@@ -1,0 +1,62 @@
+### 6.17.0-1033-oem, Model name: Intel(R) Core(TM) Ultra 5 235U, rdma-core 50.0-2ubuntu0.2, rxe0 on wlp0s20f3 (Wi-Fi), two QPs on one device = two nodes, run as uid 1000
+### RS_SWEEP=1 bin/rdma_spike
+R0 load
+  dlopen(libibverbs.so.1) ok
+R1 device
+  rxe0: 1 device(s), port state 4, active MTU 1024, max_qp 1048560, max_mr_size 17592186044415 MB
+  RoCE v2 GID index 1 = 172.25.47.240
+  ibv_is_fork_initialized = UNNEEDED (kernel copes with fork)
+R2 registration cost
+  ibv_reg_mr      4096 B: reg      2.3 us, dereg      0.9 us
+  ibv_reg_mr     65536 B: reg      3.0 us, dereg      1.1 us
+  ibv_reg_mr   1048576 B: reg     12.3 us, dereg      3.7 us
+  ibv_reg_mr  16777216 B: reg    166.5 us, dereg     58.3 us
+  ibv_reg_mr 268435456 B: reg   3914.4 us, dereg   2178.9 us
+R3 RLIMIT_MEMLOCK (no CAP_IPC_LOCK)
+  this shell: RLIMIT_MEMLOCK soft 1972408 KB
+  memlock    64 KB:  reg    32 KB ok  reg  1024 KB Cannot allocate memory  reg  4096 KB Cannot allocate memory  reg 16384 KB Cannot allocate memory
+  memlock  8192 KB:  reg    32 KB ok  reg  1024 KB ok  reg  4096 KB ok  reg 16384 KB Cannot allocate memory
+R4 round trips, 20000 each
+  rxe  poll        64 B  RTT p50     6.6 p99     8.2 us | CPU/RT client   6.6 us server   6.6 us |     19 MB/s
+  rxe  epoll       64 B  RTT p50    11.5 p99    15.4 us | CPU/RT client   5.4 us server   5.6 us |     12 MB/s
+  tcp  block       64 B  RTT p50     7.5 p99    10.8 us | CPU/RT client   3.8 us server   3.8 us |     16 MB/s
+  rxe  poll      4096 B  RTT p50    12.2 p99    15.6 us | CPU/RT client  12.4 us server  12.4 us |    663 MB/s
+  rxe  epoll     4096 B  RTT p50    16.2 p99    21.1 us | CPU/RT client   5.7 us server   6.0 us |    487 MB/s
+  tcp  block     4096 B  RTT p50     9.4 p99    13.6 us | CPU/RT client   4.7 us server   4.7 us |    857 MB/s
+  rxe  poll     65536 B  RTT p50   131.6 p99   155.2 us | CPU/RT client 131.8 us server 131.8 us |    995 MB/s
+  rxe  epoll    65536 B  RTT p50   107.9 p99   157.9 us | CPU/RT client   6.9 us server   6.9 us |   1145 MB/s
+  tcp  block    65536 B  RTT p50    19.7 p99    26.7 us | CPU/RT client  11.1 us server  11.1 us |   6377 MB/s
+  rxe  poll   1048576 B  RTT p50  1946.0 p99  2381.8 us | CPU/RT client 1942.7 us server 1943.3 us |   1079 MB/s
+  rxe  epoll  1048576 B  RTT p50  1555.8 p99  2397.9 us | CPU/RT client   9.4 us server   9.7 us |   1269 MB/s
+  tcp  block  1048576 B  RTT p50   164.0 p99   405.9 us | CPU/RT client 155.1 us server 154.6 us |  11723 MB/s
+R5 buffers
+  64 B inline send from unregistered heap: post 0, completion success
+  4 KB send from unregistered heap with another MR's lkey: post 0
+      sender completion: opcode 0 status Work Request Flushed Error (vendor_err 0)
+  next valid send on the same QP: post 0
+      sender completion: opcode 0 status Work Request Flushed Error (vendor_err 0)
+R6 failures
+  peer QP destroyed (node died)        timeout= 8 retry=1 rnr_retry=7 -> transport retry counter exceeded after 4.3 ms
+  peer QP destroyed (node died)        timeout= 9 retry=1 rnr_retry=7 -> transport retry counter exceeded after 5.2 ms
+  peer QP destroyed (node died)        timeout=10 retry=1 rnr_retry=7 -> transport retry counter exceeded after 9.5 ms
+  peer QP destroyed (node died)        timeout=11 retry=1 rnr_retry=7 -> transport retry counter exceeded after 17.5 ms
+  peer QP destroyed (node died)        timeout=12 retry=1 rnr_retry=7 -> transport retry counter exceeded after 33.2 ms
+  peer QP destroyed (node died)        timeout=13 retry=1 rnr_retry=7 -> transport retry counter exceeded after 67.3 ms
+  peer QP destroyed (node died)        timeout=14 retry=1 rnr_retry=7 -> transport retry counter exceeded after 144.5 ms
+  peer QP destroyed (node died)        timeout=15 retry=1 rnr_retry=7 -> transport retry counter exceeded after 277.6 ms
+  peer QP destroyed (node died)        timeout=16 retry=1 rnr_retry=7 -> transport retry counter exceeded after 542.4 ms
+  peer QP destroyed (node died)        timeout=10 retry=5 rnr_retry=7 -> transport retry counter exceeded after 33.9 ms
+  peer QP destroyed (node died)        timeout=10 retry=6 rnr_retry=7 -> transport retry counter exceeded after 34.5 ms
+  peer QP destroyed (node died)        timeout=10 retry=7 rnr_retry=7 -> NO COMPLETION after 15000.0 ms
+  peer QP destroyed (node died)        timeout=14 retry=7 rnr_retry=7 -> NO COMPLETION after 15000.1 ms
+  peer QP destroyed (node died)        timeout=10 retry=3 rnr_retry=7 -> transport retry counter exceeded after 19.4 ms
+  peer QP destroyed (node died)        timeout= 0 retry=7 rnr_retry=7 -> NO COMPLETION after 15000.0 ms
+  peer alive, no receive posted        timeout=14 retry=7 rnr_retry=3 -> RNR retry counter exceeded after 5.3 ms
+
+### before setup-root.sh (no rxe device) and with the library missing
+R0 load
+  dlopen(libibverbs.so.1) ok
+  0 RDMA devices -> transport = TCP
+R0 load
+  dlopen(libibverbs-missing.so.1) failed: libibverbs-missing.so.1: cannot open shared object file: No such file or directory
+  -> no RDMA on this node, transport = TCP

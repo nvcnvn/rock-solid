@@ -1,0 +1,4 @@
+# Shallow clones, user-local sysroot and build outputs: recreate with fetch.sh + build.sh
+vendor/
+bin/
+work/

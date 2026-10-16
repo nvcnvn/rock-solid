@@ -1,0 +1,62 @@
+# kernel 6.17.0-1033-oem, libfuse 3.14.0, 2026-10-16
+
+=== T1 baseline: B cached handle, A writes, no invalidation
+  [OK ] B first read: got=b'AAAA' want=b'AAAA'
+  [STALE] B read after A write: got=b'AAAA' want=b'BBBB'
+
+=== T2 notify_inval_inode on B, same open handle
+   inval rc=0 us=24.4 writes_during=0
+  [OK ] B read after inval: got=b'BBBB' want=b'BBBB'
+
+=== T3 one-shot recall is not enough: B re-caches, A writes again
+  [OK ] B read (repopulates cache): got=b'BBBB' want=b'BBBB'
+  [STALE] B read via old handle: got=b'BBBB' want=b'CCCC'
+
+=== T4 switch new opens to direct_io; old cached handle still open
+   direct=1
+  [OK ] B read via new direct handle: got=b'DDDD' want=b'DDDD'
+  [STALE] B read via old cached handle: got=b'BBBB' want=b'DDDD'
+  [OK ] B old handle after B's own direct write: got=b'EEEE' want=b'EEEE'
+   direct=0
+
+=== T5 auto_inval_data + attr_ttl=0: per-read revalidation of old cached handle
+   ttl=0 inval rc=0 us=24.9 writes_during=0
+   ok
+  [OK ] B read via old cached handle: got=b'FFFF' want=b'FFFF'
+  [OK ] B read again, no remote write: got=b'FFFF' want=b'FFFF'
+   B daemon: read=1 write=0 getattr=2 (for 2 reads)
+
+=== T5b same, but via mmap of the old cached handle
+  [OK ] B mmap read: got=b'FFFF' want=b'FFFF'
+  [STALE] B mmap read after A write: got=b'FFFF' want=b'GGGG'
+   inval rc=0 us=14.8 writes_during=0
+  [OK ] B mmap read after inval: got=b'GGGG' want=b'GGGG'
+   ttl=3600
+
+=== T5c churned change counter: old cached handle, A writes with no version bump visible to B
+   ttl=0 churn=1 inval rc=0 us=4.7 writes_during=0
+  [OK ] B read via old cached handle: got=b'QQQQ' want=b'QQQQ'
+   churn=0 ttl=3600 inval rc=0 us=5.0 writes_during=0
+
+=== T6 close-to-open: new open without keep_cache drops stale pages
+   keep=0
+  [OK ] B read via new handle (no keep_cache): got=b'HHHH' want=b'HHHH'
+   keep=1
+
+=== T7 latency: 20000 x 4K pread on B, by mode
+   cached (keep_cache)                         0.33 us/read   daemon: read=2 write=0 getattr=0
+   cached + per-read revalidate (ttl 0)        5.35 us/read   daemon: read=0 write=0 getattr=20000
+   cached + ttl 0 + churned change counter    14.55 us/read   daemon: read=20000 write=0 getattr=20000
+   direct_io                                   5.42 us/read   daemon: read=20000 write=0 getattr=0
+
+=== T8 cost of notify_inval_inode (clean pages, 64K cached)
+   inval rc=0 us=8.1 writes_during=0
+   inval rc=0 us=4.8 writes_during=0
+   inval rc=0 us=2.4 writes_during=0
+
+=== T9 writeback_cache mount on B (mount-wide FUSE_WRITEBACK_CACHE)
+   B daemon after B write: read=0 write=0 getattr=0
+  [STALE] A sees B's write: got=b'AAAA' want=b'WWWW'
+   inval rc=0 us=190.6 writes_during=1
+  [OK ] backing store after B inval (launder): got=b'WWWW' want=b'WWWW'
+  [STALE] B (wb, autoinval, ttl 0) read after A write: got=b'WWWW' want=b'XXXX'

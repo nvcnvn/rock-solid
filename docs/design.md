@@ -145,7 +145,33 @@ stripe = [d0 d1 d2 d3 | p0 p1], overwrite d1:
 
 Three-way replication costs 3 writes and 0 reads. Files being written and block volumes stay replicated. Cold file data and S3 objects are sealed, and a background job then erasure-codes them.
 
-**Placement table.** A small table maps chunk to replica set, tagged with an epoch number. It lives in the control-plane Raft group and every node caches it. Any change (disk added, node failed, rebalance) bumps the epoch, and nodes reject requests carrying a stale epoch. Recovery and rebalancing while writes are in flight is where the hardest correctness bugs live.
+**Placement groups.** Chunks are not placed one by one. Each chunk hashes into one of a fixed number of placement groups (PGs), as in Ceph, and placement is decided per PG:
+
+```
+chunk_id = (volume_or_inode_id, offset / CHUNK_SIZE)   // computed
+pg       = hash(chunk_id) % PG_COUNT                   // computed
+replicas = placement_table[pg]                         // [primary, r1, r2], in-memory
+```
+
+The hash spreads a volume's consecutive chunks over many PGs, and so over every disk in the cluster. A volume is therefore not bounded by any one drive; see [Volume size and capacity](#volume-size-and-capacity). The PG is also the unit of recovery and rebalancing: adding a disk moves whole PGs onto it, never individual chunks.
+
+`PG_COUNT` is a power of two, sized for the largest expected cluster (around 100 PGs per disk, so 4096 for 40 disks). It can grow later by doubling, where each PG splits in two along the next hash bit, as Ceph does.
+
+**Placement table.** The table maps each PG to its replica set and carries an epoch number. Its size depends on `PG_COUNT` and not on how much data is stored: 4096 PGs × 3 replicas × a 4-byte disk ID is about 48 KiB, whether the cluster holds 1 GB or 100 TB. So it is **not sharded**. It lives in the single control-plane Raft group, every node caches a full copy, and it changes only on disk and node events, never on the I/O path. Any change (disk added, node failed, rebalance) bumps the epoch, and nodes reject requests carrying a stale epoch. Recovery and rebalancing while writes are in flight is where the hardest correctness bugs live.
+
+What does grow with data lives elsewhere. Each disk keeps its own local index of the chunks it holds, and file-to-inode metadata lives in the sharded MetaStore.
+
+### Volume size and capacity
+
+A volume, block or file, can be larger than any single drive. Its chunks are spread across every disk through placement groups, so the limit is the cluster's usable capacity:
+
+| Data | Redundancy | Usable / raw |
+| --- | --- | --- |
+| Block volumes, files being written | 3-way replication | 1/3 |
+| Sealed cold file data, S3 objects | Erasure coding, e.g. 4 data + 2 parity | 2/3 |
+
+- **Thin provisioning.** A chunk exists only after its first write, so creating a volume allocates nothing. Whether the sum of volume sizes may exceed free capacity (overcommit) is an open question.
+- **Wider blast radius.** A volume spread over every disk is affected by any failure, anywhere in the cluster, that takes out every replica of one PG. Placement must keep each PG's replicas in distinct failure domains (node at minimum), and recovery must re-replicate a degraded PG before a second failure arrives.
 
 **Fencing.** Each write carries the client's session ID. When a client session expires (see [Sessions and fencing](#sessions-and-fencing)), the control plane publishes it as fenced and chunk primaries reject its writes. This stops a paused or partitioned client from writing after its locks and cache rights are gone.
 
@@ -178,7 +204,7 @@ async fn txn(ops: Vec<Op>) -> Result<()> {
 
 | Data | Key | Shard rule |
 | --- | --- | --- |
-| Placement table, membership, fenced sessions | `ctl/...` | One dedicated control-plane Raft group |
+| Placement table, membership, fenced sessions | `ctl/...` | One dedicated control-plane Raft group, not sharded; small because it maps placement groups, not chunks |
 | Directory entries and inodes | `dir/{parent}/{name}`, `inode/{id}` | New inode IDs allocated from the parent's shard, so create stays single-shard |
 | Orphans (unlinked while open) | `orphan/{inode}` | Same shard as the inode |
 | flock and whole-file locks | `lock/{inode}` | Same shard as the inode |
@@ -359,7 +385,8 @@ Block volumes use the same ChunkStore path and never touch the MetaStore on the 
 ```
 pod write() → kernel block layer → userspace block device (ublk) in node daemon
   → chunk_id = (volume_id, offset / CHUNK_SIZE)    // computed
-  → placement_table[chunk_id] → primary            // in-memory, epoch-versioned
+  → pg = hash(chunk_id) % PG_COUNT                 // computed
+  → placement_table[pg] → primary                  // in-memory, epoch-versioned
   → primary: journal append ‖ send to 2 replicas → acks → done
 ```
 
@@ -476,7 +503,7 @@ clients:    storage nodes only | plus compute-only nodes
 backend:    io_uring | SPDK
 ```
 
-Property tests on placement: after any random add, remove and failure sequence, every chunk keeps its replica count across failure domains, no disk exceeds a set fill margin above average, and chunks moved stay near the minimum.
+Property tests on placement: after any random add, remove and failure sequence, every placement group keeps its replica count across failure domains, no disk exceeds a set fill margin above average, and chunks moved stay near the minimum.
 
 **7. Performance.** Track metadata operations per second (create, stat, rename), cached and write-shared read latency, 4K block latency at queue depth 1, CPU per operation, and 99.9th-percentile latency during recovery. A 20% overnight regression is treated as a bug.
 
@@ -501,7 +528,7 @@ Each choice below favors a short hot path, a single binary and testable correctn
 | Cross-shard transactions | Transaction record plus intents (CockroachDB style) | Percolator with a central timestamp oracle (TiKV); a central sequencer (FoundationDB) | No extra central service; the commit point rides on one shard's Raft |
 | Redundancy | Replicate mutable chunks, erasure-code sealed ones | Erasure-code everything with redirect-on-write (Weka); replication only | Avoids read-modify-write and the write hole without needing garbage collection |
 | Replication protocol | Primary fans out to replicas in parallel (Ceph, Vitastor) | Chain replication or CRAQ (3FS); leaderless quorum writes | One added hop instead of one per chain link; the primary also gives each chunk a single write order |
-| Placement | Table plus epochs (leaning) | Computed placement (Ceph CRUSH; Weka's algorithmic ownership) | Epochs are easier to reason about and test in simulation; computed placement scales better. Still open |
+| Placement | Chunks hashed into placement groups; table of PG → replicas plus epochs (leaning) | Per-chunk table; computed placement (Ceph CRUSH; Weka's algorithmic ownership) | Placement groups keep the table small (tens of KiB) whatever the data size, so it needs no sharding. Epochs are easier to reason about and test in simulation; computed placement scales better. Still open |
 | Block frontend | ublk locally, NVMe-oF/TCP remotely | NBD (single-threaded overhead); iSCSI (old, heavy) | ublk rides io\_uring with little overhead; NVMe-oF is the native remote protocol for NVMe |
 | Simulation | Own simulator over a sans-IO core | turmoil or madsim; Jepsen-only testing | We need a detailed disk and page-cache fault model, which those crates don't cover. Jepsen alone can't reproduce failures |
 | License | Apache 2.0 | AGPL (MinIO); network copyleft (Vitastor) | Copyleft with a network clause deters adopters |
@@ -512,7 +539,7 @@ Build order puts the simulator before any real driver and ships RWX file storage
 
 1. **Sans-IO core and simulator.** Single-node ChunkStore state machine, simulated disk with the full fault model, invariant checker.
 2. **Protocol models.** `stateright` models of placement epochs, sessions and fencing, and cache-mode recalls, before writing the real protocols.
-3. **Replication and placement.** Primary-based 3-way replication, placement table with epochs, recovery. Fault-injected in simulation from the first commit.
+3. **Replication and placement.** Primary-based 3-way replication, placement groups and a placement table with epochs, recovery per placement group. Fault-injected in simulation from the first commit.
 4. **Embedded MetaStore.** Raft with group commit, one shard only, with the sharded API from day one. Inodes, directory entries, sessions and locks.
 5. **Default drivers.** `io_uring` and kernel TCP behind the `Action` interface.
 6. **File frontend with Tier 1: first usable product.** FUSE client with daemon-side write-back, close-to-open, flock, orphans, fencing. CSI driver with RWX and fsGroup delegation. Passes `pjdfstest`, single and multi-client `fsx`, and `csi-sanity`. Nightly nemesis runs and power-cut tests.
@@ -524,6 +551,8 @@ Build order puts the simulator before any real driver and ships RWX file storage
 
 **Open questions**
 
+- [ ] `CHUNK_SIZE`: bigger chunks mean fewer local index entries and longer sequential I/O; smaller ones mean finer-grained write ordering and less data rewritten when sealing. 4 MiB (Ceph RBD's default object size) is a starting point to benchmark.
+- [ ] Thin provisioning: allow overcommit (sum of volume sizes above free capacity)? If so, what happens to writes when the cluster fills: fail with `ENOSPC`, or reserve space per volume?
 - [ ] FUSE daemon restarts: pass `/dev/fuse` file descriptors to the new process, or run one mount process per volume?
 - [ ] Owner failover: how long a grace period for clients to re-register open files and cache modes, and what blocks during it?
 - [ ] mmap readers of a write-shared file get invalidations after each write, not instantly. Is that acceptable, or should mapping a write-shared file switch to synchronous invalidations?

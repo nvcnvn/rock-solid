@@ -1,0 +1,75 @@
+### 6.17.0-1033-oem, Model name: Intel(R) Core(TM) Ultra 5 235U, SPDK v26.09 / DPDK 26.03, run as uid 1000, no hugepages
+### bin/spdk_spike --reinit work
+S1 env init: uid=1000, no_huge, no_pci, mem 128 MB, mode poll
+  spdk_env_init ok in 7.3 ms, RSS 10 MB
+  subsystems up, RSS 63 MB
+  create malloc bdev: ok
+  create aio bdev on work/disk.img: ok
+  create uring bdev on same file: ok
+S2 4K QD1, 20000 writes + 20000 reads each
+  Malloc0  dma   write p50    0.1 p99    1.1 us | read p50    0.1 p99    0.2 us | CPU  18.7% of wall,   0.1 us/op | failed 0
+  Malloc0  heap  write p50    0.1 p99    0.2 us | read p50    0.1 p99    0.1 us | CPU  99.7% of wall,   0.1 us/op | failed 0
+  Aio0     dma   write p50   12.4 p99  906.5 us | read p50   16.9 p99 1196.1 us | CPU  99.1% of wall,  44.6 us/op | failed 0
+  Aio0     heap  write p50   12.6 p99  913.5 us | read p50   16.9 p99 1169.0 us | CPU  99.2% of wall,  46.6 us/op | failed 0
+  Uring0   dma   write p50   13.1 p99  896.5 us | read p50   17.1 p99 1166.0 us | CPU  98.4% of wall,  43.3 us/op | failed 0
+  Uring0   heap  write p50   13.5 p99  908.6 us | read p50   16.9 p99 1166.5 us | CPU  99.1% of wall,  45.2 us/op | failed 0
+S3 idle
+  idle loop for 1 s: CPU 100.0%
+S4 cross-thread
+  malloc write via spdk_thread_send_msg from another pthread: p50 1.6 p99 1.9 us
+S5 DMA-ability of buffers (what an NVMe/PCIe bdev needs)
+  spdk_vtophys(spdk_dma_zmalloc buf) = ERROR
+  spdk_vtophys(heap buf)             = ERROR (NVMe/PCIe would reject it)
+  spdk_mem_register(4 MB heap, 2 MB aligned) = 0 (ok); vtophys after = ERROR
+  RSS at end of I/O tests 69 MB
+  clean shutdown ok
+S6 re-init env in the same process
+Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 reinitialization...
+  spdk_env_init(NULL) after fini = 0
+  dma alloc after re-init: ok
+
+### bin/spdk_spike --interrupt work
+S1 env init: uid=1000, no_huge, no_pci, mem 128 MB, mode interrupt
+  spdk_env_init ok in 7.0 ms, RSS 10 MB
+uring.c:1981:uring_net_impl_init: *ERROR*: Interrupt mode is not supported in the uring sock implementation.
+sock.c:1299:spdk_sock_initialize: *WARNING*: Removing uring net impl - initialization failed: -95
+  subsystems up, RSS 63 MB
+  create malloc bdev: ok
+  create aio bdev on work/disk.img: ok
+  create uring bdev on same file: ok
+S2 4K QD1, 20000 writes + 20000 reads each
+  Malloc0  dma   write p50    0.8 p99    1.7 us | read p50    0.8 p99    0.9 us | CPU  52.8% of wall,   0.8 us/op | failed 0
+  Malloc0  heap  write p50    0.8 p99    1.2 us | read p50    0.8 p99    1.2 us | CPU  98.4% of wall,   0.8 us/op | failed 0
+  Aio0     dma   write p50   13.0 p99  907.2 us | read p50   18.2 p99 1144.9 us | CPU   6.4% of wall,   2.9 us/op | failed 0
+  Aio0     heap  write p50   12.9 p99  903.7 us | read p50   18.2 p99 1076.3 us | CPU   6.3% of wall,   2.8 us/op | failed 0
+  Uring0   dma   write p50   13.8 p99  896.8 us | read p50   17.4 p99 1031.9 us | CPU  97.8% of wall,  42.6 us/op | failed 0
+  Uring0   heap  write p50   13.8 p99  906.7 us | read p50   17.4 p99 1040.5 us | CPU  99.0% of wall,  43.8 us/op | failed 0
+S3 idle
+  idle loop for 1 s: CPU 0.0%
+S4 cross-thread
+  malloc write via spdk_thread_send_msg from another pthread: p50 3.0 p99 3.9 us
+S5 DMA-ability of buffers (what an NVMe/PCIe bdev needs)
+  spdk_vtophys(spdk_dma_zmalloc buf) = ERROR
+  spdk_vtophys(heap buf)             = ERROR (NVMe/PCIe would reject it)
+  spdk_mem_register(4 MB heap, 2 MB aligned) = 0 (ok); vtophys after = ERROR
+  RSS at end of I/O tests 69 MB
+  clean shutdown ok
+
+### bin/spdk_spike_nowa work   (linked without --whole-archive)
+S1 env init: uid=1000, no_huge, no_pci, mem 128 MB, mode poll
+  spdk_env_init ok in 6.3 ms, RSS 8 MB
+thread.c: 391:_thread_lib_init: *ERROR*: spdk_msg_mempool creation failed
+(then SIGSEGV)
+
+### stock hello_bdev, default base address
+EAL: eal_legacy_hugepage_init(): couldn't allocate memory due to IOVA exceeding limits of current DMA mask.
+EAL: Cannot init memory
+init.c: 863:spdk_env_init: *ERROR*: Failed to initialize DPDK
+app.c: 562:app_setup_env: *ERROR*: Unable to initialize SPDK env
+app.c: 564:app_setup_env: *ERROR*: You may need to run as root
+hello_bdev.c: 309:main: *ERROR*: ERROR starting application
+### binary size and runtime deps
+88808 bin/rdma_spike
+11856160 bin/spdk_spike
+2686736 bin/spdk_spike_nowa
+linux-vdso.so.1 liburing.so.2 libuuid.so.1 libssl.so.3 libcrypto.so.3 libm.so.6 libaio.so.1t64 libnuma.so.1 libc.so.6 /lib64/ld-linux-x86-64.so.2 
