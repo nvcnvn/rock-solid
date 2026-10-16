@@ -1,0 +1,125 @@
+# kernel 6.17.0-1033-oem, Samba 4.19.5-Ubuntu, 2026-10-16
+
+=== L1 lease grant and break between two clients of one gateway
+   c1 open asks RWH, granted RWH
+   c1 second open, same lease key: granted RWH; c1 sees no break
+   c2 open asks RWH: granted RH, open took 2.17 ms (includes c1's ack); c1 sees lease RWH->RH (ack required)
+   c2 writes: c1 sees lease RH->none (ack required); c2 sees no break
+   after c1 closed, c2 reopens: granted RWH
+
+=== L2 a read-only second opener, then a writer: what each break costs the opener
+   c2 read-only open with lease RH: granted RH, 1.06 ms; c1 sees lease RWH->RH (ack required)
+   c3 (no lease) writes: OK in 0.34 ms; c1 sees lease RH->none (ack required); c2 sees lease RH->none (ack required)
+
+=== L3 the lease holder never acks (a hung or partitioned client)
+   c2 open: OK after 35.0 s; cz saw lease RWH->RH (ack required)
+   c2 write: OK in 0.0 s; cz saw no break
+   holder of RH (no W) never acks; c2 (no lease) writes: OK in 0.00 s; cz2 saw lease RH->none (ack required)
+
+=== L4 share modes (deny modes) are Samba state, not kernel state
+   c1 opens with share=READ (deny write, deny delete)
+   c2 open for write: SHARING_VIOLATION
+   c2 open for read:  OK
+   c2 open for delete: SHARING_VIOLATION
+   smbstatus -L: DENY_WRITE
+   local process opens O_RDWR and writes: allowed; c1 reads b'LLLL'
+
+=== L5 byte-range locks: mandatory for SMB clients, mirrored as OFD locks for local processes
+   c1 exclusive lock [0, 100)
+   c2 lock [50, 60):  LOCK_NOT_GRANTED
+   c2 write at 60:    FILE_LOCK_CONFLICT
+   c2 read at 60:     FILE_LOCK_CONFLICT
+   c2 write at 200:   OK
+   local F_OFD_GETLK [0, 100): write lock [0, +100) pid=-1
+   local write at 10: allowed (POSIX locks are advisory); c1 reads b'L'
+   c2 blocking lock [0, 10) waiting; c1 unlocks: c2 OK 1.2 ms after the unlock
+
+=== L6 a local (non-SMB) writer vs a client holding a lease
+   kernel oplocks = no (default): local write while c1 holds RWH: c1 sees no break
+   kernel oplocks = yes: c1 asks lease RWH: granted none
+   kernel oplocks = yes: c1 asks batch oplock: granted oplock batch
+   local open(O_RDWR) took 0.35 ms (kernel lease break); c1 sees oplock ->none (ack required)
+   kernel oplocks = yes, batch holder never acks: local open(O_RDWR) took 35.0 s; holder saw oplock ->none (ack required)
+   kernel oplocks = yes, SMB second opener: granted c1 oplock batch; c1 sees oplock ->none (ack required)
+
+=== L7 change notify on a local directory
+   local process creates dir/new: c1 notified=True after 0.7 ms, [('new', 1)]
+
+=== G1 lease on gateway A, writer on gateway B
+   a granted RWH; b (other gateway) granted RWH; a sees no break
+   b writes: a sees no break. a's cached data is now stale, and a was told nothing
+
+=== G2 share mode on gateway A, opener on gateway B
+   a opens deny-write; b opens for write: OK
+
+=== G3 byte-range lock on gateway A, contender on gateway B (posix locking = yes)
+   a exclusive lock [0, 100); b lock [50, 60): LOCK_NOT_GRANTED
+   b write at 60: FILE_LOCK_CONFLICT
+   b read at 60:  FILE_LOCK_CONFLICT
+
+=== G4 both gateways with kernel oplocks = yes (one kernel, so kernel leases are shared)
+   a granted oplock batch; b opens via the other gateway in 1001.22 ms; a sees oplock ->none (ack required)
+
+=== F1 FUSE requests per SMB operation (Samba on passfs; defaults, attr/entry timeout 1 s)
+   create + write 4K + close     22 FUSE requests: access=1 create=1 flush=1 getattr=7 getxattr=6 opendir=1 readdir=1 release=1 setxattr=1 utimens=1 write=1
+     sequence: getattr / | getattr /new0_2 | opendir / | readdir / | getattr / | getxattr / system.posix_acl_access | getxattr / system.posix_acl_default | getattr /new0_2 | create /new0_2 | getattr /new0_2 (fh) | getxattr /new0_2 user.DOSATTRIB | getxattr /new0_2 system.posix_acl_access | setxattr /new0_2 user.DOSATTRIB | access / | getattr / | getxattr /new0_2 security.capability | write /new0_2 | getxattr /new0_2 user.DOSATTRIB | utimens /new0_2 | getattr /new0_2 | flush /new0_2 | release /new0_2
+   open + read 4K + close        10 FUSE requests: access=1 flush=1 getattr=2 getxattr=3 open=1 read=1 release=1
+   open + close (stat)            6 FUSE requests: access=1 getattr=2 getxattr=3
+   list a 100-entry directory   312 FUSE requests: access=1 getattr=102 getxattr=105 listxattr=102 opendir=1 readdir=1
+   latency open + read 4K + close       0.93 ms
+   latency create + write 4K + close    1.26 ms
+
+=== F1 FUSE requests per SMB operation (Samba on passfs; defaults, attr/entry timeout 0 s)
+   create + write 4K + close     33 FUSE requests: access=1 create=1 flush=1 getattr=18 getxattr=6 opendir=1 readdir=1 release=1 setxattr=1 utimens=1 write=1
+   open + read 4K + close        16 FUSE requests: access=1 flush=1 getattr=8 getxattr=3 open=1 read=1 release=1
+   open + close (stat)           11 FUSE requests: access=1 getattr=7 getxattr=3
+   list a 100-entry directory   352 FUSE requests: access=1 getattr=178 getxattr=87 listxattr=84 opendir=1 readdir=1
+   latency open + read 4K + close       0.95 ms
+   latency create + write 4K + close    1.42 ms
+
+=== F1 FUSE requests per SMB operation (Samba on passfs; timeout 1 s, case sensitive = yes, ea support = no, store dos attributes = no)
+   create + write 4K + close     17 FUSE requests: access=1 chmod=1 create=1 flush=1 getattr=7 getxattr=3 release=1 utimens=1 write=1
+   open + read 4K + close         8 FUSE requests: access=1 flush=1 getattr=2 getxattr=1 open=1 read=1 release=1
+   open + close (stat)            4 FUSE requests: access=1 getattr=2 getxattr=1
+   list a 100-entry directory   107 FUSE requests: access=1 getattr=102 getxattr=2 opendir=1 readdir=1
+   latency open + read 4K + close       0.84 ms
+   latency create + write 4K + close    1.03 ms
+
+=== F1b creating new names in a 10,000-entry directory, case sensitive = auto (default)
+   one create:  16 FUSE requests: access=1 create=1 flush=1 getattr=5 getxattr=4 opendir=1 readdir=1 release=1 setxattr=1
+   latency create + close: 4.62 ms
+   latency open of a missing name (OBJECT_NAME_NOT_FOUND): 3.40 ms
+
+=== F1b creating new names in a 10,000-entry directory, case sensitive = yes
+   one create:  13 FUSE requests: access=1 create=1 flush=1 getattr=4 getxattr=4 release=1 setxattr=1
+   latency create + close: 0.94 ms
+   latency open of a missing name (OBJECT_NAME_NOT_FOUND): 0.24 ms
+
+=== F1c baseline: the same SMB operations on a local ext4 share (client-side Python overhead included)
+   latency open + read 4K + close       0.75 ms
+   latency create + write 4K + close    1.02 ms
+
+=== F2 xattrs: what Samba stores in them, and a filesystem without them
+   xattrs touched on create: ['system.posix_acl_access', 'system.posix_acl_default', 'user.DOSATTRIB']
+   noxattr mount: create OK
+
+=== F3 kernel leases on FUSE: node A (gateway A on mount A), node B (gateway B on mount B)
+   a granted oplock batch; b opens via mount B in 1.15 ms; a sees no break
+   b writes: a sees no break
+   local read lease on mount A; open for write on mount B: lease break signal=False
+   open for write on mount A: lease break signal=True
+
+=== F4 change notify across nodes
+   file created via mount B: a notified=False
+   file created via mount A: a notified=True
+
+=== F5 file identity: Samba keys locking.tdb and brlock.tdb by (st_dev, st_ino)
+   mount A: dev=0x36 ino=18661922; mount B: dev=0x4d ino=18661922
+
+=== F6 byte-range locks across nodes, passfs leaves locks to the kernel (local per mount)
+   a exclusive lock [0, 100); b lock [50, 60) via the other node: OK
+   local F_OFD_GETLK on mount B: write lock [50, +10) pid=-1
+
+=== F6 byte-range locks across nodes, passfs forwards locks to the backing file
+   a exclusive lock [0, 100); b lock [50, 60) via the other node: LOCK_NOT_GRANTED
+   local F_OFD_GETLK on mount B: write lock [0, +100) pid=-1

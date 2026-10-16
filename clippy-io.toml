@@ -1,0 +1,8 @@
+# Clippy settings for I/O crates (drivers, frontends, daemon, csi). Symlink it as clippy.toml in
+# the crate directory: `ln -s ../../clippy-io.toml crates/<name>/clippy.toml`.
+# Same as clippy.toml minus the sans-IO bans; keep the shared settings in sync.
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true

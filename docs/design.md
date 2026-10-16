@@ -374,7 +374,7 @@ This is the same machinery for flock (Tier 1), recalls (Tier 2) and RWX block (T
 
 - File metadata speed is bounded by MetaStore round trips, so small-file workloads never match a local disk. Every shared POSIX system pays this. Tier 3's pushed directory invalidations let caches live longer.
 - While a file is write-shared, its reported mtime changes on every `stat` (a side effect of revalidation). Tools that compare mtimes on a file that another node is actively writing may notice.
-- SMB for macOS and Windows clients would be a Samba gateway over the file frontend, and is out of scope for v1.
+- SMB for macOS and Windows clients would be a Samba gateway over the file frontend, and is out of scope for v1. The [Samba spike](#appendix-samba-gateway-spike) found that Samba's leases, share modes and lock state are per gateway, so a gateway on our filesystem needs a VFS module to see writes from other nodes.
 
 ## Block frontend
 
@@ -571,6 +571,7 @@ Build order puts the simulator before any real driver and ships RWX file storage
 - [ ] Raft and storage engine: `openraft` maturity for multi-Raft, `redb` versus `fjall`.
 - [ ] Name and license confirmation (Apache 2.0 assumed).
 - [ ] SPDK NVMe in interrupt mode: does the PCIe NVMe driver support it with `vfio-pci`, and at what latency cost? Needs a spare NVMe drive (not tested in the spike).
+- [ ] Samba gateway (post-v1): xattrs stored in the inode record and cached by the daemon, and a case-folded name index, so a gateway doesn't pay a MetaStore round trip per directory entry and a directory scan per create. Decide before freezing the key layout.
 - [ ] Memory-lock limits in Kubernetes: request `IPC_LOCK` for the daemon pod, or size the RDMA buffer pool to the default container limit?
 
 ## Learning project
@@ -653,3 +654,27 @@ Each learning track starts with a small throwaway exercise, then lands as a real
 - The driver contract (driver-owned buffers, a readiness fd with event mode by default, connection-level failure) must exist from the default drivers on, or SPDK and RDMA would force a retrofit of every `Action`.
 - SPDK's opt-in has two tiers: file-backed bdevs need no privileges; real NVMe needs root, `vfio-pci` and hugepages, on a dedicated drive.
 - RDMA needs `IPC_LOCK` or a large enough memory-lock limit in the daemon pod, and TCP to bootstrap every connection.
+
+## Appendix: Samba gateway spike
+
+**Question.** If SMB is later served by Samba on top of the file frontend, how does Samba handle client caching, share modes and byte-range locks, what breaks with more than one gateway, and what does Samba need from the filesystem under it?
+
+**Setup.** Linux 6.17, Samba 4.19.5 run unprivileged under `uid_wrapper`, a Python SMB 3.1.1 client that records and acknowledges lease breaks. Each gateway is one smbd with its own state, as on one node without CTDB. A counting passthrough FUSE filesystem stands in for the frontend; two mounts of one directory stand in for two nodes. Code and raw output: [spikes/samba](../spikes/samba/).
+
+| Test | Result |
+| --- | --- |
+| Lease RWH held, a second client opens | Break to RH; the open waits for the ack (2 ms). Unacked: the open blocks 35 s |
+| Read-caching lease held, another client writes | Break sent, but the write does not wait: SMB readers can be stale for one message delay |
+| Share modes (deny write) | Enforced between SMB clients only; a local process writes freely |
+| Byte-range locks | Mandatory for SMB clients; mirrored as OFD locks, which local processes see but may ignore |
+| Two gateways, no CTDB | Both clients granted RWH on one file, share modes ignored. Locks cross only through cluster-wide fcntl locks |
+| `kernel oplocks = yes` | Disables SMB2 leases. Crosses gateways on one kernel at 1 s per conflicting open; on FUSE, leases stay local to each mount |
+| FUSE requests per SMB operation | create 22, open + read 10, stat 6, 100-entry listing 312 (lookup, `user.DOSATTRIB`, `listxattr` per entry) |
+| Create in a 10,000-entry directory | 4.6 ms (Samba scans the directory for a case-insensitive match) vs 0.94 ms with `case sensitive = yes` |
+| File identity across mounts | Same `st_ino`, different `st_dev` (CTDB needs `vfs_fileid`) |
+
+**Conclusions** (open question in [Roadmap](#roadmap-and-open-questions))
+
+- SMB leases map onto Tier 2 cache modes: a lease break is a recall. A Samba VFS module that registers the gateway's opens with the inode owner would make SMB clients coherent with pods on other nodes; without it, shares that pods also write need `oplocks = no`.
+- Start with one gateway per volume; CTDB across nodes needs a cluster lock (a MetaStore-backed helper) and cluster-wide FUSE `lock`/`flock`.
+- Shape the frontend now: inode IDs exposed as `st_ino`, small xattrs stored in the inode record and cached by the daemon, readdirplus, and room for a case-folded name index.

@@ -1,0 +1,38 @@
+# Sans-IO rules: the default for every crate. State machines must be deterministic under the
+# simulator, so no real clock, threads, files, sockets, environment or randomly seeded hashing.
+# I/O crates (drivers, frontends, daemon, csi) opt out with a clippy.toml symlink to
+# clippy-io.toml in their crate directory. Keep the shared settings below in sync with it.
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+
+disallowed-types = [
+    { path = "std::time::Instant", reason = "use the simulated Tick passed to on_event" },
+    { path = "std::time::SystemTime", reason = "use the simulated Tick passed to on_event" },
+    { path = "std::collections::HashMap", reason = "random iteration order breaks seed replay; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "random iteration order breaks seed replay; use BTreeSet" },
+    { path = "std::collections::hash_map::RandomState", reason = "randomly seeded; breaks seed replay" },
+    { path = "std::fs::File", reason = "emit a disk Action instead" },
+    { path = "std::fs::OpenOptions", reason = "emit a disk Action instead" },
+    { path = "std::net::TcpStream", reason = "emit a NetSend Action instead" },
+    { path = "std::net::TcpListener", reason = "network belongs to a driver" },
+    { path = "std::net::UdpSocket", reason = "network belongs to a driver" },
+    { path = "std::process::Command", reason = "processes belong to the daemon" },
+    { path = "std::sync::Mutex", reason = "state machines are single-threaded; the driver owns concurrency" },
+    { path = "std::sync::RwLock", reason = "state machines are single-threaded; the driver owns concurrency" },
+]
+
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "use the simulated Tick passed to on_event" },
+    { path = "std::time::SystemTime::now", reason = "use the simulated Tick passed to on_event" },
+    { path = "std::thread::spawn", reason = "the driver owns threads" },
+    { path = "std::thread::sleep", reason = "emit a SetTimer Action instead" },
+    { path = "std::fs::read", reason = "emit a disk Action instead" },
+    { path = "std::fs::read_to_string", reason = "emit a disk Action instead" },
+    { path = "std::fs::write", reason = "emit a disk Action instead" },
+    { path = "std::env::var", reason = "configuration is passed in by the daemon" },
+    { path = "std::env::var_os", reason = "configuration is passed in by the daemon" },
+    { path = "std::process::exit", reason = "return an error; the daemon decides" },
+]
