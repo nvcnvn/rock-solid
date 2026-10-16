@@ -797,7 +797,7 @@ Each choice below favors a short hot path, a single binary and testable correctn
 
 ## Roadmap and open questions
 
-Build order puts the simulator before any real driver and ships RWX file storage as the first usable product. Each phase ends with something that runs and is tested.
+Build order puts the simulator before any real driver and ships RWX file storage as the first usable product. Each phase ends with something that runs and is tested. Phases 1 to 5 are broken into reviewable components, libraries and tests in the [build checklist](build-checklist.md).
 
 1. **Sans-IO core and simulator.** Single-node ChunkStore state machine with the per-disk log, extent index, punch, its cleaner and the first-stage LSM index (memtable plus snapshots), simulated disk with the full fault model, invariant checker.
 2. **Protocol models.** `stateright` models of epoch changes (peering and primary read leases), sessions and fencing with fence acknowledgments, cache-mode recalls, and purges, before writing the real protocols.
