@@ -3,11 +3,15 @@
 use core::fmt;
 use twox_hash::xxhash3_64::Hasher as Xxh3_64;
 
+use crate::event::BLOCK_BYTES;
+
 /// Size of a single chunk in bytes (4 MiB).
 pub const CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 
 /// Number of 4 KiB blocks in a single 4 MiB chunk.
 pub const CHUNK_BLOCKS: u32 = 1024;
+
+const _: () = assert!(CHUNK_BLOCKS as u64 * BLOCK_BYTES as u64 == CHUNK_SIZE);
 
 /// Pool identifier.
 #[repr(transparent)]

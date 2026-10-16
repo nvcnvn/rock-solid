@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::buf::{IoBuf, PoolExhausted};
+use crate::buf::{BufPool, IoBuf};
 
 /// Size of a single logical disk block in bytes.
 pub const BLOCK_BYTES: usize = 4096;
@@ -11,7 +11,7 @@ pub const BLOCK_BYTES: usize = 4096;
 /// Maximum byte length of an inline control message.
 pub const MAX_CONTROL_MSG_BYTES: usize = 256;
 
-/// Monotonic or simulated timestamp in ticks.
+/// Monotonic timestamp in microseconds (1 tick = 1 µs).
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tick(pub u64);
@@ -20,9 +20,48 @@ impl Tick {
     /// Origin tick zero.
     pub const ZERO: Self = Self(0);
 
-    /// Wraps a raw tick count.
+    /// One microsecond in ticks.
+    pub const ONE_MICROS: u64 = 1;
+
+    /// One millisecond in ticks (1,000 µs).
+    pub const ONE_MILLIS: u64 = 1_000;
+
+    /// One second in ticks (1,000,000 µs).
+    pub const ONE_SECOND: u64 = 1_000_000;
+
+    /// Wraps a raw microsecond count.
     pub const fn new(raw: u64) -> Self {
         Self(raw)
+    }
+
+    /// Constructs a tick from microseconds.
+    pub const fn from_micros(micros: u64) -> Self {
+        Self(micros)
+    }
+
+    /// Constructs a tick from milliseconds.
+    pub const fn from_millis(millis: u64) -> Self {
+        Self(millis.saturating_mul(Self::ONE_MILLIS))
+    }
+
+    /// Constructs a tick from seconds.
+    pub const fn from_secs(secs: u64) -> Self {
+        Self(secs.saturating_mul(Self::ONE_SECOND))
+    }
+
+    /// Returns the timestamp in microseconds.
+    pub const fn as_micros(self) -> u64 {
+        self.0
+    }
+
+    /// Returns the timestamp in milliseconds (truncated).
+    pub const fn as_millis(self) -> u64 {
+        self.0 / Self::ONE_MILLIS
+    }
+
+    /// Returns the timestamp in seconds (truncated).
+    pub const fn as_secs(self) -> u64 {
+        self.0 / Self::ONE_SECOND
     }
 
     /// Returns the raw tick value.
@@ -39,6 +78,21 @@ impl Tick {
     /// Elapsed ticks since `earlier`, saturating at zero.
     pub const fn saturating_sub(self, earlier: Self) -> u64 {
         self.0.saturating_sub(earlier.0)
+    }
+}
+
+/// Execution context passed to sans-IO state machines.
+pub struct Context<'a, P: BufPool + ?Sized> {
+    /// Current monotonic timestamp in ticks (1 tick = 1 µs).
+    pub now: Tick,
+    /// Driver-owned buffer pool.
+    pub pool: &'a mut P,
+}
+
+impl<'a, P: BufPool + ?Sized> Context<'a, P> {
+    /// Creates an execution context for `now` with access to `pool`.
+    pub fn new(now: Tick, pool: &'a mut P) -> Self {
+        Self { now, pool }
     }
 }
 
@@ -280,8 +334,6 @@ pub enum Event {
     DiskDone(IoId, DiskResult),
     /// Scheduled timer fired at its deadline.
     Timer(TimerId),
-    /// Driver buffer pool had insufficient capacity to satisfy an allocation.
-    PoolExhausted(PoolExhausted),
 }
 
 /// Output action emitted by a sans-IO state machine for a driver to execute.
@@ -345,7 +397,6 @@ struct InFlightEntry {
 #[derive(Clone, Debug, Default)]
 pub struct PeerRequests {
     next_request_id: u64,
-    next_timer_id: u64,
     in_flight: BTreeMap<RequestId, InFlightEntry>,
     by_timer: BTreeMap<TimerId, RequestId>,
 }
@@ -354,26 +405,27 @@ impl PeerRequests {
     /// Creates an empty outbound request tracker.
     pub const fn new() -> Self {
         Self {
-            next_request_id: 1,
-            next_timer_id: 1,
+            next_request_id: 0,
             in_flight: BTreeMap::new(),
             by_timer: BTreeMap::new(),
         }
     }
 
-    /// Registers an outbound request to `peer`, returning its [`RequestId`] and send/timer actions.
+    /// Registers an outbound request to `peer` with a deadline on the caller-allocated `timer`.
     pub fn send(
         &mut self,
         now: Tick,
         timeout_ticks: u64,
+        timer: TimerId,
         peer: NodeId,
         msg: Msg,
     ) -> (RequestId, [Action; 2]) {
+        assert!(
+            !self.by_timer.contains_key(&timer),
+            "{timer:?} already guards an in-flight request"
+        );
         let id = RequestId(self.next_request_id);
-        self.next_request_id = self.next_request_id.saturating_add(1);
-
-        let timer = TimerId(self.next_timer_id);
-        self.next_timer_id = self.next_timer_id.saturating_add(1);
+        self.next_request_id += 1;
 
         let deadline = now.saturating_add(timeout_ticks);
         self.in_flight.insert(
@@ -449,7 +501,7 @@ impl PeerRequests {
                     reason: PeerRequestFailure::Timeout,
                 }]
             }
-            Event::NetRecv(_, _) | Event::DiskDone(_, _) | Event::PoolExhausted(_) => Vec::new(),
+            Event::NetRecv(_, _) | Event::DiskDone(_, _) => Vec::new(),
         }
     }
 }
@@ -520,6 +572,7 @@ mod tests {
         let (req1, actions1) = tracker.send(
             Tick::new(100),
             50,
+            TimerId::new(1),
             peer_a,
             Msg::with_data(ControlMsg::new(b"r1").unwrap(), buf1),
         );
@@ -534,8 +587,13 @@ mod tests {
             ]
         );
 
-        let (req2, actions2) =
-            tracker.send(Tick::new(110), 50, peer_a, Msg::control(b"r2").unwrap());
+        let (req2, actions2) = tracker.send(
+            Tick::new(110),
+            50,
+            TimerId::new(2),
+            peer_a,
+            Msg::control(b"r2").unwrap(),
+        );
         assert_eq!(
             actions2,
             [
@@ -547,6 +605,7 @@ mod tests {
         let (req3, _actions3) = tracker.send(
             Tick::new(115),
             50,
+            TimerId::new(3),
             peer_b,
             Msg::with_data(ControlMsg::new(b"r3").unwrap(), buf2),
         );
@@ -598,11 +657,41 @@ mod tests {
         let mut tracker = PeerRequests::new();
         let peer = NodeId::new(5);
         let buf = IoBuf::new(2, 1, 4096);
-        let (req, _actions) = tracker.send(Tick::new(10), 25, peer, Msg::data_only(buf));
+        let (req, _actions) = tracker.send(
+            Tick::new(10),
+            25,
+            TimerId::new(1),
+            peer,
+            Msg::data_only(buf),
+        );
+
+        assert_eq!(tracker.on_event(Event::Timer(TimerId::new(2))), Vec::new());
+        assert_eq!(tracker.in_flight_len(), 1);
 
         assert_eq!(tracker.complete(req), Some(Some(buf)));
         assert_eq!(tracker.complete(req), None);
         assert_eq!(tracker.on_event(Event::Timer(TimerId::new(1))), Vec::new());
         assert_eq!(tracker.on_event(Event::PeerLost(peer)), Vec::new());
+    }
+
+    #[test]
+    fn tick_time_unit_conversions() {
+        assert_eq!(Tick::ONE_MICROS, 1);
+        assert_eq!(Tick::ONE_MILLIS, 1_000);
+        assert_eq!(Tick::ONE_SECOND, 1_000_000);
+
+        let t = Tick::from_secs(2);
+        assert_eq!(t.as_secs(), 2);
+        assert_eq!(t.as_millis(), 2_000);
+        assert_eq!(t.as_micros(), 2_000_000);
+        assert_eq!(t.as_u64(), 2_000_000);
+
+        let ms = Tick::from_millis(15);
+        assert_eq!(ms.as_micros(), 15_000);
+        assert_eq!(ms.as_millis(), 15);
+
+        let us = Tick::from_micros(950);
+        assert_eq!(us.as_micros(), 950);
+        assert_eq!(us.as_millis(), 0);
     }
 }

@@ -20,7 +20,8 @@ for manifest in crates/*/Cargo.toml; do
 	dir=$(dirname "$manifest")
 	[ -e "$dir/clippy.toml" ] && continue
 	pkg=$(sed -n 's/^name = "\(.*\)"/\1/p' "$manifest" | head -1)
-	if bad=$(cargo tree -p "$pkg" -e normal --prefix none | sed 's/ .*//' | sort -u | grep -Ex "$IO_DEPS"); then
+	deps=$(cargo tree -p "$pkg" -e normal --target all --prefix none)
+	if bad=$(sed 's/ .*//' <<<"$deps" | sort -u | grep -Ex "$IO_DEPS"); then
 		echo "sans-IO crate $pkg depends on I/O crates: $bad" >&2
 		fail=1
 	fi

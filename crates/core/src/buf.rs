@@ -75,8 +75,15 @@ pub trait BufPool {
         self.capacity().saturating_sub(self.used())
     }
 
-    /// Allocates a zero-initialized buffer of `len` bytes or returns [`PoolExhausted`].
+    /// Allocates a buffer of `len` bytes for callers that overwrite it or returns [`PoolExhausted`].
     fn alloc(&mut self, len: usize) -> Result<IoBuf, PoolExhausted>;
+
+    /// Allocates a zero-initialized buffer of `len` bytes or returns [`PoolExhausted`].
+    fn alloc_zeroed(&mut self, len: usize) -> Result<IoBuf, PoolExhausted> {
+        let buf = self.alloc(len)?;
+        self.as_mut_slice(buf).fill(0);
+        Ok(buf)
+    }
 
     /// Allocates a buffer initialized with `data` or returns [`PoolExhausted`].
     fn alloc_from_slice(&mut self, data: &[u8]) -> Result<IoBuf, PoolExhausted> {
@@ -94,4 +101,3 @@ pub trait BufPool {
     /// Releases `buf` back to the pool so its capacity can be reused.
     fn free(&mut self, buf: IoBuf);
 }
-

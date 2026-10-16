@@ -142,7 +142,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use rock_core::buf::{BufPool, IoBuf, PoolExhausted};
-    use rock_core::event::{Action, BLOCK_BYTES, Event, IoId, Lba, NodeId, Tick, TimerId};
+    use rock_core::event::{Action, BLOCK_BYTES, Context, Event, IoId, Lba, Tick, TimerId};
 
     use super::HeapPool;
 
@@ -169,13 +169,12 @@ mod tests {
 
         pub(super) fn enqueue_write(
             &mut self,
-            now: Tick,
+            ctx: &mut Context<'_, impl BufPool>,
             lba: Lba,
             tag: [u8; 4],
-            pool: &mut dyn BufPool,
         ) -> Vec<Action> {
             self.pending_writes.push((lba, tag));
-            self.flush_pending(now, pool)
+            self.flush_pending(ctx)
         }
 
         #[allow(
@@ -184,20 +183,18 @@ mod tests {
         )]
         pub(super) fn on_event(
             &mut self,
-            now: Tick,
+            ctx: &mut Context<'_, impl BufPool>,
             ev: Event,
-            pool: &mut dyn BufPool,
         ) -> Vec<Action> {
             match ev {
                 Event::DiskDone(id, result) => {
                     if let Some(buf) = self.in_flight.remove(&id) {
-                        pool.free(buf);
+                        ctx.pool.free(buf);
                     }
                     assert!(result.is_ok());
-                    self.flush_pending(now, pool)
+                    self.flush_pending(ctx)
                 }
-                Event::PoolExhausted(_) => self.schedule_retry(now),
-                Event::Timer(timer) if timer == self.retry_timer => self.flush_pending(now, pool),
+                Event::Timer(timer) if timer == self.retry_timer => self.flush_pending(ctx),
                 Event::Timer(_) | Event::NetRecv(_, _) | Event::PeerLost(_) => Vec::new(),
             }
         }
@@ -210,31 +207,27 @@ mod tests {
             )]
         }
 
-        fn flush_pending(&mut self, now: Tick, pool: &mut dyn BufPool) -> Vec<Action> {
+        fn flush_pending(&mut self, ctx: &mut Context<'_, impl BufPool>) -> Vec<Action> {
             let mut actions = Vec::new();
             while let Some(&(lba, tag)) = self.pending_writes.first() {
-                match pool.alloc(BLOCK_BYTES) {
-                    Ok(buf) => {
-                        self.pending_writes.remove(0);
-                        pool.as_mut_slice(buf)[..4].copy_from_slice(&tag);
-                        let id = IoId::new(self.next_io);
-                        self.next_io += 1;
-                        self.in_flight.insert(id, buf);
-                        actions.push(Action::DiskWrite(id, lba, buf));
-                    }
-                    Err(exhausted) => {
-                        actions.extend(self.on_event(now, Event::PoolExhausted(exhausted), pool));
-                        break;
-                    }
+                if let Ok(buf) = ctx.pool.alloc(BLOCK_BYTES) {
+                    self.pending_writes.remove(0);
+                    ctx.pool.as_mut_slice(buf)[..4].copy_from_slice(&tag);
+                    let id = IoId::new(self.next_io);
+                    self.next_io += 1;
+                    self.in_flight.insert(id, buf);
+                    actions.push(Action::DiskWrite(id, lba, buf));
+                } else {
+                    actions.extend(self.schedule_retry(ctx.now));
+                    break;
                 }
             }
-            let _ = NodeId::new(0);
             actions
         }
     }
 
     #[test]
-    fn explicit_size_pool_allocates_reuses_and_zero_initializes() {
+    fn explicit_size_pool_allocates_and_reuses() {
         let mut pool = HeapPool::new(2 * BLOCK_BYTES);
         assert_eq!(pool.capacity(), 2 * BLOCK_BYTES);
         assert_eq!(pool.used(), 0);
@@ -245,7 +238,6 @@ mod tests {
         assert_eq!(pool.used(), 2 * BLOCK_BYTES);
         assert_eq!(pool.available(), 0);
         assert_eq!(pool.live_buffers(), 2);
-        assert!(pool.as_slice(b2).iter().all(|&b| b == 0));
 
         assert_eq!(
             pool.alloc(1),
@@ -262,12 +254,23 @@ mod tests {
         let b3 = pool.alloc(BLOCK_BYTES).unwrap();
         assert_eq!(b3.slot(), b1.slot());
         assert_ne!(b3.generation(), b1.generation());
-        assert!(pool.as_slice(b3).iter().all(|&b| b == 0));
 
         pool.free(b2);
         pool.free(b3);
         assert_eq!(pool.used(), 0);
         assert_eq!(pool.live_buffers(), 0);
+    }
+
+    #[test]
+    fn alloc_zeroed_clears_dirty_slot() {
+        let mut pool = HeapPool::new(BLOCK_BYTES);
+        let b1 = pool.alloc(BLOCK_BYTES).unwrap();
+        pool.as_mut_slice(b1).fill(0x5A);
+        pool.free(b1);
+
+        let b2 = pool.alloc_zeroed(BLOCK_BYTES).unwrap();
+        assert!(pool.as_slice(b2).iter().all(|&b| b == 0));
+        pool.free(b2);
     }
 
     #[test]
@@ -287,12 +290,13 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_pool_is_handled_as_an_event_without_panic() {
+    fn exhausted_pool_is_handled_without_panic() {
         let mut pool = HeapPool::new(BLOCK_BYTES);
         let retry_timer = TimerId::new(77);
         let mut machine = BufferedWriterMachine::new(retry_timer, 10);
 
-        let a1 = machine.enqueue_write(Tick::new(100), Lba::new(0), *b"blk0", &mut pool);
+        let mut ctx1 = Context::new(Tick::new(100), &mut pool);
+        let a1 = machine.enqueue_write(&mut ctx1, Lba::new(0), *b"blk0");
         let expected_buf1 = IoBuf::new(0, 1, BLOCK_BYTES);
         assert_eq!(
             a1,
@@ -300,19 +304,18 @@ mod tests {
         );
         assert_eq!(&pool.as_slice(expected_buf1)[..4], b"blk0");
 
-        let a2 = machine.enqueue_write(Tick::new(105), Lba::new(1), *b"blk1", &mut pool);
+        let mut ctx2 = Context::new(Tick::new(105), &mut pool);
+        let a2 = machine.enqueue_write(&mut ctx2, Lba::new(1), *b"blk1");
         assert_eq!(a2, vec![Action::SetTimer(retry_timer, Tick::new(115))]);
         assert_eq!(machine.exhaustions_seen, 1);
 
-        let a3 = machine.on_event(Tick::new(115), Event::Timer(retry_timer), &mut pool);
+        let mut ctx3 = Context::new(Tick::new(115), &mut pool);
+        let a3 = machine.on_event(&mut ctx3, Event::Timer(retry_timer));
         assert_eq!(a3, vec![Action::SetTimer(retry_timer, Tick::new(125))]);
         assert_eq!(machine.exhaustions_seen, 2);
 
-        let a4 = machine.on_event(
-            Tick::new(120),
-            Event::DiskDone(IoId::new(1), Ok(())),
-            &mut pool,
-        );
+        let mut ctx4 = Context::new(Tick::new(120), &mut pool);
+        let a4 = machine.on_event(&mut ctx4, Event::DiskDone(IoId::new(1), Ok(())));
         let expected_buf2 = IoBuf::new(0, 2, BLOCK_BYTES);
         assert_eq!(
             a4,
@@ -320,11 +323,8 @@ mod tests {
         );
         assert_eq!(&pool.as_slice(expected_buf2)[..4], b"blk1");
 
-        let a5 = machine.on_event(
-            Tick::new(130),
-            Event::DiskDone(IoId::new(2), Ok(())),
-            &mut pool,
-        );
+        let mut ctx5 = Context::new(Tick::new(130), &mut pool);
+        let a5 = machine.on_event(&mut ctx5, Event::DiskDone(IoId::new(2), Ok(())));
         assert_eq!(a5, Vec::new());
         assert_eq!(pool.live_buffers(), 0);
     }

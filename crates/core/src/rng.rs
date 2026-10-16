@@ -1,7 +1,7 @@
 //! Deterministic seeded pseudo-random number generator for sans-IO state machines.
 
 use rand_chacha::ChaCha8Rng;
-use rand_chacha::rand_core::{RngCore, SeedableRng};
+use rand_chacha::rand_core::{Rng as _, SeedableRng};
 
 /// Deterministic seeded RNG backed by `ChaCha8Rng`.
 #[derive(Clone, Debug, PartialEq, Eq)]
