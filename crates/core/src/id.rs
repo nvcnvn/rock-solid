@@ -18,34 +18,10 @@ const _: () = assert!(CHUNK_BLOCKS as u64 * BLOCK_BYTES as u64 == CHUNK_SIZE);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PoolId(pub u32);
 
-impl PoolId {
-    /// Wraps a raw 32-bit pool identifier.
-    pub const fn new(raw: u32) -> Self {
-        Self(raw)
-    }
-
-    /// Returns the raw 32-bit pool identifier.
-    pub const fn as_u32(self) -> u32 {
-        self.0
-    }
-}
-
 /// 32-bit volume identifier (never reused).
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VolumeId(pub u32);
-
-impl VolumeId {
-    /// Wraps a raw 32-bit volume identifier.
-    pub const fn new(raw: u32) -> Self {
-        Self(raw)
-    }
-
-    /// Returns the raw 32-bit volume identifier.
-    pub const fn as_u32(self) -> u32 {
-        self.0
-    }
-}
 
 /// Error returned when an inode's slot or sequence number exceeds its bit width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -89,11 +65,6 @@ impl InodeId {
     /// Maximum 40-bit sequence value (`2^40 - 1`).
     pub const MAX_SEQ: u64 = (1 << 40) - 1;
 
-    /// Wraps a raw 64-bit inode identifier.
-    pub const fn new(raw: u64) -> Self {
-        Self(raw)
-    }
-
     /// Packs a 24-bit `slot` and a 40-bit `seq` into a 64-bit [`InodeId`].
     pub const fn from_slot_seq(slot: u32, seq: u64) -> Result<Self, InvalidInodeId> {
         if slot > Self::MAX_SLOT || seq > Self::MAX_SEQ {
@@ -116,11 +87,6 @@ impl InodeId {
     /// Extracts the 40-bit sequence number from the bottom bits.
     pub const fn seq(self) -> u64 {
         self.0 & Self::MAX_SEQ
-    }
-
-    /// Returns the raw 64-bit inode identifier.
-    pub const fn as_u64(self) -> u64 {
-        self.0
     }
 
     /// Encodes the inode identifier as 8 big-endian bytes.
@@ -292,11 +258,11 @@ mod tests {
 
     #[test]
     fn inode_slot_and_sequence_packing() {
-        assert_eq!(InodeId::BLOCK_INODE.as_u64(), 0);
+        assert_eq!(InodeId::BLOCK_INODE.0, 0);
         assert_eq!(InodeId::BLOCK_INODE.slot(), 0);
         assert_eq!(InodeId::BLOCK_INODE.seq(), 0);
 
-        assert_eq!(InodeId::ROOT_INODE.as_u64(), 1);
+        assert_eq!(InodeId::ROOT_INODE.0, 1);
         assert_eq!(InodeId::ROOT_INODE.slot(), 0);
         assert_eq!(InodeId::ROOT_INODE.seq(), 1);
         assert_eq!(InodeId::from_slot_seq(0, 1).unwrap(), InodeId::ROOT_INODE);
@@ -304,7 +270,7 @@ mod tests {
         let meta = InodeId::slot_meta(0x0012_3456).unwrap();
         assert_eq!(meta.slot(), 0x0012_3456);
         assert_eq!(meta.seq(), 0);
-        assert_eq!(meta.as_u64(), 0x1234_5600_0000_0000);
+        assert_eq!(meta.0, 0x1234_5600_0000_0000);
 
         let ino = InodeId::from_slot_seq(0x00AB_CDEF, 0x0000_0098_7654_3210).unwrap();
         assert_eq!(ino.slot(), 0x00AB_CDEF);
@@ -321,8 +287,8 @@ mod tests {
 
     #[test]
     fn chunk_id_packing_and_offset_computation() {
-        let vol = VolumeId::new(0x0102_0304);
-        let ino = InodeId::new(0x0506_0708_090A_0B0C);
+        let vol = VolumeId(0x0102_0304);
+        let ino = InodeId(0x0506_0708_090A_0B0C);
         let idx = 0x0D0E_0F10;
         let cid = ChunkId::new(vol, ino, idx);
 
@@ -367,7 +333,7 @@ mod tests {
         assert_eq!(pg_index_from_hash(0, 3), Err(InvalidPgCount(3)));
         assert_eq!(pg_index_from_hash(u64::MAX, 1).unwrap(), 0);
 
-        let vol = VolumeId::new(7);
+        let vol = VolumeId(7);
         let ino = InodeId::from_slot_seq(3, 100).unwrap();
         for idx in 0..64 {
             let cid = ChunkId::new(vol, ino, idx);
@@ -403,7 +369,7 @@ mod tests {
             let expected_pg2048: u32 = cols[7].parse().unwrap();
 
             let ino = InodeId::from_slot_seq(slot, seq).unwrap();
-            let cid = ChunkId::new(VolumeId::new(vol), ino, idx);
+            let cid = ChunkId::new(VolumeId(vol), ino, idx);
 
             assert_eq!(cid.as_u128(), expected_packed);
             assert_eq!(cid.to_be_bytes(), expected_packed.to_be_bytes());
@@ -411,9 +377,9 @@ mod tests {
             assert_eq!(cid.pg_index(64).unwrap(), expected_pg64);
             assert_eq!(cid.pg_index(2048).unwrap(), expected_pg2048);
             assert_eq!(
-                cid.pg(PoolId::new(1), 2048).unwrap(),
+                cid.pg(PoolId(1), 2048).unwrap(),
                 PgId {
-                    pool: PoolId::new(1),
+                    pool: PoolId(1),
                     index: expected_pg2048,
                 }
             );

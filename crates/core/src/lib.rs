@@ -4,4 +4,5 @@ pub mod buf;
 pub mod crc;
 pub mod event;
 pub mod id;
+pub mod peer;
 pub mod rng;

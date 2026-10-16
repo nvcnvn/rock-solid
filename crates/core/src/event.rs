@@ -1,6 +1,5 @@
 //! Sans-IO event, action, and driver-contract types.
 
-use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::buf::{BufPool, IoBuf};
@@ -26,11 +25,6 @@ impl Tick {
     /// One second in ticks (1,000,000 µs).
     pub const ONE_SECOND: u64 = 1_000_000;
 
-    /// Constructs a tick from microseconds.
-    pub const fn new(raw: u64) -> Self {
-        Self(raw)
-    }
-
     /// Constructs a tick from milliseconds.
     pub const fn from_millis(millis: u64) -> Self {
         Self(millis.saturating_mul(Self::ONE_MILLIS))
@@ -49,11 +43,6 @@ impl Tick {
     /// Returns the timestamp in seconds (truncated).
     pub const fn as_secs(self) -> u64 {
         self.0 / Self::ONE_SECOND
-    }
-
-    /// Returns the timestamp in microseconds.
-    pub const fn as_u64(self) -> u64 {
-        self.0
     }
 
     /// Advances the tick by `delta`, saturating at [`u64::MAX`].
@@ -88,51 +77,15 @@ impl<'a, P: BufPool + ?Sized> Context<'a, P> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IoId(pub u64);
 
-impl IoId {
-    /// Wraps a raw I/O identifier.
-    pub const fn new(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    /// Returns the raw identifier value.
-    pub const fn as_u64(self) -> u64 {
-        self.0
-    }
-}
-
 /// Identifier correlating an [`Action::SetTimer`] with its [`Event::Timer`] firing.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TimerId(pub u64);
 
-impl TimerId {
-    /// Wraps a raw timer identifier.
-    pub const fn new(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    /// Returns the raw identifier value.
-    pub const fn as_u64(self) -> u64 {
-        self.0
-    }
-}
-
 /// Cluster-unique identifier of a node.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(pub u32);
-
-impl NodeId {
-    /// Wraps a raw node identifier.
-    pub const fn new(raw: u32) -> Self {
-        Self(raw)
-    }
-
-    /// Returns the raw node identifier value.
-    pub const fn as_u32(self) -> u32 {
-        self.0
-    }
-}
 
 /// Logical block address on a disk in 4 KiB blocks.
 #[repr(transparent)]
@@ -140,16 +93,6 @@ impl NodeId {
 pub struct Lba(pub u64);
 
 impl Lba {
-    /// Wraps a raw 4 KiB block index.
-    pub const fn new(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    /// Returns the raw 4 KiB block index.
-    pub const fn as_u64(self) -> u64 {
-        self.0
-    }
-
     /// Returns the byte offset of this block on disk.
     pub const fn byte_offset(self) -> u64 {
         self.0.saturating_mul(BLOCK_BYTES as u64)
@@ -202,7 +145,7 @@ impl ControlMsg {
         }
         let mut bytes = [0u8; MAX_CONTROL_MSG_BYTES];
         bytes[..slice.len()].copy_from_slice(slice);
-        let len = u16::try_from(slice.len()).unwrap_or(u16::MAX);
+        let len = u16::try_from(slice.len()).expect("length checked against MAX_CONTROL_MSG_BYTES");
         Ok(Self { bytes, len })
     }
 
@@ -282,8 +225,6 @@ impl Msg {
 pub enum DiskError {
     /// Underlying device or file I/O failure.
     Io,
-    /// Checksum or on-disk format corruption detected.
-    Corrupt,
     /// Disk or pool capacity limit reached.
     NoSpace,
     /// LBA range or buffer length is invalid.
@@ -294,7 +235,6 @@ impl fmt::Display for DiskError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io => f.write_str("disk I/O error"),
-            Self::Corrupt => f.write_str("corrupt disk block or record"),
             Self::NoSpace => f.write_str("no space left on disk"),
             Self::InvalidRange => f.write_str("invalid disk LBA range or buffer size"),
         }
@@ -344,145 +284,6 @@ pub enum Action {
     SetTimer(TimerId, Tick),
 }
 
-/// Caller-allocated identifier of an outbound request tracked by [`PeerRequests`].
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RequestId(pub u64);
-
-/// Reason an outbound peer request failed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PeerRequestFailure {
-    /// Connection to the target peer failed with [`Event::PeerLost`].
-    PeerLost,
-    /// Core-managed request deadline expired with [`Event::Timer`].
-    Timeout,
-}
-
-/// Outbound request in flight to a peer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PeerRequest {
-    /// Target peer of the request.
-    pub peer: NodeId,
-    /// Timer guarding the request deadline.
-    pub timer: TimerId,
-    /// Tick at which the request times out.
-    pub deadline: Tick,
-    /// Optional data buffer handle carried by the request.
-    pub data: Option<IoBuf>,
-}
-
-/// Outbound peer request failed by [`PeerRequests::on_event`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FailedPeerRequest {
-    /// Identifier of the failed request.
-    pub id: RequestId,
-    /// The failed request.
-    pub request: PeerRequest,
-    /// Failure cause.
-    pub reason: PeerRequestFailure,
-}
-
-/// Deterministic tracker for outbound peer requests, deadlines, and [`Event::PeerLost`] failures.
-#[derive(Clone, Debug, Default)]
-pub struct PeerRequests {
-    in_flight: BTreeMap<RequestId, PeerRequest>,
-    by_timer: BTreeMap<TimerId, RequestId>,
-}
-
-impl PeerRequests {
-    /// Creates an empty outbound request tracker.
-    pub const fn new() -> Self {
-        Self {
-            in_flight: BTreeMap::new(),
-            by_timer: BTreeMap::new(),
-        }
-    }
-
-    /// Registers request `id`, already encoded in `msg`, with a deadline on the caller-allocated `timer`.
-    pub fn send(
-        &mut self,
-        now: Tick,
-        timeout_ticks: u64,
-        id: RequestId,
-        timer: TimerId,
-        peer: NodeId,
-        msg: Msg,
-    ) -> [Action; 2] {
-        assert!(
-            !self.in_flight.contains_key(&id),
-            "{id:?} is already in flight"
-        );
-        assert!(
-            !self.by_timer.contains_key(&timer),
-            "{timer:?} already guards an in-flight request"
-        );
-        let deadline = now.saturating_add(timeout_ticks);
-        self.in_flight.insert(
-            id,
-            PeerRequest {
-                peer,
-                timer,
-                deadline,
-                data: msg.data,
-            },
-        );
-        self.by_timer.insert(timer, id);
-        [
-            Action::NetSend(peer, msg),
-            Action::SetTimer(timer, deadline),
-        ]
-    }
-
-    /// Marks `id` completed and returns it, or `None` if it is not in flight.
-    pub fn complete(&mut self, id: RequestId) -> Option<PeerRequest> {
-        let request = self.in_flight.remove(&id)?;
-        self.by_timer.remove(&request.timer);
-        Some(request)
-    }
-
-    /// Total number of requests currently in flight across all peers.
-    pub fn in_flight_len(&self) -> usize {
-        self.in_flight.len()
-    }
-
-    /// Number of requests currently in flight to `peer`.
-    pub fn in_flight_for_peer(&self, peer: NodeId) -> usize {
-        self.in_flight.values().filter(|r| r.peer == peer).count()
-    }
-
-    /// Processes [`Event::PeerLost`] and [`Event::Timer`] at `now`, failing matching in-flight requests.
-    pub fn on_event(&mut self, now: Tick, ev: Event) -> Vec<FailedPeerRequest> {
-        match ev {
-            Event::PeerLost(peer) => {
-                let ids: Vec<RequestId> = self
-                    .in_flight
-                    .iter()
-                    .filter_map(|(&id, r)| (r.peer == peer).then_some(id))
-                    .collect();
-                ids.into_iter()
-                    .filter_map(|id| self.fail(id, PeerRequestFailure::PeerLost))
-                    .collect()
-            }
-            Event::Timer(timer) => match self.by_timer.get(&timer) {
-                Some(&id) if now >= self.in_flight[&id].deadline => self
-                    .fail(id, PeerRequestFailure::Timeout)
-                    .into_iter()
-                    .collect(),
-                _ => Vec::new(),
-            },
-            Event::NetRecv(_, _) | Event::DiskDone(_, _) => Vec::new(),
-        }
-    }
-
-    fn fail(&mut self, id: RequestId, reason: PeerRequestFailure) -> Option<FailedPeerRequest> {
-        self.complete(id).map(|request| FailedPeerRequest {
-            id,
-            request,
-            reason,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,176 +315,22 @@ mod tests {
         let ctrl = ControlMsg::new(b"write-req").unwrap();
         let net_msg = Msg::with_data(ctrl, buf);
 
-        let send = Action::NetSend(NodeId::new(2), net_msg);
-        let disk_write = Action::DiskWrite(IoId::new(9), Lba::new(64), buf);
-        let disk_read = Action::DiskRead(IoId::new(10), Lba::new(64), buf);
+        let send = Action::NetSend(NodeId(2), net_msg);
+        let disk_write = Action::DiskWrite(IoId(9), Lba(64), buf);
+        let disk_read = Action::DiskRead(IoId(10), Lba(64), buf);
 
         assert_eq!(
             send,
             Action::NetSend(
-                NodeId::new(2),
+                NodeId(2),
                 Msg {
                     control: ctrl,
                     data: Some(buf),
                 }
             )
         );
-        assert_eq!(
-            disk_write,
-            Action::DiskWrite(IoId::new(9), Lba::new(64), buf)
-        );
-        assert_eq!(
-            disk_read,
-            Action::DiskRead(IoId::new(10), Lba::new(64), buf)
-        );
-    }
-
-    fn request(peer: NodeId, timer: u64, deadline: u64, data: Option<IoBuf>) -> PeerRequest {
-        PeerRequest {
-            peer,
-            timer: TimerId::new(timer),
-            deadline: Tick::new(deadline),
-            data,
-        }
-    }
-
-    #[test]
-    fn peer_lost_fails_all_outstanding_requests_for_that_peer_only() {
-        let mut tracker = PeerRequests::new();
-        let peer_a = NodeId::new(10);
-        let peer_b = NodeId::new(20);
-        let buf1 = IoBuf::new(0, 1, 4096);
-        let buf2 = IoBuf::new(1, 1, 4096);
-
-        let msg1 = Msg::with_data(ControlMsg::new(b"r1").unwrap(), buf1);
-        let actions1 = tracker.send(
-            Tick::new(100),
-            50,
-            RequestId(1),
-            TimerId::new(1),
-            peer_a,
-            msg1,
-        );
-        assert_eq!(
-            actions1,
-            [
-                Action::NetSend(peer_a, msg1),
-                Action::SetTimer(TimerId::new(1), Tick::new(150)),
-            ]
-        );
-
-        let msg2 = Msg::control(b"r2").unwrap();
-        tracker.send(
-            Tick::new(110),
-            50,
-            RequestId(2),
-            TimerId::new(2),
-            peer_a,
-            msg2,
-        );
-        tracker.send(
-            Tick::new(115),
-            50,
-            RequestId(3),
-            TimerId::new(3),
-            peer_b,
-            Msg::with_data(ControlMsg::new(b"r3").unwrap(), buf2),
-        );
-
-        assert_eq!(tracker.in_flight_for_peer(peer_a), 2);
-        assert_eq!(tracker.in_flight_for_peer(peer_b), 1);
-
-        let failed = tracker.on_event(Tick::new(120), Event::PeerLost(peer_a));
-        assert_eq!(
-            failed,
-            vec![
-                FailedPeerRequest {
-                    id: RequestId(1),
-                    request: request(peer_a, 1, 150, Some(buf1)),
-                    reason: PeerRequestFailure::PeerLost,
-                },
-                FailedPeerRequest {
-                    id: RequestId(2),
-                    request: request(peer_a, 2, 160, None),
-                    reason: PeerRequestFailure::PeerLost,
-                },
-            ]
-        );
-        assert_eq!(tracker.in_flight_for_peer(peer_a), 0);
-        assert_eq!(tracker.in_flight_for_peer(peer_b), 1);
-
-        assert_eq!(
-            tracker.on_event(Tick::new(150), Event::Timer(TimerId::new(1))),
-            Vec::new()
-        );
-
-        let timed_out = tracker.on_event(Tick::new(165), Event::Timer(TimerId::new(3)));
-        assert_eq!(
-            timed_out,
-            vec![FailedPeerRequest {
-                id: RequestId(3),
-                request: request(peer_b, 3, 165, Some(buf2)),
-                reason: PeerRequestFailure::Timeout,
-            }]
-        );
-        assert_eq!(tracker.in_flight_len(), 0);
-    }
-
-    #[test]
-    fn completed_request_ignores_later_timer_and_peer_lost() {
-        let mut tracker = PeerRequests::new();
-        let peer = NodeId::new(5);
-        let buf = IoBuf::new(2, 1, 4096);
-        tracker.send(
-            Tick::new(10),
-            25,
-            RequestId(7),
-            TimerId::new(1),
-            peer,
-            Msg::data_only(buf),
-        );
-
-        assert_eq!(
-            tracker.on_event(Tick::new(40), Event::Timer(TimerId::new(2))),
-            Vec::new()
-        );
-        assert_eq!(tracker.in_flight_len(), 1);
-
-        assert_eq!(
-            tracker.complete(RequestId(7)),
-            Some(request(peer, 1, 35, Some(buf)))
-        );
-        assert_eq!(tracker.complete(RequestId(7)), None);
-        assert_eq!(
-            tracker.on_event(Tick::new(40), Event::Timer(TimerId::new(1))),
-            Vec::new()
-        );
-        assert_eq!(
-            tracker.on_event(Tick::new(40), Event::PeerLost(peer)),
-            Vec::new()
-        );
-    }
-
-    #[test]
-    fn stale_timer_from_reused_id_does_not_fail_new_request() {
-        let mut tracker = PeerRequests::new();
-        let peer = NodeId::new(5);
-        let timer = TimerId::new(1);
-        let msg = Msg::control(b"r").unwrap();
-
-        tracker.send(Tick::new(100), 50, RequestId(1), timer, peer, msg);
-        tracker.complete(RequestId(1));
-        tracker.send(Tick::new(130), 50, RequestId(2), timer, peer, msg);
-
-        assert_eq!(
-            tracker.on_event(Tick::new(150), Event::Timer(timer)),
-            Vec::new()
-        );
-        assert_eq!(tracker.in_flight_len(), 1);
-
-        let timed_out = tracker.on_event(Tick::new(180), Event::Timer(timer));
-        assert_eq!(timed_out.len(), 1);
-        assert_eq!(timed_out[0].id, RequestId(2));
+        assert_eq!(disk_write, Action::DiskWrite(IoId(9), Lba(64), buf));
+        assert_eq!(disk_read, Action::DiskRead(IoId(10), Lba(64), buf));
     }
 
     #[test]
@@ -694,14 +341,14 @@ mod tests {
         let t = Tick::from_secs(2);
         assert_eq!(t.as_secs(), 2);
         assert_eq!(t.as_millis(), 2_000);
-        assert_eq!(t.as_u64(), 2_000_000);
+        assert_eq!(t.0, 2_000_000);
 
         let ms = Tick::from_millis(15);
-        assert_eq!(ms.as_u64(), 15_000);
+        assert_eq!(ms.0, 15_000);
         assert_eq!(ms.as_millis(), 15);
 
-        let us = Tick::new(950);
-        assert_eq!(us.as_u64(), 950);
+        let us = Tick(950);
+        assert_eq!(us.0, 950);
         assert_eq!(us.as_millis(), 0);
     }
 }

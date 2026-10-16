@@ -26,14 +26,7 @@ pub struct HeapPool {
 impl HeapPool {
     /// Creates a heap buffer pool with an explicit total byte `capacity`.
     pub const fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            max_slots: usize::MAX,
-            used: 0,
-            live_count: 0,
-            slots: Vec::new(),
-            free_slots: Vec::new(),
-        }
+        Self::with_max_slots(capacity, usize::MAX)
     }
 
     /// Creates a heap buffer pool bounded by both byte `capacity` and `max_slots` handles.
@@ -216,7 +209,7 @@ mod tests {
                 if let Ok(buf) = ctx.pool.alloc(BLOCK_BYTES) {
                     self.pending_writes.remove(0);
                     ctx.pool.as_mut_slice(buf)[..4].copy_from_slice(&tag);
-                    let id = IoId::new(self.next_io);
+                    let id = IoId(self.next_io);
                     self.next_io += 1;
                     self.in_flight.insert(id, buf);
                     actions.push(Action::DiskWrite(id, lba, buf));
@@ -299,39 +292,33 @@ mod tests {
     #[test]
     fn exhausted_pool_is_handled_without_panic() {
         let mut pool = HeapPool::new(BLOCK_BYTES);
-        let retry_timer = TimerId::new(77);
+        let retry_timer = TimerId(77);
         let mut machine = BufferedWriterMachine::new(retry_timer, 10);
 
-        let mut ctx1 = Context::new(Tick::new(100), &mut pool);
-        let a1 = machine.enqueue_write(&mut ctx1, Lba::new(0), *b"blk0");
+        let mut ctx1 = Context::new(Tick(100), &mut pool);
+        let a1 = machine.enqueue_write(&mut ctx1, Lba(0), *b"blk0");
         let expected_buf1 = IoBuf::new(0, 1, BLOCK_BYTES);
-        assert_eq!(
-            a1,
-            vec![Action::DiskWrite(IoId::new(1), Lba::new(0), expected_buf1)]
-        );
+        assert_eq!(a1, vec![Action::DiskWrite(IoId(1), Lba(0), expected_buf1)]);
         assert_eq!(&pool.as_slice(expected_buf1)[..4], b"blk0");
 
-        let mut ctx2 = Context::new(Tick::new(105), &mut pool);
-        let a2 = machine.enqueue_write(&mut ctx2, Lba::new(1), *b"blk1");
-        assert_eq!(a2, vec![Action::SetTimer(retry_timer, Tick::new(115))]);
+        let mut ctx2 = Context::new(Tick(105), &mut pool);
+        let a2 = machine.enqueue_write(&mut ctx2, Lba(1), *b"blk1");
+        assert_eq!(a2, vec![Action::SetTimer(retry_timer, Tick(115))]);
         assert_eq!(machine.exhaustions_seen, 1);
 
-        let mut ctx3 = Context::new(Tick::new(115), &mut pool);
+        let mut ctx3 = Context::new(Tick(115), &mut pool);
         let a3 = machine.on_event(&mut ctx3, Event::Timer(retry_timer));
-        assert_eq!(a3, vec![Action::SetTimer(retry_timer, Tick::new(125))]);
+        assert_eq!(a3, vec![Action::SetTimer(retry_timer, Tick(125))]);
         assert_eq!(machine.exhaustions_seen, 2);
 
-        let mut ctx4 = Context::new(Tick::new(120), &mut pool);
-        let a4 = machine.on_event(&mut ctx4, Event::DiskDone(IoId::new(1), Ok(())));
+        let mut ctx4 = Context::new(Tick(120), &mut pool);
+        let a4 = machine.on_event(&mut ctx4, Event::DiskDone(IoId(1), Ok(())));
         let expected_buf2 = IoBuf::new(0, 2, BLOCK_BYTES);
-        assert_eq!(
-            a4,
-            vec![Action::DiskWrite(IoId::new(2), Lba::new(1), expected_buf2)]
-        );
+        assert_eq!(a4, vec![Action::DiskWrite(IoId(2), Lba(1), expected_buf2)]);
         assert_eq!(&pool.as_slice(expected_buf2)[..4], b"blk1");
 
-        let mut ctx5 = Context::new(Tick::new(130), &mut pool);
-        let a5 = machine.on_event(&mut ctx5, Event::DiskDone(IoId::new(2), Ok(())));
+        let mut ctx5 = Context::new(Tick(130), &mut pool);
+        let a5 = machine.on_event(&mut ctx5, Event::DiskDone(IoId(2), Ok(())));
         assert_eq!(a5, Vec::new());
         assert_eq!(pool.live_buffers(), 0);
     }

@@ -108,6 +108,22 @@ mod tests {
     }
 
     #[test]
+    fn stream_matches_golden_values() {
+        let mut rng = Rng::from_seed(0);
+        let stream: Vec<u64> = (0..4).map(|_| rng.next_u64()).collect();
+        assert_eq!(
+            stream,
+            [
+                0xB585_F767_A79A_3B6C,
+                0x7746_A55F_BAD8_C037,
+                0xB2FB_0D32_81E2_A6E6,
+                0x0F67_60A4_8F9B_887C,
+            ],
+            "seed expansion or ChaCha8 output changed, so recorded regression seeds no longer replay"
+        );
+    }
+
+    #[test]
     fn forked_rng_is_deterministic_and_independent() {
         let mut root1 = Rng::from_seed(42);
         let mut child1 = root1.fork();

@@ -26,7 +26,7 @@ impl ChunkReplica {
 
 These rules hold from the first default driver, so SPDK and RDMA fit later without changes to the core:
 
-1. **Buffers belong to the driver.** Data travels as an `IoBuf` handle from the driver's pool, never as a `Vec<u8>` the core allocated. Control messages of 256 bytes or less go inline.
+1. **Buffers come from the driver's pool; the core frees them.** Data travels as an `IoBuf` handle from the driver's pool, never as a `Vec<u8>` the core allocated. Control messages of 256 bytes or less go inline. A buffer in an action stays with the driver until `DiskDone`, or for `NetSend` until the peer's reply or `PeerLost(peer)`; a timeout doesn't free it. `PeerRequests` in `core::peer` tracks this.
 2. **Every driver exposes a readiness fd and defaults to event mode.** That's a driver concern, but the core must never assume busy polling.
 3. **Connections fail as a unit:** a single `PeerLost(NodeId)` fails every outstanding request to that peer. The core keeps its own deadlines with `SetTimer`; it never trusts transport timeouts. `SetTimer` re-arms an armed `TimerId` and there is no cancel, so a stale `Timer` can arrive: check the deadline against `ctx.now` first.
 
