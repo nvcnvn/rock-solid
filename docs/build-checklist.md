@@ -16,11 +16,11 @@ Items are in build order within a phase. An item can start once the items it use
 
 **Foundations**
 
-- [ ] **Event and Action types** (component, `core`). `Tick`, `IoId`, `TimerId`, `NodeId`, `Event`, `Action` as in [Modularity](design.md#modularity-sans-io-core-pluggable-drivers). Review when the three driver-contract rules are expressible: data travels only as `IoBuf` handles, control messages of 256 bytes or less go inline, and a `PeerLost` fails a peer's outstanding requests.
-- [ ] **Buffer pool interface** (component, `core`; heap pool in `sim`). `IoBuf` handles from a pool of explicit size. Review when an exhausted pool is an event the caller handles, never a panic or a heap fallback.
-- [ ] **Seeded RNG** (lib, `core`). `rand_chacha` or `rand_pcg` with `default-features = false`. Review when the sans-IO dependency check passes and the RNG is the only source of randomness in `core`.
-- [ ] **IDs and hashing** (lib, `core`). 128-bit `ChunkId` packing and the PG hash (`xxh3_64`, seed 0, top bits) from [ADR 0004](decisions/0004-key-layout-and-ids.md) and [placement groups](design.md#data-layer-chunkstore). Both are frozen disk format. Review with golden vectors checked into the repo.
-- [ ] **CRC32C** (lib, `core`). Pick a crate that builds without `std` I/O; review with the RFC 3720 test vectors.
+- [x] **Event and Action types** (component, `core`). `Tick`, `IoId`, `TimerId`, `NodeId`, `Event`, `Action` as in [Modularity](design.md#modularity-sans-io-core-pluggable-drivers). Review when the three driver-contract rules are expressible: data travels only as `IoBuf` handles, control messages of 256 bytes or less go inline, and a `PeerLost` fails a peer's outstanding requests.
+- [x] **Buffer pool interface** (component, `core`; heap pool in `sim`). `IoBuf` handles from a pool of explicit size. Review when an exhausted pool is an event the caller handles, never a panic or a heap fallback.
+- [x] **Seeded RNG** (lib, `core`). `rand_chacha` or `rand_pcg` with `default-features = false`. Review when the sans-IO dependency check passes and the RNG is the only source of randomness in `core`.
+- [x] **IDs and hashing** (lib, `core`). 128-bit `ChunkId` packing and the PG hash (`xxh3_64`, seed 0, top bits) from [ADR 0004](decisions/0004-key-layout-and-ids.md) and [placement groups](design.md#data-layer-chunkstore). Both are frozen disk format. Review with golden vectors checked into the repo.
+- [x] **CRC32C** (lib, `core`). Pick a crate that builds without `std` I/O; review with the RFC 3720 test vectors.
 
 **Disk log** ([On-disk format](design.md#on-disk-format), [ADR 0003](decisions/0003-one-log-per-disk.md))
 

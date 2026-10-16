@@ -12,3 +12,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+crc.workspace = true
+rand_chacha.workspace = true
+twox-hash.workspace = true
