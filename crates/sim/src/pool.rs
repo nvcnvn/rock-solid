@@ -2,6 +2,9 @@
 
 use rock_core::buf::{BufPool, IoBuf, PoolExhausted};
 
+// Real driver pools hand out dirty memory from `alloc`; poison it so code that assumes zeros fails here.
+const POISON: u8 = 0xA5;
+
 #[derive(Clone, Debug)]
 struct Slot {
     data: Vec<u8>,
@@ -81,8 +84,12 @@ impl BufPool for HeapPool {
     }
 
     fn alloc(&mut self, len: usize) -> Result<IoBuf, PoolExhausted> {
-        let available = self.available();
-        if len > available || self.live_count >= self.max_slots {
+        let available = if self.live_count < self.max_slots {
+            self.available()
+        } else {
+            0
+        };
+        if len > available {
             return Err(PoolExhausted {
                 requested: len,
                 available,
@@ -92,7 +99,7 @@ impl BufPool for HeapPool {
         let slot_idx = if let Some(idx) = self.free_slots.pop() {
             let slot = &mut self.slots[usize::try_from(idx).expect("slot index fits in usize")];
             slot.data.clear();
-            slot.data.resize(len, 0);
+            slot.data.resize(len, POISON);
             slot.allocated = true;
             idx
         } else {
@@ -101,7 +108,7 @@ impl BufPool for HeapPool {
                 available,
             })?;
             self.slots.push(Slot {
-                data: vec![0u8; len],
+                data: vec![POISON; len],
                 generation: 1,
                 allocated: true,
             });
@@ -146,7 +153,7 @@ mod tests {
 
     use super::HeapPool;
 
-    pub(super) struct BufferedWriterMachine {
+    struct BufferedWriterMachine {
         next_io: u64,
         retry_timer: TimerId,
         retry_delay_ticks: u64,
@@ -156,7 +163,7 @@ mod tests {
     }
 
     impl BufferedWriterMachine {
-        pub(super) fn new(retry_timer: TimerId, retry_delay_ticks: u64) -> Self {
+        fn new(retry_timer: TimerId, retry_delay_ticks: u64) -> Self {
             Self {
                 next_io: 1,
                 retry_timer,
@@ -167,7 +174,7 @@ mod tests {
             }
         }
 
-        pub(super) fn enqueue_write(
+        fn enqueue_write(
             &mut self,
             ctx: &mut Context<'_, impl BufPool>,
             lba: Lba,
@@ -181,11 +188,7 @@ mod tests {
             clippy::large_types_passed_by_value,
             reason = "sans-IO state machine on_event signature takes Event by value"
         )]
-        pub(super) fn on_event(
-            &mut self,
-            ctx: &mut Context<'_, impl BufPool>,
-            ev: Event,
-        ) -> Vec<Action> {
+        fn on_event(&mut self, ctx: &mut Context<'_, impl BufPool>, ev: Event) -> Vec<Action> {
             match ev {
                 Event::DiskDone(id, result) => {
                     if let Some(buf) = self.in_flight.remove(&id) {
@@ -262,11 +265,15 @@ mod tests {
     }
 
     #[test]
-    fn alloc_zeroed_clears_dirty_slot() {
+    fn alloc_poisons_and_alloc_zeroed_clears() {
         let mut pool = HeapPool::new(BLOCK_BYTES);
         let b1 = pool.alloc(BLOCK_BYTES).unwrap();
         pool.as_mut_slice(b1).fill(0x5A);
         pool.free(b1);
+
+        let b2 = pool.alloc(BLOCK_BYTES).unwrap();
+        assert!(pool.as_slice(b2).iter().all(|&b| b == super::POISON));
+        pool.free(b2);
 
         let b2 = pool.alloc_zeroed(BLOCK_BYTES).unwrap();
         assert!(pool.as_slice(b2).iter().all(|&b| b == 0));
@@ -281,7 +288,7 @@ mod tests {
             pool.alloc(BLOCK_BYTES),
             Err(PoolExhausted {
                 requested: BLOCK_BYTES,
-                available: 3 * BLOCK_BYTES,
+                available: 0,
             })
         );
         pool.free(b1);

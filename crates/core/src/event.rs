@@ -20,23 +20,15 @@ impl Tick {
     /// Origin tick zero.
     pub const ZERO: Self = Self(0);
 
-    /// One microsecond in ticks.
-    pub const ONE_MICROS: u64 = 1;
-
     /// One millisecond in ticks (1,000 µs).
     pub const ONE_MILLIS: u64 = 1_000;
 
     /// One second in ticks (1,000,000 µs).
     pub const ONE_SECOND: u64 = 1_000_000;
 
-    /// Wraps a raw microsecond count.
+    /// Constructs a tick from microseconds.
     pub const fn new(raw: u64) -> Self {
         Self(raw)
-    }
-
-    /// Constructs a tick from microseconds.
-    pub const fn from_micros(micros: u64) -> Self {
-        Self(micros)
     }
 
     /// Constructs a tick from milliseconds.
@@ -49,11 +41,6 @@ impl Tick {
         Self(secs.saturating_mul(Self::ONE_SECOND))
     }
 
-    /// Returns the timestamp in microseconds.
-    pub const fn as_micros(self) -> u64 {
-        self.0
-    }
-
     /// Returns the timestamp in milliseconds (truncated).
     pub const fn as_millis(self) -> u64 {
         self.0 / Self::ONE_MILLIS
@@ -64,7 +51,7 @@ impl Tick {
         self.0 / Self::ONE_SECOND
     }
 
-    /// Returns the raw tick value.
+    /// Returns the timestamp in microseconds.
     pub const fn as_u64(self) -> u64 {
         self.0
     }
@@ -353,11 +340,11 @@ pub enum Action {
     DiskFsync(IoId),
     /// Discard (TRIM) `u64` 4 KiB blocks starting at `Lba`.
     DiskTrim(IoId, Lba, u64),
-    /// Arm a timer to fire [`Event::Timer`] at `Tick`.
+    /// Arm a timer to fire [`Event::Timer`] at `Tick`, replacing any deadline it already has.
     SetTimer(TimerId, Tick),
 }
 
-/// Identifier of an outbound request tracked by [`PeerRequests`].
+/// Caller-allocated identifier of an outbound request tracked by [`PeerRequests`].
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(pub u64);
@@ -371,33 +358,34 @@ pub enum PeerRequestFailure {
     Timeout,
 }
 
+/// Outbound request in flight to a peer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerRequest {
+    /// Target peer of the request.
+    pub peer: NodeId,
+    /// Timer guarding the request deadline.
+    pub timer: TimerId,
+    /// Tick at which the request times out.
+    pub deadline: Tick,
+    /// Optional data buffer handle carried by the request.
+    pub data: Option<IoBuf>,
+}
+
 /// Outbound peer request failed by [`PeerRequests::on_event`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FailedPeerRequest {
     /// Identifier of the failed request.
     pub id: RequestId,
-    /// Target peer of the failed request.
-    pub peer: NodeId,
-    /// Deadline timer associated with the request.
-    pub timer: TimerId,
-    /// Optional data buffer handle carried by the request.
-    pub data: Option<IoBuf>,
+    /// The failed request.
+    pub request: PeerRequest,
     /// Failure cause.
     pub reason: PeerRequestFailure,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct InFlightEntry {
-    peer: NodeId,
-    timer: TimerId,
-    data: Option<IoBuf>,
 }
 
 /// Deterministic tracker for outbound peer requests, deadlines, and [`Event::PeerLost`] failures.
 #[derive(Clone, Debug, Default)]
 pub struct PeerRequests {
-    next_request_id: u64,
-    in_flight: BTreeMap<RequestId, InFlightEntry>,
+    in_flight: BTreeMap<RequestId, PeerRequest>,
     by_timer: BTreeMap<TimerId, RequestId>,
 }
 
@@ -405,51 +393,51 @@ impl PeerRequests {
     /// Creates an empty outbound request tracker.
     pub const fn new() -> Self {
         Self {
-            next_request_id: 0,
             in_flight: BTreeMap::new(),
             by_timer: BTreeMap::new(),
         }
     }
 
-    /// Registers an outbound request to `peer` with a deadline on the caller-allocated `timer`.
+    /// Registers request `id`, already encoded in `msg`, with a deadline on the caller-allocated `timer`.
     pub fn send(
         &mut self,
         now: Tick,
         timeout_ticks: u64,
+        id: RequestId,
         timer: TimerId,
         peer: NodeId,
         msg: Msg,
-    ) -> (RequestId, [Action; 2]) {
+    ) -> [Action; 2] {
+        assert!(
+            !self.in_flight.contains_key(&id),
+            "{id:?} is already in flight"
+        );
         assert!(
             !self.by_timer.contains_key(&timer),
             "{timer:?} already guards an in-flight request"
         );
-        let id = RequestId(self.next_request_id);
-        self.next_request_id += 1;
-
         let deadline = now.saturating_add(timeout_ticks);
         self.in_flight.insert(
             id,
-            InFlightEntry {
+            PeerRequest {
                 peer,
                 timer,
+                deadline,
                 data: msg.data,
             },
         );
         self.by_timer.insert(timer, id);
-
-        let actions = [
+        [
             Action::NetSend(peer, msg),
             Action::SetTimer(timer, deadline),
-        ];
-        (id, actions)
+        ]
     }
 
-    /// Marks `id` completed and returns its associated data buffer handle, if any.
-    pub fn complete(&mut self, id: RequestId) -> Option<Option<IoBuf>> {
-        let entry = self.in_flight.remove(&id)?;
-        self.by_timer.remove(&entry.timer);
-        Some(entry.data)
+    /// Marks `id` completed and returns it, or `None` if it is not in flight.
+    pub fn complete(&mut self, id: RequestId) -> Option<PeerRequest> {
+        let request = self.in_flight.remove(&id)?;
+        self.by_timer.remove(&request.timer);
+        Some(request)
     }
 
     /// Total number of requests currently in flight across all peers.
@@ -459,50 +447,39 @@ impl PeerRequests {
 
     /// Number of requests currently in flight to `peer`.
     pub fn in_flight_for_peer(&self, peer: NodeId) -> usize {
-        self.in_flight.values().filter(|e| e.peer == peer).count()
+        self.in_flight.values().filter(|r| r.peer == peer).count()
     }
 
-    /// Processes [`Event::PeerLost`] and [`Event::Timer`], failing matching in-flight requests.
-    pub fn on_event(&mut self, ev: Event) -> Vec<FailedPeerRequest> {
+    /// Processes [`Event::PeerLost`] and [`Event::Timer`] at `now`, failing matching in-flight requests.
+    pub fn on_event(&mut self, now: Tick, ev: Event) -> Vec<FailedPeerRequest> {
         match ev {
             Event::PeerLost(peer) => {
                 let ids: Vec<RequestId> = self
                     .in_flight
                     .iter()
-                    .filter_map(|(&id, entry)| (entry.peer == peer).then_some(id))
+                    .filter_map(|(&id, r)| (r.peer == peer).then_some(id))
                     .collect();
-                let mut failed = Vec::with_capacity(ids.len());
-                for id in ids {
-                    if let Some(entry) = self.in_flight.remove(&id) {
-                        self.by_timer.remove(&entry.timer);
-                        failed.push(FailedPeerRequest {
-                            id,
-                            peer: entry.peer,
-                            timer: entry.timer,
-                            data: entry.data,
-                            reason: PeerRequestFailure::PeerLost,
-                        });
-                    }
-                }
-                failed
+                ids.into_iter()
+                    .filter_map(|id| self.fail(id, PeerRequestFailure::PeerLost))
+                    .collect()
             }
-            Event::Timer(timer) => {
-                let Some(id) = self.by_timer.remove(&timer) else {
-                    return Vec::new();
-                };
-                let Some(entry) = self.in_flight.remove(&id) else {
-                    return Vec::new();
-                };
-                vec![FailedPeerRequest {
-                    id,
-                    peer: entry.peer,
-                    timer: entry.timer,
-                    data: entry.data,
-                    reason: PeerRequestFailure::Timeout,
-                }]
-            }
+            Event::Timer(timer) => match self.by_timer.get(&timer) {
+                Some(&id) if now >= self.in_flight[&id].deadline => self
+                    .fail(id, PeerRequestFailure::Timeout)
+                    .into_iter()
+                    .collect(),
+                _ => Vec::new(),
+            },
             Event::NetRecv(_, _) | Event::DiskDone(_, _) => Vec::new(),
         }
+    }
+
+    fn fail(&mut self, id: RequestId, reason: PeerRequestFailure) -> Option<FailedPeerRequest> {
+        self.complete(id).map(|request| FailedPeerRequest {
+            id,
+            request,
+            reason,
+        })
     }
 }
 
@@ -561,6 +538,15 @@ mod tests {
         );
     }
 
+    fn request(peer: NodeId, timer: u64, deadline: u64, data: Option<IoBuf>) -> PeerRequest {
+        PeerRequest {
+            peer,
+            timer: TimerId::new(timer),
+            deadline: Tick::new(deadline),
+            data,
+        }
+    }
+
     #[test]
     fn peer_lost_fails_all_outstanding_requests_for_that_peer_only() {
         let mut tracker = PeerRequests::new();
@@ -569,42 +555,36 @@ mod tests {
         let buf1 = IoBuf::new(0, 1, 4096);
         let buf2 = IoBuf::new(1, 1, 4096);
 
-        let (req1, actions1) = tracker.send(
+        let msg1 = Msg::with_data(ControlMsg::new(b"r1").unwrap(), buf1);
+        let actions1 = tracker.send(
             Tick::new(100),
             50,
+            RequestId(1),
             TimerId::new(1),
             peer_a,
-            Msg::with_data(ControlMsg::new(b"r1").unwrap(), buf1),
+            msg1,
         );
         assert_eq!(
             actions1,
             [
-                Action::NetSend(
-                    peer_a,
-                    Msg::with_data(ControlMsg::new(b"r1").unwrap(), buf1)
-                ),
+                Action::NetSend(peer_a, msg1),
                 Action::SetTimer(TimerId::new(1), Tick::new(150)),
             ]
         );
 
-        let (req2, actions2) = tracker.send(
+        let msg2 = Msg::control(b"r2").unwrap();
+        tracker.send(
             Tick::new(110),
             50,
+            RequestId(2),
             TimerId::new(2),
             peer_a,
-            Msg::control(b"r2").unwrap(),
+            msg2,
         );
-        assert_eq!(
-            actions2,
-            [
-                Action::NetSend(peer_a, Msg::control(b"r2").unwrap()),
-                Action::SetTimer(TimerId::new(2), Tick::new(160)),
-            ]
-        );
-
-        let (req3, _actions3) = tracker.send(
+        tracker.send(
             Tick::new(115),
             50,
+            RequestId(3),
             TimerId::new(3),
             peer_b,
             Msg::with_data(ControlMsg::new(b"r3").unwrap(), buf2),
@@ -613,22 +593,18 @@ mod tests {
         assert_eq!(tracker.in_flight_for_peer(peer_a), 2);
         assert_eq!(tracker.in_flight_for_peer(peer_b), 1);
 
-        let failed = tracker.on_event(Event::PeerLost(peer_a));
+        let failed = tracker.on_event(Tick::new(120), Event::PeerLost(peer_a));
         assert_eq!(
             failed,
             vec![
                 FailedPeerRequest {
-                    id: req1,
-                    peer: peer_a,
-                    timer: TimerId::new(1),
-                    data: Some(buf1),
+                    id: RequestId(1),
+                    request: request(peer_a, 1, 150, Some(buf1)),
                     reason: PeerRequestFailure::PeerLost,
                 },
                 FailedPeerRequest {
-                    id: req2,
-                    peer: peer_a,
-                    timer: TimerId::new(2),
-                    data: None,
+                    id: RequestId(2),
+                    request: request(peer_a, 2, 160, None),
                     reason: PeerRequestFailure::PeerLost,
                 },
             ]
@@ -636,16 +612,17 @@ mod tests {
         assert_eq!(tracker.in_flight_for_peer(peer_a), 0);
         assert_eq!(tracker.in_flight_for_peer(peer_b), 1);
 
-        assert_eq!(tracker.on_event(Event::Timer(TimerId::new(1))), Vec::new());
+        assert_eq!(
+            tracker.on_event(Tick::new(150), Event::Timer(TimerId::new(1))),
+            Vec::new()
+        );
 
-        let timed_out = tracker.on_event(Event::Timer(TimerId::new(3)));
+        let timed_out = tracker.on_event(Tick::new(165), Event::Timer(TimerId::new(3)));
         assert_eq!(
             timed_out,
             vec![FailedPeerRequest {
-                id: req3,
-                peer: peer_b,
-                timer: TimerId::new(3),
-                data: Some(buf2),
+                id: RequestId(3),
+                request: request(peer_b, 3, 165, Some(buf2)),
                 reason: PeerRequestFailure::Timeout,
             }]
         );
@@ -657,41 +634,74 @@ mod tests {
         let mut tracker = PeerRequests::new();
         let peer = NodeId::new(5);
         let buf = IoBuf::new(2, 1, 4096);
-        let (req, _actions) = tracker.send(
+        tracker.send(
             Tick::new(10),
             25,
+            RequestId(7),
             TimerId::new(1),
             peer,
             Msg::data_only(buf),
         );
 
-        assert_eq!(tracker.on_event(Event::Timer(TimerId::new(2))), Vec::new());
+        assert_eq!(
+            tracker.on_event(Tick::new(40), Event::Timer(TimerId::new(2))),
+            Vec::new()
+        );
         assert_eq!(tracker.in_flight_len(), 1);
 
-        assert_eq!(tracker.complete(req), Some(Some(buf)));
-        assert_eq!(tracker.complete(req), None);
-        assert_eq!(tracker.on_event(Event::Timer(TimerId::new(1))), Vec::new());
-        assert_eq!(tracker.on_event(Event::PeerLost(peer)), Vec::new());
+        assert_eq!(
+            tracker.complete(RequestId(7)),
+            Some(request(peer, 1, 35, Some(buf)))
+        );
+        assert_eq!(tracker.complete(RequestId(7)), None);
+        assert_eq!(
+            tracker.on_event(Tick::new(40), Event::Timer(TimerId::new(1))),
+            Vec::new()
+        );
+        assert_eq!(
+            tracker.on_event(Tick::new(40), Event::PeerLost(peer)),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn stale_timer_from_reused_id_does_not_fail_new_request() {
+        let mut tracker = PeerRequests::new();
+        let peer = NodeId::new(5);
+        let timer = TimerId::new(1);
+        let msg = Msg::control(b"r").unwrap();
+
+        tracker.send(Tick::new(100), 50, RequestId(1), timer, peer, msg);
+        tracker.complete(RequestId(1));
+        tracker.send(Tick::new(130), 50, RequestId(2), timer, peer, msg);
+
+        assert_eq!(
+            tracker.on_event(Tick::new(150), Event::Timer(timer)),
+            Vec::new()
+        );
+        assert_eq!(tracker.in_flight_len(), 1);
+
+        let timed_out = tracker.on_event(Tick::new(180), Event::Timer(timer));
+        assert_eq!(timed_out.len(), 1);
+        assert_eq!(timed_out[0].id, RequestId(2));
     }
 
     #[test]
     fn tick_time_unit_conversions() {
-        assert_eq!(Tick::ONE_MICROS, 1);
         assert_eq!(Tick::ONE_MILLIS, 1_000);
         assert_eq!(Tick::ONE_SECOND, 1_000_000);
 
         let t = Tick::from_secs(2);
         assert_eq!(t.as_secs(), 2);
         assert_eq!(t.as_millis(), 2_000);
-        assert_eq!(t.as_micros(), 2_000_000);
         assert_eq!(t.as_u64(), 2_000_000);
 
         let ms = Tick::from_millis(15);
-        assert_eq!(ms.as_micros(), 15_000);
+        assert_eq!(ms.as_u64(), 15_000);
         assert_eq!(ms.as_millis(), 15);
 
-        let us = Tick::from_micros(950);
-        assert_eq!(us.as_micros(), 950);
+        let us = Tick::new(950);
+        assert_eq!(us.as_u64(), 950);
         assert_eq!(us.as_millis(), 0);
     }
 }

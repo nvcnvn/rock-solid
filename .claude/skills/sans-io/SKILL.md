@@ -28,7 +28,7 @@ These rules hold from the first default driver, so SPDK and RDMA fit later witho
 
 1. **Buffers belong to the driver.** Data travels as an `IoBuf` handle from the driver's pool, never as a `Vec<u8>` the core allocated. Control messages of 256 bytes or less go inline.
 2. **Every driver exposes a readiness fd and defaults to event mode.** That's a driver concern, but the core must never assume busy polling.
-3. **Connections fail as a unit:** a single `PeerLost(NodeId)` fails every outstanding request to that peer. The core keeps its own deadlines with `SetTimer`; it never trusts transport timeouts.
+3. **Connections fail as a unit:** a single `PeerLost(NodeId)` fails every outstanding request to that peer. The core keeps its own deadlines with `SetTimer`; it never trusts transport timeouts. `SetTimer` re-arms an armed `TimerId` and there is no cancel, so a stale `Timer` can arrive: check the deadline against `ctx.now` first.
 
 ## Enforcement
 

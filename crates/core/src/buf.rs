@@ -46,7 +46,7 @@ impl IoBuf {
 pub struct PoolExhausted {
     /// Number of bytes requested by the caller.
     pub requested: usize,
-    /// Number of free bytes available in the pool.
+    /// Number of bytes the pool could allocate at the time of the request.
     pub available: usize,
 }
 
