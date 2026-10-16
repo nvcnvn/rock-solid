@@ -423,8 +423,8 @@ All protocol and replication logic, including the coherence protocol, is written
 impl ChunkReplica {
     fn on_event(&mut self, now: Tick, ev: Event) -> Vec<Action> { ... }
 }
-enum Event  { NetRecv(NodeId, Msg), DiskDone(IoId, Result<()>), Timer(TimerId) }
-enum Action { NetSend(NodeId, Msg), DiskWrite(IoId, Lba, Bytes), DiskFsync(IoId), SetTimer(TimerId, Tick) }
+enum Event  { NetRecv(NodeId, Msg), PeerLost(NodeId), DiskDone(IoId, Result<()>), Timer(TimerId) }
+enum Action { NetSend(NodeId, Msg), DiskWrite(IoId, Lba, IoBuf), DiskFsync(IoId), SetTimer(TimerId, Tick) }
 ```
 
 A driver executes `Action`s and feeds back `Event`s:
@@ -436,6 +436,12 @@ A driver executes `Action`s and feeds back `Event`s:
 | Clock and timers | Monotonic clock | Same | Simulated time |
 | Frontend | FUSE client; ublk + CSI driver | NVMe-oF/TCP for remote block clients | Simulated clients with a model page cache that record histories |
 
+**Driver contract.** The [bypass-drivers spike](#appendix-kernel-bypass-drivers-spike) showed that SPDK and RDMA fit this slot, but only if three rules hold from the first (default) driver:
+
+- **Data buffers belong to the driver.** `IoBuf` is a handle from a buffer pool the driver provides, never an arbitrary heap allocation. NVMe under SPDK can only DMA from SPDK-registered memory, and RDMA can only send from registered memory; one stray buffer breaks the whole RDMA connection, and registering per I/O costs as much as the I/O. The default drivers and the simulator use a plain heap pool, so nothing changes for them. Control messages up to 256 bytes go inline and need no pool buffer.
+- **Every driver exposes a readiness fd and defaults to event mode.** SPDK's thread interrupt fd and the RDMA completion-channel fd both sit in the daemon's epoll loop. Busy polling is a separate opt-in for dedicated cores.
+- **Network connections fail as a unit.** A transport error on a connection becomes one `PeerLost` event, every outstanding request on it fails, and the driver reconnects. The core keeps its own deadlines and never relies on transport timeouts.
+
 **Crate layout (proposed)**
 
 - `core`: state machines for ChunkStore replicas, placement, Raft shards, sessions and leases. No I/O dependencies.
@@ -446,7 +452,7 @@ A driver executes `Action`s and feeds back `Event`s:
 - `daemon`: the single binary that wires the drivers and frontends picked by flags.
 - `csi`: Kubernetes CSI driver.
 
-**Transport negotiation.** Each node pair picks RDMA if both ends support it, otherwise TCP, so mixed clusters work without configuration.
+**Transport negotiation.** Every node pair connects over TCP first, then upgrades to RDMA if both ends report a usable device. RDMA needs that TCP channel anyway, to exchange queue pair numbers and addresses. The daemon loads `libibverbs` at runtime, so one binary runs on nodes with and without rdma-core, and a missing library, device or memory-lock allowance means TCP, not an error. Mixed clusters work without configuration.
 
 ## Testing strategy
 
@@ -490,7 +496,7 @@ Invariants checked after every step:
 
 - **FUSE behavior** is pinned by the spike harness in [spikes/fuse-coherence](../spikes/fuse-coherence/), run in CI against each supported kernel.
 - **Power cuts** via the Intelligent Platform Management Interface (IPMI) or a smart power strip are the only honest fsync test. Write checksummed patterns with `fio --verify=crc32c`, cut power, boot, verify. Some consumer NVMe drives acknowledge flushes they haven't done.
-- **Soft-RoCE (`rdma_rxe`)** runs the RDMA code path on any ordinary network card, and `tc netem` can inject faults under it.
+- **Soft-RoCE (`rdma_rxe`)** runs the RDMA code path on any ordinary network card, and `tc netem` can inject faults under it. It is a functional stand-in only: it is slower than kernel TCP at every message size, and it treats `retry_cnt=7` as "retry forever", unlike real NICs. RDMA performance decisions need a real card.
 - device-mapper can't see SPDK I/O, so the SPDK path uses SPDK's own error and delay bdev modules.
 
 **5. Test matrix.**
@@ -507,7 +513,7 @@ Property tests on placement: after any random add, remove and failure sequence, 
 
 **7. Performance.** Track metadata operations per second (create, stat, rename), cached and write-shared read latency, 4K block latency at queue depth 1, CPU per operation, and 99.9th-percentile latency during recovery. A 20% overnight regression is treated as a bug.
 
-**Starting hardware.** One big machine is enough at first: a few virtual machines, QEMU's emulated NVMe devices (SPDK runs against them for correctness, not speed), and Soft-RoCE between the virtual machines.
+**Starting hardware.** One big machine is enough at first: a few virtual machines, QEMU's emulated NVMe devices (SPDK runs against them for correctness, not speed; this needs root, `vfio-pci` and hugepages inside the virtual machine). SPDK's file-backed aio bdev needs none of that and runs in CI as a normal user, and Soft-RoCE between the virtual machines.
 
 ## Alternatives considered
 
@@ -541,7 +547,7 @@ Build order puts the simulator before any real driver and ships RWX file storage
 2. **Protocol models.** `stateright` models of placement epochs, sessions and fencing, and cache-mode recalls, before writing the real protocols.
 3. **Replication and placement.** Primary-based 3-way replication, placement groups and a placement table with epochs, recovery per placement group. Fault-injected in simulation from the first commit.
 4. **Embedded MetaStore.** Raft with group commit, one shard only, with the sharded API from day one. Inodes, directory entries, sessions and locks.
-5. **Default drivers.** `io_uring` and kernel TCP behind the `Action` interface.
+5. **Default drivers.** `io_uring` and kernel TCP behind the `Action` interface, with the driver contract (driver-owned buffer pools, readiness fd, `PeerLost`) in place from the start.
 6. **File frontend with Tier 1: first usable product.** FUSE client with daemon-side write-back, close-to-open, flock, orphans, fencing. CSI driver with RWX and fsGroup delegation. Passes `pjdfstest`, single and multi-client `fsx`, and `csi-sanity`. Nightly nemesis runs and power-cut tests.
 7. **Tier 2.** Inode owner with open registry and cache modes, recalls, revalidation of old handles, mmap invalidations. Simulated FUSE clients and the spike harness in CI.
 8. **Block frontend.** ublk plus CSI for RWO, then RWX block (Tier 0).
@@ -564,6 +570,8 @@ Build order puts the simulator before any real driver and ships RWX file storage
 - [ ] Flush latency of common consumer NVMe drives, which bounds durable write latency on homelab hardware. Measure with eBPF on the `nvme_setup_cmd` and `nvme_complete_rq` tracepoints.
 - [ ] Raft and storage engine: `openraft` maturity for multi-Raft, `redb` versus `fjall`.
 - [ ] Name and license confirmation (Apache 2.0 assumed).
+- [ ] SPDK NVMe in interrupt mode: does the PCIe NVMe driver support it with `vfio-pci`, and at what latency cost? Needs a spare NVMe drive (not tested in the spike).
+- [ ] Memory-lock limits in Kubernetes: request `IPC_LOCK` for the daemon pod, or size the RDMA buffer pool to the default container limit?
 
 ## Learning project
 
@@ -618,3 +626,30 @@ Each learning track starts with a small throwaway exercise, then lands as a real
 - Never enable `writeback_cache`; buffer writes in the daemon.
 - A recall must drop pages, switch new opens to `direct_io`, and put old handles into per-read revalidation.
 - mmap readers need an invalidation after each write.
+
+## Appendix: kernel-bypass drivers spike
+
+**Question.** Can SPDK and RDMA be added later as opt-in drivers behind the `Action` interface, without changing the core, the default build or the no-hugepages install? Or does something in them have to shape the interface now?
+
+**Setup.** Linux 6.17, laptop with one consumer NVMe drive (the root disk). SPDK v26.09 (DPDK 26.03) and rdma-core v50.0, both shallow clones, built and run as a normal user. SPDK runs inside the spike's own event loop (no `spdk_app_start`, no reactors) on malloc, aio and uring bdevs over a file. RDMA runs on Soft-RoCE over Wi-Fi; two queue pairs on one device stand in for two nodes. Code and raw output: [spikes/bypass-drivers](../spikes/bypass-drivers/).
+
+| Test | Result |
+| --- | --- |
+| SPDK without hugepages, as a normal user | Works, but only after moving DPDK's base address below the host's IOMMU address width (42 bits here). The default fails at startup |
+| SPDK memory | About 430 MB RSS with default pools; 63 MB with pools sized explicitly |
+| SPDK 4K I/O, polling vs interrupt mode (aio bdev) | Same latency (write 13 µs, read 17 µs at p50). CPU per I/O 43 µs polling, 2.9 µs in interrupt mode; idle loop 100% vs 0% of a core. The uring bdev has no interrupt support and keeps a core busy |
+| Handing I/O to the SPDK thread from another thread | 1.6 µs (poll) / 3 µs (interrupt) |
+| SPDK embedding pitfalls | Interrupt mode crashes on shutdown unless the thread library gets a scheduler callback (`spdk_thread_lib_init_ext`). Linking without `--whole-archive` builds fine and fails at startup |
+| SPDK DMA | Without hugepages, no memory is DMA-able. Real NVMe under SPDK still needs root, `vfio-pci` and very likely hugepages |
+| RDMA library loading | Loaded at runtime; no library or no device means TCP, not a crash |
+| RDMA memory registration | 2.3 µs for 4 KB, 12 µs for 1 MB, 170 µs for 16 MB. Fails with ENOMEM above the process's memory-lock limit (a 64 KB limit can't register 1 MB) |
+| RDMA round trips on Soft-RoCE | 4 KB: 12 µs polling, 16 µs event-driven; kernel TCP loopback 9 µs. Event mode uses 5 to 10 µs of CPU per round trip at every size; polling burns the whole wait |
+| RDMA bad buffer | Sending from memory outside any registration breaks the queue pair; every later send fails until it is rebuilt |
+| RDMA dead peer | Detected in 4 to 540 ms depending on timeout settings. With `retry_cnt=7` Soft-RoCE retries forever |
+
+**Conclusions** (applied in [Modularity](#modularity-sans-io-core-pluggable-drivers))
+
+- Both drivers fit the driver slot; neither needs the core to change.
+- The driver contract (driver-owned buffers, a readiness fd with event mode by default, connection-level failure) must exist from the default drivers on, or SPDK and RDMA would force a retrofit of every `Action`.
+- SPDK's opt-in has two tiers: file-backed bdevs need no privileges; real NVMe needs root, `vfio-pci` and hugepages, on a dedicated drive.
+- RDMA needs `IPC_LOCK` or a large enough memory-lock limit in the daemon pod, and TCP to bootstrap every connection.
