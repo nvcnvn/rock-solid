@@ -1,0 +1,38 @@
+# kernel 6.17.0-1033-oem redb 4.4.0 fjall 3.1.12 (lsm-tree 3.1.10) rustc 1.99.1 date=2026-10-16T06:56Z cpu=14x Intel(R) Core(TM) Ultra 5 235U mem=15G disk=UMIS RPEYJ512MML1QWQ (write back) fs=ext4 quick=false loadavg=17.49 16.04 10.03
+
+## K3 chunk index: redb, 10000000 entries (38 B key, 16 B value), cache 64MB  loadavg=17.49 16.04 10.03  rss=3MB
+K3 redb   sorted bulk load (100k/commit) time=17.4s entries/s=575243 wamp=1.18 disk=609.1MB space_amp=1.18 rss=73MB cpu/entry=1.60us
+K3 redb   random updates batch=  1000 (insert+delete per entry) commits=200 commit_p50=95.1ms commit_p99=140.8ms entries/s=10048 wamp_commit=159.8 wamp_total=159.8 devwamp=160.7 written=1646MB cpu/entry=91.36us
+K3 redb   random updates batch= 10000 (insert+delete per entry) commits=20 commit_p50=675.8ms commit_p99=989.1ms entries/s=14771 wamp_commit=113.7 wamp_total=113.7 devwamp=139.2 written=1171MB cpu/entry=62.46us
+K3 redb   random updates batch=100000 (insert+delete per entry) commits=2 commit_p50=5688.2ms commit_p99=5688.2ms entries/s=17932 wamp_commit=99.6 wamp_total=99.6 devwamp=109.0 written=1026MB cpu/entry=49.86us
+K3 redb   after updates entries=10017722 disk=1094.5MB (journal 0.0MB) bytes/entry=114.6 rss=125MB
+K3 redb   lookups warm  n=100000 get_hit p50=10.3us p99=21.3us  get_miss p50=0.8us p99=9.9us  floor_seek p50=1.0us p99=9.6us found=94.1%
+K3 redb   rss_after_lookups=125MB hwm=125MB
+K3 redb   reopen with unflushed journal (page cache dropped) open=2.6ms fresh_process_open=5.0ms disk=1094.5MB
+K3 redb   reopen after memtable flush (page cache dropped) open=5.1ms fresh_process_open=3.3ms rss=103MB
+K3 redb   lookups cold  n=2000 get_hit p50=147.2us p99=236.2us  get_miss p50=1.0us p99=82.0us  floor_seek p50=1.4us p99=78.6us found=93.8%
+
+## K5b crash recovery time on the K3 index (redb): kill -9 during durable 1k-entry commits  loadavg=13.90 15.27 10.17  rss=103MB
+K5b redb    iter=0 child(open+5 commits)=1052ms reopen_after_kill=32813ms read=935MB written=0.0MB
+K5b redb    iter=1 child(open+5 commits)=412ms reopen_after_kill=34242ms read=931MB written=0.0MB
+K5b redb    iter=2 child(open+5 commits)=496ms reopen_after_kill=21730ms read=1263MB written=0.0MB
+K5b redb-qr iter=0 child(open+5 commits)=343ms reopen_after_kill=7ms read=1MB written=0.0MB
+K5b redb-qr iter=1 child(open+5 commits)=1437ms reopen_after_kill=13ms read=1MB written=0.0MB
+K5b redb-qr iter=2 child(open+5 commits)=1153ms reopen_after_kill=9ms read=1MB written=0.0MB
+
+## K3 chunk index: fjall, 10000000 entries (38 B key, 16 B value), cache 64MB  loadavg=11.80 14.11 10.25  rss=3MB
+K3 fjall  sorted bulk load (100k/commit) time=15.5s entries/s=643656 wamp=2.14 disk=415.6MB space_amp=0.81 rss=293MB cpu/entry=2.36us
+K3 fjall  random updates batch=  1000 (insert+delete per entry) commits=200 commit_p50=14.4ms commit_p99=33.1ms entries/s=59635 wamp_commit=5.0 wamp_total=5.0 devwamp=8.2 written=51MB cpu/entry=14.49us
+K3 fjall  random updates batch= 10000 (insert+delete per entry) commits=20 commit_p50=103.2ms commit_p99=146.0ms entries/s=89373 wamp_commit=2.5 wamp_total=2.5 devwamp=2.9 written=26MB cpu/entry=11.34us
+K3 fjall  random updates batch=100000 (insert+delete per entry) commits=2 commit_p50=733.2ms commit_p99=733.2ms entries/s=131087 wamp_commit=5.2 wamp_total=5.2 devwamp=5.2 written=53MB cpu/entry=10.51us
+K3 fjall  after updates entries=10017722 disk=465.6MB (journal 25.6MB) bytes/entry=48.7 rss=316MB
+K3 fjall  lookups warm  n=100000 get_hit p50=14.4us p99=25.8us  get_miss p50=1.8us p99=3.6us  floor_seek p50=13.6us p99=25.8us found=94.1%
+K3 fjall  rss_after_lookups=322MB hwm=322MB
+K3 fjall  reopen with unflushed journal (page cache dropped) open=2127.6ms fresh_process_open=1633.0ms disk=465.6MB
+K3 fjall  reopen after memtable flush (page cache dropped) open=1980.5ms fresh_process_open=2105.4ms rss=324MB
+K3 fjall  lookups cold  n=2000 get_hit p50=1419.0us p99=4992.9us  get_miss p50=603.9us p99=1612.6us  floor_seek p50=2268.5us p99=7940.1us found=93.8%
+
+## K5b crash recovery time on the K3 index (fjall): kill -9 during durable 1k-entry commits  loadavg=12.85 13.98 10.41  rss=324MB
+K5b fjall   iter=0 child(open+5 commits)=2408ms reopen_after_kill=2458ms read=31MB written=0.0MB
+K5b fjall   iter=1 child(open+5 commits)=2533ms reopen_after_kill=3442ms read=31MB written=0.0MB
+K5b fjall   iter=2 child(open+5 commits)=3051ms reopen_after_kill=3192ms read=32MB written=0.0MB

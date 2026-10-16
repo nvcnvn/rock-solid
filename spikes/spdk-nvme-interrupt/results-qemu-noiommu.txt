@@ -1,0 +1,90 @@
+### host 6.17.0-1033-oem, Model name: Intel(R) Core(TM) Ultra 5 235U, QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18), SPDK v26.09 / DPDK 26.03.0, 2026-10-16
+### guest: same kernel, -machine q35,accel=kvm , -smp 4 -m 2G, -device nvme,ioeventfd=on on a 1 GB raw file (cache=none, aio=native)
+### guest: 6.17.0-1033-oem, rs.mode=noiommu, 4 vCPUs, 2013924 kB
+  NVMe controller: 0000:00:01.0, driver: 
+  hugepages: 512 x 2 MB
+  bound 0000:00:01.0 to vfio-pci, iommu_group 0, /dev/vfio: noiommu-0 vfio 
+
+### nvme_intr trtype:PCIe traddr:0000:00:01.0
+env: uid=0, hugepages, mem 256 MB, pci 0000:00:01.0
+[2026-10-16 07:02:11.447713] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 07:02:11.447752] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --huge-unlink --allow=0000:00:01.0 --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --iova-mode=pa --base-virtaddr=0x200000000000 --match-allocations --file-prefix=spdk_pid131 ]
+N1 attach PCIE 0000:00:01.0, enable_interrupts=0
+  [OK ] ctrlr opts.enable_interrupts after attach got=0 want=0
+  num_io_queues 64, admin qpair fd -1, eventfds opened by attach: 2
+  ns 1: 2097152 sectors of 512 B
+  I/O qpair fd -1, poll group fd_group fd 142
+  [OK ] spdk_vtophys(dma buf) ok got=1 want=1
+  vfio interrupt vectors in /proc/interrupts: 0
+N2 4K QD1, 20000 writes + 20000 reads, mode poll
+  nvme   write p50   61.3 p99 1103.2 us | read p50   60.3 p99 1081.0 us | CPU 100.0% of wall, 100.5 us/op (all CPUs 101.2 us/op) | wakeups/op 0.00 | failed 0
+  vfio interrupts during N2: 0.00 per I/O
+N3 idle
+  idle 1 s: CPU 100.0% (all CPUs 102.0% of one CPU)
+N4 throughput
+  4K randread QD32: 104523 IOPS, CPU 100.0% of wall,  9.57 us/op (all CPUs  9.66 us/op), wakeups/op 0.00, failed 0
+  vfio interrupts during N4: 0
+  detach ok
+
+### nvme_intr --interrupt trtype:PCIe traddr:0000:00:01.0
+env: uid=0, hugepages, mem 256 MB, pci 0000:00:01.0
+[2026-10-16 07:02:19.069152] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 07:02:19.069173] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --huge-unlink --allow=0000:00:01.0 --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --iova-mode=pa --base-virtaddr=0x200000000000 --match-allocations --file-prefix=spdk_pid135 ]
+N1 attach PCIE 0000:00:01.0, enable_interrupts=1
+  [OK ] ctrlr opts.enable_interrupts after attach got=1 want=1
+  num_io_queues 64, admin qpair fd 139, eventfds opened by attach: 66
+  ns 1: 2097152 sectors of 512 B
+  I/O qpair fd 142, poll group fd_group fd 206
+  [OK ] I/O qpair has an eventfd got=1 want=1
+  [OK ] spdk_vtophys(dma buf) ok got=1 want=1
+  vfio interrupt vectors in /proc/interrupts: 65
+N2 4K QD1, 20000 writes + 20000 reads, mode interrupt
+  nvme   write p50   79.0 p99 1170.1 us | read p50   81.7 p99 1241.5 us | CPU  22.8% of wall,  30.3 us/op (all CPUs  28.0 us/op) | wakeups/op 1.00 | failed 0
+  vfio interrupts during N2: 1.00 per I/O
+N3 idle
+  idle 1 s: CPU 0.1% (all CPUs 0.0% of one CPU)
+N4 throughput
+  4K randread QD32: 154879 IOPS, CPU  18.7% of wall,  1.21 us/op (all CPUs  1.29 us/op), wakeups/op 0.03, failed 0
+  vfio interrupts during N4: 10609
+  detach ok
+
+### nvme_intr --interrupt --no-huge --mem 128 trtype:PCIe traddr:0000:00:01.0
+env: uid=0, no_huge, mem 128 MB, pci 0000:00:01.0
+[2026-10-16 07:02:27.956765] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 07:02:27.956784] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 128 --no-huge --legacy-mem --iova-mode=va --allow=0000:00:01.0 --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --base-virtaddr=0x200000000000 --file-prefix=spdk_pid138 ]
+N1 attach PCIE 0000:00:01.0, enable_interrupts=1
+PCI_BUS:   Expecting 'PA' IOVA mode but current mode is 'VA', not initializing
+EAL: Driver cannot attach the device (0000:00:01.0)
+EAL: Failed to attach device on primary process
+[2026-10-16 07:02:28.071462] nvme.c: 781:nvme_probe_internal: *ERROR*: NVMe ctrlr scan failed
+[2026-10-16 07:02:28.071513] nvme.c: 890:spdk_nvme_probe_ext: *ERROR*: Create probe context failed
+  [FAIL] spdk_nvme_probe found no controller
+
+  bound 0000:00:01.0 to uio_pci_generic, iommu_group , /dev/vfio: vfio 
+### nvme_intr --interrupt trtype:PCIe traddr:0000:00:01.0
+env: uid=0, hugepages, mem 256 MB, pci 0000:00:01.0
+[2026-10-16 07:02:28.127848] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 07:02:28.127890] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --huge-unlink --allow=0000:00:01.0 --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --iova-mode=pa --base-virtaddr=0x200000000000 --match-allocations --file-prefix=spdk_pid149 ]
+N1 attach PCIE 0000:00:01.0, enable_interrupts=1
+[2026-10-16 07:02:28.342616] pci.c: 826:spdk_pci_device_enable_interrupts: *ERROR*: VFIO MSI-X capability not present for device 0000:00:01.0
+[2026-10-16 07:02:28.342702] nvme_pcie.c:1071:nvme_pcie_ctrlr_enable_interrupts: *ERROR*: [0000:00:01.0,cntlid:0] enable_interrupts() failed
+[2026-10-16 07:02:28.342716] nvme_ctrlr.c:3235:nvme_ctrlr_set_num_queues_done: *ERROR*: [0000:00:01.0,cntlid:0] Failed to enable interrupts!
+  [FAIL] ctrlr opts.enable_interrupts after attach got=0 want=1
+  attach fell back to polling; running in poll mode
+  num_io_queues 64, admin qpair fd -1, eventfds opened by attach: 0
+  ns 1: 2097152 sectors of 512 B
+  I/O qpair fd -1, poll group fd_group fd 140
+  [OK ] spdk_vtophys(dma buf) ok got=1 want=1
+  vfio interrupt vectors in /proc/interrupts: 0
+N2 4K QD1, 20000 writes + 20000 reads, mode poll
+  nvme   write p50   62.0 p99 1084.4 us | read p50   60.9 p99 1145.6 us | CPU 100.0% of wall,  98.8 us/op (all CPUs  99.0 us/op) | wakeups/op 0.00 | failed 0
+  vfio interrupts during N2: 0.00 per I/O
+N3 idle
+  idle 1 s: CPU 100.0% (all CPUs 100.0% of one CPU)
+N4 throughput
+  4K randread QD32: 160289 IOPS, CPU 100.0% of wall,  6.24 us/op (all CPUs  6.24 us/op), wakeups/op 0.00, failed 0
+  vfio interrupts during N4: 0
+  detach ok
+
+### guest done
+[   25.334937] reboot: Power down

@@ -1,0 +1,21 @@
+# kernel 6.17.0-1033-oem redb 4.4.0 fjall 3.1.12 (lsm-tree 3.1.10) rustc 1.99.1 date=2026-10-16T06:55Z cpu=14x Intel(R) Core(TM) Ultra 5 235U mem=15G disk=UMIS RPEYJ512MML1QWQ (write back) fs= quick=false loadavg=16.09 15.22 9.26
+
+## K2 MetaStore shard: redb, 500 dirs x 1000 files (dentry + attr keys), cache 64MB  loadavg=16.09 15.22 9.26  rss=3MB
+K2 redb   load keys=1000500 logical=173.7MB time=7.6s keys/s=131712 wamp=1.91 disk=330.8MB space_amp=1.90 rss=38MB cpu/key=4.7us
+K2 redb   mixed70/30 durable                rounds=3000 ops/s=14073 get_p50=7.2us get_p99=42.6us commit_p50=3562us commit_p99=11426us wamp=38.89 devwamp=42.61 cpu/op=32.2us misses=0 rss=74MB disk=331.4MB
+K2 redb   mixed70/30 apply-nosync+ckpt/100  rounds=3000 ops/s=28693 get_p50=8.9us get_p99=73.6us commit_p50=880us commit_p99=7278us wamp=21.38 devwamp=23.37 cpu/op=26.9us misses=0 rss=74MB disk=344.7MB
+K2 redb   readdir 1000 entries warm: p50=196us p99=369us
+[OK ] K2 redb readdir returns 1000 entries: got=500/500 want=500/500
+K2 redb   disk_end=344.7MB (journal 0.0MB) space_amp=1.99 hwm=74MB
+K2 redb   reopen with unflushed journal (page cache dropped): open=3.9ms fresh_process_open=3.6ms disk_journal_included=344.7MB
+K2 redb   cold open after memtable flush=4.3ms fresh_process_open=6.1ms first-200-gets p50=233us p99=1416us cold_readdir=2838us (1000 entries) rss_after_open=72MB
+
+## K2 MetaStore shard: fjall, 500 dirs x 1000 files (dentry + attr keys), cache 64MB  loadavg=18.82 15.95 9.69  rss=3MB
+K2 fjall  load keys=1000500 logical=173.7MB time=3.6s keys/s=279436 wamp=1.92 disk=228.2MB space_amp=1.31 rss=212MB cpu/key=3.9us
+K2 fjall  mixed70/30 durable                rounds=3000 ops/s=9502 get_p50=17.8us get_p99=72.0us commit_p50=3651us commit_p99=96271us wamp=1.75 devwamp=12.65 cpu/op=21.5us misses=0 rss=237MB disk=246.6MB
+K2 fjall  mixed70/30 apply-nosync+ckpt/100  rounds=3000 ops/s=47660 get_p50=14.3us get_p99=57.5us commit_p50=138us commit_p99=5258us wamp=3.69 devwamp=5.70 cpu/op=16.6us misses=0 rss=239MB disk=203.0MB
+K2 fjall  readdir 1000 entries warm: p50=374us p99=1791us
+[OK ] K2 fjall readdir returns 1000 entries: got=500/500 want=500/500
+K2 fjall  disk_end=203.0MB (journal 17.5MB) space_amp=1.17 hwm=239MB
+K2 fjall  reopen with unflushed journal (page cache dropped): open=246.8ms fresh_process_open=306.1ms disk_journal_included=203.0MB
+K2 fjall  cold open after memtable flush=437.8ms fresh_process_open=453.7ms first-200-gets p50=90us p99=1434us cold_readdir=603us (1000 entries) rss_after_open=238MB

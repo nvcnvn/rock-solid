@@ -1,0 +1,25 @@
+### 6.17.0-1033-oem, UMIS RPEYJ512MML1QWQ fw 1.0Q06C1, ext4 rw,relatime, 2026-10-16T14:25:22+07:00 (N2d alone, twice; run.sh now includes it)
+
+### N2d run 1: 4K pwrite + fdatasync into fallocated but never written extents (sequential)
+loadavg: 2.84 4.09 6.83 4/2211 267265
+    fallocated 64 MiB, extents left unwritten
+    background over 3 s idle: 0.3 flushes/s, 5.3 writes/s (other processes), loadavg 2.85 4.07 6.80 3/2192 267320
+    N2d bs=4096 n=2000 mode=fdatasync gap_us=0 offsets=sequential
+    write  p50=    27.4 p90=    41.8 p99=   132.1 p99.9=   408.3 max=   479.3 mean=    32.9 us
+    flush  p50=  2503.2 p90=  2639.5 p99=  4689.8 p99.9=102905.4 max=104698.2 mean=  3331.4 us
+    total  p50=  2532.3 p90=  2672.0 p99=  4750.4 p99.9=102939.2 max=104777.7 mean=  3364.2 us
+    cpu/op=24.8 us, 297 durable ops/s
+    device: 1.00 flushes/op (1.00 after subtracting background), 3.02 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 28.4 KiB written/op, device time per flush 0.205 ms, 6.7 s
+[OK ] N2d device flushes per op got=1.00 want=1.00
+
+### N2d run 2: 4K pwrite + fdatasync into fallocated but never written extents (sequential)
+loadavg: 2.95 4.07 6.79 5/2181 267428
+    fallocated 64 MiB, extents left unwritten
+    background over 3 s idle: 3.7 flushes/s, 12.0 writes/s (other processes), loadavg 2.95 4.05 6.77 4/2182 267488
+    N2d bs=4096 n=2000 mode=fdatasync gap_us=0 offsets=sequential
+    write  p50=    31.1 p90=    93.8 p99=   369.6 p99.9=  1001.1 max=  1270.4 mean=    55.2 us
+    flush  p50=  2557.5 p90=  2699.6 p99= 96607.7 p99.9=102594.8 max=103323.9 mean=  4332.2 us
+    total  p50=  2595.1 p90=  2848.4 p99= 96643.6 p99.9=102633.8 max=103357.4 mean=  4387.4 us
+    cpu/op=36.6 us, 228 durable ops/s
+    device: 1.00 flushes/op (0.99 after subtracting background), 3.02 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 28.4 KiB written/op, device time per flush 0.206 ms, 8.8 s
+[OK ] N2d device flushes per op got=0.99 want=1.00

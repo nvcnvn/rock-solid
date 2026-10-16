@@ -1,0 +1,20 @@
+[package]
+name = "multi-raft-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+openraft = { version = "=0.9.25", features = ["storage-v2"] }
+raft = { version = "=0.7.0", default-features = false, features = ["protobuf-codec"] }
+slog = "=2.7.0"
+tokio = { version = "=1.47.1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "test-util"] }
+rand = "=0.8.5"
+
+[profile.release]
+debug = 1
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }

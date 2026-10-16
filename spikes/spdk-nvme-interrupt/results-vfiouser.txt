@@ -1,0 +1,86 @@
+### 6.17.0-1033-oem, Model name: Intel(R) Core(TM) Ultra 5 235U, SPDK 26.09.0 / DPDK 26.03.0, uid 1000, no hugepages, 2026-10-16
+### target: nvmf_tgt --no-huge -m 0x2 (core 1, poll mode), VFIOUSER transport, Malloc0 64 MB 4K blocks
+### bin/nvme_intr 
+env: uid=1000, no_huge, mem 256 MB, pci off
+[2026-10-16 14:10:40.629249] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 14:10:40.629301] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --no-pci --no-huge --legacy-mem --iova-mode=va --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --base-virtaddr=0x20000000000 --file-prefix=spdk_pid250676 ]
+N1 attach VFIOUSER /home/lap17083/Sources/rock-solid/spikes/spdk-nvme-interrupt/work/vfu.250637, enable_interrupts=0
+  [OK ] ctrlr opts.enable_interrupts after attach got=0 want=0
+  num_io_queues 127, admin qpair fd -95, eventfds opened by attach: 0
+  ns 1: 16384 sectors of 4096 B
+  I/O qpair fd -95, poll group fd_group fd 10
+  [FAIL] spdk_vtophys(dma buf) ok got=0 want=1
+  vfio interrupt vectors in /proc/interrupts: 0
+N2 4K QD1, 20000 writes + 20000 reads, mode poll
+  nvme   write p50    1.2 p99    3.2 us | read p50    1.1 p99    1.5 us | CPU  99.6% of wall,   1.2 us/op (all CPUs  10.0 us/op) | wakeups/op 0.00 | failed 0
+  vfio interrupts during N2: 0.00 per I/O
+N3 idle
+  idle 1 s: CPU 100.0% (all CPUs 887.9% of one CPU)
+N4 throughput
+  4K randread QD32: 1161260 IOPS, CPU 100.0% of wall,  0.86 us/op (all CPUs  7.76 us/op), wakeups/op 0.00, failed 0
+  vfio interrupts during N4: 0
+  detach ok
+
+### bin/nvme_intr --interrupt
+env: uid=1000, no_huge, mem 256 MB, pci off
+[2026-10-16 14:10:43.747033] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 14:10:43.747069] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --no-pci --no-huge --legacy-mem --iova-mode=va --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --base-virtaddr=0x20000000000 --file-prefix=spdk_pid250746 ]
+N1 attach VFIOUSER /home/lap17083/Sources/rock-solid/spikes/spdk-nvme-interrupt/work/vfu.250637, enable_interrupts=1
+[2026-10-16 14:10:43.790949] nvme_ctrlr.c:3235:nvme_ctrlr_set_num_queues_done: *ERROR*: [/home/lap17083/Sources/rock-solid/spikes/spdk-nvme-interrupt/work/vfu.250637,cntlid:0] Failed to enable interrupts!
+  [FAIL] ctrlr opts.enable_interrupts after attach got=0 want=1
+  attach fell back to polling; running in poll mode
+  num_io_queues 127, admin qpair fd -95, eventfds opened by attach: 0
+  ns 1: 16384 sectors of 4096 B
+  I/O qpair fd -95, poll group fd_group fd 10
+  [FAIL] spdk_vtophys(dma buf) ok got=0 want=1
+  vfio interrupt vectors in /proc/interrupts: 0
+N2 4K QD1, 20000 writes + 20000 reads, mode poll
+  nvme   write p50    1.1 p99    7.4 us | read p50    1.0 p99    7.2 us | CPU  99.6% of wall,   1.3 us/op (all CPUs  10.2 us/op) | wakeups/op 0.00 | failed 0
+  vfio interrupts during N2: 0.00 per I/O
+N3 idle
+  idle 1 s: CPU 99.9% (all CPUs 756.9% of one CPU)
+N4 throughput
+  4K randread QD32: 1186243 IOPS, CPU 100.0% of wall,  0.84 us/op (all CPUs  7.46 us/op), wakeups/op 0.00, failed 0
+  vfio interrupts during N4: 0
+  detach ok
+
+### bin/nvme_intr --interrupt --trust-request   (killed after 5 s, first 20 lines)
+env: uid=1000, no_huge, mem 256 MB, pci off
+[2026-10-16 14:10:46.869207] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 14:10:46.869242] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --no-pci --no-huge --legacy-mem --iova-mode=va --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --base-virtaddr=0x20000000000 --file-prefix=spdk_pid250798 ]
+N1 attach VFIOUSER /home/lap17083/Sources/rock-solid/spikes/spdk-nvme-interrupt/work/vfu.250637, enable_interrupts=1
+[2026-10-16 14:10:46.910820] nvme_ctrlr.c:3235:nvme_ctrlr_set_num_queues_done: *ERROR*: [/home/lap17083/Sources/rock-solid/spikes/spdk-nvme-interrupt/work/vfu.250637,cntlid:0] Failed to enable interrupts!
+  [FAIL] ctrlr opts.enable_interrupts after attach got=0 want=1
+  num_io_queues 127, admin qpair fd -95, eventfds opened by attach: 0
+  ns 1: 16384 sectors of 4096 B
+  I/O qpair fd -95, poll group fd_group fd 10
+  [FAIL] I/O qpair has an eventfd got=0 want=1
+  [FAIL] spdk_vtophys(dma buf) ok got=0 want=1
+  vfio interrupt vectors in /proc/interrupts: 0
+N2 4K QD1, 20000 writes + 20000 reads, mode interrupt
+[2026-10-16 14:10:47.915372] fd_group.c: 619:spdk_fd_group_wait: *ERROR*: fd group(0x62fe118e5dc0) epoll_wait failed: Invalid argument
+[2026-10-16 14:10:48.915505] fd_group.c: 619:spdk_fd_group_wait: *ERROR*: fd group(0x62fe118e5dc0) epoll_wait failed: Invalid argument
+[2026-10-16 14:10:49.916513] fd_group.c: 619:spdk_fd_group_wait: *ERROR*: fd group(0x62fe118e5dc0) epoll_wait failed: Invalid argument
+[2026-10-16 14:10:50.917490] fd_group.c: 619:spdk_fd_group_wait: *ERROR*: fd group(0x62fe118e5dc0) epoll_wait failed: Invalid argument
+exit status 124 (124 = killed by timeout)
+
+### bin/nvme_intr --bdev
+env: uid=1000, no_huge, mem 256 MB, pci off
+[2026-10-16 14:10:51.874624] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 14:10:51.874670] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --no-pci --no-huge --legacy-mem --iova-mode=va --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --base-virtaddr=0x20000000000 --file-prefix=spdk_pid250869 ]
+B1 spdk_bdev_nvme_create VFIOUSER /home/lap17083/Sources/rock-solid/spikes/spdk-nvme-interrupt/work/vfu.250637, thread mode poll
+  [OK ] open Nvme0n1 got=0 want=0
+B2 4K QD1, 20000 writes + 20000 reads
+  bdev   write p50    1.4 p99    7.1 us | read p50    1.2 p99    7.0 us | CPU  99.8% of wall,   1.4 us/op (all CPUs  13.2 us/op) | wakeups/op 0.00 | failed 0
+B3 idle
+  idle 1 s: CPU 99.9%
+  clean shutdown ok
+
+### bin/nvme_intr --bdev --interrupt
+env: uid=1000, no_huge, mem 256 MB, pci off
+[2026-10-16 14:10:53.114997] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 14:10:53.115047] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --no-pci --no-huge --legacy-mem --iova-mode=va --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --base-virtaddr=0x20000000000 --file-prefix=spdk_pid250883 ]
+B1 spdk_bdev_nvme_create VFIOUSER /home/lap17083/Sources/rock-solid/spikes/spdk-nvme-interrupt/work/vfu.250637, thread mode interrupt
+  [FAIL] spdk_bdev_nvme_create returned -95 (Operation not supported)
+  clean shutdown ok
+

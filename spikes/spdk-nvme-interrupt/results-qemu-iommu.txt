@@ -1,0 +1,186 @@
+### host 6.17.0-1033-oem, Model name: Intel(R) Core(TM) Ultra 5 235U, QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18), SPDK v26.09 / DPDK 26.03.0, 2026-10-16
+### guest: same kernel, -machine q35,accel=kvm,kernel-irqchip=split -device intel-iommu,intremap=on, -smp 4 -m 2G, -device nvme,ioeventfd=on on a 1 GB raw file (cache=none, aio=native)
+### guest: 6.17.0-1033-oem, rs.mode=iommu, 4 vCPUs, 2013920 kB
+  dmesg: DMAR: Host address width 39
+  dmesg: DMAR-IR: Enabled IRQ remapping in x2apic mode
+  dmesg: DMAR: Intel(R) Virtualization Technology for Directed I/O
+  NVMe controller: 0000:00:01.0, driver: 
+  hugepages: 512 x 2 MB
+  bound 0000:00:01.0 to vfio-pci, iommu_group 1, /dev/vfio: 1 devices vfio 
+
+### nvme_intr --n 1 trtype:PCIe traddr:0000:00:01.0
+env: uid=0, hugepages, mem 256 MB, pci 0000:00:01.0
+[2026-10-16 07:02:38.309070] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 07:02:38.309097] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --huge-unlink --allow=0000:00:01.0 --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --iova-mode=pa --base-virtaddr=0x200000000000 --match-allocations --file-prefix=spdk_pid132 ]
+N1 attach PCIE 0000:00:01.0, enable_interrupts=0
+  [OK ] ctrlr opts.enable_interrupts after attach got=0 want=0
+  num_io_queues 64, admin qpair fd -1, eventfds opened by attach: 2
+  ns 1: 2097152 sectors of 512 B
+  I/O qpair fd -1, poll group fd_group fd 142
+  [OK ] spdk_vtophys(dma buf) ok got=1 want=1
+  vfio interrupt vectors in /proc/interrupts: 0
+N2 4K QD1, 1 writes + 1 reads, mode poll
+  nvme   write p50 5025.1 p99 5025.1 us | read p50 3837.5 p99 3837.5 us | CPU  98.3% of wall, 4370.5 us/op (all CPUs 10000.0 us/op) | wakeups/op 0.00 | failed 0
+  vfio interrupts during N2: 0.00 per I/O
+N3 idle
+  idle 1 s: CPU 100.0% (all CPUs 104.0% of one CPU)
+N4 throughput
+  4K randread QD32: 85881 IOPS, CPU 100.0% of wall, 11.64 us/op (all CPUs 11.84 us/op), wakeups/op 0.00, failed 0
+  vfio interrupts during N4: 0
+  detach ok
+
+### nvme_intr --base 0x1000000000 trtype:PCIe traddr:0000:00:01.0
+env: uid=0, hugepages, mem 256 MB, pci 0000:00:01.0
+[2026-10-16 07:02:41.934669] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 07:02:41.934699] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --huge-unlink --allow=0000:00:01.0 --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --iova-mode=pa --base-virtaddr=0x1000000000 --match-allocations --file-prefix=spdk_pid136 ]
+N1 attach PCIE 0000:00:01.0, enable_interrupts=0
+  [OK ] ctrlr opts.enable_interrupts after attach got=0 want=0
+  num_io_queues 64, admin qpair fd -1, eventfds opened by attach: 2
+  ns 1: 2097152 sectors of 512 B
+  I/O qpair fd -1, poll group fd_group fd 142
+  [OK ] spdk_vtophys(dma buf) ok got=1 want=1
+  vfio interrupt vectors in /proc/interrupts: 0
+N2 4K QD1, 20000 writes + 20000 reads, mode poll
+  nvme   write p50   65.3 p99 1177.0 us | read p50   63.3 p99 1127.2 us | CPU 100.0% of wall, 107.3 us/op (all CPUs 107.5 us/op) | wakeups/op 0.00 | failed 0
+  vfio interrupts during N2: 0.00 per I/O
+N3 idle
+  idle 1 s: CPU 100.0% (all CPUs 101.0% of one CPU)
+N4 throughput
+  4K randread QD32: 209232 IOPS, CPU 100.0% of wall,  4.78 us/op (all CPUs  4.80 us/op), wakeups/op 0.00, failed 0
+  vfio interrupts during N4: 0
+  detach ok
+
+### nvme_intr --base 0x1000000000 --interrupt trtype:PCIe traddr:0000:00:01.0
+env: uid=0, hugepages, mem 256 MB, pci 0000:00:01.0
+[2026-10-16 07:02:49.916516] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 07:02:49.916552] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --huge-unlink --allow=0000:00:01.0 --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --iova-mode=pa --base-virtaddr=0x1000000000 --match-allocations --file-prefix=spdk_pid139 ]
+N1 attach PCIE 0000:00:01.0, enable_interrupts=1
+  [OK ] ctrlr opts.enable_interrupts after attach got=1 want=1
+  num_io_queues 64, admin qpair fd 139, eventfds opened by attach: 66
+  ns 1: 2097152 sectors of 512 B
+  I/O qpair fd 142, poll group fd_group fd 206
+  [OK ] I/O qpair has an eventfd got=1 want=1
+  [OK ] spdk_vtophys(dma buf) ok got=1 want=1
+  vfio interrupt vectors in /proc/interrupts: 65
+N2 4K QD1, 20000 writes + 20000 reads, mode interrupt
+  nvme   write p50   78.8 p99 1300.4 us | read p50   77.7 p99 1213.8 us | CPU  26.8% of wall,  39.4 us/op (all CPUs  43.0 us/op) | wakeups/op 1.00 | failed 0
+  vfio interrupts during N2: 1.00 per I/O
+N3 idle
+  idle 1 s: CPU 0.1% (all CPUs 1.0% of one CPU)
+N4 throughput
+  4K randread QD32: 105310 IOPS, CPU  15.5% of wall,  1.48 us/op (all CPUs  1.38 us/op), wakeups/op 0.03, failed 0
+  vfio interrupts during N4: 7290
+  detach ok
+
+### nvme_intr --base 0x1000000000 --bdev trtype:PCIe traddr:0000:00:01.0
+env: uid=0, hugepages, mem 256 MB, pci 0000:00:01.0
+[2026-10-16 07:02:59.460975] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 07:02:59.461038] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --huge-unlink --allow=0000:00:01.0 --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --iova-mode=pa --base-virtaddr=0x1000000000 --match-allocations --file-prefix=spdk_pid142 ]
+B1 spdk_bdev_nvme_create PCIE 0000:00:01.0, thread mode poll
+  spdk_bdev_nvme_create done: 1 bdevs, rc 0
+  [OK ] open Nvme0n1 got=0 want=0
+B2 4K QD1, 20000 writes + 20000 reads
+  bdev   write p50   63.7 p99 1169.2 us | read p50   64.1 p99 1214.3 us | CPU 100.0% of wall, 107.6 us/op (all CPUs 120.5 us/op) | wakeups/op 0.00 | failed 0
+B3 idle
+  idle 1 s: CPU 100.0%
+  clean shutdown ok
+
+### nvme_intr --base 0x1000000000 --bdev --interrupt trtype:PCIe traddr:0000:00:01.0
+env: uid=0, hugepages, mem 256 MB, pci 0000:00:01.0
+[2026-10-16 07:03:05.455656] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 07:03:05.455684] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --huge-unlink --allow=0000:00:01.0 --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --iova-mode=pa --base-virtaddr=0x1000000000 --match-allocations --file-prefix=spdk_pid145 ]
+B1 spdk_bdev_nvme_create PCIE 0000:00:01.0, thread mode interrupt
+  spdk_bdev_nvme_create done: 1 bdevs, rc 0
+  [OK ] open Nvme0n1 got=0 want=0
+B2 4K QD1, 20000 writes + 20000 reads
+  bdev   write p50  118.3 p99 2580.4 us | read p50  118.9 p99 2378.2 us | CPU  16.2% of wall,  54.7 us/op (all CPUs  76.8 us/op) | wakeups/op 1.02 | failed 0
+B3 idle
+  idle 1 s: CPU 0.1%
+  clean shutdown ok
+
+### nvme_intr --base 0x1000000000 --interrupt --no-huge trtype:PCIe traddr:0000:00:01.0
+env: uid=0, no_huge, mem 256 MB, pci 0000:00:01.0
+[2026-10-16 07:03:20.776767] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 07:03:20.776875] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --no-huge --legacy-mem --iova-mode=va --allow=0000:00:01.0 --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --base-virtaddr=0x1000000000 --file-prefix=spdk_pid148 ]
+N1 attach PCIE 0000:00:01.0, enable_interrupts=1
+EAL: Cannot set up DMA remapping, error 28 (No space left on device)
+EAL: 0000:00:01.0 DMA remapping failed, error 28 (No space left on device)
+EAL: Driver cannot attach the device (0000:00:01.0)
+EAL: Failed to attach device on primary process
+[2026-10-16 07:03:21.413032] nvme.c: 781:nvme_probe_internal: *ERROR*: NVMe ctrlr scan failed
+[2026-10-16 07:03:21.413130] nvme.c: 890:spdk_nvme_probe_ext: *ERROR*: Create probe context failed
+  [FAIL] spdk_nvme_probe found no controller
+
+### nvme_intr --base 0x1000000000 --interrupt --no-huge --mem 128 trtype:PCIe traddr:0000:00:01.0
+env: uid=0, no_huge, mem 128 MB, pci 0000:00:01.0
+[2026-10-16 07:03:21.465001] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 07:03:21.465055] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 128 --no-huge --legacy-mem --iova-mode=va --allow=0000:00:01.0 --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --base-virtaddr=0x1000000000 --file-prefix=spdk_pid151 ]
+N1 attach PCIE 0000:00:01.0, enable_interrupts=1
+  [OK ] ctrlr opts.enable_interrupts after attach got=1 want=1
+  num_io_queues 64, admin qpair fd 12, eventfds opened by attach: 66
+  ns 1: 2097152 sectors of 512 B
+  I/O qpair fd 15, poll group fd_group fd 79
+  [OK ] I/O qpair has an eventfd got=1 want=1
+  [OK ] spdk_vtophys(dma buf) ok got=1 want=1
+  vfio interrupt vectors in /proc/interrupts: 65
+N2 4K QD1, 20000 writes + 20000 reads, mode interrupt
+  nvme   write p50   90.9 p99 1826.1 us | read p50   89.3 p99 1730.0 us | CPU  16.9% of wall,  42.3 us/op (all CPUs  47.5 us/op) | wakeups/op 1.00 | failed 0
+  vfio interrupts during N2: 1.00 per I/O
+N3 idle
+  idle 1 s: CPU 0.1% (all CPUs 0.0% of one CPU)
+N4 throughput
+  4K randread QD32: 101406 IOPS, CPU  15.3% of wall,  1.51 us/op (all CPUs  1.28 us/op), wakeups/op 0.03, failed 0
+  vfio interrupts during N4: 6835
+  detach ok
+
+### spdk_nvme_perf -q 1 -w randread
+                                                                                       Latency(us)
+PCIE (0000:00:01.0) [1b36:0010] NSID 1 from core  0:   20594.20      80.45      48.51      13.79    7361.72
+Total                                              :   20594.20      80.45      48.51      13.79    7361.72
+real	0m 5.60s
+user	0m 5.08s
+sys	0m 0.23s
+
+### spdk_nvme_perf -q 1 -w randread -E
+                                                                                       Latency(us)
+PCIE (0000:00:01.0) [1b36:0010] NSID 1 from core  0:   16133.97      63.02      61.93      14.57    3841.48
+Total                                              :   16133.97      63.02      61.93      14.57    3841.48
+real	0m 5.63s
+user	0m 1.80s
+sys	0m 0.73s
+
+### spdk_nvme_perf -q 32 -w randread
+                                                                                       Latency(us)
+PCIE (0000:00:01.0) [1b36:0010] NSID 1 from core  0:  115972.20     453.02     275.88      22.36   35996.52
+Total                                              :  115972.20     453.02     275.88      22.36   35996.52
+real	0m 5.59s
+user	0m 5.06s
+sys	0m 0.19s
+
+### spdk_nvme_perf -q 32 -w randread -E
+                                                                                       Latency(us)
+PCIE (0000:00:01.0) [1b36:0010] NSID 1 from core  0:   89253.57     348.65     358.57      28.05    7514.45
+Total                                              :   89253.57     348.65     358.57      28.05    7514.45
+real	0m 5.73s
+user	0m 0.73s
+sys	0m 0.46s
+
+  bound 0000:00:01.0 to uio_pci_generic, iommu_group 1, /dev/vfio: vfio 
+### nvme_intr --base 0x1000000000 --interrupt --n 1 trtype:PCIe traddr:0000:00:01.0
+env: uid=0, hugepages, mem 256 MB, pci 0000:00:01.0
+[2026-10-16 07:03:57.821767] Starting SPDK v26.09 git sha1 0bbb7fe / DPDK 26.03.0 initialization...
+[2026-10-16 07:03:57.821818] [ DPDK EAL parameters: rs-nvme-intr --no-shconf -l 0 -m 256 --huge-unlink --allow=0000:00:01.0 --no-telemetry --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=lib.power:5 --log-level=user1:6 --iova-mode=pa --base-virtaddr=0x1000000000 --match-allocations --file-prefix=spdk_pid182 ]
+N1 attach PCIE 0000:00:01.0, enable_interrupts=1
+qemu-system-x86_64: vtd_iova_to_slpte: detected slpte permission error (iova=0x193e0000, level=0x3, slpte=0x0, write=0, pasid=0xffffffff)
+qemu-system-x86_64: vtd_iommu_translate: detected translation failure (dev=00:01:00, iova=0x193e0000)
+qemu-system-x86_64: New fault is not recorded due to compression of faults
+[2026-10-16 07:04:28.037379] nvme_ctrlr.c:4791:nvme_ctrlr_process_init: *ERROR*: [0000:00:01.0,cntlid:0] Initialization timed out in state 22 (wait for identify controller)
+[2026-10-16 07:04:28.037544] nvme.c: 647:nvme_ctrlr_poll_internal: *ERROR*: [0000:00:01.0,cntlid:0] Failed to initialize SSD: 0000:00:01.0
+[2026-10-16 07:04:28.037562] nvme.c: 834:nvme_dummy_attach_fail_cb: *ERROR*: Failed to attach nvme ctrlr: trtype=PCIe adrfam=(null) traddr=0000:00:01.0 trsvcid= subnqn=, Operation not permitted
+[2026-10-16 07:04:28.037572] nvme_ctrlr.c:1139:nvme_ctrlr_fail: *ERROR*: [0000:00:01.0,cntlid:0] in failed state.
+[2026-10-16 07:04:28.037716] nvme_pcie_common.c: 790:nvme_pcie_qpair_abort_trackers: *ERROR*: [0000:00:01.0,cntlid:0,qid:0,qpair:0x10101f9ea0,DISCONNECTED] aborting outstanding command
+[2026-10-16 07:04:28.037745] nvme_ctrlr.c:2131:nvme_ctrlr_identify_done: *ERROR*: [0000:00:01.0,cntlid:0] nvme_identify_controller failed!
+  [FAIL] spdk_nvme_probe found no controller
+
+### guest done
+[  111.197659] reboot: Power down

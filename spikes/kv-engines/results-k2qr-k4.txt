@@ -1,0 +1,57 @@
+# kernel 6.17.0-1033-oem redb 4.4.0 fjall 3.1.12 (lsm-tree 3.1.10) rustc 1.99.1 date=2026-10-16T07:02Z cpu=14x Intel(R) Core(TM) Ultra 5 235U mem=15G disk=UMIS RPEYJ512MML1QWQ (write back) fs=ext4 quick=false loadavg=13.11 13.87 10.95
+
+## K0 background: whole-disk writes and flushes from other processes while this harness idles 10 s  loadavg=13.11 13.87 10.95  rss=3MB
+K0 idle 10s: device written=88.5MB (9058KB/s) flushes=26 (3/s)
+
+## K2 MetaStore shard: redb-qr, 500 dirs x 1000 files (dentry + attr keys), cache 64MB  loadavg=13.09 13.84 10.97  rss=3MB
+K2 redb-qr load keys=1000500 logical=173.7MB time=3.8s keys/s=260262 wamp=1.91 disk=330.9MB space_amp=1.91 rss=39MB cpu/key=3.4us
+K2 redb-qr mixed70/30 durable                rounds=3000 ops/s=11748 get_p50=6.2us get_p99=35.3us commit_p50=4799us commit_p99=11398us wamp=52.10 devwamp=58.77 cpu/op=36.7us misses=0 rss=74MB disk=331.5MB
+K2 redb-qr mixed70/30 apply-nosync+ckpt/100  rounds=3000 ops/s=42058 get_p50=5.7us get_p99=35.0us commit_p50=601us commit_p99=4260us wamp=21.52 devwamp=23.89 cpu/op=18.4us misses=0 rss=74MB disk=344.9MB
+K2 redb-qr readdir 1000 entries warm: p50=201us p99=357us
+[OK ] K2 redb-qr readdir returns 1000 entries: got=500/500 want=500/500
+K2 redb-qr disk_end=344.9MB (journal 0.0MB) space_amp=1.99 hwm=74MB
+K2 redb-qr reopen with unflushed journal (page cache dropped): open=2.0ms fresh_process_open=3.3ms disk_journal_included=344.9MB
+K2 redb-qr cold open after memtable flush=5.9ms fresh_process_open=2.8ms first-200-gets p50=176us p99=1108us cold_readdir=3777us (1000 entries) rss_after_open=72MB
+
+## K4 group commit across N=100 shards: one 256 B log entry per shard per round  loadavg=12.61 13.66 11.01  rss=3MB
+K4 redb one txn, 100 tables     rounds=300 round_p50=5396us round_p99=10220us shard-appends/s=17683 written/round=816.0KB cpu/round=2817us
+K4 redb 100 txns, 1 file        rounds=30 round_p50=120376us round_p99=154845us shard-appends/s=818 written/round=3200.0KB cpu/round=23596us
+K4 redb 100 files, 100 threads  rounds=30 round_p50=20631us round_p99=57917us shard-appends/s=3382 written/round=2560.0KB cpu/round=33864us
+K4 fjall one batch, 100 keyspaces rounds=300 round_p50=3131us round_p99=5279us shard-appends/s=30721 written/round=31.9KB cpu/round=486us
+K4 fjall 100 batches, 1 db      rounds=30 round_p50=113932us round_p99=133468us shard-appends/s=860 written/round=430.3KB cpu/round=8015us
+K4 fjall 100 threads, 1 db      rounds=30 round_p50=121052us round_p99=165512us shard-appends/s=797 written/round=430.3KB cpu/round=14126us
+K4 file one fdatasync (shared)  rounds=300 round_p50=1199us round_p99=3826us shard-appends/s=81463 written/round=30.5KB cpu/round=235us
+K4 file 100 files, 100 threads  rounds=30 round_p50=7920us round_p99=13457us shard-appends/s=9417 written/round=413.3KB cpu/round=7623us
+[OK ] K4 redb: 100 separate commits vs one combined: got=22x slower want=> 20x (each commit is one fsync)
+[OK ] K4 fjall: 100 separate batches vs one combined: got=36x slower want=> 20x
+[OK ] K4 fjall: 100 concurrent SyncData batches are not coalesced into one fsync: got=38.7x of one batch want=> 20x (journal mutex held across each fsync; hypothesis)
+
+## K4b 1000 shards in one process: open cost, RSS, file descriptors  loadavg=12.61 13.58 11.04  rss=29MB
+K4b redb 1 file 1000 tables    create+10 entries each=72ms rss_delta=0MB fds_delta=1
+K4b redb 1 file 1000 tables    reopen=14ms disk=4.1MB
+K4b redb 1000 files            create+10 entries each=7889ms rss_delta=42MB fds_delta=1000
+K4b redb 1000 files            reopen=1237ms disk=50.8MB
+K4b fjall 1 db 1000 keyspaces  create+10 entries each=64097ms rss_delta=0MB fds_delta=2
+K4b fjall 1 db 1000 keyspaces  reopen=160ms disk=11.6MB
+
+## K5 crash safety: kill -9 a writer of 64-entry durable batches, reopen, verify (process crash only, not power loss)  loadavg=13.27 13.57 11.27  rss=3MB
+K5 redb  iterations=50 batches_acked=2194 reopen p50=54.3ms max=111.1ms committed-but-unacked batches seen=45
+[OK ] K5 redb every acknowledged batch present: got=0 missing want=0
+[OK ] K5 redb no partial batch visible: got=0 partial want=0
+[OK ] K5 redb values intact: got=0 corrupt want=0
+[FAIL] K5 redb nothing beyond the in-flight batch: got=1 want=0
+K5 fjall iterations=50 batches_acked=922 reopen p50=102.6ms max=153.4ms committed-but-unacked batches seen=50
+[OK ] K5 fjall every acknowledged batch present: got=0 missing want=0
+[OK ] K5 fjall no partial batch visible: got=0 partial want=0
+[OK ] K5 fjall values intact: got=0 corrupt want=0
+[OK ] K5 fjall nothing beyond the in-flight batch: got=0 want=0
+K5 file  iterations=50 batches_acked=2198 reopen p50=83.5ms max=136.0ms committed-but-unacked batches seen=50
+[OK ] K5 file every acknowledged batch present: got=0 missing want=0
+[OK ] K5 file no partial batch visible: got=0 partial want=0
+[OK ] K5 file values intact: got=0 corrupt want=0
+[FAIL] K5 file nothing beyond the in-flight batch: got=1 want=0
+
+## K5c fjall open time (fresh process, page cache dropped) vs journal bytes; random 54 B index entries, non-durable 10k batches  loadavg=12.50 13.34 11.32  rss=3MB
+K5c fjall entries=450000 journal=32MB in 1 files tables=0MB open_cold=1576ms open_warm=1294ms
+K5c fjall entries=37130000 journal=46MB in 1 files tables=2160MB open_cold=2225ms open_warm=2238ms
+Terminated

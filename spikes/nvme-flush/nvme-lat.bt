@@ -1,0 +1,44 @@
+// Per-command NVMe latency, from submission (nvme_setup_cmd) to completion (nvme_complete_rq).
+// kind: 1 flush, 2 write, 3 write with FUA, 4 read, 5 other, 6 write submitted < 100 us after a
+// flush completed. ours: 1 if submitted by the spike harness (comm "flush") or fio.
+tracepoint:nvme:nvme_setup_cmd /args->qid != 0/
+{
+	$op = args->opcode;
+	// cdw12 bit 30 (FUA) is bit 6 of byte 11 of the cdw10..cdw15 array, as in nvme_trace_read_write.
+	$fua = (args->cdw10[11] >> 6) & 1;
+	$kind = 5;
+	if ($op == 0) { $kind = 1; }
+	if ($op == 1) { $kind = $fua ? 3 : 2; }
+	if ($op == 2) { $kind = 4; }
+	if ($kind == 2 && @lastflush > 0 && nsecs - @lastflush < 100000) { $kind = 6; }
+	$ours = (comm == "flush" || comm == "fio") ? 1 : 0;
+	@t[args->ctrl_id, args->qid, args->cid] = nsecs;
+	@k[args->ctrl_id, args->qid, args->cid] = $kind;
+	@o[args->ctrl_id, args->qid, args->cid] = $ours;
+	@inflight = @inflight + 1;
+	if ($op == 0) { @inflight_at_flush_submit[$ours] = lhist(@inflight, 1, 17, 1); }
+	@cmds[$ours, $kind] = count();
+}
+
+tracepoint:nvme:nvme_complete_rq /@t[args->ctrl_id, args->qid, args->cid]/
+{
+	$us = (nsecs - @t[args->ctrl_id, args->qid, args->cid]) / 1000;
+	$kind = @k[args->ctrl_id, args->qid, args->cid];
+	$ours = @o[args->ctrl_id, args->qid, args->cid];
+	if ($kind == 1) { @lastflush = nsecs; }
+	@lat_us[$ours, $kind] = hist($us);
+	@stats_us[$ours, $kind] = stats($us);
+	@inflight = @inflight - 1;
+	delete(@t[args->ctrl_id, args->qid, args->cid]);
+	delete(@k[args->ctrl_id, args->qid, args->cid]);
+	delete(@o[args->ctrl_id, args->qid, args->cid]);
+}
+
+END
+{
+	clear(@t);
+	clear(@k);
+	clear(@o);
+	clear(@lastflush);
+	clear(@inflight);
+}

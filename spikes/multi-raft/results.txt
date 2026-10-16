@@ -1,0 +1,251 @@
+# kernel 6.17.0-1033-oem, openraft 0.9.25, raft (raft-rs) 0.7.0, tokio 1.47.1, rustc 1.99.1, 14 cores, 2026-10-16
+# loadavg at start: 19.05 14.62 7.82 (other agents were compiling and benchmarking on this host)
+
+##### M1-M3: memory, idle CPU, elections (1000 groups x 3 replicas in one process)
+
+=== raft-rs groups=1000 tick=50ms hb=50ms election=150-300ms init=spread write=0s inflight=4 fsync_us=0 loadavg=19.05 14.62 7.82
+      M1 create 3 x groups RawNodes: 22196 us
+[OK ] M3a raft-rs all groups elected from bootstrap (spread): got=106 ms (1000 leaders) want=<= 650 ms
+      M3a leaders per node: 334 333 333
+[OK ] M1 raft-rs RSS per group (3 replicas): got=13.2 KiB (heap 8.6 KiB of which 2.4 KiB in 3 allocations >= 16 KiB; total RSS 16 MiB, threads 1) want=< 100 KiB
+[FAIL] M2 raft-rs idle CPU, 3 nodes in one thread: got=35.81% of one core total, 11.94% per simulated node want=< 5% per node
+      M2 idle traffic: 79999 raft msgs/s (39999 heartbeats/s), 240 node-pair batches/s, 40 rounds/s, 4.0 msgs per group per heartbeat interval, loadavg 19.35 14.93 8.03
+      M1 after the idle window: RSS per group 13.2 KiB (heap 8.6 KiB)
+      M2 cpu per tick of all 3 x groups replicas: 17906 us
+[FAIL] M3b raft-rs re-elect after node 1 stops (334 groups had their leader there): got=1467 ms want=<= 400 ms
+
+=== raft-rs groups=1000 tick=10ms hb=50ms election=150-300ms init=spread write=0s inflight=4 fsync_us=0 loadavg=19.35 14.93 8.03
+      M1 create 3 x groups RawNodes: 21624 us
+[OK ] M3a raft-rs all groups elected from bootstrap (spread): got=103 ms (1000 leaders) want=<= 650 ms
+      M3a leaders per node: 334 333 333
+[OK ] M1 raft-rs RSS per group (3 replicas): got=13.0 KiB (heap 8.6 KiB of which 2.4 KiB in 3 allocations >= 16 KiB; total RSS 16 MiB, threads 1) want=< 100 KiB
+[FAIL] M2 raft-rs idle CPU, 3 nodes in one thread: got=39.17% of one core total, 13.06% per simulated node want=< 5% per node
+      M2 idle traffic: 70397 raft msgs/s (35199 heartbeats/s), 211 node-pair batches/s, 35 rounds/s, 3.5 msgs per group per heartbeat interval, loadavg 18.68 14.93 8.10
+      M1 after the idle window: RSS per group 13.0 KiB (heap 8.6 KiB)
+      M2 cpu per tick of all 3 x groups replicas: 4441 us
+[FAIL] M3b raft-rs re-elect after node 1 stops (334 groups had their leader there): got=727 ms want=<= 400 ms
+
+=== raft-rs groups=1000 tick=100ms hb=100ms election=1000-2000ms init=spread write=0s inflight=4 fsync_us=0 loadavg=18.68 14.93 8.10
+      M1 create 3 x groups RawNodes: 23743 us
+[OK ] M3a raft-rs all groups elected from bootstrap (spread): got=89 ms (1000 leaders) want=<= 4100 ms
+      M3a leaders per node: 334 333 333
+[OK ] M1 raft-rs RSS per group (3 replicas): got=13.0 KiB (heap 8.6 KiB of which 2.4 KiB in 3 allocations >= 16 KiB; total RSS 16 MiB, threads 1) want=< 100 KiB
+[OK ] M2 raft-rs idle CPU, 3 nodes in one thread: got=13.01% of one core total, 4.34% per simulated node want=< 5% per node
+      M2 idle traffic: 40000 raft msgs/s (20000 heartbeats/s), 120 node-pair batches/s, 20 rounds/s, 4.0 msgs per group per heartbeat interval, loadavg 17.65 14.89 8.20
+      M1 after the idle window: RSS per group 13.0 KiB (heap 8.6 KiB)
+      M2 cpu per tick of all 3 x groups replicas: 13013 us
+[FAIL] M3b raft-rs re-elect after node 1 stops (334 groups had their leader there): got=3124 ms want=<= 2200 ms
+
+=== raft-rs groups=1000 tick=10ms hb=100ms election=1000-2000ms init=spread write=0s inflight=4 fsync_us=0 loadavg=17.65 14.89 8.20
+      M1 create 3 x groups RawNodes: 18261 us
+[OK ] M3a raft-rs all groups elected from bootstrap (spread): got=89 ms (1000 leaders) want=<= 4100 ms
+      M3a leaders per node: 334 333 333
+[OK ] M1 raft-rs RSS per group (3 replicas): got=13.0 KiB (heap 8.6 KiB of which 2.4 KiB in 3 allocations >= 16 KiB; total RSS 16 MiB, threads 1) want=< 100 KiB
+[FAIL] M2 raft-rs idle CPU, 3 nodes in one thread: got=19.20% of one core total, 6.40% per simulated node want=< 5% per node
+      M2 idle traffic: 37600 raft msgs/s (18800 heartbeats/s), 113 node-pair batches/s, 19 rounds/s, 3.8 msgs per group per heartbeat interval, loadavg 16.97 14.87 8.30
+      M1 after the idle window: RSS per group 13.0 KiB (heap 8.6 KiB)
+      M2 cpu per tick of all 3 x groups replicas: 2047 us
+[FAIL] M3b raft-rs re-elect after node 1 stops (334 groups had their leader there): got=2777 ms want=<= 2200 ms
+
+=== openraft 0.9.25 groups=1000 hb=50ms election=150-300ms init=spread threads=1 write=0s inflight=4 fsync_us=0 loadavg=16.97 14.87 8.30
+      M1 create 3 x groups Raft instances: 139989 us
+      M2 tokio tasks per replica before initialize: 3.00
+[OK ] M3a openraft(threads=1) all groups elected from bootstrap (spread): got=221 ms (1000 leaders) want=<= 650 ms
+      M3a leaders per node: 334 333 333
+[FAIL] M1 openraft(threads=1) RSS per group (3 replicas): got=167.0 KiB (heap 1961.0 KiB of which 1824.1 KiB in 3001 allocations >= 16 KiB; total RSS 167 MiB, threads 1) want=< 100 KiB
+[OK ] M2 openraft(threads=1) tokio tasks per group (3 replicas, 1 leader): got=11.00 (11000 tasks) want=<= 11
+[FAIL] M2 openraft(threads=1) idle CPU, 3 nodes in one process: got=93.96% of one core total, 31.32% per simulated node want=< 5% per node
+      M2 idle traffic: 22384 RPCs/s = 44768 raft msgs/s counting responses (22384 heartbeats/s), 2.2 msgs per group per heartbeat interval, loadavg 16.84 14.95 8.43
+      M1 after the idle window: RSS per group 281.3 KiB (heap 2011.2 KiB)
+[FAIL] M3b openraft(threads=1) re-elect after node 1 stops (334 groups had their leader there): got=774 ms (1000 leaders) want=<= 400 ms
+
+=== openraft 0.9.25 groups=1000 hb=100ms election=1000-2000ms init=spread threads=1 write=0s inflight=4 fsync_us=0 loadavg=16.84 14.95 8.43
+      M1 create 3 x groups Raft instances: 116004 us
+      M2 tokio tasks per replica before initialize: 3.00
+[OK ] M3a openraft(threads=1) all groups elected from bootstrap (spread): got=172 ms (1000 leaders) want=<= 4100 ms
+      M3a leaders per node: 334 333 333
+[FAIL] M1 openraft(threads=1) RSS per group (3 replicas): got=147.4 KiB (heap 1960.9 KiB of which 1824.1 KiB in 3001 allocations >= 16 KiB; total RSS 148 MiB, threads 1) want=< 100 KiB
+[OK ] M2 openraft(threads=1) tokio tasks per group (3 replicas, 1 leader): got=11.00 (11000 tasks) want=<= 11
+[FAIL] M2 openraft(threads=1) idle CPU, 3 nodes in one process: got=46.49% of one core total, 15.50% per simulated node want=< 5% per node
+      M2 idle traffic: 13198 RPCs/s = 26396 raft msgs/s counting responses (13198 heartbeats/s), 2.6 msgs per group per heartbeat interval, loadavg 16.06 14.87 8.51
+      M1 after the idle window: RSS per group 249.1 KiB (heap 2011.1 KiB)
+[FAIL] M3b openraft(threads=1) re-elect after node 1 stops (334 groups had their leader there): got=3995 ms (1000 leaders) want=<= 2200 ms
+
+=== openraft 0.9.25 groups=1000 hb=50ms election=150-300ms init=spread threads=4 write=0s inflight=4 fsync_us=0 loadavg=16.06 14.87 8.51
+      M1 create 3 x groups Raft instances: 169668 us
+      M2 tokio tasks per replica before initialize: 3.00
+[OK ] M3a openraft(threads=4) all groups elected from bootstrap (spread): got=231 ms (1000 leaders) want=<= 650 ms
+      M3a leaders per node: 334 333 333
+[FAIL] M1 openraft(threads=4) RSS per group (3 replicas): got=170.0 KiB (heap 1963.6 KiB of which 1824.0 KiB in 3000 allocations >= 16 KiB; total RSS 170 MiB, threads 5) want=< 100 KiB
+[OK ] M2 openraft(threads=4) tokio tasks per group (3 replicas, 1 leader): got=11.00 (11000 tasks) want=<= 11
+[FAIL] M2 openraft(threads=4) idle CPU, 3 nodes in one process: got=111.47% of one core total, 37.16% per simulated node want=< 5% per node
+      M2 idle traffic: 25895 RPCs/s = 51789 raft msgs/s counting responses (25895 heartbeats/s), 2.6 msgs per group per heartbeat interval, loadavg 16.19 14.96 8.64
+      M1 after the idle window: RSS per group 297.8 KiB (heap 2011.1 KiB)
+[FAIL] M3b openraft(threads=4) re-elect after node 1 stops (334 groups had their leader there): got=645 ms (1000 leaders) want=<= 400 ms
+
+##### M5: quiescence (driver stops ticking idle groups)
+
+=== raft-rs groups=1000 tick=50ms hb=50ms election=150-300ms init=spread write=0s inflight=4 fsync_us=0 loadavg=16.19 14.96 8.64
+      M1 create 3 x groups RawNodes: 18150 us
+[OK ] M3a raft-rs all groups elected from bootstrap (spread): got=74 ms (1000 leaders) want=<= 650 ms
+      M3a leaders per node: 334 333 333
+[OK ] M1 raft-rs RSS per group (3 replicas): got=13.2 KiB (heap 8.6 KiB of which 2.4 KiB in 3 allocations >= 16 KiB; total RSS 16 MiB, threads 1) want=< 100 KiB
+[OK ] M2 raft-rs idle CPU, 3 nodes in one thread, quiesced (no ticks): got=0.07% of one core total, 0.02% per simulated node want=< 5% per node
+      M2 idle traffic: 0 raft msgs/s (0 heartbeats/s), 0 node-pair batches/s, 0 rounds/s, 0.0 msgs per group per heartbeat interval, loadavg 15.70 14.89 8.69
+      M1 after the idle window: RSS per group 13.2 KiB (heap 8.6 KiB)
+
+=== openraft 0.9.25 groups=1000 hb=50ms election=150-300ms init=spread threads=1 write=0s inflight=4 fsync_us=0 loadavg=15.70 14.89 8.69
+      M1 create 3 x groups Raft instances: 132835 us
+      M2 tokio tasks per replica before initialize: 3.00
+[OK ] M3a openraft(threads=1) all groups elected from bootstrap (spread): got=164 ms (1000 leaders) want=<= 650 ms
+      M3a leaders per node: 334 333 333
+[FAIL] M1 openraft(threads=1) RSS per group (3 replicas): got=167.1 KiB (heap 1960.9 KiB of which 1824.1 KiB in 3001 allocations >= 16 KiB; total RSS 167 MiB, threads 1) want=< 100 KiB
+[OK ] M2 openraft(threads=1) tokio tasks per group (3 replicas, 1 leader): got=11.00 (11000 tasks) want=<= 11
+[OK ] M2 openraft(threads=1) idle CPU, 3 nodes in one process, quiesced (enable_tick(false)): got=4.52% of one core total, 1.51% per simulated node want=< 5% per node
+      M2 idle traffic: 0 RPCs/s = 0 raft msgs/s counting responses (0 heartbeats/s), 0.0 msgs per group per heartbeat interval, loadavg 15.85 14.96 8.81
+      M1 after the idle window: RSS per group 167.1 KiB (heap 1960.9 KiB)
+
+##### M1: openraft RSS growth over a long idle window (100 groups, 120 s)
+
+=== openraft 0.9.25 groups=100 hb=50ms election=150-300ms init=spread threads=1 write=0s inflight=4 fsync_us=0 loadavg=15.85 14.96 8.81
+      M1 create 3 x groups Raft instances: 12839 us
+      M2 tokio tasks per replica before initialize: 3.00
+[OK ] M3a openraft(threads=1) all groups elected from bootstrap (spread): got=22 ms (100 leaders) want=<= 650 ms
+      M3a leaders per node: 34 33 33
+[FAIL] M1 openraft(threads=1) RSS per group (3 replicas): got=187.9 KiB (heap 1960.9 KiB of which 1824.0 KiB in 300 allocations >= 16 KiB; total RSS 22 MiB, threads 1) want=< 100 KiB
+[OK ] M2 openraft(threads=1) tokio tasks per group (3 replicas, 1 leader): got=11.00 (1100 tasks) want=<= 11
+[OK ] M2 openraft(threads=1) idle CPU, 3 nodes in one process: got=8.13% of one core total, 2.71% per simulated node want=< 5% per node
+      M2 idle traffic: 2611 RPCs/s = 5223 raft msgs/s counting responses (2611 heartbeats/s), 2.6 msgs per group per heartbeat interval, loadavg 18.39 16.16 10.00
+      M1 after the idle window: RSS per group 1166.2 KiB (heap 2011.1 KiB)
+
+=== raft-rs groups=100 tick=50ms hb=50ms election=150-300ms init=spread write=0s inflight=4 fsync_us=0 loadavg=18.39 16.16 10.00
+      M1 create 3 x groups RawNodes: 1530 us
+[OK ] M3a raft-rs all groups elected from bootstrap (spread): got=5 ms (100 leaders) want=<= 650 ms
+      M3a leaders per node: 34 33 33
+[OK ] M1 raft-rs RSS per group (3 replicas): got=21.5 KiB (heap 8.6 KiB of which 2.4 KiB in 3 allocations >= 16 KiB; total RSS 5 MiB, threads 1) want=< 100 KiB
+[OK ] M2 raft-rs idle CPU, 3 nodes in one thread: got=1.66% of one core total, 0.55% per simulated node want=< 5% per node
+      M2 idle traffic: 8000 raft msgs/s (4000 heartbeats/s), 240 node-pair batches/s, 40 rounds/s, 4.0 msgs per group per heartbeat interval, loadavg 11.75 14.47 10.17
+      M1 after the idle window: RSS per group 21.5 KiB (heap 8.6 KiB)
+      M2 cpu per tick of all 3 x groups replicas: 829 us
+
+##### M4/M5: writes, 100 B proposals over all groups, closed loop
+
+=== raft-rs groups=1000 tick=100ms hb=100ms election=1000-2000ms init=spread write=5s inflight=4 fsync_us=0 loadavg=11.75 14.47 10.17
+      M1 create 3 x groups RawNodes: 13993 us
+[OK ] M3a raft-rs all groups elected from bootstrap (spread): got=52 ms (1000 leaders) want=<= 4100 ms
+      M3a leaders per node: 334 333 333
+[OK ] M1 raft-rs RSS per group (3 replicas): got=13.0 KiB (heap 8.6 KiB of which 2.4 KiB in 3 allocations >= 16 KiB; total RSS 16 MiB, threads 1) want=< 100 KiB
+[FAIL] M4 raft-rs 100B proposals, 4 in flight per group, 1000 groups, one thread: got=75736 ops/s, 13.18 us CPU per op, CPU 100% of one core want=> 100000 ops/s
+      M4 batching: 0.47 entries per MsgAppend, 2.00 entries persisted per Ready, 38 fsyncs/s, 6000.0 entries per fsync, 3000.0 Readys per fsync, heap growth 199 MiB, loadavg 11.69 14.42 10.17
+
+=== openraft 0.9.25 groups=1000 hb=100ms election=1000-2000ms init=spread threads=1 write=5s inflight=4 fsync_us=0 loadavg=11.69 14.42 10.17
+      M1 create 3 x groups Raft instances: 47576 us
+      M2 tokio tasks per replica before initialize: 3.00
+[OK ] M3a openraft(threads=1) all groups elected from bootstrap (spread): got=69 ms (1000 leaders) want=<= 4100 ms
+      M3a leaders per node: 334 333 333
+[FAIL] M1 openraft(threads=1) RSS per group (3 replicas): got=151.0 KiB (heap 1960.9 KiB of which 1824.1 KiB in 3001 allocations >= 16 KiB; total RSS 151 MiB, threads 1) want=< 100 KiB
+[OK ] M2 openraft(threads=1) tokio tasks per group (3 replicas, 1 leader): got=11.00 (11000 tasks) want=<= 11
+[FAIL] M4 openraft(threads=1) 100B proposals, 4 in flight per group, 1000 groups: got=25832 ops/s, 38.58 us CPU per op, CPU 100% of one core want=> 100000 ops/s
+      M4 batching: 1.95 entries per AppendEntries RPC (2186 of 137237 RPCs empty), 1.49 entries per RaftLogStorage::append, 0 fsyncs/s, 0.0 entries per fsync, 0.0 append calls per fsync, heap growth 162 MiB, loadavg 11.88 14.37 10.20
+
+=== raft-rs groups=1000 tick=100ms hb=100ms election=1000-2000ms init=spread write=5s inflight=32 fsync_us=0 loadavg=11.88 14.37 10.20
+      M1 create 3 x groups RawNodes: 9264 us
+[OK ] M3a raft-rs all groups elected from bootstrap (spread): got=46 ms (1000 leaders) want=<= 4100 ms
+      M3a leaders per node: 334 333 333
+[OK ] M1 raft-rs RSS per group (3 replicas): got=13.0 KiB (heap 8.6 KiB of which 2.4 KiB in 3 allocations >= 16 KiB; total RSS 16 MiB, threads 1) want=< 100 KiB
+[OK ] M4 raft-rs 100B proposals, 32 in flight per group, 1000 groups, one thread: got=117787 ops/s, 8.49 us CPU per op, CPU 100% of one core want=> 100000 ops/s
+      M4 batching: 0.49 entries per MsgAppend, 16.00 entries persisted per Ready, 7 fsyncs/s, 48000.0 entries per fsync, 3000.0 Readys per fsync, heap growth 397 MiB, loadavg 11.89 14.33 10.21
+
+=== openraft 0.9.25 groups=1000 hb=100ms election=1000-2000ms init=spread threads=1 write=5s inflight=32 fsync_us=0 loadavg=11.89 14.33 10.21
+      M1 create 3 x groups Raft instances: 65234 us
+      M2 tokio tasks per replica before initialize: 3.00
+[OK ] M3a openraft(threads=1) all groups elected from bootstrap (spread): got=103 ms (1000 leaders) want=<= 4100 ms
+      M3a leaders per node: 334 333 333
+[FAIL] M1 openraft(threads=1) RSS per group (3 replicas): got=151.1 KiB (heap 1960.9 KiB of which 1824.1 KiB in 3001 allocations >= 16 KiB; total RSS 151 MiB, threads 1) want=< 100 KiB
+[OK ] M2 openraft(threads=1) tokio tasks per group (3 replicas, 1 leader): got=11.00 (11000 tasks) want=<= 11
+[OK ] M4 openraft(threads=1) 100B proposals, 32 in flight per group, 1000 groups: got=102512 ops/s, 9.75 us CPU per op, CPU 100% of one core want=> 100000 ops/s
+      M4 batching: 15.00 entries per AppendEntries RPC (3171 of 72614 RPCs empty), 2.66 entries per RaftLogStorage::append, 0 fsyncs/s, 0.0 entries per fsync, 0.0 append calls per fsync, heap growth 456 MiB, loadavg 11.77 14.22 10.22
+
+=== openraft 0.9.25 groups=1000 hb=100ms election=1000-2000ms init=spread threads=4 write=5s inflight=32 fsync_us=0 loadavg=11.77 14.22 10.22
+      M1 create 3 x groups Raft instances: 93102 us
+      M2 tokio tasks per replica before initialize: 3.00
+[OK ] M3a openraft(threads=4) all groups elected from bootstrap (spread): got=73 ms (1000 leaders) want=<= 4100 ms
+      M3a leaders per node: 334 333 333
+[FAIL] M1 openraft(threads=4) RSS per group (3 replicas): got=151.5 KiB (heap 1960.8 KiB of which 1824.0 KiB in 3000 allocations >= 16 KiB; total RSS 152 MiB, threads 5) want=< 100 KiB
+[OK ] M2 openraft(threads=4) tokio tasks per group (3 replicas, 1 leader): got=11.00 (11000 tasks) want=<= 11
+[OK ] M4 openraft(threads=4) 100B proposals, 32 in flight per group, 1000 groups: got=278264 ops/s, 12.73 us CPU per op, CPU 354% of one core want=> 100000 ops/s
+      M4 batching: 13.71 entries per AppendEntries RPC (46180 of 208869 RPCs empty), 2.69 entries per RaftLogStorage::append, 0 fsyncs/s, 0.0 entries per fsync, 0.0 append calls per fsync, heap growth 1096 MiB, loadavg 12.03 14.23 10.25
+
+# simulated 1 ms fsync: raft-rs one fsync per loop round for all Readys; openraft one shared WAL task
+
+=== raft-rs groups=1000 tick=100ms hb=100ms election=1000-2000ms init=spread write=5s inflight=32 fsync_us=1000 loadavg=12.03 14.23 10.25
+      M1 create 3 x groups RawNodes: 10027 us
+[OK ] M3a raft-rs all groups elected from bootstrap (spread): got=30 ms (1000 leaders) want=<= 4100 ms
+      M3a leaders per node: 334 333 333
+[OK ] M1 raft-rs RSS per group (3 replicas): got=13.0 KiB (heap 8.6 KiB of which 2.4 KiB in 3 allocations >= 16 KiB; total RSS 16 MiB, threads 1) want=< 100 KiB
+[OK ] M4 raft-rs 100B proposals, 32 in flight per group, 1000 groups, one thread: got=152050 ops/s, 6.47 us CPU per op, CPU 98% of one core want=> 100000 ops/s
+      M4 batching: 0.49 entries per MsgAppend, 16.00 entries persisted per Ready, 10 fsyncs/s, 48000.0 entries per fsync, 3000.0 Readys per fsync, heap growth 416 MiB, loadavg 11.80 14.11 10.25
+
+=== openraft 0.9.25 groups=1000 hb=100ms election=1000-2000ms init=spread threads=1 write=5s inflight=32 fsync_us=1000 loadavg=11.80 14.11 10.25
+      M1 create 3 x groups Raft instances: 64115 us
+      M2 tokio tasks per replica before initialize: 3.00
+[OK ] M3a openraft(threads=1) all groups elected from bootstrap (spread): got=163 ms (1000 leaders) want=<= 4100 ms
+      M3a leaders per node: 334 333 333
+[FAIL] M1 openraft(threads=1) RSS per group (3 replicas): got=150.6 KiB (heap 1961.0 KiB of which 1824.1 KiB in 3001 allocations >= 16 KiB; total RSS 151 MiB, threads 2) want=< 100 KiB
+[OK ] M2 openraft(threads=1) tokio tasks per group (3 replicas, 1 leader): got=11.00 (11001 tasks) want=<= 11
+[FAIL] M4 openraft(threads=1) 100B proposals, 32 in flight per group, 1000 groups: got=53188 ops/s, 17.14 us CPU per op, CPU 91% of one core want=> 100000 ops/s
+      M4 batching: 13.52 entries per AppendEntries RPC (6479 of 42605 RPCs empty), 2.67 entries per RaftLogStorage::append, 66 fsyncs/s, 2407.2 entries per fsync, 903.0 append calls per fsync, heap growth 259 MiB, loadavg 12.05 14.12 10.28
+
+=== openraft 0.9.25 groups=1000 hb=100ms election=1000-2000ms init=spread threads=4 write=5s inflight=32 fsync_us=1000 loadavg=12.05 14.12 10.28
+      M1 create 3 x groups Raft instances: 145345 us
+      M2 tokio tasks per replica before initialize: 3.00
+[OK ] M3a openraft(threads=4) all groups elected from bootstrap (spread): got=106 ms (1000 leaders) want=<= 4100 ms
+      M3a leaders per node: 334 333 333
+[FAIL] M1 openraft(threads=4) RSS per group (3 replicas): got=151.8 KiB (heap 1961.0 KiB of which 1824.0 KiB in 3000 allocations >= 16 KiB; total RSS 152 MiB, threads 6) want=< 100 KiB
+[OK ] M2 openraft(threads=4) tokio tasks per group (3 replicas, 1 leader): got=11.00 (11001 tasks) want=<= 11
+[FAIL] M4 openraft(threads=4) 100B proposals, 32 in flight per group, 1000 groups: got=96662 ops/s, 24.27 us CPU per op, CPU 235% of one core want=> 100000 ops/s
+      M4 batching: 12.80 entries per AppendEntries RPC (18710 of 80646 RPCs empty), 2.68 entries per RaftLogStorage::append, 203 fsyncs/s, 1431.1 entries per fsync, 534.3 append calls per fsync, heap growth 434 MiB, loadavg 12.28 14.10 10.31
+
+##### M7: determinism, 10 runs per variant in separate processes (30 groups, seed 11)
+[OK ] M7 raftrs-sim variant=plain: got=10 distinct traces in 10 runs want=differ
+            1 trace=05c8c239c6be09de
+            1 trace=2cab649b7a12903a
+            1 trace=4be4ebcefd02c9cc
+            1 trace=7c436c44ef93b550
+            1 trace=8ad21044faa1877d
+            1 trace=abc7664df7011e10
+            1 trace=bcbfda206892964f
+            1 trace=d8188665393736db
+            1 trace=e1dd408886834355
+            1 trace=fcc7693e8402711f
+[OK ] M7 raftrs-sim variant=seeded: got=1 distinct traces in 10 runs want=same
+           10 trace=1618987897a6f677
+[OK ] M7 openraft-sim variant=plain: got=10 distinct traces in 10 runs want=differ
+            1 trace=46774202497f1022
+            1 trace=4c32a6d8e0f1f25f
+            1 trace=5a282fdb1ef62986
+            1 trace=62939e3233a11d97
+            1 trace=7d220dbf80271291
+            1 trace=919b3ff66230b490
+            1 trace=9486ca1c40d9aa8a
+            1 trace=a8c406ed47724cee
+            1 trace=cae0b18aa760c5a7
+            1 trace=f2d1737ac790e8f5
+[OK ] M7 openraft-sim variant=seeded: got=1 distinct traces in 10 runs want=same
+           10 trace=efa8b5063831c054
+
+SIM raft-rs variant=seeded seed=12 groups=30 msgs=30441 trace=5ff5cffb040b133e leaders=2@4,3@2,3@1,2@1,2@1,2@3,3@2,3@1,3
+SIM openraft variant=seeded seed=12 groups=30 rpcs=8936 trace=c968ede6967d14ac leaders=2@9,2@5,3@17,3@14,2@7,2@4,3@6,3@5
+
+##### M6: dependency footprint and advisories
+openraft: 68 crates in its normal dependency tree (including itself)
+  notable: chrono v0.4.45 clap v4.6.7 getrandom v0.2.17 libc v0.2.190 tokio v1.47.1 
+raft: 22 crates in its normal dependency tree (including itself)
+  notable: fxhash v0.2.1 getrandom v0.2.17 libc v0.2.190 protobuf v2.28.0 
+  error[unmaintained]: fxhash - no longer maintained
+     ├ ID: RUSTSEC-2025-0057
+  error[vulnerability]: Crash due to uncontrolled recursion in protobuf crate
+     ├ ID: RUSTSEC-2024-0437
+  error[unsound]: Rand is unsound with a custom logger using `rand::rng()`
+     ├ ID: RUSTSEC-2026-0097
+  advisories FAILED

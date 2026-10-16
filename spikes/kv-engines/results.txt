@@ -1,0 +1,35 @@
+# kernel 6.17.0-1033-oem redb 4.4.0 fjall 3.1.12 (lsm-tree 3.1.10) rustc 1.99.1 date=2026-10-16T07:15Z cpu=14x Intel(R) Core(TM) Ultra 5 235U mem=15G disk=UMIS RPEYJ512MML1QWQ (write back) fs=ext4 quick=false loadavg=6.47 8.58 9.80
+
+## K0 background: whole-disk writes and flushes from other processes while this harness idles 10 s  loadavg=6.47 8.58 9.80  rss=3MB
+K0 idle 10s: device written=0.5MB (54KB/s) flushes=2 (0/s)
+
+## K5 crash safety: kill -9 a writer of 64-entry durable batches, reopen, verify (process crash only, not power loss)  loadavg=6.16 8.44 9.75  rss=3MB
+K5 redb  iterations=50 batches_acked=2815 reopen p50=43.1ms max=67.5ms committed-but-unacked batches seen=46
+[OK ] K5 redb every acknowledged batch present: got=0 missing want=0
+[OK ] K5 redb no partial batch visible: got=0 partial want=0
+[OK ] K5 redb values intact: got=0 corrupt want=0
+[OK ] K5 redb nothing beyond the in-flight batch: got=0 want=0
+K5 fjall iterations=50 batches_acked=1191 reopen p50=103.4ms max=129.6ms committed-but-unacked batches seen=29
+[OK ] K5 fjall every acknowledged batch present: got=0 missing want=0
+[OK ] K5 fjall no partial batch visible: got=0 partial want=0
+[OK ] K5 fjall values intact: got=0 corrupt want=0
+[OK ] K5 fjall nothing beyond the in-flight batch: got=0 want=0
+K5 file  iterations=50 batches_acked=2545 reopen p50=72.7ms max=108.9ms committed-but-unacked batches seen=40
+[OK ] K5 file every acknowledged batch present: got=0 missing want=0
+[OK ] K5 file no partial batch visible: got=0 partial want=0
+[OK ] K5 file values intact: got=0 corrupt want=0
+[OK ] K5 file nothing beyond the in-flight batch: got=0 want=0
+
+## K5c fjall open time (fresh process, page cache dropped) vs journal bytes; random 54 B index entries, non-durable 10k batches  loadavg=6.04 8.10 9.57  rss=3MB
+K5c fjall entries=230000 journal=16MB in 1 files tables=0MB open_cold=528ms open_warm=518ms
+K5c fjall entries=450000 journal=32MB in 1 files tables=0MB open_cold=1103ms open_warm=1086ms
+K5c fjall entries=900000 journal=64MB in 1 files tables=34MB open_cold=2786ms open_warm=2565ms
+
+## K7 long-lived reader during 100 durable commits of 1000 overwrites (100k keys x 200 B)  loadavg=5.60 7.90 9.48  rss=3MB
+K7 redb  reader=false commit_p50=11354us commit_p99=14398us disk: before=22.1MB max_during=26.2MB end=26.2MB after_release+50=26.2MB after_compact=22.1MB (journal 0.0MB) reader_sees_old_value=None
+K7 redb  reader=true  commit_p50=15484us commit_p99=18436us disk: before=22.1MB max_during=419.4MB end=419.4MB after_release+50=423.4MB after_compact=22.1MB (journal 0.0MB) reader_sees_old_value=Some(true)
+K7 fjall reader=false commit_p50=5897us commit_p99=119321us disk: before=21.9MB max_during=43.7MB end=43.7MB after_release+50=75.1MB after_compact=95.6MB (journal 54.6MB) reader_sees_old_value=None
+K7 fjall reader=true  commit_p50=5473us commit_p99=6108us disk: before=21.9MB max_during=43.7MB end=43.7MB after_release+50=75.1MB after_compact=95.6MB (journal 54.6MB) reader_sees_old_value=Some(true)
+
+## K0 background: whole-disk writes and flushes from other processes while this harness idles 10 s  loadavg=5.48 7.75 9.41  rss=3MB
+K0 idle 10s: device written=1.6MB (162KB/s) flushes=11 (1/s)

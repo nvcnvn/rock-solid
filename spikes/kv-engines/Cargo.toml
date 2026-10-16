@@ -1,0 +1,16 @@
+[package]
+name = "kv-engines-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+redb = "=4.4.0"
+fjall = "=3.1.12"
+libc = "=0.2.177"
+rand = { version = "=0.8.5", features = ["small_rng"] }
+
+[profile.release]
+debug = 1

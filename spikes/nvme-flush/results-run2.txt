@@ -1,0 +1,302 @@
+### 6.17.0-1033-oem, UMIS RPEYJ512MML1QWQ fw 1.0Q06C1, fio-3.36, bpftrace v0.20.2, ext4 rw,relatime, Intel(R) Core(TM) Ultra 5 235U, 2026-10-16T13:57:31+07:00
+
+### N1 drive facts from sysfs (no root)
+loadavg: 14.43 15.44 10.14 23/2223 235463
+    device/model = UMIS RPEYJ512MML1QWQ 
+    device/firmware_rev = 1.0Q06C1
+    device/sqsize = 255
+    device/queue_count = 15
+    device/hmb = 1
+    device/transport = pcie
+    queue/write_cache = write back
+    queue/fua = 1
+    queue/nr_requests = 255
+    queue/max_hw_sectors_kb = 128
+    queue/max_sectors_kb = 128
+    queue/scheduler = [none] mq-deadline 
+    queue/logical_block_size = 512
+    queue/physical_block_size = 512
+    pcie link = 16.0 GT/s PCIe x4, vendor:device = 0x1cc4:0x6c13
+    pci runtime pm: power/control = on, runtime_status = active
+    nvme_core.default_ps_max_latency_us = 100000
+    nvme_core.apst_primary_timeout_ms = 100
+    nvme_core.apst_primary_latency_tol_us = 15000
+    nvme_core.apst_secondary_timeout_ms = 2000
+    nvme_core.apst_secondary_latency_tol_us = 100000
+    nvme_core.force_apst = N
+    since boot: 273212 flushes, 0.544 ms device time per flush (all processes)
+[OK ] N1 volatile write cache got=write back want=write back
+[OK ] N1 FUA supported got=1 want=1
+[OK ] N1 host memory buffer in use (DRAM-less) got=1 want=1
+
+### N2 prepare: fallocate + write the whole file once
+loadavg: 14.43 15.44 10.14 24/2223 235501
+    wrote 256 MiB in 664.6 ms (fallocate, then every block once, then fsync)
+
+### B0 background disk activity from other processes
+loadavg: 14.43 15.44 10.14 16/2241 235529
+    background over 5 s idle: 1.6 flushes/s, 8429.8 writes/s (other processes), loadavg 14.07 15.35 10.14 10/2220 235611
+
+### N2 4K O_DIRECT pwrite + fdatasync, QD1, random offsets
+loadavg: 14.07 15.35 10.14 11/2220 235612
+    background over 3 s idle: 0.3 flushes/s, 5261.0 writes/s (other processes), loadavg 14.07 15.35 10.14 11/2226 235714
+    N2 bs=4096 n=5000 mode=fdatasync gap_us=0 offsets=random
+    write  p50=   437.4 p90=  1102.9 p99=  1941.2 p99.9=  4292.2 max=  5271.9 mean=   516.5 us
+    flush  p50=   250.1 p90=  1229.7 p99=  2027.4 p99.9=  4600.6 max= 48827.4 mean=   645.4 us
+    total  p50=  1063.1 p90=  2270.1 p99=  3576.1 p99.9=  7819.3 max= 48885.1 mean=  1161.9 us
+    cpu/op=50.1 us, 859 durable ops/s
+    device: 1.00 flushes/op (1.00 after subtracting background), 11.88 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 93.7 KiB written/op, device time per flush 0.615 ms, 5.8 s
+[OK ] N2 device flushes per op got=1.00 want=1.00
+
+### N2b same, sequential offsets (log-structured append)
+loadavg: 13.90 15.27 10.17 15/2219 235801
+    background over 3 s idle: 11.3 flushes/s, 8165.7 writes/s (other processes), loadavg 13.90 15.27 10.17 9/2219 235837
+    N2b bs=4096 n=5000 mode=fdatasync gap_us=0 offsets=sequential
+    write  p50=   391.6 p90=  1053.9 p99=  1363.6 p99.9=  2243.4 max=  2776.8 mean=   476.8 us
+    flush  p50=   270.4 p90=  1096.1 p99=  2268.3 p99.9=  2590.5 max=  3001.8 mean=   554.6 us
+    total  p50=  1059.9 p90=  1483.0 p99=  3231.8 p99.9=  3782.0 max=  5723.7 mean=  1031.4 us
+    cpu/op=49.6 us, 968 durable ops/s
+    device: 1.00 flushes/op (0.99 after subtracting background), 2.90 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 8.1 KiB written/op, device time per flush 0.539 ms, 5.2 s
+[OK ] N2b device flushes per op got=0.99 want=1.00
+
+### N2c 4K O_DIRECT pwrite only, no flush (write latency without a preceding flush)
+loadavg: 13.58 15.19 10.17 11/2226 235935
+    background over 3 s idle: 1.7 flushes/s, 955.9 writes/s (other processes), loadavg 13.30 15.10 10.17 10/2224 235985
+    N2c bs=4096 n=5000 mode=none gap_us=0 offsets=random
+    write  p50=    60.9 p90=    92.1 p99=  1183.6 p99.9=  1546.4 max=  3415.9 mean=    97.3 us
+    flush  p50=     0.0 p90=     0.0 p99=     0.3 p99.9=     0.6 max=     0.8 mean=     0.0 us
+    total  p50=    60.9 p90=    92.1 p99=  1183.6 p99.9=  1546.4 max=  3416.0 mean=    97.3 us
+    cpu/op=12.3 us, 10194 durable ops/s
+    device: 0.00 flushes/op (0.00 after subtracting background), 1.00 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 4.0 KiB written/op, device time per flush 1.000 ms, 0.5 s
+[OK ] N2c device flushes per op got=0.00 want=0.00
+
+### N3 bytes per flush: one O_DIRECT pwrite of 4K..4M, then one fdatasync
+loadavg: 13.30 15.10 10.17 14/2225 235987
+    background over 3 s idle: 1.7 flushes/s, 3856.0 writes/s (other processes), loadavg 12.95 15.00 10.16 11/2224 236050
+    bytes         n  write_p50  flush_p50  flush_p99  total_p50  total_p99       MB/s   cpu/op dev_fl_ms
+    4096       2000      373.6      270.4     2362.8     1085.6     3350.2        3.9     41.2     0.566
+    16384      2000      381.4      261.2     1992.9     1041.0     3151.9       16.0     46.0     0.535
+    65536      1024      286.0     1058.9     2595.4     1253.1     3809.3       42.3     65.0     1.074
+    262144      256     1017.8     1366.7     3299.3     2412.4     5188.7       95.2     95.4     1.637
+    1048576      64     1814.5     2437.7     4097.0     4084.2     6601.1      241.0    203.8     2.438
+    4194304      32     4622.5     2256.9     4375.7     7022.1    12312.7      593.8    458.1     2.159
+[FAIL] N3 flush p50 at 256K vs 4K (flush cost roughly fixed) got=5.05x want=<=2x
+[FAIL] N3 flush p50 at 4M vs 4K got=8.35x want=<=2x
+[FAIL] N3 commit p50 at 256K vs 4K (group commit amortizes) got=2.22x want=<=2x
+
+### N3b one 64K record made durable with one flush or several
+loadavg: 12.64 14.90 10.16 11/2230 236147
+    background over 3 s idle: 2.7 flushes/s, 1371.6 writes/s (other processes), loadavg 12.58 14.85 10.17 12/2228 236225
+    pattern                                       commit_p50 commit_p99 commit_max    fl/op dev_fl_ms
+    1 write of 64K + 1 fdatasync                      1060.7     5706.5    47376.5     1.00     0.793
+    16 writes of 4K + 1 fdatasync                     1819.2     4691.1     5476.1     1.00     0.498
+    16 x (4K write + fdatasync)                      16442.5    20938.2    22311.5    15.98     0.540
+    60K data + fdatasync, 4K header + fdatasync       2119.5     4863.9     5292.4     1.99     0.560
+[OK ] N3b two flushes per commit vs one got=2.00x want=>1.7x (each flush is a full cost)
+[FAIL] N3b 16 small writes + 1 flush vs 1 write + 1 flush got=1.72x want=<1.3x
+
+### N4 empty fdatasync (nothing dirty)
+loadavg: 12.38 14.77 10.17 13/2229 236330
+    background over 3 s idle: 0.3 flushes/s, 5243.6 writes/s (other processes), loadavg 12.38 14.77 10.17 10/2227 236379
+    N4 bs=4096 n=5000 mode=empty gap_us=0 offsets=random
+    write  p50=     0.0 p90=     0.0 p99=     0.1 p99.9=     0.5 max=     0.8 mean=     0.0 us
+    flush  p50=    64.7 p90=    66.9 p99=  2014.3 p99.9=  3089.0 max=  3680.2 mean=    99.8 us
+    total  p50=    64.7 p90=    66.9 p99=  2014.3 p99.9=  3089.1 max=  3680.3 mean=    99.8 us
+    cpu/op=6.8 us, 9957 durable ops/s
+    device: 1.00 flushes/op (1.00 after subtracting background), 3.39 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 10.2 KiB written/op, device time per flush 0.083 ms, 0.5 s
+[OK ] N4 device flushes per op got=1.00 want=1.00
+
+### N5 O_DIRECT|O_DSYNC 4K (FUA write instead of a flush)
+loadavg: 12.43 14.74 10.18 12/2227 236402
+    background over 3 s idle: 1.0 flushes/s, 3368.4 writes/s (other processes), loadavg 12.43 14.74 10.18 10/2226 236447
+    N5 bs=4096 n=2000 mode=dsync gap_us=0 offsets=random
+    write  p50=  2293.0 p90=  2436.4 p99= 96083.5 p99.9=104724.4 max=106438.3 mean=  4695.6 us
+    flush  p50=     0.1 p90=     0.3 p99=     0.8 p99.9=     1.0 max=     1.1 mean=     0.1 us
+    total  p50=  2293.2 p90=  2436.6 p99= 96083.6 p99.9=104724.4 max=106438.4 mean=  4695.7 us
+    cpu/op=60.3 us, 213 durable ops/s
+    device: 0.00 flushes/op (-0.00 after subtracting background), 1.57 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 6.5 KiB written/op, device time per flush 16.667 ms, 9.4 s
+[OK ] N5 device flushes per op got=-0.00 want=0.00
+
+### N5b O_DIRECT|O_DSYNC 64K
+loadavg: 11.90 14.55 10.17 13/2200 236612
+    background over 3 s idle: 0.7 flushes/s, 2947.1 writes/s (other processes), loadavg 11.75 14.47 10.17 10/2201 236661
+    N5b bs=65536 n=500 mode=dsync gap_us=0 offsets=random
+    write  p50=  2231.7 p90=  2342.2 p99=  2616.5 p99.9=  4331.0 max=  4331.0 mean=  2244.3 us
+    flush  p50=     0.0 p90=     0.1 p99=     0.8 p99.9=     2.0 max=     2.0 mean=     0.1 us
+    total  p50=  2231.7 p90=  2342.3 p99=  2616.6 p99.9=  4331.1 max=  4331.1 mean=  2244.4 us
+    cpu/op=59.6 us, 445 durable ops/s
+    device: 0.00 flushes/op (0.00 after subtracting background), 1.33 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 66.3 KiB written/op, device time per flush 3.000 ms, 1.1 s
+[OK ] N5b device flushes per op got=0.00 want=0.00
+
+### N5c O_DIRECT 4K + fsync (not fdatasync)
+loadavg: 11.75 14.47 10.17 13/2201 236674
+    background over 3 s idle: 0.0 flushes/s, 2960.5 writes/s (other processes), loadavg 11.75 14.47 10.17 11/2194 236737
+    N5c bs=4096 n=2000 mode=fsync gap_us=0 offsets=random
+    write  p50=    67.9 p90=   124.2 p99=   258.9 p99.9=   838.1 max=  1737.0 mean=    80.7 us
+    flush  p50=  2769.3 p90=  2936.7 p99=  3295.1 p99.9=  6418.4 max=  7073.8 mean=  2791.3 us
+    total  p50=  2846.7 p90=  3036.0 p99=  3414.4 p99.9=  6508.4 max=  7192.5 mean=  2872.0 us
+    cpu/op=69.4 us, 348 durable ops/s
+    device: 1.00 flushes/op (1.00 after subtracting background), 4.21 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 25.1 KiB written/op, device time per flush 0.252 ms, 5.8 s
+[OK ] N5c device flushes per op got=1.00 want=1.00
+
+### N6 idle gap before each 4K write + fdatasync
+loadavg: 11.87 14.41 10.19 17/2194 236834
+    background over 3 s idle: 0.0 flushes/s, 2983.8 writes/s (other processes), loadavg 11.87 14.41 10.19 10/2193 236876
+    gap_us wait      n  write_p50  flush_p50  total_p50  total_p90  total_max dev_fl_ms
+    0      sleep   300      401.7      293.1     1067.8     1824.7     2921.0     0.537
+    1000   sleep   300      427.1      290.3     1096.9     1503.9     3177.8     0.540
+    10000  sleep   300      449.9      292.4     1118.8     1469.1     3003.3     0.536
+    100000 sleep    50      702.7      295.9     1215.8     2620.5     5523.9     0.571
+    1000000 sleep    20      239.2      286.2      661.6     2121.3     2579.1     0.606
+    1000   spin    300      426.1      282.1     1101.6     2091.0    49585.8     0.622
+    10000  spin    300      629.1      315.3     1312.3     2466.9    30626.6     0.604
+    100000 spin     50     1669.9      367.2     2094.3     4924.6    22454.7     0.603
+    1000000 spin     20     1457.5      355.6     1836.5     3962.1    25209.0     0.500
+[FAIL] N6 commit p50 after 1 s idle (sleep) vs back-to-back got=0.62x want=>1.5x (APST wake-up)
+[OK ] N6 commit p50 after 1 s idle (spin) vs back-to-back got=1.72x want=>1.5x (device-side)
+
+### N7 concurrent 4K write + fdatasync threads, unpinned
+loadavg: 11.93 13.97 10.31 14/2181 238164
+    background over 3 s idle: 0.3 flushes/s, 1.0 writes/s (other processes), loadavg 11.61 13.87 10.30 10/2182 238201
+    threads unpinned
+    threads    ops/s    lat_p50    lat_p99    lat_max      fl/op fl/op_adj dev_fl_ms   cpu/op
+    1           1061      989.7     2368.1     4470.0       1.00      1.00     0.491     32.0
+    2           1914     1018.2     2574.7    13991.1       1.00      1.00     0.510     35.4
+    4           1511     2448.6     5289.0    49692.5       0.99      0.99     1.184     54.3
+    8           1848     4031.8     8788.0    10979.0       0.85      0.85     1.791     74.2
+[OK ] N7 device flushes per fdatasync at max threads (kernel merges flushes) got=0.85 want=<0.9 (expected before reading blk-flush.c)
+[OK ] N7 durable ops/s at max threads vs 1 thread got=1.74x want=>1.5x
+
+### N7b same, all threads pinned to CPU 2 (one blk-mq hardware queue)
+loadavg: 12.85 13.98 10.41 16/2203 238621
+    background over 3 s idle: 1.7 flushes/s, 441.0 writes/s (other processes), loadavg 12.85 13.98 10.41 13/2200 238695
+    threads all pinned to one CPU (one blk-mq hardware queue)
+    threads    ops/s    lat_p50    lat_p99    lat_max      fl/op fl/op_adj dev_fl_ms   cpu/op
+    1           1013     1011.9     2532.1     5824.9       1.00      1.00     0.493     50.0
+    2           1521     1100.2     3820.2    51010.8       1.00      1.00     0.386     32.2
+    4           1465     2543.6     5157.1     7934.8       0.74      0.74     0.894     32.6
+    8           3010     2389.2     5365.7     8360.0       0.37      0.37     0.858     21.3
+[OK ] N7b device flushes per fdatasync at max threads (kernel merges flushes) got=0.37 want=<0.9
+[OK ] N7b durable ops/s at max threads vs 1 thread got=2.97x want=>1.5x
+
+### N8a fio --fdatasync=1
+loadavg: 14.13 14.18 10.55 18/2189 239055
+N8a: (g=0): rw=randwrite, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=psync, iodepth=1
+fio-3.36
+N8a: (groupid=0, jobs=1): err= 0: pid=239083: Fri Oct 16 14:00:44 2026
+  write: IOPS=549, BW=2199KiB/s (2251kB/s)(21.5MiB/10014msec); 0 zone resets
+    clat (usec): min=21, max=188727, avg=519.63, stdev=2577.54
+     lat (usec): min=21, max=188740, avg=520.13, stdev=2577.70
+    clat percentiles (usec):
+     | 50.0th=[  379], 90.0th=[ 1074], 99.0th=[ 1483], 99.9th=[ 4015]
+   bw (  KiB/s): min=  784, max= 4200, per=100.00%, avg=2201.35, stdev=1345.83, samples=20
+   iops        : min=  196, max= 1050, avg=550.30, stdev=336.46, samples=20
+  lat (usec)   : 50=15.82%, 100=11.86%, 250=13.55%, 500=15.52%, 750=15.30%
+  lat (usec)   : 1000=14.63%
+  lat (msec)   : 2=12.77%, 4=0.44%, 10=0.09%, 250=0.02%
+  fsync/fdatasync/sync_file_range:
+    sync (usec): min=109, max=205409, avg=1292.97, stdev=8755.88
+    sync percentiles (usec):
+     | 50.0th=[   241], 90.0th=[  1188], 99.0th=[  2999], 99.9th=[104334]
+  cpu          : usr=0.72%, sys=3.09%, ctx=16896, majf=0, minf=10
+  IO depths    : 1=200.0%, 2=0.0%, 4=0.0%, 8=0.0%, 16=0.0%, 32=0.0%, >=64=0.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     issued rwts: total=0,5504,0,0 short=5504,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=1
+Run status group 0 (all jobs):
+  WRITE: bw=2199KiB/s (2251kB/s), 2199KiB/s-2199KiB/s (2251kB/s-2251kB/s), io=21.5MiB (22.5MB), run=10014-10014msec
+Disk stats (read/write):
+  nvme0n1: ios=5338/16082, sectors=43976/128080, merge=73/151, ticks=14470/22728, in_queue=43672, util=79.45%
+    device: 5513 flushes, 16791 write requests, device time per flush 1.194 ms (includes background)
+
+### N8b fio --fsync=1
+loadavg: 13.73 14.09 10.56 16/2183 239262
+N8b: (g=0): rw=randwrite, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=psync, iodepth=1
+fio-3.36
+N8b: (groupid=0, jobs=1): err= 0: pid=239281: Fri Oct 16 14:00:54 2026
+  write: IOPS=346, BW=1384KiB/s (1417kB/s)(13.5MiB/10001msec); 0 zone resets
+    clat (usec): min=30, max=9772, avg=131.44, stdev=327.77
+     lat (usec): min=30, max=9773, avg=132.39, stdev=327.95
+    clat percentiles (usec):
+     | 50.0th=[   79], 90.0th=[  186], 99.0th=[ 1057], 99.9th=[ 3785]
+   bw (  KiB/s): min= 1240, max= 1504, per=100.00%, avg=1390.74, stdev=77.02, samples=19
+   iops        : min=  310, max=  376, avg=347.68, stdev=19.26, samples=19
+  lat (usec)   : 50=13.41%, 100=51.83%, 250=28.84%, 500=3.44%, 750=0.98%
+  lat (usec)   : 1000=0.40%
+  lat (msec)   : 2=0.64%, 4=0.38%, 10=0.09%
+  fsync/fdatasync/sync_file_range:
+    sync (usec): min=2345, max=50442, avg=2748.52, stdev=1002.34
+    sync percentiles (usec):
+     | 50.0th=[ 2638], 90.0th=[ 2900], 99.0th=[ 4752], 99.9th=[ 7308]
+  cpu          : usr=0.63%, sys=2.49%, ctx=7574, majf=0, minf=10
+  IO depths    : 1=200.0%, 2=0.0%, 4=0.0%, 8=0.0%, 16=0.0%, 32=0.0%, >=64=0.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     issued rwts: total=0,3461,0,3461 short=0,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=1
+Run status group 0 (all jobs):
+  WRITE: bw=1384KiB/s (1417kB/s), 1384KiB/s-1384KiB/s (1417kB/s-1417kB/s), io=13.5MiB (14.2MB), run=10001-10001msec
+Disk stats (read/write):
+  nvme0n1: ios=3789/14248, sectors=33024/255312, merge=58/6993, ticks=6497/16293, in_queue=23530, util=78.62%
+    device: 3489 flushes, 14394 write requests, device time per flush 0.215 ms (includes background)
+
+### N8c fio --sync=dsync
+loadavg: 14.27 14.19 10.63 18/2199 239715
+N8c: (g=0): rw=randwrite, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=psync, iodepth=1
+fio-3.36
+N8c: (groupid=0, jobs=1): err= 0: pid=239734: Fri Oct 16 14:01:04 2026
+  write: IOPS=419, BW=1679KiB/s (1719kB/s)(16.4MiB/10003msec); 0 zone resets
+    clat (usec): min=1436, max=21013, avg=2372.41, stdev=497.11
+     lat (usec): min=1437, max=21014, avg=2373.72, stdev=497.60
+    clat percentiles (usec):
+     | 50.0th=[ 2311], 90.0th=[ 2474], 99.0th=[ 4359], 99.9th=[ 7635]
+   bw (  KiB/s): min= 1496, max= 1760, per=100.00%, avg=1682.11, stdev=74.61, samples=19
+   iops        : min=  374, max=  440, avg=420.53, stdev=18.65, samples=19
+  lat (msec)   : 2=0.07%, 4=98.26%, 10=1.64%, 50=0.02%
+  cpu          : usr=0.69%, sys=2.56%, ctx=4615, majf=0, minf=8
+  IO depths    : 1=100.0%, 2=0.0%, 4=0.0%, 8=0.0%, 16=0.0%, 32=0.0%, >=64=0.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     issued rwts: total=0,4199,0,0 short=0,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=1
+Run status group 0 (all jobs):
+  WRITE: bw=1679KiB/s (1719kB/s), 1679KiB/s-1679KiB/s (1719kB/s-1719kB/s), io=16.4MiB (17.2MB), run=10003-10003msec
+Disk stats (read/write):
+  nvme0n1: ios=4039/7332, sectors=336960/132200, merge=17/283, ticks=5481/17557, in_queue=23090, util=74.46%
+    device: 52 flushes, 7887 write requests, device time per flush 1.077 ms (includes background)
+
+### N8d fio --fdatasync=1 --rw=write
+loadavg: 14.29 14.20 10.67 19/2199 240190
+N8d: (g=0): rw=write, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=psync, iodepth=1
+fio-3.36
+N8d: (groupid=0, jobs=1): err= 0: pid=240209: Fri Oct 16 14:01:15 2026
+  write: IOPS=570, BW=2281KiB/s (2336kB/s)(22.3MiB/10001msec); 0 zone resets
+    clat (usec): min=24, max=5259, avg=493.41, stdev=428.75
+     lat (usec): min=24, max=5259, avg=494.01, stdev=428.73
+    clat percentiles (usec):
+     | 50.0th=[  400], 90.0th=[ 1074], 99.0th=[ 1369], 99.9th=[ 3949]
+   bw (  KiB/s): min= 1112, max= 4039, per=97.18%, avg=2217.63, stdev=1173.39, samples=19
+   iops        : min=  278, max= 1009, avg=554.37, stdev=293.28, samples=19
+  lat (usec)   : 50=8.59%, 100=15.36%, 250=16.29%, 500=15.94%, 750=15.36%
+  lat (usec)   : 1000=14.39%
+  lat (msec)   : 2=13.74%, 4=0.25%, 10=0.09%
+  fsync/fdatasync/sync_file_range:
+    sync (usec): min=147, max=112056, avg=1253.21, stdev=8007.69
+    sync percentiles (usec):
+     | 50.0th=[   269], 90.0th=[  1237], 99.0th=[  2507], 99.9th=[104334]
+  cpu          : usr=0.64%, sys=3.81%, ctx=17250, majf=0, minf=12
+  IO depths    : 1=200.0%, 2=0.0%, 4=0.0%, 8=0.0%, 16=0.0%, 32=0.0%, >=64=0.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     issued rwts: total=0,5704,0,0 short=5704,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=1
+Run status group 0 (all jobs):
+  WRITE: bw=2281KiB/s (2336kB/s), 2281KiB/s-2281KiB/s (2336kB/s-2336kB/s), io=22.3MiB (23.4MB), run=10001-10001msec
+Disk stats (read/write):
+  nvme0n1: ios=8169/15845, sectors=398792/86808, merge=1/59, ticks=8275/15068, in_queue=30317, util=71.96%
+    device: 5717 flushes, 16722 write requests, device time per flush 1.229 ms (includes background)
+
+### end
+loadavg: 14.59 14.26 10.73 18/2192 240391
+    device total during run (all processes): 99485 flushes, 4863 MiB written

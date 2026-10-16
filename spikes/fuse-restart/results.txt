@@ -1,0 +1,217 @@
+# kernel 6.17.0-1033-oem, libfuse 3.18.3 (vendor build), fusermount3 version: 3.14.0, systemd 255 (255.4-1ubuntu8.18), Python 3.12.3, 2026-10-16
+
+=== F1 handoff over SCM_RIGHTS to a freshly exec'd daemon, A exits, B serves without INIT
+  expect: mount stays, open handle reads and writes through B, B sees no INIT and rebuilds nodeids from backing
+  [OK ] A INIT: got=True want=True
+  [OK ] read via A: got='hello-from-backing\n' want='hello-from-backing\n'
+  [OK ] A exit code: got=0 want=0
+  handoff A HANDOFF_START -> B TAKEOVER: 276 us (harness command -> B ready 375 us)
+  [OK ] mount still in mountinfo: got=True want=True
+  [OK ] pread on handle opened under A: got='hello-from-backing\n' want='hello-from-backing\n'
+  [OK ] pwrite on handle opened under A: got=12 want=12
+  [OK ] backing has B's write: got='WRITTEN-BY-B' want='WRITTEN-BY-B'
+  [OK ] stat: got='ok' want='ok'
+  [OK ] listdir: got=['f', 'hang1'] want=['f', 'hang1']
+  [OK ] fresh open after handoff: got=True want=True
+  [OK ] INITs seen by B: got='0' want='0'
+  B: PONG reqs=11 inits=0 nfds=1; B rebuilt nodeids: 1 RESCAN(s)
+
+=== F2 request A read but never answered, A hands off and exits, B does not resend
+  expect: caller stays blocked (request sits on the processing list of the fud B now owns)
+  A: HUNG unique=0x14a op=LOOKUP name=hang1
+  [OK ] caller 2 s after A exited: got='hang' want='hang'
+  [OK ] fusectl waiting: got=1 want=1
+  [OK ] other requests still served by B: got='ok' want='ok'
+
+=== F3 B sends FUSE_NOTIFY_RESEND after takeover
+  expect: the hung LOOKUP is requeued with FUSE_UNIQUE_RESEND (bit 63) set, B answers it, caller succeeds
+  [OK ] caller after RESEND: got='ok' want='ok'
+  [OK ] resent unique = A's unique | 1<<63: got='0x800000000000014a' want='0x800000000000014a'
+  RESEND sent -> caller returns: 581 us; caller total blocked 2014175 us
+  A INIT: INIT kernel=7.44 flags=0x5ff73fffffb has_resend=1 request_timeout_offered=1 reply_flags=0x40440000 max_write=131072 timeout=0
+  [OK ] kernel offered FUSE_HAS_RESEND: got='1' want='1'
+  [OK ] A's INIT reply carried FUSE_HAS_RESEND (bit 39): got=False want=False
+  [OK ] fusectl waiting: got=0 want=0
+
+=== F2b same as F2 but A did not negotiate FUSE_PARALLEL_DIROPS
+  expect: the hung LOOKUP holds the parent directory's fuse_inode mutex, so every other lookup in that directory blocks too until B resends
+  [OK ] stat of another name in the same directory: got='hang' want='hang'
+  [OK ] both callers after RESEND: got=['ok', 'ok'] want=['ok', 'ok']
+
+=== F3c B answers a resent request with the unique masked back to A's value (bit 63 cleared)
+  expect: the reply is rejected with ENOENT (fuse_request_find compares the full unique) and the caller stays blocked
+  [OK ] reply write errno: got='2' want='2'
+  [OK ] caller: got='hang' want='hang'
+
+=== F3b RESEND of a non-idempotent request (MKDIR) that A already applied
+  expect: B re-executes it and the caller gets EEXIST for its own mkdir
+  A: HUNG unique=0x14c op=MKDIR name=mkhangdir applied=0
+  [OK ] caller mkdir result: got='EEXIST' want='EEXIST'
+  B: MKDIR_ERR unique=0x800000000000014c name=mkhangdir err=-17 resent=1
+
+=== F4a daemon closes its only /dev/fuse fd (exit, no handoff)
+  expect: connection aborted; next request ENOTCONN, mount entry stays until unmounted
+  [OK ] stat before: got='ok' want='ok'
+  [OK ] stat after last fd closed: got='ENOTCONN' want='ENOTCONN'
+  [OK ] mount entry still present: got=True want=True
+
+=== F4b daemon killed (SIGKILL) with a request read but unanswered, nobody else holds the fd
+  expect: hung caller gets ECONNABORTED (fuse_dev_end_requests), later callers ENOTCONN
+  [OK ] hung caller: got='ECONNABORTED' want='ECONNABORTED'
+  [OK ] next caller: got='ENOTCONN' want='ENOTCONN'
+
+=== F4c A reads through a FUSE_DEV_IOC_CLONE fd, hands off only the original fd, exits
+  expect: mount survives (B holds a fud), but the request read on the clone gets ECONNABORTED when the clone's last reference closes
+  [OK ] caller whose request was read on the dropped clone: got='ECONNABORTED' want='ECONNABORTED'
+  [OK ] other requests via B: got='ok' want='ok'
+
+=== F4d same, but A hands off both the original and the clone fd; B resends
+  expect: caller succeeds
+  [OK ] B received fds: got='2' want='2'
+  [OK ] caller: got='ok' want='ok'
+
+=== F5a fd-holder process: A puts its fd in a holder, A crashes (SIGKILL) with a request unanswered, a cold-started B gets the fd from the holder and resends
+  expect: mount survives the crash; hung caller and callers during the gap succeed once B serves
+  [OK ] holder got fds: got=True want=True
+
+=== F6a request issued while no daemon serves (holder only), B started 500 ms later
+  expect: it blocks for the gap and then succeeds; no error
+  [OK ] gap caller still blocked before B starts: got=True want=True
+  [OK ] fusectl waiting >= 2 (hung + gap caller): got=True want=True
+  fusectl waiting=2 (above 2: desktop mount monitors such as gvfs-udisks2-volume-monitor probe new mounts)
+  [OK ] gap caller: got='ok' want='ok'
+  gap caller blocked 441031 us; B exec -> caller returns 4964 us
+  [OK ] hung caller (read by crashed A): got='ok' want='ok'
+  crash -> B TAKEOVER: 508451 us (includes the deliberate 500 ms)
+  holder: ['HOLDER_LISTENING', 'HOLDER_PUT nfds=1', 'HOLDER_GET nfds=1']
+  [OK ] fusermount3 -u: got=0 want=0
+  [OK ] holder notices unmount (POLLERR) and drops fds: got=True want=True
+
+=== F5b re-exec in place: A execve()s the new binary, fd inherited (no CLOEXEC), same PID
+  expect: mount and open handle keep working, no INIT
+  [OK ] same pid after exec: got='231522' want='231522'
+  [OK ] pread on old handle: got='hello-from-backing\n' want='hello-from-backing\n'
+  [OK ] INITs after exec: got='0' want='0'
+  EXEC_START -> TAKEOVER: 1628 us
+
+=== F5c systemd --user fdstore: the daemon stores its fuse fd + a memfd with INIT state (FDSTORE=1), then is restarted / killed
+  expect: systemd hands the fds back as LISTEN_FDS; mount and open handle survive both; 'systemctl stop' flushes the store and aborts the connection
+  [OK ] systemd-run --user: got=0 want=0
+  [OK ] INIT under systemd: got=True want=True
+  [OK ] fds in store: got='2' want='2'
+  [OK ] systemctl restart: got=0 want=0
+  [OK ] adopted after restart: got=True want=True
+  [OK ] new MainPID: got=True want=True
+  [OK ] pread on old handle after restart: got='hello-from-backing\n' want='hello-from-backing\n'
+  [OK ] adopted after SIGKILL + Restart=always: got=True want=True
+  [OK ] pread on old handle after crash: got='hello-from-backing\n' want='hello-from-backing\n'
+  [OK ] INITs across both restarts: got=1 want=1
+  LISTEN_FDS seen: LISTEN_FDS=2 LISTEN_FDNAMES=state:fuse
+  [OK ] after 'systemctl stop': got='ENOTCONN' want='ENOTCONN'
+
+=== F6b client stat loop (1.2 s, ~100 us apart) across each handoff kind, 5 reps each; 'none' is the control with no handoff
+  expect: no errors in any run; the stall of the stat overlapping the handoff is about the daemon-side gap: sub-ms for a hot standby over SCM_RIGHTS, a few ms for exec-based ones, more for systemd
+  [OK ] none: errors during the loop: got={} want={}
+  none: stat p50 27 us, loop max (us) [4814, 5222, 5650, 8746, 9349], stall at handoff (us) [0, 0, 0, 0, 0] -> median 0 us
+  [OK ] scm-hot: errors during the loop: got={} want={}
+  scm-hot: stat p50 27 us, loop max (us) [3365, 3506, 5767, 6407, 7444], stall at handoff (us) [0, 237, 678, 1009, 1103] -> median 678 us; daemon-side gap (us) [284, 313, 378, 706, 722] -> median 378 us
+  [OK ] reexec: errors during the loop: got={} want={}
+  reexec: stat p50 24 us, loop max (us) [3303, 4839, 5667, 8273, 14495], stall at handoff (us) [1577, 1591, 1672, 2605, 3303] -> median 1672 us; daemon-side gap (us) [1434, 1453, 1479, 2391, 3745] -> median 1479 us
+  [OK ] holder-cold: errors during the loop: got={} want={}
+  holder-cold: stat p50 48 us, loop max (us) [5546, 7132, 7384, 8070, 20782], stall at handoff (us) [3833, 4149, 4180, 6724, 7407] -> median 4180 us; daemon-side gap (us) [3660, 3708, 3823, 6703, 7221] -> median 3823 us
+  [OK ] systemd-restart: errors during the loop: got={} want={}
+  systemd-restart: stat p50 48 us, loop max (us) [20779, 21139, 21418, 22071, 36465], stall at handoff (us) [20779, 21139, 21418, 22071, 36465] -> median 21418 us; daemon-side gap (us) [28924, 33106, 33482, 37607, 50406] -> median 33482 us
+  [OK ] systemd-sigkill: errors during the loop: got={} want={}
+  systemd-sigkill: stat p50 57 us, loop max (us) [17832, 26423, 26641, 26689, 29490], stall at handoff (us) [17832, 26423, 26641, 26689, 29490] -> median 26641 us; daemon-side gap (us) [30407, 40682, 41069, 45164, 50425] -> median 41069 us
+
+=== F7 cost of one libfuse daemon per mount (10 mounts) vs one daemon with 10 sessions
+  expect: a few MB RSS and 1 thread per single-threaded daemon (mostly shared libc pages, small PSS); loop_mt adds worker threads under load
+  [OK ] 10 x llfs single: stat on every mount: got=['ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok'] want=['ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok']
+  10 x llfs (single-threaded), idle: processes=10 RSS=21476 kB PSS=2264 kB RssAnon=1924 kB threads=10
+  10 x llfs (single-threaded), after 8 concurrent stat loops on 2 of the mounts: processes=10 RSS=21476 kB PSS=2264 kB RssAnon=1924 kB threads=10
+  [OK ] 10 x llfs mt: stat on every mount: got=['ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok'] want=['ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok']
+  10 x llfs (mt-threaded), idle: processes=10 RSS=22748 kB PSS=3518 kB RssAnon=3188 kB threads=43
+  10 x llfs (mt-threaded), after 8 concurrent stat loops on 2 of the mounts: processes=10 RSS=22828 kB PSS=3598 kB RssAnon=3268 kB threads=47
+  [OK ] 1 x llfs multi 10: stat on every mount: got=['ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok'] want=['ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok']
+  1 x llfs with 10 sessions (one thread each), idle: processes=1 RSS=2712 kB PSS=1027 kB RssAnon=756 kB threads=11
+
+=== F8 daemon negotiated request_timeout=15 s (FUSE_REQUEST_TIMEOUT, 6.14+); a request A read is never answered after handoff (B does not resend)
+  expect: kernel aborts the whole connection after 15-30 s although B holds the fd: hung caller ECONNABORTED, then ENOTCONN
+  A: INIT kernel=7.44 flags=0x5ff73fffffb has_resend=1 request_timeout_offered=1 reply_flags=0x40040440000 max_write=131072 timeout=15
+  [OK ] hung caller: got='ECONNABORTED' want='ECONNABORTED'
+  hung caller blocked 30.3 s
+  [OK ] next caller: got='ENOTCONN' want='ENOTCONN'
+  B: DEV_READ_ERR errno=19 No such device
+
+=== F9a control: mounted with -o auto_unmount, A killed with no handoff
+  expect: fusermount3 wakes on the closed socket, but its probe open(mnt) runs with euid 0 on a mount without allow_other, gets EACCES instead of ENOTCONN (should_auto_unmount), and leaves the dead mount
+  [OK ] fusermount3 watchdog alive while A runs: got=True want=True
+  [OK ] fusermount3 exited: got=False want=False
+  [OK ] mount present 500 ms after A killed: got=True want=True
+
+=== F9b -o auto_unmount; A hands off only the fuse fd and exits
+  expect: mount survives A's exit (the probe open(mnt) would succeed through B anyway); fusermount3 sees the socket close and exits, so nothing watches B any more
+  B: TAKEOVER nfds=1 commfd=-1 kernel=7.44 max_write=131072
+  [OK ] mount present 300 ms after A exit: got=True want=True
+  [OK ] stat via B: got='ok' want='ok'
+  [OK ] fusermount3 watchdog alive: got=False want=False
+
+=== F9c -o auto_unmount; A hands off the fuse fd and the fusermount3 socket and exits
+  expect: mount survives A's exit (the probe open(mnt) would succeed through B anyway); fusermount3 keeps watching, now tied to B
+  B: TAKEOVER nfds=1 commfd=7 kernel=7.44 max_write=131072
+  [OK ] mount present 300 ms after A exit: got=True want=True
+  [OK ] stat via B: got='ok' want='ok'
+  [OK ] fusermount3 watchdog alive: got=True want=True
+  [OK ] fusermount3 exits when B dies: got=False want=False
+
+=== L1 libfuse 3.18.3 session started on an already-INITed fd via the '/dev/fd/N' mountpoint
+  expect: libfuse waits for an INIT that never comes and answers every request with EIO
+  llfs: DEVFD_MOUNT /dev/fd/4 ret=0
+  [OK ] stat via libfuse on /dev/fd/N: got='EIO' want='EIO'
+
+=== L2 libfuse 3.18.3 (built -Denable-custom-io=true): llfs re-execs itself, the new image uses fuse_session_custom_io and feeds libfuse a synthetic INIT copied from the original, swallowing the reply
+  expect: session works without a kernel INIT; replayed INIT reply equals the original; open handle survives
+  [OK ] custom io accepted: got='0' want='0'
+  [OK ] read before: got='hello-from-backing\n' want='hello-from-backing\n'
+  [OK ] trigger lookup: got='ENOENT' want='ENOENT'
+  [OK ] replayed INIT reply == original: got='1' want='1'
+  [OK ] same pid: got='233691' want='233691'
+  [OK ] read on old handle after re-exec: got='hello-from-backing\n' want='hello-from-backing\n'
+  [OK ] stat after re-exec: got='ok' want='ok'
+  EXEC_START -> TAKEOVER: 3212 us
+
+=== L3 default libfuse 3.18.3 build: fuse_session_custom_io
+  expect: -ENOTSUP (-95): custom io is compiled out unless -Denable-custom-io=true
+  [OK ] fuse_session_custom_io ret: got='-95' want='-95'
+
+=== L4 a different implementation takes over: rawfs INITs, then execs llfs adopt (libfuse computes its own INIT reply)
+  expect: libfuse's reply differs from what the kernel holds (it is swallowed, the kernel keeps rawfs's); requests still work here because both sides only use basic ops
+  llfs: INIT_REPLY_SWALLOWED matches_original=0 flags=0x40409029/0x40440000 flags2=0/0 max_write=1048576/131072
+  [OK ] replayed INIT reply == original: got='0' want='0'
+  [OK ] stat: got='ok' want='ok'
+
+=== summary
+  F1: 11/11 checks OK
+  F2: 3/3 checks OK
+  F3: 5/5 checks OK
+  F2b: 2/2 checks OK
+  F3c: 2/2 checks OK
+  F3b: 1/1 checks OK
+  F4a: 3/3 checks OK
+  F4b: 2/2 checks OK
+  F4c: 2/2 checks OK
+  F4d: 2/2 checks OK
+  F5a: 4/4 checks OK
+  F6a: 3/3 checks OK
+  F5b: 3/3 checks OK
+  F5c: 11/11 checks OK
+  F6b: 6/6 checks OK
+  F7: 3/3 checks OK
+  F8: 2/2 checks OK
+  F9a: 3/3 checks OK
+  F9b: 3/3 checks OK
+  F9c: 4/4 checks OK
+  L1: 1/1 checks OK
+  L2: 7/7 checks OK
+  L3: 1/1 checks OK
+  L4: 2/2 checks OK

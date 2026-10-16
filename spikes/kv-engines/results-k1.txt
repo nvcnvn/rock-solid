@@ -1,0 +1,49 @@
+# kernel 6.17.0-1033-oem redb 4.4.0 fjall 3.1.12 (lsm-tree 3.1.10) rustc 1.99.1 date=2026-10-16T06:52Z cpu=14x Intel(R) Core(TM) Ultra 5 235U mem=15G disk=UMIS RPEYJ512MML1QWQ (write back) fs= quick=false loadavg=19.79 14.61 7.74
+
+## K1 Raft log append: durable commit per batch  loadavg=19.79 14.61 7.74  rss=3MB
+payload = random bytes; key = u64 index; wamp = /proc/self/io write_bytes / payload bytes
+devwamp = whole-disk sectors written / payload (includes ext4 journal and other processes)
+K1 file-prealloc size= 256 batch=  1 commits=2000 p50=1098us p99=4246us entries/s=835 wamp_commit=17.00 wamp_total=17.00 devwamp=25.22 dev_flushes=2001 cpu/entry=89.2us disk=32.0MB
+K1 file-append   size= 256 batch=  1 commits=2000 p50=2923us p99=99447us entries/s=183 wamp_commit=17.00 wamp_total=17.00 devwamp=228.17 dev_flushes=2014 cpu/entry=131.6us disk=0.5MB
+K1 redb          size= 256 batch=  1 commits=2000 p50=1302us p99=6263us entries/s=598 wamp_commit=112.50 wamp_total=112.50 devwamp=143.16 dev_flushes=2004 cpu/entry=308.1us disk=0.6MB
+K1 fjall         size= 256 batch=  1 commits=2000 p50=1131us p99=4222us entries/s=787 wamp_commit=17.21 wamp_total=17.21 devwamp=42.98 dev_flushes=2000 cpu/entry=105.9us disk=0.6MB
+K1 file-prealloc size= 256 batch= 16 commits=1000 p50=1242us p99=4900us entries/s=11422 wamp_commit=2.00 wamp_total=2.00 devwamp=2.99 dev_flushes=1000 cpu/entry=8.7us disk=32.0MB
+K1 file-append   size= 256 batch= 16 commits=1000 p50=3040us p99=6917us entries/s=4880 wamp_commit=2.00 wamp_total=2.00 devwamp=10.69 dev_flushes=1003 cpu/entry=11.9us disk=4.2MB
+K1 redb          size= 256 batch= 16 commits=1000 p50=3625us p99=7164us entries/s=4310 wamp_commit=8.89 wamp_total=8.89 devwamp=18.71 dev_flushes=1007 cpu/entry=32.2us disk=4.3MB
+K1 fjall         size= 256 batch= 16 commits=1000 p50=2936us p99=6719us entries/s=4959 wamp_commit=2.12 wamp_total=2.12 devwamp=10.35 dev_flushes=1008 cpu/entry=12.7us disk=4.4MB
+K1 file-prealloc size= 256 batch=128 commits=300 p50=1176us p99=3756us entries/s=102317 wamp_commit=1.12 wamp_total=1.12 devwamp=1.27 dev_flushes=300 cpu/entry=1.6us disk=32.0MB
+K1 file-append   size= 256 batch=128 commits=300 p50=3192us p99=7049us entries/s=37748 wamp_commit=1.12 wamp_total=1.12 devwamp=2.28 dev_flushes=301 cpu/entry=2.2us disk=10.0MB
+K1 redb          size= 256 batch=128 commits=300 p50=3979us p99=8174us entries/s=29138 wamp_commit=2.07 wamp_total=2.07 devwamp=3.43 dev_flushes=304 cpu/entry=6.2us disk=10.2MB
+K1 fjall         size= 256 batch=128 commits=300 p50=3189us p99=6417us entries/s=36796 wamp_commit=1.24 wamp_total=1.24 devwamp=2.64 dev_flushes=301 cpu/entry=3.0us disk=10.5MB
+K1 file-prealloc size=4096 batch=  1 commits=2000 p50=1070us p99=2762us entries/s=934 wamp_commit=2.00 wamp_total=2.00 devwamp=2.68 dev_flushes=2000 cpu/entry=76.2us disk=32.0MB
+K1 file-append   size=4096 batch=  1 commits=2000 p50=2891us p99=6583us entries/s=316 wamp_commit=2.00 wamp_total=2.00 devwamp=9.94 dev_flushes=2006 cpu/entry=159.5us disk=7.8MB
+K1 redb          size=4096 batch=  1 commits=2000 p50=3382us p99=98227us entries/s=171 wamp_commit=8.95 wamp_total=8.95 devwamp=21.63 dev_flushes=2022 cpu/entry=402.1us disk=15.8MB
+K1 fjall         size=4096 batch=  1 commits=2000 p50=2772us p99=5573us entries/s=345 wamp_commit=2.02 wamp_total=2.02 devwamp=11.36 dev_flushes=2000 cpu/entry=106.1us disk=8.0MB
+K1 file-prealloc size=4096 batch= 16 commits=1000 p50=1454us p99=5521us entries/s=8540 wamp_commit=1.06 wamp_total=1.06 devwamp=1.07 dev_flushes=1001 cpu/entry=20.6us disk=80.0MB
+K1 file-append   size=4096 batch= 16 commits=1000 p50=3466us p99=6614us entries/s=4283 wamp_commit=1.06 wamp_total=1.06 devwamp=1.67 dev_flushes=1005 cpu/entry=26.2us disk=62.8MB
+K1 redb          size=4096 batch= 16 commits=1000 p50=4505us p99=8429us entries/s=3321 wamp_commit=2.48 wamp_total=2.48 devwamp=3.32 dev_flushes=1010 cpu/entry=50.9us disk=126.0MB
+K1 fjall         size=4096 batch= 16 commits=1000 p50=3359us p99=6932us entries/s=4456 wamp_commit=1.07 wamp_total=1.07 devwamp=1.71 dev_flushes=1004 cpu/entry=20.4us disk=63.3MB
+K1 file-prealloc size=4096 batch=128 commits=300 p50=4238us p99=10409us entries/s=28126 wamp_commit=1.01 wamp_total=1.01 devwamp=1.07 dev_flushes=300 cpu/entry=16.4us disk=176.0MB
+K1 file-append   size=4096 batch=128 commits=300 p50=7647us p99=12172us entries/s=15975 wamp_commit=1.01 wamp_total=1.01 devwamp=1.17 dev_flushes=310 cpu/entry=16.7us disk=150.6MB
+K1 redb          size=4096 batch=128 commits=300 p50=8219us p99=20382us entries/s=13489 wamp_commit=2.08 wamp_total=2.08 devwamp=2.14 dev_flushes=310 cpu/entry=27.8us disk=302.4MB
+K1 fjall         size=4096 batch=128 commits=300 p50=8209us p99=113839us entries/s=5579 wamp_commit=1.88 wamp_total=1.88 devwamp=2.00 dev_flushes=333 cpu/entry=21.8us disk=153.5MB
+[OK ] K1 redb p50 vs file floor size=256 batch=1: got=1.19x want=< 3x (hypothesis)
+[OK ] K1 fjall p50 vs file floor size=256 batch=1: got=1.03x want=< 3x (hypothesis)
+[FAIL] K1 redb p50 vs file floor size=4096 batch=16: got=3.10x want=< 3x (hypothesis)
+[OK ] K1 fjall p50 vs file floor size=4096 batch=16: got=2.31x want=< 3x (hypothesis)
+[OK ] K1 redb wamp size=256 batch=1: got=112.5 want=> 10 (CoW rewrites leaf+branch pages per commit)
+[OK ] K1 fjall wamp_total size=256 batch=128: got=1.24 want=< 3 (journal + one memtable flush)
+
+## K1b prefix truncation after snapshot  loadavg=16.41 14.92 8.49  rss=127MB
+K1b file-prealloc   entries=200000 truncate_below=180065 truncate=24.6ms written=0.00MB disk_before=60.0MB disk_after=16.0MB reclaim(compact)=0ms reclaim_written=0.0MB disk_after_reclaim=16.0MB live_entries=0
+K1b redb            entries=200000 truncate_below=180065 truncate=40.5ms written=0.15MB disk_before=53.0MB disk_after=53.1MB reclaim(compact)=62ms reclaim_written=5.4MB disk_after_reclaim=5.3MB live_entries=20000
+K1b fjall           files>64KB after reclaim: 0.jnl=59.4MB keyspaces/1/tables/0=52.0MB keyspaces/1/tables/1=1.6MB keyspaces/1/tables/2=5.2MB
+K1b fjall           entries=200000 truncate_below=180065 truncate=192.8ms written=4.98MB disk_before=106.5MB disk_after=111.5MB reclaim(compact)=551ms reclaim_written=6.8MB disk_after_reclaim=118.3MB live_entries=20000
+K1b fjall-droprange files>64KB after reclaim: 0.jnl=54.4MB keyspaces/1/tables/0=52.0MB keyspaces/1/tables/1=51.9MB
+K1b fjall-droprange entries=200000 truncate_below=180065 truncate=14.4ms written=0.01MB disk_before=106.5MB disk_after=106.5MB reclaim(compact)=588ms reclaim_written=51.9MB disk_after_reclaim=158.4MB live_entries=200064
+
+## K1c steady state: append 128 x 256 B per commit, truncate every 100 commits to the last 20k entries  loadavg=15.93 14.92 8.67  rss=89MB
+K1c file-prealloc   commits=4000 append_p50=1177us append_p99=3706us truncate_p50=4721us truncate_max=6869us wamp=1.12 cpu/entry=1.5us disk_max=144.0MB disk_end=16.0MB live=4.9MB
+K1c redb            commits=4000 append_p50=1570us append_p99=6036us truncate_p50=3584us truncate_max=9900us wamp=2.09 cpu/entry=4.0us disk_max=9.1MB disk_end=9.1MB live=4.9MB
+K1c fjall           commits=4000 append_p50=3118us append_p99=93548us truncate_p50=29105us truncate_max=124324us wamp=1.55 cpu/entry=5.5us disk_max=170.2MB disk_end=178.6MB live=4.9MB
+K1c fjall-droprange commits=4000 append_p50=3196us append_p99=8564us truncate_p50=12680us truncate_max=19230us wamp=2.09 cpu/entry=3.6us disk_max=192.6MB disk_end=192.6MB live=4.9MB

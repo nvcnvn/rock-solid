@@ -1,0 +1,4 @@
+vendor/
+bin/
+work/
+__pycache__/
