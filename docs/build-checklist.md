@@ -31,17 +31,23 @@ Items are in build order within a phase. An item can start once the items it use
 - [x] **LSM tree, stage 1** (component, `core`). Memtable plus periodic full snapshots and manifests in the log, behind the interface stage 2 will implement.
 - [x] **Chunk index** (component, `core`). Extent map `(pool, h, chunk_id, version, first block) → (location, block count, record header)`; rebuild by scanning record headers, punches included.
 - [ ] **Streaming snapshots, compact memtable** (component, `core`). A snapshot reads a frozen view of the memtable and hands the log one piece at a time, each built at its final size; `MemTree` stores each entry as one allocation and restores by bulk build. Review against the [MetaStore memory spike](design.md#appendix-metastore-memory-spike): about 235 B per file, and a snapshot's peak is the tree plus one piece plus what the frozen view copies.
+- [ ] **Write-side decode check** (test, `core` and `sim`). In debug builds and the simulator, group commit decodes every record it just encoded and asserts the result equals what it submitted, and a round asserts it never builds a record with no entries. A property test checks that anything `submit` accepts decodes. Review when a deliberately broken encoder fails the simulator's seeds.
+- [ ] **Superblock copy** (component, `core`). A second superblock in the last block of segment 0, written and flushed after the first; recovery uses a valid copy and rewrites a damaged one ([Recovery](design.md#on-disk-format)). Changes the disk format, so it lands before the format is frozen at the first release.
+- [ ] **Quarantined segments** (component, `core`). A segment whose header fails to decode is free only if none of its blocks holds a record header of this log; otherwise recovery reports it as quarantined and group commit never reuses it ([Recovery](design.md#on-disk-format)). Review with the simulator's bit flips on segment headers: no acknowledged record is ever overwritten.
 
 **ChunkStore and cleaner**
 
-- [ ] **Single-node ChunkStore** (component, `core`). `write`, `punch`, `read`, `flush` with versions, `expect_ver` compare-and-set, `at_ver` reads and tombstones ([Data layer](design.md#data-layer-chunkstore)). `seal` exists in the API only.
-- [ ] **Cleaner** (component, `core`). Cost-benefit victim choice with the net-gain guard and the age cap, two streams, blocks regrouped by chunk, a TRIM action for freed segments.
+- [ ] **Chunk index overlap rule** (component, `core`). Decide in an ADR how the index orders extents of different versions that cover the same blocks: trim and split older entries on insert so the live version's map never overlaps (Ceph BlueStore, Btrfs), or keep every entry with its LSN and resolve at read time (RocksDB). Either way, frozen versions keep their entries, and the index counts live blocks per record for the cleaner. Review when replaying records in LSN order rebuilds the identical map and a read of the live version costs one lookup per block.
+- [ ] **Single-node ChunkStore** (component, `core`). `write`, `punch`, `read`, `flush` with versions, `expect_ver` compare-and-set, `at_ver` reads and tombstones ([Data layer](design.md#data-layer-chunkstore)). A write larger than one record (`max_group_commit_bytes`, 1 MiB, so every whole 4 MiB chunk) goes to the log as several items of the same version, acknowledged once all are durable. It handles `Failed` and `CheckpointFailed` events from the log. `seal` exists in the API only.
+- [ ] **Segment usage table** (component, `core`). Each manifest carries state, live blocks and newest LSN per segment; free segments come from it, and a rebuild reports a gap the table cannot explain as corruption ([Free space](design.md#on-disk-format)).
+- [ ] **Segment reserve** (component, `core`). A few segments only checkpoints and the cleaner may use; ordinary writes get `NoSpace` while only the reserve is free ([Free space](design.md#on-disk-format)). Review when the simulator fills a disk to its reserve and a checkpoint and a cleaner pass still finish.
+- [ ] **Cleaner** (component, `core`). Cost-benefit victim choice with the net-gain guard and the age cap, two streams, blocks regrouped by chunk, a TRIM action for freed segments. It takes live counts from the usage table and writes into the reserve when the disk is full.
 
 **Simulator** ([Testing strategy](design.md#testing-strategy))
 
 - [ ] **Deterministic scheduler** (component, `sim`). One thread, simulated time, one seed. Review when two runs of a seed produce byte-identical action traces.
 - [ ] **Simulated disk** (component, `sim`). Torn writes, loss of unflushed data on crash, bit flips, misdirected writes, fail-slow.
-- [ ] **Invariant checker** (component, `sim`). Phase 1 invariants: acknowledged writes are readable; punched ranges read zeros; every cleaner pass frees more segments than it fills; a rebuilt chunk index equals the one recovered from its manifest.
+- [ ] **Invariant checker** (component, `sim`). Phase 1 invariants: acknowledged writes are readable; punched ranges read zeros; every cleaner pass frees more segments than it fills; no segment is reused while it holds a live block; a disk full except for its reserve still finishes a checkpoint and a cleaner pass; a rebuilt chunk index equals the one recovered from its manifest.
 - [ ] **History recorder** (component, `sim`). `(invoke_time, complete_time, op, result)` in a format Porcupine reads.
 - [ ] **Seed runner in CI** (test). Thousands of seeds per commit; a failing seed prints a one-line replay command.
 - [ ] **Planted-bug check** (test, `sim`). The simulator replays a failing seed exactly and finds a bug planted in a toy replication protocol ([done-when checkpoint](design.md#learning-project)).
@@ -73,6 +79,7 @@ The control-plane Raft group arrives in phase 4, so here a simulated single auth
 
 ## Phase 4: embedded MetaStore
 
+- [ ] **Raft write-path profile** (test). Profile `spikes/raft-port/bench` writes against raft-rs and find the 8 to 13% gap ([open question](design.md#roadmap-and-open-questions)). Fix it inside the port only where the change stays local and is listed as a deviation; otherwise accept the gap.
 - [ ] **Raft shard** (component, `core`). The etcd-raft v3.7.0 port moved from `spikes/raft-port/eraft` into `core`, with the pedantic lint fixes and the pinned tag recorded in `docs/tech-debts.md`. Synchronous `Ready`/`Advance`, a 10 ms election tick under a 100 ms heartbeat ([ADR 0007](decisions/0007-port-etcd-raft.md), [Raft shard](design.md#metadata-layer-metastore)).
 - [ ] **Ported Raft tests** (test, `core`). etcd-raft's unit tests and datadriven testdata, compared byte for byte and rerun on every upstream tag update.
 - [ ] **Maelstrom harness** (test). A small I/O adapter that runs the Raft shard as a Maelstrom node; passes the linearizable key-value workload under partitions ([done-when checkpoint](design.md#learning-project)).
