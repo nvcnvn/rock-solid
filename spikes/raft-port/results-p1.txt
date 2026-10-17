@@ -1,0 +1,71 @@
+# macOS 27.0 (Darwin 27.0.0), Apple M4 Pro, 14 cores, 64 GiB, rustc 1.99.1, etcd-raft v3.7.0 (b867cf13f6bc), raft-rs 0.7.0, rand_chacha 0.10.0, 2026-10-17
+# loadavg at start: { 8.26 4.86 4.03 }
+P1 Go ported (non-test): 6811 lines, 3908 code lines (excluding blank and comment-only lines)
+      Go node.go (only SoftState, Ready, IsEmpty*, Peer, confChangeToMsg ported): 616 lines
+      Go raftpb/raft.proto (message definitions ported as structs): 205 lines
+      raft.go                           2162 lines  1211 code
+      rawnode.go                         557 lines   293 code
+      log.go                             576 lines   356 code
+      log_unstable.go                    249 lines   139 code
+      storage.go                         326 lines   178 code
+      read_only.go                       101 lines    57 code
+      status.go                          105 lines    69 code
+      util.go                            343 lines   264 code
+      bootstrap.go                        82 lines    35 code
+      types.go                           106 lines    40 code
+      logger.go                          142 lines    99 code
+      tracker/inflights.go               143 lines    84 code
+      tracker/progress.go                314 lines   140 code
+      tracker/state.go                    42 lines    13 code
+      tracker/tracker.go                 281 lines   168 code
+      quorum/joint.go                     75 lines    39 code
+      quorum/majority.go                 198 lines   129 code
+      quorum/quorum.go                    58 lines    26 code
+      quorum/voteresult_string.go         26 lines    17 code
+      confchange/confchange.go           419 lines   262 code
+      confchange/restore.go              155 lines    72 code
+      raftpb/confchange.go               177 lines   116 code
+      raftpb/confstate.go                 52 lines    28 code
+      raftpb/util.go                      67 lines    36 code
+      raftpb/alias.go                     55 lines    37 code
+      Go left out: node.go Node/goroutines (616 lines), raftpb/raft.pb.go generated codec (1233), state_trace.go TLA+ tracing behind build tag with_tla (389), doc.go (399, docs only)
+      Go test harness rafttest/ (non-test files): 1781 lines
+P1 Rust library (eraft/src without tests): 6173 lines, 5179 code lines
+      src/bootstrap.rs                    56 lines    51 code
+      src/confchange/mod.rs              237 lines   202 code
+      src/confchange/restore.rs           62 lines    53 code
+      src/lib.rs                          90 lines    68 code
+      src/log.rs                         527 lines   440 code
+      src/log_unstable.rs                199 lines   160 code
+      src/logger.rs                       65 lines    39 code
+      src/node.rs                         98 lines    62 code
+      src/quorum/joint.rs                 52 lines    37 code
+      src/quorum/majority.rs             146 lines   129 code
+      src/quorum/mod.rs                   61 lines    38 code
+      src/raft.rs                       2098 lines  1941 code
+      src/raftpb/codec.rs                199 lines   174 code
+      src/raftpb/mod.rs                  545 lines   385 code
+      src/rawnode.rs                     410 lines   338 code
+      src/read_only.rs                    84 lines    62 code
+      src/status.rs                       98 lines    78 code
+      src/storage.rs                     222 lines   180 code
+      src/tracker/inflights.rs           101 lines    84 code
+      src/tracker/mod.rs                 184 lines   132 code
+      src/tracker/progress.rs            212 lines   165 code
+      src/types.rs                        66 lines    46 code
+      src/util.rs                        361 lines   315 code
+P1 Rust tests and harness: 9657 lines
+      src/log_test.rs                    887 lines
+      src/log_unstable_test.rs           299 lines
+      src/raft_paper_test.rs             945 lines
+      src/raft_test.rs                  3135 lines
+      src/rawnode_test.rs                769 lines
+      src/storage_test.rs                167 lines
+      src/testutil.rs                    397 lines
+      src/tracker_test.rs                322 lines
+      tests/confchange_datadriven.rs     379 lines
+      tests/datadriven/mod.rs            232 lines
+      tests/interaction.rs                85 lines
+      tests/quorum_datadriven.rs         330 lines
+      tests/rafttest/mod.rs              826 lines
+      tests/sim.rs                       884 lines

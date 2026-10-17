@@ -1,0 +1,13 @@
+macOS 27.0 (26A428) darwin 27.0.0 cpu=14x Apple M4 Pro mem=64G rustc 1.99.1 libc=0.2.177 rock-core=f3bfd04+uncommitted date=2026-10-17T03:55Z loadavg=3.70 3.48 3.18
+
+## F3 name length sweep, 1M files, create order, separate process each
+  columns, all per regular file unless noted: logical = key+value bytes; req = requested heap; act = macOS malloc_size (measured); glibc/jem = modelled Linux allocators; allocs = live allocations; node_per_entry = BTreeMap node bytes per entry (act minus key/value buffers); rss / compressed / footprint = growth of resident, compressor-held and phys_footprint bytes (task_info TASK_VM_INFO)
+  RESULT files=1000000 dirs=28464 entries=2085391 names=8B xattrs=0 order=create logical=141.8 req=314.0 act=363.5 glibc=392.9 jem=363.5 allocs=4.48 node_per_entry=94.9 rss=370.4 compressed=0.0 footprint=370.5 build_us=393142
+  RESULT files=1000000 dirs=28464 entries=2085391 names=24B xattrs=0 order=create logical=158.2 req=330.6 act=380.0 glibc=409.5 jem=380.0 allocs=4.48 node_per_entry=95.0 rss=387.2 compressed=0.0 footprint=387.3 build_us=396014
+  RESULT files=1000000 dirs=28464 entries=2085391 names=64B xattrs=0 order=create logical=199.3 req=371.6 act=412.9 glibc=458.8 jem=412.9 allocs=4.48 node_per_entry=95.0 rss=420.4 compressed=0.0 footprint=420.6 build_us=423086
+  RESULT files=1000000 dirs=28464 entries=2085391 names=sampled-mean-20.1B xattrs=0 order=create logical=154.2 req=326.4 act=372.8 glibc=411.1 jem=372.8 allocs=4.48 node_per_entry=95.0 rss=379.8 compressed=0.0 footprint=380.0 build_us=441237
+  req   B/file  8B 314.0  24B 330.6  64B 371.6  sampled 326.4   fit 305.8 + 1.03 x len, R2 1.0000
+  act   B/file  8B 363.5  24B 380.0  64B 412.9  sampled 372.8   fit 357.6 + 0.87 x len, R2 0.9972
+[OK ] F3 act B/file linear in name length: got=R2=0.9972 slope=0.87 B per name byte want=R2 >= 0.95
+  glibc B/file  8B 392.9  24B 409.5  64B 458.8  sampled 411.1   fit 382.4 + 1.19 x len, R2 0.9987
+  jem   B/file  8B 363.5  24B 380.0  64B 412.9  sampled 372.8   fit 357.6 + 0.87 x len, R2 0.9972

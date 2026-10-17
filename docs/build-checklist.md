@@ -30,6 +30,7 @@ Items are in build order within a phase. An item can start once the items it use
 - [x] **Recovery** (component, `core`). Load the last manifest, replay the log after it; memtables flush once `max_replay_bytes` of records follow the manifest.
 - [x] **LSM tree, stage 1** (component, `core`). Memtable plus periodic full snapshots and manifests in the log, behind the interface stage 2 will implement.
 - [x] **Chunk index** (component, `core`). Extent map `(pool, h, chunk_id, version, first block) → (location, block count, record header)`; rebuild by scanning record headers, punches included.
+- [ ] **Streaming snapshots, compact memtable** (component, `core`). A snapshot reads a frozen view of the memtable and hands the log one piece at a time, each built at its final size; `MemTree` stores each entry as one allocation and restores by bulk build. Review against the [MetaStore memory spike](design.md#appendix-metastore-memory-spike): about 235 B per file, and a snapshot's peak is the tree plus one piece plus what the frozen view copies.
 
 **ChunkStore and cleaner**
 
@@ -72,8 +73,8 @@ The control-plane Raft group arrives in phase 4, so here a simulated single auth
 
 ## Phase 4: embedded MetaStore
 
-- [ ] **Raft shard** (component, `core`). `Ready`-shaped, seeded election timeouts, a 10 ms election tick under a 100 ms heartbeat ([ADR 0006](decisions/0006-own-raft-shard.md), [Raft shard](design.md#metadata-layer-metastore)).
-- [ ] **Ported Raft tests** (test, `core`). The etcd-raft and raft-rs cases, with the source and commit of each recorded.
+- [ ] **Raft shard** (component, `core`). The etcd-raft v3.7.0 port moved from `spikes/raft-port/eraft` into `core`, with the pedantic lint fixes and the pinned tag recorded in `docs/tech-debts.md`. Synchronous `Ready`/`Advance`, a 10 ms election tick under a 100 ms heartbeat ([ADR 0007](decisions/0007-port-etcd-raft.md), [Raft shard](design.md#metadata-layer-metastore)).
+- [ ] **Ported Raft tests** (test, `core`). etcd-raft's unit tests and datadriven testdata, compared byte for byte and rerun on every upstream tag update.
 - [ ] **Maelstrom harness** (test). A small I/O adapter that runs the Raft shard as a Maelstrom node; passes the linearizable key-value workload under partitions ([done-when checkpoint](design.md#learning-project)).
 - [ ] **Raft persistence in the disk log** (component, `core`). Entries and hard state join the round's record; an entry is dead to the cleaner once the memtable that applied it is flushed.
 - [ ] **Shard state machine** (component, `meta`). `txn` (compare-and-set, put, delete, all or nothing) and `scan(prefix, after, limit)` on the stage 1 LSM tree, with one log entry per leader per round.
@@ -82,7 +83,6 @@ The control-plane Raft group arrives in phase 4, so here a simulated single auth
 - [ ] **Control-plane group** (component, `meta`). Pools, placement table, membership, fenced sessions and format level under `ctl/`, replacing phase 3's stand-in.
 - [ ] **Filesystem schema** (component, `meta`). Inode ID allocation by slot and sequence, inodes, directory entries, xattrs, sessions and locks, orphans, purge lists, slot byte counters and replay records ([Key layout](design.md#metadata-layer-metastore)).
 - [ ] **MetaStore invariants** (test, `sim`). At most one leader per shard per term; a committed entry is never lost; a shard recovered from manifest and log equals its state before the crash; at most one lock holder; a replayed request returns its first result and changes nothing.
-- [ ] **Memory per file** (test). Bytes per file of a memtable-only shard, which decides when the LSM tree's second stage is needed ([open question](design.md#roadmap-and-open-questions)).
 
 ## Phase 5: default drivers
 

@@ -1,6 +1,6 @@
 # 0006. Write our own Raft shard
 
-Status: Accepted (2026-10-16)
+Status: Superseded by [0007](0007-port-etcd-raft.md)
 
 ## Context
 The MetaStore runs about 1,000 Raft groups on each node. The [per-disk log](0003-one-log-per-disk.md) needs a Raft implementation that leaves persistence to its caller, and the sans-IO core needs one that takes time, randomness and I/O from outside: `on_event(now, ev) -> Vec<Action>`.
