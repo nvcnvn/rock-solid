@@ -1,3 +1,4 @@
+// Copyright 2015 The etcd Authors
 // Ported from go.etcd.io/raft v3.7.0 (b867cf13f6bc0dae21204302df97bc2355c3af55),
 // doc.go and the error variables of raft.go, rawnode.go and storage.go.
 // Licensed under the Apache License 2.0.

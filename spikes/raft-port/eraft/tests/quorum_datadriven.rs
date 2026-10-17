@@ -1,3 +1,4 @@
+// Copyright 2019, 2025 The etcd Authors
 // Ported from go.etcd.io/raft v3.7.0 (b867cf13f6bc0dae21204302df97bc2355c3af55),
 // quorum/datadriven_test.go, quorum/quick_test.go and quorum/majority_test.go.
 // Licensed under the Apache License 2.0.

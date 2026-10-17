@@ -6,7 +6,7 @@ Items are in build order within a phase. An item can start once the items it use
 
 **Every item, before review**
 
-- `scripts/lint.sh` passes. Sans-IO crates (`core`, `meta`, `sim`, `models`) pull in no I/O or OS randomness, even indirectly.
+- `scripts/lint.sh` passes. Sans-IO crates (`core`, `meta`, `raft`, `sim`, `models`) pull in no I/O or OS randomness, even indirectly.
 - Unit tests feed events and assert on actions; no mocks.
 - New invariants are registered with the simulator's checker in the same change.
 - Every failing seed found so far is a regression test.
@@ -80,7 +80,8 @@ The control-plane Raft group arrives in phase 4, so here a simulated single auth
 ## Phase 4: embedded MetaStore
 
 - [ ] **Raft write-path profile** (test). Profile `spikes/raft-port/bench` writes against raft-rs and find the 8 to 13% gap ([open question](design.md#roadmap-and-open-questions)). Fix it inside the port only where the change stays local and is listed as a deviation; otherwise accept the gap.
-- [ ] **Raft shard** (component, `core`). The etcd-raft v3.7.0 port moved from `spikes/raft-port/eraft` into `core`, with the pedantic lint fixes and the pinned tag recorded in `docs/tech-debts.md`. Synchronous `Ready`/`Advance`, a 10 ms election tick under a 100 ms heartbeat ([ADR 0007](decisions/0007-port-etcd-raft.md), [Raft shard](design.md#metadata-layer-metastore)).
+- [ ] **Raft port crate** (lib, `raft`). The etcd-raft v3.7.0 port moved from `spikes/raft-port/eraft` into `crates/raft` (package `rock-raft`, sans-IO), with the pedantic lint fixes and the test harness off `std::fs`. Each ported file keeps a short header: the etcd copyright line and "ported from etcd-raft v3.7.0, Apache License 2.0"; the file map and deviation list move from the file headers into `crates/raft/UPSTREAM.md`. The pinned tag goes into `docs/tech-debts.md` as a version pin, and `crates/raft/check-upstream.sh` lists the Go files changed since the pin ([ADR 0007](decisions/0007-port-etcd-raft.md)).
+- [ ] **Raft shard** (component, `core`). Wraps `rock-raft` in `on_event`: ticks from `ctx.now`, messages from `NetRecv`, payloads over 256 bytes as `IoBuf`s. Synchronous `Ready`/`Advance`, a 10 ms election tick under a 100 ms heartbeat ([Raft shard](design.md#metadata-layer-metastore)).
 - [ ] **Ported Raft tests** (test, `core`). etcd-raft's unit tests and datadriven testdata, compared byte for byte and rerun on every upstream tag update.
 - [ ] **Maelstrom harness** (test). A small I/O adapter that runs the Raft shard as a Maelstrom node; passes the linearizable key-value workload under partitions ([done-when checkpoint](design.md#learning-project)).
 - [ ] **Raft persistence in the disk log** (component, `core`). Entries and hard state join the round's record; an entry is dead to the cleaner once the memtable that applied it is flushed.

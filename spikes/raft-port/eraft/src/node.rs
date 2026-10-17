@@ -1,3 +1,4 @@
+// Copyright 2015 The etcd Authors
 // Ported from go.etcd.io/raft v3.7.0 (b867cf13f6bc0dae21204302df97bc2355c3af55),
 // node.go (the types only; the goroutine-based Node is not ported) and the
 // confChangeToMsg helper. Licensed under the Apache License 2.0.
