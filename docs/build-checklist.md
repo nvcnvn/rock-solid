@@ -24,12 +24,12 @@ Items are in build order within a phase. An item can start once the items it use
 
 **Disk log** ([On-disk format](design.md#on-disk-format), [ADR 0003](decisions/0003-one-log-per-disk.md))
 
-- [ ] **Segments** (component, `core`). Segment size min(64 MiB, disk ÷ 4096) rounded down to a power of two; segment header carries the format version and the stream tag. The tag leaves room for a chunk-slot layout for whole chunks without a format break ([open question](design.md#roadmap-and-open-questions)).
-- [ ] **Record codec** (component, `core`). Header block with per-4K CRC32C and a header checksum, capped at `max_group_commit_bytes`. Review with a property test: for every torn prefix and every subset of landed sectors, decoding returns the whole record or rejects it.
-- [ ] **Group commit** (component, `core`). One write and one flush per round, accepting records from many producers (chunk writes and any number of shards), so either thread-per-core shape stays open. Two streams. Review when the action trace shows exactly one `DiskFsync` per round.
-- [ ] **Recovery** (component, `core`). Load the last manifest, replay the log after it; memtables flush once `max_replay_bytes` of records follow the manifest.
-- [ ] **LSM tree, stage 1** (component, `core`). Memtable plus periodic full snapshots and manifests in the log, behind the interface stage 2 will implement.
-- [ ] **Chunk index** (component, `core`). Extent map `(pool, h, chunk_id, version, first block) → (location, block count, record header)`; rebuild by scanning record headers, punches included.
+- [x] **Segments** (component, `core`). Segment size min(64 MiB, disk ÷ 4096) rounded down to a power of two; segment header carries the format version and the stream tag. The tag leaves room for a chunk-slot layout for whole chunks without a format break ([open question](design.md#roadmap-and-open-questions)).
+- [x] **Record codec** (component, `core`). Header block with per-4K CRC32C and a header checksum, capped at `max_group_commit_bytes`. Review with a property test: for every torn prefix and every subset of landed sectors, decoding returns the whole record or rejects it.
+- [x] **Group commit** (component, `core`). One write and one flush per round, accepting records from many producers (chunk writes and any number of shards), so either thread-per-core shape stays open. Two streams. Review when the action trace shows exactly one `DiskFsync` per round.
+- [x] **Recovery** (component, `core`). Load the last manifest, replay the log after it; memtables flush once `max_replay_bytes` of records follow the manifest.
+- [x] **LSM tree, stage 1** (component, `core`). Memtable plus periodic full snapshots and manifests in the log, behind the interface stage 2 will implement.
+- [x] **Chunk index** (component, `core`). Extent map `(pool, h, chunk_id, version, first block) → (location, block count, record header)`; rebuild by scanning record headers, punches included.
 
 **ChunkStore and cleaner**
 

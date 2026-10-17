@@ -101,3 +101,68 @@ pub trait BufPool {
     /// Releases `buf` back to the pool so its capacity can be reused.
     fn free(&mut self, buf: IoBuf);
 }
+
+#[cfg(test)]
+pub(crate) mod test_pool {
+    use super::{BufPool, IoBuf, PoolExhausted};
+
+    /// Minimal pool for core unit tests; `sim::pool::HeapPool` is the checked one.
+    pub(crate) struct VecPool {
+        slots: Vec<Option<Vec<u8>>>,
+        pub(crate) capacity: usize,
+        used: usize,
+    }
+
+    impl VecPool {
+        pub(crate) const fn new(capacity: usize) -> Self {
+            Self {
+                slots: Vec::new(),
+                capacity,
+                used: 0,
+            }
+        }
+
+        pub(crate) fn live(&self) -> usize {
+            self.slots.iter().flatten().count()
+        }
+    }
+
+    impl BufPool for VecPool {
+        fn capacity(&self) -> usize {
+            self.capacity
+        }
+
+        fn used(&self) -> usize {
+            self.used
+        }
+
+        fn alloc(&mut self, len: usize) -> Result<IoBuf, PoolExhausted> {
+            if len > self.available() {
+                return Err(PoolExhausted {
+                    requested: len,
+                    available: self.available(),
+                });
+            }
+            self.used += len;
+            self.slots.push(Some(vec![0xA5; len]));
+            Ok(IoBuf::new(
+                u32::try_from(self.slots.len() - 1).unwrap(),
+                1,
+                len,
+            ))
+        }
+
+        fn as_slice(&self, buf: IoBuf) -> &[u8] {
+            self.slots[buf.slot() as usize].as_ref().unwrap()
+        }
+
+        fn as_mut_slice(&mut self, buf: IoBuf) -> &mut [u8] {
+            self.slots[buf.slot() as usize].as_mut().unwrap()
+        }
+
+        fn free(&mut self, buf: IoBuf) {
+            self.slots[buf.slot() as usize].take().unwrap();
+            self.used -= buf.len();
+        }
+    }
+}
