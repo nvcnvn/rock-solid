@@ -1,8 +1,8 @@
-# Rock Solid - a Rust Distributed Storage — Project Design
+# Rock Solid - a Go Distributed Storage — Project Design
 
 ## Goals
 
-Build a distributed storage system in Rust whose headline feature is **ReadWriteMany (RWX) shared filesystems** for a 3 to 10 node homelab Kubernetes cluster: many pods on many nodes mounting one directory, with no NFS gateway in the path, caching that stays correct when files are shared, and Longhorn-level ease of install. Block volumes come from the same core, at near-raw NVMe latency.
+Build a distributed storage system in Go ([ADR 0009](decisions/0009-write-in-go.md)) whose headline feature is **ReadWriteMany (RWX) shared filesystems** for a 3 to 10 node homelab Kubernetes cluster: many pods on many nodes mounting one directory, with no NFS gateway in the path, caching that stays correct when files are shared, and Longhorn-level ease of install. Block volumes come from the same core, at near-raw NVMe latency.
 
 **Target user:** homelab and small-cluster Kubernetes operators. They have several NVMe or SATA solid-state drives per node, 10 to 25 Gigabit Ethernet (GbE), and some nodes with Remote Direct Memory Access (RDMA) capable cards. For RWX today they choose between a Network File System (NFS) server (single server, fragile), Longhorn RWX (an NFS server pod in front of each volume), JuiceFS (needs an external metadata database and object store) and CephFS (heavy on RAM, CPU and operator knowledge).
 
@@ -27,7 +27,7 @@ Build a distributed storage system in Rust whose headline feature is **ReadWrite
 | `open` of a file | One round trip to the inode's owner (memory only, no disk write) |
 | Block 4K write at queue depth 1 | Around 0.1 ms (Vitastor class) on drives with power-loss protection; Ceph is around 1 ms. Consumer drives without it floor at about 1 ms per durable write ([NVMe flush spike](#appendix-nvme-flush-spike)) |
 
-**Learning goals:** Rust, the Storage Performance Development Kit (SPDK), the Data Plane Development Kit (DPDK) and RDMA, extended Berkeley Packet Filter (eBPF) tracing, plus distributed-systems correctness testing.
+**Learning goals:** Go for systems code, the Storage Performance Development Kit (SPDK), the Data Plane Development Kit (DPDK) and RDMA, extended Berkeley Packet Filter (eBPF) tracing, plus distributed-systems correctness testing.
 
 **Non-goals for v1:** Server Message Block (SMB) file sharing for macOS and Windows clients, GPU-cluster scale, shared-writable `mmap` across nodes, cross-directory hard links, a custom kernel module, and authentication or encryption between daemons. v1 trusts the cluster network: any host that can reach a daemon's port can read and write any volume.
 
@@ -115,13 +115,13 @@ The same daemon runs on every node. On storage nodes it serves chunks and MetaSt
 
 The ChunkStore is dumb, fast and versioned. It knows nothing about files, buckets or volumes.
 
-```rust
-trait ChunkStore {
-    async fn write(&self, c: ChunkId, off: u32, data: &[u8], expect_ver: Option<u64>) -> Result<u64>;
-    async fn punch(&self, c: ChunkId, off: u32, len: u32, expect_ver: Option<u64>) -> Result<u64>; // zero a range; the whole chunk deletes it
-    async fn read(&self, c: ChunkId, off: u32, len: u32, at_ver: Option<u64>) -> Result<Bytes>;
-    async fn seal(&self, c: ChunkId) -> Result<()>;      // now immutable -> eligible for erasure coding
-    async fn flush(&self, cs: &[ChunkId]) -> Result<()>; // durability barrier
+```go
+type ChunkStore interface {
+	Write(c ChunkID, off uint32, data []byte, expectVer *uint64) (uint64, error)
+	Punch(c ChunkID, off, n uint32, expectVer *uint64) (uint64, error) // zero a range; the whole chunk deletes it
+	Read(c ChunkID, off, n uint32, atVer *uint64) ([]byte, error)
+	Seal(c ChunkID) error     // now immutable -> eligible for erasure coding
+	Flush(cs []ChunkID) error // durability barrier
 }
 ```
 
@@ -129,7 +129,7 @@ trait ChunkStore {
 
 **Versions.** Every write and punch returns a new version. `expect_ver` gives compare-and-set on data. A primary keeps an old version only while a [snapshot](#snapshots-and-clones) pins it. A read at a frozen version (`at_ver`) needs no ordering against writes, so any PG member holding that version can serve it, and it never waits for a writer.
 
-**Reads see only acknowledged writes.** A version is *committed* once every live member of the chunk's PG holds it, which is also when its write is acknowledged. A read without `at_ver` returns the newest committed version, never one still being replicated. Otherwise a reader could see a write that a primary crash then loses, since the new primary may be a member that never received it. Until the new version commits, the previous one's blocks are still in the log and still mapped, so the read does not wait.
+**Reads see only acknowledged writes.** A version is *committed* once every live member of the chunk's PG holds it, which is also when its write is acknowledged. A read without `atVer` returns the newest committed version, never one still being replicated. Otherwise a reader could see a write that a primary crash then loses, since the new primary may be a member that never received it. Until the new version commits, the previous one's blocks are still in the log and still mapped, so the read does not wait.
 
 **Single order per chunk.** Each chunk has one primary that applies writes in one order. This is what makes RWX block and uncached shared files correct without any client-side protocol.
 
@@ -137,7 +137,7 @@ trait ChunkStore {
 
 **Fencing.** Each write carries the client's session ID. When a client session expires (see [Sessions and fencing](#sessions-and-fencing)), the control plane publishes it as fenced and chunk primaries reject its writes. The session's locks and cache rights are released only after every node acting as a primary has applied the fence. This stops a paused or partitioned client from writing after its locks and cache rights are gone.
 
-**Integrity.** Each 4K block, and each 4K block of an erasure-coded shard, carries a CRC32C checksum in its record's header in the [on-disk format](#on-disk-format), which catches bit rot, torn writes and misdirected writes.
+**Integrity.** Each 4K block, and each 4K block of an erasure-coded shard, carries a CRC32C checksum in its record's header in the [on-disk format](#on-disk-format), which catches bit rot, torn writes and misdirected writes. It is computed with Go's `hash/crc32`, which interleaves three SSE4.2 streams: 167 ns per 4 KiB block, against 1.2 µs for a table-driven implementation ([Go CPU spike](#appendix-go-cpu-per-operation-spike), C0).
 
 **Placement groups.** Chunks are not placed one by one. Each chunk hashes into one of a fixed number of placement groups (PGs) in its volume's [pool](#pools-and-redundancy), as in Ceph, and placement is decided per PG:
 
@@ -202,10 +202,10 @@ each round (what arrived from every producer during the last round, up to max_gr
 - **The chunk index maps extents.** Each entry maps a run of consecutive blocks, `(pool, h, chunk_id, version, first block) → (location, block count, record header)`, so a chunk written whole is one entry per record it spans: at least four, since a record holds at most `max_group_commit_bytes` (1 MiB), or about a million entries for a disk holding 1 TB of such chunks. The checksums stay in the record headers, and a read fetches its extent's header block alongside the data; hot header blocks stay cached. A chunk overwritten at random 4K holds one extent per write until the cleaner regroups its blocks, so a block volume can push a 1 TB disk toward 270 million entries, more than 10 GB.
 - **The log is the source of truth.** The chunk index and each MetaStore shard's state are log-structured merge (LSM) trees inside the log. An in-memory memtable holds what was applied since the last flush. A flush writes it to the log as an immutable sorted run, a manifest record lists the live runs, and compaction merges runs into new ones. Memtables are flushed once `max_replay_bytes` (default 64 MiB) of records follow the last manifest, which bounds replay after a crash. Replay time adds to restart time: fjall needed 2.8 s to replay a 64 MB journal ([KV engines spike](#appendix-kv-engines-spike)). If the chunk index is lost, a scan of the record headers rebuilds it. A [punch](#data-layer-chunkstore) is recorded in a record header like a write, so a rebuild cannot bring punched blocks or a deleted chunk back.
 - **Recovery.** The superblock gives the geometry. It is kept twice, in the first and the last block of segment 0, so one bad block cannot make the disk unreadable. A damaged copy is rewritten from block 0. When block 0 is unreadable, or holds this format's superblock with a bad checksum, recovery takes the copy, which the disk's size locates, and rewrites block 0; a disk therefore keeps the size it was formatted with. A block 0 of zeros or of another format may mean the disk was wiped or reused, since a partition table or a new filesystem leaves the end of segment 0 alone, so recovery writes nothing and reports the copy for an operator to restore ([ADR 0008](decisions/0008-repair-superblock-only-from-own-block-0.md)). Recovery reads every segment header, and the newest one names the manifest to start from: it lists each index's snapshot pieces and, per stream, where the next record went when the snapshots were taken. Recovery loads the snapshots, then replays the records after that point in LSN order. A segment header names the manifest that was newest when the segment opened, so replay can run up to a segment past `max_replay_bytes`, plus the records written while the checkpoint's snapshot streamed. A record that fails its checksums with no record after it was the round in flight, and is dropped. A damaged or missing record with later records after it is corruption: recovery reports it instead of cutting the log short, as [Protocol-Aware Recovery](https://www.usenix.org/conference/fast18/presentation/alagappan) argues. A scan that stops at a bad header reads the rest of its segment for later headers, so a damaged header cannot hide the records behind it; this reads the unused tail of each open segment at every start. A segment whose header reads as zeros was never written or was trimmed, and is free. One whose header is otherwise unreadable, or names another segment, is free only if none of its blocks holds a record header of this log. Otherwise it is quarantined: never reused, and reported for repair from a replica, as NILFS2 never allocates a segment marked erroneous. Its records are missing from replay like damaged ones: a single record past the end of the readable log may be the round in flight, and more than one is corruption.
-- **The LSM tree comes in two stages** behind one interface. The first keeps only memtables, saved by periodic full snapshots into the log. Each memtable entry is one allocation holding key and value, and a restart restores the tree by bulk build, about 0.1 s per million files. In a MetaStore shard a file costs about 270 B of memtable (attributes plus directory entry, Linux allocator), plus about 125 B per xattr, so a 16 GiB budget holds about 63 million file replicas: 21 million distinct files per node at three replicas ([MetaStore memory spike](#appendix-metastore-memory-spike)). A snapshot streams: it reads a frozen view of the memtable while applies go on, builds each piece at its final size and hands the log one piece at a time, so its peak is the tree plus one piece plus the entries changed while it runs. The second stage adds sorted runs, compaction, Bloom filters and a block cache, for when an index outgrows memory; prefix-compressed sorted runs take 135 B per file, 1.7× less than the memtable on the same allocator. File data, written mostly in whole chunks, fits the first stage; the fragmented index of a block volume does not, so the second stage lands before the block frontend.
+- **The LSM tree comes in two stages** behind one interface. The first keeps only memtables, saved by periodic full snapshots into the log. A memtable is a copy-on-write B+-tree of 4 KiB pages held in pointer-free slabs: a page holds a slot array and its entries, and pages refer to each other by `uint32` page number, so the garbage collector sees one pointer per 64 MiB slab. A tree of one heap allocation per entry cost a quarter to a third of the CPU in collection at 10 to 20 million files; the page tree costs under 1 ms per collection at any size and answers gets fastest ([Go memtable spike](#appendix-go-memtable-spike)). A file costs about 270 B of memtable with pages filled in create order (63% full) and 175 B after a restore in key order (98% full), plus about 125 B per xattr, so a 16 GiB budget holds about 63 million file replicas in create order: 21 million distinct files per node at three replicas ([MetaStore memory spike](#appendix-metastore-memory-spike)). A leaf redistributes into a neighbour before it splits, to raise the create-order fill. A restart restores the tree from the snapshot's pieces by appending in key order. A snapshot freezes the root page number; a write while it streams copies the pages it changes, so its peak is the tree plus the pages written meanwhile (22.5% for 100,000 updates on 10 million files), and the copies are freed when it ends. The second stage adds sorted runs, compaction, Bloom filters and a block cache, for when an index outgrows memory; prefix-compressed sorted runs take 135 B per file. A frozen memtable being written out as a sorted run is freed whole, so it may live in a Go arena ([ADR 0009](decisions/0009-write-in-go.md), rule 11). File data, written mostly in whole chunks, fits the first stage; the fragmented index of a block volume does not, so the second stage lands before the block frontend.
 - **Versions share blocks.** An overwrite appends only the blocks it writes. A version frozen by a [snapshot](#snapshots-and-clones) keeps its older index entries, so it shares every block it did not overwrite with the live version, without reference counts.
 - **Cleaning.** A block is live while the live version, a snapshot or an unflattened clone still maps to it. A Raft entry is dead once the memtable that applied it has been flushed, and a sorted run once compaction has replaced it. A manifest, its snapshot pieces and every record after its base stay live until a segment header naming a newer manifest is durable. The cleaner picks segments by cost-benefit (free space × age ÷ copy cost, as in the original log-structured file system), copies their live contents, grouping blocks by chunk, which also defragments chunks overwritten at random, and discards (TRIMs) the freed segments. Two guards keep it from livelocking, which the [cleaner spike](#appendix-cleaner-write-amplification-spike) saw without them: a victim must free more space than copying it costs, header blocks included, and age counts up to one disk capacity of writes at most, so old, nearly full segments such as snapshot data stop looking attractive. On skewed overwrites, cost-benefit with two streams writes 36 to 45% less than greedy cleaning; on uniform ones it writes 3 to 14% more.
-- **The cleaner runs beside the writer, not on it.** Its copying runs on a worker thread, never on the thread that owns the disk's chunk index and serves its writes. Inline, cleaning cost that thread 5.9 to 11 µs per write at 90 to 95% full and gave its writes a p99 of 250 to 540 µs; with a worker, 1.6 to 1.8 µs and about 6 µs ([parallel cleaner spike](#appendix-parallel-cleaner-spike)). The worker checks liveness, verifies each block's CRC32C and copies the block, then sends its moves to the index's owner. The owner applies a move only if the index still points at the block that was copied, so a write that lands during cleaning wins, and frees a victim only after all its moves are applied. A segment holding moves not yet applied is not a victim candidate. Applying costs the owner 42 to 72 ns per move, and the index stays single-writer. A disk gets one worker, and another only when writes stall for free segments: an idle extra worker costs CPU and speeds nothing up.
+- **The cleaner runs beside the writer, not on it.** Its copying runs on a worker goroutine, never on the event loop that owns the disk's chunk index and serves its writes. Inline, cleaning cost that loop 5.9 to 11 µs per write at 90 to 95% full and gave its writes a p99 of 250 to 540 µs; with a worker, 1.6 to 1.8 µs and about 6 µs ([parallel cleaner spike](#appendix-parallel-cleaner-spike)). The worker checks liveness, verifies each block's CRC32C and copies the block, then sends its moves to the index's owner. The owner applies a move only if the index still points at the block that was copied, so a write that lands during cleaning wins, and frees a victim only after all its moves are applied. A segment holding moves not yet applied is not a victim candidate. Applying costs the owner 42 to 72 ns per move, and the index stays single-writer. A disk gets one worker, and another only when writes stall for free segments: an idle extra worker costs CPU and speeds nothing up.
 - **Free space is recorded, and some of it is reserved.** Each manifest carries a segment usage table: state, live blocks and newest LSN per segment. A segment is free because the table says so, never because its header is unreadable, and an index rebuild can tell a segment the cleaner freed from a damaged one, as F2FS and the original log-structured file system do. A few segments stay in reserve: ordinary writes get `NoSpace` while only the reserve is free, and only checkpoints and the cleaner may use it, because freeing space needs both. ZFS's slop space and Btrfs's global reserve work the same way.
 - **Segment count matters, segment size does not.** At a fixed number of segments, write amplification is the same from 1 to 256 MiB per segment. What drives it near full is the share of the disk taken by the segments the cleaner keeps free: a reserve of 8 segments costs nothing on 4,096 segments, but on 256 it raised write amplification at 95% full from 17 to 70. So a segment is min(64 MiB, disk size ÷ 4096), rounded down to a power of two: 64 MiB on disks of 256 GiB and up, with 0.5 MiB of segment metadata per TiB. Large segments, written sequentially and TRIMmed whole, also suit the drive's own garbage collection.
 - **Headers are capacity.** Header blocks are dead to the cleaner, so near full they cost far more than their bytes: at 95% full, the headers of 64 KiB records with 32-byte entries raise write amplification from 11.4 to 17.3, and at 90% full, queue-depth-1 4K writes, one header block per data block, double it. The header encoding is part of the format and must stay compact: a write or punch entry takes 33 bytes, plus 4 bytes of CRC per data block. How full a disk may get is the pool's [`write_limit`](#volume-size-and-capacity).
@@ -340,10 +340,10 @@ Chunk IDs are computed, so freeing data never needs to find chunks: a purge list
 
 The MetaStore is an ordered, transactional key-value store, sharded into many small Raft groups, each with its own leader. Consensus is needed per key, not globally.
 
-```rust
-trait MetaStore {
-    async fn txn(&self, ops: Vec<Op>) -> Result<()>;   // compare-and-set, put, delete, all-or-nothing
-    async fn scan(&self, prefix: &[u8], after: &[u8], limit: usize) -> Result<Vec<(Key, Val)>>;
+```go
+type MetaStore interface {
+	Txn(ops []Op) error                                // compare-and-set, put, delete, all-or-nothing
+	Scan(prefix, after []byte, limit int) ([]KV, error)
 }
 ```
 
@@ -351,11 +351,13 @@ trait MetaStore {
 
 **Sharding (multi-Raft).** The key space is split into ranges, each its own 3-replica Raft group, with leaders spread across nodes:
 
-```rust
-async fn txn(ops: Vec<Op>) -> Result<()> {
-    let shards: HashSet<ShardId> = ops.iter().map(|o| shard_map.route(&o.key)).collect();
-    if shards.len() == 1 { shard(shards[0]).propose(ops).await }  // fast path: one Raft round
-    else { two_phase_commit(ops, shards).await }                 // slow path: rare by design
+```go
+func Txn(ops []Op) error {
+	shards := shardMap.Route(ops) // sorted and deduplicated
+	if len(shards) == 1 {
+		return shard(shards[0]).Propose(ops) // fast path: one Raft round
+	}
+	return twoPhaseCommit(ops, shards) // slow path: rare by design
 }
 ```
 
@@ -395,7 +397,7 @@ Cross-directory `rename` is the main file operation that takes this path.
 
 **Storage.** Each shard replica lives on one disk of its node. Its Raft log and its state, an LSM tree, are part of that disk's [log](#on-disk-format), so the daemon embeds no key-value engine and SPDK drives hold metadata too.
 
-**Raft shard.** The Raft shard is etcd-raft ported to Rust as a sans-IO state machine ([ADR 0007](decisions/0007-port-etcd-raft.md)), keeping etcd-raft's file layout and names so upstream fixes can be followed, and passing its upstream tests byte for byte. The port is its own crate, `rock-raft`, with its pinned upstream tag, file map and deviations in `crates/raft/UPSTREAM.md`; the shard in `core` wraps it in `on_event`, stores its entries in the disk log and carries large payloads as `IoBuf`s. Later the port is to be rewritten as idiomatic, optimized Rust, recorded in a new ADR when that starts; until then it tracks upstream releases. The driver feeds it ticks and messages, and it returns a `Ready`: entries to persist, messages to send and entries to apply. Ticks, messages and persistence all belong to the driver, so the driver can share flushes, batch messages and quiesce shards across every group on the node. The [Raft port spike](#appendix-raft-port-spike) measured 7.7 KiB of heap per group and 1.3 µs of CPU per idle message on an Apple M4 Pro, below raft-rs on the same host; openraft 0.9 used 150 to 670 KiB per replica and 11 tokio tasks per group ([multi-raft spike](#appendix-multi-raft-spike)). Election timeouts come from a seeded random number generator (RNG), one stream per replica, so the simulator replays the shard exactly. The driver calls `Ready` and `Advance` synchronously. etcd-raft's asynchronous storage writes stay off: with them a restored snapshot can overtake committed configuration changes still queued for apply, which panics upstream too ([study](../studies/etcd-raft-async-snapshot-apply/README.md)).
+**Raft shard.** The Raft shard is etcd-raft itself (`go.etcd.io/raft/v3`, pinned to v3.7.0), a sans-IO state machine already: the shard in `core` wraps its `RawNode` in `OnEvent`, stores its entries in the disk log and carries large payloads as `IoBuf`s. One patch, carried as a `replace` to a pinned fork, gives each replica a seeded source for election timeouts in place of upstream's `crypto/rand`, so the simulator replays the shard exactly ([ADR 0009](decisions/0009-write-in-go.md)); etcd-raft's own tests and datadriven testdata run on the fork. The driver feeds it ticks and messages, and it returns a `Ready`: entries to persist, messages to send and entries to apply. Ticks, messages and persistence all belong to the driver, so the driver can share flushes, batch messages and quiesce shards across every group on the node. The [Raft port spike](#appendix-raft-port-spike) measured 7.7 KiB of heap per group and 1.3 µs of CPU per idle message for its Rust port of the same code on an Apple M4 Pro; openraft 0.9 used 150 to 670 KiB per replica and 11 tokio tasks per group ([multi-raft spike](#appendix-multi-raft-spike)). The driver calls `Ready` and `Advance` synchronously. etcd-raft's asynchronous storage writes stay off: with them a restored snapshot can overtake committed configuration changes still queued for apply, which panics upstream too ([study](../studies/etcd-raft-async-snapshot-apply/README.md)).
 
 **Shard count.** A shard splits, at a slot boundary, once it holds more than `shard_split_size` (default 512 MiB, as CockroachDB's ranges), so a 3 to 10 node cluster runs tens of groups per node. Splitting by load comes with leader balancing. The Raft shard is still built to stay cheap at about 1,000 groups per node, so per-group cost never limits splitting:
 
@@ -405,17 +407,21 @@ Cross-directory `rename` is the main file operation that takes this path.
 
 **Group commit.** Each leader batches whatever arrived during the last round into one log entry and one network round. The entry joins the next record of its disk's log, so it shares one flush with every other shard and every chunk write on that disk:
 
-```rust
-loop {
-    let batch = inbox.drain_up_to(1024);
-    let entry = encode(&batch);
-    join!(disk_log.append(&entry), replicate_to_followers(&entry));
-    wait_for_majority().await;
-    for t in batch { memtable.apply(&t); t.reply_ok(); }
+```go
+for {
+	batch := inbox.DrainUpTo(1024)
+	entry := encode(batch)
+	diskLog.Append(entry) // the append and the sends go out in the same round
+	replicateToFollowers(entry)
+	waitForMajority()
+	for _, t := range batch {
+		memtable.Apply(t)
+		t.ReplyOK()
+	}
 }
 ```
 
-**Thread-per-core.** Each core owns a set of shards outright: their Raft state and LSM trees, with no locks between them. Tables that every I/O reads and that rarely change (the placement table, fenced sessions) are copied to each core and updated by message, so the hot path takes no locks either.
+**Event loop per core.** Each core's event-loop goroutine owns a set of shards outright: their Raft state and LSM trees, with no locks between them. Tables that every I/O reads and that rarely change (the placement table, fenced sessions) are immutable values published through `atomic.Pointer`: a reader loads the current one without a lock, an update publishes a new one, and the collector frees the old ([ADR 0009](decisions/0009-write-in-go.md), rule 13).
 
 **Reads.** Served by the leader under a time-based lease, so there is no extra round trip. Follower reads with the read-index check come later, if leaders get hot. Readers never wait for writers, except a reader that meets a cross-shard intent and must check its transaction record (above). A reader gets a point-in-time view of the shard's LSM tree without blocking the writer. The view pins the memtable and sorted runs it reads, so a view held open holds back the cleaner, and anything long-lived, such as a [snapshot's metadata](#snapshots-and-clones), is copied out instead.
 
@@ -481,11 +487,13 @@ Tier 1 already beats Longhorn RWX: there is no NFS pod per volume, so no single-
 
 Weka caches file data in the page cache by default. When several servers access a file and at least one writes, it bypasses the page cache and sends all I/O to the backend. We do the same, and the inode's owner tracks the mode:
 
-```rust
-enum CacheMode {
-    Exclusive { client: ClientId },          // one node: cache reads, daemon buffers writes
-    ReadShared { readers: Set<ClientId> },   // several nodes, none has written: everyone caches reads
-    WriteShared { members: Set<ClientId> },  // several nodes, one or more has written: nobody caches
+```go
+// Exclusive: one node; it caches reads and the daemon buffers its writes.
+// ReadShared: several nodes, none has written; everyone caches reads.
+// WriteShared: several nodes, one or more has written; nobody caches.
+type CacheMode struct {
+	Kind    ModeKind
+	Members []ClientID
 }
 ```
 
@@ -654,14 +662,33 @@ The object becomes visible atomically in that one transaction.
 
 ## Modularity: sans-IO core, pluggable drivers
 
-All protocol and replication logic, including the coherence protocol, is written as pure state machines that take events and return actions. They never call a syscall, tokio, SPDK or a clock. This one decision makes deterministic simulation possible and makes every input/output (I/O) backend swappable.
+All protocol and replication logic, including the coherence protocol, is written as pure state machines that take events and return actions. They never make a syscall, start a goroutine, use a channel, read a clock, range over a map or call SPDK; a `go vet` analyzer enforces this ([ADR 0009](decisions/0009-write-in-go.md), rule 8). This one decision makes deterministic simulation possible and makes every input/output (I/O) backend swappable.
 
-```rust
-impl ChunkReplica {
-    fn on_event(&mut self, ctx: &mut Context<'_, impl BufPool>, ev: Event) -> Vec<Action> { ... }
+```go
+// OnEvent appends its actions to out and returns it; the caller reuses out, so a call allocates nothing.
+func (r *ChunkReplica) OnEvent(ctx *Context, ev *Event, out []Action) []Action
+
+// Event and Action are tagged structs, not interfaces, so passing one never allocates.
+type Event struct {
+	Kind  EventKind // NetRecv, PeerLost, DiskDone, Timer
+	Peer  NodeID
+	Msg   Msg
+	IO    IOID
+	Err   DiskError
+	Timer TimerID
 }
-enum Event  { NetRecv(NodeId, Msg), PeerLost(NodeId), DiskDone(IoId, Result<(), DiskError>), Timer(TimerId) }
-enum Action { NetSend(NodeId, Msg), DiskRead(IoId, Lba, IoBuf), DiskWrite(IoId, Lba, IoBuf), DiskFsync(IoId), DiskTrim(IoId, Lba, u64), SetTimer(TimerId, Tick) }
+
+type Action struct {
+	Kind  ActionKind // NetSend, DiskRead, DiskWrite, DiskFsync, DiskTrim, SetTimer
+	Peer  NodeID
+	Msg   Msg
+	IO    IOID
+	LBA   LBA
+	Buf   IOBuf
+	Len   uint64
+	Timer TimerID
+	At    Tick
+}
 ```
 
 A driver executes `Action`s and feeds back `Event`s. Chunk data, Raft logs and indexes all live in the [disk log](#on-disk-format), so the disk driver is the only code that touches storage:
@@ -684,19 +711,23 @@ A driver executes `Action`s and feeds back `Event`s. Chunk data, Raft logs and i
   | `DiskRead`, `DiskWrite` | its `DiskDone` arrives |
   | `NetSend` | the peer's reply arrives, or `PeerLost` for that peer |
 
-  A send reports no completion of its own, so a peer answers every request that carries data, even if only to reject it. The driver releases a send's buffer before it delivers the reply (an RDMA driver drains send completions before receive completions) and releases all of a peer's buffers before it emits that peer's `PeerLost`. A timeout gives up on the result, not the buffer: the buffer stays allocated until the reply or `PeerLost`. One buffer can go to several peers in a fan-out and is freed once every one of them is done with it. `IoBuf` is a `Copy` handle, so the type system doesn't track any of this; the simulator's pool checks a per-slot generation and fills `alloc`ed memory with a poison byte, which catches stale handles and reads of unwritten memory.
+  A send reports no completion of its own, so a peer answers every request that carries data, even if only to reject it. The driver releases a send's buffer before it delivers the reply (an RDMA driver drains send completions before receive completions) and releases all of a peer's buffers before it emits that peer's `PeerLost`. A timeout gives up on the result, not the buffer: the buffer stays allocated until the reply or `PeerLost`. One buffer can go to several peers in a fan-out and is freed once every one of them is done with it. `IoBuf` is a plain value (a slot number and a generation), so the type system doesn't track any of this; the simulator's pool checks a per-slot generation and fills `alloc`ed memory with a poison byte, which catches stale handles and reads of unwritten memory.
 - **Every driver exposes a readiness fd and defaults to event mode.** SPDK's thread interrupt fd and the RDMA completion-channel fd both sit in the daemon's epoll loop. Busy polling is a separate opt-in for dedicated cores. SPDK's NVMe driver supports event mode on PCIe drives bound to `vfio-pci`, with one MSI-X eventfd per queue pair ([SPDK NVMe interrupt spike](#appendix-spdk-nvme-interrupt-spike)). Elsewhere (`uio_pci_generic`, or interrupts that can't be enabled) it silently attaches in polling mode, and a loop that sleeps on its fd then hangs. So the driver reads the mode back after attach and fails the disk with a clear error, unless the operator gave it a busy-polled core.
 - **Network connections fail as a unit.** A transport error on a connection becomes one `PeerLost` event, every outstanding request on it fails, and the driver reconnects. The core keeps its own deadlines and never relies on transport timeouts. `SetTimer` on an armed `TimerId` replaces its deadline, and there is no cancel: a `Timer` event can still arrive for a deadline that was replaced or no longer matters, so the core checks its own deadline against `now` before acting on one.
 - **Every pass of an event loop does bounded work.** A pass reads at most a fixed budget from each connection (256 KiB in the spike), the bytes queued for replication are capped and stop the loop reading clients while over the cap, and output buffers are rings or compacted in place rather than grown. A loop that reads each socket until it would block makes each pass slower the more is queued: under overload both the Rust and the Go replication harnesses ran away into multi-second stalls with up to 200 MB buffered and most cores idle, Go from 30,000 writes/s because growing a slice copies it, Rust above 90,000. With the budget, neither dropped a request up to 100,000 writes/s.
 
-**Crate layout (proposed)**
+**Event loops in Go.** Each loop is a goroutine running `epoll` through the `syscall` package on raw non-blocking descriptors, never `net.Conn` or a goroutine per connection, which cost 1.5 to 1.7× Rust's CPU per write against 1.07× for loops tuned as follows ([ADR 0009](decisions/0009-write-in-go.md), rules 1 to 6). `GOMAXPROCS` stays above the number of loops that block in `epoll_wait`, or the runtime retakes a blocked loop's processor and the loop resumes on another thread ([Go and Rust codegen spike](#appendix-go-and-rust-codegen-spike)). Reads and writes on non-blocking descriptors use `syscall.RawSyscall`; `epoll_wait` uses `syscall.Syscall`. Loops are not locked to OS threads, except an SPDK thread. A pass writes each descriptor once, with every frame ready for it.
 
-- `core`: state machines for ChunkStore replicas, placement, Raft shards, sessions and leases. No I/O dependencies.
+**Package layout (proposed)**
+
+One Go module:
+
+- `core`: state machines for ChunkStore replicas, placement, Raft shards, sessions and leases. Sans-IO.
 - `meta`: MetaStore shard logic, key layout, cross-shard transactions, and the inode owner (open registry, cache modes, recalls).
-- `drivers-uring`, `drivers-tcp`, `drivers-spdk`, `drivers-rdma`: one crate per backend, behind feature flags so the default build needs no SPDK.
+- `drivers/uring`, `drivers/tcp`, `drivers/spdk`, `drivers/rdma`: one package per backend. SPDK and RDMA use cgo, behind build tags, so the default build is pure Go and needs no SPDK.
 - `sim`: deterministic simulator, fault models and invariant checkers.
-- `frontend-file`, `frontend-block`, `frontend-s3`: protocol adapters onto `ChunkStore` and `MetaStore`.
-- `daemon`: the single binary that wires the drivers and frontends picked by flags.
+- `frontend/file`, `frontend/block`, `frontend/s3`: protocol adapters onto `ChunkStore` and `MetaStore`.
+- `cmd/rock-solid`: the single binary that wires the drivers and frontends picked by flags, built with PGO and `GOAMD64=v3`.
 - `csi`: Kubernetes CSI driver.
 
 **Transport negotiation.** Every node pair connects over TCP first, then upgrades to RDMA if both ends report a usable device. RDMA needs that TCP channel anyway, to exchange queue pair numbers and addresses. The daemon loads `libibverbs` at runtime, so one binary runs on nodes with and without rdma-core, and a missing library, device or memory-lock allowance means TCP, not an error. Mixed clusters work without configuration. Turning RDMA on at install (off by default) adds `IPC_LOCK` to the daemon pod so its buffer pool can be registered.
@@ -708,10 +739,10 @@ Most bugs live in interleavings that a real cluster hits rarely and can't reprod
 | Layer | What it catches | Tools |
 | --- | --- | --- |
 | 1. Deterministic simulation testing (DST) | Interleaving bugs across crashes, partitions, disk faults and lost recalls; reproducible from a seed | Own simulator over the sans-IO core |
-| 2. Protocol model checking | Design bugs in epoch changes (peering, read leases), sessions and fencing, cache-mode recalls, purges, snapshot cuts, cross-shard commit | `stateright` (models in plain Rust) |
+| 2. Protocol model checking | Design bugs in epoch changes (peering, read leases), sessions and fencing, cache-mode recalls, purges, snapshot cuts, cross-shard commit | TLA+ specifications checked with TLC, as etcd-raft checks its own |
 | 3. Consistency checking | Reads that no valid ordering could produce; close-to-open violations | Porcupine (Go), Jepsen Elle |
 | 4. Real-cluster fault injection | Kernel, FUSE, firmware, fsync and RDMA behavior | device-mapper, SPDK error/delay bdevs, eBPF error injection (`bpf_override_return`), `tc netem`, `nftables`, `kill -9`, power cuts |
-| 5. Heterogeneous matrix and property tests | Placement and rebalance bugs on mixed hardware | Generated matrix, `proptest` |
+| 5. Heterogeneous matrix and property tests | Placement and rebalance bugs on mixed hardware | Generated matrix, Go fuzzing and `testing/quick` |
 | 6. Conformance suites | POSIX and protocol compatibility gaps | `pjdfstest`, `fsx` (single and multi-client), `csi-sanity`, Kubernetes storage end-to-end tests, Ceph `s3-tests` |
 | 7. Performance regression | Latency, CPU and recovery regressions | `fio` and metadata benchmarks nightly → VictoriaMetrics → Grafana; eBPF off-CPU and latency profiles to explain regressions |
 
@@ -795,7 +826,7 @@ Each choice below favors a short hot path, a single binary and testable correctn
 | Decision | Chosen | Alternatives weighed | Why the chosen one |
 | --- | --- | --- | --- |
 | First product | RWX filesystem | Block first; S3 first | RWX is where homelab users have no good option; block alone competes with Longhorn v2 and Mayastor |
-| Language | Rust | Go; C++ (Ceph, 3FS) | A learning goal; memory safety; SPDK and RDMA are C libraries, reached through bindgen without cgo. Measured against Go 1.27, Go costs 1.1 to 1.25× the CPU on compute-bound code. On the replicated 4K write path it costs 1.14 to 1.21× when it runs the same epoll loop per node, and 1.5 to 1.7× with a goroutine per connection ([Go CPU spike](#appendix-go-cpu-per-operation-spike), [tuned Go spike](#appendix-tuned-go-spike)). Most of that is Go's runtime, not its compiler: with `GOMAXPROCS` above the number of goroutines that block in syscalls and raw syscalls for non-blocking reads and writes, Go comes to 1.07× ([Go and Rust codegen spike](#appendix-go-and-rust-codegen-spike)), while compiler options (PGO, `GOAMD64=v3`, bounds checks) are worth under 3.5%. Under rising open-loop load its p99 knee comes at a 1.2× lower rate, with the same throughput up to 100,000 writes/s ([open-loop latency spike](#appendix-open-loop-latency-spike)). Its collector's pauses stay under 1 ms, but a memtable with one pointer per entry costs 23 to 35% of the CPU in collection, 9% in a Go arena, so in Go the memtable would have to be pointer-free pages ([Go memtable spike](#appendix-go-memtable-spike)) |
+| Language | Go ([ADR 0009](decisions/0009-write-in-go.md)) | Rust; C++ (Ceph, 3FS) | Easier to read, review and extend, and the language of etcd-raft, the CSI tooling, go-fuse and Porcupine. Measured against Rust, its cost is 1.07× the CPU on the replicated write path with event loops on raw sockets, `GOMAXPROCS` above the blocking loops and raw syscalls ([Go and Rust codegen spike](#appendix-go-and-rust-codegen-spike)), 1.5 to 1.7× with a goroutine per connection ([tuned Go spike](#appendix-tuned-go-spike)), and 1.1 to 1.25× on compute-bound code ([Go CPU spike](#appendix-go-cpu-per-operation-spike)); the p99 knee came 1.2× earlier before that tuning, at the same throughput up to 100,000 writes/s ([open-loop latency spike](#appendix-open-loop-latency-spike)). Collector pauses stay under 1 ms, but a memtable with one pointer per entry spends 23 to 35% of the CPU in collection, so bulk structures are pointer-free pages ([Go memtable spike](#appendix-go-memtable-spike)). Rust was the first choice for memory safety without a collector and bindgen access to SPDK and RDMA; Go reaches them through cgo in two drivers |
 | File client | FUSE | Own kernel module (Weka, CephFS); NFS gateway pod (Longhorn RWX) | The spike shows FUSE can do per-file cache switching. FUSE is safe to iterate on, and a crash doesn't take down the kernel. A gateway funnels all traffic through one pod |
 | Where write-back lives | In the daemon | FUSE `writeback_cache` (kernel page cache) | The kernel option is mount-wide, hides writes from the daemon and can't be revoked per file, so write-shared mode couldn't be enforced (spike T9) |
 | Coherence | Tiers 1 → 2 → 3 | Close-to-open only (NFS, JuiceFS); full capabilities from the start (CephFS); caching left to the user (DAOS) | Ships useful RWX early; the Weka-style mode switch gets most of the benefit of capabilities with three states and one message type |
@@ -804,7 +835,7 @@ Each choice below favors a short hot path, a single binary and testable correctn
 | Core abstraction | Two narrow primitives: ChunkStore + MetaStore (Tectonic, Colossus, 3FS) | One rich object layer (Ceph RADOS) | Each frontend pays only for the metadata it needs |
 | Metadata store | Embedded multi-Raft | External FoundationDB (3FS), TiKV, Redis (JuiceFS), etcd | The single-binary goal rules out a second system to operate. An external etcd remains an option for early prototypes |
 | Consensus shape | Leader per shard, one shard at first | Single global Raft group; leaderless Egalitarian Paxos or Accord; quorum or CRDT with no consensus (Garage) | CAS is required for locks and rename, which rules out quorums and CRDTs. Per-shard leaders already remove the single-leader bottleneck |
-| Raft implementation | etcd-raft ported to sans-IO Rust, `Ready`-style ([ADR 0007](decisions/0007-port-etcd-raft.md)) | A Raft written from scratch; openraft 0.9; raft-rs 0.7; a vendored raft-rs fork | Only the `Ready` shape fits `on_event` and lets the driver share flushes, batch per node pair and quiesce shards. The port passes all 28 upstream interaction test files byte for byte and costs no more per group than raft-rs; a Raft from scratch would start without etcd-raft's years of fixes. openraft costs 150 to 670 KiB and 11 tasks per group and needs tokio; raft-rs fails cargo-deny and needs a test hook to be deterministic |
+| Raft implementation | etcd-raft (`go.etcd.io/raft/v3`) used directly, `Ready`-style, with one patch for seeded election timeouts ([ADR 0009](decisions/0009-write-in-go.md)) | A Raft written from scratch; etcd-raft ported to Rust ([ADR 0007](decisions/0007-port-etcd-raft.md), superseded); openraft 0.9; raft-rs 0.7 | Only the `Ready` shape fits `OnEvent` and lets the driver share flushes, batch per node pair and quiesce shards. Using upstream keeps its tests and years of fixes without a port to maintain; a Raft from scratch would start without them. openraft costs 150 to 670 KiB and 11 tasks per group and needs tokio; raft-rs fails cargo-deny and needs a test hook to be deterministic |
 | Cross-shard transactions | Transaction record plus intents (CockroachDB style) | Percolator with a central timestamp oracle (TiKV); a central sequencer (FoundationDB) | No extra central service; the commit point rides on one shard's Raft |
 | Redundancy | Per pool, chosen by the user: 1 to 3 copies, optionally erasure coding; defaults favor capacity without lowering failure tolerance | One scheme for the whole cluster; a replica count per volume (Longhorn) | Placement groups spread every volume over every disk, so a redundancy scheme has to belong to a whole set of PGs, not one volume. Pools also let one cluster mix scratch, block and media data |
 | Erasure coding of mutable data | Never in place: encode whole new chunks and idle chunks, overwrite only copies (Windows Azure Storage) | In-place overwrites of stripes (Ceph `allow_ec_overwrites`, Vitastor); erasure-code everything with redirect-on-write (Weka) | Avoids read-modify-write and the write hole without cluster-wide stripe garbage collection. Closing the write hole in place is hard: Vitastor's chaos test failed on every seed of its two-phase erasure-coded configurations before its [3.2.0 fixes](https://vitastor.io/en/blog/2026-08-31-v3.2.0.html) |
@@ -816,7 +847,7 @@ Each choice below favors a short hot path, a single binary and testable correctn
 | Metadata keys and inode IDs | Keys grouped by inode; inode IDs of a slot plus a sequence number, with shards split at slot boundaries ([ADR 0004](decisions/0004-key-layout-and-ids.md)) | One global transaction per create (3FS on FoundationDB, JuiceFS on TiKV); inodes inside directory entries (CephFS, HopsFS) | `create` and `mkdir` stay single-shard with no global transaction service, and `st_ino` stays stable |
 | Changing a volume's pool | In place: cut, read-through to the old pool, background copy ([ADR 0005](decisions/0005-move-volumes-between-pools-in-place.md)) | Snapshot and restore into a new PVC only | Keeps the PVC, so applications are not rebound; reuses the snapshot machinery |
 | Superblock repair | From its copy only while block 0 is unreadable or this format's ([ADR 0008](decisions/0008-repair-superblock-only-from-own-block-0.md)) | Repair from any valid copy (ZFS labels); copies used only by an offline tool (ext4, XFS, Btrfs) | A bad block 0 needs no operator, and a disk repartitioned or given to another system is never written; ZFS has rewritten its labels over a disk reformatted with UFS |
-| Cleaner threading | Worker threads copy; the index's owner applies their moves ([parallel cleaner spike](#appendix-parallel-cleaner-spike)) | Inline on the writing thread; workers that update a shared concurrent index | Inline cleaning cost the writer 5.9 to 11 µs per write and a p99 of 250 to 540 µs. A shared index saved the owner only 0.16 to 0.59 µs per write, and would need a concurrent index and memtable, which thread-per-core avoids |
+| Cleaner threading | Worker goroutines copy; the index's owner applies their moves ([parallel cleaner spike](#appendix-parallel-cleaner-spike)) | Inline on the writing thread; workers that update a shared concurrent index | Inline cleaning cost the writer 5.9 to 11 µs per write and a p99 of 250 to 540 µs. A shared index saved the owner only 0.16 to 0.59 µs per write, and would need a concurrent index and memtable, which thread-per-core avoids |
 | Block frontend | ublk locally, NVMe-oF/TCP remotely | NBD (single-threaded overhead); iSCSI (old, heavy) | ublk rides io\_uring with little overhead; NVMe-oF is the native remote protocol for NVMe |
 | Simulation | Own simulator over a sans-IO core | turmoil or madsim; Jepsen-only testing | We need a detailed disk and page-cache fault model, which those crates don't cover. Jepsen alone can't reproduce failures |
 | License | Apache 2.0 ([ADR 0001](decisions/0001-name-rock-solid-apache-2.md)) | AGPL (MinIO); network copyleft (Vitastor) | Copyleft with a network clause deters adopters |
@@ -826,9 +857,9 @@ Each choice below favors a short hot path, a single binary and testable correctn
 Build order puts the simulator before any real driver and ships RWX file storage as the first usable product. Each phase ends with something that runs and is tested. Phases 1 to 5 are broken into reviewable components, libraries and tests in the [build checklist](build-checklist.md).
 
 1. **Sans-IO core and simulator.** Single-node ChunkStore state machine with the per-disk log, extent index, punch, its cleaner and the first-stage LSM index (memtable plus snapshots), simulated disk with the full fault model, invariant checker.
-2. **Protocol models.** `stateright` models of epoch changes (peering and primary read leases), sessions and fencing with fence acknowledgments, cache-mode recalls, and purges, before writing the real protocols.
+2. **Protocol models.** TLA+ models, checked with TLC, of epoch changes (peering and primary read leases), sessions and fencing with fence acknowledgments, cache-mode recalls, and purges, before writing the real protocols.
 3. **Replication and placement.** Pools with 1 to 3 replicas and `min_live`, primary-based replication with reads of committed versions only, placement groups and the placement table computed by the control plane, with epochs, peering, read leases, failure and fail-slow detection, recovery per placement group. Fault-injected in simulation from the first commit.
-4. **Embedded MetaStore.** The etcd-raft port as the Raft shard, with its upstream tests, with group commit on the disk log, one shard only, with the sharded API from day one. Inodes, directory entries, sessions and locks, purge lists, slot byte counters and replay records.
+4. **Embedded MetaStore.** etcd-raft as the Raft shard, with its upstream tests, with group commit on the disk log, one shard only, with the sharded API from day one. Inodes, directory entries, sessions and locks, purge lists, slot byte counters and replay records.
 5. **Default drivers.** `io_uring` and kernel TCP behind the `Action` interface, with the driver contract (driver-owned buffer pools, readiness fd, `PeerLost`) in place from the start.
 6. **File frontend with Tier 1: first usable product.** FUSE client with daemon-side write-back, close-to-open, flock, orphans, unlink and truncate through purges, PVC size quotas, fencing, restart by descriptor handoff. CSI driver with RWX, fsGroup delegation and the descriptor holder. Passes `pjdfstest`, single and multi-client `fsx`, and `csi-sanity`. Nightly nemesis runs and power-cut tests.
 7. **Tier 2.** Inode owner with open registry (handed over on planned leader transfers) and cache modes, recalls, revalidation of old handles, mmap invalidations. Simulated FUSE clients and the spike harness in CI.
@@ -848,14 +879,12 @@ Each of these needs a measurement or a spike, not a design choice.
 - [ ] Flush latency of drive classes beyond the one DRAM-less consumer NVMe drive measured so far: consumer drives with DRAM, QLC drives, SATA SSDs, and drives with power-loss protection, where `durability: fua` may beat write plus flush. Measure the device-side split with eBPF on the `nvme_setup_cmd` and `nvme_complete_rq` tracepoints, which needs root.
 - [ ] Leader leases for [quiescent shards](#metadata-layer-metastore): without heartbeats, how does a leader keep its read lease? Node-liveness epochs (CockroachDB), or the per-node-pair leases that already back [primary read leases](#epoch-changes-and-failure-detection)?
 - [ ] Commit latency (p50 and p99) of a driver that collects every shard's `Ready` once per round. The multi-raft spike's naive loop had rounds of about 100 ms with 32,000 proposals in flight, so rounds must be bounded by size or time, or split per core.
-- [ ] Where the Raft port's write path loses 8 to 13% of throughput against raft-rs: entry clones into `Ready`, `BTreeMap` lookups or the extra `Ready` pass. Profile it before deviating further from upstream ([Raft port spike](#appendix-raft-port-spike)).
-- [ ] Disk logs under thread-per-core: does each disk's log belong to one core that collects the records of shards on other cores, or does each core append to its own segments on every disk? The first keeps one flush per disk per round; the second keeps cores independent but adds flushes. The multi-raft spike's harness used the second shape, one log per core shared by its shards, as TiKV's raft-engine does. On the measured drive two concurrent flush streams cost no latency, and four or more did ([NVMe flush spike](#appendix-nvme-flush-spike), N7).
+- [ ] Disk logs with an event loop per core: does each disk's log belong to one core that collects the records of shards on other cores, or does each core append to its own segments on every disk? The first keeps one flush per disk per round; the second keeps cores independent but adds flushes. The multi-raft spike's harness used the second shape, one log per core shared by its shards, as TiKV's raft-engine does. On the measured drive two concurrent flush streams cost no latency, and four or more did ([NVMe flush spike](#appendix-nvme-flush-spike), N7).
 - [ ] Two commit loops per disk, one per stream, so a hot 4K commit no longer waits for a cold 1 MiB record: on the consumer NVMe drive, does a hot commit next to a stream of 1 MiB cold records stay near 0.95 ms? On a bandwidth-bound VM disk it did not: 1,356 µs against 97 µs alone and 1,553 µs with alternating rounds, and the size of the cold records mattered more than the second loop ([stream overlap spike](#appendix-stream-overlap-spike)). If it does, recovery must accept one torn record per stream, and the streams must order their durability explicitly: a cleaner copy durable before its victim is freed, a manifest after the records it covers. `spikes/stream-overlap/run.sh` measures it.
 - [ ] Write amplification inside the drive under this log: does it fall with 16, 64 or 256 MiB segments written sequentially and TRIMmed whole? Measure with a drive's host-writes and NAND-writes SMART counters; the [cleaner spike](#appendix-cleaner-write-amplification-spike) models the host side only.
 - [ ] Segment layout for the stream of whole chunks and encoded shards. Whole files deleted at random cost a write amplification of 4.4 at 90% full with 64 MiB segments and 1.4 with 4 MiB ones, so that stream may want chunk-sized slots, TRIMmed per chunk.
 - [ ] Separating data by temperature beyond two streams, by age or by the number of times the cleaner moved it (F2FS multi-head logging, SepBIT): the best policy simulated stays 1.5 to 2.9× above perfect hot/cold separation at 80 to 95% full.
 - [ ] Cleaning cost of the Raft entries, sorted runs and compactions that share the log with chunk data, including the index updates the cleaner causes when it moves blocks. The cleaner spike counted chunk writes only.
-- [ ] CRC32C on the write path: `core` checksums each 4K block with the `crc` crate's 16 tables, about 1.2 µs per block, against about 0.2 µs for a hardware CRC32C that interleaves three streams (`crc32c` 0.6 built for x86-64-v2, or Go's `hash/crc32`) ([Go CPU spike](#appendix-go-cpu-per-operation-spike), C0): a tenth of a core at 100,000 blocks per second. Decide whether `core` takes `crc32c`, which does no I/O, and whether release builds target x86-64-v2, without which `crc32c` is no faster than a single-stream loop. ARMv8 needs its own measurement.
 - [ ] SPDK interrupt mode on a real NVMe drive: its latency cost at queue depth 1, and interrupts per I/O at queue depths 32 and 128, which decide whether the SPDK driver sets NVMe interrupt coalescing. `spikes/spdk-nvme-interrupt/run-real.sh` measures both on a spare drive; needed before phase 9.
 
 ## Learning project
@@ -864,16 +893,16 @@ Each learning track starts with a small throwaway exercise, then lands as a real
 
 | Track | Warm-up exercise | Lands in the project as | Roadmap phase |
 | --- | --- | --- | --- |
-| Rust for systems code | Write a sans-IO echo state machine plus a tiny simulator that drops and reorders messages | `core` and `sim` crates | 1 |
-| Correctness and consensus | Fly.io Gossip Glomers challenges on Maelstrom, through to the linearizable key-value one; then read the etcd-raft port against the Raft paper, running its tests | The Raft shard, MetaStore shards | 2, 4 |
-| Model checking | A `stateright` model of a 3-node lease: prove at most one holder per epoch | Models of placement epochs, sessions, cache-mode recalls | 2 |
+| Go for systems code | Write a sans-IO echo state machine plus a tiny simulator that drops and reorders messages; check it allocates nothing per event and passes the sans-IO analyzer | `core` and `sim` packages | 1 |
+| Correctness and consensus | Fly.io Gossip Glomers challenges on Maelstrom, through to the linearizable key-value one; then read etcd-raft against the Raft paper, running its tests | The Raft shard, MetaStore shards | 2, 4 |
+| Model checking | A TLA+ model of a 3-node lease, checked with TLC: at most one holder per epoch | Models of placement epochs, sessions, cache-mode recalls | 2 |
 | Consistency checking | Feed a recorded history from your simulator into Porcupine (Go) | History recorder plus checker in CI | 1, 3 |
-| io\_uring | Raw-device read/write benchmark with the `io-uring` crate, compared against fio | Default disk driver | 5 |
+| io\_uring | Raw-device read/write benchmark through an io_uring ring driven by raw syscalls from Go, compared against fio | Default disk driver | 5 |
 | FUSE | Extend the coherence spike: add a second inode and directory-entry invalidation | `frontend-file` | 6, 7 |
-| eBPF | bpftrace: a flush-latency histogram for your NVMe drives; count FUSE reads served by the daemon versus the page cache during spike tests T3 and T5 | Answer to the flush-latency open question; kernel-side checks in the spike CI; tracing and fault-injection tooling in Rust with `aya`. eBPF stays out of the data path: the verifier's limits make it the wrong home for storage logic | 1 (spike), 6 onward |
-| Kubernetes storage | A toy CSI driver that provisions directories, run through `csi-sanity` | `csi` crate | 6 |
-| SPDK | Run SPDK's NVMe perf tool and hello\_bdev against a QEMU emulated NVMe; then call one bdev from Rust via bindgen, studying Mayastor's Rust bindings | Opt-in SPDK disk driver | 9 |
-| RDMA | rdma-core's ibv\_rc\_pingpong over Soft-RoCE between two virtual machines; then a Rust RDMA write-and-completion loop | Opt-in RDMA network driver, transport negotiation | 9 |
+| eBPF | bpftrace: a flush-latency histogram for your NVMe drives; count FUSE reads served by the daemon versus the page cache during spike tests T3 and T5 | Answer to the flush-latency open question; kernel-side checks in the spike CI; tracing and fault-injection tooling in Go with `cilium/ebpf`. eBPF stays out of the data path: the verifier's limits make it the wrong home for storage logic | 1 (spike), 6 onward |
+| Kubernetes storage | A toy CSI driver that provisions directories, run through `csi-sanity` | `csi` package | 6 |
+| SPDK | Run SPDK's NVMe perf tool and hello\_bdev against a QEMU emulated NVMe; then call one bdev from Go through cgo, batching submissions and completions per call | Opt-in SPDK disk driver | 9 |
+| RDMA | rdma-core's ibv\_rc\_pingpong over Soft-RoCE between two virtual machines; then a Go RDMA write-and-completion loop through cgo | Opt-in RDMA network driver, transport negotiation | 9 |
 | Erasure coding | Reed-Solomon over GF(2^8) from scratch: encode, lose shards, decode; then benchmark it against ISA-L | Encoding in erasure-coded pools | 10 |
 | DPDK | DPDK's l2fwd or testpmd on a spare port or virtual function; measure the busy-poll core cost. Compare with AF_XDP, which skips most of the kernel network stack without hugepages or a dedicated card | Side experiment only; informs the opt-in decision | Any |
 | Performance work | Profile one hot path with perf and flame graphs; count CPU per operation | Nightly performance tracking | 6 onward |

@@ -1,6 +1,6 @@
 # 0007. Port etcd-raft for the Raft shard
 
-Status: Accepted (2026-10-17)
+Status: Superseded by [0009](0009-write-in-go.md)
 
 ## Context
 The MetaStore runs about 1,000 Raft groups on each node. The [per-disk log](0003-one-log-per-disk.md) needs a Raft implementation that leaves persistence to its caller, and the sans-IO core needs one that takes time, randomness and I/O from outside: `on_event(now, ev) -> Vec<Action>`.

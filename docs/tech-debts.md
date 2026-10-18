@@ -24,3 +24,8 @@
 - **Where:** `crates/core/src/log/recovery.rs`, `Recovery::on_segment_header`
 - **Why:** the segment usage table is not built yet, and reading every zeroed segment in full to check for records would read the whole disk at each start. A fault that zeroes the header of a segment holding records, such as a misdirected write of zeros, lets an index rebuild skip those records and group commit reuse the segment. A normal start still reports the missing records as corruption.
 - **Remove when:** the build checklist's **Segment usage table** item is reviewed; a segment is then free only because the table says so.
+
+## Workaround: the phase 1 code is still Rust
+- **Where:** `crates/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `clippy.toml`, `clippy-io.toml`, `deny.toml`, `rustfmt.toml`, `scripts/lint.sh`, the Rust section of `CLAUDE.md`, `.claude/skills/sans-io`
+- **Why:** [ADR 0009](decisions/0009-write-in-go.md) moved the project to Go after the disk log, group commit, recovery, the stage 1 LSM tree and the chunk index were built in Rust. Until their Go packages pass the same review, the Rust code is the only working implementation and the Rust tooling checks it. The workarounds above that name `crates/core` are in this code.
+- **Remove when:** the build checklist's **Port to Go** items are reviewed. Then delete `crates/` and the Rust tooling, give `scripts/lint.sh`, `CLAUDE.md` and the sans-IO skill their Go rules, and carry each workaround above into the Go package that keeps it or delete it.
