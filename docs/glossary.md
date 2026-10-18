@@ -110,7 +110,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Copy-on-write (COW).** Never modifying shared data in place: a write puts new data elsewhere and repoints the writer, so whoever still points at the old data (a snapshot, a reader) keeps seeing it.
 
-**Freeze.** The step that preserves a chunk's current version for a snapshot when the first write after the snapshot arrives. The frozen version keeps pointing at the old blocks.
+**Freeze.** The step that preserves a chunk's current version for a snapshot when the first write after the snapshot arrives. The frozen version keeps pointing at the old blocks. A chunk first written after a snapshot freezes version 0, the absent chunk, so the snapshot reads it as never written.
 
 **Clone, restore, read-through, flatten.** A restore creates a new volume from a snapshot, and a clone creates one from a live volume. Neither copies data at first: a read of a block the new volume has not written **reads through** to the source. **Flatten** copies the remaining blocks in the background and then drops the link to the source.
 
@@ -290,7 +290,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **NFS, SMB, Samba.** Network File System and Server Message Block are network file-sharing protocols. Both put a server between clients and storage, which is the bottleneck rock-solid's RWX avoids. Samba is the open-source SMB server.
 
-**ublk, NVMe-oF, NBD, iSCSI.** Ways to present a block device. ublk lets a user-space process (the daemon) serve a local block device through io_uring. NVMe over Fabrics (NVMe-oF) and iSCSI expose a block device over the network; NBD is Linux's simple network block device.
+**ublk, NVMe-oF, NBD, iSCSI.** Ways to present a block device. ublk lets a user-space process (the daemon) serve a local block device through io_uring. NVMe over Fabrics (NVMe-oF) and iSCSI expose a block device over the network; NBD is Linux's simple network block device. ublk's **user recovery** keeps the device and holds its I/O while the daemon restarts, and with **reissue** hands the requests the dead daemon held to its successor.
+
+**Incarnation.** One run of a daemon process, named by its start time. A primary that has seen a newer incarnation of a client's session rejects the older one's writes, so bytes a dead daemon left on the wire cannot land after its successor's. See [Daemon restart and upgrade](design.md#daemon-restart-and-upgrade).
 
 **S3, object, bucket.** S3 is Amazon's object-storage protocol, which many systems implement. An object is a whole blob written at once under a key; a bucket holds objects.
 

@@ -1,0 +1,77 @@
+--- ../../internal/chunkstore/index.go	2026-10-18 16:32:39.719168544 +0000
++++ absent/index.go	2026-10-18 16:47:30.223951809 +0000
+@@ -1,6 +1,6 @@
+-// Package chunkstore is the data layer of one disk: the chunk index over the disk log, and later
+-// the replica primary, pools, placement, peering and failure detection.
+-package chunkstore
++// Package absent is internal/chunkstore/index.go with a freeze of version 0 that records a chunk
++// as absent before a snapshot cut. See ../README.md.
++package absent
+ 
+ import (
+ 	"bytes"
+@@ -35,8 +35,8 @@
+ var (
+ 	// ErrReservedPool reports a record entry for RecordPool.
+ 	ErrReservedPool = errors.New("chunkstore: pool reserved for the index")
+-	// ErrFrozenLive reports a freeze of version 0, which names the live map.
+-	ErrFrozenLive = errors.New("chunkstore: freeze of version 0")
++	// ErrFrozenLive reports a freeze of version 0, the absent chunk, for a chunk that exists.
++	ErrFrozenLive = errors.New("chunkstore: freeze of version 0 of an existing chunk")
+ 	// ErrBadKey reports a key that is not an extent's.
+ 	ErrBadKey = errors.New("chunkstore: not an extent key")
+ )
+@@ -180,8 +180,10 @@
+ 		if e.Kind != disklog.EntryBlob && e.Pool == RecordPool {
+ 			return ErrReservedPool
+ 		}
+-		if e.Kind == disklog.EntryFreeze && e.Version == 0 {
+-			return ErrFrozenLive
++		if e.Kind == disklog.EntryFreeze && e.Version == 0 && !x.absentMarked(e.Pool, e.Chunk) {
++			if _, ok := x.Chunk(e.Pool, e.Chunk); ok {
++				return ErrFrozenLive
++			}
+ 		}
+ 	}
+ 	for i := range ev.Entries {
+@@ -342,6 +344,9 @@
+ // snapshot's cut carry its epoch, or the live map when none is.
+ func (x *Index) LookupAt(pool core.PoolID, c core.ChunkID, b uint16, epoch uint64) (Extent, bool) {
+ 	if v, ok := x.FrozenAt(pool, c, epoch); ok {
++		if v == 0 {
++			return Extent{}, false
++		}
+ 		return x.lookup(pool, c, v, b)
+ 	}
+ 	return x.Lookup(pool, c, b)
+@@ -359,8 +364,19 @@
+ 	return best, found
+ }
+ 
+-// frozen appends each frozen version of the chunk and its freeze epoch.
++// absentMarked reports whether the chunk holds an absent marker, a freeze of version 0.
++func (x *Index) absentMarked(pool core.PoolID, c core.ChunkID) bool {
++	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), 0)
++	_, ok := x.tree.Get(x.key)
++	return ok
++}
++
++// frozen appends each frozen version of the chunk and its freeze epoch, the absent version 0 first.
+ func (x *Index) frozen(dst []uint64, pool core.PoolID, c core.ChunkID) []uint64 {
++	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), 0)
++	if v, ok := x.tree.Get(x.key); ok {
++		dst = append(dst, 0, binary.LittleEndian.Uint64(v))
++	}
+ 	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), 1)
+ 	x.tree.Iter(&x.it)
+ 	for ok := x.it.SeekGE(x.key); ok && bytes.HasPrefix(x.it.Key(), x.key[:chunkKeySize]); {
+@@ -394,6 +410,9 @@
+ 	moved := 0
+ 	for i := 0; i < len(x.vers); i += 2 {
+ 		v := x.vers[i]
++		if v == 0 && i+2 < len(x.vers) {
++			continue
++		}
+ 		e, ok := x.lookup(pool, c, v, first)
+ 		if !ok || e.LBA == 0 || e.BlockLBA(first) != from || int(first)+int(count) > e.end() || count == 0 {
+ 			continue

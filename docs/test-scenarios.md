@@ -483,12 +483,21 @@ the model's run through recovery, replay the records after its replay LSN, resum
   moved blocks; once the maps point elsewhere it is dropped. A write that replaced the live block
   leaves only the frozen map to move.
 - A record with an entry for pool 2^32 − 1, which the index keeps record counts under, or with a
-  freeze of version 0, which names the live map, is refused whole.
+  freeze of version 0 of a chunk that exists and holds no absent version, is refused whole.
+- Absent freeze: a record with freeze(chunk 9, v0, epoch 1) and a 1-block write v1 leaves chunk 9's
+  entry at v1, epoch 1, and a read at epoch 1 finds nothing. A second write at epoch 1 carries no
+  freeze. After cut 2, a write freezes v1 at epoch 2: a read at epoch 1 still finds nothing, and one
+  at epoch 2 finds v1. The record applied again changes nothing.
 - [property] Seed 22, 20 runs of 300 random writes, punches and freezes over 3 chunks of 64 blocks,
   with a cleaner move of a live or frozen block after one record in four: each move changes as many
   maps as the model holds the block at its location, every block, live and at every snapshot epoch,
   reads the version and location a model of whole-map copies holds, and the invariants hold after
-  every step.
+  every step. The runs include snapshot cuts and chunks created after them, as the
+  [chunk epochs spike](design.md#appendix-chunk-epochs-spike)'s E3 does.
+- [property] Replay past pending writes (chunk epochs spike R1, 200 seeds): a primary that maps
+  writes at commit, a chunk's in version order, with cleaner moves and checkpoints whose replay
+  point is its oldest pending write, restarts from the checkpoint's runs plus every record from the
+  replay point, and reads every block, live and at every snapshot epoch, as a rebuild does.
 - [property] On a 1 GiB simulated disk (16-block records, a checkpoint every 96 blocks of records),
   seeds 0-3, three generations of 150 rounds of writes, punches and freezes, with checkpoints,
   multi-piece runs, carried runs and compactions: recovery from the manifest's runs plus replay, and
