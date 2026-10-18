@@ -214,7 +214,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Log sequence number (LSN).** A record's position in the log's order. "Everything after LSN 5000" names exactly which records a recovery must replay.
 
-**Stream.** One of two sequences of segments the log appends to, separating data that changes often from data that rarely does, which makes cleaning cheaper.
+**Stream.** One of three sequences of segments the log appends to: hot (new writes), cold (cleaner copies and shards) and metadata (sorted runs, compactions, manifests). Each segment holds one kind of data, so it tends to empty all at once, which keeps cleaning cheap.
+
+**Chunk slot.** A chunk-sized place in a slot segment holding one whole chunk's data. It is freed when the chunk is rewritten or deleted, so whole chunks never need cleaning. See [On-disk format](design.md#on-disk-format).
 
 **Superblock.** The block at the start of the disk that says how the rest is laid out. rock-solid keeps a second copy so one bad block cannot make a disk unreadable; see [Superblock repair](design.md#superblock-repair).
 

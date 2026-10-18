@@ -1,0 +1,8 @@
+# Intel(R) Xeon(R) Processor @ 2.10GHz, 4 vCPUs (shared with other benchmarks), 16 GiB RAM; kernel 6.18.44-fc-v139; rustc 1.97.0 (2d8144b78 2026-07-07); Python 3.13.16; 2026-10-18
+# S4 rerun with run counts in the error: compaction=stcs (the design's adjacent-only buckets) vs tiered, uniform 4K, u=0.8, chunk index on
+$ cleaner-streams wl=uniform u=0.8 meta=1 compaction=stcs warm=4 windows=2
+
+thread 'main' (26289) panicked at src/main.rs:819:9:
+cleaner cannot make progress: victims are full (live 0.9863 of disk, chunk-index runs 13025 holding 0.1846 of disk)
+$ cleaner-streams wl=uniform u=0.8 meta=1 compaction=tiered warm=4 windows=2
+RUN tag=S4:tiered wl=uniform u=0.800 pol=cb sep=Base streams=2 seg_mb=4 segs=4096 disk_gb=16 rec_kb=64 io_kb=4 slots=0 slot_hdr_in_log=0 whole_f=0.5 whole_w=0.5 whole_stream=0 file_chunks=16 writers=1 meta=1 raft_ratio=0 meta_live=0 raft_stream=0 run_stream=1 compaction=tiered hot=0.8/0.2 | wa=4.8690 chunk_wa=4.5122 copies_per_user=3.4075 hdr_per_user=0.1107 raft_per_user=0.0000 runflush_per_user=0.0556 runcompact_per_user=0.2844 manifest_per_user=0.0060 blobmove_per_user=0.0048 slothdr_per_user=0.0000 idx_user_entries_per_write=2.0625 idx_clean_entries_per_user=3.5014 victim_u=0.7008 u_data=0.7998 u_total=0.8169 avg_free=8.2 slot_segs=0.0 slot_occ=0.0000 ell=1137686 runs=16/0 windows=[4.883,4.855] spread=0.0056 steady=OK secs=14.1
