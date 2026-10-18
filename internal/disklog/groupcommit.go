@@ -216,10 +216,12 @@ func isManifestKind(e *Entry) bool {
 	return e.Kind == EntryBlob && (e.BlobKind == BlobManifest || e.BlobKind == BlobManifestPiece)
 }
 
-// CheckpointIndex names an index a checkpoint covers and the LSN after which records replay into it.
+// CheckpointIndex names an index a checkpoint covers, the LSN after which records replay into it,
+// and the runs it already holds durably, which the manifest names again before the runs written now.
 type CheckpointIndex struct {
 	Owner     uint32
 	ReplayLSN uint64
+	Runs      []BlobRef
 }
 
 type queued struct {
@@ -558,10 +560,11 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 	}
 	m := Manifest{BaseLSN: l.durableLSN, Indexes: make([]ManifestIndex, len(indexes))}
 	for i, ix := range indexes {
-		if ix.ReplayLSN > l.durableLSN || slices.ContainsFunc(indexes[:i], func(o CheckpointIndex) bool { return o.Owner == ix.Owner }) {
+		if ix.ReplayLSN > l.durableLSN || slices.ContainsFunc(indexes[:i], func(o CheckpointIndex) bool { return o.Owner == ix.Owner }) ||
+			slices.ContainsFunc(ix.Runs, func(r BlobRef) bool { return r.Segment == 0 || r.LSN > l.durableLSN }) {
 			return ErrMalformed
 		}
-		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN}
+		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Runs: slices.Clone(ix.Runs)}
 	}
 	m.Segments = l.usageRows()
 	l.cp = &checkpoint{manifest: m, replayAtBegin: l.replayBytes}

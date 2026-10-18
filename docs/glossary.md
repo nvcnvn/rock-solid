@@ -230,6 +230,12 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Memtable flush.** Writing a memtable out as a sorted run. Unrelated to a drive flush, though both make data durable.
 
+**Removal marker.** What an LSM tree writes to delete a key: an entry saying "deleted", since the older runs holding the key are immutable. It hides the key in every older run until a compaction that includes the oldest run drops it with them. Other engines call it a tombstone, the word rock-solid keeps for a deleted chunk.
+
+**Run piece.** A sorted run is written to the log in pieces of at most one record each; the last, the root, lists the others, so a manifest names a run by its root. See [The LSM tree](design.md#on-disk-format).
+
+**Fence pointer, prefix compression.** A run is cut into blocks, and the first key of each block is a fence pointer: binary search over them finds the one block that can hold a key. Inside a block, each key is stored as the bytes it shares with the key before it plus the rest, which shrinks sorted keys with long common prefixes; every 16th key, a restart point, is stored whole so a search can start there. This is LevelDB's block format, which Pebble and RocksDB keep.
+
 **Bloom filter.** A small structure that answers "is this key possibly in this run?" with no false negatives and a few false positives, so a lookup can skip runs that cannot hold its key.
 
 **B+-tree.** A sorted tree whose nodes are fixed-size pages, the classic structure for indexes. rock-solid's memtable is one, built **copy-on-write** so a reader can keep a consistent view while the writer goes on.

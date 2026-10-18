@@ -68,7 +68,7 @@ func AppendManifest(dst []byte, m *Manifest) []byte {
 		dst = binary.LittleEndian.AppendUint64(dst, ix.ReplayLSN)
 		dst = binary.LittleEndian.AppendUint32(dst, uint32(len(ix.Runs)))
 		for _, r := range ix.Runs {
-			dst = appendBlobRef(dst, r)
+			dst = AppendBlobRef(dst, r)
 		}
 	}
 	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(m.Segments)))
@@ -153,7 +153,7 @@ func AppendManifestPiece(dst []byte, earlier []BlobRef, rest []byte) ([]byte, er
 	dst = binary.LittleEndian.AppendUint16(dst, FormatVersion)
 	dst = binary.LittleEndian.AppendUint16(dst, uint16(len(earlier)))
 	for _, r := range earlier {
-		dst = appendBlobRef(dst, r)
+		dst = AppendBlobRef(dst, r)
 	}
 	return append(dst, rest...), nil
 }
@@ -181,7 +181,8 @@ func DecodeManifestPiece(b []byte, earlier []BlobRef) ([]BlobRef, []byte, error)
 	return earlier, r.b, nil
 }
 
-func appendBlobRef(dst []byte, r BlobRef) []byte {
+// AppendBlobRef appends the encoded reference.
+func AppendBlobRef(dst []byte, r BlobRef) []byte {
 	dst = binary.LittleEndian.AppendUint32(dst, r.Segment)
 	dst = binary.LittleEndian.AppendUint32(dst, r.Block)
 	dst = binary.LittleEndian.AppendUint64(dst, r.LSN)
@@ -193,7 +194,7 @@ type reader struct {
 	bad bool
 }
 
-var zeroField [8]byte
+var zeroField [BlobRefSize]byte
 
 func (r *reader) take(n int) []byte {
 	if r.bad || len(r.b) < n {
@@ -205,10 +206,18 @@ func (r *reader) take(n int) []byte {
 	return p
 }
 
-func (r *reader) left() int   { return len(r.b) }
-func (r *reader) u16() uint16 { return binary.LittleEndian.Uint16(r.take(2)) }
-func (r *reader) u32() uint32 { return binary.LittleEndian.Uint32(r.take(4)) }
-func (r *reader) u64() uint64 { return binary.LittleEndian.Uint64(r.take(8)) }
-func (r *reader) blobRef() BlobRef {
-	return BlobRef{Segment: r.u32(), Block: r.u32(), LSN: r.u64(), Entry: r.u16()}
+func (r *reader) left() int        { return len(r.b) }
+func (r *reader) u16() uint16      { return binary.LittleEndian.Uint16(r.take(2)) }
+func (r *reader) u32() uint32      { return binary.LittleEndian.Uint32(r.take(4)) }
+func (r *reader) u64() uint64      { return binary.LittleEndian.Uint64(r.take(8)) }
+func (r *reader) blobRef() BlobRef { return DecodeBlobRef(r.take(BlobRefSize)) }
+
+// DecodeBlobRef decodes the reference in the first BlobRefSize bytes of b.
+func DecodeBlobRef(b []byte) BlobRef {
+	return BlobRef{
+		Segment: binary.LittleEndian.Uint32(b),
+		Block:   binary.LittleEndian.Uint32(b[4:]),
+		LSN:     binary.LittleEndian.Uint64(b[8:]),
+		Entry:   binary.LittleEndian.Uint16(b[16:]),
+	}
 }

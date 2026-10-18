@@ -9,3 +9,8 @@
 - **Where:** `go.mod`; `ChunkID.Hash` in `internal/core/ids.go`
 - **Why:** the PG hash is disk format, and XXH3-64 is not in the standard library. The module is pure Go with assembly for amd64 and matches the reference XXH3 output; its one indirect dependency, `klauspost/cpuid`, selects the assembly path.
 - **Remove when:** never removed, only bumped, and only after `TestChunkIDGoldenVectors` passes on the new version, since a hash change would move every chunk.
+
+## Workaround: LSM pages and runs on the Go heap
+- **Where:** `pages` in `internal/lsm/page.go`; the blocks of `run` in `internal/lsm/run.go`
+- **Why:** memtable pages and runs belong in slabs mapped outside the Go heap ([Runtime in Go](design.md#runtime-in-go)), which the event loop's off-heap slabs provide, and those do not exist yet. Until then they are pointer-free Go slices: the collector does not scan them (0.24 ms per collection at 20 million entries) but counts them toward its heap goal, and runs are freed by the collector rather than by hand once no view holds them.
+- **Remove when:** the off-heap slabs of `internal/loop` exist; the page store takes its slabs from them and runs are released when the last view holding them closes.

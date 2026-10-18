@@ -254,7 +254,10 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   usage table of segment 1 alone: used, 6 live blocks (the two writes' data, not their headers),
   newest LSN 2. LSN 3 is not counted and segment 2, opened after begin, is not listed.
   The bytes left to replay are the 8 record blocks of LSNs 3 to 5.
-- A checkpoint naming one owner twice, or a replay LSN past the durable LSN, is Malformed.
+- A checkpoint naming one owner twice, or a replay LSN past the durable LSN, is Malformed, as is
+  one carrying a run in segment 0 or past the durable LSN. A checkpoint carrying a durable run names
+  it first, then the run whose root it writes, and a change to the caller's slice after the begin
+  does not reach the manifest.
 - The next segment opened after a checkpoint (segment 3, filled by 40-block writes) carries the
   manifest's position in its header.
 - Manifest in pieces: with 3-block rounds (4 KiB max blob), a checkpoint of 500 runs writes the
@@ -397,48 +400,102 @@ the model's run through recovery, replay the records after its replay LSN, resum
 
 ## LSM tree
 
+- Blocks (from Pebble's `sstable/rowblk` tests, a7b8321871e3): "apple", "apricot", "banana" with
+  empty values encode to Pebble's golden bytes, and a seek to each of its 14 probe keys lands on the
+  same entry; an empty block is one restart at 0. [property] Seed 31, 300 blocks of up to 100 keys
+  across restarts: seek and floor, strict or not, agree with a sorted list. A truncated block,
+  unsorted or repeated keys, an empty value, an unknown kind, or a restart past the entries is rejected.
 - Get, replace and prefix scan: keys "ab", "a", "abc", "b", "aa": scan "a" returns a, aa, ab, abc in
   order; scan "ab" returns 2; inserting "b" again replaces its value and leaves 5 entries.
+- [property] Seeds 0-11, 2,000-6,000 random puts and removes, keys and values up to the limits in
+  every third seed so pages split at every level: gets, floors and a full scan read as a map, inner
+  keys equal their child's smallest key, and every page in use is reachable.
+- [property] Views: seeds 0-5, 15,000 writes with views opened and closed at random read as the map
+  did when each opened; once all close no page is left copied away, and a write then copies nothing.
+- Keys inserted in random order leave leaves at least 75% full (80% measured; 63% without
+  redistribution in the Go memtable spike).
 - [property] Flush to a run at any piece size: seed 11, 50 trees from up to 200 random inserts and
-  removes (keys 1-40 B, values 0-59 B), max piece 106-4,105 B. Every piece is non-empty, within the
-  limit and sized exactly. Loading the pieces as a run into an empty tree and reading every key
-  equals the original.
-- [property] A flush keeps its frozen view: seed 12, 200 trees from up to 300 mutations (keys 1-3 B,
-  1/4 removes), max piece 70-569 B. Up to 20 random inserts/removes run between pieces, on keys before
-  and after the cursor, into the new memtable. The run equals the tree as of the freeze, the frozen
-  pages are freed after the last piece, and the tree still answers every key.
+  removes (keys 1-40 B, values 0-59 B), max piece 123-4,105 B. Every piece is non-empty, within the
+  limit and sized exactly, only the root lists references. Loading the pieces as a run into an empty
+  tree reads as the original. A run needing more pieces than its root can list fails with TooLarge,
+  checked to be so, in at most 15 trials.
+- [property] A flush keeps its frozen view: seed 12, 200 trees from up to 300 mutations (keys 1-3 B
+  over 5 letters, values 0-20 B, 1/4 removes), max piece 256-2,055 B. Up to 20 random inserts and
+  removes run between pieces, on keys before and after the cursor, into the new memtable. The run
+  equals the tree as of the freeze, the frozen pages are freed after the last piece, and the tree
+  still reads as the map.
+- A view opened during a flush keeps reading the frozen memtable after the flush ends, and its
+  pages are freed only once the view closes.
 - Memtable over runs: after a flush, a key only in the run reads from the run; a key written after the
   flush reads the memtable's value; a key removed after the flush reads as absent; a scan merges the
-  memtable and runs in key order with no duplicates. A get touches the memtable and each run at most once.
-- Compaction: three runs with overlapping keys merge into one run equal to their merge, newest value
-  winning and removed keys dropped. A view opened before the compaction still reads the three runs, and
-  the old runs are released only after that view closes.
-- Restore is runs plus replay: after two flushes and more writes, loading both runs and replaying the
-  later records equals the live tree.
-- Loading a truncated piece (last byte removed) is Malformed.
+  memtable and runs in key order with no duplicates. With three runs and a flush running, a get,
+  present or not, probes 5 layers: the memtable, the frozen one and each run once.
+- Compaction: four runs with overlapping keys merge, on another goroutine while the memtable takes
+  writes, into one run equal to their merge, newest value winning and removed keys dropped. A view
+  opened before the compaction still reads the four runs; the next checkpoint names the merged run
+  and reports every piece of the four dead.
+- A compaction of four small runs above a run larger than 1 MiB leaves that run out and keeps the
+  four removals, which still hide its keys. A flush drops a removal no older run holds the key of,
+  and keeps one that hides a key in a run.
+- A compaction installed before it ran is Stale and the next is still picked; a bucket larger than
+  a root of its pieces could list is never picked.
+- A compaction installed while a flush writes its inputs: that checkpoint's manifest names the
+  inputs, which restore to the tree, and the next names the merged run and reports the inputs dead.
+- A checkpoint that fails after writing a compaction's result whole carries that run next time.
+- Buckets (ported from Cassandra's `testGetBuckets`, runs in age order): sizes 1,1,4,4,8,8 with small
+  below 2 make three buckets of two; 3,3,3,8,8,8 two of three, or one of six with small below 10;
+  1,8,1,8 four buckets; 70 equal runs buckets of 32, 32 and 6.
+- Restore is runs plus replay: after six flushes, a compaction and more writes, loading the newest
+  manifest's runs and replaying the later writes equals the live tree.
+- Loading a run is Malformed when a piece or the root is truncated by a byte, a piece is missing or
+  two are swapped, a piece names another run's sequence number, a key moves above the next one, or
+  the run is loaded twice; a piece of another version is BadVersion. The loader is fuzzed.
+- An entry larger than a piece, a key over 1,024 B or a value over 1,000 B is TooLarge, the largest
+  entry fits; a piece size under 64 B is BadConfig.
+- A failed checkpoint keeps the frozen memtable and reports the one piece it wrote of it as dead;
+  writes go on into the new memtable, and the next flush writes the frozen one without freezing them.
 
 ## Chunk index
 
 - [property] Key byte order equals logical order: seed 21, 5,000 random key pairs. Comparing encoded
   keys (pool | XXH3 of chunk | chunk | frozen version, 0 for the live map | first block, all
-  big-endian, 38 bytes) matches comparing the tuple. Keys round-trip, and a chunk's entry sorts
-  before its live map, which sorts before its frozen maps.
+  big-endian, 38 bytes) matches comparing the tuple. Keys round-trip, a key whose hash names another
+  chunk does not decode, and a chunk's entry sorts before its live map, which sorts before a frozen
+  version's epoch and its map.
 - Applying a durable record at LBA 100 (one header block) with a 2-block write of chunk 7 v1 at
   block 0, a blob, a 1-block write of chunk 7 v2 at block 5, and a whole-chunk punch of chunk 8 v3
   maps: chunk 7's live map to data at LBA 101 (blocks 0-1, v1) and LBA 103 (block 5, v2; writes are
   packed before blobs), both with header LBA 100, and its chunk entry to version 2; chunk 8's live
   map to Zero(1,024 blocks, header 100) and its entry to version 3. Blobs are skipped. Listing a
-  chunk returns its live extents by first block.
+  chunk returns its live extents by first block; record 100 refers to 3 blocks.
 - Trim and split: a 1-block write of chunk 7 v3 at block 1 leaves the live map as block 0 (v1,
   LBA 101), block 1 (v3) and block 5 (v2); a 4-block write v4 at blocks 0-3 leaves blocks 0-3 (v4)
   and block 5 (v2). The live counts of the records that lost blocks fall by the blocks trimmed, and
   the live map never holds two entries for one block.
 - Freeze: a record with freeze(chunk 7, v4, epoch 2) and a 1-block write v5 at block 2 copies the live
   map under key version 4 before applying the write. A read of block 2 at snapshot epoch 1 finds v4's
-  block, the live read finds v5's, and a read at epoch 3 reads the live map. The chunk entry holds
-  version 5 and epoch 2. A rebuild from headers in LSN order gives identical live and frozen maps.
-- A cleaner move (same chunk, same blocks, new location LBA 200: data 201) applies only if the live
-  or frozen entry still points at the location it copied; otherwise it is dropped.
+  block, as does a read at epoch 2, whose cut the freezing write followed, the live read finds
+  v5's, and a read at epoch 3 reads the live map. The chunk entry holds
+  version 5 and epoch 2. The freeze applied again changes nothing. A rebuild from headers in LSN
+  order gives identical live and frozen maps.
+- A cleaner move (same chunk, same blocks, new location LBA 500: data 501) applies to every map, live
+  or frozen, whose extent still points at the location it copied, splitting the extent around the
+  moved blocks; once the maps point elsewhere it is dropped. A write that replaced the live block
+  leaves only the frozen map to move.
+- A record with an entry for pool 2^32 − 1, which the index keeps record counts under, or with a
+  freeze of version 0, which names the live map, is refused whole.
+- [property] Seed 22, 20 runs of 300 random writes, punches and freezes over 3 chunks of 64 blocks,
+  with a cleaner move of a live or frozen block after one record in four: each move changes as many
+  maps as the model holds the block at its location, every block, live and at every snapshot epoch,
+  reads the version and location a model of whole-map copies holds, and the invariants hold after
+  every step.
+- [property] On a 1 GiB simulated disk (16-block records, a checkpoint every 96 blocks of records),
+  seeds 0-3, three generations of 150 rounds of writes, punches and freezes, with checkpoints,
+  multi-piece runs, carried runs and compactions: recovery from the manifest's runs plus replay, and
+  a rebuild from every record header, both equal the live index.
+- A crash after a checkpoint's runs are durable but before its manifest, with a compaction's result
+  among them, recovers from the previous manifest plus replay to the live index, and the next
+  checkpoint's restart does too.
 
 ## Segment usage table
 

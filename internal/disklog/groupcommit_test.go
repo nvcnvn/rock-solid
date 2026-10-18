@@ -435,6 +435,39 @@ func TestCheckpointEndToEnd(t *testing.T) {
 	}
 }
 
+func TestCheckpointCarriesDurableRuns(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	h.submit(disklog.Hot, h.write(0, 1, 1))
+	h.run()
+	carried := disklog.BlobRef{Segment: 1, Block: 1, LSN: 1, Entry: 0}
+	for _, bad := range []disklog.BlobRef{{Block: 1, LSN: 1}, {Segment: 1, Block: 1, LSN: 2}} {
+		if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: 5, Runs: []disklog.BlobRef{bad}}}); !errors.Is(err, disklog.ErrMalformed) {
+			t.Fatalf("carrying %+v: %v", bad, err)
+		}
+	}
+	runs := []disklog.BlobRef{carried}
+	if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: 5, ReplayLSN: 1, Runs: runs}}); err != nil {
+		t.Fatal(err)
+	}
+	runs[0].Block = 9
+	it := h.blob(disklog.BlobRun, 5, 10, 1)
+	if _, err := h.log.CheckpointPiece(&h.ctx, 5, it.Buf, 10, true, &h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.absorb()
+	if err := h.log.EndCheckpoint(&h.ctx, &h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.absorb()
+	h.run()
+	durable := h.eventsOf(disklog.Durable)
+	m := h.readManifest(durable[len(durable)-1])
+	want := []disklog.BlobRef{carried, {Segment: 2, Block: 1, LSN: 2, Entry: 0}}
+	if len(m.Indexes) != 1 || !slices.Equal(m.Indexes[0].Runs, want) {
+		t.Fatalf("manifest indexes %+v, want runs %+v", m.Indexes, want)
+	}
+}
+
 func TestManifestLargerThanARecordGoesInPieces(t *testing.T) {
 	h := formatted(t, gib, testConfig(3))
 	const runs = 500
