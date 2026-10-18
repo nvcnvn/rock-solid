@@ -54,6 +54,6 @@ Then fold it into [docs/design.md](../../../docs/design.md) with the `design-doc
 
 - Add or rewrite `## Appendix: <name> spike` with the same Question / Setup / Test table / Conclusions, linking `../spikes/<name>/`.
 - Apply each conclusion where it belongs (architecture, driver contract, testing strategy, roadmap). Tick off or rewrite any open question it answers, and add the new ones it raises.
-- If a conclusion settles a design choice, write an ADR in `docs/decisions/`.
+- If a conclusion settles a design choice, record it in the section that owns it and in "Alternatives considered" (see the `design-doc` skill).
 
 Commit the spike and the design changes together: `Add <name> spike`.

@@ -1,6 +1,6 @@
 # Cleaner write-amplification spike
 
-**Question.** What write amplification (WA) does the per-disk log ([ADR 0003](../../docs/decisions/0003-one-log-per-disk.md), [On-disk format](../../docs/design.md#on-disk-format)) and its cost-benefit cleaner have for block volumes with random overwrites as a disk fills toward the pool's 90% write limit? What segment size should it use, and does the write limit need a larger reserve?
+**Question.** What write amplification (WA) does the per-disk log ([On-disk format](../../docs/design.md#on-disk-format)) and its cost-benefit cleaner have for block volumes with random overwrites as a disk fills toward the pool's 90% write limit? What segment size should it use, and does the write limit need a larger reserve?
 
 **Setup.** A trace-free simulation in Rust ([src/main.rs](src/main.rs), no dependencies, its own `[workspace]`), driven by [run.py](run.py). Intel Core Ultra 5 235U, 14 cores, 15 GiB, Linux 6.17, rustc 1.99.1, Python 3.12.3. Other agents were running on the machine; this only affects the C7 micro-benchmark.
 
@@ -23,7 +23,7 @@ The model:
 Not modeled:
 
 - the SSD's own flash translation layer (FTL);
-- Raft entries, LSM sorted runs and manifests, which since ADR 0003 also live in the log and add writes and cleaning of their own;
+- Raft entries, LSM sorted runs and manifests, which also live in the log and add writes and cleaning of their own;
 - erasure-coded shards;
 - a background or rate-limited cleaner (here cleaning is synchronous);
 - reads and latency.

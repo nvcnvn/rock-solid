@@ -2,7 +2,7 @@
 
 **Status:** reproduced on upstream etcd-raft v3.7.0 and `main` (638f427, 2026-10-09). Not reported upstream. A keyword search of etcd-io/raft issues and pull requests found no existing report.
 
-**Found by:** the [Raft port spike](../../spikes/raft-port/README.md) (test P9, seed 237, 3 nodes), in the Rust port first and then in Go with the same panic.
+**Found by:** the Raft port spike, an early port of etcd-raft to Rust since removed ([`spikes/raft-port`](https://github.com/nvcnvn/rock-solid/tree/200714b/spikes/raft-port), test P9, seed 237, 3 nodes), in the Rust port first and then in Go with the same panic.
 
 ## Summary
 

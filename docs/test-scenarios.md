@@ -51,7 +51,7 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   to PG 0. The PG index is the top log2(count) bits of the hash.
 - [property] PG splitting keeps hash ranges contiguous: for 64 chunk IDs and every count 1..2^11,
   doubling the PG count maps PG p to 2p or 2p+1.
-- Golden vectors (`internal/core/testdata/chunk_id_golden.txt`, 10 rows, ADR 0004): for each (volume, slot, seq,
+- Golden vectors (`internal/core/testdata/chunk_id_golden.txt`, 10 rows, frozen by the design's key layout): for each (volume, slot, seq,
   index) the packed 128-bit ID, its XXH3-64 (seed 0, over the 16 big-endian bytes), PG index at 64
   and at 2048 PGs, and the PG ID in pool 1 all match. Rows include all-zero
   (hash 0xd0a66a65c7528968, PGs 52/1669) and all-ones (0x722a202f07a4b313, 28/913). The fixture is

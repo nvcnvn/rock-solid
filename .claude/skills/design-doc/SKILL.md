@@ -1,6 +1,6 @@
 ---
 name: design-doc
-description: Edit the project's documents - docs/design.md, ADRs in docs/decisions/, docs/tech-debts.md, spike READMEs and the README. Use whenever a change touches a doc, a design decision is made or reversed, an open question is answered, a spike finishes, or a workaround, version pin or pre-release dependency is added or removed.
+description: Edit the project's documents - docs/design.md, docs/build-checklist.md, docs/test-scenarios.md, docs/tech-debts.md, spike READMEs and the README. Use whenever a change touches a doc, a design decision is made or reversed, an open question is answered, a spike finishes, or a workaround, version pin or pre-release dependency is added or removed.
 ---
 
 # Design docs
@@ -12,7 +12,7 @@ The rules in [CLAUDE.md](../../../CLAUDE.md) ("Documents", "Tech debt") apply. T
 | Change | Goes in |
 | --- | --- |
 | How the system works or will work | `docs/design.md`, in the section that owns the topic |
-| A choice between real alternatives that is now settled | New ADR in `docs/decisions/`, plus updates to `design.md` and its "Alternatives considered" row |
+| A choice between real alternatives that is now settled | The `design.md` section that owns it, plus its "Alternatives considered" row (see Decisions below) |
 | Workaround, version pin, pre-release dependency | `docs/tech-debts.md` entry, in the same change as the code |
 | Experiment results | The spike's README, then a `design.md` appendix (see the `spike` skill) |
 | A test scenario a component must pass | `docs/test-scenarios.md`, in the section of its build checklist item |
@@ -27,24 +27,13 @@ The rules in [CLAUDE.md](../../../CLAUDE.md) ("Documents", "Tech debt") apply. T
 - **Open questions:** delete a question once it's answered, and put the answer in the section that owns it. Add the new questions an answer raises.
 - **Style:** spell out each acronym on first use, as the doc already does. Give targets as round trips or µs with how they were measured. Show the mechanism with mermaid or code blocks. Write for a reader new to the project.
 
-## ADRs
+## Decisions
 
-`docs/decisions/NNNN-kebab-title.md`, numbered in sequence from `0001`:
+There are no separate decision records: `design.md` holds every decision where a reader meets it.
 
-```markdown
-# NNNN. Title as a decision ("Use FUSE for the file client")
-
-Status: Accepted (YYYY-MM-DD) | Superseded by [NNNN](NNNN-...md)
-
-## Context
-Forces and constraints, linking spike results.
-## Decision
-What we do, in a few sentences.
-## Consequences
-What gets easier, what gets harder, what we accept.
-```
-
-Never rewrite an accepted ADR. To reverse one, write a new ADR and change only the old one's `Status` line to `Superseded by`.
+- **In the owning section,** state the decision together with what forced it (the constraints, the measurements, how other systems handle it) and what it costs. A reader should not need another document to see why.
+- **In "Alternatives considered",** add or rewrite the row: what was chosen, what was weighed, and the reason in a sentence or two, linking the owning section and any spike.
+- **A reversed decision is rewritten** in both places as the new decision. The old reasoning lives in git history; keep only the facts that still explain the new choice, such as a measurement of the rejected option.
 
 ## tech-debts.md
 

@@ -9,9 +9,8 @@
   a seeded `math/rand/v2` source the machine owns. A corrupt message or failed disk is an event to
   handle; panic only on a broken invariant of the machine's own state. Protocol logic goes here,
   never in a frontend.
-- On the data path, follow the rules of ADR 0009 (`docs/decisions/0009-write-in-go.md`): one
-  epoll loop per core on raw descriptors, never a goroutine per connection, `net.Conn`, channel,
-  `select` or `time.Timer`; no allocation per operation; bulk data pointer-free and off the Go
+- On the data path, follow "Runtime in Go" in `docs/design.md`: one epoll loop per core on raw
+  descriptors, never a goroutine per connection, `net.Conn`, channel, `select` or `time.Timer`; no allocation per operation; bulk data pointer-free and off the Go
   heap; I/O buffers as pool handles; hand-written encodings. Off the data path, write ordinary Go.
 - Tests feed events and assert on actions, with no mocks. Fuzz every decoder. Register new
   invariants with the simulator in the same change, and turn a seed that finds a bug into a
@@ -28,12 +27,12 @@
 - When editing existing code, don't add comments to lines you didn't need to change.
 
 ## Documents
-- `docs/design.md` is the design, `docs/build-checklist.md` the reviewable pieces of phases 1 to
-  5, `docs/test-scenarios.md` the scenarios their tests cover, `docs/decisions/` the ADRs.
-  The `design-doc` skill says which change goes where.
+- `docs/design.md` is the design, including every decision and why it was made;
+  `docs/build-checklist.md` the reviewable pieces of phases 1 to 5; `docs/test-scenarios.md`
+  the scenarios their tests cover. The `design-doc` skill says which change goes where.
 - Docs and code state current facts, arranged so they are easiest to read and understand.
-  Git history keeps the past; don't preserve it in the text. ADRs in `docs/decisions/` are
-  the exception: an accepted ADR is never rewritten, only superseded by a new one.
+  Git history keeps the past; don't preserve it in the text. A reversed decision is rewritten
+  as the new decision.
 - When a doc needs updating, consider rewriting the whole doc or section instead of patching
   it or appending a block. Appended blocks drift into a changelog.
 - Before adding content, check for duplication elsewhere in the doc (and related docs).

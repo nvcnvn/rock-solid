@@ -1,6 +1,6 @@
 # Embedded KV engines spike (redb, fjall, plain log file)
 
-> **Superseded in part.** Conclusions 3 and 4 chose redb for shard state and fjall for the chunk index, and conclusions 1 and 2 a separate Raft log per core. [ADR 0003](../../docs/decisions/0003-one-log-per-disk.md) instead keeps all three in one log per disk, with no embedded engine. The measurements stand.
+> **Superseded in part.** Conclusions 3 and 4 chose redb for shard state and fjall for the chunk index, and conclusions 1 and 2 a separate Raft log per core. [the one-log-per-disk design](../../docs/design.md#on-disk-format) instead keeps all three in one log per disk, with no embedded engine. The measurements stand.
 
 **Question.** Which embedded key-value engine, `redb` (copy-on-write B-tree) or `fjall` (LSM tree), should hold (a) the Raft logs, (b) MetaStore shard state and (c) the per-disk ChunkStore [chunk index](../../docs/design.md#on-disk-format)? Or should some of these use something else, such as a plain append-only file for the Raft logs? This answers the "`redb` versus `fjall`" half of the Raft and storage-engine open question in [design.md](../../docs/design.md#roadmap-and-open-questions).
 
@@ -82,7 +82,7 @@ Latency is commit p50; `wamp` and `devwamp` are as defined in Setup.
 
 ## K2: MetaStore shard
 
-1M keys laid out as in ADR 0004: 500 directories × 1000 files, each with a dentry key and an attribute key, attributes 100 to 500 B, 174 MB logical. Each mixed round is 64 operations (70% `get`, 30% `put` of attributes) and ends in one commit. Two commit modes:
+1M keys laid out as in the design's key layout: 500 directories × 1000 files, each with a dentry key and an attribute key, attributes 100 to 500 B, 174 MB logical. Each mixed round is 64 operations (70% `get`, 30% `put` of attributes) and ends in one commit. Two commit modes:
 
 - **durable**: every round's commit is durable.
 - **apply**: non-durable commits with a durable checkpoint every 100 rounds. This is what a Raft state machine can do, since its log is already durable.
@@ -102,7 +102,7 @@ Latency is commit p50; `wamp` and `devwamp` are as defined in Setup.
 
 ## K3: per-disk chunk index
 
-10M entries. The key is pool, h, chunk ID, version and first block (38 B, sorted by placement hash as in ADR 0004); the value is segment, offset, length and CRC (16 B); 540 MB logical. The index is bulk-loaded in key order, 100k entries per commit. Then come durable batches of random updates: each update inserts an entry and deletes one from the same chunk, 200k updates per batch size. Lookups are exact hits, misses at an existing chunk prefix, and "floor seeks" (last key ≤ the target block).
+10M entries. The key is pool, h, chunk ID, version and first block (38 B, sorted by placement hash as in the design's key layout); the value is segment, offset, length and CRC (16 B); 540 MB logical. The index is bulk-loaded in key order, 100k entries per commit. Then come durable batches of random updates: each update inserts an entry and deletes one from the same chunk, 200k updates per batch size. Lookups are exact hits, misses at an existing chunk prefix, and "floor seeks" (last key ≤ the target block).
 
 | Test | Result |
 | --- | --- |

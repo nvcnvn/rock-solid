@@ -2,9 +2,9 @@
 
 **Question.** How many bytes of RAM does one file cost in a MetaStore shard held only in memtables (the stage-1 `MemTree` in [crates/core/src/lsm.rs](https://github.com/nvcnvn/rock-solid/blob/200714b/crates/core/src/lsm.rs)), so we know at what file count per node the LSM tree's stage 2 (sorted runs, compaction) becomes necessary?
 
-**Setup.** macOS 27.0 (26A428), Apple M4 Pro (14 cores), 64 GiB RAM, rustc 1.99.1, libc 0.2.177. The harness is one Rust binary ([src/main.rs](src/main.rs)) in its own cargo workspace. It measures the real `rock_core::lsm::MemTree` through a path dependency on `crates/core` at `f3bfd04` plus the uncommitted stage-1 `lsm.rs` and `log/` in the working tree. Each F1 to F3 point runs in its own process; F4 to F8 share one process holding a 10M-file tree. `crates/core` has since been deleted with the rest of the Rust code ([ADR 0009](../../docs/decisions/0009-write-in-go.md)); the Rust harness builds at commit `200714b`.
+**Setup.** macOS 27.0 (26A428), Apple M4 Pro (14 cores), 64 GiB RAM, rustc 1.99.1, libc 0.2.177. The harness is one Rust binary ([src/main.rs](src/main.rs)) in its own cargo workspace. It measures the real `rock_core::lsm::MemTree` through a path dependency on `crates/core` at `f3bfd04` plus the uncommitted stage-1 `lsm.rs` and `log/` in the working tree. Each F1 to F3 point runs in its own process; F4 to F8 share one process holding a 10M-file tree. `crates/core` has since been deleted with the rest of the Rust code ([Runtime in Go](../../docs/design.md#runtime-in-go)); the Rust harness builds at commit `200714b`.
 
-File model ([ADR 0004](../../docs/decisions/0004-key-layout-and-ids.md) encoding: a one-byte tag per `word/`, fixed-width big-endian integers, only the last component variable, no terminator):
+File model ([key layout](../../docs/design.md#metadata-layer-metastore) encoding: a one-byte tag per `word/`, fixed-width big-endian integers, only the last component variable, no terminator):
 
 | Key | Bytes | Value | Bytes |
 | --- | --- | --- | --- |
@@ -13,7 +13,7 @@ File model ([ADR 0004](../../docs/decisions/0004-key-layout-and-ids.md) encoding
 | `fs/{volume}/{inode}/x/{name}` | 14 + name | xattr value | 24 to 57 |
 | `fs/{volume}/{slot·0}/n`, one per directory | 14 | next sequence u64, bytes used u64 | 16 |
 
-- **Attribute record, 92 B:** mode, uid, gid, nlink, flags (5 × u32); size and `alloc_end` (2 × u64, as in the design's key table); atime, mtime, ctime and btime (4 × i64 seconds + u32 ns; btime because SMB and `statx` report birth time); a u64 change counter for NFSv4 change attributes and cache coherence. No generation number, because ADR 0004 never reuses inode IDs, and no `rdev`.
+- **Attribute record, 92 B:** mode, uid, gid, nlink, flags (5 × u32); size and `alloc_end` (2 × u64, as in the design's key table); atime, mtime, ctime and btime (4 × i64 seconds + u32 ns; btime because SMB and `statx` report birth time); a u64 change counter for NFSv4 change attributes and cache coherence. No generation number, because the key layout never reuses inode IDs, and no `rdev`.
 - **Inode IDs:** directory `j` gets slot `j` and inode `(j << 40) | 1`; its files take sequence numbers 2, 3, … in that slot. The root is inode 1. Directories have attributes, a directory entry in their parent, and the slot counter.
 - **Tree shape:** each directory holds 20 to 50 files (uniform, mean 35) and up to 4 subdirectories (parent of `j` is `(j-1)/4`). Directory 1 holds 996 files and 4 subdirectories, the 1,000-entry listing of F7. That gives 0.0286 directories and 2.09 tree entries per file.
 - **Names:** lengths drawn from the histogram of 372,021 names under `/usr` and `/Applications` on this machine ([name-lengths.txt](name-lengths.txt): mean 20.1 B, p50 17, p99 53; lengths only, no names kept); bytes random from a 64-character alphabet, unique within a directory. F3 also uses fixed 8, 24 and 64 B.
