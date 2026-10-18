@@ -15,6 +15,8 @@ The rules in [CLAUDE.md](../../../CLAUDE.md) ("Documents", "Tech debt") apply. T
 | A choice between real alternatives that is now settled | New ADR in `docs/decisions/`, plus updates to `design.md` and its "Alternatives considered" row |
 | Workaround, version pin, pre-release dependency | `docs/tech-debts.md` entry, in the same change as the code |
 | Experiment results | The spike's README, then a `design.md` appendix (see the `spike` skill) |
+| A test scenario a component must pass | `docs/test-scenarios.md`, in the section of its build checklist item |
+| A buildable piece of phases 1 to 5 | `docs/build-checklist.md` |
 
 ## Editing design.md
 
@@ -24,7 +26,6 @@ The rules in [CLAUDE.md](../../../CLAUDE.md) ("Documents", "Tech debt") apply. T
 - **Keep the sections consistent.** A change to a protocol often touches Architecture, the frontend section, Testing strategy (its invariants and faults), Roadmap and Open questions. Check each one.
 - **Open questions:** delete a question once it's answered, and put the answer in the section that owns it. Add the new questions an answer raises.
 - **Style:** spell out each acronym on first use, as the doc already does. Give targets as round trips or µs with how they were measured. Show the mechanism with mermaid or code blocks. Write for a reader new to the project.
-- **Source doc:** the header links a Claude Doc. If the user edits there, ask which one is authoritative before you change either; never let them drift silently.
 
 ## ADRs
 

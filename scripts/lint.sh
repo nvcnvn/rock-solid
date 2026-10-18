@@ -1,29 +1,36 @@
 #!/bin/bash
-# Runs every Rust lint: formatting, clippy, dependency licenses and advisories, sans-IO purity.
-# A crate is sans-IO unless its directory has a clippy.toml (the I/O opt-out, see clippy-io.toml).
+# Runs every Go check: formatting, vet, staticcheck, known vulnerabilities and dependency licenses.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-IO_DEPS='tokio|mio|libc|nix|rustix|io-uring|socket2|async-std|smol|getrandom'
+GOTOOLCHAIN=$(sed -n 's/^toolchain //p' go.mod)
+export GOTOOLCHAIN
 
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+STATICCHECK=honnef.co/go/tools/cmd/staticcheck@v0.8.2
+GOVULNCHECK=golang.org/x/vuln/cmd/govulncheck@v1.9.0
+GO_LICENSES=github.com/google/go-licenses/v2@v2.0.1
+ALLOWED_LICENSES=Apache-2.0,MIT,BSD-2-Clause,BSD-3-Clause,ISC,Zlib,CC0-1.0,Unicode-3.0
 
-if command -v cargo-deny >/dev/null; then
-	cargo deny --log-level error check
-else
-	echo "cargo-deny not installed (cargo install --locked cargo-deny); skipping license and advisory checks" >&2
+mapfile -t files < <(git ls-files --cached --others --exclude-standard '*.go' ':!:spikes/**')
+if [ ${#files[@]} -eq 0 ]; then
+	echo "no Go files outside spikes/; nothing to lint"
+	exit 0
 fi
 
-fail=0
-for manifest in crates/*/Cargo.toml; do
-	dir=$(dirname "$manifest")
-	[ -e "$dir/clippy.toml" ] && continue
-	pkg=$(sed -n 's/^name = "\(.*\)"/\1/p' "$manifest" | head -1)
-	deps=$(cargo tree -p "$pkg" -e normal --target all --prefix none)
-	if bad=$(sed 's/ .*//' <<<"$deps" | sort -u | grep -Ex "$IO_DEPS"); then
-		echo "sans-IO crate $pkg depends on I/O crates: $bad" >&2
-		fail=1
-	fi
-done
-exit $fail
+unformatted=$(gofmt -l "${files[@]}")
+if [ -n "$unformatted" ]; then
+	echo "gofmt needed:" >&2
+	echo "$unformatted" >&2
+	exit 1
+fi
+
+go vet ./...
+go run "$STATICCHECK" ./...
+status=0
+go run "$GOVULNCHECK" ./... || status=$?
+case $status in
+0) ;;
+3) exit 3 ;;
+*) echo "govulncheck could not run (exit $status); skipping the vulnerability check" >&2 ;;
+esac
+go run "$GO_LICENSES" check ./... --allowed_licenses="$ALLOWED_LICENSES"

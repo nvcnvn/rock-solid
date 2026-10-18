@@ -1,6 +1,13 @@
 # rock-solid
 
-A distributed storage system in Go for homelab Kubernetes clusters, with ReadWriteMany shared filesystems first. The design is in [docs/design.md](docs/design.md); [ADR 0009](docs/decisions/0009-write-in-go.md) records why it is written in Go and the rules its code follows.
+A distributed storage system in Go for homelab Kubernetes clusters, with ReadWriteMany shared filesystems first. It is in early development: nothing runs yet.
+
+- [docs/design.md](docs/design.md): the design, from goals to on-disk format, with the results of every spike.
+- [docs/decisions/](docs/decisions/): architecture decision records; [ADR 0009](docs/decisions/0009-write-in-go.md) records why it is written in Go and the rules its code follows.
+- [docs/build-checklist.md](docs/build-checklist.md) and [docs/test-scenarios.md](docs/test-scenarios.md): the pieces of the first five phases, in build order, and the scenarios their tests cover.
+- [spikes/](spikes/) and [studies/](studies/): the experiments and outside findings the design rests on.
+
+`scripts/lint.sh` runs every check; it needs only Go, which `go.mod` pins.
 
 ## Acknowledgments
 

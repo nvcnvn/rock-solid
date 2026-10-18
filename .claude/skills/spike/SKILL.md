@@ -30,7 +30,7 @@ spikes/<name>/
 ```
 
 - **No root, no `apt install`.** `apt-get download` the `.deb`s and unpack them with `dpkg -x` into `vendor/sysroot`, then point `env.sh` at it (see `bypass-drivers/fetch.sh`). Pin every clone to a tag with `--depth 1`. If root is truly needed, put it in `setup-root.sh` and **ask the user to run it**; never run sudo yourself.
-- Use C against the C library directly; it keeps bindings out of the question. Rust is only worth it when the question is about Rust (bindgen, `build.rs` linking).
+- Use C against the C library directly; it keeps bindings out of the question. Go is worth it when the question is about Go (cgo crossings, the scheduler, the collector); give the spike its own `go.mod`, so it stays out of the main module and `scripts/lint.sh`.
 - The harness prints `[OK ]` or `[STALE]`/`[FAIL]` with `got=` and `want=` for each check, plus timings in µs, so the results file reads on its own.
 - Stop processes and unmount (`fusermount3 -u`) on exit, even on failure.
 
