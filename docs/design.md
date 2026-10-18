@@ -806,6 +806,7 @@ flowchart LR
 - **Loops are not locked to OS threads** (35 against 29 µs per write), except where a C library requires its own thread, as SPDK's `spdk_thread` does.
 - **A loop waits only on its epoll set.** A goroutine blocked in `epoll_wait` cannot wait on a channel too, so everything that can wake a loop is a descriptor: its sockets, its io_uring completion eventfd, one timerfd armed for the earliest deadline in the loop's timer heap, and one eventfd for its inbox. Other loops and worker goroutines hand it work through a lock-free multi-producer queue and write the eventfd only when the queue was empty, so a burst costs one wakeup. No channel, `select`, `time.Timer` or `time.AfterFunc` on the data path.
 - **Bounded passes** and **one `writev` per descriptor per pass**, gathering every frame ready for it, as the [driver contract](#modularity-sans-io-core-pluggable-drivers) requires: syscalls set the cost of a write, and batching halved Rust's and cut Go's by 29%. A slice grown by `append` copies itself (`runtime/slice.go`), which is why Go collapsed from 30,000 writes/s without the bound.
+- **Traces, not logs.** A loop records every event, action and syscall as a fixed-field trace record and never writes a free-form log line ([Testing the design decisions](#testing-the-design-decisions)).
 - **Disk I/O goes through io_uring**, on a ring the driver maps and drives with raw syscalls, since Go's standard library has none.
 
 **Memory**
@@ -938,6 +939,20 @@ Property tests on placement: after any random add, remove and failure sequence, 
 **7. Performance.** Track metadata operations per second (create, stat, rename), cached and write-shared read latency, 4K block latency at queue depth 1, CPU per operation, 99.9th-percentile latency during recovery, and cleaning write amplification with disks held at 80% and 90% full. Latency runs include idle gaps, because a drive that has idled for 100 ms adds about 1 ms to the next durable write (NVMe flush spike, N6). A 20% overnight regression is treated as a bug.
 
 **Starting hardware.** One big machine is enough at first: a few virtual machines, QEMU's emulated NVMe devices (SPDK runs against them for correctness, not speed; this needs root, `vfio-pci` and hugepages inside the virtual machine). SPDK's file-backed aio bdev needs none of that and runs in CI as a normal user, and Soft-RoCE between the virtual machines.
+
+### Testing the design decisions
+
+Every decision above is held by a test, and the test is written with the decision, before or with the code that implements it. Which kind of test depends on what the decision is about:
+
+| Decision is about | Held by | Examples |
+| --- | --- | --- |
+| A byte layout (superblock, headers, keys, chunk IDs, the PG hash) | Golden fixtures under `testdata/` that the code must reproduce byte for byte, round trips, an exhaustive single-bit-flip test, a torn-write property test over every subset of landed blocks, and a native fuzz test on every decoder | `internal/core/testdata/chunk_id_golden.txt`, `internal/disklog/testdata/log_format_golden.txt` |
+| What a state machine emits (one flush per round, write and flush emitted together, `commit_depth` rounds in flight, peering before serving, a freeze entry with the first write after a snapshot) | Trace checks: a test feeds events, records the actions, and asserts on the trace, in the unit test and in the simulator over thousands of seeds | "exactly one `DiskFsync` per round"; "no `NetSend` of a write before the peering reply" |
+| What must hold across a whole run (acknowledged writes readable, one primary per PG, versions never reused, a live map with one entry per block) | Simulator invariants checked after every step, plus a TLA+ model for each protocol | the invariant list above |
+| What the runtime does (one loop per core, no goroutine per connection, one `writev` per descriptor per pass, bounded passes, no allocation per operation, loops woken only through epoll) | Static checks where the rule is about code: the sans-IO analyzer. Trace checks where it is about behaviour: the event loop records every syscall it makes as a trace event, through a recording layer under its `unix` calls, and a test asserts on the counts per pass (`writev` ≤ 1 per descriptor, bytes read ≤ the budget, `epoll_wait` once). Allocation checks: `testing.AllocsPerRun` and `b.ReportAllocs` must report 0. Goroutine checks: `runtime.NumGoroutine` is the same with 1 and with 1,000 connections, measured in the loop's test | `tools/sansio`; the event loop item of the [build checklist](build-checklist.md) |
+| A number the design relies on (CRC32C per block, collection cost of the page tree, cost per group) | A benchmark with the spike's figure as its bar, run nightly, and a 20% regression is a bug | `BenchmarkCRC32CBlock` against 167 ns |
+
+**Traces, not logs.** On the data path the daemon writes no free-form log lines; the sans-IO analyzer rejects `log`, `log/slog` and `fmt.Print*` there. Every event a loop handles, every action it executes and every syscall it makes is a fixed-field trace record, the same record the simulator keeps for its action trace, so one checker library reads both: a seed's trace in a unit test, and a real daemon's trace from `--trace`, which writes the records to a ring in memory and dumps them as text on request. The format is one record per line, `tick loop kind fields...`, with fields in a fixed order per kind, so two runs of a seed are compared with `cmp` and a check is a scan over lines. The daemon's operator logs (startup, configuration, a disk marked down) go through `log/slog` off the data path.
 
 ## Alternatives considered
 
