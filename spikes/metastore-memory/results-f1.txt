@@ -1,0 +1,13 @@
+macOS 27.0 (26A428) darwin 27.0.0 cpu=14x Apple M4 Pro mem=64G rustc 1.99.1 libc=0.2.177 rock-core=f3bfd04+uncommitted date=2026-10-17T03:54Z loadavg=3.83 3.47 3.17
+
+## F1 bytes per file in MemTree, 1M files, sampled names, separate process each
+  columns, all per regular file unless noted: logical = key+value bytes; req = requested heap; act = macOS malloc_size (measured); glibc/jem = modelled Linux allocators; allocs = live allocations; node_per_entry = BTreeMap node bytes per entry (act minus key/value buffers); rss / compressed / footprint = growth of resident, compressor-held and phys_footprint bytes (task_info TASK_VM_INFO)
+  RESULT files=1000000 dirs=28464 entries=2085391 names=sampled-mean-20.1B xattrs=0 order=create logical=154.2 req=326.4 act=372.8 glibc=411.1 jem=372.8 allocs=4.48 node_per_entry=95.0 rss=379.9 compressed=0.0 footprint=380.0 build_us=435783
+  RESULT files=1000000 dirs=28464 entries=3113855 names=sampled-mean-20.1B xattrs=1 order=create logical=207.7 req=474.9 act=548.0 glibc=591.0 jem=548.0 allocs=6.71 node_per_entry=98.7 rss=558.4 compressed=0.0 footprint=558.6 build_us=641016
+  RESULT files=1000000 dirs=28464 entries=5170783 names=sampled-mean-20.1B xattrs=3 order=create logical=369.1 req=818.5 act=954.8 glibc=1008.8 jem=954.8 allocs=11.15 node_per_entry=99.9 rss=971.9 compressed=0.0 footprint=972.4 build_us=1007355
+  RESULT files=1000000 dirs=28464 entries=2085391 names=sampled-mean-20.1B xattrs=0 order=shuffled logical=154.2 req=308.7 act=352.9 glibc=392.8 jem=352.9 allocs=4.45 node_per_entry=85.4 rss=461.2 compressed=0.0 footprint=461.5 build_us=1204620
+  RESULT files=1000000 dirs=28464 entries=2085391 names=sampled-mean-20.1B xattrs=0 order=restored logical=154.2 req=348.0 act=397.2 glibc=433.2 jem=397.2 allocs=4.52 node_per_entry=106.7 rss=704.2 compressed=0.0 footprint=441.2 build_us=918875
+[OK ] F1 attrs+dirent, create order, act B/file: got=372.8 want=300..=400
+[FAIL] F1 +1 xattr (user.DOSATTRIB 24 B), added B/file: got=175.2 (total 548.0) want=100..=160 (own guess)
+[FAIL] F1 +3 xattrs, added B per xattr: got=194.0 (total 954.8) want=100..=160 (own guess)
+  insert order, act B/file: create 372.8, shuffled 352.9, restored (checkpoint+restore) 397.2; node bytes per entry: 95.0 / 85.4 / 106.7

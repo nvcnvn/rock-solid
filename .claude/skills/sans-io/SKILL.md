@@ -11,12 +11,12 @@ Design source: the "Modularity" and "Testing strategy" sections of [docs/design.
 
 ```rust
 impl ChunkReplica {
-    pub fn on_event(&mut self, now: Tick, ev: Event) -> Vec<Action> { ... }
+    pub fn on_event(&mut self, ctx: &mut Context<'_, impl BufPool>, ev: Event) -> Vec<Action> { ... }
 }
 ```
 
-- **Input:** `now: Tick` and an `Event` only (`NetRecv`, `PeerLost`, `DiskDone(IoId, Result)`, `Timer`). The state machine never reads a clock, so time comes in as `now`.
-- **Output:** `Action`s (`NetSend`, `DiskRead(IoId, Lba, IoBuf)`, `DiskWrite(IoId, Lba, IoBuf)`, `DiskFsync`, `SetTimer`). The machine doesn't wait; it records what it's waiting for under an `IoId` or `TimerId`, and the matching event resumes it.
+- **Input:** `ctx: &mut Context<'_, impl BufPool>` (`ctx.now: Tick` where 1 tick = 1 µs, `ctx.pool: &mut BufPool`) and an `Event` only (`NetRecv`, `PeerLost`, `DiskDone(IoId, Result<(), DiskError>)`, `Timer`). The state machine never reads a clock, so time comes in as `ctx.now`.
+- **Output:** `Action`s (`NetSend`, `DiskRead(IoId, Lba, IoBuf)`, `DiskWrite(IoId, Lba, IoBuf)`, `DiskFsync`, `DiskTrim`, `SetTimer`). The machine doesn't wait; it records what it's waiting for under an `IoId` or `TimerId`, and the matching event resumes it.
 - **No async, no threads, no locks.** `on_event` is synchronous and `&mut self`. The driver owns concurrency.
 - **Randomness** comes from a seeded RNG passed in (or owned and seeded at construction). Never use an OS RNG.
 - **Ordered containers:** `BTreeMap` and `BTreeSet`. Iteration order shapes the order of emitted actions, so `HashMap`'s random seed breaks replay.
@@ -26,9 +26,9 @@ impl ChunkReplica {
 
 These rules hold from the first default driver, so SPDK and RDMA fit later without changes to the core:
 
-1. **Buffers belong to the driver.** Data travels as an `IoBuf` handle from the driver's pool, never as a `Vec<u8>` the core allocated. Control messages of 256 bytes or less go inline.
+1. **Buffers come from the driver's pool; the core frees them.** Data travels as an `IoBuf` handle from the driver's pool, never as a `Vec<u8>` the core allocated. Control messages of 256 bytes or less go inline. A buffer in an action stays with the driver until `DiskDone`, or for `NetSend` until the peer's reply or `PeerLost(peer)`; a timeout doesn't free it. `PeerRequests` in `core::peer` tracks this.
 2. **Every driver exposes a readiness fd and defaults to event mode.** That's a driver concern, but the core must never assume busy polling.
-3. **Connections fail as a unit:** a single `PeerLost(NodeId)` fails every outstanding request to that peer. The core keeps its own deadlines with `SetTimer`; it never trusts transport timeouts.
+3. **Connections fail as a unit:** a single `PeerLost(NodeId)` fails every outstanding request to that peer. The core keeps its own deadlines with `SetTimer`; it never trusts transport timeouts. `SetTimer` re-arms an armed `TimerId` and there is no cancel, so a stale `Timer` can arrive: check the deadline against `ctx.now` first.
 
 ## Enforcement
 

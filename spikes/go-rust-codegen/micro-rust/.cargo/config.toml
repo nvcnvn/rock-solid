@@ -1,0 +1,4 @@
+# The crc32c crate's three-stream path only inlines when SSE4.2 is enabled at compile time
+# (crc32c 0.6.8 src/hw_x86_64.rs: the entry point lacks #[target_feature]); x86-64-v2 includes it.
+[build]
+rustflags = ["-C", "target-cpu=x86-64-v2"]

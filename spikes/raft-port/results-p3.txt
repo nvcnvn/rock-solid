@@ -1,0 +1,234 @@
+# macOS 27.0 (Darwin 27.0.0), Apple M4 Pro, 14 cores, 64 GiB, rustc 1.99.1, etcd-raft v3.7.0 (b867cf13f6bc), raft-rs 0.7.0, rand_chacha 0.10.0, 2026-10-17
+# loadavg at start: { 3.85 3.82 3.62 }
+# P3 and the other ported unit tests (cargo test --lib); upstream Go suite for reference
+go version go1.27.0 darwin/arm64
+ok  	go.etcd.io/raft/v3	0.633s
+ok  	go.etcd.io/raft/v3/confchange	0.467s
+ok  	go.etcd.io/raft/v3/quorum	0.483s
+ok  	go.etcd.io/raft/v3/raftpb	0.435s
+ok  	go.etcd.io/raft/v3/rafttest	1.028s
+ok  	go.etcd.io/raft/v3/tracker	0.435s
+test log_test::test_append ... ok
+test log_test::test_applied_to ... ok
+test log_test::test_accept_applying ... ok
+test log_test::test_has_next_committed_ents ... ok
+test log_test::test_find_conflict ... ok
+test log_test::test_compaction_side_effects ... ok
+test log_test::test_find_conflict_by_term ... ok
+test log_test::test_commit_to ... ok
+test log_test::test_is_up_to_date ... ok
+test log_test::test_is_out_of_bounds ... ok
+test log_test::test_log_restore ... ok
+test log_test::test_compaction ... ok
+test log_test::test_next_committed_ents ... ok
+test log_test::test_next_unstable_ents ... ok
+test log_test::test_log_maybe_append ... ok
+test log_test::test_stable_to ... ok
+test log_test::test_stable_to_with_snap ... ok
+test log_test::test_term ... ok
+test log_test::test_slice ... ok
+test log_test::test_term_with_unstable_snapshot ... ok
+test log_unstable_test::test_maybe_last_index ... ok
+test log_unstable_test::test_unstable_accept_in_progress ... ok
+test log_unstable_test::test_unstable_maybe_first_index ... ok
+test log_unstable_test::test_unstable_maybe_term ... ok
+test log_unstable_test::test_unstable_next_entries ... ok
+test log_unstable_test::test_unstable_next_snapshot ... ok
+test log_unstable_test::test_unstable_restore ... ok
+test log_unstable_test::test_unstable_stable_to ... ok
+test log_unstable_test::test_unstable_truncate_and_append ... ok
+test raft_paper_test::test_candidate_fallback ... ok
+test raft_paper_test::test_candidate_start_new_election ... ok
+test raft_paper_test::test_candidate_update_term_from_message ... ok
+test raft_paper_test::test_follower_append_entries ... ok
+test raft_paper_test::test_follower_check_msg_app ... ok
+test raft_paper_test::test_follower_commit_entry ... ok
+test raft_paper_test::test_follower_start_election ... ok
+test raft_paper_test::test_follower_update_term_from_message ... ok
+test raft_paper_test::test_follower_vote ... ok
+test log_test::test_scan ... ok
+test raft_paper_test::test_leader_bcast_beat ... ok
+test raft_paper_test::test_leader_commit_entry ... ok
+test raft_paper_test::test_leader_acknowledge_commit ... ok
+test raft_paper_test::test_leader_only_commits_log_from_current_term ... ok
+test raft_paper_test::test_leader_start_replication ... ok
+test raft_paper_test::test_leader_election_in_one_round_rpc ... ok
+test raft_paper_test::test_leader_commit_preceding_entries ... ok
+test raft_paper_test::test_leader_update_term_from_message ... ok
+test raft_paper_test::test_reject_stale_term_message ... ok
+test raft_paper_test::test_leader_sync_follower_log ... ok
+test raft_paper_test::test_candidate_election_timeout_randomized ... ok
+test raft_paper_test::test_start_as_follower ... ok
+test raft_test::test_add_learner ... ok
+test raft_paper_test::test_voter ... ok
+test raft_paper_test::test_vote_request ... ok
+test raft_test::test_add_node_check_quorum ... ok
+test raft_test::test_all_server_stepdown ... ok
+test raft_test::test_add_node ... ok
+test raft_test::test_bcast_beat ... ok
+test raft_test::test_campaign_while_leader ... ok
+test raft_test::test_candidate_concede ... ok
+test raft_test::test_candidate_delivers_pre_candidate_self_vote_after_becoming_candidate ... ok
+test raft_test::test_candidate_self_vote_after_lost_election ... ok
+test raft_test::test_candidate_reset_term_msg_app ... ok
+test raft_test::test_candidate_self_vote_after_lost_election_pre_vote ... ok
+test raft_test::test_candidate_reset_term_msg_heartbeat ... ok
+test raft_paper_test::test_follower_election_timeout_randomized ... ok
+test raft_test::test_conf_change_check_before_campaign ... ok
+test raft_test::test_commit_without_new_term_entry ... ok
+test raft_test::test_disruptive_follower ... ok
+test raft_test::test_conf_change_v2_check_before_campaign ... ok
+test raft_test::test_commit_after_remove_node ... ok
+test raft_test::test_cannot_commit_without_new_term_entry ... ok
+test raft_test::test_commit ... ok
+test raft_test::test_dueling_pre_candidates ... ok
+test raft_test::test_disruptive_follower_pre_vote ... ok
+test raft_test::test_dueling_candidates ... ok
+test raft_test::test_free_stuck_candidate_with_check_quorum ... ok
+test raft_test::test_handle_heartbeat ... ok
+test raft_test::test_handle_heartbeat_resp ... ok
+test raft_test::test_fast_log_rejection ... ok
+test raft_test::test_ignore_providing_snap ... ok
+test raft_test::test_leader_app_resp ... ok
+test raft_test::test_handle_msg_app ... ok
+test raft_test::test_leader_cycle ... ok
+test raft_test::test_leader_election_overwrite_newer_logs ... ok
+test raft_test::test_leader_election_with_check_quorum ... ok
+test raft_test::test_leader_cycle_pre_vote ... ok
+test raft_test::test_leader_election_overwrite_newer_logs_pre_vote ... ok
+test raft_test::test_leader_election_pre_vote ... ok
+test raft_test::test_leader_increase_next ... ok
+test raft_test::test_leader_election ... ok
+test raft_test::test_leader_stepdown_when_quorum_active ... ok
+test raft_test::test_leader_msg_app_self_ack_after_term_change ... ok
+test raft_test::test_leader_stepdown_when_quorum_lost ... ok
+test raft_test::test_leader_transfer_back ... ok
+test raft_test::test_leader_superseding_with_check_quorum ... ok
+test raft_test::test_leader_transfer_demote_node ... ok
+test raft_test::test_leader_transfer_after_snapshot ... ok
+test raft_test::test_leader_transfer_ignore_proposal ... ok
+test raft_test::test_leader_transfer_receive_higher_term_vote ... ok
+test raft_test::test_leader_transfer_remove_node ... ok
+test raft_test::test_leader_transfer_second_transfer_to_another_node ... ok
+test raft_test::test_leader_transfer_timeout ... ok
+test raft_test::test_leader_transfer_to_non_existing_node ... ok
+test raft_test::test_leader_transfer_second_transfer_to_same_node ... ok
+test raft_test::test_leader_transfer_to_self ... ok
+test raft_test::test_leader_transfer_to_slow_follower ... ok
+test raft_test::test_leader_transfer_to_up_to_date_node ... ok
+test raft_test::test_leader_transfer_to_up_to_date_node_from_follower ... ok
+test raft_test::test_learner_campaign ... ok
+test raft_test::test_leader_transfer_with_check_quorum ... ok
+test raft_test::test_learner_can_vote ... ok
+test raft_test::test_learner_election_timeout ... ok
+test raft_test::test_learner_log_replication ... ok
+test raft_test::test_learner_promotion ... ok
+test raft_test::test_learner_receive_snapshot ... ok
+test raft_test::test_log_replication_with_reordered_message ... ok
+test raft_test::test_msg_app_resp_wait_reset ... ok
+test raft_test::test_log_replication ... ok
+test raft_test::test_new_leader_pending_config ... ok
+test raft_test::test_non_promotable_voter_with_check_quorum ... ok
+test raft_test::test_node_with_smaller_term_can_complete_election ... ok
+test raft_test::test_pre_campaign_while_leader ... ok
+test raft_test::test_old_messages ... ok
+test raft_test::test_pre_vote_from_any_state ... ok
+test raft_test::test_pre_vote_migration_can_complete_election ... ok
+test raft_test::test_pre_vote_migration_with_free_stuck_pre_candidate ... ok
+test raft_test::test_pre_vote_with_check_quorum ... ok
+test raft_test::test_progress_leader ... ok
+test raft_test::test_progress_flow_control ... ok
+test raft_test::test_pre_vote_with_split_vote ... ok
+test raft_test::test_progress_paused ... ok
+test raft_test::test_progress_resume_by_heartbeat_resp ... ok
+test raft_test::test_promotable ... ok
+test raft_test::test_provide_snap ... ok
+test raft_test::test_raft_frees_read_only_mem ... ok
+test raft_test::test_raft_nodes ... ok
+test raft_test::test_proposal_by_proxy ... ok
+test raft_test::test_read_only_duplicate_request ... ok
+test raft_test::test_read_only_for_new_leader ... ok
+test raft_test::test_proposal ... ok
+test raft_test::test_recv_msg_beat ... ok
+test raft_test::test_recv_msg_unreachable ... ok
+test raft_test::test_recv_msg_pre_vote ... ok
+test raft_test::test_restore_from_snap_msg ... ok
+test raft_test::test_restore ... ok
+test raft_test::test_recv_msg_vote ... ok
+test raft_test::test_restore_learner_promotion ... ok
+test raft_test::test_remove_learner ... ok
+test raft_test::test_restore_ignore_snapshot ... ok
+test raft_test::test_read_only_with_learner ... ok
+test raft_test::test_restore_voter_to_learner ... ok
+test raft_test::test_remove_node ... ok
+test raft_test::test_read_only_option_lease ... ok
+test raft_paper_test::test_followers_election_timeout_nonconflict ... ok
+test raft_test::test_restore_with_voters_outgoing ... ok
+test raft_test::test_restore_with_learner ... ok
+test raft_test::test_read_only_option_safe ... ok
+test raft_test::test_send_append_for_progress_probe ... ok
+test raft_test::test_send_append_for_progress_replicate ... ok
+test raft_test::test_send_append_for_progress_snapshot ... ok
+test raft_test::test_single_node_candidate ... ok
+test raft_test::test_single_node_commit ... ok
+test raft_test::test_single_node_pre_candidate ... ok
+test raft_test::test_step_config ... ok
+test raft_test::test_step_ignore_config ... ok
+test raft_test::test_step_ignore_old_term_msg ... ok
+test raft_test::test_transfer_non_member ... ok
+test raft_test::test_state_transition ... ok
+test raft_test::test_vote_from_any_state ... ok
+test raft_test::test_slow_node_restore ... ok
+test rawnode_test::test_raw_node_commit_pagination_after_restart ... ok
+test rawnode_test::test_raw_node_consume_ready ... ok
+test rawnode_test::test_raw_node_joint_auto_leave ... ok
+test rawnode_test::test_raw_node_propose_add_duplicate_node ... ok
+test rawnode_test::test_raw_node_read_index ... ok
+test raft_paper_test::test_candidates_election_timeout_nonconflict ... ok
+test rawnode_test::test_raw_node_restart ... ok
+test rawnode_test::test_raw_node_restart_from_snapshot ... ok
+test rawnode_test::test_raw_node_start ... ok
+test rawnode_test::test_raw_node_status ... ok
+test storage_test::test_storage_append ... ok
+test storage_test::test_storage_apply_snapshot ... ok
+test storage_test::test_storage_compact ... ok
+test storage_test::test_storage_create_snapshot ... ok
+test rawnode_test::test_raw_node_propose_and_conf_change ... ok
+test storage_test::test_storage_entries ... ok
+test storage_test::test_storage_first_index ... ok
+test rawnode_test::test_raw_node_step ... ok
+test rawnode_test::test_raw_node_bounded_log_growth_with_partition ... ok
+test storage_test::test_storage_last_index ... ok
+test storage_test::test_storage_term ... ok
+test tracker_test::test_inflight_free_to ... ok
+test tracker_test::test_inflights_add ... ok
+test tracker_test::test_inflights_reset ... ok
+test tracker_test::test_progress_become_probe ... ok
+test tracker_test::test_progress_become_replicate ... ok
+test tracker_test::test_progress_become_snapshot ... ok
+test tracker_test::test_progress_is_paused ... ok
+test tracker_test::test_progress_maybe_decr ... ok
+test tracker_test::test_progress_resume ... ok
+test tracker_test::test_inflights_full ... ok
+test tracker_test::test_progress_string ... ok
+test tracker_test::test_progress_update ... ok
+test raft_test::test_uncommitted_entry_limit ... ok
+test raft_test::test_past_election_timeout ... ok
+test result: ok. 206 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+[OK ] quorum joint_commit.txt: byte-identical (481 lines)
+[OK ] quorum joint_vote.txt: byte-identical (165 lines)
+[OK ] quorum majority_commit.txt: byte-identical (153 lines)
+[OK ] quorum majority_vote.txt: byte-identical (97 lines)
+[OK ] quorum TestQuick
+[OK ] quorum TestDescribe
+[OK ] confchange joint_autoleave.txt: byte-identical (29 lines)
+[OK ] confchange joint_idempotency.txt: byte-identical (23 lines)
+[OK ] confchange joint_learners_next.txt: byte-identical (24 lines)
+[OK ] confchange joint_safety.txt: byte-identical (81 lines)
+[OK ] confchange simple_idempotency.txt: byte-identical (69 lines)
+[OK ] confchange simple_promote_demote.txt: byte-identical (60 lines)
+[OK ] confchange simple_safety.txt: byte-identical (64 lines)
+[OK ] confchange update.txt: byte-identical (23 lines)
+[OK ] confchange zero.txt: byte-identical (6 lines)
+[OK ] confchange TestConfChangeQuick
+[OK ] confchange TestRestore

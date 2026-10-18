@@ -1,0 +1,461 @@
+# 6.18.44-fc-v139, Intel(R) Xeon(R) Processor @ 2.80GHz, 4 CPUs, go1.27.0, rustc 1.99.1 (58cf8f9c3 2026-10-13), perf version 6.8.12, 2026-10-18T06:52:44, stages: asm
+=== A: generated code of the frame parse loop (micro-go main.parse, micro-rust parse)
+ASM go main.parse: 91 instructions, 3 bounds-check panic sites, 3 stack zeroing stores -> asm/main-parse.s
+ASM go main.parseBCE: 99 instructions, 1 bounds-check panic sites, 3 stack zeroing stores -> asm/main-parseBCE.s
+ASM go main.parseInPlace: 95 instructions, 4 bounds-check panic sites, 3 stack zeroing stores -> asm/main-parseInPlace.s
+ASM rust micro_rust::parse: 73 instructions, 1 bounds-check panic sites, 0 stack zeroing stores -> asm/micro_rust-parse.s
+BCE replicate-go3/main.go: 29 bounds checks left by the prove pass
+  replicate-go3/main.go:67:12: Found IsSliceInBounds
+  replicate-go3/main.go:109:14: Found IsInBounds
+  replicate-go3/main.go:122:14: Found IsInBounds
+  replicate-go3/main.go:125:39: Found IsSliceInBounds
+  replicate-go3/main.go:144:14: Found IsInBounds
+  replicate-go3/main.go:150:38: Found IsSliceInBounds
+  replicate-go3/main.go:161:14: Found IsSliceInBounds
+  replicate-go3/main.go:162:40: Found IsSliceInBounds
+  replicate-go3/main.go:177:14: Found IsInBounds
+  replicate-go3/main.go:180:30: Found IsSliceInBounds
+  replicate-go3/main.go:196:25: Found IsSliceInBounds
+  replicate-go3/main.go:246:15: Found IsInBounds
+  replicate-go3/main.go:248:19: Found IsSliceInBounds
+  replicate-go3/main.go:279:13: Found IsInBounds
+  replicate-go3/main.go:279:42: Found IsInBounds
+  replicate-go3/main.go:284:16: Found IsInBounds
+  replicate-go3/main.go:284:26: Found IsSliceInBounds
+  replicate-go3/main.go:288:17: Found IsInBounds
+  replicate-go3/main.go:303:27: Found IsSliceInBounds
+  replicate-go3/main.go:344:15: Found IsInBounds
+  replicate-go3/main.go:366:34: Found IsInBounds
+  replicate-go3/main.go:204:14: Found IsInBounds
+  replicate-go3/main.go:204:14: Found IsSliceInBounds
+  replicate-go3/main.go:213:35: Found IsInBounds
+  replicate-go3/main.go:213:35: Found IsSliceInBounds
+  replicate-go3/main.go:356:7: Found IsInBounds
+  replicate-go3/main.go:387:4: Found IsInBounds
+  replicate-go3/main.go:387:12: Found IsInBounds
+  replicate-go3/main.go:387:21: Found IsInBounds
+  replicate-go3/main.go:47:6: can inline header with cost 34 as: func([]byte, byte, int, uint64, uint32) []byte { b = append(b, kind, byte(0), byte(0), byte(0)); 
+  replicate-go3/main.go:60:6: cannot inline (*ring).store: function too complex: cost 104 exceeds budget 80
+  replicate-go3/main.go:92:6: cannot inline newLoop: function too complex: cost 82 exceeds budget 80
+  replicate-go3/main.go:98:6: cannot inline (*loop).add: function too complex: cost 263 exceeds budget 80
+  replicate-go3/main.go:108:6: cannot inline (*loop).arm: function too complex: cost 109 exceeds budget 80
+  replicate-go3/main.go:121:6: cannot inline (*loop).flush: function too complex: cost 226 exceeds budget 80
+  replicate-go3/main.go:143:6: cannot inline (*loop).read: function too complex: cost 224 exceeds budget 80
+  replicate-go3/main.go:183:6: cannot inline (*loop).run: function too complex: cost 597 exceeds budget 80
+  replicate-go3/main.go:222:6: cannot inline pair: function too complex: cost 417 exceeds budget 80
+  replicate-go3/main.go:240:6: cannot inline replica: unhandled op DEFER
+  replicate-go3/main.go:260:6: cannot inline primary: unhandled op DEFER
+  replicate-go3/main.go:295:6: cannot inline cpu: function too complex: cost 103 exceeds budget 80
+  replicate-go3/main.go:301:6: cannot inline main: unhandled op GO
+
+# 6.18.44-fc-v139, Intel(R) Xeon(R) Processor @ 2.80GHz, 4 CPUs, go1.27.0, rustc 1.99.1 (58cf8f9c3 2026-10-13), perf version 6.8.12, 2026-10-18T06:52:50, stages: micro
+=== M: microbenchmarks, ns per operation, median of 7 repetitions per round, 3 rounds alternating, each pinned to CPU 3 with taskset
+BENCH lang=go name=getppid_raw ns_per_op=111.6 min=98.1 max=126.5
+BENCH lang=go name=getppid_syscall ns_per_op=201.5 min=187.7 max=228.9
+BENCH lang=go name=read_eagain_std ns_per_op=343.1 min=330.5 max=398.1
+BENCH lang=go name=read_eagain_raw ns_per_op=234.4 min=232.2 max=299.3
+BENCH lang=go name=write_read_24_std ns_per_op=6975.1 min=6524.9 max=7525.8
+BENCH lang=go name=write_read_24_raw ns_per_op=4856.6 min=4522.7 max=5522.2
+BENCH lang=go name=write_read_4120_std ns_per_op=6905.2 min=6618.5 max=7725.0
+BENCH lang=go name=write_read_4120_raw ns_per_op=4597.6 min=4429.1 max=4739.0
+BENCH lang=go name=epoll_wait0_empty_std ns_per_op=191.4 min=185.5 max=288.3
+BENCH lang=go name=epoll_wait0_empty_raw ns_per_op=145.2 min=117.3 max=215.2
+BENCH lang=go name=epoll_wait0_ready_std ns_per_op=393.9 min=381.5 max=502.8
+BENCH lang=go name=epoll_wait0_ready_raw ns_per_op=270.4 min=247.6 max=316.0
+BENCH lang=go name=clock_now ns_per_op=44.7 min=41.8 max=81.9
+BENCH lang=go name=parse_repl16 ns_per_op=134.1 min=133.2 max=140.8
+BENCH lang=go name=parse_ack64 ns_per_op=564.8 min=533.0 max=610.8
+BENCH lang=go name=parse_ack64_bce ns_per_op=554.3 min=511.0 max=657.1
+BENCH lang=go name=parse_ack64_inplace ns_per_op=174.1 min=171.0 max=228.6
+BENCH lang=go name=header16 ns_per_op=75.0 min=74.1 max=119.2
+BENCH lang=go name=append_frame_4k ns_per_op=47.8 min=45.6 max=63.1
+BENCH lang=go name=crc32c_4k ns_per_op=182.7 min=179.8 max=192.9
+BENCH lang=go name=ring_store_64k ns_per_op=74.1 min=73.8 max=76.1
+BENCH lang=go name=ring_store_65536k ns_per_op=550.9 min=541.5 max=592.3
+BENCH lang=go name=map_cycle_ptr ns_per_op=84.5 min=80.5 max=101.3
+BENCH lang=go name=map_cycle_val ns_per_op=87.0 min=83.2 max=93.4
+BENCH lang=go name=sum_bytes_4k ns_per_op=2757.6 min=2651.9 max=3256.2
+BENCH lang=go name=gather_1k ns_per_op=689.8 min=640.0 max=813.7
+BENCH lang=gccgo name=getppid_raw ns_per_op=116.9 min=108.3 max=120.5
+BENCH lang=gccgo name=getppid_syscall ns_per_op=413.1 min=392.6 max=428.8
+BENCH lang=gccgo name=read_eagain_std ns_per_op=779.1 min=706.6 max=856.8
+BENCH lang=gccgo name=read_eagain_raw ns_per_op=236.1 min=230.0 max=242.1
+BENCH lang=gccgo name=write_read_24_std ns_per_op=7570.4 min=6917.4 max=7841.1
+BENCH lang=gccgo name=write_read_24_raw ns_per_op=4505.9 min=4287.2 max=5224.6
+BENCH lang=gccgo name=write_read_4120_std ns_per_op=8038.3 min=7392.8 max=9433.6
+BENCH lang=gccgo name=write_read_4120_raw ns_per_op=5268.8 min=4631.1 max=5685.4
+BENCH lang=gccgo name=epoll_wait0_empty_std ns_per_op=446.8 min=433.8 max=561.3
+BENCH lang=gccgo name=epoll_wait0_empty_raw ns_per_op=125.9 min=123.4 max=135.6
+BENCH lang=gccgo name=epoll_wait0_ready_std ns_per_op=646.6 min=578.2 max=707.5
+BENCH lang=gccgo name=epoll_wait0_ready_raw ns_per_op=268.9 min=251.0 max=321.7
+BENCH lang=gccgo name=clock_now ns_per_op=69.1 min=61.6 max=83.6
+BENCH lang=gccgo name=parse_repl16 ns_per_op=546.4 min=526.6 max=601.9
+BENCH lang=gccgo name=parse_ack64 ns_per_op=2206.6 min=2075.3 max=2522.0
+BENCH lang=gccgo name=parse_ack64_bce ns_per_op=2020.5 min=1941.7 max=2336.3
+BENCH lang=gccgo name=parse_ack64_inplace ns_per_op=2142.4 min=2086.5 max=2258.0
+BENCH lang=gccgo name=header16 ns_per_op=722.9 min=688.8 max=789.9
+BENCH lang=gccgo name=append_frame_4k ns_per_op=99.8 min=90.3 max=110.7
+BENCH lang=gccgo name=crc32c_4k ns_per_op=2019.5 min=1956.5 max=2059.9
+BENCH lang=gccgo name=ring_store_64k ns_per_op=82.3 min=73.3 max=102.1
+BENCH lang=gccgo name=ring_store_65536k ns_per_op=595.6 min=578.0 max=625.1
+BENCH lang=gccgo name=map_cycle_ptr ns_per_op=303.2 min=267.9 max=346.2
+BENCH lang=gccgo name=map_cycle_val ns_per_op=224.3 min=221.0 max=236.7
+BENCH lang=gccgo name=sum_bytes_4k ns_per_op=1978.6 min=1896.9 max=2028.3
+BENCH lang=gccgo name=gather_1k ns_per_op=849.3 min=816.9 max=1019.0
+BENCH lang=rust name=getppid_libc ns_per_op=96.4 min=93.5 max=114.6
+BENCH lang=rust name=read_eagain_std ns_per_op=185.2 min=175.1 max=223.8
+BENCH lang=rust name=read_eagain_libc ns_per_op=211.9 min=209.9 max=214.9
+BENCH lang=rust name=write_read_24_std ns_per_op=4445.8 min=4235.9 max=6308.2
+BENCH lang=rust name=write_read_24_libc ns_per_op=4691.9 min=4283.3 max=4948.4
+BENCH lang=rust name=write_read_4120_std ns_per_op=4541.7 min=4084.9 max=5471.2
+BENCH lang=rust name=write_read_4120_libc ns_per_op=4770.5 min=4538.1 max=5057.4
+BENCH lang=rust name=epoll_wait0_empty_libc ns_per_op=108.9 min=102.1 max=113.5
+BENCH lang=rust name=epoll_wait0_ready_libc ns_per_op=237.4 min=223.9 max=266.0
+BENCH lang=rust name=clock_now ns_per_op=20.4 min=20.2 max=20.7
+BENCH lang=rust name=parse_repl16 ns_per_op=39.5 min=39.4 max=40.1
+BENCH lang=rust name=parse_ack64 ns_per_op=153.8 min=150.5 max=160.2
+BENCH lang=rust name=header16 ns_per_op=49.2 min=49.1 max=52.0
+BENCH lang=rust name=append_frame_4k ns_per_op=46.2 min=46.1 max=46.4
+BENCH lang=rust name=crc32c_4k ns_per_op=220.3 min=219.8 max=242.8
+BENCH lang=rust name=ring_store_64k ns_per_op=70.4 min=69.6 max=74.3
+BENCH lang=rust name=ring_store_65536k ns_per_op=602.3 min=546.9 max=619.7
+BENCH lang=rust name=map_cycle_sip ns_per_op=50.5 min=50.3 max=51.9
+BENCH lang=rust name=map_cycle_fx ns_per_op=16.0 min=15.9 max=17.7
+BENCH lang=rust name=sum_bytes_4k ns_per_op=646.9 min=643.6 max=656.4
+BENCH lang=rust name=gather_1k ns_per_op=648.6 min=635.3 max=696.5
+BENCH lang=go name=getppid_raw ns_per_op=105.2 min=99.5 max=110.2
+BENCH lang=go name=getppid_syscall ns_per_op=178.1 min=172.6 max=207.0
+BENCH lang=go name=read_eagain_std ns_per_op=356.6 min=323.7 max=398.1
+BENCH lang=go name=read_eagain_raw ns_per_op=237.5 min=233.0 max=275.0
+BENCH lang=go name=write_read_24_std ns_per_op=6351.7 min=6013.6 max=6668.3
+BENCH lang=go name=write_read_24_raw ns_per_op=4730.2 min=4542.5 max=5567.7
+BENCH lang=go name=write_read_4120_std ns_per_op=6845.8 min=6444.8 max=7036.2
+BENCH lang=go name=write_read_4120_raw ns_per_op=4872.2 min=4536.7 max=5127.7
+BENCH lang=go name=epoll_wait0_empty_std ns_per_op=186.5 min=174.1 max=235.7
+BENCH lang=go name=epoll_wait0_empty_raw ns_per_op=122.2 min=119.6 max=162.3
+BENCH lang=go name=epoll_wait0_ready_std ns_per_op=364.0 min=348.3 max=405.0
+BENCH lang=go name=epoll_wait0_ready_raw ns_per_op=255.3 min=242.5 max=306.0
+BENCH lang=go name=clock_now ns_per_op=43.4 min=42.1 max=47.6
+BENCH lang=go name=parse_repl16 ns_per_op=142.8 min=136.2 max=174.0
+BENCH lang=go name=parse_ack64 ns_per_op=534.2 min=530.3 max=540.7
+BENCH lang=go name=parse_ack64_bce ns_per_op=493.0 min=492.6 max=500.0
+BENCH lang=go name=parse_ack64_inplace ns_per_op=177.1 min=166.4 max=224.1
+BENCH lang=go name=header16 ns_per_op=70.8 min=70.7 max=73.2
+BENCH lang=go name=append_frame_4k ns_per_op=45.9 min=45.0 max=48.1
+BENCH lang=go name=crc32c_4k ns_per_op=183.5 min=180.2 max=192.0
+BENCH lang=go name=ring_store_64k ns_per_op=78.5 min=76.1 max=92.2
+BENCH lang=go name=ring_store_65536k ns_per_op=583.3 min=572.8 max=592.4
+BENCH lang=go name=map_cycle_ptr ns_per_op=88.1 min=83.7 max=103.1
+BENCH lang=go name=map_cycle_val ns_per_op=87.9 min=83.9 max=96.5
+BENCH lang=go name=sum_bytes_4k ns_per_op=2693.7 min=2555.6 max=2903.0
+BENCH lang=go name=gather_1k ns_per_op=683.5 min=636.8 max=771.5
+BENCH lang=gccgo name=getppid_raw ns_per_op=112.9 min=108.1 max=121.8
+BENCH lang=gccgo name=getppid_syscall ns_per_op=433.1 min=394.3 max=470.3
+BENCH lang=gccgo name=read_eagain_std ns_per_op=746.8 min=677.7 max=774.6
+BENCH lang=gccgo name=read_eagain_raw ns_per_op=246.2 min=235.7 max=252.7
+BENCH lang=gccgo name=write_read_24_std ns_per_op=7126.3 min=6713.4 max=7955.4
+BENCH lang=gccgo name=write_read_24_raw ns_per_op=4542.2 min=4273.0 max=4828.0
+BENCH lang=gccgo name=write_read_4120_std ns_per_op=7349.1 min=7216.1 max=9168.0
+BENCH lang=gccgo name=write_read_4120_raw ns_per_op=4783.9 min=4469.3 max=5244.1
+BENCH lang=gccgo name=epoll_wait0_empty_std ns_per_op=473.6 min=457.7 max=526.2
+BENCH lang=gccgo name=epoll_wait0_empty_raw ns_per_op=123.3 min=122.6 max=125.9
+BENCH lang=gccgo name=epoll_wait0_ready_std ns_per_op=659.9 min=599.5 max=712.9
+BENCH lang=gccgo name=epoll_wait0_ready_raw ns_per_op=251.1 min=249.1 max=306.1
+BENCH lang=gccgo name=clock_now ns_per_op=62.3 min=61.8 max=72.3
+BENCH lang=gccgo name=parse_repl16 ns_per_op=564.5 min=533.4 max=589.8
+BENCH lang=gccgo name=parse_ack64 ns_per_op=2177.2 min=2131.8 max=2265.9
+BENCH lang=gccgo name=parse_ack64_bce ns_per_op=2141.2 min=1986.2 max=2358.1
+BENCH lang=gccgo name=parse_ack64_inplace ns_per_op=2186.6 min=2129.6 max=2306.4
+BENCH lang=gccgo name=header16 ns_per_op=719.3 min=708.4 max=756.5
+BENCH lang=gccgo name=append_frame_4k ns_per_op=90.4 min=90.3 max=101.7
+BENCH lang=gccgo name=crc32c_4k ns_per_op=1956.7 min=1941.2 max=2063.9
+BENCH lang=gccgo name=ring_store_64k ns_per_op=79.1 min=73.8 max=85.3
+BENCH lang=gccgo name=ring_store_65536k ns_per_op=522.7 min=499.5 max=535.3
+BENCH lang=gccgo name=map_cycle_ptr ns_per_op=279.9 min=266.5 max=302.0
+BENCH lang=gccgo name=map_cycle_val ns_per_op=233.9 min=219.8 max=256.1
+BENCH lang=gccgo name=sum_bytes_4k ns_per_op=1987.4 min=1846.1 max=2190.3
+BENCH lang=gccgo name=gather_1k ns_per_op=826.4 min=813.9 max=842.7
+BENCH lang=rust name=getppid_libc ns_per_op=100.0 min=92.8 max=117.3
+BENCH lang=rust name=read_eagain_std ns_per_op=179.2 min=176.1 max=188.3
+BENCH lang=rust name=read_eagain_libc ns_per_op=215.5 min=210.9 max=293.6
+BENCH lang=rust name=write_read_24_std ns_per_op=4097.5 min=4044.9 max=4556.8
+BENCH lang=rust name=write_read_24_libc ns_per_op=4344.7 min=4211.9 max=4984.7
+BENCH lang=rust name=write_read_4120_std ns_per_op=4456.1 min=4106.2 max=4811.8
+BENCH lang=rust name=write_read_4120_libc ns_per_op=4540.6 min=4260.7 max=4940.6
+BENCH lang=rust name=epoll_wait0_empty_libc ns_per_op=105.0 min=98.2 max=130.5
+BENCH lang=rust name=epoll_wait0_ready_libc ns_per_op=227.6 min=221.5 max=253.6
+BENCH lang=rust name=clock_now ns_per_op=21.4 min=20.4 max=21.8
+BENCH lang=rust name=parse_repl16 ns_per_op=39.9 min=39.7 max=40.7
+BENCH lang=rust name=parse_ack64 ns_per_op=156.2 min=150.9 max=165.2
+BENCH lang=rust name=header16 ns_per_op=50.2 min=49.6 max=60.1
+BENCH lang=rust name=append_frame_4k ns_per_op=45.3 min=45.1 max=46.4
+BENCH lang=rust name=crc32c_4k ns_per_op=221.2 min=220.4 max=229.5
+BENCH lang=rust name=ring_store_64k ns_per_op=74.6 min=67.0 max=106.7
+BENCH lang=rust name=ring_store_65536k ns_per_op=596.3 min=573.2 max=635.2
+BENCH lang=rust name=map_cycle_sip ns_per_op=52.0 min=50.9 max=56.1
+BENCH lang=rust name=map_cycle_fx ns_per_op=16.4 min=16.0 max=24.8
+BENCH lang=rust name=sum_bytes_4k ns_per_op=650.6 min=640.9 max=732.4
+BENCH lang=rust name=gather_1k ns_per_op=693.6 min=634.3 max=740.9
+BENCH lang=go name=getppid_raw ns_per_op=99.6 min=97.8 max=109.7
+BENCH lang=go name=getppid_syscall ns_per_op=181.6 min=179.0 max=208.7
+BENCH lang=go name=read_eagain_std ns_per_op=385.1 min=316.6 max=409.7
+BENCH lang=go name=read_eagain_raw ns_per_op=264.8 min=233.5 max=289.9
+BENCH lang=go name=write_read_24_std ns_per_op=6333.9 min=5848.7 max=7139.0
+BENCH lang=go name=write_read_24_raw ns_per_op=4958.7 min=4403.4 max=5362.0
+BENCH lang=go name=write_read_4120_std ns_per_op=6987.4 min=6482.4 max=7839.3
+BENCH lang=go name=write_read_4120_raw ns_per_op=4784.3 min=4596.5 max=5038.3
+BENCH lang=go name=epoll_wait0_empty_std ns_per_op=210.0 min=185.6 max=226.2
+BENCH lang=go name=epoll_wait0_empty_raw ns_per_op=127.7 min=119.1 max=170.0
+BENCH lang=go name=epoll_wait0_ready_std ns_per_op=383.0 min=346.6 max=413.3
+BENCH lang=go name=epoll_wait0_ready_raw ns_per_op=259.6 min=243.1 max=322.1
+BENCH lang=go name=clock_now ns_per_op=46.3 min=42.0 max=62.1
+BENCH lang=go name=parse_repl16 ns_per_op=133.8 min=133.4 max=142.9
+BENCH lang=go name=parse_ack64 ns_per_op=528.5 min=527.1 max=531.7
+BENCH lang=go name=parse_ack64_bce ns_per_op=491.1 min=490.1 max=552.7
+BENCH lang=go name=parse_ack64_inplace ns_per_op=185.9 min=166.7 max=240.6
+BENCH lang=go name=header16 ns_per_op=71.2 min=70.5 max=94.1
+BENCH lang=go name=append_frame_4k ns_per_op=44.9 min=44.8 max=52.7
+BENCH lang=go name=crc32c_4k ns_per_op=182.9 min=179.9 max=191.3
+BENCH lang=go name=ring_store_64k ns_per_op=78.9 min=76.4 max=82.1
+BENCH lang=go name=ring_store_65536k ns_per_op=569.0 min=538.6 max=591.0
+BENCH lang=go name=map_cycle_ptr ns_per_op=80.2 min=79.6 max=90.3
+BENCH lang=go name=map_cycle_val ns_per_op=89.8 min=79.6 max=104.6
+BENCH lang=go name=sum_bytes_4k ns_per_op=2773.6 min=2648.0 max=3306.9
+BENCH lang=go name=gather_1k ns_per_op=981.2 min=630.8 max=1151.1
+BENCH lang=gccgo name=getppid_raw ns_per_op=110.9 min=106.0 max=134.0
+BENCH lang=gccgo name=getppid_syscall ns_per_op=426.9 min=408.1 max=451.0
+BENCH lang=gccgo name=read_eagain_std ns_per_op=726.0 min=701.0 max=787.4
+BENCH lang=gccgo name=read_eagain_raw ns_per_op=235.4 min=233.2 max=250.4
+BENCH lang=gccgo name=write_read_24_std ns_per_op=7667.8 min=7387.2 max=8704.4
+BENCH lang=gccgo name=write_read_24_raw ns_per_op=4817.3 min=4475.5 max=5662.8
+BENCH lang=gccgo name=write_read_4120_std ns_per_op=7299.3 min=6904.6 max=8367.9
+BENCH lang=gccgo name=write_read_4120_raw ns_per_op=5282.8 min=5013.7 max=5701.8
+BENCH lang=gccgo name=epoll_wait0_empty_std ns_per_op=431.1 min=427.0 max=511.5
+BENCH lang=gccgo name=epoll_wait0_empty_raw ns_per_op=136.7 min=123.1 max=186.7
+BENCH lang=gccgo name=epoll_wait0_ready_std ns_per_op=623.7 min=591.0 max=668.9
+BENCH lang=gccgo name=epoll_wait0_ready_raw ns_per_op=263.7 min=255.4 max=277.6
+BENCH lang=gccgo name=clock_now ns_per_op=63.4 min=61.8 max=68.6
+BENCH lang=gccgo name=parse_repl16 ns_per_op=547.9 min=534.2 max=570.9
+BENCH lang=gccgo name=parse_ack64 ns_per_op=2206.6 min=2099.1 max=2259.0
+BENCH lang=gccgo name=parse_ack64_bce ns_per_op=2054.5 min=1998.2 max=2158.0
+BENCH lang=gccgo name=parse_ack64_inplace ns_per_op=2204.3 min=2163.1 max=2321.2
+BENCH lang=gccgo name=header16 ns_per_op=708.9 min=698.2 max=736.5
+BENCH lang=gccgo name=append_frame_4k ns_per_op=90.5 min=90.3 max=90.8
+BENCH lang=gccgo name=crc32c_4k ns_per_op=2088.1 min=1914.5 max=2250.4
+BENCH lang=gccgo name=ring_store_64k ns_per_op=76.1 min=73.7 max=84.4
+BENCH lang=gccgo name=ring_store_65536k ns_per_op=560.2 min=515.0 max=710.6
+BENCH lang=gccgo name=map_cycle_ptr ns_per_op=281.3 min=273.1 max=305.4
+BENCH lang=gccgo name=map_cycle_val ns_per_op=237.4 min=227.5 max=257.9
+BENCH lang=gccgo name=sum_bytes_4k ns_per_op=1982.7 min=1882.7 max=2127.0
+BENCH lang=gccgo name=gather_1k ns_per_op=884.6 min=824.1 max=1023.6
+BENCH lang=rust name=getppid_libc ns_per_op=100.0 min=95.9 max=112.6
+BENCH lang=rust name=read_eagain_std ns_per_op=179.5 min=178.4 max=188.3
+BENCH lang=rust name=read_eagain_libc ns_per_op=231.1 min=216.8 max=243.1
+BENCH lang=rust name=write_read_24_std ns_per_op=4388.0 min=4137.0 max=4531.7
+BENCH lang=rust name=write_read_24_libc ns_per_op=4611.3 min=4353.8 max=5126.6
+BENCH lang=rust name=write_read_4120_std ns_per_op=4601.2 min=4171.7 max=5051.8
+BENCH lang=rust name=write_read_4120_libc ns_per_op=5196.0 min=4299.9 max=5855.7
+BENCH lang=rust name=epoll_wait0_empty_libc ns_per_op=99.4 min=98.5 max=101.8
+BENCH lang=rust name=epoll_wait0_ready_libc ns_per_op=249.7 min=228.4 max=284.4
+BENCH lang=rust name=clock_now ns_per_op=22.8 min=20.6 max=24.8
+BENCH lang=rust name=parse_repl16 ns_per_op=42.3 min=38.9 max=49.3
+BENCH lang=rust name=parse_ack64 ns_per_op=160.5 min=150.2 max=209.1
+BENCH lang=rust name=header16 ns_per_op=49.9 min=49.5 max=53.3
+BENCH lang=rust name=append_frame_4k ns_per_op=51.5 min=47.0 max=60.6
+BENCH lang=rust name=crc32c_4k ns_per_op=232.3 min=223.7 max=254.3
+BENCH lang=rust name=ring_store_64k ns_per_op=77.6 min=73.3 max=82.9
+BENCH lang=rust name=ring_store_65536k ns_per_op=599.0 min=565.0 max=639.8
+BENCH lang=rust name=map_cycle_sip ns_per_op=53.0 min=50.8 max=71.6
+BENCH lang=rust name=map_cycle_fx ns_per_op=16.5 min=16.3 max=17.4
+BENCH lang=rust name=sum_bytes_4k ns_per_op=732.2 min=639.8 max=862.1
+BENCH lang=rust name=gather_1k ns_per_op=715.8 min=648.3 max=979.6
+
+| Benchmark | Go (gc) ns | gccgo ns | Rust ns | gc − Rust |
+|---|---|---|---|---|
+| getppid_raw | 105.2 | 112.9 |  |  |
+| getppid_syscall | 181.6 | 426.9 |  |  |
+| read_eagain_std | 356.6 | 746.8 | 179.5 | +177.1 |
+| read_eagain_raw | 237.5 | 236.1 |  |  |
+| write_read_24_std | 6351.7 | 7570.4 | 4388.0 | +1963.7 |
+| write_read_24_raw | 4856.6 | 4542.2 |  |  |
+| write_read_4120_std | 6905.2 | 7349.1 | 4541.7 | +2363.5 |
+| write_read_4120_raw | 4784.3 | 5268.8 |  |  |
+| epoll_wait0_empty_std | 191.4 | 446.8 |  |  |
+| epoll_wait0_empty_raw | 127.7 | 125.9 |  |  |
+| epoll_wait0_ready_std | 383.0 | 646.6 |  |  |
+| epoll_wait0_ready_raw | 259.6 | 263.7 |  |  |
+| clock_now | 44.7 | 63.4 | 21.4 | +23.3 |
+| parse_repl16 | 134.1 | 547.9 | 39.9 | +94.2 |
+| parse_ack64 | 534.2 | 2206.6 | 156.2 | +378.0 |
+| parse_ack64_bce | 493.0 | 2054.5 |  |  |
+| parse_ack64_inplace | 177.1 | 2186.6 |  |  |
+| header16 | 71.2 | 719.3 | 49.9 | +21.3 |
+| append_frame_4k | 45.9 | 90.5 | 46.2 | -0.3 |
+| crc32c_4k | 182.9 | 2019.5 | 221.2 | -38.3 |
+| ring_store_64k | 78.5 | 79.1 | 74.6 | +3.9 |
+| ring_store_65536k | 569.0 | 560.2 | 599.0 | -30.0 |
+| map_cycle_ptr | 84.5 | 281.3 |  |  |
+| map_cycle_val | 87.9 | 233.9 |  |  |
+| sum_bytes_4k | 2757.6 | 1982.7 | 650.6 | +2107.0 |
+| gather_1k | 689.8 | 849.3 | 693.6 | -3.8 |
+| getppid_libc |  |  | 100.0 |  |
+| read_eagain_libc |  |  | 215.5 |  |
+| write_read_24_libc |  |  | 4611.3 |  |
+| write_read_4120_libc |  |  | 4770.5 |  |
+| epoll_wait0_empty_libc |  |  | 105.0 |  |
+| epoll_wait0_ready_libc |  |  | 237.4 |  |
+| map_cycle_sip |  |  | 52.0 |  |
+| map_cycle_fx |  |  | 16.4 |  |
+
+# 6.18.44-fc-v139, Intel(R) Xeon(R) Processor @ 2.80GHz, 4 CPUs, go1.27.0, rustc 1.99.1 (58cf8f9c3 2026-10-13), perf version 6.8.12, 2026-10-18T07:07:57, stages: replicate
+=== V: replicated 4K write, 16 connections, 5 s per run, 5 rounds, variants interleaved
+[rust] RUN lang=rust conns=16 coalesce=1 | ops_per_s=48686 cpu_us_per_op=36.02 cores=1.75 reads_per_op=5.36 writes_per_op=2.69 lat_p50_us=303.7 lat_p99_us=819.0 lat_p999_us=2819.1 secs=5.0
+[rust-kept] RUN lang=rust-kept conns=16 coalesce=1 touch=0 | ops_per_s=48854 cpu_us_per_op=36.83 cores=1.80 reads_per_op=5.36 writes_per_op=2.70 lat_p50_us=302.7 lat_p99_us=788.3 lat_p999_us=2815.4 secs=5.0
+[rust-kept touch] RUN lang=rust-kept conns=16 coalesce=1 touch=1 | ops_per_s=49169 cpu_us_per_op=36.06 cores=1.77 reads_per_op=5.33 writes_per_op=2.70 lat_p50_us=301.7 lat_p99_us=920.7 lat_p999_us=2983.8 secs=5.0
+[go3] RUN lang=go3 conns=16 lock=0 | ops_per_s=47627 cpu_us_per_op=42.02 cores=2.00 reads_per_op=5.20 writes_per_op=2.68 lat_p50_us=315.2 lat_p99_us=679.4 lat_p999_us=2632.2 secs=5.0
+[go4 touch] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=4 | ops_per_s=48802 cpu_us_per_op=40.99 cores=2.00 reads_per_op=5.22 writes_per_op=2.69 lat_p50_us=304.6 lat_p99_us=693.7 lat_p999_us=2333.2 secs=5.0
+[go4 touch P8] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=8 | ops_per_s=48577 cpu_us_per_op=38.37 cores=1.86 reads_per_op=5.26 writes_per_op=2.68 lat_p50_us=305.9 lat_p99_us=723.3 lat_p999_us=2389.0 secs=5.0
+[go4 raw touch] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=4 | ops_per_s=50250 cpu_us_per_op=39.48 cores=1.98 reads_per_op=5.20 writes_per_op=2.67 lat_p50_us=296.8 lat_p99_us=682.8 lat_p999_us=2224.5 secs=5.0
+[go4 raw touch P8] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=8 | ops_per_s=47972 cpu_us_per_op=31.33 cores=1.50 reads_per_op=5.12 writes_per_op=2.62 lat_p50_us=298.4 lat_p99_us=847.7 lat_p999_us=2823.7 secs=5.0
+[rust] RUN lang=rust conns=16 coalesce=1 | ops_per_s=53669 cpu_us_per_op=29.37 cores=1.58 reads_per_op=5.40 writes_per_op=2.79 lat_p50_us=257.1 lat_p99_us=923.4 lat_p999_us=3450.6 secs=5.0
+[rust-kept] RUN lang=rust-kept conns=16 coalesce=1 touch=0 | ops_per_s=45591 cpu_us_per_op=36.41 cores=1.66 reads_per_op=5.35 writes_per_op=2.76 lat_p50_us=299.1 lat_p99_us=1535.9 lat_p999_us=5127.4 secs=5.0
+[rust-kept touch] RUN lang=rust-kept conns=16 coalesce=1 touch=1 | ops_per_s=53005 cpu_us_per_op=34.24 cores=1.81 reads_per_op=5.37 writes_per_op=2.74 lat_p50_us=271.4 lat_p99_us=903.0 lat_p999_us=3671.6 secs=5.0
+[go3] RUN lang=go3 conns=16 lock=0 | ops_per_s=41899 cpu_us_per_op=47.39 cores=1.99 reads_per_op=5.17 writes_per_op=2.67 lat_p50_us=354.2 lat_p99_us=821.5 lat_p999_us=3385.1 secs=5.0
+[go4 touch] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=4 | ops_per_s=46962 cpu_us_per_op=41.76 cores=1.96 reads_per_op=5.17 writes_per_op=2.67 lat_p50_us=314.0 lat_p99_us=750.6 lat_p999_us=2677.3 secs=5.0
+[go4 touch P8] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=8 | ops_per_s=47846 cpu_us_per_op=38.26 cores=1.83 reads_per_op=5.23 writes_per_op=2.66 lat_p50_us=308.1 lat_p99_us=712.7 lat_p999_us=2550.4 secs=5.0
+[go4 raw touch] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=4 | ops_per_s=43510 cpu_us_per_op=44.43 cores=1.93 reads_per_op=5.19 writes_per_op=2.68 lat_p50_us=327.0 lat_p99_us=1069.8 lat_p999_us=3495.3 secs=5.0
+[go4 raw touch P8] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=8 | ops_per_s=47031 cpu_us_per_op=38.68 cores=1.82 reads_per_op=5.27 writes_per_op=2.68 lat_p50_us=309.1 lat_p99_us=840.9 lat_p999_us=2736.8 secs=5.0
+[rust] RUN lang=rust conns=16 coalesce=1 | ops_per_s=55037 cpu_us_per_op=33.29 cores=1.83 reads_per_op=5.41 writes_per_op=2.72 lat_p50_us=275.1 lat_p99_us=534.8 lat_p999_us=1554.1 secs=5.0
+[rust-kept] RUN lang=rust-kept conns=16 coalesce=1 touch=0 | ops_per_s=52659 cpu_us_per_op=35.08 cores=1.85 reads_per_op=5.38 writes_per_op=2.71 lat_p50_us=285.2 lat_p99_us=677.9 lat_p999_us=1858.8 secs=5.0
+[rust-kept touch] RUN lang=rust-kept conns=16 coalesce=1 touch=1 | ops_per_s=51591 cpu_us_per_op=36.01 cores=1.86 reads_per_op=5.38 writes_per_op=2.71 lat_p50_us=288.8 lat_p99_us=581.9 lat_p999_us=2019.4 secs=5.0
+[go3] RUN lang=go3 conns=16 lock=0 | ops_per_s=44909 cpu_us_per_op=44.44 cores=2.00 reads_per_op=5.18 writes_per_op=2.68 lat_p50_us=326.8 lat_p99_us=793.4 lat_p999_us=2457.0 secs=5.0
+[go4 touch] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=4 | ops_per_s=42504 cpu_us_per_op=47.13 cores=2.00 reads_per_op=5.20 writes_per_op=2.69 lat_p50_us=347.5 lat_p99_us=848.3 lat_p999_us=2408.9 secs=5.0
+[go4 touch P8] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=8 | ops_per_s=44089 cpu_us_per_op=42.71 cores=1.88 reads_per_op=5.24 writes_per_op=2.68 lat_p50_us=343.7 lat_p99_us=713.4 lat_p999_us=2244.2 secs=5.0
+[go4 raw touch] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=4 | ops_per_s=44560 cpu_us_per_op=45.33 cores=2.02 reads_per_op=5.22 writes_per_op=2.69 lat_p50_us=336.2 lat_p99_us=723.6 lat_p999_us=2427.0 secs=5.0
+[go4 raw touch P8] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=8 | ops_per_s=43404 cpu_us_per_op=43.25 cores=1.88 reads_per_op=5.29 writes_per_op=2.70 lat_p50_us=339.7 lat_p99_us=874.0 lat_p999_us=2384.4 secs=5.0
+[rust] RUN lang=rust conns=16 coalesce=1 | ops_per_s=46688 cpu_us_per_op=38.18 cores=1.78 reads_per_op=5.36 writes_per_op=2.69 lat_p50_us=325.1 lat_p99_us=667.0 lat_p999_us=2347.7 secs=5.0
+[rust-kept] RUN lang=rust-kept conns=16 coalesce=1 touch=0 | ops_per_s=44172 cpu_us_per_op=41.57 cores=1.84 reads_per_op=5.37 writes_per_op=2.71 lat_p50_us=341.0 lat_p99_us=837.0 lat_p999_us=2738.2 secs=5.0
+[rust-kept touch] RUN lang=rust-kept conns=16 coalesce=1 touch=1 | ops_per_s=40399 cpu_us_per_op=39.27 cores=1.59 reads_per_op=5.30 writes_per_op=2.77 lat_p50_us=324.3 lat_p99_us=2503.7 lat_p999_us=4533.5 secs=5.0
+[go3] RUN lang=go3 conns=16 lock=0 | ops_per_s=34384 cpu_us_per_op=45.44 cores=1.56 reads_per_op=5.11 writes_per_op=2.62 lat_p50_us=406.6 lat_p99_us=1363.8 lat_p999_us=4391.1 secs=5.0
+[go4 touch] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=4 | ops_per_s=36643 cpu_us_per_op=42.84 cores=1.57 reads_per_op=5.13 writes_per_op=2.64 lat_p50_us=387.7 lat_p99_us=1301.3 lat_p999_us=4099.0 secs=5.0
+[go4 touch P8] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=8 | ops_per_s=37716 cpu_us_per_op=39.99 cores=1.51 reads_per_op=5.12 writes_per_op=2.62 lat_p50_us=385.3 lat_p99_us=1135.8 lat_p999_us=3660.0 secs=5.0
+[go4 raw touch] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=4 | ops_per_s=33371 cpu_us_per_op=47.81 cores=1.60 reads_per_op=5.20 writes_per_op=2.67 lat_p50_us=416.8 lat_p99_us=1508.1 lat_p999_us=4598.5 secs=5.0
+[go4 raw touch P8] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=8 | ops_per_s=40711 cpu_us_per_op=36.55 cores=1.49 reads_per_op=5.09 writes_per_op=2.60 lat_p50_us=359.0 lat_p99_us=988.4 lat_p999_us=3548.5 secs=5.0
+[rust] RUN lang=rust conns=16 coalesce=1 | ops_per_s=41467 cpu_us_per_op=38.66 cores=1.60 reads_per_op=5.31 writes_per_op=2.77 lat_p50_us=325.1 lat_p99_us=2067.6 lat_p999_us=4440.7 secs=5.0
+[rust-kept] RUN lang=rust-kept conns=16 coalesce=1 touch=0 | ops_per_s=32245 cpu_us_per_op=50.98 cores=1.64 reads_per_op=5.38 writes_per_op=2.81 lat_p50_us=358.7 lat_p99_us=2996.8 lat_p999_us=5325.6 secs=5.0
+[rust-kept touch] RUN lang=rust-kept conns=16 coalesce=1 touch=1 | ops_per_s=38755 cpu_us_per_op=41.25 cores=1.60 reads_per_op=5.34 writes_per_op=2.78 lat_p50_us=339.5 lat_p99_us=2485.5 lat_p999_us=5729.3 secs=5.0
+[go3] RUN lang=go3 conns=16 lock=0 | ops_per_s=36158 cpu_us_per_op=53.04 cores=1.92 reads_per_op=5.17 writes_per_op=2.67 lat_p50_us=386.2 lat_p99_us=1578.9 lat_p999_us=3111.1 secs=5.0
+[go4 touch] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=4 | ops_per_s=40483 cpu_us_per_op=48.41 cores=1.96 reads_per_op=5.17 writes_per_op=2.68 lat_p50_us=365.8 lat_p99_us=895.2 lat_p999_us=2417.7 secs=5.0
+[go4 touch P8] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=8 | ops_per_s=37069 cpu_us_per_op=44.81 cores=1.66 reads_per_op=5.24 writes_per_op=2.70 lat_p50_us=380.3 lat_p99_us=1301.1 lat_p999_us=2794.1 secs=5.0
+[go4 raw touch] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=4 | ops_per_s=41014 cpu_us_per_op=42.44 cores=1.74 reads_per_op=5.19 writes_per_op=2.68 lat_p50_us=358.2 lat_p99_us=960.0 lat_p999_us=1975.6 secs=5.0
+[go4 raw touch P8] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=8 | ops_per_s=42590 cpu_us_per_op=38.57 cores=1.64 reads_per_op=5.22 writes_per_op=2.67 lat_p50_us=349.0 lat_p99_us=913.3 lat_p999_us=2261.3 secs=5.0
+
+| Variant | CPU µs per write, median | min to max | vs rust-kept touch |
+|---|---|---|---|
+| rust | 36.02 | 29.37 to 38.66 | -0.04 |
+| rust-kept | 36.83 | 35.08 to 50.98 | +0.77 |
+| rust-kept touch | 36.06 | 34.24 to 41.25 | +0.00 |
+| go3 | 45.44 | 42.02 to 53.04 | +9.38 |
+| go4 touch | 42.84 | 40.99 to 48.41 | +6.78 |
+| go4 touch P8 | 39.99 | 38.26 to 44.81 | +3.93 |
+| go4 raw touch | 44.43 | 39.48 to 47.81 | +8.37 |
+| go4 raw touch P8 | 38.57 | 31.33 to 43.25 | +2.51 |
+
+# 6.18.44-fc-v139, Intel(R) Xeon(R) Processor @ 2.80GHz, 4 CPUs, go1.27.0, rustc 1.99.1 (58cf8f9c3 2026-10-13), perf version 6.8.12, 2026-10-18T07:14:41, stages: counters
+=== P1: syscalls and scheduler events per write (perf stat over the whole process)
+[rust] RUN lang=rust conns=16 coalesce=1 | ops_per_s=43439 cpu_us_per_op=42.85 cores=1.86 reads_per_op=5.40 writes_per_op=2.82 lat_p50_us=331.3 lat_p99_us=1046.6 lat_p999_us=4366.5 secs=5.0
+COUNTERS rust | task_clock_us=42.79 context-switches=0.550 cpu-migrations=0.001 page-faults=0.078 all syscalls=9.196 read=0.000 recvfrom=5.401 write=0.000 sendto=2.819 epoll_wait=0.974 epoll_ctl=0.000 futex=0.000 nanosleep=0.000 sched_yield=0.000 tgkill=0.000
+[rust-kept] RUN lang=rust-kept conns=16 coalesce=1 touch=0 | ops_per_s=41091 cpu_us_per_op=45.66 cores=1.88 reads_per_op=5.40 writes_per_op=2.75 lat_p50_us=341.2 lat_p99_us=1266.4 lat_p999_us=4087.6 secs=5.0
+COUNTERS rust-kept | task_clock_us=45.60 context-switches=0.509 cpu-migrations=0.002 page-faults=0.242 all syscalls=9.096 read=0.000 recvfrom=5.395 write=0.000 sendto=2.752 epoll_wait=0.947 epoll_ctl=0.000 futex=0.000 nanosleep=0.000 sched_yield=0.000 tgkill=0.000
+[rust-kept touch] RUN lang=rust-kept conns=16 coalesce=1 touch=1 | ops_per_s=41545 cpu_us_per_op=45.54 cores=1.89 reads_per_op=5.37 writes_per_op=2.72 lat_p50_us=372.0 lat_p99_us=805.8 lat_p999_us=2457.9 secs=5.0
+COUNTERS rust-kept touch | task_clock_us=45.75 context-switches=0.505 cpu-migrations=0.003 page-faults=0.240 all syscalls=9.044 read=0.000 recvfrom=5.372 write=0.000 sendto=2.724 epoll_wait=0.945 epoll_ctl=0.000 futex=0.000 nanosleep=0.000 sched_yield=0.000 tgkill=0.000
+[go3] RUN lang=go3 conns=16 lock=0 | ops_per_s=37651 cpu_us_per_op=54.93 cores=2.07 reads_per_op=5.19 writes_per_op=2.70 lat_p50_us=393.2 lat_p99_us=984.5 lat_p999_us=2727.4 secs=5.0
+COUNTERS go3 | task_clock_us=52.49 context-switches=0.838 cpu-migrations=0.137 page-faults=0.275 all syscalls=9.171 read=5.191 recvfrom=0.000 write=2.696 sendto=0.000 epoll_wait=0.834 epoll_ctl=0.001 futex=0.210 nanosleep=0.226 sched_yield=0.001 tgkill=0.001
+[go4 touch] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=4 | ops_per_s=38671 cpu_us_per_op=53.88 cores=2.08 reads_per_op=5.20 writes_per_op=2.70 lat_p50_us=380.4 lat_p99_us=1113.7 lat_p999_us=2564.4 secs=5.0
+COUNTERS go4 touch | task_clock_us=52.68 context-switches=0.838 cpu-migrations=0.134 page-faults=0.268 all syscalls=9.181 read=5.199 recvfrom=0.000 write=2.698 sendto=0.000 epoll_wait=0.837 epoll_ctl=0.001 futex=0.205 nanosleep=0.225 sched_yield=0.005 tgkill=0.001
+[go4 touch P8] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=8 | ops_per_s=41731 cpu_us_per_op=44.54 cores=1.86 reads_per_op=5.21 writes_per_op=2.67 lat_p50_us=357.4 lat_p99_us=894.2 lat_p999_us=2713.7 secs=5.0
+COUNTERS go4 touch P8 | task_clock_us=44.44 context-switches=0.590 cpu-migrations=0.076 page-faults=0.249 all syscalls=8.857 read=5.207 recvfrom=0.000 write=2.673 sendto=0.000 epoll_wait=0.840 epoll_ctl=0.001 futex=0.024 nanosleep=0.092 sched_yield=0.000 tgkill=0.005
+[go4 raw touch] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=4 | ops_per_s=41927 cpu_us_per_op=49.86 cores=2.09 reads_per_op=5.25 writes_per_op=2.71 lat_p50_us=355.6 lat_p99_us=808.5 lat_p999_us=1972.2 secs=5.0
+COUNTERS go4 raw touch | task_clock_us=48.40 context-switches=0.845 cpu-migrations=0.112 page-faults=0.248 all syscalls=9.214 read=5.246 recvfrom=0.000 write=2.708 sendto=0.000 epoll_wait=0.850 epoll_ctl=0.001 futex=0.177 nanosleep=0.213 sched_yield=0.000 tgkill=0.003
+[go4 raw touch P8] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=8 | ops_per_s=42933 cpu_us_per_op=45.31 cores=1.95 reads_per_op=5.32 writes_per_op=2.72 lat_p50_us=345.3 lat_p99_us=861.7 lat_p999_us=1762.0 secs=5.0
+COUNTERS go4 raw touch P8 | task_clock_us=45.20 context-switches=0.570 cpu-migrations=0.056 page-faults=0.242 all syscalls=9.067 read=5.318 recvfrom=0.000 write=2.716 sendto=0.000 epoll_wait=0.925 epoll_ctl=0.001 futex=0.018 nanosleep=0.064 sched_yield=0.002 tgkill=0.005
+
+# 6.18.44-fc-v139, Intel(R) Xeon(R) Processor @ 2.80GHz, 4 CPUs, go1.27.0, rustc 1.99.1 (58cf8f9c3 2026-10-13), perf version 6.8.12, 2026-10-18T07:16:00, stages: profile
+=== P2: perf record -g -e cpu-clock -F 4000, from the start of the measured window (-D) to exit, split by classify.py, µs per write, mean of 2 runs
+[rust] RUN lang=rust conns=16 coalesce=1 | ops_per_s=37867 cpu_us_per_op=53.52 cores=2.03 reads_per_op=5.35 writes_per_op=2.76 lat_p50_us=390.1 lat_p99_us=1041.2 lat_p999_us=2621.5 secs=5.0
+[rust-kept touch] RUN lang=rust-kept conns=16 coalesce=1 touch=1 | ops_per_s=39980 cpu_us_per_op=52.13 cores=2.08 reads_per_op=5.36 writes_per_op=2.76 lat_p50_us=382.6 lat_p99_us=763.3 lat_p999_us=2607.3 secs=5.0
+[go3] RUN lang=go3 conns=16 lock=0 | ops_per_s=33056 cpu_us_per_op=64.79 cores=2.14 reads_per_op=5.17 writes_per_op=2.69 lat_p50_us=450.6 lat_p99_us=1097.6 lat_p999_us=2602.1 secs=5.0
+[go4 touch] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=4 | ops_per_s=33470 cpu_us_per_op=63.87 cores=2.14 reads_per_op=5.12 writes_per_op=2.67 lat_p50_us=448.7 lat_p99_us=1120.6 lat_p999_us=2694.3 secs=5.0
+[go4 raw touch P8] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=8 | ops_per_s=35019 cpu_us_per_op=57.48 cores=2.01 reads_per_op=5.23 writes_per_op=2.70 lat_p50_us=433.1 lat_p99_us=932.3 lat_p999_us=3080.2 secs=5.0
+[rust] RUN lang=rust conns=16 coalesce=1 | ops_per_s=40809 cpu_us_per_op=49.68 cores=2.03 reads_per_op=5.34 writes_per_op=2.74 lat_p50_us=370.1 lat_p99_us=790.7 lat_p999_us=2605.9 secs=5.0
+[rust-kept touch] RUN lang=rust-kept conns=16 coalesce=1 touch=1 | ops_per_s=39784 cpu_us_per_op=52.40 cores=2.08 reads_per_op=5.40 writes_per_op=2.79 lat_p50_us=369.4 lat_p99_us=957.2 lat_p999_us=4031.8 secs=5.0
+[go3] RUN lang=go3 conns=16 lock=0 | ops_per_s=32364 cpu_us_per_op=66.41 cores=2.15 reads_per_op=5.16 writes_per_op=2.69 lat_p50_us=463.6 lat_p99_us=1101.3 lat_p999_us=2517.5 secs=5.0
+[go4 touch] RUN lang=go4 conns=16 lock=0 raw=0 touch=1 gomaxprocs=4 | ops_per_s=36737 cpu_us_per_op=57.61 cores=2.12 reads_per_op=5.13 writes_per_op=2.67 lat_p50_us=409.7 lat_p99_us=898.2 lat_p999_us=2503.6 secs=5.0
+[go4 raw touch P8] RUN lang=go4 conns=16 lock=0 raw=1 touch=1 gomaxprocs=8 | ops_per_s=36867 cpu_us_per_op=54.25 cores=2.00 reads_per_op=5.27 writes_per_op=2.73 lat_p50_us=396.4 lat_p99_us=1105.3 lat_p999_us=3173.7 secs=5.0
+
+| Bucket | rust | rust-kept touch | go3 | go4 touch | go4 raw touch P8 |
+|---|---|---|---|---|---|
+| kernel: epoll_wait | 10.25 | 9.80 | 8.10 | 7.20 | 8.64 |
+| kernel: futex | 0.00 | 0.00 | 3.23 | 2.88 | 0.21 |
+| kernel: interrupts and other | 0.01 | 0.01 | 0.06 | 0.05 | 0.05 |
+| kernel: nanosleep | 0.00 | 0.00 | 4.22 | 3.74 | 1.20 |
+| kernel: other syscalls | 0.05 | 0.11 | 0.04 | 0.03 | 0.16 |
+| kernel: page faults | 0.21 | 0.02 | 0.71 | 0.06 | 0.06 |
+| kernel: read | 5.68 | 5.48 | 6.81 | 6.11 | 6.43 |
+| kernel: syscall entry/exit | 1.13 | 1.00 | 1.66 | 1.51 | 1.38 |
+| kernel: write | 27.53 | 26.55 | 25.81 | 23.00 | 25.31 |
+| user: alloc/GC | 0.00 | 0.00 | 0.23 | 0.21 | 0.20 |
+| user: clock | 0.06 | 0.05 | 0.16 | 0.15 | 0.10 |
+| user: crc32c | 0.35 | 0.29 | 0.97 | 0.97 | 0.95 |
+| user: hash map | 0.00 | 0.00 | 0.24 | 0.25 | 0.24 |
+| user: memmove/memset | 1.39 | 2.46 | 2.51 | 2.36 | 2.35 |
+| user: other user (lib) | 0.12 | 0.13 | 0.12 | 0.10 | 0.13 |
+| user: other user (runtime) | 0.00 | 0.00 | 0.19 | 0.15 | 0.10 |
+| user: program code | 1.80 | 1.87 | 2.15 | 2.01 | 2.06 |
+| user: scheduler/sysmon | 0.00 | 0.00 | 1.28 | 1.21 | 0.32 |
+| user: syscall wrappers | 1.22 | 1.19 | 2.42 | 2.11 | 1.44 |
+| total | 49.79 | 48.97 | 60.89 | 54.10 | 51.34 |
+
+# 6.18.44-fc-v139, Intel(R) Xeon(R) Processor @ 2.80GHz, 4 CPUs, go1.27.0, rustc 1.99.1 (58cf8f9c3 2026-10-13), perf version 6.8.12, 2026-10-18T07:18:39, stages: pprof
+=== Go pprof of go3 (CPUPROFILE), top 30 by flat time
+[go3] RUN lang=go3 conns=16 lock=0 | ops_per_s=39222 cpu_us_per_op=48.39 cores=1.90 reads_per_op=5.17 writes_per_op=2.67 lat_p50_us=369.5 lat_p99_us=1042.9 lat_p999_us=3675.9 secs=5.0
+File: replicate-go3
+Build ID: daf5b2259a5c94c6601c868c45472b73a8334415
+Type: cpu
+Time: 2026-10-18 07:18:39 UTC
+Duration: 5.03s, Total samples = 7.80s (155.03%)
+Showing nodes accounting for 7.61s, 97.56% of 7.80s total
+Dropped 28 nodes (cum <= 0.04s)
+Showing top 30 nodes out of 40
+      flat  flat%   sum%        cum   cum%
+     6.25s 80.13% 80.13%      6.25s 80.13%  internal/runtime/syscall/linux.Syscall6
+     0.61s  7.82% 87.95%      0.61s  7.82%  runtime.memmove
+     0.14s  1.79% 89.74%      0.14s  1.79%  hash/crc32.castagnoliSSE42Triple
+     0.10s  1.28% 91.03%      1.19s 15.26%  main.(*loop).read
+     0.10s  1.28% 92.31%      0.10s  1.28%  runtime.futex
+     0.09s  1.15% 93.46%      4.86s 62.31%  main.(*loop).flush
+     0.04s  0.51% 93.97%      0.06s  0.77%  runtime.exitsyscall
+     0.04s  0.51% 94.49%      0.06s  0.77%  runtime.reentersyscall
+     0.03s  0.38% 94.87%      7.62s 97.69%  main.(*loop).run
+     0.03s  0.38% 95.26%      0.66s  8.46%  main.(*ring).store
+     0.03s  0.38% 95.64%      0.04s  0.51%  runtime.mallocgcSmallNoScanSC3
+     0.03s  0.38% 96.03%      4.76s 61.03%  syscall.write
+     0.02s  0.26% 96.28%      0.16s  2.05%  hash/crc32.archUpdateCastagnoli
+     0.02s  0.26% 96.54%      6.27s 80.38%  syscall.RawSyscall6
+     0.02s  0.26% 96.79%      5.81s 74.49%  syscall.Syscall
+     0.01s  0.13% 96.92%      0.08s  1.03%  main.main.func2
+     0.01s  0.13% 97.05%      0.38s  4.87%  main.primary.func1
+     0.01s  0.13% 97.18%      0.11s  1.41%  runtime.notesleep
+     0.01s  0.13% 97.31%      0.14s  1.79%  runtime.schedule
+     0.01s  0.13% 97.44%      1.09s 13.97%  syscall.Read (inline)
+     0.01s  0.13% 97.56%      4.77s 61.15%  syscall.Write (inline)
+         0     0% 97.56%      0.16s  2.05%  hash/crc32.Checksum (inline)
+         0     0% 97.56%      0.16s  2.05%  hash/crc32.Update (inline)
+         0     0% 97.56%      0.16s  2.05%  hash/crc32.update
+         0     0% 97.56%      1.89s 24.23%  main.main
+         0     0% 97.56%      0.06s  0.77%  main.main.func1
+         0     0% 97.56%      3.93s 50.38%  main.primary
+         0     0% 97.56%      1.82s 23.33%  main.replica
+         0     0% 97.56%      0.44s  5.64%  main.replica.func1
+         0     0% 97.56%      0.08s  1.03%  runtime.entersyscall
+

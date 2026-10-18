@@ -11,4 +11,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Decode every record group commit writes, as debug builds always do; the simulator turns it on.
+decode-check = []
+
 [dependencies]
+crc.workspace = true
+rand_chacha.workspace = true
+twox-hash.workspace = true

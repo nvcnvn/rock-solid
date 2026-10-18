@@ -1,0 +1,12 @@
+# 2026-10-17T05:21Z macOS 27.0 arm64
+warning: refs/tags/v3.7.0 5b12b7a153e856cc09c711679b36a0997bf38204 is not a commit!
+# etcd-raft v3.7.0 (b867cf13f6bc0dae21204302df97bc2355c3af55), go version go1.27.0 darwin/arm64
+            panic during testdata/async_snapshot_overtakes_apply.txt:94:
+panic: can't leave a non-joint config [recovered, repanicked]
+FAIL	go.etcd.io/raft/v3	0.147s
+FAIL
+# etcd-raft main (638f42739b77572b5708eb0d8a776a272ade71ed), go version go1.27.0 darwin/arm64
+            panic during testdata/async_snapshot_overtakes_apply.txt:94:
+panic: can't leave a non-joint config [recovered, repanicked]
+FAIL	go.etcd.io/raft/v3	0.148s
+FAIL

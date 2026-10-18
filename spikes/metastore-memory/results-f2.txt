@@ -1,0 +1,16 @@
+macOS 27.0 (26A428) darwin 27.0.0 cpu=14x Apple M4 Pro mem=64G rustc 1.99.1 libc=0.2.177 rock-core=f3bfd04+uncommitted date=2026-10-17T03:55Z loadavg=3.84 3.48 3.18
+
+## F2 scale, create order, sampled names, separate process each
+  columns, all per regular file unless noted: logical = key+value bytes; req = requested heap; act = macOS malloc_size (measured); glibc/jem = modelled Linux allocators; allocs = live allocations; node_per_entry = BTreeMap node bytes per entry (act minus key/value buffers); rss / compressed / footprint = growth of resident, compressor-held and phys_footprint bytes (task_info TASK_VM_INFO)
+  RESULT files=1000000 dirs=28464 entries=2085391 names=sampled-mean-20.1B xattrs=0 order=create logical=154.2 req=326.4 act=372.8 glibc=411.1 jem=372.8 allocs=4.48 node_per_entry=95.0 rss=379.8 compressed=0.0 footprint=380.0 build_us=439110
+  RESULT files=10000000 dirs=285734 entries=20857201 names=sampled-mean-20.1B xattrs=0 order=create logical=154.2 req=326.4 act=372.9 glibc=411.1 jem=372.9 allocs=4.48 node_per_entry=94.9 rss=379.5 compressed=0.0 footprint=379.7 build_us=4714761
+  RESULT files=30000000 dirs=856896 entries=62570687 names=sampled-mean-20.1B xattrs=0 order=create logical=154.2 req=326.5 act=372.9 glibc=411.1 jem=372.9 allocs=4.48 node_per_entry=95.0 rss=199.0 compressed=180.6 footprint=379.7 build_us=14452005
+  req   B/file  1M 326.4  10M 326.4  30M 326.5
+  act   B/file  1M 372.8  10M 372.9  30M 372.9
+  glibc B/file  1M 411.1  10M 411.1  30M 411.1
+  jem   B/file  1M 372.8  10M 372.9  30M 372.9
+  rss   B/file  1M 379.8  10M 379.5  30M 199.0
+  compressed B/file  1M 0.0  10M 0.0  30M 180.6
+  footprint B/file  1M 380.0  10M 379.7  30M 379.7
+[OK ] F2 act B/file 30M vs 1M: got=1.000x (372.9 vs 372.8) want=within 10%
+  phys_footprint growth / act heap: 1M 1.019  10M 1.018  30M 1.018

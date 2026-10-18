@@ -1,0 +1,111 @@
+# 6.18.44-fc-v139, Intel(R) Xeon(R) Processor @ 2.10GHz, 4 CPUs, avx2=True, avx512f=True, go1.27.0, rustc 1.99.1 (58cf8f9c3 2026-10-13), 2026-10-18T05:33:01
+=== T1: replicated 4K write, three Go designs against Rust (all batching writes)
+RUN lang=rust conns=1 coalesce=1 | ops_per_s=12379 cpu_us_per_op=90.66 cores=1.12 reads_per_op=12.00 writes_per_op=6.00 lat_p50_us=74.1 lat_p99_us=152.8 lat_p999_us=674.9 secs=10.0
+RUN lang=go conns=1 coalesce=1 | ops_per_s=10866 cpu_us_per_op=137.44 cores=1.49 reads_per_op=6.00 writes_per_op=6.00 lat_p50_us=83.7 lat_p99_us=200.1 lat_p999_us=490.6 secs=10.0
+RUN lang=go2 conns=1 yield=1 | ops_per_s=14403 cpu_us_per_op=100.21 cores=1.44 reads_per_op=6.00 writes_per_op=6.00 lat_p50_us=61.0 lat_p99_us=145.2 lat_p999_us=276.6 secs=10.0
+RUN lang=go3 conns=1 lock=0 | ops_per_s=11936 cpu_us_per_op=112.66 cores=1.34 reads_per_op=12.00 writes_per_op=6.00 lat_p50_us=77.6 lat_p99_us=156.1 lat_p999_us=491.2 secs=10.0
+RUN lang=rust conns=1 coalesce=1 | ops_per_s=12225 cpu_us_per_op=91.84 cores=1.12 reads_per_op=12.00 writes_per_op=6.00 lat_p50_us=75.7 lat_p99_us=151.8 lat_p999_us=588.1 secs=10.0
+RUN lang=go conns=1 coalesce=1 | ops_per_s=10865 cpu_us_per_op=138.47 cores=1.50 reads_per_op=6.00 writes_per_op=6.00 lat_p50_us=84.8 lat_p99_us=191.5 lat_p999_us=344.4 secs=10.0
+RUN lang=go2 conns=1 yield=1 | ops_per_s=12031 cpu_us_per_op=118.81 cores=1.43 reads_per_op=6.00 writes_per_op=6.00 lat_p50_us=73.7 lat_p99_us=198.5 lat_p999_us=433.1 secs=10.0
+RUN lang=go3 conns=1 lock=0 | ops_per_s=11905 cpu_us_per_op=112.98 cores=1.34 reads_per_op=12.00 writes_per_op=6.00 lat_p50_us=77.5 lat_p99_us=160.6 lat_p999_us=533.5 secs=10.0
+RUN lang=rust conns=16 coalesce=1 | ops_per_s=79808 cpu_us_per_op=22.55 cores=1.80 reads_per_op=5.38 writes_per_op=2.70 lat_p50_us=195.9 lat_p99_us=439.4 lat_p999_us=1244.0 secs=10.0
+RUN lang=go conns=16 coalesce=1 | ops_per_s=77353 cpu_us_per_op=37.88 cores=2.93 reads_per_op=2.93 writes_per_op=3.69 lat_p50_us=189.5 lat_p99_us=507.2 lat_p999_us=1487.0 secs=10.0
+RUN lang=go2 conns=16 yield=1 | ops_per_s=75814 cpu_us_per_op=37.10 cores=2.81 reads_per_op=2.92 writes_per_op=3.47 lat_p50_us=192.3 lat_p99_us=500.3 lat_p999_us=1573.6 secs=10.0
+RUN lang=go3 conns=16 lock=0 | ops_per_s=73807 cpu_us_per_op=25.71 cores=1.90 reads_per_op=5.16 writes_per_op=2.65 lat_p50_us=203.5 lat_p99_us=436.1 lat_p999_us=1180.1 secs=10.0
+RUN lang=rust conns=16 coalesce=1 | ops_per_s=79992 cpu_us_per_op=22.08 cores=1.77 reads_per_op=5.35 writes_per_op=2.68 lat_p50_us=196.2 lat_p99_us=373.4 lat_p999_us=1428.1 secs=10.0
+RUN lang=go conns=16 coalesce=1 | ops_per_s=78326 cpu_us_per_op=37.78 cores=2.96 reads_per_op=2.94 writes_per_op=3.69 lat_p50_us=188.2 lat_p99_us=486.6 lat_p999_us=1414.2 secs=10.0
+RUN lang=go2 conns=16 yield=1 | ops_per_s=78826 cpu_us_per_op=35.58 cores=2.80 reads_per_op=2.92 writes_per_op=3.47 lat_p50_us=185.6 lat_p99_us=477.1 lat_p999_us=1365.1 secs=10.0
+RUN lang=go3 conns=16 lock=0 | ops_per_s=67662 cpu_us_per_op=28.41 cores=1.92 reads_per_op=5.19 writes_per_op=2.67 lat_p50_us=219.0 lat_p99_us=532.1 lat_p999_us=1372.3 secs=10.0
+
+| design, connections | ops/s | CPU us/op | x Rust | cores | socket reads/op | socket writes/op | p50 us | p99 us |
+|---|---|---|---|---|---|---|---|---|
+| rust, epoll loop per node, 1 conn | 12302 | 91.2 | 1.00 | 1.12 | 12.00 | 6.00 | 74.9 | 152.3 |
+| go v1, goroutine per connection, 1 conn | 10866 | 138.0 | 1.51 | 1.50 | 6.00 | 6.00 | 84.2 | 195.8 |
+| go v2, atomics, no handoff, 1 conn | 13217 | 109.5 | 1.20 | 1.44 | 6.00 | 6.00 | 67.3 | 171.8 |
+| go v3, epoll loop per node, 1 conn | 11920 | 112.8 | 1.24 | 1.34 | 12.00 | 6.00 | 77.5 | 158.3 |
+| rust, epoll loop per node, 16 conn | 79900 | 22.3 | 1.00 | 1.79 | 5.37 | 2.69 | 196.1 | 406.4 |
+| go v1, goroutine per connection, 16 conn | 77840 | 37.8 | 1.70 | 2.95 | 2.94 | 3.69 | 188.8 | 496.9 |
+| go v2, atomics, no handoff, 16 conn | 77320 | 36.3 | 1.63 | 2.80 | 2.92 | 3.47 | 188.9 | 488.7 |
+| go v3, epoll loop per node, 16 conn | 70734 | 27.1 | 1.21 | 1.91 | 5.18 | 2.66 | 211.2 | 484.1 |
+
+[FAIL] T1 go v2 CPU per write at 16 connections got=36.3us want=30-34us (estimate before the run)
+[FAIL] T1 go v2 socket writes per operation at 16 connections got=3.47 want=<=3.2 (estimate before the run)
+=== T2: compiler options; PGO profiles come from a 10 s run of each default build
+RUN lang=go3 conns=16 lock=0 | ops_per_s=69600 cpu_us_per_op=27.47 cores=1.91 reads_per_op=5.18 writes_per_op=2.66 lat_p50_us=213.2 lat_p99_us=497.3 lat_p999_us=1398.2 secs=10.0
+RUN tag=- lang=go mode=inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 | writes_per_s=159985 owner_busy_ns=6087 owner_work_ns=6087 owner_cpu_ns=6102 worker_cpu_ns=48 total_cpu_ns=6151 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.18 lat_p99_us=304.20 lat_p999_us=539.73 lat_max_us=3188.4 secs=3.28
+RUN lang=go3 conns=16 lock=0 | ops_per_s=65417 cpu_us_per_op=29.54 cores=1.93 reads_per_op=5.21 writes_per_op=2.68 lat_p50_us=224.4 lat_p99_us=593.4 lat_p999_us=1268.0 secs=10.0
+RUN tag=- lang=go mode=inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 | writes_per_s=166635 owner_busy_ns=5853 owner_work_ns=5853 owner_cpu_ns=5910 worker_cpu_ns=46 total_cpu_ns=5955 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.18 lat_p99_us=301.71 lat_p999_us=485.66 lat_max_us=6978.1 secs=3.15
+RUN lang=go3 conns=16 lock=0 | ops_per_s=68996 cpu_us_per_op=27.76 cores=1.92 reads_per_op=5.18 writes_per_op=2.66 lat_p50_us=215.2 lat_p99_us=575.4 lat_p999_us=1123.5 secs=10.0
+RUN tag=- lang=go mode=inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 | writes_per_s=169906 owner_busy_ns=5737 owner_work_ns=5737 owner_cpu_ns=5802 worker_cpu_ns=41 total_cpu_ns=5843 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.18 lat_p99_us=298.10 lat_p999_us=468.49 lat_max_us=4423.8 secs=3.09
+RUN lang=go3 conns=16 lock=0 | ops_per_s=66335 cpu_us_per_op=28.98 cores=1.92 reads_per_op=5.18 writes_per_op=2.66 lat_p50_us=219.7 lat_p99_us=675.7 lat_p999_us=1405.3 secs=10.0
+RUN tag=- lang=go mode=inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 | writes_per_s=167672 owner_busy_ns=5804 owner_work_ns=5804 owner_cpu_ns=5902 worker_cpu_ns=42 total_cpu_ns=5944 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.17 lat_p99_us=299.75 lat_p999_us=487.07 lat_max_us=3640.3 secs=3.13
+RUN lang=go3 conns=16 lock=0 | ops_per_s=71952 cpu_us_per_op=26.45 cores=1.90 reads_per_op=5.15 writes_per_op=2.64 lat_p50_us=208.2 lat_p99_us=488.3 lat_p999_us=1314.7 secs=10.0
+RUN tag=- lang=go mode=inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 | writes_per_s=173896 owner_busy_ns=5611 owner_work_ns=5611 owner_cpu_ns=5710 worker_cpu_ns=39 total_cpu_ns=5749 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.17 lat_p99_us=294.28 lat_p999_us=462.62 lat_max_us=2134.1 secs=3.01
+RUN lang=go3 conns=16 lock=0 | ops_per_s=68469 cpu_us_per_op=27.87 cores=1.91 reads_per_op=5.18 writes_per_op=2.66 lat_p50_us=215.2 lat_p99_us=586.6 lat_p999_us=1542.8 secs=10.0
+RUN tag=- lang=go mode=inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 | writes_per_s=170691 owner_busy_ns=5695 owner_work_ns=5695 owner_cpu_ns=5739 worker_cpu_ns=42 total_cpu_ns=5781 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.18 lat_p99_us=292.46 lat_p999_us=474.05 lat_max_us=3442.3 secs=3.07
+RUN lang=rust conns=16 coalesce=1 | ops_per_s=74774 cpu_us_per_op=23.77 cores=1.78 reads_per_op=5.34 writes_per_op=2.68 lat_p50_us=203.1 lat_p99_us=437.2 lat_p999_us=1364.1 secs=10.0
+RUN tag=- mode=Inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=189256 owner_busy_ns=5202 owner_work_ns=5202 owner_cpu_ns=5175 worker_cpu_ns=0 total_cpu_ns=5175 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 victims_per_user=0.1424 lat_p50_us=0.17 lat_p99_us=268.67 lat_p999_us=425.46 lat_max_us=2869.7 secs=2.77
+RUN lang=rust conns=16 coalesce=1 | ops_per_s=73358 cpu_us_per_op=24.44 cores=1.79 reads_per_op=5.35 writes_per_op=2.69 lat_p50_us=203.5 lat_p99_us=611.9 lat_p999_us=1641.0 secs=10.0
+RUN tag=- mode=Inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=196647 owner_busy_ns=4995 owner_work_ns=4995 owner_cpu_ns=5040 worker_cpu_ns=0 total_cpu_ns=5040 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 victims_per_user=0.1424 lat_p50_us=0.17 lat_p99_us=261.53 lat_p999_us=407.48 lat_max_us=4135.6 secs=2.67
+RUN lang=go3 conns=16 lock=0 | ops_per_s=71989 cpu_us_per_op=26.42 cores=1.90 reads_per_op=5.15 writes_per_op=2.64 lat_p50_us=208.2 lat_p99_us=468.8 lat_p999_us=1299.2 secs=10.0
+RUN tag=- lang=go mode=inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 | writes_per_s=169087 owner_busy_ns=5779 owner_work_ns=5779 owner_cpu_ns=5801 worker_cpu_ns=41 total_cpu_ns=5843 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.18 lat_p99_us=295.67 lat_p999_us=478.34 lat_max_us=3555.0 secs=3.10
+RUN lang=go3 conns=16 lock=0 | ops_per_s=69387 cpu_us_per_op=27.59 cores=1.91 reads_per_op=5.17 writes_per_op=2.65 lat_p50_us=214.6 lat_p99_us=496.3 lat_p999_us=1491.1 secs=10.0
+RUN tag=- lang=go mode=inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 | writes_per_s=170304 owner_busy_ns=5781 owner_work_ns=5781 owner_cpu_ns=5761 worker_cpu_ns=40 total_cpu_ns=5801 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.18 lat_p99_us=296.27 lat_p999_us=479.66 lat_max_us=3555.0 secs=3.08
+RUN lang=go3 conns=16 lock=0 | ops_per_s=66262 cpu_us_per_op=28.90 cores=1.92 reads_per_op=5.18 writes_per_op=2.66 lat_p50_us=222.8 lat_p99_us=565.1 lat_p999_us=1714.6 secs=10.0
+RUN tag=- lang=go mode=inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 | writes_per_s=171265 owner_busy_ns=5685 owner_work_ns=5685 owner_cpu_ns=5774 worker_cpu_ns=43 total_cpu_ns=5817 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.18 lat_p99_us=297.99 lat_p999_us=461.51 lat_max_us=5504.6 secs=3.06
+RUN lang=go3 conns=16 lock=0 | ops_per_s=67496 cpu_us_per_op=28.45 cores=1.92 reads_per_op=5.18 writes_per_op=2.66 lat_p50_us=218.6 lat_p99_us=574.3 lat_p999_us=1689.4 secs=10.0
+RUN tag=- lang=go mode=inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 | writes_per_s=173416 owner_busy_ns=5654 owner_work_ns=5654 owner_cpu_ns=5670 worker_cpu_ns=41 total_cpu_ns=5710 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.17 lat_p99_us=294.54 lat_p999_us=459.37 lat_max_us=3207.5 secs=3.02
+RUN lang=go3 conns=16 lock=0 | ops_per_s=69965 cpu_us_per_op=27.44 cores=1.92 reads_per_op=5.19 writes_per_op=2.66 lat_p50_us=211.7 lat_p99_us=553.5 lat_p999_us=1359.2 secs=10.0
+RUN tag=- lang=go mode=inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 | writes_per_s=173757 owner_busy_ns=5642 owner_work_ns=5642 owner_cpu_ns=5716 worker_cpu_ns=44 total_cpu_ns=5760 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.18 lat_p99_us=294.86 lat_p999_us=471.85 lat_max_us=1817.3 secs=3.02
+RUN lang=rust conns=16 coalesce=1 | ops_per_s=75392 cpu_us_per_op=24.20 cores=1.82 reads_per_op=5.40 writes_per_op=2.71 lat_p50_us=201.5 lat_p99_us=525.4 lat_p999_us=2102.5 secs=10.0
+RUN tag=- mode=Inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=176258 owner_busy_ns=5583 owner_work_ns=5583 owner_cpu_ns=5595 worker_cpu_ns=0 total_cpu_ns=5595 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 victims_per_user=0.1424 lat_p50_us=0.18 lat_p99_us=290.25 lat_p999_us=487.68 lat_max_us=6455.3 secs=2.97
+RUN lang=rust conns=16 coalesce=1 | ops_per_s=75144 cpu_us_per_op=23.80 cores=1.79 reads_per_op=5.37 writes_per_op=2.69 lat_p50_us=201.2 lat_p99_us=467.9 lat_p999_us=1931.8 secs=10.0
+RUN tag=- mode=Inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=192763 owner_busy_ns=5106 owner_work_ns=5106 owner_cpu_ns=5131 worker_cpu_ns=0 total_cpu_ns=5131 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 victims_per_user=0.1424 lat_p50_us=0.17 lat_p99_us=264.21 lat_p999_us=425.30 lat_max_us=4102.7 secs=2.72
+
+| language: build | replicate CPU us/op (16 conn) | x default | ops/s | cleaner owner ns/write (inline, 95%) | x default |
+|---|---|---|---|---|---|
+| go: default (GOAMD64=v1) | 28.0 | 1.000 | 68703 | 5816 | 1.000 |
+| go: GOAMD64=v3 | 27.7 | 0.989 | 69192 | 5759 | 0.990 |
+| go: PGO | 28.9 | 1.034 | 66298 | 5744 | 0.988 |
+| go: PGO + GOAMD64=v3 | 27.4 | 0.981 | 69724 | 5632 | 0.968 |
+| go: no bounds checks (-B, measurement only) | 27.7 | 0.988 | 69217 | 5668 | 0.975 |
+| rust: default (x86-64-v2 for replicate, v1 for cleaner) | 24.0 | 1.000 | 75083 | 5392 | 1.000 |
+| rust: target-cpu=x86-64-v3 | 24.1 | 1.006 | 74251 | 5050 | 0.937 |
+
+[FAIL] T2 PGO gain on the cleaner harness got=1.2% want=2-7% (estimate)
+[FAIL] T2 PGO gain on the replicated write got=-3.4% want=2-7% (estimate)
+[OK ] T2 bounds checks' share of the cleaner harness got=2.5% want=1-5% (estimate)
+=== T3: memtable at 10M files: []byte B-tree on the Go heap, the same in a Go arena, 4K pages
+generated files=10000000 dirs=285737 entries=20857210 key+value bytes=1541862570 (154.2 per file)
+### variant=slices go1.27.0-X:arenas GOEXPERIMENT="arenas" GOGC="" GOMAXPROCS=4
+M1 build: entries=20857210 18.96 s (1.10 M entries/s) nodes=533527
+M1 memory: heap objects 256 B/file, RSS 268 B/file (files = entries / 2.09)
+M4 get: p50 2.89 us p99 5.04 us (1000000 probes, 0 misses)
+M4 scan: 1000 entries, p50 9.8 us
+M2 forced GC 0: wall 288.2 ms, GC CPU 662.1 ms, max pause 0.082 ms
+M2 forced GC 1: wall 281.1 ms, GC CPU 659.0 ms, max pause 0.049 ms
+M2 forced GC 2: wall 286.9 ms, GC CPU 683.1 ms, max pause 0.066 ms
+M4 update: 1000000 same-length overwrites, 4.75 us each, nodes=537585
+M3 churn 10s: limit 3038 MiB, garbage 153 MB/s, GC cycles 13, GC CPU 0.914 cores (23.5% of process CPU), max pause 1.835 ms, lookups 0.59 M/s, get p50 2.83 us p99 6.03 us p99.9 29.51 us max 4058 us
+### variant=slices-goarena go1.27.0-X:arenas GOEXPERIMENT="arenas" GOGC="" GOMAXPROCS=4
+M1 build: entries=20857210 10.84 s (1.92 M entries/s) nodes=533527
+M1 memory: heap objects 243 B/file, RSS 247 B/file (files = entries / 2.09)
+M4 get: p50 3.15 us p99 7.15 us (1000000 probes, 0 misses)
+M4 scan: 1000 entries, p50 9.3 us
+M2 forced GC 0: wall 77.8 ms, GC CPU 307.9 ms, max pause 0.041 ms
+M2 forced GC 1: wall 77.3 ms, GC CPU 306.8 ms, max pause 0.020 ms
+M2 forced GC 2: wall 83.3 ms, GC CPU 329.5 ms, max pause 0.020 ms
+M4 update: 1000000 same-length overwrites, 4.81 us each, nodes=537585
+M3 churn 10s: limit 2914 MiB, garbage 200 MB/s, GC cycles 10, GC CPU 0.363 cores (9.3% of process CPU), max pause 0.229 ms, lookups 0.58 M/s, get p50 2.96 us p99 4.95 us p99.9 32.14 us max 4091 us
+### variant=pages go1.27.0-X:arenas GOEXPERIMENT="arenas" GOGC="" GOMAXPROCS=4
+M1 build: entries=20857210 11.86 s (1.76 M entries/s) pages=657181 fill=0.629 copies=0
+M1 memory: heap objects 276 B/file, RSS 270 B/file (files = entries / 2.09)
+M4 get: p50 1.78 us p99 2.92 us (1000000 probes, 0 misses)
+M4 scan: 1000 entries, p50 10.0 us
+M2 forced GC 0: wall 0.4 ms, GC CPU 0.3 ms, max pause 0.041 ms
+M2 forced GC 1: wall 0.3 ms, GC CPU 0.3 ms, max pause 0.057 ms
+M2 forced GC 2: wall 0.2 ms, GC CPU 0.3 ms, max pause 0.020 ms
+M4 update: 1000000 same-length overwrites, 2.76 us each, pages=657181 fill=0.629 copies=0
+M3 churn 10s: limit 3222 MiB, garbage 235 MB/s, GC cycles 6, GC CPU 0.001 cores (0.0% of process CPU), max pause 0.262 ms, lookups 0.93 M/s, get p50 1.69 us p99 3.17 us p99.9 25.63 us max 185 us
+
+# checks failed: T1, T1, T2, T2

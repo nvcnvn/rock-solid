@@ -1,0 +1,189 @@
+# macOS 27.0 (Darwin 27.0.0), Apple M4 Pro, 14 cores, 64 GiB, rustc 1.99.1, etcd-raft v3.7.0 (b867cf13f6bc), raft-rs 0.7.0, rand_chacha 0.10.0, 2026-10-17
+# loadavg at start: { 2.78 3.64 3.52 }
+# P5/P6: 1000 groups x 3 replicas in one process, idle 10 s, check_quorum + pre_vote; two runs per library, alternating
+
+=== raft-rs groups=1000 tick=50ms hb=50ms election=150-300ms write=0s inflight=32 fsync_us=0 loadavg=2.78 3.64 3.52
+      P5 raft-rs all groups elected: 10 ms (1000 leaders, done=true)
+      P5 raft-rs leaders per node: 334 333 333
+      P5 raft-rs memory per group (3 replicas) after election + 2s: live heap 8.7 KiB (at creation 5.6 KiB), RSS 16.0 KiB (total RSS 17 MiB, threads 1)
+RESULT lib=raft-rs metric=heap_kib_per_group value=8.72
+RESULT lib=raft-rs metric=rss_kib_per_group value=15.97
+      P6 raft-rs idle 10s: 14.21% of one core, 79942 msgs/s (39971 heartbeats/s), 1.78 us CPU per message, 4.0 msgs per group per heartbeat, loadavg 2.59 3.57 3.50
+RESULT lib=raft-rs metric=idle_cpu_pct value=14.207
+RESULT lib=raft-rs metric=idle_msgs_per_s value=79942
+RESULT lib=raft-rs metric=idle_us_per_msg value=1.777
+      P5 raft-rs after the idle window: live heap 8.7 KiB RSS 16.0 KiB per group
+
+=== eraft groups=1000 tick=50ms hb=50ms election=150-300ms write=0s inflight=32 fsync_us=0 loadavg=2.59 3.57 3.50
+      P5 eraft all groups elected: 6 ms (1000 leaders, done=true)
+      P5 eraft leaders per node: 334 333 333
+      P5 eraft memory per group (3 replicas) after election + 2s: live heap 7.7 KiB (at creation 7.3 KiB), RSS 14.2 KiB (total RSS 16 MiB, threads 1)
+RESULT lib=eraft metric=heap_kib_per_group value=7.67
+RESULT lib=eraft metric=rss_kib_per_group value=14.21
+      P6 eraft idle 10s: 10.79% of one core, 79990 msgs/s (39995 heartbeats/s), 1.35 us CPU per message, 4.0 msgs per group per heartbeat, loadavg 2.45 3.49 3.47
+RESULT lib=eraft metric=idle_cpu_pct value=10.787
+RESULT lib=eraft metric=idle_msgs_per_s value=79990
+RESULT lib=eraft metric=idle_us_per_msg value=1.349
+      P5 eraft after the idle window: live heap 7.7 KiB RSS 14.2 KiB per group
+
+=== raft-rs groups=1000 tick=50ms hb=50ms election=150-300ms write=0s inflight=32 fsync_us=0 loadavg=2.45 3.49 3.47
+      P5 raft-rs all groups elected: 6 ms (1000 leaders, done=true)
+      P5 raft-rs leaders per node: 334 333 333
+      P5 raft-rs memory per group (3 replicas) after election + 2s: live heap 8.7 KiB (at creation 5.6 KiB), RSS 14.1 KiB (total RSS 15 MiB, threads 1)
+RESULT lib=raft-rs metric=heap_kib_per_group value=8.72
+RESULT lib=raft-rs metric=rss_kib_per_group value=14.08
+      P6 raft-rs idle 10s: 13.43% of one core, 79586 msgs/s (39793 heartbeats/s), 1.69 us CPU per message, 4.0 msgs per group per heartbeat, loadavg 5.92 4.23 3.73
+RESULT lib=raft-rs metric=idle_cpu_pct value=13.425
+RESULT lib=raft-rs metric=idle_msgs_per_s value=79586
+RESULT lib=raft-rs metric=idle_us_per_msg value=1.687
+      P5 raft-rs after the idle window: live heap 8.7 KiB RSS 15.0 KiB per group
+
+=== eraft groups=1000 tick=50ms hb=50ms election=150-300ms write=0s inflight=32 fsync_us=0 loadavg=5.92 4.23 3.73
+      P5 eraft all groups elected: 7 ms (1000 leaders, done=true)
+      P5 eraft leaders per node: 334 333 333
+      P5 eraft memory per group (3 replicas) after election + 2s: live heap 7.7 KiB (at creation 7.3 KiB), RSS 14.2 KiB (total RSS 16 MiB, threads 1)
+RESULT lib=eraft metric=heap_kib_per_group value=7.67
+RESULT lib=eraft metric=rss_kib_per_group value=14.21
+      P6 eraft idle 10s: 10.29% of one core, 79595 msgs/s (39798 heartbeats/s), 1.29 us CPU per message, 4.0 msgs per group per heartbeat, loadavg 5.08 4.10 3.70
+RESULT lib=eraft metric=idle_cpu_pct value=10.294
+RESULT lib=eraft metric=idle_msgs_per_s value=79595
+RESULT lib=eraft metric=idle_us_per_msg value=1.293
+      P5 eraft after the idle window: live heap 7.7 KiB RSS 15.2 KiB per group
+
+=== raft-rs groups=1000 tick=100ms hb=100ms election=1000-2000ms write=0s inflight=32 fsync_us=0 loadavg=5.08 4.10 3.70
+      P5 raft-rs all groups elected: 8 ms (1000 leaders, done=true)
+      P5 raft-rs leaders per node: 334 333 333
+      P5 raft-rs memory per group (3 replicas) after election + 2s: live heap 8.7 KiB (at creation 5.6 KiB), RSS 15.0 KiB (total RSS 16 MiB, threads 1)
+RESULT lib=raft-rs metric=heap_kib_per_group value=8.72
+RESULT lib=raft-rs metric=rss_kib_per_group value=15.01
+      P6 raft-rs idle 10s: 7.84% of one core, 39983 msgs/s (19992 heartbeats/s), 1.96 us CPU per message, 4.0 msgs per group per heartbeat, loadavg 4.09 3.93 3.64
+RESULT lib=raft-rs metric=idle_cpu_pct value=7.838
+RESULT lib=raft-rs metric=idle_msgs_per_s value=39983
+RESULT lib=raft-rs metric=idle_us_per_msg value=1.960
+      P5 raft-rs after the idle window: live heap 8.7 KiB RSS 15.0 KiB per group
+
+=== eraft groups=1000 tick=100ms hb=100ms election=1000-2000ms write=0s inflight=32 fsync_us=0 loadavg=4.09 3.93 3.64
+      P5 eraft all groups elected: 7 ms (1000 leaders, done=true)
+      P5 eraft leaders per node: 334 333 333
+      P5 eraft memory per group (3 replicas) after election + 2s: live heap 7.7 KiB (at creation 7.3 KiB), RSS 14.2 KiB (total RSS 16 MiB, threads 1)
+RESULT lib=eraft metric=heap_kib_per_group value=7.67
+RESULT lib=eraft metric=rss_kib_per_group value=14.21
+      P6 eraft idle 10s: 5.39% of one core, 39996 msgs/s (19998 heartbeats/s), 1.35 us CPU per message, 4.0 msgs per group per heartbeat, loadavg 3.69 3.85 3.62
+RESULT lib=eraft metric=idle_cpu_pct value=5.394
+RESULT lib=eraft metric=idle_msgs_per_s value=39996
+RESULT lib=eraft metric=idle_us_per_msg value=1.349
+      P5 eraft after the idle window: live heap 7.7 KiB RSS 15.2 KiB per group
+
+=== raft-rs groups=1000 tick=100ms hb=100ms election=1000-2000ms write=0s inflight=32 fsync_us=0 loadavg=3.69 3.85 3.62
+      P5 raft-rs all groups elected: 8 ms (1000 leaders, done=true)
+      P5 raft-rs leaders per node: 334 333 333
+      P5 raft-rs memory per group (3 replicas) after election + 2s: live heap 8.7 KiB (at creation 5.6 KiB), RSS 14.1 KiB (total RSS 15 MiB, threads 1)
+RESULT lib=raft-rs metric=heap_kib_per_group value=8.72
+RESULT lib=raft-rs metric=rss_kib_per_group value=14.10
+      P6 raft-rs idle 10s: 8.09% of one core, 40397 msgs/s (20198 heartbeats/s), 2.00 us CPU per message, 4.0 msgs per group per heartbeat, loadavg 3.33 3.76 3.59
+RESULT lib=raft-rs metric=idle_cpu_pct value=8.090
+RESULT lib=raft-rs metric=idle_msgs_per_s value=40397
+RESULT lib=raft-rs metric=idle_us_per_msg value=2.003
+      P5 raft-rs after the idle window: live heap 8.7 KiB RSS 14.1 KiB per group
+
+=== eraft groups=1000 tick=100ms hb=100ms election=1000-2000ms write=0s inflight=32 fsync_us=0 loadavg=3.33 3.76 3.59
+      P5 eraft all groups elected: 5 ms (1000 leaders, done=true)
+      P5 eraft leaders per node: 334 333 333
+      P5 eraft memory per group (3 replicas) after election + 2s: live heap 7.7 KiB (at creation 7.3 KiB), RSS 14.2 KiB (total RSS 16 MiB, threads 1)
+RESULT lib=eraft metric=heap_kib_per_group value=7.67
+RESULT lib=eraft metric=rss_kib_per_group value=14.19
+      P6 eraft idle 10s: 5.37% of one core, 39989 msgs/s (19994 heartbeats/s), 1.34 us CPU per message, 4.0 msgs per group per heartbeat, loadavg 3.12 3.70 3.57
+RESULT lib=eraft metric=idle_cpu_pct value=5.371
+RESULT lib=eraft metric=idle_msgs_per_s value=39989
+RESULT lib=eraft metric=idle_us_per_msg value=1.343
+      P5 eraft after the idle window: live heap 7.7 KiB RSS 14.2 KiB per group
+
+# P7: 100 B proposals, 32 in flight per group, one thread, tuned timing, 5 s
+
+=== raft-rs groups=1000 tick=100ms hb=100ms election=1000-2000ms write=5s inflight=32 fsync_us=1000 loadavg=3.12 3.70 3.57
+      P5 raft-rs all groups elected: 14 ms (1000 leaders, done=true)
+      P5 raft-rs leaders per node: 334 333 333
+      P5 raft-rs memory per group (3 replicas) after election + 2s: live heap 8.7 KiB (at creation 5.6 KiB), RSS 14.1 KiB (total RSS 15 MiB, threads 1)
+RESULT lib=raft-rs metric=heap_kib_per_group value=8.72
+RESULT lib=raft-rs metric=rss_kib_per_group value=14.11
+      P7 raft-rs 100B proposals, 32 in flight per group, 1000 groups, fsync 1000 us: 675333 ops/s, 1.39 us CPU per op, 5480710 msgs/s, 0.17 us CPU per message, CPU 94% of one core
+      P7 raft-rs batching: 0.50 entries per MsgApp, 16.00 entries persisted per Ready, 42 fsyncs/s, 48000.0 entries per fsync, 3000.0 Readys per fsync, 84 rounds/s, loadavg 3.83 3.84 3.62
+RESULT lib=raft-rs metric=write_ops_per_s value=675333
+RESULT lib=raft-rs metric=write_us_per_op value=1.385
+
+=== eraft groups=1000 tick=100ms hb=100ms election=1000-2000ms write=5s inflight=32 fsync_us=1000 loadavg=3.83 3.84 3.62
+      P5 eraft all groups elected: 10 ms (1000 leaders, done=true)
+      P5 eraft leaders per node: 334 333 333
+      P5 eraft memory per group (3 replicas) after election + 2s: live heap 7.7 KiB (at creation 7.3 KiB), RSS 15.1 KiB (total RSS 16 MiB, threads 1)
+RESULT lib=eraft metric=heap_kib_per_group value=7.67
+RESULT lib=eraft metric=rss_kib_per_group value=15.14
+      P7 eraft 100B proposals, 32 in flight per group, 1000 groups, fsync 1000 us: 607041 ops/s, 1.55 us CPU per op, 4934603 msgs/s, 0.19 us CPU per message, CPU 94% of one core
+      P7 eraft batching: 0.50 entries per MsgApp, 16.00 entries persisted per Ready, 38 fsyncs/s, 48000.0 entries per fsync, 3000.0 Readys per fsync, 76 rounds/s, loadavg 3.47 3.76 3.59
+RESULT lib=eraft metric=write_ops_per_s value=607041
+RESULT lib=eraft metric=write_us_per_op value=1.554
+
+=== raft-rs groups=1000 tick=100ms hb=100ms election=1000-2000ms write=5s inflight=32 fsync_us=1000 loadavg=3.47 3.76 3.59
+      P5 raft-rs all groups elected: 10 ms (1000 leaders, done=true)
+      P5 raft-rs leaders per node: 334 333 333
+      P5 raft-rs memory per group (3 replicas) after election + 2s: live heap 8.7 KiB (at creation 5.6 KiB), RSS 16.0 KiB (total RSS 17 MiB, threads 1)
+RESULT lib=raft-rs metric=heap_kib_per_group value=8.72
+RESULT lib=raft-rs metric=rss_kib_per_group value=16.00
+      P7 raft-rs 100B proposals, 32 in flight per group, 1000 groups, fsync 1000 us: 694706 ops/s, 1.35 us CPU per op, 5635727 msgs/s, 0.17 us CPU per message, CPU 93% of one core
+      P7 raft-rs batching: 0.50 entries per MsgApp, 16.00 entries persisted per Ready, 43 fsyncs/s, 48000.0 entries per fsync, 3000.0 Readys per fsync, 87 rounds/s, loadavg 3.27 3.72 3.58
+RESULT lib=raft-rs metric=write_ops_per_s value=694706
+RESULT lib=raft-rs metric=write_us_per_op value=1.346
+
+=== eraft groups=1000 tick=100ms hb=100ms election=1000-2000ms write=5s inflight=32 fsync_us=1000 loadavg=3.27 3.72 3.58
+      P5 eraft all groups elected: 10 ms (1000 leaders, done=true)
+      P5 eraft leaders per node: 334 333 333
+      P5 eraft memory per group (3 replicas) after election + 2s: live heap 7.7 KiB (at creation 7.3 KiB), RSS 15.2 KiB (total RSS 16 MiB, threads 1)
+RESULT lib=eraft metric=heap_kib_per_group value=7.67
+RESULT lib=eraft metric=rss_kib_per_group value=15.17
+      P7 eraft 100B proposals, 32 in flight per group, 1000 groups, fsync 1000 us: 641277 ops/s, 1.47 us CPU per op, 5209583 msgs/s, 0.18 us CPU per message, CPU 94% of one core
+      P7 eraft batching: 0.50 entries per MsgApp, 16.00 entries persisted per Ready, 40 fsyncs/s, 48000.0 entries per fsync, 3000.0 Readys per fsync, 80 rounds/s, loadavg 3.32 3.71 3.58
+RESULT lib=eraft metric=write_ops_per_s value=641277
+RESULT lib=eraft metric=write_us_per_op value=1.465
+
+=== raft-rs groups=1000 tick=100ms hb=100ms election=1000-2000ms write=5s inflight=32 fsync_us=0 loadavg=3.32 3.71 3.58
+      P5 raft-rs all groups elected: 5 ms (1000 leaders, done=true)
+      P5 raft-rs leaders per node: 334 333 333
+      P5 raft-rs memory per group (3 replicas) after election + 2s: live heap 8.7 KiB (at creation 5.6 KiB), RSS 16.0 KiB (total RSS 17 MiB, threads 1)
+RESULT lib=raft-rs metric=heap_kib_per_group value=8.72
+RESULT lib=raft-rs metric=rss_kib_per_group value=15.97
+      P7 raft-rs 100B proposals, 32 in flight per group, 1000 groups, fsync 0 us: 741621 ops/s, 1.35 us CPU per op, 6011282 msgs/s, 0.17 us CPU per message, CPU 100% of one core
+      P7 raft-rs batching: 0.50 entries per MsgApp, 16.00 entries persisted per Ready, 46 fsyncs/s, 48000.0 entries per fsync, 3000.0 Readys per fsync, 93 rounds/s, loadavg 3.30 3.70 3.57
+RESULT lib=raft-rs metric=write_ops_per_s value=741621
+RESULT lib=raft-rs metric=write_us_per_op value=1.348
+
+=== eraft groups=1000 tick=100ms hb=100ms election=1000-2000ms write=5s inflight=32 fsync_us=0 loadavg=3.30 3.70 3.57
+      P5 eraft all groups elected: 4 ms (1000 leaders, done=true)
+      P5 eraft leaders per node: 334 333 333
+      P5 eraft memory per group (3 replicas) after election + 2s: live heap 7.7 KiB (at creation 7.3 KiB), RSS 15.2 KiB (total RSS 16 MiB, threads 1)
+RESULT lib=eraft metric=heap_kib_per_group value=7.67
+RESULT lib=eraft metric=rss_kib_per_group value=15.15
+      P7 eraft 100B proposals, 32 in flight per group, 1000 groups, fsync 0 us: 645546 ops/s, 1.55 us CPU per op, 5244260 msgs/s, 0.19 us CPU per message, CPU 100% of one core
+      P7 eraft batching: 0.50 entries per MsgApp, 16.00 entries persisted per Ready, 40 fsyncs/s, 48000.0 entries per fsync, 3000.0 Readys per fsync, 81 rounds/s, loadavg 3.61 3.76 3.59
+RESULT lib=eraft metric=write_ops_per_s value=645546
+RESULT lib=eraft metric=write_us_per_op value=1.549
+
+=== raft-rs groups=1000 tick=100ms hb=100ms election=1000-2000ms write=5s inflight=32 fsync_us=0 loadavg=3.61 3.76 3.59
+      P5 raft-rs all groups elected: 4 ms (1000 leaders, done=true)
+      P5 raft-rs leaders per node: 334 333 333
+      P5 raft-rs memory per group (3 replicas) after election + 2s: live heap 8.7 KiB (at creation 5.6 KiB), RSS 15.2 KiB (total RSS 16 MiB, threads 1)
+RESULT lib=raft-rs metric=heap_kib_per_group value=8.72
+RESULT lib=raft-rs metric=rss_kib_per_group value=15.17
+      P7 raft-rs 100B proposals, 32 in flight per group, 1000 groups, fsync 0 us: 745079 ops/s, 1.34 us CPU per op, 6040237 msgs/s, 0.17 us CPU per message, CPU 100% of one core
+      P7 raft-rs batching: 0.50 entries per MsgApp, 16.00 entries persisted per Ready, 47 fsyncs/s, 48000.0 entries per fsync, 3000.0 Readys per fsync, 93 rounds/s, loadavg 3.56 3.74 3.59
+RESULT lib=raft-rs metric=write_ops_per_s value=745079
+RESULT lib=raft-rs metric=write_us_per_op value=1.342
+
+=== eraft groups=1000 tick=100ms hb=100ms election=1000-2000ms write=5s inflight=32 fsync_us=0 loadavg=3.56 3.74 3.59
+      P5 eraft all groups elected: 4 ms (1000 leaders, done=true)
+      P5 eraft leaders per node: 334 333 333
+      P5 eraft memory per group (3 replicas) after election + 2s: live heap 7.7 KiB (at creation 7.3 KiB), RSS 15.1 KiB (total RSS 16 MiB, threads 1)
+RESULT lib=eraft metric=heap_kib_per_group value=7.67
+RESULT lib=eraft metric=rss_kib_per_group value=15.06
+      P7 eraft 100B proposals, 32 in flight per group, 1000 groups, fsync 0 us: 688395 ops/s, 1.45 us CPU per op, 5586835 msgs/s, 0.18 us CPU per message, CPU 100% of one core
+      P7 eraft batching: 0.50 entries per MsgApp, 16.00 entries persisted per Ready, 43 fsyncs/s, 48000.0 entries per fsync, 3000.0 Readys per fsync, 86 rounds/s, loadavg 4.03 3.84 3.62
+RESULT lib=eraft metric=write_ops_per_s value=688395
+RESULT lib=eraft metric=write_us_per_op value=1.451

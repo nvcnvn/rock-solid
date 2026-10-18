@@ -1,0 +1,51 @@
+macOS 27.0 (26A428) darwin 27.0.0 cpu=14x Apple M4 Pro mem=64G rustc 1.99.1 libc=0.2.177 rock-core=f3bfd04+uncommitted date=2026-10-17T03:55Z loadavg=3.70 3.48 3.18
+
+## 10000000 files, names sampled-mean-20.1B, attrs + dirent, create order, one process
+  counting allocator cost: alloc+free of 32 B 21.8 ns, plain System 12.2 ns (every timing below includes it)
+  BTreeMap<Vec<u8>,Vec<u8>> (MemTree): leaf 544 -> 640 B, internal 640 -> 640 B
+  BTreeMap<Box<[u8]>,Box<[u8]>>: leaf 368 -> 384 B, internal 464 -> 512 B
+  BTreeSet<OneAlloc>: leaf 192 -> 192 B, internal 288 -> 320 B
+  built in 4745228 us (0.23 us/entry): 10000000 files, 285734 dirs, 20857201 entries; logical 154.2 B/file; heap req 326.4 act 372.9 glibc 411.1 jem 372.9 B/file; resident 3699 MB, phys_footprint 3588 MB
+
+## F7 point get and 1,000-entry listing on the MemTree
+  MemTree: get p50 0.88 us p99 1.46 us (attr p50 0.83, dirent p50 0.96); 1000-entry listing p50 3.3 us p99 4.1 us
+[OK ] F7 get p50 vs redb 7.2 us: got=0.88 us (p99 1.46) want=< 7.2 us
+[OK ] F7 1000-entry listing p50 vs redb 196 us: got=3.3 us (p99 4.1) want=< 196 us
+  readdirplus (listing + 1,000 attribute gets): p50 84.3 us p99 104.2 us
+
+## F5/F6 checkpoint and restore
+  max_piece 1044480 B (default max_record_bytes 1 MiB); 1596 pieces, 1666913182 B serialized = 166.7 B/file, 79.9 B/entry; piece capacity 2778185728 B = 1.667x their length; pieces hold act 2778251264 B (277.8 B/file)
+  F6 checkpoint 471933 us = 23 ns/entry, 3532 MB/s
+  derived: with pieces allocated at their final length the peak would be 1.447x (1 + serialized / tree)
+[FAIL] F5 peak live heap during checkpoint / tree (act): got=1.745x (req 1.851x), peak above tree 277.8 B/file want=1.8..=2.2x
+[OK ] F6 restore rate: got=5.49M entries/s (3797699 us for 20857201 entries, 182 ns/entry) want=> 1M entries/s
+  restored tree: act 397.3 B/file (create-order tree 372.9, ratio 1.066); req 348.0; peak during restore = original tree + pieces + new tree = 2.81x the original tree
+  restored MemTree: get p50 1.12 us p99 5.96 us (attr p50 1.08, dirent p50 1.17); 1000-entry listing p50 2.7 us p99 2.8 us
+
+## F4 representations of the same map (memory measured while the MemTree stays alive)
+  MemTree (baseline, from F7): get p50 0.88 us p99 1.46 us (attr p50 0.83, dirent p50 0.96); 1000-entry listing p50 3.3 us p99 4.1 us
+  BTreeMap<Vec,Vec> bulk-built (FromIterator on sorted input): build 1470626 us; req 258.8 act 296.2 glibc 341.6 jem 296.2 B/file, 4.36 allocs/file
+  BTreeMap<Vec,Vec> bulk-built (FromIterator on sorted input): get p50 1.00 us p99 3.58 us (attr p50 0.96, dirent p50 1.04); 1000-entry listing p50 2.6 us p99 3.0 us
+  BTreeMap<Box<[u8]>,Box<[u8]>>, create order: build 4680567 us; req 272.0 act 298.9 glibc 356.6 jem 298.9 B/file, 4.48 allocs/file
+  BTreeMap<Box<[u8]>,Box<[u8]>>, create order: get p50 1.00 us p99 3.50 us (attr p50 0.92, dirent p50 1.04); 1000-entry listing p50 3.0 us p99 3.2 us
+  BTreeSet of one allocation per entry (klen|key|value), create order: build 6279742 us; req 221.7 act 235.2 glibc 262.9 jem 235.2 B/file, 2.40 allocs/file
+  BTreeSet of one allocation per entry (klen|key|value), create order: get p50 1.04 us p99 1.75 us (attr p50 1.00, dirent p50 1.08); 1000-entry listing p50 3.2 us p99 4.0 us
+  BTreeSet of one allocation per entry, bulk-built (FromIterator on sorted input): build 844047 us; req 196.3 act 208.9 glibc 235.6 jem 208.9 B/file, 2.28 allocs/file
+  BTreeSet of one allocation per entry, bulk-built (FromIterator on sorted input): get p50 0.96 us p99 1.62 us (attr p50 0.92, dirent p50 0.96); 1000-entry listing p50 2.7 us p99 2.9 us
+  Packed arena + sorted u32 offsets (immutable): build 638823 us; req 170.9 act 179.2 glibc 170.9 jem 196.3 B/file, 0.00 allocs/file
+  Packed arena + sorted u32 offsets (immutable): get p50 1.92 us p99 2.96 us (attr p50 1.92, dirent p50 1.92); 1000-entry listing p50 2.4 us p99 2.8 us
+  Prefix-compressed blocks of 16, restart offsets (immutable): build 617609 us; req 135.5 act 135.5 glibc 135.5 jem 161.6 B/file, 0.00 allocs/file
+  Prefix-compressed blocks of 16, restart offsets (immutable): get p50 1.38 us p99 4.04 us (attr p50 1.38, dirent p50 1.42); 1000-entry listing p50 8.6 us p99 9.9 us
+  (every alternative returned the MemTree's value for all 200000 sampled keys)
+[OK ] F4 best mutable alternative built in create order / MemTree (act): got=0.631 (BTreeSet of one allocation per entry (klen|key|value), create order: 235.2 vs 372.9 B/file) want=0.5..1.0
+[FAIL] F4 best of all / MemTree (act): got=0.363 (Prefix-compressed blocks of 16, restart offsets (immutable): 135.5 vs 372.9 B/file) want=0.5..1.0
+
+## F8 projection: files per node by MetaStore RAM budget (bytes/file measured at 10000000 files)
+  A node holds one full replica of each shard it is in; followers keep the same tree as the leader. 'replicas' = file replicas that fit in the budget; 'distinct' = files per node of cluster capacity with 3 replicas = replicas / 3. Not counted: Raft entries awaiting checkpoint, replay records, caches, the transient checkpoint peak (shown separately).
+  | Representation | B/file | 4 GiB replicas / distinct | 16 GiB | 64 GiB |
+  | MemTree, macOS malloc (measured) | 373 | 11.5M / 3.8M | 46.1M / 15.4M | 184.3M / 61.4M |
+  | MemTree, glibc model | 411 | 10.4M / 3.5M | 41.8M / 13.9M | 167.2M / 55.7M |
+  | MemTree + checkpoint peak (1.75x) | 651 | 6.6M / 2.2M | 26.4M / 8.8M | 105.6M / 35.2M |
+  | BTreeSet of one allocation per entry (klen|key|value), create order (best mutable) | 235 | 18.3M / 6.1M | 73.1M / 24.4M | 292.2M / 97.4M |
+  | BTreeSet of one allocation per entry (klen|key|value), create order (best mutable), glibc model | 263 | 16.3M / 5.4M | 65.3M / 21.8M | 261.4M / 87.1M |
+  | Prefix-compressed blocks of 16, restart offsets (immutable) (best) | 135 | 31.7M / 10.6M | 126.8M / 42.3M | 507.2M / 169.1M |

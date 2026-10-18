@@ -1,0 +1,6 @@
+# Build outputs, vendored tools and profiles
+bin/
+work/
+vendor/
+*/target/
+__pycache__/
