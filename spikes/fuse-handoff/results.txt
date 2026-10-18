@@ -1,0 +1,294 @@
+# 6.18.44-fc-v139 x86_64, fuse.enable_uring=Y, possible CPUs 0-3, unshare from util-linux 2.39.3, python 3.13.16, 2026-10-18 17:01:01 UTC, go-fuse v2.12.0, go version go1.27.0 linux/amd64
+
+=== H1: holder process keeps the fd, daemon SIGKILLed with I/O in flight, cold successor resends
+  expected: every run: >=1 request read by A and unanswered at the kill (fusectl waiting > 0 after the kill), B receives them with bit 63 set, the hung LOOKUP and all 4 I/O workers finish with 0 errors and verified data; the worst op stalls for about the restart time (a few ms)
+  run 0: waiting before kill=5 after kill=5 resent=3 (I/O 2) ops=706 worst op started -110.8 ms after the kill, errors=0 max_op_us=32534 kill->B serving=9.76 ms
+  [OK ] H1.0 requests in flight at kill: got=5 want=>0
+  [OK ] H1.0 B got the resent LOOKUP: got=1 want=1
+  [OK ] H1.0 hung LOOKUP succeeds after resend: got={'ok': True, 't0': 1732.431329628, 't1': 1733.140876113} want=ok
+  [OK ] H1.0 I/O workers: no errors, data verified: got=0 [] want=0
+  [OK ] H1.0 INITs in B: got=0 want=0
+  run 1: waiting before kill=5 after kill=5 resent=2 (I/O 1) ops=645 worst op started 425.7 ms after the kill, errors=0 max_op_us=31845 kill->B serving=3.33 ms
+  [OK ] H1.1 requests in flight at kill: got=5 want=>0
+  [OK ] H1.1 B got the resent LOOKUP: got=1 want=1
+  [OK ] H1.1 hung LOOKUP succeeds after resend: got={'ok': True, 't0': 1734.008044017, 't1': 1734.786940992} want=ok
+  [OK ] H1.1 I/O workers: no errors, data verified: got=0 [] want=0
+  [OK ] H1.1 INITs in B: got=0 want=0
+  run 2: waiting before kill=5 after kill=5 resent=3 (I/O 2) ops=639 worst op started 166.8 ms after the kill, errors=0 max_op_us=40896 kill->B serving=8.94 ms
+  [OK ] H1.2 requests in flight at kill: got=5 want=>0
+  [OK ] H1.2 B got the resent LOOKUP: got=1 want=1
+  [OK ] H1.2 hung LOOKUP succeeds after resend: got={'ok': True, 't0': 1735.716398046, 't1': 1736.469855599} want=ok
+  [OK ] H1.2 I/O workers: no errors, data verified: got=0 [] want=0
+  [OK ] H1.2 INITs in B: got=0 want=0
+  run 3: waiting before kill=5 after kill=5 resent=4 (I/O 3) ops=654 worst op started 607.1 ms after the kill, errors=0 max_op_us=38963 kill->B serving=7.74 ms
+  [OK ] H1.3 requests in flight at kill: got=5 want=>0
+  [OK ] H1.3 B got the resent LOOKUP: got=1 want=1
+  [OK ] H1.3 hung LOOKUP succeeds after resend: got={'ok': True, 't0': 1737.425520626, 't1': 1738.178788846} want=ok
+  [OK ] H1.3 I/O workers: no errors, data verified: got=0 [] want=0
+  [OK ] H1.3 INITs in B: got=0 want=0
+  run 4: waiting before kill=5 after kill=5 resent=5 (I/O 4) ops=632 worst op started 299.1 ms after the kill, errors=0 max_op_us=40232 kill->B serving=6.92 ms
+  [OK ] H1.4 requests in flight at kill: got=5 want=>0
+  [OK ] H1.4 B got the resent LOOKUP: got=1 want=1
+  [OK ] H1.4 hung LOOKUP succeeds after resend: got={'ok': True, 't0': 1739.167631846, 't1': 1739.915036852} want=ok
+  [OK ] H1.4 I/O workers: no errors, data verified: got=0 [] want=0
+  [OK ] H1.4 INITs in B: got=0 want=0
+
+=== H2: allow_other; I/O as uid 65534 (nobody) across a SIGKILL handoff
+  expected: control without allow_other: nobody's stat fails with EACCES (the kernel admits only the mounting uid: fuse_allow_current_process). With allow_other: nobody reads and writes; across the handoff 0 errors; the handed-over fd carries allow_other since it is a superblock option
+  [OK ] H2.ctl nobody without allow_other: got={'ok': False, 'errno': 13, 'err': 'Permission denied', 't0': 1740.861702566, 't1': 1740.861722513} want=EACCES
+  uids=[65534] ops=653 errors=0 max_op_us=31520 resent=4
+  [OK ] H2 workers ran as uid 65534: got=[65534, 65534, 65534, 65534] want=65534
+  [OK ] H2 nobody I/O across handoff: no errors: got=0 [] want=0
+  [OK ] H2 B serves after handoff (allow_other kept): got=allow_other in mountinfo want=present
+
+=== H3: mount namespaces: daemon (Bidirectional), holder (plugin) and app (HostToContainer) in different mount namespaces; the daemon's namespace dies; successor in a namespace that cannot see the mount
+  expected: a mount made in a namespace whose kubelet dir is shared with the host propagates to the host and into the app's slave namespace; it outlives the namespace it was made in; the successor needs only the fd, not the mount; the app sees 0 errors. Control: a mount made in a private-propagation namespace is invisible to the host and app
+  [OK ] H3 mount visible in host ns: got=staging+target want=both
+  [OK ] H3 mount propagated into app (slave) ns: got=True want=True
+  [OK ] H3 daemon's mount ns has no processes left: got=[] want=[]
+  [OK ] H3 mount survives its ns in host and app ns: got=present want=present
+  [OK ] H3 successor ns cannot see the mount: got=False want=False
+  ops=606 errors=0 max_op_us=158425 resent=3
+  [OK ] H3 app I/O across handoff: no errors: got=0 [] want=0
+  [OK ] H3.ctl control mount exists in its own ns: got=True want=True
+  [OK ] H3.ctl private-propagation mount invisible to host: got=False want=False
+  [OK ] H3 unmount from host propagates to app ns: got=False want=False
+
+=== H4: FUSE over io_uring (FUSE_OVER_IO_URING, 4 queues x 2 entries, one thread)
+
+--- U0: requests arrive on the ring, not on read(/dev/fuse)
+  expected: I/O works; every request after INIT comes through the ring (read_reqs=0)
+  ops=20525 errors=0 p50_us=[58.41300003339711, 59.30499992246041, 59.716000123444246, 59.764000070572365] daemon={'reqs': '41067', 'read_reqs': '0', 'uring_reqs': '41066', 'resent': '0', 'inits': '1'}
+  [OK ] U0 ring serves I/O: got={'reqs': '41067', 'read_reqs': '0', 'uring_reqs': '41066', 'resent': '0', 'inits': '1'} want=uring_reqs>0 read_reqs=0
+
+--- U1: daemon SIGKILLed idle; a request made in the gap; successor tries read(/dev/fuse), then re-registers
+  expected: (a) a successor that only reads /dev/fuse never sees the gap request: once the ring is ready, fiq->ops sends every request to a ring queue; (b) after re-registering fresh entries the gap request is still blocked: REGISTER does not dispatch requests already queued (fuse_uring_do_register); (c) one later request from the same CPU is served and its commit dispatches the queued one
+  [OK ] U1a gap request not served via read(/dev/fuse): got=None {'reqs': '0', 'read_reqs': '0', 'uring_reqs': '0', 'resent': '0', 'inits': '0'} want=blocked, read_reqs=0
+  [OK ] U1b gap request still blocked after re-register: got=None want=blocked
+  [OK ] U1 new request on another CPU served: got={'ok': True, 't0': 1747.455198192, 't1': 1747.456500215} want=ok
+  [OK ] U1c kick on the gap request's CPU releases it: got=kick={'ok': True, 't0': 1747.496640106, 't1': 1747.500150833} gap={'ok': True, 't0': 1745.230861668, 't1': 1747.496781588} want=both ok
+  [OK ] U1 unmount with dead ring entries: got=rc=0 15.2 ms want=rc=0
+
+--- U2: daemon SIGKILLed with a request fetched over the ring; successor re-registers and resends
+  expected: the fetched request stays blocked: FUSE_NOTIFY_RESEND only requeues the processing lists of /dev/fuse devices (fuse_resend walks fc->devices), not the ring queues' lists
+  [OK ] U2 fetched request after resend + re-register + kick: got=None want=still blocked
+  fusectl waiting=1 resent seen by B=0
+  after umount -l and fusectl abort: {'ok': False, 'errno': 103, 'err': 'Software caused connection abort', 't0': 1747.704284141, 't1': 1749.723124419}
+
+--- U3.0: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=2 staged=0 fresh=4 ops=878 errors=0 max_op_us=159691 kill->B serving=142.94 ms
+  [OK ] U3.0 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1749.818333833, 't1': 1750.510590152} want=ok
+  [OK ] U3.0 gap requests on every CPU served: got=[{'ok': True, 't0': 1750.460590351, 't1': 1750.514889171}, {'ok': True, 't0': 1750.444366879, 't1': 1750.521729448}, {'ok': True, 't0': 1750.421868215, 't1': 1750.511046976}, {'ok': True, 't0': 1750.4713436, 't1': 1750.523199196}] want=all ok
+  [OK ] U3.0 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.0 unmount: got=rc=0 12.0 ms want=rc=0
+
+--- U3.1: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=1 staged=0 fresh=5 ops=896 errors=0 max_op_us=125957 kill->B serving=118.15 ms
+  [OK ] U3.1 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1751.471433302, 't1': 1752.098256974} want=ok
+  [OK ] U3.1 gap requests on every CPU served: got=[{'ok': True, 't0': 1752.089702687, 't1': 1752.113843447}, {'ok': True, 't0': 1752.037186342, 't1': 1752.104135015}, {'ok': True, 't0': 1752.004586493, 't1': 1752.122204445}, {'ok': True, 't0': 1752.008665303, 't1': 1752.113223679}] want=all ok
+  [OK ] U3.1 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.1 unmount: got=rc=0 8.5 ms want=rc=0
+
+--- U3.2: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=2 staged=0 fresh=4 ops=860 errors=0 max_op_us=145242 kill->B serving=129.94 ms
+  [OK ] U3.2 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1752.96973397, 't1': 1753.682236508} want=ok
+  [OK ] U3.2 gap requests on every CPU served: got=[{'ok': True, 't0': 1753.615395089, 't1': 1753.702159605}, {'ok': True, 't0': 1753.638290894, 't1': 1753.70147428}, {'ok': True, 't0': 1753.618417242, 't1': 1753.694182476}, {'ok': True, 't0': 1753.584836786, 't1': 1753.700902407}] want=all ok
+  [OK ] U3.2 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.2 unmount: got=rc=0 11.2 ms want=rc=0
+
+--- U3.3: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=1 staged=0 fresh=5 ops=882 errors=1 max_op_us=174118 kill->B serving=162.23 ms
+  [OK ] U3.3 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1754.675779992, 't1': 1755.326638769} want=ok
+  [OK ] U3.3 gap requests on every CPU served: got=[{'ok': True, 't0': 1755.222398448, 't1': 1755.336598636}, {'ok': True, 't0': 1755.217223616, 't1': 1755.336685069}, {'ok': True, 't0': 1755.255600072, 't1': 1755.338302779}, {'ok': True, 't0': 1755.274505281, 't1': 1755.335203079}] want=all ok
+  [FAIL] U3.3 I/O workers: no errors: got=1 [[125, 'Operation canceled', 1755.161591669]] want=0
+  kill at 1755.161481
+    A| EV 1754543364 START mode=mount pid=22456 uid=0
+    A| EV 1754544130 MOUNTED fd=4 opts=fd=4,rootmode=40000,user_id=0,group_id=0
+    A| EV 1754544146 INIT kernel=7.45 flags=0x7fd73fffffb over_io_uring_offered=1 has_resend=1 reply_flags=0x20040440000 max_write=131072
+    A| EV 1754544674 URING_REGISTERED queues=4 depth=2
+    A| EV 1754544953 PUT_TO_HOLDER nfds=2
+    A| EV 1754686796 HUNG unique=0x4 op=LOOKUP name=hang1 ent=7
+    B| EV 1755314875 START mode=get pid=22476 uid=0
+    B| EV 1755315236 TAKEOVER nfds=1 shm=1 uring=1 kernel=7.45 max_write=131072
+    B| EV 1755315463 ADOPT_FETCHED ent=2 state=1 unique=0x550 op=15
+    B| EV 1755316035 RESCAN nodeid=606516
+    B| EV 1755316833 ADOPT_FETCHED ent=3 state=0 unique=0x554 op=16
+    B| EV 1755317456 ADOPT_FETCHED ent=7 state=1 unique=0x4 op=1
+    B| EV 1755318605 URING_ADOPTED fetched=2 unreaped=1 staged=0 fresh=5
+    B| EV 1755318844 RESEND_SENT ret=16 errno=0
+    B| EV 1755323286 KICK_STARTED queues=4
+    B| EV 1755323713 SERVING
+  [OK ] U3.3 unmount: got=rc=0 9.1 ms want=rc=0
+
+--- U3.4: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=3 staged=0 fresh=3 ops=842 errors=0 max_op_us=233005 kill->B serving=225.57 ms
+  [OK ] U3.4 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1756.290894999, 't1': 1757.035571447} want=ok
+  [OK ] U3.4 gap requests on every CPU served: got=[{'ok': True, 't0': 1756.883970862, 't1': 1757.038715965}, {'ok': True, 't0': 1756.946964296, 't1': 1757.03862731}, {'ok': True, 't0': 1757.240596408, 't1': 1757.247253578}, {'ok': True, 't0': 1757.027013193, 't1': 1757.037581982}] want=all ok
+  [OK ] U3.4 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.4 unmount: got=rc=0 6.6 ms want=rc=0
+
+--- U3.5: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=0 staged=0 fresh=6 ops=909 errors=0 max_op_us=170071 kill->B serving=158.26 ms
+  [OK ] U3.5 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1757.964358398, 't1': 1758.650633103} want=ok
+  [OK ] U3.5 gap requests on every CPU served: got=[{'ok': True, 't0': 1758.547808627, 't1': 1758.653788505}, {'ok': True, 't0': 1758.514617214, 't1': 1758.693653426}, {'ok': True, 't0': 1758.638781308, 't1': 1758.657645813}, {'ok': True, 't0': 1758.558410986, 't1': 1758.655631775}] want=all ok
+  [OK ] U3.5 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.5 unmount: got=rc=0 8.7 ms want=rc=0
+
+--- U3.6: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=1 staged=0 fresh=5 ops=955 errors=0 max_op_us=150191 kill->B serving=137.63 ms
+  [OK ] U3.6 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1759.55779904, 't1': 1760.252919221} want=ok
+  [OK ] U3.6 gap requests on every CPU served: got=[{'ok': True, 't0': 1760.224194331, 't1': 1760.259456165}, {'ok': True, 't0': 1760.138607974, 't1': 1760.293221601}, {'ok': True, 't0': 1760.17256996, 't1': 1760.255866613}, {'ok': True, 't0': 1760.172865159, 't1': 1760.264490921}] want=all ok
+  [OK ] U3.6 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.6 unmount: got=rc=0 15.1 ms want=rc=0
+
+--- U3.7: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=1 staged=0 fresh=5 ops=955 errors=0 max_op_us=135335 kill->B serving=127.52 ms
+  [OK ] U3.7 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1761.181285197, 't1': 1761.863090692} want=ok
+  [OK ] U3.7 gap requests on every CPU served: got=[{'ok': True, 't0': 1761.789562001, 't1': 1761.88602532}, {'ok': True, 't0': 1761.807328212, 't1': 1761.892062581}, {'ok': True, 't0': 1761.756649517, 't1': 1761.888252071}, {'ok': True, 't0': 1761.842853544, 't1': 1761.874719086}] want=all ok
+  [OK ] U3.7 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.7 unmount: got=rc=0 4.7 ms want=rc=0
+
+--- U3.8: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=1 unreaped=2 staged=0 fresh=5 ops=1055 errors=2 max_op_us=133904 kill->B serving=126.61 ms
+  [OK ] U3.8 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1762.811060154, 't1': 1763.47020591} want=ok
+  [OK ] U3.8 gap requests on every CPU served: got=[{'ok': True, 't0': 1763.397966871, 't1': 1763.47620193}, {'ok': True, 't0': 1763.378536723, 't1': 1763.492178912}, {'ok': True, 't0': 1763.425619501, 't1': 1763.478556561}, {'ok': True, 't0': 1763.395697347, 't1': 1763.479108169}] want=all ok
+  [FAIL] U3.8 I/O workers: no errors: got=2 [[125, 'Operation canceled', 1763.324925104], [125, 'Operation canceled', 1763.344885716]] want=0
+  kill at 1763.342210
+    A| EV 1762712610 START mode=mount pid=22660 uid=0
+    A| EV 1762712980 MOUNTED fd=4 opts=fd=4,rootmode=40000,user_id=0,group_id=0
+    A| EV 1762713032 INIT kernel=7.45 flags=0x7fd73fffffb over_io_uring_offered=1 has_resend=1 reply_flags=0x20040440000 max_write=131072
+    A| EV 1762713234 URING_REGISTERED queues=4 depth=2
+    A| EV 1762713405 PUT_TO_HOLDER nfds=2
+    A| EV 1762813369 HUNG unique=0x70 op=LOOKUP name=hang1 ent=1
+    B| EV 1763465567 START mode=get pid=22678 uid=0
+    B| EV 1763465718 TAKEOVER nfds=1 shm=1 uring=1 kernel=7.45 max_write=131072
+    B| EV 1763465795 ADOPT_FETCHED ent=1 state=1 unique=0x70 op=1
+    B| EV 1763466484 ADOPT_FETCHED ent=4 state=2 unique=0x6f8 op=15
+    B| EV 1763467082 RESCAN nodeid=606518
+    B| EV 1763467188 ADOPT_FETCHED ent=7 state=0 unique=0x6fa op=15
+    B| EV 1763468227 URING_ADOPTED fetched=1 unreaped=2 staged=0 fresh=5
+    B| EV 1763468241 RESEND_SENT ret=16 errno=0
+    B| EV 1763468796 KICK_STARTED queues=4
+    B| EV 1763468817 SERVING
+  [OK ] U3.8 unmount: got=rc=0 9.8 ms want=rc=0
+
+--- U3.9: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=1 staged=0 fresh=5 ops=979 errors=0 max_op_us=134839 kill->B serving=118.78 ms
+  [OK ] U3.9 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1764.3537485, 't1': 1765.054226643} want=ok
+  [OK ] U3.9 gap requests on every CPU served: got=[{'ok': True, 't0': 1764.975443104, 't1': 1765.068105166}, {'ok': True, 't0': 1764.974374953, 't1': 1765.06503206}, {'ok': True, 't0': 1764.973633911, 't1': 1765.060203672}, {'ok': True, 't0': 1765.000503067, 't1': 1765.054657051}] want=all ok
+  [OK ] U3.9 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.9 unmount: got=rc=0 8.9 ms want=rc=0
+
+--- U3.10: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=3 staged=0 fresh=3 ops=980 errors=0 max_op_us=132422 kill->B serving=128.46 ms
+  [OK ] U3.10 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1765.958576368, 't1': 1766.65473163} want=ok
+  [OK ] U3.10 gap requests on every CPU served: got=[{'ok': True, 't0': 1766.560289861, 't1': 1766.700134983}, {'ok': True, 't0': 1766.616582063, 't1': 1766.659588735}, {'ok': True, 't0': 1766.571140651, 't1': 1766.663939606}, {'ok': True, 't0': 1766.607351438, 't1': 1766.665337596}] want=all ok
+  [OK ] U3.10 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.10 unmount: got=rc=0 13.2 ms want=rc=0
+
+--- U3.11: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=1 staged=0 fresh=5 ops=909 errors=0 max_op_us=139731 kill->B serving=126.37 ms
+  [OK ] U3.11 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1767.540346924, 't1': 1768.260442428} want=ok
+  [OK ] U3.11 gap requests on every CPU served: got=[{'ok': True, 't0': 1768.184830449, 't1': 1768.258334033}, {'ok': True, 't0': 1768.179296402, 't1': 1768.250557852}, {'ok': True, 't0': 1768.240730564, 't1': 1768.259214051}, {'ok': True, 't0': 1768.163340418, 't1': 1768.265350704}] want=all ok
+  [OK ] U3.11 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.11 unmount: got=rc=0 8.7 ms want=rc=0
+
+--- U3.12: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=0 staged=0 fresh=6 ops=906 errors=0 max_op_us=219337 kill->B serving=194.17 ms
+  [OK ] U3.12 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1769.283702323, 't1': 1769.994783754} want=ok
+  [OK ] U3.12 gap requests on every CPU served: got=[{'ok': True, 't0': 1769.870466888, 't1': 1770.007295437}, {'ok': True, 't0': 1769.902191732, 't1': 1769.995104926}, {'ok': True, 't0': 1770.11526889, 't1': 1770.118520897}, {'ok': True, 't0': 1769.916461445, 't1': 1769.996702157}] want=all ok
+  [OK ] U3.12 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.12 unmount: got=rc=0 8.0 ms want=rc=0
+
+--- U3.13: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=1 staged=0 fresh=5 ops=991 errors=0 max_op_us=164472 kill->B serving=153.40 ms
+  [OK ] U3.13 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1771.731251797, 't1': 1771.89139628} want=ok
+  [OK ] U3.13 gap requests on every CPU served: got=[{'ok': True, 't0': 1771.809087206, 't1': 1771.986542269}, {'ok': True, 't0': 1771.975100803, 't1': 1772.001142407}, {'ok': True, 't0': 1771.822567158, 't1': 1771.903339192}, {'ok': True, 't0': 1771.799597628, 't1': 1771.940382637}] want=all ok
+  [OK ] U3.13 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.13 unmount: got=rc=0 7.1 ms want=rc=0
+
+--- U3.14: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=1 staged=0 fresh=5 ops=903 errors=0 max_op_us=189020 kill->B serving=171.74 ms
+  [OK ] U3.14 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1773.108214588, 't1': 1773.605285403} want=ok
+  [OK ] U3.14 gap requests on every CPU served: got=[{'ok': True, 't0': 1773.47853352, 't1': 1773.610489418}, {'ok': True, 't0': 1773.599879014, 't1': 1773.612339834}, {'ok': True, 't0': 1773.547988035, 't1': 1773.60879698}, {'ok': True, 't0': 1773.690946331, 't1': 1773.697039448}] want=all ok
+  [OK ] U3.14 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.14 unmount: got=rc=0 6.9 ms want=rc=0
+
+--- U3.15: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=0 staged=0 fresh=6 ops=694 errors=0 max_op_us=153494 kill->B serving=140.68 ms
+  [OK ] U3.15 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1774.596863591, 't1': 1775.233037123} want=ok
+  [OK ] U3.15 gap requests on every CPU served: got=[{'ok': True, 't0': 1775.336090045, 't1': 1775.372337885}, {'ok': True, 't0': 1775.163492858, 't1': 1775.233630967}, {'ok': True, 't0': 1775.381881041, 't1': 1775.384319435}, {'ok': True, 't0': 1775.193022011, 't1': 1775.236860322}] want=all ok
+  [OK ] U3.15 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.15 unmount: got=rc=0 9.5 ms want=rc=0
+
+--- U3.16: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=1 staged=0 fresh=5 ops=772 errors=0 max_op_us=118197 kill->B serving=110.64 ms
+  [OK ] U3.16 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1776.383564352, 't1': 1776.820950098} want=ok
+  [OK ] U3.16 gap requests on every CPU served: got=[{'ok': True, 't0': 1776.770669221, 't1': 1776.824071014}, {'ok': True, 't0': 1776.754433581, 't1': 1776.848807804}, {'ok': True, 't0': 1776.823305202, 't1': 1776.828909965}, {'ok': True, 't0': 1776.782330329, 't1': 1776.838102367}] want=all ok
+  [OK ] U3.16 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.16 unmount: got=rc=0 6.5 ms want=rc=0
+
+--- U3.17: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=1 unreaped=2 staged=0 fresh=5 ops=653 errors=0 max_op_us=172774 kill->B serving=149.78 ms
+  [OK ] U3.17 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1778.245123306, 't1': 1778.531228877} want=ok
+  [OK ] U3.17 gap requests on every CPU served: got=[{'ok': True, 't0': 1778.79723747, 't1': 1778.801070699}, {'ok': True, 't0': 1778.436503635, 't1': 1778.539837086}, {'ok': True, 't0': 1778.52684236, 't1': 1778.544705364}, {'ok': True, 't0': 1778.461387037, 't1': 1778.545304887}] want=all ok
+  [OK ] U3.17 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.17 unmount: got=rc=0 11.5 ms want=rc=0
+
+--- U3.18: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=1 staged=0 fresh=5 ops=725 errors=0 max_op_us=187885 kill->B serving=163.46 ms
+  [OK ] U3.18 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1779.525129161, 't1': 1780.159532119} want=ok
+  [OK ] U3.18 gap requests on every CPU served: got=[{'ok': True, 't0': 1780.369999923, 't1': 1780.373529217}, {'ok': True, 't0': 1780.070698087, 't1': 1780.16756781}, {'ok': True, 't0': 1780.194076755, 't1': 1780.197738908}, {'ok': True, 't0': 1780.308848094, 't1': 1780.312609825}] want=all ok
+  [OK ] U3.18 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.18 unmount: got=rc=0 138.0 ms want=rc=0
+
+--- U3.19: ring buffers in a memfd held by the holder; successor maps it at the same address and adopts
+  expected: the successor answers the request the dead daemon had fetched (the kernel copies replies from the user address it registered, which now maps the same memory), re-registers the rest at the same buffers and kicks each CPU's queue: the hung LOOKUP, the gap requests and all I/O workers finish with 0 errors
+  URING_ADOPTED fetched=2 unreaped=1 staged=0 fresh=5 ops=724 errors=0 max_op_us=204492 kill->B serving=192.43 ms
+  [OK ] U3.19 fetched LOOKUP answered by successor: got={'ok': True, 't0': 1781.382898685, 't1': 1782.002205555} want=ok
+  [OK ] U3.19 gap requests on every CPU served: got=[{'ok': True, 't0': 1781.968432453, 't1': 1782.010192206}, {'ok': True, 't0': 1782.196334657, 't1': 1782.202842033}, {'ok': True, 't0': 1781.923166691, 't1': 1782.00902016}, {'ok': True, 't0': 1781.983607056, 't1': 1782.005996703}] want=all ok
+  [OK ] U3.19 I/O workers: no errors: got=0 [] want=0
+  [OK ] U3.19 unmount: got=rc=0 18.3 ms want=rc=0
+
+=== G1: go-fuse v2.12.0 NewServer on an initialized fd through the /dev/fd/N mountpoint
+  expected: NewServer blocks reading the INIT it always expects first (server.go handleInit); when a request arrives it is handled as the first request with no kernel settings, and doInit never runs, so the stat either fails or NewServer reports an init error
+  [OK ] G1 NewServer blocks waiting for INIT: got=EV NEWSERVER_BLOCKED_2S want=blocked
+  stat: {'ok': True, 't0': 1784.965139273, 't1': 1784.965776649}; EV NEWSERVER_RETURNED err=<nil>
+    gofuse| EV GOT_FD fd=8
+    gofuse| 2026/10/18 17:01:52 mount: magic mountpoint "/dev/fd/8", using fd 8
+    gofuse| EV NEWSERVER_BLOCKED_2S
+    gofuse| 2026/10/18 17:01:54 rx 4: GETATTR n1 {Fh 0 } p23174
+    gofuse| 2026/10/18 17:01:54 tx 4:     OK, {tA=0s {M040755 SZ=0 L=2 0:0 B0*0 i0:1 A 0.000000 M 0.000000 C 0.000000}}
+    gofuse| EV NEWSERVER_RETURNED err=<nil>
+    gofuse| EV KERNEL_SETTINGS major=0 minor=0
+  [FAIL] G1 first request after adoption fails, or NewServer reports an init error: got=stat={'ok': True, 't0': 1784.965139273, 't1': 1784.965776649} EV NEWSERVER_RETURNED err=<nil> want=failure
+  [FAIL] G1 adopted server knows the kernel's INIT settings: got=EV KERNEL_SETTINGS major=0 minor=0 want=major=7 minor=45
+
+=== G2: go-fuse ProtocolServer (transport-free): replayed INIT, 64-bit unique echo, allocations
+  expected: a replayed INIT sets its kernel settings; a resent unique (bit 63) is echoed whole; HandleRequest allocates per request (requestAlloc and its cancel channel)
+    gofuse| EV INIT_REPLAYED n=80 status=OK
+    gofuse| EV GETATTR n=120 status=OK unique_in=0x800000000000014a unique_out=0x800000000000014a full_echo=true
+    gofuse| EV GETATTR_ALLOCS allocs_per_op=2.0 bench= 1000000	      1274 ns/op     1008 B/op	       2 allocs/op
+  [OK ] G2 full 64-bit unique echoed: got=True want=True
+  [OK ] G2 allocations per GETATTR: got=2.0 want=>0 (violates zero-alloc rule)
+
+4 CHECK(S) FAILED

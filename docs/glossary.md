@@ -266,6 +266,10 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Filesystem in Userspace (FUSE).** A Linux mechanism that forwards a filesystem's operations from the kernel to an ordinary process, here the daemon, through `/dev/fuse`. It avoids writing a kernel module, at a cost of a few microseconds per request.
 
+**Descriptor handoff.** Passing the open `/dev/fuse` file descriptor that serves a mount from one process to another over a Unix socket (`SCM_RIGHTS`). The kernel keeps the mount's whole state with the descriptor, so a restarted daemon that takes it back serves the mount without remounting, and applications see a pause instead of errors. See [Daemon restart and upgrade](design.md#daemon-restart-and-upgrade).
+
+**FUSE over io_uring.** A FUSE transport (Linux 6.14+) in which the daemon takes requests and returns replies through io_uring commands on per-CPU queues instead of reading and writing `/dev/fuse`. The daemon does not use it, because a crash strands or fails requests ([Daemon restart and upgrade](design.md#daemon-restart-and-upgrade)).
+
 **Page cache.** The kernel's in-memory cache of file contents. A read served from it never reaches the daemon, which is why caching is fast and also why it must be turned off when another node is writing.
 
 **Direct I/O.** Bypassing the page cache, so every read and write goes to the daemon. rock-solid opens a file with direct I/O while it is write-shared.
