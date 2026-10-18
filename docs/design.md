@@ -673,7 +673,7 @@ A driver executes `Action`s and feeds back `Event`s. Chunk data, Raft logs and i
 | Clock and timers | Monotonic clock (1 tick = 1 µs) | Same | Simulated time |
 | Frontend | FUSE client; ublk + CSI driver | NVMe-oF/TCP for remote block clients | Simulated clients with a model page cache that record histories |
 
-**Driver contract.** The [bypass-drivers spike](#appendix-kernel-bypass-drivers-spike) showed that SPDK and RDMA fit this slot, but only if three rules hold from the first (default) driver:
+**Driver contract.** The [bypass-drivers spike](#appendix-kernel-bypass-drivers-spike) showed that SPDK and RDMA fit this slot, but only if the first three rules hold from the first (default) driver; the [open-loop latency spike](#appendix-open-loop-latency-spike) added the fourth:
 
 - **Data buffers come from the driver's pool, and the core frees them.** `IoBuf` is a handle from a buffer pool the driver provides, never an arbitrary heap allocation. NVMe under SPDK can only DMA from SPDK-registered memory, and RDMA can only send from registered memory; one stray buffer breaks the whole RDMA connection, and registering per I/O costs as much as the I/O. The default drivers and the simulator use a plain heap pool, so nothing changes for them. The pool has an explicit size: without hugepages, vfio limits SPDK to just under 256 MB of DMA memory (65,535 mappings of 4 KB pages), so the SPDK pool defaults to 128 MB and needs hugepages above that. Control messages up to 256 bytes go inline and need no pool buffer.
 
@@ -687,6 +687,7 @@ A driver executes `Action`s and feeds back `Event`s. Chunk data, Raft logs and i
   A send reports no completion of its own, so a peer answers every request that carries data, even if only to reject it. The driver releases a send's buffer before it delivers the reply (an RDMA driver drains send completions before receive completions) and releases all of a peer's buffers before it emits that peer's `PeerLost`. A timeout gives up on the result, not the buffer: the buffer stays allocated until the reply or `PeerLost`. One buffer can go to several peers in a fan-out and is freed once every one of them is done with it. `IoBuf` is a `Copy` handle, so the type system doesn't track any of this; the simulator's pool checks a per-slot generation and fills `alloc`ed memory with a poison byte, which catches stale handles and reads of unwritten memory.
 - **Every driver exposes a readiness fd and defaults to event mode.** SPDK's thread interrupt fd and the RDMA completion-channel fd both sit in the daemon's epoll loop. Busy polling is a separate opt-in for dedicated cores. SPDK's NVMe driver supports event mode on PCIe drives bound to `vfio-pci`, with one MSI-X eventfd per queue pair ([SPDK NVMe interrupt spike](#appendix-spdk-nvme-interrupt-spike)). Elsewhere (`uio_pci_generic`, or interrupts that can't be enabled) it silently attaches in polling mode, and a loop that sleeps on its fd then hangs. So the driver reads the mode back after attach and fails the disk with a clear error, unless the operator gave it a busy-polled core.
 - **Network connections fail as a unit.** A transport error on a connection becomes one `PeerLost` event, every outstanding request on it fails, and the driver reconnects. The core keeps its own deadlines and never relies on transport timeouts. `SetTimer` on an armed `TimerId` replaces its deadline, and there is no cancel: a `Timer` event can still arrive for a deadline that was replaced or no longer matters, so the core checks its own deadline against `now` before acting on one.
+- **Every pass of an event loop does bounded work.** A pass reads at most a fixed budget from each connection (256 KiB in the spike), the bytes queued for replication are capped and stop the loop reading clients while over the cap, and output buffers are rings or compacted in place rather than grown. A loop that reads each socket until it would block makes each pass slower the more is queued: under overload both the Rust and the Go replication harnesses ran away into multi-second stalls with up to 200 MB buffered and most cores idle, Go from 30,000 writes/s because growing a slice copies it, Rust above 90,000. With the budget, neither dropped a request up to 100,000 writes/s.
 
 **Crate layout (proposed)**
 
@@ -794,7 +795,7 @@ Each choice below favors a short hot path, a single binary and testable correctn
 | Decision | Chosen | Alternatives weighed | Why the chosen one |
 | --- | --- | --- | --- |
 | First product | RWX filesystem | Block first; S3 first | RWX is where homelab users have no good option; block alone competes with Longhorn v2 and Mayastor |
-| Language | Rust | Go; C++ (Ceph, 3FS) | A learning goal; memory safety; SPDK and RDMA are C libraries, reached through bindgen without cgo. Measured against Go 1.27, Go costs 1.1 to 1.25× the CPU on compute-bound code. On the replicated 4K write path it costs 1.14 to 1.21× when it runs the same epoll loop per node, and 1.5 to 1.7× with a goroutine per connection ([Go CPU spike](#appendix-go-cpu-per-operation-spike), [tuned Go spike](#appendix-tuned-go-spike)). Compiler options (PGO, `GOAMD64=v3`, bounds checks) are worth under 3.5%. Its collector's pauses stay under 1 ms, but a memtable with one pointer per entry costs 23 to 35% of the CPU in collection, 9% in a Go arena, so in Go the memtable would have to be pointer-free pages ([Go memtable spike](#appendix-go-memtable-spike)) |
+| Language | Rust | Go; C++ (Ceph, 3FS) | A learning goal; memory safety; SPDK and RDMA are C libraries, reached through bindgen without cgo. Measured against Go 1.27, Go costs 1.1 to 1.25× the CPU on compute-bound code. On the replicated 4K write path it costs 1.14 to 1.21× when it runs the same epoll loop per node, and 1.5 to 1.7× with a goroutine per connection ([Go CPU spike](#appendix-go-cpu-per-operation-spike), [tuned Go spike](#appendix-tuned-go-spike)). Most of that is Go's runtime, not its compiler: with `GOMAXPROCS` above the number of goroutines that block in syscalls and raw syscalls for non-blocking reads and writes, Go comes to 1.07× ([Go and Rust codegen spike](#appendix-go-and-rust-codegen-spike)), while compiler options (PGO, `GOAMD64=v3`, bounds checks) are worth under 3.5%. Under rising open-loop load its p99 knee comes at a 1.2× lower rate, with the same throughput up to 100,000 writes/s ([open-loop latency spike](#appendix-open-loop-latency-spike)). Its collector's pauses stay under 1 ms, but a memtable with one pointer per entry costs 23 to 35% of the CPU in collection, 9% in a Go arena, so in Go the memtable would have to be pointer-free pages ([Go memtable spike](#appendix-go-memtable-spike)) |
 | File client | FUSE | Own kernel module (Weka, CephFS); NFS gateway pod (Longhorn RWX) | The spike shows FUSE can do per-file cache switching. FUSE is safe to iterate on, and a crash doesn't take down the kernel. A gateway funnels all traffic through one pod |
 | Where write-back lives | In the daemon | FUSE `writeback_cache` (kernel page cache) | The kernel option is mount-wide, hides writes from the daemon and can't be revoked per file, so write-shared mode couldn't be enforced (spike T9) |
 | Coherence | Tiers 1 → 2 → 3 | Close-to-open only (NFS, JuiceFS); full capabilities from the start (CephFS); caching left to the user (DAOS) | Ships useful RWX early; the Weka-style mode switch gets most of the benefit of capabilities with three states and one message type |
@@ -1268,3 +1269,43 @@ Each learning track starts with a small throwaway exercise, then lands as a real
 - A Go data path should run an event loop per node on raw sockets, the sans-IO driver's shape; it then costs about 1.2× Rust. Goroutine per connection costs 1.5 to 1.7× whatever its synchronization.
 - Compiler options are not a lever for this code.
 - Arenas suit memory freed whole, not a long-lived memtable: they cut its collection cost 2.1 to 2.5×, where pointer-free pages cut it to nothing.
+
+## Appendix: Go and Rust codegen spike
+
+**Question.** With the same epoll design and the same syscall counts, Go costs 1.21× Rust's CPU per replicated 4K write and the garbage collector is not involved. Where do the extra cycles go, and do the two compilers share a backend?
+
+**Setup.** The cloud VM of the [tuned Go spike](#appendix-tuned-go-spike), moved by a restart to a 2.8 GHz host, so absolute numbers are higher and only comparisons within the spike hold. Go 1.27.0, Rust 1.99.1 on LLVM 23.1.1, gccgo 14.2. Microbenchmarks of each part of a write in both languages, `perf` with software events (the VM has no hardware counters), Go's CPU profile, and the assembly of the frame-parse loop. Code and raw output: [spikes/go-rust-codegen](../spikes/go-rust-codegen/).
+
+| Test | Result |
+| --- | --- |
+| Compilers | No shared backend. Go's `gc` has its own SSA backend, a linear-scan register allocator, an inlining budget of 80 and no auto-vectorization; rustc uses LLVM. gccgo 14 ships a Go 1.18 library, cannot parse generics and was 2 to 11× slower than `gc`; gollvm was never released |
+| Decomposition of the gap per write | **Runtime scheduling about 61%**: with as many busy goroutines as Ps, `sysmon` retakes the P of a goroutine blocked in `epoll_wait` after 20 µs, so it wakes without one and often moves CPU (0.84 context switches and 0.137 migrations per write against Rust's 0.51 and 0.003). Syscall wrappers about 16% (64 to 123 ns per call). User code about 13%, page faults 6%, `read`/`write` against `recv`/`send` 5% |
+| Generated code | Parse loop: Go 46 instructions and 3 bounds checks per frame, Rust 30 and 1. A frame literal built on the stack and copied with wide loads cost 534 ns; filling the slice element in place, 177 ns. Summed over a write, code differences are about zero, and Go's CRC32C is faster |
+| Rust harness | LLVM removed two of Rust's three 4 KiB ring copies per write, as stores never read; keeping them costs 1.07 µs |
+| Recovering the gap | `GOMAXPROCS=8` with 4 busy goroutines about −2.9 µs; `syscall.RawSyscall` for non-blocking reads and writes about −1.4 µs; rings touched before measuring. **Go 1.26× → 1.07× Rust** |
+
+**Conclusions** (applied in [Alternatives considered](#alternatives-considered))
+
+- The compilers differ, but on this loop the generated code costs about the same; Go's extra cost is its runtime scheduling event loops that block in syscalls.
+- A Go event-loop driver needs `GOMAXPROCS` above its number of blocking loops, raw syscalls for non-blocking socket I/O, and structs filled in place on hot paths.
+- Benchmarks must read what they write, or LLVM deletes the work.
+
+## Appendix: open-loop latency spike
+
+**Question.** At the same offered load, how do latency and server CPU differ between the Rust and Go replicated 4K write paths in the same epoll design as load rises past saturation, and where is each one's knee?
+
+**Setup.** The Rust and Go event-loop harnesses as standalone servers (primary and two replicas in one process) and one open-loop C load generator for both, sending at fixed rates over 16 connections and timing each write from its scheduled send. Offered load from 10,000 to 115,000 writes/s, each point twice, the languages interleaved. A restart moved the VM between hosts mid-spike; each sweep is compared only within its host. Code and raw output: [spikes/open-loop-latency](../spikes/open-loop-latency/).
+
+| Test | Result |
+| --- | --- |
+| Loop reading each socket until it would block | **Overload collapse**: Go dropped requests from 30,000 writes/s on one host and 50,000 on the other, Rust above 90,000, at about 1.5 of 4 cores. The primary's output buffer grew to 81 to 196 MB; in Go, growing a slice copies it (61% `memmove`, 13% `memclr` in a collapsing run), and TCP backoff stretched stalls to seconds |
+| Loop reading at most 256 KiB per connection per pass | Neither dropped a request up to 100,000 writes/s (the load generator's limit); output buffers stayed under 20 MB |
+| p99 knee, bounded loop | **Rust 60,000, Go 50,000 writes/s (1.2×)**; p50 knee 120,000 against 80,000 |
+| Latency at 100,000 writes/s, bounded loop | p50 440 against 875 µs, p99 10.6 against 50 ms |
+| Server CPU per write | Go 1.05 to 1.25× Rust; it falls with load (Rust 88 µs at 10,000/s to 13.8 µs at 100,000/s) because batches grow, while server cores stay at 1.3 to 1.5 |
+
+**Conclusions** (applied in the [driver contract](#modularity-sans-io-core-pluggable-drivers) and [Alternatives considered](#alternatives-considered))
+
+- An event-loop pass must do bounded work, with capped replication queues as backpressure; otherwise overload is a collapse, in either language.
+- With bounded passes, Go's latency knee comes at a 1.2× lower rate than Rust's, and throughput is the same up to 100,000 writes/s.
+- An event loop's cores do not measure its headroom; capacity is planned from latency against offered load.

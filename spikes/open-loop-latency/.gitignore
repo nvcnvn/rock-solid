@@ -1,0 +1,4 @@
+# Build outputs and profiles
+bin/
+server-rust/target/
+*.pprof

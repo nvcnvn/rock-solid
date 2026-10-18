@@ -1,0 +1,360 @@
+# kernel 6.18.44-fc-v139, rustc 1.99.1 (58cf8f9c3 2026-10-13), go version go1.27.0 linux/amd64, 4 vCPUs, 2026-10-18T07:22:18
+# conns=16 secs=10 warm=1 arrivals=poisson cap=16384 reps=2
+GAPS secs=10 | g20_100us=6910 g100_500us=211 g500us_1ms=22 g1_5ms=29 g5ms_up=0 lost_ms=338.5 max_us=4876
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=9910 achieved=9910 measured=99097 dropped=0 unanswered=0 p50_us=229.1 p90_us=356.1 p99_us=1552.2 p999_us=4260.7 max_us=6463.3 lag_p99_us=182.5 srv_cores=0.859 srv_us_per_op=86.68 cli_cores=0.426 machine_cores=1.228 softirq_cores=0.596 steal_cores=0.027
+SERVER lang=rust conns=16 drain=1 | ops=109066 cpu_s=9.479 wall_s=11.102 cpu_us_per_op=86.91 max_wbuf=230720
+NET lang=rust | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=9910 achieved=9910 measured=99097 dropped=0 unanswered=0 p50_us=270.0 p90_us=422.3 p99_us=1708.2 p999_us=10332.1 max_us=16752.4 lag_p99_us=184.5 srv_cores=1.098 srv_us_per_op=110.80 cli_cores=0.416 machine_cores=1.316 softirq_cores=0.521 steal_cores=0.026
+SERVER lang=go conns=16 drain=1 | ops=109066 cpu_s=12.097 wall_s=11.101 cpu_us_per_op=110.92 max_wbuf=498520
+NET lang=go | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=9910 achieved=9910 measured=99097 dropped=0 unanswered=0 p50_us=250.7 p90_us=381.7 p99_us=1652.9 p999_us=3852.2 max_us=8453.3 lag_p99_us=179.8 srv_cores=0.897 srv_us_per_op=90.52 cli_cores=0.427 machine_cores=1.237 softirq_cores=0.549 steal_cores=0.022
+SERVER lang=rust conns=16 drain=0 | ops=109066 cpu_s=9.829 wall_s=11.102 cpu_us_per_op=90.12 max_wbuf=152440
+NET lang=rust-d0 | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=9910 achieved=9910 measured=99097 dropped=0 unanswered=0 p50_us=283.0 p90_us=461.7 p99_us=1896.7 p999_us=5391.0 max_us=9535.4 lag_p99_us=202.6 srv_cores=1.108 srv_us_per_op=111.81 cli_cores=0.426 machine_cores=1.309 softirq_cores=0.551 steal_cores=0.026
+SERVER lang=go conns=16 drain=0 | ops=109066 cpu_s=12.272 wall_s=11.101 cpu_us_per_op=112.51 max_wbuf=309000
+NET lang=go-d0 | RetransSegs=1 TCPLossProbes=2 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=19961 achieved=19962 measured=199613 dropped=0 unanswered=0 p50_us=306.1 p90_us=489.4 p99_us=3952.7 p999_us=22493.7 max_us=32642.2 lag_p99_us=571.2 srv_cores=1.388 srv_us_per_op=69.53 cli_cores=0.572 machine_cores=1.704 softirq_cores=0.675 steal_cores=0.022
+SERVER lang=go conns=16 drain=1 | ops=219372 cpu_s=15.324 wall_s=11.100 cpu_us_per_op=69.85 max_wbuf=894040
+NET lang=go | RetransSegs=11 TCPLossProbes=6 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=19961 achieved=19961 measured=199613 dropped=0 unanswered=0 p50_us=238.9 p90_us=357.0 p99_us=1160.4 p999_us=3310.4 max_us=7816.7 lag_p99_us=131.5 srv_cores=1.188 srv_us_per_op=59.52 cli_cores=0.564 machine_cores=1.525 softirq_cores=0.701 steal_cores=0.021
+SERVER lang=rust conns=16 drain=0 | ops=219372 cpu_s=13.078 wall_s=11.102 cpu_us_per_op=59.62 max_wbuf=535600
+NET lang=rust-d0 | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=19961 achieved=19961 measured=199613 dropped=0 unanswered=0 p50_us=281.1 p90_us=490.2 p99_us=2834.0 p999_us=5548.2 max_us=7947.9 lag_p99_us=163.1 srv_cores=1.354 srv_us_per_op=67.83 cli_cores=0.559 machine_cores=1.620 softirq_cores=0.635 steal_cores=0.022
+SERVER lang=go conns=16 drain=0 | ops=219372 cpu_s=14.973 wall_s=11.101 cpu_us_per_op=68.25 max_wbuf=341960
+NET lang=go-d0 | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=19961 achieved=19961 measured=199613 dropped=0 unanswered=0 p50_us=268.9 p90_us=390.6 p99_us=1743.1 p999_us=13390.2 max_us=22389.7 lag_p99_us=195.1 srv_cores=1.241 srv_us_per_op=62.17 cli_cores=0.588 machine_cores=1.577 softirq_cores=0.722 steal_cores=0.025
+SERVER lang=rust conns=16 drain=1 | ops=219372 cpu_s=13.638 wall_s=11.102 cpu_us_per_op=62.17 max_wbuf=1384320
+NET lang=rust | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=30032 achieved=30032 measured=300319 dropped=0 unanswered=0 p50_us=267.2 p90_us=390.1 p99_us=1623.1 p999_us=5245.4 max_us=8629.8 lag_p99_us=155.1 srv_cores=1.363 srv_us_per_op=45.38 cli_cores=0.671 machine_cores=1.783 softirq_cores=0.793 steal_cores=0.024
+SERVER lang=rust conns=16 drain=0 | ops=329917 cpu_s=15.009 wall_s=11.102 cpu_us_per_op=45.49 max_wbuf=671560
+NET lang=rust-d0 | RetransSegs=0 TCPLossProbes=1 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=30032 achieved=30032 measured=300319 dropped=0 unanswered=0 p50_us=305.5 p90_us=486.1 p99_us=1367.5 p999_us=4821.9 max_us=10933.4 lag_p99_us=170.2 srv_cores=1.475 srv_us_per_op=49.11 cli_cores=0.659 machine_cores=1.854 softirq_cores=0.709 steal_cores=0.021
+SERVER lang=go conns=16 drain=0 | ops=329917 cpu_s=16.265 wall_s=11.100 cpu_us_per_op=49.30 max_wbuf=593280
+NET lang=go-d0 | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=30032 achieved=30032 measured=300319 dropped=0 unanswered=0 p50_us=271.6 p90_us=428.1 p99_us=1865.1 p999_us=4244.4 max_us=7036.1 lag_p99_us=173.8 srv_cores=1.341 srv_us_per_op=44.65 cli_cores=0.665 machine_cores=1.799 softirq_cores=0.773 steal_cores=0.025
+SERVER lang=rust conns=16 drain=1 | ops=329917 cpu_s=14.776 wall_s=11.102 cpu_us_per_op=44.79 max_wbuf=585040
+NET lang=rust | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=30032 achieved=30032 measured=300319 dropped=0 unanswered=0 p50_us=330.5 p90_us=583.0 p99_us=1826.9 p999_us=5726.1 max_us=10569.3 lag_p99_us=189.9 srv_cores=1.482 srv_us_per_op=49.35 cli_cores=0.666 machine_cores=1.962 softirq_cores=0.707 steal_cores=0.028
+SERVER lang=go conns=16 drain=1 | ops=329917 cpu_s=16.349 wall_s=11.101 cpu_us_per_op=49.55 max_wbuf=725120
+NET lang=go | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=40048 achieved=40048 measured=400485 dropped=0 unanswered=0 p50_us=364.7 p90_us=706.8 p99_us=2058.2 p999_us=4515.0 max_us=8345.0 lag_p99_us=215.3 srv_cores=1.494 srv_us_per_op=37.30 cli_cores=0.736 machine_cores=2.013 softirq_cores=0.723 steal_cores=0.023
+SERVER lang=go conns=16 drain=0 | ops=440158 cpu_s=16.526 wall_s=11.101 cpu_us_per_op=37.55 max_wbuf=758080
+NET lang=go-d0 | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=40048 achieved=40048 measured=400485 dropped=0 unanswered=0 p50_us=301.3 p90_us=733.7 p99_us=13480.1 p999_us=44041.0 max_us=50793.5 lag_p99_us=155.4 srv_cores=1.394 srv_us_per_op=34.81 cli_cores=0.738 machine_cores=1.972 softirq_cores=0.789 steal_cores=0.022
+SERVER lang=rust conns=16 drain=1 | ops=440158 cpu_s=15.317 wall_s=11.103 cpu_us_per_op=34.80 max_wbuf=4556720
+NET lang=rust | RetransSegs=14 TCPLossProbes=25 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=5 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=40048 achieved=40046 measured=400485 dropped=0 unanswered=0 p50_us=330.5 p90_us=623.4 p99_us=2720.4 p999_us=8213.4 max_us=12482.4 lag_p99_us=188.6 srv_cores=1.483 srv_us_per_op=37.03 cli_cores=0.712 machine_cores=1.968 softirq_cores=0.687 steal_cores=0.029
+SERVER lang=go conns=16 drain=1 | ops=440158 cpu_s=16.383 wall_s=11.101 cpu_us_per_op=37.22 max_wbuf=959960
+NET lang=go | RetransSegs=1 TCPLossProbes=2 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=40048 achieved=40049 measured=400485 dropped=0 unanswered=0 p50_us=272.7 p90_us=430.1 p99_us=2605.5 p999_us=7510.4 max_us=12052.5 lag_p99_us=140.7 srv_cores=1.383 srv_us_per_op=34.53 cli_cores=0.719 machine_cores=1.897 softirq_cores=0.778 steal_cores=0.021
+SERVER lang=rust conns=16 drain=0 | ops=440158 cpu_s=15.197 wall_s=11.102 cpu_us_per_op=34.53 max_wbuf=935240
+NET lang=rust-d0 | RetransSegs=3 TCPLossProbes=1 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=50053 achieved=50053 measured=500530 dropped=0 unanswered=0 p50_us=369.4 p90_us=614.9 p99_us=4143.4 p999_us=16565.6 max_us=24063.7 lag_p99_us=380.8 srv_cores=1.358 srv_us_per_op=27.13 cli_cores=0.794 machine_cores=2.004 softirq_cores=0.762 steal_cores=0.027
+SERVER lang=rust conns=16 drain=1 | ops=550097 cpu_s=14.999 wall_s=11.103 cpu_us_per_op=27.27 max_wbuf=1965240
+NET lang=rust | RetransSegs=7 TCPLossProbes=11 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=50053 achieved=20049 measured=500530 dropped=316351 unanswered=0 p50_us=437.7 p90_us=1649.3 p99_us=4086744.6 p999_us=4118168.0 max_us=4122293.6 lag_p99_us=363.8 srv_cores=1.559 srv_us_per_op=77.76 cli_cores=0.669 machine_cores=1.960 softirq_cores=0.300 steal_cores=0.033
+SERVER lang=go conns=16 drain=1 | ops=203807 cpu_s=17.016 wall_s=11.102 cpu_us_per_op=83.49 max_wbuf=108100560
+NET lang=go | RetransSegs=58 TCPLossProbes=174 TCPToZeroWindowAdv=7 TCPWinProbe=14 PruneCalled=6 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=50053 achieved=50054 measured=500530 dropped=0 unanswered=0 p50_us=297.2 p90_us=523.6 p99_us=2645.7 p999_us=10034.1 max_us=14664.2 lag_p99_us=284.8 srv_cores=1.395 srv_us_per_op=27.87 cli_cores=0.800 machine_cores=2.058 softirq_cores=0.824 steal_cores=0.028
+SERVER lang=rust conns=16 drain=0 | ops=550097 cpu_s=15.333 wall_s=11.102 cpu_us_per_op=27.87 max_wbuf=1549120
+NET lang=rust-d0 | RetransSegs=10 TCPLossProbes=8 TCPToZeroWindowAdv=8 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=50053 achieved=50049 measured=500530 dropped=0 unanswered=0 p50_us=380.9 p90_us=753.3 p99_us=8463.9 p999_us=48635.2 max_us=56961.5 lag_p99_us=289.7 srv_cores=1.483 srv_us_per_op=29.63 cli_cores=0.783 machine_cores=2.072 softirq_cores=0.677 steal_cores=0.031
+SERVER lang=go conns=16 drain=0 | ops=550097 cpu_s=16.390 wall_s=11.102 cpu_us_per_op=29.79 max_wbuf=3263040
+NET lang=go-d0 | RetransSegs=45 TCPLossProbes=50 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=1 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=60037 achieved=32555 measured=600366 dropped=291168 unanswered=0 p50_us=391.0 p90_us=2062.2 p99_us=4030442.5 p999_us=4077102.6 max_us=4081965.9 lag_p99_us=1088.8 srv_cores=1.572 srv_us_per_op=48.29 cli_cores=0.725 machine_cores=2.039 softirq_cores=0.325 steal_cores=0.029
+SERVER lang=go conns=16 drain=1 | ops=325837 cpu_s=17.161 wall_s=11.101 cpu_us_per_op=52.67 max_wbuf=127476920
+NET lang=go | RetransSegs=122 TCPLossProbes=256 TCPToZeroWindowAdv=8 TCPWinProbe=10 PruneCalled=9 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=60037 achieved=60032 measured=600366 dropped=0 unanswered=0 p50_us=327.9 p90_us=593.5 p99_us=2739.3 p999_us=7067.5 max_us=11912.5 lag_p99_us=550.2 srv_cores=1.392 srv_us_per_op=23.19 cli_cores=0.839 machine_cores=2.092 softirq_cores=0.803 steal_cores=0.026
+SERVER lang=rust conns=16 drain=0 | ops=659782 cpu_s=15.406 wall_s=11.103 cpu_us_per_op=23.35 max_wbuf=1256600
+NET lang=rust-d0 | RetransSegs=15 TCPLossProbes=10 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=60037 achieved=60036 measured=600366 dropped=0 unanswered=0 p50_us=444.6 p90_us=858.0 p99_us=2564.5 p999_us=6676.3 max_us=11036.9 lag_p99_us=197.0 srv_cores=1.479 srv_us_per_op=24.64 cli_cores=0.825 machine_cores=2.206 softirq_cores=0.681 steal_cores=0.025
+SERVER lang=go conns=16 drain=0 | ops=659782 cpu_s=16.317 wall_s=11.101 cpu_us_per_op=24.73 max_wbuf=2459640
+NET lang=go-d0 | RetransSegs=14 TCPLossProbes=12 TCPToZeroWindowAdv=20 TCPWinProbe=0 PruneCalled=1 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=60037 achieved=60034 measured=600366 dropped=0 unanswered=0 p50_us=345.9 p90_us=695.5 p99_us=4279.3 p999_us=18195.4 max_us=26408.5 lag_p99_us=235.0 srv_cores=1.384 srv_us_per_op=23.05 cli_cores=0.824 machine_cores=2.143 softirq_cores=0.768 steal_cores=0.036
+SERVER lang=rust conns=16 drain=1 | ops=659782 cpu_s=15.173 wall_s=11.104 cpu_us_per_op=23.00 max_wbuf=2434920
+NET lang=rust | RetransSegs=9 TCPLossProbes=3 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=70052 achieved=70050 measured=700522 dropped=0 unanswered=0 p50_us=340.5 p90_us=736.2 p99_us=10209.3 p999_us=18189.9 max_us=27559.9 lag_p99_us=177.6 srv_cores=1.376 srv_us_per_op=19.64 cli_cores=0.857 machine_cores=2.156 softirq_cores=0.780 steal_cores=0.028
+SERVER lang=rust conns=16 drain=0 | ops=769826 cpu_s=15.093 wall_s=11.104 cpu_us_per_op=19.61 max_wbuf=2570880
+NET lang=rust-d0 | RetransSegs=20 TCPLossProbes=16 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=70052 achieved=70053 measured=700522 dropped=0 unanswered=0 p50_us=476.7 p90_us=1073.8 p99_us=3916.4 p999_us=9982.3 max_us=15855.3 lag_p99_us=263.1 srv_cores=1.475 srv_us_per_op=21.06 cli_cores=0.851 machine_cores=2.214 softirq_cores=0.668 steal_cores=0.031
+SERVER lang=go conns=16 drain=0 | ops=769826 cpu_s=16.250 wall_s=11.100 cpu_us_per_op=21.11 max_wbuf=11890320
+NET lang=go-d0 | RetransSegs=60 TCPLossProbes=53 TCPToZeroWindowAdv=39 TCPWinProbe=0 PruneCalled=14 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=70052 achieved=70053 measured=700522 dropped=0 unanswered=0 p50_us=339.5 p90_us=614.6 p99_us=3596.6 p999_us=9365.8 max_us=12720.2 lag_p99_us=191.6 srv_cores=1.386 srv_us_per_op=19.78 cli_cores=0.852 machine_cores=2.134 softirq_cores=0.767 steal_cores=0.027
+SERVER lang=rust conns=16 drain=1 | ops=769826 cpu_s=15.231 wall_s=11.102 cpu_us_per_op=19.78 max_wbuf=1779840
+NET lang=rust | RetransSegs=7 TCPLossProbes=1 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=70052 achieved=32180 measured=700522 dropped=395048 unanswered=0 p50_us=607.0 p90_us=2075.1 p99_us=1488620.2 p999_us=2989115.9 max_us=2993323.9 lag_p99_us=789.1 srv_cores=1.633 srv_us_per_op=50.75 cli_cores=0.770 machine_cores=2.156 softirq_cores=0.301 steal_cores=0.020
+SERVER lang=go conns=16 drain=1 | ops=322210 cpu_s=17.798 wall_s=11.101 cpu_us_per_op=55.24 max_wbuf=130492760
+NET lang=go | RetransSegs=106 TCPLossProbes=215 TCPToZeroWindowAdv=10 TCPWinProbe=18 PruneCalled=3 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=80115 achieved=80120 measured=801147 dropped=0 unanswered=0 p50_us=705.2 p90_us=3450.1 p99_us=31438.7 p999_us=45794.5 max_us=51443.6 lag_p99_us=459.1 srv_cores=1.456 srv_us_per_op=18.17 cli_cores=0.885 machine_cores=2.269 softirq_cores=0.621 steal_cores=0.027
+SERVER lang=go conns=16 drain=0 | ops=880473 cpu_s=16.080 wall_s=11.101 cpu_us_per_op=18.26 max_wbuf=4152960
+NET lang=go-d0 | RetransSegs=91 TCPLossProbes=73 TCPToZeroWindowAdv=191 TCPWinProbe=0 PruneCalled=21 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=80115 achieved=80106 measured=801147 dropped=0 unanswered=0 p50_us=420.1 p90_us=876.7 p99_us=47230.3 p999_us=72778.1 max_us=97793.3 lag_p99_us=272.0 srv_cores=1.372 srv_us_per_op=17.13 cli_cores=0.893 machine_cores=2.187 softirq_cores=0.766 steal_cores=0.026
+SERVER lang=rust conns=16 drain=1 | ops=880473 cpu_s=15.065 wall_s=11.108 cpu_us_per_op=17.11 max_wbuf=16010320
+NET lang=rust | RetransSegs=22 TCPLossProbes=66 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=80115 achieved=40921 measured=801147 dropped=408266 unanswered=0 p50_us=708.2 p90_us=2665.0 p99_us=2658912.6 p999_us=4241161.8 max_us=4245990.7 lag_p99_us=239.5 srv_cores=1.664 srv_us_per_op=40.66 cli_cores=0.806 machine_cores=2.228 softirq_cores=0.337 steal_cores=0.025
+SERVER lang=go conns=16 drain=1 | ops=409458 cpu_s=18.337 wall_s=11.101 cpu_us_per_op=44.78 max_wbuf=107902800
+NET lang=go | RetransSegs=76 TCPLossProbes=128 TCPToZeroWindowAdv=19 TCPWinProbe=24 PruneCalled=2 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=80115 achieved=80113 measured=801147 dropped=0 unanswered=0 p50_us=437.8 p90_us=854.0 p99_us=21897.7 p999_us=48349.1 max_us=63408.2 lag_p99_us=334.1 srv_cores=1.379 srv_us_per_op=17.21 cli_cores=0.909 machine_cores=2.225 softirq_cores=0.784 steal_cores=0.020
+SERVER lang=rust conns=16 drain=0 | ops=880473 cpu_s=15.236 wall_s=11.102 cpu_us_per_op=17.30 max_wbuf=4091160
+NET lang=rust-d0 | RetransSegs=19 TCPLossProbes=14 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=16 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=90184 achieved=90048 measured=901843 dropped=1114 unanswered=0 p50_us=504.7 p90_us=1698.0 p99_us=150012.9 p999_us=197075.9 max_us=224437.5 lag_p99_us=239.8 srv_cores=1.349 srv_us_per_op=14.98 cli_cores=0.911 machine_cores=2.188 softirq_cores=0.719 steal_cores=0.025
+SERVER lang=rust conns=16 drain=1 | ops=990013 cpu_s=14.951 wall_s=11.116 cpu_us_per_op=15.10 max_wbuf=52826640
+NET lang=rust | RetransSegs=47 TCPLossProbes=133 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=14 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=90184 achieved=52084 measured=901843 dropped=396641 unanswered=0 p50_us=1012.4 p90_us=4506.5 p99_us=1316191.7 p999_us=3689650.1 max_us=3695313.8 lag_p99_us=400.7 srv_cores=1.522 srv_us_per_op=29.22 cli_cores=0.833 machine_cores=2.185 softirq_cores=0.364 steal_cores=0.039
+SERVER lang=go conns=16 drain=1 | ops=522471 cpu_s=17.029 wall_s=11.103 cpu_us_per_op=32.59 max_wbuf=117597160
+NET lang=go | RetransSegs=115 TCPLossProbes=180 TCPToZeroWindowAdv=12 TCPWinProbe=10 PruneCalled=1 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=90184 achieved=90185 measured=901843 dropped=0 unanswered=0 p50_us=445.0 p90_us=1069.5 p99_us=9560.7 p999_us=26242.7 max_us=35435.1 lag_p99_us=370.7 srv_cores=1.361 srv_us_per_op=15.09 cli_cores=0.910 machine_cores=2.262 softirq_cores=0.784 steal_cores=0.034
+SERVER lang=rust conns=16 drain=0 | ops=991127 cpu_s=14.984 wall_s=11.103 cpu_us_per_op=15.12 max_wbuf=4152960
+NET lang=rust-d0 | RetransSegs=35 TCPLossProbes=34 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=9 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=90184 achieved=90184 measured=901843 dropped=0 unanswered=0 p50_us=689.4 p90_us=2220.6 p99_us=7457.0 p999_us=18826.6 max_us=27536.2 lag_p99_us=241.6 srv_cores=1.459 srv_us_per_op=16.18 cli_cores=0.900 machine_cores=2.268 softirq_cores=0.627 steal_cores=0.034
+SERVER lang=go conns=16 drain=0 | ops=991127 cpu_s=16.063 wall_s=11.101 cpu_us_per_op=16.21 max_wbuf=4152960
+NET lang=go-d0 | RetransSegs=45 TCPLossProbes=32 TCPToZeroWindowAdv=25 TCPWinProbe=0 PruneCalled=30 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=100076 achieved=67598 measured=1000763 dropped=341109 unanswered=0 p50_us=1143.2 p90_us=10622.1 p99_us=1342599.4 p999_us=2907665.1 max_us=2918439.6 lag_p99_us=340.5 srv_cores=1.537 srv_us_per_op=22.74 cli_cores=0.863 machine_cores=2.226 softirq_cores=0.391 steal_cores=0.036
+SERVER lang=go conns=16 drain=1 | ops=676044 cpu_s=17.011 wall_s=11.101 cpu_us_per_op=25.16 max_wbuf=124819520
+NET lang=go | RetransSegs=192 TCPLossProbes=215 TCPToZeroWindowAdv=11 TCPWinProbe=10 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=100076 achieved=100085 measured=1000763 dropped=0 unanswered=0 p50_us=504.7 p90_us=1847.8 p99_us=15789.8 p999_us=36120.0 max_us=42338.3 lag_p99_us=503.3 srv_cores=1.369 srv_us_per_op=13.68 cli_cores=0.918 machine_cores=2.265 softirq_cores=0.751 steal_cores=0.038
+SERVER lang=rust conns=16 drain=0 | ops=1100007 cpu_s=15.053 wall_s=11.102 cpu_us_per_op=13.68 max_wbuf=4152960
+NET lang=rust-d0 | RetransSegs=63 TCPLossProbes=11 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=9 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=100076 achieved=99895 measured=1000763 dropped=0 unanswered=0 p50_us=1009.6 p90_us=9026.4 p99_us=66674.0 p999_us=94883.7 max_us=101578.9 lag_p99_us=393.8 srv_cores=1.462 srv_us_per_op=14.64 cli_cores=0.913 machine_cores=2.311 softirq_cores=0.580 steal_cores=0.052
+SERVER lang=go conns=16 drain=0 | ops=1100007 cpu_s=16.131 wall_s=11.103 cpu_us_per_op=14.66 max_wbuf=20356920
+NET lang=go-d0 | RetransSegs=218 TCPLossProbes=195 TCPToZeroWindowAdv=118 TCPWinProbe=0 PruneCalled=122 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=100076 achieved=99469 measured=1000763 dropped=6110 unanswered=0 p50_us=470.2 p90_us=1785.5 p99_us=180730.7 p999_us=229599.2 max_us=245823.1 lag_p99_us=313.8 srv_cores=1.353 srv_us_per_op=13.60 cli_cores=0.915 machine_cores=2.219 softirq_cores=0.717 steal_cores=0.035
+SERVER lang=rust conns=16 drain=1 | ops=1093897 cpu_s=14.893 wall_s=11.109 cpu_us_per_op=13.61 max_wbuf=47927960
+NET lang=rust | RetransSegs=101 TCPLossProbes=178 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=11 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=120124 achieved=120920 measured=1201240 dropped=430 unanswered=0 p50_us=892.6 p90_us=76141.6 p99_us=147532.2 p999_us=202538.5 max_us=218981.2 lag_p99_us=2661.8 srv_cores=1.323 srv_us_per_op=10.94 cli_cores=0.925 machine_cores=2.286 softirq_cores=0.682 steal_cores=0.036
+SERVER lang=rust conns=16 drain=0 | ops=1319850 cpu_s=14.495 wall_s=11.104 cpu_us_per_op=10.98 max_wbuf=7638480
+NET lang=rust-d0 | RetransSegs=368 TCPLossProbes=80 TCPToZeroWindowAdv=127 TCPWinProbe=0 PruneCalled=337 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=120124 achieved=121041 measured=1201240 dropped=0 unanswered=0 p50_us=3396.1 p90_us=39468.4 p99_us=149610.7 p999_us=183426.8 max_us=191343.3 lag_p99_us=4882.9 srv_cores=1.452 srv_us_per_op=12.00 cli_cores=0.912 machine_cores=2.315 softirq_cores=0.509 steal_cores=0.039
+SERVER lang=go conns=16 drain=0 | ops=1319001 cpu_s=15.997 wall_s=11.101 cpu_us_per_op=12.13 max_wbuf=7799160
+NET lang=go-d0 | RetransSegs=456 TCPLossProbes=205 TCPToZeroWindowAdv=551 TCPWinProbe=0 PruneCalled=163 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=120124 achieved=120712 measured=1201240 dropped=5798 unanswered=0 p50_us=1279.2 p90_us=103285.9 p99_us=135171.2 p999_us=162742.3 max_us=188045.2 lag_p99_us=631.0 srv_cores=1.313 srv_us_per_op=10.88 cli_cores=0.923 machine_cores=2.219 softirq_cores=0.607 steal_cores=0.023
+SERVER lang=rust conns=16 drain=1 | ops=1307982 cpu_s=14.462 wall_s=11.109 cpu_us_per_op=11.06 max_wbuf=73933400
+NET lang=rust | RetransSegs=377 TCPLossProbes=444 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=3 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=120124 achieved=44849 measured=1201240 dropped=769025 unanswered=0 p50_us=95424.8 p90_us=159521.8 p99_us=3035334.9 p999_us=4266550.0 max_us=4278488.1 lag_p99_us=1080.5 srv_cores=1.648 srv_us_per_op=36.75 cli_cores=0.846 machine_cores=2.302 softirq_cores=0.188 steal_cores=0.033
+SERVER lang=go conns=16 drain=1 | ops=448709 cpu_s=17.868 wall_s=11.101 cpu_us_per_op=39.82 max_wbuf=196013120
+NET lang=go | RetransSegs=562 TCPLossProbes=781 TCPToZeroWindowAdv=19 TCPWinProbe=28 PruneCalled=8 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=140114 achieved=110779 measured=1401139 dropped=293892 unanswered=0 p50_us=130747.3 p90_us=202946.1 p99_us=260431.0 p999_us=300101.0 max_us=326341.0 lag_p99_us=1414.7 srv_cores=1.416 srv_us_per_op=12.78 cli_cores=0.902 machine_cores=2.301 softirq_cores=0.358 steal_cores=0.046
+SERVER lang=go conns=16 drain=0 | ops=1220013 cpu_s=15.795 wall_s=11.204 cpu_us_per_op=12.95 max_wbuf=8305920
+NET lang=go-d0 | RetransSegs=1050 TCPLossProbes=569 TCPToZeroWindowAdv=1887 TCPWinProbe=0 PruneCalled=7 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=140114 achieved=118320 measured=1401139 dropped=224605 unanswered=0 p50_us=100945.0 p90_us=145657.2 p99_us=176688.5 p999_us=200195.2 max_us=225784.3 lag_p99_us=820.7 srv_cores=1.247 srv_us_per_op=10.54 cli_cores=0.921 machine_cores=2.291 softirq_cores=0.506 steal_cores=0.035
+SERVER lang=rust conns=16 drain=1 | ops=1286254 cpu_s=13.747 wall_s=11.144 cpu_us_per_op=10.69 max_wbuf=109410720
+NET lang=rust | RetransSegs=1064 TCPLossProbes=2134 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=127 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=140114 achieved=31593 measured=1401139 dropped=1101483 unanswered=0 p50_us=105714.0 p90_us=1428629.0 p99_us=2805511.1 p999_us=4416880.6 max_us=4420033.2 lag_p99_us=2767.3 srv_cores=1.668 srv_us_per_op=52.80 cli_cores=0.878 machine_cores=2.347 softirq_cores=0.155 steal_cores=0.038
+SERVER lang=go conns=16 drain=1 | ops=316302 cpu_s=18.256 wall_s=11.101 cpu_us_per_op=57.72 max_wbuf=192144440
+NET lang=go | RetransSegs=461 TCPLossProbes=665 TCPToZeroWindowAdv=16 TCPWinProbe=11 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=140114 achieved=120010 measured=1401139 dropped=187581 unanswered=0 p50_us=127269.1 p90_us=152970.8 p99_us=209094.8 p999_us=227250.6 max_us=230501.7 lag_p99_us=860.8 srv_cores=1.228 srv_us_per_op=10.23 cli_cores=0.883 machine_cores=2.213 softirq_cores=0.512 steal_cores=0.025
+SERVER lang=rust conns=16 drain=0 | ops=1352544 cpu_s=13.803 wall_s=11.225 cpu_us_per_op=10.21 max_wbuf=8305920
+NET lang=rust-d0 | RetransSegs=1025 TCPLossProbes=192 TCPToZeroWindowAdv=163 TCPWinProbe=0 PruneCalled=89 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=9962 achieved=9963 measured=99623 dropped=0 unanswered=0 p50_us=260.3 p90_us=397.3 p99_us=1513.4 p999_us=4644.3 max_us=9677.3 lag_p99_us=220.5 srv_cores=1.082 srv_us_per_op=108.61 cli_cores=0.416 machine_cores=1.271 softirq_cores=0.548 steal_cores=0.025
+SERVER lang=go conns=16 drain=1 | ops=109542 cpu_s=11.912 wall_s=11.101 cpu_us_per_op=108.75 max_wbuf=325480
+NET lang=go | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=9962 achieved=9963 measured=99623 dropped=0 unanswered=0 p50_us=221.1 p90_us=328.1 p99_us=1535.4 p999_us=9808.6 max_us=18701.2 lag_p99_us=178.9 srv_cores=0.853 srv_us_per_op=85.62 cli_cores=0.418 machine_cores=1.074 softirq_cores=0.560 steal_cores=0.024
+SERVER lang=rust conns=16 drain=0 | ops=109542 cpu_s=9.369 wall_s=11.102 cpu_us_per_op=85.53 max_wbuf=412000
+NET lang=rust-d0 | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=9962 achieved=9963 measured=99623 dropped=0 unanswered=0 p50_us=257.4 p90_us=384.1 p99_us=1529.2 p999_us=6258.6 max_us=11502.9 lag_p99_us=176.3 srv_cores=1.071 srv_us_per_op=107.50 cli_cores=0.417 machine_cores=1.220 softirq_cores=0.551 steal_cores=0.026
+SERVER lang=go conns=16 drain=0 | ops=109542 cpu_s=11.795 wall_s=11.101 cpu_us_per_op=107.67 max_wbuf=337840
+NET lang=go-d0 | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=9962 achieved=9963 measured=99623 dropped=0 unanswered=0 p50_us=220.2 p90_us=321.0 p99_us=1588.5 p999_us=13103.2 max_us=21868.2 lag_p99_us=201.1 srv_cores=0.856 srv_us_per_op=85.92 cli_cores=0.418 machine_cores=1.078 softirq_cores=0.533 steal_cores=0.023
+SERVER lang=rust conns=16 drain=1 | ops=109542 cpu_s=9.428 wall_s=11.101 cpu_us_per_op=86.06 max_wbuf=218360
+NET lang=rust | RetransSegs=1 TCPLossProbes=1 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=19944 achieved=19944 measured=199435 dropped=0 unanswered=0 p50_us=249.0 p90_us=433.6 p99_us=1941.8 p999_us=4469.4 max_us=7076.0 lag_p99_us=162.3 srv_cores=1.193 srv_us_per_op=59.82 cli_cores=0.571 machine_cores=1.522 softirq_cores=0.697 steal_cores=0.026
+SERVER lang=rust conns=16 drain=0 | ops=219293 cpu_s=13.091 wall_s=11.101 cpu_us_per_op=59.70 max_wbuf=354320
+NET lang=rust-d0 | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=19944 achieved=19944 measured=199435 dropped=0 unanswered=0 p50_us=273.3 p90_us=430.0 p99_us=2578.2 p999_us=24406.8 max_us=34445.7 lag_p99_us=203.2 srv_cores=1.338 srv_us_per_op=67.09 cli_cores=0.556 machine_cores=1.634 softirq_cores=0.680 steal_cores=0.033
+SERVER lang=go conns=16 drain=0 | ops=219293 cpu_s=14.823 wall_s=11.101 cpu_us_per_op=67.59 max_wbuf=959960
+NET lang=go-d0 | RetransSegs=2 TCPLossProbes=1 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=19944 achieved=19944 measured=199435 dropped=0 unanswered=0 p50_us=233.3 p90_us=338.5 p99_us=1469.7 p999_us=3533.2 max_us=5324.7 lag_p99_us=142.4 srv_cores=1.186 srv_us_per_op=59.47 cli_cores=0.563 machine_cores=1.543 softirq_cores=0.703 steal_cores=0.026
+SERVER lang=rust conns=16 drain=1 | ops=219293 cpu_s=13.112 wall_s=11.101 cpu_us_per_op=59.79 max_wbuf=379040
+NET lang=rust | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=19944 achieved=19944 measured=199435 dropped=0 unanswered=0 p50_us=268.3 p90_us=446.7 p99_us=100954.6 p999_us=168430.6 max_us=191949.8 lag_p99_us=5649.5 srv_cores=1.328 srv_us_per_op=66.59 cli_cores=0.543 machine_cores=1.629 softirq_cores=0.639 steal_cores=0.057
+SERVER lang=go conns=16 drain=1 | ops=219293 cpu_s=14.708 wall_s=11.101 cpu_us_per_op=67.07 max_wbuf=6554920
+NET lang=go | RetransSegs=5 TCPLossProbes=4 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=29900 achieved=29900 measured=298997 dropped=0 unanswered=0 p50_us=300.6 p90_us=492.0 p99_us=2117.2 p999_us=24865.4 max_us=34664.7 lag_p99_us=179.5 srv_cores=1.458 srv_us_per_op=48.76 cli_cores=0.655 machine_cores=1.928 softirq_cores=0.710 steal_cores=0.029
+SERVER lang=go conns=16 drain=0 | ops=328903 cpu_s=16.105 wall_s=11.101 cpu_us_per_op=48.97 max_wbuf=1648000
+NET lang=go-d0 | RetransSegs=11 TCPLossProbes=16 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=29900 achieved=29900 measured=298997 dropped=0 unanswered=0 p50_us=268.8 p90_us=411.3 p99_us=2262.5 p999_us=6697.2 max_us=9108.6 lag_p99_us=134.8 srv_cores=1.355 srv_us_per_op=45.32 cli_cores=0.654 machine_cores=1.827 softirq_cores=0.775 steal_cores=0.020
+SERVER lang=rust conns=16 drain=1 | ops=328903 cpu_s=14.890 wall_s=11.102 cpu_us_per_op=45.27 max_wbuf=749840
+NET lang=rust | RetransSegs=3 TCPLossProbes=1 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=29900 achieved=29900 measured=298997 dropped=0 unanswered=0 p50_us=309.3 p90_us=481.1 p99_us=1395.3 p999_us=5429.4 max_us=10328.2 lag_p99_us=160.2 srv_cores=1.484 srv_us_per_op=49.63 cli_cores=0.656 machine_cores=1.886 softirq_cores=0.694 steal_cores=0.021
+SERVER lang=go conns=16 drain=1 | ops=328903 cpu_s=16.301 wall_s=11.101 cpu_us_per_op=49.56 max_wbuf=585040
+NET lang=go | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=29900 achieved=29900 measured=298997 dropped=0 unanswered=0 p50_us=231.2 p90_us=333.0 p99_us=1148.2 p999_us=3038.8 max_us=5005.8 lag_p99_us=121.6 srv_cores=1.310 srv_us_per_op=43.81 cli_cores=0.635 machine_cores=1.717 softirq_cores=0.761 steal_cores=0.024
+SERVER lang=rust conns=16 drain=0 | ops=328903 cpu_s=14.429 wall_s=11.101 cpu_us_per_op=43.87 max_wbuf=519120
+NET lang=rust-d0 | RetransSegs=1 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=39822 achieved=39823 measured=398223 dropped=0 unanswered=0 p50_us=274.2 p90_us=478.6 p99_us=10957.0 p999_us=21285.9 max_us=24932.3 lag_p99_us=181.1 srv_cores=1.384 srv_us_per_op=34.75 cli_cores=0.714 machine_cores=1.868 softirq_cores=0.760 steal_cores=0.024
+SERVER lang=rust conns=16 drain=1 | ops=438055 cpu_s=15.238 wall_s=11.102 cpu_us_per_op=34.79 max_wbuf=2752160
+NET lang=rust | RetransSegs=5 TCPLossProbes=3 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=39822 achieved=39846 measured=398223 dropped=0 unanswered=0 p50_us=342.6 p90_us=636.3 p99_us=2841.3 p999_us=14969.0 max_us=20686.3 lag_p99_us=173.6 srv_cores=1.495 srv_us_per_op=37.52 cli_cores=0.724 machine_cores=1.961 softirq_cores=0.678 steal_cores=0.031
+SERVER lang=go conns=16 drain=1 | ops=438055 cpu_s=16.485 wall_s=11.100 cpu_us_per_op=37.63 max_wbuf=1153600
+NET lang=go | RetransSegs=0 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=39822 achieved=39823 measured=398223 dropped=0 unanswered=0 p50_us=282.7 p90_us=455.9 p99_us=2206.7 p999_us=4866.2 max_us=7119.9 lag_p99_us=183.1 srv_cores=1.383 srv_us_per_op=34.73 cli_cores=0.726 machine_cores=1.905 softirq_cores=0.804 steal_cores=0.027
+SERVER lang=rust conns=16 drain=0 | ops=438055 cpu_s=15.152 wall_s=11.102 cpu_us_per_op=34.59 max_wbuf=770440
+NET lang=rust-d0 | RetransSegs=4 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=39822 achieved=39823 measured=398223 dropped=0 unanswered=0 p50_us=314.7 p90_us=550.6 p99_us=2166.5 p999_us=4695.5 max_us=8123.7 lag_p99_us=213.2 srv_cores=1.499 srv_us_per_op=37.64 cli_cores=0.718 machine_cores=1.979 softirq_cores=0.720 steal_cores=0.029
+SERVER lang=go conns=16 drain=0 | ops=438055 cpu_s=16.519 wall_s=11.101 cpu_us_per_op=37.71 max_wbuf=799280
+NET lang=go-d0 | RetransSegs=5 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=49865 achieved=49863 measured=498648 dropped=0 unanswered=0 p50_us=387.5 p90_us=778.0 p99_us=3150.9 p999_us=12067.2 max_us=21542.9 lag_p99_us=224.9 srv_cores=1.490 srv_us_per_op=29.88 cli_cores=0.780 machine_cores=2.070 softirq_cores=0.667 steal_cores=0.030
+SERVER lang=go conns=16 drain=1 | ops=548365 cpu_s=16.448 wall_s=11.105 cpu_us_per_op=29.99 max_wbuf=1355480
+NET lang=go | RetransSegs=3 TCPLossProbes=0 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=49865 achieved=49865 measured=498648 dropped=0 unanswered=0 p50_us=291.8 p90_us=530.9 p99_us=3271.3 p999_us=7644.2 max_us=10765.4 lag_p99_us=151.0 srv_cores=1.380 srv_us_per_op=27.67 cli_cores=0.774 machine_cores=1.994 softirq_cores=0.781 steal_cores=0.021
+SERVER lang=rust conns=16 drain=0 | ops=548365 cpu_s=15.237 wall_s=11.102 cpu_us_per_op=27.79 max_wbuf=1021760
+NET lang=rust-d0 | RetransSegs=2 TCPLossProbes=2 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=49865 achieved=49866 measured=498648 dropped=0 unanswered=0 p50_us=344.5 p90_us=759.0 p99_us=6428.8 p999_us=19549.7 max_us=25298.9 lag_p99_us=175.6 srv_cores=1.492 srv_us_per_op=29.92 cli_cores=0.771 machine_cores=2.022 softirq_cores=0.709 steal_cores=0.028
+SERVER lang=go conns=16 drain=0 | ops=548365 cpu_s=16.444 wall_s=11.101 cpu_us_per_op=29.99 max_wbuf=2397840
+NET lang=go-d0 | RetransSegs=17 TCPLossProbes=24 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=49865 achieved=49865 measured=498648 dropped=0 unanswered=0 p50_us=322.9 p90_us=584.8 p99_us=3242.0 p999_us=10007.6 max_us=20990.6 lag_p99_us=190.0 srv_cores=1.384 srv_us_per_op=27.75 cli_cores=0.779 machine_cores=2.022 softirq_cores=0.760 steal_cores=0.028
+SERVER lang=rust conns=16 drain=1 | ops=548365 cpu_s=15.280 wall_s=11.102 cpu_us_per_op=27.86 max_wbuf=2010560
+NET lang=rust | RetransSegs=3 TCPLossProbes=1 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=59850 achieved=59851 measured=598505 dropped=0 unanswered=0 p50_us=313.4 p90_us=619.4 p99_us=3665.4 p999_us=9924.1 max_us=15818.7 lag_p99_us=270.0 srv_cores=1.397 srv_us_per_op=23.34 cli_cores=0.828 machine_cores=2.188 softirq_cores=0.810 steal_cores=0.037
+SERVER lang=rust conns=16 drain=0 | ops=658210 cpu_s=15.399 wall_s=11.102 cpu_us_per_op=23.39 max_wbuf=1268960
+NET lang=rust-d0 | RetransSegs=31 TCPLossProbes=15 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=59850 achieved=59852 measured=598505 dropped=0 unanswered=0 p50_us=409.2 p90_us=897.3 p99_us=3604.2 p999_us=17245.2 max_us=25249.7 lag_p99_us=208.1 srv_cores=1.484 srv_us_per_op=24.79 cli_cores=0.819 machine_cores=2.135 softirq_cores=0.681 steal_cores=0.030
+SERVER lang=go conns=16 drain=0 | ops=658210 cpu_s=16.394 wall_s=11.101 cpu_us_per_op=24.91 max_wbuf=2150640
+NET lang=go-d0 | RetransSegs=2 TCPLossProbes=1 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=59850 achieved=59852 measured=598505 dropped=0 unanswered=0 p50_us=300.8 p90_us=487.4 p99_us=1897.0 p999_us=4603.8 max_us=7472.9 lag_p99_us=189.5 srv_cores=1.400 srv_us_per_op=23.39 cli_cores=0.807 machine_cores=2.042 softirq_cores=0.767 steal_cores=0.025
+SERVER lang=rust conns=16 drain=1 | ops=658210 cpu_s=15.357 wall_s=11.103 cpu_us_per_op=23.33 max_wbuf=4812160
+NET lang=rust | RetransSegs=2 TCPLossProbes=24 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=59850 achieved=39099 measured=598505 dropped=217463 unanswered=0 p50_us=443.2 p90_us=1198.3 p99_us=3757107.7 p999_us=3813474.3 max_us=3834987.1 lag_p99_us=264.1 srv_cores=1.481 srv_us_per_op=37.88 cli_cores=0.755 machine_cores=1.988 softirq_cores=0.420 steal_cores=0.024
+SERVER lang=go conns=16 drain=1 | ops=440747 cpu_s=16.313 wall_s=11.101 cpu_us_per_op=37.01 max_wbuf=81374120
+NET lang=go | RetransSegs=39 TCPLossProbes=135 TCPToZeroWindowAdv=6 TCPWinProbe=12 PruneCalled=11 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=69839 achieved=69910 measured=698386 dropped=0 unanswered=0 p50_us=492.6 p90_us=1402.6 p99_us=8527.8 p999_us=40756.7 max_us=49286.4 lag_p99_us=557.9 srv_cores=1.460 srv_us_per_op=20.88 cli_cores=0.844 machine_cores=2.171 softirq_cores=0.653 steal_cores=0.041
+SERVER lang=go conns=16 drain=0 | ops=768010 cpu_s=16.133 wall_s=11.100 cpu_us_per_op=21.01 max_wbuf=4082920
+NET lang=go-d0 | RetransSegs=37 TCPLossProbes=28 TCPToZeroWindowAdv=46 TCPWinProbe=0 PruneCalled=12 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=69839 achieved=69838 measured=698386 dropped=0 unanswered=0 p50_us=337.0 p90_us=590.0 p99_us=3859.8 p999_us=41414.1 max_us=51273.9 lag_p99_us=193.2 srv_cores=1.378 srv_us_per_op=19.73 cli_cores=0.852 machine_cores=2.094 softirq_cores=0.752 steal_cores=0.026
+SERVER lang=rust conns=16 drain=1 | ops=768010 cpu_s=15.201 wall_s=11.103 cpu_us_per_op=19.79 max_wbuf=6381880
+NET lang=rust | RetransSegs=3 TCPLossProbes=18 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=3 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=69839 achieved=35923 measured=698386 dropped=355514 unanswered=0 p50_us=532.9 p90_us=22826.0 p99_us=2793912.1 p999_us=3820084.3 max_us=3835862.0 lag_p99_us=807.4 srv_cores=1.602 srv_us_per_op=44.59 cli_cores=0.761 machine_cores=2.137 softirq_cores=0.331 steal_cores=0.026
+SERVER lang=go conns=16 drain=1 | ops=359636 cpu_s=17.421 wall_s=11.101 cpu_us_per_op=48.44 max_wbuf=166901200
+NET lang=go | RetransSegs=150 TCPLossProbes=306 TCPToZeroWindowAdv=5 TCPWinProbe=2 PruneCalled=8 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=69839 achieved=69839 measured=698386 dropped=0 unanswered=0 p50_us=313.8 p90_us=618.9 p99_us=11356.5 p999_us=30310.9 max_us=38322.7 lag_p99_us=405.5 srv_cores=1.374 srv_us_per_op=19.67 cli_cores=0.841 machine_cores=2.128 softirq_cores=0.806 steal_cores=0.026
+SERVER lang=rust conns=16 drain=0 | ops=768010 cpu_s=15.165 wall_s=11.102 cpu_us_per_op=19.75 max_wbuf=3502000
+NET lang=rust-d0 | RetransSegs=15 TCPLossProbes=20 TCPToZeroWindowAdv=3 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=79885 achieved=79886 measured=798853 dropped=0 unanswered=0 p50_us=402.2 p90_us=884.9 p99_us=4550.1 p999_us=12275.2 max_us=18181.7 lag_p99_us=200.4 srv_cores=1.380 srv_us_per_op=17.27 cli_cores=0.891 machine_cores=2.214 softirq_cores=0.768 steal_cores=0.036
+SERVER lang=rust conns=16 drain=1 | ops=878365 cpu_s=15.183 wall_s=11.102 cpu_us_per_op=17.29 max_wbuf=2352520
+NET lang=rust | RetransSegs=18 TCPLossProbes=1 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=79885 achieved=48488 measured=798853 dropped=330316 unanswered=0 p50_us=629.2 p90_us=2859.1 p99_us=2830448.9 p999_us=4229537.5 max_us=4236044.9 lag_p99_us=736.9 srv_cores=1.588 srv_us_per_op=32.75 cli_cores=0.804 machine_cores=2.198 softirq_cores=0.399 steal_cores=0.050
+SERVER lang=go conns=16 drain=1 | ops=486545 cpu_s=17.585 wall_s=11.101 cpu_us_per_op=36.14 max_wbuf=116884400
+NET lang=go | RetransSegs=93 TCPLossProbes=187 TCPToZeroWindowAdv=10 TCPWinProbe=4 PruneCalled=11 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=79885 achieved=79886 measured=798853 dropped=0 unanswered=0 p50_us=344.0 p90_us=758.7 p99_us=56746.2 p999_us=76083.8 max_us=100078.5 lag_p99_us=353.6 srv_cores=1.388 srv_us_per_op=17.37 cli_cores=0.873 machine_cores=2.167 softirq_cores=0.760 steal_cores=0.022
+SERVER lang=rust conns=16 drain=0 | ops=878365 cpu_s=15.238 wall_s=11.102 cpu_us_per_op=17.35 max_wbuf=4111760
+NET lang=rust-d0 | RetransSegs=40 TCPLossProbes=24 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=14 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=79885 achieved=79885 measured=798853 dropped=0 unanswered=0 p50_us=592.1 p90_us=1781.7 p99_us=11421.3 p999_us=36129.5 max_us=46939.9 lag_p99_us=461.6 srv_cores=1.460 srv_us_per_op=18.28 cli_cores=0.881 machine_cores=2.287 softirq_cores=0.663 steal_cores=0.039
+SERVER lang=go conns=16 drain=0 | ops=878365 cpu_s=16.139 wall_s=11.101 cpu_us_per_op=18.37 max_wbuf=4025240
+NET lang=go-d0 | RetransSegs=24 TCPLossProbes=20 TCPToZeroWindowAdv=2 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=89842 achieved=47042 measured=898416 dropped=444348 unanswered=0 p50_us=969.7 p90_us=15210.8 p99_us=4590029.4 p999_us=4637348.2 max_us=4642424.9 lag_p99_us=2282.6 srv_cores=1.625 srv_us_per_op=34.54 cli_cores=0.816 machine_cores=2.235 softirq_cores=0.303 steal_cores=0.044
+SERVER lang=go conns=16 drain=1 | ops=470661 cpu_s=17.630 wall_s=11.101 cpu_us_per_op=37.46 max_wbuf=124601160
+NET lang=go | RetransSegs=156 TCPLossProbes=253 TCPToZeroWindowAdv=8 TCPWinProbe=7 PruneCalled=2 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=89842 achieved=89843 measured=898416 dropped=0 unanswered=0 p50_us=398.6 p90_us=953.6 p99_us=8514.3 p999_us=27047.2 max_us=34701.5 lag_p99_us=468.3 srv_cores=1.383 srv_us_per_op=15.39 cli_cores=0.900 machine_cores=2.223 softirq_cores=0.772 steal_cores=0.032
+SERVER lang=rust conns=16 drain=0 | ops=987907 cpu_s=15.227 wall_s=11.102 cpu_us_per_op=15.41 max_wbuf=4152960
+NET lang=rust-d0 | RetransSegs=18 TCPLossProbes=19 TCPToZeroWindowAdv=1 TCPWinProbe=0 PruneCalled=3 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=89842 achieved=89858 measured=898416 dropped=0 unanswered=0 p50_us=759.3 p90_us=3091.0 p99_us=55103.1 p999_us=71026.6 max_us=89197.1 lag_p99_us=417.0 srv_cores=1.468 srv_us_per_op=16.34 cli_cores=0.897 machine_cores=2.301 softirq_cores=0.649 steal_cores=0.044
+SERVER lang=go conns=16 drain=0 | ops=987907 cpu_s=16.215 wall_s=11.100 cpu_us_per_op=16.41 max_wbuf=4993440
+NET lang=go-d0 | RetransSegs=63 TCPLossProbes=60 TCPToZeroWindowAdv=38 TCPWinProbe=0 PruneCalled=42 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=89842 achieved=89840 measured=898416 dropped=0 unanswered=0 p50_us=436.6 p90_us=980.3 p99_us=7923.4 p999_us=29265.0 max_us=39259.1 lag_p99_us=201.6 srv_cores=1.383 srv_us_per_op=15.39 cli_cores=0.904 machine_cores=2.224 softirq_cores=0.742 steal_cores=0.038
+SERVER lang=rust conns=16 drain=1 | ops=987907 cpu_s=15.220 wall_s=11.102 cpu_us_per_op=15.41 max_wbuf=7630240
+NET lang=rust | RetransSegs=54 TCPLossProbes=6 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=99855 achieved=99859 measured=998553 dropped=0 unanswered=0 p50_us=376.2 p90_us=673.3 p99_us=5480.8 p999_us=20722.0 max_us=28484.7 lag_p99_us=163.5 srv_cores=1.388 srv_us_per_op=13.90 cli_cores=0.910 machine_cores=2.240 softirq_cores=0.698 steal_cores=0.017
+SERVER lang=rust conns=16 drain=0 | ops=1098116 cpu_s=15.254 wall_s=11.102 cpu_us_per_op=13.89 max_wbuf=3909880
+NET lang=rust-d0 | RetransSegs=16 TCPLossProbes=2 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=3 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=99855 achieved=99862 measured=998553 dropped=0 unanswered=0 p50_us=739.7 p90_us=3017.8 p99_us=33296.8 p999_us=50369.0 max_us=59814.5 lag_p99_us=304.1 srv_cores=1.472 srv_us_per_op=14.74 cli_cores=0.904 machine_cores=2.314 softirq_cores=0.635 steal_cores=0.033
+SERVER lang=go conns=16 drain=0 | ops=1098116 cpu_s=16.205 wall_s=11.101 cpu_us_per_op=14.76 max_wbuf=4152960
+NET lang=go-d0 | RetransSegs=111 TCPLossProbes=54 TCPToZeroWindowAdv=209 TCPWinProbe=0 PruneCalled=58 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=99855 achieved=99844 measured=998553 dropped=17 unanswered=0 p50_us=477.4 p90_us=1432.1 p99_us=111890.7 p999_us=162611.1 max_us=184438.4 lag_p99_us=208.9 srv_cores=1.367 srv_us_per_op=13.69 cli_cores=0.916 machine_cores=2.235 softirq_cores=0.713 steal_cores=0.026
+SERVER lang=rust conns=16 drain=1 | ops=1098099 cpu_s=15.088 wall_s=11.108 cpu_us_per_op=13.74 max_wbuf=41628480
+NET lang=rust | RetransSegs=68 TCPLossProbes=139 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=99855 achieved=36256 measured=998553 dropped=652243 unanswered=0 p50_us=1277.8 p90_us=68169.7 p99_us=3247302.4 p999_us=3277916.6 max_us=3307369.4 lag_p99_us=596.5 srv_cores=1.637 srv_us_per_op=45.15 cli_cores=0.821 machine_cores=2.244 softirq_cores=0.235 steal_cores=0.038
+SERVER lang=go conns=16 drain=1 | ops=362864 cpu_s=18.132 wall_s=11.101 cpu_us_per_op=49.97 max_wbuf=166975360
+NET lang=go | RetransSegs=114 TCPLossProbes=269 TCPToZeroWindowAdv=20 TCPWinProbe=24 PruneCalled=12 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=119790 achieved=109159 measured=1197897 dropped=108103 unanswered=0 p50_us=117763.2 p90_us=221074.9 p99_us=269003.5 p999_us=309102.3 max_us=327553.8 lag_p99_us=5838.7 srv_cores=1.431 srv_us_per_op=13.11 cli_cores=0.879 machine_cores=2.244 softirq_cores=0.344 steal_cores=0.052
+SERVER lang=go conns=16 drain=0 | ops=1209181 cpu_s=15.854 wall_s=11.181 cpu_us_per_op=13.11 max_wbuf=4152960
+NET lang=go-d0 | RetransSegs=1114 TCPLossProbes=545 TCPToZeroWindowAdv=2565 TCPWinProbe=0 PruneCalled=643 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=119790 achieved=118743 measured=1197897 dropped=10450 unanswered=0 p50_us=857.8 p90_us=58780.8 p99_us=143596.4 p999_us=187453.1 max_us=219297.1 lag_p99_us=453.8 srv_cores=1.328 srv_us_per_op=11.18 cli_cores=0.933 machine_cores=2.267 softirq_cores=0.671 steal_cores=0.031
+SERVER lang=rust conns=16 drain=1 | ops=1306834 cpu_s=14.660 wall_s=11.109 cpu_us_per_op=11.22 max_wbuf=75976920
+NET lang=rust | RetransSegs=197 TCPLossProbes=284 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=119790 achieved=78227 measured=1197897 dropped=431957 unanswered=0 p50_us=41732.0 p90_us=116160.4 p99_us=249890.0 p999_us=2623795.1 max_us=2630642.4 lag_p99_us=987.9 srv_cores=1.573 srv_us_per_op=20.11 cli_cores=0.876 machine_cores=2.346 softirq_cores=0.348 steal_cores=0.037
+SERVER lang=go conns=16 drain=1 | ops=783045 cpu_s=17.122 wall_s=11.101 cpu_us_per_op=21.87 max_wbuf=131526880
+NET lang=go | RetransSegs=659 TCPLossProbes=563 TCPToZeroWindowAdv=15 TCPWinProbe=14 PruneCalled=2 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=119790 achieved=115327 measured=1197897 dropped=38805 unanswered=0 p50_us=122145.5 p90_us=149603.7 p99_us=185335.1 p999_us=195179.7 max_us=205040.4 lag_p99_us=378.9 srv_cores=1.221 srv_us_per_op=10.59 cli_cores=0.876 machine_cores=2.214 softirq_cores=0.523 steal_cores=0.039
+SERVER lang=rust conns=16 drain=0 | ops=1278479 cpu_s=13.761 wall_s=11.247 cpu_us_per_op=10.76 max_wbuf=4152960
+NET lang=rust-d0 | RetransSegs=893 TCPLossProbes=264 TCPToZeroWindowAdv=86 TCPWinProbe=0 PruneCalled=422 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust conns=16 arrivals=poisson cap=16384 | offered=139833 achieved=121098 measured=1398327 dropped=176444 unanswered=0 p50_us=92212.3 p90_us=140588.8 p99_us=175186.3 p999_us=200364.9 max_us=256408.3 lag_p99_us=1303.6 srv_cores=1.259 srv_us_per_op=10.40 cli_cores=0.910 machine_cores=2.234 softirq_cores=0.470 steal_cores=0.043
+SERVER lang=rust conns=16 drain=1 | ops=1348120 cpu_s=13.966 wall_s=11.151 cpu_us_per_op=10.36 max_wbuf=81440040
+NET lang=rust | RetransSegs=875 TCPLossProbes=1616 TCPToZeroWindowAdv=0 TCPWinProbe=0 PruneCalled=5 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go conns=16 arrivals=poisson cap=16384 | offered=139833 achieved=72371 measured=1398327 dropped=674615 unanswered=0 p50_us=86312.1 p90_us=192688.5 p99_us=1317577.4 p999_us=2837768.4 max_us=2843344.7 lag_p99_us=225892.8 srv_cores=1.597 srv_us_per_op=22.07 cli_cores=0.892 machine_cores=2.366 softirq_cores=0.281 steal_cores=0.037
+SERVER lang=go conns=16 drain=1 | ops=740096 cpu_s=18.514 wall_s=11.561 cpu_us_per_op=25.02 max_wbuf=129866520
+NET lang=go | RetransSegs=846 TCPLossProbes=1044 TCPToZeroWindowAdv=12 TCPWinProbe=11 PruneCalled=0 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=rust-d0 conns=16 arrivals=poisson cap=16384 | offered=139833 achieved=114390 measured=1398327 dropped=253792 unanswered=0 p50_us=136578.0 p90_us=164603.9 p99_us=198082.2 p999_us=221879.2 max_us=247983.4 lag_p99_us=38946.1 srv_cores=1.204 srv_us_per_op=10.53 cli_cores=0.884 machine_cores=2.176 softirq_cores=0.434 steal_cores=0.035
+SERVER lang=rust conns=16 drain=0 | ops=1281682 cpu_s=13.423 wall_s=11.202 cpu_us_per_op=10.47 max_wbuf=4152960
+NET lang=rust-d0 | RetransSegs=914 TCPLossProbes=79 TCPToZeroWindowAdv=832 TCPWinProbe=0 PruneCalled=2 TCPBacklogDrop=0 TCPRcvQDrop=0
+LOAD lang=go-d0 conns=16 arrivals=poisson cap=16384 | offered=139833 achieved=109970 measured=1398327 dropped=298036 unanswered=0 p50_us=139210.8 p90_us=175455.3 p99_us=196580.4 p999_us=210607.5 max_us=231875.5 lag_p99_us=760.9 srv_cores=1.428 srv_us_per_op=12.99 cli_cores=0.885 machine_cores=2.285 softirq_cores=0.384 steal_cores=0.051
+SERVER lang=go conns=16 drain=0 | ops=1217587 cpu_s=15.933 wall_s=11.232 cpu_us_per_op=13.09 max_wbuf=4152960
+NET lang=go-d0 | RetransSegs=1140 TCPLossProbes=580 TCPToZeroWindowAdv=170 TCPWinProbe=0 PruneCalled=202 TCPBacklogDrop=0 TCPRcvQDrop=0
+
+## Mean of reps per offered rate (k writes/s); latency in us; cores = server CPU / wall
+| offered | lang | achieved | dropped | p50 | p99 (range) | p99.9 | max | srv cores | srv us/op | cli cores | retrans | max wbuf MB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 10k | rust | 9936 | 0 | 225 | 1570 (1552-1588) | 8682 | 14166 | 0.86 | 86.3 | 0.42 | 0 | 0.2 |
+| 10k | go | 9936 | 0 | 265 | 1611 (1513-1708) | 7488 | 13215 | 1.09 | 109.7 | 0.42 | 0 | 0.4 |
+| 10k | rust-d0 | 9936 | 0 | 236 | 1594 (1535-1653) | 6830 | 13577 | 0.88 | 88.1 | 0.42 | 0 | 0.3 |
+| 10k | go-d0 | 9936 | 0 | 270 | 1713 (1529-1897) | 5825 | 10519 | 1.09 | 109.7 | 0.42 | 0 | 0.3 |
+| 20k | rust | 19952 | 0 | 251 | 1606 (1470-1743) | 8462 | 13857 | 1.21 | 60.8 | 0.58 | 0 | 0.9 |
+| 20k | go | 19953 | 0 | 287 | 52454 (3953-100955) | 95462 | 112296 | 1.36 | 68.1 | 0.56 | 8 | 3.7 |
+| 20k | rust-d0 | 19952 | 0 | 244 | 1551 (1160-1942) | 3890 | 7446 | 1.19 | 59.7 | 0.57 | 0 | 0.4 |
+| 20k | go-d0 | 19952 | 0 | 277 | 2706 (2578-2834) | 14978 | 21197 | 1.35 | 67.5 | 0.56 | 1 | 0.7 |
+| 30k | rust | 29966 | 0 | 270 | 2064 (1865-2262) | 5471 | 8072 | 1.35 | 45.0 | 0.66 | 2 | 0.7 |
+| 30k | go | 29966 | 0 | 320 | 1611 (1395-1827) | 5578 | 10449 | 1.48 | 49.5 | 0.66 | 0 | 0.7 |
+| 30k | rust-d0 | 29966 | 0 | 249 | 1386 (1148-1623) | 4142 | 6818 | 1.34 | 44.6 | 0.65 | 0 | 0.6 |
+| 30k | go-d0 | 29966 | 0 | 303 | 1742 (1368-2117) | 14844 | 22799 | 1.47 | 48.9 | 0.66 | 6 | 1.1 |
+| 40k | rust | 39936 | 0 | 288 | 12219 (10957-13480) | 32663 | 37863 | 1.39 | 34.8 | 0.73 | 10 | 3.7 |
+| 40k | go | 39946 | 0 | 337 | 2781 (2720-2841) | 11591 | 16584 | 1.49 | 37.3 | 0.72 | 0 | 1.1 |
+| 40k | rust-d0 | 39936 | 0 | 278 | 2406 (2207-2606) | 6188 | 9586 | 1.38 | 34.6 | 0.72 | 4 | 0.9 |
+| 40k | go-d0 | 39936 | 0 | 340 | 2112 (2058-2166) | 4605 | 8234 | 1.50 | 37.5 | 0.73 | 2 | 0.8 |
+| 50k | rust | 49959 | 0 | 346 | 3693 (3242-4143) | 13287 | 22527 | 1.37 | 27.4 | 0.79 | 5 | 2.0 |
+| 50k | go | 34956 | 158176 | 413 | 2044948 (3151-4086745) | 2065118 | 2071918 | 1.52 | 53.8 | 0.72 | 30 | 54.7 |
+| 50k | rust-d0 | 49960 | 0 | 294 | 2958 (2646-3271) | 8839 | 12715 | 1.39 | 27.8 | 0.79 | 6 | 1.3 |
+| 50k | go-d0 | 49958 | 0 | 363 | 7446 (6429-8464) | 34092 | 41130 | 1.49 | 29.8 | 0.78 | 31 | 2.8 |
+| 60k | rust | 59943 | 0 | 323 | 3088 (1897-4279) | 11400 | 16941 | 1.39 | 23.2 | 0.82 | 6 | 3.6 |
+| 60k | go | 35827 | 254316 | 417 | 3893775 (3757108-4030442) | 3945288 | 3958476 | 1.53 | 43.1 | 0.74 | 80 | 104.4 |
+| 60k | rust-d0 | 59942 | 0 | 321 | 3202 (2739-3665) | 8496 | 13866 | 1.39 | 23.3 | 0.83 | 23 | 1.3 |
+| 60k | go-d0 | 59944 | 0 | 427 | 3084 (2564-3604) | 11961 | 18143 | 1.48 | 24.7 | 0.82 | 8 | 2.3 |
+| 70k | rust | 69946 | 0 | 338 | 3728 (3597-3860) | 25390 | 31997 | 1.38 | 19.8 | 0.85 | 5 | 4.1 |
+| 70k | go | 34052 | 375281 | 570 | 2141266 (1488620-2793912) | 3404600 | 3414593 | 1.62 | 47.7 | 0.77 | 128 | 148.7 |
+| 70k | rust-d0 | 69944 | 0 | 327 | 10783 (10209-11356) | 24250 | 32941 | 1.38 | 19.7 | 0.85 | 18 | 3.0 |
+| 70k | go-d0 | 69982 | 0 | 485 | 6222 (3916-8528) | 25370 | 32571 | 1.47 | 21.0 | 0.85 | 48 | 8.0 |
+| 80k | rust | 79996 | 0 | 411 | 25890 (4550-47230) | 42527 | 57988 | 1.38 | 17.2 | 0.89 | 20 | 9.2 |
+| 80k | go | 44704 | 369291 | 669 | 2744681 (2658913-2830449) | 4235350 | 4241018 | 1.63 | 36.7 | 0.81 | 84 | 112.4 |
+| 80k | rust-d0 | 80000 | 0 | 391 | 39322 (21898-56746) | 62216 | 81743 | 1.38 | 17.3 | 0.89 | 30 | 4.1 |
+| 80k | go-d0 | 80002 | 0 | 649 | 21430 (11421-31439) | 40962 | 49192 | 1.46 | 18.2 | 0.88 | 58 | 4.1 |
+| 90k | rust | 89944 | 557 | 471 | 78968 (7923-150013) | 113170 | 131848 | 1.37 | 15.2 | 0.91 | 50 | 30.2 |
+| 90k | go | 49563 | 420494 | 991 | 2953111 (1316192-4590029) | 4163499 | 4168869 | 1.57 | 31.9 | 0.82 | 136 | 121.1 |
+| 90k | rust-d0 | 90014 | 0 | 422 | 9038 (8514-9561) | 26645 | 35068 | 1.37 | 15.2 | 0.91 | 26 | 4.2 |
+| 90k | go-d0 | 90021 | 0 | 724 | 31280 (7457-55103) | 44927 | 58367 | 1.46 | 16.3 | 0.90 | 54 | 4.6 |
+| 100k | rust | 99656 | 3064 | 474 | 146311 (111891-180731) | 196105 | 215131 | 1.36 | 13.6 | 0.92 | 84 | 44.8 |
+| 100k | go | 51927 | 496676 | 1210 | 2294951 (1342599-3247302) | 3092791 | 3112904 | 1.59 | 33.9 | 0.84 | 153 | 145.9 |
+| 100k | rust-d0 | 99972 | 0 | 440 | 10635 (5481-15790) | 28421 | 35412 | 1.38 | 13.8 | 0.91 | 40 | 4.0 |
+| 100k | go-d0 | 99878 | 0 | 875 | 49985 (33297-66674) | 72626 | 80697 | 1.47 | 14.7 | 0.91 | 164 | 12.3 |
+| 120k | rust | 119728 | 8124 | 1068 | 139384 (135171-143596) | 175098 | 203671 | 1.32 | 11.0 | 0.93 | 287 | 75.0 |
+| 120k | go | 61538 | 600491 | 68578 | 1642612 (249890-3035335) | 3445173 | 3454565 | 1.61 | 28.4 | 0.86 | 610 | 163.8 |
+| 120k | rust-d0 | 118124 | 19618 | 61519 | 166434 (147532-185335) | 198859 | 212011 | 1.27 | 10.8 | 0.90 | 630 | 5.9 |
+| 120k | go-d0 | 115100 | 54052 | 60580 | 209307 (149611-269004) | 246265 | 259449 | 1.44 | 12.6 | 0.90 | 785 | 6.0 |
+| 140k | rust | 119709 | 200524 | 96579 | 175937 (175186-176688) | 200280 | 241096 | 1.25 | 10.5 | 0.92 | 970 | 95.4 |
+| 140k | go | 51982 | 888049 | 96013 | 2061544 (1317577-2805511) | 3627324 | 3631689 | 1.63 | 37.4 | 0.89 | 654 | 161.0 |
+| 140k | rust-d0 | 117200 | 220686 | 131924 | 203588 (198082-209095) | 224565 | 239243 | 1.22 | 10.4 | 0.88 | 970 | 6.2 |
+| 140k | go-d0 | 110374 | 295964 | 134979 | 228506 (196580-260431) | 255354 | 279108 | 1.42 | 12.9 | 0.89 | 1095 | 6.2 |
+
+rust: p50/p99 at 10k 225/1570 us, p50 knee (>2x) at 90k, p99 knee (>2x) at 40k, full service up to 80k, max achieved 119728/s
+go: p50/p99 at 10k 265/1611 us, p50 knee (>2x) at 70k, p99 knee (>2x) at 20k, full service up to 40k, max achieved 61538/s
+rust-d0: p50/p99 at 10k 236/1594 us, p50 knee (>2x) at 120k, p99 knee (>2x) at 60k, full service up to 100k, max achieved 118124/s
+go-d0: p50/p99 at 10k 270/1713 us, p50 knee (>2x) at 80k, p99 knee (>2x) at 50k, full service up to 100k, max achieved 115100/s
+[FAIL] E1 Go p50 minus Rust p50 at lowest rate, us got=40.5 want=0..15
+[FAIL] E2 Rust p99 knee / Go p99 knee got=2.00 want=1.1..1.35
+[FAIL] E3 Rust / Go full-service rate got=2.00 want=1.1..1.35
+[OK ] E6 drain=0 Rust p99 knee / Go p99 knee got=1.20 want=1.1..1.35
+[FAIL] E6 drain=0 Rust / Go full-service rate got=1.00 want=1.1..1.35
+[OK ] E4 Go / Rust server us per write at 30k got=49.5/45.0=1.10 want=1.1..1.4
+[OK ] E5 rust server us per write at 80k below 10k got=17.2<86.3 want=falls with load
+[OK ] E5 go server us per write at 40k below 10k got=37.3<109.7 want=falls with load
+[OK ] E5 rust-d0 server us per write at 100k below 10k got=13.8<88.1 want=falls with load
+[OK ] E5 go-d0 server us per write at 100k below 10k got=14.7<109.7 want=falls with load
+
+FAILS: ['E1', 'E2', 'E3', 'E6']
