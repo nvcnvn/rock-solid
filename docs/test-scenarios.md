@@ -2,7 +2,7 @@
 
 The scenarios the phase 1 tests must cover, one section per [build checklist](build-checklist.md) item. They come from the tests of the first, Rust, implementation of the disk log, and from the RocksDB, etcd and Protocol-Aware Recovery (FAST 2018) tests those were ported from, named next to each scenario. They describe behaviour, not an API.
 
-A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks (256 KiB), with the superblock copy at block 63. "[property]" marks a randomized or exhaustive test, with its seeds so a run replays. Sizes that follow from the record layout (a 48-byte header prelude, 33 bytes per write or punch entry, 14 bytes per blob entry, 4 bytes of CRC per data block) move with the layout if the Go code changes it; the behaviour does not.
+A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks (256 KiB), with the superblock copy at block 63. "[property]" marks a randomized or exhaustive test, with its seeds so a run replays. Sizes that follow from the record layout (a 48-byte header prelude, 33 bytes per write or punch entry, 37 per freeze, 14 per blob, 4 bytes of CRC per data block) move with the layout if the Go code changes it; the behaviour does not.
 
 ## Buffer pool
 
