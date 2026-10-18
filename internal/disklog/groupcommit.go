@@ -38,17 +38,19 @@ var (
 type Config struct {
 	// MaxRecordBytes is max_group_commit_bytes, the most a round writes, segment header included; at least 3 blocks.
 	MaxRecordBytes uint64
-	// MaxReplayBytes is max_replay_bytes, the bytes written after the newest manifest that make a checkpoint due.
+	// MaxReplayBytes is max_replay_bytes, the size of the records after the newest manifest's base that makes a checkpoint due.
 	MaxReplayBytes uint64
 	// CommitDepth is commit_depth, the most rounds in flight at once; at least 1.
 	CommitDepth int
 	// Check decodes every record a round encodes and panics unless it holds exactly what was submitted.
 	Check bool
+	// ReadDepth is the most segment-header reads recovery keeps in flight; at least 1.
+	ReadDepth int
 }
 
 // DefaultConfig is the default settings, with the decode check off.
 func DefaultConfig() Config {
-	return Config{MaxRecordBytes: 1 << 20, MaxReplayBytes: 64 << 20, CommitDepth: 1}
+	return Config{MaxRecordBytes: 1 << 20, MaxReplayBytes: 64 << 20, CommitDepth: 1, ReadDepth: 64}
 }
 
 // Ticket names one submitted item in the log's events; NoTicket marks the log's own manifest pieces.
@@ -78,6 +80,16 @@ const (
 	CheckpointDone
 	// CheckpointFailed reports that the running checkpoint will never finish; a new one may begin.
 	CheckpointFailed
+	// ManifestLoaded reports that recovery read the newest manifest, if any; blob reads and Replay may follow.
+	ManifestLoaded
+	// BlobRead reports the blob at Ref, whose bytes are Data.
+	BlobRead
+	// Replayed reports one durable record in LSN order, as Durable does, with its blob bytes in Data.
+	Replayed
+	// Recovered reports that recovery finished with LSN the newest durable record; Log resumes group commit.
+	Recovered
+	// RecoveryFailed reports that recovery stopped with Err and wrote nothing more.
+	RecoveryFailed
 )
 
 // Event is one outcome of the log; its slices stay valid until the Output carrying it is reset.
@@ -93,6 +105,20 @@ type Event struct {
 	Payloads     []uint64
 	Err          error
 	Manifest     ManifestPos
+	Ref          BlobRef
+	Data         []byte
+}
+
+// Blob is the payload of blob entry i of a Replayed event.
+func (ev *Event) Blob(i int) []byte {
+	var writes uint64
+	for j := range ev.Entries {
+		if ev.Entries[j].Kind == EntryWrite {
+			writes += ev.Entries[j].dataBytes()
+		}
+	}
+	start := ev.Payloads[i] - writes
+	return ev.Data[start : start+ev.Entries[i].Length]
 }
 
 // Output is the actions and events of calls into the log, reused by the caller so a call allocates nothing once it has grown.
@@ -102,6 +128,7 @@ type Output struct {
 	entries  []Entry
 	tickets  []Ticket
 	payloads []uint64
+	data     []byte
 }
 
 // Reset empties the output for reuse.
@@ -112,6 +139,7 @@ func (o *Output) Reset() {
 	o.entries = o.entries[:0]
 	o.tickets = o.tickets[:0]
 	o.payloads = o.payloads[:0]
+	o.data = o.data[:0]
 }
 
 func (o *Output) emitDurable(ev Event, r *round) {
@@ -126,6 +154,48 @@ func (o *Output) emitDurable(ev Event, r *round) {
 	}
 	ev.Tickets = o.tickets[ts:len(o.tickets):len(o.tickets)]
 	o.Events = append(o.Events, ev)
+}
+
+func (o *Output) emitRecord(ev Event, d *DecodedRecord) {
+	es, ps, ds := len(o.entries), len(o.payloads), len(o.data)
+	o.entries = append(o.entries, d.Entries...)
+	var writes uint64
+	for i := range d.Entries {
+		if d.Entries[i].Kind == EntryWrite {
+			writes += d.Entries[i].dataBytes()
+		}
+	}
+	var writeOff, blobOff uint64
+	for i := range d.Entries {
+		e := &d.Entries[i]
+		if e.Kind == EntryWrite {
+			o.payloads = append(o.payloads, writeOff)
+			writeOff += e.dataBytes()
+			continue
+		}
+		o.payloads = append(o.payloads, writes+blobOff)
+		if e.Kind == EntryBlob {
+			blobOff += e.Length
+		}
+	}
+	o.data = append(o.data, d.Data[writes:writes+blobOff]...)
+	ev.Entries = o.entries[es:len(o.entries):len(o.entries)]
+	ev.Payloads = o.payloads[ps:len(o.payloads):len(o.payloads)]
+	ev.Data = o.data[ds:len(o.data):len(o.data)]
+	o.Events = append(o.Events, ev)
+}
+
+func (o *Output) emitBlob(ref BlobRef, b []byte) {
+	ds := len(o.data)
+	o.data = append(o.data, b...)
+	o.Events = append(o.Events, Event{
+		Kind:    BlobRead,
+		LSN:     ref.LSN,
+		Segment: ref.Segment,
+		Block:   ref.Block,
+		Ref:     ref,
+		Data:    o.data[ds:len(o.data):len(o.data)],
+	})
 }
 
 func (o *Output) emitTickets(kind EventKind, err error, from int) {
@@ -211,7 +281,6 @@ type round struct {
 	segment      uint32
 	block        uint32
 	headerBlocks uint32
-	after        cursor
 	bytes        uint64
 	head         core.IOBuf
 	tail         core.IOBuf
@@ -269,7 +338,7 @@ type Log struct {
 
 	queues [2]queue
 	asm    [2]cursor
-	dur    [2]cursor
+	opened [2]uint64
 	last   Stream
 
 	rounds []round
@@ -286,7 +355,8 @@ type Log struct {
 	checkImg []byte
 	checkEnt []Entry
 
-	breakEncoding func(head []byte)
+	breakEncoding  func(head []byte)
+	appendAnywhere bool
 }
 
 // Format starts a log on an empty disk, writing and flushing the superblock then its copy, with IO IDs counting up from firstIO, a range no other machine on the disk uses.
@@ -409,7 +479,7 @@ func (l *Log) Err() error { return l.err }
 // MaxBlobBytes is the largest blob one record holds.
 func (l *Log) MaxBlobBytes() uint64 { return l.maxBlob }
 
-// ReplayBytes is the bytes written after the newest manifest's base, which a restart replays.
+// ReplayBytes is the size of the records written after the newest manifest's base, which a restart replays.
 func (l *Log) ReplayBytes() uint64 { return l.replayBytes }
 
 // InFlight is the number of rounds written but not yet durable.
@@ -485,12 +555,6 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 		return ErrBusy
 	}
 	m := Manifest{BaseLSN: l.durableLSN, Indexes: make([]ManifestIndex, len(indexes))}
-	for s, c := range l.dur {
-		m.BaseSeq = max(m.BaseSeq, c.seq)
-		if c.segment != 0 {
-			m.Starts[s] = StreamStart{Segment: c.segment, Block: c.next}
-		}
-	}
 	for i, ix := range indexes {
 		if ix.ReplayLSN > l.durableLSN || slices.ContainsFunc(indexes[:i], func(o CheckpointIndex) bool { return o.Owner == ix.Owner }) {
 			return ErrMalformed
@@ -687,7 +751,6 @@ func (l *Log) earlierWritten() bool {
 func (l *Log) retire(out *Output) {
 	r := l.round(0)
 	l.durableLSN = r.lsn
-	l.dur[r.stream] = r.after
 	l.replayBytes += r.bytes
 	out.emitDurable(Event{
 		Kind:         Durable,
@@ -805,18 +868,13 @@ func (cp *checkpoint) owns(t Ticket) bool {
 	return false
 }
 
-func (l *Log) pickStream() (Stream, bool) {
-	hot, cold := l.queues[Hot].len() > 0, l.queues[Cold].len() > 0
-	switch {
-	case hot && cold && l.last == Hot:
-		return Cold, true
-	case hot:
-		return Hot, true
-	case cold:
-		return Cold, true
-	}
-	return 0, false
-}
+type targetState uint8
+
+const (
+	targetReady targetState = iota
+	targetBlocked
+	targetNoSpace
+)
 
 type target struct {
 	stream  Stream
@@ -828,24 +886,51 @@ type target struct {
 
 func (l *Log) target(ctx *core.Context, out *Output) (target, bool) {
 	for {
-		s, ok := l.pickStream()
-		if !ok {
+		order := [2]Stream{Hot, Cold}
+		if l.last == Hot {
+			order = [2]Stream{Cold, Hot}
+		}
+		retry := false
+		for _, s := range order {
+			if l.queues[s].len() == 0 {
+				continue
+			}
+			t, state := l.targetFor(s)
+			if state == targetReady {
+				return t, true
+			}
+			if state == targetNoSpace {
+				l.failNoSpace(ctx, s, out)
+				retry = true
+				break
+			}
+		}
+		if !retry {
 			return target{}, false
 		}
-		var acc layoutAcc
-		if err := acc.add(&l.queues[s].at(0).entry); err != nil {
-			panic(fmt.Sprintf("disklog: queued entry no longer validates: %v", err))
-		}
-		lay, _ := acc.layout()
-		c := l.asm[s]
-		if c.segment != 0 && uint64(l.sb.SegmentBlocks-c.next) >= lay.Blocks() {
-			return target{stream: s, segment: c.segment, seq: c.seq, offset: c.next}, true
-		}
-		if seg, ok := l.firstFree(); ok {
-			return target{stream: s, segment: seg, seq: l.nextSeq, offset: 1, roll: true}, true
-		}
-		l.failNoSpace(ctx, s, out)
 	}
+}
+
+// targetFor places a round of stream s. A round appends to the stream's segment only once
+// the round that opened it is durable, so a segment whose header never landed holds at
+// most the one record written with it, the record recovery checks at block 1.
+func (l *Log) targetFor(s Stream) (target, targetState) {
+	var acc layoutAcc
+	if err := acc.add(&l.queues[s].at(0).entry); err != nil {
+		panic(fmt.Sprintf("disklog: queued entry no longer validates: %v", err))
+	}
+	lay, _ := acc.layout()
+	c := l.asm[s]
+	if c.segment != 0 && uint64(l.sb.SegmentBlocks-c.next) >= lay.Blocks() {
+		if l.opened[s] > l.durableLSN && !l.appendAnywhere {
+			return target{}, targetBlocked
+		}
+		return target{stream: s, segment: c.segment, seq: c.seq, offset: c.next}, targetReady
+	}
+	if seg, ok := l.firstFree(); ok {
+		return target{stream: s, segment: seg, seq: l.nextSeq, offset: 1, roll: true}, targetReady
+	}
+	return target{}, targetNoSpace
 }
 
 func (l *Log) firstFree() (uint32, bool) {
@@ -977,8 +1062,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		segment:      t.segment,
 		block:        t.offset,
 		headerBlocks: lay.HeaderBlocks,
-		after:        cursor{segment: t.segment, seq: t.seq, next: t.offset + uint32(lay.Blocks())},
-		bytes:        bytes,
+		bytes:        lay.Blocks() * core.BlockSize,
 		head:         r.head,
 		tail:         r.tail,
 		vec:          r.vec,
@@ -987,8 +1071,11 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		tickets:      r.tickets,
 		payloads:     r.payloads,
 	}
+	l.asm[t.stream] = cursor{segment: t.segment, seq: t.seq, next: t.offset + uint32(lay.Blocks())}
+	if t.roll {
+		l.opened[t.stream] = l.nextLSN
+	}
 	l.nextLSN++
-	l.asm[t.stream] = r.after
 	l.last = t.stream
 	l.count++
 	out.Actions = append(out.Actions, core.Action{

@@ -335,6 +335,24 @@ func TestAFlushSentLaterWaitsForItsOwnWrite(t *testing.T) {
 	}
 }
 
+func TestARoundAppendsOnlyOnceItsSegmentsOpeningRoundIsDurable(t *testing.T) {
+	cfg := testConfig(0)
+	cfg.CommitDepth = 2
+	h := formatted(t, gib, cfg)
+	h.submit(disklog.Hot, h.chunkWrite(0, 0, 1, 1))
+	h.submit(disklog.Hot, h.chunkWrite(1, 0, 1, 2))
+	h.wantTrace("write 64+3 io104", "fsync io105")
+	h.submit(disklog.Cold, h.chunkWrite(2, 0, 1, 3))
+	h.wantTrace("write 64+3 io104", "fsync io105", "write 128+3 io106")
+	h.round()
+	h.wantTrace("write 64+3 io104", "fsync io105", "write 128+3 io106", "write 67+2 io108")
+	h.run()
+	if d := h.eventsOf(disklog.Durable); len(d) != 3 {
+		t.Fatalf("events %+v", h.events)
+	}
+	h.close()
+}
+
 func TestCheckpointEndToEnd(t *testing.T) {
 	cfg := testConfig(0)
 	cfg.MaxReplayBytes = 8 * core.BlockSize
@@ -342,12 +360,12 @@ func TestCheckpointEndToEnd(t *testing.T) {
 	h.submit(disklog.Hot, h.write(0, 3, 1))
 	h.run()
 	if h.log.CheckpointDue() {
-		t.Fatal("due after 5 blocks")
+		t.Fatal("due after 4 blocks")
 	}
 	h.submit(disklog.Hot, h.write(1, 3, 2))
 	h.run()
 	if !h.log.CheckpointDue() {
-		t.Fatal("not due after 9 blocks")
+		t.Fatal("not due after 8 blocks")
 	}
 	third := h.submit(disklog.Hot, h.write(2, 3, 3))
 	indexes := []disklog.CheckpointIndex{{Owner: 5, ReplayLSN: 2}, {Owner: 6, ReplayLSN: 2}}
@@ -394,8 +412,6 @@ func TestCheckpointEndToEnd(t *testing.T) {
 	got := h.readManifest(durable[2])
 	want := disklog.Manifest{
 		BaseLSN: 2,
-		BaseSeq: 1,
-		Starts:  [2]disklog.StreamStart{{Segment: 1, Block: 9}, {}},
 		Indexes: []disklog.ManifestIndex{
 			{Owner: 5, ReplayLSN: 2, Runs: []disklog.BlobRef{{Segment: 2, Block: 1, LSN: 4, Entry: 0}, {Segment: 2, Block: 1, LSN: 4, Entry: 1}}},
 			{Owner: 6, ReplayLSN: 2},
@@ -404,8 +420,8 @@ func TestCheckpointEndToEnd(t *testing.T) {
 	if !manifestsEqual(got, want) {
 		t.Fatalf("manifest\n got %+v\nwant %+v", got, want)
 	}
-	if h.log.ReplayBytes() != 9*core.BlockSize {
-		t.Fatalf("%d bytes to replay after the manifest's base, want the 9 blocks of LSNs 3 to 5", h.log.ReplayBytes())
+	if h.log.ReplayBytes() != 8*core.BlockSize {
+		t.Fatalf("%d bytes to replay after the manifest's base, want the 8 record blocks of LSNs 3 to 5", h.log.ReplayBytes())
 	}
 	h.wantLive(0)
 
@@ -563,7 +579,7 @@ func (h *harness) readManifest(last disklog.Event) disklog.Manifest {
 }
 
 func manifestsEqual(a, b disklog.Manifest) bool {
-	return a.BaseLSN == b.BaseLSN && a.BaseSeq == b.BaseSeq && a.Starts == b.Starts &&
+	return a.BaseLSN == b.BaseLSN &&
 		slices.EqualFunc(a.Indexes, b.Indexes, func(x, y disklog.ManifestIndex) bool {
 			return x.Owner == y.Owner && x.ReplayLSN == y.ReplayLSN && slices.Equal(x.Runs, y.Runs)
 		})

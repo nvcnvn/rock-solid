@@ -152,9 +152,8 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
 
 ## Manifest codec
 
-- A manifest (base LSN 77, base seq 5, hot start at segment 3 block 17, no cold start, two indexes:
-  owner 1 with one run of one piece and replay LSN 70, owner 2 with no runs and replay LSN 77)
-  round-trips. A trailing extra byte, or a truncation to 10 bytes, is Malformed. Each blob reference
+- A manifest (base LSN 77, two indexes: owner 1 with one run of one piece and replay LSN 70, owner 2
+  with no runs and replay LSN 77) round-trips. A trailing extra byte, or a truncation to 10 bytes, is Malformed. Each blob reference
   adds 18 bytes. A run of several pieces is one reference, to the piece that lists the others.
 - A manifest naming one owner twice, or a replay LSN past its base LSN, is Malformed.
 - A manifest's last piece (the format version, a 2-byte count, an 18-byte reference to each earlier
@@ -211,6 +210,9 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   changes nothing.
 - Regression (seed 1 of the property below): with round 1's write completed first, round 2's flush
   waits for round 2's own write; an unlinked flush covers only writes that have completed.
+- A round appends to a segment only once the round that opened it is durable (commit depth 2): while
+  round 1 (hot, opening segment 1) is in flight a second hot write waits, and a cold write goes out
+  at once into segment 2. Round 1 completing sends the waiting hot write.
 - [property] Every accepted item ends durable in a record that decodes to it: 100 seeds; max round
   3..64 blocks; disk 16 blocks (1 in 4) or 1 GiB; commit depth 1-3; max replay 4-200 blocks; a pool
   of the log's buffers plus a round to 512 blocks; punch share 0-8 of 8; 1-1000 items to random
@@ -228,14 +230,14 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
 - The decode check catches a broken encoder: an encoder that writes a wrong version into an entry
   and fixes the header checksum, or flips a padding bit, panics in the decode check on the
   property's seeds.
-- Checkpoint end to end (max replay 8 blocks): after a 3-block write (5 blocks with the segment
-  header) a checkpoint is not due; after a second (9 blocks) it is. A third write is in flight when
-  the checkpoint begins for owners 5 and 6; a second begin is Busy, and "due" turns false while one
-  runs. Two pieces for owner 5 then end. Results: LSN 3 = the in-flight write; LSN 4 = both
-  pieces in one cold record (segment 2 block 1, entries 0 and 1); LSN 5 = the manifest, reported as
-  CheckpointDone and kept as the newest manifest. The manifest has base LSN 2 (durable at begin, not
-  the in-flight 3), base seq 1, hot start segment 1 block 9, no cold start, trees
-  [(5, [LSN4#0, LSN4#1]), (6, [])]. The bytes left to replay are the 9 blocks of LSNs 3 to 5.
+- Checkpoint end to end (max replay 8 blocks, counted in record blocks, segment headers left out):
+  after a 3-block write (a 4-block record) a checkpoint is not due; after a second (8 blocks) it is.
+  A third write is in flight when the checkpoint begins for owners 5 and 6; a second begin is Busy,
+  and "due" turns false while one runs. Two pieces for owner 5 then end. Results: LSN 3 = the
+  in-flight write; LSN 4 = both pieces in one cold record (segment 2 block 1, entries 0 and 1);
+  LSN 5 = the manifest, reported as CheckpointDone and kept as the newest manifest. The manifest has
+  base LSN 2 (durable at begin, not the in-flight 3) and trees [(5, [LSN4#0, LSN4#1]), (6, [])].
+  The bytes left to replay are the 8 record blocks of LSNs 3 to 5.
 - A checkpoint naming one owner twice, or a replay LSN past the durable LSN, is Malformed.
 - The next segment opened after a checkpoint (segment 3, filled by 40-block writes) carries the
   manifest's position in its header.
@@ -247,87 +249,132 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
 
 ## Recovery
 
-All recovery scenarios run against the simulated disk. "Open" = replay-mode recovery: load the chunk
-index's runs, replay the records after its replay LSN, resume group commit. "Rebuild" = recovery that
-ignores manifests and returns every record header.
+All recovery scenarios run against the simulated disk, through the chunk store stand-in described
+under [Seeded runs](#seeded-runs-and-the-simulation-harness), whose "index" is a model of where each
+live block of each chunk sits. "Open" = recovery in open mode: load the newest named manifest, read
+the model's run through recovery, replay the records after its replay LSN, resume group commit.
+"Rebuild" = recovery that ignores manifests and replays every record.
 
-- Empty log: a freshly formatted disk recovers with no records and no snapshots; the first new write
+- Empty log: a freshly formatted disk recovers with no records and no manifest; the first new write
   gets LSN 1 (RocksDB Empty).
 - An all-zero disk is NotFormatted.
-- Reformat (recycle): a disk holding log 3's six records is formatted as log 4 with one write. Recovery
-  returns only that record (log ID 4), and 4,094 of 4,095 segments are free. Old segments are
-  never replayed (RocksDB Recycle).
-- Torn tail: 3 records of 2-block writes, then a 4th round written but not flushed. A crash landing
-  only its first 0, 1 or 2 of 3 blocks, or every block but the last, recovers LSNs 1-3, and the index
-  equals the index before the 4th write (RocksDB TruncatedTrailingRecord, PartialLast).
-- An unflushed but fully landed last record is kept (LSNs 1-4), although it was never acknowledged.
+- Reformat (recycle): a disk holding log 3's six writes and a cold blob is formatted as log 4 with one
+  write. Recovery returns only that record (log ID 4), and all segments but segment 0 and the new
+  log's are free, the old log's valid headers included (RocksDB Recycle).
+- Torn tail: 3 records of 2-block writes, then a 4th round written but not flushed (LBAs 74-76). A
+  crash landing none, {74}, {74, 75}, {75, 76} or {74, 76} recovers LSNs 1-3, and the index equals the
+  index before the 4th write (RocksDB TruncatedTrailingRecord, PartialLast).
+- An unflushed but fully landed last record is kept (LSNs 1-4), holding exactly the submitted write,
+  although it was never acknowledged.
 - Damage in a middle record is corruption, not truncation: XOR 0x5A into every byte of record 2's
-  header gives Corrupt(LSN 2) (RocksDB ErrorJoinsRecords). One flipped bit in record 3's data
-  or header, of 5 records, gives Corrupt(LSN 3) (PAR, FAST 2018).
+  header gives Corrupt(LSN 2) (RocksDB ErrorJoinsRecords). One flipped bit in record 3's header or data,
+  of 5 records, gives Corrupt(LSN 3) (PAR, FAST 2018), and in record 4's header, the last but one,
+  Corrupt(LSN 4). Open and rebuild agree.
 - Damage in the last record (a data block of record 5 of 5) cannot be told from a torn write, so it
   recovers as a crash: LSNs 1-4.
 - Overwriting a torn tail: 10 records, then an 11th 4-block record crashing with only its even blocks
-  landed, recovers 10. Five more writes then reuse the space, and the next open gives LSNs 1-15 with
-  an equal, readable index (etcd TestOpenOnTornWrite).
+  landed (its header included), recovers 10 and zeroes the torn header. Five more writes then reuse the
+  space, and the next open gives LSNs 1-15 with an equal, readable index (etcd TestOpenOnTornWrite).
 - Segment exactly full: 21 two-block writes on 1 GiB fill segment 1 to its last block (last record at
   block 61). After reopening, appends continue in segment 2 (record 22), and 30 records recover
   (etcd TestTailWriteNoSlackSpace).
-- Crash in the round that opens a segment: write 22 opens segment 2. For each combination of the
-  segment header and the record landing, recovery gives 22 records only if both landed, else 21. A
-  following write and reopen give contiguous LSNs 1..n+1 (etcd TestRecoverAfterCut).
-- Torn record left in the other stream: 2 hot records, then a cold 3-block blob whose first 2
-  blocks (segment header, record header) land. Recovery gives LSNs 1-2. The next hot write reuses
-  LSN 3 in segment 1. On reopen both streams hold an LSN-3 header, and recovery accepts the one
-  whose data verifies (LSNs 1-3), reporting no corruption; rebuild agrees.
-- Manifest in pieces: recovery from a manifest written in several pieces equals recovery from a
-  one-piece manifest, and a crash that lands all but the last piece recovers from the previous
-  manifest.
-- Many segments, both streams: 64K-block disk (16-block segments), 4-block records, 200 writes of 1-3
-  blocks plus a cold blob every 5th, using more than 20 segments. Reopen returns exactly the
-  acknowledged records. The index from recovery and the index from rebuild both equal the live index,
-  and every mapped extent reads back its written pattern (RocksDB ReadWrite/ManyBlocks/Fragmentation).
-- Checkpoints bound replay: max replay 40 blocks, 120 writes of 1-4 blocks over 16 chunks with a
-  whole-chunk punch every 7th, unlimited or 512-byte run pieces. At least 5 checkpoints complete.
-  Reopen loads several pieces only with the 512-byte limit, and replays at most max replay + one
-  segment + 1 MiB. Index, rebuild and read-back all match.
+- Crash in the round that opens a segment: write 22 opens segment 2 (LBAs 128-131). For each
+  combination of the segment header and the record landing, recovery gives 22 records only if both
+  landed, else 21. A record that landed without its header is erased, and segment 2 is reopened with
+  seq 3, past the seq that record carries; otherwise with seq 2. A following write and reopen give
+  contiguous LSNs 1..n+1 (etcd TestRecoverAfterCut).
+- Torn record left in the other stream: 2 hot records, then a cold 3-block blob whose first 2 blocks
+  (segment header, record header) land. Recovery gives LSNs 1-2 and zeroes the cold record's header.
+  The next hot write reuses LSN 3 in segment 1, and open and rebuild then give LSNs 1-3.
+- Commit depth 2, both rounds in flight landed whole: a hot and a cold write written but not
+  flushed recover as LSNs 2 and 3, with their writes in the index.
+- Commit depth 2, a round missing: of two hot rounds in flight the first's header does not land and
+  the second lands whole. Both are dropped (LSN 1 recovers) and the second's header is zeroed, so a
+  shorter write that reuses LSN 2 is not followed, on the next open, by the old LSN 3.
+- A duplicate LSN is corruption: with the append rule switched off, a depth-2 round appending to a
+  segment whose opening round is in flight lands alone; after recovery, segment 2 reopens with the
+  same seq and the cold stream reuses the old record's LSN, and the next open gives Corrupt(LSN 23)
+  instead of replaying the old record.
+- A durable manifest is never dropped (depth 2): record 21's data is damaged, the manifest (LSN 22)
+  is named by a segment header whose record never landed. Rebuild gives Corrupt(LSN 21), since the
+  tail rule alone would drop the manifest; open, which replays from LSN 22, recovers it.
+- Restart without a crash: a round written but not flushed when the process stops is replayed, and
+  recovery's last action is a flush, so a crash right after it keeps LSN 4.
+- A flipped bit in the header-block count of the last record on a 256 GiB disk (64 MiB segments)
+  recovers as a torn tail (LSNs 1-2), not as an attempt to read a whole segment.
+- Many reads in flight: with a read depth of 1, 4 or 64, that many segment-header reads are in flight
+  at once.
+- A failed superblock repair write, erase write or final flush fails recovery with Disk(Io) and frees
+  every buffer.
+- Manifest in pieces (3-block rounds): a checkpoint with 500 runs writes its manifest in several
+  pieces; once a segment header names it, open loads the same manifest, all 500 runs, and replays from
+  its replay LSN. A second such checkpoint crashing before the write of its last piece recovers from
+  the first.
+- Many segments, both streams: 64K-block disk (16-block segments), 4-block records, 200 writes of 1-2
+  blocks plus a cold blob every 5th, reaching segment 20 or beyond. Open returns exactly the acknowledged
+  records. The index from open and the index from rebuild both equal the live index, and every mapped
+  block reads back its written pattern (RocksDB ReadWrite/ManyBlocks/Fragmentation).
+- Checkpoints bound replay: 64K-block disk, max replay 40 blocks, 120 writes of 1-4 blocks over 16
+  chunks with a whole-chunk punch every 7th, unlimited or 512-byte run pieces. At least 5 checkpoints
+  complete. Open loads several pieces only with the 512-byte limit, replays at most max replay
+  + 3 segments, and reads at most 4 segments more: a segment per stream before the replay point and
+  the rest of each open segment. Index, rebuild and read-back all match.
+- What is left to replay: with max replay 8 blocks, two 3-block writes leave a checkpoint due after
+  recovery, with 8 record blocks to replay.
 - Read errors: if reads of both block 0 and the superblock copy fail with Io, recovery ends with
-  Disk(Io) and all its buffers are freed.
-- [property] Random crashes keep acknowledged records: 50 seeds x 4 crash/reopen cycles; disk 1,024 or
-  4,096 blocks; max record 2-32 blocks; max replay 4-200 blocks; random log ID. Each cycle runs up to 300
-  steps, each either submitting 1-4 random items (60% writes of 1-3 blocks, 10% whole-chunk punches,
-  20% hot blobs under 3,000 B, 10% cold blobs under 6,000 B) with 2/5 probability, or executing one
-  pending disk action. The harness checkpoints whenever one is due, one piece per round. Then a crash
-  lands each unflushed block with probability 1/2. Properties: recovery always succeeds; the
-  recovered durable LSN is the pre-crash one or one more (then it is the last recovered record);
-  the index from manifest+replay and the index from rebuild both equal the pre-crash index (plus
-  that record); every mapped extent reads back; every blob has its declared length. Coverage checks:
-  more than 5 kept in-flight rounds, more than 5 dropped, more than 20 recoveries from a manifest, and
-  at least one NoSpace.
+  Disk(Io); a read error on a segment header fails it too. All its buffers are freed.
+- Out-of-step calls: Recover refuses a read depth below 1 and an unknown mode; Replay before
+  ManifestLoaded and Log before Recovered are refused; Close refuses while a read is in flight; a blob
+  reference that does not name a blob of a durable record fails recovery with Corrupt at its LSN.
+- [property] Random crashes keep acknowledged records: 50 seeds x 4 crash/reopen cycles; disk 1,024,
+  4,096 or 65,536 blocks; max record 3-32 blocks; commit depth 1-2; max replay 4-200 blocks; run
+  pieces unlimited or 512 bytes; random log ID. Each cycle runs 300 steps, each either submitting 1-4
+  random items (60% writes of 1-3 blocks, 10% whole-chunk punches, 20% hot blobs under 3,000 B, 10%
+  cold blobs under 6,000 B) when nothing is pending or with probability 2/5, or executing one random
+  pending disk action. The stand-in checkpoints whenever one is due. Then, in 3 cycles of 4, a crash
+  lands each unflushed block with probability 1/2; otherwise the process only restarts. Rebuild,
+  with a crash before each of its writes and flushes with probability 1/4, each followed by a fresh
+  start, then open; recovery's reads complete in random order. Properties: both succeed with the same
+  durable LSN, between the one acknowledged before the crash and that plus the rounds in flight, and
+  leave nothing unflushed; every record holds only submitted entries and blobs; the index from open
+  and from rebuild both equal the pre-crash index plus the records kept from rounds in flight; every
+  mapped block reads back; both leave the same bytes to replay, and when nothing in flight was kept
+  and the manifest is the newest, as many as before the crash. Coverage: more than 5 kept in-flight
+  rounds, more than 5 dropped, more than 20 recoveries from a manifest, at least one NoSpace, depth 2,
+  an erased header, a restart and a crash during recovery all occur.
+- [fuzz] Bit flips anywhere in a log of 40 writes, cold blobs and checkpoints: rebuild and open either
+  fail with Corrupt, CopyOnly or NotFormatted, or resume a log whose next write survives a restart.
 
 ## Superblock copy
 
-- A bit flip in block 0 or in the copy: recovery returns all records and rewrites the damaged copy
-  from the good one, flushed before it reads further.
+- A bit flip in the log ID of block 0, or of the copy: recovery returns all records and rewrites the
+  damaged one from the other, flushed before the first segment-header read (trace: read block 0, read
+  the copy, write, linked flush, then the header reads).
 - An unreadable block 0 (read error) is restored from the copy, flushed.
-- Block 0 of zeros, or of another format ("EFI PART" repeated), with a valid copy is CopyOnly(BadMagic,
-  copy). The disk may have been reused, so recovery writes nothing and leaves restoring to the
-  operator.
+- Block 0 of zeros, or of another format ("EFI PART" repeated), or with a bit flipped in its magic or
+  version, next to a valid copy is CopyOnly(BadMagic or BadVersion, copy). The disk may have been
+  reused, so recovery reads nothing more, writes nothing and leaves restoring to the operator.
 - Both copies damaged is NotFormatted.
 - A reformat that crashes after the new block 0 is flushed but before the copy is written: block 0
-  (new log) wins and the stale copy (old log) is rewritten to match.
+  (new log) wins, the stale copy (old log) is rewritten to match, and every segment is free.
 
 ## Quarantined segments
 
-- [property] 10 seeds; 4,096-block disk (4-block segments), 4-block records, 300 writes of 1-2 blocks.
-  Flip one random bit in the first 56 bytes of 3 random used segments' headers (not the newest)
-  and of 1 free segment. Rebuild recovery reports exactly the 3 as quarantined, and the free one
-  stays free. Filling the disk until NoSpace leaves every quarantined segment's blocks unchanged.
+- [property] 10 seeds; 4,096-block disk (4-block segments), 4-block records, max replay 40 blocks,
+  300 writes of 1-2 blocks with checkpoints. Flip one random bit in the first 52 bytes of 3 random
+  used segments' headers whose records all precede the replay point of the newest named manifest,
+  and of 1 never-written segment. Open, its reads completing in random order, reports exactly the 3
+  as quarantined, in segment order, and frees the other.
+  Filling the disk until NoSpace leaves every quarantined segment's blocks unchanged and reuses the
+  damaged free one; open then still equals the live index and reads back. Rebuild, which must
+  replay the quarantined segments' records, gives Corrupt(their first LSN).
 - Quarantine is detected by reading a damaged segment in full for valid record headers of this log
   (any segment sequence). A damaged header over a segment with no records counts as free.
-- Replay through a quarantined segment is corruption: 64K-block disk, 60 one-block writes. Damaging
-  the header of LSN 1's segment gives Corrupt(LSN 1), a gap at the start. Damaging the newest
-  segment's header (several records) gives Corrupt(first LSN in it): more than `commit_depth` (1)
-  lost records cannot be rounds in flight. Losing only one is allowed.
+- A damaged header over records past the replay point is corruption, since a torn write leaves a
+  segment header whole or as it was: 64K-block disk, one-block writes. With 60 writes, damaging the
+  header of LSN 1's segment gives Corrupt(LSN 1), and damaging the newest segment's header (several
+  records) gives Corrupt(first LSN in it). With 64 writes the newest segment holds only record 64,
+  which may have been acknowledged: Corrupt(LSN 64), and the segment is left unchanged.
 
 ## LSM tree
 
@@ -390,14 +437,14 @@ ignores manifests and returns every record header.
 The seeded runs, each described in its section above:
 
 - Group commit: 100 seeds (every accepted item decodes).
-- Random crashes: 50 seeds x 4 cycles (acknowledged records kept, index = rebuild).
+- Random crashes: 50 seeds x 4 cycles (acknowledged records kept, index = rebuild), and the recovery
+  fuzz test.
 - Quarantine: 10 seeds (bit flips in segment headers).
 - Record codec: seed 1 (round trip, 499 records), seed 4 (exhaustive torn subsets, 40 records x 3 old
   contents), seed 5 (torn 512-byte sectors, 300 records).
 
-The simulation node harness: it applies every Durable record to the chunk
-index. It starts a checkpoint whenever one is due, freezes the index's memtable, hands one run piece
-at a time, and the next only after the previous piece is durable. It ends the checkpoint after the
-last piece, and on CheckpointFailed keeps the frozen memtable for the next attempt and stops
-checkpointing. Write payloads are a
-pattern derived from (chunk hash, version, block), so any extent can be checked by reading it back.
+The chunk store stand-in of the recovery tests applies every Durable record to its model of the
+chunk index. It starts a checkpoint whenever one is due, snapshots the model, hands one run piece at
+a time, and the next only after the previous piece is durable, each piece naming the one before. It
+ends the checkpoint after the last piece, and on CheckpointFailed stops checkpointing. Write payloads
+are a pattern derived from (chunk, version, block), so any extent can be checked by reading it back.

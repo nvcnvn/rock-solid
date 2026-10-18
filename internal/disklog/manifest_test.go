@@ -12,8 +12,6 @@ import (
 func sampleManifest() disklog.Manifest {
 	return disklog.Manifest{
 		BaseLSN: 77,
-		BaseSeq: 5,
-		Starts:  [2]disklog.StreamStart{{Segment: 3, Block: 17}, {}},
 		Indexes: []disklog.ManifestIndex{
 			{Owner: 1, ReplayLSN: 70, Runs: []disklog.BlobRef{{Segment: 4, Block: 2, LSN: 78, Entry: 3}}},
 			{Owner: 2, ReplayLSN: 77},

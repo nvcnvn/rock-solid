@@ -23,21 +23,31 @@ type pendingIO struct {
 	link   core.IOID
 }
 
-// harness drives a Log against an in-memory disk: it executes the log's actions when told
-// to, feeds back their completions, and records the action trace and every event.
+// harness drives a Log, or a Recovery, against a simulated disk: it executes their actions
+// when told to, feeds back the completions, and records the action trace and every event.
 type harness struct {
 	t       testing.TB
 	pool    *sim.Pool
 	ctx     core.Context
 	geo     disklog.Geometry
+	cfg     disklog.Config
+	logID   uint64
 	log     *disklog.Log
+	rec     *disklog.Recovery
 	out     disklog.Output
-	blocks  map[core.LBA][]byte
+	disk    *sim.Disk
 	pending []pendingIO
 	trace   []string
 	events  []disklog.Event
 	failIO  map[core.IOID]core.DiskError
 	own     int
+	onEvent func(disklog.Event)
+	// failWhen, when set, chooses the result of each action instead of executing it.
+	failWhen func(core.Action) core.DiskError
+	// ioRand, when set, makes recovery complete its actions in random order.
+	ioRand     *core.Rand
+	readBytes  uint64
+	maxPending int
 
 	completed map[core.IOID]bool
 	done      []core.IOID
@@ -50,28 +60,38 @@ type harness struct {
 
 func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {
 	t.Helper()
+	h := blankHarness(t, diskBytes, poolBytes, cfg)
+	var err error
+	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, firstIO, &h.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.own = h.pool.Live()
+	h.absorb()
+	return h
+}
+
+// blankHarness is a harness over an all-zero disk with no log on it.
+func blankHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {
+	t.Helper()
 	geo, err := disklog.GeometryFor(diskBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.Check = true
 	h := &harness{
 		t:         t,
 		pool:      sim.NewPool(poolBytes, 0),
 		geo:       geo,
-		blocks:    map[core.LBA][]byte{},
+		cfg:       cfg,
+		logID:     testLogID,
+		disk:      sim.NewDisk(diskBytes / core.BlockSize),
 		failIO:    map[core.IOID]core.DiskError{},
 		completed: map[core.IOID]bool{},
 		durable:   map[core.IOID]bool{},
 		writeAt:   map[core.LBA]core.IOID{},
 	}
 	h.ctx = core.Context{Now: 1000, Pool: h.pool}
-	cfg.Check = true
-	h.log, err = disklog.Format(&h.ctx, cfg, disklog.Superblock{LogID: testLogID, Geometry: geo}, firstIO, &h.out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.own = h.pool.Live()
-	h.absorb()
 	return h
 }
 
@@ -95,6 +115,11 @@ func formatted(t testing.TB, diskBytes uint64, cfg disklog.Config) *harness {
 func (h *harness) absorb() {
 	for i, a := range h.out.Actions {
 		switch a.Kind {
+		case core.ActDiskRead:
+			h.pending = append(h.pending, pendingIO{act: a})
+			h.trace = append(h.trace, fmt.Sprintf("read %d+%d io%d", a.LBA, a.Len/core.BlockSize, a.IO))
+			h.readBytes += a.Len
+			h.maxPending = max(h.maxPending, len(h.pending))
 		case core.ActDiskWrite:
 			p := pendingIO{act: a}
 			p.act.Vec = slices.Clone(a.Vec)
@@ -120,12 +145,20 @@ func (h *harness) absorb() {
 			h.t.Fatalf("unexpected action %+v", a)
 		}
 	}
+	from := len(h.events)
 	for _, ev := range h.out.Events {
 		ev.Entries = slices.Clone(ev.Entries)
 		ev.Tickets = slices.Clone(ev.Tickets)
+		ev.Payloads = slices.Clone(ev.Payloads)
+		ev.Data = slices.Clone(ev.Data)
 		h.events = append(h.events, ev)
 	}
 	h.out.Reset()
+	if h.onEvent != nil {
+		for i := from; i < len(h.events); i++ {
+			h.onEvent(h.events[i])
+		}
+	}
 }
 
 func (h *harness) eligible(i int) bool {
@@ -141,42 +174,33 @@ func (h *harness) step(i int) {
 	}
 	p := h.pending[i]
 	h.pending = slices.Delete(h.pending, i, i+1)
-	derr := h.failIO[p.act.IO]
+	ev := core.Event{Kind: core.EvDiskDone, IO: p.act.IO, Err: h.failIO[p.act.IO]}
+	if h.failWhen != nil && ev.Err == core.DiskOK {
+		ev.Err = h.failWhen(p.act)
+	}
+	if ev.Err == core.DiskOK {
+		ev = h.disk.Execute(h.pool, &p.act)
+	}
 	switch p.act.Kind {
 	case core.ActDiskWrite:
-		if derr == core.DiskOK {
-			h.applyWrite(p.act)
-		}
 		h.completed[p.act.IO] = true
 		h.done = append(h.done, p.act.IO)
 	case core.ActDiskFsync:
-		if derr == core.DiskOK {
+		if ev.Err == core.DiskOK {
 			for _, io := range h.done {
 				h.durable[io] = true
 			}
 		}
 	}
-	h.feed(core.Event{Kind: core.EvDiskDone, IO: p.act.IO, Err: derr})
-}
-
-func (h *harness) applyWrite(a core.Action) {
-	var img []byte
-	if a.Buf != core.NoBuf {
-		img = append(img, h.pool.Bytes(a.Buf)...)
-	}
-	for _, v := range a.Vec {
-		img = append(img, h.pool.Bytes(v.Buf)[:v.Len]...)
-	}
-	if uint64(len(img)) != a.Len {
-		h.t.Fatalf("write io%d gathers %d bytes, says %d", a.IO, len(img), a.Len)
-	}
-	for i := 0; i < len(img); i += core.BlockSize {
-		h.blocks[a.LBA+core.LBA(i/core.BlockSize)] = slices.Clone(img[i : i+core.BlockSize])
-	}
+	h.feed(ev)
 }
 
 func (h *harness) feed(ev core.Event) {
-	h.log.OnEvent(&h.ctx, &ev, &h.out)
+	if h.rec != nil {
+		h.rec.OnEvent(&h.ctx, &ev, &h.out)
+	} else {
+		h.log.OnEvent(&h.ctx, &ev, &h.out)
+	}
 	h.absorb()
 }
 
@@ -195,24 +219,14 @@ func (h *harness) round() {
 	h.step(0)
 }
 
-func (h *harness) read(lba core.LBA, n uint64) []byte {
-	var b []byte
-	for i := range n {
-		blk, ok := h.blocks[lba+core.LBA(i)]
-		if !ok {
-			blk = make([]byte, core.BlockSize)
-		}
-		b = append(b, blk...)
-	}
-	return b
-}
+func (h *harness) read(lba core.LBA, n uint64) []byte { return h.disk.Read(lba, n) }
 
 // record reads back and decodes the record a Durable event names.
 func (h *harness) record(ev disklog.Event) disklog.DecodedRecord {
 	h.t.Helper()
 	seq := h.segmentSeq(ev.Segment)
 	left := h.geo.SegmentBlocks - ev.Block
-	place := disklog.Place{LogID: testLogID, Seq: seq, Offset: ev.Block}
+	place := disklog.Place{LogID: h.logID, Seq: seq, Offset: ev.Block}
 	headerBlocks := uint64(binary.LittleEndian.Uint16(h.read(ev.LBA, 1)[6:]))
 	hdr, err := disklog.DecodeHeader(h.read(ev.LBA, headerBlocks), place, left, nil)
 	if err != nil {

@@ -9,7 +9,7 @@ const (
 	// BlobRefSize is the encoded length of a BlobRef.
 	BlobRefSize = 18
 
-	manifestFixedSize = 2 + 8 + 8 + 2*8 + 4
+	manifestFixedSize = 2 + 8 + 4
 	manifestIndexSize = 4 + 8 + 4
 	pieceListSize     = 2 + 2
 )
@@ -22,12 +22,6 @@ type BlobRef struct {
 	Entry   uint16
 }
 
-// StreamStart is where a stream's next record went at a manifest's base: Segment 0 means no open segment, and Block equal to the segment size means it was full.
-type StreamStart struct {
-	Segment uint32
-	Block   uint32
-}
-
 // ManifestIndex is an index's runs, each named by its last piece, and the LSN after which records replay into it.
 type ManifestIndex struct {
 	Owner     uint32
@@ -35,11 +29,9 @@ type ManifestIndex struct {
 	Runs      []BlobRef
 }
 
-// Manifest is a checkpoint: each index's runs and replay point, and where each stream stood at BaseLSN.
+// Manifest is a checkpoint: each index's runs and replay point, all at or before BaseLSN, the durable LSN when the checkpoint began.
 type Manifest struct {
 	BaseLSN uint64
-	BaseSeq uint64
-	Starts  [2]StreamStart
 	Indexes []ManifestIndex
 }
 
@@ -47,11 +39,6 @@ type Manifest struct {
 func AppendManifest(dst []byte, m *Manifest) []byte {
 	dst = binary.LittleEndian.AppendUint16(dst, FormatVersion)
 	dst = binary.LittleEndian.AppendUint64(dst, m.BaseLSN)
-	dst = binary.LittleEndian.AppendUint64(dst, m.BaseSeq)
-	for _, s := range m.Starts {
-		dst = binary.LittleEndian.AppendUint32(dst, s.Segment)
-		dst = binary.LittleEndian.AppendUint32(dst, s.Block)
-	}
 	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(m.Indexes)))
 	for i := range m.Indexes {
 		ix := &m.Indexes[i]
@@ -80,13 +67,7 @@ func DecodeManifest(b []byte) (Manifest, error) {
 	if v := r.u16(); v != FormatVersion && !r.bad {
 		return Manifest{}, ErrBadVersion
 	}
-	m := Manifest{BaseLSN: r.u64(), BaseSeq: r.u64()}
-	for i := range m.Starts {
-		m.Starts[i] = StreamStart{Segment: r.u32(), Block: r.u32()}
-		if m.Starts[i].Segment == 0 && m.Starts[i].Block != 0 {
-			return Manifest{}, ErrMalformed
-		}
-	}
+	m := Manifest{BaseLSN: r.u64()}
 	count := r.u32()
 	if r.bad || uint64(count)*manifestIndexSize > uint64(r.left()) {
 		return Manifest{}, ErrMalformed

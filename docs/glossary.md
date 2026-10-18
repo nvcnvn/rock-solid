@@ -220,6 +220,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Write-ahead log (WAL), replay, recovery.** A WAL records each change before it is applied elsewhere, so after a crash the change can be redone by **replaying** the log. Crash recovery means reading the log back and rebuilding the in-memory state from it.
 
+**Torn tail, tail rule.** After a crash, the last few records of a log may be torn or missing because their rounds were still being written. The tail rule tells such a torn tail from damage: a missing record ends the log only if the records found after it are few enough to have been in flight together (`commit_depth` rounds). More than that means something already durable was lost, and recovery reports corruption instead of quietly cutting the log short. See [Recovery](design.md#on-disk-format).
+
 **Checkpoint, manifest.** Replaying the whole log after every crash would take ever longer, so a checkpoint periodically saves the in-memory state to disk and writes a **manifest**, a small record that says where that state is and from which LSN replay must start.
 
 **Index.** A structure that finds data by key without scanning everything. The **chunk index** on each disk maps each chunk's blocks to their place in the log; its **live map** lists the current extents of each chunk.
