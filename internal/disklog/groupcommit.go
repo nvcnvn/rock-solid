@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
@@ -25,36 +26,38 @@ var (
 	ErrBadBuffer = errors.New("buffer does not match its entry")
 	// ErrReservedKind reports an item of a blob kind only the log writes.
 	ErrReservedKind = errors.New("blob kind reserved for the log")
+	// ErrBadConfig reports settings the log cannot run with.
+	ErrBadConfig = errors.New("bad group commit settings")
+	// ErrFlushBeforeWrite reports a driver that completed a round's flush before its write.
+	ErrFlushBeforeWrite = errors.New("flush completed before its write")
+	// ErrClosed reports a log whose buffers were returned.
+	ErrClosed = errors.New("log closed")
 )
 
 // Config is the group commit settings.
 type Config struct {
-	// MaxRecordBytes is max_group_commit_bytes, the largest record a round writes.
+	// MaxRecordBytes is max_group_commit_bytes, the most a round writes, segment header included; at least 3 blocks.
 	MaxRecordBytes uint64
-	// MaxReplayBytes is max_replay_bytes: the record bytes after the newest manifest that make a checkpoint due.
+	// MaxReplayBytes is max_replay_bytes, the bytes written after the newest manifest that make a checkpoint due.
 	MaxReplayBytes uint64
-	// CommitDepth is commit_depth, the most rounds in flight at once.
+	// CommitDepth is commit_depth, the most rounds in flight at once; at least 1.
 	CommitDepth int
-	// RetryTimer is the timer that retries a round the buffer pool could not hold.
-	RetryTimer core.TimerID
-	// RetryDelay is how long that retry waits.
-	RetryDelay core.Tick
-	// Check decodes every record a round encodes and panics unless it holds exactly what
-	// was submitted.
+	// Check decodes every record a round encodes and panics unless it holds exactly what was submitted.
 	Check bool
 }
 
 // DefaultConfig is the default settings, with the decode check off.
 func DefaultConfig() Config {
-	return Config{MaxRecordBytes: 1 << 20, MaxReplayBytes: 64 << 20, CommitDepth: 1, RetryDelay: 1000}
+	return Config{MaxRecordBytes: 1 << 20, MaxReplayBytes: 64 << 20, CommitDepth: 1}
 }
 
-// Ticket names one submitted item in the log's events.
+// Ticket names one submitted item in the log's events; NoTicket marks the log's own manifest pieces.
 type Ticket uint64
 
-// Item is one thing to append: a write's Count blocks in a buffer of exactly that size,
-// a blob's Length bytes at the start of its buffer, or a punch or freeze with no buffer.
-// Once accepted, the buffer belongs to the log.
+// NoTicket is the ticket events give the log's own items.
+const NoTicket Ticket = 0
+
+// Item is a write's Count blocks in a buffer of exactly that size, a blob's Length bytes at the start of its buffer, or a bufferless punch or freeze.
 type Item struct {
 	Entry Entry
 	Buf   core.IOBuf
@@ -65,18 +68,19 @@ type EventKind uint8
 
 // Event kinds.
 const (
-	// Durable reports a durable record; Tickets[i] submitted Entries[i].
+	// Durable reports a durable record; Tickets[i] submitted Entries[i], whose payload starts Payloads[i] bytes into the data area.
 	Durable EventKind = iota + 1
-	// Failed reports items that will never be durable, and why.
+	// Failed reports items that were never written and never will be, and why.
 	Failed
+	// InDoubt reports items whose round was in flight when the disk failed; recovery decides whether they are durable.
+	InDoubt
 	// CheckpointDone reports the running checkpoint's manifest durable at Manifest.
 	CheckpointDone
 	// CheckpointFailed reports that the running checkpoint will never finish; a new one may begin.
 	CheckpointFailed
 )
 
-// Event is one outcome of the log. Its slices point into the Output that carried it and
-// stay valid until that Output is reset.
+// Event is one outcome of the log; its slices stay valid until the Output carrying it is reset.
 type Event struct {
 	Kind         EventKind
 	LSN          uint64
@@ -86,18 +90,18 @@ type Event struct {
 	HeaderBlocks uint32
 	Entries      []Entry
 	Tickets      []Ticket
+	Payloads     []uint64
 	Err          error
 	Manifest     ManifestPos
 }
 
-// Output collects what one call into the log produced: actions for the driver and
-// events for the log's owner. The caller reuses it across calls, so a call allocates
-// nothing once it has grown.
+// Output is the actions and events of calls into the log, reused by the caller so a call allocates nothing once it has grown.
 type Output struct {
-	Actions []core.Action
-	Events  []Event
-	entries []Entry
-	tickets []Ticket
+	Actions  []core.Action
+	Events   []Event
+	entries  []Entry
+	tickets  []Ticket
+	payloads []uint64
 }
 
 // Reset empties the output for reuse.
@@ -107,19 +111,42 @@ func (o *Output) Reset() {
 	o.Events = o.Events[:0]
 	o.entries = o.entries[:0]
 	o.tickets = o.tickets[:0]
+	o.payloads = o.payloads[:0]
 }
 
-func (o *Output) emit(ev Event, entries []Entry, tickets []Ticket) {
-	es, ts := len(o.entries), len(o.tickets)
-	o.entries = append(o.entries, entries...)
-	o.tickets = append(o.tickets, tickets...)
+func (o *Output) emitDurable(ev Event, r *round) {
+	es, ps := len(o.entries), len(o.payloads)
+	o.entries = append(o.entries, r.entries...)
+	o.payloads = append(o.payloads, r.payloads...)
 	ev.Entries = o.entries[es:len(o.entries):len(o.entries)]
+	ev.Payloads = o.payloads[ps:len(o.payloads):len(o.payloads)]
+	ts := len(o.tickets)
+	for i, t := range r.tickets {
+		o.tickets = append(o.tickets, visible(t, &r.entries[i]))
+	}
 	ev.Tickets = o.tickets[ts:len(o.tickets):len(o.tickets)]
 	o.Events = append(o.Events, ev)
 }
 
-// CheckpointIndex names an index a checkpoint covers and the LSN after which records
-// replay into it.
+func (o *Output) emitTickets(kind EventKind, err error, from int) {
+	if from == len(o.tickets) {
+		return
+	}
+	o.Events = append(o.Events, Event{Kind: kind, Err: err, Tickets: o.tickets[from:len(o.tickets):len(o.tickets)]})
+}
+
+func visible(t Ticket, e *Entry) Ticket {
+	if isManifestKind(e) {
+		return NoTicket
+	}
+	return t
+}
+
+func isManifestKind(e *Entry) bool {
+	return e.Kind == EntryBlob && (e.BlobKind == BlobManifest || e.BlobKind == BlobManifestPiece)
+}
+
+// CheckpointIndex names an index a checkpoint covers and the LSN after which records replay into it.
 type CheckpointIndex struct {
 	Owner     uint32
 	ReplayLSN uint64
@@ -186,9 +213,13 @@ type round struct {
 	headerBlocks uint32
 	after        cursor
 	bytes        uint64
-	bufs         []core.IOBuf
+	head         core.IOBuf
+	tail         core.IOBuf
+	vec          []core.IOVec
+	writeBufs    []core.IOBuf
 	entries      []Entry
 	tickets      []Ticket
+	payloads     []uint64
 }
 
 type pendingPiece struct {
@@ -217,17 +248,15 @@ const (
 	formatDone
 )
 
-// Log appends records to one disk's log by group commit: each round writes one record
-// to one stream's open segment with one vectored write and makes it durable with one
-// flush, and the items of any number of producers that arrive meanwhile share the next.
+// Log appends a disk's records by group commit, one vectored write and one flush per round.
 type Log struct {
-	cfg          Config
-	sb           Superblock
-	maxRecBlocks uint32
-	maxBlob      uint64
+	cfg        Config
+	sb         Superblock
+	maxWrite   uint32
+	maxItemRec uint32
+	maxBlob    uint64
 
 	phase      formatPhase
-	formatBuf  core.IOBuf
 	formatIO   core.IOID
 	formatSync core.IOID
 
@@ -246,9 +275,9 @@ type Log struct {
 	rounds []round
 	first  int
 	count  int
+	stale  []core.IOID
 
 	err         error
-	retryArmed  bool
 	manifest    ManifestPos
 	replayBytes uint64
 	cp          *checkpoint
@@ -260,49 +289,84 @@ type Log struct {
 	breakEncoding func(head []byte)
 }
 
-// Format starts a new log on an empty disk: it writes the superblock to block 0 and
-// flushes, then writes the copy to the last block of segment 0 and flushes, before the
-// first round. Its IO IDs count up from firstIO.
+// Format starts a log on an empty disk, writing and flushing the superblock then its copy, with IO IDs counting up from firstIO, a range no other machine on the disk uses.
 func Format(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID, out *Output) (*Log, error) {
 	if err := sb.check(); err != nil {
 		return nil, err
 	}
-	buf, err := ctx.Pool.Alloc(core.BlockSize)
+	l, err := newLog(ctx, cfg, sb, firstIO)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := AppendSuperblock(ctx.Pool.Bytes(buf)[:0], sb); err != nil {
-		ctx.Pool.Free(buf)
+	if _, err := AppendSuperblock(ctx.Pool.Bytes(l.rounds[0].head)[:0], sb); err != nil {
+		l.release(ctx)
 		return nil, err
 	}
-	l := newLog(cfg, sb, firstIO)
 	for s := uint32(1); s < sb.SegmentCount; s++ {
 		l.free[s/64] |= 1 << (s % 64)
 	}
 	l.phase = formatBlock0
-	l.formatBuf = buf
 	l.writeFormat(sb.SuperblockLBA(), out)
 	return l, nil
 }
 
-func newLog(cfg Config, sb Superblock, firstIO core.IOID) *Log {
-	cfg.CommitDepth = max(cfg.CommitDepth, 1)
-	maxRec := uint32(min(cfg.MaxRecordBytes/core.BlockSize, math.MaxUint32))
-	maxRec = min(max(maxRec, 2), sb.SegmentBlocks-1)
-	l := &Log{
-		cfg:          cfg,
-		sb:           sb,
-		maxRecBlocks: maxRec,
-		maxBlob:      maxBlobBytes(maxRec),
-		nextIO:       firstIO,
-		nextTicket:   1,
-		nextLSN:      1,
-		nextSeq:      1,
-		free:         make([]uint64, (sb.SegmentCount+63)/64),
-		last:         Cold,
-		rounds:       make([]round, cfg.CommitDepth),
+// newLog sizes the log and takes each round slot's header and blob buffers from the pool
+// for the log's lifetime, so a pool filled by producers never stops a round.
+func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*Log, error) {
+	maxWrite := uint32(min(cfg.MaxRecordBytes/core.BlockSize, uint64(sb.SegmentBlocks)))
+	if cfg.CommitDepth < 1 || maxWrite < 3 {
+		return nil, ErrBadConfig
 	}
-	return l
+	l := &Log{
+		cfg:        cfg,
+		sb:         sb,
+		maxWrite:   maxWrite,
+		maxItemRec: maxWrite - 1,
+		maxBlob:    maxBlobBytes(maxWrite - 1),
+		nextIO:     firstIO,
+		nextTicket: 1,
+		nextLSN:    1,
+		nextSeq:    1,
+		free:       make([]uint64, (sb.SegmentCount+63)/64),
+		last:       Cold,
+		rounds:     make([]round, cfg.CommitDepth),
+	}
+	for i := range l.rounds {
+		r := &l.rounds[i]
+		var err error
+		if r.head, err = ctx.Pool.Alloc(int(maxWrite) * core.BlockSize); err == nil {
+			r.tail, err = ctx.Pool.Alloc(int(maxWrite-1) * core.BlockSize)
+		}
+		if err != nil {
+			l.release(ctx)
+			return nil, err
+		}
+	}
+	return l, nil
+}
+
+func (l *Log) release(ctx *core.Context) {
+	for i := range l.rounds {
+		r := &l.rounds[i]
+		for _, b := range []*core.IOBuf{&r.head, &r.tail} {
+			if *b != core.NoBuf {
+				ctx.Pool.Free(*b)
+				*b = core.NoBuf
+			}
+		}
+	}
+}
+
+// Close returns the log's own buffers to the pool; it refuses while anything is in flight, and the log takes nothing more.
+func (l *Log) Close(ctx *core.Context) error {
+	if l.count > 0 || l.phase != formatDone || len(l.stale) > 0 {
+		return ErrBusy
+	}
+	if l.err != ErrClosed {
+		l.release(ctx)
+		l.err = ErrClosed
+	}
+	return nil
 }
 
 func maxBlobBytes(maxRecBlocks uint32) uint64 {
@@ -323,9 +387,11 @@ func (l *Log) io() core.IOID {
 
 func (l *Log) writeFormat(lba core.LBA, out *Output) {
 	l.formatIO, l.formatSync = l.io(), l.io()
+	r := &l.rounds[0]
+	r.vec = append(r.vec[:0], core.IOVec{Buf: r.head, Len: core.BlockSize})
 	out.Actions = append(out.Actions,
-		core.Action{Kind: core.ActDiskWrite, IO: l.formatIO, LBA: lba, Buf: l.formatBuf, Len: core.BlockSize},
-		core.Action{Kind: core.ActDiskFsync, IO: l.formatSync})
+		core.Action{Kind: core.ActDiskWrite, IO: l.formatIO, LBA: lba, Vec: r.vec, Len: core.BlockSize},
+		core.Action{Kind: core.ActDiskFsync, IO: l.formatSync, Linked: true})
 }
 
 // Superblock is the log's identity and geometry.
@@ -337,28 +403,29 @@ func (l *Log) DurableLSN() uint64 { return l.durableLSN }
 // Manifest is the position of the newest durable manifest's last piece.
 func (l *Log) Manifest() ManifestPos { return l.manifest }
 
-// Err is the disk error that failed the log, or nil.
+// Err is the error that failed or closed the log, or nil.
 func (l *Log) Err() error { return l.err }
 
 // MaxBlobBytes is the largest blob one record holds.
 func (l *Log) MaxBlobBytes() uint64 { return l.maxBlob }
 
+// ReplayBytes is the bytes written after the newest manifest's base, which a restart replays.
+func (l *Log) ReplayBytes() uint64 { return l.replayBytes }
+
 // InFlight is the number of rounds written but not yet durable.
 func (l *Log) InFlight() int { return l.count }
 
-// CheckpointDue reports whether MaxReplayBytes of records follow the newest manifest and
-// no checkpoint is running.
+// CheckpointDue reports whether MaxReplayBytes follow the newest manifest and no checkpoint is running.
 func (l *Log) CheckpointDue() bool {
 	return l.cp == nil && l.err == nil && l.replayBytes >= l.cfg.MaxReplayBytes
 }
 
-// Submit queues an item for a stream; a Durable event names its ticket once its record
-// is durable. A refused item's buffer stays with the caller.
+// Submit queues an item for a stream, taking its buffer; a refused item's buffer stays with the caller.
 func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ticket, error) {
 	if l.err != nil {
 		return 0, l.err
 	}
-	if it.Entry.Kind == EntryBlob && (it.Entry.BlobKind == BlobManifest || it.Entry.BlobKind == BlobManifestPiece) {
+	if isManifestKind(&it.Entry) {
 		return 0, ErrReservedKind
 	}
 	if err := l.accept(ctx, stream, &it); err != nil {
@@ -378,7 +445,7 @@ func (l *Log) accept(ctx *core.Context, stream Stream, it *Item) error {
 		return err
 	}
 	lay, err := acc.layout()
-	if err != nil || lay.Blocks() > uint64(l.maxRecBlocks) {
+	if err != nil || lay.Blocks() > uint64(l.maxItemRec) {
 		return ErrTooLarge
 	}
 	switch it.Entry.Kind {
@@ -409,10 +476,7 @@ func (l *Log) enqueue(stream Stream, q queued) Ticket {
 	return q.ticket
 }
 
-// BeginCheckpoint starts a checkpoint of the given indexes, whose runs must hold exactly
-// the records up to DurableLSN that each one has not left to replay. Their pieces follow
-// through CheckpointPiece, then EndCheckpoint; it finishes with CheckpointDone or
-// CheckpointFailed.
+// BeginCheckpoint starts a checkpoint of indexes whose runs hold every record up to DurableLSN after each one's replay LSN; pieces and EndCheckpoint follow.
 func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 	if l.err != nil {
 		return l.err
@@ -428,7 +492,7 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 		}
 	}
 	for i, ix := range indexes {
-		if ix.ReplayLSN > l.durableLSN {
+		if ix.ReplayLSN > l.durableLSN || slices.ContainsFunc(indexes[:i], func(o CheckpointIndex) bool { return o.Owner == ix.Owner }) {
 			return ErrMalformed
 		}
 		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN}
@@ -437,9 +501,7 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 	return nil
 }
 
-// CheckpointPiece queues the next piece of an index's runs, buf holding its length bytes,
-// on the cold stream. root marks the piece the manifest names: a run's last piece, which
-// lists the others.
+// CheckpointPiece queues an index's next run piece of length bytes on the cold stream; root marks a run's last piece, the one the manifest names.
 func (l *Log) CheckpointPiece(ctx *core.Context, owner uint32, buf core.IOBuf, length uint64, root bool, out *Output) (Ticket, error) {
 	if l.err != nil {
 		return 0, l.err
@@ -467,8 +529,7 @@ func (l *Log) CheckpointPiece(ctx *core.Context, owner uint32, buf core.IOBuf, l
 	return t, nil
 }
 
-// EndCheckpoint marks every piece handed over; the manifest follows once they are all
-// durable.
+// EndCheckpoint marks every piece handed over; the manifest follows once they are all durable.
 func (l *Log) EndCheckpoint(ctx *core.Context, out *Output) error {
 	if l.err != nil {
 		return l.err
@@ -508,17 +569,10 @@ func (l *Log) advanceManifest(out *Output) {
 	out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: ErrTooLarge})
 }
 
-// OnEvent advances rounds on disk completions and retries a round the buffer pool could
-// not hold when the retry timer fires.
+// OnEvent advances rounds on disk completions.
 func (l *Log) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
-	switch ev.Kind {
-	case core.EvDiskDone:
+	if ev.Kind == core.EvDiskDone {
 		l.diskDone(ctx, ev.IO, ev.Err, out)
-	case core.EvTimer:
-		if ev.Timer == l.cfg.RetryTimer && l.retryArmed {
-			l.retryArmed = false
-			l.startRounds(ctx, out)
-		}
 	}
 }
 
@@ -535,7 +589,7 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 				return
 			}
 			r.writeDone = true
-			l.freeBufs(ctx, r)
+			l.freeWriteBufs(ctx, r)
 			if r.abandoned {
 				l.dropAbandoned()
 				return
@@ -554,11 +608,25 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 				l.fail(ctx, derr, out)
 				return
 			}
-			for range i + 1 {
+			if !r.writeDone {
+				l.fail(ctx, ErrFlushBeforeWrite, out)
+				return
+			}
+			for range i {
+				if l.round(0).flushSent {
+					l.stale = append(l.stale, l.round(0).flushIO)
+				}
 				l.retire(out)
 			}
+			l.retire(out)
 			l.startRounds(ctx, out)
 			return
+		}
+	}
+	if j := slices.Index(l.stale, io); j >= 0 {
+		l.stale = slices.Delete(l.stale, j, j+1)
+		if derr != core.DiskOK && l.err == nil {
+			l.fail(ctx, derr, out)
 		}
 	}
 }
@@ -566,8 +634,6 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 func (l *Log) formatDone(ctx *core.Context, io core.IOID, derr core.DiskError, out *Output) {
 	if derr != core.DiskOK {
 		l.phase = formatDone
-		ctx.Pool.Free(l.formatBuf)
-		l.formatBuf = core.NoBuf
 		l.fail(ctx, derr, out)
 		return
 	}
@@ -580,23 +646,22 @@ func (l *Log) formatDone(ctx *core.Context, io core.IOID, derr core.DiskError, o
 		return
 	}
 	l.phase = formatDone
-	ctx.Pool.Free(l.formatBuf)
-	l.formatBuf = core.NoBuf
 	l.startRounds(ctx, out)
 }
 
 func (l *Log) round(i int) *round { return &l.rounds[(l.first+i)%len(l.rounds)] }
 
-func (l *Log) freeBufs(ctx *core.Context, r *round) {
-	for _, b := range r.bufs {
+func (l *Log) freeWriteBufs(ctx *core.Context, r *round) {
+	for _, b := range r.writeBufs {
 		ctx.Pool.Free(b)
 	}
-	clear(r.bufs)
-	r.bufs = r.bufs[:0]
+	clear(r.writeBufs)
+	r.writeBufs = r.writeBufs[:0]
 }
 
 // sendFlushes submits the flush of every round whose write and every earlier round's
-// write have completed, so durability stays a prefix of the log.
+// write have completed, so durability stays a prefix of the log; such a flush is not
+// linked, since its write is already done.
 func (l *Log) sendFlushes(out *Output) {
 	for i := range l.count {
 		r := l.round(i)
@@ -624,14 +689,14 @@ func (l *Log) retire(out *Output) {
 	l.durableLSN = r.lsn
 	l.dur[r.stream] = r.after
 	l.replayBytes += r.bytes
-	out.emit(Event{
+	out.emitDurable(Event{
 		Kind:         Durable,
 		LSN:          r.lsn,
 		Segment:      r.segment,
 		Block:        r.block,
 		LBA:          l.sb.LBA(r.segment, r.block),
 		HeaderBlocks: r.headerBlocks,
-	}, r.entries, r.tickets)
+	}, r)
 	l.checkpointProgress(r, out)
 	l.first = (l.first + 1) % len(l.rounds)
 	l.count--
@@ -671,13 +736,17 @@ func (l *Log) fail(ctx *core.Context, err error, out *Output) {
 	ts := len(out.tickets)
 	for i := range l.count {
 		r := l.round(i)
-		out.tickets = append(out.tickets, r.tickets...)
+		for j, t := range r.tickets {
+			out.tickets = append(out.tickets, visible(t, &r.entries[j]))
+		}
 		r.abandoned = true
 	}
+	out.emitTickets(InDoubt, err, ts)
+	ts = len(out.tickets)
 	for s := range l.queues {
 		out.tickets = l.drain(ctx, Stream(s), out.tickets)
 	}
-	out.Events = append(out.Events, Event{Kind: Failed, Err: err, Tickets: out.tickets[ts:len(out.tickets):len(out.tickets)]})
+	out.emitTickets(Failed, err, ts)
 	if l.cp != nil {
 		l.cp = nil
 		out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: err})
@@ -696,7 +765,7 @@ func (l *Log) drain(ctx *core.Context, s Stream, tickets []Ticket) []Ticket {
 	q := &l.queues[s]
 	for i := range q.len() {
 		it := q.at(i)
-		tickets = append(tickets, it.ticket)
+		tickets = append(tickets, visible(it.ticket, &it.entry))
 		if it.buf != core.NoBuf {
 			ctx.Pool.Free(it.buf)
 		}
@@ -705,21 +774,23 @@ func (l *Log) drain(ctx *core.Context, s Stream, tickets []Ticket) []Ticket {
 	return tickets
 }
 
+// failNoSpace fails a whole stream's queue, even items behind its head that would fit,
+// since writing them first would break submit order, which a freeze before its write
+// relies on.
 func (l *Log) failNoSpace(ctx *core.Context, s Stream, out *Output) {
-	ts := len(out.tickets)
-	out.tickets = l.drain(ctx, s, out.tickets)
-	failed := out.tickets[ts:len(out.tickets):len(out.tickets)]
-	out.Events = append(out.Events, Event{Kind: Failed, Err: ErrNoSpace, Tickets: failed})
-	if l.cp == nil {
-		return
-	}
-	for _, t := range failed {
-		if l.cp.owns(t) {
-			l.cp = nil
-			out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: ErrNoSpace})
-			return
+	if l.cp != nil {
+		q := &l.queues[s]
+		for i := range q.len() {
+			if l.cp.owns(q.at(i).ticket) {
+				l.cp = nil
+				out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: ErrNoSpace})
+				break
+			}
 		}
 	}
+	ts := len(out.tickets)
+	out.tickets = l.drain(ctx, s, out.tickets)
+	out.emitTickets(Failed, ErrNoSpace, ts)
 }
 
 func (cp *checkpoint) owns(t Ticket) bool {
@@ -792,19 +863,17 @@ func (l *Log) startRounds(ctx *core.Context, out *Output) {
 		if !ok {
 			return
 		}
-		if !l.startRound(ctx, t, out) {
-			if !l.retryArmed {
-				l.retryArmed = true
-				out.Actions = append(out.Actions, core.Action{Kind: core.ActSetTimer, Timer: l.cfg.RetryTimer, At: ctx.Now + l.cfg.RetryDelay})
-			}
-			return
-		}
+		l.startRound(ctx, t, out)
 	}
 }
 
-func (l *Log) startRound(ctx *core.Context, t target, out *Output) bool {
+func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	q := &l.queues[t.stream]
-	limit := uint64(min(l.sb.SegmentBlocks-t.offset, l.maxRecBlocks))
+	lead := uint32(0)
+	if t.roll {
+		lead = 1
+	}
+	limit := uint64(min(l.sb.SegmentBlocks-t.offset, l.maxWrite-lead))
 	var acc layoutAcc
 	var lay Layout
 	n, writeBlocks := 0, uint32(0)
@@ -828,45 +897,50 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) bool {
 		panic("disklog: a round built a record with no entries")
 	}
 	items := q.window(n)
-	lead := uint32(0)
-	if t.roll {
-		lead = 1
-	}
-	head, err := ctx.Pool.Alloc(int(lead+lay.HeaderBlocks) * core.BlockSize)
-	if err != nil {
-		return false
-	}
-	tail := core.NoBuf
-	if tailBlocks := lay.DataBlocks - writeBlocks; tailBlocks > 0 {
-		if tail, err = ctx.Pool.Alloc(int(tailBlocks) * core.BlockSize); err != nil {
-			ctx.Pool.Free(head)
-			return false
-		}
-		l.fillTail(ctx, items, ctx.Pool.Bytes(tail))
-	}
-
 	slot := (l.first + l.count) % len(l.rounds)
 	r := &l.rounds[slot]
+	tailBlocks := lay.DataBlocks - writeBlocks
+	if tailBlocks > 0 {
+		l.fillTail(ctx, items, ctx.Pool.Bytes(r.tail)[:tailBlocks*core.BlockSize])
+	}
+
+	headLen := (lead + lay.HeaderBlocks) * core.BlockSize
 	r.entries = r.entries[:0]
 	r.tickets = r.tickets[:0]
-	r.bufs = append(r.bufs[:0], head)
+	r.payloads = r.payloads[:0]
+	r.writeBufs = r.writeBufs[:0]
+	r.vec = append(r.vec[:0], core.IOVec{Buf: r.head, Len: headLen})
 	l.crcs = l.crcs[:0]
+	var writeOff, blobOff uint64
 	for i := range items {
 		it := &items[i]
 		r.entries = append(r.entries, it.entry)
 		r.tickets = append(r.tickets, it.ticket)
-		if it.entry.Kind == EntryWrite {
-			r.bufs = append(r.bufs, it.buf)
+		switch it.entry.Kind {
+		case EntryWrite:
+			r.payloads = append(r.payloads, writeOff)
+			writeOff += uint64(it.entry.Count) * core.BlockSize
+			r.writeBufs = append(r.writeBufs, it.buf)
+			r.vec = append(r.vec, core.IOVec{Buf: it.buf, Len: uint32(it.entry.Count) * core.BlockSize})
 			l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(it.buf))
+		default:
+			r.payloads = append(r.payloads, blobOff)
+			blobOff += it.entry.Length
 		}
 	}
-	if tail != core.NoBuf {
-		r.bufs = append(r.bufs, tail)
-		l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(tail))
+	for i := range items {
+		if items[i].entry.Kind != EntryWrite {
+			r.payloads[i] += writeOff
+		}
+	}
+	if tailBlocks > 0 {
+		r.vec = append(r.vec, core.IOVec{Buf: r.tail, Len: tailBlocks * core.BlockSize})
+		l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(r.tail)[:tailBlocks*core.BlockSize])
 	}
 
 	rec := Record{Place: Place{LogID: l.sb.LogID, Seq: t.seq, Offset: t.offset}, LSN: l.nextLSN}
-	img := ctx.Pool.Bytes(head)[:0]
+	img := ctx.Pool.Bytes(r.head)[:0]
+	var err error
 	if t.roll {
 		img, err = AppendSegmentHeader(img, l.segmentHeader(t))
 		if err != nil {
@@ -877,10 +951,10 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) bool {
 		panic(fmt.Sprintf("disklog: record header does not encode: %v", err))
 	}
 	if l.breakEncoding != nil {
-		l.breakEncoding(ctx.Pool.Bytes(head))
+		l.breakEncoding(ctx.Pool.Bytes(r.head)[:headLen])
 	}
 	if l.cfg.Check {
-		l.check(ctx, t, rec, r.bufs, items)
+		l.check(ctx, t, rec, r.vec, items)
 	}
 	for i := range items {
 		if it := &items[i]; it.entry.Kind == EntryBlob && it.buf != core.NoBuf {
@@ -899,16 +973,20 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) bool {
 		lsn:          l.nextLSN,
 		writeIO:      l.io(),
 		flushIO:      l.io(),
+		flushSent:    l.earlierWritten(),
 		segment:      t.segment,
 		block:        t.offset,
 		headerBlocks: lay.HeaderBlocks,
 		after:        cursor{segment: t.segment, seq: t.seq, next: t.offset + uint32(lay.Blocks())},
 		bytes:        bytes,
-		bufs:         r.bufs,
+		head:         r.head,
+		tail:         r.tail,
+		vec:          r.vec,
+		writeBufs:    r.writeBufs,
 		entries:      r.entries,
 		tickets:      r.tickets,
+		payloads:     r.payloads,
 	}
-	r.flushSent = l.earlierWritten()
 	l.nextLSN++
 	l.asm[t.stream] = r.after
 	l.last = t.stream
@@ -917,13 +995,12 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) bool {
 		Kind: core.ActDiskWrite,
 		IO:   r.writeIO,
 		LBA:  l.sb.LBA(t.segment, t.offset-lead),
-		Bufs: r.bufs,
+		Vec:  r.vec,
 		Len:  bytes,
 	})
 	if r.flushSent {
-		out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskFsync, IO: r.flushIO})
+		out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskFsync, IO: r.flushIO, Linked: true})
 	}
-	return true
 }
 
 func (l *Log) segmentHeader(t target) SegmentHeader {
@@ -947,10 +1024,10 @@ func appendBlockCRCs(crcs []uint32, b []byte) []uint32 {
 	return crcs
 }
 
-func (l *Log) check(ctx *core.Context, t target, rec Record, bufs []core.IOBuf, items []queued) {
+func (l *Log) check(ctx *core.Context, t target, rec Record, vec []core.IOVec, items []queued) {
 	img := l.checkImg[:0]
-	for _, b := range bufs {
-		img = append(img, ctx.Pool.Bytes(b)...)
+	for _, v := range vec {
+		img = append(img, ctx.Pool.Bytes(v.Buf)[:v.Len]...)
 	}
 	l.checkImg = img
 	if t.roll {

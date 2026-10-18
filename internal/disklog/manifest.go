@@ -11,11 +11,10 @@ const (
 
 	manifestFixedSize = 2 + 8 + 8 + 2*8 + 4
 	manifestIndexSize = 4 + 8 + 4
-	pieceListSize     = 2
+	pieceListSize     = 2 + 2
 )
 
-// BlobRef names one blob entry of a durable record: the record's segment, block offset
-// and LSN, and the entry's index in it.
+// BlobRef names a blob entry of a durable record by the record's segment, block offset and LSN and the entry's index.
 type BlobRef struct {
 	Segment uint32
 	Block   uint32
@@ -23,23 +22,20 @@ type BlobRef struct {
 	Entry   uint16
 }
 
-// StreamStart is where a stream's next record went when a manifest's base was durable;
-// Segment 0 means the stream had no open segment.
+// StreamStart is where a stream's next record went at a manifest's base: Segment 0 means no open segment, and Block equal to the segment size means it was full.
 type StreamStart struct {
 	Segment uint32
 	Block   uint32
 }
 
-// ManifestIndex is one index's part of a manifest: the records after ReplayLSN replay
-// into it, on top of its runs, each named by the piece that lists the run's others.
+// ManifestIndex is an index's runs, each named by its last piece, and the LSN after which records replay into it.
 type ManifestIndex struct {
 	Owner     uint32
 	ReplayLSN uint64
 	Runs      []BlobRef
 }
 
-// Manifest is a checkpoint: each index's runs and replay point, and where each stream
-// stood at BaseLSN, the newest record every index's runs and replay together cover.
+// Manifest is a checkpoint: each index's runs and replay point, and where each stream stood at BaseLSN.
 type Manifest struct {
 	BaseLSN uint64
 	BaseSeq uint64
@@ -78,8 +74,7 @@ func ManifestSize(m *Manifest) int {
 	return n
 }
 
-// DecodeManifest decodes a manifest; the checksums of the records holding it already
-// vouch for the bytes, so any inconsistency is ErrMalformed.
+// DecodeManifest decodes a manifest, whose records' checksums already vouch for its bytes, so any inconsistency is ErrMalformed.
 func DecodeManifest(b []byte) (Manifest, error) {
 	r := reader{b: b}
 	if v := r.u16(); v != FormatVersion && !r.bad {
@@ -97,10 +92,15 @@ func DecodeManifest(b []byte) (Manifest, error) {
 		return Manifest{}, ErrMalformed
 	}
 	m.Indexes = make([]ManifestIndex, count)
+	owners := make(map[uint32]bool, count)
 	for i := range m.Indexes {
 		ix := &m.Indexes[i]
 		ix.Owner = r.u32()
 		ix.ReplayLSN = r.u64()
+		if owners[ix.Owner] || ix.ReplayLSN > m.BaseLSN {
+			return Manifest{}, ErrMalformed
+		}
+		owners[ix.Owner] = true
 		runs := r.u32()
 		if r.bad || uint64(runs)*BlobRefSize > uint64(r.left()) {
 			return Manifest{}, ErrMalformed
@@ -120,13 +120,12 @@ func DecodeManifest(b []byte) (Manifest, error) {
 	return m, nil
 }
 
-// AppendManifestPiece appends the last piece of a manifest: the references to the
-// pieces before it, in order, then the rest of the manifest's bytes. A manifest that
-// fits one blob is one such piece with no references.
+// AppendManifestPiece appends a manifest's last piece: a version, references to the earlier pieces in order, then the manifest's remaining bytes.
 func AppendManifestPiece(dst []byte, earlier []BlobRef, rest []byte) ([]byte, error) {
 	if len(earlier) > math.MaxUint16 {
 		return dst, ErrTooLarge
 	}
+	dst = binary.LittleEndian.AppendUint16(dst, FormatVersion)
 	dst = binary.LittleEndian.AppendUint16(dst, uint16(len(earlier)))
 	for _, r := range earlier {
 		dst = appendBlobRef(dst, r)
@@ -137,10 +136,12 @@ func AppendManifestPiece(dst []byte, earlier []BlobRef, rest []byte) ([]byte, er
 // ManifestPieceSize is the length of a last piece with earlier references and rest bytes.
 func ManifestPieceSize(earlier, rest int) int { return pieceListSize + BlobRefSize*earlier + rest }
 
-// DecodeManifestPiece splits a manifest's last piece into the references to the pieces
-// before it, appended to earlier, and the rest of the manifest's bytes.
+// DecodeManifestPiece splits a manifest's last piece into references to the earlier pieces, appended to earlier, and the remaining bytes.
 func DecodeManifestPiece(b []byte, earlier []BlobRef) ([]BlobRef, []byte, error) {
 	r := reader{b: b}
+	if v := r.u16(); v != FormatVersion && !r.bad {
+		return earlier, nil, ErrBadVersion
+	}
 	n := int(r.u16())
 	if r.bad || n*BlobRefSize > r.left() {
 		return earlier, nil, ErrMalformed

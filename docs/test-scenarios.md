@@ -156,60 +156,75 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   owner 1 with one run of one piece and replay LSN 70, owner 2 with no runs and replay LSN 77)
   round-trips. A trailing extra byte, or a truncation to 10 bytes, is Malformed. Each blob reference
   adds 18 bytes. A run of several pieces is one reference, to the piece that lists the others.
-- A manifest's last piece (a 2-byte count, an 18-byte reference to each earlier piece, then the rest
-  of the manifest's bytes) round-trips; a one-piece manifest has no references; a truncated list
-  is Malformed. Both decoders are fuzzed.
+- A manifest naming one owner twice, or a replay LSN past its base LSN, is Malformed.
+- A manifest's last piece (the format version, a 2-byte count, an 18-byte reference to each earlier
+  piece, then the rest of the manifest's bytes) round-trips; a one-piece manifest has no
+  references; a truncated list is Malformed and another version BadVersion. Both decoders are fuzzed.
 
 ## Group commit
 
-- Format writes the superblock to block 0, flushes, then writes the same buffer as the copy at the
-  last block of segment 0 (LBA 63 on 1 GiB), flushes, and then is idle. The buffer is freed, and IO
-  IDs count up from the caller's first ID.
+- Format takes each round slot's header and blob buffers from the pool for the log's lifetime
+  (with 1 MiB rounds on 1 GiB: 64 + 63 blocks per slot), writes the superblock to block 0, flushes,
+  then writes the same block as the copy at the last block of segment 0 (LBA 63), flushes, and is
+  idle. IO IDs count up from the caller's first ID. A pool too small for the slots' buffers fails
+  Format with PoolExhausted and leaves nothing allocated; a depth below 1 or rounds below 3 blocks
+  are BadConfig. Close returns every buffer, and refuses while a write or flush is in flight.
 - One write and one flush per round: the first submit starts round 1 at once; four items submitted
   while it is in flight (a 2-block write, blobs of 100 and 5,000 bytes, a whole-chunk punch) all go
-  into round 2. Disk trace: write, flush, write, flush. Durable reports LSN 1 with the first ticket
-  and LSN 2 with the four tickets in submit order. All pool buffers are released.
+  into round 2. Disk trace: write, linked flush, write, linked flush. Durable reports LSN 1 with the
+  first ticket and LSN 2 with the four tickets in submit order and their payload offsets in the
+  data area (0, 8,192, 8,292, 13,292). Every producer buffer is released.
 - Opening a segment: round 1 writes the segment header (segment 1, seq 1, hot) and the record
   together, starting at segment 1 block 0 (LBA 64); the record sits at block 1 and the data
   is the submitted bytes. Round 2 appends at block 3 (LBA 67) with LSN 2 and 4 entries.
 - Streams alternate when both have work, and each opens its own segment: with hot items A, B and a
   cold item queued behind round 1 (A), round 2 is the cold item (segment 2, LBA 128) and round 3 is
   hot B plus a later hot item (LBA 67). LSNs are global across streams.
-- Rounds stop at the maximum record size: with 3-block records a 3-block write is refused as
-  TooLarge at submit, 1-block writes pack two per record (LSN 2 = two items, LSN 3 = the third),
-  and the largest blob is 2 blocks.
+- Rounds stop at the maximum round size, segment header included: with 3-block rounds an item's
+  record may take 2 blocks, so a 3-block write and a blob over 1 block are refused as TooLarge at
+  submit; 1-block writes pack two per record once no segment header is needed (LSN 2 = two items,
+  LSN 3 = the third).
 - Full segment rolls, full disk fails: a 16-block disk has 3 usable 4-block segments; three 2-block
   writes fill one segment each (LBAs 4, 8, 12). The next write, even 1 block, fails at once with
-  NoSpace naming its ticket, and its buffer is freed.
+  NoSpace naming its ticket, and its buffer is freed. NoSpace fails the stream's whole queue, items
+  behind its head included, so items are never written out of submit order.
+- A full pool never stalls a round: with the pool holding only the log's buffers and eight 1-block
+  writes, so that nothing is free, all eight become durable.
 - A write or punch with zero blocks, or running past block 1,024 of its chunk, is refused (BadExtent)
   with no disk action.
-- A disk error fails the log: an Io error on the round's write fails the in-flight round and every
-  queued item in one Failed event (in-round tickets first), frees all buffers, and every later
-  submit is refused with that error.
-- Pool exhaustion retries: with a 3-block pool, the 1-block write's own buffer and one block the test
-  holds leave one block, and the round needs two (segment header and record header; the data block
-  is written from the producer's buffer), so it arms the retry timer at now + delay (TimerId 4,
-  delay 50) instead of writing. Once the test frees its block, the timer event starts the write and
-  the item becomes durable at LSN 1.
 - A refused item (a write buffer that is not exactly its blocks, a missing buffer, a blob longer than
   its buffer, a punch with a buffer, or a manifest blob kind, which only the log writes) leaves its
   buffer with the caller.
-- Commit depth 2: a hot and a cold write are submitted. Round 1's write goes out with its flush;
-  round 2's write goes out alone, since round 1's write has not completed. Round 2's write
-  completing sends nothing; round 1's completing sends round 2's flush. That flush completing makes
-  both rounds durable in LSN order, and round 1's own flush completing later changes nothing.
+- A disk error fails the log: an Io error on round 1's write reports its ticket InDoubt and the
+  queued items Failed, frees their buffers, and every later submit is refused with that error.
+  With depth 2, an error on round 2's write while round 1's is in flight reports both rounds
+  InDoubt (round 1 may still land) and the queued item Failed; round 1's buffers come back when its
+  write completes.
+- Driver faults fail the log: a flush reported before its write (ErrFlushBeforeWrite) leaves its
+  round InDoubt and frees the write's buffers when the write completes; an error on an earlier
+  round's flush that arrives after a later flush made both durable fails the log, and Close waits
+  for it.
+- Commit depth 2: a hot and a cold write are submitted. Round 1's write goes out with its linked
+  flush; round 2's write goes out alone, since round 1's write has not completed. Round 2's write
+  completing sends nothing; round 1's completing sends round 2's unlinked flush. That flush
+  completing makes both rounds durable in LSN order, and round 1's own flush completing later
+  changes nothing.
 - Regression (seed 1 of the property below): with round 1's write completed first, round 2's flush
   waits for round 2's own write; an unlinked flush covers only writes that have completed.
-- [property] Every accepted item reaches the disk as a record that decodes to it: 100 seeds; max
-  record 2..64 blocks; disk 16 blocks (1 in 4) or 1 GiB; commit depth 1-3; punch share 0-8 of 8;
-  1-1000 items to random streams, 1 in 8 sized near the record limit; completions interleaved at
-  random, a flush linked to the write before it running only after that write. Before each write
-  the log decodes its own bytes and checks they hold exactly the queued items. Every accepted ticket
-  ends Durable or Failed(NoSpace), and a Durable record read back from the disk holds its tickets'
-  entries and payloads; no record is reported durable before a flush that ran after its write
-  completed; LSNs are reported in order; there is one flush per write; the only refusal is
-  TooLarge; the pool ends with 0 live buffers. Coverage: NoSpace, TooLarge, deferred flushes and
-  depth above 1 all occur.
+- [property] Every accepted item ends durable in a record that decodes to it: 100 seeds; max round
+  3..64 blocks; disk 16 blocks (1 in 4) or 1 GiB; commit depth 1-3; max replay 4-200 blocks; a pool
+  of the log's buffers plus a round to 512 blocks; punch share 0-8 of 8; 1-1000 items to random
+  streams, 1 in 8 sized near the round limit; a checkpoint of owners 1 and 2 with 0-3 random pieces
+  whenever one is due; 1 seed in 8 fails one random disk action with Io; completions interleaved at
+  random, a linked flush running only after its write. Before each write the log decodes its own
+  bytes and checks they hold exactly the queued items. Every accepted ticket ends Durable, Failed
+  (NoSpace or Io) or InDoubt (Io); a Durable record read back from the disk holds its tickets'
+  entries and payloads at the reported offsets, and the log's own manifest pieces carry NoTicket;
+  no record is reported durable before a flush that ran after its write completed; LSNs are
+  reported in order; every finished checkpoint's manifest reads back with its base LSN and runs;
+  without an error there is one flush per write; the only refusal is TooLarge; Close then finds
+  every buffer back. Coverage: NoSpace, TooLarge, a full pool, InDoubt, deferred flushes, depth
+  above 1, finished and failed checkpoints all occur.
 - The decode check catches a broken encoder: an encoder that writes a wrong version into an entry
   and fixes the header checksum, or flips a padding bit, panics in the decode check on the
   property's seeds.
@@ -220,12 +235,13 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   pieces in one cold record (segment 2 block 1, entries 0 and 1); LSN 5 = the manifest, reported as
   CheckpointDone and kept as the newest manifest. The manifest has base LSN 2 (durable at begin, not
   the in-flight 3), base seq 1, hot start segment 1 block 9, no cold start, trees
-  [(5, [LSN4#0, LSN4#1]), (6, [])].
+  [(5, [LSN4#0, LSN4#1]), (6, [])]. The bytes left to replay are the 9 blocks of LSNs 3 to 5.
+- A checkpoint naming one owner twice, or a replay LSN past the durable LSN, is Malformed.
 - The next segment opened after a checkpoint (segment 3, filled by 40-block writes) carries the
   manifest's position in its header.
-- Manifest in pieces: with 3-block records (8 KiB max blob), a checkpoint of more runs than one blob
-  can name writes the manifest as several pieces, the last naming the others, and the next segment
-  header points at the last piece.
+- Manifest in pieces: with 3-block rounds (4 KiB max blob), a checkpoint of 500 runs writes the
+  manifest as several pieces, the last naming the others, and the next segment header points at
+  the last piece.
 - A checkpoint on a full disk: its piece fails with NoSpace, which also emits CheckpointFailed(NoSpace).
   End then says NoCheckpoint, and a new checkpoint can begin.
 

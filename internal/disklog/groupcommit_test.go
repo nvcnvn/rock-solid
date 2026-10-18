@@ -8,6 +8,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
 func TestFormatWritesBothSuperblocks(t *testing.T) {
@@ -28,6 +29,23 @@ func TestFormatWritesBothSuperblocks(t *testing.T) {
 		if err != nil || sb != want {
 			t.Fatalf("superblock at LBA %d: %+v, %v", lba, sb, err)
 		}
+	}
+	h.close()
+}
+
+func TestFormatRefusesBadSettingsAndASmallPool(t *testing.T) {
+	geo, _ := disklog.GeometryFor(gib)
+	sb := disklog.Superblock{LogID: testLogID, Geometry: geo}
+	var out disklog.Output
+	for _, cfg := range []disklog.Config{{MaxRecordBytes: 2 * core.BlockSize, CommitDepth: 1}, {MaxRecordBytes: 1 << 20}} {
+		pool := sim.NewPool(1<<20, 0)
+		if _, err := disklog.Format(&core.Context{Pool: pool}, cfg, sb, 1, &out); !errors.Is(err, disklog.ErrBadConfig) {
+			t.Fatalf("%+v: %v", cfg, err)
+		}
+	}
+	pool := sim.NewPool(100*core.BlockSize, 0)
+	if _, err := disklog.Format(&core.Context{Pool: pool}, testConfig(0), sb, 1, &out); !errors.Is(err, core.ErrPoolExhausted) || pool.Live() != 0 {
+		t.Fatalf("pool of 100 blocks for 127: %v, %d live", err, pool.Live())
 	}
 }
 
@@ -51,6 +69,9 @@ func TestOneWriteAndOneFlushPerRound(t *testing.T) {
 	}
 	if durable[1].LSN != 2 || !slices.Equal(durable[1].Tickets, []disklog.Ticket{b, c, d, e}) {
 		t.Fatalf("round 2: %+v", durable[1])
+	}
+	if !slices.Equal(durable[1].Payloads, []uint64{0, 8192, 8292, 13292}) {
+		t.Fatalf("round 2 payload offsets %v", durable[1].Payloads)
 	}
 	h.wantLive(0)
 
@@ -104,10 +125,10 @@ func TestRoundsStopAtTheMaximumRecord(t *testing.T) {
 		t.Fatalf("3-block write in 3-block records: %v", err)
 	}
 	h.pool.Free(big.Buf)
-	if h.log.MaxBlobBytes() != 2*core.BlockSize {
+	if h.log.MaxBlobBytes() != core.BlockSize {
 		t.Fatalf("largest blob %d", h.log.MaxBlobBytes())
 	}
-	tooBig := h.blob(disklog.BlobRaftEntries, 1, 2*core.BlockSize+1, 9)
+	tooBig := h.blob(disklog.BlobRaftEntries, 1, core.BlockSize+1, 9)
 	if _, err := h.log.Submit(&h.ctx, disklog.Hot, tooBig, &h.out); !errors.Is(err, disklog.ErrTooLarge) {
 		t.Fatalf("blob past the largest: %v", err)
 	}
@@ -145,7 +166,7 @@ func TestFullSegmentRollsAndFullDiskFails(t *testing.T) {
 	if len(h.pending) != 0 {
 		t.Fatalf("disk actions on a full disk: %+v", h.pending)
 	}
-	h.wantLive(0)
+	h.close()
 }
 
 func TestBadExtentIsRefused(t *testing.T) {
@@ -171,9 +192,10 @@ func TestDiskErrorFailsTheLog(t *testing.T) {
 	c := h.submit(disklog.Cold, h.blob(disklog.BlobRun, 5, 10, 3))
 	h.failIO[firstIO+4] = core.DiskIO
 	h.run()
-	failed := h.eventsOf(disklog.Failed)
-	if len(h.events) != 1 || len(failed) != 1 || !errors.Is(failed[0].Err, core.DiskIO) ||
-		!slices.Equal(failed[0].Tickets, []disklog.Ticket{a, b, c}) {
+	inDoubt, failed := h.eventsOf(disklog.InDoubt), h.eventsOf(disklog.Failed)
+	if len(h.events) != 2 || len(inDoubt) != 1 || len(failed) != 1 ||
+		!errors.Is(inDoubt[0].Err, core.DiskIO) || !slices.Equal(inDoubt[0].Tickets, []disklog.Ticket{a}) ||
+		!errors.Is(failed[0].Err, core.DiskIO) || !slices.Equal(failed[0].Tickets, []disklog.Ticket{b, c}) {
 		t.Fatalf("events %+v", h.events)
 	}
 	h.wantLive(0)
@@ -181,29 +203,95 @@ func TestDiskErrorFailsTheLog(t *testing.T) {
 	if _, err := h.log.Submit(&h.ctx, disklog.Hot, it, &h.out); !errors.Is(err, core.DiskIO) {
 		t.Fatalf("submit after failure: %v", err)
 	}
+	h.pool.Free(it.Buf)
 	if !errors.Is(h.log.Err(), core.DiskIO) {
 		t.Fatalf("log error %v", h.log.Err())
 	}
+	h.close()
 }
 
-func TestPoolExhaustionRetriesOnATimer(t *testing.T) {
-	h := newHarness(t, gib, 3*core.BlockSize, testConfig(0))
-	h.run()
-	h.trace = nil
-	it := h.write(0, 1, 1)
-	hog := h.alloc(core.BlockSize)
-	t1 := h.submit(disklog.Hot, it)
-	h.wantTrace("timer 4 at 1050")
-	h.pool.Free(hog)
-	h.ctx.Now = 1050
-	h.fireTimer()
-	h.wantTrace("timer 4 at 1050", "write 64+3 io104", "fsync io105")
-	h.run()
-	durable := h.eventsOf(disklog.Durable)
-	if len(durable) != 1 || durable[0].LSN != 1 || !slices.Equal(durable[0].Tickets, []disklog.Ticket{t1}) {
+func TestDiskErrorWithRoundsInFlight(t *testing.T) {
+	cfg := testConfig(0)
+	cfg.CommitDepth = 2
+	h := formatted(t, gib, cfg)
+	a := h.submit(disklog.Hot, h.write(0, 1, 1))
+	b := h.submit(disklog.Cold, h.write(1, 1, 2))
+	c := h.submit(disklog.Hot, h.write(2, 1, 3))
+	h.failIO[firstIO+6] = core.DiskIO
+	h.step(2)
+	inDoubt, failed := h.eventsOf(disklog.InDoubt), h.eventsOf(disklog.Failed)
+	if len(inDoubt) != 1 || !slices.Equal(inDoubt[0].Tickets, []disklog.Ticket{a, b}) ||
+		len(failed) != 1 || !slices.Equal(failed[0].Tickets, []disklog.Ticket{c}) {
 		t.Fatalf("events %+v", h.events)
 	}
-	h.wantLive(0)
+	if err := h.log.Close(&h.ctx); !errors.Is(err, disklog.ErrBusy) {
+		t.Fatalf("close with a write in flight: %v", err)
+	}
+	h.wantLive(1)
+	h.run()
+	if len(h.events) != 2 {
+		t.Fatalf("events after the failure: %+v", h.events)
+	}
+	h.close()
+}
+
+func TestAFlushBeforeItsWriteFailsTheLog(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	a := h.submit(disklog.Hot, h.write(0, 1, 1))
+	h.pending[1].linked = false
+	h.step(1)
+	inDoubt := h.eventsOf(disklog.InDoubt)
+	if len(inDoubt) != 1 || !errors.Is(inDoubt[0].Err, disklog.ErrFlushBeforeWrite) || !slices.Equal(inDoubt[0].Tickets, []disklog.Ticket{a}) {
+		t.Fatalf("events %+v", h.events)
+	}
+	h.wantLive(1)
+	h.run()
+	h.close()
+}
+
+func TestAnErrorOnALaterFlushFailsTheLog(t *testing.T) {
+	cfg := testConfig(0)
+	cfg.CommitDepth = 2
+	h := formatted(t, gib, cfg)
+	h.submit(disklog.Hot, h.write(0, 1, 1))
+	h.submit(disklog.Cold, h.write(1, 1, 2))
+	h.step(0)
+	h.step(1)
+	h.failIO[firstIO+5] = core.DiskIO
+	h.step(1)
+	if len(h.eventsOf(disklog.Durable)) != 2 || h.log.Err() != nil {
+		t.Fatalf("events %+v", h.events)
+	}
+	if err := h.log.Close(&h.ctx); !errors.Is(err, disklog.ErrBusy) {
+		t.Fatalf("close with a flush outstanding: %v", err)
+	}
+	h.step(0)
+	if !errors.Is(h.log.Err(), core.DiskIO) {
+		t.Fatalf("a failed earlier flush left the log at %v", h.log.Err())
+	}
+	h.close()
+}
+
+func TestAFullPoolNeverStallsARound(t *testing.T) {
+	const own = 64 + 63
+	h := newHarness(t, gib, (own+8)*core.BlockSize, testConfig(0))
+	h.run()
+	var tickets []disklog.Ticket
+	for i := range 8 {
+		tickets = append(tickets, h.submit(disklog.Hot, h.write(uint32(i), 1, uint64(i))))
+	}
+	if h.pool.Available() != 0 {
+		t.Fatalf("%d bytes left in the pool", h.pool.Available())
+	}
+	h.run()
+	var durable []disklog.Ticket
+	for _, ev := range h.eventsOf(disklog.Durable) {
+		durable = append(durable, ev.Tickets...)
+	}
+	if !slices.Equal(durable, tickets) {
+		t.Fatalf("durable %v, want %v", durable, tickets)
+	}
+	h.close()
 }
 
 func TestCommitDepthWaitsForEarlierWritesBeforeAFlush(t *testing.T) {
@@ -226,6 +314,7 @@ func TestCommitDepthWaitsForEarlierWritesBeforeAFlush(t *testing.T) {
 	if len(h.events) != 2 || h.writes != h.fsyncs {
 		t.Fatalf("events %+v, %d writes and %d flushes", h.events, h.writes, h.fsyncs)
 	}
+	h.close()
 }
 
 // Seed 1 of TestEveryAcceptedItemDecodes once flushed a round as soon as the rounds before
@@ -315,6 +404,9 @@ func TestCheckpointEndToEnd(t *testing.T) {
 	if !manifestsEqual(got, want) {
 		t.Fatalf("manifest\n got %+v\nwant %+v", got, want)
 	}
+	if h.log.ReplayBytes() != 9*core.BlockSize {
+		t.Fatalf("%d bytes to replay after the manifest's base, want the 9 blocks of LSNs 3 to 5", h.log.ReplayBytes())
+	}
 	h.wantLive(0)
 
 	for i := range 2 {
@@ -363,12 +455,21 @@ func TestManifestLargerThanARecordGoesInPieces(t *testing.T) {
 	if len(m.Indexes) != 1 || len(m.Indexes[0].Runs) != runs {
 		t.Fatalf("manifest holds %+v", m.Indexes)
 	}
+	for _, ev := range h.eventsOf(disklog.Durable) {
+		for i, e := range ev.Entries {
+			if e.BlobKind == disklog.BlobManifest || e.BlobKind == disklog.BlobManifestPiece {
+				if ev.Tickets[i] != disklog.NoTicket {
+					t.Fatalf("manifest piece reported with ticket %d", ev.Tickets[i])
+				}
+			}
+		}
+	}
 	h.submit(disklog.Hot, h.write(0, 1, 1))
 	h.run()
 	if sh := h.segmentHeader(last.Segment + 1); sh.Stream != disklog.Hot || sh.Manifest != done[0].Manifest {
 		t.Fatalf("next segment header %+v, want manifest %+v", sh, done[0].Manifest)
 	}
-	h.wantLive(0)
+	h.close()
 }
 
 func TestCheckpointOnAFullDiskFails(t *testing.T) {
@@ -397,7 +498,16 @@ func TestCheckpointOnAFullDiskFails(t *testing.T) {
 	if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: 5, ReplayLSN: 3}}); err != nil {
 		t.Fatalf("begin after failure: %v", err)
 	}
-	h.wantLive(0)
+	h.close()
+}
+
+func TestBeginCheckpointRefusesDuplicateOwnersAndLateReplay(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	for _, ixs := range [][]disklog.CheckpointIndex{{{Owner: 5}, {Owner: 5}}, {{Owner: 5, ReplayLSN: 1}}} {
+		if err := h.log.BeginCheckpoint(ixs); !errors.Is(err, disklog.ErrMalformed) {
+			t.Fatalf("%+v: %v", ixs, err)
+		}
+	}
 }
 
 func TestSubmitRefusesBadBuffersAndReservedKinds(t *testing.T) {
@@ -420,7 +530,7 @@ func TestSubmitRefusesBadBuffersAndReservedKinds(t *testing.T) {
 		}
 	}
 	h.pool.Free(two)
-	h.wantLive(0)
+	h.close()
 }
 
 // readManifest reads the manifest whose last piece is the blob of a Durable record,

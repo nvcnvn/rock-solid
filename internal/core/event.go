@@ -159,21 +159,25 @@ const (
 	ActSetTimer
 )
 
-// Action is one output of a state machine, executed by a driver. A DiskWrite gathers
-// Bufs in order; a DiskRead fills Buf; Len is in bytes; a SetTimer re-arms Timer at At.
-// A DiskFsync makes durable every write completed before it runs; one that directly
-// follows a DiskWrite in the same output is linked to it and runs once that write completes.
+// IOVec is the first Len bytes of a pool buffer, one element of a vectored write.
+type IOVec struct {
+	Buf IOBuf
+	Len uint32
+}
+
+// Action is one output of a state machine, executed by a driver: a DiskWrite gathers Vec, or Buf when Vec is empty; a DiskRead fills Buf; Len is in bytes; a SetTimer re-arms Timer at At; a DiskFsync makes durable every write completed before it runs, and with Linked set runs only once the DiskWrite just before it in the same output completes.
 type Action struct {
-	Kind  ActionKind
-	Peer  NodeID
-	Msg   Msg
-	IO    IOID
-	LBA   LBA
-	Buf   IOBuf
-	Bufs  []IOBuf
-	Len   uint64
-	Timer TimerID
-	At    Tick
+	Kind   ActionKind
+	Peer   NodeID
+	Msg    Msg
+	IO     IOID
+	LBA    LBA
+	Buf    IOBuf
+	Vec    []IOVec
+	Len    uint64
+	Linked bool
+	Timer  TimerID
+	At     Tick
 }
 
 // Context is what a state machine may read besides its event: the time and the pool.

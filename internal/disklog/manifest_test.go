@@ -62,6 +62,23 @@ func TestManifestPieceRoundTrip(t *testing.T) {
 	if _, _, err := disklog.DecodeManifestPiece(b[:20], nil); !errors.Is(err, disklog.ErrMalformed) {
 		t.Fatalf("truncated: %v", err)
 	}
+	b[0]++
+	if _, _, err := disklog.DecodeManifestPiece(b, nil); !errors.Is(err, disklog.ErrBadVersion) {
+		t.Fatalf("other version: %v", err)
+	}
+}
+
+func TestManifestRejectsDuplicateOwnersAndLateReplay(t *testing.T) {
+	m := sampleManifest()
+	m.Indexes[1].Owner = 1
+	if _, err := disklog.DecodeManifest(disklog.AppendManifest(nil, &m)); !errors.Is(err, disklog.ErrMalformed) {
+		t.Fatalf("duplicate owner: %v", err)
+	}
+	m = sampleManifest()
+	m.Indexes[0].ReplayLSN = m.BaseLSN + 1
+	if _, err := disklog.DecodeManifest(disklog.AppendManifest(nil, &m)); !errors.Is(err, disklog.ErrMalformed) {
+		t.Fatalf("replay LSN past the base: %v", err)
+	}
 }
 
 func FuzzDecodeManifest(f *testing.F) {
@@ -82,7 +99,7 @@ func FuzzDecodeManifest(f *testing.F) {
 func FuzzDecodeManifestPiece(f *testing.F) {
 	b, _ := disklog.AppendManifestPiece(nil, []disklog.BlobRef{{Segment: 2, Block: 1, LSN: 4}}, []byte("rest"))
 	f.Add(b)
-	f.Add([]byte{0, 0})
+	f.Add([]byte{1, 0, 0, 0})
 	f.Fuzz(func(t *testing.T, b []byte) {
 		refs, rest, err := disklog.DecodeManifestPiece(b, nil)
 		if err != nil {

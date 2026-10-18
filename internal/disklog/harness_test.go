@@ -12,11 +12,9 @@ import (
 )
 
 const (
-	testLogID  = 0x0123456789abcdef
-	gib        = 1 << 30
-	firstIO    = 100
-	retryTimer = 4
-	retryDelay = 50
+	testLogID = 0x0123456789abcdef
+	gib       = 1 << 30
+	firstIO   = 100
 )
 
 type pendingIO struct {
@@ -39,9 +37,10 @@ type harness struct {
 	trace   []string
 	events  []disklog.Event
 	failIO  map[core.IOID]core.DiskError
-	timer   bool
+	own     int
 
 	completed map[core.IOID]bool
+	done      []core.IOID
 	durable   map[core.IOID]bool
 	writeAt   map[core.LBA]core.IOID
 	writes    int
@@ -66,13 +65,12 @@ func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Confi
 		writeAt:   map[core.LBA]core.IOID{},
 	}
 	h.ctx = core.Context{Now: 1000, Pool: h.pool}
-	cfg.RetryTimer = retryTimer
-	cfg.RetryDelay = retryDelay
 	cfg.Check = true
 	h.log, err = disklog.Format(&h.ctx, cfg, disklog.Superblock{LogID: testLogID, Geometry: geo}, firstIO, &h.out)
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.own = h.pool.Live()
 	h.absorb()
 	return h
 }
@@ -99,7 +97,7 @@ func (h *harness) absorb() {
 		switch a.Kind {
 		case core.ActDiskWrite:
 			p := pendingIO{act: a}
-			p.act.Bufs = slices.Clone(a.Bufs)
+			p.act.Vec = slices.Clone(a.Vec)
 			h.pending = append(h.pending, p)
 			blocks := a.Len / core.BlockSize
 			h.trace = append(h.trace, fmt.Sprintf("write %d+%d io%d", a.LBA, blocks, a.IO))
@@ -107,7 +105,10 @@ func (h *harness) absorb() {
 			h.writes++
 		case core.ActDiskFsync:
 			p := pendingIO{act: a}
-			if i > 0 && h.out.Actions[i-1].Kind == core.ActDiskWrite {
+			if a.Linked {
+				if i == 0 || h.out.Actions[i-1].Kind != core.ActDiskWrite {
+					h.t.Fatalf("linked flush io%d does not follow a write", a.IO)
+				}
 				p.linked, p.link = true, h.out.Actions[i-1].IO
 			} else {
 				h.unlinked++
@@ -115,9 +116,6 @@ func (h *harness) absorb() {
 			h.pending = append(h.pending, p)
 			h.trace = append(h.trace, fmt.Sprintf("fsync io%d", a.IO))
 			h.fsyncs++
-		case core.ActSetTimer:
-			h.trace = append(h.trace, fmt.Sprintf("timer %d at %d", a.Timer, a.At))
-			h.timer = true
 		default:
 			h.t.Fatalf("unexpected action %+v", a)
 		}
@@ -150,9 +148,10 @@ func (h *harness) step(i int) {
 			h.applyWrite(p.act)
 		}
 		h.completed[p.act.IO] = true
+		h.done = append(h.done, p.act.IO)
 	case core.ActDiskFsync:
 		if derr == core.DiskOK {
-			for io := range h.completed {
+			for _, io := range h.done {
 				h.durable[io] = true
 			}
 		}
@@ -165,8 +164,8 @@ func (h *harness) applyWrite(a core.Action) {
 	if a.Buf != core.NoBuf {
 		img = append(img, h.pool.Bytes(a.Buf)...)
 	}
-	for _, b := range a.Bufs {
-		img = append(img, h.pool.Bytes(b)...)
+	for _, v := range a.Vec {
+		img = append(img, h.pool.Bytes(v.Buf)[:v.Len]...)
 	}
 	if uint64(len(img)) != a.Len {
 		h.t.Fatalf("write io%d gathers %d bytes, says %d", a.IO, len(img), a.Len)
@@ -179,11 +178,6 @@ func (h *harness) applyWrite(a core.Action) {
 func (h *harness) feed(ev core.Event) {
 	h.log.OnEvent(&h.ctx, &ev, &h.out)
 	h.absorb()
-}
-
-func (h *harness) fireTimer() {
-	h.timer = false
-	h.feed(core.Event{Kind: core.EvTimer, Timer: retryTimer})
 }
 
 // run executes pending actions oldest first until none is left.
@@ -307,9 +301,21 @@ func (h *harness) wantTrace(want ...string) {
 	}
 }
 
+// wantLive checks the pool buffers live besides the log's own.
 func (h *harness) wantLive(n int) {
 	h.t.Helper()
-	if h.pool.Live() != n {
-		h.t.Fatalf("%d pool buffers live, want %d", h.pool.Live(), n)
+	if got := h.pool.Live() - h.own; got != n {
+		h.t.Fatalf("%d pool buffers live besides the log's %d, want %d", got, h.own, n)
+	}
+}
+
+// close closes the log and checks every buffer is back in the pool.
+func (h *harness) close() {
+	h.t.Helper()
+	if err := h.log.Close(&h.ctx); err != nil {
+		h.t.Fatalf("close: %v", err)
+	}
+	if h.pool.Live() != 0 {
+		h.t.Fatalf("%d pool buffers live after close", h.pool.Live())
 	}
 }

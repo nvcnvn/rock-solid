@@ -208,7 +208,7 @@ func (w *writer) drain(ctx core.Context, out []core.Action) []core.Action {
 		w.queued--
 		w.lastIO++
 		w.pending = append(w.pending, pendingWrite{io: w.lastIO, buf: buf})
-		out = append(out, core.Action{Kind: core.ActDiskWrite, IO: w.lastIO, Bufs: []core.IOBuf{buf}, Len: core.BlockSize})
+		out = append(out, core.Action{Kind: core.ActDiskWrite, IO: w.lastIO, Vec: []core.IOVec{{Buf: buf, Len: core.BlockSize}}, Len: core.BlockSize})
 	}
 	return out
 }
@@ -221,10 +221,10 @@ func TestExhaustionIsAnOrdinaryOutcome(t *testing.T) {
 		event core.Event
 		want  []core.Action
 	}{
-		{now: 100, want: []core.Action{{Kind: core.ActDiskWrite, IO: 1, Bufs: []core.IOBuf{{Slot: 0, Gen: 1}}, Len: core.BlockSize}}},
+		{now: 100, want: []core.Action{{Kind: core.ActDiskWrite, IO: 1, Vec: []core.IOVec{{Buf: core.IOBuf{Slot: 0, Gen: 1}, Len: core.BlockSize}}, Len: core.BlockSize}}},
 		{now: 105, want: []core.Action{{Kind: core.ActSetTimer, Timer: retryTimer, At: 115}}},
 		{now: 115, event: core.Event{Kind: core.EvTimer, Timer: retryTimer}, want: []core.Action{{Kind: core.ActSetTimer, Timer: retryTimer, At: 125}}},
-		{now: 120, event: core.Event{Kind: core.EvDiskDone, IO: 1}, want: []core.Action{{Kind: core.ActDiskWrite, IO: 2, Bufs: []core.IOBuf{{Slot: 0, Gen: 2}}, Len: core.BlockSize}}},
+		{now: 120, event: core.Event{Kind: core.EvDiskDone, IO: 1}, want: []core.Action{{Kind: core.ActDiskWrite, IO: 2, Vec: []core.IOVec{{Buf: core.IOBuf{Slot: 0, Gen: 2}, Len: core.BlockSize}}, Len: core.BlockSize}}},
 		{now: 125, event: core.Event{Kind: core.EvTimer, Timer: retryTimer}},
 		{now: 130, event: core.Event{Kind: core.EvDiskDone, IO: 2}},
 	}
