@@ -137,6 +137,8 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   when some sector did not land.
 - Any single corrupted byte (XOR 0x10 at every offset of a 1-write, 2-data-block record) is rejected
   (RocksDB ChecksumMismatch).
+- A freeze entry (pool 1, chunk (2,3,4), version 5, snapshot epoch 9) round-trips, adds no data block,
+  and may share a record with writes, punches and blobs.
 - An unknown entry tag (100) with a recomputed header CRC is Malformed (RocksDB BadRecordType).
 - A header-block count that disagrees with the entries, CRC recomputed, is Malformed (BadLength).
 - Truncated images (0, 4, 48, 4,096 bytes, and all but the last byte) are rejected (TruncatedTrailingRecord).
@@ -150,9 +152,10 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
 
 ## Manifest codec
 
-- A manifest (base LSN 77, base seq 5, hot start at segment 3 block 17, no cold start, two trees:
-  owner 1 with one blob reference, owner 2 with none) round-trips. A trailing extra byte, or a
-  truncation to 10 bytes, is Malformed. Each blob reference adds 18 bytes.
+- A manifest (base LSN 77, base seq 5, hot start at segment 3 block 17, no cold start, two indexes:
+  owner 1 with one run of one piece and replay LSN 70, owner 2 with no runs and replay LSN 77)
+  round-trips. A trailing extra byte, or a truncation to 10 bytes, is Malformed. Each blob reference
+  adds 18 bytes. A run of several pieces is one reference, to the piece that lists the others.
 
 ## Group commit
 
@@ -200,17 +203,18 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   [(5, [LSN4#0, LSN4#1]), (6, [])].
 - The next segment opened after a checkpoint (segment 3, filled by 40-block writes) carries the
   manifest's position in its header.
-- Manifest capacity: with 3-block records (8 KiB max blob), exactly
-  (max blob - empty manifest length) / 18 one-byte pieces are accepted. The next one fails with
-  TooLarge and ends the checkpoint (end then says NoCheckpoint), and a new checkpoint can begin.
+- Manifest in pieces: with 3-block records (8 KiB max blob), a checkpoint of more runs than one blob
+  can name writes the manifest as several pieces, the last naming the others, and the next segment
+  header points at the last piece. Recovery from it equals recovery from a one-piece manifest, and
+  a crash that lands all but the last piece recovers from the previous manifest.
 - A checkpoint on a full disk: its piece fails with NoSpace, which also emits CheckpointFailed(NoSpace).
   End then says NoCheckpoint, and a new checkpoint can begin.
 
 ## Recovery
 
-All recovery scenarios run against the simulated disk. "Open" = replay-mode recovery: restore the
-chunk index from its snapshot, replay the records after it, resume group commit. "Rebuild" = recovery that ignores manifests and returns
-every record header.
+All recovery scenarios run against the simulated disk. "Open" = replay-mode recovery: load the chunk
+index's runs, replay the records after its replay LSN, resume group commit. "Rebuild" = recovery that
+ignores manifests and returns every record header.
 
 - Empty log: a freshly formatted disk recovers with no records and no snapshots; the first new write
   gets LSN 1 (RocksDB Empty).
@@ -245,7 +249,7 @@ every record header.
   acknowledged records. The index from recovery and the index from rebuild both equal the live index,
   and every mapped extent reads back its written pattern (RocksDB ReadWrite/ManyBlocks/Fragmentation).
 - Checkpoints bound replay: max replay 40 blocks, 120 writes of 1-4 blocks over 16 chunks with a
-  whole-chunk punch every 7th, unlimited or 512-byte snapshot pieces. At least 5 checkpoints complete.
+  whole-chunk punch every 7th, unlimited or 512-byte run pieces. At least 5 checkpoints complete.
   Reopen loads several pieces only with the 512-byte limit, and replays at most max replay + one
   segment + 1 MiB. Index, rebuild and read-back all match.
 - Read errors: if reads of both block 0 and the superblock copy fail with Io, recovery ends with
@@ -284,33 +288,53 @@ every record header.
   (any segment sequence). A damaged header over a segment with no records counts as free.
 - Replay through a quarantined segment is corruption: 64K-block disk, 60 one-block writes. Damaging
   the header of LSN 1's segment gives Corrupt(LSN 1), a gap at the start. Damaging the newest
-  segment's header (several records) gives Corrupt(first LSN in it): more than one lost record
-  cannot be the round in flight. Losing only one is allowed.
+  segment's header (several records) gives Corrupt(first LSN in it): more than `commit_depth` (1)
+  lost records cannot be rounds in flight. Losing only one is allowed.
 
-## LSM tree, stage 1
+## LSM tree
 
 - Get, replace and prefix scan: keys "ab", "a", "abc", "b", "aa": scan "a" returns a, aa, ab, abc in
   order; scan "ab" returns 2; inserting "b" again replaces its value and leaves 5 entries.
-- [property] Snapshot/restore at any piece size: seed 11, 50 trees from up to 200 random inserts and
+- [property] Flush to a run at any piece size: seed 11, 50 trees from up to 200 random inserts and
   removes (keys 1-40 B, values 0-59 B), max piece 106-4,105 B. Every piece is non-empty, within the
-  limit and sized exactly. Restoring into a non-empty tree replaces its contents and equals the original.
-- [property] A snapshot keeps its frozen view: seed 12, 200 trees from up to 300 mutations (keys 1-3 B,
+  limit and sized exactly. Loading the pieces as a run into an empty tree and reading every key
+  equals the original.
+- [property] A flush keeps its frozen view: seed 12, 200 trees from up to 300 mutations (keys 1-3 B,
   1/4 removes), max piece 70-569 B. Up to 20 random inserts/removes run between pieces, on keys before
-  and after the cursor. The restored pieces equal the tree as of the freeze, and the snapshot is
-  closed after the last piece.
-- Restore rejects a truncated piece (last byte removed) as Malformed.
+  and after the cursor, into the new memtable. The run equals the tree as of the freeze, the frozen
+  pages are freed after the last piece, and the tree still answers every key.
+- Memtable over runs: after a flush, a key only in the run reads from the run; a key written after the
+  flush reads the memtable's value; a key removed after the flush reads as absent; a scan merges the
+  memtable and runs in key order with no duplicates. A get touches the memtable and each run at most once.
+- Compaction: three runs with overlapping keys merge into one run equal to their merge, newest value
+  winning and removed keys dropped. A view opened before the compaction still reads the three runs, and
+  the old runs are released only after that view closes.
+- Restore is runs plus replay: after two flushes and more writes, loading both runs and replaying the
+  later records equals the live tree.
+- Loading a truncated piece (last byte removed) is Malformed.
 
 ## Chunk index
 
 - [property] Key byte order equals logical order: seed 21, 5,000 random key pairs. Comparing encoded
-  keys (pool | XXH3 of chunk | chunk | version | first block, all big-endian, 38 bytes) matches
-  comparing the tuple. Keys round-trip.
-- Applying a durable record at LBA 100 (one header block) with a 2-block write of chunk 7 v1, a blob,
-  a 1-block write of chunk 7 v2 at block 5, and a whole-chunk punch of chunk 8 v3 maps:
-  chunk 7 v1 to data at LBA 101 (2 blocks), chunk 7 v2 to data at LBA 103 (writes are packed before
-  blobs), both with header LBA 100; chunk 8 v3 to Zero(1,024 blocks, header 100). Blobs are skipped.
-  Listing a chunk returns its extents ordered by version then first block.
-- A later record with the same extent key moves the extent to its new location (LBA 200: data 201).
+  keys (pool | XXH3 of chunk | chunk | frozen version, 0 for the live map | first block, all
+  big-endian, 38 bytes) matches comparing the tuple. Keys round-trip, and a chunk's entry sorts
+  before its live map, which sorts before its frozen maps.
+- Applying a durable record at LBA 100 (one header block) with a 2-block write of chunk 7 v1 at
+  block 0, a blob, a 1-block write of chunk 7 v2 at block 5, and a whole-chunk punch of chunk 8 v3
+  maps: chunk 7's live map to data at LBA 101 (blocks 0-1, v1) and LBA 103 (block 5, v2; writes are
+  packed before blobs), both with header LBA 100, and its chunk entry to version 2; chunk 8's live
+  map to Zero(1,024 blocks, header 100) and its entry to version 3. Blobs are skipped. Listing a
+  chunk returns its live extents by first block.
+- Trim and split: a 1-block write of chunk 7 v3 at block 1 leaves the live map as block 0 (v1,
+  LBA 101), block 1 (v3) and block 5 (v2); a 4-block write v4 at blocks 0-3 leaves blocks 0-3 (v4)
+  and block 5 (v2). The live counts of the records that lost blocks fall by the blocks trimmed, and
+  the live map never holds two entries for one block.
+- Freeze: a record with freeze(chunk 7, v4, epoch 2) and a 1-block write v5 at block 2 copies the live
+  map under key version 4 before applying the write. A read of block 2 at snapshot epoch 1 finds v4's
+  block, the live read finds v5's, and a read at epoch 3 reads the live map. The chunk entry holds
+  version 5 and epoch 2. A rebuild from headers in LSN order gives identical live and frozen maps.
+- A cleaner move (same chunk, same blocks, new location LBA 200: data 201) applies only if the live
+  or frozen entry still points at the location it copied; otherwise it is dropped.
 
 ## Simulated disk
 
@@ -334,7 +358,8 @@ The seeded runs, each described in its section above:
   contents), seed 5 (torn 512-byte sectors, 300 records).
 
 The simulation node harness: it applies every Durable record to the chunk
-index. It starts a checkpoint whenever one is due, freezes the index, hands one snapshot piece at a
-time, and the next only after the previous piece is durable. It ends the checkpoint after the last
-piece, and on CheckpointFailed drops the snapshot and stops checkpointing. Write payloads are a
+index. It starts a checkpoint whenever one is due, freezes the index's memtable, hands one run piece
+at a time, and the next only after the previous piece is durable. It ends the checkpoint after the
+last piece, and on CheckpointFailed keeps the frozen memtable for the next attempt and stops
+checkpointing. Write payloads are a
 pattern derived from (chunk hash, version, block), so any extent can be checked by reading it back.
