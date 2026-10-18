@@ -18,16 +18,16 @@ Items are in build order within a phase. An item can start once the items it use
 **Tooling**
 
 - [x] **Module, toolchain and lint** (lib). One Go module pinned with `toolchain go1.27.0`; `scripts/lint.sh` runs `gofmt`, `go vet`, `staticcheck`, `govulncheck` and a dependency license check.
-- [ ] **Sans-IO analyzer** (lib, `tools/sansio`). A `go/analysis` pass that `scripts/lint.sh` runs through `go vet -vettool` on every sans-IO package ([rules for state machines](design.md#modularity-sans-io-core-pluggable-drivers)). Review when it rejects a planted `range` over a map, `time.Now`, `go` statement, channel, `sync` import and global `math/rand` call in `internal/core`, and accepts the same code in a test file and in `internal/loop`.
+- [x] **Sans-IO analyzer** (lib, `tools/sansio`). A `go/analysis` pass that `scripts/lint.sh` runs through `go vet -vettool` on every sans-IO package ([rules for state machines](design.md#modularity-sans-io-core-pluggable-drivers)). Review when it rejects a planted `range` over a map, `time.Now`, `go` statement, channel, `sync` import and global `math/rand` call in `internal/core`, and accepts the same code in a test file and in `internal/loop`.
 
 **Foundations** (`internal/core`)
 
-- [ ] **Event and Action types** (component). `Tick`, `IOID`, `TimerID`, `NodeID`, `Context`, `Event`, `Action` as in [Modularity](design.md#modularity-sans-io-core-pluggable-drivers). `DiskWrite` takes a vector of buffers, so group commit writes producers' buffers in place without copying them into one image. Review when the three driver-contract rules are expressible: data travels only as `IOBuf` handles, control messages of 256 bytes or less go inline, and a `PeerLost` fails a peer's outstanding requests.
-- [ ] **Buffer pool interface** (component; heap pool in `internal/sim`). `IOBuf` handles of a slot and a generation, from a pool of explicit size. Review when an exhausted pool is an error the caller handles, never a panic or a heap fallback, and a stale handle is caught.
-- [ ] **Seeded RNG** (lib). `math/rand/v2` with a seeded PCG or ChaCha8 source per state machine, and a golden stream checked in.
-- [ ] **IDs and hashing** (lib). 128-bit `ChunkID` packing and the PG hash (`xxh3_64`, seed 0, top bits) from the [key layout](design.md#metadata-layer-metastore) and [placement groups](design.md#data-layer-chunkstore). Both are frozen disk format: the test reads `internal/core/testdata/chunk_id_golden.txt` unchanged.
-- [ ] **CRC32C** (lib). `hash/crc32` with the Castagnoli table; review with the RFC 3720 test vectors.
-- [ ] **Peer requests** (component). Outstanding requests per peer with their deadlines and buffers: a timeout keeps the buffer, `PeerLost` fails them all and returns their buffers, and a stale `Timer` is ignored.
+- [x] **Event and Action types** (component). `Tick`, `IOID`, `TimerID`, `NodeID`, `Context`, `Event`, `Action` as in [Modularity](design.md#modularity-sans-io-core-pluggable-drivers). `DiskWrite` takes a vector of buffers, so group commit writes producers' buffers in place without copying them into one image. Review when the three driver-contract rules are expressible: data travels only as `IOBuf` handles, control messages of 256 bytes or less go inline, and a `PeerLost` fails a peer's outstanding requests.
+- [x] **Buffer pool interface** (component; heap pool in `internal/sim`). `IOBuf` handles of a slot and a generation, from a pool of explicit size. Review when an exhausted pool is an error the caller handles, never a panic or a heap fallback, and a stale handle is caught.
+- [x] **Seeded RNG** (lib). `math/rand/v2` with a seeded PCG or ChaCha8 source per state machine, and a golden stream checked in.
+- [x] **IDs and hashing** (lib). 128-bit `ChunkID` packing and the PG hash (`xxh3_64`, seed 0, top bits) from the [key layout](design.md#metadata-layer-metastore) and [placement groups](design.md#data-layer-chunkstore). Both are frozen disk format: the test reads `internal/core/testdata/chunk_id_golden.txt` unchanged.
+- [x] **CRC32C** (lib). `hash/crc32` with the Castagnoli table; review with the RFC 3720 test vectors.
+- [x] **Peer requests** (component). Outstanding requests per peer with their deadlines and buffers: a timeout keeps the buffer, `PeerLost` fails them all and returns their buffers, and a stale `Timer` is ignored.
 
 **Disk log** (`internal/disklog`; [On-disk format](design.md#on-disk-format))
 

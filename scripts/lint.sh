@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs every Go check: formatting, vet, staticcheck, known vulnerabilities and dependency licenses.
+# Runs every Go check: formatting, vet, the sans-IO analyzer, staticcheck, known vulnerabilities and dependency licenses.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -25,6 +25,10 @@ if [ -n "$unformatted" ]; then
 fi
 
 go vet ./...
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+go build -o "$tmp/sansio" ./tools/sansio
+go vet -vettool="$tmp/sansio" ./...
 go run "$STATICCHECK" ./...
 status=0
 go run "$GOVULNCHECK" ./... || status=$?
