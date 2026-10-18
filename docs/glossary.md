@@ -218,7 +218,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Superblock.** The block at the start of the disk that says how the rest is laid out. rock-solid keeps a second copy so one bad block cannot make a disk unreadable; see [Superblock repair](design.md#superblock-repair).
 
-**Group commit, round.** Collecting every write that arrived while the previous flush was running, and making them all durable with one write and one flush. Each such batch is a round. Since a flush costs the same whether it covers one write or a hundred, this multiplies throughput.
+**Group commit, round.** Collecting every write that arrived while the previous flush was running, and making them all durable with one write and one flush. Each such batch is a round. Since a flush costs the same whether it covers one write or a hundred, this multiplies throughput. In the MetaStore, each leader also folds a round's proposals into one Raft entry.
 
 **Write-ahead log (WAL), replay, recovery.** A WAL records each change before it is applied elsewhere, so after a crash the change can be redone by **replaying** the log. Crash recovery means reading the log back and rebuilding the in-memory state from it.
 

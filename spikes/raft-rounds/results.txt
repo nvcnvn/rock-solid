@@ -1,0 +1,657 @@
+# Linux 6.18.44-fc-v139, go1.27.0, etcd-raft v3.7.0 and v3.6.0, 4 vCPUs, 2026-10-18T16:48Z, loadavg 8.79 6.06 2.85 (machine shared with other benchmarks)
+### R: closed loop, 32 proposals in flight per group (32,000), flush 0.95 ms
+== R1 unbounded
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 3.76% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 78.6 KiB (per node: idle 2.7 MiB, loaded 76.8 MiB)
+   throughput 1983979 ops/s, latency p50 15187 us, p99 28157 us, p99.9 32065 us, max 32065 us, dropped 0
+   loop CPU per op 1.42 us (collect 49%), busiest loop 94% busy, passes/s/loop 487
+   rounds/s/loop 188, per round: 1343 KiB mean, 4039 KiB max, 537 Readys; entries proposed per op 0.032
+   msgs 564883/s (0.28 per op, 933 B avg), batches 1289/s, MsgSnap 0
+   allocs per op 4.6 (868 B), per msg 16.3; GC cycles 13; process CPU 4720 ms = loop threads 4222 (incl. GC assist ~1) + other threads 498 (GC workers, sysmon): GC ~10.6% of process CPU
+== R2 max-bytes 1 MiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 1048576, max-cpu-us 0, batch true, wire true
+   elected in 0.03s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.44% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 74.3 KiB (per node: idle 2.7 MiB, loaded 72.6 MiB)
+   throughput 1976640 ops/s, latency p50 14861 us, p99 30047 us, p99.9 42036 us, max 47870 us, dropped 0
+   loop CPU per op 1.48 us (collect 48%), busiest loop 98% busy, passes/s/loop 726
+   rounds/s/loop 269, per round: 937 KiB mean, 1028 KiB max, 380 Readys; entries proposed per op 0.032
+   msgs 566137/s (0.29 per op, 925 B avg), batches 1613/s, MsgSnap 0
+   allocs per op 4.6 (868 B), per msg 16.2; GC cycles 14; process CPU 4976 ms = loop threads 4388 (incl. GC assist ~4) + other threads 588 (GC workers, sysmon): GC ~11.9% of process CPU
+== R3 max-bytes 256 KiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 262144, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.50% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 56.8 KiB (per node: idle 2.7 MiB, loaded 55.5 MiB)
+   throughput 1305984 ops/s, latency p50 23422 us, p99 38132 us, p99.9 43424 us, max 47870 us, dropped 0
+   loop CPU per op 1.44 us (collect 45%), busiest loop 63% busy, passes/s/loop 2048
+   rounds/s/loop 649, per round: 258 KiB mean, 263 KiB max, 98 Readys; entries proposed per op 0.032
+   msgs 402094/s (0.31 per op, 869 B avg), batches 3895/s, MsgSnap 0
+   allocs per op 4.8 (887 B), per msg 15.5; GC cycles 11; process CPU 3200 ms = loop threads 2828 (incl. GC assist ~3) + other threads 372 (GC workers, sysmon): GC ~11.7% of process CPU
+== R4 collection CPU bound 1 ms
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 0, max-cpu-us 1000, batch true, wire true
+   elected in 0.03s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.22% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.9 KiB, loaded 48.9 KiB (per node: idle 2.8 MiB, loaded 47.7 MiB)
+   throughput 1880021 ops/s, latency p50 16032 us, p99 29724 us, p99.9 33485 us, max 35733 us, dropped 0
+   loop CPU per op 1.42 us (collect 46%), busiest loop 90% busy, passes/s/loop 1564
+   rounds/s/loop 496, per round: 484 KiB mean, 1086 KiB max, 187 Readys; entries proposed per op 0.032
+   msgs 538708/s (0.29 per op, 927 B avg), batches 2976/s, MsgSnap 0
+   allocs per op 4.6 (873 B), per msg 16.1; GC cycles 14; process CPU 4599 ms = loop threads 4018 (incl. GC assist ~1) + other threads 582 (GC workers, sysmon): GC ~12.7% of process CPU
+== R5 2 loops per node
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 2 loop(s)/node, flush fixed 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.90% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.9 KiB, loaded 67.7 KiB (per node: idle 2.9 MiB, loaded 66.1 MiB)
+   throughput 3815147 ops/s, latency p50 7676 us, p99 20126 us, p99.9 31040 us, max 36122 us, dropped 0
+   loop CPU per op 1.34 us (collect 49%), busiest loop 86% busy, passes/s/loop 1012
+   rounds/s/loop 347, per round: 701 KiB mean, 2693 KiB max, 268 Readys; entries proposed per op 0.031
+   msgs 1021784/s (0.27 per op, 985 B avg), batches 4801/s, MsgSnap 0
+   allocs per op 4.5 (853 B), per msg 16.6; GC cycles 25; process CPU 8538 ms = loop threads 7665 (incl. GC assist ~38) + other threads 873 (GC workers, sysmon): GC ~10.7% of process CPU
+== R6 4 loops per node
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 4 loop(s)/node, flush fixed 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.79% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.2 KiB, loaded 67.5 KiB (per node: idle 3.1 MiB, loaded 66.0 MiB)
+   throughput 6003499 ops/s, latency p50 5141 us, p99 7593 us, p99.9 9227 us, max 30047 us, dropped 0
+   loop CPU per op 1.32 us (collect 49%), busiest loop 67% busy, passes/s/loop 1705
+   rounds/s/loop 547, per round: 348 KiB mean, 3350 KiB max, 133 Readys; entries proposed per op 0.031
+   msgs 1567929/s (0.26 per op, 1009 B avg), batches 13983/s, MsgSnap 0
+   allocs per op 4.4 (849 B), per msg 16.8; GC cycles 42; process CPU 13538 ms = loop threads 11887 (incl. GC assist ~39) + other threads 1651 (GC workers, sysmon): GC ~12.5% of process CPU
+== R7 4 loops, 1 MiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 4 loop(s)/node, flush fixed 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 1048576, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 3.82% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.2 KiB, loaded 79.5 KiB (per node: idle 3.1 MiB, loaded 77.7 MiB)
+   throughput 5480939 ops/s, latency p50 5546 us, p99 10063 us, p99.9 14078 us, max 15519 us, dropped 0
+   loop CPU per op 1.56 us (collect 48%), busiest loop 72% busy, passes/s/loop 1525
+   rounds/s/loop 496, per round: 350 KiB mean, 1016 KiB max, 133 Readys; entries proposed per op 0.031
+   msgs 1435969/s (0.26 per op, 1007 B avg), batches 12979/s, MsgSnap 0
+   allocs per op 4.4 (849 B), per msg 16.8; GC cycles 36; process CPU 14509 ms = loop threads 12858 (incl. GC assist ~33) + other threads 1651 (GC workers, sysmon): GC ~11.6% of process CPU
+== R8 unbounded, flush by size (NVMe spike N3 curve)
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush nvme 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 5.16% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 77.6 KiB (per node: idle 2.7 MiB, loaded 75.8 MiB)
+   throughput 1763563 ops/s, latency p50 16742 us, p99 31040 us, p99.9 34218 us, max 34218 us, dropped 0
+   loop CPU per op 1.36 us (collect 49%), busiest loop 80% busy, passes/s/loop 498
+   rounds/s/loop 163, per round: 1380 KiB mean, 4039 KiB max, 538 Readys; entries proposed per op 0.032
+   msgs 505343/s (0.29 per op, 928 B avg), batches 1076/s, MsgSnap 0
+   allocs per op 4.6 (873 B), per msg 16.2; GC cycles 11; process CPU 3984 ms = loop threads 3603 (incl. GC assist ~11) + other threads 381 (GC workers, sysmon): GC ~9.8% of process CPU
+== R9 1 MiB, flush by size
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush nvme 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 1048576, max-cpu-us 0, batch true, wire true
+   elected in 0.04s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 6.45% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 53.0 KiB (per node: idle 2.8 MiB, loaded 51.8 MiB)
+   throughput 1497195 ops/s, latency p50 19273 us, p99 38967 us, p99.9 44858 us, max 54514 us, dropped 0
+   loop CPU per op 1.70 us (collect 46%), busiest loop 85% busy, passes/s/loop 629
+   rounds/s/loop 204, per round: 941 KiB mean, 1028 KiB max, 378 Readys; entries proposed per op 0.032
+   msgs 446304/s (0.30 per op, 893 B avg), batches 1223/s, MsgSnap 0
+   allocs per op 4.8 (881 B), per msg 15.9; GC cycles 11; process CPU 4241 ms = loop threads 3814 (incl. GC assist ~5) + other threads 427 (GC workers, sysmon): GC ~10.2% of process CPU
+== R10 one entry per proposal (multi-raft spike's shape)
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 0, max-cpu-us 0, batch false, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 3.98% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 44.7 KiB (per node: idle 2.8 MiB, loaded 43.7 MiB)
+   throughput 163563 ops/s, latency p50 177504 us, p99 308384 us, p99.9 308384 us, max 308384 us, dropped 0
+   loop CPU per op 16.82 us (collect 25%), busiest loop 96% busy, passes/s/loop 53
+   rounds/s/loop 17, per round: 1563 KiB mean, 5016 KiB max, 524 Readys; entries proposed per op 1.130
+   msgs 1408606/s (8.61 per op, 58 B avg), batches 127/s, MsgSnap 0
+   allocs per op 95.0 (6729 B), per msg 11.0; GC cycles 17; process CPU 5250 ms = loop threads 4127 (incl. GC assist ~23) + other threads 1124 (GC workers, sysmon): GC ~21.8% of process CPU
+== R11 one entry per proposal, 1 MiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 1048576, max-cpu-us 0, batch false, wire true
+   elected in 0.03s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 7.42% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 25.5 KiB (per node: idle 2.7 MiB, loaded 24.9 MiB)
+   throughput 174997 ops/s, latency p50 166336 us, p99 251029 us, p99.9 256526 us, max 259319 us, dropped 0
+   loop CPU per op 17.04 us (collect 24%), busiest loop 101% busy, passes/s/loop 70
+   rounds/s/loop 34, per round: 880 KiB mean, 1029 KiB max, 288 Readys; entries proposed per op 1.095
+   msgs 1606590/s (9.18 per op, 57 B avg), batches 211/s, MsgSnap 0
+   allocs per op 98.1 (6888 B), per msg 10.7; GC cycles 24; process CPU 5954 ms = loop threads 4473 (incl. GC assist ~44) + other threads 1481 (GC workers, sysmon): GC ~25.6% of process CPU
+### R: closed loop, flush 0.1 ms
+== R12 unbounded
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 100us, net 50us, mode closed 32/group (32000 in flight), max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.63% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 78.3 KiB (per node: idle 2.8 MiB, loaded 76.4 MiB)
+   throughput 1948416 ops/s, latency p50 14861 us, p99 33849 us, p99.9 40254 us, max 40254 us, dropped 0
+   loop CPU per op 1.50 us (collect 48%), busiest loop 98% busy, passes/s/loop 430
+   rounds/s/loop 179, per round: 1383 KiB mean, 4039 KiB max, 556 Readys; entries proposed per op 0.031
+   msgs 563547/s (0.29 per op, 915 B avg), batches 1262/s, MsgSnap 0
+   allocs per op 4.7 (873 B), per msg 16.1; GC cycles 12; process CPU 4874 ms = loop threads 4381 (incl. GC assist ~19) + other threads 493 (GC workers, sysmon): GC ~10.5% of process CPU
+== R13 1 MiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 100us, net 50us, mode closed 32/group (32000 in flight), max-bytes 1048576, max-cpu-us 0, batch true, wire true
+   elected in 0.03s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.86% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 67.3 KiB (per node: idle 2.8 MiB, loaded 65.7 MiB)
+   throughput 1719467 ops/s, latency p50 15688 us, p99 51641 us, p99.9 66970 us, max 70697 us, dropped 0
+   loop CPU per op 1.74 us (collect 47%), busiest loop 100% busy, passes/s/loop 546
+   rounds/s/loop 271, per round: 811 KiB mean, 1031 KiB max, 310 Readys; entries proposed per op 0.032
+   msgs 506221/s (0.29 per op, 902 B avg), batches 1629/s, MsgSnap 0
+   allocs per op 4.7 (875 B), per msg 15.9; GC cycles 11; process CPU 4957 ms = loop threads 4482 (incl. GC assist ~15) + other threads 476 (GC workers, sysmon): GC ~9.9% of process CPU
+== R14 4 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 4 loop(s)/node, flush fixed 100us, net 50us, mode closed 32/group (32000 in flight), max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 3.53% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.2 KiB, loaded 62.3 KiB (per node: idle 3.1 MiB, loaded 60.8 MiB)
+   throughput 7304384 ops/s, latency p50 3964 us, p99 10738 us, p99.9 14386 us, max 18060 us, dropped 0
+   loop CPU per op 1.57 us (collect 47%), busiest loop 97% busy, passes/s/loop 1607
+   rounds/s/loop 667, per round: 347 KiB mean, 1677 KiB max, 133 Readys; entries proposed per op 0.031
+   msgs 1898209/s (0.26 per op, 1013 B avg), batches 18275/s, MsgSnap 0
+   allocs per op 4.4 (846 B), per msg 16.8; GC cycles 47; process CPU 19272 ms = loop threads 17161 (incl. GC assist ~48) + other threads 2111 (GC workers, sysmon): GC ~11.2% of process CPU
+### O: open loop (Poisson), flush 0.95 ms and 0.1 ms
+== O flush 950us rate 30000, 1 loop
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 30000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 5.69% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 5.9 KiB (per node: idle 2.8 MiB, loaded 5.7 MiB)
+   throughput 29825 ops/s, latency p50 4613 us, p99 10623 us, p99.9 15187 us, max 17673 us, dropped 0
+   loop CPU per op 53.41 us (collect 48%), busiest loop 53% busy, passes/s/loop 7870
+   rounds/s/loop 703, per round: 7 KiB mean, 30 KiB max, 69 Readys; entries proposed per op 0.980
+   msgs 278499/s (9.34 per op, 51 B avg), batches 4217/s, MsgSnap 0
+   allocs per op 149.1 (8756 B), per msg 16.0; GC cycles 25; process CPU 3051 ms = loop threads 2389 (incl. GC assist ~24) + other threads 662 (GC workers, sysmon): GC ~22.5% of process CPU
+== O flush 950us rate 30000, 1 loop, 256 KiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 30000/s, max-bytes 262144, max-cpu-us 0, batch true, wire true
+   elected in 0.03s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 5.19% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 5.9 KiB (per node: idle 2.7 MiB, loaded 5.8 MiB)
+   throughput 29865 ops/s, latency p50 5983 us, p99 32767 us, p99.9 39820 us, max 42036 us, dropped 0
+   loop CPU per op 68.47 us (collect 47%), busiest loop 68% busy, passes/s/loop 5602
+   rounds/s/loop 566, per round: 9 KiB mean, 76 KiB max, 84 Readys; entries proposed per op 0.970
+   msgs 279075/s (9.34 per op, 51 B avg), batches 3395/s, MsgSnap 0
+   allocs per op 148.2 (8729 B), per msg 15.9; GC cycles 25; process CPU 3822 ms = loop threads 3067 (incl. GC assist ~120) + other threads 755 (GC workers, sysmon): GC ~22.9% of process CPU
+== O flush 950us rate 30000, 2 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 2 loop(s)/node, flush fixed 950us, net 50us, mode open 30000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 6.78% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.9 KiB, loaded 5.8 KiB (per node: idle 2.9 MiB, loaded 5.6 MiB)
+   throughput 29888 ops/s, latency p50 3157 us, p99 5369 us, p99.9 6454 us, max 7350 us, dropped 0
+   loop CPU per op 54.56 us (collect 51%), busiest loop 27% busy, passes/s/loop 7029
+   rounds/s/loop 873, per round: 3 KiB mean, 10 KiB max, 28 Readys; entries proposed per op 0.984
+   msgs 278152/s (9.31 per op, 51 B avg), batches 10480/s, MsgSnap 0
+   allocs per op 149.3 (8756 B), per msg 16.0; GC cycles 25; process CPU 3131 ms = loop threads 2446 (incl. GC assist ~35) + other threads 684 (GC workers, sysmon): GC ~23.0% of process CPU
+== O flush 950us rate 30000, 4 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 4 loop(s)/node, flush fixed 950us, net 50us, mode open 30000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 8.15% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.2 KiB, loaded 6.0 KiB (per node: idle 3.1 MiB, loaded 5.8 MiB)
+   throughput 29883 ops/s, latency p50 2864 us, p99 4564 us, p99.9 5427 us, max 6813 us, dropped 0
+   loop CPU per op 60.49 us (collect 52%), busiest loop 15% busy, passes/s/loop 5305
+   rounds/s/loop 952, per round: 1 KiB mean, 5 KiB max, 13 Readys; entries proposed per op 0.986
+   msgs 277909/s (9.30 per op, 51 B avg), batches 22838/s, MsgSnap 0
+   allocs per op 149.3 (8758 B), per msg 16.1; GC cycles 24; process CPU 3437 ms = loop threads 2711 (incl. GC assist ~45) + other threads 726 (GC workers, sysmon): GC ~22.4% of process CPU
+== O flush 950us rate 60000, 1 loop
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 60000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.04s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 6.86% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 6.9 KiB (per node: idle 2.8 MiB, loaded 6.7 MiB)
+   throughput 60035 ops/s, latency p50 11093 us, p99 51084 us, p99.9 61412 us, max 65535 us, dropped 0
+   loop CPU per op 44.72 us (collect 43%), busiest loop 90% busy, passes/s/loop 3411
+   rounds/s/loop 366, per round: 28 KiB mean, 246 KiB max, 226 Readys; entries proposed per op 0.895
+   msgs 496470/s (8.27 per op, 55 B avg), batches 2197/s, MsgSnap 0
+   allocs per op 132.1 (7859 B), per msg 16.0; GC cycles 38; process CPU 5324 ms = loop threads 4027 (incl. GC assist ~40) + other threads 1296 (GC workers, sysmon): GC ~25.1% of process CPU
+== O flush 950us rate 60000, 1 loop, 256 KiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 60000/s, max-bytes 262144, max-cpu-us 0, batch true, wire true
+   elected in 0.04s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 7.93% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 7.4 KiB (per node: idle 2.7 MiB, loaded 7.3 MiB)
+   throughput 59903 ops/s, latency p50 12229 us, p99 53346 us, p99.9 66970 us, max 71467 us, dropped 0
+   loop CPU per op 45.65 us (collect 42%), busiest loop 92% busy, passes/s/loop 2972
+   rounds/s/loop 335, per round: 30 KiB mean, 256 KiB max, 239 Readys; entries proposed per op 0.887
+   msgs 488735/s (8.16 per op, 55 B avg), batches 2011/s, MsgSnap 0
+   allocs per op 129.8 (7735 B), per msg 15.9; GC cycles 33; process CPU 5115 ms = loop threads 4102 (incl. GC assist ~83) + other threads 1013 (GC workers, sysmon): GC ~21.4% of process CPU
+== O flush 950us rate 60000, 2 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 2 loop(s)/node, flush fixed 950us, net 50us, mode open 60000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.86% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.9 KiB, loaded 6.3 KiB (per node: idle 2.9 MiB, loaded 6.2 MiB)
+   throughput 59978 ops/s, latency p50 4564 us, p99 10508 us, p99.9 12097 us, max 13050 us, dropped 0
+   loop CPU per op 53.32 us (collect 46%), busiest loop 54% busy, passes/s/loop 7915
+   rounds/s/loop 712, per round: 7 KiB mean, 27 KiB max, 65 Readys; entries proposed per op 0.960
+   msgs 507239/s (8.46 per op, 54 B avg), batches 8544/s, MsgSnap 0
+   allocs per op 138.9 (8142 B), per msg 16.4; GC cycles 45; process CPU 5953 ms = loop threads 4797 (incl. GC assist ~53) + other threads 1156 (GC workers, sysmon): GC ~20.3% of process CPU
+== O flush 950us rate 60000, 4 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 4 loop(s)/node, flush fixed 950us, net 50us, mode open 60000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 6.36% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.2 KiB, loaded 6.3 KiB (per node: idle 3.1 MiB, loaded 6.2 MiB)
+   throughput 60106 ops/s, latency p50 3056 us, p99 5031 us, p99.9 5729 us, max 6525 us, dropped 0
+   loop CPU per op 50.39 us (collect 47%), busiest loop 26% busy, passes/s/loop 7196
+   rounds/s/loop 892, per round: 3 KiB mean, 7 KiB max, 27 Readys; entries proposed per op 0.968
+   msgs 510232/s (8.49 per op, 54 B avg), batches 21413/s, MsgSnap 0
+   allocs per op 140.0 (8192 B), per msg 16.5; GC cycles 46; process CPU 5777 ms = loop threads 4543 (incl. GC assist ~89) + other threads 1234 (GC workers, sysmon): GC ~22.9% of process CPU
+== O flush 950us rate 100000, 1 loop
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 100000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 5.80% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 11.2 KiB (per node: idle 2.7 MiB, loaded 10.9 MiB)
+   throughput 97289 ops/s, latency p50 34590 us, p99 84073 us, p99.9 93690 us, max 96784 us, dropped 0
+   loop CPU per op 30.51 us (collect 40%), busiest loop 99% busy, passes/s/loop 882
+   rounds/s/loop 134, per round: 116 KiB mean, 574 KiB max, 575 Readys; entries proposed per op 0.669
+   msgs 592509/s (6.09 per op, 67 B avg), batches 805/s, MsgSnap 0
+   allocs per op 92.9 (5823 B), per msg 15.3; GC cycles 32; process CPU 5546 ms = loop threads 4452 (incl. GC assist ~13) + other threads 1094 (GC workers, sysmon): GC ~20.0% of process CPU
+== O flush 950us rate 100000, 1 loop, 256 KiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 100000/s, max-bytes 262144, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.16% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 8.6 KiB (per node: idle 2.8 MiB, loaded 8.4 MiB)
+   throughput 98926 ops/s, latency p50 23422 us, p99 77095 us, p99.9 104407 us, max 115097 us, dropped 0
+   loop CPU per op 29.55 us (collect 42%), busiest loop 98% busy, passes/s/loop 1377
+   rounds/s/loop 205, per round: 78 KiB mean, 257 KiB max, 468 Readys; entries proposed per op 0.740
+   msgs 655837/s (6.63 per op, 63 B avg), batches 1228/s, MsgSnap 0
+   allocs per op 103.7 (6353 B), per msg 15.6; GC cycles 42; process CPU 5517 ms = loop threads 4385 (incl. GC assist ~102) + other threads 1132 (GC workers, sysmon): GC ~22.4% of process CPU
+== O flush 950us rate 100000, 2 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 2 loop(s)/node, flush fixed 950us, net 50us, mode open 100000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.59% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.9 KiB, loaded 6.9 KiB (per node: idle 2.9 MiB, loaded 6.7 MiB)
+   throughput 99827 ops/s, latency p50 4870 us, p99 7929 us, p99.9 9741 us, max 13336 us, dropped 0
+   loop CPU per op 33.41 us (collect 44%), busiest loop 56% busy, passes/s/loop 10852
+   rounds/s/loop 710, per round: 12 KiB mean, 45 KiB max, 104 Readys; entries proposed per op 0.936
+   msgs 798205/s (8.00 per op, 57 B avg), batches 8524/s, MsgSnap 0
+   allocs per op 132.6 (7788 B), per msg 16.6; GC cycles 64; process CPU 6463 ms = loop threads 5003 (incl. GC assist ~44) + other threads 1460 (GC workers, sysmon): GC ~23.3% of process CPU
+== O flush 950us rate 100000, 4 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 4 loop(s)/node, flush fixed 950us, net 50us, mode open 100000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 5.47% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.2 KiB, loaded 6.8 KiB (per node: idle 3.1 MiB, loaded 6.6 MiB)
+   throughput 100106 ops/s, latency p50 3123 us, p99 4766 us, p99.9 5141 us, max 6048 us, dropped 0
+   loop CPU per op 34.92 us (collect 45%), busiest loop 29% busy, passes/s/loop 9764
+   rounds/s/loop 875, per round: 5 KiB mean, 12 KiB max, 43 Readys; entries proposed per op 0.947
+   msgs 805164/s (8.04 per op, 57 B avg), batches 20991/s, MsgSnap 0
+   allocs per op 134.0 (7857 B), per msg 16.7; GC cycles 68; process CPU 6872 ms = loop threads 5243 (incl. GC assist ~70) + other threads 1629 (GC workers, sysmon): GC ~24.7% of process CPU
+== O flush 950us rate 130000, 1 loop
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 130000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 5.45% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 9.1 KiB (per node: idle 2.8 MiB, loaded 8.9 MiB)
+   throughput 128982 ops/s, latency p50 27257 us, p99 47870 us, p99.9 52772 us, max 56928 us, dropped 0
+   loop CPU per op 22.85 us (collect 42%), busiest loop 99% busy, passes/s/loop 1126
+   rounds/s/loop 164, per round: 125 KiB mean, 311 KiB max, 634 Readys; entries proposed per op 0.676
+   msgs 779979/s (6.05 per op, 67 B avg), batches 985/s, MsgSnap 0
+   allocs per op 93.3 (5788 B), per msg 15.4; GC cycles 45; process CPU 5689 ms = loop threads 4422 (incl. GC assist ~33) + other threads 1267 (GC workers, sysmon): GC ~22.8% of process CPU
+== O flush 950us rate 130000, 1 loop, 256 KiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 130000/s, max-bytes 262144, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 5.51% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 8.5 KiB (per node: idle 2.7 MiB, loaded 8.3 MiB)
+   throughput 129328 ops/s, latency p50 18456 us, p99 34590 us, p99.9 41135 us, max 45841 us, dropped 0
+   loop CPU per op 22.72 us (collect 43%), busiest loop 98% busy, passes/s/loop 1560
+   rounds/s/loop 236, per round: 90 KiB mean, 248 KiB max, 558 Readys; entries proposed per op 0.758
+   msgs 860106/s (6.65 per op, 64 B avg), batches 1413/s, MsgSnap 0
+   allocs per op 106.0 (6449 B), per msg 15.9; GC cycles 54; process CPU 5654 ms = loop threads 4407 (incl. GC assist ~70) + other threads 1247 (GC workers, sysmon): GC ~23.3% of process CPU
+== O flush 950us rate 130000, 2 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 2 loop(s)/node, flush fixed 950us, net 50us, mode open 130000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 5.59% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.9 KiB, loaded 7.5 KiB (per node: idle 2.9 MiB, loaded 7.3 MiB)
+   throughput 129926 ops/s, latency p50 5729 us, p99 25820 us, p99.9 32414 us, max 36122 us, dropped 0
+   loop CPU per op 31.07 us (collect 43%), busiest loop 68% busy, passes/s/loop 9962
+   rounds/s/loop 625, per round: 18 KiB mean, 187 KiB max, 143 Readys; entries proposed per op 0.897
+   msgs 988265/s (7.61 per op, 59 B avg), batches 7500/s, MsgSnap 0
+   allocs per op 125.8 (7445 B), per msg 16.5; GC cycles 75; process CPU 7821 ms = loop threads 6054 (incl. GC assist ~106) + other threads 1766 (GC workers, sysmon): GC ~23.9% of process CPU
+== O flush 950us rate 130000, 4 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 4 loop(s)/node, flush fixed 950us, net 50us, mode open 130000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 3.75% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.2 KiB, loaded 7.3 KiB (per node: idle 3.1 MiB, loaded 7.1 MiB)
+   throughput 130043 ops/s, latency p50 3557 us, p99 5792 us, p99.9 6525 us, max 8015 us, dropped 0
+   loop CPU per op 37.63 us (collect 44%), busiest loop 41% busy, passes/s/loop 10276
+   rounds/s/loop 803, per round: 7 KiB mean, 21 KiB max, 59 Readys; entries proposed per op 0.925
+   msgs 1012701/s (7.79 per op, 58 B avg), batches 19267/s, MsgSnap 0
+   allocs per op 129.9 (7640 B), per msg 16.7; GC cycles 81; process CPU 9433 ms = loop threads 7339 (incl. GC assist ~60) + other threads 2094 (GC workers, sysmon): GC ~22.8% of process CPU
+== O flush 100us rate 30000, 1 loop
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 100us, net 50us, mode open 30000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.90% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.9 KiB, loaded 5.8 KiB (per node: idle 2.8 MiB, loaded 5.6 MiB)
+   throughput 29926 ops/s, latency p50 1165 us, p99 10738 us, p99.9 14543 us, max 15859 us, dropped 0
+   loop CPU per op 78.72 us (collect 67%), busiest loop 79% busy, passes/s/loop 13167
+   rounds/s/loop 3713, per round: 1 KiB mean, 26 KiB max, 13 Readys; entries proposed per op 0.995
+   msgs 281024/s (9.39 per op, 51 B avg), batches 22258/s, MsgSnap 0
+   allocs per op 150.9 (8839 B), per msg 16.1; GC cycles 26; process CPU 4107 ms = loop threads 3534 (incl. GC assist ~22) + other threads 574 (GC workers, sysmon): GC ~14.5% of process CPU
+== O flush 100us rate 30000, 1 loop, 256 KiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 100us, net 50us, mode open 30000/s, max-bytes 262144, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.30% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.9 KiB, loaded 5.8 KiB (per node: idle 2.8 MiB, loaded 5.7 MiB)
+   throughput 29923 ops/s, latency p50 1140 us, p99 3157 us, p99.9 4766 us, max 5855 us, dropped 0
+   loop CPU per op 78.49 us (collect 67%), busiest loop 78% busy, passes/s/loop 13475
+   rounds/s/loop 3772, per round: 1 KiB mean, 12 KiB max, 13 Readys; entries proposed per op 0.996
+   msgs 280851/s (9.39 per op, 51 B avg), batches 22619/s, MsgSnap 0
+   allocs per op 150.9 (8837 B), per msg 16.1; GC cycles 24; process CPU 4034 ms = loop threads 3523 (incl. GC assist ~22) + other threads 511 (GC workers, sysmon): GC ~13.2% of process CPU
+== O flush 100us rate 30000, 2 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 2 loop(s)/node, flush fixed 100us, net 50us, mode open 30000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.84% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.0 KiB, loaded 6.1 KiB (per node: idle 2.9 MiB, loaded 6.0 MiB)
+   throughput 29929 ops/s, latency p50 739 us, p99 1797 us, p99.9 3227 us, max 3796 us, dropped 0
+   loop CPU per op 111.61 us (collect 73%), busiest loop 56% busy, passes/s/loop 18238
+   rounds/s/loop 5408, per round: 0 KiB mean, 6 KiB max, 5 Readys; entries proposed per op 0.997
+   msgs 280045/s (9.36 per op, 51 B avg), batches 63298/s, MsgSnap 0
+   allocs per op 150.8 (8854 B), per msg 16.1; GC cycles 25; process CPU 5738 ms = loop threads 5011 (incl. GC assist ~8) + other threads 728 (GC workers, sysmon): GC ~12.8% of process CPU
+== O flush 100us rate 30000, 4 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 4 loop(s)/node, flush fixed 100us, net 50us, mode open 30000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.36% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.2 KiB, loaded 6.7 KiB (per node: idle 3.1 MiB, loaded 6.5 MiB)
+   throughput 29934 ops/s, latency p50 534 us, p99 928 us, p99.9 3635 us, max 8103 us, dropped 0
+   loop CPU per op 151.01 us (collect 76%), busiest loop 38% busy, passes/s/loop 18831
+   rounds/s/loop 6278, per round: 0 KiB mean, 9 KiB max, 2 Readys; entries proposed per op 0.998
+   msgs 279652/s (9.34 per op, 51 B avg), batches 131407/s, MsgSnap 0
+   allocs per op 150.7 (8843 B), per msg 16.1; GC cycles 22; process CPU 7571 ms = loop threads 6781 (incl. GC assist ~1) + other threads 791 (GC workers, sysmon): GC ~10.5% of process CPU
+== O flush 100us rate 60000, 1 loop
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 100us, net 50us, mode open 60000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.65% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 6.0 KiB (per node: idle 2.8 MiB, loaded 5.9 MiB)
+   throughput 60184 ops/s, latency p50 1837 us, p99 7759 us, p99.9 10283 us, max 11967 us, dropped 0
+   loop CPU per op 47.45 us (collect 55%), busiest loop 95% busy, passes/s/loop 7588
+   rounds/s/loop 2414, per round: 4 KiB mean, 46 KiB max, 40 Readys; entries proposed per op 0.984
+   msgs 520747/s (8.65 per op, 54 B avg), batches 14483/s, MsgSnap 0
+   allocs per op 142.8 (8333 B), per msg 16.5; GC cycles 47; process CPU 5273 ms = loop threads 4284 (incl. GC assist ~55) + other threads 989 (GC workers, sysmon): GC ~19.8% of process CPU
+== O flush 100us rate 60000, 1 loop, 256 KiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 100us, net 50us, mode open 60000/s, max-bytes 262144, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.28% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 7.6 KiB (per node: idle 2.8 MiB, loaded 7.4 MiB)
+   throughput 60195 ops/s, latency p50 3123 us, p99 30705 us, p99.9 36122 us, max 37721 us, dropped 0
+   loop CPU per op 48.35 us (collect 50%), busiest loop 97% busy, passes/s/loop 4868
+   rounds/s/loop 1660, per round: 6 KiB mean, 132 KiB max, 56 Readys; entries proposed per op 0.958
+   msgs 511279/s (8.49 per op, 54 B avg), batches 9961/s, MsgSnap 0
+   allocs per op 138.8 (8195 B), per msg 16.3; GC cycles 40; process CPU 5327 ms = loop threads 4366 (incl. GC assist ~15) + other threads 961 (GC workers, sysmon): GC ~18.3% of process CPU
+== O flush 100us rate 60000, 2 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 2 loop(s)/node, flush fixed 100us, net 50us, mode open 60000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.40% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.9 KiB, loaded 6.4 KiB (per node: idle 2.9 MiB, loaded 6.3 MiB)
+   throughput 60240 ops/s, latency p50 833 us, p99 1939 us, p99.9 3519 us, max 5427 us, dropped 0
+   loop CPU per op 66.22 us (collect 64%), busiest loop 67% busy, passes/s/loop 18937
+   rounds/s/loop 4945, per round: 1 KiB mean, 16 KiB max, 10 Readys; entries proposed per op 0.993
+   msgs 521543/s (8.66 per op, 54 B avg), batches 59240/s, MsgSnap 0
+   allocs per op 143.7 (8387 B), per msg 16.6; GC cycles 45; process CPU 7030 ms = loop threads 5984 (incl. GC assist ~27) + other threads 1047 (GC workers, sysmon): GC ~15.3% of process CPU
+== O flush 100us rate 60000, 4 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 4 loop(s)/node, flush fixed 100us, net 50us, mode open 60000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.85% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.2 KiB, loaded 6.3 KiB (per node: idle 3.1 MiB, loaded 6.1 MiB)
+   throughput 60243 ops/s, latency p50 576 us, p99 980 us, p99.9 1327 us, max 1982 us, dropped 0
+   loop CPU per op 83.83 us (collect 68%), busiest loop 42% busy, passes/s/loop 22663
+   rounds/s/loop 6644, per round: 0 KiB mean, 4 KiB max, 4 Readys; entries proposed per op 0.996
+   msgs 521184/s (8.65 per op, 54 B avg), batches 152783/s, MsgSnap 0
+   allocs per op 143.9 (8380 B), per msg 16.6; GC cycles 45; process CPU 8802 ms = loop threads 7575 (incl. GC assist ~23) + other threads 1227 (GC workers, sysmon): GC ~14.2% of process CPU
+== O flush 100us rate 100000, 1 loop
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 100us, net 50us, mode open 100000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 5.10% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 7.7 KiB (per node: idle 2.7 MiB, loaded 7.5 MiB)
+   throughput 99511 ops/s, latency p50 11967 us, p99 27553 us, p99.9 31719 us, max 33849 us, dropped 0
+   loop CPU per op 29.97 us (collect 43%), busiest loop 99% busy, passes/s/loop 1107
+   rounds/s/loop 438, per round: 38 KiB mean, 152 KiB max, 282 Readys; entries proposed per op 0.868
+   msgs 755849/s (7.60 per op, 59 B avg), batches 2625/s, MsgSnap 0
+   allocs per op 122.1 (7278 B), per msg 16.1; GC cycles 58; process CPU 5868 ms = loop threads 4474 (incl. GC assist ~18) + other threads 1394 (GC workers, sysmon): GC ~24.1% of process CPU
+== O flush 100us rate 100000, 1 loop, 256 KiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 100us, net 50us, mode open 100000/s, max-bytes 262144, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 6.40% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 7.8 KiB (per node: idle 2.8 MiB, loaded 7.6 MiB)
+   throughput 99732 ops/s, latency p50 12229 us, p99 34590 us, p99.9 42036 us, max 44375 us, dropped 0
+   loop CPU per op 29.90 us (collect 43%), busiest loop 99% busy, passes/s/loop 1018
+   rounds/s/loop 404, per round: 41 KiB mean, 222 KiB max, 298 Readys; entries proposed per op 0.854
+   msgs 751454/s (7.53 per op, 59 B avg), batches 2424/s, MsgSnap 0
+   allocs per op 120.5 (7201 B), per msg 16.0; GC cycles 52; process CPU 5662 ms = loop threads 4474 (incl. GC assist ~38) + other threads 1188 (GC workers, sysmon): GC ~21.7% of process CPU
+== O flush 100us rate 100000, 2 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 2 loop(s)/node, flush fixed 100us, net 50us, mode open 100000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.03s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 5.66% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.9 KiB, loaded 8.0 KiB (per node: idle 2.9 MiB, loaded 7.9 MiB)
+   throughput 100259 ops/s, latency p50 969 us, p99 2598 us, p99.9 4514 us, max 6454 us, dropped 0
+   loop CPU per op 47.05 us (collect 56%), busiest loop 79% busy, passes/s/loop 17846
+   rounds/s/loop 4310, per round: 2 KiB mean, 22 KiB max, 19 Readys; entries proposed per op 0.988
+   msgs 837615/s (8.35 per op, 56 B avg), batches 51729/s, MsgSnap 0
+   allocs per op 140.3 (8168 B), per msg 16.8; GC cycles 60; process CPU 8430 ms = loop threads 7075 (incl. GC assist ~64) + other threads 1355 (GC workers, sysmon): GC ~16.8% of process CPU
+== O flush 100us rate 100000, 4 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 4 loop(s)/node, flush fixed 100us, net 50us, mode open 100000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.62% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.2 KiB, loaded 7.0 KiB (per node: idle 3.1 MiB, loaded 6.8 MiB)
+   throughput 100271 ops/s, latency p50 635 us, p99 1217 us, p99.9 1857 us, max 3964 us, dropped 0
+   loop CPU per op 62.47 us (collect 61%), busiest loop 52% busy, passes/s/loop 23511
+   rounds/s/loop 6157, per round: 1 KiB mean, 11 KiB max, 7 Readys; entries proposed per op 0.992
+   msgs 838353/s (8.36 per op, 56 B avg), batches 146667/s, MsgSnap 0
+   allocs per op 140.7 (8192 B), per msg 16.8; GC cycles 71; process CPU 11304 ms = loop threads 9396 (incl. GC assist ~17) + other threads 1908 (GC workers, sysmon): GC ~17.0% of process CPU
+== O flush 100us rate 130000, 1 loop
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 100us, net 50us, mode open 130000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 3.92% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 10.1 KiB (per node: idle 2.8 MiB, loaded 9.8 MiB)
+   throughput 127633 ops/s, latency p50 21478 us, p99 37315 us, p99.9 42036 us, max 42957 us, dropped 0
+   loop CPU per op 23.45 us (collect 42%), busiest loop 100% busy, passes/s/loop 554
+   rounds/s/loop 220, per round: 94 KiB mean, 285 KiB max, 525 Readys; entries proposed per op 0.739
+   msgs 829920/s (6.50 per op, 65 B avg), batches 1317/s, MsgSnap 0
+   allocs per op 101.6 (6235 B), per msg 15.6; GC cycles 51; process CPU 5802 ms = loop threads 4490 (incl. GC assist ~47) + other threads 1312 (GC workers, sysmon): GC ~23.4% of process CPU
+== O flush 100us rate 130000, 1 loop, 256 KiB
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 100us, net 50us, mode open 130000/s, max-bytes 262144, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.18% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 10.4 KiB (per node: idle 2.7 MiB, loaded 10.2 MiB)
+   throughput 127826 ops/s, latency p50 22429 us, p99 44375 us, p99.9 54514 us, max 66249 us, dropped 0
+   loop CPU per op 23.41 us (collect 43%), busiest loop 100% busy, passes/s/loop 550
+   rounds/s/loop 209, per round: 99 KiB mean, 256 KiB max, 528 Readys; entries proposed per op 0.723
+   msgs 815129/s (6.38 per op, 66 B avg), batches 1256/s, MsgSnap 0
+   allocs per op 99.1 (6114 B), per msg 15.5; GC cycles 46; process CPU 5659 ms = loop threads 4489 (incl. GC assist ~56) + other threads 1169 (GC workers, sysmon): GC ~21.7% of process CPU
+== O flush 100us rate 130000, 2 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 2 loop(s)/node, flush fixed 100us, net 50us, mode open 130000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 3.92% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.9 KiB, loaded 11.3 KiB (per node: idle 2.9 MiB, loaded 11.0 MiB)
+   throughput 130236 ops/s, latency p50 1371 us, p99 11093 us, p99.9 29724 us, max 38132 us, dropped 0
+   loop CPU per op 42.00 us (collect 51%), busiest loop 92% busy, passes/s/loop 11337
+   rounds/s/loop 3071, per round: 4 KiB mean, 265 KiB max, 33 Readys; entries proposed per op 0.969
+   msgs 1058937/s (8.13 per op, 57 B avg), batches 36849/s, MsgSnap 0
+   allocs per op 136.4 (8037 B), per msg 16.8; GC cycles 65; process CPU 9810 ms = loop threads 8204 (incl. GC assist ~117) + other threads 1606 (GC workers, sysmon): GC ~17.6% of process CPU
+== O flush 100us rate 130000, 4 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 4 loop(s)/node, flush fixed 100us, net 50us, mode open 130000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.87% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.2 KiB, loaded 7.3 KiB (per node: idle 3.1 MiB, loaded 7.1 MiB)
+   throughput 130293 ops/s, latency p50 656 us, p99 3635 us, p99.9 5792 us, max 7844 us, dropped 0
+   loop CPU per op 53.31 us (collect 57%), busiest loop 58% busy, passes/s/loop 23509
+   rounds/s/loop 5829, per round: 1 KiB mean, 17 KiB max, 9 Readys; entries proposed per op 0.988
+   msgs 1073909/s (8.24 per op, 56 B avg), batches 139574/s, MsgSnap 0
+   allocs per op 139.2 (8109 B), per msg 16.9; GC cycles 86; process CPU 12575 ms = loop threads 10419 (incl. GC assist ~117) + other threads 2155 (GC workers, sysmon): GC ~18.1% of process CPU
+### A: allocations and heap, etcd-raft v3.7.0 against v3.6.0
+== A rounds open 60,000/s wire
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 60000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.22% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 6.8 KiB (per node: idle 2.8 MiB, loaded 6.6 MiB)
+   throughput 59584 ops/s, latency p50 8280 us, p99 21948 us, p99.9 24994 us, max 26963 us, dropped 0
+   loop CPU per op 43.82 us (collect 45%), busiest loop 87% busy, passes/s/loop 4393
+   rounds/s/loop 445, per round: 23 KiB mean, 112 KiB max, 199 Readys; entries proposed per op 0.935
+   msgs 500455/s (8.40 per op, 55 B avg), batches 2672/s, MsgSnap 0
+   allocs per op 136.5 (8049 B), per msg 16.2; GC cycles 43; process CPU 4994 ms = loop threads 3916 (incl. GC assist ~22) + other threads 1078 (GC workers, sysmon): GC ~22.0% of process CPU
+== A rounds open 60,000/s in-process, no encoding
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 60000/s, max-bytes 0, max-cpu-us 0, batch true, wire false
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 3.69% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.6 KiB, loaded 4.3 KiB (per node: idle 2.6 MiB, loaded 4.2 MiB)
+   throughput 60076 ops/s, latency p50 5606 us, p99 12362 us, p99.9 15859 us, max 18257 us, dropped 0
+   loop CPU per op 30.23 us (collect 53%), busiest loop 61% busy, passes/s/loop 10974
+   rounds/s/loop 633, per round: 16 KiB mean, 50 KiB max, 146 Readys; entries proposed per op 0.954
+   msgs 508072/s (8.46 per op, 0 B avg), batches 3796/s, MsgSnap 0
+   allocs per op 97.5 (5451 B), per msg 11.5; GC cycles 44; process CPU 3491 ms = loop threads 2724 (incl. GC assist ~27) + other threads 767 (GC workers, sysmon): GC ~22.7% of process CPU
+== A rounds closed 32,000 in flight wire
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.03s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.37% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 63.9 KiB (per node: idle 2.7 MiB, loaded 62.4 MiB)
+   throughput 1578731 ops/s, latency p50 19065 us, p99 36515 us, p99.9 39820 us, max 39820 us, dropped 0
+   loop CPU per op 1.80 us (collect 48%), busiest loop 96% busy, passes/s/loop 374
+   rounds/s/loop 152, per round: 1337 KiB mean, 4039 KiB max, 539 Readys; entries proposed per op 0.032
+   msgs 468020/s (0.30 per op, 899 B avg), batches 1027/s, MsgSnap 0
+   allocs per op 4.8 (886 B), per msg 16.1; GC cycles 9; process CPU 4620 ms = loop threads 4252 (incl. GC assist ~17) + other threads 368 (GC workers, sysmon): GC ~8.3% of process CPU
+== A rounds36 open 60,000/s wire
+   raft v3.6.0 (raftpb on gogoproto, value fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 60000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.03s, leaders per node [334 333 333]; heap before groups 0.4 MiB
+   idle: 4.07% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 6.1 KiB (per node: idle 2.7 MiB, loaded 6.0 MiB)
+   throughput 60132 ops/s, latency p50 4051 us, p99 18060 us, p99.9 22187 us, max 24994 us, dropped 0
+   loop CPU per op 26.67 us (collect 42%), busiest loop 54% busy, passes/s/loop 13027
+   rounds/s/loop 714, per round: 14 KiB mean, 130 KiB max, 130 Readys; entries proposed per op 0.956
+   msgs 509025/s (8.47 per op, 63 B avg), batches 4285/s, MsgSnap 0
+   allocs per op 22.6 (3790 B), per msg 2.7; GC cycles 20; process CPU 2781 ms = loop threads 2405 (incl. GC assist ~8) + other threads 376 (GC workers, sysmon): GC ~13.8% of process CPU
+== A rounds36 open 60,000/s in-process, no encoding
+   raft v3.6.0 (raftpb on gogoproto, value fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 60000/s, max-bytes 0, max-cpu-us 0, batch true, wire false
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.4 MiB
+   idle: 2.23% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.9 KiB, loaded 5.1 KiB (per node: idle 2.8 MiB, loaded 4.9 MiB)
+   throughput 60139 ops/s, latency p50 3635 us, p99 15023 us, p99.9 19910 us, max 21018 us, dropped 0
+   loop CPU per op 22.21 us (collect 44%), busiest loop 45% busy, passes/s/loop 15108
+   rounds/s/loop 767, per round: 13 KiB mean, 54 KiB max, 122 Readys; entries proposed per op 0.961
+   msgs 509261/s (8.47 per op, 0 B avg), batches 4600/s, MsgSnap 0
+   allocs per op 18.8 (3377 B), per msg 2.2; GC cycles 23; process CPU 2365 ms = loop threads 2003 (incl. GC assist ~21) + other threads 361 (GC workers, sysmon): GC ~16.2% of process CPU
+== A rounds36 closed 32,000 in flight wire
+   raft v3.6.0 (raftpb on gogoproto, value fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode closed 32/group (32000 in flight), max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.03s, leaders per node [334 333 333]; heap before groups 0.4 MiB
+   idle: 2.23% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 68.4 KiB (per node: idle 2.7 MiB, loaded 66.8 MiB)
+   throughput 2716437 ops/s, latency p50 10855 us, p99 22429 us, p99.9 26385 us, max 26385 us, dropped 0
+   loop CPU per op 1.01 us (collect 45%), busiest loop 92% busy, passes/s/loop 658
+   rounds/s/loop 234, per round: 1480 KiB mean, 4039 KiB max, 565 Readys; entries proposed per op 0.031
+   msgs 752001/s (0.28 per op, 965 B avg), batches 1711/s, MsgSnap 0
+   allocs per op 0.7 (572 B), per msg 2.7; GC cycles 10; process CPU 4484 ms = loop threads 4129 (incl. GC assist ~9) + other threads 355 (GC workers, sysmon): GC ~8.1% of process CPU
+### pprof rounds open: alloc_objects during the measurement
+File: rounds
+Build ID: b3cff616bbc0a7ef6cfdfa978d8dde570fd39c79
+Type: alloc_objects
+Time: 2026-10-18 16:58:59 UTC
+Showing nodes accounting for 11478328, 99.04% of 11589122 total
+Dropped 47 nodes (cum <= 57945)
+Showing top 25 nodes out of 63
+      flat  flat%   sum%        cum   cum%
+   1899423 16.39% 16.39%    1899423 16.39%  google.golang.org/protobuf/internal/impl.consumeUint64Ptr
+   1632397 14.09% 30.48%    1632397 14.09%  go.etcd.io/raft/v3.(*raft).send
+   1242169 10.72% 41.19%    1242169 10.72%  go.etcd.io/raft/v3.(*raft).hardState (inline)
+    921499  7.95% 49.15%    1734855 14.97%  go.etcd.io/raft/v3.(*raft).maybeSendAppend
+    819617  7.07% 56.22%     936410  8.08%  go.etcd.io/raft/v3.newStorageAppendRespMsg
+    717871  6.19% 62.41%    3425032 29.55%  main.mDecode
+    626989  5.41% 67.82%     626989  5.41%  go.etcd.io/raft/v3/raftpb.MessageType.Enum (inline)
+    579827  5.00% 72.83%     683301  5.90%  go.etcd.io/raft/v3.newStorageApplyRespMsg (inline)
+    504594  4.35% 77.18%    1524366 13.15%  go.etcd.io/raft/v3.(*raft).handleAppendEntries
+    335011  2.89% 80.07%     335011  2.89%  google.golang.org/protobuf/internal/impl.consumeInt32Ptr
+    320628  2.77% 82.84%     767104  6.62%  go.etcd.io/raft/v3.(*raft).appendEntry
+    318552  2.75% 85.59%    1560721 13.47%  go.etcd.io/raft/v3.(*RawNode).readyWithoutAccept
+    314860  2.72% 88.30%     314860  2.72%  reflect.unsafe_New
+    286260  2.47% 90.77%    1940164 16.74%  go.etcd.io/raft/v3.(*RawNode).Propose
+    278601  2.40% 93.18%     278601  2.40%  go.etcd.io/raft/v3.(*unstable).truncateAndAppend
+    161831  1.40% 94.57%     161831  1.40%  google.golang.org/protobuf/internal/impl.pointer.AppendPointerSlice (inline)
+    157873  1.36% 95.93%     157873  1.36%  google.golang.org/protobuf/internal/impl.consumeBytes
+     82533  0.71% 96.65%    2022697 17.45%  main.(*sim).proposeBatch
+     77156  0.67% 97.31%      77156  0.67%  google.golang.org/protobuf/internal/impl.mergeBytes
+     66224  0.57% 97.88%      66224  0.57%  go.etcd.io/raft/v3.(*MemoryStorage).Compact
+     63278  0.55% 98.43%     136525  1.18%  go.etcd.io/raft/v3.(*raft).sendHeartbeat
+     27506  0.24% 98.67%     105359  0.91%  go.etcd.io/raft/v3.(*raft).handleHeartbeat
+     25701  0.22% 98.89%     172470  1.49%  go.etcd.io/raft/v3.(*raft).tickHeartbeat
+     17416  0.15% 99.04%     162667  1.40%  go.etcd.io/raft/v3.(*MemoryStorage).CreateSnapshot
+### pprof rounds closed: alloc_objects during the measurement
+File: rounds
+Build ID: b3cff616bbc0a7ef6cfdfa978d8dde570fd39c79
+Type: alloc_objects
+Time: 2026-10-18 16:59:11 UTC
+Showing nodes accounting for 8793606, 99.12% of 8872013 total
+Dropped 39 nodes (cum <= 44360)
+Showing top 25 nodes out of 63
+      flat  flat%   sum%        cum   cum%
+   1441470 16.25% 16.25%    1441470 16.25%  google.golang.org/protobuf/internal/impl.consumeUint64Ptr
+   1210070 13.64% 29.89%    1210070 13.64%  go.etcd.io/raft/v3.(*raft).send
+    973065 10.97% 40.85%     973065 10.97%  go.etcd.io/raft/v3.(*raft).hardState (inline)
+    769713  8.68% 49.53%    1441235 16.24%  go.etcd.io/raft/v3.(*raft).maybeSendAppend
+    625954  7.06% 56.59%     726355  8.19%  go.etcd.io/raft/v3.newStorageAppendRespMsg
+    556556  6.27% 62.86%    2636337 29.72%  main.mDecode
+    545029  6.14% 69.00%     545029  6.14%  go.etcd.io/raft/v3/raftpb.MessageType.Enum (inline)
+    410430  4.63% 73.63%     494439  5.57%  go.etcd.io/raft/v3.newStorageApplyRespMsg (inline)
+    373567  4.21% 77.84%    1107020 12.48%  go.etcd.io/raft/v3.(*raft).handleAppendEntries
+    264320  2.98% 80.82%     264320  2.98%  google.golang.org/protobuf/internal/impl.consumeInt32Ptr
+    250799  2.83% 83.64%     566380  6.38%  go.etcd.io/raft/v3.(*raft).appendEntry
+    250381  2.82% 86.47%     250381  2.82%  reflect.unsafe_New
+    218898  2.47% 88.93%    1492291 16.82%  go.etcd.io/raft/v3.(*RawNode).Propose
+    215100  2.42% 91.36%    1188165 13.39%  go.etcd.io/raft/v3.(*RawNode).readyWithoutAccept
+    184365  2.08% 93.44%     184365  2.08%  go.etcd.io/raft/v3.(*unstable).truncateAndAppend
+    124958  1.41% 94.85%     124958  1.41%  google.golang.org/protobuf/internal/impl.pointer.AppendPointerSlice (inline)
+    119289  1.34% 96.19%     119289  1.34%  google.golang.org/protobuf/internal/impl.consumeBytes
+     59145  0.67% 96.86%    1551436 17.49%  main.(*sim).proposeBatch
+     58486  0.66% 97.52%      58486  0.66%  google.golang.org/protobuf/internal/impl.mergeBytes
+     46327  0.52% 98.04%      46327  0.52%  go.etcd.io/raft/v3.(*MemoryStorage).Compact
+     41190  0.46% 98.50%     101630  1.15%  go.etcd.io/raft/v3.(*raft).sendHeartbeat
+     22512  0.25% 98.76%      83976  0.95%  go.etcd.io/raft/v3.(*raft).handleHeartbeat
+     16615  0.19% 98.94%     122342  1.38%  go.etcd.io/raft/v3.(*raft).tickHeartbeat
+     15367  0.17% 99.12%     120666  1.36%  go.etcd.io/raft/v3.(*MemoryStorage).CreateSnapshot
+### pprof rounds36 open: alloc_objects during the measurement
+File: rounds36
+Build ID: 5d55e59cdafa4b89027f08eac98782a3880dd7ec
+Type: alloc_objects
+Time: 2026-10-18 16:59:21 UTC
+Showing nodes accounting for 1846369, 99.71% of 1851755 total
+Dropped 50 nodes (cum <= 9258)
+Showing top 25 nodes out of 41
+      flat  flat%   sum%        cum   cum%
+    764077 41.26% 41.26%     764077 41.26%  go.etcd.io/raft/v3.(*raft).send
+    324826 17.54% 58.80%     324997 17.55%  go.etcd.io/raft/v3.(*RawNode).readyWithoutAccept
+    229816 12.41% 71.21%     229816 12.41%  go.etcd.io/raft/v3.(*unstable).truncateAndAppend
+    163444  8.83% 80.04%     163444  8.83%  go.etcd.io/raft/v3/raftpb.(*Entry).Unmarshal
+    157585  8.51% 88.55%     321029 17.34%  go.etcd.io/raft/v3/raftpb.(*Message).Unmarshal
+     77710  4.20% 92.75%     448231 24.21%  main.(*sim).proposeBatch
+     71784  3.88% 96.62%     370521 20.01%  go.etcd.io/raft/v3.(*RawNode).Propose (inline)
+     37352  2.02% 98.64%      37352  2.02%  go.etcd.io/raft/v3.(*MemoryStorage).Append
+     19034  1.03% 99.67%      19034  1.03%  go.etcd.io/raft/v3.(*MemoryStorage).Compact
+       729 0.039% 99.71%     830861 44.87%  main.(*sim).collect
+         8 0.00043% 99.71%    1848341 99.82%  main.(*sim).run
+         4 0.00022% 99.71%      19038  1.03%  main.(*sim).apply
+         0     0% 99.71%     325505 17.58%  go.etcd.io/raft/v3.(*RawNode).Ready
+         0     0% 99.71%     665376 35.93%  go.etcd.io/raft/v3.(*RawNode).Step
+         0     0% 99.71%      31063  1.68%  go.etcd.io/raft/v3.(*RawNode).Tick (inline)
+         0     0% 99.71%     995176 53.74%  go.etcd.io/raft/v3.(*raft).Step
+         0     0% 99.71%     155083  8.37%  go.etcd.io/raft/v3.(*raft).appendEntry
+         0     0% 99.71%     301156 16.26%  go.etcd.io/raft/v3.(*raft).bcastAppend (inline)
+         0     0% 99.71%     301156 16.26%  go.etcd.io/raft/v3.(*raft).bcastAppend.func1
+         0     0% 99.71%      31063  1.68%  go.etcd.io/raft/v3.(*raft).bcastHeartbeat
+         0     0% 99.71%      31063  1.68%  go.etcd.io/raft/v3.(*raft).bcastHeartbeatWithCtx (inline)
+         0     0% 99.71%      31063  1.68%  go.etcd.io/raft/v3.(*raft).bcastHeartbeatWithCtx.func1
+         0     0% 99.71%     473673 25.58%  go.etcd.io/raft/v3.(*raft).handleAppendEntries
+         0     0% 99.71%      28400  1.53%  go.etcd.io/raft/v3.(*raft).handleHeartbeat
+### pprof rounds36 closed: alloc_objects during the measurement
+File: rounds36
+Build ID: 5d55e59cdafa4b89027f08eac98782a3880dd7ec
+Type: alloc_objects
+Time: 2026-10-18 16:59:33 UTC
+Showing nodes accounting for 2615043, 99.82% of 2619660 total
+Dropped 38 nodes (cum <= 13098)
+Showing top 25 nodes out of 41
+      flat  flat%   sum%        cum   cum%
+   1047952 40.00% 40.00%    1047952 40.00%  go.etcd.io/raft/v3.(*raft).send
+    459284 17.53% 57.54%     459284 17.53%  go.etcd.io/raft/v3.(*RawNode).readyWithoutAccept
+    342858 13.09% 70.62%     342858 13.09%  go.etcd.io/raft/v3.(*unstable).truncateAndAppend
+    234839  8.96% 79.59%     457054 17.45%  go.etcd.io/raft/v3/raftpb.(*Message).Unmarshal
+    222215  8.48% 88.07%     222215  8.48%  go.etcd.io/raft/v3/raftpb.(*Entry).Unmarshal
+    116223  4.44% 92.51%     559983 21.38%  go.etcd.io/raft/v3.(*RawNode).Propose (inline)
+    110105  4.20% 96.71%     670088 25.58%  main.(*sim).proposeBatch
+     55083  2.10% 98.81%      55083  2.10%  go.etcd.io/raft/v3.(*MemoryStorage).Append
+     26484  1.01% 99.82%      26484  1.01%  go.etcd.io/raft/v3.(*MemoryStorage).Compact
+         0     0% 99.82%     459284 17.53%  go.etcd.io/raft/v3.(*RawNode).Ready
+         0     0% 99.82%     922677 35.22%  go.etcd.io/raft/v3.(*RawNode).Step
+         0     0% 99.82%      25913  0.99%  go.etcd.io/raft/v3.(*RawNode).Tick
+         0     0% 99.82%    1392350 53.15%  go.etcd.io/raft/v3.(*raft).Step
+         0     0% 99.82%     227285  8.68%  go.etcd.io/raft/v3.(*raft).appendEntry
+         0     0% 99.82%     424242 16.19%  go.etcd.io/raft/v3.(*raft).bcastAppend (inline)
+         0     0% 99.82%     424242 16.19%  go.etcd.io/raft/v3.(*raft).bcastAppend.func1
+         0     0% 99.82%      25913  0.99%  go.etcd.io/raft/v3.(*raft).bcastHeartbeat
+         0     0% 99.82%      25913  0.99%  go.etcd.io/raft/v3.(*raft).bcastHeartbeatWithCtx (inline)
+         0     0% 99.82%      25913  0.99%  go.etcd.io/raft/v3.(*raft).bcastHeartbeatWithCtx.func1
+         0     0% 99.82%     674501 25.75%  go.etcd.io/raft/v3.(*raft).handleAppendEntries
+         0     0% 99.82%      24181  0.92%  go.etcd.io/raft/v3.(*raft).handleHeartbeat
+         0     0% 99.82%     440470 16.81%  go.etcd.io/raft/v3.(*raft).maybeSendAppend
+         0     0% 99.82%     440470 16.81%  go.etcd.io/raft/v3.(*raft).sendAppend (partial-inline)
+         0     0% 99.82%      25913  0.99%  go.etcd.io/raft/v3.(*raft).sendHeartbeat
