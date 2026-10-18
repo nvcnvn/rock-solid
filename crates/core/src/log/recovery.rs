@@ -1,4 +1,5 @@
-//! Recovery: load the newest manifest and its snapshots, then replay the records after it.
+//! Recovery: hand out the newest manifest's snapshot pieces one at a time, so restoring an index
+//! holds one piece at most, then replay the records after the manifest.
 //!
 //! The superblock comes from block 0, or from its copy when block 0 is unreadable or holds this
 //! format's superblock damaged; a damaged copy is rewritten from the other before anything else is
@@ -30,7 +31,7 @@ const PROBE_BLOCKS: u32 = 64;
 /// What recovery reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Mode {
-    /// Load the newest manifest and its snapshots, replay the records after its base.
+    /// Hand out the newest manifest's snapshot pieces, then replay the records after its base.
     Replay,
     /// Ignore manifests and return every record's header, to rebuild an index from scratch.
     Rebuild,
@@ -63,8 +64,6 @@ pub enum RecoveryError {
 /// Everything recovered from a disk's log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recovered {
-    /// Each index's snapshot pieces from the manifest, in order.
-    pub snapshots: Vec<(u64, Vec<Vec<u8>>)>,
     /// Records after the manifest's base in LSN order; in [`Mode::Rebuild`], every record, without blobs.
     pub records: Vec<LogRecord>,
     /// State for [`GroupCommit::resume`](super::commit::GroupCommit::resume).
@@ -78,6 +77,14 @@ pub struct Recovered {
 pub enum Step {
     /// Execute these disk actions and feed back their completions.
     Io(Vec<Action>),
+    /// The next snapshot piece of index `owner`, in manifest order; restore it, then call
+    /// [`Recovery::on_piece_restored`].
+    Piece {
+        /// Index the piece belongs to.
+        owner: u64,
+        /// The piece.
+        piece: Vec<u8>,
+    },
     /// Recovery finished.
     Done(Result<Recovered, RecoveryError>),
 }
@@ -142,6 +149,7 @@ enum Flow {
     Read(Lba, u32),
     Write(Lba),
     Fsync,
+    Piece(u64, Vec<u8>),
     Finish,
 }
 
@@ -157,6 +165,7 @@ pub struct Recovery {
     disk_blocks: u64,
     next_io: u64,
     pending: Option<(IoId, Option<IoBuf>)>,
+    piece_out: bool,
     finished: bool,
     stage: Stage,
     superblock: Option<Superblock>,
@@ -165,8 +174,7 @@ pub struct Recovery {
     quarantined_lsns: BTreeSet<u64>,
     manifest_ptr: Option<RecordPos>,
     manifest: Manifest,
-    snapshot_refs: Vec<(usize, BlobRef)>,
-    snapshots: Vec<(u64, Vec<Vec<u8>>)>,
+    snapshot_refs: Vec<(u64, BlobRef)>,
     scan: Vec<(u32, u32)>,
     found: Vec<Found>,
     groups: BTreeMap<u64, Vec<usize>>,
@@ -188,6 +196,7 @@ impl Recovery {
             disk_blocks,
             next_io: first_io.0,
             pending: None,
+            piece_out: false,
             finished: false,
             stage: Stage::Superblock,
             superblock: None,
@@ -197,7 +206,6 @@ impl Recovery {
             manifest_ptr: None,
             manifest: Manifest::default(),
             snapshot_refs: Vec::new(),
-            snapshots: Vec::new(),
             scan: Vec::new(),
             found: Vec::new(),
             groups: BTreeMap::new(),
@@ -232,6 +240,14 @@ impl Recovery {
         self.drive(ctx, Some(result.map(|()| bytes)))
     }
 
+    /// Continues after the caller restored the piece of the last [`Step::Piece`].
+    pub fn on_piece_restored(&mut self, ctx: &mut Context<'_, impl BufPool>) -> Step {
+        if !core::mem::take(&mut self.piece_out) || self.finished {
+            return Step::Io(Vec::new());
+        }
+        self.drive(ctx, None)
+    }
+
     fn drive(
         &mut self,
         ctx: &mut Context<'_, impl BufPool>,
@@ -245,6 +261,10 @@ impl Recovery {
                 }
                 let recovered = self.finish();
                 return self.done(Ok(recovered));
+            }
+            Ok(Flow::Piece(owner, piece)) => {
+                self.piece_out = true;
+                return Step::Piece { owner, piece };
             }
             Ok(flow) => flow,
         };
@@ -527,14 +547,7 @@ impl Recovery {
             .manifest
             .trees
             .iter()
-            .enumerate()
-            .flat_map(|(t, (_, refs))| refs.iter().map(move |r| (t, *r)))
-            .collect();
-        self.snapshots = self
-            .manifest
-            .trees
-            .iter()
-            .map(|(owner, _)| (*owner, Vec::new()))
+            .flat_map(|(owner, refs)| refs.iter().map(move |r| (*owner, *r)))
             .collect();
         self.stage = Stage::Snapshots {
             next: 0,
@@ -549,7 +562,7 @@ impl Recovery {
         record_blocks: Option<u32>,
         input: &mut Option<Vec<u8>>,
     ) -> Result<Flow, RecoveryError> {
-        let Some(&(tree, blob_ref)) = self.snapshot_refs.get(next) else {
+        let Some(&(owner, blob_ref)) = self.snapshot_refs.get(next) else {
             self.begin_scan();
             return Ok(Flow::Next);
         };
@@ -573,12 +586,11 @@ impl Recovery {
             }
         }
         let span = header.data_spans()[entry].clone();
-        self.snapshots[tree].1.push(data[span].to_vec());
         self.stage = Stage::Snapshots {
             next: next + 1,
             record_blocks: None,
         };
-        Ok(Flow::Next)
+        Ok(Flow::Piece(owner, data[span].to_vec()))
     }
 
     fn next_segment(&self, item: usize) -> Stage {
@@ -911,7 +923,6 @@ impl Recovery {
             .map(|r| u64::from(r.header.layout().record_blocks()) * BLOCK_BYTES as u64)
             .sum();
         Recovered {
-            snapshots: core::mem::take(&mut self.snapshots),
             resume: Resume {
                 superblock: sb,
                 open,

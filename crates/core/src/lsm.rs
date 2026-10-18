@@ -33,8 +33,12 @@ pub trait Tree {
     /// Drops an unfinished snapshot, such as one whose checkpoint failed.
     fn end_snapshot(&mut self);
 
-    /// Replaces the contents with the pieces of a snapshot, in order.
-    fn restore(&mut self, pieces: &[Vec<u8>]) -> Result<(), DecodeError>;
+    /// Takes the next piece of a snapshot, in order, for [`finish_restore`](Self::finish_restore);
+    /// fails on a malformed piece or a key not after the one before it.
+    fn restore_piece(&mut self, piece: &[u8]) -> Result<(), DecodeError>;
+
+    /// Replaces the contents with the pieces taken since the last restore; none empties the tree.
+    fn finish_restore(&mut self);
 }
 
 /// One allocation per entry: `key_len u16 | key | value`, ordered and compared by key.
@@ -138,6 +142,8 @@ impl Snapshot {
 pub struct MemTree {
     entries: BTreeSet<Entry>,
     snapshot: Option<Snapshot>,
+    /// Entries of a running restore, in key order, for one bulk build.
+    restoring: Vec<Entry>,
 }
 
 impl MemTree {
@@ -146,6 +152,7 @@ impl MemTree {
         Self {
             entries: BTreeSet::new(),
             snapshot: None,
+            restoring: Vec::new(),
         }
     }
 
@@ -287,21 +294,27 @@ impl Tree for MemTree {
         self.snapshot = None;
     }
 
-    fn restore(&mut self, pieces: &[Vec<u8>]) -> Result<(), DecodeError> {
-        let mut entries = Vec::new();
-        for piece in pieces {
-            let mut rest = piece.as_slice();
-            while !rest.is_empty() {
-                let key_len = usize::from(u16::from_le_bytes(take(&mut rest)?));
-                let key = take_slice(&mut rest, key_len)?;
-                let value_len = u32::from_le_bytes(take(&mut rest)?) as usize;
-                let value = take_slice(&mut rest, value_len)?;
-                entries.push(Entry::new(key, value));
+    fn restore_piece(&mut self, piece: &[u8]) -> Result<(), DecodeError> {
+        let mut rest = piece;
+        while !rest.is_empty() {
+            let key_len = usize::from(u16::from_le_bytes(take(&mut rest)?));
+            let key = take_slice(&mut rest, key_len)?;
+            let value_len = u32::from_le_bytes(take(&mut rest)?) as usize;
+            let value = take_slice(&mut rest, value_len)?;
+            if self.restoring.last().is_some_and(|last| last.key() >= key) {
+                return Err(DecodeError::Malformed);
             }
+            self.restoring.push(Entry::new(key, value));
         }
-        self.entries = entries.into_iter().collect();
-        self.snapshot = None;
         Ok(())
+    }
+
+    fn finish_restore(&mut self) {
+        let mut entries = core::mem::take(&mut self.restoring);
+        // The bulk build keeps this buffer until the tree is complete: 16 B per entry, not up to 32.
+        entries.shrink_to_fit();
+        self.entries = BTreeSet::from_iter(entries);
+        self.snapshot = None;
     }
 }
 
@@ -344,6 +357,14 @@ mod tests {
         core::iter::from_fn(|| tree.next_piece(max_piece)).collect()
     }
 
+    fn restore(tree: &mut MemTree, pieces: &[Vec<u8>]) -> Result<(), DecodeError> {
+        for piece in pieces {
+            tree.restore_piece(piece)?;
+        }
+        tree.finish_restore();
+        Ok(())
+    }
+
     #[test]
     fn snapshots_restore_random_trees_at_any_piece_size() {
         let mut rng = Rng::from_seed(11);
@@ -366,7 +387,7 @@ mod tests {
             );
             let mut restored = MemTree::new();
             restored.insert(b"stale".to_vec(), Vec::new());
-            restored.restore(&pieces).unwrap();
+            restore(&mut restored, &pieces).unwrap();
             assert_eq!(restored, tree, "round {round}");
         }
     }
@@ -392,7 +413,7 @@ mod tests {
                 }
             }
             let mut restored = MemTree::new();
-            restored.restore(&pieces).unwrap();
+            restore(&mut restored, &pieces).unwrap();
             assert_eq!(restored, frozen, "round {round}");
             assert!(tree.snapshot.is_none());
         }
@@ -418,6 +439,90 @@ mod tests {
         tree.insert(b"key".to_vec(), b"value".to_vec());
         let mut pieces = snapshot(&mut tree, 4096);
         pieces[0].pop();
-        assert_eq!(MemTree::new().restore(&pieces), Err(DecodeError::Malformed));
+        assert_eq!(
+            restore(&mut MemTree::new(), &pieces),
+            Err(DecodeError::Malformed)
+        );
+    }
+
+    #[test]
+    fn restore_rejects_keys_out_of_order_within_and_across_pieces() {
+        let mut tree = MemTree::new();
+        for key in [&b"a"[..], b"b", b"c", b"d"] {
+            tree.insert(key.to_vec(), key.to_vec());
+        }
+        let pieces = snapshot(&mut tree, 2 + 1 + 4 + 1);
+        assert_eq!(pieces.len(), 4);
+        let reversed: Vec<Vec<u8>> = pieces.iter().rev().cloned().collect();
+        let repeated = vec![pieces[0].clone(), pieces[1].clone(), pieces[1].clone()];
+        let swapped_within = vec![[pieces[1].clone(), pieces[0].clone()].concat()];
+        for bad in [reversed, repeated, swapped_within] {
+            assert_eq!(
+                restore(&mut MemTree::new(), &bad),
+                Err(DecodeError::Malformed)
+            );
+        }
+    }
+
+    /// etcd `snap` `TestEmptySnapshot`: an empty tree snapshots to no pieces and restores empty,
+    /// replacing whatever the tree held and dropping a running snapshot.
+    #[test]
+    fn finish_restore_without_pieces_empties_the_tree() {
+        assert_eq!(snapshot(&mut MemTree::new(), 4096), Vec::<Vec<u8>>::new());
+        let mut tree = MemTree::new();
+        tree.insert(b"stale".to_vec(), b"v".to_vec());
+        tree.begin_snapshot();
+        tree.finish_restore();
+        assert!(tree.is_empty());
+        assert_eq!(tree.next_piece(4096), None);
+    }
+
+    /// `LevelDB` `DBTest.Randomized` against its `ModelDB`: random inserts and removes on the tree
+    /// and on a `BTreeMap` model, with the tree replaced at random points by a streamed restore of
+    /// its own snapshot. The bulk-built tree must keep taking changes like the original.
+    #[test]
+    fn leveldb_randomized_against_a_model_across_restores() {
+        use std::collections::BTreeMap;
+        let mut rng = Rng::from_seed(13);
+        for round in 0..30 {
+            let mut tree = MemTree::new();
+            let mut model: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+            for op in 0..2000 {
+                let key = random_bytes(&mut rng, 1, 3);
+                if rng.chance(1, 4) {
+                    tree.remove(&key);
+                    model.remove(&key);
+                } else {
+                    let value = random_bytes(&mut rng, 0, 30);
+                    tree.insert(key.clone(), value.clone());
+                    model.insert(key, value);
+                }
+                if rng.chance(1, 200) {
+                    let max_piece = 40 + usize::try_from(rng.below(400)).unwrap();
+                    tree.begin_snapshot();
+                    let mut restored = MemTree::new();
+                    while let Some(piece) = tree.next_piece(max_piece) {
+                        restored.restore_piece(&piece).unwrap();
+                    }
+                    restored.finish_restore();
+                    tree = restored;
+                }
+                let probe = random_bytes(&mut rng, 1, 3);
+                assert_eq!(
+                    tree.get(&probe),
+                    model.get(&probe).map(Vec::as_slice),
+                    "round {round} op {op}"
+                );
+            }
+            let prefix = random_bytes(&mut rng, 0, 1);
+            assert!(
+                tree.scan(&prefix).eq(model
+                    .iter()
+                    .filter(|(k, _)| k.starts_with(&prefix))
+                    .map(|(k, v)| (k.as_slice(), v.as_slice()))),
+                "round {round}"
+            );
+            assert_eq!(tree.len(), model.len(), "round {round}");
+        }
     }
 }

@@ -522,9 +522,12 @@ fn measure(args: &[String]) {
         "restored" => {
             let mut orig = MemTree::new();
             let st = generate(&m, &plan, |k, v| orig.insert(k, v));
-            let pieces = snapshot(&mut orig, max_blob_bytes());
+            orig.begin_snapshot();
+            while let Some(piece) = orig.next_piece(max_blob_bytes()) {
+                tree.restore_piece(&piece).unwrap();
+            }
             drop(orig);
-            tree.restore(&pieces).unwrap();
+            tree.finish_restore();
             st
         }
         _ => panic!("order"),
@@ -1238,7 +1241,10 @@ fn tenm(args: &[String]) {
     let before = Mem::now();
     reset_peak();
     let t = Instant::now();
-    restored.restore(&pieces).unwrap();
+    for piece in &pieces {
+        restored.restore_piece(piece).unwrap();
+    }
+    restored.finish_restore();
     let rst = us(t);
     let (_, pk_act) = peak();
     let rm = Mem::now().since(before);
@@ -1252,7 +1258,7 @@ fn tenm(args: &[String]) {
     );
     println!(
         "  restored tree: act {:.1} B/file (create-order tree {:.1}, ratio {:.3}); req {:.1}; \
-         peak during restore = original tree + pieces + new tree = {:.2}x the original tree",
+         peak restoring held pieces = original tree + pieces + new tree = {:.2}x the original tree",
         rm.act as f64 / f,
         tm.act as f64 / f,
         rm.act as f64 / tm.act as f64,
@@ -1269,6 +1275,33 @@ fn tenm(args: &[String]) {
     let restored_glibc = rm.glibc as f64 / f;
     drop(restored);
     drop(pieces);
+
+    let mut restored = MemTree::new();
+    let before = Mem::now();
+    reset_peak();
+    tree.begin_snapshot();
+    while let Some(piece) = tree.next_piece(max_piece) {
+        restored.restore_piece(&piece).unwrap();
+    }
+    restored.finish_restore();
+    let (_, pk_act) = peak();
+    let restored_tree = Mem::now().since(before).act;
+    let extra = pk_act - before.act - restored_tree;
+    let handles = 16 * st.entries as usize;
+    println!(
+        "  streamed restart, each piece restored as it arrives and then dropped: peak {:.3}x the restored tree, \
+         {extra} B above it = 16 B x {} entries ({handles} B) + {} B",
+        (restored_tree + extra) as f64 / restored_tree as f64,
+        st.entries,
+        extra as i64 - handles as i64
+    );
+    check(
+        "F5 streamed restart peak above the restored tree",
+        extra >= handles && extra <= handles + max_piece + (1 << 20),
+        &format!("{extra} B"),
+        &format!("16 B per entry + one piece = {} B (+1 MiB slack)", handles + max_piece),
+    );
+    drop(restored);
 
     println!("\n## F4 representations of the same map (memory measured while the MemTree stays alive)");
     let mut reprs = vec![

@@ -39,6 +39,7 @@ struct Node {
     checkpoint_failed: bool,
     piece: Option<Ticket>,
     max_piece: usize,
+    restored_pieces: usize,
 }
 
 impl Node {
@@ -63,10 +64,11 @@ impl Node {
 
     fn open(mut disk: SimDisk, config: Config) -> Result<(Self, Recovered), RecoveryError> {
         let mut pool = HeapPool::new(POOL_BYTES);
-        let recovered = recover(&mut disk, &mut pool, Mode::Replay)?;
-        let index = index_of(&recovered);
-        let log = GroupCommit::resume(config, recovered.resume.clone(), IoId(1_000_000));
-        Ok((Self::new(disk, pool, log, index), recovered))
+        let restart = recover(&mut disk, &mut pool, Mode::Replay)?;
+        let log = GroupCommit::resume(config, restart.recovered.resume.clone(), IoId(1_000_000));
+        let mut node = Self::new(disk, pool, log, restart.index);
+        node.restored_pieces = restart.pieces;
+        Ok((node, restart.recovered))
     }
 
     fn new(disk: SimDisk, pool: HeapPool, log: GroupCommit, index: ChunkIndex) -> Self {
@@ -83,6 +85,7 @@ impl Node {
             checkpoint_failed: false,
             piece: None,
             max_piece: usize::MAX,
+            restored_pieces: 0,
         }
     }
 
@@ -190,30 +193,56 @@ impl Node {
     }
 }
 
-fn recover(
-    disk: &mut SimDisk,
-    pool: &mut HeapPool,
-    mode: Mode,
-) -> Result<Recovered, RecoveryError> {
+/// What a restart rebuilds from a disk: the log's state, the chunk index restored piece by piece
+/// and then replayed, and the number of snapshot pieces that took.
+#[derive(Debug, PartialEq, Eq)]
+struct Restart {
+    recovered: Recovered,
+    index: ChunkIndex,
+    pieces: usize,
+}
+
+fn recover(disk: &mut SimDisk, pool: &mut HeapPool, mode: Mode) -> Result<Restart, RecoveryError> {
     recover_with(disk, pool, mode, &[])
 }
 
-/// Recovers with reads of the blocks `unreadable` failing.
+/// Recovers with reads of the blocks `unreadable` failing, restoring each snapshot piece as it
+/// comes; recovery holds no buffer while the caller restores a piece.
 fn recover_with(
     disk: &mut SimDisk,
     pool: &mut HeapPool,
     mode: Mode,
     unreadable: &[Lba],
-) -> Result<Recovered, RecoveryError> {
+) -> Result<Restart, RecoveryError> {
     let (mut recovery, mut step) = Recovery::start(
         &mut Context::new(Tick(0), pool),
         mode,
         disk.blocks(),
         IoId(1),
     );
+    let mut tree = MemTree::new();
+    let mut pieces = 0;
     loop {
-        match step {
-            Step::Done(result) => return result,
+        step = match step {
+            Step::Done(result) => {
+                let recovered = result?;
+                tree.finish_restore();
+                let mut index = ChunkIndex::new(tree);
+                for record in &recovered.records {
+                    index.apply(record);
+                }
+                return Ok(Restart {
+                    recovered,
+                    index,
+                    pieces,
+                });
+            }
+            Step::Piece { owner, piece } => {
+                assert_eq!((owner, pool.live_buffers()), (INDEX, 0));
+                tree.restore_piece(&piece).unwrap();
+                pieces += 1;
+                recovery.on_piece_restored(&mut Context::new(Tick(0), pool))
+            }
             Step::Io(actions) => {
                 let [action] = actions.as_slice() else {
                     panic!("one read at a time: {actions:?}");
@@ -224,37 +253,21 @@ fn recover_with(
                     }
                     _ => disk.execute(pool, action).unwrap(),
                 };
-                step = recovery.on_event(&mut Context::new(Tick(0), pool), event);
+                recovery.on_event(&mut Context::new(Tick(0), pool), event)
             }
-        }
+        };
     }
-}
-
-fn index_of(recovered: &Recovered) -> ChunkIndex {
-    let mut tree = MemTree::new();
-    if let Some((_, pieces)) = recovered
-        .snapshots
-        .iter()
-        .find(|(owner, _)| *owner == INDEX)
-    {
-        tree.restore(pieces).unwrap();
-    }
-    let mut index = ChunkIndex::new(tree);
-    for record in &recovered.records {
-        index.apply(record);
-    }
-    index
 }
 
 fn rebuilt(disk: &SimDisk) -> ChunkIndex {
-    let recovered = recover(
+    let restart = recover(
         &mut disk.clone(),
         &mut HeapPool::new(POOL_BYTES),
         Mode::Rebuild,
     )
     .unwrap();
-    assert_eq!(recovered.snapshots, Vec::new());
-    index_of(&recovered)
+    assert_eq!(restart.pieces, 0);
+    restart.index
 }
 
 fn extent(chunk: u32, version: u64, first_block: u16, blocks: u16) -> Extent {
@@ -308,7 +321,7 @@ fn small_records() -> Config {
 fn rocksdb_empty() {
     let node = Node::format(SimDisk::new(GIB_BLOCKS), Config::default(), 1);
     let (mut node, recovered) = Node::open(node.disk, Config::default()).unwrap();
-    assert!(recovered.records.is_empty() && recovered.snapshots.is_empty());
+    assert!(recovered.records.is_empty() && node.restored_pieces == 0);
     node.write(0, 1, 0, 1);
     node.run();
     assert_eq!(lsns(&node.durable), [1]);
@@ -346,8 +359,8 @@ fn block_0_is_restored_from_the_copy_only_while_it_is_this_format() {
     let good = node.disk.read_block(Lba(0));
     let mut disk = node.disk.clone();
     let mut pool = HeapPool::new(POOL_BYTES);
-    let recovered = recover_with(&mut disk, &mut pool, Mode::Replay, &[Lba(0)]).unwrap();
-    assert_eq!(recovered.records, node.durable);
+    let restart = recover_with(&mut disk, &mut pool, Mode::Replay, &[Lba(0)]).unwrap();
+    assert_eq!(restart.recovered.records, node.durable);
     assert_eq!(
         (disk.read_block(Lba(0)), disk.unflushed_blocks()),
         (good, 0)
@@ -459,12 +472,14 @@ fn segments_with_damaged_headers_are_quarantined_not_reused() {
         let before: Vec<_> = damaged.iter().map(|&s| blocks_of(&disk, s)).collect();
 
         let mut pool = HeapPool::new(POOL_BYTES);
-        let recovered = recover(&mut disk, &mut pool, Mode::Rebuild).unwrap();
+        let Restart {
+            recovered, index, ..
+        } = recover(&mut disk, &mut pool, Mode::Rebuild).unwrap();
         let context = format!("seed {seed}");
         assert_eq!(recovered.quarantined, damaged, "{context}");
         assert!(recovered.resume.free.contains(&empty), "{context}");
-        let log = GroupCommit::resume(small_records(), recovered.resume.clone(), IoId(1_000_000));
-        let mut node = Node::new(disk, pool, log, index_of(&recovered));
+        let log = GroupCommit::resume(small_records(), recovered.resume, IoId(1_000_000));
+        let mut node = Node::new(disk, pool, log, index);
         let mut i = 0;
         while node.failed.is_empty() {
             node.write(i % 8, 1000 + u64::from(i), 0, 2);
@@ -727,29 +742,47 @@ fn torn_record_left_behind_in_the_other_stream() {
     assert_eq!(rebuilt(&node.disk), node.index);
 }
 
+fn checkpoint_config() -> Config {
+    Config {
+        max_replay_bytes: 40 * BLOCK_BYTES as u64,
+        ..Config::default()
+    }
+}
+
+/// A node that wrote 120 rounds of writes and punches and took at least five checkpoints.
+fn checkpointed_node(max_piece: usize) -> Node {
+    let mut node = Node::format(SimDisk::new(GIB_BLOCKS), checkpoint_config(), 7);
+    node.max_piece = max_piece;
+    for i in 0..120u32 {
+        node.write(i % 16, u64::from(i), 0, 1 + u16::try_from(i % 4).unwrap());
+        if i % 7 == 0 {
+            node.submit(
+                Stream::Hot,
+                Item::Punch(extent(i % 16, u64::from(i) + 1000, 0, 1024)),
+            );
+        }
+        node.run();
+    }
+    assert!(node.checkpoints >= 5, "{}", node.checkpoints);
+    node
+}
+
+fn is_piece(record: &LogRecord) -> bool {
+    record
+        .header
+        .entries
+        .iter()
+        .any(|e| matches!(e, Entry::Blob { kind, .. } if *kind == BlobKind::SNAPSHOT))
+}
+
 #[test]
 fn checkpoints_bound_replay_and_rebuild_matches_the_manifest() {
     for max_piece in [usize::MAX, 512] {
-        let config = Config {
-            max_replay_bytes: 40 * BLOCK_BYTES as u64,
-            ..Config::default()
-        };
-        let mut node = Node::format(SimDisk::new(GIB_BLOCKS), config, 7);
-        node.max_piece = max_piece;
-        for i in 0..120u32 {
-            node.write(i % 16, u64::from(i), 0, 1 + u16::try_from(i % 4).unwrap());
-            if i % 7 == 0 {
-                node.submit(
-                    Stream::Hot,
-                    Item::Punch(extent(i % 16, u64::from(i) + 1000, 0, 1024)),
-                );
-            }
-            node.run();
-        }
-        assert!(node.checkpoints >= 5, "{}", node.checkpoints);
+        let config = checkpoint_config();
+        let node = checkpointed_node(max_piece);
         let live = node.index.clone();
         let (node, recovered) = Node::open(node.disk, config).unwrap();
-        let pieces = recovered.snapshots[0].1.len();
+        let pieces = node.restored_pieces;
         assert_eq!(pieces > 1, max_piece == 512, "{pieces} pieces");
         let replayed: u64 = recovered
             .records
@@ -845,7 +878,7 @@ fn random_crashes_keep_acknowledged_records() {
                 assert_eq!(recovered_lsn, durable_lsn, "{context}");
                 dropped += usize::from(in_flight);
             }
-            from_manifest += usize::from(!recovered.snapshots.is_empty());
+            from_manifest += usize::from(reopened.restored_pieces > 0);
             assert_eq!(reopened.index, expected, "{context}");
             assert_eq!(rebuilt(&reopened.disk), expected, "{context}");
             assert_readable(&reopened.disk, &reopened.index, 6);
@@ -896,4 +929,137 @@ fn recovery_reads_fail_cleanly() {
     }
     assert_eq!(step, Step::Done(Err(RecoveryError::Disk(DiskError::Io))));
     assert_eq!(pool.live_buffers(), 0);
+}
+
+/// Recovery hands out one piece and waits: a completion arriving meanwhile and a repeated call
+/// change nothing, and the pieces restore the index the node had.
+#[test]
+fn recovery_waits_for_each_piece_to_be_restored() {
+    let node = checkpointed_node(512);
+    let mut disk = node.disk.clone();
+    let mut pool = HeapPool::new(POOL_BYTES);
+    let (mut recovery, mut step) = Recovery::start(
+        &mut Context::new(Tick(0), &mut pool),
+        Mode::Replay,
+        disk.blocks(),
+        IoId(1),
+    );
+    let mut tree = MemTree::new();
+    let mut pieces = 0;
+    let recovered = loop {
+        let mut ctx = Context::new(Tick(0), &mut pool);
+        step = match step {
+            Step::Io(actions) => {
+                let [action] = actions.as_slice() else {
+                    panic!("one read at a time: {actions:?}");
+                };
+                let event = disk.execute(ctx.pool, action).unwrap();
+                recovery.on_event(&mut ctx, event)
+            }
+            Step::Piece { owner, piece } => {
+                assert_eq!(owner, INDEX);
+                let stray = Event::DiskDone(IoId(1), Ok(()));
+                assert_eq!(recovery.on_event(&mut ctx, stray), Step::Io(Vec::new()));
+                tree.restore_piece(&piece).unwrap();
+                pieces += 1;
+                let next = recovery.on_piece_restored(&mut ctx);
+                assert_eq!(recovery.on_piece_restored(&mut ctx), Step::Io(Vec::new()));
+                next
+            }
+            Step::Done(result) => break result.unwrap(),
+        };
+    };
+    assert!(pieces > 1, "{pieces}");
+    tree.finish_restore();
+    let mut index = ChunkIndex::new(tree);
+    for record in &recovered.records {
+        index.apply(record);
+    }
+    assert_eq!(index, node.index);
+}
+
+/// etcd `snap` `TestBadCRC`: a bit flip in a piece of the snapshot recovery starts from is
+/// reported, not restored. etcd then falls back to an older snapshot (`TestFailback`); here an
+/// older manifest's records may already be cleaned, so there is none to fall back to.
+#[test]
+fn etcd_bad_crc_in_a_snapshot_piece_is_corruption() {
+    let node = checkpointed_node(512);
+    let (_, recovered) = Node::open(node.disk.clone(), checkpoint_config()).unwrap();
+    let manifest = recovered.resume.manifest.unwrap();
+    let piece = node
+        .durable
+        .iter()
+        .rfind(|r| r.pos.lsn < manifest.lsn && is_piece(r))
+        .unwrap();
+    let header_blocks = u64::from(piece.header.layout().header_blocks);
+    let mut disk = node.disk;
+    disk.flip(piece.lba.advance(header_blocks), 100, 0x04);
+    assert_eq!(
+        recover(&mut disk, &mut HeapPool::new(POOL_BYTES), Mode::Replay),
+        Err(RecoveryError::Corrupt { lsn: piece.pos.lsn })
+    );
+}
+
+/// etcd `snap` `TestLoadNewestSnap`: only the newest manifest's pieces are read, so damage to an
+/// older checkpoint's pieces changes nothing.
+#[test]
+fn etcd_older_snapshot_pieces_are_not_read() {
+    let node = checkpointed_node(512);
+    let (_, recovered) = Node::open(node.disk.clone(), checkpoint_config()).unwrap();
+    let base = node
+        .durable
+        .iter()
+        .find(|r| r.pos == recovered.resume.manifest.unwrap())
+        .map(|r| r.pos.lsn)
+        .unwrap();
+    let mut disk = node.disk.clone();
+    let older: Vec<&LogRecord> = node
+        .durable
+        .iter()
+        .filter(|r| r.pos.lsn + 40 < base && is_piece(r))
+        .collect();
+    assert!(older.len() > 3, "{}", older.len());
+    for piece in older {
+        disk.flip(piece.lba, 30, 0x01);
+    }
+    let (reopened, _) = Node::open(disk, checkpoint_config()).unwrap();
+    assert_eq!(reopened.index, node.index);
+}
+
+/// A crash while a checkpoint's pieces stream leaves pieces with no manifest naming them: the
+/// restart restores the previous snapshot, and the next checkpoint completes.
+#[test]
+fn a_crash_mid_checkpoint_restores_the_previous_snapshot() {
+    let mut node = checkpointed_node(512);
+    let config = checkpoint_config();
+    let previous = Node::open(node.disk.clone(), config)
+        .unwrap()
+        .0
+        .restored_pieces;
+    let start = node.durable.len();
+    let mut version = 5000;
+    while node.durable[start..].iter().filter(|r| is_piece(r)).count() < 3 {
+        if node.piece.is_none() {
+            version += 1;
+            node.write(3, version, 0, 4);
+        }
+        assert!(node.step(), "the checkpoint stalled");
+    }
+    assert!(node.piece.is_some(), "the checkpoint is still streaming");
+    assert!(previous > 3, "{previous}");
+    node.run_to_unflushed_write();
+    let live = node.index.clone();
+    let disk = node.crash_with(|_, _| false);
+
+    let (mut node, _) = Node::open(disk, config).unwrap();
+    assert_eq!((node.restored_pieces, &node.index), (previous, &live));
+    while node.checkpoints == 0 {
+        version += 1;
+        node.write(4, version, 0, 4);
+        node.run();
+    }
+    let live = node.index.clone();
+    let (reopened, _) = Node::open(node.disk, config).unwrap();
+    assert_ne!(reopened.restored_pieces, 0);
+    assert_eq!(reopened.index, live);
 }

@@ -120,13 +120,14 @@ Not counted: Raft entries applied but not yet checkpointed (up to `max_replay_by
 
 ## Rerun after applying conclusions 3 and 5
 
-`MemTree` now stores each entry as one allocation, restores by bulk build and streams snapshots from a frozen view (`Tree::begin_snapshot`, `Tree::next_piece`). The harness builds against that API, so `./run.sh` reproduces the rerun; the results above came from `f3bfd04`. The streamed F5 hands out every piece and drops each at once, as the log does after a piece is durable.
+`MemTree` now stores each entry as one allocation, streams snapshots from a frozen view (`Tree::begin_snapshot`, `Tree::next_piece`) and restores them piece by piece into one bulk build (`Tree::restore_piece`, `Tree::finish_restore`). The harness builds against that API, so `./run.sh` reproduces the rerun; the results above came from `f3bfd04`. The streamed F5 hands out every piece and drops each at once, as the log does after a piece is durable; the streamed restart restores each piece as it arrives and then drops it, as recovery hands them over.
 
 | Test | Result |
 | --- | --- |
 | F1 attributes + directory entry, 1M files | **235 B/file** (glibc model 263 B), as F4 predicted. 2.39 allocations per file |
 | F1 +1 / +3 xattrs | +101 B, then +117 B per xattr (glibc model +103, +124 B) |
-| F1 restored by snapshot + bulk-built `restore` | 209 B/file (was 397 B) |
+| F1 restored by snapshot + streamed, bulk-built restore | 209 B/file (was 397 B) |
 | F5 streamed snapshot, 10M files | **Peak 1.0004× the tree**: 1,048,720 B above it, one piece. Pieces hold exactly their length. Holding every piece at once is 1.71×, 1 + serialized / tree |
-| F6 restore, 10M files | **19 to 25M entries/s** (was 5.5M), 0.08 to 0.11 s per million files |
+| F5 streamed restart, 10M files | **Peak 1.16× the restored tree**, 1.03× a tree built in create order: 16 B per entry above it for the bulk build's handles, plus 10 KB. The last piece is already dropped when the build peaks |
+| F6 restore, 10M files | **15 to 25M entries/s** (was 5.5M), 0.08 to 0.14 s per million files; the 15M run was on a host at load 6.3 |
 | F7 get and 1,000-entry listing | Get p50 0.96 to 1.00 µs, listing p50 3.4 to 3.5 µs, over three runs on a host at load 3.1 to 3.6 |
