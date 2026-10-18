@@ -314,7 +314,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Buffer pool, slab, handle.** A fixed area of memory, carved into equal slots (a slab), from which I/O buffers are taken and returned. Code passes a small handle (slot number plus generation) instead of a pointer, so a stale handle can be detected.
 
-**Kernel bypass.** Talking to hardware from user space without going through the kernel, to save its overhead. **SPDK** does it for NVMe drives, **DPDK** for network cards, and **RDMA** (Remote Direct Memory Access) lets one machine's network card read and write another machine's memory directly. **Soft-RoCE** is a software RDMA that runs on any network card, for testing. These need **hugepages** (large memory pages) or **registered memory** the hardware may access by **DMA** (direct memory access), and often **polling**: spinning on a core instead of sleeping until an interrupt.
+**Kernel bypass.** Talking to hardware from user space without going through the kernel, to save its overhead. **SPDK** does it for NVMe drives, **DPDK** for network cards, and **RDMA** (Remote Direct Memory Access) lets one machine's network card read and write another machine's memory directly. **Soft-RoCE** is a software RDMA that runs on any network card, for testing. These need **hugepages** (large memory pages) or **registered memory** the hardware may access by **DMA** (direct memory access), and often **polling**: spinning on a core instead of sleeping until an interrupt. io_uring registers memory too (*fixed buffers*), so the kernel pins it once instead of on every request ([Runtime in Go](design.md#runtime-in-go)).
+
+**CPU limit, CFS quota, throttling.** A Kubernetes CPU limit becomes a CFS bandwidth quota on the container's cgroup: so much CPU time per 100 ms period across all its threads. A process that uses its quota early in a period is throttled, with every thread stopped, until the next period. This is why the daemon never runs more Go Ps than its limit ([Runtime in Go](design.md#runtime-in-go)).
 
 **cgo.** Go's mechanism for calling C libraries, used only for SPDK and RDMA.
 
