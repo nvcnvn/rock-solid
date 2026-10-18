@@ -1,0 +1,980 @@
+package disklog
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"math"
+	"math/bits"
+
+	"github.com/nvcnvn/rock-solid/internal/core"
+)
+
+const maxRecordEntries = math.MaxUint16
+
+var (
+	// ErrNoSpace reports an item no free segment is left to hold.
+	ErrNoSpace = errors.New("no free segment")
+	// ErrBusy reports a checkpoint begun while another runs.
+	ErrBusy = errors.New("a checkpoint is already running")
+	// ErrNoCheckpoint reports a checkpoint piece or end with no checkpoint taking pieces.
+	ErrNoCheckpoint = errors.New("no checkpoint is taking pieces")
+	// ErrUnknownOwner reports a checkpoint piece for an index the checkpoint did not name.
+	ErrUnknownOwner = errors.New("index not named by the checkpoint")
+	// ErrBadBuffer reports an item whose buffer does not match its entry.
+	ErrBadBuffer = errors.New("buffer does not match its entry")
+	// ErrReservedKind reports an item of a blob kind only the log writes.
+	ErrReservedKind = errors.New("blob kind reserved for the log")
+)
+
+// Config is the group commit settings.
+type Config struct {
+	// MaxRecordBytes is max_group_commit_bytes, the largest record a round writes.
+	MaxRecordBytes uint64
+	// MaxReplayBytes is max_replay_bytes: the record bytes after the newest manifest that make a checkpoint due.
+	MaxReplayBytes uint64
+	// CommitDepth is commit_depth, the most rounds in flight at once.
+	CommitDepth int
+	// RetryTimer is the timer that retries a round the buffer pool could not hold.
+	RetryTimer core.TimerID
+	// RetryDelay is how long that retry waits.
+	RetryDelay core.Tick
+	// Check decodes every record a round encodes and panics unless it holds exactly what
+	// was submitted.
+	Check bool
+}
+
+// DefaultConfig is the default settings, with the decode check off.
+func DefaultConfig() Config {
+	return Config{MaxRecordBytes: 1 << 20, MaxReplayBytes: 64 << 20, CommitDepth: 1, RetryDelay: 1000}
+}
+
+// Ticket names one submitted item in the log's events.
+type Ticket uint64
+
+// Item is one thing to append: a write's Count blocks in a buffer of exactly that size,
+// a blob's Length bytes at the start of its buffer, or a punch or freeze with no buffer.
+// Once accepted, the buffer belongs to the log.
+type Item struct {
+	Entry Entry
+	Buf   core.IOBuf
+}
+
+// EventKind tags an Event.
+type EventKind uint8
+
+// Event kinds.
+const (
+	// Durable reports a durable record; Tickets[i] submitted Entries[i].
+	Durable EventKind = iota + 1
+	// Failed reports items that will never be durable, and why.
+	Failed
+	// CheckpointDone reports the running checkpoint's manifest durable at Manifest.
+	CheckpointDone
+	// CheckpointFailed reports that the running checkpoint will never finish; a new one may begin.
+	CheckpointFailed
+)
+
+// Event is one outcome of the log. Its slices point into the Output that carried it and
+// stay valid until that Output is reset.
+type Event struct {
+	Kind         EventKind
+	LSN          uint64
+	Segment      uint32
+	Block        uint32
+	LBA          core.LBA
+	HeaderBlocks uint32
+	Entries      []Entry
+	Tickets      []Ticket
+	Err          error
+	Manifest     ManifestPos
+}
+
+// Output collects what one call into the log produced: actions for the driver and
+// events for the log's owner. The caller reuses it across calls, so a call allocates
+// nothing once it has grown.
+type Output struct {
+	Actions []core.Action
+	Events  []Event
+	entries []Entry
+	tickets []Ticket
+}
+
+// Reset empties the output for reuse.
+func (o *Output) Reset() {
+	o.Actions = o.Actions[:0]
+	clear(o.Events)
+	o.Events = o.Events[:0]
+	o.entries = o.entries[:0]
+	o.tickets = o.tickets[:0]
+}
+
+func (o *Output) emit(ev Event, entries []Entry, tickets []Ticket) {
+	es, ts := len(o.entries), len(o.tickets)
+	o.entries = append(o.entries, entries...)
+	o.tickets = append(o.tickets, tickets...)
+	ev.Entries = o.entries[es:len(o.entries):len(o.entries)]
+	ev.Tickets = o.tickets[ts:len(o.tickets):len(o.tickets)]
+	o.Events = append(o.Events, ev)
+}
+
+// CheckpointIndex names an index a checkpoint covers and the LSN after which records
+// replay into it.
+type CheckpointIndex struct {
+	Owner     uint32
+	ReplayLSN uint64
+}
+
+type queued struct {
+	ticket Ticket
+	entry  Entry
+	buf    core.IOBuf
+	bytes  []byte
+}
+
+func (q *queued) payload(pool core.BufPool) []byte {
+	switch {
+	case q.bytes != nil:
+		return q.bytes
+	case q.buf == core.NoBuf:
+		return nil
+	case q.entry.Kind == EntryBlob:
+		return pool.Bytes(q.buf)[:q.entry.Length]
+	}
+	return pool.Bytes(q.buf)
+}
+
+type queue struct {
+	items []queued
+	head  int
+}
+
+func (q *queue) len() int              { return len(q.items) - q.head }
+func (q *queue) at(i int) *queued      { return &q.items[q.head+i] }
+func (q *queue) push(it queued)        { q.items = append(q.items, it) }
+func (q *queue) window(n int) []queued { return q.items[q.head : q.head+n] }
+
+func (q *queue) drop(n int) {
+	clear(q.items[q.head : q.head+n])
+	q.head += n
+	switch {
+	case q.head == len(q.items):
+		q.items, q.head = q.items[:0], 0
+	case q.head > 64 && q.head > len(q.items)/2:
+		n := copy(q.items, q.items[q.head:])
+		clear(q.items[n:])
+		q.items, q.head = q.items[:n], 0
+	}
+}
+
+type cursor struct {
+	segment uint32
+	seq     uint64
+	next    uint32
+}
+
+type round struct {
+	stream       Stream
+	lsn          uint64
+	writeIO      core.IOID
+	flushIO      core.IOID
+	writeDone    bool
+	flushSent    bool
+	abandoned    bool
+	segment      uint32
+	block        uint32
+	headerBlocks uint32
+	after        cursor
+	bytes        uint64
+	bufs         []core.IOBuf
+	entries      []Entry
+	tickets      []Ticket
+}
+
+type pendingPiece struct {
+	ticket Ticket
+	index  int
+	root   bool
+}
+
+type checkpoint struct {
+	manifest      Manifest
+	replayAtBegin uint64
+	pending       []pendingPiece
+	ended         bool
+	body          []byte
+	written       int
+	earlier       []BlobRef
+	piece         Ticket
+	final         bool
+}
+
+type formatPhase uint8
+
+const (
+	formatBlock0 formatPhase = iota + 1
+	formatCopy
+	formatDone
+)
+
+// Log appends records to one disk's log by group commit: each round writes one record
+// to one stream's open segment with one vectored write and makes it durable with one
+// flush, and the items of any number of producers that arrive meanwhile share the next.
+type Log struct {
+	cfg          Config
+	sb           Superblock
+	maxRecBlocks uint32
+	maxBlob      uint64
+
+	phase      formatPhase
+	formatBuf  core.IOBuf
+	formatIO   core.IOID
+	formatSync core.IOID
+
+	nextIO     core.IOID
+	nextTicket Ticket
+	nextLSN    uint64
+	nextSeq    uint64
+	durableLSN uint64
+	free       []uint64
+
+	queues [2]queue
+	asm    [2]cursor
+	dur    [2]cursor
+	last   Stream
+
+	rounds []round
+	first  int
+	count  int
+
+	err         error
+	retryArmed  bool
+	manifest    ManifestPos
+	replayBytes uint64
+	cp          *checkpoint
+
+	crcs     []uint32
+	checkImg []byte
+	checkEnt []Entry
+
+	breakEncoding func(head []byte)
+}
+
+// Format starts a new log on an empty disk: it writes the superblock to block 0 and
+// flushes, then writes the copy to the last block of segment 0 and flushes, before the
+// first round. Its IO IDs count up from firstIO.
+func Format(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID, out *Output) (*Log, error) {
+	if err := sb.check(); err != nil {
+		return nil, err
+	}
+	buf, err := ctx.Pool.Alloc(core.BlockSize)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := AppendSuperblock(ctx.Pool.Bytes(buf)[:0], sb); err != nil {
+		ctx.Pool.Free(buf)
+		return nil, err
+	}
+	l := newLog(cfg, sb, firstIO)
+	for s := uint32(1); s < sb.SegmentCount; s++ {
+		l.free[s/64] |= 1 << (s % 64)
+	}
+	l.phase = formatBlock0
+	l.formatBuf = buf
+	l.writeFormat(sb.SuperblockLBA(), out)
+	return l, nil
+}
+
+func newLog(cfg Config, sb Superblock, firstIO core.IOID) *Log {
+	cfg.CommitDepth = max(cfg.CommitDepth, 1)
+	maxRec := uint32(min(cfg.MaxRecordBytes/core.BlockSize, math.MaxUint32))
+	maxRec = min(max(maxRec, 2), sb.SegmentBlocks-1)
+	l := &Log{
+		cfg:          cfg,
+		sb:           sb,
+		maxRecBlocks: maxRec,
+		maxBlob:      maxBlobBytes(maxRec),
+		nextIO:       firstIO,
+		nextTicket:   1,
+		nextLSN:      1,
+		nextSeq:      1,
+		free:         make([]uint64, (sb.SegmentCount+63)/64),
+		last:         Cold,
+		rounds:       make([]round, cfg.CommitDepth),
+	}
+	return l
+}
+
+func maxBlobBytes(maxRecBlocks uint32) uint64 {
+	for d := maxRecBlocks - 1; d > 0; d-- {
+		headerBytes := uint64(preludeSize + blobEntrySize + core.CRC32CSize*d)
+		if (headerBytes+core.BlockSize-1)/core.BlockSize+uint64(d) <= uint64(maxRecBlocks) {
+			return uint64(d) * core.BlockSize
+		}
+	}
+	return 0
+}
+
+func (l *Log) io() core.IOID {
+	io := l.nextIO
+	l.nextIO++
+	return io
+}
+
+func (l *Log) writeFormat(lba core.LBA, out *Output) {
+	l.formatIO, l.formatSync = l.io(), l.io()
+	out.Actions = append(out.Actions,
+		core.Action{Kind: core.ActDiskWrite, IO: l.formatIO, LBA: lba, Buf: l.formatBuf, Len: core.BlockSize},
+		core.Action{Kind: core.ActDiskFsync, IO: l.formatSync})
+}
+
+// Superblock is the log's identity and geometry.
+func (l *Log) Superblock() Superblock { return l.sb }
+
+// DurableLSN is the LSN of the newest durable record.
+func (l *Log) DurableLSN() uint64 { return l.durableLSN }
+
+// Manifest is the position of the newest durable manifest's last piece.
+func (l *Log) Manifest() ManifestPos { return l.manifest }
+
+// Err is the disk error that failed the log, or nil.
+func (l *Log) Err() error { return l.err }
+
+// MaxBlobBytes is the largest blob one record holds.
+func (l *Log) MaxBlobBytes() uint64 { return l.maxBlob }
+
+// InFlight is the number of rounds written but not yet durable.
+func (l *Log) InFlight() int { return l.count }
+
+// CheckpointDue reports whether MaxReplayBytes of records follow the newest manifest and
+// no checkpoint is running.
+func (l *Log) CheckpointDue() bool {
+	return l.cp == nil && l.err == nil && l.replayBytes >= l.cfg.MaxReplayBytes
+}
+
+// Submit queues an item for a stream; a Durable event names its ticket once its record
+// is durable. A refused item's buffer stays with the caller.
+func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ticket, error) {
+	if l.err != nil {
+		return 0, l.err
+	}
+	if it.Entry.Kind == EntryBlob && (it.Entry.BlobKind == BlobManifest || it.Entry.BlobKind == BlobManifestPiece) {
+		return 0, ErrReservedKind
+	}
+	if err := l.accept(ctx, stream, &it); err != nil {
+		return 0, err
+	}
+	t := l.enqueue(stream, queued{entry: it.Entry, buf: it.Buf})
+	l.startRounds(ctx, out)
+	return t, nil
+}
+
+func (l *Log) accept(ctx *core.Context, stream Stream, it *Item) error {
+	if stream > Cold {
+		return ErrMalformed
+	}
+	var acc layoutAcc
+	if err := acc.add(&it.Entry); err != nil {
+		return err
+	}
+	lay, err := acc.layout()
+	if err != nil || lay.Blocks() > uint64(l.maxRecBlocks) {
+		return ErrTooLarge
+	}
+	switch it.Entry.Kind {
+	case EntryWrite:
+		if it.Buf == core.NoBuf || len(ctx.Pool.Bytes(it.Buf)) != int(it.Entry.Count)*core.BlockSize {
+			return ErrBadBuffer
+		}
+	case EntryBlob:
+		if it.Entry.Length == 0 {
+			if it.Buf != core.NoBuf {
+				return ErrBadBuffer
+			}
+		} else if it.Buf == core.NoBuf || uint64(len(ctx.Pool.Bytes(it.Buf))) < it.Entry.Length {
+			return ErrBadBuffer
+		}
+	default:
+		if it.Buf != core.NoBuf {
+			return ErrBadBuffer
+		}
+	}
+	return nil
+}
+
+func (l *Log) enqueue(stream Stream, q queued) Ticket {
+	q.ticket = l.nextTicket
+	l.nextTicket++
+	l.queues[stream].push(q)
+	return q.ticket
+}
+
+// BeginCheckpoint starts a checkpoint of the given indexes, whose runs must hold exactly
+// the records up to DurableLSN that each one has not left to replay. Their pieces follow
+// through CheckpointPiece, then EndCheckpoint; it finishes with CheckpointDone or
+// CheckpointFailed.
+func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
+	if l.err != nil {
+		return l.err
+	}
+	if l.cp != nil {
+		return ErrBusy
+	}
+	m := Manifest{BaseLSN: l.durableLSN, Indexes: make([]ManifestIndex, len(indexes))}
+	for s, c := range l.dur {
+		m.BaseSeq = max(m.BaseSeq, c.seq)
+		if c.segment != 0 {
+			m.Starts[s] = StreamStart{Segment: c.segment, Block: c.next}
+		}
+	}
+	for i, ix := range indexes {
+		if ix.ReplayLSN > l.durableLSN {
+			return ErrMalformed
+		}
+		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN}
+	}
+	l.cp = &checkpoint{manifest: m, replayAtBegin: l.replayBytes}
+	return nil
+}
+
+// CheckpointPiece queues the next piece of an index's runs, buf holding its length bytes,
+// on the cold stream. root marks the piece the manifest names: a run's last piece, which
+// lists the others.
+func (l *Log) CheckpointPiece(ctx *core.Context, owner uint32, buf core.IOBuf, length uint64, root bool, out *Output) (Ticket, error) {
+	if l.err != nil {
+		return 0, l.err
+	}
+	if l.cp == nil || l.cp.ended {
+		return 0, ErrNoCheckpoint
+	}
+	index := -1
+	for i := range l.cp.manifest.Indexes {
+		if l.cp.manifest.Indexes[i].Owner == owner {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return 0, ErrUnknownOwner
+	}
+	it := Item{Entry: BlobEntry(BlobRun, owner, length), Buf: buf}
+	if err := l.accept(ctx, Cold, &it); err != nil {
+		return 0, err
+	}
+	t := l.enqueue(Cold, queued{entry: it.Entry, buf: it.Buf})
+	l.cp.pending = append(l.cp.pending, pendingPiece{ticket: t, index: index, root: root})
+	l.startRounds(ctx, out)
+	return t, nil
+}
+
+// EndCheckpoint marks every piece handed over; the manifest follows once they are all
+// durable.
+func (l *Log) EndCheckpoint(ctx *core.Context, out *Output) error {
+	if l.err != nil {
+		return l.err
+	}
+	if l.cp == nil || l.cp.ended {
+		return ErrNoCheckpoint
+	}
+	l.cp.ended = true
+	l.advanceManifest(out)
+	l.startRounds(ctx, out)
+	return nil
+}
+
+func (l *Log) advanceManifest(out *Output) {
+	cp := l.cp
+	if cp == nil || !cp.ended || len(cp.pending) > 0 || cp.piece != 0 {
+		return
+	}
+	if cp.body == nil {
+		cp.body = AppendManifest(nil, &cp.manifest)
+	}
+	rest := cp.body[cp.written:]
+	if uint64(ManifestPieceSize(len(cp.earlier), len(rest))) <= l.maxBlob {
+		piece, err := AppendManifestPiece(nil, cp.earlier, rest)
+		if err == nil {
+			cp.final = true
+			cp.piece = l.enqueue(Cold, queued{entry: BlobEntry(BlobManifest, 0, uint64(len(piece))), bytes: piece})
+			return
+		}
+	} else if len(rest) > 0 && len(cp.earlier) < math.MaxUint16 {
+		n := min(uint64(len(rest)), l.maxBlob)
+		cp.piece = l.enqueue(Cold, queued{entry: BlobEntry(BlobManifestPiece, 0, n), bytes: rest[:n]})
+		cp.written += int(n)
+		return
+	}
+	l.cp = nil
+	out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: ErrTooLarge})
+}
+
+// OnEvent advances rounds on disk completions and retries a round the buffer pool could
+// not hold when the retry timer fires.
+func (l *Log) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
+	switch ev.Kind {
+	case core.EvDiskDone:
+		l.diskDone(ctx, ev.IO, ev.Err, out)
+	case core.EvTimer:
+		if ev.Timer == l.cfg.RetryTimer && l.retryArmed {
+			l.retryArmed = false
+			l.startRounds(ctx, out)
+		}
+	}
+}
+
+func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out *Output) {
+	if l.phase != formatDone && (io == l.formatIO || io == l.formatSync) {
+		l.formatDone(ctx, io, derr, out)
+		return
+	}
+	for i := range l.count {
+		r := l.round(i)
+		switch io {
+		case r.writeIO:
+			if r.writeDone {
+				return
+			}
+			r.writeDone = true
+			l.freeBufs(ctx, r)
+			if r.abandoned {
+				l.dropAbandoned()
+				return
+			}
+			if derr != core.DiskOK {
+				l.fail(ctx, derr, out)
+				return
+			}
+			l.sendFlushes(out)
+			return
+		case r.flushIO:
+			if r.abandoned || !r.flushSent {
+				return
+			}
+			if derr != core.DiskOK {
+				l.fail(ctx, derr, out)
+				return
+			}
+			for range i + 1 {
+				l.retire(out)
+			}
+			l.startRounds(ctx, out)
+			return
+		}
+	}
+}
+
+func (l *Log) formatDone(ctx *core.Context, io core.IOID, derr core.DiskError, out *Output) {
+	if derr != core.DiskOK {
+		l.phase = formatDone
+		ctx.Pool.Free(l.formatBuf)
+		l.formatBuf = core.NoBuf
+		l.fail(ctx, derr, out)
+		return
+	}
+	if io != l.formatSync {
+		return
+	}
+	if l.phase == formatBlock0 {
+		l.phase = formatCopy
+		l.writeFormat(l.sb.SuperblockCopyLBA(), out)
+		return
+	}
+	l.phase = formatDone
+	ctx.Pool.Free(l.formatBuf)
+	l.formatBuf = core.NoBuf
+	l.startRounds(ctx, out)
+}
+
+func (l *Log) round(i int) *round { return &l.rounds[(l.first+i)%len(l.rounds)] }
+
+func (l *Log) freeBufs(ctx *core.Context, r *round) {
+	for _, b := range r.bufs {
+		ctx.Pool.Free(b)
+	}
+	clear(r.bufs)
+	r.bufs = r.bufs[:0]
+}
+
+// sendFlushes submits the flush of every round whose write and every earlier round's
+// write have completed, so durability stays a prefix of the log.
+func (l *Log) sendFlushes(out *Output) {
+	for i := range l.count {
+		r := l.round(i)
+		if !r.writeDone {
+			return
+		}
+		if !r.flushSent {
+			r.flushSent = true
+			out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskFsync, IO: r.flushIO})
+		}
+	}
+}
+
+func (l *Log) earlierWritten() bool {
+	for i := range l.count {
+		if !l.round(i).writeDone {
+			return false
+		}
+	}
+	return true
+}
+
+func (l *Log) retire(out *Output) {
+	r := l.round(0)
+	l.durableLSN = r.lsn
+	l.dur[r.stream] = r.after
+	l.replayBytes += r.bytes
+	out.emit(Event{
+		Kind:         Durable,
+		LSN:          r.lsn,
+		Segment:      r.segment,
+		Block:        r.block,
+		LBA:          l.sb.LBA(r.segment, r.block),
+		HeaderBlocks: r.headerBlocks,
+	}, r.entries, r.tickets)
+	l.checkpointProgress(r, out)
+	l.first = (l.first + 1) % len(l.rounds)
+	l.count--
+}
+
+func (l *Log) checkpointProgress(r *round, out *Output) {
+	cp := l.cp
+	if cp == nil {
+		return
+	}
+	for i, t := range r.tickets {
+		ref := BlobRef{Segment: r.segment, Block: r.block, LSN: r.lsn, Entry: uint16(i)}
+		switch {
+		case len(cp.pending) > 0 && cp.pending[0].ticket == t:
+			p := cp.pending[0]
+			cp.pending = cp.pending[1:]
+			if p.root {
+				ix := &cp.manifest.Indexes[p.index]
+				ix.Runs = append(ix.Runs, ref)
+			}
+		case t == cp.piece && cp.final:
+			l.manifest = ManifestPos{Segment: r.segment, Block: r.block, LSN: r.lsn}
+			l.replayBytes -= cp.replayAtBegin
+			l.cp = nil
+			out.Events = append(out.Events, Event{Kind: CheckpointDone, Manifest: l.manifest})
+			return
+		case t == cp.piece:
+			cp.earlier = append(cp.earlier, ref)
+			cp.piece = 0
+		}
+	}
+	l.advanceManifest(out)
+}
+
+func (l *Log) fail(ctx *core.Context, err error, out *Output) {
+	l.err = err
+	ts := len(out.tickets)
+	for i := range l.count {
+		r := l.round(i)
+		out.tickets = append(out.tickets, r.tickets...)
+		r.abandoned = true
+	}
+	for s := range l.queues {
+		out.tickets = l.drain(ctx, Stream(s), out.tickets)
+	}
+	out.Events = append(out.Events, Event{Kind: Failed, Err: err, Tickets: out.tickets[ts:len(out.tickets):len(out.tickets)]})
+	if l.cp != nil {
+		l.cp = nil
+		out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: err})
+	}
+	l.dropAbandoned()
+}
+
+func (l *Log) dropAbandoned() {
+	for l.count > 0 && l.round(0).writeDone {
+		l.first = (l.first + 1) % len(l.rounds)
+		l.count--
+	}
+}
+
+func (l *Log) drain(ctx *core.Context, s Stream, tickets []Ticket) []Ticket {
+	q := &l.queues[s]
+	for i := range q.len() {
+		it := q.at(i)
+		tickets = append(tickets, it.ticket)
+		if it.buf != core.NoBuf {
+			ctx.Pool.Free(it.buf)
+		}
+	}
+	q.drop(q.len())
+	return tickets
+}
+
+func (l *Log) failNoSpace(ctx *core.Context, s Stream, out *Output) {
+	ts := len(out.tickets)
+	out.tickets = l.drain(ctx, s, out.tickets)
+	failed := out.tickets[ts:len(out.tickets):len(out.tickets)]
+	out.Events = append(out.Events, Event{Kind: Failed, Err: ErrNoSpace, Tickets: failed})
+	if l.cp == nil {
+		return
+	}
+	for _, t := range failed {
+		if l.cp.owns(t) {
+			l.cp = nil
+			out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: ErrNoSpace})
+			return
+		}
+	}
+}
+
+func (cp *checkpoint) owns(t Ticket) bool {
+	if t == cp.piece {
+		return true
+	}
+	for _, p := range cp.pending {
+		if p.ticket == t {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *Log) pickStream() (Stream, bool) {
+	hot, cold := l.queues[Hot].len() > 0, l.queues[Cold].len() > 0
+	switch {
+	case hot && cold && l.last == Hot:
+		return Cold, true
+	case hot:
+		return Hot, true
+	case cold:
+		return Cold, true
+	}
+	return 0, false
+}
+
+type target struct {
+	stream  Stream
+	segment uint32
+	seq     uint64
+	offset  uint32
+	roll    bool
+}
+
+func (l *Log) target(ctx *core.Context, out *Output) (target, bool) {
+	for {
+		s, ok := l.pickStream()
+		if !ok {
+			return target{}, false
+		}
+		var acc layoutAcc
+		if err := acc.add(&l.queues[s].at(0).entry); err != nil {
+			panic(fmt.Sprintf("disklog: queued entry no longer validates: %v", err))
+		}
+		lay, _ := acc.layout()
+		c := l.asm[s]
+		if c.segment != 0 && uint64(l.sb.SegmentBlocks-c.next) >= lay.Blocks() {
+			return target{stream: s, segment: c.segment, seq: c.seq, offset: c.next}, true
+		}
+		if seg, ok := l.firstFree(); ok {
+			return target{stream: s, segment: seg, seq: l.nextSeq, offset: 1, roll: true}, true
+		}
+		l.failNoSpace(ctx, s, out)
+	}
+}
+
+func (l *Log) firstFree() (uint32, bool) {
+	for w, bitsSet := range l.free {
+		if bitsSet != 0 {
+			return uint32(w*64 + bits.TrailingZeros64(bitsSet)), true
+		}
+	}
+	return 0, false
+}
+
+func (l *Log) startRounds(ctx *core.Context, out *Output) {
+	for l.err == nil && l.phase == formatDone && l.count < len(l.rounds) {
+		t, ok := l.target(ctx, out)
+		if !ok {
+			return
+		}
+		if !l.startRound(ctx, t, out) {
+			if !l.retryArmed {
+				l.retryArmed = true
+				out.Actions = append(out.Actions, core.Action{Kind: core.ActSetTimer, Timer: l.cfg.RetryTimer, At: ctx.Now + l.cfg.RetryDelay})
+			}
+			return
+		}
+	}
+}
+
+func (l *Log) startRound(ctx *core.Context, t target, out *Output) bool {
+	q := &l.queues[t.stream]
+	limit := uint64(min(l.sb.SegmentBlocks-t.offset, l.maxRecBlocks))
+	var acc layoutAcc
+	var lay Layout
+	n, writeBlocks := 0, uint32(0)
+	for n < q.len() && n < maxRecordEntries {
+		next := acc
+		e := &q.at(n).entry
+		if err := next.add(e); err != nil {
+			break
+		}
+		nl, err := next.layout()
+		if err != nil || nl.Blocks() > limit {
+			break
+		}
+		acc, lay = next, nl
+		if e.Kind == EntryWrite {
+			writeBlocks += uint32(e.Count)
+		}
+		n++
+	}
+	if n == 0 {
+		panic("disklog: a round built a record with no entries")
+	}
+	items := q.window(n)
+	lead := uint32(0)
+	if t.roll {
+		lead = 1
+	}
+	head, err := ctx.Pool.Alloc(int(lead+lay.HeaderBlocks) * core.BlockSize)
+	if err != nil {
+		return false
+	}
+	tail := core.NoBuf
+	if tailBlocks := lay.DataBlocks - writeBlocks; tailBlocks > 0 {
+		if tail, err = ctx.Pool.Alloc(int(tailBlocks) * core.BlockSize); err != nil {
+			ctx.Pool.Free(head)
+			return false
+		}
+		l.fillTail(ctx, items, ctx.Pool.Bytes(tail))
+	}
+
+	slot := (l.first + l.count) % len(l.rounds)
+	r := &l.rounds[slot]
+	r.entries = r.entries[:0]
+	r.tickets = r.tickets[:0]
+	r.bufs = append(r.bufs[:0], head)
+	l.crcs = l.crcs[:0]
+	for i := range items {
+		it := &items[i]
+		r.entries = append(r.entries, it.entry)
+		r.tickets = append(r.tickets, it.ticket)
+		if it.entry.Kind == EntryWrite {
+			r.bufs = append(r.bufs, it.buf)
+			l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(it.buf))
+		}
+	}
+	if tail != core.NoBuf {
+		r.bufs = append(r.bufs, tail)
+		l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(tail))
+	}
+
+	rec := Record{Place: Place{LogID: l.sb.LogID, Seq: t.seq, Offset: t.offset}, LSN: l.nextLSN}
+	img := ctx.Pool.Bytes(head)[:0]
+	if t.roll {
+		img, err = AppendSegmentHeader(img, l.segmentHeader(t))
+		if err != nil {
+			panic(fmt.Sprintf("disklog: segment header does not encode: %v", err))
+		}
+	}
+	if _, err = AppendHeader(img, rec, r.entries, l.crcs); err != nil {
+		panic(fmt.Sprintf("disklog: record header does not encode: %v", err))
+	}
+	if l.breakEncoding != nil {
+		l.breakEncoding(ctx.Pool.Bytes(head))
+	}
+	if l.cfg.Check {
+		l.check(ctx, t, rec, r.bufs, items)
+	}
+	for i := range items {
+		if it := &items[i]; it.entry.Kind == EntryBlob && it.buf != core.NoBuf {
+			ctx.Pool.Free(it.buf)
+		}
+	}
+	q.drop(n)
+
+	if t.roll {
+		l.free[t.segment/64] &^= 1 << (t.segment % 64)
+		l.nextSeq++
+	}
+	bytes := uint64(lead+uint32(lay.Blocks())) * core.BlockSize
+	*r = round{
+		stream:       t.stream,
+		lsn:          l.nextLSN,
+		writeIO:      l.io(),
+		flushIO:      l.io(),
+		segment:      t.segment,
+		block:        t.offset,
+		headerBlocks: lay.HeaderBlocks,
+		after:        cursor{segment: t.segment, seq: t.seq, next: t.offset + uint32(lay.Blocks())},
+		bytes:        bytes,
+		bufs:         r.bufs,
+		entries:      r.entries,
+		tickets:      r.tickets,
+	}
+	r.flushSent = l.earlierWritten()
+	l.nextLSN++
+	l.asm[t.stream] = r.after
+	l.last = t.stream
+	l.count++
+	out.Actions = append(out.Actions, core.Action{
+		Kind: core.ActDiskWrite,
+		IO:   r.writeIO,
+		LBA:  l.sb.LBA(t.segment, t.offset-lead),
+		Bufs: r.bufs,
+		Len:  bytes,
+	})
+	if r.flushSent {
+		out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskFsync, IO: r.flushIO})
+	}
+	return true
+}
+
+func (l *Log) segmentHeader(t target) SegmentHeader {
+	return SegmentHeader{LogID: l.sb.LogID, Seq: t.seq, Index: t.segment, Stream: t.stream, Manifest: l.manifest}
+}
+
+func (l *Log) fillTail(ctx *core.Context, items []queued, tail []byte) {
+	n := 0
+	for i := range items {
+		if it := &items[i]; it.entry.Kind == EntryBlob {
+			n += copy(tail[n:], it.payload(ctx.Pool))
+		}
+	}
+	clear(tail[n:])
+}
+
+func appendBlockCRCs(crcs []uint32, b []byte) []uint32 {
+	for i := 0; i < len(b); i += core.BlockSize {
+		crcs = append(crcs, core.CRC32C(b[i:i+core.BlockSize]))
+	}
+	return crcs
+}
+
+func (l *Log) check(ctx *core.Context, t target, rec Record, bufs []core.IOBuf, items []queued) {
+	img := l.checkImg[:0]
+	for _, b := range bufs {
+		img = append(img, ctx.Pool.Bytes(b)...)
+	}
+	l.checkImg = img
+	if t.roll {
+		h, err := DecodeSegmentHeader(img)
+		if err != nil || h != l.segmentHeader(t) {
+			panic(fmt.Sprintf("disklog: decode check: segment header decodes to %+v, %v; want %+v", h, err, l.segmentHeader(t)))
+		}
+		img = img[core.BlockSize:]
+	}
+	d, err := DecodeRecord(img, rec.Place, l.sb.SegmentBlocks-t.offset, l.checkEnt[:0])
+	l.checkEnt = d.Entries[:0]
+	if err != nil {
+		panic(fmt.Sprintf("disklog: decode check: LSN %d does not decode: %v", rec.LSN, err))
+	}
+	if d.Record != rec || len(d.Entries) != len(items) {
+		panic(fmt.Sprintf("disklog: decode check: LSN %d decodes as %+v with %d entries; want %+v with %d", rec.LSN, d.Record, len(d.Entries), rec, len(items)))
+	}
+	for i := range items {
+		it := &items[i]
+		if d.Entries[i] != it.entry {
+			panic(fmt.Sprintf("disklog: decode check: LSN %d entry %d decodes as %+v; want %+v", rec.LSN, i, d.Entries[i], it.entry))
+		}
+		if !bytes.Equal(d.Payload(i), it.payload(ctx.Pool)) {
+			panic(fmt.Sprintf("disklog: decode check: LSN %d entry %d payload differs", rec.LSN, i))
+		}
+	}
+}

@@ -161,6 +161,8 @@ const (
 
 // Action is one output of a state machine, executed by a driver. A DiskWrite gathers
 // Bufs in order; a DiskRead fills Buf; Len is in bytes; a SetTimer re-arms Timer at At.
+// A DiskFsync makes durable every write completed before it runs; one that directly
+// follows a DiskWrite in the same output is linked to it and runs once that write completes.
 type Action struct {
 	Kind  ActionKind
 	Peer  NodeID

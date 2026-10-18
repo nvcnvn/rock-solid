@@ -1,4 +1,5 @@
-// Package disklog is the on-disk log of one disk: its geometry, superblock, segment headers and record codec.
+// Package disklog is the on-disk log of one disk: its geometry, superblock, segment headers,
+// record and manifest codecs, and group commit.
 package disklog
 
 import (

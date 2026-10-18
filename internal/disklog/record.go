@@ -48,6 +48,7 @@ const (
 	BlobRaftState
 	BlobRun
 	BlobManifest
+	BlobManifestPiece
 )
 
 // Entry is one item of a record header. A write or punch names a block range of a chunk
@@ -141,23 +142,37 @@ func LayoutOf(entries []Entry) (Layout, error) {
 	if uint64(len(entries)) > math.MaxUint32 {
 		return Layout{}, ErrTooLarge
 	}
-	headerBytes := uint64(preludeSize)
-	var dataBytes uint64
+	var acc layoutAcc
 	for i := range entries {
-		e := &entries[i]
-		n, err := e.wireSize()
-		if err != nil {
+		if err := acc.add(&entries[i]); err != nil {
 			return Layout{}, err
 		}
-		headerBytes += uint64(n)
-		add := e.dataBytes()
-		if add > maxDataBytes-dataBytes {
-			return Layout{}, ErrTooLarge
-		}
-		dataBytes += add
 	}
-	dataBlocks := (dataBytes + core.BlockSize - 1) / core.BlockSize
-	headerBytes += dataBlocks * core.CRC32CSize
+	return acc.layout()
+}
+
+type layoutAcc struct {
+	headerBytes uint64
+	dataBytes   uint64
+}
+
+func (a *layoutAcc) add(e *Entry) error {
+	n, err := e.wireSize()
+	if err != nil {
+		return err
+	}
+	add := e.dataBytes()
+	if add > maxDataBytes-a.dataBytes {
+		return ErrTooLarge
+	}
+	a.headerBytes += uint64(n)
+	a.dataBytes += add
+	return nil
+}
+
+func (a *layoutAcc) layout() (Layout, error) {
+	dataBlocks := (a.dataBytes + core.BlockSize - 1) / core.BlockSize
+	headerBytes := preludeSize + a.headerBytes + dataBlocks*core.CRC32CSize
 	headerBlocks := (headerBytes + core.BlockSize - 1) / core.BlockSize
 	if headerBlocks > math.MaxUint16 {
 		return Layout{}, ErrTooLarge
