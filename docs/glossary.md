@@ -232,7 +232,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Memtable flush.** Writing a memtable out as a sorted run. Unrelated to a drive flush, though both make data durable.
 
-**Removal marker.** What an LSM tree writes to delete a key: an entry saying "deleted", since the older runs holding the key are immutable. It hides the key in every older run until a compaction that includes the oldest run drops it with them. Other engines call it a tombstone, the word rock-solid keeps for a deleted chunk.
+**Removal marker.** What an LSM tree writes to delete a key: an entry saying "deleted", since the older runs holding the key are immutable. It hides the key in every older run until a compaction that includes the oldest run drops it with them. Other engines call it a tombstone, the word rock-solid keeps for a deleted chunk. A **range removal** hides every key from one key up to another, as RocksDB's `DeleteRange` does, kept as non-overlapping fragments per memtable and run; the chunk index uses one when a write covers several old extents, so lookups don't step over each removed key. See [The LSM tree](design.md#on-disk-format).
 
 **Run piece.** A sorted run is written to the log in pieces of at most one record each; the last, the root, lists the others, so a manifest names a run by its root. See [The LSM tree](design.md#on-disk-format).
 

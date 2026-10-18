@@ -1,0 +1,5 @@
+work/
+bin/
+*.test
+*.prof
+work.log

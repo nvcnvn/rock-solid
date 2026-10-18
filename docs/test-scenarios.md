@@ -454,6 +454,15 @@ the model's run through recovery, replay the records after its replay LSN, resum
   entry fits; a piece size under 64 B is BadConfig.
 - A failed checkpoint keeps the frozen memtable and reports the one piece it wrote of it as dead;
   writes go on into the new memtable, and the next flush writes the frozen one without freezing them.
+- Run count: 64 flushes of 4 KiB runs with compaction after each never leave more than three runs
+  under 1 MiB, and runs of 1 to 4 MiB merge once four sit side by side.
+- [property] Range removals: seeds 0-59, 3,000 random puts, removals and range removals over 300 keys
+  with flushes and compactions, with size tiering on and with every run under 1 MiB in one bucket:
+  gets, floors and a full scan read as a map. A merge whose output drops its inputs' fragments, or a
+  memtable that does not cut a later write's key out of a fragment, fails.
+- A range removal over a run's keys, flushed: a get or a floor of any key in it probes each layer
+  once; a write into the range after it reads back, before and after the flush; a fragment no older
+  run has a key in is dropped by the flush.
 
 ## Chunk index
 
@@ -484,6 +493,13 @@ the model's run through recovery, replay the records after its replay LSN, resum
   leaves only the frozen map to move.
 - A record with an entry for pool 2^32 − 1, which the index keeps record counts under, or with a
   freeze of version 0 of a chunk that exists and holds no absent version, is refused whole.
+- Removals: chunk 7 written as 1,024 one-block extents, checkpointed, then rewritten in one
+  1,024-block write: the index holds one range removal for blocks 1 to 1,023 and no point removal, a
+  lookup of every block takes at most two searches before the checkpoint, after it and after a
+  compaction, and a 1-block write at block 700 splits the new extent.
+- [property] Seeds 0-5, 1,500 random writes, punches, freezes and whole rewrites over 4 chunks, with
+  checkpoints and compactions: every block reads as an index built with point removals does, and the
+  invariants hold.
 - Absent freeze: a record with freeze(chunk 9, v0, epoch 1) and a 1-block write v1 leaves chunk 9's
   entry at v1, epoch 1, and a read at epoch 1 finds nothing. A second write at epoch 1 carries no
   freeze. After cut 2, a write freezes v1 at epoch 2: a read at epoch 1 still finds nothing, and one
