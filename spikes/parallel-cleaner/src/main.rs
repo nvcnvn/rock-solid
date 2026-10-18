@@ -43,6 +43,7 @@ struct Cfg {
     warm: f64,
     measure: f64,
     rate: f64,
+    crc: bool,
     seed: u64,
     tag: String,
 }
@@ -65,6 +66,7 @@ impl Cfg {
             "warm",
             "measure",
             "rate",
+            "crc",
             "seed",
             "tag",
         ];
@@ -94,6 +96,7 @@ impl Cfg {
             warm: get("warm", "4").parse().unwrap(),
             measure: get("measure", "2").parse().unwrap(),
             rate: get("rate", "0").parse().unwrap(),
+            crc: get("crc", "1") == "1",
             seed: get("seed", "1").parse().unwrap(),
             tag: get("tag", "-"),
         }
@@ -303,7 +306,9 @@ fn clean_victim(log: &Log, v: u32, cold: &mut Cursor, mode: Mode) -> Option<Batc
         }
         let src = log.disk.block(p);
         let c = log.crc[p as usize].load(Relaxed);
-        assert_eq!(crc32c(src), c, "CRC mismatch at block {p}");
+        if log.cfg.crc {
+            assert_eq!(crc32c(src), c, "CRC mismatch at block {p}");
+        }
         if cold.seg == INVALID || cold.next == sb {
             if cold.seg != INVALID {
                 log.seal(cold.seg);
@@ -469,7 +474,9 @@ impl Owner<'_> {
         self.src[8..16].copy_from_slice(&seq.to_le_bytes());
         let dst = log.disk.block(p);
         dst.copy_from_slice(&self.src);
-        log.crc[p as usize].store(crc32c(dst), Relaxed);
+        if log.cfg.crc {
+            log.crc[p as usize].store(crc32c(dst), Relaxed);
+        }
         log.rev[p as usize].store(l, Release);
         log.live[log.seg(p)].fetch_add(1, Relaxed);
         let old = log.index[l as usize].swap(p, AcqRel);

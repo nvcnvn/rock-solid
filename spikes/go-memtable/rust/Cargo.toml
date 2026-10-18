@@ -1,0 +1,17 @@
+[package]
+name = "memtable-rust-baseline"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: not a member of the repo workspace.
+[workspace]
+
+[dependencies]
+rock-core = { path = "../../../crates/core" }
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+panic = "abort"

@@ -1,0 +1,20 @@
+[package]
+name = "crc-rust"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: not a member of the repo workspace.
+[workspace]
+
+[dependencies]
+# The version crates/core uses (table-driven, no CRC instructions).
+crc = { version = "=3.4.0", default-features = false }
+# Hardware CRC32C with three interleaved streams, as Go's hash/crc32 does.
+crc32c = "0.6"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+panic = "abort"

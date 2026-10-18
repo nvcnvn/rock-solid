@@ -794,7 +794,7 @@ Each choice below favors a short hot path, a single binary and testable correctn
 | Decision | Chosen | Alternatives weighed | Why the chosen one |
 | --- | --- | --- | --- |
 | First product | RWX filesystem | Block first; S3 first | RWX is where homelab users have no good option; block alone competes with Longhorn v2 and Mayastor |
-| Language | Rust | Go; C++ (Ceph, 3FS) | A learning goal; no garbage-collector pauses in tail latency; memory safety; SPDK and RDMA are C libraries, reached through bindgen without cgo overhead |
+| Language | Rust | Go; C++ (Ceph, 3FS) | A learning goal; memory safety; SPDK and RDMA are C libraries, reached through bindgen without cgo. Measured against Go 1.27, Go costs 1.1 to 1.25× the CPU on compute-bound code and 1.54× on the replicated 4K write path with each language batching its writes, and adds about 10 µs at queue depth 1 ([Go CPU spike](#appendix-go-cpu-per-operation-spike)). Its collector's pauses stay under 1 ms, but a memtable with one pointer per entry costs 23 to 35% of the CPU in collection, so in Go the memtable would have to be pointer-free pages ([Go memtable spike](#appendix-go-memtable-spike)) |
 | File client | FUSE | Own kernel module (Weka, CephFS); NFS gateway pod (Longhorn RWX) | The spike shows FUSE can do per-file cache switching. FUSE is safe to iterate on, and a crash doesn't take down the kernel. A gateway funnels all traffic through one pod |
 | Where write-back lives | In the daemon | FUSE `writeback_cache` (kernel page cache) | The kernel option is mount-wide, hides writes from the daemon and can't be revoked per file, so write-shared mode couldn't be enforced (spike T9) |
 | Coherence | Tiers 1 → 2 → 3 | Close-to-open only (NFS, JuiceFS); full capabilities from the start (CephFS); caching left to the user (DAOS) | Ships useful RWX early; the Weka-style mode switch gets most of the benefit of capabilities with three states and one message type |
@@ -854,7 +854,7 @@ Each of these needs a measurement or a spike, not a design choice.
 - [ ] Segment layout for the stream of whole chunks and encoded shards. Whole files deleted at random cost a write amplification of 4.4 at 90% full with 64 MiB segments and 1.4 with 4 MiB ones, so that stream may want chunk-sized slots, TRIMmed per chunk.
 - [ ] Separating data by temperature beyond two streams, by age or by the number of times the cleaner moved it (F2FS multi-head logging, SepBIT): the best policy simulated stays 1.5 to 2.9× above perfect hot/cold separation at 80 to 95% full.
 - [ ] Cleaning cost of the Raft entries, sorted runs and compactions that share the log with chunk data, including the index updates the cleaner causes when it moves blocks. The cleaner spike counted chunk writes only.
-- [ ] CRC32C cost on the write path: every record checksums each 4K block, and the `crc` crate in `core` is table-driven without SSE4.2 or ARMv8 CRC instructions. Measure it against the durable write benchmark in phase 5 before deciding whether `core` needs a hardware-accelerated crate.
+- [ ] CRC32C on the write path: `core` checksums each 4K block with the `crc` crate's 16 tables, about 1.2 µs per block, against about 0.2 µs for a hardware CRC32C that interleaves three streams (`crc32c` 0.6 built for x86-64-v2, or Go's `hash/crc32`) ([Go CPU spike](#appendix-go-cpu-per-operation-spike), C0): a tenth of a core at 100,000 blocks per second. Decide whether `core` takes `crc32c`, which does no I/O, and whether release builds target x86-64-v2, without which `crc32c` is no faster than a single-stream loop. ARMv8 needs its own measurement.
 - [ ] SPDK interrupt mode on a real NVMe drive: its latency cost at queue depth 1, and interrupts per I/O at queue depths 32 and 128, which decide whether the SPDK driver sets NVMe interrupt coalescing. `spikes/spdk-nvme-interrupt/run-real.sh` measures both on a spare drive; needed before phase 9.
 
 ## Learning project
@@ -1209,3 +1209,43 @@ Each learning track starts with a small throwaway exercise, then lands as a real
 
 - On a bandwidth-bound device a second commit loop helps, but does not shield the hot stream: a hot commit still waits for the cold bytes ahead of it.
 - The size of the cold records matters more than concurrency: 181 µs next to 64K records, 1,356 µs next to 1M ones.
+
+## Appendix: Go memtable spike
+
+**Question.** If the MetaStore were written in Go, what would its stage-1 memtable cost the garbage collector at 10 to 20 million files per node, and which layout avoids that cost without giving up memory per file?
+
+**Setup.** Linux 6.18.44 in a cloud VM, 4 vCPUs of an Intel Xeon at 2.1 GHz, Go 1.27.0 (Green Tea on by default) and Rust 1.99.1. The [MetaStore memory spike](#appendix-metastore-memory-spike)'s file model without xattrs, written to a file once and loaded by every variant: a B-tree of `[]byte` entries (the Rust `MemTree`'s shape, one pointer per entry), the same B-tree over handles into byte slabs, and a copy-on-write B+-tree of 4 KiB pages in pointer-free slabs. The real Rust `MemTree` loads the same file. Request load is two goroutines of lookups beside one allocating 256 MB/s of short-lived garbage, with the memory limit 512 MiB above the tree. Code and raw output: [spikes/go-memtable](../spikes/go-memtable/).
+
+| Test (10M files unless noted) | Result |
+| --- | --- |
+| Bytes per file, create order / after a restore in key order | Rust 264 / 237; Go `[]byte` B-tree 256 / 279; slabs 199 / 207 (holes not reclaimed); **pages 276 / 175**, pages 63% / 98% full |
+| One full collection with the tree live | `[]byte` B-tree: 0.25 s wall, 0.56 to 0.64 s of CPU; **1.25 s of CPU at 20M files**. Slabs 23 to 33 ms of CPU. **Pages under 3 ms** at 10M and 20M |
+| Under request garbage | `[]byte` B-tree: **collection takes 23% of process CPU at 10M files and 35% at 20M**, and the allocating goroutine reaches 161 and 10 of its 256 MB/s. Pages: 0.0%. The longest pause stays under 1 ms in every variant |
+| Green Tea against `nogreenteagc` | 7 to 14% less collection CPU, nothing else changed |
+| Get p50 | Rust 2.29 µs; Go `[]byte` B-tree 2.64 µs; pages 1.66 µs |
+| Copy-on-write snapshot, pages | 100,000 updates while frozen copy 22.5% of the pages until the snapshot ends |
+
+**Conclusions** (applied in [Alternatives considered](#alternatives-considered))
+
+- In Go, the memtable's pointer layout, not the collector's version, decides its cost: one pointer per entry costs a quarter to a third of the CPU under load.
+- A Go memtable would be a copy-on-write B+-tree of 4 KiB pages in pointer-free slabs: no collection cost, the fastest gets measured, and Rust's memory per file. It needs fuller pages in create order, and a bound on what a snapshot may copy.
+
+## Appendix: Go CPU per operation spike
+
+**Question.** On drives with power-loss protection, where the data path is bound by CPU, how much more CPU per operation and latency would the same design cost in Go than in Rust?
+
+**Setup.** The same VM, Go 1.27.0 and Rust 1.99.1, the languages interleaved run by run. CRC32C per 4 KiB block in each language's implementations (C0). The [parallel cleaner](#appendix-parallel-cleaner-spike) harness ported line by line to Go, run without CRC32C (G1). A replicated 4K write, client to primary to two replicas and back over loopback TCP with CRC32C and an in-memory log at each node and no disk (G2). Rust runs one epoll loop per node, Go one goroutine per connection. Each runs with every frame written at once and with frames that are ready together batched into one write. Code and raw output: [spikes/go-cpu-per-op](../spikes/go-cpu-per-op/).
+
+| Test | Result |
+| --- | --- |
+| C0: CRC32C per 4 KiB | Go `hash/crc32` 167 ns; Rust `crc32c` 215 ns built for x86-64-v2, 798 ns for the default target, which keeps its three-stream loop from inlining; the `crc` crate's 16 tables as in `core` 1.2 µs |
+| G1: cleaner harness, owner work and cleaner CPU per write | **Go 1.13 to 1.16× Rust inline, 1.12 to 1.24× for the cleaner workers** |
+| G2: 16 connections, every frame written at once | **Same CPU per write in both, 55 µs**, 6 socket writes per operation |
+| G2: 16 connections, batched | **Rust 25.4 µs, Go 39.2 µs of CPU per write (1.54×)**, both about 74,000 writes/s; Go makes 3.69 socket writes per operation against 2.78, and spends about 9% of its CPU in the scheduler |
+| G2: one connection | p50 75 µs in Rust, 85 to 87 µs in Go |
+
+**Conclusions** (applied in [Alternatives considered](#alternatives-considered) and the [CRC32C open question](#roadmap-and-open-questions))
+
+- Go costs 1.1 to 1.25× Rust on compute-bound code, and about 1.5× on a CPU-bound small-write path when both batch their writes: about 35% fewer 4K writes per core.
+- The number of syscalls per operation matters more than the language: with the same write pattern Go and Rust cost the same.
+- A hardware CRC32C with three streams is 5.5 to 7.3× faster than `core`'s table-driven one, but in Rust only when built for x86-64-v2.

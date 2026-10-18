@@ -1,0 +1,84 @@
+# 6.18.44-fc-v139, Intel(R) Xeon(R) Processor @ 2.10GHz, 4 CPUs, 15 GiB, go1.27.0, rustc 1.99.1, 2026-10-18T04:20:17+00:00
+generated files=10000000 dirs=285737 entries=20857210 key+value bytes=1541862570 (154.2 per file)
+### variant=slices go1.27.0 GOEXPERIMENT="" GOGC="" GOMAXPROCS=4
+M1 build: entries=20857210 18.49 s (1.13 M entries/s) nodes=533527
+M1 memory: heap objects 256 B/file, RSS 268 B/file (files = entries / 2.09)
+M4 get: p50 2.64 us p99 4.50 us (1000000 probes, 0 misses)
+M4 scan: 1000 entries, p50 8.3 us
+M2 forced GC 0: wall 259.2 ms, GC CPU 607.8 ms, max pause 0.082 ms
+M2 forced GC 1: wall 247.1 ms, GC CPU 558.4 ms, max pause 0.041 ms
+M2 forced GC 2: wall 266.3 ms, GC CPU 636.3 ms, max pause 0.049 ms
+M4 update: 1000000 same-length overwrites, 4.24 us each, nodes=537585
+M3 churn 10s: limit 3038 MiB, garbage 161 MB/s, GC cycles 14, GC CPU 0.932 cores (23.3% of process CPU), max pause 0.328 ms, lookups 0.67 M/s, get p50 2.53 us p99 4.90 us p99.9 29.09 us max 2471 us
+M7 restore in key order: 46.73 s (0.45 M entries/s), heap objects 279 B/file, nodes=672811
+### variant=arena go1.27.0 GOEXPERIMENT="" GOGC="" GOMAXPROCS=4
+M1 build: entries=20857210 9.44 s (2.21 M entries/s) nodes=533527 slabs=25 holes=0
+M1 memory: heap objects 199 B/file, RSS 192 B/file (files = entries / 2.09)
+M4 get: p50 2.99 us p99 5.87 us (1000000 probes, 0 misses)
+M4 scan: 1000 entries, p50 17.2 us
+M2 forced GC 0: wall 24.3 ms, GC CPU 33.2 ms, max pause 0.057 ms
+M2 forced GC 1: wall 19.1 ms, GC CPU 22.7 ms, max pause 0.033 ms
+M2 forced GC 2: wall 20.7 ms, GC CPU 26.6 ms, max pause 0.033 ms
+M4 update: 1000000 same-length overwrites, 4.20 us each, nodes=537585 slabs=26 holes=77958298
+M3 churn 10s: limit 2491 MiB, garbage 243 MB/s, GC cycles 8, GC CPU 0.020 cores (0.5% of process CPU), max pause 0.229 ms, lookups 0.63 M/s, get p50 2.74 us p99 4.66 us p99.9 30.37 us max 2309 us
+M7 restore in key order: 45.48 s (0.46 M entries/s), heap objects 207 B/file, nodes=672811 slabs=25 holes=0
+### variant=pages go1.27.0 GOEXPERIMENT="" GOGC="" GOMAXPROCS=4
+M1 build: entries=20857210 7.72 s (2.70 M entries/s) pages=657181 fill=0.629 copies=0
+M1 memory: heap objects 276 B/file, RSS 270 B/file (files = entries / 2.09)
+M4 get: p50 1.66 us p99 5.29 us (1000000 probes, 0 misses)
+M4 scan: 1000 entries, p50 10.1 us
+M2 forced GC 0: wall 0.4 ms, GC CPU 0.3 ms, max pause 0.041 ms
+M2 forced GC 1: wall 0.5 ms, GC CPU 0.2 ms, max pause 0.020 ms
+M2 forced GC 2: wall 1.0 ms, GC CPU 2.5 ms, max pause 0.786 ms
+M4 update: 1000000 same-length overwrites, 2.59 us each, pages=657181 fill=0.629 copies=0
+M3 churn 10s: limit 3222 MiB, garbage 246 MB/s, GC cycles 6, GC CPU 0.001 cores (0.0% of process CPU), max pause 0.262 ms, lookups 1.12 M/s, get p50 1.43 us p99 2.36 us p99.9 21.38 us max 685 us
+M7 restore in key order: 25.90 s (0.81 M entries/s), heap objects 175 B/file, pages=418942 fill=0.982 copies=0
+M6 snapshot: 100000 updates while frozen, 4.46 us each; frozen view 20857210 entries (live 20857210); pages 418942 -> 513150 (+22.5%) -> 418942 after end
+### variant=slices go1.27.0-X:nogreenteagc GOEXPERIMENT="nogreenteagc" GOGC="" GOMAXPROCS=4
+M1 build: entries=20857210 8.15 s (2.56 M entries/s) nodes=533527
+M1 memory: heap objects 256 B/file, RSS 265 B/file (files = entries / 2.09)
+M4 get: p50 2.68 us p99 4.55 us (1000000 probes, 0 misses)
+M4 scan: 1000 entries, p50 8.9 us
+M2 forced GC 0: wall 269.7 ms, GC CPU 722.9 ms, max pause 0.082 ms
+M2 forced GC 1: wall 289.9 ms, GC CPU 733.2 ms, max pause 0.041 ms
+M2 forced GC 2: wall 240.9 ms, GC CPU 630.6 ms, max pause 0.057 ms
+M4 update: 1000000 same-length overwrites, 3.95 us each, nodes=537585
+M3 churn 10s: limit 3038 MiB, garbage 166 MB/s, GC cycles 12, GC CPU 0.894 cores (23.6% of process CPU), max pause 0.328 ms, lookups 0.66 M/s, get p50 2.59 us p99 4.34 us p99.9 29.80 us max 213 us
+### variant=rust-memtree memtable-rust-baseline
+M1 build: entries=20857210 8.13 s (2.57 M entries/s)
+M1 memory: malloc in use 264 B/file, RSS 264 B/file (files = entries / 2.09)
+M4 get: p50 2.29 us p99 3.80 us (1000000 probes, 0 misses)
+M4 scan: 1000 entries, p50 4.2 us
+M4 update: 1000000 same-length overwrites, 3.17 us each
+M7 restore through snapshot pieces: 16.07 s, malloc in use 237 B/file (was 264)
+generated files=20000000 dirs=571467 entries=41714400 key+value bytes=3083710261 (154.2 per file)
+### variant=slices go1.27.0 GOEXPERIMENT="" GOGC="" GOMAXPROCS=4
+M1 build: entries=41714400 34.46 s (1.21 M entries/s) nodes=1067160
+M1 memory: heap objects 256 B/file, RSS 268 B/file (files = entries / 2.09)
+M4 get: p50 3.02 us p99 5.74 us (1000000 probes, 0 misses)
+M4 scan: 1000 entries, p50 9.0 us
+M2 forced GC 0: wall 548.8 ms, GC CPU 1254.3 ms, max pause 0.115 ms
+M2 forced GC 1: wall 536.9 ms, GC CPU 1262.4 ms, max pause 0.115 ms
+M2 forced GC 2: wall 547.9 ms, GC CPU 1267.6 ms, max pause 0.082 ms
+M4 update: 1000000 same-length overwrites, 5.08 us each, nodes=1073641
+M3 churn 10s: limit 5564 MiB, garbage 10 MB/s, GC cycles 11, GC CPU 1.348 cores (35.2% of process CPU), max pause 0.655 ms, lookups 0.61 M/s, get p50 2.81 us p99 4.62 us p99.9 28.03 us max 480 us
+### variant=pages go1.27.0 GOEXPERIMENT="" GOGC="" GOMAXPROCS=4
+M1 build: entries=41714400 24.78 s (1.68 M entries/s) pages=1314619 fill=0.629 copies=0
+M1 memory: heap objects 272 B/file, RSS 267 B/file (files = entries / 2.09)
+M4 get: p50 1.84 us p99 2.86 us (1000000 probes, 0 misses)
+M4 scan: 1000 entries, p50 9.0 us
+M2 forced GC 0: wall 0.9 ms, GC CPU 0.6 ms, max pause 0.057 ms
+M2 forced GC 1: wall 0.4 ms, GC CPU 0.4 ms, max pause 0.029 ms
+M2 forced GC 2: wall 0.3 ms, GC CPU 0.5 ms, max pause 0.025 ms
+M4 update: 1000000 same-length overwrites, 2.71 us each, pages=1314619 fill=0.629 copies=0
+M3 churn 10s: limit 5868 MiB, garbage 241 MB/s, GC cycles 8, GC CPU 0.001 cores (0.0% of process CPU), max pause 0.229 ms, lookups 0.92 M/s, get p50 1.76 us p99 2.94 us p99.9 24.02 us max 1789 us
+### variant=slices go1.27.0-X:nogreenteagc GOEXPERIMENT="nogreenteagc" GOGC="" GOMAXPROCS=4
+M1 build: entries=41714400 24.37 s (1.71 M entries/s) nodes=1067160
+M1 memory: heap objects 256 B/file, RSS 265 B/file (files = entries / 2.09)
+M4 get: p50 2.98 us p99 6.72 us (1000000 probes, 0 misses)
+M4 scan: 1000 entries, p50 9.2 us
+M2 forced GC 0: wall 535.0 ms, GC CPU 1392.3 ms, max pause 0.164 ms
+M2 forced GC 1: wall 520.1 ms, GC CPU 1368.8 ms, max pause 0.082 ms
+M2 forced GC 2: wall 515.3 ms, GC CPU 1304.4 ms, max pause 0.786 ms
+M4 update: 1000000 same-length overwrites, 4.96 us each, nodes=1073641
+M3 churn 10s: limit 5564 MiB, garbage 13 MB/s, GC cycles 11, GC CPU 1.515 cores (38.1% of process CPU), max pause 0.918 ms, lookups 0.57 M/s, get p50 2.97 us p99 5.92 us p99.9 31.02 us max 3154 us

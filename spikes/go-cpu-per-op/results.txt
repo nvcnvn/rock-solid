@@ -1,0 +1,82 @@
+# 6.18.44-fc-v139, Intel(R) Xeon(R) Processor @ 2.10GHz, 4 CPUs, go1.27.0, rustc 1.99.1 (58cf8f9c3 2026-10-13), 2026-10-18T05:10:02
+=== C0: CRC32C of one 4 KiB block
+CRC lang=rust impl=crc-3.4-table1 | ns_per_4k=10597
+CRC lang=rust impl=crc-3.4-table16-as-in-core | ns_per_4k=1174
+CRC lang=rust impl=sse42-one-stream | ns_per_4k=759
+CRC lang=rust impl=crc32c-0.6 | ns_per_4k=798
+CRC lang=rust impl=crc-3.4-table1 | ns_per_4k=10539
+CRC lang=rust impl=crc-3.4-table16-as-in-core | ns_per_4k=1213
+CRC lang=rust impl=sse42-one-stream | ns_per_4k=415
+CRC lang=rust impl=crc32c-0.6 | ns_per_4k=215
+CRC lang=go impl=hash/crc32 | ns_per_4k=167
+
+| implementation | ns per 4 KiB |
+|---|---|
+| Rust, default target: crc-3.4-table1 | 10597 |
+| Rust, default target: crc-3.4-table16-as-in-core | 1174 |
+| Rust, default target: sse42-one-stream | 759 |
+| Rust, default target: crc32c-0.6 | 798 |
+| Rust, x86-64-v2: crc-3.4-table1 | 10539 |
+| Rust, x86-64-v2: crc-3.4-table16-as-in-core | 1213 |
+| Rust, x86-64-v2: sse42-one-stream | 415 |
+| Rust, x86-64-v2: crc32c-0.6 | 215 |
+| Go: hash/crc32 | 167 |
+
+=== G1: cleaner harness without CRC32C (crc=0), Rust vs Go; inline unthrottled, then paced at 50k writes/s
+RUN tag=G1/rust/inline_u=0.90 mode=Inline workers=0 u=0.90 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=339422 owner_busy_ns=2862 owner_work_ns=2862 owner_cpu_ns=2920 worker_cpu_ns=0 total_cpu_ns=2920 stall_ns=0 copies_per_user=3.891 wasted_per_user=0.0000 wa=4.891 victims_per_user=0.0764 lat_p50_us=0.17 lat_p99_us=132.97 lat_p999_us=270.48 lat_max_us=1416.6 secs=1.54
+RUN tag=G1/go/inline_u=0.90 lang=go mode=inline workers=0 u=0.90 rate=0 segs=4096 seg_blocks=64 | writes_per_s=293662 owner_busy_ns=3330 owner_work_ns=3330 owner_cpu_ns=3371 worker_cpu_ns=22 total_cpu_ns=3393 stall_ns=0 copies_per_user=3.891 wasted_per_user=0.0000 wa=4.891 lat_p50_us=0.18 lat_p99_us=149.85 lat_p999_us=329.54 lat_max_us=2287.4 secs=1.79
+[FAIL] G1 Go / Rust owner work per write, inline u=0.90 got=1.16x want=1.2-1.5x (estimate before the run)
+RUN tag=G1/rust/inline_u=0.95 mode=Inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=194713 owner_busy_ns=5093 owner_work_ns=5093 owner_cpu_ns=5128 worker_cpu_ns=0 total_cpu_ns=5128 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 victims_per_user=0.1424 lat_p50_us=0.17 lat_p99_us=270.71 lat_p999_us=414.66 lat_max_us=1546.5 secs=2.69
+RUN tag=G1/go/inline_u=0.95 lang=go mode=inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 | writes_per_s=171154 owner_busy_ns=5768 owner_work_ns=5768 owner_cpu_ns=5801 worker_cpu_ns=39 total_cpu_ns=5840 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.17 lat_p99_us=300.82 lat_p999_us=483.21 lat_max_us=2176.2 secs=3.06
+[FAIL] G1 Go / Rust owner work per write, inline u=0.95 got=1.13x want=1.2-1.5x (estimate before the run)
+RUN tag=G1/rust/paced_inline_u=0.95 mode=Inline workers=0 u=0.95 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=50000 owner_busy_ns=5210 owner_work_ns=5210 owner_cpu_ns=19914 worker_cpu_ns=0 total_cpu_ns=19914 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 victims_per_user=0.1424 lat_p50_us=0.21 lat_p99_us=271.44 lat_p999_us=421.23 lat_max_us=4438.8 secs=10.49
+RUN tag=G1/go/paced_inline_u=0.95 lang=go mode=inline workers=0 u=0.95 rate=50000 segs=4096 seg_blocks=64 | writes_per_s=50000 owner_busy_ns=5962 owner_work_ns=5962 owner_cpu_ns=19727 worker_cpu_ns=130 total_cpu_ns=19857 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 lat_p50_us=0.22 lat_p99_us=300.65 lat_p999_us=499.97 lat_max_us=4320.8 secs=10.49
+RUN tag=G1/rust/paced_owner/1_u=0.95 mode=Owner workers=1 u=0.95 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=3 | writes_per_s=50000 owner_busy_ns=1558 owner_work_ns=1500 owner_cpu_ns=19834 worker_cpu_ns=6620 total_cpu_ns=26454 stall_ns=58 copies_per_user=8.133 wasted_per_user=0.0000 wa=9.133 victims_per_user=0.1427 lat_p50_us=0.66 lat_p99_us=9.81 lat_p999_us=17.76 lat_max_us=22197.3 secs=10.49
+RUN tag=G1/go/paced_owner/1_u=0.95 lang=go mode=owner workers=1 u=0.95 rate=50000 segs=4096 seg_blocks=64 | writes_per_s=50000 owner_busy_ns=1385 owner_work_ns=1385 owner_cpu_ns=19768 worker_cpu_ns=8233 total_cpu_ns=28000 stall_ns=0 copies_per_user=8.129 wasted_per_user=0.0000 wa=9.129 lat_p50_us=0.68 lat_p99_us=6.59 lat_p999_us=10.43 lat_max_us=2264.9 secs=10.49
+RUN tag=G1/rust/paced_shared/1_u=0.95 mode=Shared workers=1 u=0.95 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=3 | writes_per_s=50000 owner_busy_ns=623 owner_work_ns=623 owner_cpu_ns=19798 worker_cpu_ns=6248 total_cpu_ns=26047 stall_ns=0 copies_per_user=8.114 wasted_per_user=0.0000 wa=9.114 victims_per_user=0.1424 lat_p50_us=0.59 lat_p99_us=1.21 lat_p999_us=3.92 lat_max_us=611.2 secs=10.49
+RUN tag=G1/go/paced_shared/1_u=0.95 lang=go mode=shared workers=1 u=0.95 rate=50000 segs=4096 seg_blocks=64 | writes_per_s=50000 owner_busy_ns=708 owner_work_ns=708 owner_cpu_ns=19718 worker_cpu_ns=7000 total_cpu_ns=26718 stall_ns=0 copies_per_user=8.118 wasted_per_user=0.0000 wa=9.118 lat_p50_us=0.66 lat_p99_us=1.34 lat_p999_us=3.76 lat_max_us=2852.3 secs=10.49
+
+| case | Rust owner ns/write | Go owner ns/write | Go/Rust | Rust cleaner cpu ns/write | Go cleaner cpu ns/write | Rust p99 us | Go p99 us | Rust WA | Go WA |
+|---|---|---|---|---|---|---|---|---|---|
+| inline u=0.90 | 2862 | 3330 | 1.16 | 0 | 22 | 133.0 | 149.8 | 4.89 | 4.89 |
+| inline u=0.95 | 5093 | 5768 | 1.13 | 0 | 39 | 270.7 | 300.8 | 9.11 | 9.11 |
+| paced inline u=0.95 | 5210 | 5962 | 1.14 | 0 | 130 | 271.4 | 300.6 | 9.11 | 9.11 |
+| paced owner/1 u=0.95 | 1500 | 1385 | 0.92 | 6620 | 8233 | 9.8 | 6.6 | 9.13 | 9.13 |
+| paced shared/1 u=0.95 | 623 | 708 | 1.14 | 6248 | 7000 | 1.2 | 1.3 | 9.11 | 9.12 |
+
+=== G2: replicated 4K write over loopback TCP, client -> primary -> 2 replicas, no disk; each language writing every frame at once (coalesce=0) and batching frames that are ready together (coalesce=1)
+RUN lang=rust conns=1 coalesce=1 | ops_per_s=12381 cpu_us_per_op=91.04 cores=1.13 reads_per_op=12.00 writes_per_op=6.00 lat_p50_us=75.7 lat_p99_us=147.4 lat_p999_us=494.3 secs=10.0
+RUN lang=rust conns=1 coalesce=0 | ops_per_s=12975 cpu_us_per_op=86.32 cores=1.12 reads_per_op=12.00 writes_per_op=6.00 lat_p50_us=72.0 lat_p99_us=135.4 lat_p999_us=474.2 secs=10.0
+RUN lang=go conns=1 coalesce=0 | ops_per_s=11699 cpu_us_per_op=120.61 cores=1.41 reads_per_op=6.00 writes_per_op=6.00 lat_p50_us=83.5 lat_p99_us=156.7 lat_p999_us=365.4 secs=10.0
+RUN lang=go conns=1 coalesce=1 | ops_per_s=10522 cpu_us_per_op=142.90 cores=1.50 reads_per_op=6.00 writes_per_op=6.00 lat_p50_us=88.7 lat_p99_us=189.1 lat_p999_us=424.2 secs=10.0
+RUN lang=rust conns=1 coalesce=1 | ops_per_s=12231 cpu_us_per_op=91.16 cores=1.11 reads_per_op=12.00 writes_per_op=6.00 lat_p50_us=75.3 lat_p99_us=151.7 lat_p999_us=665.5 secs=10.0
+RUN lang=rust conns=1 coalesce=0 | ops_per_s=11615 cpu_us_per_op=97.11 cores=1.13 reads_per_op=12.00 writes_per_op=6.00 lat_p50_us=77.6 lat_p99_us=178.6 lat_p999_us=630.6 secs=10.0
+RUN lang=go conns=1 coalesce=0 | ops_per_s=11275 cpu_us_per_op=127.24 cores=1.43 reads_per_op=6.00 writes_per_op=6.00 lat_p50_us=86.1 lat_p99_us=173.3 lat_p999_us=402.9 secs=10.0
+RUN lang=go conns=1 coalesce=1 | ops_per_s=10827 cpu_us_per_op=139.15 cores=1.51 reads_per_op=6.00 writes_per_op=6.00 lat_p50_us=84.9 lat_p99_us=200.5 lat_p999_us=354.2 secs=10.0
+RUN lang=rust conns=16 coalesce=1 | ops_per_s=73321 cpu_us_per_op=26.21 cores=1.92 reads_per_op=5.61 writes_per_op=2.83 lat_p50_us=203.9 lat_p99_us=474.1 lat_p999_us=1785.9 secs=10.0
+RUN lang=rust conns=16 coalesce=0 | ops_per_s=30458 cpu_us_per_op=57.41 cores=1.75 reads_per_op=8.42 writes_per_op=6.00 lat_p50_us=480.7 lat_p99_us=1042.3 lat_p999_us=2318.4 secs=10.0
+RUN lang=go conns=16 coalesce=0 | ops_per_s=56011 cpu_us_per_op=56.16 cores=3.15 reads_per_op=3.44 writes_per_op=6.00 lat_p50_us=260.3 lat_p99_us=732.0 lat_p999_us=1541.8 secs=10.0
+RUN lang=go conns=16 coalesce=1 | ops_per_s=74552 cpu_us_per_op=39.42 cores=2.94 reads_per_op=2.93 writes_per_op=3.69 lat_p50_us=197.4 lat_p99_us=509.6 lat_p999_us=1368.9 secs=10.0
+RUN lang=rust conns=16 coalesce=1 | ops_per_s=74590 cpu_us_per_op=24.64 cores=1.84 reads_per_op=5.43 writes_per_op=2.73 lat_p50_us=203.7 lat_p99_us=410.1 lat_p999_us=1364.9 secs=10.0
+RUN lang=rust conns=16 coalesce=0 | ops_per_s=32529 cpu_us_per_op=53.57 cores=1.74 reads_per_op=8.45 writes_per_op=6.00 lat_p50_us=458.1 lat_p99_us=952.9 lat_p999_us=2505.9 secs=10.0
+RUN lang=go conns=16 coalesce=0 | ops_per_s=57219 cpu_us_per_op=54.27 cores=3.11 reads_per_op=3.44 writes_per_op=6.00 lat_p50_us=251.6 lat_p99_us=708.5 lat_p999_us=2395.4 secs=10.0
+RUN lang=go conns=16 coalesce=1 | ops_per_s=75387 cpu_us_per_op=39.07 cores=2.95 reads_per_op=2.93 writes_per_op=3.69 lat_p50_us=193.6 lat_p99_us=534.6 lat_p999_us=1531.7 secs=10.0
+
+| language, mode, connections | ops/s | CPU us/op (all 4 nodes) | cores | socket reads/op | socket writes/op | p50 us | p99 us | p99.9 us |
+|---|---|---|---|---|---|---|---|---|
+| rust, coalesce=1, 1 conn | 12306 | 91.1 | 1.12 | 12.00 | 6.00 | 75.5 | 149.6 | 579.9 |
+| rust, coalesce=0, 1 conn | 12295 | 91.7 | 1.12 | 12.00 | 6.00 | 74.8 | 157.0 | 552.4 |
+| go, coalesce=0, 1 conn | 11487 | 123.9 | 1.42 | 6.00 | 6.00 | 84.8 | 165.0 | 384.1 |
+| go, coalesce=1, 1 conn | 10674 | 141.0 | 1.50 | 6.00 | 6.00 | 86.8 | 194.8 | 389.2 |
+| rust, coalesce=1, 16 conn | 73956 | 25.4 | 1.88 | 5.52 | 2.78 | 203.8 | 442.1 | 1575.4 |
+| rust, coalesce=0, 16 conn | 31494 | 55.5 | 1.75 | 8.43 | 6.00 | 469.4 | 997.6 | 2412.2 |
+| go, coalesce=0, 16 conn | 56615 | 55.2 | 3.13 | 3.44 | 6.00 | 255.9 | 720.2 | 1968.6 |
+| go, coalesce=1, 16 conn | 74970 | 39.2 | 2.95 | 2.93 | 3.69 | 195.5 | 522.1 | 1450.3 |
+
+[FAIL] G2 Go / Rust CPU per replicated write, coalesce=1, 1 conn got=1.55x want=1.2-1.5x (estimate before the run)
+[OK ] G2 Go / Rust CPU per replicated write, coalesce=0, 1 conn got=1.35x want=1.2-1.5x (estimate before the run)
+[FAIL] G2 Go / Rust CPU per replicated write, coalesce=1, 16 conn got=1.54x want=1.2-1.5x (estimate before the run)
+[FAIL] G2 Go / Rust CPU per replicated write, coalesce=0, 16 conn got=1.00x want=1.2-1.5x (estimate before the run)
+[OK ] G2 Go - Rust p50 latency at queue depth 1 got=+11.3us want=+5 to +20us (estimate)
+
+# checks failed: G1, G1, G2, G2, G2

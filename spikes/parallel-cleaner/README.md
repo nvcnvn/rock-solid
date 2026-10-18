@@ -8,7 +8,7 @@
 - **owner:** on 1 to 3 worker threads. A worker sends the victim's moves (logical block, old location, new location) to the owner over a channel. The owner applies each move only if the index still points at the old location, then frees the victim. Until then the target segment cannot be picked as a victim.
 - **shared:** on worker threads that update an atomic index themselves with compare-and-swap, and free the victim.
 
-A run fills the disk, warms up for 4 disk capacities of writes, then measures 2. The owner's *work* is the time spent in its write calls, minus time stalled waiting for a free segment. Worker CPU comes from `CLOCK_THREAD_CPUTIME_ID`. P3 paces the owner at 50,000 writes/s, about 200 MB/s of 4K writes. That load is enough to need cleaning at 95% full, and every mode keeps up with it. [run.py](run.py) drives the tests and checks expected outcomes written before the first run.
+A run fills the disk, warms up for 4 disk capacities of writes, then measures 2. The owner's *work* is the time spent in its write calls, minus time stalled waiting for a free segment. Worker CPU comes from `CLOCK_THREAD_CPUTIME_ID`. P3 paces the owner at 50,000 writes/s, about 200 MB/s of 4K writes. That load is enough to need cleaning at 95% full, and every mode keeps up with it. [run.py](run.py) drives the tests and checks expected outcomes written before the first run. The CRC32C is a single-stream SSE4.2 loop, about 0.6 to 0.8 µs per block, 4× slower than a three-stream one ([Go comparison spike](../go-cpu-per-op/README.md), C0); `crc=0` skips it, which only that spike uses.
 
 ```
 cargo build --release

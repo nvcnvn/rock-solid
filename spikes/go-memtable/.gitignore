@@ -1,0 +1,4 @@
+# Generated data, build outputs
+work/
+bin/
+rust/target/
