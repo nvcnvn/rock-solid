@@ -1,5 +1,7 @@
 # rock-solid design
 
+Terms such as primary, placement group, epoch or fencing are explained in the [glossary](glossary.md).
+
 ## Goals
 
 Build a distributed storage system in Go ([Runtime in Go](#runtime-in-go)) whose headline feature is **ReadWriteMany (RWX) shared filesystems** for a 3 to 10 node homelab Kubernetes cluster: many pods on many nodes mounting one directory, with no NFS gateway in the path, caching that stays correct when files are shared, and Longhorn-level ease of install. Block volumes come from the same core, at near-raw NVMe latency.

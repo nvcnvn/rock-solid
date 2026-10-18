@@ -1,6 +1,6 @@
 ---
 name: design-doc
-description: Edit the project's documents - docs/design.md, docs/build-checklist.md, docs/test-scenarios.md, docs/tech-debts.md, spike READMEs and the README. Use whenever a change touches a doc, a design decision is made or reversed, an open question is answered, a spike finishes, or a workaround, version pin or pre-release dependency is added or removed.
+description: Edit the project's documents - docs/design.md, docs/build-checklist.md, docs/test-scenarios.md, docs/tech-debts.md, docs/glossary.md, spike READMEs and the README. Use whenever a change touches a doc, a design decision is made or reversed, an open question is answered, a spike finishes, or a workaround, version pin or pre-release dependency is added or removed.
 ---
 
 # Design docs
@@ -17,6 +17,7 @@ The rules in [CLAUDE.md](../../../CLAUDE.md) ("Documents", "Tech debt") apply. T
 | Experiment results | The spike's README, then a `design.md` appendix (see the `spike` skill) |
 | A test scenario a component must pass | `docs/test-scenarios.md`, in the section of its build checklist item |
 | A buildable piece of phases 1 to 5 | `docs/build-checklist.md` |
+| A term a reader new to storage would not know | `docs/glossary.md`: what it means, why systems need it, and a link to the `design.md` section that owns its details |
 
 ## Editing design.md
 
@@ -25,7 +26,7 @@ The rules in [CLAUDE.md](../../../CLAUDE.md) ("Documents", "Tech debt") apply. T
 - **One home per fact.** Before adding anything, grep `docs/` and the spike READMEs for the topic. If the fact lives somewhere else, link to it or move it; don't copy it. Tables (performance targets, driver slots, test layers, roadmap) are usually the home.
 - **Keep the sections consistent.** A change to a protocol often touches Architecture, the frontend section, Testing strategy (its invariants and faults), Roadmap and Open questions. Check each one.
 - **Open questions:** delete a question once it's answered, and put the answer in the section that owns it. Add the new questions an answer raises.
-- **Style:** spell out each acronym on first use, as the doc already does. Give targets as round trips or µs with how they were measured. Show the mechanism with mermaid or code blocks. Write for a reader new to the project.
+- **Style:** spell out each acronym on first use, as the doc already does. A new term of art gets a `glossary.md` entry, and a term whose meaning changes gets its entry rewritten. Give targets as round trips or µs with how they were measured. Show the mechanism with mermaid or code blocks. Write for a reader new to the project.
 
 ## Decisions
 
