@@ -1,4 +1,5 @@
-//! Disk layout: segment geometry, the superblock in segment 0 and the header of every other segment.
+//! Disk layout: segment geometry, the superblock's two copies in segment 0 and the header of every
+//! other segment.
 
 use core::fmt;
 
@@ -76,13 +77,18 @@ impl Geometry {
         self.segment_count
     }
 
+    /// Disk address of the superblock's second copy: the last block of segment 0.
+    pub const fn superblock_copy(self) -> Lba {
+        Lba(self.segment_blocks as u64 - 1)
+    }
+
     /// Disk address of `block` within `segment`.
     pub const fn lba(self, segment: u32, block: u32) -> Lba {
         Lba(segment as u64 * self.segment_blocks as u64 + block as u64)
     }
 }
 
-/// Block 0 of the disk: identifies the log and fixes its geometry.
+/// The first and the last block of segment 0: identifies the log and fixes its geometry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Superblock {
     /// Random identifier of this log; every segment and record header repeats it.

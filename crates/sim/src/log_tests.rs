@@ -12,13 +12,13 @@ use crate::disk::SimDisk;
 use crate::pool::HeapPool;
 use rock_core::buf::BufPool;
 use rock_core::chunk_index::{ChunkIndex, ExtentValue};
-use rock_core::event::{Action, BLOCK_BYTES, Context, Event, IoId, Lba, Tick};
+use rock_core::event::{Action, BLOCK_BYTES, Context, DiskError, Event, IoId, Lba, Tick};
 use rock_core::id::{ChunkId, InodeId, PoolId, VolumeId};
 use rock_core::log::commit::{Config, GroupCommit, Item, LogEvent, Ticket};
 use rock_core::log::record::{BlobKind, Entry, Extent};
 use rock_core::log::recovery::{Mode, Recovered, Recovery, RecoveryError, Step};
 use rock_core::log::segment::{Geometry, Superblock};
-use rock_core::log::{LogRecord, Stream};
+use rock_core::log::{DecodeError, LogRecord, Stream};
 use rock_core::lsm::{MemTree, Tree};
 use rock_core::rng::Rng;
 
@@ -37,6 +37,8 @@ struct Node {
     durable: Vec<LogRecord>,
     checkpoints: usize,
     checkpoint_failed: bool,
+    piece: Option<Ticket>,
+    max_piece: usize,
 }
 
 impl Node {
@@ -79,6 +81,8 @@ impl Node {
             durable: Vec::new(),
             checkpoints: 0,
             checkpoint_failed: false,
+            piece: None,
+            max_piece: usize::MAX,
         }
     }
 
@@ -88,25 +92,42 @@ impl Node {
             match event {
                 LogEvent::Durable { record, tickets } => {
                     self.index.apply(&record);
+                    let piece_done = self.piece.is_some_and(|p| tickets.contains(&p));
                     self.acked.extend(tickets);
                     self.durable.push(record);
+                    if piece_done {
+                        self.hand_next_piece();
+                    }
                 }
                 LogEvent::Failed { tickets, .. } => self.failed.extend(tickets),
                 LogEvent::CheckpointDone(_) => self.checkpoints += 1,
-                LogEvent::CheckpointFailed(_) => self.checkpoint_failed = true,
+                LogEvent::CheckpointFailed(_) => {
+                    self.checkpoint_failed = true;
+                    self.piece = None;
+                    self.index.end_snapshot();
+                }
             }
         }
         if self.log.checkpoint_due() && !self.checkpoint_failed {
-            let pieces = self.index.tree().checkpoint(self.log.max_blob_bytes());
-            let out = self
-                .log
-                .begin_checkpoint(
-                    &mut Context::new(Tick(0), &mut self.pool),
-                    vec![(INDEX, pieces)],
-                )
-                .unwrap();
-            self.handle(out.actions, out.events);
+            self.index.begin_snapshot();
+            self.log.begin_checkpoint(&[INDEX]).unwrap();
+            self.hand_next_piece();
         }
+    }
+
+    /// Hands the log the snapshot's next piece, or ends the checkpoint after the last.
+    fn hand_next_piece(&mut self) {
+        let mut ctx = Context::new(Tick(0), &mut self.pool);
+        let max_piece = self.max_piece.min(self.log.max_blob_bytes());
+        let out = if let Some(piece) = self.index.next_piece(max_piece) {
+            let (ticket, out) = self.log.checkpoint_piece(&mut ctx, INDEX, piece).unwrap();
+            self.piece = Some(ticket);
+            out
+        } else {
+            self.piece = None;
+            self.log.end_checkpoint(&mut ctx).unwrap()
+        };
+        self.handle(out.actions, out.events);
     }
 
     fn submit(&mut self, stream: Stream, item: Item) -> Ticket {
@@ -174,7 +195,22 @@ fn recover(
     pool: &mut HeapPool,
     mode: Mode,
 ) -> Result<Recovered, RecoveryError> {
-    let (mut recovery, mut step) = Recovery::start(&mut Context::new(Tick(0), pool), mode, IoId(1));
+    recover_with(disk, pool, mode, &[])
+}
+
+/// Recovers with reads of the blocks `unreadable` failing.
+fn recover_with(
+    disk: &mut SimDisk,
+    pool: &mut HeapPool,
+    mode: Mode,
+    unreadable: &[Lba],
+) -> Result<Recovered, RecoveryError> {
+    let (mut recovery, mut step) = Recovery::start(
+        &mut Context::new(Tick(0), pool),
+        mode,
+        disk.blocks(),
+        IoId(1),
+    );
     loop {
         match step {
             Step::Done(result) => return result,
@@ -182,7 +218,12 @@ fn recover(
                 let [action] = actions.as_slice() else {
                     panic!("one read at a time: {actions:?}");
                 };
-                let event = disk.execute(pool, action).unwrap();
+                let event = match *action {
+                    Action::DiskRead(io, lba, _) if unreadable.contains(&lba) => {
+                        Event::DiskDone(io, Err(DiskError::Io))
+                    }
+                    _ => disk.execute(pool, action).unwrap(),
+                };
                 step = recovery.on_event(&mut Context::new(Tick(0), pool), event);
             }
         }
@@ -280,6 +321,187 @@ fn rocksdb_not_formatted_disk_is_reported() {
         recover(&mut disk, &mut HeapPool::new(POOL_BYTES), Mode::Replay),
         Err(RecoveryError::NotFormatted(_))
     ));
+}
+
+#[test]
+fn a_damaged_superblock_copy_is_rewritten_from_the_other() {
+    let node = node_with_records(3);
+    let copy = node.log.superblock().geometry.superblock_copy();
+    let good = node.disk.read_block(Lba(0));
+    for damaged in [Lba(0), copy] {
+        let mut disk = node.disk.clone();
+        disk.flip(damaged, 20, 0x01);
+        let (reopened, recovered) = Node::open(disk, Config::default()).unwrap();
+        assert_eq!(recovered.records, node.durable, "{damaged:?}");
+        assert_eq!(reopened.disk.read_block(damaged), good, "{damaged:?}");
+        assert_eq!(reopened.disk.unflushed_blocks(), 0);
+    }
+}
+
+/// An unreadable block 0 is restored from the copy. A block 0 of zeros or of another format may be
+/// a disk reused since, so recovery reports the copy and writes nothing.
+#[test]
+fn block_0_is_restored_from_the_copy_only_while_it_is_this_format() {
+    let node = node_with_records(3);
+    let good = node.disk.read_block(Lba(0));
+    let mut disk = node.disk.clone();
+    let mut pool = HeapPool::new(POOL_BYTES);
+    let recovered = recover_with(&mut disk, &mut pool, Mode::Replay, &[Lba(0)]).unwrap();
+    assert_eq!(recovered.records, node.durable);
+    assert_eq!(
+        (disk.read_block(Lba(0)), disk.unflushed_blocks()),
+        (good, 0)
+    );
+
+    let partition_table = b"EFI PART".repeat(BLOCK_BYTES / 8);
+    for foreign in [vec![0; BLOCK_BYTES], partition_table] {
+        let mut disk = node.disk.clone();
+        let buf = pool.alloc_from_slice(&foreign).unwrap();
+        disk.execute(&mut pool, &Action::DiskWrite(IoId(0), Lba(0), buf));
+        disk.execute(&mut pool, &Action::DiskFsync(IoId(0)));
+        pool.free(buf);
+        assert_eq!(
+            recover(&mut disk, &mut pool, Mode::Replay),
+            Err(RecoveryError::CopyOnly {
+                block0: DecodeError::BadMagic,
+                copy: *node.log.superblock(),
+            })
+        );
+        assert_eq!(disk.read_block(Lba(0)), foreign);
+    }
+}
+
+#[test]
+fn both_superblock_copies_damaged_is_not_formatted() {
+    let node = node_with_records(1);
+    let mut disk = node.disk;
+    disk.flip(Lba(0), 20, 0x01);
+    disk.flip(node.log.superblock().geometry.superblock_copy(), 20, 0x01);
+    assert!(matches!(
+        recover(&mut disk, &mut HeapPool::new(POOL_BYTES), Mode::Replay),
+        Err(RecoveryError::NotFormatted(_))
+    ));
+}
+
+/// A reformat that crashes after its first superblock leaves the old log's copy behind; block 0
+/// wins and the copy is rewritten.
+#[test]
+fn a_crash_between_the_superblock_copies_keeps_the_first() {
+    let mut disk = Node::format(SimDisk::new(GIB_BLOCKS), Config::default(), 1).disk;
+    let mut pool = HeapPool::new(POOL_BYTES);
+    let superblock = Superblock {
+        log_id: 2,
+        geometry: Geometry::for_disk(GIB_BLOCKS).unwrap(),
+    };
+    let copy = superblock.geometry.superblock_copy();
+    let (mut log, mut actions) = GroupCommit::format(
+        &mut Context::new(Tick(0), &mut pool),
+        Config::default(),
+        superblock,
+        IoId(1),
+    )
+    .unwrap();
+    while let [action] = actions.as_slice()
+        && !matches!(action, Action::DiskWrite(_, lba, _) if *lba == copy)
+    {
+        let event = disk.execute(&mut pool, action).unwrap();
+        actions = log
+            .on_event(&mut Context::new(Tick(0), &mut pool), event)
+            .actions;
+    }
+    disk.crash_with(|_, _| false);
+    let (reopened, recovered) = Node::open(disk, Config::default()).unwrap();
+    assert_eq!(recovered.resume.superblock, superblock);
+    assert_eq!(
+        Superblock::decode(&reopened.disk.read_block(copy)),
+        Ok(superblock)
+    );
+}
+
+/// Bit flips in segment headers quarantine the segments that hold records, and filling the disk
+/// afterwards never overwrites them; a damaged header over a segment without records stays free.
+/// The newest segment stays intact here; losing it is corruption, as the next test shows.
+#[test]
+fn segments_with_damaged_headers_are_quarantined_not_reused() {
+    for seed in 0..10 {
+        let mut rng = Rng::from_seed(seed);
+        let mut node = Node::format(SimDisk::new(1 << 12), small_records(), 4);
+        for i in 0..300u32 {
+            node.write(
+                i % 8,
+                u64::from(i) + 1,
+                0,
+                1 + u16::try_from(i % 2).unwrap(),
+            );
+            node.run();
+        }
+        let geometry = node.log.superblock().geometry;
+        let free: Vec<u32> = node.log.free_segments().iter().copied().collect();
+        let newest = node.durable.last().unwrap().pos.segment;
+        let used: Vec<u32> = (1..geometry.segment_count())
+            .filter(|&s| s != newest && !node.log.free_segments().contains(&s))
+            .collect();
+        let pick = |rng: &mut Rng, from: &[u32]| {
+            from[usize::try_from(rng.below(from.len() as u64)).unwrap()]
+        };
+        let damaged: BTreeSet<u32> = (0..3).map(|_| pick(&mut rng, &used)).collect();
+        let empty = pick(&mut rng, &free);
+        let mut disk = node.disk;
+        for &segment in damaged.iter().chain([&empty]) {
+            let byte = usize::try_from(rng.below(56)).unwrap();
+            disk.flip(geometry.lba(segment, 0), byte, 1 << rng.below(8));
+        }
+        let blocks_of = |disk: &SimDisk, segment: u32| -> Vec<Vec<u8>> {
+            (0..geometry.segment_blocks())
+                .map(|b| disk.read_block(geometry.lba(segment, b)))
+                .collect()
+        };
+        let before: Vec<_> = damaged.iter().map(|&s| blocks_of(&disk, s)).collect();
+
+        let mut pool = HeapPool::new(POOL_BYTES);
+        let recovered = recover(&mut disk, &mut pool, Mode::Rebuild).unwrap();
+        let context = format!("seed {seed}");
+        assert_eq!(recovered.quarantined, damaged, "{context}");
+        assert!(recovered.resume.free.contains(&empty), "{context}");
+        let log = GroupCommit::resume(small_records(), recovered.resume.clone(), IoId(1_000_000));
+        let mut node = Node::new(disk, pool, log, index_of(&recovered));
+        let mut i = 0;
+        while node.failed.is_empty() {
+            node.write(i % 8, 1000 + u64::from(i), 0, 2);
+            node.run();
+            i += 1;
+        }
+        let after: Vec<_> = damaged.iter().map(|&s| blocks_of(&node.disk, s)).collect();
+        assert_eq!(after, before, "{context}");
+    }
+}
+
+/// A quarantined segment's records are lost to replay: in the middle of the log that is a gap,
+/// and at its end more than one lost record cannot be the round in flight.
+#[test]
+fn par_quarantined_segments_with_records_to_replay_are_corruption() {
+    let mut node = Node::format(SimDisk::new(1 << 16), Config::default(), 5);
+    for i in 0..60u32 {
+        node.write(i % 8, u64::from(i) + 1, 0, 1);
+        node.run();
+    }
+    let geometry = node.log.superblock().geometry;
+    let segment_of = |lsn: u64| node.durable[usize::try_from(lsn - 1).unwrap()].pos.segment;
+    let newest = segment_of(60);
+    let first_in_newest = (1..=60).find(|&lsn| segment_of(lsn) == newest).unwrap();
+    assert!(
+        first_in_newest < 60,
+        "the newest segment holds several records"
+    );
+    for (segment, lost) in [(segment_of(1), 1), (newest, first_in_newest)] {
+        let mut disk = node.disk.clone();
+        disk.flip(geometry.lba(segment, 0), 30, 0x01);
+        assert_eq!(
+            recover(&mut disk, &mut HeapPool::new(POOL_BYTES), Mode::Replay),
+            Err(RecoveryError::Corrupt { lsn: lost }),
+            "segment {segment}"
+        );
+    }
 }
 
 /// Covers `ReadWrite`, `ManyBlocks` and `Fragmentation`: records spanning many segments of both streams.
@@ -507,39 +729,42 @@ fn torn_record_left_behind_in_the_other_stream() {
 
 #[test]
 fn checkpoints_bound_replay_and_rebuild_matches_the_manifest() {
-    let config = Config {
-        max_replay_bytes: 40 * BLOCK_BYTES as u64,
-        ..Config::default()
-    };
-    let mut node = Node::format(SimDisk::new(GIB_BLOCKS), config, 7);
-    for i in 0..120u32 {
-        node.write(i % 16, u64::from(i), 0, 1 + u16::try_from(i % 4).unwrap());
-        if i % 7 == 0 {
-            node.submit(
-                Stream::Hot,
-                Item::Punch(extent(i % 16, u64::from(i) + 1000, 0, 1024)),
-            );
+    for max_piece in [usize::MAX, 512] {
+        let config = Config {
+            max_replay_bytes: 40 * BLOCK_BYTES as u64,
+            ..Config::default()
+        };
+        let mut node = Node::format(SimDisk::new(GIB_BLOCKS), config, 7);
+        node.max_piece = max_piece;
+        for i in 0..120u32 {
+            node.write(i % 16, u64::from(i), 0, 1 + u16::try_from(i % 4).unwrap());
+            if i % 7 == 0 {
+                node.submit(
+                    Stream::Hot,
+                    Item::Punch(extent(i % 16, u64::from(i) + 1000, 0, 1024)),
+                );
+            }
+            node.run();
         }
-        node.run();
+        assert!(node.checkpoints >= 5, "{}", node.checkpoints);
+        let live = node.index.clone();
+        let (node, recovered) = Node::open(node.disk, config).unwrap();
+        let pieces = recovered.snapshots[0].1.len();
+        assert_eq!(pieces > 1, max_piece == 512, "{pieces} pieces");
+        let replayed: u64 = recovered
+            .records
+            .iter()
+            .map(|r| u64::from(r.header.layout().record_blocks()) * BLOCK_BYTES as u64)
+            .sum();
+        let segment_bytes = 64 * BLOCK_BYTES as u64;
+        assert!(
+            replayed <= config.max_replay_bytes + segment_bytes + (1 << 20),
+            "{replayed}"
+        );
+        assert_eq!(node.index, live);
+        assert_eq!(rebuilt(&node.disk), live);
+        assert_readable(&node.disk, &node.index, 16);
     }
-    assert!(node.checkpoints >= 5, "{}", node.checkpoints);
-    let live = node.index.clone();
-    let (node, recovered) = Node::open(node.disk, config).unwrap();
-    assert_eq!(recovered.snapshots.len(), 1);
-    assert!(recovered.records.len() < 40, "{}", recovered.records.len());
-    let replayed: u64 = recovered
-        .records
-        .iter()
-        .map(|r| u64::from(r.header.layout().record_blocks()) * BLOCK_BYTES as u64)
-        .sum();
-    let segment_bytes = 64 * BLOCK_BYTES as u64;
-    assert!(
-        replayed <= config.max_replay_bytes + segment_bytes + (1 << 20),
-        "{replayed}"
-    );
-    assert_eq!(node.index, live);
-    assert_eq!(rebuilt(&node.disk), live);
-    assert_readable(&node.disk, &node.index, 16);
 }
 
 fn random_item(node: &mut Node, rng: &mut Rng, version: &mut u64) {
@@ -650,23 +875,25 @@ fn random_crashes_keep_acknowledged_records() {
 #[test]
 fn recovery_reads_fail_cleanly() {
     let node = node_with_records(2);
-    let mut disk = node.disk;
+    let copy = node.log.superblock().geometry.superblock_copy();
     let mut pool = HeapPool::new(POOL_BYTES);
-    let (mut recovery, step) =
-        Recovery::start(&mut Context::new(Tick(0), &mut pool), Mode::Replay, IoId(1));
-    let Step::Io(actions) = step else { panic!() };
-    let Action::DiskRead(io, Lba(0), buf) = actions[0] else {
-        panic!()
-    };
-    disk.execute(&mut pool, &actions[0]);
-    let _ = buf;
-    let step = recovery.on_event(
+    let (mut recovery, mut step) = Recovery::start(
         &mut Context::new(Tick(0), &mut pool),
-        Event::DiskDone(io, Err(rock_core::event::DiskError::Io)),
+        Mode::Replay,
+        node.disk.blocks(),
+        IoId(1),
     );
-    assert_eq!(
-        step,
-        Step::Done(Err(RecoveryError::Disk(rock_core::event::DiskError::Io)))
-    );
+    for lba in [Lba(0), copy] {
+        let Step::Io(actions) = step else { panic!() };
+        let [Action::DiskRead(io, read, _)] = actions[..] else {
+            panic!()
+        };
+        assert_eq!(read, lba);
+        step = recovery.on_event(
+            &mut Context::new(Tick(0), &mut pool),
+            Event::DiskDone(io, Err(DiskError::Io)),
+        );
+    }
+    assert_eq!(step, Step::Done(Err(RecoveryError::Disk(DiskError::Io))));
     assert_eq!(pool.live_buffers(), 0);
 }

@@ -122,9 +122,19 @@ impl<T: Tree> ChunkIndex<T> {
         Self { tree }
     }
 
-    /// The underlying tree, for checkpoints.
-    pub const fn tree(&self) -> &T {
-        &self.tree
+    /// Freezes the index for a snapshot; see [`Tree::begin_snapshot`].
+    pub fn begin_snapshot(&mut self) {
+        self.tree.begin_snapshot();
+    }
+
+    /// The snapshot's next piece; see [`Tree::next_piece`].
+    pub fn next_piece(&mut self, max_piece: usize) -> Option<Vec<u8>> {
+        self.tree.next_piece(max_piece)
+    }
+
+    /// Drops an unfinished snapshot; see [`Tree::end_snapshot`].
+    pub fn end_snapshot(&mut self) {
+        self.tree.end_snapshot();
     }
 
     /// Adds the extents written or punched by a durable record. Records must come in LSN order.

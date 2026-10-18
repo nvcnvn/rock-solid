@@ -395,6 +395,19 @@ pub fn decode_header(header: &[u8], expected: &Expected) -> Result<RecordHeader,
     })
 }
 
+/// The LSN of `header`, exactly its header blocks, if it is a valid record header of log `log_id`
+/// at block `offset`, whatever its segment's sequence number; for segments whose own header is
+/// unreadable.
+pub fn record_lsn(header: &[u8], log_id: u64, offset: u32) -> Option<u64> {
+    let (header_blocks, _) = peek(header).ok()?;
+    let stored = u32::from_le_bytes(header[CRC_AT..CRC_AT + 4].try_into().expect("four bytes"));
+    (header.len() == header_blocks as usize * BLOCK_BYTES
+        && crc_with_hole(header, CRC_AT) == stored
+        && header[16..24] == log_id.to_le_bytes()
+        && header[40..44] == offset.to_le_bytes())
+    .then(|| u64::from_le_bytes(header[32..40].try_into().expect("eight bytes")))
+}
+
 /// Decodes a whole record image (header and data) expected at `expected`.
 pub fn decode(record: &[u8], expected: &Expected) -> Result<RecordHeader, DecodeError> {
     let (header_blocks, record_blocks) = peek(record)?;

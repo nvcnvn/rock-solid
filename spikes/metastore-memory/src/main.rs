@@ -476,10 +476,16 @@ fn max_blob_bytes() -> usize {
 }
 
 /// Sum of malloc_size over every key and value buffer of `tree`.
+/// Allocated bytes of the entries themselves: each is one allocation, `key_len u16 | key | value`.
 fn kv_alloc_bytes(tree: &MemTree) -> usize {
     tree.scan(&[])
-        .map(|(k, v)| msize(k.as_ptr()) + msize(v.as_ptr()))
+        .map(|(k, _)| msize(k.as_ptr().wrapping_sub(2)))
         .sum()
+}
+
+fn snapshot(tree: &mut MemTree, max_piece: usize) -> Vec<Vec<u8>> {
+    tree.begin_snapshot();
+    std::iter::from_fn(|| tree.next_piece(max_piece)).collect()
 }
 
 // ---------------------------------------------------------------- measure (child of f1/f2/f3)
@@ -516,7 +522,7 @@ fn measure(args: &[String]) {
         "restored" => {
             let mut orig = MemTree::new();
             let st = generate(&m, &plan, |k, v| orig.insert(k, v));
-            let pieces = orig.checkpoint(max_blob_bytes());
+            let pieces = snapshot(&mut orig, max_blob_bytes());
             drop(orig);
             tree.restore(&pieces).unwrap();
             st
@@ -1168,7 +1174,31 @@ fn tenm(args: &[String]) {
     let before = Mem::now();
     reset_peak();
     let t = Instant::now();
-    let pieces = tree.checkpoint(max_piece);
+    tree.begin_snapshot();
+    let mut streamed = 0usize;
+    while let Some(piece) = tree.next_piece(max_piece) {
+        streamed += piece.len();
+    }
+    let stream_us = us(t);
+    let (pk_req, pk_act) = peak();
+    let stream_ratio_act = (tm.act + pk_act - before.act) as f64 / tm.act as f64;
+    let stream_ratio_req = (tm.req + pk_req - before.req) as f64 / tm.req as f64;
+    println!(
+        "  streamed snapshot, each piece dropped once handed out: {streamed} B in {:.0} us; peak live heap \
+         {stream_ratio_act:.4}x the tree (req {stream_ratio_req:.4}x), {} B above the tree",
+        stream_us,
+        pk_act - before.act
+    );
+    check(
+        "F5 streamed snapshot peak / tree (act)",
+        pk_act - before.act <= 2 * max_piece + (1 << 20),
+        &format!("{stream_ratio_act:.4}x, {} B above the tree", pk_act - before.act),
+        "tree + one piece (+1 MiB slack)",
+    );
+    let before = Mem::now();
+    reset_peak();
+    let t = Instant::now();
+    let pieces = snapshot(&mut tree, max_piece);
     let ckpt = us(t);
     let (pk_req, pk_act) = peak();
     let pm = Mem::now().since(before);
@@ -1197,11 +1227,12 @@ fn tenm(args: &[String]) {
         "  derived: with pieces allocated at their final length the peak would be {:.3}x (1 + serialized / tree)",
         1.0 + ser as f64 / tm.act as f64
     );
+    let exact = 1.0 + ser as f64 / tm.act as f64;
     check(
-        "F5 peak live heap during checkpoint / tree (act)",
-        (1.8..=2.2).contains(&ratio_act),
+        "F5 peak live heap holding every piece / tree (act)",
+        (ratio_act - exact).abs() < 0.02,
         &format!("{ratio_act:.3}x (req {ratio_req:.3}x), peak above tree {:.1} B/file", (pk_act - before.act) as f64 / f),
-        "1.8..=2.2x",
+        &format!("1 + serialized / tree = {exact:.3}x"),
     );
     let mut restored = MemTree::new();
     let before = Mem::now();

@@ -1,5 +1,13 @@
 //! Recovery: load the newest manifest and its snapshots, then replay the records after it.
 //!
+//! The superblock comes from block 0, or from its copy when block 0 is unreadable or holds this
+//! format's superblock damaged; a damaged copy is rewritten from the other before anything else is
+//! read. Block 0 holding zeros or another format may mean the disk was reused, so recovery then
+//! never writes it (ADR 0008). A segment whose header is neither zeros nor a valid header of its
+//! own index is read in full, and quarantined if it holds a record header of this log. Its records
+//! after the last one accepted are lost: one is the round in flight, as with a torn record, and
+//! more is corruption.
+//!
 //! Rounds are written one at a time, so at a crash only the newest record can be torn. Recovery
 //! accepts records in LSN order from the manifest's base; a bad record with nothing after it was
 //! the round in flight and is dropped, while a bad or missing record with later records after it
@@ -12,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::commit::{OpenSegment, Resume};
 use super::manifest::{BlobRef, Manifest};
 use super::record::{self, BlobKind, Entry, Expected, RecordHeader};
-use super::segment::{SegmentHeader, Superblock};
+use super::segment::{Geometry, SegmentHeader, Superblock};
 use super::{DecodeError, LogRecord, RecordPos, Stream};
 use crate::buf::{BufPool, IoBuf, PoolExhausted};
 use crate::event::{Action, BLOCK_BYTES, Context, DiskError, Event, IoId, Lba};
@@ -31,14 +39,22 @@ pub enum Mode {
 /// Reason recovery failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RecoveryError {
-    /// Block 0 holds no superblock of this format.
+    /// Neither copy of the superblock decodes; the error is block 0's.
     NotFormatted(DecodeError),
+    /// Block 0 holds zeros or another format but the copy is valid: the disk may have been reused,
+    /// so restoring the copy is left to the operator.
+    CopyOnly {
+        /// Why block 0 does not decode.
+        block0: DecodeError,
+        /// The valid copy.
+        copy: Superblock,
+    },
     /// The record with this LSN is unreadable although later records exist, or the manifest is.
     Corrupt {
         /// LSN of the bad or missing record.
         lsn: u64,
     },
-    /// A read failed.
+    /// A disk action failed.
     Disk(DiskError),
     /// The buffer pool cannot hold the next read.
     Pool(PoolExhausted),
@@ -53,12 +69,14 @@ pub struct Recovered {
     pub records: Vec<LogRecord>,
     /// State for [`GroupCommit::resume`](super::commit::GroupCommit::resume).
     pub resume: Resume,
+    /// Segments with an unreadable header that hold records of this log; never reused.
+    pub quarantined: BTreeSet<u32>,
 }
 
 /// Progress of a recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// Execute these reads and feed back their completions.
+    /// Execute these disk actions and feed back their completions.
     Io(Vec<Action>),
     /// Recovery finished.
     Done(Result<Recovered, RecoveryError>),
@@ -70,10 +88,31 @@ struct Found {
     header_blocks: u32,
 }
 
+#[derive(Clone, Copy)]
+enum BlockZero {
+    Valid(Superblock),
+    /// Unreadable, or this format's superblock with a bad checksum: repaired from the copy.
+    Damaged(RecoveryError),
+    /// Zeros or another format: perhaps no longer this log's disk, so never written.
+    Foreign(DecodeError),
+}
+
 enum Stage {
     Superblock,
+    SuperblockCopy {
+        lba: Lba,
+        first: BlockZero,
+    },
+    Repair {
+        flushing: bool,
+    },
     Headers {
         index: u32,
+    },
+    Inspect {
+        index: u32,
+        block: u32,
+        blocks: u32,
     },
     Manifest {
         record_blocks: Option<u32>,
@@ -101,6 +140,8 @@ enum Stage {
 enum Flow {
     Next,
     Read(Lba, u32),
+    Write(Lba),
+    Fsync,
     Finish,
 }
 
@@ -109,16 +150,19 @@ enum RecordRead {
     Got(RecordHeader, Vec<u8>),
 }
 
-/// Reads a disk's log back, one read at a time.
+/// Reads a disk's log back, one disk action at a time.
 // ponytail: one read in flight; batch the segment header reads if startup time on 4096 segments matters.
 pub struct Recovery {
     mode: Mode,
+    disk_blocks: u64,
     next_io: u64,
-    pending: Option<(IoId, IoBuf)>,
+    pending: Option<(IoId, Option<IoBuf>)>,
     finished: bool,
     stage: Stage,
     superblock: Option<Superblock>,
     segments: BTreeMap<u32, SegmentHeader>,
+    quarantined: BTreeSet<u32>,
+    quarantined_lsns: BTreeSet<u64>,
     manifest_ptr: Option<RecordPos>,
     manifest: Manifest,
     snapshot_refs: Vec<(usize, BlobRef)>,
@@ -131,16 +175,25 @@ pub struct Recovery {
 }
 
 impl Recovery {
-    /// Starts recovering the log on a disk; the first step reads the superblock.
-    pub fn start(ctx: &mut Context<'_, impl BufPool>, mode: Mode, first_io: IoId) -> (Self, Step) {
+    /// Starts recovering the log on a disk of `disk_blocks`; the first step reads the superblock.
+    /// The disk size locates the superblock's second copy when block 0 is damaged.
+    pub fn start(
+        ctx: &mut Context<'_, impl BufPool>,
+        mode: Mode,
+        disk_blocks: u64,
+        first_io: IoId,
+    ) -> (Self, Step) {
         let mut recovery = Self {
             mode,
+            disk_blocks,
             next_io: first_io.0,
             pending: None,
             finished: false,
             stage: Stage::Superblock,
             superblock: None,
             segments: BTreeMap::new(),
+            quarantined: BTreeSet::new(),
+            quarantined_lsns: BTreeSet::new(),
             manifest_ptr: None,
             manifest: Manifest::default(),
             snapshot_refs: Vec::new(),
@@ -171,31 +224,51 @@ impl Recovery {
             return Step::Io(Vec::new());
         }
         self.pending = None;
-        let bytes = ctx.pool.as_slice(buf).to_vec();
-        ctx.pool.free(buf);
-        if let Err(error) = result {
-            return self.done(Err(RecoveryError::Disk(error)));
-        }
-        self.drive(ctx, Some(bytes))
+        let bytes = buf.map_or_else(Vec::new, |buf| {
+            let bytes = ctx.pool.as_slice(buf).to_vec();
+            ctx.pool.free(buf);
+            bytes
+        });
+        self.drive(ctx, Some(result.map(|()| bytes)))
     }
 
-    fn drive(&mut self, ctx: &mut Context<'_, impl BufPool>, input: Option<Vec<u8>>) -> Step {
-        match self.step(input) {
-            Err(error) => self.done(Err(error)),
-            Ok(None) => {
-                let recovered = self.finish();
-                self.done(Ok(recovered))
-            }
-            Ok(Some((lba, blocks))) => match ctx.pool.alloc(blocks as usize * BLOCK_BYTES) {
-                Err(error) => self.done(Err(RecoveryError::Pool(error))),
-                Ok(buf) => {
-                    let io = IoId(self.next_io);
-                    self.next_io += 1;
-                    self.pending = Some((io, buf));
-                    Step::Io(vec![Action::DiskRead(io, lba, buf)])
+    fn drive(
+        &mut self,
+        ctx: &mut Context<'_, impl BufPool>,
+        input: Option<Result<Vec<u8>, DiskError>>,
+    ) -> Step {
+        let flow = match self.step(input) {
+            Err(error) => return self.done(Err(error)),
+            Ok(Flow::Finish) => {
+                if let Err(error) = self.check_quarantined() {
+                    return self.done(Err(error));
                 }
-            },
-        }
+                let recovered = self.finish();
+                return self.done(Ok(recovered));
+            }
+            Ok(flow) => flow,
+        };
+        let buf = match flow {
+            Flow::Read(_, blocks) => ctx.pool.alloc(blocks as usize * BLOCK_BYTES).map(Some),
+            Flow::Write(_) => ctx.pool.alloc_zeroed(BLOCK_BYTES).map(Some),
+            _ => Ok(None),
+        };
+        let buf = match buf {
+            Ok(buf) => buf,
+            Err(error) => return self.done(Err(RecoveryError::Pool(error))),
+        };
+        let io = IoId(self.next_io);
+        self.next_io += 1;
+        self.pending = Some((io, buf));
+        let action = match (flow, buf) {
+            (Flow::Read(lba, _), Some(buf)) => Action::DiskRead(io, lba, buf),
+            (Flow::Write(lba), Some(buf)) => {
+                self.superblock().encode(ctx.pool.as_mut_slice(buf));
+                Action::DiskWrite(io, lba, buf)
+            }
+            _ => Action::DiskFsync(io),
+        };
+        Step::Io(vec![action])
     }
 
     fn done(&mut self, result: Result<Recovered, RecoveryError>) -> Step {
@@ -222,13 +295,31 @@ impl Recovery {
         })
     }
 
-    /// Absorbs the previous read and returns the next one, or `None` once there is nothing left.
-    fn step(&mut self, mut input: Option<Vec<u8>>) -> Result<Option<(Lba, u32)>, RecoveryError> {
+    /// Absorbs the previous completion and returns the next disk action, or [`Flow::Finish`].
+    fn step(&mut self, input: Option<Result<Vec<u8>, DiskError>>) -> Result<Flow, RecoveryError> {
+        let mut input = match self.stage {
+            Stage::Superblock => return self.on_superblock(input),
+            Stage::SuperblockCopy { lba, first } => {
+                match self.on_superblock_copy(lba, first, input)? {
+                    Flow::Next => None,
+                    flow => return Ok(flow),
+                }
+            }
+            _ => input.transpose().map_err(RecoveryError::Disk)?,
+        };
         loop {
             let input = &mut input;
             let flow = match self.stage {
-                Stage::Superblock => self.on_superblock(input)?,
+                Stage::Superblock | Stage::SuperblockCopy { .. } => {
+                    unreachable!("the superblock stages return before the loop")
+                }
+                Stage::Repair { flushing } => self.on_repair(flushing, input),
                 Stage::Headers { index } => self.on_segment_header(index, input),
+                Stage::Inspect {
+                    index,
+                    block,
+                    blocks,
+                } => self.on_inspect(index, block, blocks, input),
                 Stage::Manifest { record_blocks } => self.on_manifest(record_blocks, input)?,
                 Stage::Snapshots {
                     next,
@@ -246,33 +337,98 @@ impl Recovery {
                 } => self.on_probe(item, block, blocks, input),
                 Stage::Resolve { at, candidate } => self.on_resolve(at, candidate, input)?,
             };
-            match flow {
-                Flow::Next => {}
-                Flow::Read(lba, blocks) => return Ok(Some((lba, blocks))),
-                Flow::Finish => return Ok(None),
+            if !matches!(flow, Flow::Next) {
+                return Ok(flow);
             }
         }
     }
 
-    fn on_superblock(&mut self, input: &mut Option<Vec<u8>>) -> Result<Flow, RecoveryError> {
-        let Some(bytes) = input.take() else {
+    fn on_superblock(
+        &mut self,
+        input: Option<Result<Vec<u8>, DiskError>>,
+    ) -> Result<Flow, RecoveryError> {
+        let Some(read) = input else {
             return Ok(Flow::Read(Lba(0), 1));
         };
-        self.superblock = Some(Superblock::decode(&bytes).map_err(RecoveryError::NotFormatted)?);
-        self.stage = Stage::Headers { index: 1 };
-        Ok(Flow::Next)
+        let first = match read.map(|bytes| Superblock::decode(&bytes)) {
+            Ok(Ok(superblock)) => BlockZero::Valid(superblock),
+            Ok(Err(error @ (DecodeError::BadChecksum | DecodeError::Malformed))) => {
+                BlockZero::Damaged(RecoveryError::NotFormatted(error))
+            }
+            Ok(Err(error)) => BlockZero::Foreign(error),
+            Err(error) => BlockZero::Damaged(RecoveryError::Disk(error)),
+        };
+        let geometry = match first {
+            BlockZero::Valid(superblock) => superblock.geometry,
+            BlockZero::Damaged(error) => Geometry::for_disk(self.disk_blocks).map_err(|_| error)?,
+            BlockZero::Foreign(error) => Geometry::for_disk(self.disk_blocks)
+                .map_err(|_| RecoveryError::NotFormatted(error))?,
+        };
+        let lba = geometry.superblock_copy();
+        self.stage = Stage::SuperblockCopy { lba, first };
+        Ok(Flow::Read(lba, 1))
+    }
+
+    /// Takes the superblock from block 0, else from the copy if the copy sits where its own
+    /// geometry puts it and block 0 is damaged, and rewrites the copy that does not match.
+    fn on_superblock_copy(
+        &mut self,
+        lba: Lba,
+        first: BlockZero,
+        input: Option<Result<Vec<u8>, DiskError>>,
+    ) -> Result<Flow, RecoveryError> {
+        let copy = input
+            .and_then(Result::ok)
+            .and_then(|bytes| Superblock::decode(&bytes).ok())
+            .filter(|copy| copy.geometry.superblock_copy() == lba);
+        let (superblock, damaged) = match (first, copy) {
+            (BlockZero::Valid(first), copy) => (first, (copy != Some(first)).then_some(lba)),
+            (BlockZero::Damaged(_), Some(copy)) => (copy, Some(Lba(0))),
+            (BlockZero::Damaged(error), None) => return Err(error),
+            (BlockZero::Foreign(block0), Some(copy)) => {
+                return Err(RecoveryError::CopyOnly { block0, copy });
+            }
+            (BlockZero::Foreign(error), None) => return Err(RecoveryError::NotFormatted(error)),
+        };
+        self.superblock = Some(superblock);
+        Ok(if let Some(lba) = damaged {
+            self.stage = Stage::Repair { flushing: false };
+            Flow::Write(lba)
+        } else {
+            self.stage = Stage::Headers { index: 1 };
+            Flow::Next
+        })
+    }
+
+    fn on_repair(&mut self, flushing: bool, input: &mut Option<Vec<u8>>) -> Flow {
+        input.take();
+        if flushing {
+            self.stage = Stage::Headers { index: 1 };
+            Flow::Next
+        } else {
+            self.stage = Stage::Repair { flushing: true };
+            Flow::Fsync
+        }
     }
 
     fn on_segment_header(&mut self, index: u32, input: &mut Option<Vec<u8>>) -> Flow {
         let sb = self.superblock();
         if let Some(bytes) = input.take() {
-            if let Ok(header) = SegmentHeader::decode(&bytes)
-                && header.log_id == sb.log_id
-                && header.index == index
-            {
-                self.segments.insert(index, header);
-            }
             self.stage = Stage::Headers { index: index + 1 };
+            match SegmentHeader::decode(&bytes) {
+                Ok(header) if header.log_id == sb.log_id && header.index == index => {
+                    self.segments.insert(index, header);
+                }
+                Ok(header) if header.log_id != sb.log_id => {}
+                _ if bytes.iter().all(|&b| b == 0) => {}
+                _ => {
+                    self.stage = Stage::Inspect {
+                        index,
+                        block: 1,
+                        blocks: PROBE_BLOCKS,
+                    };
+                }
+            }
             return Flow::Next;
         }
         if index < sb.geometry.segment_count() {
@@ -290,6 +446,55 @@ impl Recovery {
                 };
             }
             _ => self.begin_scan(),
+        }
+        Flow::Next
+    }
+
+    /// Reads a segment whose header is damaged or misdirected for record headers of this log;
+    /// finding one quarantines the segment.
+    fn on_inspect(
+        &mut self,
+        index: u32,
+        block: u32,
+        blocks: u32,
+        input: &mut Option<Vec<u8>>,
+    ) -> Flow {
+        let sb = self.superblock();
+        let segment_blocks = sb.geometry.segment_blocks();
+        if block >= segment_blocks {
+            self.stage = Stage::Headers { index: index + 1 };
+            return Flow::Next;
+        }
+        let n = blocks.min(segment_blocks - block);
+        let Some(bytes) = input.take() else {
+            return Flow::Read(self.lba(index, block), n);
+        };
+        self.stage = Stage::Inspect {
+            index,
+            block: block + n,
+            blocks: PROBE_BLOCKS,
+        };
+        for i in 0..n {
+            let at = &bytes[i as usize * BLOCK_BYTES..];
+            let Ok((header_blocks, _)) = record::peek(at) else {
+                continue;
+            };
+            if block + i + header_blocks > segment_blocks {
+                continue;
+            }
+            if header_blocks > n - i {
+                self.stage = Stage::Inspect {
+                    index,
+                    block: block + i,
+                    blocks: header_blocks.max(PROBE_BLOCKS),
+                };
+                break;
+            }
+            let header = &at[..header_blocks as usize * BLOCK_BYTES];
+            if let Some(lsn) = record::record_lsn(header, sb.log_id, block + i) {
+                self.quarantined.insert(index);
+                self.quarantined_lsns.insert(lsn);
+            }
         }
         Flow::Next
     }
@@ -613,10 +818,7 @@ impl Recovery {
     }
 
     fn begin_resolve(&mut self) {
-        let base = match self.mode {
-            Mode::Replay => self.manifest.base_lsn,
-            Mode::Rebuild => 0,
-        };
+        let base = self.base_lsn();
         for (i, f) in self.found.iter().enumerate() {
             if f.pos.lsn > base {
                 self.groups.entry(f.pos.lsn).or_default().push(i);
@@ -636,6 +838,28 @@ impl Recovery {
                 at: at + 1,
                 candidate: 0,
             };
+        }
+    }
+
+    /// LSN that records are accepted after.
+    const fn base_lsn(&self) -> u64 {
+        match self.mode {
+            Mode::Replay => self.manifest.base_lsn,
+            Mode::Rebuild => 0,
+        }
+    }
+
+    /// Fails if quarantined segments hold more than one record after the last one accepted.
+    fn check_quarantined(&self) -> Result<(), RecoveryError> {
+        let newest = self
+            .accepted
+            .last()
+            .map_or(self.base_lsn(), |&(f, _)| self.found[f].pos.lsn);
+        let mut lost = self.quarantined_lsns.range(newest + 1..);
+        match (lost.next(), lost.next()) {
+            (None, _) => Ok(()),
+            (Some(&lsn), None) if lsn == newest + 1 => Ok(()),
+            _ => Err(RecoveryError::Corrupt { lsn: newest + 1 }),
         }
     }
 
@@ -668,10 +892,7 @@ impl Recovery {
             })
         });
         let used: BTreeSet<u32> = self.segments.keys().copied().collect();
-        let base = match self.mode {
-            Mode::Replay => self.manifest.base_lsn,
-            Mode::Rebuild => 0,
-        };
+        let base = self.base_lsn();
         let records: Vec<LogRecord> = core::mem::take(&mut self.accepted)
             .into_iter()
             .map(|(f, blobs)| {
@@ -695,7 +916,7 @@ impl Recovery {
                 superblock: sb,
                 open,
                 free: (1..geometry.segment_count())
-                    .filter(|s| !used.contains(s))
+                    .filter(|s| !used.contains(s) && !self.quarantined.contains(s))
                     .collect(),
                 next_seq: self.segments.values().map(|h| h.seq).max().unwrap_or(0) + 1,
                 next_lsn: records.last().map_or(base, |r| r.pos.lsn) + 1,
@@ -703,6 +924,7 @@ impl Recovery {
                 replay_bytes,
             },
             records,
+            quarantined: core::mem::take(&mut self.quarantined),
         }
     }
 }

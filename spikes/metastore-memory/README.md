@@ -62,6 +62,7 @@ Expected outcomes, written before the first run and printed by the harness as `[
 | [results-f2.txt](results-f2.txt) | F2 |
 | [results-f3.txt](results-f3.txt) | F3 |
 | [results-10m.txt](results-10m.txt) | Node sizes, F7, F5, F6, F4, F8 on one 10M-file tree |
+| [results-f1-compact.txt](results-f1-compact.txt), [results-10m-compact.txt](results-10m-compact.txt) | F1 and the 10M-file run again, after conclusions 3 and 5 were applied |
 
 ## Results
 
@@ -116,3 +117,16 @@ Not counted: Raft entries applied but not yet checkpointed (up to `max_replay_by
 4. **Restart costs about 0.38 s per million files** to restore (5.5M entries per second, 2.09 entries per file), plus replay; at 46M file replicas per node that is 17 s before replay if every shard restores one after another (F6). It is CPU-bound and parallel per shard.
 5. **Before stage 2, `MemTree` can get 1.6× smaller with no design change:** store each entry as one allocation in a `BTreeSet` keyed by the key part (235 B per file, same get and listing speed), and restore with `from_iter`/bulk build instead of repeated `insert` (the sorted inserts leave leaves 55% full). Both are changes inside `MemTree` behind the `Tree` trait (F4).
 6. **Stage 2's sorted runs, if kept in RAM, are 2.8× smaller than `MemTree`**: prefix-compressed blocks of 16 entries take 135 B per file, less than the 154 B of raw key and value, and still read in 1.4 µs and list 1,000 entries in 8.6 µs (F4). So stage 2 can raise the file count per node 2.8× before any run has to leave memory, and the same layout is the natural on-log format for those runs.
+
+## Rerun after applying conclusions 3 and 5
+
+`MemTree` now stores each entry as one allocation, restores by bulk build and streams snapshots from a frozen view (`Tree::begin_snapshot`, `Tree::next_piece`). The harness builds against that API, so `./run.sh` reproduces the rerun; the results above came from `f3bfd04`. The streamed F5 hands out every piece and drops each at once, as the log does after a piece is durable.
+
+| Test | Result |
+| --- | --- |
+| F1 attributes + directory entry, 1M files | **235 B/file** (glibc model 263 B), as F4 predicted. 2.39 allocations per file |
+| F1 +1 / +3 xattrs | +101 B, then +117 B per xattr (glibc model +103, +124 B) |
+| F1 restored by snapshot + bulk-built `restore` | 209 B/file (was 397 B) |
+| F5 streamed snapshot, 10M files | **Peak 1.0004× the tree**: 1,048,720 B above it, one piece. Pieces hold exactly their length. Holding every piece at once is 1.71×, 1 + serialized / tree |
+| F6 restore, 10M files | **19 to 25M entries/s** (was 5.5M), 0.08 to 0.11 s per million files |
+| F7 get and 1,000-entry listing | Get p50 0.96 to 1.00 µs, listing p50 3.4 to 3.5 µs, over three runs on a host at load 3.1 to 3.6 |

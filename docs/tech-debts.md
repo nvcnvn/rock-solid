@@ -16,11 +16,11 @@
 - **Remove when:** phase 5 measures startup on a real disk. If reading the segment headers takes more than a second, issue them as independent reads with many in flight.
 
 ## Workaround: a checkpoint's manifest must fit in one record
-- **Where:** `crates/core/src/log/commit.rs`, `GroupCommit::begin_checkpoint` returns `SubmitError::TooLarge`
+- **Where:** `crates/core/src/log/commit.rs`, `GroupCommit::checkpoint_piece` returns `SubmitError::TooLarge`
 - **Why:** the manifest is a single blob. With the default 1 MiB records it lists about 58,000 snapshot pieces of up to 1 MiB each, about 56 GiB of snapshot, far above stage 1's memory budget. A smaller `max_record_bytes` lowers the limit faster than in proportion, since both the piece count and the piece size shrink.
 - **Remove when:** an index needs a larger snapshot, at the latest with the LSM tree's stage 2. Then let a manifest span several records as an atomic group, applied only when complete, as RocksDB groups manifest edits.
 
-## Workaround: the disk's roots are single copies
-- **Where:** `crates/core/src/log/segment.rs` (one superblock), `crates/core/src/log/recovery.rs` (a segment whose header does not decode counts as free)
-- **Why:** the second superblock copy, quarantined segments and the segment usage table are not built yet. Until then a bad block 0 makes the disk unreadable, and bit rot in a full segment's header lets an index rebuild skip its records silently and group commit reuse the segment. A normal start still reports the missing records as corruption.
-- **Remove when:** the build checklist's **Superblock copy**, **Quarantined segments** and **Segment usage table** items are reviewed.
+## Workaround: a segment whose header reads as zeros counts as free
+- **Where:** `crates/core/src/log/recovery.rs`, `Recovery::on_segment_header`
+- **Why:** the segment usage table is not built yet, and reading every zeroed segment in full to check for records would read the whole disk at each start. A fault that zeroes the header of a segment holding records, such as a misdirected write of zeros, lets an index rebuild skip those records and group commit reuse the segment. A normal start still reports the missing records as corruption.
+- **Remove when:** the build checklist's **Segment usage table** item is reviewed; a segment is then free only because the table says so.

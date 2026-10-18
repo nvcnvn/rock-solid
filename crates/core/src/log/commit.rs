@@ -3,8 +3,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use super::manifest::{BlobRef, Manifest};
-use super::record::{self, BlobKind, Entry, Extent, Layout, LayoutBuilder, RecordHeader};
+use super::manifest::{BLOB_REF_LEN, BlobRef, Manifest};
+use super::record::{self, BlobKind, Entry, Expected, Extent, Layout, LayoutBuilder, RecordHeader};
 use super::segment::{SegmentHeader, Superblock};
 use super::{LogRecord, RecordPos, Stream};
 use crate::buf::{BufPool, IoBuf, PoolExhausted};
@@ -88,6 +88,8 @@ pub enum SubmitError {
     BadExtent,
     /// A checkpoint is already in progress.
     Busy,
+    /// No checkpoint is taking pieces.
+    NoCheckpoint,
     /// An earlier disk error failed the log.
     Failed(DiskError),
 }
@@ -163,6 +165,7 @@ pub struct Resume {
 
 enum Work {
     Format,
+    FormatCopy,
     Record {
         stream: Stream,
         opened: OpenSegment,
@@ -193,6 +196,8 @@ struct Checkpoint {
     replay_bytes_at_begin: u64,
     pending: BTreeMap<Ticket, (usize, usize)>,
     refs: Vec<(u64, Vec<Option<BlobRef>>)>,
+    manifest_len: usize,
+    ended: bool,
     manifest: Option<Ticket>,
 }
 
@@ -219,7 +224,7 @@ pub struct GroupCommit {
 }
 
 impl GroupCommit {
-    /// Formats an empty log: writes and flushes the superblock before the first round.
+    /// Formats an empty log: writes and flushes the superblock, then its copy, before the first round.
     pub fn format(
         ctx: &mut Context<'_, impl BufPool>,
         config: Config,
@@ -350,54 +355,100 @@ impl GroupCommit {
         Ok((ticket, self.start_round(ctx)))
     }
 
-    /// Starts a checkpoint from `snapshots` (each index's pieces, at most
-    /// [`max_blob_bytes`](Self::max_blob_bytes) each), which must reflect exactly the records up to
-    /// [`durable_lsn`](Self::durable_lsn). Ends with [`LogEvent::CheckpointDone`] or
-    /// [`LogEvent::CheckpointFailed`].
-    pub fn begin_checkpoint(
-        &mut self,
-        ctx: &mut Context<'_, impl BufPool>,
-        snapshots: Vec<(u64, Vec<Vec<u8>>)>,
-    ) -> Result<Output, SubmitError> {
+    /// Starts a checkpoint of the indexes `owners`, whose snapshots must reflect exactly the
+    /// records up to [`durable_lsn`](Self::durable_lsn). Their pieces follow through
+    /// [`checkpoint_piece`](Self::checkpoint_piece), then [`end_checkpoint`](Self::end_checkpoint);
+    /// it ends with [`LogEvent::CheckpointDone`] or [`LogEvent::CheckpointFailed`].
+    pub fn begin_checkpoint(&mut self, owners: &[u64]) -> Result<(), SubmitError> {
         if let Some(error) = self.failed {
             return Err(SubmitError::Failed(error));
         }
         if self.checkpoint.is_some() {
             return Err(SubmitError::Busy);
         }
-        if snapshots
-            .iter()
-            .flat_map(|(_, pieces)| pieces)
-            .any(|piece| piece.len() > self.max_blob_bytes)
-            || manifest_len(&snapshots) > self.max_blob_bytes
-        {
+        let base = Manifest {
+            base_lsn: self.durable_lsn,
+            base_seq: self.open.iter().flatten().map(|o| o.seq).max().unwrap_or(0),
+            starts: self.open.map(|o| o.map(|o| (o.index, o.next_block))),
+            trees: owners.iter().map(|&owner| (owner, Vec::new())).collect(),
+        };
+        let manifest_len = base.encode().len();
+        if manifest_len > self.max_blob_bytes {
             return Err(SubmitError::TooLarge);
         }
-        let mut checkpoint = Checkpoint {
-            base: Manifest {
-                base_lsn: self.durable_lsn,
-                base_seq: self.open.iter().flatten().map(|o| o.seq).max().unwrap_or(0),
-                starts: self.open.map(|o| o.map(|o| (o.index, o.next_block))),
-                trees: Vec::new(),
-            },
+        self.checkpoint = Some(Checkpoint {
             replay_bytes_at_begin: self.replay_bytes,
             pending: BTreeMap::new(),
-            refs: Vec::new(),
+            refs: owners.iter().map(|&owner| (owner, Vec::new())).collect(),
+            manifest_len,
+            ended: false,
             manifest: None,
-        };
-        for (tree, (owner, pieces)) in snapshots.into_iter().enumerate() {
-            checkpoint.refs.push((owner, vec![None; pieces.len()]));
-            for (piece, bytes) in pieces.into_iter().enumerate() {
-                let item = Item::Blob {
-                    kind: BlobKind::SNAPSHOT,
-                    owner,
-                    bytes,
-                };
-                let ticket = self.enqueue(Stream::Cold, item);
-                checkpoint.pending.insert(ticket, (tree, piece));
-            }
+            base,
+        });
+        Ok(())
+    }
+
+    /// Queues the next snapshot piece of `owner`, at most [`max_blob_bytes`](Self::max_blob_bytes).
+    /// A piece the manifest has no room left to name ends the checkpoint with `TooLarge`.
+    ///
+    /// # Panics
+    ///
+    /// If `owner` was not named in [`begin_checkpoint`](Self::begin_checkpoint).
+    pub fn checkpoint_piece(
+        &mut self,
+        ctx: &mut Context<'_, impl BufPool>,
+        owner: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(Ticket, Output), SubmitError> {
+        if let Some(error) = self.failed {
+            return Err(SubmitError::Failed(error));
         }
-        self.checkpoint = Some(checkpoint);
+        let max_blob_bytes = self.max_blob_bytes;
+        let checkpoint = self
+            .checkpoint
+            .as_mut()
+            .filter(|c| !c.ended)
+            .ok_or(SubmitError::NoCheckpoint)?;
+        if bytes.len() > max_blob_bytes || checkpoint.manifest_len + BLOB_REF_LEN > max_blob_bytes {
+            self.checkpoint = None;
+            return Err(SubmitError::TooLarge);
+        }
+        checkpoint.manifest_len += BLOB_REF_LEN;
+        let tree = checkpoint
+            .refs
+            .iter()
+            .position(|(o, _)| *o == owner)
+            .expect("owner named at begin_checkpoint");
+        let piece = checkpoint.refs[tree].1.len();
+        checkpoint.refs[tree].1.push(None);
+        let item = Item::Blob {
+            kind: BlobKind::SNAPSHOT,
+            owner,
+            bytes,
+        };
+        let ticket = self.enqueue(Stream::Cold, item);
+        self.checkpoint
+            .as_mut()
+            .expect("checked above")
+            .pending
+            .insert(ticket, (tree, piece));
+        Ok((ticket, self.start_round(ctx)))
+    }
+
+    /// Marks every piece handed over; the manifest follows once they are all durable.
+    pub fn end_checkpoint(
+        &mut self,
+        ctx: &mut Context<'_, impl BufPool>,
+    ) -> Result<Output, SubmitError> {
+        if let Some(error) = self.failed {
+            return Err(SubmitError::Failed(error));
+        }
+        let checkpoint = self
+            .checkpoint
+            .as_mut()
+            .filter(|c| !c.ended)
+            .ok_or(SubmitError::NoCheckpoint)?;
+        checkpoint.ended = true;
         self.enqueue_manifest_when_ready();
         Ok(self.start_round(ctx))
     }
@@ -418,6 +469,24 @@ impl GroupCommit {
                     round.flushing = true;
                     return Output {
                         actions: vec![Action::DiskFsync(io)],
+                        events: Vec::new(),
+                    };
+                }
+                if matches!(round.work, Work::Format) {
+                    let buf = round.buf;
+                    let io = self.io();
+                    self.round = Some(Round {
+                        io,
+                        flushing: false,
+                        buf,
+                        work: Work::FormatCopy,
+                    });
+                    return Output {
+                        actions: vec![Action::DiskWrite(
+                            io,
+                            self.superblock.geometry.superblock_copy(),
+                            buf,
+                        )],
                         events: Vec::new(),
                     };
                 }
@@ -465,7 +534,7 @@ impl GroupCommit {
         let Some(checkpoint) = &self.checkpoint else {
             return;
         };
-        if !checkpoint.pending.is_empty() || checkpoint.manifest.is_some() {
+        if !checkpoint.ended || !checkpoint.pending.is_empty() || checkpoint.manifest.is_some() {
             return;
         }
         let manifest = Manifest {
@@ -618,14 +687,7 @@ impl GroupCommit {
         let lead = usize::from(t.roll);
         let mut image = vec![0u8; (lead + layout.record_blocks() as usize) * BLOCK_BYTES];
         if t.roll {
-            SegmentHeader {
-                log_id: self.superblock.log_id,
-                seq: t.seq,
-                index: t.index,
-                stream: t.stream,
-                manifest: self.manifest,
-            }
-            .encode(&mut image[..BLOCK_BYTES]);
+            self.segment_header(t).encode(&mut image[..BLOCK_BYTES]);
         }
         let data_at = (lead + layout.header_blocks as usize) * BLOCK_BYTES;
         for ((_, item), span) in queue.iter().zip(record::data_spans(&entries)) {
@@ -647,6 +709,63 @@ impl GroupCommit {
         (count, header, image)
     }
 
+    fn segment_header(&self, t: Target) -> SegmentHeader {
+        SegmentHeader {
+            log_id: self.superblock.log_id,
+            seq: t.seq,
+            index: t.index,
+            stream: t.stream,
+            manifest: self.manifest,
+        }
+    }
+
+    /// Decodes the bytes a round is about to write and asserts they hold exactly the first `count`
+    /// queued items, so an encoder bug fails here instead of in a later recovery.
+    fn check_encoded(
+        &self,
+        ctx: &Context<'_, impl BufPool>,
+        t: Target,
+        count: usize,
+        header: &RecordHeader,
+        written: &[u8],
+    ) {
+        let record_at = if t.roll {
+            assert_eq!(
+                SegmentHeader::decode(written),
+                Ok(self.segment_header(t)),
+                "segment header just encoded does not decode"
+            );
+            BLOCK_BYTES
+        } else {
+            0
+        };
+        let expected = Expected {
+            log_id: self.superblock.log_id,
+            segment_seq: t.seq,
+            offset: t.offset,
+            max_blocks: self.superblock.geometry.segment_blocks() - t.offset,
+        };
+        let decoded = record::decode(&written[record_at..], &expected)
+            .expect("record just encoded does not decode");
+        assert_eq!(&decoded, header, "record decodes to another header");
+        assert_eq!(
+            decoded.entries.len(),
+            count,
+            "record lost or gained entries"
+        );
+        let data = &written[record_at + decoded.layout().header_blocks as usize * BLOCK_BYTES..];
+        let queued = self.queues[t.stream.index()].iter().map(|(_, item)| item);
+        for ((item, entry), span) in queued.zip(&decoded.entries).zip(decoded.data_spans()) {
+            assert_eq!(*entry, item.entry(), "entry decodes differently");
+            let submitted = match item {
+                Item::Write { data, .. } => ctx.pool.as_slice(*data),
+                Item::Blob { bytes, .. } => bytes,
+                Item::Punch(_) => &[],
+            };
+            assert!(data[span] == *submitted, "payload decodes differently");
+        }
+    }
+
     fn start_round(&mut self, ctx: &mut Context<'_, impl BufPool>) -> Output {
         let mut out = Output::default();
         if self.round.is_some() || self.failed.is_some() {
@@ -656,6 +775,7 @@ impl GroupCommit {
             return out;
         };
         let (count, header, image) = self.assemble(ctx, t);
+        assert!(count > 0, "a round built a record with no entries");
         let Ok(buf) = ctx.pool.alloc_from_slice(&image) else {
             out.actions.push(Action::SetTimer(
                 self.config.retry_timer,
@@ -663,6 +783,9 @@ impl GroupCommit {
             ));
             return out;
         };
+        if cfg!(any(debug_assertions, test, feature = "decode-check")) {
+            self.check_encoded(ctx, t, count, &header, ctx.pool.as_slice(buf));
+        }
 
         let mut tickets = Vec::with_capacity(count);
         let mut blobs = Vec::new();
@@ -717,27 +840,6 @@ impl GroupCommit {
     }
 }
 
-/// Bytes of the manifest that would list `snapshots`; its size does not depend on where they land.
-fn manifest_len(snapshots: &[(u64, Vec<Vec<u8>>)]) -> usize {
-    let placeholder = BlobRef {
-        record: RecordPos {
-            segment: 0,
-            block: 0,
-            lsn: 0,
-        },
-        entry: 0,
-    };
-    Manifest {
-        trees: snapshots
-            .iter()
-            .map(|(owner, pieces)| (*owner, vec![placeholder; pieces.len()]))
-            .collect(),
-        ..Manifest::default()
-    }
-    .encode()
-    .len()
-}
-
 /// Largest blob payload that fits in a record of `max_record_blocks`.
 fn max_blob_bytes(max_record_blocks: u32) -> usize {
     let fits = |blocks: u32| {
@@ -775,6 +877,7 @@ mod tests {
     use crate::log::manifest::Manifest;
     use crate::log::record::{Expected, decode};
     use crate::log::segment::Geometry;
+    use crate::rng::Rng;
 
     const GIB_BLOCKS: u64 = 1 << 18;
 
@@ -807,8 +910,9 @@ mod tests {
                 writes: Vec::new(),
                 events: Vec::new(),
             };
-            h.complete();
-            h.complete();
+            while h.log.in_flight() {
+                h.complete();
+            }
             h.trace.clear();
             h.writes.clear();
             h
@@ -920,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn format_writes_and_flushes_the_superblock() {
+    fn format_writes_and_flushes_the_superblock_then_its_copy() {
         let mut pool = VecPool::new(usize::MAX);
         let superblock = Superblock {
             log_id: 5,
@@ -936,6 +1040,10 @@ mod tests {
         let out = log.on_event(&mut ctx, Event::DiskDone(io, Ok(())));
         assert_eq!(out.actions, vec![Action::DiskFsync(IoId(10))]);
         let out = log.on_event(&mut ctx, Event::DiskDone(io, Ok(())));
+        assert_eq!(out.actions, vec![Action::DiskWrite(IoId(11), Lba(63), buf)]);
+        let out = log.on_event(&mut ctx, Event::DiskDone(IoId(11), Ok(())));
+        assert_eq!(out.actions, vec![Action::DiskFsync(IoId(11))]);
+        let out = log.on_event(&mut ctx, Event::DiskDone(IoId(11), Ok(())));
         assert_eq!(out, Output::default());
         assert_eq!(pool.live(), 0);
     }
@@ -1100,12 +1208,26 @@ mod tests {
             ..Config::default()
         };
         let mut h = Harness::new(GIB_BLOCKS, config);
-        let snapshots = vec![(1, vec![vec![1]; 500])];
+        let empty = Manifest {
+            trees: vec![(1, Vec::new())],
+            ..Manifest::default()
+        };
+        let fits = (h.log.max_blob_bytes() - empty.encode().len()) / BLOB_REF_LEN;
+        h.log.begin_checkpoint(&[1]).unwrap();
+        let mut accepted = 0;
+        let error = loop {
+            match h.with(|log, ctx| log.checkpoint_piece(ctx, 1, vec![1])) {
+                Ok((_, out)) => h.absorb(out),
+                Err(error) => break error,
+            }
+            accepted += 1;
+        };
+        assert_eq!((error, accepted), (SubmitError::TooLarge, fits));
         assert_eq!(
-            h.with(|log, ctx| log.begin_checkpoint(ctx, snapshots)),
-            Err(SubmitError::TooLarge)
+            h.with(GroupCommit::end_checkpoint),
+            Err(SubmitError::NoCheckpoint)
         );
-        assert_eq!(h.trace, Vec::new());
+        assert_eq!(h.log.begin_checkpoint(&[1]), Ok(()));
     }
 
     #[test]
@@ -1115,17 +1237,19 @@ mod tests {
             h.write(chunk, 2);
             h.round();
         }
-        let out = h
-            .with(|log, ctx| log.begin_checkpoint(ctx, vec![(1, vec![vec![1; 10]])]))
+        h.log.begin_checkpoint(&[1]).unwrap();
+        let (_, out) = h
+            .with(|log, ctx| log.checkpoint_piece(ctx, 1, vec![1; 10]))
             .unwrap();
         assert_eq!(
             out.events.last(),
             Some(&LogEvent::CheckpointFailed(DiskError::NoSpace))
         );
-        assert!(
-            h.with(|log, ctx| log.begin_checkpoint(ctx, Vec::new()))
-                .is_ok()
+        assert_eq!(
+            h.with(GroupCommit::end_checkpoint),
+            Err(SubmitError::NoCheckpoint)
         );
+        assert_eq!(h.log.begin_checkpoint(&[]), Ok(()));
     }
 
     #[test]
@@ -1134,7 +1258,7 @@ mod tests {
         let in_round = h.write(1, 1);
         let queued = h.write(2, 1);
         let out =
-            h.with(|log, ctx| log.on_event(ctx, Event::DiskDone(IoId(2), Err(DiskError::Io))));
+            h.with(|log, ctx| log.on_event(ctx, Event::DiskDone(IoId(3), Err(DiskError::Io))));
         assert_eq!(
             out.events,
             vec![LogEvent::Failed {
@@ -1168,6 +1292,100 @@ mod tests {
         assert_eq!(h.durable(), vec![(1, vec![ticket])]);
     }
 
+    fn random_byte(rng: &mut Rng) -> u8 {
+        u8::try_from(rng.below(256)).unwrap()
+    }
+
+    /// A write, punch or blob; `punch_share` of 8 are punches, and one in 8 of the rest is near
+    /// the largest size a record allows.
+    fn random_item(h: &mut Harness, rng: &mut Rng, punch_share: u32) -> Item {
+        let large = rng.chance(1, 8);
+        if rng.chance(punch_share, 8) {
+            let blocks = u16::try_from(rng.range_inclusive(1, 1024)).unwrap();
+            return Item::Punch(record::tests::extent(rng, blocks));
+        }
+        if rng.chance(1, 2) {
+            let max = if large { h.log.max_record_blocks } else { 4 };
+            let blocks = u16::try_from(rng.range_inclusive(1, u64::from(max))).unwrap();
+            let bytes = vec![random_byte(rng); usize::from(blocks) * BLOCK_BYTES];
+            let data = h.pool.alloc_from_slice(&bytes).unwrap();
+            return Item::Write {
+                extent: record::tests::extent(rng, blocks),
+                data,
+            };
+        }
+        let max = h.log.max_blob_bytes() as u64;
+        let len = if large {
+            max + 1 - rng.below(3).min(max)
+        } else {
+            rng.below(2 * BLOCK_BYTES as u64)
+        };
+        let bytes = vec![random_byte(rng); usize::try_from(len).unwrap()];
+        Item::Blob {
+            kind: BlobKind(9),
+            owner: rng.next_u64(),
+            bytes,
+        }
+    }
+
+    /// Anything `submit` accepts reaches the disk as a record that decodes to it; the decode check
+    /// in `start_round` asserts that for every round.
+    #[test]
+    fn every_accepted_item_decodes() {
+        for seed in 0..100 {
+            let mut rng = Rng::from_seed(seed);
+            let config = Config {
+                max_record_bytes: usize::try_from(rng.range_inclusive(2, 64)).unwrap()
+                    * BLOCK_BYTES,
+                ..Config::default()
+            };
+            let disk_blocks = if rng.chance(1, 4) { 16 } else { GIB_BLOCKS };
+            let mut h = Harness::new(disk_blocks, config);
+            let mut accepted = BTreeSet::new();
+            let punch_share = u32::try_from(rng.below(9)).unwrap();
+            let backlog = u32::try_from(rng.range_inclusive(2, 300)).unwrap();
+            for _ in 0..rng.range_inclusive(1, 1000) {
+                let stream = Stream::ALL[usize::try_from(rng.below(2)).unwrap()];
+                let item = random_item(&mut h, &mut rng, punch_share);
+                let data = match &item {
+                    Item::Write { data, .. } => Some(*data),
+                    _ => None,
+                };
+                match h.with(|log, ctx| log.submit(ctx, stream, item)) {
+                    Ok((ticket, out)) => {
+                        h.absorb(out);
+                        accepted.insert(ticket);
+                    }
+                    Err(SubmitError::TooLarge) => {
+                        if let Some(data) = data {
+                            h.pool.free(data);
+                        }
+                    }
+                    Err(error) => panic!("seed {seed}: {error:?}"),
+                }
+                while h.log.in_flight() && rng.chance(1, backlog) {
+                    h.complete();
+                }
+            }
+            while h.log.in_flight() {
+                h.complete();
+            }
+            let mut finished = BTreeSet::new();
+            for event in &h.events {
+                match event {
+                    LogEvent::Durable { tickets, .. }
+                    | LogEvent::Failed {
+                        tickets,
+                        error: DiskError::NoSpace,
+                    } => finished.extend(tickets),
+                    other => panic!("seed {seed}: {other:?}"),
+                }
+            }
+            assert_eq!(finished, accepted, "seed {seed}");
+            assert_eq!(h.pool.live(), 0, "seed {seed}");
+        }
+    }
+
     #[test]
     fn a_checkpoint_writes_snapshots_then_a_manifest_that_the_next_segment_points_to() {
         let config = Config {
@@ -1183,14 +1401,15 @@ mod tests {
         assert!(h.log.checkpoint_due());
         let in_flight = h.write(3, 1);
 
-        let snapshots = vec![(5, vec![vec![7; 10], vec![8; 20]]), (6, Vec::new())];
-        let out = h
-            .with(|log, ctx| log.begin_checkpoint(ctx, snapshots))
-            .unwrap();
-        assert_eq!(
-            h.with(|log, ctx| log.begin_checkpoint(ctx, Vec::new())),
-            Err(SubmitError::Busy)
-        );
+        h.log.begin_checkpoint(&[5, 6]).unwrap();
+        assert_eq!(h.log.begin_checkpoint(&[]), Err(SubmitError::Busy));
+        for piece in [vec![7; 10], vec![8; 20]] {
+            let (_, out) = h
+                .with(|log, ctx| log.checkpoint_piece(ctx, 5, piece))
+                .unwrap();
+            h.absorb(out);
+        }
+        let out = h.with(GroupCommit::end_checkpoint).unwrap();
         h.absorb(out);
         assert!(!h.log.checkpoint_due());
         h.round();

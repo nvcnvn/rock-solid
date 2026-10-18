@@ -11,6 +11,9 @@ pub struct BlobRef {
     pub entry: u16,
 }
 
+/// Bytes one [`BlobRef`] adds to an encoded manifest.
+pub const BLOB_REF_LEN: usize = 18;
+
 /// Replay start and snapshot locations, written as a [`BlobKind::MANIFEST`](super::record::BlobKind::MANIFEST) blob.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Manifest {
