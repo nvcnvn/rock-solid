@@ -232,6 +232,16 @@ func TestRecoverCrashInTheRoundThatOpensASegment(t *testing.T) {
 			if record && !header && !isZeroBlock(h.read(129, 1)) {
 				t.Fatal("the record of a segment whose header never landed was not erased")
 			}
+			wantUsage := []disklog.SegmentUsage{{Segment: 1, State: disklog.SegmentUsed, Live: 42, Newest: 21}}
+			if header {
+				wantUsage = append(wantUsage, disklog.SegmentUsage{Segment: 2, State: disklog.SegmentUsed})
+				if record {
+					wantUsage[1].Live, wantUsage[1].Newest = 2, 22
+				}
+			}
+			if got := disklog.SegmentUsageOf(h.log); !slices.Equal(got, wantUsage) {
+				t.Fatalf("header %v, record %v: usage %+v, want %+v", header, record, got, wantUsage)
+			}
 			n.live = res.index
 			h.put(disklog.Hot, h.chunkWrite(30, 0, 1, 99))
 			wantSeq := uint64(2)

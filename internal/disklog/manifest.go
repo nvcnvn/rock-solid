@@ -9,9 +9,12 @@ const (
 	// BlobRefSize is the encoded length of a BlobRef.
 	BlobRefSize = 18
 
-	manifestFixedSize = 2 + 8 + 4
+	manifestFixedSize = 2 + 8 + 4 + 4
 	manifestIndexSize = 4 + 8 + 4
 	pieceListSize     = 2 + 2
+
+	// SegmentUsageSize is the encoded length of a SegmentUsage.
+	SegmentUsageSize = 4 + 1 + 4 + 8
 )
 
 // BlobRef names a blob entry of a durable record by the record's segment, block offset and LSN and the entry's index.
@@ -29,10 +32,29 @@ type ManifestIndex struct {
 	Runs      []BlobRef
 }
 
-// Manifest is a checkpoint: each index's runs and replay point, all at or before BaseLSN, the durable LSN when the checkpoint began.
+// SegmentState says whether a segment may be opened; zero is free.
+type SegmentState uint8
+
+// Segment states.
+const (
+	SegmentFree SegmentState = iota
+	SegmentUsed
+	SegmentQuarantined
+)
+
+// SegmentUsage is a segment that is not free: its state, the data blocks of its records and the LSN of its newest record.
+type SegmentUsage struct {
+	Segment uint32
+	State   SegmentState
+	Live    uint32
+	Newest  uint64
+}
+
+// Manifest is a checkpoint: each index's runs and replay point, all at or before BaseLSN, the durable LSN when the checkpoint began, and the segment usage table as of BaseLSN, every segment it leaves out free.
 type Manifest struct {
-	BaseLSN uint64
-	Indexes []ManifestIndex
+	BaseLSN  uint64
+	Indexes  []ManifestIndex
+	Segments []SegmentUsage
 }
 
 // AppendManifest appends the encoded manifest.
@@ -49,6 +71,13 @@ func AppendManifest(dst []byte, m *Manifest) []byte {
 			dst = appendBlobRef(dst, r)
 		}
 	}
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(m.Segments)))
+	for _, u := range m.Segments {
+		dst = binary.LittleEndian.AppendUint32(dst, u.Segment)
+		dst = append(dst, byte(u.State))
+		dst = binary.LittleEndian.AppendUint32(dst, u.Live)
+		dst = binary.LittleEndian.AppendUint64(dst, u.Newest)
+	}
 	return dst
 }
 
@@ -58,7 +87,7 @@ func ManifestSize(m *Manifest) int {
 	for i := range m.Indexes {
 		n += manifestIndexSize + BlobRefSize*len(m.Indexes[i].Runs)
 	}
-	return n
+	return n + SegmentUsageSize*len(m.Segments)
 }
 
 // DecodeManifest decodes a manifest, whose records' checksums already vouch for its bytes, so any inconsistency is ErrMalformed.
@@ -94,6 +123,21 @@ func DecodeManifest(b []byte) (Manifest, error) {
 				return Manifest{}, ErrMalformed
 			}
 		}
+	}
+	rows := r.u32()
+	if r.bad || uint64(rows)*SegmentUsageSize > uint64(r.left()) {
+		return Manifest{}, ErrMalformed
+	}
+	if rows > 0 {
+		m.Segments = make([]SegmentUsage, rows)
+	}
+	var prev uint32
+	for i := range m.Segments {
+		u := SegmentUsage{Segment: r.u32(), State: SegmentState(r.take(1)[0]), Live: r.u32(), Newest: r.u64()}
+		if u.Segment <= prev || (u.State != SegmentUsed && u.State != SegmentQuarantined) || u.Newest > m.BaseLSN {
+			return Manifest{}, ErrMalformed
+		}
+		m.Segments[i], prev = u, u.Segment
 	}
 	if r.bad || r.left() != 0 {
 		return Manifest{}, ErrMalformed

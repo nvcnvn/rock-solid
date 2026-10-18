@@ -70,6 +70,20 @@ func TestLayoutExamples(t *testing.T) {
 		_, err := LayoutOf([]Entry{{Kind: 100}})
 		wantErr(t, "kind", err, ErrMalformed)
 	})
+	t.Run("a field of another kind", func(t *testing.T) {
+		freeze := FreezeEntry(1, testChunk, 1, 2)
+		freeze.Owner = 7
+		punch := PunchEntry(1, testChunk, 1, 0, 1)
+		punch.Epoch = 3
+		write := WriteEntry(1, testChunk, 1, 0, 1)
+		write.Length = 4096
+		blob := BlobEntry(BlobRun, 1, 10)
+		blob.Version = 5
+		for _, e := range []Entry{freeze, punch, write, blob} {
+			_, err := LayoutOf([]Entry{e})
+			wantErr(t, "field", err, ErrMalformed)
+		}
+	})
 	t.Run("too large", func(t *testing.T) {
 		_, err := LayoutOf([]Entry{blob(1 << 60)})
 		wantErr(t, "blob", err, ErrTooLarge)

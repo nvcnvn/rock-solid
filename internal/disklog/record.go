@@ -88,18 +88,35 @@ func BlobEntry(kind BlobKind, owner uint32, length uint64) Entry {
 }
 
 func (e *Entry) wireSize() (int, error) {
+	var n int
 	switch e.Kind {
 	case EntryWrite, EntryPunch:
 		if e.Count == 0 || int(e.First)+int(e.Count) > core.BlocksPerChunk {
 			return 0, ErrBadExtent
 		}
-		return writeEntrySize, nil
+		n = writeEntrySize
 	case EntryFreeze:
-		return freezeEntrySize, nil
+		n = freezeEntrySize
 	case EntryBlob:
-		return blobEntrySize, nil
+		n = blobEntrySize
+	default:
+		return 0, ErrMalformed
 	}
-	return 0, ErrMalformed
+	if *e != e.ofKind() {
+		return 0, ErrMalformed
+	}
+	return n, nil
+}
+
+// ofKind is the entry with only the fields its kind encodes.
+func (e *Entry) ofKind() Entry {
+	switch e.Kind {
+	case EntryWrite, EntryPunch:
+		return Entry{Kind: e.Kind, Pool: e.Pool, Chunk: e.Chunk, Version: e.Version, First: e.First, Count: e.Count}
+	case EntryFreeze:
+		return FreezeEntry(e.Pool, e.Chunk, e.Version, e.Epoch)
+	}
+	return BlobEntry(e.BlobKind, e.Owner, e.Length)
 }
 
 func (e *Entry) dataBytes() uint64 {

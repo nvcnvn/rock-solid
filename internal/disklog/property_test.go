@@ -3,6 +3,7 @@ package disklog_test
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ type seedStats struct {
 // accepted item ends durable in a record on disk that decodes to it, failed, or in doubt
 // after a disk error; that durability is a prefix of the log; that every finished
 // checkpoint's manifest reads back; and that every buffer comes back.
-func runSeed(t testing.TB, seed uint64, broken func(head []byte), stats *seedStats) {
+func runSeed(t testing.TB, seed uint64, broken func(*disklog.Log), stats *seedStats) {
 	r := core.NewRand(seed)
 	maxRec := r.Range(3, 64)
 	disk := uint64(gib)
@@ -41,7 +42,7 @@ func runSeed(t testing.TB, seed uint64, broken func(head []byte), stats *seedSta
 	own := uint64(cfg.CommitDepth) * (2*maxWrite - 1)
 	h := newHarness(t, disk, int(own+r.Range(maxWrite, 512))*core.BlockSize, cfg)
 	if broken != nil {
-		disklog.BreakEncoding(h.log, broken)
+		broken(h.log)
 	}
 	h.run()
 	if r.Chance(1, 8) {
@@ -253,32 +254,174 @@ func TestEveryAcceptedItemDecodes(t *testing.T) {
 	t.Logf("%+v", stats)
 }
 
+// randomEntry is an entry of any kind byte with random values, which half the time has one
+// field set, its kind's or another's, beyond what its constructor sets.
+func randomEntry(r *core.Rand, maxBlob uint64) disklog.Entry {
+	pool, chunk, version := core.PoolID(r.Below(4)), core.ChunkID{Volume: core.VolumeID(r.Uint32()), Inode: core.InodeID(r.Uint64()), Index: r.Uint32()}, r.Uint64()
+	first, count := uint16(r.Below(core.BlocksPerChunk+1)), uint16(r.Range(1, 3))
+	if r.Chance(1, 4) {
+		count = uint16(r.Below(core.BlocksPerChunk + 2))
+	}
+	var e disklog.Entry
+	switch k := disklog.EntryKind(r.Below(6)); k {
+	case disklog.EntryWrite:
+		e = disklog.WriteEntry(pool, chunk, version, first, count)
+	case disklog.EntryPunch:
+		e = disklog.PunchEntry(pool, chunk, version, first, count)
+	case disklog.EntryFreeze:
+		e = disklog.FreezeEntry(pool, chunk, version, r.Uint64())
+	case disklog.EntryBlob:
+		e = disklog.BlobEntry(disklog.BlobKind(r.Below(256)), r.Uint32(), r.Below(maxBlob+2))
+	default:
+		e = disklog.Entry{Kind: k, Pool: pool, Chunk: chunk, Version: version}
+	}
+	if r.Chance(1, 2) {
+		switch r.Below(9) {
+		case 0:
+			e.Pool = core.PoolID(r.Uint32() | 1)
+		case 1:
+			e.Chunk.Index = r.Uint32() | 1
+		case 2:
+			e.Version = r.Uint64() | 1
+		case 3:
+			e.First = uint16(r.Range(1, 3))
+		case 4:
+			e.Count = uint16(r.Range(1, 3))
+		case 5:
+			e.Epoch = r.Uint64() | 1
+		case 6:
+			e.BlobKind = disklog.BlobKind(r.Range(1, 3))
+		case 7:
+			e.Owner = r.Uint32() | 1
+		case 8:
+			e.Length = r.Range(1, 100)
+		}
+	}
+	return e
+}
+
+// TestAnythingSubmitAcceptsDecodes submits random entries with buffers of their size, one
+// off or missing, and checks that every item Submit accepts ends durable in a record that
+// decodes to it, and that every refusal is one Submit documents.
+func TestAnythingSubmitAcceptsDecodes(t *testing.T) {
+	accepted := map[disklog.EntryKind]int{}
+	refused := map[error]int{}
+	known := []error{disklog.ErrMalformed, disklog.ErrBadExtent, disklog.ErrTooLarge, disklog.ErrBadBuffer, disklog.ErrReservedKind}
+	for seed := uint64(1); seed <= 20; seed++ {
+		r := core.NewRand(seed)
+		cfg := testConfig(r.Range(3, 64))
+		cfg.CommitDepth = int(r.Range(1, 3))
+		h := formatted(t, gib, cfg)
+		items := map[disklog.Ticket]*submitted{}
+		for range 300 {
+			e := randomEntry(r, h.log.MaxBlobBytes())
+			n := int(e.Length)
+			if e.Kind == disklog.EntryWrite {
+				n = int(e.Count) * core.BlockSize
+			}
+			if r.Chance(1, 8) {
+				n += (int(r.Below(3)) - 1) * core.BlockSize
+			}
+			it := disklog.Item{Entry: e}
+			var payload []byte
+			if n > 0 && n <= 64*core.BlockSize {
+				it.Buf = h.alloc(n)
+				b := h.pool.Bytes(it.Buf)
+				r.Fill(b)
+				payload = bytes.Clone(b)
+				if e.Kind == disklog.EntryBlob {
+					payload = payload[:min(uint64(len(b)), e.Length)]
+				}
+			}
+			tk, err := h.log.Submit(&h.ctx, disklog.Stream(r.Below(2)), it, &h.out)
+			if err != nil {
+				i := slices.IndexFunc(known, func(k error) bool { return errors.Is(err, k) })
+				if i < 0 {
+					t.Fatalf("seed %d: submit %+v: %v", seed, e, err)
+				}
+				refused[known[i]]++
+				if it.Buf != core.NoBuf {
+					h.pool.Free(it.Buf)
+				}
+				continue
+			}
+			accepted[e.Kind]++
+			items[tk] = &submitted{entry: e, payload: payload}
+			h.absorb()
+			if r.Chance(1, 4) {
+				h.run()
+			}
+		}
+		h.run()
+		for _, ev := range h.eventsOf(disklog.Durable) {
+			d := h.record(ev)
+			for i, tk := range ev.Tickets {
+				it := items[tk]
+				if it == nil || it.done || d.Entries[i] != it.entry || !bytes.Equal(d.Payload(i), it.payload) {
+					t.Fatalf("seed %d: LSN %d entry %d is not what ticket %d submitted", seed, ev.LSN, i, tk)
+				}
+				it.done = true
+			}
+		}
+		for tk, it := range items {
+			if !it.done {
+				t.Fatalf("seed %d: ticket %d never became durable", seed, tk)
+			}
+		}
+		h.close()
+	}
+	for _, k := range []disklog.EntryKind{disklog.EntryWrite, disklog.EntryPunch, disklog.EntryFreeze, disklog.EntryBlob} {
+		if accepted[k] == 0 {
+			t.Fatalf("no entry of kind %d accepted: %v", k, accepted)
+		}
+	}
+	for _, k := range known {
+		if refused[k] == 0 {
+			t.Fatalf("no item refused with %v: %v", k, refused)
+		}
+	}
+}
+
 func TestDecodeCheckCatchesABrokenEncoder(t *testing.T) {
+	record := func(head []byte) []byte {
+		if string(head[:8]) == "RSOLIDSG" {
+			return head[core.BlockSize:]
+		}
+		return head
+	}
+	header := func(f func(head []byte)) func(*disklog.Log) {
+		return func(l *disklog.Log) { disklog.BreakEncoding(l, f) }
+	}
 	breakers := []struct {
 		name   string
-		broken func(head []byte)
+		broken func(*disklog.Log)
 	}{
-		{"wrong version, checksum fixed", func(head []byte) {
-			rec := head
-			if string(head[:8]) == "RSOLIDSG" {
-				rec = head[core.BlockSize:]
-			}
+		{"wrong version, checksum fixed", header(func(head []byte) {
+			rec := record(head)
 			rec[48+21]++
 			disklog.FixRecordCRC(rec)
-		}},
-		{"flipped bit", func(head []byte) { head[len(head)-1] ^= 1 }},
+		})},
+		{"flipped bit", header(func(head []byte) { head[len(head)-1] ^= 1 })},
+		{"segment header of the other stream, checksum fixed", header(func(head []byte) {
+			if &record(head)[0] != &head[0] {
+				head[10] ^= 1
+				disklog.FixSegmentCRC(head)
+			}
+		})},
+		{"payload offset misreported", disklog.MisreportPayloads},
+		{"write longer than its record", disklog.PadWrites},
 	}
 	for _, b := range breakers {
-		broken := b.broken
 		t.Run(b.name, func(t *testing.T) {
-			defer func() {
-				msg, _ := recover().(string)
-				if !strings.Contains(msg, "decode check") {
-					t.Fatalf("a broken encoder passed the decode check: %q", msg)
-				}
-			}()
 			for seed := uint64(1); seed <= 100; seed++ {
-				runSeed(t, seed, broken, &seedStats{})
+				func() {
+					defer func() {
+						if msg, _ := recover().(string); !strings.Contains(msg, "decode check") {
+							t.Fatalf("seed %d: a broken encoder passed the decode check: %q", seed, msg)
+						}
+					}()
+					runSeed(t, seed, b.broken, &seedStats{})
+				}()
 			}
 		})
 	}

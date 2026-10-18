@@ -244,6 +244,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Quarantine.** Setting aside a segment that looks damaged: never reused, and reported for repair from another replica.
 
+**Segment usage table.** The list, saved in every manifest, of which segments are in use or quarantined, how many live blocks each holds and its newest LSN. Recovery takes free space from it instead of guessing from segment headers, and the cleaner picks victims by it. See [On-disk format](design.md#on-disk-format).
+
 ## Files and caching
 
 **POSIX.** The standard Unix filesystem interface (`open`, `read`, `write`, `rename`, `stat`, locks) that applications expect.

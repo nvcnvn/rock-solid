@@ -335,6 +335,7 @@ type Log struct {
 	nextSeq    uint64
 	durableLSN uint64
 	free       []uint64
+	usage      []SegmentUsage
 
 	queues [2]queue
 	asm    [2]cursor
@@ -355,7 +356,7 @@ type Log struct {
 	checkImg []byte
 	checkEnt []Entry
 
-	breakEncoding  func(head []byte)
+	breakRound     func(head []byte, r *round)
 	appendAnywhere bool
 }
 
@@ -398,6 +399,7 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		nextLSN:    1,
 		nextSeq:    1,
 		free:       make([]uint64, (sb.SegmentCount+63)/64),
+		usage:      make([]SegmentUsage, sb.SegmentCount),
 		last:       Cold,
 		rounds:     make([]round, cfg.CommitDepth),
 	}
@@ -561,6 +563,7 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 		}
 		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN}
 	}
+	m.Segments = l.usageRows()
 	l.cp = &checkpoint{manifest: m, replayAtBegin: l.replayBytes}
 	return nil
 }
@@ -748,10 +751,25 @@ func (l *Log) earlierWritten() bool {
 	return true
 }
 
+// usageRows is the segment usage table as of the durable LSN: every segment that is not free.
+func (l *Log) usageRows() []SegmentUsage {
+	var rows []SegmentUsage
+	for s := range l.usage {
+		if u := l.usage[s]; u.State != SegmentFree {
+			u.Segment = uint32(s)
+			rows = append(rows, u)
+		}
+	}
+	return rows
+}
+
 func (l *Log) retire(out *Output) {
 	r := l.round(0)
 	l.durableLSN = r.lsn
 	l.replayBytes += r.bytes
+	u := &l.usage[r.segment]
+	u.State, u.Newest = SegmentUsed, r.lsn
+	u.Live += uint32(r.bytes/core.BlockSize) - r.headerBlocks
 	out.emitDurable(Event{
 		Kind:         Durable,
 		LSN:          r.lsn,
@@ -1035,11 +1053,11 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	if _, err = AppendHeader(img, rec, r.entries, l.crcs); err != nil {
 		panic(fmt.Sprintf("disklog: record header does not encode: %v", err))
 	}
-	if l.breakEncoding != nil {
-		l.breakEncoding(ctx.Pool.Bytes(r.head)[:headLen])
+	if l.breakRound != nil {
+		l.breakRound(ctx.Pool.Bytes(r.head)[:headLen], r)
 	}
 	if l.cfg.Check {
-		l.check(ctx, t, rec, r.vec, items)
+		l.check(ctx, t, rec, r, items)
 	}
 	for i := range items {
 		if it := &items[i]; it.entry.Kind == EntryBlob && it.buf != core.NoBuf {
@@ -1111,9 +1129,9 @@ func appendBlockCRCs(crcs []uint32, b []byte) []uint32 {
 	return crcs
 }
 
-func (l *Log) check(ctx *core.Context, t target, rec Record, vec []core.IOVec, items []queued) {
+func (l *Log) check(ctx *core.Context, t target, rec Record, r *round, items []queued) {
 	img := l.checkImg[:0]
-	for _, v := range vec {
+	for _, v := range r.vec {
 		img = append(img, ctx.Pool.Bytes(v.Buf)[:v.Len]...)
 	}
 	l.checkImg = img
@@ -1129,13 +1147,16 @@ func (l *Log) check(ctx *core.Context, t target, rec Record, vec []core.IOVec, i
 	if err != nil {
 		panic(fmt.Sprintf("disklog: decode check: LSN %d does not decode: %v", rec.LSN, err))
 	}
-	if d.Record != rec || len(d.Entries) != len(items) {
-		panic(fmt.Sprintf("disklog: decode check: LSN %d decodes as %+v with %d entries; want %+v with %d", rec.LSN, d.Record, len(d.Entries), rec, len(items)))
+	if d.Record != rec || len(d.Entries) != len(items) || uint64(len(img)) != d.Layout.Blocks()*core.BlockSize {
+		panic(fmt.Sprintf("disklog: decode check: LSN %d decodes as %+v with %d entries in %d blocks; want %+v with %d in %d bytes", rec.LSN, d.Record, len(d.Entries), d.Layout.Blocks(), rec, len(items), len(img)))
 	}
 	for i := range items {
 		it := &items[i]
 		if d.Entries[i] != it.entry {
 			panic(fmt.Sprintf("disklog: decode check: LSN %d entry %d decodes as %+v; want %+v", rec.LSN, i, d.Entries[i], it.entry))
+		}
+		if off := PayloadOffset(d.Entries, i); r.payloads[i] != off {
+			panic(fmt.Sprintf("disklog: decode check: LSN %d entry %d reported at offset %d; it decodes at %d", rec.LSN, i, r.payloads[i], off))
 		}
 		if !bytes.Equal(d.Payload(i), it.payload(ctx.Pool)) {
 			panic(fmt.Sprintf("disklog: decode check: LSN %d entry %d payload differs", rec.LSN, i))

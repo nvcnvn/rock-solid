@@ -416,6 +416,7 @@ func TestCheckpointEndToEnd(t *testing.T) {
 			{Owner: 5, ReplayLSN: 2, Runs: []disklog.BlobRef{{Segment: 2, Block: 1, LSN: 4, Entry: 0}, {Segment: 2, Block: 1, LSN: 4, Entry: 1}}},
 			{Owner: 6, ReplayLSN: 2},
 		},
+		Segments: []disklog.SegmentUsage{{Segment: 1, State: disklog.SegmentUsed, Live: 6, Newest: 2}},
 	}
 	if !manifestsEqual(got, want) {
 		t.Fatalf("manifest\n got %+v\nwant %+v", got, want)
@@ -582,5 +583,6 @@ func manifestsEqual(a, b disklog.Manifest) bool {
 	return a.BaseLSN == b.BaseLSN &&
 		slices.EqualFunc(a.Indexes, b.Indexes, func(x, y disklog.ManifestIndex) bool {
 			return x.Owner == y.Owner && x.ReplayLSN == y.ReplayLSN && slices.Equal(x.Runs, y.Runs)
-		})
+		}) &&
+		slices.Equal(a.Segments, b.Segments)
 }

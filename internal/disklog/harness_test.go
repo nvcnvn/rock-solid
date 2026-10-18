@@ -154,8 +154,9 @@ func (h *harness) absorb() {
 		h.events = append(h.events, ev)
 	}
 	h.out.Reset()
+	to := len(h.events)
 	if h.onEvent != nil {
-		for i := from; i < len(h.events); i++ {
+		for i := from; i < to; i++ {
 			h.onEvent(h.events[i])
 		}
 	}

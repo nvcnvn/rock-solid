@@ -140,6 +140,8 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
 - A freeze entry (pool 1, chunk (2,3,4), version 5, snapshot epoch 9) round-trips, adds no data block,
   and may share a record with writes, punches and blobs.
 - An unknown entry tag (100) with a recomputed header CRC is Malformed (RocksDB BadRecordType).
+- An entry with a field its kind does not encode set (a freeze with an owner, a punch with an epoch,
+  a write with a length, a blob with a version) is Malformed, since it would not decode to itself.
 - A header-block count that disagrees with the entries, CRC recomputed, is Malformed (BadLength).
 - Truncated images (0, 4, 48, 4,096 bytes, and all but the last byte) are rejected (TruncatedTrailingRecord).
 - A record longer than the blocks left in its segment is Malformed (BadLengthAtEnd).
@@ -159,6 +161,10 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
 - A manifest's last piece (the format version, a 2-byte count, an 18-byte reference to each earlier
   piece, then the rest of the manifest's bytes) round-trips; a one-piece manifest has no
   references; a truncated list is Malformed and another version BadVersion. Both decoders are fuzzed.
+- The segment usage table round-trips with the manifest (segment 1 used, 40 live blocks, newest LSN
+  77; segment 3 quarantined; segment 4 used and empty), and each row adds 17 bytes. A row for segment
+  0, rows out of segment order or naming one segment twice, a free or unknown state, or a newest LSN
+  past the base LSN is Malformed.
 
 ## Group commit
 
@@ -228,15 +234,25 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   every buffer back. Coverage: NoSpace, TooLarge, a full pool, InDoubt, deferred flushes, depth
   above 1, finished and failed checkpoints all occur.
 - The decode check catches a broken encoder: an encoder that writes a wrong version into an entry
-  and fixes the header checksum, or flips a padding bit, panics in the decode check on the
-  property's seeds.
+  and fixes the header checksum, flips a padding bit, or writes the segment header of the other
+  stream with its checksum fixed panics in the decode check on every one of the property's seeds,
+  as does a round that reports its last payload a byte late, or writes one block more than its
+  record.
+- [property] Anything Submit accepts decodes: 20 seeds; max round 3..64 blocks; commit depth 1-3;
+  300 items each of a random kind tag (unknown ones included) and random field values, half with one
+  field set beyond what its constructor sets, with a buffer of its size, a block off, or none. Each
+  item is either refused with Malformed, BadExtent, TooLarge, BadBuffer or ReservedKind, all of which
+  occur, or ends Durable in a record that reads back as exactly its entry and payload. Regression
+  (seed 1): a freeze entry carrying an owner was accepted and decoded without it.
 - Checkpoint end to end (max replay 8 blocks, counted in record blocks, segment headers left out):
   after a 3-block write (a 4-block record) a checkpoint is not due; after a second (8 blocks) it is.
   A third write is in flight when the checkpoint begins for owners 5 and 6; a second begin is Busy,
   and "due" turns false while one runs. Two pieces for owner 5 then end. Results: LSN 3 = the
   in-flight write; LSN 4 = both pieces in one cold record (segment 2 block 1, entries 0 and 1);
   LSN 5 = the manifest, reported as CheckpointDone and kept as the newest manifest. The manifest has
-  base LSN 2 (durable at begin, not the in-flight 3) and trees [(5, [LSN4#0, LSN4#1]), (6, [])].
+  base LSN 2 (durable at begin, not the in-flight 3), trees [(5, [LSN4#0, LSN4#1]), (6, [])] and a
+  usage table of segment 1 alone: used, 6 live blocks (the two writes' data, not their headers),
+  newest LSN 2. LSN 3 is not counted and segment 2, opened after begin, is not listed.
   The bytes left to replay are the 8 record blocks of LSNs 3 to 5.
 - A checkpoint naming one owner twice, or a replay LSN past the durable LSN, is Malformed.
 - The next segment opened after a checkpoint (segment 3, filled by 40-block writes) carries the
@@ -281,8 +297,10 @@ the model's run through recovery, replay the records after its replay LSN, resum
 - Crash in the round that opens a segment: write 22 opens segment 2 (LBAs 128-131). For each
   combination of the segment header and the record landing, recovery gives 22 records only if both
   landed, else 21. A record that landed without its header is erased, and segment 2 is reopened with
-  seq 3, past the seq that record carries; otherwise with seq 2. A following write and reopen give
-  contiguous LSNs 1..n+1 (etcd TestRecoverAfterCut).
+  seq 3, past the seq that record carries; otherwise with seq 2. Segment 1 counts 42 live blocks
+  and newest LSN 21; a segment 2 whose header landed is used, with 2 live blocks if its record did
+  and none if not. A following write and reopen give contiguous LSNs 1..n+1 (etcd
+  TestRecoverAfterCut).
 - Torn record left in the other stream: 2 hot records, then a cold 3-block blob whose first 2 blocks
   (segment header, record header) land. Recovery gives LSNs 1-2 and zeroes the cold record's header.
   The next hot write reuses LSN 3 in segment 1, and open and rebuild then give LSNs 1-3.
@@ -336,7 +354,8 @@ the model's run through recovery, replay the records after its replay LSN, resum
   with a crash before each of its writes and flushes with probability 1/4, each followed by a fresh
   start, then open; recovery's reads complete in random order. Properties: both succeed with the same
   durable LSN, between the one acknowledged before the crash and that plus the rounds in flight, and
-  leave nothing unflushed; every record holds only submitted entries and blobs; the index from open
+  leave nothing unflushed; both give the same segment usage table, and with no round in flight at
+  the crash the one the log held before it; every record holds only submitted entries and blobs; the index from open
   and from rebuild both equal the pre-crash index plus the records kept from rounds in flight; every
   mapped block reads back; both leave the same bytes to replay, and when nothing in flight was kept
   and the manifest is the newest, as many as before the crash. Coverage: more than 5 kept in-flight
@@ -421,6 +440,27 @@ the model's run through recovery, replay the records after its replay LSN, resum
 - A cleaner move (same chunk, same blocks, new location LBA 200: data 201) applies only if the live
   or frozen entry still points at the location it copied; otherwise it is dropped.
 
+## Segment usage table
+
+The log below writes 60 one-block hot writes on a 64K-block disk (16-block segments), checkpointing
+whenever 40 blocks follow the manifest.
+
+- Zeroing the header of segment 1, whose records all precede the replay point, or all its 16
+  blocks, or writing another log's segment header over it, quarantines it instead of freeing it: one segment fewer is free, open still equals the
+  live index, and 16 more writes open new segments but leave segment 1's blocks unchanged. The next
+  open quarantines it again.
+- Zeroing the header of a segment the table lists that holds records past the replay point is
+  Corrupt(the first of them).
+- Zeroing the header of the newest hot segment, opened after the manifest and holding several
+  records, is Corrupt(its first LSN), not a log that ends before it: its block 1 holds a record, so
+  recovery reads it in full and the tail rule sees the records past the gap.
+- A manifest whose table names a segment past the end of the disk, its record rewritten with valid
+  checksums, is Corrupt(the manifest's LSN).
+- A quarantine outlives the start that found it: a bit flip in segment 1's header is quarantined
+  after reading the segment in full; once a checkpoint's table records it and a segment header
+  names that manifest, open quarantines segment 1 again without reading past its header, and still
+  does after its header is restored. Rebuild, which needs its records, gives Corrupt(LSN 1).
+
 ## Simulated disk
 
 - Writes stay volatile until a flush. Reads see unflushed writes. On a crash each unflushed block
@@ -436,7 +476,8 @@ the model's run through recovery, replay the records after its replay LSN, resum
 
 The seeded runs, each described in its section above:
 
-- Group commit: 100 seeds (every accepted item decodes).
+- Group commit: 100 seeds (every accepted item decodes), each also failing under five broken
+  encoders, and 20 seeds of random entries (anything Submit accepts decodes).
 - Random crashes: 50 seeds x 4 cycles (acknowledged records kept, index = rebuild), and the recovery
   fuzz test.
 - Quarantine: 10 seeds (bit flips in segment headers).

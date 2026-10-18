@@ -17,7 +17,7 @@ type Mode uint8
 const (
 	// ModeOpen loads the newest manifest and replays the records after its oldest replay LSN.
 	ModeOpen Mode = iota + 1
-	// ModeRebuild ignores manifests and replays every record from the start of the log.
+	// ModeRebuild replays every record from the start of the log, taking from the manifest only its usage table and what is left to replay.
 	ModeRebuild
 )
 
@@ -86,6 +86,9 @@ type segInfo struct {
 	hasFirst bool
 	seq      uint64
 	firstLSN uint64
+	listed   bool
+	live     uint32
+	newest   uint64
 }
 
 type foundHeader struct {
@@ -174,12 +177,13 @@ type Recovery struct {
 	win       [2]window
 	scratch   []Entry
 
-	segs     []segInfo
-	follow   []uint32
-	fi       int
-	suspects []uint32
-	qi       int
-	qPos     uint32
+	segs   []segInfo
+	follow []uint32
+	fi     int
+	strays []uint32
+	scan   []uint32
+	qi     int
+	qPos   uint32
 
 	manifestPos ManifestPos
 	manifest    Manifest
@@ -285,7 +289,7 @@ func (r *Recovery) DurableLSN() uint64 { return r.durable }
 // ReplayedBytes is the size of the records replay delivered.
 func (r *Recovery) ReplayedBytes() uint64 { return r.replayed }
 
-// Quarantined is the segments whose damaged header covers records before the replay point; group commit does not open them.
+// Quarantined is the segments the manifest's table quarantines, or whose damaged header covers records before the replay point; group commit does not open them.
 func (r *Recovery) Quarantined() []uint32 { return r.quarantined }
 
 // Erased is the number of record headers past the durable end that recovery erased.
@@ -474,7 +478,6 @@ func (r *Recovery) classify(s uint32, img []byte) {
 		r.checkFirst(s, img[core.BlockSize:], 0, true)
 	default:
 		*info = segInfo{state: segSuspect}
-		r.suspects = append(r.suspects, s)
 	}
 }
 
@@ -499,6 +502,7 @@ func (r *Recovery) noteFirst(s uint32, h RecordHeader) {
 		return
 	}
 	r.noteFound(s, 1, h)
+	r.strays = append(r.strays, s)
 }
 
 func (r *Recovery) noteFound(s, block uint32, h RecordHeader) {
@@ -622,15 +626,59 @@ func (r *Recovery) pumpFollow(ctx *core.Context, out *Output) {
 		}
 		r.fi++
 	}
+	r.phase = recManifest
+	r.pumpManifest(ctx, out)
+}
+
+// applyTable takes from the manifest's segment usage table what headers cannot tell: a
+// quarantined segment stays quarantined without being read again, and a used one whose
+// header reads as zeros or another log's is damaged, not free. It then lists the segments to
+// read in full: the damaged ones, and the free ones holding a record at block 1, since a header
+// damaged to zeros over a segment opened after the manifest looks like one that never landed.
+func (r *Recovery) applyTable(ctx *core.Context, out *Output) bool {
+	for _, u := range r.manifest.Segments {
+		if u.Segment >= r.sb.SegmentCount {
+			r.fail(ctx, &CorruptError{LSN: r.manifestPos.LSN}, out)
+			return false
+		}
+		info := &r.segs[u.Segment]
+		info.listed, info.live, info.newest = true, u.Live, u.Newest
+		switch {
+		case u.State == SegmentQuarantined:
+			info.state = segQuarantined
+		case info.state == segFree:
+			info.state = segSuspect
+		}
+	}
+	for s := range r.segs {
+		if r.segs[s].state == segSuspect {
+			r.scan = append(r.scan, uint32(s))
+		}
+	}
+	for _, s := range r.strays {
+		if r.segs[s].state == segFree {
+			r.scan = append(r.scan, s)
+		}
+	}
+	r.found = slices.DeleteFunc(r.found, func(f foundHeader) bool {
+		return slices.Contains(r.scan, f.segment) || r.segs[f.segment].state == segQuarantined
+	})
+	return true
+}
+
+func (r *Recovery) startQuarantine(ctx *core.Context, out *Output) {
+	if !r.applyTable(ctx, out) {
+		return
+	}
 	r.phase, r.qPos = recQuarantine, 1
 	r.pumpQuarantine(ctx, out)
 }
 
-// pumpQuarantine only collects what suspect segments hold; whether each is free or
-// quarantined depends on where replay finds the durable log ends.
+// pumpQuarantine only collects what the segments read in full hold; whether a damaged one
+// is free or quarantined depends on where replay finds the durable log ends.
 func (r *Recovery) pumpQuarantine(ctx *core.Context, out *Output) {
-	for r.qi < len(r.suspects) {
-		s := r.suspects[r.qi]
+	for r.qi < len(r.scan) {
+		s := r.scan[r.qi]
 		for r.qPos < r.sb.SegmentBlocks {
 			b, h, st := r.seek(ctx, 0, s, r.qPos, 0, true, r.scratch, out)
 			r.qPos = b
@@ -646,8 +694,7 @@ func (r *Recovery) pumpQuarantine(ctx *core.Context, out *Output) {
 		r.qi++
 		r.qPos = 1
 	}
-	r.phase = recManifest
-	r.pumpManifest(ctx, out)
+	r.loaded(out)
 }
 
 type readState uint8
@@ -708,7 +755,7 @@ func (r *Recovery) readBlob(ctx *core.Context, ref BlobRef, out *Output) ([]byte
 func (r *Recovery) pumpManifest(ctx *core.Context, out *Output) {
 	pos := r.manifestPos
 	if pos.IsNone() {
-		r.loaded(out)
+		r.startQuarantine(ctx, out)
 		return
 	}
 	corrupt := &CorruptError{LSN: pos.LSN}
@@ -748,7 +795,7 @@ func (r *Recovery) pumpManifest(ctx *core.Context, out *Output) {
 	}
 	r.manifest, r.hasManifest = m, true
 	r.body, r.rest, r.pieces = nil, nil, nil
-	r.loaded(out)
+	r.startQuarantine(ctx, out)
 }
 
 func (r *Recovery) loaded(out *Output) {
@@ -955,6 +1002,9 @@ func (r *Recovery) deliver(x *streamScan, out *Output) {
 	r.replayed += blocks * core.BlockSize
 	if d.Record.LSN > r.replayFloor {
 		r.replayBytes += blocks * core.BlockSize
+		info := &r.segs[x.headSeg]
+		info.live += d.Layout.DataBlocks
+		info.newest = d.Record.LSN
 	}
 }
 
@@ -962,17 +1012,20 @@ func (r *Recovery) deliver(x *streamScan, out *Output) {
 // sector, so a torn write leaves it whole or as it was, and a damaged one over records past
 // the replay point is damage. The first missing LSN g ends the log only if every record header
 // found past it lies within the commit_depth rounds that can be in flight, and no durable
-// manifest lies past it.
+// manifest lies past it; the manifest's LSN is past every LSN its usage table lists, so
+// replay cannot miss a record of a segment the table lists without ending before it.
 func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
 	var damaged uint64
 	for _, f := range r.found {
-		if r.segs[f.segment].state != segSuspect && r.segs[f.segment].state != segQuarantined {
+		info := &r.segs[f.segment]
+		if info.state != segSuspect && info.state != segQuarantined {
 			continue
 		}
 		if f.lsn > r.minReplay && (damaged == 0 || f.lsn < damaged) {
 			damaged = f.lsn
 		}
-		r.segs[f.segment].state = segQuarantined
+		info.state = segQuarantined
+		info.newest = max(info.newest, f.lsn)
 	}
 	g := r.expected
 	switch {
@@ -984,14 +1037,18 @@ func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
 		return
 	}
 	r.durable = g - 1
-	for _, s := range r.suspects {
-		if r.segs[s].state == segQuarantined {
-			r.quarantined = append(r.quarantined, s)
-		} else {
-			r.segs[s].state = segFree
+	for s := range r.segs {
+		info := &r.segs[s]
+		if info.state == segSuspect && info.listed {
+			info.state = segQuarantined
+		}
+		switch info.state {
+		case segSuspect:
+			info.state = segFree
+		case segQuarantined:
+			r.quarantined = append(r.quarantined, uint32(s))
 		}
 	}
-	slices.Sort(r.quarantined)
 	for s := range r.streams {
 		st := &r.streams[s]
 		if len(st.segs) == 0 {
@@ -1048,8 +1105,15 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 	l.replayBytes = r.replayBytes
 	l.asm = r.resume
 	for s := uint32(1); s < r.sb.SegmentCount; s++ {
-		if r.segs[s].state == segFree {
+		info := &r.segs[s]
+		switch info.state {
+		case segFree:
 			l.free[s/64] |= 1 << (s % 64)
+		case segUsed, segQuarantined:
+			l.usage[s] = SegmentUsage{State: SegmentUsed, Live: info.live, Newest: info.newest}
+			if info.state == segQuarantined {
+				l.usage[s].State = SegmentQuarantined
+			}
 		}
 	}
 	return l, nil

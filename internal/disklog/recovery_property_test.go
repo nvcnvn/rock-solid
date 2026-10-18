@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -107,6 +108,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) {
 		}
 		acked, inFlight := h.log.DurableLSN(), uint64(h.log.InFlight())
 		newest, replayBytes := h.log.Manifest(), h.log.ReplayBytes()
+		usage := disklog.SegmentUsageOf(h.log)
 		before := n.live.clone()
 		if r.Chance(1, 4) {
 			st.restarts++
@@ -126,12 +128,16 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) {
 			t.Fatalf("seed %d cycle %d: rebuild: %v", seed, cycle, reb.err)
 		}
 		rebuiltReplay := h.log.ReplayBytes()
+		rebuiltUsage := disklog.SegmentUsageOf(h.log)
 		res := h.recover(disklog.ModeOpen)
 		if res.err != nil {
 			t.Fatalf("seed %d cycle %d: open: %v", seed, cycle, res.err)
 		}
 		if h.disk.Unflushed() != 0 {
 			t.Fatalf("seed %d cycle %d: recovered with %d blocks unflushed", seed, cycle, h.disk.Unflushed())
+		}
+		if got := disklog.SegmentUsageOf(h.log); !slices.Equal(got, rebuiltUsage) || (inFlight == 0 && !slices.Equal(got, usage)) {
+			t.Fatalf("seed %d cycle %d: open's usage %+v, rebuild's %+v, before the crash %+v", seed, cycle, got, rebuiltUsage, usage)
 		}
 		if h.log.ReplayBytes() != rebuiltReplay {
 			t.Fatalf("seed %d cycle %d: open leaves %d bytes to replay, rebuild %d", seed, cycle, h.log.ReplayBytes(), rebuiltReplay)
