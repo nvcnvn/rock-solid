@@ -1,0 +1,3 @@
+# Build outputs and the test file: recreate with build.sh + run.sh
+bin/
+work/

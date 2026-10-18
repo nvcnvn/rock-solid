@@ -1,0 +1,94 @@
+# 6.18.44-fc-v139, Intel(R) Xeon(R) Processor @ 2.10GHz, 4 CPUs, rustc 1.99.1 (58cf8f9c3 2026-10-13), Python 3.13.16, 2026-10-18T03:41:11
+# 1 GiB in-memory disk = 4096 segments x 64 blocks of 4K; uniform random 4K overwrites; greedy cleaner; free_low=8 segments; warm-up 4x capacity, measure 2x capacity
+=== P0: inline cleaner, unthrottled; WA against the greedy model
+RUN tag=P0/0.8 mode=Inline workers=0 u=0.80 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=320464 owner_busy_ns=3051 owner_work_ns=3051 owner_cpu_ns=3098 worker_cpu_ns=0 total_cpu_ns=3098 stall_ns=0 copies_per_user=1.620 wasted_per_user=0.0000 wa=2.620 victims_per_user=0.0409 lat_p50_us=0.73 lat_p99_us=186.37 lat_p999_us=239.96 lat_max_us=2422.7 secs=1.64
+[OK ] P0 WA at u=0.8 within 10% of greedy model got=2.62 want=2.69+-10%
+RUN tag=P0/0.9 mode=Inline workers=0 u=0.90 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=178301 owner_busy_ns=5568 owner_work_ns=5568 owner_cpu_ns=5546 worker_cpu_ns=0 total_cpu_ns=5546 stall_ns=0 copies_per_user=3.891 wasted_per_user=0.0000 wa=4.891 victims_per_user=0.0764 lat_p50_us=0.70 lat_p99_us=242.21 lat_p999_us=493.19 lat_max_us=3506.9 secs=2.94
+[OK ] P0 WA at u=0.9 within 10% of greedy model got=4.89 want=5.18+-10%
+RUN tag=P0/0.95 mode=Inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=97149 owner_busy_ns=10249 owner_work_ns=10249 owner_cpu_ns=10164 worker_cpu_ns=0 total_cpu_ns=10164 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 victims_per_user=0.1424 lat_p50_us=0.70 lat_p99_us=513.73 lat_p999_us=804.17 lat_max_us=4744.8 secs=5.40
+[FAIL] P0 WA at u=0.95 within 10% of greedy model got=9.11 want=10.17+-10%
+
+| u | writes/s | owner ns/write | copies/user | p99 us | p99.9 us | max us |
+|---|---|---|---|---|---|---|
+| 0.8 | 320464 | 3051 | 1.62 | 186.4 | 240.0 | 2423 |
+| 0.9 | 178301 | 5568 | 3.89 | 242.2 | 493.2 | 3507 |
+| 0.95 | 97149 | 10249 | 8.11 | 513.7 | 804.2 | 4745 |
+
+=== P0b: inline cleaner at u=0.95, 4096 segments of 16, 64 or 256 blocks, and 64 blocks with 12x warm-up
+RUN tag=P0b/16 mode=Inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=16 free_low=8 reserve=2 | writes_per_s=106330 owner_busy_ns=9364 owner_work_ns=9364 owner_cpu_ns=9336 worker_cpu_ns=0 total_cpu_ns=9336 stall_ns=0 copies_per_user=5.723 wasted_per_user=0.0000 wa=6.723 victims_per_user=0.4202 lat_p50_us=0.67 lat_p99_us=173.22 lat_p999_us=226.58 lat_max_us=2376.3 secs=1.23
+RUN tag=P0b/64 mode=Inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=97238 owner_busy_ns=10090 owner_work_ns=10090 owner_cpu_ns=10240 worker_cpu_ns=0 total_cpu_ns=10240 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 victims_per_user=0.1424 lat_p50_us=0.71 lat_p99_us=516.11 lat_p999_us=790.25 lat_max_us=4755.8 secs=5.39
+RUN tag=P0b/256 mode=Inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=256 free_low=8 reserve=2 | writes_per_s=89050 owner_busy_ns=11186 owner_work_ns=11186 owner_cpu_ns=11154 worker_cpu_ns=0 total_cpu_ns=11154 stall_ns=0 copies_per_user=9.142 wasted_per_user=0.0000 wa=10.142 victims_per_user=0.0396 lat_p50_us=0.80 lat_p99_us=1.57 lat_p999_us=3025.57 lat_max_us=11086.2 secs=23.55
+RUN tag=P0b/64, warm 12x mode=Inline workers=0 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=97103 owner_busy_ns=10254 owner_work_ns=10254 owner_cpu_ns=10257 worker_cpu_ns=0 total_cpu_ns=10257 stall_ns=0 copies_per_user=8.102 wasted_per_user=0.0000 wa=9.102 victims_per_user=0.1422 lat_p50_us=0.70 lat_p99_us=516.57 lat_p999_us=823.91 lat_max_us=2650.5 secs=5.40
+
+| blocks per segment | WA | greedy model |
+|---|---|---|
+| 16 | 6.72 | 10.17 |
+| 64 | 9.11 | 10.17 |
+| 256 | 10.14 | 10.17 |
+| 64, warm 12x | 9.10 | 10.17 |
+
+=== P1: owner mode, unthrottled at u=0.95, 1-3 workers
+RUN tag=P1/1 mode=Owner workers=1 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=3 | writes_per_s=107987 owner_busy_ns=9218 owner_work_ns=1206 owner_cpu_ns=9218 worker_cpu_ns=9183 total_cpu_ns=18400 stall_ns=8012 copies_per_user=7.969 wasted_per_user=0.0001 wa=8.969 victims_per_user=0.1401 lat_p50_us=1.06 lat_p99_us=482.21 lat_p999_us=625.61 lat_max_us=3788.8 secs=4.86
+RUN tag=P1/2 mode=Owner workers=2 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=4 | writes_per_s=182590 owner_busy_ns=5434 owner_work_ns=1335 owner_cpu_ns=5445 worker_cpu_ns=10785 total_cpu_ns=16229 stall_ns=4099 copies_per_user=8.025 wasted_per_user=0.0002 wa=9.025 victims_per_user=0.1410 lat_p50_us=1.12 lat_p99_us=192.50 lat_p999_us=515.38 lat_max_us=2291.0 secs=2.87
+RUN tag=P1/3 mode=Owner workers=3 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=5 | writes_per_s=249054 owner_busy_ns=3968 owner_work_ns=1427 owner_cpu_ns=3894 worker_cpu_ns=11539 total_cpu_ns=15433 stall_ns=2541 copies_per_user=8.072 wasted_per_user=0.0003 wa=9.073 victims_per_user=0.1418 lat_p50_us=1.09 lat_p99_us=96.40 lat_p999_us=365.63 lat_max_us=8149.2 secs=2.11
+
+| workers | writes/s | x inline | owner work ns | owner stall ns | worker cpu ns/user | wasted/user |
+|---|---|---|---|---|---|---|
+| 1 | 107987 | 1.11 | 1206 | 8012 | 9183 | 0.0001 |
+| 2 | 182590 | 1.88 | 1335 | 4099 | 10785 | 0.0002 |
+| 3 | 249054 | 2.56 | 1427 | 2541 | 11539 | 0.0003 |
+
+[OK ] P1 max write rate with 2 workers vs inline got=1.88x want=>1.5x
+[OK ] P1 max write rate grows from 2 to 3 workers got=1.36x want=>1.1x
+=== P2: shared mode, unthrottled at u=0.95, 1-3 workers
+RUN tag=P2/1 mode=Shared workers=1 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=3 | writes_per_s=103528 owner_busy_ns=9590 owner_work_ns=1202 owner_cpu_ns=9542 worker_cpu_ns=9596 total_cpu_ns=19137 stall_ns=8387 copies_per_user=7.969 wasted_per_user=0.0000 wa=8.969 victims_per_user=0.1401 lat_p50_us=1.08 lat_p99_us=503.34 lat_p999_us=680.96 lat_max_us=3639.1 secs=5.06
+RUN tag=P2/2 mode=Shared workers=2 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=4 | writes_per_s=165242 owner_busy_ns=5988 owner_work_ns=1155 owner_cpu_ns=5940 worker_cpu_ns=11652 total_cpu_ns=17592 stall_ns=4833 copies_per_user=8.017 wasted_per_user=0.0000 wa=9.017 victims_per_user=0.1409 lat_p50_us=1.06 lat_p99_us=217.26 lat_p999_us=632.83 lat_max_us=6393.0 secs=3.17
+RUN tag=P2/3 mode=Shared workers=3 u=0.95 rate=0 segs=4096 seg_blocks=64 free_low=8 reserve=5 | writes_per_s=221165 owner_busy_ns=4478 owner_work_ns=1183 owner_cpu_ns=4460 worker_cpu_ns=12619 total_cpu_ns=17079 stall_ns=3295 copies_per_user=8.070 wasted_per_user=0.0000 wa=9.070 victims_per_user=0.1417 lat_p50_us=1.08 lat_p99_us=122.40 lat_p999_us=492.06 lat_max_us=3119.8 secs=2.37
+
+| workers | writes/s | x inline | owner work ns | owner stall ns | worker cpu ns/user | wasted/user |
+|---|---|---|---|---|---|---|
+| 1 | 103528 | 1.07 | 1202 | 8387 | 9596 | 0.0000 |
+| 2 | 165242 | 1.70 | 1155 | 4833 | 11652 | 0.0000 |
+| 3 | 221165 | 2.28 | 1183 | 3295 | 12619 | 0.0000 |
+
+[OK ] P2 max write rate with 2 workers vs inline got=1.70x want=>1.5x
+[OK ] P2 max write rate grows from 2 to 3 workers got=1.34x want=>1.1x
+=== P3: owner paced at 50000 user writes/s; inline vs owner vs shared
+RUN tag=P3/0.9/inline mode=Inline workers=0 u=0.90 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=50000 owner_busy_ns=5858 owner_work_ns=5858 owner_cpu_ns=19781 worker_cpu_ns=0 total_cpu_ns=19781 stall_ns=0 copies_per_user=3.891 wasted_per_user=0.0000 wa=4.891 victims_per_user=0.0764 lat_p50_us=0.77 lat_p99_us=247.29 lat_p999_us=497.77 lat_max_us=6349.9 secs=10.49
+RUN tag=P3/0.9/owner/1 mode=Owner workers=1 u=0.90 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=3 | writes_per_s=50000 owner_busy_ns=1556 owner_work_ns=1556 owner_cpu_ns=19829 worker_cpu_ns=6078 total_cpu_ns=25907 stall_ns=0 copies_per_user=3.907 wasted_per_user=0.0000 wa=4.907 victims_per_user=0.0767 lat_p50_us=1.17 lat_p99_us=6.23 lat_p999_us=11.76 lat_max_us=2179.3 secs=10.49
+RUN tag=P3/0.9/owner/2 mode=Owner workers=2 u=0.90 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=4 | writes_per_s=50000 owner_busy_ns=1790 owner_work_ns=1774 owner_cpu_ns=19746 worker_cpu_ns=7970 total_cpu_ns=27715 stall_ns=16 copies_per_user=3.912 wasted_per_user=0.0000 wa=4.912 victims_per_user=0.0768 lat_p50_us=1.22 lat_p99_us=10.95 lat_p999_us=20.44 lat_max_us=32992.3 secs=10.49
+RUN tag=P3/0.9/shared/1 mode=Shared workers=1 u=0.90 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=3 | writes_per_s=50000 owner_busy_ns=1392 owner_work_ns=1392 owner_cpu_ns=19870 worker_cpu_ns=5994 total_cpu_ns=25865 stall_ns=0 copies_per_user=3.900 wasted_per_user=0.0000 wa=4.900 victims_per_user=0.0766 lat_p50_us=1.15 lat_p99_us=11.62 lat_p999_us=19.97 lat_max_us=1686.4 secs=10.49
+RUN tag=P3/0.9/shared/2 mode=Shared workers=2 u=0.90 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=4 | writes_per_s=50000 owner_busy_ns=1300 owner_work_ns=1300 owner_cpu_ns=19871 worker_cpu_ns=8391 total_cpu_ns=28262 stall_ns=0 copies_per_user=3.906 wasted_per_user=0.0000 wa=4.906 victims_per_user=0.0767 lat_p50_us=1.23 lat_p99_us=2.14 lat_p999_us=6.02 lat_max_us=1087.9 secs=10.49
+
+| u=0.9 | owner work ns/write | cleaner cpu ns/write | total ns/write | stall ns | p50 us | p99 us | p99.9 us | max us | WA |
+|---|---|---|---|---|---|---|---|---|---|
+| inline | 5858 | 0 | 5858 | 0 | 0.77 | 247.3 | 497.8 | 6350 | 4.89 |
+| owner/1 | 1556 | 6078 | 7634 | 0 | 1.17 | 6.2 | 11.8 | 2179 | 4.91 |
+| owner/2 | 1774 | 7970 | 9744 | 16 | 1.22 | 10.9 | 20.4 | 32992 | 4.91 |
+| shared/1 | 1392 | 5994 | 7386 | 0 | 1.15 | 11.6 | 20.0 | 1686 | 4.90 |
+| shared/2 | 1300 | 8391 | 9691 | 0 | 1.23 | 2.1 | 6.0 | 1088 | 4.91 |
+
+[OK ] P3 owner work per write, owner mode vs inline, u=0.9 got=1556ns vs 5858ns want=<0.4x
+[OK ] P3 write p99 owner mode vs inline, u=0.9 got=6.2us vs 247.3us want=<0.1x
+[FAIL] P3 total CPU per write, owner mode vs inline, u=0.9 got=1.30x want=<1.25x
+[OK ] P4 owner work per write, owner mode (applies moves) vs shared, u=0.9 got=1556ns vs 1392ns want=<1.5x
+RUN tag=P3/0.95/inline mode=Inline workers=0 u=0.95 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=2 | writes_per_s=49998 owner_busy_ns=10955 owner_work_ns=10955 owner_cpu_ns=19770 worker_cpu_ns=0 total_cpu_ns=19770 stall_ns=0 copies_per_user=8.112 wasted_per_user=0.0000 wa=9.112 victims_per_user=0.1424 lat_p50_us=0.74 lat_p99_us=537.19 lat_p999_us=908.72 lat_max_us=5711.9 secs=10.49
+RUN tag=P3/0.95/owner/1 mode=Owner workers=1 u=0.95 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=3 | writes_per_s=50000 owner_busy_ns=1789 owner_work_ns=1783 owner_cpu_ns=19860 worker_cpu_ns=10504 total_cpu_ns=30364 stall_ns=6 copies_per_user=8.137 wasted_per_user=0.0001 wa=9.137 victims_per_user=0.1428 lat_p50_us=1.17 lat_p99_us=6.33 lat_p999_us=9.50 lat_max_us=1589.1 secs=10.49
+RUN tag=P3/0.95/owner/2 mode=Owner workers=2 u=0.95 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=4 | writes_per_s=50000 owner_busy_ns=1995 owner_work_ns=1995 owner_cpu_ns=19817 worker_cpu_ns=13541 total_cpu_ns=33358 stall_ns=0 copies_per_user=8.173 wasted_per_user=0.0001 wa=9.173 victims_per_user=0.1433 lat_p50_us=1.29 lat_p99_us=10.79 lat_p999_us=17.29 lat_max_us=2622.0 secs=10.49
+RUN tag=P3/0.95/shared/1 mode=Shared workers=1 u=0.95 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=3 | writes_per_s=50000 owner_busy_ns=1213 owner_work_ns=1197 owner_cpu_ns=19870 worker_cpu_ns=10473 total_cpu_ns=30344 stall_ns=16 copies_per_user=8.113 wasted_per_user=0.0000 wa=9.113 victims_per_user=0.1424 lat_p50_us=1.13 lat_p99_us=1.88 lat_p999_us=5.22 lat_max_us=3517.2 secs=10.49
+RUN tag=P3/0.95/shared/2 mode=Shared workers=2 u=0.95 rate=50000 segs=4096 seg_blocks=64 free_low=8 reserve=4 | writes_per_s=50000 owner_busy_ns=1368 owner_work_ns=1365 owner_cpu_ns=19874 worker_cpu_ns=13960 total_cpu_ns=33834 stall_ns=2 copies_per_user=8.151 wasted_per_user=0.0000 wa=9.151 victims_per_user=0.1430 lat_p50_us=1.29 lat_p99_us=2.11 lat_p999_us=4.86 lat_max_us=2414.9 secs=10.49
+
+| u=0.95 | owner work ns/write | cleaner cpu ns/write | total ns/write | stall ns | p50 us | p99 us | p99.9 us | max us | WA |
+|---|---|---|---|---|---|---|---|---|---|
+| inline | 10955 | 0 | 10955 | 0 | 0.74 | 537.2 | 908.7 | 5712 | 9.11 |
+| owner/1 | 1783 | 10504 | 12287 | 6 | 1.17 | 6.3 | 9.5 | 1589 | 9.14 |
+| owner/2 | 1995 | 13541 | 15536 | 0 | 1.29 | 10.8 | 17.3 | 2622 | 9.17 |
+| shared/1 | 1197 | 10473 | 11670 | 16 | 1.13 | 1.9 | 5.2 | 3517 | 9.11 |
+| shared/2 | 1365 | 13960 | 15325 | 2 | 1.29 | 2.1 | 4.9 | 2415 | 9.15 |
+
+[OK ] P3 owner work per write, owner mode vs inline, u=0.95 got=1783ns vs 10955ns want=<0.4x
+[OK ] P3 write p99 owner mode vs inline, u=0.95 got=6.3us vs 537.2us want=<0.1x
+[OK ] P3 total CPU per write, owner mode vs inline, u=0.95 got=1.12x want=<1.25x
+[OK ] P4 owner work per write, owner mode (applies moves) vs shared, u=0.95 got=1783ns vs 1197ns want=<1.5x
+
+# checks failed: P0, P3
