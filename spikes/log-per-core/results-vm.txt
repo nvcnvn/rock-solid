@@ -1,0 +1,63 @@
+kernel 6.18.44-fc-v139, go1.27.0, dev vda (write back, 1 hw queues), 4 CPUs, 2026-10-18T16:40Z, loadavg 1.22 0.61 0.23
+
+medians over repetitions
+hop batch=1 trips=68608 rt_p50=27.1 rt_p99=67.9 cpu/trip=27.15 cpu/item/hop=13.576 ctxsw/trip=2.06 eventfd_writes/trip=2 (n=3)
+hop batch=64 trips=194560 rt_p50=4.5 rt_p99=69.5 cpu/trip=8.97 cpu/item/hop=0.07 ctxsw/trip=2.03 eventfd_writes/trip=2 (n=3)
+hop batch=8 trips=152576 rt_p50=3.6 rt_p99=71.8 cpu/trip=11.69 cpu/item/hop=0.731 ctxsw/trip=2.03 eventfd_writes/trip=2 (n=3)
+owner k=1 depth=8 items/s=19261 records/s=2408 items/record=8 p50=346 p99=1611 cpu/item=11.42 ctxsw/item=0.756 dev_flushes/record=1 eventfd_writes/record=2 (n=3)
+owner k=2 depth=8 items/s=22663 records/s=2489 items/record=9.1 p50=575 p99=2218 cpu/item=11.68 ctxsw/item=0.689 dev_flushes/record=1 eventfd_writes/record=2.29 (n=3)
+owner k=4 depth=8 items/s=35662 records/s=2066 items/record=17.3 p50=778 p99=3288 cpu/item=9.97 ctxsw/item=0.495 dev_flushes/record=1 eventfd_writes/record=4.36 (n=3)
+owner k=8 depth=8 items/s=50412 records/s=1283 items/record=39.3 p50=1162 p99=3078 cpu/item=8.13 ctxsw/item=0.423 dev_flushes/record=1 eventfd_writes/record=9.88 (n=3)
+perloop k=1 depth=8 items/s=21939 records/s=2742 items/record=8 p50=331 p99=903 cpu/item=9.96 ctxsw/item=0.603 dev_flushes/record=1 eventfd_writes/record=0 (n=3)
+perloop k=2 depth=8 items/s=25663 records/s=3208 items/record=8 p50=507 p99=3987 cpu/item=9.72 ctxsw/item=0.563 dev_flushes/record=1 eventfd_writes/record=0 (n=3)
+perloop k=4 depth=8 items/s=32946 records/s=4118 items/record=8 p50=914 p99=2690 cpu/item=10.69 ctxsw/item=0.556 dev_flushes/record=0.69 eventfd_writes/record=0 (n=3)
+perloop k=8 depth=8 items/s=39844 records/s=4980 items/record=8 p50=1521 p99=3550 cpu/item=8.15 ctxsw/item=0.511 dev_flushes/record=0.36 eventfd_writes/record=0 (n=3)
+
+checks (expected outcomes written before the full run)
+[FAIL] C1 one log per loop, 2 loops vs 1: items/s ratio (N7 on NVMe: about 2x): got=1.17 want=>= 1.6
+[OK ] C2 owner: device flushes per record: got=1.0 want=<= 1.00
+[OK ] C3 k=4: owner items/s / per-loop items/s: got=1.08 want=>= 1.0
+[OK ] C3 k=8: owner items/s / per-loop items/s: got=1.27 want=>= 1.0
+[OK ] C4 k=1: owner CPU per item / per-loop CPU per item: got=1.15 want=<= 1.25
+[OK ] C4 k=2: owner CPU per item / per-loop CPU per item: got=1.2 want=<= 1.25
+[OK ] C4 k=4: owner CPU per item / per-loop CPU per item: got=0.93 want=<= 1.25
+[OK ] C4 k=8: owner CPU per item / per-loop CPU per item: got=1.0 want=<= 1.25
+[OK ] C5 hop, 1 item: CPU per hop (us): got=13.576 want=<= 20
+[OK ] C5 hop, 64 items: CPU per item per hop (us): got=0.07 want=<= 1
+
+raw output
+kernel 6.18.44-fc-v139, go1.27.0, dev vda (write back, 1 hw queues), 4 CPUs, 2026-10-18T16:40Z, loadavg 1.22 0.61 0.23
+hop batch=1 trips=66560 rt_p50=27.1us rt_p99=79.5us cpu/trip=27.81us cpu/item/hop=13.906us ctxsw/trip=2.07 eventfd_writes/trip=2.00
+hop batch=8 trips=65536 rt_p50=27.8us rt_p99=83.3us cpu/trip=28.52us cpu/item/hop=1.783us ctxsw/trip=2.06 eventfd_writes/trip=2.00
+hop batch=64 trips=56320 rt_p50=31.5us rt_p99=110.1us cpu/trip=33.12us cpu/item/hop=0.259us ctxsw/trip=2.08 eventfd_writes/trip=2.00
+perloop k=1 depth=8 items/s=23691 records/s=2961 items/record=8.0 p50=310us p99=829us cpu/item=9.56us ctxsw/item=0.603 dev_flushes/record=1.00 eventfd_writes/record=0.00
+owner k=1 depth=8 items/s=19261 records/s=2408 items/record=8.0 p50=346us p99=931us cpu/item=11.34us ctxsw/item=0.663 dev_flushes/record=1.00 eventfd_writes/record=2.00
+perloop k=2 depth=8 items/s=28279 records/s=3535 items/record=8.0 p50=513us p99=1589us cpu/item=9.72us ctxsw/item=0.533 dev_flushes/record=1.00 eventfd_writes/record=0.00
+owner k=2 depth=8 items/s=25317 records/s=3099 items/record=8.2 p50=568us p99=1676us cpu/item=11.46us ctxsw/item=0.609 dev_flushes/record=1.00 eventfd_writes/record=2.06
+perloop k=4 depth=8 items/s=32985 records/s=4123 items/record=8.0 p50=898us p99=2690us cpu/item=10.69us ctxsw/item=0.547 dev_flushes/record=0.69 eventfd_writes/record=0.00
+owner k=4 depth=8 items/s=35195 records/s=2086 items/record=16.9 p50=778us p99=3485us cpu/item=10.45us ctxsw/item=0.495 dev_flushes/record=1.00 eventfd_writes/record=4.27
+perloop k=8 depth=8 items/s=39844 records/s=4980 items/record=8.0 p50=1520us p99=3550us cpu/item=9.15us ctxsw/item=0.518 dev_flushes/record=0.36 eventfd_writes/record=0.00
+owner k=8 depth=8 items/s=50412 records/s=1381 items/record=36.5 p50=1189us p99=3046us cpu/item=8.64us ctxsw/item=0.413 dev_flushes/record=1.00 eventfd_writes/record=9.22
+hop batch=1 trips=68608 rt_p50=27.1us rt_p99=67.9us cpu/trip=27.15us cpu/item/hop=13.576us ctxsw/trip=2.06 eventfd_writes/trip=2.00
+hop batch=8 trips=152576 rt_p50=3.6us rt_p99=71.8us cpu/trip=11.69us cpu/item/hop=0.731us ctxsw/trip=2.03 eventfd_writes/trip=2.00
+hop batch=64 trips=194560 rt_p50=4.5us rt_p99=69.5us cpu/trip=8.97us cpu/item/hop=0.070us ctxsw/trip=2.03 eventfd_writes/trip=2.00
+perloop k=1 depth=8 items/s=21939 records/s=2742 items/record=8.0 p50=331us p99=903us cpu/item=9.96us ctxsw/item=0.626 dev_flushes/record=1.00 eventfd_writes/record=0.00
+owner k=1 depth=8 items/s=19407 records/s=2428 items/record=8.0 p50=353us p99=1611us cpu/item=12.59us ctxsw/item=0.756 dev_flushes/record=1.00 eventfd_writes/record=2.00
+perloop k=2 depth=8 items/s=25056 records/s=3132 items/record=8.0 p50=507us p99=3987us cpu/item=10.23us ctxsw/item=0.563 dev_flushes/record=1.00 eventfd_writes/record=0.00
+owner k=2 depth=8 items/s=22663 records/s=2489 items/record=9.1 p50=613us p99=2218us cpu/item=12.39us ctxsw/item=0.689 dev_flushes/record=1.00 eventfd_writes/record=2.29
+perloop k=4 depth=8 items/s=32946 records/s=4118 items/record=8.0 p50=914us p99=2358us cpu/item=8.94us ctxsw/item=0.556 dev_flushes/record=0.71 eventfd_writes/record=0.00
+owner k=4 depth=8 items/s=42883 records/s=1947 items/record=22.0 p50=656us p99=2547us cpu/item=7.54us ctxsw/item=0.495 dev_flushes/record=1.00 eventfd_writes/record=5.53
+perloop k=8 depth=8 items/s=40080 records/s=5010 items/record=8.0 p50=1521us p99=3482us cpu/item=7.62us ctxsw/item=0.500 dev_flushes/record=0.37 eventfd_writes/record=0.00
+owner k=8 depth=8 items/s=44160 records/s=960 items/record=46.0 p50=1045us p99=7050us cpu/item=8.10us ctxsw/item=0.458 dev_flushes/record=1.00 eventfd_writes/record=11.53
+hop batch=1 trips=498688 rt_p50=3.0us rt_p99=30.5us cpu/trip=3.78us cpu/item/hop=1.892us ctxsw/trip=2.02 eventfd_writes/trip=2.00
+hop batch=8 trips=478208 rt_p50=3.3us rt_p99=25.2us cpu/trip=3.99us cpu/item/hop=0.249us ctxsw/trip=2.01 eventfd_writes/trip=2.00
+hop batch=64 trips=245760 rt_p50=4.5us rt_p99=67.9us cpu/trip=7.72us cpu/item/hop=0.060us ctxsw/trip=2.03 eventfd_writes/trip=2.00
+perloop k=1 depth=8 items/s=10741 records/s=1343 items/record=8.0 p50=334us p99=4442us cpu/item=10.68us ctxsw/item=0.602 dev_flushes/record=1.00 eventfd_writes/record=0.00
+owner k=1 depth=8 items/s=15897 records/s=1988 items/record=8.0 p50=313us p99=4047us cpu/item=11.42us ctxsw/item=0.852 dev_flushes/record=1.00 eventfd_writes/record=2.00
+perloop k=2 depth=8 items/s=25663 records/s=3208 items/record=8.0 p50=450us p99=4038us cpu/item=8.22us ctxsw/item=0.574 dev_flushes/record=1.00 eventfd_writes/record=0.00
+owner k=2 depth=8 items/s=19503 records/s=1731 items/record=11.3 p50=575us p99=4935us cpu/item=11.68us ctxsw/item=0.755 dev_flushes/record=1.00 eventfd_writes/record=2.82
+perloop k=4 depth=8 items/s=31024 records/s=3878 items/record=8.0 p50=953us p99=2704us cpu/item=11.59us ctxsw/item=0.562 dev_flushes/record=0.68 eventfd_writes/record=0.00
+owner k=4 depth=8 items/s=35662 records/s=2066 items/record=17.3 p50=786us p99=3288us cpu/item=9.97us ctxsw/item=0.506 dev_flushes/record=1.00 eventfd_writes/record=4.36
+perloop k=8 depth=8 items/s=38227 records/s=4778 items/record=8.0 p50=1571us p99=3807us cpu/item=8.15us ctxsw/item=0.511 dev_flushes/record=0.35 eventfd_writes/record=0.00
+owner k=8 depth=8 items/s=50480 records/s=1283 items/record=39.3 p50=1162us p99=3078us cpu/item=8.13us ctxsw/item=0.423 dev_flushes/record=1.00 eventfd_writes/record=9.88
+loadavg at end 4.72 1.79 0.68

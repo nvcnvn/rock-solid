@@ -192,11 +192,13 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Two-phase commit, transaction record, intent.** The general way to commit across shards: first write every change provisionally, then flip one switch that makes them all real. rock-solid writes provisional values called **intents**, and a single **transaction record** key whose flip to COMMITTED is the switch. A reader that meets an intent checks the record. See [Cross-shard transactions](design.md#metadata-layer-metastore).
 
-**Lease read, leader lease.** A Raft leader normally must check with a majority before answering a read, to be sure it is still the leader. Holding a lease lets it answer from memory instead, as long as the lease lasts.
+**Lease read, leader lease.** A Raft leader normally must check with a majority before answering a read, to be sure it is still the leader. Holding a lease lets it answer from memory instead, as long as the lease lasts. rock-solid's leader lease comes from **fortification**: the leader asks each follower to promise that, while its node's lease to the leader's node holds, it will not help elect anyone else in that group. With a quorum of promises the leader holds a lease without sending heartbeats, so an idle group can go quiet and still serve reads. See [Reads and leader leases](design.md#metadata-layer-metastore).
+
+**Support epoch.** The number of one unbroken run of a node-pair lease. The grantor bumps it when the lease lapses, so nothing granted under the old number comes back after a partition heals. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
 **Leader transfer, leader balancing.** Handing leadership to another replica on purpose, without an election: for an upgrade, to drain a node, or to spread leaders evenly.
 
-**Quiescence.** Letting an idle Raft group stop its timers and heartbeats, so thousands of idle groups cost almost nothing.
+**Quiescence.** Letting an idle Raft group stop its timers and heartbeats, so thousands of idle groups cost almost nothing. The per-node-pair leases keep an idle group's leader lease and its followers' loyalty.
 
 **Soft state.** State kept only in memory and rebuilt after a crash rather than written to disk. The inode owner's record of open files is soft state, which keeps `open` free of disk writes.
 
@@ -336,7 +338,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 | Replica | A PG member other than the primary, holding a copy of chunk data. Any copy of a Raft shard, leader included. `rep3` means three copies |
 | Member | A disk in a PG. In a cache mode, a node that has the file open |
 | Leader | A Raft group's elected coordinator; never used for chunk data, which has primaries |
-| Owner | The inode owner, the leader of an inode's shard. The event loop that owns a disk's index, connections or shards and is the only code to change them |
+| Owner | The inode owner, the leader of an inode's shard. The event loop that owns a disk's log and index, its connections or its shards and is the only code to change them |
 | Epoch | The placement table's version. A volume's snapshot epoch, which counts its snapshots. The high bits of a chunk version, which are the first kind |
 | Shard | A MetaStore Raft group over a range of keys. One piece of an erasure-coded chunk |
 | Commit | A chunk version is committed once every live member holds it. A Raft entry, once a majority holds it. A transaction, once its changes take effect. Group commit is batching many writes into one flush |
@@ -344,7 +346,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 | Flush | A drive flush, which makes cached writes durable. A memtable flush, which writes the in-memory index out as a sorted run. Flushing the write-back buffer, which sends buffered writes to the chunk primaries |
 | Snapshot | A volume snapshot, a point-in-time copy users see. A Raft snapshot, a copy of a shard's state sent to a lagging replica. A point-in-time view, a frozen read view of an LSM tree |
 | Log | The disk log holding all of a disk's data. A Raft log, the ordered entries of a shard, stored inside the disk log. Operator logs, ordinary text messages |
-| Lease | A session lease, held by a client daemon. A primary's read lease, held per PG. A Raft leader lease, for reads without a round trip. In Samba, an SMB lease is a client cache right |
+| Lease | A session lease, held by a client daemon. A primary's read lease, held per PG. A Raft leader lease, for reads without a round trip; both of the last two ride on per-node-pair leases. In Samba, an SMB lease is a client cache right |
 | Pool | A storage pool: PGs sharing one redundancy scheme. A buffer pool: memory that I/O buffers come from |
 | Recovery | Crash recovery: rebuilding a disk's state from its log at start. PG recovery: restoring full redundancy after a failure |
 | Index | The chunk index of a disk. A MetaStore shard's state. The S3 index of keys to objects |
