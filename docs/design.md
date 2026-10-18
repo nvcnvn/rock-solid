@@ -794,7 +794,7 @@ Each choice below favors a short hot path, a single binary and testable correctn
 | Decision | Chosen | Alternatives weighed | Why the chosen one |
 | --- | --- | --- | --- |
 | First product | RWX filesystem | Block first; S3 first | RWX is where homelab users have no good option; block alone competes with Longhorn v2 and Mayastor |
-| Language | Rust | Go; C++ (Ceph, 3FS) | A learning goal; memory safety; SPDK and RDMA are C libraries, reached through bindgen without cgo. Measured against Go 1.27, Go costs 1.1 to 1.25× the CPU on compute-bound code and 1.54× on the replicated 4K write path with each language batching its writes, and adds about 10 µs at queue depth 1 ([Go CPU spike](#appendix-go-cpu-per-operation-spike)). Its collector's pauses stay under 1 ms, but a memtable with one pointer per entry costs 23 to 35% of the CPU in collection, so in Go the memtable would have to be pointer-free pages ([Go memtable spike](#appendix-go-memtable-spike)) |
+| Language | Rust | Go; C++ (Ceph, 3FS) | A learning goal; memory safety; SPDK and RDMA are C libraries, reached through bindgen without cgo. Measured against Go 1.27, Go costs 1.1 to 1.25× the CPU on compute-bound code. On the replicated 4K write path it costs 1.14 to 1.21× when it runs the same epoll loop per node, and 1.5 to 1.7× with a goroutine per connection ([Go CPU spike](#appendix-go-cpu-per-operation-spike), [tuned Go spike](#appendix-tuned-go-spike)). Compiler options (PGO, `GOAMD64=v3`, bounds checks) are worth under 3.5%. Its collector's pauses stay under 1 ms, but a memtable with one pointer per entry costs 23 to 35% of the CPU in collection, 9% in a Go arena, so in Go the memtable would have to be pointer-free pages ([Go memtable spike](#appendix-go-memtable-spike)) |
 | File client | FUSE | Own kernel module (Weka, CephFS); NFS gateway pod (Longhorn RWX) | The spike shows FUSE can do per-file cache switching. FUSE is safe to iterate on, and a crash doesn't take down the kernel. A gateway funnels all traffic through one pod |
 | Where write-back lives | In the daemon | FUSE `writeback_cache` (kernel page cache) | The kernel option is mount-wide, hides writes from the daemon and can't be revoked per file, so write-shared mode couldn't be enforced (spike T9) |
 | Coherence | Tiers 1 → 2 → 3 | Close-to-open only (NFS, JuiceFS); full capabilities from the start (CephFS); caching left to the user (DAOS) | Ships useful RWX early; the Weka-style mode switch gets most of the benefit of capabilities with three states and one message type |
@@ -1249,3 +1249,22 @@ Each learning track starts with a small throwaway exercise, then lands as a real
 - Go costs 1.1 to 1.25× Rust on compute-bound code, and about 1.5× on a CPU-bound small-write path when both batch their writes: about 35% fewer 4K writes per core.
 - The number of syscalls per operation matters more than the language: with the same write pattern Go and Rust cost the same.
 - A hardware CRC32C with three streams is 5.5 to 7.3× faster than `core`'s table-driven one, but in Rust only when built for x86-64-v2.
+
+## Appendix: tuned Go spike
+
+**Question.** How much of Go's gap to Rust on the replicated write path closes with Go-specific work (fewer syscalls, atomics instead of mutexes and channels, Rust's event-loop design, profile-guided optimization, `GOAMD64=v3`, no bounds checks), and do Go arenas cut the collector cost of a memtable with one pointer per entry?
+
+**Setup.** The VM of the [Go CPU spike](#appendix-go-cpu-per-operation-spike), Go 1.27.0, Rust 1.99.1. The replicated 4K write in four designs, all batching frames that are ready together: Rust's epoll loop per node; Go with a goroutine per connection; the same with a slot table of atomic counters, replies sent from the acknowledgment reader and lock-free queues to the replicas; and Rust's design ported to Go, one goroutine per node running epoll on raw sockets. Go built with each compiler option; Rust with `target-cpu=x86-64-v3`. The [Go memtable spike](#appendix-go-memtable-spike)'s `[]byte` B-tree at 10 million files on the Go heap and in a Go arena (`GOEXPERIMENT=arenas`). Code and raw output: [spikes/go-tuned](../spikes/go-tuned/).
+
+| Test | Result |
+| --- | --- |
+| Replicated write, 16 connections, CPU per write | Rust 22.3 µs. **Go with Rust's epoll design 27.1 µs (1.21×)**, with Rust's syscall counts. Go with atomics 36.3 µs (1.63×), goroutine per connection 37.8 µs (1.70×) |
+| Replicated write, one connection | p50: Rust 74.9 µs, **Go with atomics 67.3 µs**, Go epoll 77.5 µs, goroutine per connection 84.2 µs |
+| Compiler options | Go: PGO, `GOAMD64=v3`, both, and no bounds checks all within 3.5% of the default. Rust: `x86-64-v3` 6.3% faster on the cleaner harness, no change on the write path |
+| Memtable in a Go arena, 10M files | One collection 307 to 330 ms of CPU against 659 to 683 ms on the heap (2.1× less); under request garbage 9.3% of CPU against 23.5%; 243 against 256 B per file. Pages: 0.3 ms and 0.0% |
+
+**Conclusions** (applied in [Alternatives considered](#alternatives-considered))
+
+- A Go data path should run an event loop per node on raw sockets, the sans-IO driver's shape; it then costs about 1.2× Rust. Goroutine per connection costs 1.5 to 1.7× whatever its synchronization.
+- Compiler options are not a lever for this code.
+- Arenas suit memory freed whole, not a long-lived memtable: they cut its collection cost 2.1 to 2.5×, where pointer-free pages cut it to nothing.

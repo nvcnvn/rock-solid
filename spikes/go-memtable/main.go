@@ -3,7 +3,7 @@
 //
 // usage: go-memtable gen files=N names=PATH data=PATH probes=PATH
 //
-//	go-memtable run variant=slices|arena|pages data=PATH probes=PATH [churn_secs=10] [restore=1] [snap_updates=100000]
+//	go-memtable run variant=slices|arena|pages|slices-goarena data=PATH probes=PATH [churn_secs=10] [restore=1] [snap_updates=100000]
 package main
 
 import (
@@ -96,7 +96,13 @@ func pct(v []time.Duration, q float64) float64 {
 	return float64(v[min(len(v)-1, int(float64(len(v))*q))].Nanoseconds()) / 1000
 }
 
+// extraVariants holds variants that need a GOEXPERIMENT to build.
+var extraVariants = map[string]func() memtable{}
+
 func newVariant(name string) memtable {
+	if mk, ok := extraVariants[name]; ok {
+		return mk()
+	}
 	switch name {
 	case "slices":
 		return newSliceTree()

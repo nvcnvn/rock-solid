@@ -13,6 +13,7 @@ import (
 	"math/bits"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"slices"
 	"strconv"
 	"strings"
@@ -436,6 +437,12 @@ func main() {
 	var period time.Duration
 	if c.rate > 0 {
 		period = time.Duration(1e9 / c.rate)
+	}
+	if path := os.Getenv("CPUPROFILE"); path != "" {
+		f, err := os.Create(path)
+		must(err)
+		must(pprof.StartCPUProfile(f))
+		defer pprof.StopCPUProfile()
 	}
 	cpu0, pcpu0 := threadCPU(), processCPU()
 	t0 := time.Now()

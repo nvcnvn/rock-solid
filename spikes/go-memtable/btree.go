@@ -19,12 +19,17 @@ type btree[T any] struct {
 	root  *node[T]
 	cmp   func(item T, key []byte) int
 	keyOf func(item T) []byte
+	// alloc, if set, allocates nodes in place of the Go heap (the arena variant).
+	alloc func(leaf bool) *node[T]
 	len   int
 	nodes int
 }
 
 func (t *btree[T]) newNode(leaf bool) *node[T] {
 	t.nodes++
+	if t.alloc != nil {
+		return t.alloc(leaf)
+	}
 	n := &node[T]{items: make([]T, 0, maxItems)}
 	if !leaf {
 		n.children = make([]*node[T], 0, maxItems+1)
