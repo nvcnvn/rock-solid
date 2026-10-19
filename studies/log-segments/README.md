@@ -1,6 +1,6 @@
 # Log segments: recovery with several open metadata segments, and the headers freed segments keep
 
-**Status:** read from source, plus a model ([`lanes.py`](lanes.py)) and tests run against `internal/disklog` at `546f956` ([`testdata/stale_header_test.go`](testdata/stale_header_test.go)), with a prototype of the second proposal ([`next-seq.diff`](next-seq.diff)); output in [`results.txt`](results.txt). Proposal awaiting review; the design and the code are unchanged.
+**Status:** read from source, plus a model ([`lanes.py`](lanes.py)) and tests run against `internal/disklog` at `546f956` ([`testdata/stale_header_test.go`](testdata/stale_header_test.go)), with a prototype of the second proposal ([`next-seq.diff`](next-seq.diff)); output in [`results.txt`](results.txt). Both proposals are adopted in the design ([On-disk format](../../docs/design.md#on-disk-format): lanes, `NextSeq` and reuse at once; [Testing strategy](../../docs/design.md#testing-strategy) invariants; [Alternatives considered](../../docs/design.md#alternatives-considered)), with the rebuild rule after cleaning and the C5 rerun with per-worker lanes left as [open questions](../../docs/design.md#roadmap-and-open-questions); the built code is unchanged, and the stale-header tests are the Cleaner item's regression tests.
 
 **Question:** two parts.
 

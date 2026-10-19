@@ -501,7 +501,9 @@ replaced.
 
 `CLOCK_MONOTONIC_RAW` is the clock no daemon touches. It runs at the rate the kernel calibrated
 for the processor's time-stamp counter at boot, which the kernel never checks against a bound
-and only a daemon corrects, in `CLOCK_BOOTTIME`. So each lease is counted on both:
+and only a daemon corrects, in `CLOCK_BOOTTIME`. On Intel CPUs that report their crystal frequency
+the kernel trusts that number outright, and one wrong entry in its own table ran Skylake-X
+workstations 4% slow until a 2017 fix; every virtual machine inherits its host's figure. So each lease is counted on both:
 
 - The **holder** ends it when *either* clock shows the lease minus `lease_drift` since it asked.
 - The **grantor** keeps it until *both* clocks show the whole lease since it granted.
@@ -510,8 +512,9 @@ A slew or a bad calibration can then only end a holder's lease early or make a g
 longer, by at most 22.6% for a slew. What is left for the 40 ms margin is the two oscillators'
 own difference, typically within ±100 ppm each.
 
-The remaining gap is both of one node's clocks wrong the same way: a bad calibration with no
-daemon to correct it. So each holder measures, from outside, how fast each grantor's clock can
+The remaining gap is both of one node's clocks wrong the same way: a bad calibration that no
+daemon corrects (ntpd and systemd-timesyncd fix at most 500 ppm of frequency and step the clock
+for the rest). So each holder measures, from outside, how fast each grantor's clock can
 be running. Every grant carries the grantor's `CLOCK_MONOTONIC_RAW` reading `g`, and the holder
 notes on its own raw clock when it sent the request (`s`) and when the grant arrived (`r`). The
 grantor read `g` somewhere between the two, so between two grants `a` and `b` at least `s_b − r_a`
@@ -526,11 +529,20 @@ That is a bound, not an estimate: no delayed or lopsided network path can make i
 window's first third with the one in its last third, so one slow round trip loosens the bound only
 if every grant in a third was slow. The bound overshoots by about two round trips over the third
 of a window between them: 600 ppm with 1 ms round trips, 60 ppm on a quiet network's 100 µs,
-against the 5,000 ppm that half the margin allows. A holder whose bound for a grantor exceeds
-`1 + lease_drift / 2` widens its margin for that grantor by the excess and reports the pair. Until
-a pair has grants a whole window apart, as just after either node starts, the margin is
-`lease_drift` alone. Comparing the two raw clocks errs safe: a grantor counts on the slower of its
-clocks, so no faster than its raw one, and a holder on the faster, so no slower than its raw one.
+against the 5,000 ppm that half the margin allows. Comparing the two raw clocks errs safe: a
+grantor counts on the slower of its clocks, so no faster than its raw one, and a holder on the
+faster, so no slower than its raw one. A grantor whose raw clock runs ρ times as fast as the
+holder's needs a margin of `1 − 1/ρ`, a little under `ρ − 1`. A holder whose bound for a grantor
+exceeds `1 + lease_drift / 2` widens its margin for that grantor by the excess and reports the
+pair, which always leaves at least half a percent, 20 ms of a 4 s lease, to spare: room for the
+grantor's rate to change after it was measured.
+
+The bound does not need the whole window. Any two grants give one; grants close together only
+give a looser one. So after the first grant from a grantor, the holder asks again `rate_gap`
+(100 ms) later, and takes no lease from that grantor until it has those two. The first lease is a
+little shorter (3.90 s instead of 3.96 s at 1 ms round trips) and lengthens as the window fills.
+A holder keeps its window per grantor and per boot: every grant carries the grantor's boot ID,
+because its raw clock starts again from zero at every boot, and a reboot starts a new window.
 
 #### A holder that slept gives up its leases
 
@@ -587,12 +599,14 @@ cases:
 A QEMU guest on kvm-clock that is stopped and continued in place, or snapshotted while it runs,
 changes neither, and only the grantors' clocks saw the time go by. So every heartbeat a grantor
 sends carries its `CLOCK_MONOTONIC_RAW`, not only its grants, and the holder checks each one: if
-the grantor's clock moved further since the last grant than the holder's own could have, the
-holder lost time and ends its leases as on `Resumed`. Messages sent to a stopped VM wait in the
+the grantor's clock moved further since the last grant than that lease's margin allows, more than
+`1/(1 − margin)` times the holder's own, the holder lost time and ends its leases as on `Resumed`.
+Tying the check to the margin matters: a fixed limit just above the 0.5% where widening starts would
+trip on every heartbeat from a grantor slightly fast, and its bound would never form. Messages sent to a stopped VM wait in the
 hypervisor's network backend and arrive when it continues, ahead of any client request sent after
 them, and the holder handles a pass's peer messages before its reads, so it ends the old leases
 before it serves a request that waited behind them. After either, the holder asks every grantor
-again at once and restarts its rate window, so a pause costs one round trip of reads. A grantor
+again at once and restarts its rate window, so a pause costs about 100 ms of reads. A grantor
 needs none of this: a clock that stopped only makes it wait longer.
 
 The core itself never reads a clock: a state machine gets time only from its driver, today as
@@ -1065,13 +1079,16 @@ during peering and a node restarted within a lease it granted.
   [`internal/core/peer.go`](../internal/core/peer.go): it tracks each request to another node
   with its deadline, and a timeout keeps the request's buffer, since the peer may be slow rather
   than gone.
-- **A gap in the design text, not listed among its open questions.** Whether a fresh node-pair
-  grant covers PGs by the grantor's current table or the holder's.
+- **Open question: which PGs a node-pair grant covers.** Whether a fresh grant covers PGs by the
+  grantor's current table or the holder's. The epoch change model's lease-heavy configuration
+  decides it before phase 3 builds the Grant message.
 - **Open question: incarnation fencing in the epoch-change model.** A dead daemon's write could
-  be delivered late to an old primary in interval `j`, or to a new primary that has not yet seen
-  the successor's incarnation. Does each primary's table of newest incarnations need to survive a
-  primary change, or does the interval rule already reject every such write? The design lists
-  this under [open questions](../docs/design.md#roadmap-and-open-questions).
+  be delivered late to an old primary, or held by a primary that stalls while another primary
+  leads the PG. The design's expected answer is that each primary's table of newest incarnations
+  need not survive a primary change: every chunk write carries its incarnation, the primary checks
+  it when it orders the write, and it orders a held write again only if no other primary led the
+  PG meanwhile. The model is to confirm it; the design lists this under [open
+  questions](../docs/design.md#roadmap-and-open-questions).
 - **Open question: the keep rule across several intervals.** Is "keep a version of the last
   activated interval unless a member live in it neither holds nor lists it, and keep everything
   below a kept version" complete when recovery is cut short by the next interval, or when a

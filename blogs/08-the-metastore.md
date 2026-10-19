@@ -83,10 +83,19 @@ The MetaStore offers two calls:
 
 ```go
 type MetaStore interface {
-	Txn(ops []Op) error                                // compare-and-set, put, delete, all-or-nothing
-	Scan(prefix, after []byte, limit int) ([]KV, error)
+	Txn(t Txn) (Result, error) // checks, then writes in order, all-or-nothing
+	Scan(start, end []byte, limit int) (kvs []KV, more bool, err error)
 }
 ```
+
+A `Txn` is a list of six kinds of op: `Put`, `Delete`, `DeleteRange`, `Check` (this key holds this
+value, or is absent), `CheckEmpty` (no key in this range, which `rmdir` needs) and `Update`, which
+adds to or bumps a number inside a value. Every check is tested first, against the state before the
+transaction; if one fails, nothing changes, and otherwise the writes apply in list order. `Update`
+exists because many clients write some keys at once: every `create` in a directory moves the
+directory's modification time, and with compare-and-set alone only one of 64 parallel creators
+would win each round. `Scan` reads a range, stops at a key count or a byte budget, and says whether
+there is `more`.
 
 Inodes, directories, sessions, locks and purge lists are all keys and transactions on this one
 store. Shards and the control plane are always 3-voter Raft groups whatever pool their files use,
@@ -318,7 +327,7 @@ fs/5/2:1/d/cat.jpg     -> 2:3, file
 fs/5/2:2/a                    attributes of beach.jpg (size, alloc_end, ...)
 fs/5/2:2/x/user.DOSATTRIB     an extended attribute, next to the attributes
 fs/5/2:3/a                    attributes of cat.jpg
-fs/5/2:3/l/{session}          an flock held on cat.jpg
+fs/5/2:3/l/x/{session}        an exclusive flock held on cat.jpg
 - - - - - - - - - - - - - - - a shard may split here, between slots - - - - - -
 fs/5/3:0/n                    the next slot begins
 ```
@@ -332,7 +341,8 @@ variable length, so a prefix scan is a plain byte-prefix scan.
 **Inode IDs.** Every key of an inode starts with `fs/{volume}/{inode}`, so a slot is one
 contiguous key range, and shards split only at slot boundaries.
 
-- A new file takes the next sequence number in its parent's slot: entry and inode, one shard.
+- A new file takes a sequence number in its parent's slot, from a batch of 64 its daemon reserved
+  ahead of time: entry and inode, one shard.
 - A new directory takes a free slot from the same shard's range, so `mkdir` is single-shard and a
   later split can move whole subtrees. With no free slot left it shares its parent's slot; when a
   slot's 2^40 IDs run out, new files go to a fresh slot.
@@ -347,7 +357,7 @@ records, volume attachments, case-folded names for SMB and the later S3 index):
 | Inode attributes, including size and `alloc_end` | `fs/{volume}/{inode}/a` | The inode's slot |
 | Directory entries | `fs/{volume}/{dir}/d/{name}` → inode, type | The directory's slot, so `readdirplus` is one request to one shard |
 | Extended attributes | `fs/{volume}/{inode}/x/{name}` | Next to the attributes |
-| flock and whole-file locks | `fs/{volume}/{inode}/l/{session}` | The inode's slot |
+| flock and whole-file locks | `fs/{volume}/{inode}/l/{mode}/{session}` | The inode's slot |
 | Slot counters, orphans, purge list | `fs/{volume}/{slot · 0}/n`, `…/u`, `…/o/{inode}`, `…/p/{inode}` | The slot itself |
 
 The volume prefix makes a filesystem one contiguous key range, which a snapshot copies and a
@@ -403,8 +413,9 @@ Cross-directory `rename` is the main file operation that takes this path, and it
 in its old slot, so locality decays slowly over time without affecting correctness.
 
 The design does not yet spell out what a reader does on a PENDING record, or when it may abort
-one; the cross-shard commit is one of the protocols to be model-checked in TLA+. Phase 4's API
-only "leaves room for cross-shard transactions"; they matter once ranges split, in phase 13.
+one. That is finished in phase 13, when range splitting first makes two data shards, with a TLA+
+model written before the code. Until then a `Txn` that spans two Raft groups is refused with an
+error naming them.
 
 ### Where the bytes go: shards share the disk log
 

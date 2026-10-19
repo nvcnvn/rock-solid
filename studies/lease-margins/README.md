@@ -1,6 +1,6 @@
 # Lease margins: the startup window and the margin-widening rule
 
-**Status:** read from source (Linux v6.18, CockroachDB `d30c905`) plus a model script ([margins.py](margins.py), output in [results.txt](results.txt)); no experiment on hardware. Revised after an independent review (grantor boot key, sessions, Raft wording, model variants). Nothing is adopted yet: the [proposal](#proposal) waits for the user's approval.
+**Status:** read from source (Linux v6.18, CockroachDB `d30c905`) plus a model script ([margins.py](margins.py), output in [results.txt](results.txt)); no experiment on hardware. Revised after an independent review (grantor boot key, sessions, Raft wording, model variants). The [proposal](#proposal) is adopted in the design ([Lease time](../../docs/design.md#epoch-changes-and-failure-detection), [Sessions and fencing](../../docs/design.md#sessions-and-fencing), [leader leases](../../docs/design.md#metadata-layer-metastore)), with the rate-rise residual as an open question; the alternative of a grantor recounting its grants after a VMClock marker change is left in that question, not adopted.
 
 **Question:** A lease holder ends its lease `lease_drift` (1%) early on the faster of its two clocks, the grantor keeps it on the slower of its two, and a holder widens its margin for a grantor whose clock it has measured to run fast ([Lease time](../../docs/design.md#epoch-changes-and-failure-detection)). Two things are unsettled:
 

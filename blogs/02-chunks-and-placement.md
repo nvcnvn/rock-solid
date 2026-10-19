@@ -371,21 +371,23 @@ sans-IO core (code with no network, disk or clock access, so tests can drive it 
 starts from the previous table, never from scratch:
 
 1. **Refill** every missing member onto the eligible disk furthest below its target.
-2. **Rebalance:** while a disk is outside a fill margin of its target, move one member from the
-   disk furthest above its target to the eligible disk furthest below, and stop when no move
-   brings that disk nearer.
+2. **Rebalance:** while any disk is outside its fill margin, move one member from the disk
+   furthest above its target, even one already inside its margin, to the eligible disk furthest
+   below, and stop when no move brings that disk nearer.
 
-A disk's target is its share of the pool's members, in proportion to its *room*: what the pool's
-[`write_limit`](../docs/design.md#volume-size-and-capacity) leaves of it after the data every pool
-already keeps there. In a homelab with a 1, a 2 and a 4 TB disk, all empty, the 4 TB disk should
-hold four times what the 1 TB one holds. Rebalance stops once every disk is within a small margin
-of its target. That is what "exact balance" means here, as opposed to the average-case balance of
-a hash function. The design does not give the margin's value.
+A disk's target is its share of the pool's members, in proportion to its *capacity*: what the
+pool's [`write_limit`](../docs/design.md#volume-size-and-capacity) leaves of it after the data
+other pools keep there. The pool's own data counts as capacity, so a finished move does not shift
+the targets and set off moves back. In a homelab with a 1, a 2 and a 4 TB disk, the 4 TB disk
+should hold four times what the 1 TB one holds. Rebalance stops once every disk is within its
+margin: 5% of its target, but at least one member, because on a small disk a single member is
+already more than 5%. That is what "exact balance" means here, as opposed to the average-case
+balance of a hash function.
 
 Proportional to room is not always possible. Under `rep2` on two nodes of 0.7 and 2 GB, every PG
 needs one member on each node, whatever their sizes, so the big node can never hold 74% of the
 members. Targets are therefore *capped*: no failure domain is asked for more than `max_per_domain`
-members of each PG, and what the cap cuts off is spread over the other domains by room, like
+members of each PG, and what the cap cuts off is spread over the other domains by capacity, like
 water filling the lower vessels. In the
 [capacity model spike](../docs/design.md#appendix-capacity-model-spike), a loop aiming at
 size-proportional shares never converged on such layouts, while capped targets converged within
@@ -485,14 +487,18 @@ every node can take a share proportional to its size:
 ```
 
 The pool also computes a *balanced* figure, the most any placement could make available under the
-failure-domain rule, from a closed formula over the nodes' room. The difference between room ÷
-overhead and balanced is *stranded* space, which no rebalancing reaches: in the `rep2` example, 0.58 GB of data, or 1.17 GB of
-the large disk's 1.8 GB of room. The pool raises a `Stranded` warning when that exceeds a tenth of its room, and the CLI
-asks for confirmation when a layout would strand more than half of a node's room. It never refuses:
-another pool on the same disks, such as a one-copy pool, can use the space. Other warnings say
-when a disk is within 10 points of `write_limit` (`NearFull`), past it (`Full`), when available
-lags balanced because members are still moving (`Unbalanced`), and when losing the largest node
-would leave recovery no room to restore every copy (`CannotReprotect`).
+failure-domain rule, from a closed formula over the nodes' capacity. What the rule leaves unusable
+is *stranded* space, which no rebalancing reaches: in the `rep2` example, 1.17 GB of the large
+disk's 1.8 GB, or 48% of the pool's capacity. Stranding like that lasts until new hardware arrives,
+so `rock-solid pool create` and disk changes show it and ask for confirmation when a node would
+strand more than half its capacity, and the pool raises a `Stranded` warning only for stranding
+nobody confirmed: over 10% of its capacity and 5 points above the confirmed figure, as when a
+failed disk is marked out. It never refuses a layout: another pool on the same disks, such as a
+one-copy pool, can use the space. Other warnings say when a disk is within 10 points of
+`write_limit` (`NearFull`), at it (`Full`), when placement has finished moving members but left
+available well short of balanced (`Unbalanced`), when losing the largest node, or a disk where no
+node is spare, would leave recovery no room to restore every copy (`CannotReprotect`), and when a
+placement group's copying has stalled for a minute (`Stuck`).
 
 Available also subtracts the *space grants* outstanding on the pool: bytes the control plane lets
 each node's daemon buffer and acknowledge before any disk holds them, so that a buffered write
@@ -830,9 +836,9 @@ What backs these choices, with numbers exactly as the design and spikes give the
   Vitastor, Longhorn, CockroachDB and MinIO report capacity.
 - **Placement in code: not built.** Its review is planned as property tests: after any random
   add, remove and failure sequence, every PG keeps its pool's width with no more than
-  `max_per_domain` members per failure domain, the balance loop terminates, no disk exceeds the
-  fill margin of its capped target, available stays within 1% of balanced and never above it, and
-  chunks moved stay near the minimum
+  `max_per_domain` members per failure domain, the balance loop converges with every disk within
+  its fill margin, available plus what the pool holds then stays within that margin of balanced
+  and never above it, and chunks moved stay near the minimum
   ([Testing strategy](../docs/design.md#testing-strategy),
   [build checklist](../docs/build-checklist.md), phase 3).
 

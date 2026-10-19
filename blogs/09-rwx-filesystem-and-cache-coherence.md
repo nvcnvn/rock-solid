@@ -341,14 +341,21 @@ after discarding what it had buffered, JuiceFS at the next `write()` or flush
 
 rock-solid's daemon buffers only against a **space grant**: bytes of a pool its node may hold
 unflushed. The heartbeat every node already sends the control-plane leader each second, the one
-that renews its session, reports what the node has buffered and flushed, and the reply sets the
-grant, at most the 256 MiB buffer. The daemon reuses its grant as flushes complete. The leader
-keeps a pool's grants at most half of what the pool can still take, so they shrink as it fills.
-It also keeps them within the smallest gap any of the pool's disks has between `write_limit` and
-its log's reserve, less a heartbeat's worth of that disk's writes, because a granted flush is
-admitted past the limit, one node's buffer can land on a single disk, and the leader hears of
-flushes up to a heartbeat late. A new leader counts every live session as holding a full buffer
-until it renews:
+that renews its session, reports what the node has buffered and a running total of what it has
+flushed, and asks for what it would buffer in the next second; the reply sets the grant, at most
+the 256 MiB buffer. The leader keeps a pool's grants at most half of what the pool can still take,
+so they shrink as it fills, and when nodes ask for more than that it shares it out evenly, up to
+a common level, so one heavy writer cannot crowd out the small ones.
+
+The daemon reuses its grant as flushes complete, but only for two grants' worth of flushes since
+its last answered heartbeat; once it has used half of that, it sends its heartbeat early, so a
+busy node rarely runs out. Whatever happens to heartbeats or to the control plane, a node can then
+write at most three grants unseen, and the leader keeps three times the grants within the
+smallest gap any of the pool's disks has between `write_limit` and its log's reserve, because a
+granted flush is admitted past the limit and one node's buffer can land on a single disk. Without
+that budget, a node cut off from the leader but not from storage could keep flushing for a whole
+10-second session lease, 11 GB onto each disk of a three-node pool. A new leader counts every live
+session as holding three full buffers until it renews:
 
 ```mermaid
 flowchart TD
@@ -365,8 +372,9 @@ flowchart TD
 
 *Near full, buffering turns into writing through, and the error arrives where programs look for it.*
 
-At 10 nodes this costs no extra message, about 16 bytes per pool on each heartbeat, and at most
-2.5 GiB of promised space. The price is speed near full: a write that goes through costs a round
+A quiet node sends no extra message, only a few bytes per pool on each heartbeat; a node
+streaming at 10 GbE sends about four more heartbeats a second, and at 100 GbE about 41, each a
+memory update at the leader. At 10 nodes at most 2.5 GiB of space is promised. The price is speed near full: a write that goes through costs a round
 trip and a flush, about 1 ms on NVMe, against 5 µs buffered. CephFS pays the same once its pool is
 nearly full, when its client makes every write synchronous. Writes through `mmap` cannot be
 granted, since the kernel sends them at writeback; a refusal reaches `msync` or `fsync`.
@@ -769,7 +777,9 @@ can serve it, and only when the *last* holder exits does the kernel abort it. So
 - **Replayed requests are idempotent.** In the spike, a resent `mkdir` that the dead process had
   already applied returned `EEXIST` to the application. So every mutating MetaStore request
   carries the session, mount and FUSE request ID, and the shard stores its result in a replay
-  record in the same transaction and returns it if the request comes again. The successor
+  record in the same transaction and returns it if the request comes again. Only a final result
+  is stored, a success or an error the application will see such as `EEXIST`; a lost race the
+  daemon retries itself stores nothing. The successor
   resumes the dead process's session, which the memfd names.
 - **A dead daemon's stray writes are fenced.** Bytes the dead process left queued on a socket can
   still reach a chunk primary after it dies. Each connection names the session and an
@@ -876,7 +886,7 @@ like cache modes, and a lease break is a recall.
 - **An owner crash pauses new opens** for one session lease while clients re-register.
 - **A daemon crash loses unflushed buffered writes**, reported as `EIO` but still lost.
 - **Near a full pool, writes slow down to a round trip each**, because space grants shrink and
-  writes go through, and pools on small, fast disks leave almost no room for grants at all.
+  writes go through; a 32 GB NVMe disk at 90% leaves room for about 1 GB of grants.
 - **The daemon container is privileged**, and the descriptor holder is sensitive: a descriptor is
   the whole filesystem.
 - **FUSE parameters are frozen per mount**; changing them needs a remount.
@@ -905,13 +915,15 @@ From the [roadmap and open questions](../docs/design.md#roadmap-and-open-questio
   files pay off, from traces of real pods, and what the primary's base read costs on NVMe and
   SATA. And the `fsx -e` case above: an extending write after a mapped page was dirtied past the
   old end of file.
-- **Space grants on small, fast disks:** the room above `write_limit` must hold every grant plus a
-  second of a disk's writes, which on a 32 GB NVMe disk leaves almost nothing. Would a shorter
-  heartbeat for grants, or measured write rates, let such pools buffer?
+- **The grant reuse budget:** two grants between answered heartbeats is reasoned, not measured.
+  Does it hold through a simulated control-plane failover with streaming writers, and do 41 early
+  heartbeats a second per node at 100 GbE fit the leader's loop?
 - **`recall_timeout`:** 30 s is a default to tune from recall acknowledgment times measured
   under load, not a measurement.
-- **Incarnation fencing:** does a primary's table of newest incarnations need to survive a primary
-  change, or does the per-PG interval rule already reject a dead daemon's late write?
+- **Incarnation fencing:** the design expects that a primary's table of newest incarnations need
+  not survive a primary change, since every chunk write carries its incarnation, checked when the
+  write is ordered, and a held write is reordered only if no other primary led the PG meanwhile.
+  The phase 2 model is to confirm it.
 - **SMB later.** One Samba gateway per volume, plus a Samba VFS module that registers the
   gateway's opens with the inode owner and turns a recall into a lease break. Until it exists,
   shares that pods also write need `oplocks = no`.

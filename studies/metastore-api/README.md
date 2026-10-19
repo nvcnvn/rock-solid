@@ -1,6 +1,6 @@
 # MetaStore API: transaction ops, key encoding, routing and space grants
 
-**Status:** read from source, with an arithmetic model ([`model.py`](model.py), output in [`results.txt`](results.txt)). Reviewed independently and revised; nothing here is adopted yet; [Where it would apply](#where-it-would-apply) lists the sections each proposal touches.
+**Status:** read from source, with an arithmetic model ([`model.py`](model.py), output in [`results.txt`](results.txt)). Reviewed independently and revised. Adopted in the design: the six-op `Txn`, `Scan`, limits and guards, replay records and redirects in [Metadata layer](../../docs/design.md#metadata-layer-metastore) and [Daemon restart and upgrade](../../docs/design.md#daemon-restart-and-upgrade), the key layout and transaction table, the merged purge entries and checked purger in [Freeing space](../../docs/design.md#freeing-space), the reuse budget and water-filling in [Client design](../../docs/design.md#client-design), and the key and value limits in [On-disk format](../../docs/design.md#on-disk-format). The `internal/lsm` change (`MaxKey` 1,032, tests of both pair bounds) is not made yet; the Range removals item of the build checklist carries it. [Where it would apply](#where-it-would-apply) lists the sections each proposal touched.
 
 **Question:** four parts, all about phase 4 (the embedded MetaStore).
 

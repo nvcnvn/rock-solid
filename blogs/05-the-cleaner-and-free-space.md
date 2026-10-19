@@ -445,8 +445,10 @@ How big is a full table? Disks under 256 GiB have between 4,096 and 8,191 segmen
 bytes a row the table stays under 136 KiB; above that it grows by 272 KiB per TiB. Either way,
 the table is small.
 
-A segment is free because the table says so, never because its header is unreadable. That is how
-an index rebuild can tell a segment the cleaner freed from a damaged one, as F2FS and LFS do. A
+A segment is free because the table says so, never because its header is unreadable, as in F2FS
+and LFS. *(Planned:)* a segment the cleaner frees keeps its old header until it is reused, so
+every manifest also records the sequence number the next segment will open with, and recovery
+trusts a header below it only if the table lists the segment. A
 segment whose header is damaged but which holds records of this log is *quarantined*: never
 reused, reported for repair from a replica, and kept quarantined by every later table.
 
@@ -614,6 +616,9 @@ flowchart LR
   entry starts at the new size's byte offset, so its first punch zeroes the rest of the last
   block, with a whole-block merge at the chunk's primary, and frees only the whole blocks after it.
   A punch that covers part of a block frees nothing; it writes a new block of zeros there.
+  An inode has one purge entry: a second truncate, or an unlink before the purger has run, widens
+  the pending entry instead of overwriting it, which would leak the chunks the first one covered.
+  The purger removes entries only with a check that nobody added or widened them meanwhile.
 - **Block discard** from the pod's filesystem reaches the daemon through ublk and becomes a punch
   (phase 8). The CSI driver mounts the filesystems it creates with `discard`, because without it
   deleting files frees nothing in the pool: in the block ENOSPC spike, a write after `rm` still

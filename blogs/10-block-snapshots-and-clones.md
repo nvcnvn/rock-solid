@@ -420,8 +420,8 @@ The edge cases:
 - **A node that never answers.** The coordinator waits until its session expires and is fenced,
   as a recall does; every primary then rejects its writes.
 - **The coordinator crashes** between pause and resume, or a MetaStore shard changes leader at the
-  cut. Both are named simulation faults, and snapshot cuts are among the protocols the design
-  will check with TLA+ models.
+  cut. Both are named simulation faults, and a paused node resumes only once it knows whether the
+  snapshot committed. Snapshot cuts get a TLA+ model in phase 11, before the cut's code.
 - **Cost.** A block RWO volume has one node to pause; a volume nobody uses needs no pause.
 
 **Data still in the daemon's buffer.** By default the cut does not flush the filesystem daemon's
@@ -709,8 +709,9 @@ From the [roadmap and open questions](../docs/design.md#roadmap-and-open-questio
 - **The primary's base read for a 512-byte write:** its latency at queue depth 1 on NVMe and SATA
   drives, and how large a per-loop cache of recently merged blocks lets most merges skip it.
 - **Incarnation fencing in the epoch-change model.** A dead daemon's write delivered late to an old
-  primary, or to a new primary that has not yet seen the successor's incarnation: does the
-  per-primary table of newest incarnations need to survive a primary change?
+  primary, or held by one: the design expects the per-primary table of newest incarnations need
+  not survive a primary change, since every chunk write carries its incarnation, checked when it
+  is ordered. The phase 2 model is to confirm it.
 
 One gap is not an open question in the design but is worth naming: NVMe-oF/TCP is the design's
 remote block protocol and the frontend slot's opt-in driver, but no roadmap phase schedules it.

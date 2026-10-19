@@ -262,8 +262,9 @@ of every chunk on each node, a third of the chunk, whatever the nodes hold. With
 1 TB the small node fills first: room ÷ overhead says 5.4 TB, the pool holds 1.8 TB, and 3.6 TB of
 the large nodes is *stranded*. So a pool reports as *available* what its placement table lets
 through before its first disk fills, next to the *balanced* figure the best placement could reach,
-raises a `Stranded` warning once more than 10% of its room is stranded, and `rock-solid pool create`
-and disk changes ask for confirmation when a failure domain would strand more than half its room
+and `rock-solid pool create` and disk changes show what each failure domain strands and ask for
+confirmation when one would strand more than half of what the pool could use there. The `Stranded`
+warning is kept for stranding nobody confirmed, such as after a failed disk is marked out
 ([post 02](02-chunks-and-placement.md#volume-size-and-capacity) has the formulas and the
 [capacity model spike](../docs/design.md#appendix-capacity-model-spike) the measurements). Placement
 never refuses such a layout, because a one-copy pool on the same disks can still use stranded space.
@@ -345,7 +346,7 @@ survives one node failure, as Ceph's `crush-osds-per-failure-domain` does; `ec16
 fits on 6 nodes and survives none, which is exactly why the CLI prints the number. The placement
 computation in [post 02](02-chunks-and-placement.md) keeps the failure-domain rule whenever it
 places or moves a member, and it aims each disk at a target built from the same rule: the disk's
-room for the pool, with no failure domain asked for more than `max_per_domain` members of a PG.
+capacity for the pool, with no failure domain asked for more than `max_per_domain` members of a PG.
 Under `rep2` on a 0.7 GB and a 2 GB node, each node holds one copy of every PG whatever its size,
 so a target proportional to size could never be met; the capped targets are what let placement
 settle on mismatched disks.
@@ -607,10 +608,13 @@ a daemon buffered under a *space grant*, which was promised when the daemon ackn
 ([post 09](09-rwx-filesystem-and-cache-coherence.md#a-full-pool-space-grants)). The headroom above
 the limit serves recovery, those granted flushes and the cleaner
 ([post 05](05-the-cleaner-and-free-space.md)). A pool raises `NearFull` once a member disk is within
-10 points of `write_limit` and `Full` once one passes it. Recovery also needs the surviving nodes to
-have room for every copy: a pool raises `CannotReprotect` when it holds more than its balanced
-capacity without its largest failure domain. `rep3` on nodes of 4, 4, 2 and 1 TB holds 2.7 TB, but
-after losing a 4 TB node the other three can re-protect only 0.9 TB.
+10 points of `write_limit` and `Full` once one reaches it, counting space grants. Recovery also
+needs the surviving nodes to have room for every copy: a pool raises `CannotReprotect` when it holds
+more than its balanced capacity without its largest failure domain. `rep3` on nodes of 4, 4, 2 and
+1 TB holds 2.7 TB, but after losing a 4 TB node the other three can re-protect only 0.9 TB. On
+exactly three nodes, where losing a node leaves too few for the copies whatever the data, the pool
+says so at creation and in its status instead, and `CannotReprotect` looks at losing one disk; a
+one-copy pool never raises it.
 
 The simulator checks, after every step, that every chunk reaches its pool's redundancy once
 recovery settles, that copies are dropped only after all shards are durable, and that a chunk with

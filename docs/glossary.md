@@ -56,9 +56,15 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Thin provisioning and overcommit.** A thin volume takes space only as it is written, so creating a 1 TiB volume allocates nothing. Overcommit lets the sizes of all volumes add up to more than the disks hold, betting they never all fill; with it off, the pool admits a volume only while every volume's size fits its balanced capacity. When a thin pool does fill, a block volume's writes that need new space wait until it has room: failing them would corrupt the filesystem inside. See [Volume size and capacity](design.md#volume-size-and-capacity) and [Block frontend](design.md#block-frontend).
 
-**Available, balanced and stranded capacity.** Available is what a pool can still take before its first disk reaches `write_limit`, given where its placement table sends new data; it is what `df` and Kubernetes see. Balanced is the most any placement could make available, given that copies of a chunk must sit in different failure domains; stranded is the room that rule leaves unusable, such as most of the larger disk when two nodes of different sizes each hold a copy of everything. See [Volume size and capacity](design.md#volume-size-and-capacity).
+**Capacity, held, available, balanced and stranded.** A disk's *capacity* for a pool is the space the pool's `write_limit` leaves on it after other pools' data, so it includes what this pool already stores there; *held* is how much data applications have stored in the pool. Available is what a pool can still take before its first disk reaches `write_limit`, given where its placement table sends new data; it is what `df` and Kubernetes see. Balanced is the most the pool could hold in all under any placement, given that copies of a chunk must sit in different failure domains; stranded space is the capacity that rule leaves unusable, such as most of the larger disk when two nodes of different sizes each hold a copy of everything. A failure domain's *stranded room* is the part of its capacity it would still have free with the pool perfectly balanced and full. These figures count capacity rather than free space so that they stay put as the pool fills. See [Volume size and capacity](design.md#volume-size-and-capacity).
 
-**Space grant.** Bytes of a pool a node may hold in its write-back buffer, granted by the control plane on the node's heartbeat. The daemon acknowledges a buffered write only against a grant, so a full pool is reported by `write()` itself, as a local filesystem reserves blocks before it buffers. See [Client design](design.md#client-design).
+**Pool conditions.** Statuses a pool raises on its `Pool` resource, also sent as Kubernetes events and metrics, to tell an operator about its space: `NearFull` and `Full` as its fullest disk nears or reaches `write_limit`; `Stranded` when more of its capacity is stranded than the operator accepted; `Unbalanced` when placement has stopped well short of balanced; `CannotReprotect` when losing a disk or node would leave too little room to restore every copy; and `Stuck` when a placement group's copying has stalled for a minute. See [Volume size and capacity](design.md#volume-size-and-capacity).
+
+**Fill margin.** How far from its target a disk may sit before placement moves members off or onto it: 5% of the target, but at least one member, since on a small disk one member is more than 5%. See [placement table](design.md#data-layer-chunkstore).
+
+**Space grant.** Bytes of a pool a node may hold in its write-back buffer, granted by the control plane on the node's heartbeat. The daemon acknowledges a buffered write only against a grant, so a full pool is reported by `write()` itself, as a local filesystem reserves blocks before it buffers. When nodes ask for more than the pool can give, the control plane shares it out by **water-filling**: every node gets what it asked for up to a common level, raised until the grants fill what is available, so a heavy writer cannot crowd out small ones. See [Client design](design.md#client-design).
+
+**Reuse budget.** How much a daemon may flush under its space grant before the control plane hears from it again: two grants' worth, counted from its last answered heartbeat. Past it the daemon writes straight to storage until the next reply, and it sends its heartbeat early once it has used half, so a busy node rarely reaches the limit. It bounds what a node can write unseen to three grants, whatever happens to heartbeats or the control plane, so the control plane can keep every disk's free room above the bytes it promised. See [Client design](design.md#client-design).
 
 **KubeVirt live migration.** KubeVirt runs virtual machines in pods. Moving a running VM to another node needs both nodes to open its disk at once for a moment, which is why RWX block volumes exist.
 
@@ -170,6 +176,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Monotonic clock, clock skew, clock drift, slewing.** A monotonic clock only moves forward, unlike wall-clock time, which can jump. Skew is the difference between two clocks' readings; drift is the difference in their rates. A time daemon such as chrony corrects a clock's reading by **slewing** it: running it faster or slower for a while instead of jumping it, by up to 22.6% on Linux. Linux's `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` follow slews; `CLOCK_MONOTONIC_RAW` does not, so it drifts only as far as the machine's oscillator and its calibration at boot do. rock-solid counts every lease on both, each side taking the one that is safe for it. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
+**Lease margin, rate bound, step check.** The **margin** is how much earlier than its grantor a lease holder stops counting: `lease_drift`, 1% of the lease, for clocks that agree. Both clocks of a machine can run fast or slow together, by an error in the kernel's boot calibration that no daemon fixes, so a holder measures each grantor: from the grantor's clock readings on two grants and its own send and receive times, it gets an upper limit, the **rate bound**, on how fast the grantor's clock runs against its own, and widens its margin to match. It needs two grants at least `rate_gap` (100 ms) apart, takes no lease from a grantor before then, and starts again when the grantor reboots, which it sees from the **boot ID**, a random number Linux picks at every boot. The **step check** compares the grantor's clock on every heartbeat with its own: a grantor's clock that moved further than the margin allows means the holder lost time, as in a VM pause, and it ends its leases. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
+
 **VM pause, VMClock.** A hypervisor can stop a virtual machine and later continue it, save it as a snapshot and restore it, or move it to another host while it runs (live migration). QEMU and Firecracker then give the guest its clocks back as they were, so to every clock inside the VM no time passed. **VMClock** is a page of memory the hypervisor shares with the guest; its **disruption marker** changes whenever the guest's clock was disrupted, which QEMU and Firecracker do on every restore and migration, but not on a stop and continue in place. rock-solid's lease holders end their leases when the marker changes, or when a peer's clock shows they lost time. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
 ## Consensus and metadata
@@ -178,7 +186,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Key-value store, ordered.** A database of keys mapped to values. Ordered means keys are kept sorted, so all keys sharing a prefix ("every entry of this directory") can be read with one **scan**. The MetaStore is one; every piece of metadata is a key. See [Key layout](design.md#metadata-layer-metastore).
 
-**Compare-and-set (CAS).** "Set this key to X only if it is still Y." Locks, `rename` and S3's create-if-absent are all CAS, since two racing clients must not both win.
+**Compare-and-set (CAS).** "Set this key to X only if it is still Y." Locks, `rename` and S3's create-if-absent are all CAS, since two racing clients must not both win. In a MetaStore transaction the compare is a `Check` op, and `CheckEmpty` asks that no key lies in a range, as `rmdir` needs.
+
+**Atomic update (Add, Bump).** A change to a number stored in a key that the store computes itself, from whatever the key holds when the change applies, instead of the client sending the new value: `Add` adds to it, `Bump` sets it to the larger of a given time and the stored time plus one, so it always moves forward. Many clients can update one key in the same round without any of them failing, which compare-and-set cannot do; a directory's modification time and a slot's counters change this way. FoundationDB calls these atomic operations. See [Metadata layer](design.md#metadata-layer-metastore).
 
 **Consensus.** Getting several machines, some of which may crash, to agree on one value or one order of operations. CAS across replicas needs it: they must agree on which of two racing requests won.
 
@@ -191,6 +201,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 **Log compaction, Raft snapshot.** A Raft log cannot grow forever. Once entries are applied and the result saved, they are dropped; a replica too far behind to catch up from the log is sent a Raft snapshot, a copy of the applied state, instead.
 
 **Shard, Raft group, multi-Raft.** The metadata key space is cut into ranges, and each range is its own Raft group, called a shard. Running many groups (multi-Raft) spreads leaders, and so load, over every node, instead of sending every metadata write through one leader. A shard that grows too large **splits** in two.
+
+**Redirect (not leader).** What a shard replica that is not the leader does with a request: it answers "not leader", naming the leader it knows, and the client resends there, rather than forwarding the request itself. The client then hears its result directly, and the request reaches the replica that keeps the shard's in-memory state. CockroachDB and TiKV redirect the same way. See [Metadata layer](design.md#metadata-layer-metastore).
 
 **Slot.** A range of inode numbers that always stays in one shard. A directory and its files share a slot, so creating a file touches one shard only. See [Inode IDs](design.md#metadata-layer-metastore).
 
@@ -218,11 +230,15 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Segment.** A fixed-size piece of the disk log, written front to back once and later cleaned and reused as a whole.
 
+**Open sequence number, `NextSeq`.** A counter the log raises every time it starts filling a segment, written into the segment's header and every record header in it, so a block left from an earlier use of the segment never reads as a current record. Every manifest records `NextSeq`, the number the next segment will take, so recovery can tell a segment opened after the manifest from one the cleaner freed before it, whose old header is still on disk. See [Recovery](design.md#on-disk-format).
+
 **Record.** One append to the log: header blocks describing what follows (which chunk, which version, checksums) and the data blocks themselves.
 
 **Log sequence number (LSN).** A record's position in the log's order. "Everything after LSN 5000" names exactly which records a recovery must replay.
 
 **Stream.** One of three sequences of segments the log appends to: hot (new writes), cold (cleaner copies and shards) and metadata (sorted runs, compactions, manifests). Each segment holds one kind of data, so it tends to empty all at once, which keeps cleaning cheap.
+
+**Lane.** A sequence of segments of one stream that fill one after another, at most one open at a time. Each stream has a shared lane, and each merge worker writes its output to a lane of its own in the metadata stream, so merge output does not mix with other data. Recovery reads each lane from just before the replay point and merges the lanes in LSN order. See [On-disk format](design.md#on-disk-format).
 
 **Chunk slot.** A chunk-sized place in a slot segment holding one whole chunk's data. It is freed when the chunk is rewritten or deleted, so whole chunks never need cleaning. See [On-disk format](design.md#on-disk-format).
 
@@ -244,7 +260,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Memtable flush.** Writing a memtable out as a sorted run. Unrelated to a drive flush, though both make data durable.
 
-**Removal marker.** What an LSM tree writes to delete a key: an entry saying "deleted", since the older runs holding the key are immutable. It hides the key in every older run until a compaction that includes the oldest run drops it with them. Other engines call it a tombstone, the word rock-solid keeps for a deleted chunk. A **range removal** hides every key from one key up to another, as RocksDB's and Pebble's `DeleteRange` do, kept as non-overlapping fragments per memtable and run that hide older layers' keys but not their own run's; the chunk index uses one when a write covers several old extents and to remove a punched chunk's live map, and the MetaStore to drop a volume or a list's consumed prefix. See [The LSM tree](design.md#on-disk-format).
+**Removal marker.** What an LSM tree writes to delete a key: an entry saying "deleted", since the older runs holding the key are immutable. It hides the key in every older run until a compaction that includes the oldest run drops it with them. Other engines call it a tombstone, the word rock-solid keeps for a deleted chunk. A **range removal** hides every key from one key up to another, as RocksDB's and Pebble's `DeleteRange` do, kept as non-overlapping fragments per memtable and run that hide older layers' keys but not their own run's; the chunk index uses one when a write covers several old extents and to remove a punched chunk's live map, and the MetaStore to drop a volume or a list's consumed entries. See [The LSM tree](design.md#on-disk-format).
 
 **Value separation.** Keeping large values out of an index, in a log of their own, so the index holds only their locations and merging it rewrites small entries instead of the data; WiscKey introduced it, and RocksDB's BlobDB, TiKV's Titan and Pebble ship it. The price is a cleaner that copies live values out of old log space and updates the index. rock-solid's chunk data and chunk index are laid out this way; see [On-disk format](design.md#on-disk-format).
 
@@ -328,7 +344,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **ublk, NVMe-oF, NBD, iSCSI.** Ways to present a block device. ublk lets a user-space process (the daemon) serve a local block device through io_uring. NVMe over Fabrics (NVMe-oF) and iSCSI expose a block device over the network; NBD is Linux's simple network block device. ublk's **user recovery** keeps the device and holds its I/O while the daemon restarts, and with **reissue** hands the requests the dead daemon held to its successor.
 
-**Incarnation.** One run of a daemon process, named by its start time. A primary that has seen a newer incarnation of a client's session rejects the older one's writes, so bytes a dead daemon left on the wire cannot land after its successor's. See [Daemon restart and upgrade](design.md#daemon-restart-and-upgrade).
+**Incarnation.** One run of a daemon process, named by its start time. Every connection's hello and every chunk write and punch carry it. A primary that has seen a newer incarnation of a client's session rejects the older one's writes, checking when it orders each write, so bytes a dead daemon left on the wire, or a write the primary already held, cannot land after its successor's. See [Daemon restart and upgrade](design.md#daemon-restart-and-upgrade).
 
 **S3, object, bucket.** S3 is Amazon's object-storage protocol, which many systems implement. An object is a whole blob written at once under a key; a bucket holds objects.
 
@@ -341,6 +357,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 **Event loop, epoll.** One thread of control that waits for any of many things to happen (a socket readable, a disk completion, a timer) and handles each in turn. epoll is the Linux system call that does the waiting. rock-solid runs one event loop per CPU core instead of one goroutine per connection.
 
 **io_uring.** The modern Linux interface for asynchronous I/O: the program puts requests on a ring shared with the kernel and picks up completions from another, with few system calls.
+
+**Kernel seam.** The one small interface through which an event loop does everything that involves time or waiting: it waits in `epoll_wait`, reads all its clocks together, and arms its timer. Production plugs in the real kernel; tests plug in a stepped kernel with scripted clocks. A pass waits first and reads the clocks only after the wait, so nothing that became ready while the loop slept is handled at an earlier time. See [Runtime in Go](design.md#runtime-in-go).
 
 **Garbage collector (GC), heap, off-heap.** Go frees unused memory automatically by scanning the heap for pointers. Memory mapped outside the Go heap is never scanned, so large pointer-free structures there cost the collector nothing; rock-solid keeps its bulk data there.
 
@@ -369,6 +387,10 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 **Golden file.** A checked-in file of expected bytes that the code must reproduce exactly, so an accidental format change fails a test.
 
 **Spike.** A throwaway experiment that answers one design question by measurement. Kept under `spikes/`, summarized in the appendices of design.md.
+
+**Stepped loop.** An event loop run in a test on a stepped kernel: its clocks are scripted, its waits never block, and the simulator's scheduler decides, from a seed, which loop or worker job runs next. Many loops then run in one goroutine over real sockets, a suspend can be scripted inside a chosen pass, and a seed replays the same event order. See [Testing strategy](design.md#testing-strategy).
+
+**synctest bubble.** Go's `testing/synctest` runs a test's goroutines in a bubble whose fake clock jumps ahead whenever every goroutine in it is blocked on something only another one can release, such as a channel or `time.Sleep`. It fakes only Go's `time` package, so it suits background goroutines that wait on channels and timers, but not an event loop, whose clock reads and `epoll_wait` go to the kernel. See [Testing strategy](design.md#testing-strategy).
 
 ## Words with more than one meaning
 

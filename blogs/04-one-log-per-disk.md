@@ -524,9 +524,10 @@ LSNs are global: hot 1, 2, 4 ... cold 3, 6 ... metadata 5 ... merge back into on
 - **Hot** takes new chunk writes and the Raft entries of the same round.
 - **Cold** takes blocks the cleaner moves and erasure-coded pieces of chunks.
 - **Metadata** *(planned)* takes sorted runs, compaction output and manifests, which are written
-  whole and die whole when a compaction or a newer manifest replaces them. Each running merge
-  fills a metadata segment of its own, so a merge's consumed inputs free whole segments
-  ([post 06](06-the-lsm-tree.md)). Until the stream lands, checkpoint pieces go to the cold stream.
+  whole and die whole when a compaction or a newer manifest replaces them. Each merge worker
+  fills a *lane* of its own, one segment at a time, so a merge's consumed inputs free whole
+  segments ([post 06](06-the-lsm-tree.md)); recovery reads each lane from just before the replay
+  point. Until the stream lands, checkpoint pieces go to the cold stream.
 
 Raft entries stay in the hot stream because a round writes one record to one stream: a Raft
 stream would split a commit's chunk write and its Raft entries into two rounds and two flushes. It
@@ -608,7 +609,7 @@ index's runs, the LSN each replays from, and the segment usage table (which segm
   last manifest, which bounds replay after a crash and the Raft entries a shard keeps in memory.
   *(Planned:)* if they reach twice that, rounds take items only from the checkpoint and the
   cleaner until a manifest is durable, as Pebble and RocksDB stop writes at two memtables, which
-  makes that bound hard. Replay can still run a little past it: up to a segment per stream, the
+  makes that bound hard. Replay can still run a little past it: up to a segment per lane, the
   records written while the checkpoint's runs streamed out, and, on a disk holding replicated
   primaries, everything logged while the oldest uncommitted write waited, since a replay point
   never passes a write that has not committed.

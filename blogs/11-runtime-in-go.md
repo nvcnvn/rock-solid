@@ -408,8 +408,9 @@ reads a real clock, so a simulator can play every driver at once: all nodes, dis
 the network in one goroutine, with one seeded generator deciding which message is delivered,
 dropped or delayed, which disk write survives a crash, and when each timer fires. A seed that
 finds a bug tonight replays as a regression test tomorrow
-([12-testing-for-trust.md](12-testing-for-trust.md)). Drivers, which cannot be sans-IO, are
-tested with `testing/synctest` for fake time.
+([12-testing-for-trust.md](12-testing-for-trust.md)). Drivers, which cannot be sans-IO, do
+everything that involves time or waiting through one small interface, so a test can give a loop
+scripted clocks and let the same simulator step many loops over real sockets.
 
 ```mermaid
 flowchart LR
@@ -548,9 +549,9 @@ everything that can wake it is in that set.*
   write against 29 µs unlocked. The exception is a C library that needs its own thread, as
   SPDK's does.
 - **The loop reads the clocks itself.** Go's own monotonic clock is `CLOCK_MONOTONIC`, neither
-  of the two that leases need, so each pass reads `CLOCK_BOOTTIME` and `CLOCK_MONOTONIC_RAW`
-  directly, about 140 ns each, and the VMClock marker from a mapped page, 3 ns. It delivers
-  `Resumed` when `CLOCK_BOOTTIME` gains on `CLOCK_MONOTONIC`, which happens only across a
+  of the two that leases need, so each pass, after its wait, reads `CLOCK_BOOTTIME` and
+  `CLOCK_MONOTONIC_RAW` directly, about 140 ns each, between two cheap `CLOCK_MONOTONIC` reads,
+  and the VMClock marker from a mapped page, 3 ns. It delivers `Resumed` when `CLOCK_BOOTTIME` gains on `CLOCK_MONOTONIC`, which happens only across a
   suspend, or when the marker changes. A pass handles peer messages before client reads, so a
   holder that missed time while its VM was stopped learns it from the heartbeats queued during the
   stop before it serves a read that waited behind them.

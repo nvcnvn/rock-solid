@@ -227,9 +227,11 @@ Three details make the page tree work as an LSM memtable:
   is open, a write copies any page that view can reach instead of changing it; the old page is
   freed when the last view that could reach it closes.
 
-A key is at most 1,024 bytes and a value at most 1,000, so two entries always fit a page. An entry
-too large to fit one run piece (next section) is refused with `ErrTooLarge` when it is written,
-not later when a flush meets it.
+A key is at most 1,032 bytes and a value at most 1,000, so two entries always fit a page: room for
+an S3 key of 1,024 bytes plus its prefix. A range removal stores both its ends, so each end is kept
+to 1,000 bytes, and the MetaStore splits a larger value, such as a 64 KiB extended attribute, over
+several keys. An entry too large to fit one run piece (next section) is refused with `ErrTooLarge`
+when it is written, not later when a flush meets it.
 
 ### Flushes: streaming a sorted run into the log, one piece at a time
 
@@ -508,8 +510,9 @@ and inputs never hold the same key, and still no sequence number is needed.
 Each key lives in exactly one of O or the inputs at any moment, and a restart resumes from the
 bound. An input piece wholly below the bound is dead once the manifest naming that bound is
 durable, and leaves memory too unless a view holds it, so a merge's memory peak is also one step;
-the piece the bound falls in stays whole. Each running merge writes its output into a metadata
-segment of its own, so a later merge's steps free whole segments: sharing the open segment with
+the piece the bound falls in stays whole. Each merge worker writes its output into a lane of its
+own in the metadata stream, one segment at a time that its next merge continues, so a later
+merge's steps free whole segments: sharing the open segment with
 flush pieces left 30 to 57 segments stranded instead of 8 to 10. The [LSM space
 spike](../docs/design.md#appendix-lsm-space-spike) measured space held beyond what the manifests
 name: installed whole, a merge of everything held up to the whole index, 258 segments of 64 MiB on
