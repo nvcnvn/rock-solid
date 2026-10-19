@@ -277,8 +277,8 @@ flowchart TB
 - **The MetaStore** is a transactional key-value store split into many small Raft groups. It needs
   consensus because locks and atomic `rename` are compare-and-set operations, which need one agreed
   winner. One more Raft group, the **control plane**, holds cluster-wide state: the pools, the
-  placement table that says which disks hold which PGs, and every client's session
-  ([post 08](08-the-metastore.md)).
+  placement table that says which disks hold which PGs, every client's session, and the space
+  grants that let a node buffer writes ([post 08](08-the-metastore.md)).
 - **Each disk** holds one append-only log for everything on it: chunk data, the Raft logs of the
   metadata shards placed there, and the indexes over both. The daemon embeds no database and a disk
   needs no filesystem ([posts 04](04-one-log-per-disk.md), [05](05-the-cleaner-and-free-space.md)
@@ -446,7 +446,7 @@ fits into.
       +-----------------------------------------------------------+
       |  state machine: OnEvent(ctx, event, out) -> out           |
       |  ChunkStore replica, MetaStore shard, inode owner, ...    |
-      |  no clock (time is ctx.Now), no goroutines, no sockets    |
+      |  time from ctx only; no clock reads, goroutines, sockets  |
       +-----------------------------------------------------------+
               ^                                          |
               |              either                      v
@@ -536,22 +536,28 @@ The name states the priority behind all of it: correctness before features.
 
 Each phase ends with something that runs and is tested. Follow the chain left to right; phase 6 is the
 first usable product. Phase 2 writes TLA+ models: precise descriptions of the protocols that a model
-checker explores state by state, catching design bugs before code exists.
+checker, TLC, explores state by state, catching design bugs before code exists. It models the
+protocols phases 3 to 7 build: changing a placement group's primary, together with the read
+leases and Raft leader leases that rest on the same leases between pairs of nodes, as one model;
+client sessions and fencing; cache-mode recalls; and purges. Each model has a configuration small enough to check exhaustively in
+CI in under 5 minutes, a deeper one run once per change, and a nightly random run. Later protocols
+get their models in the phase that builds them, before their code: the snapshot cut and the pool
+move in phase 11, cross-shard transactions in phase 13.
 
 ```mermaid
 flowchart LR
     P1["Phase 1<br/>core, disk log,<br/>simulator"] --> P2["Phase 2<br/>TLA+ protocol<br/>models"]
     P2 --> P3["Phase 3<br/>replication,<br/>placement"]
     P3 --> P4["Phase 4<br/>embedded<br/>MetaStore"]
-    P4 --> P5["Phase 5<br/>io_uring and<br/>TCP drivers"]
+    P4 --> P5["Phase 5<br/>event loops,<br/>io_uring and TCP"]
     P5 --> P6["<b>Phase 6</b><br/>FUSE + CSI, Tier 1<br/>first usable product"]
     P6 --> P7["Phase 7<br/>Tier 2<br/>cache modes"]
     P7 --> P8["Phase 8<br/>block volumes,<br/>RWX block"]
     P8 --> P9["Phase 9<br/>SPDK and RDMA"]
     P9 --> P10["Phase 10<br/>erasure-coded<br/>pools"]
-    P10 --> P11["Phase 11<br/>snapshots, clones,<br/>pool moves"]
+    P10 --> P11["Phase 11<br/>snapshots, clones,<br/>pool moves, modelled first"]
     P11 --> P12["Phase 12<br/>S3"]
-    P12 --> P13["Phase 13<br/>scale-out, Tier 3"]
+    P12 --> P13["Phase 13<br/>scale-out, cross-shard<br/>transactions, Tier 3"]
 ```
 
 *Simulator first, real drivers fifth, the first thing you can mount sixth.*

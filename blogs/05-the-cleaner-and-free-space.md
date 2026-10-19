@@ -25,9 +25,11 @@ The **How it works** part after it has the real names, numbers and edge cases.
   wrote. A WA of 7 means every 4 KiB you write costs 28 KiB of writes. The SSD's own internal
   garbage collection multiplies this again.
 - **Fill.** The share of the disk holding live data.
-- **Stream.** A sequence of segments the log appends to. The design has three, each with its own
-  open segment: *hot* (new writes), *cold* (the cleaner's copies) and *metadata* (sorted runs and
-  manifests). The code has the first two; the third is planned.
+- **Stream, lane.** A stream is a kind of data the log keeps in segments of its own. The design
+  has three: *hot* (new writes), *cold* (the cleaner's copies) and *metadata* (sorted runs and
+  manifests). A stream fills its segments in *lanes*, each a chain of segments with one open at a
+  time; most streams have one lane, the metadata stream one more per merge worker. The code has the
+  hot and cold streams with one lane each; the metadata stream and its lanes are planned.
 - **Segment usage table.** A small table, saved with every checkpoint, of which segments are in
   use and how many live blocks each holds.
 - **TRIM, discard.** Telling an SSD that blocks no longer hold data, so it can erase them ahead of
@@ -182,8 +184,9 @@ Going from 90% to 95% full more than doubles the cost. At 95%, 94% of everything
 would be cleaning, and the cleaner would spend about 20 µs of CPU per user 4K write (cleaner
 spike, C7, an order of magnitude on a shared machine). That is why a pool's
 [`write_limit`](../docs/design.md#volume-size-and-capacity) defaults to 90%: a write that adds data
-is refused once any disk holding one of its placement group's members is fuller than that, and the
-pool warns 10 points earlier. The limit is checked per disk, because one full disk stalls every
+is refused once any disk holding one of its placement group's members reaches that, counting its
+live blocks plus its share of the space grants outstanding on the pool (below), and the pool warns
+10 points earlier. The limit is checked per disk, because one full disk stalls every
 placement group on it. Three kinds of write still pass. A flush of buffered file data under a
 *space grant* passes, because the daemon promised it room when it acknowledged the write. An
 overwrite passes if it only replaces blocks the chunk already holds live, written since its last
@@ -313,7 +316,7 @@ hot stream       new chunk writes + the Raft entries of the same round
                  [seg 41: new data, dies at the next overwrite      ] ...
 cold stream      blocks the cleaner moves + erasure-coded shards
                  [seg 17: data that already survived one cleaning   ] ...
-metadata stream  sorted runs, compaction output, manifests; one open segment per running merge
+metadata stream  lane 0: flushed runs, manifests; lane w: merge worker w's output
                  [seg 63: runs, written whole, die whole            ] ...
 ```
 
@@ -325,6 +328,15 @@ to 50 at 95%; in a stream of their own, by 3 to 15% at 80 to 90% full
 header knows two stream tags today, `Hot` and `Cold`
 ([internal/disklog/segment.go](../internal/disklog/segment.go)); the metadata stream is a planned
 build item, and the tag is a whole byte, so it needs only a new format version.
+
+Within the metadata stream, each merge worker writes its output to a *lane* of its own, a chain of
+segments separate from the one flushed runs and manifests share. Merges install their output in
+steps (below and [post 06](06-the-lsm-tree.md)), so a merge's consumed input pieces die together and
+free whole segments: mixed into the shared segment, they left 30 to 57 segments stranded instead of
+8 to 10. When a merge ends, its worker's open segment stays open and the next merge continues it,
+so no unused tail is left behind pieces the cleaner cannot move; one segment per merge boundary then
+holds the end of one merge and the start of the next. Recovery reads the log lane by lane, because
+LSNs rise only along a lane, not along a stream ([post 04](04-one-log-per-disk.md)).
 
 Raft entries stay in the hot stream even though a stream of their own saved 6%: a round writes one
 record to one stream, so a Raft stream would split a commit's chunk write and its Raft entries into
@@ -446,11 +458,20 @@ bytes a row the table stays under 136 KiB; above that it grows by 272 KiB per Ti
 the table is small.
 
 A segment is free because the table says so, never because its header is unreadable, as in F2FS
-and LFS. *(Planned:)* a segment the cleaner frees keeps its old header until it is reused, so
-every manifest also records the sequence number the next segment will open with, and recovery
-trusts a header below it only if the table lists the segment. A
-segment whose header is damaged but which holds records of this log is *quarantined*: never
-reused, reported for repair from a replica, and kept quarantined by every later table.
+and LFS. A segment whose header is damaged but which holds records of this log is *quarantined*:
+never reused, reported for repair from a replica, and kept quarantined by every later table.
+
+*(Planned, with manifest edits.)* A segment the cleaner frees keeps its old header until it is
+reused, so a header alone cannot say whether a segment was opened after the manifest or freed
+before it. Every manifest therefore records `NextSeq`, the sequence number the next segment opened
+after its base LSN will take. At recovery, a header at `NextSeq` or above is a segment opened since
+the manifest, so it is used whatever the table says; below it, the table decides, and a segment the
+table leaves out is free with a stale header. That makes a freed segment reusable at once, with no
+waiting state like F2FS's *prefree*, under two conditions: the cleaner never frees a segment holding
+what the newest manifest named by a durable segment header still needs (its pieces, its runs, the
+records after its replay points), and no index's replay point passes a copy record whose moves its
+runs do not yet hold. The [log segments study](../studies/log-segments/) walks every crash order of
+freeing, reusing and TRIM.
 
 The life of a segment. The table records Used and Quarantined, and Free by a row's absence; Open
 and Victim are states of the running log and cleaner:
@@ -491,8 +512,8 @@ our arithmetic, with max_replay_bytes = compaction_step_bytes = 64 MiB (both def
                                                      which is what the spikes' cleaner took
 ```
 
-The design does not state a victims-per-pass default; the spikes all ran with 4 victims per pass
-and 8 segments kept free. A checkpoint is at most twice `max_replay_bytes`, because producers wait
+The design sums it with 4 victims per pass, as every cleaner spike ran, and keeps the spikes' 8
+segments as the default. A checkpoint is at most twice `max_replay_bytes`, because producers wait
 beyond that (below). A merge holds at most one step beyond what the manifests name: installed
 whole, a merge held 65 to 258 segments of 64 MiB on a 256 GiB disk; in steps, 2
 ([LSM space spike](../spikes/lsm-study-space/)). RocksDB's `SstFileManager` reserves the same
@@ -572,13 +593,21 @@ build items turn "full disk fails" into "full disk waits".
 > **In plain words.** When a segment is freed, rock-solid tells the SSD that the space is empty so
 > the drive can erase it in the background. But some SSDs stall when told about lots of freed
 > space at once. Since the segment is already usable by the log the moment the table says it is
-> free, there is no hurry: TRIMs trickle out at a steady rate.
+> free, there is no hurry: TRIMs trickle out at a steady rate, and only once the disk's own
+> records can no longer mistake the trimmed segment for damage.
 
 **How it works.** TRIMs are paced: one per segment, at `trim_rate` (default 128 MiB/s,
 CockroachDB's file deletion rate, so two 64 MiB segments a second). They run faster only to clear
 a backlog older than 5 minutes within 5 minutes, as Pebble's delete pacer does. Unlike deleting a
-file in Pebble, a TRIM frees no space in the log, so low space never speeds it up, and a segment
-allocated again before its TRIM ran drops it. The `io_uring` driver discards with
+file in Pebble, a TRIM frees no space in the log, so low space never speeds it up.
+
+A freed segment's TRIM is queued only once a segment header naming the manifest that freed it is
+durable. Before that, a crash would load the older manifest, which still lists the segment, and a
+listed segment whose header reads as zeros is damage. A segment allocated again drops its TRIM if
+it is still queued and waits for one already issued, as F2FS does, so a late discard cannot erase
+new records. A drive whose discarded blocks do not read back as zeros would leave an undecodable
+header that recovery reads in full at every start, so on such a drive the freed segment's header is
+zeroed instead. The `io_uring` driver discards with
 `BLOCK_URING_CMD_DISCARD` on Linux 6.12 and later, or `BLKDISCARD` on a worker goroutine on older
 kernels, and SPDK with an NVMe Dataset Management deallocate. A disk that is a file instead of a
 raw device ignores TRIM, since punching holes in the file would undo writing it in full when it
@@ -689,12 +718,14 @@ From the design's [Roadmap and open questions](../docs/design.md#roadmap-and-ope
   outside the reserve they, and the MetaStore's unlinks, wait like any write. Should they draw on a
   slice of the reserve? Every system studied keeps one: ext4 for punches, XFS a reserve pool, Btrfs
   for `unlink`, ZFS its slop space, CockroachDB a ballast file an operator deletes.
+- **Merge lanes shared between merges.** A worker's next merge continues its last one's segment;
+  how much that mixing strands has not been measured.
 - **The drive's own WA under this log** with 16, 64 or 256 MiB segments, measured with SMART
   host-writes and NAND-writes counters.
 
 From the [build checklist](../docs/build-checklist.md), still to build: the cleaner, the segment
-reserve, write admission, merge steps, the metadata stream, manifest edits and checkpoint
-backpressure. The segment usage table with full tables, quarantine, and the chunk index's
+reserve, write admission, merge steps, the metadata stream and its lanes, manifest edits with
+`NextSeq`, and checkpoint backpressure. The segment usage table with full tables, quarantine, and the chunk index's
 per-record counts and conditional `Move` are built. [docs/tech-debts.md](../docs/tech-debts.md)
 has no entry for the cleaner or free space today.
 
@@ -720,7 +751,8 @@ has no entry for the cleaner or free space today.
   [`spikes/stream-overlap/`](../spikes/stream-overlap/),
   [`spikes/lsm-study-space/`](../spikes/lsm-study-space/),
   [`spikes/block-enospc/`](../spikes/block-enospc/).
-- Study: [pool capacity and ENOSPC](../studies/capacity-and-enospc/README.md).
+- Studies: [pool capacity and ENOSPC](../studies/capacity-and-enospc/README.md),
+  [log segments](../studies/log-segments/README.md).
 - Code: [`internal/disklog/geometry.go`](../internal/disklog/geometry.go) (segment size),
   [`internal/disklog/segment.go`](../internal/disklog/segment.go) (segment header and stream tag),
   [`internal/disklog/manifest.go`](../internal/disklog/manifest.go) (segment usage table),

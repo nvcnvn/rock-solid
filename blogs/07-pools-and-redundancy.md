@@ -263,10 +263,11 @@ of every chunk on each node, a third of the chunk, whatever the nodes hold. With
 the large nodes is *stranded*. So a pool reports as *available* what its placement table lets
 through before its first disk fills, next to the *balanced* figure the best placement could reach,
 and `rock-solid pool create` and disk changes show what each failure domain strands and ask for
-confirmation when one would strand more than half of what the pool could use there. The `Stranded`
-warning is kept for stranding nobody confirmed, such as after a failed disk is marked out
-([post 02](02-chunks-and-placement.md#volume-size-and-capacity) has the formulas and the
-[capacity model spike](../docs/design.md#appendix-capacity-model-spike) the measurements). Placement
+confirmation when one would strand more than half its capacity. The `Stranded` warning is kept for
+stranding nobody confirmed, such as after a failed disk is marked out
+([post 02](02-chunks-and-placement.md#volume-size-and-capacity) has the formulas, the
+[capacity model spike](../docs/design.md#appendix-capacity-model-spike) the measurements and the
+[capacity conditions study](../studies/capacity-conditions/README.md) the thresholds). Placement
 never refuses such a layout, because a one-copy pool on the same disks can still use stranded space.
 
 Because shards are contiguous byte ranges, a 4 KiB read of an encoded chunk touches one disk, the
@@ -316,12 +317,17 @@ which is why it is listed for large clusters.
 
 `failure_domain` is `node` (the default) or `disk`. Two rules are checked when a pool is created:
 
-- **Width fits.** Copies always sit in distinct failure domains. Shards may share one, up to
-  `max_per_domain`, so `data + parity ≤ domains × max_per_domain`, counting only disks of the pool's
-  `disk_class`.
+- **Width fits.** Copies always sit in distinct failure domains. Shards may share a domain, up to
+  `max_per_domain`, but never a disk, so a domain takes at most min(`max_per_domain`, its disks)
+  shards of a PG, and that summed over the domains must reach `data + parity`, counting only disks
+  of the pool's `disk_class`.
 - **Node tolerance is printed.** With `max_per_domain` above 1, one node failure takes out several
   shards of a PG, and an encoded chunk survives `⌊parity ÷ max_per_domain⌋` node failures. The CLI
-  states, for every pool, how many node failures its copies and its shards survive.
+  states, for every pool, how many node failures its copies and its shards survive, and names each
+  single loss after which the survivors cannot hold a PG's width, such as any node of `rep3` on
+  three nodes: "losing node A leaves its PGs degraded until it returns". `rock-solid pool status`
+  repeats it.
+- **`write_limit` is above 10%,** so the `NearFull` warning, 10 points below it, has room.
 
 That second rule is what makes `ec4-2` usable on a three-node homelab. Six shards cannot go on six
 nodes you do not have, but at 2 per node they fit on 3. The diagram shows one PG of such a pool;
@@ -519,8 +525,10 @@ volume moves in place, keeping its `volume_id`, PVC and inode numbers, by reusin
 machinery ([post 10](10-block-snapshots-and-clones.md)): a cut at snapshot epoch E that pauses
 every node using the volume, a transaction that points the volume at the new pool with the old
 pool at E as its source, reads that fall through to the source, and a background copy like a clone's *flatten*.
-Chunk IDs are the same in both pools; only the PG changes, because the pool is part of the PG. The
-sequence below follows one move.
+Chunk IDs are the same in both pools; only the PG changes, because the pool is part of the PG. A
+chunk's versions in the new pool therefore follow its new PG's intervals and are never compared
+with the old pool's: reads fall through by snapshot epoch, and a compare-and-set on a version read
+before the move fails. The sequence below follows one move.
 
 ```mermaid
 sequenceDiagram
@@ -601,7 +609,8 @@ lists "shard recovery" without detailing the flow.
 once idle for `seal_after`.
 
 **Headroom.** Recovery needs free space on the disks it writes to. A pool's `write_limit` (default
-90%) refuses writes that add data once any disk holding one of the PG's members passes it. Three
+90%) refuses writes that add data once any disk holding one of the PG's members reaches it,
+counting the disk's share of the space grants outstanding on the pool. Three
 kinds of write still pass: an overwrite of blocks a chunk already holds live as copies that no
 snapshot shares, which frees as much as it writes; a punch, which frees space; and a flush of data
 a daemon buffered under a *space grant*, which was promised when the daemon acknowledged it
@@ -614,7 +623,9 @@ more than its balanced capacity without its largest failure domain. `rep3` on no
 1 TB holds 2.7 TB, but after losing a 4 TB node the other three can re-protect only 0.9 TB. On
 exactly three nodes, where losing a node leaves too few for the copies whatever the data, the pool
 says so at creation and in its status instead, and `CannotReprotect` looks at losing one disk; a
-one-copy pool never raises it.
+one-copy pool never raises it. And if recovery itself stops, for example because the disk it copies
+to is full, a PG with members still to fill that copies nothing for 60 s raises `Stuck`, naming the
+PG.
 
 The simulator checks, after every step, that every chunk reaches its pool's redundancy once
 recovery settles, that copies are dropped only after all shards are durable, and that a chunk with
@@ -644,9 +655,11 @@ when whole or idle" rests on arithmetic and on other systems' experience:
 What is built today is the groundwork: chunk IDs, the PG hash and the power-of-two PG count
 ([`internal/core/ids.go`](../internal/core/ids.go), with frozen golden vectors), and the chunk index
 keyed by pool and hash. The **Pools** and **Recovery per PG** items in the
-[build checklist](../docs/build-checklist.md#phase-3-replication-and-placement) are still open, and
-[test scenarios](../docs/test-scenarios.md) has no pools or PG-recovery section yet (its "Recovery"
-section is a disk's crash recovery); its PG scenarios are the hashing ones under "IDs and hashing".
+[build checklist](../docs/build-checklist.md#phase-3-replication-and-placement) are still open; the scenarios they must pass are in [test scenarios](../docs/test-scenarios.md)
+under [Pools](../docs/test-scenarios.md#pools),
+[Placement computation](../docs/test-scenarios.md#placement-computation) and
+[Recovery per PG](../docs/test-scenarios.md#recovery-per-pg) (its "Recovery" section is a disk's
+crash recovery).
 
 ## Trade-offs and what it costs us
 
@@ -703,7 +716,8 @@ No entry in [`docs/tech-debts.md`](../docs/tech-debts.md) covers pools today.
   ("shard", "recovery", "seal, freeze").
 - Spikes: [`spikes/cleaner-streams/`](../spikes/cleaner-streams/),
   [`spikes/capacity-model/`](../spikes/capacity-model/).
-- Study: [pool capacity and ENOSPC](../studies/capacity-and-enospc/README.md).
+- Studies: [pool capacity and ENOSPC](../studies/capacity-and-enospc/README.md),
+  [capacity conditions](../studies/capacity-conditions/README.md).
 - Code: [`internal/core/ids.go`](../internal/core/ids.go),
   [`internal/chunkstore/index.go`](../internal/chunkstore/index.go).
 - Other posts: [01 The big picture](01-the-big-picture.md),

@@ -401,7 +401,9 @@ illustrative.*
 `driver/…`, `frontend/…` and `csi`. It rejects `go` statements, channels, `range` over a map,
 `time.Now` and timers. It also rejects imports of `os`, `net`, `syscall`, `unsafe`, `sync`,
 `sync/atomic`, `context`, `runtime`, `math/rand`, `crypto/rand`, `log` and `log/slog`. Each
-rejection gives its reason, such as "use ctx.Now".
+rejection gives its reason, such as "use ctx.Now". The loop and driver packages, which must do
+I/O, are to get a narrower rule set of their own: no clock read, `time.Sleep`, timer, channel,
+`select` or `range` over a map anywhere outside the one interface described below.
 
 **Why this makes deterministic simulation possible.** Nothing inside a machine does real I/O or
 reads a real clock, so a simulator can play every driver at once: all nodes, disks, clients and
@@ -409,8 +411,9 @@ the network in one goroutine, with one seeded generator deciding which message i
 dropped or delayed, which disk write survives a crash, and when each timer fires. A seed that
 finds a bug tonight replays as a regression test tomorrow
 ([12-testing-for-trust.md](12-testing-for-trust.md)). Drivers, which cannot be sans-IO, do
-everything that involves time or waiting through one small interface, so a test can give a loop
-scripted clocks and let the same simulator step many loops over real sockets.
+everything that involves time or waiting through one small interface, the *kernel seam* below,
+so a test can give a loop scripted clocks and let the same simulator step many loops over real
+sockets, with the worker goroutines' jobs run inline as steps of its scheduler.
 
 ```mermaid
 flowchart LR
@@ -548,13 +551,37 @@ everything that can wake it is in that set.*
 - **Loops are not locked to OS threads.** In a smoke run, `runtime.LockOSThread` cost 35 µs per
   write against 29 µs unlocked. The exception is a C library that needs its own thread, as
   SPDK's does.
-- **The loop reads the clocks itself.** Go's own monotonic clock is `CLOCK_MONOTONIC`, neither
-  of the two that leases need, so each pass, after its wait, reads `CLOCK_BOOTTIME` and
+- **Time and waiting go through one seam.** Everything a loop asks of the kernel that involves
+  time or waiting is one small interface in `internal/loop`, so a test can put a stepped kernel
+  with scripted clocks behind it (`internal/loop/looptest`):
+
+  ```go
+  type Kernel interface {
+  	Wait(ready []Ready, block bool) []Ready // epoll_wait; block is the loop's own decision
+  	Clocks() core.Clocks                    // BOOTTIME, MONOTONIC_RAW, MONOTONIC, VMClock marker
+  	Arm(deadline core.Tick)                 // the loop's timerfd, an absolute deadline
+  }
+  ```
+
+  It costs three interface calls per pass, a few ns by estimate, and allocates nothing.
+- **A pass waits first, then reads the clocks.** Go's own monotonic clock is `CLOCK_MONOTONIC`,
+  neither of the two that leases need, so after its wait each pass reads `CLOCK_BOOTTIME` and
   `CLOCK_MONOTONIC_RAW` directly, about 140 ns each, between two cheap `CLOCK_MONOTONIC` reads,
-  and the VMClock marker from a mapped page, 3 ns. It delivers `Resumed` when `CLOCK_BOOTTIME` gains on `CLOCK_MONOTONIC`, which happens only across a
-  suspend, or when the marker changes. A pass handles peer messages before client reads, so a
-  holder that missed time while its VM was stopped learns it from the heartbeats queued during the
-  stop before it serves a read that waited behind them.
+  and the VMClock marker from a mapped page, 3 ns. Then it delivers `Resumed` if needed, fires
+  every timer due, handles peer messages before client reads, executes actions and arms the
+  timerfd, as FoundationDB's loop does. Reading the clocks *before* the wait would be unsafe for
+  leases: a suspend during the wait would surface a pass late, after it served the reads that woke
+  it on the old lease. The two `CLOCK_MONOTONIC` reads bracket the others, and the reads are taken
+  again if the bracket is too wide, so a stall between them, from descheduling or CFS throttling,
+  never looks like a suspend and ends every lease. `Resumed` comes when `CLOCK_BOOTTIME` gains on
+  `CLOCK_MONOTONIC`, which happens only across a suspend, or when the marker changes. Handling
+  peer messages first means a holder that missed time while its VM was stopped learns it from the
+  heartbeats queued during the stop before it serves a read that waited behind them.
+- **The loop decides when to block.** It blocks in `Wait` only when it has no queued inbox item,
+  deferred submission or unspent read budget. Timers don't wait for the timerfd to become ready:
+  every pass fires the ones its heap holds due, and re-arms the timerfd only when the earliest
+  deadline changed, so a pass makes at most one `timerfd_settime` and usually none. The timer heap
+  and the `Resumed` detector are pure code in `internal/core`, shared with the simulator.
 
 **Connections are per loop pair.** Each node publishes which loop owns each of its disks and
 shard replicas. A loop opens one connection to each peer loop it needs, on demand, as Seastar's
@@ -797,14 +824,23 @@ From the design's [open questions](../docs/design.md#roadmap-and-open-questions)
   network queue keep those heartbeats under load, and with one loop per core, how does a lost-time
   signal seen on one loop's connection reach the loops serving reads before they serve the next
   request?
+- **The clock bracket:** how wide may the two `CLOCK_MONOTONIC` reads lie apart and still count
+  as one reading, and how large a jump of `CLOCK_BOOTTIME` counts as a suspend (above that width,
+  at most 2 s)? And what should a loop do if the kernel ever returns a clock reading below the
+  last one: hold the last value, end its leases, or stop, as TigerBeetle panics?
+- **io_uring under Kubernetes' default seccomp profile** (the filter on which system calls a
+  container may make): Docker's refuses `io_uring_setup`;
+  whether containerd's and Kubernetes' defaults also refuse it, so that the chart must set a
+  profile, was not checked.
 - **SPDK interrupt mode on a real drive:** its latency at QD 1 and interrupts per I/O at QD 32
   and 128, needed before phase 9.
 - **One loop per disk on a fast drive:** with power-loss protection, does the disk's loop
   become CPU-bound? If so, the drive can be split into two partitions with a loop each.
 - **`/dev/fuse` across loops:** does every loop read its own clone of each mount, or one loop
   read for all?
-- **Roadmap.** Phase 5 builds the event-loop runtime, then io_uring and kernel TCP behind the
-  `Event`/`Action` contract. Phase 9 adds SPDK and RDMA. DPDK stays a side experiment, to be
+- **Roadmap.** Phase 5 builds the event-loop runtime (epoll loops behind the kernel seam,
+  stepped on scripted clocks in tests, inboxes, timer heaps, off-heap slabs), then io_uring and
+  kernel TCP behind the `Event`/`Action` contract. Phase 9 adds SPDK and RDMA. DPDK stays a side experiment, to be
   compared with AF_XDP, a Linux socket type that skips most of the kernel network stack.
 
 ## Further reading

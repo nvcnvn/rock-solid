@@ -47,8 +47,10 @@ small writes on the left go to the MetaStore; the one on the right goes to the C
 MetaStore (metadata, a few hundred bytes)        ChunkStore (data)
 -----------------------------------------        -----------------------------------
 create, one transaction:
+  check            /data has no "notes.txt" yet
   directory entry  /data -> "notes.txt"
   inode record     size 0, mode, uid, times
+  /data's times    mtime and ctime moved forward
 before the first chunk write, one transaction:
   inode record     raise alloc_end               write chunk (volume, inode, 0):
                                                    3 bytes "hi\n" at offset 0
@@ -86,16 +88,49 @@ type MetaStore interface {
 	Txn(t Txn) (Result, error) // checks, then writes in order, all-or-nothing
 	Scan(start, end []byte, limit int) (kvs []KV, more bool, err error)
 }
+
+type Txn struct {
+	Ops    []Op
+	Replay []byte // the client request's replay record key, nil for an internal transaction
+	Oldest uint64 // the mount's oldest outstanding request; its older replay records are dropped
+}
+
+type Result struct {
+	FailedCheck int      // index of the first failed check, or -1
+	Actual      []byte   // that check's key's current value, so a retry needs no extra read
+	Updated     []uint64 // each Update's new field value
+}
 ```
 
-A `Txn` is a list of six kinds of op: `Put`, `Delete`, `DeleteRange`, `Check` (this key holds this
-value, or is absent), `CheckEmpty` (no key in this range, which `rmdir` needs) and `Update`, which
-adds to or bumps a number inside a value. Every check is tested first, against the state before the
-transaction; if one fails, nothing changes, and otherwise the writes apply in list order. `Update`
-exists because many clients write some keys at once: every `create` in a directory moves the
-directory's modification time, and with compare-and-set alone only one of 64 parallel creators
-would win each round. `Scan` reads a range, stops at a key count or a byte budget, and says whether
-there is `more`.
+A `Txn` is a list of six kinds of op, and that is the whole set: `Put`, `Delete`, `DeleteRange`,
+`Check` (this key holds exactly this value, or is absent), `CheckEmpty` (no key in this range, which
+`rmdir` needs for `ENOTEMPTY`) and `Update`, which changes one 8-byte number inside a value: `Set`
+it, `Add` to it, or `Bump` it, which stores max(n, old + 1) so the number always moves forward.
+Every replica evaluates the `Txn` when it applies the log entry, in log order: every check first,
+against the state before the transaction; if one fails, nothing changes and the result names it,
+and otherwise the writes apply in list order, each seeing the ones before it, so none can fail.
+`Update` exists because many clients write some keys at once: every `create` in a directory moves
+the directory's modification time, and with compare-and-set alone only one of 64 parallel creators
+would win each round, 333 to 1,667 creates per second; with `Update` the bound is the shard's loop,
+about 60,000 proposals per second.
+
+Both calls are bounded before anything is proposed, and break a limit with an error, never a panic.
+A `Txn` encodes to at most 256 KiB (`max_txn_bytes`) and is never split, since splitting would break
+all-or-nothing; keys are at most 1,032 bytes, values at most 1,000, and a value over that, such as
+a 64 KiB extended attribute, is stored as numbered pieces in one `Txn`. `Scan` reads one
+point-in-time view, at most `limit` keys and 256 KiB, sets `more` when it stopped at either, and the
+caller resumes from the last key plus a zero byte, which is also a `readdir` cookie and S3's
+`start-after`. A point read such as `stat` is a `Scan` of one key.
+
+**Internal transactions are guarded.** A client's request is safe to resend because its replay
+record returns the first result ([post 09](09-rwx-filesystem-and-cache-coherence.md)). A `Txn` with
+no replay record, from the control-plane leader or the background purger, carries a `Check` or
+`CheckEmpty` on every key or range it read, so a repeat after an election, or a writer that got
+there first, fails instead of doing harm. Being idempotent is not enough: a blind delete retried
+after an election can remove an entry written after its first attempt applied. The purger, for
+example, removes a consumed run of purge entries with one `DeleteRange` that checks each entry it
+consumed and checks each gap between them is still empty, because new entries can be added in the
+middle of the list at any time ([MetaStore API study](../studies/metastore-api/README.md)).
 
 Inodes, directories, sessions, locks and purge lists are all keys and transactions on this one
 store. Shards and the control plane are always 3-voter Raft groups whatever pool their files use,
@@ -283,8 +318,17 @@ shard 3       [s3    follow]   [s3    follow]   [s3    leader]   the next key ra
 #### How it works: routing a transaction
 
 `Txn` routes its operations through the shard map. One shard is the fast path, one Raft round;
-several shards take the slow path, a cross-shard commit that is "rare by design". The work, in
-the next section, is making the one-shard branch the common one.
+several shards take the slow path, a cross-shard commit that is "rare by design" and refused with
+`ErrCrossShard` until phase 13. The work, in the next section, is making the one-shard branch the
+common one.
+
+A daemon sends each `Txn` to the shard's leader from its route cache. A follower never forwards
+it: it answers `NotLeader` with the leader's node and term, and the daemon updates its cache and
+resends, as CockroachDB and TiKV clients do. Forwarding would add a hop and bypass the open-file
+registry that lives at the leader (below). During an election a `Txn` fails and is retried; since
+a leader never re-proposes on its own, a resend is safe under the same replay key. The control
+plane's `ctl/` keys go through the same API: the shard map pins their range to the control-plane
+group, which never splits.
 
 ```mermaid
 flowchart LR
@@ -334,18 +378,25 @@ fs/5/3:0/n                    the next slot begins
 
 #### How it works: keys and inode IDs
 
-**Encoding.** Each `word/` is a one-byte tag on disk, and integers are fixed-width and big-endian,
-so numeric order is byte order. Only the last component (a file name, xattr name or S3 key) has
-variable length, so a prefix scan is a plain byte-prefix scan.
+**Encoding.** Each `word/` is a one-byte tag on disk, and integers are fixed-width and big-endian
+(volume IDs 32 bits, inode, session and request IDs 64, mount IDs 32), so numeric order is byte
+order: `fs/5/2:1/a` is the bytes `03 00000005 0000020000000001 01`. Only the last component (a file
+name, xattr name or S3 key) has variable length, so keys need no escaping and a prefix scan is a
+plain byte-prefix scan. Fixed widths cost about 8 bytes per key over variable-length integers,
+which the sorted runs' prefix compression mostly wins back.
 
 **Inode IDs.** Every key of an inode starts with `fs/{volume}/{inode}`, so a slot is one
 contiguous key range, and shards split only at slot boundaries.
 
-- A new file takes a sequence number in its parent's slot, from a batch of 64 its daemon reserved
-  ahead of time: entry and inode, one shard.
-- A new directory takes a free slot from the same shard's range, so `mkdir` is single-shard and a
-  later split can move whole subtrees. With no free slot left it shares its parent's slot; when a
-  slot's 2^40 IDs run out, new files go to a fresh slot.
+- A new file takes a sequence number in its parent's slot: entry and inode, one shard. Its daemon
+  reserves numbers 64 at a time with an `Update(n, Add, 64)` of their own, hands them out from
+  memory and reserves the next batch when 10% are left. The reservation cannot ride in the create,
+  whose keys already contain the new number.
+- A new directory takes a free slot from the same shard's range (daemons reserve slots 16 at a
+  time), so `mkdir` is single-shard and a later split can move whole subtrees. The directory is
+  sequence 1 of its fresh slot, and its `mkdir` hands the creating daemon sequences 2 to 65, so
+  creating files in a new directory needs no reservation round. With no free slot left it shares
+  its parent's slot; when a slot's 2^40 IDs run out, new files go to a fresh slot.
 - IDs are never reused. The root is inode 1; sequence 0 of each slot holds the slot's own keys.
 
 The main keys (the [design's table](../docs/design.md#metadata-layer-metastore) also lists replay
@@ -356,6 +407,7 @@ records, volume attachments, case-folded names for SMB and the later S3 index):
 | Pools, placement table, membership, sessions | `ctl/...` | The control-plane group, not sharded |
 | Inode attributes, including size and `alloc_end` | `fs/{volume}/{inode}/a` | The inode's slot |
 | Directory entries | `fs/{volume}/{dir}/d/{name}` → inode, type | The directory's slot, so `readdirplus` is one request to one shard |
+| A directory's parent | `fs/{volume}/{dir}/P` → parent | Its own key, so a cross-directory rename can check that a directory never moves under itself without creates in an ancestor failing that check |
 | Extended attributes | `fs/{volume}/{inode}/x/{name}` | Next to the attributes |
 | flock and whole-file locks | `fs/{volume}/{inode}/l/{mode}/{session}` | The inode's slot |
 | Slot counters, orphans, purge list | `fs/{volume}/{slot · 0}/n`, `…/u`, `…/o/{inode}`, `…/p/{inode}` | The slot itself |
@@ -412,10 +464,16 @@ Percolator with a central timestamp oracle (TiKV), and a central sequencer (Foun
 Cross-directory `rename` is the main file operation that takes this path, and it keeps the inode
 in its old slot, so locality decays slowly over time without affecting correctness.
 
-The design does not yet spell out what a reader does on a PENDING record, or when it may abort
-one. That is finished in phase 13, when range splitting first makes two data shards, with a TLA+
-model written before the code. Until then a `Txn` that spans two Raft groups is refused with an
-error naming them.
+The four steps leave out exactly where other systems' bugs came from: what a reader or writer that
+meets a PENDING intent does (wait, or abort T, and how the coordinator learns it lost), when a
+record may be removed, how a rename checks ancestors on other shards, and how a snapshot's markers
+commit with its record. CockroachDB's model of its parallel commits reproduced two assertion
+failures its TPC-C runs had hit, and MongoDB's two-shard transaction model found a 27-step
+isolation bug in minutes ([protocol models study](../studies/protocol-models/README.md)). So the
+protocol is finished in phase 13, when range splitting first makes two data shards, with a TLA+
+model as its first precise form, before its code. Until then no designed operation needs it, and a
+`Txn` or `Scan` whose keys span two Raft groups, the control-plane group included, is refused with
+`ErrCrossShard` naming them, so nothing comes to depend on an unmodelled path.
 
 ### Where the bytes go: shards share the disk log
 
@@ -533,9 +591,13 @@ sequenceDiagram
   lease is: on two clocks, `CLOCK_BOOTTIME` and `CLOCK_MONOTONIC_RAW`, ending at whichever
   runs faster, while the grantor waits for the slower. A time daemon's slew then cannot stretch
   a lease, and the clocks need not be synchronized. In case both of a node's clocks err the same
-  way, each grant also carries the grantor's raw clock reading, from which the holder bounds how
-  fast that grantor's clock can run, and it widens its margin if the bound is too fast
+  way, each grant also carries the grantor's raw clock reading and boot ID, from which the holder
+  bounds how fast that grantor's clock can run. It takes no lease from a grantor boot until it has
+  that bound, from two grants 100 ms apart, and widens its margin if the bound is too fast
   ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
+  A voter whose node has no bound yet gives no expiry, though it still refuses to vote for a
+  challenger, so groups led from a freshly started node read through ReadIndex for their first
+  100 ms or so.
 - Until a new leader is fortified and has committed an entry of its own term, it answers reads
   through etcd-raft's **ReadIndex** round (a majority round trip that confirms leadership). A
   planned transfer ends the old leader's lease the moment it sends `MsgTimeoutNow`.
@@ -594,7 +656,11 @@ heartbeat, once a second, renews the node's client session, reports its disks' f
 the node's *space grant*, the bytes of each pool its daemon may buffer before flushing
 ([09-rwx-filesystem-and-cache-coherence.md](09-rwx-filesystem-and-cache-coherence.md#a-full-pool-space-grants)).
 Renewals and grants live only in the leader's memory, and only a leader holding its leader lease
-answers them. The Raft log changes only when a session starts or is fenced: the leader commits
+answers them. The leader keeps a pool's grants within half its available space and a cap per disk,
+dividing them fairly when nodes ask for more; a daemon reuses its grant as its flushes complete,
+but for at most two grants' worth per heartbeat reply. Every reply also returns each pool's total
+of outstanding grants, which chunk primaries count against `write_limit`
+([07-pools-and-redundancy.md](07-pools-and-redundancy.md)). The Raft log changes only when a session starts or is fenced: the leader commits
 expired sessions as fenced in a new version of the *session table*, and commits that version as
 acknowledged once every storage node has applied it or been marked down. From the reported fills it computes each
 pool's capacity figures. Every node caches the placement and session tables.
@@ -726,7 +792,9 @@ spike recommended writing an own Raft shard, and the raft rounds spike took v3.7
   [`spikes/raft-rounds/`](../spikes/raft-rounds/),
   [`spikes/metastore-memory/`](../spikes/metastore-memory/),
   [`spikes/kv-engines/`](../spikes/kv-engines/),
-  [`studies/etcd-raft-async-snapshot-apply/`](../studies/etcd-raft-async-snapshot-apply/README.md)
+  [`studies/etcd-raft-async-snapshot-apply/`](../studies/etcd-raft-async-snapshot-apply/README.md),
+  [`studies/metastore-api/`](../studies/metastore-api/README.md),
+  [`studies/protocol-models/`](../studies/protocol-models/README.md)
 - Build plan: [Phase 4 in the build checklist](../docs/build-checklist.md#phase-4-embedded-metastore);
   glossary: [Consensus and metadata](../docs/glossary.md#consensus-and-metadata)
 - Code: the LSM tree each shard's state will use is in [`internal/lsm`](../internal/lsm/); the

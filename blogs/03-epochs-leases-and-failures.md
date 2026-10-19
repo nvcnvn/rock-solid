@@ -198,6 +198,14 @@ had to retry than if every older table epoch were refused. On a 3-node cluster e
 member on every node, so a node reboot still changes every PG. Table epochs and interval numbers
 never go backwards on any node, one of the invariants the simulator is to check after every step.
 
+A client's write is judged a little more loosely, because nothing in it depends on who the PG's
+replicas are. A primary takes it as long as its interval number is at least the one in which this
+primary's own term began. A write it was holding when an interval ended under it, say because a
+replica was replaced, it orders again once it has re-peered, but only if no interval since had
+another primary, which peering shows. Otherwise it refuses the write and the client retries with a
+newer table: a write held across another primary's term could land after writes that primary
+acknowledged meanwhile.
+
 The interval number also lives inside every version. A version is 64 bits:
 
 ```text
@@ -533,16 +541,26 @@ against the 5,000 ppm that half the margin allows. Comparing the two raw clocks 
 grantor counts on the slower of its clocks, so no faster than its raw one, and a holder on the
 faster, so no slower than its raw one. A grantor whose raw clock runs ρ times as fast as the
 holder's needs a margin of `1 − 1/ρ`, a little under `ρ − 1`. A holder whose bound for a grantor
-exceeds `1 + lease_drift / 2` widens its margin for that grantor by the excess and reports the
-pair, which always leaves at least half a percent, 20 ms of a 4 s lease, to spare: room for the
-grantor's rate to change after it was measured.
+exceeds `1 + lease_drift / 2` widens its margin for that grantor by the excess, to
+`lease_drift + (B − (1 + lease_drift / 2))`, and reports the pair. That always leaves at least half
+a percent, 20 ms of a 4 s lease, to spare: headroom for a grantor whose rate changes after it was
+measured, such as an oscillator warming up, the kernel switching the grantor to another
+hardware clock after its watchdog stops trusting the current one, or a VM migrated onto a host with another calibration. A grantor
+that would need a margin of `max_margin` (50%) or more, a bound of about 1.5, gets no lease at all,
+and the pair is reported.
 
 The bound does not need the whole window. Any two grants give one; grants close together only
 give a looser one. So after the first grant from a grantor, the holder asks again `rate_gap`
 (100 ms) later, and takes no lease from that grantor until it has those two. The first lease is a
-little shorter (3.90 s instead of 3.96 s at 1 ms round trips) and lengthens as the window fills.
-A holder keeps its window per grantor and per boot: every grant carries the grantor's boot ID,
-because its raw clock starts again from zero at every boot, and a reboot starts a new window.
+little shorter (3.90 s instead of 3.96 s at 1 ms round trips, 3.18 s at the 10 ms of an event loop
+at 90% load) and lengthens as the window fills. A holder keeps its window per grantor and per
+boot: every grant and heartbeat carries the grantor's boot ID, because its raw clock starts again
+near zero at every boot and a new boot may calibrate differently. A window starts again at a new
+boot ID, at a raw reading below the last one, after a detected pause (below), and when the last
+grant ages out of the window. So a holder goes about 100 ms without reads on a grantor's leases
+when it starts, when that grantor reboots and after every pause it detects; a grantor's daemon
+restarting within one boot costs nothing, since its raw clock and boot ID carry on
+([lease margins study](../studies/lease-margins/README.md)).
 
 #### A holder that slept gives up its leases
 
@@ -602,7 +620,9 @@ sends carries its `CLOCK_MONOTONIC_RAW`, not only its grants, and the holder che
 the grantor's clock moved further since the last grant than that lease's margin allows, more than
 `1/(1 − margin)` times the holder's own, the holder lost time and ends its leases as on `Resumed`.
 Tying the check to the margin matters: a fixed limit just above the 0.5% where widening starts would
-trip on every heartbeat from a grantor slightly fast, and its bound would never form. Messages sent to a stopped VM wait in the
+trip on every heartbeat from a grantor slightly fast, and its bound would never form. A pause the
+check misses fits inside the lease's headroom as long as the last grant is less than a lease old.
+Messages sent to a stopped VM wait in the
 hypervisor's network backend and arrive when it continues, ahead of any client request sent after
 them, and the holder handles a pass's peer messages before its reads, so it ends the old leases
 before it serves a request that waited behind them. After either, the holder asks every grantor
@@ -660,9 +680,9 @@ PG 17 with A, so A gets no lease for it and serves no stale read.
 
 A node that restarts has forgotten what it granted. It may have granted node A a lease a moment
 before it crashed; if it came straight back and joined peering for a new interval that moves A's PGs
-elsewhere, A could still be serving reads under that forgotten grant. So for one `primary_lease`
-(4 s) after it starts, a node grants no vote and joins no peering. Every grant it could have made
-before the crash has lapsed by then.
+elsewhere, A could still be serving reads under that forgotten grant. So until both its clocks
+show one `primary_lease` (4 s) since it started, a node grants no vote and joins no peering. Every
+grant it could have made before the crash has lapsed by then.
 
 #### One lease per pair of nodes, not per PG
 
@@ -820,8 +840,11 @@ owner that fails over leaves every session as it was.
 Both sides count the lease the way every lease in this post is counted
 ([Counting on clocks](#counting-on-clocks-that-never-agree)), on two clocks: the client from when
 it *sent* its last answered renewal, as a holder, the leader from when it *processed* that
-renewal, which is later, as a grantor. Two more rules keep the leader from expiring a session
-too early:
+renewal, which is later, as a grantor. The client keeps its rate bound per leader node and boot,
+so a leader failover starts a new window: the client keeps its old lease, counted from its last
+answered renewal, while it sends the new leader a second renewal `rate_gap` after the first, well
+inside `session_lease`. A client daemon that starts holds its writes about 100 ms longer for the
+same reason. Two more rules keep the leader from expiring a session too early:
 
 - **Only a leader holding its leader lease answers renewals**, and a new leader gives every live
   session a full `session_lease` from the start of its own lease before expiring any. A renewal
@@ -908,10 +931,22 @@ lock.
 #### Incarnations
 
 A restarted daemon resumes its session, so bytes the dead process left queued on a socket could
-still reach a primary after its successor's writes. Each connection therefore names an
-*incarnation*, the daemon's start time on `CLOCK_BOOTTIME`, and a primary that has seen a newer
-one rejects the older one's writes; see
-[10-block-snapshots-and-clones.md](10-block-snapshots-and-clones.md).
+still reach a primary after its successor's writes, and land after the successor's reissue of the
+same write and the application's next one. So each connection's hello names the session and an
+*incarnation*, the daemon's start time on `CLOCK_BOOTTIME`, and so does every chunk write and
+punch, in 8 bytes. A primary that has seen a newer incarnation of a session closes the older one's
+connections and rejects their writes, and it checks when it *orders* a write, not only when one
+arrives, so a write it is already holding is caught too. The incarnation rides in every write
+rather than only in the hello because with one event loop per core the old connection, the new
+one and the chunk's loop can be three different loops.
+
+A primary's table of newest incarnations does not need to survive a primary change: the old
+copy is bound to its connection, which dies if the primary process restarts; a reissue that
+completed on another primary means the copy's interval was stopped before that primary activated;
+and a held write is ordered again only if no other primary led the PG since (the client-write rule
+in [section 1](#1-table-epochs-intervals-and-versions)). That reasoning is for the phase 2 model to
+confirm; [10-block-snapshots-and-clones.md](10-block-snapshots-and-clones.md) shows where reissues
+come from.
 
 ## Evidence
 
@@ -1022,8 +1057,12 @@ and [Metadata layer](../docs/design.md#metadata-layer-metastore).
 epochs spike lists "peering itself" as not covered, the clock slew and VM pause spikes measured
 the clocks leases count on, not the leases, and the PG epochs spike counts tables, not messages. The roadmap's
 answer is phase 2: TLA+ models (a formal specification language, checked by its model checker,
-TLC) of epoch changes, leases and sessions with fence acknowledgments, before the real protocols
-are written. Their properties are fixed: no PG serves reads from two primaries at once, no write
+TLC) before the real protocols are written. Epoch changes and leases are one model, because its
+central property needs both: a lease-heavy CI configuration (`ci-leases`: 3 nodes, one chunk of
+one block, both of each node's clocks in full) and a peering-heavy one (`ci-peering`: 2 PGs and 2
+chunks, with lease expiry left open), each checked exhaustively in
+under 5 minutes, plus a `deep` configuration holding both at 4 nodes. Sessions and fencing get a
+model of their own. Their properties are fixed: no PG serves reads from two primaries at once, no write
 tagged with an interval completes after a later interval of its PG activates, no version an
 activated interval kept is dropped later, a table that leaves a PG's interval alone never fails
 its writes, no fenced session's write is applied, and no lock reaches a new holder while a
@@ -1097,6 +1136,12 @@ during peering and a node restarted within a lease it granted.
   slows its own writes, and so its acknowledgments. Should members report admission rates to the
   primary, as CockroachDB's followers return tokens, so one cleaning disk does not stall a whole
   PG? It is the polite cousin of a fail-slow disk.
+- **Open question: a grantor whose rate rises past the headroom.** If a grantor's raw rate rises
+  by more than `lease_drift / 2` after it was measured, as after a clocksource switch or a live
+  migration, while its heartbeats are lost or delayed, a lease can outlast its grant by up to
+  `(Δρ − lease_drift / 2) · primary_lease`, Δρ being how much the rate rose, until the next heartbeat's step check ends it. Does the
+  phase 2 model exclude this with a stated assumption, or must a grantor that sees a VMClock marker
+  change count its outstanding grants from the resume, a full `primary_lease` on both clocks?
 - **Open question: a stopped QEMU guest on kvm-clock.** Under KVM and Firecracker, a restore or
   migration changes the VMClock marker, and a stop shows in the guest's own clocks, except on QEMU
   with a guest on kvm-clock, where every clock freezes. Peers' heartbeats catch that stop only if
@@ -1122,6 +1167,8 @@ during peering and a node restarted within a lease it granted.
   [VM pause](../spikes/vm-pause/), [sub-block writes](../spikes/sub-block-writes/).
 - Studies: [PG epochs](../studies/pg-epochs/README.md),
   [session expiry](../studies/session-expiry/README.md),
+  [lease margins](../studies/lease-margins/README.md) (the startup window and the widening rule),
+  [protocol models](../studies/protocol-models/README.md) (how the phase 2 models are scoped),
   [clock skew](../studies/clock-skew/README.md) (CockroachDB's bounded clock offset against
   rock-solid's bounded clock rate).
 - Code: [`internal/core/peer.go`](../internal/core/peer.go) and

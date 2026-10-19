@@ -22,8 +22,8 @@ post is designed but not in the code:
 | Built and tested in simulation | Planned |
 | --- | --- |
 | Superblock and its copy, segments, record codec with per-block CRC32C | The durable LSN in record headers |
-| Group commit: one write and one flush per round, `commit_depth` | Third (metadata) stream; the code has hot and cold |
-| Hot and cold streams | Manifest edits; the code writes a full manifest each time |
+| Group commit: one write and one flush per round, `commit_depth` | Third (metadata) stream and its lanes; the code has hot and cold |
+| Hot and cold streams | Manifest edits and `NextSeq`; the code writes a full manifest each time |
 | Checkpoints with a full manifest, recovery, the tail rule, quarantine | Checkpoint backpressure, the cleaner and its copy entry |
 | The chunk index's live map | Chunk slots (phase 6) |
 | | The `io_uring` driver, event loops and inboxes (phase 5) |
@@ -244,7 +244,7 @@ The rest of this section walks through the log from the outside in.
 
 ```text
 disk = segment 0:     superblock in its first and last block (log id, segment size and count)
-       segments 1..n: segment header (log id, stream, open sequence, newest manifest) + records
+       segments 1..n: segment header (log id, stream, lane, open sequence, newest manifest) + records
 ```
 
 The segment size is min(64 MiB, disk size ÷ 4096), rounded down to a power of two: 64 MiB on disks
@@ -279,8 +279,9 @@ LBA 128
 
 The superblock ([`superblock.go`](../internal/disklog/superblock.go)) holds a magic string, the
 format version, a CRC32C, a random 64-bit **log id** drawn at format time, and the geometry. The
-segment header ([`segment.go`](../internal/disklog/segment.go)) adds the stream, its own index,
-the newest manifest's position, and an **open sequence**, a counter that rises every time any
+segment header ([`segment.go`](../internal/disklog/segment.go)) adds the stream, the lane within
+it (a byte the code reserves today; *planned*), its own index, the newest manifest's position, and
+an **open sequence**, a counter that rises every time any
 segment is opened, so a reused segment's second life is told apart from its first. It uses 52
 bytes, so it fits in one sector and a torn write leaves it whole or as it was.
 
@@ -434,8 +435,8 @@ On a drive with PLP, FUA may well be faster, so `durability` is a per-disk drive
 **How it works.** Each round takes what arrived from every producer during the last round, up to
 `max_group_commit_bytes` (default 1 MiB), builds one record, appends it to one stream's open
 segment in one write (after the segment header, if the round opens a new segment), flushes once,
-and acknowledges every item. A round writes one record to one stream, and rounds take the
-streams that have work in turn. Follow one round from top to bottom; the event loops and the
+and acknowledges every item. A round writes one record to one *lane* of one stream (see Three
+streams), and rounds take the lanes that have work in turn. Follow one round from top to bottom; the event loops and the
 `io_uring` driver around the log are *(planned, phase 5)*:
 
 ```mermaid
@@ -512,7 +513,7 @@ writer), and CockroachDB runs every range of a store through one Pebble write-ah
 segment holds data of one kind, which tends to die together:
 
 ```text
-          open segment of each stream (each round writes one record to one stream)
+          open segment of each stream (each round writes one record to one lane of one stream)
 
 hot       [hdr][new chunk writes + Raft entries][....][....]--> appending
 cold      [hdr][cleaner copies][erasure-coded chunk pieces]--> appending
@@ -524,10 +525,17 @@ LSNs are global: hot 1, 2, 4 ... cold 3, 6 ... metadata 5 ... merge back into on
 - **Hot** takes new chunk writes and the Raft entries of the same round.
 - **Cold** takes blocks the cleaner moves and erasure-coded pieces of chunks.
 - **Metadata** *(planned)* takes sorted runs, compaction output and manifests, which are written
-  whole and die whole when a compaction or a newer manifest replaces them. Each merge worker
-  fills a *lane* of its own, one segment at a time, so a merge's consumed inputs free whole
-  segments ([post 06](06-the-lsm-tree.md)); recovery reads each lane from just before the replay
-  point. Until the stream lands, checkpoint pieces go to the cold stream.
+  whole and die whole when a compaction or a newer manifest replaces them. Until the stream lands,
+  checkpoint pieces go to the cold stream.
+
+*(Planned:)* a stream fills its segments in **lanes**. A lane is a sequence of segments filled one
+after another, at most one open at a time, so LSNs rise along it. Lane 0 of each stream is its
+shared segment, and merge worker *w* writes its output to lane *w* of the metadata stream, so a
+merge's pieces never share a segment with flush pieces and a merge's consumed inputs free whole
+segments ([post 06](06-the-lsm-tree.md)). When a merge ends, its worker's segment stays open and the
+worker's next merge continues it, so no unused tail is stranded behind run pieces the cleaner
+cannot move. Group commit keeps a queue per lane and takes turns round the lanes: three plus the
+merge workers.
 
 Raft entries stay in the hot stream because a round writes one record to one stream: a Raft
 stream would split a commit's chunk write and its Raft entries into two rounds and two flushes. It
@@ -605,6 +613,14 @@ disk as sorted runs, in pieces of at most one record each, then writes a **manif
 index's runs, the LSN each replays from, and the segment usage table (which segments are in use;
 [post 05](05-the-cleaner-and-free-space.md)).
 
+- **What else a manifest records.** *(Planned:)* every manifest also records `NextSeq`, the open
+  sequence number the first segment opened after its base LSN will take. A segment the cleaner
+  freed keeps its old header of this log until it is reused, so a header alone cannot say whether
+  its segment was opened after the manifest (used, replay rebuilds its row) or freed before it
+  (the usage table decides). An open sequence at or past `NextSeq` means after; below it, the table rules.
+  That holds in every crash order of freeing, reusing and TRIM, which is what lets a freed segment
+  be reused at once, under conditions [post 05](05-the-cleaner-and-free-space.md) gives
+  ([log segments study](../studies/log-segments/)).
 - **When.** A checkpoint is due once `max_replay_bytes` (default 64 MiB) of records follow the
   last manifest, which bounds replay after a crash and the Raft entries a shard keeps in memory.
   *(Planned:)* if they reach twice that, rounds take items only from the checkpoint and the
@@ -644,12 +660,22 @@ flowchart TD
     B -- "yes" --> C["Read every segment header plus the block after it, many reads in flight"]
     C --> D["Pick the newest manifest any used header names"]
     D --> E["Load the manifest, edits planned, then each index's runs"]
-    E --> F["Replay records after the oldest replay LSN, streams merged by LSN"]
+    E --> F["Replay records after the oldest replay LSN, lanes merged by LSN"]
     F --> G{"First missing LSN: does the tail rule allow it?"}
     G -- "yes" --> H["Zero every record header found past the end, then flush"]
     G -- "no" --> Y["Stop: Corrupt at that LSN, write nothing"]
     H --> I["Resume group commit at the next LSN"]
 ```
+
+Each lane is read from the last of its segments whose first record is at or before the first
+record to replay, and resumes appending in its newest segment. Since LSNs rise along a lane, every
+segment after that one holds only records to replay. The same rule per stream would miss records:
+a merge's segment opens before shared metadata segments opened later and keeps filling after them.
+In a model of the log it missed a record past the replay point in 74% of crashes with one merge
+worker and 99% with four, usually reported as corruption at every start, and silently lost when the
+merge's records were the newest durable ones; per lane it missed none
+([log segments study](../studies/log-segments/)). Merge lanes are read for their records' LSNs,
+which the tail rule needs; their entries go to no index until a manifest names their pieces.
 
 Recovery writes only when it repairs a damaged superblock in the first step (next section) and in
 the final zero-and-flush. A disk has 4,096 to 262,144 segment headers, so recovery reads them 64 at
@@ -735,8 +761,9 @@ an operator's repair command, as ext4, XFS and Btrfs leave their copies to offli
 version (today 1), and golden byte fixtures in [`testdata/`](../internal/disklog/testdata/) make
 any accidental change fail a test. A daemon reads the current and the previous format, but writes
 the new one only after the operator raises the cluster's format level, a `ctl/` key in the
-control-plane Raft group *(planned)*, once every node runs the new release. The cleaner rewrites
-old segments over time.
+control-plane Raft group *(planned)*, once every node runs the new release. A node on an older
+release that heartbeats after the level was raised is not marked up, and a condition names it.
+The cleaner rewrites old segments over time.
 
 ## Evidence
 
@@ -815,6 +842,13 @@ From the design's [roadmap and open questions](../docs/design.md#roadmap-and-ope
 - **Header patches for fsync'd appends** and **short last blocks for small files**: worth it only
   if real homelab traces show many fsync'd sub-block appends or much space in small files and
   tails.
+- **Rebuild after cleaning.** A rebuild of a lost index replays every record from LSN 1, but the
+  cleaner's freed segments take their LSNs with them. Should a rebuild check LSN continuity only
+  past the manifest's base and rely below it on each listed segment's records following one
+  another, so a damaged header still shows as a hole?
+- **Merge lanes shared between merges.** A worker's next merge continues the segment its last one
+  left, so one segment can hold the tail of one merge and the head of the next, possibly another
+  index's. How much does that strand?
 - **Chunk slots for erasure-coded pieces** (4 MiB ÷ k, so several slot sizes), **regrouping
   fragmented chunks** into slots, **in-drive write amplification** by segment size, and
   **registered `io_uring` buffers on a real NVMe drive.**
@@ -852,8 +886,9 @@ Spikes: [`spikes/nvme-flush/`](../spikes/nvme-flush/),
 [`spikes/uring-registered/`](../spikes/uring-registered/),
 [`spikes/lsm-study-durability/`](../spikes/lsm-study-durability/),
 [`spikes/stream-overlap/`](../spikes/stream-overlap/),
-[`spikes/sub-block-writes/`](../spikes/sub-block-writes/); study:
-[sub-block writes and small files](../studies/sub-block-writes/README.md)
+[`spikes/sub-block-writes/`](../spikes/sub-block-writes/); studies:
+[sub-block writes and small files](../studies/sub-block-writes/README.md),
+[log segments](../studies/log-segments/) (lanes, `NextSeq`, freed segments)
 
 Code: [`internal/disklog/`](../internal/disklog/): `geometry.go`, `superblock.go`, `segment.go`,
 `record.go`, `groupcommit.go`, `manifest.go`, `recovery.go`; and

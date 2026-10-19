@@ -379,7 +379,10 @@ A disk's target is its share of the pool's members, in proportion to its *capaci
 pool's [`write_limit`](../docs/design.md#volume-size-and-capacity) leaves of it after the data
 other pools keep there. The pool's own data counts as capacity, so a finished move does not shift
 the targets and set off moves back. In a homelab with a 1, a 2 and a 4 TB disk, the 4 TB disk
-should hold four times what the 1 TB one holds. Rebalance stops once every disk is within its
+should hold four times what the 1 TB one holds. Targets by free room would shift with every
+move: in the study, after a disk was added to a pool holding data, settling took 1.5 to 2 times the moves and 3
+to 5 computations, against 2 by capacity, the second proposing nothing
+([capacity conditions study](../studies/capacity-conditions/README.md)). Rebalance stops once every disk is within its
 margin: 5% of its target, but at least one member, because on a small disk a single member is
 already more than 5%. That is what "exact balance" means here, as opposed to the average-case
 balance of a hash function.
@@ -463,10 +466,11 @@ The design's reasons ([Alternatives considered](../docs/design.md#alternatives-c
 
 ### How it works
 
-Each disk's *room* is what the pool's `write_limit` (90% by default) leaves of it after the data
-already there, and the placement table says what *share* of new data each disk receives: the PGs it
-belongs to, out of all of them. Chunks hash evenly over PGs, so the pool can take, before its first
-disk reaches the limit:
+Each disk's *capacity* for a pool is what the pool's `write_limit` (90% by default) leaves of it
+after other pools' data, and its *room* is that capacity less the pool's own data on it. The
+placement table says what *share* of new data each disk receives: the PGs it belongs to, out of all
+of them. Chunks hash evenly over PGs, so the pool can take, before its first disk reaches the
+limit:
 
 ```text
  available = smallest over the pool's disks of   room ÷ share
@@ -500,9 +504,18 @@ available well short of balanced (`Unbalanced`), when losing the largest node, o
 node is spare, would leave recovery no room to restore every copy (`CannotReprotect`), and when a
 placement group's copying has stalled for a minute (`Stuck`).
 
+Every figure but available is measured against capacity, not room. Room shrinks with every byte
+the pool writes even when nothing is wrong, so a warning measured on room would rise on every
+healthy pool as it fills; capacity, balanced and the stranded fraction stay put. In a `rep3` pool on
+nodes of 4, 4, 2 and 1 TB, 18.2% of the capacity is stranded at any fill, where measured against
+room it would read 26% at 1 TB held and 75% at 2.5 TB
+([capacity conditions study](../studies/capacity-conditions/README.md)).
+
 Available also subtracts the *space grants* outstanding on the pool: bytes the control plane lets
 each node's daemon buffer and acknowledge before any disk holds them, so that a buffered write
-never fails later for lack of space.
+never fails later for lack of space. The control-plane leader returns each pool's total of
+outstanding grants on every heartbeat reply, and `Full` and the primary's refusal below both count
+a disk's share of it, so `Full`, an available figure of 0 and the first refused write coincide.
 
 Volumes are thin: with the pool setting `overcommit` on (the default), volume sizes may add up to
 more than the pool holds. With it off, a new volume is admitted only while every volume's size fits
@@ -543,9 +556,11 @@ type ChunkStore interface {
 ```
 
 Every write and punch returns a new version; `expectVer` and `atVer` are optional and explained
-below. `Seal` is [post 07](07-pools-and-redundancy.md)'s topic. Each write also carries the
-client's session ID so primaries can reject a client whose session has expired (fencing), which
-[post 03](03-epochs-leases-and-failures.md) covers. The next five sections are the promises
+below. `Seal` is [post 07](07-pools-and-redundancy.md)'s topic. Each write and punch also
+carries the client's session ID, so primaries can reject a client whose session has expired
+(fencing), and its *incarnation*, the start time of the client daemon's process, so a primary that
+has seen a restarted daemon rejects writes its dead predecessor left on the wire;
+[post 03](03-epochs-leases-and-failures.md) covers both. The next five sections are the promises
 behind these calls.
 
 ## Versions: an interval on top, a counter below
@@ -900,7 +915,8 @@ What backs these choices, with numbers exactly as the design and spikes give the
   [spikes/capacity-model](../spikes/capacity-model/).
 - Studies: [sub-block writes and small files](../studies/sub-block-writes/README.md),
   [PG epochs](../studies/pg-epochs/README.md),
-  [pool capacity and ENOSPC](../studies/capacity-and-enospc/README.md).
+  [pool capacity and ENOSPC](../studies/capacity-and-enospc/README.md),
+  [capacity conditions](../studies/capacity-conditions/README.md).
 - Code: [internal/core/ids.go](../internal/core/ids.go) (`ChunkID`, `ChunkIndexOf`, `Hash`,
   `PGIndexOf`, `CheckPGCount`), [internal/core/crc.go](../internal/core/crc.go),
   `internal/core/testdata/chunk_id_golden.txt`.

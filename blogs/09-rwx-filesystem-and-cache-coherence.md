@@ -205,6 +205,8 @@ FUSE write(inode, off, data)
                    -> ChunkStore.write via the chunk primary, which merges partial blocks
                    -> acknowledge, or ENOSPC if the pool refuses it
                    -> if the write extends the file: MetaStore size = max(size, end)
+any chunk write    -> first, if its index >= alloc_end:
+                      MetaStore.txn([raise alloc_end, set size written so far])
 close() / fsync()  -> flush buffered chunks, widened to whole blocks where the daemon has the bytes
                    -> MetaStore.txn([set size, mtime = max(last write's time, mtime + 1 ns)])
                    -> an error this handle has not seen yet, if any
@@ -216,7 +218,10 @@ both:            the daemon clamps a read to the file's size
 ```
 
 "Shared" here means the WriteShared cache mode explained under Tier 2 below; the space grant and
-the late error are explained [below](#a-full-pool-space-grants). Namespace
+the late error are explained [below](#a-full-pool-space-grants). `alloc_end` is a mark on the
+inode, one past the highest chunk that may hold data: it tells a later delete or truncate which
+chunks to remove, even after a crash, and since the daemon raises it in steps that double up to 16
+chunks, other nodes see a large file grow while it is written, at most 64 MiB behind. Namespace
 operations (`create`, `mkdir`, `unlink`, `rename`, `setattr`) are MetaStore transactions,
 single-shard except a cross-directory `rename`. The design's targets, stated as round trips:
 
@@ -308,8 +313,10 @@ first, so a crash in between exposed old bytes, which `fsx` could not see becaus
 right (commit `5885ebda`, 2015).
 
 rock-solid keeps one rule instead: **once a file's purge has run, every byte past its size is zero
-on disk.** A truncate commits the new size together with a purge entry that starts at the new
-size's *byte offset*, not at a chunk boundary. The purge's first punch zeroes the rest of the block
+on disk.** A truncate commits, in one transaction, the new size, `alloc_end` lowered to the new
+end, and a purge entry that starts at the new size's *byte offset*, not at a chunk boundary. A
+file has at most one pending purge entry, so a truncate followed by an unlink before the purger
+gets to it merges the two ranges instead of losing the first. The purge's first punch zeroes the rest of the block
 holding the new end, by a merge at the primary, and the rest of its chunk; the daemon runs it
 before `truncate` returns, and the purger runs it again if a crash came first. Any extension
 finishes a pending purge before it writes. So growing a file again writes nothing to the gap:
@@ -340,7 +347,8 @@ after discarding what it had buffered, JuiceFS at the next `write()` or flush
 ([capacity and ENOSPC study](../studies/capacity-and-enospc/README.md)).
 
 rock-solid's daemon buffers only against a **space grant**: bytes of a pool its node may hold
-unflushed. The heartbeat every node already sends the control-plane leader each second, the one
+unflushed, counted in whole blocks written, so a 100-byte append is charged a 4 KiB block per
+copy. The heartbeat every node already sends the control-plane leader each second, the one
 that renews its session, reports what the node has buffered and a running total of what it has
 flushed, and asks for what it would buffer in the next second; the reply sets the grant, at most
 the 256 MiB buffer. The leader keeps a pool's grants at most half of what the pool can still take,
@@ -659,7 +667,9 @@ to the session.
   it could not hear ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#who-decides-that-a-session-has-expired)).
 - **The client limits itself.** It counts its lease from when it sent the last answered
   heartbeat, which is before the leader counted it, and stops writing `lease_drift` early on
-  whichever of its two clocks runs faster, or at once when it learns its machine was suspended,
+  whichever of its two clocks runs faster, with the margin widened if the leader's clock has been
+  measured running fast (a freshly started daemon takes that measurement from two renewals 100 ms
+  apart, so it holds its writes about 100 ms longer), or at once when it learns its machine was suspended,
   restored from a snapshot or migrated ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
   No timeout it gives the kernel reaches past that instant. So when the lease ends, a paused
   client's next `read()` asks the daemon for attributes, and the daemon, seeing its lease has

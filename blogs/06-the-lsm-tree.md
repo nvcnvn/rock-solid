@@ -228,7 +228,8 @@ Three details make the page tree work as an LSM memtable:
   freed when the last view that could reach it closes.
 
 A key is at most 1,032 bytes and a value at most 1,000, so two entries always fit a page: room for
-an S3 key of 1,024 bytes plus its prefix. A range removal stores both its ends, so each end is kept
+an S3 key of 1,024 bytes plus its prefix. (The code allows 1,024-byte keys today; the limit rises
+with range removals.) A range removal stores both its ends, so each end is kept
 to 1,000 bytes, and the MetaStore splits a larger value, such as a 64 KiB extended attribute, over
 several keys. An entry too large to fit one run piece (next section) is refused with `ErrTooLarge`
 when it is written, not later when a flush meets it.
@@ -676,6 +677,9 @@ From the design's [Roadmap and open questions](../docs/design.md#roadmap-and-ope
 - **Pieces shared between runs.** Dropping the blocks a range removal covers, as Pebble drops whole
   tables, freed 22 of a dropped volume's 28 MB at the first checkpoint, but pays only once a run can
   share pieces with the run it replaces; written again whole, the kept blocks cost 85.6 MB.
+- **Merge lanes shared between merges.** A merge worker's next merge continues the segment its last
+  one left, so one segment can hold the end of one merge and the start of another; the LSM space
+  spike measured a segment per merge, not this mixing.
 - **Regrouping fragmented chunks** into a whole-chunk slot once their extent map grows too long.
 - **Revisit leveled** when runs are read from disk.
 - **Tech debt:** memtable pages and runs on the Go heap until the off-heap slabs exist (phase 5).

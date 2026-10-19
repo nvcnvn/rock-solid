@@ -131,7 +131,7 @@ sequenceDiagram
     D->>D: chunk_id = volume_id, 0, N / 4 MiB
     D->>D: pg = top bits of xxh3_64 of chunk_id
     D->>D: primary = placement_table of pg
-    D->>PR: write, tagged with table epoch, PG interval and session
+    D->>PR: write, tagged with table epoch, PG interval, session and incarnation
     par
         PR->>PR: append to own log, flush
     and
@@ -226,9 +226,16 @@ sequenceDiagram
     PR->>PR: rejected, incarnation 1 is older
 ```
 
-An *incarnation* is the daemon's start time, named in each connection's hello. A primary that has
-seen a newer incarnation of a session rejects the older one's writes. Applying a reissued write
-twice is harmless: the same bytes give the same blocks under a newer version. The flags and
+An *incarnation* is the daemon's start time on `CLOCK_BOOTTIME`. Each connection's hello names
+it, and so does every chunk write and punch, in 8 bytes. A primary that has seen a newer
+incarnation of a session closes the older one's connections and rejects their writes, and it checks
+when it orders a write, not only when it receives one, so a stale write it already holds is caught
+too. The incarnation rides in each write, not only in the hello, because with one event loop per
+core the old connection, the new one and the chunk's loop can be three different loops
+([11](11-runtime-in-go.md)), and making every hello reach every loop first would be an ordering
+rule between loops kept forever. Applying a reissued write twice is harmless: the same bytes give
+the same blocks under a newer version. The same check fences the chunk writes of a dead FUSE
+daemon. The flags and
 recovery steps are in [Daemon restart and upgrade](../docs/design.md#daemon-restart-and-upgrade).
 
 ### When the pool is full: pause, never fail
@@ -420,8 +427,15 @@ The edge cases:
 - **A node that never answers.** The coordinator waits until its session expires and is fenced,
   as a recall does; every primary then rejects its writes.
 - **The coordinator crashes** between pause and resume, or a MetaStore shard changes leader at the
-  cut. Both are named simulation faults, and a paused node resumes only once it knows whether the
-  snapshot committed. Snapshot cuts get a TLA+ model in phase 11, before the cut's code.
+  cut. Both are named simulation faults. A paused node resumes only once it knows whether the
+  snapshot committed: the cut is a two-phase commit, the pause prepares it and the snapshot record
+  commits it, so a node that resumed on a timeout under the old epoch could put a post-cut write
+  into the snapshot. It asks the MetaStore whether snapshot E exists. Snapshot cuts get a TLA+
+  model in phase 11, before the cut's code; it is to settle how the commit is made conditional, so
+  a cut a node gave up on can never commit later, and how a node that attaches or mounts the
+  volume during the cut is paused. Until phase 13 a filesystem has one data shard; once it has
+  several, the markers commit with the snapshot record through the cross-shard transactions of
+  [08](08-the-metastore.md).
 - **Cost.** A block RWO volume has one node to pause; a volume nobody uses needs no pause.
 
 **Data still in the daemon's buffer.** By default the cut does not flush the filesystem daemon's
@@ -555,7 +569,8 @@ frozen version needs no ordering against writes, so any PG member holding it can
 
 **Erasure-coded pools**, which store a chunk as data and parity pieces instead of full copies
 ([07](07-pools-and-redundancy.md)), normally encode a block chunk only after a day idle. Frozen
-versions never change, so they are encoded at once.
+versions never change, so they are encoded at once, and when an overwrite returns an encoded
+chunk to copies, the encoded version stays on as the frozen one instead of being dropped.
 
 ### Restore and clone: a new volume that reads through
 
