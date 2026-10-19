@@ -467,7 +467,10 @@ the model's run through recovery, replay the records after its replay LSN, resum
   keys, a 10 bits-per-key filter's false positives stay within 1.0 to 1.4%.
 - [property] Seeds 0-11, random puts, removes, range removals, flushes and compactions, with filters
   on and off: gets, floors inside a prefix and prefix scans read alike and as the map. A run whose
-  filter rules out a key is never searched for it.
+  filter rules out a key is never searched for it, yet a covering fragment in it still hides the
+  key, and a run holding only fragments is never skipped by its bounds.
+- 262,144 one-chunk fragments in a memtable: a range removal and a cut allocate nothing and cost one
+  search each.
 - Over 24 runs, a get of a key no run holds searches on average fewer than 0.5 runs. A floor inside
   a chunk written whole searches only the run holding it, plus false positives. A restore loads each
   run's filter from its filter blocks, and lookups probe as before.
@@ -508,6 +511,10 @@ the model's run through recovery, replay the records after its replay LSN, resum
   leaves only the frozen map to move.
 - A record with an entry for pool 2^32 − 1, which the index keeps record counts under, or with a
   freeze of version 0 of a chunk that exists and holds no absent version, is refused whole.
+- A whole-chunk punch leaves the chunk entry and one range removal over the live map; frozen maps
+  read as before.
+- A cleaner copy logged before or after the write that replaced the copied block, rebuilt from the
+  records in LSN order and applied twice: the write wins wherever it covers the block.
 - Removals: chunk 7 written as 1,024 one-block extents, checkpointed, then rewritten in one
   1,024-block write: the index holds one range removal for blocks 1 to 1,023 and no point removal, a
   lookup of every block takes at most two searches before the checkpoint, after it and after a
