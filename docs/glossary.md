@@ -224,9 +224,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Write-ahead log (WAL), replay, recovery.** A WAL records each change before it is applied elsewhere, so after a crash the change can be redone by **replaying** the log. Crash recovery means reading the log back and rebuilding the in-memory state from it.
 
-**Torn tail, tail rule.** After a crash, the last few records of a log may be torn or missing because their rounds were still being written. The tail rule tells such a torn tail from damage: a missing record ends the log only if the records found after it are few enough to have been in flight together (`commit_depth` rounds). More than that means something already durable was lost, and recovery reports corruption instead of quietly cutting the log short. See [Recovery](design.md#on-disk-format).
+**Torn tail, tail rule.** After a crash, the last few records of a log may be torn or missing because their rounds were still being written. The tail rule tells such a torn tail from damage: a missing record ends the log only if no record after it says the missing one was already durable (each record header names the newest durable LSN when it was written) and the records found after it are few enough to have been in flight together (`commit_depth` rounds). Otherwise something already durable was lost, and recovery reports corruption instead of quietly cutting the log short. See [Recovery](design.md#on-disk-format).
 
-**Checkpoint, manifest.** Replaying the whole log after every crash would take ever longer, so a checkpoint periodically saves the in-memory state to disk and writes a **manifest**, a small record that says where that state is and from which LSN replay must start.
+**Checkpoint, manifest.** Replaying the whole log after every crash would take ever longer, so a checkpoint periodically saves the in-memory state to disk and writes a **manifest**, a small record that says where that state is and from which LSN replay must start. A manifest is a **snapshot** of that state or an **edit** listing only what changed since the manifest before it; a snapshot is written once the edits since the last one would outgrow it.
 
 **Index.** A structure that finds data by key without scanning everything. The **chunk index** on each disk maps each chunk's blocks to their place in the log; its **live map** lists the current extents of each chunk.
 
@@ -260,7 +260,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Quarantine.** Setting aside a segment that looks damaged: never reused, and reported for repair from another replica.
 
-**Segment usage table.** The list, saved in every manifest, of which segments are in use or quarantined, how many live blocks each holds and its newest LSN. Recovery takes free space from it instead of guessing from segment headers, and the cleaner picks victims by it. See [On-disk format](design.md#on-disk-format).
+**Segment usage table.** The list of which segments are in use or quarantined, how many live blocks each holds and its newest LSN, kept in the manifests: whole in a snapshot, the changed rows in an edit. Recovery takes free space from it instead of guessing from segment headers, and the cleaner picks victims by it. See [On-disk format](design.md#on-disk-format).
 
 ## Files and caching
 

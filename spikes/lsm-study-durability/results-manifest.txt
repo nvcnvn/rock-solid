@@ -1,0 +1,43 @@
+# Linux 6.18.44-fc-v139 go1.27.0 2026-10-18T23:49Z manifestsim (segment-level model, greedy cleaner interleaved with user writes, reserve 8, checkpoint every 64 MiB of log writes)
+## manifestsim -disk 256 -seg 64 -warm 0.6 -meas 0.2
+disk=256GiB seg=64MiB segments=4096 fill=0.90 write=4KiB uniform checkpoints=4326 WA=5.28
+  full table   :     4088 rows      67.9 KiB/checkpoint  0.104% of log
+  delta only   :     2165 rows      35.9 KiB/checkpoint  0.055% of log  (p50 2273 p99 2343 max 2370 rows; bound 16384)
+  pebble-ratio1:      49.2 KiB/checkpoint  0.075% of log, snapshot every 2.3 checkpoints, recovery reads at most 135.7 KiB (2.00x full)
+  rocksdb-amp500:      39.1 KiB/checkpoint  0.060% of log, snapshot every 10.0 checkpoints, recovery reads at most 404.1 KiB (5.95x full)
+## manifestsim -disk 1024 -seg 64 -warm 0.6 -meas 0.15
+disk=1024GiB seg=64MiB segments=16384 fill=0.90 write=4KiB uniform checkpoints=12789 WA=5.20
+  full table   :    16376 rows     271.9 KiB/checkpoint  0.415% of log
+  delta only   :     2863 rows      47.5 KiB/checkpoint  0.073% of log  (p50 3071 p99 3147 max 3173 rows; bound 16384)
+  pebble-ratio1:      84.5 KiB/checkpoint  0.129% of log, snapshot every 6.0 checkpoints, recovery reads at most 543.7 KiB (2.00x full)
+  rocksdb-amp500:      55.3 KiB/checkpoint  0.084% of log, snapshot every 29.0 checkpoints, recovery reads at most 1630.6 KiB (6.00x full)
+## manifestsim -disk 1024 -seg 64 -warm 0.6 -meas 0.15 -hotcold
+disk=1024GiB seg=64MiB segments=16384 fill=0.90 write=4KiB hotcold80/20 checkpoints=14464 WA=5.89
+  full table   :    16376 rows     271.9 KiB/checkpoint  0.415% of log
+  delta only   :     2373 rows      39.4 KiB/checkpoint  0.060% of log  (p50 2453 p99 3172 max 3252 rows; bound 16384)
+  pebble-ratio1:      70.3 KiB/checkpoint  0.107% of log, snapshot every 7.4 checkpoints, recovery reads at most 543.7 KiB (2.00x full)
+  rocksdb-amp500:      45.8 KiB/checkpoint  0.070% of log, snapshot every 35.1 checkpoints, recovery reads at most 1631.1 KiB (6.00x full)
+## manifestsim -disk 1024 -seg 64 -warm 0.6 -meas 0.15 -ext 16
+disk=1024GiB seg=64MiB segments=16384 fill=0.90 write=64KiB uniform checkpoints=12726 WA=5.18
+  full table   :    16377 rows     271.9 KiB/checkpoint  0.415% of log
+  delta only   :      198 rows       3.3 KiB/checkpoint  0.005% of log  (p50 79 p99 800 max 819 rows; bound 16384)
+  pebble-ratio1:       6.5 KiB/checkpoint  0.010% of log, snapshot every 83.2 checkpoints, recovery reads at most 543.8 KiB (2.00x full)
+  rocksdb-amp500:       3.9 KiB/checkpoint  0.006% of log, snapshot every 410.5 checkpoints, recovery reads at most 1631.4 KiB (6.00x full)
+## manifestsim -disk 1024 -seg 64 -warm 0.6 -meas 0.15 -fill 0.8
+disk=1024GiB seg=64MiB segments=16384 fill=0.80 write=4KiB uniform checkpoints=6648 WA=2.71
+  full table   :    16376 rows     271.9 KiB/checkpoint  0.415% of log
+  delta only   :     5031 rows      83.5 KiB/checkpoint  0.127% of log  (p50 5291 p99 5766 max 5818 rows; bound 16384)
+  pebble-ratio1:     130.6 KiB/checkpoint  0.199% of log, snapshot every 4.0 checkpoints, recovery reads at most 537.7 KiB (1.98x full)
+  rocksdb-amp500:      94.6 KiB/checkpoint  0.144% of log, snapshot every 17.0 checkpoints, recovery reads at most 1630.8 KiB (6.00x full)
+## manifestsim -disk 1024 -seg 4 -warm 0.6 -meas 0.15
+disk=1024GiB seg=4MiB segments=262144 fill=0.90 write=4KiB uniform checkpoints=12673 WA=5.16
+  full table   :   262136 rows    4351.9 KiB/checkpoint  6.640% of log
+  delta only   :     3163 rows      52.5 KiB/checkpoint  0.080% of log  (p50 3164 p99 3221 max 3235 rows; bound 16384)
+  pebble-ratio1:     104.4 KiB/checkpoint  0.159% of log, snapshot every 82.8 checkpoints, recovery reads at most 8664.8 KiB (1.99x full)
+  rocksdb-amp500:      63.0 KiB/checkpoint  0.096% of log, snapshot every 408.8 checkpoints, recovery reads at most 26109.2 KiB (6.00x full)
+## manifestsim -disk 4096 -seg 64 -warm 0.5 -meas 0.05 -ext 16
+disk=4096GiB seg=64MiB segments=65536 fill=0.90 write=64KiB uniform checkpoints=16896 WA=5.16
+  full table   :    65529 rows    1087.9 KiB/checkpoint  1.660% of log
+  delta only   :      201 rows       3.3 KiB/checkpoint  0.005% of log  (p50 79 p99 822 max 840 rows; bound 16384)
+  pebble-ratio1:       6.7 KiB/checkpoint  0.010% of log, snapshot every 324.9 checkpoints, recovery reads at most 2175.3 KiB (2.00x full)
+  rocksdb-amp500:       4.0 KiB/checkpoint  0.006% of log, snapshot every 1536.0 checkpoints, recovery reads at most 6527.1 KiB (6.00x full)
