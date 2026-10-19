@@ -242,6 +242,14 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Copy entry.** The record entry a cleaner writes for blocks it moves: the chunk, version and blocks, plus the location it copied them from. Replay applies it only where the index still holds that location, so a write that replaced the blocks first is never undone. See [On-disk format](design.md#on-disk-format).
 
+**Metamorphic test.** A test that runs the same operations under configurations that must not change the results (piece sizes, flush and compaction timing, restarts) and compares what each run read. It needs no model of the right answer, only the rule that the configurations agree. Pebble's main correctness test. See [Testing strategy](design.md#testing-strategy).
+
+**Data-driven test.** A test whose cases are text files: a command, its input lines, a separator and the expected output, which the test rewrites on request for review. Used by Pebble and etcd-raft (`github.com/cockroachdb/datadriven`). See [Testing strategy](design.md#testing-strategy).
+
+**Test-case reduction.** Shrinking a failing generated test to the fewest operations that still fail, by removing chunks while the failure persists. See [Testing strategy](design.md#testing-strategy).
+
+**Prefix recovery.** Recovery that returns exactly the writes up to some point and none after it: no recovered write is newer than a lost one (no hole). RocksDB's crash test and our crash oracle check it. See [Testing strategy](design.md#testing-strategy).
+
 **Delete-only compaction.** Pebble's name for dropping whole tables that a newer range deletion covers, by editing the manifest instead of merging. See [The LSM tree](design.md#on-disk-format).
 
 **Run piece.** A sorted run is written to the log in pieces of at most one record each; the last, the root, lists the others, so a manifest names a run by its root. See [The LSM tree](design.md#on-disk-format).

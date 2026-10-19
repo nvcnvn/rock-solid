@@ -366,6 +366,25 @@ the model's run through recovery, replay the records after its replay LSN, resum
   an erased header, a restart and a crash during recovery all occur.
 - [fuzz] Bit flips anywhere in a log of 40 writes, cold blobs and checkpoints: rebuild and open either
   fail with Corrupt, CopyOnly or NotFormatted, or resume a log whose next write survives a restart.
+- Recover twice: after a crash, recover, crash again before any new write (and, separately, during
+  recovery's own writes), and recover again: both recoveries give the same LSN and index (RocksDB
+  "column family inconsistency" on second recovery, "SST file is ahead of WALs").
+- A recovery that ends Corrupt writes nothing: the disk reads byte for byte as before it (RocksDB
+  MANIFEST written before recovery succeeds).
+- A failed write in a round fails the log: no item of that round or after is acknowledged; recovery
+  after a restart gives an LSN no greater than the last record fully landed, the next record takes
+  the next LSN, and no block of the failed round reads as a record (RocksDB sequence numbers going
+  backwards, duplicate WAL entries after error recovery).
+- A failed flush: the round's items are not acknowledged even though reads see the blocks; a crash
+  then lands any subset, and recovery is a prefix.
+- One checkpoint over two indexes and a shard replica, where one index has no new writes and one's
+  flush fails: the manifest's replay LSN for each index is at most its oldest unflushed write, and a
+  crash recovers all three to one LSN (RocksDB #11148, atomic flush leaving out a column family).
+- [property] Crash at every action: 40 one- and two-block writes with two checkpoints (one with a
+  compaction) on a 1,024-block disk; for every k, crash at the k-th disk action with none, a seeded
+  half and all of the unflushed blocks landing, and separately fail the k-th action with an IO
+  error: each recovery holds every acknowledged write and is a prefix of the submitted ones (Pebble
+  `TestErrors`, `TestDBCompactionCrash`).
 
 ## Superblock copy
 
@@ -469,6 +488,11 @@ the model's run through recovery, replay the records after its replay LSN, resum
   on and off: gets, floors inside a prefix and prefix scans read alike and as the map. A run whose
   filter rules out a key is never searched for it, yet a covering fragment in it still hides the
   key, and a run holding only fragments is never skipped by its bounds.
+- With `Check` on, a flush whose piece encoder drops an entry, or a merge that emits a key twice or
+  out of order, panics in that flush or merge.
+- A view opened before a range removal still reads the keys in it; a scan that starts inside a
+  fragment and is bounded inside it returns nothing past the bound (RocksDB `Refresh` after
+  DeleteRange, iteration past `iterate_upper_bound`, `HISTORY.md` v11.8.1).
 - 262,144 one-chunk fragments in a memtable: a range removal and a cut allocate nothing and cost one
   search each.
 - Over 24 runs, a get of a key no run holds searches on average fewer than 0.5 runs. A floor inside
@@ -547,6 +571,29 @@ the model's run through recovery, replay the records after its replay LSN, resum
   among them, recovers from the previous manifest plus replay to the live index, and the next
   checkpoint's restart does too.
 
+## Metamorphic index tests
+
+- [property] `internal/lsm`, seeds 0-199, 3,000 ops (puts 35, removals 10, gets 15, floors 8, scans
+  5, views 11, flushes 5, failed flushes 1, compactions 4, restarts 1, by weight; keys of 1-6
+  letters a-f, a put's key new one time in four): the histories of every option set equal the
+  model's. Sets: memtable only; generated flushes and compactions with 1 MiB pieces; 4 KiB pieces, a
+  flush every 40 writes, compaction until none is due; 256 B pieces, a flush every 10 writes, no
+  compaction; 512 B pieces, a flush every 25 writes, compaction picked at an op and installed between
+  the pieces of the next flush, up to 4 writes between a flush's pieces; 1 KiB pieces, every flush
+  failing after one piece first, a restart after every flush; 4 KiB pieces, a flush every 2 writes,
+  compaction after every 40th flush (Pebble's `internal/metamorphic`, a7b8321871e3).
+- Planted bugs, each failing at least one seed of 20: a flush dropping removals that hide a run's
+  key (every set with flushes); a merge's output installed as the oldest run, and a merge dropping
+  removals that hide keys in runs older than its inputs (only the set with 40 runs before a merge); a
+  restore loading runs in manifest order (every set with restarts); reads skipping the frozen
+  memtable (sets with failed flushes or writes between pieces).
+- Regression cases (data-driven, reduced from the planted bugs): `put aa`, flush, `del aa`, flush: a
+  floor of `aca` finds none. `put e`, flush, `del e`, a flush failing after 3 pieces, a flush, a
+  restart: a floor of `e` finds none.
+- With range removals: the same ops with each range removal replaced by point removals of the keys
+  it covers read the same, and the chunk index with range trims reads as with point removals
+  (Pebble's `replace_single_delete`).
+
 ## Segment usage table
 
 The log below writes 60 one-block hot writes on a 64K-block disk (16-block segments), checkpointing
@@ -578,6 +625,14 @@ whenever 40 blocks follow the manifest.
 - Fault helpers used by the log tests: crash with a chosen landed-set or with p = 1/2 per block
   (from a seeded RNG); flip a bit (XOR a mask into one byte of a durable block); fail reads of
   chosen LBAs with Io.
+- A failed write completes with IO and leaves each of its blocks undecided, as an unflushed write is:
+  a crash lands each or not, since a device's error says nothing about which blocks it wrote. A
+  failed flush completes with IO and leaves every unflushed block undecided: reads still see them,
+  and a later crash lands each or not. A damaged read completes OK with one byte changed in the
+  returned buffer. Errors are chosen by action kind, LBA range, the action's index and a probability
+  from the disk's seeded source, so a seed replays them.
+- Two unflushed writes to one block, the newer landing alone or the older alone, or both: the block
+  reads as the one that landed last in execution order.
 
 ## Seeded runs and the simulation harness
 

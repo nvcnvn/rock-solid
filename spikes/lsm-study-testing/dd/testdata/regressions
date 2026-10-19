@@ -1,0 +1,24 @@
+# Reduced failures of the metamorphic harness against planted bugs (results.txt).
+# Each passes on internal/lsm and fails on its plant.
+
+# P1, seed 0 under A: a flush dropped a removal that hid a key in an older run.
+run set=A
+put aa v26x
+flush
+del aa
+flush
+floor aca
+----
+floor aca: none
+
+# P3, seed 0 under A: a restart loaded the manifest's runs out of age order.
+run set=A
+put e v30xxx
+flush
+del e
+flushfail 3
+flush
+restart
+floor e
+----
+floor e: none
