@@ -4,8 +4,8 @@ Every chunk of data in rock-solid has one member in charge of it, the primary, a
 sometimes crash, hang, sleep or lose its network while clients are still writing. The obvious
 fix, "if the primary stops answering, pick another one", is how storage systems lose data: for a
 while two nodes both believe they are in charge, and a paused client can wake up and write over
-someone else's data. rock-solid closes those windows with a small set of rules: numbered
-membership epochs, a new primary that *peers* before its first write, read leases counted on
+someone else's data. rock-solid closes those windows with a small set of rules: membership
+numbered per placement group, a new primary that *peers* before its first write, read leases counted on
 two clocks so that neither a time daemon nor a suspend can stretch them, and client sessions
 that are *fenced* before their
 locks move. This post walks through each race, the rule that closes it, and what the rules
@@ -22,15 +22,19 @@ from phase 3 on.
 - **Version, committed, acknowledged.** Every write to a chunk gets a new version. A version is
   *committed* once every live member holds it, and only then is the client told "OK"
   (*acknowledged*). See [data model](../docs/glossary.md#data-model).
-- **Placement table, epoch, control plane.** The table maps every PG to its members; each new
-  table gets a higher *epoch*. It lives in the *control plane*, one small Raft group (a few
-  replicas that elect a leader and commit a change once a majority holds it), never on the I/O
+- **Placement table, table epoch, control plane.** The table maps every PG to its members; each
+  new table gets a higher *table epoch*. It lives in the *control plane*, one small Raft group (a
+  few replicas that elect a leader and commit a change once a majority holds it), never on the I/O
   path.
-- **Peering.** What a new primary does before its first write: it stops the old epoch from
-  finishing writes and agrees with the members on the newest version of every chunk (a Ceph term).
+- **Interval.** A run of tables in which one PG's members stay the same. The table numbers each
+  PG's intervals; a PG gets a new interval only when its own members change (a Ceph term).
+- **Peering.** What a new primary does before its first write: it stops the PG's earlier
+  intervals from finishing writes and agrees with the members on the newest version of every
+  chunk (a Ceph term).
 - **Lease, support epoch.** A lease is a right that expires on its own unless renewed; a primary
   serves reads only under a *read lease* from its PG's other live members. A *support epoch*
-  numbers one unbroken run of a lease. See
+  numbers one unbroken run of a lease between two nodes; it has nothing to do with the table
+  epoch. See
   [coordination and failure](../docs/glossary.md#coordination-and-failure).
 - **Monotonic clock, drift, slewing.** A monotonic clock only moves forward, unlike wall-clock
   time; *drift* is how differently fast two clocks run. A time daemon *slews* a clock when it
@@ -90,7 +94,7 @@ sequenceDiagram
     participant C as Node C
     participant Y as Client Y, new table
     Note over X,A: A partition cuts A and X off from B, C and the control plane
-    Note over B,C: Epoch 42 is published, B is primary
+    Note over B,C: Table 42 is published, B is primary
     Y->>B: write dog to chunk 7
     B->>C: replicate dog
     C-->>B: ok
@@ -129,13 +133,16 @@ reason. Raft is covered in [08-the-metastore.md](08-the-metastore.md).
 | --- | --- | --- | --- |
 | Who is in charge | Timeouts alone | Nothing to build | Split brain |
 | Who is in charge | Raft majority (etcd, rock-solid metadata) | No outside authority | 3 copies survive 1 failure |
-| Who is in charge | **Appointed primary, epochs, peering (Ceph, rock-solid data)** | An acknowledged write survives while any one member does; writes continue down to `min_live` members | Needs the control plane, peering before writes |
+| Who is in charge | **Appointed primary, numbered intervals, peering (Ceph, rock-solid data)** | An acknowledged write survives while any one member does; writes continue down to `min_live` members | Needs the control plane, peering before writes |
 | Fresh reads | Ask a majority on every read (Raft's ReadIndex) | No clock assumptions | A round trip per read |
 | Fresh reads | Tick-counted lease (etcd-raft) | No round trip | Stops when idle; overlap up to one election timeout |
 | Fresh reads | Central liveness record (CockroachDB epoch leases) | One renewal per node | Its outage expires every lease at once |
 | Fresh reads | **Node-pair leases, support epochs (CockroachDB leader leases)** | No central record, no synced clocks, cost independent of PG count | Bounded oscillator drift needed, so each lease is counted on two clocks; a restarted node sits out one lease |
+| Stale requests | One epoch for the whole table, every older one refused | Simple | Every table change makes every write in flight retry |
+| Stale requests | **Each PG's interval, checked per request (Ceph)** | A table change disturbs only the PGs it changes | Every table entry carries an interval number; peering must reach every interval since the last activated one |
 | Versions | Plain counter | Simple | Two primaries reuse a number |
-| Versions | **Epoch + counter (Ceph `eversion_t`)** | Version alone tells writes apart | 24 bits of every version spent on the epoch |
+| Versions | Table epoch + counter | Version alone tells writes apart | The epoch field fills at the whole cluster's rate |
+| Versions | **PG interval + counter (Ceph `eversion_t` with its map epoch, Vitastor with a per-PG epoch)** | Version alone tells writes apart, and the field grows only with the PG's own changes | 32 bits of every version spent on the interval; a counter that runs out costs the PG a new interval |
 | Stale clients | Client-side timeout only | Simple | A paused client writes late |
 | Stale clients | Each server expires its own clients (Lustre, CephFS's metadata servers) | No central authority | Safe only where one server holds both the locks and the data (Lustre); otherwise one server's timeout must evict the client everywhere (CephFS) |
 | Stale clients | **Expiry by the control plane, fence acknowledged by every storage node** | One verdict per session, late writes are rejected | Locks move only after every storage node confirms |
@@ -144,63 +151,99 @@ Bold rows are what rock-solid picked. The rest of the post explains each one.
 
 ## What rock-solid picked
 
-### 1. Epochs and versions
+### 1. Table epochs, intervals and versions
 
-> **In plain words.** Every time the office changes who holds the pen, it stamps a new edition
-> number on the seating chart. Every edit is labeled with the edition its author was working
-> from, and everyone refuses edits labeled with an old edition. Edits are also numbered
-> "edition.sequence", so two editors in different editions can never produce two different edits
-> with the same label.
+> **In plain words.** Every time the office changes anyone's seat, it stamps a new edition number
+> on the seating chart. But each table group also keeps its own count of how often *its* seats
+> changed, and that count is printed next to it on the chart. An edit is labeled with its group's
+> count, and a group member refuses only edits labeled with an old count of their own group, so
+> moving someone at table 3 does not hold up the edits at table 7. Edits are also numbered
+> "count.sequence", so two editors in different terms can never produce two different edits with
+> the same label.
 
 #### How it works
 
 Only the control plane changes membership. Its leader computes each new placement table and
-commits it as one Raft entry with a new epoch; nodes never compute placement themselves. Any
-change bumps the epoch: a pool created, a disk added, a node failed, a rebalance. Every node
-caches the whole table (it maps PGs, not chunks, so it is small: 2048 PGs × 3 replicas × a 4-byte
-disk ID is 24 KiB), and nodes reject requests carrying a stale epoch. Epochs never go backwards
-on any node, one of the invariants the simulator is to check after every step.
+commits it as one Raft entry with a new *table epoch*, holding only the PG entries that changed
+and a CRC of the whole table it produces; nodes never compute placement themselves. Every node
+caches the whole table (it maps PGs, not chunks, so it is small: 2048 PGs × 3 replicas × a
+4-byte disk ID, plus 8 bytes of interval numbers each, is 40 KiB), applies each change to the
+table before it and checks the CRC, and fetches the whole table if it missed one.
 
-The epoch also lives inside every version number. A version is 64 bits:
+Every change raises the table epoch: a pool created, a disk added, a node failed, a rebalance
+step. Only some changes start a new *interval* of a PG: a change to its members or their order
+(so its primary), a member marked down or up, its pool's `replicas` or `min_live`, a split of
+the PG, or its primary asking for one. Each PG entry in the table carries its interval number.
+Every message about a PG carries the sender's table epoch and the PG's interval number, and a
+member checks only the interval:
 
 ```text
- 63                       40 39                                                 0
-+---------------------------+----------------------------------------------------+
-|  epoch of the primary     |  counter, counted up by that primary               |
-|  that assigned it, 24 bit |  40 bit                                            |
-+---------------------------+----------------------------------------------------+
-  example: epoch 41, counter 7  ->  written "41.7" in this post
+ member's table says PG 7 is in interval 42; a request about PG 7 arrives tagged with interval
+   42  ->  accept, whether the sender's table epoch is older or newer than the member's
+   41  ->  refuse, and answer with the member's table epoch and interval
+   43  ->  the member's table is behind: fetch one at least as new as the sender's, then decide
 ```
 
-*The high bits say who assigned the version, so no two primaries can ever produce the same one.*
+*A table change makes only the writes of the PGs it changed retry.*
 
-A primary that runs out of its 40-bit counter (about 1.1 trillion writes) asks the control plane
-for a new epoch. Versions therefore grow across primaries, and a member that comes back holding a
-write its new primary never saw is told apart by the version alone. In the first diagram, A's
-write would be 41.8 and B's 42.1: different numbers, and 42.1 is newer. With a plain counter both
-would be 8, and the stale write could pass for the current one.
+Comparing a PG's member lists in two tables would not be enough: a member removed and added back
+leaves the lists equal, though it missed the writes in between, whereas its interval number has
+gone up twice. Ceph checks the same way, with its own intervals: a replica drops an operation
+only if its PG started a new interval since the operation's map epoch. In the
+[PG epochs spike](#evidence)'s homelab year on 10 nodes, a table change touched 22% of PGs on
+average, and 2 to 4% when rebalancing moved one member per table, so 4.4 to 46 times fewer writes
+had to retry than if every older table epoch were refused. On a 3-node cluster every PG has a
+member on every node, so a node reboot still changes every PG. Table epochs and interval numbers
+never go backwards on any node, one of the invariants the simulator is to check after every step.
+
+The interval number also lives inside every version. A version is 64 bits:
+
+```text
+ 63                                32 31                                 0
++------------------------------------+------------------------------------+
+|  interval of the chunk's PG when   |  counter of the chunk's writes in  |
+|  its primary ordered the write     |  that interval, from 1             |
++------------------------------------+------------------------------------+
+  example: interval 41, counter 7  ->  written "41.7" in this post
+```
+
+*The high bits say which interval, and so which primary, assigned the version, so no two
+primaries can ever produce the same one.*
+
+Versions therefore grow across primaries, and a member that comes back holding a write its new
+primary never saw is told apart by the version alone. In the first diagram, A's write would be
+41.8 and B's 42.1: different numbers, and 42.1 is newer. With a plain counter both would be 8,
+and the stale write could pass for the current one. A chunk's counter runs out after 4.3 billion
+writes in one interval, more than an hour even at a million writes a second; its primary then
+asks for a new interval of that one PG. The table epoch could not take the counter's place in the
+high bits: it moves with every change anywhere, and one node flapping every 10 seconds with its
+members moved one per table would fill 32 bits of table epochs in 207 days, against 272 years for
+the busiest PG's intervals ([post 02](02-chunks-and-placement.md)).
 
 ### 2. Peering: the new primary before its first write
 
 > **In plain words.** Before the new editor makes a single change, they walk round to the people
-> who were in the room under the old edition, ask them to switch to the new edition, and compare
-> notes on what the latest saved state of every cell is. Once any one person who was in the old
-> room has switched, the old editor can no longer get a change saved, because saving needs
-> everyone in the old room to agree.
+> who sat at the group under its earlier counts, ask them to switch to the new count, and compare
+> notes on what the latest saved state of every cell is. Once any one person from an earlier
+> sitting has switched, that sitting's editor can no longer get a change saved, because saving
+> needs everyone at that sitting to agree.
 
 #### How it works
 
-The write rule does most of the work. A write tagged with epoch `e` completes only when every
-member that is live in `e` acknowledges it, and a member that has adopted `e + 1` rejects anything
-tagged `e`. So before it accepts writes, the new primary *peers*:
+The write rule does most of the work. A write tagged with interval `j` completes only when every
+member that is live in `j` acknowledges it, and a member whose table has moved the PG past `j`
+refuses it. So before it accepts writes in a new interval `k`, the new primary *peers*:
 
-1. It gets at least one member that was live in `e` to adopt `e + 1`.
-2. It collects the newest version of every chunk from each member it reaches.
+1. For every interval of the PG since the last one whose primary finished peering (its last
+   *activated* interval), it gets at least one member that was live in that interval to adopt a
+   table with interval `k`.
+2. It collects, from each member it reaches, the newest version of every chunk and that member's
+   *missing list* (below).
 
-After step 1 no write tagged `e` can complete, because each one needs that member's
-acknowledgment, which it will now refuse. And every write already acknowledged in `e` is on that
-member, because acknowledgment needed every live member. Here is the first race again, with the
-rule in place:
+After step 1 no write tagged with an earlier interval can complete, because each one needs the
+acknowledgment of a member that will now refuse it. And every write already acknowledged in one
+of those intervals is on that member, because acknowledgment needed every live member. Here is
+the first race again, with the rule in place; the PG goes from interval 41 to 42:
 
 ```mermaid
 sequenceDiagram
@@ -209,14 +252,14 @@ sequenceDiagram
     participant C as Node C, replica
     participant B as Node B, new primary
     participant Y as Client Y, new table
-    Note over B: Table with epoch 42 arrives, B is primary
-    B->>C: peer, adopt epoch 42 and send your newest versions
+    Note over B: New table arrives, PG in interval 42, B is primary
+    B->>C: peer, adopt interval 42 and send your newest versions
     C-->>B: adopted 42, chunk 7 is at 41.7
     X->>A: write cat to chunk 7
-    A->>C: version 41.8 is cat, tagged epoch 41
-    C-->>A: rejected, I am in epoch 42
-    A->>B: version 41.8 is cat, tagged epoch 41
-    B-->>A: rejected, I am in epoch 42
+    A->>C: version 41.8 is cat, tagged interval 41
+    C-->>A: rejected, this PG is in interval 42
+    A->>B: version 41.8 is cat, tagged interval 41
+    B-->>A: rejected, this PG is in interval 42
     Note over X,A: The write can never complete, so X is never told OK
     Y->>B: write dog to chunk 7
     B->>C: version 42.1 is dog
@@ -228,8 +271,17 @@ sequenceDiagram
 longer finish anything.*
 
 A side benefit of this shape is that a crash does not need the old primary to cooperate. It can
-be dead, partitioned or asleep; once one member from its epoch has moved on, its writes are
+be dead, partitioned or asleep; once one member from its interval has moved on, its writes are
 stuck.
+
+Why every interval since the last activated one, not just the previous one? Tables can come
+faster than peering. If PG 7 goes from interval 41 to 42 and, before 42's primary has peered, on
+to 43, then a member that was live in 42 may never have been a member in 41. Getting it to adopt
+43 stops interval 42's writes but not 41's. So 43's primary reaches a member of 41 too. An
+interval with fewer live members than `min_live` accepted no writes and is skipped; if no member
+of another can be reached, the PG waits, as Ceph's waits in its `down` state. The table keeps,
+for each PG, its last activated interval, which primaries report on their heartbeats, and the
+members of the intervals since; usually that is just the previous one.
 
 #### Which versions to keep
 
@@ -238,17 +290,18 @@ be on some members and not others, and the client may or may not have been told 
 primary cannot tell an acknowledged write from one that reached every member it sees but was
 never acknowledged. So it uses the one fact it can prove:
 
-**The keep rule: a version is kept unless some member that was live in `e` lacks it.** A member
-that lacks it proves the write was never acknowledged, since acknowledgment needed every live
-member.
+**The keep rule: a version of the last activated interval is kept unless some member that was
+live in that interval neither holds it nor lists it as missing.** A member that lacks it proves the
+write was never acknowledged, since acknowledgment needed every live member. Every version below
+a kept one is kept too.
 
 Keeping an unacknowledged write is fine: a write whose client never heard back may land or not.
 Losing an acknowledged one is not, and the rule never does. Here is chunk 7 after A crashed
-in the middle of sending 41.8, which reached only B. The new epoch 42 makes B primary and adds a
+in the middle of sending 41.8, which reached only B. Interval 42 makes B primary and adds a
 fresh disk D in A's place:
 
 ```text
-chunk 7 when B starts peering for epoch 42
+chunk 7 when B starts peering for interval 42
 
   member            live in 41?   newest version   its log holds
   A (old primary)   yes           crashed, cannot be reached
@@ -263,7 +316,7 @@ chunk 7 when B starts peering for epoch 42
 ```
 
 *The new primary's own newest write is the one thrown away: B cannot trust its own disk more than
-the rule.* Had C been marked down during epoch 41, so not live in it, 41.8 on B alone could have
+the rule.* Had C been marked down during interval 41, so not live in it, 41.8 on B alone could have
 been acknowledged, and it would be kept. The rule hinges on who was live, not on who holds the
 newest version.
 
@@ -271,9 +324,9 @@ The decision for each chunk, as a flow:
 
 ```mermaid
 flowchart TD
-    T["Table with epoch e+1 names this node primary"] --> AD["Get at least one member that was live in e to adopt e+1"]
-    AD --> CO["Collect the newest version of every chunk from each member reached"]
-    CO --> Q{"For each chunk: does some member that was live in e lack this version?"}
+    T["Table names this node primary of the PG in interval k"] --> AD["For every interval since the last activated one: get a member live in it to adopt k"]
+    AD --> CO["Collect every chunk's newest version and every member's missing list"]
+    CO --> Q{"For each chunk: does some member live in the last activated interval neither hold nor list this version?"}
     Q -- yes --> DR["Drop it: it was never acknowledged"]
     Q -- no --> KE["Keep it: it may have been acknowledged"]
     DR --> RE["Write the authoritative member's blocks under a new version to every member that lacks them or logged the dropped version"]
@@ -287,6 +340,24 @@ kept versions are on the new primary, a write that covers only part of one of it
 its merge needs the newest kept block as its base (next section). A write of whole blocks needs no
 base and goes ahead, as Ceph's primary holds writes only to objects it is missing or still
 recovering.
+
+#### What an activated interval decided stays decided
+
+> **In plain words.** Each colleague keeps a to-do slip of the cells they still have to copy from
+> the authoritative sheet. If the editor changes again before the copying is done, the next editor
+> reads the slips and knows what was decided, even where nobody finished copying.
+
+Recovery takes time, and the PG can change interval again before it is done. Say interval 42
+keeps version 41.7 of chunk 7 and starts copying it to the new disk D; then 42 ends, and the next
+primary reaches only B and D, and D lacks 41.7. Had 42 already acknowledged a write merged on
+41.7, dropping it would lose acknowledged bytes. So before a primary *activates*, starting to
+accept writes, every member persists a *missing list*: for each chunk it lacks, or holds a
+dropped version of, the kept version it still has to receive. Recovery removes an entry once it
+has copied the blocks, and a member never serves a chunk on its list. A later peering then reads
+the decision from the lists of any member live in the activated interval, and a chunk whose kept
+version no reachable member holds is reported unfound, never replaced by an older one. Ceph's
+members keep a missing set for the same reason. The rule across several intervals is a candidate
+for now: the phase 2 model has to confirm it ([Evidence](#evidence)).
 
 #### Dropped versions are always a chunk's newest
 
@@ -315,7 +386,7 @@ with that rule stayed correct through 3,670 primary changes with 8 writes pipeli
 > **In plain words.** Each disk's log only ever appends, so the way to take back a write is to
 > append something newer over it.
 
-B, as a replica in epoch 41, put 41.8 into its index as soon as it was durable (replicas do,
+B, as a replica in interval 41, put 41.8 into its index as soon as it was durable (replicas do,
 since they serve no live reads), so the recovery copy fixes what B holds right away. It also
 matters later. After a crash a disk rebuilds its index by replaying its log
 ([04-one-log-per-disk.md](04-one-log-per-disk.md)). Replay applies every logged record, and the
@@ -326,8 +397,11 @@ than the 41.7 blocks it replaced. This is Ceph's approach to divergent objects, 
 [chunk epochs spike](#evidence) showed both halves: without the copy the dropped write comes
 back; with it, replay converges.
 
-The same rule covers a primary that restarts without any membership change. It peers again, in
-its own epoch or a new one, before it serves anything.
+A primary that restarts without any membership change asks for a new interval of each PG it
+leads and peers in it before it serves anything. Peering again in its old interval would not be
+safe: a write its previous run sent can still sit in a member's socket buffer and land after that
+member answered peering, under a version the restarted primary is about to give to other data. In
+the new interval the member refuses it. The table change touches only the PGs that node leads.
 
 #### Reads see only committed versions
 
@@ -350,12 +424,15 @@ loses, since the new primary may be a member that never received it.
 #### How it works
 
 A primary serves reads for a PG only while it holds an unexpired read lease from each of the PG's
-other live members. A member that granted a lease does not take part in peering a new epoch that
-moves the primary away from that node until the lease expires, or until the old primary has
-adopted the new epoch itself. Peering needs at least one member that was live in the old epoch,
-and every such member, the new primary among them, granted the old primary a lease, so peering
-cannot finish before those leases run out. In every planned change the old primary adopts the
-new epoch itself, so planned moves never wait for a lease.
+other live members. A member that granted a lease does not take part in peering a new interval
+that moves the PG's primary away from that node until the lease expires, or until the old primary
+has adopted that interval itself. Peering needs at least one member that was live in the last
+activated interval, the only one whose primary can have served reads, and every such member, the
+new primary among them, granted that primary a lease, so peering cannot finish before those
+leases run out. In every planned change the old primary adopts the new interval itself, so
+planned moves never wait for a lease. A new interval that keeps the primary, such as a replaced
+replica, needs no wait at all: the primary keeps serving reads and holds only writes while it
+re-peers.
 
 `primary_lease` defaults to 4 s, deliberately shorter than failure detection (below).
 
@@ -382,7 +459,7 @@ A (holder)   *===============================================*
                  |                                                |  4 s on B's clock,
                  v                                                v  counted from the grant
 B (grantor)      *================================================*--> B may now peer an
-                                                                       epoch that moves
+                                                                       interval that moves
              <-->                                            <---->    the primary off A
              message delay                                   40 ms margin + delay
 ```
@@ -453,7 +530,7 @@ sequenceDiagram
     B-->>A: granted for 4 s
     Note over A: At 1 s, A suspends. CLOCK_MONOTONIC stops.
     Note over B,C: At 4 s, the grants to A lapse
-    Note over B,C: At about 6 s, A is marked down. Epoch 42, B is primary
+    Note over B,C: At about 6 s, A is marked down. Interval 42, B is primary
     Y->>B: write dog to chunk 7
     B->>C: version 42.1 is dog
     C-->>B: ok
@@ -485,10 +562,12 @@ suspend a leader's node past its lease (planned placement and MetaStore faults).
 
 A is primary of PG 17 and holds B's grant under support epoch 7. A partition lasts 10 s. A's own
 clock ends its lease after 4 s, so A stops serving reads; B's grant lapses on B's clock, and B
-helps peer epoch 42, which moves PG 17 to C. The partition heals before table 42 reaches A, and
+helps peer interval 42 of PG 17, which moves the PG to C. The partition heals before that table
+reaches A, and
 A's next heartbeat asks B to renew. If that renewal simply continued the old grant, everything
 recorded under it would continue too, as if the gap never happened, though B spent the gap
-helping a new primary. So each grant carries a *support epoch*. Once a grant lapses on the
+helping a new primary. So each grant carries a *support epoch*, a number that belongs to the
+node pair and has nothing to do with the table epoch or PG 17's interval. Once a grant lapses on the
 grantor's clock, the grantor bumps the support epoch and never renews the old one:
 
 ```mermaid
@@ -499,8 +578,8 @@ sequenceDiagram
     B-->>A: granted under 7
     Note over A,B: Partition for 10 s. A's lease ends on A's clock after 4 s
     Note over B: The grant lapses on B's clock. B moves to support epoch 8
-    Note over B: B helps peer epoch 42, which moves PG 17 from A to C
-    Note over A,B: The partition heals before table 42 reaches A
+    Note over B: B helps peer PG 17's interval 42, which moves it from A to C
+    Note over A,B: The partition heals before that table reaches A
     A->>B: heartbeat, renew under support epoch 7
     B-->>A: refused, support epoch 7 has lapsed
     Note over A: Anything A held under 7 is over. A asks afresh under 8
@@ -512,13 +591,13 @@ What the design settles: a lease taken under a lapsed support epoch never comes 
 Raft promise made under it ends (post 08 explains those promises). What it leaves open is which
 PGs a fresh grant under 8 covers: a grant covers "every PG the pair shares", but the design text
 does not say by whose table, B's current one or A's stale one. The safe reading, which is this
-post's and not the design's, is the grantor's current table: B, already in epoch 42, shares no
+post's and not the design's, is the grantor's current table: B, already holding PG 17 in interval 42, shares no
 primary role for PG 17 with A, so A gets no lease for it and serves no stale read.
 
 #### The restart rule
 
 A node that restarts has forgotten what it granted. It may have granted node A a lease a moment
-before it crashed; if it came straight back and joined peering for a new epoch that moves A's PGs
+before it crashed; if it came straight back and joined peering for a new interval that moves A's PGs
 elsewhere, A could still be serving reads under that forgotten grant. So for one `primary_lease`
 (4 s) after it starts, a node grants no vote and joins no peering. Every grant it could have made
 before the crash has lapsed by then.
@@ -559,8 +638,8 @@ Only the control plane changes membership. Every node sends it a heartbeat each 
 marks a node down after `node_down_after` (default 5 s) without one. A primary that waits more
 than `member_timeout` (default 1 s) for a member's acknowledgment reports it, and the control plane
 marks the member down at once if it also fails a direct probe. Marking down means publishing a new
-table, so a new epoch. Until that new epoch, writes to the affected PGs wait, so a crash pauses
-those writes for up to `node_down_after`.
+table, which starts a new interval of every PG with a member on the node. Until that table, writes
+to those PGs wait, so a crash pauses them for up to `node_down_after`; the other PGs never notice.
 
 Here is a primary crash, end to end:
 
@@ -571,7 +650,8 @@ Here is a primary crash, end to end:
              (each grant runs 4 s from its last renewal, which was at or before 0 s;
              up to 5.2 s of real time while a time daemon slows a grantor's clock)
  t = 5 s     no heartbeat from A for node_down_after: the control plane marks A down
-             and commits a new table, epoch 42, naming B primary of A's PGs
+             and commits a new table: each of A's PGs gets a new interval, say 42,
+             naming B its primary
  t > 5 s     B peers (C adopts 42, B collects the newest versions) before it accepts
              writes, and recovers divergent chunks. Reads resume once B holds read
              leases from C and the new members.
@@ -606,14 +686,15 @@ flowchart TD
     S -- no --> R
     S -- yes --> M{"Would marking it down leave a PG below min_live?"}
     M -- yes --> K["Keep it. Those PGs stay slow and the pool reports them"]
-    M -- no --> D["Mark the disk down as if it had failed: new epoch"]
+    M -- no --> D["Mark the disk down as if it had failed: its PGs get new intervals"]
     D --> P["Keep probing it"]
     P --> N{"Latency normal for a whole slow_disk_window?"}
     N -- no --> P
     N -- yes --> J["Let it rejoin"]
 ```
 
-*Two guards: never trade slowness for unavailability, and never let a flapping disk churn epochs.*
+*Two guards: never trade slowness for unavailability, and never let a flapping disk churn its
+PGs' intervals.*
 
 The settings are `slow_disk_factor` (default 10×) and `slow_disk_window` (default 1 minute). The
 `min_live` guard comes from the pool: a PG with fewer than `min_live` live members (default
@@ -712,7 +793,7 @@ Three rules work together:
    applies the version, rejects from then on every write from that session, including ones
    already queued, and acknowledges.
 3. **Locks move only after every storage node has confirmed.** Once every storage node has
-   acknowledged, or has been marked down in a committed epoch, the leader commits the version as
+   acknowledged, or has been marked down in a committed table, the leader commits the version as
    acknowledged and the session leaves the table. Only then do owners free its locks, drop its
    open registrations and count its recalls as answered.
 
@@ -746,8 +827,12 @@ the fence or been marked down.*
 
 A write the fenced client got applied before the fence is therefore ordered before every write of
 the next lock holder. A storage node that was marked down instead of acknowledging cannot finish
-an old write either: once its PGs' new primaries have peered, no write tagged with the old epoch
-completes. It is marked up again only once its heartbeat reports the current table. The fenced
+an old write either: marking it down started a new interval of each of its PGs, and once their
+new primaries have peered, no write tagged with an earlier interval completes. In every other PG
+each member has applied the fence and checks it on every write it receives, replicated ones
+included. It is marked up again only once its heartbeat reports the current session table. The
+session table has its own version, not a change to the placement table, so its acknowledgments
+count fences alone and a fence never waits behind a rebalance. The fenced
 client must start a new session and reopen its files, and its applications get errors, never
 silently stale data. The same machinery serves file locks (`flock`), cache recalls, snapshot cuts
 and shared block volumes; see
@@ -804,6 +889,24 @@ bytes; 500 seeds per test, no I/O:
 M7 is why the in-order logging behind the suffix rule matters, and M8 why a partial-block write
 waits for its chunk's recovery.
 
+**The PG epochs spike** ([appendix](../docs/design.md#appendix-pg-epochs-spike),
+[`spikes/pg-epochs/`](../spikes/pg-epochs/)) is a model with no I/O: it builds a placement table
+of 2,048 PGs by the design's refill-and-rebalance rules on 3 and 10 nodes, then counts table
+epochs and per-PG interval changes over a homelab year (24 reboots per node, outages, disk
+failures and additions, fail-slow marks) and under a flapping node. The
+[PG epochs study](../studies/pg-epochs/README.md) reads how Ceph and Vitastor do the same jobs.
+
+| Test | Result |
+| --- | --- |
+| A year on 10 nodes, one table per step | 778 tables; a table changes 22% of PGs on average: **4.4 times fewer writes disturbed** than refusing every older table epoch |
+| Same, one table per moved member | 4,277 to 8,226 tables, 2 to 4% of PGs each: **24 to 46 times fewer** |
+| A year on 3 nodes | A node event changes every PG; per-PG checks save 1.35 times with one table per step |
+| One node flapping every 10 s, members moved one per table | Table epochs fill 24 bits in **19 hours** and 32 bits in 207 days; the busiest PG's intervals fill 32 bits in **272 years** |
+| A 32-bit counter per chunk | Runs out after 1.2 hours at a million writes a second, 50 days at a thousand |
+
+The first rows are why requests are checked per PG; the flapping row is why a version's high half
+counts the PG's intervals, not table epochs.
+
 **The clock slew spike** ([appendix](../docs/design.md#appendix-clock-slew-spike),
 [`spikes/clock-slew/`](../spikes/clock-slew/)) asked how far a time daemon can bend the clocks
 leases count on. Changing the host's clock was ruled out, so it built Linux 6.18 as User-Mode
@@ -833,18 +936,31 @@ and [Metadata layer](../docs/design.md#metadata-layer-metastore).
 
 **What is not measured yet.** No spike exercises peering, read leases or fencing; the chunk
 epochs spike lists "peering itself" as not covered, and the clock slew spike measured the clocks
-leases count on, not the leases. The roadmap's answer is phase 2: TLA+ models
-(a formal specification language, checked by its model checker, TLC) of epoch changes, leases and
-sessions with fence acknowledgments, before the real protocols are written. Their properties are
-fixed: no PG serves reads from two primaries at once, no write tagged `e` completes after `e + 1`
-activates, no fenced session's write is applied, and no lock reaches a new holder while a primary
-would still accept the old holder's writes. Phase 3 then checks the same invariants in the
+leases count on, not the leases; the PG epochs spike counts tables, not messages. The roadmap's
+answer is phase 2: TLA+ models (a formal specification language, checked by its model checker,
+TLC) of epoch changes, leases and sessions with fence acknowledgments, before the real protocols
+are written. Their properties are fixed: no PG serves reads from two primaries at once, no write
+tagged with an interval completes after a later interval of its PG activates, no version an
+activated interval kept is dropped later, a table that leaves a PG's interval alone never fails
+its writes, no fenced session's write is applied, and no lock reaches a new holder while a
+primary would still accept the old holder's writes. The model must also find the counterexamples
+behind this post's rules: peering that stops only the previous interval, a member removed and
+added back, a restarted primary peering in its old interval, and a primary that activates before
+the missing lists are durable. Phase 3 then checks the same invariants in the
 deterministic simulator under faults such as a partitioned old primary, clock drift, a crash
 during peering and a node restarted within a lease it granted.
 
 ## Trade-offs and what it costs us
 
-- **A crash pauses writes for up to 5 s** (`node_down_after`) on the crashed primary's PGs.
+- **A crash pauses writes for up to 5 s** (`node_down_after`) on the crashed primary's PGs. On a
+  3-node cluster that is every PG, since every PG has a member on every node.
+- **Peering can wait on a past interval.** If no member of an interval since the last activated
+  one can be reached, and that interval had at least `min_live` live members, the PG waits for
+  one or for an operator, as Ceph's does in its `down` state.
+- **A flapping node churns its PGs.** Nothing damps a node whose heartbeats stop for 5 s at a
+  time: each flap gives its PGs two new intervals, and with refills moved one member per table,
+  1,202 tables. Interval numbers outlast that for centuries; the data moved back and forth does
+  not come for free.
 - **A partitioned primary stops serving reads within 4 s**, even if its disk is fine.
 - **Correctness depends on oscillators, not on the time daemon.** Counting each lease on two
   clocks means a daemon's slew, up to 22.6%, only shortens a holder's lease or lengthens a
@@ -878,10 +994,14 @@ during peering and a node restarted within a lease it granted.
 - **A gap in the design text, not listed among its open questions.** Whether a fresh node-pair
   grant covers PGs by the grantor's current table or the holder's.
 - **Open question: incarnation fencing in the epoch-change model.** A dead daemon's write could
-  be delivered late to an old primary in epoch `e`, or to a new primary that has not yet seen the
-  successor's incarnation. Does each primary's table of newest incarnations need to survive a
-  primary change, or does the epoch rule already reject every such write? The design lists this
-  under [open questions](../docs/design.md#roadmap-and-open-questions).
+  be delivered late to an old primary in interval `j`, or to a new primary that has not yet seen
+  the successor's incarnation. Does each primary's table of newest incarnations need to survive a
+  primary change, or does the interval rule already reject every such write? The design lists
+  this under [open questions](../docs/design.md#roadmap-and-open-questions).
+- **Open question: the keep rule across several intervals.** Is "keep a version of the last
+  activated interval unless a member live in it neither holds nor lists it, and keep everything
+  below a kept version" complete when recovery is cut short by the next interval, or when a
+  member the activated interval never reached comes back? The phase 2 model checks it.
 - **Open question: admission across a placement group.** A disk whose cleaner falls behind
   slows its own writes, and so its acknowledgments. Should members report admission rates to the
   primary, as CockroachDB's followers return tokens, so one cleaning disk does not stall a whole
@@ -902,9 +1022,12 @@ during peering and a node restarted within a lease it granted.
   [Testing strategy](../docs/design.md#testing-strategy) (faults and invariants),
   [Alternatives considered](../docs/design.md#alternatives-considered),
   [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions).
-- Spikes: [chunk epochs](../spikes/chunk-epochs/), [multi-Raft](../spikes/multi-raft/),
+- Spikes: [chunk epochs](../spikes/chunk-epochs/), [PG epochs](../spikes/pg-epochs/),
+  [multi-Raft](../spikes/multi-raft/),
   [raft rounds](../spikes/raft-rounds/), [clock slew](../spikes/clock-slew/),
   [sub-block writes](../spikes/sub-block-writes/).
+- Studies: [PG epochs](../studies/pg-epochs/README.md),
+  [session expiry](../studies/session-expiry/README.md).
 - Code: [`internal/core/peer.go`](../internal/core/peer.go) and
   [`peer_test.go`](../internal/core/peer_test.go), [`internal/core/event.go`](../internal/core/event.go)
   (`Tick` and `Context`).

@@ -512,7 +512,7 @@ sequenceDiagram
   grantor bumps the counter and never renews the old one, so support given under it can never
   come back after a partition heals.
 - A follower that supports a leader records the leader's node and the support epoch of its own
-  node's grant to that node. While that grant holds in that epoch, it neither campaigns nor grants
+  node's grant to that node. While that grant holds in that support epoch, it neither campaigns nor grants
   a vote or pre-vote in the group, except to a planned transfer target.
 - The leader's lease ends at the **quorum-th latest expiry** among the voters that fortified it,
   itself included. With three voters and one follower fortified, the lease runs to that
@@ -571,9 +571,10 @@ reads and writes on open handles carry on. See
 > alive. It changes rarely and is never on the I/O path.
 
 The `ctl/...` keys live in one dedicated control-plane Raft group, not sharded. It stays small
-because it maps placement groups, not chunks: 2048 PGs × 3 replicas × a 4-byte disk ID is 24 KiB
-([02-chunks-and-placement.md](02-chunks-and-placement.md)). Its leader commits each new placement
-table as one Raft entry with a new epoch, marks a node down after `node_down_after` (5 s) without
+because it maps placement groups, not chunks: 2048 PGs × 3 replicas × a 4-byte disk ID, plus each
+PG's interval numbers, is 40 KiB ([02-chunks-and-placement.md](02-chunks-and-placement.md)). Its
+leader commits each new placement table as one Raft entry holding the changed PG entries, with a
+new table epoch, marks a node down after `node_down_after` (5 s) without
 a heartbeat, renews each node's client session on that same heartbeat, and publishes expired
 sessions as fenced. Every node caches its tables.
 

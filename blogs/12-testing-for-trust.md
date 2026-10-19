@@ -239,7 +239,7 @@ Each state machine registers its invariants with the simulator's checker "in the
 - a truncated or punched range reads as zeros;
 - a chunk index rebuilt from the log equals the one recovered from its manifest;
 - a replayed request returns its first result and changes nothing;
-- epochs (the version numbers of the placement table) never go backwards on any node.
+- table epochs (the version numbers of the placement table) and each PG's interval number never go backwards on any node.
 
 The invariant checker is planned; one of its checks already exists, `chunkstore.(*Index).Check`, which verifies that a chunk's map never holds two entries for one block.
 
@@ -410,7 +410,7 @@ From the [Roadmap and open questions](../docs/design.md#roadmap-and-open-questio
 
 - **Phase 1 items still open:** the scheduler and trace records, the full simulated disk, crash at every action, the crash oracle, the invariant checker, the history recorder, the seed runner, data-driven regression files, the metamorphic tests and the LSM run checks.
 - **Metamorphic cost in CI** is an open question: how many option sets per seed, and how many of them random (Pebble runs as many random sets as standard ones), find the most planted bugs per CI minute?
-- **Incarnation fencing in the epoch-change model** is an open question for phase 2's TLA+ work: does a dead daemon's late write need a per-primary table that survives a primary change, or does the epoch rule already reject it?
+- **Incarnation fencing in the epoch-change model** is an open question for phase 2's TLA+ work: does a dead daemon's late write need a per-primary table that survives a primary change, or does the interval rule already reject it?
 - **Cross-version runs** start with phase 6: from the first usable release on, the simulator opens the previous release's saved disk images before its own seeds run, as Pebble's cross-version test does.
 
 There are no entries in `docs/tech-debts.md` for the testing machinery today.

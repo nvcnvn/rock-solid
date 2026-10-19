@@ -43,13 +43,15 @@ The [glossary](../docs/glossary.md) has longer entries for all of these.
   [Post 07](07-pools-and-redundancy.md) explains it.
 - **Failure domain.** Things that can fail together, such as one node. Copies of a chunk go to
   different failure domains.
-- **Placement table and epoch.** The map from each PG to its members. Its version number is the
-  epoch. The word "epoch" has two other meanings in the design; see
+- **Placement table, table epoch and interval.** The map from each PG to its members. Its version
+  number is the *table epoch*. A PG's *interval* is a run of tables in which that PG's members stay
+  the same; the table numbers each PG's intervals. The word "epoch" has two other meanings in the
+  design; see
   [Words with more than one meaning](../docs/glossary.md#words-with-more-than-one-meaning).
 - **Control plane.** The one replicated group (a Raft group, a set of nodes that agree on a log of
   changes) that holds cluster-wide state such as pools and the placement table.
-- **Peering.** What a new primary does before it takes writes: it gathers the latest version of
-  every chunk from the other members. [Post 03](03-epochs-leases-and-failures.md) covers it.
+- **Peering.** What a new primary does before it takes writes: it stops earlier intervals of the
+  PG from completing writes and gathers the latest version of every chunk from the members. [Post 03](03-epochs-leases-and-failures.md) covers it.
 - **Version and committed.** A version is a number stamped on every write to a chunk, larger than
   every earlier one. A version is committed once every live member of the chunk's PG holds it,
   which is also the moment its write is acknowledged. A version not yet committed is *pending*.
@@ -321,17 +323,19 @@ Real systems use four shapes:
 > **In plain words.** One person writes the seating chart; everyone gets a photocopy. The chart is
 > short because it seats groups, not individuals, so photocopying the whole thing is cheap. When
 > someone leaves or a new chair arrives, the writer changes as few seats as possible, gives the
-> chart a new number, and hands out new copies. Anyone holding an old copy is turned away until
-> they get the new one.
+> chart a new number, and hands out new copies, sending only the changed lines. Each table group
+> also has its own count of how often its seats changed. Someone holding an old copy is turned
+> away only by a group whose seats changed since; the other groups carry on.
 
 ### How it works: the table
 
-The table maps each PG to its members and carries an epoch number. Its size depends on the pools'
-PG counts and widths, not on how much data is stored:
+The table maps each PG to its members, primary first, and to its current *interval* number; the
+table as a whole carries a *table epoch*, its version. Its size depends on the pools' PG counts and
+widths, not on how much data is stored:
 
 ```text
- 2048 PGs x 3 replicas  x 4-byte disk ID =  24 KiB    (a rep3 pool)
- 4096 PGs x 18 members  x 4-byte disk ID = 288 KiB    (an ec16-2 pool: 16 data + 2 parity)
+ 2048 PGs x (3 replicas  x 4-byte disk ID + 8 bytes of interval numbers) =  40 KiB   (rep3)
+ 4096 PGs x (18 members  x 4-byte disk ID + 8 bytes of interval numbers) = 320 KiB   (ec16-2)
 
  the same whether the cluster holds 1 GB or 100 TB
 ```
@@ -339,11 +343,13 @@ PG counts and widths, not on how much data is stored:
 So the table is **not sharded**. It lives in the single control-plane Raft group, every node
 caches a full copy, and it changes only on pool, disk and node events, never on the I/O path. In
 the daemon it is an immutable value published through an atomic pointer: a reader loads the
-current table without a lock, and an update publishes a new one. Any change (pool created, disk
-added, node failed, rebalance) bumps the epoch, and nodes reject requests that carry a stale
-epoch. That rejection, and how a PG moves safely from one epoch to the next while writes are in
-flight, is where the hardest bugs live; [post 03](03-epochs-leases-and-failures.md) is about
-exactly that.
+current table without a lock, and an update publishes a new one. Every change (pool created,
+disk added, node failed, rebalance step) raises the table epoch, but only a change to a PG's
+members starts a new interval of that PG, and a member turns away only requests tagged with an
+earlier interval of their PG. A rebalance step that moves one member of PG 7 therefore leaves the
+writes in flight to the other 2,047 PGs alone. That check, and how a PG moves safely from one
+interval to the next while writes are in flight, is where the hardest bugs live;
+[post 03](03-epochs-leases-and-failures.md) is about exactly that.
 
 What does grow with data lives elsewhere: each disk keeps its own index of the chunks and shards
 it holds, and the mapping of file names to inodes lives in the sharded MetaStore.
@@ -351,7 +357,9 @@ it holds, and the mapping of file names to inodes lives in the sharded MetaStore
 ### How it works: computing a new table
 
 The control-plane leader computes each new table and commits it as one Raft entry with a new
-epoch; nodes never compute placement themselves. The computation is a pure function in the
+table epoch, holding only the PG entries it changes and a CRC32C of the whole table it produces.
+A node that holds the previous table applies the change and checks the CRC; after a gap or a
+mismatch it fetches the whole table. Nodes never compute placement themselves. The computation is a pure function in the
 sans-IO core (code with no network, disk or clock access, so tests can drive it directly), and it
 starts from the previous table, never from scratch:
 
@@ -391,7 +399,7 @@ flowchart TD
     H -- "yes" --> MV["move one member to the eligible disk<br/>furthest below its target"]
     MV --> B
     H -- "no" --> C
-    B -- "no" --> C["commit the new table as one Raft entry<br/>with epoch + 1"]
+    B -- "no" --> C["commit the changed entries as one Raft entry<br/>with table epoch + 1, and interval + 1<br/>for each PG whose members changed"]
 ```
 
 Here is a small worked example. The cluster, PG numbers and disk names are made up for
@@ -401,17 +409,18 @@ nodes with two disks each, and disk `c1` fails:
 ```text
  nodes:   A: a1 a2     B: b1 b2     C: c1 c2     D: d1 d2
 
- epoch 41                   epoch 42 (c1 marked down)
- PG 7:   [a1, c1, d2]       PG 7:   [a1, b2, d2]   refill: nodes A and D are taken, so
-                                                   b1, b2 and c2 are eligible; b2 was
-                                                   furthest below its target
- PG 19:  [b1, c1, d1]       PG 19:  [b1, c2, d1]   refill: nodes B and D are taken, so
-                                                   a1, a2 and c2 are eligible; c2 was
-                                                   furthest below its target
- PG 23:  [b2, d1, a2]       PG 23:  [b2, d1, a2]   untouched: c1 was not a member
+ table epoch 41             table epoch 42 (c1 marked down)
+ PG 7:   [a1, c1, d2] i5    PG 7:   [a1, b2, d2] i6   refill: nodes A and D are taken, so
+                                                      b1, b2 and c2 are eligible; b2 was
+                                                      furthest below its target
+ PG 19:  [b1, c1, d1] i3    PG 19:  [b1, c2, d1] i4   refill: nodes B and D are taken, so
+                                                      a1, a2 and c2 are eligible; c2 was
+                                                      furthest below its target
+ PG 23:  [b2, d1, a2] i9    PG 23:  [b2, d1, a2] i9   untouched: c1 was not a member, so
+                                                      its interval and writes carry on
 ```
 
-Only the PGs that listed `c1` change, and each changes by one member. Adding a disk works the
+Only the PGs that listed `c1` change, each by one member and one interval (`i5` to `i6`). Adding a disk works the
 other way round: a new, empty disk `e1` on a fifth node is the eligible disk furthest below its target, so
 rebalance moves members onto it one at a time from the fullest disks until every disk is within
 the margin. Compare layout C from the problem section: adding a disk changes no chunk's PG. Only
@@ -430,8 +439,9 @@ The design's reasons ([Alternatives considered](../docs/design.md#alternatives-c
   function would leave disks unbalanced. Ceph's own answer, `pg-upmap`, is a table.
 - **Explicit, throttled moves.** A table change moves only the members the algorithm chose, so
   moves can be staged and throttled, and an operator can drain a disk or pin a PG by editing it.
-- **Simple to simulate.** The epoch is simply the table's version, which keeps the simulator and
-  the TLA+ models (formal models whose every state a checker explores) simple.
+- **Simple to simulate.** The table epoch is simply the table's version and an interval a
+  counter per PG, which keeps the simulator and the TLA+ models (formal models whose every state a
+  checker explores) simple.
 
 ## Volume size and capacity
 
@@ -517,39 +527,67 @@ client's session ID so primaries can reject a client whose session has expired (
 [post 03](03-epochs-leases-and-failures.md) covers. The next five sections are the promises
 behind these calls.
 
-## Versions: an epoch on top, a counter below
+## Versions: an interval on top, a counter below
 
 > **In plain words.** Every write to a chunk gets a stamped number, like the revision number on a
 > wiki page. Revision numbers let you read an old revision, refuse an edit made against a page
 > that changed meanwhile, and tell which copy of a page is newest. The catch: if two different
 > servers can hand out revision numbers, both might hand out "revision 11" for different text,
-> and then the number no longer tells you which is which.
+> and then the number no longer tells you which is which. So the number starts with which editor's
+> term it was written in, and terms only go up.
 
 ### How it works: the layout
 
-Every write and punch returns a new 64-bit version. Its high 24 bits are the epoch of the primary
-that assigned it, and its low 40 bits are a counter that primary counts up:
+Every write and punch returns a new 64-bit version. Its high 32 bits are the number of the chunk's
+PG *interval* in which its primary ordered the write, and its low 32 bits count the chunk's writes
+in that interval, starting at 1:
 
 ```text
- 63                       40 39                                              0
- +--------------------------+------------------------------------------------+
- |    epoch: 24 bits        |               counter: 40 bits                 |
- | placement-table epoch of |  counted up by that primary; when it runs out, |
- | the assigning primary    |  the primary asks the control plane for a new  |
- |                          |  epoch                                         |
- +--------------------------+------------------------------------------------+
+ 63                                32 31                                 0
+ +-----------------------------------+------------------------------------+
+ | interval: 32 bits                 | counter: 32 bits                   |
+ | the chunk's PG's interval number  | the chunk's writes in that         |
+ | when its primary ordered it       | interval, from 1                   |
+ +-----------------------------------+------------------------------------+
+   example: interval 41, counter 7  ->  written "41.7" in posts 02 and 03
 ```
 
-Because the epoch sits in the high bits, a version assigned in epoch 8 is larger than any version
-assigned in epoch 7, whatever the counters say. Versions therefore grow across primaries, and two
-primaries can never give the same version to different data. Ceph's `eversion_t` works the same
-way. Note that this is the placement table's epoch; a volume's *snapshot epoch*, which counts its
-snapshots, is a different number.
+An interval has exactly one primary, and a PG's interval numbers only go up, so a version written
+in interval 8 is larger than any version written in interval 7, whatever the counters say.
+Versions therefore grow across primaries, and two primaries can never give the same version to
+different data. Ceph's `eversion_t` does the same with its cluster map's epoch, and Vitastor with
+a per-PG epoch in its versions' high bits. Version 0 means "no version yet", so intervals and
+counters both start at 1. A primary takes the chunk's newest version, pending ones included, and
+adds one, or starts at `interval.1` if that version is from an earlier interval. When a PG splits
+in two, both halves start one interval above it, so a chunk's versions keep growing.
+
+Why the PG's own interval and not the table epoch? The table epoch moves whenever anything in the
+cluster changes, and these 32 bits are on disk forever. The
+[PG epochs spike](../docs/design.md#appendix-pg-epochs-spike) modeled a homelab year and a
+misbehaving node:
+
+```text
+ field counts                one node flapping every 10 s,     a homelab year,
+                             members refilled one per table    10 nodes
+ table epochs, 24 bits       full after 19 hours               2,040 years or more
+ table epochs, 32 bits       full after 207 days               522,000 years or more
+ busiest PG's intervals, 24  full after 1.1 years              70,000 years
+ busiest PG's intervals, 32  full after 272 years              18 million years
+```
+
+Running out of interval numbers would be fatal: the PG could never change members again without
+rewriting every version on disk. Running out of the counter is routine: after 4.3 billion writes
+to one chunk in one interval, more than an hour even at a million writes a second, the chunk's
+writes wait while its primary asks the control plane for a new interval of its PG, which touches
+no other PG. So 32 bits go to the field whose end is fatal, and a 32-bit counter is plenty for
+the field whose end is cheap. Note that none of the design's three *epochs* is in a version: the
+table epoch versions the placement table, a *snapshot epoch* counts a volume's snapshots, and a
+*support epoch* numbers a run of a lease between two nodes.
 
 ### How it works: why a plain counter fails
 
-Here is the failure a plain per-chunk counter allows, and how the epoch cures it. Follow the
-version numbers on the two nodes:
+Here is the failure a plain per-chunk counter allows, and how the interval number cures it.
+Follow the version numbers on the two nodes:
 
 ```mermaid
 sequenceDiagram
@@ -559,17 +597,17 @@ sequenceDiagram
     Note over A,B: chunk is at version 10 on both
     A->>A: write X as version 11, logged on A
     A--xB: write X lost, A is cut off
-    CP->>B: new table, B is primary
+    CP->>B: new table, B is primary, PG in interval 8
     B->>B: write Y as version 11
     Note over A,B: plain counter: A holds X at 11, B holds Y at 11<br/>same number, different data
-    Note over A,B: with epochs: A holds X at epoch 7, 11<br/>B holds Y at epoch 8, so B's is larger
+    Note over A,B: with intervals: A holds X at 7.11<br/>B holds Y at 8.1, so B's is larger
 ```
 
 With a plain counter, node A returns holding a write that the new primary never saw, stamped with
 the same number as the current data, and a member comparing versions would take the stale write
-for the current one. With an epoch in the high bits, B's version is larger whatever its counter
-reads, and A's write is recognized as one from an old epoch by its version alone. What happens to
-such a write during peering is the subject of [post 03](03-epochs-leases-and-failures.md).
+for the current one. With the interval in the high bits, B's version is larger whatever its
+counter reads, and A's write is recognized as one from an old interval by its version alone. What
+happens to such a write during peering is the subject of [post 03](03-epochs-leases-and-failures.md).
 
 ### How it works: what versions buy
 
@@ -616,8 +654,8 @@ sequenceDiagram
 So a primary maps a write into its chunk index (the per-disk map from a chunk's blocks to where
 they sit on disk) only when the write commits. Until then the write is *pending*: its record is
 in the disk log, and a read finds the previous version's blocks without waiting. A replica maps
-writes as they become durable, since it serves no live reads. A primary that restarts runs
-peering again, in its own epoch or a new one, before it serves anything. A primary also maps a
+writes as they become durable, since it serves no live reads. A primary that restarts takes
+a new interval of each PG it leads and runs peering in it before it serves anything. A primary also maps a
 chunk's writes in version order; [post 04](04-one-log-per-disk.md) shows why.
 
 ## Single order per chunk
@@ -759,6 +797,13 @@ What backs these choices, with numbers exactly as the design and spikes give the
   (M2, M3); the client merging, 500 of 500 wrong without compare-and-set, and 0.64 to 1.28 retries
   per write with it (M4, M5). The [sub-block writes study](../studies/sub-block-writes/README.md)
   reads how Ceph, Vitastor, JuiceFS and ZFS do it.
+- **Version layout and per-PG checks.** The [PG epochs spike](../spikes/pg-epochs/) modeled a
+  year of homelab churn and a flapping node on 3 and 10 nodes. Table epochs in a 24-bit field ran
+  out in **19 hours** under one node flapping with staged refills; the busiest PG's intervals take
+  **272 years** to fill 32 bits. Checking requests per PG rather than against one table epoch
+  disturbed 4.4 to 46 times fewer in-flight writes on 10 nodes, but hardly fewer on 3 nodes, where
+  every PG has a member on every node. The [PG epochs study](../studies/pg-epochs/README.md) reads
+  how Ceph and Vitastor do it.
 - **Placement itself: no spike yet.** The refill-and-rebalance computation is not built. Its
   review is planned as property tests: after any random add, remove and failure sequence, every PG
   keeps its pool's width with no more than `max_per_domain` members per failure domain, no disk
@@ -768,8 +813,8 @@ What backs these choices, with numbers exactly as the design and spikes give the
 
 ## Trade-offs: what this costs us
 
-- **Some choices are forever.** The hash function, its seed, the bit layout and the 128-bit ID are
-  disk format. So, in effect, is the chunk size, since it is part of every chunk ID. Getting them
+- **Some choices are forever.** The hash function, its seed, the bit layout, the 128-bit ID and
+  the version's 32 + 32 split are disk format. So, in effect, is the chunk size, since it is part of every chunk ID. Getting them
   wrong cannot be fixed by a config change.
 - **`pg_count` must be guessed ahead.** It is sized for the largest cluster you expect and can
   only grow by doubling.
@@ -813,15 +858,17 @@ What backs these choices, with numbers exactly as the design and spikes give the
   [Pools and redundancy](../docs/design.md#pools-and-redundancy),
   [Freeing space](../docs/design.md#freeing-space),
   [Alternatives considered](../docs/design.md#alternatives-considered) (rows "Placement",
-  "Pool capacity", "Chunk versions" and "Sub-block writes"), [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions).
+  "Pool capacity", "Stale requests", "Version layout" and "Sub-block writes"), [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions).
 - Glossary: [Data model](../docs/glossary.md#data-model),
   [Redundancy and placement](../docs/glossary.md#redundancy-and-placement),
   [Words with more than one meaning](../docs/glossary.md#words-with-more-than-one-meaning).
 - Spikes: [spikes/chunk-epochs](../spikes/chunk-epochs/),
+  [spikes/pg-epochs](../spikes/pg-epochs/),
   [spikes/go-cpu-per-op](../spikes/go-cpu-per-op/),
   [spikes/sub-block-writes](../spikes/sub-block-writes/),
   [spikes/capacity-model](../spikes/capacity-model/).
 - Studies: [sub-block writes and small files](../studies/sub-block-writes/README.md),
+  [PG epochs](../studies/pg-epochs/README.md),
   [pool capacity and ENOSPC](../studies/capacity-and-enospc/README.md).
 - Code: [internal/core/ids.go](../internal/core/ids.go) (`ChunkID`, `ChunkIndexOf`, `Hash`,
   `PGIndexOf`, `CheckPGCount`), [internal/core/crc.go](../internal/core/crc.go),
