@@ -1,0 +1,109 @@
+# 6.18.44-fc-v139, go1.27.0 linux/amd64, rock-solid cdce88a, 2026-10-19T04:28:07Z
+=== RUN   TestAppendsAlone
+    appends_test.go:443: A1 alone u=0.80 a=100 rmw     :   8288 device bytes per append,  82.9x the appended bytes, cleaner  0.0% of device writes
+    appends_test.go:443: A1 alone u=0.80 a=100 patch   :   8288 device bytes per append,  82.9x the appended bytes, cleaner  0.0% of device writes
+    appends_test.go:443: A1 alone u=0.80 a=100 patch8  :   8288 device bytes per append,  82.9x the appended bytes, cleaner  0.0% of device writes
+    appends_test.go:443: A1 alone u=0.80 a=100 patchhdr:   4196 device bytes per append,  42.0x the appended bytes, cleaner  0.0% of device writes
+    appends_test.go:443: A1 alone u=0.80 a=100 short   :   8288 device bytes per append,  82.9x the appended bytes, cleaner  0.0% of device writes
+    appends_test.go:443: A1 alone u=0.80 a=1000 rmw     :   9185 device bytes per append,   9.2x the appended bytes, cleaner  0.0% of device writes
+    appends_test.go:443: A1 alone u=0.80 a=1000 patch   :   9185 device bytes per append,   9.2x the appended bytes, cleaner  0.0% of device writes
+    appends_test.go:443: A1 alone u=0.80 a=1000 patch8  :   9185 device bytes per append,   9.2x the appended bytes, cleaner  0.0% of device writes
+    appends_test.go:443: A1 alone u=0.80 a=1000 patchhdr:   5096 device bytes per append,   5.1x the appended bytes, cleaner  0.0% of device writes
+    appends_test.go:443: A1 alone u=0.80 a=1000 short   :   9185 device bytes per append,   9.2x the appended bytes, cleaner  0.0% of device writes
+    appends_test.go:443: A1 alone u=0.90 a=100 rmw     :   8301 device bytes per append,  83.0x the appended bytes, cleaner  0.2% of device writes
+    appends_test.go:443: A1 alone u=0.90 a=100 patch   :   8301 device bytes per append,  83.0x the appended bytes, cleaner  0.2% of device writes
+    appends_test.go:443: A1 alone u=0.90 a=100 patch8  :   8301 device bytes per append,  83.0x the appended bytes, cleaner  0.2% of device writes
+    appends_test.go:443: A1 alone u=0.90 a=100 patchhdr:   4196 device bytes per append,  42.0x the appended bytes, cleaner  0.0% of device writes
+    appends_test.go:443: A1 alone u=0.90 a=100 short   :   8301 device bytes per append,  83.0x the appended bytes, cleaner  0.2% of device writes
+--- PASS: TestAppendsAlone (9.89s)
+=== RUN   TestAppendsShared
+    appends_test.go:469: A2 shared u=0.80 baseline 15 overwrites/round: WA 3.29, cleaner 67.5%, 201931 device bytes per round
+    appends_test.go:475: A2 shared u=0.80 1 appends + 15 overwrites/round rmw     : WA 3.61, cleaner 68.6%, marginal  20161 device bytes per append (201.6x)
+    appends_test.go:475: A2 shared u=0.80 1 appends + 15 overwrites/round patch   : WA 3.61, cleaner 68.6%, marginal  20161 device bytes per append (201.6x)
+    appends_test.go:475: A2 shared u=0.80 1 appends + 15 overwrites/round patch8  : WA 3.61, cleaner 68.6%, marginal  20161 device bytes per append (201.6x)
+    appends_test.go:475: A2 shared u=0.80 1 appends + 15 overwrites/round patchhdr: WA 3.31, cleaner 67.7%, marginal   1900 device bytes per append ( 19.0x)
+    appends_test.go:475: A2 shared u=0.80 1 appends + 15 overwrites/round short   : WA 3.61, cleaner 68.6%, marginal  20161 device bytes per append (201.6x)
+    appends_test.go:469: A2 shared u=0.80 baseline  8 overwrites/round: WA 3.58, cleaner 68.5%, 117235 device bytes per round
+    appends_test.go:475: A2 shared u=0.80 8 appends +  8 overwrites/round rmw     : WA 5.38, cleaner 60.9%, marginal   7924 device bytes per append ( 79.2x)
+    appends_test.go:475: A2 shared u=0.80 8 appends +  8 overwrites/round patch   : WA 4.10, cleaner 69.5%, marginal   2530 device bytes per append ( 25.3x)
+    appends_test.go:475: A2 shared u=0.80 8 appends +  8 overwrites/round patch8  : WA 4.32, cleaner 69.2%, marginal   3484 device bytes per append ( 34.8x)
+    appends_test.go:475: A2 shared u=0.80 8 appends +  8 overwrites/round patchhdr: WA 3.63, cleaner 69.0%, marginal    581 device bytes per append (  5.8x)
+    appends_test.go:475: A2 shared u=0.80 8 appends +  8 overwrites/round short   : WA 4.87, cleaner 65.6%, marginal   5770 device bytes per append ( 57.7x)
+    appends_test.go:469: A2 shared u=0.90 baseline 15 overwrites/round: WA 7.42, cleaner 85.6%, 456083 device bytes per round
+    appends_test.go:475: A2 shared u=0.90 1 appends + 15 overwrites/round rmw     : WA 7.97, cleaner 85.8%, marginal  34259 device bytes per append (342.6x)
+    appends_test.go:475: A2 shared u=0.90 1 appends + 15 overwrites/round patch   : WA 7.97, cleaner 85.8%, marginal  34259 device bytes per append (342.6x)
+    appends_test.go:475: A2 shared u=0.90 1 appends + 15 overwrites/round patch8  : WA 7.97, cleaner 85.8%, marginal  34259 device bytes per append (342.6x)
+    appends_test.go:475: A2 shared u=0.90 1 appends + 15 overwrites/round patchhdr: WA 7.50, cleaner 85.7%, marginal   5663 device bytes per append ( 56.6x)
+    appends_test.go:475: A2 shared u=0.90 1 appends + 15 overwrites/round short   : WA 7.97, cleaner 85.8%, marginal  34259 device bytes per append (342.6x)
+    appends_test.go:469: A2 shared u=0.90 baseline  8 overwrites/round: WA 7.90, cleaner 85.7%, 258786 device bytes per round
+    appends_test.go:475: A2 shared u=0.90 8 appends +  8 overwrites/round rmw     : WA 10.00, cleaner 78.9%, marginal   9599 device bytes per append ( 96.0x)
+    appends_test.go:475: A2 shared u=0.90 8 appends +  8 overwrites/round patch   : WA 8.95, cleaner 86.1%, marginal   5216 device bytes per append ( 52.2x)
+    appends_test.go:475: A2 shared u=0.90 8 appends +  8 overwrites/round patch8  : WA 9.13, cleaner 85.4%, marginal   5965 device bytes per append ( 59.6x)
+    appends_test.go:475: A2 shared u=0.90 8 appends +  8 overwrites/round patchhdr: WA 8.21, cleaner 86.3%, marginal   2098 device bytes per append ( 21.0x)
+    appends_test.go:475: A2 shared u=0.90 8 appends +  8 overwrites/round short   : WA 9.24, cleaner 81.9%, marginal   6408 device bytes per append ( 64.1x)
+--- PASS: TestAppendsShared (36.59s)
+=== RUN   TestLayoutMatchesCodec
+    layout_test.go:33: [OK ] L0 one 4 KiB write (an append flushed as a block): got=1+1 blocks (codec) want=1+1 (model)
+    layout_test.go:33: [OK ] L0 16 writes of one block: got=1+16 blocks (codec) want=1+16 (model)
+    layout_test.go:33: [OK ] L0 one 100-byte blob: got=1+1 blocks (codec) want=1+1 (model)
+    layout_test.go:33: [OK ] L0 15 writes and one 100-byte blob: got=1+16 blocks (codec) want=1+16 (model)
+--- PASS: TestLayoutMatchesCodec (0.00s)
+=== RUN   TestMerge
+    merge_test.go:318: [OK ] M1 two clients, one write each in flight (primary/overlay): got=0 of 500 seeds wrong want=0 seeds wrong; 70689 writes acknowledged 
+    merge_test.go:318: [OK ] M2 one client, 4 pipelined writes (primary/committed): got=500 of 500 seeds wrong want=some seeds wrong; 84275 writes acknowledged seed 0 step 14: 140 bytes differ
+    merge_test.go:318: [OK ] M3 two clients, one write each in flight (primary/committed): got=500 of 500 seeds wrong want=some seeds wrong; 70689 writes acknowledged seed 0 step 58: 87 bytes differ
+    merge_test.go:318: [OK ] M4 two clients, one write each in flight (client/RMW): got=500 of 500 seeds wrong want=some seeds wrong; 42304 writes acknowledged seed 0 step 31: 13 bytes differ
+    merge_test.go:318: [OK ] M5 two clients, one write each in flight (client/RMW+CAS): got=0 of 500 seeds wrong want=0 seeds wrong; 33825 writes acknowledged, 0.644 CAS retries per acknowledged write 
+    merge_test.go:318: [OK ] M5b four clients, one write each in flight (client/RMW+CAS): got=0 of 500 seeds wrong want=0 seeds wrong; 28826 writes acknowledged, 1.282 CAS retries per acknowledged write 
+    merge_test.go:318: [OK ] M6 two clients, 8 pipelined each, failovers dropping a suffix (primary/overlay): got=0 of 500 seeds wrong want=0 seeds wrong; 95689 writes acknowledged, 3670 failovers 
+    merge_test.go:318: [OK ] M7 two clients, 8 pipelined each, failovers dropping any subset (primary/overlay): got=500 of 500 seeds wrong want=some seeds wrong; 95766 writes acknowledged, 3675 failovers seed 0 step 17: 159 bytes differ
+    merge_test.go:318: [OK ] M8 failovers whose new primary merges before recovering a kept version (primary/overlay): got=458 of 500 seeds wrong want=some seeds wrong; 94637 writes acknowledged, 3629 failovers seed 0 step 99: 226 bytes differ
+    merge_test.go:318: [OK ] M9 two clients, writes up to 3 blocks long, 8 pipelined, failovers (primary/overlay): got=0 of 500 seeds wrong want=0 seeds wrong; 95996 writes acknowledged, 3766 failovers 
+--- PASS: TestMerge (34.85s)
+=== RUN   TestSmallFileSpace
+    space_test.go:63: S1 rep3      100 B file:  12399 B raw as copies (123.99x, 41.3x the pool's 3.00x) in a shared round,  24576 B flushed alone; short block    417 B as copies ( 4.17x)
+    space_test.go:63: S1 rep3     1024 B file:  12399 B raw as copies (12.11x,  4.0x the pool's 3.00x) in a shared round,  24576 B flushed alone; short block   3189 B as copies ( 3.11x)
+    space_test.go:63: S1 rep3     1536 B file:  12399 B raw as copies ( 8.07x,  2.7x the pool's 3.00x) in a shared round,  24576 B flushed alone; short block   4725 B as copies ( 3.08x)
+    space_test.go:63: S1 rep3     2048 B file:  12399 B raw as copies ( 6.05x,  2.0x the pool's 3.00x) in a shared round,  24576 B flushed alone; short block   6261 B as copies ( 3.06x)
+    space_test.go:63: S1 rep3     4096 B file:  12399 B raw as copies ( 3.03x,  1.0x the pool's 3.00x) in a shared round,  24576 B flushed alone; short block  12405 B as copies ( 3.03x)
+    space_test.go:63: S1 rep3     6144 B file:  24699 B raw as copies ( 4.02x,  1.3x the pool's 3.00x) in a shared round,  36864 B flushed alone; short block  18561 B as copies ( 3.02x)
+    space_test.go:63: S1 rep3     8192 B file:  24699 B raw as copies ( 3.02x,  1.0x the pool's 3.00x) in a shared round,  36864 B flushed alone; short block  24705 B as copies ( 3.02x)
+    space_test.go:63: S1 rep3    16384 B file:  49299 B raw as copies ( 3.01x,  1.0x the pool's 3.00x) in a shared round,  61440 B flushed alone; short block  49305 B as copies ( 3.01x)
+    space_test.go:63: S1 rep3    24576 B file:  73899 B raw as copies ( 3.01x,  1.0x the pool's 3.00x) in a shared round,  86016 B flushed alone; short block  73905 B as copies ( 3.01x)
+    space_test.go:63: S1 ec2-1     100 B file:   8266 B raw as copies (82.66x, 55.1x the pool's 1.50x) in a shared round,  16384 B flushed alone; short block    278 B as copies ( 2.78x)
+    space_test.go:63: S1 ec2-1    1024 B file:   8266 B raw as copies ( 8.07x,  5.4x the pool's 1.50x) in a shared round,  16384 B flushed alone; short block   2126 B as copies ( 2.08x)
+    space_test.go:63: S1 ec2-1    1536 B file:   8266 B raw as copies ( 5.38x,  3.6x the pool's 1.50x) in a shared round,  16384 B flushed alone; short block   3150 B as copies ( 2.05x)
+    space_test.go:63: S1 ec2-1    2048 B file:   8266 B raw as copies ( 4.04x,  2.7x the pool's 1.50x) in a shared round,  16384 B flushed alone; short block   4174 B as copies ( 2.04x)
+    space_test.go:63: S1 ec2-1    4096 B file:   8266 B raw as copies ( 2.02x,  1.3x the pool's 1.50x) in a shared round,  16384 B flushed alone; short block   8270 B as copies ( 2.02x)
+    space_test.go:63: S1 ec2-1    6144 B file:  12399 B raw as shards ( 2.02x,  1.3x the pool's 1.50x) in a shared round,  24576 B flushed alone; short block  12374 B as copies ( 2.01x)
+    space_test.go:63: S1 ec2-1    8192 B file:  12399 B raw as shards ( 1.51x,  1.0x the pool's 1.50x) in a shared round,  24576 B flushed alone; short block  12399 B as shards ( 1.51x)
+    space_test.go:63: S1 ec2-1   16384 B file:  24699 B raw as shards ( 1.51x,  1.0x the pool's 1.50x) in a shared round,  36864 B flushed alone; short block  24699 B as shards ( 1.51x)
+    space_test.go:63: S1 ec2-1   24576 B file:  36999 B raw as shards ( 1.51x,  1.0x the pool's 1.50x) in a shared round,  49152 B flushed alone; short block  36999 B as shards ( 1.51x)
+    space_test.go:63: S1 ec4-2     100 B file:  12399 B raw as copies (123.99x, 82.7x the pool's 1.50x) in a shared round,  24576 B flushed alone; short block    417 B as copies ( 4.17x)
+    space_test.go:63: S1 ec4-2    1024 B file:  12399 B raw as copies (12.11x,  8.1x the pool's 1.50x) in a shared round,  24576 B flushed alone; short block   3189 B as copies ( 3.11x)
+    space_test.go:63: S1 ec4-2    1536 B file:  12399 B raw as copies ( 8.07x,  5.4x the pool's 1.50x) in a shared round,  24576 B flushed alone; short block   4725 B as copies ( 3.08x)
+    space_test.go:63: S1 ec4-2    2048 B file:  12399 B raw as copies ( 6.05x,  4.0x the pool's 1.50x) in a shared round,  24576 B flushed alone; short block   6261 B as copies ( 3.06x)
+    space_test.go:63: S1 ec4-2    4096 B file:  12399 B raw as copies ( 3.03x,  2.0x the pool's 1.50x) in a shared round,  24576 B flushed alone; short block  12405 B as copies ( 3.03x)
+    space_test.go:63: S1 ec4-2    6144 B file:  24699 B raw as copies ( 4.02x,  2.7x the pool's 1.50x) in a shared round,  36864 B flushed alone; short block  18561 B as copies ( 3.02x)
+    space_test.go:63: S1 ec4-2    8192 B file:  24699 B raw as copies ( 3.02x,  2.0x the pool's 1.50x) in a shared round,  36864 B flushed alone; short block  24705 B as copies ( 3.02x)
+    space_test.go:63: S1 ec4-2   16384 B file:  24798 B raw as shards ( 1.51x,  1.0x the pool's 1.50x) in a shared round,  49152 B flushed alone; short block  24798 B as shards ( 1.51x)
+    space_test.go:63: S1 ec4-2   24576 B file:  49398 B raw as shards ( 2.01x,  1.3x the pool's 1.50x) in a shared round,  73728 B flushed alone; short block  49398 B as shards ( 2.01x)
+    space_test.go:63: S1 ec16-2    100 B file:  12399 B raw as copies (123.99x, 110.2x the pool's 1.12x) in a shared round,  24576 B flushed alone; short block    417 B as copies ( 4.17x)
+    space_test.go:63: S1 ec16-2   1024 B file:  12399 B raw as copies (12.11x, 10.8x the pool's 1.12x) in a shared round,  24576 B flushed alone; short block   3189 B as copies ( 3.11x)
+    space_test.go:63: S1 ec16-2   1536 B file:  12399 B raw as copies ( 8.07x,  7.2x the pool's 1.12x) in a shared round,  24576 B flushed alone; short block   4725 B as copies ( 3.08x)
+    space_test.go:63: S1 ec16-2   2048 B file:  12399 B raw as copies ( 6.05x,  5.4x the pool's 1.12x) in a shared round,  24576 B flushed alone; short block   6261 B as copies ( 3.06x)
+    space_test.go:63: S1 ec16-2   4096 B file:  12399 B raw as copies ( 3.03x,  2.7x the pool's 1.12x) in a shared round,  24576 B flushed alone; short block  12405 B as copies ( 3.03x)
+    space_test.go:63: S1 ec16-2   6144 B file:  24699 B raw as copies ( 4.02x,  3.6x the pool's 1.12x) in a shared round,  36864 B flushed alone; short block  18561 B as copies ( 3.02x)
+    space_test.go:63: S1 ec16-2   8192 B file:  24699 B raw as copies ( 3.02x,  2.7x the pool's 1.12x) in a shared round,  36864 B flushed alone; short block  24705 B as copies ( 3.02x)
+    space_test.go:63: S1 ec16-2  16384 B file:  49299 B raw as copies ( 3.01x,  2.7x the pool's 1.12x) in a shared round,  61440 B flushed alone; short block  49305 B as copies ( 3.01x)
+    space_test.go:63: S1 ec16-2  24576 B file:  73899 B raw as copies ( 3.01x,  2.7x the pool's 1.12x) in a shared round,  86016 B flushed alone; short block  73905 B as copies ( 3.01x)
+    space_test.go:72: S2 index memory per file replica: MetaStore 133 B in runs, chunk index 108 B raw (chunk entry 44 + one extent 64) before prefix compression
+    space_test.go:76: S3 inline   60 B in the inode:   193 B per file replica of MetaStore memory ( 1.5x), a 16 GiB budget holds  29.7 million files at 3 replicas (43.1 million without inline data)
+    space_test.go:76: S3 inline  112 B in the inode:   245 B per file replica of MetaStore memory ( 1.8x), a 16 GiB budget holds  23.4 million files at 3 replicas (43.1 million without inline data)
+    space_test.go:76: S3 inline  512 B in the inode:   645 B per file replica of MetaStore memory ( 4.8x), a 16 GiB budget holds   8.9 million files at 3 replicas (43.1 million without inline data)
+    space_test.go:76: S3 inline 1024 B in the inode:  1157 B per file replica of MetaStore memory ( 8.7x), a 16 GiB budget holds   4.9 million files at 3 replicas (43.1 million without inline data)
+    space_test.go:76: S3 inline 1536 B in the inode:  1669 B per file replica of MetaStore memory (12.5x), a 16 GiB budget holds   3.4 million files at 3 replicas (43.1 million without inline data)
+    space_test.go:76: S3 inline 2048 B in the inode:  2181 B per file replica of MetaStore memory (16.4x), a 16 GiB budget holds   2.6 million files at 3 replicas (43.1 million without inline data)
+--- PASS: TestSmallFileSpace (0.00s)
+PASS
+ok  	github.com/nvcnvn/rock-solid/spikes/sub-block-writes	81.337s

@@ -6,3 +6,4 @@ Findings about other projects, written up for review before deciding what to do 
 | --- | --- | --- |
 | [etcd-raft-async-snapshot-apply](etcd-raft-async-snapshot-apply/README.md) | etcd-raft v3.7.0 and `main` | Reproduced, not reported |
 | [session-expiry](session-expiry/README.md) | CephFS, NFSv4.1, Chubby, ZooKeeper, etcd, HDFS, Kubernetes, Lustre | Read from source; proposal adopted in the design |
+| [sub-block-writes](sub-block-writes/README.md) | Ceph BlueStore and erasure-coded pools, CephFS, Vitastor, JuiceFS, SeaweedFS, OpenZFS, ext4, XFS, Btrfs, F2FS, Lustre, Linux FUSE, ublk and krbd, QEMU, KubeVirt | Read from source plus a model spike; proposal not adopted |
