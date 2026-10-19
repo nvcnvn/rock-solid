@@ -130,7 +130,7 @@ sequenceDiagram
     D->>D: chunk_id = volume_id, 0, N / 4 MiB
     D->>D: pg = top bits of xxh3_64 of chunk_id
     D->>D: primary = placement_table of pg
-    D->>PR: write, tagged with placement epoch and session
+    D->>PR: write, tagged with table epoch, PG interval and session
     par
         PR->>PR: append to own log, flush
     and
@@ -143,7 +143,8 @@ sequenceDiagram
 ```
 
 The one network round trip is to the primary, which fans out to the replicas in parallel. The
-placement epoch lets a node reject requests based on an outdated table
+PG's interval number lets a member reject requests sent under an outdated membership of that PG,
+and the table epoch tells it which table to fetch
 ([03, epochs, leases and failures](03-epochs-leases-and-failures.md)).
 
 **What it costs.** The target for a 4K write at queue depth 1 is around 0.1 ms on drives with
@@ -343,8 +344,8 @@ two files on a shared volume:
 
 ```mermaid
 sequenceDiagram
-    participant A as Node A, already on epoch E
-    participant B as Node B, still on epoch E-1
+    participant A as Node A, already on snapshot epoch E
+    participant B as Node B, still on snapshot epoch E-1
     participant V as Volume chunks
     Note over A,B: snapshot E is being taken, no pause
     A->>V: write payments.log = paid order 42, tagged E
@@ -353,7 +354,7 @@ sequenceDiagram
     Note over V: snapshot E holds ship order 42<br/>but not paid order 42
 ```
 
-The snapshot keeps node B's write, tagged with the old epoch, and leaves out node A's. The
+The snapshot keeps node B's write, tagged with the old snapshot epoch, and leaves out node A's. The
 restored volume ships an order that was never paid, a state no crash can produce. The design
 rejects tagging without a pause for exactly this reason.
 
@@ -368,8 +369,8 @@ rejects tagging without a pause for exactly this reason.
 
 | Question | Option | Who | Gets right | Costs |
 | --- | --- | --- | --- | --- |
-| Instant | **Pause writers one round trip, resume under a new epoch** (chosen) | rock-solid | Reuses the recall fan-out; no timestamps in keys | A short write pause |
-| Instant | Tag writes with the new epoch, no pause | | Cheaper | Effect without its cause |
+| Instant | **Pause writers one round trip, resume under a new snapshot epoch** (chosen) | rock-solid | Reuses the recall fan-out; no timestamps in keys | A short write pause |
+| Instant | Tag writes with the new snapshot epoch, no pause | | Cheaper | Effect without its cause |
 | Instant | Multi-version data with hybrid logical clock timestamps | CockroachDB | No pause | Timestamps in every key |
 | Sharing | **Frozen copy of the chunk's extent map** (chosen) | rock-solid; extent maps as in BlueStore, Btrfs | 4K write costs 4K | One entry copied per live extent |
 | Sharing | Journal, in-place data, reference-counted extent map | Vitastor, BlueStore | Data stays in place | BlueStore's most complex part |
@@ -397,11 +398,11 @@ snapshot(volume):
     pause new writes and namespace operations on the volume
     wait until in-flight ones are acknowledged, then ack    // or its session expires and is fenced
   txn: put volume/{id}/snap/{E}, plus a marker key in each shard holding fs/{volume}/
-  resume every node; its writes now carry epoch E
+  resume every node; its writes now carry snapshot epoch E
 ```
 
 Why this is correct: when the transaction commits, every write issued before the pause has been
-acknowledged and carries an epoch below E, and none has been issued since. So "acknowledged before
+acknowledged and carries a snapshot epoch below E, and none has been issued since. So "acknowledged before
 the cut" and "tagged below E" are the same set. A paused node may read a write that an already
 resumed node tagged E, but it can act on it only after it resumes, when its own writes carry E
 too: the effect lands on the same side of the cut as its cause.
@@ -423,7 +424,7 @@ Application consistency (a database's own flush, `fsfreeze`) comes from backup-t
 ### Data: freeze entries make versions share blocks
 
 > **In plain words.** After the cut, nothing is copied. Each chunk is dealt with lazily, the first
-> time a write tagged with the new epoch reaches it. At that moment its primary writes a small
+> time a write tagged with the new snapshot epoch reaches it. At that moment its primary writes a small
 > note in the log, a *freeze*: "keep the chunk as it is now, for snapshot E". Every copy of the
 > chunk then saves its list of where each block lives, and only after that applies the write. The
 > saved list and the live list point at the same blocks, except the one the write replaced.
@@ -436,8 +437,8 @@ write. Every member copies the live map under that version's key, then applies t
 
 A worked example. Chunk 3 of a VM disk volume (bytes 12 to 16 MiB, 1,024 blocks of 4 KiB) was
 written by two records before the snapshot: blocks 0 to 511 at version v5 in record A, and blocks
-512 to 1023 at v6 in record B. (Real versions are 64-bit numbers with the placement epoch in the
-high bits.) Snapshot 1 is cut, and the guest writes 4 KiB at block 100. Compare the two maps after
+512 to 1023 at v6 in record B. (Real versions are 64-bit numbers with the PG's interval number in
+the high bits, not any epoch.) Snapshot 1 is cut, and the guest writes 4 KiB at block 100. Compare the two maps after
 the write:
 
 ```text
@@ -498,9 +499,9 @@ which versions a snapshot pinned, and applying a freeze twice changes nothing. C
 > that snapshot. But a brand-new chunk has no version to freeze. Without a note saying "this chunk
 > did not exist at the cut", the old snapshot ends up reading data written after it.
 
-**How it works.** Log entries carry no epoch, and a chunk's index entry keeps only the epoch of
-its last freeze. So after a restart, or when another member becomes primary, nothing durable says
-a write was made in epoch 1; only a freeze records an epoch. Without an extra rule, this is what
+**How it works.** Write entries carry no snapshot epoch, and a chunk's index entry keeps only the
+snapshot epoch of its last freeze. So after a restart, or when another member becomes primary,
+nothing durable says a write was made in snapshot epoch 1; only a freeze records one. Without an extra rule, this is what
 happens to a chunk first written after cut 1. Read it top to bottom:
 
 ```text
@@ -521,8 +522,8 @@ in a volume that has had a snapshot, the primary puts `freeze(chunk 9, v0, epoch
 record. Its frozen map is empty, so snapshot 1 reads the chunk as never written, and its epoch
 tells later writes in epoch 1 not to freeze again. After cut 2, a write freezes v1 at epoch 2:
 snapshot 1 still finds nothing, and snapshot 2 finds v1. That costs one 37-byte entry per chunk
-created in a snapshotted volume, against 8 bytes on every write entry for carrying the epoch
-everywhere. Today the index still refuses a freeze of version 0 (`ErrFrozenLive`); the absent
+created in a snapshotted volume, against 8 bytes on every write entry for carrying the snapshot
+epoch everywhere. Today the index still refuses a freeze of version 0 (`ErrFrozenLive`); the absent
 freeze is an open item in the [build checklist](../docs/build-checklist.md), with the spike's
 tests to become regression tests first.
 

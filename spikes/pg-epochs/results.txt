@@ -1,0 +1,70 @@
+# Linux 6.18.44-fc-v139, python 3.13.16, rock-solid e7e13b5, 2026-10-19T06:42Z
+pg-epochs model; python 3.13.16
+
+== Y: one year of homelab events (24 reboots per node, 6 short and 2 long outages,
+   2 disk failures, 2 disk adds, 6 fail-slow marks, 6 pool changes, 4 counter bumps)
+   stage: members moved per table (all = one table per step); move: tables per moved member
+cluster                stage move seed  tables  changes  max/PG   retry
+3 nodes x 2 disks        all    1    1     270   409341     208   0.740
+3 nodes x 2 disks        all    1    2     270   402838     204   0.729
+3 nodes x 2 disks        all    1    3     270   390868     196   0.707
+3 nodes x 2 disks          1    1    1    6506   409341     208   0.031
+3 nodes x 2 disks          1    1    2    4030   402838     204   0.049
+3 nodes x 2 disks          1    1    3    5472   390868     196   0.035
+3 nodes x 2 disks          1    2    1   12748   415583     213   0.016
+3 nodes x 2 disks          1    2    2    7796   406604     208   0.025
+3 nodes x 2 disks          1    2    3   10680   396076     200   0.018
+10 nodes x 3 disks       all    1    1     778   358816     228   0.225
+10 nodes x 3 disks       all    1    2     778   355631     230   0.223
+10 nodes x 3 disks       all    1    3     778   359705     233   0.226
+10 nodes x 3 disks         1    1    1    4277   358816     228   0.041
+10 nodes x 3 disks         1    1    2    4413   355631     230   0.039
+10 nodes x 3 disks         1    1    3    4497   359705     233   0.039
+10 nodes x 3 disks         1    2    1    7786   362325     231   0.023
+10 nodes x 3 disks         1    2    2    8058   359276     232   0.022
+10 nodes x 3 disks         1    2    3    8226   363434     237   0.022
+
+== F: one flap cycle of one node (down, then up); per cycle
+cluster                refill stage move  tables  changes  max/PG   retry
+3 nodes x 2 disks          no   all    1       2     4096       2   1.000
+10 nodes x 3 disks         no   all    1       2     1230       2   0.300
+10 nodes x 3 disks        yes   all    1       4     1815       3   0.222
+10 nodes x 3 disks        yes     1    1    1202     1815       3   0.001
+10 nodes x 3 disks        yes     1    2    2402     3015       5   0.001
+
+== X: years until a field of the given width runs out
+   global field = table epochs; per-PG field = interval changes of the busiest PG
+scenario                                                                  tables/y        PG/y        g24        g32       pg24       pg28       pg32
+Y 3 nodes x 2 disks, stage all, move 1                                         270         208   62,138 y  1.6e+07 y   80,660 y  1.3e+06 y  2.1e+07 y
+Y 3 nodes x 2 disks, stage 1, move 1                                         6,506         208    2,579 y  660,155 y   80,660 y  1.3e+06 y  2.1e+07 y
+Y 3 nodes x 2 disks, stage 1, move 2                                        12,748         213    1,316 y  336,913 y   78,766 y  1.3e+06 y  2.0e+07 y
+Y 10 nodes x 3 disks, stage all, move 1                                        778         233   21,565 y  5.5e+06 y   72,005 y  1.2e+06 y  1.8e+07 y
+Y 10 nodes x 3 disks, stage 1, move 1                                        4,497         233    3,731 y  955,074 y   72,005 y  1.2e+06 y  1.8e+07 y
+Y 10 nodes x 3 disks, stage 1, move 2                                        8,226         237    2,040 y  522,121 y   70,790 y  1.1e+06 y  1.8e+07 y
+F undamped 10 s, 3 nodes x 2 disks, refill no, stage all, move 1         6,311,520   6,311,520      2.7 y      680 y      2.7 y       43 y      680 y
+F damped 5/10 min, 3 nodes x 2 disks, refill no, stage all, move 1         525,960     525,960       32 y    8,166 y       32 y      510 y    8,166 y
+F undamped 10 s, 10 nodes x 3 disks, refill no, stage all, move 1        6,311,520   6,311,520      2.7 y      680 y      2.7 y       43 y      680 y
+F damped 5/10 min, 10 nodes x 3 disks, refill no, stage all, move 1        525,960     525,960       32 y    8,166 y       32 y      510 y    8,166 y
+F undamped 10 s, 10 nodes x 3 disks, refill yes, stage all, move 1      12,623,040   9,467,280      1.3 y      340 y      1.8 y       28 y      454 y
+F damped 5/10 min, 10 nodes x 3 disks, refill yes, stage all, move 1     1,051,920     788,940       16 y    4,083 y       21 y      340 y    5,444 y
+F undamped 10 s, 10 nodes x 3 disks, refill yes, stage 1, move 1      3,793,223,520   9,467,280      1.6 d      1.1 y      1.8 y       28 y      454 y
+F damped 5/10 min, 10 nodes x 3 disks, refill yes, stage 1, move 1     316,101,960     788,940     19.4 d       14 y       21 y      340 y    5,444 y
+F undamped 10 s, 10 nodes x 3 disks, refill yes, stage 1, move 2      7,580,135,520  15,778,800     19.4 h    207.0 d      1.1 y       17 y      272 y
+F damped 5/10 min, 10 nodes x 3 disks, refill yes, stage 1, move 2     631,677,960   1,314,900      9.7 d      6.8 y       13 y      204 y    3,266 y
+fail-slow disk flapping, 1 cycle / 2 min, no refill                        525,960     525,960       32 y    8,166 y       32 y      510 y    8,166 y
+
+== C: time until a counter of the given width runs out at a sustained write rate
+  writes/s  scope                                              c32       c36       c40       c48
+     1,000  one hot chunk, homelab database                 49.7 d     2.2 y      35 y   8,919 y
+    20,000  one chunk, fsync-bound at queue depth 20         2.5 d    39.8 d     1.7 y     446 y
+   150,000  one primary disk at 10 GbE, rep3 (2 copies out)     8.0 h     5.3 d    84.8 d      59 y
+   300,000  one primary disk, CPU-bound loop                 4.0 h     2.7 d    42.4 d      30 y
+ 1,000,000  one chunk or disk, upper bound of the loops      1.2 h    19.1 h    12.7 d     8.9 y
+
+== B: table bytes pushed per table change (rep3, 2048 PGs)
+   whole table: 51,232 B (members 4 B each, interval u32, since u64, live bits)
+   delta: 32 B header + CRC, plus 29 B per PG whose entry changed
+   3 nodes x 2 disks, stage all: 270 tables/y, whole 41.5 MB/y, deltas 34.91 MB/y to 3 nodes
+   3 nodes x 2 disks, stage 1: 5,336 tables/y, whole 820.1 MB/y, deltas 35.40 MB/y to 3 nodes
+   10 nodes x 3 disks, stage all: 778 tables/y, whole 398.6 MB/y, deltas 104.08 MB/y to 10 nodes
+   10 nodes x 3 disks, stage 1: 4,396 tables/y, whole 2,252.0 MB/y, deltas 105.24 MB/y to 10 nodes

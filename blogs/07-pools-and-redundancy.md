@@ -56,13 +56,14 @@ All of these, and the **write hole** this post explains below, are in the glossa
 A chunk's ID is computed from its volume, file and offset. XXH3, a fast hash function that never
 changes, turns the ID into a 64-bit number, and its top bits pick one of the volume's pool's PGs.
 The **placement table**, computed by the control plane and cached on every node, lists each PG's
-members. Each version of the table is an **epoch**.
+members. Each version of the table is a **table epoch**, and each PG's run of tables with the
+same members is one of its **intervals**, numbered in the table.
 
 Two facts matter for this post. First, the PG is the unit of recovery and rebalancing: adding a
 disk moves whole PGs onto it, never single chunks. Second, a pool's `pg_count` is a power of two
 sized so each disk holds around 100 PG members summed over all pools (`pg_count × width ÷ disks`):
 2048 PGs for a three-copy pool alone on 60 disks. The table stays small either way: even a 4096-PG
-`ec16-2` pool is 288 KiB.
+`ec16-2` pool is about 320 KiB with its interval numbers.
 
 ## The problem: erasure coding meets overwrites
 
@@ -501,15 +502,15 @@ two. That is the "metadata-only node" in the `rep2` preset row ([post 08](08-the
 ### How it works
 
 A pool's `data` and `parity` are fixed at creation, as in Ceph. Every other setting can change
-later; a change to `replicas` adds or drops copies per PG and bumps the epoch. To change the shape,
-you move each volume to another pool.
+later; a change to `replicas` adds or drops copies per PG and starts a new interval of each. To
+change the shape, you move each volume to another pool.
 
 Snapshot and restore could do that, but the result is a new PVC, and Kubernetes does not let a PVC
 change its StorageClass, so the application would have to stop and rebind its claim. Instead a
 volume moves in place, keeping its `volume_id`, PVC and inode numbers, by reusing the snapshot
-machinery ([post 10](10-block-snapshots-and-clones.md)): a cut at epoch E that pauses every node
-using the volume, a transaction that points the volume at the new pool with the old pool at E as its
-source, reads that fall through to the source, and a background copy like a clone's *flatten*.
+machinery ([post 10](10-block-snapshots-and-clones.md)): a cut at snapshot epoch E that pauses
+every node using the volume, a transaction that points the volume at the new pool with the old
+pool at E as its source, reads that fall through to the source, and a background copy like a clone's *flatten*.
 Chunk IDs are the same in both pools; only the PG changes, because the pool is part of the PG. The
 sequence below follows one move.
 
@@ -554,14 +555,14 @@ phase 11.
 
 ### How it works
 
-Detecting the failure, publishing a new epoch and making the new primary agree with the surviving
-members (*peering*) belong to [post 03](03-epochs-leases-and-failures.md); refilling members in the
-placement table belongs to [post 02](02-chunks-and-placement.md). The flowchart shows how they
+Detecting the failure, publishing a new table that starts a new interval of each affected PG,
+and making the new primary agree with the surviving members (*peering*) belong to
+[post 03](03-epochs-leases-and-failures.md); refilling members in the placement table belongs to [post 02](02-chunks-and-placement.md). The flowchart shows how they
 connect to pools.
 
 ```mermaid
 flowchart TD
-    A["Member marked down<br/>new placement table and epoch<br/>missing members refilled onto<br/>the disk furthest below its target"] --> E["The new primary of each affected PG peers<br/>before it accepts writes"]
+    A["Member marked down<br/>new placement table<br/>new interval of its PGs<br/>missing members refilled onto<br/>the disk furthest below its target"] --> E["The new primary of each affected PG peers<br/>before it accepts writes"]
     E --> F{"Live members<br/>at least min_live?"}
     F -- yes --> G["Writes continue on the live members<br/>encodings are deferred"]
     F -- no --> H["Writes rejected until recovery<br/>restores enough members"]
@@ -572,7 +573,7 @@ flowchart TD
 
 *Read the diamond: whether writes pause depends only on `min_live`, while recovery runs either way.*
 
-Until the new epoch, writes to the affected PGs wait, so a crash pauses those writes for up to
+Until the new table, writes to the affected PGs wait, so a crash pauses those writes for up to
 `node_down_after` (default 5 s). The design does not yet say how long a down member waits before it
 is replaced, nor whether an empty replacement takes writes before it is filled. A node in
 `maintenance` keeps its place and resyncs when it returns.

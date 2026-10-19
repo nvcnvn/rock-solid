@@ -102,7 +102,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Inode.** A file's identity: a number plus its attributes (size, owner, permissions, times). Names are separate: a directory entry maps a name to an inode number, so one inode can have several names (hard links). The term comes from Unix filesystems.
 
-**Version.** A number stamped on each write to a chunk, larger than every earlier one. Versions let a read ask for a past state (`at_ver`), let a write succeed only if the chunk is still at the version the writer last saw (compare-and-set), and let a new primary tell which copy is newest. Its high bits are the epoch of the primary that assigned it; see [Versions](design.md#data-layer-chunkstore).
+**Version.** A number stamped on each write to a chunk, larger than every earlier one. Versions let a read ask for a past state (`at_ver`), let a write succeed only if the chunk is still at the version the writer last saw (compare-and-set), and let a new primary tell which copy is newest. Its high 32 bits are the number of the chunk's PG [interval](#redundancy-and-placement) in which it was written, and its low 32 bits count the chunk's writes in that interval, from 1; see [Versions](design.md#data-layer-chunkstore).
 
 **Committed version.** A version that every live member of the chunk's PG holds. Reads return only committed versions, so a reader never sees a write that a crash could still undo.
 
@@ -110,7 +110,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Extent.** A run of consecutive blocks described by one entry: "blocks 8 to 15 of this chunk are at disk location X". Indexing extents rather than single blocks keeps indexes small.
 
-**Snapshot.** A read-only copy of a volume as it was at one instant. Making one copies nothing: the snapshot keeps the old blocks, and only blocks written afterwards get new space. A **crash-consistent** snapshot holds exactly what a crash at that instant would have left on disk. See [Snapshots and clones](design.md#snapshots-and-clones).
+**Snapshot.** A read-only copy of a volume as it was at one instant. Making one copies nothing: the snapshot keeps the old blocks, and only blocks written afterwards get new space. A **crash-consistent** snapshot holds exactly what a crash at that instant would have left on disk. Each snapshot of a volume gets the next **snapshot epoch** of that volume, and writes after its cut carry it, so the first write to each chunk keeps the old version for the snapshot. See [Snapshots and clones](design.md#snapshots-and-clones).
 
 **Copy-on-write (COW).** Never modifying shared data in place: a write puts new data elsewhere and repoints the writer, so whoever still points at the old data (a snapshot, a reader) keeps seeing it.
 
@@ -140,7 +140,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Placement table.** The map from each PG to its members. The control plane computes it and every node caches a full copy. See [Placement table](design.md#data-layer-chunkstore).
 
-**Epoch.** The placement table's version number. Every change (disk added, node down, rebalance) produces a new table with a higher epoch, and nodes reject requests tagged with an older one, so a node acting on stale placement is caught. Ceph calls the same thing an OSD map epoch.
+**Epoch, table epoch.** The placement table's version number. Every change (disk added, node down, a rebalancing step) produces a new table with a higher epoch, and a node uses it to tell which of two tables is newer and to fetch the one a message's sender holds. Whether a request is still valid depends on its PG's interval, not on the table epoch. Ceph calls the same thing an OSD map epoch. A *support epoch* and a *snapshot epoch* are different numbers; see [Words with more than one meaning](#words-with-more-than-one-meaning).
+
+**Interval.** A run of placement tables during which one PG's members, their order and which of them are up stay the same, so the PG keeps one primary and one set of members that must acknowledge its writes. The table numbers each PG's intervals, and a member accepts a request about a PG only if it carries the PG's current number, so a table change disturbs only the writes of the PGs whose members it changed. The interval number is also the high half of every chunk version written in it. The term and the idea come from Ceph. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
 **Recovery.** Copying data back onto new or returning members until every PG again has its full redundancy. Not to be confused with a disk log's crash recovery.
 
@@ -152,7 +154,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Heartbeat.** A small periodic "I am alive" message. Missing several of them is how a node is detected as down.
 
-**Failure detection, marked down.** The control plane decides that a node or disk has failed and publishes a new epoch without it. Detection is a guess: a slow node looks the same as a dead one, which is why protocols must stay safe when the guess is wrong.
+**Failure detection, marked down.** The control plane decides that a node or disk has failed and publishes a new table without it, which starts a new interval of every PG that had a member there. Detection is a guess: a slow node looks the same as a dead one, which is why protocols must stay safe when the guess is wrong.
 
 **Split brain.** Two nodes both believing they are in charge, for example after a network partition, and both accepting writes. Most of the coordination machinery below exists to prevent it.
 
@@ -160,7 +162,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Read lease (primary lease).** The lease a primary needs from the other members of its PG before it serves reads, so that an old primary stops serving before a new one starts writing. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
-**Peering.** What a new primary does before serving a PG: it contacts the members, makes sure the old epoch can complete no more writes, and agrees with them on the newest version of every chunk; the versions it drops, never acknowledged, are always a chunk's newest. The term comes from Ceph. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
+**Peering.** What a new primary does before serving a PG: it contacts members of every interval since the PG last activated, makes sure none of those intervals can complete any more writes, and agrees with the members on the newest version of every chunk; the versions it drops, never acknowledged, are always a chunk's newest. Each member keeps a **missing list**, the kept version of every chunk it still has to receive, so the next peering knows what this one decided. The term comes from Ceph. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
 **Session.** A client daemon's registration with the cluster, kept alive by a lease that the control plane renews on the node's heartbeat and alone declares expired. Its locks, open files and cache rights belong to the session, so they all end together when it expires.
 
@@ -198,7 +200,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Lease read, leader lease.** A Raft leader normally must check with a majority before answering a read, to be sure it is still the leader. Holding a lease lets it answer from memory instead, as long as the lease lasts. rock-solid's leader lease comes from **fortification**: the leader asks each follower to promise that, while its node's lease to the leader's node holds, it will not help elect anyone else in that group. With a quorum of promises the leader holds a lease without sending heartbeats, so an idle group can go quiet and still serve reads. See [Reads and leader leases](design.md#metadata-layer-metastore).
 
-**Support epoch.** The number of one unbroken run of a node-pair lease. The grantor bumps it when the lease lapses, so nothing granted under the old number comes back after a partition heals. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
+**Support epoch.** The number of one unbroken run of a node-pair lease. The grantor bumps it when the lease lapses, so nothing granted under the old number comes back after a partition heals. It belongs to the node pair and has nothing to do with the placement table's epoch. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
 **Leader transfer, leader balancing.** Handing leadership to another replica on purpose, without an election: for an upgrade, to drain a node, or to spread leaders evenly.
 
@@ -375,7 +377,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 | Member | A disk in a PG. In a cache mode, a node that has the file open |
 | Leader | A Raft group's elected coordinator; never used for chunk data, which has primaries |
 | Owner | The inode owner, the leader of an inode's shard. The event loop that owns a disk's log and index, its connections or its shards and is the only code to change them |
-| Epoch | The placement table's version. A volume's snapshot epoch, which counts its snapshots. The high bits of a chunk version, which are the first kind |
+| Epoch | The placement table's version, the table epoch (almost always). A volume's snapshot epoch, which counts its snapshots. A node-pair lease's support epoch. A chunk version holds none of them: its high half is its PG's interval number |
+| Interval | A PG's run of placement tables with the same members (almost always). Any span of time, as in a heartbeat interval |
 | Shard | A MetaStore Raft group over a range of keys. One piece of an erasure-coded chunk |
 | Commit | A chunk version is committed once every live member holds it. A Raft entry, once a majority holds it. A transaction, once its changes take effect. Group commit is batching many writes into one flush |
 | Acknowledged, durable, committed | Acknowledged: the caller was told the write succeeded. Durable: it survives a power cut on one disk. Committed: it is on every live member (data) or a majority (Raft). A primary acknowledges a write only once it is committed, and so durable. The daemon's write-back buffer acknowledges the application before any of that, which is why only `fsync` and `close` promise durability |

@@ -643,7 +643,7 @@ to the session.
   as fenced in one new version of the *session table*, which is published like the placement
   table. Every storage node applies it, acknowledges it, and from then on rejects writes carrying
   a fenced session's ID, including ones already queued. Only once every storage node has
-  acknowledged, or has been marked down in a committed epoch, does the leader commit the version
+  acknowledged, or has been marked down in a committed placement table, does the leader commit the version
   as acknowledged, and only then do owners release the session's rights. So a write the fenced
   client got applied is ordered before every write of the next lock holder.
 - **A node that answers the control plane but not an owner.** Its session stays alive, so a
@@ -888,7 +888,7 @@ From the [roadmap and open questions](../docs/design.md#roadmap-and-open-questio
 - **`recall_timeout`:** 30 s is a default to tune from recall acknowledgment times measured
   under load, not a measurement.
 - **Incarnation fencing:** does a primary's table of newest incarnations need to survive a primary
-  change, or does the epoch rule already reject a dead daemon's late write?
+  change, or does the per-PG interval rule already reject a dead daemon's late write?
 - **SMB later.** One Samba gateway per volume, plus a Samba VFS module that registers the
   gateway's opens with the inode owner and turns a recall into a lease break. Until it exists,
   shares that pods also write need `oplocks = no`.
