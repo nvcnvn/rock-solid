@@ -1,0 +1,137 @@
+# lease_drift 1%, primary_lease 4 s, heartbeat 1 s, rate_window 10 s, slew +-22.6%
+
+== A. Margin each rule gives, against the least margin that is safe
+   B bounds the grantor's raw rate over the holder's. Worst case: holder's
+   boot clock no faster than its raw, grantor's no slower, so only raw counts:
+   safe iff (1 - m) <= 1/rho, i.e. m >= 1 - 1/rho.
+       rho   needed        design  spike README   excess>1+ld excess>1+2ld  max(ld,1-1/B)
+    0.9900   0.000%       1.000%        1.000%        1.000%        1.000%        1.000% 
+    1.0000   0.000%       1.000%        1.000%        1.000%        1.000%        1.000% 
+    1.0040   0.398%       1.000%        1.000%        1.000%        1.000%        1.000% 
+    1.0050   0.498%       1.000%        1.000%        1.000%        1.000%        1.000% 
+    1.0060   0.596%       1.100%        1.600%        1.000%        1.000%        1.000% 
+    1.0100   0.990%       1.500%        2.000%        1.000%        1.000%        1.000% 
+    1.0101   1.000%       1.510%        2.010%        1.010%        1.000%        1.000% 
+    1.0200   1.961%       2.500%        3.000%        2.000%        1.000%!       1.961% 
+    1.0400   3.846%       4.500%        5.000%        4.000%        3.000%!       3.846% 
+    1.1000   9.091%      10.500%       11.000%       10.000%        9.000%!       9.091% 
+   (! = less than needed. For B = 1.006, the design gives 1.1%, the spike README 1.6%,
+    0.596% is needed, and lease_drift alone (1%) already covers it.)
+   Headroom = margin given - margin needed: how far rho may rise after B was measured.
+   design             least headroom over rho 1..1.2: +0.5025% of the lease
+   spike README       least headroom over rho 1..1.2: +0.5025% of the lease
+   excess>1+ld        least headroom over rho 1..1.2: +0.0099% of the lease
+   excess>1+2ld *     least headroom over rho 1..1.2: -0.9608% of the lease
+   max(ld,1-1/B)      least headroom over rho 1..1.2: +0.0000% of the lease
+   1-1/B, no floor *  least headroom over rho 1..1.2: +0.0000% of the lease
+   ld alone           least headroom over rho 1..1.2: -15.6667% of the lease
+
+== B. Worst overlap per rule, B measured from grant round trips
+   E = each node's raw calibration error bound; slew per node within +-22.6% or none;
+   round trips 50 us to 1 ms, grantor's read anywhere inside; corners plus 20,000 random.
+   'step' = a raw rate step on both nodes after the window (holder slower, grantor
+   faster), as a clocksource change would make; it is outside what B measured.
+   case                                     design   spike README    excess>1+ld excess>1+2ld *  max(ld,1-1/B) 1-1/B, no floo       ld alone
+   (* = a planted variant the check must fail)
+   E 1%                                 -20.125 ms     -20.282 ms      -0.396 ms     +38.788 ms      +0.000 ms      +0.000 ms     +39.604 ms
+   E 4% (Skylake-X crystal bug)         -19.511 ms     -20.041 ms      -0.513 ms     +39.692 ms      -0.000 ms      +0.000 ms    +278.846 ms
+   E 1%, step 0.4% after window          -4.279 ms      -4.652 ms     +15.591 ms     +54.707 ms     +16.000 ms     +16.162 ms     +55.525 ms
+   E 1%, step 1% after window           +19.682 ms     +19.474 ms     +39.591 ms     +78.588 ms     +40.001 ms     +40.405 ms     +79.408 ms
+   (positive = the holder's lease outlasts the grant; 'ld alone' is the first rate_window)
+   design = ld + excess of B over 1 + ld/2; spike README = ld + (B - 1) once B > 1 + ld/2.
+
+== C. A pair over its first 60 s: step check, rate window and partition
+   Holder's clocks exact, grantor's both rho fast (no daemon), 100 us round trips,
+   a grant per 1 s heartbeat. The network partitions at a random time in 0..60 s
+   (2,000 times); worst overlap of the holder's last lease. trips = step-check
+   detections in a 60 s run. 'first read' = when the holder first holds a lease.
+   design as written: step threshold 1 + ld/2, lease_drift alone until a full window
+       rho  trips  first read  margin at 60 s  worst overlap
+    1.0000      0      0.1 ms          1.000%      -40.05 ms
+    1.0040      0      0.1 ms          1.000%      -24.11 ms
+    1.0060     59      0.1 ms          1.000%      -16.19 ms
+    1.0101     59      0.1 ms          1.000%       -0.05 ms
+    1.0120     59      0.1 ms          1.000%       +7.38 ms
+    1.0200     59      0.1 ms          1.000%      +38.38 ms
+    1.0400     59      0.1 ms          1.000%     +113.80 ms
+   step threshold 1/(1-m) for the margin m in force, otherwise as written
+       rho  trips  first read  margin at 60 s  worst overlap
+    1.0000      0      0.1 ms          1.000%      -40.05 ms
+    1.0040      0      0.1 ms          1.000%      -24.11 ms
+    1.0060      0      0.1 ms          1.100%      -16.19 ms
+    1.0101      0      0.1 ms          1.510%       -0.05 ms
+    1.0120     59      0.1 ms          1.000%       +7.38 ms
+    1.0200     59      0.1 ms          1.000%      +38.38 ms
+    1.0400     59      0.1 ms          1.000%     +113.80 ms
+   proposed: also no lease without a bound, bound from two grants >= 100 ms apart
+       rho  trips  first read  margin at 60 s  worst overlap
+    1.0000      0    100.2 ms          1.000%      -40.05 ms
+    1.0040      0    100.2 ms          1.000%      -24.11 ms
+    1.0060      0    100.2 ms          1.100%      -20.20 ms
+    1.0101      0    100.2 ms          1.510%      -20.46 ms
+    1.0120      0    100.2 ms          1.700%      -20.63 ms
+    1.0200      0    100.2 ms          2.500%      -21.63 ms
+    1.0400      0    100.2 ms          4.500%      -26.21 ms
+   alternative: as proposed, but the bound from the next heartbeat's grant (1 s)
+       rho  trips  first read  margin at 60 s  worst overlap
+    1.0000      0   1000.1 ms          1.000%      -40.05 ms
+    1.0040      0   1000.1 ms          1.000%      -24.11 ms
+    1.0060      0   1000.1 ms          1.100%      -20.20 ms
+    1.0101      0   1000.1 ms          1.510%      -20.46 ms
+    1.0120      0   1000.1 ms          1.700%      -20.63 ms
+    1.0200      0   1000.1 ms          2.500%      -21.63 ms
+    1.0400      0   1000.1 ms          4.500%      -26.21 ms
+   planted: as proposed, but step threshold 1 + ld/2 (fails liveness, not safety)
+       rho  trips  first read  margin at 60 s  worst overlap
+    1.0000      0    100.2 ms          1.000%      -40.05 ms
+    1.0040      0    100.2 ms          1.000%      -24.11 ms
+    1.0060     59    100.2 ms          1.201%      -24.22 ms
+    1.0101    599       never            none       no lease
+    1.0120    599       never            none       no lease
+    1.0200    599       never            none       no lease
+    1.0400    599       never            none       no lease
+
+== D. Pause detection with the step threshold 1/(1-m)
+   Grantor raw rho, holder's exact, margin m = the design's rule at B = rho. The
+   holder's clocks stand still for p between grant a and a heartbeat the grantor
+   sends 1 s later (100 us round trips). Largest p the check misses, against the
+   headroom the margin leaves on a 4 s lease (real time the holder may lose unseen).
+       rho       m  missed pause, threshold 1/(1-m)  with 1+ld/2  headroom
+    1.0000  1.000%                         10.10 ms      5.07 ms   40.0 ms
+    1.0040  1.000%                          6.14 ms      1.09 ms   24.1 ms
+    1.0060  1.100%                          5.17 ms      0.00 ms   20.1 ms
+    1.0101  1.510%                          5.25 ms      0.00 ms   20.4 ms
+    1.0200  2.500%                          5.60 ms      0.00 ms   21.6 ms
+    1.0400  4.500%                          6.90 ms      0.00 ms   26.2 ms
+   A missed pause is always shorter than the headroom, so the lease still ends first;
+   with 1+ld/2 a grantor faster than about 1.005 trips the check with no pause at all.
+
+== E. A grantor reboots inside the holder's rate window
+   Holder exact. The grantor's first boot runs raw at 1.0 from t = 0; it goes down at
+   5.5 s and its second boot starts at 7.5 s with raw from 0 at rate 1.02. Grants every
+   heartbeat while it is up, 100 us round trips; the network partitions just after the
+   grant at 8 s (or after the probe, when there is one).
+   window not keyed (as specified)  bound   -0.0700  margin  1.00%  overlap  +38.38 ms
+   window keyed by grantor boot     bound   +1.0210  margin  2.60%  overlap  -25.70 ms
+   Unkeyed, the first grant of the new boot gives a negative 'bound', the rule turns it
+   into lease_drift, and the step check (g - g_a < 0) sees nothing.
+
+== F. Margin of the first lease after a start or a detection
+   Worst bound from two grants: B = rho (gap + 2 RTT) / gap, with the second request
+   sent `gap` after the first grant arrives. Margin by the design's rule; no lease at
+   50% or more. Lease = how long the holder keeps a 4 s lease.
+      gap     rtt    rho        B   margin    lease
+    100ms   100us  1.000   1.0020    1.00%  3.960 s
+    100ms   100us  1.040   1.0421    4.71%  3.812 s
+    100ms  1000us  1.000   1.0200    2.50%  3.900 s
+    100ms  1000us  1.040   1.0608    6.58%  3.737 s
+    100ms 10000us  1.000   1.2000   20.50%  3.180 s
+    100ms 10000us  1.040   1.2480   25.30%  2.988 s
+   1000ms   100us  1.000   1.0002    1.00%  3.960 s
+   1000ms   100us  1.040   1.0402    4.52%  3.819 s
+   1000ms  1000us  1.000   1.0020    1.00%  3.960 s
+   1000ms  1000us  1.040   1.0421    4.71%  3.812 s
+   1000ms 10000us  1.000   1.0200    2.50%  3.900 s
+   1000ms 10000us  1.040   1.0608    6.58%  3.737 s
+   The margin falls back towards lease_drift + (rho - 1.005) as the window lengthens.
+

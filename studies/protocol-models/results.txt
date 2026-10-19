@@ -1,0 +1,10 @@
+# ./run-tlc.sh work 4 900 on an Apple M4 Pro (14 cores, 64 GiB), Java 17 (Zulu 17.0.17), 2026-10-19
+crdb StoreLiveness (as shipped)    workers=4 distinct=25383879 depth=45 wall=88s complete
+crdb ParallelCommits (safety)      workers=4 distinct=8216557 depth=63 wall=19s complete
+crdb ParallelCommits (as shipped)  workers=4 distinct=8216557 depth=63 wall=782s complete
+etcd-raft MCetcdraft (small)       workers=4 distinct=27582788 depth=15 wall=900s stopped at the 900 s cap
+etcd-raft MCetcdraft (as shipped)  workers=4 distinct=17669559 depth=15 wall=809s stopped by hand at 809 s
+# Distinct states per minute at the cut-off: etcd-raft small 1.84 million (27.6 M in 15 min), as shipped
+# 1.31 million (17.7 M in 13.5 min), both still growing (the small run had 19 million states queued); CockroachDB StoreLiveness
+# 17.3 million, ParallelCommits safety 25.9 million. The first two runs and the last three were separate
+# invocations of the same script (the session was interrupted between them).

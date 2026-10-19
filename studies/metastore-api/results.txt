@@ -1,0 +1,59 @@
+== 1. Creates per second in one directory, by how shared keys are updated
+   (commit latency from the design's raft rounds spike; every creator waits for its commit before the next)
+   1 creator in flight, latency 0.6 ms: compare-and-set 1,667/s, Update 1,667/s; 10,000 files 6.0 s against 6.00 s
+   1 creator in flight, latency 3.0 ms: compare-and-set 333/s, Update 333/s; 10,000 files 30.0 s against 30.00 s
+   64 creators in flight, latency 0.6 ms: compare-and-set 1,667/s, Update 106,667/s; 10,000 files 6.0 s against 0.09 s
+   64 creators in flight, latency 3.0 ms: compare-and-set 333/s, Update 21,333/s; 10,000 files 30.0 s against 0.47 s
+   One loop applies about 60,000 proposals/s at 90% busy (design, Event loop per core), so the Update
+   figures above about 50,000/s are capped by the shard's loop, not by conflicts.
+
+== 2. Largest sum of grants Σ a disk's gap g_d allows, under two rules for unseen reuse
+   time window: Σ + h_d <= g_d, h_d = peak rate x window;  byte budget: Σ x (1 + k) <= g_d, no h_d
+   G4: 100 GB disk at 90%, 16 MiB segments, 3 GB/s, gap 9.87 GB: time window 1s 6.87, 0.25s 9.12; byte budget k=1 4.93, k=2 3.29, k=4 1.97 GB  (10 nodes x 256 MiB = 2.68 GB)
+   G5: 32 GB NVMe at 90%, 4 MiB segments, 3 GB/s, gap 3.17 GB: time window 1s 0.17, 0.25s 2.42; byte budget k=1 1.58, k=2 1.06, k=4 0.63 GB  (10 nodes x 256 MiB = 2.68 GB)
+
+== 3. Granted bytes the leader has not heard of, on one disk of a 3-node rep3 pool of G4's disks
+   (every disk holds a copy of every chunk, so every granted byte can land on one disk)
+   design today, one client streams 10 s at 1.1 GB/s unseen: 11.00 GB unseen + 0.81 GB granted = 11.81 GB against 9.87 GB -> overruns the log reserve
+   budget k = 2, all three nodes at their budget (worst case): 1.61 GB unseen + 0.81 GB granted = 2.42 GB against 9.87 GB -> fits
+   budget k = 4, all three nodes at their budget (worst case): 3.22 GB unseen + 0.81 GB granted = 4.03 GB against 9.87 GB -> fits
+   cap binding, G4 with 10 nodes, k = 1: grants 4.93 GB, worst landing 9.87 GB = g_d
+   cap binding, G4 with 10 nodes, k = 2: grants 3.29 GB, worst landing 9.87 GB = g_d
+   cap binding, G4 with 10 nodes, k = 4: grants 1.97 GB, worst landing 9.87 GB = g_d
+   Without the fixes the review found: a shrink from 256 to 50 MiB on three nodes whose replies are lost lands
+   up to 2.42 GB (k = 2) while the leader counts 0.47 GB; a floor grant reused at a full disk
+   lands (1 + k) x g per window, so a 1.1 GB/s writer fills G4's gap in about 9 windows.
+
+   Share of each second a node keeps buffering with no fault, if the window resets only once a second:
+   10 GbE: k=1: 24%, k=2: 49%, k=4: 98%  (grant 256 MiB)
+   25 GbE: k=1: 9%, k=2: 19%, k=4: 37%  (grant 256 MiB)
+   100 GbE: k=1: 2%, k=2: 5%, k=4: 10%  (grant 256 MiB)
+   With an early heartbeat at half the budget, the window resets every k x g / 2 bytes, so a node at rate R
+   10 GbE: 4.1 extra heartbeats per second at k = 2, and buffering never stops
+   25 GbE: 10.8 extra heartbeats per second at k = 2, and buffering never stops
+   100 GbE: 41.0 extra heartbeats per second at k = 2, and buffering never stops
+   (one more heartbeat costs the leader a memory update, no Raft entry)
+
+== 4. Dividing a binding cap: grant_i = min(ask_i, max(floor_i, L)), L the water level that fills the cap;
+   floor_i is what node i holds buffered. If the floors alone exceed the cap, every grant is its floor.
+   cap 512 MiB, asks [256, 256, 256, 256], buffered [0, 0, 0, 0] -> grants [128, 128, 128, 128] MiB, sum 512
+   cap 512 MiB, asks [256, 256, 64, 16], buffered [0, 0, 0, 0] -> grants [216, 216, 64, 16] MiB, sum 512
+   cap 512 MiB, asks [256, 256, 64, 16], buffered [200, 0, 0, 0] -> grants [216, 216, 64, 16] MiB, sum 512
+   cap 512 MiB, asks [256, 256, 64, 16], buffered [250, 0, 0, 0] -> grants [250, 182, 64, 16] MiB, sum 512
+   cap 512 MiB, asks [256, 256, 256, 256], buffered [200, 200, 200, 0] -> grants [200, 200, 200, 0] MiB, sum 600
+
+== 5. Key sizes against internal/lsm (MaxKey 1,024, MaxValue 1,000). A leaf entry is k + v + 5 bytes plus a
+   2-byte slot, and splitPoint needs every entry within half of a 4,080-byte page: k + v <= 2,033.
+   directory entry, 255-byte name: 269 B
+   xattr, 255-byte name: 269 B
+   xattr piece, 255-byte name: 270 B
+   lock (mode, session): 23 B
+   replay record (session, mount, request): 34 B
+   purge entry: 22 B
+   S3 index, 1,024-byte key: 1029 B  > MaxKey
+   MaxKey 1,032 with MaxValue 1,000: k + v = 2032 <= 2,033
+   A range-removal fragment holds two bounds: with both at MaxKey 1,032 it needs 2071 B > 2,040;
+   with bounds of at most 1,000 B each, 2007 B fits. Named range bounds: inode keys 14 B,
+   a volume 5 B, replay records 34 B.
+   64 KiB xattr in values of up to 1,000 B: 66 values, about 82 KiB of Txn
+   4,095-byte symlink target: 5 values

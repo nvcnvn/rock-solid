@@ -1,0 +1,88 @@
+# go1.27.0 darwin/arm64, rock-solid 546f956, 2026-10-19T13:52:44Z
+
+Which segments must recovery read when merges fill metadata segments of their own?
+segment 64 blocks, checkpoint every 256 record blocks, step 96 blocks, replay lag up to 40 records
+
+merge workers 0, 2000 crashes after a manifest
+  rule                                runs missing a record  extra segments read, mean   max
+  per stream (design.md now)                              0                       1.51  2.88
+  per lane (lane byte in header)                          0                       1.51  2.88
+  per lane, merge lanes skipped                           0                       1.51  2.88
+  table, open list and N in manifest                      0                       0.84  1.89
+  fewest blocks (oracle)                                  0                       0.00  0.00
+
+merge workers 1, 2000 crashes after a manifest
+  rule                                runs missing a record  extra segments read, mean   max
+  per stream (design.md now)                           1485                        n/a   n/a
+  per lane (lane byte in header)                          0                       2.14  3.72
+  per lane, merge lanes skipped                        1361                        n/a   n/a
+  table, open list and N in manifest                      0                       1.00  2.58
+  fewest blocks (oracle)                                  0                       0.00  0.00
+
+merge workers 2, 2000 crashes after a manifest
+  rule                                runs missing a record  extra segments read, mean   max
+  per stream (design.md now)                           1837                        n/a   n/a
+  per lane (lane byte in header)                          0                       2.73  4.69
+  per lane, merge lanes skipped                        1792                        n/a   n/a
+  table, open list and N in manifest                      0                       1.12  3.08
+  fewest blocks (oracle)                                  0                       0.00  0.00
+
+merge workers 4, 2000 crashes after a manifest
+  rule                                runs missing a record  extra segments read, mean   max
+  per stream (design.md now)                           1978                        n/a   n/a
+  per lane (lane byte in header)                          0                       3.98  6.41
+  per lane, merge lanes skipped                        1987                        n/a   n/a
+  table, open list and N in manifest                      0                       1.42  3.97
+  fewest blocks (oracle)                                  0                       0.00  0.00
+
+## Stale headers, committed code
+=== RUN   TestStudyFreedSegmentKeepingItsHeaderIsFree
+    stale_header_test.go:122: segment 1 is {Segment:1 State:1 Live:0 Newest:0} after recovery; the table freed it
+    stale_header_test.go:125: 4085 segments free, want 4086
+--- FAIL: TestStudyFreedSegmentKeepingItsHeaderIsFree (0.01s)
+=== RUN   TestStudyFreeingManifestNobodyNamesKeepsSegmentUsed
+--- PASS: TestStudyFreeingManifestNobodyNamesKeepsSegmentUsed (0.01s)
+=== RUN   TestStudyRecordUnderAStaleHeaderIsErased
+=== RUN   TestStudyRecordUnderAStaleHeaderIsErased/freed_in_the_table
+    stale_header_test.go:162: erased 0 record headers, want the one at segment 1 block 1
+    stale_header_test.go:171: segment 11 opened with seq 11, which the record left at segment 1 block 1 carries
+=== RUN   TestStudyRecordUnderAStaleHeaderIsErased/still_listed
+    stale_header_test.go:162: erased 0 record headers, want the one at segment 1 block 1
+    stale_header_test.go:171: segment 11 opened with seq 11, which the record left at segment 1 block 1 carries
+--- FAIL: TestStudyRecordUnderAStaleHeaderIsErased (0.05s)
+    --- FAIL: TestStudyRecordUnderAStaleHeaderIsErased/freed_in_the_table (0.03s)
+    --- FAIL: TestStudyRecordUnderAStaleHeaderIsErased/still_listed (0.02s)
+=== RUN   TestStudyReusedSegmentRowComesFromReplay
+    stale_header_test.go:199: segment 1 is {Segment:1 State:1 Live:8 Newest:67} (the table had {Segment:1 State:1 Live:7 Newest:7}); want 1 live block, newest LSN 67
+--- FAIL: TestStudyReusedSegmentRowComesFromReplay (0.02s)
+FAIL
+FAIL	github.com/nvcnvn/rock-solid/internal/disklog	0.481s
+FAIL
+
+## Stale headers and the whole disklog suite, with next-seq.diff
+=== RUN   TestStudyFreedSegmentKeepingItsHeaderIsFree
+--- PASS: TestStudyFreedSegmentKeepingItsHeaderIsFree (0.01s)
+=== RUN   TestStudyFreeingManifestNobodyNamesKeepsSegmentUsed
+--- PASS: TestStudyFreeingManifestNobodyNamesKeepsSegmentUsed (0.01s)
+=== RUN   TestStudyRecordUnderAStaleHeaderIsErased
+=== RUN   TestStudyRecordUnderAStaleHeaderIsErased/freed_in_the_table
+=== RUN   TestStudyRecordUnderAStaleHeaderIsErased/still_listed
+--- PASS: TestStudyRecordUnderAStaleHeaderIsErased (0.07s)
+    --- PASS: TestStudyRecordUnderAStaleHeaderIsErased/freed_in_the_table (0.05s)
+    --- PASS: TestStudyRecordUnderAStaleHeaderIsErased/still_listed (0.02s)
+=== RUN   TestStudyReusedSegmentRowComesFromReplay
+--- PASS: TestStudyReusedSegmentRowComesFromReplay (0.01s)
+PASS
+ok  	github.com/nvcnvn/rock-solid/internal/disklog	0.444s
+ok  	github.com/nvcnvn/rock-solid/internal/chunkstore	1.447s
+ok  	github.com/nvcnvn/rock-solid/internal/core	0.307s
+ok  	github.com/nvcnvn/rock-solid/internal/disklog	5.616s
+ok  	github.com/nvcnvn/rock-solid/internal/lsm	1.020s
+ok  	github.com/nvcnvn/rock-solid/internal/sim	0.288s
+
+## next-seq.diff taking the next sequence at checkpoint begin, which counts rounds in flight
+--- FAIL: TestRandomCrashesKeepAcknowledgedRecords (0.01s)
+    recovery_property_test.go:128: seed 1 cycle 0: rebuild: log corrupt at LSN 67
+FAIL
+FAIL	github.com/nvcnvn/rock-solid/internal/disklog	0.320s
+FAIL

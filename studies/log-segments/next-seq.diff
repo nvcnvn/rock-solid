@@ -1,0 +1,222 @@
+diff --git a/internal/disklog/groupcommit.go b/internal/disklog/groupcommit.go
+index b4b3eb0..850e07a 100644
+--- a/internal/disklog/groupcommit.go
++++ b/internal/disklog/groupcommit.go
+@@ -291,6 +291,7 @@ type round struct {
+ 	entries      []Entry
+ 	tickets      []Ticket
+ 	payloads     []uint64
++	opened       uint64
+ }
+ 
+ type pendingPiece struct {
+@@ -335,6 +336,7 @@ type Log struct {
+ 	nextTicket Ticket
+ 	nextLSN    uint64
+ 	nextSeq    uint64
++	durableSeq uint64
+ 	durableLSN uint64
+ 	free       []uint64
+ 	usage      []SegmentUsage
+@@ -400,6 +402,7 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
+ 		nextTicket: 1,
+ 		nextLSN:    1,
+ 		nextSeq:    1,
++		durableSeq: 1,
+ 		free:       make([]uint64, (sb.SegmentCount+63)/64),
+ 		usage:      make([]SegmentUsage, sb.SegmentCount),
+ 		last:       Cold,
+@@ -558,7 +561,7 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
+ 	if l.cp != nil {
+ 		return ErrBusy
+ 	}
+-	m := Manifest{BaseLSN: l.durableLSN, Indexes: make([]ManifestIndex, len(indexes))}
++	m := Manifest{BaseLSN: l.durableLSN, NextSeq: l.durableSeq, Indexes: make([]ManifestIndex, len(indexes))}
+ 	for i, ix := range indexes {
+ 		if ix.ReplayLSN > l.durableLSN || slices.ContainsFunc(indexes[:i], func(o CheckpointIndex) bool { return o.Owner == ix.Owner }) ||
+ 			slices.ContainsFunc(ix.Runs, func(r BlobRef) bool { return r.Segment == 0 || r.LSN > l.durableLSN }) {
+@@ -769,6 +772,9 @@ func (l *Log) usageRows() []SegmentUsage {
+ func (l *Log) retire(out *Output) {
+ 	r := l.round(0)
+ 	l.durableLSN = r.lsn
++	if r.opened != 0 {
++		l.durableSeq = r.opened + 1
++	}
+ 	l.replayBytes += r.bytes
+ 	u := &l.usage[r.segment]
+ 	u.State, u.Newest = SegmentUsed, r.lsn
+@@ -1092,6 +1098,9 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
+ 		tickets:      r.tickets,
+ 		payloads:     r.payloads,
+ 	}
++	if t.roll {
++		r.opened = t.seq
++	}
+ 	l.asm[t.stream] = cursor{segment: t.segment, seq: t.seq, next: t.offset + uint32(lay.Blocks())}
+ 	if t.roll {
+ 		l.opened[t.stream] = l.nextLSN
+diff --git a/internal/disklog/manifest.go b/internal/disklog/manifest.go
+index f7c1ccc..021809c 100644
+--- a/internal/disklog/manifest.go
++++ b/internal/disklog/manifest.go
+@@ -9,7 +9,7 @@ const (
+ 	// BlobRefSize is the encoded length of a BlobRef.
+ 	BlobRefSize = 18
+ 
+-	manifestFixedSize = 2 + 8 + 4 + 4
++	manifestFixedSize = 2 + 8 + 8 + 4 + 4
+ 	manifestIndexSize = 4 + 8 + 4
+ 	pieceListSize     = 2 + 2
+ 
+@@ -53,6 +53,7 @@ type SegmentUsage struct {
+ // Manifest is a checkpoint: each index's runs and replay point, all at or before BaseLSN, the durable LSN when the checkpoint began, and the segment usage table as of BaseLSN, every segment it leaves out free.
+ type Manifest struct {
+ 	BaseLSN  uint64
++	NextSeq  uint64
+ 	Indexes  []ManifestIndex
+ 	Segments []SegmentUsage
+ }
+@@ -61,6 +62,7 @@ type Manifest struct {
+ func AppendManifest(dst []byte, m *Manifest) []byte {
+ 	dst = binary.LittleEndian.AppendUint16(dst, FormatVersion)
+ 	dst = binary.LittleEndian.AppendUint64(dst, m.BaseLSN)
++	dst = binary.LittleEndian.AppendUint64(dst, m.NextSeq)
+ 	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(m.Indexes)))
+ 	for i := range m.Indexes {
+ 		ix := &m.Indexes[i]
+@@ -96,7 +98,7 @@ func DecodeManifest(b []byte) (Manifest, error) {
+ 	if v := r.u16(); v != FormatVersion && !r.bad {
+ 		return Manifest{}, ErrBadVersion
+ 	}
+-	m := Manifest{BaseLSN: r.u64()}
++	m := Manifest{BaseLSN: r.u64(), NextSeq: r.u64()}
+ 	count := r.u32()
+ 	if r.bad || uint64(count)*manifestIndexSize > uint64(r.left()) {
+ 		return Manifest{}, ErrMalformed
+diff --git a/internal/disklog/recovery.go b/internal/disklog/recovery.go
+index ac8fdf1..d05ad11 100644
+--- a/internal/disklog/recovery.go
++++ b/internal/disklog/recovery.go
+@@ -89,12 +89,14 @@ type segInfo struct {
+ 	listed   bool
+ 	live     uint32
+ 	newest   uint64
++	under    foundHeader
+ }
+ 
+ type foundHeader struct {
+ 	segment uint32
+ 	block   uint32
+ 	lsn     uint64
++	seq     uint64
+ }
+ 
+ type window struct {
+@@ -473,6 +475,7 @@ func (r *Recovery) classify(s uint32, img []byte) {
+ 			r.manifestPos = h.Manifest
+ 		}
+ 		r.checkFirst(s, img[core.BlockSize:], h.Seq, false)
++		r.checkUnder(s, img[core.BlockSize:], h.Seq)
+ 	case isZero(img[:core.BlockSize]) || (err == nil && h.LogID != r.sb.LogID):
+ 		*info = segInfo{state: segFree}
+ 		r.checkFirst(s, img[core.BlockSize:], 0, true)
+@@ -496,6 +499,19 @@ func (r *Recovery) checkFirst(s uint32, img []byte, seq uint64, anySeq bool) {
+ 	}
+ }
+ 
++// checkUnder keeps a record at block 1 of a newer segment incarnation than the header names:
++// the round that opened the segment again landed its record but not its header. It counts
++// only if the manifest's table frees the segment under that stale header.
++func (r *Recovery) checkUnder(s uint32, img []byte, seq uint64) {
++	p, ok := r.candidate(img, 1, 0, true)
++	if !ok || p.seq <= seq || p.headerBlocks > 1 {
++		return
++	}
++	if h, err := DecodeHeader(img, Place{LogID: r.sb.LogID, Seq: p.seq, Offset: 1}, r.sb.SegmentBlocks-1, r.scratch[:0]); err == nil {
++		r.segs[s].under = foundHeader{segment: s, block: 1, lsn: h.Record.LSN, seq: p.seq}
++	}
++}
++
+ func (r *Recovery) noteFirst(s uint32, h RecordHeader) {
+ 	if info := &r.segs[s]; info.state == segUsed {
+ 		info.hasFirst, info.firstLSN = true, h.Record.LSN
+@@ -506,7 +522,7 @@ func (r *Recovery) noteFirst(s uint32, h RecordHeader) {
+ }
+ 
+ func (r *Recovery) noteFound(s, block uint32, h RecordHeader) {
+-	r.found = append(r.found, foundHeader{segment: s, block: block, lsn: h.Record.LSN})
++	r.found = append(r.found, foundHeader{segment: s, block: block, lsn: h.Record.LSN, seq: h.Record.Seq})
+ 	r.maxKnown = max(r.maxKnown, h.Record.LSN)
+ 	r.maxSeq = max(r.maxSeq, h.Record.Seq)
+ }
+@@ -636,12 +652,16 @@ func (r *Recovery) pumpFollow(ctx *core.Context, out *Output) {
+ // read in full: the damaged ones, and the free ones holding a record at block 1, since a header
+ // damaged to zeros over a segment opened after the manifest looks like one that never landed.
+ func (r *Recovery) applyTable(ctx *core.Context, out *Output) bool {
++	next := r.manifest.NextSeq
+ 	for _, u := range r.manifest.Segments {
+ 		if u.Segment >= r.sb.SegmentCount {
+ 			r.fail(ctx, &CorruptError{LSN: r.manifestPos.LSN}, out)
+ 			return false
+ 		}
+ 		info := &r.segs[u.Segment]
++		if info.state == segUsed && info.seq >= next && u.State != SegmentQuarantined {
++			continue
++		}
+ 		info.listed, info.live, info.newest = true, u.Live, u.Newest
+ 		switch {
+ 		case u.State == SegmentQuarantined:
+@@ -651,10 +671,17 @@ func (r *Recovery) applyTable(ctx *core.Context, out *Output) bool {
+ 		}
+ 	}
+ 	for s := range r.segs {
++		r.judgeStale(uint32(s), next)
+ 		if r.segs[s].state == segSuspect {
+ 			r.scan = append(r.scan, uint32(s))
+ 		}
+ 	}
++	r.found = slices.DeleteFunc(r.found, func(f foundHeader) bool {
++		return f.block == 1 && f.seq < next && slices.Contains(r.strays, f.segment)
++	})
++	r.strays = slices.DeleteFunc(r.strays, func(s uint32) bool {
++		return !slices.ContainsFunc(r.found, func(f foundHeader) bool { return f.segment == s && f.block == 1 })
++	})
+ 	for _, s := range r.strays {
+ 		if r.segs[s].state == segFree {
+ 			r.scan = append(r.scan, s)
+@@ -666,6 +693,27 @@ func (r *Recovery) applyTable(ctx *core.Context, out *Output) bool {
+ 	return true
+ }
+ 
++// judgeStale applies the manifest's NextSeq to a header of this log: one older than it that the
++// table leaves out was freed, and a record at block 1 at or past it, under an older header, is
++// a round in flight that opened the segment again without its header landing.
++func (r *Recovery) judgeStale(s uint32, next uint64) {
++	info := &r.segs[s]
++	if info.state != segUsed || info.seq >= next {
++		return
++	}
++	if f := info.under; f.seq >= next && f.lsn != 0 {
++		r.found = append(r.found, f)
++		r.maxKnown = max(r.maxKnown, f.lsn)
++		r.maxSeq = max(r.maxSeq, f.seq)
++		if !info.listed {
++			r.strays = append(r.strays, s)
++		}
++	}
++	if !info.listed {
++		*info = segInfo{state: segFree}
++	}
++}
++
+ func (r *Recovery) startQuarantine(ctx *core.Context, out *Output) {
+ 	if !r.applyTable(ctx, out) {
+ 		return
+@@ -1101,6 +1149,7 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
+ 	l.nextLSN = r.durable + 1
+ 	l.durableLSN = r.durable
+ 	l.nextSeq = r.maxSeq + 1
++	l.durableSeq = l.nextSeq
+ 	l.manifest = r.manifestPos
+ 	l.replayBytes = r.replayBytes
+ 	l.asm = r.resume

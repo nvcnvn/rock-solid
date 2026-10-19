@@ -1,0 +1,104 @@
+# Darwin 27.0.0, python 3.14.7, 2026-10-19T13:57Z
+conditions model; python 3.14.7 ; self-check passed
+== S: C1..C6 under the design's reading and the proposed rules (empty pools)
+   Stranded: design reading = stranded / raw room; proposed = b x stranded / capacity (the same as stranded / (capacity / b)); fires above 10%
+-- C1: rep2, nodes of 0.7 and 2 GB (rep2), capacity 2.430 GB, room / b 1.215 GB, balanced 0.630 GB, stranded 0.585 GB
+   stranded / raw room (design text, mixed units) 24.1%; b x stranded / capacity 48.1% -> Stranded yes (design reading: yes)
+   domain stranded room max(0, c_i - a B): A 0.000 GB of 0.630 GB (0.0%), B 1.170 GB of 1.800 GB (65.0%); create asks for confirmation: ['B']
+   reprotectable: without the first largest by size (B) 0.000 GB; without the largest by capacity (B) 0.000 GB = the minimum over domains; survivors fit the width: False; copies 2
+-- C2: rep3, nodes of 4, 4, 2, 1 TB (rep3), capacity 9.900 TB, room / b 3.300 TB, balanced 2.700 TB, stranded 0.600 TB
+   stranded / raw room (design text, mixed units) 6.1%; b x stranded / capacity 18.2% -> Stranded yes (design reading: no)
+   domain stranded room max(0, c_i - a B): A 0.900 TB of 3.600 TB (25.0%), B 0.900 TB of 3.600 TB (25.0%), C 0.000 GB of 1.800 TB (0.0%), D 0.000 GB of 0.900 TB (0.0%); create asks for confirmation: no
+   reprotectable: without the first largest by size (A) 0.900 TB; without the largest by capacity (A) 0.900 TB = the minimum over domains; survivors fit the width: True; copies 3
+-- C3: ec4-2 at 2 per node, nodes of 4, 4, 1 TB (ec4-2@2), capacity 8.100 TB, room / b 5.400 TB, balanced 1.800 TB, stranded 3.600 TB
+   stranded / raw room (design text, mixed units) 44.4%; b x stranded / capacity 66.7% -> Stranded yes (design reading: yes)
+   domain stranded room max(0, c_i - a B): A 2.700 TB of 3.600 TB (75.0%), B 2.700 TB of 3.600 TB (75.0%), C 0.000 GB of 0.900 TB (0.0%); create asks for confirmation: ['A', 'B']
+   reprotectable: without the first largest by size (A) 0.000 GB; without the largest by capacity (A) 0.000 GB = the minimum over domains; survivors fit the width: False; copies 3
+-- C4: none, three 2 TB disks, A holding 1.2 TB of another pool (none), capacity 4.200 TB, room / b 4.200 TB, balanced 4.200 TB, stranded 0.000 GB
+   stranded / raw room (design text, mixed units) 0.0%; b x stranded / capacity 0.0% -> Stranded no (design reading: no)
+   domain stranded room max(0, c_i - a B): A 0.000 GB of 0.600 TB (0.0%), B 0.000 GB of 1.800 TB (0.0%), C 0.000 GB of 1.800 TB (0.0%); create asks for confirmation: no
+   reprotectable: without the first largest by size (A) 3.600 TB; without the largest by capacity (B) 2.400 TB = the minimum over domains; survivors fit the width: True; copies 1
+-- C5: rep3, ten nodes of 4,4,4,2,2,2,1,1,1,0.5 TB (rep3), capacity 19.350 TB, room / b 6.450 TB, balanced 6.450 TB, stranded 0.000 GB
+   stranded / raw room (design text, mixed units) 0.0%; b x stranded / capacity 0.0% -> Stranded no (design reading: no)
+   domain stranded room max(0, c_i - a B): A 0.000 GB of 3.600 TB (0.0%), B 0.000 GB of 3.600 TB (0.0%), C 0.000 GB of 3.600 TB (0.0%), D 0.000 GB of 1.800 TB (0.0%), E 0.000 GB of 1.800 TB (0.0%), F 0.000 GB of 1.800 TB (0.0%), G 0.000 GB of 0.900 TB (0.0%), H 0.000 GB of 0.900 TB (0.0%), I 0.000 GB of 0.900 TB (0.0%), J 0.000 GB of 0.450 TB (0.0%); create asks for confirmation: no
+   reprotectable: without the first largest by size (A) 5.250 TB; without the largest by capacity (A) 5.250 TB = the minimum over domains; survivors fit the width: True; copies 3
+-- C6: rep2, nodes of 4, 1, 1 TB (rep2), capacity 5.400 TB, room / b 2.700 TB, balanced 1.800 TB, stranded 0.900 TB
+   stranded / raw room (design text, mixed units) 16.7%; b x stranded / capacity 33.3% -> Stranded yes (design reading: yes)
+   domain stranded room max(0, c_i - a B): A 1.800 TB of 3.600 TB (50.0%), B 0.000 GB of 0.900 TB (0.0%), C 0.000 GB of 0.900 TB (0.0%); create asks for confirmation: no
+   reprotectable: without the first largest by size (A) 0.900 TB; without the largest by capacity (A) 0.900 TB = the minimum over domains; survivors fit the width: True; copies 2
+   C6 in blocks: c_A 878,906,250, balanced 439,453,124, A strands 439,453,126; 2 x stranded > c_A: True (2 x stranded - c_A = 2 blocks)
+== R: balanced, reprotectable and stranded as the pool fills at balanced proportions, C2 (rep3, 4, 4, 2, 1 TB)
+   holding 0.000 GB: balanced over free room 2.700 TB, over capacity 2.700 TB
+      reprotect: room-based (balanced over free room without A) 0.900 TB -> ok; capacity-based 0.900 TB -> ok; stranded b x s / capacity 18.2%, b x s / remaining room 18.2%
+   holding 0.500 TB: balanced over free room 2.200 TB, over capacity 2.700 TB
+      reprotect: room-based (balanced over free room without A) 0.733 TB -> ok; capacity-based 0.900 TB -> ok; stranded b x s / capacity 18.2%, b x s / remaining room 21.4%
+   holding 0.800 TB: balanced over free room 1.900 TB, over capacity 2.700 TB
+      reprotect: room-based (balanced over free room without A) 0.633 TB -> CannotReprotect; capacity-based 0.900 TB -> ok; stranded b x s / capacity 18.2%, b x s / remaining room 24.0%
+   holding 0.900 TB: balanced over free room 1.800 TB, over capacity 2.700 TB
+      reprotect: room-based (balanced over free room without A) 0.600 TB -> CannotReprotect; capacity-based 0.900 TB -> ok; stranded b x s / capacity 18.2%, b x s / remaining room 25.0%
+   holding 1.000 TB: balanced over free room 1.700 TB, over capacity 2.700 TB
+      reprotect: room-based (balanced over free room without A) 0.567 TB -> CannotReprotect; capacity-based 0.900 TB -> CannotReprotect; stranded b x s / capacity 18.2%, b x s / remaining room 26.1%
+   holding 2.000 TB: balanced over free room 0.700 TB, over capacity 2.700 TB
+      reprotect: room-based (balanced over free room without A) 0.233 TB -> CannotReprotect; capacity-based 0.900 TB -> CannotReprotect; stranded b x s / capacity 18.2%, b x s / remaining room 46.2%
+   holding 2.500 TB: balanced over free room 0.200 TB, over capacity 2.700 TB
+      reprotect: room-based (balanced over free room without A) 66.667 GB -> CannotReprotect; capacity-based 0.900 TB -> CannotReprotect; stranded b x s / capacity 18.2%, b x s / remaining room 75.0%
+== O: stranded fraction (b x stranded / capacity) on ordinary layouts; Stranded fires above 10%
+   rep3, three equal 2 TB nodes               stranded   0.0% -> quiet   ; worst domain A strands 0.0%
+   rep3, 2, 2 and 1.92 TB (vendor sizes)      stranded   2.7% -> quiet   ; worst domain A strands 4.0%
+   rep3, 2, 2 and 1.8 TB                      stranded   6.9% -> quiet   ; worst domain A strands 10.0%
+   rep3, one node upgraded: 2, 2, 4 TB        stranded  25.0% -> Stranded; worst domain C strands 50.0%
+   rep3, one node smaller: 2, 2, 1 TB         stranded  40.0% -> Stranded; worst domain A strands 50.0%
+   rep3, four nodes 2, 2, 2, 1 TB             stranded   0.0% -> quiet   ; worst domain A strands 0.0%
+   rep3, five nodes 4, 2, 2, 2, 1 TB          stranded   4.5% -> quiet   ; worst domain A strands 12.5%
+   rep2, two nodes 2 and 1.92 TB              stranded   2.0% -> quiet   ; worst domain A strands 4.0%
+   rep2, two nodes 4 and 2 TB                 stranded  33.3% -> Stranded; worst domain A strands 50.0%
+   rep2, three nodes 2, 2, 1 TB               stranded   0.0% -> quiet   ; worst domain A strands 0.0%
+   rep2, four nodes 4, 1, 1, 1 TB             stranded  14.3% -> Stranded; worst domain A strands 25.0%
+   ec2-1, three nodes 4, 4, 2 TB              stranded  40.0% -> Stranded; worst domain A strands 50.0%
+== E: shards with max_per_domain 2 on nodes with fewer than 2 disks
+   ec4-2@2, three nodes, 2x2, 2x2 and 1x4 TB: width fits by the design's rule (6 <= 3 x 2): True; counting min(max_per_domain, disks): False; balanced by the design's formula 7.200 TB, with each disk capped 0.000 GB
+   ec4-2@2, four nodes, 2x2, 2x2, 2x2 and 1x4 TB: width fits by the design's rule (6 <= 4 x 2): True; counting min(max_per_domain, disks): True; balanced by the design's formula 9.600 TB, with each disk capped 8.640 TB
+   ec4-2@2, C3: three nodes, 2x2, 2x2 and 2x0.5 TB: width fits by the design's rule (6 <= 3 x 2): True; counting min(max_per_domain, disks): True; balanced by the design's formula 1.800 TB, with each disk capped 1.800 TB
+== E2: with each disk capped, is removing the largest-capacity domain still the worst case? (ec4-2 at 2 per node)
+   A one 4 TB disk, B, C, D two 1.5 TB each: without A (capacity 3.600 TB) 5.400 TB, without B (capacity 2.700 TB) 0.000 GB, without C (capacity 2.700 TB) 0.000 GB, without D (capacity 2.700 TB) 0.000 GB
+   random layouts of 4 to 6 nodes with 1 to 3 disks: largest-capacity domain not the worst in 367 of 3000
+== D: layouts without a spare domain, losing one disk (rep3)
+   three nodes of 2 x 2 TB: balanced 3.600 TB; spare domain: False; reprotectable after losing A's 2.000 TB disk: 1.800 TB
+   three nodes of 2 x 2, 2 x 2 and 4 + 1 TB: balanced 3.600 TB; spare domain: False; reprotectable after losing C's 4.000 TB disk: 0.900 TB
+   three nodes of one 4 TB disk: balanced 3.600 TB; spare domain: False; no node has a second disk: nothing to check
+== T: member moves after a disk is added to a pool holding data, targets by room against by capacity (recomputed after each round's data has moved, until no move)
+   none, one 2 TB node holding 1 TB, a 2 TB node added: room: 124 moves over 4 recomputations; capacity: 61 moves over 2 recomputations
+   C6 holding 0.8 TB, a 2 TB disk added to B: room: 98 moves over 3 recomputations; capacity: 62 moves over 2 recomputations
+   C2 holding 1.5 TB, a 4 TB disk added to D: room: 153 moves over 5 recomputations; capacity: 98 moves over 2 recomputations
+   C2 with a 4 TB disk added to D, margin max(5%, 1 member): converged True, 1 - (available + held) / balanced = 1.5% at any held
+== U: available + held under balanced once capped placement stops, pg_count by the design's rule (around 100 members per disk); data follows the table, so available + held does not depend on held
+   C1 at 128 PGs, margin 5%: available 0.630 GB, shortfall 0.0%, converged True
+   C2 at 128 PGs, margin 5%: available 2.679 TB, shortfall 0.8%, converged True
+   C3 at 128 PGs, margin 5%: available 1.800 TB, shortfall 0.0%, converged True
+   C4 at 256 PGs, margin 5%: available 4.189 TB, shortfall 0.3%, converged True
+   C5 at 512 PGs, margin 5%: available 6.422 TB, shortfall 0.4%, converged True
+   C6 at 128 PGs, margin 5%: available 1.800 TB, shortfall 0.0%, converged True
+   rep2, placed from scratch, margin 5%: shortfall median 0.4%, p90 0.6%, p99 0.9%, max 1.0%; over 2%: 0, over 5%: 0 of 200; stopped outside the margin: 18
+   rep2, a disk added, margin 5%, only from disks above the margin, 127 moves per add: shortfall median 4.6%, p90 4.7%, p99 9.4%, max 12.2%; over 2%: 173, over 5%: 3 of 200; stopped outside the margin: 188; converged below balanced / (1 + margin): 0
+   rep2, a disk added, margin 5%, from any disk above target, 149 moves per add: shortfall median 1.2%, p90 3.2%, p99 4.5%, max 9.4%; over 2%: 54, over 5%: 1 of 200; stopped outside the margin: 15; converged below balanced / (1 + margin): 0
+      held at 50% of balanced: Unbalanced by available < 0.9 (balanced - held) 1 of 200; by available + held < 0.9 balanced 0 of 200
+      held at 70% of balanced: Unbalanced by available < 0.9 (balanced - held) 24 of 200; by available + held < 0.9 balanced 0 of 200
+      held at 90% of balanced: Unbalanced by available < 0.9 (balanced - held) 117 of 200; by available + held < 0.9 balanced 0 of 200
+   rep2, a disk added, margin 2%, from any disk above target, 154 moves per add: shortfall median 0.6%, p90 1.8%, p99 3.6%, max 9.4%; over 2%: 12, over 5%: 1 of 200; stopped outside the margin: 94; converged below balanced / (1 + margin): 0
+   rep2, a disk added, margin max(5%, 1 member), from any disk above target, 149 moves per add: shortfall median 1.3%, p90 3.2%, p99 4.5%, max 9.4%; over 2%: 56, over 5%: 1 of 200; stopped outside the margin: 0; converged below balanced / (1 + margin): 0
+      held at 50% of balanced: Unbalanced by available < 0.9 (balanced - held) 1 of 200; by available + held < 0.9 balanced 0 of 200
+      held at 70% of balanced: Unbalanced by available < 0.9 (balanced - held) 24 of 200; by available + held < 0.9 balanced 0 of 200
+      held at 90% of balanced: Unbalanced by available < 0.9 (balanced - held) 122 of 200; by available + held < 0.9 balanced 0 of 200
+   rep2, a disk added, margin max(5%, 2 members), from any disk above target, 149 moves per add: shortfall median 1.3%, p90 3.2%, p99 5.4%, max 9.4%; over 2%: 56, over 5%: 2 of 200; stopped outside the margin: 0; converged below balanced / (1 + margin): 0
+   rep3, placed from scratch, margin 5%: shortfall median 0.3%, p90 0.7%, p99 1.0%, max 1.1%; over 2%: 0, over 5%: 0 of 200; stopped outside the margin: 7
+   rep3, a disk added, margin 5%, only from disks above the margin, 132 moves per add: shortfall median 4.3%, p90 4.7%, p99 4.8%, max 4.8%; over 2%: 110, over 5%: 0 of 200; stopped outside the margin: 161; converged below balanced / (1 + margin): 0
+   rep3, a disk added, margin 5%, from any disk above target, 147 moves per add: shortfall median 0.8%, p90 3.0%, p99 4.6%, max 4.7%; over 2%: 43, over 5%: 0 of 200; stopped outside the margin: 8; converged below balanced / (1 + margin): 0
+      held at 50% of balanced: Unbalanced by available < 0.9 (balanced - held) 0 of 200; by available + held < 0.9 balanced 0 of 200
+      held at 70% of balanced: Unbalanced by available < 0.9 (balanced - held) 21 of 200; by available + held < 0.9 balanced 0 of 200
+      held at 90% of balanced: Unbalanced by available < 0.9 (balanced - held) 88 of 200; by available + held < 0.9 balanced 0 of 200
+   rep3, a disk added, margin 2%, from any disk above target, 151 moves per add: shortfall median 0.5%, p90 1.4%, p99 4.1%, max 4.5%; over 2%: 4, over 5%: 0 of 200; stopped outside the margin: 67; converged below balanced / (1 + margin): 0
+   rep3, a disk added, margin max(5%, 1 member), from any disk above target, 147 moves per add: shortfall median 0.8%, p90 3.0%, p99 4.6%, max 4.7%; over 2%: 43, over 5%: 0 of 200; stopped outside the margin: 0; converged below balanced / (1 + margin): 0
+      held at 50% of balanced: Unbalanced by available < 0.9 (balanced - held) 0 of 200; by available + held < 0.9 balanced 0 of 200
+      held at 70% of balanced: Unbalanced by available < 0.9 (balanced - held) 21 of 200; by available + held < 0.9 balanced 0 of 200
+      held at 90% of balanced: Unbalanced by available < 0.9 (balanced - held) 93 of 200; by available + held < 0.9 balanced 0 of 200
+   rep3, a disk added, margin max(5%, 2 members), from any disk above target, 146 moves per add: shortfall median 0.9%, p90 3.0%, p99 4.6%, max 5.6%; over 2%: 43, over 5%: 1 of 200; stopped outside the margin: 0; converged below balanced / (1 + margin): 0

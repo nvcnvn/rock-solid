@@ -1,0 +1,39 @@
+Linux 6.12.54-linuxkit
+=== RUN   TestRawClocksIgnoreBubble
+    bubble_linux_test.go:74: E1 start=2000-01-01T00:00:00Z fake=1h0m0s CLOCK_BOOTTIME=18.375µs CLOCK_MONOTONIC_RAW=17.958µs
+--- PASS: TestRawClocksIgnoreBubble (0.00s)
+=== RUN   TestEpollWaitHoldsBubble
+=== RUN   TestEpollWaitHoldsBubble/Syscall/time.Sleep
+    bubble_linux_test.go:111: E2 Syscall/time.Sleep: a fake step of 1ms took 306ms of CLOCK_BOOTTIME; epoll_pwait returned EINTR 0 times
+=== RUN   TestEpollWaitHoldsBubble/RawSyscall/time.Sleep
+    bubble_linux_test.go:111: E2 RawSyscall/time.Sleep: a fake step of 1ms took 300ms of CLOCK_BOOTTIME; epoll_pwait returned EINTR 62 times
+=== RUN   TestEpollWaitHoldsBubble/Syscall/synctest.Wait
+    bubble_linux_test.go:111: E2 Syscall/synctest.Wait: a fake step of 0s took 307ms of CLOCK_BOOTTIME; epoll_pwait returned EINTR 0 times
+--- PASS: TestEpollWaitHoldsBubble (0.91s)
+    --- PASS: TestEpollWaitHoldsBubble/Syscall/time.Sleep (0.31s)
+    --- PASS: TestEpollWaitHoldsBubble/RawSyscall/time.Sleep (0.30s)
+    --- PASS: TestEpollWaitHoldsBubble/Syscall/synctest.Wait (0.31s)
+=== RUN   TestTimerfdIgnoresBubble
+    bubble_linux_test.go:134: E3 after 2 s of fake time a 1 s timerfd reads: expirations=0 errno=resource temporarily unavailable
+--- PASS: TestTimerfdIgnoresBubble (0.00s)
+=== RUN   TestWorkerInBubble
+    bubble_linux_test.go:161: E4 attempts at [10ms 30ms 70ms 150ms 310ms 630ms], eventfd count 6
+--- PASS: TestWorkerInBubble (0.00s)
+=== RUN   TestReadyAfterWrite
+    bubble_linux_test.go:202: E5 AF_UNIX socketpair: ready at once after 10000 of 10000 writes
+    bubble_linux_test.go:202: E5 TCP loopback: ready at once after 10000 of 10000 writes
+--- PASS: TestReadyAfterWrite (0.03s)
+=== RUN   TestContainer
+    bubble_linux_test.go:241: E6 uid=0 cpu.max="max 100000" io_uring_setup errno=operation not permitted
+--- PASS: TestContainer (0.00s)
+PASS
+== docker run --cpus=2.5
+=== RUN   TestContainer
+    bubble_linux_test.go:241: E6 uid=0 cpu.max="250000 100000" io_uring_setup errno=operation not permitted
+--- PASS: TestContainer (0.00s)
+PASS
+== docker run --cpus=2.5 --security-opt seccomp=unconfined
+=== RUN   TestContainer
+    bubble_linux_test.go:241: E6 uid=0 cpu.max="250000 100000" io_uring_setup errno=errno 0
+--- PASS: TestContainer (0.00s)
+PASS
