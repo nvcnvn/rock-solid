@@ -1,0 +1,147 @@
+# Linux 6.18.44-fc-v139, go1.27.0, rock-solid 5a5f5e2, 2026-10-19
+  p1: -		last = fillBlock(bw, &fl.src, t.cfg.MaxPiece-pieceOverhead, fl.older, &fl.probe)
+  p1: +		last = fillBlock(bw, &fl.src, t.cfg.MaxPiece-pieceOverhead, nil, &fl.probe)
+  p2: +	t.runs = append(runs, t.runs[i+len(c.inputs):]...)
+  p2: -		runs = append(runs, c.out)
+  p2: +		t.runs = append(t.runs, c.out)
+  p2: -	t.runs = append(runs, t.runs[i+len(c.inputs):]...)
+  p3: -	t.runs = slices.Insert(t.runs, at, r)
+  p3: +	_ = at
+  p3: +	t.runs = slices.Insert(t.runs, 0, r)
+  p4: -		st.frozen, st.frozenRoot = t.frozen, t.frozen.root
+  p4: +		st.frozenRoot = t.frozen.root
+  p5: -	for _, r := range t.runs[best[1]:] {
+  p5: +	for _, r := range t.runs[len(t.runs):] {
+# go1.27.0, internal/lsm via replace, 200 seeds x 3000 ops, option sets:
+#   {Name:F-memtable-only Piece:1048576 FlushOps:false FlushEvery:0 Compact: Absorb:0 FailFirst:0 RestartEach:false CompactEvery:0}
+#   {Name:A-ops Piece:1048576 FlushOps:true FlushEvery:0 Compact:ops Absorb:0 FailFirst:0 RestartEach:false CompactEvery:0}
+#   {Name:B-4K-eager Piece:4096 FlushOps:true FlushEvery:40 Compact:eager Absorb:0 FailFirst:0 RestartEach:false CompactEvery:0}
+#   {Name:C-256B-nocompact Piece:256 FlushOps:true FlushEvery:10 Compact:none Absorb:0 FailFirst:0 RestartEach:false CompactEvery:0}
+#   {Name:D-512B-deferred-absorb Piece:512 FlushOps:true FlushEvery:25 Compact:deferred Absorb:4 FailFirst:0 RestartEach:false CompactEvery:0}
+#   {Name:E-1K-fail-restart Piece:1024 FlushOps:true FlushEvery:30 Compact:eager Absorb:0 FailFirst:1 RestartEach:true CompactEvery:0}
+#   {Name:G-4K-40-runs-then-merge Piece:4096 FlushOps:true FlushEvery:2 Compact:none Absorb:0 FailFirst:0 RestartEach:false CompactEvery:40}
+[OK ] lsm: 0 of 200 seeds differ from the model, 0 differ between option sets (no model)
+    F-memtable-only          vs model   0  vs F   0  seed0: flushes=0 failed=0 tooLarge=0 pieces=0 compactions=0 stale=0 restarts=21 replayed=12645 maxRuns=0
+    A-ops                    vs model   0  vs F   0  seed0: flushes=177 failed=4 tooLarge=0 pieces=196 compactions=40 stale=0 restarts=21 replayed=157 maxRuns=9
+    B-4K-eager               vs model   0  vs F   0  seed0: flushes=212 failed=6 tooLarge=0 pieces=251 compactions=65 stale=0 restarts=21 replayed=132 maxRuns=7
+    C-256B-nocompact         vs model   0  vs F   0  seed0: flushes=328 failed=4 tooLarge=0 pieces=295 compactions=0 stale=0 restarts=21 replayed=55 maxRuns=295
+    D-512B-deferred-absorb   vs model   0  vs F   0  seed0: flushes=229 failed=8 tooLarge=0 pieces=389 compactions=49 stale=0 restarts=21 replayed=154 maxRuns=10
+    E-1K-fail-restart        vs model   0  vs F   0  seed0: flushes=237 failed=199 tooLarge=0 pieces=381 compactions=68 stale=0 restarts=139 replayed=142 maxRuns=8
+    G-4K-40-runs-then-merge  vs model   0  vs F   0  seed0: flushes=937 failed=3 tooLarge=0 pieces=861 compactions=43 stale=0 restarts=21 replayed=9 maxRuns=42
+    writes run between a flush's pieces: 16687; 1600 runs of 3000 ops in 2m37.738s, 99ms per run
+# go1.27.0, internal/lsm via replace, 20 seeds x 3000 ops, option sets:
+#   {Name:F-memtable-only Piece:1048576 FlushOps:false FlushEvery:0 Compact: Absorb:0 FailFirst:0 RestartEach:false CompactEvery:0}
+#   {Name:A-ops Piece:1048576 FlushOps:true FlushEvery:0 Compact:ops Absorb:0 FailFirst:0 RestartEach:false CompactEvery:0}
+#   {Name:B-4K-eager Piece:4096 FlushOps:true FlushEvery:40 Compact:eager Absorb:0 FailFirst:0 RestartEach:false CompactEvery:0}
+#   {Name:C-256B-nocompact Piece:256 FlushOps:true FlushEvery:10 Compact:none Absorb:0 FailFirst:0 RestartEach:false CompactEvery:0}
+#   {Name:D-512B-deferred-absorb Piece:512 FlushOps:true FlushEvery:25 Compact:deferred Absorb:4 FailFirst:0 RestartEach:false CompactEvery:0}
+#   {Name:E-1K-fail-restart Piece:1024 FlushOps:true FlushEvery:30 Compact:eager Absorb:0 FailFirst:1 RestartEach:true CompactEvery:0}
+#   {Name:G-4K-40-runs-then-merge Piece:4096 FlushOps:true FlushEvery:2 Compact:none Absorb:0 FailFirst:0 RestartEach:false CompactEvery:40}
+[FAIL] P1-flush-drops-removals-hiding-runs seed=0 set=A-ops op#109 "floor aca" got="aa=v26x" want="none"
+    # P1-flush-drops-removals-hiding-runs: seed 0 under A-ops reduced from 3000 ops to 5
+    put aa v26x            # ok
+    flush                  # ok
+    del aa                 # ok
+    flush                  # ok
+    floor aca              # aa=v26x   <- want none
+[FAIL] P1-flush-drops-removals-hiding-runs seed=0 set=B-4K-eager op#109 "floor aca" got="aa=v26x" want="none"
+[FAIL] P1-flush-drops-removals-hiding-runs seed=0 set=C-256B-nocompact op#50 "get efeea" got="=v19xxxxxxx" want="miss"
+[FAIL] P1-flush-drops-removals-hiding-runs seed=0 set=D-512B-deferred-absorb op#105 "get f" got="=v62xxx" want="miss"
+[FAIL] P1-flush-drops-removals-hiding-runs seed=0 set=E-1K-fail-restart op#109 "floor aca" got="aa=v26x" want="none"
+[FAIL] P1-flush-drops-removals-hiding-runs seed=0 set=G-4K-40-runs-then-merge op#44 "get e" got="=v38xxxxxx" want="miss"
+[OK ] P1-flush-drops-removals-hiding-runs: 20 of 20 seeds differ from the model, 20 differ between option sets (no model)
+    F-memtable-only          vs model   0  vs F   0
+    A-ops                    vs model  20  vs F  20
+    B-4K-eager               vs model  20  vs F  20
+    C-256B-nocompact         vs model  20  vs F  20
+    D-512B-deferred-absorb   vs model  20  vs F  20
+    E-1K-fail-restart        vs model  20  vs F  20
+    G-4K-40-runs-then-merge  vs model  20  vs F  20
+[FAIL] P2-compaction-installed-as-oldest seed=0 set=G-4K-40-runs-then-merge op#239 "get fcfeb" got="=v135xxxxxxx" want="miss"
+    # P2-compaction-installed-as-oldest: seed 0 under G-4K-40-runs-then-merge reduced from 3000 ops to 76
+    # ... the last 6:
+    del fcfeb              # ok
+    del f                  # ok
+    put fab v231xxx        # ok
+    put fab v233xxx        # ok
+    del ccdaea             # ok
+    get fcfeb              # =v135xxxxxxx   <- want miss
+[OK ] P2-compaction-installed-as-oldest: 20 of 20 seeds differ from the model, 20 differ between option sets (no model)
+    F-memtable-only          vs model   0  vs F   0
+    A-ops                    vs model   0  vs F   0
+    B-4K-eager               vs model   0  vs F   0
+    C-256B-nocompact         vs model   0  vs F   0
+    D-512B-deferred-absorb   vs model   0  vs F   0
+    E-1K-fail-restart        vs model   0  vs F   0
+    G-4K-40-runs-then-merge  vs model  20  vs F  20
+[FAIL] P3-restore-ignores-run-order seed=0 set=A-ops op#271 "get bfd" got="=v154" want="=v216"
+    # P3-restore-ignores-run-order: seed 0 under A-ops reduced from 3000 ops to 7
+    put e v30xxx           # ok
+    flush                  # ok
+    del e                  # ok
+    flushfail 3            # ok
+    flush                  # ok
+    restart                # ok
+    floor e                # e=v30xxx   <- want none
+[FAIL] P3-restore-ignores-run-order seed=0 set=B-4K-eager op#722 "floor fecdac" got="fecdac=v664xxxxxxx" want="fecdac=v696"
+[FAIL] P3-restore-ignores-run-order seed=0 set=C-256B-nocompact op#258 "get f" got="=v62xxx" want="miss"
+[FAIL] P3-restore-ignores-run-order seed=0 set=D-512B-deferred-absorb op#271 "get bfd" got="=v154" want="=v216"
+[FAIL] P3-restore-ignores-run-order seed=0 set=E-1K-fail-restart op#27 "floor efeea" got="efeea=v14xx" want="efeea=v19xxxxxxx"
+[FAIL] P3-restore-ignores-run-order seed=0 set=G-4K-40-runs-then-merge op#107 "scan beb 3" got="[bef=v103xxxxxxx dcf=v100 e=v30xxx]" want="[bef=v103xxxxxxx dcf=v100 efeea=v93x]"
+[OK ] P3-restore-ignores-run-order: 20 of 20 seeds differ from the model, 20 differ between option sets (no model)
+    F-memtable-only          vs model   0  vs F   0
+    A-ops                    vs model  20  vs F  20
+    B-4K-eager               vs model  20  vs F  20
+    C-256B-nocompact         vs model  20  vs F  20
+    D-512B-deferred-absorb   vs model  20  vs F  20
+    E-1K-fail-restart        vs model  20  vs F  20
+    G-4K-40-runs-then-merge  vs model  20  vs F  20
+[FAIL] P4-reads-skip-frozen-memtable seed=0 set=D-512B-deferred-absorb op#2821 "scan bfd 7" got="[bfd=v2682xxxxxxx bfddb=v2406xx bff=v2026xxxxxxx ca=v2593xxx cab=v2211xx cadef=v2239xxxxxx caefa=v2673xxxx]" want="[bfd=v2682xxxxxxx bfddb=v2406xx bff=v2026xxxxxxx bffcf=v2770xxxxxx ca=v2593xxx cab=v2211xx cadef=v2239xxxxxx]"
+    # P4-reads-skip-frozen-memtable: seed 0 under D-512B-deferred-absorb reduced from 3000 ops to 354
+    # ... the last 6:
+    put d v927             # ok
+    put dbf v928xx         # ok
+    put dd v929xx          # ok
+    del cca                # ok
+    flushfail 2            # ok
+    scan cbeaff 5          # [cc=v762x cca=v855xxxxxxx ccdaea=v710x cd=v908x cdcdbe=v877xxxxxx]   <- want [cc=v762x ccdaea=v710x cd=v908x cdcdbe=v877xxxxxx cdde=v750xxxx]
+[FAIL] P4-reads-skip-frozen-memtable seed=2 set=A-ops op#559 "scan adccb 6" got="[ae=v354xxxxx afa=v232xxxxxxx afc=v166xxxxxx b=v495xxxxxx ba=v412xxxxx baa=v492xxxxxx]" want="[ae=v501xxxxxxx afa=v232xxxxxxx b=v495xxxxxx ba=v542 baa=v516 baf=v522xx]"
+[FAIL] P4-reads-skip-frozen-memtable seed=2 set=B-4K-eager op#445 "scan eca 4" got="[eca=v410xxxx edccd=v287xxx efefa=v239 f=v404xxxxx]" want="[eca=v410xxxx edccd=v287xxx eefd=v430 efefa=v425xxxx]"
+[FAIL] P4-reads-skip-frozen-memtable seed=3 set=E-1K-fail-restart op#2857 "get fe" got="=v2638xxxxxxx" want="=v2847xxxxxx"
+[OK ] P4-reads-skip-frozen-memtable: 18 of 20 seeds differ from the model, 18 differ between option sets (no model)
+    F-memtable-only          vs model   0  vs F   0
+    A-ops                    vs model   8  vs F   8
+    B-4K-eager               vs model   8  vs F   8
+    C-256B-nocompact         vs model   0  vs F   0
+    D-512B-deferred-absorb   vs model  17  vs F  17
+    E-1K-fail-restart        vs model  12  vs F  12
+    G-4K-40-runs-then-merge  vs model   0  vs F   0
+[FAIL] P5-compaction-drops-removals-hiding-older-runs seed=0 set=G-4K-40-runs-then-merge op#239 "get fcfeb" got="=v135xxxxxxx" want="miss"
+    # P5-compaction-drops-removals-hiding-older-runs: seed 0 under G-4K-40-runs-then-merge reduced from 3000 ops to 76
+    # ... the last 6:
+    del fcfeb              # ok
+    del f                  # ok
+    put fab v231xxx        # ok
+    put fab v233xxx        # ok
+    del ccdaea             # ok
+    get fcfeb              # =v135xxxxxxx   <- want miss
+[OK ] P5-compaction-drops-removals-hiding-older-runs: 20 of 20 seeds differ from the model, 20 differ between option sets (no model)
+    F-memtable-only          vs model   0  vs F   0
+    A-ops                    vs model   0  vs F   0
+    B-4K-eager               vs model   0  vs F   0
+    C-256B-nocompact         vs model   0  vs F   0
+    D-512B-deferred-absorb   vs model   0  vs F   0
+    E-1K-fail-restart        vs model   0  vs F   0
+    G-4K-40-runs-then-merge  vs model  20  vs F  20
+# internal/lsm's own unit tests run against each planted copy
+p1: --- FAIL: TestCompactionMergesSimilarRuns --- FAIL: TestCompactionKeepsRemovalsAboveOlderRuns --- FAIL: TestRestoreIsRunsPlusReplay --- FAIL: TestFlushDropsRemovalsWithNothingToHide 
+p2: --- FAIL: TestCompactionKeepsRemovalsAboveOlderRuns 
+p3: --- FAIL: TestRestoreIsRunsPlusReplay 
+p4: --- FAIL: TestGetTouchesEachLayerOnce --- FAIL: TestFlushFailedKeepsFrozen --- FAIL: TestViewDuringFlush 
+p5: --- FAIL: TestCompactionKeepsRemovalsAboveOlderRuns 
+--- PASS: TestRegressions (0.00s)
+ok  	github.com/nvcnvn/rock-solid/spikes/lsm-study-testing/dd	0.009s
+# go1.27.0, CRC32C over a compaction's input pieces against the compaction itself
+runs=4 x 1024 KiB, piece 65536 B: 3885 KiB of pieces, compaction 12.629107ms, CRC32C 605.007µs, CRC share 4.8%
+runs=4 x 4096 KiB, piece 65536 B: 15368 KiB of pieces, compaction 48.808575ms, CRC32C 2.507917ms, CRC share 5.1%
+runs=4 x 96 KiB, piece 4096 B: 373 KiB of pieces, compaction 1.208758ms, CRC32C 46.032µs, CRC share 3.8%

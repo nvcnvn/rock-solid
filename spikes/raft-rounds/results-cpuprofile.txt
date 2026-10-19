@@ -1,0 +1,115 @@
+# Linux 6.18.44-fc-v139, go1.27.0, etcd-raft v3.7.0, 4 vCPUs, 2026-10-18T17:10Z, loadavg 3.92 5.41 6.06 (machine shared with other benchmarks)
+== P1 open 30,000/s, flush 0.1 ms, 4 loops
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 4 loop(s)/node, flush fixed 100us, net 50us, mode open 30000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.01s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 4.22% of a core per node (ticks and heartbeats)
+   heap per replica: idle 3.2 KiB, loaded 6.9 KiB (per node: idle 3.1 MiB, loaded 6.7 MiB)
+   throughput 30041 ops/s, latency p50 517 us, p99 1140 us, p99.9 4870 us, max 7350 us, dropped 0
+   loop CPU per op 142.15 us (collect 75%), busiest loop 36% busy, passes/s/loop 19187
+   rounds/s/loop 6404, per round: 0 KiB mean, 10 KiB max, 2 Readys; entries proposed per op 0.998
+   msgs 280705/s (9.34 per op, 51 B avg), batches 133730/s, MsgSnap 0
+   allocs per op 150.8 (8939 B), per msg 16.1; GC cycles 15; process CPU 4795 ms = loop threads 4270 (incl. GC assist ~2) + other threads 525 (GC workers, sysmon): GC ~11.0% of process CPU
+File: rounds
+Build ID: b3cff616bbc0a7ef6cfdfa978d8dde570fd39c79
+Type: cpu
+Time: 2026-10-18 17:10:25 UTC
+Duration: 4.77s, Total samples = 4.74s (99.42%)
+Showing nodes accounting for 2.69s, 56.75% of 4.74s total
+Dropped 108 nodes (cum <= 0.02s)
+Showing top 40 nodes out of 143
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      4.44s 93.67%  main.(*sim).run
+         0     0%     0%      4.44s 93.67%  main.main
+         0     0%     0%      4.44s 93.67%  runtime.main
+     0.02s  0.42%  0.42%      4.34s 91.56%  main.(*sim).pass
+     0.10s  2.11%  2.53%      3.34s 70.46%  main.(*sim).collect
+     0.32s  6.75%  9.28%      2.58s 54.43%  go.etcd.io/raft/v3.(*RawNode).HasReady
+     0.82s 17.30% 26.58%      1.02s 21.52%  go.etcd.io/raft/v3.isHardStateEqual
+     0.04s  0.84% 27.43%      0.68s 14.35%  main.(*sim).deliver
+     0.60s 12.66% 40.08%      0.63s 13.29%  go.etcd.io/raft/v3.(*SoftState).equal (inline)
+     0.03s  0.63% 40.72%      0.62s 13.08%  go.etcd.io/raft/v3.(*raft).Step
+     0.42s  8.86% 49.58%      0.48s 10.13%  go.etcd.io/raft/v3.(*raft).hardState (inline)
+         0     0% 49.58%      0.38s  8.02%  go.etcd.io/raft/v3.(*RawNode).Step
+         0     0% 49.58%      0.38s  8.02%  main.step (inline)
+         0     0% 49.58%      0.35s  7.38%  go.etcd.io/raft/v3.stepLeader
+         0     0% 49.58%      0.26s  5.49%  go.etcd.io/raft/v3.(*RawNode).Ready
+         0     0% 49.58%      0.26s  5.49%  runtime.systemstack
+         0     0% 49.58%      0.22s  4.64%  main.mDecode (inline)
+         0     0% 49.58%      0.21s  4.43%  runtime.gcBgMarkWorker
+         0     0% 49.58%      0.21s  4.43%  runtime.gcBgMarkWorker.func2
+         0     0% 49.58%      0.21s  4.43%  runtime.gcDrain
+     0.01s  0.21% 49.79%      0.21s  4.43%  runtime.mallocgc
+     0.01s  0.21% 50.00%      0.21s  4.43%  runtime.scanSpan
+     0.03s  0.63% 50.63%      0.19s  4.01%  go.etcd.io/raft/v3.(*RawNode).readyWithoutAccept
+         0     0% 50.63%      0.19s  4.01%  go.etcd.io/raft/v3.(*raftLog).term
+         0     0% 50.63%      0.18s  3.80%  go.etcd.io/raft/v3.stepFollower
+         0     0% 50.63%      0.18s  3.80%  google.golang.org/protobuf/proto.Unmarshal
+         0     0% 50.63%      0.17s  3.59%  go.etcd.io/raft/v3.(*raft).handleAppendEntries
+     0.17s  3.59% 54.22%      0.17s  3.59%  go.etcd.io/raft/v3/raftpb.(*HardState).GetTerm (inline)
+         0     0% 54.22%      0.17s  3.59%  runtime.newobject
+         0     0% 54.22%      0.16s  3.38%  main.(*sim).proposeBatch
+     0.04s  0.84% 55.06%      0.15s  3.16%  go.etcd.io/raft/v3.(*MemoryStorage).firstIndex (inline)
+         0     0% 55.06%      0.15s  3.16%  go.etcd.io/raft/v3.(*RawNode).Propose
+         0     0% 55.06%      0.15s  3.16%  golang.org/x/sys/unix.ClockGettime
+     0.02s  0.42% 55.49%      0.15s  3.16%  main.(*sim).completeRound
+         0     0% 55.49%      0.15s  3.16%  main.cpuNow (inline)
+         0     0% 55.49%      0.15s  3.16%  syscall.Syscall
+     0.03s  0.63% 56.12%      0.14s  2.95%  go.etcd.io/raft/v3.(*MemoryStorage).FirstIndex
+      flat  flat%   sum%        cum   cum%   calls calls% + context 	 	 
+----------------------------------------------------------+-------------
+== P2 open 60,000/s, flush 0.95 ms, 1 loop
+   raft v3.7.0 (raftpb on google.golang.org/protobuf, pointer fields), 3 nodes x 1000 groups, 1 loop(s)/node, flush fixed 950us, net 50us, mode open 60000/s, max-bytes 0, max-cpu-us 0, batch true, wire true
+   elected in 0.02s, leaders per node [334 333 333]; heap before groups 0.2 MiB
+   idle: 5.23% of a core per node (ticks and heartbeats)
+   heap per replica: idle 2.8 KiB, loaded 6.4 KiB (per node: idle 2.7 MiB, loaded 6.2 MiB)
+   throughput 59488 ops/s, latency p50 6316 us, p99 10738 us, p99.9 13776 us, max 16032 us, dropped 0
+   loop CPU per op 36.65 us (collect 45%), busiest loop 73% busy, passes/s/loop 8191
+   rounds/s/loop 592, per round: 17 KiB mean, 62 KiB max, 155 Readys; entries proposed per op 0.957
+   msgs 503389/s (8.46 per op, 54 B avg), batches 3552/s, MsgSnap 0
+   allocs per op 138.8 (8158 B), per msg 16.4; GC cycles 29; process CPU 2822 ms = loop threads 2180 (incl. GC assist ~10) + other threads 642 (GC workers, sysmon): GC ~23.1% of process CPU
+File: rounds
+Build ID: b3cff616bbc0a7ef6cfdfa978d8dde570fd39c79
+Type: cpu
+Time: 2026-10-18 17:10:32 UTC
+Duration: 2.66s, Total samples = 2.78s (104.63%)
+Showing nodes accounting for 0.50s, 17.99% of 2.78s total
+Dropped 106 nodes (cum <= 0.01s)
+Showing top 40 nodes out of 188
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      2.20s 79.14%  main.(*sim).run
+         0     0%     0%      2.20s 79.14%  main.main
+         0     0%     0%      2.20s 79.14%  runtime.main
+         0     0%     0%      2.18s 78.42%  main.(*sim).pass
+     0.04s  1.44%  1.44%      1.02s 36.69%  main.(*sim).collect
+     0.01s  0.36%  1.80%      0.87s 31.29%  main.(*sim).deliver
+     0.05s  1.80%  3.60%      0.80s 28.78%  go.etcd.io/raft/v3.(*raft).Step
+         0     0%  3.60%      0.52s 18.71%  runtime.systemstack
+     0.02s  0.72%  4.32%      0.51s 18.35%  main.step (inline)
+     0.02s  0.72%  5.04%      0.49s 17.63%  go.etcd.io/raft/v3.(*RawNode).Step
+     0.01s  0.36%  5.40%      0.45s 16.19%  go.etcd.io/raft/v3.stepLeader
+         0     0%  5.40%      0.45s 16.19%  runtime.gcBgMarkWorker
+         0     0%  5.40%      0.45s 16.19%  runtime.gcBgMarkWorker.func2
+         0     0%  5.40%      0.45s 16.19%  runtime.gcDrain
+     0.03s  1.08%  6.47%      0.44s 15.83%  runtime.scanSpan
+     0.01s  0.36%  6.83%      0.31s 11.15%  main.mDecode (inline)
+         0     0%  6.83%      0.31s 11.15%  runtime.gcDrainMarkWorkerIdle (inline)
+     0.01s  0.36%  7.19%      0.28s 10.07%  go.etcd.io/raft/v3.(*RawNode).Ready
+     0.06s  2.16%  9.35%      0.27s  9.71%  go.etcd.io/raft/v3.(*MemoryStorage).FirstIndex
+         0     0%  9.35%      0.27s  9.71%  go.etcd.io/raft/v3.(*raftLog).firstIndex
+         0     0%  9.35%      0.27s  9.71%  google.golang.org/protobuf/proto.Unmarshal
+         0     0%  9.35%      0.26s  9.35%  go.etcd.io/raft/v3.(*raftLog).term
+         0     0%  9.35%      0.26s  9.35%  runtime.mallocgc
+     0.03s  1.08% 10.43%      0.25s  8.99%  main.(*sim).completeRound
+         0     0% 10.43%      0.24s  8.63%  main.(*sim).proposeBatch
+     0.09s  3.24% 13.67%      0.23s  8.27%  runtime.tryDeferToSpanScan
+         0     0% 13.67%      0.22s  7.91%  go.etcd.io/raft/v3.(*RawNode).Propose
+     0.07s  2.52% 16.19%      0.21s  7.55%  go.etcd.io/raft/v3.(*MemoryStorage).firstIndex (inline)
+         0     0% 16.19%      0.21s  7.55%  go.etcd.io/raft/v3.stepFollower
+         0     0% 16.19%      0.21s  7.55%  runtime.newobject
+     0.01s  0.36% 16.55%      0.20s  7.19%  go.etcd.io/raft/v3.(*raft).handleAppendEntries
+         0     0% 16.55%      0.20s  7.19%  go.etcd.io/raft/v3.(*raft).maybeSendAppend
+         0     0% 16.55%      0.19s  6.83%  go.etcd.io/raft/v3/tracker.(*ProgressTracker).Visit
+     0.02s  0.72% 17.27%      0.19s  6.83%  google.golang.org/protobuf/proto.UnmarshalOptions.unmarshal
+         0     0% 17.27%      0.18s  6.47%  go.etcd.io/raft/v3.(*raft).bcastAppend (inline)
+         0     0% 17.27%      0.17s  6.12%  go.etcd.io/raft/v3.(*raftLog).matchTerm (inline)
+     0.02s  0.72% 17.99%      0.17s  6.12%  main.(*sim).send

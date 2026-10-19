@@ -110,7 +110,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Copy-on-write (COW).** Never modifying shared data in place: a write puts new data elsewhere and repoints the writer, so whoever still points at the old data (a snapshot, a reader) keeps seeing it.
 
-**Freeze.** The step that preserves a chunk's current version for a snapshot when the first write after the snapshot arrives. The frozen version keeps pointing at the old blocks.
+**Freeze.** The step that preserves a chunk's current version for a snapshot when the first write after the snapshot arrives. The frozen version keeps pointing at the old blocks. A chunk first written after a snapshot freezes version 0, the absent chunk, so the snapshot reads it as never written.
 
 **Clone, restore, read-through, flatten.** A restore creates a new volume from a snapshot, and a clone creates one from a live volume. Neither copies data at first: a read of a block the new volume has not written **reads through** to the source. **Flatten** copies the remaining blocks in the background and then drops the link to the source.
 
@@ -192,11 +192,13 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Two-phase commit, transaction record, intent.** The general way to commit across shards: first write every change provisionally, then flip one switch that makes them all real. rock-solid writes provisional values called **intents**, and a single **transaction record** key whose flip to COMMITTED is the switch. A reader that meets an intent checks the record. See [Cross-shard transactions](design.md#metadata-layer-metastore).
 
-**Lease read, leader lease.** A Raft leader normally must check with a majority before answering a read, to be sure it is still the leader. Holding a lease lets it answer from memory instead, as long as the lease lasts.
+**Lease read, leader lease.** A Raft leader normally must check with a majority before answering a read, to be sure it is still the leader. Holding a lease lets it answer from memory instead, as long as the lease lasts. rock-solid's leader lease comes from **fortification**: the leader asks each follower to promise that, while its node's lease to the leader's node holds, it will not help elect anyone else in that group. With a quorum of promises the leader holds a lease without sending heartbeats, so an idle group can go quiet and still serve reads. See [Reads and leader leases](design.md#metadata-layer-metastore).
+
+**Support epoch.** The number of one unbroken run of a node-pair lease. The grantor bumps it when the lease lapses, so nothing granted under the old number comes back after a partition heals. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
 **Leader transfer, leader balancing.** Handing leadership to another replica on purpose, without an election: for an upgrade, to drain a node, or to spread leaders evenly.
 
-**Quiescence.** Letting an idle Raft group stop its timers and heartbeats, so thousands of idle groups cost almost nothing.
+**Quiescence.** Letting an idle Raft group stop its timers and heartbeats, so thousands of idle groups cost almost nothing. The per-node-pair leases keep an idle group's leader lease and its followers' loyalty.
 
 **Soft state.** State kept only in memory and rebuilt after a crash rather than written to disk. The inode owner's record of open files is soft state, which keeps `open` free of disk writes.
 
@@ -212,31 +214,51 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Log sequence number (LSN).** A record's position in the log's order. "Everything after LSN 5000" names exactly which records a recovery must replay.
 
-**Stream.** One of two sequences of segments the log appends to, separating data that changes often from data that rarely does, which makes cleaning cheaper.
+**Stream.** One of three sequences of segments the log appends to: hot (new writes), cold (cleaner copies and shards) and metadata (sorted runs, compactions, manifests). Each segment holds one kind of data, so it tends to empty all at once, which keeps cleaning cheap.
+
+**Chunk slot.** A chunk-sized place in a slot segment holding one whole chunk's data. It is freed when the chunk is rewritten or deleted, so whole chunks never need cleaning. See [On-disk format](design.md#on-disk-format).
 
 **Superblock.** The block at the start of the disk that says how the rest is laid out. rock-solid keeps a second copy so one bad block cannot make a disk unreadable; see [Superblock repair](design.md#superblock-repair).
 
-**Group commit, round.** Collecting every write that arrived while the previous flush was running, and making them all durable with one write and one flush. Each such batch is a round. Since a flush costs the same whether it covers one write or a hundred, this multiplies throughput.
+**Group commit, round.** Collecting every write that arrived while the previous flush was running, and making them all durable with one write and one flush. Each such batch is a round. Since a flush costs the same whether it covers one write or a hundred, this multiplies throughput. In the MetaStore, each leader also folds a round's proposals into one Raft entry.
 
 **Write-ahead log (WAL), replay, recovery.** A WAL records each change before it is applied elsewhere, so after a crash the change can be redone by **replaying** the log. Crash recovery means reading the log back and rebuilding the in-memory state from it.
 
-**Torn tail, tail rule.** After a crash, the last few records of a log may be torn or missing because their rounds were still being written. The tail rule tells such a torn tail from damage: a missing record ends the log only if the records found after it are few enough to have been in flight together (`commit_depth` rounds). More than that means something already durable was lost, and recovery reports corruption instead of quietly cutting the log short. See [Recovery](design.md#on-disk-format).
+**Torn tail, tail rule.** After a crash, the last few records of a log may be torn or missing because their rounds were still being written. The tail rule tells such a torn tail from damage: a missing record ends the log only if no record after it says the missing one was already durable (each record header names the newest durable LSN when it was written) and the records found after it are few enough to have been in flight together (`commit_depth` rounds). Otherwise something already durable was lost, and recovery reports corruption instead of quietly cutting the log short. See [Recovery](design.md#on-disk-format).
 
-**Checkpoint, manifest.** Replaying the whole log after every crash would take ever longer, so a checkpoint periodically saves the in-memory state to disk and writes a **manifest**, a small record that says where that state is and from which LSN replay must start.
+**Checkpoint, manifest.** Replaying the whole log after every crash would take ever longer, so a checkpoint periodically saves the in-memory state to disk and writes a **manifest**, a small record that says where that state is and from which LSN replay must start. A manifest is a **snapshot** of that state or an **edit** listing only what changed since the manifest before it; a snapshot is written once the edits since the last one would outgrow it.
 
 **Index.** A structure that finds data by key without scanning everything. The **chunk index** on each disk maps each chunk's blocks to their place in the log; its **live map** lists the current extents of each chunk.
 
-**LSM tree (log-structured merge tree).** The index structure used by most modern key-value engines (RocksDB, Cassandra) and by rock-solid. New entries go into an in-memory **memtable**; when it grows, it is written out whole as an immutable, sorted **sorted run** (often called an SSTable); **compaction** merges runs in the background, dropping overwritten and deleted entries. Writes are cheap; a lookup checks the memtable, then the runs. **Size-tiered** compaction merges runs of similar size.
+**LSM tree (log-structured merge tree).** The index structure used by most modern key-value engines (RocksDB, Cassandra) and by rock-solid. New entries go into an in-memory **memtable**; when it grows, it is written out whole as an immutable, sorted **sorted run** (often called an SSTable); **compaction** merges runs in the background, dropping overwritten and deleted entries. Writes are cheap; a lookup checks the memtable, then the runs. **Size-tiered** compaction merges runs of similar size; **universal** compaction, RocksDB's size-tiered variant that rock-solid uses, merges only runs adjacent in age, when a run is no larger than the newer runs before it or the newer runs together outgrow the oldest. **Leveled** compaction instead splits runs into key ranges and merges each range into the level below.
+
+**Read amplification, space amplification.** The runs a lookup searches, and the bytes an index takes divided by its live data. Compaction trades them against write amplification. See [The LSM tree](design.md#on-disk-format).
 
 **Memtable flush.** Writing a memtable out as a sorted run. Unrelated to a drive flush, though both make data durable.
 
-**Removal marker.** What an LSM tree writes to delete a key: an entry saying "deleted", since the older runs holding the key are immutable. It hides the key in every older run until a compaction that includes the oldest run drops it with them. Other engines call it a tombstone, the word rock-solid keeps for a deleted chunk.
+**Removal marker.** What an LSM tree writes to delete a key: an entry saying "deleted", since the older runs holding the key are immutable. It hides the key in every older run until a compaction that includes the oldest run drops it with them. Other engines call it a tombstone, the word rock-solid keeps for a deleted chunk. A **range removal** hides every key from one key up to another, as RocksDB's and Pebble's `DeleteRange` do, kept as non-overlapping fragments per memtable and run that hide older layers' keys but not their own run's; the chunk index uses one when a write covers several old extents and to remove a punched chunk's live map, and the MetaStore to drop a volume or a list's consumed prefix. See [The LSM tree](design.md#on-disk-format).
+
+**Value separation.** Keeping large values out of an index, in a log of their own, so the index holds only their locations and merging it rewrites small entries instead of the data; WiscKey introduced it, and RocksDB's BlobDB, TiKV's Titan and Pebble ship it. The price is a cleaner that copies live values out of old log space and updates the index. rock-solid's chunk data and chunk index are laid out this way; see [On-disk format](design.md#on-disk-format).
+
+**Copy entry.** The record entry a cleaner writes for blocks it moves: the chunk, version and blocks, plus the location it copied them from. Replay applies it only where the index still holds that location, so a write that replaced the blocks first is never undone. See [On-disk format](design.md#on-disk-format).
+
+**Metamorphic test.** A test that runs the same operations under configurations that must not change the results (piece sizes, flush and compaction timing, restarts) and compares what each run read. It needs no model of the right answer, only the rule that the configurations agree. Pebble's main correctness test. See [Testing strategy](design.md#testing-strategy).
+
+**Data-driven test.** A test whose cases are text files: a command, its input lines, a separator and the expected output, which the test rewrites on request for review. Used by Pebble and etcd-raft (`github.com/cockroachdb/datadriven`). See [Testing strategy](design.md#testing-strategy).
+
+**Test-case reduction.** Shrinking a failing generated test to the fewest operations that still fail, by removing chunks while the failure persists. See [Testing strategy](design.md#testing-strategy).
+
+**Prefix recovery.** Recovery that returns exactly the writes up to some point and none after it: no recovered write is newer than a lost one (no hole). RocksDB's crash test and our crash oracle check it. See [Testing strategy](design.md#testing-strategy).
+
+**Delete-only compaction.** Pebble's name for dropping whole tables that a newer range deletion covers, by editing the manifest instead of merging. See [The LSM tree](design.md#on-disk-format).
 
 **Run piece.** A sorted run is written to the log in pieces of at most one record each; the last, the root, lists the others, so a manifest names a run by its root. See [The LSM tree](design.md#on-disk-format).
 
 **Fence pointer, prefix compression.** A run is cut into blocks, and the first key of each block is a fence pointer: binary search over them finds the one block that can hold a key. Inside a block, each key is stored as the bytes it shares with the key before it plus the rest, which shrinks sorted keys with long common prefixes; every 16th key, a restart point, is stored whole so a search can start there. This is LevelDB's block format, which Pebble and RocksDB keep.
 
-**Bloom filter.** A small structure that answers "is this key possibly in this run?" with no false negatives and a few false positives, so a lookup can skip runs that cannot hold its key.
+**Bloom filter, prefix filter.** A small structure that answers "is this key possibly in this run?" with no false negatives and a few false positives (about 1% at 10 bits per key), so a lookup can skip runs that cannot hold its key. A prefix filter holds key prefixes instead, such as a chunk's `(pool, h, chunk_id)`, so a floor or a scan inside one prefix can skip runs too. See [The LSM tree](design.md#on-disk-format).
+
+**Block cache.** Memory holding recently read blocks of runs that live on disk, so repeated lookups skip the disk. rock-solid needs one only when an index outgrows memory. See [The LSM tree](design.md#on-disk-format).
 
 **B+-tree.** A sorted tree whose nodes are fixed-size pages, the classic structure for indexes. rock-solid's memtable is one, built **copy-on-write** so a reader can keep a consistent view while the writer goes on.
 
@@ -246,11 +268,15 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Write amplification.** Bytes actually written to the drive divided by bytes the user wrote. The cleaner's copying raises it, more so the fuller the disk is, which is why pools stop writes before disks are full. SSDs have their own internal write amplification on top. See [Volume size and capacity](design.md#volume-size-and-capacity).
 
-**Reserve.** Segments held back so that the cleaner and checkpoints can always run, since freeing space itself needs some free space.
+**Reserve.** Segments held back for the work that frees space, checkpoints, the cleaner and merge steps, since freeing space itself needs some free space. Ordinary writes wait while only the reserve is free.
+
+**Write stall, admission control.** Slowing or pausing new writes when background work (cleaning, checkpoints) falls behind, so the disk never runs out in the middle of it. RocksDB and Pebble call a pause a write stall; CockroachDB's admission control admits writes at the rate background work measurably keeps up, which is what rock-solid does. See [On-disk format](design.md#on-disk-format).
+
+**Merge step, bound.** A merge installs its output a step at a time; each input run then holds only the keys at or above a bound key, so the pieces it no longer needs are freed before the merge ends. ScyllaDB calls this incremental compaction. See [The LSM tree](design.md#on-disk-format).
 
 **Quarantine.** Setting aside a segment that looks damaged: never reused, and reported for repair from another replica.
 
-**Segment usage table.** The list, saved in every manifest, of which segments are in use or quarantined, how many live blocks each holds and its newest LSN. Recovery takes free space from it instead of guessing from segment headers, and the cleaner picks victims by it. See [On-disk format](design.md#on-disk-format).
+**Segment usage table.** The list of which segments are in use or quarantined, how many live blocks each holds and its newest LSN, kept in the manifests: whole in a snapshot, the changed rows in an edit. Recovery takes free space from it instead of guessing from segment headers, and the cleaner picks victims by it. See [On-disk format](design.md#on-disk-format).
 
 ## Files and caching
 
@@ -263,6 +289,10 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 **`mtime`.** A file's last-modification time. rock-solid also uses it to force kernels to drop stale cached pages; see Tier 2 in [Cache coherence tiers](design.md#cache-coherence-tiers).
 
 **Filesystem in Userspace (FUSE).** A Linux mechanism that forwards a filesystem's operations from the kernel to an ordinary process, here the daemon, through `/dev/fuse`. It avoids writing a kernel module, at a cost of a few microseconds per request.
+
+**Descriptor handoff.** Passing the open `/dev/fuse` file descriptor that serves a mount from one process to another over a Unix socket (`SCM_RIGHTS`). The kernel keeps the mount's whole state with the descriptor, so a restarted daemon that takes it back serves the mount without remounting, and applications see a pause instead of errors. See [Daemon restart and upgrade](design.md#daemon-restart-and-upgrade).
+
+**FUSE over io_uring.** A FUSE transport (Linux 6.14+) in which the daemon takes requests and returns replies through io_uring commands on per-CPU queues instead of reading and writing `/dev/fuse`. The daemon does not use it, because a crash strands or fails requests ([Daemon restart and upgrade](design.md#daemon-restart-and-upgrade)).
 
 **Page cache.** The kernel's in-memory cache of file contents. A read served from it never reaches the daemon, which is why caching is fast and also why it must be turned off when another node is writing.
 
@@ -288,7 +318,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **NFS, SMB, Samba.** Network File System and Server Message Block are network file-sharing protocols. Both put a server between clients and storage, which is the bottleneck rock-solid's RWX avoids. Samba is the open-source SMB server.
 
-**ublk, NVMe-oF, NBD, iSCSI.** Ways to present a block device. ublk lets a user-space process (the daemon) serve a local block device through io_uring. NVMe over Fabrics (NVMe-oF) and iSCSI expose a block device over the network; NBD is Linux's simple network block device.
+**ublk, NVMe-oF, NBD, iSCSI.** Ways to present a block device. ublk lets a user-space process (the daemon) serve a local block device through io_uring. NVMe over Fabrics (NVMe-oF) and iSCSI expose a block device over the network; NBD is Linux's simple network block device. ublk's **user recovery** keeps the device and holds its I/O while the daemon restarts, and with **reissue** hands the requests the dead daemon held to its successor.
+
+**Incarnation.** One run of a daemon process, named by its start time. A primary that has seen a newer incarnation of a client's session rejects the older one's writes, so bytes a dead daemon left on the wire cannot land after its successor's. See [Daemon restart and upgrade](design.md#daemon-restart-and-upgrade).
 
 **S3, object, bucket.** S3 is Amazon's object-storage protocol, which many systems implement. An object is a whole blob written at once under a key; a bucket holds objects.
 
@@ -306,7 +338,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Buffer pool, slab, handle.** A fixed area of memory, carved into equal slots (a slab), from which I/O buffers are taken and returned. Code passes a small handle (slot number plus generation) instead of a pointer, so a stale handle can be detected.
 
-**Kernel bypass.** Talking to hardware from user space without going through the kernel, to save its overhead. **SPDK** does it for NVMe drives, **DPDK** for network cards, and **RDMA** (Remote Direct Memory Access) lets one machine's network card read and write another machine's memory directly. **Soft-RoCE** is a software RDMA that runs on any network card, for testing. These need **hugepages** (large memory pages) or **registered memory** the hardware may access by **DMA** (direct memory access), and often **polling**: spinning on a core instead of sleeping until an interrupt.
+**Kernel bypass.** Talking to hardware from user space without going through the kernel, to save its overhead. **SPDK** does it for NVMe drives, **DPDK** for network cards, and **RDMA** (Remote Direct Memory Access) lets one machine's network card read and write another machine's memory directly. **Soft-RoCE** is a software RDMA that runs on any network card, for testing. These need **hugepages** (large memory pages) or **registered memory** the hardware may access by **DMA** (direct memory access), and often **polling**: spinning on a core instead of sleeping until an interrupt. io_uring registers memory too (*fixed buffers*), so the kernel pins it once instead of on every request ([Runtime in Go](design.md#runtime-in-go)).
+
+**CPU limit, CFS quota, throttling.** A Kubernetes CPU limit becomes a CFS bandwidth quota on the container's cgroup: so much CPU time per 100 ms period across all its threads. A process that uses its quota early in a period is throttled, with every thread stopped, until the next period. This is why the daemon never runs more Go Ps than its limit ([Runtime in Go](design.md#runtime-in-go)).
 
 **cgo.** Go's mechanism for calling C libraries, used only for SPDK and RDMA.
 
@@ -336,7 +370,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 | Replica | A PG member other than the primary, holding a copy of chunk data. Any copy of a Raft shard, leader included. `rep3` means three copies |
 | Member | A disk in a PG. In a cache mode, a node that has the file open |
 | Leader | A Raft group's elected coordinator; never used for chunk data, which has primaries |
-| Owner | The inode owner, the leader of an inode's shard. The event loop that owns a disk's index, connections or shards and is the only code to change them |
+| Owner | The inode owner, the leader of an inode's shard. The event loop that owns a disk's log and index, its connections or its shards and is the only code to change them |
 | Epoch | The placement table's version. A volume's snapshot epoch, which counts its snapshots. The high bits of a chunk version, which are the first kind |
 | Shard | A MetaStore Raft group over a range of keys. One piece of an erasure-coded chunk |
 | Commit | A chunk version is committed once every live member holds it. A Raft entry, once a majority holds it. A transaction, once its changes take effect. Group commit is batching many writes into one flush |
@@ -344,7 +378,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 | Flush | A drive flush, which makes cached writes durable. A memtable flush, which writes the in-memory index out as a sorted run. Flushing the write-back buffer, which sends buffered writes to the chunk primaries |
 | Snapshot | A volume snapshot, a point-in-time copy users see. A Raft snapshot, a copy of a shard's state sent to a lagging replica. A point-in-time view, a frozen read view of an LSM tree |
 | Log | The disk log holding all of a disk's data. A Raft log, the ordered entries of a shard, stored inside the disk log. Operator logs, ordinary text messages |
-| Lease | A session lease, held by a client daemon. A primary's read lease, held per PG. A Raft leader lease, for reads without a round trip. In Samba, an SMB lease is a client cache right |
+| Lease | A session lease, held by a client daemon. A primary's read lease, held per PG. A Raft leader lease, for reads without a round trip; both of the last two ride on per-node-pair leases. In Samba, an SMB lease is a client cache right |
 | Pool | A storage pool: PGs sharing one redundancy scheme. A buffer pool: memory that I/O buffers come from |
 | Recovery | Crash recovery: rebuilding a disk's state from its log at start. PG recovery: restoring full redundancy after a failure |
 | Index | The chunk index of a disk. A MetaStore shard's state. The S3 index of keys to objects |

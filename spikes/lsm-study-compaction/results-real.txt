@@ -1,0 +1,9 @@
+# Intel(R) Xeon(R) Processor @ 2.80GHz, 4 vCPUs (shared); kernel 6.18.44-fc-v139; go1.27.0; pebble v2.1.7; rock-solid internal/lsm at 86c47be; 2026-10-18
+$ ./bin/lsmc -mode real -keys 110000 -small 3300 -large 82500 -flushes 200
+# go go1.27.0, GOMAXPROCS 4, mode real, keys 110000, small 3300, large 82500, flushes 200, seed 1
+workload     policy                                               runsMean  runsMax       WA   cmp/fl spaceAvg spaceMax     peak   maxOut   inputs merge/fl
+steady       bucket (internal/lsm)                                    7.20       12     2.87     1.87     3.17     4.28     0.00     0.00      0.0     0.00
+alternating  bucket (internal/lsm)                                  151.50      201     1.00     0.00    42.82    56.75     0.00     0.00      0.0     0.00
+bursty       bucket (internal/lsm)                                   89.19      120     1.12     0.12    21.59    28.69     0.00     0.00      0.0     0.00
+loguniform   bucket (internal/lsm)                                  148.50      198     1.00     0.00    17.40    24.55     0.00     0.00      0.0     0.00
+

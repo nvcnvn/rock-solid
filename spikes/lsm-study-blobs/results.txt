@@ -1,0 +1,61 @@
+# Linux 6.18.44-fc-v139, go1.27.0, 2026-10-18, 2048 segments of 1024 blocks, warm 4 / measure 2 capacities
+RUN wl=hc90 u=0.80 order=chunk segs=2048 blocks=1024 L=1677312 WA=1.888 moved_per_user=0.888 secs=28.4
+  distinct_count_keys/moved=0.0127 fwd_rec_puts/moved=0.1727 live_fwd_rec_entries/live_block=0.1547
+  model=D  user_puts/uw=1.065 move_puts/moved=0.764 move_puts/uw=0.679 cleaner_share_extent=0.389 count_puts/uw=3.357 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1197681 extents/live_block=0.7140
+  model=DC user_puts/uw=1.066 move_puts/moved=0.764 move_puts/uw=0.678 cleaner_share_extent=0.389 count_puts/uw=3.352 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1191684 extents/live_block=0.7105
+  model=F  user_puts/uw=1.066 move_puts/moved=0.000 move_puts/uw=0.000 cleaner_share_extent=0.000 count_puts/uw=3.352 fwd_puts/moved=1.030 fwd_puts/uw=0.915 live_extents=1192127 extents/live_block=0.7107 live_fwd_runs=1017300 fwd_runs/live_block=0.6065 entries_total/live_block=1.3172 reads_via_fwd=0.896 logical_segs=9870
+RUN wl=hc90 u=0.80 order=origin segs=2048 blocks=1024 L=1677312 WA=1.933 moved_per_user=0.933 secs=35.3
+  distinct_count_keys/moved=0.0125 fwd_rec_puts/moved=0.0298 live_fwd_rec_entries/live_block=0.0295
+  model=D  user_puts/uw=1.065 move_puts/moved=0.765 move_puts/uw=0.714 cleaner_share_extent=0.401 count_puts/uw=3.427 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1197890 extents/live_block=0.7142
+  model=DC user_puts/uw=1.066 move_puts/moved=0.764 move_puts/uw=0.713 cleaner_share_extent=0.401 count_puts/uw=3.423 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1193643 extents/live_block=0.7116
+  model=F  user_puts/uw=1.066 move_puts/moved=0.000 move_puts/uw=0.000 cleaner_share_extent=0.000 count_puts/uw=3.256 fwd_puts/moved=0.935 fwd_puts/uw=0.872 live_extents=1192127 extents/live_block=0.7107 live_fwd_runs=963911 fwd_runs/live_block=0.5747 entries_total/live_block=1.2854 reads_via_fwd=0.897 logical_segs=9870
+RUN wl=hc90 u=0.90 order=chunk segs=2048 blocks=1024 L=1887232 WA=3.111 moved_per_user=2.111 secs=60.6
+  distinct_count_keys/moved=0.0100 fwd_rec_puts/moved=0.2270 live_fwd_rec_entries/live_block=0.2358
+  model=D  user_puts/uw=1.064 move_puts/moved=0.774 move_puts/uw=1.633 cleaner_share_extent=0.605 count_puts/uw=5.262 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1357942 extents/live_block=0.7195
+  model=DC user_puts/uw=1.068 move_puts/moved=0.769 move_puts/uw=1.624 cleaner_share_extent=0.603 count_puts/uw=5.234 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1341007 extents/live_block=0.7106
+  model=F  user_puts/uw=1.066 move_puts/moved=0.000 move_puts/uw=0.000 cleaner_share_extent=0.000 count_puts/uw=5.238 fwd_puts/moved=0.989 fwd_puts/uw=2.088 live_extents=1341671 extents/live_block=0.7109 live_fwd_runs=1215138 fwd_runs/live_block=0.6439 entries_total/live_block=1.3548 reads_via_fwd=0.932 logical_segs=11105
+RUN wl=hc90 u=0.90 order=origin segs=2048 blocks=1024 L=1887232 WA=3.305 moved_per_user=2.305 secs=56.3
+  distinct_count_keys/moved=0.0099 fwd_rec_puts/moved=0.0325 live_fwd_rec_entries/live_block=0.0362
+  model=D  user_puts/uw=1.064 move_puts/moved=0.784 move_puts/uw=1.809 cleaner_share_extent=0.630 count_puts/uw=5.613 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1358716 extents/live_block=0.7200
+  model=DC user_puts/uw=1.066 move_puts/moved=0.780 move_puts/uw=1.799 cleaner_share_extent=0.628 count_puts/uw=5.591 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1345973 extents/live_block=0.7132
+  model=F  user_puts/uw=1.066 move_puts/moved=0.000 move_puts/uw=0.000 cleaner_share_extent=0.000 count_puts/uw=4.910 fwd_puts/moved=0.842 fwd_puts/uw=1.940 live_extents=1341671 extents/live_block=0.7109 live_fwd_runs=1132255 fwd_runs/live_block=0.6000 entries_total/live_block=1.3109 reads_via_fwd=0.934 logical_segs=11105
+RUN wl=hc90 u=0.95 order=chunk segs=2048 blocks=1024 L=1991680 WA=5.664 moved_per_user=4.664 secs=52.3
+  distinct_count_keys/moved=0.0089 fwd_rec_puts/moved=0.2846 live_fwd_rec_entries/live_block=0.3093
+  model=D  user_puts/uw=1.062 move_puts/moved=0.795 move_puts/uw=3.707 cleaner_share_extent=0.777 count_puts/uw=9.406 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1452791 extents/live_block=0.7294
+  model=DC user_puts/uw=1.074 move_puts/moved=0.783 move_puts/uw=3.650 cleaner_share_extent=0.773 count_puts/uw=9.265 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1413928 extents/live_block=0.7099
+  model=F  user_puts/uw=1.066 move_puts/moved=0.000 move_puts/uw=0.000 cleaner_share_extent=0.000 count_puts/uw=9.302 fwd_puts/moved=0.930 fwd_puts/uw=4.338 live_extents=1415987 extents/live_block=0.7110 live_fwd_runs=1344555 fwd_runs/live_block=0.6751 entries_total/live_block=1.3860 reads_via_fwd=0.960 logical_segs=11720
+RUN wl=hc90 u=0.95 order=origin segs=2048 blocks=1024 L=1991680 WA=6.069 moved_per_user=5.069 secs=48.9
+  distinct_count_keys/moved=0.0089 fwd_rec_puts/moved=0.0397 live_fwd_rec_entries/live_block=0.0485
+  model=D  user_puts/uw=1.062 move_puts/moved=0.807 move_puts/uw=4.090 cleaner_share_extent=0.794 count_puts/uw=10.172 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1453236 extents/live_block=0.7297
+  model=DC user_puts/uw=1.065 move_puts/moved=0.798 move_puts/uw=4.044 cleaner_share_extent=0.792 count_puts/uw=10.074 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1425536 extents/live_block=0.7157
+  model=F  user_puts/uw=1.066 move_puts/moved=0.000 move_puts/uw=0.000 cleaner_share_extent=0.000 count_puts/uw=8.115 fwd_puts/moved=0.741 fwd_puts/uw=3.755 live_extents=1415987 extents/live_block=0.7110 live_fwd_runs=1223435 fwd_runs/live_block=0.6143 entries_total/live_block=1.3252 reads_via_fwd=0.962 logical_segs=11720
+RUN wl=uniform u=0.80 order=chunk segs=2048 blocks=1024 L=1677312 WA=2.735 moved_per_user=1.735 secs=170.7
+  distinct_count_keys/moved=0.0104 fwd_rec_puts/moved=0.2636 live_fwd_rec_entries/live_block=0.1877
+  model=D  user_puts/uw=1.000 move_puts/moved=1.000 move_puts/uw=1.735 cleaner_share_extent=0.634 count_puts/uw=5.471 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1677220 extents/live_block=0.9999
+  model=DC user_puts/uw=1.002 move_puts/moved=1.000 move_puts/uw=1.736 cleaner_share_extent=0.634 count_puts/uw=5.468 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1675375 extents/live_block=0.9988
+  model=F  user_puts/uw=1.000 move_puts/moved=0.000 move_puts/uw=0.000 cleaner_share_extent=0.000 count_puts/uw=5.470 fwd_puts/moved=1.365 fwd_puts/uw=2.370 live_extents=1677216 extents/live_block=0.9999 live_fwd_runs=1062895 fwd_runs/live_block=0.6337 entries_total/live_block=1.6336 reads_via_fwd=0.634 logical_segs=9998
+RUN wl=uniform u=0.80 order=origin segs=2048 blocks=1024 L=1677312 WA=2.735 moved_per_user=1.735 secs=168.3
+  distinct_count_keys/moved=0.0104 fwd_rec_puts/moved=0.0364 live_fwd_rec_entries/live_block=0.0277
+  model=D  user_puts/uw=1.000 move_puts/moved=1.000 move_puts/uw=1.735 cleaner_share_extent=0.634 count_puts/uw=5.471 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1677220 extents/live_block=0.9999
+  model=DC user_puts/uw=1.000 move_puts/moved=1.000 move_puts/uw=1.735 cleaner_share_extent=0.634 count_puts/uw=5.471 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1677217 extents/live_block=0.9999
+  model=F  user_puts/uw=1.000 move_puts/moved=0.000 move_puts/uw=0.000 cleaner_share_extent=0.000 count_puts/uw=4.131 fwd_puts/moved=0.980 fwd_puts/uw=1.700 live_extents=1677216 extents/live_block=0.9999 live_fwd_runs=727096 fwd_runs/live_block=0.4335 entries_total/live_block=1.4334 reads_via_fwd=0.634 logical_segs=9998
+RUN wl=uniform u=0.90 order=chunk segs=2048 blocks=1024 L=1887232 WA=5.379 moved_per_user=4.379 secs=370.5
+  distinct_count_keys/moved=0.0090 fwd_rec_puts/moved=0.3848 live_fwd_rec_entries/live_block=0.3264
+  model=D  user_puts/uw=1.000 move_puts/moved=1.000 move_puts/uw=4.379 cleaner_share_extent=0.814 count_puts/uw=10.758 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1887127 extents/live_block=0.9999
+  model=DC user_puts/uw=1.006 move_puts/moved=0.999 move_puts/uw=4.373 cleaner_share_extent=0.813 count_puts/uw=10.735 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1881479 extents/live_block=0.9970
+  model=F  user_puts/uw=1.000 move_puts/moved=0.000 move_puts/uw=0.000 cleaner_share_extent=0.000 count_puts/uw=10.757 fwd_puts/moved=1.186 fwd_puts/uw=5.193 live_extents=1887114 extents/live_block=0.9999 live_fwd_runs=1535960 fwd_runs/live_block=0.8139 entries_total/live_block=1.8138 reads_via_fwd=0.814 logical_segs=11247
+RUN wl=uniform u=0.90 order=origin segs=2048 blocks=1024 L=1887232 WA=5.380 moved_per_user=4.380 secs=352.9
+  distinct_count_keys/moved=0.0090 fwd_rec_puts/moved=0.0408 live_fwd_rec_entries/live_block=0.0362
+  model=D  user_puts/uw=1.000 move_puts/moved=1.000 move_puts/uw=4.380 cleaner_share_extent=0.814 count_puts/uw=10.760 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1887123 extents/live_block=0.9999
+  model=DC user_puts/uw=1.000 move_puts/moved=1.000 move_puts/uw=4.380 cleaner_share_extent=0.814 count_puts/uw=10.760 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1887115 extents/live_block=0.9999
+  model=F  user_puts/uw=1.000 move_puts/moved=0.000 move_puts/uw=0.000 cleaner_share_extent=0.000 count_puts/uw=6.857 fwd_puts/moved=0.740 fwd_puts/uw=3.242 live_extents=1887114 extents/live_block=0.9999 live_fwd_runs=913391 fwd_runs/live_block=0.4840 entries_total/live_block=1.4839 reads_via_fwd=0.814 logical_segs=11247
+RUN wl=uniform u=0.95 order=chunk segs=2048 blocks=1024 L=1991680 WA=11.007 moved_per_user=10.007 secs=367.0
+  distinct_count_keys/moved=0.0085 fwd_rec_puts/moved=0.5174 live_fwd_rec_entries/live_block=0.4771
+  model=D  user_puts/uw=1.000 move_puts/moved=1.000 move_puts/uw=10.006 cleaner_share_extent=0.909 count_puts/uw=22.012 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1991581 extents/live_block=1.0000
+  model=DC user_puts/uw=1.014 move_puts/moved=0.995 move_puts/uw=9.954 cleaner_share_extent=0.908 count_puts/uw=21.880 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1977707 extents/live_block=0.9930
+  model=F  user_puts/uw=1.000 move_puts/moved=0.000 move_puts/uw=0.000 cleaner_share_extent=0.000 count_puts/uw=22.009 fwd_puts/moved=1.091 fwd_puts/uw=10.914 live_extents=1991563 extents/live_block=0.9999 live_fwd_runs=1809817 fwd_runs/live_block=0.9087 entries_total/live_block=1.9086 reads_via_fwd=0.909 logical_segs=11875
+RUN wl=uniform u=0.95 order=origin segs=2048 blocks=1024 L=1991680 WA=11.005 moved_per_user=10.005 secs=343.9
+  distinct_count_keys/moved=0.0085 fwd_rec_puts/moved=0.0534 live_fwd_rec_entries/live_block=0.0504
+  model=D  user_puts/uw=1.000 move_puts/moved=1.000 move_puts/uw=10.004 cleaner_share_extent=0.909 count_puts/uw=22.008 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1991580 extents/live_block=0.9999
+  model=DC user_puts/uw=1.000 move_puts/moved=1.000 move_puts/uw=10.004 cleaner_share_extent=0.909 count_puts/uw=22.008 fwd_puts/moved=0.000 fwd_puts/uw=0.000 live_extents=1991563 extents/live_block=0.9999
+  model=F  user_puts/uw=1.000 move_puts/moved=0.000 move_puts/uw=0.000 cleaner_share_extent=0.000 count_puts/uw=12.576 fwd_puts/moved=0.619 fwd_puts/uw=6.197 live_extents=1991563 extents/live_block=0.9999 live_fwd_runs=992708 fwd_runs/live_block=0.4984 entries_total/live_block=1.4984 reads_via_fwd=0.909 logical_segs=11875

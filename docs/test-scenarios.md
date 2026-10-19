@@ -366,6 +366,25 @@ the model's run through recovery, replay the records after its replay LSN, resum
   an erased header, a restart and a crash during recovery all occur.
 - [fuzz] Bit flips anywhere in a log of 40 writes, cold blobs and checkpoints: rebuild and open either
   fail with Corrupt, CopyOnly or NotFormatted, or resume a log whose next write survives a restart.
+- Recover twice: after a crash, recover, crash again before any new write (and, separately, during
+  recovery's own writes), and recover again: both recoveries give the same LSN and index (RocksDB
+  "column family inconsistency" on second recovery, "SST file is ahead of WALs").
+- A recovery that ends Corrupt writes nothing: the disk reads byte for byte as before it (RocksDB
+  MANIFEST written before recovery succeeds).
+- A failed write in a round fails the log: no item of that round or after is acknowledged; recovery
+  after a restart gives an LSN no greater than the last record fully landed, the next record takes
+  the next LSN, and no block of the failed round reads as a record (RocksDB sequence numbers going
+  backwards, duplicate WAL entries after error recovery).
+- A failed flush: the round's items are not acknowledged even though reads see the blocks; a crash
+  then lands any subset, and recovery is a prefix.
+- One checkpoint over two indexes and a shard replica, where one index has no new writes and one's
+  flush fails: the manifest's replay LSN for each index is at most its oldest unflushed write, and a
+  crash recovers all three to one LSN (RocksDB #11148, atomic flush leaving out a column family).
+- [property] Crash at every action: 40 one- and two-block writes with two checkpoints (one with a
+  compaction) on a 1,024-block disk; for every k, crash at the k-th disk action with none, a seeded
+  half and all of the unflushed blocks landing, and separately fail the k-th action with an IO
+  error: each recovery holds every acknowledged write and is a prefix of the submitted ones (Pebble
+  `TestErrors`, `TestDBCompactionCrash`).
 
 ## Superblock copy
 
@@ -428,13 +447,14 @@ the model's run through recovery, replay the records after its replay LSN, resum
   pages are freed only once the view closes.
 - Memtable over runs: after a flush, a key only in the run reads from the run; a key written after the
   flush reads the memtable's value; a key removed after the flush reads as absent; a scan merges the
-  memtable and runs in key order with no duplicates. With three runs and a flush running, a get,
-  present or not, probes 5 layers: the memtable, the frozen one and each run once.
+  memtable and runs in key order with no duplicates. With three runs and a flush running, a get of
+  a key in every layer reads 5 layers: the memtable, the frozen one and each run once. A get of a
+  key in no run searches only the memtables and the runs whose filter lets it through.
 - Compaction: four runs with overlapping keys merge, on another goroutine while the memtable takes
   writes, into one run equal to their merge, newest value winning and removed keys dropped. A view
   opened before the compaction still reads the four runs; the next checkpoint names the merged run
   and reports every piece of the four dead.
-- A compaction of four small runs above a run larger than 1 MiB leaves that run out and keeps the
+- A compaction of four runs of 100 KB above a 10 MB run leaves that run out and keeps the
   four removals, which still hide its keys. A flush drops a removal no older run holds the key of,
   and keeps one that hides a key in a run.
 - A compaction installed before it ran is Stale and the next is still picked; a bucket larger than
@@ -442,9 +462,13 @@ the model's run through recovery, replay the records after its replay LSN, resum
 - A compaction installed while a flush writes its inputs: that checkpoint's manifest names the
   inputs, which restore to the tree, and the next names the merged run and reports the inputs dead.
 - A checkpoint that fails after writing a compaction's result whole carries that run next time.
-- Buckets (ported from Cassandra's `testGetBuckets`, runs in age order): sizes 1,1,4,4,8,8 with small
-  below 2 make three buckets of two; 3,3,3,8,8,8 two of three, or one of six with small below 10;
-  1,8,1,8 four buckets; 70 equal runs buckets of 32, 32 and 6.
+- Universal picker (ported from RocksDB's universal tests in `compaction_picker_test.cc`, run sizes
+  newest first, trigger 4): 1,1,1,1 merges all four, size amplification firing first at 300%;
+  1,10,100,1000 picks nothing, and 1,10,100,1000,10000 makes the run-limit fallback merge the newest
+  two; 300,300,100 above 100 (newer runs 700% of the oldest) is a full size-amplification merge; a
+  largest run of 64 MiB with a 1 MiB buffer gives an auto run limit of 8.
+- A merge running over the oldest runs does not stop a merge of newer runs; installing both in
+  either order leaves the runs in age order.
 - Restore is runs plus replay: after six flushes, a compaction and more writes, loading the newest
   manifest's runs and replaying the later writes equals the live tree.
 - Loading a run is Malformed when a piece or the root is truncated by a byte, a piece is missing or
@@ -454,6 +478,39 @@ the model's run through recovery, replay the records after its replay LSN, resum
   entry fits; a piece size under 64 B is BadConfig.
 - A failed checkpoint keeps the frozen memtable and reports the one piece it wrote of it as dead;
   writes go on into the new memtable, and the next flush writes the frozen one without freezing them.
+- Run count: 2,000 flushes alternating 1.3 MB and 33 MB over a 44 MB index (and bursty and
+  log-uniform sequences) never leave more than 2 + log2(largest run ÷ 1 MiB) + 1 runs, and the runs'
+  bytes stay under 3× the live index after size amplification.
+- Filters (from Pebble's `sstable/tablefilters/bloom` tests at a7b8321871e3): the filter of their
+  test keys encodes to Pebble's golden bytes, and every added key may match. Over 1,000,000 absent
+  keys, a 10 bits-per-key filter's false positives stay within 1.0 to 1.4%.
+- [property] Seeds 0-11, random puts, removes, range removals, flushes and compactions, with filters
+  on and off: gets, floors inside a prefix and prefix scans read alike and as the map. A run whose
+  filter rules out a key is never searched for it, yet a covering fragment in it still hides the
+  key, and a run holding only fragments is never skipped by its bounds.
+- Merge steps: four runs merged in steps of two pieces: after the first step, a get below the bound
+  reads the output and above it the inputs; a range removal across the bound is clipped to it; a
+  view opened before the step still reads the four runs; the manifest edit names the bounded inputs
+  and the partial output, and the input pieces wholly below the bound count dead once it is durable;
+  a crash after that manifest recovers both, resumes from the bound, and every key reads as before
+  the merge.
+- With `Check` on, a flush whose piece encoder drops an entry, or a merge that emits a key twice or
+  out of order, panics in that flush or merge.
+- A view opened before a range removal still reads the keys in it; a scan that starts inside a
+  fragment and is bounded inside it returns nothing past the bound (RocksDB `Refresh` after
+  DeleteRange, iteration past `iterate_upper_bound`, `HISTORY.md` v11.8.1).
+- 262,144 one-chunk fragments in a memtable: a range removal and a cut allocate nothing and cost one
+  search each.
+- Over 24 runs, a get of a key no run holds searches on average fewer than 0.5 runs. A floor inside
+  a chunk written whole searches only the run holding it, plus false positives. A restore loads each
+  run's filter from its filter blocks, and lookups probe as before.
+- [property] Range removals: seeds 0-59, 3,000 random puts, removals and range removals over 300 keys
+  with flushes and compactions, with size tiering on and with every run under 1 MiB in one bucket:
+  gets, floors and a full scan read as a map. A merge whose output drops its inputs' fragments, or a
+  memtable that does not cut a later write's key out of a fragment, fails.
+- A range removal over a run's keys, flushed: a get or a floor of any key in it probes each layer
+  once; a write into the range after it reads back, before and after the flush; a fragment no older
+  run has a key in is dropped by the flush.
 
 ## Chunk index
 
@@ -483,12 +540,35 @@ the model's run through recovery, replay the records after its replay LSN, resum
   moved blocks; once the maps point elsewhere it is dropped. A write that replaced the live block
   leaves only the frozen map to move.
 - A record with an entry for pool 2^32 − 1, which the index keeps record counts under, or with a
-  freeze of version 0, which names the live map, is refused whole.
+  freeze of version 0 of a chunk that exists and holds no absent version, is refused whole.
+- A whole-chunk punch leaves the chunk entry and one range removal over the live map; frozen maps
+  read as before.
+- Copy entries in replay: chunk 7 v1 block 0 at LBA 101, a copy entry moving it from LBA 101 to LBA
+  601. Logged after a write v2 of block 0, the copy changes nothing, live or in a rebuild. Logged
+  before it, the rebuild applies it and the write then replaces it. Either way the rebuilt live map
+  and record counts equal the live index's, and applying the records twice changes nothing. A plain
+  write entry in its place would map block 0 back to v1.
+- Removals: chunk 7 written as 1,024 one-block extents, checkpointed, then rewritten in one
+  1,024-block write: the index holds one range removal for blocks 1 to 1,023 and no point removal, a
+  lookup of every block takes at most two searches before the checkpoint, after it and after a
+  compaction, and a 1-block write at block 700 splits the new extent.
+- [property] Seeds 0-5, 1,500 random writes, punches, freezes and whole rewrites over 4 chunks, with
+  checkpoints and compactions: every block reads as an index built with point removals does, and the
+  invariants hold.
+- Absent freeze: a record with freeze(chunk 9, v0, epoch 1) and a 1-block write v1 leaves chunk 9's
+  entry at v1, epoch 1, and a read at epoch 1 finds nothing. A second write at epoch 1 carries no
+  freeze. After cut 2, a write freezes v1 at epoch 2: a read at epoch 1 still finds nothing, and one
+  at epoch 2 finds v1. The record applied again changes nothing.
 - [property] Seed 22, 20 runs of 300 random writes, punches and freezes over 3 chunks of 64 blocks,
   with a cleaner move of a live or frozen block after one record in four: each move changes as many
   maps as the model holds the block at its location, every block, live and at every snapshot epoch,
   reads the version and location a model of whole-map copies holds, and the invariants hold after
-  every step.
+  every step. The runs include snapshot cuts and chunks created after them, as the
+  [chunk epochs spike](design.md#appendix-chunk-epochs-spike)'s E3 does.
+- [property] Replay past pending writes (chunk epochs spike R1, 200 seeds): a primary that maps
+  writes at commit, a chunk's in version order, with cleaner moves and checkpoints whose replay
+  point is its oldest pending write, restarts from the checkpoint's runs plus every record from the
+  replay point, and reads every block, live and at every snapshot epoch, as a rebuild does.
 - [property] On a 1 GiB simulated disk (16-block records, a checkpoint every 96 blocks of records),
   seeds 0-3, three generations of 150 rounds of writes, punches and freezes, with checkpoints,
   multi-piece runs, carried runs and compactions: recovery from the manifest's runs plus replay, and
@@ -496,6 +576,29 @@ the model's run through recovery, replay the records after its replay LSN, resum
 - A crash after a checkpoint's runs are durable but before its manifest, with a compaction's result
   among them, recovers from the previous manifest plus replay to the live index, and the next
   checkpoint's restart does too.
+
+## Metamorphic index tests
+
+- [property] `internal/lsm`, seeds 0-199, 3,000 ops (puts 35, removals 10, gets 15, floors 8, scans
+  5, views 11, flushes 5, failed flushes 1, compactions 4, restarts 1, by weight; keys of 1-6
+  letters a-f, a put's key new one time in four): the histories of every option set equal the
+  model's. Sets: memtable only; generated flushes and compactions with 1 MiB pieces; 4 KiB pieces, a
+  flush every 40 writes, compaction until none is due; 256 B pieces, a flush every 10 writes, no
+  compaction; 512 B pieces, a flush every 25 writes, compaction picked at an op and installed between
+  the pieces of the next flush, up to 4 writes between a flush's pieces; 1 KiB pieces, every flush
+  failing after one piece first, a restart after every flush; 4 KiB pieces, a flush every 2 writes,
+  compaction after every 40th flush (Pebble's `internal/metamorphic`, a7b8321871e3).
+- Planted bugs, each failing at least one seed of 20: a flush dropping removals that hide a run's
+  key (every set with flushes); a merge's output installed as the oldest run, and a merge dropping
+  removals that hide keys in runs older than its inputs (only the set with 40 runs before a merge); a
+  restore loading runs in manifest order (every set with restarts); reads skipping the frozen
+  memtable (sets with failed flushes or writes between pieces).
+- Regression cases (data-driven, reduced from the planted bugs): `put aa`, flush, `del aa`, flush: a
+  floor of `aca` finds none. `put e`, flush, `del e`, a flush failing after 3 pieces, a flush, a
+  restart: a floor of `e` finds none.
+- With range removals: the same ops with each range removal replaced by point removals of the keys
+  it covers read the same, and the chunk index with range trims reads as with point removals
+  (Pebble's `replace_single_delete`).
 
 ## Segment usage table
 
@@ -528,6 +631,14 @@ whenever 40 blocks follow the manifest.
 - Fault helpers used by the log tests: crash with a chosen landed-set or with p = 1/2 per block
   (from a seeded RNG); flip a bit (XOR a mask into one byte of a durable block); fail reads of
   chosen LBAs with Io.
+- A failed write completes with IO and leaves each of its blocks undecided, as an unflushed write is:
+  a crash lands each or not, since a device's error says nothing about which blocks it wrote. A
+  failed flush completes with IO and leaves every unflushed block undecided: reads still see them,
+  and a later crash lands each or not. A damaged read completes OK with one byte changed in the
+  returned buffer. Errors are chosen by action kind, LBA range, the action's index and a probability
+  from the disk's seeded source, so a seed replays them.
+- Two unflushed writes to one block, the newer landing alone or the older alone, or both: the block
+  reads as the one that landed last in execution order.
 
 ## Seeded runs and the simulation harness
 

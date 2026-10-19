@@ -1,0 +1,18 @@
+# 6.18.44-fc-v139 go1.27.0 pebble v2.1.7, Intel(R) Xeon(R) Processor @ 2.80GHz, 4 vCPUs shared with other benchmarks, rock-solid 86c47be, 2026-10-18
+== P1 chunk of 1,024 one-block extents rewritten whole among 20,000 chunks (Pebble v2.1.7)
+mode       phase      floors  points/floor  covered/floor  ns/floor  L0 tables  L6 tables
+point      memtable     1024        1025.0            0.0    118671          0          1
+point      flushed      1024        1025.0            0.0    162374          1          1
+point      compacted    1024           1.0            0.0     10073          0          1
+range      memtable     1024           2.0            0.0      6712          0          1
+range      flushed      1024           2.0            0.0     18624          1          1
+range      compacted    1024           1.0            0.0     10362          0          1
+== P2 dropping one of four 250,000-key volumes (100-byte values), 256 KiB tables, automatic compactions
+mode         excise  default  delete-only  elision-only  tombstone-density  tables deleted  tables excised  bytes compacted  live bytes before  after
+point         false        0            0             0                 11               0               0          1020111           11768249  9371649 (L6 tables 43)
+range         false        0            1             0                  0               0               0                0           11769566  9650884 (L6 tables 42)
+range+excise   true        0            1             0                  0               0               0                0           11767447  9648665 (L6 tables 42)
+== P3 queue of 10,000 keys, 300,000 append+delete steps, 64 KiB memtable, seek to head every 1,000 steps
+density      seeks  mean points/seek  max points/seek  tombstone-density compactions  default compactions
+true           300              6382             9735                              0                  132
+false          300              6347             9629                              0                  132

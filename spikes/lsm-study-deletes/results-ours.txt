@@ -1,0 +1,9 @@
+# 6.18.44-fc-v139 go1.27.0 pebble v2.1.7, Intel(R) Xeon(R) Processor @ 2.80GHz, 4 vCPUs shared with other benchmarks, rock-solid 5a5f5e2, 2026-10-19
+== O1 dropping one of four 250,000-file volumes (100-byte values), then 400 flushes of 2,000 creates in volume 1
+mode    runs before  run MB before  run MB after the flush  after 10 flushes  after 30  after 100  after 400  bytes merged MB  bytes rewritten by drops MB  blocks dropped
+none              5          112.2                   112.2             114.2     117.5      106.2      173.4            409.9                          0.0               0
+drop              5          112.2                    90.1              92.2      95.5      106.2      173.4            409.9                         85.6              21
+== O2 queue of 10,000 keys beside 200,000 cold keys, 300,000 append+remove steps, flush every 1,000 steps
+mode    seeks  mean steps/seek  max steps/seek  runs at end
+point     300            10820           12000            4
+range     300                1               1            4

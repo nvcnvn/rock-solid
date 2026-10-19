@@ -1,0 +1,10 @@
+# 6.18.44-fc-v139 go1.27.0 Intel(R) Xeon(R) Processor @ 2.10GHz, 4 vCPUs shared with other benchmarks, rock-solid dbae461, 2026-10-18
+# go go1.27.0, GOMAXPROCS 4, scale 1.00
+
+## C mixed block-volume workload: 512 chunks, per 64 MiB flush 4,096 random 4 KiB writes and 12 whole-chunk rewrites
+C internal        4K write  17.3 us, rewrite record  167.2 us | lookup mean  12403 ns max  24402 ns   0.0 steps | runs mean 4.5 max 9 | flushed   44.1 MB merged   57.8 MB (density merges 0) run_MB 17.6
+C copy            4K write  19.4 us, rewrite record  184.6 us | lookup mean  11865 ns max  22791 ns   4.4 steps | runs mean 4.5 max 9 | flushed   44.1 MB merged   71.1 MB (density merges 0) run_MB 17.6
+C cursor          4K write  15.5 us, rewrite record  182.5 us | lookup mean   8384 ns max  15941 ns   4.4 steps | runs mean 4.5 max 9 | flushed   44.1 MB merged   71.1 MB (density merges 0) run_MB 17.6
+C range           4K write  14.1 us, rewrite record  177.4 us | lookup mean   5182 ns max   9754 ns   1.2 steps | runs mean 4.5 max 9 | flushed   41.4 MB merged   67.5 MB (density merges 0) run_MB 16.8
+C density         4K write  21.5 us, rewrite record  211.8 us | lookup mean  13917 ns max  30626 ns   4.4 steps | runs mean 4.5 max 9 | flushed   44.1 MB merged   71.1 MB (density merges 0) run_MB 17.6
+C density+cursor  4K write  16.9 us, rewrite record  195.8 us | lookup mean   7200 ns max  11232 ns   4.4 steps | runs mean 4.5 max 9 | flushed   44.1 MB merged   71.1 MB (density merges 0) run_MB 17.6

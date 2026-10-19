@@ -1,0 +1,10 @@
+# 6.18.44-fc-v139 go1.27.0 pebble v2.1.7, Intel(R) Xeon(R) Processor @ 2.80GHz, 4 vCPUs shared with other benchmarks, rock-solid 86c47be, 2026-10-18
+=== NAME  TestRangeModel
+    model_test.go:27: merges 5138, runs holding range removals at the end 5150, blocks dropped 0
+--- PASS: TestRangeModel (73.26s)
+=== NAME  TestDropModel
+    model_test.go:27: merges 5249, runs holding range removals at the end 5107, blocks dropped 4510
+--- PASS: TestDropModel (68.00s)
+PASS
+ok  	github.com/nvcnvn/rock-solid/spikes/lsm-study-deletes/lsmd	141.267s
+planted bug (drop a block whose first key is covered): failing runs of 300: 300

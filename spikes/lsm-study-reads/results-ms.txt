@@ -1,0 +1,31 @@
+# 6.18.44-fc-v139 go1.27.0 Intel(R) Xeon(R) Processor @ 2.80GHz, 4 vCPUs shared with other benchmarks, pebble a7b8321871e3, rock-solid 86c47be, 2026-10-18
+
+## L: lookups over N size-tiered runs, about 2000000 entries in all; CPU per lookup on a locked thread
+index            N op         filter     found %       ns     runs     probes  filter% fkeys/e  allocs
+metastore        6 get attr   real tree    100.0     2664        6          -        -       -    0.00
+metastore        6 get attr   none         100.0     2973     4.39       0.00        -       -    0.00
+metastore        6 get attr   bloom10      100.0     3346     1.04       4.39     2.85    1.51    0.00
+metastore        6 get attr   fuse8        100.0     3348     1.01       4.39     2.61    1.51    0.00
+metastore        6 get absent real tree      0.0     4349        6          -        -       -    0.00
+metastore        6 get absent none           0.0     5174     6.00       0.00        -       -    0.00
+metastore        6 get absent bloom10        0.0      936     0.07       6.00     2.85    1.51    0.00
+metastore        6 get absent fuse8          0.0      766     0.02       6.00     2.61    1.51    0.00
+metastore        6 runs [533328 533328 533328 133332 133332 133332] entries, 132.8 MB of runs
+metastore       12 get attr   real tree    100.0     2825       12          -        -       -    0.00
+metastore       12 get attr   none         100.0     3539    10.04       0.00        -       -    0.00
+metastore       12 get attr   bloom10      100.0     4285     1.10      10.04     2.85    1.51    0.00
+metastore       12 get attr   fuse8        100.0     4298     1.04      10.04     2.61    1.51    0.00
+metastore       12 get absent real tree      0.0     5863       12          -        -       -    0.00
+metastore       12 get absent none           0.0     5880    12.00       0.00        -       -    0.00
+metastore       12 get absent bloom10        0.0     1140     0.14      12.00     2.85    1.51    0.00
+metastore       12 get absent fuse8          0.0      879     0.05      12.00     2.61    1.51    0.00
+metastore       12 runs [501760 501760 501760 125440 125440 125440 31360 31360 31360 7840 7840 7840] entries, 132.7 MB of runs
+metastore       24 get attr   real tree    100.0     3415       24          -        -       -    0.00
+metastore       24 get attr   none         100.0     4632    22.00       0.00        -       -    0.00
+metastore       24 get attr   bloom10      100.0     4379     1.19      22.00     2.85    1.51    0.00
+metastore       24 get attr   fuse8        100.0     3896     1.08      22.00     2.62    1.51    0.00
+metastore       24 get absent real tree      0.0    10302       24          -        -       -    0.00
+metastore       24 get absent none           0.0    13277    24.00       0.00        -       -    0.00
+metastore       24 get absent bloom10        0.0     1888     0.22      24.00     2.85    1.51    0.00
+metastore       24 get absent fuse8          0.0     1351     0.09      24.00     2.62    1.51    0.00
+metastore       24 runs [458752 458752 458752 114688 114688 114688 28672 28672 28672 7168 7168 7168 1792 1792 1792 448 448 448 112 112 112 28 28 28] entries, 121.8 MB of runs

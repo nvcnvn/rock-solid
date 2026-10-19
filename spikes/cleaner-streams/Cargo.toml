@@ -1,0 +1,17 @@
+[package]
+name = "cleaner-streams"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: not a member of the repo workspace. No dependencies.
+[workspace]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+debug = false
+codegen-units = 1
+lto = "fat"
+panic = "abort"
