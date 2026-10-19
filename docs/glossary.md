@@ -306,7 +306,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Cache mode: Exclusive, ReadShared, WriteShared.** The per-file state the inode owner tracks: one node has the file open (it may cache everything), several nodes only read it (all may cache reads), or several nodes have it open and one has written (nobody caches).
 
-**Recall, invalidation.** A recall is the inode owner telling other nodes to give up their cache rights for a file: flush buffered writes and drop cached pages. Invalidation is the kernel side of dropping pages.
+**Recall, invalidation.** A recall is the inode owner telling other nodes to give up their cache rights for a file: flush buffered writes and drop cached pages. The write or open that makes the file write-shared waits until each node has acknowledged or been fenced. Invalidation is the kernel side of dropping pages.
 
 **`mmap`.** Mapping a file into a process's memory, so reads and writes are plain memory accesses the filesystem never sees one by one. That makes coherence for mapped files much harder.
 

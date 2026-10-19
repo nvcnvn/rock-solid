@@ -187,7 +187,7 @@ Pebble crash FS    old         B          random unsynced blocks of the latest c
 RocksDB fault FS   old         B          a random prefix of the unsynced data
 ```
 
-Only rock-solid's model can keep A without B. The design chose it because "the device's volatile cache can persist any subset", so recovery has to survive every subset.
+Only rock-solid's model can keep A without B. Holes like the one above are another matter: Pebble's model makes them too, since it keeps each unsynced 4 KiB block at random, while RocksDB's prefix never does. The design chose its model because "the device's volatile cache can persist any subset", so recovery has to survive every subset.
 
 The design's full fault model adds torn sectors, bit flips, misdirected writes, a disk 100× slower that never errors, and injected errors chosen by action kind, block range, action index and a seeded probability, including a read that "succeeds" with one changed byte. The rule for errors is blunt: "A failed write or flush is final for the open log"; the node runs recovery again rather than retrying, since nobody knows which unflushed blocks reached the media.
 
@@ -391,7 +391,7 @@ The [metamorphic testing spike](../docs/design.md#appendix-metamorphic-testing-s
 | History diff against the model | Every divergence from the model also showed between option sets |
 | Reduction | 5 and 7 ops from 3,000 when flushes, failed flushes and restarts are ops; 76 to 354 when an option sets the cadence |
 
-The package's hand-written unit tests also caught all five plants, some with a single test. That is the point, not a disappointment: those scenarios existed because someone had thought of these bugs. The metamorphic test found the same five without knowing where to look, which is what it is for: the net under the scenarios nobody wrote.
+The package's hand-written unit tests also caught all five plants, three of them with a single test. That is the point, not a disappointment: those scenarios existed because someone had thought of these bugs. The metamorphic test found the same five without knowing where to look, which is what it is for: the net under the scenarios nobody wrote.
 
 The spike also showed that an option set must push each choice to its extreme, or whole bug classes never show, and that a failure reduces well only when structural steps such as flushes are explicit ops.
 

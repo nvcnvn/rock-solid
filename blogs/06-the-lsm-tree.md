@@ -449,8 +449,8 @@ live index.
 **Why not leveled?** It rewrote up to 17.7 times the flushed bytes, and replaces runs one key
 range at a time, where universal runs die whole, so their segments free without cleaning
 ([post 05](05-the-cleaner-and-free-space.md)). A fixed run limit is possible per index, but four
-runs cost **100 times** the flushed bytes on a 1.6 GB index, because the second-oldest run absorbs
-every flush.
+runs cost **100 times** the flushed bytes on a 1.6 GB index under steady flushes, because the
+second-oldest run absorbs every flush, and 9 to 33 times under the other flush sequences.
 
 A merge reads only immutable inputs, so it runs on a worker goroutine, off the owner's event loop;
 that part is built.

@@ -352,8 +352,9 @@ the model's run through recovery, replay the records after its replay LSN, resum
   pieces unlimited or 512 bytes; random log ID. Each cycle runs 300 steps, each either submitting 1-4
   random items (60% writes of 1-3 blocks, 10% whole-chunk punches, 20% hot blobs under 3,000 B, 10%
   cold blobs under 6,000 B) when nothing is pending or with probability 2/5, or executing one random
-  pending disk action. The stand-in checkpoints whenever one is due. Then, in 3 cycles of 4, a crash
-  lands each unflushed block with probability 1/2; otherwise the process only restarts. Rebuild,
+  pending disk action. The stand-in checkpoints whenever one is due. Then each cycle ends in a crash
+  with probability 3/4, landing each unflushed block with probability 1/2; otherwise the process
+  only restarts. Rebuild,
   with a crash before each of its writes and flushes with probability 1/4, each followed by a fresh
   start, then open; recovery's reads complete in random order. Properties: both succeed with the same
   durable LSN, between the one acknowledged before the crash and that plus the rounds in flight, and

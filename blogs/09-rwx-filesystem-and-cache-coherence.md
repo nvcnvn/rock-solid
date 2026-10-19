@@ -376,8 +376,8 @@ open files during a grace period of one session lease, as in NFS version 4.
 #### How it works: entering WriteShared
 
 To enter WriteShared, the owner sends a recall to every other member and waits for every
-acknowledgment, or for that member's session to expire and be fenced. The write that triggered
-the change waits too. The two-pod example then plays out like this:
+acknowledgment, or for that member's session to expire and be fenced. The write or open that
+triggered the change waits too. The two-pod example then plays out like this:
 
 ```mermaid
 sequenceDiagram
@@ -438,9 +438,9 @@ local daemon. The data read then goes to the chunk primary, like every read in t
 
 The other way into WriteShared, from Exclusive, follows the same rule: the owner recalls every
 other member. If node A has written the file and node B opens it, the owner recalls A; A flushes
-its buffered writes and drops its pages, and B's open is uncached. Whether B's open waits for
-A's acknowledgment before it returns, the design does not yet say (see
-[Open directions](#open-directions)).
+its buffered writes and drops its pages. The owner answers B's open, uncached, only once A has
+acknowledged or been fenced, so B never reads storage before A's buffered writes reach it. If A
+is unreachable, B's open waits up to A's session lease plus the time to fence A's session.
 
 #### How it works: while WriteShared
 
@@ -696,9 +696,10 @@ like cache modes, and a lease break is a recall.
   tools comparing mtimes may notice.
 - **mmap readers lag by one message delay** unless `mmap_sync` is on, and shared-writable `mmap`
   across nodes is not supported.
-- **A recall waits for the slowest member.** If a reader's node is unreachable, the first write
-  on a ReadShared file waits until that node acknowledges or its session (10 s lease by default)
-  expires and is fenced at every primary.
+- **A recall waits for the slowest member.** If a member's node is unreachable, the first write
+  on a ReadShared file, or a second node's open of a file another node has written, waits until
+  that node acknowledges or its session (10 s lease by default) expires and is fenced at every
+  primary.
 - **An owner crash pauses new opens** for one session lease while clients re-register.
 - **A daemon crash loses unflushed buffered writes**, reported as `EIO` but still lost.
 - **The daemon container is privileged**, and the descriptor holder is sensitive: a descriptor is
@@ -714,17 +715,10 @@ From the [roadmap and open questions](../docs/design.md#roadmap-and-open-questio
 - **Protocol models first (phase 2):** TLA+ models of sessions and fencing and of cache-mode
   recalls, whose property is no stale read in WriteShared mode.
 - **Tier 1 (phase 6) and Tier 2 (phase 7).** Phase 6 is the first usable product, tested by
-  killing the daemon pod under multi-client `fsx` in a real cluster. Phase 7 adds the inode
-  owner's open registry, handed over on planned leader transfers, with cache modes, recalls,
-  revalidation of old handles and mmap invalidations.
-- **What phase 6 tracks about opens.** Tier 1 already registers each open with the inode's owner
-  and frees an orphan only once no node has it open, which needs some record of opens. The
-  roadmap places the owner's open registry in phase 7. The design does not yet say what phase 6
-  keeps in its place.
-- **Whether an open waits for a recall.** When node B opens a file that node A has written, the
-  owner recalls A. The design does not say whether B's open waits for A's acknowledgment. The
-  answer matters: if it does not wait, B could read storage before A has flushed its buffered
-  writes.
+  killing the daemon pod under multi-client `fsx` in a real cluster. It already has the inode
+  owner's in-memory open registry, which close-to-open and orphans need. Phase 7 adds the
+  registry's handover on planned leader transfers, cache modes, recalls, revalidation of old
+  handles and mmap invalidations.
 - **Tier 3 (phase 13).** Byte-range locks and directory caching with pushed invalidations.
 - **Runtime questions:** whether FUSE over io_uring is worth using once the kernel requeues the
   requests a crash strands, and how one mount's `/dev/fuse` requests spread across event loops.

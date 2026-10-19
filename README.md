@@ -12,4 +12,4 @@ A distributed storage system in Go for homelab Kubernetes clusters, with ReadWri
 
 ## Acknowledgments
 
-The Raft shard is [etcd-raft](https://github.com/etcd-io/raft) (Copyright The etcd Authors, Apache License 2.0), used as a Go module with one patch that seeds its election timeouts.
+The Raft shard will be [etcd-raft](https://github.com/etcd-io/raft) (Copyright The etcd Authors, Apache License 2.0), used as a Go module through a pinned fork of v3.6.0 with two changes: seeded election timeouts and v3.7.0's ReadIndex retry fix ([Raft shard](docs/design.md#metadata-layer-metastore)).

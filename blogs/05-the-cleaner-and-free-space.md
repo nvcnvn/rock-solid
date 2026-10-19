@@ -434,10 +434,9 @@ records are written. **Planned with manifest edits:** an edit carries only the r
 since the manifest before it, a freed segment as a row in state free, with a full snapshot of the
 table written from time to time.
 
-How big is a full table? The design gives at most 68 KiB on disks under 256 GiB, counting 4,096
-segments, and 272 KiB per TiB above that. The code's segment-size rule gives disks under 256 GiB
-between 4,096 and 8,191 segments, which at 17 bytes a row comes to at most about 136 KiB (our
-arithmetic). Either way, the table is small.
+How big is a full table? Disks under 256 GiB have between 4,096 and 8,191 segments, so at 17
+bytes a row the table stays under 136 KiB; above that it grows by 272 KiB per TiB. Either way,
+the table is small.
 
 A segment is free because the table says so, never because its header is unreadable. That is how
 an index rebuild can tell a segment the cleaner freed from a damaged one, as F2FS and LFS do. A
