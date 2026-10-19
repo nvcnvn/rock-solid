@@ -268,7 +268,11 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Write amplification.** Bytes actually written to the drive divided by bytes the user wrote. The cleaner's copying raises it, more so the fuller the disk is, which is why pools stop writes before disks are full. SSDs have their own internal write amplification on top. See [Volume size and capacity](design.md#volume-size-and-capacity).
 
-**Reserve.** Segments held back so that the cleaner and checkpoints can always run, since freeing space itself needs some free space.
+**Reserve.** Segments held back for the work that frees space, checkpoints, the cleaner and merge steps, since freeing space itself needs some free space. Ordinary writes wait while only the reserve is free.
+
+**Write stall, admission control.** Slowing or pausing new writes when background work (cleaning, checkpoints) falls behind, so the disk never runs out in the middle of it. RocksDB and Pebble call a pause a write stall; CockroachDB's admission control admits writes at the rate background work measurably keeps up, which is what rock-solid does. See [On-disk format](design.md#on-disk-format).
+
+**Merge step, bound.** A merge installs its output a step at a time; each input run then holds only the keys at or above a bound key, so the pieces it no longer needs are freed before the merge ends. ScyllaDB calls this incremental compaction. See [The LSM tree](design.md#on-disk-format).
 
 **Quarantine.** Setting aside a segment that looks damaged: never reused, and reported for repair from another replica.
 

@@ -488,6 +488,12 @@ the model's run through recovery, replay the records after its replay LSN, resum
   on and off: gets, floors inside a prefix and prefix scans read alike and as the map. A run whose
   filter rules out a key is never searched for it, yet a covering fragment in it still hides the
   key, and a run holding only fragments is never skipped by its bounds.
+- Merge steps: four runs merged in steps of two pieces: after the first step, a get below the bound
+  reads the output and above it the inputs; a range removal across the bound is clipped to it; a
+  view opened before the step still reads the four runs; the manifest edit names the bounded inputs
+  and the partial output, and the input pieces wholly below the bound count dead once it is durable;
+  a crash after that manifest recovers both, resumes from the bound, and every key reads as before
+  the merge.
 - With `Check` on, a flush whose piece encoder drops an entry, or a merge that emits a key twice or
   out of order, panics in that flush or merge.
 - A view opened before a range removal still reads the keys in it; a scan that starts inside a
