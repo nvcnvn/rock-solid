@@ -1,0 +1,37 @@
+# host Linux 6.18.44-fc-v139 | QEMU emulator version 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3) | guest Linux 7.0.0-14-generic (Ubuntu 26.04) | TCG, 1 vCPU, 256 MiB | 2026-10-19T07:51:49Z
+  G| # kernel: Linux version 7.0.0-14-generic (buildd@lcy02-amd64-043) (x86_64-linux-gnu-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #14-Ubuntu SMP PREEMPT_DYNAMIC Mon Apr 13 11:09:53 UTC 2026
+  G| # cmdline: console=ttyS0 quiet panic=-1 vp.mode=bench
+  G| # clocksource: tsc
+  G| # finit_module ptp_vmclock: ok
+  G| [OK ] T0 /dev/vmclock0 mmap got=ok want=ok
+  G| # vmclock0: mode=600 magic=0x4b4c4356 size=4096 version=1 counter_id=0xff time_type=0 flags=0x0 clock_status=0 seq=2 marker=1 gen=0
+  G| [OK ] T0 magic got=0x4b4c4356 want=0x4b4c4356
+  G| # vmclock0 poll: n=1 revents=0x10 (POLLHUP=0x10: no notifications)
+  G| # vmclock0 read(): 112 bytes, marker=1
+  G| READY bench
+  G| C marker (mmap seqlock)        p50=    13.6 ns p99=    22.5 ns (201 x 100000)
+  G| C vdso CLOCK_MONOTONIC_RAW     p50=   199.4 ns p99=   338.0 ns (201 x 10000)
+  G| C vdso CLOCK_BOOTTIME          p50=   194.1 ns p99=   278.9 ns (201 x 10000)
+  G| C vdso CLOCK_MONOTONIC         p50=   194.6 ns p99=   316.7 ns (201 x 10000)
+  G| C syscall CLOCK_MONOTONIC_RAW  p50=  1102.8 ns p99=  3039.1 ns (201 x 1000)
+  G| C syscall CLOCK_BOOTTIME       p50=   942.9 ns p99=  1628.9 ns (201 x 1000)
+  G| C syscall getppid              p50=   713.6 ns p99=  1446.3 ns (201 x 1000)
+  G| C pread /dev/vmclock0 (24 B)   p50=  1744.8 ns p99=  2520.9 ns (201 x 1000)
+  G| C ioctl RTC_RD_TIME            p50=  5471.0 ns p99= 51118.0 ns (201 x 1)
+  G| DONE bench
+  G| [    6.338578] reboot: Power down
+# host (native, anonymous page standing in for the VMClock page):
+# clocksource: tsc
+READY bench
+C marker (mmap seqlock)        p50=     0.7 ns p99=     1.8 ns (201 x 100000)
+C vdso CLOCK_MONOTONIC_RAW     p50=    28.0 ns p99=    40.6 ns (201 x 10000)
+C vdso CLOCK_BOOTTIME          p50=    26.9 ns p99=    44.6 ns (201 x 10000)
+C vdso CLOCK_MONOTONIC         p50=    27.7 ns p99=    40.5 ns (201 x 10000)
+C syscall CLOCK_MONOTONIC_RAW  p50=   156.6 ns p99=   198.9 ns (201 x 1000)
+C syscall CLOCK_BOOTTIME       p50=   158.8 ns p99=   205.4 ns (201 x 1000)
+C syscall getppid              p50=   111.7 ns p99=   152.0 ns (201 x 1000)
+DONE bench
+[OK ] T5 host marker read p50 got=0.7ns want=<50ns
+[OK ] T5 host marker read below one clock read got=0.7ns vs 28.0ns want=marker<clock
+[OK ] T5 guest (TCG) marker read below one clock read got=13.6ns vs 199.4ns want=marker<clock
+[OK ] T5 guest read() of the device costs more than the mmap got=1744.8ns vs 13.6ns want=read>mmap

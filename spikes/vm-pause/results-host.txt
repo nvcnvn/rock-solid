@@ -1,0 +1,9 @@
+# Linux 6.18.44-fc-v139 #1 SMP PREEMPT_DYNAMIC @0 clocksource=tsc 2026-10-19T07:51:49Z
+ACPI device HIDs: ACPI0013 AMZNC10C FCVMGID LNXSYBUS LNXSYSTM PNP0303 PNP0501 PNP0A08 
+/sys/bus/acpi/devices/AMZNC10C:00: path=\_SB_.VCLK status=15 driver=none
+dev: ls: cannot access '/dev/vmclock*': No such file or directory
+dev: ls: cannot access '/dev/ptp*': No such file or directory
+config: # CONFIG_DEVMEM is not set
+config: # CONFIG_PTP_1588_CLOCK_KVM is not set
+config: # CONFIG_PTP_1588_CLOCK_VMCLOCK is not set
+config: CONFIG_VMGENID=y
