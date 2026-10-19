@@ -162,7 +162,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Fencing.** Making sure a client that lost its rights can no longer act on them, even if it does not know yet: a paused or partitioned client may wake up and keep writing. rock-solid publishes an expired session as **fenced** in its **session table**, the versioned list of live sessions that every node caches, every storage node applies the table and rejects the session's writes, and only once all have acknowledged are its locks given to someone else. Timeouts alone cannot do this, because the client's own clock and scheduling cannot be trusted. See [Sessions and fencing](design.md#sessions-and-fencing).
 
-**Monotonic clock, clock skew, clock drift.** A monotonic clock only moves forward, unlike wall-clock time, which can jump. Skew is the difference between two clocks' readings; drift is the difference in their rates.
+**Monotonic clock, clock skew, clock drift, slewing.** A monotonic clock only moves forward, unlike wall-clock time, which can jump. Skew is the difference between two clocks' readings; drift is the difference in their rates. A time daemon such as chrony corrects a clock's reading by **slewing** it: running it faster or slower for a while instead of jumping it, by up to 22.6% on Linux. Linux's `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` follow slews; `CLOCK_MONOTONIC_RAW` does not, so it drifts only as far as the machine's oscillator and its calibration at boot do. rock-solid counts every lease on both, each side taking the one that is safe for it. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
 ## Consensus and metadata
 

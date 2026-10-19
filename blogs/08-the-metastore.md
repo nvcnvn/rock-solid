@@ -517,13 +517,16 @@ sequenceDiagram
 - The leader's lease ends at the **quorum-th latest expiry** among the voters that fortified it,
   itself included. With three voters and one follower fortified, the lease runs to that
   follower's expiry: leader plus follower make two of three.
-- Each expiry is counted from when the leader's node asked for the grant, on its own clock, so
-  leases need bounded clock drift, not synchronized clocks.
+- Each expiry is counted from when the leader's node asked for the grant, as every node-pair
+  lease is: on two clocks, `CLOCK_BOOTTIME` and `CLOCK_MONOTONIC_RAW`, ending at whichever
+  runs faster, while the grantor waits for the slower. A time daemon's slew then cannot stretch
+  a lease, and the clocks need not be synchronized
+  ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
 - Until a new leader is fortified and has committed an entry of its own term, it answers reads
   through etcd-raft's **ReadIndex** round (a majority round trip that confirms leadership). A
   planned transfer ends the old leader's lease the moment it sends `MsgTimeoutNow`.
 
-**Failure.** When a grant lapses on the grantor's clock, every fortification under it ends, and
+**Failure.** When a grant lapses on the grantor's clocks, every fortification under it ends, and
 the groups led from that node wake up and elect. The timeline for a crashed leader node:
 
 ```text
@@ -662,7 +665,9 @@ recommended writing an own Raft shard, and the raft rounds spike started from v3
   directory is bounded by one shard.
 - **Limits of the layout:** 2^40 IDs per slot (about 3.5 years at 10,000 creates per second),
   64-bit `st_ino` that can overflow 32-bit programs, one extra key per create on SMB volumes.
-- **Leases need bounded clock drift** and `CLOCK_BOOTTIME`, which keeps counting through a suspend.
+- **Leases need bounded oscillator drift**, so each is counted on both `CLOCK_BOOTTIME` and
+  `CLOCK_MONOTONIC_RAW`, and a holder gives up its leases when its machine resumes from suspend.
+  A paused VM, which stops every clock in the guest, is not covered.
 - **A fork to maintain**, an older library version, and an in-house lease around `RawNode`.
 - **Metadata lives in RAM:** about 40 million distinct files per node at 16 GiB.
 

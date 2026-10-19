@@ -355,7 +355,10 @@ Things to notice:
 - **Time comes in, waiting goes out.** A machine reads time only from `ctx.Now` and never
   blocks. It emits `ActDiskWrite` with an `IOID` it chose, and the matching `EvDiskDone`
   resumes it; `ActSetTimer` works the same way for time. Timers have no cancel, so the machine
-  checks its own deadline against `ctx.Now` when a `Timer` event arrives.
+  checks its own deadline against `ctx.Now` when a `Timer` event arrives. Leases will need a
+  second clock: the plan adds `ctx.Raw`, read from `CLOCK_MONOTONIC_RAW`, which no time daemon
+  slews, and a `Resumed` event after a suspend
+  ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
 - **Errors are data.** A corrupt message or a failed disk is an event to handle; a panic is
   only for a broken invariant of the machine's own state.
 - **Randomness is owned.** [`internal/core/rng.go`](../internal/core/rng.go) wraps
@@ -408,7 +411,7 @@ flowchart LR
     subgraph DEF["Default drivers"]
         UR["io_uring"]
         TCP["kernel TCP"]
-        CB["CLOCK_BOOTTIME"]
+        CB["CLOCK_BOOTTIME and<br/>CLOCK_MONOTONIC_RAW"]
     end
     subgraph FAST["Opt-in fast drivers"]
         SP["SPDK"]
@@ -440,7 +443,7 @@ FUSE, ublk or S3 requests into events and actions.
 | --- | --- | --- | --- |
 | Disk | `io_uring` on a file or raw device | SPDK on a dedicated NVMe drive | Simulated disk with fault model |
 | Network | Kernel TCP | RDMA (on a capable card, or Soft-RoCE, a software RDMA for testing); DPDK as an experiment | Simulated network |
-| Clock and timers | `CLOCK_BOOTTIME`, which counts through suspend (1 tick = 1 µs) | Same | Simulated time |
+| Clock and timers | `CLOCK_BOOTTIME`, which counts through suspend, and `CLOCK_MONOTONIC_RAW`, which no time daemon slews, read together each pass for leases (1 tick = 1 µs); timers on `CLOCK_BOOTTIME` | Same | Simulated time: per-node oscillator drift, time-daemon slews and suspends |
 
 Chunk data, Raft logs and indexes all live in the one log per disk, so the disk driver is the
 only code that touches storage, and swapping it swaps everything.

@@ -513,12 +513,14 @@ to the session.
 - **The control plane keeps the lease.** The session is a key in the control-plane group, and
   its lease is renewed by the heartbeat each node already sends the control-plane leader once a
   second; renewals change only the leader's memory. Only that leader declares a session expired,
-  on its own clock, so the inode owners a node talks to never disagree about it, and an owner
+  on its own clocks, so the inode owners a node talks to never disagree about it, and an owner
   that fails over leaves sessions alone. A new leader gives every live session a full lease
   before it expires any ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#who-decides-that-a-session-has-expired)).
 - **The client limits itself.** It counts its lease from when it sent the last answered
-  heartbeat, which is before the leader counted it, and stops writing `lease_drift` early. No
-  timeout it gives the kernel reaches past that instant. So when the lease ends, a paused
+  heartbeat, which is before the leader counted it, and stops writing `lease_drift` early on
+  whichever of its two clocks runs faster, or at once when its machine resumes from suspend
+  ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
+  No timeout it gives the kernel reaches past that instant. So when the lease ends, a paused
   client's next `read()` asks the daemon for attributes, and the daemon, seeing its lease has
   lapsed, drops the file's pages first. Mapped pages are the exception: they stay stale until the
   daemon runs again and invalidates every cached inode. A client that merely lost touch with the

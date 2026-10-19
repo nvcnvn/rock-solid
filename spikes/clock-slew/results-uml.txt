@@ -1,0 +1,169 @@
+# host Linux 6.18.44-fc-v139 UML Linux version 6.18.0 2026-10-19T03:29:55Z
+host before: USER_HZ=100 nominal_tick=10000
+host before: adjtimex state=5 status=0x0040 UNSYNC tick=10000 freq=0 (0.000 ppm) offset=0 us constant=2 maxerror=16000000 esterror=16000000 tolerance=32768000 (500 ppm) precision=1 tick+freq rate=0.000 ppm adjtime_left=0 us
+Failed to initialize ubd device 0 :Couldn't determine size of device's file
+slew-guest on Linux 6.18.0 x86_64, USER_HZ=100
+G0 initial state=0 status=0x0040 UNSYNC tick=10000 freq=0 (0.000 ppm) offset=0 us constant=2 maxerror=16000000 esterror=16000000 tolerance=32768000 (500 ppm) precision=1 tick+freq rate=0.000 ppm adjtime_left=0 us
+  G0 w0 raw_ms=1000.091 mono=-0.5 boot=+0.0 real=+1.0 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G0 w1 raw_ms=1000.108 mono=-0.4 boot=+0.9 real=+0.1 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G0 w2 raw_ms=1001.042 mono=-8.2 boot=+0.5 real=+8.7 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G0 all raw_ms=3001.242 mono=-3.0 boot=+0.5 ppm
+[OK ] G0 no adjustment got=-0.5 want=+0.0 tol=50.0 ppm mono
+[OK ] G0 boot follows mono got=+0.5 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G0 no adjustment got=-0.4 want=+0.0 tol=50.0 ppm mono
+[OK ] G0 boot follows mono got=+1.3 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G0 no adjustment got=-8.2 want=+0.0 tol=50.0 ppm mono
+[OK ] G0 boot follows mono got=+8.7 want=+0.0 tol=20.0 ppm boot-mono
+  G1 w0 raw_ms=1111.923 mono=-99999.9 boot=-99999.0 real=-100001.3 ppm (tick+freq -100000.0, pll offset 0, adjtime left 0 us)
+  G1 w1 raw_ms=1112.302 mono=-100009.0 boot=-99995.1 real=-99986.2 ppm (tick+freq -100000.0, pll offset 0, adjtime left 0 us)
+  G1 w2 raw_ms=1109.243 mono=-99986.5 boot=-100000.2 real=-100008.9 ppm (tick+freq -100000.0, pll offset 0, adjtime left 0 us)
+  G1 all raw_ms=3333.468 mono=-99998.4 boot=-99998.1 ppm
+[OK ] G1 tick=9000 (-10%) got=-99999.9 want=-100000.0 tol=1000.0 ppm mono
+[OK ] G1 boot follows mono got=+0.8 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G1 tick=9000 (-10%) got=-100009.0 want=-100000.0 tol=1000.0 ppm mono
+[OK ] G1 boot follows mono got=+13.9 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G1 tick=9000 (-10%) got=-99986.5 want=-100000.0 tol=1000.0 ppm mono
+[OK ] G1 boot follows mono got=-13.7 want=+0.0 tol=20.0 ppm boot-mono
+  G2 w0 raw_ms=919.637 mono=+99991.7 boot=+99995.7 real=+99998.1 ppm (tick+freq +100000.0, pll offset 0, adjtime left 0 us)
+  G2 w1 raw_ms=838.397 mono=+100016.5 boot=+99999.7 real=+99982.9 ppm (tick+freq +100000.0, pll offset 0, adjtime left 0 us)
+  G2 w2 raw_ms=985.769 mono=+99999.3 boot=+99999.0 real=+99999.0 ppm (tick+freq +100000.0, pll offset 0, adjtime left 0 us)
+  G2 all raw_ms=2743.803 mono=+100002.0 boot=+99998.1 ppm
+[OK ] G2 tick=11000 (+10%) got=+99991.7 want=+100000.0 tol=1000.0 ppm mono
+[OK ] G2 boot follows mono got=+4.0 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G2 tick=11000 (+10%) got=+100016.5 want=+100000.0 tol=1000.0 ppm mono
+[OK ] G2 boot follows mono got=-16.8 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G2 tick=11000 (+10%) got=+99999.3 want=+100000.0 tol=1000.0 ppm mono
+[OK ] G2 boot follows mono got=-0.3 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G3 tick=8999 rejected (EINVAL=22) got=+22.0 want=+22.0 tol=0.0 errno
+[OK ] G3 tick=11001 rejected (EINVAL=22) got=+22.0 want=+22.0 tol=0.0 errno
+[OK ] G4 freq=+1000 ppm clamped to MAXFREQ got=+500.0 want=+500.0 tol=0.0 ppm read back
+  G4 w0 raw_ms=999.733 mono=+489.1 boot=+499.1 real=+509.6 ppm (tick+freq +500.0, pll offset 0, adjtime left 0 us)
+  G4 w1 raw_ms=997.752 mono=+497.8 boot=+494.7 real=+497.6 ppm (tick+freq +500.0, pll offset 0, adjtime left 0 us)
+  G4 w2 raw_ms=1000.032 mono=+505.4 boot=+506.9 real=+499.2 ppm (tick+freq +500.0, pll offset 0, adjtime left 0 us)
+  G4 all raw_ms=2997.517 mono=+497.4 boot=+500.3 ppm
+[OK ] G4 freq clamped got=+489.1 want=+500.0 tol=50.0 ppm mono
+[OK ] G4 boot follows mono got=+10.0 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G4 freq clamped got=+497.8 want=+500.0 tol=50.0 ppm mono
+[OK ] G4 boot follows mono got=-3.1 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G4 freq clamped got=+505.4 want=+500.0 tol=50.0 ppm mono
+[OK ] G4 boot follows mono got=+1.5 want=+0.0 tol=20.0 ppm boot-mono
+  G5 w0 raw_ms=1111.889 mono=-100491.2 boot=-100498.0 real=-100506.9 ppm (tick+freq -100500.0, pll offset 0, adjtime left 0 us)
+  G5 w1 raw_ms=1112.102 mono=-100498.5 boot=-100498.9 real=-100498.7 ppm (tick+freq -100500.0, pll offset 0, adjtime left 0 us)
+  G5 w2 raw_ms=1111.764 mono=-100502.8 boot=-100503.0 real=-100495.5 ppm (tick+freq -100500.0, pll offset 0, adjtime left 0 us)
+  G5 all raw_ms=3335.755 mono=-100497.5 boot=-100500.0 ppm
+[OK ] G5 tick=9000 freq=-500 got=-100491.2 want=-100500.0 tol=1005.0 ppm mono
+[OK ] G5 boot follows mono got=-6.8 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G5 tick=9000 freq=-500 got=-100498.5 want=-100500.0 tol=1005.0 ppm mono
+[OK ] G5 boot follows mono got=-0.4 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G5 tick=9000 freq=-500 got=-100502.8 want=-100500.0 tol=1005.0 ppm mono
+[OK ] G5 boot follows mono got=-0.2 want=+0.0 tol=20.0 ppm boot-mono
+  G6 s0 raw_ms=1000.203 mono=-494.9 boot=-498.7 real=-503.8 ppm (tick+freq +0.0, pll offset 0, adjtime left -499000 us)
+  G6 s1 raw_ms=1000.717 mono=-500.0 boot=-501.5 real=-501.8 ppm (tick+freq +0.0, pll offset 0, adjtime left -498500 us)
+  G6 s2 raw_ms=1001.050 mono=-499.9 boot=-499.6 real=-499.6 ppm (tick+freq +0.0, pll offset 0, adjtime left -498000 us)
+[OK ] G6 adjtime(-0.5 s) got=-494.9 want=-500.0 tol=50.0 ppm mono
+[OK ] G6 boot follows mono got=-3.8 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G6 adjtime(-0.5 s) got=-500.0 want=-500.0 tol=50.0 ppm mono
+[OK ] G6 boot follows mono got=-1.5 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G6 adjtime(-0.5 s) got=-499.9 want=-500.0 tol=50.0 ppm mono
+[OK ] G6 boot follows mono got=+0.3 want=+0.0 tol=20.0 ppm boot-mono
+  G6 s0 raw_ms=999.667 mono=+500.5 boot=+503.3 real=+500.8 ppm (tick+freq +0.0, pll offset 0, adjtime left 499000 us)
+  G6 s1 raw_ms=998.237 mono=+493.6 boot=+502.6 real=+509.2 ppm (tick+freq +0.0, pll offset 0, adjtime left 498500 us)
+  G6 s2 raw_ms=999.793 mono=+505.6 boot=+497.7 real=+491.0 ppm (tick+freq +0.0, pll offset 0, adjtime left 498000 us)
+[OK ] G6 adjtime(+0.5 s) got=+500.5 want=+500.0 tol=50.0 ppm mono
+[OK ] G6 boot follows mono got=+2.8 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G6 adjtime(+0.5 s) got=+493.6 want=+500.0 tol=50.0 ppm mono
+[OK ] G6 boot follows mono got=+9.0 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G6 adjtime(+0.5 s) got=+505.6 want=+500.0 tol=50.0 ppm mono
+[OK ] G6 boot follows mono got=-7.9 want=+0.0 tol=20.0 ppm boot-mono
+  G7 s0 raw_ms=898.696 mono=+124909.0 boot=+124904.1 real=+124900.2 ppm (tick+freq +0.0, pll offset 281250000, adjtime left 0 us)
+  G7 s1 raw_ms=904.568 mono=+93686.3 boot=+93689.5 real=+93691.8 ppm (tick+freq +0.0, pll offset 210937500, adjtime left 0 us)
+  G7 s2 raw_ms=943.590 mono=+70290.4 boot=+70285.7 real=+70282.0 ppm (tick+freq +0.0, pll offset 158203125, adjtime left 0 us)
+  G7 s3 raw_ms=950.365 mono=+52690.8 boot=+52699.0 real=+52706.8 ppm (tick+freq +0.0, pll offset 118652343, adjtime left 0 us)
+[OK ] G7 PLL second got=+124909.0 want=+125000.0 tol=1250.0 ppm mono
+[OK ] G7 PLL second got=+93686.3 want=+93750.0 tol=937.5 ppm mono
+[OK ] G7 PLL second got=+70290.4 want=+70312.5 tol=703.1 ppm mono
+[OK ] G7 PLL second got=+52690.8 want=+52734.4 tol=527.3 ppm mono
+  G7 s0 raw_ms=1142.124 mono=-124969.1 boot=-124961.1 real=-124951.5 ppm (tick+freq +0.0, pll offset -281250000, adjtime left 0 us)
+  G7 s1 raw_ms=1102.975 mono=-93737.2 boot=-93734.4 real=-93735.5 ppm (tick+freq +0.0, pll offset -210937500, adjtime left 0 us)
+  G7 s2 raw_ms=1076.736 mono=-70268.9 boot=-70278.0 real=-70284.2 ppm (tick+freq +0.0, pll offset -158203125, adjtime left 0 us)
+  G7 s3 raw_ms=1065.926 mono=-52723.1 boot=-52722.7 real=-52723.3 ppm (tick+freq +0.0, pll offset -118652343, adjtime left 0 us)
+[OK ] G7 PLL second got=-124969.1 want=-125000.0 tol=1250.0 ppm mono
+[OK ] G7 PLL second got=-93737.2 want=-93750.0 tol=937.5 ppm mono
+[OK ] G7 PLL second got=-70268.9 want=-70312.5 tol=703.1 ppm mono
+[OK ] G7 PLL second got=-52723.1 want=-52734.4 tol=527.3 ppm mono
+  G8 s0 raw_ms=1053.606 mono=-49869.8 boot=-49864.7 real=-49858.7 ppm (tick+freq +0.0, pll offset -305484375, adjtime left 0 us)
+  G8 s1 raw_ms=1033.088 mono=-43634.7 boot=-43638.3 real=-43643.5 ppm (tick+freq +0.0, pll offset -267298828, adjtime left 0 us)
+  G8 s2 raw_ms=1041.305 mono=-38178.5 boot=-38179.5 real=-38179.6 ppm (tick+freq +0.0, pll offset -233886474, adjtime left 0 us)
+  G8 s3 raw_ms=1034.829 mono=-33412.0 boot=-33406.6 real=-33400.2 ppm (tick+freq +0.0, pll offset -204650665, adjtime left 0 us)
+[OK ] G8 PLL second got=-49869.8 want=-49875.0 tol=498.8 ppm mono
+[OK ] G8 PLL second got=-43634.7 want=-43640.6 tol=436.4 ppm mono
+[OK ] G8 PLL second got=-38178.5 want=-38185.5 tol=381.9 ppm mono
+[OK ] G8 PLL second got=-33412.0 want=-33412.4 tol=334.1 ppm mono
+  G9 w0 raw_ms=1090.652 mono=-83339.9 boot=-83333.0 real=-83325.3 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G9 w1 raw_ms=1092.789 mono=-83339.9 boot=-83325.7 real=-83331.1 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G9 w2 raw_ms=1089.534 mono=-83321.8 boot=-83338.6 real=-83335.6 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G9 all raw_ms=3272.975 mono=-83333.9 boot=-83332.4 ppm
+[OK ] G9 chrony maxslewrate 83333 ppm, slow got=-83339.9 want=-83333.0 tol=833.3 ppm mono
+[OK ] G9 boot follows mono got=+6.9 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G9 chrony maxslewrate 83333 ppm, slow got=-83339.9 want=-83333.0 tol=833.3 ppm mono
+[OK ] G9 boot follows mono got=+14.2 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G9 chrony maxslewrate 83333 ppm, slow got=-83321.8 want=-83333.0 tol=833.3 ppm mono
+[OK ] G9 boot follows mono got=-16.8 want=+0.0 tol=20.0 ppm boot-mono
+  G9 w0 raw_ms=934.093 mono=+83334.0 boot=+83332.3 real=+83330.2 ppm (tick+freq +83333.3, pll offset 0, adjtime left 0 us)
+  G9 w1 raw_ms=922.280 mono=+83337.7 boot=+83332.6 real=+83328.1 ppm (tick+freq +83333.3, pll offset 0, adjtime left 0 us)
+  G9 w2 raw_ms=924.946 mono=+83324.8 boot=+83344.3 real=+83355.4 ppm (tick+freq +83333.3, pll offset 0, adjtime left 0 us)
+  G9 all raw_ms=2781.318 mono=+83332.2 boot=+83336.4 ppm
+[OK ] G9 chrony maxslewrate 83333 ppm, fast got=+83334.0 want=+83333.0 tol=833.3 ppm mono
+[OK ] G9 boot follows mono got=-1.8 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G9 chrony maxslewrate 83333 ppm, fast got=+83337.7 want=+83333.0 tol=833.3 ppm mono
+[OK ] G9 boot follows mono got=-5.1 want=+0.0 tol=20.0 ppm boot-mono
+[OK ] G9 chrony maxslewrate 83333 ppm, fast got=+83324.8 want=+83333.0 tol=833.3 ppm mono
+[OK ] G9 boot follows mono got=+19.5 want=+0.0 tol=20.0 ppm boot-mono
+  G10 s0 raw_ms=1293.602 mono=-225967.8 boot=-225967.0 real=-225966.1 ppm (tick+freq -100500.0, pll offset -281250000, adjtime left -499000 us)
+  G10 s1 raw_ms=1240.652 mono=-194730.2 boot=-194731.3 real=-194732.4 ppm (tick+freq -100500.0, pll offset -210937500, adjtime left -498500 us)
+[OK ] G10 every adjustment at once, slow, first second got=-225967.8 want=-226000.0 tol=4520.0 ppm mono
+  G10 s0 raw_ms=825.032 mono=+225947.3 boot=+225939.4 real=+225926.3 ppm (tick+freq +100500.0, pll offset 281250000, adjtime left 499000 us)
+  G10 s1 raw_ms=835.139 mono=+194732.0 boot=+194737.4 real=+194746.8 ppm (tick+freq +100500.0, pll offset 210937500, adjtime left 498500 us)
+[OK ] G10 every adjustment at once, fast, first second got=+225947.3 want=+226000.0 tol=4520.0 ppm mono
+[OK ] G11 timerfd CLOCK_BOOTTIME 1 s at tick=9000 got=+1111489.0 want=+1111111.1 tol=2000.0 us raw
+[OK ] G11 timerfd CLOCK_MONOTONIC 1 s at tick=9000 got=+1111439.6 want=+1111111.1 tol=2000.0 us raw
+[OK ] G11 timerfd_create(CLOCK_MONOTONIC_RAW) rejected (EINVAL=22) got=+22.0 want=+22.0 tol=0.0 errno
+[OK ] G12 steps of +1 s and +2 s to CLOCK_REALTIME leave mono's rate got=+5.4 want=+0.0 tol=50.0 ppm mono
+[OK ] G12 CLOCK_REALTIME jumped got=+3.0 want=+3.0 tol=0.0 s
+  G13 w0 raw_ms=103.290 mono=+65.7 boot=+16.1 real=-45.9 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G13 w1 raw_ms=101.983 mono=+5.0 boot=+5.0 real=+0.0 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G13 w2 raw_ms=101.940 mono=-7.5 boot=-2.5 real=+7.5 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G13 w3 raw_ms=103.482 mono=-37.1 boot=+4.9 real=+42.1 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G13 w4 raw_ms=101.568 mono=-27.7 boot=-22.7 real=+0.0 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G13 w5 raw_ms=102.765 mono=+63.5 boot=+21.2 real=-43.6 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G13 w6 raw_ms=105.689 mono=-94.5 boot=-9.7 real=+79.9 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G13 w7 raw_ms=102.676 mono=+41.1 boot=-6.2 real=-36.2 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G13 w8 raw_ms=102.325 mono=-75.1 boot=-22.5 real=+22.5 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G13 w9 raw_ms=103.288 mono=+80.6 boot=+38.4 real=-26.0 ppm (tick+freq +0.0, pll offset 0, adjtime left 0 us)
+  G13 all raw_ms=1029.008 mono=+1.2 boot=+2.2 ppm
+[OK ] G13 100 ms BOOTTIME/RAW windows, no adjustment: worst got=+38.4 want=+0.0 tol=100.0 ppm
+  G13 w0 raw_ms=111.896 mono=-83362.7 boot=-83333.3 real=-83287.2 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G13 w1 raw_ms=111.898 mono=-83291.4 boot=-83322.8 real=-83369.0 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G13 w2 raw_ms=110.691 mono=-83339.7 boot=-83341.8 real=-83339.7 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G13 w3 raw_ms=112.448 mono=-83287.4 boot=-83325.0 real=-83368.8 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G13 w4 raw_ms=111.422 mono=-83363.9 boot=-83344.9 real=-83315.4 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G13 w5 raw_ms=111.615 mono=-83320.7 boot=-83320.7 real=-83310.2 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G13 w6 raw_ms=111.155 mono=-83322.8 boot=-83350.2 real=-83388.2 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G13 w7 raw_ms=112.364 mono=-83371.9 boot=-83309.3 real=-83259.2 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G13 w8 raw_ms=110.519 mono=-83269.6 boot=-83329.1 real=-83380.0 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G13 w9 raw_ms=112.100 mono=-83402.4 boot=-83356.3 real=-83276.8 ppm (tick+freq -83333.3, pll offset 0, adjtime left 0 us)
+  G13 all raw_ms=1116.107 mono=-83333.3 boot=-83333.3 ppm
+[OK ] G13 100 ms BOOTTIME/RAW window during a chrony slew got=-83333.3 want=-83333.0 tol=840.0 ppm
+[OK ] G13 100 ms BOOTTIME/RAW window during a chrony slew got=-83322.8 want=-83333.0 tol=840.0 ppm
+[OK ] G13 100 ms BOOTTIME/RAW window during a chrony slew got=-83341.8 want=-83333.0 tol=840.0 ppm
+[OK ] G13 100 ms BOOTTIME/RAW window during a chrony slew got=-83325.0 want=-83333.0 tol=840.0 ppm
+[OK ] G13 100 ms BOOTTIME/RAW window during a chrony slew got=-83344.9 want=-83333.0 tol=840.0 ppm
+[OK ] G13 100 ms BOOTTIME/RAW window during a chrony slew got=-83320.7 want=-83333.0 tol=840.0 ppm
+[OK ] G13 100 ms BOOTTIME/RAW window during a chrony slew got=-83350.2 want=-83333.0 tol=840.0 ppm
+[OK ] G13 100 ms BOOTTIME/RAW window during a chrony slew got=-83309.3 want=-83333.0 tol=840.0 ppm
+[OK ] G13 100 ms BOOTTIME/RAW window during a chrony slew got=-83329.1 want=-83333.0 tol=840.0 ppm
+[OK ] G13 100 ms BOOTTIME/RAW window during a chrony slew got=-83356.3 want=-83333.0 tol=840.0 ppm
+slew-guest done, 0 failures
+reboot: Power down
+host after: USER_HZ=100 nominal_tick=10000
+host after: adjtimex state=5 status=0x0040 UNSYNC tick=10000 freq=0 (0.000 ppm) offset=0 us constant=2 maxerror=16000000 esterror=16000000 tolerance=32768000 (500 ppm) precision=1 tick+freq rate=0.000 ppm adjtime_left=0 us

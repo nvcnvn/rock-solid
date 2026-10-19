@@ -1,0 +1,16 @@
+# Linux 6.18.44-fc-v139 go version go1.27.0 linux/amd64 2026-10-19T03:36:40Z
+goos: linux
+goarch: amd64
+pkg: clockslew/gocost
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkTimeNow-4                  	56493320	        48.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTimeNow-4                  	57747435	        48.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTimeNow-4                  	52066290	        46.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRawSyscallMonotonicRaw-4   	13008271	       160.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRawSyscallMonotonicRaw-4   	17691273	       146.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRawSyscallMonotonicRaw-4   	16958060	       148.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRawSyscallBoottime-4       	15808915	       146.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRawSyscallBoottime-4       	16952160	       143.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRawSyscallBoottime-4       	17151216	       150.7 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	clockslew/gocost	22.549s

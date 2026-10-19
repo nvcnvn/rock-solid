@@ -6,7 +6,8 @@ fix, "if the primary stops answering, pick another one", is how storage systems 
 while two nodes both believe they are in charge, and a paused client can wake up and write over
 someone else's data. rock-solid closes those windows with a small set of rules: numbered
 membership epochs, a new primary that *peers* before its first write, read leases counted on
-clocks that keep running through suspend, and client sessions that are *fenced* before their
+two clocks so that neither a time daemon nor a suspend can stretch them, and client sessions
+that are *fenced* before their
 locks move. This post walks through each race, the rule that closes it, and what the rules
 cost. None of it runs yet: the protocols are to be modeled in phase 2 of the roadmap and built
 from phase 3 on.
@@ -31,8 +32,9 @@ from phase 3 on.
   serves reads only under a *read lease* from its PG's other live members. A *support epoch*
   numbers one unbroken run of a lease. See
   [coordination and failure](../docs/glossary.md#coordination-and-failure).
-- **Monotonic clock, drift.** A monotonic clock only moves forward, unlike wall-clock time;
-  *drift* is how differently fast two clocks run.
+- **Monotonic clock, drift, slewing.** A monotonic clock only moves forward, unlike wall-clock
+  time; *drift* is how differently fast two clocks run. A time daemon *slews* a clock when it
+  runs it faster or slower for a while to correct its reading.
 - **Fail-slow.** A disk that keeps working but becomes far slower instead of failing.
 - **Session, fencing.** A client daemon's registration, kept alive by a lease; its locks belong
   to it. *Fencing* makes sure a client whose session expired can no longer write, even if it
@@ -103,7 +105,7 @@ sequenceDiagram
 Two more races get their own diagrams below: a client that pauses while holding a lock and
 writes after the lock has moved on ([Fencing](#6-fencing-client-sessions)), and a primary that
 sleeps like a laptop with its lid closed and wakes up believing no time has passed
-([Clocks that keep running](#clocks-that-keep-running-through-suspend)).
+([A holder that slept](#a-holder-that-slept-gives-up-its-leases)).
 
 The common thread: **failure detection is a guess.** A slow node looks exactly like a dead one,
 so every rule below has to stay safe when the guess is wrong.
@@ -131,7 +133,7 @@ reason. Raft is covered in [08-the-metastore.md](08-the-metastore.md).
 | Fresh reads | Ask a majority on every read (Raft's ReadIndex) | No clock assumptions | A round trip per read |
 | Fresh reads | Tick-counted lease (etcd-raft) | No round trip | Stops when idle; overlap up to one election timeout |
 | Fresh reads | Central liveness record (CockroachDB epoch leases) | One renewal per node | Its outage expires every lease at once |
-| Fresh reads | **Node-pair leases, support epochs (CockroachDB leader leases)** | No central record, no synced clocks, cost independent of PG count | Bounded clock drift needed; a restarted node sits out one lease |
+| Fresh reads | **Node-pair leases, support epochs (CockroachDB leader leases)** | No central record, no synced clocks, cost independent of PG count | Bounded oscillator drift needed, so each lease is counted on two clocks; a restarted node sits out one lease |
 | Versions | Plain counter | Simple | Two primaries reuse a number |
 | Versions | **Epoch + counter (Ceph `eversion_t`)** | Version alone tells writes apart | 24 bits of every version spent on the epoch |
 | Stale clients | Client-side timeout only | Simple | A paused client writes late |
@@ -331,9 +333,9 @@ new epoch itself, so planned moves never wait for a lease.
 
 `primary_lease` defaults to 4 s, deliberately shorter than failure detection (below).
 
-#### Counting on two clocks that never agree
+#### Counting on clocks that never agree
 
-The holder and the grantor each count the lease on their own monotonic clock. They never compare
+The holder and the grantor each count the lease on their own monotonic clocks. They never compare
 readings, so the clocks need not be synchronized. What makes this safe is *when* each side starts
 counting:
 
@@ -362,16 +364,57 @@ B (grantor)      *================================================*--> B may now
 *A's interval ends before B's even if A's clock runs a little slow and B's a little fast:
 message delay and the margin both push A's end earlier.*
 
-The margin only has to cover a difference in clock *rates*. The Linux kernel slews a clock by at
-most 500 parts per million (`MAXFREQ` in `include/linux/timex.h`). Even with the two clocks slewed
-in opposite directions, 1,000 ppm or 4 ms over 4 s, the 40 ms margin covers that ten times over,
-leaving room for the oscillators' own error.
+The margin only has to cover a difference in clock *rates*. How large that difference can get
+depends on which clock each side counts on.
 
-#### Clocks that keep running through suspend
+#### Two clocks, because a time daemon can bend either one
+
+> **In plain words.** Each colleague times the slip on two watches. The office time-keeper may
+> quietly run the first a fifth fast or slow to put its time right; nobody touches the second,
+> but it may have left the factory a little off. The editor stops reading aloud as soon as
+> *either* of its watches says the slip is up, and a colleague helps a new editor only once
+> *both* of theirs say so. Whichever watch is wrong, it can only make the editor stop sooner or
+> the colleague wait longer.
+
+A time daemon (chrony, systemd-timesyncd, ntpd) keeps the wall clock right by *slewing*: running
+the clock faster or slower for a while instead of jumping it. On Linux, `CLOCK_MONOTONIC` and
+`CLOCK_BOOTTIME` follow every slew. The kernel's `MAXFREQ` (500 ppm) bounds only one of the knobs
+`adjtimex` offers: the tick can move ±10%, and the kernel's phase-locked loop and `adjtime()`
+slew an offset on top. The [clock slew spike](#evidence) applied each in a throwaway kernel:
+
+| What the daemon does | How far off `CLOCK_BOOTTIME` runs |
+| --- | --- |
+| ntpd at its defaults | about 0.1% at most |
+| systemd-timesyncd correcting a 0.4 s offset | 5% in the first second |
+| chrony correcting any offset after its first updates, default `maxslewrate` | 8.3%, for 12 s per second of offset |
+| everything the kernel accepts at once | 22.6% |
+
+A 1% margin covers none of the last three. With chrony slowing the holder's clock and speeding
+the grantor's, a 4 s lease outlives its grant by 0.63 s, and at the kernel's limits by 1.85 s:
+long enough for a new primary to accept a write while the old one still serves the value it
+replaced.
+
+`CLOCK_MONOTONIC_RAW` is the clock no daemon touches. It runs at the rate the kernel calibrated
+for the processor's time-stamp counter at boot, which the kernel never checks against a bound
+and only a daemon corrects, in `CLOCK_BOOTTIME`. So each lease is counted on both:
+
+- The **holder** ends it when *either* clock shows the lease minus `lease_drift` since it asked.
+- The **grantor** keeps it until *both* clocks show the whole lease since it granted.
+
+A slew or a bad calibration can then only end a holder's lease early or make a grantor wait
+longer, by at most 22.6% for a slew. What is left for the 40 ms margin is the two oscillators'
+own difference, typically within ±100 ppm each. The remaining gap, both of one node's clocks
+wrong the same way (a bad calibration with no daemon to correct it), is watched from outside:
+heartbeats carry the sender's `CLOCK_MONOTONIC_RAW`, each node estimates its peers' rates
+against its own, and a holder that finds a grantor more than half the margin faster widens its
+margin by the difference and reports the pair.
+
+#### A holder that slept gives up its leases
 
 Go's monotonic clock reads `CLOCK_MONOTONIC` (`runtime/sys_linux_amd64.s`), and on Linux that
-clock **stops while the machine is suspended**. A node that suspends while holding a lease, the
-way a laptop does when its lid closes, wakes up believing almost no time has passed:
+clock **stops while the machine is suspended**, as `CLOCK_MONOTONIC_RAW` does. A node that
+suspends while holding a lease, the way a laptop does when its lid closes, wakes up believing
+almost no time has passed:
 
 ```mermaid
 sequenceDiagram
@@ -393,18 +436,24 @@ sequenceDiagram
     X->>A: read chunk 7
     Note over A: CLOCK_MONOTONIC says 1 s since asking, lease looks valid
     A-->>X: cat, a stale read
-    Note over A: With CLOCK_BOOTTIME, A sees 31 s and refuses to serve
+    Note over A: Under the resume rule, A has already ended its leases and refuses
 ```
 
 *Every rule worked as designed on B and C; the hole is a clock on A that did not count the
 sleep.*
 
-So lease time comes from `CLOCK_BOOTTIME`, which keeps counting while a machine is suspended. The
-core itself never reads a clock: a state machine gets time only as `ctx.Now`, a `Tick` of one
-microsecond, from its driver ([`internal/core/event.go`](../internal/core/event.go)). That keeps
-the choice of clock in one place, and it lets the simulator inject drift between holder and
-grantor (a planned placement fault) and suspend a leader's node past its lease (a planned
-MetaStore fault).
+`CLOCK_BOOTTIME` does count the sleep, but the kernel may measure it in whole seconds read from
+the real-time clock chip, so no clock tells A exactly how long it slept. A holder that resumes
+from suspend therefore ends every lease it holds and asks again. A grantor needs no such rule: a
+clock that stopped only makes it wait longer.
+
+The core itself never reads a clock: a state machine gets time only from its driver, today as
+`ctx.Now`, a `Tick` of one microsecond ([`internal/core/event.go`](../internal/core/event.go)).
+The lease rules add `ctx.Raw` on `CLOCK_MONOTONIC_RAW` and a `Resumed` event, both for the
+"Clock and timers" checklist item to build; the loop reads the two clocks itself, about 140 ns
+each per pass, since Go reaches neither through its fast path. That keeps the choice of clocks
+in one place, and it lets the simulator slew one node's clock, drift another's oscillator and
+suspend a leader's node past its lease (planned placement and MetaStore faults).
 
 #### Support epochs: a lease that lapsed never comes back
 
@@ -493,7 +542,8 @@ Here is a primary crash, end to end:
  t = 0 s     node A crashes. It is primary for some PGs; B and C hold members of them.
              Writes to those PGs stop completing.
  t <= 4 s    every read-lease grant B and C made to A lapses on their own clocks
-             (each grant runs 4 s from its last renewal, which was at or before 0 s)
+             (each grant runs 4 s from its last renewal, which was at or before 0 s;
+             up to 5.2 s of real time while a time daemon slows a grantor's clock)
  t = 5 s     no heartbeat from A for node_down_after: the control plane marks A down
              and commits a new table, epoch 42, naming B primary of A's PGs
  t > 5 s     B peers (C adopts 42, B collects the newest versions) before it accepts
@@ -599,9 +649,9 @@ session's locks and opens but never decide that it expired, so they cannot disag
 owner that fails over leaves every session as it was.
 
 Both sides count the lease the way every lease in this post is counted
-([Counting on two clocks](#counting-on-two-clocks-that-never-agree)): the client from when it
-*sent* its last answered renewal, ending `lease_drift` early, the leader from when it
-*processed* that renewal, which is later. Two more rules keep the leader from expiring a session
+([Counting on clocks](#counting-on-clocks-that-never-agree)): the client from when it
+*sent* its last answered renewal, as a holder, the leader from when it *processed* that
+renewal, which is later, as a grantor. Two more rules keep the leader from expiring a session
 too early:
 
 - **Only a leader holding its leader lease answers renewals**, and a new leader gives every live
@@ -713,6 +763,27 @@ primary maps a chunk's writes in version order, and the spike's conclusions put 
 cost: while a write is pending, replay grows by what the disk logs meanwhile, at most
 `node_down_after` (5 s) of writes during a member failure.
 
+**The clock slew spike** ([appendix](../docs/design.md#appendix-clock-slew-spike),
+[`spikes/clock-slew/`](../spikes/clock-slew/)) asked how far a time daemon can bend the clocks
+leases count on. Changing the host's clock was ruled out, so it built Linux 6.18 as User-Mode
+Linux, a kernel that runs as an ordinary process, and applied every adjustment `adjtimex`
+accepts inside it, measuring `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` against
+`CLOCK_MONOTONIC_RAW`. The daemons' own calls come from the chrony 4.9 and systemd v258 sources;
+the daemons themselves were not run.
+
+| Test | Result |
+| --- | --- |
+| Tick 9000 and 11000 (±10%) | −100,000 and +100,000 ppm |
+| Frequency asked for +1,000 ppm | Clamped to 500 ppm: the only knob `MAXFREQ` bounds |
+| chrony's call for its default `maxslewrate` | **±83,333 ppm**, steady |
+| systemd-timesyncd's call for a 0.399 s offset | −49,870 ppm in the first second |
+| Every knob at its limit | **±226,000 ppm** in the first second |
+| Wall-clock steps of 1 and 2 s | No change in `CLOCK_MONOTONIC`'s rate |
+| Reading `CLOCK_MONOTONIC_RAW` from Go | 140 ns, the same as `CLOCK_BOOTTIME` |
+
+The first rows are why one clock is not enough; the last two are why counting on two is cheap
+and steps are harmless.
+
 **Leases for metadata.** The case against etcd-raft's own lease (read from its v3.6.0 source)
 and the idle cost that per-node-pair leases let Raft groups shed, 36% of a core for 3,000 idle
 raft-rs replicas down to 0.07% when quiesced, are the evidence for post
@@ -720,7 +791,8 @@ raft-rs replicas down to 0.07% when quiesced, are the evidence for post
 and [Metadata layer](../docs/design.md#metadata-layer-metastore).
 
 **What is not measured yet.** No spike exercises peering, read leases or fencing; the chunk
-epochs spike lists "peering itself" as not covered. The roadmap's answer is phase 2: TLA+ models
+epochs spike lists "peering itself" as not covered, and the clock slew spike measured the clocks
+leases count on, not the leases. The roadmap's answer is phase 2: TLA+ models
 (a formal specification language, checked by its model checker, TLC) of epoch changes, leases and
 sessions with fence acknowledgments, before the real protocols are written. Their properties are
 fixed: no PG serves reads from two primaries at once, no write tagged `e` completes after `e + 1`
@@ -733,8 +805,14 @@ during peering and a node restarted within a lease it granted.
 
 - **A crash pauses writes for up to 5 s** (`node_down_after`) on the crashed primary's PGs.
 - **A partitioned primary stops serving reads within 4 s**, even if its disk is fine.
-- **Correctness depends on bounded clock drift.** The 1% margin is ten times the worst combined
-  kernel slew of two clocks, but clocks whose rates differ by more break the lease argument.
+- **Correctness depends on oscillators, not on the time daemon.** Counting each lease on two
+  clocks means a daemon's slew, up to 22.6%, only shortens a holder's lease or lengthens a
+  grantor's wait, so a crash can wait up to 5.2 s for its lease instead of 4 s. The 1% margin
+  then covers two oscillators at ±100 ppm about fifty times over, and heartbeats watch for one
+  that is further off. It costs the loop one more clock read, about 140 ns, per pass.
+- **A paused virtual machine is not covered.** A hypervisor that pauses a VM, snapshots it or
+  live-migrates it can stop every clock in the guest, `CLOCK_MONOTONIC_RAW` included, so a holder
+  that resumes still trusts leases its grantors have let lapse.
 - **A restarted node sits out one `primary_lease`** (4 s) before it votes or peers.
 - **Every write waits for every live member**, so a slow disk hurts every PG it is in. Fail-slow
   detection is deliberately sluggish and never goes below `min_live`: those PGs stay slow.
@@ -767,6 +845,9 @@ during peering and a node restarted within a lease it granted.
   slows its own writes, and so its acknowledgments. Should members report admission rates to the
   primary, as CockroachDB's followers return tokens, so one cleaning disk does not stall a whole
   PG? It is the polite cousin of a fail-slow disk.
+- **Open question: leases across a VM pause.** QEMU and Firecracker restore a paused guest's
+  clock to where it stopped. Can a node notice, from the VMClock device or its peers' next
+  heartbeats, before it serves a read, or must storage nodes run on hosts that never pause them?
 - **Tech debts:** none of the entries in `docs/tech-debts.md` covers epochs, leases or fencing.
 
 ## Further reading
@@ -781,7 +862,7 @@ during peering and a node restarted within a lease it granted.
   [Alternatives considered](../docs/design.md#alternatives-considered),
   [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions).
 - Spikes: [chunk epochs](../spikes/chunk-epochs/), [multi-Raft](../spikes/multi-raft/),
-  [raft rounds](../spikes/raft-rounds/).
+  [raft rounds](../spikes/raft-rounds/), [clock slew](../spikes/clock-slew/).
 - Code: [`internal/core/peer.go`](../internal/core/peer.go) and
   [`peer_test.go`](../internal/core/peer_test.go), [`internal/core/event.go`](../internal/core/event.go)
   (`Tick` and `Context`).
