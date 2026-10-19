@@ -40,7 +40,8 @@ Each term is explained again where it first matters; the glossary has longer ent
 - **MetaStore.** rock-solid's replicated metadata database (names, sizes, locks), split into
   small Raft groups called shards ([08-the-metastore.md](08-the-metastore.md)).
 - **Session, lease, fencing.** A session is a daemon's registration with the cluster, kept alive
-  by a lease that expires unless renewed. Fencing stops a daemon whose session expired from
+  by a lease that the control plane renews on the node's heartbeat and alone declares expired.
+  Fencing stops a daemon whose session expired from
   writing, even if it does not know yet
   ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md)).
 - **CSI (Container Storage Interface).** How Kubernetes drives a storage system; its node plugin
@@ -440,7 +441,8 @@ The other way into WriteShared, from Exclusive, follows the same rule: the owner
 other member. If node A has written the file and node B opens it, the owner recalls A; A flushes
 its buffered writes and drops its pages. The owner answers B's open, uncached, only once A has
 acknowledged or been fenced, so B never reads storage before A's buffered writes reach it. If A
-is unreachable, B's open waits up to A's session lease plus the time to fence A's session.
+is unreachable, B's open waits up to A's session lease plus the time to fence A's session; if A
+still renews its session but does not answer, it waits up to `recall_timeout` instead.
 
 #### How it works: while WriteShared
 
@@ -473,7 +475,8 @@ reopened.
 > cache and its locks. So every right is tied to a lease that expires on its own, and when it
 > expires, the cluster makes sure the node's late writes are refused *before* anyone else gets its
 > rights. That last step is fencing; a timeout alone is not enough, because the paused node's own
-> sense of time cannot be trusted.
+> sense of time cannot be trusted. One referee, the control plane, keeps every node's lease, so
+> the inode owners never have to agree among themselves on whether a node is gone.
 
 The timeline below follows a node that pauses past its lease; read it left to right: the
 cluster acts only after the lease has expired, and the locks are released last.
@@ -481,47 +484,61 @@ cluster acts only after the lease has expired, and the locks are released last.
 ```text
 time ---------------------------------------------------------------------------------->
 
-node B daemon      renew ... renew ...  [ paused: frozen VM, partition, long stall ] wakes
+node B daemon      heartbeat, renewed ... [ paused: frozen VM, partition, long stall ] wakes
 B's lease (10 s)   [================================================)
-                                                          ^         ^ lease expiry
-                                                          |
-         B stops writing here, and no kernel cache timeout it handed out
-         reaches past it:  lease_expiry - clock_skew_margin
+                                                          ^         ^ the leader's count
+                                                          |           runs out
+         B stops writing here, lease_drift before its own count runs out, and no
+         kernel cache timeout it handed out reaches past it
 
-control plane                                                         adds B's session to
-                                                                      the fenced set
-every chunk primary                                                     applies it, acks,
+control-plane                                                         commits B's session
+leader                                                                as fenced: session
+                                                                      table version v
+every storage node                                                      applies v, acks,
                                                                         rejects B's writes
-inode owners                                                              once every primary
-                                                                          acked: release
-                                                                          B's locks, opens,
-                                                                          recalls
+control-plane leader                                                      every node acked:
+                                                                          commits v acknowledged
+inode owners                                                                release B's locks,
+                                                                            opens, recalls
 B wakes up         its writes are rejected -> it starts a new session and reopens its files
                    -> applications get errors, never silently stale data
 ```
 
 #### How it works
 
-Each client daemon holds a session with a lease (10 s by default, `session_lease`), renewed with
-the inode owners it talks to. Its locks, open registrations and cache rights all belong to the
-session.
+Each client daemon holds one session, for its FUSE mounts and block devices alike, with a lease
+of 10 s by default (`session_lease`). Its locks, open registrations and cache rights all belong
+to the session.
 
-- **The client limits itself.** It stops writing at `lease_expiry - clock_skew_margin`, and no
+- **The control plane keeps the lease.** The session is a key in the control-plane group, and
+  its lease is renewed by the heartbeat each node already sends the control-plane leader once a
+  second; renewals change only the leader's memory. Only that leader declares a session expired,
+  on its own clock, so the inode owners a node talks to never disagree about it, and an owner
+  that fails over leaves sessions alone. A new leader gives every live session a full lease
+  before it expires any ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#who-decides-that-a-session-has-expired)).
+- **The client limits itself.** It counts its lease from when it sent the last answered
+  heartbeat, which is before the leader counted it, and stops writing `lease_drift` early. No
   timeout it gives the kernel reaches past that instant. So when the lease ends, a paused
   client's next `read()` asks the daemon for attributes, and the daemon, seeing its lease has
   lapsed, drops the file's pages first. Mapped pages are the exception: they stay stale until the
-  daemon runs again and invalidates every cached inode.
-- **The cluster fences before it reassigns.** The fenced set is versioned like the placement
-  table. Every chunk primary applies the new version, acknowledges it, and from then on rejects
-  writes carrying that session ID, including ones in flight. Only once every primary has
-  acknowledged, or has been marked down and will rejoin under a newer placement epoch that
-  carries the fence ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md)), do
-  owners release the session's rights. So a write the fenced client got applied is ordered before
-  every write of the next lock holder.
+  daemon runs again and invalidates every cached inode. A client that merely lost touch with the
+  control plane holds its requests until a new leader answers, so a control-plane failover is a
+  pause, not an error.
+- **The cluster fences before it reassigns.** The leader commits every session due at that moment
+  as fenced in one new version of the *session table*, which is published like the placement
+  table. Every storage node applies it, acknowledges it, and from then on rejects writes carrying
+  a fenced session's ID, including ones already queued. Only once every storage node has
+  acknowledged, or has been marked down in a committed epoch, does the leader commit the version
+  as acknowledged, and only then do owners release the session's rights. So a write the fenced
+  client got applied is ordered before every write of the next lock holder.
+- **A node that answers the control plane but not an owner.** Its session stays alive, so a
+  recall to it could wait forever. After `recall_timeout` (30 s by default, a value still to be
+  tuned) the owner asks the control plane to fence it, which ends the wait the same way as an
+  expiry.
 
-The same machinery serves flock (Tier 1), recalls (Tier 2) and RWX block (Tier 0). It is also
-why a recall can safely wait for a dead node: the wait ends with an ack or with the node fenced,
-never with a guess.
+The same machinery serves flock (Tier 1), recalls (Tier 2), snapshot cuts and RWX block
+(Tier 0). It is also why a recall can safely wait for a dead node: the wait ends with an ack or
+with the node fenced, never with a guess.
 
 ### Kubernetes integration for RWX
 
@@ -698,8 +715,8 @@ like cache modes, and a lease break is a recall.
   across nodes is not supported.
 - **A recall waits for the slowest member.** If a member's node is unreachable, the first write
   on a ReadShared file, or a second node's open of a file another node has written, waits until
-  that node acknowledges or its session (10 s lease by default) expires and is fenced at every
-  primary.
+  that node acknowledges, or its session (10 s lease by default) expires or it is evicted after
+  `recall_timeout` (30 s), and it is fenced at every storage node.
 - **An owner crash pauses new opens** for one session lease while clients re-register.
 - **A daemon crash loses unflushed buffered writes**, reported as `EIO` but still lost.
 - **The daemon container is privileged**, and the descriptor holder is sensitive: a descriptor is
@@ -722,6 +739,12 @@ From the [roadmap and open questions](../docs/design.md#roadmap-and-open-questio
 - **Tier 3 (phase 13).** Byte-range locks and directory caching with pushed invalidations.
 - **Runtime questions:** whether FUSE over io_uring is worth using once the kernel requeues the
   requests a crash strands, and how one mount's `/dev/fuse` requests spread across event loops.
+- **FUSE timeouts across a suspend:** the kernel counts attribute timeouts in jiffies, which stop
+  while a machine is suspended, while the session lease keeps counting. Does a resumed node trust
+  cached attributes, and so cached pages, for up to a second after its session was fenced? A
+  spike that suspends a VM is to answer it.
+- **`recall_timeout`:** 30 s is a default to tune from recall acknowledgment times measured
+  under load, not a measurement.
 - **Incarnation fencing:** does a primary's table of newest incarnations need to survive a primary
   change, or does the epoch rule already reject a dead daemon's late write?
 - **SMB later.** One Samba gateway per volume, plus a Samba VFS module that registers the

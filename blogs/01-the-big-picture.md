@@ -384,8 +384,10 @@ stateDiagram-v2
 Entering WriteShared, the owner sends a **recall** to every other node that has the file open and
 waits until each has flushed its buffered writes, dropped its cached pages, switched new opens to
 direct I/O and made already-open files check for changes before every read. A node that never
-answers is waited out until its session lease (10 s by default) expires and it is **fenced**: every
-chunk primary rejects its writes before its locks go to anyone else. While a file is write-shared,
+answers is waited out until its session lease (10 s by default) expires, or for `recall_timeout`
+(30 s) if it still renews its session, and it is then **fenced**: the control plane, which alone
+keeps every session's lease, has every chunk primary reject its writes before its locks go to
+anyone else. While a file is write-shared,
 every read and write goes to the chunk primary, which orders them: one network round trip per I/O,
 plus about 5 to 20 µs of FUSE overhead, acceptable because write-sharing is rare in homelabs
 ([post 09](09-rwx-filesystem-and-cache-coherence.md)).

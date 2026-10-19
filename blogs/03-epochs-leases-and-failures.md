@@ -135,7 +135,8 @@ reason. Raft is covered in [08-the-metastore.md](08-the-metastore.md).
 | Versions | Plain counter | Simple | Two primaries reuse a number |
 | Versions | **Epoch + counter (Ceph `eversion_t`)** | Version alone tells writes apart | 24 bits of every version spent on the epoch |
 | Stale clients | Client-side timeout only | Simple | A paused client writes late |
-| Stale clients | **Fence acknowledged by every primary** | Late writes are rejected | Locks move only after every primary confirms |
+| Stale clients | Each server expires its own clients (Lustre, CephFS's metadata servers) | No central authority | Safe only where one server holds both the locks and the data (Lustre); otherwise one server's timeout must evict the client everywhere (CephFS) |
+| Stale clients | **Expiry by the control plane, fence acknowledged by every storage node** | One verdict per session, late writes are rejected | Locks move only after every storage node confirms |
 
 Bold rows are what rock-solid picked. The rest of the post explains each one.
 
@@ -576,42 +577,85 @@ sequenceDiagram
 
 *The lock was correct the whole time; the problem is a write that was already on its way.*
 
-#### How it works
+#### Who decides that a session has expired
 
-Each client daemon holds a session with a lease, `session_lease`, 10 s by default, renewed with
-the inode owners it talks to (the MetaStore leaders that track open files). Its locks, open
-registrations and cache rights all belong to the session. Three rules work together:
+> **In plain words.** A client may deal with many desks at once: one per file it has open. If each
+> desk kept its own stopwatch on the client, they would disagree, and a client that could reach
+> one desk but not another would be "alive" and "dead" at once. So one desk keeps the only
+> stopwatch: the office manager, who already gets a "still here" text from every machine once a
+> second. That text also renews the machine's session, and only the manager ever declares a
+> session over.
 
-1. **The client stops itself early, as far as it can.** It stops writing at
-   `lease_expiry - clock_skew_margin`, and no attribute or directory-entry timeout it hands the
-   kernel reaches past that instant. So when the lease ends, the next `read()` on a paused node
-   asks the daemon for attributes, and the daemon, seeing its lease has lapsed, drops the file's
-   cached pages first.
-2. **Every write carries the session ID, and primaries refuse fenced sessions.** When a session
-   expires, the control plane adds it to the *fenced set*, which is versioned like the placement
-   table. Every node acting as a chunk primary applies the new version and acknowledges it, and
-   from then on rejects writes carrying that session ID, including ones already in flight.
-3. **Locks move only after every primary has confirmed.** Only once every such node has
-   acknowledged the fence, or has been marked down and will rejoin under a newer epoch that
-   carries the fence, do the owners release the session's locks and open registrations.
+Each client daemon holds one session, `session_lease` (10 s by default), for its FUSE mounts and
+block devices alike. Its locks, open registrations and cache rights all belong to the session,
+and every chunk write carries its ID.
 
-The design does not yet say how an expiry reaches the control plane: which owner reports it, and
-how several owners that each saw renewals at different times agree. The diagram draws that hop
-as unspecified.
+The session is a key in the control-plane group, `ctl/session/{id}`, and its lease is renewed
+by the heartbeat each node already sends the control-plane leader every second
+([Failure detection](#4-failure-detection)): the heartbeat names the session, the reply grants
+the renewal. Renewals change only the leader's memory; the Raft log changes only when a session
+starts or is fenced. The inode owners, the MetaStore leaders that track open files, hold the
+session's locks and opens but never decide that it expired, so they cannot disagree, and an
+owner that fails over leaves every session as it was.
+
+Both sides count the lease the way every lease in this post is counted
+([Counting on two clocks](#counting-on-two-clocks-that-never-agree)): the client from when it
+*sent* its last answered renewal, ending `lease_drift` early, the leader from when it
+*processed* that renewal, which is later. Two more rules keep the leader from expiring a session
+too early:
+
+- **Only a leader holding its leader lease answers renewals**, and a new leader gives every live
+  session a full `session_lease` from the start of its own lease before expiring any. A renewal
+  answered by a deposed leader was answered under a lease that ended before the new one began.
+- **A leader that stalled restarts every session's timer** instead of expiring sessions it could
+  not hear, as CephFS's metadata server skips expiries after it was itself slow.
+
+Both only delay an expiry, never bring it forward. A client that cannot reach the control plane
+at all stops writing when its lease ends, but holds its requests rather than failing them: if a
+new leader answers in time, its applications see only a pause.
+
+This is how Chubby, ZooKeeper, etcd and HDFS keep sessions too. The other shape, where each
+server times out its own clients, works for Lustre and a single NFS server because the server
+that holds a client's locks also holds the data they protect; CephFS, whose locks and data live
+on different servers, turns the first server's timeout into a cluster-wide blocklist. The
+[session expiry study](../studies/session-expiry/README.md) compares them.
+
+#### How the fence lands
+
+Three rules work together:
+
+1. **The client stops itself early, as far as it can.** It issues no write after its lease ends,
+   and no attribute or directory-entry timeout it hands the kernel reaches past that instant. So
+   when the lease ends, the next `read()` on a paused node asks the daemon for attributes, and
+   the daemon, seeing its lease has lapsed, drops the file's cached pages first.
+2. **The control plane fences, and every storage node confirms.** When a session's lease runs out
+   on the leader's clock, or an owner reports a recall the session left unanswered for
+   `recall_timeout` (30 s), or an operator evicts it, the leader commits it as fenced in a new
+   version of the *session table*. One version fences every session due at that moment, so a
+   switch failure that strands many nodes costs one version, not one each. Every storage node
+   applies the version, rejects from then on every write from that session, including ones
+   already queued, and acknowledges.
+3. **Locks move only after every storage node has confirmed.** Once every storage node has
+   acknowledged, or has been marked down in a committed epoch, the leader commits the version as
+   acknowledged and the session leaves the table. Only then do owners free its locks, drop its
+   open registrations and count its recalls as answered.
 
 ```mermaid
 sequenceDiagram
     participant P as Client 1
+    participant L as Control-plane leader
+    participant Pr as Storage nodes
     participant O as Inode owner
-    participant CP as Control plane
-    participant Pr as Chunk primary
     participant Q as Client 2
+    P->>L: heartbeat, session S1
+    L-->>P: renewed
     Note over P: Client 1 holds the lock, then is paused
-    Note over O: Session S1 expires
-    O--)CP: expiry reaches the control plane, mechanism unspecified
-    CP->>Pr: fenced set, new version, includes S1
-    Pr-->>CP: applied
-    Note over O,Pr: Every primary has acknowledged the fence
+    Note over L: No renewal of S1 for 10 s
+    L->>L: commit S1 fenced, session table version v
+    L->>Pr: session table v
+    Pr-->>L: applied v
+    L->>L: commit v acknowledged
+    L->>O: session table, S1 gone
     O-->>Q: lock granted
     Q->>Pr: write new data
     Pr-->>Q: ok
@@ -621,17 +665,20 @@ sequenceDiagram
     Note over P: Client 1 must start a new session and reopen its files
 ```
 
-*Rule 3 is the ordering that matters: the lock moves only after every primary has applied the
-fence or been marked down.*
+*Rule 3 is the ordering that matters: the lock moves only after every storage node has applied
+the fence or been marked down.*
 
 A write the fenced client got applied before the fence is therefore ordered before every write of
-the next lock holder. The fenced client must start a new session and reopen its files, and its
-applications get errors, never silently stale data. The same machinery serves file locks
-(`flock`), cache recalls and shared block volumes; see
+the next lock holder. A storage node that was marked down instead of acknowledging cannot finish
+an old write either: once its PGs' new primaries have peered, no write tagged with the old epoch
+completes. It is marked up again only once its heartbeat reports the current table. The fenced
+client must start a new session and reopen its files, and its applications get errors, never
+silently stale data. The same machinery serves file locks (`flock`), cache recalls, snapshot cuts
+and shared block volumes; see
 [09-rwx-filesystem-and-cache-coherence.md](09-rwx-filesystem-and-cache-coherence.md) for how
 sessions fit into cache coherence.
 
-The fenced set is read on every write, so in the runtime it is an immutable table published
+The session table is read on every write, so in the runtime it is an immutable table published
 through an `atomic.Pointer`, like the placement table: a reader loads the current one without a
 lock.
 
@@ -691,8 +738,8 @@ during peering and a node restarted within a lease it granted.
 - **A restarted node sits out one `primary_lease`** (4 s) before it votes or peers.
 - **Every write waits for every live member**, so a slow disk hurts every PG it is in. Fail-slow
   detection is deliberately sluggish and never goes below `min_live`: those PGs stay slow.
-- **A dead client's locks are held for a while**: its 10 s session lease, then every primary's
-  fence acknowledgment, or a down mark for one that cannot be reached. Its applications get
+- **A dead client's locks are held for a while**: its 10 s session lease, then every storage
+  node's fence acknowledgment, or a down mark for one that cannot be reached. Its applications get
   errors and must reopen their files.
 - **Mapped pages are not covered.** A paused node's memory-mapped (`mmap`) readers can see stale
   pages until its daemon runs again, since the kernel does not revalidate them.
@@ -709,9 +756,8 @@ during peering and a node restarted within a lease it granted.
   [`internal/core/peer.go`](../internal/core/peer.go): it tracks each request to another node
   with its deadline, and a timeout keeps the request's buffer, since the peer may be slow rather
   than gone.
-- **Gaps in the design text, not listed among its open questions.** How a session's expiry
-  reaches the control plane, which the sessions and fencing model will have to settle; and
-  whether a fresh node-pair grant covers PGs by the grantor's current table or the holder's.
+- **A gap in the design text, not listed among its open questions.** Whether a fresh node-pair
+  grant covers PGs by the grantor's current table or the holder's.
 - **Open question: incarnation fencing in the epoch-change model.** A dead daemon's write could
   be delivered late to an old primary in epoch `e`, or to a new primary that has not yet seen the
   successor's incarnation. Does each primary's table of newest incarnations need to survive a

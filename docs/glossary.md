@@ -30,7 +30,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Why two schemes.** A primary waits for every live member, so a write survives as long as one copy does, but it needs an outside authority (the control plane) to decide who is live and who is primary; otherwise two nodes could both believe they are primary. A Raft group waits only for a majority and elects its own leader, so it needs no outside authority, at the cost of tolerating fewer failures for the same number of copies (one of three). The control plane itself is a Raft group, which breaks the circle.
 
-**Control plane.** The single Raft group that holds cluster-wide state: pools, the placement table, node membership, fenced sessions. It changes rarely and never sits on the I/O path; every node caches its tables. "Control plane" is the usual name for the part of a system that decides configuration, as opposed to the **data plane** that moves user data.
+**Control plane.** The single Raft group that holds cluster-wide state: pools, the placement table, node membership, client sessions. It changes rarely and never sits on the I/O path; every node caches its tables. "Control plane" is the usual name for the part of a system that decides configuration, as opposed to the **data plane** that moves user data.
 
 **Inode owner.** The leader of the MetaStore shard holding an inode. Besides serving the inode's keys, it tracks in memory who has the file open and which cache mode the file is in. See [Inode owner](design.md#metadata-layer-metastore).
 
@@ -158,9 +158,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Peering.** What a new primary does before serving a PG: it contacts the members, makes sure the old epoch can complete no more writes, and agrees with them on the newest version of every chunk. The term comes from Ceph.
 
-**Session.** A client daemon's registration with the cluster, kept alive by a lease. Its locks, open files and cache rights belong to the session, so they all end together when it expires.
+**Session.** A client daemon's registration with the cluster, kept alive by a lease that the control plane renews on the node's heartbeat and alone declares expired. Its locks, open files and cache rights belong to the session, so they all end together when it expires.
 
-**Fencing.** Making sure a client that lost its rights can no longer act on them, even if it does not know yet: a paused or partitioned client may wake up and keep writing. rock-solid publishes an expired session as **fenced**, every primary rejects its writes, and only then are its locks given to someone else. Timeouts alone cannot do this, because the client's own clock and scheduling cannot be trusted. See [Sessions and fencing](design.md#sessions-and-fencing).
+**Fencing.** Making sure a client that lost its rights can no longer act on them, even if it does not know yet: a paused or partitioned client may wake up and keep writing. rock-solid publishes an expired session as **fenced** in its **session table**, the versioned list of live sessions that every node caches, every storage node applies the table and rejects the session's writes, and only once all have acknowledged are its locks given to someone else. Timeouts alone cannot do this, because the client's own clock and scheduling cannot be trusted. See [Sessions and fencing](design.md#sessions-and-fencing).
 
 **Monotonic clock, clock skew, clock drift.** A monotonic clock only moves forward, unlike wall-clock time, which can jump. Skew is the difference between two clocks' readings; drift is the difference in their rates.
 

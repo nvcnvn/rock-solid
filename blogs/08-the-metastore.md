@@ -343,7 +343,7 @@ records, volume attachments, case-folded names for SMB and the later S3 index):
 
 | Data | Key | Shard rule |
 | --- | --- | --- |
-| Pools, placement table, membership, fenced sessions | `ctl/...` | The control-plane group, not sharded |
+| Pools, placement table, membership, sessions | `ctl/...` | The control-plane group, not sharded |
 | Inode attributes, including size and `alloc_end` | `fs/{volume}/{inode}/a` | The inode's slot |
 | Directory entries | `fs/{volume}/{dir}/d/{name}` → inode, type | The directory's slot, so `readdirplus` is one request to one shard |
 | Extended attributes | `fs/{volume}/{inode}/x/{name}` | Next to the attributes |
@@ -565,13 +565,14 @@ reads and writes on open handles carry on. See
 
 > **In plain words.** One special Raft group holds the cluster's own settings: which disks exist,
 > which pools there are, which disks hold which placement group, which client sessions are
-> fenced. It changes rarely and is never on the I/O path.
+> alive. It changes rarely and is never on the I/O path.
 
 The `ctl/...` keys live in one dedicated control-plane Raft group, not sharded. It stays small
 because it maps placement groups, not chunks: 2048 PGs × 3 replicas × a 4-byte disk ID is 24 KiB
 ([02-chunks-and-placement.md](02-chunks-and-placement.md)). Its leader commits each new placement
 table as one Raft entry with a new epoch, marks a node down after `node_down_after` (5 s) without
-a heartbeat, and publishes expired sessions as fenced. Every node caches its tables.
+a heartbeat, renews each node's client session on that same heartbeat, and publishes expired
+sessions as fenced. Every node caches its tables.
 
 Chunk primaries need an outside authority to say who is live and who is primary; a Raft group
 elects its own leader and needs none, "which breaks the circle". It arrives with the MetaStore in

@@ -137,7 +137,7 @@ type ChunkStore interface {
 
 **Punch.** `punch` zeroes a byte range as a new version. Its blocks are freed once no snapshot needs them, and later reads of the range return zeros. Punching a whole chunk deletes it and leaves a tombstone. File unlink and truncate, block discard and volume deletion all free space this way (see [Freeing space](#freeing-space)).
 
-**Fencing.** Each write carries the client's session ID. When a client session expires (see [Sessions and fencing](#sessions-and-fencing)), the control plane publishes it as fenced and chunk primaries reject its writes. The session's locks and cache rights are released only after every node acting as a primary has applied the fence. This stops a paused or partitioned client from writing after its locks and cache rights are gone.
+**Fencing.** Each write carries the client's session ID. When a client session expires (see [Sessions and fencing](#sessions-and-fencing)), the control plane publishes it as fenced in its session table and every storage node rejects its writes. The session's locks and cache rights are released only after every storage node has applied the fence or been marked down. This stops a paused or partitioned client from writing after its locks and cache rights are gone.
 
 **Integrity.** Each 4K block, and each 4K block of an erasure-coded shard, carries a CRC32C checksum in its record's header in the [on-disk format](#on-disk-format), which catches bit rot, torn writes and misdirected writes. It is computed with Go's `hash/crc32`, which interleaves three SSE4.2 streams: 167 ns per 4 KiB block, 7× faster than a table-driven implementation ([Go CPU spike](#appendix-go-cpu-per-operation-spike), C0).
 
@@ -418,7 +418,7 @@ Keys are written below as paths. On disk, each `word/` is a one-byte tag, and in
 
 | Data | Key | Shard rule |
 | --- | --- | --- |
-| Pools, placement table, membership, fenced sessions, format level | `ctl/...` | One dedicated control-plane Raft group, not sharded; small because it maps placement groups, not chunks |
+| Pools, placement table, membership, sessions, format level | `ctl/...` | One dedicated control-plane Raft group, not sharded; small because it maps placement groups, not chunks |
 | Inode attributes, including size and `alloc_end` | `fs/{volume}/{inode}/a` | The inode's slot. The volume prefix makes a filesystem one contiguous key range, which a snapshot copies and a deletion drops |
 | Directory entries | `fs/{volume}/{dir}/d/{name}` → inode, type | The directory's slot, usually shared with its files, so `readdirplus` is one request to one shard |
 | Extended attributes | `fs/{volume}/{inode}/x/{name}` | Next to the attributes, so one request returns both; the daemon caches small ones with the attributes |
@@ -581,7 +581,7 @@ stateDiagram-v2
 
 *Caching turns off only while a file is write-shared, and turns back on when only one node still has it open.*
 
-**Entering WriteShared.** The owner sends a recall to every other member and waits for every acknowledgment, or for that member's session to expire and be fenced. The write or open that caused the switch waits for this too: a first write in ReadShared, or a second node's open of a file another node has written, which the owner answers only once the recall completes. If the node that wrote is unreachable, the open can wait up to its `session_lease` plus the time to fence its session ([Sessions and fencing](#sessions-and-fencing)). A recall does four things on the receiving node:
+**Entering WriteShared.** The owner sends a recall to every other member and waits for every acknowledgment, or for that member's session to expire and be fenced. The write or open that caused the switch waits for this too: a first write in ReadShared, or a second node's open of a file another node has written, which the owner answers only once the recall completes. If the node that wrote is unreachable, the open can wait up to its `session_lease`, or `recall_timeout` if the node still renews its session but does not answer, plus the time to fence it ([Sessions and fencing](#sessions-and-fencing)). A recall does four things on the receiving node:
 
 1. **Flush:** write the daemon's buffered writes for the file to the ChunkStore.
 2. **Drop cached pages:** `notify_inval_inode` (a few µs).
@@ -612,13 +612,44 @@ sequenceDiagram
 
 ### Sessions and fencing
 
-Each client daemon holds a session with a lease (10 s by default, `session_lease`), renewed with the inode owners it talks to. Its locks, open registrations and cache rights all belong to the session.
+Each client daemon holds one session, for its FUSE mounts and block devices alike, and every chunk write carries the session's ID. The session's locks, open registrations and cache rights all belong to it.
 
-- A client stops writing at `lease_expiry - clock_skew_margin`, and no attribute or directory-entry timeout it gives the kernel reaches past that instant. A paused client's kernel therefore stops trusting its cached pages when the lease ends: the next `read()` asks the daemon for attributes, and the daemon, seeing its lease has lapsed, drops the file's pages first. Mapped pages are the exception, since the kernel does not revalidate them (spike T5b), so a paused node's `mmap` readers can see stale pages until its daemon runs again and invalidates every cached inode.
-- When a session expires, the control plane adds it to the fenced set, which is versioned like the placement table. Every node acting as a chunk primary applies the new version and acknowledges it, and from then on rejects writes carrying that session ID, including ones already in flight. Only once every such node has acknowledged, or has been marked down and will rejoin under a newer epoch that carries the fence, do owners release the session's locks and open registrations and count its recalls as answered. A write the fenced client got applied before that is therefore ordered before every write of the next lock holder.
-- A fenced client must start a new session and reopen its files. Its applications get errors, never silently stale data.
+**The control plane owns every session.** A session is a key in the control-plane group, `ctl/session/{id}` → node and state, with IDs from a counter that never reuses one. Its lease (`session_lease`, 10 s by default) is renewed by the heartbeat each node already sends the control-plane leader every second for [failure detection](#epoch-changes-and-failure-detection): the heartbeat names the session, and the reply grants the renewal. Renewals change only the leader's memory; the Raft log changes only when a session starts or is fenced. So renewal costs one message per node per second whatever the number of shards, a node that uses only block volumes renews like any other, and inode owners never decide that a session expired: they cannot disagree, and their failovers leave sessions alone. Chubby, ZooKeeper, etcd and HDFS keep sessions at their leader the same way. CephFS lets each metadata server expire its own sessions but turns the first expiry into a cluster-wide blocklist, and Lustre's servers evict clients on their own, which works only because each holds both the locks and the data they protect ([session expiry study](../studies/session-expiry/README.md)).
 
-This is the same machinery for flock (Tier 1), recalls (Tier 2) and RWX block (Tier 0).
+**Each side counts the lease on its own clock**, as with every [lease](#epoch-changes-and-failure-detection). The client counts from when it sent its last answered renewal and ends its lease `lease_drift` early; the leader counts from when it processed that renewal. Only a leader holding its [leader lease](#metadata-layer-metastore) answers renewals. A new leader gives every live session a full `session_lease` from the start of its own lease before it expires any, and a leader whose loop fell behind restarts every session's timer rather than expire sessions it could not hear, as CephFS's metadata server skips expiries after it was itself slow. Both only delay an expiry, never bring it forward.
+
+- **The client limits itself.** It issues no write after its lease ends, and no attribute or directory-entry timeout it gives the kernel reaches past that instant. A paused client's kernel therefore stops trusting its cached pages when the lease ends: the next `read()` asks the daemon for attributes, and the daemon, seeing its lease has lapsed, drops the file's pages first. Mapped pages are the exception, since the kernel does not revalidate them (spike T5b), so a paused node's `mmap` readers can see stale pages until its daemon runs again and invalidates every cached inode; whether attribute timeouts hold across a machine suspend is an [open question](#roadmap-and-open-questions). A daemon whose lease lapsed without word of a fence holds its requests until a renewal is answered, so a control-plane failover shows as a pause, as in Chubby's grace period.
+- **The control plane fences.** The leader fences a session when its lease runs out, when an owner asks because the session left a recall unanswered for `recall_timeout` (default 30 s), or when an operator evicts it. It commits every session due at that moment as one new version of the *session table*, which lists the live sessions and those being fenced and is published like the placement table. Every storage node applies the version, from then on rejects every write from a fenced or removed session, including writes already queued, and acknowledges; its heartbeats repeat the version it holds. A write from a session newer than a primary's table makes the primary fetch the table first.
+- **Owners release last.** Once every storage node has acknowledged the version, or has been marked down in a committed epoch, the leader commits it as acknowledged and the fenced sessions leave the table. A down node is marked up again only once its heartbeat reports the current version. Owners act only on that: they reject requests from sessions not live in their table, a lock key whose session has left the table is free and is deleted in the transaction that grants the lock to the next holder, the session's open registrations go, and its recalls count as answered.
+- **A fenced client starts over.** It learns from its next renewal or a rejected write, starts a new session and reopens its files. Its applications get errors, never silently stale data.
+
+```mermaid
+sequenceDiagram
+    participant C as Client daemon
+    participant L as Control-plane leader
+    participant P as Storage nodes
+    participant O as Inode owner
+    C->>L: heartbeat, session S
+    L-->>C: renewed
+    Note over C: paused, its lease ends lease_drift early
+    Note over L: no renewal of S for session_lease
+    L->>L: commit S fenced, table version v
+    L->>P: session table v
+    P-->>L: applied v, or the node is marked down
+    L->>L: commit v acknowledged
+    L->>O: session table, S gone
+    O->>O: free S's locks, drop its opens, answer its recalls
+    C->>P: late write, session S
+    P-->>C: rejected
+```
+
+*The client's lease ends before the leader's, the fence commits after both, and owners release only once every storage node has applied it.*
+
+This is safe because the client's lease ends first: it counts from a send that came before the leader processed the renewal, and ends `lease_drift` early to cover the difference in rate between the two clocks. A renewal answered by a deposed leader was answered under its leader lease, which ended before the new leader's began. So the client issues no write after the fence commits, every write it issued earlier is applied before its primary applies the fence or is rejected after, and the next holder writes only once every storage node has applied it or has been marked down, after which [peering](#epoch-changes-and-failure-detection) stops any write still tagged with the old epoch. A write the fenced client got applied is therefore ordered before every write of the next holder.
+
+A dead client's locks wait `session_lease` plus one commit and one acknowledgment round, milliseconds on a LAN, or until an unreachable storage node is marked down; when the client's own node crashed, that has already happened, since `node_down_after` is shorter than `session_lease`. Fences are batched, so a switch failure that strands many nodes costs one version and one round. They are their own version, not a placement epoch, which would make members reject every write in flight. A control-plane outage longer than `session_lease` pauses every client's writes until a new leader answers, and fences none of them.
+
+This is the same machinery for flock (Tier 1), recalls (Tier 2), snapshot cuts and RWX block (Tier 0).
 
 ### Kubernetes integration for RWX
 
@@ -872,7 +903,7 @@ flowchart LR
 
 **Concurrency outside the loops**
 
-- **Read-mostly tables** (the placement table, fenced sessions) are immutable values published through `atomic.Pointer`: a reader loads the current one without a lock, an update publishes a new one, and the collector frees the old.
+- **Read-mostly tables** (the placement table, the session table) are immutable values published through `atomic.Pointer`: a reader loads the current one without a lock, an update publishes a new one, and the collector frees the old.
 - **Latency paths use typed atomics and fixed slot tables** instead of a mutex, a map and a channel: queue-depth-1 p50 67 against 84 µs. Counters written by different cores are padded to a cache line.
 - **CPU-heavy background work runs on worker goroutines** (cleaner copies, erasure coding, compaction) that send their results to the owning loop's inbox as events, so each index keeps one writer. The cleaner's copy work costs Go 1.12 to 1.24× Rust.
 
@@ -939,7 +970,7 @@ Group commit decodes each record it is about to write and asserts that it holds 
 
 Simulated FUSE clients model the kernel behavior the spike measured: a page cache that refills on reads, direct-I/O fixed at open, and mapped pages that are not revalidated.
 
-Simulation faults for coherence: lost or delayed recalls, clients paused past their lease, clock skew, owner failover in the middle of a recall, a planned leader transfer while opens arrive, a fence that reaches some primaries late, and a daemon crash with requests read but unanswered, followed by their resend, including a dead daemon's chunk write delivered after its successor's reissue and the pod's next write to the same block.
+Simulation faults for coherence: lost or delayed recalls, clients paused past their lease, clock skew, owner failover in the middle of a recall, a planned leader transfer while opens arrive, a fence that reaches some primaries late, a control-plane leader failover while sessions renew, a renewal answered by a deposed leader, a client that reaches the control plane but not an owner, a control-plane leader stalled past `session_lease`, and a daemon crash with requests read but unanswered, followed by their resend, including a dead daemon's chunk write delivered after its successor's reissue and the pod's next write to the same block.
 
 Simulation faults for placement: an old primary partitioned with clients that have not seen the new epoch, a disk that turns fail-slow and then recovers, clock drift between lease holder and grantor, a node crash during peering, and a node restarted within a lease it granted.
 
@@ -963,7 +994,7 @@ Invariants checked after every step:
 - an encoded version becomes readable, and copies are dropped, only after all its shards are durable;
 - a chunk with fewer surviving copies or shards than it needs returns an error, never wrong data;
 - at most one lock holder per lock; at most one writer per RWO volume;
-- no client reads stale data from a file in WriteShared mode, no fenced session's write is applied, and no lock is granted to a new holder while a primary would still accept the fenced holder's writes;
+- no client reads stale data from a file in WriteShared mode, no session is fenced while its client's own lease still runs, no fenced session's write is applied, and no lock is granted to a new holder while a primary would still accept the fenced holder's writes;
 - a replayed mutating request returns its first result and changes nothing;
 - an orphaned inode is never freed while a live session has it open;
 - a snapshot holds every write acknowledged before its cut and none issued after, in both data and metadata;
@@ -1032,6 +1063,7 @@ Each choice below favors a short hot path, a single binary and testable correctn
 | Where write-back lives | In the daemon | FUSE `writeback_cache` (kernel page cache) | The kernel option is mount-wide, hides writes from the daemon and can't be revoked per file, so write-shared mode couldn't be enforced (spike T9) |
 | Coherence | Tiers 1 → 2 → 3 | Close-to-open only (NFS, JuiceFS); full capabilities from the start (CephFS); caching left to the user (DAOS) | Ships useful RWX early; the Weka-style mode switch gets most of the benefit of capabilities with three states and one message type |
 | Open-file state | Soft state at the inode owner, handed over on planned leader transfers and rebuilt after a crash | Durable open records in Raft | Keeps `open` to one round trip with no fsync, which matters for small-file workloads |
+| Session expiry | Sessions owned by the control plane: renewed on each node's heartbeat to its leader, expired on the leader's clock, fenced in one versioned session table that every storage node acknowledges ([Sessions and fencing](#sessions-and-fencing)) | Renewal with every inode owner, each expiring sessions on its own (CephFS with several metadata servers, Lustre's servers); a session key in one MetaStore shard; node liveness as the session; CephFS's epoch barrier on the next holder's writes instead of acknowledgments | One verdict per session and a renewal cost per node, not per owner or shard. Per-owner expiry fences everywhere a client cut off from one owner; a session shard adds a hop and a second group whose failover pauses renewal; node liveness would turn 5 s stalls into application errors; the barrier saves an acknowledgment round that costs milliseconds at 10 nodes ([session expiry study](../studies/session-expiry/README.md)) |
 | Kernel bypass | Opt-in flag | Mandatory DPDK and SPDK (Weka, Mayastor, Longhorn v2) | Homelab links are network-bound, so bypass buys latency, not throughput. Mandatory hugepages and pinned cores break "plug and play" |
 | Core abstraction | Two narrow primitives: ChunkStore + MetaStore (Tectonic, Colossus, 3FS) | One rich object layer (Ceph RADOS) | Each frontend pays only for the metadata it needs |
 | Metadata store | Embedded multi-Raft | External FoundationDB (3FS), TiKV, Redis (JuiceFS), etcd | The single-binary goal rules out a second system to operate. An external etcd remains an option for early prototypes |
@@ -1094,9 +1126,9 @@ Each choice below favors a short hot path, a single binary and testable correctn
 Build order puts the simulator before any real driver and ships RWX file storage as the first usable product. Each phase ends with something that runs and is tested. Phases 1 to 5 are broken into reviewable components, libraries and tests in the [build checklist](build-checklist.md).
 
 1. **Sans-IO core and simulator.** The Go module with its lint and sans-IO analyzer, then a single-node ChunkStore state machine with the per-disk log, extent index, punch, its cleaner and the LSM index (memtable, sorted runs with Bloom filters, compaction), simulated disk with the full fault model, invariant checker.
-2. **Protocol models.** TLA+ models, checked with TLC, of epoch changes (peering, primary read leases and Raft leader fortification on the same node-pair leases), sessions and fencing with fence acknowledgments, cache-mode recalls, and purges, before writing the real protocols.
+2. **Protocol models.** TLA+ models, checked with TLC, of epoch changes (peering, primary read leases and Raft leader fortification on the same node-pair leases), sessions (renewal on heartbeats to the control-plane leader, expiry on its clock, leader failover) and fencing with fence acknowledgments, cache-mode recalls, and purges, before writing the real protocols.
 3. **Replication and placement.** Pools with 1 to 3 replicas and `min_live`, primary-based replication with reads of committed versions only, placement groups and the placement table computed by the control plane, with epochs, peering, read leases, failure and fail-slow detection, recovery per placement group. Fault-injected in simulation from the first commit.
-4. **Embedded MetaStore.** etcd-raft as the Raft shard, with its upstream tests, with group commit on the disk log, one shard only, with the sharded API from day one. Inodes, directory entries, sessions and locks, purge lists, slot byte counters and replay records.
+4. **Embedded MetaStore.** etcd-raft as the Raft shard, with its upstream tests, with group commit on the disk log, one shard only, with the sharded API from day one. Sessions in the control-plane group; inodes, directory entries, locks, purge lists, slot byte counters and replay records.
 5. **Default drivers.** The event-loop runtime (epoll loops, inboxes, timer heaps, off-heap slabs), then `io_uring` and kernel TCP behind the `Action` interface, with the driver contract (driver-owned buffer pools, readiness fd, `PeerLost`) in place from the start.
 6. **File frontend with Tier 1: first usable product.** Chunk slots for chunks written whole. FUSE client with daemon-side write-back, close-to-open through the inode owner's in-memory open registry, flock, orphans, unlink and truncate through purges, PVC size quotas, fencing, restart by descriptor handoff. CSI driver with RWX, fsGroup delegation and the descriptor holder, the restart tested by killing the daemon pod under multi-client `fsx` in a real cluster (kubelet bind mounts, pod user namespaces, SELinux). Passes `pjdfstest`, single and multi-client `fsx`, and `csi-sanity`. Nightly nemesis runs and power-cut tests. From this release on, the simulator opens the previous release's saved disk images before its own seeds run (cross-version runs, as Pebble's).
 7. **Tier 2.** The open registry handed over on planned leader transfers, cache modes, recalls, revalidation of old handles, mmap invalidations. Simulated FUSE clients and the spike harness in CI.
@@ -1132,6 +1164,8 @@ Each of these needs a measurement or a spike, not a design choice.
 - [ ] Fixed buffers on a real NVMe drive: does the 0.9 to 1.4 µs per 4 KiB I/O measured on zram hold at queue depths 1 and 32, and does the polled completion path (`IORING_SETUP_IOPOLL`) change it? `spikes/uring-registered/run.py` with a raw NVMe namespace in place of zram measures it.
 - [ ] FUSE over io_uring once the kernel requeues the requests a crash strands: `FUSE_NOTIFY_RESEND` covering requests fetched from ring queues, a request handed to a dying daemon requeued instead of failed with `ECANCELED`, and `REGISTER` dispatching queued requests. Does the ring then cut CPU per request enough, at queue depths 1 and 32, to use it for new mounts? `spikes/fuse-handoff/run.py U1 U2 U3s` rechecks the crash paths on a new kernel.
 - [ ] `/dev/fuse` across event loops: does every loop read its own `FUSE_DEV_IOC_CLONE` of each mount (each request wakes every loop and one wins the read, and replies go back on the clone that read the request), or does one loop read and pass requests to the inbox of the loop that owns the inode? Measure CPU and wakeups per request at queue depths 1 and 32.
+- [ ] FUSE timeouts across a suspend: the kernel keeps entry and attribute timeouts in jiffies (`fs/fuse/dir.c`, `fuse_time_to_jiffies`, Linux 6.18), which stop while the machine is suspended, while the daemon's [session lease](#sessions-and-fencing) keeps counting. After a resume, does the kernel go on trusting cached attributes, and so cached pages, for the rest of their timeout (1 s by default) after the session has been fenced, until the daemon invalidates them? A spike that suspends a VM holding a cached FUSE file, lets another node write it, and reads it on resume answers it; if it does, the daemon must invalidate every cached inode before the kernel serves a read after a resume, or the guarantee holds only for paused processes.
+- [ ] `recall_timeout`: 30 s is a default to tune, not a measurement. It must exceed a full write-back flush (256 MiB, about 2 s on 1 GbE) and a client's longest healthy stall, or a live client is evicted; any longer leaves a writer waiting on a node that renews its session but does not answer. Nightly runs under load should record recall acknowledgment times to set it.
 - [ ] SPDK interrupt mode on a real NVMe drive: its latency cost at queue depth 1, and interrupts per I/O at queue depths 32 and 128, which decide whether the SPDK driver sets NVMe interrupt coalescing. `spikes/spdk-nvme-interrupt/run-real.sh` measures both on a spare drive; needed before phase 9.
 
 ## Learning project
