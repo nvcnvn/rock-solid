@@ -214,8 +214,8 @@ data survives, and otherwise pick the option that uses less space.**
 | `disk_class` | Any | Only disks of one class, such as NVMe |
 
 Three more settings are about space and placement rather than redundancy: `overcommit` (on),
-`write_limit` (90%, the disk fill at which writes fail with `ENOSPC`, no space left on device) and
-`pg_count` (a power of two sized from the disk count); posts 02 and 05 cover them.
+`write_limit` (90%, the disk fill past which writes that add data are refused) and `pg_count` (a
+power of two sized from the disk count); posts 02 and 05 cover them.
 
 Names follow `rep<copies>` and `ec<data>-<parity>`. The presets below are starting points; any
 combination within the creation rules is allowed. "Usable / raw" is how much of the raw disk space
@@ -253,8 +253,17 @@ contiguous byte range, and the parity shards are computed from them:
 | `ec4-2` | 1 MiB | 4 + 2 | 6 MiB | 1.5× | 2/3 |
 | `ec16-2` | 256 KiB | 16 + 2 | 4.5 MiB | 1.125× | 8/9 |
 
-The overhead formula is `(data + parity) ÷ data`, and it is also how a pool reports its capacity:
-free raw space divided by that overhead, with data still held as copies shown separately.
+The overhead formula is `(data + parity) ÷ data`. Dividing a pool's free space by it gives its
+capacity only when every node can take a share of each chunk in proportion to its size, and the
+failure-domain rule often forbids that. `ec4-2` at 2 per node on three nodes puts exactly two shards
+of every chunk on each node, a third of the chunk, whatever the nodes hold. With nodes of 4, 4 and
+1 TB the small node fills first: room ÷ overhead says 5.4 TB, the pool holds 1.8 TB, and 3.6 TB of
+the large nodes is *stranded*. So a pool reports what its placement table lets through before its
+first disk fills, raises a `Stranded` warning, and asks for confirmation at creation when a layout
+strands more than half of a node's room
+([post 02](02-chunks-and-placement.md#volume-size-and-capacity) has the formula and the
+[capacity model spike](../docs/design.md#appendix-capacity-model-spike) the measurements). A one-copy
+pool on the same disks can still use stranded space.
 
 Because shards are contiguous byte ranges, a 4 KiB read of an encoded chunk touches one disk, the
 one holding the shard that contains those bytes. No decoding is needed while that shard is healthy.
@@ -552,7 +561,7 @@ connect to pools.
 
 ```mermaid
 flowchart TD
-    A["Member marked down<br/>new placement table and epoch<br/>missing members refilled onto<br/>the least-full eligible disk"] --> E["The new primary of each affected PG peers<br/>before it accepts writes"]
+    A["Member marked down<br/>new placement table and epoch<br/>missing members refilled onto<br/>the disk furthest below its target"] --> E["The new primary of each affected PG peers<br/>before it accepts writes"]
     E --> F{"Live members<br/>at least min_live?"}
     F -- yes --> G["Writes continue on the live members<br/>encodings are deferred"]
     F -- no --> H["Writes rejected until recovery<br/>restores enough members"]
@@ -583,8 +592,11 @@ lists "shard recovery" without detailing the flow.
 once idle for `seal_after`.
 
 **Headroom.** Recovery needs free space on the disks it writes to. A pool's `write_limit` (default
-90%) fails new writes once any disk holding one of the PG's members passes it; that headroom serves
-recovery and the cleaner ([post 05](05-the-cleaner-and-free-space.md)).
+90%) refuses writes that add data once any disk holding one of the PG's members passes it; that
+headroom serves recovery and the cleaner ([post 05](05-the-cleaner-and-free-space.md)). Recovery
+also needs the surviving nodes to have room for every copy: a pool raises `CannotReprotect` when it
+holds more than its balanced capacity without its largest node. `rep3` on nodes of 4, 4, 2 and
+1 TB holds 2.7 TB, but after losing a 4 TB node the other three can re-protect only 0.9 TB.
 
 The simulator checks, after every step, that every chunk reaches its pool's redundancy once
 recovery settles, that copies are dropped only after all shards are durable, and that a chunk with
@@ -666,12 +678,14 @@ No entry in [`docs/tech-debts.md`](../docs/tech-debts.md) covers pools today.
   [Snapshots and clones](../docs/design.md#snapshots-and-clones),
   [Testing strategy](../docs/design.md#testing-strategy),
   [Alternatives considered](../docs/design.md#alternatives-considered) (rows "Redundancy",
-  "Erasure coding of mutable data", "Changing a volume's pool"),
+  "Erasure coding of mutable data", "Changing a volume's pool", "Pool capacity"),
   [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions).
 - Glossary: [Redundancy and placement](../docs/glossary.md#redundancy-and-placement),
   [Words with more than one meaning](../docs/glossary.md#words-with-more-than-one-meaning)
   ("shard", "recovery", "seal, freeze").
-- Spikes: [`spikes/cleaner-streams/`](../spikes/cleaner-streams/).
+- Spikes: [`spikes/cleaner-streams/`](../spikes/cleaner-streams/),
+  [`spikes/capacity-model/`](../spikes/capacity-model/).
+- Study: [pool capacity and ENOSPC](../studies/capacity-and-enospc/README.md).
 - Code: [`internal/core/ids.go`](../internal/core/ids.go),
   [`internal/chunkstore/index.go`](../internal/chunkstore/index.go).
 - Other posts: [01 The big picture](01-the-big-picture.md),

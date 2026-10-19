@@ -355,15 +355,27 @@ epoch; nodes never compute placement themselves. The computation is a pure funct
 sans-IO core (code with no network, disk or clock access, so tests can drive it directly), and it
 starts from the previous table, never from scratch:
 
-1. **Refill** every missing member onto the least-full eligible disk.
-2. **Rebalance:** while a disk is outside a fill margin of its capacity-weighted share, move one
-   member from the fullest disk to the emptiest eligible one.
+1. **Refill** every missing member onto the eligible disk furthest below its target.
+2. **Rebalance:** while a disk is outside a fill margin of its target, move one member from the
+   disk furthest above its target to the eligible disk furthest below, and stop when no move
+   brings that disk nearer.
 
-Capacity-weighted means a disk's share is proportional to its size: in a homelab with a 1, a 2
-and a 4 TB disk, the 4 TB disk should hold four times what the 1 TB one holds. Rebalance stops
-once every disk is within a small margin of its share. That is what "exact balance" means here,
-as opposed to the average-case balance of a hash function. The design does not give the margin's
-value.
+A disk's target is its share of the pool's members, in proportion to its *room*: what the pool's
+[`write_limit`](../docs/design.md#volume-size-and-capacity) leaves of it after the data every pool
+already keeps there. In a homelab with a 1, a 2 and a 4 TB disk, all empty, the 4 TB disk should
+hold four times what the 1 TB one holds. Rebalance stops once every disk is within a small margin
+of its target. That is what "exact balance" means here, as opposed to the average-case balance of
+a hash function. The design does not give the margin's value.
+
+Proportional to room is not always possible. Under `rep2` on two nodes of 0.7 and 2 TB, every PG
+needs one member on each node, whatever their sizes, so the big node can never hold 74% of the
+members. Targets are therefore *capped*: no failure domain is asked for more than `max_per_domain`
+members of each PG, and what the cap cuts off is spread over the other domains by room, like
+water filling the lower vessels. In the
+[capacity model spike](../docs/design.md#appendix-capacity-model-spike), a loop aiming at
+size-proportional shares never converged on such layouts, while capped targets converged within
+2%. Ceph's balancer meets the same wall and warns that it can end up "shuffling data forever as
+it endeavors to meet an impossible expectation".
 
 Both steps keep the pool's failure-domain rule: with the default `failure_domain: node`, two
 members of one PG never sit on the same node. The flowchart shows the loop:
@@ -372,11 +384,13 @@ members of one PG never sit on the same node. The flowchart shows the loop:
 flowchart TD
     E["event: disk added, disk or node down,<br/>pool created or changed"] --> S["previous table"]
     S --> M{"any PG missing a member?"}
-    M -- "yes" --> R["least-full eligible disk<br/>that keeps the failure-domain rule"]
+    M -- "yes" --> R["eligible disk furthest below its target<br/>that keeps the failure-domain rule"]
     R --> M
-    M -- "no" --> B{"any disk outside the fill margin<br/>of its capacity-weighted share?"}
-    B -- "yes" --> MV["move one member from the fullest disk<br/>to the emptiest eligible disk"]
+    M -- "no" --> B{"any disk outside the fill margin<br/>of its capped target?"}
+    B -- "yes" --> H{"does a move bring<br/>the furthest-above disk nearer?"}
+    H -- "yes" --> MV["move one member to the eligible disk<br/>furthest below its target"]
     MV --> B
+    H -- "no" --> C
     B -- "no" --> C["commit the new table as one Raft entry<br/>with epoch + 1"]
 ```
 
@@ -390,15 +404,15 @@ nodes with two disks each, and disk `c1` fails:
  epoch 41                   epoch 42 (c1 marked down)
  PG 7:   [a1, c1, d2]       PG 7:   [a1, b2, d2]   refill: nodes A and D are taken, so
                                                    b1, b2 and c2 are eligible; b2 was
-                                                   the least full of them
+                                                   furthest below its target
  PG 19:  [b1, c1, d1]       PG 19:  [b1, c2, d1]   refill: nodes B and D are taken, so
                                                    a1, a2 and c2 are eligible; c2 was
-                                                   the least full of them
+                                                   furthest below its target
  PG 23:  [b2, d1, a2]       PG 23:  [b2, d1, a2]   untouched: c1 was not a member
 ```
 
 Only the PGs that listed `c1` change, and each changes by one member. Adding a disk works the
-other way round: a new, empty disk `e1` on a fifth node is the emptiest eligible disk, so
+other way round: a new, empty disk `e1` on a fifth node is the eligible disk furthest below its target, so
 rebalance moves members onto it one at a time from the fullest disks until every disk is within
 the margin. Compare layout C from the problem section: adding a disk changes no chunk's PG. Only
 the members that rebalance moves onto the new disk change, so roughly the new disk's share of
@@ -422,31 +436,55 @@ The design's reasons ([Alternatives considered](../docs/design.md#alternatives-c
 ## Volume size and capacity
 
 > **In plain words.** Because chunks spread over every disk of a pool, a volume can be larger than
-> any one drive: the limit is the pool. A pool's usable space is its free raw space divided by how
-> many times it stores each byte. And because no single disk may fill up, writes stop a little
-> before the pool is truly full.
+> any one drive: the limit is the pool. How much a pool can still take is not simply its free space
+> divided by how many times it stores each byte, because copies of a chunk must sit on different
+> nodes. Two nodes with a small and a large disk, each holding a copy of everything, are full when
+> the small one is. So a pool reports what its placement actually lets through before its first
+> disk fills, and says how much space its layout leaves unusable.
 
 ### How it works
 
-A pool reports capacity as free raw space divided by its encoded overhead: `(data + parity) ÷
-data` in an erasure-coded pool, or `replicas` in a replicated one. With encoding on write, most
-data in an erasure-coded pool lands encoded; data still held as copies is shown separately. Pools
-that share disks draw on the same free space. A worked example with six empty 2 TB disks, 12 TB
-raw:
+Each disk's *room* is what the pool's `write_limit` (90% by default) leaves of it after the data
+already there, and the placement table says what *share* of new data each disk receives: the PGs it
+belongs to, out of all of them. Chunks hash evenly over PGs, so the pool can take, before its first
+disk reaches the limit:
 
 ```text
- pool     overhead               usable (encoded)
- rep3     3                      12 TB / 3   = 4 TB
- ec4-2    (4 + 2) / 4 = 1.5      12 TB / 1.5 = 8 TB   (data still held as copies costs 3x)
+ available = smallest over the pool's disks of   room ÷ share
 ```
 
+Vitastor reports the same figure. In the
+[capacity model spike](../docs/design.md#appendix-capacity-model-spike), filling a table with
+evenly hashed 4 MiB chunks hit the first refused write within 0.3% of it in every layout tried. The
+figure everyone first reaches for, total room divided by the overhead (`replicas`, or
+`(data + parity) ÷ data`), is what Ceph's `MAX AVAIL` and MinIO compute, and it holds only when
+every node can take a share proportional to its size:
+
+```text
+ layout                                      room ÷ overhead    available
+ rep3,  six empty 2 TB disks on six nodes    10.8 TB / 3 = 3.6  3.6 TB
+ rep2,  nodes with 0.7 and 2 GB disks        2.43 GB / 2 = 1.2  0.63 GB   every chunk needs a copy on the 0.7 GB disk
+ ec4-2 at 2 per node, nodes of 4, 4, 1 TB    8.1 TB / 1.5 = 5.4 1.8 TB    each node holds a third of every chunk
+```
+
+The pool also computes a *balanced* figure, the most any placement could make available under the
+failure-domain rule, from a closed formula over the nodes' room. The difference between room ÷
+overhead and balanced is *stranded* space, which no rebalancing reaches: in the `rep2` example, 0.58 GB of data, or 1.17 GB of
+the large disk's 1.8 GB of room. The pool raises a `Stranded` warning when that exceeds a tenth of its room, and the CLI
+asks for confirmation when a layout would strand more than half of a node's room. It never refuses:
+another pool on the same disks, such as a one-copy pool, can use the space. Other warnings say
+when a disk is within 10 points of `write_limit` (`NearFull`), past it (`Full`), when available
+lags balanced because members are still moving (`Unbalanced`), and when losing the largest node
+would leave recovery no room to restore every copy (`CannotReprotect`).
+
 Volumes are thin: with the pool setting `overcommit` on (the default), volume sizes may add up to
-more than the pool holds. The fill limit is per disk, not a pool average: a write fails with
-`ENOSPC` ("no space left on device") once any disk holding one of its PG's members is fuller than
-the pool's `write_limit`, 90% by default, because one full disk stalls every PG on it. The pool
-warns 10 points earlier. Why the headroom is needed, and how snapshots and quotas count against
-it, are covered in [post 05](05-the-cleaner-and-free-space.md) and
-[post 07](07-pools-and-redundancy.md) ([Volume size and capacity](../docs/design.md#volume-size-and-capacity)
+more than the pool holds. With it off, a new volume is admitted only while every volume's size fits
+the balanced figure. Writes that add data are refused once any disk holding one of their PG's
+members is past `write_limit`, because one full disk stalls every PG on it; overwrites of blocks a
+volume already holds, and deletes, still pass. What a refusal looks like depends on the frontend:
+a file write gets `ENOSPC` from `write()`, and a block volume's write waits for space
+([post 05](05-the-cleaner-and-free-space.md), [post 09](09-rwx-filesystem-and-cache-coherence.md),
+[post 10](10-block-snapshots-and-clones.md); [Volume size and capacity](../docs/design.md#volume-size-and-capacity)
 has the full list).
 
 ## What a chunk promises: the ChunkStore
@@ -775,14 +813,16 @@ What backs these choices, with numbers exactly as the design and spikes give the
   [Pools and redundancy](../docs/design.md#pools-and-redundancy),
   [Freeing space](../docs/design.md#freeing-space),
   [Alternatives considered](../docs/design.md#alternatives-considered) (rows "Placement",
-  "Chunk versions" and "Sub-block writes"), [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions).
+  "Pool capacity", "Chunk versions" and "Sub-block writes"), [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions).
 - Glossary: [Data model](../docs/glossary.md#data-model),
   [Redundancy and placement](../docs/glossary.md#redundancy-and-placement),
   [Words with more than one meaning](../docs/glossary.md#words-with-more-than-one-meaning).
 - Spikes: [spikes/chunk-epochs](../spikes/chunk-epochs/),
   [spikes/go-cpu-per-op](../spikes/go-cpu-per-op/),
-  [spikes/sub-block-writes](../spikes/sub-block-writes/).
-- Studies: [sub-block writes and small files](../studies/sub-block-writes/README.md).
+  [spikes/sub-block-writes](../spikes/sub-block-writes/),
+  [spikes/capacity-model](../spikes/capacity-model/).
+- Studies: [sub-block writes and small files](../studies/sub-block-writes/README.md),
+  [pool capacity and ENOSPC](../studies/capacity-and-enospc/README.md).
 - Code: [internal/core/ids.go](../internal/core/ids.go) (`ChunkID`, `ChunkIndexOf`, `Hash`,
   `PGIndexOf`, `CheckPGCount`), [internal/core/crc.go](../internal/core/crc.go),
   `internal/core/testdata/chunk_id_golden.txt`.

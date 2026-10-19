@@ -54,7 +54,11 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Attach and mount.** Attach makes a volume available on a node; mount makes it appear at a path. For RWX, rock-solid mounts each volume once per node and **bind-mounts** that mount into each pod: one directory made visible at a second path.
 
-**Thin provisioning and overcommit.** A thin volume takes space only as it is written, so creating a 1 TiB volume allocates nothing. Overcommit lets the sizes of all volumes add up to more than the disks hold, betting they never all fill. See [Volume size and capacity](design.md#volume-size-and-capacity).
+**Thin provisioning and overcommit.** A thin volume takes space only as it is written, so creating a 1 TiB volume allocates nothing. Overcommit lets the sizes of all volumes add up to more than the disks hold, betting they never all fill; with it off, the pool admits a volume only while every volume's size fits its balanced capacity. When a thin pool does fill, a block volume's writes that need new space wait until it has room: failing them would corrupt the filesystem inside. See [Volume size and capacity](design.md#volume-size-and-capacity) and [Block frontend](design.md#block-frontend).
+
+**Available, balanced and stranded capacity.** Available is what a pool can still take before its first disk reaches `write_limit`, given where its placement table sends new data; it is what `df` and Kubernetes see. Balanced is the most any placement could make available, given that copies of a chunk must sit in different failure domains; stranded is the room that rule leaves unusable, such as most of the larger disk when two nodes of different sizes each hold a copy of everything. See [Volume size and capacity](design.md#volume-size-and-capacity).
+
+**Space grant.** Bytes of a pool a node may hold in its write-back buffer, granted by the control plane on the node's heartbeat. The daemon acknowledges a buffered write only against a grant, so a full pool is reported by `write()` itself, as a local filesystem reserves blocks before it buffers. See [Client design](design.md#client-design).
 
 **KubeVirt live migration.** KubeVirt runs virtual machines in pods. Moving a running VM to another node needs both nodes to open its disk at once for a moment, which is why RWX block volumes exist.
 
@@ -78,7 +82,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Bit rot and misdirected writes.** Data that changed on the media after it was written, and a write that the drive put at the wrong address. Both return wrong data without an error, so rock-solid checksums every 4 KiB block with **CRC32C**, a fast checksum with CPU instructions for it.
 
-**TRIM, discard.** Telling an SSD that blocks no longer hold data, so it can erase them ahead of time and needs less internal copying. A pod's filesystem sends discards when files are deleted; rock-solid turns them into [punches](#data-model).
+**TRIM, discard.** Telling an SSD that blocks no longer hold data, so it can erase them ahead of time and needs less internal copying. A pod's filesystem sends discards when files are deleted, since the CSI driver mounts it with `discard`; rock-solid turns them into [punches](#data-model), which give the space back to the pool.
 
 **Queue depth (QD).** How many I/Os are in flight at once. Queue depth 1, one I/O waiting for the previous one, measures pure latency; deeper queues measure throughput.
 
@@ -298,7 +302,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Direct I/O.** Bypassing the page cache, so every read and write goes to the daemon. rock-solid opens a file with direct I/O while it is write-shared.
 
-**Write-back and write-through.** A write-back cache acknowledges a write before passing it on and sends it later; a write-through cache passes it on first. The daemon's **write-back buffer** holds a file's writes while no other node shares the file.
+**Write-back and write-through.** A write-back cache acknowledges a write before passing it on and sends it later; a write-through cache passes it on first. The daemon's **write-back buffer** holds a file's writes while no other node shares the file and the node's space grant covers them; otherwise the daemon writes through.
 
 **Cache coherence.** Making every node's cache agree with the latest writes, so no node reads stale data. See [Cache coherence tiers](design.md#cache-coherence-tiers).
 
@@ -380,6 +384,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 | Log | The disk log holding all of a disk's data. A Raft log, the ordered entries of a shard, stored inside the disk log. Operator logs, ordinary text messages |
 | Lease | A session lease, held by a client daemon. A primary's read lease, held per PG. A Raft leader lease, for reads without a round trip; both of the last two ride on per-node-pair leases. In Samba, an SMB lease is a client cache right |
 | Pool | A storage pool: PGs sharing one redundancy scheme. A buffer pool: memory that I/O buffers come from |
+| Reserve, reservation | The disk log's reserve segments, kept for work that frees space. A pool's reservation of volume sizes with `overcommit` off. A space grant, which reserves pool space for a node's buffered writes |
 | Recovery | Crash recovery: rebuilding a disk's state from its log at start. PG recovery: restoring full redundancy after a failure |
 | Index | The chunk index of a disk. A MetaStore shard's state. The S3 index of keys to objects |
 | Round | A group-commit round: one write and one flush. A round trip: a message and its reply |

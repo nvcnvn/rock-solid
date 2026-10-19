@@ -1,5 +1,5 @@
 #!/bin/bash
-# Root only, not run yet: what ext4 and XFS do when the block device under them runs out of
+# Root and device-mapper only, not run yet: what ext4 and XFS do when the block device under them runs out of
 # space, failing writes with BLK_STS_NOSPC (dm-thin error_if_no_space) or holding them (dm-thin's
 # default queue, released by growing the pool or failed after no_space_timeout).
 # Creates loop devices and device-mapper targets under $WORK and removes them on exit.
@@ -89,17 +89,26 @@ overwrite_ok() { # rewrites 16 MiB of a file written before the pool filled
 
 mount_state() { findmnt -no OPTIONS "$MNT" | cut -d, -f1; }
 
+fs_check() { # unmounts, then prints clean or damaged from e2fsck -fn or xfs_repair -n
+	umount "$MNT" || { echo unmount-failed; return; }
+	case $1 in
+	ext4) e2fsck -fn /dev/mapper/$THIN >"$WORK/fsck.out" 2>&1 ;;
+	xfs) xfs_repair -n /dev/mapper/$THIN >"$WORK/fsck.out" 2>&1 ;;
+	esac && echo clean || echo damaged
+}
+
 declare -A FS=([T1]=ext4 [T2]=xfs [T3]=ext4 [T4]=xfs [T5]=ext4 [T6]=xfs)
 
 run_error() { # T1 ext4, T2 xfs: error_if_no_space
 	setup error "${FS[$1]}"
-	say "== $1 ${FS[$1]} on a thin volume with error_if_no_space; expect: fsync ENOSPC, the fs stays rw, overwrites work"
+	say "== $1 ${FS[$1]} on a thin volume with error_if_no_space; expect: fsync ENOSPC, the fs stays rw, overwrites work, ext4 damaged on disk (as T1L in results-loop.txt)"
 	dmesg -C 2>/dev/null
 	check "$1 first error" "$(fill_errno)" ENOSPC
 	check "$1 overwrite of old blocks" "$(overwrite_ok)" ok
 	touch "$MNT"/new{1..200} 2>/dev/null; sync
 	check "$1 mount after 200 creates" "$(mount_state)" rw
 	dmesg | grep -E 'critical space|EXT4-fs|XFS' | head -12 | sed 's/^/   dmesg: /'
+	if [ "${FS[$1]}" = ext4 ]; then check "$1 fsck" "$(fs_check ext4)" damaged; else say "   xfs_repair: $(fs_check xfs)"; fi
 }
 
 run_queue_grow() { # T3 ext4, T4 xfs: queue, then grow the pool after 20 s
@@ -116,13 +125,14 @@ run_queue_grow() { # T3 ext4, T4 xfs: queue, then grow the pool after 20 s
 	say "   took $((SECONDS - start)) s"
 	check "$1 mount" "$(mount_state)" rw
 	dmesg | grep -E 'critical space|EXT4-fs|XFS|blocked for more' | head -12 | sed 's/^/   dmesg: /'
+	check "$1 fsck" "$(fs_check "${FS[$1]}")" clean
 }
 
 run_queue_timeout() { # T5 ext4, T6 xfs: queue until no_space_timeout fails the writes
 	setup queue "${FS[$1]}"
 	local t
 	t=$(cat /sys/module/dm_thin_pool/parameters/no_space_timeout)
-	say "== $1 ${FS[$1]}, queue_if_no_space, no_space_timeout ${t} s, never grown; expect: ENOSPC after about ${t} s, overwrites still work"
+	say "== $1 ${FS[$1]}, queue_if_no_space, no_space_timeout ${t} s, never grown; expect: ENOSPC after about ${t} s, overwrites still work, ext4 damaged on disk as in T1"
 	dmesg -C 2>/dev/null
 	local start=$SECONDS
 	check "$1 first error" "$(fill_errno)" ENOSPC
@@ -130,6 +140,7 @@ run_queue_timeout() { # T5 ext4, T6 xfs: queue until no_space_timeout fails the 
 	check "$1 overwrite of old blocks" "$(overwrite_ok)" ok
 	check "$1 mount" "$(mount_state)" rw
 	dmesg | grep -E 'critical space|EXT4-fs|XFS|blocked for more' | head -12 | sed 's/^/   dmesg: /'
+	if [ "${FS[$1]}" = ext4 ]; then check "$1 fsck" "$(fs_check ext4)" damaged; else say "   xfs_repair: $(fs_check xfs)"; fi
 }
 
 [ "$(id -u)" = 0 ] || { echo "needs root" >&2; exit 1; }

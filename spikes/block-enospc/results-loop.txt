@@ -1,0 +1,62 @@
+# Linux 6.18.44-fc-v139, mke2fs 1.47.0 (5-Feb-2023), 2026-10-19T06:24Z
+== T1L ext4 on a loop device whose 192 MiB backing tmpfs fills; expect: fsync ENOSPC, the fs stays rw, overwrites work
+   errors behaviour: Errors behavior: Continue
+[OK ] T1L first error got=ENOSPC
+   failed at: ENOSPC fsync
+   backing tmpfs:  192M 192M
+[OK ] T1L overwrite of old blocks got=ok
+[OK ] T1L mount after rm and 200 creates got=rw
+[FAIL] T1L new write after rm got=fail want=ok
+   dmesg: [  556.575936] critical space allocation error, dev loop0, sector 572416 op 0x1:(WRITE) flags 0x0 phys_seg 8 prio class 2
+   dmesg: [  556.579654] EXT4-fs warning (device loop0): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 71552)
+   dmesg: [  556.583441] EXT4-fs (loop0): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   dmesg: [  556.583645] critical space allocation error, dev loop0, sector 573440 op 0x1:(WRITE) flags 0x4000 phys_seg 20 prio class 2
+   dmesg: [  556.591686] critical space allocation error, dev loop0, sector 576000 op 0x1:(WRITE) flags 0x4000 phys_seg 20 prio class 2
+[FAIL] T1L fsck after unmount got=4 want=0
+   fsck: Warning: skipping journal recovery because doing a read-only filesystem check.
+   fsck: Block bitmap differences:  +(98304--98432) +(163840--163968) +(164352--165375)
+   fsck: Fix? no
+   fsck: Free blocks count wrong for group #3 (32639, counted=32768).
+   fsck: Fix? no
+   fsck: Free blocks count wrong for group #5 (31615, counted=32768).
+   fsck: Fix? no
+   fsck: Free blocks count wrong (244069, counted=245351).
+   fsck: Fix? no
+   fsck: Block bitmap differences: Group 3 block bitmap does not match checksum.
+   fsck: IGNORED.
+   fsck: Group 5 block bitmap does not match checksum.
+# Linux 6.18.44-fc-v139, mke2fs 1.47.0 (5-Feb-2023), 2026-10-19T06:24Z
+== T1D ext4 -o discard on a loop device whose 192 MiB backing tmpfs fills; expect: fsync ENOSPC, the fs stays rw, overwrites work
+   errors behaviour: Errors behavior: Continue
+[OK ] T1D first error got=ENOSPC
+   failed at: ENOSPC fsync
+   backing tmpfs:  192M 192M
+[OK ] T1D overwrite of old blocks got=ok
+[OK ] T1D mount after rm and 200 creates got=rw
+[OK ] T1D new write after rm got=ok
+   dmesg: [  557.548283] critical space allocation error, dev loop0, sector 572416 op 0x1:(WRITE) flags 0x0 phys_seg 8 prio class 2
+   dmesg: [  557.554112] EXT4-fs warning (device loop0): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 71552)
+   dmesg: [  557.554439] critical space allocation error, dev loop0, sector 573440 op 0x1:(WRITE) flags 0x4000 phys_seg 20 prio class 2
+   dmesg: [  557.558074] EXT4-fs (loop0): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   dmesg: [  557.559968] critical space allocation error, dev loop0, sector 576000 op 0x1:(WRITE) flags 0x4000 phys_seg 20 prio class 2
+   dmesg: [  557.559977] critical space allocation error, dev loop0, sector 578560 op 0x1:(WRITE) flags 0x4000 phys_seg 20 prio class 2
+   dmesg: [  557.559980] critical space allocation error, dev loop0, sector 581120 op 0x1:(WRITE) flags 0x4000 phys_seg 20 prio class 2
+   dmesg: [  557.559981] critical space allocation error, dev loop0, sector 583680 op 0x1:(WRITE) flags 0x4000 phys_seg 20 prio class 2
+   dmesg: [  557.559983] critical space allocation error, dev loop0, sector 586240 op 0x1:(WRITE) flags 0x4000 phys_seg 20 prio class 2
+   dmesg: [  557.559985] critical space allocation error, dev loop0, sector 588800 op 0x1:(WRITE) flags 0x0 phys_seg 8 prio class 2
+   dmesg: [  557.559987] critical space allocation error, dev loop0, sector 589824 op 0x1:(WRITE) flags 0x4000 phys_seg 20 prio class 2
+   dmesg: [  557.559989] critical space allocation error, dev loop0, sector 592384 op 0x1:(WRITE) flags 0x4000 phys_seg 20 prio class 2
+   dmesg: [  557.559993] EXT4-fs warning (device loop0): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 75648)
+   dmesg: [  557.559999] EXT4-fs warning (device loop0): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 77696)
+   dmesg: [  557.560001] EXT4-fs warning (device loop0): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 79744)
+[FAIL] T1D fsck after unmount got=4 want=0
+   fsck: Block bitmap differences:  +(98304--98432)
+   fsck: Fix? no
+   fsck: Free blocks count wrong for group #3 (32639, counted=32768).
+   fsck: Fix? no
+   fsck: Free blocks count wrong (244069, counted=244198).
+   fsck: Fix? no
+   fsck: Block bitmap differences: Group 3 block bitmap does not match checksum.
+   fsck: IGNORED.
+   fsck: /dev/loop0: ********** WARNING: Filesystem still has errors **********
+   fsck: /dev/loop0: 213/65536 files (0.0% non-contiguous), 18075/262144 blocks

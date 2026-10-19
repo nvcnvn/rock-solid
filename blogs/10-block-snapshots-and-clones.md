@@ -192,8 +192,10 @@ daemon caches nothing, and every I/O goes to the chunk primary, whose single ord
 all the coordination needed. The kernel's own cache is the application's choice: KubeVirt opens
 shared disks with `cache=none` (direct I/O), which is what makes live migration safe.
 
-**Discard gives space back.** The device advertises discard, so `fstrim` or a `discard` mount in
-the pod becomes a punch, and a thin-provisioned block volume shrinks when files on it are deleted.
+**Discard gives space back.** The device advertises discard, and the CSI driver mounts the
+filesystems it creates on block volumes with `discard`, so deleting a file in the pod becomes a
+punch at once and a thin-provisioned block volume shrinks. Why not a weekly `fstrim` is part of the
+next section.
 
 **Surviving a daemon restart.** Normally a ublk device disappears when its server exits, and a
 failed write makes ext4 abort its journal and XFS shut down. rock-solid creates every device with
@@ -226,6 +228,54 @@ An *incarnation* is the daemon's start time, named in each connection's hello. A
 seen a newer incarnation of a session rejects the older one's writes. Applying a reissued write
 twice is harmless: the same bytes give the same blocks under a newer version. The flags and
 recovery steps are in [Daemon restart and upgrade](../docs/design.md#daemon-restart-and-upgrade).
+
+### When the pool is full: pause, never fail
+
+> **In plain words.** A thin volume can promise more space than the pool has. When the pool really
+> fills, a write into a part of the volume never written before has nowhere to go. Telling the
+> filesystem inside "no space" sounds honest, but that filesystem is not built for a disk that
+> refuses writes into its own free space: some of the refused writes are its own bookkeeping, and
+> it loses them. So rock-solid makes those writes wait until there is room, the way Ceph's block
+> devices do. A paused volume is bad; a corrupted one is worse.
+
+**How it works.** Writes that add no data still pass a full pool's `write_limit`: overwrites of
+blocks the volume already holds and nobody else shares (in the log, each kills the block it
+replaces) and discards. So a filesystem's journal keeps working. A write that needs new space is
+held, and the daemon retries it whenever the control plane reports that the pool has room again,
+with no time limit. The evidence is the
+[block ENOSPC spike](../docs/design.md#appendix-block-enospc-spike): ext4 on a loop device that
+refused writes to never-written blocks reported `ENOSPC` at `fsync` and stayed mounted, and
+overwrites worked, yet the refused writes included the first block bitmaps of block groups it had
+never used, and `e2fsck` found wrong bitmaps and free counts after unmount. The options weigh up
+like this:
+
+| On a full pool | Who does it | What happens to the filesystem inside |
+| --- | --- | --- |
+| Fail at once with `BLK_STS_NOSPC` | dm-thin with `error_if_no_space` | Damaged on disk, as in the spike |
+| Hold 60 s, then fail | dm-thin and LVM thin by default | The same damage, a minute later, unless the pool grows |
+| Let writes past the limit into a reserve | Nobody studied | The same, once the reserve is spent; meanwhile recovery has less room |
+| Hold until there is room | Ceph RBD, Vitastor, rock-solid | Intact, but the volume hangs while the pool is full |
+
+The hang is real. Held writes keep their ublk tags, and ext4's journal waits for the data it
+orders, so a volume that keeps writing soon stops altogether. Its processes sleep where nothing can
+interrupt them, the kernel warns about them after 120 s, and the pod cannot be killed until the
+writes complete. The node plugin posts a Warning event on the PVC naming the pool, and the pool's
+condition is `Full`. Three ways out, in this order: free space outside the volume (delete snapshots,
+which are what make overwrites need new space, delete other volumes, or add a disk), and the writes
+resume by themselves; raise the pool's `write_limit` into the room above it; or run
+`rock-solid volume fail-held <volume>`, which completes the held writes with `ENOSPC` when the pod
+must go, knowing its filesystem then needs `fsck`.
+
+Discard matters here too. In the spike, without `discard` a new write after deleting a 512 MiB file
+still failed: the space ext4 freed never reached the device. With `-o discard` it succeeded. A
+weekly `fstrim` would leave a full pool full until its next run, and a punch costs one log entry, so
+the CSI driver mounts with `discard`. A VM's raw disk sends discards only if its guest does.
+
+Remote clients cannot be held forever: the Linux NVMe host times a command out after 30 s and
+retries a refused one at most five times. So the target holds a write 20 s, then answers Capacity
+Exceeded with the longest retry delay NVMe allows, 6,553.5 s, and a stock host pauses about 9 hours
+before it gives up, at which point its filesystem is damaged as above. A client that must never
+give up raises `nvme_core.max_retries`.
 
 ## Part 2: snapshots
 
@@ -602,8 +652,15 @@ which is exactly why snapshots are cheap.
   every one of 500 seeds, and wrong on every seed when merged on the committed version only: the
   evidence that 512-byte sectors are safe on RWX block once they merge at the primary.
 
+- **Block ENOSPC spike** ([appendix](../docs/design.md#appendix-block-enospc-spike),
+  [`spikes/block-enospc/`](../spikes/block-enospc/)). ext4 on a 1 GiB loop device backed by a
+  192 MiB tmpfs: refused new-space writes gave `ENOSPC` at `fsync`, the mount stayed `rw` and
+  overwrites worked, but `e2fsck` exited 4 with block bitmaps of groups 3 and 5 wrong; without
+  `discard`, a write after `rm` still failed.
+
 The simulator will check after every step that a snapshot holds every write acknowledged before
-its cut and none issued after.
+its cut and none issued after, and that no block write needing new space completes with an error
+while the pool is full unless an operator failed it.
 
 ## Trade-offs: what this costs
 
@@ -611,8 +668,10 @@ its cut and none issued after.
   snapshot until its session expires and is fenced.
 - **Crash-consistent, not application-consistent.** A database still needs a backup-tool hook to
   be clean on restore.
-- **Snapshots use space.** The first write to a pinned block needs new space, so a pool near its
-  `write_limit` can return `ENOSPC` even to an overwrite.
+- **Snapshots use space.** The first write to a pinned block needs new space, so on a pool past
+  its `write_limit` even an overwrite waits for room.
+- **A full pool hangs a block volume** until space appears or an operator acts, instead of failing
+  its writes and damaging its filesystem; remote NVMe-oF clients give up after about 9 hours.
 - **A freeze copies a map,** up to 1,024 entries for a chunk overwritten at random 4K, and an
   unflattened clone pays an extra hop and keeps its source's frozen versions alive.
 - **Block volumes fragment the chunk index.** Random 4K overwrites can push a 1 TB disk's index
@@ -631,6 +690,12 @@ From the [roadmap and open questions](../docs/design.md#roadmap-and-open-questio
   a block volume's fragmented index needs it.
 - **Regrouping chunks overwritten at random.** Should a chunk whose live map passes some number of
   extents be rewritten whole? Each regroup writes 4 MiB, so it needs block-volume traces.
+- **The pause on dm-thin, and XFS.** The block ENOSPC spike ran on a loop device and ext4 only;
+  its dm-thin script, for ext4 and XFS, holding and failing, waits for a kernel with
+  device-mapper. Does XFS, which retries metadata `ENOSPC` forever, survive a refused write that
+  ext4 does not, and does a hold that ends when the pool grows leave both clean?
+- **The NVMe-oF hold** has to be checked on a real initiator: does a stock host wait out five long
+  retry delays without resetting the controller?
 - **Incarnation fencing in the epoch-change model.** A dead daemon's write delivered late to an old
   primary, or to a new primary that has not yet seen the successor's incarnation: does the
   per-primary table of newest incarnations need to survive a primary change?
@@ -652,8 +717,10 @@ Phase 8 ships ublk only.
   [Files and caching](../docs/glossary.md#files-and-caching) (ublk, NVMe-oF, incarnation, S3).
 - Spikes: [`spikes/chunk-epochs/`](../spikes/chunk-epochs/),
   [`spikes/cleaner-wa/`](../spikes/cleaner-wa/), [`spikes/nvme-flush/`](../spikes/nvme-flush/),
-  [`spikes/sub-block-writes/`](../spikes/sub-block-writes/); the
-  [sub-block writes study](../studies/sub-block-writes/README.md).
+  [`spikes/sub-block-writes/`](../spikes/sub-block-writes/),
+  [`spikes/block-enospc/`](../spikes/block-enospc/); the
+  [sub-block writes study](../studies/sub-block-writes/README.md) and the
+  [pool capacity and ENOSPC study](../studies/capacity-and-enospc/README.md).
 - Other posts: [02](02-chunks-and-placement.md), [03](03-epochs-leases-and-failures.md),
   [04](04-one-log-per-disk.md), [05](05-the-cleaner-and-free-space.md),
   [06](06-the-lsm-tree.md), [07](07-pools-and-redundancy.md), [08](08-the-metastore.md),

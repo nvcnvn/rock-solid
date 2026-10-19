@@ -181,10 +181,12 @@ fill  design: cost-benefit, 2 streams, headers (simulated)        model   design
 Going from 90% to 95% full more than doubles the cost. At 95%, 94% of everything the disk writes
 would be cleaning, and the cleaner would spend about 20 µs of CPU per user 4K write (cleaner
 spike, C7, an order of magnitude on a shared machine). That is why a pool's
-[`write_limit`](../docs/design.md#volume-size-and-capacity) defaults to 90%: a write fails with
-`ENOSPC` once any disk holding one of its placement group's members is fuller than that, and the
+[`write_limit`](../docs/design.md#volume-size-and-capacity) defaults to 90%: a write that adds data
+is refused once any disk holding one of its placement group's members is fuller than that, and the
 pool warns 10 points earlier. The limit is checked per disk, because one full disk stalls every
-placement group on it.
+placement group on it. Overwrites of blocks a volume already holds, and punches, still pass: in a
+log an overwrite writes new blocks but kills as many old ones, so it adds no live data, and a punch
+frees space.
 
 Skewed workloads do better: with Zipf-distributed overwrites, cost-benefit cleaning reaches 9.3 at
 95% rather than 17.3. Snapshots lower WA slightly at the same fill (pinned data is perfectly cold:
@@ -533,9 +535,16 @@ A full disk can therefore show up in three ways, in this order:
 
 | Condition | What the client sees |
 | --- | --- |
-| A disk holding a member of the write's placement group is past the pool's `write_limit` | `ENOSPC` |
+| A disk holding a member of the write's placement group is past the pool's `write_limit`, and the write adds data | Refused: `ENOSPC` from `write()` on a file volume ([post 09](09-rwx-filesystem-and-cache-coherence.md)), a wait until the pool has room on a block volume ([post 10](10-block-snapshots-and-clones.md)) |
 | Below the limit, the cleaner falls behind | Slower writes, then waiting |
 | The cleaner has no victim that passes its net-gain guard: nothing more can be freed | `NoSpace` from the disk log |
+
+The first row is the only one the application normally meets, and the design is careful about
+how. A file's buffered writes are acknowledged against a *space grant* so that `write()` itself
+reports a full pool. A block volume's write is never failed for space, because the filesystem
+inside the volume would be damaged by it: in the
+[block ENOSPC spike](../docs/design.md#appendix-block-enospc-spike), ext4 reported `ENOSPC` at
+`fsync` and stayed mounted, yet `e2fsck` later found block bitmaps it had lost.
 
 The same wait applies to a lagging checkpoint: once the records after the newest manifest reach
 twice `max_replay_bytes` (default 64 MiB, so 128 MiB), group commit takes items only from the
@@ -592,15 +601,17 @@ flowchart LR
   block, with a whole-block merge at the chunk's primary, and frees only the whole blocks after it.
   A punch that covers part of a block frees nothing; it writes a new block of zeros there.
 - **Block discard** from the pod's filesystem reaches the daemon through ublk and becomes a punch
-  (phase 8). **Deleting a block volume** purges chunks `0 .. size ÷ CHUNK_SIZE`; **deleting a
+  (phase 8). The CSI driver mounts the filesystems it creates with `discard`, because without it
+  deleting files frees nothing in the pool: in the block ENOSPC spike, a write after `rm` still
+  failed until the mount used `discard`. **Deleting a block volume** purges chunks `0 .. size ÷ CHUNK_SIZE`; **deleting a
   filesystem volume** has every disk of the pool sweep its chunk index for the volume's ID.
 - **Tombstones.** Punching a whole chunk keeps the chunk's entry, its tombstone, and removes its
   live map. Punches are recorded in record headers like writes, so an index rebuilt from the
   headers cannot bring a deleted chunk back.
 - **Snapshots pin blocks.** Punches carry the snapshot epoch, so a purge never frees a block a
   snapshot's frozen map still refers to. Deleting a snapshot starts a sweep that drops frozen
-  versions nothing needs. Until then, near full even an overwrite can fail with `ENOSPC`, because
-  the first write to a pinned block needs new space.
+  versions nothing needs. Until then, near full even an overwrite is refused, because the first
+  write to a pinned block needs new space.
 
 ## Evidence
 
@@ -653,9 +664,10 @@ From the design's [Roadmap and open questions](../docs/design.md#roadmap-and-ope
   replication queue.
 - **Cleaning-debt thresholds.** Does the measured-rate bucket keep latency bounded under bursty
   overwrites at 90 to 95% full, and should the thresholds scale with the current WA?
-- **Deletes on a full disk.** With no free segment outside the reserve, punches and unlinks wait
-  like any write. Should they draw on a slice of the reserve, as ZFS's slop space lets `rm`
-  through?
+- **Deletes on a full disk.** Punches pass the pool's `write_limit`, but with no free segment
+  outside the reserve they, and the MetaStore's unlinks, wait like any write. Should they draw on a
+  slice of the reserve? Every system studied keeps one: ext4 for punches, XFS a reserve pool, Btrfs
+  for `unlink`, ZFS its slop space, CockroachDB a ballast file an operator deletes.
 - **The drive's own WA under this log** with 16, 64 or 256 MiB segments, measured with SMART
   host-writes and NAND-writes counters.
 
@@ -679,12 +691,15 @@ has no entry for the cleaner or free space today.
   [parallel cleaner](../docs/design.md#appendix-parallel-cleaner-spike),
   [stream overlap](../docs/design.md#appendix-stream-overlap-spike),
   [LSM space](../docs/design.md#appendix-lsm-space-spike),
-  [value separation](../docs/design.md#appendix-value-separation-spike).
+  [value separation](../docs/design.md#appendix-value-separation-spike),
+  [block ENOSPC](../docs/design.md#appendix-block-enospc-spike).
 - Spikes: [`spikes/cleaner-wa/`](../spikes/cleaner-wa/),
   [`spikes/cleaner-streams/`](../spikes/cleaner-streams/),
   [`spikes/parallel-cleaner/`](../spikes/parallel-cleaner/),
   [`spikes/stream-overlap/`](../spikes/stream-overlap/),
-  [`spikes/lsm-study-space/`](../spikes/lsm-study-space/).
+  [`spikes/lsm-study-space/`](../spikes/lsm-study-space/),
+  [`spikes/block-enospc/`](../spikes/block-enospc/).
+- Study: [pool capacity and ENOSPC](../studies/capacity-and-enospc/README.md).
 - Code: [`internal/disklog/geometry.go`](../internal/disklog/geometry.go) (segment size),
   [`internal/disklog/segment.go`](../internal/disklog/segment.go) (segment header and stream tag),
   [`internal/disklog/manifest.go`](../internal/disklog/manifest.go) (segment usage table),

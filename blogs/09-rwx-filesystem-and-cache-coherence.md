@@ -244,7 +244,8 @@ The three rules, each from the [FUSE coherence spike](../docs/design.md#appendix
 2. **Write-back buffering lives in the daemon.** Every `write()` reaches the daemon as a FUSE
    request (about 5 µs), so the daemon always knows when a file has been written and can flush it
    on demand. While the file is not shared, the daemon buffers writes in its own memory and
-   acknowledges at once. It flushes a chunk as soon as it is full, and the rest on `fsync`,
+   acknowledges at once, as long as its *space grant* covers them ([below](#a-full-pool-space-grants)).
+   It flushes a chunk as soon as it is full, and the rest on `fsync`,
    `close` or a recall, in whole blocks where it can
    ([below](#small-writes-truncate-and-the-end-of-file)). The buffer holds up to 256 MiB per node (`writeback_buffer`); when it is
    full, the oldest partial chunk is flushed. As with the kernel's dirty pages, a crash loses
@@ -306,6 +307,60 @@ when a `setattr` changes the size (`fs/fuse/dir.c`). Whether an extending `write
 the program dirtied past the old end of file through a mapping in the cache is not tested yet;
 `fsx -e` does exactly that, and the daemon, which sees every extending write, can invalidate that
 one page if it must.
+
+### A full pool: space grants
+
+> **In plain words.** A buffered write is acknowledged before any disk has it. If the pool fills
+> before the daemon flushes it, the only places left to report the failure are a later `write()`,
+> `fsync` or `close`, and a program that ignores those loses data without a word. Local
+> filesystems avoid this by reserving space at `write()` time. rock-solid does the same across the
+> network: each node gets an allowance of pool space it may buffer against, and when the pool runs
+> short the allowance shrinks, writes go straight to the storage nodes, and `write()` itself says
+> "no space left".
+
+**How it works.** ext4, XFS and Btrfs all reserve blocks before they buffer a write
+(`ext4_da_reserve_space`, `xfs_dec_freecounter`, `btrfs_delalloc_reserve_space`), so `write()`
+returns `ENOSPC` and writeback never fails for space. Network clients do not: the Linux NFS client
+reports a full server at the next `write()`, `fsync` or `close`, CephFS at `fsync` or `close`
+after discarding what it had buffered, JuiceFS at the next `write()` or flush
+([capacity and ENOSPC study](../studies/capacity-and-enospc/README.md)).
+
+rock-solid's daemon buffers only against a **space grant**: bytes of a pool its node may hold
+unflushed. The heartbeat every node already sends the control-plane leader each second, the one
+that renews its session, reports what the node has buffered and flushed, and the reply sets the
+grant, at most the 256 MiB buffer. The daemon reuses its grant as flushes complete. The leader
+keeps a pool's grants at most half of what the pool can still take, so they shrink as it fills,
+and within the room every disk keeps above `write_limit`, because a granted flush is admitted past
+the limit and one node's buffer can land on a single disk:
+
+```mermaid
+flowchart TD
+    W["write() of a file not shared"] --> Q{"past the PVC size?"}
+    Q -- "yes" --> E1["ENOSPC"]
+    Q -- "no" --> G{"does the node's space grant<br/>cover it?"}
+    G -- "yes" --> B["take it from the grant, buffer,<br/>acknowledge in about 5 µs"]
+    B --> F["flushed later; admitted past write_limit,<br/>never refused for space"]
+    G -- "no" --> T["flush the chunk's buffered writes,<br/>send this write to the primary"]
+    T --> P{"pool past write_limit<br/>for a write that adds data?"}
+    P -- "no" --> OK["acknowledge, about 1 ms"]
+    P -- "yes" --> E2["ENOSPC from write()"]
+```
+
+*Near full, buffering turns into writing through, and the error arrives where programs look for it.*
+
+At 10 nodes this costs no extra message, about 16 bytes per pool on each heartbeat, and at most
+2.5 GiB of promised space. The price is speed near full: a write that goes through costs a round
+trip and a flush, about 1 ms on NVMe, against 5 µs buffered. CephFS pays the same once its pool is
+nearly full, when its client makes every write synchronous. Writes through `mmap` cannot be
+granted, since the kernel sends them at writeback; a refusal reaches `msync` or `fsync`.
+
+A flush can still fail for other reasons: the disk log has nothing left the cleaner can free, the
+session was fenced, or the daemon crashed. The daemon then drops the data, as CephFS does, because
+dirty data held forever would block the recalls and deletes that free space, and reports the error
+once to each handle that had the file open, at that handle's next `write()`, `fsync` or `close()`.
+That is the kernel's `errseq_t` rule for local filesystems, where each open file sees a writeback
+error once at `fsync`, extended to `close()` as NFS does; FUSE sends a `FUSE_FLUSH` on every
+`close()` and returns the daemon's answer.
 
 ### Tier 1: close-to-open, flock and open-file deletion
 
@@ -711,7 +766,7 @@ What survives a restart, in one table:
 | The mount and pods' open files | Survive | Survive |
 | Requests in flight | Finished by the old process | Resent by the kernel, deduplicated by replay records |
 | Session, locks, open registrations | Resumed: the memfd names the session | Resumed the same way |
-| Write-back buffer | Flushed before handover | Lost; the next `fsync` or `close` on each affected handle fails with `EIO` |
+| Write-back buffer | Flushed before handover | Lost; the next `write()`, `fsync` or `close` on each affected handle fails with `EIO` |
 | Kernel `INIT` parameters | Unchanged; a release that changes them needs a remount | Unchanged |
 | Pause measured in the spikes | 0.7 ms with the successor already running | 4.2 ms cold start from a holder; successor serving 3 to 10 ms after the kill under load |
 
@@ -797,6 +852,8 @@ like cache modes, and a lease break is a recall.
   `recall_timeout` (30 s), and it is fenced at every storage node.
 - **An owner crash pauses new opens** for one session lease while clients re-register.
 - **A daemon crash loses unflushed buffered writes**, reported as `EIO` but still lost.
+- **Near a full pool, writes slow down to a round trip each**, because space grants shrink and
+  writes go through, and pools on small, fast disks leave almost no room for grants at all.
 - **The daemon container is privileged**, and the descriptor holder is sensitive: a descriptor is
   the whole filesystem.
 - **FUSE parameters are frozen per mount**; changing them needs a remount.
@@ -825,6 +882,9 @@ From the [roadmap and open questions](../docs/design.md#roadmap-and-open-questio
   files pay off, from traces of real pods, and what the primary's base read costs on NVMe and
   SATA. And the `fsx -e` case above: an extending write after a mapped page was dirtied past the
   old end of file.
+- **Space grants on small, fast disks:** the room above `write_limit` must hold every grant plus a
+  second of a disk's writes, which on a 32 GB NVMe disk leaves almost nothing. Would a shorter
+  heartbeat for grants, or measured write rates, let such pools buffer?
 - **`recall_timeout`:** 30 s is a default to tune from recall acknowledgment times measured
   under load, not a measurement.
 - **Incarnation fencing:** does a primary's table of newest incarnations need to survive a primary
@@ -844,7 +904,8 @@ There are no tech-debt entries for the file frontend yet; it has no code.
 - Spikes: [fuse-coherence](../spikes/fuse-coherence/), [fuse-restart](../spikes/fuse-restart/),
   [fuse-handoff](../spikes/fuse-handoff/), [samba](../spikes/samba/),
   [sub-block-writes](../spikes/sub-block-writes/), summarized in the appendices of design.md.
-- Studies: [sub-block writes and small files](../studies/sub-block-writes/README.md).
+- Studies: [sub-block writes and small files](../studies/sub-block-writes/README.md),
+  [pool capacity and ENOSPC](../studies/capacity-and-enospc/README.md).
 - Code: none yet; planned in `internal/meta`, `internal/fuseproto` and `internal/frontend/fuse`
   ([Package layout](../docs/design.md#package-layout)).
 - Glossary: [Files and caching](../docs/glossary.md#files-and-caching),
