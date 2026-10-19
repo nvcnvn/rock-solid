@@ -1,0 +1,12 @@
+# Intel(R) Xeon(R) Processor @ 2.80GHz, 4 vCPUs (shared); kernel 6.18.44-fc-v139; go1.27.0; pebble v2.1.7; rock-solid internal/lsm at 86c47be; 2026-10-18
+$ ./bin/lsmc -mode pebble -keys 110000 -small 3300 -large 82500 -flushes 200
+# go go1.27.0, GOMAXPROCS 4, mode pebble, keys 110000, small 3300, large 82500, flushes 200, seed 1
+workload     policy                                   runsMean  runsMax       WA   cmp/fl spaceAvg spaceMax     peak   maxOut   inputs merge/fl
+steady       pebble leveled (LBase 64 MiB)                1.50        2    17.72    16.72     1.01     1.03     1.43     0.00      0.0     0.00
+steady       pebble leveled (LBase 4 MiB)                 3.42        4     6.48     5.48     1.30     1.44     2.41     0.00      0.0     0.00
+alternating  pebble leveled (LBase 64 MiB)                1.50        2     2.78     1.78     1.01     1.03     2.22     0.00      0.0     0.00
+alternating  pebble leveled (LBase 4 MiB)                 3.46        4     4.66     3.66     1.32     1.44     2.50     0.00      0.0     0.00
+bursty       pebble leveled (LBase 64 MiB)                2.50        3     4.77     3.77     2.09     2.54     3.21     0.00      0.0     0.00
+bursty       pebble leveled (LBase 4 MiB)                 3.20        4     4.29     3.29     1.34     1.88     3.20     0.00      0.0     0.00
+loguniform   pebble leveled (LBase 64 MiB)                2.29        3     4.97     3.97     1.50     2.28     2.82     0.00      0.0     0.00
+loguniform   pebble leveled (LBase 4 MiB)                 3.10        4     4.19     3.19     1.34     1.89     2.61     0.00      0.0     0.00

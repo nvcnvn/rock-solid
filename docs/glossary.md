@@ -230,7 +230,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Index.** A structure that finds data by key without scanning everything. The **chunk index** on each disk maps each chunk's blocks to their place in the log; its **live map** lists the current extents of each chunk.
 
-**LSM tree (log-structured merge tree).** The index structure used by most modern key-value engines (RocksDB, Cassandra) and by rock-solid. New entries go into an in-memory **memtable**; when it grows, it is written out whole as an immutable, sorted **sorted run** (often called an SSTable); **compaction** merges runs in the background, dropping overwritten and deleted entries. Writes are cheap; a lookup checks the memtable, then the runs. **Size-tiered** compaction merges runs of similar size.
+**LSM tree (log-structured merge tree).** The index structure used by most modern key-value engines (RocksDB, Cassandra) and by rock-solid. New entries go into an in-memory **memtable**; when it grows, it is written out whole as an immutable, sorted **sorted run** (often called an SSTable); **compaction** merges runs in the background, dropping overwritten and deleted entries. Writes are cheap; a lookup checks the memtable, then the runs. **Size-tiered** compaction merges runs of similar size; **universal** compaction, RocksDB's size-tiered variant that rock-solid uses, merges only runs adjacent in age, when a run is no larger than the newer runs before it or the newer runs together outgrow the oldest. **Leveled** compaction instead splits runs into key ranges and merges each range into the level below.
+
+**Read amplification, space amplification.** The runs a lookup searches, and the bytes an index takes divided by its live data. Compaction trades them against write amplification. See [The LSM tree](design.md#on-disk-format).
 
 **Memtable flush.** Writing a memtable out as a sorted run. Unrelated to a drive flush, though both make data durable.
 
@@ -240,7 +242,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Fence pointer, prefix compression.** A run is cut into blocks, and the first key of each block is a fence pointer: binary search over them finds the one block that can hold a key. Inside a block, each key is stored as the bytes it shares with the key before it plus the rest, which shrinks sorted keys with long common prefixes; every 16th key, a restart point, is stored whole so a search can start there. This is LevelDB's block format, which Pebble and RocksDB keep.
 
-**Bloom filter.** A small structure that answers "is this key possibly in this run?" with no false negatives and a few false positives, so a lookup can skip runs that cannot hold its key.
+**Bloom filter, prefix filter.** A small structure that answers "is this key possibly in this run?" with no false negatives and a few false positives (about 1% at 10 bits per key), so a lookup can skip runs that cannot hold its key. A prefix filter holds key prefixes instead, such as a chunk's `(pool, h, chunk_id)`, so a floor or a scan inside one prefix can skip runs too. See [The LSM tree](design.md#on-disk-format).
+
+**Block cache.** Memory holding recently read blocks of runs that live on disk, so repeated lookups skip the disk. rock-solid needs one only when an index outgrows memory. See [The LSM tree](design.md#on-disk-format).
 
 **B+-tree.** A sorted tree whose nodes are fixed-size pages, the classic structure for indexes. rock-solid's memtable is one, built **copy-on-write** so a reader can keep a consistent view while the writer goes on.
 

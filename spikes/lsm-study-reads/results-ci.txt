@@ -1,0 +1,46 @@
+# 6.18.44-fc-v139 go1.27.0 Intel(R) Xeon(R) Processor @ 2.80GHz, 4 vCPUs shared with other benchmarks, pebble a7b8321871e3, rock-solid 86c47be, 2026-10-18
+
+## L: lookups over N size-tiered runs, about 2000000 entries in all; CPU per lookup on a locked thread
+index            N op         filter     found %       ns     runs     probes  filter% fkeys/e  allocs
+ci-whole         6 read       real tree    100.0    14240        6          -        -       -    0.00
+ci-whole         6 read       none         100.0    12384     6.00       0.00        -       -    0.00
+ci-whole         6 read       bloom10      100.0     4131     1.06       6.00     0.76    0.25    0.00
+ci-whole         6 read       fuse8        100.0     3913     1.02       6.00     0.73    0.25    0.00
+ci-whole         6 unwritten  real tree      0.0    12527        6          -        -       -    0.00
+ci-whole         6 unwritten  none           0.0    13829     6.00       0.00        -       -    0.00
+ci-whole         6 unwritten  bloom10        0.0      679     0.07       6.00     0.76    0.25    0.00
+ci-whole         6 unwritten  fuse8          0.0      297     0.02       6.00     0.73    0.25    0.00
+ci-whole         6 runs [533328 533328 533328 133332 133332 133332] entries, 81.9 MB of runs
+ci-whole        12 read       real tree    100.0    22659       12          -        -       -    0.00
+ci-whole        12 read       none         100.0    22195    12.00       0.00        -       -    0.00
+ci-whole        12 read       bloom10      100.0     3722     1.12      12.00     0.76    0.25    0.00
+ci-whole        12 read       fuse8        100.0     3655     1.04      12.00     0.73    0.25    0.00
+ci-whole        12 unwritten  real tree      0.0    20172       12          -        -       -    0.00
+ci-whole        12 unwritten  none           0.0    20258    12.00       0.00        -       -    0.00
+ci-whole        12 unwritten  bloom10        0.0      813     0.13      12.00     0.76    0.25    0.00
+ci-whole        12 unwritten  fuse8          0.0      568     0.05      12.00     0.73    0.25    0.00
+ci-whole        12 runs [501760 501760 501760 125440 125440 125440 31360 31360 31360 7840 7840 7840] entries, 82.4 MB of runs
+ci-whole        24 read       real tree    100.0    28891       24          -        -       -    0.00
+ci-whole        24 read       none         100.0    31541    24.00       0.00        -       -    0.00
+ci-whole        24 read       bloom10      100.0     5053     1.18      24.00     0.76    0.25    0.00
+ci-whole        24 read       fuse8        100.0     4248     1.09      24.00     0.72    0.25    0.00
+ci-whole        24 unwritten  real tree      0.0    30355       24          -        -       -    0.00
+ci-whole        24 unwritten  none           0.0    30495    24.00       0.00        -       -    0.00
+ci-whole        24 unwritten  bloom10        0.0     1354     0.19      24.00     0.76    0.25    0.00
+ci-whole        24 unwritten  fuse8          0.0     1078     0.09      24.00     0.72    0.25    0.00
+ci-whole        24 runs [458752 458752 458752 114688 114688 114688 28672 28672 28672 7168 7168 7168 1792 1792 1792 448 448 448 112 112 112 28 28 28] entries, 75.8 MB of runs
+ci-overwrite     6 read       real tree     96.9    13873        6          -        -       -    0.00
+ci-overwrite     6 read       none          96.9    14219     6.00       0.00        -       -    0.00
+ci-overwrite     6 read       bloom10       96.9    15363     5.65       6.00     0.57    0.18    0.00
+ci-overwrite     6 read       fuse8         96.9    14539     5.65       6.00     0.55    0.18    0.00
+ci-overwrite     6 runs [533328 533328 533328 133332 133332 133332] entries, 77.9 MB of runs
+ci-overwrite    12 read       real tree     97.0    25457       12          -        -       -    0.00
+ci-overwrite    12 read       none          97.0    27329    12.00       0.00        -       -    0.00
+ci-overwrite    12 read       bloom10       97.0    18400     7.18      12.00     0.69    0.22    0.00
+ci-overwrite    12 read       fuse8         97.0    17375     7.15      12.00     0.68    0.22    0.00
+ci-overwrite    12 runs [501760 501760 501760 125440 125440 125440 31360 31360 31360 7840 7840 7840] entries, 80.7 MB of runs
+ci-overwrite    24 read       real tree     96.6    28898       24          -        -       -    0.00
+ci-overwrite    24 read       none          96.6    33237    24.00       0.00        -       -    0.00
+ci-overwrite    24 read       bloom10       96.6    19813     7.19      24.00     0.74    0.24    0.00
+ci-overwrite    24 read       fuse8         96.6    20335     7.12      24.00     0.72    0.24    0.00
+ci-overwrite    24 runs [458752 458752 458752 114688 114688 114688 28672 28672 28672 7168 7168 7168 1792 1792 1792 448 448 448 112 112 112 28 28 28] entries, 75.1 MB of runs

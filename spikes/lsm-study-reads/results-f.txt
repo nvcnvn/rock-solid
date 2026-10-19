@@ -1,0 +1,46 @@
+# 6.18.44-fc-v139 go1.27.0 Intel(R) Xeon(R) Processor @ 2.80GHz, 4 vCPUs shared with other benchmarks, pebble a7b8321871e3, rock-solid 86c47be, 2026-10-18
+
+## F: Pebble table filters alone, 200000 keys per filter; CPU per call on a locked thread
+keys                       filter    bits/key     FPR % build ns/k  absent ns present ns   allocs
+chunk prefix (28 B)        xxh3     10.637926 ns per key, sum 3
+chunk prefix (28 B)        bloom10      10.00     1.161         30       67.3       47.9     0.00
+chunk prefix (28 B)        bloom16      16.00     0.254         32       41.3       36.1     0.00
+chunk prefix (28 B)        fuse8         9.34     0.393        117       25.0       24.4     0.00
+chunk prefix (28 B)        fuse12       14.01     0.027         87       29.4       28.3     0.00
+chunk prefix (28 B)        fuse16       18.68     0.002        145       47.5       82.2     0.00
+MetaStore keys (14-45 B)   xxh3     18.078421 ns per key, sum 7
+MetaStore keys (14-45 B)   bloom10      10.00     1.147         36       53.9       40.0     0.00
+MetaStore keys (14-45 B)   bloom16      16.00     0.238         35       48.5       39.8     0.00
+MetaStore keys (14-45 B)   fuse8         9.34     0.387         78       30.5       27.9     0.00
+MetaStore keys (14-45 B)   fuse12       14.01     0.025         78       34.1       41.2     0.00
+MetaStore keys (14-45 B)   fuse16       18.68     0.002        152       30.1       36.2     0.00
+
+## F: Pebble table filters alone, 200000 keys per filter; CPU per call on a locked thread
+keys                       filter    bits/key     FPR % build ns/k  absent ns present ns   allocs
+chunk prefix (28 B)        xxh3     18.549045 ns per key, sum 3
+chunk prefix (28 B)        bloom10      10.00     1.161         34       41.2       32.6     0.00
+chunk prefix (28 B)        bloom16      16.00     0.254         28       36.9       32.4     0.00
+chunk prefix (28 B)        fuse8         9.34     0.393         98       21.8       26.1     0.00
+chunk prefix (28 B)        fuse12       14.01     0.027         74       25.5       26.5     0.00
+chunk prefix (28 B)        fuse16       18.68     0.002         74       23.5       22.5     0.00
+MetaStore keys (14-45 B)   xxh3     15.489047 ns per key, sum 7
+MetaStore keys (14-45 B)   bloom10      10.00     1.147         33       50.0       46.0     0.00
+MetaStore keys (14-45 B)   bloom16      16.00     0.238         34       52.7       43.2     0.00
+MetaStore keys (14-45 B)   fuse8         9.34     0.387        110       30.6       25.7     0.00
+MetaStore keys (14-45 B)   fuse12       14.01     0.025         73       31.2       31.6     0.00
+MetaStore keys (14-45 B)   fuse16       18.68     0.002         97       29.2       29.4     0.00
+
+## F: Pebble table filters alone, 200000 keys per filter; CPU per call on a locked thread
+keys                       filter    bits/key     FPR % build ns/k  absent ns present ns   allocs
+chunk prefix (28 B)        xxh3     11.662388 ns per key, sum 3
+chunk prefix (28 B)        bloom10      10.00     1.161         34       43.1       32.9     0.00
+chunk prefix (28 B)        bloom16      16.00     0.254         29       37.4       31.9     0.00
+chunk prefix (28 B)        fuse8         9.34     0.393        126       22.8       22.0     0.00
+chunk prefix (28 B)        fuse12       14.01     0.027         79       27.9       28.5     0.00
+chunk prefix (28 B)        fuse16       18.68     0.002         74       27.7       37.7     0.00
+MetaStore keys (14-45 B)   xxh3     15.045944 ns per key, sum 7
+MetaStore keys (14-45 B)   bloom10      10.00     1.147         35       47.7       37.9     0.00
+MetaStore keys (14-45 B)   bloom16      16.00     0.238         33       44.6       39.9     0.00
+MetaStore keys (14-45 B)   fuse8         9.34     0.387         81       28.1       26.4     0.00
+MetaStore keys (14-45 B)   fuse12       14.01     0.025         81       37.1       42.3     0.00
+MetaStore keys (14-45 B)   fuse16       18.68     0.002        130       29.0       29.4     0.00

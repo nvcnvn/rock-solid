@@ -1,0 +1,7 @@
+# 6.18.44-fc-v139 go1.27.0 Intel(R) Xeon(R) Processor @ 2.80GHz, 4 vCPUs shared with other benchmarks, pebble a7b8321871e3, rock-solid 86c47be, 2026-10-18
+
+## S: scans over N size-tiered runs, about 2000000 MetaStore entries; CPU per seek and per step
+index            N    seek ns    next ns  allocs
+metastore        6       4174         95    0.00
+metastore       12       5228        157    0.00
+metastore       24       6617        360    0.00

@@ -428,13 +428,14 @@ the model's run through recovery, replay the records after its replay LSN, resum
   pages are freed only once the view closes.
 - Memtable over runs: after a flush, a key only in the run reads from the run; a key written after the
   flush reads the memtable's value; a key removed after the flush reads as absent; a scan merges the
-  memtable and runs in key order with no duplicates. With three runs and a flush running, a get,
-  present or not, probes 5 layers: the memtable, the frozen one and each run once.
+  memtable and runs in key order with no duplicates. With three runs and a flush running, a get of
+  a key in every layer reads 5 layers: the memtable, the frozen one and each run once. A get of a
+  key in no run searches only the memtables and the runs whose filter lets it through.
 - Compaction: four runs with overlapping keys merge, on another goroutine while the memtable takes
   writes, into one run equal to their merge, newest value winning and removed keys dropped. A view
   opened before the compaction still reads the four runs; the next checkpoint names the merged run
   and reports every piece of the four dead.
-- A compaction of four small runs above a run larger than 1 MiB leaves that run out and keeps the
+- A compaction of four runs of 100 KB above a 10 MB run leaves that run out and keeps the
   four removals, which still hide its keys. A flush drops a removal no older run holds the key of,
   and keeps one that hides a key in a run.
 - A compaction installed before it ran is Stale and the next is still picked; a bucket larger than
@@ -442,9 +443,13 @@ the model's run through recovery, replay the records after its replay LSN, resum
 - A compaction installed while a flush writes its inputs: that checkpoint's manifest names the
   inputs, which restore to the tree, and the next names the merged run and reports the inputs dead.
 - A checkpoint that fails after writing a compaction's result whole carries that run next time.
-- Buckets (ported from Cassandra's `testGetBuckets`, runs in age order): sizes 1,1,4,4,8,8 with small
-  below 2 make three buckets of two; 3,3,3,8,8,8 two of three, or one of six with small below 10;
-  1,8,1,8 four buckets; 70 equal runs buckets of 32, 32 and 6.
+- Universal picker (ported from RocksDB's universal tests in `compaction_picker_test.cc`, run sizes
+  newest first, trigger 4): 1,1,1,1 merges all four, size amplification firing first at 300%;
+  1,10,100,1000 picks nothing, and 1,10,100,1000,10000 makes the run-limit fallback merge the newest
+  two; 300,300,100 above 100 (newer runs 700% of the oldest) is a full size-amplification merge; a
+  largest run of 64 MiB with a 1 MiB buffer gives an auto run limit of 8.
+- A merge running over the oldest runs does not stop a merge of newer runs; installing both in
+  either order leaves the runs in age order.
 - Restore is runs plus replay: after six flushes, a compaction and more writes, loading the newest
   manifest's runs and replaying the later writes equals the live tree.
 - Loading a run is Malformed when a piece or the root is truncated by a byte, a piece is missing or
@@ -454,8 +459,18 @@ the model's run through recovery, replay the records after its replay LSN, resum
   entry fits; a piece size under 64 B is BadConfig.
 - A failed checkpoint keeps the frozen memtable and reports the one piece it wrote of it as dead;
   writes go on into the new memtable, and the next flush writes the frozen one without freezing them.
-- Run count: 64 flushes of 4 KiB runs with compaction after each never leave more than three runs
-  under 1 MiB, and runs of 1 to 4 MiB merge once four sit side by side.
+- Run count: 2,000 flushes alternating 1.3 MB and 33 MB over a 44 MB index (and bursty and
+  log-uniform sequences) never leave more than 2 + log2(largest run ÷ 1 MiB) + 1 runs, and the runs'
+  bytes stay under 3× the live index after size amplification.
+- Filters (from Pebble's `sstable/tablefilters/bloom` tests at a7b8321871e3): the filter of their
+  test keys encodes to Pebble's golden bytes, and every added key may match. Over 1,000,000 absent
+  keys, a 10 bits-per-key filter's false positives stay within 1.0 to 1.4%.
+- [property] Seeds 0-11, random puts, removes, range removals, flushes and compactions, with filters
+  on and off: gets, floors inside a prefix and prefix scans read alike and as the map. A run whose
+  filter rules out a key is never searched for it.
+- Over 24 runs, a get of a key no run holds searches on average fewer than 0.5 runs. A floor inside
+  a chunk written whole searches only the run holding it, plus false positives. A restore loads each
+  run's filter from its filter blocks, and lookups probe as before.
 - [property] Range removals: seeds 0-59, 3,000 random puts, removals and range removals over 300 keys
   with flushes and compactions, with size tiering on and with every run under 1 MiB in one bucket:
   gets, floors and a full scan read as a map. A merge whose output drops its inputs' fragments, or a

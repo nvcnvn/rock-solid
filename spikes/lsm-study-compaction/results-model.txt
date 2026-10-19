@@ -1,0 +1,165 @@
+# Intel(R) Xeon(R) Processor @ 2.80GHz, 4 vCPUs (shared); kernel 6.18.44-fc-v139; go1.27.0; pebble v2.1.7; rock-solid internal/lsm at 86c47be; 2026-10-18
+## S4 scale: 44 MB chunk index of 40 B entries, flushes of 1.3 MB and 33 MB
+$ ./bin/lsmc -mode model
+# go go1.27.0, GOMAXPROCS 4, mode model, keys 1100000, small 33000, large 825000, flushes 2000, seed 1
+workload     policy                                               runsMean  runsMax       WA   cmp/fl spaceAvg spaceMax     peak   maxOut   inputs merge/fl
+# steady: live 44.0 MB, small flush 1.32 MB, large 33.00 MB
+steady       bucket                                                   6.49       12     2.81     1.81     2.62     4.28     5.09     1.00      4.0     2.40
+steady       bucket+fallback(cap formula)                             6.49       12     2.81     1.81     2.62     4.28     5.09     1.00      4.0     2.40
+steady       bucket+fallback(cap 8)                                   5.59        8     3.29     2.29     1.86     2.67     3.59     1.00      3.7     2.44
+steady       universal(trigger 4)                                     3.55        4     5.64     4.64     1.69     2.35     3.37     1.00      2.2     5.26
+steady       universal(trigger 8)                                     5.25        8     2.92     1.92     1.60     2.17     3.20     1.00      4.9     1.92
+steady       universal(trigger 4, max_read_amp auto, buffer 1.26 MiB)     4.03        7     3.65     2.65     1.70     2.40     3.43     1.00      3.0     2.65
+steady       universal(trigger 4, no size amp)                        3.55        4     5.64     4.64     1.69     2.35     3.37     1.00      2.2     5.26
+steady       universal(trigger 4, max_read_amp auto, buffer 1 MiB)     4.03        7     3.65     2.65     1.70     2.40     3.43     1.00      3.0     2.65
+# alternating: live 44.0 MB, small flush 1.32 MB, large 33.00 MB
+alternating  bucket                                                1501.50     2001     1.00     0.00   418.91   558.19     0.00     0.00      0.0     0.00
+alternating  bucket+fallback(cap formula)                             8.51       15     1.25     0.25     2.97     4.90     5.93     1.00     15.0     0.25
+alternating  bucket+fallback(cap 8)                                   4.50        8     1.45     0.45     1.85     2.70     4.23     1.00      9.0     0.45
+alternating  universal(trigger 4)                                     2.25        3     2.38     1.38     1.29     1.57     3.10     1.00      3.0     1.38
+alternating  universal(trigger 8)                                     4.50        7     1.60     0.60     1.85     2.67     3.70     1.00      7.0     0.60
+alternating  universal(trigger 4, max_read_amp auto, buffer 1.26 MiB)     2.25        3     2.38     1.38     1.29     1.57     3.10     1.00      3.0     1.38
+alternating  universal(trigger 4, no size amp)                        2.25        3     2.38     1.38     1.29     1.57     3.10     1.00      3.0     1.38
+alternating  universal(trigger 4, max_read_amp auto, buffer 1 MiB)     2.25        3     2.38     1.38     1.29     1.57     3.10     1.00      3.0     1.38
+# bursty: live 44.0 MB, small flush 1.32 MB, large 33.00 MB
+bursty       bucket                                                 817.03     1083     1.16     0.16   190.62   249.38   249.44     0.95      4.0     0.17
+bursty       bucket+fallback(cap formula)                             8.82       15     1.47     0.47     2.49     5.10     6.59     1.00      5.8     0.48
+bursty       bucket+fallback(cap 8)                                   5.32        8     1.81     0.81     1.74     3.58     4.61     1.00      4.6     0.82
+bursty       universal(trigger 4)                                     2.95        4     2.40     1.40     1.49     2.86     4.39     1.00      2.7     1.42
+bursty       universal(trigger 8)                                     4.81        7     1.87     0.87     1.68     3.54     4.57     1.00      5.4     0.87
+bursty       universal(trigger 4, max_read_amp auto, buffer 1.26 MiB)     3.07        7     2.27     1.27     1.51     2.97     4.49     1.00      3.1     1.27
+bursty       universal(trigger 4, no size amp)                        2.95        4     2.40     1.40     1.49     2.86     4.30     1.00      2.7     1.45
+bursty       universal(trigger 4, max_read_amp auto, buffer 1 MiB)     3.07        7     2.27     1.27     1.51     2.97     4.49     1.00      3.1     1.27
+# loguniform: live 44.0 MB, small flush 1.32 MB, large 33.00 MB
+loguniform   bucket                                                1427.08     1900     1.02     0.02   172.14   227.46   218.05     0.39      4.1     0.02
+loguniform   bucket+fallback(cap formula)                             9.18       15     1.63     0.63     1.98     3.81     5.10     1.00      8.7     0.64
+loguniform   bucket+fallback(cap 8)                                   5.62        8     2.02     1.02     1.71     3.33     4.47     1.00      5.1     1.02
+loguniform   universal(trigger 4)                                     3.12        4     2.70     1.70     1.61     2.81     4.00     1.00      2.5     1.83
+loguniform   universal(trigger 8)                                     4.97        8     2.10     1.10     1.68     3.15     4.25     1.00      4.8     1.10
+loguniform   universal(trigger 4, max_read_amp auto, buffer 1.26 MiB)     3.59        8     2.37     1.37     1.67     2.95     4.25     1.00      3.2     1.37
+loguniform   universal(trigger 4, no size amp)                        3.12        4     2.70     1.70     1.61     2.81     4.00     1.00      2.5     1.83
+loguniform   universal(trigger 4, max_read_amp auto, buffer 1 MiB)     3.59        8     2.37     1.37     1.67     2.95     4.25     1.00      3.2     1.37
+
+## validation scale, the same bytes in 404 B entries (compare with results-real.txt)
+$ ./bin/lsmc -mode model -keys 110000 -entry 404 -small 3300 -large 82500 -flushes 200
+# go go1.27.0, GOMAXPROCS 4, mode model, keys 110000, small 3300, large 82500, flushes 200, seed 1
+workload     policy                                               runsMean  runsMax       WA   cmp/fl spaceAvg spaceMax     peak   maxOut   inputs merge/fl
+# steady: live 44.4 MB, small flush 1.33 MB, large 33.33 MB
+steady       bucket                                                   7.20       12     2.87     1.87     3.17     4.28     5.09     1.00      4.0     2.65
+steady       bucket+fallback(cap formula)                             7.20       12     2.87     1.87     3.17     4.28     5.09     1.00      4.0     2.65
+steady       bucket+fallback(cap 8)                                   5.76        8     3.21     2.21     1.94     2.67     3.59     1.00      3.7     2.38
+steady       universal(trigger 4)                                     3.55        4     5.95     4.95     1.73     2.35     3.37     1.00      2.2     5.58
+steady       universal(trigger 8)                                     5.22        8     2.94     1.94     1.59     2.17     3.20     1.00      5.0     1.94
+steady       universal(trigger 4, max_read_amp auto, buffer 1.27 MiB)     4.08        7     3.68     2.68     1.73     2.40     3.43     1.00      3.1     2.68
+steady       universal(trigger 4, no size amp)                        3.55        4     5.95     4.95     1.73     2.35     3.37     1.00      2.2     5.58
+steady       universal(trigger 4, max_read_amp auto, buffer 1 MiB)     4.08        7     3.68     2.68     1.73     2.40     3.43     1.00      3.1     2.68
+# alternating: live 44.4 MB, small flush 1.33 MB, large 33.33 MB
+alternating  bucket                                                 151.50      201     1.00     0.00    42.80    56.72     0.00     0.00      0.0     0.00
+alternating  bucket+fallback(cap formula)                             8.42       15     1.25     0.25     2.94     4.90     5.93     1.00     15.0     0.25
+alternating  bucket+fallback(cap 8)                                   4.54        8     1.47     0.47     1.86     2.70     4.23     1.00      9.0     0.47
+alternating  universal(trigger 4)                                     2.25        3     2.38     1.38     1.29     1.57     3.10     1.00      3.0     1.38
+alternating  universal(trigger 8)                                     4.50        7     1.61     0.61     1.85     2.67     3.70     1.00      7.0     0.61
+alternating  universal(trigger 4, max_read_amp auto, buffer 1.27 MiB)     2.25        3     2.38     1.38     1.29     1.57     3.10     1.00      3.0     1.38
+alternating  universal(trigger 4, no size amp)                        2.25        3     2.38     1.38     1.29     1.57     3.10     1.00      3.0     1.38
+alternating  universal(trigger 4, max_read_amp auto, buffer 1 MiB)     2.25        3     2.38     1.38     1.29     1.57     3.10     1.00      3.0     1.38
+# bursty: live 44.4 MB, small flush 1.33 MB, large 33.33 MB
+bursty       bucket                                                  89.19      120     1.12     0.12    21.59    28.69    27.10     0.11      4.0     0.12
+bursty       bucket+fallback(cap formula)                             8.89       15     1.43     0.43     2.71     5.18     6.21     1.00      6.1     0.43
+bursty       bucket+fallback(cap 8)                                   5.03        8     1.75     0.75     1.64     2.81     3.99     1.00      5.2     0.75
+bursty       universal(trigger 4)                                     2.99        4     2.32     1.32     1.58     2.43     3.96     1.00      2.8     1.32
+bursty       universal(trigger 8)                                     4.82        7     1.85     0.85     1.72     2.95     3.98     1.00      5.4     0.85
+bursty       universal(trigger 4, max_read_amp auto, buffer 1.27 MiB)     3.13        6     2.20     1.20     1.58     2.43     3.96     1.00      3.1     1.20
+bursty       universal(trigger 4, no size amp)                        2.99        4     2.32     1.32     1.58     2.43     3.96     1.00      2.8     1.32
+bursty       universal(trigger 4, max_read_amp auto, buffer 1 MiB)     3.13        6     2.20     1.20     1.58     2.43     3.96     1.00      3.1     1.20
+# loguniform: live 44.4 MB, small flush 1.33 MB, large 33.33 MB
+loguniform   bucket                                                 148.50      198     1.00     0.00    17.40    24.54     0.00     0.00      0.0     0.00
+loguniform   bucket+fallback(cap formula)                             8.81       15     1.60     0.60     1.99     3.75     4.93     1.00     10.3     0.60
+loguniform   bucket+fallback(cap 8)                                   5.39        8     1.95     0.95     1.79     3.09     4.10     1.00      5.9     0.97
+loguniform   universal(trigger 4)                                     3.04        4     2.45     1.45     1.54     2.26     3.74     1.00      2.7     1.48
+loguniform   universal(trigger 8)                                     5.10        7     1.92     0.92     1.73     2.77     3.90     1.00      4.8     0.92
+loguniform   universal(trigger 4, max_read_amp auto, buffer 1.27 MiB)     3.39        7     2.24     1.24     1.56     2.28     3.76     1.00      3.5     1.24
+loguniform   universal(trigger 4, no size amp)                        3.04        4     2.45     1.45     1.54     2.26     3.74     1.00      2.7     1.48
+loguniform   universal(trigger 4, max_read_amp auto, buffer 1 MiB)     3.39        7     2.24     1.24     1.56     2.28     3.76     1.00      3.5     1.24
+
+## a 1.6 GB index (MetaStore-like shard), the same flushes
+$ ./bin/lsmc -mode model -keys 40000000 -flushes 4000
+# go go1.27.0, GOMAXPROCS 4, mode model, keys 40000000, small 33000, large 825000, flushes 4000, seed 1
+workload     policy                                               runsMean  runsMax       WA   cmp/fl spaceAvg spaceMax     peak   maxOut   inputs merge/fl
+# steady: live 1600.0 MB, small flush 1.32 MB, large 33.00 MB
+steady       bucket                                                  10.88       18     4.60     3.60     2.77     3.41     3.49     0.57      4.0     4.57
+steady       bucket+fallback(cap formula)                            10.88       18     4.60     3.60     2.77     3.41     3.49     0.57      4.0     4.57
+steady       bucket+fallback(cap 8)                                   7.35        8     8.27     7.27     1.58     2.24     3.24     1.00      2.4     7.33
+steady       universal(trigger 4)                                     3.96        4   100.05    99.05     1.64     2.25     3.25     1.00      2.0    99.96
+steady       universal(trigger 8)                                     6.86        8     6.77     5.77     1.52     2.04     3.04     1.00      2.6     6.12
+steady       universal(trigger 4, max_read_amp auto, buffer 1.26 MiB)     6.46       12     6.28     5.28     1.64     2.31     3.31     1.00      3.0     5.28
+steady       universal(trigger 4, no size amp)                        3.96        4   100.05    99.05     1.64     2.25     3.25     1.00      2.0    99.96
+steady       universal(trigger 4, max_read_amp auto, buffer 1 MiB)     6.46       12     6.28     5.28     1.64     2.31     3.31     1.00      3.0     5.28
+# alternating: live 1600.0 MB, small flush 1.32 MB, large 33.00 MB
+alternating  bucket                                                3001.50     4001     1.00     0.00    32.86    43.48     0.00     0.00      0.0     0.00
+alternating  bucket+fallback(cap formula)                            11.96       21     2.86     1.86     1.62     2.25     3.27     1.00     20.0     1.86
+alternating  bucket+fallback(cap 8)                                   6.11        8     3.72     2.72     1.85     2.72     3.72     1.00      4.9     2.72
+alternating  universal(trigger 4)                                     3.71        4     9.21     8.21     1.54     2.06     3.08     1.00      2.1     8.96
+alternating  universal(trigger 8)                                     5.36        8     3.95     2.95     1.51     2.03     3.05     1.00      4.6     2.95
+alternating  universal(trigger 4, max_read_amp auto, buffer 1.26 MiB)     4.51        8     4.48     3.48     1.55     2.09     3.11     1.00      3.0     3.48
+alternating  universal(trigger 4, no size amp)                        3.71        4     9.21     8.21     1.54     2.06     3.08     1.00      2.1     8.96
+alternating  universal(trigger 4, max_read_amp auto, buffer 1 MiB)     4.51        8     4.48     3.48     1.55     2.09     3.11     1.00      3.0     3.48
+# bursty: live 1600.0 MB, small flush 1.32 MB, large 33.00 MB
+bursty       bucket                                                1644.48     2251     1.12     0.12    14.97    19.90    19.90     0.08      4.0     0.12
+bursty       bucket+fallback(cap formula)                            12.99       21     2.97     1.97     1.69     2.63     3.63     1.00      6.3     1.98
+bursty       bucket+fallback(cap 8)                                   6.82        8     4.32     3.32     1.72     2.89     3.89     1.00      3.0     3.35
+bursty       universal(trigger 4)                                     3.87        4    21.48    20.48     1.65     2.54     3.55     1.00      2.0    21.29
+bursty       universal(trigger 8)                                     6.41        8     4.25     3.25     1.74     2.88     3.90     1.00      3.0     3.37
+bursty       universal(trigger 4, max_read_amp auto, buffer 1.26 MiB)     6.22       13     4.00     3.00     1.69     2.73     3.75     1.00      2.9     3.00
+bursty       universal(trigger 4, no size amp)                        3.87        4    21.48    20.48     1.65     2.54     3.55     1.00      2.0    21.29
+bursty       universal(trigger 4, max_read_amp auto, buffer 1 MiB)     6.22       13     4.00     3.00     1.69     2.73     3.75     1.00      2.9     3.00
+# loguniform: live 1600.0 MB, small flush 1.32 MB, large 33.00 MB
+loguniform   bucket                                                2788.82     3733     1.03     0.03    11.99    15.63    15.46     0.06      4.0     0.03
+loguniform   bucket+fallback(cap formula)                            14.25       24     3.40     2.40     1.84     3.19     4.21     1.00      8.8     2.44
+loguniform   bucket+fallback(cap 8)                                   6.94        8     4.90     3.90     1.61     2.41     3.39     1.00      3.0     3.97
+loguniform   universal(trigger 4)                                     3.91        4    33.34    32.34     1.75     2.55     3.56     1.00      2.0    33.15
+loguniform   universal(trigger 8)                                     6.62        8     4.94     3.94     1.79     3.00     4.00     1.00      2.8     4.08
+loguniform   universal(trigger 4, max_read_amp auto, buffer 1.26 MiB)     6.51       13     4.29     3.29     1.61     2.47     3.49     1.00      3.1     3.29
+loguniform   universal(trigger 4, no size amp)                        3.91        4    33.34    32.34     1.75     2.55     3.56     1.00      2.0    33.15
+loguniform   universal(trigger 4, max_read_amp auto, buffer 1 MiB)     6.51       13     4.29     3.29     1.61     2.47     3.49     1.00      3.1     3.29
+
+## whole-chunk index: a few dozen entries per flush, cleaner passes 25x that
+$ ./bin/lsmc -mode model -keys 760000 -small 40 -large 1000 -flushes 4000
+# go go1.27.0, GOMAXPROCS 4, mode model, keys 760000, small 40, large 1000, flushes 4000, seed 1
+workload     policy                                               runsMean  runsMax       WA   cmp/fl spaceAvg spaceMax     peak   maxOut   inputs merge/fl
+# steady: live 30.4 MB, small flush 0.00 MB, large 0.04 MB
+steady       bucket                                                   5.00        7    96.43    95.43     1.15     1.20     1.25     0.12      4.0    95.65
+steady       bucket+fallback(cap formula)                             5.00        7    96.43    95.43     1.15     1.20     1.25     0.12      4.0    95.65
+steady       bucket+fallback(cap 8)                                   5.00        7    96.43    95.43     1.15     1.20     1.25     0.12      4.0    95.65
+steady       universal(trigger 4)                                     3.99        4   320.28   319.28     1.15     1.20     1.25     0.10      2.0   320.03
+steady       universal(trigger 8)                                     7.30        8    10.32     9.32     1.15     1.20     1.33     0.16      2.3     9.88
+steady       universal(trigger 4, max_read_amp auto, buffer 0.00153 MiB)     7.43       12     6.98     5.98     1.15     1.20     1.21     0.10      3.0     5.98
+steady       universal(trigger 4, no size amp)                        3.99        4   320.28   319.28     1.15     1.20     1.25     0.10      2.0   320.03
+steady       universal(trigger 4, max_read_amp auto, buffer 1 MiB)     6.56        7    15.31    14.31     1.15     1.20     1.21     0.10      2.1    15.04
+# alternating: live 30.4 MB, small flush 0.00 MB, large 0.04 MB
+alternating  bucket                                                   7.92       13    11.28    10.28     2.29     2.73     3.52     0.88      4.0    11.03
+alternating  bucket+fallback(cap formula)                             7.92       13    11.28    10.28     2.29     2.73     3.52     0.88      4.0    11.03
+alternating  bucket+fallback(cap 8)                                   6.24        8    13.33    12.33     1.65     2.42     3.42     1.00      3.2    12.43
+alternating  universal(trigger 4)                                     3.96        4   100.72    99.72     1.55     2.09     3.09     1.00      2.0   100.65
+alternating  universal(trigger 8)                                     6.60        8     6.94     5.94     1.55     2.12     3.12     1.00      2.8     6.19
+alternating  universal(trigger 4, max_read_amp auto, buffer 0.00153 MiB)     6.46       12     6.46     5.46     1.55     2.13     3.13     1.00      3.0     5.46
+alternating  universal(trigger 4, no size amp)                        3.96        4   100.72    99.72     1.55     2.09     3.09     1.00      2.0   100.65
+alternating  universal(trigger 4, max_read_amp auto, buffer 1 MiB)     6.05        7     9.16     8.16     1.55     2.13     3.13     1.00      2.3     8.66
+# bursty: live 30.4 MB, small flush 0.00 MB, large 0.04 MB
+bursty       bucket                                                   6.99       11    20.66    19.66     1.74     1.97     2.32     0.41      4.0    20.05
+bursty       bucket+fallback(cap formula)                             6.99       11    20.66    19.66     1.74     1.97     2.32     0.41      4.0    20.05
+bursty       bucket+fallback(cap 8)                                   6.77        8    23.20    22.20     1.75     2.03     2.14     0.24      3.2    22.27
+bursty       universal(trigger 4)                                     3.99        4   246.87   245.87     1.69     1.90     2.33     0.58      2.0   246.80
+bursty       universal(trigger 8)                                     7.51        8    18.18    17.18     1.70     1.93     2.32     0.57      2.2    17.81
+bursty       universal(trigger 4, max_read_amp auto, buffer 0.00153 MiB)     8.51       16     5.42     4.42     1.69     1.91     2.33     0.58      2.9     4.42
+bursty       universal(trigger 4, no size amp)                        3.99        4   246.87   245.87     1.69     1.90     2.33     0.58      2.0   246.80
+bursty       universal(trigger 4, max_read_amp auto, buffer 1 MiB)     6.70        7    27.10    26.10     1.70     2.00     3.00     1.00      2.1    26.87
+# loguniform: live 30.4 MB, small flush 0.00 MB, large 0.04 MB
+loguniform   bucket                                                   6.63       10    26.39    25.39     1.59     1.79     1.91     0.41      4.0    25.86
+loguniform   bucket+fallback(cap formula)                             6.63       10    26.39    25.39     1.59     1.79     1.91     0.41      4.0    25.86
+loguniform   bucket+fallback(cap 8)                                   6.06        8    31.59    30.59     1.57     1.77     2.37     0.59      3.3    30.64
+loguniform   universal(trigger 4)                                     4.00        4   266.95   265.95     1.59     1.79     1.93     0.27      2.0   266.58
+loguniform   universal(trigger 8)                                     7.66        8    30.07    29.07     1.61     1.82     2.42     0.60      2.1    29.80
+loguniform   universal(trigger 4, max_read_amp auto, buffer 0.00153 MiB)     9.13       17     5.64     4.64     1.57     1.71     2.21     0.53      3.1     4.64
+loguniform   universal(trigger 4, no size amp)                        4.00        4   266.95   265.95     1.59     1.79     1.93     0.27      2.0   266.58
+loguniform   universal(trigger 4, max_read_amp auto, buffer 1 MiB)     6.74        7    23.88    22.88     1.58     1.75     2.10     0.49      2.1    23.65
+
