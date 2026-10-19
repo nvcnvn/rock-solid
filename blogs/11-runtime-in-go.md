@@ -648,9 +648,9 @@ generation, so a handle to a freed and reused slot is caught.*
   once with io_uring, SPDK or RDMA.
 - **Registered once, it saves the pinning on every I/O.** The io_uring driver registers each
   loop's slab (`IORING_REGISTER_BUFFERS`) and issues `READ_FIXED` and `WRITE_FIXED`. On a
-  near-null zram device, fixed buffers saved 0.9 to 1.4 µs of CPU per 4 KiB `O_DIRECT` I/O (22
-  to 27%). On a virtio disk they saved 0.6 to 0.7 µs at QD 32 ([io_uring registered buffers
-  spike](../docs/design.md#appendix-io_uring-registered-buffers-spike)). Pinned memory counts
+  consumer NVMe drive, fixed buffers saved 0.1 µs of CPU per 4 KiB `O_DIRECT` I/O at QD 32 and
+  0.2 to 0.3 µs at QD 1, 5 to 8% of the CPU per I/O, for a registration paid once ([io_uring
+  registered buffers spike](../docs/design.md#appendix-io_uring-registered-buffers-spike)). Pinned memory counts
   against the memory-lock limit: with the default 8 MiB, registering 64 MiB failed. So the
   daemon pod carries `IPC_LOCK`. Without it, the driver falls back to plain reads and writes on
   the same buffers and reports the fallback.

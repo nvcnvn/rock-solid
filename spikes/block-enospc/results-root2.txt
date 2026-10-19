@@ -1,0 +1,437 @@
+# Linux 6.17.0-1033-oem, mke2fs 1.47.0 (5-Feb-2023), mkfs.xfs version 6.6.0, no_space_timeout  s, xfssyncd_centisecs , 2026-10-19T11:01Z
+== T1 ext4 on a thin volume with error_if_no_space; expect: fsync ENOSPC, overwrites work, creates work and the fs stays writable until unmount; ext4 loses a new metadata block, aborts its journal at unmount and is damaged; XFS shuts down at unmount (fail_at_unmount) with a dirty log; after the pool grows a mount replays the log and both check clean
+[OK ] T1 first error got=ENOSPC
+[OK ] T1 overwrite of old blocks got=ok
+[FAIL] T1 writable after 200 creates got=EIO want=ok
+   fsck: e2fsck 1.47.0 (5-Feb-2023)
+   fsck: Warning: skipping journal recovery because doing a read-only filesystem check.
+   fsck: Pass 1: Checking inodes, blocks, and sizes
+   fsck: Inode 13 has an invalid extent node (blk 32897, lblk 0)
+   fsck: Clear? no
+   fsck: 
+   fsck: Inode 13 extent tree (at level 1) could be shorter.  Optimize? no
+   fsck: 
+   fsck: Inode 13, i_blocks is 1048584, should be 0.  Fix? no
+   fsck: 
+   fsck: Pass 2: Checking directory structure
+   fsck: Pass 3: Checking directory connectivity
+   fsck: Pass 4: Checking reference counts
+   fsck: Pass 5: Checking group summary information
+   fsck: Block bitmap differences:  -32897 -(38912--98303) -(100352--131071) -(139264--163839) -(165888--182271)
+   fsck: Fix? no
+   fsck: 
+   fsck: 
+   fsck: /dev/mapper/rsenospc-thin: ********** WARNING: Filesystem still has errors **********
+   fsck: 
+   fsck: /dev/mapper/rsenospc-thin: 213/65536 files (0.0% non-contiguous), 148124/262144 blocks
+   fsck: exit 4
+[OK ] T1 check got=damaged
+[OK ] T1 mount after growing the pool got=ok
+   fsck-replay: e2fsck 1.47.0 (5-Feb-2023)
+   fsck-replay: Pass 1: Checking inodes, blocks, and sizes
+   fsck-replay: Pass 2: Checking directory structure
+   fsck-replay: Pass 3: Checking directory connectivity
+   fsck-replay: Pass 4: Checking reference counts
+   fsck-replay: Pass 5: Checking group summary information
+   fsck-replay: /dev/mapper/rsenospc-thin: 213/65536 files (0.0% non-contiguous), 148124/262144 blocks
+   fsck-replay: exit 0
+[OK ] T1 check after the replay got=clean
+   kernel: [   91.358271] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+   kernel: [   91.473611] device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+   kernel: [   91.473635] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 71664)
+   kernel: [   91.473642] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [   91.473717] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 73712)
+   kernel: [   91.473755] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [   91.473793] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 75760)
+   kernel: [   91.473852] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [   91.473873] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 77808)
+   kernel: [   91.473948] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [   91.473954] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 79856)
+   kernel: [   91.474045] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 81904)
+   kernel: [   91.474046] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [   91.474137] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 83952)
+   kernel: [   91.474148] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [   91.474220] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 86000)
+   kernel: [   91.474247] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [   91.474311] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 88048)
+   kernel: [   91.474355] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [   91.474397] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 90096)
+   kernel: 45 lines in results-root2/T1.kernel.txt
+== T2 xfs on a thin volume with error_if_no_space; expect: fsync ENOSPC, overwrites work, creates work and the fs stays writable until unmount; ext4 loses a new metadata block, aborts its journal at unmount and is damaged; XFS shuts down at unmount (fail_at_unmount) with a dirty log; after the pool grows a mount replays the log and both check clean
+[OK ] T2 first error got=ENOSPC
+[OK ] T2 overwrite of old blocks got=ok
+[OK ] T2 writable after 200 creates got=ok
+   fsck: Phase 1 - find and verify superblock...
+   fsck: Phase 2 - using internal log
+   fsck: ALERT: The filesystem has valuable metadata changes in a log which is being
+   fsck: ignored because the -n option was used.  Expect spurious inconsistencies
+   fsck: which may be resolved by first mounting the filesystem to replay the log.
+   fsck: sb_icount 64, counted 256
+   fsck: sb_ifree 61, counted 50
+   fsck: sb_fdblocks 232730, counted 110501
+   fsck: Phase 3 - for each AG...
+   fsck: Metadata corruption detected at 0x582f7a8d50e6, xfs_inode block 0x8100/0x4000
+   fsck: Metadata corruption detected at 0x582f7a8d50e6, xfs_inode block 0x8120/0x4000
+   fsck: Metadata corruption detected at 0x582f7a8d50e6, xfs_inode block 0x8140/0x4000
+   fsck: Metadata corruption detected at 0x582f7a8d50e6, xfs_inode block 0x8160/0x4000
+   fsck: bad CRC for inode 33024
+   fsck: bad magic number 0x0 on inode 33024
+   fsck: bad version number 0x0 on inode 33024
+   fsck: bad next_unlinked 0x0 on inode 33024
+   fsck: inode identifier 0 mismatch on inode 33024
+   fsck: bad CRC for inode 33025
+   fsck: bad magic number 0x0 on inode 33025
+   fsck: bad version number 0x0 on inode 33025
+   fsck: bad next_unlinked 0x0 on inode 33025
+   fsck: inode identifier 0 mismatch on inode 33025
+   fsck: bad CRC for inode 33026
+   fsck: bad magic number 0x0 on inode 33026
+   fsck: bad version number 0x0 on inode 33026
+   fsck: bad next_unlinked 0x0 on inode 33026
+   fsck: inode identifier 0 mismatch on inode 33026
+   fsck: bad CRC for inode 33027
+   fsck: bad magic number 0x0 on inode 33027
+   fsck: bad version number 0x0 on inode 33027
+   fsck: bad next_unlinked 0x0 on inode 33027
+   fsck: inode identifier 0 mismatch on inode 33027
+   fsck: bad CRC for inode 33028
+   fsck: bad magic number 0x0 on inode 33028
+   fsck: bad version number 0x0 on inode 33028
+   fsck: bad next_unlinked 0x0 on inode 33028
+   fsck: inode identifier 0 mismatch on inode 33028
+   fsck: bad CRC for inode 33029
+   fsck: bad magic number 0x0 on inode 33029
+   fsck: bad version number 0x0 on inode 33029
+   fsck: bad next_unlinked 0x0 on inode 33029
+   fsck: inode identifier 0 mismatch on inode 33029
+   fsck: bad CRC for inode 33030
+   fsck: bad magic number 0x0 on inode 33030
+   fsck: bad version number 0x0 on inode 33030
+   fsck: bad next_unlinked 0x0 on inode 33030
+   fsck: inode identifier 0 mismatch on inode 33030
+   fsck: bad CRC for inode 33031
+   fsck: bad magic number 0x0 on inode 33031
+   fsck: bad version number 0x0 on inode 33031
+   fsck: bad next_unlinked 0x0 on inode 33031
+   fsck: inode identifier 0 mismatch on inode 33031
+   fsck: bad CRC for inode 33032
+   fsck: bad magic number 0x0 on inode 33032
+   fsck: bad version number 0x0 on inode 33032
+   fsck: bad next_unlinked 0x0 on inode 33032
+   fsck: inode identifier 0 mismatch on inode 33032
+   fsck: bad CRC for inode 33033
+   fsck: bad magic number 0x0 on inode 33033
+   fsck: (results-root2/T2.fsck.txt has the rest)
+   fsck: exit 1
+[OK ] T2 check got=damaged
+[OK ] T2 XFS shut down at unmount got=yes
+[OK ] T2 mount after growing the pool got=ok
+   fsck-replay: Phase 1 - find and verify superblock...
+   fsck-replay: Phase 2 - using internal log
+   fsck-replay: Phase 3 - for each AG...
+   fsck-replay: Phase 4 - check for duplicate blocks...
+   fsck-replay: No modify flag set, skipping phase 5
+   fsck-replay: Phase 6 - check inode connectivity...
+   fsck-replay: Phase 7 - verify link counts...
+   fsck-replay: No modify flag set, skipping filesystem flush and exiting.
+   fsck-replay: exit 0
+[OK ] T2 check after the replay got=clean
+   kernel: [   92.367800] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+   kernel: [   92.463427] device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+   kernel: [   92.539305] XFS (dm-1): Unmounting Filesystem 40cb21c5-668a-46ed-a7f9-7086efc4d1e4
+   kernel: [   92.539493] XFS (dm-1): metadata I/O error in "xfs_buf_ioend_handle_error+0xbc/0x3e0 [xfs]" at daddr 0x8100 len 32 error 28
+   kernel: [   92.539666] XFS (dm-1): Metadata I/O Error (0x1) detected at xfs_buf_ioend_handle_error+0x389/0x3e0 [xfs] (fs/xfs/xfs_buf.c:1137).  Shutting down filesystem.
+   kernel: [   92.539761] XFS (dm-1): Please unmount the filesystem and rectify the problem(s)
+   kernel: [   92.591442] device-mapper: thin: 252:0: switching pool to write mode
+   kernel: [   92.591447] device-mapper: thin: 252:0: growing the data device from 3072 to 20480 blocks
+   kernel: [   92.604727] XFS (dm-1): Mounting V5 Filesystem 40cb21c5-668a-46ed-a7f9-7086efc4d1e4
+   kernel: [   92.609525] XFS (dm-1): Starting recovery (logdev: internal)
+   kernel: [   92.610330] XFS (dm-1): Ending recovery (logdev: internal)
+   kernel: [   92.613595] XFS (dm-1): Unmounting Filesystem 40cb21c5-668a-46ed-a7f9-7086efc4d1e4
+   kernel: 19 lines in results-root2/T2.kernel.txt
+== T3 ext4, queue_if_no_space, pool grown to 1280 MiB after 20 s; expect: the writer waits about 20 s, then completes with no error, the fs stays writable and checks clean
+[OK ] T3 error got=none
+   took 20 s
+[OK ] T3 overwrite of old blocks got=ok
+[OK ] T3 writable got=ok
+[OK ] T3 I/O errors in the kernel log got=no
+   fsck: e2fsck 1.47.0 (5-Feb-2023)
+   fsck: Pass 1: Checking inodes, blocks, and sizes
+   fsck: Pass 2: Checking directory structure
+   fsck: Pass 3: Checking directory connectivity
+   fsck: Pass 4: Checking reference counts
+   fsck: Pass 5: Checking group summary information
+   fsck: /dev/mapper/rsenospc-thin: 14/65536 files (0.0% non-contiguous), 148124/262144 blocks
+   fsck: exit 0
+[OK ] T3 check got=clean
+   kernel: [   93.157543] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+   kernel: [   93.263323] device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+   kernel: [  113.049047] device-mapper: thin: 252:0: switching pool to write mode
+   kernel: [  113.049052] device-mapper: thin: 252:0: growing the data device from 3072 to 20480 blocks
+   kernel: [  113.526351] EXT4-fs (dm-1): unmounting filesystem 54ce3f70-7877-45dc-9d1e-0c910b40aae5.
+   kernel: 7 lines in results-root2/T3.kernel.txt
+== T4 xfs, queue_if_no_space, pool grown to 1280 MiB after 20 s; expect: the writer waits about 20 s, then completes with no error, the fs stays writable and checks clean
+[OK ] T4 error got=none
+   took 20 s
+[OK ] T4 overwrite of old blocks got=ok
+[OK ] T4 writable got=ok
+[OK ] T4 I/O errors in the kernel log got=no
+   fsck: Phase 1 - find and verify superblock...
+   fsck: Phase 2 - using internal log
+   fsck: Phase 3 - for each AG...
+   fsck: Phase 4 - check for duplicate blocks...
+   fsck: No modify flag set, skipping phase 5
+   fsck: Phase 6 - check inode connectivity...
+   fsck: Phase 7 - verify link counts...
+   fsck: No modify flag set, skipping filesystem flush and exiting.
+   fsck: exit 0
+[OK ] T4 check got=clean
+   kernel: [  114.047755] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+   kernel: [  114.149990] device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+   kernel: [  133.967545] device-mapper: thin: 252:0: switching pool to write mode
+   kernel: [  133.967550] device-mapper: thin: 252:0: growing the data device from 3072 to 20480 blocks
+   kernel: [  134.501172] XFS (dm-1): Unmounting Filesystem 27a2b0b7-4d3c-482a-80f9-26ee4e9c38d6
+   kernel: 7 lines in results-root2/T4.kernel.txt
+== T5 ext4, queue_if_no_space, no_space_timeout 60 s, never grown; expect: ENOSPC after about 60 s; ext4 loses a new metadata block with the held data, aborts its journal and refuses every write (EROFS), and is damaged; XFS, whose metadata here needs no new space, keeps working and checks clean; a replay after the pool grows checks clean
+[OK ] T5 first error got=ENOSPC
+   took 62 s
+[OK ] T5 overwrite of old blocks got=EROFS
+[OK ] T5 writable got=EROFS
+   fsck: e2fsck 1.47.0 (5-Feb-2023)
+   fsck: Warning: skipping journal recovery because doing a read-only filesystem check.
+   fsck: Pass 1: Checking inodes, blocks, and sizes
+   fsck: Inode 13 has an invalid extent node (blk 32897, lblk 0)
+   fsck: Clear? no
+   fsck: 
+   fsck: Inode 13 extent tree (at level 1) could be shorter.  Optimize? no
+   fsck: 
+   fsck: Inode 13, i_blocks is 1048584, should be 0.  Fix? no
+   fsck: 
+   fsck: Pass 2: Checking directory structure
+   fsck: Pass 3: Checking directory connectivity
+   fsck: Pass 4: Checking reference counts
+   fsck: Pass 5: Checking group summary information
+   fsck: Block bitmap differences:  -32897 -(38912--98303) -(100352--131071) -(139264--163839) -(165888--182271)
+   fsck: Fix? no
+   fsck: 
+   fsck: 
+   fsck: /dev/mapper/rsenospc-thin: ********** WARNING: Filesystem still has errors **********
+   fsck: 
+   fsck: /dev/mapper/rsenospc-thin: 13/65536 files (0.0% non-contiguous), 148124/262144 blocks
+   fsck: exit 4
+[OK ] T5 check got=damaged
+[OK ] T5 mount after growing the pool got=ok
+   fsck-replay: e2fsck 1.47.0 (5-Feb-2023)
+   fsck-replay: Pass 1: Checking inodes, blocks, and sizes
+   fsck-replay: Pass 2: Checking directory structure
+   fsck-replay: Pass 3: Checking directory connectivity
+   fsck-replay: Pass 4: Checking reference counts
+   fsck-replay: Pass 5: Checking group summary information
+   fsck-replay: /dev/mapper/rsenospc-thin: 13/65536 files (0.0% non-contiguous), 148124/262144 blocks
+   fsck-replay: exit 0
+[OK ] T5 check after the replay got=clean
+   kernel: [  135.086512] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+   kernel: [  135.192669] device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+   kernel: [  197.463509] device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+   kernel: [  197.463537] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 71664)
+   kernel: [  197.463592] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 73712)
+   kernel: [  197.463637] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 75760)
+   kernel: [  197.463676] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [  197.463700] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 77808)
+   kernel: [  197.463730] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 79856)
+   kernel: [  197.463756] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 81904)
+   kernel: [  197.463782] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 83952)
+   kernel: [  197.463809] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 86000)
+   kernel: [  197.463836] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 88048)
+   kernel: [  197.463862] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 90096)
+   kernel: [  197.463924] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [  197.464134] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [  197.464346] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [  197.464632] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [  197.464872] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   kernel: [  197.464925] Buffer I/O error on dev dm-1, logical block 32897, lost async page write
+   kernel: 50 lines in results-root2/T5.kernel.txt
+== T6 xfs, queue_if_no_space, no_space_timeout 60 s, never grown; expect: ENOSPC after about 60 s; ext4 loses a new metadata block with the held data, aborts its journal and refuses every write (EROFS), and is damaged; XFS, whose metadata here needs no new space, keeps working and checks clean; a replay after the pool grows checks clean
+[OK ] T6 first error got=ENOSPC
+   took 61 s
+[OK ] T6 overwrite of old blocks got=ok
+[OK ] T6 writable got=ok
+   fsck: Phase 1 - find and verify superblock...
+   fsck: Phase 2 - using internal log
+   fsck: Phase 3 - for each AG...
+   fsck: Phase 4 - check for duplicate blocks...
+   fsck: No modify flag set, skipping phase 5
+   fsck: Phase 6 - check inode connectivity...
+   fsck: Phase 7 - verify link counts...
+   fsck: No modify flag set, skipping filesystem flush and exiting.
+   fsck: exit 0
+[OK ] T6 check got=clean
+   kernel: [  198.118314] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+   kernel: [  198.216433] device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+   kernel: [  258.901732] device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+   kernel: [  258.976515] XFS (dm-1): Unmounting Filesystem d84b7e95-189c-4d95-ba8f-dd18064c7ae0
+   kernel: 10 lines in results-root2/T6.kernel.txt
+== T7 xfs, error_if_no_space; the pool filled, 1000 files created, the log forced and the AIL pushed while mounted, so the new inode chunks and directory blocks are refused in place; the pool is grown 35 s later; expect: XFS retries the refused metadata until it lands, never shuts down and checks clean
+[OK ] T7 first error got=ENOSPC
+[OK ] T7 creates got=ok
+[OK ] T7 metadata write refused while mounted got=yes
+[OK ] T7 shut down while mounted got=no
+[OK ] T7 writable while refused got=ok
+[OK ] T7 writable after the grow got=ok
+   fsck: Phase 1 - find and verify superblock...
+   fsck: Phase 2 - using internal log
+   fsck: Phase 3 - for each AG...
+   fsck: Phase 4 - check for duplicate blocks...
+   fsck: No modify flag set, skipping phase 5
+   fsck: Phase 6 - check inode connectivity...
+   fsck: Phase 7 - verify link counts...
+   fsck: No modify flag set, skipping filesystem flush and exiting.
+   fsck: exit 0
+[OK ] T7 check got=clean
+[OK ] T7 shut down got=no
+   kernel: [  259.523480] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+   kernel: [  259.618836] device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+   kernel: [  259.822002] XFS (dm-1): metadata I/O error in "xfs_buf_ioend_handle_error+0xbc/0x3e0 [xfs]" at daddr 0x10080 len 32 error 28
+   kernel: [  259.872611] XFS (dm-1): Failing async write on buffer block 0x10080. Retrying async write.
+   kernel: [  259.872618] XFS (dm-1): Failing async write on buffer block 0x100a0. Retrying async write.
+   kernel: [  259.872627] XFS (dm-1): Failing async write on buffer block 0x100c0. Retrying async write.
+   kernel: [  259.872628] XFS (dm-1): Failing async write on buffer block 0x100e0. Retrying async write.
+   kernel: [  259.872637] XFS (dm-1): Failing async write on buffer block 0x10100. Retrying async write.
+   kernel: [  259.872638] XFS (dm-1): Failing async write on buffer block 0x10120. Retrying async write.
+   kernel: [  259.872647] XFS (dm-1): Failing async write on buffer block 0x10140. Retrying async write.
+   kernel: [  259.872647] XFS (dm-1): Failing async write on buffer block 0x10160. Retrying async write.
+   kernel: [  259.872655] XFS (dm-1): Failing async write on buffer block 0x10180. Retrying async write.
+   kernel: [  289.824508] XFS: Failing async write: 19954 callbacks suppressed
+   kernel: [  289.824512] XFS (dm-1): Failing async write on buffer block 0x10080. Retrying async write.
+   kernel: [  289.824517] XFS (dm-1): Failing async write on buffer block 0x100a0. Retrying async write.
+   kernel: [  289.824520] XFS (dm-1): Failing async write on buffer block 0x100c0. Retrying async write.
+   kernel: [  289.824520] XFS (dm-1): Failing async write on buffer block 0x100e0. Retrying async write.
+   kernel: [  289.824523] XFS (dm-1): Failing async write on buffer block 0x10100. Retrying async write.
+   kernel: [  289.824524] XFS (dm-1): Failing async write on buffer block 0x10120. Retrying async write.
+   kernel: [  289.824526] XFS (dm-1): Failing async write on buffer block 0x10140. Retrying async write.
+   kernel: 35 lines in results-root2/T7.kernel.txt
+== T8 xfs, error_if_no_space; the pool filled, 1000 files created, the log forced and the AIL pushed while mounted, so the new inode chunks and directory blocks are refused in place; never grown; expect: XFS retries while mounted and stays writable, shuts down at unmount (fail_at_unmount) with a dirty log, and checks clean after the pool grows and a mount replays the log
+[OK ] T8 first error got=ENOSPC
+[OK ] T8 creates got=ok
+[OK ] T8 metadata write refused while mounted got=yes
+[OK ] T8 shut down while mounted got=no
+[OK ] T8 writable while refused got=ok
+   fsck: Phase 1 - find and verify superblock...
+   fsck: Phase 2 - using internal log
+   fsck: ALERT: The filesystem has valuable metadata changes in a log which is being
+   fsck: ignored because the -n option was used.  Expect spurious inconsistencies
+   fsck: which may be resolved by first mounting the filesystem to replay the log.
+   fsck: sb_icount 64, counted 1024
+   fsck: sb_ifree 61, counted 17
+   fsck: sb_fdblocks 232730, counted 110399
+   fsck: Phase 3 - for each AG...
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10080/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x100a0/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x100c0/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x100e0/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10100/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10120/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10140/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10160/0x4000
+   fsck: Metadata CRC error detected at 0x58ed4bef1490, xfs_dir3_data block 0x10208/0x1000
+   fsck: bad directory block magic # 0 in block 2 for directory inode 133
+   fsck: corrupt block 2 in directory inode 133
+   fsck: 	would junk block
+   fsck: Metadata CRC error detected at 0x58ed4bef1490, xfs_dir3_data block 0x10220/0x1000
+   fsck: bad directory block magic # 0 in block 3 for directory inode 133
+   fsck: corrupt block 3 in directory inode 133
+   fsck: 	would junk block
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10180/0x4000
+   fsck: Metadata CRC error detected at 0x58ed4bef1580, xfs_dir3_leafn block 0x10218/0x1000
+   fsck: bad directory leaf magic # 0 for directory inode 133 block 8388610
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x101a0/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x101c0/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x101e0/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10240/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10260/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10280/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x102a0/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x102c0/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x102e0/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10300/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10320/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10340/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10360/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10380/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x103a0/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x103c0/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x103e0/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10400/0x4000
+   fsck: Metadata corruption detected at 0x58ed4bec50e6, xfs_inode block 0x10420/0x4000
+   fsck: bad CRC for inode 65664
+   fsck: bad magic number 0x0 on inode 65664
+   fsck: bad version number 0x0 on inode 65664
+   fsck: bad next_unlinked 0x0 on inode 65664
+   fsck: inode identifier 0 mismatch on inode 65664
+   fsck: bad CRC for inode 65665
+   fsck: bad magic number 0x0 on inode 65665
+   fsck: bad version number 0x0 on inode 65665
+   fsck: bad next_unlinked 0x0 on inode 65665
+   fsck: inode identifier 0 mismatch on inode 65665
+   fsck: bad CRC for inode 65666
+   fsck: bad magic number 0x0 on inode 65666
+   fsck: bad version number 0x0 on inode 65666
+   fsck: (results-root2/T8.fsck.txt has the rest)
+   fsck: exit 1
+[OK ] T8 check got=damaged
+[OK ] T8 XFS shut down at unmount got=yes
+[OK ] T8 mount after growing the pool got=ok
+   fsck-replay: Phase 1 - find and verify superblock...
+   fsck-replay: Phase 2 - using internal log
+   fsck-replay: Phase 3 - for each AG...
+   fsck-replay: Phase 4 - check for duplicate blocks...
+   fsck-replay: No modify flag set, skipping phase 5
+   fsck-replay: Phase 6 - check inode connectivity...
+   fsck-replay: Phase 7 - verify link counts...
+   fsck-replay: No modify flag set, skipping filesystem flush and exiting.
+   fsck-replay: exit 0
+[OK ] T8 check after the replay got=clean
+   kernel: [  330.553262] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+   kernel: [  330.647458] device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+   kernel: [  330.702947] XFS (dm-1): metadata I/O error in "xfs_buf_ioend_handle_error+0xbc/0x3e0 [xfs]" at daddr 0x10080 len 32 error 28
+   kernel: [  330.753938] XFS (dm-1): Failing async write on buffer block 0x10080. Retrying async write.
+   kernel: [  330.753945] XFS (dm-1): Failing async write on buffer block 0x100a0. Retrying async write.
+   kernel: [  330.753950] XFS (dm-1): Failing async write on buffer block 0x100c0. Retrying async write.
+   kernel: [  330.753951] XFS (dm-1): Failing async write on buffer block 0x100e0. Retrying async write.
+   kernel: [  330.753960] XFS (dm-1): Failing async write on buffer block 0x10100. Retrying async write.
+   kernel: [  330.753961] XFS (dm-1): Failing async write on buffer block 0x10120. Retrying async write.
+   kernel: [  330.753972] XFS (dm-1): Failing async write on buffer block 0x10140. Retrying async write.
+   kernel: [  330.753973] XFS (dm-1): Failing async write on buffer block 0x10160. Retrying async write.
+   kernel: [  330.753979] XFS (dm-1): Failing async write on buffer block 0x10180. Retrying async write.
+   kernel: [  360.719774] XFS: Failing async write: 19954 callbacks suppressed
+   kernel: [  360.719777] XFS (dm-1): Failing async write on buffer block 0x10080. Retrying async write.
+   kernel: [  360.719782] XFS (dm-1): Failing async write on buffer block 0x100a0. Retrying async write.
+   kernel: [  360.719783] XFS (dm-1): Failing async write on buffer block 0x100c0. Retrying async write.
+   kernel: [  360.719784] XFS (dm-1): Failing async write on buffer block 0x100e0. Retrying async write.
+   kernel: [  360.719786] XFS (dm-1): Failing async write on buffer block 0x10100. Retrying async write.
+   kernel: [  360.719787] XFS (dm-1): Failing async write on buffer block 0x10120. Retrying async write.
+   kernel: [  360.719790] XFS (dm-1): Failing async write on buffer block 0x10140. Retrying async write.
+   kernel: 40 lines in results-root2/T8.kernel.txt
+== T9 xfs, queue_if_no_space; the pool filled by a writer that waits, then 1000 files created, the log forced and the AIL pushed, so the new metadata is held as T8's was refused; the pool grown about 20 s into the hold; expect: the writer completes with no error, no metadata error, the fs stays writable and checks clean
+[OK ] T9 pool full got=yes
+[OK ] T9 creates while held got=ok
+[OK ] T9 error got=none
+   took 20 s
+[OK ] T9 writable got=ok
+[OK ] T9 metadata errors got=no
+   fsck: Phase 1 - find and verify superblock...
+   fsck: Phase 2 - using internal log
+   fsck: Phase 3 - for each AG...
+   fsck: Phase 4 - check for duplicate blocks...
+   fsck: No modify flag set, skipping phase 5
+   fsck: Phase 6 - check inode connectivity...
+   fsck: Phase 7 - verify link counts...
+   fsck: No modify flag set, skipping filesystem flush and exiting.
+   fsck: exit 0
+[OK ] T9 check got=clean
+   kernel: [  366.540905] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+   kernel: [  366.631095] device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+   kernel: [  386.009116] device-mapper: thin: 252:0: switching pool to write mode
+   kernel: [  386.009122] device-mapper: thin: 252:0: growing the data device from 3072 to 20480 blocks
+   kernel: [  386.492796] XFS (dm-1): Unmounting Filesystem 43259c11-57cd-421f-8ac4-e3e444804f9c
+   kernel: 9 lines in results-root2/T9.kernel.txt

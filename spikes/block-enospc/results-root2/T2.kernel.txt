@@ -1,0 +1,19 @@
+[   92.254847] rsenospc 1792407682: start T2
+[   92.367800] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[   92.463427] device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+[   92.466696] dm-1: writeback error on inode 132, offset 0, sector 262272
+[   92.466743] dm-1: writeback error on inode 132, offset 131584000, sector 524416
+[   92.466777] dm-1: writeback error on inode 132, offset 263168000, sector 786560
+[   92.466809] dm-1: writeback error on inode 132, offset 394752000, sector 1310848
+[   92.466840] dm-1: writeback error on inode 132, offset 526336000, sector 1572992
+[   92.539305] XFS (dm-1): Unmounting Filesystem 40cb21c5-668a-46ed-a7f9-7086efc4d1e4
+[   92.539493] XFS (dm-1): metadata I/O error in "xfs_buf_ioend_handle_error+0xbc/0x3e0 [xfs]" at daddr 0x8100 len 32 error 28
+[   92.539666] XFS (dm-1): Metadata I/O Error (0x1) detected at xfs_buf_ioend_handle_error+0x389/0x3e0 [xfs] (fs/xfs/xfs_buf.c:1137).  Shutting down filesystem.
+[   92.539761] XFS (dm-1): Please unmount the filesystem and rectify the problem(s)
+[   92.574803] loop30: detected capacity change from 393216 to 2621440
+[   92.591442] device-mapper: thin: 252:0: switching pool to write mode
+[   92.591447] device-mapper: thin: 252:0: growing the data device from 3072 to 20480 blocks
+[   92.604727] XFS (dm-1): Mounting V5 Filesystem 40cb21c5-668a-46ed-a7f9-7086efc4d1e4
+[   92.609525] XFS (dm-1): Starting recovery (logdev: internal)
+[   92.610330] XFS (dm-1): Ending recovery (logdev: internal)
+[   92.613595] XFS (dm-1): Unmounting Filesystem 40cb21c5-668a-46ed-a7f9-7086efc4d1e4

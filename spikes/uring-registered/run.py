@@ -5,7 +5,7 @@ R*  registration limits and cost
 N*  IORING_OP_NOP with a plain or fixed file and a fixed buffer: submission cost alone
 P*  buffered 4 KiB reads served from the page cache
 Z*  O_DIRECT 4 KiB reads and writes on a zram device holding zero pages: a near-null device
-V*  O_DIRECT 4 KiB reads and writes on a file on the VM's ext4 root disk (virtio-blk)
+V*  O_DIRECT 4 KiB reads and writes on a file in work/, on whatever disk holds it
 Every I/O row runs the four variants (plain, fixed file, fixed buffer, both) back to back, in an order
 rotated each rep, REPS times. P reads its own file, so the O_DIRECT writes of V never evict it.
 """
@@ -30,6 +30,24 @@ def sh(cmd):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
 
+def read(path, default="?"):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def host():
+    cpu = next((l.split(":", 1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name")), "?")
+    virt = sh("systemd-detect-virt").stdout.strip() or ("vm" if " hypervisor" in read("/proc/cpuinfo") else "none")
+    src, fstype = (sh(f"findmnt -no SOURCE,FSTYPE --target {WORK}").stdout.split() + ["?", "?"])[:2]
+    disk = sh(f"lsblk -no PKNAME {src}").stdout.strip() or os.path.basename(src)
+    model = read(f"/sys/block/{disk}/device/model", "")
+    return (f"cpu='{cpu}' virt={virt} load1={os.getloadavg()[0]:.1f} disk='{disk} {model} {fstype}' "
+            f"io_poll={read(f'/sys/block/{disk}/queue/io_poll')} nvme_poll_queues={read('/sys/module/nvme/parameters/poll_queues', '-')}")
+
+
 def run(args, env=None):
     r = subprocess.run([BIN] + args, capture_output=True, text=True, env=env)
     line = (r.stdout.strip() or r.stderr.strip()).replace("\n", " | ")
@@ -49,7 +67,7 @@ def main():
             sh(f"dd if=/dev/zero of={DATA} bs=1M count=1024 oflag=direct status=none")
         ver = sh("cc --version | head -1").stdout.strip()
         print(f"# kernel={platform.release()} cc='{ver}' nproc={os.cpu_count()} date={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} "
-              f"secs={SECS} reps={REPS} ring=SINGLE_ISSUER|DEFER_TASKRUN slab=64MiB (shared 4-vCPU VM, Firecracker, virtio-blk vda, zram lz4)")
+              f"secs={SECS} reps={REPS} ring=SINGLE_ISSUER|DEFER_TASKRUN slab=64MiB zram=lz4 {host()}")
         print("## R registration (as root CAP_IPC_LOCK skips RLIMIT_MEMLOCK accounting)")
         pop = dict(os.environ, POPULATE="1")
         for env, args in [(None, ["64"]), (None, ["1024"]), (pop, ["64"]), (pop, ["1024"]), (pop, ["2048"]),

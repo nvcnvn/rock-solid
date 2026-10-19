@@ -1,12 +1,13 @@
 #!/bin/bash
-# Builds the host tools and the guest test into bin/, and, with "uml", the
-# User-Mode Linux kernel at bin/linux-um.
+# Builds the host tools and the guest test into bin/ (clockrate static, so the
+# VM guest runs it too), and, with "uml", the User-Mode Linux kernel at
+# bin/linux-um.
 set -eu
 cd "$(dirname "$0")"
 . ./env.sh
 mkdir -p bin
 gcc -O2 -Wall -o bin/adjtimex-read adjtimex_read.c
-gcc -O2 -Wall -o bin/clockrate clockrate.c
+gcc -O2 -Wall -static -o bin/clockrate clockrate.c
 gcc -O2 -Wall -static -o bin/slew-guest slew_guest.c
 if [ "${1:-}" = uml ]; then
   make -C vendor/linux -s ARCH=um O="$PWD/work/um" x86_64_defconfig

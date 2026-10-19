@@ -1,0 +1,7 @@
+[  113.947176] rsenospc 1792407682: start T4
+[  114.047755] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[  114.149990] device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+[  133.949628] loop30: detected capacity change from 393216 to 2621440
+[  133.967545] device-mapper: thin: 252:0: switching pool to write mode
+[  133.967550] device-mapper: thin: 252:0: growing the data device from 3072 to 20480 blocks
+[  134.501172] XFS (dm-1): Unmounting Filesystem 27a2b0b7-4d3c-482a-80f9-26ee4e9c38d6

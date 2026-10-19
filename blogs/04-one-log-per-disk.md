@@ -132,9 +132,10 @@ common DRAM-less consumer drive (UMIS RPEYJ512MML1QWQ, 512 GB, volatile write ca
 
 - A 4 KiB `O_DIRECT` write plus `fdatasync` at queue depth 1: **p50 0.95 ms, p99 2.4 ms, about
   1,090 durable writes per second**, exactly one device flush each.
-- The flush alone is only 0.22 ms. The rest shows up in the *next* write: a 4 KiB write takes
-  13 µs on its own and 0.33 ms when it follows a flush. So durability must always be measured as
-  write plus flush.
+- 98% of that time is inside the drive; the kernel adds 20 µs. The drive splits it oddly: either
+  a ~1.1 ms flush and a fast next write, or a ~0.2 ms flush and a next write of 0.3 to 1 ms,
+  against 9 µs for a write with no flush before it. So durability must always be measured as
+  write plus flush, and no faster driver can buy much of it back.
 - After the drive idles 100 ms or more, the next durable write takes 1.9 to 2.1 ms.
 
 So a homelab drive floors at about 1 ms per durable write, 2 ms after idling. Drives with PLP are
@@ -755,8 +756,8 @@ crash-and-reopen cycles, and bit flips anywhere in the log.
   per write, so its sequential reads become random 4K reads, fine on NVMe, worse on SATA and HDDs
   ([post 06](06-the-lsm-tree.md)).
 - **A millisecond floor.** One shared flush means more items per millisecond, not fewer
-  milliseconds per item. And with `commit_depth` 1, a hot 4K commit can wait behind a cold 1 MiB
-  round.
+  milliseconds per item. And a hot 4K commit can wait behind a cold 1 MiB round: 3.0 ms with
+  alternating rounds against 0.95 ms alone.
 - **Recovery reads a lot, and sometimes refuses.** Every start reads every segment header and the
   unused tail of each open segment. A disk whose damage the tail rule cannot explain does not come
   back on its own: availability traded for never silently losing acknowledged writes.
@@ -770,10 +771,13 @@ From the design's [roadmap and open questions](../docs/design.md#roadmap-and-ope
 
 - **Other drives.** Flush latency has been measured on one DRAM-less consumer NVMe drive only.
   DRAM, QLC, SATA and PLP drives are open, and on PLP drives `durability: fua` may win.
-- **`commit_depth` 2,** taking the second round from another stream so a hot 4K commit stops
-  waiting behind a cold 1 MiB record. On a bandwidth-bound VM disk it did not help (1,356 µs
-  against 97 µs alone); the NVMe drive has not been measured. It is a per-disk setting, not a
-  format change, since record headers will name what was durable.
+- **One flush for both streams.** A second round in flight does not help on a consumer drive: a
+  flush waits for every byte in the drive's cache, so a hot 4K commit next to 1 MiB cold records
+  took 2.3 ms with two rounds in flight
+  ([stream overlap spike](../docs/design.md#appendix-stream-overlap-spike)). Putting one record
+  per stream in one round under one flush gets 2.35 ms with one round, against 3.0 ms with
+  alternating rounds. Should rounds do that, and should a round cap its cold bytes while a hot
+  commit waits?
 - **Shorter commits at depth 1,** collecting work while a round is in flight, as Pebble and
   RocksDB apply while their sync runs.
 - **One loop and a fast drive.** On a PLP drive the owner loop may become CPU-bound; the drive

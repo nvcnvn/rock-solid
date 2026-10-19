@@ -1,0 +1,92 @@
+# host Linux 6.17.0-1033-oem clocksource=tsc | Firecracker v1.17.0 | guest Linux 7.0.0-14-generic (Ubuntu 26.04) | KVM, 1 vCPU, 256 MiB | 2026-10-19T10:11:15Z
+  A| # kernel: Linux version 7.0.0-14-generic (buildd@lcy02-amd64-043) (x86_64-linux-gnu-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #14-Ubuntu SMP PREEMPT_DYNAMIC Mon Apr 13 11:09:53 UTC 2026
+  A| # cmdline: console=ttyS0 reboot=k panic=-1 quiet vp.mode=monitor pci=off
+  A| # clocksource: tsc
+  A| # finit_module ptp_vmclock: ok
+  A| # finit_module ptp_kvm: ok
+  A| # ptp: ptp0 KVM virtual PTP
+  A| # ptp_kvm clock: open
+  A| # tsc: 3187198650 Hz against CLOCK_MONOTONIC_RAW
+  A| [OK ] T0 /dev/vmclock0 mmap got=ok want=ok
+  A| # vmclock0: mode=600 magic=0x4b4c4356 size=4096 version=1 counter_id=0xff time_type=0 flags=0x300 clock_status=0 seq=0 marker=0 gen=0
+  A| [OK ] T0 magic got=0x4b4c4356 want=0x4b4c4356
+  A| # vmclock0 poll: n=0 revents=0x0 (POLLHUP=0x10: no notifications)
+  A| # vmclock0 read(): 112 bytes, marker=0
+  A| READY monitor
+  A| # clocksource: tsc
+G F1 pause 10 s, resume: host 10.002 s | raw 10.003 boot 10.003 mono 10.003 real 10.003 tsc 10.003 phc 10.002 s | rtc 0 s | clocksource tsc | marker 0->0 seq 0->0 gen 0->0 flags 0x300->0x300 | n 9->10 on A->A
+  A 26189.079 S n=9 raw=1247890365 boot=1275767197 mono=1275767219 real=1792404676909630542 tsc=1353343909 phc=1792404676936558694 rtc=-1 seq=0 marker=0 gen=0 flags=0x300
+  A 26199.082 S n=10 raw=11250547924 boot=11278424755 mono=11278424776 real=1792404686912288100 tsc=11356005215 phc=1792404686938986291 rtc=-1 seq=0 marker=0 gen=0 flags=0x300
+[OK ] F1 raw kept host time got=10.003s/host 10.002s want=host±1s
+[OK ] F1 boot kept host time got=10.003s/host 10.002s want=host±1s
+[OK ] F1 mono kept host time got=10.003s/host 10.002s want=host±1s
+[OK ] F1 real kept host time got=10.003s/host 10.002s want=host±1s
+[OK ] F1 tsc kept host time got=10.003s/host 10.002s want=host±1s
+[OK ] F1 phc kept host time got=10.002s/host 10.002s want=host±1s
+[OK ] F1 marker changed got=False want=False
+[OK ] F1 vm_generation_counter changed got=False want=False
+[OK ] F1 poll() woke on /dev/vmclock0 got=0 want=0
+  snapshot create took 0.105 s
+G F2 pause, snapshot, resume after 10 s: host 10.108 s | raw 10.108 boot 10.108 mono 10.108 real 10.108 tsc 10.108 phc 10.108 s | rtc 0 s | clocksource tsc | marker 0->0 seq 0->0 gen 0->0 flags 0x300->0x300 | n 20->21 on A->A
+  A 26200.083 S n=20 raw=12251842312 boot=12279719141 mono=12279719164 real=1792404687913582486 tsc=12357299977 phc=1792404687940257015 rtc=-1 seq=0 marker=0 gen=0 flags=0x300
+  A 26210.191 S n=21 raw=22359853646 boot=22387730475 mono=22387730496 real=1792404698021593819 tsc=22465315096 phc=1792404698048036467 rtc=-1 seq=0 marker=0 gen=0 flags=0x300
+[OK ] F2 raw kept host time got=10.108s/host 10.108s want=host±1s
+[OK ] F2 boot kept host time got=10.108s/host 10.108s want=host±1s
+[OK ] F2 mono kept host time got=10.108s/host 10.108s want=host±1s
+[OK ] F2 real kept host time got=10.108s/host 10.108s want=host±1s
+[OK ] F2 tsc kept host time got=10.108s/host 10.108s want=host±1s
+[OK ] F2 phc kept host time got=10.108s/host 10.108s want=host±1s
+[OK ] F2 marker changed got=False want=False
+[OK ] F2 vm_generation_counter changed got=False want=False
+  F3 snapshot load (clock_realtime=False) took 0.002 s
+  B0| W raw=12256811064 tsc=12362442265 phc=1792404708638917613 seq=2 marker=1 gen=1
+G F3 snapshot restored in a new process, clock_realtime=False: host 20.795 s | raw 0.100 boot 0.100 mono 0.100 real 0.100 tsc 0.100 phc 20.794 s | rtc 0 s | clocksource tsc | marker 0->1 seq 0->2 gen 0->1 flags 0x300->0x300 | n 20->21 on A->B0
+  A 26200.083 S n=20 raw=12251842312 boot=12279719141 mono=12279719164 real=1792404687913582486 tsc=12357299977 phc=1792404687940257015 rtc=-1 seq=0 marker=0 gen=0 flags=0x300
+  B0 26220.878 S n=21 raw=12352310215 boot=12380187054 mono=12380187076 real=1792404688014050399 tsc=12457767927 phc=1792404708734255015 rtc=-1 seq=2 marker=1 gen=1 flags=0x300
+[OK ] F3 raw stood still got=0.100s/host 20.795s want=<1s
+[OK ] F3 boot stood still got=0.100s/host 20.795s want=<1s
+[OK ] F3 mono stood still got=0.100s/host 20.795s want=<1s
+[OK ] F3 real stood still got=0.100s/host 20.795s want=<1s
+[OK ] F3 tsc stood still got=0.100s/host 20.795s want=<1s
+[OK ] F3 phc kept host time got=20.794s/host 20.795s want=host±1s
+[OK ] F3 marker changed got=True want=True
+[OK ] F3 vm_generation_counter changed got=True want=True
+  B0 26220.781 W raw=12256811064 tsc=12362442265 phc=1792404708638917613 seq=2 marker=1 gen=1
+[OK ] F3 poll() woke on /dev/vmclock0 got=1 want=>0
+[OK ] F3 the wakeup saw the new marker got=1 want=1
+  F3: first wakeup -0.096 s after the first sample of the restored guest
+  F3b snapshot load (clock_realtime=False) took 0.003 s
+  B1| W raw=12256633472 tsc=12362256501 phc=1792404710808806247 seq=2 marker=1 gen=1
+G F3b snapshot restored in a new process, clock_realtime=False: host 22.965 s | raw 0.100 boot 0.100 mono 0.100 real 0.100 tsc 0.100 phc 22.964 s | rtc 0 s | clocksource tsc | marker 0->1 seq 0->2 gen 0->1 flags 0x300->0x300 | n 20->21 on A->B1
+  A 26200.083 S n=20 raw=12251842312 boot=12279719141 mono=12279719164 real=1792404687913582486 tsc=12357299977 phc=1792404687940257015 rtc=-1 seq=0 marker=0 gen=0 flags=0x300
+  B1 26223.048 S n=21 raw=12352244262 boot=12380121092 mono=12380121114 real=1792404688013984437 tsc=12457701965 phc=1792404710904262974 rtc=-1 seq=2 marker=1 gen=1 flags=0x300
+[OK ] F3b raw stood still got=0.100s/host 22.965s want=<1s
+[OK ] F3b boot stood still got=0.100s/host 22.965s want=<1s
+[OK ] F3b mono stood still got=0.100s/host 22.965s want=<1s
+[OK ] F3b real stood still got=0.100s/host 22.965s want=<1s
+[OK ] F3b tsc stood still got=0.100s/host 22.965s want=<1s
+[OK ] F3b phc kept host time got=22.964s/host 22.965s want=host±1s
+[OK ] F3b marker changed got=True want=True
+[OK ] F3b vm_generation_counter changed got=True want=True
+  B1 26222.951 W raw=12256633472 tsc=12362256501 phc=1792404710808806247 seq=2 marker=1 gen=1
+[OK ] F3b poll() woke on /dev/vmclock0 got=1 want=>0
+[OK ] F3b the wakeup saw the new marker got=1 want=1
+  F3b: first wakeup -0.096 s after the first sample of the restored guest
+  F3c snapshot load (clock_realtime=True) took 0.003 s
+  B2| W raw=12256563348 tsc=12362176087 phc=1792404712982289739 seq=2 marker=1 gen=1
+G F3c snapshot restored in a new process, clock_realtime=True: host 25.138 s | raw 0.100 boot 0.100 mono 0.100 real 0.100 tsc 0.100 phc 25.137 s | rtc 0 s | clocksource tsc | marker 0->1 seq 0->2 gen 0->1 flags 0x300->0x300 | n 20->21 on A->B2
+  A 26200.083 S n=20 raw=12251842312 boot=12279719141 mono=12279719164 real=1792404687913582486 tsc=12357299977 phc=1792404687940257015 rtc=-1 seq=0 marker=0 gen=0 flags=0x300
+  B2 26225.221 S n=21 raw=12351687456 boot=12379564286 mono=12379564308 real=1792404688013427631 tsc=12457145158 phc=1792404713077269754 rtc=-1 seq=2 marker=1 gen=1 flags=0x300
+[OK ] F3c raw stood still got=0.100s/host 25.138s want=<1s
+[OK ] F3c boot stood still got=0.100s/host 25.138s want=<1s
+[OK ] F3c mono stood still got=0.100s/host 25.138s want=<1s
+[OK ] F3c real stood still got=0.100s/host 25.138s want=<1s
+[OK ] F3c tsc stood still got=0.100s/host 25.138s want=<1s
+[OK ] F3c phc kept host time got=25.137s/host 25.138s want=host±1s
+[OK ] F3c marker changed got=True want=True
+[OK ] F3c vm_generation_counter changed got=True want=True
+  B2 26225.125 W raw=12256563348 tsc=12362176087 phc=1792404712982289739 seq=2 marker=1 gen=1
+[OK ] F3c poll() woke on /dev/vmclock0 got=1 want=>0
+[OK ] F3c the wakeup saw the new marker got=1 want=1
+  F3c: first wakeup -0.096 s after the first sample of the restored guest
+[OK ] F3b second restore of one snapshot shows the first restore's marker got=1 want=1

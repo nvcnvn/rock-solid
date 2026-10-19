@@ -1,0 +1,10 @@
+[  198.016090] rsenospc 1792407682: start T6
+[  198.118314] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[  198.216433] device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+[  258.901732] device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+[  258.903157] dm-1: writeback error on inode 132, offset 0, sector 262272
+[  258.903246] dm-1: writeback error on inode 132, offset 131584000, sector 524416
+[  258.903330] dm-1: writeback error on inode 132, offset 263168000, sector 786560
+[  258.903603] dm-1: writeback error on inode 132, offset 394752000, sector 1310848
+[  258.903697] dm-1: writeback error on inode 132, offset 526336000, sector 1572992
+[  258.976515] XFS (dm-1): Unmounting Filesystem d84b7e95-189c-4d95-ba8f-dd18064c7ae0

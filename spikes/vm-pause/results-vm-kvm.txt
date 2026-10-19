@@ -1,0 +1,124 @@
+# host Linux 6.17.0-1033-oem clocksource=tsc | QEMU emulator version 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3) | guest Linux 7.0.0-14-generic (Ubuntu 26.04) | KVM -cpu host, 1 vCPU, 256 MiB | 2026-10-19T08:36:17Z
+  A| # kernel: Linux version 7.0.0-14-generic (buildd@lcy02-amd64-043) (x86_64-linux-gnu-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #14-Ubuntu SMP PREEMPT_DYNAMIC Mon Apr 13 11:09:53 UTC 2026
+  A| # cmdline: console=ttyS0 quiet panic=-1 vp.mode=monitor
+  A| # clocksource: kvm-clock
+  A| # finit_module ptp_vmclock: ok
+  A| # finit_module ptp_kvm: ok
+  A| # ptp: ptp0 KVM virtual PTP
+  A| # ptp_kvm clock: open
+  A| # tsc: 3187199742 Hz against CLOCK_MONOTONIC_RAW
+  A| [OK ] T0 /dev/vmclock0 mmap got=ok want=ok
+  A| # vmclock0: mode=600 magic=0x4b4c4356 size=4096 version=1 counter_id=0xff time_type=0 flags=0x0 clock_status=0 seq=2 marker=1 gen=0
+  A| [OK ] T0 magic got=0x4b4c4356 want=0x4b4c4356
+  A| # vmclock0 poll: n=1 revents=0x10 (POLLHUP=0x10: no notifications)
+  A| # vmclock0 read(): 112 bytes, marker=1
+  A| READY monitor
+  A| # clocksource: kvm-clock
+[OK ] T1/T2 status after stop got=paused want=paused
+G T1/T2 QMP stop 10 s, cont: host 10.101 s | raw 0.100 boot 0.100 mono 0.100 real 0.100 tsc 10.101 phc 10.101 s | rtc 10 s | clocksource kvm-clock | marker 1->1 seq 2->2 gen 0->0 flags 0x0->0x0 | n 9->10 on A->A
+  A 20490.982 S n=9 raw=1462585676 boot=1479137918 mono=1479137947 real=1792398978640878817 tsc=1646388192 phc=1792398978837777260 rtc=1792398978 seq=2 marker=1 gen=0 flags=0x0
+  A 20501.082 S n=10 raw=1562529343 boot=1579081712 mono=1579081738 real=1792398978740822609 tsc=11747262716 phc=1792398988938440697 rtc=1792398988 seq=2 marker=1 gen=0 flags=0x0
+[OK ] T1/T2 raw stood still got=0.100s/host 10.101s want=<1s
+[OK ] T1/T2 boot stood still got=0.100s/host 10.101s want=<1s
+[OK ] T1/T2 mono stood still got=0.100s/host 10.101s want=<1s
+[OK ] T1/T2 real stood still got=0.100s/host 10.101s want=<1s
+[OK ] T1/T2 tsc kept host time got=10.101s/host 10.101s want=host±1s
+[OK ] T1/T2 phc kept host time got=10.101s/host 10.101s want=host±1s
+[OK ] T1/T2 rtc kept host time got=10s/host 10.101s want=host±2s
+[OK ] T1/T2 marker changed got=False want=False
+[OK ] T1/T2 vm_generation_counter changed got=False want=False
+G T2b SIGSTOP 10 s, SIGCONT: host 10.003 s | raw 10.002 boot 10.002 mono 10.002 real 10.002 tsc 10.002 phc 10.003 s | rtc 10 s | clocksource kvm-clock | marker 1->1 seq 2->2 gen 0->0 flags 0x0->0x0 | n 20->21 on A->A
+  A 20502.082 S n=20 raw=2562523771 boot=2579076019 mono=2579076049 real=1792398979740816919 tsc=12747257108 phc=1792398989938481575 rtc=1792398989 seq=2 marker=1 gen=0 flags=0x0
+  A 20512.085 S n=21 raw=12564246967 boot=12580799210 mono=12580799237 real=1792398989742540107 tsc=22748981109 phc=1792398999941213572 rtc=1792398999 seq=2 marker=1 gen=0 flags=0x0
+[OK ] T2b raw kept host time got=10.002s/host 10.003s want=host±1s
+[OK ] T2b boot kept host time got=10.002s/host 10.003s want=host±1s
+[OK ] T2b mono kept host time got=10.002s/host 10.003s want=host±1s
+[OK ] T2b real kept host time got=10.002s/host 10.003s want=host±1s
+[OK ] T2b tsc kept host time got=10.002s/host 10.003s want=host±1s
+[OK ] T2b phc kept host time got=10.003s/host 10.003s want=host±1s
+[OK ] T2b rtc kept host time got=10s/host 10.003s want=host±2s
+[OK ] T2b marker changed got=False want=False
+[OK ] T2b vm_generation_counter changed got=False want=False
+  savevm s1 took 0.096 s ''
+G T2c savevm on the running guest (0.10 s): host 0.102 s | raw 0.100 boot 0.100 mono 0.100 real 0.100 tsc 0.102 phc 0.102 s | rtc 0 s | clocksource kvm-clock | marker 1->1 seq 2->2 gen 0->0 flags 0x0->0x0 | n 31->32 on A->A
+  A 20513.088 S n=31 raw=13566743570 boot=13583295826 mono=13583295858 real=1792398990745036728 tsc=23751477811 phc=1792399000943858864 rtc=1792399000 seq=2 marker=1 gen=0 flags=0x0
+  A 20513.190 S n=32 raw=13666721664 boot=13683273919 mono=13683273958 real=1792398990845014828 tsc=23853610492 phc=1792399001046005218 rtc=1792399000 seq=2 marker=1 gen=0 flags=0x0
+[OK ] T2c raw stood still got=0.100s/host 0.102s want=<1s
+[OK ] T2c boot stood still got=0.100s/host 0.102s want=<1s
+[OK ] T2c mono stood still got=0.100s/host 0.102s want=<1s
+[OK ] T2c real stood still got=0.100s/host 0.102s want=<1s
+[OK ] T2c tsc kept host time got=0.102s/host 0.102s want=host±1s
+[OK ] T2c phc kept host time got=0.102s/host 0.102s want=host±1s
+[OK ] T2c rtc kept host time got=0s/host 0.102s want=host±2s
+[OK ] T2c marker changed got=False want=False
+[OK ] T2c vm_generation_counter changed got=False want=False
+  loadvm s1 ''
+G T3b loadvm into the same process: host 11.202 s | raw 0.120 boot 0.120 mono 0.120 real 0.120 tsc 0.027 phc 11.202 s | rtc 11 s | clocksource kvm-clock | marker 1->2 seq 2->4 gen 0->0 flags 0x0->0x0 | n 31->32 on A->A
+  A 20513.088 S n=31 raw=13566743570 boot=13583295826 mono=13583295858 real=1792398990745036728 tsc=23751477811 phc=1792399000943858864 rtc=1792399000 seq=2 marker=1 gen=0 flags=0x0
+  A 20524.290 S n=142 raw=24666714257 boot=24683266506 mono=24683266533 rS n=32 raw=13687016402 boot=13703568645 mono=13703568670 real=1792398990865309540 tsc=23778883888 phc=1792399012145877644 rtc=1792399011 seq=4 marker=2 gen=0 flags=0x0
+[OK ] T3b raw stood still got=0.120s/host 11.202s want=<1s
+[OK ] T3b boot stood still got=0.120s/host 11.202s want=<1s
+[OK ] T3b mono stood still got=0.120s/host 11.202s want=<1s
+[OK ] T3b real stood still got=0.120s/host 11.202s want=<1s
+[OK ] T3b tsc stood still got=0.027s/host 11.202s want=<1s
+[OK ] T3b phc kept host time got=11.202s/host 11.202s want=host±1s
+[OK ] T3b rtc kept host time got=11s/host 11.202s want=host±2s
+[OK ] T3b marker changed got=True want=True
+[OK ] T3b vm_generation_counter changed got=False want=False
+[OK ] T3b host gap covers the wait got=11.202s want=>10s
+[OK ] T3 source status got=postmigrate want=postmigrate
+G T3 migrate to file, restore in a new process 10 s later: host 10.598 s | raw 0.100 boot 0.100 mono 0.100 real 0.100 tsc 0.100 phc 10.598 s | rtc 11 s | clocksource kvm-clock | marker 2->3 seq 4->6 gen 0->0 flags 0x0->0x0 | n 50->51 on A->B
+  A 20526.070 S n=50 raw=15466735727 boot=15483287978 mono=15483288003 real=1792398992645028873 tsc=25558603366 phc=1792399013925996709 rtc=1792399013 seq=4 marker=2 gen=0 flags=0x0
+  B 20536.668 S n=51 raw=15566985697 boot=15583537946 mono=15583537971 real=1792398992745278842 tsc=25658650069 phc=1792399024523885857 rtc=1792399024 seq=6 marker=3 gen=0 flags=0x0
+[OK ] T3 raw stood still got=0.100s/host 10.598s want=<1s
+[OK ] T3 boot stood still got=0.100s/host 10.598s want=<1s
+[OK ] T3 mono stood still got=0.100s/host 10.598s want=<1s
+[OK ] T3 real stood still got=0.100s/host 10.598s want=<1s
+[OK ] T3 tsc stood still got=0.100s/host 10.598s want=<1s
+[OK ] T3 phc kept host time got=10.598s/host 10.598s want=host±1s
+[OK ] T3 rtc kept host time got=11s/host 10.598s want=host±2s
+[OK ] T3 marker changed got=True want=True
+[OK ] T3 vm_generation_counter changed got=False want=False
+[OK ] T3c second restore of one file shows the first restore's marker got=3 want=3
+[OK ] T3c and differs from the saved guest's got=3 want=!=2
+  migration: total 812 ms downtime 1 ms setup 1 ms
+G T4 live migration (downtime 1 ms): host 0.104 s | raw 0.100 boot 0.100 mono 0.100 real 0.100 tsc 0.100 phc 0.104 s | rtc 0 s | clocksource kvm-clock | marker 3->4 seq 6->8 gen 0->0 flags 0x0->0x0 | n 69->70 on C->D
+  C 20539.758 S n=69 raw=17366722438 boot=17383274783 mono=17383274808 real=1792398994545015678 tsc=27458342597 phc=1792399027613770503 rtc=1792399027 seq=6 marker=3 gen=0 flags=0x0
+  D 20539.862 S n=70 raw=17466825075 boot=17483377350 mono=17483377390 real=1792398994645118260 tsc=27558396819 phc=1792399027717626623 rtc=1792399027 seq=8 marker=4 gen=0 flags=0x0
+[OK ] T4 raw stood still got=0.100s/host 0.104s want=<1s
+[OK ] T4 boot stood still got=0.100s/host 0.104s want=<1s
+[OK ] T4 mono stood still got=0.100s/host 0.104s want=<1s
+[OK ] T4 real stood still got=0.100s/host 0.104s want=<1s
+[OK ] T4 tsc stood still got=0.100s/host 0.104s want=<1s
+[OK ] T4 phc kept host time got=0.104s/host 0.104s want=host±1s
+[OK ] T4 rtc kept host time got=0s/host 0.104s want=host±2s
+[OK ] T4 marker changed got=True want=True
+[OK ] T4 vm_generation_counter changed got=False want=False
+  migration: total 11158 ms downtime 10338 ms
+G T4b live migration held 10 s at switchover: host 10.415 s | raw 10.409 boot 10.409 mono 10.409 real 10.409 tsc 0.075 phc 10.415 s | rtc 11 s | clocksource kvm-clock | marker 4->5 seq 8->10 gen 0->0 flags 0x0->0x0 | n 91->92 on D->E
+  D 20541.962 S n=91 raw=19566728203 boot=19583280543 mono=19583280569 real=1792398996745021440 tsc=29658300169 phc=1792399029818134119 rtc=1792399029 seq=8 marker=4 gen=0 flags=0x0
+  E 20552.377 S n=92 raw=29975952845 boot=29992505109 mono=29992505134 real=1792399007154246004 tsc=29733085303 phc=1792399040233252431 rtc=1792399040 seq=10 marker=5 gen=0 flags=0x0
+[FAIL] T4b raw stood still got=10.409s/host 10.415s want=<1s
+[FAIL] T4b boot stood still got=10.409s/host 10.415s want=<1s
+[FAIL] T4b mono stood still got=10.409s/host 10.415s want=<1s
+[FAIL] T4b real stood still got=10.409s/host 10.415s want=<1s
+[OK ] T4b tsc stood still got=0.075s/host 10.415s want=<1s
+[OK ] T4b phc kept host time got=10.415s/host 10.415s want=host±1s
+[OK ] T4b rtc kept host time got=11s/host 10.415s want=host±2s
+[OK ] T4b marker changed got=True want=True
+[OK ] T4b vm_generation_counter changed got=False want=False
+  F| qemu-system-x86_64: check_section_footer: Read section footer failed: -5
+  E| qemu-system-x86_64: Channel error: Input/output error
+  F| qemu-system-x86_64: load of migration failed: Invalid argument: Section footer error, section_id: 1
+G T4c migration cancelled after 10 s at switchover; source resumes: host 10.449 s | raw 0.100 boot 0.100 mono 0.100 real 0.100 tsc 10.446 phc 10.449 s | rtc 11 s | clocksource kvm-clock | marker 5->5 seq 10->10 gen 0->0 flags 0x0->0x0 | n 110->111 on E->E
+  E 20554.180 S n=110 raw=31778568335 boot=31795120705 mono=31795120736 real=1792399008956861606 tsc=31535701051 phc=1792399042036441466 rtc=1792399041 seq=10 marker=5 gen=0 flags=0x0
+  E 20564.630 S n=111 raw=31878592544 boot=31895144811 mono=31895144842 real=1792399009056885713 tsc=41981589076 phc=1792399052485822717 rtc=1792399052 seq=10 marker=5 gen=0 flags=0x0
+[OK ] T4c raw stood still got=0.100s/host 10.449s want=<1s
+[OK ] T4c boot stood still got=0.100s/host 10.449s want=<1s
+[OK ] T4c mono stood still got=0.100s/host 10.449s want=<1s
+[OK ] T4c real stood still got=0.100s/host 10.449s want=<1s
+[OK ] T4c tsc kept host time got=10.446s/host 10.449s want=host±1s
+[OK ] T4c phc kept host time got=10.449s/host 10.449s want=host±1s
+[OK ] T4c rtc kept host time got=11s/host 10.449s want=host±2s
+[OK ] T4c marker changed got=False want=False
+[OK ] T4c vm_generation_counter changed got=False want=False

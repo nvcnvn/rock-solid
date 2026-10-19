@@ -1,0 +1,165 @@
+# host Linux 6.17.0-1033-oem, Intel(R) Core(TM) Ultra 5 235U, QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18), 2026-10-19T10:20:28Z
+# host before: USER_HZ=100 nominal_tick=10000
+# host before: adjtimex state=0 status=0x6001 PLL NANO tick=10000 freq=-1042464 (-15.907 ppm) offset=-1275822 ns constant=7 maxerror=957000 esterror=0 tolerance=32768000 (500 ppm) precision=1 tick+freq rate=-15.907 ppm adjtime_left=0 us
+# host clocksource: tsc
+# guest Linux 7.0.0-38-generic, clocksource kvm-clock (available: kvm-clock tsc hpet acpi_pm ), timesyncd 2026-10-19T10:20:58Z
+# /dev/ptp0: KVM virtual PTP
+### V3 Ubuntu's default server, +0.3 s
+Creating group 'systemd-timesync' with GID 987.
+Creating user 'systemd-timesync' (systemd Time Synchronization) with UID 987 and GID 987.
+Created symlink '/etc/systemd/system/dbus-org.freedesktop.timesync1.service' → '/usr/lib/systemd/system/systemd-timesyncd.service'.
+Created symlink '/etc/systemd/system/sysinit.target.wants/systemd-timesyncd.service' → '/usr/lib/systemd/system/systemd-timesyncd.service'.
+systemd-time-wait-sync.service is a disabled or a static unit, not starting it.
+systemd 259 (259.5-0ubuntu3.4)
+Failed to query server: Failed to activate service 'org.freedesktop.timesync1': timed out (service_start_timeout=25000ms)
+## step 0.3 second at 10:21:46.179587638
+start state=5 status=0x2041 PLL UNSYNC NANO tick=10000 freq=22001465 (335.716 ppm) offset=0 ns constant=2 maxerror=16000000 esterror=16000000 tolerance=32768000 (500 ppm) precision=1 tick+freq rate=335.716 ppm adjtime_left=0 us
+w000 raw_ms=1014.442 mono=-14156.556 boot=-14156.558 real=-14156.558 ppm predicted=-394.298 ppm pll_left_ms=-218.031 real-phc_ms=+299.134 span_ns=102
+w001 raw_ms=1030.843 mono=-29827.350 boot=-29827.350 real=-29827.349 ppm predicted=-394.298 ppm pll_left_ms=-190.777 real-phc_ms=+268.405 span_ns=101
+w002 raw_ms=1026.698 mono=-25902.445 boot=-25902.444 real=-25902.444 ppm predicted=-394.298 ppm pll_left_ms=-166.930 real-phc_ms=+241.830 span_ns=101
+w003 raw_ms=1023.616 mono=-22980.112 boot=-22980.112 real=-22980.112 ppm predicted=-394.298 ppm pll_left_ms=-146.064 real-phc_ms=+218.326 span_ns=101
+w004 raw_ms=1020.852 mono=-20179.058 boot=-20179.058 real=-20179.058 ppm predicted=-394.298 ppm pll_left_ms=-127.806 real-phc_ms=+197.744 span_ns=103
+w005 raw_ms=1018.122 mono=-17724.875 boot=-17724.874 real=-17724.874 ppm predicted=-394.298 ppm pll_left_ms=-111.830 real-phc_ms=+179.716 span_ns=104
+w006 raw_ms=1015.914 mono=-15575.333 boot=-15575.334 real=-15575.333 ppm predicted=-394.298 ppm pll_left_ms=-97.851 real-phc_ms=+163.911 span_ns=104
+w007 raw_ms=1013.960 mono=-13692.423 boot=-13692.423 real=-13692.422 ppm predicted=-394.298 ppm pll_left_ms=-85.620 real-phc_ms=+150.050 span_ns=104
+w008 raw_ms=1012.281 mono=-12042.796 boot=-12042.795 real=-12042.796 ppm predicted=-394.298 ppm pll_left_ms=-74.917 real-phc_ms=+137.873 span_ns=104
+w009 raw_ms=1010.808 mono=-10597.802 boot=-10597.801 real=-10597.801 ppm predicted=-394.298 ppm pll_left_ms=-65.553 real-phc_ms=+127.179 span_ns=104
+w010 raw_ms=1009.516 mono=-9332.059 boot=-9332.061 real=-9332.060 ppm predicted=-394.298 ppm pll_left_ms=-57.359 real-phc_ms=+117.776 span_ns=103
+w011 raw_ms=1008.414 mono=-8223.179 boot=-8223.177 real=-8223.178 ppm predicted=-394.298 ppm pll_left_ms=-50.189 real-phc_ms=+109.500 span_ns=104
+w012 raw_ms=1007.424 mono=-7252.242 boot=-7252.243 real=-7252.242 ppm predicted=-394.298 ppm pll_left_ms=-43.915 real-phc_ms=+102.204 span_ns=104
+w013 raw_ms=1006.588 mono=-6401.129 boot=-6401.130 real=-6401.130 ppm predicted=-394.298 ppm pll_left_ms=-38.426 real-phc_ms=+95.787 span_ns=104
+w014 raw_ms=1005.811 mono=-5655.728 boot=-5655.727 real=-5655.727 ppm predicted=-394.298 ppm pll_left_ms=-33.623 real-phc_ms=+90.118 span_ns=104
+w015 raw_ms=1005.136 mono=-5003.303 boot=-5003.303 real=-5003.303 ppm predicted=-394.298 ppm pll_left_ms=-29.420 real-phc_ms=+85.108 span_ns=104
+w016 raw_ms=1004.487 mono=-4364.560 boot=-4364.560 real=-4364.561 ppm predicted=-394.298 ppm pll_left_ms=-25.742 real-phc_ms=+80.742 span_ns=104
+w017 raw_ms=1004.033 mono=-3930.514 boot=-3930.513 real=-3930.512 ppm predicted=-394.298 ppm pll_left_ms=-22.524 real-phc_ms=+76.813 span_ns=104
+w018 raw_ms=1003.533 mono=-3411.433 boot=-3411.433 real=-3411.434 ppm predicted=-394.298 ppm pll_left_ms=-19.709 real-phc_ms=+73.408 span_ns=103
+w019 raw_ms=1003.163 mono=-3039.758 boot=-3039.759 real=-3039.758 ppm predicted=-394.298 ppm pll_left_ms=-17.245 real-phc_ms=+70.376 span_ns=104
+w020 raw_ms=1003.008 mono=-2716.436 boot=-2716.435 real=-2716.436 ppm predicted=-394.298 ppm pll_left_ms=-15.090 real-phc_ms=+67.669 span_ns=104
+w021 raw_ms=1002.551 mono=-2434.851 boot=-2434.853 real=-2434.853 ppm predicted=-394.298 ppm pll_left_ms=-13.203 real-phc_ms=+65.247 span_ns=102
+w022 raw_ms=1002.295 mono=-2183.439 boot=-2183.437 real=-2183.437 ppm predicted=-394.298 ppm pll_left_ms=-11.553 real-phc_ms=+63.076 span_ns=102
+w023 raw_ms=1002.102 mono=-1991.044 boot=-1991.046 real=-1991.046 ppm predicted=-394.298 ppm pll_left_ms=-10.109 real-phc_ms=+61.099 span_ns=101
+w024 raw_ms=1001.884 mono=-1772.714 boot=-1772.714 real=-1772.714 ppm predicted=-394.298 ppm pll_left_ms=-8.845 real-phc_ms=+59.341 span_ns=101
+w025 raw_ms=1001.741 mono=-1604.195 boot=-1604.195 real=-1604.194 ppm predicted=-394.298 ppm pll_left_ms=-7.740 real-phc_ms=+57.750 span_ns=102
+w026 raw_ms=1001.544 mono=-1456.266 boot=-1456.266 real=-1456.266 ppm predicted=-394.298 ppm pll_left_ms=-6.772 real-phc_ms=+56.311 span_ns=102
+w027 raw_ms=1001.464 mono=-1326.413 boot=-1326.413 real=-1326.414 ppm predicted=-394.298 ppm pll_left_ms=-5.926 real-phc_ms=+55.000 span_ns=102
+w028 raw_ms=1001.317 mono=-1205.651 boot=-1205.650 real=-1205.649 ppm predicted=-394.298 ppm pll_left_ms=-5.185 real-phc_ms=+53.811 span_ns=101
+w029 raw_ms=1001.222 mono=-1115.348 boot=-1115.347 real=-1115.348 ppm predicted=-394.298 ppm pll_left_ms=-4.537 real-phc_ms=+52.712 span_ns=101
+w030 raw_ms=1001.131 mono=-1008.992 boot=-1008.993 real=-1008.993 ppm predicted=-394.298 ppm pll_left_ms=-3.970 real-phc_ms=+51.720 span_ns=102
+w031 raw_ms=1001.058 mono=-946.868 boot=-946.868 real=-946.868 ppm predicted=-394.298 ppm pll_left_ms=-3.474 real-phc_ms=+50.790 span_ns=102
+w032 raw_ms=1000.949 mono=-836.697 boot=-836.698 real=-836.697 ppm predicted=-295.172 ppm pll_left_ms=+12.688 real-phc_ms=+49.971 span_ns=102
+w033 raw_ms=1000.722 mono=-478.149 boot=-478.149 real=-478.150 ppm predicted=-295.172 ppm pll_left_ms=+11.895 real-phc_ms=+49.510 span_ns=102
+w034 raw_ms=999.745 mono=+472.643 boot=+472.642 real=+472.643 ppm predicted=-295.172 ppm pll_left_ms=+11.152 real-phc_ms=+50.000 span_ns=101
+w035 raw_ms=999.774 mono=+437.648 boot=+437.649 real=+437.649 ppm predicted=-295.172 ppm pll_left_ms=+10.455 real-phc_ms=+50.456 span_ns=102
+w036 raw_ms=999.913 mono=+387.303 boot=+387.304 real=+387.303 ppm predicted=-295.172 ppm pll_left_ms=+9.801 real-phc_ms=+50.861 span_ns=101
+w037 raw_ms=999.814 mono=+349.862 boot=+349.861 real=+349.861 ppm predicted=-295.172 ppm pll_left_ms=+9.189 real-phc_ms=+51.228 span_ns=101
+w038 raw_ms=1000.009 mono=+304.015 boot=+304.015 real=+304.016 ppm predicted=-295.172 ppm pll_left_ms=+8.614 real-phc_ms=+51.550 span_ns=102
+w039 raw_ms=1000.044 mono=+271.740 boot=+271.740 real=+271.739 ppm predicted=-295.172 ppm pll_left_ms=+8.076 real-phc_ms=+51.840 span_ns=101
+w040 raw_ms=1000.056 mono=+230.904 boot=+230.905 real=+230.905 ppm predicted=-295.172 ppm pll_left_ms=+7.571 real-phc_ms=+52.089 span_ns=101
+w041 raw_ms=1000.155 mono=+194.745 boot=+194.744 real=+194.744 ppm predicted=-295.172 ppm pll_left_ms=+7.098 real-phc_ms=+52.301 span_ns=101
+w042 raw_ms=1000.098 mono=+164.806 boot=+164.806 real=+164.807 ppm predicted=-295.172 ppm pll_left_ms=+6.654 real-phc_ms=+52.484 span_ns=102
+w043 raw_ms=1000.152 mono=+142.704 boot=+142.704 real=+142.704 ppm predicted=-295.172 ppm pll_left_ms=+6.239 real-phc_ms=+52.644 span_ns=101
+w044 raw_ms=1000.187 mono=+112.009 boot=+112.009 real=+112.009 ppm predicted=-295.172 ppm pll_left_ms=+5.849 real-phc_ms=+52.774 span_ns=102
+w045 raw_ms=1000.205 mono=+89.686 boot=+89.686 real=+89.686 ppm predicted=-295.172 ppm pll_left_ms=+5.483 real-phc_ms=+52.882 span_ns=102
+w046 raw_ms=1000.228 mono=+62.322 boot=+62.321 real=+62.321 ppm predicted=-295.172 ppm pll_left_ms=+5.140 real-phc_ms=+52.962 span_ns=101
+w047 raw_ms=1000.112 mono=+40.475 boot=+40.476 real=+40.476 ppm predicted=-295.172 ppm pll_left_ms=+4.819 real-phc_ms=+53.020 span_ns=101
+w048 raw_ms=1000.274 mono=+18.720 boot=+18.721 real=+18.720 ppm predicted=-295.172 ppm pll_left_ms=+4.518 real-phc_ms=+53.057 span_ns=102
+w049 raw_ms=1000.278 mono=+1.152 boot=+1.151 real=+1.152 ppm predicted=-295.172 ppm pll_left_ms=+4.236 real-phc_ms=+53.076 span_ns=101
+w050 raw_ms=1000.269 mono=-18.470 boot=-18.470 real=-18.470 ppm predicted=-295.172 ppm pll_left_ms=+3.971 real-phc_ms=+53.075 span_ns=102
+w051 raw_ms=1000.330 mono=-33.928 boot=-33.928 real=-33.929 ppm predicted=-295.172 ppm pll_left_ms=+3.723 real-phc_ms=+53.059 span_ns=102
+w052 raw_ms=1000.345 mono=-52.218 boot=-52.217 real=-52.217 ppm predicted=-295.172 ppm pll_left_ms=+3.490 real-phc_ms=+53.025 span_ns=102
+w053 raw_ms=1000.348 mono=-70.220 boot=-70.221 real=-70.221 ppm predicted=-295.172 ppm pll_left_ms=+3.272 real-phc_ms=+52.972 span_ns=101
+w054 raw_ms=1000.396 mono=-84.148 boot=-84.148 real=-84.147 ppm predicted=-295.172 ppm pll_left_ms=+3.067 real-phc_ms=+52.906 span_ns=102
+w055 raw_ms=1000.244 mono=-97.256 boot=-97.255 real=-97.256 ppm predicted=-295.172 ppm pll_left_ms=+2.876 real-phc_ms=+52.826 span_ns=101
+w056 raw_ms=1000.237 mono=-109.552 boot=-109.553 real=-109.552 ppm predicted=-295.172 ppm pll_left_ms=+2.696 real-phc_ms=+52.734 span_ns=102
+w057 raw_ms=1000.244 mono=-121.033 boot=-121.033 real=-121.033 ppm predicted=-295.172 ppm pll_left_ms=+2.527 real-phc_ms=+52.631 span_ns=101
+w058 raw_ms=1000.277 mono=-131.841 boot=-131.839 real=-131.840 ppm predicted=-295.172 ppm pll_left_ms=+2.369 real-phc_ms=+52.514 span_ns=101
+w059 raw_ms=1000.377 mono=-141.964 boot=-141.965 real=-141.965 ppm predicted=-295.172 ppm pll_left_ms=+2.221 real-phc_ms=+52.393 span_ns=101
+w060 raw_ms=1000.275 mono=-151.482 boot=-151.483 real=-151.482 ppm predicted=-295.172 ppm pll_left_ms=+2.083 real-phc_ms=+52.259 span_ns=102
+w061 raw_ms=1000.403 mono=-160.414 boot=-160.413 real=-160.414 ppm predicted=-295.172 ppm pll_left_ms=+1.952 real-phc_ms=+52.107 span_ns=101
+w062 raw_ms=1000.306 mono=-168.731 boot=-168.731 real=-168.731 ppm predicted=-295.172 ppm pll_left_ms=+1.830 real-phc_ms=+51.965 span_ns=101
+w063 raw_ms=1000.281 mono=-176.656 boot=-176.656 real=-176.656 ppm predicted=-295.172 ppm pll_left_ms=+1.716 real-phc_ms=+51.806 span_ns=101
+w064 raw_ms=1000.287 mono=-183.962 boot=-183.963 real=-183.962 ppm predicted=-295.172 ppm pll_left_ms=+1.609 real-phc_ms=+51.640 span_ns=101
+w065 raw_ms=1000.514 mono=-190.843 boot=-190.843 real=-190.843 ppm predicted=-295.172 ppm pll_left_ms=+1.508 real-phc_ms=+51.465 span_ns=102
+w066 raw_ms=1000.450 mono=-197.473 boot=-197.472 real=-197.473 ppm predicted=-295.172 ppm pll_left_ms=+1.414 real-phc_ms=+51.287 span_ns=101
+w067 raw_ms=1000.370 mono=-203.362 boot=-203.361 real=-203.361 ppm predicted=-295.172 ppm pll_left_ms=+1.326 real-phc_ms=+51.100 span_ns=101
+w068 raw_ms=1000.328 mono=-209.098 boot=-209.099 real=-209.099 ppm predicted=-295.172 ppm pll_left_ms=+1.243 real-phc_ms=+50.910 span_ns=102
+w069 raw_ms=1000.327 mono=-214.429 boot=-214.429 real=-214.428 ppm predicted=-295.172 ppm pll_left_ms=+1.165 real-phc_ms=+50.713 span_ns=102
+w070 raw_ms=1000.337 mono=-219.541 boot=-219.542 real=-219.542 ppm predicted=-295.172 ppm pll_left_ms=+1.092 real-phc_ms=+50.511 span_ns=101
+w071 raw_ms=1000.344 mono=-224.120 boot=-224.119 real=-224.120 ppm predicted=-295.172 ppm pll_left_ms=+1.024 real-phc_ms=+50.305 span_ns=102
+w072 raw_ms=1000.327 mono=-228.780 boot=-228.780 real=-228.780 ppm predicted=-295.172 ppm pll_left_ms=+0.960 real-phc_ms=+50.093 span_ns=101
+w073 raw_ms=1000.329 mono=-232.665 boot=-232.664 real=-232.664 ppm predicted=-295.172 ppm pll_left_ms=+0.900 real-phc_ms=+49.878 span_ns=101
+w074 raw_ms=1000.484 mono=-236.879 boot=-236.881 real=-236.880 ppm predicted=-295.172 ppm pll_left_ms=+0.844 real-phc_ms=+49.659 span_ns=102
+w075 raw_ms=1000.348 mono=-240.189 boot=-240.189 real=-240.189 ppm predicted=-295.172 ppm pll_left_ms=+0.791 real-phc_ms=+49.437 span_ns=101
+w076 raw_ms=1000.460 mono=-243.777 boot=-243.777 real=-243.777 ppm predicted=-295.172 ppm pll_left_ms=+0.742 real-phc_ms=+49.211 span_ns=101
+w077 raw_ms=1000.338 mono=-246.969 boot=-246.968 real=-246.969 ppm predicted=-295.172 ppm pll_left_ms=+0.695 real-phc_ms=+48.981 span_ns=102
+w078 raw_ms=1000.352 mono=-250.056 boot=-250.055 real=-250.055 ppm predicted=-295.172 ppm pll_left_ms=+0.652 real-phc_ms=+48.749 span_ns=102
+w079 raw_ms=1000.354 mono=-253.034 boot=-253.037 real=-253.036 ppm predicted=-295.172 ppm pll_left_ms=+0.611 real-phc_ms=+48.513 span_ns=101
+w080 raw_ms=1000.387 mono=-255.550 boot=-255.549 real=-255.549 ppm predicted=-295.172 ppm pll_left_ms=+0.573 real-phc_ms=+48.275 span_ns=102
+w081 raw_ms=1000.397 mono=-257.729 boot=-257.729 real=-257.730 ppm predicted=-295.172 ppm pll_left_ms=+0.537 real-phc_ms=+48.035 span_ns=102
+w082 raw_ms=1000.363 mono=-260.380 boot=-260.379 real=-260.378 ppm predicted=-295.172 ppm pll_left_ms=+0.503 real-phc_ms=+47.792 span_ns=104
+w083 raw_ms=1000.347 mono=-262.250 boot=-262.251 real=-262.251 ppm predicted=-295.172 ppm pll_left_ms=+0.472 real-phc_ms=+47.548 span_ns=102
+w084 raw_ms=1000.357 mono=-264.476 boot=-264.476 real=-264.477 ppm predicted=-295.172 ppm pll_left_ms=+0.442 real-phc_ms=+47.301 span_ns=102
+w085 raw_ms=1000.376 mono=-266.517 boot=-266.516 real=-266.515 ppm predicted=-295.172 ppm pll_left_ms=+0.415 real-phc_ms=+47.052 span_ns=101
+w086 raw_ms=1000.482 mono=-268.246 boot=-268.247 real=-268.248 ppm predicted=-295.172 ppm pll_left_ms=+0.389 real-phc_ms=+46.802 span_ns=102
+w087 raw_ms=1000.503 mono=-269.673 boot=-269.673 real=-269.673 ppm predicted=-295.172 ppm pll_left_ms=+0.365 real-phc_ms=+46.549 span_ns=101
+w088 raw_ms=1000.359 mono=-271.528 boot=-271.526 real=-271.526 ppm predicted=-295.172 ppm pll_left_ms=+0.342 real-phc_ms=+46.295 span_ns=102
+w089 raw_ms=1000.508 mono=-272.717 boot=-272.718 real=-272.718 ppm predicted=-295.172 ppm pll_left_ms=+0.320 real-phc_ms=+46.040 span_ns=102
+w090 raw_ms=1000.495 mono=-274.436 boot=-274.436 real=-274.436 ppm predicted=-295.172 ppm pll_left_ms=+0.300 real-phc_ms=+45.783 span_ns=101
+w091 raw_ms=1000.413 mono=-275.533 boot=-275.534 real=-275.533 ppm predicted=-295.172 ppm pll_left_ms=+0.282 real-phc_ms=+45.525 span_ns=102
+w092 raw_ms=1000.491 mono=-276.880 boot=-276.879 real=-276.880 ppm predicted=-295.172 ppm pll_left_ms=+0.264 real-phc_ms=+45.266 span_ns=102
+w093 raw_ms=1000.363 mono=-277.865 boot=-277.866 real=-277.865 ppm predicted=-295.172 ppm pll_left_ms=+0.248 real-phc_ms=+45.005 span_ns=101
+w094 raw_ms=1000.407 mono=-279.111 boot=-279.110 real=-279.111 ppm predicted=-295.172 ppm pll_left_ms=+0.232 real-phc_ms=+44.744 span_ns=101
+w095 raw_ms=1000.374 mono=-279.898 boot=-279.899 real=-279.898 ppm predicted=-295.172 ppm pll_left_ms=+0.218 real-phc_ms=+44.481 span_ns=102
+w096 raw_ms=1000.597 mono=-281.069 boot=-281.068 real=-281.069 ppm predicted=-295.172 ppm pll_left_ms=+0.204 real-phc_ms=+44.218 span_ns=101
+w097 raw_ms=1000.310 mono=-98.592 boot=-98.593 real=-98.592 ppm predicted=-219.886 ppm pll_left_ms=+18.671 real-phc_ms=+44.126 span_ns=102
+w098 raw_ms=999.792 mono=+375.022 boot=+375.023 real=+375.023 ppm predicted=-219.886 ppm pll_left_ms=+18.088 real-phc_ms=+44.530 span_ns=101
+w099 raw_ms=999.861 mono=+359.631 boot=+359.630 real=+359.630 ppm predicted=-219.886 ppm pll_left_ms=+17.522 real-phc_ms=+44.907 span_ns=102
+w100 raw_ms=1000.017 mono=+338.106 boot=+338.106 real=+338.106 ppm predicted=-219.886 ppm pll_left_ms=+16.975 real-phc_ms=+45.262 span_ns=101
+w101 raw_ms=999.973 mono=+323.124 boot=+323.125 real=+323.124 ppm predicted=-219.886 ppm pll_left_ms=+16.444 real-phc_ms=+45.595 span_ns=102
+w102 raw_ms=999.971 mono=+303.508 boot=+303.507 real=+303.508 ppm predicted=-219.886 ppm pll_left_ms=+15.930 real-phc_ms=+45.924 span_ns=102
+w103 raw_ms=1000.020 mono=+290.490 boot=+290.490 real=+290.490 ppm predicted=-219.886 ppm pll_left_ms=+15.433 real-phc_ms=+46.232 span_ns=101
+w104 raw_ms=1000.042 mono=+271.055 boot=+271.054 real=+271.055 ppm predicted=-219.886 ppm pll_left_ms=+14.950 real-phc_ms=+46.521 span_ns=102
+w105 raw_ms=1000.025 mono=+259.078 boot=+259.080 real=+259.078 ppm predicted=-219.886 ppm pll_left_ms=+14.483 real-phc_ms=+46.798 span_ns=101
+w106 raw_ms=999.952 mono=+241.539 boot=+241.539 real=+241.538 ppm predicted=-219.886 ppm pll_left_ms=+14.030 real-phc_ms=+47.057 span_ns=102
+w107 raw_ms=1000.070 mono=+226.551 boot=+226.550 real=+226.551 ppm predicted=-219.886 ppm pll_left_ms=+13.592 real-phc_ms=+47.301 span_ns=102
+w108 raw_ms=1000.117 mono=+212.920 boot=+212.921 real=+212.922 ppm predicted=-219.886 ppm pll_left_ms=+13.167 real-phc_ms=+47.532 span_ns=102
+w109 raw_ms=999.973 mono=+201.952 boot=+201.952 real=+201.951 ppm predicted=-219.886 ppm pll_left_ms=+12.756 real-phc_ms=+47.751 span_ns=101
+w110 raw_ms=999.986 mono=+186.093 boot=+186.094 real=+186.094 ppm predicted=-219.886 ppm pll_left_ms=+12.357 real-phc_ms=+47.950 span_ns=101
+w111 raw_ms=1000.024 mono=+175.979 boot=+175.977 real=+175.979 ppm predicted=-219.886 ppm pll_left_ms=+11.971 real-phc_ms=+48.148 span_ns=104
+w112 raw_ms=1000.096 mono=+160.911 boot=+160.911 real=+160.910 ppm predicted=-219.886 ppm pll_left_ms=+11.597 real-phc_ms=+48.327 span_ns=102
+w113 raw_ms=1000.078 mono=+150.783 boot=+150.784 real=+150.783 ppm predicted=-219.886 ppm pll_left_ms=+11.235 real-phc_ms=+48.493 span_ns=102
+w114 raw_ms=1000.032 mono=+138.022 boot=+138.022 real=+138.023 ppm predicted=-219.886 ppm pll_left_ms=+10.883 real-phc_ms=+48.651 span_ns=103
+w115 raw_ms=1000.030 mono=+128.770 boot=+128.769 real=+128.769 ppm predicted=-219.886 ppm pll_left_ms=+10.543 real-phc_ms=+48.797 span_ns=101
+w116 raw_ms=1000.040 mono=+114.478 boot=+114.478 real=+114.478 ppm predicted=-219.886 ppm pll_left_ms=+10.214 real-phc_ms=+48.929 span_ns=101
+w117 raw_ms=1000.049 mono=+104.085 boot=+104.085 real=+104.084 ppm predicted=-219.886 ppm pll_left_ms=+9.895 real-phc_ms=+49.051 span_ns=101
+w118 raw_ms=1000.050 mono=+94.055 boot=+94.055 real=+94.056 ppm predicted=-219.886 ppm pll_left_ms=+9.585 real-phc_ms=+49.163 span_ns=102
+w119 raw_ms=1000.013 mono=+84.321 boot=+84.321 real=+84.322 ppm predicted=-219.886 ppm pll_left_ms=+9.286 real-phc_ms=+49.264 span_ns=104
+end state=0 status=0x2001 PLL NANO tick=10000 freq=-14410446 (-219.886 ppm) offset=9285923 ns constant=3 maxerror=11500 esterror=0 tolerance=32768000 (500 ppm) precision=1 tick+freq rate=-219.886 ppm adjtime_left=0 us
+summary windows=120 window_ms=1000 mono_vs_raw: mean=-2214.274 min=-29827.350 max=+472.643 ppm; boot-mono max=0.002 ppm; real mean=-2214.274 ppm; max sample span=104 ns
+       Server: 185.125.190.57 (ntp.ubuntu.com)
+Poll interval: 2min 8s (min: 32s; max 34min 8s)
+         Leap: normal
+      Version: 4
+      Stratum: 2
+    Reference: 1D586304
+    Precision: 1us (-25)
+Root distance: 4.233ms (max: 5s)
+       Offset: +19.273ms
+        Delay: 286.391ms
+       Jitter: 12.007ms
+ Packet count: 3
+    Frequency: -219.886ppm
+Oct 19 10:21:00.066180 clock-slew systemd[1]: Starting systemd-timesyncd.service - Network Time Synchronization...
+Oct 19 10:21:00.101227 clock-slew systemd[1]: Started systemd-timesyncd.service - Network Time Synchronization.
+Oct 19 10:21:10.470665 clock-slew systemd-timesyncd[1466]: Timed out waiting for reply from 91.189.91.157:123 (ntp.ubuntu.com).
+Oct 19 10:21:10.849723 clock-slew systemd-timesyncd[1466]: Contacted time server 185.125.190.57:123 (ntp.ubuntu.com).
+Oct 19 10:21:10.849805 clock-slew systemd-timesyncd[1466]: Initial clock synchronization to Mon 2026-10-19 10:21:11.167631 UTC.
+Oct 19 10:21:46.486388 clock-slew systemd[1]: Stopping systemd-timesyncd.service - Network Time Synchronization...
+Oct 19 10:21:46.493100 clock-slew systemd[1]: systemd-timesyncd.service: Deactivated successfully.
+Oct 19 10:21:46.493267 clock-slew systemd[1]: Stopped systemd-timesyncd.service - Network Time Synchronization.
+Oct 19 10:21:46.494904 clock-slew systemd[1]: Starting systemd-timesyncd.service - Network Time Synchronization...
+Oct 19 10:21:46.523577 clock-slew systemd[1]: Started systemd-timesyncd.service - Network Time Synchronization.
+Oct 19 10:21:46.812403 clock-slew systemd-timesyncd[1496]: Contacted time server 185.125.190.57:123 (ntp.ubuntu.com).
+Oct 19 10:21:46.812473 clock-slew systemd-timesyncd[1496]: Initial clock synchronization to Mon 2026-10-19 10:21:46.563096 UTC.
+# host after: USER_HZ=100 nominal_tick=10000
+# host after: adjtimex state=0 status=0x6001 PLL NANO tick=10000 freq=-1042464 (-15.907 ppm) offset=-864623 ns constant=7 maxerror=1056500 esterror=0 tolerance=32768000 (500 ppm) precision=1 tick+freq rate=-15.907 ppm adjtime_left=0 us

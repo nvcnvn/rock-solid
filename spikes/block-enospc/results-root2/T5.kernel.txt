@@ -1,0 +1,50 @@
+[  134.953516] rsenospc 1792407682: start T5
+[  135.086512] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[  135.192669] device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+[  197.463509] device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+[  197.463537] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 71664)
+[  197.463592] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 73712)
+[  197.463637] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 75760)
+[  197.463676] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[  197.463697] buffer_io_error: 100342 callbacks suppressed
+[  197.463700] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 77808)
+[  197.463699] Buffer I/O error on device dm-1, logical block 69632
+[  197.463703] Buffer I/O error on device dm-1, logical block 69633
+[  197.463703] Buffer I/O error on device dm-1, logical block 69634
+[  197.463706] Buffer I/O error on device dm-1, logical block 69635
+[  197.463707] Buffer I/O error on device dm-1, logical block 69636
+[  197.463708] Buffer I/O error on device dm-1, logical block 69637
+[  197.463710] Buffer I/O error on device dm-1, logical block 69638
+[  197.463711] Buffer I/O error on device dm-1, logical block 69639
+[  197.463712] Buffer I/O error on device dm-1, logical block 69640
+[  197.463713] Buffer I/O error on device dm-1, logical block 69641
+[  197.463730] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 79856)
+[  197.463756] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 81904)
+[  197.463782] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 83952)
+[  197.463809] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 86000)
+[  197.463836] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 88048)
+[  197.463862] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 90096)
+[  197.463924] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[  197.464134] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[  197.464346] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[  197.464632] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[  197.464872] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[  197.464925] Buffer I/O error on dev dm-1, logical block 32897, lost async page write
+[  197.465111] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[  197.465322] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[  197.465544] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[  197.465752] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[  197.474394] Aborting journal on device dm-1-8.
+[  197.478837] EXT4-fs error (device dm-1) in ext4_reserve_inode_write:6347: IO failure
+[  197.478847] EXT4-fs error (device dm-1): ext4_dirty_inode:6551: inode #13: comm wdavdaemon: mark_inode_dirty error
+[  197.478852] EXT4-fs error (device dm-1) in ext4_dirty_inode:6552: IO failure
+[  197.491938] EXT4-fs error (device dm-1): ext4_journal_check_start:87: comm python3: Detected aborted journal
+[  197.542115] loop30: detected capacity change from 393216 to 2621440
+[  197.560549] device-mapper: thin: 252:0: switching pool to write mode
+[  197.560554] device-mapper: thin: 252:0: growing the data device from 3072 to 20480 blocks
+[  197.585479] EXT4-fs warning (device dm-1): ext4_clear_journal_err:6312: Filesystem error recorded from previous mount: IO failure
+[  197.587961] EXT4-fs warning (device dm-1): ext4_clear_journal_err:6320: Marked fs in need of filesystem check.
+[  197.590540] EXT4-fs (dm-1): warning: mounting fs with errors, running e2fsck is recommended
+[  197.593115] EXT4-fs (dm-1): recovery complete
+[  197.595574] EXT4-fs (dm-1): mounted filesystem f9369988-1f9f-4587-a643-1cbca32cf59e r/w with ordered data mode. Quota mode: none.
+[  197.598693] EXT4-fs (dm-1): unmounting filesystem f9369988-1f9f-4587-a643-1cbca32cf59e.

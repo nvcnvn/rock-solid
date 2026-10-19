@@ -1,0 +1,45 @@
+[   91.230634] rsenospc 1792407682: start T1
+[   91.358271] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[   91.473611] device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+[   91.473635] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 71664)
+[   91.473642] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[   91.473649] Buffer I/O error on device dm-1, logical block 69632
+[   91.473651] Buffer I/O error on device dm-1, logical block 69633
+[   91.473651] Buffer I/O error on device dm-1, logical block 69634
+[   91.473652] Buffer I/O error on device dm-1, logical block 69635
+[   91.473652] Buffer I/O error on device dm-1, logical block 69636
+[   91.473653] Buffer I/O error on device dm-1, logical block 69637
+[   91.473654] Buffer I/O error on device dm-1, logical block 69638
+[   91.473654] Buffer I/O error on device dm-1, logical block 69639
+[   91.473655] Buffer I/O error on device dm-1, logical block 69640
+[   91.473655] Buffer I/O error on device dm-1, logical block 69641
+[   91.473717] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 73712)
+[   91.473755] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[   91.473793] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 75760)
+[   91.473852] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[   91.473873] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 77808)
+[   91.473948] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[   91.473954] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 79856)
+[   91.474045] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 81904)
+[   91.474046] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[   91.474137] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 83952)
+[   91.474148] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[   91.474220] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 86000)
+[   91.474247] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[   91.474311] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 88048)
+[   91.474355] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[   91.474397] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 90096)
+[   91.474468] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[   91.522349] Buffer I/O error on dev dm-1, logical block 32897, lost async page write
+[   91.541234] Aborting journal on device dm-1-8.
+[   91.544504] EXT4-fs error (device dm-1) in __ext4_new_inode:1094: IO failure
+[   91.544518] EXT4-fs error (device dm-1) in ext4_create:2835: IO failure
+[   91.588460] loop30: detected capacity change from 393216 to 2621440
+[   91.607228] device-mapper: thin: 252:0: switching pool to write mode
+[   91.607233] device-mapper: thin: 252:0: growing the data device from 3072 to 20480 blocks
+[   91.635031] EXT4-fs warning (device dm-1): ext4_clear_journal_err:6312: Filesystem error recorded from previous mount: IO failure
+[   91.637633] EXT4-fs warning (device dm-1): ext4_clear_journal_err:6320: Marked fs in need of filesystem check.
+[   91.640278] EXT4-fs (dm-1): warning: mounting fs with errors, running e2fsck is recommended
+[   91.643261] EXT4-fs (dm-1): recovery complete
+[   91.645933] EXT4-fs (dm-1): mounted filesystem d2f0750b-2888-472b-aeda-0ceb8363011e r/w with ordered data mode. Quota mode: none.
+[   91.648817] EXT4-fs (dm-1): unmounting filesystem d2f0750b-2888-472b-aeda-0ceb8363011e.

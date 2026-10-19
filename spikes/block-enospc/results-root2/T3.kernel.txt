@@ -1,0 +1,7 @@
+[   93.030650] rsenospc 1792407682: start T3
+[   93.157543] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[   93.263323] device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+[  113.031120] loop30: detected capacity change from 393216 to 2621440
+[  113.049047] device-mapper: thin: 252:0: switching pool to write mode
+[  113.049052] device-mapper: thin: 252:0: growing the data device from 3072 to 20480 blocks
+[  113.526351] EXT4-fs (dm-1): unmounting filesystem 54ce3f70-7877-45dc-9d1e-0c910b40aae5.

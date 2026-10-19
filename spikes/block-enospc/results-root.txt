@@ -1,0 +1,69 @@
+# Linux 6.17.0-1033-oem, mke2fs 1.47.0 (5-Feb-2023), mkfs.xfs version 6.6.0, 2026-10-19T09:01Z
+== T1 ext4 on a thin volume with error_if_no_space; expect: fsync ENOSPC, the fs stays rw, overwrites work, ext4 damaged on disk (as T1L in results-loop.txt)
+[OK ] T1 first error got=ENOSPC
+[OK ] T1 overwrite of old blocks got=ok
+[OK ] T1 mount after 200 creates got=rw
+   dmesg: [25592.325086] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 71664)
+   dmesg: [25592.325092] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   dmesg: [25592.325169] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 73712)
+   dmesg: [25592.325254] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 75760)
+   dmesg: [25592.325267] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   dmesg: [25592.325335] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 77808)
+   dmesg: [25592.325373] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 78832)
+   dmesg: [25592.325411] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 79856)
+   dmesg: [25592.325432] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   dmesg: [25592.325487] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 81904)
+   dmesg: [25592.325564] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   dmesg: [25592.325567] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 83952)
+[OK ] T1 fsck got=damaged
+== T2 xfs on a thin volume with error_if_no_space; expect: fsync ENOSPC, the fs stays rw, overwrites work, ext4 damaged on disk (as T1L in results-loop.txt)
+[OK ] T2 first error got=ENOSPC
+[OK ] T2 overwrite of old blocks got=ok
+[OK ] T2 mount after 200 creates got=rw
+   xfs_repair: damaged
+== T3 ext4, queue_if_no_space, pool grown after 20 s; expect: the writer waits, then completes with no error
+[FAIL] T3 error got=ENOSPC want=none
+   took 81 s
+[OK ] T3 mount got=rw
+   dmesg: [25675.035395] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 122864)
+   dmesg: [25675.035434] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 124912)
+   dmesg: [25675.035458] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   dmesg: [25675.035463] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 126960)
+   dmesg: [25675.035493] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 129008)
+   dmesg: [25675.035523] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 131056)
+   dmesg: [25675.035549] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 141296)
+   dmesg: [25675.035576] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 143344)
+   dmesg: [25675.035583] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   dmesg: [25675.035604] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 145392)
+   dmesg: [25675.035637] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 147440)
+   dmesg: [25675.035664] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 149488)
+[FAIL] T3 fsck got=damaged want=clean
+== T4 xfs, queue_if_no_space, pool grown after 20 s; expect: the writer waits, then completes with no error
+[FAIL] T4 error got=ENOSPC want=none
+   took 82 s
+[OK ] T4 mount got=rw
+[OK ] T4 fsck got=clean
+== T5 ext4, queue_if_no_space, no_space_timeout 60 s, never grown; expect: ENOSPC after about 60 s, overwrites still work, ext4 damaged on disk as in T1
+[OK ] T5 first error got=ENOSPC
+   took 61 s
+[FAIL] T5 overwrite of old blocks got=fail want=ok
+[OK ] T5 mount got=rw
+   dmesg: [25818.399678] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 71664)
+   dmesg: [25818.399719] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 73712)
+   dmesg: [25818.399748] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 75760)
+   dmesg: [25818.399781] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 77808)
+   dmesg: [25818.399782] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+   dmesg: [25818.399798] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 78832)
+   dmesg: [25818.399815] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 79856)
+   dmesg: [25818.399846] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 81904)
+   dmesg: [25818.399876] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 83952)
+   dmesg: [25818.399906] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 86000)
+   dmesg: [25818.399936] EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 88048)
+   dmesg: [25818.400132] EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[OK ] T5 fsck got=damaged
+== T6 xfs, queue_if_no_space, no_space_timeout 60 s, never grown; expect: ENOSPC after about 60 s, overwrites still work, ext4 damaged on disk as in T1
+[OK ] T6 first error got=ENOSPC
+   took 61 s
+[OK ] T6 overwrite of old blocks got=ok
+[OK ] T6 mount got=rw
+   xfs_repair: clean

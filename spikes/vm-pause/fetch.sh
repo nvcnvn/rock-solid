@@ -3,9 +3,10 @@
 # first release with the vmclock device is 10.0.0), its libraries and glibc
 # 2.43, the Linux 7.0.0-14 generic kernel and modules (ptp_vmclock), and a
 # static busybox, and unpacks them into vendor/sysroot. No root: nothing is
-# installed on the host. Also fetches the sources the README cites into
-# vendor/src, at the tags it names: QEMU v10.2.1, Linux v7.0, Firecracker
-# v1.17.0.
+# installed on the host. Also fetches the Firecracker v1.17.0 static release
+# binary into vendor/fc, Linux v7.0's extract-vmlinux (Firecracker boots only an
+# uncompressed vmlinux), and the sources the README cites into vendor/src, at
+# the tags it names: QEMU v10.2.1, Linux v7.0, Firecracker v1.17.0.
 set -eu
 cd "$(dirname "$0")"
 mkdir -p vendor/debs vendor/sysroot vendor/src
@@ -66,7 +67,7 @@ for f in \
   pool/main/z/zlib/zlib1g_1.3.dfsg+really1.3.1-1ubuntu3_amd64.deb \
   ; do
   deb=vendor/debs/$(basename "$f")
-  [ -s "$deb" ] || curl -sSfL -o "$deb" "$mirror/$f"
+  [ -s "$deb" ] || { curl -sSfL --retry 5 -o "$deb.part" "$mirror/$f" && mv "$deb.part" "$deb"; }
   dpkg -x "$deb" vendor/sysroot
 done
 src() { [ -s "vendor/src/$1" ] || curl -sSfL -o "vendor/src/$1" "$2"; }
@@ -75,6 +76,17 @@ src vmclock-abi.h https://raw.githubusercontent.com/torvalds/linux/v7.0/include/
 src linux-kvmclock.c https://raw.githubusercontent.com/torvalds/linux/v7.0/arch/x86/kernel/kvmclock.c
 src linux-ptp_kvm_x86.c https://raw.githubusercontent.com/torvalds/linux/v7.0/drivers/ptp/ptp_kvm_x86.c
 src linux-kvm-x86.c https://raw.githubusercontent.com/torvalds/linux/v7.0/arch/x86/kvm/x86.c
+src extract-vmlinux https://raw.githubusercontent.com/torvalds/linux/v7.0/scripts/extract-vmlinux
+fc=firecracker-v1.17.0-x86_64
+mkdir -p vendor/fc
+if [ ! -x vendor/fc/firecracker ]; then
+  rel=https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0
+  curl -sSfL --retry 5 -o "vendor/fc/$fc.tgz" "$rel/$fc.tgz"
+  curl -sSfL --retry 5 -o "vendor/fc/$fc.tgz.sha256.txt" "$rel/$fc.tgz.sha256.txt"
+  (cd vendor/fc && sha256sum -c "$fc.tgz.sha256.txt")
+  tar -xzf "vendor/fc/$fc.tgz" -C vendor/fc --strip-components=1 "release-v1.17.0-x86_64/$fc"
+  mv "vendor/fc/$fc" vendor/fc/firecracker
+fi
 if [ ! -d vendor/src/qemu ]; then
   git -c advice.detachedHead=false clone -q --depth 1 --branch v10.2.1 --filter=blob:none \
     --sparse https://github.com/qemu/qemu.git vendor/src/qemu

@@ -1,0 +1,9 @@
+[  366.417399] rsenospc 1792407682: start T9
+[  366.540905] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[  366.631095] device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+[  366.988575] run-root.sh (7843): drop_caches: 2
+[  385.990985] loop30: detected capacity change from 393216 to 2621440
+[  386.009116] device-mapper: thin: 252:0: switching pool to write mode
+[  386.009122] device-mapper: thin: 252:0: growing the data device from 3072 to 20480 blocks
+[  386.464938] run-root.sh (7843): drop_caches: 2
+[  386.492796] XFS (dm-1): Unmounting Filesystem 43259c11-57cd-421f-8ac4-e3e444804f9c

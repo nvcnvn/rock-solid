@@ -967,9 +967,13 @@ during peering and a node restarted within a lease it granted.
   grantor's wait, so a crash can wait up to 5.2 s for its lease instead of 4 s. The 1% margin
   then covers two oscillators at ±100 ppm about fifty times over, and heartbeats watch for one
   that is further off. It costs the loop one more clock read, about 140 ns, per pass.
-- **A paused virtual machine is not covered.** A hypervisor that pauses a VM, snapshots it or
-  live-migrates it can stop every clock in the guest, `CLOCK_MONOTONIC_RAW` included, so a holder
-  that resumes still trusts leases its grantors have let lapse.
+- **A paused virtual machine is covered only in part.** A hypervisor that restores a snapshot or
+  live-migrates a VM stops every clock in the guest, `CLOCK_MONOTONIC_RAW` included, so a holder
+  gives up its leases when the VMClock disruption marker changes. A stop in place leaves the
+  marker alone: under Firecracker, or QEMU with `+invtsc`, the holder's own clocks show it, but
+  a QEMU guest on kvm-clock freezes every clock, and only the grantors' next heartbeats show the
+  lost time; if the hypervisor dropped the messages sent during the stop, a holder can serve on a
+  lapsed lease for up to a heartbeat.
 - **A restarted node sits out one `primary_lease`** (4 s) before it votes or peers.
 - **Every write waits for every live member**, so a slow disk hurts every PG it is in. Fail-slow
   detection is deliberately sluggish and never goes below `min_live`: those PGs stay slow.
@@ -1006,9 +1010,12 @@ during peering and a node restarted within a lease it granted.
   slows its own writes, and so its acknowledgments. Should members report admission rates to the
   primary, as CockroachDB's followers return tokens, so one cleaning disk does not stall a whole
   PG? It is the polite cousin of a fail-slow disk.
-- **Open question: leases across a VM pause.** QEMU and Firecracker restore a paused guest's
-  clock to where it stopped. Can a node notice, from the VMClock device or its peers' next
-  heartbeats, before it serves a read, or must storage nodes run on hosts that never pause them?
+- **Open question: a stopped QEMU guest on kvm-clock.** Under KVM and Firecracker, a restore or
+  migration changes the VMClock marker, and a stop shows in the guest's own clocks, except on QEMU
+  with a guest on kvm-clock, where every clock freezes. Peers' heartbeats catch that stop only if
+  the messages sent during it wait for the guest. If the hypervisor drops them, must such hosts
+  run with `+invtsc`, or should a node read the host clock through `ptp_kvm` (1.6 µs) before
+  serving reads?
 - **Tech debts:** none of the entries in `docs/tech-debts.md` covers epochs, leases or fencing.
 
 ## Further reading

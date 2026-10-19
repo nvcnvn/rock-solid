@@ -236,24 +236,28 @@ recovery steps are in [Daemon restart and upgrade](../docs/design.md#daemon-rest
 > fills, a write into a part of the volume never written before has nowhere to go. Telling the
 > filesystem inside "no space" sounds honest, but that filesystem is not built for a disk that
 > refuses writes into its own free space: some of the refused writes are its own bookkeeping, and
-> it loses them. So rock-solid makes those writes wait until there is room, the way Ceph's block
-> devices do. A paused volume is bad; a corrupted one is worse.
+> it stops working until it gets the room to repair them. So rock-solid makes those writes wait
+> until there is room, the way Ceph's block devices do. A paused volume is bad; a stopped one
+> that also lost data is worse.
 
 **How it works.** Writes that add no data still pass a full pool's `write_limit`: overwrites of
 blocks the volume already holds and nobody else shares (in the log, each kills the block it
 replaces) and discards. So a filesystem's journal keeps working. A write that needs new space is
 held, and the daemon retries it whenever the control plane reports that the pool has room again,
 with no time limit. The evidence is the
-[block ENOSPC spike](../docs/design.md#appendix-block-enospc-spike): ext4 on a loop device that
-refused writes to never-written blocks reported `ENOSPC` at `fsync` and stayed mounted, and
-overwrites worked, yet the refused writes included the first block bitmaps of block groups it had
-never used, and `e2fsck` found wrong bitmaps and free counts after unmount. The options weigh up
-like this:
+[block ENOSPC spike](../docs/design.md#appendix-block-enospc-spike), which ran ext4 and XFS on a
+full dm-thin pool. Refused writes got `ENOSPC` at `fsync`, but they included metadata in blocks
+the device had never stored: the leaf of a file's extent tree, the inodes and directory blocks of
+new files. ext4 aborted its journal at the first one and refused every later write, overwrites
+included. XFS retried while it stayed mounted, then shut down at unmount. Both were consistent
+again only after a mount replayed their log, and the replay writes the same new blocks, so it
+needs the room the pool lacked. A hold that ended when the pool grew completed every write with
+no error, and both filesystems checked clean. The options weigh up like this:
 
 | On a full pool | Who does it | What happens to the filesystem inside |
 | --- | --- | --- |
-| Fail at once with `BLK_STS_NOSPC` | dm-thin with `error_if_no_space` | Damaged on disk, as in the spike |
-| Hold 60 s, then fail | dm-thin and LVM thin by default | The same damage, a minute later, unless the pool grows |
+| Fail at once with `BLK_STS_NOSPC` | dm-thin with `error_if_no_space` | Refused data lost; ext4 stops at once, XFS at unmount; usable again only after a log replay with room in the pool |
+| Hold 60 s, then fail | dm-thin and LVM thin by default | The same, a minute later, unless the pool grows |
 | Let writes past the limit into a reserve | Nobody studied | The same, once the reserve is spent; meanwhile recovery has less room |
 | Hold until there is room | Ceph RBD, Vitastor, rock-solid | Intact, but the volume hangs while the pool is full |
 
@@ -265,7 +269,8 @@ condition is `Full`. Three ways out, in this order: free space outside the volum
 which are what make overwrites need new space, delete other volumes, or add a disk), and the writes
 resume by themselves; raise the pool's `write_limit` into the room above it; or run
 `rock-solid volume fail-held <volume>`, which completes the held writes with `ENOSPC` when the pod
-must go, knowing its filesystem then needs `fsck`.
+must go, knowing the held data is lost and its filesystem stops until it is mounted with room in
+the pool.
 
 Discard matters here too. In the spike, without `discard` a new write after deleting a 512 MiB file
 still failed: the space ext4 freed never reached the device. With `-o discard` it succeeded. A
@@ -654,10 +659,11 @@ which is exactly why snapshots are cheap.
   evidence that 512-byte sectors are safe on RWX block once they merge at the primary.
 
 - **Block ENOSPC spike** ([appendix](../docs/design.md#appendix-block-enospc-spike),
-  [`spikes/block-enospc/`](../spikes/block-enospc/)). ext4 on a 1 GiB loop device backed by a
-  192 MiB tmpfs: refused new-space writes gave `ENOSPC` at `fsync`, the mount stayed `rw` and
-  overwrites worked, but `e2fsck` exited 4 with block bitmaps of groups 3 and 5 wrong; without
-  `discard`, a write after `rm` still failed.
+  [`spikes/block-enospc/`](../spikes/block-enospc/)). ext4 and XFS on a 1 GiB dm-thin volume over
+  a 192 MiB pool: a hold that ended when the pool grew completed every write and left both clean.
+  Refused writes gave `ENOSPC` at `fsync`, then ext4 aborted its journal and refused every write,
+  and XFS shut down at unmount; both checked clean only after a log replay with room in the pool.
+  Without `discard`, a write after `rm` still failed.
 
 The simulator will check after every step that a snapshot holds every write acknowledged before
 its cut and none issued after, and that no block write needing new space completes with an error
@@ -691,10 +697,6 @@ From the [roadmap and open questions](../docs/design.md#roadmap-and-open-questio
   a block volume's fragmented index needs it.
 - **Regrouping chunks overwritten at random.** Should a chunk whose live map passes some number of
   extents be rewritten whole? Each regroup writes 4 MiB, so it needs block-volume traces.
-- **The pause on dm-thin, and XFS.** The block ENOSPC spike ran on a loop device and ext4 only;
-  its dm-thin script, for ext4 and XFS, holding and failing, waits for a kernel with
-  device-mapper. Does XFS, which retries metadata `ENOSPC` forever, survive a refused write that
-  ext4 does not, and does a hold that ends when the pool grows leave both clean?
 - **The NVMe-oF hold** has to be checked on a real initiator: does a stock host wait out five long
   retry delays without resetting the controller?
 - **Incarnation fencing in the epoch-change model.** A dead daemon's write delivered late to an old

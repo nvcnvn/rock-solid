@@ -1,0 +1,134 @@
+### 6.17.0-1033-oem, UMIS RPEYJ512MML1QWQ fw 1.0Q06C1, no-root rerun of N5/E4 (O_DIRECT|O_DSYNC 4K) without tracing, 2026-10-19T17:11:01+07:00
+    wrote 256 MiB in 785.8 ms (fallocate, then every block once, then fsync)
+
+### R1.a empty fdatasync, as E3 before E4
+loadavg: 0.30 0.57 0.66 6/2578 204355
+    background over 1 s idle: 4.0 flushes/s, 398.0 writes/s (other processes), loadavg 0.52 0.61 0.67 9/2589 204382
+    R1.a bs=4096 n=3000 mode=empty gap_us=0 offsets=random
+    write  p50=     0.0 p90=     0.0 p99=     0.1 p99.9=     0.2 max=     0.2 mean=     0.0 us
+    flush  p50=   253.4 p90=   302.3 p99=   578.5 p99.9=  2740.2 max=  2900.0 mean=   262.7 us
+    total  p50=   253.4 p90=   302.4 p99=   578.5 p99.9=  2740.2 max=  2900.0 mean=   262.7 us
+    cpu/op=7.1 us, 3797 durable ops/s
+    device: 1.00 flushes/op (1.00 after subtracting background), 1.01 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 0.3 KiB written/op, device time per flush 0.257 ms, 0.8 s
+[OK ] R1.a device flushes per op got=1.00 want=1.00
+
+### R1.b O_DIRECT|O_DSYNC 4K random, as E4
+loadavg: 0.52 0.61 0.67 8/2588 204424
+    background over 1 s idle: 4.0 flushes/s, 250.0 writes/s (other processes), loadavg 0.52 0.61 0.67 1/2592 204445
+    R1.b bs=4096 n=1000 mode=dsync gap_us=0 offsets=random
+    write  p50=  2206.2 p90=  2325.6 p99=  4237.4 p99.9=  4585.8 max=  4585.8 mean=  2241.7 us
+    flush  p50=     0.0 p90=     0.0 p99=     0.1 p99.9=     0.3 max=     0.3 mean=     0.0 us
+    total  p50=  2206.2 p90=  2325.6 p99=  4237.4 p99.9=  4585.8 max=  4585.8 mean=  2241.8 us
+    cpu/op=12.7 us, 446 durable ops/s
+    device: 0.02 flushes/op (0.01 after subtracting background), 1.10 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 5.7 KiB written/op, device time per flush 2.095 ms, 2.2 s
+[OK ] R1.b device flushes per op got=0.01 want=0.00
+
+### R1.c O_DIRECT|O_DSYNC 4K sequential
+loadavg: 0.52 0.61 0.67 6/2593 204519
+    background over 1 s idle: 0.0 flushes/s, 0.0 writes/s (other processes), loadavg 0.48 0.60 0.67 1/2590 204529
+    R1.c bs=4096 n=1000 mode=dsync gap_us=0 offsets=sequential
+    write  p50=  2214.4 p90=  2320.9 p99=  2378.8 p99.9=  6369.0 max=  6369.0 mean=  2211.9 us
+    flush  p50=     0.0 p90=     0.0 p99=     0.1 p99.9=     0.2 max=     0.2 mean=     0.0 us
+    total  p50=  2214.4 p90=  2320.9 p99=  2378.9 p99.9=  6369.0 max=  6369.0 mean=  2211.9 us
+    cpu/op=12.3 us, 452 durable ops/s
+    device: 0.00 flushes/op (0.00 after subtracting background), 1.00 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 4.0 KiB written/op, device time per flush 0.000 ms, 2.2 s
+[OK ] R1.c device flushes per op got=0.00 want=0.00
+
+### R1.d 4K write + fdatasync random, as N2
+loadavg: 0.48 0.60 0.67 7/2581 204545
+    background over 1 s idle: 14.0 flushes/s, 60.0 writes/s (other processes), loadavg 0.48 0.60 0.67 1/2581 204585
+    R1.d bs=4096 n=1000 mode=fdatasync gap_us=0 offsets=random
+    write  p50=   332.2 p90=   995.2 p99=  1270.0 p99.9=  2127.7 max=  2127.7 mean=   417.9 us
+    flush  p50=   214.6 p90=  1031.6 p99=  1085.7 p99.9=  1641.6 max=  1641.6 mean=   481.5 us
+    total  p50=   949.0 p90=  1303.7 p99=  2302.4 p99.9=  3769.3 max=  3769.3 mean=   899.3 us
+    cpu/op=13.6 us, 1111 durable ops/s
+    device: 1.00 flushes/op (0.99 after subtracting background), 2.05 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 7.8 KiB written/op, device time per flush 0.478 ms, 0.9 s
+[OK ] R1.d device flushes per op got=0.99 want=1.00
+
+### R2.a empty fdatasync, as E3 before E4
+loadavg: 0.48 0.60 0.67 4/2581 204595
+    background over 1 s idle: 0.0 flushes/s, 0.0 writes/s (other processes), loadavg 0.52 0.61 0.67 1/2588 204612
+    R2.a bs=4096 n=3000 mode=empty gap_us=0 offsets=random
+    write  p50=     0.0 p90=     0.0 p99=     0.0 p99.9=     0.1 max=     0.2 mean=     0.0 us
+    flush  p50=    64.8 p90=    65.1 p99=    99.4 p99.9=  1603.6 max=  2554.4 mean=    68.3 us
+    total  p50=    64.8 p90=    65.1 p99=    99.4 p99.9=  1603.6 max=  2554.4 mean=    68.3 us
+    cpu/op=3.5 us, 14546 durable ops/s
+    device: 1.00 flushes/op (1.00 after subtracting background), 1.01 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 0.1 KiB written/op, device time per flush 0.066 ms, 0.2 s
+[OK ] R2.a device flushes per op got=1.00 want=1.00
+
+### R2.b O_DIRECT|O_DSYNC 4K random, as E4
+loadavg: 0.52 0.61 0.67 4/2588 204613
+    background over 1 s idle: 0.0 flushes/s, 0.0 writes/s (other processes), loadavg 0.52 0.61 0.67 1/2588 204641
+    R2.b bs=4096 n=1000 mode=dsync gap_us=0 offsets=random
+    write  p50=  2194.5 p90=  2316.3 p99=  4204.7 p99.9=  6477.8 max=  6477.8 mean=  2235.7 us
+    flush  p50=     0.0 p90=     0.0 p99=     0.1 p99.9=     0.3 max=     0.3 mean=     0.0 us
+    total  p50=  2194.5 p90=  2316.3 p99=  4204.7 p99.9=  6477.9 max=  6477.9 mean=  2235.8 us
+    cpu/op=12.9 us, 447 durable ops/s
+    device: 0.01 flushes/op (0.01 after subtracting background), 1.53 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 8.5 KiB written/op, device time per flush 1.714 ms, 2.2 s
+[OK ] R2.b device flushes per op got=0.01 want=0.00
+
+### R2.c O_DIRECT|O_DSYNC 4K sequential
+loadavg: 0.52 0.61 0.67 3/2598 204718
+    background over 1 s idle: 12.0 flushes/s, 34.0 writes/s (other processes), loadavg 0.48 0.60 0.67 1/2597 204727
+    R2.c bs=4096 n=1000 mode=dsync gap_us=0 offsets=sequential
+    write  p50=  2210.4 p90=  2312.5 p99=  2442.9 p99.9=  4486.2 max=  4486.2 mean=  2213.1 us
+    flush  p50=     0.0 p90=     0.0 p99=     0.1 p99.9=     0.2 max=     0.2 mean=     0.0 us
+    total  p50=  2210.4 p90=  2312.5 p99=  2442.9 p99.9=  4486.2 max=  4486.2 mean=  2213.1 us
+    cpu/op=9.7 us, 452 durable ops/s
+    device: 0.00 flushes/op (-0.02 after subtracting background), 1.01 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 4.1 KiB written/op, device time per flush 2.250 ms, 2.2 s
+[OK ] R2.c device flushes per op got=-0.02 want=0.00
+
+### R2.d 4K write + fdatasync random, as N2
+loadavg: 0.48 0.60 0.67 5/2589 204745
+    background over 1 s idle: 1.0 flushes/s, 6.0 writes/s (other processes), loadavg 0.48 0.60 0.67 2/2590 204782
+    R2.d bs=4096 n=1000 mode=fdatasync gap_us=0 offsets=random
+    write  p50=   331.7 p90=  1000.8 p99=  1306.4 p99.9=  2544.0 max=  2544.0 mean=   431.6 us
+    flush  p50=   214.2 p90=  1059.1 p99=  1084.6 p99.9=  1154.3 max=  1154.3 mean=   482.2 us
+    total  p50=   946.6 p90=  1325.7 p99=  2388.3 p99.9=  2806.9 max=  2806.9 mean=   913.8 us
+    cpu/op=13.2 us, 1094 durable ops/s
+    device: 1.01 flushes/op (1.01 after subtracting background), 2.02 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 4.6 KiB written/op, device time per flush 0.477 ms, 0.9 s
+[OK ] R2.d device flushes per op got=1.01 want=1.00
+
+### R3.a empty fdatasync, as E3 before E4
+loadavg: 0.48 0.60 0.67 4/2596 204802
+    background over 1 s idle: 0.0 flushes/s, 3.0 writes/s (other processes), loadavg 0.44 0.59 0.66 1/2596 204819
+    R3.a bs=4096 n=3000 mode=empty gap_us=0 offsets=random
+    write  p50=     0.0 p90=     0.0 p99=     0.0 p99.9=     0.1 max=     0.1 mean=     0.0 us
+    flush  p50=    64.8 p90=    65.0 p99=    68.0 p99.9=   567.9 max=  2851.7 mean=    66.4 us
+    total  p50=    64.8 p90=    65.0 p99=    68.0 p99.9=   567.9 max=  2851.8 mean=    66.4 us
+    cpu/op=3.5 us, 14966 durable ops/s
+    device: 1.00 flushes/op (1.00 after subtracting background), 1.00 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 0.1 KiB written/op, device time per flush 0.063 ms, 0.2 s
+[OK ] R3.a device flushes per op got=1.00 want=1.00
+
+### R3.b O_DIRECT|O_DSYNC 4K random, as E4
+loadavg: 0.44 0.59 0.66 4/2596 204820
+    background over 1 s idle: 0.0 flushes/s, 10.0 writes/s (other processes), loadavg 0.44 0.59 0.66 1/2596 204830
+    R3.b bs=4096 n=1000 mode=dsync gap_us=0 offsets=random
+    write  p50=  2220.0 p90=  2339.7 p99=  4282.4 p99.9=  6453.7 max=  6453.7 mean=  2234.8 us
+    flush  p50=     0.0 p90=     0.0 p99=     0.1 p99.9=     0.2 max=     0.2 mean=     0.0 us
+    total  p50=  2220.0 p90=  2339.8 p99=  4282.4 p99.9=  6453.8 max=  6453.8 mean=  2234.8 us
+    cpu/op=9.4 us, 447 durable ops/s
+    device: 0.01 flushes/op (0.01 after subtracting background), 1.03 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 4.6 KiB written/op, device time per flush 1.778 ms, 2.2 s
+[OK ] R3.b device flushes per op got=0.01 want=0.00
+
+### R3.c O_DIRECT|O_DSYNC 4K sequential
+loadavg: 0.44 0.59 0.66 3/2596 204876
+    background over 1 s idle: 0.0 flushes/s, 47.0 writes/s (other processes), loadavg 0.44 0.59 0.66 2/2596 204886
+    R3.c bs=4096 n=1000 mode=dsync gap_us=0 offsets=sequential
+    write  p50=  2158.8 p90=  2235.7 p99=  2296.4 p99.9=  2487.6 max=  2487.6 mean=  2163.3 us
+    flush  p50=     0.0 p90=     0.0 p99=     0.1 p99.9=     0.2 max=     0.2 mean=     0.0 us
+    total  p50=  2158.9 p90=  2235.7 p99=  2296.4 p99.9=  2487.7 max=  2487.7 mean=  2163.4 us
+    cpu/op=11.4 us, 462 durable ops/s
+    device: 0.00 flushes/op (0.00 after subtracting background), 1.00 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 4.3 KiB written/op, device time per flush 0.000 ms, 2.2 s
+[OK ] R3.c device flushes per op got=0.00 want=0.00
+
+### R3.d 4K write + fdatasync random, as N2
+loadavg: 0.48 0.60 0.67 4/2599 204924
+    background over 1 s idle: 0.0 flushes/s, 1.0 writes/s (other processes), loadavg 0.48 0.60 0.67 1/2599 204943
+    R3.d bs=4096 n=1000 mode=fdatasync gap_us=0 offsets=random
+    write  p50=   328.5 p90=   995.2 p99=  2372.7 p99.9=  2653.5 max=  2653.5 mean=   431.0 us
+    flush  p50=   215.0 p90=  1187.6 p99=  2110.4 p99.9= 12637.9 max= 12637.9 mean=   577.2 us
+    total  p50=   932.4 p90=  1987.4 p99=  2872.7 p99.9= 13563.2 max= 13563.2 mean=  1008.2 us
+    cpu/op=12.2 us, 991 durable ops/s
+    device: 1.02 flushes/op (1.02 after subtracting background), 2.07 write requests/op (an fdatasync's empty PREFLUSH write counts as one), 5.4 KiB written/op, device time per flush 0.570 ms, 1.0 s
+[OK ] R3.d device flushes per op got=1.02 want=1.00

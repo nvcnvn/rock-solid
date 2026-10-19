@@ -1,0 +1,58 @@
+### 6.17.0-1033-oem, UMIS RPEYJ512MML1QWQ, write_cache=write back, fua=1, hw queues=14, ext4   rw,relatime, 14 CPUs, Intel(R) Core(TM) Ultra 5 235U, 2026-10-19T15:15:21+07:00
+    prepared 1024 MiB in 815 ms (fallocate, then written in full once)
+    background over 3 s idle: 0.0 flushes/s (other processes), loadavg 1.67 0.82 0.42 1/2189 138032
+
+### H1 hot stream alone: 4K record + fdatasync, QD1
+loadavg: 1.67 0.82 0.42 1/2189 138032
+    case                            cold     hot/s   hot_p50   hot_p99  hot_wr50  hot_fl50  cold_p50 cold_MB/s fl/round cpu/hot
+    H1 hot alone                       -      1088     950.8    2366.5     330.9     215.0       0.0       0.0     1.00    11.4
+
+### H2 cold stream alone: one record of B bytes + fdatasync, back to back
+loadavg: 1.70 0.84 0.43 3/2171 138073
+    case                            cold     hot/s   hot_p50   hot_p99  hot_wr50  hot_fl50  cold_p50 cold_MB/s fl/round cpu/hot
+    H2 cold alone                    64K         0       0.0       0.0       0.0       0.0     967.4      69.2     1.00     0.0
+    H2 cold alone                   256K         0       0.0       0.0       0.0       0.0    1596.0     169.5     1.00     0.0
+    H2 cold alone                  1024K         0       0.0       0.0       0.0       0.0    2331.7     445.8     1.01     0.0
+
+### H3 one commit loop, rounds alternate: cold record + flush, then hot record + flush (today)
+loadavg: 1.85 0.92 0.46 3/2193 138451
+    case                            cold     hot/s   hot_p50   hot_p99  hot_wr50  hot_fl50  cold_p50 cold_MB/s fl/round cpu/hot
+    H3 serial rounds                 64K       528    1874.4    3759.6     326.1     217.3     898.5      34.6     1.00    44.2
+    H3 serial rounds                256K       391    2189.3    4375.0     548.6     215.2    1283.4     102.5     1.00    51.1
+    H3 serial rounds               1024K       297    3035.6    9988.0     555.0     215.9    2289.4     310.9     1.00   115.4
+
+### H3b one commit loop, one round holds both streams' records: cold write, hot write, one flush
+loadavg: 2.08 1.02 0.50 1/2195 138706
+    case                            cold     hot/s   hot_p50   hot_p99  hot_wr50  hot_fl50  cold_p50 cold_MB/s fl/round cpu/hot
+    H3b one round, one flush         64K       632    1164.3    8433.9      13.8     339.1    1164.2      41.4     1.00    24.4
+    H3b one round, one flush        256K       423    1953.0    9052.2      15.4    1064.9    1952.9     110.8     1.00    44.0
+    H3b one round, one flush       1024K       356    2391.2    9904.2      15.0    1412.1    2391.2     372.9     1.00   104.7
+
+### H4 two concurrent commit loops (hot, cold), unpinned
+loadavg: 1.91 1.03 0.52 3/2185 138822
+    case                            cold     hot/s   hot_p50   hot_p99  hot_wr50  hot_fl50  cold_p50 cold_MB/s fl/round cpu/hot
+    H4 concurrent                    64K       844    1064.7    2394.3     453.9     376.1    1162.4      48.2     1.00    11.7
+    H4 concurrent                   256K       638    1874.2    2410.0     490.6    1167.4    1952.7     148.6     1.00    13.2
+    H4 concurrent                  1024K       470    2290.8    3277.0     473.0    1595.3    2352.4     433.9     1.00    12.3
+
+### H4b two concurrent commit loops, cold busy 50% of the time (a cleaner that keeps up), 1M
+loadavg: 1.93 1.08 0.54 2/2176 138956
+    case                            cold     hot/s   hot_p50   hot_p99  hot_wr50  hot_fl50  cold_p50 cold_MB/s fl/round cpu/hot
+    H4b concurrent, cold 50%       1024K       808    1021.3    2839.2     413.5     219.3    2419.1     202.7     1.00    11.1
+
+    (H5 pins both loops to CPU 0, one blk-mq hardware queue, where the kernel folds flushes)
+
+### H5 two concurrent commit loops pinned to one CPU
+loadavg: 1.94 1.10 0.55 3/2181 138996
+    case                            cold     hot/s   hot_p50   hot_p99  hot_wr50  hot_fl50  cold_p50 cold_MB/s fl/round cpu/hot
+    H5 concurrent, one CPU           64K       859    1078.3    2391.4     479.6     364.1    1078.5      56.3     1.00     5.7
+    H5 concurrent, one CPU          256K       574    1929.1    2522.5     585.5    1189.7    1927.7     150.5     1.00     6.8
+    H5 concurrent, one CPU         1024K       418    2367.3    3323.8     586.0    1730.7    2366.7     437.9     1.00     6.4
+
+### checks (expected outcomes written before the run)
+[FAIL] H4 hot p50 next to a 1M cold stream stays near hot alone got=2291us want=<=1189us (1.25x H1 951)
+[OK ] H4 cold 1M throughput next to the hot stream got=434MB/s want=>=357MB/s (0.8x H2 446)
+[OK ] H4 hot p99 concurrent beats serial rounds at 1M got=3277us want=<9988us (H3 serial 1M)
+[OK ] H3b one flush per round beats one per stream at 1M got=2391us want=<3036us (H3 serial 1M)
+[OK ] H4b hot p50 next to a cold stream at 50% duty got=1021us want=<=1189us (1.25x H1)
+[FAIL] H5 flushes per commit with both loops on one CPU got=1.00 want=<0.9 (folded, as in nvme-flush N7b)

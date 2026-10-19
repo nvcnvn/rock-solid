@@ -330,8 +330,9 @@ two rounds and two flushes.
 More streams by temperature are not worth it yet: age classes for the cleaner's copies helped
 hot/cold overwrites but hurt uniform ones (see the options table), and with headers counted,
 perfect hot/cold separation is only 1.1 to 1.6× below two streams. A hot 4K commit can also wait
-behind a cold 1 MiB record, since rounds take the streams in turn; that group-commit question is
-in [post 04](04-one-log-per-disk.md) and the
+behind a cold 1 MiB record, since rounds take the streams in turn, and a second round in flight
+does not help on a consumer drive, whose flush waits for every byte in its cache; that
+group-commit question is in [post 04](04-one-log-per-disk.md) and the
 [stream overlap spike](../docs/design.md#appendix-stream-overlap-spike).
 
 **Chunk slots: data that dies alone.** One kind of data defeats streams: whole 4 MiB chunks of
@@ -542,9 +543,11 @@ A full disk can therefore show up in three ways, in this order:
 The first row is the only one the application normally meets, and the design is careful about
 how. A file's buffered writes are acknowledged against a *space grant* so that `write()` itself
 reports a full pool. A block volume's write is never failed for space, because the filesystem
-inside the volume would be damaged by it: in the
+inside the volume would stop: in the
 [block ENOSPC spike](../docs/design.md#appendix-block-enospc-spike), ext4 reported `ENOSPC` at
-`fsync` and stayed mounted, yet `e2fsck` later found block bitmaps it had lost.
+`fsync`, then aborted its journal when a refused write turned out to be its own metadata, and was
+consistent again only after a log replay that needs the room the pool lacked. Held until the pool
+grew, the same writes completed and the filesystem checked clean.
 
 The same wait applies to a lagging checkpoint: once the records after the newest manifest reach
 twice `max_replay_bytes` (default 64 MiB, so 128 MiB), group commit takes items only from the

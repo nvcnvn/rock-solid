@@ -2,14 +2,17 @@
  * Runs as init (PID 1) in a QEMU guest with the vmclock device, or as a plain
  * process on the host for "bench".
  *
- * As init it mounts /dev, /proc and /sys, loads ptp_vmclock.ko.zst with
- * finit_module(MODULE_INIT_COMPRESSED_FILE), maps /dev/vmclock0 read-only and
- * runs the mode named by vp.mode= on the kernel command line:
+ * As init it mounts /dev, /proc and /sys, loads ptp_vmclock.ko.zst and
+ * ptp_kvm.ko.zst with finit_module(MODULE_INIT_COMPRESSED_FILE), maps
+ * /dev/vmclock0 read-only, opens the KVM PTP clock if one registered, and runs
+ * the mode named by vp.mode= on the kernel command line:
  *
  *   monitor  prints a sample line every 100 ms (forever): the four clocks, the
- *            CMOS RTC and every non-constant VMClock field, so the host driver
- *            (run.py) can compare them with its own clock across a QMP stop,
- *            snapshot or migration.
+ *            guest TSC, the KVM PTP clock, the CMOS RTC and every non-constant
+ *            VMClock field, so the host driver (run.py) can compare them with
+ *            its own clock across a stop, snapshot or migration. When the
+ *            device sets NOTIFICATION_PRESENT it waits in poll() on
+ *            /dev/vmclock0 between samples and prints a W line on each wakeup.
  *   bench    prints the cost of reading the disruption marker and the clocks.
  *
  * On the host, "vmpause-guest bench" runs the same benchmark with an anonymous
@@ -17,6 +20,7 @@
  * RAM, so the guest's load is a cached memory load like this one.
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/rtc.h>
@@ -33,6 +37,7 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+#include <x86intrin.h>
 
 #ifndef MODULE_INIT_COMPRESSED_FILE
 #define MODULE_INIT_COMPRESSED_FILE 4
@@ -71,12 +76,43 @@ struct vmclock_abi {
 
 static const volatile struct vmclock_abi *clk;
 static int clk_fd = -1;
+static int phc_fd = -1;
+static double tsc_ns_per_tick;
+
+#define FD_TO_CLOCKID(fd) ((~(clockid_t)(fd) << 3) | 3)
 
 static int64_t now_ns(clockid_t id)
 {
 	struct timespec ts;
 	clock_gettime(id, &ts);
 	return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+static int64_t sys_now_ns(clockid_t id);
+
+static int64_t phc_ns(void)
+{
+	if (phc_fd < 0)
+		return -1;
+	return sys_now_ns(FD_TO_CLOCKID(phc_fd));
+}
+
+static int64_t tsc_ns(void)
+{
+	return (int64_t)((double)__rdtsc() * tsc_ns_per_tick);
+}
+
+/* The guest TSC's rate against CLOCK_MONOTONIC_RAW over 200 ms. */
+static void calibrate_tsc(void)
+{
+	int64_t r0 = now_ns(CLOCK_MONOTONIC_RAW);
+	uint64_t t0 = __rdtsc();
+	struct timespec d = {0, 200000000};
+	nanosleep(&d, NULL);
+	int64_t r1 = now_ns(CLOCK_MONOTONIC_RAW);
+	uint64_t t1 = __rdtsc();
+	tsc_ns_per_tick = (double)(r1 - r0) / (double)(t1 - t0);
+	printf("# tsc: %.0f Hz against CLOCK_MONOTONIC_RAW\n", 1e9 / tsc_ns_per_tick);
 }
 
 static int64_t sys_now_ns(clockid_t id)
@@ -142,6 +178,33 @@ static int load_module(const char *path)
 	return r < 0 && e != EEXIST ? -e : 0;
 }
 
+/* Opens the PTP clock named "KVM virtual PTP" and lists every PTP clock. */
+static void open_phc(void)
+{
+	DIR *d = opendir("/sys/class/ptp");
+	struct dirent *e;
+	char path[300], name[64] = "";
+	while (d && (e = readdir(d))) {
+		if (e->d_name[0] == '.')
+			continue;
+		snprintf(path, sizeof(path), "/sys/class/ptp/%s/clock_name", e->d_name);
+		FILE *f = fopen(path, "r");
+		if (!f || !fgets(name, sizeof(name), f))
+			name[0] = 0;
+		if (f)
+			fclose(f);
+		name[strcspn(name, "\n")] = 0;
+		printf("# ptp: %s %s\n", e->d_name, name);
+		if (strcmp(name, "KVM virtual PTP") == 0 && phc_fd < 0) {
+			snprintf(path, sizeof(path), "/dev/%s", e->d_name);
+			phc_fd = open(path, O_RDONLY | O_CLOEXEC);
+		}
+	}
+	if (d)
+		closedir(d);
+	printf("# ptp_kvm clock: %s\n", phc_fd >= 0 ? "open" : "absent");
+}
+
 static int map_vmclock(void)
 {
 	for (int i = 0; i < 50 && access("/dev/vmclock0", F_OK) != 0; i++)
@@ -178,9 +241,42 @@ static void describe_vmclock(void)
 	       r >= 24 ? (unsigned long long)((struct vmclock_abi *)buf)->disruption_marker : 0ULL);
 }
 
+static void current_clocksource(char *buf, size_t len)
+{
+	FILE *f = fopen("/sys/devices/system/clocksource/clocksource0/current_clocksource", "r");
+	if (!f || !fgets(buf, (int)len, f))
+		buf[0] = 0;
+	if (f)
+		fclose(f);
+	buf[strcspn(buf, "\n")] = 0;
+}
+
+/* Waits in poll() on /dev/vmclock0 until due, printing a W line per wakeup. */
+static void wait_notified(int64_t due)
+{
+	struct pollfd pfd = {.fd = clk_fd, .events = POLLIN};
+	char buf[sizeof(struct vmclock_abi)];
+	for (int64_t now; (now = now_ns(CLOCK_MONOTONIC)) < due;) {
+		int ms = (int)((due - now + 999999) / 1000000);
+		if (poll(&pfd, 1, ms) <= 0 || !(pfd.revents & POLLIN))
+			continue;
+		int64_t raw = now_ns(CLOCK_MONOTONIC_RAW);
+		if (pread(clk_fd, buf, sizeof(buf), 0) < 24)
+			continue;
+		const struct vmclock_abi *c = (const struct vmclock_abi *)buf;
+		printf("W raw=%lld tsc=%lld phc=%lld seq=%u marker=%llu gen=%llu\n", (long long)raw,
+		       (long long)tsc_ns(), (long long)phc_ns(), c->seq_count,
+		       (unsigned long long)c->disruption_marker,
+		       (unsigned long long)c->vm_generation_counter);
+		fflush(stdout);
+	}
+}
+
 static void monitor(void)
 {
 	int rtc = open("/dev/rtc0", O_RDONLY | O_CLOEXEC);
+	int notified = (clk->flags & VMCLOCK_FLAG_NOTIFICATION_PRESENT) != 0;
+	char cs[64], last_cs[64] = "";
 	printf("READY monitor\n");
 	fflush(stdout);
 	struct timespec next;
@@ -192,12 +288,19 @@ static void monitor(void)
 		int64_t boot = now_ns(CLOCK_BOOTTIME);
 		int64_t mono = now_ns(CLOCK_MONOTONIC);
 		int64_t real = now_ns(CLOCK_REALTIME);
+		int64_t tsc = tsc_ns();
+		int64_t phc = phc_ns();
 		int64_t rtc_s = rtc_read_s(rtc);
-		printf("S n=%llu raw=%lld boot=%lld mono=%lld real=%lld rtc=%lld seq=%u marker=%llu "
-		       "gen=%llu flags=0x%llx\n",
+		current_clocksource(cs, sizeof(cs));
+		if (strcmp(cs, last_cs) != 0) {
+			printf("# clocksource: %s\n", cs);
+			strcpy(last_cs, cs);
+		}
+		printf("S n=%llu raw=%lld boot=%lld mono=%lld real=%lld tsc=%lld phc=%lld rtc=%lld "
+		       "seq=%u marker=%llu gen=%llu flags=0x%llx\n",
 		       (unsigned long long)n, (long long)raw, (long long)boot, (long long)mono,
-		       (long long)real, (long long)rtc_s, seq, (unsigned long long)marker,
-		       (unsigned long long)clk->vm_generation_counter,
+		       (long long)real, (long long)tsc, (long long)phc, (long long)rtc_s, seq,
+		       (unsigned long long)marker, (unsigned long long)clk->vm_generation_counter,
 		       (unsigned long long)clk->flags);
 		fflush(stdout);
 		/* After a jump of the clock, sample from now rather than in a burst. */
@@ -207,7 +310,10 @@ static void monitor(void)
 			due = now + 100000000;
 		next.tv_sec = due / 1000000000;
 		next.tv_nsec = due % 1000000000;
-		clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+		if (notified)
+			wait_notified(due);
+		else
+			clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
 	}
 }
 
@@ -249,6 +355,9 @@ static void bench(void)
 	BENCH("syscall CLOCK_MONOTONIC_RAW", 1000, sys_now_ns(CLOCK_MONOTONIC_RAW));
 	BENCH("syscall CLOCK_BOOTTIME", 1000, sys_now_ns(CLOCK_BOOTTIME));
 	BENCH("syscall getppid", 1000, syscall(SYS_getppid));
+	BENCH("rdtsc", 100000, __rdtsc());
+	if (phc_fd >= 0)
+		BENCH("clock_gettime ptp_kvm PHC", 1000, phc_ns());
 	if (getpid() == 1)
 		BENCH("pread /dev/vmclock0 (24 B)", 1000, pread(clk_fd, buf, 24, 0));
 	if (rtc >= 0)
@@ -292,6 +401,10 @@ int main(int argc, char **argv)
 		 "/sys/devices/system/clocksource/clocksource0/current_clocksource");
 	int r = load_module("/lib/modules/ptp_vmclock.ko.zst");
 	printf("# finit_module ptp_vmclock: %s\n", r ? strerror(-r) : "ok");
+	r = load_module("/lib/modules/ptp_kvm.ko.zst");
+	printf("# finit_module ptp_kvm: %s\n", r ? strerror(-r) : "ok");
+	open_phc();
+	calibrate_tsc();
 	r = map_vmclock();
 	if (r) {
 		printf("[FAIL] T0 /dev/vmclock0 mmap got=%s want=ok\n", strerror(-r));

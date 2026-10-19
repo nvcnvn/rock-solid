@@ -668,7 +668,8 @@ recommended writing an own Raft shard, and the raft rounds spike started from v3
   64-bit `st_ino` that can overflow 32-bit programs, one extra key per create on SMB volumes.
 - **Leases need bounded oscillator drift**, so each is counted on both `CLOCK_BOOTTIME` and
   `CLOCK_MONOTONIC_RAW`, and a holder gives up its leases when its machine resumes from suspend.
-  A paused VM, which stops every clock in the guest, is not covered.
+  A paused VM can stop every clock in the guest; the VMClock marker and the grantors' heartbeats
+  catch it, except a stopped QEMU guest on kvm-clock whose queued messages were dropped.
 - **A fork to maintain**, an older library version, and an in-house lease around `RawNode`.
 - **Metadata lives in RAM:** about 40 million distinct files per node at 16 GiB.
 

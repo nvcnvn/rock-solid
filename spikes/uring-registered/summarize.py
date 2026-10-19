@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Median CPU per I/O and IOPS of each row and variant across reps in results.txt, as a markdown table."""
+"""Median CPU per I/O and IOPS of each row and variant across reps in a results file (results.txt by default), as a markdown table."""
 import re
 import statistics
 import sys

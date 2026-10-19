@@ -1,0 +1,930 @@
+Phase 1 - find and verify superblock...
+        - reporting progress in intervals of 15 minutes
+Phase 2 - using internal log
+        - zero log...
+ALERT: The filesystem has valuable metadata changes in a log which is being
+ignored because the -n option was used.  Expect spurious inconsistencies
+which may be resolved by first mounting the filesystem to replay the log.
+        - 18:01:24: zeroing log - 16384 of 16384 blocks done
+        - scan filesystem freespace and inode maps...
+sb_icount 64, counted 256
+sb_ifree 61, counted 50
+sb_fdblocks 232730, counted 110501
+        - 18:01:24: scanning filesystem freespace - 8 of 8 allocation groups done
+        - found root inode chunk
+Phase 3 - for each AG...
+        - scan (but don't clear) agi unlinked lists...
+        - 18:01:24: scanning agi unlinked lists - 8 of 8 allocation groups done
+        - process known inodes and perform inode discovery...
+        - agno = 0
+        - agno = 7
+Metadata corruption detected at 0x582f7a8d50e6, xfs_inode block 0x8100/0x4000
+Metadata corruption detected at 0x582f7a8d50e6, xfs_inode block 0x8120/0x4000
+Metadata corruption detected at 0x582f7a8d50e6, xfs_inode block 0x8140/0x4000
+Metadata corruption detected at 0x582f7a8d50e6, xfs_inode block 0x8160/0x4000
+bad CRC for inode 33024
+bad magic number 0x0 on inode 33024
+bad version number 0x0 on inode 33024
+bad next_unlinked 0x0 on inode 33024
+inode identifier 0 mismatch on inode 33024
+bad CRC for inode 33025
+bad magic number 0x0 on inode 33025
+bad version number 0x0 on inode 33025
+bad next_unlinked 0x0 on inode 33025
+inode identifier 0 mismatch on inode 33025
+bad CRC for inode 33026
+bad magic number 0x0 on inode 33026
+bad version number 0x0 on inode 33026
+bad next_unlinked 0x0 on inode 33026
+inode identifier 0 mismatch on inode 33026
+bad CRC for inode 33027
+bad magic number 0x0 on inode 33027
+bad version number 0x0 on inode 33027
+bad next_unlinked 0x0 on inode 33027
+inode identifier 0 mismatch on inode 33027
+bad CRC for inode 33028
+bad magic number 0x0 on inode 33028
+bad version number 0x0 on inode 33028
+bad next_unlinked 0x0 on inode 33028
+inode identifier 0 mismatch on inode 33028
+bad CRC for inode 33029
+bad magic number 0x0 on inode 33029
+bad version number 0x0 on inode 33029
+bad next_unlinked 0x0 on inode 33029
+inode identifier 0 mismatch on inode 33029
+bad CRC for inode 33030
+bad magic number 0x0 on inode 33030
+bad version number 0x0 on inode 33030
+bad next_unlinked 0x0 on inode 33030
+inode identifier 0 mismatch on inode 33030
+bad CRC for inode 33031
+bad magic number 0x0 on inode 33031
+bad version number 0x0 on inode 33031
+bad next_unlinked 0x0 on inode 33031
+inode identifier 0 mismatch on inode 33031
+bad CRC for inode 33032
+bad magic number 0x0 on inode 33032
+bad version number 0x0 on inode 33032
+bad next_unlinked 0x0 on inode 33032
+inode identifier 0 mismatch on inode 33032
+bad CRC for inode 33033
+bad magic number 0x0 on inode 33033
+bad version number 0x0 on inode 33033
+bad next_unlinked 0x0 on inode 33033
+inode identifier 0 mismatch on inode 33033
+bad CRC for inode 33034
+bad magic number 0x0 on inode 33034
+bad version number 0x0 on inode 33034
+bad next_unlinked 0x0 on inode 33034
+inode identifier 0 mismatch on inode 33034
+bad CRC for inode 33035
+bad magic number 0x0 on inode 33035
+bad version number 0x0 on inode 33035
+bad next_unlinked 0x0 on inode 33035
+inode identifier 0 mismatch on inode 33035
+bad CRC for inode 33036
+bad magic number 0x0 on inode 33036
+bad version number 0x0 on inode 33036
+bad next_unlinked 0x0 on inode 33036
+inode identifier 0 mismatch on inode 33036
+bad CRC for inode 33037
+bad magic number 0x0 on inode 33037
+bad version number 0x0 on inode 33037
+bad next_unlinked 0x0 on inode 33037
+inode identifier 0 mismatch on inode 33037
+bad CRC for inode 33038
+bad magic number 0x0 on inode 33038
+bad version number 0x0 on inode 33038
+bad next_unlinked 0x0 on inode 33038
+inode identifier 0 mismatch on inode 33038
+bad CRC for inode 33039
+bad magic number 0x0 on inode 33039
+bad version number 0x0 on inode 33039
+bad next_unlinked 0x0 on inode 33039
+inode identifier 0 mismatch on inode 33039
+bad CRC for inode 33040
+bad magic number 0x0 on inode 33040
+bad version number 0x0 on inode 33040
+bad next_unlinked 0x0 on inode 33040
+inode identifier 0 mismatch on inode 33040
+bad CRC for inode 33041
+bad magic number 0x0 on inode 33041
+bad version number 0x0 on inode 33041
+bad next_unlinked 0x0 on inode 33041
+inode identifier 0 mismatch on inode 33041
+bad CRC for inode 33042
+bad magic number 0x0 on inode 33042
+bad version number 0x0 on inode 33042
+bad next_unlinked 0x0 on inode 33042
+inode identifier 0 mismatch on inode 33042
+bad CRC for inode 33043
+bad magic number 0x0 on inode 33043
+bad version number 0x0 on inode 33043
+bad next_unlinked 0x0 on inode 33043
+inode identifier 0 mismatch on inode 33043
+bad CRC for inode 33044
+bad magic number 0x0 on inode 33044
+bad version number 0x0 on inode 33044
+bad next_unlinked 0x0 on inode 33044
+inode identifier 0 mismatch on inode 33044
+bad CRC for inode 33045
+bad magic number 0x0 on inode 33045
+bad version number 0x0 on inode 33045
+bad next_unlinked 0x0 on inode 33045
+inode identifier 0 mismatch on inode 33045
+bad CRC for inode 33046
+bad magic number 0x0 on inode 33046
+bad version number 0x0 on inode 33046
+bad next_unlinked 0x0 on inode 33046
+inode identifier 0 mismatch on inode 33046
+bad CRC for inode 33047
+bad magic number 0x0 on inode 33047
+bad version number 0x0 on inode 33047
+bad next_unlinked 0x0 on inode 33047
+inode identifier 0 mismatch on inode 33047
+bad CRC for inode 33048
+bad magic number 0x0 on inode 33048
+bad version number 0x0 on inode 33048
+bad next_unlinked 0x0 on inode 33048
+inode identifier 0 mismatch on inode 33048
+bad CRC for inode 33049
+bad magic number 0x0 on inode 33049
+bad version number 0x0 on inode 33049
+bad next_unlinked 0x0 on inode 33049
+inode identifier 0 mismatch on inode 33049
+bad CRC for inode 33050
+bad magic number 0x0 on inode 33050
+bad version number 0x0 on inode 33050
+bad next_unlinked 0x0 on inode 33050
+inode identifier 0 mismatch on inode 33050
+bad CRC for inode 33051
+bad magic number 0x0 on inode 33051
+bad version number 0x0 on inode 33051
+bad next_unlinked 0x0 on inode 33051
+inode identifier 0 mismatch on inode 33051
+bad CRC for inode 33052
+bad magic number 0x0 on inode 33052
+bad version number 0x0 on inode 33052
+bad next_unlinked 0x0 on inode 33052
+inode identifier 0 mismatch on inode 33052
+bad CRC for inode 33053
+bad magic number 0x0 on inode 33053
+bad version number 0x0 on inode 33053
+bad next_unlinked 0x0 on inode 33053
+inode identifier 0 mismatch on inode 33053
+bad CRC for inode 33054
+bad magic number 0x0 on inode 33054
+bad version number 0x0 on inode 33054
+bad next_unlinked 0x0 on inode 33054
+inode identifier 0 mismatch on inode 33054
+bad CRC for inode 33055
+bad magic number 0x0 on inode 33055
+bad version number 0x0 on inode 33055
+bad next_unlinked 0x0 on inode 33055
+inode identifier 0 mismatch on inode 33055
+bad CRC for inode 33056
+bad magic number 0x0 on inode 33056
+bad version number 0x0 on inode 33056
+bad next_unlinked 0x0 on inode 33056
+inode identifier 0 mismatch on inode 33056
+bad CRC for inode 33057
+bad magic number 0x0 on inode 33057
+bad version number 0x0 on inode 33057
+bad next_unlinked 0x0 on inode 33057
+inode identifier 0 mismatch on inode 33057
+bad CRC for inode 33058
+bad magic number 0x0 on inode 33058
+bad version number 0x0 on inode 33058
+bad next_unlinked 0x0 on inode 33058
+inode identifier 0 mismatch on inode 33058
+bad CRC for inode 33059
+bad magic number 0x0 on inode 33059
+bad version number 0x0 on inode 33059
+bad next_unlinked 0x0 on inode 33059
+inode identifier 0 mismatch on inode 33059
+bad CRC for inode 33060
+bad magic number 0x0 on inode 33060
+bad version number 0x0 on inode 33060
+bad next_unlinked 0x0 on inode 33060
+inode identifier 0 mismatch on inode 33060
+bad CRC for inode 33061
+bad magic number 0x0 on inode 33061
+bad version number 0x0 on inode 33061
+bad next_unlinked 0x0 on inode 33061
+inode identifier 0 mismatch on inode 33061
+bad CRC for inode 33062
+bad magic number 0x0 on inode 33062
+bad version number 0x0 on inode 33062
+bad next_unlinked 0x0 on inode 33062
+inode identifier 0 mismatch on inode 33062
+bad CRC for inode 33063
+bad magic number 0x0 on inode 33063
+bad version number 0x0 on inode 33063
+bad next_unlinked 0x0 on inode 33063
+inode identifier 0 mismatch on inode 33063
+bad CRC for inode 33064
+bad magic number 0x0 on inode 33064
+bad version number 0x0 on inode 33064
+bad next_unlinked 0x0 on inode 33064
+inode identifier 0 mismatch on inode 33064
+bad CRC for inode 33065
+bad magic number 0x0 on inode 33065
+bad version number 0x0 on inode 33065
+bad next_unlinked 0x0 on inode 33065
+inode identifier 0 mismatch on inode 33065
+bad CRC for inode 33066
+bad magic number 0x0 on inode 33066
+bad version number 0x0 on inode 33066
+bad next_unlinked 0x0 on inode 33066
+inode identifier 0 mismatch on inode 33066
+bad CRC for inode 33067
+bad magic number 0x0 on inode 33067
+bad version number 0x0 on inode 33067
+bad next_unlinked 0x0 on inode 33067
+inode identifier 0 mismatch on inode 33067
+bad CRC for inode 33068
+bad magic number 0x0 on inode 33068
+bad version number 0x0 on inode 33068
+bad next_unlinked 0x0 on inode 33068
+inode identifier 0 mismatch on inode 33068
+bad CRC for inode 33069
+bad magic number 0x0 on inode 33069
+bad version number 0x0 on inode 33069
+bad next_unlinked 0x0 on inode 33069
+inode identifier 0 mismatch on inode 33069
+bad CRC for inode 33070
+bad magic number 0x0 on inode 33070
+bad version number 0x0 on inode 33070
+bad next_unlinked 0x0 on inode 33070
+inode identifier 0 mismatch on inode 33070
+bad CRC for inode 33071
+bad magic number 0x0 on inode 33071
+bad version number 0x0 on inode 33071
+bad next_unlinked 0x0 on inode 33071
+inode identifier 0 mismatch on inode 33071
+bad CRC for inode 33072
+bad magic number 0x0 on inode 33072
+bad version number 0x0 on inode 33072
+bad next_unlinked 0x0 on inode 33072
+inode identifier 0 mismatch on inode 33072
+bad CRC for inode 33073
+bad magic number 0x0 on inode 33073
+bad version number 0x0 on inode 33073
+bad next_unlinked 0x0 on inode 33073
+inode identifier 0 mismatch on inode 33073
+bad CRC for inode 33074
+bad magic number 0x0 on inode 33074
+bad version number 0x0 on inode 33074
+bad next_unlinked 0x0 on inode 33074
+inode identifier 0 mismatch on inode 33074
+bad CRC for inode 33075
+bad magic number 0x0 on inode 33075
+bad version number 0x0 on inode 33075
+bad next_unlinked 0x0 on inode 33075
+inode identifier 0 mismatch on inode 33075
+bad CRC for inode 33076
+bad magic number 0x0 on inode 33076
+bad version number 0x0 on inode 33076
+bad next_unlinked 0x0 on inode 33076
+inode identifier 0 mismatch on inode 33076
+bad CRC for inode 33077
+bad magic number 0x0 on inode 33077
+bad version number 0x0 on inode 33077
+bad next_unlinked 0x0 on inode 33077
+inode identifier 0 mismatch on inode 33077
+bad CRC for inode 33078
+bad magic number 0x0 on inode 33078
+bad version number 0x0 on inode 33078
+bad next_unlinked 0x0 on inode 33078
+inode identifier 0 mismatch on inode 33078
+bad CRC for inode 33079
+bad magic number 0x0 on inode 33079
+bad version number 0x0 on inode 33079
+bad next_unlinked 0x0 on inode 33079
+inode identifier 0 mismatch on inode 33079
+bad CRC for inode 33080
+bad magic number 0x0 on inode 33080
+bad version number 0x0 on inode 33080
+bad next_unlinked 0x0 on inode 33080
+inode identifier 0 mismatch on inode 33080
+bad CRC for inode 33081
+bad magic number 0x0 on inode 33081
+bad version number 0x0 on inode 33081
+bad next_unlinked 0x0 on inode 33081
+inode identifier 0 mismatch on inode 33081
+bad CRC for inode 33082
+bad magic number 0x0 on inode 33082
+bad version number 0x0 on inode 33082
+bad next_unlinked 0x0 on inode 33082
+inode identifier 0 mismatch on inode 33082
+bad CRC for inode 33083
+bad magic number 0x0 on inode 33083
+bad version number 0x0 on inode 33083
+bad next_unlinked 0x0 on inode 33083
+inode identifier 0 mismatch on inode 33083
+bad CRC for inode 33084
+bad magic number 0x0 on inode 33084
+bad version number 0x0 on inode 33084
+bad next_unlinked 0x0 on inode 33084
+inode identifier 0 mismatch on inode 33084
+bad CRC for inode 33085
+bad magic number 0x0 on inode 33085
+bad version number 0x0 on inode 33085
+bad next_unlinked 0x0 on inode 33085
+inode identifier 0 mismatch on inode 33085
+bad CRC for inode 33086
+bad magic number 0x0 on inode 33086
+bad version number 0x0 on inode 33086
+bad next_unlinked 0x0 on inode 33086
+inode identifier 0 mismatch on inode 33086
+bad CRC for inode 33087
+bad magic number 0x0 on inode 33087
+bad version number 0x0 on inode 33087
+bad next_unlinked 0x0 on inode 33087
+inode identifier 0 mismatch on inode 33087
+bad CRC for inode 33088
+bad magic number 0x0 on inode 33088
+bad version number 0x0 on inode 33088
+bad next_unlinked 0x0 on inode 33088
+inode identifier 0 mismatch on inode 33088
+bad CRC for inode 33089
+bad magic number 0x0 on inode 33089
+bad version number 0x0 on inode 33089
+bad next_unlinked 0x0 on inode 33089
+inode identifier 0 mismatch on inode 33089
+bad CRC for inode 33090
+bad magic number 0x0 on inode 33090
+bad version number 0x0 on inode 33090
+bad next_unlinked 0x0 on inode 33090
+inode identifier 0 mismatch on inode 33090
+bad CRC for inode 33091
+bad magic number 0x0 on inode 33091
+bad version number 0x0 on inode 33091
+bad next_unlinked 0x0 on inode 33091
+inode identifier 0 mismatch on inode 33091
+bad CRC for inode 33092
+bad magic number 0x0 on inode 33092
+bad version number 0x0 on inode 33092
+bad next_unlinked 0x0 on inode 33092
+inode identifier 0 mismatch on inode 33092
+bad CRC for inode 33093
+bad magic number 0x0 on inode 33093
+bad version number 0x0 on inode 33093
+bad next_unlinked 0x0 on inode 33093
+inode identifier 0 mismatch on inode 33093
+bad CRC for inode 33094
+bad magic number 0x0 on inode 33094
+bad version number 0x0 on inode 33094
+bad next_unlinked 0x0 on inode 33094
+inode identifier 0 mismatch on inode 33094
+bad CRC for inode 33095
+bad magic number 0x0 on inode 33095
+bad version number 0x0 on inode 33095
+bad next_unlinked 0x0 on inode 33095
+inode identifier 0 mismatch on inode 33095
+bad CRC for inode 33096
+bad magic number 0x0 on inode 33096
+bad version number 0x0 on inode 33096
+bad next_unlinked 0x0 on inode 33096
+inode identifier 0 mismatch on inode 33096
+bad CRC for inode 33097
+bad magic number 0x0 on inode 33097
+bad version number 0x0 on inode 33097
+bad next_unlinked 0x0 on inode 33097
+inode identifier 0 mismatch on inode 33097
+bad CRC for inode 33098
+bad magic number 0x0 on inode 33098
+bad version number 0x0 on inode 33098
+bad next_unlinked 0x0 on inode 33098
+inode identifier 0 mismatch on inode 33098
+bad CRC for inode 33099
+bad magic number 0x0 on inode 33099
+bad version number 0x0 on inode 33099
+bad next_unlinked 0x0 on inode 33099
+inode identifier 0 mismatch on inode 33099
+bad CRC for inode 33100
+bad magic number 0x0 on inode 33100
+bad version number 0x0 on inode 33100
+bad next_unlinked 0x0 on inode 33100
+inode identifier 0 mismatch on inode 33100
+bad CRC for inode 33101
+bad magic number 0x0 on inode 33101
+bad version number 0x0 on inode 33101
+bad next_unlinked 0x0 on inode 33101
+inode identifier 0 mismatch on inode 33101
+bad CRC for inode 33102
+bad magic number 0x0 on inode 33102
+bad version number 0x0 on inode 33102
+bad next_unlinked 0x0 on inode 33102
+inode identifier 0 mismatch on inode 33102
+bad CRC for inode 33103
+bad magic number 0x0 on inode 33103
+bad version number 0x0 on inode 33103
+bad next_unlinked 0x0 on inode 33103
+inode identifier 0 mismatch on inode 33103
+bad CRC for inode 33104
+bad magic number 0x0 on inode 33104
+bad version number 0x0 on inode 33104
+bad next_unlinked 0x0 on inode 33104
+inode identifier 0 mismatch on inode 33104
+bad CRC for inode 33105
+bad magic number 0x0 on inode 33105
+bad version number 0x0 on inode 33105
+bad next_unlinked 0x0 on inode 33105
+inode identifier 0 mismatch on inode 33105
+bad CRC for inode 33106
+bad magic number 0x0 on inode 33106
+bad version number 0x0 on inode 33106
+bad next_unlinked 0x0 on inode 33106
+inode identifier 0 mismatch on inode 33106
+bad CRC for inode 33107
+bad magic number 0x0 on inode 33107
+bad version number 0x0 on inode 33107
+bad next_unlinked 0x0 on inode 33107
+inode identifier 0 mismatch on inode 33107
+bad CRC for inode 33108
+bad magic number 0x0 on inode 33108
+bad version number 0x0 on inode 33108
+bad next_unlinked 0x0 on inode 33108
+inode identifier 0 mismatch on inode 33108
+bad CRC for inode 33109
+bad magic number 0x0 on inode 33109
+bad version number 0x0 on inode 33109
+bad next_unlinked 0x0 on inode 33109
+inode identifier 0 mismatch on inode 33109
+bad CRC for inode 33110
+bad magic number 0x0 on inode 33110
+bad version number 0x0 on inode 33110
+bad next_unlinked 0x0 on inode 33110
+inode identifier 0 mismatch on inode 33110
+bad CRC for inode 33111
+bad magic number 0x0 on inode 33111
+bad version number 0x0 on inode 33111
+bad next_unlinked 0x0 on inode 33111
+inode identifier 0 mismatch on inode 33111
+bad CRC for inode 33112
+bad magic number 0x0 on inode 33112
+bad version number 0x0 on inode 33112
+bad next_unlinked 0x0 on inode 33112
+inode identifier 0 mismatch on inode 33112
+bad CRC for inode 33113
+bad magic number 0x0 on inode 33113
+bad version number 0x0 on inode 33113
+bad next_unlinked 0x0 on inode 33113
+inode identifier 0 mismatch on inode 33113
+bad CRC for inode 33114
+bad magic number 0x0 on inode 33114
+bad version number 0x0 on inode 33114
+bad next_unlinked 0x0 on inode 33114
+inode identifier 0 mismatch on inode 33114
+bad CRC for inode 33115
+bad magic number 0x0 on inode 33115
+bad version number 0x0 on inode 33115
+bad next_unlinked 0x0 on inode 33115
+inode identifier 0 mismatch on inode 33115
+bad CRC for inode 33116
+bad magic number 0x0 on inode 33116
+bad version number 0x0 on inode 33116
+bad next_unlinked 0x0 on inode 33116
+inode identifier 0 mismatch on inode 33116
+bad CRC for inode 33117
+bad magic number 0x0 on inode 33117
+bad version number 0x0 on inode 33117
+bad next_unlinked 0x0 on inode 33117
+inode identifier 0 mismatch on inode 33117
+bad CRC for inode 33118
+bad magic number 0x0 on inode 33118
+bad version number 0x0 on inode 33118
+bad next_unlinked 0x0 on inode 33118
+inode identifier 0 mismatch on inode 33118
+bad CRC for inode 33119
+bad magic number 0x0 on inode 33119
+bad version number 0x0 on inode 33119
+bad next_unlinked 0x0 on inode 33119
+inode identifier 0 mismatch on inode 33119
+bad CRC for inode 33120
+bad magic number 0x0 on inode 33120
+bad version number 0x0 on inode 33120
+bad next_unlinked 0x0 on inode 33120
+inode identifier 0 mismatch on inode 33120
+bad CRC for inode 33121
+bad magic number 0x0 on inode 33121
+bad version number 0x0 on inode 33121
+bad next_unlinked 0x0 on inode 33121
+inode identifier 0 mismatch on inode 33121
+bad CRC for inode 33122
+bad magic number 0x0 on inode 33122
+bad version number 0x0 on inode 33122
+bad next_unlinked 0x0 on inode 33122
+inode identifier 0 mismatch on inode 33122
+bad CRC for inode 33123
+bad magic number 0x0 on inode 33123
+bad version number 0x0 on inode 33123
+bad next_unlinked 0x0 on inode 33123
+inode identifier 0 mismatch on inode 33123
+bad CRC for inode 33124
+bad magic number 0x0 on inode 33124
+bad version number 0x0 on inode 33124
+bad next_unlinked 0x0 on inode 33124
+inode identifier 0 mismatch on inode 33124
+bad CRC for inode 33125
+bad magic number 0x0 on inode 33125
+bad version number 0x0 on inode 33125
+bad next_unlinked 0x0 on inode 33125
+inode identifier 0 mismatch on inode 33125
+bad CRC for inode 33126
+bad magic number 0x0 on inode 33126
+bad version number 0x0 on inode 33126
+bad next_unlinked 0x0 on inode 33126
+inode identifier 0 mismatch on inode 33126
+bad CRC for inode 33127
+bad magic number 0x0 on inode 33127
+bad version number 0x0 on inode 33127
+bad next_unlinked 0x0 on inode 33127
+inode identifier 0 mismatch on inode 33127
+bad CRC for inode 33128
+bad magic number 0x0 on inode 33128
+bad version number 0x0 on inode 33128
+bad next_unlinked 0x0 on inode 33128
+inode identifier 0 mismatch on inode 33128
+bad CRC for inode 33129
+bad magic number 0x0 on inode 33129
+bad version number 0x0 on inode 33129
+bad next_unlinked 0x0 on inode 33129
+inode identifier 0 mismatch on inode 33129
+bad CRC for inode 33130
+bad magic number 0x0 on inode 33130
+bad version number 0x0 on inode 33130
+bad next_unlinked 0x0 on inode 33130
+inode identifier 0 mismatch on inode 33130
+bad CRC for inode 33131
+bad magic number 0x0 on inode 33131
+bad version number 0x0 on inode 33131
+bad next_unlinked 0x0 on inode 33131
+inode identifier 0 mismatch on inode 33131
+bad CRC for inode 33132
+bad magic number 0x0 on inode 33132
+bad version number 0x0 on inode 33132
+bad next_unlinked 0x0 on inode 33132
+inode identifier 0 mismatch on inode 33132
+bad CRC for inode 33133
+bad magic number 0x0 on inode 33133
+bad version number 0x0 on inode 33133
+bad next_unlinked 0x0 on inode 33133
+inode identifier 0 mismatch on inode 33133
+bad CRC for inode 33134
+bad magic number 0x0 on inode 33134
+bad version number 0x0 on inode 33134
+bad next_unlinked 0x0 on inode 33134
+inode identifier 0 mismatch on inode 33134
+bad CRC for inode 33135
+bad magic number 0x0 on inode 33135
+bad version number 0x0 on inode 33135
+bad next_unlinked 0x0 on inode 33135
+inode identifier 0 mismatch on inode 33135
+bad CRC for inode 33136
+bad magic number 0x0 on inode 33136
+bad version number 0x0 on inode 33136
+bad next_unlinked 0x0 on inode 33136
+inode identifier 0 mismatch on inode 33136
+bad CRC for inode 33137
+bad magic number 0x0 on inode 33137
+bad version number 0x0 on inode 33137
+bad next_unlinked 0x0 on inode 33137
+inode identifier 0 mismatch on inode 33137
+bad CRC for inode 33138
+bad magic number 0x0 on inode 33138
+bad version number 0x0 on inode 33138
+bad next_unlinked 0x0 on inode 33138
+inode identifier 0 mismatch on inode 33138
+bad CRC for inode 33139
+bad magic number 0x0 on inode 33139
+bad version number 0x0 on inode 33139
+bad next_unlinked 0x0 on inode 33139
+inode identifier 0 mismatch on inode 33139
+bad CRC for inode 33140
+bad magic number 0x0 on inode 33140
+bad version number 0x0 on inode 33140
+bad next_unlinked 0x0 on inode 33140
+inode identifier 0 mismatch on inode 33140
+bad CRC for inode 33141
+bad magic number 0x0 on inode 33141
+bad version number 0x0 on inode 33141
+bad next_unlinked 0x0 on inode 33141
+inode identifier 0 mismatch on inode 33141
+bad CRC for inode 33142
+bad magic number 0x0 on inode 33142
+bad version number 0x0 on inode 33142
+bad next_unlinked 0x0 on inode 33142
+inode identifier 0 mismatch on inode 33142
+bad CRC for inode 33143
+bad magic number 0x0 on inode 33143
+bad version number 0x0 on inode 33143
+bad next_unlinked 0x0 on inode 33143
+inode identifier 0 mismatch on inode 33143
+bad CRC for inode 33144
+bad magic number 0x0 on inode 33144
+bad version number 0x0 on inode 33144
+bad next_unlinked 0x0 on inode 33144
+inode identifier 0 mismatch on inode 33144
+bad CRC for inode 33145
+bad magic number 0x0 on inode 33145
+bad version number 0x0 on inode 33145
+bad next_unlinked 0x0 on inode 33145
+inode identifier 0 mismatch on inode 33145
+bad CRC for inode 33146
+bad magic number 0x0 on inode 33146
+bad version number 0x0 on inode 33146
+bad next_unlinked 0x0 on inode 33146
+inode identifier 0 mismatch on inode 33146
+bad CRC for inode 33147
+bad magic number 0x0 on inode 33147
+bad version number 0x0 on inode 33147
+bad next_unlinked 0x0 on inode 33147
+inode identifier 0 mismatch on inode 33147
+bad CRC for inode 33148
+bad magic number 0x0 on inode 33148
+bad version number 0x0 on inode 33148
+bad next_unlinked 0x0 on inode 33148
+inode identifier 0 mismatch on inode 33148
+bad CRC for inode 33149
+bad magic number 0x0 on inode 33149
+bad version number 0x0 on inode 33149
+bad next_unlinked 0x0 on inode 33149
+inode identifier 0 mismatch on inode 33149
+bad CRC for inode 33150
+bad magic number 0x0 on inode 33150
+bad version number 0x0 on inode 33150
+bad next_unlinked 0x0 on inode 33150
+inode identifier 0 mismatch on inode 33150
+bad CRC for inode 33151
+bad magic number 0x0 on inode 33151
+bad version number 0x0 on inode 33151
+bad next_unlinked 0x0 on inode 33151
+inode identifier 0 mismatch on inode 33151
+        - agno = 1
+        - agno = 2
+        - agno = 3
+        - agno = 4
+        - agno = 5
+        - agno = 6
+        - 18:01:24: process known inodes and inode discovery - 192 of 64 inodes done
+        - process newly discovered inodes...
+        - 18:01:24: process newly discovered inodes - 8 of 8 allocation groups done
+Phase 4 - check for duplicate blocks...
+        - setting up duplicate extent list...
+        - 18:01:24: setting up duplicate extent list - 8 of 8 allocation groups done
+        - check for inodes claiming duplicate blocks...
+        - agno = 0
+        - agno = 1
+        - agno = 2
+entry "new124" at block 0 offset 3008 in directory inode 128 references non-existent inode 33024
+	would clear inode number in entry at offset 3008...
+        - agno = 4
+        - agno = 5
+        - agno = 7
+        - agno = 6
+        - agno = 3
+entry "new125" at block 0 offset 3032 in directory inode 128 references non-existent inode 33025
+	would clear inode number in entry at offset 3032...
+entry "new126" at block 0 offset 3056 in directory inode 128 references non-existent inode 33026
+	would clear inode number in entry at offset 3056...
+entry "new127" at block 0 offset 3080 in directory inode 128 references non-existent inode 33027
+	would clear inode number in entry at offset 3080...
+entry "new128" at block 0 offset 3104 in directory inode 128 references non-existent inode 33028
+	would clear inode number in entry at offset 3104...
+entry "new129" at block 0 offset 3128 in directory inode 128 references non-existent inode 33029
+	would clear inode number in entry at offset 3128...
+entry "new130" at block 0 offset 3152 in directory inode 128 references non-existent inode 33030
+	would clear inode number in entry at offset 3152...
+entry "new131" at block 0 offset 3176 in directory inode 128 references non-existent inode 33031
+	would clear inode number in entry at offset 3176...
+entry "new132" at block 0 offset 3200 in directory inode 128 references non-existent inode 33032
+	would clear inode number in entry at offset 3200...
+entry "new133" at block 0 offset 3224 in directory inode 128 references non-existent inode 33033
+	would clear inode number in entry at offset 3224...
+entry "new134" at block 0 offset 3248 in directory inode 128 references non-existent inode 33034
+	would clear inode number in entry at offset 3248...
+entry "new135" at block 0 offset 3272 in directory inode 128 references non-existent inode 33035
+	would clear inode number in entry at offset 3272...
+entry "new136" at block 0 offset 3296 in directory inode 128 references non-existent inode 33036
+	would clear inode number in entry at offset 3296...
+entry "new137" at block 0 offset 3320 in directory inode 128 references non-existent inode 33037
+	would clear inode number in entry at offset 3320...
+entry "new138" at block 0 offset 3344 in directory inode 128 references non-existent inode 33038
+	would clear inode number in entry at offset 3344...
+entry "new139" at block 0 offset 3368 in directory inode 128 references non-existent inode 33039
+	would clear inode number in entry at offset 3368...
+entry "new140" at block 0 offset 3392 in directory inode 128 references non-existent inode 33040
+	would clear inode number in entry at offset 3392...
+entry "new141" at block 0 offset 3416 in directory inode 128 references non-existent inode 33041
+	would clear inode number in entry at offset 3416...
+entry "new142" at block 0 offset 3440 in directory inode 128 references non-existent inode 33042
+	would clear inode number in entry at offset 3440...
+entry "new143" at block 0 offset 3464 in directory inode 128 references non-existent inode 33043
+	would clear inode number in entry at offset 3464...
+entry "new144" at block 0 offset 3488 in directory inode 128 references non-existent inode 33044
+	would clear inode number in entry at offset 3488...
+entry "new145" at block 0 offset 3512 in directory inode 128 references non-existent inode 33045
+	would clear inode number in entry at offset 3512...
+entry "new146" at block 0 offset 3536 in directory inode 128 references non-existent inode 33046
+	would clear inode number in entry at offset 3536...
+entry "new147" at block 0 offset 3560 in directory inode 128 references non-existent inode 33047
+	would clear inode number in entry at offset 3560...
+entry "new148" at block 0 offset 3584 in directory inode 128 references non-existent inode 33048
+	would clear inode number in entry at offset 3584...
+entry "new149" at block 0 offset 3608 in directory inode 128 references non-existent inode 33049
+	would clear inode number in entry at offset 3608...
+entry "new150" at block 0 offset 3632 in directory inode 128 references non-existent inode 33050
+	would clear inode number in entry at offset 3632...
+entry "new151" at block 0 offset 3656 in directory inode 128 references non-existent inode 33051
+	would clear inode number in entry at offset 3656...
+entry "new152" at block 0 offset 3680 in directory inode 128 references non-existent inode 33052
+	would clear inode number in entry at offset 3680...
+entry "new153" at block 0 offset 3704 in directory inode 128 references non-existent inode 33053
+	would clear inode number in entry at offset 3704...
+entry "new154" at block 0 offset 3728 in directory inode 128 references non-existent inode 33054
+	would clear inode number in entry at offset 3728...
+entry "new155" at block 0 offset 3752 in directory inode 128 references non-existent inode 33055
+	would clear inode number in entry at offset 3752...
+entry "new156" at block 0 offset 3776 in directory inode 128 references non-existent inode 33056
+	would clear inode number in entry at offset 3776...
+entry "new157" at block 0 offset 3800 in directory inode 128 references non-existent inode 33057
+	would clear inode number in entry at offset 3800...
+entry "new158" at block 0 offset 3824 in directory inode 128 references non-existent inode 33058
+	would clear inode number in entry at offset 3824...
+entry "new159" at block 0 offset 3848 in directory inode 128 references non-existent inode 33059
+	would clear inode number in entry at offset 3848...
+entry "new160" at block 0 offset 3872 in directory inode 128 references non-existent inode 33060
+	would clear inode number in entry at offset 3872...
+entry "new161" at block 0 offset 3896 in directory inode 128 references non-existent inode 33061
+	would clear inode number in entry at offset 3896...
+entry "new162" at block 0 offset 3920 in directory inode 128 references non-existent inode 33062
+	would clear inode number in entry at offset 3920...
+entry "new163" at block 0 offset 3944 in directory inode 128 references non-existent inode 33063
+	would clear inode number in entry at offset 3944...
+entry "new164" at block 0 offset 3968 in directory inode 128 references non-existent inode 33064
+	would clear inode number in entry at offset 3968...
+entry "new165" at block 0 offset 3992 in directory inode 128 references non-existent inode 33065
+	would clear inode number in entry at offset 3992...
+entry "new166" at block 0 offset 4016 in directory inode 128 references non-existent inode 33066
+	would clear inode number in entry at offset 4016...
+entry "new167" at block 0 offset 4040 in directory inode 128 references non-existent inode 33067
+	would clear inode number in entry at offset 4040...
+entry "new168" at block 0 offset 4064 in directory inode 128 references non-existent inode 33068
+	would clear inode number in entry at offset 4064...
+entry "new169" at block 1 offset 64 in directory inode 128 references non-existent inode 33069
+	would clear inode number in entry at offset 64...
+entry "new170" at block 1 offset 88 in directory inode 128 references non-existent inode 33070
+	would clear inode number in entry at offset 88...
+entry "new171" at block 1 offset 112 in directory inode 128 references non-existent inode 33071
+	would clear inode number in entry at offset 112...
+entry "new172" at block 1 offset 136 in directory inode 128 references non-existent inode 33072
+	would clear inode number in entry at offset 136...
+entry "new173" at block 1 offset 160 in directory inode 128 references non-existent inode 33073
+	would clear inode number in entry at offset 160...
+entry "new174" at block 1 offset 184 in directory inode 128 references non-existent inode 33074
+	would clear inode number in entry at offset 184...
+entry "new175" at block 1 offset 208 in directory inode 128 references non-existent inode 33075
+	would clear inode number in entry at offset 208...
+entry "new176" at block 1 offset 232 in directory inode 128 references non-existent inode 33076
+	would clear inode number in entry at offset 232...
+entry "new177" at block 1 offset 256 in directory inode 128 references non-existent inode 33077
+	would clear inode number in entry at offset 256...
+entry "new178" at block 1 offset 280 in directory inode 128 references non-existent inode 33078
+	would clear inode number in entry at offset 280...
+entry "new179" at block 1 offset 304 in directory inode 128 references non-existent inode 33079
+	would clear inode number in entry at offset 304...
+entry "new180" at block 1 offset 328 in directory inode 128 references non-existent inode 33080
+	would clear inode number in entry at offset 328...
+entry "new181" at block 1 offset 352 in directory inode 128 references non-existent inode 33081
+	would clear inode number in entry at offset 352...
+entry "new182" at block 1 offset 376 in directory inode 128 references non-existent inode 33082
+	would clear inode number in entry at offset 376...
+entry "new183" at block 1 offset 400 in directory inode 128 references non-existent inode 33083
+	would clear inode number in entry at offset 400...
+entry "new184" at block 1 offset 424 in directory inode 128 references non-existent inode 33084
+	would clear inode number in entry at offset 424...
+entry "new185" at block 1 offset 448 in directory inode 128 references non-existent inode 33085
+	would clear inode number in entry at offset 448...
+entry "new186" at block 1 offset 472 in directory inode 128 references non-existent inode 33086
+	would clear inode number in entry at offset 472...
+entry "new187" at block 1 offset 496 in directory inode 128 references non-existent inode 33087
+	would clear inode number in entry at offset 496...
+entry "new188" at block 1 offset 520 in directory inode 128 references non-existent inode 33088
+	would clear inode number in entry at offset 520...
+entry "new189" at block 1 offset 544 in directory inode 128 references non-existent inode 33089
+	would clear inode number in entry at offset 544...
+entry "new190" at block 1 offset 568 in directory inode 128 references non-existent inode 33090
+	would clear inode number in entry at offset 568...
+entry "new191" at block 1 offset 592 in directory inode 128 references non-existent inode 33091
+	would clear inode number in entry at offset 592...
+entry "new192" at block 1 offset 616 in directory inode 128 references non-existent inode 33092
+	would clear inode number in entry at offset 616...
+entry "new193" at block 1 offset 640 in directory inode 128 references non-existent inode 33093
+	would clear inode number in entry at offset 640...
+entry "new194" at block 1 offset 664 in directory inode 128 references non-existent inode 33094
+	would clear inode number in entry at offset 664...
+entry "new195" at block 1 offset 688 in directory inode 128 references non-existent inode 33095
+	would clear inode number in entry at offset 688...
+entry "new196" at block 1 offset 712 in directory inode 128 references non-existent inode 33096
+	would clear inode number in entry at offset 712...
+entry "new197" at block 1 offset 736 in directory inode 128 references non-existent inode 33097
+	would clear inode number in entry at offset 736...
+entry "new198" at block 1 offset 760 in directory inode 128 references non-existent inode 33098
+	would clear inode number in entry at offset 760...
+entry "new199" at block 1 offset 784 in directory inode 128 references non-existent inode 33099
+	would clear inode number in entry at offset 784...
+entry "new200" at block 1 offset 808 in directory inode 128 references non-existent inode 33100
+	would clear inode number in entry at offset 808...
+entry "probe.17408" at block 1 offset 832 in directory inode 128 references non-existent inode 33101
+	would clear inode number in entry at offset 832...
+        - 18:01:24: check for inodes claiming duplicate blocks - 128 of 64 inodes done
+No modify flag set, skipping phase 5
+Phase 6 - check inode connectivity...
+        - traversing filesystem ...
+entry "new124" in directory inode 128 points to non-existent inode 33024, would junk entry
+entry "new125" in directory inode 128 points to non-existent inode 33025, would junk entry
+entry "new126" in directory inode 128 points to non-existent inode 33026, would junk entry
+entry "new127" in directory inode 128 points to non-existent inode 33027, would junk entry
+entry "new128" in directory inode 128 points to non-existent inode 33028, would junk entry
+entry "new129" in directory inode 128 points to non-existent inode 33029, would junk entry
+entry "new130" in directory inode 128 points to non-existent inode 33030, would junk entry
+entry "new131" in directory inode 128 points to non-existent inode 33031, would junk entry
+entry "new132" in directory inode 128 points to non-existent inode 33032, would junk entry
+entry "new133" in directory inode 128 points to non-existent inode 33033, would junk entry
+entry "new134" in directory inode 128 points to non-existent inode 33034, would junk entry
+entry "new135" in directory inode 128 points to non-existent inode 33035, would junk entry
+entry "new136" in directory inode 128 points to non-existent inode 33036, would junk entry
+entry "new137" in directory inode 128 points to non-existent inode 33037, would junk entry
+entry "new138" in directory inode 128 points to non-existent inode 33038, would junk entry
+entry "new139" in directory inode 128 points to non-existent inode 33039, would junk entry
+entry "new140" in directory inode 128 points to non-existent inode 33040, would junk entry
+entry "new141" in directory inode 128 points to non-existent inode 33041, would junk entry
+entry "new142" in directory inode 128 points to non-existent inode 33042, would junk entry
+entry "new143" in directory inode 128 points to non-existent inode 33043, would junk entry
+entry "new144" in directory inode 128 points to non-existent inode 33044, would junk entry
+entry "new145" in directory inode 128 points to non-existent inode 33045, would junk entry
+entry "new146" in directory inode 128 points to non-existent inode 33046, would junk entry
+entry "new147" in directory inode 128 points to non-existent inode 33047, would junk entry
+entry "new148" in directory inode 128 points to non-existent inode 33048, would junk entry
+entry "new149" in directory inode 128 points to non-existent inode 33049, would junk entry
+entry "new150" in directory inode 128 points to non-existent inode 33050, would junk entry
+entry "new151" in directory inode 128 points to non-existent inode 33051, would junk entry
+entry "new152" in directory inode 128 points to non-existent inode 33052, would junk entry
+entry "new153" in directory inode 128 points to non-existent inode 33053, would junk entry
+entry "new154" in directory inode 128 points to non-existent inode 33054, would junk entry
+entry "new155" in directory inode 128 points to non-existent inode 33055, would junk entry
+entry "new156" in directory inode 128 points to non-existent inode 33056, would junk entry
+entry "new157" in directory inode 128 points to non-existent inode 33057, would junk entry
+entry "new158" in directory inode 128 points to non-existent inode 33058, would junk entry
+entry "new159" in directory inode 128 points to non-existent inode 33059, would junk entry
+entry "new160" in directory inode 128 points to non-existent inode 33060, would junk entry
+entry "new161" in directory inode 128 points to non-existent inode 33061, would junk entry
+entry "new162" in directory inode 128 points to non-existent inode 33062, would junk entry
+entry "new163" in directory inode 128 points to non-existent inode 33063, would junk entry
+entry "new164" in directory inode 128 points to non-existent inode 33064, would junk entry
+entry "new165" in directory inode 128 points to non-existent inode 33065, would junk entry
+entry "new166" in directory inode 128 points to non-existent inode 33066, would junk entry
+entry "new167" in directory inode 128 points to non-existent inode 33067, would junk entry
+entry "new168" in directory inode 128 points to non-existent inode 33068, would junk entry
+entry "new169" in directory inode 128 points to non-existent inode 33069, would junk entry
+entry "new170" in directory inode 128 points to non-existent inode 33070, would junk entry
+entry "new171" in directory inode 128 points to non-existent inode 33071, would junk entry
+entry "new172" in directory inode 128 points to non-existent inode 33072, would junk entry
+entry "new173" in directory inode 128 points to non-existent inode 33073, would junk entry
+entry "new174" in directory inode 128 points to non-existent inode 33074, would junk entry
+entry "new175" in directory inode 128 points to non-existent inode 33075, would junk entry
+entry "new176" in directory inode 128 points to non-existent inode 33076, would junk entry
+entry "new177" in directory inode 128 points to non-existent inode 33077, would junk entry
+entry "new178" in directory inode 128 points to non-existent inode 33078, would junk entry
+entry "new179" in directory inode 128 points to non-existent inode 33079, would junk entry
+entry "new180" in directory inode 128 points to non-existent inode 33080, would junk entry
+entry "new181" in directory inode 128 points to non-existent inode 33081, would junk entry
+entry "new182" in directory inode 128 points to non-existent inode 33082, would junk entry
+entry "new183" in directory inode 128 points to non-existent inode 33083, would junk entry
+entry "new184" in directory inode 128 points to non-existent inode 33084, would junk entry
+entry "new185" in directory inode 128 points to non-existent inode 33085, would junk entry
+entry "new186" in directory inode 128 points to non-existent inode 33086, would junk entry
+entry "new187" in directory inode 128 points to non-existent inode 33087, would junk entry
+entry "new188" in directory inode 128 points to non-existent inode 33088, would junk entry
+entry "new189" in directory inode 128 points to non-existent inode 33089, would junk entry
+entry "new190" in directory inode 128 points to non-existent inode 33090, would junk entry
+entry "new191" in directory inode 128 points to non-existent inode 33091, would junk entry
+entry "new192" in directory inode 128 points to non-existent inode 33092, would junk entry
+entry "new193" in directory inode 128 points to non-existent inode 33093, would junk entry
+entry "new194" in directory inode 128 points to non-existent inode 33094, would junk entry
+entry "new195" in directory inode 128 points to non-existent inode 33095, would junk entry
+entry "new196" in directory inode 128 points to non-existent inode 33096, would junk entry
+entry "new197" in directory inode 128 points to non-existent inode 33097, would junk entry
+entry "new198" in directory inode 128 points to non-existent inode 33098, would junk entry
+entry "new199" in directory inode 128 points to non-existent inode 33099, would junk entry
+entry "new200" in directory inode 128 points to non-existent inode 33100, would junk entry
+entry "probe.17408" in directory inode 128 points to non-existent inode 33101, would junk entry
+bad hash table for directory inode 128 (no data entry): would rebuild
+would rebuild directory inode 128
+        - traversal finished ...
+        - moving disconnected inodes to lost+found ...
+Phase 7 - verify link counts...
+        - 18:01:24: verify and correct link counts - 8 of 8 allocation groups done
+No modify flag set, skipping filesystem flush and exiting.

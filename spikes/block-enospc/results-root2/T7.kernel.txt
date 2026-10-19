@@ -1,0 +1,35 @@
+[  259.415158] rsenospc 1792407682: start T7
+[  259.523480] device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[  259.618836] device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+[  259.622618] dm-1: writeback error on inode 132, offset 0, sector 262272
+[  259.622665] dm-1: writeback error on inode 132, offset 131584000, sector 524416
+[  259.622702] dm-1: writeback error on inode 132, offset 263168000, sector 786560
+[  259.623539] dm-1: writeback error on inode 132, offset 394752000, sector 1310848
+[  259.623671] dm-1: writeback error on inode 132, offset 526336000, sector 1572992
+[  259.822002] XFS (dm-1): metadata I/O error in "xfs_buf_ioend_handle_error+0xbc/0x3e0 [xfs]" at daddr 0x10080 len 32 error 28
+[  259.853447] run-root.sh (7843): drop_caches: 2
+[  259.872611] XFS (dm-1): Failing async write on buffer block 0x10080. Retrying async write.
+[  259.872618] XFS (dm-1): Failing async write on buffer block 0x100a0. Retrying async write.
+[  259.872627] XFS (dm-1): Failing async write on buffer block 0x100c0. Retrying async write.
+[  259.872628] XFS (dm-1): Failing async write on buffer block 0x100e0. Retrying async write.
+[  259.872637] XFS (dm-1): Failing async write on buffer block 0x10100. Retrying async write.
+[  259.872638] XFS (dm-1): Failing async write on buffer block 0x10120. Retrying async write.
+[  259.872647] XFS (dm-1): Failing async write on buffer block 0x10140. Retrying async write.
+[  259.872647] XFS (dm-1): Failing async write on buffer block 0x10160. Retrying async write.
+[  259.872655] XFS (dm-1): Failing async write on buffer block 0x10180. Retrying async write.
+[  289.824508] XFS: Failing async write: 19954 callbacks suppressed
+[  289.824512] XFS (dm-1): Failing async write on buffer block 0x10080. Retrying async write.
+[  289.824517] XFS (dm-1): Failing async write on buffer block 0x100a0. Retrying async write.
+[  289.824520] XFS (dm-1): Failing async write on buffer block 0x100c0. Retrying async write.
+[  289.824520] XFS (dm-1): Failing async write on buffer block 0x100e0. Retrying async write.
+[  289.824523] XFS (dm-1): Failing async write on buffer block 0x10100. Retrying async write.
+[  289.824524] XFS (dm-1): Failing async write on buffer block 0x10120. Retrying async write.
+[  289.824526] XFS (dm-1): Failing async write on buffer block 0x10140. Retrying async write.
+[  289.824526] XFS (dm-1): Failing async write on buffer block 0x10160. Retrying async write.
+[  289.824529] XFS (dm-1): Failing async write on buffer block 0x10180. Retrying async write.
+[  289.824529] XFS (dm-1): Failing async write on buffer block 0x101a0. Retrying async write.
+[  294.879111] loop30: detected capacity change from 393216 to 2621440
+[  294.905420] device-mapper: thin: 252:0: switching pool to write mode
+[  294.905426] device-mapper: thin: 252:0: growing the data device from 3072 to 20480 blocks
+[  294.942815] run-root.sh (7843): drop_caches: 2
+[  329.977953] XFS (dm-1): Unmounting Filesystem b02f2f11-6f7c-4b65-a066-2e0bdb4aafd5

@@ -1,0 +1,187 @@
+# Linux 6.17.0-1033-oem, kernel log of the run-root.sh run in results-root.txt: journalctl -k --since '2026-10-19 15:59' --until '2026-10-19 16:08' -o short-monotonic, audit and AppArmor lines removed, 2026-10-19T10:18Z
+[25591.899452] LAP17083-nguyennvc kernel: loop2: detected capacity change from 0 to 32768
+[25591.900986] LAP17083-nguyennvc kernel: loop30: detected capacity change from 0 to 393216
+[25592.036600] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): mounted filesystem 40809920-6be3-4ad9-a072-534198f37339 r/w with ordered data mode. Quota mode: none.
+[25592.220430] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[25592.325062] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+[25592.325086] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 71664)
+[25592.325092] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25592.325099] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69632
+[25592.325101] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69633
+[25592.325102] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69634
+[25592.325102] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69635
+[25592.325103] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69636
+[25592.325103] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69637
+[25592.325104] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69638
+[25592.325104] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69639
+[25592.325105] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69640
+[25592.325105] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69641
+[25592.325169] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 73712)
+[25592.325254] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 75760)
+[25592.325267] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25592.325335] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 77808)
+[25592.325373] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 78832)
+[25592.325411] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 79856)
+[25592.325432] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25592.325487] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 81904)
+[25592.325564] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25592.325567] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 83952)
+[25592.325646] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 86000)
+[25592.325674] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25592.325729] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 88048)
+[25592.325738] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25592.325794] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25592.325899] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25592.326003] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25592.390651] LAP17083-nguyennvc kernel: Buffer I/O error on dev dm-1, logical block 32897, lost async page write
+[25592.427088] LAP17083-nguyennvc kernel: Aborting journal on device dm-1-8.
+[25592.429592] LAP17083-nguyennvc kernel: EXT4-fs error (device dm-1): ext4_put_super:1308: comm umount: Couldn't clean up the journal
+[25592.619287] LAP17083-nguyennvc kernel: loop2: detected capacity change from 0 to 32768
+[25592.622058] LAP17083-nguyennvc kernel: loop30: detected capacity change from 0 to 393216
+[25592.932409] LAP17083-nguyennvc kernel: SGI XFS with ACLs, security attributes, realtime, quota, no debug enabled
+[25592.933880] LAP17083-nguyennvc kernel: XFS (dm-1): Mounting V5 Filesystem e40b8b69-794a-43de-94c7-d56817db6d62
+[25592.935785] LAP17083-nguyennvc kernel: XFS (dm-1): Ending clean mount
+[25593.101654] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[25593.192188] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+[25593.192358] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 109051904, sector 475264
+[25593.192664] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 131584000, sector 524416
+[25593.195239] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 163577856, sector 586904
+[25593.195257] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 218103808, sector 693400
+[25593.195269] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 263168000, sector 786560
+[25593.195276] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 272629760, sector 805040
+[25593.195289] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 327155712, sector 911536
+[25593.195308] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 381681664, sector 1018032
+[25593.195314] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 394752000, sector 1310848
+[25593.195325] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 436207616, sector 1391816
+[25593.279930] LAP17083-nguyennvc kernel: XFS (dm-1): Unmounting Filesystem e40b8b69-794a-43de-94c7-d56817db6d62
+[25593.280157] LAP17083-nguyennvc kernel: XFS (dm-1): metadata I/O error in "xfs_buf_ioend_handle_error+0xbc/0x3e0 [xfs]" at daddr 0x8100 len 32 error 28
+[25593.280437] LAP17083-nguyennvc kernel: XFS (dm-1): Metadata I/O Error (0x1) detected at xfs_buf_ioend_handle_error+0x389/0x3e0 [xfs] (fs/xfs/xfs_buf.c:1137).  Shutting down filesystem.
+[25593.280603] LAP17083-nguyennvc kernel: XFS (dm-1): Please unmount the filesystem and rectify the problem(s)
+[25593.490880] LAP17083-nguyennvc kernel: loop2: detected capacity change from 0 to 32768
+[25593.493943] LAP17083-nguyennvc kernel: loop30: detected capacity change from 0 to 393216
+[25593.607070] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): mounted filesystem c5f481c0-0ca9-40fd-8e84-56a073dd4829 r/w with ordered data mode. Quota mode: none.
+[25593.792271] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[25593.894911] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+[25613.676414] LAP17083-nguyennvc kernel: loop30: detected capacity change from 393216 to 786432
+[25613.693463] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to write mode
+[25613.693467] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: growing the data device from 3072 to 6144 blocks
+[25613.750025] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[25613.919313] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+[25675.035379] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+[25675.035395] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 122864)
+[25675.035434] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 124912)
+[25675.035458] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25675.035463] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 126960)
+[25675.035466] LAP17083-nguyennvc kernel: buffer_io_error: 100342 callbacks suppressed
+[25675.035466] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 120832
+[25675.035468] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 120833
+[25675.035469] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 120834
+[25675.035469] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 120835
+[25675.035470] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 120836
+[25675.035470] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 120837
+[25675.035471] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 120838
+[25675.035471] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 120839
+[25675.035472] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 120840
+[25675.035472] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 120841
+[25675.035493] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 129008)
+[25675.035523] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 131056)
+[25675.035549] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 141296)
+[25675.035576] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 143344)
+[25675.035583] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25675.035604] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 145392)
+[25675.035637] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 147440)
+[25675.035664] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 149488)
+[25675.035686] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25675.035788] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25675.035891] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25675.035986] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25675.036070] LAP17083-nguyennvc kernel: Buffer I/O error on dev dm-1, logical block 32897, lost async page write
+[25675.036086] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25675.036187] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25675.036282] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25675.036385] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25675.038187] LAP17083-nguyennvc kernel: Aborting journal on device dm-1-8.
+[25675.044327] LAP17083-nguyennvc kernel: EXT4-fs error (device dm-1) in ext4_reserve_inode_write:6347: IO failure
+[25675.044339] LAP17083-nguyennvc kernel: EXT4-fs error (device dm-1): ext4_dirty_inode:6551: inode #13: comm wdavdaemon: mark_inode_dirty error
+[25675.044343] LAP17083-nguyennvc kernel: EXT4-fs error (device dm-1) in ext4_dirty_inode:6552: IO failure
+[25675.268642] LAP17083-nguyennvc kernel: loop2: detected capacity change from 0 to 32768
+[25675.269980] LAP17083-nguyennvc kernel: loop30: detected capacity change from 0 to 393216
+[25675.405532] LAP17083-nguyennvc kernel: XFS (dm-1): Mounting V5 Filesystem c6378147-ae32-4cc3-b956-a633d0716ab7
+[25675.407199] LAP17083-nguyennvc kernel: XFS (dm-1): Ending clean mount
+[25675.570034] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[25675.667590] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+[25695.474301] LAP17083-nguyennvc kernel: loop30: detected capacity change from 393216 to 786432
+[25695.491264] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to write mode
+[25695.491268] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: growing the data device from 3072 to 6144 blocks
+[25695.583721] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[25695.771350] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+[25756.958341] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+[25756.959774] LAP17083-nguyennvc kernel: iomap_finish_ioend_buffered: 2 callbacks suppressed
+[25756.959779] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 272629760, sector 805040
+[25756.959825] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 327155712, sector 911536
+[25756.959868] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 381681664, sector 1018032
+[25756.959877] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 394752000, sector 1310848
+[25756.959903] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 436207616, sector 1391816
+[25756.959964] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 526336000, sector 1572992
+[25756.975122] LAP17083-nguyennvc kernel: XFS (dm-1): Unmounting Filesystem c6378147-ae32-4cc3-b956-a633d0716ab7
+[25757.223149] LAP17083-nguyennvc kernel: loop2: detected capacity change from 0 to 32768
+[25757.224522] LAP17083-nguyennvc kernel: loop30: detected capacity change from 0 to 393216
+[25757.347075] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): mounted filesystem 5c311535-2b5d-461c-9010-37227fe23887 r/w with ordered data mode. Quota mode: none.
+[25757.520117] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[25757.622476] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+[25818.399657] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+[25818.399678] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 71664)
+[25818.399719] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 73712)
+[25818.399748] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 75760)
+[25818.399781] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 77808)
+[25818.399782] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25818.399792] LAP17083-nguyennvc kernel: buffer_io_error: 51190 callbacks suppressed
+[25818.399793] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69632
+[25818.399797] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69633
+[25818.399798] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69634
+[25818.399798] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 78832)
+[25818.399801] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69635
+[25818.399802] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69636
+[25818.399804] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69637
+[25818.399805] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69638
+[25818.399806] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69639
+[25818.399808] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69640
+[25818.399809] LAP17083-nguyennvc kernel: Buffer I/O error on device dm-1, logical block 69641
+[25818.399815] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 79856)
+[25818.399846] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 81904)
+[25818.399876] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 83952)
+[25818.399906] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 86000)
+[25818.399936] LAP17083-nguyennvc kernel: EXT4-fs warning (device dm-1): ext4_end_bio:368: I/O error 3 writing to inode 13 starting block 88048)
+[25818.400132] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25818.400447] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25818.400780] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25818.401051] LAP17083-nguyennvc kernel: Buffer I/O error on dev dm-1, logical block 32897, lost async page write
+[25818.401089] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25818.401228] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25818.401349] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25818.401608] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25818.401845] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25818.402085] LAP17083-nguyennvc kernel: EXT4-fs (dm-1): failed to convert unwritten extents to written extents -- potential data loss!  (inode 13, error -5)
+[25818.411814] LAP17083-nguyennvc kernel: Aborting journal on device dm-1-8.
+[25818.418028] LAP17083-nguyennvc kernel: EXT4-fs error (device dm-1): ext4_journal_check_start:87: comm dd: Detected aborted journal
+[25818.421421] LAP17083-nguyennvc kernel: EXT4-fs error (device dm-1) in ext4_reserve_inode_write:6347: IO failure
+[25818.421434] LAP17083-nguyennvc kernel: EXT4-fs error (device dm-1): ext4_dirty_inode:6551: inode #13: comm wdavdaemon: mark_inode_dirty error
+[25818.421439] LAP17083-nguyennvc kernel: EXT4-fs error (device dm-1) in ext4_dirty_inode:6552: IO failure
+[25818.647559] LAP17083-nguyennvc kernel: loop2: detected capacity change from 0 to 32768
+[25818.648980] LAP17083-nguyennvc kernel: loop30: detected capacity change from 0 to 393216
+[25818.783221] LAP17083-nguyennvc kernel: XFS (dm-1): Mounting V5 Filesystem 38d474f4-268a-4cfd-9996-291db338e2f6
+[25818.785010] LAP17083-nguyennvc kernel: XFS (dm-1): Ending clean mount
+[25818.954993] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: reached low water mark for data device: sending event.
+[25819.051883] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to out-of-data-space (queue IO) mode
+[25879.840494] LAP17083-nguyennvc kernel: device-mapper: thin: 252:0: switching pool to out-of-data-space (error IO) mode
+[25879.841805] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 109051904, sector 475264
+[25879.841839] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 131584000, sector 524416
+[25879.841870] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 163577856, sector 586904
+[25879.841905] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 218103808, sector 693400
+[25879.841935] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 263168000, sector 786560
+[25879.841946] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 272629760, sector 805040
+[25879.841983] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 327155712, sector 911536
+[25879.842020] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 381681664, sector 1018032
+[25879.842031] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 394752000, sector 1310848
+[25879.842060] LAP17083-nguyennvc kernel: dm-1: writeback error on inode 132, offset 436207616, sector 1391816
+[25879.910733] LAP17083-nguyennvc kernel: XFS (dm-1): Unmounting Filesystem 38d474f4-268a-4cfd-9996-291db338e2f6
