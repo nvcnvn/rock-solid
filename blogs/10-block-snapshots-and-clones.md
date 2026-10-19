@@ -16,8 +16,8 @@ callouts, you still get the whole story.
 
 ## Words you need
 
-- **Block device.** A disk as the kernel sees it: numbered 4 KiB blocks you read and write by
-  offset, with no names or folders. You put a filesystem such as ext4 on it yourself.
+- **Block device.** A disk as the kernel sees it: numbered blocks you read and write by offset,
+  with no names or folders. rock-solid's are 4 KiB, or 512 bytes when a volume asks for it. You put a filesystem such as ext4 on it yourself.
 - **ublk.** A Linux driver that lets a user-space process, here the rock-solid daemon, serve a
   local block device through io_uring, the kernel's asynchronous I/O interface
   ([glossary](../docs/glossary.md#files-and-caching)).
@@ -149,6 +149,38 @@ placement epoch lets a node reject requests based on an outdated table
 **What it costs.** The target for a 4K write at queue depth 1 is around 0.1 ms on drives with
 power-loss protection (Vitastor class; Ceph is around 1 ms). Consumer drives without it floor at
 about 1 ms, set by the drive's flush (see Evidence).
+
+### Block size: 4 KiB, and 512 bytes only when asked
+
+> **In plain words.** A block device tells the kernel the smallest piece it accepts. rock-solid's
+> says 4 KiB, which is what Linux filesystems write anyway, so every request it gets is whole
+> blocks and nothing has to be pieced together. Some guests and old tools insist on 512-byte
+> sectors; a volume can offer them, and then the chunk's primary pieces each 512-byte write into
+> its 4 KiB block. The choice is fixed when the volume is created, because a filesystem formatted
+> for one size may refuse to mount on the other.
+
+**How it works.** ublk takes a logical block size from 512 bytes to the page size
+(`logical_bs_shift` 9 to 12, `drivers/block/ublk_drv.c`). rock-solid sets 12 for the logical and
+physical size, `io_min` 4 KiB and `io_opt` the 4 MiB chunk, so the block layer never sends a
+request smaller than a block or off a block boundary, and the block path never merges. Vitastor
+makes the same choice, exposing its 4 KiB `bitmap_granularity` as the sector size; krbd keeps the
+kernel's default 512 bytes, and Ceph's BlueStore then reads and rewrites the rest of the block on
+every replica.
+
+KubeVirt needs nothing special. A VM disk sees 512-byte sectors unless its spec sets a
+`blockSize`, and QEMU pads a guest's 512-byte write to the host device's 4 KiB with its own
+read-modify-write (`bdrv_padding_rmw_read` in `block/io.c`), on the node, before rock-solid sees
+it.
+
+For a guest that must see 512-byte sectors on the device itself, the StorageClass parameter
+`block_size: 512` exposes them. Each 512-byte write then reaches the chunk primary as a byte range,
+and the primary merges it onto the newest version of its 4 KiB block, the same merge files use
+([02, chunks and placement](02-chunks-and-placement.md)). That keeps RWX block correct when two
+nodes write different sectors of one block, since both merges happen at one primary in one order,
+and costs a base read plus a whole 4 KiB block per write. The size cannot change later: XFS
+formatted with 512-byte sectors refuses a device whose logical block is 4 KiB
+(`bdev_validate_blocksize` in `fs/xfs/xfs_buf.c`), so clones and restores inherit their source's
+size.
 
 **RWO: one writer, enforced.** At attach, a single-writer attach record is taken in the MetaStore
 (`volume/{id}/attach`). It stops two nodes from mounting one volume and corrupting it, and the
@@ -376,7 +408,10 @@ Chunk index after applying record C, on every member:
                  \_______________ same log blocks, shared, no reference count ___/
 ```
 
-The write cost 4 KiB of data plus its header, not a 4 MiB chunk copy. The freeze copied two
+The write cost 4 KiB of data plus its header, not a 4 MiB chunk copy. Had the guest written
+only 512 bytes into block 100, the record would look the same: the primary merges them onto
+v6's block 100 first and logs the whole merged block as v7, so the frozen map keeps the old block
+untouched. The freeze copied two
 extent entries, one per live extent. A second write tagged epoch 1 to the same chunk sees freeze
 epoch 1 in the chunk entry and freezes nothing.
 
@@ -561,6 +596,12 @@ which is exactly why snapshots are cheap.
   [`spikes/nvme-flush/`](../spikes/nvme-flush/)), N2: a 4K write plus `fdatasync` at queue depth 1
   costs p50 0.95 ms, p99 2.4 ms, the block frontend's latency floor on such a drive.
 
+- **Sub-block writes spike** ([appendix](../docs/design.md#appendix-sub-block-writes-spike),
+  [`spikes/sub-block-writes/`](../spikes/sub-block-writes/)). Its model of two clients writing
+  unaligned bytes into one chunk, merged at the primary on its newest ordered version, was right on
+  every one of 500 seeds, and wrong on every seed when merged on the committed version only: the
+  evidence that 512-byte sectors are safe on RWX block once they merge at the primary.
+
 The simulator will check after every step that a snapshot holds every write acknowledged before
 its cut and none issued after.
 
@@ -577,6 +618,8 @@ its cut and none issued after.
 - **Block volumes fragment the chunk index.** Random 4K overwrites can push a 1 TB disk's index
   toward 270 million entries, more than 10 GB, and turn sequential reads into random 4K reads
   ([06, the LSM tree](06-the-lsm-tree.md)).
+- **512-byte sectors cost a read.** A volume with `block_size: 512` pays a base read at the primary
+  and a whole 4 KiB block for every 512-byte write; its latency is not measured yet.
 - **The daemon is in the I/O path.** A restart is a stall rather than an error only because of
   ublk's reissue, and a dead daemon's late writes need incarnation fencing.
 
@@ -608,7 +651,9 @@ Phase 8 ships ublk only.
 - Glossary: [Data model](../docs/glossary.md#data-model) (snapshot, copy-on-write, freeze, clone),
   [Files and caching](../docs/glossary.md#files-and-caching) (ublk, NVMe-oF, incarnation, S3).
 - Spikes: [`spikes/chunk-epochs/`](../spikes/chunk-epochs/),
-  [`spikes/cleaner-wa/`](../spikes/cleaner-wa/), [`spikes/nvme-flush/`](../spikes/nvme-flush/).
+  [`spikes/cleaner-wa/`](../spikes/cleaner-wa/), [`spikes/nvme-flush/`](../spikes/nvme-flush/),
+  [`spikes/sub-block-writes/`](../spikes/sub-block-writes/); the
+  [sub-block writes study](../studies/sub-block-writes/README.md).
 - Other posts: [02](02-chunks-and-placement.md), [03](03-epochs-leases-and-failures.md),
   [04](04-one-log-per-disk.md), [05](05-the-cleaner-and-free-space.md),
   [06](06-the-lsm-tree.md), [07](07-pools-and-redundancy.md), [08](08-the-metastore.md),

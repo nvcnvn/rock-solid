@@ -169,7 +169,7 @@ failing on every seed of its two-phase erasure-coded configurations before its 3
   the cluster now needs garbage collection of half-dead stripes across nodes.
 - **Encode only data that has stopped changing** (Windows Azure Storage, rock-solid). New and
   edited data lives as copies; it is encoded once it is whole or idle. Edits never touch encoded
-  data, so neither read-modify-write nor the write hole can occur, and nothing needs stripe garbage
+  data, so neither a stripe's read-modify-write nor the write hole can occur, and nothing needs stripe garbage
   collection. The cost: data pays copy prices until it is encoded, and editing an encoded chunk
   first turns it back into copies.
 
@@ -266,7 +266,9 @@ A chunk is encoded only if its shards, each rounded up to a 4 KiB block, take le
 copies. Worked example: a 16 KiB file in `ec16-2`. Each of its 16 data shards would hold 1 KiB,
 rounded up to a 4 KiB block, so 18 shards cost 72 KiB on disk. Three copies cost 48 KiB. The copies
 win, so that file's only chunk stays as copies. The same file in `ec4-2` has 4 KiB shards, 6 of
-them, 24 KiB against 48 KiB of copies, so it is encoded.
+them, 24 KiB against 48 KiB of copies, so it is encoded. Up to 8 KiB even `ec4-2` keeps copies:
+a 1.5 KiB file takes a 4 KiB block on each of 3 copies, 12,399 bytes with its log entries, 8.1
+times its size where the pool promises 1.5 ([sub-block writes spike](../docs/design.md#appendix-sub-block-writes-spike)).
 
 #### What a rebuild reads
 
@@ -628,7 +630,8 @@ section is a disk's crash recovery); its PG scenarios are the hashing ones under
   pools meanwhile.
 - **Spreading widens the blast radius:** any failure in the pool can touch a spread volume.
 - **Metadata always costs three nodes,** even for a `none` pool.
-- **Wide codes skip small data:** small chunks in `ec16-2` stay as copies.
+- **Small data stays as copies:** files up to 8 KiB in `ec4-2` and up to 24 KiB in `ec16-2` pay
+  copy prices.
 
 ## Open directions
 

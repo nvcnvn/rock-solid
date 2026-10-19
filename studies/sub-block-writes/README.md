@@ -1,6 +1,6 @@
 # Sub-block writes and small files: where bytes become blocks
 
-**Status:** read from source and documentation, plus a model spike ([spikes/sub-block-writes](../../spikes/sub-block-writes/README.md)). Nothing here is adopted; the proposed design at the end is for review.
+**Status:** read from source and documentation, plus a model spike ([spikes/sub-block-writes](../../spikes/sub-block-writes/README.md)). The proposed design at the end is adopted; [Where it is applied](#where-it-is-applied) lists the sections that hold the current text.
 
 **Question:** the ChunkStore API takes byte ranges (`Write(c, off, data, expectVer)`, `Punch(c, off, n, …)` in [Data layer](../../docs/design.md#data-layer-chunkstore)), but everything below it works in whole 4 KiB blocks: a record's write and punch entries name block ranges, each data block carries a CRC32C, the chunk index's live map holds runs of whole blocks, freezes share whole blocks with snapshots, and erasure-coded chunks go back to copies on overwrite. The design does not say what happens to (a) files smaller than a block, 1 to 2 KiB, and (b) writes that cover part of a block, such as 100 bytes at offset 1000 or a 300-byte append. Is it a read-modify-write merge, where, against which version, and what does it cost? The same for punches, truncates and extends inside a block, small fsync'd appends, and the block frontend's logical block size.
 
@@ -10,7 +10,7 @@ Every system read handles sub-block writes in one of three ways. **Merge into wh
 
 The proposal: **the chunk primary merges every partial block against the newest version it has ordered, pending versions included, and sends the merged whole blocks to the replicas.** Records, checksums, the chunk index and snapshots stay block-granular, with no format change. Three rules make it safe, each checked by the spike's model: merge against pending versions, not just committed ones (otherwise pipelined or concurrent writes lose bytes); peering drops only a suffix of a chunk's pending versions; a new primary merges into a chunk only once it holds every version peering kept. The client daemon sends whole blocks whenever it holds the bytes, which in Exclusive mode covers appends and new small files, so only write-shared files and 512-byte block writes pay the primary's read. Truncates keep bytes past end of file zero on disk through a purge that starts at the byte offset. Small files keep the 4 KiB floor; inline data in the inode is rejected because the MetaStore's runs live in memory. Byte-granular patch entries and short blocks are measured and deferred. Block volumes expose 4 KiB logical blocks, with 512-byte emulation as a per-volume option served by the same merge.
 
-## What the design has today
+## What the design said before this study
 
 - **Byte ranges at the top.** `Write(c ChunkID, off uint32, data []byte, expectVer *uint64)`, `Punch(c, off, n, expectVer)` and `Read(c, off, n, atVer)` ([Data layer](../../docs/design.md#data-layer-chunkstore)). A client reaches them with whatever FUSE delivers: without `writeback_cache`, the kernel sends each buffered `write()` as a `FUSE_WRITE` of exactly its position and length (`fs/fuse/file.c:1261`, `fuse_perform_write`; the size is the caller's count, `:1044`), and direct I/O passes the caller's range through.
 - **Blocks below.** A record's write and punch entries hold a first block and a block count, `uint16` each (`internal/disklog/record.go:71-77`, encoded at `:279-301`); the data area holds whole blocks, one CRC32C per block (`:246-262`), then packed blobs. The chunk index's extents are `First`, `Count` in blocks plus an LBA (`internal/chunkstore/index.go:86-92`), and `Apply` maps a write entry's blocks at `LBA + HeaderBlocks + payload/BlockSize` (`index.go:177-193`). `core.BlockSize` is 4096 (`internal/core/ids.go:16`).
@@ -146,7 +146,7 @@ From the [space model](../../spikes/sub-block-writes/README.md) (S1 to S3), usin
 | 2 KiB | 12,399 B (6.1×) | 12,399 B as copies (4.0× the pool's) | same | same |
 | 16 KiB | 49,299 B (3.0×) | 24,798 B as shards (1.5×) | 49,299 B as copies (2.7× the pool's) | same |
 
-A file flushed alone at queue depth 1 writes a header block per copy too, 24,576 B for any file up to 4 KiB, though only the data block stays live. Small files stay copies in erasure-coded pools: ec4-2 encodes from 12 KiB, ec16-2 from 28 KiB. The space a small file holds per replica, 4 KiB plus about 240 B of index, is still far below what its metadata round trips cost in time ([What is not free](../../docs/design.md#what-is-not-free)).
+A file flushed alone at queue depth 1 writes a header block per copy too, 24,576 B for any file up to 4 KiB, though only the data block stays live. Small files stay copies in erasure-coded pools: ec4-2 encodes only files over 8 KiB, ec16-2 over 24 KiB. The space a small file holds per replica, 4 KiB plus about 240 B of index, is still far below what its metadata round trips cost in time ([What is not free](../../docs/design.md#what-is-not-free)).
 
 | Option | Space for a 1.5 KiB file, rep3 | What it costs the rest of the design |
 | --- | --- | --- |
@@ -234,82 +234,26 @@ Write *apply(S, w)* for state S with write w's bytes overlaid. The claim is that
 - **Faults:** a base read that fails its CRC; a primary crash with a base read in flight; a recall while the daemon holds a kept tail block; a 512e RWX block volume written by two nodes at 512-byte offsets in one block.
 - **Conformance:** fsx with `-e` (end-of-file pollution) and mapped operations on the FUSE frontend, single and multi-client; xfstests `generic/029` and `generic/030`; `fio --verify` with 512-byte random writes on a 512e volume.
 
-### Replacement text for `docs/design.md`
+### Where it is applied
 
-**Data layer: ChunkStore.** After "**Single order per chunk.**", add:
+The proposal is adopted; the design documents hold the current text, and this list says where.
 
-```markdown
-**Byte ranges become whole blocks at the primary.** The API takes byte ranges; records, checksums and the chunk index hold whole 4 KiB blocks. For each block a write or punch covers only in part, the primary takes the newest version it has ordered for that block, from a pending write's merged block if one covers it, else from its live map (zeros if the block was never written or was punched), and overlays the bytes in a 4 KiB pool buffer. A base read from disk has its CRC32C checked, and one that fails is fetched from another member first, so a merge never carries rot into a new version; the chunk's later operations wait behind that read, so a chunk's writes keep their arrival order, as Ceph's erasure-coded extent cache never reorders and keeps one read outstanding per PG. The primary sends and logs the merged whole blocks, so members need no base and cannot diverge. Merging against the committed version alone would lose bytes as soon as two writes to one block are in flight, from one client pipelining or from two nodes; merging on the client needs a compare-and-set that fails on every concurrent write to the chunk; and merging on every member, as BlueStore does, costs a read per member and makes members agree only if their histories do ([sub-block writes study](../studies/sub-block-writes/README.md)). Two rules carry the dependency a merged version has on the one below it through a primary change: peering drops only a suffix of a chunk's pending versions, which holds because every member logs a chunk's writes in version order, and a new primary merges into a chunk only once it holds every version peering kept for it ([Epoch changes](#epoch-changes-and-failure-detection)). A partial block costs one random 4 KiB read at the primary when no pending write, the primary's small cache of recently merged blocks or the client supplies it, plus up to two whole edge blocks on the wire per replica.
-```
-
-Replace "**Punch.**" with:
-
-```markdown
-**Punch.** `punch` zeroes a byte range as a new version: whole blocks inside the range get a punch entry, and a block it covers in part is merged with zeros like a write, in the same record. Punched blocks are freed once no snapshot needs them, and later reads of the range return zeros. Punching a whole chunk deletes it and leaves a tombstone. File unlink and truncate, `fallocate` hole punches, block discard and volume deletion all free space this way (see [Freeing space](#freeing-space)).
-```
-
-**Epoch changes, "Writes" paragraph.** After "…as Ceph recovers divergent objects.", add:
-
-```markdown
-Each member logs a chunk's writes in the order of their versions, and a primary resends them in that order after a reconnect, so a member that lacks a version lacks every later one of its chunk, and peering drops a suffix of each chunk's pending versions: a version it keeps was never merged on one it drops. Until a chunk's kept versions are on the new primary, a write that covers part of one of its blocks waits, as Ceph's primary holds writes to a missing or degraded object.
-```
-
-**Snapshots and clones, "Data: copy-on-write per block".** "…so the first 4K write after a snapshot writes 4K, not a 4 MiB chunk copy" becomes "…so the first write after a snapshot writes only the 4K blocks it touches, merged whole, not a 4 MiB chunk copy".
-
-**Freeing space, "Truncate" bullet:**
-
-```markdown
-- **Truncate.** Shrinking a file commits, in one transaction, the new size, `alloc_end` lowered to the new end, and a purge entry starting at the new size's byte offset and running to the old `alloc_end`. The purger's first punch zeroes the rest of the block holding the new end and the rest of its chunk; the daemon runs that punch itself before `truncate` returns, and the purger runs it again after a crash, so bytes past the size are zero on disk whatever crashes, the bug XFS fixed when its extending truncates exposed blocks zeroed only in memory. Reads never return data past the size, and anything that extends the file over a range with a pending purge, a write raising `alloc_end` or a truncate upward, first finishes that purge. So a file extended later reads zeros where it was cut, without writing them, and the purger never deletes newer data.
-```
-
-**Client design, rule 2.** Replace "It flushes a chunk as soon as it is full, and the rest on `fsync`, `close` or a recall." with:
-
-```markdown
-It flushes a chunk as soon as it is full, and the rest on `fsync`, `close` or a recall. A flush covers whole blocks wherever the daemon holds a block's other bytes or they lie past the end of file, which no other node can change while the file is not shared: a new small file goes out as one block padded with zeros, and the daemon keeps a file's last partial block after flushing it, so the next append's flush is a whole block too. The chunk primary merges every other partial block ([Data layer](#data-layer-chunkstore)), which is what write-shared files pay.
-```
-
-**Pools and redundancy, "When chunks are encoded".** After "…so a small file's only chunk in an `ec16-2` pool stays as copies.", add: "In `ec4-2` that is every file up to 8 KiB, so a 1.5 KiB file costs 8.1 times its size, 5.4 times what the pool promises."
-
-**Block frontend.** After the RWO paragraph, add:
-
-```markdown
-**Logical block size.** A block volume exposes 4 KiB logical and physical blocks (`logical_bs_shift` 12), `io_min` 4 KiB and `io_opt` the chunk size, so the kernel never sends a write smaller than a block and the block path never merges. Vitastor exposes its 4 KiB `bitmap_granularity` the same way. KubeVirt guests, which see 512-byte sectors unless their disk asks otherwise, are padded by QEMU's own read-modify-write. The StorageClass parameter `block_size: 512` exposes 512-byte logical blocks for guests and tools that need them, merged at the primary like a file's partial blocks, which keeps RWX block correct when two nodes write sectors of one block; each such write pays a base read and a 4 KiB block. The size is fixed when the volume is created and inherited by its clones and restores, since XFS refuses a device whose logical block is larger than the sector size it was formatted with.
-```
-
-**Alternatives considered,** new rows:
-
-```markdown
-| Sub-block writes | Merged at the chunk primary against the newest version it has ordered, pending ones included; merged whole blocks sent to replicas; the daemon sends whole blocks when it holds the bytes ([Data layer](#data-layer-chunkstore)) | Client read-modify-write with compare-and-set (VitastorFS); a byte-range delta merged on every member (Ceph BlueStore); merging against the committed version; byte-granular patch entries merged on read (JuiceFS slices, the ZFS intent log) | In a model, merging on committed versions or on the client without CAS lost bytes on every seed; CAS retried 0.64 to 1.28 times per write; deltas cost a read per member and agree only if members' histories do. Patches halve a lone fsync'd append (83× → 42×) only if their bytes ride in header blocks, and cost one-entry-per-block, read merging and folding ([sub-block writes study](../studies/sub-block-writes/README.md)) |
-| Small files | A 4 KiB block per copy, as XFS, BlueStore since Pacific and Vitastor | Inline data in the inode (CephFS, deprecated since Octopus; ext4, Btrfs, F2FS, Lustre DoM); short blocks; smaller blocks; packing files into shared chunks (VitastorFS, SeaweedFS) | The MetaStore's runs live in memory: 1.5 KiB inline costs 12.5× per file, 43 → 3.4 million files per 16 GiB. Short blocks would save 2.6× on a 1.5 KiB file and are an open question; smaller blocks multiply CRCs and index entries |
-| Block volume logical block size | 4 KiB, 512e per volume through the primary merge | 512 bytes by default (krbd) | Linux filesystems write 4 KiB, QEMU pads its guests, and a 512-byte write would cost a base read and a 4 KiB block |
-```
-
-**Testing strategy.** Add to the invariants: "every read returns the bytes of the acknowledged writes applied in version order, checked against a byte-range oracle; no byte past a file's size reads non-zero; no version peering keeps follows one of its chunk that it drops". Add to the simulation faults for placement: "unaligned writes from two nodes into one block, pipelined, across a failover with a base read in flight; a base block that fails its checksum". Layer 6: "`fsx` with end-of-file pollution (`-e`) and mapped operations; xfstests `generic/029` and `generic/030`".
-
-**Open questions,** new items:
-
-```markdown
-- [ ] Short blocks: storing only a file's bytes up to its end in its last block, packed in the record, would cut a 1.5 KiB file from 12,399 to 4,725 raw bytes in rep3 and an fsync'd 100-byte append among 8 concurrent appenders from 79× to 58×, for a 2-byte stored length in write entries and extents and liveness counted in bytes ([sub-block writes study](../studies/sub-block-writes/README.md)). How much of a homelab volume's space is small files and partial tail blocks? Sizes from `find -printf '%s'` over real volumes (media, source trees, `node_modules`, app data) decide it.
-- [ ] Patch entries for fsync'd small appends: bytes kept in the record header would halve a lone append (83× → 42× for 100 bytes) and cut 8 concurrent appenders from 79× to 5.8×, at the price of live header blocks, a patch list per block on reads and freezes, and folding. How often do homelab workloads fsync appends smaller than a block (log files, MySQL's 512-byte redo blocks, SQLite's write-ahead log with its 24-byte frame headers)?
-- [ ] An extending `write()` on a cached handle after the page past the old end of file was dirtied through a mapping: does the kernel keep showing those bytes (fsx `-e`)? If it does, the daemon invalidates that page when it sees the extension.
-- [ ] The primary's base read: its latency on NVMe and SATA at queue depth 1, and how large a per-loop cache of merged blocks keeps write-shared appenders from reading.
-```
-
-**Roadmap.** Phase 1's single-node ChunkStore and phase 3's replica primary each gain "partial blocks merged against the newest ordered version"; phase 2's epoch change model gains "a chunk's pending versions dropped as a suffix"; phase 8 gains "4 KiB logical blocks, 512e per volume". The [build checklist](../../docs/build-checklist.md) items of the same names and [test scenarios](../../docs/test-scenarios.md) follow when those items are written.
-
-### Replacement text for `docs/glossary.md`
-
-Replace "**Read-modify-write and the write hole.**" with:
-
-```markdown
-**Read-modify-write, the write hole.** Storage writes whole blocks, so a write of a few bytes must read the rest of its block, overlay the bytes and write the block back: a read-modify-write. rock-solid's chunk primary does this for every block a write covers in part, against the newest version it has ordered, and sends the whole block to the replicas; see [Data layer](design.md#data-layer-chunkstore). An erasure-coded stripe needs the same for its parity, and if a crash lands between the writes to different shards, the parity no longer matches the data and a later rebuild produces garbage: the write hole. rock-solid avoids that one by never overwriting encoded data; a chunk is written as copies and encoded only once whole or idle. See [When chunks are encoded](design.md#when-chunks-are-encoded).
-```
-
-Rewrite "**Block, sector, logical block address (LBA).**":
-
-```markdown
-**Block, sector, logical block address (LBA), 512e.** A drive reads and writes fixed-size blocks, never single bytes; rock-solid works in 4 KiB blocks. An LBA is a block's number on the drive. A device's *logical* block size is the smallest write it accepts and its *physical* one what it writes internally; a *512e* drive accepts 512-byte writes on 4 KiB media by reading and rewriting the rest of the block itself. rock-solid's block volumes expose 4 KiB blocks, or 512e per volume; see [Block frontend](design.md#block-frontend).
-```
+- **`docs/design.md`**, [Data layer](../../docs/design.md#data-layer-chunkstore): "Byte ranges become whole blocks at the primary" (the merge, its base, why not on the client or every member) and "Punch" (partial blocks merged with zeros).
+- [Epoch changes](../../docs/design.md#epoch-changes-and-failure-detection), "Writes": why the versions peering drops are a suffix of each chunk's pending versions (each member logs a chunk's writes in version order, and durability is a prefix of its log), and partial-block writes waiting until the new primary holds every kept version.
+- [On-disk format](../../docs/design.md#on-disk-format), "Whole blocks are the floor": small files and fsync'd appends at a block per copy, with the costs above, and why inline data, patches and short blocks are not used.
+- [When chunks are encoded](../../docs/design.md#when-chunks-are-encoded): which small files stay copies, and a return to copies merging against the decoded chunk.
+- [Freeing space](../../docs/design.md#freeing-space), "Truncate": the purge entry from the new size's byte offset, and the zero-tail rule.
+- [Client design](../../docs/design.md#client-design): exact byte ranges from FUSE, flushes widened to whole blocks, the kept tail block, reads clamped to the size.
+- [Block frontend](../../docs/design.md#block-frontend), "Logical block size": 4 KiB by default, `block_size: 512` through the merge, fixed at creation.
+- [Snapshots and clones](../../docs/design.md#snapshots-and-clones): the first write after a cut writes only its merged blocks.
+- [Testing strategy](../../docs/design.md#testing-strategy): the byte-range oracle and suffix invariant, merge and truncate faults, `fsx -e` and xfstests `generic/029` and `030`.
+- [Alternatives considered](../../docs/design.md#alternatives-considered): rows "Sub-block writes", "Small files and fsync'd appends" and "Block volume logical block size".
+- [Roadmap and open questions](../../docs/design.md#roadmap-and-open-questions): phases 1, 2, 3 and 8; open questions on the base read's latency, header patches, short last blocks, and an extending write after `fsx -e`'s mapped pollution.
+- [Appendix: sub-block writes spike](../../docs/design.md#appendix-sub-block-writes-spike).
+- **`docs/glossary.md`**: "Read-modify-write, the write hole", "Block, sector, logical block address (LBA), 512e", "Punch, tombstone, purge", "Peering", and step 4 of "One write, end to end".
+- **`docs/build-checklist.md`**: single-node ChunkStore, invariant checker, epoch change model (the suffix and hold-before-merge properties), purge model, filesystem schema, wire messages, replica primary, peering.
+- **Blog posts** [02](../../blogs/02-chunks-and-placement.md) (the merge), [03](../../blogs/03-epochs-leases-and-failures.md) (dropped versions are a suffix), [04](../../blogs/04-one-log-per-disk.md) (whole blocks, small files and appends), [05](../../blogs/05-the-cleaner-and-free-space.md) (truncate's partial block), [07](../../blogs/07-pools-and-redundancy.md) (small files stay copies), [09](../../blogs/09-rwx-filesystem-and-cache-coherence.md) (whole-block flushes, truncate and the end of file) and [10](../../blogs/10-block-snapshots-and-clones.md) (logical block size).
+- `docs/test-scenarios.md` is unchanged: none of its sections covers the items the merge touches yet.
 
 ## Unverified
 

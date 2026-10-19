@@ -52,7 +52,10 @@ The [glossary](../docs/glossary.md) has longer entries for all of these.
   every chunk from the other members. [Post 03](03-epochs-leases-and-failures.md) covers it.
 - **Version and committed.** A version is a number stamped on every write to a chunk, larger than
   every earlier one. A version is committed once every live member of the chunk's PG holds it,
-  which is also the moment its write is acknowledged.
+  which is also the moment its write is acknowledged. A version not yet committed is *pending*.
+- **Merge (read-modify-write).** Turning a write that covers part of a 4 KiB block into a whole
+  block: read the rest of the block, overlay the new bytes, write the block. See
+  [Read-modify-write](../docs/glossary.md#redundancy-and-placement).
 - **Punch and tombstone.** A punch zeroes a range of a chunk as a new version. Punching a whole
   chunk deletes it and leaves a tombstone, a marker that says "deleted".
 - **CRC32C.** A fast checksum with dedicated CPU instructions, stored for every 4 KiB block so
@@ -611,6 +614,58 @@ one history. The primary forwards each write to every replica in parallel, so re
 one network hop, not one per copy. Primary is a role, not a kind of machine: any disk can be
 primary for some PGs and a replica for others.
 
+## Writes smaller than a block: the primary merges
+
+> **In plain words.** Disks, checksums and the chunk index all work in 4 KiB blocks, but a program
+> may write 100 bytes in the middle of one. Something has to fetch the rest of that block, paste
+> the 100 bytes in and store the whole block again. rock-solid gives that job to the chunk's
+> primary, the one place that already decides the order of writes, and has it paste onto the
+> newest version it has handed out, even one not yet safely stored, so two quick writes to the
+> same block never erase each other.
+
+### How it works
+
+The ChunkStore API takes byte ranges, but everything below it holds whole blocks: a record's write
+entry names a block range, each block carries its own checksum, and the chunk index maps runs of
+whole blocks. So for every block a write covers only in part, the primary *merges*: it takes the
+newest version of that block it has ordered, overlays the write's bytes in a 4 KiB buffer, and
+sends that whole block to the replicas and its own log. The base comes from the first of:
+
+1. a **pending** write's merged block, if one covers it (ordered, not yet on every member);
+2. the primary's **live map**, the committed version, read from disk with its checksum verified;
+3. **zeros**, if the block was never written or was punched.
+
+```text
+ Two 100-byte writes to block 5, the second arriving before the first commits
+
+   committed  v7: block 5 = [ ....................... ]
+   write A, bytes 0-99:      primary merges on v7  ->  v8 = [ AAAA................... ]  pending
+   write B, bytes 100-199:   primary merges on v8  ->  v9 = [ AAAABBBB............... ]
+                                                              (A survives)
+
+   had B merged on the committed v7 instead:          v9 = [ ....BBBB............... ]
+                                                              (A lost when v9 commits)
+```
+
+The [sub-block writes spike](../spikes/sub-block-writes/) modeled exactly this, with random
+unaligned writes of 1 to 300 bytes and an oracle replaying every acknowledged write's bytes. Merging
+on the newest ordered version was right on every seed; merging on the committed one lost bytes on
+**every seed**, from one client pipelining 4 writes or two clients with one write each. The other
+places a merge could live do worse. A client that reads the block and sends it back whole loses the
+other client's bytes, unless it compares versions and retries, which it then did 0.64 to 1.28 times
+per write, because the version belongs to the whole chunk. Sending the bytes to every replica and
+merging there, as Ceph's BlueStore does, costs a disk read on every replica and leaves the replicas
+agreeing only if their histories match exactly.
+
+Sending merged blocks keeps the replicas simple: they log the same bytes, need no base, and can
+never disagree. It costs at most two extra 4 KiB edge blocks per write on the wire to each replica,
+about 3.3 µs each at 10 GbE, and one random 4 KiB read at the primary when nothing has the base in
+memory. The file client avoids even that in the common case: while no other node uses the file, it
+sends whole blocks itself, padding a new small file with zeros and keeping a file's last partial
+block so the next append goes out whole ([post 09](09-rwx-filesystem-and-cache-coherence.md)).
+Because each merged version carries the bytes of the version below it, a primary change must never
+keep one and drop the other; [post 03](03-epochs-leases-and-failures.md) shows why peering cannot.
+
 ## Punch: deleting is a write too
 
 > **In plain words.** Deleting part of a chunk is recorded the same way as writing it: as a new
@@ -620,8 +675,9 @@ primary for some PGs and a replica for others.
 
 ### How it works
 
-`Punch` zeroes a byte range as a new version. Its blocks are freed once no snapshot needs them,
-and later reads of the range return zeros. Punching a whole chunk deletes it and leaves a
+`Punch` zeroes a byte range as a new version: blocks inside the range get a punch entry, and a
+block it covers only in part is merged with zeros like a write, in the same record. Its blocks are
+freed once no snapshot needs them, and later reads of the range return zeros. Punching a whole chunk deletes it and leaves a
 tombstone, so an older copy cannot bring the chunk back. File unlink and truncate, block discard
 (the pod's filesystem telling the device that blocks are free) and volume deletion all free space
 this way.
@@ -658,6 +714,13 @@ What backs these choices, with numbers exactly as the design and spikes give the
   version order, replay differed from a rebuild in **0 of 200 seeds** (R1). Mapped in any order,
   the index was wrong in **200 of 200**, without a crash too (R2). This is where the version-order
   rule comes from.
+- **Merging at the primary.** The [sub-block writes spike](../spikes/sub-block-writes/) checked
+  every place a partial-block merge could live against a byte oracle, 500 seeds each: the primary
+  merging on its newest ordered version, **0 seeds wrong**, also with 8 writes pipelined per client
+  and 3,670 primary changes (M1, M6, M9); merging on the committed version, **500 of 500 wrong**
+  (M2, M3); the client merging, 500 of 500 wrong without compare-and-set, and 0.64 to 1.28 retries
+  per write with it (M4, M5). The [sub-block writes study](../studies/sub-block-writes/README.md)
+  reads how Ceph, Vitastor, JuiceFS and ZFS do it.
 - **Placement itself: no spike yet.** The refill-and-rebalance computation is not built. Its
   review is planned as property tests: after any random add, remove and failure sequence, every PG
   keeps its pool's width with no more than `max_per_domain` members per failure domain, no disk
@@ -681,6 +744,9 @@ What backs these choices, with numbers exactly as the design and spikes give the
 - **Spreading widens the blast radius.** Every volume touches every disk of its pool, so a
   failure that takes out more members of one PG than the pool survives hits every volume. Recovery
   therefore starts with the most degraded PGs.
+- **A partial block can cost a read.** A write that covers part of a block the primary does not
+  hold in memory waits for one random 4 KiB read, and the chunk's later writes wait behind it. Its
+  latency is not measured yet.
 - **Writes wait for every live member.** Committed means every live member holds the write, so a
   slow disk slows every PG it is in. Fail-slow detection ([post 03](03-epochs-leases-and-failures.md))
   exists because of this.
@@ -693,6 +759,8 @@ What backs these choices, with numbers exactly as the design and spikes give the
   behind, and one slowed member delays the whole PG's acknowledgments. Does the primary need its
   members' admission rates in their acknowledgments, as CockroachDB's replication admission
   control returns tokens from followers?
+- **The base read's cost** (open question): its latency at queue depth 1 on NVMe and SATA, and
+  how big a cache of recently merged blocks keeps write-shared appenders from reading at all.
 - **Tech debt.** The `github.com/zeebo/xxh3` v1.1.0 pin is never removed, only bumped, and only
   after the golden vectors pass on the new version.
 - **Build order.** Pools, the replica primary with committed-only reads, placement computation,
@@ -706,13 +774,15 @@ What backs these choices, with numbers exactly as the design and spikes give the
   [Volume size and capacity](../docs/design.md#volume-size-and-capacity),
   [Pools and redundancy](../docs/design.md#pools-and-redundancy),
   [Freeing space](../docs/design.md#freeing-space),
-  [Alternatives considered](../docs/design.md#alternatives-considered) (rows "Placement" and
-  "Chunk versions"), [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions).
+  [Alternatives considered](../docs/design.md#alternatives-considered) (rows "Placement",
+  "Chunk versions" and "Sub-block writes"), [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions).
 - Glossary: [Data model](../docs/glossary.md#data-model),
   [Redundancy and placement](../docs/glossary.md#redundancy-and-placement),
   [Words with more than one meaning](../docs/glossary.md#words-with-more-than-one-meaning).
 - Spikes: [spikes/chunk-epochs](../spikes/chunk-epochs/),
-  [spikes/go-cpu-per-op](../spikes/go-cpu-per-op/).
+  [spikes/go-cpu-per-op](../spikes/go-cpu-per-op/),
+  [spikes/sub-block-writes](../spikes/sub-block-writes/).
+- Studies: [sub-block writes and small files](../studies/sub-block-writes/README.md).
 - Code: [internal/core/ids.go](../internal/core/ids.go) (`ChunkID`, `ChunkIndexOf`, `Hash`,
   `PGIndexOf`, `CheckPGCount`), [internal/core/crc.go](../internal/core/crc.go),
   `internal/core/testdata/chunk_id_golden.txt`.

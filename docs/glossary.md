@@ -11,7 +11,7 @@ A pod on node A writes 4 KiB into a file that a pod on node B also writes.
 1. The pod's `write()` goes to the kernel, which hands it to the **FUSE** client inside node A's **daemon**, the one rock-solid process that runs on every node.
 2. The daemon computes the **chunk ID** from the volume, the file's **inode** number and the offset, hashes the chunk ID to a **placement group (PG)**, and looks the PG up in the **placement table**. The table lists the PG's **members**: say three disks on three different nodes.
 3. The first member is the PG's **primary**. The daemon sends the write there.
-4. The primary stamps the write with a new **version**, appends it to its disk's **log**, and at the same time sends it to the other members, the **replicas**, which append it to their own logs.
+4. The primary stamps the write with a new **version**, turns any block it covers only in part into a whole block by a **read-modify-write**, appends it to its disk's **log**, and at the same time sends it to the other members, the **replicas**, which append it to their own logs.
 5. Each member **flushes** its drive so the write is **durable**: it survives a power cut. Once every live member holds the write durably, the version is **committed**, and the primary **acknowledges** the write to node A, which returns from `write()`.
 
 Had no other node been using the file, the daemon would instead have kept the write in its **write-back buffer** and sent it on later, on `close`, `fsync` or when a chunk filled.
@@ -62,7 +62,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 ## Drives and durability
 
-**Block, sector, logical block address (LBA).** A drive reads and writes fixed-size blocks, never single bytes; rock-solid works in 4 KiB blocks. An LBA is a block's number on the drive.
+**Block, sector, logical block address (LBA), 512e.** A drive reads and writes fixed-size blocks, never single bytes; rock-solid works in 4 KiB blocks, so even a 100-byte file takes a whole block per copy. An LBA is a block's number on the drive. A device's *logical* block size is the smallest write it accepts and its *physical* one what it writes internally; a *512e* device accepts 512-byte writes on 4 KiB blocks by reading and rewriting the rest of each block itself. rock-solid's block volumes expose 4 KiB blocks, or 512e per volume; see [Block frontend](design.md#block-frontend).
 
 **Write cache.** Drives acknowledge a write once it sits in their own RAM, before it reaches flash or platters, because that is much faster. A power cut loses whatever is still in that cache.
 
@@ -102,7 +102,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Committed version.** A version that every live member of the chunk's PG holds. Reads return only committed versions, so a reader never sees a write that a crash could still undo.
 
-**Punch, tombstone, purge.** A punch zeroes a range of a chunk and frees its blocks; punching a whole chunk deletes it and leaves a tombstone, a marker that says "deleted" so an older copy cannot bring the chunk back. A purge is the background job that punches every chunk of a deleted or truncated file. See [Freeing space](design.md#freeing-space).
+**Punch, tombstone, purge.** A punch zeroes a range of a chunk and frees the blocks it covers whole, zeroing the edges of blocks it covers in part; punching a whole chunk deletes it and leaves a tombstone, a marker that says "deleted" so an older copy cannot bring the chunk back. A purge is the background job that punches every chunk of a deleted or truncated file. See [Freeing space](design.md#freeing-space).
 
 **Extent.** A run of consecutive blocks described by one entry: "blocks 8 to 15 of this chunk are at disk location X". Indexing extents rather than single blocks keeps indexes small.
 
@@ -124,7 +124,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Stripe.** One set of data shards together with the parity shards computed from them.
 
-**Read-modify-write and the write hole.** Updating part of a stripe needs the old data and parity read first. If a crash lands between the writes to different shards, the stripe's parity no longer matches its data, and a later rebuild produces garbage: the write hole. rock-solid avoids both by never overwriting encoded data; a chunk is written as copies and encoded only once whole or idle. See [When chunks are encoded](design.md#when-chunks-are-encoded).
+**Read-modify-write, the write hole.** Storage writes whole blocks, so a write of a few bytes must read the rest of its block, overlay the bytes and write the block back: a read-modify-write, or *merge*. rock-solid's chunk primary merges every block a write covers in part, against the newest version it has ordered, and sends the whole block to the replicas; see [Data layer](design.md#data-layer-chunkstore). An erasure-coded stripe needs the same for its parity, and if a crash lands between the writes to different shards, the parity no longer matches the data and a later rebuild produces garbage: the write hole. rock-solid avoids that one by never overwriting encoded data; a chunk is written as copies and encoded only once whole or idle. See [When chunks are encoded](design.md#when-chunks-are-encoded).
 
 **Degraded.** Running with fewer copies or shards than configured, after a failure and before recovery. A **degraded read** of an encoded chunk rebuilds a lost shard from the others.
 
@@ -156,7 +156,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Read lease (primary lease).** The lease a primary needs from the other members of its PG before it serves reads, so that an old primary stops serving before a new one starts writing. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
-**Peering.** What a new primary does before serving a PG: it contacts the members, makes sure the old epoch can complete no more writes, and agrees with them on the newest version of every chunk. The term comes from Ceph.
+**Peering.** What a new primary does before serving a PG: it contacts the members, makes sure the old epoch can complete no more writes, and agrees with them on the newest version of every chunk; the versions it drops, never acknowledged, are always a chunk's newest. The term comes from Ceph. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
 **Session.** A client daemon's registration with the cluster, kept alive by a lease that the control plane renews on the node's heartbeat and alone declares expired. Its locks, open files and cache rights belong to the session, so they all end together when it expires.
 

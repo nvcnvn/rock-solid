@@ -32,9 +32,9 @@ The **How it works** part after it has the real names, numbers and edge cases.
   use and how many live blocks each holds.
 - **TRIM, discard.** Telling an SSD that blocks no longer hold data, so it can erase them ahead of
   time. See [Drives and durability](../docs/glossary.md#drives-and-durability).
-- **Punch, tombstone, purge.** A punch zeroes a range of a chunk and frees its blocks; punching a
-  whole chunk deletes it and leaves a tombstone. A purge is the background job that punches every
-  chunk of a deleted or truncated file. See [Data model](../docs/glossary.md#data-model).
+- **Punch, tombstone, purge.** A punch zeroes a range of a chunk and frees the blocks it covers
+  whole; punching a whole chunk deletes it and leaves a tombstone. A purge is the background job
+  that punches every chunk of a deleted or truncated file. See [Data model](../docs/glossary.md#data-model).
 - **Chunk, placement group.** Files and block volumes are cut into 4 MiB *chunks*. Each chunk
   belongs to a *placement group*, a small set of disks on different nodes that hold its copies
   ([post 02](02-chunks-and-placement.md)).
@@ -587,7 +587,10 @@ flowchart LR
 
 - **Unlink and truncate** add a purge entry in the same metadata transaction that removes or
   shrinks the file; a background purger punches the chunks
-  ([post 09](09-rwx-filesystem-and-cache-coherence.md) has the file-side details).
+  ([post 09](09-rwx-filesystem-and-cache-coherence.md) has the file-side details). A truncate's
+  entry starts at the new size's byte offset, so its first punch zeroes the rest of the last
+  block, with a whole-block merge at the chunk's primary, and frees only the whole blocks after it.
+  A punch that covers part of a block frees nothing; it writes a new block of zeros there.
 - **Block discard** from the pod's filesystem reaches the daemon through ublk and becomes a punch
   (phase 8). **Deleting a block volume** purges chunks `0 .. size ÷ CHUNK_SIZE`; **deleting a
   filesystem volume** has every disk of the pool sweep its chunk index for the volume's ID.

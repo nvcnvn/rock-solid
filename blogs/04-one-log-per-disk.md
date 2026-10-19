@@ -334,6 +334,46 @@ the record as never written. The codec's property test lands every subset of a r
 over three kinds of old content and checks the decoder returns the whole new record, the whole old
 one, or an error, never a mixture ([test scenarios](../docs/test-scenarios.md#record-codec)).
 
+### Whole blocks only: small files and small appends
+
+> **In plain words.** The box only holds whole 4 KiB blocks of chunk data. A program that writes
+> 100 bytes still gets a whole block stored, because the chunk's primary has already pasted those
+> bytes into the rest of their block ([post 02](02-chunks-and-placement.md)). So a 1.5 KiB file
+> takes a whole block on each copy, and a log file that adds one line and calls `fsync` rewrites
+> its last block every time. rock-solid accepts both costs for now, because the cheaper layouts
+> make every other part of the log more complicated.
+
+**How it works.** A write entry names whole blocks and each data block has its own CRC32C, so the
+record format never sees a partial block; nothing about it changes for small writes. What that
+costs, from the [sub-block writes spike](../spikes/sub-block-writes/)'s models with this record
+layout (checked against `LayoutOf`):
+
+```text
+1.5 KiB file, rep3, its entry and CRC in a shared round:  3 x (4,096 + 37) = 12,399 B   8.1x
+same file in ec4-2: files up to 8 KiB stay copies          12,399 B, 5.4x what ec4-2 promises
+100-byte append + fsync, alone on the disk:                header block + data block per copy
+                                                            = 8,288 B per append       83x
+same, 8 appenders sharing each round, 80% full:            7,924 B per append          79x
+```
+
+The append's old tail block dies at once, yet it does not cost just one block: in a log shared
+with live data, its space comes back only when the cleaner empties segments that also hold live
+blocks, so one append per round among 15 random overwrites cost 4.9 blocks at 80% full and 8.4 at
+90%, about the log's [write amplification](05-the-cleaner-and-free-space.md). Local filesystems
+pay about the same per fsync: ext4 rewrites the data block and commits its journal, XFS writes the
+block and a log record (from general knowledge, not measured here).
+
+Three cheaper layouts were weighed and left out for now:
+
+| Layout | What it saves | What it costs |
+| --- | --- | --- |
+| Inline data in the inode, as CephFS, ext4, Btrfs and F2FS do | A small file's block | The MetaStore's sorted runs live in memory: 1.5 KiB inline costs 12.5× the per-file budget, 3.4 million files per 16 GiB instead of 43 million. CephFS deprecated its version in Octopus |
+| Patch entries: the appended bytes, merged on read, folded later, as the ZFS intent log and JuiceFS slices do | Nothing at queue depth 1, unless the bytes ride in the header block: 83× → 42×. With 8 appenders, 79× → 25×, or 5.8× in the header | Header blocks that hold live data, a patch list per block for reads and snapshots, and a fold step |
+| Short last blocks: only a file's bytes up to its end | A 1.5 KiB file 12,399 → 4,725 B; 8 appenders 79× → 58× | A stored length in every write entry and extent, and liveness counted in bytes |
+
+Old write entries stay valid under the last two, so either can come later without a migration if
+measurements of real volumes call for it.
+
 ### Every header names its place
 
 > **In plain words.** Every packing slip also says "warehouse 17, shelf 3, position 12, 5th use of
@@ -687,6 +727,7 @@ All numbers are as the design's appendices and the spike READMEs give them.
 | Depth 1, durable LSN, manifest edits | Pebble and RocksDB keep one sync in flight; full table 0.415% of the log per checkpoint at 1 TiB vs 0.129% with edits | [durability study](../docs/design.md#appendix-lsm-study-durability-spike), M2 |
 | Streams | Runs mixed with cleaner copies: +25 to 54% write amplification at 80 to 90% full; own stream: +3 to 15% | [cleaner streams spike](../docs/design.md#appendix-cleaner-streams-spike) |
 | Chunk slots | 1.004 at any fill vs 4.9 (90%) and 9.0 (95%) in the log | cleaner streams spike |
+| Whole blocks for small writes | 100-byte append + fsync alone: 8,288 B per copy (83×), 4,196 B with the bytes in the header; 1.5 KiB file in rep3: 12,399 B (8.1×) | [sub-block writes spike](../docs/design.md#appendix-sub-block-writes-spike), A1, S1 |
 
 The KV engines spike measured `redb` and `fjall` as candidates. Its README's per-use picks (an
 own Raft log per core, `redb` for shard state, `fjall` for the chunk index) are what embedding
@@ -707,6 +748,9 @@ crash-and-reopen cycles, and bit flips anywhere in the log.
 - **Headers are capacity.** Header blocks are dead to the cleaner, so near full they cost more
   than their bytes: at 95% full the headers of 64 KiB records raise write amplification from 11.4
   to 17.3, and at 90% full queue-depth-1 4K writes, one header block per data block, double it.
+- **Small files and small appends pay a whole block.** A 1.5 KiB file costs 8.1 times its size
+  in `rep3` and in `ec4-2` alike, and a fsync'd 100-byte append writes two blocks per copy when it
+  is alone on the disk.
 - **Fragmented chunks read as random I/O.** A chunk overwritten at random 4K keeps one index entry
   per write, so its sequential reads become random 4K reads, fine on NVMe, worse on SATA and HDDs
   ([post 06](06-the-lsm-tree.md)).
@@ -734,6 +778,9 @@ From the design's [roadmap and open questions](../docs/design.md#roadmap-and-ope
   RocksDB apply while their sync runs.
 - **One loop and a fast drive.** On a PLP drive the owner loop may become CPU-bound; the drive
   could then be split into two partitions, each a disk with its own log, in one failure domain.
+- **Header patches for fsync'd appends** and **short last blocks for small files**: worth it only
+  if real homelab traces show many fsync'd sub-block appends or much space in small files and
+  tails.
 - **Chunk slots for erasure-coded pieces** (4 MiB ÷ k, so several slot sizes), **regrouping
   fragmented chunks** into slots, **in-drive write amplification** by segment size, and
   **registered `io_uring` buffers on a real NVMe drive.**
@@ -748,12 +795,14 @@ Design:
   [Superblock repair](../docs/design.md#superblock-repair)
 - [Alternatives considered](../docs/design.md#alternatives-considered): the rows "On-disk
   format", "Log streams", "Whole-chunk layout", "Disk logs and event loops", "Manifest", "Tail
-  rule", "Stale records past a recovered tail" and "Rounds in flight"
+  rule", "Stale records past a recovered tail", "Rounds in flight" and "Small files and fsync'd
+  appends"
 - Appendices: [NVMe flush](../docs/design.md#appendix-nvme-flush-spike),
   [KV engines](../docs/design.md#appendix-kv-engines-spike),
   [log per core](../docs/design.md#appendix-log-per-core-spike),
   [io_uring registered buffers](../docs/design.md#appendix-io_uring-registered-buffers-spike),
-  [LSM study: durability](../docs/design.md#appendix-lsm-study-durability-spike)
+  [LSM study: durability](../docs/design.md#appendix-lsm-study-durability-spike),
+  [sub-block writes](../docs/design.md#appendix-sub-block-writes-spike)
 - [Glossary: drives and durability](../docs/glossary.md#drives-and-durability),
   [on-disk structures](../docs/glossary.md#on-disk-structures)
 - Test scenarios: [segments and superblock](../docs/test-scenarios.md#segments-and-superblock),
@@ -766,7 +815,9 @@ Spikes: [`spikes/nvme-flush/`](../spikes/nvme-flush/),
 [`spikes/kv-engines/`](../spikes/kv-engines/),
 [`spikes/log-per-core/`](../spikes/log-per-core/),
 [`spikes/uring-registered/`](../spikes/uring-registered/),
-[`spikes/lsm-study-durability/`](../spikes/lsm-study-durability/)
+[`spikes/lsm-study-durability/`](../spikes/lsm-study-durability/),
+[`spikes/sub-block-writes/`](../spikes/sub-block-writes/); study:
+[sub-block writes and small files](../studies/sub-block-writes/README.md)
 
 Code: [`internal/disklog/`](../internal/disklog/): `geometry.go`, `superblock.go`, `segment.go`,
 `record.go`, `groupcommit.go`, `manifest.go`, `recovery.go`; and

@@ -199,13 +199,16 @@ Write path
 FUSE write(inode, off, data)
   file not shared: buffer in daemon, acknowledge         // flushed later, in order
   file shared:     chunk_id = (volume, inode, off / CHUNK_SIZE)
-                   -> ChunkStore.write via the chunk primary -> acknowledge
+                   -> ChunkStore.write via the chunk primary, which merges partial blocks
+                   -> acknowledge
                    -> if the write extends the file: MetaStore size = max(size, end)
-close() / fsync()  -> flush buffered chunks -> MetaStore.txn([set size, mtime])
+close() / fsync()  -> flush buffered chunks, widened to whole blocks where the daemon has the bytes
+                   -> MetaStore.txn([set size, mtime])
 
 Read path
 cached handle:   kernel page cache -> on a miss, FUSE read -> daemon -> ChunkStore.read
 uncached handle: FUSE read every time -> daemon -> ChunkStore.read via the chunk primary
+both:            the daemon clamps a read to the file's size
 ```
 
 "Shared" here means the WriteShared cache mode explained under Tier 2 below. Namespace
@@ -242,7 +245,8 @@ The three rules, each from the [FUSE coherence spike](../docs/design.md#appendix
    request (about 5 µs), so the daemon always knows when a file has been written and can flush it
    on demand. While the file is not shared, the daemon buffers writes in its own memory and
    acknowledges at once. It flushes a chunk as soon as it is full, and the rest on `fsync`,
-   `close` or a recall. The buffer holds up to 256 MiB per node (`writeback_buffer`); when it is
+   `close` or a recall, in whole blocks where it can
+   ([below](#small-writes-truncate-and-the-end-of-file)). The buffer holds up to 256 MiB per node (`writeback_buffer`); when it is
    full, the oldest partial chunk is flushed. As with the kernel's dirty pages, a crash loses
    what has not been flushed; the [restart section](#daemon-restart-and-upgrade) shows how that
    loss is reported instead of hidden.
@@ -250,6 +254,58 @@ The three rules, each from the [FUSE coherence spike](../docs/design.md#appendix
    handle's direct-I/O flag when the file is opened. The daemon chooses it per open, from the
    file's cache mode at that moment. Handles already open with caching need other means, which
    Tier 2 supplies.
+
+### Small writes, truncate and the end of file
+
+> **In plain words.** Storage works in 4 KiB blocks, but programs write any number of bytes
+> anywhere: a 100-byte log line, a 1.5 KiB config file, a truncate to an odd size. Someone must
+> fill in the rest of each block. While only one node uses a file, the daemon has those bytes in
+> its buffer and sends whole blocks. Once several nodes write it, the chunk's primary fills them
+> in, so two nodes writing different bytes of one block never erase each other. And every byte
+> past a file's end is kept as zeros on disk, so growing a file never shows old data.
+
+#### How it works: whole blocks from the daemon, merges at the primary
+
+Without `writeback_cache`, the kernel hands the daemon each `write()` with exactly its offset and
+length (`fuse_perform_write` in `fs/fuse/file.c`), and direct I/O unaligned too, so the daemon
+accepts any byte range. In Exclusive mode no other node can write the file, and the bytes past
+its end are zero on disk (next part), so a flush widens a partial block to a whole one whenever
+the daemon holds the block's other bytes or they lie past the end of file:
+
+- a new 1.5 KiB file goes out as one 4 KiB block padded with zeros;
+- after a flush the daemon keeps the file's last partial block, so a log file that appends a line
+  and calls `fsync` sends its tail block whole every time; a recall drops it.
+
+Everything else, writes to a WriteShared file and a buffer flushed under pressure into the middle
+of a file this node did not write, reaches the chunk primary as a byte range, and the primary
+merges it onto the newest version of the block it has ordered
+([02-chunks-and-placement.md](02-chunks-and-placement.md)). That costs one random 4 KiB read at the
+primary when nothing has the block in memory. SQLite's write-ahead log is an example: each frame is
+a 24-byte header plus a page, so every commit's first and last blocks are partial.
+
+#### How it works: truncate keeps the tail zero
+
+POSIX says a file extended by a write past its end or by `truncate` upward reads zeros in the gap.
+The bug that breaks this is old and keeps coming back. FreeBSD's fusefs dropped whole cached
+blocks on truncate but kept the stale tail of the final partial block, so reads returned old data
+(commit `e312493b`, 2019, found by `fsx`). XFS zeroed the tail in memory but committed the new size
+first, so a crash in between exposed old bytes, which `fsx` could not see because memory was
+right (commit `5885ebda`, 2015).
+
+rock-solid keeps one rule instead: **once a file's purge has run, every byte past its size is zero
+on disk.** A truncate commits the new size together with a purge entry that starts at the new
+size's *byte offset*, not at a chunk boundary. The purge's first punch zeroes the rest of the block
+holding the new end, by a merge at the primary, and the rest of its chunk; the daemon runs it
+before `truncate` returns, and the purger runs it again if a crash came first. Any extension
+finishes a pending purge before it writes. So growing a file again writes nothing to the gap:
+blocks never written read as zeros, and the old last block's tail already is zero. Reads are
+clamped to the size as well.
+
+The kernel helps: it clamps writeback of a mapped page to the file's size, and drops cached pages
+when a `setattr` changes the size (`fs/fuse/dir.c`). Whether an extending `write()` leaves a page
+the program dirtied past the old end of file through a mapping in the cache is not tested yet;
+`fsx -e` does exactly that, and the daemon, which sees every extending write, can invalidate that
+one page if it must.
 
 ### Tier 1: close-to-open, flock and open-file deletion
 
@@ -447,7 +503,9 @@ still renews its session but does not answer, it waits up to `recall_timeout` in
 #### How it works: while WriteShared
 
 - **Data:** every read and write goes to the chunk primary, which orders them: one network round
-  trip per I/O, tens of microseconds on 10 Gigabit Ethernet with kernel TCP.
+  trip per I/O, tens of microseconds on 10 Gigabit Ethernet with kernel TCP. Two nodes writing
+  different bytes of one 4 KiB block are merged there, one onto the other
+  ([below](#small-writes-truncate-and-the-end-of-file)).
 - **File size:** a write that extends the file updates the size in the MetaStore before it is
   acknowledged, so readers on other nodes can read past the old end of file. Writes inside the
   file don't touch the MetaStore.
@@ -701,6 +759,21 @@ Their appendices hold the rest, including the io_uring and go-fuse results:
 H3 makes the Kubernetes layout safe: the mount belongs to the connection, not to the process or
 namespace that made it, so a daemon pod can die while pods keep working.
 
+The [sub-block writes spike](../docs/design.md#appendix-sub-block-writes-spike)
+([spikes/sub-block-writes/](../spikes/sub-block-writes/), Go models, no I/O) checked where a
+partial block is merged, against an oracle of every acknowledged write's bytes, 500 seeds each:
+
+| Test | Result |
+| --- | --- |
+| M1: two clients writing unaligned bytes into one chunk, merged at the primary on its newest ordered version | 0 seeds wrong |
+| M3: same, merged on the committed version | **500 of 500 seeds lose bytes** |
+| M4, M5: the client merges, without and with compare-and-set | 500 of 500 wrong without; with it, 0.64 retries per write at two clients, 1.28 at four |
+| A1: a 100-byte append and `fsync`, alone on the disk | 8,288 bytes written per copy (83×), the same whatever byte-granular layout short of keeping the bytes in the record header |
+| S1: a 1.5 KiB file in `rep3` | 12,399 raw bytes (8.1×) |
+
+The [sub-block writes study](../studies/sub-block-writes/README.md) reads how CephFS, VitastorFS,
+JuiceFS and local filesystems handle the same cases.
+
 The [Samba gateway spike](../docs/design.md#appendix-samba-gateway-spike)
 ([spikes/samba/](../spikes/samba/)) adds a cross-check on the shape of Tier 2: SMB leases behave
 like cache modes, and a lease break is a recall.
@@ -709,6 +782,9 @@ like cache modes, and a lease break is a recall.
 
 - **Metadata speed is bounded by MetaStore round trips**, so small-file workloads never match a
   local disk. Every shared POSIX system pays this; Tier 3's pushed invalidations will help.
+- **Small files and small appends pay a whole block.** A 1.5 KiB file takes a 4 KiB block per
+  copy, and a write-shared write that covers part of a block can wait for a 4 KiB read at the
+  primary.
 - **Write-shared files cost a round trip per I/O** instead of 0.3 µs from the page cache, on the
   bet that write-sharing is rare in homelab workloads.
 - **`mtime` changes on every `stat` of a write-shared file**, a side effect of revalidation that
@@ -745,6 +821,10 @@ From the [roadmap and open questions](../docs/design.md#roadmap-and-open-questio
   while a machine is suspended, while the session lease keeps counting. Does a resumed node trust
   cached attributes, and so cached pages, for up to a second after its session was fenced? A
   spike that suspends a VM is to answer it.
+- **Small writes:** whether header patches for fsync'd appends or short last blocks for small
+  files pay off, from traces of real pods, and what the primary's base read costs on NVMe and
+  SATA. And the `fsx -e` case above: an extending write after a mapped page was dirtied past the
+  old end of file.
 - **`recall_timeout`:** 30 s is a default to tune from recall acknowledgment times measured
   under load, not a measurement.
 - **Incarnation fencing:** does a primary's table of newest incarnations need to survive a primary
@@ -762,8 +842,9 @@ There are no tech-debt entries for the file frontend yet; it has no code.
   [Testing strategy](../docs/design.md#testing-strategy) (simulated FUSE clients and coherence
   faults).
 - Spikes: [fuse-coherence](../spikes/fuse-coherence/), [fuse-restart](../spikes/fuse-restart/),
-  [fuse-handoff](../spikes/fuse-handoff/), [samba](../spikes/samba/), summarized in the
-  appendices of design.md.
+  [fuse-handoff](../spikes/fuse-handoff/), [samba](../spikes/samba/),
+  [sub-block-writes](../spikes/sub-block-writes/), summarized in the appendices of design.md.
+- Studies: [sub-block writes and small files](../studies/sub-block-writes/README.md).
 - Code: none yet; planned in `internal/meta`, `internal/fuseproto` and `internal/frontend/fuse`
   ([Package layout](../docs/design.md#package-layout)).
 - Glossary: [Files and caching](../docs/glossary.md#files-and-caching),

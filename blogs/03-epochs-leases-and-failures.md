@@ -278,11 +278,37 @@ flowchart TD
     Q -- no --> KE["Keep it: it may have been acknowledged"]
     DR --> RE["Write the authoritative member's blocks under a new version to every member that lacks them or logged the dropped version"]
     KE --> RE
+    RE --> PW["Writes covering part of a block of this chunk may merge again"]
 ```
 
 *Peering itself is the first two boxes, and it must finish before the PG accepts writes; both
-branches end in the same recovery step, which is what makes every member agree.* The design does
-not yet fix whether a write to a divergent chunk also waits for that chunk's recovery.
+branches end in the same recovery step, which is what makes every member agree.* Until a chunk's
+kept versions are on the new primary, a write that covers only part of one of its blocks waits:
+its merge needs the newest kept block as its base (next section). A write of whole blocks needs no
+base and goes ahead, as Ceph's primary holds writes only to objects it is missing or still
+recovering.
+
+#### Dropped versions are always a chunk's newest
+
+> **In plain words.** A write of a few bytes is stored as a whole block that already contains the
+> bytes of the write before it. So if peering threw away an older write but kept a newer one, the
+> newer one would quietly carry the thrown-away bytes back. That cannot happen, because every disk
+> stores a chunk's writes in order: a disk missing one write is missing every later one too.
+
+A primary turns a write that covers part of a 4 KiB block into a whole block by merging the new
+bytes onto the newest version it has handed out ([post 02](02-chunks-and-placement.md)). Version
+41.9 of a block may therefore hold 41.8's bytes. If peering could drop 41.8 and keep 41.9, the
+kept block would bring back bytes of a write that was never acknowledged, and that is exactly
+what the [sub-block writes spike](#evidence) saw when its model let peering drop any subset of
+pending versions: every seed went wrong.
+
+Peering never does, for three reasons that chain together. A primary sends a chunk's writes to
+each member in version order, over one connection, and again in that order after a reconnect.
+Each member's log takes them in that order. And durability is a prefix of a disk's log
+([04-one-log-per-disk.md](04-one-log-per-disk.md)): when a record is durable, so is every record
+before it. So a member that lacks 41.8 lacks 41.9 as well, the keep rule drops both, and the
+versions peering drops are always a suffix of each chunk's pending versions. The spike's model
+with that rule stayed correct through 3,670 primary changes with 8 writes pipelined per client.
 
 #### Why recovery writes a new version instead of deleting the old one
 
@@ -763,6 +789,21 @@ primary maps a chunk's writes in version order, and the spike's conclusions put 
 cost: while a write is pending, replay grows by what the disk logs meanwhile, at most
 `node_down_after` (5 s) of writes during a member failure.
 
+**The sub-block writes spike** ([appendix](../docs/design.md#appendix-sub-block-writes-spike),
+[`spikes/sub-block-writes/`](../spikes/sub-block-writes/)) modeled a primary that merges partial
+blocks onto pending versions, two clients pipelining 8 unaligned writes each into one chunk, and a
+primary change in about 2% of steps, against an oracle that replays every acknowledged write's
+bytes; 500 seeds per test, no I/O:
+
+| Test | Result |
+| --- | --- |
+| M6: peering drops a suffix of each chunk's pending versions | 0 of 500 seeds wrong, 3,670 primary changes |
+| M7: peering may drop any subset | **500 of 500 wrong**: a kept version carries a dropped one's bytes |
+| M8: the new primary merges before it holds a version peering kept | **458 of 500 wrong** |
+
+M7 is why the in-order logging behind the suffix rule matters, and M8 why a partial-block write
+waits for its chunk's recovery.
+
 **The clock slew spike** ([appendix](../docs/design.md#appendix-clock-slew-spike),
 [`spikes/clock-slew/`](../spikes/clock-slew/)) asked how far a time daemon can bend the clocks
 leases count on. Changing the host's clock was ruled out, so it built Linux 6.18 as User-Mode
@@ -862,7 +903,8 @@ during peering and a node restarted within a lease it granted.
   [Alternatives considered](../docs/design.md#alternatives-considered),
   [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions).
 - Spikes: [chunk epochs](../spikes/chunk-epochs/), [multi-Raft](../spikes/multi-raft/),
-  [raft rounds](../spikes/raft-rounds/), [clock slew](../spikes/clock-slew/).
+  [raft rounds](../spikes/raft-rounds/), [clock slew](../spikes/clock-slew/),
+  [sub-block writes](../spikes/sub-block-writes/).
 - Code: [`internal/core/peer.go`](../internal/core/peer.go) and
   [`peer_test.go`](../internal/core/peer_test.go), [`internal/core/event.go`](../internal/core/event.go)
   (`Tick` and `Context`).
