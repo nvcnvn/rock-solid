@@ -44,8 +44,9 @@ The [glossary](../docs/glossary.md) has longer entries for all of these.
 - **Failure domain.** Things that can fail together, such as one node. Copies of a chunk go to
   different failure domains.
 - **Placement table, table epoch and interval.** The map from each PG to its members. Its version
-  number is the *table epoch*. A PG's *interval* is a run of tables in which that PG's members stay
-  the same; the table numbers each PG's intervals. The word "epoch" has two other meanings in the
+  number is the *table epoch*. A PG's *interval* is a run of tables in which that PG's members,
+  their order and which of them are live stay the same, so it has one primary throughout; the
+  table numbers each PG's intervals. The word "epoch" has two other meanings in the
   design; see
   [Words with more than one meaning](../docs/glossary.md#words-with-more-than-one-meaning).
 - **Control plane.** The one replicated group (a Raft group, a set of nodes that agree on a log of
@@ -329,9 +330,11 @@ Real systems use four shapes:
 
 ### How it works: the table
 
-The table maps each PG to its members, primary first, and to its current *interval* number; the
-table as a whole carries a *table epoch*, its version. Its size depends on the pools' PG counts and
-widths, not on how much data is stored:
+The table maps each PG to its members, primary first, to its current *interval* number and its
+last *activated* interval (the last one whose primary finished taking over), and to the members of
+any intervals in between, which a new primary must reach ([post 03](03-epochs-leases-and-failures.md)).
+The table as a whole carries a *table epoch*, its version. Its size depends on the pools' PG counts
+and widths, not on how much data is stored:
 
 ```text
  2048 PGs x (3 replicas  x 4-byte disk ID + 8 bytes of interval numbers) =  40 KiB   (rep3)
@@ -345,8 +348,9 @@ caches a full copy, and it changes only on pool, disk and node events, never on 
 the daemon it is an immutable value published through an atomic pointer: a reader loads the
 current table without a lock, and an update publishes a new one. Every change (pool created,
 disk added, node failed, rebalance step) raises the table epoch, but only a change to a PG's
-members starts a new interval of that PG, and a member turns away only requests tagged with an
-earlier interval of their PG. A rebalance step that moves one member of PG 7 therefore leaves the
+own members, their order or their live marks (or to its pool's `replicas` or `min_live`, a split,
+or its primary asking) starts a new interval of that PG, and a member turns away only requests
+tagged with an earlier interval of their PG. A rebalance step that moves one member of PG 7 therefore leaves the
 writes in flight to the other 2,047 PGs alone. That check, and how a PG moves safely from one
 interval to the next while writes are in flight, is where the hardest bugs live;
 [post 03](03-epochs-leases-and-failures.md) is about exactly that.
@@ -359,7 +363,10 @@ it holds, and the mapping of file names to inodes lives in the sharded MetaStore
 The control-plane leader computes each new table and commits it as one Raft entry with a new
 table epoch, holding only the PG entries it changes and a CRC32C of the whole table it produces.
 A node that holds the previous table applies the change and checks the CRC; after a gap or a
-mismatch it fetches the whole table. Nodes never compute placement themselves. The computation is a pure function in the
+mismatch it fetches the whole table, as Ceph's daemons do with incremental maps. Because each PG
+entry carries its own interval number, a node that skips tables loses nothing; the deltas only
+save bytes, 105 MB pushed to 10 nodes over a modeled homelab year against up to 2.25 GB as whole
+tables. Nodes never compute placement themselves. The computation is a pure function in the
 sans-IO core (code with no network, disk or clock access, so tests can drive it directly), and it
 starts from the previous table, never from scratch:
 
@@ -375,14 +382,14 @@ hold four times what the 1 TB one holds. Rebalance stops once every disk is with
 of its target. That is what "exact balance" means here, as opposed to the average-case balance of
 a hash function. The design does not give the margin's value.
 
-Proportional to room is not always possible. Under `rep2` on two nodes of 0.7 and 2 TB, every PG
+Proportional to room is not always possible. Under `rep2` on two nodes of 0.7 and 2 GB, every PG
 needs one member on each node, whatever their sizes, so the big node can never hold 74% of the
 members. Targets are therefore *capped*: no failure domain is asked for more than `max_per_domain`
 members of each PG, and what the cap cuts off is spread over the other domains by room, like
 water filling the lower vessels. In the
 [capacity model spike](../docs/design.md#appendix-capacity-model-spike), a loop aiming at
 size-proportional shares never converged on such layouts, while capped targets converged within
-2%. Ceph's balancer meets the same wall and warns that it can end up "shuffling data forever as
+2% and reached the pool's balanced capacity (next section) within 1%. Ceph's balancer meets the same wall and warns that it can end up "shuffling data forever as
 it endeavors to meet an impossible expectation".
 
 Both steps keep the pool's failure-domain rule: with the default `failure_domain: node`, two
@@ -399,7 +406,7 @@ flowchart TD
     H -- "yes" --> MV["move one member to the eligible disk<br/>furthest below its target"]
     MV --> B
     H -- "no" --> C
-    B -- "no" --> C["commit the changed entries as one Raft entry<br/>with table epoch + 1, and interval + 1<br/>for each PG whose members changed"]
+    B -- "no" --> C["commit the changed entries as one Raft entry<br/>with table epoch + 1, and interval + 1<br/>for each PG whose members or live marks changed"]
 ```
 
 Here is a small worked example. The cluster, PG numbers and disk names are made up for
@@ -487,11 +494,19 @@ when a disk is within 10 points of `write_limit` (`NearFull`), past it (`Full`),
 lags balanced because members are still moving (`Unbalanced`), and when losing the largest node
 would leave recovery no room to restore every copy (`CannotReprotect`).
 
+Available also subtracts the *space grants* outstanding on the pool: bytes the control plane lets
+each node's daemon buffer and acknowledge before any disk holds them, so that a buffered write
+never fails later for lack of space.
+
 Volumes are thin: with the pool setting `overcommit` on (the default), volume sizes may add up to
 more than the pool holds. With it off, a new volume is admitted only while every volume's size fits
 the balanced figure. Writes that add data are refused once any disk holding one of their PG's
-members is past `write_limit`, because one full disk stalls every PG on it; overwrites of blocks a
-volume already holds, and deletes, still pass. What a refusal looks like depends on the frontend:
+members is past `write_limit`, because one full disk stalls every PG on it. Three kinds of write
+still pass: a flush of buffered data under a space grant, which was promised when the daemon
+acknowledged it; an overwrite of blocks the chunk already holds live and does not share with a
+snapshot, which frees as many blocks in the log as it writes; and punches, which free space. So a
+filesystem's journal and preallocated database files keep working on a full pool. What a refusal
+looks like depends on the frontend:
 a file write gets `ENOSPC` from `write()`, and a block volume's write waits for space
 ([post 05](05-the-cleaner-and-free-space.md), [post 09](09-rwx-filesystem-and-cache-coherence.md),
 [post 10](10-block-snapshots-and-clones.md); [Volume size and capacity](../docs/design.md#volume-size-and-capacity)
@@ -709,6 +724,8 @@ sends that whole block to the replicas and its own log. The base comes from the 
 
 1. a **pending** write's merged block, if one covers it (ordered, not yet on every member);
 2. the primary's **live map**, the committed version, read from disk with its checksum verified;
+   a base that fails its checksum is fetched from another member first, so a merge never carries
+   rot into a new version;
 3. **zeros**, if the block was never written or was punched.
 
 ```text
@@ -804,10 +821,18 @@ What backs these choices, with numbers exactly as the design and spikes give the
   disturbed 4.4 to 46 times fewer in-flight writes on 10 nodes, but hardly fewer on 3 nodes, where
   every PG has a member on every node. The [PG epochs study](../studies/pg-epochs/README.md) reads
   how Ceph and Vitastor do it.
-- **Placement itself: no spike yet.** The refill-and-rebalance computation is not built. Its
-  review is planned as property tests: after any random add, remove and failure sequence, every PG
-  keeps its pool's width with no more than `max_per_domain` members per failure domain, no disk
-  exceeds a set fill margin above average, and chunks moved stay near the minimum
+- **Placement and capacity, modeled.** The [capacity model spike](../spikes/capacity-model/)
+  built integer placement tables by the refill-and-rebalance steps on six layouts and filled them
+  with evenly hashed chunks: size-proportional targets never converged on four of them (the worst
+  disk 23 to 200% off), capped targets converged within 2% everywhere, and the available figure
+  predicted the first refused write within 0.3%, where room ÷ overhead overstated it by 1.36 to
+  3.3×. The [capacity and ENOSPC study](../studies/capacity-and-enospc/README.md) reads how Ceph,
+  Vitastor, Longhorn, CockroachDB and MinIO report capacity.
+- **Placement in code: not built.** Its review is planned as property tests: after any random
+  add, remove and failure sequence, every PG keeps its pool's width with no more than
+  `max_per_domain` members per failure domain, the balance loop terminates, no disk exceeds the
+  fill margin of its capped target, available stays within 1% of balanced and never above it, and
+  chunks moved stay near the minimum
   ([Testing strategy](../docs/design.md#testing-strategy),
   [build checklist](../docs/build-checklist.md), phase 3).
 

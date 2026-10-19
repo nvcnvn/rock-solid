@@ -9,12 +9,12 @@ any other key-value engine for this. It builds its own small log-structured merg
 memory, compacted with RocksDB's universal rules. This post explains why an LSM tree, why our own,
 and how each part works, with the measurements that shaped it.
 
-**Status.** Nothing in rock-solid runs yet. Built in `internal/lsm` today: the memtable, flushes
-to sorted runs, fence pointers, point-in-time views, restore, and merges that run on a worker
-goroutine. Planned for phase 1 and not yet built: universal compaction (the code still uses an
-older bucket rule), Bloom filters, range removals, merge steps, run checks, the heap merge, the
-metadata stream and checkpoint backpressure. The block cache comes in phase 8. Each section marks
-what is planned.
+**Status.** Nothing in rock-solid runs yet. Built in `internal/lsm` today: the memtable, flushes to
+sorted runs, fence pointers, point-in-time views, restore, and merges whose work can run on a
+worker goroutine while the owner installs the result. Planned for phase 1 and not yet built:
+universal compaction (the code still uses an older bucket rule), Bloom filters, range removals,
+merge steps, run checks, the heap merge, the metadata stream and checkpoint backpressure. The block
+cache comes in phase 8. Each section marks what is planned.
 
 ## Words you need
 
@@ -221,7 +221,7 @@ Three details make the page tree work as an LSM memtable:
 - **A removal is an entry.** Deleting a key writes an entry of kind "removal", which hides the key
   in older runs. A memtable never drops a key.
 - **Leaves share before they split.** Pages filled in creation order were only 63% full in the
-  spike. A full leaf now hands entries to a neighbour before it splits; leaves filled in random
+  spike. A full leaf therefore hands entries to a neighbour before it splits; leaves filled in random
   order are 80% full.
 - **Copy-on-write for views.** Each page carries a generation number. While a point-in-time view
   is open, a write copies any page that view can reach instead of changing it; the old page is
@@ -271,12 +271,19 @@ above the frozen tree and the run it becomes, 1.0004× the tree for 10 million f
 [MetaStore memory spike](../docs/design.md#appendix-metastore-memory-spike). A root lists up to about
 58,000 pieces, so a run holds up to about 58 GiB ([`run.go`](../internal/lsm/run.go)).
 
-A failed checkpoint keeps the frozen memtable, and the next one writes it again from its first
-piece. Planned: once the records after the newest manifest reach twice `max_replay_bytes`, group
-commit takes items only from the checkpoint and the cleaner until a manifest is durable, as Pebble
-and RocksDB stop writes at two memtables. That bounds memtables and kept Raft entries at 128 MiB
-per disk. Planned run checks (entry counts, a checksum per piece) rebuild the index from the log
-on a mismatch.
+A checkpoint names again the runs already durable and writes only the frozen memtable and any runs
+a merge made since. A failed checkpoint keeps the frozen memtable, and the next one writes it again
+from its first piece. Planned: once the records after the newest manifest reach twice
+`max_replay_bytes`, group commit takes items only from the checkpoint and the cleaner until a
+manifest is durable, as Pebble and RocksDB stop writes at two memtables. That bounds memtables and
+kept Raft entries at 128 MiB per disk.
+
+Planned run checks, always on, catch a bad run before it spreads: a flush checks that the run holds
+as many entries and range-removal fragments as the frozen memtable, a merge that its output and
+what it dropped add up to its inputs, as RocksDB does by default, and every piece in memory keeps a
+CRC32C of its bytes that a merge verifies before reading it (4 bytes per piece, 167 ns per 4 KiB).
+Runs are never read back from disk, so without that check a flipped bit in RAM would be merged into
+the next run. A failed check fails the flush or merge, and the index is rebuilt from the log.
 
 ### Runs in memory: fence pointers
 
@@ -364,10 +371,19 @@ flowchart TD
 The range-removal check sits **before** the filter, because a filter holds a run's entries, never
 its range removals; RocksDB twice returned deleted keys by getting this wrong.
 
+A filter is filled as the run streams out, sized from the entry count the flush or merge already
+knows, and written after the run's entries in blocks of its own, so a restart loads it instead of
+hashing every key again. Every run keeps its filter, the oldest too: RocksDB and Pebble often leave
+the largest run's filter out to avoid reading big filter blocks from disk, but these filters are in
+memory, and misses (a `create` checking that a name is free, a read of unwritten blocks) are common.
+
 **What the filter holds depends on the index.** The chunk index reads by *floor* ("the extent at or
 below block 37 of chunk X"), and block 37 is usually not a key, so its filter holds each chunk's
 prefix `(pool, h, chunk_id)`, where `h` is the hash that picks the chunk's placement group. The
-MetaStore's filter holds whole keys plus each inode's prefix, which also serves `readdir`.
+MetaStore's filter holds whole keys plus each inode's prefix, which also serves `readdir`. A read of
+several blocks of one chunk takes one reader for the chunk: it probes the filters once with the
+chunk's prefix, then serves ascending blocks by stepping forward from the last one, as Pebble's
+`TrySeekUsingNext` does.
 
 | Lookup over 24 runs | No filter | Bloom, 10 bits per key |
 | --- | --- | --- |
@@ -378,6 +394,10 @@ MetaStore's filter holds whole keys plus each inode's prefix, which also serves 
 
 The third row is the weak spot: under random overwrites every large run holds every hot chunk, so
 the filter cannot rule them out.
+
+Scans cannot use filters at all; they merge every run. A scan will merge them with a heap, as
+Pebble's and RocksDB's merging iterators do (planned): today's code compares every source at
+every step, which cost 95 ns a step over 6 runs and 360 ns over 24.
 
 ### Universal compaction: when to merge runs (planned)
 
@@ -453,7 +473,9 @@ runs cost **100 times** the flushed bytes on a 1.6 GB index under steady flushes
 second-oldest run absorbs every flush, and 9 to 33 times under the other flush sequences.
 
 A merge reads only immutable inputs, so it runs on a worker goroutine, off the owner's event loop;
-that part is built.
+that part is built. Planned: the picker skips runs a running merge holds, so a small merge can run
+beside a large one, and one scheduler per disk runs its indexes' merges, the index furthest over
+its run limit first (RocksDB's universal score).
 
 ### Merge steps: never holding a whole index twice (planned)
 
@@ -466,7 +488,7 @@ that part is built.
 
 Planned, not yet built. A step merges up to `compaction_step_bytes` (default 64 MiB) of output and
 raises each input's **bound** to the step's last key; the next checkpoint writes the step's pieces
-and a manifest edit holding the bounds. A run holds only its keys at or above its bound, so output
+and a manifest edit holding the bounds. A run holds only its keys above its bound, so output
 and inputs never hold the same key, and still no sequence number is needed.
 
 ```text
@@ -484,10 +506,14 @@ and inputs never hold the same key, and still no sequence number is needed.
 ```
 
 Each key lives in exactly one of O or the inputs at any moment, and a restart resumes from the
-bound. The [LSM space spike](../docs/design.md#appendix-lsm-space-spike) measured space held
-beyond what the manifests name: installed whole, a merge of everything held up to the whole index,
-258 segments of 64 MiB on a 256 GiB disk; in steps, 2 segments. This is ScyllaDB's
-incremental compaction.
+bound. An input piece wholly below the bound is dead once the manifest naming that bound is
+durable, and leaves memory too unless a view holds it, so a merge's memory peak is also one step;
+the piece the bound falls in stays whole. Each running merge writes its output into a metadata
+segment of its own, so a later merge's steps free whole segments: sharing the open segment with
+flush pieces left 30 to 57 segments stranded instead of 8 to 10. The [LSM space
+spike](../docs/design.md#appendix-lsm-space-spike) measured space held beyond what the manifests
+name: installed whole, a merge of everything held up to the whole index, 258 segments of 64 MiB on
+a 256 GiB disk; in steps, 2 segments. This is ScyllaDB's incremental compaction.
 
 ### Deletions: removals and range removals
 
@@ -526,7 +552,10 @@ never merged the removals into the old extents' run.
 A memtable keeps its range removals as non-overlapping fragments in a second copy-on-write page
 tree, and a later write cuts its key out of its fragment. A fragment hides every older layer and
 none of its own layer's entries. A get stops at a covering fragment; a floor or a scan skips past
-it in one search. A flush or merge drops a fragment unless an older run holds a key it hides.
+it in one search. In a run, fragments are stored after the entries in blocks of their own, and the
+run's own entries win over them. A flush or merge drops a fragment unless an older run holds a key
+it hides, checking each older run with a cursor that only moves forward, since removals arrive in
+key order.
 Range removals also delete a punched chunk's extents, a released snapshot version, a dropped
 volume's keys and a queue's consumed head
 ([LSM deletions study](../docs/design.md#appendix-lsm-deletions-study)).
@@ -563,7 +592,9 @@ the index's runs add only about 6% to the disk's total writes.
 Planned for phase 8, before the block frontend, because a block volume's chunk index outgrows
 memory: a chunk overwritten at random 4 KiB holds one extent per write, so a 1 TB disk can reach
 toward 270 million entries, more than 10 GB. Fence pointers and filters stay in memory outside
-the cache, as RocksDB keeps them by default. The cache is one CLOCK cache (a cheap
+the cache, as RocksDB keeps them by default. Those runs cut each piece into data blocks of 4 to
+32 KiB, so a miss reads one block rather than a 1 MiB piece, and each piece's filter becomes a
+partition of its own. The cache is one CLOCK cache (a cheap
 approximation of least-recently-used eviction) over off-heap buffers, owned by the index's event
 loop, so it needs no locks.
 

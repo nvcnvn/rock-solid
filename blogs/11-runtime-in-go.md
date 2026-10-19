@@ -45,6 +45,13 @@ The [glossary](../docs/glossary.md#runtime-and-drivers) has more.
 - **Deterministic simulation, seed.** Running a whole cluster inside one process from one
   random seed, so the same seed replays the same run exactly
   ([glossary](../docs/glossary.md#testing)).
+- **`CLOCK_BOOTTIME`, `CLOCK_MONOTONIC_RAW`.** Two Linux clocks that only move forward. The first
+  keeps counting while the machine is suspended, but a time daemon such as chrony may speed it up
+  or slow it down; the second is never adjusted by the daemon, but stops in suspend.
+- **VM pause, VMClock.** A hypervisor can freeze a virtual machine, or save it and restore it
+  later, and hand it back its clocks as if no time had passed. **VMClock** is a page of memory the
+  hypervisor shares with the guest, whose *disruption marker* changes on every restore and live
+  migration ([glossary](../docs/glossary.md#coordination-and-failure)).
 
 ## The problem: what the ordinary Go server gets wrong
 
@@ -355,10 +362,14 @@ Things to notice:
 - **Time comes in, waiting goes out.** A machine reads time only from `ctx.Now` and never
   blocks. It emits `ActDiskWrite` with an `IOID` it chose, and the matching `EvDiskDone`
   resumes it; `ActSetTimer` works the same way for time. Timers have no cancel, so the machine
-  checks its own deadline against `ctx.Now` when a `Timer` event arrives. Leases will need a
-  second clock: the plan adds `ctx.Raw`, read from `CLOCK_MONOTONIC_RAW`, which no time daemon
-  slews, and a `Resumed` event after a suspend
+  checks its own deadline against `ctx.Now` when a `Timer` event arrives.
+- **Leases read two clocks.** A time daemon can make `CLOCK_BOOTTIME` run up to 22.6% fast or
+  slow, so the design's `Context` also carries `Raw`, the time on `CLOCK_MONOTONIC_RAW`, and every
+  lease is counted on both. Its event kinds add `Resumed`, which the loop delivers after a suspend
+  or a VM restore, and on which a lease holder ends every lease it holds
   ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
+  The built `Context` above carries `Now` alone; `Raw` and `Resumed` are the open "Lease clocks
+  in the context" item of the build checklist.
 - **Errors are data.** A corrupt message or a failed disk is an event to handle; a panic is
   only for a broken invariant of the machine's own state.
 - **Randomness is owned.** [`internal/core/rng.go`](../internal/core/rng.go) wraps
@@ -443,7 +454,7 @@ FUSE, ublk or S3 requests into events and actions.
 | --- | --- | --- | --- |
 | Disk | `io_uring` on a file or raw device | SPDK on a dedicated NVMe drive | Simulated disk with fault model |
 | Network | Kernel TCP | RDMA (on a capable card, or Soft-RoCE, a software RDMA for testing); DPDK as an experiment | Simulated network |
-| Clock and timers | `CLOCK_BOOTTIME`, which counts through suspend, and `CLOCK_MONOTONIC_RAW`, which no time daemon slews, read together each pass for leases (1 tick = 1 µs); timers on `CLOCK_BOOTTIME` | Same | Simulated time: per-node oscillator drift, time-daemon slews and suspends |
+| Clock and timers | `CLOCK_BOOTTIME`, which counts through suspend, and `CLOCK_MONOTONIC_RAW`, which no time daemon slews, read together each pass for leases (1 tick = 1 µs), with the VMClock disruption marker from a mapped `/dev/vmclock0` where the VM has one; timers on `CLOCK_BOOTTIME` | Same | Simulated time: per-node oscillator drift, time-daemon slews, suspends and VM pauses |
 
 Chunk data, Raft logs and indexes all live in the one log per disk, so the disk driver is the
 only code that touches storage, and swapping it swaps everything.
@@ -536,6 +547,13 @@ everything that can wake it is in that set.*
 - **Loops are not locked to OS threads.** In a smoke run, `runtime.LockOSThread` cost 35 µs per
   write against 29 µs unlocked. The exception is a C library that needs its own thread, as
   SPDK's does.
+- **The loop reads the clocks itself.** Go's own monotonic clock is `CLOCK_MONOTONIC`, neither
+  of the two that leases need, so each pass reads `CLOCK_BOOTTIME` and `CLOCK_MONOTONIC_RAW`
+  directly, about 140 ns each, and the VMClock marker from a mapped page, 3 ns. It delivers
+  `Resumed` when `CLOCK_BOOTTIME` gains on `CLOCK_MONOTONIC`, which happens only across a
+  suspend, or when the marker changes. A pass handles peer messages before client reads, so a
+  holder that missed time while its VM was stopped learns it from the heartbeats queued during the
+  stop before it serves a read that waited behind them.
 
 **Connections are per loop pair.** Each node publishes which loop owns each of its disks and
 shard replicas. A loop opens one connection to each peer loop it needs, on demand, as Seastar's
@@ -566,7 +584,8 @@ the owner map is a hint for speed, never a condition for correctness.
 records through its inbox once per pass ([04-one-log-per-disk.md](04-one-log-per-disk.md)).
 **CPU-heavy background work** (cleaner copies, erasure coding, compaction) runs on worker
 goroutines that send results to the owning loop's inbox, so each index keeps one writer. **Off
-the data path**, the CSI gRPC server, metrics and the admin API are ordinary Go.
+the data path**, the CSI gRPC server, metrics, the admin API and the FUSE descriptor holder are
+ordinary Go, with goroutines, `net/http` and `context`.
 
 ### Sizing loops and GOMAXPROCS under a CPU limit
 
@@ -647,7 +666,8 @@ generation, so a handle to a freed and reused slot is caught.*
   page-aligned buffers, which the Go heap does not promise. Third, a mapped slab is registered
   once with io_uring, SPDK or RDMA.
 - **Registered once, it saves the pinning on every I/O.** The io_uring driver registers each
-  loop's slab (`IORING_REGISTER_BUFFERS`) and issues `READ_FIXED` and `WRITE_FIXED`. On a
+  loop's slab (`IORING_REGISTER_BUFFERS`, in regions of at most 1 GiB, so a slab that grows adds
+  regions to a sparse table) and issues `READ_FIXED` and `WRITE_FIXED`. On a
   consumer NVMe drive, fixed buffers saved 0.1 µs of CPU per 4 KiB `O_DIRECT` I/O at QD 32 and
   0.2 to 0.3 µs at QD 1, 5 to 8% of the CPU per I/O, for a registration paid once ([io_uring
   registered buffers spike](../docs/design.md#appendix-io_uring-registered-buffers-spike)). Pinned memory counts
@@ -758,7 +778,7 @@ serial owner, from latency against offered load.
 - **A CPU limit costs a core.** At a 2-CPU limit, that is half the loop capacity.
 - **Privileges.** Registered buffers need `IPC_LOCK` on the daemon pod. SPDK on real NVMe needs
   root, `vfio-pci` and very likely hugepages on a dedicated drive, which is why it stays opt-in.
-- **Two [tech debts](../docs/tech-debts.md).** Until the loop's off-heap slabs exist, the LSM
+- **Two runtime [tech debts](../docs/tech-debts.md).** Until the loop's off-heap slabs exist, the LSM
   pages sit on the Go heap as pointer-free slices: not scanned (0.24 ms per collection at 20
   million entries in this shortcut) but counted toward the heap goal. And the Go toolchain is
   pinned, because the scheduler and collector these rules were measured against change between
@@ -769,7 +789,13 @@ serial owner, from latency against offered load.
 From the design's [open questions](../docs/design.md#roadmap-and-open-questions) and roadmap:
 
 - **CPU limits below 3 cores:** would one loop with `GOMAXPROCS` 2 serve a 2-CPU limit better?
-- **Fixed buffers on real NVMe:** does the zram saving hold at QD 1 and 32?
+- **Polled completions on NVMe:** on a drive with poll queues, does `IORING_SETUP_IOPOLL` save or
+  add CPU per 4 KiB I/O at QD 1 and 32, and do fixed buffers still save their 0.1 to 0.3 µs?
+- **VM stops the marker misses:** a QEMU guest on kvm-clock stopped and continued in place changes
+  no clock and no marker, so a holder notices only from a peer's heartbeat. Does the hypervisor's
+  network queue keep those heartbeats under load, and with one loop per core, how does a lost-time
+  signal seen on one loop's connection reach the loops serving reads before they serve the next
+  request?
 - **SPDK interrupt mode on a real drive:** its latency at QD 1 and interrupts per I/O at QD 32
   and 128, needed before phase 9.
 - **One loop per disk on a fast drive:** with power-loss protection, does the disk's loop

@@ -197,13 +197,17 @@ A chunk ID is computed, not looked up, so a data request needs no metadata query
 ```text
 Write path
 FUSE write(inode, off, data)
-  file not shared: buffer in daemon, acknowledge         // flushed later, in order
-  file shared:     chunk_id = (volume, inode, off / CHUNK_SIZE)
+  past the PVC size: ENOSPC
+  file not shared and the space grant covers it:
+                   buffer in daemon, acknowledge         // flushed later, in order
+  otherwise:       flush the chunk's buffered writes first
+                   chunk_id = (volume, inode, off / CHUNK_SIZE)
                    -> ChunkStore.write via the chunk primary, which merges partial blocks
-                   -> acknowledge
+                   -> acknowledge, or ENOSPC if the pool refuses it
                    -> if the write extends the file: MetaStore size = max(size, end)
 close() / fsync()  -> flush buffered chunks, widened to whole blocks where the daemon has the bytes
-                   -> MetaStore.txn([set size, mtime])
+                   -> MetaStore.txn([set size, mtime = max(last write's time, mtime + 1 ns)])
+                   -> an error this handle has not seen yet, if any
 
 Read path
 cached handle:   kernel page cache -> on a miss, FUSE read -> daemon -> ChunkStore.read
@@ -211,7 +215,8 @@ uncached handle: FUSE read every time -> daemon -> ChunkStore.read via the chunk
 both:            the daemon clamps a read to the file's size
 ```
 
-"Shared" here means the WriteShared cache mode explained under Tier 2 below. Namespace
+"Shared" here means the WriteShared cache mode explained under Tier 2 below; the space grant and
+the late error are explained [below](#a-full-pool-space-grants). Namespace
 operations (`create`, `mkdir`, `unlink`, `rename`, `setattr`) are MetaStore transactions,
 single-shard except a cross-directory `rename`. The design's targets, stated as round trips:
 
@@ -221,6 +226,15 @@ single-shard except a cross-directory `rename`. The design's targets, stated as 
 | Read or write of a file being written from two or more nodes | One network round trip to the chunk primary, plus about 5 to 20 µs of FUSE overhead |
 | `stat`, `lookup` after a cache miss | One round trip to the MetaStore shard leader, answered from memory under its lease ([08-the-metastore.md](08-the-metastore.md)) |
 | `open` of a file | One round trip to the inode's owner (memory only, no disk write) |
+
+**Modification time across nodes.** A file's `mtime` comes from the wall clock of the node that
+wrote it: the daemon sends the time of the file's last write with its `close` or `fsync`
+transaction. Wall clocks on different nodes disagree by milliseconds or more, and a time daemon can
+step one back, so a file written on node A and then on node B could see its `mtime` go backwards,
+which breaks `make` and `rsync`. So the transaction stores the later of that time and the stored
+`mtime` plus 1 ns, the rule CockroachDB's hybrid logical clocks use to keep timestamps from going
+backwards ([clock skew study](../studies/clock-skew/README.md)). An explicit `utimensat`, as
+`touch -d` or `rsync -t` call, stores exactly the time it is given.
 
 ### Three rules the kernel forces on the design
 
@@ -329,9 +343,12 @@ rock-solid's daemon buffers only against a **space grant**: bytes of a pool its 
 unflushed. The heartbeat every node already sends the control-plane leader each second, the one
 that renews its session, reports what the node has buffered and flushed, and the reply sets the
 grant, at most the 256 MiB buffer. The daemon reuses its grant as flushes complete. The leader
-keeps a pool's grants at most half of what the pool can still take, so they shrink as it fills,
-and within the room every disk keeps above `write_limit`, because a granted flush is admitted past
-the limit and one node's buffer can land on a single disk:
+keeps a pool's grants at most half of what the pool can still take, so they shrink as it fills.
+It also keeps them within the smallest gap any of the pool's disks has between `write_limit` and
+its log's reserve, less a heartbeat's worth of that disk's writes, because a granted flush is
+admitted past the limit, one node's buffer can land on a single disk, and the leader hears of
+flushes up to a heartbeat late. A new leader counts every live session as holding a full buffer
+until it renews:
 
 ```mermaid
 flowchart TD
@@ -357,7 +374,8 @@ granted, since the kernel sends them at writeback; a refusal reaches `msync` or 
 A flush can still fail for other reasons: the disk log has nothing left the cleaner can free, the
 session was fenced, or the daemon crashed. The daemon then drops the data, as CephFS does, because
 dirty data held forever would block the recalls and deletes that free space, and reports the error
-once to each handle that had the file open, at that handle's next `write()`, `fsync` or `close()`.
+once to each handle that had the file open, at that handle's next `write()`, `fsync` or `close()`:
+`ENOSPC` for space, `EIO` otherwise.
 That is the kernel's `errseq_t` rule for local filesystems, where each open file sees a writeback
 error once at `fsync`, extended to `close()` as NFS does; FUSE sends a `FUSE_FLUSH` on every
 `close()` and returns the daemon's answer.
@@ -627,12 +645,14 @@ to the session.
   its lease is renewed by the heartbeat each node already sends the control-plane leader once a
   second; renewals change only the leader's memory. Only that leader declares a session expired,
   on its own clocks, so the inode owners a node talks to never disagree about it, and an owner
-  that fails over leaves sessions alone. A new leader gives every live session a full lease
-  before it expires any ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#who-decides-that-a-session-has-expired)).
+  that fails over leaves sessions alone. Only a leader that holds its own leader lease answers
+  renewals. A new leader gives every live session a full lease before it expires any, and a
+  leader whose event loop fell behind restarts every session's timer rather than expire sessions
+  it could not hear ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#who-decides-that-a-session-has-expired)).
 - **The client limits itself.** It counts its lease from when it sent the last answered
   heartbeat, which is before the leader counted it, and stops writing `lease_drift` early on
-  whichever of its two clocks runs faster, or at once when its machine resumes from suspend
-  ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
+  whichever of its two clocks runs faster, or at once when it learns its machine was suspended,
+  restored from a snapshot or migrated ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
   No timeout it gives the kernel reaches past that instant. So when the lease ends, a paused
   client's next `read()` asks the daemon for attributes, and the daemon, seeing its lease has
   lapsed, drops the file's pages first. Mapped pages are the exception: they stay stale until the
@@ -643,9 +663,11 @@ to the session.
   as fenced in one new version of the *session table*, which is published like the placement
   table. Every storage node applies it, acknowledges it, and from then on rejects writes carrying
   a fenced session's ID, including ones already queued. Only once every storage node has
-  acknowledged, or has been marked down in a committed placement table, does the leader commit the version
-  as acknowledged, and only then do owners release the session's rights. So a write the fenced
-  client got applied is ordered before every write of the next lock holder.
+  acknowledged, or has been marked down in a committed placement table, does the leader commit
+  the version as acknowledged, and only then do owners release the session's rights; a down node
+  comes back only once its heartbeat reports the current version. So a write the fenced client got
+  applied is ordered before every write of the next lock holder. Fences due at the same moment
+  share one version, so a switch failure that strands many nodes costs one round.
 - **A node that answers the control plane but not an owner.** Its session stays alive, so a
   recall to it could wait forever. After `recall_timeout` (30 s by default, a value still to be
   tuned) the owner asks the control plane to fence it, which ends the wait the same way as an
@@ -772,7 +794,8 @@ What survives a restart, in one table:
 
 On the write-back row: unflushed writes die with the process, as dirty pages die in a kernel
 crash, but here the application keeps running and would never know. So the memfd lists the
-handles holding unflushed data, and the successor fails their next `fsync` or `close` with `EIO`.
+handles holding unflushed data, and the successor fails their next `write()`, `fsync` or `close`
+with `EIO`.
 
 ## Evidence
 

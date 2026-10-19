@@ -216,7 +216,8 @@ data survives, and otherwise pick the option that uses less space.**
 
 Three more settings are about space and placement rather than redundancy: `overcommit` (on),
 `write_limit` (90%, the disk fill past which writes that add data are refused) and `pg_count` (a
-power of two sized from the disk count); posts 02 and 05 cover them.
+power of two sized from the disk count); posts 02 and 05 cover them, and the recovery section below
+shows what `write_limit` lets through.
 
 Names follow `rep<copies>` and `ec<data>-<parity>`. The presets below are starting points; any
 combination within the creation rules is allowed. "Usable / raw" is how much of the raw disk space
@@ -259,12 +260,13 @@ capacity only when every node can take a share of each chunk in proportion to it
 failure-domain rule often forbids that. `ec4-2` at 2 per node on three nodes puts exactly two shards
 of every chunk on each node, a third of the chunk, whatever the nodes hold. With nodes of 4, 4 and
 1 TB the small node fills first: room ÷ overhead says 5.4 TB, the pool holds 1.8 TB, and 3.6 TB of
-the large nodes is *stranded*. So a pool reports what its placement table lets through before its
-first disk fills, raises a `Stranded` warning, and asks for confirmation at creation when a layout
-strands more than half of a node's room
-([post 02](02-chunks-and-placement.md#volume-size-and-capacity) has the formula and the
-[capacity model spike](../docs/design.md#appendix-capacity-model-spike) the measurements). A one-copy
-pool on the same disks can still use stranded space.
+the large nodes is *stranded*. So a pool reports as *available* what its placement table lets
+through before its first disk fills, next to the *balanced* figure the best placement could reach,
+raises a `Stranded` warning once more than 10% of its room is stranded, and `rock-solid pool create`
+and disk changes ask for confirmation when a failure domain would strand more than half its room
+([post 02](02-chunks-and-placement.md#volume-size-and-capacity) has the formulas and the
+[capacity model spike](../docs/design.md#appendix-capacity-model-spike) the measurements). Placement
+never refuses such a layout, because a one-copy pool on the same disks can still use stranded space.
 
 Because shards are contiguous byte ranges, a 4 KiB read of an encoded chunk touches one disk, the
 one holding the shard that contains those bytes. No decoding is needed while that shard is healthy.
@@ -342,7 +344,11 @@ ec4-2, failure_domain node, max_per_domain 2, three nodes: one PG, member i hold
 survives one node failure, as Ceph's `crush-osds-per-failure-domain` does; `ec16-2` at 3 per node
 fits on 6 nodes and survives none, which is exactly why the CLI prints the number. The placement
 computation in [post 02](02-chunks-and-placement.md) keeps the failure-domain rule whenever it
-places or moves a member.
+places or moves a member, and it aims each disk at a target built from the same rule: the disk's
+room for the pool, with no failure domain asked for more than `max_per_domain` members of a PG.
+Under `rep2` on a 0.7 GB and a 2 GB node, each node holds one copy of every PG whatever its size,
+so a target proportional to size could never be met; the capped targets are what let placement
+settle on mismatched disks.
 
 ## `min_live`: when to stop accepting writes
 
@@ -440,10 +446,11 @@ is durable, so a crash at any point leaves either the old copies or a complete e
 
 **3. Back to copies on overwrite.** "Sealed" means finished for now, not forever. A write to an
 encoded chunk first turns it back into copies: the primary reads `data` shards, writes the copies,
-then applies the write, and the chunk is encoded again once idle. That costs a full chunk read and a
-replicated chunk write. Editors write new files rather than patch footage, so media rarely pays it.
-A database on a block volume pays it on the first write to each idle chunk, which is why block
-chunks wait 24 hours before encoding.
+then applies the write, merging any partial block against the chunk it just decoded, and the chunk
+is encoded again once idle. That costs a full chunk read and a replicated chunk write. Editors
+write new files rather than patch footage, so media rarely pays it. A database on a block volume
+pays it on the first write to each idle chunk, which is why block chunks wait 24 hours before
+encoding.
 
 Snapshot versions are the one thing truly frozen. They never change, so in an erasure-coded pool
 they are encoded at once without waiting for `seal_after`, and a return to copies keeps the encoded
@@ -593,11 +600,17 @@ lists "shard recovery" without detailing the flow.
 once idle for `seal_after`.
 
 **Headroom.** Recovery needs free space on the disks it writes to. A pool's `write_limit` (default
-90%) refuses writes that add data once any disk holding one of the PG's members passes it; that
-headroom serves recovery and the cleaner ([post 05](05-the-cleaner-and-free-space.md)). Recovery
-also needs the surviving nodes to have room for every copy: a pool raises `CannotReprotect` when it
-holds more than its balanced capacity without its largest node. `rep3` on nodes of 4, 4, 2 and
-1 TB holds 2.7 TB, but after losing a 4 TB node the other three can re-protect only 0.9 TB.
+90%) refuses writes that add data once any disk holding one of the PG's members passes it. Three
+kinds of write still pass: an overwrite of blocks a chunk already holds live as copies that no
+snapshot shares, which frees as much as it writes; a punch, which frees space; and a flush of data
+a daemon buffered under a *space grant*, which was promised when the daemon acknowledged it
+([post 09](09-rwx-filesystem-and-cache-coherence.md#a-full-pool-space-grants)). The headroom above
+the limit serves recovery, those granted flushes and the cleaner
+([post 05](05-the-cleaner-and-free-space.md)). A pool raises `NearFull` once a member disk is within
+10 points of `write_limit` and `Full` once one passes it. Recovery also needs the surviving nodes to
+have room for every copy: a pool raises `CannotReprotect` when it holds more than its balanced
+capacity without its largest failure domain. `rep3` on nodes of 4, 4, 2 and 1 TB holds 2.7 TB, but
+after losing a 4 TB node the other three can re-protect only 0.9 TB.
 
 The simulator checks, after every step, that every chunk reaches its pool's redundancy once
 recovery settles, that copies are dropped only after all shards are durable, and that a chunk with

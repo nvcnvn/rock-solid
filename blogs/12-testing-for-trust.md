@@ -75,11 +75,11 @@ The [Testing strategy](../docs/design.md#testing-strategy) stacks seven layers:
 | Layer | What it catches |
 | --- | --- |
 | 1. Deterministic simulation | Bugs in the order of crashes, partitions and disk faults, replayable from a seed |
-| 2. Protocol model checking | Design bugs in the failover, locking and caching protocols, before code exists |
+| 2. Protocol model checking | Design bugs in failover (per-PG intervals, peering, read leases), sessions and fencing, cache recalls, purges and snapshot cuts, before code exists |
 | 3. Consistency checking | Reads that no valid order of operations could produce |
 | 4. Real-cluster fault injection | Kernel, firmware and fsync behaviour no simulator knows |
 | 5. Matrix and property tests | Placement bugs on mixed hardware; malformed bytes, via fuzzing |
-| 6. Conformance suites | Gaps against POSIX (the standard Unix file API) and Kubernetes storage tests |
+| 6. Conformance suites | Gaps against POSIX (the standard Unix file API), the kernel's file-mapping corner cases and Kubernetes storage tests |
 | 7. Performance regression | Latency, CPU and recovery slowdowns, measured nightly |
 
 The order is deliberate: "Build order puts the simulator before any real driver." The simulator is phase 1; the real io_uring driver is phase 5.
@@ -96,7 +96,7 @@ Every machine has one entry point; here is the disk log's, in `internal/disklog`
 func (l *Log) OnEvent(ctx *core.Context, ev *core.Event, out *Output)
 ```
 
-`ctx.Now` carries the time (1 tick = 1 µs); events are `NetRecv`, `PeerLost`, `DiskDone` or `Timer`, actions `NetSend`, `DiskRead`, `DiskWrite`, `DiskFsync`, `DiskTrim` or `SetTimer` ([Modularity](../docs/design.md#modularity-sans-io-core-pluggable-drivers)). The machine cannot tell whether a production driver or the simulator is on the other side. The diagram shows the swap; the box in the middle is the same code in both worlds.
+`ctx.Now` carries the time (1 tick = 1 µs); events are `NetRecv`, `PeerLost`, `DiskDone` or `Timer`, actions `NetSend`, `DiskRead`, `DiskWrite`, `DiskFsync`, `DiskTrim` or `SetTimer` ([Modularity](../docs/design.md#modularity-sans-io-core-pluggable-drivers)). For leases the design adds a second time, `ctx.Raw` from `CLOCK_MONOTONIC_RAW`, and a `Resumed` event after a suspend or a VM restore, both still to be built; they matter here because the simulator can then set a node's two clocks apart. The machine cannot tell whether a production driver or the simulator is on the other side. The diagram shows the swap; the box in the middle is the same code in both worlds.
 
 ```mermaid
 flowchart LR
@@ -195,6 +195,24 @@ Today `sim.Disk` implements crashes, bit flips and failed reads of chosen blocks
 
 The buffer pool is hostile too. `sim.Pool` fills every buffer from `Alloc` with the poison byte `0xA5`, so code that assumes zeroed memory fails, and every handle carries a generation, so using a freed or reallocated buffer panics instead of silently reading someone else's data.
 
+### The simulated world: networks, clocks, paused VMs and a full pool
+
+> **In plain words.** Disks are not the only liars. Networks lose and reorder messages, clocks run fast or slow, a virtual machine can be frozen for minutes and wake up believing no time passed, and a pool can fill up while a dozen nodes still hold buffered writes. Each of these breaks a different promise, so the simulator does all of them on purpose too.
+
+#### How it works
+
+The design names the faults each protocol must survive, and the simulated network, clocks and clients will inject them; the simulated network is a phase 3 item, none of it is built yet. A sample, by what they attack:
+
+| Attacks | Faults the simulator injects |
+| --- | --- |
+| Failover | An old primary partitioned with clients that have not seen the new table; a PG's interval changing in bursts faster than peering; a node flapping every few seconds; a member removed and added back within one recovery |
+| Leases | A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±1%; grants delayed by up to 50 ms in one direction only; a suspend whose length the kernel rounded to whole seconds; a VM stopped for longer than a lease with every clock frozen, the messages sent to it queued or lost, and its VMClock marker changed or not |
+| Partial blocks | Unaligned writes from two nodes into one 4 KiB block, pipelined, across a primary change while the primary's read of the old block is in flight, and an old block that fails its checksum |
+| A full pool | The pool reaching `write_limit` while daemons buffer writes; a heartbeat carrying a space grant lost or delayed; a control-plane failover with grants out; a snapshot cut while a volume overwrites near full; a held block write released by a discard, a purge or a new disk |
+| Restarts | A daemon crash with requests read but unanswered, then resent, including a dead daemon's late write arriving after its successor's reissue and the pod's next write |
+
+Some of these need a word. ±22.6% is the most a time daemon can legally bend Linux's adjustable clocks (the tick by ±10%, the frequency by 500 ppm, plus a slew of up to 0.5 s), so a lease protocol that survives it survives any daemon. A VM pause is the nastiest: from inside, no clock moved, so only the hypervisor's VMClock marker or a peer's clock can tell a lease holder it was asleep. A *space grant* is the control plane's promise that a node may hold some bytes of buffered writes on a nearly full pool and flush them later without being refused. The reasoning behind each is in [03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md) for leases and clocks, [09-rwx-filesystem-and-cache-coherence.md](09-rwx-filesystem-and-cache-coherence.md) for space grants and [10-block-snapshots-and-clones.md](10-block-snapshots-and-clones.md) for block volumes on a full pool.
+
 ### Tests feed events and assert actions, with no mocks
 
 > **In plain words.** You do not need a fake disk to test a state machine. You hand it the event "write 104 finished" and look at what it asks for next. The test reads like a transcript: given this, it must say that.
@@ -233,13 +251,16 @@ The design generalizes this into **traces, not logs**: the data path will write 
 
 #### How it works
 
-Each state machine registers its invariants with the simulator's checker "in the same change" that adds the machine. The design's full list covers placement, leases, caching and the cleaner ([Testing strategy](../docs/design.md#testing-strategy)); five that need no other post:
+Each state machine registers its invariants with the simulator's checker "in the same change" that adds the machine. The design's full list covers placement, leases, caching, free space and the cleaner ([Testing strategy](../docs/design.md#testing-strategy)); a few that need little from other posts:
 
 - every acknowledged write is readable, and no read returns a version that is later lost;
+- every read returns exactly the bytes of the acknowledged writes and punches applied in version order, live and at every snapshot. The judge is a **byte-range oracle**: a plain model that keeps each chunk's bytes as the writes left them, so a merged or mis-ordered partial block shows as a diff;
 - a truncated or punched range reads as zeros;
 - a chunk index rebuilt from the log equals the one recovered from its manifest;
 - a replayed request returns its first result and changes nothing;
-- table epochs (the version numbers of the placement table) and each PG's interval number never go backwards on any node.
+- no write tagged with a PG's interval (the number of that placement group's current membership) completes after a later interval of the PG has activated, and table epochs and interval numbers never go backwards on any node;
+- no file's modification time goes backwards, except by an explicit `utimensat`, whatever the writers' wall clocks show;
+- no block write that needs new space completes with an error while the pool is full, unless an operator failed it.
 
 The invariant checker is planned; one of its checks already exists, `chunkstore.(*Index).Check`, which verifies that a chunk's map never holds two entries for one block.
 
@@ -375,7 +396,7 @@ f.Fuzz(func(t *testing.T, img []byte) {
 
 #### How it works
 
-These layers are all planned. "A new protocol is modeled in TLA+ before it is written": phase 2 models failover, fencing, cache recalls and purges, checked with the TLC model checker, each property tied to a simulator invariant. Every client operation will be recorded as `(invoke_time, complete_time, op, result)` so Porcupine can search for a linearizable order (each operation taking effect at one instant between its start and end). Nightly Jepsen-style runs will inject kills, partitions, disk errors and slow disks. Power cuts, through a server's management port or a smart power strip, with `fio --verify=crc32c` before and after, are "the only honest fsync test", because "some consumer NVMe drives acknowledge flushes they haven't done".
+These layers are all planned. "A new protocol is modeled in TLA+ before it is written": phase 2 models failover, fencing, cache recalls and purges, checked with the TLC model checker, each property tied to a simulator invariant. Every client operation will be recorded as `(invoke_time, complete_time, op, result)` so Porcupine can search for a linearizable order (each operation taking effect at one instant between its start and end). Nightly Jepsen-style runs will inject kills, partitions, disk errors and slow disks, the errors through device-mapper and through eBPF error injection, which makes a chosen kernel function return an error. Conformance suites will pin the file behaviour: `pjdfstest` for POSIX, `fsx` with one and several clients, including its mapped operations and its `-e` mode, which writes past the end of a file through a memory mapping and checks that those bytes do not reappear when the file grows, and xfstests `generic/029` and `generic/030`, which mix mapped writes with truncates. Power cuts, through a server's management port or a smart power strip, with `fio --verify=crc32c` before and after, are "the only honest fsync test", because "some consumer NVMe drives acknowledge flushes they haven't done".
 
 Numbers are decisions too: each is held by a nightly benchmark with the spike's figure as its bar, such as `BenchmarkCRC32CBlock` against 167 ns, and "a 20% regression is a bug". Hot-path benchmarks call `b.ReportAllocs` and must report zero allocations per operation; `BenchmarkGroupCommitRound` and the `internal/lsm` lookup benchmarks already call it. [Testing the design decisions](../docs/design.md#testing-the-design-decisions) maps every kind of decision, from byte layouts to runtime rules, to the test that holds it.
 
@@ -408,7 +429,7 @@ The spike also showed that an option set must push each choice to its extreme, o
 
 From the [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions) and the [build checklist](../docs/build-checklist.md):
 
-- **Phase 1 items still open:** the scheduler and trace records, the full simulated disk, crash at every action, the crash oracle, the invariant checker, the history recorder, the seed runner, data-driven regression files, the metamorphic tests and the LSM run checks.
+- **Phase 1 items still open:** the second clock and `Resumed` event in the core's context, the scheduler and trace records, the full simulated disk, crash at every action, the crash oracle, the invariant checker, the history recorder, the seed runner, data-driven regression files, the metamorphic tests and the LSM run checks.
 - **Metamorphic cost in CI** is an open question: how many option sets per seed, and how many of them random (Pebble runs as many random sets as standard ones), find the most planted bugs per CI minute?
 - **Incarnation fencing in the epoch-change model** is an open question for phase 2's TLA+ work: does a dead daemon's late write need a per-primary table that survives a primary change, or does the interval rule already reject it?
 - **Cross-version runs** start with phase 6: from the first usable release on, the simulator opens the previous release's saved disk images before its own seeds run, as Pebble's cross-version test does.

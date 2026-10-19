@@ -34,8 +34,9 @@ callouts, you still get the whole story.
 - **Copy-on-write.** Never modifying shared data in place: a write puts new data elsewhere and
   repoints the writer, so whoever still points at the old data, such as a snapshot, keeps seeing
   it. This is the broad sense the design uses; two narrower schemes are compared below.
-- **Snapshot epoch.** A per-volume counter of snapshots. Not the same as the placement epoch,
-  the version number of the placement table
+- **Snapshot epoch.** A per-volume counter of snapshots. It is not the table epoch, the version
+  number of the placement table, nor a PG's interval number, which counts the changes to one
+  placement group's membership and fills the high half of every chunk version
   ([Words with more than one meaning](../docs/glossary.md#words-with-more-than-one-meaning)).
 - **Punch, discard.** A discard (TRIM) is a filesystem saying "these blocks are free now".
   rock-solid turns it into a punch, which zeroes the range and frees its space.
@@ -185,7 +186,7 @@ size.
 
 **RWO: one writer, enforced.** At attach, a single-writer attach record is taken in the MetaStore
 (`volume/{id}/attach`). It stops two nodes from mounting one volume and corrupting it, and the
-simulator checks "at most one writer per RWO volume" after every step.
+simulator, once built, checks "at most one writer per RWO volume" after every step.
 
 **RWX block.** Several nodes attach one raw device, for KubeVirt live migration. The design calls
 this Tier 0, the lowest of its coherence tiers: the attach record allows several writers, the
@@ -258,16 +259,18 @@ no error, and both filesystems checked clean. The options weigh up like this:
 | --- | --- | --- |
 | Fail at once with `BLK_STS_NOSPC` | dm-thin with `error_if_no_space` | Refused data lost; ext4 stops at once, XFS at unmount; usable again only after a log replay with room in the pool |
 | Hold 60 s, then fail | dm-thin and LVM thin by default | The same, a minute later, unless the pool grows |
-| Let writes past the limit into a reserve | Nobody studied | The same, once the reserve is spent; meanwhile recovery has less room |
+| Let writes past the limit into a bounded reserve | No system studied | The same, once the reserve is spent; meanwhile recovery has less room |
 | Hold until there is room | Ceph RBD, Vitastor, rock-solid | Intact, but the volume hangs while the pool is full |
 
 The hang is real. Held writes keep their ublk tags, and ext4's journal waits for the data it
 orders, so a volume that keeps writing soon stops altogether. Its processes sleep where nothing can
 interrupt them, the kernel warns about them after 120 s, and the pod cannot be killed until the
-writes complete. The node plugin posts a Warning event on the PVC naming the pool, and the pool's
-condition is `Full`. Three ways out, in this order: free space outside the volume (delete snapshots,
-which are what make overwrites need new space, delete other volumes, or add a disk), and the writes
-resume by themselves; raise the pool's `write_limit` into the room above it; or run
+writes complete. The node plugin posts a Warning event on the PVC naming the pool, the pool's
+condition is `Full`, and a metric counts held writes per volume. Three ways out, in this order:
+free space outside the volume (delete snapshots, which are what make overwrites need new space,
+delete other volumes, or add a disk), and the writes resume by themselves; raise the pool's
+`write_limit` into the room above it, which resumes them at once but leaves space grants and
+recovery less room; or run
 `rock-solid volume fail-held <volume>`, which completes the held writes with `ENOSPC` when the pod
 must go, knowing the held data is lost and its filesystem stops until it is mounted with room in
 the pool.
@@ -418,7 +421,7 @@ The edge cases:
   as a recall does; every primary then rejects its writes.
 - **The coordinator crashes** between pause and resume, or a MetaStore shard changes leader at the
   cut. Both are named simulation faults, and snapshot cuts are among the protocols the design
-  checks with TLA+ models.
+  will check with TLA+ models.
 - **Cost.** A block RWO volume has one node to pause; a volume nobody uses needs no pause.
 
 **Data still in the daemon's buffer.** By default the cut does not flush the filesystem daemon's
@@ -666,8 +669,12 @@ which is exactly why snapshots are cheap.
   Without `discard`, a write after `rm` still failed.
 
 The simulator will check after every step that a snapshot holds every write acknowledged before
-its cut and none issued after, and that no block write needing new space completes with an error
-while the pool is full unless an operator failed it.
+its cut and none issued after, that every read, live and at every snapshot, equals a byte-range
+oracle of the acknowledged writes and punches, and that no block write needing new space completes
+with an error while the pool is full unless an operator failed it. Among its faults are a snapshot
+cut while a volume overwrites near full, so its overwrites suddenly need new space, a held block
+write released by a discard, a purge or a new disk, and unaligned writes from two nodes into one
+block across a primary change.
 
 ## Trade-offs: what this costs
 
@@ -699,6 +706,8 @@ From the [roadmap and open questions](../docs/design.md#roadmap-and-open-questio
   extents be rewritten whole? Each regroup writes 4 MiB, so it needs block-volume traces.
 - **The NVMe-oF hold** has to be checked on a real initiator: does a stock host wait out five long
   retry delays without resetting the controller?
+- **The primary's base read for a 512-byte write:** its latency at queue depth 1 on NVMe and SATA
+  drives, and how large a per-loop cache of recently merged blocks lets most merges skip it.
 - **Incarnation fencing in the epoch-change model.** A dead daemon's write delivered late to an old
   primary, or to a new primary that has not yet seen the successor's incarnation: does the
   per-primary table of newest incarnations need to survive a primary change?

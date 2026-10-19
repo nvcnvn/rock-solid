@@ -220,7 +220,7 @@ The design's principles, in priority order:
 6. **Correctness before features**, with deterministic simulation from day one, and **Apache 2.0**.
 
 Not in v1: SMB (Server Message Block) file sharing for macOS and Windows clients, GPU-cluster scale,
-shared-writable `mmap` across nodes, a custom kernel module, and authentication or encryption between
+shared-writable `mmap` across nodes, cross-directory hard links, a custom kernel module, and authentication or encryption between
 daemons. A spike found that a Samba gateway can be added later on top of the file frontend
 ([post 09](09-rwx-filesystem-and-cache-coherence.md)).
 
@@ -276,8 +276,9 @@ flowchart TB
   failures).
 - **The MetaStore** is a transactional key-value store split into many small Raft groups. It needs
   consensus because locks and atomic `rename` are compare-and-set operations, which need one agreed
-  winner. One more Raft group, the **control plane**, holds cluster-wide state such as which disks
-  hold which PGs ([post 08](08-the-metastore.md)).
+  winner. One more Raft group, the **control plane**, holds cluster-wide state: the pools, the
+  placement table that says which disks hold which PGs, and every client's session
+  ([post 08](08-the-metastore.md)).
 - **Each disk** holds one append-only log for everything on it: chunk data, the Raft logs of the
   metadata shards placed there, and the indexes over both. The daemon embeds no database and a disk
   needs no filesystem ([posts 04](04-one-log-per-disk.md), [05](05-the-cleaner-and-free-space.md)
@@ -323,7 +324,7 @@ sequenceDiagram
     P->>D: write 4 KiB via FUSE
     D->>D: chunk ID from volume, inode, offset<br/>hash to PG, look up placement table
     D->>PR: write chunk, one hop
-    PR->>PR: assign new version
+    PR->>PR: assign new version,<br/>fill out any partial 4 KiB block
     par Primary
         PR->>PR: append to disk log, flush
     and Replicas
@@ -339,9 +340,14 @@ sequenceDiagram
 chunk's location is computed.*
 
 A write that extends the file also records the new size in the MetaStore before it is
-acknowledged. Had node A been the only
-node using the file, the daemon would instead have kept the write in its own write-back buffer and
-sent it on at `close`, at `fsync`, or when a chunk filled.
+acknowledged. A write that covers only part of a 4 KiB block is filled out by the primary, which
+reads the rest of the block and sends whole blocks on, so replicas never need the old bytes
+([post 02](02-chunks-and-placement.md)). Had node A been the only node using the file, the daemon
+would instead have kept the write in its own write-back buffer and sent it on at `close`, at
+`fsync`, or when a chunk filled. It buffers only as much as its node's *space grant* from the
+control plane covers, so a write it has acknowledged never fails later for lack of space; near a
+full pool the grant shrinks and writes go straight to the primary, where a refusal reaches the
+application as `ENOSPC` from `write()` itself.
 
 ## Caching that switches itself off
 
@@ -491,7 +497,8 @@ SPDK and RDMA plug into the same slots as io_uring and TCP; a node without RDMA 
 - **Write-shared files lose caching**, and memory-mapped readers see other nodes' writes within one
   message delay, not instantly.
 - **A daemon crash loses its unflushed write-back buffer**, as a kernel crash loses dirty pages, but
-  never silently: the next `fsync` or `close` on each affected file fails with `EIO`.
+  never silently: the next `write()`, `fsync` or `close` on each handle that had the file open
+  fails with `EIO`.
 - **v1 has no authentication or encryption between daemons.** Any host that can reach a daemon's port
   can read and write any volume. Run it on a network you trust.
 - **Three metadata nodes are mandatory**, whatever the data pools look like.
@@ -552,7 +559,7 @@ flowchart LR
 Tier numbers are not build order: Tier 0 (RWX block) ships in phase 8, after Tiers 1 and 2, because
 the file frontend is the first product.
 
-**Where the build stands.** 18 of the 45 phase 1 items in the
+**Where the build stands.** 18 of the 46 phase 1 items in the
 [build checklist](../docs/build-checklist.md) are done: the tooling, the foundation types in
 `internal/core`, the disk log, the index's memtable and sorted runs, and the chunk index. The
 simulator and the single-node ChunkStore are next.

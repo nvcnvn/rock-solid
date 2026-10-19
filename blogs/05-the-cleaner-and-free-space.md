@@ -184,9 +184,12 @@ spike, C7, an order of magnitude on a shared machine). That is why a pool's
 [`write_limit`](../docs/design.md#volume-size-and-capacity) defaults to 90%: a write that adds data
 is refused once any disk holding one of its placement group's members is fuller than that, and the
 pool warns 10 points earlier. The limit is checked per disk, because one full disk stalls every
-placement group on it. Overwrites of blocks a volume already holds, and punches, still pass: in a
-log an overwrite writes new blocks but kills as many old ones, so it adds no live data, and a punch
-frees space.
+placement group on it. Three kinds of write still pass. A flush of buffered file data under a
+*space grant* passes, because the daemon promised it room when it acknowledged the write. An
+overwrite passes if it only replaces blocks the chunk already holds live, written since its last
+snapshot and kept as copies: in a log it writes new blocks but kills as many old ones, so it adds
+no live data. And a punch passes, because it frees space. So a filesystem's journal and a
+database's preallocated files keep working on a full pool.
 
 Skewed workloads do better: with Zipf-distributed overwrites, cost-benefit cleaning reaches 9.3 at
 95% rather than 17.3. Snapshots lower WA slightly at the same fill (pinned data is perfectly cold:
@@ -356,7 +359,8 @@ backups, can raise its `write_limit` to 95%.
 owns the disk's chunk index. The cleaner is its own sans-IO state machine, which the daemon runs
 on that worker; its moves reach the owner as an event. The worker:
 
-1. checks liveness and verifies each block's CRC32C,
+1. checks liveness and verifies each block's CRC32C, reading around the header-block cache, since
+   readers move to the copies anyway,
 2. copies the block into a record of `copy` entries in the cold stream, each naming the location
    it copied from,
 3. sends its moves to the index's owner.
@@ -532,16 +536,20 @@ A chunk write the bucket refuses stays with its connection, and the loop stops r
 connection until the bucket refills, so clients see ordinary TCP backpressure. Waiting items keep
 their buffers and are written in submit order once a segment frees.
 
+Unlike RocksDB and Pebble, whose level 0 also stops writes when it holds too many files, the
+number of sorted runs never slows anyone here: an index over its run limit only makes lookups
+cost more ([post 06](06-the-lsm-tree.md)).
+
 A full disk can therefore show up in three ways, in this order:
 
 | Condition | What the client sees |
 | --- | --- |
 | A disk holding a member of the write's placement group is past the pool's `write_limit`, and the write adds data | Refused: `ENOSPC` from `write()` on a file volume ([post 09](09-rwx-filesystem-and-cache-coherence.md)), a wait until the pool has room on a block volume ([post 10](10-block-snapshots-and-clones.md)) |
 | Below the limit, the cleaner falls behind | Slower writes, then waiting |
-| The cleaner has no victim that passes its net-gain guard: nothing more can be freed | `NoSpace` from the disk log |
+| The cleaner has no victim that passes its net-gain guard: nothing more can be freed | `NoSpace` from the disk log, which reaches a file's writer late, at its next `write()`, `fsync` or `close` |
 
 The first row is the only one the application normally meets, and the design is careful about
-how. A file's buffered writes are acknowledged against a *space grant* so that `write()` itself
+how. A file's buffered writes are acknowledged against a space grant so that `write()` itself
 reports a full pool. A block volume's write is never failed for space, because the filesystem
 inside the volume would stop: in the
 [block ENOSPC spike](../docs/design.md#appendix-block-enospc-spike), ext4 reported `ENOSPC` at
@@ -568,8 +576,11 @@ build items turn "full disk fails" into "full disk waits".
 CockroachDB's file deletion rate, so two 64 MiB segments a second). They run faster only to clear
 a backlog older than 5 minutes within 5 minutes, as Pebble's delete pacer does. Unlike deleting a
 file in Pebble, a TRIM frees no space in the log, so low space never speeds it up, and a segment
-allocated again before its TRIM ran drops it. A disk that is a file instead of a raw device
-ignores TRIM.
+allocated again before its TRIM ran drops it. The `io_uring` driver discards with
+`BLOCK_URING_CMD_DISCARD` on Linux 6.12 and later, or `BLKDISCARD` on a worker goroutine on older
+kernels, and SPDK with an NVMe Dataset Management deallocate. A disk that is a file instead of a
+raw device ignores TRIM, since punching holes in the file would undo writing it in full when it
+was created ([post 04](04-one-log-per-disk.md)).
 
 ## Freeing space: from `rm` to a free segment
 
@@ -607,14 +618,16 @@ flowchart LR
   (phase 8). The CSI driver mounts the filesystems it creates with `discard`, because without it
   deleting files frees nothing in the pool: in the block ENOSPC spike, a write after `rm` still
   failed until the mount used `discard`. **Deleting a block volume** purges chunks `0 .. size ÷ CHUNK_SIZE`; **deleting a
-  filesystem volume** has every disk of the pool sweep its chunk index for the volume's ID.
+  filesystem volume** removes its metadata keys (`fs/{volume}/`) with one range removal and has
+  every disk of the pool sweep its chunk index for the volume's ID, which is cheaper than purging
+  millions of small files one by one.
 - **Tombstones.** Punching a whole chunk keeps the chunk's entry, its tombstone, and removes its
   live map. Punches are recorded in record headers like writes, so an index rebuilt from the
   headers cannot bring a deleted chunk back.
 - **Snapshots pin blocks.** Punches carry the snapshot epoch, so a purge never frees a block a
   snapshot's frozen map still refers to. Deleting a snapshot starts a sweep that drops frozen
-  versions nothing needs. Until then, near full even an overwrite is refused, because the first
-  write to a pinned block needs new space.
+  versions nothing needs. Until then, past `write_limit` even an overwrite of a block a snapshot
+  shares is refused like a new write, because it needs new space.
 
 ## Evidence
 

@@ -280,7 +280,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Write stall, admission control.** Slowing or pausing new writes when background work (cleaning, checkpoints) falls behind, so the disk never runs out in the middle of it. RocksDB and Pebble call a pause a write stall; CockroachDB's admission control admits writes at the rate background work measurably keeps up, which is what rock-solid does. See [On-disk format](design.md#on-disk-format).
 
-**Merge step, bound.** A merge installs its output a step at a time; each input run then holds only the keys at or above a bound key, so the pieces it no longer needs are freed before the merge ends. ScyllaDB calls this incremental compaction. See [The LSM tree](design.md#on-disk-format).
+**Merge step, bound.** A merge installs its output a step at a time; each input run then holds only the keys above a bound key, the last key the merge has written, so the pieces it no longer needs are freed before the merge ends. ScyllaDB calls this incremental compaction. See [The LSM tree](design.md#on-disk-format).
 
 **Quarantine.** Setting aside a segment that looks damaged: never reused, and reported for repair from another replica.
 

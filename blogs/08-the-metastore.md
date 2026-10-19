@@ -55,7 +55,7 @@ before the first chunk write, one transaction:
                                                    to the chunk's placement group,
                                                    primary + replicas, in parallel
 close / fsync, one transaction:
-  inode record     size 3, mtime
+  inode record     size 3, mtime (never earlier than the stored one)
 ```
 
 Chunk data is addressed by a computed ID (volume, inode, offset ÷ 4 MiB), so the data path never
@@ -516,11 +516,14 @@ sequenceDiagram
   a vote or pre-vote in the group, except to a planned transfer target.
 - The leader's lease ends at the **quorum-th latest expiry** among the voters that fortified it,
   itself included. With three voters and one follower fortified, the lease runs to that
-  follower's expiry: leader plus follower make two of three.
+  follower's expiry: leader plus follower make two of three. During a membership change, both the
+  old and the new configuration must each give a quorum.
 - Each expiry is counted from when the leader's node asked for the grant, as every node-pair
   lease is: on two clocks, `CLOCK_BOOTTIME` and `CLOCK_MONOTONIC_RAW`, ending at whichever
   runs faster, while the grantor waits for the slower. A time daemon's slew then cannot stretch
-  a lease, and the clocks need not be synchronized
+  a lease, and the clocks need not be synchronized. In case both of a node's clocks err the same
+  way, each grant also carries the grantor's raw clock reading, from which the holder bounds how
+  fast that grantor's clock can run, and it widens its margin if the bound is too fast
   ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
 - Until a new leader is fortified and has committed an entry of its own term, it answers reads
   through etcd-raft's **ReadIndex** round (a majority round trip that confirms leadership). A
@@ -568,15 +571,22 @@ reads and writes on open handles carry on. See
 
 > **In plain words.** One special Raft group holds the cluster's own settings: which disks exist,
 > which pools there are, which disks hold which placement group, which client sessions are
-> alive. It changes rarely and is never on the I/O path.
+> alive. Its leader also keeps track of how much space each pool has left. It changes rarely and
+> is never on the I/O path.
 
 The `ctl/...` keys live in one dedicated control-plane Raft group, not sharded. It stays small
 because it maps placement groups, not chunks: 2048 PGs × 3 replicas × a 4-byte disk ID, plus each
 PG's interval numbers, is 40 KiB ([02-chunks-and-placement.md](02-chunks-and-placement.md)). Its
 leader commits each new placement table as one Raft entry holding the changed PG entries, with a
-new table epoch, marks a node down after `node_down_after` (5 s) without
-a heartbeat, renews each node's client session on that same heartbeat, and publishes expired
-sessions as fenced. Every node caches its tables.
+new table epoch, and marks a node down after `node_down_after` (5 s) without a heartbeat. That same
+heartbeat, once a second, renews the node's client session, reports its disks' fill and asks for
+the node's *space grant*, the bytes of each pool its daemon may buffer before flushing
+([09-rwx-filesystem-and-cache-coherence.md](09-rwx-filesystem-and-cache-coherence.md#a-full-pool-space-grants)).
+Renewals and grants live only in the leader's memory, and only a leader holding its leader lease
+answers them. The Raft log changes only when a session starts or is fenced: the leader commits
+expired sessions as fenced in a new version of the *session table*, and commits that version as
+acknowledged once every storage node has applied it or been marked down. From the reported fills it computes each
+pool's capacity figures. Every node caches the placement and session tables.
 
 Chunk primaries need an outside authority to say who is live and who is primary; a Raft group
 elects its own leader and needs none, "which breaks the circle". It arrives with the MetaStore in
@@ -653,8 +663,8 @@ on an Apple M4 Pro under macOS against rock-solid's earlier Rust tree, since del
 | Bytes per file, memtable | 235 B (263 B modelled for Linux); +101 to 117 B per xattr; an earlier tree's 373 B stayed flat from 1M to 30M files; get p50 about 1 µs | [MetaStore memory spike](../docs/design.md#appendix-metastore-memory-spike) |
 | Bytes per file, sorted runs | 133 B against 199 B in the memtable, plus 3.5 B of filter; the spike's prefix-compressed blocks gave 135 B (F4) | [On-disk format](../docs/design.md#on-disk-format) |
 
-Two spike conclusions were later revised, and the design is the authority: the multi-raft spike
-recommended writing an own Raft shard, and the raft rounds spike started from v3.7.0 as the pin.
+The design departs from two spike conclusions, and the design is the authority: the multi-raft
+spike recommended writing an own Raft shard, and the raft rounds spike took v3.7.0 as the pin.
 
 ## Trade-offs: what it costs us
 

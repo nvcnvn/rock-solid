@@ -61,7 +61,9 @@ Drives and the kernel:
 rock-solid's data:
 
 - **Chunk, version.** Files and volumes are cut into 4 MiB chunks. Every write to a chunk gets a
-  new version number. See [02-chunks-and-placement.md](02-chunks-and-placement.md).
+  new version: a 64-bit number whose high half numbers its placement group's current *interval*
+  (a stretch with unchanged members and primary) and whose low half counts the chunk's writes in
+  it. See [02-chunks-and-placement.md](02-chunks-and-placement.md).
 - **MetaStore, shard, Raft.** File metadata lives in the MetaStore, split into shards. Each shard
   is replicated over a few nodes with Raft, a protocol that keeps a log of changes which each
   replica must make durable before it acknowledges. See [08-the-metastore.md](08-the-metastore.md).
@@ -100,7 +102,7 @@ Your 4 KiB passes two caches on its way to flash. Look at where each call return
 your process --> page cache --------> drive write cache --flush--> flash
 
 plain write()       returns here
-O_DIRECT write()                       returns here (~13 us)
+O_DIRECT write()                       returns here (~14 us)
 + fdatasync()                                                     returns here (~1 ms)
 
 a power cut loses everything that has not reached the right-hand column
@@ -116,7 +118,7 @@ cut does with and without the flush:
 time ->
 
 without a flush
-  app:    write A --- "ok" after ~13 us ------------------------ power cut
+  app:    write A --- "ok" after ~14 us ------------------------ power cut
   drive:  A sits in RAM cache ................................... X   A is lost
 
 with write + flush
@@ -167,7 +169,8 @@ The spikes measured how badly the top half goes:
   120 ms as 100 separate commits, and 1.2 ms as one combined commit in a shared file
   ([KV engines spike](../spikes/kv-engines/), K4).
 - **Neither does the kernel.** Threads on different CPUs each get their own flush; the drive
-  overlaps two flush streams at unchanged latency, and four or more add latency (N7).
+  overlaps two flush streams at unchanged latency, four or more add latency, and it completes at
+  most about 2,800 flushes a second however many are queued (N7).
 - **Filesystems add flushes.** Writing into allocated but never-written file space makes
   `fdatasync` commit the ext4 journal too: 2.5 ms instead of 0.95 ms (N2d).
 - **A second flush per record doubles the cost.** Flushing data first and its header second, so
@@ -308,6 +311,7 @@ one record = header block(s) + data blocks, written in one write
 |          punch  (same fields: zero this range)                   33 B    |
 |          freeze (pool, chunk id, version, snapshot epoch)        37 B    |
 |          blob   (kind, owner, length)                            14 B    |
+|          copy   (a write's fields + its source; planned)         41 B    |
 | CRC32C of data block 0 | CRC32C of data block 1 | ...   4 B per block    |
 | zero padding to the end of the last header block                         |
 +------------------------------- data blocks ------------------------------+
@@ -321,7 +325,10 @@ A **write** puts blocks of a chunk version on disk; a **punch** zeroes a range a
 (the whole chunk deletes it); a **freeze** pins a chunk version for a snapshot, so the snapshot
 keeps reading that version's blocks after later writes; a **blob** carries everything else, Raft
 entries and state, sorted-run pieces and manifests, with an owner field naming its shard or index.
-The cleaner's **copy** entry, for blocks it moves, is *(planned)* with the cleaner.
+The cleaner's **copy** entry, for blocks it moves, also names where it copied them from, so the
+move applies only where the index still points there; it is *(planned)* with the cleaner
+([post 05](05-the-cleaner-and-free-space.md)). Of a write entry's 33 bytes, 8 are the version,
+and a write into a chunk slot *(planned)* adds 6 bytes naming the slot.
 
 A concrete size: a single 4 KiB write is a 2-block record, with 48 + 33 + 4 = 85 header bytes
 padded to one block. One header block has room for a write of up to 1,003 data blocks
@@ -427,7 +434,8 @@ On a drive with PLP, FUA may well be faster, so `durability` is a per-disk drive
 **How it works.** Each round takes what arrived from every producer during the last round, up to
 `max_group_commit_bytes` (default 1 MiB), builds one record, appends it to one stream's open
 segment in one write (after the segment header, if the round opens a new segment), flushes once,
-and acknowledges every item. Follow one round from top to bottom; the event loops and the
+and acknowledges every item. A round writes one record to one stream, and rounds take the
+streams that have work in turn. Follow one round from top to bottom; the event loops and the
 `io_uring` driver around the log are *(planned, phase 5)*:
 
 ```mermaid
@@ -449,11 +457,12 @@ sequenceDiagram
     O-->>S: inbox message naming what became durable
 ```
 
-Why 1 MiB? On the measured drive a commit costs the same 0.95 ms from 4 KiB to 64 KiB, 1.9 ms at
-256 KiB and 2.3 ms at 1 MiB. Past 1 MiB, latency grows faster than throughput. The cap also bounds
-how long a large chunk write delays a metadata commit. It is the only bound on a round: in the
-[raft rounds spike](../docs/design.md#appendix-raft-rounds-spike), rounds under open load stayed
-below 574 KiB, a 256 KiB cap cost a third of the throughput, and a time bound changed nothing.
+Why 1 MiB? On the measured drive a commit costs the same 0.95 ms from 4 KiB to 64 KiB, 1.2 to 1.9
+ms at 256 KiB and 2.3 ms at 1 MiB. Past 1 MiB, latency grows faster than throughput. The cap also
+bounds how long a large chunk write delays a metadata commit. It is the only bound on a round: in
+the [raft rounds spike](../docs/design.md#appendix-raft-rounds-spike), rounds under open load
+stayed below 574 KiB, a 256 KiB cap cost a third of the throughput, and a time bound changed
+nothing.
 
 ### Durability is a prefix
 
@@ -467,6 +476,12 @@ once its own write and every earlier round's write have completed. So when a rec
 every record before it is too, and at a crash only the last `commit_depth` records can be torn or
 missing. Pebble and RocksDB make the same choice: one sync in flight per log, with throughput
 coming from the group collected while it runs ([durability study](../spikes/lsm-study-durability/)).
+
+A second round in flight would not pay on a consumer drive anyway. A flush drains the drive's
+whole write cache, so in the [stream overlap spike](../docs/design.md#appendix-stream-overlap-spike)
+a hot 4K commit next to a stream of 1 MiB cold records took 2.3 ms with two rounds in flight:
+no better than the 2.35 ms of putting both records in one round under one flush, and far from
+the 0.95 ms it takes alone. So `commit_depth` stays 1.
 
 ### One owner loop per disk
 
@@ -509,8 +524,9 @@ LSNs are global: hot 1, 2, 4 ... cold 3, 6 ... metadata 5 ... merge back into on
 - **Hot** takes new chunk writes and the Raft entries of the same round.
 - **Cold** takes blocks the cleaner moves and erasure-coded pieces of chunks.
 - **Metadata** *(planned)* takes sorted runs, compaction output and manifests, which are written
-  whole and die whole when a compaction or a newer manifest replaces them. Until it lands,
-  checkpoint pieces go to the cold stream.
+  whole and die whole when a compaction or a newer manifest replaces them. Each running merge
+  fills a metadata segment of its own, so a merge's consumed inputs free whole segments
+  ([post 06](06-the-lsm-tree.md)). Until the stream lands, checkpoint pieces go to the cold stream.
 
 Raft entries stay in the hot stream because a round writes one record to one stream: a Raft
 stream would split a commit's chunk write and its Raft entries into two rounds and two flushes. It
@@ -544,7 +560,8 @@ More in [post 05](05-the-cleaner-and-free-space.md).
 one order by LSN. *(Planned:)* a record header also names the newest LSN that was durable when its
 round was built, as Pebble writes the offset its write-ahead log had synced into every chunk
 header. That lets recovery tell a missing record that was durable (corruption) from one still in
-flight (a torn tail). It adds 8 bytes to the prelude, taking it to 56.
+flight (a torn tail). It adds 8 bytes to the prelude, taking it to 56, so one header block then
+holds a write of up to 1,001 data blocks instead of 1,003.
 
 ### The chunk index: where every block lives
 
@@ -567,9 +584,12 @@ after v2: block 10 rewritten, stored at LBA 9000
     [ v1  0-9  @ 5000 ][ v2  10  @ 9000 ][ v1  11-15  @ 5011 ]
 ```
 
-A primary maps a write into the index only once it *commits* (every live replica holds it); until
-then its record is in the log and reads see the previous version. If the index is lost, a scan of
-the record headers rebuilds it. Keys, filters and compaction are in [post 06](06-the-lsm-tree.md).
+A primary maps a write into the index only once it *commits* (every live member of its placement
+group holds it); until then its record is in the log and reads see the previous version. A member
+that is not the primary serves no live reads, so it maps writes as soon as they are durable. Either
+way a chunk's writes are mapped in version order, or an older write could trim a newer one away. If
+the index is lost, a scan of the record headers rebuilds it. Keys, filters and compaction are in
+[post 06](06-the-lsm-tree.md).
 
 ### Checkpoints and manifests
 
@@ -585,18 +605,26 @@ index's runs, the LSN each replays from, and the segment usage table (which segm
 [post 05](05-the-cleaner-and-free-space.md)).
 
 - **When.** A checkpoint is due once `max_replay_bytes` (default 64 MiB) of records follow the
-  last manifest, which bounds replay after a crash. *(Planned:)* if they reach twice that, rounds
-  take items only from the checkpoint and the cleaner until a manifest is durable, as Pebble and
-  RocksDB stop writes at two memtables.
+  last manifest, which bounds replay after a crash and the Raft entries a shard keeps in memory.
+  *(Planned:)* if they reach twice that, rounds take items only from the checkpoint and the
+  cleaner until a manifest is durable, as Pebble and RocksDB stop writes at two memtables, which
+  makes that bound hard. Replay can still run a little past it: up to a segment per stream, the
+  records written while the checkpoint's runs streamed out, and, on a disk holding replicated
+  primaries, everything logged while the oldest uncommitted write waited, since a replay point
+  never passes a write that has not committed.
 - **Full manifests and edits.** The code writes a full manifest every time. *(Planned:)* most
-  checkpoints write an *edit* holding only what changed, and a full one (which Pebble and RocksDB
-  call a snapshot, unrelated to volume snapshots) only by Pebble's rotation rule. The full usage
-  table grows with the disk: in every manifest it would cost 0.42% of the log on a 1 TiB disk at
+  checkpoints write an *edit* holding only what changed (runs added and removed, replay LSNs, the
+  usage rows that changed), and a full one (which Pebble and RocksDB call a snapshot, unrelated
+  to volume snapshots) only by Pebble's rule: once the edits since the last snapshot would
+  outgrow the smaller of that snapshot and the next. Snapshots are then at most half of what
+  manifests write, and recovery reads at most twice a snapshot. The full usage table grows with
+  the disk: in every manifest it would cost 0.42% of the log on a 1 TiB disk at
   90% full and 6.6% on 16 TiB, against 0.13% and about 0.16% with edits
   ([durability study](../spikes/lsm-study-durability/)).
-- **Finding it.** A manifest larger than a record is written in pieces, the last listing the
-  others. Each segment header names the newest manifest when the segment opens, so the headers do
-  the job of RocksDB's `CURRENT` file, the small file that names the current manifest.
+- **Finding it.** A manifest larger than a record is written in pieces; its last piece lists the
+  pieces of its snapshot and of every edit since. Each segment header names the newest manifest
+  when the segment opens, so the headers do the job of RocksDB's `CURRENT` file, the small file
+  that names the current manifest.
 
 ### Crash recovery and the tail rule
 
@@ -718,7 +746,7 @@ All numbers are as the design's appendices and the spike READMEs give them.
 | Durable-write floor on a consumer drive | 4K write + `fdatasync`: p50 0.95 ms, p99 2.4 ms, ~1,090/s; 1.9 to 2.1 ms after 100 ms to 3 s idle | [NVMe flush spike](../docs/design.md#appendix-nvme-flush-spike), N2, N6 |
 | One write + one flush, not two flushes | Data + flush, then header + flush: 1.93× one write + flush | NVMe flush, N3b |
 | Write + flush, not FUA | `O_DSYNC` (FUA) 2.2 ms; `fsync` 2.5 ms; write + `fdatasync` 0.95 ms | NVMe flush, N5, N5c |
-| 1 MiB round cap | 0.95 ms flat from 4 to 64 KiB, 1.9 ms at 256 KiB, 2.3 ms at 1 MiB, 4.3 ms at 4 MiB | NVMe flush, N3 |
+| 1 MiB round cap | 0.95 ms flat from 4 to 64 KiB, 1.2 to 1.9 ms at 256 KiB, 2.3 ms at 1 MiB, 4.3 ms at 4 MiB | NVMe flush, N3 |
 | No time bound on rounds | 256 KiB cap lost a third of throughput; rounds ≤ 574 KiB under open load | [raft rounds spike](../docs/design.md#appendix-raft-rounds-spike) |
 | One flush stream per disk | Kernel merges no flushes across CPUs; 2 streams overlap, 4+ add latency | NVMe flush, N7 |
 | Share one flush across shards | 100 shards: one combined commit 1.2 ms, 100 separate 114 to 120 ms | [KV engines spike](../docs/design.md#appendix-kv-engines-spike), K4 |
@@ -726,6 +754,7 @@ All numbers are as the design's appendices and the spike READMEs give them.
 | Bound replay | `fjall` replays 0.53 s at 16 MB, 2.8 s at 64 MB | KV engines, K5 |
 | One owner loop per disk | Hop 13.6 µs CPU, 0.07 µs per batched item; 39 items per flush vs 8 (cloud VM, virtio disk) | [log per core spike](../docs/design.md#appendix-log-per-core-spike) |
 | Depth 1, durable LSN, manifest edits | Pebble and RocksDB keep one sync in flight; full table 0.415% of the log per checkpoint at 1 TiB vs 0.129% with edits | [durability study](../docs/design.md#appendix-lsm-study-durability-spike), M2 |
+| Depth 1 on a consumer drive | Hot 4K commit next to 1 MiB cold records: 2.3 ms with two rounds in flight, 2.35 ms in one round, 3.04 ms alternating, 0.95 ms alone | [stream overlap spike](../docs/design.md#appendix-stream-overlap-spike), H1 to H4 |
 | Streams | Runs mixed with cleaner copies: +25 to 54% write amplification at 80 to 90% full; own stream: +3 to 15% | [cleaner streams spike](../docs/design.md#appendix-cleaner-streams-spike) |
 | Chunk slots | 1.004 at any fill vs 4.9 (90%) and 9.0 (95%) in the log | cleaner streams spike |
 | Whole blocks for small writes | 100-byte append + fsync alone: 8,288 B per copy (83×), 4,196 B with the bytes in the header; 1.5 KiB file in rep3: 12,399 B (8.1×) | [sub-block writes spike](../docs/design.md#appendix-sub-block-writes-spike), A1, S1 |
@@ -806,6 +835,7 @@ Design:
   [log per core](../docs/design.md#appendix-log-per-core-spike),
   [io_uring registered buffers](../docs/design.md#appendix-io_uring-registered-buffers-spike),
   [LSM study: durability](../docs/design.md#appendix-lsm-study-durability-spike),
+  [stream overlap](../docs/design.md#appendix-stream-overlap-spike),
   [sub-block writes](../docs/design.md#appendix-sub-block-writes-spike)
 - [Glossary: drives and durability](../docs/glossary.md#drives-and-durability),
   [on-disk structures](../docs/glossary.md#on-disk-structures)
@@ -820,6 +850,7 @@ Spikes: [`spikes/nvme-flush/`](../spikes/nvme-flush/),
 [`spikes/log-per-core/`](../spikes/log-per-core/),
 [`spikes/uring-registered/`](../spikes/uring-registered/),
 [`spikes/lsm-study-durability/`](../spikes/lsm-study-durability/),
+[`spikes/stream-overlap/`](../spikes/stream-overlap/),
 [`spikes/sub-block-writes/`](../spikes/sub-block-writes/); study:
 [sub-block writes and small files](../studies/sub-block-writes/README.md)
 
