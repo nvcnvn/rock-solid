@@ -5,8 +5,11 @@
 - Everything but `cmd/` and `tools/` lives under `internal/`. Packages there are sans-IO, except
   `loop`, `driver/…`, `frontend/…` and `csi` (see "Modularity" in `docs/design.md`).
 - In a sans-IO package: no goroutine, channel, `select`, `sync` or `sync/atomic`; no clock, `os`,
-  `net`, `syscall` or `unsafe`; no `range` over a map. Time comes from `ctx.Now`, randomness from
-  a seeded `math/rand/v2` source the machine owns. A corrupt message or failed disk is an event to
+  `net`, `syscall` or `unsafe`; no `range` over a map. Time comes from `ctx.Now` (`CLOCK_BOOTTIME`)
+  and `ctx.Raw` (`CLOCK_MONOTONIC_RAW`), randomness from a seeded `math/rand/v2` source the machine
+  owns. A time daemon can slew `ctx.Now` by up to 22.6%, so anything that must hold across nodes,
+  such as a lease, is counted on both: a holder stops on whichever clock runs faster, a grantor waits
+  for the slower ("Lease time" in `docs/design.md`). A corrupt message or failed disk is an event to
   handle; panic only on a broken invariant of the machine's own state. Protocol logic goes here,
   never in a frontend.
 - On the data path, follow "Runtime in Go" in `docs/design.md`: one epoll loop per core on raw
