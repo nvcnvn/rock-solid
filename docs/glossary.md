@@ -238,6 +238,10 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Removal marker.** What an LSM tree writes to delete a key: an entry saying "deleted", since the older runs holding the key are immutable. It hides the key in every older run until a compaction that includes the oldest run drops it with them. Other engines call it a tombstone, the word rock-solid keeps for a deleted chunk. A **range removal** hides every key from one key up to another, as RocksDB's and Pebble's `DeleteRange` do, kept as non-overlapping fragments per memtable and run that hide older layers' keys but not their own run's; the chunk index uses one when a write covers several old extents and to remove a punched chunk's live map, and the MetaStore to drop a volume or a list's consumed prefix. See [The LSM tree](design.md#on-disk-format).
 
+**Value separation.** Keeping large values out of an index, in a log of their own, so the index holds only their locations and merging it rewrites small entries instead of the data; WiscKey introduced it, and RocksDB's BlobDB, TiKV's Titan and Pebble ship it. The price is a cleaner that copies live values out of old log space and updates the index. rock-solid's chunk data and chunk index are laid out this way; see [On-disk format](design.md#on-disk-format).
+
+**Copy entry.** The record entry a cleaner writes for blocks it moves: the chunk, version and blocks, plus the location it copied them from. Replay applies it only where the index still holds that location, so a write that replaced the blocks first is never undone. See [On-disk format](design.md#on-disk-format).
+
 **Delete-only compaction.** Pebble's name for dropping whole tables that a newer range deletion covers, by editing the manifest instead of merging. See [The LSM tree](design.md#on-disk-format).
 
 **Run piece.** A sorted run is written to the log in pieces of at most one record each; the last, the root, lists the others, so a manifest names a run by its root. See [The LSM tree](design.md#on-disk-format).

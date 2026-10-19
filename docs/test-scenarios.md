@@ -513,8 +513,11 @@ the model's run through recovery, replay the records after its replay LSN, resum
   freeze of version 0 of a chunk that exists and holds no absent version, is refused whole.
 - A whole-chunk punch leaves the chunk entry and one range removal over the live map; frozen maps
   read as before.
-- A cleaner copy logged before or after the write that replaced the copied block, rebuilt from the
-  records in LSN order and applied twice: the write wins wherever it covers the block.
+- Copy entries in replay: chunk 7 v1 block 0 at LBA 101, a copy entry moving it from LBA 101 to LBA
+  601. Logged after a write v2 of block 0, the copy changes nothing, live or in a rebuild. Logged
+  before it, the rebuild applies it and the write then replaces it. Either way the rebuilt live map
+  and record counts equal the live index's, and applying the records twice changes nothing. A plain
+  write entry in its place would map block 0 back to v1.
 - Removals: chunk 7 written as 1,024 one-block extents, checkpointed, then rewritten in one
   1,024-block write: the index holds one range removal for blocks 1 to 1,023 and no point removal, a
   lookup of every block takes at most two searches before the checkpoint, after it and after a
