@@ -1,0 +1,55 @@
+# Linux 6.18.44-fc-v139, python 3.13.16 numpy 2.5.3, 2026-10-19T05:48Z
+capacity model; python 3.13.16, numpy 2.5.3
+== C1: rep2 on two nodes, 0.7 and 2 GB disks, rep2, 128 PGs, write_limit 90%
+   naive, free raw / overhead (design text)  1.35 GB
+   naive, headroom to write_limit / overhead 1.22 GB
+   Ceph MAX AVAIL rule (CRUSH weight = size)  1.22 GB
+   balanced bound over failure domains       0.63 GB
+   balanced bound after losing domain B       0.00 GB
+   [weighted] converged=False worst |load/target-1|=0.93 available-from-table 0.63 GB; first refusal over 40 fills: mean 0.63 GB (1.00x), p5 0.63 GB
+   [capped  ] converged=True worst |load/target-1|=0.00 available-from-table 0.63 GB; first refusal over 40 fills: mean 0.63 GB (1.00x), p5 0.63 GB
+== C2: rep3 on four nodes, 4, 4, 2 and 1 TB, rep3, 128 PGs, write_limit 90%
+   naive, free raw / overhead (design text)  3.667 TB
+   naive, headroom to write_limit / overhead 3.300 TB
+   Ceph MAX AVAIL rule (CRUSH weight = size)  3.300 TB
+   balanced bound over failure domains       2.700 TB
+   balanced bound after losing domain A       900.00 GB
+   [weighted] converged=False worst |load/target-1|=0.23 available-from-table 2.679 TB; first refusal over 40 fills: mean 2.680 TB (1.00x), p5 2.671 TB
+   [capped  ] converged=True worst |load/target-1|=0.01 available-from-table 2.679 TB; first refusal over 40 fills: mean 2.680 TB (1.00x), p5 2.671 TB
+== C3: ec4-2 at 2 per node on three nodes, 2x2, 2x2 and 2x0.5 TB, ec4-2 at 2 per node, 128 PGs, write_limit 90%
+   naive, free raw / overhead (design text)  6.000 TB
+   naive, headroom to write_limit / overhead 5.400 TB
+   Ceph MAX AVAIL rule (CRUSH weight = size)  5.400 TB
+   balanced bound over failure domains       1.800 TB
+   balanced bound after losing domain A       0.00 GB
+   [weighted] converged=False worst |load/target-1|=2.00 available-from-table 1.800 TB; first refusal over 40 fills: mean 1.800 TB (1.00x), p5 1.800 TB
+   [capped  ] converged=True worst |load/target-1|=0.00 available-from-table 1.800 TB; first refusal over 40 fills: mean 1.800 TB (1.00x), p5 1.800 TB
+== C4: none, spread, three 2 TB disks, one holding 1.2 TB of another pool, none, 256 PGs, write_limit 90%
+   naive, free raw / overhead (design text)  4.800 TB
+   naive, headroom to write_limit / overhead 4.200 TB
+   Ceph MAX AVAIL rule (CRUSH weight = size)  1.800 TB
+   balanced bound over failure domains       4.200 TB
+   balanced bound after losing domain A       3.600 TB
+   [weighted] converged=True worst |load/target-1|=0.01 available-from-table 1.786 TB; first refusal over 40 fills: mean 1.787 TB (1.00x), p5 1.782 TB
+   [capped  ] converged=True worst |load/target-1|=0.02 available-from-table 4.189 TB; first refusal over 40 fills: mean 4.185 TB (1.00x), p5 4.178 TB
+== C5: rep3 on ten nodes, 4,4,4,2,2,2,1,1,1,0.5 TB, rep3, 512 PGs, write_limit 90%
+   naive, free raw / overhead (design text)  7.167 TB
+   naive, headroom to write_limit / overhead 6.450 TB
+   Ceph MAX AVAIL rule (CRUSH weight = size)  6.450 TB
+   balanced bound over failure domains       6.450 TB
+   balanced bound after losing domain A       5.250 TB
+   [weighted] converged=True worst |load/target-1|=0.02 available-from-table 6.422 TB; first refusal over 40 fills: mean 6.423 TB (1.00x), p5 6.416 TB
+   [capped  ] converged=True worst |load/target-1|=0.02 available-from-table 6.422 TB; first refusal over 40 fills: mean 6.423 TB (1.00x), p5 6.416 TB
+== C6: rep2 on three nodes, 4, 1 and 1 TB, rep2, 128 PGs, write_limit 90%
+   naive, free raw / overhead (design text)  3.000 TB
+   naive, headroom to write_limit / overhead 2.700 TB
+   Ceph MAX AVAIL rule (CRUSH weight = size)  2.700 TB
+   balanced bound over failure domains       1.800 TB
+   balanced bound after losing domain A       900.00 GB
+   [weighted] converged=False worst |load/target-1|=0.50 available-from-table 1.800 TB; first refusal over 40 fills: mean 1.798 TB (1.00x), p5 1.796 TB
+   [capped  ] converged=True worst |load/target-1|=0.00 available-from-table 1.800 TB; first refusal over 40 fills: mean 1.798 TB (1.00x), p5 1.796 TB
+== B1: per-disk bytes of one node's full 256 MiB buffer, relative to buffer x share
+   C2 (rep3, 4 disks, 128 PGs): disk share 0.336..1.000; worst disk per buffer p50 1.08x p99 1.40x max 1.77x; any one disk p99 1.30x
+   C5 (rep3, 10 disks, 512 PGs): disk share 0.068..0.561; worst disk per buffer p50 1.37x p99 2.29x max 3.43x; any one disk p99 1.80x
+== G1: pool-wide grant of 256 MiB per node, each disk keeping 10 x 256 MiB x share in reserve
+   all 10 buffers full at once: some disk past its reserve in 2000/2000 trials, worst 1.46x
