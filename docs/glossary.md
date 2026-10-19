@@ -170,6 +170,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Monotonic clock, clock skew, clock drift, slewing.** A monotonic clock only moves forward, unlike wall-clock time, which can jump. Skew is the difference between two clocks' readings; drift is the difference in their rates. A time daemon such as chrony corrects a clock's reading by **slewing** it: running it faster or slower for a while instead of jumping it, by up to 22.6% on Linux. Linux's `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` follow slews; `CLOCK_MONOTONIC_RAW` does not, so it drifts only as far as the machine's oscillator and its calibration at boot do. rock-solid counts every lease on both, each side taking the one that is safe for it. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
+**VM pause, VMClock.** A hypervisor can stop a virtual machine and later continue it, save it as a snapshot and restore it, or move it to another host while it runs (live migration). QEMU and Firecracker then give the guest its clocks back as they were, so to every clock inside the VM no time passed. **VMClock** is a page of memory the hypervisor shares with the guest; its **disruption marker** changes whenever the guest's clock was disrupted, which QEMU and Firecracker do on every restore and migration, but not on a stop and continue in place. rock-solid's lease holders end their leases when the marker changes, or when a peer's clock shows they lost time. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
+
 ## Consensus and metadata
 
 **Metadata.** Data about data: file names, directories, sizes, permissions, locks, which disks hold which PGs. It is small but every operation needs it, and losing it loses the data it describes.

@@ -1,0 +1,72 @@
+# Python 3.13.16 | no VM | 2026-10-19T07:53:42Z
+# T6 model: L=4 s, lease_drift=1%, heartbeat 1 s, rate_window 10 s, round trips 0.2-1 ms; 100 pause phases per row
+# rule    in-flight  P(s)   stale exposure max/p50 (s)  blocked max/p50 (s)  detected after resume max (s)  undetected
+R rate    queued   0.50   0.000 /  0.000        0.000 /  0.000      3.981         0/100
+R rate    queued   2.00   0.000 /  0.000        0.000 /  0.000      3.981         0/100
+R rate    queued   3.50   0.500 /  0.496        0.522 /  0.000      3.981         0/100
+R rate    queued   5.00   0.991 /  0.496        2.878 /  0.879      3.981         0/100
+R rate    queued  10.00   0.991 /  0.496        4.041 /  4.040      3.981         0/100
+R rate    queued  30.00   0.991 /  0.496        4.041 /  4.040      3.981         0/100
+R step    queued   0.50   0.000 /  0.000        0.001 /  0.001      0.991         0/100
+R step    queued   2.00   0.000 /  0.000        0.001 /  0.001      0.991         0/100
+R step    queued   3.50   0.500 /  0.496        0.001 /  0.001      0.991         0/100
+R step    queued   5.00   0.991 /  0.496        0.001 /  0.001      0.991         0/100
+R step    queued  10.00   0.991 /  0.496        0.001 /  0.001      0.991         0/100
+R step    queued  30.00   0.991 /  0.496        0.001 /  0.001      0.991         0/100
+R hb      queued   0.50   0.000 /  0.000        0.001 /  0.001      0.502         0/100
+R hb      queued   2.00   0.000 /  0.000        0.001 /  0.001      0.000         0/100
+R hb      queued   3.50   0.000 /  0.000        0.001 /  0.001      0.000         0/100
+R hb      queued   5.00   0.000 /  0.000        0.000 /  0.000      0.000         0/100
+R hb      queued  10.00   0.000 /  0.000        0.000 /  0.000      0.000         0/100
+R hb      queued  30.00   0.000 /  0.000        0.000 /  0.000      0.000         0/100
+R marker  queued   0.50   0.000 /  0.000        0.000 /  0.000      3.981         0/100
+R marker  queued   2.00   0.000 /  0.000        0.000 /  0.000      3.981         0/100
+R marker  queued   3.50   0.500 /  0.496        0.522 /  0.000      3.981         0/100
+R marker  queued   5.00   0.991 /  0.496        2.878 /  0.879      3.981         0/100
+R marker  queued  10.00   0.991 /  0.496        4.041 /  4.040      3.981         0/100
+R marker  queued  30.00   0.991 /  0.496        4.041 /  4.040      3.981         0/100
+R all     queued   0.50   0.000 /  0.000        0.001 /  0.001      0.502         0/100
+R all     queued   2.00   0.000 /  0.000        0.001 /  0.001      0.000         0/100
+R all     queued   3.50   0.000 /  0.000        0.001 /  0.001      0.000         0/100
+R all     queued   5.00   0.000 /  0.000        0.000 /  0.000      0.000         0/100
+R all     queued  10.00   0.000 /  0.000        0.000 /  0.000      0.000         0/100
+R all     queued  30.00   0.000 /  0.000        0.000 /  0.000      0.000         0/100
+R rate    lost     0.50   0.000 /  0.000        0.000 /  0.000      3.981         0/100
+R rate    lost     2.00   0.000 /  0.000        0.000 /  0.000      3.981         0/100
+R rate    lost     3.50   0.500 /  0.496        0.522 /  0.000      3.981         0/100
+R rate    lost     5.00   0.991 /  0.496        2.878 /  0.879      3.981         0/100
+R rate    lost    10.00   0.991 /  0.496        4.041 /  4.040      3.981         0/100
+R rate    lost    30.00   0.991 /  0.496        4.041 /  4.040      3.981         0/100
+R step    lost     0.50   0.000 /  0.000        0.001 /  0.001      0.991         0/100
+R step    lost     2.00   0.000 /  0.000        0.001 /  0.001      0.991         0/100
+R step    lost     3.50   0.500 /  0.496        0.001 /  0.001      0.991         0/100
+R step    lost     5.00   0.991 /  0.496        0.001 /  0.001      0.991         0/100
+R step    lost    10.00   0.991 /  0.496        0.001 /  0.001      0.991         0/100
+R step    lost    30.00   0.991 /  0.496        0.001 /  0.001      0.991         0/100
+R hb      lost     0.50   0.000 /  0.000        0.001 /  0.001      0.901         0/100
+R hb      lost     2.00   0.000 /  0.000        0.001 /  0.001      0.937         0/100
+R hb      lost     3.50   0.500 /  0.235        0.001 /  0.000      0.901         0/100
+R hb      lost     5.00   0.937 /  0.276        0.001 /  0.000      0.936         0/100
+R hb      lost    10.00   0.937 /  0.276        0.001 /  0.000      0.936         0/100
+R hb      lost    30.00   0.937 /  0.276        0.001 /  0.000      0.936         0/100
+R marker  lost     0.50   0.000 /  0.000        0.001 /  0.001      0.000         0/100
+R marker  lost     2.00   0.000 /  0.000        0.001 /  0.001      0.000         0/100
+R marker  lost     3.50   0.000 /  0.000        0.001 /  0.001      0.000         0/100
+R marker  lost     5.00   0.000 /  0.000        0.000 /  0.000      0.000         0/100
+R marker  lost    10.00   0.000 /  0.000        0.000 /  0.000      0.000         0/100
+R marker  lost    30.00   0.000 /  0.000        0.000 /  0.000      0.000         0/100
+R all     lost     0.50   0.000 /  0.000        0.001 /  0.001      0.000         0/100
+R all     lost     2.00   0.000 /  0.000        0.001 /  0.001      0.000         0/100
+R all     lost     3.50   0.000 /  0.000        0.001 /  0.001      0.000         0/100
+R all     lost     5.00   0.000 /  0.000        0.000 /  0.000      0.000         0/100
+R all     lost    10.00   0.000 /  0.000        0.000 /  0.000      0.000         0/100
+R all     lost    30.00   0.000 /  0.000        0.000 /  0.000      0.000         0/100
+[OK ] T6 rule rate grants in flight any: worst stale exposure got=0.991s want=>0
+[OK ] T6 rule step grants in flight any: worst stale exposure got=0.991s want=>0
+[OK ] T6 rule hb grants in flight queued: worst stale exposure got=0.000s want=0
+[OK ] T6 rule hb grants in flight lost: worst stale exposure got=0.937s want=>0
+[OK ] T6 rule marker grants in flight queued: worst stale exposure got=0.991s want=>0
+[OK ] T6 rule marker grants in flight lost: worst stale exposure got=0.000s want=0
+[OK ] T6 rule all grants in flight any: worst stale exposure got=0.000s want=0
+[OK ] T6 every rule: worst stale exposure got=0.991s want<=heartbeat 1s
+[OK ] T6 rule rate: the pause shortens later leases (worst blocked) got=4.041s want>1s

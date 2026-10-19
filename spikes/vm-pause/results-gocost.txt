@@ -1,0 +1,13 @@
+# Linux 6.18.44-fc-v139 go1.27.0 linux/amd64 2026-10-19T07:51:58Z
+goos: linux
+goarch: amd64
+pkg: vmpause/gocost
+cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+BenchmarkMarker-4                   	801574074	         2.846 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMarker-4                   	851634829	         2.757 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMarker-4                   	956828380	         2.791 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRawSyscallMonotonicRaw-4   	14122446	       196.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRawSyscallMonotonicRaw-4   	11464458	       204.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRawSyscallMonotonicRaw-4   	11827230	       196.6 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	vmpause/gocost	14.750s

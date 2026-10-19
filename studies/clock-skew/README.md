@@ -1,6 +1,6 @@
 # Clock skew: CockroachDB's bounded offset against rock-solid's bounded rate
 
-**Status:** read from source and documentation, no experiment. Recommendations 1, 4 and 5 are adopted in the design; 2 and 3 are open, and each [recommendation](#recommendations) names the sections it touches.
+**Status:** read from source and documentation, no experiment. Recommendations 1, 4 and 5 are adopted in the design, 3 led to the [VM pause spike](../../spikes/vm-pause/), and 2 is open. Each [recommendation](#recommendations) names the sections it touches.
 
 **Question:** CockroachDB runs on commodity clocks, without Spanner's atomic and GPS time, by assuming a bound on the *offset* between any two nodes' wall clocks and then waiting or repeating work around that bound. rock-solid counts every lease as a *duration* on two local clocks and never compares readings across nodes ([Lease time](../../docs/design.md#epoch-changes-and-failure-detection)). Does any of CockroachDB's machinery (hybrid logical clocks, the maximum offset and self-termination, uncertainty restarts, read refresh, commit wait, lease stasis) map onto rock-solid, and would adopting it simplify the design or the code?
 
@@ -126,7 +126,7 @@ None of these changes the lease design. Each names what it would touch.
 - **When `--max-offset` changed.** The source at master has a 500 ms default, a separate tolerated offset at 80% and `--disable-max-offset-check`; the documentation recommends 250 ms for new multi-region clusters. Which release split the tolerated offset from `max_offset` was not checked.
 - **CockroachDB's leader-lease failover figures** are the generated comment in `pkg/base/config.go`, not a measurement.
 - **The rate-estimate arithmetic** (2*J*/*W*) assumes jitter that is independent across samples and no asymmetric path change inside a window; a simulator scenario should check it.
-- **Host PTP clocks across a VM pause** (recommendation 3) are untested: whether `ptp_kvm` or VMClock keep counting across QEMU and Firecracker pauses, snapshot restores and migrations, and their read cost.
+- **Host PTP clocks across a VM pause** (recommendation 3): the [VM pause spike](../../spikes/vm-pause/) measured VMClock under QEMU without KVM, where it carries no time but a marker that changes on restore and migration; `ptp_kvm`, which needs KVM, is untested.
 - **`mtime` in other systems** (recommendation 4) was not read.
 - **Branch heads, not releases.** CockroachDB and its documentation were read at their default branches on 2026-10-19; the commits are pinned in `fetch.sh`.
 
