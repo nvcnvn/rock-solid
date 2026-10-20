@@ -2609,7 +2609,7 @@ A TLA+ specification of [Tier 2](design.md#cache-coherence-tiers) for one file. 
 4. **Lost recall.** The recall to B is lost and no answer comes. Expected: the owner waits for an acknowledgment or a fence, never for a timeout alone.
 5. **Delayed recall.** The recall reaches B after B closed and reopened the file. Expected: no stale read. Open: recalls carry no stated generation, so it is unspecified whether an acknowledgment of an older recall counts for a newer one.
 6. **Owner failover mid-recall.** Owner O1 has sent a recall to B and crashes before B acknowledges. O2 becomes the owner and, for one session lease (10 s), accepts only re-registrations. A and B re-register. Expected: no stale read before or after, and no new open answered during the grace period. Open: whether a re-registration carries "has written", and whether O2 sends the recall again or waits for it.
-7. **Leaving WriteShared.** B closes. The owner returns the file to Exclusive with no recall, and A's new opens are cached and its writes buffered again. A handle A opened with `direct_io` while the file was WriteShared stays uncached until A reopens it.
+7. **Leaving WriteShared.** B closes. The owner returns the file to Exclusive with no recall, and A's new opens are cached and its writes buffered again. A handle A opened with `direct_io` while the file was WriteShared stays uncached until A reopens it. Stored `mtime` 1,000 s; while WriteShared, B's last `stat` reported 1,000.000000040 s and A's 1,000.000000025 s. B's `close` stores 1,000.000000040 s, and A's next `stat`, no longer bumped, reports no less than 1,000.000000040 s. A planted variant that falls back to the stored `mtime` must fail "no file's `mtime` goes backwards".
 8. **First write in ReadShared from a handle opened `O_RDWR` that has only read.** The file stays ReadShared until the first actual write.
 9. **An extending write while WriteShared.** A writes 4 KiB past the end of a 10,000-byte file. The size is 14,096 in the MetaStore before A's write is acknowledged. B's `read()` of bytes 10,000 to 14,095 then returns them.
 
@@ -4069,6 +4069,7 @@ Transaction shapes, from the design's [transaction table](design.md#metadata-lay
 | `close` whose `Check(a)` loses a race with another node's size change | The check fails, not final | The daemon reads again and retries under the same request ID, and commits |
 | `close` or `fsync`, writer's clock behind | Stored `mtime` 1,000.000000005 s; the writer's wall clock reads 999.9 s | Stored `mtime` becomes 1,000.000000006 s |
 | `close` or `fsync`, writer's clock ahead | Stored `mtime` 1,000 s; the writer's last write at 1,001 s | Stored `mtime` becomes 1,001 s |
+| `close` of a write-shared file, writer's clock behind | Stored `mtime` 1,000 s; the node last reported 1,000.000000040 s; its last write at 999.9 s | Stored `mtime` becomes 1,000.000000040 s |
 | `utimensat(500 s)` | Same stored `mtime` | Stored `mtime` becomes 500 s |
 | flock `LOCK_EX` | Scan `fs/5/2:3/l/`; `CheckEmpty` over each gap between the keys found; put `fs/5/2:3/l/x/{s}` | Granted when no live session holds a key |
 | flock `LOCK_EX` while a session gone from the session table holds `l/x/{t}` | `Check(l/x/{t} = v)`, `Delete` it, the gap checks, `Put(l/x/{s})` | Granted in one `Txn`, the dead holder's key gone |
