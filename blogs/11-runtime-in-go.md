@@ -737,8 +737,10 @@ bar ([`internal/lsm/bench_test.go`](../internal/lsm/bench_test.go)).
 
 ## Evidence
 
-All measurements come from one 4-vCPU cloud VM with Go 1.27.0 and Rust 1.99.1; the appendices
-note where a restart moved the VM to another host. Each spike's design appendix and code:
+The Go and Rust measurements come from one 4-vCPU cloud VM with Go 1.27.0 and Rust 1.99.1, and the
+appendices note where a restart moved the VM to another host. The kernel-bypass and SPDK spikes ran
+on a laptop with one consumer NVMe drive, and the io_uring registered buffers spike on a bare-metal
+host and a Firecracker VM. Each spike's design appendix and code:
 [tuned Go](../docs/design.md#appendix-tuned-go-spike) ([code](../spikes/go-tuned/)),
 [Go and Rust codegen](../docs/design.md#appendix-go-and-rust-codegen-spike)
 ([code](../spikes/go-rust-codegen/)),

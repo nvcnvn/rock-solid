@@ -326,7 +326,7 @@ chunk 7 when B starts peering for interval 42
 ```
 
 *The new primary's own newest write is the one thrown away: B cannot trust its own disk more than
-the rule.* Had C been marked down during interval 41, so not live in it, 41.8 on B alone could have
+the rule.* Had C already been marked down when interval 41 began, so not live in it, 41.8 on B alone could have
 been acknowledged, and it would be kept. The rule hinges on who was live, not on who holds the
 newest version.
 
@@ -1048,8 +1048,8 @@ grantor's raw clock. The spike had no network card, so whether a hypervisor queu
 messages sent during a stop is the open question below.
 
 **Leases for metadata.** The case against etcd-raft's own lease (read from its v3.6.0 source)
-and the idle cost that per-node-pair leases let Raft groups shed, 36% of a core for 3,000 idle
-raft-rs replicas down to 0.07% when quiesced, are the evidence for post
+and the idle cost that per-node-pair leases let Raft groups shed, 13% of a core for 3,000 idle
+raft-rs replicas at the design's timing (36% at raft-rs's default heartbeat) down to 0.07% when quiesced, are the evidence for post
 [08-the-metastore.md](08-the-metastore.md); see the [multi-Raft spike README](../spikes/multi-raft/)
 and [Metadata layer](../docs/design.md#metadata-layer-metastore).
 
@@ -1075,8 +1075,10 @@ during peering and a node restarted within a lease it granted.
 
 ## Trade-offs and what it costs us
 
-- **A crash pauses writes for up to 5 s** (`node_down_after`) on the crashed primary's PGs. On a
-  3-node cluster that is every PG, since every PG has a member on every node.
+- **A crash pauses writes for up to 5 s** (`node_down_after`) on every PG with a member on the
+  crashed node, since a write waits for every live member; under write load the direct probe
+  marks its disks down sooner, as for the replica crash above. On a 3-node cluster that is every
+  PG, since every PG has a member on every node.
 - **Peering can wait on a past interval.** If no member of an interval since the last activated
   one can be reached, and that interval had at least `min_live` live members, the PG waits for
   one or for an operator, as Ceph's does in its `down` state.

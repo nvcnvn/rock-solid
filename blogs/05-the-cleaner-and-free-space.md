@@ -353,7 +353,8 @@ group-commit question is in [post 04](04-one-log-per-disk.md) and the
 **Chunk slots: data that dies alone.** One kind of data defeats streams: whole 4 MiB chunks of
 large files, deleted at random. A 64 MiB segment holds 16 of them, and random deletes leave it
 partly live, so they clean like small writes: 4.9 at 90% and 9.0 at 95% full. The fix is a *chunk
-slot* (planned for phase 6): a slot segment is 16 slots of exactly one chunk's data, a slot frees
+slot* (planned for phase 6): a slot segment holds as many slots of exactly one chunk's data as
+fit, 16 in a 64 MiB segment; a slot frees
 once the record that rewrote or deleted its chunk is durable, and the segment is freed with its
 last slot. Whole chunks then cost a WA of 1.004 at any fill, so a pool of large files, such as
 backups, can raise its `write_limit` to 95%.

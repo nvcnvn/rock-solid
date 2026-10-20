@@ -266,8 +266,10 @@ or own their storage, which rules both out.
 | `raft_election_timeout` | random 1 to 2 s | How long a follower waits before campaigning |
 | Election tick | 10 ms | Finer than the heartbeat, so timeouts take many distinct values and followers rarely time out together and split the vote |
 
-Failover is set by the slowest of the groups that lost their leader, so the design budgets 1.5 to
-5× the maximum election timeout: 3 to 10 s with the defaults.
+Failover is set by the slowest of the groups that lost their leader. A crashed leader's followers
+stay fortified until its node's grants lapse, `primary_lease` (4 s; see the leases below), and then
+elect in 1.5 to 5× the maximum election timeout, 3 to 10 s with the defaults, so the design budgets
+7 to 15 s from the crash to a new leader.
 
 ## The options: where can metadata live?
 
@@ -538,8 +540,9 @@ metadata, is copied out instead.
 - **Batching per connection.** The driver sends every group's messages for one peer loop as one
   batch over their connection. In the multi-raft spike, 80,000 Raft messages per second fit in
   240 batches.
-- **Quiescence.** A group with no writes stops ticking and heartbeating. In the spike that cut the
-  idle cost of 3,000 replicas from 36% of a core to 0.07%. The per-node-pair leases (next
+- **Quiescence.** A group with no writes stops ticking and heartbeating. The multi-raft spike cut the
+  idle cost of 3,000 replicas from 13% of a core at the design's timing (36% at raft-rs's default
+  50 ms heartbeat) to 0.07%. The per-node-pair leases (next
   section) keep its leader's lease and its followers' loyalty, so it sends nothing until it writes
   again or a node-pair lease lapses. TiKV's hibernate regions work the same way.
 
@@ -740,13 +743,14 @@ on an Apple M4 Pro under macOS against rock-solid's earlier Rust tree, since del
 | Bytes per file, memtable | 235 B (263 B modelled for Linux); +101 to 117 B per xattr; an earlier tree's 373 B stayed flat from 1M to 30M files; get p50 about 1 µs | [MetaStore memory spike](../docs/design.md#appendix-metastore-memory-spike) |
 | Bytes per file, sorted runs | 133 B against 199 B in the memtable, plus 3.5 B of filter; the spike's prefix-compressed blocks gave 135 B (F4) | [On-disk format](../docs/design.md#on-disk-format) |
 
-The design departs from two spike conclusions, and the design is the authority: the multi-raft
-spike recommended writing an own Raft shard, and the raft rounds spike took v3.7.0 as the pin.
+The design departs from one spike conclusion, and the design is the authority: the multi-raft
+spike recommended writing an own Raft shard. The raft rounds spike started from v3.7.0, the pin at
+the time, and its measurements are why the pin moved to v3.6.0.
 
 ## Trade-offs: what it costs us
 
 - **Three copies of all metadata**, one failure tolerated per group, even in a one-copy pool.
-- **Failover takes seconds:** 3 to 10 s budgeted; new opens on a crashed owner's inodes wait one
+- **Failover takes seconds:** 7 to 15 s budgeted; new opens on a crashed owner's inodes wait one
   session lease.
 - **A commit costs about three rounds**, so leaders must be planned to keep loops under half busy.
 - **Cross-directory rename is the slow path** and slowly erodes locality; one huge, busy

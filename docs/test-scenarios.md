@@ -2359,6 +2359,7 @@ questions](design.md#roadmap-and-open-questions))
 - A member removed and added back.
 - Two interval changes before the first new primary peers.
 - An interval with fewer than `min_live` live members.
+- An interval short of `min_live` only by members in `maintenance`: it accepted writes and is not skipped.
 - A replica replaced under a primary that stays.
 - A primary restart.
 - A counter running out.
@@ -3179,7 +3180,8 @@ swaps**
 | Write | Base | Sent to members |
 | --- | --- | --- |
 | Bytes 0 to 99 of block 5, nothing pending | 7.7's block 5 from the live map, CRC32C checked | One merged whole block, 7.8 |
-| Bytes 100 to 199 of block 5 while 7.8 is pending | 7.8's merged block | Whole block 7.9 holding both writes' bytes |
+| Bytes 100 to 199 of block 5 while 7.8 is pending | 7.8's merged block | Whole block 7.9 holding both writes' bytes; 7.9 is acknowledged only after 7.8 commits |
+| As above, but a member refuses 7.8 (its session fenced, or a new interval reached the member first) | 7.8 never commits | 7.9 is refused too, and no later version carries 7.8's bytes; the client retries against 7.7 |
 | Bytes 0 to 99 of a block never written | Zeros | Whole block |
 | Bytes 0 to 99 of a punched block | Zeros | Whole block |
 | Bytes 100 to 8,291 of a chunk (blocks 0 to 2) | Edge blocks 0 and 2 only; block 1 is whole | Three whole blocks; at most two edge blocks are merged per write |
@@ -3343,6 +3345,10 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
   - A asks to renew under 7 and is refused; nothing A held under 7 survives. A asks afresh under 8.
 - A grant under a lapsed support epoch is never renewed, whatever the message delay. A duplicated
   old renewal arriving after the bump is refused.
+- A holds B's grant and reaches B but not the control plane. B adopts a table that moves PG 17's
+  primary away from A; A's heartbeats still report the older table. B refuses A's renewals until A
+  reports a table at least as new, so A's lease on B lapses within one `primary_lease` and A serves
+  no read of PG 17 after it. Once A fetches the table, B renews again.
 - A node that starts at t = 100 s grants no vote and joins no peering before 104 s. The wait is a
   grantor's, so it lasts until both clocks show 4 s: with its `BOOTTIME` 1% fast, not before its raw
   clock shows 4 s too.
@@ -3373,6 +3379,7 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
 | 42 only, the usual case | One member live in 42 |
 | 42 (never activated), now 43 | One live in 42 and one live in 41 |
 | 42 had fewer than `min_live` live members | 42 skipped |
+| 42 was short of `min_live` only by members in `maintenance` | 42 stopped and read like any interval that accepted writes |
 | No member of an interval to stop is reachable | The PG waits (down) until one returns or an operator declares its disks lost; it accepts no writes, and this is not an error |
 
 - Activation report lost. 42's primary activates and its heartbeat report is lost, then 43 starts.

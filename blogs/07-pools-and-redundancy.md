@@ -259,8 +259,8 @@ The overhead formula is `(data + parity) ÷ data`. Dividing a pool's free space 
 capacity only when every node can take a share of each chunk in proportion to its size, and the
 failure-domain rule often forbids that. `ec4-2` at 2 per node on three nodes puts exactly two shards
 of every chunk on each node, a third of the chunk, whatever the nodes hold. With nodes of 4, 4 and
-1 TB the small node fills first: room ÷ overhead says 5.4 TB, the pool holds 1.8 TB, and 3.6 TB of
-the large nodes is *stranded*. So a pool reports as *available* what its placement table lets
+1 TB the small node fills first: room ÷ overhead says 5.4 TB, the pool holds 1.8 TB, and 2.7 TB of
+each large node, 5.4 TB in all, is *stranded*. So a pool reports as *available* what its placement table lets
 through before its first disk fills, next to the *balanced* figure the best placement could reach,
 and `rock-solid pool create` and disk changes show what each failure domain strands and ask for
 confirmation when one would strand more than half its capacity. The `Stranded` warning is kept for
@@ -459,9 +459,12 @@ write new files rather than patch footage, so media rarely pays it. A database o
 pays it on the first write to each idle chunk, which is why block chunks wait 24 hours before
 encoding.
 
-Snapshot versions are the one thing truly frozen. They never change, so in an erasure-coded pool
-they are encoded at once without waiting for `seal_after`, and a return to copies keeps the encoded
-version as the frozen one instead of dropping it ([post 10](10-block-snapshots-and-clones.md)).
+Snapshot versions keep the form their chunk has. While a chunk is held as copies its frozen
+versions are copies too, sharing every untouched block with the live version, and when the chunk
+seals after `seal_after` every version, live and frozen, is encoded with it, each into shards of
+its own. Encoding a frozen version on its own would cost a whole-chunk read and write on the first
+small write after a snapshot. A return to copies keeps the encoded version as the frozen one
+instead of dropping it ([post 10](10-block-snapshots-and-clones.md)).
 
 On each disk, encoded shards go to the log's *cold* stream, while new copies go to the *hot* stream
 ([post 04](04-one-log-per-disk.md)).

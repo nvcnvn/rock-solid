@@ -285,7 +285,7 @@ PGs `2p` and `2p + 1` are already its two halves. That is why the design says do
 "without rewriting the per-disk index". Had the PG been `h % pg_count`, a PG's chunks would be
 every 2,048th hash value, scattered through the whole index. Moving, recovering or splitting one
 PG would then mean walking every key on the disk instead of one range. A property test checks
-the split for 64 chunk IDs and every count from 1 to 2^11 ([test scenarios](../docs/test-scenarios.md)).
+the split for 64 chunk IDs at every power-of-two count from 1 to 2^10 ([test scenarios](../docs/test-scenarios.md)).
 
 ## The options for deciding placement
 
@@ -822,7 +822,7 @@ What backs these choices, with numbers exactly as the design and spikes give the
   `internal/core`: ten frozen golden vectors in `internal/core/testdata/chunk_id_golden.txt` fix
   the packed bytes, the XXH3-64 hash and the PG index at 64 and 2,048 PGs (the examples above come
   from them), and a property test checks that doubling maps PG `p` to `2p` or `2p + 1` for 64
-  chunk IDs at every count from 1 to 2^11.
+  chunk IDs at every power-of-two count from 1 to 2^10.
 - **Committed-only mapping.** The [chunk epochs spike](../spikes/chunk-epochs/) drove the real
   chunk index through a primary that maps writes only at commit. With a chunk's commits mapped in
   version order, replay differed from a rebuild in **0 of 200 seeds** (R1). Mapped in any order,

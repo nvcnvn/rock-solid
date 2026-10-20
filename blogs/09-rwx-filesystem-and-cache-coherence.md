@@ -382,7 +382,7 @@ flowchart TD
 
 A quiet node sends no extra message, only a few bytes per pool on each heartbeat; a node
 streaming at 10 GbE sends about four more heartbeats a second, and at 100 GbE about 41, each a
-memory update at the leader. At 10 nodes at most 2.5 GiB of space is promised. The price is speed near full: a write that goes through costs a round
+memory update at the leader. At 10 nodes the grants add up to 2.5 GiB, and the leader budgets three times that, 7.5 GiB, for what can land unseen. The price is speed near full: a write that goes through costs a round
 trip and a flush, about 1 ms on NVMe, against 5 µs buffered. CephFS pays the same once its pool is
 nearly full, when its client makes every write synchronous. Writes through `mmap` cannot be
 granted, since the kernel sends them at writeback; a refusal reaches `msync` or `fsync`.

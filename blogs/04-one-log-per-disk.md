@@ -376,7 +376,7 @@ Three cheaper layouts were weighed and left out for now:
 
 | Layout | What it saves | What it costs |
 | --- | --- | --- |
-| Inline data in the inode, as CephFS, ext4, Btrfs and F2FS do | A small file's block | The MetaStore's sorted runs live in memory: 1.5 KiB inline costs 12.5× the per-file budget, 3.4 million files per 16 GiB instead of 43 million. CephFS deprecated its version in Octopus |
+| Inline data in the inode, as CephFS, ext4, Btrfs and F2FS do | A small file's block | The MetaStore's sorted runs live in memory: 1.5 KiB inline costs 12.5× the per-file budget, 3.4 million files per 16 GiB instead of 43 million in the [sub-block writes spike](../docs/design.md#appendix-sub-block-writes-spike)'s file model. CephFS deprecated its version in Octopus |
 | Patch entries: the appended bytes, merged on read, folded later, as the ZFS intent log and JuiceFS slices do | Nothing at queue depth 1, unless the bytes ride in the header block: 83× → 42×. With 8 appenders, 79× → 25×, or 5.8× in the header | Header blocks that hold live data, a patch list per block for reads and snapshots, and a fold step |
 | Short last blocks: only a file's bytes up to its end | A 1.5 KiB file 12,399 → 4,725 B; 8 appenders 79× → 58× | A stored length in every write entry and extent, and liveness counted in bytes |
 

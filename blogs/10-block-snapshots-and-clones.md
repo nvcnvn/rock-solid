@@ -569,8 +569,10 @@ frozen version needs no ordering against writes, so any PG member holding it can
 
 **Erasure-coded pools**, which store a chunk as data and parity pieces instead of full copies
 ([07](07-pools-and-redundancy.md)), normally encode a block chunk only after a day idle. Frozen
-versions never change, so they are encoded at once, and when an overwrite returns an encoded
-chunk to copies, the encoded version stays on as the frozen one instead of being dropped.
+versions keep the chunk's form: copies while the chunk is copies, sharing untouched blocks with the
+live version, and encoded with it when it seals, each version into shards of its own. When an
+overwrite returns an encoded chunk to copies, the encoded version stays on as the frozen one
+instead of being dropped.
 
 ### Restore and clone: a new volume that reads through
 
