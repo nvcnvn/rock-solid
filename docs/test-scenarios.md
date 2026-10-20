@@ -2759,8 +2759,10 @@ sender's table epoch (`uint64`, per the PG epochs study) and the PG's interval n
 | Read reply | Bytes and version; or a refusal (wrong interval, chunk on the missing list, unfound) |
 | Grant | Support epoch, and the grantor's `CLOCK_MONOTONIC_RAW` reading `g`; the grantor's table epoch too if the epoch change model's grant rule needs it |
 | Heartbeat between a node pair | The grantor's `CLOCK_MONOTONIC_RAW`, on every heartbeat |
-| Heartbeat to the authority | Activation reports per PG; each member's acknowledgment latency; disk fills |
+| Heartbeat to the authority | Activation reports per PG; each member's acknowledgment latency; per disk its log ID, fill, oldest unfinished I/O age and whether its log has failed |
 | `member_timeout` report, primary to authority | Member, PG |
+| Direct probe, authority to a disk's owner loop | Disk ID |
+| Probe reply | Log ID, oldest unfinished I/O age, whether the log has failed |
 | Peering | The adopted interval; per chunk, the newest version; the member's missing list |
 
 **Cases**
@@ -3431,13 +3433,26 @@ A simulated single authority stands in for the control plane. `node_down_after` 
 | Heartbeats every 1 s, the last at t = 10.0 s | Marked down at t = 15.0 s, in a table that starts a new interval of every PG with a member on the node |
 | A heartbeat at 14.9 s | Not marked; the 5 s count restarts from 14.9 s |
 | A primary waits more than 1 s for member M's acknowledgment and reports it; the direct probe fails | M is marked down at once, not after 5 s |
-| The same report, and the probe answers | M is not marked |
+| The same report; M's node and loop are up, but a write M's disk took 1.2 s ago has not completed | The probe answers from memory with age 1.2 s; M is marked down at once |
+| The same report, and M's loop does not answer within 1 s | M is marked down |
+| The same report, and the probe answers with no I/O older than 1 s | M is not marked |
+| No report; a disk's oldest unfinished flush passes 1 s (the primary's own disk, or one holding only shard replicas) | Marked down from the next heartbeat |
+| A disk's open log fails a write | Marked down from the next heartbeat, until recovery has run and it rejoins |
+| A discard has been unfinished for 3 s; no read, write or flush is older than 1 s | Not marked |
+| A stalled disk whose marking leaves a PG below `min_live` | Marked down anyway; the PG reports that it is below `min_live` |
+| A stalled disk whose I/O completes; then normal for 50 s, then a whole minute | Stays down and probed for 50 s; rejoins after the whole `slow_disk_window` |
 | Node A crashes at t = 0 with writes in flight | Writes to A's PGs wait until the down table (at most 5 s); writes to other PGs never wait |
 | The same, for the PGs A led | The new primary then peers once its grantors' grants to A expire on both clocks: with a grantor's `CLOCK_BOOTTIME` −22.6%, 5.2 s after the grant, so up to about 0.2 s after the down table |
 | A node flapping: down 5 s, up, every 10 s | Without refill, two intervals per flap for every PG with a member on the node (F1). With refill staged one member per table, 1,202 tables per flap and 3 intervals for the busiest PG (F2). Nothing damps it |
 
 - Open: damping a flapping node, and delaying refill after a node goes down, are not decided (PG
   epochs study, "Not decided").
+- Open: the link between a primary and member M is down while both reach the authority. The primary
+  reports M, the probe answers healthy, and the PG's writes wait while the link stays down (open
+  question "A link down between a primary and one member"). Today's expected result is that wait;
+  the row changes with the rule the open question picks.
+- Open: the 1 s stall threshold is a default, not a measurement (open question "The stall
+  threshold").
 
 **Fail-slow.** Disk X is in a pool of 6 disks, under 5 minutes of simulated load. The simulated disk
 models a 100× fail-slow; each row sets X's slowdown so that its 99th percentile has the stated ratio
@@ -3919,8 +3934,9 @@ Only the last component (a file name, an xattr name or an S3 key) has variable l
 | Input | Expected |
 | --- | --- |
 | A node misses heartbeats for `node_down_after` (5 s) | Marked down in one table, which starts a new interval of every PG with a member on it |
-| A primary reports a member after `member_timeout` (1 s), and the member fails a direct probe | Marked down at once |
-| The same report, but the probe succeeds | Not marked down |
+| A primary reports a member after `member_timeout` (1 s), and the member fails a direct probe (its disk stalled, its log failed, or no answer within 1 s) | Marked down at once |
+| The same report, but the probe answers with no stall | Not marked down |
+| A heartbeat shows a disk stalled, with no report | Marked down at once |
 | A disk's 99th percentile acknowledgment latency above `slow_disk_factor` (10×) its pool's median for `slow_disk_window` (1 min) | Marked down as fail-slow, unless that would drop a PG below `min_live` |
 | A fail-slow disk's latency back to normal for 50 s, then for a whole minute | It rejoins only after the whole `slow_disk_window` |
 | A `role: meta` node | Holds control-plane and shard voters, and no PG member |
