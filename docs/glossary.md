@@ -232,6 +232,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Open sequence number, `NextSeq`.** A counter the log raises every time it starts filling a segment, written into the segment's header and every record header in it, so a block left from an earlier use of the segment never reads as a current record. Every manifest records `NextSeq`, the number the next segment will take, so recovery can tell a segment opened after the manifest from one the cleaner freed before it, whose old header is still on disk. See [Recovery](design.md#on-disk-format).
 
+**Log ID.** A random number drawn when a disk is formatted, written into its superblock and every header, so a block left by an earlier format is never read as this one's. The control plane binds each disk ID to its log ID: a disk formatted again or replaced comes back as a new disk with a new ID, never as the member it was, whose writes it no longer holds. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
+
 **Record.** One append to the log: header blocks describing what follows (which chunk, which version, checksums) and the data blocks themselves.
 
 **Log sequence number (LSN).** A record's position in the log's order. "Everything after LSN 5000" names exactly which records a recovery must replay.

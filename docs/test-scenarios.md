@@ -2327,6 +2327,9 @@ ticks in the same ratios.
   least the one its own term began in.
 - **Peering.** It reaches a member of every interval since the last activated one that had at least
   `min_live` live members. It reads members' missing lists and keeps every version below a kept one.
+- **Disks.** Each member is a disk ID bound to a log ID. A disk formatted again keeps its node but
+  empties its log and draws a new log ID, which the authority treats as a new disk ID; the old disk
+  ID stays down.
 - **Activation.** Members persist their missing lists, the primary then activates and reports it on
   a heartbeat, and the leader folds the report into a later table that starts no interval.
 - **Restarts and counters.** A restarted primary takes a new interval. A chunk whose counter runs
@@ -2363,6 +2366,7 @@ questions](design.md#roadmap-and-open-questions))
 - A member live in the last activated interval that its peering never reached, returning after a
   later interval and holding versions the others dropped.
 - A message duplicated or held for any time.
+- A member's disk formatted again, or swapped for a new drive, while its node stays up.
 - A suspend, or a VM pause with every clock frozen.
 - A grantor that reboots within `rate_window`, its raw clock restarted near 0 and its rate changed
   by 2%.
@@ -2409,6 +2413,7 @@ variant that passes means the model is too weak.
 | A new primary merges before it holds a kept version | 5 or 4 | Recovery's whole block overwrites the new write's bytes, or the new write merges on the stale block (sub-block spike M8) |
 | Peering stops only the previous interval | 3 | 41 → 42 → 43 before 42's primary peers; 43 reaches only a member live in 42 and not in 41; a write tagged 41 completes |
 | Members compare member lists instead of interval numbers | 3 | [A,B,C] → [A,B] → [A,B,C]; C missed 42's writes, and the old primary's write tagged 41 collects C's acknowledgment |
+| A disk ID kept across a new log ID | 4 | 41.7 acknowledged on A, B and C; C's disk is formatted again and reports under its old ID; A fails; B peers 42, and C, live in 41, lacks 41.7, so B drops an acknowledged write |
 | A restarted primary peers in its old interval | 6 | A write from its previous run, still in a member's socket, lands after peering under a version the new run gives to other data |
 | An older version is decided by its own interval's members after a later interval kept it | 4 | 42 keeps 41.7 and starts recovering it onto D; 42 ends; the next primary reaches only B and D, and 41's rule drops what 42 kept |
 | A primary activates before missing lists are durable | 4 | A member crashes after activation, forgets that it lacks the kept version, and serves the older one |
@@ -3384,6 +3389,13 @@ it on its missing list.
 | Unreachable | 39.3, lists 39.4 | Lists 39.4 (L's peering kept 39.4) | The chunk is unfound; 39.3 is never served |
 | Any | Any | Any; D, new in 43 and not live in 41, holds nothing | D does not affect the decision; recovery gives D the kept versions |
 
+- A disk formatted again or replaced comes back as a new disk, not as the member it was: on
+  41.8 acknowledged by A, B and C, C's disk is formatted again and its node reports a new log ID.
+  The authority gives it a new disk ID, keeps C's old disk ID down, and peering keeps 41.8 from B.
+  The planted variant that keeps C's old disk ID for the new log must drop 41.8 and fail "no
+  acknowledged version is ever dropped".
+- A second device reporting a log ID that is already up (a cloned drive) is refused, and the disk
+  that reported it first keeps its ID.
 - Before the primary activates, each member persists its missing list: for each chunk it lacks or
   holds a dropped version of, the kept version it must get. Trace check: no activation report before
   every member's missing-list write has its `DiskDone`. Reads and removal of entries are under
