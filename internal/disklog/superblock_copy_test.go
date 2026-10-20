@@ -138,3 +138,77 @@ func TestSuperblockCopyAfterAReformatThatCrashed(t *testing.T) {
 		t.Fatalf("%d segments free, want every one of the old log's", free)
 	}
 }
+
+func TestSuperblockCopyWithAnImpossibleGeometryIsNotUsed(t *testing.T) {
+	geo, err := disklog.GeometryFor(gib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oversized := geo
+	oversized.SegmentCount *= 2
+	displaced := disklog.Geometry{SegmentBlocks: geo.SegmentBlocks / 2, SegmentCount: geo.SegmentCount * 2}
+	if displaced.DiskBlocks() != geo.DiskBlocks() || displaced.SuperblockCopyLBA() == geo.SuperblockCopyLBA() {
+		t.Fatalf("geometry %+v does not fill the disk with its copy elsewhere", displaced)
+	}
+	put := func(h *harness, lba core.LBA, geo disklog.Geometry) {
+		b, err := disklog.AppendSuperblock(nil, disklog.Superblock{LogID: testLogID, Geometry: geo})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.disk.Put(lba, b)
+	}
+	cases := []struct {
+		name   string
+		damage func(h *harness)
+	}{
+		{"a damaged block 0 and a copy claiming more blocks than the disk", func(h *harness) {
+			h.disk.FlipBit(0, 17, 1)
+			put(h, 63, oversized)
+		}},
+		{"block 0 and the copy both claiming more blocks than the disk", func(h *harness) {
+			put(h, 0, oversized)
+			put(h, 63, oversized)
+		}},
+		{"a damaged block 0 and a copy not where its geometry puts it", func(h *harness) {
+			h.disk.FlipBit(0, 17, 1)
+			put(h, 63, displaced)
+		}},
+		{"block 0 claiming more blocks than the disk and a copy not where its geometry puts it", func(h *harness) {
+			put(h, 0, oversized)
+			put(h, 63, displaced)
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := formatted(t, gib, testConfig(0))
+			h.twoBlockWrites(2)
+			c.damage(h)
+			res := h.recover(disklog.ModeOpen)
+			if !errors.Is(res.err, disklog.ErrNotFormatted) {
+				t.Fatalf("recovery: %v, want NotFormatted", res.err)
+			}
+			if i := slices.IndexFunc(res.trace, func(s string) bool { return !strings.HasPrefix(s, "read ") }); i >= 0 {
+				t.Fatalf("recovery sent %q", res.trace[i])
+			}
+		})
+	}
+}
+
+func TestSuperblockCopyRestoresABlock0ClaimingMoreBlocksThanTheDisk(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	h.twoBlockWrites(2)
+	want := h.log.Superblock()
+	oversized := want
+	oversized.SegmentCount *= 2
+	b, err := disklog.AppendSuperblock(nil, oversized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.disk.Put(0, b)
+	res, trace := superblockTrace(h.reopen())
+	if wantTrace := []string{"read 0+1 io100", "read 63+1 io101", "write 0+1 io102", "fsync io103", "read 64+2 io104"}; !slices.Equal(trace, wantTrace) {
+		t.Fatalf("trace %q, want %q", trace, wantTrace)
+	}
+	h.wantLSNs(res, lsnRange(1, 2))
+	h.wantSuperblockAt(0, want)
+}

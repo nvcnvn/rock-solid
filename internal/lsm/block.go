@@ -191,10 +191,22 @@ func (it *blockIter) floor(k []byte, strict bool) bool {
 	}
 }
 
-// validateBlock checks that b is a block whose keys are strictly increasing, and above prev when
-// hasPrev, with every value at least one byte whose first byte is a kind. It returns the block's
-// entry count and its last key, appended to prev[:0].
+// validateBlock checks that b is an entry block whose keys are strictly increasing, and above prev
+// when hasPrev, with keys of at most MaxKey bytes and every value a kind byte and at most MaxValue
+// bytes. It returns the block's entry count and its last key, appended to prev[:0].
 func validateBlock(b, prev []byte, hasPrev bool) (int, []byte, bool) {
+	return walkBlock(b, prev, hasPrev, false)
+}
+
+// validateFragBlock checks that b is a fragment block whose fragments are sorted, never overlap
+// one another or end above the next's start, nor start below prevEnd when hasPrev, with bounds of
+// at most MaxBound bytes, each ending above its start. It returns the fragment count and the last
+// end, appended to prevEnd[:0].
+func validateFragBlock(b, prevEnd []byte, hasPrev bool) (int, []byte, bool) {
+	return walkBlock(b, prevEnd, hasPrev, true)
+}
+
+func walkBlock(b, prev []byte, hasPrev, frags bool) (int, []byte, bool) {
 	if len(b) < emptyBlockSize {
 		return 0, prev, false
 	}
@@ -235,14 +247,22 @@ func validateBlock(b, prev []byte, hasPrev bool) (int, []byte, bool) {
 		}
 		key = append(key[:shared], b[off:off+int(unshared)]...)
 		off += int(unshared)
-		if kind := b[off]; kind != kindSet && kind != kindDel || len(key) > MaxKey || vlen-1 > MaxValue {
-			return 0, prev, false
-		}
+		val := b[off : off+int(vlen)]
 		off += int(vlen)
-		if (hasPrev || n > 0) && bytes.Compare(key, prev) <= 0 {
-			return 0, prev, false
+		after := hasPrev || n > 0
+		if frags {
+			if len(key) > MaxBound || len(val) > MaxBound || bytes.Compare(val, key) <= 0 ||
+				after && bytes.Compare(key, prev) < 0 {
+				return 0, prev, false
+			}
+			prev = append(prev[:0], val...)
+		} else {
+			if kind := val[0]; kind != kindSet && kind != kindDel || len(key) > MaxKey || len(val)-1 > MaxValue ||
+				after && bytes.Compare(key, prev) <= 0 {
+				return 0, prev, false
+			}
+			prev = append(prev[:0], key...)
 		}
-		prev = append(prev[:0], key...)
 		if isRestart {
 			ri++
 		}

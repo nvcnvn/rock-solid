@@ -65,7 +65,7 @@ func testLogConfig() disklog.Config {
 
 func newNode(t *testing.T) *node {
 	n := &node{t: t, pool: sim.NewPool(64<<20, 0), disk: sim.NewDisk(diskBytes / core.BlockSize), cfg: testLogConfig()}
-	n.ctx = core.Context{Now: 1, Pool: n.pool}
+	n.ctx = core.Context{Now: 1, Raw: 2, Pool: n.pool}
 	geo, err := disklog.GeometryFor(diskBytes)
 	if err != nil {
 		t.Fatal(err)

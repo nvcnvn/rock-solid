@@ -3,6 +3,7 @@ package disklog
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -21,13 +22,13 @@ func goldenRecord(t testing.TB) testRecord {
 		BlobEntry(BlobManifest, 7, 3),
 	}
 	payloads := [][]byte{bytes.Repeat([]byte{0xAB}, core.BlockSize), nil, []byte("abc")}
-	return encodeRecord(t, Record{Place: testPlace, LSN: 10}, entries, payloads)
+	return encodeRecord(t, Record{Place: testPlace, LSN: 10, Durable: 9}, entries, payloads)
 }
 
 func oneWriteRecord(t testing.TB, r *core.Rand, blocks uint16) testRecord {
 	t.Helper()
 	entries := []Entry{WriteEntry(3, testChunk, 1, 0, blocks)}
-	return encodeRecord(t, Record{Place: testPlace, LSN: 77}, entries, [][]byte{randomBytes(r, int(blocks)*core.BlockSize)})
+	return encodeRecord(t, Record{Place: testPlace, LSN: 77, Durable: 0x4c}, entries, [][]byte{randomBytes(r, int(blocks)*core.BlockSize)})
 }
 
 func TestLayoutExamples(t *testing.T) {
@@ -42,15 +43,17 @@ func TestLayoutExamples(t *testing.T) {
 		entries []Entry
 		want    Layout
 	}{
-		{"write entry", []Entry{write(1)}, Layout{48 + 33 + 4, 1, 1}},
-		{"punch entry", []Entry{PunchEntry(1, testChunk, 1, 0, 1)}, Layout{48 + 33, 1, 0}},
-		{"freeze entry", []Entry{FreezeEntry(1, testChunk, 1, 2)}, Layout{48 + 37, 1, 0}},
-		{"empty blob", []Entry{blob(0)}, Layout{48 + 14, 1, 0}},
-		{"blobs 1 and 4095", []Entry{blob(1), blob(4095)}, Layout{48 + 28 + 4, 1, 1}},
-		{"blob 4097", []Entry{blob(4097)}, Layout{48 + 14 + 8, 1, 2}},
-		{"write 1003", []Entry{write(1003)}, Layout{4093, 1, 1003}},
-		{"write 1004", []Entry{write(1004)}, Layout{4097, 2, 1004}},
-		{"200 writes", manyWrites, Layout{48 + 200*33 + 200*4, 2, 200}},
+		{"write entry", []Entry{write(1)}, Layout{56 + 33 + 4, 1, 1}},
+		{"punch entry", []Entry{PunchEntry(1, testChunk, 1, 0, 1)}, Layout{56 + 33, 1, 0}},
+		{"freeze entry", []Entry{FreezeEntry(1, testChunk, 1, 2)}, Layout{56 + 37, 1, 0}},
+		{"empty blob", []Entry{blob(0)}, Layout{56 + 14, 1, 0}},
+		{"blobs 1 and 4095", []Entry{blob(1), blob(4095)}, Layout{56 + 28 + 4, 1, 1}},
+		{"blob 4097", []Entry{blob(4097)}, Layout{56 + 14 + 8, 1, 2}},
+		{"write 1001", []Entry{write(1001)}, Layout{4093, 1, 1001}},
+		{"write 1002", []Entry{write(1002)}, Layout{4097, 2, 1002}},
+		{"write 1003", []Entry{write(1003)}, Layout{4101, 2, 1003}},
+		{"write 1004", []Entry{write(1004)}, Layout{4105, 2, 1004}},
+		{"200 writes", manyWrites, Layout{56 + 200*33 + 200*4, 2, 200}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -113,7 +116,7 @@ func TestRecordRoundTrip(t *testing.T) {
 	r := core.NewRand(11)
 	t.Run("golden", func(t *testing.T) {
 		d := decodeExact(t, goldenRecord(t))
-		if d.Layout != (Layout{48 + 33 + 33 + 14 + 8, 1, 2}) {
+		if d.Layout != (Layout{56 + 33 + 33 + 14 + 8, 1, 2}) {
 			t.Fatalf("layout %+v", d.Layout)
 		}
 		if d.DataCRC(0) != core.CRC32C(d.Data[:core.BlockSize]) || d.Payload(1) != nil {
@@ -184,7 +187,7 @@ func TestRecordRoundTrip(t *testing.T) {
 func TestRecordRoundTripSeed1(t *testing.T) {
 	r := core.NewRand(1)
 	for lsn := uint64(1); lsn < 500; lsn++ {
-		rec := Record{Place: Place{LogID: r.Uint64(), Seq: r.Uint64(), Offset: r.Uint32()}, LSN: lsn}
+		rec := Record{Place: Place{LogID: r.Uint64(), Seq: r.Uint64(), Offset: r.Uint32()}, LSN: lsn, Durable: r.Below(lsn)}
 		tr := randomRecord(t, r, rec, 8)
 		if tr.layout.DataBlocks > 8 {
 			t.Fatalf("LSN %d: %d data blocks", lsn, tr.layout.DataBlocks)
@@ -194,6 +197,24 @@ func TestRecordRoundTripSeed1(t *testing.T) {
 			if e.Kind == EntryBlob && uint64(len(d.Payload(i))) != e.Length {
 				t.Fatalf("LSN %d: blob %d has %d bytes, declared %d", lsn, i, len(d.Payload(i)), e.Length)
 			}
+		}
+	}
+}
+
+func TestRecordDurableLSN(t *testing.T) {
+	entries := []Entry{PunchEntry(1, testChunk, 1, 0, 1)}
+	first := encodeRecord(t, Record{Place: testPlace, LSN: 1}, entries, [][]byte{nil})
+	if binary.LittleEndian.Uint64(first.image[recDurable:]) != 0 {
+		t.Fatal("the first record's durable LSN is not 0")
+	}
+	decodeExact(t, first)
+	for _, durable := range []uint64{1, 2, 1 << 63} {
+		rec := Record{Place: testPlace, LSN: 1, Durable: durable}
+		if img, err := AppendRecord(nil, rec, entries, nil); !errors.Is(err, ErrMalformed) || len(img) != 0 {
+			t.Fatalf("AppendRecord with durable LSN %d: %d bytes, %v", durable, len(img), err)
+		}
+		if img, err := AppendHeader(nil, rec, entries, nil); !errors.Is(err, ErrMalformed) || len(img) != 0 {
+			t.Fatalf("AppendHeader with durable LSN %d: %d bytes, %v", durable, len(img), err)
 		}
 	}
 }
@@ -226,6 +247,9 @@ func TestRecordErrors(t *testing.T) {
 		{"zeros", func(b []byte) { clear(b) }, ErrBadMagic},
 		{"version", func(b []byte) { b[recVersion] = 2; fixCRC(hdr(b), recCRC) }, ErrBadVersion},
 		{"header checksum", func(b []byte) { b[recLSN] ^= 1 }, ErrBadChecksum},
+		{"a bit of the durable LSN", func(b []byte) { b[recDurable] ^= 1 }, ErrBadChecksum},
+		{"durable LSN at its own", func(b []byte) { b[recDurable] = 10; fixCRC(hdr(b), recCRC) }, ErrMalformed},
+		{"durable LSN past its own", func(b []byte) { b[recDurable+7] = 1; fixCRC(hdr(b), recCRC) }, ErrMalformed},
 		{"data checksum", func(b []byte) { b[core.BlockSize+100] ^= 1 }, ErrBadChecksum},
 		{"blob pad", func(b []byte) { b[len(b)-1] = 1 }, ErrBadChecksum},
 		{"unknown tag", func(b []byte) { b[preludeSize] = 100; fixCRC(hdr(b), recCRC) }, ErrMalformed},
@@ -252,7 +276,7 @@ func TestRecordErrors(t *testing.T) {
 		})
 	}
 	t.Run("truncated", func(t *testing.T) {
-		for _, n := range []int{0, 4, 48, core.BlockSize, len(tr.image) - 1} {
+		for _, n := range []int{0, 4, 56, core.BlockSize, len(tr.image) - 1} {
 			_, err := DecodeRecord(tr.image[:n], testPlace, manyLeft, nil)
 			wantErr(t, "truncated", err, ErrTruncated)
 		}
@@ -282,7 +306,7 @@ func TestRecordErrors(t *testing.T) {
 	t.Run("entry sizes", func(t *testing.T) {
 		h := tr.image
 		if h[preludeSize] != byte(EntryWrite) || h[preludeSize+33] != byte(EntryPunch) || h[preludeSize+66] != byte(EntryBlob) {
-			t.Fatal("entry tags not at 48, 81 and 114")
+			t.Fatal("entry tags not at 56, 89 and 122")
 		}
 		if binary.LittleEndian.Uint16(h[preludeSize+29:]) != 6 || binary.LittleEndian.Uint16(h[preludeSize+31:]) != 1 {
 			t.Fatal("write extent not at the end of the entry")

@@ -151,12 +151,14 @@ func (p *page) entries(dst [][]byte) [][]byte {
 	return dst
 }
 
-// pages is a store of pages in pointer-free slabs, addressed by page number.
+// pages is a store of pages in pointer-free slabs, addressed by page number; searches counts
+// the descents from a root its trees' reads made.
 type pages struct {
 	slabs    [][]page
 	next     uint32
 	freeList []uint32
 	inUse    int
+	searches int
 }
 
 func (s *pages) get(id uint32) *page { return &s.slabs[id/slabPages][id%slabPages] }

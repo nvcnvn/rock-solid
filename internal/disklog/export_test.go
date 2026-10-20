@@ -47,3 +47,20 @@ func FreeSegments(l *Log) int {
 
 // SegmentUsageOf is the log's segment usage table as of its durable LSN.
 func SegmentUsageOf(l *Log) []SegmentUsage { return l.usageRows() }
+
+// FreeSegment stands in for the cleaner freeing segment s: its row turns free for the next
+// checkpoint's edit, and reuse lets a round open it again at once.
+func FreeSegment(l *Log, s uint32, reuse bool) {
+	l.usage[s] = SegmentUsage{}
+	l.changed[s/64] |= 1 << (s % 64)
+	if reuse {
+		l.free[s/64] |= 1 << (s % 64)
+	}
+}
+
+// NextSeqOf is the NextSeq a checkpoint begun now would record.
+func NextSeqOf(l *Log) uint64 { return l.durableSeq }
+
+// TakeNextSeqAtBegin plants the bug of recording the log's next sequence number when a
+// checkpoint begins as its NextSeq, which counts segments rounds in flight have opened.
+func TakeNextSeqAtBegin(l *Log) { l.seqAtBegin = true }

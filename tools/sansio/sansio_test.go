@@ -13,7 +13,7 @@ func TestAnalyzer(t *testing.T) {
 		"github.com/nvcnvn/rock-solid/internal/loop",
 		"github.com/nvcnvn/rock-solid/internal/driver/uring",
 		"github.com/nvcnvn/rock-solid/internal/csi",
-		"github.com/nvcnvn/rock-solid/cmd/rockd",
+		"github.com/nvcnvn/rock-solid/cmd/rock-solid",
 	)
 }
 
@@ -29,7 +29,7 @@ func TestClassify(t *testing.T) {
 		"github.com/nvcnvn/rock-solid/internal/core.test":                                              unchecked,
 		"github.com/nvcnvn/rock-solid/internal/csi":                                                    unchecked,
 		"github.com/nvcnvn/rock-solid/internal/csi/grpc":                                               unchecked,
-		"github.com/nvcnvn/rock-solid/cmd/rockd":                                                       unchecked,
+		"github.com/nvcnvn/rock-solid/cmd/rock-solid":                                                  unchecked,
 		"github.com/nvcnvn/rock-solid/tools/sansio":                                                    unchecked,
 		"github.com/other/internal/core":                                                               unchecked,
 	}

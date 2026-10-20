@@ -44,13 +44,40 @@ func TestPoolExhaustedError(t *testing.T) {
 
 func TestEventAndActionAllocateNothing(t *testing.T) {
 	out := make([]Action, 0, 8)
+	var now Tick
 	allocs := testing.AllocsPerRun(1000, func() {
 		out = out[:0]
+		ctx := Context{Now: 1000 + now, Raw: 1226 + now}
 		ev := Event{Kind: EvTimer, Timer: 7}
-		out = append(out, Action{Kind: ActSetTimer, Timer: ev.Timer, At: 100})
-		out = append(out, Action{Kind: ActDiskFsync, IO: 3})
+		resumed := Event{Kind: EvResumed}
+		if resumed.Kind == EvResumed {
+			out = append(out, Action{Kind: ActSetTimer, Timer: ev.Timer, At: ctx.Now + 100})
+		}
+		out = append(out, Action{Kind: ActDiskFsync, IO: 3, At: ctx.Raw})
+		now++
 	})
 	if allocs != 0 {
 		t.Fatalf("%v allocations per call", allocs)
+	}
+}
+
+func TestContextCarriesTwoClocks(t *testing.T) {
+	for _, c := range []struct{ now, raw Tick }{{1000, 1226}, {5_000_000, 4_000_000}, {7, 0}, {0, 7}} {
+		ctx := Context{Now: c.now, Raw: c.raw}
+		if ctx.Now != c.now || ctx.Raw != c.raw {
+			t.Fatalf("context %+v, want Now %d and Raw %d", ctx, c.now, c.raw)
+		}
+	}
+}
+
+func TestResumedNeedsNoOtherField(t *testing.T) {
+	ev := Event{Kind: EvResumed}
+	if ev != (Event{Kind: EvResumed, Peer: NodeID{}, Msg: Msg{}, IO: 0, Err: DiskOK, Timer: 0}) {
+		t.Fatalf("Resumed %+v", ev)
+	}
+	for _, k := range []EventKind{EvNone, EvNetRecv, EvPeerLost, EvDiskDone, EvTimer} {
+		if k == EvResumed {
+			t.Fatalf("Resumed shares kind %d", k)
+		}
 	}
 }

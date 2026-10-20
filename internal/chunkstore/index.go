@@ -19,7 +19,8 @@ import (
 // A chunk's keys are pool u32 | XXH3 of the chunk u64 | chunk ID, all big-endian, so a placement
 // group's chunks are one key range. That prefix alone holds the chunk's entry; with a version
 // appended (0 for the live map) and a first block, an extent of that map; a frozen version alone
-// holds its freeze epoch, sorting before that version's extents. A record's live block count sits
+// holds its freeze epoch, sorting before that version's extents. Version 0, the absent chunk, has
+// no extents of its own: its marker sorts before the live map's. A record's live block count sits
 // under RecordPool and its header's LBA, after every chunk.
 const (
 	chunkKeySize  = 4 + 8 + core.ChunkIDSize
@@ -35,14 +36,13 @@ const (
 var (
 	// ErrReservedPool reports a record entry for RecordPool.
 	ErrReservedPool = errors.New("chunkstore: pool reserved for the index")
-	// ErrFrozenLive reports a freeze of version 0, which names the live map.
-	ErrFrozenLive = errors.New("chunkstore: freeze of version 0")
+	// ErrFrozenLive reports a freeze of version 0, the absent chunk, of a chunk that exists.
+	ErrFrozenLive = errors.New("chunkstore: freeze of version 0 of an existing chunk")
 	// ErrBadKey reports a key that is not an extent's.
 	ErrBadKey = errors.New("chunkstore: not an extent key")
 )
 
-// Key is an extent's key: the chunk, the frozen version whose map holds it (0 for the live map) and
-// its first block.
+// Key is an extent's key: the chunk, the frozen version whose map holds it (0 for the live map) and its first block.
 type Key struct {
 	Pool    core.PoolID
 	Chunk   core.ChunkID
@@ -80,9 +80,7 @@ func DecodeKey(b []byte) (Key, error) {
 	return k, nil
 }
 
-// Extent is a run of a chunk's blocks written by one record: Count blocks from block First of the
-// chunk, at version Version, stored from LBA on, or zeros when LBA is 0, in the record whose header
-// is at Header.
+// Extent is Count blocks of a chunk from block First at Version, stored from LBA on (zeros when 0), in the record at Header.
 type Extent struct {
 	First   uint16
 	Count   uint16
@@ -136,17 +134,18 @@ type Chunk struct {
 	Epoch   uint64
 }
 
-// Index is one disk's chunk index, in an LSM tree: per chunk its entry, its live map, which never
-// holds two extents for one block, a frozen map per version a snapshot froze, and per record the
-// blocks the maps still refer to. Records apply once each, in LSN order.
+// Index is one disk's chunk index in an LSM tree: per chunk its entry, live map and frozen maps, and per record its live blocks.
 type Index struct {
-	tree  *lsm.Tree
-	key   []byte
-	val   []byte
-	exts  []Extent
-	vers  []uint64
-	it    lsm.Iter
-	check []recordCount
+	tree          *lsm.Tree
+	key           []byte
+	val           []byte
+	lo            []byte
+	hi            []byte
+	exts          []Extent
+	vers          []uint64
+	it            lsm.Iter
+	check         []recordCount
+	pointRemovals bool
 }
 
 // NewIndex makes an index over tree, which holds the index alone.
@@ -171,17 +170,17 @@ func (x *Index) must(err error) {
 	}
 }
 
-// Apply maps a durable record, a Durable or Replayed event of the disk log: writes and punches
-// replace what they cover in the live map, and a freeze copies the live map under its version
-// first, as the entries come in the record.
+// Apply maps a Durable or Replayed record's entries in order: writes and punches into the live map, freezes as copies of it.
 func (x *Index) Apply(ev *disklog.Event) error {
 	for i := range ev.Entries {
 		e := &ev.Entries[i]
 		if e.Kind != disklog.EntryBlob && e.Pool == RecordPool {
 			return ErrReservedPool
 		}
-		if e.Kind == disklog.EntryFreeze && e.Version == 0 {
-			return ErrFrozenLive
+		if e.Kind == disklog.EntryFreeze && e.Version == 0 && !x.absent(e.Pool, e.Chunk) {
+			if _, ok := x.Chunk(e.Pool, e.Chunk); ok {
+				return ErrFrozenLive
+			}
 		}
 	}
 	for i := range ev.Entries {
@@ -191,6 +190,10 @@ func (x *Index) Apply(ev *disklog.Event) error {
 			lba := ev.LBA + core.LBA(ev.HeaderBlocks) + core.LBA(ev.Payloads[i]/core.BlockSize)
 			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, LBA: lba, Header: ev.LBA})
 		case disklog.EntryPunch:
+			if e.First == 0 && e.Count == core.BlocksPerChunk {
+				x.punchWhole(e.Pool, e.Chunk, e.Version)
+				continue
+			}
 			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, Header: ev.LBA})
 		case disklog.EntryFreeze:
 			x.freeze(e.Pool, e.Chunk, e.Version, e.Epoch)
@@ -199,9 +202,22 @@ func (x *Index) Apply(ev *disklog.Event) error {
 	return nil
 }
 
-// insert maps ext into the chunk's live map, trimming and splitting the extents it covers.
+// insert maps ext into the chunk's live map, trimming and splitting the extents it covers, and
+// removing the keys of those starting inside it with one range removal when there are two or more.
 func (x *Index) insert(pool core.PoolID, c core.ChunkID, ext Extent) {
 	x.exts = x.overlapping(x.exts[:0], pool, c, 0, ext.First, ext.end())
+	inside := 0
+	for _, o := range x.exts {
+		if o.First > ext.First {
+			inside++
+		}
+	}
+	ranged := inside >= 2 && !x.pointRemovals
+	if ranged {
+		x.lo = AppendKey(x.lo[:0], Key{Pool: pool, Chunk: c, First: ext.First + 1})
+		x.hi = AppendKey(x.hi[:0], Key{Pool: pool, Chunk: c, First: uint16(ext.end())})
+		x.must(x.tree.DeleteRange(x.lo, x.hi))
+	}
 	for _, o := range x.exts {
 		lo, hi := max(int(o.First), int(ext.First)), min(o.end(), ext.end())
 		if o.LBA != 0 {
@@ -212,7 +228,7 @@ func (x *Index) insert(pool core.PoolID, c core.ChunkID, ext Extent) {
 			left := o
 			left.Count = ext.First - o.First
 			x.put(x.extentKey(pool, c, 0, o.First), left)
-		case o.First != ext.First:
+		case o.First != ext.First && !ranged:
 			x.must(x.tree.Delete(x.extentKey(pool, c, 0, o.First)))
 		}
 		if o.end() > ext.end() {
@@ -226,6 +242,60 @@ func (x *Index) insert(pool core.PoolID, c core.ChunkID, ext Extent) {
 	ch, _ := x.Chunk(pool, c)
 	ch.Version = ext.Version
 	x.putChunk(pool, c, ch)
+}
+
+// punchWhole empties the chunk's live map with one range removal, keeping its entry, at version,
+// as its tombstone.
+func (x *Index) punchWhole(pool core.PoolID, c core.ChunkID, version uint64) {
+	x.exts = x.overlapping(x.exts[:0], pool, c, 0, 0, core.BlocksPerChunk)
+	x.removeMap(pool, c, 0, x.exts)
+	ch, _ := x.Chunk(pool, c)
+	ch.Version = version
+	x.putChunk(pool, c, ch)
+}
+
+// removeMap removes map version of the chunk, whose extents are exts, with one range removal:
+// the live map's extents for version 0, a frozen version's epoch and extents otherwise.
+func (x *Index) removeMap(pool core.PoolID, c core.ChunkID, version uint64, exts []Extent) {
+	for _, e := range exts {
+		if e.LBA != 0 {
+			x.addLive(e.Header, -int(e.Count))
+		}
+	}
+	if x.pointRemovals {
+		if version != 0 {
+			x.must(x.tree.Delete(binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), version)))
+		}
+		for _, e := range exts {
+			x.must(x.tree.Delete(x.extentKey(pool, c, version, e.First)))
+		}
+		return
+	}
+	x.lo = binary.BigEndian.AppendUint64(appendChunkPrefix(x.lo[:0], pool, c), version)
+	if version == 0 {
+		x.lo = binary.BigEndian.AppendUint16(x.lo, 0)
+	}
+	x.hi = appendChunkPrefix(x.hi[:0], pool, c)
+	if version == math.MaxUint64 {
+		x.hi = binary.BigEndian.AppendUint64(x.hi, version)
+		x.hi = append(x.hi, 0xff, 0xff, 0xff)
+	} else {
+		x.hi = binary.BigEndian.AppendUint64(x.hi, version+1)
+	}
+	x.must(x.tree.DeleteRange(x.lo, x.hi))
+}
+
+// Release removes a frozen version no snapshot reads any more with one range removal over its epoch and map; the absent version 0, whose empty map shares the live map's key range, removes no keys.
+func (x *Index) Release(pool core.PoolID, c core.ChunkID, version uint64) {
+	if version == 0 {
+		return
+	}
+	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), version)
+	if _, ok := x.tree.Get(x.key); !ok {
+		return
+	}
+	x.exts = x.overlapping(x.exts[:0], pool, c, version, 0, core.BlocksPerChunk)
+	x.removeMap(pool, c, version, x.exts)
 }
 
 // overlapping appends the extents of map version that cover any block in [first, end).
@@ -248,17 +318,20 @@ func (x *Index) overlapping(dst []Extent, pool core.PoolID, c core.ChunkID, vers
 	return dst
 }
 
-// freeze copies the live map under version, once: replaying a freeze already applied changes nothing.
+// freeze copies the live map under version, or records version 0 absent with an empty map, once:
+// replaying a freeze already applied changes nothing.
 func (x *Index) freeze(pool core.PoolID, c core.ChunkID, version, epoch uint64) {
 	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), version)
 	if _, ok := x.tree.Get(x.key); ok {
 		return
 	}
-	x.exts = x.overlapping(x.exts[:0], pool, c, 0, 0, core.BlocksPerChunk)
-	for _, e := range x.exts {
-		x.put(x.extentKey(pool, c, version, e.First), e)
-		if e.LBA != 0 {
-			x.addLive(e.Header, int(e.Count))
+	if version != 0 {
+		x.exts = x.overlapping(x.exts[:0], pool, c, 0, 0, core.BlocksPerChunk)
+		for _, e := range x.exts {
+			x.put(x.extentKey(pool, c, version, e.First), e)
+			if e.LBA != 0 {
+				x.addLive(e.Header, int(e.Count))
+			}
 		}
 	}
 	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), version)
@@ -299,8 +372,7 @@ func (x *Index) addLive(header core.LBA, delta int) {
 	x.must(x.tree.Put(k, x.val))
 }
 
-// Live is how many blocks of the record whose header is at header the live and frozen maps refer
-// to; a block both refer to counts twice, and a record at 0 holds nothing the index needs.
+// Live is how many blocks of the record at header the live and frozen maps refer to, a block both refer to counting twice.
 func (x *Index) Live(header core.LBA) uint32 {
 	v, ok := x.tree.Get(x.recordKey(header))
 	if !ok {
@@ -319,35 +391,64 @@ func (x *Index) Chunk(pool core.PoolID, c core.ChunkID) (Chunk, bool) {
 	return Chunk{Version: binary.LittleEndian.Uint64(v), Epoch: binary.LittleEndian.Uint64(v[8:])}, true
 }
 
-// Lookup returns the live extent holding block b of the chunk.
+// Lookup returns the live extent holding block b of the chunk, a one-block extent of zeros at version 0 when the chunk has an entry and no extent holds b, or false when the chunk has no entry or only the absent version.
 func (x *Index) Lookup(pool core.PoolID, c core.ChunkID, b uint16) (Extent, bool) {
 	return x.lookup(pool, c, 0, b)
 }
 
+// lookup reads block b of map version with one floor: an extent of that map, or, below its
+// extents, the map's epoch for a frozen version and the chunk's entry or absent version for the
+// live map.
 func (x *Index) lookup(pool core.PoolID, c core.ChunkID, version uint64, b uint16) (Extent, bool) {
 	k := x.extentKey(pool, c, version, b)
 	fk, v, ok := x.tree.Floor(k)
-	if !ok || !bytes.HasPrefix(fk, k[:frozenKeySize]) {
+	if !ok || !bytes.HasPrefix(fk, k[:chunkKeySize]) {
 		return Extent{}, false
 	}
-	e, ok := decodeExtent(fk, v)
-	if !ok || int(b) >= e.end() {
+	zeros := Extent{First: b, Count: 1}
+	switch len(fk) {
+	case KeySize:
+		e, ok := decodeExtent(fk, v)
+		if !ok || !bytes.HasPrefix(fk, k[:frozenKeySize]) {
+			return Extent{}, false
+		}
+		if int(b) >= e.end() {
+			return zeros, true
+		}
+		return e, true
+	case frozenKeySize:
+		if !bytes.Equal(fk, k[:frozenKeySize]) {
+			return Extent{}, false
+		}
+		if version != 0 {
+			return zeros, true
+		}
+	case chunkKeySize:
+		if version != 0 || len(v) != 16 || binary.LittleEndian.Uint64(v) == 0 {
+			return Extent{}, false
+		}
+		return zeros, true
+	default:
 		return Extent{}, false
 	}
-	return e, true
+	if ch, ok := x.Chunk(pool, c); ok && ch.Version != 0 {
+		return zeros, true
+	}
+	return Extent{}, false
 }
 
-// LookupAt returns the extent holding block b of the chunk as the snapshot of epoch reads it: from
-// the frozen version with the smallest freeze epoch at or above epoch, since writes after that
-// snapshot's cut carry its epoch, or the live map when none is.
+// LookupAt returns the extent holding block b of the chunk as the snapshot of epoch reads it.
 func (x *Index) LookupAt(pool core.PoolID, c core.ChunkID, b uint16, epoch uint64) (Extent, bool) {
 	if v, ok := x.FrozenAt(pool, c, epoch); ok {
+		if v == 0 {
+			return Extent{}, false
+		}
 		return x.lookup(pool, c, v, b)
 	}
 	return x.Lookup(pool, c, b)
 }
 
-// FrozenAt returns the frozen version a snapshot at epoch reads the chunk at, if any.
+// FrozenAt returns the frozen version a snapshot at epoch reads the chunk at, if any, 0 if the chunk was absent.
 func (x *Index) FrozenAt(pool core.PoolID, c core.ChunkID, epoch uint64) (uint64, bool) {
 	x.vers = x.frozen(x.vers[:0], pool, c)
 	best, bestEpoch, found := uint64(0), uint64(0), false
@@ -359,8 +460,18 @@ func (x *Index) FrozenAt(pool core.PoolID, c core.ChunkID, epoch uint64) (uint64
 	return best, found
 }
 
-// frozen appends each frozen version of the chunk and its freeze epoch.
+func (x *Index) absent(pool core.PoolID, c core.ChunkID) bool {
+	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), 0)
+	_, ok := x.tree.Get(x.key)
+	return ok
+}
+
+// frozen appends each frozen version of the chunk and its freeze epoch, the absent version 0 first.
 func (x *Index) frozen(dst []uint64, pool core.PoolID, c core.ChunkID) []uint64 {
+	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), 0)
+	if v, ok := x.tree.Get(x.key); ok {
+		dst = append(dst, 0, binary.LittleEndian.Uint64(v))
+	}
 	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), 1)
 	x.tree.Iter(&x.it)
 	for ok := x.it.SeekGE(x.key); ok && bytes.HasPrefix(x.it.Key(), x.key[:chunkKeySize]); {
@@ -385,15 +496,15 @@ func (x *Index) Extents(dst []Extent, pool core.PoolID, c core.ChunkID, version 
 	return x.overlapping(dst, pool, c, version, 0, core.BlocksPerChunk)
 }
 
-// Move applies a cleaner's copy of count blocks from block first of the chunk, stored from LBA
-// from on, to LBA to in the record whose header is at header. It changes each map, live or
-// frozen, whose extent still stores exactly those blocks at from, so a write that landed while the
-// cleaner copied wins, and returns how many maps it changed.
+// Move repoints every map still storing the blocks at from to the cleaner's copy at to, and returns how many maps it changed.
 func (x *Index) Move(pool core.PoolID, c core.ChunkID, first, count uint16, from, to, header core.LBA) int {
 	x.vers = append(x.frozen(x.vers[:0], pool, c), 0, 0)
 	moved := 0
 	for i := 0; i < len(x.vers); i += 2 {
 		v := x.vers[i]
+		if v == 0 && i+2 < len(x.vers) {
+			continue
+		}
 		e, ok := x.lookup(pool, c, v, first)
 		if !ok || e.LBA == 0 || e.BlockLBA(first) != from || int(first)+int(count) > e.end() || count == 0 {
 			continue
@@ -421,13 +532,12 @@ type recordCount struct {
 	n      uint32
 }
 
-// Check verifies the index's invariants: every map's extents lie in the chunk and never share a
-// block, and each record's count equals the blocks the maps refer to in it.
+// Check verifies that no map's extents leave the chunk or share a block, that no freeze is newer than its chunk's entry, and that every record's count is right.
 func (x *Index) Check() error {
 	x.check = x.check[:0]
 	var stored []recordCount
 	var prefix []byte
-	var mapVersion, marker uint64
+	var mapVersion, marker, chunkEpoch uint64
 	prevEnd := 0
 	x.tree.Iter(&x.it)
 	for ok := x.it.SeekGE(nil); ok; ok = x.it.Next() {
@@ -444,8 +554,9 @@ func (x *Index) Check() error {
 			}
 			prefix = append(prefix[:0], k...)
 			mapVersion, marker, prevEnd = math.MaxUint64, 0, 0
+			chunkEpoch = binary.LittleEndian.Uint64(v[8:])
 		case len(k) == frozenKeySize && bytes.HasPrefix(k, prefix) && len(prefix) > 0:
-			if len(v) != 8 {
+			if len(v) != 8 || binary.LittleEndian.Uint64(v) > chunkEpoch {
 				return fmt.Errorf("frozen %x: epoch %x", k, v)
 			}
 			marker = binary.BigEndian.Uint64(k[chunkKeySize:])

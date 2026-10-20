@@ -9,7 +9,7 @@ import (
 
 const (
 	recordMagic = "RSRC"
-	preludeSize = 48
+	preludeSize = 56
 
 	writeEntrySize  = 33
 	freezeEntrySize = 37
@@ -24,6 +24,7 @@ const (
 	recLSN          = 32
 	recEntries      = 40
 	recDataBlocks   = 44
+	recDurable      = 48
 
 	maxDataBytes = uint64(math.MaxUint32) * core.BlockSize
 )
@@ -51,9 +52,7 @@ const (
 	BlobManifestPiece
 )
 
-// Entry is one item of a record header. A write or punch names a block range of a chunk
-// version, a freeze the chunk version a snapshot epoch pins, and a blob a payload of
-// Length bytes for Owner; only the fields of the entry's kind are set.
+// Entry is one item of a record header; only the fields of its kind are set.
 type Entry struct {
 	Kind     EntryKind
 	Pool     core.PoolID
@@ -129,22 +128,21 @@ func (e *Entry) dataBytes() uint64 {
 	return 0
 }
 
-// Place is where a record sits: its log, the open sequence of its segment and its block
-// offset within the segment.
+// Place is where a record sits: its log, its segment's open sequence and its block offset in the segment.
 type Place struct {
 	LogID  uint64
 	Seq    uint64
 	Offset uint32
 }
 
-// Record identifies one record: its place and its log sequence number.
+// Record identifies one record: its place, its log sequence number and the newest LSN durable when its round was built.
 type Record struct {
 	Place
-	LSN uint64
+	LSN     uint64
+	Durable uint64
 }
 
-// Layout is the size of a record: its header bytes before padding, and its header and
-// data blocks.
+// Layout is the size of a record: its header bytes before padding, and its header and data blocks.
 type Layout struct {
 	HeaderBytes  int
 	HeaderBlocks uint32
@@ -197,10 +195,7 @@ func (a *layoutAcc) layout() (Layout, error) {
 	return Layout{HeaderBytes: int(headerBytes), HeaderBlocks: uint32(headerBlocks), DataBlocks: uint32(dataBlocks)}, nil
 }
 
-// PayloadOffset is where entry i's payload starts within the data area: a write's blocks
-// follow the blocks of the writes before it, and a blob's bytes follow every write and
-// the blobs before it. A punch or freeze has no payload; its offset is where the next
-// blob's bytes go.
+// PayloadOffset is where entry i's payload starts in the data area: writes' blocks first, in order, then blobs' bytes.
 func PayloadOffset(entries []Entry, i int) uint64 {
 	var writeBytes, blobBytes uint64
 	for j := range entries[:i] {
@@ -222,14 +217,13 @@ func PayloadOffset(entries []Entry, i int) uint64 {
 	return writeBytes + blobBytes
 }
 
-// AppendHeader appends the record's header blocks; crcs holds the checksum of each data
-// block, in order, and must have one per data block of the layout.
+// AppendHeader appends the record's header blocks; crcs holds one checksum per data block, in order.
 func AppendHeader(dst []byte, rec Record, entries []Entry, crcs []uint32) ([]byte, error) {
 	lay, err := LayoutOf(entries)
 	if err != nil {
 		return dst, err
 	}
-	if uint64(len(crcs)) != uint64(lay.DataBlocks) {
+	if uint64(len(crcs)) != uint64(lay.DataBlocks) || rec.Durable >= rec.LSN {
 		return dst, ErrMalformed
 	}
 	start := len(dst)
@@ -241,14 +235,13 @@ func AppendHeader(dst []byte, rec Record, entries []Entry, crcs []uint32) ([]byt
 	return finishHeader(dst, start, lay), nil
 }
 
-// AppendRecord appends the whole record: its header blocks, then data, which must be the
-// record's data area of exactly its data blocks.
+// AppendRecord appends the record's header blocks and then data, which must be exactly its data area.
 func AppendRecord(dst []byte, rec Record, entries []Entry, data []byte) ([]byte, error) {
 	lay, err := LayoutOf(entries)
 	if err != nil {
 		return dst, err
 	}
-	if uint64(len(data)) != uint64(lay.DataBlocks)*core.BlockSize {
+	if uint64(len(data)) != uint64(lay.DataBlocks)*core.BlockSize || rec.Durable >= rec.LSN {
 		return dst, ErrMalformed
 	}
 	start := len(dst)
@@ -273,6 +266,7 @@ func appendPrelude(dst []byte, rec Record, lay Layout, entries int) []byte {
 	binary.LittleEndian.PutUint64(b[recLSN:], rec.LSN)
 	binary.LittleEndian.PutUint32(b[recEntries:], uint32(entries))
 	binary.LittleEndian.PutUint32(b[recDataBlocks:], lay.DataBlocks)
+	binary.LittleEndian.PutUint64(b[recDurable:], rec.Durable)
 	return dst
 }
 
@@ -349,8 +343,7 @@ func decodeEntry(b []byte, e *Entry) (int, error) {
 	return 0, ErrMalformed
 }
 
-// RecordHeader is a decoded record header. Entries are appended to the slice the
-// decoder was given; the per-block checksums stay in the image.
+// RecordHeader is a decoded record header; its entries share the slice the decoder was given.
 type RecordHeader struct {
 	Record  Record
 	Layout  Layout
@@ -363,9 +356,7 @@ func (h *RecordHeader) DataCRC(i int) uint32 {
 	return core.GetCRC32C(h.crcs[i*core.CRC32CSize:])
 }
 
-// DecodeHeader decodes and verifies the header blocks at the start of img, which must
-// name the place at and fit in the blocksLeft of its segment, appending its entries to
-// entries. The data blocks are not read.
+// DecodeHeader verifies and decodes the header at the start of img, which must name place at and fit in blocksLeft.
 func DecodeHeader(img []byte, at Place, blocksLeft uint32, entries []Entry) (RecordHeader, error) {
 	if len(img) < len(recordMagic) {
 		return RecordHeader{}, ErrTruncated
@@ -397,7 +388,11 @@ func DecodeHeader(img []byte, at Place, blocksLeft uint32, entries []Entry) (Rec
 			Seq:    binary.LittleEndian.Uint64(h[recSeq:]),
 			Offset: binary.LittleEndian.Uint32(h[recOffset:]),
 		},
-		LSN: binary.LittleEndian.Uint64(h[recLSN:]),
+		LSN:     binary.LittleEndian.Uint64(h[recLSN:]),
+		Durable: binary.LittleEndian.Uint64(h[recDurable:]),
+	}
+	if rec.Durable >= rec.LSN {
+		return RecordHeader{}, ErrMalformed
 	}
 	dataBlocks := binary.LittleEndian.Uint32(h[recDataBlocks:])
 	if uint64(headerBlocks)+uint64(dataBlocks) > uint64(blocksLeft) {
@@ -438,8 +433,7 @@ type DecodedRecord struct {
 	Data []byte
 }
 
-// DecodeRecord decodes and verifies the whole record at the start of img, as
-// DecodeHeader does, and checks every data block against its checksum.
+// DecodeRecord decodes the record at the start of img as DecodeHeader does and checks every data block's checksum.
 func DecodeRecord(img []byte, at Place, blocksLeft uint32, entries []Entry) (DecodedRecord, error) {
 	h, err := DecodeHeader(img, at, blocksLeft, entries)
 	if err != nil {
@@ -460,8 +454,7 @@ func DecodeRecord(img []byte, at Place, blocksLeft uint32, entries []Entry) (Dec
 	return DecodedRecord{RecordHeader: h, Data: data}, nil
 }
 
-// Payload is entry i's bytes within the data area: a write's blocks or a blob's bytes,
-// sliced from the image; a punch or freeze has none.
+// Payload is entry i's bytes sliced from the image: a write's blocks or a blob's bytes, empty for a punch or freeze.
 func (d *DecodedRecord) Payload(i int) []byte {
 	e := &d.Entries[i]
 	switch e.Kind {

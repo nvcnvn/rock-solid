@@ -2,6 +2,7 @@ package lsm
 
 import (
 	"bytes"
+	"fmt"
 	"maps"
 	"slices"
 	"testing"
@@ -53,19 +54,26 @@ func dump(r reader) []kv {
 // floor of each probe.
 func checkReads(t testing.TB, r reader, m model, probes []string) {
 	t.Helper()
+	if d := readsDiffer(r, m, probes); d != "" {
+		t.Fatal(d)
+	}
+}
+
+// readsDiffer describes the first read in which r differs from m, or returns "".
+func readsDiffer(r reader, m model, probes []string) string {
 	want := m.sorted()
 	if got := dump(r); !slices.Equal(got, want) {
-		t.Fatalf("entries\n got %d %v\nwant %d %v", len(got), clip(got), len(want), clip(want))
+		return fmt.Sprintf("entries\n got %d %v\nwant %d %v", len(got), clip(got), len(want), clip(want))
 	}
 	for _, e := range want {
 		if v, ok := r.Get([]byte(e.k)); !ok || string(v) != e.v {
-			t.Fatalf("get %q = %q %v, want %q", e.k, v, ok, e.v)
+			return fmt.Sprintf("get %q = %q %v, want %q", e.k, v, ok, e.v)
 		}
 	}
 	for _, p := range probes {
 		v, ok := r.Get([]byte(p))
 		if mv, mok := m[p]; ok != mok || string(v) != mv {
-			t.Fatalf("get %q = %q %v, want %q %v", p, v, ok, mv, mok)
+			return fmt.Sprintf("get %q = %q %v, want %q %v", p, v, ok, mv, mok)
 		}
 		i, _ := slices.BinarySearchFunc(want, p, func(e kv, p string) int { return bytes.Compare([]byte(e.k), []byte(p)) })
 		if i < len(want) && want[i].k == p {
@@ -73,9 +81,10 @@ func checkReads(t testing.TB, r reader, m model, probes []string) {
 		}
 		k, v, ok := r.Floor([]byte(p))
 		if ok != (i > 0) || ok && (string(k) != want[i-1].k || string(v) != want[i-1].v) {
-			t.Fatalf("floor %q = %q %q %v, want index %d", p, k, v, ok, i-1)
+			return fmt.Sprintf("floor %q = %q %q %v, want index %d", p, k, v, ok, i-1)
 		}
 	}
+	return ""
 }
 
 func clip(s []kv) []kv { return s[:min(len(s), 8)] }
@@ -158,6 +167,13 @@ func (f *fakeLog) restore(t testing.TB, maxPiece int, roots []disklog.BlobRef) *
 // It returns the number of pages reachable.
 func checkPages(t testing.TB, m *memtable, root uint32) int {
 	t.Helper()
+	return checkTree(t, m, root, true)
+}
+
+// checkTree is checkPages, with inner keys only at or below their child's smallest key unless
+// exact, as a tree that removes keys leaves them.
+func checkTree(t testing.TB, m *memtable, root uint32, exact bool) int {
+	t.Helper()
 	var walk func(id uint32, lo, hi []byte, isRoot bool) ([]byte, int)
 	walk = func(id uint32, lo, hi []byte, isRoot bool) ([]byte, int) {
 		p := m.pg.get(id)
@@ -189,7 +205,7 @@ func checkPages(t testing.TB, m *memtable, root uint32) int {
 				next = p.key(i + 1)
 			}
 			min, n := walk(p.child(i), p.key(i), next, false)
-			if !bytes.Equal(min, p.key(i)) {
+			if c := bytes.Compare(min, p.key(i)); c < 0 || exact && c != 0 {
 				t.Fatalf("page %d key %d is %q, its child's smallest %q", id, i, p.key(i), min)
 			}
 			pages += n

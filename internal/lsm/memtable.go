@@ -1,6 +1,10 @@
 package lsm
 
-import "encoding/binary"
+import (
+	"bytes"
+	"encoding/binary"
+	"math"
+)
 
 // A stored value starts with its kind, so a removal is an entry that shadows older runs.
 const (
@@ -8,15 +12,26 @@ const (
 	kindSet byte = 1
 )
 
+// noPage is the root of a fragment tree not yet started.
+const noPage = math.MaxUint32
+
 type stalePage struct{ id, born, at uint32 }
 
-// memtable is a copy-on-write B+-tree of pages. A view pins the root it saw, and once one is
-// open a write copies each page it changes that a view can reach. A page copied away is freed
-// once no open view could reach it.
+// memtable is a copy-on-write B+-tree of pages, and a second one of its range removals'
+// fragments, start → end, which never overlap or abut. A view pins the roots it saw, and once one
+// is open a write copies each page it changes that a view can reach. A page copied away is freed
+// once no open view could reach it. Entries under a fragment are removals, since a range removal
+// turns the entries in it into removals and a later put cuts its key out, unless mixed: a put
+// whose cut would leave a bound over MaxBound stays inside the fragment, and then the memtable's
+// own entries win over its fragments, as a run's do.
 type memtable struct {
 	pg      *pages
 	root    uint32
+	froot   uint32
 	count   int
+	frags   int
+	mixed   bool
+	added   bool
 	gen     uint32
 	views   []uint32
 	stale   []stalePage
@@ -24,13 +39,18 @@ type memtable struct {
 	scratch [3]page
 	ebuf    []byte
 	ibuf    []byte
+	fbuf    []byte
 	sep     []byte
+	flo     []byte
+	fhi     []byte
+	fk      []byte
 	elist   [][]byte
 	slist   [][]byte
+	fc      memCursor
 }
 
 func newMemtable(pg *pages) *memtable {
-	m := &memtable{pg: pg, gen: 1, refs: 1}
+	m := &memtable{pg: pg, gen: 1, refs: 1, froot: noPage}
 	m.root = pg.alloc(leafPage, m.gen)
 	return m
 }
@@ -68,22 +88,196 @@ func (m *memtable) innerEntry(k []byte, child uint32) []byte {
 	return e
 }
 
+func (m *memtable) fragEntry(lo, hi []byte) []byte {
+	e := m.fbuf[:0]
+	e = binary.LittleEndian.AppendUint16(e, uint16(len(lo)))
+	e = binary.LittleEndian.AppendUint16(e, uint16(len(hi)))
+	e = append(e, lo...)
+	e = append(e, hi...)
+	m.fbuf = e
+	return e
+}
+
 func entryKey(leafEntry []byte) []byte {
 	return leafEntry[4 : 4+int(binary.LittleEndian.Uint16(leafEntry))]
 }
 
 // put stores k with value v of the given kind, replacing any entry for k.
 func (m *memtable) put(k []byte, kind byte, v []byte) {
-	e := m.leafEntry(k, kind, v)
-	m.root = m.writable(m.root)
-	sep, right, split := m.insert(m.root, k, e)
+	if m.insertInto(&m.root, k, m.leafEntry(k, kind, v)) {
+		m.count++
+	}
+}
+
+// insertInto places leaf entry e for k in the tree at *root, replacing any entry for k, and
+// reports whether k is new.
+func (m *memtable) insertInto(root *uint32, k, e []byte) bool {
+	*root = m.writable(*root)
+	m.added = false
+	sep, right, split := m.insert(*root, k, e)
 	if split {
 		r := m.pg.alloc(innerPage, m.gen)
 		p := m.pg.get(r)
-		p.setLeft(m.root)
+		p.setLeft(*root)
 		p.add(0, m.innerEntry(sep, right))
-		m.root = r
+		*root = r
 	}
+	return m.added
+}
+
+// removeFrom deletes k's entry, which the tree at *root holds, freeing the pages it empties.
+// Inner keys stay at or below their child's smallest key, which is all a search needs.
+func (m *memtable) removeFrom(root *uint32, k []byte) {
+	*root = m.writable(*root)
+	if m.removeIn(*root, k) && m.pg.get(*root).kind() == innerPage {
+		m.pg.release(*root)
+		*root = m.pg.alloc(leafPage, m.gen)
+	}
+	for p := m.pg.get(*root); p.kind() == innerPage && p.n() == 0; p = m.pg.get(*root) {
+		old := *root
+		*root = p.left()
+		m.pg.release(old)
+	}
+}
+
+// removeIn deletes k from the writable subtree id and reports whether the subtree is left empty.
+func (m *memtable) removeIn(id uint32, k []byte) bool {
+	p := m.pg.get(id)
+	if p.kind() == leafPage {
+		i, found := p.lowerBound(k)
+		if !found {
+			panic("lsm: removing a key the memtable lacks")
+		}
+		p.remove(i)
+		return p.n() == 0
+	}
+	ci := p.childFor(k)
+	child := m.writable(p.childAt(ci))
+	p.setChildAt(ci, child)
+	if !m.removeIn(child, k) {
+		return false
+	}
+	m.pg.release(child)
+	switch {
+	case ci >= 0:
+		p.remove(ci)
+	case p.n() > 0:
+		p.setLeft(p.child(0))
+		p.remove(0)
+	default:
+		return true
+	}
+	return false
+}
+
+func (m *memtable) putFrag(lo, hi []byte) {
+	if m.froot == noPage {
+		m.froot = m.pg.alloc(leafPage, m.gen)
+	}
+	if m.insertInto(&m.froot, lo, m.fragEntry(lo, hi)) {
+		m.frags++
+	}
+}
+
+func (m *memtable) removeFrag(lo []byte) {
+	m.removeFrom(&m.froot, lo)
+	m.frags--
+}
+
+// cut takes k out of the fragment holding it before k is put, so the memtable's entries under
+// its fragments stay removals. A piece with a bound over maxBound leaves the fragment whole and
+// the memtable mixed.
+func (m *memtable) cut(k []byte, maxBound int) {
+	if m.frags == 0 {
+		return
+	}
+	c := &m.fc
+	c.init(m, m.froot)
+	if !c.seekFloor(k) || bytes.Compare(k, c.value()) >= 0 {
+		return
+	}
+	m.flo = append(m.flo[:0], c.key()...)
+	m.fhi = append(m.fhi[:0], c.value()...)
+	m.fk = append(append(m.fk[:0], k...), 0)
+	left := !bytes.Equal(m.flo, k)
+	right := bytes.Compare(m.fk, m.fhi) < 0
+	if left && max(len(m.flo), len(k)) > maxBound || right && max(len(m.fk), len(m.fhi)) > maxBound {
+		m.mixed = true
+		return
+	}
+	if left {
+		m.putFrag(m.flo, k)
+	} else {
+		m.removeFrag(m.flo)
+	}
+	if right {
+		m.putFrag(m.fk, m.fhi)
+	}
+}
+
+// deleteRange turns the entries in [lo, hi) into removals and merges the range with the
+// fragments it overlaps or abuts.
+func (m *memtable) deleteRange(lo, hi []byte) {
+	c := &m.fc
+	m.fk = append(m.fk[:0], lo...)
+	for m.count > 0 {
+		c.init(m, m.root)
+		ok := c.seekGE(m.fk)
+		for ok && c.value()[0] == kindDel && bytes.Compare(c.key(), hi) < 0 {
+			ok = c.next()
+		}
+		if !ok || bytes.Compare(c.key(), hi) >= 0 {
+			break
+		}
+		m.fk = append(m.fk[:0], c.key()...)
+		m.put(m.fk, kindDel, nil)
+	}
+	m.flo = append(m.flo[:0], lo...)
+	m.fhi = append(m.fhi[:0], hi...)
+	merged := 0
+	if m.frags > 0 {
+		c.init(m, m.froot)
+		var ok bool
+		if c.seekFloor(lo) {
+			if bytes.Compare(c.value(), lo) >= 0 {
+				m.flo = append(m.flo[:0], c.key()...)
+				m.fhi = maxKey(m.fhi, c.value())
+			}
+			ok = c.next()
+		} else {
+			ok = c.valid
+		}
+		for ; ok && bytes.Compare(c.key(), m.fhi) <= 0; ok = c.next() {
+			m.fhi = maxKey(m.fhi, c.value())
+			merged++
+		}
+	}
+	for range merged {
+		c.init(m, m.froot)
+		if c.seekGE(m.flo) && bytes.Equal(c.key(), m.flo) {
+			c.next()
+		}
+		m.fk = append(m.fk[:0], c.key()...)
+		m.removeFrag(m.fk)
+	}
+	m.putFrag(m.flo, m.fhi)
+}
+
+// maxKey sets buf to the greater of buf and k.
+func maxKey(buf, k []byte) []byte {
+	if bytes.Compare(k, buf) > 0 {
+		return append(buf[:0], k...)
+	}
+	return buf
+}
+
+// hasFrags reports whether the fragment tree at root holds a fragment.
+func (m *memtable) hasFrags(root uint32) bool {
+	if root == noPage {
+		return false
+	}
+	p := m.pg.get(root)
+	return p.kind() == innerPage || p.n() > 0
 }
 
 // insert places leaf entry e for k into the writable subtree id; a split returns the new right
@@ -120,7 +314,7 @@ func (m *memtable) insertLeaf(parent uint32, hasParent bool, ci int, id uint32, 
 		}
 		p.remove(i)
 	} else {
-		m.count++
+		m.added = true
 	}
 	if p.room() >= len(e)+2 {
 		p.add(i, e)
@@ -292,6 +486,7 @@ func (m *memtable) setKey(id uint32, i int, k []byte, child uint32) {
 
 // get returns k's stored value, its kind byte first.
 func (m *memtable) get(root uint32, k []byte) ([]byte, bool) {
+	m.pg.searches++
 	p := m.pg.get(root)
 	for p.kind() == innerPage {
 		p = m.pg.get(p.childAt(p.childFor(k)))
@@ -305,6 +500,7 @@ func (m *memtable) get(root uint32, k []byte) ([]byte, bool) {
 
 // floor returns the greatest entry with key <= k, or < k when strict.
 func (m *memtable) floor(root uint32, k []byte, strict bool) ([]byte, []byte, bool) {
+	m.pg.searches++
 	id, alt, hasAlt := root, uint32(0), false
 	p := m.pg.get(id)
 	for p.kind() == innerPage {
@@ -374,6 +570,9 @@ func (m *memtable) unref() {
 		return
 	}
 	m.releaseTree(m.root)
+	if m.froot != noPage {
+		m.releaseTree(m.froot)
+	}
 	for _, s := range m.stale {
 		m.pg.release(s.id)
 	}
@@ -405,6 +604,7 @@ type memCursor struct {
 func (c *memCursor) init(m *memtable, root uint32) { *c = memCursor{pg: m.pg, root: root} }
 
 func (c *memCursor) seekGE(k []byte) bool {
+	c.pg.searches++
 	c.depth = 0
 	id := c.root
 	for {
@@ -464,6 +664,44 @@ func (c *memCursor) advance() bool {
 	}
 	c.valid = false
 	return false
+}
+
+// prev moves to the entry before the current one, or to the last entry from past the end; when
+// there is none it reports false and stays.
+func (c *memCursor) prev() bool {
+	if c.idx[c.depth] > 0 {
+		c.idx[c.depth]--
+		c.valid = true
+		return true
+	}
+	for d := c.depth - 1; d >= 0; d-- {
+		if c.idx[d] < 0 {
+			continue
+		}
+		c.idx[d]--
+		id := c.pg.get(c.ids[d]).childAt(c.idx[d])
+		c.depth = d + 1
+		for {
+			q := c.pg.get(id)
+			c.ids[c.depth] = id
+			c.idx[c.depth] = q.n() - 1
+			if q.kind() == leafPage {
+				c.valid = true
+				return true
+			}
+			c.depth++
+			id = q.childAt(q.n() - 1)
+		}
+	}
+	return false
+}
+
+// seekFloor moves to the last entry <= k, or reports false at the first entry, if any.
+func (c *memCursor) seekFloor(k []byte) bool {
+	if c.seekGE(k) && bytes.Equal(c.key(), k) {
+		return true
+	}
+	return c.prev()
 }
 
 func (c *memCursor) key() []byte   { return c.pg.get(c.ids[c.depth]).key(c.idx[c.depth]) }

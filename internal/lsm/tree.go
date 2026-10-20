@@ -1,5 +1,5 @@
 // Package lsm is the log-structured merge tree behind every index in a disk log: a copy-on-write
-// page-tree memtable, immutable prefix-compressed sorted runs held in memory, size-tiered
+// page-tree memtable, immutable prefix-compressed sorted runs held in memory, universal
 // compaction, point-in-time views, flushes written to the log one piece at a time and restores
 // from the pieces a manifest names.
 package lsm
@@ -14,9 +14,11 @@ import (
 
 const (
 	// MaxKey is the longest key a tree takes.
-	MaxKey = 1024
+	MaxKey = 1032
 	// MaxValue is the longest value a tree takes.
 	MaxValue = 1000
+	// MaxBound is the longest bound of a range removal a tree takes.
+	MaxBound = 1000
 	// MinPiece is the smallest piece size a tree is configured with.
 	MinPiece = 64
 )
@@ -26,7 +28,7 @@ var (
 	ErrTooLarge = errors.New("lsm: too large")
 	// ErrBadConfig reports settings a tree cannot run with.
 	ErrBadConfig = errors.New("lsm: bad config")
-	// ErrBusy reports a flush begun while another runs, or a compaction picked while another runs.
+	// ErrBusy reports a flush begun while another runs.
 	ErrBusy = errors.New("lsm: already running")
 	// ErrNoFlush reports a flush call with no flush running, or at the wrong step.
 	ErrNoFlush = errors.New("lsm: no flush at that step")
@@ -36,60 +38,77 @@ var (
 	ErrBadVersion = errors.New("lsm: unsupported run format version")
 	// ErrStale reports a compaction whose inputs are no longer the tree's.
 	ErrStale = errors.New("lsm: compaction inputs changed")
+	// ErrEmptyRange reports a range removal whose start is not below its end.
+	ErrEmptyRange = errors.New("lsm: empty range")
 )
 
 // Config is a tree's settings.
 type Config struct {
 	// MaxPiece is the largest run piece, the log's MaxBlobBytes; at least MinPiece.
 	MaxPiece int
+	// RunLimit is the most runs before the newest merge whatever their sizes; 0 tunes it from the largest run.
+	RunLimit int
 }
 
 // Tree is an LSM tree. Only its owner calls it; a compaction's Run alone may run elsewhere.
 type Tree struct {
-	cfg       Config
-	pg        pages
-	mem       *memtable
-	frozen    *memtable
-	frozenSeq uint64
-	runs      []*run
-	nextSeq   uint64
-	fl        *flush
-	written   []*run
-	compact   *Compaction
-	it        iterState
+	cfg         Config
+	pg          pages
+	mem         *memtable
+	frozen      *memtable
+	frozenSeq   uint64
+	runs        []*run
+	nextSeq     uint64
+	fl          *flush
+	written     []*run
+	merges      []*Compaction
+	limitBuffer int
+	maxFrag     int
+	it          iterState
+	plant       plants
+}
+
+// plants are bugs a test turns on to show that its checks catch them.
+type plants struct {
+	noCut       bool
+	dropFrags   bool
+	keepCovered bool
 }
 
 type flush struct {
-	carried  []disklog.BlobRef
-	named    []*run
-	write    []*run
-	frozen   *run
-	src      iterState
-	bw       blockWriter
-	older    []*run
-	probe    blockIter
-	cur      int
-	next     int
-	refs     []disklog.BlobRef
-	inFlight bool
-	isRoot   bool
-	written  bool
+	carried     []disklog.BlobRef
+	named       []*run
+	write       []*run
+	frozen      *run
+	src         iterState
+	bw          blockWriter
+	older       []runIter
+	olderFrag   []runIter
+	entriesDone bool
+	cur         int
+	next        int
+	refs        []disklog.BlobRef
+	inFlight    bool
+	isRoot      bool
+	written     bool
 }
 
 // New makes an empty tree.
 func New(cfg Config) (*Tree, error) {
-	if cfg.MaxPiece < MinPiece {
+	if cfg.MaxPiece < MinPiece || cfg.RunLimit < 0 {
 		return nil, ErrBadConfig
 	}
-	t := &Tree{cfg: cfg, nextSeq: 1}
+	t := &Tree{cfg: cfg, nextSeq: 1, limitBuffer: autoLimitBuffer}
+	for t.maxFrag = MaxBound; t.maxFrag > 0 && !t.fits(t.maxFrag, t.maxFrag); t.maxFrag-- {
+	}
 	t.mem = newMemtable(&t.pg)
 	return t, nil
 }
 
 func (t *Tree) state() state {
-	st := state{mem: t.mem, memRoot: t.mem.root, runs: t.runs}
+	st := state{mem: t.mem, memRoot: t.mem.root, memFRoot: t.mem.froot, runs: t.runs}
 	if t.frozen != nil {
-		st.frozen, st.frozenRoot = t.frozen, t.frozen.root
+		st.frozen, st.frozenRoot, st.frozenFRoot = t.frozen, t.frozen.root, t.frozen.froot
 	}
 	return st
 }
@@ -99,7 +118,22 @@ func (t *Tree) Put(k, v []byte) error {
 	if !t.fits(len(k), len(v)) {
 		return ErrTooLarge
 	}
+	if !t.plant.noCut {
+		t.mem.cut(k, t.maxFrag)
+	}
 	t.mem.put(k, kindSet, v)
+	return nil
+}
+
+// DeleteRange removes every key in [lo, hi).
+func (t *Tree) DeleteRange(lo, hi []byte) error {
+	if bytes.Compare(lo, hi) >= 0 {
+		return ErrEmptyRange
+	}
+	if max(len(lo), len(hi)) > t.maxFrag {
+		return ErrTooLarge
+	}
+	t.mem.deleteRange(lo, hi)
 	return nil
 }
 
@@ -156,8 +190,10 @@ func (t *Tree) Runs() int { return len(t.runs) }
 // Frozen reports whether a memtable is frozen for a flush that has not finished writing it.
 func (t *Tree) Frozen() bool { return t.frozen != nil }
 
-// View is a point-in-time view of a tree. It pins the pages and runs it reads, so it is closed
-// once done; only the tree's owner reads it.
+// Searches is how many layers the tree's gets and floors have searched.
+func (t *Tree) Searches() int { return t.it.probes }
+
+// View is a point-in-time view of a tree that pins what it reads until closed; only the tree's owner reads it.
 type View struct {
 	st        state
 	memGen    uint32
@@ -205,22 +241,19 @@ func (v *View) Close() {
 	v.st = state{}
 }
 
-// BeginFlush starts writing what the newest manifest will need: the memtable, frozen now unless a
-// failed flush left one frozen, and every run not yet durable. It reports whether it froze the
-// memtable, which fixes the index's replay point. Pieces follow, each once the one before is durable.
+// BeginFlush starts writing the frozen memtable and every run not yet durable, and reports whether it froze the memtable.
 func (t *Tree) BeginFlush() (bool, error) {
 	if t.fl != nil {
 		return false, ErrBusy
 	}
 	froze := false
-	if t.frozen == nil && t.mem.count > 0 {
+	if t.frozen == nil && (t.mem.count > 0 || t.mem.frags > 0) {
 		t.frozen, t.frozenSeq = t.mem, t.nextSeq
 		t.nextSeq++
 		t.mem = newMemtable(&t.pg)
 		froze = true
 	}
-	fl := &flush{named: slices.Clone(t.runs)}
-	fl.older = fl.named
+	fl := &flush{named: slices.Clone(t.runs), older: runIters(t.runs), olderFrag: runIters(t.runs)}
 	for _, r := range t.runs {
 		if r.durable() {
 			fl.carried = append(fl.carried, r.root())
@@ -231,7 +264,7 @@ func (t *Tree) BeginFlush() (bool, error) {
 	if t.frozen != nil {
 		fl.frozen = &run{seq: t.frozenSeq}
 		fl.write = append(fl.write, fl.frozen)
-		st := state{mem: t.frozen, memRoot: t.frozen.root}
+		st := state{mem: t.frozen, memRoot: t.frozen.root, memFRoot: t.frozen.froot}
 		fl.src.reset(&st, true)
 		fl.src.seek(nil)
 	}
@@ -239,8 +272,7 @@ func (t *Tree) BeginFlush() (bool, error) {
 	return froze, nil
 }
 
-// CarriedRuns is the root piece of each durable run the running flush does not rewrite, for the
-// checkpoint to name again.
+// CarriedRuns is the root piece of each durable run the running flush does not rewrite.
 func (t *Tree) CarriedRuns() []disklog.BlobRef {
 	if t.fl == nil {
 		return nil
@@ -248,8 +280,7 @@ func (t *Tree) CarriedRuns() []disklog.BlobRef {
 	return t.fl.carried
 }
 
-// NextPiece builds the flush's next piece in buf, which holds MaxPiece bytes, and returns its length
-// and whether it is a run's root; a length of 0 means every piece is written.
+// NextPiece builds the flush's next piece in buf and returns its length, 0 when done, and whether it is a run's root.
 func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 	fl := t.fl
 	if fl == nil || fl.inFlight {
@@ -266,12 +297,23 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 	w := fl.write[fl.cur]
 	var block []byte
 	var last, inPlace bool
+	kind := entryBlock
 	switch {
 	case w == fl.frozen:
 		bw := &fl.bw
 		bw.reset(buf[pieceHeader:])
-		last = fillBlock(bw, &fl.src, t.cfg.MaxPiece-pieceOverhead, fl.older, &fl.probe)
-		if bw.n == 0 && len(w.blocks) == 0 && last {
+		limit := t.cfg.MaxPiece - pieceOverhead
+		if !fl.entriesDone {
+			if fl.entriesDone = fillBlock(bw, &fl.src, limit, fl.older); fl.entriesDone {
+				fl.src.fragsFromStart()
+			}
+		}
+		if bw.n == 0 && fl.entriesDone {
+			kind = fragBlock
+			fillFragBlock(bw, &fl.src, limit, fl.olderFrag)
+		}
+		last = fl.entriesDone && !fl.src.pendingFrag(fl.olderFrag)
+		if bw.n == 0 && len(w.blocks)+len(w.frags) == 0 && last {
 			fl.frozen, fl.write = nil, fl.write[:fl.cur]
 			t.finishWrite()
 			return 0, false, nil
@@ -280,15 +322,21 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 			return 0, false, ErrTooLarge
 		}
 		block, inPlace = bw.finish(), true
-		if bw.n > 0 {
+		switch {
+		case bw.n == 0:
+		case kind == fragBlock:
+			w.addFrag(bytes.Clone(block))
+		default:
 			w.addBlock(bytes.Clone(block))
 		}
 	case fl.next < len(w.blocks):
-		block, last = w.blocks[fl.next], fl.next == len(w.blocks)-1
+		block, last = w.blocks[fl.next], fl.next == len(w.blocks)+len(w.frags)-1
+	case fl.next < len(w.blocks)+len(w.frags):
+		block, last, kind = w.frags[fl.next-len(w.blocks)], fl.next == len(w.blocks)+len(w.frags)-1, fragBlock
 	default:
 		block, last = emptyBlock[:], true
 	}
-	piece, root, err := writePiece(buf, block, inPlace, last, w.seq, fl.refs, t.cfg.MaxPiece)
+	piece, root, err := writePiece(buf, block, kind, inPlace, last, w.seq, fl.refs, t.cfg.MaxPiece)
 	if err != nil {
 		return 0, false, err
 	}
@@ -327,6 +375,7 @@ func (t *Tree) finishWrite() {
 	}
 	fl.written = true
 	if fl.frozen != nil {
+		fl.frozen.setBounds()
 		t.runs = append([]*run{fl.frozen}, t.runs...)
 	}
 	if t.frozen != nil {
@@ -335,9 +384,7 @@ func (t *Tree) finishWrite() {
 	}
 }
 
-// CheckpointDone reports the manifest naming this flush's runs durable and ends the flush. It
-// returns every piece of the runs that manifest no longer names; they are dead once a segment
-// header names it.
+// CheckpointDone ends the flush once its manifest is durable and returns the pieces of the runs it no longer names.
 func (t *Tree) CheckpointDone() ([]disklog.BlobRef, error) {
 	fl := t.fl
 	if fl == nil || !fl.written {
@@ -362,9 +409,7 @@ func (t *Tree) CheckpointDone() ([]disklog.BlobRef, error) {
 	return dead, nil
 }
 
-// FlushFailed ends a flush whose checkpoint failed. A frozen memtable not yet written stays
-// frozen for the next flush, and runs already durable stay so; it returns the pieces of the run it
-// was writing, which nothing names.
+// FlushFailed ends a failed flush, keeping its frozen memtable for the next, and returns the pieces nothing names.
 func (t *Tree) FlushFailed() []disklog.BlobRef {
 	fl := t.fl
 	if fl == nil {
@@ -375,18 +420,17 @@ func (t *Tree) FlushFailed() []disklog.BlobRef {
 		return nil
 	}
 	if fl.frozen != nil {
-		fl.frozen.blocks = nil
+		fl.frozen.blocks, fl.frozen.frags, fl.frozen.bytes = nil, nil, 0
 	}
 	return slices.Clone(fl.refs)
 }
 
-// LoadRun restores a run from its pieces in order, its root at ref last, before replay applies
-// what followed the manifest. Runs may load in any order.
+// LoadRun restores a run from its pieces in order, its root at ref last; runs may load in any order.
 func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
 	if len(pieces) == 0 {
 		return ErrMalformed
 	}
-	_, seq, refs, err := splitPiece(pieces[len(pieces)-1], nil)
+	_, _, seq, refs, err := splitPiece(pieces[len(pieces)-1], nil)
 	if err != nil {
 		return err
 	}
@@ -394,17 +438,28 @@ func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
 		return ErrMalformed
 	}
 	r := &run{seq: seq, pieces: append(refs, ref)}
-	var last []byte
+	var last, end []byte
 	for i, p := range pieces {
-		block, s, rr, err := splitPiece(p, nil)
+		block, kind, s, rr, err := splitPiece(p, nil)
 		if err != nil {
 			return err
 		}
 		if s != seq || (i < len(pieces)-1 && len(rr) > 0) {
 			return ErrMalformed
 		}
+		if kind == fragBlock {
+			n, e, ok := validateFragBlock(block, end, len(r.frags) > 0)
+			if !ok {
+				return ErrMalformed
+			}
+			end = e
+			if n > 0 {
+				r.addFrag(bytes.Clone(block))
+			}
+			continue
+		}
 		n, l, ok := validateBlock(block, last, len(r.blocks) > 0)
-		if !ok {
+		if !ok || n > 0 && len(r.frags) > 0 {
 			return ErrMalformed
 		}
 		last = l
@@ -412,6 +467,7 @@ func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
 			r.addBlock(bytes.Clone(block))
 		}
 	}
+	r.setBounds()
 	at, _ := slices.BinarySearchFunc(t.runs, seq, func(r *run, s uint64) int {
 		switch {
 		case r.seq > s:

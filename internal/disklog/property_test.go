@@ -9,6 +9,8 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 type submitted struct {
@@ -22,11 +24,12 @@ type seedStats struct {
 }
 
 // runSeed submits random items to random streams, checkpoints whenever one is due and
-// may fail one disk action, with completions interleaved at random. It checks that every
+// may fail one disk action, with completions interleaved at random, on a node of the
+// scheduler, whose trace it returns with the harness. It checks that every
 // accepted item ends durable in a record on disk that decodes to it, failed, or in doubt
 // after a disk error; that durability is a prefix of the log; that every finished
 // checkpoint's manifest reads back; and that every buffer comes back.
-func runSeed(t testing.TB, seed uint64, broken func(*disklog.Log), stats *seedStats) {
+func runSeed(t testing.TB, seed uint64, setup func(*harness), stats *seedStats) *harness {
 	r := core.NewRand(seed)
 	maxRec := r.Range(3, 64)
 	disk := uint64(gib)
@@ -40,9 +43,9 @@ func runSeed(t testing.TB, seed uint64, broken func(*disklog.Log), stats *seedSt
 	cfg.MaxReplayBytes = r.Range(4, 200) * core.BlockSize
 	maxWrite := min(maxRec, uint64(geo.SegmentBlocks))
 	own := uint64(cfg.CommitDepth) * (2*maxWrite - 1)
-	h := newHarness(t, disk, int(own+r.Range(maxWrite, 512))*core.BlockSize, cfg)
-	if broken != nil {
-		broken(h.log)
+	h := schedHarness(t, seed, disk, int(own+r.Range(maxWrite, 512))*core.BlockSize, cfg)
+	if setup != nil {
+		setup(h)
 	}
 	h.run()
 	if r.Chance(1, 8) {
@@ -55,7 +58,8 @@ func runSeed(t testing.TB, seed uint64, broken func(*disklog.Log), stats *seedSt
 	items := map[disklog.Ticket]*submitted{}
 	durableAt := map[uint64]disklog.Event{}
 	running := false
-	var cpBase uint64
+	var cpBase, cpNextSeq uint64
+	var cpRows []disklog.SegmentUsage
 	var cpRoots int
 	toSubmit := r.Range(1, 1000)
 	var nextLSN uint64 = 1
@@ -117,8 +121,8 @@ func runSeed(t testing.TB, seed uint64, broken func(*disklog.Log), stats *seedSt
 				running = false
 				stats.checkpoints++
 				m := h.readManifest(durableAt[ev.Manifest.LSN])
-				if m.BaseLSN != cpBase || len(m.Indexes) != 2 || len(m.Indexes[0].Runs)+len(m.Indexes[1].Runs) != cpRoots {
-					t.Fatalf("seed %d: manifest %+v, want base %d and %d runs", seed, m, cpBase, cpRoots)
+				if m.BaseLSN != cpBase || m.NextSeq != cpNextSeq || !slices.Equal(m.Segments, cpRows) || len(m.Indexes) != 2 || len(m.Indexes[0].Runs)+len(m.Indexes[1].Runs) != cpRoots {
+					t.Fatalf("seed %d: manifest %+v, want base %d, NextSeq %d, rows %+v and %d runs", seed, m, cpBase, cpNextSeq, cpRows, cpRoots)
 				}
 			case disklog.CheckpointFailed:
 				running = false
@@ -133,7 +137,7 @@ func runSeed(t testing.TB, seed uint64, broken func(*disklog.Log), stats *seedSt
 		from := len(h.events)
 		switch {
 		case !running && h.log.CheckpointDue():
-			cpBase = h.log.DurableLSN()
+			cpBase, cpNextSeq, cpRows = h.log.DurableLSN(), disklog.NextSeqOf(h.log), disklog.SegmentUsageOf(h.log)
 			if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: 1, ReplayLSN: cpBase}, {Owner: 2, ReplayLSN: cpBase}}); err != nil {
 				t.Fatalf("seed %d: begin: %v", seed, err)
 			}
@@ -240,12 +244,19 @@ func runSeed(t testing.TB, seed uint64, broken func(*disklog.Log), stats *seedSt
 	if cfg.CommitDepth > 1 {
 		stats.deepRuns++
 	}
+	return h
 }
 
 func TestEveryAcceptedItemDecodes(t *testing.T) {
 	var stats seedStats
 	for seed := uint64(1); seed <= 100; seed++ {
-		runSeed(t, seed, nil, &stats)
+		h := runSeed(t, seed, nil, &stats)
+		if err := trace.Check(h.sched.Trace(), diskLogRules(h.cfg.CommitDepth)...); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		if err := sim.CompareTraces(h.sched.Trace(), runSeed(t, seed, nil, &seedStats{}).sched.Trace()); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
 	}
 	if stats.noSpace == 0 || stats.tooLarge == 0 || stats.deferredFlushes == 0 || stats.deepRuns == 0 ||
 		stats.poolFull == 0 || stats.inDoubt == 0 || stats.checkpoints == 0 || stats.checkpointsFailed == 0 || stats.manifestPieces == 0 {
@@ -420,7 +431,7 @@ func TestDecodeCheckCatchesABrokenEncoder(t *testing.T) {
 							t.Fatalf("seed %d: a broken encoder passed the decode check: %q", seed, msg)
 						}
 					}()
-					runSeed(t, seed, b.broken, &seedStats{})
+					runSeed(t, seed, func(h *harness) { b.broken(h.log) }, &seedStats{})
 				}()
 			}
 		})

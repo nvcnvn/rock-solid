@@ -109,8 +109,7 @@ func ChunkIDFromBytes(b [ChunkIDSize]byte) ChunkID {
 	}
 }
 
-// Hash is the placement hash of the chunk: XXH3-64 with seed 0 over its packed bytes.
-// It is disk format and never changes.
+// Hash is the chunk's placement hash, XXH3-64 with seed 0 over its packed bytes; it is disk format.
 func (c ChunkID) Hash() uint64 {
 	b := c.Bytes()
 	return xxh3.HashSeed(b[:], 0)
@@ -133,9 +132,7 @@ func CheckPGCount(count uint32) error {
 	return nil
 }
 
-// PGIndexOf maps a chunk hash to one of count placement groups by its top bits, so each
-// group is one contiguous hash range and doubling count splits group p into 2p and 2p+1.
-// count must pass CheckPGCount.
+// PGIndexOf maps a chunk hash to one of count placement groups, count passing CheckPGCount, by its top bits.
 func PGIndexOf(hash uint64, count uint32) uint32 {
 	shift := 64 - bits.TrailingZeros32(count)
 	if shift == 64 {

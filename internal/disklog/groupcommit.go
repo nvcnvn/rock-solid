@@ -216,8 +216,7 @@ func isManifestKind(e *Entry) bool {
 	return e.Kind == EntryBlob && (e.BlobKind == BlobManifest || e.BlobKind == BlobManifestPiece)
 }
 
-// CheckpointIndex names an index a checkpoint covers, the LSN after which records replay into it,
-// and the runs it already holds durably, which the manifest names again before the runs written now.
+// CheckpointIndex names an index a checkpoint covers, its replay LSN and the durable runs the manifest names again.
 type CheckpointIndex struct {
 	Owner     uint32
 	ReplayLSN uint64
@@ -291,6 +290,8 @@ type round struct {
 	entries      []Entry
 	tickets      []Ticket
 	payloads     []uint64
+	opened       uint64
+	named        ManifestPos
 }
 
 type pendingPiece struct {
@@ -301,14 +302,32 @@ type pendingPiece struct {
 
 type checkpoint struct {
 	manifest      Manifest
+	editRows      []SegmentUsage
+	changed       []uint64
 	replayAtBegin uint64
 	pending       []pendingPiece
 	ended         bool
 	body          []byte
+	snapshot      bool
+	state         []ManifestIndex
+	prior         [][]BlobRef
 	written       int
 	earlier       []BlobRef
+	size          uint64
 	piece         Ticket
 	final         bool
+}
+
+// chainEntry is a snapshot or an edit a last piece lists: its pieces, its own last piece
+// included, and the bytes they hold, which Pebble's rule weighs.
+type chainEntry struct {
+	pieces []BlobRef
+	size   uint64
+}
+
+type liveChain struct {
+	pos     ManifestPos
+	entries []chainEntry
 }
 
 type formatPhase uint8
@@ -335,9 +354,11 @@ type Log struct {
 	nextTicket Ticket
 	nextLSN    uint64
 	nextSeq    uint64
+	durableSeq uint64
 	durableLSN uint64
 	free       []uint64
 	usage      []SegmentUsage
+	changed    []uint64
 
 	queues [2]queue
 	asm    [2]cursor
@@ -353,6 +374,10 @@ type Log struct {
 	manifest    ManifestPos
 	replayBytes uint64
 	cp          *checkpoint
+	chain       []chainEntry
+	state       []ManifestIndex
+	live        []liveChain
+	wantSnap    bool
 
 	crcs     []uint32
 	checkImg []byte
@@ -360,6 +385,7 @@ type Log struct {
 
 	breakRound     func(head []byte, r *round)
 	appendAnywhere bool
+	seqAtBegin     bool
 }
 
 // Format starts a log on an empty disk, writing and flushing the superblock then its copy, with IO IDs counting up from firstIO, a range no other machine on the disk uses.
@@ -400,8 +426,10 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		nextTicket: 1,
 		nextLSN:    1,
 		nextSeq:    1,
+		durableSeq: 1,
 		free:       make([]uint64, (sb.SegmentCount+63)/64),
 		usage:      make([]SegmentUsage, sb.SegmentCount),
+		changed:    make([]uint64, (sb.SegmentCount+63)/64),
 		last:       Cold,
 		rounds:     make([]round, cfg.CommitDepth),
 	}
@@ -558,17 +586,57 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 	if l.cp != nil {
 		return ErrBusy
 	}
-	m := Manifest{BaseLSN: l.durableLSN, Indexes: make([]ManifestIndex, len(indexes))}
+	nextSeq := l.durableSeq
+	if l.seqAtBegin {
+		nextSeq = l.nextSeq
+	}
+	m := Manifest{BaseLSN: l.durableLSN, NextSeq: nextSeq, Indexes: make([]ManifestIndex, len(indexes))}
 	for i, ix := range indexes {
 		if ix.ReplayLSN > l.durableLSN || slices.ContainsFunc(indexes[:i], func(o CheckpointIndex) bool { return o.Owner == ix.Owner }) ||
-			slices.ContainsFunc(ix.Runs, func(r BlobRef) bool { return r.Segment == 0 || r.LSN > l.durableLSN }) {
+			slices.ContainsFunc(ix.Runs, func(r BlobRef) bool { return r.Segment == 0 || r.LSN > l.durableLSN }) ||
+			hasDuplicate(ix.Runs) {
 			return ErrMalformed
 		}
 		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Runs: slices.Clone(ix.Runs)}
 	}
 	m.Segments = l.usageRows()
-	l.cp = &checkpoint{manifest: m, replayAtBegin: l.replayBytes}
+	cp := &checkpoint{manifest: m, changed: slices.Clone(l.changed), replayAtBegin: l.replayBytes}
+	for w, set := range l.changed {
+		for ; set != 0; set &= set - 1 {
+			s := w*64 + bits.TrailingZeros64(set)
+			u := l.usage[s]
+			u.Segment = uint32(s)
+			cp.editRows = append(cp.editRows, u)
+		}
+	}
+	clear(l.changed)
+	l.cp = cp
 	return nil
+}
+
+func hasDuplicate(refs []BlobRef) bool {
+	for i, r := range refs {
+		if slices.Contains(refs[i+1:], r) {
+			return true
+		}
+	}
+	return false
+}
+
+// RequestSnapshot makes the next checkpoint to choose its manifest write a snapshot, whatever Pebble's rule says.
+func (l *Log) RequestSnapshot() { l.wantSnap = true }
+
+// HoldsManifestPiece reports whether segment holds a piece of a manifest recovery may still load, or one the running checkpoint wrote.
+func (l *Log) HoldsManifestPiece(segment uint32) bool {
+	in := func(refs []BlobRef) bool {
+		return slices.ContainsFunc(refs, func(r BlobRef) bool { return r.Segment == segment })
+	}
+	for _, c := range l.live {
+		if slices.ContainsFunc(c.entries, func(e chainEntry) bool { return in(e.pieces) }) {
+			return true
+		}
+	}
+	return l.cp != nil && in(l.cp.earlier)
 }
 
 // CheckpointPiece queues an index's next run piece of length bytes on the cold stream; root marks a run's last piece, the one the manifest names.
@@ -619,24 +687,72 @@ func (l *Log) advanceManifest(out *Output) {
 		return
 	}
 	if cp.body == nil {
-		cp.body = AppendManifest(nil, &cp.manifest)
+		l.chooseManifest(cp)
 	}
 	rest := cp.body[cp.written:]
-	if uint64(ManifestPieceSize(len(cp.earlier), len(rest))) <= l.maxBlob {
-		piece, err := AppendManifestPiece(nil, cp.earlier, rest)
+	lists := append(slices.Clip(cp.prior), cp.earlier)
+	if uint64(ManifestPieceSize(lists, len(rest))) <= l.maxBlob {
+		piece, err := AppendManifestPiece(nil, lists, rest)
 		if err == nil {
 			cp.final = true
+			cp.size += uint64(len(piece))
 			cp.piece = l.enqueue(Cold, queued{entry: BlobEntry(BlobManifest, 0, uint64(len(piece))), bytes: piece})
 			return
 		}
 	} else if len(rest) > 0 && len(cp.earlier) < math.MaxUint16 {
 		n := min(uint64(len(rest)), l.maxBlob)
+		cp.size += n
 		cp.piece = l.enqueue(Cold, queued{entry: BlobEntry(BlobManifestPiece, 0, n), bytes: rest[:n]})
 		cp.written += int(n)
 		return
 	}
+	l.dropCheckpoint(ErrTooLarge, out)
+}
+
+// chooseManifest writes a snapshot of the state an edit would leave, runs in the order applying
+// it gives, so loading either yields the same manifest.
+func (l *Log) chooseManifest(cp *checkpoint) {
+	snapshot := len(l.chain) == 0 || l.wantSnap
+	state := cp.manifest.Indexes
+	var edit ManifestEdit
+	if !snapshot {
+		edit = ManifestEdit{BaseLSN: cp.manifest.BaseLSN, NextSeq: cp.manifest.NextSeq, Indexes: diffIndexes(l.state, state), Segments: cp.editRows}
+		var err error
+		if state, err = applyIndexes(l.state, edit.Indexes); err != nil {
+			panic(fmt.Sprintf("disklog: an edit diffed from its base does not apply: %v", err))
+		}
+	}
+	snap := Manifest{BaseLSN: cp.manifest.BaseLSN, NextSeq: cp.manifest.NextSeq, Indexes: state, Segments: cp.manifest.Segments}
+	cp.state = state
+	if !snapshot {
+		prior := make([][]BlobRef, len(l.chain))
+		var since uint64
+		for i, e := range l.chain {
+			prior[i] = e.pieces
+			if i > 0 {
+				since += e.size
+			}
+		}
+		next, ok := manifestBytes(ManifestSize(&snap), nil, l.maxBlob)
+		if !ok {
+			next = math.MaxUint64
+		}
+		if size, ok := manifestBytes(ManifestEditSize(&edit), prior, l.maxBlob); ok && !snapshotDue(l.chain[0].size, since, size, next) {
+			cp.body, cp.prior = AppendManifestEdit(nil, &edit), prior
+			return
+		}
+	}
+	cp.body, cp.snapshot = AppendManifest(nil, &snap), true
+}
+
+// dropCheckpoint ends the running checkpoint unfinished; the segments it would have recorded
+// changing stay marked for the next one.
+func (l *Log) dropCheckpoint(err error, out *Output) {
+	for w, set := range l.cp.changed {
+		l.changed[w] |= set
+	}
 	l.cp = nil
-	out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: ErrTooLarge})
+	out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: err})
 }
 
 // OnEvent advances rounds on disk completions.
@@ -769,7 +885,12 @@ func (l *Log) usageRows() []SegmentUsage {
 func (l *Log) retire(out *Output) {
 	r := l.round(0)
 	l.durableLSN = r.lsn
+	if r.opened != 0 {
+		l.durableSeq = r.opened + 1
+		l.headerDurable(r.named)
+	}
 	l.replayBytes += r.bytes
+	l.changed[r.segment/64] |= 1 << (r.segment % 64)
 	u := &l.usage[r.segment]
 	u.State, u.Newest = SegmentUsed, r.lsn
 	u.Live += uint32(r.bytes/core.BlockSize) - r.headerBlocks
@@ -784,6 +905,15 @@ func (l *Log) retire(out *Output) {
 	l.checkpointProgress(r, out)
 	l.first = (l.first + 1) % len(l.rounds)
 	l.count--
+}
+
+// headerDurable drops the manifests older than the one a now durable segment header names:
+// recovery loads that one or a newer one.
+func (l *Log) headerDurable(named ManifestPos) {
+	i := slices.IndexFunc(l.live, func(c liveChain) bool { return c.pos.LSN >= named.LSN })
+	if i > 0 {
+		l.live = slices.Delete(l.live, 0, i)
+	}
 }
 
 func (l *Log) checkpointProgress(r *round, out *Output) {
@@ -804,6 +934,14 @@ func (l *Log) checkpointProgress(r *round, out *Output) {
 		case t == cp.piece && cp.final:
 			l.manifest = ManifestPos{Segment: r.segment, Block: r.block, LSN: r.lsn}
 			l.replayBytes -= cp.replayAtBegin
+			entry := chainEntry{pieces: append(cp.earlier, ref), size: cp.size}
+			if cp.snapshot {
+				l.chain, l.wantSnap = []chainEntry{entry}, false
+			} else {
+				l.chain = append(slices.Clip(l.chain), entry)
+			}
+			l.state = cp.state
+			l.live = append(l.live, liveChain{pos: l.manifest, entries: l.chain})
 			l.cp = nil
 			out.Events = append(out.Events, Event{Kind: CheckpointDone, Manifest: l.manifest})
 			return
@@ -832,8 +970,7 @@ func (l *Log) fail(ctx *core.Context, err error, out *Output) {
 	}
 	out.emitTickets(Failed, err, ts)
 	if l.cp != nil {
-		l.cp = nil
-		out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: err})
+		l.dropCheckpoint(err, out)
 	}
 	l.dropAbandoned()
 }
@@ -866,8 +1003,7 @@ func (l *Log) failNoSpace(ctx *core.Context, s Stream, out *Output) {
 		q := &l.queues[s]
 		for i := range q.len() {
 			if l.cp.owns(q.at(i).ticket) {
-				l.cp = nil
-				out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: ErrNoSpace})
+				l.dropCheckpoint(ErrNoSpace, out)
 				break
 			}
 		}
@@ -1044,7 +1180,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(r.tail)[:tailBlocks*core.BlockSize])
 	}
 
-	rec := Record{Place: Place{LogID: l.sb.LogID, Seq: t.seq, Offset: t.offset}, LSN: l.nextLSN}
+	rec := Record{Place: Place{LogID: l.sb.LogID, Seq: t.seq, Offset: t.offset}, LSN: l.nextLSN, Durable: l.durableLSN}
 	img := ctx.Pool.Bytes(r.head)[:0]
 	var err error
 	if t.roll {
@@ -1091,6 +1227,9 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		entries:      r.entries,
 		tickets:      r.tickets,
 		payloads:     r.payloads,
+	}
+	if t.roll {
+		r.opened, r.named = t.seq, l.manifest
 	}
 	l.asm[t.stream] = cursor{segment: t.segment, seq: t.seq, next: t.offset + uint32(lay.Blocks())}
 	if t.roll {

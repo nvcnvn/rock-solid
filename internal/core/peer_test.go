@@ -218,3 +218,36 @@ func BenchmarkSendComplete(b *testing.B) {
 		p.Complete(RequestID(i))
 	}
 }
+
+func TestPeerDeadlinesIgnoreRaw(t *testing.T) {
+	type step struct {
+		now, raw Tick
+		failures []Failure
+	}
+	run := func(raw func(now Tick) Tick) []step {
+		p := NewPeerRequests()
+		var msg Msg
+		p.Send(&Context{Now: 100, Raw: raw(100)}, 1, peerA, 7, 50, &msg, NoBuf, nil)
+		var steps []step
+		for _, now := range []Tick{149, 150} {
+			ctx := &Context{Now: now, Raw: raw(now)}
+			steps = append(steps, step{now, ctx.Raw, p.OnTimer(ctx, 7, nil)})
+		}
+		return steps
+	}
+	sameRaw := run(func(now Tick) Tick { return now })
+	if len(sameRaw[0].failures) != 0 || len(sameRaw[1].failures) != 1 || sameRaw[1].failures[0].Reason != ReasonTimeout {
+		t.Fatalf("Raw = Now: %+v", sameRaw)
+	}
+	for name, raw := range map[string]func(Tick) Tick{
+		"Raw 10":        func(Tick) Tick { return 10 },
+		"Raw Now×1.226": func(now Tick) Tick { return now * 1226 / 1000 },
+	} {
+		got := run(raw)
+		for i := range got {
+			if !reflect.DeepEqual(got[i].failures, sameRaw[i].failures) {
+				t.Fatalf("%s at Now %d: %+v, want %+v", name, got[i].now, got[i].failures, sameRaw[i].failures)
+			}
+		}
+	}
+}

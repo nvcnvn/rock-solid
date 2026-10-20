@@ -40,8 +40,13 @@ func TestCRC32CVectors(t *testing.T) {
 	if stored != [4]byte{0xAA, 0x36, 0x91, 0x8A} {
 		t.Fatalf("stored % x, want little-endian", stored)
 	}
-	if GetCRC32C(stored[:]) != 0x8A9136AA || GetCRC32C(stored[:]) == 0x8A9136AA+1 {
-		t.Fatal("GetCRC32C")
+	if GetCRC32C(stored[:]) != CRC32C(make([]byte, 32)) {
+		t.Fatal("the stored checksum does not read back as the data's")
+	}
+	var wrong [4]byte
+	PutCRC32C(wrong[:], 0x8A9136AA+1)
+	if GetCRC32C(wrong[:]) == CRC32C(make([]byte, 32)) {
+		t.Fatal("a stored value+1 reads back as the data's checksum")
 	}
 	if got := AppendCRC32C(nil, make([]byte, 32)); !bytes.Equal(got, stored[:]) {
 		t.Fatalf("AppendCRC32C = % x", got)

@@ -9,6 +9,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 const (
@@ -42,12 +43,15 @@ type harness struct {
 	failIO  map[core.IOID]core.DiskError
 	own     int
 	onEvent func(disklog.Event)
+	onWrite func(core.Action)
 	// failWhen, when set, chooses the result of each action instead of executing it.
 	failWhen func(core.Action) core.DiskError
 	// ioRand, when set, makes recovery complete its actions in random order.
 	ioRand     *core.Rand
 	readBytes  uint64
 	maxPending int
+	// raw sets ctx.Raw from ctx.Now at every completion.
+	raw func(now core.Tick) core.Tick
 
 	completed map[core.IOID]bool
 	done      []core.IOID
@@ -56,6 +60,16 @@ type harness struct {
 	writes    int
 	fsyncs    int
 	unlinked  int
+
+	// sched, when set, executes the actions on node's loop instead, each when step chooses it.
+	sched   *sim.Scheduler
+	node    *sim.Node
+	loop    core.NodeID
+	inPass  bool
+	passOut []core.Action
+	roundOf map[core.IOID]uint64
+	// ignoreErrors hands the log every completion as a success, as a log without its error path would see it.
+	ignoreErrors bool
 }
 
 func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {
@@ -70,6 +84,50 @@ func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Confi
 	h.absorb()
 	return h
 }
+
+// schedHarness is newHarness on a node of a scheduler made from seed, whose disk fails the
+// actions failIO names.
+func schedHarness(t testing.TB, seed, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {
+	t.Helper()
+	h := blankHarness(t, diskBytes, poolBytes, cfg)
+	set := sim.DefaultSettings()
+	set.PoolBytes = poolBytes
+	h.sched = sim.New(seed, set)
+	h.node = h.sched.AddNode(sim.DefaultClock, []sim.DiskSpec{{Blocks: diskBytes / core.BlockSize, Settings: sim.DefaultDiskSettings()}}, func(n *sim.Node) {
+		h.loop = n.Start(logMachine{h}, n.Disk(0))
+		h.pool = n.Pool()
+		h.ctx = n.Context()
+	})
+	h.disk = h.node.Disk(0)
+	h.disk.Inject(sim.Fault{Effect: sim.FailIO, When: func(op sim.DiskOp, _ *core.Rand) bool { return h.failIO[op.IO] != core.DiskOK }})
+	h.roundOf = map[core.IOID]uint64{}
+	var err error
+	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, firstIO, &h.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.own = h.pool.Live()
+	h.absorb()
+	return h
+}
+
+// logMachine runs the harness's Log or Recovery as a scheduler's machine.
+type logMachine struct{ h *harness }
+
+func (m logMachine) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
+	h := m.h
+	h.ctx = *ctx
+	h.inPass, h.passOut = true, out
+	i := slices.IndexFunc(h.pending, func(p pendingIO) bool { return p.act.IO == ev.IO })
+	if ev.Kind != core.EvDiskDone || i < 0 {
+		h.t.Fatalf("event %+v for no pending action", *ev)
+	}
+	h.finish(i, *ev)
+	h.inPass = false
+	return h.passOut
+}
+
+func (m logMachine) Round(a *core.Action) uint64 { return m.h.roundOf[a.IO] }
 
 // blankHarness is a harness over an all-zero disk with no log on it.
 func blankHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {
@@ -91,7 +149,8 @@ func blankHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Con
 		durable:   map[core.IOID]bool{},
 		writeAt:   map[core.LBA]core.IOID{},
 	}
-	h.ctx = core.Context{Now: 1000, Pool: h.pool}
+	h.raw = func(now core.Tick) core.Tick { return now*1226/1000 + 7 }
+	h.ctx = core.Context{Now: 1000, Raw: h.raw(1000), Pool: h.pool}
 	return h
 }
 
@@ -113,6 +172,9 @@ func formatted(t testing.TB, diskBytes uint64, cfg disklog.Config) *harness {
 }
 
 func (h *harness) absorb() {
+	if h.sched != nil {
+		h.noteRounds()
+	}
 	for i, a := range h.out.Actions {
 		switch a.Kind {
 		case core.ActDiskRead:
@@ -128,6 +190,9 @@ func (h *harness) absorb() {
 			h.trace = append(h.trace, fmt.Sprintf("write %d+%d io%d", a.LBA, blocks, a.IO))
 			h.writeAt[a.LBA] = a.IO
 			h.writes++
+			if h.onWrite != nil {
+				h.onWrite(a)
+			}
 		case core.ActDiskFsync:
 			p := pendingIO{act: a}
 			if a.Linked {
@@ -145,6 +210,9 @@ func (h *harness) absorb() {
 			h.t.Fatalf("unexpected action %+v", a)
 		}
 	}
+	if h.sched != nil {
+		h.handOver()
+	}
 	from := len(h.events)
 	for _, ev := range h.out.Events {
 		ev.Entries = slices.Clone(ev.Entries)
@@ -152,6 +220,9 @@ func (h *harness) absorb() {
 		ev.Payloads = slices.Clone(ev.Payloads)
 		ev.Data = slices.Clone(ev.Data)
 		h.events = append(h.events, ev)
+		if h.sched != nil && ev.Kind == disklog.Durable {
+			h.node.Output(h.loop, trace.Record{Name: trace.OutDurable, Fields: [trace.MaxFields]uint64{ev.LSN, ev.LSN}})
+		}
 	}
 	h.out.Reset()
 	to := len(h.events)
@@ -160,6 +231,50 @@ func (h *harness) absorb() {
 			h.onEvent(h.events[i])
 		}
 	}
+}
+
+// noteRounds numbers the log's round writes and flushes by their record's LSN: the writes a
+// call emits start its newest rounds, and a round's flush takes the IO after its write's.
+func (h *harness) noteRounds() {
+	if h.rec != nil || h.log == nil {
+		return
+	}
+	writes := 0
+	for _, a := range h.out.Actions {
+		if a.Kind == core.ActDiskWrite {
+			writes++
+		}
+	}
+	if writes > h.log.InFlight() {
+		return
+	}
+	next := h.log.DurableLSN() + uint64(h.log.InFlight()-writes) + 1
+	for _, a := range h.out.Actions {
+		switch a.Kind {
+		case core.ActDiskWrite:
+			h.roundOf[a.IO] = next
+			next++
+		case core.ActDiskFsync:
+			h.roundOf[a.IO] = h.roundOf[a.IO-1]
+		}
+	}
+}
+
+// handOver gives the scheduler the actions absorbed: as the current pass's when an event is
+// being handled, otherwise as a pass of their own.
+func (h *harness) handOver() {
+	if len(h.out.Actions) == 0 {
+		return
+	}
+	if h.inPass {
+		for _, a := range h.out.Actions {
+			a.Vec = slices.Clone(a.Vec)
+			h.passOut = append(h.passOut, a)
+		}
+		return
+	}
+	acts := slices.Clone(h.out.Actions)
+	h.node.Call(h.loop, func(_ *core.Context, out []core.Action) []core.Action { return append(out, acts...) })
 }
 
 func (h *harness) eligible(i int) bool {
@@ -174,7 +289,10 @@ func (h *harness) step(i int) {
 		h.t.Fatalf("action %+v runs before its linked write", h.pending[i].act)
 	}
 	p := h.pending[i]
-	h.pending = slices.Delete(h.pending, i, i+1)
+	if h.sched != nil {
+		h.take(p.act.IO)
+		return
+	}
 	ev := core.Event{Kind: core.EvDiskDone, IO: p.act.IO, Err: h.failIO[p.act.IO]}
 	if h.failWhen != nil && ev.Err == core.DiskOK {
 		ev.Err = h.failWhen(p.act)
@@ -182,6 +300,24 @@ func (h *harness) step(i int) {
 	if ev.Err == core.DiskOK {
 		ev = h.disk.Execute(h.pool, &p.act)
 	}
+	h.finish(i, ev)
+}
+
+func (h *harness) take(io core.IOID) {
+	h.t.Helper()
+	for _, c := range h.sched.Choices() {
+		if c.Kind == sim.ChooseDisk && c.Node == h.node.ID() && c.Action.IO == io {
+			h.sched.Take(c)
+			return
+		}
+	}
+	h.t.Fatalf("io%d is not among the scheduler's choices", io)
+}
+
+// finish records pending action i's completion ev and feeds it to the log.
+func (h *harness) finish(i int, ev core.Event) {
+	p := h.pending[i]
+	h.pending = slices.Delete(h.pending, i, i+1)
 	switch p.act.Kind {
 	case core.ActDiskWrite:
 		h.completed[p.act.IO] = true
@@ -197,6 +333,13 @@ func (h *harness) step(i int) {
 }
 
 func (h *harness) feed(ev core.Event) {
+	if h.sched == nil {
+		h.ctx.Now += 10
+		h.ctx.Raw = h.raw(h.ctx.Now)
+	}
+	if h.ignoreErrors {
+		ev.Err = core.DiskOK
+	}
 	if h.rec != nil {
 		h.rec.OnEvent(&h.ctx, &ev, &h.out)
 	} else {

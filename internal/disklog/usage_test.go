@@ -171,16 +171,21 @@ func TestUsageTableNamingASegmentPastTheDiskIsCorruption(t *testing.T) {
 	ev := disklog.Event{LSN: pos.LSN, Segment: pos.Segment, Block: pos.Block, LBA: h.geo.LBA(pos.Segment, pos.Block)}
 	d := h.record(ev)
 	i := slices.IndexFunc(d.Entries, func(e disklog.Entry) bool { return e.BlobKind == disklog.BlobManifest })
-	earlier, rest, err := disklog.DecodeManifestPiece(d.Payload(i), nil)
-	if err != nil {
+	lists, rest, err := disklog.DecodeManifestPiece(d.Payload(i))
+	if err != nil || len(lists[len(lists)-1]) != 0 {
+		t.Fatalf("newest manifest in pieces %v: %v", lists, err)
+	}
+	var body []byte
+	if m, err := disklog.DecodeManifest(rest); err == nil {
+		m.Segments[len(m.Segments)-1].Segment = h.geo.SegmentCount
+		body = disklog.AppendManifest(nil, &m)
+	} else if e, err := disklog.DecodeManifestEdit(rest); err == nil {
+		e.Segments[len(e.Segments)-1].Segment = h.geo.SegmentCount
+		body = disklog.AppendManifestEdit(nil, &e)
+	} else {
 		t.Fatal(err)
 	}
-	m, err := disklog.DecodeManifest(rest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.Segments[len(m.Segments)-1].Segment = h.geo.SegmentCount
-	piece, err := disklog.AppendManifestPiece(nil, earlier, disklog.AppendManifest(nil, &m))
+	piece, err := disklog.AppendManifestPiece(nil, lists, body)
 	if err != nil {
 		t.Fatal(err)
 	}

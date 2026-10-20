@@ -2,14 +2,42 @@ package lsm
 
 import "bytes"
 
-// source is one layer of a tree: a memtable at a root, or a run.
+// source is one layer of a tree: a memtable at a root, or a run, with its range removals'
+// fragments. A fragment hides every older layer, and its own layer's entries only when selfHide:
+// a memtable whose entries under its fragments are all removals.
 type source struct {
-	mem  *memtable
-	root uint32
-	run  *run
-	mc   memCursor
-	ri   runIter
-	ok   bool
+	mem      *memtable
+	root     uint32
+	froot    uint32
+	run      *run
+	mc       memCursor
+	ri       runIter
+	ok       bool
+	empty    bool
+	frags    bool
+	selfHide bool
+	fc       memCursor
+	fr       runIter
+	fpos     bool
+	fok      bool
+	ck       []byte
+	cv       []byte
+	cok      bool
+}
+
+func (s *source) setMem(m *memtable, root, froot uint32) {
+	s.mem, s.root, s.froot, s.run, s.ok, s.fpos = m, root, froot, nil, false, false
+	s.frags, s.selfHide = m.hasFrags(froot), !m.mixed
+	p := m.pg.get(root)
+	s.empty = p.kind() == leafPage && p.n() == 0
+	s.mc.init(m, root)
+}
+
+func (s *source) setRun(r *run) {
+	s.mem, s.run, s.ok, s.fpos, s.empty = nil, r, false, false, false
+	s.frags, s.selfHide = len(r.frags) > 0, false
+	s.ri.init(r.blocks)
+	s.fr.init(r.frags)
 }
 
 func (s *source) seekGE(k []byte) {
@@ -46,7 +74,7 @@ func (s *source) get(k []byte) ([]byte, bool) {
 	if s.run == nil {
 		return s.mem.get(s.root, k)
 	}
-	return s.run.get(&s.ri.it, k)
+	return s.run.blocks.get(&s.ri.it, k)
 }
 
 func (s *source) floor(k []byte, strict bool) ([]byte, []byte, bool) {
@@ -59,13 +87,83 @@ func (s *source) floor(k []byte, strict bool) ([]byte, []byte, bool) {
 	return s.ri.it.key, s.ri.it.val, true
 }
 
+// fragFloor is the fragment with the greatest start <= b, or < b when strict, found by a search.
+func (s *source) fragFloor(b []byte, strict bool) ([]byte, []byte, bool) {
+	if s.run == nil {
+		return s.mem.floor(s.froot, b, strict)
+	}
+	s.fpos = false
+	if !s.fr.floor(b, strict) {
+		return nil, nil, false
+	}
+	return s.fr.it.key, s.fr.it.val, true
+}
+
+// fragSeek moves the forward fragment cursor to the first fragment ending above k.
+func (s *source) fragSeek(k []byte) {
+	s.fpos = true
+	if s.run == nil {
+		s.fc.init(s.mem, s.froot)
+		if s.fc.seekFloor(k) {
+			s.fok = bytes.Compare(k, s.fc.value()) < 0 || s.fc.next()
+		} else {
+			s.fok = s.fc.valid
+		}
+		return
+	}
+	if s.fr.floor(k, false) {
+		s.fok = bytes.Compare(k, s.fr.it.val) < 0 || s.fr.next()
+	} else {
+		s.fok = s.fr.seekGE(k)
+	}
+}
+
+func (s *source) fragNext() {
+	if s.run == nil {
+		s.fok = s.fc.next()
+	} else {
+		s.fok = s.fr.next()
+	}
+}
+
+func (s *source) fragStart() []byte {
+	if s.run == nil {
+		return s.fc.key()
+	}
+	return s.fr.it.key
+}
+
+func (s *source) fragEnd() []byte {
+	if s.run == nil {
+		return s.fc.value()
+	}
+	return s.fr.it.val
+}
+
+// fragCover returns the end of the fragment holding k, keeping the fragment until k passes its
+// end; k must not fall below a key it was given since the last seek.
+func (s *source) fragCover(k []byte) ([]byte, bool) {
+	if !s.fpos {
+		s.fragSeek(k)
+	}
+	for s.fok && bytes.Compare(s.fragEnd(), k) <= 0 {
+		s.fragNext()
+	}
+	if s.fok && bytes.Compare(s.fragStart(), k) <= 0 {
+		return s.fragEnd(), true
+	}
+	return nil, false
+}
+
 // state is what a read sees: the memtable, the one being flushed and the runs, newest first.
 type state struct {
-	mem        *memtable
-	memRoot    uint32
-	frozen     *memtable
-	frozenRoot uint32
-	runs       []*run
+	mem         *memtable
+	memRoot     uint32
+	memFRoot    uint32
+	frozen      *memtable
+	frozenRoot  uint32
+	frozenFRoot uint32
+	runs        []*run
 }
 
 // sources lays the state's layers out newest first in srcs, reusing its buffers.
@@ -83,37 +181,45 @@ func (st *state) sources(srcs []source) []source {
 	}
 	srcs = srcs[:n]
 	i := 0
-	set := func(m *memtable, root uint32) {
-		s := &srcs[i]
-		s.mem, s.root, s.run, s.ok = m, root, nil, false
-		s.mc.init(m, root)
+	srcs[i].setMem(st.mem, st.memRoot, st.memFRoot)
+	i++
+	if st.frozen != nil {
+		srcs[i].setMem(st.frozen, st.frozenRoot, st.frozenFRoot)
 		i++
 	}
-	set(st.mem, st.memRoot)
-	if st.frozen != nil {
-		set(st.frozen, st.frozenRoot)
-	}
 	for _, r := range st.runs {
-		s := &srcs[i]
-		s.mem, s.run, s.ok = nil, r, false
-		s.ri.init(r)
+		srcs[i].setRun(r)
 		i++
 	}
 	return srcs
 }
 
-// iterState merges sources in key order; among equal keys the newest source's entry wins.
+// iterState merges sources in key order; among equal keys the newest source's entry wins, and a
+// fragment hides the older sources' entries in it. probes counts the searches of a layer's
+// entries, steps a floor's rounds.
 type iterState struct {
 	srcs    []source
 	cur     int
 	keepDel bool
+	ranges  bool
+	bounded bool
+	upper   []byte
 	prev    []byte
+	lo      []byte
+	ulo     []byte
+	uhi     []byte
+	uok     bool
 	probes  int
+	steps   int
 }
 
 func (it *iterState) reset(st *state, keepDel bool) {
 	it.srcs = st.sources(it.srcs)
-	it.cur, it.keepDel = -1, keepDel
+	it.cur, it.keepDel, it.bounded, it.uok = -1, keepDel, false, false
+	it.ranges = false
+	for i := range it.srcs {
+		it.ranges = it.ranges || it.srcs[i].frags
+	}
 }
 
 func (it *iterState) valid() bool   { return it.cur >= 0 }
@@ -122,7 +228,14 @@ func (it *iterState) value() []byte { return it.srcs[it.cur].value() }
 
 func (it *iterState) seek(k []byte) {
 	for i := range it.srcs {
-		it.srcs[i].seekGE(k)
+		s := &it.srcs[i]
+		s.fpos = false
+		if s.empty || s.run != nil && s.run.beyond(k) {
+			s.ok = false
+			continue
+		}
+		it.probes++
+		s.seekGE(k)
 	}
 	it.settle()
 }
@@ -149,54 +262,252 @@ func (it *iterState) settle() {
 				it.cur = i
 			}
 		}
-		if it.cur < 0 || it.keepDel || it.value()[0] != kindDel {
+		if it.cur < 0 {
+			return
+		}
+		if it.bounded && bytes.Compare(it.key(), it.upper) >= 0 {
+			it.cur = -1
+			return
+		}
+		if it.ranges && it.hideRange() {
+			continue
+		}
+		if it.keepDel || it.value()[0] != kindDel {
 			return
 		}
 		it.skip()
 	}
 }
 
+// hideRange moves the sources a fragment over the current key hides past its end, or out of
+// the scan when the end is at or past the upper bound, and reports whether it did.
+func (it *iterState) hideRange() bool {
+	k := it.key()
+	for j := 0; j <= it.cur; j++ {
+		s := &it.srcs[j]
+		if !s.frags || j == it.cur && !s.selfHide {
+			continue
+		}
+		end, ok := s.fragCover(k)
+		if !ok {
+			continue
+		}
+		first := j + 1
+		if s.selfHide {
+			first = j
+		}
+		past := it.bounded && bytes.Compare(end, it.upper) >= 0
+		for o := first; o < len(it.srcs); o++ {
+			if src := &it.srcs[o]; src.ok && bytes.Compare(src.key(), end) < 0 {
+				if past {
+					src.ok = false
+				} else {
+					it.probes++
+					src.seekGE(end)
+				}
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// covered reports whether a fragment of any source holds k; k must not fall below a key it was
+// given since the last seek.
+func (it *iterState) covered(k []byte) bool {
+	if !it.ranges {
+		return false
+	}
+	for i := range it.srcs {
+		if s := &it.srcs[i]; s.frags {
+			if _, ok := s.fragCover(k); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// fragsFromStart moves every source's fragments to their first, for nextFrag.
+func (it *iterState) fragsFromStart() {
+	it.uok = false
+	for i := range it.srcs {
+		if s := &it.srcs[i]; s.frags {
+			s.fragSeek(nil)
+		} else {
+			s.fok = false
+		}
+	}
+}
+
+func (it *iterState) firstFrag() int {
+	best := -1
+	for i := range it.srcs {
+		if s := &it.srcs[i]; s.fok && (best < 0 || bytes.Compare(s.fragStart(), it.srcs[best].fragStart()) < 0) {
+			best = i
+		}
+	}
+	return best
+}
+
+// nextFrag sets ulo and uhi to the next fragment of the union of the sources' fragments, those
+// that overlap or abut merged into one.
+func (it *iterState) nextFrag() bool {
+	b := it.firstFrag()
+	if b < 0 {
+		return false
+	}
+	it.ulo = append(it.ulo[:0], it.srcs[b].fragStart()...)
+	it.uhi = append(it.uhi[:0], it.srcs[b].fragEnd()...)
+	it.srcs[b].fragNext()
+	for {
+		b = it.firstFrag()
+		if b < 0 || bytes.Compare(it.srcs[b].fragStart(), it.uhi) > 0 {
+			return true
+		}
+		it.uhi = maxKey(it.uhi, it.srcs[b].fragEnd())
+		it.srcs[b].fragNext()
+	}
+}
+
+// pendingFrag reports whether a fragment of the union that a run in older holds a key in is
+// left, setting ulo and uhi to it.
+func (it *iterState) pendingFrag(older []runIter) bool {
+	for !it.uok {
+		if !it.nextFrag() {
+			return false
+		}
+		it.uok = heldIn(older, it.ulo, it.uhi)
+	}
+	return true
+}
+
 func (it *iterState) get(k []byte) ([]byte, bool) {
 	for i := range it.srcs {
-		it.probes++
-		if v, ok := it.srcs[i].get(k); ok {
-			if v[0] == kindDel {
+		s := &it.srcs[i]
+		if s.run != nil && s.run.outside(k) {
+			continue
+		}
+		if !s.empty {
+			it.probes++
+			if v, ok := s.get(k); ok {
+				if v[0] == kindDel {
+					return nil, false
+				}
+				return v[1:], true
+			}
+		}
+		if s.frags {
+			if _, end, ok := s.fragFloor(k, false); ok && bytes.Compare(k, end) < 0 {
 				return nil, false
 			}
-			return v[1:], true
 		}
 	}
 	return nil, false
 }
 
-// floor finds the greatest key <= k that is not removed; a removal hides the keys it shadows,
-// so the search steps below it.
+func (it *iterState) candidate(s *source, b []byte, strict bool) {
+	if s.empty || s.run != nil && s.run.below(b, strict) {
+		s.cok = false
+		return
+	}
+	it.probes++
+	s.ck, s.cv, s.cok = s.floor(b, strict)
+}
+
+// lower returns the bound below which older layers are searched: the start of s's fragment that
+// covers the top of the keys at or below b, or below b when strict, if it has one.
+func (it *iterState) lower(s *source, b []byte, strict bool) ([]byte, bool) {
+	if !s.frags {
+		return b, strict
+	}
+	lo, end, ok := s.fragFloor(b, strict)
+	if !ok {
+		return b, strict
+	}
+	if c := bytes.Compare(end, b); c > 0 || c == 0 && strict {
+		return lo, true
+	}
+	return b, strict
+}
+
+// hider returns the newest layer whose fragment hides key k of layer best, and its start.
+func (it *iterState) hider(best int, k []byte) (int, []byte) {
+	for j := 0; j <= best; j++ {
+		s := &it.srcs[j]
+		if !s.frags || j == best && !s.selfHide {
+			continue
+		}
+		if lo, end, ok := s.fragFloor(k, false); ok && bytes.Compare(k, end) < 0 {
+			return j, lo
+		}
+	}
+	return -1, nil
+}
+
+// floor finds the greatest key <= k that is not removed. Each layer keeps its candidate: a layer's
+// fragment over the bound lowers the bound of the layers older than it before they are searched,
+// a fragment over the best candidate moves the layers it hides below its start in one search
+// each, and a removal moves the layers holding its key below it.
 func (it *iterState) floor(k []byte) ([]byte, []byte, bool) {
+	it.steps = 0
 	bound, strict := k, false
+	for i := range it.srcs {
+		s := &it.srcs[i]
+		if s.selfHide {
+			bound, strict = it.lower(s, bound, strict)
+		}
+		it.candidate(s, bound, strict)
+		if !s.selfHide {
+			bound, strict = it.lower(s, bound, strict)
+		}
+	}
 	for {
+		it.steps++
 		best := -1
-		var bk, bv []byte
 		for i := range it.srcs {
-			it.probes++
-			if fk, fv, ok := it.srcs[i].floor(bound, strict); ok && (best < 0 || bytes.Compare(fk, bk) > 0) {
-				best, bk, bv = i, fk, fv
+			if s := &it.srcs[i]; s.cok && (best < 0 || bytes.Compare(s.ck, it.srcs[best].ck) > 0) {
+				best = i
 			}
 		}
 		if best < 0 {
 			return nil, nil, false
 		}
+		bk, bv := it.srcs[best].ck, it.srcs[best].cv
+		if j, lo := it.hider(best, bk); j >= 0 {
+			it.lo = append(it.lo[:0], lo...)
+			first := j + 1
+			if it.srcs[j].selfHide {
+				first = j
+			}
+			for o := first; o < len(it.srcs); o++ {
+				if s := &it.srcs[o]; s.cok && bytes.Compare(s.ck, it.lo) >= 0 {
+					it.candidate(s, it.lo, true)
+				}
+			}
+			continue
+		}
 		if bv[0] != kindDel {
 			return bk, bv[1:], true
 		}
 		it.prev = append(it.prev[:0], bk...)
-		bound, strict = it.prev, true
+		for o := best; o < len(it.srcs); o++ {
+			if s := &it.srcs[o]; s.cok && bytes.Equal(s.ck, it.prev) {
+				it.candidate(s, it.prev, true)
+			}
+		}
 	}
 }
 
-// Iter walks a tree or view in key order, skipping removed keys. It is valid until the tree's next
-// write when opened on a tree, and until the view closes when opened on a view.
+// Iter walks a tree or view in key order, skipping removed keys, until the tree's next write or the view closes.
 type Iter struct {
 	s iterState
+}
+
+// SetUpperBound makes the iterator stop before hi, nil for no bound, until it is opened again.
+func (it *Iter) SetUpperBound(hi []byte) {
+	it.s.bounded = hi != nil
+	it.s.upper = append(it.s.upper[:0], hi...)
 }
 
 // SeekGE moves to the first key >= k.

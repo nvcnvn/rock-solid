@@ -12,7 +12,7 @@ import (
 // through submit, write completion and flush completion.
 func BenchmarkGroupCommitRound(b *testing.B) {
 	pool := sim.NewPool(4<<20, 0)
-	ctx := core.Context{Pool: pool}
+	ctx := core.Context{Now: 1000, Raw: 1226, Pool: pool}
 	geo, err := disklog.GeometryFor(1 << 40)
 	if err != nil {
 		b.Fatal(err)

@@ -2,134 +2,290 @@ package lsm
 
 import (
 	"bytes"
+	"math"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
-// Compaction is size-tiered by the bucket rule of Cassandra's SizeTieredCompactionStrategy
-// (getBuckets): a run joins a bucket when its size is within half to one and a half times the
-// bucket's average, or when both are below minRunBytes, and the bucket of at least minMerge runs
-// with the smallest average merges first. Entries carry no sequence number, so a merge takes only
-// runs adjacent in age, as RocksDB's universal compaction does: buckets form along the run list,
-// newest first, never over runs sorted by size.
+// Compaction follows RocksDB's universal compaction (UniversalCompactionBuilder::PickCompaction,
+// db/compaction/compaction_picker_universal.cc at v11.8.1): runs span the whole key range, newest
+// first, and a merge takes runs adjacent in age, so entries need no sequence number.
 const (
-	minMerge    = 4
-	maxMerge    = 32
-	minRunBytes = 1 << 20
+	compactTrigger  = 4
+	sizeRatio       = 1.0
+	maxSizeAmp      = 200.0
+	minMergeWidth   = 2
+	autoLimitBuffer = 1 << 20
 )
 
-// Compaction merges adjacent runs into one. Run touches nothing the tree's owner changes, so it
-// may run on a worker goroutine; the owner then installs the result.
+type pickOpts struct {
+	trigger  int
+	ratio    float64
+	sizeAmp  float64
+	minWidth int
+	buffer   int
+	limit    int
+	maxBytes int
+}
+
+type pickRun struct {
+	bytes int
+	held  bool
+}
+
+type rule uint8
+
+const (
+	ruleNone rule = iota
+	ruleSizeAmp
+	ruleSizeRatio
+	ruleRunLimit
+)
+
+func (r rule) String() string {
+	return [...]string{"none", "size amplification", "size ratio", "run limit"}[r]
+}
+
+// pick returns the runs [i, j), newest first, that the first rule to apply merges.
+func pick(runs []pickRun, o pickOpts) (int, int, rule) {
+	if len(runs) == 0 || len(runs) < o.trigger {
+		return 0, 0, ruleNone
+	}
+	if i, j, ok := pickSizeAmp(runs, o.sizeAmp); ok && o.fits(runs[i:j]) {
+		return i, j, ruleSizeAmp
+	}
+	if i, j, ok := pickSizeRatio(runs, o.ratio, o.minWidth, math.MaxInt); ok && o.fits(runs[i:j]) {
+		return i, j, ruleSizeRatio
+	}
+	free, largest := 0, 0
+	for _, r := range runs {
+		if !r.held {
+			free++
+		}
+		largest = max(largest, r.bytes)
+	}
+	limit := o.limit
+	if limit <= 0 {
+		limit = autoLimit(largest, o.buffer, o.ratio)
+	}
+	if free > limit {
+		if i, j, ok := pickSizeRatio(runs, math.Inf(1), o.minWidth, free-limit+1); ok && o.fits(runs[i:j]) {
+			return i, j, ruleRunLimit
+		}
+	}
+	return 0, 0, ruleNone
+}
+
+func (o pickOpts) fits(span []pickRun) bool {
+	if o.maxBytes <= 0 {
+		return true
+	}
+	n := 0
+	for _, r := range span {
+		n += r.bytes
+	}
+	return n <= o.maxBytes
+}
+
+// pickSizeAmp takes the free runs adjacent to the oldest, and the oldest, once the newer of them
+// hold sizeAmp percent of the oldest's bytes (PickCompactionToReduceSizeAmp).
+func pickSizeAmp(runs []pickRun, sizeAmp float64) (int, int, bool) {
+	end := len(runs) - 1
+	if runs[end].held {
+		return 0, 0, false
+	}
+	start, newer := end, 0
+	for start > 0 && !runs[start-1].held {
+		start--
+		newer += runs[start].bytes
+	}
+	if start == end || float64(newer)*100 < sizeAmp*float64(runs[end].bytes) {
+		return 0, 0, false
+	}
+	return start, end + 1, true
+}
+
+// pickSizeRatio walks from the newest free run, taking the next while it is at most ratio
+// percent larger than the runs taken so far, up to maxRuns, and returns the first span of at
+// least minWidth (PickCompactionToReduceSortedRuns with kCompactionStopStyleTotalSize).
+func pickSizeRatio(runs []pickRun, ratio float64, minWidth, maxRuns int) (int, int, bool) {
+	minWidth = max(minWidth, 2)
+	for start := range runs {
+		if runs[start].held {
+			continue
+		}
+		n, taken := 1, runs[start].bytes
+		for i := start + 1; n < maxRuns && i < len(runs) && !runs[i].held; i++ {
+			if !math.IsInf(ratio, 1) && float64(taken)*(100+ratio)/100 < float64(runs[i].bytes) {
+				break
+			}
+			taken += runs[i].bytes
+			n++
+		}
+		if n >= minWidth {
+			return start, start + n, true
+		}
+	}
+	return 0, 0, false
+}
+
+// autoLimit is RocksDB's max_read_amp of 0: the runs a size-ratio tree needs for its largest run,
+// the first holding buffer bytes and each next ratio percent more than all before it.
+func autoLimit(largest, buffer int, ratio float64) int {
+	limit := 1
+	next, total := float64(buffer), 0.0
+	for next < float64(largest) {
+		total += next
+		next = (100 + ratio) / 100 * total
+		limit++
+	}
+	return limit
+}
+
+// Compaction merges adjacent runs into one; Run may run on a worker while the owner goes on, and the owner installs it.
 type Compaction struct {
+	tree   *Tree
+	rule   rule
 	inputs []*run
-	blocks [][][]byte
+	runs   []*run
 	older  []*run
+	plant  plants
 	seq    uint64
 	limit  int
 	out    *run
 }
 
-func similar(size, avg, small int) bool {
-	return (2*size > avg && 2*size < 3*avg) || (size < small && avg < small)
-}
-
-// buckets cuts sizes, newest first, into buckets of adjacent runs, each [start, end); runs below
-// small bucket together.
-func buckets(sizes []int, small int) [][2]int {
-	var out [][2]int
-	for i := 0; i < len(sizes); {
-		j, sum := i+1, sizes[i]
-		for j < len(sizes) && j-i < maxMerge && similar(sizes[j], sum/(j-i), small) {
-			sum += sizes[j]
-			j++
-		}
-		out = append(out, [2]int{i, j})
-		i = j
+func (t *Tree) opts() pickOpts {
+	return pickOpts{
+		trigger:  compactTrigger,
+		ratio:    sizeRatio,
+		sizeAmp:  maxSizeAmp,
+		minWidth: minMergeWidth,
+		buffer:   t.limitBuffer,
+		limit:    t.cfg.RunLimit,
+		maxBytes: t.maxRunBytes(),
 	}
-	return out
 }
 
-// PickCompaction returns the next compaction due, or nil when none is or one is running.
+// PickCompaction returns the next compaction due over runs no running compaction holds, or nil.
 func (t *Tree) PickCompaction() *Compaction {
-	if t.compact != nil {
-		return nil
-	}
-	sizes := make([]int, len(t.runs))
+	runs := make([]pickRun, len(t.runs))
 	for i, r := range t.runs {
-		sizes[i] = r.bytes
+		runs[i] = pickRun{bytes: r.bytes, held: r.held}
 	}
-	best, bestAvg := [2]int{}, -1
-	for _, b := range buckets(sizes, minRunBytes) {
-		n := b[1] - b[0]
-		if n < minMerge {
-			continue
-		}
-		sum := 0
-		for _, s := range sizes[b[0]:b[1]] {
-			sum += s
-		}
-		if sum > t.maxRunBytes() {
-			continue
-		}
-		if avg := sum / n; bestAvg < 0 || avg < bestAvg {
-			best, bestAvg = b, avg
-		}
-	}
-	if bestAvg < 0 {
+	i, j, rule := pick(runs, t.opts())
+	if rule == ruleNone {
 		return nil
 	}
+	return t.compaction(i, j, rule)
+}
+
+// compaction holds runs [i, j) for a merge by rule.
+func (t *Tree) compaction(i, j int, rule rule) *Compaction {
 	c := &Compaction{
-		inputs: slices.Clone(t.runs[best[0]:best[1]]),
-		seq:    t.runs[best[0]].seq,
+		tree:   t,
+		rule:   rule,
+		inputs: slices.Clone(t.runs[i:j]),
+		seq:    t.runs[i].seq,
 		limit:  t.cfg.MaxPiece - pieceOverhead,
+		plant:  t.plant,
 	}
 	for _, r := range c.inputs {
-		c.blocks = append(c.blocks, slices.Clone(r.blocks))
+		r.held = true
+		c.runs = append(c.runs, &run{blocks: slices.Clone(r.blocks), frags: slices.Clone(r.frags)})
 	}
-	for _, r := range t.runs[best[1]:] {
+	for _, r := range t.runs[j:] {
 		c.older = append(c.older, &run{blocks: slices.Clone(r.blocks)})
 	}
-	t.compact = c
+	t.merges = append(t.merges, c)
 	return c
 }
 
-// maxRunBytes is the most a run may hold for its root to list every piece, a piece spare.
-func (t *Tree) maxRunBytes() int {
-	pieces := (t.cfg.MaxPiece - pieceOverhead - emptyBlockSize) / disklog.BlobRefSize
-	return (pieces - 1) * (t.cfg.MaxPiece - pieceOverhead) / 2
+// runLimit is the most runs the tree keeps before merging the newest whatever their sizes.
+func (t *Tree) runLimit() int {
+	if t.cfg.RunLimit > 0 {
+		return t.cfg.RunLimit
+	}
+	largest := 0
+	for _, r := range t.runs {
+		largest = max(largest, r.bytes)
+	}
+	return autoLimit(largest, t.limitBuffer, sizeRatio)
 }
 
-// Run merges the inputs, the newest entry of each key winning; a removal is dropped unless a run
-// older than the inputs holds its key.
+// score is the tree's runs no compaction holds over its run limit, RocksDB's universal score
+// (VersionStorageInfo::ComputeCompactionScore), as a fraction.
+func (t *Tree) score() (free, limit int) {
+	for _, r := range t.runs {
+		if !r.held {
+			free++
+		}
+	}
+	return free, t.runLimit()
+}
+
+// maxRunBytes is the most a run may hold for its root to list every piece, a piece spare. A
+// block is closed only when the next entry would not fit, so it is short of full by less than
+// that entry, and two adjacent blocks together hold more than a piece since the second starts
+// with that entry.
+func (t *Tree) maxRunBytes() int {
+	room := t.cfg.MaxPiece - pieceOverhead
+	refs := (room - emptyBlockSize) / disklog.BlobRefSize
+	grow := min(room-emptyBlockSize, maxEntryBytes) + 4
+	return (refs - 1) * max(room/2, room-grow)
+}
+
+var maxEntryBytes = uvarintLen(0) + uvarintLen(MaxKey) + uvarintLen(MaxValue+1) + MaxKey + MaxValue + 1
+
+// Run merges the inputs: the newest entry of each key wins unless a newer input's fragment covers it, the fragments unite, and a removal or fragment is dropped unless an older run holds a key it hides.
 func (c *Compaction) Run() {
-	it := iterState{srcs: make([]source, len(c.inputs)), cur: -1, keepDel: true}
-	for i, blocks := range c.blocks {
-		it.srcs[i].run = &run{blocks: blocks}
-		it.srcs[i].ri.init(it.srcs[i].run)
+	it := iterState{srcs: make([]source, len(c.runs)), cur: -1, keepDel: true}
+	for i, r := range c.runs {
+		it.srcs[i].setRun(r)
+		it.ranges = it.ranges || it.srcs[i].frags
+	}
+	if c.plant.keepCovered {
+		it.ranges = false
 	}
 	it.seek(nil)
+	older := runIters(c.older)
 	out := &run{seq: c.seq}
 	buf := make([]byte, 0, c.limit)
 	var w blockWriter
-	var probe blockIter
 	for it.valid() {
 		w.reset(buf)
-		fillBlock(&w, &it, c.limit, c.older, &probe)
+		fillBlock(&w, &it, c.limit, older)
 		if w.n > 0 {
 			out.addBlock(bytes.Clone(w.finish()))
 		}
 	}
+	if !c.plant.dropFrags {
+		it.fragsFromStart()
+		olderFrag := runIters(c.older)
+		for it.pendingFrag(olderFrag) {
+			w.reset(buf)
+			fillFragBlock(&w, &it, c.limit, olderFrag)
+			if w.n == 0 {
+				panic("lsm: a fragment larger than a piece")
+			}
+			out.addFrag(bytes.Clone(w.finish()))
+		}
+	}
+	out.setBounds()
 	c.out = out
 }
 
-// Install swaps the compaction's result in for its inputs. A view opened before keeps reading the
-// inputs; the next flush writes the result, and the inputs die once a manifest no longer names them.
+// Install swaps the compaction's result in for its inputs, which views opened before keep reading.
 func (t *Tree) Install(c *Compaction) error {
-	if c == nil || t.compact != c {
+	k := slices.Index(t.merges, c)
+	if c == nil || k < 0 {
 		return ErrStale
 	}
-	t.compact = nil
+	t.merges = slices.Delete(t.merges, k, k+1)
+	for _, r := range c.inputs {
+		r.held = false
+	}
 	if c.out == nil {
 		return ErrStale
 	}
@@ -139,9 +295,73 @@ func (t *Tree) Install(c *Compaction) error {
 	}
 	runs := make([]*run, 0, len(t.runs)-len(c.inputs)+1)
 	runs = append(runs, t.runs[:i]...)
-	if len(c.out.blocks) > 0 {
+	if len(c.out.blocks)+len(c.out.frags) > 0 {
 		runs = append(runs, c.out)
 	}
 	t.runs = append(runs, t.runs[i+len(c.inputs):]...)
 	return nil
+}
+
+// DefaultMergeWorkers is how many merges a disk's scheduler runs at once unless configured.
+const DefaultMergeWorkers = 1
+
+// SchedulerConfig is a disk's merge scheduler's settings.
+type SchedulerConfig struct {
+	// MergeWorkers is how many merges run at once, DefaultMergeWorkers when 0.
+	MergeWorkers int
+}
+
+// Scheduler runs the merges of one disk's trees, the tree whose runs most exceed its run limit in proportion first.
+type Scheduler struct {
+	workers int
+	trees   []*Tree
+	running []*Compaction
+}
+
+// NewScheduler makes a scheduler with no trees.
+func NewScheduler(cfg SchedulerConfig) (*Scheduler, error) {
+	if cfg.MergeWorkers < 0 {
+		return nil, ErrBadConfig
+	}
+	if cfg.MergeWorkers == 0 {
+		cfg.MergeWorkers = DefaultMergeWorkers
+	}
+	return &Scheduler{workers: cfg.MergeWorkers}, nil
+}
+
+// Add makes the scheduler run t's merges.
+func (s *Scheduler) Add(t *Tree) { s.trees = append(s.trees, t) }
+
+// Running is the number of merges started and not yet installed.
+func (s *Scheduler) Running() int { return len(s.running) }
+
+// Next picks the merge to start next, or nil when every worker is busy or no tree has one due.
+func (s *Scheduler) Next() *Compaction {
+	if len(s.running) >= s.workers {
+		return nil
+	}
+	order := slices.Clone(s.trees)
+	slices.SortStableFunc(order, func(a, b *Tree) int {
+		af, al := a.score()
+		bf, bl := b.score()
+		return bf*al - af*bl
+	})
+	for _, t := range order {
+		if c := t.PickCompaction(); c != nil {
+			s.running = append(s.running, c)
+			return c
+		}
+	}
+	return nil
+}
+
+// Install installs c in its tree and frees its worker.
+func (s *Scheduler) Install(c *Compaction) error {
+	if c == nil {
+		return ErrStale
+	}
+	if i := slices.Index(s.running, c); i >= 0 {
+		s.running = slices.Delete(s.running, i, i+1)
+	}
+	return c.tree.Install(c)
 }

@@ -18,6 +18,7 @@ const (
 	ReasonPeerLost
 )
 
+// String names the reason.
 func (r Reason) String() string {
 	switch r {
 	case ReasonTimeout:
@@ -56,8 +57,7 @@ func (t *tracked) failure(reason Reason) Failure {
 	return Failure{ID: t.ID, Peer: t.Peer, Timer: t.Timer, Deadline: t.Deadline, Buf: t.Buf, Reason: reason}
 }
 
-// PeerRequests tracks the requests outstanding to peers, each with its timer, deadline
-// and data buffer, in request-ID order.
+// PeerRequests tracks the requests outstanding to peers, each with its timer, deadline and data buffer.
 type PeerRequests struct {
 	reqs []tracked
 }
@@ -65,9 +65,7 @@ type PeerRequests struct {
 // NewPeerRequests returns an empty table.
 func NewPeerRequests() *PeerRequests { return &PeerRequests{} }
 
-// Send records the request and appends two actions: the message to the peer, carrying
-// buf as its data, then the timer armed at now + timeout. An id or timer already in
-// flight is a programming error.
+// Send records the request and appends the message to the peer, carrying buf, then its timer armed at now + timeout.
 func (p *PeerRequests) Send(ctx *Context, id RequestID, peer NodeID, timer TimerID, timeout Tick, msg *Msg, buf IOBuf, out []Action) []Action {
 	i, found := p.find(id)
 	if found {
@@ -87,9 +85,7 @@ func (p *PeerRequests) Send(ctx *Context, id RequestID, peer NodeID, timer Timer
 	return append(out, Action{Kind: ActSetTimer, Timer: timer, At: deadline})
 }
 
-// OnTimer reports the request the timer guards once its deadline has passed, with reason
-// timeout, and keeps it tracked. A fire before the current request's deadline, for a
-// timer guarding nothing, or for a request already reported, reports nothing.
+// OnTimer reports, once, the request the timer guards as timed out if its deadline has passed, and keeps tracking it.
 func (p *PeerRequests) OnTimer(ctx *Context, timer TimerID, out []Failure) []Failure {
 	for i := range p.reqs {
 		r := &p.reqs[i]
@@ -105,8 +101,7 @@ func (p *PeerRequests) OnTimer(ctx *Context, timer TimerID, out []Failure) []Fai
 	return out
 }
 
-// OnPeerLost fails every request outstanding to the peer, in request-ID order, and
-// stops tracking them.
+// OnPeerLost fails every request outstanding to the peer, in request-ID order, and stops tracking them.
 func (p *PeerRequests) OnPeerLost(peer NodeID, out []Failure) []Failure {
 	kept := p.reqs[:0]
 	for i := range p.reqs {

@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"bytes"
 	"cmp"
+	"errors"
 	"math/rand/v2"
 	"slices"
 	"testing"
@@ -118,8 +119,11 @@ func TestIndexScenarios(t *testing.T) {
 	if got := extents(x, chunk(7), 0); !slices.Equal(got, want) {
 		t.Fatalf("chunk 7 live map %+v, want %+v", got, want)
 	}
-	if got := extents(x, chunk(8), 0); !slices.Equal(got, []Extent{{First: 0, Count: core.BlocksPerChunk, Version: 3, Header: 100}}) {
-		t.Fatalf("chunk 8 live map %+v", got)
+	if got := extents(x, chunk(8), 0); len(got) != 0 {
+		t.Fatalf("chunk 8 live map %+v, want empty", got)
+	}
+	if e, ok := x.Lookup(1, chunk(8), 700); !ok || e.LBA != 0 {
+		t.Fatalf("block 700 of the punched chunk 8 reads %+v %v, want zeros", e, ok)
 	}
 	if c7, _ := x.Chunk(1, chunk(7)); c7.Version != 2 {
 		t.Fatalf("chunk 7 entry %+v", c7)
@@ -130,8 +134,11 @@ func TestIndexScenarios(t *testing.T) {
 	if e, ok := x.Lookup(1, chunk(7), 1); !ok || e.BlockLBA(1) != 102 {
 		t.Fatalf("block 1 of chunk 7 at %+v %v", e, ok)
 	}
-	if _, ok := x.Lookup(1, chunk(7), 2); ok {
-		t.Fatal("unwritten block 2 of chunk 7 found")
+	if e, ok := x.Lookup(1, chunk(7), 2); !ok || e != (Extent{First: 2, Count: 1}) {
+		t.Fatalf("unwritten block 2 of chunk 7 reads %+v %v, want zeros", e, ok)
+	}
+	if e, ok := x.Lookup(1, chunk(9), 2); ok {
+		t.Fatalf("chunk 9, which has no entry, reads %+v", e)
 	}
 	if x.Live(100) != 3 {
 		t.Fatalf("record 100 refers to %d blocks, want 3", x.Live(100))
@@ -247,12 +254,15 @@ func TestApplyRejectsReservedPool(t *testing.T) {
 func TestApplyRejectsFreezeOfLiveMap(t *testing.T) {
 	x := newIndex(t)
 	apply(t, x, record(100, disklog.WriteEntry(1, chunk(1), 1, 0, 4)))
-	if err := x.Apply(record(200, disklog.FreezeEntry(1, chunk(1), 0, 1))); err == nil {
-		t.Fatal("a freeze of version 0 applied")
+	before := dumpIndex(x)
+	err := x.Apply(record(200, disklog.WriteEntry(1, chunk(2), 1, 0, 1), disklog.FreezeEntry(1, chunk(1), 0, 1)))
+	if !errors.Is(err, ErrFrozenLive) {
+		t.Fatalf("a freeze of version 0 of a chunk that exists with no absent version: %v", err)
 	}
-	if x.Live(100) != 4 {
-		t.Fatalf("record 100 refers to %d blocks", x.Live(100))
+	if !slices.Equal(dumpIndex(x), before) {
+		t.Fatal("a refused record changed the index")
 	}
+	apply(t, x, record(300, disklog.FreezeEntry(1, chunk(3), 0, 1), disklog.WriteEntry(1, chunk(3), 2, 0, 1)))
 }
 
 func TestCheckFindsOverlap(t *testing.T) {

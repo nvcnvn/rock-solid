@@ -134,10 +134,14 @@ type node struct {
 	ticket  disklog.Ticket
 
 	checkpoints, failedCheckpoints int
+	// begun is the snapshot the running checkpoint would write, its run filled in once durable;
+	// expect holds it for every finished checkpoint by where its manifest's last piece sits.
+	begun  disklog.Manifest
+	expect map[disklog.ManifestPos]disklog.Manifest
 }
 
 func newNode(h *harness, pieceLimit int) *node {
-	n := &node{h: h, live: model{}, pieceLimit: pieceLimit}
+	n := &node{h: h, live: model{}, pieceLimit: pieceLimit, expect: map[disklog.ManifestPos]disklog.Manifest{}}
 	h.onEvent = n.onEvent
 	return n
 }
@@ -147,12 +151,16 @@ func (n *node) onEvent(ev disklog.Event) {
 	case disklog.Durable:
 		n.live.apply(ev)
 		for i, t := range ev.Tickets {
-			if n.running && t == n.ticket {
+			if n.running && n.ticket != disklog.NoTicket && t == n.ticket {
 				n.prev = &disklog.BlobRef{Segment: ev.Segment, Block: ev.Block, LSN: ev.LSN, Entry: uint16(i)}
 				n.ticket = 0
 			}
 		}
 	case disklog.CheckpointDone:
+		if n.running {
+			n.begun.Indexes[0].Runs = []disklog.BlobRef{*n.prev}
+			n.expect[ev.Manifest] = n.begun
+		}
 		n.running = false
 		n.checkpoints++
 	case disklog.CheckpointFailed:
@@ -172,7 +180,9 @@ func (n *node) step() bool {
 		if !h.log.CheckpointDue() {
 			return false
 		}
-		if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: indexOwner, ReplayLSN: h.log.DurableLSN()}}); err != nil {
+		base := h.log.DurableLSN()
+		n.begun = disklog.Manifest{BaseLSN: base, NextSeq: disklog.NextSeqOf(h.log), Indexes: []disklog.ManifestIndex{{Owner: indexOwner, ReplayLSN: base}}, Segments: disklog.SegmentUsageOf(h.log)}
+		if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: indexOwner, ReplayLSN: base}}); err != nil {
 			h.t.Fatalf("begin checkpoint: %v", err)
 		}
 		n.running, n.body, n.off, n.prev, n.ticket = true, n.live.encode(), 0, nil, 0
@@ -257,7 +267,8 @@ func (r *recovered) lsns() []uint64 {
 	return lsns
 }
 
-// resetIO forgets everything in flight and starts a fresh pool, as a restarted process does.
+// resetIO forgets everything in flight and starts a fresh pool, as a restarted process does;
+// on a scheduler it restarts the node, crashing it first, if it is up, with every write landing.
 func (h *harness) resetIO() {
 	h.pending = nil
 	h.trace = nil
@@ -267,9 +278,27 @@ func (h *harness) resetIO() {
 	h.writeAt = map[core.LBA]core.IOID{}
 	h.done = nil
 	h.writes, h.fsyncs, h.unlinked, h.maxPending = 0, 0, 0, 0
-	h.pool = sim.NewPool(64<<20, 0)
-	h.ctx.Pool = h.pool
 	h.log, h.rec = nil, nil
+	if h.sched == nil {
+		h.pool = sim.NewPool(64<<20, 0)
+		h.ctx.Pool = h.pool
+		return
+	}
+	if h.node.Up() {
+		h.sched.Crash(h.node.ID(), func(int, int, core.LBA) bool { return true })
+	}
+	h.roundOf = map[core.IOID]uint64{}
+	h.sched.Restart(h.node.ID())
+}
+
+// crashRandom crashes the disk with each unflushed block write landing with probability 1/2
+// from r; on a scheduler it crashes the node, and writes issued but not completed are decided too.
+func (h *harness) crashRandom(r *core.Rand) {
+	if h.sched == nil {
+		h.disk.CrashRandom(r)
+		return
+	}
+	h.sched.Crash(h.node.ID(), func(int, int, core.LBA) bool { return r.Chance(1, 2) })
 }
 
 // recover runs a recovery to its end, loading the index's run from the manifest in open

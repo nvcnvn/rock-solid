@@ -9,27 +9,34 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
 const userBlobOwner = 7
 
 type crashStats struct {
-	keptInFlight, droppedInFlight, fromManifest, noSpace, depth2, erased, restarts, crashesInRecovery int
+	keptInFlight, droppedInFlight, fromManifest, noSpace, depth2, depth3, erased, restarts, crashesInRecovery, gaps, gapsInsideTheWindow int
 }
 
 // crashSeed runs four cycles of random items, checkpoints and disk completions, each ended
 // by a crash that lands every unflushed block with probability 1/2, and checks every
-// recovery against what was acknowledged before the crash.
-func crashSeed(t *testing.T, seed uint64, st *crashStats) {
+// recovery against what was acknowledged before the crash. It runs on a node of the
+// scheduler, whose trace it returns with the harness.
+func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 	r := core.NewRand(seed)
 	disk := [3]uint64{1024, 4096, 1 << 16}[r.Below(3)]
 	cfg := testConfig(r.Range(3, 32))
 	cfg.MaxReplayBytes = r.Range(4, 200) * core.BlockSize
-	cfg.CommitDepth = int(r.Range(1, 2))
-	if cfg.CommitDepth == 2 {
+	cfg.CommitDepth = int(r.Range(1, 3))
+	switch cfg.CommitDepth {
+	case 2:
 		st.depth2++
+	case 3:
+		st.depth3++
 	}
-	h := formatted(t, disk*core.BlockSize, cfg)
+	h := schedHarness(t, seed, disk*core.BlockSize, 64<<20, cfg)
+	h.run()
+	h.trace = nil
 	h.reformat(r.Uint64() | 1)
 	pieceLimit := 0
 	if r.Chance(1, 2) {
@@ -37,6 +44,25 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) {
 	}
 	n := newNode(h, pieceLimit)
 	h.ioRand = r.Fork()
+	durableAtWrite := map[core.LBA]uint64{}
+	h.onWrite = func(a core.Action) {
+		if h.log == nil || h.rec != nil {
+			return
+		}
+		for b := range core.LBA(a.Len / core.BlockSize) {
+			durableAtWrite[a.LBA+b] = h.log.DurableLSN()
+		}
+	}
+	nodeEvent := h.onEvent
+	h.onEvent = func(ev disklog.Event) {
+		nodeEvent(ev)
+		if ev.Kind != disklog.Durable {
+			return
+		}
+		if named := h.record(ev).Record.Durable; named >= ev.LSN || named > durableAtWrite[ev.LBA] {
+			t.Fatalf("seed %d: LSN %d names %d durable; the log's durable LSN was %d when its round was written", seed, ev.LSN, named, durableAtWrite[ev.LBA])
+		}
+	}
 	writes := map[uint64]disklog.Entry{}
 	blobs := map[uint64][]byte{}
 	var version, blobID uint64
@@ -113,7 +139,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) {
 		if r.Chance(1, 4) {
 			st.restarts++
 		} else {
-			h.disk.CrashRandom(r)
+			h.crashRandom(r)
 		}
 
 		reb := h.recoverCrashing(disklog.ModeRebuild, func(a core.Action) bool {
@@ -121,7 +147,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) {
 				return false
 			}
 			st.crashesInRecovery++
-			h.disk.CrashRandom(r)
+			h.crashRandom(r)
 			return true
 		})
 		if reb.err != nil {
@@ -154,6 +180,10 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) {
 		}
 		if !res.manifest.IsNone() {
 			st.fromManifest++
+			want, ok := n.expect[res.manifest]
+			if !ok || !manifestsEqual(res.loaded, want) || !manifestsEqual(reb.loaded, want) {
+				t.Fatalf("seed %d cycle %d: open loaded %+v, rebuild %+v; a snapshot at the same base is %+v", seed, cycle, res.loaded, reb.loaded, want)
+			}
 		}
 		st.erased += reb.erased + res.erased
 		if len(reb.replayed) != int(d) {
@@ -184,16 +214,66 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) {
 		h.wantModel("open", res.index, want)
 		h.wantModel("rebuild", reb.index, want)
 		h.readBack(want)
+		if gapNamedDurable(t, h, r, res, st) {
+			if again := h.reopen(); again.durable != d {
+				t.Fatalf("seed %d cycle %d: reopened at LSN %d after undoing the gap, want %d", seed, cycle, again.durable, d)
+			}
+		}
 		n.live, n.running, n.stopped = res.index, false, false
 	}
+	return h
+}
+
+// gapNamedDurable damages the header of a random replayed record that a later whole header
+// names durable, checks that recovery ends Corrupt at it, and undoes the damage; it reports
+// whether it found such a record.
+func gapNamedDurable(t *testing.T, h *harness, r *core.Rand, res *recovered, st *crashStats) bool {
+	t.Helper()
+	var candidates []int
+	for i, ev := range res.replayed {
+		if ev.LSN > res.replayLSN && ev.LSN > res.manifest.LSN && i+1 < len(res.replayed) && !checkpointRecord(ev) {
+			candidates = append(candidates, i)
+		}
+	}
+	if len(candidates) == 0 {
+		return false
+	}
+	i := candidates[len(candidates)-1]
+	if r.Chance(1, 2) {
+		i = candidates[r.Below(uint64(len(candidates)))]
+	}
+	gap := res.replayed[i]
+	namer := slices.IndexFunc(res.replayed[i+1:], func(ev disklog.Event) bool { return h.record(ev).Record.Durable >= gap.LSN })
+	if namer < 0 {
+		return false
+	}
+	st.gaps++
+	if res.durable < gap.LSN+uint64(h.cfg.CommitDepth) {
+		st.gapsInsideTheWindow++
+	}
+	off := int(r.Below(56))
+	h.disk.FlipBit(gap.LBA, off, 1)
+	wantCorrupt(t, h.recover(disklog.ModeOpen), gap.LSN)
+	h.disk.FlipBit(gap.LBA, off, 1)
+	return true
+}
+
+func checkpointRecord(ev disklog.Event) bool {
+	return slices.ContainsFunc(ev.Entries, func(e disklog.Entry) bool { return e.Kind == disklog.EntryBlob && e.Owner != userBlobOwner })
 }
 
 func TestRandomCrashesKeepAcknowledgedRecords(t *testing.T) {
 	var st crashStats
 	for seed := uint64(1); seed <= 50; seed++ {
-		crashSeed(t, seed, &st)
+		h := crashSeed(t, seed, &st)
+		if err := checkIncarnations(h.sched.Trace(), diskLogRules(h.cfg.CommitDepth)...); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		if err := sim.CompareTraces(h.sched.Trace(), crashSeed(t, seed, &crashStats{}).sched.Trace()); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
 	}
-	if st.keptInFlight <= 5 || st.droppedInFlight <= 5 || st.fromManifest <= 20 || st.noSpace == 0 || st.depth2 == 0 || st.erased == 0 || st.restarts == 0 || st.crashesInRecovery == 0 {
+	if st.keptInFlight <= 5 || st.droppedInFlight <= 5 || st.fromManifest <= 20 || st.noSpace == 0 || st.depth2 == 0 || st.depth3 == 0 || st.gapsInsideTheWindow == 0 || st.erased == 0 || st.restarts == 0 || st.crashesInRecovery == 0 {
 		t.Fatalf("seeds missed a case: %+v", st)
 	}
 	t.Logf("%+v", st)

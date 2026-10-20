@@ -55,3 +55,14 @@ func deadline(now, tick time.Duration) time.Duration {
 	}
 	return now + 3*tick
 }
+
+type Tick uint64
+
+type Context struct {
+	Now Tick
+	Raw Tick
+}
+
+func leaseEnds(ctx *Context, nowEnd, rawEnd Tick) bool {
+	return ctx.Now >= nowEnd || ctx.Raw >= rawEnd
+}

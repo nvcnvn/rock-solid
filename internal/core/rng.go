@@ -5,8 +5,7 @@ import (
 	"math/rand/v2"
 )
 
-// Rand is the only source of randomness a state machine may use: ChaCha8 from a 64-bit
-// seed, so a run replays from its seed. It is not safe for concurrent use.
+// Rand is a state machine's only source of randomness: ChaCha8 from a 64-bit seed, so a run replays from its seed.
 type Rand struct {
 	r *rand.Rand
 }
@@ -56,8 +55,7 @@ func (r *Rand) Fill(b []byte) {
 	}
 }
 
-// Fork draws a seed and returns a generator for it, so a child's stream is fixed by the
-// parent's state and independent of what the child draws.
+// Fork returns a generator seeded from r, so the child's stream is fixed by r's state alone.
 func (r *Rand) Fork() *Rand { return NewRand(r.r.Uint64()) }
 
 // Shuffle permutes n elements with Fisher-Yates.

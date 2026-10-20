@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -189,7 +190,7 @@ func flushChecked(t *testing.T, f *fakeLog, tr *Tree, between func()) ([]disklog
 		if n == 0 {
 			break
 		}
-		block, seq, refs, err := splitPiece(buf[:n], nil)
+		block, _, seq, refs, err := splitPiece(buf[:n], nil)
 		if err != nil || n > tr.cfg.MaxPiece || len(block)+rootOverhead(len(refs)) != n || seq == 0 || root && len(refs) != pieces || !root && len(refs) != 0 {
 			t.Fatalf("piece %d of %d bytes: block %d, refs %d, seq %d, root %v: %v", pieces, n, len(block), len(refs), seq, root, err)
 		}
@@ -277,6 +278,104 @@ func TestFlushKeepsFrozenView(t *testing.T) {
 	}
 }
 
+// An empty memtable writes no run, nor does one holding only removals no older run holds the key
+// of; a durable run is named again without being rewritten.
+func TestEmptyTreeWritesNoRun(t *testing.T) {
+	tr := newTree(t, 256)
+	f := newFakeLog()
+	if froze, err := tr.BeginFlush(); froze || err != nil {
+		t.Fatalf("empty tree froze %v: %v", froze, err)
+	}
+	if n, _, err := tr.NextPiece(make([]byte, 256)); n != 0 || err != nil {
+		t.Fatalf("empty tree built a piece of %d bytes: %v", n, err)
+	}
+	if dead, err := tr.CheckpointDone(); len(dead) != 0 || err != nil || tr.Runs() != 0 {
+		t.Fatalf("dead %v, %d runs: %v", dead, tr.Runs(), err)
+	}
+	put(t, tr, nil, "a", "v")
+	del(t, tr, nil, "a")
+	del(t, tr, nil, "b")
+	if roots, dead := f.checkpoint(t, tr, nil); len(roots) != 0 || len(dead) != 0 || len(f.blobs) != 0 || tr.Runs() != 0 {
+		t.Fatalf("removals with nothing to hide wrote roots %v, %d pieces, dead %v", roots, len(f.blobs), dead)
+	}
+	if tr.Frozen() || tr.pg.inUse != checkPages(t, tr.mem, tr.mem.root) {
+		t.Fatalf("frozen %v, %d pages in use", tr.Frozen(), tr.pg.inUse)
+	}
+	checkReads(t, tr, model{}, []string{"a", "b"})
+	put(t, tr, nil, "c", "v")
+	first, _ := f.checkpoint(t, tr, nil)
+	written := len(f.blobs)
+	del(t, tr, nil, "d")
+	if roots, dead := f.checkpoint(t, tr, nil); !slices.Equal(roots, first) || len(dead) != 0 || len(f.blobs) != written || tr.Runs() != 1 {
+		t.Fatalf("roots %v after %v, %d pieces after %d, dead %v", roots, first, len(f.blobs), written, dead)
+	}
+}
+
+// A flush holds the frozen tree, the one piece being built and the run it becomes, and nothing
+// more: the frozen pages are never copied, the run grows by each piece's block, a second piece is
+// refused until the first is durable, and the heap grows only by the run.
+func TestFlushPeakMemory(t *testing.T) {
+	const maxPiece = 4096
+	tr := newTree(t, maxPiece)
+	fileModel(t, tr, 2000, 3)
+	frozenPages := tr.pg.inUse
+	if froze, err := tr.BeginFlush(); !froze || err != nil {
+		t.Fatalf("froze %v: %v", froze, err)
+	}
+	memPages := checkPages(t, tr.mem, tr.mem.root)
+	buf, spare := make([]byte, maxPiece), make([]byte, maxPiece)
+	refs := make([]disklog.BlobRef, 0, maxPiece/disklog.BlobRefSize)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	held, pieces, peak := 0, 0, 0
+	for {
+		n, _, err := tr.NextPiece(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+		pieces++
+		block, _, _, _, err := splitPiece(buf[:n], refs[:0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(block) > emptyBlockSize {
+			held += len(block)
+		}
+		if tr.pg.inUse != frozenPages+memPages || tr.fl.frozen.bytes != held {
+			t.Fatalf("piece %d: %d pages in use, want %d; run holds %d bytes, its pieces' blocks %d", pieces, tr.pg.inUse, frozenPages+memPages, tr.fl.frozen.bytes, held)
+		}
+		if _, _, err := tr.NextPiece(spare); !errors.Is(err, ErrNoFlush) {
+			t.Fatalf("piece %d: a second piece handed out before the first is durable: %v", pieces, err)
+		}
+		peak = max(peak, tr.pg.inUse*pageSize+tr.fl.frozen.bytes+maxPiece)
+		if err := tr.PieceDurable(disklog.BlobRef{Segment: 1, Block: uint32(pieces), LSN: uint64(pieces)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if _, err := tr.CheckpointDone(); err != nil {
+		t.Fatal(err)
+	}
+	if tr.Runs() != 1 || tr.RunBytes() != held || tr.pg.inUse != memPages {
+		t.Fatalf("%d runs of %d bytes, want 1 of %d; %d pages in use, want %d", tr.Runs(), tr.RunBytes(), held, tr.pg.inUse, memPages)
+	}
+	if entries, _ := runKinds(tr.runs[0]); entries != 2*2000 {
+		t.Fatalf("run holds %d entries, want %d", entries, 2*2000)
+	}
+	if bound := (frozenPages+memPages)*pageSize + maxPiece + held; peak > bound {
+		t.Fatalf("peak %d bytes over the frozen tree, a piece and the run, %d", peak, bound)
+	}
+	alloc := int(after.TotalAlloc - before.TotalAlloc)
+	t.Logf("%d pieces; frozen tree %d B, run %d B, heap allocated %d B", pieces, frozenPages*pageSize, held, alloc)
+	if limit := held + held/8 + 16<<10; alloc > limit {
+		t.Fatalf("flush allocated %d bytes for a run of %d, limit %d", alloc, held, limit)
+	}
+}
+
 func TestMemtableOverRuns(t *testing.T) {
 	tr := newTree(t, 1<<20)
 	m := model{}
@@ -295,12 +394,15 @@ func TestMemtableOverRuns(t *testing.T) {
 }
 
 // Without Bloom filters a get searches each layer once: the memtable, the frozen one during a
-// flush, and each run's fence pointers and one block.
+// flush, and each run's fence pointers and one block; a run whose bounds leave the key out is
+// not searched.
 func TestGetTouchesEachLayerOnce(t *testing.T) {
 	tr := newTree(t, 1<<20)
 	f := newFakeLog()
 	for i := range 3 {
+		put(t, tr, nil, "a", "v")
 		put(t, tr, nil, fmt.Sprint("k", i), "v")
+		put(t, tr, nil, "z", "v")
 		f.checkpoint(t, tr, nil)
 	}
 	put(t, tr, nil, "k9", "v")
@@ -308,11 +410,14 @@ func TestGetTouchesEachLayerOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	put(t, tr, nil, "k8", "v")
-	for _, k := range []string{"missing", "k0"} {
-		before := tr.it.probes
-		tr.Get([]byte(k))
-		if n := tr.it.probes - before; k == "missing" && n != 5 || k == "k0" && n != 5 {
-			t.Fatalf("get %q probed %d layers, want 5", k, n)
+	for _, c := range []struct {
+		k      string
+		probes int
+	}{{"missing", 5}, {"k0", 5}, {"zz", 2}, {"", 2}} {
+		before := tr.Searches()
+		tr.Get([]byte(c.k))
+		if n := tr.Searches() - before; n != c.probes {
+			t.Fatalf("get %q probed %d layers, want %d", c.k, n, c.probes)
 		}
 	}
 }
@@ -332,10 +437,10 @@ func runKinds(r *run) (entries, removals int) {
 	return entries, removals
 }
 
-// Four similar runs with overlapping keys merge into their merge, the newest value winning and,
-// since they include the oldest run, removed keys dropped; a view opened before keeps reading the
-// old runs, and the next checkpoint reports the old runs dead.
-func TestCompactionMergesSimilarRuns(t *testing.T) {
+// Four equal runs with overlapping keys merge by size amplification into their merge, the newest
+// value winning and, since they include the oldest run, removed keys dropped; a view opened before
+// keeps reading the old runs, and the next checkpoint reports the old runs dead.
+func TestCompactionMergesFourRuns(t *testing.T) {
 	tr := newTree(t, 512)
 	m := model{}
 	f := newFakeLog()
@@ -353,11 +458,11 @@ func TestCompactionMergesSimilarRuns(t *testing.T) {
 	before := m.clone()
 	view := tr.View()
 	c := tr.PickCompaction()
-	if c == nil || len(c.inputs) != 4 || len(c.older) != 0 {
+	if c == nil || c.rule != ruleSizeAmp || len(c.inputs) != 4 || len(c.older) != 0 {
 		t.Fatalf("compaction %+v", c)
 	}
-	if tr.PickCompaction() != nil {
-		t.Fatal("a second compaction picked while one runs")
+	if c := tr.PickCompaction(); c != nil {
+		t.Fatalf("picked %v over runs the running merge holds", c.rule)
 	}
 	done := make(chan struct{})
 	go func() {
@@ -394,7 +499,8 @@ func TestCompactionMergesSimilarRuns(t *testing.T) {
 
 func cmpRef(a, b disklog.BlobRef) int { return int(a.Block) - int(b.Block) }
 
-// A merge that leaves out the oldest run keeps the removals, which still hide that run's keys.
+// Size ratio takes four small runs and stops at a run over 1 MiB; the merge leaves that run out
+// and keeps the removals, which still hide its keys.
 func TestCompactionKeepsRemovalsAboveOlderRuns(t *testing.T) {
 	tr := newTree(t, 1<<20)
 	m := model{}
@@ -403,8 +509,8 @@ func TestCompactionKeepsRemovalsAboveOlderRuns(t *testing.T) {
 		put(t, tr, m, fmt.Sprintf("base%06d", i), strings.Repeat("b", 30))
 	}
 	f.checkpoint(t, tr, nil)
-	if tr.runs[0].bytes < minRunBytes {
-		t.Fatalf("base run of %d bytes is not above minRunBytes", tr.runs[0].bytes)
+	if tr.runs[0].bytes < 1<<20 {
+		t.Fatalf("base run of %d bytes is not over 1 MiB", tr.runs[0].bytes)
 	}
 	for i := range 4 {
 		del(t, tr, m, fmt.Sprintf("base%06d", i))
@@ -412,7 +518,7 @@ func TestCompactionKeepsRemovalsAboveOlderRuns(t *testing.T) {
 		f.checkpoint(t, tr, nil)
 	}
 	c := tr.PickCompaction()
-	if c == nil || len(c.inputs) != 4 || len(c.older) != 1 {
+	if c == nil || c.rule != ruleSizeRatio || len(c.inputs) != 4 || len(c.older) != 1 {
 		t.Fatalf("compaction %+v", c)
 	}
 	c.Run()
@@ -425,34 +531,7 @@ func TestCompactionKeepsRemovalsAboveOlderRuns(t *testing.T) {
 	checkReads(t, tr, m, []string{"base000000", "base000004", "small3"})
 }
 
-// Ported from SizeTieredCompactionStrategyTest.testGetBuckets in Apache Cassandra, with its runs
-// laid out in age order, since a merge here takes only adjacent runs.
-func TestBuckets(t *testing.T) {
-	cases := []struct {
-		sizes   []int
-		minSize int
-		want    [][2]int
-	}{
-		{[]int{1, 1, 4, 4, 8, 8}, 2, [][2]int{{0, 2}, {2, 4}, {4, 6}}},
-		{[]int{3, 3, 3, 8, 8, 8}, 2, [][2]int{{0, 3}, {3, 6}}},
-		{[]int{3, 3, 3, 8, 8, 8}, 10, [][2]int{{0, 6}}},
-		{[]int{1, 8, 1, 8}, 2, [][2]int{{0, 1}, {1, 2}, {2, 3}, {3, 4}}},
-	}
-	for _, tc := range cases {
-		if got := buckets(tc.sizes, tc.minSize); !slices.Equal(got, tc.want) {
-			t.Errorf("buckets(%v, %d) = %v, want %v", tc.sizes, tc.minSize, got, tc.want)
-		}
-	}
-	long := make([]int, 70)
-	for i := range long {
-		long[i] = 100
-	}
-	if got := buckets(long, 2); !slices.Equal(got, [][2]int{{0, 32}, {32, 64}, {64, 70}}) {
-		t.Errorf("70 equal runs: %v", got)
-	}
-}
-
-// Restore is runs plus replay: after two flushes, a compaction and more writes, loading the
+// Restore is runs plus replay: after six flushes, a compaction and more writes, loading the
 // manifest's runs and replaying the writes after it reads as the live tree.
 func TestRestoreIsRunsPlusReplay(t *testing.T) {
 	r := rand.New(rand.NewPCG(13, 0))
@@ -677,6 +756,10 @@ func TestFlushDropsRemovalsWithNothingToHide(t *testing.T) {
 	checkReads(t, tr, m, []string{"old", "new", "never"})
 }
 
+// A compaction installed before it ran is Stale and the next is still picked; a span whose output
+// a root could not list is never picked: size amplification and size ratio both pick four runs
+// of 400 entries in 512-byte pieces, the picker goes on to the next rule each time it refuses the
+// span, and nothing is picked.
 func TestCompactionGuards(t *testing.T) {
 	tr := newTree(t, 512)
 	f := newFakeLog()
@@ -698,8 +781,18 @@ func TestCompactionGuards(t *testing.T) {
 		}
 		f.checkpoint(t, big, nil)
 	}
+	runs := make([]pickRun, big.Runs())
+	for i, r := range big.runs {
+		runs[i].bytes = r.bytes
+	}
+	if i, j, ok := pickSizeAmp(runs, maxSizeAmp); !ok || i != 0 || j != 4 {
+		t.Fatalf("size amplification picks [%d, %d) %v", i, j, ok)
+	}
+	if i, j, ok := pickSizeRatio(runs, sizeRatio, minMergeWidth, len(runs)); !ok || i != 0 || j != 4 {
+		t.Fatalf("size ratio picks [%d, %d) %v", i, j, ok)
+	}
 	if c := big.PickCompaction(); c != nil {
-		t.Fatalf("picked a merge of %d bytes, more than a root of 512-byte pieces lists (%d)", big.RunBytes(), big.maxRunBytes())
+		t.Fatalf("picked %v over %d bytes, more than a root of 512-byte pieces lists (%d)", c.rule, big.RunBytes(), big.maxRunBytes())
 	}
 }
 

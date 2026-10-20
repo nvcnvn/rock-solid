@@ -8,8 +8,7 @@ import (
 
 const poison = 0xA5
 
-// Pool is the simulator's buffer pool: whole blocks of one backing slice, a generation
-// per slot, poisoned Alloc memory and a panic on any freed or stale handle.
+// Pool is the simulator's buffer pool: poisoned blocks of one slice, panicking on any freed or stale handle.
 type Pool struct {
 	mem     []byte
 	blocks  []block
@@ -24,8 +23,7 @@ type block struct {
 	taken bool
 }
 
-// NewPool makes a pool of capacityBytes rounded up to whole blocks; maxLive caps the
-// buffers outstanding at once, 0 meaning no cap.
+// NewPool makes a pool of capacityBytes in whole blocks with at most maxLive buffers out, 0 meaning no cap.
 func NewPool(capacityBytes int, maxLive int) *Pool {
 	n := (capacityBytes + core.BlockSize - 1) / core.BlockSize
 	return &Pool{

@@ -59,7 +59,11 @@ func TestRunBytesPerFile(t *testing.T) {
 	}
 }
 
-func benchTree(b *testing.B) (*Tree, [][]byte) {
+func benchTree(b *testing.B) (*Tree, [][]byte) { return benchTreeRanges(b, 0) }
+
+// benchTreeRanges is four layers of 50,000 random keys, three flushed, each layer also removing
+// the given number of narrow ranges between the keys.
+func benchTreeRanges(b *testing.B, ranges int) (*Tree, [][]byte) {
 	tr := newTree(b, 1<<20)
 	r := rand.New(rand.NewPCG(9, 9))
 	var keys [][]byte
@@ -70,11 +74,54 @@ func benchTree(b *testing.B) (*Tree, [][]byte) {
 			keys = append(keys, k)
 			put(b, tr, nil, string(k), "value-of-some-length")
 		}
+		for range ranges {
+			lo := r.Uint64() >> 1
+			if err := tr.DeleteRange(binary.BigEndian.AppendUint64(nil, lo), binary.BigEndian.AppendUint64(nil, lo+1<<20)); err != nil {
+				b.Fatal(err)
+			}
+		}
 		if layer < 3 {
 			f.checkpoint(b, tr, nil)
 		}
 	}
 	return tr, keys
+}
+
+func BenchmarkGetWithRanges(b *testing.B) {
+	tr, keys := benchTreeRanges(b, 1000)
+	b.ReportAllocs()
+	i := 0
+	for b.Loop() {
+		if _, ok := tr.Get(keys[i%len(keys)]); !ok {
+			b.Fatal("missing key")
+		}
+		i += 7919
+	}
+}
+
+func BenchmarkFloorWithRanges(b *testing.B) {
+	tr, keys := benchTreeRanges(b, 1000)
+	b.ReportAllocs()
+	i := 0
+	for b.Loop() {
+		if _, _, ok := tr.Floor(keys[i%len(keys)]); !ok {
+			b.Fatal("missing key")
+		}
+		i += 7919
+	}
+}
+
+func BenchmarkIterNextWithRanges(b *testing.B) {
+	tr, _ := benchTreeRanges(b, 1000)
+	var it Iter
+	tr.Iter(&it)
+	it.SeekGE(nil)
+	b.ReportAllocs()
+	for b.Loop() {
+		if !it.Next() {
+			it.SeekGE(nil)
+		}
+	}
 }
 
 func BenchmarkGet(b *testing.B) {

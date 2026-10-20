@@ -16,15 +16,15 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   changes nothing. The toolchain and the three tool versions are pinned in
   [tech-debts.md](tech-debts.md#version-pin-go-toolchain-1270-and-lint-tools).
 - The script fails, naming the cause, on each of these planted faults: a Go file outside `spikes/`
-  that `gofmt` would change (the file is listed); a `go vet` finding; a sans-IO analyzer finding
+  and `studies/` that `gofmt` would change (the file is listed); a `go vet` finding; a sans-IO analyzer finding
   ([next section](#sans-io-analyzer)); a `staticcheck` (v0.8.2) finding; a vulnerability
   `govulncheck` (v1.9.0) finds in code the module calls (its exit status 3); a dependency whose
   license is not Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, CC0-1.0 or Unicode-3.0
   (`go-licenses` v2.0.1).
 - `govulncheck` that cannot run at all (no network: any exit status but 0 and 3) prints a warning and
   skips; every other check still decides the result.
-- Go files under `spikes/` are never linted, tracked or not; untracked Go files elsewhere are. With
-  no Go file outside `spikes/`, the script prints "nothing to lint" and passes.
+- Go files under `spikes/` and `studies/` are never linted, tracked or not; untracked Go files
+  elsewhere are. With no Go file outside them, the script prints "nothing to lint" and passes.
 
 ## Sans-IO analyzer
 
@@ -34,7 +34,7 @@ finding is a `// want` line with its message, and a package with none must repor
 
 | Planted code | In `internal/core` and its subpackages (sans-IO) | Accepted in |
 | --- | --- | --- |
-| `range` over a map, or over a named map type | Rejected: "iteration order is random; iterate sorted keys" | test files, `internal/loop`, `internal/driver/uring`, `internal/csi`, `cmd/rockd` |
+| `range` over a map, or over a named map type | Rejected: "iteration order is random; iterate sorted keys" | test files, `internal/loop`, `internal/driver/uring`, `internal/csi`, `cmd/rock-solid` |
 | `time.Now` (also taken as a value), `Since`, `Until` | Rejected: "use ctx.Now" | the same |
 | `time.Sleep`, `After`, `AfterFunc`, `NewTimer`, `NewTicker`, `Tick` | Rejected: "emit an Action with a TimerID" | the same |
 | A `go` statement | Rejected | the same |
@@ -44,7 +44,7 @@ finding is a `// want` line with its message, and a package with none must repor
 | Import of `os`, `os/exec`, `io/fs`, `net`, `net/http`, `syscall` or `golang.org/x/sys/unix` | Rejected: "emit an Action for I/O" | the same (a test file reads `testdata` with `os`) |
 | Import of `unsafe`, `runtime`, `context`, `crypto/rand` or `math/rand` (v1) | Rejected, each with its reason | `unsafe` on the data path and in unchecked packages |
 | A global `math/rand/v2` draw: `rand.Uint64`, `IntN`, `N`, `Float64`, `Shuffle` | Rejected: "draws from the global source; use a seeded core.Rand" | the same |
-| Import of `log` or `log/slog`; a call of `fmt.Print*` or `fmt.Fprint*` | Rejected: "record a trace event" | test files, `internal/csi`, `cmd/rockd`; on the data path (`internal/loop`, `internal/driver/…`) rejected too: "the data path emits no free-form logs" |
+| Import of `log` or `log/slog`; a call of `fmt.Print*` or `fmt.Fprint*` | Rejected: "record a trace event" | test files, `internal/csi`, `cmd/rock-solid`; on the data path (`internal/loop`, `internal/driver/…`) rejected too: "the data path emits no free-form logs" |
 
 - Accepted in a sans-IO package: `rand.New` over `rand.NewPCG` or `rand.NewChaCha8` seeded by the
   machine; ranging over `maps.Keys(m)`, `slices.Sorted(maps.Keys(m))`, a slice or an integer;
@@ -139,10 +139,10 @@ finding is a `// want` line with its message, and a package with none must repor
 - RFC 3720 appendix B.4 vectors (Castagnoli): "123456789" gives 0xE3069283; 32 zero bytes give
   0x8A9136AA; 32 x 0xFF give 0x62A8AB43; 32 incrementing bytes give 0x46DD794E; 32 decrementing
   bytes give 0x113FDB5C; the 48-byte iSCSI READ(10) PDU gives 0xD9963A56. The checksum is stored
-  little-endian (e.g. AA 36 91 8A), and appending it writes those 4 bytes. Verification accepts the
-  right value and rejects value+1.
-- Incremental hashing and "append to a finished CRC" both equal the one-shot CRC of a 4,096-byte
-  payload (byte i = i*31 mod 256) for split points 0, 1, 7, 16, 63, 64, 511, 2048, 4095, 4096.
+  little-endian (e.g. AA 36 91 8A), and appending it writes those 4 bytes. The stored value reads
+  back as the data's checksum, and a stored value+1 does not.
+- Continuing a finished CRC over the rest equals the one-shot CRC of a 4,096-byte payload (byte i =
+  i*31 mod 256) for split points 0, 1, 7, 16, 63, 64, 511, 2048, 4095, 4096.
 - Benchmarks: the CRC32C of one 4 KiB block, whose bar is the 167 ns the design relies on.
 
 ## Lease clocks in the context
@@ -230,27 +230,30 @@ types](#event-and-action-types), and this section is their only home.
 - Golden bytes: the superblock for log ID 0x0123456789abcdef on a 1 GiB disk, and the segment header
   (seq 7, segment 3, cold, manifest at segment 2 block 9 LSN 41), encode to the checked-in
   `internal/disklog/testdata/log_format_golden.txt`, followed by zeros to the end of the block.
-  Changing it is a format break that needs a version bump.
+  Until the first release a format change replaces the fixture in place; after it, a change needs a
+  version bump.
 - [fuzz] Both decoders: anything they accept re-encodes to the same block.
 
 ## Record codec
 
-- Layout: a record is header blocks then data blocks. The header holds a 48-byte prelude, 33 bytes
+- Layout: a record is header blocks then data blocks. The header holds a 56-byte prelude, 33 bytes
   per write/punch entry, 37 per freeze, 14 per blob entry, and a 4-byte CRC32C per data block, zero
   padded to whole blocks. Data holds each write's blocks in entry order, then blob payloads packed
   back to back.
 
   | Entries | Header bytes | Header blocks | Data blocks |
   | --- | --- | --- | --- |
-  | A 1-block write | 85 | 1 | 1 |
-  | A punch | 81 | 1 | 0 |
-  | A freeze | 85 | 1 | 0 |
-  | An empty blob | 62 | 1 | 0 |
-  | Blobs of 1 and 4,095 bytes | 80 | 1 | 1 |
-  | A blob of 4,097 bytes | 70 | 1 | 2 |
-  | A 1,003-block write | 4,093 | 1 | 1,003 |
-  | A 1,004-block write | 4,097 | 2 | 1,004 |
-  | 200 one-block writes | 7,448 | 2 | 200 |
+  | A 1-block write | 93 | 1 | 1 |
+  | A punch | 89 | 1 | 0 |
+  | A freeze | 93 | 1 | 0 |
+  | An empty blob | 70 | 1 | 0 |
+  | Blobs of 1 and 4,095 bytes | 88 | 1 | 1 |
+  | A blob of 4,097 bytes | 78 | 1 | 2 |
+  | A 1,001-block write | 4,093 | 1 | 1,001 |
+  | A 1,002-block write | 4,097 | 2 | 1,002 |
+  | A 1,003-block write | 4,101 | 2 | 1,003 |
+  | A 1,004-block write | 4,105 | 2 | 1,004 |
+  | 200 one-block writes | 7,456 | 2 | 200 |
 
   A 1-block write is a 2-block record. Payload offsets, for a blob of 5 bytes, a 2-block write, a
   punch, a blob of 7, a 1-block write and a freeze: 12,288 (after the 3 write blocks), 0, 12,293,
@@ -290,20 +293,21 @@ types](#event-and-action-types), and this section is their only home.
   | Entry tag 100 or 0 | Malformed (RocksDB BadRecordType) |
   | Header-block count 0, or 2 for a 1-block header | Malformed (RocksDB BadLength) |
   | Data-block count 3 for 2, entry count 0, 2 or 4 for 3 | Malformed |
+  | A durable LSN of 10 or 11 for LSN 10 | Malformed (encoding refuses it too) |
   | A non-zero byte in the header padding | Malformed |
   | A write of 0 blocks, a punch running past block 1,024 | BadExtent |
   | Another log ID, segment sequence or offset | Mismatch |
 
-- Truncated images (0, 4, 48, 4,096 bytes, and all but the last byte) are rejected
+- Truncated images (0, 4, 56, 4,096 bytes, and all but the last byte) are rejected
   (RocksDB TruncatedTrailingRecord); the header block alone still decodes as a header.
-- A record longer than the blocks left in its segment is Malformed (RocksDB BadLengthAtEnd): the
+- A record longer than the blocks left in its segment is BadLengthAtEnd (as RocksDB names it): the
   3-block golden record decodes with 3 blocks left and not with 2.
 - A record read back under a different expected segment sequence, log ID or offset is a Mismatch, so
   records of an earlier incarnation of a recycled segment are never accepted (RocksDB Recycle).
-- Golden bytes: a record (log ID 0x0123456789abcdef, segment seq 9, offset 1, LSN 10) with a 1-block
+- Golden bytes: a record (log ID 0x0123456789abcdef, segment seq 9, offset 1, LSN 10, durable LSN 9) with a 1-block
   write (pool 1, chunk (2,3,4), version 5, block 6, data block filled with 0xAB), a whole-chunk punch
   (version 6) and a 3-byte manifest blob ("abc", owner 7) encodes to a checked-in fixture, followed by
-  zeros to the end of the header block. Its entries sit at bytes 48, 81 and 114, and a write's
+  zeros to the end of the header block. Its entries sit at bytes 56, 89 and 122, and a write's
   extent (first block, count) closes its entry.
 - [fuzz] A record the decoder accepts re-encodes to the same bytes and spans its layout's blocks.
 - Benchmarks: encoding and decoding a 16-entry record and its header alone.
@@ -512,7 +516,8 @@ no buffer allocated.
 - A duplicate LSN is corruption: with the append rule switched off, a depth-2 round appending to a
   segment whose opening round is in flight lands alone; after recovery, segment 2 reopens with the
   same seq and the cold stream reuses the old record's LSN, and the next open gives Corrupt(LSN 23)
-  instead of replaying the old record.
+  instead of replaying the old record. Within one stream too: a copy of record 2, its offset and
+  checksum fixed, placed after record 4 gives Corrupt(LSN 2) instead of being skipped.
 - A durable manifest is never dropped (depth 2): record 21's data is damaged, the manifest (LSN 22)
   is named by a segment header whose record never landed. Rebuild gives Corrupt(LSN 21), since the
   tail rule alone would drop the manifest; open, which replays from LSN 22, recovers it.
@@ -661,20 +666,10 @@ no buffer allocated.
 - A flush's peak memory is the frozen tree, one piece and the run it becomes.
 - A full collection with 20 million live entries, half in runs, takes under 1 ms (Go memtable
   spike; `BenchmarkCollection` with `-lsm.entries`).
-- Compaction picks by Cassandra's bucket rule over runs adjacent in age, newest first (ported from
-  `SizeTieredCompactionStrategyTest.testGetBuckets`, its runs laid out in age order):
-
-  | Run sizes | Size below which runs bucket together | Buckets |
-  | --- | --- | --- |
-  | 1, 1, 4, 4, 8, 8 | 2 | [1, 1], [4, 4], [8, 8] |
-  | 3, 3, 3, 8, 8, 8 | 2 | [3, 3, 3], [8, 8, 8] |
-  | 3, 3, 3, 8, 8, 8 | 10 | all six |
-  | 1, 8, 1, 8 | 2 | each run alone |
-  | 70 runs of 100 | 2 | 32, 32 and 6 runs |
-
+- Compaction picks by RocksDB's universal rules; the picker cases are under "Compaction".
 - Compaction: four runs with overlapping keys merge, on another goroutine while the memtable takes
   writes, into one run equal to their merge, newest value winning and removed keys dropped, since
-  the oldest run is among them. No second compaction is picked while one runs. A view opened before
+  the oldest run is among them. A merge of newer runs may be picked while one over the oldest runs. A view opened before
   the compaction still reads the four runs; the next checkpoint names the merged run and reports
   every piece of the four dead.
 - A merge of four small runs above a run over 1 MiB (30,000 entries) leaves that run out and keeps
@@ -682,8 +677,10 @@ no buffer allocated.
 - A flush drops a removal no older run holds the key of, and keeps one that hides a key in a run:
   with "old" in a run, putting and removing "new" and removing "old" and "never" flushes a run of
   one entry, the removal of "old".
-- A compaction installed before it ran is Stale and the next is still picked; a bucket larger than
-  a root of its pieces could list is never picked.
+- A compaction installed before it ran is Stale and the next is still picked; a span whose output
+  a root could not list is never picked (512-byte pieces, four runs of 400 entries): size
+  amplification and size ratio both pick those four runs, the picker goes on to the next rule each
+  time it refuses a span, and nothing is picked.
 - A compaction installed while a flush writes its inputs: that checkpoint's manifest names the
   inputs, which restore to the tree, and the next names the merged run and reports the inputs dead.
 - A checkpoint that fails after writing a compaction's result whole reports nothing dead and carries
@@ -703,29 +700,13 @@ no buffer allocated.
 
 ## Compaction
 
-The built "LSM tree" section describes Cassandra's bucket rule. This item replaces it, and these
-existing scenarios change:
+The "LSM tree" section holds the merge, removal, staleness, install-during-flush, failed
+checkpoint and restore scenarios; Merge steps rewrites the first two for steps.
 
-- The bucket table ported from `SizeTieredCompactionStrategyTest.testGetBuckets` is removed; the
-  picker cases below replace it.
-- "Compaction: four runs with overlapping keys merge ... No second compaction is picked while one
-  runs" keeps its first part (four equal runs merge, by size amplification) and its last sentence
-  becomes "a merge of newer runs may be picked while one over the oldest runs".
-- "A merge of four small runs above a run over 1 MiB (30,000 entries) leaves that run out and keeps
-  the four removals" stays: under universal, size ratio takes the four small runs and stops at the
-  large one.
-- "A compaction installed before it ran is Stale and the next is still picked; a bucket larger
-  than a root of its pieces could list is never picked" keeps its setting (512-byte pieces, four
-  runs of 400 entries, as `TestCompactionGuards`) and becomes "... a span whose output a root could
-  not list is never picked": size amplification and size ratio both pick those four runs, and
-  nothing is picked. Open: whether the picker goes on to the next rule when it refuses a span.
-
-Kept as they are: the compaction installed while a flush writes its inputs, the failed checkpoint
-carrying a merged run, restore as runs plus replay, and in "Chunk index" the crash before a
-manifest with a compaction's result among its runs (Merge steps rewrites the first two for steps).
-
-Picker cases (data-driven; the universal cases of RocksDB's `db/compaction/compaction_picker_test.cc`
-at v11.8.1 are ported as they are, and the rows below added; run sizes in MiB newest first; size
+Picker cases (a Go table until Data-driven files moves them to files; the universal cases of
+RocksDB's `db/compaction/compaction_picker_test.cc` at v11.8.1 that exercise these three rules,
+`NeedsCompactionUniversal` and `UniversalMaxReadAmp*`, are ported as they are, and the rows below
+added; run sizes in MiB newest first; size
 amplification 200%, size ratio 1% with at least 2 runs, auto run limit from a 1 MiB buffer;
 nothing below 4 runs):
 
@@ -747,14 +728,15 @@ nothing below 4 runs):
   16 GiB → 16. A fixed limit set in an index's config replaces it.
 - A merge running over the oldest runs does not stop a merge of newer runs; installing both in
   either order leaves the runs in age order.
-- Open: the exact rounding of 2 + log2(largest run ÷ 1 MiB) for sizes between the design's
-  examples (the ten-run case above assumes rounding up, as 44 MB → 8 implies). The ported RocksDB
-  computation decides; the case is written against it.
-- Open: whether "once an index holds four runs" counts runs a running merge holds.
+- The limit is counted as RocksDB counts it: 1 MiB, then each next run 1% larger than all before,
+  until one reaches the largest run; 38.4 MiB gives 8, as the ten-run case uses.
+- Runs a running merge holds count toward the four: the oldest three held and one more run make
+  four, and the free run alone picks nothing (no span of two).
 
 Flush sequences (the [LSM compaction study](../spikes/lsm-study-compaction/)'s M1 to M3 through
-the real tree, 2,000 flushes measured over the second half; the size model and the real tree gave
-identical counts in V1, so the bars below are the model's):
+the picker's size model, M1 over 2,000 flushes and M2 and M3 over the study's 4,000, measured over
+the second half; the size model and the real tree gave identical counts in V1, so the bars below
+are the model's):
 
 | Index, flushes | Runs mean / max | Bytes rewritten per flushed byte | Runs' bytes ÷ live index |
 | --- | --- | --- | --- |
@@ -766,13 +748,14 @@ identical counts in V1, so the bars below are the model's):
 | 30 MB whole-chunk chunk index, flushes of 40 and 1,000 entries | 6.1 to 6.7 / 7 | 9 to 27 | |
 | 1.6 GB, steady, fixed limit 4 | | about 100 (the second-oldest run absorbs every flush) | |
 
-- Run count through the real tree: 2,000 flushes alternating 1.3 MB and 33 MB over a 44 MB index,
-  and the bursty and log-uniform sequences, never leave more than 2 + log2(largest run ÷ 1 MiB) + 1
+- Run count through the real tree, at 1/33 of M1's sizes (3,300 keys of about 400 B, 64 KiB
+  pieces, the buffer scaled to match) so it runs in about 2 s: 2,000 flushes alternating the two
+  flush sizes, and the bursty and log-uniform sequences, never leave more than 2 + log2(largest run ÷ 1 MiB) + 1
   runs (the limit plus the flush not yet merged); the runs' bytes average 1.29 to 1.70× the live
   index, and the peak during a merge stays within 4.5× (the study's 3.1 to 4.4, design.md 3.1 to
   4.5).
-- Open: the tolerance for the other bars. Max runs is a hard bound (the auto limit); mean runs and
-  bytes rewritten should land near the model's figures, and the design names no margin.
+- Max runs is a hard bound (the auto limit); mean runs and bytes rewritten land within 25% of the
+  model's figures.
 
 Scheduling and swapping:
 
@@ -782,9 +765,10 @@ Scheduling and swapping:
 - The picker skips runs a running merge holds (the held-runs row above).
 - One scheduler per disk, one merge worker: index A at 10 runs over a limit of 8 and index B at 14
   over 13 start A first by either measure. A at 6 over a limit of 4 (2 over, ratio 1.5) against B
-  at 16 over 13 (3 over, ratio 1.23): B first by design.md's "most runs over its limit", A first by
-  RocksDB's score of runs ÷ trigger (`version_set.cc:3601`). Open: which measure.
-- Open: the default number of merge workers per disk (the reserve's example assumes one).
+  at 16 over 13 (3 over, ratio 1.23): A first, by the score of free runs ÷ limit (RocksDB's,
+  `version_set.cc:3601`).
+- `merge_workers` defaults to 1: with index A's merge running, index B's waits until it installs;
+  with 2, both run.
 - A merge's inputs die once a manifest that no longer names them is durable and a segment header
   names it; until then their pieces count live in the usage table.
 
@@ -808,7 +792,7 @@ Edge and negative cases:
   maps: chunk 7's live map to data at LBA 101 (blocks 0-1, v1) and LBA 103 (block 5, v2; writes are
   packed before blobs), both with header LBA 100, and its chunk entry to version 2; chunk 8's live
   map to Zero(1,024 blocks, header 100) and its entry to version 3. Blobs are skipped. Block 1 of
-  chunk 7 reads LBA 102, and unwritten block 2 is not found. Listing a chunk returns its live
+  chunk 7 reads LBA 102, and unwritten block 2 reads as zeros (the chunk has an entry); a chunk with no entry is not found. Listing a chunk returns its live
   extents by first block; record 100 refers to 3 blocks.
 - Trim and split: a 1-block write of chunk 7 v3 at block 1 leaves the live map as block 0 (v1,
   LBA 101), block 1 (v3) and block 5 (v2); a 4-block write v4 at blocks 0-3 leaves blocks 0-3 (v4)
@@ -832,7 +816,9 @@ Edge and negative cases:
   nothing, one of a block only the live map holds changes 1, and after a write replaced live block 0
   a move of it from LBA 101 changes only the frozen map.
 - A record with an entry for pool 2^32 − 1, which the index keeps record counts under, or with a
-  freeze of version 0, is refused whole and leaves the index as it was.
+  freeze of version 0 of a chunk that exists and holds no absent version, is refused whole and
+  leaves the index as it was; a freeze of version 0 of a chunk with no entry is accepted (see
+  "Absent freeze").
 - The index's own check finds a planted second live entry over a block another entry holds.
 - A read of a live block costs one lookup, the greatest key at or below its block's.
 - [property] Seed 22, 20 runs of 300 records over 3 chunks of 64 blocks: a write of 1-8 blocks, or
@@ -891,13 +877,11 @@ Memtable fragments (keys are single letters, `k\0` the key right after `k`):
 | put c, DeleteRange(b, e) | [b, e); c now a removal | get c: absent; a flush keeps no entry for c: with no older key in [b, e) it drops both, and with an older run holding c it keeps [b, e) and drops the removal of c |
 | DeleteRange(b, e), put c | [b, c), [c\0, e) | get c: the put; get d: absent |
 | DeleteRange(b, d), DeleteRange(c, f) | [b, f) | |
-| DeleteRange(b, c), DeleteRange(c, d) | [b, d), or [b, c) and [c, d) (see Open); reads are identical | |
+| DeleteRange(b, c), DeleteRange(c, d) | [b, d) | |
 | DeleteRange(b, e), DeleteRange(c, d) | [b, e) | |
 
-- Open: whether two fragments that only abut (the fifth row) merge; design.md says a range merges
-  with the fragments it "touches". Either form reads the same; only the fragment count differs.
-- Open: DeleteRange(lo, hi) with lo ≥ hi, an error or nothing. It must never panic or store an
-  empty fragment.
+- Fragments that only abut merge (the fifth row gives [b, d)), as overlapping ones do.
+- DeleteRange(lo, hi) with lo ≥ hi returns an error and stores nothing; it never panics.
 
 Layers and runs:
 
@@ -933,16 +917,16 @@ Chunk index uses:
 | --- | --- | --- |
 | A write covering two or more whole live extents | their keys, as one range removal | the extents it trims or splits, rewritten as points |
 | A write covering exactly one whole extent | that key, as a point removal | |
-| A whole-chunk punch | live map `(…, 0, 0) .. (…, 1, 0)`, one range removal | chunk entry (tombstone), frozen maps |
+| A whole-chunk punch | live map `(…, 0, 0) .. (…, 1)`, one range removal | chunk entry (tombstone), frozen maps |
 | Releasing frozen version v ≥ 1 | `(…, v) .. (…, v + 1)` | the live map and other frozen versions |
 | Releasing the absent version 0 | no keys (its map is empty and its key range is the live map's) | everything (see Absent freeze) |
 
-- A whole-chunk punch leaves the chunk entry and one range removal over the live map; frozen maps
-  read as before. Open: whether a Zero extent over the 1,024 blocks is still inserted, as the built
-  index does; design.md says only that the punch removes the live map with one range removal. The
-  built "Chunk index" scenario ("chunk 8's live map to Zero(1,024 blocks, header 100)") stays or
-  changes with the answer, and so do Absent freeze's tombstone case and the Cleaner's whole-chunk
-  punch row.
+- A whole-chunk punch leaves the chunk entry and one range removal over the live map, and no Zero
+  extent; frozen maps read as before. A chunk with an entry and no extent at a block reads that
+  block as zeros, and a chunk with no entry (or the absent version) as a miss, so a lookup tells
+  the two apart. The built "Chunk index" scenario ("chunk 8's live map to Zero(1,024 blocks, header
+  100)") becomes "chunk 8's live map empty, its entry at version 3", and Absent freeze's tombstone
+  case and the Cleaner's whole-chunk punch row read zeros the same way.
 - Chunk 7 written as 1,024 one-block extents, checkpointed, then rewritten in one 1,024-block
   write: the index holds one range removal and no point removal, a lookup of every block takes at
   most two searches before the checkpoint, after it and after a compaction, and a 1-block write at
@@ -976,9 +960,10 @@ Always on (release builds too), each failure an error, never a panic:
 | One bit flipped in an in-memory piece of an input run | CRC32C of the piece, checked before the merge reads it | the next merge reading it fails, as above |
 | One bit flipped in an in-memory piece no merge reads | nothing until a merge reads it | reads go on; the flip is caught by the first merge that reads the piece |
 
-- The rebuilt index equals the oracle's. Open: how a MetaStore shard replica rebuilds when its
-  index fails a check, and whether the disk's other indexes keep serving meanwhile.
-- Open: a check that fails in step k of a merge whose earlier steps are installed.
+- The rebuilt index equals the oracle's, and the disk's other indexes serve throughout. A
+  MetaStore shard replica catches up from a Raft snapshot instead (phase 4).
+- A check that fails in step k of a merge whose earlier steps are installed rebuilds the index from
+  the log like any failed check (with Merge steps).
 - The CRC32C is kept per piece in memory, 4 bytes per piece, and costs 167 ns per 4 KiB merged: a
   benchmark of a merge of four 1 MiB runs costs at most 5.1% more than the same merge without the
   check (4.8% in the [metamorphic testing spike](../spikes/lsm-study-testing/)'s T6), 0 allocations.
@@ -1121,12 +1106,7 @@ entries; counts are the bar, times on the shared VM):
 
 ## Absent freeze
 
-Changed existing scenario ("Chunk index"):
-
-- "A record with an entry for pool 2^32 − 1 ... or with a freeze of version 0, is refused whole"
-  becomes "... or with a freeze of version 0 of a chunk that exists and holds no absent version";
-  a freeze of version 0 of a chunk with no entry is accepted.
-- The seed 22 property stays as it is: its epochs count freezes of chunks already written, with no
+- The "Chunk index" seed 22 property stays as it is: its epochs count freezes of chunks already written, with no
   volume cut, so reading a never-frozen chunk as live is right there. E3 below is the regression
   with volume cuts.
 
@@ -1139,8 +1119,8 @@ Scenarios (records fed to the index):
 - A record with freeze(chunk 9, v0, epoch 1) and a punch v1 records the chunk absent at epoch 1,
   as a write would: a read at epoch 1 finds nothing, a live read zeros.
 
-The chunk epochs spike's cases become regression tests before the fix, failing on the index at
-676095b:
+The chunk epochs spike's cases are regression tests. The index at 676095b refused a freeze of
+version 0 outright; the column below is what it read when the writer left that freeze out:
 
 | Case | Steps | Index at 676095b | With the absent freeze |
 | --- | --- | --- | --- |
@@ -1155,11 +1135,12 @@ The chunk epochs spike's cases become regression tests before the fix, failing o
   versions only, and the absent version stays empty.
 - A freeze of version 0 replayed for a chunk that now exists and holds the absent marker changes
   nothing (replay after a restart applies the same record again).
-- Releasing the absent version removes no keys: the live map reads as before. A record with that
-  freeze of version 0, replayed after the release, changes nothing and is never refused.
+- Releasing a frozen version belongs to the snapshot deletion sweep ([Deletion](design.md#snapshots-and-clones)),
+  which has no index operation yet. When it lands: releasing the absent version removes no keys,
+  the live map reads as before, and a record with that freeze of version 0, replayed after the
+  release, changes nothing and is never refused.
 - A chunk with a tombstone has a version, so the first write after a cut freezes the tombstone's
-  version, not version 0: a read at that snapshot returns zeros, not a miss (subject to Range
-  removals' Open on the whole-chunk punch).
+  version, not version 0: a read at that snapshot returns zeros, not a miss.
 
 ## Single-node ChunkStore
 
@@ -1448,37 +1429,12 @@ round, time from `ctx.Now`:
 
 ## Durable LSN in record headers
 
-Codec:
+Codec ("Record codec" holds the layout, golden and damage rows):
 
-- The prelude carries the newest LSN durable when the round was built, 8 bytes, 56 bytes in all.
-  The first record of a log carries 0.
-- Open: whether a prelude whose durable LSN is not below its own LSN is Malformed; it follows from
-  the definition, and design.md does not list it.
-- Changed existing scenarios ("Record codec"): the preamble's and the layout's "48-byte prelude"
-  becomes 56, and every layout row grows by 8 bytes:
-
-  | Row | Header bytes before | After |
-  | --- | --- | --- |
-  | A 1-block write | 85 | 93 |
-  | A punch | 81 | 89 |
-  | A freeze | 85 | 93 |
-  | An empty blob | 62 | 70 |
-  | Blobs of 1 and 4,095 bytes | 80 | 88 |
-  | A blob of 4,097 bytes | 70 | 78 |
-  | A 1,003-block write | 4,093 (1 header block) | 4,101 (2 header blocks) |
-  | A 1,004-block write | 4,097 (2) | 4,105 (2) |
-  | 200 one-block writes | 7,448 (2) | 7,456 (still 2) |
-
-  New rows: a 1,001-block write, 4,093 bytes in 1 header block; a 1,002-block write, 4,097 in 2.
-  The golden record is regenerated with a durable LSN of 9 for LSN 10, its entries at bytes 56, 89
-  and 122 instead of 48, 81 and 114; the truncated image of 48 bytes becomes 56.
+- The prelude carries the newest LSN durable when the round was built, 8 bytes at byte 48, 56
+  bytes in all. The first record of a log carries 0. A durable LSN not below the record's own LSN is
+  Malformed, and encoding refuses it.
 - The exhaustive single-bit-flip, torn-subset and torn-sector properties cover the new field.
-- Open (shared with Metadata stream): is the format version bumped before the first release? The
-  existing "Segments and superblock" golden says a change "needs a version bump", design.md says
-  a new stream "needs only a new format version" and that a daemon "reads the current and the
-  previous format". If it is bumped, the "Version 2 | BadVersion" damage rows of "Record codec" and
-  "Segments and superblock" move to the next unused version, and a log of the previous format is
-  read, not refused; if not, the old goldens are simply replaced.
 
 Tail rule. Let g be the first LSN replay does not find. The log ends at g only if no record header
 found past g names a durable LSN at or past g, every header found past g lies within
@@ -1540,8 +1496,10 @@ a7b8321871e3): a later valid chunk whose synced offset passes the bad one proves
   3,071 rows at the median on 16,384 segments, 3,164 on 262,144).
 - Space bars (the study's model, counts): on 1 TiB at 90% full with 4 KiB writes, edits plus
   snapshots 0.129% of the log against 0.415% for a full table, recovery reading at most 544 KiB;
-  with 262,144 segments of 4 MiB, 0.159% against 6.64%, at most 8.5 MiB. Snapshots are at most
-  half of all manifest bytes, and recovery reads at most twice a snapshot.
+  with 262,144 segments of 4 MiB, 0.159% against 6.64%, at most 8.5 MiB (the study's model; the
+  tests check the bound below). Recovery reads at most twice a snapshot; the rule weighs every byte
+  a checkpoint wrote for the manifest, piece lists included, and snapshots growing between
+  rotations may exceed half of what manifests write.
 - The cleaner never copies a manifest piece. A segment holding pieces the current manifest lists
   is not a victim; when the cleaner asks for it, the next checkpoint writes a snapshot whatever
   the rule says, and once a segment header naming that snapshot is durable the old pieces are
@@ -1608,7 +1566,7 @@ headers left out, as in "Checkpoint end to end":
   metadata segment header (Open: added beside the cold one, or replacing it) and a merge-lane
   header. The "Non-zero padding" damage row, which today covers byte 11, keeps covering the bytes
   still reserved; a lane past the disk's merge workers is not damage (see the lane whose worker is
-  gone below). The format version is the shared Open under Durable LSN in record headers.
+  gone below). The format version stays 1 before the first release (see design.md "Upgrades").
 - "Group commit": "Streams alternate when both have work" becomes: with hot items A and B, a cold
   item and a metadata item queued behind round 1 (A), the rounds that follow are the cold item
   (segment 2, LBA 128), the metadata item (segment 3, LBA 192, seq 3) and hot B plus a later hot
@@ -1727,7 +1685,7 @@ A pass:
 | punch of block 3 | punched (location 0) | | dead |
 | snapshot cut and a freeze of the version | 5000 | 5000 (counted twice) | live |
 | freeze, then a write of block 3 to 900 | 900 | 5000 | live through the frozen map |
-| whole-chunk punch | none (see Range removals' Open on the punch) | frozen maps moved if they still point at 100 | live only through them |
+| whole-chunk punch | none (the punch leaves no extent) | frozen maps moved if they still point at 100 | live only through them |
 
 - Copy entries in replay: chunk 7 v1 block 0 at LBA 101, a copy entry moving it from LBA 101 to
   LBA 601. Logged after a write v2 of block 0, the copy changes nothing, live or in a rebuild.
@@ -1813,10 +1771,35 @@ Invariants (simulator) and faults:
   about 6 µs. Open: whether these Rust figures are the Go benchmark's bar.
 - Write amplification at 80 / 90 / 95% belongs to "Cleaner write amplification in simulation".
 
+## Chunk slots
+
+- Slots per segment: 16 in a 64 MiB segment; one in the 4 MiB segments of a 16 GiB disk; none on a
+  disk whose segments are smaller than 4 MiB, where a whole chunk goes to the log as several items.
+- A write entry naming a slot is 39 bytes, its slot's segment and index after the write's fields;
+  golden bytes of a record with one such entry and one ordinary write are checked in. Its per-block
+  CRCs cover the slot's blocks, so a block damaged in the slot fails the record as a damaged log
+  block does.
+- A whole-chunk write puts its data in a slot, its record in the hot stream; the index maps the
+  chunk's 1,024 blocks to the slot. A partial write of the same chunk goes to the log and trims the
+  slot's extent; the slot stays used while any block of it is live.
+- A slot is free for reuse only once the record that rewrote or deleted its chunk is durable: a
+  crash before that record is durable reads the old chunk from the slot.
+- A slot segment has no segment header; the usage table lists it as `slot`. Replay marks a slot
+  segment opened after the manifest from the records that name its slots, never from its first
+  block (which holds chunk data that may look like anything, a valid segment header of this log
+  included).
+- The segment is TRIMmed and freed with its last slot; allocation fills the fullest slot segment
+  first (two segments with 3 and 9 free slots: the next chunk goes to the one with 3).
+- The tail rule applies to a slot write's record as to any other: a torn slot write under a
+  record in flight is dropped, one under a durable record is corruption.
+- Cost (the cleaner streams spike): whole chunks deleted at random cost no cleaning, write
+  amplification near 1.004 at any fill; a pool holding half its data in whole chunks cleans its
+  small writes for about 2.5 at 90% full.
+
 ## Trace records
 
-- One record type covers the three kinds the design names: an event a loop handles, an action it
-  executes, and a syscall it makes. Each has a fixed field set and order per kind, and one text line
+- One 64-byte, pointer-free record type covers the four kinds the design names: an event a loop
+  handles, an action it executes, a syscall it makes, and an output a machine hands its owner. Each has a fixed field set and order per kind, and one text line
   `tick loop kind fields...`. A loop's records carry its pass number, and a log's round actions carry
   their round, so a rule can tell which pass or round a line belongs to. For example:
 
@@ -1831,11 +1814,12 @@ Invariants (simulator) and faults:
   1001208 2 event pass=82 DiskDone io=42 err=ok
   ```
 
-- Open: in simulation, whether `tick` is the scheduler's global time or the node's `Now`, and where
-  the node ID goes in the line.
-- Open: how a machine's outputs to its owner (the log's `Durable`, `Failed`, `CheckpointDone`) are
-  recorded: as an `event` on the owner's loop, or as a fourth kind. The traces below write them as
-  `event ... Durable`, pending that choice.
+- An `output` line records what a machine hands its owner, after the flush that made it so:
+  `1001209 2 output pass=82 Durable round=7 lsn=12`. An `Entry` action names each entry a round's
+  record holds (`action pass=81 Entry round=7 type=freeze vol=3 inode=9 index=0`), and a snapshot
+  cut is a message (`msg=cut`), so the freeze rule can read both. In the simulator `tick` is the scheduler's global time and `loop` is
+  `node.loop` (`1000250 3.2 syscall ...`); records of three nodes whose `Now` differ merge into one
+  file in tick order.
 - Round trip: every kind's record encodes to its line and parses back to an equal record; for every
   kind, a line with a missing field, an extra field, fields out of order, an unknown kind or a
   non-numeric tick is rejected. [fuzz] The line parser is fuzzed: anything it accepts re-encodes to
@@ -1844,8 +1828,14 @@ Invariants (simulator) and faults:
   pointer, a wall-clock time or a map's iteration order would break this and is not allowed.
 - Recording a record allocates nothing (`testing.AllocsPerRun` 0), since the event loop records
   every syscall on the data path.
-- The checker library scans lines for a rule and reports the first line that breaks it, with the
-  line number and the rule's name. The rules the design names, each with a passing trace and a
+- The checker library scans lines, or records, for a rule and reports the first line that breaks
+  it, with the line number and the rule's name; a line that does not parse breaks the rule
+  `syntax`. Rules keep state per loop. A round has at most one `DiskFsync`, after its write: a crash
+  or a dump may end a trace between a round's write and its flush. The `epoll_wait` rule skips a
+  loop's first pass, which a wrapped ring may hold only in part, and passes a trace with no
+  syscalls, as the simulator's is. The peering and freeze rules read per loop, since the lines name
+  no PG or volume beyond the entry's. Rounds and I/O IDs start over at a restart, so the round rules
+  check a trace one incarnation at a time, split at each `Restart`. The rules the design names, each with a passing trace and a
   planted trace that must fail:
 
   | Rule | Passing trace that must pass | Planted failing trace |
@@ -1868,7 +1858,8 @@ Invariants (simulator) and faults:
   its passing trace and fails its planted one in both.
 - The daemon's `--trace` writes the same records to a ring in memory and dumps them as text on
   request: a dump after the ring has wrapped holds the newest records, whole, in tick order, and
-  parses with the same parser. Open: ring size and what the dump does with a record being written.
+  parses with the same parser. A ring of `trace_records` (default 65,536) records; 65,537 records
+  dump the newest 65,536. The dump runs on the owning loop, so no record is half-written.
 - On the data path no free-form log line exists: the sans-IO analyzer rejects `log`, `log/slog` and
   `fmt.Print*` in sans-IO and data-path packages (Sans-IO analyzer); operator logs go through
   `log/slog` off the data path.
@@ -1894,29 +1885,40 @@ Invariants (simulator) and faults:
 - Each step the generator chooses among everything pending: a disk action's completion (any pending
   one, not only the oldest, so completions reorder), a message delivery, a timer due, a client's next
   operation, a crash or a restart. A linked `DiskFsync` runs only after its `DiskWrite` completes.
-- A write's blocks enter the disk's volatile state when its completion is chosen, not when it is
-  issued; an unlinked `DiskFsync` makes durable only writes completed before it runs ("A flush makes
+- A write's blocks enter the disk's volatile state, which reads see, when its completion is chosen,
+  not when it is issued, but a crash decides a write still in flight like an unflushed one: each
+  of its blocks lands or not from the seed, as a real device may have written them. A linked
+  `DiskFsync` whose write failed completes with Io without running, as io_uring cancels a link.
+  A completion or delivery may be chosen at any time and moves the node's clocks to the later of
+  now and its issue time plus its latency; a timer is offered only once due, and time jumps to the
+  next one only when nothing else is pending; an unlinked `DiskFsync` makes durable only writes completed before it runs ("A flush makes
   durable every write that completed before it runs"). Case: depth 2, W1 and W2 issued, W1
   completes, an unlinked flush runs, crash with nothing landing: W2's blocks read as before. A
   scheduler that applies writes at issue lets the seed-1 bug (`TestAFlushSentLaterWaitsForItsOwnWrite`)
   pass, and this case must fail on it.
 - Message delivery: for the planted-bug check in phase 1, the scheduler drops and reorders the toy
-  protocol's messages itself, ahead of phase 3's simulated network.
+  protocol's messages itself, ahead of phase 3's simulated network, which adds duplicates and a
+  `PeerLost` to a crashed node's peers. Crashes, restarts and drops are trace lines of their own
+  (`event ... Crash`, `Restart`, `Drop peer=5 msg=write`).
 - Timers: `SetTimer` on an armed `TimerID` replaces its deadline; the scheduler still delivers, at
   random, a `Timer` event for the replaced deadline or for one that no longer matters, because the
   driver contract allows it, and a machine must ignore it ("Stale timer" under Peer requests).
 - Each machine draws from a child source forked from the run's seed (Seeded RNG, Fork), so adding a
-  draw in one machine does not shift another's stream. Open: the design says each machine owns a
-  seeded source but not how it derives from the run's seed.
+  draw in one machine does not shift another's stream: the run's source forks the scheduler's
+  child first, which makes every scheduling choice, then one child per node in node order, and each node's forks one per machine as the node creates it. A machine that
+  draws once more leaves every other machine's draws unchanged.
 - The scheduler drives the machines only through `OnEvent` and the actions they return: a machine
   that is handed an event outside its contract (a `DiskDone` for an unknown `IOID`) reports it as
   data, never panics on it.
-- The disk log's seeded tests run on the scheduler with their seeds unchanged. Their harnesses
-  already work this way: a seeded generator picks each step, executes the chosen disk action against
-  `sim.Disk` and feeds its completion back as an event. On the scheduler they keep their coverage
-  thresholds, and, with identical traces, the counts they log today (for the random crash test over
-  seeds 1-50: 27 in-flight rounds kept, 128 dropped, 200 recoveries from a manifest, 44 NoSpace, 25 at
-  depth 2, 30 headers erased, 46 restarts, 100 crashes inside recovery).
+- The disk log's seeded tests run on the scheduler with their seeds unchanged: the harness's
+  seeded generator picks each step and the scheduler carries it out (`Take`), disk failures are
+  `sim.Disk` faults, and crashes and restarts are the scheduler's. They keep their coverage
+  thresholds. The group commit property's counts are unchanged; the random crash test's, now that a
+  crash also decides writes in flight, are over seeds 1-50: 75 in-flight rounds kept, 79 dropped,
+  199 recoveries from a manifest, 46 NoSpace, 15 at depth 2 and 22 at depth 3, 74 headers erased,
+  49 restarts, 101 crashes inside recovery, 128 gaps named durable (12 inside the window). Each seed
+  runs twice with byte-identical traces, and each incarnation's trace (split at `Restart`) passes
+  the trace rules for rounds.
 
 ## Simulated disk
 
@@ -1956,18 +1958,21 @@ Injected errors (Pebble's `errorfs` predicates, RocksDB's fault injection):
 
 - A failed read fills nothing the caller may trust and returns Io; a damaged read is
   indistinguishable from a good one to the caller, so only checksums catch it: a damaged read of a
-  record header gives the record codec's checksum error, never a decoded record.
+  record header never decodes: damage in bytes 8 and up gives the checksum error, and in bytes 0-7
+  (magic, version, header-block count) BadMagic, BadVersion, Malformed or Truncated.
 - A failed flush is never followed by an acknowledgment from the same open log. Trace-check rule:
   after a `DiskDone` with an error for a log's `DiskFsync` (or `DiskWrite`), no durable event of that
   log instance appears until recovery has run again. Planted failing trace:
 
   ```text
-  5000 0 action pass=12 DiskWrite round=7 io=41 lba=67 len=8192
+  5000 0 action pass=12 DiskWrite round=7 io=41 lba=67 len=8192 vec=2
   5000 0 action pass=12 DiskFsync round=7 io=42 linked=1
   5950 0 event pass=13 DiskDone io=41 err=ok
   5951 0 event pass=14 DiskDone io=42 err=io
-  5952 0 event pass=14 Durable lsn=7          <- breaks the rule
+  5952 0 output pass=14 Durable round=7 lsn=7   <- breaks the rule
   ```
+
+  The rule is `NoDurableAfterFailure`, and it resets at a `Restart`.
 
   The real group commit passes it on seeds 1-100 of the "every accepted item decodes" property, rerun
   with the first flush of each seed failed; a copy whose flush-error path is removed fails it.
@@ -1995,28 +2000,33 @@ Misdirected writes:
 - The blocks it overwrote at the wrong place are damage like a bit flip: a record's data block there
   fails its CRC32C wherever it is checked, a segment header there is handled as under Quarantined
   segments, and a free segment's blocks are harmless.
-- Open: a misdirected last record that was acknowledged is lost on a single disk, and the tail rule
-  cannot tell. The phase 1 invariant "every acknowledged write is readable" then trips; the checker
-  needs a rule for writes the fault model itself destroyed, or the fault must be limited to rounds
-  later rounds name durable.
+- A misdirected last record that was acknowledged is lost on a single disk, and the tail rule
+  cannot tell. The simulated disk reports every write it misdirects, and the single-disk invariant
+  "every acknowledged write is readable" excuses the writes of a misdirected record that no later
+  durable header names; every other loss still trips it, and with replicas (phase 3) nothing is
+  excused.
 
 Torn writes, bit flips, fail-slow and discards:
 
 - Torn writes: only some 4 KiB blocks of a multi-block write land at a crash; that is the per-block
-  crash model above (Testing strategy: "only some 4K sectors of a larger write land"). Open: the
-  NVMe flush spike's drive is power-fail atomic for 512 B only, "so the per-block checksum must also
-  catch a torn 4 KiB block", and On-disk format relies on "a segment header fits in one sector, so a
-  torn write leaves it whole or as it was"; whether the simulated disk also tears inside a 4 KiB block
-  is not decided. If it does, each 512 B sector still lands whole or not.
+  crash model above (Testing strategy: "only some 4K sectors of a larger write land"). The NVMe
+  flush spike's drive is power-fail atomic for 512 B only, so the simulated disk also tears inside a
+  4 KiB block: with tearing on, each 512 B sector of an unflushed block lands whole or not, and a
+  segment header, which fits in one sector, lands whole or as it was.
 - Silent bit flips by seeded probability over durable blocks, besides the chosen `FlipBit`: a flip in
   a record's data fails its CRC32C wherever the block is checked (recovery, a base read, a cleaner
   copy), and a flip in a header fails the header checksum. Open: whether every chunk read checks its
   block's CRC32C; if not, the byte-range oracle trips on a flipped block a read returns.
 - Fail-slow: with no crash or other fault, every submitted item is acknowledged with a 100× fail-slow
   disk, no action completes with an error, and each completion takes 100 times its normal simulated
-  latency. Open: the simulated disk's latency model (per-kind base latencies) is not in the design.
-- `DiskTrim` executes, since the cleaner's paced TRIM issues it. Open: what a trimmed block reads back
-  (zeros or its old contents) and whether a trim is durable before a flush.
+  latency. Base latencies are settings of the simulated disk: read 80 µs, write 20 µs, flush
+  1,000 µs (a consumer drive's durable-write floor, from the NVMe flush spike), trim 20 µs.
+- `DiskTrim` executes, since the cleaner's paced TRIM issues it. A trimmed block reads back as zeros
+  or as its old contents, chosen per trim from the seed, as devices differ, and a trim is volatile
+  until a flush like a write: a crash may undo it. A machine that relies on trimmed blocks reading
+  as zeros fails under some seed. A failed trim leaves its blocks undecided, as a failed write does.
+- Blocks a failed write or flush left undecided stay so until a later flush, which lands each from
+  the seed; latency is one base time per action kind, whatever its size.
 
 ## Crash at every action
 

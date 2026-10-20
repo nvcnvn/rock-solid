@@ -39,6 +39,30 @@ func TestDiskWritesStayVolatileUntilAFlush(t *testing.T) {
 	}
 }
 
+func TestDiskLandsUnflushedWritesInOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		landed []bool
+		want   byte
+	}{
+		{"newer alone", []bool{false, true}, 2},
+		{"older alone", []bool{true, false}, 1},
+		{"both", []bool{true, true}, 2},
+		{"neither", []bool{false, false}, 0},
+	} {
+		p := NewPool(1<<20, 0)
+		d := NewDisk(4)
+		for i := range 2 {
+			w := writeAction(t, p, core.IOID(i+1), 0, filled(byte(i+1), 1))
+			d.Execute(p, &w)
+		}
+		d.Crash(func(i int, _ core.LBA) bool { return tc.landed[i] })
+		if got := d.Read(0, 1)[0]; got != tc.want {
+			t.Fatalf("%s landing: block reads %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestDiskReadsZerosAndRefusesOutOfRange(t *testing.T) {
 	p := NewPool(1<<20, 0)
 	d := NewDisk(4)
@@ -68,6 +92,16 @@ func TestDiskFaults(t *testing.T) {
 	d.Crash(func(int, core.LBA) bool { return false })
 	if d.Read(1, 1)[10] != 7^0x10 {
 		t.Fatal("a flipped bit is durable")
+	}
+	w := writeAction(t, p, 2, 0, filled(9, 1))
+	d.Execute(p, &w)
+	d.FlipBit(0, 10, 0x10)
+	if d.Read(0, 1)[10] != 9 {
+		t.Fatal("a bit flip under an unflushed write shows through it")
+	}
+	d.Crash(func(int, core.LBA) bool { return false })
+	if got := d.Read(0, 1); got[10] != 7^0x10 || got[11] != 7 {
+		t.Fatal("a bit flip under an unflushed write made the write durable")
 	}
 	d.FailReads(1)
 	buf := mustAlloc(t, p, 2*core.BlockSize)

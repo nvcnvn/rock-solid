@@ -18,15 +18,13 @@ const (
 	segmentDivisor = 4096
 )
 
-// Geometry is how a disk is cut into segments. Segment 0 holds the superblock in its
-// first and last block; segments 1 and up hold records.
+// Geometry is how a disk is cut into segments: segment 0 holds the superblock and its copy, the rest hold records.
 type Geometry struct {
 	SegmentBlocks uint32
 	SegmentCount  uint32
 }
 
-// GeometryFor cuts a disk of diskBytes into segments of min(MaxSegmentBytes, diskBytes/4096)
-// rounded down to a power of two and no smaller than MinSegmentBlocks.
+// GeometryFor cuts a disk into segments of min(MaxSegmentBytes, diskBytes/4096) rounded down to a power of two.
 func GeometryFor(diskBytes uint64) (Geometry, error) {
 	segBytes := min(uint64(MaxSegmentBytes), diskBytes/segmentDivisor)
 	segBytes = max(floorPow2(segBytes), MinSegmentBlocks*core.BlockSize)

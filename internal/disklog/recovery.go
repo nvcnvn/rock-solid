@@ -38,6 +38,7 @@ type CopyOnlyError struct {
 	Copy   Superblock
 }
 
+// Error names why block 0 failed and where the copy is.
 func (e *CopyOnlyError) Error() string {
 	return fmt.Sprintf("block 0 is not a superblock (%v) but the copy at LBA %d is valid", e.Block0, e.Copy.SuperblockCopyLBA())
 }
@@ -50,6 +51,7 @@ type CorruptError struct {
 	LSN uint64
 }
 
+// Error names the LSN.
 func (e *CorruptError) Error() string { return fmt.Sprintf("log corrupt at LSN %d", e.LSN) }
 
 // Is lets errors.Is match ErrCorrupt.
@@ -81,20 +83,33 @@ const (
 )
 
 type segInfo struct {
-	state    segState
-	stream   Stream
-	hasFirst bool
-	seq      uint64
-	firstLSN uint64
-	listed   bool
-	live     uint32
-	newest   uint64
+	state  segState
+	stream Stream
+	seq    uint64
+	first  firstRecord
+	listed bool
+	live   uint32
+	newest uint64
+}
+
+// firstRecord is the record header of this log at block 1, of whatever segment sequence.
+type firstRecord struct {
+	ok      bool
+	seq     uint64
+	lsn     uint64
+	durable uint64
+}
+
+type followSeg struct {
+	segment uint32
+	seq     uint64
 }
 
 type foundHeader struct {
 	segment uint32
 	block   uint32
 	lsn     uint64
+	repeat  bool
 }
 
 type window struct {
@@ -178,9 +193,8 @@ type Recovery struct {
 	scratch   []Entry
 
 	segs   []segInfo
-	follow []uint32
+	follow []followSeg
 	fi     int
-	strays []uint32
 	scan   []uint32
 	qi     int
 	qPos   uint32
@@ -188,11 +202,14 @@ type Recovery struct {
 	manifestPos ManifestPos
 	manifest    Manifest
 	hasManifest bool
-	pieces      []BlobRef
-	pi          int
+	nextSeq     uint64
+	chain       []chainEntry
+	pieces      [][]BlobRef
+	mi, pi      int
 	pieceStep   bool
 	rest        []byte
-	body        []byte
+	container   BlobRef
+	bodies      [][]byte
 	blobs       []BlobRef
 	bi          int
 
@@ -201,6 +218,7 @@ type Recovery struct {
 	expected    uint64
 	gapped      bool
 	maxKnown    uint64
+	maxDurable  uint64
 	maxSeq      uint64
 	found       []foundHeader
 	replayFloor uint64
@@ -220,7 +238,7 @@ func Recover(ctx *core.Context, cfg Config, diskBlocks uint64, mode Mode, firstI
 	if cfg.CommitDepth < 1 || cfg.ReadDepth < 1 || maxRec < 3 || (mode != ModeOpen && mode != ModeRebuild) || diskBlocks == 0 {
 		return nil, ErrBadConfig
 	}
-	r := &Recovery{cfg: cfg, mode: mode, diskBlocks: diskBlocks, nextIO: firstIO, phase: recSuperblock}
+	r := &Recovery{cfg: cfg, mode: mode, diskBlocks: diskBlocks, nextIO: firstIO, phase: recSuperblock, nextSeq: 1}
 	r.hdrBufs = make([]core.IOBuf, cfg.ReadDepth)
 	r.slotSeg = make([]uint32, cfg.ReadDepth)
 	winBlocks := uint32(min(maxRec, MaxSegmentBytes/core.BlockSize))
@@ -455,13 +473,15 @@ func (r *Recovery) onHeader(ctx *core.Context, slot int, out *Output) {
 	r.classify(r.slotSeg[slot], ctx.Pool.Bytes(r.hdrBufs[slot])[:2*core.BlockSize])
 	r.readHeader(slot, out)
 	if r.hdrsDone++; r.hdrsDone == r.sb.SegmentCount-1 {
-		r.startFollow(ctx, out)
+		r.phase = recManifest
+		r.pumpManifest(ctx, out)
 	}
 }
 
 // classify reads block 1 along with the header: it holds the record written with the header,
-// which locates a used segment for replay and, in a free segment, is a round in flight whose
-// header never landed.
+// which locates a used segment for replay, or the record of a round in flight that opened the
+// segment again and whose header never landed, which the loaded manifest's NextSeq tells from
+// one left by an earlier use.
 func (r *Recovery) classify(s uint32, img []byte) {
 	h, err := DecodeSegmentHeader(img)
 	info := &r.segs[s]
@@ -472,22 +492,24 @@ func (r *Recovery) classify(s uint32, img []byte) {
 		if h.Manifest.LSN > r.manifestPos.LSN {
 			r.manifestPos = h.Manifest
 		}
-		r.checkFirst(s, img[core.BlockSize:], h.Seq, false)
+		r.checkFirst(s, img[core.BlockSize:])
 	case isZero(img[:core.BlockSize]) || (err == nil && h.LogID != r.sb.LogID):
 		*info = segInfo{state: segFree}
-		r.checkFirst(s, img[core.BlockSize:], 0, true)
+		r.checkFirst(s, img[core.BlockSize:])
 	default:
 		*info = segInfo{state: segSuspect}
 	}
 }
 
-func (r *Recovery) checkFirst(s uint32, img []byte, seq uint64, anySeq bool) {
-	p, ok := r.candidate(img, 1, seq, anySeq)
+// checkFirst leaves a record header longer than a block to the follow pass, which runs once
+// NextSeq says whether it matters.
+func (r *Recovery) checkFirst(s uint32, img []byte) {
+	p, ok := r.candidate(img, 1, 0, true)
 	if !ok {
 		return
 	}
 	if p.headerBlocks > 1 {
-		r.follow = append(r.follow, s)
+		r.follow = append(r.follow, followSeg{segment: s, seq: p.seq})
 		return
 	}
 	h, err := DecodeHeader(img, Place{LogID: r.sb.LogID, Seq: p.seq, Offset: 1}, r.sb.SegmentBlocks-1, r.scratch[:0])
@@ -497,19 +519,18 @@ func (r *Recovery) checkFirst(s uint32, img []byte, seq uint64, anySeq bool) {
 }
 
 func (r *Recovery) noteFirst(s uint32, h RecordHeader) {
-	if info := &r.segs[s]; info.state == segUsed {
-		info.hasFirst, info.firstLSN = true, h.Record.LSN
-		return
-	}
-	r.noteFound(s, 1, h)
-	r.strays = append(r.strays, s)
+	r.segs[s].first = firstRecord{ok: true, seq: h.Record.Seq, lsn: h.Record.LSN, durable: h.Record.Durable}
 }
 
-func (r *Recovery) noteFound(s, block uint32, h RecordHeader) {
-	r.found = append(r.found, foundHeader{segment: s, block: block, lsn: h.Record.LSN})
-	r.maxKnown = max(r.maxKnown, h.Record.LSN)
-	r.maxSeq = max(r.maxSeq, h.Record.Seq)
+func (r *Recovery) noteFound(s, block uint32, seq, lsn, durable uint64) {
+	r.found = append(r.found, foundHeader{segment: s, block: block, lsn: lsn})
+	r.maxKnown = max(r.maxKnown, lsn)
+	r.maxDurable = max(r.maxDurable, durable)
+	r.maxSeq = max(r.maxSeq, seq)
 }
+
+// hasFirst reports whether a used segment's block 1 holds the record written with its header.
+func (info *segInfo) hasFirst() bool { return info.first.ok && info.first.seq == info.seq }
 
 type prelude struct {
 	headerBlocks uint32
@@ -606,12 +627,13 @@ func (r *Recovery) pump(ctx *core.Context, out *Output) {
 
 func (r *Recovery) startFollow(ctx *core.Context, out *Output) {
 	r.phase = recFollow
+	r.follow = slices.DeleteFunc(r.follow, func(f followSeg) bool { return f.seq < r.nextSeq && f.seq != r.segs[f.segment].seq })
 	r.pumpFollow(ctx, out)
 }
 
 func (r *Recovery) pumpFollow(ctx *core.Context, out *Output) {
 	for r.fi < len(r.follow) {
-		s := r.follow[r.fi]
+		s := r.follow[r.fi].segment
 		img, ok := r.need(ctx, 0, s, 1, 1, out)
 		if !ok {
 			return
@@ -626,22 +648,29 @@ func (r *Recovery) pumpFollow(ctx *core.Context, out *Output) {
 		}
 		r.fi++
 	}
-	r.phase = recManifest
-	r.pumpManifest(ctx, out)
+	r.startQuarantine(ctx, out)
 }
 
-// applyTable takes from the manifest's segment usage table what headers cannot tell: a
-// quarantined segment stays quarantined without being read again, and a used one whose
-// header reads as zeros or another log's is damaged, not free. It then lists the segments to
-// read in full: the damaged ones, and the free ones holding a record at block 1, since a header
-// damaged to zeros over a segment opened after the manifest looks like one that never landed.
+// applyTable judges each segment by the loaded manifest, as "Recovery" in docs/design.md says.
+// A header of this log at NextSeq or more was opened after the base and is used, its row from
+// replay; below it the table decides: listed, the row's state, left out, free under a stale
+// header. A quarantined row stays quarantined without being read again, and a listed segment
+// whose header reads as zeros or another log's is damaged, not free. A record at block 1 at
+// NextSeq or more that its header does not match is a round in flight that opened the segment
+// again: under a stale header the append rule makes it the only record that round wrote there,
+// while a free-looking header may be damage, so that segment is read in full with the damaged
+// ones. An older record at block 1 is left from an earlier use and ignored.
 func (r *Recovery) applyTable(ctx *core.Context, out *Output) bool {
+	next := r.nextSeq
 	for _, u := range r.manifest.Segments {
 		if u.Segment >= r.sb.SegmentCount {
 			r.fail(ctx, &CorruptError{LSN: r.manifestPos.LSN}, out)
 			return false
 		}
 		info := &r.segs[u.Segment]
+		if u.State != SegmentQuarantined && info.state == segUsed && info.seq >= next {
+			continue
+		}
 		info.listed, info.live, info.newest = true, u.Live, u.Newest
 		switch {
 		case u.State == SegmentQuarantined:
@@ -651,18 +680,21 @@ func (r *Recovery) applyTable(ctx *core.Context, out *Output) bool {
 		}
 	}
 	for s := range r.segs {
-		if r.segs[s].state == segSuspect {
+		info := &r.segs[s]
+		f := info.first
+		stray := f.ok && f.seq >= next && f.seq != info.seq
+		switch {
+		case info.state == segUsed && info.seq < next:
+			if stray {
+				r.noteFound(uint32(s), 1, f.seq, f.lsn, f.durable)
+			}
+			if !info.listed {
+				*info = segInfo{state: segFree}
+			}
+		case info.state == segFree && stray, info.state == segSuspect:
 			r.scan = append(r.scan, uint32(s))
 		}
 	}
-	for _, s := range r.strays {
-		if r.segs[s].state == segFree {
-			r.scan = append(r.scan, s)
-		}
-	}
-	r.found = slices.DeleteFunc(r.found, func(f foundHeader) bool {
-		return slices.Contains(r.scan, f.segment) || r.segs[f.segment].state == segQuarantined
-	})
 	return true
 }
 
@@ -688,7 +720,7 @@ func (r *Recovery) pumpQuarantine(ctx *core.Context, out *Output) {
 			if st == seekEnd {
 				break
 			}
-			r.noteFound(s, b, h)
+			r.noteFound(s, b, h.Record.Seq, h.Record.LSN, h.Record.Durable)
 			r.qPos = b + uint32(h.Layout.Blocks())
 		}
 		r.qi++
@@ -752,10 +784,13 @@ func (r *Recovery) readBlob(ctx *core.Context, ref BlobRef, out *Output) ([]byte
 	return d.Payload(int(ref.Entry)), d.Entries[ref.Entry].BlobKind, readOK
 }
 
+// pumpManifest reads the newest manifest a segment header names: its last piece, then the
+// pieces of the snapshot and of every edit its list names, each manifest but the newest ending
+// in its own last piece, whose bytes after its list are the end of its body.
 func (r *Recovery) pumpManifest(ctx *core.Context, out *Output) {
 	pos := r.manifestPos
 	if pos.IsNone() {
-		r.startQuarantine(ctx, out)
+		r.startFollow(ctx, out)
 		return
 	}
 	corrupt := &CorruptError{LSN: pos.LSN}
@@ -769,33 +804,57 @@ func (r *Recovery) pumpManifest(ctx *core.Context, out *Output) {
 			r.fail(ctx, corrupt, out)
 			return
 		}
-		earlier, rest, err := DecodeManifestPiece(d.Payload(i), nil)
-		if err != nil {
+		pieces, rest, err := DecodeManifestPiece(d.Payload(i))
+		if err != nil || slices.ContainsFunc(pieces[:len(pieces)-1], func(p []BlobRef) bool { return len(p) == 0 }) {
 			r.fail(ctx, corrupt, out)
 			return
 		}
-		r.pieces, r.rest, r.pieceStep = earlier, slices.Clone(rest), true
+		r.pieces, r.rest, r.pieceStep = pieces, slices.Clone(rest), true
+		r.container = BlobRef{Segment: pos.Segment, Block: pos.Block, LSN: pos.LSN, Entry: uint16(i)}
+		r.bodies, r.chain = make([][]byte, len(pieces)), make([]chainEntry, len(pieces))
+		r.chain[len(pieces)-1].size = uint64(len(d.Payload(i)))
 	}
-	for r.pi < len(r.pieces) {
-		b, kind, st := r.readBlob(ctx, r.pieces[r.pi], out)
-		if st == readPending {
-			return
+	for ; r.mi < len(r.pieces); r.mi, r.pi = r.mi+1, 0 {
+		list := r.pieces[r.mi]
+		newest := r.mi == len(r.pieces)-1
+		for r.pi < len(list) {
+			b, kind, st := r.readBlob(ctx, list[r.pi], out)
+			if st == readPending {
+				return
+			}
+			ownLast := !newest && r.pi == len(list)-1
+			if ownLast && st == readOK && kind == BlobManifest {
+				r.chain[r.mi].size += uint64(len(b))
+				_, rest, err := DecodeManifestPiece(b)
+				if err != nil {
+					st = readBad
+				}
+				b = rest
+			} else if kind != BlobManifestPiece || ownLast {
+				st = readBad
+			} else {
+				r.chain[r.mi].size += uint64(len(b))
+			}
+			if st == readBad {
+				r.fail(ctx, corrupt, out)
+				return
+			}
+			r.bodies[r.mi] = append(r.bodies[r.mi], b...)
+			r.pi++
 		}
-		if st == readBad || kind != BlobManifestPiece {
-			r.fail(ctx, corrupt, out)
-			return
-		}
-		r.body = append(r.body, b...)
-		r.pi++
+		r.chain[r.mi].pieces = slices.Clone(list)
 	}
-	m, err := DecodeManifest(append(r.body, r.rest...))
+	last := len(r.bodies) - 1
+	r.bodies[last] = append(r.bodies[last], r.rest...)
+	r.chain[last].pieces = append(r.chain[last].pieces, r.container)
+	m, err := LoadManifest(r.bodies)
 	if err != nil {
 		r.fail(ctx, corrupt, out)
 		return
 	}
-	r.manifest, r.hasManifest = m, true
-	r.body, r.rest, r.pieces = nil, nil, nil
-	r.startQuarantine(ctx, out)
+	r.manifest, r.hasManifest, r.nextSeq = m, true, m.NextSeq
+	r.bodies, r.rest, r.pieces = nil, nil, nil
+	r.startFollow(ctx, out)
 }
 
 func (r *Recovery) loaded(out *Output) {
@@ -879,7 +938,7 @@ func (r *Recovery) replaySegments(s Stream) []uint32 {
 	})
 	start := 0
 	for i, seg := range segs {
-		if info := r.segs[seg]; info.hasFirst && info.firstLSN <= r.expected {
+		if info := &r.segs[seg]; info.hasFirst() && info.first.lsn <= r.expected {
 			start = i
 		}
 	}
@@ -964,6 +1023,7 @@ func (r *Recovery) advance(ctx *core.Context, s int, out *Output) {
 			st.searching, st.pos = true, pos+1
 			continue
 		}
+		r.maxDurable = max(r.maxDurable, h.Record.Durable)
 		n := uint32(h.Layout.Blocks())
 		if img, ok = r.need(ctx, s, seg, pos, n, out); !ok {
 			return
@@ -977,7 +1037,7 @@ func (r *Recovery) advance(ctx *core.Context, s int, out *Output) {
 		st.pos = pos + n
 		switch {
 		case err != nil || lsn <= st.lastLSN:
-			r.found = append(r.found, foundHeader{segment: seg, block: pos, lsn: lsn})
+			r.found = append(r.found, foundHeader{segment: seg, block: pos, lsn: lsn, repeat: err == nil})
 		case lsn <= r.minReplay:
 			st.lastLSN = lsn
 		default:
@@ -1010,15 +1070,18 @@ func (r *Recovery) deliver(x *streamScan, out *Output) {
 
 // endReplay applies the rules of "Recovery" in docs/design.md. A segment header fits in one
 // sector, so a torn write leaves it whole or as it was, and a damaged one over records past
-// the replay point is damage. The first missing LSN g ends the log only if every record header
-// found past it lies within the commit_depth rounds that can be in flight, and no durable
-// manifest lies past it; the manifest's LSN is past every LSN its usage table lists, so
+// the replay point is damage. The first missing LSN g ends the log only if no record header
+// names g or later durable, every record header found past it lies within the commit_depth
+// rounds that can be in flight, and no durable manifest lies past it; the manifest's LSN is past every LSN its usage table lists, so
 // replay cannot miss a record of a segment the table lists without ending before it.
 func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
-	var damaged uint64
+	var damaged, repeated uint64
 	for _, f := range r.found {
 		info := &r.segs[f.segment]
 		if info.state != segSuspect && info.state != segQuarantined {
+			if f.repeat && (repeated == 0 || f.lsn < repeated) {
+				repeated = f.lsn
+			}
 			continue
 		}
 		if f.lsn > r.minReplay && (damaged == 0 || f.lsn < damaged) {
@@ -1032,7 +1095,10 @@ func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
 	case damaged != 0:
 		r.fail(ctx, &CorruptError{LSN: damaged}, out)
 		return
-	case r.maxKnown >= g+uint64(r.cfg.CommitDepth) || r.manifestPos.LSN >= g:
+	case repeated != 0:
+		r.fail(ctx, &CorruptError{LSN: repeated}, out)
+		return
+	case r.maxKnown >= g+uint64(r.cfg.CommitDepth) || r.maxDurable >= g || r.manifestPos.LSN >= g:
 		r.fail(ctx, &CorruptError{LSN: g}, out)
 		return
 	}
@@ -1100,10 +1166,15 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 	l.phase = formatDone
 	l.nextLSN = r.durable + 1
 	l.durableLSN = r.durable
-	l.nextSeq = r.maxSeq + 1
+	l.nextSeq = max(r.maxSeq+1, r.nextSeq)
+	l.durableSeq = l.nextSeq
 	l.manifest = r.manifestPos
 	l.replayBytes = r.replayBytes
 	l.asm = r.resume
+	if r.hasManifest {
+		l.chain, l.state = r.chain, r.manifest.Indexes
+		l.live = []liveChain{{pos: r.manifestPos, entries: r.chain}}
+	}
 	for s := uint32(1); s < r.sb.SegmentCount; s++ {
 		info := &r.segs[s]
 		switch info.state {
@@ -1114,6 +1185,17 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 			if info.state == segQuarantined {
 				l.usage[s].State = SegmentQuarantined
 			}
+		}
+	}
+	table := r.manifest.Segments
+	for s := uint32(1); s < r.sb.SegmentCount; s++ {
+		var was SegmentUsage
+		if len(table) > 0 && table[0].Segment == s {
+			was, table = table[0], table[1:]
+			was.Segment = 0
+		}
+		if l.usage[s] != was {
+			l.changed[s/64] |= 1 << (s % 64)
 		}
 	}
 	return l, nil

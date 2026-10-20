@@ -181,12 +181,12 @@ type writer struct {
 	pending []pendingWrite
 }
 
-func (w *writer) Write(ctx core.Context, out []core.Action) []core.Action {
+func (w *writer) Write(ctx *core.Context, out []core.Action) []core.Action {
 	w.queued++
 	return w.drain(ctx, out)
 }
 
-func (w *writer) OnEvent(ctx core.Context, ev core.Event, out []core.Action) []core.Action {
+func (w *writer) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
 	switch ev.Kind {
 	case core.EvTimer:
 		return w.drain(ctx, out)
@@ -199,7 +199,7 @@ func (w *writer) OnEvent(ctx core.Context, ev core.Event, out []core.Action) []c
 	return out
 }
 
-func (w *writer) drain(ctx core.Context, out []core.Action) []core.Action {
+func (w *writer) drain(ctx *core.Context, out []core.Action) []core.Action {
 	for w.queued > 0 {
 		buf, err := ctx.Pool.Alloc(core.BlockSize)
 		if errors.Is(err, core.ErrPoolExhausted) {
@@ -225,16 +225,17 @@ func TestExhaustionIsAnOrdinaryOutcome(t *testing.T) {
 		{now: 105, want: []core.Action{{Kind: core.ActSetTimer, Timer: retryTimer, At: 115}}},
 		{now: 115, event: core.Event{Kind: core.EvTimer, Timer: retryTimer}, want: []core.Action{{Kind: core.ActSetTimer, Timer: retryTimer, At: 125}}},
 		{now: 120, event: core.Event{Kind: core.EvDiskDone, IO: 1}, want: []core.Action{{Kind: core.ActDiskWrite, IO: 2, Vec: []core.IOVec{{Buf: core.IOBuf{Slot: 0, Gen: 2}, Len: core.BlockSize}}, Len: core.BlockSize}}},
+		{now: 122, event: core.Event{Kind: core.EvResumed}},
 		{now: 125, event: core.Event{Kind: core.EvTimer, Timer: retryTimer}},
 		{now: 130, event: core.Event{Kind: core.EvDiskDone, IO: 2}},
 	}
 	for i, s := range steps {
-		ctx := core.Context{Now: s.now, Pool: p}
+		ctx := core.Context{Now: s.now, Raw: s.now * 1226 / 1000, Pool: p}
 		var got []core.Action
 		if s.event.Kind == core.EvNone {
-			got = w.Write(ctx, nil)
+			got = w.Write(&ctx, nil)
 		} else {
-			got = w.OnEvent(ctx, s.event, nil)
+			got = w.OnEvent(&ctx, &s.event, nil)
 		}
 		if !reflect.DeepEqual(got, s.want) {
 			t.Fatalf("step %d at t=%d: got %+v, want %+v", i, s.now, got, s.want)

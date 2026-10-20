@@ -13,7 +13,7 @@ func TestTornBlocksSeed4(t *testing.T) {
 	kinds := []string{"zeros", "random", "record"}
 	cases := 0
 	for i := range 40 {
-		rec := Record{Place: testPlace, LSN: uint64(i + 1)}
+		rec := Record{Place: testPlace, LSN: uint64(i + 1), Durable: r.Below(uint64(i + 1))}
 		tr := randomRecord(t, r, rec, 9)
 		n := int(tr.layout.Blocks())
 		if tr.layout.HeaderBlocks != 1 || n > 10 {
@@ -27,7 +27,7 @@ func TestTornBlocksSeed4(t *testing.T) {
 			case "random":
 				old.image = randomBytes(r, len(tr.image))
 			case "record":
-				oldRec := Record{Place: testPlace, LSN: rec.LSN + 1000}
+				oldRec := Record{Place: testPlace, LSN: rec.LSN + 1000, Durable: rec.LSN + 999}
 				if n == 1 {
 					old = encodeRecord(t, oldRec, []Entry{PunchEntry(1, testChunk, 1, 0, 1)}, [][]byte{nil})
 				} else {
@@ -90,7 +90,7 @@ func TestTornSectorsSeed5(t *testing.T) {
 	r := core.NewRand(5)
 	errs := 0
 	for i := range 300 {
-		rec := Record{Place: testPlace, LSN: uint64(i + 1)}
+		rec := Record{Place: testPlace, LSN: uint64(i + 1), Durable: r.Below(uint64(i + 1))}
 		tr := randomRecord(t, r, rec, 8)
 		img := randomBytes(r, len(tr.image))
 		all := true

@@ -76,8 +76,7 @@ var loggingImports = map[string]bool{
 	"log/slog": true,
 }
 
-// Analyzer rejects clocks, I/O, goroutines, channels, global randomness and map iteration
-// in sans-IO packages, and free-form logs on the data path.
+// Analyzer rejects clocks, I/O, concurrency, global randomness and map iteration in sans-IO packages, and logs on the data path.
 var Analyzer = &analysis.Analyzer{
 	Name: "sansio",
 	Doc:  "check sans-IO packages for nondeterminism and the data path for free-form logs",

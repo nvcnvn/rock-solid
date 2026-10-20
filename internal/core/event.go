@@ -6,8 +6,7 @@ import (
 	"time"
 )
 
-// Tick is simulated or monotonic time in microseconds. A state machine reads it only
-// from Context.
+// Tick is a time in microseconds, which a state machine reads only from its Context.
 type Tick uint64
 
 // TickFromDuration converts a duration to ticks, truncating below a microsecond.
@@ -34,8 +33,7 @@ type TimerID uint64
 // LBA is a block address on one disk.
 type LBA uint64
 
-// IOBuf is a handle to a block-aligned buffer in the driver's pool: its slot and the
-// generation the slot had when the buffer was handed out, so a stale handle is caught.
+// IOBuf is a handle to a block-aligned pool buffer: its slot and the slot's generation, so a stale handle is caught.
 type IOBuf struct {
 	Slot uint32
 	Gen  uint32
@@ -44,8 +42,7 @@ type IOBuf struct {
 // NoBuf is the zero handle, meaning no buffer.
 var NoBuf = IOBuf{}
 
-// BufPool hands out buffers the driver owns. Data crosses a driver only as IOBuf
-// handles from it, never as heap slices, so SPDK and RDMA can register the pool once.
+// BufPool hands out the driver-owned buffers that data crosses a driver in, so SPDK and RDMA register the pool once.
 type BufPool interface {
 	// Alloc returns a buffer of n bytes, rounded up to whole blocks, with undefined
 	// contents. ErrPoolExhausted is an ordinary outcome the caller retries later.
@@ -64,6 +61,7 @@ type PoolExhaustedError struct {
 	Available int
 }
 
+// Error names the size requested and the bytes available.
 func (e *PoolExhaustedError) Error() string {
 	return fmt.Sprintf("buffer pool exhausted: requested %d bytes, %d available", e.Requested, e.Available)
 }
@@ -74,12 +72,10 @@ var ErrPoolExhausted = errors.New("buffer pool exhausted")
 // Is lets errors.Is match ErrPoolExhausted.
 func (e *PoolExhaustedError) Is(target error) bool { return target == ErrPoolExhausted }
 
-// MaxInlineMsg is the largest control message carried inline; anything bigger travels
-// as an IOBuf.
+// MaxInlineMsg is the largest control message carried inline; anything bigger travels as an IOBuf.
 const MaxInlineMsg = 256
 
-// Msg is a control message: up to MaxInlineMsg inline bytes and, optionally, one pool
-// buffer of data that stays with the driver until the peer answers or is lost.
+// Msg is a control message: up to MaxInlineMsg inline bytes and optionally one pool buffer of data.
 type Msg struct {
 	Len  uint16
 	Buf  IOBuf
@@ -111,6 +107,7 @@ const (
 	DiskInvalidRange
 )
 
+// Error names the error.
 func (e DiskError) Error() string {
 	switch e {
 	case DiskOK:
@@ -133,6 +130,7 @@ const (
 	EvPeerLost
 	EvDiskDone
 	EvTimer
+	EvResumed
 )
 
 // Event is one input to a state machine. Which fields are set depends on Kind.
@@ -180,8 +178,9 @@ type Action struct {
 	At     Tick
 }
 
-// Context is what a state machine may read besides its event: the time and the pool.
+// Context is what a state machine may read besides its event: the time on CLOCK_BOOTTIME and on CLOCK_MONOTONIC_RAW, and the pool.
 type Context struct {
 	Now  Tick
+	Raw  Tick
 	Pool BufPool
 }

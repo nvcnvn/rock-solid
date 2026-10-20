@@ -96,6 +96,44 @@ func TestOneWriteAndOneFlushPerRound(t *testing.T) {
 	}
 }
 
+func TestNoBlockIsCopied(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	first := h.write(0, 1, 1)
+	h.submit(disklog.Hot, first)
+	write := h.write(1, 2, 2)
+	h.submit(disklog.Hot, write)
+	small := h.blob(disklog.BlobRaftEntries, 7, 100, 3)
+	h.submit(disklog.Hot, small)
+	large := h.blob(disklog.BlobRaftEntries, 7, 5000, 4)
+	h.submit(disklog.Hot, large)
+	h.submit(disklog.Hot, disklog.Item{Entry: disklog.PunchEntry(1, testChunk, 5, 0, core.BlocksPerChunk)})
+	if vec := h.pending[0].act.Vec; len(vec) != 2 || vec[1] != (core.IOVec{Buf: first.Buf, Len: core.BlockSize}) {
+		t.Fatalf("round 1 writes %+v, want its header and the producer's buffer %+v", vec, first.Buf)
+	}
+	h.round()
+	h.wantTrace("write 64+3 io104", "fsync io105", "write 67+5 io106", "fsync io107")
+	vec := h.pending[0].act.Vec
+	if len(vec) != 3 || vec[0].Len != core.BlockSize || vec[1] != (core.IOVec{Buf: write.Buf, Len: 2 * core.BlockSize}) || vec[2].Len != 2*core.BlockSize {
+		t.Fatalf("round 2 writes %+v, want a header block, the producer's buffer %+v and two blob blocks", vec, write.Buf)
+	}
+	header, packed := vec[0].Buf, vec[2].Buf
+	for _, own := range []core.IOBuf{header, packed} {
+		if own == first.Buf || own == write.Buf || own == small.Buf || own == large.Buf {
+			t.Fatalf("round 2 writes producer buffer %+v as the log's own", own)
+		}
+	}
+	if header == packed {
+		t.Fatal("round 2 writes its header and its blobs from one buffer")
+	}
+	blobs := h.pool.Bytes(packed)[:2*core.BlockSize]
+	if want := append(pattern(3, 100), pattern(4, 5000)...); !bytes.Equal(blobs[:len(want)], want) || !isZeroBlock(blobs[len(want):]) {
+		t.Fatal("the blob buffer does not hold the two blobs packed back to back")
+	}
+	h.run()
+	h.wantLive(0)
+	h.close()
+}
+
 func TestStreamsAlternate(t *testing.T) {
 	h := formatted(t, gib, testConfig(0))
 	a := h.submit(disklog.Hot, h.write(0, 1, 1))
@@ -166,6 +204,29 @@ func TestFullSegmentRollsAndFullDiskFails(t *testing.T) {
 	if len(h.pending) != 0 {
 		t.Fatalf("disk actions on a full disk: %+v", h.pending)
 	}
+	h.close()
+}
+
+func TestNoSpaceFailsTheStreamsWholeQueue(t *testing.T) {
+	h := formatted(t, 16*core.BlockSize, testConfig(0))
+	for i := range 2 {
+		h.put(disklog.Hot, h.write(uint32(i), 2, uint64(i)))
+	}
+	last := h.submit(disklog.Hot, h.write(2, 1, 2))
+	head := h.submit(disklog.Hot, h.write(3, 1, 3))
+	fits := h.submit(disklog.Hot, disklog.Item{Entry: disklog.PunchEntry(1, testChunk, 4, 0, core.BlocksPerChunk)})
+	behind := h.submit(disklog.Hot, h.write(4, 1, 4))
+	h.wantTrace("write 4+4 io104", "fsync io105", "write 8+4 io106", "fsync io107", "write 12+3 io108", "fsync io109")
+	h.run()
+	h.wantTrace("write 4+4 io104", "fsync io105", "write 8+4 io106", "fsync io107", "write 12+3 io108", "fsync io109")
+	durable, failed := h.eventsOf(disklog.Durable), h.eventsOf(disklog.Failed)
+	if len(durable) != 3 || !slices.Equal(durable[2].Tickets, []disklog.Ticket{last}) {
+		t.Fatalf("durable %+v", durable)
+	}
+	if len(failed) != 1 || !errors.Is(failed[0].Err, disklog.ErrNoSpace) || !slices.Equal(failed[0].Tickets, []disklog.Ticket{head, fits, behind}) {
+		t.Fatalf("a 2-block head with a 1-block punch behind it and one block left: events %+v", h.events)
+	}
+	h.wantLive(0)
 	h.close()
 }
 
@@ -412,6 +473,7 @@ func TestCheckpointEndToEnd(t *testing.T) {
 	got := h.readManifest(durable[2])
 	want := disklog.Manifest{
 		BaseLSN: 2,
+		NextSeq: 2,
 		Indexes: []disklog.ManifestIndex{
 			{Owner: 5, ReplayLSN: 2, Runs: []disklog.BlobRef{{Segment: 2, Block: 1, LSN: 4, Entry: 0}, {Segment: 2, Block: 1, LSN: 4, Entry: 1}}},
 			{Owner: 6, ReplayLSN: 2},
@@ -497,9 +559,9 @@ func TestManifestLargerThanARecordGoesInPieces(t *testing.T) {
 		}
 	}
 	d := h.record(last)
-	earlier, _, err := disklog.DecodeManifestPiece(d.Payload(0), nil)
-	if err != nil || len(earlier) == 0 {
-		t.Fatalf("last piece names %d earlier pieces: %v", len(earlier), err)
+	lists, _, err := disklog.DecodeManifestPiece(d.Payload(0))
+	if err != nil || len(lists) != 1 || len(lists[0]) == 0 {
+		t.Fatalf("last piece lists %v: %v", lists, err)
 	}
 	m := h.readManifest(last)
 	if len(m.Indexes) != 1 || len(m.Indexes[0].Runs) != runs {
@@ -553,7 +615,9 @@ func TestCheckpointOnAFullDiskFails(t *testing.T) {
 
 func TestBeginCheckpointRefusesDuplicateOwnersAndLateReplay(t *testing.T) {
 	h := formatted(t, gib, testConfig(0))
-	for _, ixs := range [][]disklog.CheckpointIndex{{{Owner: 5}, {Owner: 5}}, {{Owner: 5, ReplayLSN: 1}}} {
+	h.put(disklog.Hot, h.write(0, 1, 1))
+	run := disklog.BlobRef{Segment: 1, Block: 1, LSN: 1}
+	for _, ixs := range [][]disklog.CheckpointIndex{{{Owner: 5}, {Owner: 5}}, {{Owner: 5, ReplayLSN: 2}}, {{Owner: 5, Runs: []disklog.BlobRef{run, run}}}} {
 		if err := h.log.BeginCheckpoint(ixs); !errors.Is(err, disklog.ErrMalformed) {
 			t.Fatalf("%+v: %v", ixs, err)
 		}
@@ -583,39 +647,91 @@ func TestSubmitRefusesBadBuffersAndReservedKinds(t *testing.T) {
 	h.close()
 }
 
-// readManifest reads the manifest whose last piece is the blob of a Durable record,
-// following its references to the earlier pieces.
+// readManifest reads the manifest whose last piece is the blob of a Durable record: the
+// snapshot and edits its list names, applied in order.
 func (h *harness) readManifest(last disklog.Event) disklog.Manifest {
+	h.t.Helper()
+	m, err := disklog.LoadManifest(h.readChain(last).bodies)
+	if err != nil {
+		h.t.Fatalf("manifest at LSN %d: %v", last.LSN, err)
+	}
+	return m
+}
+
+// chain is a manifest as its last piece lists it: the body of the snapshot and of each edit
+// since, the bytes each one's blobs hold, and where they are.
+type chain struct {
+	bodies [][]byte
+	sizes  []uint64
+	pieces [][]disklog.BlobRef
+}
+
+func (h *harness) blobAt(ref disklog.BlobRef) (disklog.BlobKind, []byte) {
+	h.t.Helper()
+	d := h.record(disklog.Event{LSN: ref.LSN, Segment: ref.Segment, Block: ref.Block, LBA: h.geo.LBA(ref.Segment, ref.Block)})
+	return d.Entries[ref.Entry].BlobKind, d.Payload(int(ref.Entry))
+}
+
+func (h *harness) readChain(last disklog.Event) chain {
 	h.t.Helper()
 	d := h.record(last)
 	i := slices.IndexFunc(d.Entries, func(e disklog.Entry) bool { return e.BlobKind == disklog.BlobManifest })
 	if i < 0 {
 		h.t.Fatalf("LSN %d holds no manifest", last.LSN)
 	}
-	earlier, rest, err := disklog.DecodeManifestPiece(d.Payload(i), nil)
+	lists, rest, err := disklog.DecodeManifestPiece(d.Payload(i))
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	var body []byte
-	for _, ref := range earlier {
-		ev := disklog.Event{LSN: ref.LSN, Segment: ref.Segment, Block: ref.Block, LBA: h.geo.LBA(ref.Segment, ref.Block)}
-		p := h.record(ev)
-		if p.Entries[ref.Entry].BlobKind != disklog.BlobManifestPiece {
-			h.t.Fatalf("reference %+v names a %+v", ref, p.Entries[ref.Entry])
+	c := chain{bodies: make([][]byte, len(lists)), sizes: make([]uint64, len(lists)), pieces: lists}
+	for m, list := range lists {
+		for j, ref := range list {
+			kind, b := h.blobAt(ref)
+			c.sizes[m] += uint64(len(b))
+			if m < len(lists)-1 && j == len(list)-1 {
+				if kind != disklog.BlobManifest {
+					h.t.Fatalf("manifest %d ends in %+v, a blob of kind %d", m, ref, kind)
+				}
+				if _, b, err = disklog.DecodeManifestPiece(b); err != nil {
+					h.t.Fatal(err)
+				}
+			} else if kind != disklog.BlobManifestPiece {
+				h.t.Fatalf("reference %+v names a blob of kind %d", ref, kind)
+			}
+			c.bodies[m] = append(c.bodies[m], b...)
 		}
-		body = append(body, p.Payload(int(ref.Entry))...)
 	}
-	m, err := disklog.DecodeManifest(append(body, rest...))
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	return m
+	n := len(lists) - 1
+	c.bodies[n] = append(c.bodies[n], rest...)
+	c.sizes[n] += uint64(len(d.Payload(i)))
+	return c
 }
 
 func manifestsEqual(a, b disklog.Manifest) bool {
-	return a.BaseLSN == b.BaseLSN &&
+	return a.BaseLSN == b.BaseLSN && a.NextSeq == b.NextSeq &&
 		slices.EqualFunc(a.Indexes, b.Indexes, func(x, y disklog.ManifestIndex) bool {
 			return x.Owner == y.Owner && x.ReplayLSN == y.ReplayLSN && slices.Equal(x.Runs, y.Runs)
 		}) &&
 		slices.Equal(a.Segments, b.Segments)
+}
+
+func TestEachRecordNamesTheDurableLSNOfItsRound(t *testing.T) {
+	cfg := testConfig(0)
+	cfg.CommitDepth = 2
+	h := formatted(t, gib, cfg)
+	h.put(disklog.Hot, h.chunkWrite(0, 0, 1, 1))
+	h.put(disklog.Hot, h.chunkWrite(1, 0, 1, 2))
+	h.submit(disklog.Hot, h.chunkWrite(2, 0, 1, 3))
+	h.submit(disklog.Hot, h.chunkWrite(3, 0, 1, 4))
+	h.run()
+	durable := h.eventsOf(disklog.Durable)
+	want := []uint64{0, 1, 2, 2}
+	if len(durable) != len(want) {
+		t.Fatalf("%d records durable, want %d", len(durable), len(want))
+	}
+	for i, ev := range durable {
+		if got := h.record(ev).Record.Durable; got != want[i] {
+			t.Fatalf("LSN %d names %d durable, want %d", ev.LSN, got, want[i])
+		}
+	}
 }
