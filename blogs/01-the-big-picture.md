@@ -220,7 +220,9 @@ The design's principles, in priority order:
 6. **Correctness before features**, with deterministic simulation from day one, and **Apache 2.0**.
 
 Not in v1: SMB (Server Message Block) file sharing for macOS and Windows clients, GPU-cluster scale,
-shared-writable `mmap` across nodes, cross-directory hard links, a custom kernel module, and authentication or encryption between
+shared-writable `mmap` across nodes, cross-directory hard links, a custom kernel module, hard disk
+drives (HDDs, which can come later as a capacity tier behind flash, see
+[post 04](04-one-log-per-disk.md#open-directions)), and authentication or encryption between
 daemons. A spike found that a Samba gateway can be added later on top of the file frontend
 ([post 09](09-rwx-filesystem-and-cache-coherence.md)).
 

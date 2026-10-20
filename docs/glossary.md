@@ -98,7 +98,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Fail-slow.** A disk or node that keeps working but becomes far slower instead of failing. It is harder to handle than a crash because nothing reports an error. See [Fail-slow](design.md#epoch-changes-and-failure-detection).
 
-**NVMe, SATA, HDD.** NVMe drives are SSDs on the PCIe bus, with deep hardware queues and microsecond latency. SATA SSDs use an older, slower interface. HDDs are spinning disks, slow at random access.
+**NVMe, SATA, HDD.** NVMe drives are SSDs on the PCIe bus, with deep hardware queues and microsecond latency. SATA SSDs use an older, slower interface. HDDs are spinning disks, slow at random access; rock-solid supports them only later, behind flash ([Addresses belong to the log](design.md#on-disk-format)). Shingled magnetic recording (SMR) HDDs overlap their tracks to hold more, and drive-managed ones stall for seconds while they rewrite them.
 
 ## Data model
 

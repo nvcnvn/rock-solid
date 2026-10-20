@@ -828,6 +828,14 @@ From the design's [roadmap and open questions](../docs/design.md#roadmap-and-ope
 
 - **Other drives.** Flush latency has been measured on one DRAM-less consumer NVMe drive only.
   DRAM, QLC, SATA and PLP drives are open, and on PLP drives `durability: fua` may win.
+- **Hard disks, later.** On an HDD alone every flush and every turn between open segments is a
+  seek, so the MetaStore commits on that disk run at HDD speed. The way in is one log over two
+  devices, as BlueStore's DB device and ZFS's special vdev do: hot and metadata segments on a
+  flash partition, cold segments and chunk slots on the HDD. Every address the format stores is a
+  block of the log's own address space, today one device block for block, so that tier rewrites
+  no index entry. It still needs a faster recovery than reading every segment header from the HDD,
+  a stall threshold per drive class, and a refusal of drive-managed SMR disks
+  ([addresses belong to the log](../docs/design.md#on-disk-format)).
 - **One flush for both streams.** A second round in flight does not help on a consumer drive: a
   flush waits for every byte in the drive's cache, so a hot 4K commit next to 1 MiB cold records
   took 2.3 ms with two rounds in flight
