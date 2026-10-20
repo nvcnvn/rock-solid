@@ -2230,6 +2230,9 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   must state which it matches.
 - With the index's runs mixed into the cold stream, the streams spike measured 4.27 / 11.0 / 49.6;
   the real layout must stay near the metadata-stream figures, not these.
+- The disk's exported write amplification metric equals the run's own count (user, header, copied
+  and index-run blocks over user blocks) over the measured window, so the drive wear figures in
+  design.md read the same number an operator does.
 - The run reports cleaner CPU per user 4 KiB write against the spike's order of magnitude (about 2.8 /
   7.5 / 20 µs at 80 / 90 / 95%). Open: tolerance.
 - Invariants hold throughout (Invariant checker), and no ordinary write fails with NoSpace while the
