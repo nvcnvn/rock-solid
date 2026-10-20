@@ -70,7 +70,7 @@ func FuzzCheck(f *testing.F) {
 	}
 	f.Add(seed)
 	f.Fuzz(func(t *testing.T, b []byte) {
-		tree, err := lsm.New(lsm.Config{MaxPiece: 1 << 20})
+		tree, err := lsm.New(lsm.Config{MaxPiece: 1 << 20, Check: true})
 		if err != nil {
 			t.Fatal(err)
 		}

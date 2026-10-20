@@ -151,7 +151,7 @@ func TestAutoRunLimit(t *testing.T) {
 			t.Errorf("largest run %.0f B: limit %d over 2 + log2(largest / 1 MiB) + 1", c.largest, c.want)
 		}
 	}
-	tr, err := New(Config{MaxPiece: 512, RunLimit: 5})
+	tr, err := New(Config{MaxPiece: 512, RunLimit: 5, Check: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestCrashDuringMergePicksItAgain(t *testing.T) {
 // treeWithRuns makes a tree with a fixed run limit and n flushed runs of one key each.
 func treeWithRuns(t *testing.T, limit, n int) *Tree {
 	t.Helper()
-	tr, err := New(Config{MaxPiece: 512, RunLimit: limit})
+	tr, err := New(Config{MaxPiece: 512, RunLimit: limit, Check: true})
 	if err != nil {
 		t.Fatal(err)
 	}

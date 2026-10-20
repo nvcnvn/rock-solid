@@ -151,9 +151,11 @@ type Compaction struct {
 	runs   []*run
 	older  []*run
 	plant  plants
+	check  bool
 	seq    uint64
 	limit  int
 	out    *run
+	err    error
 }
 
 func (t *Tree) opts() pickOpts {
@@ -190,13 +192,16 @@ func (t *Tree) compaction(i, j int, rule rule) *Compaction {
 		seq:    t.runs[i].seq,
 		limit:  t.cfg.MaxPiece - pieceOverhead,
 		plant:  t.plant,
+		check:  t.cfg.Check,
 	}
 	for _, r := range c.inputs {
 		r.held = true
-		c.runs = append(c.runs, &run{blocks: slices.Clone(r.blocks), frags: slices.Clone(r.frags)})
+		in := *r
+		in.blocks, in.frags = slices.Clone(r.blocks), slices.Clone(r.frags)
+		c.runs = append(c.runs, &in)
 	}
 	for _, r := range t.runs[j:] {
-		c.older = append(c.older, &run{blocks: slices.Clone(r.blocks)})
+		c.older = append(c.older, &run{blocks: slices.Clone(r.blocks), sums: r.sums})
 	}
 	t.merges = append(t.merges, c)
 	return c
@@ -240,6 +245,13 @@ var maxEntryBytes = uvarintLen(0) + uvarintLen(MaxKey) + uvarintLen(MaxValue+1) 
 
 // Run merges the inputs: the newest entry of each key wins unless a newer input's fragment covers it, the fragments unite, and a removal or fragment is dropped unless an older run holds a key it hides.
 func (c *Compaction) Run() {
+	c.out, c.err = nil, nil
+	for _, r := range c.runs {
+		if !c.plant.noSums && !r.intact() {
+			c.err = ErrCheck
+			return
+		}
+	}
 	it := iterState{srcs: make([]source, len(c.runs)), cur: -1, keepDel: true}
 	for i, r := range c.runs {
 		it.srcs[i].setRun(r)
@@ -257,23 +269,75 @@ func (c *Compaction) Run() {
 		w.reset(buf)
 		fillBlock(&w, &it, c.limit, older)
 		if w.n > 0 {
-			out.addBlock(bytes.Clone(w.finish()))
+			out.addBlock(bytes.Clone(w.finish()), w.n)
 		}
 	}
+	if c.plant.repeatBlock && len(out.blocks) > 0 {
+		out.addBlock(out.blocks[0], 0)
+	}
+	olderFrag := runIters(c.older)
 	if !c.plant.dropFrags {
 		it.fragsFromStart()
-		olderFrag := runIters(c.older)
 		for it.pendingFrag(olderFrag) {
 			w.reset(buf)
 			fillFragBlock(&w, &it, c.limit, olderFrag)
 			if w.n == 0 {
 				panic("lsm: a fragment larger than a piece")
 			}
-			out.addFrag(bytes.Clone(w.finish()))
+			out.addFrag(bytes.Clone(w.finish()), w.n)
 		}
 	}
 	out.setBounds()
+	if !c.plant.noSums {
+		out.checksum()
+	}
+	if c.check {
+		c.checkOrder(out)
+	}
+	entries, frags := 0, 0
+	for _, r := range c.runs {
+		entries += r.entries
+		frags += r.nfrags
+	}
+	if anyBad(older) || anyBad(olderFrag) || out.entries+it.dropped != entries || out.nfrags+it.fragsDropped != frags {
+		c.err = ErrCheck
+		return
+	}
 	c.out = out
+}
+
+// checkOrder panics unless out's entries and fragments are each in strictly increasing order and
+// within the bounds of the inputs.
+func (c *Compaction) checkOrder(out *run) {
+	var prev []byte
+	for i, b := range out.blocks {
+		var ok bool
+		if _, prev, ok = validateBlock(b, prev, i > 0); !ok {
+			panic("lsm: a merge's output keys are out of order")
+		}
+	}
+	prev = nil
+	for i, b := range out.frags {
+		var ok bool
+		if _, prev, ok = validateFragBlock(b, prev, i > 0); !ok {
+			panic("lsm: a merge's output fragments are out of order")
+		}
+	}
+	if !out.bounded {
+		return
+	}
+	var first, last []byte
+	for _, r := range c.runs {
+		if r.bounded && (first == nil || bytes.Compare(r.first, first) < 0) {
+			first = r.first
+		}
+		if r.bounded && (last == nil || bytes.Compare(r.last, last) > 0) {
+			last = r.last
+		}
+	}
+	if first == nil || bytes.Compare(out.first, first) < 0 || bytes.Compare(out.last, last) > 0 {
+		panic("lsm: a merge's output lies outside its inputs")
+	}
 }
 
 // Install swaps the compaction's result in for its inputs, which views opened before keep reading.
@@ -286,6 +350,9 @@ func (t *Tree) Install(c *Compaction) error {
 	for _, r := range c.inputs {
 		r.held = false
 	}
+	if c.err != nil {
+		return c.err
+	}
 	if c.out == nil {
 		return ErrStale
 	}
@@ -295,10 +362,15 @@ func (t *Tree) Install(c *Compaction) error {
 	}
 	runs := make([]*run, 0, len(t.runs)-len(c.inputs)+1)
 	runs = append(runs, t.runs[:i]...)
-	if len(c.out.blocks)+len(c.out.frags) > 0 {
+	keep := len(c.out.blocks)+len(c.out.frags) > 0
+	if keep && !t.plant.installOldest {
 		runs = append(runs, c.out)
 	}
 	t.runs = append(runs, t.runs[i+len(c.inputs):]...)
+	if keep && t.plant.installOldest {
+		t.runs = append(t.runs, c.out)
+	}
+	t.checkRuns()
 	return nil
 }
 

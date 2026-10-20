@@ -11,7 +11,10 @@ GOVULNCHECK=golang.org/x/vuln/cmd/govulncheck@v1.9.0
 GO_LICENSES=github.com/google/go-licenses/v2@v2.0.1
 ALLOWED_LICENSES=Apache-2.0,MIT,BSD-2-Clause,BSD-3-Clause,ISC,Zlib,CC0-1.0,Unicode-3.0
 
-mapfile -t files < <(git ls-files --cached --others --exclude-standard '*.go' ':!:spikes/**' ':!:studies/**')
+files=()
+while IFS= read -r f; do
+	files+=("$f")
+done < <(git ls-files --cached --others --exclude-standard '*.go' ':!:spikes/**' ':!:studies/**')
 if [ ${#files[@]} -eq 0 ]; then
 	echo "no Go files outside spikes/ and studies/; nothing to lint"
 	exit 0

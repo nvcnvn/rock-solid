@@ -14,17 +14,22 @@ const restartInterval = 16
 
 const emptyBlockSize = 8
 
+// blockWriter builds a block; with record on it also keeps each entry added, a uvarint-prefixed
+// key then value, in taken for the flush's decode check.
 type blockWriter struct {
-	buf      []byte
-	restarts []uint32
-	prev     []byte
-	n        int
+	buf        []byte
+	restarts   []uint32
+	prev       []byte
+	n          int
+	record     bool
+	taken      []byte
+	skipSecond bool
 }
 
 // reset starts a block in buf, which must have the capacity of every entry added to it, since
 // the writer never grows it.
 func (w *blockWriter) reset(buf []byte) {
-	w.buf, w.restarts, w.prev, w.n = buf[:0], w.restarts[:0], w.prev[:0], 0
+	w.buf, w.restarts, w.prev, w.n, w.taken = buf[:0], w.restarts[:0], w.prev[:0], 0, w.taken[:0]
 }
 
 func (w *blockWriter) shared(k []byte) int {
@@ -50,6 +55,14 @@ func (w *blockWriter) sizeWith(k []byte, vlen int) int {
 }
 
 func (w *blockWriter) add(k, v []byte) {
+	if w.record {
+		w.taken = append(binary.AppendUvarint(w.taken, uint64(len(k))), k...)
+		w.taken = append(binary.AppendUvarint(w.taken, uint64(len(v))), v...)
+		if w.skipSecond && w.n == 1 {
+			w.n++
+			return
+		}
+	}
 	s := w.shared(k)
 	if w.n%restartInterval == 0 {
 		w.restarts = append(w.restarts, uint32(len(w.buf)))

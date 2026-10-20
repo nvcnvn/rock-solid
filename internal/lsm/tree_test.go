@@ -316,7 +316,10 @@ func TestEmptyTreeWritesNoRun(t *testing.T) {
 // refused until the first is durable, and the heap grows only by the run.
 func TestFlushPeakMemory(t *testing.T) {
 	const maxPiece = 4096
-	tr := newTree(t, maxPiece)
+	tr, err := New(Config{MaxPiece: maxPiece})
+	if err != nil {
+		t.Fatal(err)
+	}
 	fileModel(t, tr, 2000, 3)
 	frozenPages := tr.pg.inUse
 	if froze, err := tr.BeginFlush(); !froze || err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"math"
 
+	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
@@ -64,10 +65,15 @@ func RootRefs(root []byte, refs []disklog.BlobRef) ([]disklog.BlobRef, error) {
 // run is an immutable sorted run held in memory as the blocks of its pieces, empty blocks left
 // out: entry blocks, then fragment blocks. Each block's first key, stored whole, is its fence
 // pointer. Its bounds span its entries and fragments, so a run holding only fragments is searched.
+// sums holds each block's CRC32C, entry blocks then fragment blocks, since runs are never read
+// back from disk.
 type run struct {
 	seq     uint64
 	blocks  blockList
 	frags   blockList
+	sums    []uint32
+	entries int
+	nfrags  int
 	bounded bool
 	first   []byte
 	last    []byte
@@ -82,14 +88,42 @@ type blockList [][]byte
 func (r *run) durable() bool         { return len(r.pieces) > 0 }
 func (r *run) root() disklog.BlobRef { return r.pieces[len(r.pieces)-1] }
 
-func (r *run) addBlock(b []byte) {
+func (r *run) addBlock(b []byte, n int) {
 	r.blocks = append(r.blocks, b)
+	r.entries += n
 	r.bytes += len(b)
 }
 
-func (r *run) addFrag(b []byte) {
+func (r *run) addFrag(b []byte, n int) {
 	r.frags = append(r.frags, b)
+	r.nfrags += n
 	r.bytes += len(b)
+}
+
+// checksum sets sums from the run's blocks.
+func (r *run) checksum() {
+	r.sums = r.sums[:0]
+	for _, b := range r.blocks {
+		r.sums = append(r.sums, core.CRC32C(b))
+	}
+	for _, b := range r.frags {
+		r.sums = append(r.sums, core.CRC32C(b))
+	}
+}
+
+// intact reports whether every block still has the checksum it was added with.
+func (r *run) intact() bool {
+	for i, b := range r.blocks {
+		if core.CRC32C(b) != r.sums[i] {
+			return false
+		}
+	}
+	for i, b := range r.frags {
+		if core.CRC32C(b) != r.sums[len(r.blocks)+i] {
+			return false
+		}
+	}
+	return true
 }
 
 // setBounds sets the run's first key, its smallest key or fragment start, and its last, its
@@ -177,12 +211,15 @@ func (bl blockList) get(it *blockIter, k []byte) ([]byte, bool) {
 	return it.val, true
 }
 
-// runIter walks a run's entry or fragment blocks; searches counts its binary searches.
+// runIter walks a run's entry or fragment blocks; searches counts its binary searches. With sums,
+// moving forward into a block whose checksum fails ends the walk and sets bad.
 type runIter struct {
 	bl       blockList
 	b        int
 	it       blockIter
 	searches int
+	sums     []uint32
+	bad      bool
 }
 
 // forwardSteps is how many entries seekForward steps over before it searches instead.
@@ -226,9 +263,8 @@ func (ri *runIter) seekForward(k []byte) bool {
 		return false
 	}
 	ri.searches++
-	if b := max(ri.bl.blockFrom(from, k, false), from); b != ri.b {
-		ri.b = b
-		ri.it.init(ri.bl[b])
+	if b := max(ri.bl.blockFrom(from, k, false), from); b != ri.b && !ri.enter(b) {
+		return false
 	}
 	if ri.it.seekGE(k) {
 		return true
@@ -248,12 +284,24 @@ func (ri *runIter) next() bool {
 
 func (ri *runIter) nextBlock() bool {
 	for ri.b++; ri.b < len(ri.bl); ri.b++ {
-		ri.it.init(ri.bl[ri.b])
+		if !ri.enter(ri.b) {
+			return false
+		}
 		if ri.it.first() {
 			return true
 		}
 	}
 	return false
+}
+
+func (ri *runIter) enter(b int) bool {
+	if ri.sums != nil && core.CRC32C(ri.bl[b]) != ri.sums[b] {
+		ri.b, ri.bad = len(ri.bl), true
+		return false
+	}
+	ri.b = b
+	ri.it.init(ri.bl[b])
+	return true
 }
 
 func (ri *runIter) floor(k []byte, strict bool) bool {
@@ -267,12 +315,14 @@ func (ri *runIter) floor(k []byte, strict bool) bool {
 }
 
 // fillBlock adds entries from src to w while the finished block stays within limit bytes,
-// leaving out each removal that a fragment of src covers or no run in older holds the key of,
-// since it has nothing to hide. It reports whether src ran out.
+// leaving out each entry a fragment hides and each removal that a fragment of src covers or no run
+// in older holds the key of, since it has nothing to hide. It counts what it leaves out in
+// src.dropped and reports whether src ran out.
 func fillBlock(w *blockWriter, src *iterState, limit int, older []runIter) bool {
 	for ; src.valid(); src.next() {
 		k, v := src.key(), src.value()
-		if v[0] == kindDel && (src.covered(k) || !holds(older, k)) {
+		if src.hidden() || v[0] == kindDel && (src.covered(k) || !holds(older, k)) {
+			src.dropped++
 			continue
 		}
 		if w.sizeWith(k, len(v)) > limit {
@@ -292,6 +342,7 @@ func fillFragBlock(w *blockWriter, src *iterState, limit int, older []runIter) b
 		}
 		w.add(src.ulo, src.uhi)
 		src.uok = false
+		src.fragsDropped += src.united - 1
 	}
 	return true
 }
@@ -315,12 +366,23 @@ func heldIn(older []runIter, lo, hi []byte) bool {
 	return false
 }
 
+// runIters walks the entry blocks of runs, checking each block's checksum as it enters it.
 func runIters(runs []*run) []runIter {
 	its := make([]runIter, len(runs))
 	for i, r := range runs {
 		its[i].init(r.blocks)
+		its[i].sums = r.sums[:len(r.blocks)]
 	}
 	return its
+}
+
+func anyBad(its []runIter) bool {
+	for i := range its {
+		if its[i].bad {
+			return true
+		}
+	}
+	return false
 }
 
 // writePiece writes into dst a piece of block, of the given kind, which already sits at

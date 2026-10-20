@@ -12,7 +12,7 @@ import (
 
 func newTree(t testing.TB, maxPiece int) *Tree {
 	t.Helper()
-	tr, err := New(Config{MaxPiece: maxPiece})
+	tr, err := New(Config{MaxPiece: maxPiece, Check: true})
 	if err != nil {
 		t.Fatal(err)
 	}

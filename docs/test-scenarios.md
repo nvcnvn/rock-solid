@@ -143,7 +143,8 @@ finding is a `// want` line with its message, and a package with none must repor
   back as the data's checksum, and a stored value+1 does not.
 - Continuing a finished CRC over the rest equals the one-shot CRC of a 4,096-byte payload (byte i =
   i*31 mod 256) for split points 0, 1, 7, 16, 63, 64, 511, 2048, 4095, 4096.
-- Benchmarks: the CRC32C of one 4 KiB block, whose bar is the 167 ns the design relies on.
+- Benchmarks: the CRC32C of one 4 KiB block, whose bar is the 167 ns the design relies on on
+  x86-64, and 359 ns on arm64 (an Apple M4 Pro).
 
 ## Lease clocks in the context
 
@@ -957,16 +958,23 @@ Always on (release builds too), each failure an error, never a panic:
 | A flush's run holds one range-removal fragment fewer | fragment count on flush | the flush fails, as above |
 | A merge's output plus what it dropped is one entry short of its inputs | entry count on merge | the merge fails, nothing installed, the index rebuilt from the log |
 | A merge's output plus what it dropped is one fragment short of its inputs | fragment count on merge | the merge fails, as above |
-| One bit flipped in an in-memory piece of an input run | CRC32C of the piece, checked before the merge reads it | the next merge reading it fails, as above |
+| One bit flipped in an in-memory piece of an input run, in an entry or a fragment block | CRC32C of the piece, checked before the merge reads it | the next merge reading it fails, as above |
+| One bit flipped in a piece of an older run that a merge reads to decide whether to keep a removal | CRC32C of the piece, checked as the merge enters it | the merge fails, as above |
+| One bit flipped in a merge's output before a flush writes it to the log | CRC32C of the piece, checked as the flush writes it | the flush fails, as above, and the log never holds the flipped block under a valid checksum |
 | One bit flipped in an in-memory piece no merge reads | nothing until a merge reads it | reads go on; the flip is caught by the first merge that reads the piece |
 
-- The rebuilt index equals the oracle's, and the disk's other indexes serve throughout. A
-  MetaStore shard replica catches up from a Raft snapshot instead (phase 4).
+- A failed check is `ErrCheck` from `NextPiece` or `Install`; the rebuild that follows is the
+  store's (Single-node ChunkStore). A MetaStore shard replica catches up from a Raft snapshot
+  instead (phase 4).
 - A check that fails in step k of a merge whose earlier steps are installed rebuilds the index from
   the log like any failed check (with Merge steps).
-- The CRC32C is kept per piece in memory, 4 bytes per piece, and costs 167 ns per 4 KiB merged: a
-  benchmark of a merge of four 1 MiB runs costs at most 5.1% more than the same merge without the
-  check (4.8% in the [metamorphic testing spike](../spikes/lsm-study-testing/)'s T6), 0 allocations.
+- The CRC32C is kept per piece in memory, 4 bytes per piece, and checking a run's checksums
+  allocates nothing. `BenchmarkMergeChecksums` merges four runs of the
+  [metamorphic testing spike](../spikes/lsm-study-testing/)'s T6 workload (26,214 random 24-byte
+  keys with 12-byte values each, 64 KiB pieces) with and without checking the inputs' checksums
+  and computing the output's. On an arm64 Mac with Go 1.27, where CRC32C runs at 359 ns per 4 KiB,
+  the two passes cost 12% (7.04 against 6.27 ms); the spike timed one pass at 4.8% of its own,
+  slower merge.
 
 Behind `Config.Check` (tests and simulator on, release off), each failure a panic in the flush or
 merge that made it:
@@ -1251,6 +1259,9 @@ Events from the log:
   the caller sees for an in-doubt write.
 - `CheckpointFailed`: the index keeps its frozen memtable, and the next checkpoint writes it
   again from its first piece (the "LSM tree" scenario, through the store).
+- A flush or merge that fails a run check (`lsm.ErrCheck`, see Run checks): the store rebuilds
+  that index from the log, the rebuilt index equals the oracle's, and the disk's other indexes
+  serve throughout.
 - The store hands the log one run piece at a time, each once the one before is durable: the trace
   never shows two pieces of one run in flight.
 - `Flush(cs)`: completes once every write to cs acknowledged before it is durable; with nothing

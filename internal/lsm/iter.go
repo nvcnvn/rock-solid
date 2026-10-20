@@ -196,26 +196,32 @@ func (st *state) sources(srcs []source) []source {
 
 // iterState merges sources in key order; among equal keys the newest source's entry wins, and a
 // fragment hides the older sources' entries in it. probes counts the searches of a layer's
-// entries, steps a floor's rounds.
+// entries, steps a floor's rounds. With keepDel, as a flush or merge reads, it leaves hidden
+// entries for the caller to drop one by one, so that dropped, with the older entries each key
+// shadows, and fragsDropped account for every entry and fragment of the sources.
 type iterState struct {
-	srcs    []source
-	cur     int
-	keepDel bool
-	ranges  bool
-	bounded bool
-	upper   []byte
-	prev    []byte
-	lo      []byte
-	ulo     []byte
-	uhi     []byte
-	uok     bool
-	probes  int
-	steps   int
+	srcs         []source
+	cur          int
+	keepDel      bool
+	ranges       bool
+	bounded      bool
+	upper        []byte
+	prev         []byte
+	lo           []byte
+	ulo          []byte
+	uhi          []byte
+	uok          bool
+	united       int
+	dropped      int
+	fragsDropped int
+	probes       int
+	steps        int
 }
 
 func (it *iterState) reset(st *state, keepDel bool) {
 	it.srcs = st.sources(it.srcs)
 	it.cur, it.keepDel, it.bounded, it.uok = -1, keepDel, false, false
+	it.dropped, it.fragsDropped = 0, 0
 	it.ranges = false
 	for i := range it.srcs {
 		it.ranges = it.ranges || it.srcs[i].frags
@@ -241,17 +247,23 @@ func (it *iterState) seek(k []byte) {
 }
 
 func (it *iterState) next() {
-	it.skip()
+	if n := it.skip(); it.keepDel {
+		it.dropped += n - 1
+	}
 	it.settle()
 }
 
-func (it *iterState) skip() {
+// skip moves every source at the current key past it and returns how many it moved.
+func (it *iterState) skip() int {
 	it.prev = append(it.prev[:0], it.key()...)
+	n := 0
 	for i := range it.srcs {
 		if s := &it.srcs[i]; s.ok && bytes.Equal(s.key(), it.prev) {
 			s.next()
+			n++
 		}
 	}
+	return n
 }
 
 func (it *iterState) settle() {
@@ -269,7 +281,7 @@ func (it *iterState) settle() {
 			it.cur = -1
 			return
 		}
-		if it.ranges && it.hideRange() {
+		if it.ranges && !it.keepDel && it.hideRange() {
 			continue
 		}
 		if it.keepDel || it.value()[0] != kindDel {
@@ -308,6 +320,23 @@ func (it *iterState) hideRange() bool {
 			}
 		}
 		return true
+	}
+	return false
+}
+
+// hidden reports whether a fragment of a source newer than the current one, or of the current
+// one when it hides its own entries, holds the current key.
+func (it *iterState) hidden() bool {
+	if !it.ranges {
+		return false
+	}
+	k := it.key()
+	for j := 0; j <= it.cur; j++ {
+		if s := &it.srcs[j]; s.frags && (j < it.cur || s.selfHide) {
+			if _, ok := s.fragCover(k); ok {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -351,7 +380,7 @@ func (it *iterState) firstFrag() int {
 }
 
 // nextFrag sets ulo and uhi to the next fragment of the union of the sources' fragments, those
-// that overlap or abut merged into one.
+// that overlap or abut merged into one, and united to how many it merged.
 func (it *iterState) nextFrag() bool {
 	b := it.firstFrag()
 	if b < 0 {
@@ -360,7 +389,7 @@ func (it *iterState) nextFrag() bool {
 	it.ulo = append(it.ulo[:0], it.srcs[b].fragStart()...)
 	it.uhi = append(it.uhi[:0], it.srcs[b].fragEnd()...)
 	it.srcs[b].fragNext()
-	for {
+	for it.united = 1; ; it.united++ {
 		b = it.firstFrag()
 		if b < 0 || bytes.Compare(it.srcs[b].fragStart(), it.uhi) > 0 {
 			return true
@@ -371,13 +400,15 @@ func (it *iterState) nextFrag() bool {
 }
 
 // pendingFrag reports whether a fragment of the union that a run in older holds a key in is
-// left, setting ulo and uhi to it.
+// left, setting ulo and uhi to it and counting the fragments it passes over in fragsDropped.
 func (it *iterState) pendingFrag(older []runIter) bool {
 	for !it.uok {
 		if !it.nextFrag() {
 			return false
 		}
-		it.uok = heldIn(older, it.ulo, it.uhi)
+		if it.uok = heldIn(older, it.ulo, it.uhi); !it.uok {
+			it.fragsDropped += it.united
+		}
 	}
 	return true
 }

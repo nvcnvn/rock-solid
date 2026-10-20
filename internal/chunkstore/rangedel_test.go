@@ -48,7 +48,7 @@ func applyBoth(t testing.TB, x, p *Index, ev *disklog.Event) {
 // keeps the entry and empties the live map; releasing frozen version v removes (…, v) .. (…, v+1);
 // releasing the absent version removes no keys.
 func TestRangeRemovalUses(t *testing.T) {
-	x, p := newIndexWith(t, lsm.Config{MaxPiece: 1 << 20}, false), newIndexWith(t, lsm.Config{MaxPiece: 1 << 20}, true)
+	x, p := newIndexWith(t, lsm.Config{MaxPiece: 1 << 20, Check: true}, false), newIndexWith(t, lsm.Config{MaxPiece: 1 << 20, Check: true}, true)
 	for i := range uint16(5) {
 		applyBoth(t, x, p, record(100+core.LBA(10*i), disklog.WriteEntry(1, chunk(7), 1+uint64(i), 2*i, 2)))
 	}
@@ -143,7 +143,7 @@ func TestReleaseAbsentVersion(t *testing.T) {
 // writes that follow have merged every run into one, where point removals step over the old
 // extents; a 1-block write then splits the new extent.
 func TestRewriteOver1024Extents(t *testing.T) {
-	cfg := lsm.Config{MaxPiece: replayMaxPiece, RunLimit: 1}
+	cfg := lsm.Config{MaxPiece: replayMaxPiece, RunLimit: 1, Check: true}
 	x, p := newIndexWith(t, cfg, false), newIndexWith(t, cfg, true)
 	sx, sp := &runStore{blobs: map[disklog.BlobRef][]byte{}}, &runStore{blobs: map[disklog.BlobRef][]byte{}}
 	lba := core.LBA(100)
@@ -212,7 +212,7 @@ func TestRangeRemovalsMatchPointRemovals(t *testing.T) {
 	const chunks = 4
 	for seed := range uint64(6) {
 		r := rand.New(rand.NewPCG(seed, 30))
-		cfg := lsm.Config{MaxPiece: replayMaxPiece}
+		cfg := lsm.Config{MaxPiece: replayMaxPiece, Check: true}
 		x, p := newIndexWith(t, cfg, false), newIndexWith(t, cfg, true)
 		sx, sp := &runStore{blobs: map[disklog.BlobRef][]byte{}}, &runStore{blobs: map[disklog.BlobRef][]byte{}}
 		var epoch, version uint64

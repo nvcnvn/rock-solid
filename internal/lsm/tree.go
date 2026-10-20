@@ -6,9 +6,11 @@ package lsm
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"slices"
 
+	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
@@ -40,6 +42,8 @@ var (
 	ErrStale = errors.New("lsm: compaction inputs changed")
 	// ErrEmptyRange reports a range removal whose start is not below its end.
 	ErrEmptyRange = errors.New("lsm: empty range")
+	// ErrCheck reports a flush or merge whose entry counts or the checksums of the runs it read do not add up.
+	ErrCheck = errors.New("lsm: run check failed")
 )
 
 // Config is a tree's settings.
@@ -48,6 +52,8 @@ type Config struct {
 	MaxPiece int
 	// RunLimit is the most runs before the newest merge whatever their sizes; 0 tunes it from the largest run.
 	RunLimit int
+	// Check decodes every piece a flush builds, checks a merge's output order and the run list's, and panics on a mismatch.
+	Check bool
 }
 
 // Tree is an LSM tree. Only its owner calls it; a compaction's Run alone may run elsewhere.
@@ -70,9 +76,13 @@ type Tree struct {
 
 // plants are bugs a test turns on to show that its checks catch them.
 type plants struct {
-	noCut       bool
-	dropFrags   bool
-	keepCovered bool
+	noCut         bool
+	dropFrags     bool
+	keepCovered   bool
+	skipEncoded   bool
+	repeatBlock   bool
+	installOldest bool
+	noSums        bool
 }
 
 type flush struct {
@@ -302,6 +312,7 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 	case w == fl.frozen:
 		bw := &fl.bw
 		bw.reset(buf[pieceHeader:])
+		bw.record, bw.skipSecond = t.cfg.Check, t.plant.skipEncoded
 		limit := t.cfg.MaxPiece - pieceOverhead
 		if !fl.entriesDone {
 			if fl.entriesDone = fillBlock(bw, &fl.src, limit, fl.older); fl.entriesDone {
@@ -314,6 +325,9 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 		}
 		last = fl.entriesDone && !fl.src.pendingFrag(fl.olderFrag)
 		if bw.n == 0 && len(w.blocks)+len(w.frags) == 0 && last {
+			if err := t.checkFlushCounts(w); err != nil {
+				return 0, false, err
+			}
 			fl.frozen, fl.write = nil, fl.write[:fl.cur]
 			t.finishWrite()
 			return 0, false, nil
@@ -325,9 +339,14 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 		switch {
 		case bw.n == 0:
 		case kind == fragBlock:
-			w.addFrag(bytes.Clone(block))
+			w.addFrag(bytes.Clone(block), bw.n)
 		default:
-			w.addBlock(bytes.Clone(block))
+			w.addBlock(bytes.Clone(block), bw.n)
+		}
+		if last {
+			if err := t.checkFlushCounts(w); err != nil {
+				return 0, false, err
+			}
 		}
 	case fl.next < len(w.blocks):
 		block, last = w.blocks[fl.next], fl.next == len(w.blocks)+len(w.frags)-1
@@ -336,9 +355,15 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 	default:
 		block, last = emptyBlock[:], true
 	}
+	if w != fl.frozen && fl.next < len(w.sums) && core.CRC32C(block) != w.sums[fl.next] {
+		return 0, false, ErrCheck
+	}
 	piece, root, err := writePiece(buf, block, kind, inPlace, last, w.seq, fl.refs, t.cfg.MaxPiece)
 	if err != nil {
 		return 0, false, err
+	}
+	if t.cfg.Check && w == fl.frozen {
+		checkPiece(piece, kind, w.seq, fl.bw.taken)
 	}
 	fl.next++
 	fl.inFlight, fl.isRoot = true, root
@@ -346,6 +371,64 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 }
 
 var emptyBlock = [emptyBlockSize]byte{4: 1}
+
+// checkFlushCounts fails the flush unless the run it wrote from the frozen memtable and what it
+// dropped hold as many entries and fragments as the memtable.
+func (t *Tree) checkFlushCounts(w *run) error {
+	fl := t.fl
+	if anyBad(fl.older) || anyBad(fl.olderFrag) ||
+		w.entries+fl.src.dropped != t.frozen.count || w.nfrags+fl.src.fragsDropped != t.frozen.frags {
+		return ErrCheck
+	}
+	return nil
+}
+
+// checkPiece panics unless piece decodes as a block of kind in run seq holding exactly the entries
+// in taken, each a uvarint-prefixed key then value.
+func checkPiece(piece []byte, kind byte, seq uint64, taken []byte) {
+	block, k, s, _, err := splitPiece(piece, nil)
+	if err != nil || k != kind || s != seq {
+		panic("lsm: a flush built a piece that does not decode")
+	}
+	n, _, ok := walkBlock(block, nil, false, kind == fragBlock)
+	if !ok {
+		panic("lsm: a flush built a block that does not decode")
+	}
+	var it blockIter
+	it.init(block)
+	for ok := it.first(); ok; ok = it.advance() {
+		var key, val []byte
+		key, taken = cutUvarint(taken)
+		val, taken = cutUvarint(taken)
+		if !bytes.Equal(it.key, key) || !bytes.Equal(it.val, val) {
+			panic("lsm: a flush built a block that differs from the entries it took")
+		}
+		n--
+	}
+	if n != 0 || len(taken) != 0 {
+		panic("lsm: a flush built a block that differs from the entries it took")
+	}
+}
+
+func cutUvarint(b []byte) ([]byte, []byte) {
+	l, n := binary.Uvarint(b)
+	if n <= 0 || uint64(len(b)-n) < l {
+		return nil, nil
+	}
+	return b[n : n+int(l)], b[n+int(l):]
+}
+
+// checkRuns panics, with Check on, unless the run list is newest first with no sequence number twice.
+func (t *Tree) checkRuns() {
+	if !t.cfg.Check {
+		return
+	}
+	for i := 1; i < len(t.runs); i++ {
+		if t.runs[i].seq >= t.runs[i-1].seq {
+			panic("lsm: run list out of sequence order")
+		}
+	}
+}
 
 // PieceDurable reports the piece NextPiece built last durable at ref.
 func (t *Tree) PieceDurable(ref disklog.BlobRef) error {
@@ -376,7 +459,9 @@ func (t *Tree) finishWrite() {
 	fl.written = true
 	if fl.frozen != nil {
 		fl.frozen.setBounds()
+		fl.frozen.checksum()
 		t.runs = append([]*run{fl.frozen}, t.runs...)
+		t.checkRuns()
 	}
 	if t.frozen != nil {
 		t.frozen.unref()
@@ -420,7 +505,7 @@ func (t *Tree) FlushFailed() []disklog.BlobRef {
 		return nil
 	}
 	if fl.frozen != nil {
-		fl.frozen.blocks, fl.frozen.frags, fl.frozen.bytes = nil, nil, 0
+		*fl.frozen = run{seq: fl.frozen.seq}
 	}
 	return slices.Clone(fl.refs)
 }
@@ -454,7 +539,7 @@ func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
 			}
 			end = e
 			if n > 0 {
-				r.addFrag(bytes.Clone(block))
+				r.addFrag(bytes.Clone(block), n)
 			}
 			continue
 		}
@@ -464,10 +549,11 @@ func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
 		}
 		last = l
 		if n > 0 {
-			r.addBlock(bytes.Clone(block))
+			r.addBlock(bytes.Clone(block), n)
 		}
 	}
 	r.setBounds()
+	r.checksum()
 	at, _ := slices.BinarySearchFunc(t.runs, seq, func(r *run, s uint64) int {
 		switch {
 		case r.seq > s:

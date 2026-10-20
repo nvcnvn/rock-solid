@@ -15,7 +15,7 @@ import (
 
 func newIndex(t testing.TB) *Index {
 	t.Helper()
-	tree, err := lsm.New(lsm.Config{MaxPiece: 1 << 20})
+	tree, err := lsm.New(lsm.Config{MaxPiece: 1 << 20, Check: true})
 	if err != nil {
 		t.Fatal(err)
 	}

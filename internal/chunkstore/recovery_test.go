@@ -81,7 +81,7 @@ func newNode(t *testing.T) *node {
 }
 
 func (n *node) newIndex() *Index {
-	tree, err := lsm.New(lsm.Config{MaxPiece: n.maxBlob})
+	tree, err := lsm.New(lsm.Config{MaxPiece: n.maxBlob, Check: true})
 	if err != nil {
 		n.t.Fatal(err)
 	}

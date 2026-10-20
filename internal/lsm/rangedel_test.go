@@ -190,11 +190,11 @@ func TestEmptyRangeRefused(t *testing.T) {
 }
 
 var rangeConfigs = []Config{
-	{MaxPiece: 4096},
-	{MaxPiece: 256},
-	{MaxPiece: 1 << 20},
-	{MaxPiece: 4096, RunLimit: 2},
-	{MaxPiece: 512, RunLimit: 1},
+	{MaxPiece: 4096, Check: true},
+	{MaxPiece: 256, Check: true},
+	{MaxPiece: 1 << 20, Check: true},
+	{MaxPiece: 4096, RunLimit: 2, Check: true},
+	{MaxPiece: 512, RunLimit: 1, Check: true},
 }
 
 // rangeModel runs the LSM runs spike's map-model test on one seed: 3,000 random puts, removals and
@@ -217,13 +217,12 @@ func rangeModel(t *testing.T, cfg Config, seed uint64, plant plants) string {
 	}
 	var view *View
 	var viewModel model
-	merge := func(c *Compaction) {
+	merge := func(c *Compaction) error {
 		c.Run()
-		if err := tr.Install(c); err != nil {
-			t.Fatal(err)
-		}
+		return tr.Install(c)
 	}
 	for step := range 3000 {
+		var err error
 		switch x := r.IntN(100); {
 		case x < 55:
 			put(t, tr, m, key(r.IntN(300)), fmt.Sprint("v", step))
@@ -236,17 +235,20 @@ func rangeModel(t *testing.T, cfg Config, seed uint64, plant plants) string {
 			f.checkpoint(t, tr, nil)
 		case x < 87:
 			if c := tr.PickCompaction(); c != nil {
-				merge(c)
+				err = merge(c)
 			}
 		case x < 89:
 			if n := len(tr.runs); n >= 2 {
 				i := r.IntN(n - 1)
-				merge(tr.compaction(i, i+2+r.IntN(n-i-1), ruleNone))
+				err = merge(tr.compaction(i, i+2+r.IntN(n-i-1), ruleNone))
 			}
 		case x < 90:
 			if view == nil {
 				view, viewModel = tr.View(), m.clone()
 			}
+		}
+		if err != nil {
+			return fmt.Sprintf("step %d: merge: %v", step, err)
 		}
 		if step%100 == 99 {
 			if !plant.noCut {
