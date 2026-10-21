@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"cmp"
+	"encoding/binary"
 	"fmt"
 	"maps"
 	"math/rand/v2"
@@ -70,7 +71,7 @@ func (m blockModel) Apply(ev disklog.Event) {
 			}
 		case disklog.EntryFreeze:
 			ch := m.chunk(e.Pool, e.Chunk)
-			if slices.ContainsFunc(ch.frozen, func(f modelFrozen) bool { return f.version == e.Version }) {
+			if ch.frozenIndex(e.Version) >= 0 {
 				continue
 			}
 			f := modelFrozen{version: e.Version, epoch: e.Epoch, blocks: map[uint16]blockRead{}}
@@ -99,6 +100,10 @@ func (m blockModel) Clone() blockModel {
 		out[k] = &c
 	}
 	return out
+}
+
+func (ch *modelChunk) frozenIndex(version uint64) int {
+	return slices.IndexFunc(ch.frozen, func(f modelFrozen) bool { return f.version == version })
 }
 
 // frozenAt is the freeze a snapshot at epoch reads, as Index.FrozenAt finds it.
@@ -135,7 +140,7 @@ func extentRead(e Extent, ok bool, b uint16) blockRead {
 	return blockRead{ok: true, version: e.Version, lba: e.BlockLBA(b), header: e.Header}
 }
 
-// workloadChunks is every chunk the recovery workload writes.
+// workloadChunks is every chunk the recovery workload writes or freezes.
 func workloadChunks() []core.ChunkID {
 	var cs []core.ChunkID
 	for inode := range 3 {
@@ -143,7 +148,31 @@ func workloadChunks() []core.ChunkID {
 			cs = append(cs, core.ChunkID{Volume: 1, Inode: core.InodeID(1 + inode), Index: uint32(i)})
 		}
 	}
-	return cs
+	return append(cs, core.ChunkID{Volume: 1, Inode: 4, Index: 0}, core.ChunkID{Volume: 1, Inode: 4, Index: 1})
+}
+
+// outsideWorkload names a chunk that x or m holds and the workload neither writes nor freezes.
+func outsideWorkload(x *Index, m blockModel) error {
+	known := map[chunkRef]bool{}
+	for _, c := range workloadChunks() {
+		known[chunkRef{1, c}] = true
+	}
+	for k := range m {
+		if !known[k] {
+			return fmt.Errorf("the model holds chunk %v of pool %d, which the workload does not touch", k.chunk, k.pool)
+		}
+	}
+	for _, kv := range dumpIndex(x) {
+		k := []byte(kv[0])
+		pool := core.PoolID(binary.BigEndian.Uint32(k))
+		if pool == RecordPool {
+			continue
+		}
+		if c := core.ChunkIDFromBytes([core.ChunkIDSize]byte(k[12:chunkKeySize])); !known[chunkRef{pool, c}] {
+			return fmt.Errorf("the index holds chunk %v of pool %d, which the workload does not touch", c, pool)
+		}
+	}
+	return nil
 }
 
 // oracleDiff names the first read where x differs from the model m: a chunk's entry, the version
@@ -151,6 +180,9 @@ func workloadChunks() []core.ChunkID {
 // at that version's epochs once the versions match, without its FrozenAt per block.
 func oracleDiff(x *Index, m blockModel) error {
 	if err := x.Check(); err != nil {
+		return err
+	}
+	if err := outsideWorkload(x, m); err != nil {
 		return err
 	}
 	for _, c := range workloadChunks() {
@@ -243,6 +275,9 @@ func (n *node) noteWrite(a core.Action) {
 // oracleStats counts what the crash cycles reached.
 type oracleStats struct {
 	recoveries, kept, crashedRecoveries, erasedThenCrashed, withRuns, withFreezes int
+	// absent counts recoveries with a chunk frozen absent, writtenAfterAbsent those with one
+	// written after it.
+	absent, writtenAfterAbsent int
 }
 
 // crashCycles runs the workload on a node crashed at random actions six times, each unflushed
@@ -300,8 +335,16 @@ func crashCycles(t *testing.T, seed uint64, replayLate bool, st *oracleStats) er
 		if n.ix.Tree().Runs() > 0 {
 			st.withRuns++
 		}
-		if slices.ContainsFunc(slices.Collect(maps.Values(n.want)), func(ch *modelChunk) bool { return len(ch.frozen) > 0 }) {
+		chunks := slices.Collect(maps.Values(n.want))
+		if slices.ContainsFunc(chunks, func(ch *modelChunk) bool { return len(ch.frozen) > 0 }) {
 			st.withFreezes++
+		}
+		absent := func(ch *modelChunk) bool { return ch.frozenIndex(0) >= 0 }
+		if slices.ContainsFunc(chunks, absent) {
+			st.absent++
+		}
+		if slices.ContainsFunc(chunks, func(ch *modelChunk) bool { return absent(ch) && ch.version != 0 }) {
+			st.writtenAfterAbsent++
 		}
 	}
 	return nil
@@ -320,7 +363,7 @@ func TestRecoveriesMatchTheCrashOracle(t *testing.T) {
 		}
 	}
 	t.Logf("%+v", st)
-	if st.kept == 0 || st.erasedThenCrashed == 0 || st.withRuns < st.recoveries/2 || st.withFreezes == 0 {
+	if st.kept == 0 || st.erasedThenCrashed == 0 || st.withRuns < st.recoveries/2 || st.withFreezes == 0 || st.absent == 0 || st.writtenAfterAbsent == 0 {
 		t.Fatalf("the crashes missed a case: %+v", st)
 	}
 }

@@ -369,6 +369,7 @@ type workload struct {
 	epoch       uint64
 	compactions int
 	freezes     int
+	written     map[core.ChunkID]bool
 }
 
 func (w *workload) run(n *node, ops int) {
@@ -400,15 +401,25 @@ func (w *workload) run(n *node, ops int) {
 	}
 }
 
+// item is a write, a punch, or a freeze: of a chunk's version, or of version 0, the absent chunk,
+// for a chunk the workload has not written, among them two chunks it never writes.
 func (w *workload) item(n *node) disklog.Item {
+	if w.r.IntN(32) == 0 {
+		return w.freeze(core.ChunkID{Volume: 1, Inode: 4, Index: uint32(w.r.IntN(2))}, 0)
+	}
 	c := core.ChunkID{Volume: 1, Inode: core.InodeID(1 + w.r.IntN(3)), Index: uint32(w.r.IntN(4))}
 	if w.r.IntN(8) == 0 {
 		if ch, ok := n.ix.Chunk(1, c); ok {
-			w.epoch++
-			w.freezes++
-			return disklog.Item{Entry: disklog.FreezeEntry(1, c, ch.Version, w.epoch)}
+			return w.freeze(c, ch.Version)
+		}
+		if !w.written[c] {
+			return w.freeze(c, 0)
 		}
 	}
+	if w.written == nil {
+		w.written = map[core.ChunkID]bool{}
+	}
+	w.written[c] = true
 	w.version++
 	first := uint16(w.r.IntN(core.BlocksPerChunk))
 	count := uint16(1 + w.r.IntN(min(6, core.BlocksPerChunk-int(first))))
@@ -427,6 +438,12 @@ func (w *workload) item(n *node) disklog.Item {
 		b[i] = byte(w.version)
 	}
 	return disklog.Item{Entry: disklog.WriteEntry(1, c, w.version, first, count), Buf: buf}
+}
+
+func (w *workload) freeze(c core.ChunkID, version uint64) disklog.Item {
+	w.epoch++
+	w.freezes++
+	return disklog.Item{Entry: disklog.FreezeEntry(1, c, version, w.epoch)}
 }
 
 func (n *node) submit(it disklog.Item) {

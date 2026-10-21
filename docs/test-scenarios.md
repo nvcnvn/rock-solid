@@ -849,7 +849,9 @@ Edge and negative cases:
 - [property] On a 1 GiB simulated disk (16-block records, a checkpoint every 96 blocks of records,
   the decode check on), seeds 0-3, three generations of 150 rounds of 1-4 items over 12 chunks
   (writes of 1-6 blocks, a whole-chunk punch one time in ten, a partial punch two in ten, a freeze
-  of a written chunk one in eight), with checkpoints and compactions: after each generation a
+  one in eight: of the chunk's version, or of version 0, absent, for a chunk not yet written), plus
+  a freeze of version 0 one item in 32 of two chunks never written, with checkpoints and
+  compactions: after each generation a
   rebuild from every record header, and recovery from the manifest's runs plus replay, both equal
   the live index and pass its check. Every seed writes multi-piece runs, carries runs, compacts and
   freezes.
@@ -2302,12 +2304,15 @@ plain block model: per chunk its entry, and block by block its live map and froz
   `TestCrashBetweenRunAndManifest` and the property below), the recovered LSN must lie in the
   oracle's window, and the recovered `Index` must read as the model at that LSN: each chunk's
   entry, the frozen version `FrozenAt` gives at every epoch up to one past the newest freeze, and
-  every block of every chunk the workload writes, live and in every frozen version. `Check` must
-  pass too.
+  every block of every chunk the workload writes or freezes, live and in every frozen version.
+  Neither the index nor the model may hold another chunk, and `Check` must pass too.
 - [property] `TestRecoveriesMatchTheCrashOracle`: seeds 0-7, six crashes each at a random write or
   flush, each unflushed block landing at random, with checkpoints, compactions and freezes between
-  them. The run must reach a recovery that keeps a record past the acknowledged LSN, recoveries
-  that load runs and frozen maps, and a crashed recovery that had erased records.
+  them, absent freezes among them. The run must reach a recovery that keeps a record past the
+  acknowledged LSN, recoveries that load runs and frozen maps, recoveries holding a chunk frozen
+  absent and one written after its absent freeze, and a crashed recovery that had erased records.
+  A snapshot lookup that misses the absent version (`Index.frozen` skipping version 0's marker)
+  trips the oracle at the first recovery.
 - Crash during recovery, then recovery again: every other recovery of the property is crashed
   before its final flush, with its erasures landing at random. The oracle's window is unchanged
   by it, and the recovery run again reports the LSN the crashed one had found.
