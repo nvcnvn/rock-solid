@@ -218,6 +218,7 @@ type Store struct {
 	apply   disklog.Event
 	entry   [1]disklog.Entry
 	payload [1]uint64
+	changes []LiveChange
 
 	plant plants
 }
@@ -281,6 +282,9 @@ func (s *Store) recover(ctx *core.Context, diskBlocks uint64, mode disklog.Mode)
 	return nil
 }
 
+// resume serves on log. A recovered index holds every record, so the log's usage table takes
+// each chunk segment's live blocks from the index's record counts, and the index reports every
+// change to them from then on.
 func (s *Store) resume(log *disklog.Log) error {
 	s.log, s.rec, s.sb, s.maxWrite = log, nil, log.Superblock(), log.MaxWriteBlocks()
 	if s.ix == nil {
@@ -289,7 +293,12 @@ func (s *Store) resume(log *disklog.Log) error {
 			return err
 		}
 		s.ix = ix
+	} else {
+		live := make([]uint32, s.sb.SegmentCount)
+		s.ix.SegmentLive(s.sb.SegmentBlocks, live)
+		log.Recount(live)
 	}
+	s.ix.TrackLive(true)
 	s.phase, s.checkpointing, s.inPiece, s.piecesOut, s.pieceWait = serving, false, false, 0, false
 	return nil
 }
@@ -978,12 +987,14 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 			s.stop(ctx, ErrInDoubt, out)
 		}
 	case disklog.CheckpointDone:
-		if _, err := s.ix.Tree().CheckpointDone(); err != nil {
+		dead, err := s.ix.Tree().CheckpointDone()
+		if err != nil {
 			panic("chunkstore: checkpoint done with no flush running: " + err.Error())
 		}
+		s.piecesDead(dead)
 		s.checkpointing = false
 	case disklog.CheckpointFailed:
-		s.ix.Tree().FlushFailed()
+		s.piecesDead(s.ix.Tree().FlushFailed())
 		s.checkpointing, s.inPiece, s.piecesOut, s.retryAfter, s.pieceWait = false, false, 0, true, false
 	case disklog.ManifestLoaded:
 		s.manifestLoaded(ctx)
@@ -1139,6 +1150,24 @@ func (s *Store) mapItem(it *item) {
 	s.apply = disklog.Event{Kind: disklog.Durable, LSN: it.lsn, LBA: it.lba, HeaderBlocks: it.headerBlocks, Entries: s.entry[:], Payloads: s.payload[:]}
 	if err := s.ix.Apply(&s.apply); err != nil {
 		panic("chunkstore: the index refused the store's own entry: " + err.Error())
+	}
+	s.reportLive()
+}
+
+// reportLive hands the log's usage table the changes to record counts the index made.
+func (s *Store) reportLive() {
+	s.changes = s.ix.TakeChanges(s.changes[:0])
+	for _, c := range s.changes {
+		if err := s.log.AddLive(uint32(uint64(c.Header)/uint64(s.sb.SegmentBlocks)), int(c.Delta)); err != nil {
+			panic("chunkstore: the usage table refused a record count change: " + err.Error())
+		}
+	}
+}
+
+// piecesDead hands the log the run pieces the index no longer names.
+func (s *Store) piecesDead(refs []disklog.BlobRef) {
+	if err := s.log.PiecesDead(refs); err != nil {
+		panic("chunkstore: the log does not hold a piece the index wrote: " + err.Error())
 	}
 }
 

@@ -193,6 +193,7 @@ type Recovery struct {
 	scratch   []Entry
 
 	segs   []segInfo
+	pieces pieceSet
 	follow []followSeg
 	fi     int
 	scan   []uint32
@@ -204,7 +205,7 @@ type Recovery struct {
 	hasManifest bool
 	nextSeq     uint64
 	chain       []chainEntry
-	pieces      [][]BlobRef
+	chainPieces [][]BlobRef
 	mi, pi      int
 	pieceStep   bool
 	rest        []byte
@@ -472,6 +473,7 @@ func (r *Recovery) startHeaders(ctx *core.Context, out *Output) {
 	}
 	r.phase = recHeaders
 	r.segs = make([]segInfo, r.sb.SegmentCount)
+	r.pieces = newPieceSet(r.sb.SegmentCount)
 	r.nextSeg = 1
 	for slot := range r.hdrBufs {
 		r.readHeader(slot, out)
@@ -800,7 +802,16 @@ func (r *Recovery) readBlob(ctx *core.Context, ref BlobRef, out *Output) ([]byte
 	if d.Record.LSN != ref.LSN || int(ref.Entry) >= len(d.Entries) || d.Entries[ref.Entry].Kind != EntryBlob {
 		return nil, 0, readBad
 	}
+	r.keepPiece(ref, &d)
 	return d.Payload(int(ref.Entry)), d.Entries[ref.Entry].BlobKind, readOK
+}
+
+// keepPiece counts a blob recovery read as live: a piece of the loaded manifest, or one its
+// owner read for the runs that manifest names.
+func (r *Recovery) keepPiece(ref BlobRef, d *DecodedRecord) {
+	e := &d.Entries[ref.Entry]
+	lo, hi := spanOf(ref.Block, d.Layout.HeaderBlocks, PayloadOffset(d.Entries, int(ref.Entry)), e.Length)
+	r.pieces.add(ref, lo, hi)
 }
 
 // pumpManifest reads the newest manifest a segment header names: its last piece, then the
@@ -828,14 +839,15 @@ func (r *Recovery) pumpManifest(ctx *core.Context, out *Output) {
 			r.fail(ctx, corrupt, out)
 			return
 		}
-		r.pieces, r.rest, r.pieceStep = pieces, slices.Clone(rest), true
+		r.chainPieces, r.rest, r.pieceStep = pieces, slices.Clone(rest), true
 		r.container = BlobRef{Segment: pos.Segment, Block: pos.Block, LSN: pos.LSN, Entry: uint16(i)}
+		r.keepPiece(r.container, &d)
 		r.bodies, r.chain = make([][]byte, len(pieces)), make([]chainEntry, len(pieces))
 		r.chain[len(pieces)-1].size = uint64(len(d.Payload(i)))
 	}
-	for ; r.mi < len(r.pieces); r.mi, r.pi = r.mi+1, 0 {
-		list := r.pieces[r.mi]
-		newest := r.mi == len(r.pieces)-1
+	for ; r.mi < len(r.chainPieces); r.mi, r.pi = r.mi+1, 0 {
+		list := r.chainPieces[r.mi]
+		newest := r.mi == len(r.chainPieces)-1
 		for r.pi < len(list) {
 			b, kind, st := r.readBlob(ctx, list[r.pi], out)
 			if st == readPending {
@@ -872,7 +884,7 @@ func (r *Recovery) pumpManifest(ctx *core.Context, out *Output) {
 		return
 	}
 	r.manifest, r.hasManifest, r.nextSeq = m, true, m.NextSeq
-	r.bodies, r.rest, r.pieces = nil, nil, nil
+	r.bodies, r.rest, r.chainPieces = nil, nil, nil
 	r.startFollow(ctx, out)
 }
 
@@ -1269,6 +1281,7 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 		l.chain, l.state = r.chain, r.manifest.Indexes
 		l.live = []liveChain{{pos: r.manifestPos, entries: r.chain}}
 	}
+	l.pieces, l.namedLSN = r.pieces, r.manifestPos.LSN
 	for s := uint32(1); s < r.sb.SegmentCount; s++ {
 		info := &r.segs[s]
 		switch info.state {
@@ -1276,10 +1289,16 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 			l.free[s/64] |= 1 << (s % 64)
 		case segUsed, segQuarantined:
 			l.usage[s] = SegmentUsage{State: SegmentUsed, Live: info.live, Newest: info.newest}
+			l.streams[s] = streamOfLane(info.lane)
 			if info.state == segQuarantined {
 				l.usage[s].State = SegmentQuarantined
 			}
 		}
+	}
+	if r.mode == ModeRebuild && r.hasManifest {
+		l.pinnedLSN = r.manifestPos.LSN
+	} else {
+		l.recount(nil, false)
 	}
 	table := r.manifest.Segments
 	for s := uint32(1); s < r.sb.SegmentCount; s++ {

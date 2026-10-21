@@ -1879,8 +1879,21 @@ on the 1 GiB disk one capacity is 262,144 blocks):
   its replay points), or moves not yet applied, is never a victim. A used segment
   with no live block (one that rounds recovery dropped left empty) is freed without copying
   anything.
-- Live counts come from the usage table. Open: how the index's per-record counts reach the
-  table's per-segment live counts.
+- Live counts come from the usage table. The owner hands the log every change to a record's
+  count past the blocks it wrote (the index keeps them while tracking is on): after every step
+  of the store's tests, each segment outside the metadata stream counts exactly what the
+  index's records in it refer to, and a property test checks that a record's count is its own
+  blocks plus the changes kept, over writes, punches, freezes and copies. A copy no map takes
+  lowers its own record by its blocks at once.
+- Dead run pieces (a dropped run, a merge's consumed inputs, a replaced step root, a failed
+  checkpoint's pieces) stay live until a segment header names the manifest that dropped them,
+  then leave the count; a block two pieces of a record share stays live until both are dead; a
+  manifest's pieces die once a named manifest no longer lists them. After every step of the
+  log's tests each metadata segment counts exactly the blocks its live pieces touch.
+- At every open the counts are recounted: chunk segments from the index's record counts,
+  metadata segments from the pieces of the loaded manifest and its runs, so a merge step
+  written but never named before a crash counts nothing. After a rebuild, which reads no run,
+  every metadata segment is held until a header names a manifest written since.
 
 A pass:
 
@@ -1891,9 +1904,10 @@ A pass:
 - Grouping: a victim holding chunk 7 block 3, chunk 3 block 1, chunk 7 block 4 and chunk 3
   block 2 gives copy entries chunk 3 [1, 2] and chunk 7 [3, 4], each contiguous. Open: the order
   between chunks.
-- Open: live run pieces in a victim, handled as the open question "Pieces shared between runs"
-  settles (copy a piece and rewrite every root naming it, or have the next checkpoint write those
-  runs again).
+- Live run pieces in a victim are never copied: the cleaner marks each run holding one for a
+  rewrite, a merge of that run alone, in steps when the tree has them, which writes it again in
+  its place; once the manifest naming it is durable every old piece is reported dead and the
+  segment holds no live piece, and every key reads the same throughout and after a restore.
 - The owner applies a move only where a map, live or frozen, still points at the source, then
   frees the victim once all its moves are applied. Interleavings (worker copies chunk 7 block 3
   from LBA 100 to LBA 5000):

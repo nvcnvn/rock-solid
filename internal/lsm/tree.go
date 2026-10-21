@@ -77,6 +77,7 @@ type Tree struct {
 	written     []writtenRun
 	resume      []*run
 	merges      []*Compaction
+	rewrite     []disklog.BlobRef
 	limitBuffer int
 	maxFrag     int
 	it          iterState

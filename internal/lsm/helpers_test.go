@@ -193,13 +193,15 @@ type fakeLog struct {
 	roots   []disklog.BlobRef
 	bounds  []disklog.MergeBound
 	workers []int
+	// segment is where the next pieces go, segment 1 when 0.
+	segment uint32
 }
 
 func newFakeLog() *fakeLog { return &fakeLog{blobs: map[disklog.BlobRef][]byte{}} }
 
 func (f *fakeLog) put(b []byte) disklog.BlobRef {
 	f.next++
-	ref := disklog.BlobRef{Segment: 1, Block: uint32(f.next), LSN: f.next}
+	ref := disklog.BlobRef{Segment: max(f.segment, 1), Block: uint32(f.next), LSN: f.next}
 	f.blobs[ref] = bytes.Clone(b)
 	return ref
 }

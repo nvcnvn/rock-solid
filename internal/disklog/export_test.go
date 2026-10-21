@@ -2,6 +2,7 @@ package disklog
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math/bits"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -120,6 +121,38 @@ func FreeSegments(l *Log) int {
 
 // SegmentUsageOf is the log's segment usage table as of its durable LSN.
 func SegmentUsageOf(l *Log) []SegmentUsage { return l.usageRows() }
+
+// CheckMetaLive reports a metadata segment whose live blocks are not those its live pieces touch,
+// which holds at every step while every blob of the metadata stream is a run or manifest piece;
+// after a rebuild the counts wait for the first manifest named since.
+func CheckMetaLive(l *Log) error {
+	if l.pinnedLSN != 0 {
+		return nil
+	}
+	want := make([]uint32, l.sb.SegmentCount)
+	l.pieces.coverage(want)
+	for s := uint32(1); s < l.sb.SegmentCount; s++ {
+		if u := l.usage[s]; u.State == SegmentUsed && l.streams[s] == Meta && u.Live != want[s] {
+			return fmt.Errorf("metadata segment %d counts %d live blocks, its live pieces touch %d", s, u.Live, want[s])
+		}
+	}
+	return nil
+}
+
+// HoldsLivePiece reports whether ref is among the pieces the log counts live.
+func HoldsLivePiece(l *Log, ref BlobRef) bool { return l.pieces.holds(ref) }
+
+// ChunkUsageOf is SegmentUsageOf with the live blocks of metadata segments left out: those count
+// the pieces still needed, which an open recounts from the ones its owner reads.
+func ChunkUsageOf(l *Log) []SegmentUsage {
+	rows := l.usageRows()
+	for i := range rows {
+		if l.streams[rows[i].Segment] == Meta {
+			rows[i].Live = 0
+		}
+	}
+	return rows
+}
 
 // FreeSegment stands in for the cleaner freeing segment s: its row turns free for the next
 // checkpoint's edit, and reuse lets a round open it again at once.

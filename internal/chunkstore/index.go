@@ -436,6 +436,22 @@ func (x *Index) Live(header core.LBA) uint32 {
 	return binary.LittleEndian.Uint32(v)
 }
 
+// SegmentLive adds to live[s] the blocks the maps refer to in the records of each segment s of segmentBlocks blocks, a block a live and a frozen map share counting twice.
+func (x *Index) SegmentLive(segmentBlocks uint32, live []uint32) {
+	x.tree.Iter(&x.it)
+	lo := x.recordKey(0)
+	for ok := x.it.SeekGE(lo); ok; ok = x.it.Next() {
+		k := x.it.Key()
+		if len(k) != recordSize || core.PoolID(binary.BigEndian.Uint32(k)) != RecordPool {
+			break
+		}
+		s := binary.BigEndian.Uint64(k[4:]) / uint64(segmentBlocks)
+		if s < uint64(len(live)) {
+			live[s] += binary.LittleEndian.Uint32(x.it.Value())
+		}
+	}
+}
+
 // Chunk returns the chunk's entry.
 func (x *Index) Chunk(pool core.PoolID, c core.ChunkID) (Chunk, bool) {
 	x.key = appendChunkPrefix(x.key[:0], pool, c)

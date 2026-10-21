@@ -41,10 +41,11 @@ const (
 	ruleSizeAmp
 	ruleSizeRatio
 	ruleRunLimit
+	ruleRewrite
 )
 
 func (r rule) String() string {
-	return [...]string{"none", "size amplification", "size ratio", "run limit"}[r]
+	return [...]string{"none", "size amplification", "size ratio", "run limit", "rewrite"}[r]
 }
 
 // pick returns the runs [i, j), newest first, that the first rule to apply merges.
@@ -221,12 +222,22 @@ func (t *Tree) opts() pickOpts {
 }
 
 // PickCompaction returns the next merge step due over runs no other merge holds, or nil: first
-// that of a merge whose last step a durable manifest names, a restored one included, then a new merge.
+// that of a merge whose last step a durable manifest names, a restored one included, then the
+// rewrite of a run the cleaner marked, then a new merge.
 func (t *Tree) PickCompaction() *Compaction {
 	t.pairMerges()
 	for _, c := range t.merges {
 		if c.ready() {
 			return t.start(c)
+		}
+	}
+	t.rewrite = slices.DeleteFunc(t.rewrite, func(root disklog.BlobRef) bool {
+		return !slices.ContainsFunc(t.runs, func(r *run) bool { return len(r.pieces) > 0 && r.root() == root })
+	})
+	for i, r := range t.runs {
+		if !r.held && len(r.pieces) > 0 && slices.Contains(t.rewrite, r.root()) {
+			t.rewrite = slices.DeleteFunc(t.rewrite, func(root disklog.BlobRef) bool { return root == r.root() })
+			return t.start(t.compaction(i, i+1, ruleRewrite))
 		}
 	}
 	runs := make([]pickRun, len(t.runs))
@@ -328,6 +339,43 @@ func (t *Tree) pairMerges() {
 		i = j + 1
 	}
 	t.resume = nil
+}
+
+// RunsIn is the bytes of the runs holding a live piece in segment, which a rewrite of each would
+// write again, and whether a running merge holds such a run or wrote a step there, which that
+// merge's end makes dead or names.
+func (t *Tree) RunsIn(segment uint32) (bytes int, held bool) {
+	for _, r := range t.runs {
+		if !r.inSegment(segment) {
+			continue
+		}
+		if r.held {
+			held = true
+			continue
+		}
+		bytes += r.bytes
+	}
+	for _, c := range t.merges {
+		for _, refs := range [][]disklog.BlobRef{c.entryRefs, c.fragRefs, c.partRefs, c.tail} {
+			held = held || slices.ContainsFunc(refs, func(p disklog.BlobRef) bool { return p.Segment == segment })
+		}
+	}
+	return bytes, held
+}
+
+// MarkRewrite marks every run no merge holds that has a live piece in segment for a merge of that
+// run alone, which writes it again elsewhere in steps on a merge worker, so that the cleaner
+// never copies a piece of a live run and no piece is ever named by two roots. It returns how
+// many runs it marked.
+func (t *Tree) MarkRewrite(segment uint32) int {
+	n := 0
+	for _, r := range t.runs {
+		if !r.held && r.inSegment(segment) && !slices.Contains(t.rewrite, r.root()) {
+			t.rewrite = append(t.rewrite, r.root())
+			n++
+		}
+	}
+	return n
 }
 
 // runLimit is the most runs the tree keeps before merging the newest whatever their sizes.

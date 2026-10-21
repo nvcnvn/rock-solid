@@ -290,7 +290,8 @@ func (h *harness) windowReads(trace []string) []uint32 {
 }
 
 // A merge worker configured away leaves its lane: its last segment is read at every start until
-// the cleaner frees it, and no record goes to it.
+// the cleaner frees it, and no record goes to it. Its piece, which no manifest names, counts no
+// live block once the log is open again.
 func TestALaneWhoseWorkerIsGone(t *testing.T) {
 	h := formatted(t, gib, mergeConfig(2))
 	h.put(disklog.Hot, h.write(0, 1, 1))
@@ -302,7 +303,9 @@ func TestALaneWhoseWorkerIsGone(t *testing.T) {
 		if res.durable < gone.LSN || !slices.Contains(h.windowReads(res.trace), gone.Segment) {
 			t.Fatalf("recovered LSN %d, reading segments %v; want LSN %d and segment %d read", res.durable, h.windowReads(res.trace), gone.LSN, gone.Segment)
 		}
-		if !slices.ContainsFunc(disklog.SegmentUsageOf(h.log), func(u disklog.SegmentUsage) bool { return u.Segment == gone.Segment && u.Live == 1 }) {
+		if !slices.ContainsFunc(disklog.SegmentUsageOf(h.log), func(u disklog.SegmentUsage) bool {
+			return u.Segment == gone.Segment && u.State == disklog.SegmentUsed && u.Live == 0
+		}) {
 			t.Fatalf("usage %+v lost lane 2's segment", disklog.SegmentUsageOf(h.log))
 		}
 		it := h.blob(disklog.BlobRun, runOwner, 10, 9)

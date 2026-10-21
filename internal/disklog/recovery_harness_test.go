@@ -141,6 +141,10 @@ type node struct {
 	off     int
 	prev    *disklog.BlobRef
 	ticket  disklog.Ticket
+	// pieces is the running checkpoint's durable pieces, and named those of the run the newest
+	// durable manifest names, which the node reports dead once a later one replaces it.
+	pieces, named []disklog.BlobRef
+	log           *disklog.Log
 
 	checkpoints, failedCheckpoints int
 	// begun is the snapshot the running checkpoint would write, its run filled in once durable;
@@ -160,6 +164,9 @@ func newNode(h *harness, pieceLimit int) *node {
 }
 
 func (n *node) onEvent(ev disklog.Event) {
+	if n.log != n.h.log {
+		n.log, n.pieces, n.named = n.h.log, nil, nil
+	}
 	switch ev.Kind {
 	case disklog.Durable:
 		if n.stale {
@@ -169,6 +176,7 @@ func (n *node) onEvent(ev disklog.Event) {
 		for i, t := range ev.Tickets {
 			if n.running && n.ticket != disklog.NoTicket && t == n.ticket {
 				n.prev = &disklog.BlobRef{Segment: ev.Segment, Block: ev.Block, LSN: ev.LSN, Entry: uint16(i)}
+				n.pieces = append(n.pieces, *n.prev)
 				n.ticket = 0
 			}
 		}
@@ -177,11 +185,25 @@ func (n *node) onEvent(ev disklog.Event) {
 			n.begun.Indexes[0].Runs = []disklog.BlobRef{*n.prev}
 			n.expect[ev.Manifest] = n.begun
 		}
+		n.retire(n.named)
+		n.named, n.pieces = n.pieces, nil
 		n.running = false
 		n.checkpoints++
 	case disklog.CheckpointFailed:
+		n.retire(n.pieces)
+		n.pieces = nil
 		n.running, n.failed, n.failedAt = false, true, n.h.log.DurableLSN()
 		n.failedCheckpoints++
+	}
+}
+
+// retire reports pieces no manifest will name again dead, as an index owner does.
+func (n *node) retire(refs []disklog.BlobRef) {
+	if len(refs) == 0 || n.h.log == nil {
+		return
+	}
+	if err := n.h.log.PiecesDead(refs); err != nil {
+		n.h.t.Fatalf("pieces dead %v: %v", refs, err)
 	}
 }
 

@@ -243,6 +243,11 @@ func (h *harness) absorb() {
 	}
 	if h.rec == nil {
 		h.tickets.log = h.log
+		if h.log != nil {
+			if err := disklog.CheckMetaLive(h.log); err != nil {
+				h.t.Fatal(err)
+			}
+		}
 	}
 	from := len(h.events)
 	for _, ev := range h.out.Events {

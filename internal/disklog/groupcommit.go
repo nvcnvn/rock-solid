@@ -380,6 +380,16 @@ func laneOf(s Stream, n uint8) int {
 	return laneMeta + int(n)
 }
 
+func streamOfLane(i int) Stream {
+	switch {
+	case i == laneHot:
+		return Hot
+	case i < laneMeta:
+		return Cold
+	}
+	return Meta
+}
+
 func ordinaryLane(i int) bool { return i == laneHot || i == laneCold }
 
 // lane is a sequence of segments that fill one after another, at most one open at a time, so
@@ -488,6 +498,11 @@ type Log struct {
 	free       []uint64
 	usage      []SegmentUsage
 	changed    []uint64
+	streams    []Stream
+	pieces     pieceSet
+	dying      []dyingPiece
+	namedLSN   uint64
+	pinnedLSN  uint64
 
 	lanes     []lane
 	cpNoSpace bool
@@ -563,6 +578,8 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		free:       make([]uint64, (sb.SegmentCount+63)/64),
 		usage:      make([]SegmentUsage, sb.SegmentCount),
 		changed:    make([]uint64, (sb.SegmentCount+63)/64),
+		streams:    make([]Stream, sb.SegmentCount),
+		pieces:     newPieceSet(sb.SegmentCount),
 		lanes:      make([]lane, laneMeta+1+workers),
 		rounds:     make([]round, cfg.CommitDepth),
 	}
@@ -1049,7 +1066,11 @@ func (l *Log) dropCheckpoint(err error, out *Output) {
 	for w, set := range l.cp.changed {
 		l.changed[w] |= set
 	}
+	earlier := l.cp.earlier
 	l.cp = nil
+	for _, ref := range earlier {
+		l.dropPiece(ref)
+	}
 	out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: err})
 }
 
@@ -1193,16 +1214,17 @@ func (l *Log) retire(out *Output) {
 	r := l.round(0)
 	l.durableLSN = r.lsn
 	r.keepBufs = r.keepBufs[:0]
-	if r.opened != 0 {
-		l.durableSeq = r.opened + 1
-		l.headerDurable(r.named)
-	}
 	l.replayBytes += r.bytes
 	l.heldBytes += r.ordinary
 	l.changed[r.segment/64] |= 1 << (r.segment % 64)
 	u := &l.usage[r.segment]
 	u.State, u.Newest = SegmentUsed, r.lsn
 	u.Live += uint32(r.bytes/core.BlockSize) - r.headerBlocks
+	l.registerBlobs(r)
+	if r.opened != 0 {
+		l.durableSeq = r.opened + 1
+		l.namedDurable(r.named)
+	}
 	out.emitDurable(Event{
 		Kind:         Durable,
 		LSN:          r.lsn,
@@ -1214,15 +1236,6 @@ func (l *Log) retire(out *Output) {
 	l.checkpointProgress(r, out)
 	l.first = (l.first + 1) % len(l.rounds)
 	l.count--
-}
-
-// headerDurable drops the manifests older than the one a now durable segment header names:
-// recovery loads that one or a newer one.
-func (l *Log) headerDurable(named ManifestPos) {
-	i := slices.IndexFunc(l.live, func(c liveChain) bool { return c.pos.LSN >= named.LSN })
-	if i > 0 {
-		l.live = slices.Delete(l.live, 0, i)
-	}
 }
 
 func (l *Log) checkpointProgress(r *round, out *Output) {
@@ -1518,6 +1531,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 
 	if t.roll {
 		l.free[t.segment/64] &^= 1 << (t.segment % 64)
+		l.streams[t.segment] = ln.stream
 		l.nextSeq++
 	}
 	bytes := uint64(lead+uint32(lay.Blocks())) * core.BlockSize

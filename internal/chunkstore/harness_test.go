@@ -122,6 +122,25 @@ func (h *harness) step() bool {
 func (h *harness) settle() {
 	for h.step() {
 	}
+	h.checkUsage()
+}
+
+// checkUsage checks that every segment outside the metadata stream counts as many live blocks
+// as the index's records in it refer to.
+func (h *harness) checkUsage() {
+	h.t.Helper()
+	if !h.s.Serving() {
+		return
+	}
+	geo := h.s.sb.Geometry
+	want := make([]uint32, geo.SegmentCount)
+	h.s.Index().SegmentLive(geo.SegmentBlocks, want)
+	for s := uint32(1); s < geo.SegmentCount; s++ {
+		u, stream := h.s.Log().Usage(s)
+		if stream != disklog.Meta && u.State == disklog.SegmentUsed && u.Live != want[s] {
+			h.t.Fatalf("segment %d counts %d live blocks, the index's records in it %d", s, u.Live, want[s])
+		}
+	}
 }
 
 func (h *harness) noteDurable() {
