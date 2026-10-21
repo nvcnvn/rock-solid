@@ -17,15 +17,16 @@ const FormatVersion uint16 = 1
 // sequence number u64 and the reference count u16, all little-endian. Reading the trailer from the
 // end lets a piece be built at its final size without knowing in advance whether it is the root.
 // A run's entry blocks come first, then its fragment blocks: `start → end` sorted by start, never
-// overlapping.
+// overlapping, then its filter cut into blocks of raw bytes.
 const (
 	pieceHeader   = 2
 	pieceOverhead = pieceHeader + 1 + 8 + 2
 )
 
 const (
-	entryBlock byte = 0
-	fragBlock  byte = 1
+	entryBlock  byte = 0
+	fragBlock   byte = 1
+	filterBlock byte = 2
 )
 
 func rootOverhead(earlier int) int { return pieceOverhead + disklog.BlobRefSize*earlier }
@@ -43,7 +44,7 @@ func splitPiece(b []byte, refs []disklog.BlobRef) ([]byte, byte, uint64, []diskl
 	seq := binary.LittleEndian.Uint64(b[len(b)-10:])
 	kind := b[len(b)-11]
 	end := len(b) - rootOverhead(n) + pieceHeader
-	if end < pieceHeader || kind != entryBlock && kind != fragBlock {
+	if end < pieceHeader || kind > filterBlock {
 		return nil, 0, 0, refs, ErrMalformed
 	}
 	for i := range n {
@@ -63,14 +64,15 @@ func RootRefs(root []byte, refs []disklog.BlobRef) ([]disklog.BlobRef, error) {
 }
 
 // run is an immutable sorted run held in memory as the blocks of its pieces, empty blocks left
-// out: entry blocks, then fragment blocks. Each block's first key, stored whole, is its fence
-// pointer. Its bounds span its entries and fragments, so a run holding only fragments is searched.
-// sums holds each block's CRC32C, entry blocks then fragment blocks, since runs are never read
-// back from disk.
+// out: entry blocks, then fragment blocks, and the filter of what its entries' keys hold. Each
+// block's first key, stored whole, is its fence pointer. Its bounds span its entries and
+// fragments, so a run holding only fragments is searched. sums holds each block's CRC32C, entry
+// blocks then fragment blocks, then the filter's, since runs are never read back from disk.
 type run struct {
 	seq     uint64
 	blocks  blockList
 	frags   blockList
+	filter  []byte
 	sums    []uint32
 	entries int
 	nfrags  int
@@ -100,6 +102,19 @@ func (r *run) addFrag(b []byte, n int) {
 	r.bytes += len(b)
 }
 
+func (r *run) setFilter(f []byte) {
+	r.filter = f
+	r.bytes += len(f)
+}
+
+// filterPieces is how many pieces of at most limit bytes the filter takes.
+func (r *run) filterPieces(limit int) int { return (len(r.filter) + limit - 1) / limit }
+
+// filterPiece is the filter's piece i of at most limit bytes.
+func (r *run) filterPiece(i, limit int) []byte {
+	return r.filter[i*limit : min((i+1)*limit, len(r.filter))]
+}
+
 // checksum sets sums from the run's blocks.
 func (r *run) checksum() {
 	r.sums = r.sums[:0]
@@ -109,6 +124,7 @@ func (r *run) checksum() {
 	for _, b := range r.frags {
 		r.sums = append(r.sums, core.CRC32C(b))
 	}
+	r.sums = append(r.sums, core.CRC32C(r.filter))
 }
 
 // intact reports whether every block still has the checksum it was added with.
@@ -122,6 +138,20 @@ func (r *run) intact() bool {
 		if core.CRC32C(b) != r.sums[len(r.blocks)+i] {
 			return false
 		}
+	}
+	return core.CRC32C(r.filter) == r.sums[len(r.blocks)+len(r.frags)]
+}
+
+// pieceIntact reports whether piece i, which a flush writes, still has its checksum: a block's, or
+// at the filter's first piece the whole filter's.
+func (r *run) pieceIntact(i int) bool {
+	switch nb := len(r.blocks) + len(r.frags); {
+	case i < len(r.blocks):
+		return core.CRC32C(r.blocks[i]) == r.sums[i]
+	case i < nb:
+		return core.CRC32C(r.frags[i-len(r.blocks)]) == r.sums[i]
+	case i == nb:
+		return core.CRC32C(r.filter) == r.sums[nb]
 	}
 	return true
 }
@@ -314,11 +344,11 @@ func (ri *runIter) floor(k []byte, strict bool) bool {
 	return ri.it.floor(k, strict)
 }
 
-// fillBlock adds entries from src to w while the finished block stays within limit bytes,
-// leaving out each entry a fragment hides and each removal that a fragment of src covers or no run
+// fillBlock adds entries from src to w and their keys to f while the finished block stays within
+// limit bytes, leaving out each entry a fragment hides and each removal that a fragment of src covers or no run
 // in older holds the key of, since it has nothing to hide. It counts what it leaves out in
 // src.dropped and reports whether src ran out.
-func fillBlock(w *blockWriter, src *iterState, limit int, older []runIter) bool {
+func fillBlock(w *blockWriter, f *filterWriter, src *iterState, limit int, older []runIter) bool {
 	for ; src.valid(); src.next() {
 		k, v := src.key(), src.value()
 		if src.hidden() || v[0] == kindDel && (src.covered(k) || !holds(older, k)) {
@@ -329,6 +359,7 @@ func fillBlock(w *blockWriter, src *iterState, limit int, older []runIter) bool 
 			return false
 		}
 		w.add(k, v)
+		f.add(k)
 	}
 	return true
 }

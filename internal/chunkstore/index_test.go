@@ -15,7 +15,7 @@ import (
 
 func newIndex(t testing.TB) *Index {
 	t.Helper()
-	tree, err := lsm.New(lsm.Config{MaxPiece: 1 << 20, Check: true})
+	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: 1 << 20, Check: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,5 +410,42 @@ func BenchmarkApplyWrite(b *testing.B) {
 			b.Fatal(err)
 		}
 		i++
+	}
+}
+
+// Over 24 runs, each writing 20 chunks whole, a lookup of a written chunk searches the run holding
+// it plus at most 0.3 more, and one of a chunk never written at most 0.3 runs, through the run
+// filters of chunk prefixes.
+func TestLookupOver24Runs(t *testing.T) {
+	x := newIndexWith(t, lsm.Config{MaxPiece: replayMaxPiece, Check: true}, false)
+	s := &runStore{blobs: map[disklog.BlobRef][]byte{}}
+	lba := core.LBA(100)
+	for layer := range uint32(25) {
+		for c := range uint32(20) {
+			apply(t, x, record(lba, disklog.WriteEntry(1, chunk(layer*20+c), 1, 0, core.BlocksPerChunk)))
+			lba += 1 + core.BlocksPerChunk
+		}
+		if layer < 24 {
+			s.checkpoint(t, x.Tree())
+		}
+	}
+	if x.Tree().Runs() != 24 {
+		t.Fatalf("%d runs", x.Tree().Runs())
+	}
+	const n = 5000
+	runs := func(base uint32, found bool) float64 {
+		before := x.Tree().Searches()
+		for i := range uint32(n) {
+			c := base + i%480
+			if _, ok := x.Lookup(1, chunk(c), uint16(i*7919%core.BlocksPerChunk)); ok != found {
+				t.Fatalf("lookup of chunk %d: %v", c, ok)
+			}
+		}
+		return float64(x.Tree().Searches()-before)/n - 1
+	}
+	written, unwritten := runs(0, true), runs(1000, false)
+	t.Logf("runs searched: %.3f per lookup of a written chunk, %.3f of an unwritten one", written, unwritten)
+	if written > 1.3 || unwritten > 0.3 {
+		t.Fatalf("runs searched: %.3f per lookup of a written chunk, %.3f of an unwritten one", written, unwritten)
 	}
 }

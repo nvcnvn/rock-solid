@@ -13,7 +13,7 @@ import (
 
 func newIndexWith(t testing.TB, cfg lsm.Config, pointRemovals bool) *Index {
 	t.Helper()
-	tree, err := lsm.New(cfg)
+	tree, err := lsm.New(TreeConfig(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}

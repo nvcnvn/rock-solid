@@ -10,7 +10,6 @@ import (
 	"errors"
 	"slices"
 
-	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
@@ -54,6 +53,10 @@ type Config struct {
 	RunLimit int
 	// Check decodes every piece a flush builds, checks a merge's output order and the run list's, and panics on a mismatch.
 	Check bool
+	// Filter is what each run's filter holds; prefixes need Prefix.
+	Filter FilterKeys
+	// Prefix is the length of k's prefix, 0 if k has none; every key starting with a prefix must have that prefix.
+	Prefix func(k []byte) int
 }
 
 // Tree is an LSM tree. Only its owner calls it; a compaction's Run alone may run elsewhere.
@@ -80,6 +83,7 @@ type plants struct {
 	dropFrags     bool
 	keepCovered   bool
 	skipEncoded   bool
+	skipFiltered  bool
 	repeatBlock   bool
 	installOldest bool
 	noSums        bool
@@ -94,6 +98,7 @@ type flush struct {
 	bw          blockWriter
 	older       []runIter
 	olderFrag   []runIter
+	filter      filterWriter
 	entriesDone bool
 	cur         int
 	next        int
@@ -105,7 +110,7 @@ type flush struct {
 
 // New makes an empty tree.
 func New(cfg Config) (*Tree, error) {
-	if cfg.MaxPiece < MinPiece || cfg.RunLimit < 0 {
+	if cfg.MaxPiece < MinPiece || cfg.RunLimit < 0 || cfg.Filter > KeysAndPrefixes || cfg.Filter != WholeKeys && cfg.Prefix == nil {
 		return nil, ErrBadConfig
 	}
 	t := &Tree{cfg: cfg, nextSeq: 1, limitBuffer: autoLimitBuffer}
@@ -116,7 +121,7 @@ func New(cfg Config) (*Tree, error) {
 }
 
 func (t *Tree) state() state {
-	st := state{mem: t.mem, memRoot: t.mem.root, memFRoot: t.mem.froot, runs: t.runs}
+	st := state{mem: t.mem, memRoot: t.mem.root, memFRoot: t.mem.froot, runs: t.runs, filter: t.cfg.Filter, prefix: t.cfg.Prefix}
 	if t.frozen != nil {
 		st.frozen, st.frozenRoot, st.frozenFRoot = t.frozen, t.frozen.root, t.frozen.froot
 	}
@@ -174,6 +179,13 @@ func (t *Tree) Floor(k []byte) ([]byte, []byte, bool) {
 	st := t.state()
 	t.it.reset(&st, false)
 	return t.it.floor(k)
+}
+
+// FloorPrefix returns the greatest key <= k with k's prefix, or any when k has none, and its value, valid until the tree's next write.
+func (t *Tree) FloorPrefix(k []byte) ([]byte, []byte, bool) {
+	st := t.state()
+	t.it.reset(&st, false)
+	return t.it.floorPrefix(k)
 }
 
 // Iter opens it on the tree; it is valid until the tree's next write. Seek it before reading.
@@ -235,6 +247,12 @@ func (v *View) Floor(k []byte) ([]byte, []byte, bool) {
 	return v.it.floor(k)
 }
 
+// FloorPrefix returns the greatest key <= k with k's prefix, or any when k has none, and its value as of the view.
+func (v *View) FloorPrefix(k []byte) ([]byte, []byte, bool) {
+	v.it.reset(&v.st, false)
+	return v.it.floorPrefix(k)
+}
+
 // Iter opens it on the view. Seek it before reading.
 func (v *View) Iter(it *Iter) { it.s.reset(&v.st, false) }
 
@@ -277,6 +295,11 @@ func (t *Tree) BeginFlush() (bool, error) {
 		st := state{mem: t.frozen, memRoot: t.frozen.root, memFRoot: t.frozen.froot}
 		fl.src.reset(&st, true)
 		fl.src.seek(nil)
+		keys := t.frozen.count
+		if t.cfg.Filter == KeysAndPrefixes {
+			keys *= 2
+		}
+		fl.filter.reset(t.cfg.Filter, t.cfg.Prefix, keys)
 	}
 	t.fl = fl
 	return froze, nil
@@ -305,17 +328,17 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 		return 0, false, nil
 	}
 	w := fl.write[fl.cur]
+	limit := t.cfg.MaxPiece - pieceOverhead
 	var block []byte
 	var last, inPlace bool
 	kind := entryBlock
-	switch {
-	case w == fl.frozen:
+	if w == fl.frozen && w.filter == nil {
 		bw := &fl.bw
 		bw.reset(buf[pieceHeader:])
 		bw.record, bw.skipSecond = t.cfg.Check, t.plant.skipEncoded
-		limit := t.cfg.MaxPiece - pieceOverhead
+		fl.filter.skipSecond = t.plant.skipFiltered
 		if !fl.entriesDone {
-			if fl.entriesDone = fillBlock(bw, &fl.src, limit, fl.older); fl.entriesDone {
+			if fl.entriesDone = fillBlock(bw, &fl.filter, &fl.src, limit, fl.older); fl.entriesDone {
 				fl.src.fragsFromStart()
 			}
 		}
@@ -323,46 +346,56 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 			kind = fragBlock
 			fillFragBlock(bw, &fl.src, limit, fl.olderFrag)
 		}
-		last = fl.entriesDone && !fl.src.pendingFrag(fl.olderFrag)
-		if bw.n == 0 && len(w.blocks)+len(w.frags) == 0 && last {
-			if err := t.checkFlushCounts(w); err != nil {
-				return 0, false, err
-			}
-			fl.frozen, fl.write = nil, fl.write[:fl.cur]
-			t.finishWrite()
-			return 0, false, nil
-		}
-		if bw.n == 0 && !last {
+		done := fl.entriesDone && !fl.src.pendingFrag(fl.olderFrag)
+		if bw.n == 0 && !done {
 			return 0, false, ErrTooLarge
 		}
-		block, inPlace = bw.finish(), true
-		switch {
-		case bw.n == 0:
-		case kind == fragBlock:
-			w.addFrag(bytes.Clone(block), bw.n)
-		default:
-			w.addBlock(bytes.Clone(block), bw.n)
+		if t.cfg.Check && kind == entryBlock {
+			fl.filter.checkHolds(bw.taken)
 		}
-		if last {
+		if bw.n > 0 {
+			block, inPlace = bw.finish(), true
+			if kind == fragBlock {
+				w.addFrag(bytes.Clone(block), bw.n)
+			} else {
+				w.addBlock(bytes.Clone(block), bw.n)
+			}
+		}
+		if done {
 			if err := t.checkFlushCounts(w); err != nil {
 				return 0, false, err
 			}
+			if len(w.blocks)+len(w.frags) == 0 {
+				fl.frozen, fl.write = nil, fl.write[:fl.cur]
+				t.finishWrite()
+				return 0, false, nil
+			}
+			w.setFilter(fl.filter.finish())
 		}
-	case fl.next < len(w.blocks):
-		block, last = w.blocks[fl.next], fl.next == len(w.blocks)+len(w.frags)-1
-	case fl.next < len(w.blocks)+len(w.frags):
-		block, last, kind = w.frags[fl.next-len(w.blocks)], fl.next == len(w.blocks)+len(w.frags)-1, fragBlock
-	default:
-		block, last = emptyBlock[:], true
 	}
-	if w != fl.frozen && fl.next < len(w.sums) && core.CRC32C(block) != w.sums[fl.next] {
+	if block == nil {
+		nb, nf := len(w.blocks), len(w.frags)
+		total := nb + nf + w.filterPieces(limit)
+		switch {
+		case fl.next < nb:
+			block = w.blocks[fl.next]
+		case fl.next < nb+nf:
+			block, kind = w.frags[fl.next-nb], fragBlock
+		case fl.next < total:
+			block, kind = w.filterPiece(fl.next-nb-nf, limit), filterBlock
+		default:
+			block = emptyBlock[:]
+		}
+		last = fl.next >= total-1
+	}
+	if !inPlace && w.sums != nil && !w.pieceIntact(fl.next) {
 		return 0, false, ErrCheck
 	}
 	piece, root, err := writePiece(buf, block, kind, inPlace, last, w.seq, fl.refs, t.cfg.MaxPiece)
 	if err != nil {
 		return 0, false, err
 	}
-	if t.cfg.Check && w == fl.frozen {
+	if t.cfg.Check && inPlace {
 		checkPiece(piece, kind, w.seq, fl.bw.taken)
 	}
 	fl.next++
@@ -523,13 +556,21 @@ func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
 		return ErrMalformed
 	}
 	r := &run{seq: seq, pieces: append(refs, ref)}
-	var last, end []byte
+	var last, end, filter []byte
+	sawFilter := false
 	for i, p := range pieces {
 		block, kind, s, rr, err := splitPiece(p, nil)
 		if err != nil {
 			return err
 		}
 		if s != seq || (i < len(pieces)-1 && len(rr) > 0) {
+			return ErrMalformed
+		}
+		if kind == filterBlock {
+			filter, sawFilter = append(filter, block...), true
+			continue
+		}
+		if sawFilter && !(i == len(pieces)-1 && bytes.Equal(block, emptyBlock[:])) {
 			return ErrMalformed
 		}
 		if kind == fragBlock {
@@ -552,6 +593,10 @@ func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
 			r.addBlock(bytes.Clone(block), n)
 		}
 	}
+	if !validFilter(filter, t.cfg.Filter) {
+		return ErrMalformed
+	}
+	r.setFilter(filter)
 	r.setBounds()
 	r.checksum()
 	at, _ := slices.BinarySearchFunc(t.runs, seq, func(r *run, s uint64) int {

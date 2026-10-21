@@ -2,39 +2,83 @@ package lsm
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
-// FuzzLoadRun feeds arbitrary bytes as a one-piece run, of entries or fragments: loading never
-// panics, and a run it accepts iterates in strictly increasing key order, and gets and floors of
-// its keys find them.
+// joinPieces encodes a run's pieces as one fuzz input, each piece after its u16 length.
+func joinPieces(ps [][]byte) []byte {
+	var b []byte
+	for _, p := range ps {
+		b = binary.LittleEndian.AppendUint16(b, uint16(len(p)))
+		b = append(b, p...)
+	}
+	return b
+}
+
+func splitPieces(b []byte) [][]byte {
+	var ps [][]byte
+	for len(b) >= 2 {
+		n := min(int(binary.LittleEndian.Uint16(b)), len(b)-2)
+		ps = append(ps, b[2:2+n])
+		b = b[2+n:]
+	}
+	return ps
+}
+
+// FuzzLoadRun feeds arbitrary bytes as a run's pieces, of entries, fragments and the filter:
+// loading never panics, and a run it accepts iterates in strictly increasing key order, floors of
+// its keys find them, gets and prefix floors find them unless the filter rules them out, and its
+// fragments hide their keys.
 func FuzzLoadRun(f *testing.F) {
-	tr := newTree(f, 512)
+	cfg := Config{MaxPiece: 512, Check: true, Filter: KeysAndPrefixes, Prefix: func(k []byte) int { return min(len(k), 1) }}
+	tr, err := New(cfg)
+	if err != nil {
+		f.Fatal(err)
+	}
 	for i := range 30 {
 		put(f, tr, nil, string(rune('a'+i%26))+string(rune('a'+i/26)), "v")
 	}
 	fl := newFakeLog()
-	roots, _ := fl.checkpoint(f, tr, nil)
-	for _, b := range fl.blobs {
-		f.Add(b)
+	run := func(root disklog.BlobRef) [][]byte {
+		refs, err := RootRefs(fl.blobs[root], nil)
+		if err != nil {
+			f.Fatal(err)
+		}
+		var ps [][]byte
+		for _, r := range append(refs, root) {
+			ps = append(ps, fl.blobs[r])
+		}
+		return ps
 	}
-	f.Add(fl.blobs[roots[0]][:5])
+	roots, _ := fl.checkpoint(f, tr, nil)
+	ps := run(roots[0])
+	f.Add(joinPieces(ps))
+	f.Add(joinPieces(ps[:len(ps)-1]))
+	f.Add(joinPieces([][]byte{ps[0], ps[len(ps)-1][:5]}))
 	for _, r := range [][2]string{{"aa", "ab"}, {"ac", "zz"}} {
 		if err := tr.DeleteRange([]byte(r[0]), []byte(r[1])); err != nil {
 			f.Fatal(err)
 		}
 	}
 	roots, _ = fl.checkpoint(f, tr, nil)
-	f.Add(fl.blobs[roots[len(roots)-1]])
-	f.Fuzz(func(t *testing.T, piece []byte) {
+	f.Add(joinPieces(run(roots[len(roots)-1])))
+	f.Fuzz(func(t *testing.T, in []byte) {
 		root := disklog.BlobRef{Segment: 1, Block: 1, LSN: 1}
-		if _, err := RootRefs(piece, nil); err != nil {
+		pieces := splitPieces(in)
+		if len(pieces) == 0 {
 			return
 		}
-		tr := newTree(t, 512)
-		if tr.LoadRun(root, [][]byte{piece}) != nil {
+		if _, err := RootRefs(pieces[len(pieces)-1], nil); err != nil {
+			return
+		}
+		tr, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tr.LoadRun(root, pieces) != nil {
 			return
 		}
 		var fi blockIter
@@ -54,11 +98,16 @@ func FuzzLoadRun(f *testing.F) {
 				t.Fatalf("key %q after %q", it.Key(), prev)
 			}
 			prev = append(prev[:0], it.Key()...)
-			if v, ok := tr.Get(it.Key()); !ok || !bytes.Equal(v, it.Value()) {
+			filter := tr.runs[0].filter
+			if v, ok := tr.Get(it.Key()); mayContain(filter, bloomHash(it.Key())) && (!ok || !bytes.Equal(v, it.Value())) {
 				t.Fatalf("get %q = %q %v, want %q", it.Key(), v, ok, it.Value())
 			}
 			if k, v, ok := tr.Floor(it.Key()); !ok || !bytes.Equal(k, it.Key()) || !bytes.Equal(v, it.Value()) {
 				t.Fatalf("floor %q = %q %q %v, want itself and %q", it.Key(), k, v, ok, it.Value())
+			}
+			k, _, ok := tr.FloorPrefix(it.Key())
+			if mayContain(filter, bloomHash(it.Key()[:1])) && (!ok || !bytes.Equal(k, it.Key())) {
+				t.Fatalf("prefix floor %q = %q %v, want itself", it.Key(), k, ok)
 			}
 		}
 	})

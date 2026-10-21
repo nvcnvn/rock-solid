@@ -152,6 +152,8 @@ type Compaction struct {
 	older  []*run
 	plant  plants
 	check  bool
+	filter FilterKeys
+	prefix func([]byte) int
 	seq    uint64
 	limit  int
 	out    *run
@@ -193,6 +195,8 @@ func (t *Tree) compaction(i, j int, rule rule) *Compaction {
 		limit:  t.cfg.MaxPiece - pieceOverhead,
 		plant:  t.plant,
 		check:  t.cfg.Check,
+		filter: t.cfg.Filter,
+		prefix: t.cfg.Prefix,
 	}
 	for _, r := range c.inputs {
 		r.held = true
@@ -230,15 +234,17 @@ func (t *Tree) score() (free, limit int) {
 	return free, t.runLimit()
 }
 
-// maxRunBytes is the most a run may hold for its root to list every piece, a piece spare. A
-// block is closed only when the next entry would not fit, so it is short of full by less than
-// that entry, and two adjacent blocks together hold more than a piece since the second starts
-// with that entry.
+// maxRunBytes is the most a run may hold for its root to list every piece. A block is closed only
+// when the next entry would not fit, so it is short of full by less than that entry, and two
+// adjacent blocks together hold more than a piece since the second starts with that entry; the
+// filter fills its pieces. Entries, fragments and the filter may each end in a short piece, so
+// two pieces are spare beyond the root, and a merge's filter may round up to one line more than
+// its inputs' together.
 func (t *Tree) maxRunBytes() int {
 	room := t.cfg.MaxPiece - pieceOverhead
 	refs := (room - emptyBlockSize) / disklog.BlobRefSize
 	grow := min(room-emptyBlockSize, maxEntryBytes) + 4
-	return (refs - 1) * max(room/2, room-grow)
+	return (refs-2)*max(room/2, room-grow) - cacheLineSize
 }
 
 var maxEntryBytes = uvarintLen(0) + uvarintLen(MaxKey) + uvarintLen(MaxValue+1) + MaxKey + MaxValue + 1
@@ -265,9 +271,15 @@ func (c *Compaction) Run() {
 	out := &run{seq: c.seq}
 	buf := make([]byte, 0, c.limit)
 	var w blockWriter
+	var f filterWriter
+	keys := 0
+	for _, r := range c.runs {
+		keys += filterKeyCount(r.filter)
+	}
+	f.reset(c.filter, c.prefix, keys)
 	for it.valid() {
 		w.reset(buf)
-		fillBlock(&w, &it, c.limit, older)
+		fillBlock(&w, &f, &it, c.limit, older)
 		if w.n > 0 {
 			out.addBlock(bytes.Clone(w.finish()), w.n)
 		}
@@ -287,6 +299,7 @@ func (c *Compaction) Run() {
 			out.addFrag(bytes.Clone(w.finish()), w.n)
 		}
 	}
+	out.setFilter(f.finish())
 	out.setBounds()
 	if !c.plant.noSums {
 		out.checksum()

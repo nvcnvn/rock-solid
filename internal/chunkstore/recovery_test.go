@@ -81,7 +81,7 @@ func newNode(t *testing.T) *node {
 }
 
 func (n *node) newIndex() *Index {
-	tree, err := lsm.New(lsm.Config{MaxPiece: n.maxBlob, Check: true})
+	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: n.maxBlob, Check: true}))
 	if err != nil {
 		n.t.Fatal(err)
 	}
@@ -404,8 +404,9 @@ func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
 	}
 }
 
-// A crash after a checkpoint's runs are durable but before its manifest is recovers from the
-// previous manifest plus replay, even when the runs it wrote came from a compaction.
+// A crash after a checkpoint's runs are durable but before its manifest is recovers from an
+// earlier manifest a segment header names plus replay, even when the runs it wrote came from a
+// compaction.
 func TestCrashBetweenRunAndManifest(t *testing.T) {
 	for seed := range 4 {
 		n := newNode(t)
@@ -413,20 +414,17 @@ func TestCrashBetweenRunAndManifest(t *testing.T) {
 		for n.checkpoints < 3 {
 			w.run(n, 10)
 		}
+		w.run(n, 5)
 		for n.checkpointing {
 			n.settle()
 		}
-		previous := n.log.Manifest()
 		if c := n.ix.Tree().PickCompaction(); c != nil {
 			c.Run()
 			if err := n.ix.Tree().Install(c); err != nil {
 				t.Fatal(err)
 			}
 		}
-		w.run(n, 5)
-		for n.checkpointing {
-			n.settle()
-		}
+		previous := n.log.Manifest()
 		live := n.ix
 		n.checkpoint()
 		n.crashWhen = func(ev *disklog.Event) bool {
@@ -439,8 +437,8 @@ func TestCrashBetweenRunAndManifest(t *testing.T) {
 			t.Fatalf("seed %d: no manifest written", seed)
 		}
 		n.recover(disklog.ModeOpen)
-		if got := n.log.Manifest(); got != previous {
-			t.Fatalf("seed %d: recovered from manifest %+v, want the previous %+v", seed, got, previous)
+		if got := n.log.Manifest(); got.IsNone() || got.LSN > previous.LSN {
+			t.Fatalf("seed %d: recovered from manifest %+v, past the last durable one %+v", seed, got, previous)
 		}
 		n.equal(live, "index recovered past the lost manifest")
 		w.run(n, 40)

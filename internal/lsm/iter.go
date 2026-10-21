@@ -16,6 +16,7 @@ type source struct {
 	empty    bool
 	frags    bool
 	selfHide bool
+	out      bool
 	fc       memCursor
 	fr       runIter
 	fpos     bool
@@ -26,7 +27,7 @@ type source struct {
 }
 
 func (s *source) setMem(m *memtable, root, froot uint32) {
-	s.mem, s.root, s.froot, s.run, s.ok, s.fpos = m, root, froot, nil, false, false
+	s.mem, s.root, s.froot, s.run, s.ok, s.fpos, s.out = m, root, froot, nil, false, false, false
 	s.frags, s.selfHide = m.hasFrags(froot), !m.mixed
 	p := m.pg.get(root)
 	s.empty = p.kind() == leafPage && p.n() == 0
@@ -34,7 +35,7 @@ func (s *source) setMem(m *memtable, root, froot uint32) {
 }
 
 func (s *source) setRun(r *run) {
-	s.mem, s.run, s.ok, s.fpos, s.empty = nil, r, false, false, false
+	s.mem, s.run, s.ok, s.fpos, s.empty, s.out = nil, r, false, false, false, false
 	s.frags, s.selfHide = len(r.frags) > 0, false
 	s.ri.init(r.blocks)
 	s.fr.init(r.frags)
@@ -155,7 +156,8 @@ func (s *source) fragCover(k []byte) ([]byte, bool) {
 	return nil, false
 }
 
-// state is what a read sees: the memtable, the one being flushed and the runs, newest first.
+// state is what a read sees: the memtable, the one being flushed and the runs, newest first, and
+// what the runs' filters hold.
 type state struct {
 	mem         *memtable
 	memRoot     uint32
@@ -164,6 +166,8 @@ type state struct {
 	frozenRoot  uint32
 	frozenFRoot uint32
 	runs        []*run
+	filter      FilterKeys
+	prefix      func([]byte) int
 }
 
 // sources lays the state's layers out newest first in srcs, reusing its buffers.
@@ -194,18 +198,25 @@ func (st *state) sources(srcs []source) []source {
 	return srcs
 }
 
-// iterState merges sources in key order; among equal keys the newest source's entry wins, and a
-// fragment hides the older sources' entries in it. probes counts the searches of a layer's
-// entries, steps a floor's rounds. With keepDel, as a flush or merge reads, it leaves hidden
-// entries for the caller to drop one by one, so that dropped, with the older entries each key
-// shadows, and fragsDropped account for every entry and fragment of the sources.
+// iterState merges sources in key order with a min-heap of the positioned ones, as Pebble's
+// mergingIter does; among equal keys the newest source's entry wins, and a fragment hides the
+// older sources' entries in it. probes counts the searches of a layer's entries, filterProbes the
+// probes of run filters, steps a floor's rounds. With keepDel, as a flush or merge reads, it
+// leaves hidden entries for the caller to drop one by one, so that dropped, with the older entries
+// each key shadows, and fragsDropped account for every entry and fragment of the sources. A prefix
+// lookup leaves out the sources marked out, the runs whose filter rules its prefix out.
 type iterState struct {
 	srcs         []source
+	filter       FilterKeys
+	prefix       func([]byte) int
+	heap         []int
 	cur          int
 	keepDel      bool
 	ranges       bool
 	bounded      bool
 	upper        []byte
+	inPrefix     bool
+	pfx          []byte
 	prev         []byte
 	lo           []byte
 	ulo          []byte
@@ -215,11 +226,13 @@ type iterState struct {
 	dropped      int
 	fragsDropped int
 	probes       int
+	filterProbes int
 	steps        int
 }
 
 func (it *iterState) reset(st *state, keepDel bool) {
-	it.srcs = st.sources(it.srcs)
+	it.srcs, it.heap = st.sources(it.srcs), it.heap[:0]
+	it.filter, it.prefix, it.inPrefix = st.filter, st.prefix, false
 	it.cur, it.keepDel, it.bounded, it.uok = -1, keepDel, false, false
 	it.dropped, it.fragsDropped = 0, 0
 	it.ranges = false
@@ -236,13 +249,14 @@ func (it *iterState) seek(k []byte) {
 	for i := range it.srcs {
 		s := &it.srcs[i]
 		s.fpos = false
-		if s.empty || s.run != nil && s.run.beyond(k) {
+		if s.empty || s.out || s.run != nil && s.run.beyond(k) {
 			s.ok = false
 			continue
 		}
 		it.probes++
 		s.seekGE(k)
 	}
+	it.initHeap()
 	it.settle()
 }
 
@@ -257,37 +271,79 @@ func (it *iterState) next() {
 func (it *iterState) skip() int {
 	it.prev = append(it.prev[:0], it.key()...)
 	n := 0
-	for i := range it.srcs {
-		if s := &it.srcs[i]; s.ok && bytes.Equal(s.key(), it.prev) {
-			s.next()
-			n++
+	for len(it.heap) > 0 {
+		s := &it.srcs[it.heap[0]]
+		if !bytes.Equal(s.key(), it.prev) {
+			break
 		}
+		s.next()
+		n++
+		if !s.ok {
+			last := len(it.heap) - 1
+			it.heap[0] = it.heap[last]
+			it.heap = it.heap[:last]
+		}
+		it.down(0)
 	}
 	return n
 }
 
 func (it *iterState) settle() {
 	for {
-		it.cur = -1
-		for i := range it.srcs {
-			if s := &it.srcs[i]; s.ok && (it.cur < 0 || bytes.Compare(s.key(), it.srcs[it.cur].key()) < 0) {
-				it.cur = i
-			}
-		}
-		if it.cur < 0 {
+		if len(it.heap) == 0 {
+			it.cur = -1
 			return
 		}
-		if it.bounded && bytes.Compare(it.key(), it.upper) >= 0 {
+		it.cur = it.heap[0]
+		if it.bounded && bytes.Compare(it.key(), it.upper) >= 0 || it.inPrefix && !bytes.HasPrefix(it.key(), it.pfx) {
 			it.cur = -1
 			return
 		}
 		if it.ranges && !it.keepDel && it.hideRange() {
+			it.initHeap()
 			continue
 		}
 		if it.keepDel || it.value()[0] != kindDel {
 			return
 		}
 		it.skip()
+	}
+}
+
+// before orders the heap by key, then newest source first.
+func (it *iterState) before(a, b int) bool {
+	c := bytes.Compare(it.srcs[a].key(), it.srcs[b].key())
+	return c < 0 || c == 0 && a < b
+}
+
+// initHeap builds the heap from the positioned sources.
+func (it *iterState) initHeap() {
+	it.heap = it.heap[:0]
+	for i := range it.srcs {
+		if it.srcs[i].ok {
+			it.heap = append(it.heap, i)
+		}
+	}
+	for i := len(it.heap)/2 - 1; i >= 0; i-- {
+		it.down(i)
+	}
+}
+
+func (it *iterState) down(i int) {
+	h := it.heap
+	for {
+		c := 2*i + 1
+		if c >= len(h) {
+			return
+		}
+		if c+1 < len(h) && it.before(h[c+1], h[c]) {
+			c++
+		}
+		if !it.before(h[c], h[i]) {
+			return
+		}
+		h[i], h[c] = h[c], h[i]
+		i = c
 	}
 }
 
@@ -413,13 +469,45 @@ func (it *iterState) pendingFrag(older []runIter) bool {
 	return true
 }
 
+// filterKey is what a lookup of k probes the filters with: k itself when they hold whole keys
+// and whole is set, otherwise k's prefix when they hold prefixes, or nothing.
+func (it *iterState) filterKey(k []byte, whole bool) ([]byte, bool) {
+	if whole && it.filter != Prefixes {
+		return k, true
+	}
+	if it.filter == WholeKeys {
+		return nil, false
+	}
+	p := prefixOf(it.prefix, k)
+	return p, len(p) > 0
+}
+
+// filterOut marks the runs whose filter rules out fk, the filter key of a prefix lookup.
+func (it *iterState) filterOut(fk []byte, on bool) {
+	h := bloomHash(fk)
+	for i := range it.srcs {
+		s := &it.srcs[i]
+		s.out = on && s.run != nil && !it.mayHold(s.run, h)
+	}
+}
+
+func (it *iterState) mayHold(r *run, h uint32) bool {
+	it.filterProbes++
+	return mayContain(r.filter, h)
+}
+
 func (it *iterState) get(k []byte) ([]byte, bool) {
+	fk, on := it.filterKey(k, true)
+	var h uint32
+	if on {
+		h = bloomHash(fk)
+	}
 	for i := range it.srcs {
 		s := &it.srcs[i]
 		if s.run != nil && s.run.outside(k) {
 			continue
 		}
-		if !s.empty {
+		if !s.empty && !(on && s.run != nil && !it.mayHold(s.run, h)) {
 			it.probes++
 			if v, ok := s.get(k); ok {
 				if v[0] == kindDel {
@@ -438,7 +526,7 @@ func (it *iterState) get(k []byte) ([]byte, bool) {
 }
 
 func (it *iterState) candidate(s *source, b []byte, strict bool) {
-	if s.empty || s.run != nil && s.run.below(b, strict) {
+	if s.empty || s.out || s.run != nil && s.run.below(b, strict) {
 		s.cok = false
 		return
 	}
@@ -505,6 +593,9 @@ func (it *iterState) floor(k []byte) ([]byte, []byte, bool) {
 			return nil, nil, false
 		}
 		bk, bv := it.srcs[best].ck, it.srcs[best].cv
+		if it.inPrefix && !bytes.HasPrefix(bk, it.pfx) {
+			return nil, nil, false
+		}
 		if j, lo := it.hider(best, bk); j >= 0 {
 			it.lo = append(it.lo[:0], lo...)
 			first := j + 1
@@ -530,6 +621,20 @@ func (it *iterState) floor(k []byte) ([]byte, []byte, bool) {
 	}
 }
 
+// floorPrefix is floor bounded to k's prefix, leaving out the runs whose filter rules it out.
+func (it *iterState) floorPrefix(k []byte) ([]byte, []byte, bool) {
+	it.setPrefix(k)
+	return it.floor(k)
+}
+
+// setPrefix bounds the next floor or scan to k's prefix and marks the runs whose filter rules it out.
+func (it *iterState) setPrefix(k []byte) {
+	it.pfx = append(it.pfx[:0], prefixOf(it.prefix, k)...)
+	it.inPrefix = true
+	fk, on := it.filterKey(k, false)
+	it.filterOut(fk, on)
+}
+
 // Iter walks a tree or view in key order, skipping removed keys, until the tree's next write or the view closes.
 type Iter struct {
 	s iterState
@@ -543,6 +648,17 @@ func (it *Iter) SetUpperBound(hi []byte) {
 
 // SeekGE moves to the first key >= k.
 func (it *Iter) SeekGE(k []byte) bool {
+	if it.s.inPrefix {
+		it.s.inPrefix = false
+		it.s.filterOut(nil, false)
+	}
+	it.s.seek(k)
+	return it.s.valid()
+}
+
+// SeekPrefixGE moves to the first key >= k with k's prefix, and the scan stops at the prefix's last key; with no prefix it is SeekGE.
+func (it *Iter) SeekPrefixGE(k []byte) bool {
+	it.s.setPrefix(k)
 	it.s.seek(k)
 	return it.s.valid()
 }

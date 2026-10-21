@@ -657,9 +657,10 @@ no buffer allocated.
 - Memtable over runs: after a flush, a key only in the run reads from the run; a key written after the
   flush reads the memtable's value; a key removed after the flush reads as absent; a scan merges the
   memtable and runs in key order with no duplicates.
-- A get touches each layer once: with three runs and a flush running, a get of a missing key and one
-  of a key only in the oldest run each search 5 layers, the memtable, the frozen one and each run's
-  fence pointers and one block.
+- A get probes each run's filter once: with three runs and a flush running, a get of a missing key
+  searches only the memtable and the frozen one, and a get of a key only in the oldest run also
+  searches that run's fence pointers and one block, plus any run its filter lets through by a false
+  positive.
 - A run of the [MetaStore memory spike](design.md#appendix-metastore-memory-spike)'s file model
   (100,000 files, each a 92-byte attribute record and a directory entry, 20 to 50 files per
   directory, names of 8 to 32 bytes, in create order) takes at most 145 B per file (the spike's
@@ -992,8 +993,8 @@ merge that made it:
 ## Metamorphic index tests
 
 - [property] `internal/lsm`, seeds 0-199, 3,000 ops in a text form (`put aa v26x`, `del aa`,
-  `flush`, `flushfail 3`, `floor aca`), drawn by weight: puts 35, removals 10, gets 15, floors 8,
-  scans 5, views 11 (open 2, get 5, scan 2, close 2), flushes 5, failed flushes 1, compactions 4,
+  `flush`, `flushfail 3`, `floor aca`), drawn by weight: puts 35, removals 10, gets 15, floors 8
+  (prefix floors among them), scans 5 (prefix scans among them), views 11 (open 2, get 5, scan 2, close 2), flushes 5, failed flushes 1, compactions 4,
   restarts 1, plus range removals; keys of 1-6 letters a-f, a put's key new one time in four. Each
   op writes one history line, and the histories of every option set equal each other line by line
   and the map model's (Pebble's `internal/metamorphic`, a7b8321871e3).
@@ -1036,14 +1037,6 @@ merge that made it:
 
 ## Run filters
 
-Changed existing scenario ("LSM tree"):
-
-- "A get touches each layer once: with three runs and a flush running, a get of a missing key and
-  one of a key only in the oldest run each search 5 layers" becomes: the get of the key only in the
-  oldest run searches the memtable, the frozen one and the oldest run, plus any run its filter
-  lets through by a false positive; the get of a missing key searches only the memtables unless a
-  filter lets it through. Every run is still probed once.
-
 Lookups:
 
 - A get of a key in no run searches only the memtables and the runs whose filter lets it through
@@ -1051,64 +1044,86 @@ Lookups:
 - Filters are probed newest first: a key in the newest run probes no older run's filter, and a
   covering fragment in a newer run stops the get before any older filter is probed.
 - A floor inside a chunk written whole searches only the run holding it, plus false positives.
-
-Filter build and layout:
-
-- The filter is sized from the entry count the flush or merge knows before it starts and filled
-  as the run streams out. For 1,000,000 entries at 10 bits per key, Pebble's writer rounds
-  10,000,000 bits up to 19,532 lines of 64 bytes, then to the odd 19,533: 1,250,112 bytes plus a
-  5-byte trailer (checked against the ported code). The flush's peak is the frozen tree, one piece
-  and the filter, and its allocations do not grow with the entry count.
-- It follows the run's entries and range removals in blocks of its own, marked in the trailer;
-  the run golden bytes are updated. A run whose filter blocks are truncated or not marked is
-  Malformed on load (fuzzed). A restore loads each run's filter from its filter blocks without
-  hashing a key, and lookups probe as before the restart.
-- The port carries Pebble's BSD notice and its tests (`sstable/tablefilters/bloom` at
-  a7b8321871e3): the filter of their test keys encodes to Pebble's golden bytes, and every added
-  key may match. Over 1,000,000 absent keys, a 10 bits-per-key filter's false positives stay within
-  1.0 to 1.4% (1.16% in the read path spike).
-- Every run has a filter, the oldest one included.
-
-What each index's filter holds (an extractor per index in `Config`):
-
-| Index | Filter holds | Lookup that probes it | Probes with |
-| --- | --- | --- | --- |
-| Chunk index | each chunk's prefix `(pool, h, chunk_id)`, 28 bytes, one key per chunk | floor bounded to a chunk's prefix, chunk reader | the prefix, once per read |
-| MetaStore | whole keys and each key's inode prefix `fs/{volume}/{inode}` | get; prefix scan of one inode (`readdir`) | the key; the prefix |
-| An index with whole keys only | whole keys | get | the key |
-
-- A floor bounded to a prefix equals a plain floor plus a prefix check, under the property tests.
-- A read of blocks 3, 4 and 700 of one chunk takes one reader: it probes the filters once with the
-  chunk's prefix and serves 4 by stepping forward from 3, as Pebble's `TrySeekUsingNext` does.
+- A floor bounded to a prefix equals a plain floor plus the prefix check, and a prefix scan equals a
+  plain scan cut at the prefix's last key, under the range-removal property with prefix filters
+  (prefixes alone, and whole keys with prefixes).
 - A filter never holds fragments: with one run holding fragment [c, f) and its filter ruling out
   d, a get of d, which an older run holds, is absent (RocksDB returned such keys twice,
   `HISTORY.md:1451`, `:2783` at v11.8.1).
+
+Filter build and layout:
+
+- A flush sizes the filter from the frozen memtable's entry count (twice it for whole keys with
+  prefixes), a merge from the sum of its inputs' filter key counts, and either fills it as the run
+  streams out. For 1,000,000 keys at 10 bits per key, Pebble's writer rounds 10,000,000 bits up to
+  19,532 lines of 64 bytes, then to the odd 19,533: 1,250,112 bytes plus a 5-byte trailer. The
+  flush's peak is the frozen tree, one piece, the run and the filter, and its allocations do not grow
+  with the entry count.
+- A prefix filter holds each distinct prefix once, so a chunk's extents add one key; a filter of
+  whole keys and prefixes holds each key and each prefix that is not a whole key.
+- It follows the run's entries and range removals in pieces of its own, marked in the trailer, its
+  bytes headed by what it holds (whole keys, prefixes or both) and its key count; the run golden
+  bytes cover an entry piece, a fragment piece and the filter piece as root. A run with no filter,
+  a truncated one, or entries or fragments after it is Malformed on load, and so is a run whose
+  filter holds other keys than the tree's `Config.Filter` (fuzzed with the run loader). A restore
+  loads each run's filter from its pieces without hashing a key, and lookups search as before the
+  restart.
+- The port carries Pebble's BSD notice and its tests (`sstable/tablefilters/bloom` at
+  a7b8321871e3): the filter of "hello" and "world" encodes to RocksDB's golden bits, the hash
+  matches RocksDB's vectors, and every added key may match. Over 1,000,000 absent random 16-byte
+  keys, a 10 bits-per-key filter's false positives stay within 1.0 to 1.4% (1.17% measured, 1.16%
+  in the read path spike).
+- Every run has a filter, the oldest one included.
+- Each run's filter has a checksum beside its blocks': a flipped filter bit fails the next merge of
+  the run and a flush that rewrites it with `ErrCheck`. With `Config.Check`, a flush checks that its
+  filter holds every key of each entry block it built; a planted filter that leaves a key out
+  panics there.
+- A prefix is closed: every key that starts with a prefix has that prefix, and a key too short for
+  one has none. The property tests' 3-byte prefix gives none to shorter keys, and probes of 1 and 2
+  bytes run as plain floors and scans; a prefix of at most 3 bytes, which breaks the rule, fails
+  them.
+
+What each index's filter holds (`Config.Filter` and `Config.Prefix`):
+
+| Index | Filter holds | Lookup that probes it | Probes with |
+| --- | --- | --- | --- |
+| Chunk index | each chunk's prefix `(pool, h, chunk_id)`, 28 bytes, one key per chunk, and each record count's whole key | floor bounded to a chunk's prefix, prefix scan, get | the prefix, once per lookup |
+| MetaStore | whole keys and each key's inode prefix `fs/{volume}/{inode}` | get; prefix scan of one inode (`readdir`) | the key; the prefix |
+| An index with whole keys only | whole keys | get | the key |
 
 Targets (the [LSM read path spike](../spikes/lsm-study-reads/) over 24 runs, about 2 million
 entries; counts are the bar, times on the shared VM):
 
 | Lookup | Runs searched | Time (spike) |
 | --- | --- | --- |
-| MetaStore get of an absent name | at most 0.5 on average (0.22 measured) | 1.9 µs against 13.3 µs unfiltered |
-| Chunk-index read of a chunk written whole | about 1.18 | 5.1 µs against 31.5 µs |
-| Chunk-index read of an unwritten chunk | about 0.19 | 1.35 µs against 30.5 µs |
+| MetaStore get of an absent name | at most 0.5 on average (0.22 measured; 0.03 in the package's test) | 1.9 µs against 13.3 µs unfiltered |
+| Chunk-index read of a chunk written whole | about 1.18 (1.01 in the package's test) | 5.1 µs against 31.5 µs |
+| Chunk-index read of an unwritten chunk | about 0.19 (0.01 in the package's test) | 1.35 µs against 30.5 µs |
 | Chunk-index read under random 4 KiB overwrites | about 7.2 (every large run holds every hot chunk) | 19.8 µs against 33.2 µs |
 | Filter memory | 0.76% of the chunk index's run bytes, 2.6 to 2.9% of the MetaStore's | |
 
-- Every probe and lookup allocates nothing.
-- Passes the Metamorphic index tests' sets Filters off and Filters "maybe".
+- Every probe, get and prefix floor allocates nothing.
+
+## Chunk reader
+
+- A read of blocks 3, 4 and 700 of one chunk takes one reader: it probes the filters once with the
+  chunk's prefix and serves 4 by stepping forward from 3, as Pebble's `TrySeekUsingNext` does.
+- A read of ascending blocks searches each layer once, then steps; a block below the last one read
+  searches again.
 
 ## Heap merge
 
 - A scan merges the memtables and runs with a min-heap, as Pebble's `mergingIter` does. Review: a
-  scan step over 24 runs costs less than twice the step over 6 (the linear merge took 95 ns over
-  6 and 360 ns over 24), and a seek and a step allocate nothing.
+  scan step over 24 runs costs less than twice the step over 6 (`BenchmarkIterNextRuns` on the
+  Apple M4 Pro: 41 against 61 ns, where the linear merge took 54 against 151), and a seek and a step
+  allocate nothing.
 - Ties: when several sources hold one key, the newest layer's entry is returned once and the
   others are stepped past; a removal in the newest layer hides the key.
 - A scan of n steps that crosses k fragments of one layer does at most k + 1 fragment searches in
   that layer, checked with a search counter.
-- [property] The heap merge and the linear merge return identical scans, forward from every seek
-  key, over the range-removal property's seeds (0-59) and the metamorphic seeds (0-199).
+- [property] Scans forward from every probe, plain and bounded to a prefix, equal the map model
+  over the range-removal property's seeds (0-59) under its seven configurations; the metamorphic
+  tests run scans under every option set.
 - A scan over one source (memtable only) and over zero runs works, and a scan that exhausts
   every source reports the end once.
 
@@ -3899,6 +3914,8 @@ Recovery from manifest and log is under Raft storage in the disk log and MetaSto
 - table epochs and snapshot epochs, 64 bits; a lock mode, 8 bits.
 
 Only the last component (a file name, an xattr name or an S3 key) has variable length, with no escaping and no terminator.
+
+- The run filters' inode prefix `T(fs) volume inode` has a fixed length, so every key under an inode has the same prefix and a shorter key has none, as `lsm.Config.Prefix` requires; a prefix taken up to a delimiter would not be (`fs/2/` starts `fs/23/a`).
 
 **Tags**, from the [key layout](design.md#metadata-layer-metastore), frozen by the golden file as disk format: first byte `0x01` ctl, `0x02` volume, `0x03` fs, `0x04` s3; under `ctl/` `0x01` pool, `0x02` placement table, `0x03` membership, `0x04` session, `0x05` format level; under `volume/{id}/` `0x01` attach, `0x02` snap; an inode's keys `0x01` a, `0x02` x, `0x03` t, `0x04` l, `0x05` d, `0x06` c, `0x07` P; a slot's keys `0x10` n, `0x11` u, `0x12` o, `0x13` p, `0x14` r, `0x15` f; a piece key is its value's tag with the high bit set (`0x82`, `0x83`), then a 1-byte piece number. The vectors below write some tags symbolically, as `T(fs)`, `T(a)` and so on, standing for these bytes.
 

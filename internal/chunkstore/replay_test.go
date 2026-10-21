@@ -53,7 +53,7 @@ func (s *runStore) checkpoint(t testing.TB, tree *lsm.Tree) []disklog.BlobRef {
 
 func (s *runStore) restore(t *testing.T, roots []disklog.BlobRef) *Index {
 	t.Helper()
-	tree, err := lsm.New(lsm.Config{MaxPiece: replayMaxPiece, Check: true})
+	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: replayMaxPiece, Check: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ type replica struct {
 }
 
 func newReplica(t *testing.T, seed uint64) *replica {
-	tree, err := lsm.New(lsm.Config{MaxPiece: replayMaxPiece, Check: true})
+	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: replayMaxPiece, Check: true}))
 	if err != nil {
 		t.Fatal(err)
 	}

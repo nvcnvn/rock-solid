@@ -378,7 +378,7 @@ func TestMaxRunBytes(t *testing.T) {
 		t.Fatalf("1 MiB pieces: %d bytes", got)
 	}
 	room := 512 - pieceOverhead
-	if got, want := small.maxRunBytes(), ((room-8)/disklog.BlobRefSize-1)*(room/2); got != want {
+	if got, want := small.maxRunBytes(), ((room-8)/disklog.BlobRefSize-2)*(room/2)-cacheLineSize; got != want {
 		t.Fatalf("512-byte pieces: %d bytes, want %d", got, want)
 	}
 }

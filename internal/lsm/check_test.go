@@ -13,7 +13,7 @@ import (
 // removal, then k10-k29 removed one by one, and m the map it reads as.
 func threeRuns(t *testing.T) (*Tree, *fakeLog, model) {
 	t.Helper()
-	tr := newTree(t, 128)
+	tr := newTree(t, 192)
 	f := newFakeLog()
 	m := model{}
 	key := func(i int) string { return fmt.Sprintf("k%02d", i) }
@@ -166,19 +166,34 @@ func TestMergeVerifiesPieceChecksums(t *testing.T) {
 			t.Fatalf("merge reading the flipped fragment: %v, want ErrCheck", err)
 		}
 	})
+	t.Run("filter", func(t *testing.T) {
+		tr, _, _ := threeRuns(t)
+		tr.runs[1].filter[1] ^= 0x80
+		if err := mergeErr(tr, 1, 3); !errors.Is(err, ErrCheck) {
+			t.Fatalf("merge of a run with a flipped filter: %v, want ErrCheck", err)
+		}
+	})
 }
 
 // A flush that writes a merge's output, flipped in memory after the merge, fails with ErrCheck
 // rather than give the flipped block a fresh checksum in the log.
 func TestFlushVerifiesRewrittenRuns(t *testing.T) {
-	tr, f, _ := threeRuns(t)
-	compactSpan(t, tr, 0, 3)
-	flipLastValue(tr.runs[0].blocks[0])
-	if _, err := tr.BeginFlush(); err != nil {
-		t.Fatal(err)
-	}
-	if err := drainFlush(tr, f); !errors.Is(err, ErrCheck) {
-		t.Fatalf("flush of the flipped run: %v, want ErrCheck", err)
+	for _, part := range []string{"block", "filter"} {
+		t.Run(part, func(t *testing.T) {
+			tr, f, _ := threeRuns(t)
+			compactSpan(t, tr, 0, 3)
+			if part == "block" {
+				flipLastValue(tr.runs[0].blocks[0])
+			} else {
+				tr.runs[0].filter[filterKeyHdr] ^= 1
+			}
+			if _, err := tr.BeginFlush(); err != nil {
+				t.Fatal(err)
+			}
+			if err := drainFlush(tr, f); !errors.Is(err, ErrCheck) {
+				t.Fatalf("flush of the flipped run: %v, want ErrCheck", err)
+			}
+		})
 	}
 }
 
@@ -204,6 +219,18 @@ func TestFlushDecodeCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustPanic(t, "differs from the entries it took", func() { drainFlush(tr, newFakeLog()) })
+}
+
+// With Check on, a planted filter that leaves a key out panics in the flush that built the piece.
+func TestFlushFilterCheck(t *testing.T) {
+	tr := newTree(t, 512)
+	tr.plant.skipFiltered = true
+	put(t, tr, nil, "a", "1")
+	put(t, tr, nil, "b", "2")
+	if _, err := tr.BeginFlush(); err != nil {
+		t.Fatal(err)
+	}
+	mustPanic(t, "left a key out of its filter", func() { drainFlush(tr, newFakeLog()) })
 }
 
 // With Check on, a planted merge that emits keys again after later ones panics in that merge.

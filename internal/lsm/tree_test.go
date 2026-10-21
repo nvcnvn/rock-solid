@@ -311,9 +311,9 @@ func TestEmptyTreeWritesNoRun(t *testing.T) {
 	}
 }
 
-// A flush holds the frozen tree, the one piece being built and the run it becomes, and nothing
-// more: the frozen pages are never copied, the run grows by each piece's block, a second piece is
-// refused until the first is durable, and the heap grows only by the run.
+// A flush holds the frozen tree, the one piece being built, the run it becomes and its filter,
+// and nothing more: the frozen pages are never copied, the run grows by each piece's block, a
+// second piece is refused until the first is durable, and the heap grows only by the run.
 func TestFlushPeakMemory(t *testing.T) {
 	const maxPiece = 4096
 	tr, err := New(Config{MaxPiece: maxPiece})
@@ -326,6 +326,7 @@ func TestFlushPeakMemory(t *testing.T) {
 		t.Fatalf("froze %v: %v", froze, err)
 	}
 	memPages := checkPages(t, tr.mem, tr.mem.root)
+	filterBytes := len(tr.fl.filter.blob)
 	buf, spare := make([]byte, maxPiece), make([]byte, maxPiece)
 	refs := make([]disklog.BlobRef, 0, maxPiece/disklog.BlobRefSize)
 	var before, after runtime.MemStats
@@ -341,20 +342,20 @@ func TestFlushPeakMemory(t *testing.T) {
 			break
 		}
 		pieces++
-		block, _, _, _, err := splitPiece(buf[:n], refs[:0])
+		block, kind, _, _, err := splitPiece(buf[:n], refs[:0])
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(block) > emptyBlockSize {
+		if kind != filterBlock && len(block) > emptyBlockSize {
 			held += len(block)
 		}
-		if tr.pg.inUse != frozenPages+memPages || tr.fl.frozen.bytes != held {
-			t.Fatalf("piece %d: %d pages in use, want %d; run holds %d bytes, its pieces' blocks %d", pieces, tr.pg.inUse, frozenPages+memPages, tr.fl.frozen.bytes, held)
+		if got := tr.fl.frozen.bytes - len(tr.fl.frozen.filter); tr.pg.inUse != frozenPages+memPages || got != held {
+			t.Fatalf("piece %d: %d pages in use, want %d; run holds %d bytes, its pieces' blocks %d", pieces, tr.pg.inUse, frozenPages+memPages, got, held)
 		}
 		if _, _, err := tr.NextPiece(spare); !errors.Is(err, ErrNoFlush) {
 			t.Fatalf("piece %d: a second piece handed out before the first is durable: %v", pieces, err)
 		}
-		peak = max(peak, tr.pg.inUse*pageSize+tr.fl.frozen.bytes+maxPiece)
+		peak = max(peak, tr.pg.inUse*pageSize+held+filterBytes+maxPiece)
 		if err := tr.PieceDurable(disklog.BlobRef{Segment: 1, Block: uint32(pieces), LSN: uint64(pieces)}); err != nil {
 			t.Fatal(err)
 		}
@@ -363,14 +364,14 @@ func TestFlushPeakMemory(t *testing.T) {
 	if _, err := tr.CheckpointDone(); err != nil {
 		t.Fatal(err)
 	}
-	if tr.Runs() != 1 || tr.RunBytes() != held || tr.pg.inUse != memPages {
-		t.Fatalf("%d runs of %d bytes, want 1 of %d; %d pages in use, want %d", tr.Runs(), tr.RunBytes(), held, tr.pg.inUse, memPages)
+	if tr.Runs() != 1 || tr.RunBytes() != held+filterBytes || tr.pg.inUse != memPages {
+		t.Fatalf("%d runs of %d bytes, want 1 of %d; %d pages in use, want %d", tr.Runs(), tr.RunBytes(), held+filterBytes, tr.pg.inUse, memPages)
 	}
 	if entries, _ := runKinds(tr.runs[0]); entries != 2*2000 {
 		t.Fatalf("run holds %d entries, want %d", entries, 2*2000)
 	}
-	if bound := (frozenPages+memPages)*pageSize + maxPiece + held; peak > bound {
-		t.Fatalf("peak %d bytes over the frozen tree, a piece and the run, %d", peak, bound)
+	if bound := (frozenPages+memPages)*pageSize + maxPiece + held + filterBytes; peak > bound {
+		t.Fatalf("peak %d bytes over the frozen tree, a piece, the run and its filter, %d", peak, bound)
 	}
 	alloc := int(after.TotalAlloc - before.TotalAlloc)
 	t.Logf("%d pieces; frozen tree %d B, run %d B, heap allocated %d B", pieces, frozenPages*pageSize, held, alloc)
@@ -396,9 +397,9 @@ func TestMemtableOverRuns(t *testing.T) {
 	}
 }
 
-// Without Bloom filters a get searches each layer once: the memtable, the frozen one during a
-// flush, and each run's fence pointers and one block; a run whose bounds leave the key out is
-// not searched.
+// A get searches the memtable, the frozen one during a flush, and each run whose filter lets the
+// key through, by its fence pointers and one block; a run whose bounds leave the key out is not
+// searched. Every run's filter is probed once.
 func TestGetTouchesEachLayerOnce(t *testing.T) {
 	tr := newTree(t, 1<<20)
 	f := newFakeLog()
@@ -413,10 +414,11 @@ func TestGetTouchesEachLayerOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	put(t, tr, nil, "k8", "v")
+	noFalsePositives(t, tr, "missing", "k0", "k2", "zz", "")
 	for _, c := range []struct {
 		k      string
 		probes int
-	}{{"missing", 5}, {"k0", 5}, {"zz", 2}, {"", 2}} {
+	}{{"missing", 2}, {"k0", 3}, {"k2", 3}, {"zz", 2}, {"", 2}} {
 		before := tr.Searches()
 		tr.Get([]byte(c.k))
 		if n := tr.Searches() - before; n != c.probes {
@@ -861,12 +863,15 @@ func TestFlushFailedAfterARunCompleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 512)
-	n, root, err := tr.NextPiece(buf)
-	if err != nil || !root {
-		t.Fatalf("compacted run's piece %d root %v: %v", n, root, err)
-	}
-	if err := tr.PieceDurable(f.put(buf[:n])); err != nil {
-		t.Fatal(err)
+	for root := false; !root; {
+		n, r, err := tr.NextPiece(buf)
+		if err != nil || n == 0 {
+			t.Fatalf("compacted run's piece of %d bytes: %v", n, err)
+		}
+		if err := tr.PieceDurable(f.put(buf[:n])); err != nil {
+			t.Fatal(err)
+		}
+		root = r
 	}
 	if dead := tr.FlushFailed(); len(dead) != 0 || !tr.Frozen() {
 		t.Fatalf("dead %v, frozen %v", dead, tr.Frozen())

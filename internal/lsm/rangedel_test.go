@@ -195,6 +195,16 @@ var rangeConfigs = []Config{
 	{MaxPiece: 1 << 20, Check: true},
 	{MaxPiece: 4096, RunLimit: 2, Check: true},
 	{MaxPiece: 512, RunLimit: 1, Check: true},
+	{MaxPiece: 4096, Check: true, Filter: Prefixes, Prefix: prefix3},
+	{MaxPiece: 256, Check: true, Filter: KeysAndPrefixes, Prefix: prefix3},
+}
+
+// prefix3 groups the property tests' keys k000 to k299 ten to a prefix; shorter keys have none.
+func prefix3(k []byte) int {
+	if len(k) < 3 {
+		return 0
+	}
+	return 3
 }
 
 // rangeModel runs the LSM runs spike's map-model test on one seed: 3,000 random puts, removals and
@@ -215,6 +225,7 @@ func rangeModel(t *testing.T, cfg Config, seed uint64, plant plants) string {
 	for i := range 300 {
 		probes = append(probes, key(i), key(i)+"~")
 	}
+	probes = append(probes, "k", "k0", "k29")
 	var view *View
 	var viewModel model
 	merge := func(c *Compaction) error {
@@ -279,14 +290,18 @@ func rangeModel(t *testing.T, cfg Config, seed uint64, plant plants) string {
 	return ""
 }
 
-// [property] Seeds 0-59 under five configurations: gets, floors and a full scan read as a map.
+// [property] Seeds 0-59 under seven configurations, two with prefix filters: gets, floors, prefix
+// floors and scans from every probe read as a map.
 func TestRangeRemovalsMatchModel(t *testing.T) {
-	for _, cfg := range rangeConfigs {
-		for seed := range uint64(60) {
-			if d := rangeModel(t, cfg, seed, plants{}); d != "" {
-				t.Fatalf("%+v seed %d: %s", cfg, seed, d)
+	for i, cfg := range rangeConfigs {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			t.Parallel()
+			for seed := range uint64(60) {
+				if d := rangeModel(t, cfg, seed, plants{}); d != "" {
+					t.Fatalf("%+v seed %d: %s", cfg, seed, d)
+				}
 			}
-		}
+		})
 	}
 }
 
@@ -690,9 +705,10 @@ func TestRemovePrefixAsRange(t *testing.T) {
 	checkReads(t, tr, m, probes)
 }
 
-// A run with fragments in its format: the entry piece first, then the fragment piece as its root,
-// marked in its trailer. Loading rejects fragment blocks that are truncated, unsorted, overlapping
-// or not marked.
+// A run with fragments in its format: the entry piece first, then the fragment piece, then the
+// filter piece as its root, each marked in its trailer. Loading rejects fragment blocks that are
+// truncated, unsorted, overlapping or not marked, a run with no filter or a truncated one, and
+// entries or fragments after the filter.
 func TestRunFragmentFormat(t *testing.T) {
 	tr := newTree(t, 128)
 	f := newFakeLog()
@@ -704,7 +720,7 @@ func TestRunFragmentFormat(t *testing.T) {
 	roots = roots[len(roots)-1:]
 	root := f.blobs[roots[0]]
 	refs, err := RootRefs(root, nil)
-	if err != nil || len(refs) != 1 {
+	if err != nil || len(refs) != 2 {
 		t.Fatalf("refs %v: %v", refs, err)
 	}
 	entries := []byte("\x01\x00" + "\x00\x01\x02a\x011" + "\x00\x00\x00\x00\x01\x00\x00\x00" +
@@ -712,12 +728,22 @@ func TestRunFragmentFormat(t *testing.T) {
 	if got := f.blobs[refs[0]]; !bytes.Equal(got, entries) {
 		t.Fatalf("entry piece\n%q\nwant\n%q", got, entries)
 	}
-	frags := append([]byte("\x01\x00"+"\x00\x01\x01bd"+"\x00\x00\x00\x00\x01\x00\x00\x00"), disklog.AppendBlobRef(nil, refs[0])...)
-	frags = append(frags, "\x01"+"\x02\x00\x00\x00\x00\x00\x00\x00"+"\x01\x00"...)
-	if !bytes.Equal(root, frags) {
-		t.Fatalf("fragment piece\n%q\nwant\n%q", root, frags)
+	frags := []byte("\x01\x00" + "\x00\x01\x01bd" + "\x00\x00\x00\x00\x01\x00\x00\x00" +
+		"\x01" + "\x02\x00\x00\x00\x00\x00\x00\x00" + "\x00\x00")
+	if got := f.blobs[refs[1]]; !bytes.Equal(got, frags) {
+		t.Fatalf("fragment piece\n%q\nwant\n%q", got, frags)
 	}
-
+	line := make([]byte, 64)
+	line[3], line[10], line[17], line[24], line[54], line[60] = 0x40, 0x20, 0x10, 0x08, 0x01, 0x80
+	filter := append([]byte("\x01\x00"+"\x00"+"\x01\x00\x00\x00\x00\x00\x00\x00"), line...)
+	filter = append(filter, "\x06"+"\x01\x00\x00\x00"...)
+	for _, r := range refs {
+		filter = disklog.AppendBlobRef(filter, r)
+	}
+	filter = append(filter, "\x02"+"\x02\x00\x00\x00\x00\x00\x00\x00"+"\x02\x00"...)
+	if !bytes.Equal(root, filter) {
+		t.Fatalf("filter piece\n%q\nwant\n%q", root, filter)
+	}
 	piece := func(block string, kind byte, refs []disklog.BlobRef) []byte {
 		p := []byte("\x01\x00" + block)
 		for _, r := range refs {
@@ -728,7 +754,7 @@ func TestRunFragmentFormat(t *testing.T) {
 		return binary.LittleEndian.AppendUint16(p, uint16(len(refs)))
 	}
 	pieces := func(fragBlock string, kind byte) [][]byte {
-		return [][]byte{entries, piece(fragBlock, kind, refs)}
+		return [][]byte{entries, piece(fragBlock, kind, nil), root}
 	}
 	restarts := "\x00\x00\x00\x00\x01\x00\x00\x00"
 	if err := newTree(t, 128).LoadRun(roots[0], pieces("\x00\x01\x01bd"+restarts, fragBlock)); err != nil {
@@ -744,14 +770,22 @@ func TestRunFragmentFormat(t *testing.T) {
 			t.Errorf("%s fragment block: %v, want ErrMalformed", name, err)
 		}
 	}
-	for _, kind := range []byte{entryBlock, 2} {
+	for _, kind := range []byte{entryBlock, filterBlock, 3} {
 		if err := newTree(t, 128).LoadRun(roots[0], pieces("\x00\x01\x01bd"+restarts, kind)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("fragment block marked %d: %v, want ErrMalformed", kind, err)
 		}
 	}
-	behind := [][]byte{piece("\x00\x01\x01bd"+restarts, fragBlock, nil), piece("\x00\x01\x02a\x011"+restarts, entryBlock, refs)}
-	if err := newTree(t, 128).LoadRun(roots[0], behind); !errors.Is(err, ErrMalformed) {
-		t.Errorf("entries after fragments: %v, want ErrMalformed", err)
+	fragRoot := piece("\x00\x01\x01bd"+restarts, fragBlock, refs[:1])
+	shortFilter := piece(string(filter[2:2+9+64+4]), filterBlock, refs)
+	for name, ps := range map[string][][]byte{
+		"entries after fragments": {piece("\x00\x01\x01bd"+restarts, fragBlock, nil), entries, root},
+		"no filter":               {entries, fragRoot},
+		"truncated filter":        {entries, frags, shortFilter},
+		"fragments after filter":  {entries, piece(string(filter[2:2+9+64+5]), filterBlock, nil), piece("\x00\x01\x01bd"+restarts, fragBlock, refs)},
+	} {
+		if err := newTree(t, 128).LoadRun(roots[0], ps); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v, want ErrMalformed", name, err)
+		}
 	}
 }
 

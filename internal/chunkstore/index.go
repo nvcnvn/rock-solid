@@ -148,7 +148,24 @@ type Index struct {
 	pointRemovals bool
 }
 
-// NewIndex makes an index over tree, which holds the index alone.
+// Prefix is the length of an index key's prefix for run filters: its chunk's, or a record count's whole key.
+func Prefix(k []byte) int {
+	switch {
+	case len(k) >= recordSize && core.PoolID(binary.BigEndian.Uint32(k)) == RecordPool:
+		return recordSize
+	case len(k) >= chunkKeySize:
+		return chunkKeySize
+	}
+	return 0
+}
+
+// TreeConfig is cfg with run filters of each key's Prefix, which the index's lookups probe.
+func TreeConfig(cfg lsm.Config) lsm.Config {
+	cfg.Filter, cfg.Prefix = lsm.Prefixes, Prefix
+	return cfg
+}
+
+// NewIndex makes an index over tree, which holds the index alone, configured by TreeConfig.
 func NewIndex(tree *lsm.Tree) *Index { return &Index{tree: tree} }
 
 // Tree is the LSM tree the index is in, for its owner to flush and restore.
@@ -301,14 +318,14 @@ func (x *Index) Release(pool core.PoolID, c core.ChunkID, version uint64) {
 // overlapping appends the extents of map version that cover any block in [first, end).
 func (x *Index) overlapping(dst []Extent, pool core.PoolID, c core.ChunkID, version uint64, first uint16, end int) []Extent {
 	k := x.extentKey(pool, c, version, first)
-	if fk, v, ok := x.tree.Floor(k); ok && bytes.HasPrefix(fk, k[:frozenKeySize]) {
+	if fk, v, ok := x.tree.FloorPrefix(k); ok && bytes.HasPrefix(fk, k[:frozenKeySize]) {
 		if e, ok := decodeExtent(fk, v); ok && e.First < first && e.end() > int(first) {
 			dst = append(dst, e)
 		}
 	}
 	k = x.extentKey(pool, c, version, first)
 	x.tree.Iter(&x.it)
-	for ok := x.it.SeekGE(k); ok && bytes.HasPrefix(x.it.Key(), k[:frozenKeySize]); ok = x.it.Next() {
+	for ok := x.it.SeekPrefixGE(k); ok && bytes.HasPrefix(x.it.Key(), k[:frozenKeySize]); ok = x.it.Next() {
 		e, ok := decodeExtent(x.it.Key(), x.it.Value())
 		if !ok || int(e.First) >= end {
 			break
@@ -401,7 +418,7 @@ func (x *Index) Lookup(pool core.PoolID, c core.ChunkID, b uint16) (Extent, bool
 // live map.
 func (x *Index) lookup(pool core.PoolID, c core.ChunkID, version uint64, b uint16) (Extent, bool) {
 	k := x.extentKey(pool, c, version, b)
-	fk, v, ok := x.tree.Floor(k)
+	fk, v, ok := x.tree.FloorPrefix(k)
 	if !ok || !bytes.HasPrefix(fk, k[:chunkKeySize]) {
 		return Extent{}, false
 	}
@@ -474,7 +491,7 @@ func (x *Index) frozen(dst []uint64, pool core.PoolID, c core.ChunkID) []uint64 
 	}
 	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), 1)
 	x.tree.Iter(&x.it)
-	for ok := x.it.SeekGE(x.key); ok && bytes.HasPrefix(x.it.Key(), x.key[:chunkKeySize]); {
+	for ok := x.it.SeekPrefixGE(x.key); ok && bytes.HasPrefix(x.it.Key(), x.key[:chunkKeySize]); {
 		k := x.it.Key()
 		if len(k) != frozenKeySize {
 			ok = x.it.Next()
@@ -486,7 +503,7 @@ func (x *Index) frozen(dst []uint64, pool core.PoolID, c core.ChunkID) []uint64 
 			break
 		}
 		x.key = binary.BigEndian.AppendUint64(x.key[:chunkKeySize], v+1)
-		ok = x.it.SeekGE(x.key)
+		ok = x.it.SeekPrefixGE(x.key)
 	}
 	return dst
 }
