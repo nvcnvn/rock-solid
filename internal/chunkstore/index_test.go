@@ -432,7 +432,8 @@ func BenchmarkRead8Blocks(b *testing.B) {
 // A read of blocks 3, 4 and 700 of a chunk of one-block extents spread over three runs and the
 // memtable, through one Reader, probes each run's filter once with the chunk's prefix, searches
 // each layer holding the chunk once for 3, serves 4 by stepping from 3 without a search, reads as
-// Lookup does, and allocates nothing; 700, too far to step to, and 2, below it, search again.
+// Lookup does, and allocates nothing; 700, too far to step to, and 2, below it, search again. A
+// block 16 extents past each layer's candidate steps; one 17 past searches.
 func TestReaderSteps(t *testing.T) {
 	x := newIndexWith(t, lsm.Config{MaxPiece: replayMaxPiece, Check: true}, false)
 	s := &runStore{blobs: map[disklog.BlobRef][]byte{}}
@@ -460,7 +461,7 @@ func TestReaderSteps(t *testing.T) {
 	for _, c := range []struct {
 		block    uint16
 		searches int
-	}{{3, 4}, {4, 0}, {700, 4}, {2, 4}} {
+	}{{3, 4}, {4, 0}, {700, 4}, {2, 4}, {2 + 4*16, 0}, {2 + 4*(2*16+1), 4}} {
 		before := r.it.Searches()
 		e, ok := r.Lookup(c.block)
 		if le, lok := x.Lookup(1, chunk(7), c.block); !ok || e != le || ok != lok {
@@ -481,6 +482,25 @@ func TestReaderSteps(t *testing.T) {
 	}); a != 0 {
 		t.Fatalf("a read of three blocks allocates %v", a)
 	}
+}
+
+// A Reader read after the index changes panics under Check: the memtable pages it holds may have
+// changed under it.
+func TestReaderAfterChangePanics(t *testing.T) {
+	x := newIndex(t)
+	apply(t, x, record(100, disklog.WriteEntry(1, chunk(1), 1, 0, 1)))
+	var r Reader
+	x.Open(&r, 1, chunk(1))
+	if _, ok := r.Lookup(0); !ok {
+		t.Fatal("block 0 missing")
+	}
+	apply(t, x, record(102, disklog.WriteEntry(1, chunk(1), 2, 1, 1)))
+	defer func() {
+		if recover() == nil {
+			t.Fatal("a read after a write did not panic")
+		}
+	}()
+	r.Lookup(1)
 }
 
 func BenchmarkApplyWrite(b *testing.B) {

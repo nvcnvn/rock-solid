@@ -63,7 +63,8 @@ func TestScanEdges(t *testing.T) {
 
 // A prefix floor of ascending keys searches each layer once, then steps; a key more than
 // forwardSteps entries on searches each layer again, as does one below the last; one iterator
-// probes the filters once for its prefix, and none of it allocates.
+// probes the filters once for its prefix, and none of it allocates. A floor exactly forwardSteps
+// entries past each layer's candidate steps; one more searches.
 func TestFloorPrefixSteps(t *testing.T) {
 	tr, err := New(Config{MaxPiece: 1 << 20, Check: true, Filter: Prefixes, Prefix: chunkPrefix})
 	if err != nil {
@@ -85,7 +86,7 @@ func TestFloorPrefixSteps(t *testing.T) {
 	tr.Iter(&it)
 	for _, c := range []struct {
 		block, searches, filters int
-	}{{3, 4, 4}, {4, 0, 0}, {5, 0, 0}, {700, 3, 0}, {700, 0, 0}, {2, 3, 0}} {
+	}{{3, 4, 4}, {4, 0, 0}, {5, 0, 0}, {700, 3, 0}, {700, 0, 0}, {2, 3, 0}, {2 + 3*forwardSteps, 0, 0}, {2 + 3*(2*forwardSteps+1), 3, 0}} {
 		s, fp := it.Searches(), it.FilterProbes()
 		k, v, ok := it.FloorPrefix([]byte(key(1, c.block)))
 		if !ok || string(k) != key(1, c.block) || string(v) != fmt.Sprint(c.block) {

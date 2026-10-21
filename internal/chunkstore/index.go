@@ -524,9 +524,7 @@ func frozenIn(dst []uint64, it *lsm.Iter, key []byte, pool core.PoolID, c core.C
 	return dst, key
 }
 
-// Reader reads blocks of one chunk for one read, until the index next changes: opened once, it
-// probes the run filters once with the chunk's prefix and serves ascending blocks by stepping
-// forward from the last one. Reuse it across reads.
+// Reader reads blocks of one chunk, ascending, until the index next changes; reuse it across reads.
 type Reader struct {
 	it      lsm.Iter
 	key     []byte

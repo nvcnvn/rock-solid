@@ -387,6 +387,7 @@ func (t *Tree) Install(c *Compaction) error {
 	if keep && t.plant.installOldest {
 		t.runs = append(t.runs, c.out)
 	}
+	t.gen++
 	t.checkRuns()
 	return nil
 }

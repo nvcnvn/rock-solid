@@ -76,6 +76,7 @@ type Tree struct {
 	it          iterState
 	linear      bool
 	plant       plants
+	gen         uint64
 }
 
 // plants are bugs a test turns on to show that its checks catch them.
@@ -142,6 +143,7 @@ func (t *Tree) Put(k, v []byte) error {
 		t.mem.cut(k, t.maxFrag)
 	}
 	t.mem.put(k, kindSet, v)
+	t.gen++
 	return nil
 }
 
@@ -154,6 +156,7 @@ func (t *Tree) DeleteRange(lo, hi []byte) error {
 		return ErrTooLarge
 	}
 	t.mem.deleteRange(lo, hi)
+	t.gen++
 	return nil
 }
 
@@ -163,6 +166,7 @@ func (t *Tree) Delete(k []byte) error {
 		return ErrTooLarge
 	}
 	t.mem.put(k, kindDel, nil)
+	t.gen++
 	return nil
 }
 
@@ -193,10 +197,11 @@ func (t *Tree) FloorPrefix(k []byte) ([]byte, []byte, bool) {
 	return t.it.floorPrefix(k)
 }
 
-// Iter opens it on the tree; it is valid until the tree's next write. Seek it before reading.
+// Iter opens it on the tree; it is valid until the tree's next write, flush step or merge install, which a prefix floor checks under Check. Seek it before reading.
 func (t *Tree) Iter(it *Iter) {
 	st := t.state()
 	it.s.reset(&st, false)
+	it.tree, it.gen = t, t.gen
 }
 
 // MemtableBytes is the memory the memtables' pages take.
@@ -259,7 +264,10 @@ func (v *View) FloorPrefix(k []byte) ([]byte, []byte, bool) {
 }
 
 // Iter opens it on the view. Seek it before reading.
-func (v *View) Iter(it *Iter) { it.s.reset(&v.st, false) }
+func (v *View) Iter(it *Iter) {
+	it.s.reset(&v.st, false)
+	it.tree = nil
+}
 
 // Close releases what the view pins.
 func (v *View) Close() {
@@ -284,6 +292,7 @@ func (t *Tree) BeginFlush() (bool, error) {
 		t.frozen, t.frozenSeq = t.mem, t.nextSeq
 		t.nextSeq++
 		t.mem = newMemtable(&t.pg)
+		t.gen++
 		froze = true
 	}
 	fl := &flush{named: slices.Clone(t.runs), older: runIters(t.runs), olderFrag: runIters(t.runs)}
@@ -499,6 +508,7 @@ func (t *Tree) finishWrite() {
 		return
 	}
 	fl.written = true
+	t.gen++
 	if fl.frozen != nil {
 		fl.frozen.setBounds()
 		fl.frozen.checksum()
@@ -621,6 +631,7 @@ func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
 		at = 0
 	}
 	t.runs = slices.Insert(t.runs, at, r)
+	t.gen++
 	t.written = append(t.written, r)
 	t.nextSeq = max(t.nextSeq, seq+1)
 	return nil

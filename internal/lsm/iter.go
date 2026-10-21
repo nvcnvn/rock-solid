@@ -580,6 +580,7 @@ func (it *iterState) filterOut(fk []byte, on bool) {
 	for i := range it.srcs {
 		s := &it.srcs[i]
 		s.out = on && s.run != nil && !it.mayHold(s.run, h)
+		s.fwd = s.fwd && !s.out
 	}
 }
 
@@ -744,7 +745,9 @@ func (it *iterState) setPrefix(k []byte) {
 
 // Iter walks a tree or view in key order, skipping removed keys, until the tree's next write or the view closes.
 type Iter struct {
-	s iterState
+	s    iterState
+	tree *Tree
+	gen  uint64
 }
 
 // SetUpperBound makes the iterator stop before hi, nil for no bound, until it is opened again.
@@ -772,6 +775,9 @@ func (it *Iter) SeekPrefixGE(k []byte) bool {
 
 // FloorPrefix returns the greatest key <= k with k's prefix, or any when k has none, and its value until the iterator's next read; a floor at or above the last steps each layer forward instead of searching it.
 func (it *Iter) FloorPrefix(k []byte) ([]byte, []byte, bool) {
+	if t := it.tree; t != nil && t.cfg.Check && t.gen != it.gen {
+		panic("lsm: iterator read after its tree changed")
+	}
 	it.s.setPrefix(k)
 	it.s.forward, it.s.cur = true, -1
 	return it.s.floor(k)
