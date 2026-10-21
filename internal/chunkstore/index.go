@@ -436,6 +436,51 @@ func (x *Index) Live(header core.LBA) uint32 {
 	return binary.LittleEndian.Uint32(v)
 }
 
+// RecordLive is a record of the log, by its header's address, and how many blocks the maps refer to in it.
+type RecordLive struct {
+	Header core.LBA
+	Live   uint32
+}
+
+// Records appends to dst, by address, each record whose header lies in [lo, hi) that a map refers to.
+func (x *Index) Records(dst []RecordLive, lo, hi core.LBA) []RecordLive {
+	x.tree.Iter(&x.it)
+	for ok := x.it.SeekGE(x.recordKey(lo)); ok; ok = x.it.Next() {
+		k := x.it.Key()
+		if len(k) != recordSize || core.PoolID(binary.BigEndian.Uint32(k)) != RecordPool {
+			break
+		}
+		h := core.LBA(binary.BigEndian.Uint64(k[4:]))
+		if h >= hi {
+			break
+		}
+		dst = append(dst, RecordLive{Header: h, Live: binary.LittleEndian.Uint32(x.it.Value())})
+	}
+	return dst
+}
+
+// LiveBlocks sets bit b − first of live for each block b of [first, first+count) of the chunk that a map, live or frozen, still stores at lba + (b − first).
+func (x *Index) LiveBlocks(pool core.PoolID, c core.ChunkID, first, count uint16, lba core.LBA, live *[core.BlocksPerChunk / 64]uint64) {
+	end := int(first) + int(count)
+	x.vers = append(x.frozen(x.vers[:0], pool, c), 0, 0)
+	for i := 0; i < len(x.vers); i += 2 {
+		v := x.vers[i]
+		if v == 0 && i+2 < len(x.vers) {
+			continue
+		}
+		x.exts = x.overlapping(x.exts[:0], pool, c, v, first, end)
+		for _, e := range x.exts {
+			lo, hi := max(int(e.First), int(first)), min(e.end(), end)
+			if e.LBA == 0 || e.BlockLBA(uint16(lo)) != lba+core.LBA(lo-int(first)) {
+				continue
+			}
+			for b := lo - int(first); b < hi-int(first); b++ {
+				live[b/64] |= 1 << (b % 64)
+			}
+		}
+	}
+}
+
 // SegmentLive adds to live[s] the blocks the maps refer to in the records of each segment s of segmentBlocks blocks, a block a live and a frozen map share counting twice.
 func (x *Index) SegmentLive(segmentBlocks uint32, live []uint32) {
 	x.tree.Iter(&x.it)

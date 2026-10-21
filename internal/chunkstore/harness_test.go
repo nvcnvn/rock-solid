@@ -40,6 +40,8 @@ type harness struct {
 	// executed counts the actions run since format; the step that would run action crashAt panics with errCrash instead.
 	executed int
 	crashAt  int
+	// noMerge leaves merges unrun.
+	noMerge bool
 }
 
 var errCrash = errors.New("crash")
@@ -60,13 +62,19 @@ func testConfig() Config {
 }
 
 func newHarness(t testing.TB, cfg Config) *harness {
-	h := &harness{t: t, pool: sim.NewPool(32<<20, 0), disk: sim.NewDisk(diskBytes / core.BlockSize), cfg: cfg,
-		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, crashAt: -1}
-	h.ctx = core.Context{Now: 1, Raw: 2, Pool: h.pool}
 	geo, err := disklog.GeometryFor(diskBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return geoHarness(t, cfg, geo)
+}
+
+// geoHarness is newHarness on a disk cut as geo, whatever its size.
+func geoHarness(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
+	h := &harness{t: t, pool: sim.NewPool(32<<20, 0), disk: sim.NewDisk(geo.DiskBlocks()), cfg: cfg,
+		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, crashAt: -1}
+	h.ctx = core.Context{Now: 1, Raw: 2, Pool: h.pool}
+	var err error
 	if h.s, err = Format(&h.ctx, cfg, disklog.Superblock{LogID: 0x5eed, Geometry: geo}, &h.out); err != nil {
 		t.Fatal(err)
 	}

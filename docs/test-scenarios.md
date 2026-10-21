@@ -1867,18 +1867,24 @@ on the 1 GiB disk one capacity is 262,144 blocks):
 - Net-gain guard, header blocks rounded up per record (design: "a victim must free more space than
   copying it costs, header blocks included"). In 16,384-block (64 MiB) segments a copy record of
   single-block extents holds 253 data blocks and 3 header blocks (56 + 253 × 45 = 11,441 bytes; 256
-  blocks fill the 1 MiB cap), so L live blocks cost L + 3⌈L ÷ 253⌉. A victim of 16,191 live blocks
-  costs 16,383 and is picked; 16,192 costs 16,384 and is refused. Estimated in exact bytes, the
+  blocks fill the 1 MiB cap), so L live blocks cost L + 3⌈L ÷ 253⌉. Estimated in exact bytes, the
   guard let the cleaner pick 98.9% live victims and livelock (cleaner streams spike).
-- Open: whether a copy record's own segment header is charged.
-- Age cap regression, scripted in Go: a 1 GiB disk at 90% full with 20% of the data frozen by a
-  snapshot; each of 1,000 passes gains at least one segment, and a planted uncapped score
-  livelocks (cleaner spike C2: 1,000 passes without a free segment).
+- The guard also charges the header of the segment the copies open: a victim is picked only when
+  its cost plus that block is below a segment. A victim of 16,190 live blocks costs 16,382 and is
+  picked; 16,191 costs 16,383 and is refused. Uncharged, a copy of a nearly full 16-block segment
+  filled a new segment exactly, and a disk of live data churned forever without a write failing.
+- Age cap regression, scripted in Go as the cleaner spike modelled it: a 1 GiB disk of 4,096
+  segments at 90% full, 20% of the data frozen by a snapshot, 90/10 hot/cold overwrites, copies in
+  age order with moved blocks keeping their write time. Capped, at most a few passes in a row gain
+  no segment over 2 million writes; a planted uncapped score takes more passes for the same writes.
+  This model's guard keeps the uncapped cleaner out of the spike's livelock (C2: 1,000 passes
+  without a free segment), which needed the spike's own record and header layout.
 - A segment holding a piece the current manifest lists (Manifest edits and snapshots), or a run
   piece or record that the newest manifest named by a durable segment header needs (a record after
-  its replay points), or moves not yet applied, is never a victim. A used segment
-  with no live block (one that rounds recovery dropped left empty) is freed without copying
-  anything.
+  its replay points), or moves not yet applied, is never a victim; nor is the open segment of any
+  lane, nor any segment before a manifest is named. A segment holding a manifest's piece asks for
+  an early snapshot instead. A used segment with no live block (one that rounds recovery dropped
+  left empty, or whose blocks were all overwritten) is freed without reading or copying anything.
 - Live counts come from the usage table. The owner hands the log every change to a record's
   count past the blocks it wrote (the index keeps them while tracking is on): after every step
   of the store's tests, each segment outside the metadata stream counts exactly what the
@@ -1897,13 +1903,18 @@ on the 1 GiB disk one capacity is 262,144 blocks):
 
 A pass:
 
-- The worker checks liveness, verifies each block's CRC32C (a failing block is never copied;
-  Open: what the pass does with it, since a single node has no other copy), reads around the
-  header-block cache, groups blocks by chunk, and writes records of copy entries into the cold
-  stream, never a manifest piece. It sends its moves to the owner as an event.
+- The owner lists each victim's live records from the index's record counts, reads their
+  headers around the header-block cache, and finds each entry's blocks a map still stores there;
+  each run of them is read into a buffer of its own. The worker verifies each block's CRC32C and
+  sorts the runs; they go to the cold stream's cleaner lane as copy entries, never a manifest
+  piece, and each move applies when its copy record's Durable event reaches the owner.
+- A victim holding a block whose checksum fails is quarantined: nothing of it is copied, it is
+  never a victim again, the pass cleans its other victims, and reads of the block keep failing
+  with a checksum error.
 - Grouping: a victim holding chunk 7 block 3, chunk 3 block 1, chunk 7 block 4 and chunk 3
-  block 2 gives copy entries chunk 3 [1, 2] and chunk 7 [3, 4], each contiguous. Open: the order
-  between chunks.
+  block 2 gives copy entries in the index's key order (pool, hash of the chunk, chunk, block):
+  each chunk's entries side by side and ascending. One entry spans blocks whose sources are
+  consecutive in one record.
 - Live run pieces in a victim are never copied: the cleaner marks each run holding one for a
   rewrite, a merge of that run alone, in steps when the tree has them, which writes it again in
   its place; once the manifest naming it is durable every old piece is reported dead and the
@@ -1928,10 +1939,13 @@ A pass:
   nothing. A plain write entry in its place would map block 0 back to v1.
 - A rebuild from record headers maps every copy entry exactly where the owner applied its move,
   record counts included (simulator invariant).
-- Apply costs 42 to 72 ns per move on the owner, one index entry per moved block, 0 allocations
-  (benchmark bar from the [parallel cleaner spike](../spikes/parallel-cleaner/), P4).
-- Workers per disk: see Write admission.
-- The cleaner writes into the reserve when only the reserve is free.
+- Apply costs the owner one index entry per moved block, 0 allocations (`BenchmarkApplyMove`):
+  1.5 µs per move on an Apple M4 Pro, as much as applying a write; the [parallel cleaner
+  spike](../spikes/parallel-cleaner/)'s Rust array index took 42 to 72 ns (P4).
+- Workers per disk: one pass, and a second once free segments outside the reserve fall two below
+  `clean_free` (14 of the default 16). Write admission covers slowing writes.
+- The cleaner writes into the reserve when only the reserve is free, and a disk filled to its
+  reserve finishes a pass; writes fail with NoSpace only when no victim passes the guard.
 
 Freed segments and `NextSeq` (design.md, Recovery: a header of this log below the loaded
 manifest's `NextSeq` is judged by the usage table, one at or past it was opened after the base).
@@ -2001,9 +2015,10 @@ Invariants (simulator) and faults:
   after the copy record is durable and before the moves are applied (replay applies them with the
   same check, and replay applying a move without it trips the crash oracle on at least one seed of
   50); a crash after the victim is free in the table and before its TRIM.
-- Performance bars (the parallel cleaner spike's P3, at 50,000 writes/s): the owner's work per
-  write with a worker 1.6 to 1.8 µs at 90 to 95% full against 5.9 to 11 µs inline, its write p99
-  about 6 µs. Open: whether these Rust figures are the Go benchmark's bar.
+- Performance bars: the parallel cleaner spike's P3 figures (at 50,000 writes/s, the owner's work
+  per write with a worker 1.6 to 1.8 µs at 90 to 95% full against 5.9 to 11 µs inline, its write
+  p99 about 6 µs) are Rust's; the Go bar is the measured `BenchmarkApplyMove` above, and the
+  owner's work per write is measured with the event loop.
 - Write amplification at 80 / 90 / 95% belongs to "Cleaner write amplification in simulation".
 
 ## Chunk slots

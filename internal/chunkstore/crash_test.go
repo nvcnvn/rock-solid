@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"fmt"
 	"maps"
 	"slices"
 	"testing"
@@ -103,6 +104,13 @@ func (m *storeModel) at(c core.ChunkID, b uint16, epoch uint64) []byte {
 // epoch up to maxEpoch, with the store.
 func checkModel(t testing.TB, h *harness, m *storeModel, chunks []core.ChunkID, maxEpoch uint64) {
 	t.Helper()
+	if msg := modelDiff(h, m, chunks, maxEpoch); msg != "" {
+		t.Fatal(msg)
+	}
+}
+
+// modelDiff describes the first block where the store differs from the model, or is empty.
+func modelDiff(h *harness, m *storeModel, chunks []core.ChunkID, maxEpoch uint64) string {
 	ix := h.s.Index()
 	for _, c := range chunks {
 		blocks := map[uint16]bool{}
@@ -128,11 +136,12 @@ func checkModel(t testing.TB, h *harness, m *storeModel, chunks []core.ChunkID, 
 			for b := range blocks {
 				if got, want := h.block(c, b, epoch), m.at(c, b, epoch); !bytes.Equal(got, want) {
 					i := firstDiff(got, want)
-					t.Fatalf("chunk %v block %d at epoch %d: byte %d is %#x, the model holds %#x", c, b, epoch, i, got[i], want[i])
+					return fmt.Sprintf("chunk %v block %d at epoch %d: byte %d is %#x, the model holds %#x", c, b, epoch, i, got[i], want[i])
 				}
 			}
 		}
 	}
+	return ""
 }
 
 // crashChunks are the chunks of the crash workload.

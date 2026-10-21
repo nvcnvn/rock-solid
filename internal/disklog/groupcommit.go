@@ -465,6 +465,7 @@ type chainEntry struct {
 type liveChain struct {
 	pos     ManifestPos
 	entries []chainEntry
+	replay  uint64
 }
 
 type formatPhase uint8
@@ -499,6 +500,8 @@ type Log struct {
 	usage      []SegmentUsage
 	changed    []uint64
 	streams    []Stream
+	written    uint64
+	writtenAt  []uint64
 	pieces     pieceSet
 	dying      []dyingPiece
 	namedLSN   uint64
@@ -579,6 +582,8 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		usage:      make([]SegmentUsage, sb.SegmentCount),
 		changed:    make([]uint64, (sb.SegmentCount+63)/64),
 		streams:    make([]Stream, sb.SegmentCount),
+		written:    sb.DiskBlocks(),
+		writtenAt:  make([]uint64, sb.SegmentCount),
 		pieces:     newPieceSet(sb.SegmentCount),
 		lanes:      make([]lane, laneMeta+1+workers),
 		rounds:     make([]round, cfg.CommitDepth),
@@ -1220,6 +1225,7 @@ func (l *Log) retire(out *Output) {
 	u := &l.usage[r.segment]
 	u.State, u.Newest = SegmentUsed, r.lsn
 	u.Live += uint32(r.bytes/core.BlockSize) - r.headerBlocks
+	l.noteWritten(r)
 	l.registerBlobs(r)
 	if r.opened != 0 {
 		l.durableSeq = r.opened + 1
@@ -1265,7 +1271,7 @@ func (l *Log) checkpointProgress(r *round, out *Output) {
 				l.chain = append(slices.Clip(l.chain), entry)
 			}
 			l.state = cp.state
-			l.live = append(l.live, liveChain{pos: l.manifest, entries: l.chain})
+			l.live = append(l.live, liveChain{pos: l.manifest, entries: l.chain, replay: replayFloor(&cp.manifest)})
 			l.cp = nil
 			out.Events = append(out.Events, Event{Kind: CheckpointDone, Manifest: l.manifest})
 			return

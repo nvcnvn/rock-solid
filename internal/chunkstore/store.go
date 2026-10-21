@@ -39,6 +39,8 @@ type Config struct {
 	Pool core.PoolID
 	// Check makes the index's tree verify every piece and merge it builds.
 	Check bool
+	// CleanFree is clean_free, the free segments outside the reserve the cleaner keeps; 0 is DefaultCleanFree, and below 0 the cleaner runs only for items waiting for room.
+	CleanFree int
 }
 
 // Request is a Write, Punch or Read of a chunk's bytes [Off, Off+Len).
@@ -171,9 +173,11 @@ type loadingRun struct {
 }
 
 type plants struct {
-	mergeCommitted bool
-	failCheck      bool
-	failMerge      bool
+	// replayCopyAsWrite replays a copy entry as a write of its blocks, mapping them whether or not a map still stores them at the source.
+	replayCopyAsWrite bool
+	mergeCommitted    bool
+	failCheck         bool
+	failMerge         bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.
@@ -219,6 +223,8 @@ type Store struct {
 	entry   [1]disklog.Entry
 	payload [1]uint64
 	changes []LiveChange
+
+	cl cleaner
 
 	plant plants
 }
@@ -823,6 +829,8 @@ func (s *Store) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	}
 	if ev.IO&fetchIOBit != 0 {
 		s.fetchDone(ctx, int32(uint64(ev.IO)&^fetchIOBit>>1), ev.Err, out)
+	} else if ev.IO&cleanIOBit != 0 {
+		s.cleanReadDone(ctx, int(uint64(ev.IO)&^cleanIOBit), ev.Err)
 	} else if s.rec != nil {
 		s.rec.OnEvent(ctx, ev, &s.lout)
 	} else if s.log != nil {
@@ -946,8 +954,7 @@ func (s *Store) housekeep(ctx *core.Context, out *Output) {
 			s.stop(ctx, s.log.Err(), out)
 			return
 		}
-		// With no cleaner yet, nothing frees a segment, so items waiting for room fail at once.
-		if s.log.Stalled() {
+		if victim := s.clean(ctx); s.log.Stalled() && (!victim || s.log.CopiesStalled()) {
 			s.log.FailStalled(ctx, &s.lout)
 			return
 		}
@@ -970,6 +977,9 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 		for _, t := range ev.Tickets {
 			if s.inPiece && t == s.piece {
 				s.inPiece, s.piecesOut = false, 0
+				continue
+			}
+			if s.copyResolved(t, ev, -1) {
 				continue
 			}
 			if si, ok := s.popSent(t); ok {
@@ -1001,6 +1011,13 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 	case disklog.BlobRead:
 		s.blobRead(ctx, ev)
 	case disklog.Replayed:
+		if s.plant.replayCopyAsWrite {
+			for i := range ev.Entries {
+				if e := &ev.Entries[i]; e.Kind == disklog.EntryCopy {
+					*e = disklog.WriteEntry(e.Pool, e.Chunk, e.Version, e.First, e.Count)
+				}
+			}
+		}
 		if ev.LSN > s.replayLSN {
 			if err := s.ix.Apply(ev); err != nil {
 				s.recoveryFailed(ctx, err)
@@ -1057,6 +1074,9 @@ func (s *Store) durable(ctx *core.Context, ev *disklog.Event, out *Output) {
 				panic("chunkstore: piece durable out of turn: " + err.Error())
 			}
 			s.nextPiece(ctx, out)
+			continue
+		}
+		if s.copyResolved(t, ev, i) {
 			continue
 		}
 		si, ok := s.popSent(t)
@@ -1287,12 +1307,13 @@ func (s *Store) drain(ctx *core.Context, out *Output) {
 		s.logEvent(ctx, &closed.Events[i], out)
 	}
 	s.phase = recovering
+	s.resetCleaner()
 	if err := s.recover(ctx, s.sb.Geometry.DiskBlocks(), disklog.ModeRebuild); err != nil {
 		s.phase, s.err = failed, err
 	}
 }
 
-func (s *Store) fetchesOut() int { return len(s.fetches) - len(s.freeFetch) }
+func (s *Store) fetchesOut() int { return len(s.fetches) - len(s.freeFetch) + s.cleanReadsOut() }
 
 func (s *Store) stop(ctx *core.Context, err error, out *Output) {
 	s.phase, s.err = failed, err

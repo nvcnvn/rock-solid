@@ -935,15 +935,8 @@ func (r *Recovery) Replay(ctx *core.Context, out *Output) error {
 		return ErrBusy
 	}
 	r.phase = recReplay
-	switch {
-	case r.mode == ModeRebuild:
-	case r.hasManifest && len(r.manifest.Indexes) > 0:
-		r.minReplay = r.manifest.Indexes[0].ReplayLSN
-		for _, ix := range r.manifest.Indexes[1:] {
-			r.minReplay = min(r.minReplay, ix.ReplayLSN)
-		}
-	case r.hasManifest:
-		r.minReplay = r.manifest.BaseLSN
+	if r.mode != ModeRebuild && r.hasManifest {
+		r.minReplay = replayFloor(&r.manifest)
 	}
 	r.expected = r.minReplay + 1
 	r.replayFloor = r.manifestPos.LSN
@@ -1279,7 +1272,7 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 	}
 	if r.hasManifest {
 		l.chain, l.state = r.chain, r.manifest.Indexes
-		l.live = []liveChain{{pos: r.manifestPos, entries: r.chain}}
+		l.live = []liveChain{{pos: r.manifestPos, entries: r.chain, replay: replayFloor(&r.manifest)}}
 	}
 	l.pieces, l.namedLSN = r.pieces, r.manifestPos.LSN
 	for s := uint32(1); s < r.sb.SegmentCount; s++ {
