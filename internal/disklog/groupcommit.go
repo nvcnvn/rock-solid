@@ -24,8 +24,8 @@ var (
 	ErrUnknownOwner = errors.New("index not named by the checkpoint")
 	// ErrBadBuffer reports an item whose buffer does not match its entry.
 	ErrBadBuffer = errors.New("buffer does not match its entry")
-	// ErrReservedKind reports an item of a blob kind only a checkpoint writes.
-	ErrReservedKind = errors.New("blob kind reserved for checkpoints")
+	// ErrReservedKind reports an item of a kind only a checkpoint or the cleaner writes.
+	ErrReservedKind = errors.New("kind reserved for checkpoints and the cleaner")
 	// ErrBadConfig reports settings the log cannot run with.
 	ErrBadConfig = errors.New("bad group commit settings")
 	// ErrFlushBeforeWrite reports a driver that completed a round's flush before its write.
@@ -195,7 +195,7 @@ type Event struct {
 func (ev *Event) Blob(i int) []byte {
 	var writes uint64
 	for j := range ev.Entries {
-		if ev.Entries[j].Kind == EntryWrite {
+		if ev.Entries[j].HasBlocks() {
 			writes += ev.Entries[j].dataBytes()
 		}
 	}
@@ -243,14 +243,14 @@ func (o *Output) emitRecord(ev Event, d *DecodedRecord) {
 	o.entries = append(o.entries, d.Entries...)
 	var writes uint64
 	for i := range d.Entries {
-		if d.Entries[i].Kind == EntryWrite {
+		if d.Entries[i].HasBlocks() {
 			writes += d.Entries[i].dataBytes()
 		}
 	}
 	var writeOff, blobOff uint64
 	for i := range d.Entries {
 		e := &d.Entries[i]
-		if e.Kind == EntryWrite {
+		if e.HasBlocks() {
 			o.payloads = append(o.payloads, writeOff)
 			writeOff += e.dataBytes()
 			continue
@@ -359,12 +359,14 @@ type cursor struct {
 	next    uint32
 }
 
-// Lanes in the order rounds take turns: each stream's shared lane, then merge worker w's lane
-// of the metadata stream at laneMeta + w. Only the hot and cold lanes take ordinary items; the
-// metadata lane takes the checkpoint's pieces and manifest, and a merge lane its worker's output.
+// Lanes in the order rounds take turns: each stream's shared lane, the cleaner's lane of the cold
+// stream, then merge worker w's lane of the metadata stream at laneMeta + w. Only the hot and
+// cold lanes take ordinary items; the cleaner's lane takes its copies, the metadata lane the
+// checkpoint's pieces and manifest, and a merge lane its worker's output.
 const (
 	laneHot = iota
 	laneCold
+	laneClean
 	laneMeta
 )
 
@@ -373,10 +375,12 @@ func laneOf(s Stream, n uint8) int {
 	case Hot:
 		return laneHot
 	case Cold:
-		return laneCold
+		return laneCold + int(n)
 	}
 	return laneMeta + int(n)
 }
+
+func ordinaryLane(i int) bool { return i == laneHot || i == laneCold }
 
 // lane is a sequence of segments that fill one after another, at most one open at a time, so
 // LSNs rise along it.
@@ -563,6 +567,7 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		rounds:     make([]round, cfg.CommitDepth),
 	}
 	l.lanes[laneHot].stream, l.lanes[laneCold].stream = Hot, Cold
+	l.lanes[laneClean].stream, l.lanes[laneClean].n = Cold, 1
 	for i := laneMeta; i < len(l.lanes); i++ {
 		l.lanes[i].stream, l.lanes[i].n = Meta, uint8(i-laneMeta)
 	}
@@ -733,7 +738,7 @@ func ordinaryBytes(entries []Entry, lay Layout) uint64 {
 	ordinary := false
 	for i := range entries {
 		e := &entries[i]
-		own := isCheckpointKind(e)
+		own := isCheckpointKind(e) || e.Kind == EntryCopy
 		ordinary = ordinary || !own
 		switch e.Kind {
 		case EntryWrite:
@@ -778,7 +783,7 @@ func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ti
 	if stream > Cold {
 		return 0, ErrMalformed
 	}
-	if isCheckpointKind(&it.Entry) {
+	if isCheckpointKind(&it.Entry) || it.Entry.Kind == EntryCopy {
 		return 0, ErrReservedKind
 	}
 	if err := l.accept(ctx, &it); err != nil {
@@ -812,6 +817,22 @@ func (l *Log) MergePiece(ctx *core.Context, w int, owner uint32, buf core.IOBuf,
 	return t, nil
 }
 
+// Copy queues a cleaner's copy item on the cleaner's lane of the cold stream, whose rounds may open segments of the reserve and never wait behind a checkpoint, so a pass finishes on a disk filled to its reserve; its source must lie in a segment of the log.
+func (l *Log) Copy(ctx *core.Context, it Item, out *Output) (Ticket, error) {
+	if l.err != nil {
+		return 0, l.err
+	}
+	if it.Entry.Kind != EntryCopy || uint64(it.Entry.Source) < uint64(l.sb.SegmentBlocks) || uint64(it.Entry.Source)+uint64(it.Entry.Count) > l.sb.DiskBlocks() {
+		return 0, ErrMalformed
+	}
+	if err := l.accept(ctx, &it); err != nil {
+		return 0, err
+	}
+	t := l.enqueue(&l.lanes[laneClean].q, queued{entry: it.Entry, buf: it.Buf})
+	l.startRounds(ctx, out)
+	return t, nil
+}
+
 func (l *Log) accept(ctx *core.Context, it *Item) error {
 	var acc layoutAcc
 	if err := acc.add(&it.Entry); err != nil {
@@ -822,7 +843,7 @@ func (l *Log) accept(ctx *core.Context, it *Item) error {
 		return ErrTooLarge
 	}
 	switch it.Entry.Kind {
-	case EntryWrite:
+	case EntryWrite, EntryCopy:
 		if it.Buf == core.NoBuf || len(ctx.Pool.Bytes(it.Buf)) != int(it.Entry.Count)*core.BlockSize {
 			return ErrBadBuffer
 		}
@@ -1341,7 +1362,7 @@ func (l *Log) target() (target, bool) {
 // their segments.
 func (l *Log) place(i int) (target, placement) {
 	ln := &l.lanes[i]
-	ordinary := i < laneMeta
+	ordinary := ordinaryLane(i)
 	if ordinary && l.behind() {
 		if l.cpNoSpace {
 			return target{}, placeNoRoom
@@ -1415,7 +1436,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 			break
 		}
 		acc, lay = next, nl
-		if e.Kind == EntryWrite {
+		if e.HasBlocks() {
 			writeBlocks += uint32(e.Count)
 		}
 		n++
@@ -1444,8 +1465,8 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		it := &items[i]
 		r.entries = append(r.entries, it.entry)
 		r.tickets = append(r.tickets, it.ticket)
-		switch it.entry.Kind {
-		case EntryWrite:
+		switch {
+		case it.entry.HasBlocks():
 			r.payloads = append(r.payloads, writeOff)
 			writeOff += uint64(it.entry.Count) * core.BlockSize
 			if it.keep {
@@ -1461,7 +1482,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		}
 	}
 	for i := range items {
-		if items[i].entry.Kind != EntryWrite {
+		if !items[i].entry.HasBlocks() {
 			r.payloads[i] += writeOff
 		}
 	}

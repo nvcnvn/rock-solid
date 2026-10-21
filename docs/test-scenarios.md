@@ -1847,8 +1847,10 @@ Copy entry codec:
   and the golden record fixture gains a record of two copy entries. A copy with zero blocks or
   past block 1,024 is BadExtent; a copy entry with a field its kind does not encode set is
   Malformed.
-- Open: a copy entry whose source is location 0 (a punched range): Malformed, or accepted and
-  never applied.
+- A copy whose source is location 0 (a punched range) is Malformed to the codec, and group
+  commit refuses one whose source lies in segment 0 or past the disk: a copy only ever reads a
+  log block. `Submit` refuses a copy entry (ErrReservedKind); only the cleaner's `Copy` writes
+  one, to lane 1 of the cold stream, past the hold behind a checkpoint and into the reserve.
 
 Victim choice (score free space × age ÷ copy cost; the spikes use (1 − u) × age ÷ (1 + u), age in
 user blocks written since the segment's youngest block was written, capped at one disk capacity;

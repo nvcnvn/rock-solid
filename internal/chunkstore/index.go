@@ -146,6 +146,15 @@ type Index struct {
 	it            lsm.Iter
 	check         []recordCount
 	pointRemovals bool
+	track         bool
+	changes       []LiveChange
+}
+
+// LiveChange is a change of Delta to the blocks the maps refer to in the record at Header, past
+// the blocks the record itself wrote, which the log counted when it became durable.
+type LiveChange struct {
+	Header core.LBA
+	Delta  int32
 }
 
 // Prefix is the length of an index key's prefix for run filters: its chunk's, or a record count's whole key.
@@ -168,6 +177,19 @@ func TreeConfig(cfg lsm.Config) lsm.Config {
 // NewIndex makes an index over tree, which holds the index alone, configured by TreeConfig.
 func NewIndex(tree *lsm.Tree) *Index { return &Index{tree: tree} }
 
+// TrackLive makes the index keep a LiveChange for every change to a record's count but a write's own blocks, until TakeChanges.
+func (x *Index) TrackLive(on bool) {
+	x.track = on
+	x.changes = x.changes[:0]
+}
+
+// TakeChanges appends the LiveChanges kept since the last call to dst.
+func (x *Index) TakeChanges(dst []LiveChange) []LiveChange {
+	dst = append(dst, x.changes...)
+	x.changes = x.changes[:0]
+	return dst
+}
+
 // Tree is the LSM tree the index is in, for its owner to flush and restore.
 func (x *Index) Tree() *lsm.Tree { return x.tree }
 
@@ -187,7 +209,7 @@ func (x *Index) must(err error) {
 	}
 }
 
-// Apply maps a Durable or Replayed record's entries in order: writes and punches into the live map, freezes as copies of it.
+// Apply maps a Durable or Replayed record's entries in order: writes and punches into the live map, freezes as copies of it, and copies wherever a map still stores the copied blocks at their source.
 func (x *Index) Apply(ev *disklog.Event) error {
 	for i := range ev.Entries {
 		e := &ev.Entries[i]
@@ -206,6 +228,10 @@ func (x *Index) Apply(ev *disklog.Event) error {
 		case disklog.EntryWrite:
 			lba := ev.LBA + core.LBA(ev.HeaderBlocks) + core.LBA(ev.Payloads[i]/core.BlockSize)
 			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, LBA: lba, Header: ev.LBA})
+		case disklog.EntryCopy:
+			lba := ev.LBA + core.LBA(ev.HeaderBlocks) + core.LBA(ev.Payloads[i]/core.BlockSize)
+			x.move(e.Pool, e.Chunk, e.First, e.Count, e.Source, lba, ev.LBA)
+			x.note(ev.LBA, -int(e.Count))
 		case disklog.EntryPunch:
 			if e.First == 0 && e.Count == core.BlocksPerChunk {
 				x.punchWhole(e.Pool, e.Chunk, e.Version)
@@ -254,7 +280,7 @@ func (x *Index) insert(pool core.PoolID, c core.ChunkID, ext Extent) {
 	}
 	x.put(x.extentKey(pool, c, 0, ext.First), ext)
 	if ext.LBA != 0 {
-		x.addLive(ext.Header, int(ext.Count))
+		x.count(ext.Header, int(ext.Count))
 	}
 	ch, _ := x.Chunk(pool, c)
 	ch.Version = ext.Version
@@ -375,7 +401,19 @@ func (x *Index) recordKey(header core.LBA) []byte {
 	return x.key
 }
 
+// addLive changes the record's count and keeps the change for the log's usage table.
 func (x *Index) addLive(header core.LBA, delta int) {
+	x.note(header, delta)
+	x.count(header, delta)
+}
+
+func (x *Index) note(header core.LBA, delta int) {
+	if x.track && delta != 0 {
+		x.changes = append(x.changes, LiveChange{Header: header, Delta: int32(delta)})
+	}
+}
+
+func (x *Index) count(header core.LBA, delta int) {
 	n := int(x.Live(header)) + delta
 	if n < 0 {
 		panic(fmt.Sprintf("chunkstore: record at LBA %d refers to %d blocks", header, n))
@@ -571,35 +609,52 @@ func (x *Index) Extents(dst []Extent, pool core.PoolID, c core.ChunkID, version 
 	return x.overlapping(dst, pool, c, version, 0, core.BlocksPerChunk)
 }
 
-// Move repoints every map still storing the blocks at from to the cleaner's copy at to, and returns how many maps it changed.
+// Move repoints, in every map, live or frozen, the blocks of [first, first+count) still stored where the cleaner read them, from on, to its copy at to in the record at header, and returns how many maps it changed.
 func (x *Index) Move(pool core.PoolID, c core.ChunkID, first, count uint16, from, to, header core.LBA) int {
+	maps, _ := x.move(pool, c, first, count, from, to, header)
+	return maps
+}
+
+// move is Move, also returning the blocks it moved summed over the maps.
+func (x *Index) move(pool core.PoolID, c core.ChunkID, first, count uint16, from, to, header core.LBA) (maps, blocks int) {
+	if count == 0 {
+		return 0, 0
+	}
+	end := int(first) + int(count)
 	x.vers = append(x.frozen(x.vers[:0], pool, c), 0, 0)
-	moved := 0
 	for i := 0; i < len(x.vers); i += 2 {
 		v := x.vers[i]
 		if v == 0 && i+2 < len(x.vers) {
 			continue
 		}
-		e, ok := x.lookup(pool, c, v, first)
-		if !ok || e.LBA == 0 || e.BlockLBA(first) != from || int(first)+int(count) > e.end() || count == 0 {
-			continue
+		x.exts = x.overlapping(x.exts[:0], pool, c, v, first, end)
+		changed := false
+		for _, e := range x.exts {
+			lo, hi := max(int(e.First), int(first)), min(e.end(), end)
+			if e.LBA == 0 || e.BlockLBA(uint16(lo)) != from+core.LBA(lo-int(first)) {
+				continue
+			}
+			if int(e.First) < lo {
+				left := e
+				left.Count = uint16(lo) - e.First
+				x.put(x.extentKey(pool, c, v, e.First), left)
+			}
+			mid := e.shifted(uint16(lo))
+			mid.Count, mid.LBA, mid.Header = uint16(hi-lo), to+core.LBA(lo-int(first)), header
+			x.put(x.extentKey(pool, c, v, uint16(lo)), mid)
+			if e.end() > hi {
+				x.put(x.extentKey(pool, c, v, uint16(hi)), e.shifted(uint16(hi)))
+			}
+			x.addLive(e.Header, lo-hi)
+			x.addLive(header, hi-lo)
+			blocks += hi - lo
+			changed = true
 		}
-		if e.First < first {
-			left := e
-			left.Count = first - e.First
-			x.put(x.extentKey(pool, c, v, e.First), left)
+		if changed {
+			maps++
 		}
-		mid := e.shifted(first)
-		mid.Count, mid.LBA, mid.Header = count, to, header
-		x.put(x.extentKey(pool, c, v, first), mid)
-		if end := int(first) + int(count); e.end() > end {
-			x.put(x.extentKey(pool, c, v, uint16(end)), e.shifted(uint16(end)))
-		}
-		x.addLive(e.Header, -int(count))
-		x.addLive(header, int(count))
-		moved++
 	}
-	return moved
+	return maps, blocks
 }
 
 type recordCount struct {

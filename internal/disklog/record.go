@@ -12,6 +12,7 @@ const (
 	preludeSize = 56
 
 	writeEntrySize  = 33
+	copyEntrySize   = writeEntrySize + 8
 	freezeEntrySize = 37
 	blobEntrySize   = 14
 
@@ -38,6 +39,7 @@ const (
 	EntryPunch
 	EntryFreeze
 	EntryBlob
+	EntryCopy
 )
 
 // BlobKind says what a blob payload holds; the codec carries it without checking it.
@@ -64,12 +66,21 @@ type Entry struct {
 	BlobKind BlobKind
 	Owner    uint32
 	Length   uint64
+	Source   core.LBA
 }
 
 // WriteEntry is a write of count blocks from block first of a chunk version.
 func WriteEntry(pool core.PoolID, chunk core.ChunkID, version uint64, first, count uint16) Entry {
 	return Entry{Kind: EntryWrite, Pool: pool, Chunk: chunk, Version: version, First: first, Count: count}
 }
+
+// CopyEntry is the cleaner's copy of count blocks from block first of a chunk version, read from source on, where the blocks were stored.
+func CopyEntry(pool core.PoolID, chunk core.ChunkID, version uint64, first, count uint16, source core.LBA) Entry {
+	return Entry{Kind: EntryCopy, Pool: pool, Chunk: chunk, Version: version, First: first, Count: count, Source: source}
+}
+
+// HasBlocks reports whether the entry carries chunk blocks in the record's data area: a write or a copy.
+func (e *Entry) HasBlocks() bool { return e.Kind == EntryWrite || e.Kind == EntryCopy }
 
 // PunchEntry frees count blocks from block first of a chunk version.
 func PunchEntry(pool core.PoolID, chunk core.ChunkID, version uint64, first, count uint16) Entry {
@@ -94,6 +105,14 @@ func (e *Entry) wireSize() (int, error) {
 			return 0, ErrBadExtent
 		}
 		n = writeEntrySize
+	case EntryCopy:
+		if e.Count == 0 || int(e.First)+int(e.Count) > core.BlocksPerChunk {
+			return 0, ErrBadExtent
+		}
+		if e.Source == 0 {
+			return 0, ErrMalformed
+		}
+		n = copyEntrySize
 	case EntryFreeze:
 		n = freezeEntrySize
 	case EntryBlob:
@@ -112,6 +131,8 @@ func (e *Entry) ofKind() Entry {
 	switch e.Kind {
 	case EntryWrite, EntryPunch:
 		return Entry{Kind: e.Kind, Pool: e.Pool, Chunk: e.Chunk, Version: e.Version, First: e.First, Count: e.Count}
+	case EntryCopy:
+		return CopyEntry(e.Pool, e.Chunk, e.Version, e.First, e.Count, e.Source)
 	case EntryFreeze:
 		return FreezeEntry(e.Pool, e.Chunk, e.Version, e.Epoch)
 	}
@@ -120,7 +141,7 @@ func (e *Entry) ofKind() Entry {
 
 func (e *Entry) dataBytes() uint64 {
 	switch e.Kind {
-	case EntryWrite:
+	case EntryWrite, EntryCopy:
 		return uint64(e.Count) * core.BlockSize
 	case EntryBlob:
 		return e.Length
@@ -195,22 +216,22 @@ func (a *layoutAcc) layout() (Layout, error) {
 	return Layout{HeaderBytes: int(headerBytes), HeaderBlocks: uint32(headerBlocks), DataBlocks: uint32(dataBlocks)}, nil
 }
 
-// PayloadOffset is where entry i's payload starts in the data area: writes' blocks first, in order, then blobs' bytes.
+// PayloadOffset is where entry i's payload starts in the data area: writes' and copies' blocks first, in order, then blobs' bytes.
 func PayloadOffset(entries []Entry, i int) uint64 {
 	var writeBytes, blobBytes uint64
 	for j := range entries[:i] {
-		switch entries[j].Kind {
-		case EntryWrite:
+		switch {
+		case entries[j].HasBlocks():
 			writeBytes += entries[j].dataBytes()
-		case EntryBlob:
+		case entries[j].Kind == EntryBlob:
 			blobBytes += entries[j].Length
 		}
 	}
-	if entries[i].Kind == EntryWrite {
+	if entries[i].HasBlocks() {
 		return writeBytes
 	}
 	for j := i; j < len(entries); j++ {
-		if entries[j].Kind == EntryWrite {
+		if entries[j].HasBlocks() {
 			writeBytes += entries[j].dataBytes()
 		}
 	}
@@ -275,12 +296,15 @@ func appendEntries(dst []byte, entries []Entry) []byte {
 		e := &entries[i]
 		dst = append(dst, byte(e.Kind))
 		switch e.Kind {
-		case EntryWrite, EntryPunch:
+		case EntryWrite, EntryPunch, EntryCopy:
 			dst = binary.LittleEndian.AppendUint32(dst, uint32(e.Pool))
 			dst = e.Chunk.AppendTo(dst)
 			dst = binary.LittleEndian.AppendUint64(dst, e.Version)
 			dst = binary.LittleEndian.AppendUint16(dst, e.First)
 			dst = binary.LittleEndian.AppendUint16(dst, e.Count)
+			if e.Kind == EntryCopy {
+				dst = binary.LittleEndian.AppendUint64(dst, uint64(e.Source))
+			}
 		case EntryFreeze:
 			dst = binary.LittleEndian.AppendUint32(dst, uint32(e.Pool))
 			dst = e.Chunk.AppendTo(dst)
@@ -309,8 +333,9 @@ func decodeEntry(b []byte, e *Entry) (int, error) {
 	}
 	*e = Entry{Kind: EntryKind(b[0])}
 	switch e.Kind {
-	case EntryWrite, EntryPunch:
-		if len(b) < writeEntrySize {
+	case EntryWrite, EntryPunch, EntryCopy:
+		n := entrySize(e.Kind)
+		if len(b) < n {
 			return 0, ErrMalformed
 		}
 		e.Pool = core.PoolID(binary.LittleEndian.Uint32(b[1:]))
@@ -321,7 +346,12 @@ func decodeEntry(b []byte, e *Entry) (int, error) {
 		if e.Count == 0 || int(e.First)+int(e.Count) > core.BlocksPerChunk {
 			return 0, ErrBadExtent
 		}
-		return writeEntrySize, nil
+		if e.Kind == EntryCopy {
+			if e.Source = core.LBA(binary.LittleEndian.Uint64(b[33:])); e.Source == 0 {
+				return 0, ErrMalformed
+			}
+		}
+		return n, nil
 	case EntryFreeze:
 		if len(b) < freezeEntrySize {
 			return 0, ErrMalformed
@@ -454,11 +484,11 @@ func DecodeRecord(img []byte, at Place, blocksLeft uint32, entries []Entry) (Dec
 	return DecodedRecord{RecordHeader: h, Data: data}, nil
 }
 
-// Payload is entry i's bytes sliced from the image: a write's blocks or a blob's bytes, empty for a punch or freeze.
+// Payload is entry i's bytes sliced from the image: a write's or copy's blocks or a blob's bytes, empty for a punch or freeze.
 func (d *DecodedRecord) Payload(i int) []byte {
 	e := &d.Entries[i]
 	switch e.Kind {
-	case EntryWrite, EntryBlob:
+	case EntryWrite, EntryCopy, EntryBlob:
 		start := PayloadOffset(d.Entries, i)
 		return d.Data[start : start+e.dataBytes()]
 	}
@@ -495,14 +525,7 @@ func BlockCRC(img []byte, logID uint64, offset uint32, i uint32) (crc uint32, he
 	for range binary.LittleEndian.Uint32(h[recEntries:]) {
 		var n int
 		if pos < len(h) {
-			switch EntryKind(h[pos]) {
-			case EntryWrite, EntryPunch:
-				n = writeEntrySize
-			case EntryFreeze:
-				n = freezeEntrySize
-			case EntryBlob:
-				n = blobEntrySize
-			}
+			n = entrySize(EntryKind(h[pos]))
 		}
 		if n == 0 || pos+n > len(h) {
 			return 0, headerBlocks, ErrMalformed
@@ -514,4 +537,18 @@ func BlockCRC(img []byte, logID uint64, offset uint32, i uint32) (crc uint32, he
 		return 0, headerBlocks, ErrMalformed
 	}
 	return core.GetCRC32C(h[at:]), headerBlocks, nil
+}
+
+func entrySize(k EntryKind) int {
+	switch k {
+	case EntryWrite, EntryPunch:
+		return writeEntrySize
+	case EntryCopy:
+		return copyEntrySize
+	case EntryFreeze:
+		return freezeEntrySize
+	case EntryBlob:
+		return blobEntrySize
+	}
+	return 0
 }

@@ -11,6 +11,10 @@ func testSegmentHeader() SegmentHeader {
 	return SegmentHeader{LogID: testLogID, Seq: 7, Index: 3, Stream: Cold, Manifest: ManifestPos{Segment: 2, Block: 9, LSN: 41}}
 }
 
+func testCleanHeader() SegmentHeader {
+	return SegmentHeader{LogID: testLogID, Seq: 10, Index: 6, Stream: Cold, Lane: 1, Manifest: ManifestPos{Segment: 2, Block: 9, LSN: 41}}
+}
+
 func testMetaHeader() SegmentHeader {
 	return SegmentHeader{LogID: testLogID, Seq: 8, Index: 4, Stream: Meta, Manifest: ManifestPos{Segment: 2, Block: 9, LSN: 41}}
 }
@@ -29,6 +33,7 @@ func TestSegmentHeaderRoundTrip(t *testing.T) {
 		{"hot no manifest", SegmentHeader{LogID: testLogID, Seq: 1 << 50, Index: 1 << 20, Stream: Hot}},
 		{"cold no manifest", SegmentHeader{LogID: 1, Seq: 2, Index: 4095, Stream: Cold}},
 		{"metadata", testMetaHeader()},
+		{"cleaner's lane", testCleanHeader()},
 		{"merge lane", testMergeHeader()},
 		{"last merge lane no manifest", SegmentHeader{LogID: 1, Seq: 3, Index: 7, Stream: Meta, Lane: MaxMergeWorkers}},
 	}
@@ -89,7 +94,8 @@ func TestSegmentHeaderErrors(t *testing.T) {
 		{"version", func(b []byte) { b[sgVersion] = 0; fixCRC(b, sgCRC) }, ErrBadVersion},
 		{"checksum", func(b []byte) { b[sgSeq] ^= 0x10 }, ErrBadChecksum},
 		{"stream 3", func(b []byte) { b[sgStream] = 3; fixCRC(b, sgCRC) }, ErrMalformed},
-		{"lane of the cold stream", func(b []byte) { b[sgLane] = 1; fixCRC(b, sgCRC) }, ErrMalformed},
+		{"cold lane past the cleaner's", func(b []byte) { b[sgLane] = 2; fixCRC(b, sgCRC) }, ErrMalformed},
+		{"lane of the hot stream", func(b []byte) { b[sgStream] = byte(Hot); b[sgLane] = 1; fixCRC(b, sgCRC) }, ErrMalformed},
 		{"tail", func(b []byte) { b[segmentHeaderSize] = 1; fixCRC(b, sgCRC) }, ErrMalformed},
 		{"index 0", func(b []byte) { b[sgIndex] = 0; fixCRC(b, sgCRC) }, ErrMalformed},
 		{"manifest block 0", func(b []byte) { b[sgManifestBlock] = 0; fixCRC(b, sgCRC) }, ErrMalformed},
