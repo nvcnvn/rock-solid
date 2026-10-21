@@ -375,6 +375,19 @@ starts from the previous table, never from scratch:
    furthest above its target, even one already inside its margin, to the eligible disk furthest
    below, and stop when no move brings that disk nearer.
 
+A member that is merely down is not missing. It stays in its PG, marked down, for `refill_after`
+(10 minutes by default), so a reboot or a network hiccup costs only the writes it missed, never a
+copy of everything the node holds and a second copy back once it returns. RADOS draws the same
+line between a device that is *down* and one that is *out* of the mapping, and Ceph waits 10
+minutes before marking it out. A member is missing once it has been down that long, or at once
+when its disk has lost its log. A PG that has fallen below `min_live` accepts no writes, so its
+down members wait only `degraded_refill_after` (1 minute): a 5 s hiccup still moves nothing, but
+a `rep2` pool, where one member down is already below `min_live`, copies a rebooting node's PGs
+away and back unless the node was put in `maintenance` first. The new member counts toward
+`min_live` while it is still being filled, so writes resume as soon as it joins. A member that
+peering has to wait for anyway, the only one holding some interval's writes, is never replaced
+([Failure detection](../docs/design.md#epoch-changes-and-failure-detection)).
+
 A disk's target is its share of the pool's members, in proportion to its *capacity*: what the
 pool's [`write_limit`](../docs/design.md#volume-size-and-capacity) leaves of it after the data
 other pools keep there. The pool's own data counts as capacity, so a finished move does not shift
@@ -403,7 +416,7 @@ members of one PG never sit on the same node. The flowchart shows the loop:
 ```mermaid
 flowchart TD
     E["event: disk added, disk or node down,<br/>pool created or changed"] --> S["previous table"]
-    S --> M{"any PG missing a member?"}
+    S --> M{"any PG missing a member?<br/>(down for refill_after, log lost,<br/>or 1 min below min_live)"}
     M -- "yes" --> R["eligible disk furthest below its target<br/>that keeps the failure-domain rule"]
     R --> M
     M -- "no" --> B{"any disk outside the fill margin<br/>of its capped target?"}
@@ -416,28 +429,37 @@ flowchart TD
 
 Here is a small worked example. The cluster, PG numbers and disk names are made up for
 illustration; the rules are the design's. A `rep3` pool with `failure_domain: node` runs on four
-nodes with two disks each, and disk `c1` fails:
+nodes with two disks each, and disk `c1` fails and stays down:
 
 ```text
  nodes:   A: a1 a2     B: b1 b2     C: c1 c2     D: d1 d2
 
  table epoch 41             table epoch 42 (c1 marked down)
- PG 7:   [a1, c1, d2] i5    PG 7:   [a1, b2, d2] i6   refill: nodes A and D are taken, so
+ PG 7:   [a1, c1, d2] i5    PG 7:   [a1, c1↓, d2] i6  c1 stays a member; writes go to
+                                                      a1 and d2
+ PG 19:  [b1, c1, d1] i3    PG 19:  [b1, c1↓, d1] i4
+
+ 10 minutes later           table epoch 43 (c1 down for refill_after)
+                            PG 7:   [a1, b2, d2] i7   refill: nodes A and D are taken, so
                                                       b1, b2 and c2 are eligible; b2 was
                                                       furthest below its target
- PG 19:  [b1, c1, d1] i3    PG 19:  [b1, c2, d1] i4   refill: nodes B and D are taken, so
+                            PG 19:  [b1, c2, d1] i5   refill: nodes B and D are taken, so
                                                       a1, a2 and c2 are eligible; c2 was
                                                       furthest below its target
- PG 23:  [b2, d1, a2] i9    PG 23:  [b2, d1, a2] i9   untouched: c1 was not a member, so
-                                                      its interval and writes carry on
+ PG 23:  [b2, d1, a2] i9    PG 23:  [b2, d1, a2] i9   untouched throughout: c1 was not a
+                                                      member, so its interval and writes
+                                                      carry on
 ```
 
-Only the PGs that listed `c1` change, each by one member and one interval (`i5` to `i6`). Adding a disk works the
-other way round: a new, empty disk `e1` on a fifth node is the eligible disk furthest below its target, so
-rebalance moves members onto it one at a time from the fullest disks until every disk is within
-the margin. Compare layout C from the problem section: adding a disk changes no chunk's PG. Only
-the members that rebalance moves onto the new disk change, so roughly the new disk's share of
-the data moves, not almost all of it.
+Only the PGs that listed `c1` change: one interval when `c1` is marked down, and one member and
+one more interval when it is refilled. Had `c1` come back within the 10 minutes, it would have
+been marked up instead, in a new interval, and caught up on the writes it missed.
+
+Adding a disk works the other way round: a new, empty disk `e1` on a fifth node is the eligible
+disk furthest below its target, so rebalance moves members onto it one at a time from the fullest
+disks until every disk is within the margin. Compare layout C from the problem section: adding a
+disk changes no chunk's PG. Only the members that rebalance moves onto the new disk change, so
+roughly the new disk's share of the data moves, not almost all of it.
 
 Which member takes over the primary role, and how the new members catch up, is peering and
 recovery ([post 03](03-epochs-leases-and-failures.md)). Recovery starts with the PGs that have
@@ -720,11 +742,18 @@ block can reach two replicas in different orders:
    client 2 "B" --+              v9 = B   +--> replica 2: v8 = A, v9 = B  ->  holds B
 ```
 
-This single order per chunk is what makes RWX (ReadWriteMany) block volumes and uncached shared
-files correct without any client-side protocol: two pods on two nodes writing the same bytes see
+This single order per chunk is what lets RWX (ReadWriteMany) block volumes and uncached shared
+files work without any client-side protocol: two pods on two nodes writing the same bytes see
 one history. The primary forwards each write to every replica in parallel, so replication adds
 one network hop, not one per copy. Primary is a role, not a kind of machine: any disk can be
 primary for some PGs and a replica for others.
+
+The order is of attempts, though, not of writes. If a primary crashes after committing client
+1's "A" but before acknowledging it, client 1 sends "A" again, and the new primary applies it
+again. Had client 2's "B" landed in between, a reader could see A, then B, then A once more: one
+write that took effect twice. Ceph prevents that by remembering request IDs in each PG's log and
+answering a resend from it, as the MetaStore's replay records do for metadata. Whether chunk
+writes need the same is an [open question](../docs/design.md#roadmap-and-open-questions).
 
 ## Writes smaller than a block: the primary merges
 
@@ -890,6 +919,9 @@ What backs these choices, with numbers exactly as the design and spikes give the
   control returns tokens from followers?
 - **The base read's cost** (open question): its latency at queue depth 1 on NVMe and SATA, and
   how big a cache of recently merged blocks keeps write-shared appenders from reading at all.
+- **Resent chunk writes** (open question). Should each chunk remember its last writer's request
+  with the version it got, so a primary answers a resend instead of applying it again, or should
+  the history checker count each attempt as its own write?
 - **Tech debt.** The `github.com/zeebo/xxh3` v1.1.0 pin is never removed, only bumped, and only
   after the golden vectors pass on the new version.
 - **Build order.** Pools, the replica primary with committed-only reads, placement computation,

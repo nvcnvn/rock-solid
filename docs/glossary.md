@@ -152,6 +152,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Recovery.** Copying data back onto new or returning members until every PG again has its full redundancy. Not to be confused with a disk log's crash recovery.
 
+**Refill, `refill_after`.** Giving a PG a new member on another disk in place of a missing one, after which recovery copies the data onto it. A member that is only down is not missing until it has been down for `refill_after` (10 minutes by default), Ceph's "marked out", or for `degraded_refill_after` (1 minute) when its PG has fallen below `min_live` and so takes no writes; its disk losing its log makes it missing at once. A member peering must wait for anyway is never refilled. The new member counts toward `min_live` while recovery is still copying onto it. See [Failure detection](design.md#epoch-changes-and-failure-detection).
+
 **Rebalancing.** Moving PGs between disks to even out how full they are, for example after a disk is added.
 
 **Blast radius.** How much data one failure affects. Spreading a volume over every disk makes it fast and lets it outgrow any one drive, but any failure in the pool touches it.
@@ -160,7 +162,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Heartbeat.** A small periodic "I am alive" message. Missing several of them is how a node is detected as down.
 
-**Failure detection, marked down.** The control plane decides that a node or disk has failed and publishes a new table without it, which starts a new interval of every PG that had a member there. Detection is a guess: a slow node looks the same as a dead one, which is why protocols must stay safe when the guess is wrong.
+**Failure detection, marked down.** The control plane decides that a node or disk has failed and publishes a new table that marks it down, which starts a new interval of every PG that has a member there. The member stays in its PGs while down, so a reboot costs only the writes it missed, unless it leaves a PG below `min_live` for longer than `degraded_refill_after`. Detection is a guess: a slow node looks the same as a dead one, which is why protocols must stay safe when the guess is wrong. See [Failure detection](design.md#epoch-changes-and-failure-detection).
+
+**Flap damping, `flap_count`, `flap_window`.** Keeping a node or disk that keeps going down and coming back marked down until it has stayed healthy for a while, so its PGs do not start new intervals over and over. rock-solid holds one marked down `flap_count` times (5) within `flap_window` (10 minutes) down until it has been normal for a whole `flap_window`, unless that would keep a PG below `min_live` with nowhere to refill; Ceph stops an OSD at the same count. See [Failure detection](design.md#epoch-changes-and-failure-detection).
 
 **Split brain.** Two nodes both believing they are in charge, for example after a network partition, and both accepting writes. Most of the coordination machinery below exists to prevent it.
 
@@ -197,6 +201,10 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 **Raft.** A widely used consensus algorithm. A group of replicas, usually three, elects a **leader**; the leader appends each operation to its **Raft log** and copies it to the **followers**; an entry is **committed** once a majority has it durably, and then every replica **applies** it to its own copy of the data, in log order. If the leader fails, followers wait out a random **election timeout** and one is elected for a new **term**. rock-solid uses etcd's implementation, etcd-raft. See [Raft shard](design.md#metadata-layer-metastore).
 
 **Voter.** A replica that counts toward Raft's majority.
+
+**Learner.** A Raft replica that receives the log but does not vote. A new replica joins as a learner and becomes a voter only once it has caught up, so a group never waits on a member with an empty log. See [Replica placement and replacement](design.md#metadata-layer-metastore).
+
+**Joint configuration, `ConfChangeV2`.** Raft's safe way to change a group's voters: for a while every decision needs a majority of the old voters and a majority of the new ones, so the two sets can never decide apart. etcd-raft's `ConfChangeV2` enters one and, by default, leaves it on its own.
 
 **Log compaction, Raft snapshot.** A Raft log cannot grow forever. Once entries are applied and the result saved, they are dropped; a replica too far behind to catch up from the log is sent a Raft snapshot, a copy of the applied state, instead.
 

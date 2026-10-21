@@ -3113,7 +3113,8 @@ by 1.
 | PG 7's primary asks because a counter ran out | PG 7 only |
 | Node N restarts and asks | Exactly the PGs whose primary is on N |
 | Member C removed (table e + 1), then added back (e + 2) | +2 over the two tables, though the member list equals table e's |
-| Down mark and refill in one table | +1; in two tables, +2 |
+| Down mark and refill in one table (a lost log) | +1; in two tables, +2 |
+| A member down for `refill_after`, then refilled | +1 at the down mark, +1 at the refill, 10 minutes later |
 
 - A change to the session table or the format level makes no placement table and leaves the table
   epoch alone.
@@ -3123,6 +3124,23 @@ by 1.
 - Open: whether a balance move swaps the member in one table (+1) or adds and then removes it (+2).
   The PG epochs spike ran both (F2: 1,202 against 2,402 tables per staged flap); the "Balance moves
   one member" row assumes one.
+
+**Which members are missing.** `refill_after` 10 minutes, `degraded_refill_after` 1 minute; a `rep3` pool on 4 nodes unless stated.
+
+| State of member M | Refilled |
+| --- | --- |
+| Down for 9 minutes 59 s | No; its PGs write to their two live members |
+| Down for 10 minutes | Yes, in the next table |
+| Down 5 minutes, up, down again 5 minutes | No: the count restarts at each down mark |
+| Down, and its disk then reports a new log ID | At once |
+| Down, and an operator declares its disk lost | At once |
+| Down for 59 s in a `rep2` PG with `min_live` 2 | No; the PG takes no writes meanwhile |
+| Down for 1 minute in a `rep2` PG with `min_live` 2 | Yes, in the next table, since the PG accepts no writes while it waits |
+| Down 5 s (a network hiccup), then up, in a `rep2` PG with `min_live` 2 | No member moves; the PG resyncs the member and takes writes again |
+| Down for 1 minute in a `rep2` PG, and the only member live in an interval since the last activated one | No; peering waits for it whether or not a new member joins |
+| A refill member, still recovering, in a `rep2` PG whose other member is live | Counts toward `min_live` from the table that adds it: the PG takes writes once that interval activates, each acknowledged on both members, while recovery copies the older chunks on its missing list |
+| In `maintenance` for an hour | No; it counts toward `min_live` throughout |
+| Down on a 3-node `rep3` cluster for an hour | No eligible disk on another node; a disk failure on a node with a second disk refills there after 10 minutes |
 
 **Placement rules**
 
@@ -3542,11 +3560,22 @@ it on its missing list.
   one version" when a stale write from its previous run lands after peering.
 - Activation is reported on the next heartbeat. The authority records the last activated interval in
   a later table that starts no interval, and trims the past intervals' member lists.
+- A member back from an outage shorter than `refill_after` is marked up in a new interval and, after
+  peering, receives only the versions on its missing list: in a seed where it missed 100 writes to
+  a PG of 10,000 chunks, recovery copies those 100 chunks' blocks and no others.
+- Open: peering's duration. It compares every chunk's newest version from every member, so it grows
+  with the chunks a PG holds (open question "Peering's cost"). Measure it on 3 nodes with several TB
+  each before setting a bound.
+- Open: the phase 1 trace rules that check peering before a write or read require a reply from every
+  member sent a peering message, but peering needs only one member of each interval it stops, and
+  none of an interval it skips, so it goes ahead without unreachable ones. Revisit them when phase 3
+  builds peering.
 
 ## Failure and fail-slow detection
 
 A simulated single authority stands in for the control plane. `node_down_after` 5 s,
-`member_timeout` 1 s, `slow_disk_factor` 10×, `slow_disk_window` 1 minute.
+`member_timeout` 1 s, `slow_disk_factor` 10×, `slow_disk_window` 1 minute, `refill_after` 10
+minutes, `flap_count` 5, `flap_window` 10 minutes.
 
 **Node failure**
 
@@ -3565,10 +3594,12 @@ A simulated single authority stands in for the control plane. `node_down_after` 
 | A stalled disk whose I/O completes; then normal for 50 s, then a whole minute | Stays down and probed for 50 s; rejoins after the whole `slow_disk_window` |
 | Node A crashes at t = 0 with writes in flight | Writes to A's PGs wait until the down table (at most 5 s); writes to other PGs never wait |
 | The same, for the PGs A led | The new primary then peers once its grantors' grants to A expire on both clocks: with a grantor's `CLOCK_BOOTTIME` −22.6%, 5.2 s after the grant, so up to about 0.2 s after the down table |
-| A node flapping: down 5 s, up, every 10 s | Without refill, two intervals per flap for every PG with a member on the node (F1). With refill staged one member per table, 1,202 tables per flap and 3 intervals for the busiest PG (F2). Nothing damps it |
+| A node flapping: down 5 s, up, every 10 s | Marked down at its 1st to 5th flap, each starting two intervals of every PG with a member on it (F1); in a `rep3` pool never refilled, since no outage reaches `refill_after`, and in a `rep2` pool neither, since none reaches `degraded_refill_after`. At the 5th mark within 10 minutes it stays down |
+| The damped node then heartbeats normally for 9 minutes, then 10 | Stays down for 9 minutes; marked up after the whole `flap_window`. Its members, down for over `refill_after` meanwhile, have been refilled |
+| A disk marked down as stalled 5 times within 10 minutes | Stays down until its I/O ages have been normal for a whole `flap_window` |
+| `rep2` on two storage nodes; node B damped at its 5th mark, then heartbeating normally | Marked up at its first normal heartbeat, since its PGs would otherwise stay below `min_live` with no disk to refill onto |
+| Node A, the control-plane leader, crashes at t = 0 | A new control-plane leader starts the `node_down_after` count from its leader lease, so A is marked down at that start plus 5 s, not at t = 5 s |
 
-- Open: damping a flapping node, and delaying refill after a node goes down, are not decided (PG
-  epochs study, "Not decided").
 - Open: the link between a primary and member M is down while both reach the authority. The primary
   reports M, the probe answers healthy, and the PG's writes wait while the link stays down (open
   question "A link down between a primary and one member"). Today's expected result is that wait;
@@ -3716,7 +3747,7 @@ model](#epoch-change-model) property it checks:
 | P1 | 3 nodes, `rep3`. A is primary of PG 7. A partition cuts A and client X from B, C and the authority. The authority marks A down, interval 42, B primary. Client Y writes "dog"; X writes "cat" and reads | X's write never completes, and no read anywhere returns "cat". X's reads at A return the pre-partition value until A's lease ends (3.96 s on A's clocks), then are refused. Y's "dog" is acknowledged only after B's and C's grants to A expire on both of their clocks |
 | P2 | PG 7 at 41, activated. Two tables bring it to 42 and then 43 before 42's primary peers | 43's primary gets a member of 42 and one of 41 to adopt 43. No write tagged 41 or 42 completes after 43 activates |
 | P3 | Member C removed (42) and added back (43) within one recovery | C refuses tag 41; no write of 41 collects C's acknowledgment |
-| P4 | 10 nodes, one node flapping every 10 s for 10 minutes, refill staged one member per table | About 1,202 tables per flap; the busiest PG gains 3 intervals per flap (F2) |
+| P4 | 10 nodes, one node flapping every 10 s for 10 minutes, refill staged one member per table | Each PG with a member on the node gains two intervals per flap for the first 5 flaps (F1) and none after the 5th mark damps it; no member is refilled, since none has been down for `refill_after` |
 | P5 | Primary A of PG 7 crashes and restarts within 5 s, with a replicated write still in a member's socket | A takes interval 42 and peers (when, see the restart-wait Open under Peering and read leases). The stale write is refused or superseded; no two contents share one version |
 | P6 | The counter case under [Replica primary](#replica-primary), under 4 clients | As stated there; the refusal counter of other PGs stays 0 |
 | P7 | `pg_count` 1,024 → 2,048 with writes in flight to PG 567 | PGs 1,134 and 1,135 start one interval above 567; every chunk's versions keep growing |
@@ -3739,7 +3770,7 @@ model](#epoch-change-model) property it checks:
 | P21 | Capacity layouts C1 to C6 filled with uniformly hashed chunks | The first refusal comes within 1% of the reported available figure |
 | P22 | `rep3`, `min_live` 2, two members down with writes in flight | Writes are rejected until recovery restores a member; no write is acknowledged on one copy |
 | P23 | `rep3` on 3 nodes of 2 disks; a disk fails, and the node's other disk, the only eligible one, fills to its log reserve during the refill, so copying stops | 60 s later on `ctx.Now` the pool raises `Stuck`, naming the PGs; adding a disk lets them copy, and `Stuck` clears |
-| P24 | A node reboots, its disks down and not marked out | No capacity figure or pool condition changes: its disks keep their shares at their last reported fills |
+| P24 | A node reboots, its disks down for less than `refill_after` | No capacity figure or pool condition changes: its disks keep their shares at their last reported fills |
 
 - Open: P20's fault in Testing strategy happens "while grants are out". Grants arrive in phase 4,
   and the row gains them with the control-plane group.
@@ -3754,6 +3785,11 @@ model](#epoch-change-model) property it checks:
   - `read(off, n) → bytes, version`
   - `read(off, n, at_ver) → bytes`
 - Linearizable: each operation takes effect at one instant between its invoke and its complete.
+- Open: a write resent after its first attempt committed is applied again, so a history with
+  another write between the two attempts is not linearizable if the attempts count as one
+  operation. Until the open question on resent chunk writes is settled, the recorder logs each
+  attempt as its own operation, and a planted resend after a lost acknowledgment, with another
+  client's write between, is the case that shows which way it went.
 - An operation with an unknown result is checked as maybe applied, with no completion.
 - Open: which errors are definite (`NoSpace` before ordering, an `expect_ver` mismatch) and which
   leave the result unknown. Unknown results come from a timeout, a `PeerLost`, or an interval
@@ -3839,6 +3875,8 @@ Unit and trace tests for fortification on the per-node-pair leases. Lease time f
 | Same | `MsgVote` with the transfer context, from the target of a planned transfer | Passed to `RawNode`, which votes under Raft's rules |
 | Same | The leader's Raft heartbeats are lost for 2 s while the node-pair grant holds | Its election timer is stopped: no campaign |
 | Grant to L's node lapsed on the grantor's clocks, epoch bumped to e + 1 | `MsgPreVote`, then `MsgVote`, from C | Passed and answered under Raft's rules (the review criterion "votes once its grant lapses") |
+| Same, with no challenger | The lapse | Campaigns, pre-vote first, after a random 150 to 300 ms (`raft_lapse_campaign`), not at its election timeout |
+| Same, and the other follower's grant to L's node still holds on its own clocks | Its own pre-vote | Dropped by that follower; it campaigns again at its election timeout |
 | Supports no leader | `MsgVote` | Passed |
 | Node restarted 2 s ago on both clocks (within `primary_lease`, 4 s) | Any `MsgVote` or `MsgPreVote` | Refused: no vote and no peering for one `primary_lease` after start |
 | Node restarted 4.1 s ago on both clocks | `MsgVote` | Answered under Raft's rules |
@@ -3883,7 +3921,34 @@ The leader counts itself as a fortified voter. Open: "itself included" gives the
 2. **A leader's node suspended past its lease (5 s).** On resume it ends every lease (`Resumed`) before serving. A new leader may have been elected after the grants lapsed on the grantors' clocks. Expected: no overlap.
 3. **A leader transfer while lease reads arrive.** Expected: the old leader serves none after `MsgTimeoutNow` leaves, and the new leader none before it is fortified and has committed an entry of its term.
 4. **A configuration change while a lease is held.** Expected: the lease requires quorums in both halves throughout the joint configuration.
-5. **Lease clocks.** A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±1%, and grants delayed by asymmetric queueing of up to 50 ms. Expected: no overlap. A crash fails over within 5.2 s plus an election, the most a 22.6% slew can stretch a grantor's wait.
+5. **Lease clocks.** A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±1%, and grants delayed by asymmetric queueing of up to 50 ms. Expected: no overlap. A crash fails over within 5.2 s, the most a 22.6% slew can stretch a grantor's wait, plus `raft_lapse_campaign` and an election.
+
+## Voter replacement
+
+Trace tests on one group of three voters A, B and C, with the control-plane leader's shard map as
+input, and simulator seeds for the whole cluster. `refill_after` 10 minutes.
+
+| Events | Expected |
+| --- | --- |
+| C's node down for 9 minutes 59 s | No configuration change; the group commits on A and B |
+| C's node down for 10 minutes, a fourth metadata node D up | The shard map names D in place of C; the leader adds D as a learner. No proposal waits on D while it catches up |
+| D caught up | One `ConfChangeV2`: remove C, promote D. It commits on A and B through the joint configuration and leaves it on its own |
+| D's log compacted past the learner's position | D receives a snapshot from a point-in-time view, then the log |
+| C's disk reports a new log ID | C replaced at once, without waiting for `refill_after` |
+| C returns after the swap | It finds itself removed, deletes its replica's state, and campaigns in no election |
+| B crashes while D is still a learner | The group, on A alone, commits nothing until B or C returns; it never promotes D to make a quorum |
+| Only three metadata nodes, C down for an hour | Nothing replaced; the group runs on A and B |
+| The control-plane group loses a voter for 10 minutes | Its own leader replaces it the same way |
+
+[property] Across seeds, no learner is promoted before it has caught up with the leader's log, and a
+replacement never stalls proposals while two voters of the old configuration are up.
+
+- Open: what "caught up" means for promotion: the learner's match index equal to the leader's last
+  index, or within one round of it.
+- Open: whether a swap whose dead voter returns while the learner catches up goes on or is
+  dropped, with the learner removed.
+- Open: whether the control-plane leader moves the swap to another node when D fails as a learner,
+  and after how long.
 
 ## Raft storage in the disk log
 
@@ -3991,7 +4056,7 @@ Recovery from manifest and log is under Raft storage in the disk log and MetaSto
 
 Only the last component (a file name, an xattr name or an S3 key) has variable length, with no escaping and no terminator.
 
-**Tags**, from the [key layout](design.md#metadata-layer-metastore), frozen by the golden file as disk format: first byte `0x01` ctl, `0x02` volume, `0x03` fs, `0x04` s3; under `ctl/` `0x01` pool, `0x02` placement table, `0x03` membership, `0x04` session, `0x05` format level; under `volume/{id}/` `0x01` attach, `0x02` snap; an inode's keys `0x01` a, `0x02` x, `0x03` t, `0x04` l, `0x05` d, `0x06` c, `0x07` P; a slot's keys `0x10` n, `0x11` u, `0x12` o, `0x13` p, `0x14` r, `0x15` f; a piece key is its value's tag with the high bit set (`0x82`, `0x83`), then a 1-byte piece number. The vectors below write some tags symbolically, as `T(fs)`, `T(a)` and so on, standing for these bytes.
+**Tags**, from the [key layout](design.md#metadata-layer-metastore), frozen by the golden file as disk format: first byte `0x01` ctl, `0x02` volume, `0x03` fs, `0x04` s3; under `ctl/` `0x01` pool, `0x02` placement table, `0x03` membership, `0x04` session, `0x05` format level, `0x06` shard map; under `volume/{id}/` `0x01` attach, `0x02` snap; an inode's keys `0x01` a, `0x02` x, `0x03` t, `0x04` l, `0x05` d, `0x06` c, `0x07` P; a slot's keys `0x10` n, `0x11` u, `0x12` o, `0x13` p, `0x14` r, `0x15` f; a piece key is its value's tag with the high bit set (`0x82`, `0x83`), then a 1-byte piece number. The vectors below write some tags symbolically, as `T(fs)`, `T(a)` and so on, standing for these bytes.
 
 **Golden vectors**, checked into `internal/meta/testdata/` and never edited once frozen:
 
@@ -4056,6 +4121,8 @@ Only the last component (a file name, an xattr name or an S3 key) has variable l
 | Input | Expected |
 | --- | --- |
 | A node misses heartbeats for `node_down_after` (5 s) | Marked down in one table, which starts a new interval of every PG with a member on it |
+| The node stays down for `refill_after` (10 minutes) | Its PG members refilled ([Placement computation](#placement-computation)) and its shard voters replaced ([Voter replacement](#voter-replacement)) |
+| A node marked down for the 5th time within `flap_window` (10 minutes) | Held down until it has been normal for a whole `flap_window` ([Failure and fail-slow detection](#failure-and-fail-slow-detection)) |
 | A primary reports a member after `member_timeout` (1 s), and the member fails a direct probe (its disk stalled, its log failed, or no answer within 1 s) | Marked down at once |
 | The same report, but the probe answers with no stall | Not marked down |
 | A heartbeat shows a disk stalled, with no report | Marked down at once |
@@ -4085,6 +4152,7 @@ Only the last component (a file name, an xattr name or an S3 key) has variable l
 | A storage node marked down sends a heartbeat reporting an older version | It is not marked up |
 | A follower of the control-plane group, or a new leader before its leader lease starts, receives a heartbeat | It answers no renewal |
 | A new leader's leader lease starts | Every live session gets a full `session_lease` from that start |
+| The control-plane leader crashes 1 s after its last renewal of client C, whose `CLOCK_BOOTTIME` runs 22.6% fast; a new leader answers 8 s after the crash | C's lease ends about 8.1 s after that renewal, 7.1 s after the crash, and C holds its writes from then until the new leader answers; no session is fenced. With a new leader at 5 s, C never holds |
 | The leader's loop falls behind by more than a heartbeat interval | Every session's timer restarts from now |
 | An owner reports a recall unanswered for `recall_timeout` | The session is fenced in the next version |
 | An operator evicts a session | The same |

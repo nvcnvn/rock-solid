@@ -191,8 +191,9 @@ simulator, once built, checks "at most one writer per RWO volume" after every st
 **RWX block.** Several nodes attach one raw device, for KubeVirt live migration. The design calls
 this Tier 0, the lowest of its coherence tiers: the attach record allows several writers, the
 daemon caches nothing, and every I/O goes to the chunk primary, whose single order per chunk is
-all the coordination needed. The kernel's own cache is the application's choice: KubeVirt opens
-shared disks with `cache=none` (direct I/O), which is what makes live migration safe.
+all the coordination live migration needs, since it never writes one block from two nodes at
+once. The kernel's own cache is the application's choice: KubeVirt opens shared disks with
+`cache=none` (direct I/O), which is what makes live migration safe.
 
 **Discard gives space back.** The device advertises discard, and the CSI driver mounts the
 filesystems it creates on block volumes with `discard`, so deleting a file in the pod becomes a
@@ -233,10 +234,13 @@ when it orders a write, not only when it receives one, so a stale write it alrea
 too. The incarnation rides in each write, not only in the hello, because with one event loop per
 core the old connection, the new one and the chunk's loop can be three different loops
 ([11](11-runtime-in-go.md)), and making every hello reach every loop first would be an ordering
-rule between loops kept forever. Applying a reissued write twice is harmless: the same bytes give
-the same blocks under a newer version. The same check fences the chunk writes of a dead FUSE
-daemon. The flags and
-recovery steps are in [Daemon restart and upgrade](../docs/design.md#daemon-restart-and-upgrade).
+rule between loops kept forever. Applying a reissued write twice is harmless to the pod that sent
+it: the same bytes give the same blocks under a newer version. Under RWX block, another node's
+write landing between the two would be overwritten, and a reader on a third node could see the
+reissued write take effect twice, which live migration never causes because it never writes one
+block from two nodes at once ([Single order per chunk](../docs/design.md#data-layer-chunkstore)).
+The same check fences the chunk writes of a dead FUSE daemon. The flags and recovery steps are in
+[Daemon restart and upgrade](../docs/design.md#daemon-restart-and-upgrade).
 
 ### When the pool is full: pause, never fail
 

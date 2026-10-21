@@ -265,11 +265,22 @@ or own their storage, which rules both out.
 | `raft_heartbeat` | 100 ms | Leader's keepalive to followers while the group is active |
 | `raft_election_timeout` | random 1 to 2 s | How long a follower waits before campaigning |
 | Election tick | 10 ms | Finer than the heartbeat, so timeouts take many distinct values and followers rarely time out together and split the vote |
+| `raft_lapse_campaign` | random 150 to 300 ms | How long a follower waits to campaign once its support for a leader lapses with its grant: the lapse already shows the leader's node gone. The Raft paper's range |
 
 Failover is set by the slowest of the groups that lost their leader. A crashed leader's followers
 stay fortified until its node's grants lapse, `primary_lease` (4 s; see the leases below), and then
-elect in 1.5 to 5× the maximum election timeout, 3 to 10 s with the defaults, so the design budgets
-7 to 15 s from the crash to a new leader.
+campaign after `raft_lapse_campaign` instead of a whole election timeout. A grant lapses one
+`primary_lease` after its last renewal, which came up to a heartbeat before the crash, so the design
+budgets about 3.2 to 4.3 s from the crash to a new leader, up to 5.5 s under a slewed clock, and 1
+to 2 s more where campaigns collide. That is
+reasoned, not measured: the multi-raft spike measured 1.4 to 5× the maximum election timeout with
+no lapse campaigns, and rerunning it with them is an open question. The control-plane group fails
+over the same way, while each client keeps the 10 s session lease of its last answered renewal.
+That renewal came up to a heartbeat before the crash, and a client whose clock a time daemon runs
+22.6% fast ends its lease early, so a control-plane failover longer than about 7.1 s pauses that
+client's writes, and one longer than about 9 s every client's. Only slewed clocks and colliding
+campaigns together get there. The pause fences nobody, so the lease stays at 10 s rather than
+holding a dead client's locks longer.
 
 ## The options: where can metadata live?
 
@@ -345,9 +356,28 @@ node. Splitting by load comes with leader balancing. The Raft shard is still bui
 at about 1,000 groups per node, "so per-group cost never limits splitting".
 
 **Moves and balancing.** A planned leader transfer moves leadership without an election, for
-balancing, a rolling upgrade or draining a node. Replicas change through joint configurations
-(Raft's two-step membership change); the design does not yet spell out when they move. Phase 4
-ships one shard with the sharded API; range splitting and leader balancing are phase 13.
+balancing, a rolling upgrade or draining a node. Phase 4 ships one shard with the sharded API;
+range splitting and leader balancing are phase 13.
+
+**Replacing a voter.** The control-plane leader places every group's three voters, one per node
+that holds metadata, and records them in the shard map. A voter whose node or disk has been down
+for `refill_after` (10 minutes, the wait a PG member gets too) is replaced, and one whose disk lost
+its log is replaced at once. The Raft paper warns about the obvious way: adding the new, empty
+replica as a fourth voter while one of the three is dead makes the quorum three, and every commit
+then waits for the newcomer to copy up to 512 MiB. So the new replica joins as a *learner*, which
+receives the log but has no vote, and once it has caught up, one joint configuration change removes
+the dead voter and promotes the learner in a single step. The two survivors are a majority of both
+the old and the new set, so the swap never waits on anyone who is missing:
+
+```text
+ voters {A, B, C}, C down 10 min    add D as learner     D caught up        one ConfChangeV2
+ quorum 2 of 3: A, B                 D copies the log;    .                  joint {A,B,C} + {A,B,D}:
+                                     commits still need   .                  A and B are a majority
+                                     only A and B         .                  of both -> {A, B, D}
+```
+
+With only three metadata nodes there is nowhere to put D, so a group whose voter's node is down
+runs on two voters until the node returns.
 
 ### Key layout: keep a directory and its files together
 
@@ -516,9 +546,11 @@ stream, next to the chunk writes of the same round.
 
 **Group commit inside Raft.** Each leader batches whatever arrived during the last round into
 *one* log entry and one network round (so entries 41 and 42 in the race diagram would really be
-one). A follower holds its acknowledgments until its round's flush completes, since an
-acknowledged entry must survive its crash. Rounds are bounded by size only, at
-`max_group_commit_bytes` (1 MiB), and the loop collects `Ready` only from shards that changed
+one). Only the leader's appends leave before the round's flush. Everything else waits for it: a
+follower's acknowledgments, since an acknowledged entry must survive its crash, and a vote or a
+new term, since Raft (its Figure 2) needs both durable before a reply. Only a pre-vote, which
+changes nothing, goes out at once. Rounds are bounded by size only, at `max_group_commit_bytes`
+(1 MiB), and the loop collects `Ready` only from shards that changed
 ([11-runtime-in-go.md](11-runtime-in-go.md)).
 
 **Commit latency.** A commit waits for about three rounds: the leader's append, the follower's
@@ -606,7 +638,8 @@ sequenceDiagram
   planned transfer ends the old leader's lease the moment it sends `MsgTimeoutNow`.
 
 **Failure.** When a grant lapses on the grantor's clocks, every fortification under it ends, and
-the groups led from that node wake up and elect. The timeline for a crashed leader node:
+the groups led from that node wake up and campaign after `raft_lapse_campaign`. The timeline for
+a crashed leader node:
 
 ```text
 time ->   0 s                    about 4 s                       + election
@@ -614,12 +647,14 @@ time ->   0 s                    about 4 s                       + election
 node A    X crashes              .                               .
 grants    B->A, C->A still valid | lapse on B's and C's clocks   .
           (primary_lease = 4 s)  | support epochs bumped         .
-followers loyal, timers stopped  | campaign (pre-vote, vote)     | new leader, reads via
+followers loyal, timers stopped  | campaign 150-300 ms later     | new leader, reads via
                                                                  | ReadIndex until fortified
 ```
 
-So a crashed leader's groups fail over after `primary_lease` (4 s) plus an election. A restarted
-node has forgotten what it granted, so for one `primary_lease` it grants no vote.
+So a crashed leader's groups fail over after `primary_lease` (4 s) plus an election. Campaigning
+that early is safe: the leader's lease ended before the grant did, and a follower whose grant
+still holds drops the pre-vote of anyone challenging a live leader. A restarted node has
+forgotten what it granted, so for one `primary_lease` it grants no vote.
 
 **Why not just use etcd-raft's built-in lease?** Because it relies on timer ticks that idle groups
 stop taking. etcd-raft's `CheckQuorum` lease counts ticks, and it checks the quorum only once per
@@ -654,9 +689,11 @@ The `ctl/...` keys live in one dedicated control-plane Raft group, not sharded. 
 because it maps placement groups, not chunks: 2048 PGs × 3 replicas × a 4-byte disk ID, plus each
 PG's interval numbers, is 40 KiB ([02-chunks-and-placement.md](02-chunks-and-placement.md)). Its
 leader commits each new placement table as one Raft entry holding the changed PG entries, with a
-new table epoch, and marks a node down after `node_down_after` (5 s) without a heartbeat. That same
-heartbeat, once a second, renews the node's client session, reports its disks' fill and asks for
-the node's *space grant*, the bytes of each pool its daemon may buffer before flushing
+new table epoch, and marks a node down after `node_down_after` (5 s) without a heartbeat. A new
+leader starts that count from its own lease, so when the old leader's node crashed, its PGs wait
+for the failover plus 5 s. The heartbeat, once a second, also renews the node's client session,
+reports its disks' fill and asks for the node's *space grant*, the bytes of each pool its daemon
+may buffer before flushing
 ([09-rwx-filesystem-and-cache-coherence.md](09-rwx-filesystem-and-cache-coherence.md#a-full-pool-space-grants)).
 Renewals and grants live only in the leader's memory, and only a leader holding its leader lease
 answers them. The leader keeps a pool's grants within half its available space and a cap per disk,
@@ -750,8 +787,8 @@ the time, and its measurements are why the pin moved to v3.6.0.
 ## Trade-offs: what it costs us
 
 - **Three copies of all metadata**, one failure tolerated per group, even in a one-copy pool.
-- **Failover takes seconds:** 7 to 15 s budgeted; new opens on a crashed owner's inodes wait one
-  session lease.
+- **Failover takes seconds:** about 3.2 to 4.3 s budgeted (5.5 s under a slewed clock), most of it the 4 s lease; new opens on
+  a crashed owner's inodes wait one session lease more.
 - **A commit costs about three rounds**, so leaders must be planned to keep loops under half busy.
 - **Cross-directory rename is the slow path** and slowly erodes locality; one huge, busy
   directory is bounded by one shard.
@@ -771,6 +808,10 @@ the time, and its measurements are why the pin moved to v3.6.0.
   commits to two rounds? (open question)
 - **Deletes on a full disk.** Should Raft entries and punches draw on a slice of the log's
   reserve, as ZFS's slop space lets `rm` through? (open question)
+- **Failover with lapse campaigns.** The 3.2 to 4.3 s budget is reasoned, not measured: how many
+  of 334 groups that lose their leader collide and wait out an election timeout? Rerunning the
+  multi-raft spike's M3 with campaigns on a lapse answers it, and also how often a control-plane
+failover outlasts the 7.1 s a fast-clocked client keeps its session. (open question)
 - **Asynchronous storage writes** stay off until two guards exist; the study is not yet reported
   upstream.
 - **The fork's tech-debt entry.** The build checklist's "etcd-raft module" item says the pin and
