@@ -125,9 +125,11 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats, plant crashPlant) (*ha
 				return
 			}
 			copy(h.pool.Bytes(buf), pattern(uint64(size), size))
-			if _, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), indexOwner, buf, uint64(size), &h.out); err != nil {
+			tk, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), indexOwner, buf, uint64(size), &h.out)
+			if err != nil {
 				t.Fatalf("seed %d: merge piece: %v", seed, err)
 			}
+			h.submitted[tk] = disklog.BlobEntry(disklog.BlobRun, indexOwner, uint64(size))
 			h.absorb()
 			return
 		case k < 6:
@@ -157,9 +159,11 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats, plant crashPlant) (*ha
 			copy(h.pool.Bytes(buf), payload)
 			it = disklog.Item{Entry: disklog.BlobEntry(disklog.BlobRaftEntries, userBlobOwner, uint64(size)), Buf: buf}
 		}
-		if _, err := h.log.Submit(&h.ctx, stream, it, &h.out); err != nil {
+		tk, err := h.log.Submit(&h.ctx, stream, it, &h.out)
+		if err != nil {
 			t.Fatalf("seed %d: submit %+v: %v", seed, it.Entry, err)
 		}
+		h.submitted[tk] = it.Entry
 		h.absorb()
 	}
 

@@ -117,8 +117,15 @@ func scriptedRecovery(t *testing.T, d *datadriven.TestData) string {
 			last = h.recover(mode)
 			fmt.Fprintf(&b, "%s: %s\n", line, recoveryResult(last))
 		case "index":
-			if len(f) != 1 || last == nil || last.err != nil {
-				d.Fatalf(t, "%q: index takes no arguments and follows a successful recover", line)
+			rejected := len(f) == 2 && f[1] == "rejected"
+			if len(f) != 1 && !rejected || last == nil || last.err != nil {
+				d.Fatalf(t, "%q: index [rejected] follows a successful recover", line)
+			}
+			switch err := oracleCheck(last); {
+			case err != nil && !rejected:
+				d.Fatalf(t, "%q: the crash oracle rejects the index: %v", line, err)
+			case err == nil && rejected:
+				d.Fatalf(t, "%q: the crash oracle accepts an index the case expects it to reject", line)
 			}
 			b.WriteString(indexResult(h, last))
 		default:
@@ -201,8 +208,8 @@ func indexResult(h *harness, res *recovered) string {
 
 // Recovery from disk images that testdata/recovery's commands build: write (submit and complete),
 // submit (only queue, printing the actions), exec ioN, crash landing the listed unflushed blocks,
-// xor a block with a mask, flip bits of a byte, zeros, recover open or rebuild, and index, the
-// last recovery's index read back and checked against the crash oracle.
+// xor a block with a mask, flip bits of a byte, zeros, recover open or rebuild, and index
+// [rejected], the last recovery's index read back and checked against the crash oracle.
 func TestScriptedRecovery(t *testing.T) {
 	datadriven.RunTest(t, "testdata/recovery", func(t *testing.T, d *datadriven.TestData) string {
 		if d.Cmd != "run" {

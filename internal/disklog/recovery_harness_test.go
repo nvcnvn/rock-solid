@@ -231,6 +231,7 @@ func (n *node) step() bool {
 		h.pool.Free(buf)
 		h.t.Fatalf("checkpoint piece: %v", err)
 	}
+	h.submitted[t] = disklog.BlobEntry(disklog.BlobRun, indexOwner, uint64(len(piece)))
 	n.ticket = t
 	n.off += len(chunk)
 	h.absorb()
@@ -298,6 +299,8 @@ func (h *harness) resetIO() {
 	h.completed = map[core.IOID]bool{}
 	h.durable = map[core.IOID]bool{}
 	h.writeAt = map[core.LBA]core.IOID{}
+	clear(h.submitted)
+	clear(h.noted)
 	h.done = nil
 	h.writes, h.fsyncs, h.unlinked, h.maxPending = 0, 0, 0, 0
 	h.log, h.rec = nil, nil

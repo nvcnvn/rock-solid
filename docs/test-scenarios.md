@@ -2231,9 +2231,17 @@ Torn writes, bit flips, fail-slow and discards:
   cycle's recoveries, before the checks that would otherwise run after the oracle's. The scripted
   recovery file shows the first two as cases.
 - The oracle's state is independent of replay and of the index: the harness decodes each record's
-  items from the round's write as it goes to the disk and applies them to a plain model. It shares
-  the record codec and group commit's choice of entries with the code under test, which the
-  write-side decode check covers.
+  items from the round's write as it goes to the disk, with the segment's open sequence taken from
+  the write that opened it rather than read back from the disk, and applies them to a plain model.
+  It shares the record codec with the code under test, so when a record becomes durable each
+  decoded entry must equal the item submitted under its ticket, and only the log's own manifest
+  pieces may carry none: a codec bug the oracle would share with replay, or a round that hands
+  entries out under one another's tickets (`disklog.SwapTickets`), fails the test. A round in
+  flight at a crash that recovery keeps is not yet checked against its items.
+- A torn round between acknowledged rounds and a whole one in flight, seeded over 50 seeds at
+  commit depth 2 and 3, one or more of its blocks lost: recovery stops at the round before it, and
+  with `disklog.ReplayPastGaps` planted every seed trips the oracle, whatever the random-crash
+  generator happens to produce.
 - The Recovery section's atomic-flush scenario (one checkpoint over two indexes and a shard replica)
   and the failed-flush cases pass through the oracle.
 - Crash during recovery, then recovery again: the oracle's window is the same, and the second
@@ -2363,14 +2371,17 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   `run [depth=n]` takes `write` and `submit` of chunk writes (a submit prints the actions it queues),
   `exec ioN`, `crash` landing the listed unflushed blocks, `xor` and `flip` of a block's bytes,
   `zeros`, `recover open|rebuild`, which prints the LSNs replayed, the durable LSN, the headers
-  erased and the segments quarantined, or Corrupt(LSN), and `index`, which prints the last
-  recovery's index as extents (chunk, blocks, version, pool, LBAs), whether every mapped block
+  erased and the segments quarantined, or Corrupt(LSN), and `index [rejected]`, which prints the
+  last recovery's index as extents (chunk, blocks, version, pool, LBAs), whether every mapped block
   reads back the data its version wrote, so a block damaged after recovery is named, and whether
   the index is what the crash oracle holds at the recovered LSN, naming the first block that
-  differs, so a careless `go test -rewrite` cannot hide a wrong index. `run plant=stop-early` and
-  `plant=past-gaps` break recovery as the Crash oracle section's planted bugs do. The Recovery
-  section's torn tail (every landing set), damage in a middle record and in the last one, and both
-  commit-depth-2 cases live only here, each that recovers printing its index.
+  differs. `run plant=stop-early` and `plant=past-gaps` break recovery as the Crash oracle section's
+  planted bugs do. An `index` the oracle rejects fails the case unless it is written
+  `index rejected`, as after a plant or damage to an acknowledged record, and one written so fails
+  if the oracle accepts it, so a careless `go test -rewrite` cannot accept a wrong index or a plant
+  the oracle misses. The Recovery section's torn tail (every landing set), damage in a middle
+  record and in the last one, and both commit-depth-2 cases live only here, each that recovers
+  printing its index.
 - An unknown command, argument or op, or a malformed argument, fails the test with the file and
   line, never a silent skip.
 

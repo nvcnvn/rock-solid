@@ -23,6 +23,15 @@ func PadWrites(l *Log) {
 	l.breakRound = func(_ []byte, r *round) { r.vec = append(r.vec, core.IOVec{Buf: r.head, Len: core.BlockSize}) }
 }
 
+// SwapTickets makes every round of two or more items report its first two items' tickets swapped.
+func SwapTickets(l *Log) {
+	l.breakRound = func(_ []byte, r *round) {
+		if len(r.tickets) >= 2 {
+			r.tickets[0], r.tickets[1] = r.tickets[1], r.tickets[0]
+		}
+	}
+}
+
 // AppendAnywhere lets rounds append to a segment whose opening round is still in flight, as
 // a log without that rule would.
 func AppendAnywhere(l *Log) { l.appendAnywhere = true }

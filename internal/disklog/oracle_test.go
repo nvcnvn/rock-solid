@@ -1,8 +1,11 @@
 package disklog_test
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
+	"strings"
+	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
@@ -31,27 +34,22 @@ func (h *harness) watch(m model) *diskOracle {
 }
 
 // noteRound hands the oracle the record a round's write a carries, decoded from the bytes the
-// write sends, as a Durable event for it would report it. Writes to segment 0 are the superblock's.
+// write sends with the open sequence of the write that opened its segment, as a Durable event
+// for it would report it. Writes to segment 0 are the superblock's.
 func (h *harness) noteRound(a core.Action) {
 	h.t.Helper()
 	seg, block := uint32(uint64(a.LBA)/uint64(h.geo.SegmentBlocks)), uint32(uint64(a.LBA)%uint64(h.geo.SegmentBlocks))
 	if seg == 0 {
 		return
 	}
-	var img []byte
-	for _, v := range a.Vec {
-		img = append(img, h.pool.Bytes(v.Buf)[:v.Len]...)
-	}
+	img := h.writeImage(a)
 	lba := a.LBA
-	var seq uint64
 	if block == 0 {
-		sh, err := disklog.DecodeSegmentHeader(img)
-		if err != nil {
-			h.t.Fatalf("a round opens segment %d with a header that does not decode: %v", seg, err)
-		}
-		seq, img, block, lba = sh.Seq, img[core.BlockSize:], 1, lba+1
-	} else {
-		seq = h.segmentSeq(seg)
+		img, block, lba = img[core.BlockSize:], 1, lba+1
+	}
+	seq, ok := h.opened[seg]
+	if !ok {
+		h.t.Fatalf("a round is written at LBA %d of segment %d, which no write opened", lba, seg)
 	}
 	hdr, err := disklog.DecodeHeader(img, disklog.Place{LogID: h.logID, Seq: seq, Offset: block}, h.geo.SegmentBlocks-block, nil)
 	if err != nil {
@@ -64,6 +62,59 @@ func (h *harness) noteRound(a core.Action) {
 	if err := h.oracle.Written(ev.LSN, ev); err != nil {
 		h.t.Fatalf("oracle: %v", err)
 	}
+	h.noted[ev.LSN] = ev.Entries
+}
+
+// noteOpen records the open sequence of the segment a write of its block 0 opens; a block 0
+// that is not a segment header of this log leaves the segment unopened.
+func (h *harness) noteOpen(a core.Action) {
+	seg := uint32(uint64(a.LBA) / uint64(h.geo.SegmentBlocks))
+	if seg == 0 || uint64(a.LBA)%uint64(h.geo.SegmentBlocks) != 0 {
+		return
+	}
+	sh, err := disklog.DecodeSegmentHeader(h.writeImage(a)[:core.BlockSize])
+	if err != nil || sh.LogID != h.logID {
+		delete(h.opened, seg)
+		return
+	}
+	h.opened[seg] = sh.Seq
+}
+
+// writeImage is the bytes a write sends.
+func (h *harness) writeImage(a core.Action) []byte {
+	var img []byte
+	for _, v := range a.Vec {
+		img = append(img, h.pool.Bytes(v.Buf)[:v.Len]...)
+	}
+	return img
+}
+
+// checkTickets reports how the entries the oracle was handed for a durable record differ from
+// the items submitted under its tickets; only the log's own manifest pieces carry no ticket.
+func (h *harness) checkTickets(ev disklog.Event) error {
+	noted := h.noted[ev.LSN]
+	delete(h.noted, ev.LSN)
+	if len(noted) != len(ev.Tickets) {
+		return fmt.Errorf("LSN %d: %d entries decoded from its round, %d tickets durable", ev.LSN, len(noted), len(ev.Tickets))
+	}
+	for i, t := range ev.Tickets {
+		e := noted[i]
+		if t == disklog.NoTicket {
+			if e.Kind != disklog.EntryBlob || e.BlobKind != disklog.BlobManifest && e.BlobKind != disklog.BlobManifestPiece {
+				return fmt.Errorf("LSN %d entry %d is %+v under no ticket", ev.LSN, i, e)
+			}
+			continue
+		}
+		want, ok := h.submitted[t]
+		if !ok {
+			return fmt.Errorf("LSN %d entry %d: ticket %d was not submitted through the harness", ev.LSN, i, t)
+		}
+		if e != want {
+			return fmt.Errorf("LSN %d entry %d is %+v, ticket %d submitted %+v", ev.LSN, i, e, t, want)
+		}
+		delete(h.submitted, t)
+	}
+	return nil
 }
 
 // oracleCheck reports how a recovery fails the crash oracle: an LSN outside its window, or an
@@ -106,4 +157,90 @@ func modelDiff(got, want model) string {
 		first += fmt.Sprintf(" (%d blocks differ)", n)
 	}
 	return first
+}
+
+// tornMiddle writes one to six acknowledged rounds, then commit depth rounds in flight together,
+// each a chunk of its own, and crashes with every block of their writes landing but one or more
+// of an earlier in-flight round's: a gap with a whole round after it. It returns the recovery
+// and the LSN recovery must stop at.
+func tornMiddle(t *testing.T, seed uint64, plant func(*disklog.Recovery)) (*recovered, uint64) {
+	r := core.NewRand(seed)
+	cfg := testConfig(0)
+	cfg.CommitDepth = int(r.Range(2, 3))
+	h := formatted(t, gib, cfg)
+	h.plant = plant
+	h.watch(model{})
+	chunk := uint32(0)
+	write := func() disklog.Item {
+		chunk++
+		return h.chunkWrite(chunk, 0, uint16(r.Range(1, 3)), uint64(chunk))
+	}
+	for range r.Range(1, 6) {
+		h.put(disklog.Hot, write())
+	}
+	acked := h.log.DurableLSN()
+	for range cfg.CommitDepth {
+		h.submit(disklog.Hot, write())
+	}
+	var rounds []core.Action
+	for i := 0; i < len(h.pending); {
+		if a := h.pending[i].act; a.Kind == core.ActDiskWrite {
+			rounds = append(rounds, a)
+			h.step(i)
+			continue
+		}
+		i++
+	}
+	if len(rounds) != cfg.CommitDepth {
+		t.Fatalf("seed %d: %d rounds in flight, want %d", seed, len(rounds), cfg.CommitDepth)
+	}
+	i := int(r.Below(uint64(len(rounds) - 1)))
+	torn := rounds[i]
+	blocks := core.LBA(torn.Len / core.BlockSize)
+	lost := map[core.LBA]bool{torn.LBA + core.LBA(r.Below(uint64(blocks))): true}
+	for b := range blocks {
+		if r.Chance(1, 2) {
+			lost[torn.LBA+b] = true
+		}
+	}
+	h.disk.Crash(func(_ int, lba core.LBA) bool { return !lost[lba] })
+	return h.recover(disklog.ModeOpen), acked + uint64(i)
+}
+
+// A round torn between acknowledged rounds and a whole one in flight ends the log there, and
+// replaying past it trips the crash oracle on every seed.
+func TestOracleCatchesReplayPastATornRound(t *testing.T) {
+	for seed := uint64(1); seed <= 50; seed++ {
+		res, stop := tornMiddle(t, seed, nil)
+		if res.err != nil || res.durable != stop {
+			t.Fatalf("seed %d: recovered to LSN %d, %v; want %d", seed, res.durable, res.err, stop)
+		}
+		if err := oracleCheck(res); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		if res, _ = tornMiddle(t, seed, disklog.ReplayPastGaps); res.err != nil || oracleCheck(res) == nil {
+			t.Fatalf("seed %d: planted, recovery ended %v and the oracle passed it", seed, res.err)
+		}
+	}
+}
+
+// A round that hands its items' entries out under one another's tickets fails the check of
+// each durable record's entries against the items submitted.
+func TestTicketCheckCatchesSwappedTickets(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	h.watch(model{})
+	var mismatch error
+	h.onMismatch = func(err error) { mismatch = cmp.Or(mismatch, err) }
+	h.put(disklog.Hot, h.chunkWrite(1, 0, 1, 1))
+	if mismatch != nil {
+		t.Fatalf("unplanted: %v", mismatch)
+	}
+	disklog.SwapTickets(h.log)
+	h.submit(disklog.Hot, h.chunkWrite(2, 0, 1, 2))
+	h.submit(disklog.Hot, h.chunkWrite(3, 0, 1, 3))
+	h.submit(disklog.Hot, h.chunkWrite(4, 0, 1, 4))
+	h.run()
+	if mismatch == nil || !strings.Contains(mismatch.Error(), "LSN 3 entry 0 is") || !strings.Contains(mismatch.Error(), "ticket 4 submitted") {
+		t.Fatalf("swapped tickets: %v, want LSN 3's first entry named against ticket 4", mismatch)
+	}
 }

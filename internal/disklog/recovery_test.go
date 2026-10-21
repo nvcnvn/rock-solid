@@ -939,6 +939,7 @@ func (o *owners) checkpoint(indexes []disklog.CheckpointIndex, flushed ...uint32
 		if err != nil {
 			h.t.Fatal(err)
 		}
+		h.submitted[t] = disklog.BlobEntry(disklog.BlobRun, owner, 8)
 		h.absorb()
 		tickets[owner] = t
 	}

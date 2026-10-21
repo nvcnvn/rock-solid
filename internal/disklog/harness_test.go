@@ -79,6 +79,15 @@ type harness struct {
 	poolBytes int
 	// oracle, when set, is handed every round the log writes and every LSN it reports durable.
 	oracle oracleFeed
+	// opened is each segment's open sequence, from the write that opened it.
+	opened map[uint32]uint64
+	// submitted is the entry of each item submitted through the harness, by ticket.
+	submitted map[disklog.Ticket]disklog.Entry
+	// onMismatch, when set, takes each durable record whose entries differ from the items
+	// submitted under its tickets, instead of failing the test.
+	onMismatch func(error)
+	// noted is the entries the oracle was handed for each LSN, decoded from the round's write.
+	noted map[uint64][]disklog.Entry
 }
 
 func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {
@@ -157,6 +166,9 @@ func blankHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Con
 		completed: map[core.IOID]bool{},
 		durable:   map[core.IOID]bool{},
 		writeAt:   map[core.LBA]core.IOID{},
+		opened:    map[uint32]uint64{},
+		submitted: map[disklog.Ticket]disklog.Entry{},
+		noted:     map[uint64][]disklog.Entry{},
 	}
 	h.raw = func(now core.Tick) core.Tick { return now*1226/1000 + 7 }
 	h.ctx = core.Context{Now: 1000, Raw: h.raw(1000), Pool: h.pool}
@@ -206,6 +218,7 @@ func (h *harness) absorb() {
 			if h.onWrite != nil {
 				h.onWrite(a)
 			}
+			h.noteOpen(a)
 			if h.oracle != nil && h.log != nil && h.rec == nil {
 				h.noteRound(a)
 			}
@@ -237,6 +250,12 @@ func (h *harness) absorb() {
 		ev.Data = slices.Clone(ev.Data)
 		h.events = append(h.events, ev)
 		if h.oracle != nil && ev.Kind == disklog.Durable {
+			if err := h.checkTickets(ev); err != nil {
+				if h.onMismatch == nil {
+					h.t.Fatalf("oracle: %v", err)
+				}
+				h.onMismatch(err)
+			}
 			if err := h.oracle.Acked(ev.LSN); err != nil {
 				h.t.Fatalf("oracle: %v", err)
 			}
@@ -469,6 +488,7 @@ func (h *harness) submit(s disklog.Stream, it disklog.Item) disklog.Ticket {
 	if err != nil {
 		h.t.Fatalf("submit %+v: %v", it.Entry, err)
 	}
+	h.submitted[t] = it.Entry
 	h.absorb()
 	return t
 }
