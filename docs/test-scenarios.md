@@ -1985,8 +1985,9 @@ crash oracle and the usage table against the index:
 - Simulator, extending the random-crash property: with the cleaner freeing and reusing segments
   and crashes at every action, the usage table after every recovery equals the log's own, and the
   next open sequence number is at least the loaded manifest's `NextSeq`.
-- Rebuild after cleaning: a rebuild from LSN 1 meets the LSNs freed segments held, gone for good;
-  its rule is the design's open question, and its scenarios come with it.
+- Rebuild after cleaning: a rebuild from LSN 1 meets the LSNs freed segments held, gone for good,
+  and reports the log corrupt; freed segments also take punches, freezes and copies' sources that
+  surviving records need. Its rule is the design's open question, and its scenarios come with it.
 
 TRIM (one `DiskTrim` per freed segment, `trim_rate` 128 MiB/s, time from `ctx.Now`):
 
