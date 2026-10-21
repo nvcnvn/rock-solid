@@ -81,13 +81,12 @@ type harness struct {
 	oracle oracleFeed
 	// opened is each segment's open sequence, from the write that opened it.
 	opened map[uint32]uint64
-	// submitted is the entry of each item submitted through the harness, by ticket.
-	submitted map[disklog.Ticket]disklog.Entry
-	// onMismatch, when set, takes each durable record whose entries differ from the items
-	// submitted under its tickets, instead of failing the test.
-	onMismatch func(error)
-	// noted is the entries the oracle was handed for each LSN, decoded from the round's write.
-	noted map[uint64][]disklog.Entry
+	// tickets is the items submitted through the harness.
+	tickets *ticketBook
+	// noted is each round in flight that the oracle was handed, by LSN.
+	noted map[uint64]notedRound
+	// crashed is what was in flight when the last log was dropped, until a recovery settles it.
+	crashed crashedRounds
 }
 
 func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {
@@ -167,9 +166,9 @@ func blankHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Con
 		durable:   map[core.IOID]bool{},
 		writeAt:   map[core.LBA]core.IOID{},
 		opened:    map[uint32]uint64{},
-		submitted: map[disklog.Ticket]disklog.Entry{},
-		noted:     map[uint64][]disklog.Entry{},
+		noted:     map[uint64]notedRound{},
 	}
+	h.tickets = &ticketBook{t: t, submitted: map[disklog.Ticket]disklog.Entry{}, unanswered: map[disklog.Ticket]bool{}}
 	h.raw = func(now core.Tick) core.Tick { return now*1226/1000 + 7 }
 	h.ctx = core.Context{Now: 1000, Raw: h.raw(1000), Pool: h.pool}
 	return h
@@ -242,6 +241,9 @@ func (h *harness) absorb() {
 	if h.sched != nil {
 		h.handOver()
 	}
+	if h.rec == nil {
+		h.tickets.log = h.log
+	}
 	from := len(h.events)
 	for _, ev := range h.out.Events {
 		ev.Entries = slices.Clone(ev.Entries)
@@ -249,13 +251,11 @@ func (h *harness) absorb() {
 		ev.Payloads = slices.Clone(ev.Payloads)
 		ev.Data = slices.Clone(ev.Data)
 		h.events = append(h.events, ev)
+		h.tickets.answer(ev, h.oracle != nil)
 		if h.oracle != nil && ev.Kind == disklog.Durable {
-			if err := h.checkTickets(ev); err != nil {
-				if h.onMismatch == nil {
-					h.t.Fatalf("oracle: %v", err)
-				}
-				h.onMismatch(err)
-			}
+			n := h.noted[ev.LSN]
+			delete(h.noted, ev.LSN)
+			h.tickets.mismatch(checkTickets(ev.LSN, n.entries, ev.Tickets, h.tickets.submitted))
 			if err := h.oracle.Acked(ev.LSN); err != nil {
 				h.t.Fatalf("oracle: %v", err)
 			}
@@ -488,7 +488,7 @@ func (h *harness) submit(s disklog.Stream, it disklog.Item) disklog.Ticket {
 	if err != nil {
 		h.t.Fatalf("submit %+v: %v", it.Entry, err)
 	}
-	h.submitted[t] = it.Entry
+	h.tickets.track(t, it.Entry)
 	h.absorb()
 	return t
 }

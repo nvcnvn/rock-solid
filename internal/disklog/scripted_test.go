@@ -15,11 +15,30 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
+// caseTB fails a check the harness makes during a scripted case with the case's testdata line
+// and the command running, as the case's own checks do.
+type caseTB struct {
+	testing.TB
+	d    *datadriven.TestData
+	line *string
+}
+
+func (c caseTB) Fatalf(format string, args ...any) {
+	c.TB.Helper()
+	c.d.Fatalf(c.TB, "%q: %s", *c.line, fmt.Sprintf(format, args...))
+}
+
+func (c caseTB) Fatal(args ...any) {
+	c.TB.Helper()
+	c.d.Fatalf(c.TB, "%q: %s", *c.line, fmt.Sprint(args...))
+}
+
 // scriptedRecovery runs one case of testdata/recovery on a freshly formatted 1 GiB disk and
 // returns what its commands print.
-func scriptedRecovery(t *testing.T, d *datadriven.TestData) string {
+func scriptedRecovery(t testing.TB, d *datadriven.TestData) string {
 	cfg := testConfig(0)
 	var plant func(*disklog.Recovery)
+	swap := false
 	for _, a := range d.CmdArgs {
 		switch {
 		case a.Key == "depth" && len(a.Vals) == 1:
@@ -32,16 +51,22 @@ func scriptedRecovery(t *testing.T, d *datadriven.TestData) string {
 			plant = disklog.StopEarly
 		case a.Key == "plant" && len(a.Vals) == 1 && a.Vals[0] == "past-gaps":
 			plant = disklog.ReplayPastGaps
+		case a.Key == "plant" && len(a.Vals) == 1 && a.Vals[0] == "swap-tickets":
+			swap = true
 		default:
 			d.Fatalf(t, "unknown argument %q", a.String())
 		}
 	}
-	h := formatted(t, gib, cfg)
+	line := "format"
+	h := formatted(caseTB{TB: t, d: d, line: &line}, gib, cfg)
 	h.plant = plant
+	if swap {
+		disklog.SwapTickets(h.log)
+	}
 	h.watch(model{})
 	var b strings.Builder
 	var last *recovered
-	for _, line := range strings.Split(strings.TrimSpace(d.Input), "\n") {
+	for _, line = range strings.Split(strings.TrimSpace(d.Input), "\n") {
 		f := strings.Fields(line)
 		nums := func(from, n int) []uint64 {
 			if n >= 0 && len(f) != from+n {

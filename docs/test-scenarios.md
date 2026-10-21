@@ -2233,11 +2233,17 @@ Torn writes, bit flips, fail-slow and discards:
 - The oracle's state is independent of replay and of the index: the harness decodes each record's
   items from the round's write as it goes to the disk, with the segment's open sequence taken from
   the write that opened it rather than read back from the disk, and applies them to a plain model.
-  It shares the record codec with the code under test, so when a record becomes durable each
-  decoded entry must equal the item submitted under its ticket, and only the log's own manifest
-  pieces may carry none: a codec bug the oracle would share with replay, or a round that hands
-  entries out under one another's tickets (`disklog.SwapTickets`), fails the test. A round in
-  flight at a crash that recovery keeps is not yet checked against its items.
+  It shares the record codec with the code under test, so each decoded entry must equal the item
+  submitted under its ticket, and only the log's own manifest pieces may carry none. This is
+  checked when a record becomes durable and, for a round in flight at a crash (in doubt after a
+  disk error or not), when recovery keeps it: a codec bug the oracle would share with replay, or a
+  round that hands entries out under one another's tickets (`disklog.SwapTickets`), fails the
+  test, whether the round was acknowledged or kept.
+- Every ticket resolves. When a watched log is dropped at a crash, and at the end of the test,
+  every ticket submitted through the harness has been answered Durable, InDoubt or Failed, or the
+  log still holds its item queued or in a round in flight; no ticket is answered twice. An item
+  the log drops without an event, from its queue (`disklog.LoseNewest`) or with its round in
+  flight (`disklog.LoseOldestRound`), fails both checks, naming its ticket.
 - A torn round between acknowledged rounds and a whole one in flight, seeded over 50 seeds at
   commit depth 2 and 3, one or more of its blocks lost: recovery stops at the round before it, and
   with `disklog.ReplayPastGaps` planted every seed trips the oracle, whatever the random-crash
@@ -2383,7 +2389,9 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   record and in the last one, and both commit-depth-2 cases live only here, each that recovers
   printing its index.
 - An unknown command, argument or op, or a malformed argument, fails the test with the file and
-  line, never a silent skip.
+  line, never a silent skip. So does a check the harness makes during a scripted recovery case,
+  such as the ticket check, which also quotes the command running: a case built in the test with
+  `plant=swap-tickets` fails at its first write that makes the swapped round durable.
 
 ## Planted-bug check
 

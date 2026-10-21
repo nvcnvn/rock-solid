@@ -1,7 +1,8 @@
 # Recovery from scripted disk images, each on a freshly formatted 1 GiB disk (64-block segments,
 # segment 1 the hot stream's from block 64, segment 2 the cold stream's from block 128).
 # run [depth=n] [plant=stop-early|past-gaps] takes commands, one per line; a plant breaks every
-# recovery the case runs, as disklog.StopEarly or disklog.ReplayPastGaps does:
+# recovery the case runs, as disklog.StopEarly or disklog.ReplayPastGaps does (plant=swap-tickets,
+# which fails any case, is for TestScriptedHarnessFailuresNameTheirLine):
 #   write <hot|cold> <chunk> <first> <count> <version>   a chunk write, submitted and completed
 #   submit <hot|cold> <chunk> <first> <count> <version>  submitted only; prints the actions it queues
 #   exec ioN                                              executes pending action ioN

@@ -42,6 +42,7 @@ func wantCorrupt(t testing.TB, res *recovered, lsn uint64) {
 func (h *harness) reformat(logID uint64) {
 	h.t.Helper()
 	h.resetIO()
+	h.crashed = crashedRounds{}
 	h.logID = logID
 	var err error
 	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: logID, Geometry: h.geo}, firstIO, &h.out)
@@ -874,7 +875,7 @@ type owners struct {
 func newOwners(h *harness) *owners {
 	o := &owners{h: h, live: facts{}, refs: map[disklog.Ticket]disklog.BlobRef{}}
 	o.oracle = sim.NewOracle[disklog.Event](h.log.DurableLSN(), facts{})
-	h.oracle = o.oracle
+	h.feedOracle(o.oracle)
 	h.onEvent = func(ev disklog.Event) {
 		if ev.Kind != disklog.Durable {
 			return
@@ -939,7 +940,7 @@ func (o *owners) checkpoint(indexes []disklog.CheckpointIndex, flushed ...uint32
 		if err != nil {
 			h.t.Fatal(err)
 		}
-		h.submitted[t] = disklog.BlobEntry(disklog.BlobRun, owner, 8)
+		h.tickets.track(t, disklog.BlobEntry(disklog.BlobRun, owner, 8))
 		h.absorb()
 		tickets[owner] = t
 	}
@@ -1021,6 +1022,7 @@ func (o *owners) recover() (uint64, facts) {
 	h.absorb()
 	h.run()
 	h.onEvent = saved
+	h.settle(durable)
 	if h.log, err = h.rec.Log(&h.ctx); err != nil {
 		h.t.Fatalf("resume: %v", err)
 	}

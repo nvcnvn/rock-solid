@@ -231,7 +231,7 @@ func (n *node) step() bool {
 		h.pool.Free(buf)
 		h.t.Fatalf("checkpoint piece: %v", err)
 	}
-	h.submitted[t] = disklog.BlobEntry(disklog.BlobRun, indexOwner, uint64(len(piece)))
+	h.tickets.track(t, disklog.BlobEntry(disklog.BlobRun, indexOwner, uint64(len(piece))))
 	n.ticket = t
 	n.off += len(chunk)
 	h.absorb()
@@ -292,15 +292,25 @@ func (r *recovered) lsns() []uint64 {
 
 // resetIO forgets everything in flight and starts a fresh pool, as a restarted process does;
 // on a scheduler it restarts the node, crashing it first, if it is up, with every write landing.
+// A watched log's tickets must all be answered or held when it is dropped, and its rounds in
+// flight wait for the next recovery to settle them.
 func (h *harness) resetIO() {
+	if h.log != nil {
+		h.tickets.log = h.log
+		if h.oracle != nil {
+			h.tickets.mismatch(h.tickets.unheld())
+		}
+		h.crashed = crashedRounds{rounds: h.noted, submitted: h.tickets.submitted}
+		h.noted, h.tickets.submitted = map[uint64]notedRound{}, map[disklog.Ticket]disklog.Entry{}
+		clear(h.tickets.unanswered)
+		h.tickets.log = nil
+	}
 	h.pending = nil
 	h.trace = nil
 	h.events = nil
 	h.completed = map[core.IOID]bool{}
 	h.durable = map[core.IOID]bool{}
 	h.writeAt = map[core.LBA]core.IOID{}
-	clear(h.submitted)
-	clear(h.noted)
 	h.done = nil
 	h.writes, h.fsyncs, h.unlinked, h.maxPending = 0, 0, 0, 0
 	h.log, h.rec = nil, nil
@@ -461,6 +471,7 @@ func (h *harness) recoverOnce(mode disklog.Mode, crash func(core.Action) bool) (
 			h.oracle = sim.NewOracle[disklog.Event](res.durable, res.index.Clone())
 		}
 	}
+	h.settle(res.durable)
 	h.log, err = h.rec.Log(&h.ctx)
 	if err != nil {
 		h.t.Fatalf("resume: %v", err)

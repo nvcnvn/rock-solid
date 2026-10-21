@@ -129,7 +129,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats, plant crashPlant) (*ha
 			if err != nil {
 				t.Fatalf("seed %d: merge piece: %v", seed, err)
 			}
-			h.submitted[tk] = disklog.BlobEntry(disklog.BlobRun, indexOwner, uint64(size))
+			h.tickets.track(tk, disklog.BlobEntry(disklog.BlobRun, indexOwner, uint64(size)))
 			h.absorb()
 			return
 		case k < 6:
@@ -163,7 +163,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats, plant crashPlant) (*ha
 		if err != nil {
 			t.Fatalf("seed %d: submit %+v: %v", seed, it.Entry, err)
 		}
-		h.submitted[tk] = it.Entry
+		h.tickets.track(tk, it.Entry)
 		h.absorb()
 	}
 
