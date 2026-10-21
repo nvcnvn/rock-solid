@@ -202,6 +202,7 @@ type fakeTree struct {
 	frozen       bool
 	failed       int
 	carried      []disklog.BlobRef
+	bounds       []disklog.MergeBound
 	written      []disklog.BlobRef
 	dead         []disklog.BlobRef
 }
@@ -214,6 +215,7 @@ func (f *fakeTree) BeginFlush() (bool, error) {
 
 func (f *fakeTree) Frozen() bool                   { return f.frozen }
 func (f *fakeTree) CarriedRuns() []disklog.BlobRef { return f.carried }
+func (f *fakeTree) Bounds() []disklog.MergeBound   { return f.bounds }
 
 func (f *fakeTree) NextPiece(buf []byte) (int, bool, error) {
 	if f.next == f.pieces {
@@ -241,8 +243,8 @@ func (f *fakeTree) FlushFailed() []disklog.BlobRef {
 }
 
 // A checkpoint names its roots and its replay point; a failed one keeps the previous manifest and
-// replays from the freeze it left; Restore hands over each named run's pieces, and a manifest
-// naming a dead piece is an error.
+// replays from the freeze it left; Restore hands over each named run's pieces, those of a run a
+// merge bound names from the first it leaves live, and a manifest naming a dead piece is an error.
 func TestLogCheckpoints(t *testing.T) {
 	l := NewLog(16)
 	tr := &fakeTree{pieces: 2}
@@ -269,17 +271,29 @@ func TestLogCheckpoints(t *testing.T) {
 	refs := func(root []byte, _ []disklog.BlobRef) ([]disklog.BlobRef, error) {
 		return tr.written[:1], nil
 	}
-	err := l.Restore(refs, func(root disklog.BlobRef, pieces [][]byte) error {
+	load := func(root disklog.BlobRef, pieces [][]byte) error {
 		loaded = pieces
 		return nil
-	})
+	}
+	loadBounded := func(b disklog.MergeBound, pieces [][]byte) error {
+		if b.Run != l.roots[0] {
+			t.Fatalf("bound %+v on another run", b)
+		}
+		return load(b.Run, pieces)
+	}
+	err := l.Restore(refs, load, loadBounded)
 	if err != nil || len(loaded) != 2 || loaded[0][0] != 1 || loaded[1][0] != 2 {
 		t.Fatalf("restored %v, %v", loaded, err)
 	}
+	l.bounds = []disklog.MergeBound{{Run: l.roots[0], Key: []byte("k"), Dead: 1}}
+	if err := l.Restore(refs, nil, loadBounded); err != nil || len(loaded) != 1 || loaded[0][0] != 2 {
+		t.Fatalf("restored a bounded run as %v, %v", loaded, err)
+	}
+	l.bounds = nil
 	stale := func(root []byte, _ []disklog.BlobRef) ([]disklog.BlobRef, error) {
 		return []disklog.BlobRef{{Segment: 9}}, nil
 	}
-	if err := l.Restore(stale, func(disklog.BlobRef, [][]byte) error { return nil }); err == nil {
+	if err := l.Restore(stale, func(disklog.BlobRef, [][]byte) error { return nil }, nil); err == nil {
 		t.Fatal("a manifest naming a dead piece restored")
 	}
 }

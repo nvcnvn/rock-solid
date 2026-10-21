@@ -87,7 +87,7 @@ func TestScanTies(t *testing.T) {
 		t.Fatal("seek to the removed key did not land on b0")
 	}
 
-	c := tr.compaction(0, 3, ruleNone)
+	c := tr.pickSpan(0, 3, ruleNone)
 	c.Run()
 	if c.err != nil {
 		t.Fatal(c.err)

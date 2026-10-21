@@ -19,7 +19,7 @@ func mergeConfig(workers int) disklog.Config {
 func (h *harness) mergePiece(w int, owner uint32, n int, seed uint64) disklog.Ticket {
 	h.t.Helper()
 	it := h.blob(disklog.BlobRun, owner, n, seed)
-	tk, err := h.log.MergePiece(&h.ctx, w, owner, it.Buf, uint64(n), &h.out)
+	tk, err := h.log.MergePiece(&h.ctx, w, owner, it.Buf, uint64(n), false, &h.out)
 	if err != nil {
 		h.t.Fatalf("merge piece on lane %d: %v", w, err)
 	}
@@ -113,7 +113,7 @@ func TestMergeLanesOpenSegmentsOfTheirOwn(t *testing.T) {
 	}
 	for _, w := range []int{0, 3} {
 		it := h.blob(disklog.BlobRun, runOwner, 10, 9)
-		if _, err := h.log.MergePiece(&h.ctx, w, runOwner, it.Buf, 10, &h.out); !errors.Is(err, disklog.ErrMalformed) {
+		if _, err := h.log.MergePiece(&h.ctx, w, runOwner, it.Buf, 10, false, &h.out); !errors.Is(err, disklog.ErrMalformed) {
 			t.Fatalf("merge piece on lane %d of 2: %v", w, err)
 		}
 		h.pool.Free(it.Buf)
@@ -306,7 +306,7 @@ func TestALaneWhoseWorkerIsGone(t *testing.T) {
 			t.Fatalf("usage %+v lost lane 2's segment", disklog.SegmentUsageOf(h.log))
 		}
 		it := h.blob(disklog.BlobRun, runOwner, 10, 9)
-		if _, err := h.log.MergePiece(&h.ctx, 2, runOwner, it.Buf, 10, &h.out); !errors.Is(err, disklog.ErrMalformed) {
+		if _, err := h.log.MergePiece(&h.ctx, 2, runOwner, it.Buf, 10, false, &h.out); !errors.Is(err, disklog.ErrMalformed) {
 			t.Fatalf("merge piece on a lane past the merge workers: %v", err)
 		}
 		h.pool.Free(it.Buf)

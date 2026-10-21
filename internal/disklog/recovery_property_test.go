@@ -126,7 +126,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats, plant crashPlant) (*ha
 				return
 			}
 			copy(h.pool.Bytes(buf), pattern(uint64(size), size))
-			tk, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), indexOwner, buf, uint64(size), &h.out)
+			tk, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), indexOwner, buf, uint64(size), false, &h.out)
 			if err != nil {
 				t.Fatalf("seed %d: merge piece: %v", seed, err)
 			}

@@ -721,7 +721,7 @@ no buffer allocated.
 ## Compaction
 
 The "LSM tree" section holds the merge, removal, staleness, install-during-flush, failed
-checkpoint and restore scenarios; Merge steps rewrites the first two for steps.
+checkpoint and restore scenarios; Merge steps holds those of merges that take several steps.
 
 Picker cases (in `internal/lsm/testdata/compaction_picker`; the universal cases of
 RocksDB's `db/compaction/compaction_picker_test.cc` at v11.8.1 that exercise these three rules,
@@ -1122,17 +1122,22 @@ Lookups:
 
 Filter build and layout:
 
-- A flush sizes the filter from the frozen memtable's entry count (twice it for whole keys with
-  prefixes), a merge from the sum of its inputs' filter key counts, and either fills it as the run
-  streams out. For 1,000,000 keys at 10 bits per key, Pebble's writer rounds 10,000,000 bits up to
+- A flush sizes its filter partition from the frozen memtable's entry count (twice it for whole keys
+  with prefixes) and fills it as the run streams out; a merge step sizes its partition from the keys
+  it wrote, plus one for its fence's prefix, once its blocks are built. For 1,000,000 keys at 10 bits per key, Pebble's writer rounds 10,000,000 bits up to
   19,532 lines of 64 bytes, then to the odd 19,533: 1,250,112 bytes plus a 5-byte trailer. The
   flush's peak is the frozen tree, one piece, the run and the filter, and its allocations do not grow
   with the entry count.
 - A prefix filter holds each distinct prefix once, so a chunk's extents add one key; a filter of
   whole keys and prefixes holds each key and each prefix that is not a whole key.
-- It follows the run's entries and range removals in pieces of its own, marked in the trailer, its
-  bytes headed by what it holds (whole keys, prefixes or both) and its key count; the run golden
-  bytes cover an entry piece, a fragment piece and the filter piece as root. A run with no filter,
+- It follows the run's entries and range removals in pieces of its own, marked in the trailer, as
+  partitions: each the filter's length, the filter, headed by what it holds (whole keys, prefixes
+  or both) and its key count, then a fence flag, length and key. A flush or a merge in one step
+  writes one unfenced partition; a merge in steps one per step, each fenced by its step's bound but
+  the last. The run golden bytes cover an entry piece, a fragment piece and the filter piece, one
+  unfenced partition, as root, and a fenced partition's bytes are golden too. Decoding partitions
+  refuses an unfenced partition before the last, fences out of order, a bad flag and any truncation
+  but at a partition's end (fuzzed, and with the run loaders). A run with no filter,
   a truncated one, or entries or fragments after it is Malformed on load, and so is a run whose
   filter holds other keys than the tree's `Config.Filter` (fuzzed with the run loader). A restore
   loads each run's filter from its pieces without hashing a key, and lookups search as before the
@@ -1450,58 +1455,87 @@ Who may use the reserve:
 
 ## Merge steps
 
-- Four runs merged in steps of two pieces: after the first step, a get at or below the bound reads
-  the output and above it the inputs; a range removal across the bound is clipped to it; a view
-  opened before the step still reads the four runs; the manifest edit names the bounded inputs and
-  the partial output, and the input pieces wholly at or below the bound count dead once it is
-  current; a crash after that manifest recovers both, resumes from the bound, and every key reads
-  as before the merge.
+The "LSM tree" section's compaction scenarios hold for a merge that fits one step; these are the
+merges that take several.
+
+- Four runs merged in steps of two pieces, the first step installed while a flush writes: after it,
+  a get at or below the bound reads the output and above it the inputs; a range removal across the
+  bound is clipped to start past it; a view opened before the step still reads the four runs; the
+  merge's copies of the input blocks wholly at or below the bound are gone. That flush's manifest
+  names the inputs whole; the next, a manifest alone, names the bounded inputs and the partial
+  output and reports dead the input pieces wholly at or below the bound. A crash after it recovers
+  both and resumes from the bound; each later checkpoint writes one step, the one after the last
+  names the merged run alone, and every key reads as before the merge throughout.
 - A step merges up to `compaction_step_bytes` (64 MiB) of output; the owner appends the step's
-  pieces to the output run and sets each input's bound to the last key the merge has written; the
-  next checkpoint writes the pieces, the output's root and a manifest edit holding the bounds, as a
-  manifest alone when no checkpoint is due.
+  blocks to the output run and sets each input's bound to the last key the step consumed; the next
+  checkpoint writes the step's pieces to the merge worker's lane through `MergePiece`, a new root
+  for the output listing all its pieces, and a manifest holding the bounds with each input's dead
+  pieces, as a manifest alone when no checkpoint is due. The manifest waits for those pieces and
+  names the root; a snapshot carries the bounds, an edit replaces them, and a bound on a run the
+  index does not hold is Malformed.
 - Bounded runs: an input holds only its keys above its bound, so output and inputs never share a
-  key. With inputs A (newer) and B over keys a..z and a step ending at f, a get of c reads the
-  output, a get of q reads A then B, a get of f reads the output, a scan from a returns each key
-  once, and a floor of g returns f from the output when neither input holds g.
+  key. With inputs A (newer) and B over keys a..z, B lacking g, and a step ending at f, a get of c
+  or f reads the output alone, a get of q reads A, a get of r reads A then B, a scan from a returns
+  each key once, and a floor of g returns f from the output.
 - A lookup of a key at or below an input's bound never searches that input, even when its filter
   says maybe.
-- An input piece wholly at or below the bound is dead in the usage table once the manifest naming
-  that bound is current; the piece the bound falls in stays whole and live. Its blocks below the
-  bound leave memory unless a view holds them, so a merge's memory peak is one step.
-- Output fills its merge worker's lane of the metadata stream: with a merge running and checkpoint
-  flushes going on, no output piece shares a segment with a flush piece or a manifest. When the
-  merge ends, the worker's next merge continues the same open segment, whatever index it merges.
+- An input piece wholly at or below the bound is reported dead once the manifest naming that bound
+  is durable, and a restore never reads it; the piece the bound falls in stays whole and live. Its
+  blocks below the bound leave memory unless a view holds them, so a merge's memory peak is one
+  step. The usage table's live blocks for dead run pieces come with the Cleaner.
+- Output fills its merge worker's lane of the metadata stream: with two indexes merging in steps on
+  one worker and checkpoint flushes going on, no output piece shares a segment with a flush piece
+  or a manifest. When a merge ends, the worker's next merge continues the same open segment,
+  whatever index it merges.
+- The scheduler hands each merge the lowest free worker and the merge keeps it until a manifest
+  names its last step: with one worker, index B's merge waits for that manifest, then takes worker
+  1; with two, it takes worker 2. A merge's next step is picked only once the manifest naming its
+  previous one is durable, before any new merge.
 - Concurrent merges: a merge of the newest runs picked while a stepped merge holds the oldest runs
-  installs whole or in its own steps, and the two merges' bounds can share one manifest edit; every
-  key reads the same throughout.
+  runs in its own steps on another worker, one manifest names both merges' bounds, a restart
+  resumes both, and every key reads the same throughout.
 - Restart between steps resumes the merge from the bound in the manifest: crash after step 2's
-  manifest of a 5-step merge, recover, and the merge's next step starts at step 2's bound; every
+  manifest of a 5-step merge, recover, and the merge's next step starts past step 2's bound; every
   key reads the same before the merge, between steps, after the crash and after the merge.
 - Crash after a step's pieces are durable but before its manifest: recovery uses the previous
-  manifest's bound, and the step is merged again.
-- A failed checkpoint during a merge keeps the step's pieces for the next checkpoint.
+  manifest's bound, and the step is merged again into the same blocks.
+- A checkpoint that fails while writing a step reports the step's pieces it wrote dead and keeps
+  the inputs' bounds, and the next writes the step again; one that fails after the step's root is
+  durable reports nothing dead, and the next names the step without writing it again.
+- A run check that fails in a later step, a bit flipped in an input above the bound, fails that
+  step's install with `ErrCheck`, and the merge is never picked again; the index is rebuilt (Run
+  checks).
+- A step finishes on a disk filled to its reserve: with only the reserve free and a write held, a
+  checkpoint writes a merge step into a reserve segment of the worker's lane and its manifest is
+  durable.
+- Filter partitions: a merge in steps writes a partition of its keys per step, fenced by the step's
+  bound, and a get, a prefix floor and a prefix seek each probe the one partition covering their key
+  or prefix, allocating nothing (`BenchmarkPartitionedLookups`, over 20 or more partitions). Under
+  filters of whole keys, prefixes and both, with fixed two-byte prefixes and prefixes up to a slash
+  of one or two letters, straddling steps, and removals the merge drops ending steps, gets, floors,
+  prefix floors and prefix scans read like the map between steps, after and after a restore; with
+  the fence's prefix left out of its partition, a lookup by prefix misses keys of a later partition
+  under prefix filters (a prefix filter's get among them) and nothing changes under whole keys.
+- A merge in steps is picked only when its output's root can list every piece with each step's
+  short pieces and fenced partition: four runs of five 270-byte entries (6,120 bytes) are refused
+  in 512-byte pieces and steps, where the output would need about 40 pieces for 27 references, and
+  1 MiB pieces in 64 MiB steps still allow about 55 GiB.
+- With steps whose partitions span several pieces, a merge holds at most a step of entries and
+  fragments and its own partition beyond the manifests, the last step included.
+- Metamorphic option sets for the tree: `steps` (384-byte pieces, two-piece steps), `steps-restart`
+  (one-piece steps, a failed first flush and a restart after every flush) and `steps-deferred`
+  (steps installed between a flush's pieces, two merges at once); each must read as the model, and
+  seed 0 must install steps under each, resume a merge after a restart under `steps-restart` and
+  install a step during a flush under `steps-deferred`.
 - Review (the [LSM space spike](../spikes/lsm-study-space/), C2 and C4): at most one step plus a
   checkpoint's flush held beyond the manifests, 2 segments of 64 MiB on a 256 GiB disk with a
   MetaStore index of 2 or 6.25% (whole: 65 and 109; with size amplification 88 and 258), 5 and 2
   segments of 4 MiB with 16 and 4 MiB steps on the 16 GiB stand-in; manifest bytes per flushed
   byte at most 0.0080 with full tables (0.0018 whole). Steps sharing the open segment left 30 to
   57 segments stranded against 8 to 10 in a segment of their own (C5).
-- A merge holds at most one step beyond what the manifests name: checked after every step in the
-  simulator together with the reserve invariant.
-
-Changed existing scenarios ("LSM tree"):
-
-- "Compaction: ... the next checkpoint names the merged run and reports every piece of the four
-  dead" becomes: the four-run merge in 1 MiB steps writes one step per checkpoint, each checkpoint
-  bounds the inputs and reports dead the pieces wholly at or below the bound, and the checkpoint
-  after the last step names the merged run alone.
-- "A compaction installed while a flush writes its inputs ... the next names the merged run and
-  reports the inputs dead" becomes: the next names the output so far and the bounded inputs, and
-  the inputs die step by step.
-- "A checkpoint that fails after writing a compaction's result whole reports nothing dead and
-  carries that run next time" becomes: a checkpoint that fails after writing a step reports nothing
-  dead, keeps the inputs' previous bounds, and writes the step again next time.
+- A merge holds at most one step, with its filter partition, beyond what the manifests name,
+  checked after every checkpoint of the lane tests; the simulator checks it after every step
+  together with the reserve invariant once the invariant checker exists.
 
 ## Write admission
 
