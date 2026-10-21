@@ -493,7 +493,7 @@ func (m *metaTree) Restart() error {
 
 func (m *metaTree) countSearches() {
 	m.st.searches += m.tr.Searches()
-	m.st.filterProbes += m.tr.it.filterProbes
+	m.st.filterProbes += m.tr.FilterProbes()
 }
 
 // metaFailure is the first option set whose history differs from the model's.

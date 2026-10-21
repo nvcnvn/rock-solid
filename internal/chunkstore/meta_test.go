@@ -399,7 +399,7 @@ func genMetaOps(seed uint64, n int) []metamorphic.Op {
 
 // metaStats counts what an option set made the index's tree do.
 type metaStats struct {
-	flushes, failed, compactions, together, deferred, restarts, maxRuns, searches int
+	flushes, failed, compactions, together, deferred, restarts, maxRuns, searches, filterProbes int
 }
 
 // metaIndex runs an Index over a log that keeps every live piece. Its write ops stand in for the
@@ -582,7 +582,7 @@ func (m *metaIndex) Restart() error {
 			return errors.New(l)
 		}
 	}
-	m.st.searches += m.x.Tree().Searches()
+	m.st.searches, m.st.filterProbes = m.st.searches+m.x.Tree().Searches(), m.st.filterProbes+m.x.Tree().FilterProbes()
 	m.x = x
 	m.st.restarts++
 	return nil
@@ -605,7 +605,7 @@ func metaRun(ops []metamorphic.Op, sets []metaSet) (*metaFailure, []metaStats) {
 	for i, s := range sets {
 		e := newMetaIndex(s)
 		got := metamorphic.Run(ops, s.run, e)
-		e.st.searches += e.x.Tree().Searches()
+		e.st.searches, e.st.filterProbes = e.st.searches+e.x.Tree().Searches(), e.st.filterProbes+e.x.Tree().FilterProbes()
 		stats[i] = e.st
 		stats[i].flushes, stats[i].failed = e.log.Flushes, e.log.Failed
 		if d := metamorphic.Diff(want, got); d >= 0 && fail == nil {
@@ -710,8 +710,8 @@ func TestMetamorphicOpsCoverTheIndex(t *testing.T) {
 		{"D installs merges during flushes", of("D").deferred > 0},
 		{"two-merges runs two at once", of("two-merges").together > 0},
 		{"fixed-limit compacts", of("fixed-limit").compactions > 0},
-		{"filters-off searches more than C", of("filters-off").searches > of("C").searches},
-		{"filters-maybe searches as filters-off does", of("filters-maybe").searches == of("filters-off").searches},
+		{"filters-off probes no filter and searches more than C", of("filters-off").filterProbes == 0 && of("filters-off").searches > of("C").searches},
+		{"filters-maybe probes as C does and searches as filters-off does", of("filters-maybe").filterProbes == of("C").filterProbes && of("filters-maybe").searches == of("filters-off").searches},
 	} {
 		if !c.ok {
 			t.Errorf("%s: %+v", c.name, stats)

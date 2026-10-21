@@ -1172,9 +1172,10 @@ entries; counts are the bar, times on the shared VM):
   pass under two more option sets with C's cadence: Filters off, whose lookups probe no run filter,
   and Filters maybe, whose every probe answers "maybe" (`lsm.Config.Probe`). The chunk index's
   runs under every set hold its chunk-prefix filters.
-- On seed 0 both sets search the same number of layers, more than C (`TestMetamorphicOpsCoverTheIndex`,
-  `TestMetamorphicSetsReachTheirExtremes`); in `internal/lsm` Filters off also probes no filter and
-  Filters maybe as many as C.
+- On seed 0, in both indexes, both sets search the same number of layers, more than C; Filters
+  off probes no filter, and Filters maybe probes as many as C (`Tree.FilterProbes`), so a Filters
+  maybe that skips its probes fails (`TestMetamorphicOpsCoverTheIndex`,
+  `TestMetamorphicSetsReachTheirExtremes`).
 
 ## Chunk reader
 

@@ -222,6 +222,9 @@ func (t *Tree) Frozen() bool { return t.frozen != nil }
 // Searches is how many layers the tree's gets and floors have searched.
 func (t *Tree) Searches() int { return t.it.probes }
 
+// FilterProbes is how many run filters the tree's gets and floors have probed.
+func (t *Tree) FilterProbes() int { return t.it.filterProbes }
+
 // View is a point-in-time view of a tree that pins what it reads until closed; only the tree's owner reads it.
 type View struct {
 	st        state
