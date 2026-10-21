@@ -1608,7 +1608,8 @@ manifest, written or in flight, segment headers and the checkpoint's own records
 - [property] The hold a record adds, checked against marking each block one by one over 10,000
   random records of writes, punches, freezes and blobs of every kind: none for a record of
   checkpoint items alone, the whole record for one with none, else its header blocks and the
-  blocks ordinary payloads touch. Recovery counts each replayed record the same way.
+  blocks ordinary payloads touch. Reopened after each mixed round above, with no manifest written,
+  recovery restores the hold the log had.
 - Close fails what still waits: on the full-disk-waits disk of Segment reserve, Close fails the
   write held for room with Closed and returns its buffer and the log's own. With
   `max_replay_bytes` 4 blocks, two 3-block writes hold a 1-block cold write behind a checkpoint;
@@ -1617,11 +1618,12 @@ manifest, written or in flight, segment headers and the checkpoint's own records
   submit after it is refused with Closed. A test's own close fails if anything was still waiting.
 - The checkpoint's pieces lead the cold stream, so while they fill a segment of the reserve an
   ordinary cold item waits behind them, even with segments free outside the reserve: on a 1 GiB
-  disk (4,095 usable 64-block segments) with a reserve of 4,093, two 62-block cold writes fill
-  segments 1 and 2, a 100-byte piece opens segment 3 from the reserve, and segments 1 and 2 are
-  then freed. A 1-block cold write and a second piece queued behind it wait for the first; the
-  second piece goes into segment 3 alone, the write still queued and not `Stalled`, and once the
-  checkpoint's queue is empty the write opens segment 1. The Metadata stream ends this wait.
+  disk (4,095 usable 64-block segments) at commit depth 2 with a reserve of 4,093, two 62-block
+  cold writes fill segments 1 and 2, a 100-byte piece opens segment 3 from the reserve, and
+  segments 1 and 2 are then freed. A second piece waits for the first, which opened segment 3, and
+  a 1-block cold write queued behind it waits too, with a round slot idle and not `Stalled`. Once
+  the first piece is durable, the second goes into segment 3 and the write opens segment 1 beside
+  it. The Metadata stream ends this wait.
 
 ## Reserve from settings
 
@@ -1652,7 +1654,7 @@ manifest, written or in flight, segment headers and the checkpoint's own records
   item (LBA 67); LSNs are global. The order cold, metadata, hot is an assumption: design.md says
   only "taking the lanes that have work in turn".
 - "Held items": a cold write no longer waits behind the checkpoint's pieces; in the reserve
-  scenario it goes out in segment 1 while the second piece goes into segment 3, since the pieces
+  scenario it opens segment 1 while the second piece still waits for the first, since the pieces
   are on the metadata stream.
 - "Group commit", "Checkpoint end to end": the pieces' record (LSN 4) and the manifest (LSN 5) go to
   a metadata segment, not cold segment 2.

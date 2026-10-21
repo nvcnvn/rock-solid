@@ -238,6 +238,11 @@ func mixedRoundHold(t *testing.T, cold func(h *harness) []disklog.Item) uint64 {
 		t.Fatalf("round %+v, want the piece then the cold items", mixed)
 	}
 	h.close()
+	h.reopen()
+	if got := disklog.HeldBytes(h.log); got != after {
+		t.Fatalf("recovery restored a hold of %d bytes, the log had %d", got, after)
+	}
+	h.close()
 	return after - before
 }
 

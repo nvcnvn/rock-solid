@@ -268,11 +268,12 @@ func TestCloseFailsItemsWaitingForRoom(t *testing.T) {
 }
 
 // The checkpoint's pieces lead the cold stream, so while they fill a segment of the reserve an
-// ordinary cold item waits behind them even with segments free outside it; once their queue
-// empties, the item opens a segment of its own.
+// ordinary cold item waits behind them even with segments free outside it and a round slot
+// idle; once their queue empties, the item opens a segment of its own.
 func TestColdItemsWaitForTheCheckpointInTheReserve(t *testing.T) {
 	cfg := testConfig(0)
 	cfg.Reserve = 4093
+	cfg.CommitDepth = 2
 	h := formatted(t, gib, cfg)
 	h.put(disklog.Cold, h.write(0, 62, 0))
 	h.put(disklog.Cold, h.write(1, 62, 1))
@@ -291,12 +292,15 @@ func TestColdItemsWaitForTheCheckpointInTheReserve(t *testing.T) {
 	first := piece(1)
 	disklog.FreeSegment(h.log, 1, true)
 	disklog.FreeSegment(h.log, 2, true)
-	cold := h.submit(disklog.Cold, h.write(2, 1, 2))
 	second := piece(2)
+	cold := h.submit(disklog.Cold, h.write(2, 1, 2))
+	if h.log.Queued() != 2 || h.log.InFlight() != 1 || h.log.Stalled() {
+		t.Fatalf("behind the second piece: %d queued, %d in flight, stalled %v", h.log.Queued(), h.log.InFlight(), h.log.Stalled())
+	}
 	h.step(0)
 	h.step(0)
-	if h.log.Queued() != 1 || h.log.Stalled() {
-		t.Fatalf("behind the second piece: %d queued, stalled %v", h.log.Queued(), h.log.Stalled())
+	if h.log.Queued() != 0 || h.log.InFlight() != 2 {
+		t.Fatalf("once the first piece is durable: %d queued, %d in flight", h.log.Queued(), h.log.InFlight())
 	}
 	h.run()
 	d := h.eventsOf(disklog.Durable)

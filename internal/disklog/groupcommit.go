@@ -486,7 +486,7 @@ func (l *Log) release(ctx *core.Context) {
 	}
 }
 
-// Close fails the items still waiting, for room or for a manifest, and the running checkpoint with ErrClosed, and returns their buffers and the log's own to the pool; it refuses while a write or flush is in flight, and the log takes nothing more.
+// Close fails the items still waiting, for room or for a manifest, and the running checkpoint with ErrClosed, and returns their buffers and the log's own to the pool; it refuses until format finishes and while a write or flush is in flight, and the log takes nothing more.
 func (l *Log) Close(ctx *core.Context, out *Output) error {
 	if l.count > 0 || l.phase != formatDone || len(l.stale) > 0 {
 		return ErrBusy
