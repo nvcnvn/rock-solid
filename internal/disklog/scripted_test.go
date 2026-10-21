@@ -16,21 +16,43 @@ import (
 )
 
 // caseTB fails a check the harness makes during a scripted case with the case's testdata line
-// and the command running, as the case's own checks do.
+// and the command running, as the case's own checks do, unless the case expects the command to
+// fail: then it records the failure and stops the case.
 type caseTB struct {
 	testing.TB
 	d    *datadriven.TestData
 	line *string
+	fail *expectedFailure
 }
+
+// expectedFailure is the command a case's closing fails line expects a harness check to fail,
+// and the failure, once it happens.
+type expectedFailure struct {
+	command string
+	running bool
+	msg     string
+}
+
+// caseStopped is the panic that stops a case at its expected failure.
+type caseStopped struct{}
 
 func (c caseTB) Fatalf(format string, args ...any) {
 	c.TB.Helper()
-	c.d.Fatalf(c.TB, "%q: %s", *c.line, fmt.Sprintf(format, args...))
+	c.failed(fmt.Sprintf(format, args...))
 }
 
 func (c caseTB) Fatal(args ...any) {
 	c.TB.Helper()
-	c.d.Fatalf(c.TB, "%q: %s", *c.line, fmt.Sprint(args...))
+	c.failed(fmt.Sprint(args...))
+}
+
+func (c caseTB) failed(msg string) {
+	c.TB.Helper()
+	if c.fail.running {
+		c.fail.running, c.fail.msg = false, msg
+		panic(caseStopped{})
+	}
+	c.d.Fatalf(c.TB, "%q: %s", *c.line, msg)
 }
 
 // scriptedRecovery runs one case of testdata/recovery on a freshly formatted 1 GiB disk and
@@ -57,16 +79,55 @@ func scriptedRecovery(t testing.TB, d *datadriven.TestData) string {
 			d.Fatalf(t, "unknown argument %q", a.String())
 		}
 	}
+	lines := strings.Split(strings.TrimSpace(d.Input), "\n")
+	fail := &expectedFailure{}
+	want, expectFail := strings.CutPrefix(lines[len(lines)-1], "fails ")
+	if expectFail {
+		lines = lines[:len(lines)-1]
+		if len(lines) == 0 || strings.TrimSpace(want) == "" {
+			d.Fatalf(t, "fails <text> follows the command expected to fail")
+		}
+		fail.command = lines[len(lines)-1]
+	}
 	line := "format"
-	h := formatted(caseTB{TB: t, d: d, line: &line}, gib, cfg)
+	h := formatted(caseTB{TB: t, d: d, line: &line, fail: fail}, gib, cfg)
 	h.plant = plant
 	if swap {
 		disklog.SwapTickets(h.log)
 	}
 	h.watch(model{})
 	var b strings.Builder
+	func() {
+		defer func() {
+			fail.running = false
+			if r := recover(); r != nil && r != (caseStopped{}) {
+				panic(r)
+			}
+		}()
+		runCommands(t, d, h, lines, &line, fail, &b)
+	}()
+	if expectFail {
+		switch {
+		case fail.msg == "":
+			d.Fatalf(t, "%q: no harness check failed, the case expects %q", fail.command, "fails "+want)
+		case !strings.Contains(fail.msg, want):
+			d.Fatalf(t, "%q: failed with %q, the case expects it to contain %q", fail.command, fail.msg, want)
+		}
+		// The case stopped inside a harness call, so the tickets it left unanswered say nothing.
+		h.tickets.log = nil
+		fmt.Fprintf(&b, "%s: fails: %s\n", fail.command, fail.msg)
+	}
+	return b.String()
+}
+
+// runCommands runs a scripted case's commands on h, writing what they print to b; when fail names
+// a command, the last one, a harness failure while it runs is recorded in fail rather than
+// failing the test.
+func runCommands(t testing.TB, d *datadriven.TestData, h *harness, lines []string, linep *string, fail *expectedFailure, b *strings.Builder) {
 	var last *recovered
-	for _, line = range strings.Split(strings.TrimSpace(d.Input), "\n") {
+	for i, line := range lines {
+		*linep = line
+		fail.running = fail.command != "" && i == len(lines)-1
 		f := strings.Fields(line)
 		nums := func(from, n int) []uint64 {
 			if n >= 0 && len(f) != from+n {
@@ -104,7 +165,7 @@ func scriptedRecovery(t testing.TB, d *datadriven.TestData) string {
 			if f[0] == "write" {
 				h.run()
 			} else {
-				fmt.Fprintf(&b, "%s: %s\n", line, strings.Join(h.trace, ", "))
+				fmt.Fprintf(b, "%s: %s\n", line, strings.Join(h.trace, ", "))
 			}
 			h.trace = nil
 		case "exec":
@@ -129,7 +190,7 @@ func scriptedRecovery(t testing.TB, d *datadriven.TestData) string {
 			h.disk.FlipBit(core.LBA(v[0]), int(v[1]), byte(v[2]))
 		case "zeros":
 			v := nums(1, 1)
-			fmt.Fprintf(&b, "%s: %v\n", line, isZeroBlock(h.read(core.LBA(v[0]), 1)))
+			fmt.Fprintf(b, "%s: %v\n", line, isZeroBlock(h.read(core.LBA(v[0]), 1)))
 		case "recover":
 			mode := disklog.ModeOpen
 			switch {
@@ -140,7 +201,7 @@ func scriptedRecovery(t testing.TB, d *datadriven.TestData) string {
 				d.Fatalf(t, "%q: recover open or rebuild", line)
 			}
 			last = h.recover(mode)
-			fmt.Fprintf(&b, "%s: %s\n", line, recoveryResult(last))
+			fmt.Fprintf(b, "%s: %s\n", line, recoveryResult(last))
 		case "index":
 			rejected := len(f) == 2 && f[1] == "rejected"
 			if len(f) != 1 && !rejected || last == nil || last.err != nil {
@@ -157,7 +218,6 @@ func scriptedRecovery(t testing.TB, d *datadriven.TestData) string {
 			d.Fatalf(t, "unknown command %q", line)
 		}
 	}
-	return b.String()
 }
 
 // recoveryResult prints a recovery's LSNs, as a range when they are contiguous, its error, and the

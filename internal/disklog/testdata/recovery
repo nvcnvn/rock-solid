@@ -1,8 +1,8 @@
 # Recovery from scripted disk images, each on a freshly formatted 1 GiB disk (64-block segments,
 # segment 1 the hot stream's from block 64, segment 2 the cold stream's from block 128).
-# run [depth=n] [plant=stop-early|past-gaps] takes commands, one per line; a plant breaks every
-# recovery the case runs, as disklog.StopEarly or disklog.ReplayPastGaps does (plant=swap-tickets,
-# which fails any case, is for TestScriptedHarnessFailuresNameTheirLine):
+# run [depth=n] [plant=stop-early|past-gaps|swap-tickets] takes commands, one per line; a plant
+# breaks every recovery the case runs, as disklog.StopEarly or disklog.ReplayPastGaps does, or
+# every round of two or more items, as disklog.SwapTickets does:
 #   write <hot|cold> <chunk> <first> <count> <version>   a chunk write, submitted and completed
 #   submit <hot|cold> <chunk> <first> <count> <version>  submitted only; prints the actions it queues
 #   exec ioN                                              executes pending action ioN
@@ -19,6 +19,11 @@
 #                                                         record and the written ones up to it. The
 #                                                         case fails unless the oracle rejects the
 #                                                         index exactly when it says rejected.
+#   fails <text>                                          only as the last line: a check the
+#                                                         harness makes must fail during the line
+#                                                         before it, with a message containing
+#                                                         text, which ends the case; it prints the
+#                                                         failure. The case fails if none does.
 # go test -rewrite regenerates the output.
 
 # Torn tail (RocksDB TruncatedTrailingRecord, PartialLast): three 2-block writes, then a fourth
@@ -306,3 +311,19 @@ recover open: LSNs [1 3], durable 3
 index: 2 blocks, every block reads back, oracle: index at LSN 3 differs from the oracle's: chunk 1 block 0 missing, want v2 at 68 (2 blocks differ)
   chunk 0 block 0 v1 pool 1 at 66
   chunk 2 block 0 v3 pool 1 at 71
+
+# A round that hands its items' entries out under one another's tickets: the round of LSN 3 holds
+# chunks 3 and 4, reported under tickets 4 and 3. The ticket check catches it when the next write
+# makes LSN 3 durable.
+run plant=swap-tickets
+write hot 1 0 1 1
+submit hot 2 0 1 2
+submit hot 3 0 1 3
+submit hot 4 0 1 4
+write hot 5 0 1 5
+fails oracle: LSN 3 entry 0 is
+----
+submit hot 2 0 1 2: write 67+2 io106, fsync io107
+submit hot 3 0 1 3: 
+submit hot 4 0 1 4: 
+write hot 5 0 1 5: fails: oracle: LSN 3 entry 0 is {Kind:1 Pool:1 Chunk:{Volume:2 Inode:3 Index:3} Version:3 First:0 Count:1 Epoch:0 BlobKind:0 Owner:0 Length:0}, ticket 4 submitted {Kind:1 Pool:1 Chunk:{Volume:2 Inode:3 Index:4} Version:4 First:0 Count:1 Epoch:0 BlobKind:0 Owner:0 Length:0}

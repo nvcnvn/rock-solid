@@ -2440,17 +2440,24 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   last recovery's index as extents (chunk, blocks, version, pool, LBAs), whether every mapped block
   reads back the data its version wrote, so a block damaged after recovery is named, and whether
   the index is what the crash oracle holds at the recovered LSN, naming the first block that
-  differs. `run plant=stop-early` and `plant=past-gaps` break recovery as the Crash oracle section's
-  planted bugs do. An `index` the oracle rejects fails the case unless it is written
-  `index rejected`, as after a plant or damage to an acknowledged record, and one written so fails
-  if the oracle accepts it, so a careless `go test -rewrite` cannot accept a wrong index or a plant
-  the oracle misses. The Recovery section's torn tail (every landing set), damage in a middle
-  record and in the last one, and both commit-depth-2 cases live only here, each that recovers
-  printing its index.
+  differs. `run plant=stop-early`, `plant=past-gaps` and `plant=swap-tickets` break recovery or
+  rounds as the Crash oracle section's planted bugs do. An `index` the oracle rejects fails the
+  case unless it is written `index rejected`, as after a plant or damage to an acknowledged
+  record, and one written so fails if the oracle accepts it, so a careless `go test -rewrite`
+  cannot accept a wrong index or a plant the oracle misses. Likewise a check the harness makes,
+  such as the ticket check, fails the case unless the case closes with `fails <text>`: then a
+  harness check must fail during the line before it, with a message containing the text, which
+  ends the case and is printed; a `fails` whose failure does not happen, or whose message lacks
+  the text, fails the case. The `plant=swap-tickets` case shows the ticket check catching the
+  swapped round when the next write makes it durable. The Recovery section's torn tail (every
+  landing set), damage in a middle record and in the last one, and both commit-depth-2 cases live
+  only here, each that recovers printing its index.
 - An unknown command, argument or op, or a malformed argument, fails the test with the file and
-  line, never a silent skip. So does a check the harness makes during a scripted recovery case,
-  such as the ticket check, which also quotes the command running: a case built in the test with
-  `plant=swap-tickets` fails at its first write that makes the swapped round durable.
+  line, never a silent skip. So does a check the harness makes during a scripted recovery case
+  that does not expect it, which also quotes the command running: the `plant=swap-tickets` case
+  run without its `fails` line fails at `write hot 5 0 1 5`, naming its line
+  (`TestScriptedHarnessFailuresNameTheirLine`, which also runs the case unplanted and with the
+  wrong text, and checks that each fails).
 
 ## Planted-bug check
 
