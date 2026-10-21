@@ -585,10 +585,21 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 			return nil, err
 		}
 	}
+	if l.slots.per > 0 {
+		var err error
+		if l.slots.zero, err = ctx.Pool.AllocZeroed(core.BlockSize); err != nil {
+			l.release(ctx)
+			return nil, err
+		}
+	}
 	return l, nil
 }
 
 func (l *Log) release(ctx *core.Context) {
+	if l.slots.zero != core.NoBuf {
+		ctx.Pool.Free(l.slots.zero)
+		l.slots.zero = core.NoBuf
+	}
 	for i := range l.rounds {
 		r := &l.rounds[i]
 		for _, b := range []*core.IOBuf{&r.head, &r.tail} {
@@ -1060,7 +1071,7 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 		l.formatDone(ctx, io, derr, out)
 		return
 	}
-	if l.trimDone(io) {
+	if l.trimDone(io, out) {
 		return
 	}
 	for i := range l.count {

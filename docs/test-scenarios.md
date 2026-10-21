@@ -1996,8 +1996,9 @@ Invariants (simulator) and faults:
   disk whose segments are smaller than 4 MiB, where a whole chunk goes to the log as several items.
 - A write entry naming a slot is 39 bytes, its slot's segment and index after the write's fields;
   golden bytes of a record with one such entry and one ordinary write are checked in. Its per-block
-  CRCs cover the slot's blocks, so a block damaged in the slot fails the record as a damaged log
-  block does.
+  CRCs cover the slot's blocks, after the record's own data blocks'. Replay checks a slot's blocks
+  only under a record that may be a round in flight (below); a read checks every block it
+  reads.
 - A whole-chunk write puts its data in a slot, in a DiskWrite of its own from the request's
   buffer, its record in the hot stream; the round's one flush follows both writes, a round carries
   one slot write, and the index maps the chunk's 1,024 blocks to the slot in one extent. A partial write of the same chunk goes to the log and trims the
@@ -2014,7 +2015,9 @@ Invariants (simulator) and faults:
   block (which holds chunk data that may look like anything, a valid segment header of this log
   included, whether or not the manifest lists the segment as slot). The resumed log appends no
   record there.
-- The segment is TRIMmed and freed with its last slot, once the TRIM completes; allocation fills the
+- The segment is TRIMmed with its last slot, then its first block written with zeros, and freed
+  once both complete; a TRIM that fails, or does not read back as zeros, still leaves a first block
+  of zeros. Allocation fills the
   fullest slot segment first (two segments with 3 and 9 free slots: the next chunk goes to the one
   with 3), and never opens a segment of the reserve for one.
 - A snapshot's frozen version keeps the slot it reads in use.
@@ -2023,16 +2026,19 @@ Invariants (simulator) and faults:
 - The tail rule applies to a slot write's record as to any other: a torn slot write under a
   record in flight is dropped and its header erased. Recovery reads no slot under a record a later
   header names durable, damaged or not; reads check those blocks.
-- Recovery reads two blocks of a slot segment opened since the manifest, where reading it in full
-  as a segment whose first block does not decode takes 16,385 of a 64 MiB one; a record
-  erased at block 1 of a slot segment, a round in flight that opened it again, leaves none of its
-  slots in use.
+- Recovery reads two blocks of a slot segment opened since the manifest, not the 16,385 of a
+  64 MiB segment read in full. A slot segment opened again for records, whose block 1 holds a
+  record at `NextSeq` or more, is read in full when its header is damaged, and its durable
+  records past the gap are corruption. A record erased at block 1 of a slot segment, a round in
+  flight that opened it again, leaves none of its slots in use.
 - With no slot free and only the reserve, a whole chunk goes to the log as several items, and the
   hot lane's other items go on.
 - A round carries one slot write before its record's under its one flush, which follows both
   writes: the trace rules hold over seeds of whole chunks, small writes and freed slots at
   `commit_depth` 1 to 3 (`TestSlotRoundsKeepTheTraceRules`), and the crash property holds at
-  `commit_depth` 1, 2 and 4.
+  `commit_depth` 1, 2 and 4, and at 2 and 4 over a slot freed and a whole chunk written with no
+  checkpoint between, where only the log's hold on the freed slot keeps it (without the hold,
+  recovery loses acknowledged records).
 - Cost (the cleaner streams spike): whole chunks deleted at random cost no cleaning, write
   amplification near 1.004 at any fill; a pool holding half its data in whole chunks cleans its
   small writes for about 2.5 at 90% full.

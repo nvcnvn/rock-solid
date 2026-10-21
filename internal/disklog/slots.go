@@ -1,6 +1,7 @@
 package disklog
 
 import (
+	"fmt"
 	"math/bits"
 	"slices"
 
@@ -18,6 +19,8 @@ type slotTable struct {
 	fillN []int
 	held  []heldSlot
 	trims []trimIO
+	// zero is a zeroed block, written over the first block of each segment freed with its last slot.
+	zero core.IOBuf
 }
 
 // heldSlot is a slot its owner freed, held from reuse and TRIM until the round of LSN until,
@@ -32,6 +35,7 @@ type heldSlot struct {
 type trimIO struct {
 	io      core.IOID
 	segment uint32
+	zeroing bool
 }
 
 func newSlotTable(g Geometry) slotTable {
@@ -61,6 +65,42 @@ func (t *slotTable) setTaken(s uint32, taken uint16) {
 		}
 	}
 	t.taken[s] = taken
+}
+
+// checkSlots panics unless the fill bitmaps and counts agree with the slots taken, and every slot
+// in use or held is taken; the decode check runs it after every change.
+func (l *Log) checkSlots() {
+	t := &l.slots
+	if !l.cfg.Check || t.per == 0 {
+		return
+	}
+	n := make([]int, t.per)
+	for s, taken := range t.taken {
+		k := bits.OnesCount16(taken)
+		for j := 1; j < int(t.per); j++ {
+			if marked := t.fill[j][s/64]&(1<<(s%64)) != 0; marked != (j == k) {
+				panic(fmt.Sprintf("disklog: slot segment %d with %d slots taken is marked %v at fill %d", s, k, marked, j))
+			}
+		}
+		if k > 0 && k < int(t.per) {
+			n[k]++
+		}
+		need := uint16(0)
+		if u := &l.usage[s]; u.State == SegmentSlot {
+			need = uint16(u.Live)
+		}
+		for _, h := range t.held {
+			if h.segment == uint32(s) {
+				need |= 1 << h.slot
+			}
+		}
+		if taken&need != need {
+			panic(fmt.Sprintf("disklog: slot segment %d takes slots %b, in use or held %b", s, taken, need))
+		}
+	}
+	if !slices.Equal(n[1:], t.fillN[1:]) {
+		panic(fmt.Sprintf("disklog: slot segments by fill %v, counted %v", n[1:], t.fillN[1:]))
+	}
 }
 
 // Slots is how many chunk slots a slot segment holds, 0 on a disk whose segments are smaller than a chunk.
@@ -123,6 +163,7 @@ func (l *Log) takeSlot(e *Entry) bool {
 	}
 	l.slots.setTaken(s, l.slots.taken[s]|1<<slot)
 	*e = SlotEntry(e.Pool, e.Chunk, e.Version, s, slot)
+	l.checkSlots()
 	return true
 }
 
@@ -134,6 +175,7 @@ func (l *Log) untake(e *Entry) {
 	if l.slots.taken[s] == 0 && l.usage[s].State != SegmentSlot {
 		l.free[s/64] |= 1 << (s % 64)
 	}
+	l.checkSlots()
 }
 
 // useSlots marks the slots a durable round wrote in use.
@@ -164,6 +206,7 @@ func (l *Log) FreeSlot(lba core.LBA, out *Output) error {
 	}
 	l.changed[s/64] |= 1 << (s % 64)
 	l.slots.held = append(l.slots.held, heldSlot{segment: s, slot: slot, until: l.nextLSN})
+	l.checkSlots()
 	return nil
 }
 
@@ -182,17 +225,28 @@ func (l *Log) releaseHeld(out *Output) {
 		}
 		return true
 	})
+	l.checkSlots()
 }
 
-// trimDone frees a segment whose TRIM completed, failed or not: a failed discard leaves old data
-// that new writes overwrite, and is no longer in flight to erase them.
-func (l *Log) trimDone(io core.IOID) bool {
+// trimDone follows a freed slot segment's TRIM, failed or not, with a write of zeros over its
+// first block, and frees the segment once that write completes, failed or not. A slot segment has
+// no header, so recovery tells it free only by a first block of zeros, which a disk that is a
+// file, a discard that does not read back as zeros or a TRIM lost at a crash would not leave;
+// otherwise every start would read the segment in full. A failed write costs only that read, and
+// neither is in flight any more to erase what the segment holds next.
+func (l *Log) trimDone(io core.IOID, out *Output) bool {
 	t := &l.slots
 	j := slices.IndexFunc(t.trims, func(t trimIO) bool { return t.io == io })
 	if j < 0 {
 		return false
 	}
-	s := t.trims[j].segment
+	tr := &t.trims[j]
+	if !tr.zeroing {
+		tr.io, tr.zeroing = l.io(), true
+		out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskWrite, IO: tr.io, LBA: l.sb.LBA(tr.segment, 0), Buf: t.zero, Len: core.BlockSize})
+		return true
+	}
+	s := tr.segment
 	t.trims = slices.Delete(t.trims, j, j+1)
 	l.free[s/64] |= 1 << (s % 64)
 	return true

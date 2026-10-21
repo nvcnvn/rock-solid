@@ -285,7 +285,7 @@ func (h *harness) noteRounds() {
 	}
 	writes := 0
 	for _, a := range h.out.Actions {
-		if a.Kind == core.ActDiskWrite && !isSlotWrite(a) {
+		if a.Kind == core.ActDiskWrite && !isSlotWrite(a) && !disklog.ZeroesASegment(h.log, a.IO) {
 			writes++
 		}
 	}
@@ -296,6 +296,9 @@ func (h *harness) noteRounds() {
 	for _, a := range h.out.Actions {
 		switch a.Kind {
 		case core.ActDiskWrite:
+			if disklog.ZeroesASegment(h.log, a.IO) {
+				continue
+			}
 			h.roundOf[a.IO] = next
 			if !isSlotWrite(a) {
 				next++

@@ -759,19 +759,14 @@ func (r *Recovery) startQuarantine(ctx *core.Context, out *Output) {
 // startScan reads in full, once replay has delivered every record, the segments whose first
 // block did not decode or whose block 1 holds a round in flight, except those replay found to be
 // slot segments, whose first block is chunk data: a slot segment opened since the manifest would
-// otherwise be read whole at every start. Its block 1 still counts for the tail rule, the one
-// place a round in flight that opened it again for records can have left a record.
+// otherwise be read whole at every start. A slot segment whose block 1 holds a record of this log
+// at NextSeq or more is read all the same: a round opened it again for records once its slots
+// were freed, and if its header is damaged, durable records may follow.
 func (r *Recovery) startScan(ctx *core.Context, out *Output) {
 	r.markSlots()
 	r.scan = slices.DeleteFunc(r.scan, func(s uint32) bool {
 		info := &r.segs[s]
-		if info.state != segSlot {
-			return false
-		}
-		if f := info.first; f.ok && f.seq >= r.nextSeq {
-			r.noteFound(s, 1, f.seq, f.lsn, f.durable)
-		}
-		return true
+		return info.state == segSlot && !(info.first.ok && info.first.seq >= r.nextSeq)
 	})
 	r.phase, r.qPos = recQuarantine, 1
 	r.pumpQuarantine(ctx, out)
@@ -1474,5 +1469,6 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 			l.changed[s/64] |= 1 << (s % 64)
 		}
 	}
+	l.checkSlots()
 	return l, nil
 }

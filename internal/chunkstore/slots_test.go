@@ -212,7 +212,7 @@ func TestCrashAtEveryActionWithSlots(t *testing.T) {
 			cfg.Log.MaxReplayBytes = 4 * core.BlockSize
 			cfg.Log.CommitDepth = depth
 			geo := slotGeometry
-			crashEveryAction(t, cfg, &geo, crashSlotWorkload)
+			crashEveryAction(t, cfg, &geo, crashSlotWorkload, true)
 		})
 	}
 }
@@ -307,5 +307,32 @@ func TestTheIndexCountsChunkSlots(t *testing.T) {
 	}
 	if err := newIndex(t).Apply(record(100, disklog.SlotEntry(1, chunk(1), 1, 2, 1))); !errors.Is(err, ErrNoSlots) {
 		t.Fatalf("a slot write on a disk without slots: %v", err)
+	}
+}
+
+// slotReuseWorkload frees a slot whose write no header names durable yet and writes a whole chunk
+// at once, with no checkpoint, whose records would name the write durable (raised in the second
+// review of Chunk slots).
+func slotReuseWorkload(h *harness) {
+	c, d := crashChunks[0], crashChunks[1]
+	h.write(d, 0, fill(core.BlockSize, 0xa0), 0)
+	h.write(c, 0, fill(core.ChunkSize, 0xb1), 0)
+	h.punch(c, 0, core.ChunkSize, 0)
+	h.settle()
+	h.write(d, 0, fill(core.ChunkSize, 0xb2), 0)
+	h.settle()
+}
+
+// [property] The crash property over a slot freed and a whole chunk written at once, with no
+// checkpoint, at commit_depth 2 and 4, where the log's hold on the freed slot is what keeps the
+// freed slot's write recoverable.
+func TestCrashAtEveryActionReusingASlot(t *testing.T) {
+	for _, depth := range []int{2, 4} {
+		t.Run(fmt.Sprint("depth ", depth), func(t *testing.T) {
+			cfg := testConfig()
+			cfg.Log.CommitDepth = depth
+			geo := slotGeometry
+			crashEveryAction(t, cfg, &geo, slotReuseWorkload, false)
+		})
 	}
 }

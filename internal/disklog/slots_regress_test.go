@@ -1,9 +1,11 @@
 package disklog_test
 
 import (
+	"bytes"
 	"slices"
 	"testing"
 
+	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
@@ -84,4 +86,66 @@ func TestRecoveryReadsNoSlotSegmentInFull(t *testing.T) {
 		t.Fatalf("recovery read %d blocks of the slot segment", n)
 	}
 	h.wantSlots(h.geo.SlotLBA(2, 0))
+}
+
+// Regression (second review of Chunk slots): a segment used for a slot after the manifest's base,
+// freed and opened again for records, whose header is then damaged, is read in full like any
+// damaged segment, and its durable records past the gap are corruption, not dropped as rounds in
+// flight, though replay finds the record that wrote its slot.
+func TestADamagedHeaderOfASlotSegmentOpenedForRecordsIsCorruption(t *testing.T) {
+	h := slotHarness(t, 4096, 8, testConfig(0))
+	h.submit(disklog.Hot, h.write(1, 1, 1))
+	h.submit(disklog.Hot, h.whole(2, 1, chunkData(2, 1)))
+	h.run()
+	if err := h.log.FreeSlot(h.geo.SlotLBA(2, 0), &h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.absorb()
+	h.submit(disklog.Hot, h.write(3, 1, 3))
+	h.run()
+	for i := range uint32(3) {
+		h.submit(disklog.Cold, h.write(4+i, 1, uint64(4+i)))
+		h.run()
+	}
+	if got := h.segmentHeader(2); got.Stream != disklog.Cold {
+		t.Fatalf("segment 2 not opened for the cold records: %+v", got)
+	}
+	h.disk.FlipBit(h.geo.LBA(2, 0), 20, 0x10)
+	h.crashLanding()
+	res := h.recover(disklog.ModeOpen)
+	if res.err == nil {
+		t.Fatalf("durable records 4 to 6 dropped: recovered to LSN %d", res.durable)
+	}
+}
+
+// Regression (second review of Chunk slots): a slot segment freed with its last slot has its first
+// block zeroed after its TRIM, which here fails and leaves the chunk data, as a disk that is a
+// file or a discard that does not read back as zeros does: a segment no manifest lists is free
+// to recovery when its first block reads as zeros, and read in full at every start otherwise.
+func TestAFreedSlotSegmentReadsAsFreeWhateverItsTRIMLeft(t *testing.T) {
+	h := slotHarness(t, 4096, 8, testConfig(0))
+	h.submit(disklog.Hot, h.write(1, 1, 1))
+	h.submit(disklog.Hot, h.whole(2, 1, chunkData(2, 1)))
+	h.run()
+	if err := h.log.FreeSlot(h.geo.SlotLBA(2, 0), &h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.absorb()
+	h.failWhen = func(a core.Action) core.DiskError {
+		if a.Kind == core.ActDiskTrim {
+			return core.DiskIO
+		}
+		return core.DiskOK
+	}
+	h.submit(disklog.Hot, h.write(3, 1, 3))
+	h.run()
+	h.failWhen = nil
+	if !slices.Contains(h.trace, "write 8192+1 io112") || disklog.FreeSegments(h.log) != 6 {
+		t.Fatalf("no write of zeros over the freed segment's first block: %q, %d free", h.trace, disklog.FreeSegments(h.log))
+	}
+	h.submit(disklog.Hot, h.write(4, 1, 4))
+	h.run()
+	if b := h.disk.Durable(h.geo.LBA(2, 0)); b == nil || !bytes.Equal(b, make([]byte, core.BlockSize)) {
+		t.Fatal("the freed slot segment's first block is not durably zero")
+	}
 }

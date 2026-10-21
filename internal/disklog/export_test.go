@@ -3,6 +3,7 @@ package disklog
 import (
 	"encoding/binary"
 	"math/bits"
+	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
@@ -156,3 +157,8 @@ func StopEarly(r *Recovery) { r.stopEarly = true }
 
 // ReplayPastGaps plants the bug of delivering a record past a missing LSN instead of ending the log there.
 func ReplayPastGaps(r *Recovery) { r.pastGaps = true }
+
+// ZeroesASegment reports whether io is the write of zeros over a freed slot segment's first block.
+func ZeroesASegment(l *Log, io core.IOID) bool {
+	return slices.ContainsFunc(l.slots.trims, func(t trimIO) bool { return t.zeroing && t.io == io })
+}

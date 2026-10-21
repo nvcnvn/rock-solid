@@ -188,14 +188,15 @@ func (h *harness) recoverStore(mode disklog.Mode) {
 // landing, a seeded half of them, and all of them, recovers to a prefix of what was written that holds
 // every acknowledged record, live and at every snapshot, and the rebuilt index equals it.
 func TestCrashAtEveryAction(t *testing.T) {
-	crashEveryAction(t, crashConfig(), nil, crashWorkload)
+	crashEveryAction(t, crashConfig(), nil, crashWorkload, true)
 }
 
 // crashEveryAction runs the crash property over workload on a disk cut as geo, or the default
 // disk when geo is nil, checking after every recovery that the log's chunk slots in use are
 // those the index refers to. On a disk with chunk slots, a crash also lands every write but
-// those of slots, so a record lands without its slot data.
-func crashEveryAction(t *testing.T, cfg Config, geo *disklog.Geometry, workload func(*harness)) {
+// those of slots, so a record lands without its slot data. With checkpoints, the workload must
+// write a manifest.
+func crashEveryAction(t *testing.T, cfg Config, geo *disklog.Geometry, workload func(*harness), checkpoints bool) {
 	start := func() *harness {
 		if geo == nil {
 			return newHarness(t, cfg)
@@ -211,7 +212,7 @@ func crashEveryAction(t *testing.T, cfg Config, geo *disklog.Geometry, workload 
 	full := start()
 	workload(full)
 	total := full.executed
-	if full.s.Log().Manifest().IsNone() {
+	if checkpoints && full.s.Log().Manifest().IsNone() {
 		t.Fatal("the workload wrote no manifest")
 	}
 	if err := full.s.CheckSlots(); err != nil {

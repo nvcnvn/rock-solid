@@ -198,6 +198,9 @@ func (h *harness) noteOpen(a core.Action) {
 // writeImage is the bytes a write sends.
 func (h *harness) writeImage(a core.Action) []byte {
 	var img []byte
+	if len(a.Vec) == 0 {
+		img = append(img, h.pool.Bytes(a.Buf)[:a.Len]...)
+	}
 	for _, v := range a.Vec {
 		img = append(img, h.pool.Bytes(v.Buf)[:v.Len]...)
 	}
