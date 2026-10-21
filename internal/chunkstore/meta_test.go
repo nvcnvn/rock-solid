@@ -37,6 +37,7 @@ type metaSet struct {
 	runLimit int
 	merges   int
 	points   bool
+	probe    lsm.FilterProbe
 	run      metamorphic.Options
 }
 
@@ -54,6 +55,8 @@ var metaSets = []metaSet{
 	{name: "two-merges", piece: 1024, merges: 2, run: metamorphic.Options{FlushOps: true, FlushEvery: 3, CompactEvery: 8}},
 	{name: "fixed-limit", piece: 1024, runLimit: 4, run: metamorphic.Options{FlushOps: true, FlushEvery: 5, Compact: metamorphic.CompactEager}},
 	{name: "point-removals", piece: 4096, points: true, run: metamorphic.Options{FlushOps: true, FlushEvery: 20, Compact: metamorphic.CompactEager}},
+	{name: "filters-off", piece: 512, probe: lsm.FiltersOff, run: metamorphic.Options{FlushOps: true, FlushEvery: 10}},
+	{name: "filters-maybe", piece: 512, probe: lsm.FiltersMaybe, run: metamorphic.Options{FlushOps: true, FlushEvery: 10}},
 }
 
 func metaSetNamed(name string) (metaSet, bool) {
@@ -396,7 +399,7 @@ func genMetaOps(seed uint64, n int) []metamorphic.Op {
 
 // metaStats counts what an option set made the index's tree do.
 type metaStats struct {
-	flushes, failed, compactions, together, deferred, restarts, maxRuns int
+	flushes, failed, compactions, together, deferred, restarts, maxRuns, searches int
 }
 
 // metaIndex runs an Index over a log that keeps every live piece. Its write ops stand in for the
@@ -418,7 +421,7 @@ func newMetaIndex(s metaSet) *metaIndex {
 }
 
 func (m *metaIndex) newTree() *lsm.Tree {
-	tr, err := lsm.New(lsm.Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, Check: true})
+	tr, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, Check: true, Probe: m.set.probe}))
 	if err != nil {
 		panic(err)
 	}
@@ -579,6 +582,7 @@ func (m *metaIndex) Restart() error {
 			return errors.New(l)
 		}
 	}
+	m.st.searches += m.x.Tree().Searches()
 	m.x = x
 	m.st.restarts++
 	return nil
@@ -601,6 +605,7 @@ func metaRun(ops []metamorphic.Op, sets []metaSet) (*metaFailure, []metaStats) {
 	for i, s := range sets {
 		e := newMetaIndex(s)
 		got := metamorphic.Run(ops, s.run, e)
+		e.st.searches += e.x.Tree().Searches()
 		stats[i] = e.st
 		stats[i].flushes, stats[i].failed = e.log.Flushes, e.log.Failed
 		if d := metamorphic.Diff(want, got); d >= 0 && fail == nil {
@@ -705,6 +710,8 @@ func TestMetamorphicOpsCoverTheIndex(t *testing.T) {
 		{"D installs merges during flushes", of("D").deferred > 0},
 		{"two-merges runs two at once", of("two-merges").together > 0},
 		{"fixed-limit compacts", of("fixed-limit").compactions > 0},
+		{"filters-off searches more than C", of("filters-off").searches > of("C").searches},
+		{"filters-maybe searches as filters-off does", of("filters-maybe").searches == of("filters-off").searches},
 	} {
 		if !c.ok {
 			t.Errorf("%s: %+v", c.name, stats)

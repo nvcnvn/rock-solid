@@ -57,6 +57,8 @@ type Config struct {
 	Filter FilterKeys
 	// Prefix is the length of k's prefix, 0 if k has none; every key starting with a prefix must have that prefix.
 	Prefix func(k []byte) int
+	// Probe is how lookups use run filters.
+	Probe FilterProbe
 }
 
 // Tree is an LSM tree. Only its owner calls it; a compaction's Run alone may run elsewhere.
@@ -115,7 +117,7 @@ type flush struct {
 
 // New makes an empty tree.
 func New(cfg Config) (*Tree, error) {
-	if cfg.MaxPiece < MinPiece || cfg.RunLimit < 0 || cfg.Filter > KeysAndPrefixes || cfg.Filter != WholeKeys && cfg.Prefix == nil {
+	if cfg.MaxPiece < MinPiece || cfg.RunLimit < 0 || cfg.Filter > KeysAndPrefixes || cfg.Probe > FiltersMaybe || cfg.Filter != WholeKeys && cfg.Prefix == nil {
 		return nil, ErrBadConfig
 	}
 	t := &Tree{cfg: cfg, nextSeq: 1, limitBuffer: autoLimitBuffer}
@@ -126,7 +128,7 @@ func New(cfg Config) (*Tree, error) {
 }
 
 func (t *Tree) state() state {
-	st := state{mem: t.mem, memRoot: t.mem.root, memFRoot: t.mem.froot, runs: t.runs, linear: t.linear, filter: t.cfg.Filter, prefix: t.cfg.Prefix}
+	st := state{mem: t.mem, memRoot: t.mem.root, memFRoot: t.mem.froot, runs: t.runs, linear: t.linear, filter: t.cfg.Filter, prefix: t.cfg.Prefix, probe: t.cfg.Probe}
 	if t.frozen != nil && !t.plant.skipFrozen {
 		st.frozen, st.frozenRoot, st.frozenFRoot = t.frozen, t.frozen.root, t.frozen.froot
 	}

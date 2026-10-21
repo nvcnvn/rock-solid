@@ -168,6 +168,7 @@ type state struct {
 	runs        []*run
 	filter      FilterKeys
 	prefix      func([]byte) int
+	probe       FilterProbe
 	linear      bool
 }
 
@@ -212,6 +213,7 @@ type iterState struct {
 	srcs         []source
 	filter       FilterKeys
 	prefix       func([]byte) int
+	probe        FilterProbe
 	heap         []int
 	cur          int
 	linear       bool
@@ -236,7 +238,7 @@ type iterState struct {
 
 func (it *iterState) reset(st *state, keepDel bool) {
 	it.srcs, it.heap, it.linear = st.sources(it.srcs), it.heap[:0], st.linear
-	it.filter, it.prefix, it.inPrefix = st.filter, st.prefix, false
+	it.filter, it.prefix, it.probe, it.inPrefix = st.filter, st.prefix, st.probe, false
 	it.cur, it.keepDel, it.bounded, it.uok = -1, keepDel, false, false
 	it.dropped, it.fragsDropped = 0, 0
 	it.ranges = false
@@ -506,6 +508,9 @@ func (it *iterState) pendingFrag(older []runIter) bool {
 // filterKey is what a lookup of k probes the filters with: k itself when they hold whole keys
 // and whole is set, otherwise k's prefix when they hold prefixes, or nothing.
 func (it *iterState) filterKey(k []byte, whole bool) ([]byte, bool) {
+	if it.probe == FiltersOff {
+		return nil, false
+	}
 	if whole && it.filter != Prefixes {
 		return k, true
 	}
@@ -527,7 +532,7 @@ func (it *iterState) filterOut(fk []byte, on bool) {
 
 func (it *iterState) mayHold(r *run, h uint32) bool {
 	it.filterProbes++
-	return mayContain(r.filter, h)
+	return it.probe == FiltersMaybe || mayContain(r.filter, h)
 }
 
 func (it *iterState) get(k []byte) ([]byte, bool) {

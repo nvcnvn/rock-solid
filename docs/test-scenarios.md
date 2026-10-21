@@ -1020,8 +1020,8 @@ them under every option set and a model, and turns a failure into a regression c
   compactions 4, restarts 1; keys of 1-6 letters a-f, a put's key new one time in four, a range
   removal half the time over every key with its start as prefix. With `Check` on, every set's
   history equals the map model's line by line (Pebble's `internal/metamorphic`, a7b8321871e3).
-  The 11 sets take about 5 s for 20 seeds on an Intel Core Ultra 5 235U; seeds 0-10,002 passed
-  once with the change that added the test.
+  The 13 sets take about 4 s for 20 seeds on an Apple M4 Pro; seeds 0-10,002 passed once with
+  the change that added the test, and seeds 0-199 with the filter sets.
 
   | Set | Pieces | Flushes | Compaction | Other |
   | --- | --- | --- | --- | --- |
@@ -1036,11 +1036,13 @@ them under every option set and a model, and turns a failure into a regression c
   | Fixed limit | 1 KiB | after every 5 writes | eager, with a fixed run limit of 4 against the auto-tuned one | |
   | Point removals | 4 KiB | after every 20 writes | eager | each range removal replaced by the point removals of the keys it covers (Pebble's `replace_single_delete`) |
   | Linear merge | 1 KiB | after every 15 writes | eager | scans, flushes and merges compare every layer at every step instead of keeping the heap, so the flush's and merge's drop counts and reads during a flush meet the reference too; up to 4 ops between a flush's pieces |
+  | Filters off | 256 B | as C | as C | lookups probe no run filter and search every run (`Config.Probe = FiltersOff`) |
+  | Filters maybe | 256 B | as C | as C | lookups probe every run filter and take each answer as "maybe" (`FiltersMaybe`) |
 
-  Run filters adds two sets: Filters off, and every filter probe answering "maybe".
 - Each set reaches the extreme it is there for on seed 0: F never flushes, C keeps over 100 runs
   and G 40, E fails flushes and restarts more than A, D installs merges while a memtable is frozen,
-  Two merges runs two at once, and Fixed limit compacts.
+  Two merges runs two at once, Fixed limit compacts, and Filters off and Filters maybe search more
+  layers than C ([Filter option sets](#filter-option-sets)).
 - [property] The chunk index's `TestMetamorphic` (`internal/chunkstore`): seeds 0-19 per run, 1,000
   ops drawn by weight: writes 30, punches 6, whole-chunk punches 1, cuts 2, releases of frozen
   versions 2, cleaner moves 8, reads of blocks live 12 and at a snapshot epoch 10, chunk entries 3,
@@ -1050,12 +1052,14 @@ them under every option set and a model, and turns a failure into a regression c
   write after each cut; a move copies one block a live or frozen map holds. Every op names its record's LBA, so
   histories are comparable, and a move is logged and replayed after a restart as the cleaner's copy
   record will be. The model is per chunk an entry, a live map and frozen maps, block by block. The
-  sets are internal/lsm's but Linear merge, with C's pieces 512 bytes, since a 256-byte root lists
-  13 pieces, fewer than a flush of 10 index writes takes; Point removals sets the index's own
-  point-removal switch, so range trims read as point removals. A seed costs about 0.3 s over the
-  10 sets; at 3,000 ops it costs 3 s, as runs pile up to 300 under C and Two merges. Seed 0
-  holds an absent freeze, a whole-chunk punch, a move that changes a map, a release and a read
-  that finds a frozen version. Seeds 0-10,001 passed once with the change that added the test.
+  tree is configured by `TreeConfig`, so its filters hold chunk prefixes as in production. The
+  sets are internal/lsm's but Linear merge, with the pieces of C, Filters off and Filters maybe
+  512 bytes, since a 256-byte root lists 13 pieces, fewer than a flush of 10 index writes takes;
+  Point removals sets the index's own point-removal switch, so range trims read as point removals.
+  A seed costs about 0.2 s over the 12 sets on an Apple M4 Pro; at 3,000 ops about 4 s, as runs
+  pile up to 300 under C and Two merges. Seed 0 holds an absent freeze, a whole-chunk punch, a
+  move that changes a map, a release and a read that finds a frozen version. Seeds 0-10,001
+  passed once with the change that added the test, and seeds 0-299 with the filter sets.
 - Planted bugs, each one line behind a test switch in `internal/lsm` and run with `Check` off so
   the history diff alone finds them, fail at least one seed of 20 under the set each is checked
   under, and the failing seed differs from set F too:
@@ -1162,8 +1166,13 @@ entries; counts are the bar, times on the shared VM):
 
 ## Filter option sets
 
-- Both indexes' metamorphic tests pass under two more option sets: filters off, and every filter
-  probe answering "maybe".
+- Both indexes' metamorphic tests (`TestMetamorphic` in `internal/lsm` and `internal/chunkstore`)
+  pass under two more option sets with C's cadence: Filters off, whose lookups probe no run filter,
+  and Filters maybe, whose every probe answers "maybe" (`lsm.Config.Probe`). The chunk index's
+  runs under every set hold its chunk-prefix filters.
+- On seed 0 both sets search the same number of layers, more than C (`TestMetamorphicOpsCoverTheIndex`,
+  `TestMetamorphicSetsReachTheirExtremes`); in `internal/lsm` Filters off also probes no filter and
+  Filters maybe as many as C.
 
 ## Chunk reader
 
