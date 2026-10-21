@@ -11,9 +11,9 @@ const (
 	BlobRefSize = 18
 
 	manifestFixedSize  = 2 + 1 + 8 + 8 + 4 + 4
-	manifestIndexSize  = 4 + 8 + 4
+	manifestIndexSize  = 4 + 8 + 4 + 4
 	editIndexSize      = 4 + 8 + 4 + 4 + 4
-	mergeBoundSize     = BlobRefSize + 2
+	mergeBoundSize     = BlobRefSize + 4 + 2
 	pieceListSize      = 2 + 2
 	pieceListEntrySize = 2
 
@@ -34,11 +34,12 @@ type BlobRef struct {
 	Entry   uint16
 }
 
-// ManifestIndex is an index's runs, each named by its last piece, and the LSN after which records replay into it.
+// ManifestIndex is an index's runs, each named by its last piece, the bounds its running merges set on some of them, and the LSN after which records replay into it.
 type ManifestIndex struct {
 	Owner     uint32
 	ReplayLSN uint64
 	Runs      []BlobRef
+	Bounds    []MergeBound
 }
 
 // SegmentState says whether a segment may be opened; zero is free.
@@ -68,13 +69,14 @@ type Manifest struct {
 	Segments []SegmentUsage
 }
 
-// MergeBound is the key at or below which a merge has consumed a run, which holds only keys above it.
+// MergeBound is the key at or below which a merge has consumed a run, which holds only keys above it, and how many of the run's first pieces lie wholly at or below it, which are dead.
 type MergeBound struct {
-	Run BlobRef
-	Key []byte
+	Run  BlobRef
+	Key  []byte
+	Dead uint32
 }
 
-// IndexEdit is an index's replay point and the runs an edit adds to and removes from it, with the bounds its merge steps set.
+// IndexEdit is an index's replay point, the runs an edit adds to and removes from it, and every bound its merges hold after it.
 type IndexEdit struct {
 	Owner     uint32
 	ReplayLSN uint64
@@ -99,6 +101,7 @@ func AppendManifest(dst []byte, m *Manifest) []byte {
 		dst = binary.LittleEndian.AppendUint32(dst, ix.Owner)
 		dst = binary.LittleEndian.AppendUint64(dst, ix.ReplayLSN)
 		dst = appendRefs(dst, ix.Runs)
+		dst = appendBounds(dst, ix.Bounds)
 	}
 	return appendRows(dst, m.Segments)
 }
@@ -107,7 +110,7 @@ func AppendManifest(dst []byte, m *Manifest) []byte {
 func ManifestSize(m *Manifest) int {
 	n := manifestFixedSize
 	for i := range m.Indexes {
-		n += manifestIndexSize + BlobRefSize*len(m.Indexes[i].Runs)
+		n += manifestIndexSize + BlobRefSize*len(m.Indexes[i].Runs) + boundsSize(m.Indexes[i].Bounds)
 	}
 	return n + SegmentUsageSize*len(m.Segments)
 }
@@ -121,12 +124,7 @@ func AppendManifestEdit(dst []byte, e *ManifestEdit) []byte {
 		dst = binary.LittleEndian.AppendUint64(dst, ix.ReplayLSN)
 		dst = appendRefs(dst, ix.Added)
 		dst = appendRefs(dst, ix.Removed)
-		dst = binary.LittleEndian.AppendUint32(dst, uint32(len(ix.Bounds)))
-		for _, b := range ix.Bounds {
-			dst = AppendBlobRef(dst, b.Run)
-			dst = binary.LittleEndian.AppendUint16(dst, uint16(len(b.Key)))
-			dst = append(dst, b.Key...)
-		}
+		dst = appendBounds(dst, ix.Bounds)
 	}
 	return appendRows(dst, e.Segments)
 }
@@ -136,10 +134,7 @@ func ManifestEditSize(e *ManifestEdit) int {
 	n := manifestFixedSize
 	for i := range e.Indexes {
 		ix := &e.Indexes[i]
-		n += editIndexSize + BlobRefSize*(len(ix.Added)+len(ix.Removed))
-		for _, b := range ix.Bounds {
-			n += mergeBoundSize + len(b.Key)
-		}
+		n += editIndexSize + BlobRefSize*(len(ix.Added)+len(ix.Removed)) + boundsSize(ix.Bounds)
 	}
 	return n + SegmentUsageSize*len(e.Segments)
 }
@@ -158,6 +153,25 @@ func appendRefs(dst []byte, refs []BlobRef) []byte {
 		dst = AppendBlobRef(dst, r)
 	}
 	return dst
+}
+
+func appendBounds(dst []byte, bounds []MergeBound) []byte {
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(bounds)))
+	for _, b := range bounds {
+		dst = AppendBlobRef(dst, b.Run)
+		dst = binary.LittleEndian.AppendUint32(dst, b.Dead)
+		dst = binary.LittleEndian.AppendUint16(dst, uint16(len(b.Key)))
+		dst = append(dst, b.Key...)
+	}
+	return dst
+}
+
+func boundsSize(bounds []MergeBound) int {
+	n := 0
+	for _, b := range bounds {
+		n += mergeBoundSize + len(b.Key)
+	}
+	return n
 }
 
 func appendRows(dst []byte, rows []SegmentUsage) []byte {
@@ -190,6 +204,12 @@ func DecodeManifest(b []byte) (Manifest, error) {
 		owners[ix.Owner] = true
 		if ix.Runs, err = r.refs(); err != nil {
 			return Manifest{}, err
+		}
+		if ix.Bounds, err = r.bounds(); err != nil {
+			return Manifest{}, err
+		}
+		if !validBounds(ix.Runs, ix.Bounds) {
+			return Manifest{}, ErrMalformed
 		}
 	}
 	if m.Segments, err = r.rows(base, false); err != nil {
@@ -272,6 +292,7 @@ func (r *reader) bounds() ([]MergeBound, error) {
 	for i := range bounds {
 		b := &bounds[i]
 		b.Run = r.blobRef()
+		b.Dead = r.u32()
 		b.Key = slices.Clone(r.take(int(r.u16())))
 		if r.bad || b.Run.Segment == 0 {
 			return nil, ErrMalformed
@@ -305,7 +326,7 @@ func (r *reader) rows(base uint64, edit bool) ([]SegmentUsage, error) {
 	return rows, nil
 }
 
-// ApplyManifestEdit is m with e applied: e's indexes in its order, each keeping its runs in m not removed, then the added ones; and m's usage table with e's rows. Removing a run m does not hold, adding one it does, changing a quarantined row or going back in base LSN or NextSeq is ErrMalformed.
+// ApplyManifestEdit is m with e applied: e's indexes in its order, each keeping its runs in m not removed, then the added ones, and taking e's bounds; and m's usage table with e's rows. Removing a run m does not hold, adding one it does, a bound on a run the index does not hold, changing a quarantined row or going back in base LSN or NextSeq is ErrMalformed.
 func ApplyManifestEdit(m *Manifest, e *ManifestEdit) (Manifest, error) {
 	if e.BaseLSN < m.BaseLSN || e.NextSeq < m.NextSeq {
 		return Manifest{}, ErrMalformed
@@ -360,9 +381,22 @@ func applyIndexes(base []ManifestIndex, edits []IndexEdit) ([]ManifestIndex, err
 		if len(runs) == 0 {
 			runs = nil
 		}
-		out[i] = ManifestIndex{Owner: ed.Owner, ReplayLSN: ed.ReplayLSN, Runs: runs}
+		if !validBounds(runs, ed.Bounds) {
+			return nil, ErrMalformed
+		}
+		out[i] = ManifestIndex{Owner: ed.Owner, ReplayLSN: ed.ReplayLSN, Runs: runs, Bounds: ed.Bounds}
 	}
 	return out, nil
+}
+
+// validBounds reports whether each bound names a different run of runs.
+func validBounds(runs []BlobRef, bounds []MergeBound) bool {
+	for i, b := range bounds {
+		if !slices.Contains(runs, b.Run) || slices.ContainsFunc(bounds[:i], func(o MergeBound) bool { return o.Run == b.Run }) {
+			return false
+		}
+	}
+	return true
 }
 
 // diffIndexes is the index edits that turn base into next.
@@ -375,7 +409,7 @@ func diffIndexes(base, next []ManifestIndex) []IndexEdit {
 		if j, ok := at[ix.Owner]; ok {
 			old = base[j].Runs
 		}
-		ed := IndexEdit{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN}
+		ed := IndexEdit{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Bounds: ix.Bounds}
 		for _, r := range old {
 			if !slices.Contains(ix.Runs, r) {
 				ed.Removed = append(ed.Removed, r)

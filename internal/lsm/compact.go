@@ -143,11 +143,16 @@ func autoLimit(largest, buffer int, ratio float64) int {
 	return limit
 }
 
-// Compaction merges adjacent runs into one; Run may run on a worker while the owner goes on, and the owner installs it.
+// Compaction merges adjacent runs into one in steps: Run, which may run on a worker while the
+// owner goes on, merges up to Config.StepBytes of output with a filter partition of its keys, and
+// Install installs it, bounding the inputs below the step's last key; a checkpoint writes each
+// step to the merge worker's lane.
 type Compaction struct {
 	tree   *Tree
 	rule   rule
+	worker int
 	inputs []*run
+	output *run
 	runs   []*run
 	older  []*run
 	plant  plants
@@ -157,8 +162,50 @@ type Compaction struct {
 	linear bool
 	seq    uint64
 	limit  int
-	out    *run
-	err    error
+	step   int
+	bound  []byte
+
+	started      bool
+	it, fit      *iterState
+	olderIt      []runIter
+	olderFrag    []runIter
+	baseEntries  int
+	baseFrags    int
+	outEntries   int
+	outFrags     int
+	fragsSkipped int
+	lastFrag     []byte
+	out          *run
+	stepBound    []byte
+	done         bool
+	err          error
+
+	running      bool
+	failed       bool
+	finished     bool
+	final        bool
+	installed    int
+	written      int
+	named        int
+	freed        []int
+	entryRefs    []disklog.BlobRef
+	fragRefs     []disklog.BlobRef
+	partRefs     []disklog.BlobRef
+	tail         []disklog.BlobRef
+	writtenParts int
+	stale        []disklog.BlobRef
+}
+
+// Worker is the merge worker, from 1, whose lane of the metadata stream the merge's output fills.
+func (c *Compaction) Worker() int { return c.worker }
+
+// Finished reports whether the merge is over: its last step named by a durable manifest, dropped,
+// or failed with its last installed step named.
+func (c *Compaction) Finished() bool { return c.finished || c.failed && c.installed == c.named }
+
+// ready reports whether the merge may run its next step: the manifest naming its last one is durable.
+func (c *Compaction) ready() bool {
+	return !c.running && !c.failed && !c.final && !c.finished && c.installed == c.named
 }
 
 func (t *Tree) opts() pickOpts {
@@ -173,8 +220,15 @@ func (t *Tree) opts() pickOpts {
 	}
 }
 
-// PickCompaction returns the next compaction due over runs no running compaction holds, or nil.
+// PickCompaction returns the next merge step due over runs no other merge holds, or nil: first
+// that of a merge whose last step a durable manifest names, a restored one included, then a new merge.
 func (t *Tree) PickCompaction() *Compaction {
+	t.pairMerges()
+	for _, c := range t.merges {
+		if c.ready() {
+			return t.start(c)
+		}
+	}
 	runs := make([]pickRun, len(t.runs))
 	for i, r := range t.runs {
 		runs[i] = pickRun{bytes: r.bytes, held: r.held}
@@ -183,17 +237,29 @@ func (t *Tree) PickCompaction() *Compaction {
 	if rule == ruleNone {
 		return nil
 	}
-	return t.compaction(i, j, rule)
+	return t.start(t.compaction(i, j, rule))
 }
 
-// compaction holds runs [i, j) for a merge by rule.
+// start hands c to a worker. A tree alone numbers its merges' workers itself; a Scheduler
+// renumbers a new merge with the disk's lowest free worker, which is what keeps lanes per worker.
+func (t *Tree) start(c *Compaction) *Compaction {
+	c.running = true
+	if c.worker == 0 {
+		for c.worker = 1; slices.ContainsFunc(t.merges, func(o *Compaction) bool { return o != c && o.worker == c.worker }); c.worker++ {
+		}
+	}
+	return c
+}
+
+// compaction holds runs [i, j) for a merge by rule, its output taking the oldest's place and sequence number.
 func (t *Tree) compaction(i, j int, rule rule) *Compaction {
 	c := &Compaction{
 		tree:   t,
 		rule:   rule,
 		inputs: slices.Clone(t.runs[i:j]),
-		seq:    t.runs[i].seq,
+		seq:    t.runs[j-1].seq,
 		limit:  t.cfg.MaxPiece - pieceOverhead,
+		step:   t.cfg.StepBytes,
 		plant:  t.plant,
 		check:  t.cfg.Check,
 		filter: t.cfg.Filter,
@@ -206,13 +272,62 @@ func (t *Tree) compaction(i, j int, rule rule) *Compaction {
 		in.blocks, in.frags = slices.Clone(r.blocks), slices.Clone(r.frags)
 		c.runs = append(c.runs, &in)
 	}
-	for _, r := range t.runs[j:] {
-		if !t.plant.mergeNoOlder {
-			c.older = append(c.older, &run{blocks: slices.Clone(r.blocks), sums: r.sums})
-		}
-	}
+	c.freed = make([]int, len(c.runs))
+	c.older = t.olderCopies(j)
 	t.merges = append(t.merges, c)
 	return c
+}
+
+// olderCopies is what a merge of runs before j reads of the runs from j on.
+func (t *Tree) olderCopies(j int) []*run {
+	if t.plant.mergeNoOlder {
+		return nil
+	}
+	var older []*run
+	for _, r := range t.runs[j:] {
+		older = append(older, &run{blocks: slices.Clone(r.blocks), sums: r.sums})
+	}
+	return older
+}
+
+// pairMerges rebuilds the merges a restored manifest left between steps: each run of bounded
+// inputs sharing one bound, followed by the output, which has the oldest input's sequence number.
+func (t *Tree) pairMerges() {
+	if len(t.resume) == 0 {
+		return
+	}
+	for i := 0; i < len(t.runs); {
+		r := t.runs[i]
+		if r.lo == nil || r.held {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(t.runs) && t.runs[j].lo != nil && !t.runs[j].held && bytes.Equal(t.runs[j].lo, r.lo) {
+			j++
+		}
+		if j == len(t.runs) || t.runs[j].lo != nil || t.runs[j].seq != t.runs[j-1].seq {
+			i = j
+			continue
+		}
+		c := t.compaction(i, j, ruleNone)
+		for k, in := range c.inputs {
+			c.runs[k] = t.resume[slices.IndexFunc(t.resume, func(x *run) bool { return x.root() == in.root() })]
+		}
+		out := t.runs[j]
+		out.held = true
+		nb, nf := len(out.blocks), len(out.frags)
+		np := nb + nf + out.filterPieces(0, c.limit)
+		c.output, c.bound = out, r.lo
+		c.entryRefs, c.fragRefs, c.partRefs = out.pieces[:nb:nb], out.pieces[nb:nb+nf:nb+nf], out.pieces[nb+nf:np:np]
+		c.tail = slices.Clone(out.pieces[np:])
+		c.writtenParts = len(out.parts)
+		c.installed, c.written, c.named = 1, 1, 1
+		c.older = t.olderCopies(j + 1)
+		t.written = slices.DeleteFunc(t.written, func(w writtenRun) bool { return w.root() == out.root() })
+		i = j + 1
+	}
+	t.resume = nil
 }
 
 // runLimit is the most runs the tree keeps before merging the newest whatever their sizes.
@@ -238,105 +353,180 @@ func (t *Tree) score() (free, limit int) {
 	return free, t.runLimit()
 }
 
-// maxRunBytes is the most a run may hold for its root to list every piece. A block is closed only
-// when the next entry would not fit, so it is short of full by less than that entry, and two
-// adjacent blocks together hold more than a piece since the second starts with that entry; the
-// filter fills its pieces. Entries, fragments and the filter may each end in a short piece, so
-// two pieces are spare beyond the root, and a merge's filter may round up to one line more than
-// its inputs' together.
+// maxRunBytes is the most a merge's inputs may hold for its output's root to list every piece. A
+// block is closed only when the next entry would not fit, so it is short of full by less than that
+// entry, and two adjacent blocks together hold more than a piece since the second starts with that
+// entry; a partition fills its pieces. Entries, fragments and the last partition may each end in a
+// short piece, so two pieces are spare beyond the root, and the output's filter may round up to one
+// line more than its inputs' together, plus a partition's framing. Each step before the last adds
+// a fenced partition, which may end in a short piece, round up by two lines and carry a fence of
+// up to a piece, and may end its fragments in a short piece; a step outputs at least
+// StepBytes less a piece, and at least a block.
 func (t *Tree) maxRunBytes() int {
 	room := t.cfg.MaxPiece - pieceOverhead
 	refs := (room - emptyBlockSize) / disklog.BlobRefSize
 	grow := min(room-emptyBlockSize, maxEntryBytes) + 4
-	return (refs-2)*max(room/2, room-grow) - cacheLineSize
+	full := max(room/2, room-grow)
+	budget := (refs-2)*full - cacheLineSize - partHdr - partTrailer
+	if t.cfg.StepBytes == 0 {
+		return budget
+	}
+	perStep := 2*room + 2*cacheLineSize + partHdr + partTrailer + filterKeyHdr + filterTrailer + min(MaxKey, room)
+	stepMin := max(t.cfg.StepBytes-room, full)
+	return max(budget*stepMin/(stepMin+perStep), 1)
 }
 
 var maxEntryBytes = uvarintLen(0) + uvarintLen(MaxKey) + uvarintLen(MaxValue+1) + MaxKey + MaxValue + 1
 
-// Run merges the inputs: the newest entry of each key wins unless a newer input's fragment covers it, the fragments unite, and a removal or fragment is dropped unless an older run holds a key it hides.
+// Run merges the next step from the inputs: the newest entry of each key wins unless a newer input's fragment covers it, the fragments unite, and a removal or fragment is dropped unless an older run holds a key it hides.
 func (c *Compaction) Run() {
-	c.out, c.err = nil, nil
-	for _, r := range c.runs {
-		if !c.plant.noSums && !r.intact() {
-			c.err = ErrCheck
-			return
-		}
+	c.out, c.done, c.err = nil, false, nil
+	if !c.running {
+		c.err = ErrStale
+		return
 	}
-	it := iterState{srcs: make([]source, len(c.runs)), cur: -1, keepDel: true, linear: c.linear}
-	for i, r := range c.runs {
-		it.srcs[i].setRun(r)
-		it.ranges = it.ranges || it.srcs[i].frags
+	if !c.started && !c.begin() {
+		return
 	}
-	if c.plant.keepCovered {
-		it.ranges = false
-	}
-	it.seek(nil)
-	older := runIters(c.older)
+	it := c.it
 	out := &run{seq: c.seq}
 	buf := make([]byte, 0, c.limit)
 	var w blockWriter
-	var f filterWriter
-	keys := 0
-	for _, r := range c.runs {
-		keys += filterKeyCount(r.filter)
-	}
-	f.reset(c.filter, c.prefix, keys)
-	for it.valid() {
+	size := 0
+	for it.valid() && (c.step == 0 || len(out.blocks) == 0 || size+c.limit <= c.step) {
 		w.reset(buf)
-		fillBlock(&w, &f, &it, c.limit, older)
+		fillBlock(&w, nil, it, c.limit, c.olderIt)
 		if w.n > 0 {
-			out.addBlock(bytes.Clone(w.finish()), w.n)
+			b := bytes.Clone(w.finish())
+			out.addBlock(b, w.n)
+			size += len(b)
 		}
 	}
-	if c.plant.repeatBlock && len(out.blocks) > 0 {
+	c.done = !it.valid()
+	var upTo []byte
+	if !c.done {
+		c.stepBound = bytes.Clone(it.prev)
+		upTo = c.stepBound
+	}
+	if c.plant.repeatBlock && c.done && len(out.blocks) > 0 {
 		out.addBlock(out.blocks[0], 0)
 	}
-	olderFrag := runIters(c.older)
 	if !c.plant.dropFrags {
-		it.fragsFromStart()
-		for it.pendingFrag(olderFrag) {
+		for c.fit.pendingFrag(c.olderFrag) && (upTo == nil || bytes.Compare(c.fit.ulo, upTo) <= 0) {
 			w.reset(buf)
-			fillFragBlock(&w, &it, c.limit, olderFrag)
+			fillFragBlock(&w, c.fit, c.limit, c.olderFrag, upTo)
 			if w.n == 0 {
 				panic("lsm: a fragment larger than a piece")
 			}
 			out.addFrag(bytes.Clone(w.finish()), w.n)
 		}
 	}
-	out.setFilter(f.finish())
+	c.outEntries += out.entries
+	c.outFrags += out.nfrags
+	out.addPart(c.partition(out, upTo))
 	out.setBounds()
 	if !c.plant.noSums {
 		out.checksum()
 	}
+	if c.plant.clobberBound {
+		prev := c.bound
+		for i, b := range out.blocks {
+			_, prev, _ = validateBlock(b, prev, i > 0 || c.bound != nil)
+		}
+	}
 	if c.check {
 		c.checkOrder(out)
 	}
-	entries, frags := 0, 0
-	for _, r := range c.runs {
-		entries += r.entries
-		frags += r.nfrags
+	bad := anyBad(c.olderIt) || anyBad(c.olderFrag)
+	for i := range it.srcs {
+		bad = bad || it.srcs[i].ri.bad
 	}
-	if anyBad(older) || anyBad(olderFrag) || out.entries+it.dropped != entries || out.nfrags+it.fragsDropped != frags {
+	if bad || c.done && (c.outEntries+it.dropped != c.baseEntries || c.outFrags+c.fit.fragsDropped+c.fragsSkipped != c.baseFrags) {
 		c.err = ErrCheck
 		return
 	}
 	c.out = out
 }
 
-// checkOrder panics unless out's entries and fragments are each in strictly increasing order and
-// within the bounds of the inputs.
+// partition is the filter partition of a step's keys, fenced by its bound unless it is the last,
+// sized for exactly its keys, and so for the prefixes they and the fence have.
+func (c *Compaction) partition(out *run, fence []byte) filterPart {
+	keys := out.entries + 1
+	if c.filter == KeysAndPrefixes {
+		keys += out.entries
+	}
+	var f filterWriter
+	f.reset(c.filter, c.prefix, keys)
+	var bi blockIter
+	for _, b := range out.blocks {
+		bi.init(b)
+		for ok := bi.first(); ok; ok = bi.advance() {
+			f.add(bi.key)
+		}
+	}
+	if fence != nil && !c.plant.noFencePrefix {
+		f.addPrefix(fence)
+	}
+	return newPart(f.finish(), fence, fence != nil)
+}
+
+// begin sets up the merge from its bound: its inputs from the start, or, restored between steps,
+// from past the bound, with the fragments the output holds skipped.
+func (c *Compaction) begin() bool {
+	c.started = true
+	for _, r := range c.runs {
+		if !c.plant.noSums && !r.fragsIntact() {
+			c.err = ErrCheck
+			return false
+		}
+	}
+	c.it = &iterState{srcs: make([]source, len(c.runs)), cur: -1, keepDel: true, linear: c.linear}
+	c.fit = &iterState{srcs: make([]source, len(c.runs)), cur: -1, linear: c.linear}
+	for i, r := range c.runs {
+		c.it.srcs[i].setRun(r)
+		if !c.plant.noSums {
+			c.it.srcs[i].ri.sums = r.sums[:len(r.blocks)]
+		}
+		c.it.ranges = c.it.ranges || c.it.srcs[i].frags
+		c.fit.srcs[i].setRun(r)
+		c.baseEntries += entriesAbove(r, c.bound)
+		c.baseFrags += r.nfrags
+	}
+	if c.plant.keepCovered {
+		c.it.ranges = false
+	}
+	c.it.seek(c.bound)
+	if c.bound != nil && c.it.valid() && bytes.Equal(c.it.key(), c.bound) {
+		c.it.skip()
+		c.it.settle()
+	}
+	c.olderIt, c.olderFrag = runIters(c.older), runIters(c.older)
+	c.fit.fragsFromStart()
+	for c.bound != nil && c.fit.nextFrag() {
+		if bytes.Compare(c.fit.ulo, c.bound) > 0 {
+			if c.fit.uok = heldIn(c.olderFrag, c.fit.ulo, c.fit.uhi); !c.fit.uok {
+				c.fit.fragsDropped += c.fit.united
+			}
+			break
+		}
+		c.fragsSkipped += c.fit.united
+	}
+	return true
+}
+
+// checkOrder panics unless a step's entries and fragments are each in strictly increasing order,
+// past the step before, and within the bounds of the inputs.
 func (c *Compaction) checkOrder(out *run) {
-	var prev []byte
+	prev := bytes.Clone(c.bound)
 	for i, b := range out.blocks {
 		var ok bool
-		if _, prev, ok = validateBlock(b, prev, i > 0); !ok {
+		if _, prev, ok = validateBlock(b, prev, i > 0 || c.bound != nil); !ok {
 			panic("lsm: a merge's output keys are out of order")
 		}
 	}
-	prev = nil
 	for i, b := range out.frags {
 		var ok bool
-		if _, prev, ok = validateFragBlock(b, prev, i > 0); !ok {
+		if _, c.lastFrag, ok = validateFragBlock(b, c.lastFrag, i > 0 || c.lastFrag != nil); !ok {
 			panic("lsm: a merge's output fragments are out of order")
 		}
 	}
@@ -357,39 +547,92 @@ func (c *Compaction) checkOrder(out *run) {
 	}
 }
 
-// Install swaps the compaction's result in for its inputs, which views opened before keep reading.
+// Install installs the step Run merged: the inputs are bounded below its last key and its pieces
+// follow the output's, or, at the last step, the output takes the inputs' place. Views opened
+// before keep reading what they read.
 func (t *Tree) Install(c *Compaction) error {
-	k := slices.Index(t.merges, c)
-	if c == nil || k < 0 {
+	if c == nil || !slices.Contains(t.merges, c) || !c.running {
 		return ErrStale
 	}
-	t.merges = slices.Delete(t.merges, k, k+1)
-	for _, r := range c.inputs {
-		r.held = false
-	}
-	if c.err != nil {
-		return c.err
-	}
-	if c.out == nil {
-		return ErrStale
+	c.running = false
+	out, err := c.out, c.err
+	c.out, c.err = nil, nil
+	if err == nil && out == nil {
+		err = ErrStale
 	}
 	i := slices.Index(t.runs, c.inputs[0])
-	if i < 0 || i+len(c.inputs) > len(t.runs) || !slices.Equal(t.runs[i:i+len(c.inputs)], c.inputs) {
-		return ErrStale
+	n := len(c.inputs)
+	if err == nil && (i < 0 || i+n > len(t.runs) || !slices.Equal(t.runs[i:i+n], c.inputs) || c.output != nil && (i+n == len(t.runs) || t.runs[i+n] != c.output)) {
+		err = ErrStale
 	}
-	runs := make([]*run, 0, len(t.runs)-len(c.inputs)+1)
-	runs = append(runs, t.runs[:i]...)
-	keep := len(c.out.blocks)+len(c.out.frags) > 0
-	if keep && !t.plant.installOldest {
-		runs = append(runs, c.out)
+	if err != nil {
+		t.failMerge(c)
+		return err
 	}
-	t.runs = append(runs, t.runs[i+len(c.inputs):]...)
-	if keep && t.plant.installOldest {
-		t.runs = append(t.runs, c.out)
+	if c.output != nil {
+		n++
+	}
+	if c.done {
+		var final *run
+		if c.output != nil || len(out.blocks)+len(out.frags) > 0 {
+			final = joinRuns(c.output, out)
+		}
+		runs := slices.Delete(slices.Clone(t.runs), i, i+n)
+		if final != nil && !t.plant.installOldest {
+			runs = slices.Insert(runs, i, final)
+		} else if final != nil {
+			runs = append(runs, final)
+		}
+		t.runs, c.output, c.final = runs, final, true
+		c.installed++
+		if final == nil {
+			c.written = c.installed
+		}
+		t.gen++
+		t.checkRuns()
+		return nil
+	}
+	runs := slices.Clone(t.runs)
+	for k, in := range c.inputs {
+		trimmed, err := in.above(c.stepBound)
+		if err != nil {
+			t.failMerge(c)
+			return err
+		}
+		runs[i+k] = trimmed
+	}
+	copy(c.inputs, runs[i:i+n])
+	output := joinRuns(c.output, out)
+	if c.output == nil {
+		runs = slices.Insert(runs, i+n, output)
+	} else {
+		runs[i+n-1] = output
+	}
+	t.runs, c.output, c.bound = runs, output, c.stepBound
+	c.installed++
+	for k, r := range c.runs {
+		from := r.blocks.blockFrom(c.freed[k], c.bound, false)
+		for ; c.freed[k] < from; c.freed[k]++ {
+			r.blocks[c.freed[k]] = nil
+		}
 	}
 	t.gen++
 	t.checkRuns()
 	return nil
+}
+
+// failMerge drops a merge that failed before installing a step, freeing its inputs; one that
+// installed steps stays, never ready again, since its index is rebuilt.
+func (t *Tree) failMerge(c *Compaction) {
+	if c.installed > 0 {
+		c.failed = true
+		return
+	}
+	for _, r := range c.inputs {
+		r.held = false
+	}
+	t.merges = slices.DeleteFunc(t.merges, func(o *Compaction) bool { return o == c })
+	c.finished = true
 }
 
 // SchedulerConfig is a disk's merge scheduler's settings.
@@ -398,7 +641,8 @@ type SchedulerConfig struct {
 	MergeWorkers int
 }
 
-// Scheduler runs the merges of one disk's trees, the tree whose runs most exceed its run limit in proportion first.
+// Scheduler runs the merges of one disk's trees, the tree whose runs most exceed its run limit in
+// proportion first. A merge keeps its worker, and so its lane, until it is finished.
 type Scheduler struct {
 	workers int
 	trees   []*Tree
@@ -417,12 +661,21 @@ func NewScheduler(cfg SchedulerConfig) (*Scheduler, error) {
 // Add makes the scheduler run t's merges.
 func (s *Scheduler) Add(t *Tree) { s.trees = append(s.trees, t) }
 
-// Running is the number of merges started and not yet installed.
-func (s *Scheduler) Running() int { return len(s.running) }
+// Running is the number of merges holding a worker.
+func (s *Scheduler) Running() int {
+	s.running = slices.DeleteFunc(s.running, (*Compaction).Finished)
+	return len(s.running)
+}
 
-// Next picks the merge to start next, or nil when every worker is busy or no tree has one due.
+// Next returns the merge step to run next, or nil: a running merge's next step once the manifest
+// naming its last is durable, else a new merge on the lowest free worker, if one is free.
 func (s *Scheduler) Next() *Compaction {
-	if len(s.running) >= s.workers {
+	for _, c := range s.running {
+		if c.ready() {
+			return c.tree.start(c)
+		}
+	}
+	if s.Running() >= s.workers {
 		return nil
 	}
 	order := slices.Clone(s.trees)
@@ -433,20 +686,21 @@ func (s *Scheduler) Next() *Compaction {
 	})
 	for _, t := range order {
 		if c := t.PickCompaction(); c != nil {
-			s.running = append(s.running, c)
+			if !slices.Contains(s.running, c) {
+				for c.worker = 1; slices.ContainsFunc(s.running, func(o *Compaction) bool { return o.worker == c.worker }); c.worker++ {
+				}
+				s.running = append(s.running, c)
+			}
 			return c
 		}
 	}
 	return nil
 }
 
-// Install installs c in its tree and frees its worker.
+// Install installs c's step in its tree; the merge keeps its worker until it is finished.
 func (s *Scheduler) Install(c *Compaction) error {
 	if c == nil {
 		return ErrStale
-	}
-	if i := slices.Index(s.running, c); i >= 0 {
-		s.running = slices.Delete(s.running, i, i+1)
 	}
 	return c.tree.Install(c)
 }

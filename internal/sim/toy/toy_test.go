@@ -3,16 +3,14 @@ package toy_test
 import (
 	"bytes"
 	"errors"
-	"flag"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 	"github.com/nvcnvn/rock-solid/internal/sim/toy"
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
-
-var seeds = flag.Int("toy.seeds", 100, "seeds the fixed protocol runs")
 
 const (
 	ops   = 40
@@ -35,8 +33,9 @@ func run(seed uint64, set sim.Settings, bug toy.Bug) (*toy.Cluster, error) {
 }
 
 func TestTheFixedProtocolKeepsEveryAcknowledgedWrite(t *testing.T) {
-	acked, crashes := 0, uint64(0)
-	for seed := range uint64(*seeds) {
+	acked, crashes, ran := 0, uint64(0), 0
+	seeds.Run(t, 0, commitSeeds, func(seed uint64) {
+		ran++
 		c, err := run(seed, chaos(), toy.NoBug)
 		if err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
@@ -44,9 +43,9 @@ func TestTheFixedProtocolKeepsEveryAcknowledgedWrite(t *testing.T) {
 		acked += c.Acked()
 		b := c.Boots()
 		crashes += b[0] + b[1] + b[2] - toy.Nodes
-	}
-	if acked < *seeds*ops*3/4 || crashes < uint64(*seeds) {
-		t.Fatalf("%d writes acknowledged and %d crashes over %d seeds", acked, crashes, *seeds)
+	})
+	if ran >= commitSeeds && (acked < ran*ops*3/4 || crashes < uint64(ran)) {
+		t.Fatalf("%d writes acknowledged and %d crashes over %d seeds", acked, crashes, ran)
 	}
 }
 
@@ -85,16 +84,16 @@ func TestEachPlantedBugIsFoundAndItsSeedReplays(t *testing.T) {
 func TestAStaleReplyNeedsAPrimaryCrash(t *testing.T) {
 	set := chaos()
 	set.CrashNum, set.CrashDen = 0, 0
-	for seed := range uint64(commitSeeds) {
+	seeds.Run(t, 0, commitSeeds, func(seed uint64) {
 		if _, err := run(seed, set, toy.IgnoreEpoch); err != nil {
 			t.Fatalf("seed %d with no crashes: %v", seed, err)
 		}
-	}
+	})
 }
 
 func TestTheHistoryHoldsEveryWriteAndOnlyAcknowledgedOnesComplete(t *testing.T) {
 	incomplete := 0
-	for seed := range uint64(20) {
+	seeds.Run(t, 0, 20, func(seed uint64) {
 		c, err := run(seed, chaos(), toy.NoBug)
 		if err != nil {
 			t.Fatal(err)
@@ -116,6 +115,9 @@ func TestTheHistoryHoldsEveryWriteAndOnlyAcknowledgedOnesComplete(t *testing.T) 
 		if done != c.Acked() {
 			t.Fatalf("seed %d: %d complete, %d acknowledged", seed, done, c.Acked())
 		}
+	})
+	if !seeds.Default() {
+		return
 	}
 	if incomplete == 0 {
 		t.Fatal("no write was left incomplete by a primary crash over 20 seeds")

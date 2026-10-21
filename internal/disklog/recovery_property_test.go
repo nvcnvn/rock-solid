@@ -12,6 +12,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 const userBlobOwner = 7
@@ -51,7 +52,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats, plant crashPlant) (*ha
 	case 3:
 		st.depth3++
 	}
-	h := schedHarness(t, seed, disk*core.BlockSize, 64<<20, cfg)
+	h := schedHarness(t, seed, disk*core.BlockSize, 16<<20, cfg)
 	h.run()
 	h.trace = nil
 	h.reformat(r.Uint64() | 1)
@@ -125,7 +126,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats, plant crashPlant) (*ha
 				return
 			}
 			copy(h.pool.Bytes(buf), pattern(uint64(size), size))
-			tk, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), indexOwner, buf, uint64(size), &h.out)
+			tk, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), indexOwner, buf, uint64(size), false, &h.out)
 			if err != nil {
 				t.Fatalf("seed %d: merge piece: %v", seed, err)
 			}
@@ -336,7 +337,7 @@ func checkpointRecord(ev disklog.Event) bool {
 
 func TestRandomCrashesKeepAcknowledgedRecords(t *testing.T) {
 	var st crashStats
-	for seed := uint64(1); seed <= 50; seed++ {
+	seeds.Run(t, 1, 50, func(seed uint64) {
 		h, err := crashSeed(t, seed, &st, plantNone)
 		if err != nil {
 			t.Fatal(err)
@@ -351,6 +352,9 @@ func TestRandomCrashesKeepAcknowledgedRecords(t *testing.T) {
 		if err := sim.CompareTraces(h.sched.Trace(), again.sched.Trace()); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
+	})
+	if !seeds.Default() {
+		return
 	}
 	if st.keptInFlight <= 5 || st.droppedInFlight <= 5 || st.fromManifest <= 20 || st.noSpace == 0 || st.depth2 == 0 || st.depth3 == 0 || st.gapsInsideTheWindow == 0 || st.erased == 0 || st.restarts == 0 || st.crashesInRecovery == 0 || st.mergeRecords == 0 {
 		t.Fatalf("seeds missed a case: %+v", st)

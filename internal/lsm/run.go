@@ -64,15 +64,17 @@ func RootRefs(root []byte, refs []disklog.BlobRef) ([]disklog.BlobRef, error) {
 }
 
 // run is an immutable sorted run held in memory as the blocks of its pieces, empty blocks left
-// out: entry blocks, then fragment blocks, and the filter of what its entries' keys hold. Each
-// block's first key, stored whole, is its fence pointer. Its bounds span its entries and
+// out: entry blocks, then fragment blocks, and the filter partitions of what its entries' keys
+// hold. Each block's first key, stored whole, is its fence pointer. Its bounds span its entries and
 // fragments, so a run holding only fragments is searched. sums holds each block's CRC32C, entry
-// blocks then fragment blocks, then the filter's, since runs are never read back from disk.
+// blocks then fragment blocks, then each partition's, since runs are never read back from disk. A
+// merge's input past its first step holds only its keys above lo, its merge bound: its blocks
+// start at entry piece base, the first ones wholly at or below lo left out.
 type run struct {
 	seq     uint64
 	blocks  blockList
 	frags   blockList
-	filter  []byte
+	parts   []filterPart
 	sums    []uint32
 	entries int
 	nfrags  int
@@ -82,12 +84,13 @@ type run struct {
 	bytes   int
 	pieces  []disklog.BlobRef
 	held    bool
+	lo      []byte
+	base    int
 }
 
 // blockList is a run's entry or fragment blocks in key order.
 type blockList [][]byte
 
-func (r *run) durable() bool         { return len(r.pieces) > 0 }
 func (r *run) root() disklog.BlobRef { return r.pieces[len(r.pieces)-1] }
 
 func (r *run) addBlock(b []byte, n int) {
@@ -102,20 +105,51 @@ func (r *run) addFrag(b []byte, n int) {
 	r.bytes += len(b)
 }
 
-func (r *run) setFilter(f []byte) {
-	r.filter = f
-	r.bytes += len(f)
+func (r *run) addPart(p filterPart) {
+	r.parts = append(r.parts, p)
+	r.bytes += len(p.enc)
 }
 
-// filterPieces is how many pieces of at most limit bytes the filter takes.
-func (r *run) filterPieces(limit int) int { return (len(r.filter) + limit - 1) / limit }
-
-// filterPiece is the filter's piece i of at most limit bytes.
-func (r *run) filterPiece(i, limit int) []byte {
-	return r.filter[i*limit : min((i+1)*limit, len(r.filter))]
+// filterPieces is how many pieces of at most limit bytes the partitions from fromP on take, each
+// cut on its own.
+func (r *run) filterPieces(fromP, limit int) int {
+	n := 0
+	for _, p := range r.parts[fromP:] {
+		n += (len(p.enc) + limit - 1) / limit
+	}
+	return n
 }
 
-// checksum sets sums from the run's blocks.
+// filterPiece is piece i of the partitions from fromP on, the partition it belongs to, and whether
+// it is that partition's first.
+func (r *run) filterPiece(fromP, i, limit int) ([]byte, int, bool) {
+	for j := fromP; j < len(r.parts); j++ {
+		enc := r.parts[j].enc
+		if n := (len(enc) + limit - 1) / limit; i >= n {
+			i -= n
+			continue
+		}
+		return enc[i*limit : min((i+1)*limit, len(enc))], j, i == 0
+	}
+	return nil, -1, false
+}
+
+// mayContain reports whether the partition covering k, a key or a prefix hashed to h, may hold
+// it; past the last fence of a run between merge steps nothing is held.
+func (r *run) mayContain(k []byte, h uint32) bool {
+	lo, hi := 0, len(r.parts)
+	for lo < hi {
+		m := int(uint(lo+hi) >> 1)
+		if p := &r.parts[m]; p.fenced && bytes.Compare(p.fence, k) < 0 {
+			lo = m + 1
+		} else {
+			hi = m
+		}
+	}
+	return lo < len(r.parts) && mayContain(r.parts[lo].bits, h)
+}
+
+// checksum sets sums from the run's blocks and partitions.
 func (r *run) checksum() {
 	r.sums = r.sums[:0]
 	for _, b := range r.blocks {
@@ -124,7 +158,9 @@ func (r *run) checksum() {
 	for _, b := range r.frags {
 		r.sums = append(r.sums, core.CRC32C(b))
 	}
-	r.sums = append(r.sums, core.CRC32C(r.filter))
+	for _, p := range r.parts {
+		r.sums = append(r.sums, core.CRC32C(p.enc))
+	}
 }
 
 // intact reports whether every block still has the checksum it was added with.
@@ -134,26 +170,167 @@ func (r *run) intact() bool {
 			return false
 		}
 	}
+	return r.fragsIntact()
+}
+
+// fragsIntact is intact for the fragment blocks and the partitions.
+func (r *run) fragsIntact() bool {
 	for i, b := range r.frags {
 		if core.CRC32C(b) != r.sums[len(r.blocks)+i] {
 			return false
 		}
 	}
-	return core.CRC32C(r.filter) == r.sums[len(r.blocks)+len(r.frags)]
-}
-
-// pieceIntact reports whether piece i, which a flush writes, still has its checksum: a block's, or
-// at the filter's first piece the whole filter's.
-func (r *run) pieceIntact(i int) bool {
-	switch nb := len(r.blocks) + len(r.frags); {
-	case i < len(r.blocks):
-		return core.CRC32C(r.blocks[i]) == r.sums[i]
-	case i < nb:
-		return core.CRC32C(r.frags[i-len(r.blocks)]) == r.sums[i]
-	case i == nb:
-		return core.CRC32C(r.filter) == r.sums[nb]
+	for j := range r.parts {
+		if !r.partIntact(j) {
+			return false
+		}
 	}
 	return true
+}
+
+func (r *run) partIntact(j int) bool {
+	return core.CRC32C(r.parts[j].enc) == r.sums[len(r.blocks)+len(r.frags)+j]
+}
+
+// pieceIntact reports whether piece k of a flush writing r from entry block fromB, fragment block
+// fromF and partition fromP on still has its checksum: a block's, or at a partition's first piece
+// the partition's.
+func (r *run) pieceIntact(k, fromB, fromF, fromP, limit int) bool {
+	nb, nf := len(r.blocks)-fromB, len(r.frags)-fromF
+	switch {
+	case k < nb:
+		return core.CRC32C(r.blocks[fromB+k]) == r.sums[fromB+k]
+	case k < nb+nf:
+		i := fromF + k - nb
+		return core.CRC32C(r.frags[i]) == r.sums[len(r.blocks)+i]
+	}
+	if _, j, first := r.filterPiece(fromP, k-nb-nf, limit); first {
+		return r.partIntact(j)
+	}
+	return true
+}
+
+// above is r holding only its keys above b: the entry blocks wholly at or below b left out, the
+// block b falls in cut, and the fragments clipped to start past b. It shares r's other blocks and
+// its filter, and fails with ErrCheck when a block it cuts no longer has its checksum.
+func (r *run) above(b []byte) (*run, error) {
+	n := &run{seq: r.seq, parts: r.parts, pieces: r.pieces, held: r.held, lo: bytes.Clone(b), base: r.base, entries: r.entries, nfrags: r.nfrags}
+	var w blockWriter
+	var it blockIter
+	from := r.blocks.blockFor(b, false)
+	kept := max(from, 0)
+	if from >= 0 {
+		if core.CRC32C(r.blocks[from]) != r.sums[from] {
+			return nil, ErrCheck
+		}
+		w.reset(make([]byte, 0, len(r.blocks[from])+len(b)))
+		it.init(r.blocks[from])
+		for ok := it.first(); ok; ok = it.advance() {
+			if bytes.Compare(it.key, b) > 0 {
+				w.add(it.key, it.val)
+			}
+		}
+		if w.n > 0 {
+			n.blocks = append(n.blocks, w.finish())
+			n.sums = append(n.sums, core.CRC32C(n.blocks[0]))
+		}
+		kept = from + 1
+	}
+	n.base += kept - len(n.blocks)
+	n.blocks = append(n.blocks, r.blocks[kept:]...)
+	n.sums = append(n.sums, r.sums[kept:len(r.blocks)]...)
+	succ := append(bytes.Clone(b), 0)
+	f := max(r.frags.blockFor(b, false), 0)
+	for i := f; i < len(r.frags); i++ {
+		if i > f {
+			n.frags = append(n.frags, r.frags[i:]...)
+			n.sums = append(n.sums, r.sums[len(r.blocks)+i:len(r.blocks)+len(r.frags)]...)
+			break
+		}
+		if core.CRC32C(r.frags[i]) != r.sums[len(r.blocks)+i] {
+			return nil, ErrCheck
+		}
+		w.reset(make([]byte, 0, len(r.frags[i])+len(succ)))
+		it.init(r.frags[i])
+		for ok := it.first(); ok; ok = it.advance() {
+			switch {
+			case bytes.Compare(it.val, succ) <= 0:
+			case bytes.Compare(it.key, b) <= 0:
+				w.add(succ, it.val)
+			default:
+				w.add(it.key, it.val)
+			}
+		}
+		if w.n > 0 {
+			n.frags = append(n.frags, w.finish())
+			n.sums = append(n.sums, core.CRC32C(n.frags[len(n.frags)-1]))
+		}
+	}
+	n.sums = append(n.sums, r.sums[len(r.blocks)+len(r.frags):]...)
+	for _, bl := range n.blocks {
+		n.bytes += len(bl)
+	}
+	for _, bl := range n.frags {
+		n.bytes += len(bl)
+	}
+	for _, p := range n.parts {
+		n.bytes += len(p.enc)
+	}
+	n.setBounds()
+	return n, nil
+}
+
+// entriesAbove counts r's entries above b, stepping through those at or below it from the start.
+func entriesAbove(r *run, b []byte) int {
+	n := r.entries
+	if b == nil {
+		return n
+	}
+	var it blockIter
+	for _, bl := range r.blocks {
+		it.init(bl)
+		for ok := it.first(); ok; ok = it.advance() {
+			if bytes.Compare(it.key, b) > 0 {
+				return n
+			}
+			n--
+		}
+	}
+	return n
+}
+
+// joinRuns is prev, which may be nil, followed by step's blocks, fragments and partitions, each
+// keeping the checksum it has.
+func joinRuns(prev, step *run) *run {
+	if prev == nil {
+		prev = &run{seq: step.seq}
+	}
+	if step.sums == nil {
+		step.checksum()
+	}
+	n := &run{seq: prev.seq, held: true}
+	for _, src := range []*run{prev, step} {
+		for i, b := range src.blocks {
+			n.addBlock(b, 0)
+			n.sums = append(n.sums, src.sums[i])
+		}
+		n.entries += src.entries
+	}
+	for _, src := range []*run{prev, step} {
+		for i, b := range src.frags {
+			n.addFrag(b, 0)
+			n.sums = append(n.sums, src.sums[len(src.blocks)+i])
+		}
+		n.nfrags += src.nfrags
+	}
+	for _, src := range []*run{prev, step} {
+		for j, p := range src.parts {
+			n.addPart(p)
+			n.sums = append(n.sums, src.sums[len(src.blocks)+len(src.frags)+j])
+		}
+	}
+	n.setBounds()
+	return n
 }
 
 // setBounds sets the run's first key, its smallest key or fragment start, and its last, its
@@ -261,11 +438,10 @@ func (ri *runIter) valid() bool { return ri.b >= 0 && ri.b < len(ri.bl) && ri.it
 
 func (ri *runIter) seekGE(k []byte) bool {
 	ri.searches++
-	ri.b = max(ri.bl.blockFor(k, false), 0)
-	if ri.b >= len(ri.bl) {
+	b := max(ri.bl.blockFor(k, false), 0)
+	if b >= len(ri.bl) || !ri.enter(b) {
 		return false
 	}
-	ri.it.init(ri.bl[ri.b])
 	if ri.it.seekGE(k) {
 		return true
 	}
@@ -359,15 +535,21 @@ func fillBlock(w *blockWriter, f *filterWriter, src *iterState, limit int, older
 			return false
 		}
 		w.add(k, v)
-		f.add(k)
+		if f != nil {
+			f.add(k)
+		}
 	}
 	return true
 }
 
-// fillFragBlock adds the fragments of src's union that a run in older holds a key in to w while
-// the finished block stays within limit bytes, and reports whether none is left.
-func fillFragBlock(w *blockWriter, src *iterState, limit int, older []runIter) bool {
+// fillFragBlock adds the fragments of src's union that a run in older holds a key in, up to those
+// starting at upTo unless it is nil, to w while the finished block stays within limit bytes, and
+// reports whether none is left.
+func fillFragBlock(w *blockWriter, src *iterState, limit int, older []runIter, upTo []byte) bool {
 	for src.pendingFrag(older) {
+		if upTo != nil && bytes.Compare(src.ulo, upTo) > 0 {
+			return false
+		}
 		if w.sizeWith(src.ulo, len(src.uhi)) > limit {
 			return false
 		}

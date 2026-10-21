@@ -390,7 +390,12 @@ types](#event-and-action-types), and this section is their only home.
   reported in order; every finished checkpoint's manifest reads back with its base LSN and runs;
   without an error there is one flush per write; the only refusal is TooLarge; Close then finds
   every buffer back. Coverage: NoSpace, TooLarge, a full pool, InDoubt, deferred flushes, depth
-  above 1, manifest pieces, finished and failed checkpoints all occur.
+  above 1, manifest pieces, finished and failed checkpoints all occur. After a failed checkpoint
+  the next begins only once a record has become durable since, as the chunk store's does, and a
+  seed that has not ended after 100,000 steps fails.
+- Regression (seed 1957 of the property above, found by the seed runner): on a 16-block disk with
+  no free segment every checkpoint fails with NoSpace as it begins; beginning the next at once
+  never ended, and the items it kept grew one process to 12 GB.
 - Checkpoint end to end (max replay 8 blocks, counted in record blocks, segment headers left out):
   after a 3-block write (a 4-block record) a checkpoint is not due; after a second (8 blocks) it is.
   A third write is in flight when the checkpoint begins for owners 5 and 6; a second begin is Busy,
@@ -716,7 +721,7 @@ no buffer allocated.
 ## Compaction
 
 The "LSM tree" section holds the merge, removal, staleness, install-during-flush, failed
-checkpoint and restore scenarios; Merge steps rewrites the first two for steps.
+checkpoint and restore scenarios; Merge steps holds those of merges that take several steps.
 
 Picker cases (in `internal/lsm/testdata/compaction_picker`; the universal cases of
 RocksDB's `db/compaction/compaction_picker_test.cc` at v11.8.1 that exercise these three rules,
@@ -1017,8 +1022,8 @@ op, diffs histories and reduces a failing ops file; its log stands in for the di
 tree, keeping every live piece, the newest manifest's runs and its replay point. Each index's test generates its ops, runs
 them under every option set and a model, and turns a failure into a regression case.
 
-- [property] `internal/lsm` `TestMetamorphic`: seeds 0-19 per run (`-meta.seeds`, `-meta.first`;
-  `-meta.seed n` replays one), 3,000 ops in a text form (`put aa v26x`, `del aa`, `delrange a ab`,
+- [property] `internal/lsm` `TestMetamorphic`: seeds 0-19 in `go test`, more in the
+  [seed runner](#seed-runner-in-ci), 3,000 ops in a text form (`put aa v26x`, `del aa`, `delrange a ab`,
   `flush`, `flushfail 3`, `floor aca`), drawn by weight: puts 35, removals 10, range removals 3,
   gets 15, floors 8, scans 5, views 11 (open 2, get 5, scan 2, close 2), flushes 5, failed flushes 1,
   compactions 4, restarts 1; keys of 1-6 letters a-f, a put's key new one time in four, a range
@@ -1047,7 +1052,7 @@ them under every option set and a model, and turns a failure into a regression c
   and G 40, E fails flushes and restarts more than A, D installs merges while a memtable is frozen,
   Two merges runs two at once, Fixed limit compacts, and Filters off and Filters maybe search more
   layers than C ([Filter option sets](#filter-option-sets)).
-- [property] The chunk index's `TestMetamorphic` (`internal/chunkstore`): seeds 0-19 per run, 1,000
+- [property] The chunk index's `TestMetamorphic` (`internal/chunkstore`): seeds 0-19 in `go test`, 1,000
   ops drawn by weight: writes 30, punches 6, whole-chunk punches 1, cuts 2, releases of frozen
   versions 2, cleaner moves 8, reads of blocks live 12 and at a snapshot epoch 10, chunk entries 3,
   `FrozenAt` 3, live counts per record 4, `Check` 2, and the structural ops as above. Writes and
@@ -1117,17 +1122,22 @@ Lookups:
 
 Filter build and layout:
 
-- A flush sizes the filter from the frozen memtable's entry count (twice it for whole keys with
-  prefixes), a merge from the sum of its inputs' filter key counts, and either fills it as the run
-  streams out. For 1,000,000 keys at 10 bits per key, Pebble's writer rounds 10,000,000 bits up to
+- A flush sizes its filter partition from the frozen memtable's entry count (twice it for whole keys
+  with prefixes) and fills it as the run streams out; a merge step sizes its partition from the keys
+  it wrote, plus one for its fence's prefix, once its blocks are built. For 1,000,000 keys at 10 bits per key, Pebble's writer rounds 10,000,000 bits up to
   19,532 lines of 64 bytes, then to the odd 19,533: 1,250,112 bytes plus a 5-byte trailer. The
   flush's peak is the frozen tree, one piece, the run and the filter, and its allocations do not grow
   with the entry count.
 - A prefix filter holds each distinct prefix once, so a chunk's extents add one key; a filter of
   whole keys and prefixes holds each key and each prefix that is not a whole key.
-- It follows the run's entries and range removals in pieces of its own, marked in the trailer, its
-  bytes headed by what it holds (whole keys, prefixes or both) and its key count; the run golden
-  bytes cover an entry piece, a fragment piece and the filter piece as root. A run with no filter,
+- It follows the run's entries and range removals in pieces of its own, marked in the trailer, as
+  partitions: each the filter's length, the filter, headed by what it holds (whole keys, prefixes
+  or both) and its key count, then a fence flag, length and key. A flush or a merge in one step
+  writes one unfenced partition; a merge in steps one per step, each fenced by its step's bound but
+  the last. The run golden bytes cover an entry piece, a fragment piece and the filter piece, one
+  unfenced partition, as root, and a fenced partition's bytes are golden too. Decoding partitions
+  refuses an unfenced partition before the last, fences out of order, a bad flag and any truncation
+  but at a partition's end (fuzzed, and with the run loaders). A run with no filter,
   a truncated one, or entries or fragments after it is Malformed on load, and so is a run whose
   filter holds other keys than the tree's `Config.Filter` (fuzzed with the run loader). A restore
   loads each run's filter from its pieces without hashing a key, and lookups search as before the
@@ -1445,58 +1455,87 @@ Who may use the reserve:
 
 ## Merge steps
 
-- Four runs merged in steps of two pieces: after the first step, a get at or below the bound reads
-  the output and above it the inputs; a range removal across the bound is clipped to it; a view
-  opened before the step still reads the four runs; the manifest edit names the bounded inputs and
-  the partial output, and the input pieces wholly at or below the bound count dead once it is
-  current; a crash after that manifest recovers both, resumes from the bound, and every key reads
-  as before the merge.
+The "LSM tree" section's compaction scenarios hold for a merge that fits one step; these are the
+merges that take several.
+
+- Four runs merged in steps of two pieces, the first step installed while a flush writes: after it,
+  a get at or below the bound reads the output and above it the inputs; a range removal across the
+  bound is clipped to start past it; a view opened before the step still reads the four runs; the
+  merge's copies of the input blocks wholly at or below the bound are gone. That flush's manifest
+  names the inputs whole; the next, a manifest alone, names the bounded inputs and the partial
+  output and reports dead the input pieces wholly at or below the bound. A crash after it recovers
+  both and resumes from the bound; each later checkpoint writes one step, the one after the last
+  names the merged run alone, and every key reads as before the merge throughout.
 - A step merges up to `compaction_step_bytes` (64 MiB) of output; the owner appends the step's
-  pieces to the output run and sets each input's bound to the last key the merge has written; the
-  next checkpoint writes the pieces, the output's root and a manifest edit holding the bounds, as a
-  manifest alone when no checkpoint is due.
+  blocks to the output run and sets each input's bound to the last key the step consumed; the next
+  checkpoint writes the step's pieces to the merge worker's lane through `MergePiece`, a new root
+  for the output listing all its pieces, and a manifest holding the bounds with each input's dead
+  pieces, as a manifest alone when no checkpoint is due. The manifest waits for those pieces and
+  names the root; a snapshot carries the bounds, an edit replaces them, and a bound on a run the
+  index does not hold is Malformed.
 - Bounded runs: an input holds only its keys above its bound, so output and inputs never share a
-  key. With inputs A (newer) and B over keys a..z and a step ending at f, a get of c reads the
-  output, a get of q reads A then B, a get of f reads the output, a scan from a returns each key
-  once, and a floor of g returns f from the output when neither input holds g.
+  key. With inputs A (newer) and B over keys a..z, B lacking g, and a step ending at f, a get of c
+  or f reads the output alone, a get of q reads A, a get of r reads A then B, a scan from a returns
+  each key once, and a floor of g returns f from the output.
 - A lookup of a key at or below an input's bound never searches that input, even when its filter
   says maybe.
-- An input piece wholly at or below the bound is dead in the usage table once the manifest naming
-  that bound is current; the piece the bound falls in stays whole and live. Its blocks below the
-  bound leave memory unless a view holds them, so a merge's memory peak is one step.
-- Output fills its merge worker's lane of the metadata stream: with a merge running and checkpoint
-  flushes going on, no output piece shares a segment with a flush piece or a manifest. When the
-  merge ends, the worker's next merge continues the same open segment, whatever index it merges.
+- An input piece wholly at or below the bound is reported dead once the manifest naming that bound
+  is durable, and a restore never reads it; the piece the bound falls in stays whole and live. Its
+  blocks below the bound leave memory unless a view holds them, so a merge's memory peak is one
+  step. The usage table's live blocks for dead run pieces come with the Cleaner.
+- Output fills its merge worker's lane of the metadata stream: with two indexes merging in steps on
+  one worker and checkpoint flushes going on, no output piece shares a segment with a flush piece
+  or a manifest. When a merge ends, the worker's next merge continues the same open segment,
+  whatever index it merges.
+- The scheduler hands each merge the lowest free worker and the merge keeps it until a manifest
+  names its last step: with one worker, index B's merge waits for that manifest, then takes worker
+  1; with two, it takes worker 2. A merge's next step is picked only once the manifest naming its
+  previous one is durable, before any new merge.
 - Concurrent merges: a merge of the newest runs picked while a stepped merge holds the oldest runs
-  installs whole or in its own steps, and the two merges' bounds can share one manifest edit; every
-  key reads the same throughout.
+  runs in its own steps on another worker, one manifest names both merges' bounds, a restart
+  resumes both, and every key reads the same throughout.
 - Restart between steps resumes the merge from the bound in the manifest: crash after step 2's
-  manifest of a 5-step merge, recover, and the merge's next step starts at step 2's bound; every
+  manifest of a 5-step merge, recover, and the merge's next step starts past step 2's bound; every
   key reads the same before the merge, between steps, after the crash and after the merge.
 - Crash after a step's pieces are durable but before its manifest: recovery uses the previous
-  manifest's bound, and the step is merged again.
-- A failed checkpoint during a merge keeps the step's pieces for the next checkpoint.
+  manifest's bound, and the step is merged again into the same blocks.
+- A checkpoint that fails while writing a step reports the step's pieces it wrote dead and keeps
+  the inputs' bounds, and the next writes the step again; one that fails after the step's root is
+  durable reports nothing dead, and the next names the step without writing it again.
+- A run check that fails in a later step, a bit flipped in an input above the bound, fails that
+  step's install with `ErrCheck`, and the merge is never picked again; the index is rebuilt (Run
+  checks).
+- A step finishes on a disk filled to its reserve: with only the reserve free and a write held, a
+  checkpoint writes a merge step into a reserve segment of the worker's lane and its manifest is
+  durable.
+- Filter partitions: a merge in steps writes a partition of its keys per step, fenced by the step's
+  bound, and a get, a prefix floor and a prefix seek each probe the one partition covering their key
+  or prefix, allocating nothing (`BenchmarkPartitionedLookups`, over 20 or more partitions). Under
+  filters of whole keys, prefixes and both, with fixed two-byte prefixes and prefixes up to a slash
+  of one or two letters, straddling steps, and removals the merge drops ending steps, gets, floors,
+  prefix floors and prefix scans read like the map between steps, after and after a restore; with
+  the fence's prefix left out of its partition, a lookup by prefix misses keys of a later partition
+  under prefix filters (a prefix filter's get among them) and nothing changes under whole keys.
+- A merge in steps is picked only when its output's root can list every piece with each step's
+  short pieces and fenced partition: four runs of five 270-byte entries (6,120 bytes) are refused
+  in 512-byte pieces and steps, where the output would need about 40 pieces for 27 references, and
+  1 MiB pieces in 64 MiB steps still allow about 55 GiB.
+- With steps whose partitions span several pieces, a merge holds at most a step of entries and
+  fragments and its own partition beyond the manifests, the last step included.
+- Metamorphic option sets for the tree: `steps` (384-byte pieces, two-piece steps), `steps-restart`
+  (one-piece steps, a failed first flush and a restart after every flush) and `steps-deferred`
+  (steps installed between a flush's pieces, two merges at once); each must read as the model, and
+  seed 0 must install steps under each, resume a merge after a restart under `steps-restart` and
+  install a step during a flush under `steps-deferred`.
 - Review (the [LSM space spike](../spikes/lsm-study-space/), C2 and C4): at most one step plus a
   checkpoint's flush held beyond the manifests, 2 segments of 64 MiB on a 256 GiB disk with a
   MetaStore index of 2 or 6.25% (whole: 65 and 109; with size amplification 88 and 258), 5 and 2
   segments of 4 MiB with 16 and 4 MiB steps on the 16 GiB stand-in; manifest bytes per flushed
   byte at most 0.0080 with full tables (0.0018 whole). Steps sharing the open segment left 30 to
   57 segments stranded against 8 to 10 in a segment of their own (C5).
-- A merge holds at most one step beyond what the manifests name: checked after every step in the
-  simulator together with the reserve invariant.
-
-Changed existing scenarios ("LSM tree"):
-
-- "Compaction: ... the next checkpoint names the merged run and reports every piece of the four
-  dead" becomes: the four-run merge in 1 MiB steps writes one step per checkpoint, each checkpoint
-  bounds the inputs and reports dead the pieces wholly at or below the bound, and the checkpoint
-  after the last step names the merged run alone.
-- "A compaction installed while a flush writes its inputs ... the next names the merged run and
-  reports the inputs dead" becomes: the next names the output so far and the bounded inputs, and
-  the inputs die step by step.
-- "A checkpoint that fails after writing a compaction's result whole reports nothing dead and
-  carries that run next time" becomes: a checkpoint that fails after writing a step reports nothing
-  dead, keeps the inputs' previous bounds, and writes the step again next time.
+- A merge holds at most one step, with its filter partition, beyond what the manifests name,
+  checked after every checkpoint of the lane tests; the simulator checks it after every step
+  together with the reserve invariant once the invariant checker exists.
 
 ## Write admission
 
@@ -2398,25 +2437,69 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 
 ## Seed runner in CI
 
-- CI runs thousands of seeds per commit; each failing seed prints a one-line replay command
-  (`go test ./internal/... -run <Test> -seed <n>` or the runner's equivalent) that reproduces it
-  exactly, and its ops file reduced to the fewest ops that still fail. Open: the seed count per commit
-  and CI's time budget, the design's open question "Metamorphic cost in CI". The metamorphic tests
-  already replay with `-meta.seed n` and shard with `-meta.first` and `-meta.seeds`.
-- Reduction drops chunks of ops while the failure persists. Targets from the metamorphic testing
-  spike: the planted flush bug reduces from 3,000 ops to 5, and a second plant to 7, when flushes,
-  failed flushes and restarts are ops. When an option sets the cadence (76 to 354 ops after
-  reduction), the reduced case is rewritten with explicit ops before it is saved. Open: tolerance on
-  the reduced size.
-- The reduced case becomes a data-driven regression file under `testdata/` before the fix: the change
-  shows the new case failing without the fix and passing with it. A fix that lands without its
-  regression case fails review.
-- A change that adds a seeded test runs it over 10,000 seeds once (as Pebble stresses every test a
-  pull request adds); the run's result is recorded in the change.
-- Millions of seeds overnight on idle machines: a failure found overnight produces the same one-line
-  replay command and reduced file.
-- A runner given a seed range shards it across processes, and the union of results equals a single
-  process's run of the range (no seed skipped or run twice).
+Every seeded property test, one whose property must hold seed by seed, takes its seeds from
+`internal/sim/seeds` (`seeds.Run(t, first, n, f)`), and `scripts/seeds.sh` runs those in its list
+over thousands of seeds. The repository has no hosted CI yet, so the script is the job
+every item runs before review ([build checklist](build-checklist.md)), beside `scripts/lint.sh`.
+Tests that check something across a fixed range keep their range: that two seeds give different
+traces, that both outcomes of a seeded choice occur, or that a planted bug trips within the seeds
+`go test` runs.
+
+- Seeds: a test runs its own `n` from `first` under `go test ./...`; `-seeds n` replaces the count,
+  `-seeds.first n` the first seed, `-seed n` runs that one seed, and `-seeds.shard i/k` keeps the
+  i-th of k contiguous parts; `-seed` with `-seeds.shard` is refused. A check across seeds (every
+  case seen at least once) runs only on the test's own seeds; the toy protocol's averages run
+  whenever 100 seeds or more do.
+- A seed that fails or panics logs one line that reproduces it exactly, with every other flag the
+  run was given, such as `-meta.ops`:
+  `replay: go test ./internal/lsm -run '^TestMetamorphic$' -seed 250`. The package comes from the
+  test binary's build info, so the line is the same from `go test` and from the runner's compiled
+  binaries; a subtest is named `'^TestX$/^sub$'`. A panic is logged, then re-raised (seed 3 of 1-5
+  panicking, checked from a second process).
+- **[property]** Shards: the k parts of a range hold each seed exactly once, in order, so the union
+  of k processes' results is one process's run of the range (10,000 seeds in 14 parts, 100 in 3,
+  3 in 8, none in 2).
+- The runner splits each test's seeds over `JOBS` processes (the CPUs, at most 4), each with
+  `GOMEMLIMIT` (1 GiB) and `TIMEOUT` (30 minutes, 0 for none), and stops at the first test that
+  fails, printing each failing process's output. A timeout prints the stack, whose
+  `func1(0x…)` frame holds the seed, but no replay line. A test the list names that the package
+  lacks fails, as does an argument naming no listed test, and Ctrl-C stops every process. `SEEDS`
+  and `SEEDS_FIRST` replace every test's count and first seed and arguments keep only the tests
+  named, so a change that adds a seeded test runs it over 10,000 seeds once with
+  `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
+  runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
+  they take.
+- The list, with 4 processes on a 14-core Apple M4 Pro Mac mini: 20,000 seeds in 182 s; the largest
+  process peaked at 540 MiB resident (an `internal/lsm` metamorphic shard), all four at 2.0 GiB:
+
+  | Test | Seeds | Time |
+  | --- | --- | --- |
+  | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 3 s |
+  | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 12 s |
+  | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 4 s |
+  | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 42 s |
+  | `internal/disklog` `TestOracleCatchesReplayPastATornRound` | 1,000 | 5 s |
+  | `internal/disklog` `TestQuarantinedSegmentsAreNeverReused` | 500 | 6 s |
+  | `internal/chunkstore` `TestReplayPastPendingWrites` | 2,000 | 9 s |
+  | `internal/lsm` `TestMetamorphic` | 1,000 | 44 s |
+  | `internal/chunkstore` `TestMetamorphic` | 1,000 | 55 s |
+
+- A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
+  under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
+  1957 ([Group commit](#group-commit)) is the case that grew one.
+- A metamorphic failure also prints its ops reduced to the fewest whose first difference from the
+  model, under the set that failed, is still the op that failed, written as a data-driven case for
+  `testdata/regressions`. Reduction drops chunks of ops while the failure persists. Targets from
+  the metamorphic testing spike: the planted flush bug reduces from 3,000 ops to 5, and a second
+  plant to 7, when flushes, failed flushes and restarts are ops. When an option sets the cadence
+  (76 to 354 ops after reduction), the reduced case is rewritten with explicit ops before it is
+  saved. Open: tolerance on the reduced size.
+- A case found with a planted bug names it (`run set=A plant=merge-no-older`) and fails with it on
+  (`TestMetamorphicRegressionsCatchTheirPlants`); `internal/lsm`'s P5 case came from the runner,
+  1,200 ops of seed 250 reduced to 27.
+- The reduced case, or for a test with no ops form a test of the failing seed, lands before the
+  fix: the change shows it failing without the fix and passing with it. A fix that lands without
+  its regression case fails review.
 
 ## Data-driven files
 
@@ -2425,12 +2508,13 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   output; `go test -rewrite` regenerates the expected output for review, and a run without it fails
   on any difference, naming the file and line.
 - Regression cases of the metamorphic tests: `run set=<option set>` over an ops file, printing each
-  op whose history line is not "ok" (see Metamorphic index tests):
+  op whose history line is not "ok" (see Metamorphic index tests); a case found with a planted bug
+  names it with `plant=`, and must differ from the model with it on:
 
   ```text
   # Metamorphic testing spike, plant P1 at seed 0 under A: a flush dropped a removal that hid a key
   # in an older run.
-  run set=A
+  run set=A plant=drop-removals
   put aa v26x
   flush
   del aa
@@ -2497,11 +2581,11 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   as one to the restarted primary's write of the same sequence number (found at seed 4, step 444,
   and in 49 of seeds 0 to 999). With crashes off, `IgnoreEpoch` passes seeds 0 to 99: only a primary
   crash with a reply in flight exposes it.
-- Each bug trips within seeds 0 to 99, the seeds every commit runs; running its first failing seed
+- Each bug trips within seeds 0 to 99, the seeds `go test` runs; running its first failing seed
   twice gives byte-identical traces and the same failure at the same step; the fixed protocol passes
-  that seed. **[property]** The fixed protocol passes seeds 0 to 99 per commit (at least 75% of
-  writes acknowledged and a crash per seed on average) and passed seeds 0 to 9,999 once
-  (`-toy.seeds 10000`, 37 s).
+  that seed. **[property]** The fixed protocol passes seeds 0 to 99 in `go test` and 0 to 9,999
+  in the seed runner (at least 75% of writes acknowledged and a crash per seed on average,
+  whenever 100 seeds or more run).
 - The history holds every write in order; exactly the acknowledged ones complete, never before they
   start, and over seeds 0 to 19 some are left incomplete by a primary crash.
 - The toy package passes the sans-IO analyzer, and a write's whole cycle of events on the primary
@@ -2549,7 +2633,8 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 
 ## Seeded runs and the simulation harness
 
-The seeded runs, each described in its section above:
+The seeded runs, each described in its section above, with the seeds `go test` runs; the
+[seed runner](#seed-runner-in-ci) lists those it runs more of:
 
 - Group commit: seeds 1-100 (every accepted item decodes), each also failing under five broken
   encoders, and seeds 1-20 of random entries (anything Submit accepts decodes).
@@ -2567,7 +2652,7 @@ The seeded runs, each described in its section above:
   index on every run; seeds 0-10,002 and 0-10,001 once.
 - Crash at every action: every k, with three landing sets and a failure each.
 - Cleaner write amplification at 80 / 90 / 95% full.
-- Planted-bug check: seeds 0-99 under each planted bug and the fixed protocol, the replay of each bug's first failing seed, and seeds 0-9,999 of the fixed protocol once.
+- Planted-bug check: seeds 0-99 under each planted bug and the fixed protocol, and the replay of each bug's first failing seed.
 
 The chunk store stand-in of the recovery tests applies every Durable record to its model of the
 chunk index. It starts a checkpoint whenever one is due, snapshots the model, hands one run piece at

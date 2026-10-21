@@ -185,10 +185,14 @@ func seekDiffers(r reader, want []kv, p string, inPrefix bool) string {
 
 func clip(s []kv) []kv { return s[:min(len(s), 8)] }
 
-// fakeLog keeps the pieces a flush writes, each under a reference of its own.
+// fakeLog keeps the pieces a flush writes, each under a reference of its own, the newest
+// manifest's roots and bounds, and the merge worker of every piece.
 type fakeLog struct {
-	next  uint64
-	blobs map[disklog.BlobRef][]byte
+	next    uint64
+	blobs   map[disklog.BlobRef][]byte
+	roots   []disklog.BlobRef
+	bounds  []disklog.MergeBound
+	workers []int
 }
 
 func newFakeLog() *fakeLog { return &fakeLog{blobs: map[disklog.BlobRef][]byte{}} }
@@ -207,7 +211,7 @@ func (f *fakeLog) checkpoint(t testing.TB, tr *Tree, between func()) ([]disklog.
 	if _, err := tr.BeginFlush(); err != nil {
 		t.Fatal(err)
 	}
-	roots := slices.Clone(tr.CarriedRuns())
+	roots, bounds := slices.Clone(tr.CarriedRuns()), slices.Clone(tr.Bounds())
 	buf := make([]byte, tr.cfg.MaxPiece)
 	for {
 		n, root, err := tr.NextPiece(buf)
@@ -221,6 +225,7 @@ func (f *fakeLog) checkpoint(t testing.TB, tr *Tree, between func()) ([]disklog.
 			t.Fatalf("piece of %d bytes, max %d", n, tr.cfg.MaxPiece)
 		}
 		ref := f.put(buf[:n])
+		f.workers = append(f.workers, tr.PieceWorker())
 		if between != nil {
 			between()
 		}
@@ -235,7 +240,51 @@ func (f *fakeLog) checkpoint(t testing.TB, tr *Tree, between func()) ([]disklog.
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.roots, f.bounds = roots, bounds
 	return roots, dead
+}
+
+// drop forgets dead pieces, so a restore that reads one fails.
+func (f *fakeLog) drop(dead []disklog.BlobRef) {
+	for _, r := range dead {
+		delete(f.blobs, r)
+	}
+}
+
+// restoreManifest loads the newest manifest's runs, bounded ones from their first live piece, into a tree of cfg.
+func (f *fakeLog) restoreManifest(t testing.TB, cfg Config) *Tree {
+	t.Helper()
+	tr, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range f.roots {
+		refs, err := RootRefs(f.blobs[root], nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := slices.IndexFunc(f.bounds, func(b disklog.MergeBound) bool { return b.Run == root })
+		if b >= 0 {
+			refs = refs[f.bounds[b].Dead:]
+		}
+		var pieces [][]byte
+		for _, r := range append(refs, root) {
+			p, ok := f.blobs[r]
+			if !ok {
+				t.Fatalf("the manifest needs dead piece %+v", r)
+			}
+			pieces = append(pieces, p)
+		}
+		if b >= 0 {
+			err = tr.LoadBoundedRun(f.bounds[b], pieces)
+		} else {
+			err = tr.LoadRun(root, pieces)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return tr
 }
 
 // restore loads the runs at roots into a new tree.
@@ -325,4 +374,16 @@ func firstOr(p *page, i int, hi []byte) []byte {
 		return p.key(i)
 	}
 	return hi
+}
+
+// pickSpan starts a merge of runs [i, j) by rule, whatever the picker would choose.
+func (t *Tree) pickSpan(i, j int, r rule) *Compaction { return t.start(t.compaction(i, j, r)) }
+
+// filterBytesOf is the bytes of r's filter partitions.
+func filterBytesOf(r *run) int {
+	n := 0
+	for _, p := range r.parts {
+		n += len(p.enc)
+	}
+	return n
 }

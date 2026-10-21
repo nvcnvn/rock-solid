@@ -13,20 +13,17 @@ import (
 	"github.com/cockroachdb/datadriven"
 
 	"github.com/nvcnvn/rock-solid/internal/sim/metamorphic"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
-var (
-	metaSeeds = flag.Int("meta.seeds", 20, "seeds the metamorphic test runs, from meta.first")
-	metaFirst = flag.Int("meta.first", 0, "the first seed the metamorphic test runs")
-	metaSeed  = flag.Int("meta.seed", -1, "the one seed the metamorphic test runs, to replay a failure")
-	metaOps   = flag.Int("meta.ops", 3000, "ops per metamorphic seed")
-)
+var metaOps = flag.Int("meta.ops", 3000, "ops per metamorphic seed")
 
 // metaSet is an option set: the tree's settings and the cadence of its structural ops.
 type metaSet struct {
 	name     string
 	piece    int
 	runLimit int
+	step     int
 	merges   int
 	linear   bool
 	points   bool
@@ -48,6 +45,9 @@ var metaSets = []metaSet{
 	{name: "fixed-limit", piece: 1024, runLimit: 4, run: metamorphic.Options{FlushOps: true, FlushEvery: 5, Compact: metamorphic.CompactEager}},
 	{name: "point-removals", piece: 4096, points: true, run: metamorphic.Options{FlushOps: true, FlushEvery: 20, Compact: metamorphic.CompactEager}},
 	{name: "linear-merge", piece: 1024, linear: true, run: metamorphic.Options{FlushOps: true, FlushEvery: 15, Compact: metamorphic.CompactEager, Absorb: 4}},
+	{name: "steps", piece: 1024, step: 1024, run: metamorphic.Options{FlushOps: true, FlushEvery: 10, Compact: metamorphic.CompactEager}},
+	{name: "steps-restart", piece: 768, step: 768, run: metamorphic.Options{FlushOps: true, FlushEvery: 20, Compact: metamorphic.CompactEager, FailFirst: 1, RestartEach: true}},
+	{name: "steps-deferred", piece: 1024, step: 1024, merges: 2, run: metamorphic.Options{FlushOps: true, FlushEvery: 8, Compact: metamorphic.CompactDeferred, Absorb: 4, CompactEvery: 3}},
 	{name: "filters-off", piece: 256, probe: FiltersOff, run: metamorphic.Options{FlushOps: true, FlushEvery: 10}},
 	{name: "filters-maybe", piece: 256, probe: FiltersMaybe, run: metamorphic.Options{FlushOps: true, FlushEvery: 10}},
 }
@@ -276,7 +276,7 @@ type metaWrite struct {
 
 // metaStats counts what an option set made the tree do, to show the set reaches its extreme.
 type metaStats struct {
-	flushes, failed, compactions, together, deferred, restarts, maxRuns, searches, filterProbes int
+	flushes, failed, compactions, together, deferred, restarts, maxRuns, searches, filterProbes, steps, resumed int
 }
 
 // metaTree runs a Tree over a log that keeps every live piece. Its writes stand in for the disk
@@ -302,7 +302,7 @@ func newMetaTree(s metaSet, check bool, plant plants) *metaTree {
 }
 
 func (m *metaTree) newTree() *Tree {
-	tr, err := New(Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, Check: m.check, Probe: m.set.probe})
+	tr, err := New(Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, StepBytes: m.set.step, Check: m.check, Probe: m.set.probe})
 	if err != nil {
 		panic(err)
 	}
@@ -417,8 +417,19 @@ func (m *metaTree) install(c *Compaction) error {
 	if err := m.tr.Install(c); err != nil {
 		return err
 	}
+	if !c.final {
+		m.st.steps++
+	}
 	m.st.compactions++
 	return nil
+}
+
+// run runs a merge's next step, counting a merge a restart left between steps.
+func (m *metaTree) run(c *Compaction) {
+	if !c.started && c.bound != nil {
+		m.st.resumed++
+	}
+	c.Run()
 }
 
 // Compact picks as many merges as the set runs at once, runs them all and installs them newest
@@ -439,7 +450,7 @@ func (m *metaTree) Compact() (bool, error) {
 		m.st.together++
 	}
 	for _, c := range cs {
-		c.Run()
+		m.run(c)
 	}
 	for i := len(cs) - 1; i >= 0; i-- {
 		if err := m.install(cs[i]); err != nil {
@@ -463,7 +474,7 @@ func (m *metaTree) CompactFinish() error {
 	if c == nil {
 		return nil
 	}
-	c.Run()
+	m.run(c)
 	if m.tr.Frozen() {
 		m.st.deferred++
 	}
@@ -477,7 +488,7 @@ func (m *metaTree) Restart() error {
 	}
 	m.pending = nil
 	tr := m.newTree()
-	if err := m.log.Restore(RootRefs, tr.LoadRun); err != nil {
+	if err := m.log.Restore(RootRefs, tr.LoadRun, tr.LoadBoundedRun); err != nil {
 		return err
 	}
 	for _, w := range m.writes[m.log.Replay():] {
@@ -530,11 +541,13 @@ func metaRun(ops []metamorphic.Op, sets []metaSet, check bool, plant plants) (*m
 	return fail, stats, fromF
 }
 
-// reduceMeta reduces ops to the fewest that still differ from the model under s.
+// reduceMeta reduces ops, whose last op is the first to differ from the model under s, to the
+// fewest whose first difference is still that op.
 func reduceMeta(ops []metamorphic.Op, s metaSet, check bool, plant plants) []metamorphic.Op {
+	last := ops[len(ops)-1].String()
 	return metamorphic.Reduce(ops, func(c []metamorphic.Op) bool {
 		f, _, _ := metaRun(c, []metaSet{s}, check, plant)
-		return f != nil
+		return f != nil && f.at == len(c)-1 && c[f.at].String() == last
 	})
 }
 
@@ -550,25 +563,14 @@ func metaCase(ops []metamorphic.Op, s metaSet) string {
 	return b.String()
 }
 
-func metaSeedRange() []uint64 {
-	if *metaSeed >= 0 {
-		return []uint64{uint64(*metaSeed)}
-	}
-	n := *metaSeeds
-	if testing.Short() {
-		n = min(n, 3)
-	}
-	seeds := make([]uint64, n)
-	for i := range seeds {
-		seeds[i] = uint64(*metaFirst + i)
-	}
-	return seeds
-}
-
 // [property] Every seed's ops read the same under every option set and the map model. A failing
 // seed prints its replay command and its ops reduced to a regression case for testdata/regressions.
 func TestMetamorphic(t *testing.T) {
-	for _, seed := range metaSeedRange() {
+	n := 20
+	if testing.Short() {
+		n = 3
+	}
+	seeds.Run(t, 0, n, func(seed uint64) {
 		ops := genMetaOps(seed, *metaOps)
 		fail, stats, _ := metaRun(ops, metaSets, true, plants{})
 		if seed == 0 {
@@ -577,12 +579,12 @@ func TestMetamorphic(t *testing.T) {
 			}
 		}
 		if fail == nil {
-			continue
+			return
 		}
 		small := reduceMeta(ops[:fail.at+1], fail.set, true, plants{})
-		t.Fatalf("seed %d under %s, op %d %q: got %q, the model %q\nreplay: go test ./internal/lsm -run 'TestMetamorphic$' -meta.seed=%d -meta.ops=%d\nreduced to %d ops:\n%s",
-			seed, fail.set.name, fail.at, ops[fail.at], fail.got[fail.at], fail.want[fail.at], seed, *metaOps, len(small), metaCase(small, fail.set))
-	}
+		t.Fatalf("seed %d under %s, op %d %q: got %q, the model %q\nreduced to %d ops, for testdata/regressions:\n%s",
+			seed, fail.set.name, fail.at, ops[fail.at], fail.got[fail.at], fail.want[fail.at], len(small), metaCase(small, fail.set))
+	})
 }
 
 // Each option set reaches the extreme it is there for on seed 0: F never flushes, C and G keep
@@ -604,6 +606,9 @@ func TestMetamorphicSetsReachTheirExtremes(t *testing.T) {
 		{"D installs merges during flushes", of("D").deferred > 0},
 		{"two-merges runs two at once", of("two-merges").together > 0},
 		{"fixed-limit compacts", of("fixed-limit").compactions > 0},
+		{"steps installs merges in steps", of("steps").steps > 0},
+		{"steps-restart resumes merges after restarts", of("steps-restart").resumed > 0},
+		{"steps-deferred installs steps during flushes", of("steps-deferred").steps > 0 && of("steps-deferred").deferred > 0},
 		{"filters-off probes no filter and searches more than C", of("filters-off").filterProbes == 0 && of("filters-off").searches > of("C").searches},
 		{"filters-maybe probes as C does and searches as filters-off does", of("filters-maybe").filterProbes == of("C").filterProbes && of("filters-maybe").searches == of("filters-off").searches},
 	} {
@@ -648,23 +653,45 @@ func TestMetamorphicFindsPlantedBugs(t *testing.T) {
 	}
 }
 
+// metaPlants names the planted bugs a regression case can name with plant=, the one that found it.
+var metaPlants = map[string]plants{
+	"drop-removals":  {dropRemovals: true},
+	"load-unordered": {loadUnordered: true},
+	"merge-no-older": {mergeNoOlder: true},
+	"clobber-bound":  {clobberBound: true},
+}
+
+// metaRegression reads a regression case: its option set, its ops and the plant that found it.
+func metaRegression(t *testing.T, d *datadriven.TestData) (metaSet, []metamorphic.Op, plants) {
+	if d.Cmd != "run" {
+		d.Fatalf(t, "unknown command %q", d.Cmd)
+	}
+	var name string
+	d.ScanArgs(t, "set", &name)
+	s, ok := metaSetNamed(name)
+	if !ok {
+		d.Fatalf(t, "unknown option set %q", name)
+	}
+	var plant plants
+	if d.HasArg("plant") {
+		var p string
+		d.ScanArgs(t, "plant", &p)
+		if plant, ok = metaPlants[p]; !ok {
+			d.Fatalf(t, "unknown plant %q", p)
+		}
+	}
+	ops, err := metamorphic.Parse(d.Input, checkMetaOp)
+	if err != nil {
+		d.Fatalf(t, "%v", err)
+	}
+	return s, ops, plant
+}
+
 // The reduced failures of the metamorphic test, each run under its option set, must read as the
-// model does; an unknown command, set or op fails the test at its line.
+// model does; an unknown command, set, plant or op fails the test at its line.
 func TestMetamorphicRegressions(t *testing.T) {
 	datadriven.RunTest(t, "testdata/regressions", func(t *testing.T, d *datadriven.TestData) string {
-		if d.Cmd != "run" {
-			d.Fatalf(t, "unknown command %q", d.Cmd)
-		}
-		var name string
-		d.ScanArgs(t, "set", &name)
-		s, ok := metaSetNamed(name)
-		if !ok {
-			d.Fatalf(t, "unknown option set %q", name)
-		}
-		ops, err := metamorphic.Parse(d.Input, checkMetaOp)
-		if err != nil {
-			d.Fatalf(t, "%v", err)
-		}
+		s, ops, _ := metaRegression(t, d)
 		if fail, _, _ := metaRun(ops, []metaSet{s}, true, plants{}); fail != nil {
 			t.Errorf("%s: op %d %q: got %q, the model %q", d.Pos, fail.at, ops[fail.at], fail.got[fail.at], fail.want[fail.at])
 		}
@@ -672,25 +699,18 @@ func TestMetamorphicRegressions(t *testing.T) {
 	})
 }
 
-// The spike's regression cases fail with their planted bugs on, as they did in the metamorphic
-// testing spike.
+// A regression case that names the planted bug that found it differs from the model with that
+// bug on.
 func TestMetamorphicRegressionsCatchTheirPlants(t *testing.T) {
-	s, _ := metaSetNamed("A")
-	for _, c := range []struct {
-		ops   string
-		plant plants
-	}{
-		{"put aa v26x\nflush\ndel aa\nflush\nfloor aca\n", plants{dropRemovals: true}},
-		{"put e v30xxx\nflush\ndel e\nflushfail 3\nflush\nrestart\nfloor e\n", plants{loadUnordered: true}},
-	} {
-		ops, err := metamorphic.Parse(c.ops, checkMetaOp)
-		if err != nil {
-			t.Fatal(err)
+	datadriven.RunTest(t, "testdata/regressions", func(t *testing.T, d *datadriven.TestData) string {
+		s, ops, plant := metaRegression(t, d)
+		if plant != (plants{}) {
+			if fail, _, _ := metaRun(ops, []metaSet{s}, false, plant); fail == nil {
+				t.Errorf("%s: reads as the model with %+v", d.Pos, plant)
+			}
 		}
-		if fail, _, _ := metaRun(ops, []metaSet{s}, false, c.plant); fail == nil {
-			t.Fatalf("%+v reads as the model:\n%s", c.plant, c.ops)
-		}
-	}
+		return d.Expected
+	})
 }
 
 func TestMetamorphicParseRejects(t *testing.T) {

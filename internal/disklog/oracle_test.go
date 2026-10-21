@@ -13,6 +13,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 // diskOracle is the crash oracle over the disk's one index, kept as the plain model.
@@ -323,7 +324,7 @@ func tornMiddle(t *testing.T, seed uint64, plant func(*disklog.Recovery)) (*reco
 // A round torn between acknowledged rounds and a whole one in flight ends the log there, and
 // replaying past it trips the crash oracle on every seed.
 func TestOracleCatchesReplayPastATornRound(t *testing.T) {
-	for seed := uint64(1); seed <= 50; seed++ {
+	seeds.Run(t, 1, 50, func(seed uint64) {
 		res, stop := tornMiddle(t, seed, nil)
 		if res.err != nil || res.durable != stop {
 			t.Fatalf("seed %d: recovered to LSN %d, %v; want %d", seed, res.durable, res.err, stop)
@@ -334,7 +335,7 @@ func TestOracleCatchesReplayPastATornRound(t *testing.T) {
 		if res, _ = tornMiddle(t, seed, disklog.ReplayPastGaps); res.err != nil || oracleCheck(res) == nil {
 			t.Fatalf("seed %d: planted, recovery ended %v and the oracle passed it", seed, res.err)
 		}
-	}
+	})
 }
 
 // A round that hands its items' entries out under one another's tickets fails the check of

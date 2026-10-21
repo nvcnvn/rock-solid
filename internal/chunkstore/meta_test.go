@@ -16,14 +16,10 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim/metamorphic"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
-var (
-	metaSeeds = flag.Int("meta.seeds", 20, "seeds the metamorphic test runs, from meta.first")
-	metaFirst = flag.Int("meta.first", 0, "the first seed the metamorphic test runs")
-	metaSeed  = flag.Int("meta.seed", -1, "the one seed the metamorphic test runs, to replay a failure")
-	metaOps   = flag.Int("meta.ops", 1000, "ops per metamorphic seed")
-)
+var metaOps = flag.Int("meta.ops", 1000, "ops per metamorphic seed")
 
 // metaBlocks is how many blocks of a chunk ops touch; a whole-chunk punch covers all of
 // core.BlocksPerChunk.
@@ -587,7 +583,7 @@ func (m *metaIndex) CompactFinish() error {
 func (m *metaIndex) Restart() error {
 	m.pending = nil
 	tr := m.newTree()
-	if err := m.log.Restore(lsm.RootRefs, tr.LoadRun); err != nil {
+	if err := m.log.Restore(lsm.RootRefs, tr.LoadRun, tr.LoadBoundedRun); err != nil {
 		return err
 	}
 	x := m.newIndex(tr)
@@ -641,26 +637,15 @@ func metaCase(ops []metamorphic.Op, s metaSet) string {
 	return b.String()
 }
 
-func metaSeedRange() []uint64 {
-	if *metaSeed >= 0 {
-		return []uint64{uint64(*metaSeed)}
-	}
-	n := *metaSeeds
-	if testing.Short() {
-		n = min(n, 3)
-	}
-	seeds := make([]uint64, n)
-	for i := range seeds {
-		seeds[i] = uint64(*metaFirst + i)
-	}
-	return seeds
-}
-
 // [property] Every seed's ops read the same, block by block, live and at snapshot epochs, under
 // every option set and the model; a failing seed prints its replay command and its ops reduced to
 // a regression case for testdata/regressions.
 func TestMetamorphic(t *testing.T) {
-	for _, seed := range metaSeedRange() {
+	n := 20
+	if testing.Short() {
+		n = 3
+	}
+	seeds.Run(t, 0, n, func(seed uint64) {
 		ops := genMetaOps(seed, *metaOps)
 		fail, stats := metaRun(ops, metaSets)
 		if seed == 0 {
@@ -669,15 +654,16 @@ func TestMetamorphic(t *testing.T) {
 			}
 		}
 		if fail == nil {
-			continue
+			return
 		}
+		last := ops[fail.at].String()
 		small := metamorphic.Reduce(ops[:fail.at+1], func(c []metamorphic.Op) bool {
 			f, _ := metaRun(c, []metaSet{fail.set})
-			return f != nil
+			return f != nil && f.at == len(c)-1 && c[f.at].String() == last
 		})
-		t.Fatalf("seed %d under %s, op %d %q: got %q, the model %q\nreplay: go test ./internal/chunkstore -run 'TestMetamorphic$' -meta.seed=%d -meta.ops=%d\nreduced to %d ops:\n%s",
-			seed, fail.set.name, fail.at, ops[fail.at], fail.got[fail.at], fail.want[fail.at], seed, *metaOps, len(small), metaCase(small, fail.set))
-	}
+		t.Fatalf("seed %d under %s, op %d %q: got %q, the model %q\nreduced to %d ops, for testdata/regressions:\n%s",
+			seed, fail.set.name, fail.at, ops[fail.at], fail.got[fail.at], fail.want[fail.at], len(small), metaCase(small, fail.set))
+	})
 }
 
 // The generated ops exercise what the index does on seed 0: absent freezes, whole-chunk punches,

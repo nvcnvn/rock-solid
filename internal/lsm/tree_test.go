@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 func put(t testing.TB, tr *Tree, m model, k, v string) {
@@ -79,7 +80,7 @@ func TestGetReplaceAndPrefixScan(t *testing.T) {
 // [property] Random puts and removes, with keys up to MaxKey and values up to MaxValue so pages
 // split at every level, read back as the model does at every step, and the page structure holds.
 func TestMemtableMatchesModel(t *testing.T) {
-	for seed := range 12 {
+	seeds.Run(t, 0, 12, func(seed uint64) {
 		r := rand.New(rand.NewPCG(uint64(seed), 1))
 		tr := newTree(t, 1<<20)
 		m := model{}
@@ -97,13 +98,13 @@ func TestMemtableMatchesModel(t *testing.T) {
 				}
 			}
 		}
-	}
+	})
 }
 
 // [property] Views opened at random points read the tree as it was then while writes continue,
 // closing them frees every page they alone held, and only pages a view could reach are copied.
 func TestViewsCopyOnWrite(t *testing.T) {
-	for seed := range 6 {
+	seeds.Run(t, 0, 6, func(seed uint64) {
 		r := rand.New(rand.NewPCG(uint64(seed), 3))
 		tr := newTree(t, 1<<20)
 		m := model{}
@@ -140,7 +141,7 @@ func TestViewsCopyOnWrite(t *testing.T) {
 		if tr.pg.inUse != before {
 			t.Fatalf("a write with no view open copied pages: %d to %d", before, tr.pg.inUse)
 		}
-	}
+	})
 }
 
 // Keys inserted in random order, as files are created, leave leaves well filled because a full
@@ -326,7 +327,7 @@ func TestFlushPeakMemory(t *testing.T) {
 		t.Fatalf("froze %v: %v", froze, err)
 	}
 	memPages := checkPages(t, tr.mem, tr.mem.root)
-	filterBytes := len(tr.fl.filter.blob)
+	filterBytes := len(tr.fl.filter.blob) + partHdr + partTrailer
 	buf, spare := make([]byte, maxPiece), make([]byte, maxPiece)
 	refs := make([]disklog.BlobRef, 0, maxPiece/disklog.BlobRefSize)
 	var before, after runtime.MemStats
@@ -349,7 +350,7 @@ func TestFlushPeakMemory(t *testing.T) {
 		if kind != filterBlock && len(block) > emptyBlockSize {
 			held += len(block)
 		}
-		if got := tr.fl.frozen.bytes - len(tr.fl.frozen.filter); tr.pg.inUse != frozenPages+memPages || got != held {
+		if got := tr.fl.frozen.bytes - filterBytesOf(tr.fl.frozen); tr.pg.inUse != frozenPages+memPages || got != held {
 			t.Fatalf("piece %d: %d pages in use, want %d; run holds %d bytes, its pieces' blocks %d", pieces, tr.pg.inUse, frozenPages+memPages, got, held)
 		}
 		if _, _, err := tr.NextPiece(spare); !errors.Is(err, ErrNoFlush) {
@@ -798,6 +799,24 @@ func TestCompactionGuards(t *testing.T) {
 	}
 	if c := big.PickCompaction(); c != nil {
 		t.Fatalf("picked %v over %d bytes, more than a root of 512-byte pieces lists (%d)", c.rule, big.RunBytes(), big.maxRunBytes())
+	}
+
+	stepped, err := New(Config{MaxPiece: 512, StepBytes: 512, Check: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 4 {
+		for j := range 5 {
+			put(t, stepped, nil, fmt.Sprintf("k%d-%d", i, j), strings.Repeat("v", 270))
+		}
+		f.checkpoint(t, stepped, nil)
+	}
+	for c := stepped.PickCompaction(); c != nil; c = stepped.PickCompaction() {
+		c.Run()
+		if err := stepped.Install(c); err != nil {
+			t.Fatal(err)
+		}
+		f.checkpoint(t, stepped, nil)
 	}
 }
 

@@ -89,7 +89,7 @@ func TestMergeCountCheck(t *testing.T) {
 		t.Run(short, func(t *testing.T) {
 			tr, _, m := threeRuns(t)
 			before := slices.Clone(tr.runs)
-			c := tr.compaction(0, 3, ruleNone)
+			c := tr.pickSpan(0, 3, ruleNone)
 			if short == "entry" {
 				c.runs[1].entries++
 			} else {
@@ -121,7 +121,7 @@ func flipLastValue(b []byte) string {
 }
 
 func mergeErr(tr *Tree, i, j int) error {
-	c := tr.compaction(i, j, ruleNone)
+	c := tr.pickSpan(i, j, ruleNone)
 	c.Run()
 	return tr.Install(c)
 }
@@ -168,7 +168,7 @@ func TestMergeVerifiesPieceChecksums(t *testing.T) {
 	})
 	t.Run("filter", func(t *testing.T) {
 		tr, _, _ := threeRuns(t)
-		tr.runs[1].filter[1] ^= 0x80
+		tr.runs[1].parts[0].bits[1] ^= 0x80
 		if err := mergeErr(tr, 1, 3); !errors.Is(err, ErrCheck) {
 			t.Fatalf("merge of a run with a flipped filter: %v, want ErrCheck", err)
 		}
@@ -185,7 +185,7 @@ func TestFlushVerifiesRewrittenRuns(t *testing.T) {
 			if part == "block" {
 				flipLastValue(tr.runs[0].blocks[0])
 			} else {
-				tr.runs[0].filter[filterKeyHdr] ^= 1
+				tr.runs[0].parts[0].bits[filterKeyHdr] ^= 1
 			}
 			if _, err := tr.BeginFlush(); err != nil {
 				t.Fatal(err)
@@ -237,7 +237,7 @@ func TestFlushFilterCheck(t *testing.T) {
 func TestMergeOrderCheck(t *testing.T) {
 	tr, _, _ := threeRuns(t)
 	tr.plant.repeatBlock = true
-	c := tr.compaction(0, 3, ruleNone)
+	c := tr.pickSpan(0, 3, ruleNone)
 	mustPanic(t, "out of order", c.Run)
 }
 
@@ -246,7 +246,7 @@ func TestMergeOrderCheck(t *testing.T) {
 func TestRunOrderCheck(t *testing.T) {
 	tr, _, _ := threeRuns(t)
 	tr.plant.installOldest = true
-	c := tr.compaction(0, 2, ruleNone)
+	c := tr.pickSpan(0, 2, ruleNone)
 	c.Run()
 	mustPanic(t, "sequence order", func() { tr.Install(c) })
 }
@@ -273,17 +273,18 @@ func BenchmarkMergeChecksums(b *testing.B) {
 		}
 		f.checkpoint(b, tr, nil)
 	}
-	c := tr.compaction(0, 4, ruleNone)
 	for _, verify := range []bool{true, false} {
 		b.Run(fmt.Sprintf("verify=%v", verify), func(b *testing.B) {
-			c.plant.noSums = !verify
 			b.SetBytes(int64(tr.RunBytes()))
 			b.ReportAllocs()
 			for b.Loop() {
+				c := tr.pickSpan(0, 4, ruleNone)
+				c.plant.noSums = !verify
 				c.Run()
-			}
-			if c.err != nil {
-				b.Fatal(c.err)
+				if c.err != nil {
+					b.Fatal(c.err)
+				}
+				tr.failMerge(c)
 			}
 		})
 	}

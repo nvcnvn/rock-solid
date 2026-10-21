@@ -10,6 +10,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
@@ -62,6 +63,7 @@ func runSeed(t testing.TB, seed uint64, setup func(*harness), stats *seedStats) 
 	var cpBase, cpNextSeq uint64
 	var cpRows []disklog.SegmentUsage
 	var cpRoots int
+	var retryFrom uint64
 	toSubmit := r.Range(1, 1000)
 	var nextLSN uint64 = 1
 	settle := func(tk disklog.Ticket, what string) {
@@ -126,7 +128,7 @@ func runSeed(t testing.TB, seed uint64, setup func(*harness), stats *seedStats) 
 					t.Fatalf("seed %d: manifest %+v, want base %d, NextSeq %d, rows %+v and %d runs", seed, m, cpBase, cpNextSeq, cpRows, cpRoots)
 				}
 			case disklog.CheckpointFailed:
-				running = false
+				running, retryFrom = false, nextLSN
 				stats.checkpointsFailed++
 			default:
 				t.Fatalf("seed %d: event %+v", seed, ev)
@@ -134,10 +136,13 @@ func runSeed(t testing.TB, seed uint64, setup func(*harness), stats *seedStats) 
 		}
 	}
 
-	for (toSubmit > 0 || h.log.Queued() > 0) && h.log.Err() == nil || len(h.pending) > 0 {
+	for steps := 0; (toSubmit > 0 || h.log.Queued() > 0) && h.log.Err() == nil || len(h.pending) > 0; steps++ {
+		if steps == maxSeedSteps {
+			t.Fatalf("seed %d: no end after %d steps, %d items left to submit", seed, steps, toSubmit)
+		}
 		from := len(h.events)
 		switch {
-		case !running && h.log.CheckpointDue():
+		case !running && h.log.CheckpointDue() && nextLSN > retryFrom:
 			cpBase, cpNextSeq, cpRows = h.log.DurableLSN(), disklog.NextSeqOf(h.log), disklog.SegmentUsageOf(h.log)
 			if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: 1, ReplayLSN: cpBase}, {Owner: 2, ReplayLSN: cpBase}}); err != nil {
 				t.Fatalf("seed %d: begin: %v", seed, err)
@@ -181,7 +186,7 @@ func runSeed(t testing.TB, seed uint64, setup func(*harness), stats *seedStats) 
 			r.Fill(h.pool.Bytes(buf)[:n])
 			payload := bytes.Clone(h.pool.Bytes(buf)[:n])
 			owner := uint32(r.Range(1, 2))
-			tk, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), owner, buf, uint64(n), &h.out)
+			tk, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), owner, buf, uint64(n), false, &h.out)
 			if err != nil {
 				t.Fatalf("seed %d: merge piece: %v", seed, err)
 			}
@@ -266,9 +271,19 @@ func runSeed(t testing.TB, seed uint64, setup func(*harness), stats *seedStats) 
 	return h
 }
 
+// maxSeedSteps bounds runSeed's loop, so a seed that stops making progress fails instead of
+// growing its items without end.
+const maxSeedSteps = 100_000
+
+// Regression (seed 1957): on a 16-block disk with no free segment every checkpoint fails with
+// NoSpace as it begins, and beginning the next one before a record became durable never ended.
+func TestACheckpointFailedForWantOfSpaceWaitsForADurableRecord(t *testing.T) {
+	runSeed(t, 1957, nil, &seedStats{})
+}
+
 func TestEveryAcceptedItemDecodes(t *testing.T) {
 	var stats seedStats
-	for seed := uint64(1); seed <= 100; seed++ {
+	seeds.Run(t, 1, 100, func(seed uint64) {
 		h := runSeed(t, seed, nil, &stats)
 		if err := trace.Check(h.sched.Trace(), diskLogRules(h.cfg.CommitDepth)...); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
@@ -276,6 +291,9 @@ func TestEveryAcceptedItemDecodes(t *testing.T) {
 		if err := sim.CompareTraces(h.sched.Trace(), runSeed(t, seed, nil, &seedStats{}).sched.Trace()); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
+	})
+	if !seeds.Default() {
+		return
 	}
 	if stats.noSpace == 0 || stats.tooLarge == 0 || stats.deferredFlushes == 0 || stats.deepRuns == 0 ||
 		stats.poolFull == 0 || stats.inDoubt == 0 || stats.checkpoints == 0 || stats.checkpointsFailed == 0 || stats.manifestPieces == 0 || stats.mergePieces == 0 {
@@ -337,7 +355,7 @@ func TestAnythingSubmitAcceptsDecodes(t *testing.T) {
 	accepted := map[disklog.EntryKind]int{}
 	refused := map[error]int{}
 	known := []error{disklog.ErrMalformed, disklog.ErrBadExtent, disklog.ErrTooLarge, disklog.ErrBadBuffer, disklog.ErrReservedKind}
-	for seed := uint64(1); seed <= 20; seed++ {
+	seeds.Run(t, 1, 20, func(seed uint64) {
 		r := core.NewRand(seed)
 		cfg := testConfig(r.Range(3, 64))
 		cfg.CommitDepth = int(r.Range(1, 3))
@@ -399,6 +417,9 @@ func TestAnythingSubmitAcceptsDecodes(t *testing.T) {
 			}
 		}
 		h.close()
+	})
+	if !seeds.Default() {
+		return
 	}
 	for _, k := range []disklog.EntryKind{disklog.EntryWrite, disklog.EntryPunch, disklog.EntryFreeze, disklog.EntryBlob} {
 		if accepted[k] == 0 {

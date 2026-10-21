@@ -13,6 +13,7 @@ import (
 	"github.com/cockroachdb/datadriven"
 
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 func delRange(t testing.TB, tr *Tree, m model, lo, hi string) {
@@ -255,7 +256,7 @@ func rangeModel(t *testing.T, cfg Config, seed uint64, plant plants) string {
 		case x < 89:
 			if n := len(tr.runs); n >= 2 {
 				i := r.IntN(n - 1)
-				err = merge(tr.compaction(i, i+2+r.IntN(n-i-1), ruleNone))
+				err = merge(tr.pickSpan(i, i+2+r.IntN(n-i-1), ruleNone))
 			}
 		case x < 90:
 			if view == nil {
@@ -306,11 +307,11 @@ func TestRangeRemovalsMatchModel(t *testing.T) {
 	for i, cfg := range rangeConfigs {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			t.Parallel()
-			for seed := range uint64(60) {
+			seeds.Run(t, 0, 60, func(seed uint64) {
 				if d := rangeModel(t, cfg, seed, plants{}); d != "" {
 					t.Fatalf("%+v seed %d: %s", cfg, seed, d)
 				}
-			}
+			})
 		})
 	}
 }
@@ -570,7 +571,7 @@ func TestFragmentOnlyRunBounds(t *testing.T) {
 // compactSpan merges runs [i, j) and installs the result.
 func compactSpan(t *testing.T, tr *Tree, i, j int) {
 	t.Helper()
-	c := tr.compaction(i, j, ruleNone)
+	c := tr.pickSpan(i, j, ruleNone)
 	c.Run()
 	if err := tr.Install(c); err != nil {
 		t.Fatal(err)
@@ -716,11 +717,11 @@ func TestRemovePrefixAsRange(t *testing.T) {
 }
 
 // A run with fragments in its format: the entry piece first, then the fragment piece, then the
-// filter piece as its root, each marked in its trailer. Loading rejects fragment blocks that are
+// filter piece, one unfenced partition, as its root, each marked in its trailer. Loading rejects fragment blocks that are
 // truncated, unsorted, overlapping or not marked, a run with no filter or a truncated one, and
 // entries or fragments after the filter.
 func TestRunFragmentFormat(t *testing.T) {
-	tr := newTree(t, 128)
+	tr := newTree(t, 136)
 	f := newFakeLog()
 	put(t, tr, nil, "c", "0")
 	f.checkpoint(t, tr, nil)
@@ -745,8 +746,8 @@ func TestRunFragmentFormat(t *testing.T) {
 	}
 	line := make([]byte, 64)
 	line[3], line[10], line[17], line[24], line[54], line[60] = 0x40, 0x20, 0x10, 0x08, 0x01, 0x80
-	filter := append([]byte("\x01\x00"+"\x00"+"\x01\x00\x00\x00\x00\x00\x00\x00"), line...)
-	filter = append(filter, "\x06"+"\x01\x00\x00\x00"...)
+	filter := append([]byte("\x01\x00"+"\x4e\x00\x00\x00"+"\x00"+"\x01\x00\x00\x00\x00\x00\x00\x00"), line...)
+	filter = append(filter, "\x06"+"\x01\x00\x00\x00"+"\x00"+"\x00\x00"...)
 	for _, r := range refs {
 		filter = disklog.AppendBlobRef(filter, r)
 	}
@@ -767,7 +768,7 @@ func TestRunFragmentFormat(t *testing.T) {
 		return [][]byte{entries, piece(fragBlock, kind, nil), root}
 	}
 	restarts := "\x00\x00\x00\x00\x01\x00\x00\x00"
-	if err := newTree(t, 128).LoadRun(roots[0], pieces("\x00\x01\x01bd"+restarts, fragBlock)); err != nil {
+	if err := newTree(t, 136).LoadRun(roots[0], pieces("\x00\x01\x01bd"+restarts, fragBlock)); err != nil {
 		t.Fatalf("rebuilt pieces: %v", err)
 	}
 	for name, block := range map[string]string{
@@ -776,24 +777,24 @@ func TestRunFragmentFormat(t *testing.T) {
 		"overlapping": "\x00\x01\x01bf\x00\x01\x01dg" + restarts,
 		"empty":       "\x00\x01\x01db" + restarts,
 	} {
-		if err := newTree(t, 128).LoadRun(roots[0], pieces(block, fragBlock)); !errors.Is(err, ErrMalformed) {
+		if err := newTree(t, 136).LoadRun(roots[0], pieces(block, fragBlock)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s fragment block: %v, want ErrMalformed", name, err)
 		}
 	}
 	for _, kind := range []byte{entryBlock, filterBlock, 3} {
-		if err := newTree(t, 128).LoadRun(roots[0], pieces("\x00\x01\x01bd"+restarts, kind)); !errors.Is(err, ErrMalformed) {
+		if err := newTree(t, 136).LoadRun(roots[0], pieces("\x00\x01\x01bd"+restarts, kind)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("fragment block marked %d: %v, want ErrMalformed", kind, err)
 		}
 	}
 	fragRoot := piece("\x00\x01\x01bd"+restarts, fragBlock, refs[:1])
-	shortFilter := piece(string(filter[2:2+9+64+4]), filterBlock, refs)
+	shortFilter := piece(string(filter[2:2+4+9+64+4]), filterBlock, refs)
 	for name, ps := range map[string][][]byte{
 		"entries after fragments": {piece("\x00\x01\x01bd"+restarts, fragBlock, nil), entries, root},
 		"no filter":               {entries, fragRoot},
 		"truncated filter":        {entries, frags, shortFilter},
-		"fragments after filter":  {entries, piece(string(filter[2:2+9+64+5]), filterBlock, nil), piece("\x00\x01\x01bd"+restarts, fragBlock, refs)},
+		"fragments after filter":  {entries, piece(string(filter[2:2+4+9+64+5+3]), filterBlock, nil), piece("\x00\x01\x01bd"+restarts, fragBlock, refs)},
 	} {
-		if err := newTree(t, 128).LoadRun(roots[0], ps); !errors.Is(err, ErrMalformed) {
+		if err := newTree(t, 136).LoadRun(roots[0], ps); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v, want ErrMalformed", name, err)
 		}
 	}

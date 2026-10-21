@@ -33,7 +33,7 @@ func sampleEdit() disklog.ManifestEdit {
 			{
 				Owner: 2, ReplayLSN: 88,
 				Added:  []disklog.BlobRef{{Segment: 6, Block: 1, LSN: 91}},
-				Bounds: []disklog.MergeBound{{Run: disklog.BlobRef{Segment: 6, Block: 1, LSN: 91}, Key: []byte("k")}},
+				Bounds: []disklog.MergeBound{{Run: disklog.BlobRef{Segment: 6, Block: 1, LSN: 91}, Key: []byte("k"), Dead: 3}},
 			},
 			{Owner: 1, ReplayLSN: 90, Removed: []disklog.BlobRef{{Segment: 4, Block: 2, LSN: 78, Entry: 3}}},
 		},
@@ -48,7 +48,7 @@ func editsEqual(a, b disklog.ManifestEdit) bool {
 	return a.BaseLSN == b.BaseLSN && a.NextSeq == b.NextSeq && slices.Equal(a.Segments, b.Segments) &&
 		slices.EqualFunc(a.Indexes, b.Indexes, func(x, y disklog.IndexEdit) bool {
 			return x.Owner == y.Owner && x.ReplayLSN == y.ReplayLSN && slices.Equal(x.Added, y.Added) && slices.Equal(x.Removed, y.Removed) &&
-				slices.EqualFunc(x.Bounds, y.Bounds, func(p, q disklog.MergeBound) bool { return p.Run == q.Run && bytes.Equal(p.Key, q.Key) })
+				boundsEqual(x.Bounds, y.Bounds)
 		})
 }
 
@@ -232,7 +232,7 @@ func TestManifestEditApplies(t *testing.T) {
 		BaseLSN: 90,
 		NextSeq: 11,
 		Indexes: []disklog.ManifestIndex{
-			{Owner: 2, ReplayLSN: 88, Runs: []disklog.BlobRef{{Segment: 6, Block: 1, LSN: 91}}},
+			{Owner: 2, ReplayLSN: 88, Runs: []disklog.BlobRef{{Segment: 6, Block: 1, LSN: 91}}, Bounds: e.Indexes[0].Bounds},
 			{Owner: 1, ReplayLSN: 90},
 		},
 		Segments: []disklog.SegmentUsage{
@@ -296,6 +296,8 @@ func TestLoadManifestStartsFromASnapshot(t *testing.T) {
 
 func FuzzDecodeManifest(f *testing.F) {
 	m := sampleManifest()
+	f.Add(disklog.AppendManifest(nil, &m))
+	m.Indexes[0].Bounds = []disklog.MergeBound{{Run: m.Indexes[0].Runs[0], Key: []byte("bound"), Dead: 2}}
 	f.Add(disklog.AppendManifest(nil, &m))
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, b []byte) {

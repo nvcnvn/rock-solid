@@ -9,6 +9,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 const replayMaxPiece = 4096
@@ -304,13 +305,13 @@ func differ(a, b *Index, originA func(core.LBA) core.LBA, chunks, blocks int, ep
 // writes commit.
 func TestReplayPastPendingWrites(t *testing.T) {
 	const chunks, blocks, rounds = 4, 16, 300
-	seeds := 200
+	n := 200
 	if testing.Short() {
-		seeds = 20
+		n = 20
 	}
 	var replayed, held, commits, moves, checkpoints, compactions int
-	for seed := range seeds {
-		p := newReplica(t, uint64(seed))
+	seeds.Run(t, 0, n, func(seed uint64) {
+		p := newReplica(t, seed)
 		for round := range rounds {
 			if p.r.IntN(12) == 0 {
 				p.epoch++
@@ -351,9 +352,12 @@ func TestReplayPastPendingWrites(t *testing.T) {
 		moves += p.moves
 		checkpoints += p.checkpoints
 		compactions += p.compactions
+	})
+	if !seeds.Default() {
+		return
 	}
 	t.Logf("%d seeds: replay applied %d records, %d of them already in the runs; %d commits, %d cleaner moves, %d checkpoints, %d compactions",
-		seeds, replayed, held, commits, moves, checkpoints, compactions)
+		n, replayed, held, commits, moves, checkpoints, compactions)
 	if held == 0 || moves == 0 || compactions == 0 {
 		t.Fatal("the workload missed a case")
 	}

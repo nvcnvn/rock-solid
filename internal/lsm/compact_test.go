@@ -68,7 +68,8 @@ func seqs(tr *Tree) []uint64 {
 }
 
 // A merge running over the oldest runs does not stop a merge of newer runs, the two share no
-// run, and installing them in either order leaves the runs in age order.
+// run, and installing them in either order leaves the runs in age order; both end once a
+// checkpoint names their output.
 func TestTwoMergesInstallInEitherOrder(t *testing.T) {
 	for _, olderFirst := range []bool{true, false} {
 		tr := newTree(t, 512)
@@ -107,7 +108,8 @@ func TestTwoMergesInstallInEitherOrder(t *testing.T) {
 			}
 			checkReads(t, tr, m, []string{"a0", "b3", "c"})
 		}
-		if tr.Runs() != 2 || len(tr.merges) != 0 {
+		f.checkpoint(t, tr, nil)
+		if tr.Runs() != 2 || len(tr.merges) != 0 || !older.Finished() || !newer.Finished() {
 			t.Fatalf("%d runs, %d merges running", tr.Runs(), len(tr.merges))
 		}
 	}
@@ -180,7 +182,8 @@ func TestSchedulerOrder(t *testing.T) {
 	}
 }
 
-// One merge worker by default: index B's merge waits until index A's installs; with two, both run.
+// One merge worker by default: index B's merge waits until a checkpoint names index A's output,
+// then takes worker 1 and so its lane; with two, both run, on workers 1 and 2.
 func TestSchedulerWorkers(t *testing.T) {
 	for _, workers := range []int{-1, disklog.MaxMergeWorkers + 1} {
 		if _, err := NewScheduler(SchedulerConfig{MergeWorkers: workers}); !errors.Is(err, ErrBadConfig) {
@@ -188,7 +191,9 @@ func TestSchedulerWorkers(t *testing.T) {
 		}
 	}
 	for _, workers := range []int{0, 2} {
-		a, b := treeWithRuns(t, 0, 6), treeWithRuns(t, 0, 4)
+		fa := newFakeLog()
+		a, b := newTree(t, 512), treeWithRuns(t, 0, 4)
+		flushRuns(t, fa, a, nil, "k", 6)
 		s, err := NewScheduler(SchedulerConfig{MergeWorkers: workers})
 		if err != nil {
 			t.Fatal(err)
@@ -196,7 +201,7 @@ func TestSchedulerWorkers(t *testing.T) {
 		s.Add(a)
 		s.Add(b)
 		ca := s.Next()
-		if ca == nil || ca.tree != a {
+		if ca == nil || ca.tree != a || ca.Worker() != 1 {
 			t.Fatalf("workers %d: first merge %+v", workers, ca)
 		}
 		cb := s.Next()
@@ -208,13 +213,17 @@ func TestSchedulerWorkers(t *testing.T) {
 			if err := s.Install(ca); err != nil {
 				t.Fatal(err)
 			}
+			if cb = s.Next(); cb != nil {
+				t.Fatal("index B's merge started before a manifest named index A's output")
+			}
+			fa.checkpoint(t, a, nil)
 			cb = s.Next()
 		}
-		want := 1
+		want, worker := 1, 1
 		if workers == 2 {
-			want = 2
+			want, worker = 2, 2
 		}
-		if cb == nil || cb.tree != b || s.Running() != want {
+		if cb == nil || cb.tree != b || s.Running() != want || cb.Worker() != worker {
 			t.Fatalf("workers %d: second merge %+v, %d running", workers, cb, s.Running())
 		}
 	}
@@ -261,14 +270,26 @@ func TestHoldsForwardCursors(t *testing.T) {
 
 // maxRunBytes leaves a block short of full by at most one entry: with 1 MiB pieces a run holds
 // about 56.8 GiB, and only pieces too small for two of the largest entries fall back to half full.
+// Merging in steps reserves each step's short pieces and fenced partition: 64 MiB steps of 1 MiB
+// pieces keep about 55 GiB, and 512-byte steps of 512-byte pieces, where four runs of 6,120 bytes
+// would need about 40 pieces for 27 references, refuse such a merge.
 func TestMaxRunBytes(t *testing.T) {
 	big, small := newTree(t, 1<<20), newTree(t, 512)
 	if got := big.maxRunBytes(); got < 56<<30 || got > 57<<30 {
 		t.Fatalf("1 MiB pieces: %d bytes", got)
 	}
 	room := 512 - pieceOverhead
-	if got, want := small.maxRunBytes(), ((room-8)/disklog.BlobRefSize-2)*(room/2)-cacheLineSize; got != want {
-		t.Fatalf("512-byte pieces: %d bytes, want %d", got, want)
+	budget := ((room-8)/disklog.BlobRefSize-2)*(room/2) - cacheLineSize - partHdr - partTrailer
+	if got := small.maxRunBytes(); got != budget {
+		t.Fatalf("512-byte pieces: %d bytes, want %d", got, budget)
+	}
+	big.cfg.StepBytes, small.cfg.StepBytes = 64<<20, 512
+	if got := big.maxRunBytes(); got < 54<<30 || got > 56<<30 {
+		t.Fatalf("1 MiB pieces in 64 MiB steps: %d bytes", got)
+	}
+	perStep := 2*room + 2*cacheLineSize + 21 + room
+	if got, want := small.maxRunBytes(), budget*(room/2)/(room/2+perStep); got != want || got >= 6120 {
+		t.Fatalf("512-byte pieces in 512-byte steps: %d bytes, want %d", got, want)
 	}
 }
 

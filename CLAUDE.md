@@ -2,6 +2,8 @@
 - Run `scripts/lint.sh` before every commit: gofmt, go vet, staticcheck, govulncheck and the
   dependency license check. Fix the code rather than suppressing a finding; when a
   `//lint:ignore` is right, give its reason.
+- Run `scripts/seeds.sh` before a change goes to review: every seeded test over its per-commit seeds.
+  A failure prints the command that replays it.
 - Everything but `cmd/` and `tools/` lives under `internal/`. Packages there are sans-IO, except
   `loop`, `driver/…`, `frontend/…` and `csi` (see "Modularity" in `docs/design.md`).
 - In a sans-IO package: no goroutine, channel, `select`, `sync` or `sync/atomic`; no clock, `os`,
