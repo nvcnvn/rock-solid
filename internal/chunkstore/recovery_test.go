@@ -19,8 +19,8 @@ const (
 )
 
 // node runs a chunk index over a disk log on a simulated disk, executing each action at once. It
-// is the owner a ChunkStore will be: it maps durable records, checkpoints the index's tree a piece
-// at a time and restores it from the manifest's runs plus replay. It hands the crash oracle each
+// submits raw entries, freezes and versions a Store request cannot choose, so it repeats the
+// Store's checkpoint and restore steps rather than running the Store. It hands the crash oracle each
 // round as its write goes to the disk and each Durable LSN, and checks every recovered index
 // against the oracle's block model.
 type node struct {

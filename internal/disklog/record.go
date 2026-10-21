@@ -464,3 +464,54 @@ func (d *DecodedRecord) Payload(i int) []byte {
 	}
 	return nil
 }
+
+// BlockCRC verifies the record header at the start of img, which must be logID's at offset in its segment, and returns the stored checksum of its data block i; when img holds less than the header, it returns ErrTruncated and the header's length in blocks.
+func BlockCRC(img []byte, logID uint64, offset uint32, i uint32) (crc uint32, headerBlocks uint32, err error) {
+	if len(img) < preludeSize {
+		return 0, 0, ErrTruncated
+	}
+	if string(img[:len(recordMagic)]) != recordMagic {
+		return 0, 0, ErrBadMagic
+	}
+	if binary.LittleEndian.Uint16(img[recVersion:]) != FormatVersion {
+		return 0, 0, ErrBadVersion
+	}
+	headerBlocks = uint32(binary.LittleEndian.Uint16(img[recHeaderBlocks:]))
+	if headerBlocks == 0 {
+		return 0, 0, ErrMalformed
+	}
+	hlen := int(headerBlocks) * core.BlockSize
+	if len(img) < hlen {
+		return 0, headerBlocks, ErrTruncated
+	}
+	h := img[:hlen]
+	if core.GetCRC32C(h[recCRC:]) != headerCRC(h, recCRC) {
+		return 0, headerBlocks, ErrBadChecksum
+	}
+	if binary.LittleEndian.Uint64(h[recLogID:]) != logID || binary.LittleEndian.Uint32(h[recOffset:]) != offset {
+		return 0, headerBlocks, ErrMismatch
+	}
+	pos := preludeSize
+	for range binary.LittleEndian.Uint32(h[recEntries:]) {
+		var n int
+		if pos < len(h) {
+			switch EntryKind(h[pos]) {
+			case EntryWrite, EntryPunch:
+				n = writeEntrySize
+			case EntryFreeze:
+				n = freezeEntrySize
+			case EntryBlob:
+				n = blobEntrySize
+			}
+		}
+		if n == 0 || pos+n > len(h) {
+			return 0, headerBlocks, ErrMalformed
+		}
+		pos += n
+	}
+	at := pos + int(i)*core.CRC32CSize
+	if i >= binary.LittleEndian.Uint32(h[recDataBlocks:]) || at+core.CRC32CSize > len(h) {
+		return 0, headerBlocks, ErrMalformed
+	}
+	return core.GetCRC32C(h[at:]), headerBlocks, nil
+}

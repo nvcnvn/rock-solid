@@ -24,3 +24,18 @@
 - **Where:** the TLC jar the `models/` CI job downloads, by checksum
 - **Why:** a TLC release can change what a configuration explores or how fast, so an unpinned checker would move every model's state counts and `ci` times without a spec change ([Testing strategy](design.md#testing-strategy)). The 1.8 line is a pre-release whose jar is rebuilt in place, so the models use no CommunityModules operator that needs it ([protocol models study](../studies/protocol-models/README.md)).
 - **Remove when:** never removed, only bumped. A bump reruns every `deep` configuration, which the nightly job does once the TLC version in its hash changes, and records the new state counts in the model-to-simulator map.
+
+## Workaround: writes larger than one record copied
+- **Where:** `writeItems` in `internal/chunkstore/store.go`
+- **Why:** a write larger than one record goes to the log as several items, each needing a pool buffer of exactly its blocks, and a pool buffer cannot be split, so the store copies such a write into one buffer per item although [chunk blocks are never copied](design.md#on-disk-format) otherwise.
+- **Remove when:** whole chunks go to [chunk slots](design.md#on-disk-format) in one record, and the frontends' receive path hands a larger write as item-sized buffers.
+
+## Workaround: writes waiting for room fail at once
+- **Where:** `housekeep` in `internal/chunkstore/store.go`
+- **Why:** with no cleaner, nothing frees a segment, so the store calls `FailStalled` as soon as group commit holds items for room, where the design fails them only once the cleaner has no victim ([Writers slow down](design.md#on-disk-format)).
+- **Remove when:** the Cleaner item lands and the store calls `FailStalled` only when the cleaner reports no victim.
+
+## Workaround: an index rebuild restarts the whole log
+- **Where:** `indexBroken` and `drain` in `internal/chunkstore/store.go`
+- **Why:** a rebuild replays the log through recovery, which only runs on a log that is not appending, so the store stops, closes its log and recovers it in rebuild mode, where the design rebuilds one index while the disk's other indexes serve ([The LSM tree](design.md#on-disk-format)). The chunk index is a disk's only index until MetaStore shards share it.
+- **Remove when:** a second index shares a disk (Raft storage in the disk log) and the log can replay its records to one index while it keeps appending.

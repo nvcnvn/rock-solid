@@ -64,3 +64,25 @@ func FuzzDecodeRecord(f *testing.F) {
 		}
 	})
 }
+
+// BlockCRC never panics, and on every header DecodeHeader accepts it finds each data block's
+// stored checksum.
+func FuzzBlockCRC(f *testing.F) {
+	rec := goldenRecord(f)
+	f.Add(rec.image, uint32(0))
+	f.Add(rec.image[:core.BlockSize], uint32(1))
+	f.Add(randomRecord(f, core.NewRand(6), rec.rec, 3).image, uint32(2))
+	f.Fuzz(func(t *testing.T, img []byte, i uint32) {
+		crc, _, err := BlockCRC(img, testPlace.LogID, testPlace.Offset, i)
+		h, herr := DecodeHeader(img, testPlace, math.MaxUint32, nil)
+		if herr != nil {
+			return
+		}
+		switch {
+		case i < h.Layout.DataBlocks && (err != nil || crc != h.DataCRC(int(i))):
+			t.Fatalf("block %d: checksum %x, %v; the header holds %x", i, crc, err, h.DataCRC(int(i)))
+		case i >= h.Layout.DataBlocks && err == nil:
+			t.Fatalf("block %d of %d: checksum %x", i, h.Layout.DataBlocks, crc)
+		}
+	})
+}
