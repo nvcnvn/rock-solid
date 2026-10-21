@@ -413,45 +413,51 @@ func (x *Index) Lookup(pool core.PoolID, c core.ChunkID, b uint16) (Extent, bool
 	return x.lookup(pool, c, 0, b)
 }
 
-// lookup reads block b of map version with one floor: an extent of that map, or, below its
-// extents, the map's epoch for a frozen version and the chunk's entry or absent version for the
-// live map.
+// lookup reads block b of map version with one floor.
 func (x *Index) lookup(pool core.PoolID, c core.ChunkID, version uint64, b uint16) (Extent, bool) {
 	k := x.extentKey(pool, c, version, b)
 	fk, v, ok := x.tree.FloorPrefix(k)
+	e, ok, entry := floorExtent(k, fk, v, ok, version, b)
+	if !entry {
+		return e, ok
+	}
+	if ch, ok := x.Chunk(pool, c); ok && ch.Version != 0 {
+		return e, true
+	}
+	return Extent{}, false
+}
+
+// floorExtent reads block b of map version from fk and v, the floor of k, the block's extent key:
+// an extent of that map, or, below its extents, the map's epoch for a frozen version and the
+// chunk's entry or absent version for the live map. Below the absent version it reports entry,
+// and the block reads as zeros when the chunk's entry has a version.
+func floorExtent(k, fk, v []byte, ok bool, version uint64, b uint16) (Extent, bool, bool) {
 	if !ok || !bytes.HasPrefix(fk, k[:chunkKeySize]) {
-		return Extent{}, false
+		return Extent{}, false, false
 	}
 	zeros := Extent{First: b, Count: 1}
 	switch len(fk) {
 	case KeySize:
 		e, ok := decodeExtent(fk, v)
 		if !ok || !bytes.HasPrefix(fk, k[:frozenKeySize]) {
-			return Extent{}, false
+			return Extent{}, false, false
 		}
 		if int(b) >= e.end() {
-			return zeros, true
+			return zeros, true, false
 		}
-		return e, true
+		return e, true, false
 	case frozenKeySize:
 		if !bytes.Equal(fk, k[:frozenKeySize]) {
-			return Extent{}, false
+			return Extent{}, false, false
 		}
-		if version != 0 {
-			return zeros, true
-		}
+		return zeros, version != 0, version == 0
 	case chunkKeySize:
 		if version != 0 || len(v) != 16 || binary.LittleEndian.Uint64(v) == 0 {
-			return Extent{}, false
+			return Extent{}, false, false
 		}
-		return zeros, true
-	default:
-		return Extent{}, false
+		return zeros, true, false
 	}
-	if ch, ok := x.Chunk(pool, c); ok && ch.Version != 0 {
-		return zeros, true
-	}
-	return Extent{}, false
+	return Extent{}, false, false
 }
 
 // LookupAt returns the extent holding block b of the chunk as the snapshot of epoch reads it.
@@ -468,9 +474,14 @@ func (x *Index) LookupAt(pool core.PoolID, c core.ChunkID, b uint16, epoch uint6
 // FrozenAt returns the frozen version a snapshot at epoch reads the chunk at, if any, 0 if the chunk was absent.
 func (x *Index) FrozenAt(pool core.PoolID, c core.ChunkID, epoch uint64) (uint64, bool) {
 	x.vers = x.frozen(x.vers[:0], pool, c)
+	return frozenAt(x.vers, epoch)
+}
+
+// frozenAt picks from vers, as frozen lists them, the version a snapshot at epoch reads.
+func frozenAt(vers []uint64, epoch uint64) (uint64, bool) {
 	best, bestEpoch, found := uint64(0), uint64(0), false
-	for i := 0; i < len(x.vers); i += 2 {
-		if v, e := x.vers[i], x.vers[i+1]; e >= epoch && (!found || e < bestEpoch) {
+	for i := 0; i < len(vers); i += 2 {
+		if v, e := vers[i], vers[i+1]; e >= epoch && (!found || e < bestEpoch) {
 			best, bestEpoch, found = v, e, true
 		}
 	}
@@ -485,27 +496,74 @@ func (x *Index) absent(pool core.PoolID, c core.ChunkID) bool {
 
 // frozen appends each frozen version of the chunk and its freeze epoch, the absent version 0 first.
 func (x *Index) frozen(dst []uint64, pool core.PoolID, c core.ChunkID) []uint64 {
-	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), 0)
-	if v, ok := x.tree.Get(x.key); ok {
-		dst = append(dst, 0, binary.LittleEndian.Uint64(v))
-	}
-	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), 1)
 	x.tree.Iter(&x.it)
-	for ok := x.it.SeekPrefixGE(x.key); ok && bytes.HasPrefix(x.it.Key(), x.key[:chunkKeySize]); {
-		k := x.it.Key()
-		if len(k) != frozenKeySize {
-			ok = x.it.Next()
+	dst, x.key = frozenIn(dst, &x.it, x.key, pool, c)
+	return dst
+}
+
+// frozenIn is frozen through it, with key as its buffer, seeking from each map's first key to the
+// next map's.
+func frozenIn(dst []uint64, it *lsm.Iter, key []byte, pool core.PoolID, c core.ChunkID) ([]uint64, []byte) {
+	key = binary.BigEndian.AppendUint64(appendChunkPrefix(key[:0], pool, c), 0)
+	for ok := it.SeekPrefixGE(key); ok && bytes.HasPrefix(it.Key(), key[:chunkKeySize]); {
+		k := it.Key()
+		if len(k) < frozenKeySize {
+			ok = it.Next()
 			continue
 		}
 		v := binary.BigEndian.Uint64(k[chunkKeySize:])
-		dst = append(dst, v, binary.LittleEndian.Uint64(x.it.Value()))
+		if len(k) == frozenKeySize {
+			dst = append(dst, v, binary.LittleEndian.Uint64(it.Value()))
+		}
 		if v == math.MaxUint64 {
 			break
 		}
-		x.key = binary.BigEndian.AppendUint64(x.key[:chunkKeySize], v+1)
-		ok = x.it.SeekPrefixGE(x.key)
+		key = binary.BigEndian.AppendUint64(key[:chunkKeySize], v+1)
+		ok = it.SeekPrefixGE(key)
 	}
-	return dst
+	return dst, key
+}
+
+// Reader reads blocks of one chunk, ascending, until the index next changes; reuse it across reads.
+type Reader struct {
+	it      lsm.Iter
+	key     []byte
+	vers    []uint64
+	pool    core.PoolID
+	chunk   core.ChunkID
+	version uint64
+	absent  bool
+}
+
+// Open opens r on the chunk's live map, which its Lookup reads as Index.Lookup does.
+func (x *Index) Open(r *Reader, pool core.PoolID, c core.ChunkID) {
+	x.tree.Iter(&r.it)
+	r.pool, r.chunk, r.version, r.absent = pool, c, 0, false
+}
+
+// OpenAt opens r on the chunk as the snapshot of epoch reads it, which its Lookup reads as Index.LookupAt does.
+func (x *Index) OpenAt(r *Reader, pool core.PoolID, c core.ChunkID, epoch uint64) {
+	x.Open(r, pool, c)
+	r.vers, r.key = frozenIn(r.vers[:0], &r.it, r.key, pool, c)
+	r.version, r.absent = frozenAt(r.vers, epoch)
+	r.absent = r.absent && r.version == 0
+}
+
+// Lookup returns the extent holding block b of the map r was opened on.
+func (r *Reader) Lookup(b uint16) (Extent, bool) {
+	if r.absent {
+		return Extent{}, false
+	}
+	r.key = AppendKey(r.key[:0], Key{Pool: r.pool, Chunk: r.chunk, Version: r.version, First: b})
+	fk, v, ok := r.it.FloorPrefix(r.key)
+	e, ok, entry := floorExtent(r.key, fk, v, ok, r.version, b)
+	if !entry {
+		return e, ok
+	}
+	if fk, v, ok := r.it.FloorPrefix(r.key[:chunkKeySize]); ok && len(fk) == chunkKeySize && len(v) == 16 && binary.LittleEndian.Uint64(v) != 0 {
+		return e, true
+	}
+	return Extent{}, false
 }
 
 // Extents appends the extents of the chunk's map at version, 0 for the live map, by first block.

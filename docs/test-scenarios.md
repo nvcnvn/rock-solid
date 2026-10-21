@@ -1182,9 +1182,16 @@ entries; counts are the bar, times on the shared VM):
 ## Chunk reader
 
 - A read of blocks 3, 4 and 700 of one chunk takes one reader: it probes the filters once with the
-  chunk's prefix and serves 4 by stepping forward from 3, as Pebble's `TrySeekUsingNext` does.
-- A read of ascending blocks searches each layer once, then steps; a block below the last one read
-  searches again.
+  chunk's prefix and serves 4 by stepping forward from 3, as Pebble's `TrySeekUsingNext` does, and
+  allocates nothing.
+- A read of ascending blocks searches each layer once, then steps; a block exactly 16 entries past
+  a layer's candidate steps, and one 17 past, or below it, searches that layer again.
+- A reader read after the index changes panics under `Check`.
+- [property] The reader reads every block as the per-block lookup does, live and at snapshot
+  epochs, with range or point removals, with filters on and off: the range-removal property's
+  readers, the metamorphic tests' lookups (each read ascending, then its first block again) and the
+  fuzzed index. In `internal/lsm`, one iterator's prefix floors over every probe, ascending with a
+  prefix seek between, then descending, equal the map model under the range-removal property.
 
 ## Heap merge
 
