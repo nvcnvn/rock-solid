@@ -194,6 +194,7 @@ func (l *Log) registerBlobs(r *round) {
 // was durable leave the live pieces.
 func (l *Log) namedDurable(named ManifestPos) {
 	l.namedLSN = max(l.namedLSN, named.LSN)
+	l.trimNamed()
 	if l.pinnedLSN != 0 && l.namedLSN > l.pinnedLSN {
 		l.pinnedLSN = 0
 		l.recount(nil, false)

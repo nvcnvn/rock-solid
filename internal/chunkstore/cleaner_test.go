@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
@@ -73,6 +74,12 @@ func TestCleanerKeepsAFullDiskWriting(t *testing.T) {
 	}
 	if per := float64(st.Copied) / float64(st.Freed); per >= float64(cleanGeo.SegmentBlocks-1) {
 		t.Fatalf("the cleaner copied %.1f blocks per segment it freed, a segment's worth", per)
+	}
+	for range 20 {
+		h.advance(core.Tick(time.Second / time.Microsecond))
+	}
+	if len(h.trims) == 0 {
+		t.Fatal("no freed segment was trimmed")
 	}
 	h.recoverStore(disklog.ModeOpen)
 	o.check(t, h, 0, 63, 0)

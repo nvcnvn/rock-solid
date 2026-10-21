@@ -1998,9 +1998,12 @@ TRIM (one `DiskTrim` per freed segment, `trim_rate` 128 MiB/s, time from `ctx.No
 | A crash with TRIMs queued | they are lost, and the segments are free by the table all the same |
 | A disk that is a file | no DiskTrim ever |
 
-- Open: the exact rate for a backlog older than 5 minutes; design.md says "as Pebble's delete
-  pacer does" (Pebble adds the backlog's bytes ÷ 5 minutes to its base rate).
-- Open: a failed DiskTrim (fail the log, or ignore).
+- A backlog older than 5 minutes adds its bytes ÷ 5 minutes to the base rate, held until the
+  backlog is gone (Pebble's constant-horizon drain): the 2,000 segments above go out at the base
+  rate for 5 minutes and then all by 10.
+- A failed DiskTrim is ignored: it costs only the discard, as a TRIM lost at a crash does.
+- A segment freed and allocated again while the checkpoint that frees it runs drops its TRIM too
+  (a cleaner crash seed found it trimmed after reuse, erasing new records).
 
 Invariants (simulator) and faults:
 

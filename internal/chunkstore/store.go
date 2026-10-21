@@ -822,8 +822,13 @@ func fetchIO(fi int32, part uint64) core.IOID {
 	return core.IOID(fetchIOBit | uint64(fi)<<1 | part)
 }
 
-// OnEvent takes a disk completion.
+// OnEvent takes a disk completion or the log's TRIM timer.
 func (s *Store) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
+	if ev.Kind == core.EvTimer && ev.Timer == disklog.TrimTimer && s.log != nil {
+		s.log.OnEvent(ctx, ev, &s.lout)
+		s.pump(ctx, out)
+		return
+	}
 	if ev.Kind != core.EvDiskDone {
 		return
 	}

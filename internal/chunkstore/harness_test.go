@@ -42,6 +42,22 @@ type harness struct {
 	crashAt  int
 	// noMerge leaves merges unrun.
 	noMerge bool
+	// trims is every TRIM executed, and timerAt the time the log's TRIM timer was last armed for.
+	trims   []core.Action
+	timerAt core.Tick
+}
+
+// advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
+func (h *harness) advance(d core.Tick) {
+	h.t.Helper()
+	h.ctx.Now += d
+	h.ctx.Raw += d
+	if h.timerAt != 0 && h.timerAt <= h.ctx.Now {
+		h.timerAt = 0
+		h.s.OnEvent(&h.ctx, &core.Event{Kind: core.EvTimer, Timer: disklog.TrimTimer}, &h.out)
+		h.take()
+	}
+	h.settle()
 }
 
 var errCrash = errors.New("crash")
@@ -109,6 +125,13 @@ func (h *harness) step() bool {
 	h.executed++
 	a := h.queue[0]
 	h.queue = h.queue[1:]
+	if a.Kind == core.ActSetTimer {
+		h.timerAt = a.At
+		return true
+	}
+	if a.Kind == core.ActDiskTrim {
+		h.trims = append(h.trims, a)
+	}
 	if a.Kind == core.ActDiskWrite {
 		h.noteWrite(&a)
 	}

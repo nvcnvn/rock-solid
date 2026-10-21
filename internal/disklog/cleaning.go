@@ -105,6 +105,8 @@ func (l *Log) Free(ctx *core.Context, segment uint32, out *Output) error {
 	l.usage[segment] = SegmentUsage{}
 	l.changed[segment/64] |= 1 << (segment % 64)
 	l.free[segment/64] |= 1 << (segment % 64)
+	l.noteFreed(segment)
+	l.now = ctx.Now
 	l.startRounds(ctx, out)
 	return nil
 }

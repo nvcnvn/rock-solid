@@ -2,6 +2,7 @@ package disklog
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -54,6 +55,10 @@ type Config struct {
 	Reserve uint32
 	// NoReserve runs the log with no reserve, which only tests ask for.
 	NoReserve bool
+	// TrimRate is trim_rate, the bytes a second of freed segments the log discards; 0 is DefaultTrimRate.
+	TrimRate uint64
+	// NoTrim never discards a freed segment, as on a disk that is a file, where punching holes would undo writing it in full.
+	NoTrim bool
 }
 
 const (
@@ -453,6 +458,7 @@ type checkpoint struct {
 	size          uint64
 	piece         Ticket
 	final         bool
+	trims         []uint32
 }
 
 // chainEntry is a snapshot or an edit a last piece lists: its pieces, its own last piece
@@ -503,6 +509,8 @@ type Log struct {
 	written    uint64
 	writtenAt  []uint64
 	pieces     pieceSet
+	trims      trimState
+	now        core.Tick
 	dying      []dyingPiece
 	namedLSN   uint64
 	pinnedLSN  uint64
@@ -588,6 +596,7 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		lanes:      make([]lane, laneMeta+1+workers),
 		rounds:     make([]round, cfg.CommitDepth),
 	}
+	l.trims.pacer = trimPacer{rate: float64(cmp.Or(cfg.TrimRate, DefaultTrimRate)), segBytes: float64(uint64(sb.SegmentBlocks) * core.BlockSize)}
 	l.lanes[laneHot].stream, l.lanes[laneCold].stream = Hot, Cold
 	l.lanes[laneClean].stream, l.lanes[laneClean].n = Cold, 1
 	for i := laneMeta; i < len(l.lanes); i++ {
@@ -918,7 +927,8 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Runs: slices.Clone(ix.Runs), Bounds: bounds}
 	}
 	m.Segments = l.usageRows()
-	cp := &checkpoint{manifest: m, changed: slices.Clone(l.changed), replayAtBegin: l.replayBytes, heldAtBegin: l.heldBytes}
+	cp := &checkpoint{manifest: m, changed: slices.Clone(l.changed), replayAtBegin: l.replayBytes, heldAtBegin: l.heldBytes, trims: l.trims.waiting}
+	l.trims.waiting = nil
 	for w, set := range l.changed {
 		for ; set != 0; set &= set - 1 {
 			s := w*64 + bits.TrailingZeros64(set)
@@ -1072,6 +1082,7 @@ func (l *Log) dropCheckpoint(err error, out *Output) {
 		l.changed[w] |= set
 	}
 	earlier := l.cp.earlier
+	l.trims.waiting = append(l.trims.waiting, l.cp.trims...)
 	l.cp = nil
 	for _, ref := range earlier {
 		l.dropPiece(ref)
@@ -1079,11 +1090,18 @@ func (l *Log) dropCheckpoint(err error, out *Output) {
 	out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: err})
 }
 
-// OnEvent advances rounds on disk completions.
+// OnEvent advances rounds on disk completions and paces TRIMs on TrimTimer.
 func (l *Log) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
-	if ev.Kind == core.EvDiskDone {
+	l.now = ctx.Now
+	switch {
+	case ev.Kind == core.EvTimer && ev.Timer == TrimTimer:
+		l.trims.timerAt = 0
+	case ev.Kind == core.EvDiskDone && l.trimDone(ev.IO):
+		l.startRounds(ctx, out)
+	case ev.Kind == core.EvDiskDone:
 		l.diskDone(ctx, ev.IO, ev.Err, out)
 	}
+	l.pumpTrims(out)
 }
 
 func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out *Output) {
@@ -1272,6 +1290,9 @@ func (l *Log) checkpointProgress(r *round, out *Output) {
 			}
 			l.state = cp.state
 			l.live = append(l.live, liveChain{pos: l.manifest, entries: l.chain, replay: replayFloor(&cp.manifest)})
+			for _, s := range cp.trims {
+				l.trims.named = append(l.trims.named, namedTrim{segment: s, lsn: l.manifest.LSN})
+			}
 			l.cp = nil
 			out.Events = append(out.Events, Event{Kind: CheckpointDone, Manifest: l.manifest})
 			return
@@ -1401,7 +1422,10 @@ func (l *Log) place(i int) (target, placement) {
 		return target{lane: i, segment: c.segment, seq: c.seq, offset: c.next}, placeReady
 	}
 	seg, ok := l.firstFree()
-	if !ok || ordinary && l.freeCount() <= l.reserve {
+	switch {
+	case !ok && len(l.trims.issued) > 0:
+		return target{}, placeWait
+	case !ok || ordinary && l.freeCount() <= l.reserve:
 		return target{}, placeNoRoom
 	}
 	return target{lane: i, segment: seg, seq: l.nextSeq, offset: 1, roll: true}, placeReady
@@ -1415,10 +1439,14 @@ func (l *Log) freeCount() uint32 {
 	return uint32(n)
 }
 
+// firstFree is the lowest free segment no TRIM is discarding: a segment allocated again waits for
+// one issued, so a late discard cannot erase its new records.
 func (l *Log) firstFree() (uint32, bool) {
 	for w, bitsSet := range l.free {
-		if bitsSet != 0 {
-			return uint32(w*64 + bits.TrailingZeros64(bitsSet)), true
+		for ; bitsSet != 0; bitsSet &= bitsSet - 1 {
+			if s := uint32(w*64 + bits.TrailingZeros64(bitsSet)); len(l.trims.issued) == 0 || !l.trimmed(s) {
+				return s, true
+			}
 		}
 	}
 	return 0, false
@@ -1537,6 +1565,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 
 	if t.roll {
 		l.free[t.segment/64] &^= 1 << (t.segment % 64)
+		l.reuseTrim(t.segment)
 		l.streams[t.segment] = ln.stream
 		l.nextSeq++
 	}
