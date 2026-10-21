@@ -47,7 +47,7 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) uint64 {
 // It returns the difference, if any.
 func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
 	r := core.NewRand(seed)
-	h := geoHarness(t, cleanConfig(), cleanGeo)
+	h := newHarnessOn(t, cleanConfig(), cleanGeo)
 	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 	h.crashAt = int(r.Range(200, 4000))
 	var epoch uint64

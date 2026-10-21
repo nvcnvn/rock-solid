@@ -39,17 +39,33 @@ func buildData(t testing.TB, entries []Entry, payloads [][]byte) []byte {
 	return data
 }
 
+// encodeRecord encodes a record whose payloads are its entries', a slot write's being the slot's
+// data, which the record's image leaves out; payloads holds nil for it in the result.
 func encodeRecord(t testing.TB, rec Record, entries []Entry, payloads [][]byte) testRecord {
 	t.Helper()
 	lay, err := LayoutOf(entries)
 	if err != nil {
 		t.Fatal(err)
 	}
-	img, err := AppendRecord(nil, rec, entries, buildData(t, entries, payloads))
+	payloads = slices.Clone(payloads)
+	var slots [][]byte
+	for i := range entries {
+		if entries[i].Kind == EntrySlot {
+			slots, payloads[i] = append(slots, payloads[i]), nil
+		}
+	}
+	data := buildData(t, entries, payloads)
+	var crcs []uint32
+	for _, b := range append([][]byte{data}, slots...) {
+		for i := 0; i < len(b); i += core.BlockSize {
+			crcs = append(crcs, core.CRC32C(b[i:i+core.BlockSize]))
+		}
+	}
+	img, err := AppendHeader(nil, rec, entries, crcs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return testRecord{rec: rec, entries: entries, payloads: payloads, layout: lay, image: img}
+	return testRecord{rec: rec, entries: entries, payloads: payloads, layout: lay, image: append(img, data...)}
 }
 
 func randomChunk(r *core.Rand) core.ChunkID {

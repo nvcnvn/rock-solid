@@ -28,7 +28,7 @@ func drain(p *trimPacer, now core.Tick) []core.Tick {
 func TestTrimsArePaced(t *testing.T) {
 	p := trimPacer{rate: DefaultTrimRate, segBytes: 64 << 20}
 	for s := range uint32(10) {
-		p.push(s+1, 0)
+		p.push(s+1, 0, false)
 	}
 	at := drain(&p, 0)
 	for i, a := range at {
@@ -47,7 +47,7 @@ func TestTrimsArePaced(t *testing.T) {
 func TestATrimBacklogClearsWithinTenMinutes(t *testing.T) {
 	p := trimPacer{rate: DefaultTrimRate, segBytes: 64 << 20}
 	for s := range uint32(2000) {
-		p.push(s+1, 0)
+		p.push(s+1, 0, false)
 	}
 	at := drain(&p, 0)
 	if last := at[len(at)-1]; len(at) != 2000 || last > 600*second || last < 400*second {

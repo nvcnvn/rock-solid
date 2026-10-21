@@ -57,7 +57,7 @@ func overwrite(h *harness, o *byteOracle, r *core.Rand, chunks []core.ChunkID, b
 // segments free, so no write fails, every block reads back, the usage table keeps the index's
 // counts, and a restart reads the same.
 func TestCleanerKeepsAFullDiskWriting(t *testing.T) {
-	h := geoHarness(t, cleanConfig(), cleanGeo)
+	h := newHarnessOn(t, cleanConfig(), cleanGeo)
 	r := core.NewRand(7)
 	chunks := []core.ChunkID{chunk(1), chunk(2)}
 	o := newByteOracle()
@@ -94,7 +94,7 @@ func TestCleanerKeepsAFullDiskWriting(t *testing.T) {
 func primed(t *testing.T) (*harness, *byteOracle) {
 	cfg := cleanConfig()
 	cfg.CleanFree = -1
-	h := geoHarness(t, cfg, cleanGeo)
+	h := newHarnessOn(t, cfg, cleanGeo)
 	r := core.NewRand(5)
 	o := newByteOracle()
 	chunks := []core.ChunkID{chunk(1), chunk(2)}
@@ -184,7 +184,7 @@ func TestAPassFinishesOnADiskFilledToItsReserve(t *testing.T) {
 // Writes of new blocks fill the disk with live data: no victim gains space, and only then do
 // writes waiting for room fail with NoSpace.
 func TestWritesFailOnlyWhenNoVictimGainsSpace(t *testing.T) {
-	h := geoHarness(t, cleanConfig(), cleanGeo)
+	h := newHarnessOn(t, cleanConfig(), cleanGeo)
 	for i := 0; ; i++ {
 		id := h.write(chunk(uint32(10+i/64)), uint32(i%64)*core.BlockSize, fill(core.BlockSize, byte(i)), 0)
 		h.settle()
@@ -199,6 +199,37 @@ func TestWritesFailOnlyWhenNoVictimGainsSpace(t *testing.T) {
 			return
 		}
 	}
+}
+
+// A whole chunk's record header, which holds the checksums of its slot, stays live while the chunk
+// does: the usage table counts the slot's blocks against the header's segment, so the cleaner
+// never frees it, and the chunk reads back after every pass.
+func TestTheCleanerKeepsTheHeadersOfLiveSlotWrites(t *testing.T) {
+	cfg := cleanConfig()
+	cfg.Log.MaxReplayBytes = 64 * core.BlockSize
+	h := newHarnessOn(t, cfg, slotGeometry)
+	whole := []core.ChunkID{{Volume: 3, Inode: 1, Index: 1}, {Volume: 3, Inode: 1, Index: 2}}
+	for i, c := range whole {
+		h.sync(h.write(c, 0, pattern(uint64(i), core.ChunkSize), 0))
+	}
+	o := newByteOracle()
+	for i := range 300 {
+		data := fill(64*core.BlockSize, byte(i))
+		id := h.write(chunk(1), 0, data, 0)
+		h.settle()
+		h.merge()
+		o.apply(t, chunk(1), 0, uint32(len(data)), data, h.ok(id), 0)
+	}
+	h.clean(1000)
+	for i, c := range whole {
+		if got := h.readNow(c, 0, core.ChunkSize); !bytes.Equal(got, pattern(uint64(i), core.ChunkSize)) {
+			t.Fatalf("whole chunk %d does not read back after cleaning", i)
+		}
+	}
+	if h.s.CleanStats().Freed == 0 {
+		t.Fatal("the cleaner freed nothing")
+	}
+	o.check(t, h, 0, 63, 0)
 }
 
 // A pass takes the 4 best victims by cost-benefit among the segments it may clean whose copy

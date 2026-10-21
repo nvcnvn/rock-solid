@@ -19,7 +19,7 @@ func newIndex(t testing.TB) *Index {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewIndex(tree)
+	return NewIndex(tree, 0)
 }
 
 // record is a durable record of entries at LBA lba with one header block.

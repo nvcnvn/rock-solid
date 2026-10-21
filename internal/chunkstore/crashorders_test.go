@@ -32,7 +32,7 @@ func newStage(t *testing.T, noTrim, lowest bool) *stage {
 	cfg.Log.MaxReplayBytes = 40 * core.BlockSize
 	cfg.Log.NoTrim = noTrim
 	cfg.CleanFree = -1
-	h := geoHarness(t, cfg, cleanGeo)
+	h := newHarnessOn(t, cfg, cleanGeo)
 	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 	st := &stage{h: h}
 	for range 150 {

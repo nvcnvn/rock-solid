@@ -427,7 +427,7 @@ func (m *metaIndex) newTree() *lsm.Tree {
 }
 
 func (m *metaIndex) newIndex(tr *lsm.Tree) *Index {
-	x := NewIndex(tr)
+	x := NewIndex(tr, 0)
 	x.pointRemovals = m.set.points
 	return x
 }

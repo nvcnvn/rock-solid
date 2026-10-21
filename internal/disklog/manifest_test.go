@@ -191,7 +191,7 @@ func TestManifestRejectsBadSegmentRows(t *testing.T) {
 		"segment 0":       func(u []disklog.SegmentUsage, _ uint64) { u[0].Segment = 0 },
 		"out of order":    func(u []disklog.SegmentUsage, _ uint64) { u[0].Segment = 7 },
 		"listed twice":    func(u []disklog.SegmentUsage, _ uint64) { u[1].Segment = u[0].Segment },
-		"unknown state":   func(u []disklog.SegmentUsage, _ uint64) { u[1].State = 3 },
+		"unknown state":   func(u []disklog.SegmentUsage, _ uint64) { u[1].State = disklog.SegmentSlot + 1 },
 		"newer than base": func(u []disklog.SegmentUsage, base uint64) { u[1].Newest = base + 1 },
 		"free with a count": func(u []disklog.SegmentUsage, _ uint64) {
 			u[1].State, u[1].Live, u[1].Newest = disklog.SegmentFree, 1, 0

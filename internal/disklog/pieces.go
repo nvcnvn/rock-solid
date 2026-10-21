@@ -122,6 +122,16 @@ func (l *Log) Usage(segment uint32) (SegmentUsage, Stream) {
 	return u, l.streams[segment]
 }
 
+// slotBlocksOf is the blocks the slot writes among entries put in chunk slots, which the segment
+// of their record counts live too: its header holds their checksums.
+func slotBlocksOf(entries []Entry) uint32 {
+	var n uint64
+	for i := range entries {
+		n += entries[i].slotBlocks()
+	}
+	return uint32(n)
+}
+
 // AddLive changes segment's live blocks by delta, as the owner of the index whose records it holds reports their counts changing past the blocks each record wrote; ErrMalformed for a segment that is not used or a count that would go below zero.
 func (l *Log) AddLive(segment uint32, delta int) error {
 	if segment == 0 || segment >= l.sb.SegmentCount {
@@ -248,7 +258,7 @@ func (l *Log) recount(chunk []uint32, all bool) {
 	l.pieces.coverage(meta)
 	for s := uint32(1); s < l.sb.SegmentCount; s++ {
 		u := &l.usage[s]
-		if u.State == SegmentFree {
+		if u.State == SegmentFree || u.State == SegmentSlot {
 			continue
 		}
 		live := meta[s]

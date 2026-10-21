@@ -50,6 +50,23 @@ func (g Geometry) LBA(s, b uint32) core.LBA {
 	return core.LBA(s)*core.LBA(g.SegmentBlocks) + core.LBA(b)
 }
 
+// SlotsPerSegment is how many chunk slots a slot segment holds: as many whole chunks as fit, none in segments smaller than a chunk.
+func (g Geometry) SlotsPerSegment() uint16 { return uint16(g.SegmentBlocks / core.BlocksPerChunk) }
+
+// SlotLBA is the address of the first block of chunk slot slot of segment s; a slot segment has no header.
+func (g Geometry) SlotLBA(s uint32, slot uint16) core.LBA {
+	return g.LBA(s, uint32(slot)*core.BlocksPerChunk)
+}
+
+// SlotOf is the segment and slot whose first block is lba, if lba starts a slot.
+func (g Geometry) SlotOf(lba core.LBA) (uint32, uint16, bool) {
+	s, b := uint64(lba)/uint64(g.SegmentBlocks), uint64(lba)%uint64(g.SegmentBlocks)
+	if s == 0 || s >= uint64(g.SegmentCount) || b%core.BlocksPerChunk != 0 {
+		return 0, 0, false
+	}
+	return uint32(s), uint16(b / core.BlocksPerChunk), true
+}
+
 // SuperblockLBA is the address of the superblock: the first block of segment 0.
 func (g Geometry) SuperblockLBA() core.LBA { return 0 }
 

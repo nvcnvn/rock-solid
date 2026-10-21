@@ -17,6 +17,7 @@ const (
 type queuedTrim struct {
 	segment uint32
 	at      core.Tick
+	slot    bool
 }
 
 // trimPacer paces the TRIMs of freed segments at a base rate, one segment per discard, as
@@ -30,8 +31,8 @@ type trimPacer struct {
 	nextAt   core.Tick
 }
 
-func (p *trimPacer) push(seg uint32, now core.Tick) {
-	p.queue = append(p.queue, queuedTrim{segment: seg, at: now})
+func (p *trimPacer) push(seg uint32, now core.Tick, slot bool) {
+	p.queue = append(p.queue, queuedTrim{segment: seg, at: now, slot: slot})
 }
 
 // drop takes seg out of the queue, as when it is allocated again before its TRIM ran.
@@ -41,12 +42,12 @@ func (p *trimPacer) drop(seg uint32) {
 
 // next is the segment to discard now, if its turn has come, and otherwise when to ask again, 0
 // with nothing queued.
-func (p *trimPacer) next(now core.Tick) (uint32, bool, core.Tick) {
+func (p *trimPacer) next(now core.Tick) (queuedTrim, bool, core.Tick) {
 	if len(p.queue) == 0 {
-		return 0, false, 0
+		return queuedTrim{}, false, 0
 	}
 	if now < p.nextAt {
-		return 0, false, p.nextAt
+		return queuedTrim{}, false, p.nextAt
 	}
 	var backlog float64
 	for _, q := range p.queue {
@@ -59,10 +60,10 @@ func (p *trimPacer) next(now core.Tick) (uint32, bool, core.Tick) {
 	} else {
 		p.extra = max(p.extra, backlog/backlogAge.Duration().Seconds())
 	}
-	seg := p.queue[0].segment
+	q := p.queue[0]
 	p.queue = p.queue[1:]
 	p.nextAt = now + core.Tick(p.segBytes/(p.rate+p.extra)*1e6)
-	return seg, true, 0
+	return q, true, 0
 }
 
 // trimState is a freed segment's way to its TRIM: freed before the checkpoint that will record it
@@ -117,7 +118,7 @@ func (l *Log) trimNamed() {
 	k := 0
 	for _, q := range t.named {
 		if q.lsn <= l.namedLSN {
-			t.pacer.push(q.segment, l.now)
+			t.pacer.push(q.segment, l.now, false)
 			continue
 		}
 		t.named[k] = q
@@ -129,7 +130,7 @@ func (l *Log) trimNamed() {
 // pumpTrims issues the TRIMs whose turn has come and arms the timer for the next.
 func (l *Log) pumpTrims(out *Output) {
 	for l.err == nil {
-		seg, ok, wake := l.trims.pacer.next(l.now)
+		q, ok, wake := l.trims.pacer.next(l.now)
 		if !ok {
 			if wake != 0 && wake != l.trims.timerAt {
 				l.trims.timerAt = wake
@@ -138,9 +139,26 @@ func (l *Log) pumpTrims(out *Output) {
 			return
 		}
 		io := l.io()
-		l.trims.issued = append(l.trims.issued, issuedTrim{segment: seg, io: io})
-		out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskTrim, IO: io, LBA: l.sb.LBA(seg, 0), Len: uint64(l.sb.SegmentBlocks) * core.BlockSize})
+		if q.slot {
+			l.slots.trims = append(l.slots.trims, trimIO{io: io, segment: q.segment})
+		} else {
+			l.trims.issued = append(l.trims.issued, issuedTrim{segment: q.segment, io: io})
+		}
+		out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskTrim, IO: io, LBA: l.sb.LBA(q.segment, 0), Len: uint64(l.sb.SegmentBlocks) * core.BlockSize})
 	}
+}
+
+// trimSlotSegment queues the TRIM of a slot segment freed with its last slot, which stays out of
+// the free segments until the write of zeros that follows the TRIM completes; a disk that is a
+// file skips the TRIM and writes the zeros at once.
+func (l *Log) trimSlotSegment(segment uint32, out *Output) {
+	if !l.cfg.NoTrim {
+		l.trims.pacer.push(segment, l.now, true)
+		return
+	}
+	io := l.io()
+	l.slots.trims = append(l.slots.trims, trimIO{io: io, segment: segment, zeroing: true})
+	out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskWrite, IO: io, LBA: l.sb.LBA(segment, 0), Buf: l.slots.zero, Len: core.BlockSize})
 }
 
 // trimDone takes a TRIM's completion; a failed TRIM costs only the discard, as one lost at a crash
