@@ -1235,7 +1235,8 @@ version 0 outright; the column below is what it read when the writer left that f
 
 The byte-range oracle applies every acknowledged write's and punch's bytes in version order;
 after every step, every block, live and at every snapshot epoch, must equal it. A chunk is 1,024
-blocks. "Pending" is a write whose record is not yet durable.
+blocks. "Pending" is a write whose record is not yet durable. Tests feed requests and disk
+completions to `chunkstore.Store` and read the records it writes back from the disk actions.
 
 Byte ranges to whole blocks:
 
@@ -1246,119 +1247,109 @@ Byte ranges to whole blocks:
 | Write(off 4,000, 200 B) | blocks 0 and 1, both merged | bytes 4,000-4,199 set, rest zeros |
 | Write(off 3 × 4,096 + 10, 3 × 4,096 B) | 4 blocks: 2 merged edges, 2 whole | exact range |
 | Punch(off 0, 8,192) | one punch entry, blocks 0-1 | zeros |
-| Punch(off 100, 8,192) over written blocks 0-2 | one record, one version: block 1 a punch entry, blocks 0 and 2 merged with zeros as write entries | 100..8,291 zeros, the rest unchanged |
+| Punch(off 100, 8,192) over written blocks 0-2 | one version: block 1 a punch entry, blocks 0 and 2 merged with zeros as write entries, 2 base reads | 100..8,291 zeros, the rest unchanged |
 | Punch(off 0, 4 MiB) | whole-chunk punch, tombstone | zeros; the chunk entry stays with the new version |
-| Punch of a chunk that does not exist | succeeds | zeros |
+| Punch of a chunk that does not exist | nothing; version 0 | zeros |
 | Read(off 100, 10 B) of a written block | | those 10 bytes |
-| Read of a chunk never written | | zeros |
+| Read of a chunk never written | | zeros, and no chunk entry |
 | Write after a tombstone | the version continues past the tombstone's | the written bytes, other blocks zeros |
 
-API edges (Open where noted):
+API edges (`TestAPIEdges`):
 
-- A write or punch running past 4 MiB is refused with no disk action. Open: its error, and
-  whether a write is cut at the chunk's end by the caller or refused.
-- Open: a zero-length write, punch or read (refused, or a no-op that returns the current
-  version).
-- Open: the version a punch returns (the new version, as a write does, by design.md's "Every
-  write and punch returns a new version"), and whether a punch of a chunk that does not exist
-  takes one.
-- Open: `expectVer` = 0 on an absent chunk (create-if-absent) succeeds and on an existing chunk
-  fails.
+- A write or punch running past 4 MiB, and a zero-length write, punch or read, is refused with
+  `ErrRange` and no disk action; the store frees a refused write's buffer.
+- A punch returns its new version; a punch of a chunk with no version returns 0.
+- `expectVer` = 0 on an absent chunk creates it; on an existing chunk it fails with `ErrVersion`.
+- `Seal` returns `ErrSeal`.
 
 Merging against the newest ordered version (the [sub-block writes spike](../spikes/sub-block-writes/)):
 
-- W1 = Write(off 0, 10 B 'a') pending, then W2 = Write(off 5, 10 B 'b'): W2's base is W1's merged
-  block, so the block reads `aaaaabbbbbbbbbb` then zeros. Merging against the committed version
-  (zeros) would lose W1's bytes: the spike's M2 lost bytes on 500 of 500 seeds.
+- W1 = Write(off 0, 10 B 'a') pending, then W2 = Write(off 5, 10 B 'b'): W2's base is W1's
+  pending block, with no base read, so the block reads `aaaaabbbbbbbbbb` then zeros.
 - [property] M1 and M9 as a regression bar: seeds 0-499, 400 steps, two clients with 8 writes
-  pipelined each, 1 byte to 3 blocks at random offsets: 0 seeds wrong.
-- A base read from disk checks the block's CRC32C. A base whose CRC fails is never merged into a
-  new version.
+  pipelined each, 1 byte to 3 blocks at random offsets in 4 blocks: 0 seeds wrong. Merging
+  against the committed version instead (M2, a plant) loses bytes on each of seeds 0-19.
+- A base read from disk checks the block's CRC32C. A base that fails it, or whose read fails
+  with Io, is never merged: the write fails with `ErrBadChecksum` or the disk's error, logs
+  nothing, and the chunk's next write goes on; a read of that block fails the same way.
 - A base read in flight holds the chunk's later operations: W1 partial (base on disk), then W2
-  whole-block to the same block, then W3 to another chunk. W3 goes out at once; W2 is ordered and
-  logged after W1, so the block ends as W2. The trace shows no write of C before W1's base read
-  completes.
-- Open: what a single-node store does when a base read fails, by CRC or with Io (the replicated
-  design fetches it from another member), and whether the operations queued behind it fail or go
-  on. It must never carry rot into a new version.
-- Open: the per-loop cache of recently merged blocks (design, Data layer) is unmeasured; whether
-  it is part of this item.
+  whole-block to the same block, then W3 to another chunk. W3's round goes out at once; no record
+  of C is written before W1's base read completes, W2 is ordered after W1, and the block ends as
+  W2.
 
-Versions (fixed here: 32-bit interval over a 32-bit counter):
+Versions (32-bit interval over a 32-bit counter):
 
 | State | Next write's version |
 | --- | --- |
 | Chunk with no version, local interval 1 | (1, 1) = 0x0000000100000001 |
-| Chunk at (1, 7), pending or committed | (1, 8) |
+| Chunk at (1, 7) committed; at (1, 6) with (1, 7) pending | (1, 8) |
 | Chunk at (1, 0xFFFFFFFF) | the local interval is raised: (2, 1) |
-| Another chunk at (1, 5), after that raise | (2, 1), above (1, 5) |
+| Another chunk at (1, 5), and a chunk with no version, after that raise | (2, 1) |
 
 - Version 0 is the absent chunk and is never assigned.
-- No two writes of a chunk get one version (simulator invariant), across restarts too.
-- Open: where the single-node interval number is kept so a restart never reuses a version that a
-  lost, unacknowledged write held; the replicated design takes a new interval on restart.
-- Open: whether the raise waits for the chunk's pending writes to become durable, as the
-  replicated primary lets its PG's pending writes commit first.
-- `expectVer`: Write with expectVer = the chunk's version succeeds; any other value fails with
-  no disk action. Open: whether it compares with the newest ordered version or the newest
-  committed one, and its error.
-- `atVer`: a read at a frozen version returns that version's bytes and never waits for a writer;
-  a read at an old version no snapshot pins is an error. Open: its error.
-- A read without `atVer` while W is pending returns the previous version's blocks at once.
+- No two durable writes of a chunk get one version, across restarts too: the interval starts at
+  1 at each open and never drops below the interval of the version it increments, so a restart
+  reuses only a version no durable record holds.
+- `expectVer`: compared with the newest ordered version, so with W1 pending at v, expectVer = v
+  succeeds and expectVer = the committed version fails with `ErrVersion`.
+- `atVer`: a read at a frozen version returns that version's bytes; a read at version 0 of a
+  chunk frozen absent reads zeros; a read at a version no snapshot pins is `ErrNoVersion`.
+- A read without `atVer` while W is pending issues its block reads at once and returns the
+  previous version's blocks.
 
 Commit and mapping:
 
 - A write is mapped when its record is durable, and a chunk's writes are mapped in version order
-  (the chunk epochs spike's R2 failed 200 of 200 seeds out of order). The log reports Durable in
-  LSN order, so the case that matters is a write of several items: a whole-chunk W1 of 5 items,
-  then a 1-block W2 to the same chunk whose record becomes durable before W1's last item. W2 is
-  mapped after W1. Open: whether W2's acknowledgment waits for W1's; if it does not, a read after
-  W2's acknowledgment misses W2 until W1 completes.
-- Snapshot epochs on the writer side: the first write after a cut to a chunk at version v puts
-  freeze(v, epoch) in its record; with a pending W1 at epoch 1 and a cut, W2 at epoch 2 freezes
-  W1's version; a second write at epoch 2 carries no freeze; a chunk with no version gets a freeze
-  of version 0 (Absent freeze), and so does a punch that gives an absent chunk its first version;
-  in a volume whose snapshot epoch is 0, a chunk's first write carries no freeze.
-- Open: whether a punch of a never-written chunk logs a record at all.
-- Open: the `ChunkStore` interface carries no snapshot epoch, so how the single-node store learns
-  a write's epoch is unstated.
+  (the chunk epochs spike's R2 failed 200 of 200 seeds out of order), each answered when mapped.
+  A lane takes items in submit order, so a 1-block W2 behind a whole-chunk W1 is durable no
+  earlier than W1's last item; W2 is mapped and answered after W1, and merges against W1's
+  pending block.
+- Snapshot epochs on the writer side: each write and punch carries its volume's snapshot epoch.
+  The first write after a cut to a chunk at version v puts freeze(v, epoch) before its blocks;
+  with a pending W1 at epoch 1, W2 at epoch 2 freezes W1's version; a second write at epoch 2
+  carries no freeze; a chunk with no version gets a freeze of version 0 (Absent freeze); a punch
+  of a chunk with no version logs nothing; in a volume whose snapshot epoch is 0 nothing freezes.
 - A write larger than one record goes as several items of one version. Group commit refuses an
   item whose record exceeds the round less one block, so with 1 MiB rounds an item holds 254 data
-  blocks: a whole 4 MiB chunk goes as 5 items (254, 254, 254, 254 and 8), acknowledged once all 5
-  are durable; the freeze, if any, is in the first. On the 1 GiB test disk (64-block rounds) an
-  item holds 62 data blocks and a chunk takes 17 items (16 × 62 + 32).
-- A checkpoint while such a write is partly durable keeps its replay point at the record of the
-  write's first item (design.md: a replay point never passes a pending write's record).
-- Open: a crash with 3 of the 5 items durable. Replay maps those blocks under the version, so an
-  unacknowledged write is partly visible; the design does not say whether that is allowed or must
-  be all or nothing.
+  blocks and a whole 4 MiB chunk goes as 5 items (254, 254, 254, 254 and 8); on the 1 GiB test
+  disk (64-block rounds) an item holds 62 data blocks and a chunk takes 17 items (16 × 62 + 32),
+  acknowledged once all are durable, the freeze, if any, before the first.
+- While such a write is partly durable, the replay point stays at the record before its first
+  item's (design.md: a replay point never passes a pending write's record).
+- A crash with some of its items durable recovers them mapped under its version: the
+  unacknowledged write is partly visible, and the chunk's next write takes the next version.
 
 Events from the log:
 
-- `Failed(NoSpace)` fails the writes it names to their callers, in submit order.
-- `InDoubt` items are never acknowledged, and the store refuses writes until recovery. Open: what
-  the caller sees for an in-doubt write.
-- `CheckpointFailed`: the index keeps its frozen memtable, and the next checkpoint writes it
-  again from its first piece (the "LSM tree" scenario, through the store).
-- A flush or merge that fails a run check (`lsm.ErrCheck`, see Run checks): the store rebuilds
-  that index from the log, the rebuilt index equals the oracle's, and the disk's other indexes
-  serve throughout.
-- The store hands the log one run piece at a time, each once the one before is durable: the trace
-  never shows two pieces of one run in flight.
-- `Flush(cs)`: completes once every write to cs acknowledged before it is durable; with nothing
-  pending it completes with no disk action. Open: the semantics, since writes are acknowledged
-  only once durable.
-- `Seal` exists in the API only and returns an error. Open: which.
+- `Failed(NoSpace)` fails the writes it names to their callers in submit order: with only the
+  reserve free, every write before the first failure succeeds and every one after it fails, and
+  no buffer is left out of the pool.
+- `InDoubt` items are never acknowledged: a write in flight when a flush fails reports
+  `ErrInDoubt`, one queued behind it the disk's error, and the store refuses writes with
+  `ErrUnavailable` until it is opened again.
+- `CheckpointFailed` (no segment left): the index keeps its frozen memtable and its runs, and reads
+  go on; the next checkpoint writes it again from its first piece (the "LSM tree" scenario).
+- A flush that fails a run check (`lsm.ErrCheck`, a plant): the store refuses operations, lets its
+  rounds finish, restarts its log once in rebuild mode, and the rebuilt index equals the oracle's,
+  live and at every snapshot. A merge that fails its check takes the same path.
+- The store hands the log one run piece at a time, each once the one before is durable: no step
+  of a workload with multi-piece runs has two pieces in flight.
+- `Flush(cs)` completes at once with no disk action when nothing is pending, and otherwise once
+  every write and punch to cs submitted before it is answered.
 
 Invariants and faults (simulator): acknowledged writes readable; reads equal the byte-range
-oracle live and at every snapshot; punched ranges read zeros; no two writes of a chunk share a
-version; a live map never holds two entries for one block (`Index.Check`); a rebuilt index equals
-the recovered one. Faults: crash at every action of a workload with unaligned writes, a cut, a
-whole-chunk write and a checkpoint; unaligned writes pipelined to one block; a merge base failing
-its checksum; a failed base read.
+oracle live and at every snapshot; punched ranges read zeros; no two durable writes of a chunk
+share a version; a live map never holds two entries for one block (`Index.Check`); a rebuilt
+index equals the recovered one. Faults: crash at every action of a workload with unaligned
+writes, a cut, a whole-chunk write and a checkpoint, with no unflushed block landing and with
+each landing at random, each recovery checked against the crash oracle with a block model and
+then rebuilt; unaligned writes pipelined to one block; a merge base failing its checksum; a
+failed base read; a failed flush.
 
 Performance: `Write` of a whole block, `Write` of one byte with its base in a pending write, and
-`Read` of one block report 0 allocations per operation; a merge uses one 4 KiB pool buffer.
+`Read` of one block report 0 allocations per operation. A merge against a pending write copies
+into the write's own buffer; one against the disk reads the block and its record header block.
+The per-loop cache of recently merged blocks waits for a measurement and is not part of this item.
 
 ## Segment reserve
 
