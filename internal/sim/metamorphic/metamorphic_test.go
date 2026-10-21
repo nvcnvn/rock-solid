@@ -70,10 +70,10 @@ func ops(t *testing.T, text string) []Op {
 }
 
 // The cadence options decide the structural calls: without FlushOps the flush, flushfail and
-// compact ops do nothing; FlushEvery flushes after every n writes; Absorb runs the writes after a
-// flush op between its pieces; Deferred holds a merge picked at a compact op until the next
-// flush's first piece; FailFirst fails each flush once first; RestartEach restarts after each
-// flush while no view is open; Eager compacts after every flush.
+// compact ops do nothing; FlushEvery flushes once n writes follow the start of the last flush;
+// Absorb runs the writes after a flush op between its pieces; Deferred holds a merge picked at a
+// compact op until the next flush's first piece; FailFirst fails each flush once first; RestartEach
+// restarts after each flush while no view is open; Eager compacts after every flush.
 func TestRunCadence(t *testing.T) {
 	text := "put a 1\nflush\nput b 2\nput c 3\nput d 4\ncompact\nflushfail 2\nget a\nflush\nrestart\n"
 	for _, c := range []struct {
@@ -85,7 +85,7 @@ func TestRunCadence(t *testing.T) {
 		{"memtable only", Options{}, 0,
 			"put a 1|put b 2|put c 3|put d 4|get a|restart"},
 		{"flush every 2 writes", Options{FlushOps: true, FlushEvery: 2}, 0,
-			"put a 1|flush{|}|put b 2|flush{|}|put c 3|put d 4|flush{|}|fail 2|get a|flush{|}|restart"},
+			"put a 1|flush{|}|put b 2|put c 3|flush{|}|put d 4|fail 2|get a|flush{|}|restart"},
 		{"absorb", Options{FlushOps: true, Absorb: 2}, 0,
 			"put a 1|flush{|put b 2|put c 3|}|put d 4|fail 2|get a|flush{|}|restart"},
 		{"deferred", Options{FlushOps: true, Compact: CompactDeferred}, 0,
@@ -119,6 +119,17 @@ func TestRunAbsorbsReads(t *testing.T) {
 	}
 	if hist[1] != "=a" || hist[4] != "=c" {
 		t.Fatalf("history %q", hist)
+	}
+}
+
+// FlushEvery counts the writes since the last flush began, those absorbed between its pieces
+// included: a write absorbed by a flush op leaves one more to go before the next flush.
+func TestRunFlushEveryCountsAbsorbedWrites(t *testing.T) {
+	r := &recorder{}
+	Run(ops(t, "put a 1\nflush\nput b 2\nput c 3\nput d 4\nput e 5\n"), Options{FlushOps: true, FlushEvery: 2, Absorb: 1}, r)
+	want := "put a 1|flush{|put b 2|}|put c 3|flush{|}|put d 4|put e 5|flush{|}"
+	if got := strings.Join(r.calls, "|"); got != want {
+		t.Fatalf("calls\n got %s\nwant %s", got, want)
 	}
 }
 

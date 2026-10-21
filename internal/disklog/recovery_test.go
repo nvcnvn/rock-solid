@@ -102,66 +102,12 @@ func TestRecoverReformattedDisk(t *testing.T) {
 	h.readBack(res.index)
 }
 
-func TestRecoverTornTail(t *testing.T) {
-	for _, landed := range [][]core.LBA{{}, {74}, {74, 75}, {75, 76}, {74, 76}, {74, 75, 76}} {
-		h := formatted(t, gib, testConfig(0))
-		n := newNode(h, 0)
-		h.twoBlockWrites(3)
-		before := n.live.clone()
-		h.submit(disklog.Hot, h.chunkWrite(3, 0, 2, 4))
-		h.wantTrace("write 74+3 io110", "fsync io111")
-		h.step(0)
-		h.crashLanding(landed...)
-		res := h.reopen()
-		if len(landed) == 3 {
-			h.wantLSNs(res, lsnRange(1, 4))
-			if got := res.replayed[3].Entries; !slices.Equal(got, []disklog.Entry{disklog.WriteEntry(1, chunkOf(3), 4, 0, 2)}) {
-				t.Fatalf("kept unflushed record holds %+v", got)
-			}
-			before.apply(res.replayed[3])
-		} else {
-			h.wantLSNs(res, lsnRange(1, 3))
-		}
-		h.wantModel("index", res.index, before)
-		h.readBack(res.index)
-	}
-}
-
 func xorBlock(h *harness, lba core.LBA, mask byte) {
 	b := h.read(lba, 1)
 	for i := range b {
 		b[i] ^= mask
 	}
 	h.disk.Put(lba, b)
-}
-
-func TestRecoverDamageInTheMiddleIsCorruption(t *testing.T) {
-	cases := []struct {
-		name   string
-		damage func(h *harness)
-		lsn    uint64
-	}{
-		{"record 2's header, every byte", func(h *harness) { xorBlock(h, 68, 0x5a) }, 2},
-		{"a bit of record 3's header", func(h *harness) { h.disk.FlipBit(71, 60, 1) }, 3},
-		{"a bit of record 3's data", func(h *harness) { h.disk.FlipBit(72, 100, 0x80) }, 3},
-		{"a bit of record 4's header, the last but one", func(h *harness) { h.disk.FlipBit(74, 60, 1) }, 4},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			h := formatted(t, gib, testConfig(0))
-			h.twoBlockWrites(5)
-			c.damage(h)
-			wantCorrupt(t, h.recover(disklog.ModeOpen), c.lsn)
-			wantCorrupt(t, h.recover(disklog.ModeRebuild), c.lsn)
-		})
-	}
-}
-
-func TestRecoverDamageInTheLastRecordIsACrash(t *testing.T) {
-	h := formatted(t, gib, testConfig(0))
-	h.twoBlockWrites(5)
-	h.disk.FlipBit(78, 7, 4)
-	h.wantLSNs(h.reopen(), lsnRange(1, 4))
 }
 
 func TestRecoverOverwritesATornTail(t *testing.T) {
@@ -561,54 +507,6 @@ func TestRecoveryRefusesCallsOutOfStep(t *testing.T) {
 	if h.pool.Live() != 0 {
 		t.Fatalf("%d buffers live after a failed recovery", h.pool.Live())
 	}
-}
-
-func TestCommitDepth2KeepsBothLandedRounds(t *testing.T) {
-	cfg := testConfig(0)
-	cfg.CommitDepth = 2
-	h := formatted(t, gib, cfg)
-	n := newNode(h, 0)
-	h.put(disklog.Hot, h.chunkWrite(0, 0, 1, 1))
-	h.submit(disklog.Hot, h.chunkWrite(1, 0, 2, 2))
-	h.submit(disklog.Cold, h.chunkWrite(2, 0, 1, 3))
-	h.wantTrace("write 64+3 io104", "fsync io105", "write 67+3 io106", "fsync io107", "write 128+3 io108")
-	h.step(2)
-	h.step(0)
-	h.crashLanding(67, 68, 69, 128, 129, 130)
-	res := h.reopen()
-	h.wantLSNs(res, lsnRange(1, 3))
-	want := n.live.clone()
-	want.apply(res.replayed[1])
-	want.apply(res.replayed[2])
-	h.wantModel("index", res.index, want)
-	h.readBack(res.index)
-}
-
-func TestCommitDepth2DropsRoundsAfterAMissingOne(t *testing.T) {
-	cfg := testConfig(0)
-	cfg.CommitDepth = 2
-	h := formatted(t, gib, cfg)
-	h.put(disklog.Hot, h.chunkWrite(0, 0, 1, 1))
-	h.submit(disklog.Hot, h.chunkWrite(1, 0, 2, 2))
-	h.submit(disklog.Hot, h.chunkWrite(2, 0, 1, 3))
-	h.wantTrace("write 64+3 io104", "fsync io105", "write 67+3 io106", "fsync io107", "write 70+2 io108")
-	h.step(2)
-	h.step(0)
-	h.crashLanding(68, 69, 70, 71)
-	res := h.reopen()
-	h.wantLSNs(res, lsnRange(1, 1))
-	if !isZeroBlock(h.read(70, 1)) {
-		t.Fatal("the landed record after the missing one was not erased")
-	}
-	n := newNode(h, 0)
-	n.live = res.index
-	h.put(disklog.Hot, h.chunkWrite(3, 0, 1, 4))
-	if d := h.eventsOf(disklog.Durable); len(d) != 1 || d[0].LSN != 2 || d[0].LBA != 67 {
-		t.Fatalf("next write: %+v", d)
-	}
-	res = h.reopen()
-	h.wantLSNs(res, lsnRange(1, 2))
-	h.wantModel("index", res.index, n.live)
 }
 
 func TestRecoverFlushesBeforeReportingRecovered(t *testing.T) {

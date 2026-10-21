@@ -1,6 +1,7 @@
 package disklog_test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"slices"
@@ -32,6 +33,7 @@ func scriptedRecovery(t *testing.T, d *datadriven.TestData) string {
 	}
 	h := formatted(t, gib, cfg)
 	var b strings.Builder
+	var last *recovered
 	for _, line := range strings.Split(strings.TrimSpace(d.Input), "\n") {
 		f := strings.Fields(line)
 		nums := func(from, n int) []uint64 {
@@ -105,7 +107,13 @@ func scriptedRecovery(t *testing.T, d *datadriven.TestData) string {
 			default:
 				d.Fatalf(t, "%q: recover open or rebuild", line)
 			}
-			fmt.Fprintf(&b, "%s: %s\n", line, recoveryResult(h.recover(mode)))
+			last = h.recover(mode)
+			fmt.Fprintf(&b, "%s: %s\n", line, recoveryResult(last))
+		case "index":
+			if len(f) != 1 || last == nil || last.err != nil {
+				d.Fatalf(t, "%q: index takes no arguments and follows a successful recover", line)
+			}
+			b.WriteString(indexResult(h, last.index))
 		default:
 			d.Fatalf(t, "unknown command %q", line)
 		}
@@ -143,9 +151,45 @@ func recoveryResult(res *recovered) string {
 	return out
 }
 
+// indexResult prints a recovered index as extents, each a run of blocks of one chunk version at
+// consecutive LBAs, and whether every block reads back the data its version wrote.
+func indexResult(h *harness, m model) string {
+	var lines []string
+	status := ""
+	keys := m.keys()
+	for i := 0; i < len(keys); {
+		k, v := keys[i], m[keys[i]]
+		n := 1
+		for ; i+n < len(keys); n++ {
+			nk, nv := keys[i+n], m[keys[i+n]]
+			if nk.chunk != k.chunk || nk.block != k.block+uint16(n) || nv.version != v.version || nv.lba != v.lba+core.LBA(n) {
+				break
+			}
+		}
+		for j := range n {
+			kj, vj := keys[i+j], m[keys[i+j]]
+			if status == "" && !bytes.Equal(h.read(vj.lba, 1), blockData(kj.chunk, vj.version, kj.block)) {
+				status = fmt.Sprintf("chunk %d block %d does not read back", kj.chunk.Index, kj.block)
+			}
+		}
+		blocks, lbas := fmt.Sprintf("block %d", k.block), fmt.Sprintf("%d", v.lba)
+		if n > 1 {
+			blocks = fmt.Sprintf("blocks %d-%d", k.block, k.block+uint16(n-1))
+			lbas = fmt.Sprintf("%d-%d", v.lba, v.lba+core.LBA(n-1))
+		}
+		lines = append(lines, fmt.Sprintf("  chunk %d %s v%d at %s\n", k.chunk.Index, blocks, v.version, lbas))
+		i += n
+	}
+	if status == "" {
+		status = "every block reads back"
+	}
+	return fmt.Sprintf("index: %d blocks, %s\n", len(keys), status) + strings.Join(lines, "")
+}
+
 // Recovery from disk images that testdata/recovery's commands build: write (submit and complete),
 // submit (only queue, printing the actions), exec ioN, crash landing the listed unflushed blocks,
-// xor a block with a mask, flip bits of a byte, zeros, and recover open or rebuild.
+// xor a block with a mask, flip bits of a byte, zeros, recover open or rebuild, and index, the
+// last recovery's index read back.
 func TestScriptedRecovery(t *testing.T) {
 	datadriven.RunTest(t, "testdata/recovery", func(t *testing.T, d *datadriven.TestData) string {
 		if d.Cmd != "run" {

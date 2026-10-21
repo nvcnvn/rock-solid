@@ -494,8 +494,8 @@ no buffer allocated.
 - Torn tail: 3 records of 2-block writes, then a 4th round written but not flushed (LBAs 74-76). A
   crash landing none, {74}, {74, 75}, {75, 76} or {74, 76} recovers LSNs 1-3, and the index equals the
   index before the 4th write (RocksDB TruncatedTrailingRecord, PartialLast).
-- An unflushed but fully landed last record ({74, 75, 76}) is kept (LSNs 1-4), holding exactly the
-  submitted write, although it was never acknowledged.
+- An unflushed but fully landed last record ({74, 75, 76}) is kept (LSNs 1-4), although it was never
+  acknowledged: open and rebuild both map its write, chunk 3 blocks 0-1 version 4, at LBAs 75-76.
 - Damage in a middle record is corruption, not truncation: XOR 0x5A into every byte of record 2's
   header gives Corrupt(LSN 2) (RocksDB ErrorJoinsRecords). One flipped bit in record 3's header or data,
   of 5 records, gives Corrupt(LSN 3) (PAR, FAST 2018), and in record 4's header, the last but one,
@@ -522,7 +522,8 @@ no buffer allocated.
   flushed recover as LSNs 2 and 3, with their writes in the index.
 - Commit depth 2, a round missing: of two hot rounds in flight the first's header does not land and
   the second lands whole. Both are dropped (LSN 1 recovers) and the second's header is zeroed, so a
-  shorter write that reuses LSN 2 is not followed, on the next open, by the old LSN 3.
+  shorter write that reuses LSN 2 (its block at LBA 68) is not followed, on the next open, by the
+  old LSN 3.
 - A duplicate LSN is corruption: with the append rule switched off, a depth-2 round appending to a
   segment whose opening round is in flight lands alone; after recovery, segment 2 reopens with the
   same seq and the cold stream reuses the old record's LSN, and the next open gives Corrupt(LSN 23)
@@ -1005,10 +1006,10 @@ merge that made it:
 ## Metamorphic index tests
 
 `internal/sim/metamorphic` runs an ops file under an option set's cadence (which flush, failed
-flush and compact ops run, flushes every n writes, a merge held across a flush, ops between a
-flush's pieces, a restart after every flush that finds no view open), records one history line per op, diffs histories and
-reduces a failing ops file; its log stands in for the disk log under one tree, keeping every live
-piece, the newest manifest's runs and its replay point. Each index's test generates its ops, runs
+flush and compact ops run, a flush every n writes, a merge held across a flush, ops between a
+flush's pieces, a restart after every flush that finds no view open), records one history line per
+op, diffs histories and reduces a failing ops file; its log stands in for the disk log under one
+tree, keeping every live piece, the newest manifest's runs and its replay point. Each index's test generates its ops, runs
 them under every option set and a model, and turns a failure into a regression case.
 
 - [property] `internal/lsm` `TestMetamorphic`: seeds 0-19 per run (`-meta.seeds`, `-meta.first`;
@@ -1070,6 +1071,10 @@ them under every option set and a model, and turns a failure into a regression c
   The merge bugs show under more sets here than in the spike: with Two merges, Fixed limit and the
   universal picker, merges leave older runs out under every set that merges (all but F and C).
 
+- A set's "after every n writes" counts the writes since the last flush began, writes run between
+  that flush's pieces included, so no flush is skipped when those writes cross a multiple of n:
+  with n = 2 and one write between a flush op's pieces, the next write flushes
+  (`TestRunFlushEveryCountsAbsorbedWrites`).
 - A failing seed prints its replay command and its ops reduced to the fewest that still fail, as a
   data-driven case; a case whose cadence comes from its set is rewritten with explicit ops before it
   goes under `testdata/regressions`, before the fix. The planted flush bug's first failure on seed
@@ -2347,9 +2352,12 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 - Scripted recovery (`internal/disklog/testdata/recovery`): on a freshly formatted 1 GiB disk,
   `run [depth=n]` takes `write` and `submit` of chunk writes (a submit prints the actions it queues),
   `exec ioN`, `crash` landing the listed unflushed blocks, `xor` and `flip` of a block's bytes,
-  `zeros`, and `recover open|rebuild`, which prints the LSNs replayed, the durable LSN, the headers
-  erased and the segments quarantined, or Corrupt(LSN). The Recovery section's torn tail (every
-  landing set), damage in a middle record and in the last one, and both commit-depth-2 cases.
+  `zeros`, `recover open|rebuild`, which prints the LSNs replayed, the durable LSN, the headers
+  erased and the segments quarantined, or Corrupt(LSN), and `index`, which prints the last
+  recovery's index as extents (chunk, blocks, version, LBAs) and whether every mapped block reads
+  back the data its version wrote, so a block damaged after recovery is named. The Recovery
+  section's torn tail (every landing set), damage in a middle record and in the last one, and both
+  commit-depth-2 cases live only here, each that recovers printing its index.
 - An unknown command, argument or op, or a malformed argument, fails the test with the file and
   line, never a silent skip.
 

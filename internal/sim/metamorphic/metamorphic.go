@@ -129,7 +129,7 @@ const (
 type Options struct {
 	// FlushOps runs the generated flush, flushfail and compact ops; without it the index stays in its memtable.
 	FlushOps bool
-	// FlushEvery also flushes after every n writes.
+	// FlushEvery also flushes once n writes follow the start of the last flush.
 	FlushEvery int
 	// Compact is when merges run.
 	Compact Compaction
@@ -162,15 +162,15 @@ func Run(ops []Op, o Options, e Engine) (hist []string) {
 }
 
 type runner struct {
-	ops     []Op
-	o       Options
-	e       Engine
-	hist    []string
-	done    []bool
-	at      int
-	writes  int
-	flushes int
-	pending bool
+	ops        []Op
+	o          Options
+	e          Engine
+	hist       []string
+	done       []bool
+	at         int
+	sinceFlush int
+	flushes    int
+	pending    bool
 }
 
 func errLine(err error) string {
@@ -211,7 +211,7 @@ func (r *runner) run() {
 				continue
 			}
 			r.write(r.at)
-			if r.o.FlushEvery > 0 && r.writes%r.o.FlushEvery == 0 {
+			if r.o.FlushEvery > 0 && r.sinceFlush >= r.o.FlushEvery {
 				if l := r.flush(r.at, false); l != "ok" {
 					r.hist[r.at] = l
 				}
@@ -222,7 +222,7 @@ func (r *runner) run() {
 
 func (r *runner) write(i int) {
 	r.hist[i], r.done[i] = r.e.Do(r.ops[i]), true
-	r.writes++
+	r.sinceFlush++
 }
 
 func (r *runner) compactOp() {
@@ -260,6 +260,7 @@ func (r *runner) flush(at int, absorb bool) string {
 		}
 	}
 	next := at + 1
+	r.sinceFlush = 0
 	err := r.e.Flush(func() {
 		r.finishPending(&line)
 		if absorb && next < len(r.ops) && next-at <= r.o.Absorb && !structural(r.ops[next]) {

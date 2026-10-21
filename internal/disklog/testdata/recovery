@@ -9,6 +9,9 @@
 #   flip <lba> <byte> <mask>                              XORs one byte of a block with mask
 #   zeros <lba>                                           whether a block reads as zeros
 #   recover <open|rebuild>                                recovers and prints the LSNs replayed
+#   index                                                 prints the last recovery's index, each
+#                                                         extent's chunk, blocks, version and LBAs,
+#                                                         and whether every block reads back
 # go test -rewrite regenerates the output.
 
 # Torn tail (RocksDB TruncatedTrailingRecord, PartialLast): three 2-block writes, then a fourth
@@ -21,9 +24,14 @@ submit hot 3 0 2 4
 exec io110
 crash
 recover open
+index
 ----
 submit hot 3 0 2 4: write 74+3 io110, fsync io111
 recover open: LSNs 1-3, durable 3
+index: 6 blocks, every block reads back
+  chunk 0 blocks 0-1 v1 at 66-67
+  chunk 1 blocks 0-1 v2 at 69-70
+  chunk 2 blocks 0-1 v3 at 72-73
 
 run
 write hot 0 0 2 1
@@ -33,9 +41,14 @@ submit hot 3 0 2 4
 exec io110
 crash 74
 recover open
+index
 ----
 submit hot 3 0 2 4: write 74+3 io110, fsync io111
 recover open: LSNs 1-3, durable 3, headers erased: 1
+index: 6 blocks, every block reads back
+  chunk 0 blocks 0-1 v1 at 66-67
+  chunk 1 blocks 0-1 v2 at 69-70
+  chunk 2 blocks 0-1 v3 at 72-73
 
 run
 write hot 0 0 2 1
@@ -45,9 +58,14 @@ submit hot 3 0 2 4
 exec io110
 crash 74 75
 recover open
+index
 ----
 submit hot 3 0 2 4: write 74+3 io110, fsync io111
 recover open: LSNs 1-3, durable 3, headers erased: 1
+index: 6 blocks, every block reads back
+  chunk 0 blocks 0-1 v1 at 66-67
+  chunk 1 blocks 0-1 v2 at 69-70
+  chunk 2 blocks 0-1 v3 at 72-73
 
 run
 write hot 0 0 2 1
@@ -57,9 +75,14 @@ submit hot 3 0 2 4
 exec io110
 crash 75 76
 recover open
+index
 ----
 submit hot 3 0 2 4: write 74+3 io110, fsync io111
 recover open: LSNs 1-3, durable 3
+index: 6 blocks, every block reads back
+  chunk 0 blocks 0-1 v1 at 66-67
+  chunk 1 blocks 0-1 v2 at 69-70
+  chunk 2 blocks 0-1 v3 at 72-73
 
 run
 write hot 0 0 2 1
@@ -69,9 +92,14 @@ submit hot 3 0 2 4
 exec io110
 crash 74 76
 recover open
+index
 ----
 submit hot 3 0 2 4: write 74+3 io110, fsync io111
 recover open: LSNs 1-3, durable 3, headers erased: 1
+index: 6 blocks, every block reads back
+  chunk 0 blocks 0-1 v1 at 66-67
+  chunk 1 blocks 0-1 v2 at 69-70
+  chunk 2 blocks 0-1 v3 at 72-73
 
 # An unflushed but fully landed last record is kept, although it was never acknowledged.
 run
@@ -82,11 +110,34 @@ submit hot 3 0 2 4
 exec io110
 crash 74 75 76
 recover open
+index
 recover rebuild
+index
 ----
 submit hot 3 0 2 4: write 74+3 io110, fsync io111
 recover open: LSNs 1-4, durable 4
+index: 8 blocks, every block reads back
+  chunk 0 blocks 0-1 v1 at 66-67
+  chunk 1 blocks 0-1 v2 at 69-70
+  chunk 2 blocks 0-1 v3 at 72-73
+  chunk 3 blocks 0-1 v4 at 75-76
 recover rebuild: LSNs 1-4, durable 4
+index: 8 blocks, every block reads back
+  chunk 0 blocks 0-1 v1 at 66-67
+  chunk 1 blocks 0-1 v2 at 69-70
+  chunk 2 blocks 0-1 v3 at 72-73
+  chunk 3 blocks 0-1 v4 at 75-76
+
+# A mapped block damaged after recovery does not read back.
+run
+write hot 0 0 2 1
+recover open
+xor 66 0xff
+index
+----
+recover open: LSNs 1-1, durable 1
+index: 2 blocks, chunk 0 block 0 does not read back
+  chunk 0 blocks 0-1 v1 at 66-67
 
 # Damage in a middle record is corruption, not truncation, and open and rebuild agree: record 2's
 # header XORed with 0x5A (RocksDB ErrorJoinsRecords), and one flipped bit in record 3's header or
@@ -152,8 +203,14 @@ write hot 3 0 2 4
 write hot 4 0 2 5
 flip 78 7 4
 recover open
+index
 ----
 recover open: LSNs 1-4, durable 4, headers erased: 1
+index: 8 blocks, every block reads back
+  chunk 0 blocks 0-1 v1 at 66-67
+  chunk 1 blocks 0-1 v2 at 69-70
+  chunk 2 blocks 0-1 v3 at 72-73
+  chunk 3 blocks 0-1 v4 at 75-76
 
 # Commit depth 2, both rounds in flight landed whole: a hot and a cold write written but not
 # flushed recover as LSNs 2 and 3.
@@ -165,10 +222,15 @@ exec io108
 exec io106
 crash 67 68 69 128 129 130
 recover open
+index
 ----
 submit hot 1 0 2 2: write 67+3 io106, fsync io107
 submit cold 2 0 1 3: write 128+3 io108
 recover open: LSNs 1-3, durable 3
+index: 4 blocks, every block reads back
+  chunk 0 block 0 v1 at 66
+  chunk 1 blocks 0-1 v2 at 68-69
+  chunk 2 block 0 v3 at 130
 
 # Commit depth 2, a round missing: of two hot rounds in flight the first's header does not land
 # and the second lands whole. Both are dropped and the second's header is zeroed, so a shorter
@@ -184,9 +246,13 @@ recover open
 zeros 70
 write hot 3 0 1 4
 recover open
+index
 ----
 submit hot 1 0 2 2: write 67+3 io106, fsync io107
 submit hot 2 0 1 3: write 70+2 io108
 recover open: LSNs 1-1, durable 1, headers erased: 1
 zeros 70: true
 recover open: LSNs 1-2, durable 2
+index: 2 blocks, every block reads back
+  chunk 0 block 0 v1 at 66
+  chunk 3 block 0 v4 at 68
