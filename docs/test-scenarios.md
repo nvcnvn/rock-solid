@@ -2222,24 +2222,34 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 
 ## History recorder
 
-- Every client operation is recorded as `(invoke_time, complete_time, op, result)`, from simulation
-  and real clusters alike. In simulation the times are the scheduler's global time, not a node's
-  `Now`, since a linearizability check needs one timeline and node clocks drift and are slewed by up
-  to 22.6%. Open: the time base of real-cluster histories.
+- `sim.History` records every client operation as `(invoke_time, complete_time, op, result)` in the
+  scheduler's time, not a node's `Now`, since a linearizability check needs one timeline and node
+  clocks drift and are slewed by up to 22.6%. Case: a node whose `Now` starts at 5,000 completes an
+  operation 70 ticks into the run, and the history reads 0 to 70 (the node saw 5,070).
 - The format is one Porcupine reads (Porcupine's `Operation`: client ID, input, call time, output,
-  return time). A recorded history converts with no loss: op and result round-trip.
-- Porcupine with a per-chunk register model: write A [10, 20], read A [15, 30], write B [25, 40],
-  read B [45, 50] is accepted; write A [10, 20], write B [25, 40], read A [45, 50] is rejected, and
-  the checker names read A.
-- An operation that never completes (its node crashed) is recorded with no completion. Open: how an
-  incomplete operation is written for Porcupine (an infinite return time is Porcupine's usual
-  choice).
-- Open: how pipelined chunk writes from one client are recorded, as one Porcupine client with
-  overlapping operations or as one client per write in flight.
-- Recording allocates nothing per operation on the data path. Open: where real-cluster histories are
-  written.
+  return time), each operation's index in its metadata; `internal/sim/lincheck` converts and checks,
+  so the simulator itself does not import Porcupine. A recorded history converts with no loss:
+  op, result, client and times round-trip, an incomplete one included.
+- Porcupine with a per-key register model: write A [10, 20], read A [15, 30], write B [25, 40],
+  read B [45, 50] is accepted; write A [10, 20], write B [25, 40], read A [45, 50] is rejected
+  beside a legal history of another key, and `lincheck.Illegal` names read A.
+- The named operation is the same every run, though Porcupine gathers its partial orders in a map:
+  the first to return of the operations in no partial order (two reads of a value never written,
+  at [40, 60] and [41, 50]: the second is named); when every operation fits one (writes 1 and 2 at
+  [1, 5], then reads of 1 at [10, 20] and of 2 at [10, 21]), the first to return of those the
+  longest order with the smallest operation indices leaves out (read 2), over 100 runs.
+- An operation that never completes (its node crashed) is recorded with no completion and goes to
+  Porcupine with an infinite return time (`math.MaxInt64`) and an output marked not done: after
+  write A [10, 20] and write B [25, never], a read at [45, 50] may see A or B, but a read of B
+  followed by a read of A is rejected.
+- Pipelined operations of one client overlap under one client ID: write A [10, 30] and write B
+  [15, 25] from client 0, then read A [40, 50], is accepted with B taking effect first.
+- Completing an operation twice is a broken invariant of the recorder and panics.
+- **Benchmarks:** `BenchmarkHistoryRecord`, one invoke and completion, zero allocations per
+  operation within the capacity the history is made with (16.5 ns on an Intel Core Ultra 5 235U).
 - The consistency check of chunk histories (phase 3) and the file-level close-to-open check (phase 6)
-  read the same format.
+  read the same format, and the toy protocol of the planted-bug check records its client's writes in
+  it. Real-cluster histories are the [Real-cluster histories](#real-cluster-histories) item's.
 
 ## Seed runner in CI
 
@@ -2298,17 +2308,39 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 ## Planted-bug check
 
 - The design's done-when checkpoint: "Simulator replays a failing seed exactly, and finds a bug
-  planted in a toy replication protocol." The deterministic scheduler drops and reorders the toy
-  protocol's messages, ahead of phase 3's simulated network. The learning project's warm-up is a
-  sans-IO echo machine plus a tiny simulator that drops and reorders messages.
-- Setup, for example: a toy primary-backup register whose messages the scheduler drops, delays and
-  reorders, with crashes and restarts, and the invariant "every acknowledged write is readable after
-  any crash". Planted bug, for example: the primary acknowledges before the backup's ack. Open: the
-  design names neither the toy protocol nor the bug.
-- Expected: a seed within the per-commit seed count trips the invariant (Open: that count); running
-  that seed twice gives byte-identical traces up to the failure and the same failing step; the fixed
-  protocol passes the same seeds and 10,000 more.
-- The toy protocol passes the sans-IO analyzer and allocates nothing per event.
+  planted in a toy replication protocol." The deterministic scheduler drops (1 in 8), delays and
+  reorders the toy protocol's messages, crashes a node at 1 step in 300 and restarts it, and repeats
+  1 retry timer in 4 as a stale one, ahead of phase 3's simulated network.
+- Setup (`internal/sim/toy`): three nodes, node 0 the primary. Its client writes the values 1 to 40,
+  each to the block of its number, at most two in flight, recording each in a history that outlives
+  crashes; a restarted primary goes on from the next value. The primary acknowledges a value once it
+  is durable locally and on one replica, resending to the replicas until then, and every message
+  carries the primary's incarnation. Invariant, checked after every step of 3,000: every
+  acknowledged value is durable on at least two disks, so it stays readable after a crash of every
+  node and the loss of any one disk.
+- Planted bugs, behind a setting: `AckBeforeReplica` acknowledges once the primary's own copy is
+  durable (found at seed 0, step 6); `IgnoreEpoch` takes a reply to an earlier incarnation's write
+  as one to the restarted primary's write of the same sequence number (found at seed 4, step 444,
+  and in 49 of seeds 0 to 999). With crashes off, `IgnoreEpoch` passes seeds 0 to 99: only a primary
+  crash with a reply in flight exposes it.
+- Each bug trips within seeds 0 to 99, the seeds every commit runs; running its first failing seed
+  twice gives byte-identical traces and the same failure at the same step; the fixed protocol passes
+  that seed. **[property]** The fixed protocol passes seeds 0 to 99 per commit (at least 75% of
+  writes acknowledged and a crash per seed on average) and passed seeds 0 to 9,999 once
+  (`-toy.seeds 10000`, 37 s).
+- The history holds every write in order; exactly the acknowledged ones complete, never before they
+  start, and over seeds 0 to 19 some are left incomplete by a primary crash.
+- The toy package passes the sans-IO analyzer, and a write's whole cycle of events on the primary
+  and a replica (proposal, retry timer, write and flush completions, the replica's message, write,
+  flush and reply) allocates nothing. Messages of the wrong length or kind are ignored, which a fuzz
+  test of the message decoder on a primary and a replica checks.
+
+## Client replies as outputs
+
+- The toy primary acknowledges a value through an output of the kind the replica primary answers
+  clients with, not a callback, and the cluster completes the history from the outputs the
+  scheduler records; the Planted-bug check's scenarios pass unchanged.
+- Open: the output's form, settled with the replica primary's client replies in phase 3.
 
 ## Cleaner write amplification in simulation
 
@@ -2360,7 +2392,7 @@ The seeded runs, each described in its section above:
 - Metamorphic index tests: seeds 0-199 x 12 option sets.
 - Crash at every action: every k, with three landing sets and a failure each.
 - Cleaner write amplification at 80 / 90 / 95% full.
-- Planted-bug check: seeds 0-99 and the replay of its failing seed.
+- Planted-bug check: seeds 0-99 under each planted bug and the fixed protocol, the replay of each bug's first failing seed, and seeds 0-9,999 of the fixed protocol once.
 
 The chunk store stand-in of the recovery tests applies every Durable record to its model of the
 chunk index. It starts a checkpoint whenever one is due, snapshots the model, hands one run piece at
@@ -4749,3 +4781,11 @@ measurement needs the Raft shard of phase 4 or a stand-in shard.
 - Repeated: many kill cycles per run, each with a new kill point drawn from a seed the test prints,
   so a failing cycle is repeated with the same kill point (the kill's timing still varies).
 - Power cuts are not this item: they come with the nightly real-cluster tests of phase 6.
+
+## Real-cluster histories
+
+- Clients on several nodes record every operation in the [history recorder](#history-recorder)'s
+  format, and the recorded history passes the same Porcupine check as a simulated one.
+- Recording allocates nothing per operation on the data path.
+- Open: the time base, one test driver process on one host or each node's clock widened by its error
+  bound, and where a run's history is written ([open question](design.md#roadmap-and-open-questions)).

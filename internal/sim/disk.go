@@ -495,6 +495,9 @@ func (d *Disk) Read(lba core.LBA, n uint64) []byte {
 	return b
 }
 
+// Durable returns the block at lba as a crash that lands nothing unflushed would leave it, or nil if it was never written; the caller must not change it.
+func (d *Disk) Durable(lba core.LBA) []byte { return d.durable[lba] }
+
 // Put writes whole blocks at lba durably, as content left on the disk before a test starts.
 func (d *Disk) Put(lba core.LBA, data []byte) {
 	if len(data)%core.BlockSize != 0 || !d.inRange(lba, uint64(len(data)/core.BlockSize)) {
