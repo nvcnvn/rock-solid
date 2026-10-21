@@ -71,7 +71,7 @@ func (s *runStore) restore(t *testing.T, roots []disklog.BlobRef) *Index {
 			t.Fatal(err)
 		}
 	}
-	return NewIndex(tree)
+	return NewIndex(tree, 0)
 }
 
 // pendingWrite is one write or punch of a record, with the freeze before it if any: what a
@@ -114,7 +114,7 @@ func newReplica(t *testing.T, seed uint64) *replica {
 		t.Fatal(err)
 	}
 	return &replica{
-		r: rand.New(rand.NewPCG(seed, 11)), ix: NewIndex(tree), store: runStore{blobs: map[disklog.BlobRef][]byte{}},
+		r: rand.New(rand.NewPCG(seed, 11)), ix: NewIndex(tree, 0), store: runStore{blobs: map[disklog.BlobRef][]byte{}},
 		lba: 100, moveLBA: 1 << 40,
 		newest: map[core.ChunkID]uint64{}, newestEpoch: map[core.ChunkID]uint64{}, origin: map[core.LBA]core.LBA{},
 	}

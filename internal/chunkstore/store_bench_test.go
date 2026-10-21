@@ -132,3 +132,46 @@ func BenchmarkStoreReadBlock(b *testing.B) {
 		op()
 	}
 }
+
+// BenchmarkStoreWriteWholeChunk writes one of 8 chunks whole to a chunk slot, through its record's
+// durability, mapping and the freeing of the slot it rewrote.
+func BenchmarkStoreWriteWholeChunk(b *testing.B) {
+	bs := newBenchStore(b, nil)
+	if bs.s.Log().Slots() == 0 {
+		b.Fatal("no chunk slots")
+	}
+	i := 0
+	op := func() {
+		bs.write(core.ChunkID{Index: uint32(i % 8)}, 0, core.ChunkSize)
+		bs.complete()
+		i++
+	}
+	for range 100 {
+		op()
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		op()
+	}
+}
+
+// BenchmarkStoreReadSlotBlock reads one block of a chunk in a slot, checking its CRC32C against
+// its record header.
+func BenchmarkStoreReadSlotBlock(b *testing.B) {
+	bs := newBenchStore(b, sim.NewDisk(256<<30/core.BlockSize))
+	bs.write(chunkC, 0, core.ChunkSize)
+	bs.complete()
+	i := 0
+	op := func() {
+		bs.s.Read(&bs.ctx, Request{Chunk: chunkC, Off: uint32(i%1024) * core.BlockSize, Len: core.BlockSize}, &bs.out)
+		bs.complete()
+		i++
+	}
+	for range 1000 {
+		op()
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		op()
+	}
+}

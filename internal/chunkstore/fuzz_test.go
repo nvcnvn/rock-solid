@@ -52,13 +52,15 @@ func FuzzDecodeExtent(f *testing.F) {
 // and a value: Check returns an error or nil and never panics, and when it passes a Reader reads
 // blocks, ascending and back, live and at an epoch, as Lookup and LookupAt do.
 func FuzzCheck(f *testing.F) {
-	x := newIndex(f)
+	x := slotIndex(f)
 	if err := x.Apply(record(100,
 		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(1), Version: 1, First: 0, Count: 2},
 		disklog.Entry{Kind: disklog.EntryFreeze, Pool: 1, Chunk: chunk(1), Version: 1, Epoch: 5},
 		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(1), Version: 2, First: 1, Count: 1},
 		disklog.Entry{Kind: disklog.EntryFreeze, Pool: 1, Chunk: chunk(2), Version: 0, Epoch: 5},
 		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(2), Version: 1, First: 0, Count: 1},
+		disklog.SlotEntry(1, chunk(3), 1, 2, 1),
+		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(3), Version: 2, First: 7, Count: 1},
 	)); err != nil {
 		f.Fatal(err)
 	}
@@ -91,7 +93,7 @@ func FuzzCheck(f *testing.F) {
 				}
 			}
 		}
-		x := NewIndex(tree)
+		x := NewIndex(tree, slotSegmentBlocks)
 		if x.Check() == nil {
 			var r Reader
 			for _, c := range []uint32{1, 2} {

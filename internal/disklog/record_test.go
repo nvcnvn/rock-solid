@@ -25,6 +25,15 @@ func goldenRecord(t testing.TB) testRecord {
 	return encodeRecord(t, Record{Place: testPlace, LSN: 10, Durable: 9}, entries, payloads)
 }
 
+// goldenSlotRecord is a write of a whole chunk to slot 2 of segment 3, its data 0xCD, and a
+// 1-block write of data 0xAB.
+func goldenSlotRecord(t testing.TB) testRecord {
+	t.Helper()
+	entries := []Entry{SlotEntry(1, testChunk, 5, 3, 2), WriteEntry(1, testChunk, 6, 6, 1)}
+	payloads := [][]byte{bytes.Repeat([]byte{0xCD}, core.ChunkSize), bytes.Repeat([]byte{0xAB}, core.BlockSize)}
+	return encodeRecord(t, Record{Place: testPlace, LSN: 10, Durable: 9}, entries, payloads)
+}
+
 func oneWriteRecord(t testing.TB, r *core.Rand, blocks uint16) testRecord {
 	t.Helper()
 	entries := []Entry{WriteEntry(3, testChunk, 1, 0, blocks)}
@@ -43,17 +52,19 @@ func TestLayoutExamples(t *testing.T) {
 		entries []Entry
 		want    Layout
 	}{
-		{"write entry", []Entry{write(1)}, Layout{56 + 33 + 4, 1, 1}},
-		{"punch entry", []Entry{PunchEntry(1, testChunk, 1, 0, 1)}, Layout{56 + 33, 1, 0}},
-		{"freeze entry", []Entry{FreezeEntry(1, testChunk, 1, 2)}, Layout{56 + 37, 1, 0}},
-		{"empty blob", []Entry{blob(0)}, Layout{56 + 14, 1, 0}},
-		{"blobs 1 and 4095", []Entry{blob(1), blob(4095)}, Layout{56 + 28 + 4, 1, 1}},
-		{"blob 4097", []Entry{blob(4097)}, Layout{56 + 14 + 8, 1, 2}},
-		{"write 1001", []Entry{write(1001)}, Layout{4093, 1, 1001}},
-		{"write 1002", []Entry{write(1002)}, Layout{4097, 2, 1002}},
-		{"write 1003", []Entry{write(1003)}, Layout{4101, 2, 1003}},
-		{"write 1004", []Entry{write(1004)}, Layout{4105, 2, 1004}},
-		{"200 writes", manyWrites, Layout{56 + 200*33 + 200*4, 2, 200}},
+		{"write entry", []Entry{write(1)}, Layout{56 + 33 + 4, 1, 1, 0}},
+		{"punch entry", []Entry{PunchEntry(1, testChunk, 1, 0, 1)}, Layout{56 + 33, 1, 0, 0}},
+		{"freeze entry", []Entry{FreezeEntry(1, testChunk, 1, 2)}, Layout{56 + 37, 1, 0, 0}},
+		{"empty blob", []Entry{blob(0)}, Layout{56 + 14, 1, 0, 0}},
+		{"blobs 1 and 4095", []Entry{blob(1), blob(4095)}, Layout{56 + 28 + 4, 1, 1, 0}},
+		{"blob 4097", []Entry{blob(4097)}, Layout{56 + 14 + 8, 1, 2, 0}},
+		{"write 1001", []Entry{write(1001)}, Layout{4093, 1, 1001, 0}},
+		{"write 1002", []Entry{write(1002)}, Layout{4097, 2, 1002, 0}},
+		{"write 1003", []Entry{write(1003)}, Layout{4101, 2, 1003, 0}},
+		{"write 1004", []Entry{write(1004)}, Layout{4105, 2, 1004, 0}},
+		{"200 writes", manyWrites, Layout{56 + 200*33 + 200*4, 2, 200, 0}},
+		{"slot write", []Entry{SlotEntry(1, testChunk, 1, 3, 2)}, Layout{56 + 39 + 1024*4, 2, 0, 1024}},
+		{"slot write and a write", []Entry{SlotEntry(1, testChunk, 1, 3, 2), write(1)}, Layout{56 + 39 + 33 + 1025*4, 2, 1, 1024}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -116,7 +127,7 @@ func TestRecordRoundTrip(t *testing.T) {
 	r := core.NewRand(11)
 	t.Run("golden", func(t *testing.T) {
 		d := decodeExact(t, goldenRecord(t))
-		if d.Layout != (Layout{56 + 33 + 33 + 14 + 8, 1, 2}) {
+		if d.Layout != (Layout{56 + 33 + 33 + 14 + 8, 1, 2, 0}) {
 			t.Fatalf("layout %+v", d.Layout)
 		}
 		if d.DataCRC(0) != core.CRC32C(d.Data[:core.BlockSize]) || d.Payload(1) != nil {
@@ -312,4 +323,89 @@ func TestRecordErrors(t *testing.T) {
 			t.Fatal("write extent not at the end of the entry")
 		}
 	})
+}
+
+func TestSlotRecord(t *testing.T) {
+	tr := goldenSlotRecord(t)
+	if tr.layout != (Layout{56 + 39 + 33 + 1025*4, 2, 1, 1024}) || len(tr.image) != 3*core.BlockSize {
+		t.Fatalf("layout %+v, image of %d bytes", tr.layout, len(tr.image))
+	}
+	h := tr.image
+	if h[preludeSize] != byte(EntrySlot) || binary.LittleEndian.Uint32(h[preludeSize+33:]) != 3 || binary.LittleEndian.Uint16(h[preludeSize+37:]) != 2 || h[preludeSize+39] != byte(EntryWrite) {
+		t.Fatal("the slot's segment and index do not follow the write's fields")
+	}
+	d := decodeExact(t, tr)
+	slotCRC := core.CRC32C(bytes.Repeat([]byte{0xCD}, core.BlockSize))
+	if d.Entries[0] != SlotEntry(1, testChunk, 5, 3, 2) || d.DataCRC(0) != core.CRC32C(d.Data) || d.SlotCRC(0, 0) != slotCRC || d.SlotCRC(0, 1023) != slotCRC || d.Payload(0) != nil {
+		t.Fatalf("decoded %+v", d.Entries)
+	}
+	if crc, _, err := BlockCRC(tr.image, testLogID, 1, 0); err != nil || crc != d.DataCRC(0) {
+		t.Fatalf("data block 0: %x, %v", crc, err)
+	}
+	if _, _, err := BlockCRC(tr.image, testLogID, 1, 1); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("data block 1 of 1: %v", err)
+	}
+	if crc, hb, err := SlotBlockCRC(tr.image, testLogID, 1, 3, 2, 1023); err != nil || crc != slotCRC || hb != 2 {
+		t.Fatalf("slot block 1023: %x, %d header blocks, %v", crc, hb, err)
+	}
+	for _, c := range []struct {
+		segment uint32
+		slot    uint16
+		block   uint16
+	}{{3, 1, 0}, {4, 2, 0}, {3, 2, 1024}} {
+		if _, _, err := SlotBlockCRC(tr.image, testLogID, 1, c.segment, c.slot, c.block); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("slot %d of segment %d block %d: %v", c.slot, c.segment, c.block, err)
+		}
+	}
+	if _, hb, err := SlotBlockCRC(tr.image[:core.BlockSize], testLogID, 1, 3, 2, 0); !errors.Is(err, ErrTruncated) || hb != 2 {
+		t.Fatalf("one header block of two: %d, %v", hb, err)
+	}
+	if _, err := AppendRecord(nil, tr.rec, tr.entries, nil); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("AppendRecord of a slot write: %v", err)
+	}
+	fix := func(b []byte) { fixCRC(b[:2*core.BlockSize], recCRC) }
+	for name, c := range map[string]struct {
+		mod  func(b []byte)
+		want error
+	}{
+		"not the whole chunk": {func(b []byte) { b[preludeSize+31] = 1; fix(b) }, ErrBadExtent},
+		"from block 1":        {func(b []byte) { b[preludeSize+29] = 1; fix(b) }, ErrBadExtent},
+		"segment 0":           {func(b []byte) { clear(b[preludeSize+33 : preludeSize+37]); fix(b) }, ErrMalformed},
+		"a slot checksum":     {func(b []byte) { b[preludeSize+39+33+4+100] ^= 1 }, ErrBadChecksum},
+	} {
+		b := bytes.Clone(tr.image)
+		c.mod(b)
+		_, err := DecodeRecord(b, testPlace, manyLeft, nil)
+		wantErr(t, name, err, c.want)
+	}
+	for _, e := range []Entry{{Kind: EntrySlot, Pool: 1, Chunk: testChunk, Count: 1, Segment: 3}, {Kind: EntrySlot, Pool: 1, Chunk: testChunk, Count: core.BlocksPerChunk, Segment: 3, Epoch: 1}} {
+		if _, err := LayoutOf([]Entry{e}); err == nil {
+			t.Fatalf("layout of %+v", e)
+		}
+	}
+}
+
+// For every subset of a slot record's blocks landing over zeros or random old content, decoding
+// returns the whole record or rejects it.
+func TestTornSlotRecord(t *testing.T) {
+	tr := goldenSlotRecord(t)
+	n := len(tr.image) / core.BlockSize
+	r := core.NewRand(5)
+	for _, old := range [][]byte{make([]byte, len(tr.image)), randomBytes(r, len(tr.image))} {
+		for landed := range 1 << n {
+			img := bytes.Clone(old)
+			for b := range n {
+				if landed&(1<<b) != 0 {
+					copy(img[b*core.BlockSize:], tr.image[b*core.BlockSize:(b+1)*core.BlockSize])
+				}
+			}
+			d, err := DecodeRecord(img, testPlace, manyLeft, nil)
+			switch {
+			case landed == 1<<n-1 && (err != nil || !sameRecord(d, tr)):
+				t.Fatalf("whole record: %v", err)
+			case landed != 1<<n-1 && err == nil:
+				t.Fatalf("blocks %b landed: decoded %+v", landed, d.Record)
+			}
+		}
+	}
 }

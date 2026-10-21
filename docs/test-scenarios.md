@@ -1996,21 +1996,49 @@ Invariants (simulator) and faults:
   disk whose segments are smaller than 4 MiB, where a whole chunk goes to the log as several items.
 - A write entry naming a slot is 39 bytes, its slot's segment and index after the write's fields;
   golden bytes of a record with one such entry and one ordinary write are checked in. Its per-block
-  CRCs cover the slot's blocks, so a block damaged in the slot fails the record as a damaged log
-  block does.
-- A whole-chunk write puts its data in a slot, its record in the hot stream; the index maps the
-  chunk's 1,024 blocks to the slot. A partial write of the same chunk goes to the log and trims the
+  CRCs cover the slot's blocks, after the record's own data blocks'. Replay checks a slot's blocks
+  only under a record that may be a round in flight (below); a read checks every block it
+  reads.
+- A whole-chunk write puts its data in a slot, in a DiskWrite of its own from the request's
+  buffer, its record in the hot stream; the round's one flush follows both writes, a round carries
+  one slot write, and the index maps the chunk's 1,024 blocks to the slot in one extent. A partial write of the same chunk goes to the log and trims the
   slot's extent; the slot stays used while any block of it is live.
 - A slot is free for reuse only once the record that rewrote or deleted its chunk is durable: a
-  crash before that record is durable reads the old chunk from the slot.
+  crash before that record is durable reads the old chunk from the slot. The log then holds it
+  from reuse and TRIM until a round begun after the free is durable: at `commit_depth` 2, a whole
+  chunk written and punched, both acknowledged, recovers whole after a clean crash, pipelined or
+  not, and at depth 4 a slot freed and written again near the tail leaves its first record
+  recoverable. A slot a read in flight reads from is freed once the read completes, and the read
+  returns the old chunk.
 - A slot segment has no segment header; the usage table lists it as `slot`. Replay marks a slot
   segment opened after the manifest from the records that name its slots, never from its first
   block (which holds chunk data that may look like anything, a valid segment header of this log
-  included).
-- The segment is TRIMmed and freed with its last slot; allocation fills the fullest slot segment
-  first (two segments with 3 and 9 free slots: the next chunk goes to the one with 3).
+  included, whether or not the manifest lists the segment as slot). The resumed log appends no
+  record there.
+- The segment is TRIMmed with its last slot, then its first block written with zeros, and freed
+  once both complete; a TRIM that fails, or does not read back as zeros, still leaves a first block
+  of zeros. Allocation fills the
+  fullest slot segment first (two segments with 3 and 9 free slots: the next chunk goes to the one
+  with 3), and never opens a segment of the reserve for one.
+- A snapshot's frozen version keeps the slot it reads in use.
+- After every crash in a workload of whole chunks rewritten, trimmed and punched across a cut and
+  checkpoints, the slots the log holds in use are exactly those the index refers to.
 - The tail rule applies to a slot write's record as to any other: a torn slot write under a
-  record in flight is dropped, one under a durable record is corruption.
+  record in flight is dropped and its header erased. Recovery reads no slot under a record a later
+  header names durable, damaged or not; reads check those blocks.
+- Recovery reads two blocks of a slot segment opened since the manifest, not the 16,385 of a
+  64 MiB segment read in full. A slot segment opened again for records, whose block 1 holds a
+  record at `NextSeq` or more, is read in full when its header is damaged, and its durable
+  records past the gap are corruption. A record erased at block 1 of a slot segment, a round in
+  flight that opened it again, leaves none of its slots in use.
+- With no slot free and only the reserve, a whole chunk goes to the log as several items, and the
+  hot lane's other items go on.
+- A round carries one slot write before its record's under its one flush, which follows both
+  writes: the trace rules hold over seeds of whole chunks, small writes and freed slots at
+  `commit_depth` 1 to 3 (`TestSlotRoundsKeepTheTraceRules`), and the crash property holds at
+  `commit_depth` 1, 2 and 4, and at 2 and 4 over a slot freed and a whole chunk written with no
+  checkpoint between, where only the log's hold on the freed slot keeps it (without the hold,
+  recovery loses acknowledged records).
 - Cost (the cleaner streams spike): whole chunks deleted at random cost no cleaning, write
   amplification near 1.004 at any fill; a pool holding half its data in whole chunks cleans its
   small writes for about 2.5 at 90% full.
@@ -2059,7 +2087,7 @@ Invariants (simulator) and faults:
 
   | Rule | Passing trace that must pass | Planted failing trace |
   | --- | --- | --- |
-  | Each round has exactly one `DiskFsync`, paired with its round's `DiskWrite`; format's two flushes and recovery's final flush are not rounds and are exempt | Depth 2: W1 F1 W2 W3 F2 F3 (as in `TestARoundAppendsOnlyOnceItsSegmentsOpeningRoundIsDurable`: "write 64+3 io104", "fsync io105", "write 128+3 io106", "write 67+2 io108", then the two flushes) | A round with two `DiskFsync` actions |
+  | Each round has exactly one `DiskFsync`, paired with its round's `DiskWrite`, besides at most one chunk slot's write before it, which the flush follows once both completed; format's two flushes and recovery's final flush are not rounds and are exempt | Depth 2: W1 F1 W2 W3 F2 F3 (as in `TestARoundAppendsOnlyOnceItsSegmentsOpeningRoundIsDurable`: "write 64+3 io104", "fsync io105", "write 128+3 io106", "write 67+2 io108", then the two flushes) | A round with two `DiskFsync` actions |
   | A round's write and flush are emitted together when every earlier round's write has completed | Depth 1: each `DiskWrite` and its linked `DiskFsync` in one pass | A `DiskFsync` emitted one pass after its round's `DiskWrite` with no earlier write in flight |
   | At most `commit_depth` rounds' writes in flight | Depth 1: round 2's `DiskWrite` after round 1's `DiskDone` | Depth 1: round 2's `DiskWrite` before round 1's `DiskDone` |
   | No round is reported durable before a flush that ran after its write completed | The seed-1 regression's fixed trace: `fsync io107` only after `DiskDone io=106` | The seed-1 trace: `DiskWrite io=106`, then `DiskFsync io=107` completing before `DiskDone io=106`, then a durable event for round 2 |
@@ -2474,6 +2502,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 42 s |
   | `internal/disklog` `TestOracleCatchesReplayPastATornRound` | 1,000 | 5 s |
   | `internal/disklog` `TestQuarantinedSegmentsAreNeverReused` | 500 | 6 s |
+  | `internal/disklog` `TestSlotRoundsKeepTheTraceRules` | 300 | 8 s |
   | `internal/chunkstore` `TestReplayPastPendingWrites` | 2,000 | 9 s |
   | `internal/lsm` `TestMetamorphic` | 1,000 | 44 s |
   | `internal/chunkstore` `TestMetamorphic` | 1,000 | 55 s |

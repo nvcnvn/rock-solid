@@ -234,6 +234,9 @@ func (h *harness) absorb() {
 			h.pending = append(h.pending, p)
 			h.trace = append(h.trace, fmt.Sprintf("fsync io%d", a.IO))
 			h.fsyncs++
+		case core.ActDiskTrim:
+			h.pending = append(h.pending, pendingIO{act: a})
+			h.trace = append(h.trace, fmt.Sprintf("trim %d+%d io%d", a.LBA, a.Len/core.BlockSize, a.IO))
 		default:
 			h.t.Fatalf("unexpected action %+v", a)
 		}
@@ -273,15 +276,16 @@ func (h *harness) absorb() {
 	}
 }
 
-// noteRounds numbers the log's round writes and flushes by their record's LSN: the writes a
-// call emits start its newest rounds, and a round's flush takes the IO after its write's.
+// noteRounds numbers the log's round writes and flushes by their record's LSN: the record writes
+// a call emits start its newest rounds, a chunk slot's write goes just before its round's record
+// write, and a round's flush takes the IO after its record write's.
 func (h *harness) noteRounds() {
 	if h.rec != nil || h.log == nil {
 		return
 	}
 	writes := 0
 	for _, a := range h.out.Actions {
-		if a.Kind == core.ActDiskWrite {
+		if a.Kind == core.ActDiskWrite && !isSlotWrite(a) && !disklog.ZeroesASegment(h.log, a.IO) {
 			writes++
 		}
 	}
@@ -292,8 +296,13 @@ func (h *harness) noteRounds() {
 	for _, a := range h.out.Actions {
 		switch a.Kind {
 		case core.ActDiskWrite:
+			if disklog.ZeroesASegment(h.log, a.IO) {
+				continue
+			}
 			h.roundOf[a.IO] = next
-			next++
+			if !isSlotWrite(a) {
+				next++
+			}
 		case core.ActDiskFsync:
 			h.roundOf[a.IO] = h.roundOf[a.IO-1]
 		}
@@ -522,3 +531,5 @@ func (h *harness) close() {
 		h.t.Fatalf("%d pool buffers live after close", h.pool.Live())
 	}
 }
+
+func isSlotWrite(a core.Action) bool { return a.Len == core.ChunkSize && len(a.Vec) == 1 }

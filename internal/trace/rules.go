@@ -2,34 +2,63 @@ package trace
 
 import (
 	"fmt"
+	"slices"
+
+	"github.com/nvcnvn/rock-solid/internal/core"
 )
 
-// OneFsyncPerRound checks that each round has at most one DiskWrite and one DiskFsync, the flush after the write; round 0 is exempt.
+// isSlotWrite reports a DiskWrite of a chunk slot: one buffer of a whole chunk, which a round
+// writes beside its record.
+func isSlotWrite(r *Record) bool {
+	return r.Name == ActDiskWrite && r.Fields[3] == core.ChunkSize && r.Fields[4] == 1
+}
+
+// OneFsyncPerRound checks that each round has at most one DiskWrite of its record, besides at most one of a chunk slot before it, and one DiskFsync after them, which a round with a slot write emits only once both writes completed; round 0 is exempt.
 func OneFsyncPerRound() Rule {
 	return Rule{Name: "one-fsync-per-round", New: func() Scanner { return &fsyncPerRound{} }}
 }
 
 type roundActions struct {
 	writes map[uint64]bool
+	slots  map[uint64]bool
 	fsyncs map[uint64]bool
+	// roundOf is each write in flight's round, and left each round's writes in flight.
+	roundOf map[uint64]uint64
+	left    map[uint64]int
 }
 
 type fsyncPerRound struct{ loops perLoop[roundActions] }
 
 func (s *fsyncPerRound) Scan(r *Record) string {
+	st := s.loops.get(r)
+	if st.writes == nil {
+		st.writes, st.slots, st.fsyncs = make(map[uint64]bool), make(map[uint64]bool), make(map[uint64]bool)
+		st.roundOf, st.left = make(map[uint64]uint64), make(map[uint64]int)
+	}
+	if r.Name == EvDiskDone {
+		if round, ok := st.roundOf[r.Fields[0]]; ok {
+			delete(st.roundOf, r.Fields[0])
+			st.left[round]--
+		}
+		return ""
+	}
 	if r.Name != ActDiskWrite && r.Name != ActDiskFsync || r.Fields[0] == 0 {
 		return ""
 	}
 	round := r.Fields[0]
-	st := s.loops.get(r)
-	if st.writes == nil {
-		st.writes, st.fsyncs = make(map[uint64]bool), make(map[uint64]bool)
-	}
 	if r.Name == ActDiskWrite {
-		if st.writes[round] {
+		switch {
+		case isSlotWrite(r) && (st.slots[round] || st.writes[round]):
+			return fmt.Sprintf("round %d has a second slot write, or one after its record's", round)
+		case isSlotWrite(r):
+			st.slots[round] = true
+		case st.writes[round]:
 			return fmt.Sprintf("round %d has a second DiskWrite", round)
+		default:
+			st.writes[round] = true
 		}
-		st.writes[round] = true
+		st.roundOf[r.Fields[1]] = round
+		st.left[round]++
 		return ""
 	}
 	if !st.writes[round] {
@@ -38,13 +67,16 @@ func (s *fsyncPerRound) Scan(r *Record) string {
 	if st.fsyncs[round] {
 		return fmt.Sprintf("round %d has a second DiskFsync", round)
 	}
+	if st.slots[round] && st.left[round] > 0 {
+		return fmt.Sprintf("round %d's DiskFsync comes before its record's and its slot's writes completed", round)
+	}
 	st.fsyncs[round] = true
 	return ""
 }
 
 func (s *fsyncPerRound) End() string { return "" }
 
-// WriteAndFlushTogether checks that a round's DiskWrite emitted with no write in flight has its DiskFsync in the same pass.
+// WriteAndFlushTogether checks that a round's DiskWrite emitted with no write in flight has its DiskFsync in the same pass; a round with a slot write flushes once both its writes completed instead.
 func WriteAndFlushTogether() Rule {
 	return Rule{Name: "write-and-flush-together", New: func() Scanner { return &together{} }}
 }
@@ -69,7 +101,7 @@ func (s *together) Scan(r *Record) string {
 	}
 	switch r.Name {
 	case ActDiskWrite:
-		if round := r.Fields[0]; round != 0 && len(st.inflight) == 0 {
+		if round := r.Fields[0]; round != 0 && len(st.inflight) == 0 && !isSlotWrite(r) {
 			st.pending, st.pendingRound, st.pendingPass = true, round, r.Pass
 		}
 		st.inflight[r.Fields[1]] = true
@@ -85,42 +117,47 @@ func (s *together) Scan(r *Record) string {
 
 func (s *together) End() string { return "" }
 
-// CommitDepth checks that at most depth rounds' DiskWrites are in flight at once.
+// CommitDepth checks that at most depth rounds' DiskWrites are in flight at once, a round's slot write and record write counting as one round.
 func CommitDepth(depth int) Rule {
 	return Rule{Name: "commit-depth", New: func() Scanner { return &commitDepth{depth: depth} }}
 }
 
 type commitDepth struct {
 	depth int
-	loops perLoop[map[uint64]bool]
+	loops perLoop[[]ioRound]
 }
+
+type ioRound struct{ io, round uint64 }
 
 func (s *commitDepth) Scan(r *Record) string {
 	if r.Name != ActDiskWrite && r.Name != EvDiskDone {
 		return ""
 	}
 	st := s.loops.get(r)
-	if *st == nil {
-		*st = make(map[uint64]bool)
-	}
-	inflight := *st
 	if r.Name == EvDiskDone {
-		delete(inflight, r.Fields[0])
+		*st = slices.DeleteFunc(*st, func(w ioRound) bool { return w.io == r.Fields[0] })
 		return ""
 	}
-	if r.Fields[0] == 0 {
+	round := r.Fields[0]
+	if round == 0 {
 		return ""
 	}
-	if len(inflight) >= s.depth {
-		return fmt.Sprintf("round %d's DiskWrite with %d rounds' writes in flight, commit_depth %d", r.Fields[0], len(inflight), s.depth)
+	var others []uint64
+	for _, w := range *st {
+		if w.round != round && !slices.Contains(others, w.round) {
+			others = append(others, w.round)
+		}
 	}
-	inflight[r.Fields[1]] = true
+	if len(others) >= s.depth {
+		return fmt.Sprintf("round %d's DiskWrite with %d rounds' writes in flight, commit_depth %d", round, len(others), s.depth)
+	}
+	*st = append(*st, ioRound{io: r.Fields[1], round: round})
 	return ""
 }
 
 func (s *commitDepth) End() string { return "" }
 
-// DurableAfterFlush checks that a round is reported Durable only after a flush that ran after its DiskWrite completed has completed.
+// DurableAfterFlush checks that a round is reported Durable only after a flush that ran after its DiskWrites, its record's and any slot's, completed has completed.
 func DurableAfterFlush() Rule {
 	return Rule{Name: "durable-after-flush", New: func() Scanner { return &durable{} }}
 }
@@ -132,7 +169,7 @@ type flush struct {
 }
 
 type durableState struct {
-	roundWrite    map[uint64]uint64
+	roundWrites   map[uint64][]uint64
 	writes        map[uint64]bool
 	doneIndex     map[uint64]int
 	done          int
@@ -157,7 +194,7 @@ func (s *durable) Scan(r *Record) string {
 	}
 	st := s.loops.get(r)
 	if st.writes == nil {
-		st.roundWrite = make(map[uint64]uint64)
+		st.roundWrites = make(map[uint64][]uint64)
 		st.writes = make(map[uint64]bool)
 		st.doneIndex = make(map[uint64]int)
 		st.flushes = make(map[uint64]flush)
@@ -168,7 +205,7 @@ func (s *durable) Scan(r *Record) string {
 		io := r.Fields[1]
 		st.writes[io] = true
 		if r.Fields[0] != 0 {
-			st.roundWrite[r.Fields[0]] = io
+			st.roundWrites[r.Fields[0]] = append(st.roundWrites[r.Fields[0]], io)
 		}
 		st.lastWrite, st.lastWritePass, st.lastWasWrite = io, r.Pass, true
 	case ActDiskFsync:
@@ -192,12 +229,14 @@ func (s *durable) Scan(r *Record) string {
 		}
 	case OutDurable:
 		round := r.Fields[0]
-		io, ok := st.roundWrite[round]
+		ios, ok := st.roundWrites[round]
 		if !ok {
 			return fmt.Sprintf("round %d reported durable with no DiskWrite", round)
 		}
-		if i := st.doneIndex[io]; !st.linkedDurable[io] && (i == 0 || i > st.durablePrefix) {
-			return fmt.Sprintf("round %d reported durable before a flush that ran after its DiskWrite io=%d completed", round, io)
+		for _, io := range ios {
+			if i := st.doneIndex[io]; !st.linkedDurable[io] && (i == 0 || i > st.durablePrefix) {
+				return fmt.Sprintf("round %d reported durable before a flush that ran after its DiskWrite io=%d completed", round, io)
+			}
 		}
 	}
 	return ""

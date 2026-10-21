@@ -48,7 +48,7 @@ func goldenImages(t testing.TB) map[string][]byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	images := map[string][]byte{"superblock": sb, "record_header": goldenRecord(t).image[:core.BlockSize]}
+	images := map[string][]byte{"superblock": sb, "record_header": goldenRecord(t).image[:core.BlockSize], "record_header_slot": goldenSlotRecord(t).image[:2*core.BlockSize]}
 	input, output := BlobRef{Segment: 4, Block: 2, LSN: 78, Entry: 3}, BlobRef{Segment: 6, Block: 1, LSN: 91}
 	images["manifest_snapshot"] = AppendManifest(nil, &Manifest{BaseLSN: 77, NextSeq: 9,
 		Indexes:  []ManifestIndex{{Owner: 1, ReplayLSN: 70, Runs: []BlobRef{input, output}, Bounds: []MergeBound{{Run: input, Key: []byte("bound"), Dead: 2}}}},
@@ -67,7 +67,7 @@ func goldenImages(t testing.TB) map[string][]byte {
 func TestGoldenBytes(t *testing.T) {
 	golden := readGolden(t)
 	images := goldenImages(t)
-	for _, name := range []string{"superblock", "segment_header", "segment_header_meta", "segment_header_merge", "record_header", "manifest_snapshot", "manifest_edit"} {
+	for _, name := range []string{"superblock", "segment_header", "segment_header_meta", "segment_header_merge", "record_header", "record_header_slot", "manifest_snapshot", "manifest_edit"} {
 		t.Run(name, func(t *testing.T) {
 			want, ok := golden[name]
 			if !ok {

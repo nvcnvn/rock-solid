@@ -80,6 +80,7 @@ const (
 	segUsed
 	segSuspect
 	segQuarantined
+	segSlot
 )
 
 type segInfo struct {
@@ -90,6 +91,10 @@ type segInfo struct {
 	listed bool
 	live   uint32
 	newest uint64
+	// slots is a slot segment's slots in use; marks those the records replayed past the manifest's base name.
+	slots      uint16
+	marks      uint16
+	markNewest uint64
 }
 
 // firstRecord is the record header of this log at block 1, of whatever segment sequence.
@@ -123,6 +128,7 @@ type window struct {
 }
 
 type tailRecord struct {
+	seg uint32
 	lsn uint64
 	end uint32
 }
@@ -138,8 +144,20 @@ type laneScan struct {
 	head      DecodedRecord
 	headSeg   uint32
 	headBlock uint32
+	headImg   []byte
 	ents      []Entry
 	tail      []tailRecord
+}
+
+// heldRecord is a record replay copied out of its lane's window to read past it: a record with
+// slot writes that may be one of the rounds in flight, whose slot data it checks before
+// delivering it, or one that follows such a record.
+type heldRecord struct {
+	d       DecodedRecord
+	seg     uint32
+	block   uint32
+	merge   bool
+	checked int
 }
 
 type ioKind uint8
@@ -225,6 +243,7 @@ type Recovery struct {
 	replayBytes uint64
 	heldBytes   uint64
 	replayed    uint64
+	held        []heldRecord
 
 	durable     uint64
 	erase       []foundHeader
@@ -517,6 +536,7 @@ func (r *Recovery) classify(s uint32, img []byte) {
 		r.checkFirst(s, img[core.BlockSize:])
 	default:
 		*info = segInfo{state: segSuspect}
+		r.checkFirst(s, img[core.BlockSize:])
 	}
 }
 
@@ -682,11 +702,16 @@ func (r *Recovery) pumpFollow(ctx *core.Context, out *Output) {
 func (r *Recovery) applyTable(ctx *core.Context, out *Output) bool {
 	next := r.nextSeq
 	for _, u := range r.manifest.Segments {
-		if u.Segment >= r.sb.SegmentCount {
+		if u.Segment >= r.sb.SegmentCount || u.State == SegmentSlot && (u.Live == 0 || u.Live >= 1<<r.sb.SlotsPerSegment()) {
 			r.fail(ctx, &CorruptError{LSN: r.manifestPos.LSN}, out)
 			return false
 		}
 		info := &r.segs[u.Segment]
+		if u.State == SegmentSlot && info.state == segUsed && info.seq >= next {
+			// Chunk data may read as a header of this log at NextSeq or more; markSlots decides.
+			info.marks, info.markNewest = uint16(u.Live), u.Newest
+			continue
+		}
 		if u.State != SegmentQuarantined && info.state == segUsed && info.seq >= next {
 			continue
 		}
@@ -694,6 +719,8 @@ func (r *Recovery) applyTable(ctx *core.Context, out *Output) bool {
 		switch {
 		case u.State == SegmentQuarantined:
 			info.state = segQuarantined
+		case u.State == SegmentSlot:
+			info.state, info.live, info.slots = segSlot, 0, uint16(u.Live)
 		case info.state == segFree:
 			info.state = segSuspect
 		}
@@ -703,6 +730,12 @@ func (r *Recovery) applyTable(ctx *core.Context, out *Output) bool {
 		f := info.first
 		stray := f.ok && f.seq >= next && f.seq != info.seq
 		switch {
+		case info.state == segSlot:
+			// Block 1 is chunk data, unless a round in flight reopened the segment for records
+			// after its last slot was freed.
+			if f.ok && f.seq >= next {
+				r.noteFound(uint32(s), 1, f.seq, f.lsn, f.durable)
+			}
 		case info.state == segUsed && info.seq < next:
 			if stray {
 				r.noteFound(uint32(s), 1, f.seq, f.lsn, f.durable)
@@ -718,9 +751,23 @@ func (r *Recovery) applyTable(ctx *core.Context, out *Output) bool {
 }
 
 func (r *Recovery) startQuarantine(ctx *core.Context, out *Output) {
-	if !r.applyTable(ctx, out) {
-		return
+	if r.applyTable(ctx, out) {
+		r.loaded(out)
 	}
+}
+
+// startScan reads in full, once replay has delivered every record, the segments whose first
+// block did not decode or whose block 1 holds a round in flight, except those replay found to be
+// slot segments, whose first block is chunk data: a slot segment opened since the manifest would
+// otherwise be read whole at every start. A slot segment whose block 1 holds a record of this log
+// at NextSeq or more is read all the same: a round opened it again for records once its slots
+// were freed, and if its header is damaged, durable records may follow.
+func (r *Recovery) startScan(ctx *core.Context, out *Output) {
+	r.markSlots()
+	r.scan = slices.DeleteFunc(r.scan, func(s uint32) bool {
+		info := &r.segs[s]
+		return info.state == segSlot && !(info.first.ok && info.first.seq >= r.nextSeq)
+	})
 	r.phase, r.qPos = recQuarantine, 1
 	r.pumpQuarantine(ctx, out)
 }
@@ -745,7 +792,7 @@ func (r *Recovery) pumpQuarantine(ctx *core.Context, out *Output) {
 		r.qi++
 		r.qPos = 1
 	}
-	r.loaded(out)
+	r.endReplay(ctx, out)
 }
 
 type readState uint8
@@ -1011,7 +1058,10 @@ func (r *Recovery) scanLane(s int) int {
 // pumpReplay merges the lanes by LSN. It stops delivering at the first missing LSN but scans
 // every lane to its end, since the tail rule needs every record header past it. A merge lane's
 // records count for the LSN chain and the tail rule but go to no index: a step's pieces count
-// once a manifest names them.
+// once a manifest names them. A record with slot writes within the last commit_depth LSNs found
+// so far may be a round in flight whose slot write did not land, so replay holds it, and the
+// records after it, until a header far enough past it is found, and checks its slot data as
+// data in the log is checked once every lane has ended without one.
 func (r *Recovery) pumpReplay(ctx *core.Context, out *Output) {
 	for r.phase == recReplay {
 		for i := range r.lanes {
@@ -1031,33 +1081,108 @@ func (r *Recovery) pumpReplay(ctx *core.Context, out *Output) {
 				x, merge = st, i > laneMeta
 			}
 		}
+		if len(r.held) > 0 {
+			h := &r.held[0]
+			torn := false
+			if r.unsure(&h.d) {
+				if x != nil {
+					r.hold(x, merge)
+					continue
+				}
+				st := r.checkSlots(ctx, h, out)
+				if st == readPending {
+					return
+				}
+				torn = st == readBad
+			}
+			r.take(ctx, &h.d, h.seg, h.block, h.merge, torn, out)
+			r.held[0] = heldRecord{}
+			r.held = r.held[1:]
+			continue
+		}
 		if x == nil {
-			r.endReplay(ctx, out)
+			r.startScan(ctx, out)
 			return
 		}
-		lsn := x.head.Record.LSN
-		switch {
-		case !r.gapped && lsn == r.expected:
-			r.count(x)
-			if !merge {
-				r.deliver(x, out)
-			}
-			r.expected++
-		case !r.gapped && lsn < r.expected:
-			r.fail(ctx, &CorruptError{LSN: lsn}, out)
-			return
-		case r.pastGaps && !r.gapped:
-			r.count(x)
-			if !merge {
-				r.deliver(x, out)
-			}
-			r.expected = lsn + 1
-		default:
-			r.gapped = true
-			r.found = append(r.found, foundHeader{segment: x.headSeg, block: x.headBlock, lsn: lsn})
+		if r.unsure(&x.head) {
+			r.hold(x, merge)
+			continue
 		}
+		r.take(ctx, &x.head, x.headSeg, x.headBlock, merge, false, out)
 		x.hasHead = false
 	}
+}
+
+// unsure reports a record next in the chain whose slot writes may not have landed: no header
+// found so far names it durable or lies commit_depth or more LSNs past it, so its round may
+// have been in flight. A slot freed after its record is held until a header names that record
+// durable, so its data is never checked against a later write.
+func (r *Recovery) unsure(d *DecodedRecord) bool {
+	lsn := d.Record.LSN
+	return !r.gapped && lsn == r.expected && d.Layout.SlotBlocks > 0 && lsn > r.maxDurable && lsn+uint64(r.cfg.CommitDepth) > r.maxKnown
+}
+
+// hold copies a lane's head out of the lane's window, so the lane reads on.
+func (r *Recovery) hold(x *laneScan, merge bool) {
+	img := slices.Clone(x.headImg)
+	place := Place{LogID: r.sb.LogID, Seq: r.segs[x.headSeg].seq, Offset: x.headBlock}
+	d, err := DecodeRecord(img, place, r.sb.SegmentBlocks-x.headBlock, nil)
+	if err != nil {
+		panic(fmt.Sprintf("disklog: a record that decoded in its window does not decode copied: %v", err))
+	}
+	r.held = append(r.held, heldRecord{d: d, seg: x.headSeg, block: x.headBlock, merge: merge})
+	x.hasHead = false
+}
+
+// checkSlots reads each slot a held record writes and checks every block against its checksum.
+func (r *Recovery) checkSlots(ctx *core.Context, h *heldRecord, out *Output) readState {
+	w := len(r.lanes)
+	if !r.window(ctx, w, out) {
+		return readPending
+	}
+	for ; h.checked < len(h.d.Entries); h.checked++ {
+		e := &h.d.Entries[h.checked]
+		if e.Kind != EntrySlot {
+			continue
+		}
+		img, ok := r.need(ctx, w, e.Segment, uint32(e.Slot)*core.BlocksPerChunk, core.BlocksPerChunk, out)
+		if !ok {
+			return readPending
+		}
+		for b := range uint16(core.BlocksPerChunk) {
+			if core.CRC32C(img[int(b)*core.BlockSize:][:core.BlockSize]) != h.d.SlotCRC(h.checked, b) {
+				return readBad
+			}
+		}
+	}
+	return readOK
+}
+
+// take puts the next record in LSN order into the chain, or past its end.
+func (r *Recovery) take(ctx *core.Context, d *DecodedRecord, seg, block uint32, merge, torn bool, out *Output) {
+	lsn := d.Record.LSN
+	switch {
+	case torn || r.gapped:
+	case lsn == r.expected:
+		r.count(d, seg)
+		if !merge {
+			r.deliver(d, seg, block, out)
+		}
+		r.expected++
+		return
+	case lsn < r.expected:
+		r.fail(ctx, &CorruptError{LSN: lsn}, out)
+		return
+	case r.pastGaps:
+		r.count(d, seg)
+		if !merge {
+			r.deliver(d, seg, block, out)
+		}
+		r.expected = lsn + 1
+		return
+	}
+	r.gapped = true
+	r.found = append(r.found, foundHeader{segment: seg, block: block, lsn: lsn})
 }
 
 // advance searches the rest of a segment after a block that holds no valid record, so damage
@@ -1109,11 +1234,12 @@ func (r *Recovery) advance(ctx *core.Context, s int, out *Output) {
 			return
 		}
 		d, err := DecodeRecord(img, place, left, st.ents[:0])
+		if err == nil && !r.slotsValid(&d, seg) {
+			err = ErrMalformed
+		}
 		lsn := h.Record.LSN
 		r.maxKnown = max(r.maxKnown, lsn)
-		if seg == st.segs[len(st.segs)-1] {
-			st.tail = append(st.tail, tailRecord{lsn: lsn, end: pos + n})
-		}
+		st.tail = append(st.tail, tailRecord{seg: seg, lsn: lsn, end: pos + n})
 		st.pos = pos + n
 		switch {
 		case err != nil || lsn <= st.lastLSN:
@@ -1122,19 +1248,29 @@ func (r *Recovery) advance(ctx *core.Context, s int, out *Output) {
 			st.lastLSN = lsn
 		default:
 			st.lastLSN = lsn
-			st.head, st.headSeg, st.headBlock, st.hasHead = d, seg, pos, true
+			st.head, st.headSeg, st.headBlock, st.hasHead, st.headImg = d, seg, pos, true, img[:n*core.BlockSize]
 		}
 	}
 }
 
-func (r *Recovery) deliver(x *laneScan, out *Output) {
-	d := &x.head
+// slotsValid reports whether every slot a record writes is one the geometry has, outside the
+// record's own segment.
+func (r *Recovery) slotsValid(d *DecodedRecord, seg uint32) bool {
+	for i := range d.Entries {
+		if e := &d.Entries[i]; e.Kind == EntrySlot && (e.Segment >= r.sb.SegmentCount || e.Segment == seg || e.Slot >= r.sb.SlotsPerSegment()) {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Recovery) deliver(d *DecodedRecord, seg, block uint32, out *Output) {
 	ev := Event{
 		Kind:         Replayed,
 		LSN:          d.Record.LSN,
-		Segment:      x.headSeg,
-		Block:        x.headBlock,
-		LBA:          r.sb.LBA(x.headSeg, x.headBlock),
+		Segment:      seg,
+		Block:        block,
+		LBA:          r.sb.LBA(seg, block),
 		HeaderBlocks: d.Layout.HeaderBlocks,
 	}
 	out.emitRecord(ev, d)
@@ -1142,16 +1278,22 @@ func (r *Recovery) deliver(x *laneScan, out *Output) {
 }
 
 // count restores what group commit counted for a record as it retired: the replay and hold
-// bytes after the manifest and its segment's usage row.
-func (r *Recovery) count(x *laneScan) {
-	d := &x.head
+// bytes after the manifest, its segment's usage row and the slots it writes.
+func (r *Recovery) count(d *DecodedRecord, seg uint32) {
 	blocks := d.Layout.Blocks()
 	if d.Record.LSN > r.replayFloor {
 		r.replayBytes += blocks * core.BlockSize
 		r.heldBytes += ordinaryBytes(d.Entries, d.Layout)
-		info := &r.segs[x.headSeg]
+		info := &r.segs[seg]
 		info.live += d.Layout.DataBlocks
 		info.newest = d.Record.LSN
+		for i := range d.Entries {
+			if e := &d.Entries[i]; e.Kind == EntrySlot {
+				s := &r.segs[e.Segment]
+				s.marks |= 1 << e.Slot
+				s.markNewest = d.Record.LSN
+			}
+		}
 	}
 }
 
@@ -1193,6 +1335,13 @@ func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
 	if r.stopEarly && r.durable > 0 {
 		r.durable--
 	}
+	for _, f := range r.found {
+		if info := &r.segs[f.segment]; f.lsn > r.durable && info.state == segSlot {
+			// A round in flight opened the segment for records, which it does only once every
+			// slot of it was freed: the slots the table or replay name were rewritten since.
+			info.state, info.slots = segFree, 0
+		}
+	}
 	for s := range r.segs {
 		info := &r.segs[s]
 		if info.state == segSuspect && info.listed {
@@ -1208,13 +1357,14 @@ func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
 	r.resume = make([]cursor, len(r.lanes))
 	for s := range r.lanes {
 		st := &r.lanes[s]
+		st.segs = slices.DeleteFunc(st.segs, func(seg uint32) bool { return r.segs[seg].state == segSlot })
 		if len(st.segs) == 0 {
 			continue
 		}
 		seg := st.segs[len(st.segs)-1]
 		c := cursor{segment: seg, seq: r.segs[seg].seq, next: 1}
 		for _, t := range st.tail {
-			if t.lsn <= r.durable {
+			if t.seg == seg && t.lsn <= r.durable {
 				c.next = max(c.next, t.end)
 			}
 		}
@@ -1222,6 +1372,9 @@ func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
 	}
 	for _, f := range r.found {
 		if f.lsn > r.durable {
+			if r.segs[f.segment].state == segSlot {
+				panic(fmt.Sprintf("disklog: erasing a record at block %d of slot segment %d, whose slots are in use", f.block, f.segment))
+			}
 			r.erase = append(r.erase, f)
 		}
 	}
@@ -1235,6 +1388,27 @@ func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
 	r.eraseLeft = len(r.erase)
 	for _, f := range r.erase {
 		r.issue(ioErase, 0, core.Action{Kind: core.ActDiskWrite, LBA: r.sb.LBA(f.segment, f.block), Buf: zero, Len: core.BlockSize}, out)
+	}
+}
+
+// markSlots makes a slot segment of each segment the records replayed past the manifest's base
+// write slots of, whatever its first block holds, which is chunk data that may even read as a
+// segment header of this log. Only records of the segment's own newer than every slot write
+// make it a log segment, opened again once its slots were freed; a segment opened again whose
+// first round never became durable holds nothing, and its slots, freed, free it. A segment read
+// in full because its first block did not decode is not damaged: records found there lie in chunk
+// data, or are a round in flight that opened it again, and are erased as any past the end.
+func (r *Recovery) markSlots() {
+	for s := range r.segs {
+		info := &r.segs[s]
+		switch {
+		case info.marks == 0, info.state == segQuarantined:
+		case info.state == segUsed && info.newest > info.markNewest:
+		case info.state == segSlot:
+			info.slots, info.newest = info.slots|info.marks, max(info.newest, info.markNewest)
+		default:
+			info.state, info.slots, info.newest = segSlot, info.marks, info.markNewest
+		}
 	}
 }
 
@@ -1279,6 +1453,9 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 			if info.state == segQuarantined {
 				l.usage[s].State = SegmentQuarantined
 			}
+		case segSlot:
+			l.usage[s] = SegmentUsage{State: SegmentSlot, Live: uint32(info.slots), Newest: info.newest}
+			l.slots.setTaken(s, info.slots)
 		}
 	}
 	table := r.manifest.Segments
@@ -1292,5 +1469,6 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 			l.changed[s/64] |= 1 << (s % 64)
 		}
 	}
+	l.checkSlots()
 	return l, nil
 }

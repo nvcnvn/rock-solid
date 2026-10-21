@@ -393,6 +393,11 @@ type round struct {
 	writeIO      core.IOID
 	flushIO      core.IOID
 	writeDone    bool
+	recordDone   bool
+	hasSlot      bool
+	slotIO       core.IOID
+	slotDone     bool
+	slotVec      []core.IOVec
 	flushSent    bool
 	abandoned    bool
 	segment      uint32
@@ -484,6 +489,7 @@ type Log struct {
 	free       []uint64
 	usage      []SegmentUsage
 	changed    []uint64
+	slots      slotTable
 
 	lanes     []lane
 	cpNoSpace bool
@@ -551,6 +557,7 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		maxItemRec: maxWrite - 1,
 		maxBlob:    maxBlobBytes(maxWrite - 1),
 		maxWrites:  maxWriteBlocks(maxWrite - 1),
+		slots:      newSlotTable(sb.Geometry),
 		nextIO:     firstIO,
 		nextTicket: 1,
 		nextLSN:    1,
@@ -578,10 +585,21 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 			return nil, err
 		}
 	}
+	if l.slots.per > 0 {
+		var err error
+		if l.slots.zero, err = ctx.Pool.AllocZeroed(core.BlockSize); err != nil {
+			l.release(ctx)
+			return nil, err
+		}
+	}
 	return l, nil
 }
 
 func (l *Log) release(ctx *core.Context) {
+	if l.slots.zero != core.NoBuf {
+		ctx.Pool.Free(l.slots.zero)
+		l.slots.zero = core.NoBuf
+	}
 	for i := range l.rounds {
 		r := &l.rounds[i]
 		for _, b := range []*core.IOBuf{&r.head, &r.tail} {
@@ -595,7 +613,7 @@ func (l *Log) release(ctx *core.Context) {
 
 // Close fails the items still waiting, for room or for a manifest, and the running checkpoint with ErrClosed, and returns their buffers and the log's own to the pool; it refuses until format finishes and while a write or flush is in flight, and the log takes nothing more.
 func (l *Log) Close(ctx *core.Context, out *Output) error {
-	if l.count > 0 || l.phase != formatDone || len(l.stale) > 0 {
+	if l.count > 0 || l.phase != formatDone || len(l.stale) > 0 || len(l.slots.trims) > 0 {
 		return ErrBusy
 	}
 	if l.err != ErrClosed {
@@ -668,8 +686,11 @@ func (l *Log) Err() error { return l.err }
 // MaxBlobBytes is the largest blob one record holds.
 func (l *Log) MaxBlobBytes() uint64 { return l.maxBlob }
 
-// MaxWriteBlocks is the most blocks one write item holds.
+// MaxWriteBlocks is the most blocks one write item holds, besides a whole chunk on a disk with chunk slots.
 func (l *Log) MaxWriteBlocks() uint16 { return l.maxWrites }
+
+// FreeSegments is the number of segments free to open, the reserve included.
+func (l *Log) FreeSegments() uint32 { return l.freeCount() }
 
 // ReplayBytes is the size of the records written after the newest manifest's base, which a restart replays.
 func (l *Log) ReplayBytes() uint64 { return l.replayBytes }
@@ -770,21 +791,27 @@ func (l *Log) CheckpointDue() bool {
 	return l.cp == nil && l.err == nil && l.replayBytes >= l.cfg.MaxReplayBytes
 }
 
-// Submit queues an item for the hot or the cold stream, taking its buffer; a refused item's buffer stays with the caller.
+// Submit queues an item for the hot or the cold stream, taking its buffer; a refused item's buffer stays with the caller. A write of a whole chunk to the hot stream goes to a chunk slot while SlotAvailable, and its Durable event names it as a slot write.
 func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ticket, error) {
 	if l.err != nil {
 		return 0, l.err
 	}
-	if stream > Cold {
+	if stream > Cold || it.Entry.Kind == EntrySlot {
 		return 0, ErrMalformed
 	}
 	if isCheckpointKind(&it.Entry) {
 		return 0, ErrReservedKind
 	}
+	if e := &it.Entry; e.Kind == EntryWrite && e.First == 0 && e.Count == core.BlocksPerChunk && stream == Hot && l.SlotAvailable() {
+		e.Kind = EntrySlot
+	}
 	if err := l.accept(ctx, &it); err != nil {
 		return 0, err
 	}
-	t := l.enqueue(&l.lanes[laneOf(stream, 0)].q, queued{entry: it.Entry, buf: it.Buf, keep: it.Keep && it.Entry.Kind == EntryWrite})
+	if it.Entry.Kind == EntrySlot && !l.takeSlot(&it.Entry) {
+		panic("disklog: no slot for a whole chunk submitted while one was available")
+	}
+	t := l.enqueue(&l.lanes[laneOf(stream, 0)].q, queued{entry: it.Entry, buf: it.Buf, keep: it.Keep && (it.Entry.Kind == EntryWrite || it.Entry.Kind == EntrySlot)})
 	l.startRounds(ctx, out)
 	return t, nil
 }
@@ -822,7 +849,7 @@ func (l *Log) accept(ctx *core.Context, it *Item) error {
 		return ErrTooLarge
 	}
 	switch it.Entry.Kind {
-	case EntryWrite:
+	case EntryWrite, EntrySlot:
 		if it.Buf == core.NoBuf || len(ctx.Pool.Bytes(it.Buf)) != int(it.Entry.Count)*core.BlockSize {
 			return ErrBadBuffer
 		}
@@ -1044,11 +1071,25 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 		l.formatDone(ctx, io, derr, out)
 		return
 	}
+	if l.trimDone(io, out) {
+		return
+	}
 	for i := range l.count {
 		r := l.round(i)
-		switch io {
-		case r.writeIO:
-			if r.writeDone {
+		switch {
+		case io == r.writeIO || r.hasSlot && io == r.slotIO:
+			done := &r.recordDone
+			if io != r.writeIO {
+				done = &r.slotDone
+			}
+			if *done {
+				return
+			}
+			*done = true
+			if !r.recordDone || r.hasSlot && !r.slotDone {
+				if derr != core.DiskOK && !r.abandoned {
+					l.fail(ctx, derr, out)
+				}
 				return
 			}
 			r.writeDone = true
@@ -1064,7 +1105,7 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 			}
 			l.sendFlushes(out)
 			return
-		case r.flushIO:
+		case io == r.flushIO:
 			if r.abandoned || !r.flushSent {
 				return
 			}
@@ -1182,6 +1223,8 @@ func (l *Log) retire(out *Output) {
 	u := &l.usage[r.segment]
 	u.State, u.Newest = SegmentUsed, r.lsn
 	u.Live += uint32(r.bytes/core.BlockSize) - r.headerBlocks
+	l.useSlots(r)
+	l.releaseHeld(out)
 	out.emitDurable(Event{
 		Kind:         Durable,
 		LSN:          r.lsn,
@@ -1286,6 +1329,9 @@ func (l *Log) drain(ctx *core.Context, q *queue, tickets []Ticket) []Ticket {
 		tickets = append(tickets, visible(it.ticket, &it.entry))
 		if it.buf != core.NoBuf && !it.keep {
 			ctx.Pool.Free(it.buf)
+		}
+		if it.entry.Kind == EntrySlot {
+			l.untake(&it.entry)
 		}
 	}
 	q.drop(q.len())
@@ -1400,10 +1446,13 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	if t.roll {
 		lead = 1
 	}
+	if t.roll {
+		l.free[t.segment/64] &^= 1 << (t.segment % 64)
+	}
 	limit := uint64(min(l.sb.SegmentBlocks-t.offset, l.maxWrite-lead))
 	var acc layoutAcc
 	var lay Layout
-	n, writeBlocks := 0, uint32(0)
+	n, writeBlocks, slotted := 0, uint32(0), false
 	for n < ln.q.len() && n < maxRecordEntries {
 		next := acc
 		e := &ln.q.at(n).entry
@@ -1413,6 +1462,13 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		nl, err := next.layout()
 		if err != nil || nl.Blocks() > limit {
 			break
+		}
+		if e.Kind == EntrySlot {
+			// One slot write a round bounds how long its 4 MiB delays the round's other items.
+			if slotted {
+				break
+			}
+			slotted = true
 		}
 		acc, lay = next, nl
 		if e.Kind == EntryWrite {
@@ -1438,22 +1494,33 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	r.writeBufs = r.writeBufs[:0]
 	r.keepBufs = r.keepBufs[:0]
 	r.vec = append(r.vec[:0], core.IOVec{Buf: r.head, Len: headLen})
+	r.slotVec = r.slotVec[:0]
 	l.crcs = l.crcs[:0]
+	var slotAt core.LBA
 	var writeOff, blobOff uint64
 	for i := range items {
 		it := &items[i]
 		r.entries = append(r.entries, it.entry)
 		r.tickets = append(r.tickets, it.ticket)
 		switch it.entry.Kind {
-		case EntryWrite:
-			r.payloads = append(r.payloads, writeOff)
-			writeOff += uint64(it.entry.Count) * core.BlockSize
+		case EntryWrite, EntrySlot:
+			if it.entry.Kind == EntryWrite {
+				r.payloads = append(r.payloads, writeOff)
+			} else {
+				r.payloads = append(r.payloads, blobOff)
+			}
 			if it.keep {
 				r.keepBufs = append(r.keepBufs, it.buf)
 			} else {
 				r.writeBufs = append(r.writeBufs, it.buf)
 			}
-			r.vec = append(r.vec, core.IOVec{Buf: it.buf, Len: uint32(it.entry.Count) * core.BlockSize})
+			v := core.IOVec{Buf: it.buf, Len: uint32(it.entry.Count) * core.BlockSize}
+			if it.entry.Kind == EntrySlot {
+				r.slotVec, slotAt = append(r.slotVec, v), l.sb.SlotLBA(it.entry.Segment, it.entry.Slot)
+				continue
+			}
+			writeOff += uint64(it.entry.Count) * core.BlockSize
+			r.vec = append(r.vec, v)
 			l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(it.buf))
 		default:
 			r.payloads = append(r.payloads, blobOff)
@@ -1468,6 +1535,9 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	if tailBlocks > 0 {
 		r.vec = append(r.vec, core.IOVec{Buf: r.tail, Len: tailBlocks * core.BlockSize})
 		l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(r.tail)[:tailBlocks*core.BlockSize])
+	}
+	for _, v := range r.slotVec {
+		l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(v.Buf)[:v.Len])
 	}
 
 	rec := Record{Place: Place{LogID: l.sb.LogID, Seq: t.seq, Offset: t.offset}, LSN: l.nextLSN, Durable: l.durableLSN}
@@ -1496,15 +1566,17 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	ln.q.drop(n)
 
 	if t.roll {
-		l.free[t.segment/64] &^= 1 << (t.segment % 64)
 		l.nextSeq++
 	}
 	bytes := uint64(lead+uint32(lay.Blocks())) * core.BlockSize
+	hasSlot := len(r.slotVec) > 0
 	*r = round{
 		lsn:          l.nextLSN,
 		writeIO:      l.io(),
 		flushIO:      l.io(),
-		flushSent:    l.earlierWritten(),
+		hasSlot:      hasSlot,
+		slotVec:      r.slotVec,
+		flushSent:    l.earlierWritten() && !hasSlot,
 		segment:      t.segment,
 		block:        t.offset,
 		headerBlocks: lay.HeaderBlocks,
@@ -1529,6 +1601,11 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	l.nextLSN++
 	l.last = t.lane
 	l.count++
+	if hasSlot {
+		// The flush must cover the slot's write too, so it goes out once both writes complete.
+		r.slotIO = l.io()
+		out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskWrite, IO: r.slotIO, LBA: slotAt, Vec: r.slotVec, Len: core.ChunkSize})
+	}
 	out.Actions = append(out.Actions, core.Action{
 		Kind: core.ActDiskWrite,
 		IO:   r.writeIO,
@@ -1591,6 +1668,15 @@ func (l *Log) check(ctx *core.Context, t target, rec Record, r *round, items []q
 		}
 		if off := PayloadOffset(d.Entries, i); r.payloads[i] != off {
 			panic(fmt.Sprintf("disklog: decode check: LSN %d entry %d reported at offset %d; it decodes at %d", rec.LSN, i, r.payloads[i], off))
+		}
+		if it.entry.Kind == EntrySlot {
+			data := ctx.Pool.Bytes(it.buf)
+			for b := range uint16(core.BlocksPerChunk) {
+				if core.CRC32C(data[int(b)*core.BlockSize:][:core.BlockSize]) != d.SlotCRC(i, b) {
+					panic(fmt.Sprintf("disklog: decode check: LSN %d entry %d slot block %d checksum differs", rec.LSN, i, b))
+				}
+			}
+			continue
 		}
 		if !bytes.Equal(d.Payload(i), it.payload(ctx.Pool)) {
 			panic(fmt.Sprintf("disklog: decode check: LSN %d entry %d payload differs", rec.LSN, i))
