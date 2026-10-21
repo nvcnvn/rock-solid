@@ -856,6 +856,8 @@ Edge and negative cases:
 - A crash once a checkpoint's manifest record is durable but before any segment header names it,
   with a compaction's result among its runs, recovers from the previous manifest plus replay to the
   live index, and the next checkpoint's restart does too (seeds 0-3).
+- Every recovery in these tests is also checked against the crash oracle's block model ([Chunk
+  index under the crash oracle](#chunk-index-under-the-crash-oracle)).
 - Benchmarks: a lookup among 20,000 one-block extents over 64 chunks, and applying a one-block write.
 
 ## Range removals
@@ -2237,8 +2239,10 @@ Torn writes, bit flips, fail-slow and discards:
 - Per disk the oracle (`sim.Oracle`) keeps every index's state at the last acknowledged LSN and the
   records written since, in LSN order (RocksDB's crash test: expected state plus trace). It is
   generic over the record and the model: in phase 1 the disk log's tests keep a block map standing
-  in for the chunk index, and the atomic-flush scenario a list of entries per owner; from phase 4
-  each shard replica on the disk joins the model.
+  in for the chunk index, the atomic-flush scenario a list of entries per owner, and the chunk
+  index's tests a block model of the real `Index` ([Chunk index under the crash
+  oracle](#chunk-index-under-the-crash-oracle)); from phase 4 each shard replica on the disk joins
+  the model.
 - After a crash, recovery reports an LSN r. Required: acked ≤ r ≤ acked + in flight. The oracle
   replays its trace from acked to r onto the state at acked, and every index on the disk equals the
   result, with no hole. The window, with 7 acknowledged and 2 in flight:
@@ -2285,6 +2289,30 @@ Torn writes, bit flips, fail-slow and discards:
   recovery reports the same r.
 - The phase 5 real-disk crash test keeps the same oracle in its test driver, in a file outside the
   daemon it kills (Crash tests on real disks).
+
+## Chunk index under the crash oracle
+
+The chunkstore tests' `node` runs the real `Index` over the disk log on a simulated disk. It hands
+`sim.Oracle` each round as its write goes to the disk, decoded from the bytes written with the
+open sequence of the write that opened its segment, and each `Durable` LSN. The oracle's model is a
+plain block model: per chunk its entry, and block by block its live map and frozen maps.
+
+- After every recovery the node's tests run (`TestRecoveryAndRebuildEqualLiveIndex`,
+  `TestCrashBetweenRunAndManifest` and the property below), the recovered LSN must lie in the
+  oracle's window, and the recovered `Index` must read as the model at that LSN: each chunk's
+  entry, the frozen version `FrozenAt` gives at every epoch up to one past the newest freeze, and
+  every block of every chunk the workload writes, live and in every frozen version. `Check` must
+  pass too.
+- [property] `TestRecoveriesMatchTheCrashOracle`: seeds 0-7, six crashes each at a random write or
+  flush, each unflushed block landing at random, with checkpoints, compactions and freezes between
+  them. The run must reach a recovery that keeps a record past the acknowledged LSN, recoveries
+  that load runs and frozen maps, and a crashed recovery that had erased records.
+- Crash during recovery, then recovery again: every other recovery of the property is crashed
+  before its final flush, with its erasures landing at random. The oracle's window is unchanged
+  by it, and the recovery run again reports the LSN the crashed one had found.
+- Planted bug: replay that leaves out the first record past the replay LSN that maps blocks, as a
+  replay LSN one record too new would (RocksDB #11148), trips the oracle on at least one seed of 8
+  (`TestCrashOracleCatchesLateReplay`; seed 0 names a chunk entry at an older version).
 
 ## Invariant checker
 
