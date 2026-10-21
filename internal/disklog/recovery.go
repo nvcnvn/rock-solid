@@ -236,7 +236,7 @@ type Recovery struct {
 // Recover starts recovering the log on a disk of diskBlocks blocks, with IO IDs counting up from firstIO, taking its read buffers from the pool at once.
 func Recover(ctx *core.Context, cfg Config, diskBlocks uint64, mode Mode, firstIO core.IOID, out *Output) (*Recovery, error) {
 	maxRec := cfg.MaxRecordBytes / core.BlockSize
-	if cfg.CommitDepth < 1 || cfg.ReadDepth < 1 || maxRec < 3 || (mode != ModeOpen && mode != ModeRebuild) || diskBlocks == 0 {
+	if cfg.CommitDepth < 1 || cfg.ReadDepth < 1 || maxRec < 3 || (mode != ModeOpen && mode != ModeRebuild) || diskBlocks == 0 || !cfg.reserveSettled() {
 		return nil, ErrBadConfig
 	}
 	r := &Recovery{cfg: cfg, mode: mode, diskBlocks: diskBlocks, nextIO: firstIO, phase: recSuperblock, nextSeq: 1}
@@ -452,8 +452,8 @@ func (r *Recovery) repair(ctx *core.Context, lba core.LBA, out *Output) {
 }
 
 func (r *Recovery) startHeaders(ctx *core.Context, out *Output) {
-	if r.cfg.Reserve >= r.sb.SegmentCount-1 {
-		r.fail(ctx, ErrBadConfig, out)
+	if _, err := r.cfg.reserve(&r.sb); err != nil {
+		r.fail(ctx, err, out)
 		return
 	}
 	r.phase = recHeaders
@@ -1208,7 +1208,7 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 	// Which open segment a checkpoint took from the reserve is not on disk, so with only the
 	// reserve free every open segment counts as taken from it.
 	for st := range l.asm {
-		l.inReserve[st] = l.asm[st].segment != 0 && l.freeCount() <= l.cfg.Reserve
+		l.inReserve[st] = l.asm[st].segment != 0 && l.freeCount() <= l.reserve
 	}
 	return l, nil
 }

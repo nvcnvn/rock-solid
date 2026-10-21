@@ -138,7 +138,7 @@ func TestStreamsAlternate(t *testing.T) {
 	h := formatted(t, gib, testConfig(0))
 	a := h.submit(disklog.Hot, h.write(0, 1, 1))
 	b := h.submit(disklog.Hot, h.write(1, 1, 2))
-	c := h.submit(disklog.Cold, h.blob(disklog.BlobRun, 5, 10, 3))
+	c := h.submit(disklog.Cold, h.blob(disklog.BlobRaftEntries, 5, 10, 3))
 	h.round()
 	h.wantTrace("write 64+3 io104", "fsync io105", "write 128+3 io106", "fsync io107")
 	d := h.submit(disklog.Hot, h.write(2, 1, 4))
@@ -253,7 +253,7 @@ func TestDiskErrorFailsTheLog(t *testing.T) {
 	h := formatted(t, gib, testConfig(0))
 	a := h.submit(disklog.Hot, h.write(0, 1, 1))
 	b := h.submit(disklog.Hot, h.write(1, 1, 2))
-	c := h.submit(disklog.Cold, h.blob(disklog.BlobRun, 5, 10, 3))
+	c := h.submit(disklog.Cold, h.blob(disklog.BlobRaftEntries, 5, 10, 3))
 	h.failIO[firstIO+4] = core.DiskIO
 	h.run()
 	inDoubt, failed := h.eventsOf(disklog.InDoubt), h.eventsOf(disklog.Failed)
@@ -631,20 +631,56 @@ func TestSubmitRefusesBadBuffersAndReservedKinds(t *testing.T) {
 	for _, it := range []disklog.Item{
 		{Entry: disklog.WriteEntry(1, testChunk, 1, 0, 1), Buf: two},
 		{Entry: disklog.WriteEntry(1, testChunk, 1, 0, 1)},
-		{Entry: disklog.BlobEntry(disklog.BlobRun, 1, 3*core.BlockSize), Buf: two},
+		{Entry: disklog.BlobEntry(disklog.BlobRaftEntries, 1, 3*core.BlockSize), Buf: two},
 		{Entry: disklog.PunchEntry(1, testChunk, 1, 0, 1), Buf: two},
 	} {
 		if _, err := h.log.Submit(&h.ctx, disklog.Hot, it, &h.out); !errors.Is(err, disklog.ErrBadBuffer) {
 			t.Fatalf("%+v: %v", it.Entry, err)
 		}
 	}
-	for _, k := range []disklog.BlobKind{disklog.BlobManifest, disklog.BlobManifestPiece} {
-		it := disklog.Item{Entry: disklog.BlobEntry(k, 0, 10), Buf: two}
-		if _, err := h.log.Submit(&h.ctx, disklog.Cold, it, &h.out); !errors.Is(err, disklog.ErrReservedKind) {
-			t.Fatalf("blob kind %d: %v", k, err)
+	for _, k := range []disklog.BlobKind{disklog.BlobRun, disklog.BlobManifest, disklog.BlobManifestPiece} {
+		for _, s := range []disklog.Stream{disklog.Hot, disklog.Cold} {
+			it := disklog.Item{Entry: disklog.BlobEntry(k, 5, 10), Buf: two}
+			if _, err := h.log.Submit(&h.ctx, s, it, &h.out); !errors.Is(err, disklog.ErrReservedKind) {
+				t.Fatalf("blob kind %d on stream %d: %v", k, s, err)
+			}
 		}
 	}
-	h.pool.Free(two)
+	h.wantLive(1)
+	if len(h.pending) != 0 || h.log.Queued() != 0 {
+		t.Fatalf("a refused item went to the disk: %v, %d queued", h.trace, h.log.Queued())
+	}
+	if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: 5}}); err != nil {
+		t.Fatal(err)
+	}
+	piece, err := h.log.CheckpointPiece(&h.ctx, 5, two, 10, true, &h.out)
+	if err != nil {
+		t.Fatalf("the same run piece through CheckpointPiece: %v", err)
+	}
+	h.absorb()
+	if err := h.log.EndCheckpoint(&h.ctx, &h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.absorb()
+	h.run()
+	if done := h.eventsOf(disklog.CheckpointDone); len(done) != 1 || !slices.Contains(h.eventsOf(disklog.Durable)[0].Tickets, piece) {
+		t.Fatalf("checkpoint with the piece: events %+v", h.events)
+	}
+	h.close()
+}
+
+func TestCloseIsBusyUntilFormatFinishes(t *testing.T) {
+	h := newHarness(t, gib, 64<<20, testConfig(0))
+	for len(h.pending) > 0 {
+		if err := h.log.Close(&h.ctx, &h.out); !errors.Is(err, disklog.ErrBusy) {
+			t.Fatalf("close with %v left of format: %v", h.trace[len(h.trace)-len(h.pending):], err)
+		}
+		h.wantLive(0)
+		h.step(0)
+	}
+	if h.log.Err() != nil {
+		t.Fatal(h.log.Err())
+	}
 	h.close()
 }
 

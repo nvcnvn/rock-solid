@@ -20,6 +20,7 @@ func BenchmarkGroupCommitRound(b *testing.B) {
 	var out disklog.Output
 	cfg := disklog.DefaultConfig()
 	cfg.MaxReplayBytes = 1 << 60
+	cfg.NoReserve = true
 	log, err := disklog.Format(&ctx, cfg, disklog.Superblock{LogID: 1, Geometry: geo}, 1, &out)
 	if err != nil {
 		b.Fatal(err)

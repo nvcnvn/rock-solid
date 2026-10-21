@@ -24,8 +24,8 @@ var (
 	ErrUnknownOwner = errors.New("index not named by the checkpoint")
 	// ErrBadBuffer reports an item whose buffer does not match its entry.
 	ErrBadBuffer = errors.New("buffer does not match its entry")
-	// ErrReservedKind reports an item of a blob kind only the log writes.
-	ErrReservedKind = errors.New("blob kind reserved for the log")
+	// ErrReservedKind reports an item of a blob kind only a checkpoint writes.
+	ErrReservedKind = errors.New("blob kind reserved for checkpoints")
 	// ErrBadConfig reports settings the log cannot run with.
 	ErrBadConfig = errors.New("bad group commit settings")
 	// ErrFlushBeforeWrite reports a driver that completed a round's flush before its write.
@@ -46,8 +46,14 @@ type Config struct {
 	Check bool
 	// ReadDepth is the most segment-header reads recovery keeps in flight; at least 1.
 	ReadDepth int
-	// Reserve is the free segments only checkpoints may open, fewer than the disk's usable segments; ReserveSegments sizes it for a disk.
+	// MergeWorkers is merge_workers, the merges that run at once on the disk; the reserve holds a step of each, so it is at least 1 unless Reserve or NoReserve is set.
+	MergeWorkers int
+	// CompactionStepBytes is compaction_step_bytes, the most output a merge installs at once.
+	CompactionStepBytes uint64
+	// Reserve, if set, replaces the reserve ReserveSegments sizes from these settings and the disk's segments.
 	Reserve uint32
+	// NoReserve runs the log with no reserve, which only tests ask for.
+	NoReserve bool
 }
 
 const (
@@ -70,7 +76,39 @@ func ReserveSegments(maxReplayBytes, stepBytes uint64, mergeWorkers int, segment
 
 // DefaultConfig is the default settings, with the decode check off.
 func DefaultConfig() Config {
-	return Config{MaxRecordBytes: 1 << 20, MaxReplayBytes: 64 << 20, CommitDepth: 1, ReadDepth: 64}
+	return Config{MaxRecordBytes: 1 << 20, MaxReplayBytes: 64 << 20, CommitDepth: 1, ReadDepth: 64, MergeWorkers: 1, CompactionStepBytes: 64 << 20}
+}
+
+// reserveSettled reports whether the reserve settings name one reserve, before any disk's
+// geometry is known.
+func (c *Config) reserveSettled() bool {
+	switch {
+	case c.NoReserve:
+		return c.Reserve == 0
+	case c.Reserve != 0:
+		return true
+	default:
+		return c.MergeWorkers >= 1 && c.CompactionStepBytes > 0
+	}
+}
+
+// reserve is the free segments only checkpoints may open on a disk of sb's geometry, sized for a
+// checkpoint, the merge steps and a cleaner pass, which must leave a segment for everything else.
+func (c *Config) reserve(sb *Superblock) (uint32, error) {
+	var n uint32
+	switch {
+	case !c.reserveSettled():
+		return 0, ErrBadConfig
+	case c.NoReserve:
+	case c.Reserve != 0:
+		n = c.Reserve
+	default:
+		n = ReserveSegments(c.MaxReplayBytes, c.CompactionStepBytes, c.MergeWorkers, sb.SegmentBlocks)
+	}
+	if n >= sb.SegmentCount-1 {
+		return 0, ErrBadConfig
+	}
+	return n, nil
 }
 
 // Ticket names one submitted item in the log's events; NoTicket marks the log's own manifest pieces.
@@ -236,6 +274,10 @@ func isManifestKind(e *Entry) bool {
 	return e.Kind == EntryBlob && (e.BlobKind == BlobManifest || e.BlobKind == BlobManifestPiece)
 }
 
+func isCheckpointKind(e *Entry) bool {
+	return isManifestKind(e) || e.Kind == EntryBlob && e.BlobKind == BlobRun
+}
+
 // CheckpointIndex names an index a checkpoint covers, its replay LSN and the durable runs the manifest names again.
 type CheckpointIndex struct {
 	Owner     uint32
@@ -364,6 +406,7 @@ const (
 type Log struct {
 	cfg        Config
 	sb         Superblock
+	reserve    uint32
 	maxWrite   uint32
 	maxItemRec uint32
 	maxBlob    uint64
@@ -440,12 +483,14 @@ func Format(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID, out
 // for the log's lifetime, so a pool filled by producers never stops a round.
 func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*Log, error) {
 	maxWrite := uint32(min(cfg.MaxRecordBytes/core.BlockSize, uint64(sb.SegmentBlocks)))
-	if cfg.CommitDepth < 1 || maxWrite < 3 || cfg.MaxReplayBytes == 0 || cfg.MaxReplayBytes > math.MaxUint64/4 || cfg.Reserve >= sb.SegmentCount-1 {
+	reserve, err := cfg.reserve(&sb)
+	if err != nil || cfg.CommitDepth < 1 || maxWrite < 3 || cfg.MaxReplayBytes == 0 || cfg.MaxReplayBytes > math.MaxUint64/4 {
 		return nil, ErrBadConfig
 	}
 	l := &Log{
 		cfg:        cfg,
 		sb:         sb,
+		reserve:    reserve,
 		maxWrite:   maxWrite,
 		maxItemRec: maxWrite - 1,
 		maxBlob:    maxBlobBytes(maxWrite - 1),
@@ -535,6 +580,9 @@ func (l *Log) writeFormat(lba core.LBA, out *Output) {
 // Superblock is the log's identity and geometry.
 func (l *Log) Superblock() Superblock { return l.sb }
 
+// Reserve is the free segments only checkpoints may open, sized for a checkpoint, the merge steps and a cleaner pass.
+func (l *Log) Reserve() uint32 { return l.reserve }
+
 // DurableLSN is the LSN of the newest durable record.
 func (l *Log) DurableLSN() uint64 { return l.durableLSN }
 
@@ -600,7 +648,7 @@ func ordinaryBytes(entries []Entry, lay Layout) uint64 {
 	ordinary := false
 	for i := range entries {
 		e := &entries[i]
-		own := e.Kind == EntryBlob && (e.BlobKind == BlobRun || isManifestKind(e))
+		own := isCheckpointKind(e)
 		ordinary = ordinary || !own
 		switch e.Kind {
 		case EntryWrite:
@@ -642,7 +690,7 @@ func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ti
 	if l.err != nil {
 		return 0, l.err
 	}
-	if isManifestKind(&it.Entry) {
+	if isCheckpointKind(&it.Entry) {
 		return 0, ErrReservedKind
 	}
 	if err := l.accept(ctx, stream, &it); err != nil {
@@ -1192,7 +1240,7 @@ func (l *Log) place(s Stream) (target, placement) {
 		return target{stream: s, segment: c.segment, seq: c.seq, offset: c.next, reserve: l.inReserve[s], ordinary: ordinary && !l.inReserve[s]}, placeReady
 	}
 	seg, ok := l.firstFree()
-	reserve := !ok || l.freeCount() <= l.cfg.Reserve
+	reserve := !ok || l.freeCount() <= l.reserve
 	if !ok || reserve && !own {
 		return target{}, placeNoRoom
 	}

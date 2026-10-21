@@ -159,6 +159,7 @@ func blankHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Con
 
 func testConfig(maxRecordBlocks uint64) disklog.Config {
 	cfg := disklog.DefaultConfig()
+	cfg.NoReserve = true
 	if maxRecordBlocks > 0 {
 		cfg.MaxRecordBytes = maxRecordBlocks * core.BlockSize
 	}

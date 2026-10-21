@@ -352,7 +352,8 @@ types](#event-and-action-types), and this section is their only home.
   at block 1,000), is refused (BadExtent) with no action and no event.
 - A refused item leaves its buffer with the caller: BadBuffer for a write buffer that is not exactly
   its blocks, a missing write buffer, a blob longer than its buffer, or a punch with a buffer;
-  ReservedKind for a manifest or manifest-piece blob, which only the log writes.
+  ReservedKind, on either stream, for a run piece, manifest or manifest-piece blob, which only a
+  checkpoint writes (`CheckpointPiece` and the log's own manifest).
 - A disk error fails the log: an Io error on round 1's write reports its ticket InDoubt and the
   queued items Failed, frees their buffers, and every later submit is refused with that error.
   With depth 2, an error on round 2's write while round 1's is in flight reports both rounds
@@ -1627,15 +1628,30 @@ manifest, written or in flight, segment headers and the checkpoint's own records
 
 ## Reserve from settings
 
-- Format and open refuse a zero reserve once the daemon sets it from `ReserveSegments`; the tests
-  that need none say so.
+- At the default settings (`merge_workers` 1, `compaction_step_bytes` 64 MiB) the log sizes its
+  reserve by `ReserveSegments` from the superblock's segments: 772 on a 1 GiB disk of 256 KiB
+  segments. A reserve set directly (3) replaces it, and `NoReserve`, which the tests' settings ask
+  for by name, gives 0.
+- Open sizes the reserve again: on a 64-block disk (15 usable 4-block segments) with
+  `max_replay_bytes` 8 blocks and a 1-block step, the reserve is 9 at format and after a reopen.
+  Six 1-block writes fill segments 1 to 6 and a checkpoint's manifest opens segment 7 from the
+  reserve; after the reopen a cold punch that would fit in segment 7 is `Stalled`.
+- Before the reopen, a hot write with only the reserve's 9 segments free is `Stalled`, with no
+  disk action.
+- BadConfig at Format, leaving nothing allocated: the default reserve of a 64 MiB disk of 16 KiB
+  segments (12,292 of 4,096), `NoReserve` together with a reserve, no merge worker, and a zero
+  `compaction_step_bytes`. Open refuses the first once it has read the superblock, before a segment
+  header, and the other three, which no geometry changes, in `Recover` itself, with no action and
+  no buffer taken.
+- A reserve set directly or `NoReserve` needs no merge settings: with `merge_workers` and
+  `compaction_step_bytes` both 0, either one formats, writes and reopens.
 
 ## Group commit API guards
 
-- Submit of a run piece is refused with ReservedKind, as a manifest or manifest piece is, and its
-  buffer stays with the caller; the same piece through `CheckpointPiece` is accepted.
-- Close after Format, before the superblock copy's flush completes, is Busy and leaves the log's
-  buffers allocated; once it completes, Close succeeds.
+- Submit refuses a run piece as "Group commit" lists; the same piece through `CheckpointPiece` is
+  accepted and goes out with the checkpoint.
+- Close after Format, at each step until the superblock copy's flush completes, is Busy and leaves
+  every buffer of the log allocated; once it completes, Close succeeds and returns them.
 
 ## Metadata stream
 

@@ -27,9 +27,127 @@ func TestReserveSegments(t *testing.T) {
 	}
 }
 
+func TestReserveFromSettings(t *testing.T) {
+	h := formatted(t, gib, disklog.DefaultConfig())
+	if got := h.log.Reserve(); got != 772 {
+		t.Fatalf("1 GiB disk of 256 KiB segments at the default settings: reserve %d, want 772", got)
+	}
+	h.close()
+	cfg := disklog.DefaultConfig()
+	cfg.Reserve = 3
+	h = formatted(t, gib, cfg)
+	if got := h.log.Reserve(); got != 3 {
+		t.Fatalf("reserve %d with 3 set, want 3", got)
+	}
+	h.close()
+	h = formatted(t, gib, testConfig(0))
+	if got := h.log.Reserve(); got != 0 {
+		t.Fatalf("reserve %d with none asked for, want 0", got)
+	}
+	h.close()
+
+	cfg = disklog.DefaultConfig()
+	cfg.MaxReplayBytes, cfg.CompactionStepBytes = 8*core.BlockSize, core.BlockSize
+	h = formatted(t, 64*core.BlockSize, cfg)
+	if got := h.log.Reserve(); got != 9 {
+		t.Fatalf("15 usable 4-block segments, max_replay_bytes 8 blocks, a 1-block step: reserve %d, want 9", got)
+	}
+	for i := range 6 {
+		h.put(disklog.Hot, h.write(uint32(i), 1, uint64(i)))
+	}
+	if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: runOwner, ReplayLSN: 6}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.log.EndCheckpoint(&h.ctx, &h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.absorb()
+	h.run()
+	if done := h.eventsOf(disklog.CheckpointDone); len(done) != 1 || done[0].Manifest.Segment != 7 {
+		t.Fatalf("manifest %+v", done)
+	}
+	h.victim = true
+	h.trace = nil
+	h.submit(disklog.Hot, h.write(6, 1, 6))
+	if len(h.trace) != 0 || !h.log.Stalled() {
+		t.Fatalf("a write opened a segment with only the reserve free: %v", h.trace)
+	}
+	h.log.FailStalled(&h.ctx, &h.out)
+	h.absorb()
+	h.victim = false
+	h.close()
+	h.reopen()
+	if got := h.log.Reserve(); got != 9 {
+		t.Fatalf("reserve %d after open, want 9", got)
+	}
+	h.victim = true
+	h.trace = nil
+	h.submit(disklog.Cold, disklog.Item{Entry: disklog.PunchEntry(1, testChunk, 7, 0, core.BlocksPerChunk)})
+	if len(h.trace) != 0 || !h.log.Stalled() {
+		t.Fatalf("after a restart a punch appended to the reserve segment: %v", h.trace)
+	}
+	h.log.FailStalled(&h.ctx, &h.out)
+	h.absorb()
+	h.close()
+}
+
+func TestBadReserveSettingsAreRefused(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		disk     uint64
+		geometry bool
+		set      func(*disklog.Config)
+	}{
+		{"reserve of a 64 MiB disk of 16 KiB segments", 64 << 20, true, func(*disklog.Config) {}},
+		{"no reserve and a reserve", gib, false, func(c *disklog.Config) { c.NoReserve, c.Reserve = true, 2 }},
+		{"no merge worker", gib, false, func(c *disklog.Config) { c.MergeWorkers = 0 }},
+		{"no compaction step", gib, false, func(c *disklog.Config) { c.CompactionStepBytes = 0 }},
+	} {
+		name, cfg := c.name, disklog.DefaultConfig()
+		c.set(&cfg)
+		h := blankHarness(t, c.disk, 1<<20, cfg)
+		if _, err := disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, firstIO, &h.out); !errors.Is(err, disklog.ErrBadConfig) {
+			t.Fatalf("format, %s: %v", name, err)
+		}
+		if h.pool.Live() != 0 {
+			t.Fatalf("format, %s: %d buffers left allocated", name, h.pool.Live())
+		}
+		h = formatted(t, c.disk, testConfig(0))
+		h.put(disklog.Hot, h.write(0, 2, 1))
+		h.close()
+		h.cfg = cfg
+		h.cfg.Check = true
+		if c.geometry {
+			if res := h.recover(disklog.ModeOpen); !errors.Is(res.err, disklog.ErrBadConfig) {
+				t.Fatalf("open, %s: %v", name, res.err)
+			}
+			continue
+		}
+		if _, err := disklog.Recover(&h.ctx, h.cfg, h.disk.Blocks(), disklog.ModeOpen, firstIO, &h.out); !errors.Is(err, disklog.ErrBadConfig) || len(h.out.Actions) != 0 || h.pool.Live() != 0 {
+			t.Fatalf("open, %s: %v with %d actions and %d buffers", name, err, len(h.out.Actions), h.pool.Live())
+		}
+	}
+}
+
+func TestReserveSetDirectlyNeedsNoMergeSettings(t *testing.T) {
+	for _, set := range []func(*disklog.Config){
+		func(c *disklog.Config) { c.Reserve = 3 },
+		func(c *disklog.Config) { c.NoReserve = true },
+	} {
+		cfg := disklog.DefaultConfig()
+		cfg.MergeWorkers, cfg.CompactionStepBytes = 0, 0
+		set(&cfg)
+		h := formatted(t, gib, cfg)
+		h.put(disklog.Hot, h.write(0, 2, 1))
+		h.close()
+		h.reopen()
+		h.close()
+	}
+}
+
 func TestReserveLeavingNoSegmentIsRefused(t *testing.T) {
 	cfg := testConfig(0)
-	cfg.Reserve = 3
+	cfg.NoReserve, cfg.Reserve = false, 3
 	h := blankHarness(t, 16*core.BlockSize, 1<<20, cfg)
 	if _, err := disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, firstIO, &h.out); !errors.Is(err, disklog.ErrBadConfig) {
 		t.Fatalf("format with a reserve of every usable segment: %v", err)
@@ -41,7 +159,7 @@ func TestReserveLeavingNoSegmentIsRefused(t *testing.T) {
 	h = formatted(t, 16*core.BlockSize, testConfig(0))
 	h.put(disklog.Hot, h.write(0, 2, 1))
 	h.close()
-	h.cfg.Reserve = 3
+	h.cfg.NoReserve, h.cfg.Reserve = false, 3
 	if res := h.recover(disklog.ModeOpen); !errors.Is(res.err, disklog.ErrBadConfig) {
 		t.Fatalf("open with a reserve of every usable segment: %v", res.err)
 	}
@@ -51,7 +169,7 @@ func TestReserveLeavingNoSegmentIsRefused(t *testing.T) {
 // other segments two 2-block writes fill (LBAs 4 and 8), and a third write held for room.
 func reserveDisk(t *testing.T) (*harness, disklog.Ticket) {
 	cfg := testConfig(0)
-	cfg.Reserve = 1
+	cfg.NoReserve, cfg.Reserve = false, 1
 	h := formatted(t, 16*core.BlockSize, cfg)
 	h.victim = true
 	for i := range 2 {
@@ -111,7 +229,7 @@ func TestFullDiskWaits(t *testing.T) {
 
 func TestCheckpointFinishesInTheReserve(t *testing.T) {
 	cfg := testConfig(0)
-	cfg.Reserve = 2
+	cfg.NoReserve, cfg.Reserve = false, 2
 	h := formatted(t, 32*core.BlockSize, cfg)
 	h.victim = true
 	for i := range 5 {
@@ -193,7 +311,7 @@ func TestCheckpointWaitsUntilNoVictim(t *testing.T) {
 
 func TestStallEndsWhenASegmentFrees(t *testing.T) {
 	cfg := testConfig(0)
-	cfg.Reserve = 2
+	cfg.NoReserve, cfg.Reserve = false, 2
 	h := formatted(t, 32*core.BlockSize, cfg)
 	h.victim = true
 	for i := range 4 {
@@ -226,7 +344,7 @@ func TestStallEndsWhenASegmentFrees(t *testing.T) {
 
 func TestReserveSegmentSurvivesARestart(t *testing.T) {
 	cfg := testConfig(0)
-	cfg.Reserve = 2
+	cfg.NoReserve, cfg.Reserve = false, 2
 	h := formatted(t, 32*core.BlockSize, cfg)
 	for i := range 5 {
 		h.put(disklog.Hot, h.write(uint32(i), 2, uint64(i)))
@@ -272,7 +390,7 @@ func TestCloseFailsItemsWaitingForRoom(t *testing.T) {
 // idle; once their queue empties, the item opens a segment of its own.
 func TestColdItemsWaitForTheCheckpointInTheReserve(t *testing.T) {
 	cfg := testConfig(0)
-	cfg.Reserve = 4093
+	cfg.NoReserve, cfg.Reserve = false, 4093
 	cfg.CommitDepth = 2
 	h := formatted(t, gib, cfg)
 	h.put(disklog.Cold, h.write(0, 62, 0))
