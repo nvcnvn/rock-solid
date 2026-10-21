@@ -133,7 +133,7 @@ func runSeed(t testing.TB, seed uint64, setup func(*harness), stats *seedStats) 
 		}
 	}
 
-	for (toSubmit > 0 && h.log.Err() == nil) || len(h.pending) > 0 {
+	for (toSubmit > 0 || h.log.Queued() > 0) && h.log.Err() == nil || len(h.pending) > 0 {
 		from := len(h.events)
 		switch {
 		case !running && h.log.CheckpointDue():

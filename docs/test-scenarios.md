@@ -340,10 +340,12 @@ types](#event-and-action-types), and this section is their only home.
   record may take 2 blocks, so a 3-block write and a blob over 1 block (4,097 bytes) are refused as
   TooLarge at submit; 1-block writes pack two per record once no segment header is needed (LSN 2 =
   two items, LSN 3 = the third).
-- Full segment rolls, full disk fails: a 16-block disk has 3 usable 4-block segments; three 2-block
-  writes fill one segment each (LBAs 4, 8, 12). The next write, even 1 block, fails at once with
-  NoSpace naming its ticket, with no disk action, and its buffer is freed. NoSpace fails the stream's
-  whole queue, items behind its head included, so items are never written out of submit order.
+- Full segment rolls, full disk fails: a 16-block disk has 3 usable 4-block segments and no reserve;
+  three 2-block writes fill one segment each (LBAs 4, 8, 12). The next write, even 1 block, is held
+  with no disk action, and fails with NoSpace naming its ticket, its buffer freed, once the owner
+  reports that the cleaner has no victim (`FailStalled`), as the harness does whenever the log is
+  stalled. NoSpace fails the stream's whole queue, items behind its head that would fit included,
+  so items are never written out of submit order.
 - A full pool never stalls a round: with the pool holding only the log's buffers and eight 1-block
   writes, so that nothing is free, all eight become durable in submit order.
 - A write or punch with zero blocks, or running past block 1,024 of its chunk (a punch of 25 blocks
@@ -397,13 +399,14 @@ types](#event-and-action-types), and this section is their only home.
   one carrying a run in segment 0 or past the durable LSN. A checkpoint carrying a durable run names
   it first, then the run whose root it writes, and a change to the caller's slice after the begin
   does not reach the manifest.
-- The next segment opened after a checkpoint (segment 3, filled by 40-block writes) carries the
+- The next segment opened after a checkpoint (segment 3, opened by a 60-block write) carries the
   manifest's position in its header.
 - Manifest in pieces: with 3-block rounds (4 KiB max blob), a checkpoint of 500 runs writes the
   manifest as several pieces, the last naming the others, and the next segment header points at
   the last piece.
-- A checkpoint on a full disk: its piece fails with NoSpace, which also emits CheckpointFailed(NoSpace).
-  End then says NoCheckpoint, and a new checkpoint can begin.
+- A checkpoint on a full disk with no reserve: its piece waits, and the no-victim report fails it
+  with NoSpace and emits CheckpointFailed(NoSpace). End then says NoCheckpoint, and a new
+  checkpoint can begin.
 - Manifest encoding: a manifest (base LSN 77, two indexes: owner 1 with one run of one piece and
   replay LSN 70, owner 2 with no runs and replay LSN 77) round-trips, at the size it reports. A
   trailing extra byte, or a truncation to 10 bytes, is Malformed, and another format version
@@ -1286,43 +1289,47 @@ Performance: `Write` of a whole block, `Write` of one byte with its base in a pe
 ## Segment reserve
 
 The reserve, ⌈(2 × `max_replay_bytes` + merge workers × `compaction_step_bytes`) ÷ segment⌉ +
-victims per pass (4, as in the cleaner spikes), with both byte settings at 64 MiB:
+victims per pass (4, as in the cleaner spikes), at least 8, with both byte settings at 64 MiB
+(`ReserveSegments`):
 
 | Disk | Segment | Merge workers | Reserve |
 | --- | --- | --- | --- |
-| 256 GiB and up | 64 MiB | 1 | 3 + 4 = 7 by the formula; 8 by default |
+| 256 GiB and up | 64 MiB | 1 | 3 + 4 = 7 by the formula; 8, the floor |
 | 256 GiB and up | 64 MiB | 2 | 4 + 4 = 8 |
 | 255 GiB | 32 MiB | 1 | 6 + 4 = 10 |
 | 1 GiB | 256 KiB | 1 | 768 + 4 = 772 of 4,096 |
 
-- Open: whether 8 is a floor on every disk (it only matters for 64 MiB segments with one worker).
-- Open: a disk whose reserve is larger than its segments allow (a 64 MiB disk of 16 KiB segments
-  needs 12,292 of 4,096) must be refused at format or open, or scale its settings; the design says
-  neither. The small disks of the existing tests set the reserve and their byte settings directly.
-
-Changed existing scenarios:
-
-- "Group commit": "Full segment rolls, full disk fails: a 16-block disk has 3 usable 4-block
-  segments; three 2-block writes fill one segment each ... The next write ... fails at once with
-  NoSpace" becomes "full disk waits", the test setting a reserve of 1 segment directly: two 2-block
-  writes fill the 2 usable segments (LBAs 4 and 8); the next write is held (`Stalled`) with no disk
-  action and keeps its buffer; a checkpoint's piece still goes into the reserve segment (segment
-  header and the 2-block piece record, LBAs 12-14), and the checkpoint completes once a segment is
-  freed; then the held write becomes durable, and any later held items in submit order.
-- Open: how a segment is freed in that test before the cleaner exists (a test hook that reports a
-  segment empty, or a punch the index counts).
-- "Group commit": "A checkpoint on a full disk: its piece fails with NoSpace, which also emits
-  CheckpointFailed(NoSpace)" becomes: with only the reserve free, the checkpoint's pieces and
-  manifest go into the reserve and it completes. CheckpointFailed(NoSpace) remains only for a
-  reserve that is itself full. Open: whether that can happen once the reserve is sized as above,
-  or is a broken invariant (panic).
-- Harnesses that rely on NoSpace: the group commit property ("Every accepted ticket ends Durable,
-  Failed (NoSpace or Io) ... Coverage: NoSpace"), the random-crash property's coverage ("at least
-  one NoSpace") and the quarantine property ("Filling the disk until NoSpace"). With no cleaner yet,
-  each harness's owner reports "no victim" whenever only the reserve is free, so held items fail
-  with NoSpace and the coverage still occurs.
-- NoSpace: held ordinary items fail with NoSpace, in submit order and freeing their buffers, only
-  when the owner reports that the cleaner has no victim that passes its net-gain guard.
+- A reserve of every usable segment or more (3 on a 16-block disk) is BadConfig: Format refuses it
+  and leaves nothing allocated, and open of a formatted disk fails recovery with BadConfig before it
+  reads a segment header. The small disks of the tests set the reserve directly.
+- Full disk waits: a 16-block disk (3 usable 4-block segments) with a reserve of 1 and a cleaner
+  that has a victim. Two 2-block writes fill segments 1 and 2 (LBAs 4 and 8); a third is held:
+  `Stalled`, no disk action, its buffer kept, and Close is Busy. A checkpoint's 10-byte piece still
+  opens the reserve segment (segment header and the 2-block record, LBAs 12-14); its manifest finds
+  no segment free and waits. Once segments 1 and 2 are freed (a test hook standing in for the
+  cleaner), the held write goes into segment 1 and the manifest into segment 2, the checkpoint
+  completes, and nothing failed.
+- A checkpoint finishes in the reserve: a 32-block disk (7 usable segments) with a reserve of 2.
+  Five 2-block writes fill segments 1 to 5 and a sixth write is held; the checkpoint's piece and
+  manifest go into segments 6 and 7 and it completes, while the held write stays held. A punch on
+  the cold stream that would fit in the block the manifest left free in segment 7 is held too: an
+  ordinary item never appends to a segment opened from the reserve. When the owner reports no
+  victim (`FailStalled`), both fail with NoSpace, one Failed event per stream (hot, then cold),
+  and their buffers are freed.
+- After a restart with only the reserve free, the open segments count as taken from the reserve:
+  the log above, after a checkpoint whose manifest went into segment 6 of 7 and a reopen, holds a
+  cold punch that would fit in segment 6.
+- A stall ends when a segment frees: on that disk with a reserve of 2, a hot write stalls with
+  segments 6 and 7 free; a cold punch then takes the only round slot. Once segment 1 is freed the
+  write is no longer `Stalled`, a no-victim report fails nothing, and the write goes into segment 1.
+  `Stalled` is worked out when asked, never left over from the last round placed.
+- A checkpoint waits until no victim: on the full-disk-waits disk, a checkpoint's first 2-block
+  piece fills the reserve segment and its second finds no segment free; both it and the held write
+  wait, with no disk action. `FailStalled` then reports Failed(NoSpace) for the held write (hot),
+  CheckpointFailed(NoSpace) and Failed(NoSpace) for the waiting piece (cold); End then says
+  NoCheckpoint.
+- Settings: a `max_replay_bytes` past 2^62 is BadConfig, since the hold compares against twice
+  it, and `ReserveSegments` saturates rather than wraps.
 
 Who may use the reserve:
 
@@ -1330,14 +1337,16 @@ Who may use the reserve:
 | --- | --- |
 | Chunk write, punch, freeze, Raft entries | held in submit order |
 | Checkpoint run pieces and manifest | written into the reserve |
-| Merge step output | written into the reserve |
-| Cleaner copy records | written into the reserve |
+| Merge step output | written into the reserve (with Merge steps) |
+| Cleaner copy records | written into the reserve (with the Cleaner) |
 
-- Review: the simulator fills a disk to its reserve, and a checkpoint, a merge step and a cleaner
-  pass all finish; the bytes held beyond what the manifests name never exceed the reserve, checked
-  after every step (simulator invariant).
+- Review, for checkpoints: a disk filled to its reserve still finishes a checkpoint, and an
+  ordinary item never opens or appends to a reserve segment (each fails under a planted bug). The
+  merge step and the cleaner pass join the check with their items; the simulator invariant that the
+  bytes held beyond what the manifests name never exceed the reserve arrives with the invariant
+  checker.
 - Crash with the disk full except the reserve, during a checkpoint in the reserve: recovery
-  succeeds and the held items were never acknowledged.
+  succeeds and the held items were never acknowledged (with Crash at every action).
 
 ## Merge steps
 
@@ -1543,34 +1552,63 @@ a7b8321871e3): a later valid chunk whose synced offset passes the bad one proves
 
 ## Checkpoint backpressure
 
-With `max_replay_bytes` 8 blocks, counted in record blocks after the newest manifest, segment
-headers left out, as in "Checkpoint end to end":
+With `max_replay_bytes` 8 blocks, counted in record blocks of ordinary items after the newest
+manifest, written or in flight, segment headers and the checkpoint's own records left out:
 
-| Record blocks after the newest manifest | Ordinary items | Checkpoint and cleaner items |
+| Ordinary record blocks after the newest manifest | Ordinary items | Checkpoint items |
 | --- | --- | --- |
 | 8 | admitted; a checkpoint is due | admitted |
 | 15 | admitted | admitted |
-| 16 (twice `max_replay_bytes`) | held in submit order, buffers kept | admitted |
+| 17 (past twice `max_replay_bytes`) | held in submit order, buffers kept, not `Stalled` | admitted |
 | a manifest becomes durable | the held items go out in submit order | |
 
-- The table holds items once the records reach twice `max_replay_bytes`, as design.md says;
-  the checklist says "past twice", which should change to match.
-- The checkpoint's own pieces and manifest still count toward the total while items are held,
-  and never wait.
-- A checkpoint that fails while items are held keeps them held; the next checkpoint releases
-  them. Open: what bounds the wait when checkpoints keep failing.
-- Merge-step pieces, written by the checkpoint, count as checkpoint items.
-- Changed existing scenario ("Seeded runs and the simulation harness"): the chunk store stand-in,
-  which "on CheckpointFailed stops checkpointing", begins a new checkpoint whenever one is due
-  after a failure, so held items are released and the random-crash property keeps "every accepted
-  ticket ends ...".
-- Review: a simulator seed with a stalled checkpoint (its index owner withholding pieces for a
-  while) keeps the memtables at most twice `max_replay_bytes` per disk, checked after every step.
-  The Raft entries shards retain join the check with the Raft shard (phase 4).
-- Replay after a crash while items were held reads at most twice `max_replay_bytes` plus a segment
-  per lane and the records written while the checkpoint's runs streamed (the term for replicated
-  primaries' pending writes arrives with phase 3).
+- Three 3-block and a 2-block write leave 15 blocks; a 1-block write is admitted and leaves 17; a
+  hot and a cold write are then held with no disk action. The checkpoint's 100-byte piece goes out
+  at once and adds its 2 blocks to the bytes to replay (19), but not to the hold. Once the
+  manifest is durable the held hot write, then the held cold write, become durable.
+- A checkpoint's pieces and manifest wait in a queue of their own that leads the cold stream, so
+  they never wait behind held items. A round may carry them and ordinary cold items together: with
+  a hot write in flight, a cold 2-block write and a 100-byte piece queued behind it go out as one
+  record, the piece first, which adds at least the write's 2 blocks to the hold and not
+  the piece's block.
+- A checkpoint larger than the bound releases the hold: with `max_replay_bytes` 4 blocks, two
+  3-block writes hold a third; a checkpoint of four 2-block pieces and its manifest (14 blocks)
+  completes and the held write goes out at once. Reopened, recovery replays from the start, since
+  no segment header names the new manifest yet: 24 blocks to replay, of which the hold counts the
+  10 of the three writes.
+- A checkpoint that fails while items are held keeps them held, and the next checkpoint releases
+  them. A failure for want of space, reported when the cleaner has no victim, fails the held items
+  with NoSpace too, which bounds the wait: on a 16-block disk with `max_replay_bytes` 4 blocks,
+  three 2-block writes fill it and hold a fourth; the checkpoint's piece finds no segment, and the
+  no-victim report fails the piece, the checkpoint and the held write. A write submitted next is
+  `Stalled` at once, until a new checkpoint begins.
+- Merge-step pieces, written by the checkpoint, count as checkpoint items (with Merge steps).
+- The chunk store stand-in of the recovery tests begins a new checkpoint after a failure once a
+  record has become durable since, so held items are released and the random-crash property keeps
+  "every accepted ticket ends ...".
+- [property] A stalled checkpoint keeps the memtables bounded: seeds 1-10 on a 1 GiB disk, rounds
+  of 3 to 16 blocks, commit depth 1-3, `max_replay_bytes` 8 to 40 blocks, 1,000 steps of 1- to
+  8-block writes to random streams with completions interleaved, the stand-in withholding its pieces for runs of
+  steps. After every event, the ordinary data durable after the newest manifest's base is at most
+  twice `max_replay_bytes` plus one round; afterwards every write is durable and none failed.
+  Coverage: a write held with nothing in flight. Without the hold it fails at seed 1. The Raft
+  entries shards retain join the check with the Raft shard (phase 4).
+- Replay after a crash while items were held reads at most twice `max_replay_bytes` plus a round,
+  the records the checkpoint wrote and a segment per lane (the term for replicated primaries'
+  pending writes arrives with phase 3).
 
+
+## Held items: open points
+
+- A round of a 100-byte checkpoint piece and two 1-block cold writes adds the writes' blocks and
+  its header block to the hold, and nothing for the piece's block (today it adds all but the
+  piece's 100 bytes).
+- Open: whether `Close` with items held behind a checkpoint fails them with `ErrClosed`, freeing
+  their buffers, or stays Busy.
+- Open: whether ordinary cold items roll into a segment of their own while the checkpoint's queue
+  fills a reserve segment and segments are free outside the reserve.
+- Format and open refuse a zero reserve once the daemon sets it from `ReserveSegments`; the tests
+  that need none say so.
 ## Metadata stream
 
 - A third stream tag (2) for sorted runs, compaction output and manifests; the hot stream keeps
@@ -2287,7 +2325,9 @@ The seeded runs, each described in its section above:
 The chunk store stand-in of the recovery tests applies every Durable record to its model of the
 chunk index. It starts a checkpoint whenever one is due, snapshots the model, hands one run piece at
 a time, and the next only after the previous piece is durable, each piece naming the one before. It
-ends the checkpoint after the last piece, and on CheckpointFailed stops checkpointing. Write payloads
+ends the checkpoint after the last piece, and after a CheckpointFailed begins the next once a record
+has become durable since. With no cleaner, the harness reports no victim whenever the log is
+stalled. Write payloads
 are a pattern derived from (chunk, version, block), so any extent can be checked by reading it back.
 
 ## TLA+ and TLC

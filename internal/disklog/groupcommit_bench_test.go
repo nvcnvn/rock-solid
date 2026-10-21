@@ -9,7 +9,7 @@ import (
 )
 
 // BenchmarkGroupCommitRound runs rounds of eight 1-block writes and a 300-byte blob
-// through submit, write completion and flush completion.
+// through submit, write completion and flush completion, with no checkpoint ever due.
 func BenchmarkGroupCommitRound(b *testing.B) {
 	pool := sim.NewPool(4<<20, 0)
 	ctx := core.Context{Now: 1000, Raw: 1226, Pool: pool}
@@ -18,7 +18,9 @@ func BenchmarkGroupCommitRound(b *testing.B) {
 		b.Fatal(err)
 	}
 	var out disklog.Output
-	log, err := disklog.Format(&ctx, disklog.DefaultConfig(), disklog.Superblock{LogID: 1, Geometry: geo}, 1, &out)
+	cfg := disklog.DefaultConfig()
+	cfg.MaxReplayBytes = 1 << 60
+	log, err := disklog.Format(&ctx, cfg, disklog.Superblock{LogID: 1, Geometry: geo}, 1, &out)
 	if err != nil {
 		b.Fatal(err)
 	}

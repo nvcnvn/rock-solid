@@ -209,6 +209,7 @@ func TestFullSegmentRollsAndFullDiskFails(t *testing.T) {
 
 func TestNoSpaceFailsTheStreamsWholeQueue(t *testing.T) {
 	h := formatted(t, 16*core.BlockSize, testConfig(0))
+	h.victim = true
 	for i := range 2 {
 		h.put(disklog.Hot, h.write(uint32(i), 2, uint64(i)))
 	}
@@ -218,6 +219,8 @@ func TestNoSpaceFailsTheStreamsWholeQueue(t *testing.T) {
 	behind := h.submit(disklog.Hot, h.write(4, 1, 4))
 	h.wantTrace("write 4+4 io104", "fsync io105", "write 8+4 io106", "fsync io107", "write 12+3 io108", "fsync io109")
 	h.run()
+	h.log.FailStalled(&h.ctx, &h.out)
+	h.absorb()
 	h.wantTrace("write 4+4 io104", "fsync io105", "write 8+4 io106", "fsync io107", "write 12+3 io108", "fsync io109")
 	durable, failed := h.eventsOf(disklog.Durable), h.eventsOf(disklog.Failed)
 	if len(durable) != 3 || !slices.Equal(durable[2].Tickets, []disklog.Ticket{last}) {
@@ -488,10 +491,8 @@ func TestCheckpointEndToEnd(t *testing.T) {
 	}
 	h.wantLive(0)
 
-	for i := range 2 {
-		h.submit(disklog.Hot, h.write(uint32(10+i), 40, uint64(20+i)))
-		h.run()
-	}
+	h.submit(disklog.Hot, h.write(10, 60, 20))
+	h.run()
 	if sh := h.segmentHeader(3); sh.Stream != disklog.Hot || sh.Manifest != wantPos {
 		t.Fatalf("segment 3 header %+v, want manifest %+v", sh, wantPos)
 	}

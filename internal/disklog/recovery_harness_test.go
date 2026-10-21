@@ -120,12 +120,14 @@ func (h *harness) wantModel(name string, got, want model) {
 
 // node stands in for the chunk store that owns a disk log: it applies every durable record
 // to its index and checkpoints the index whenever one is due, as a chain of run pieces
-// each naming the one before, handing a piece only once the previous one is durable.
+// each naming the one before, handing a piece only once the previous one is durable. After
+// a failed checkpoint it begins the next once a record has become durable since.
 type node struct {
 	h          *harness
 	live       model
 	pieceLimit int
-	stopped    bool
+	failed     bool
+	failedAt   uint64
 
 	running bool
 	body    []byte
@@ -164,7 +166,7 @@ func (n *node) onEvent(ev disklog.Event) {
 		n.running = false
 		n.checkpoints++
 	case disklog.CheckpointFailed:
-		n.running, n.stopped = false, true
+		n.running, n.failed, n.failedAt = false, true, n.h.log.DurableLSN()
 		n.failedCheckpoints++
 	}
 }
@@ -173,7 +175,7 @@ func (n *node) onEvent(ev disklog.Event) {
 // is durable; it reports whether it did anything.
 func (n *node) step() bool {
 	h := n.h
-	if h.log.Err() != nil || n.stopped {
+	if h.log.Err() != nil || n.failed && h.log.DurableLSN() == n.failedAt {
 		return false
 	}
 	if !n.running {

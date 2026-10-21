@@ -46,6 +46,26 @@ type Config struct {
 	Check bool
 	// ReadDepth is the most segment-header reads recovery keeps in flight; at least 1.
 	ReadDepth int
+	// Reserve is the free segments only checkpoints may open, fewer than the disk's usable segments; ReserveSegments sizes it for a disk.
+	Reserve uint32
+}
+
+const (
+	victimsPerPass = 4
+	minReserve     = 8
+)
+
+// ReserveSegments is the reserve for segments of segmentBlocks blocks: a checkpoint at its largest, a step per merge worker and a cleaner pass, and at least 8.
+func ReserveSegments(maxReplayBytes, stepBytes uint64, mergeWorkers int, segmentBlocks uint32) uint32 {
+	seg := uint64(segmentBlocks) * core.BlockSize
+	hi, steps := bits.Mul64(uint64(mergeWorkers), stepBytes)
+	held, c1 := bits.Add64(maxReplayBytes, maxReplayBytes, 0)
+	held, c2 := bits.Add64(held, steps, 0)
+	held, c3 := bits.Add64(held, seg-1, 0)
+	if hi|c1|c2|c3 != 0 {
+		return math.MaxUint32
+	}
+	return uint32(min(max(held/seg+victimsPerPass, minReserve), math.MaxUint32))
 }
 
 // DefaultConfig is the default settings, with the decode check off.
@@ -283,6 +303,7 @@ type round struct {
 	block        uint32
 	headerBlocks uint32
 	bytes        uint64
+	ordinary     uint64
 	head         core.IOBuf
 	tail         core.IOBuf
 	vec          []core.IOVec
@@ -305,6 +326,7 @@ type checkpoint struct {
 	editRows      []SegmentUsage
 	changed       []uint64
 	replayAtBegin uint64
+	heldAtBegin   uint64
 	pending       []pendingPiece
 	ended         bool
 	body          []byte
@@ -360,10 +382,14 @@ type Log struct {
 	usage      []SegmentUsage
 	changed    []uint64
 
-	queues [2]queue
-	asm    [2]cursor
-	opened [2]uint64
-	last   Stream
+	queues    [2]queue
+	own       queue
+	asm       [2]cursor
+	opened    [2]uint64
+	inReserve [2]bool
+	cpNoSpace bool
+	last      Stream
+	items     []queued
 
 	rounds []round
 	first  int
@@ -373,6 +399,7 @@ type Log struct {
 	err         error
 	manifest    ManifestPos
 	replayBytes uint64
+	heldBytes   uint64
 	cp          *checkpoint
 	chain       []chainEntry
 	state       []ManifestIndex
@@ -413,7 +440,7 @@ func Format(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID, out
 // for the log's lifetime, so a pool filled by producers never stops a round.
 func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*Log, error) {
 	maxWrite := uint32(min(cfg.MaxRecordBytes/core.BlockSize, uint64(sb.SegmentBlocks)))
-	if cfg.CommitDepth < 1 || maxWrite < 3 {
+	if cfg.CommitDepth < 1 || maxWrite < 3 || cfg.MaxReplayBytes == 0 || cfg.MaxReplayBytes > math.MaxUint64/4 || cfg.Reserve >= sb.SegmentCount-1 {
 		return nil, ErrBadConfig
 	}
 	l := &Log{
@@ -459,9 +486,9 @@ func (l *Log) release(ctx *core.Context) {
 	}
 }
 
-// Close returns the log's own buffers to the pool; it refuses while anything is in flight, and the log takes nothing more.
+// Close returns the log's own buffers to the pool; it refuses while anything is queued or in flight, and the log takes nothing more.
 func (l *Log) Close(ctx *core.Context) error {
-	if l.count > 0 || l.phase != formatDone || len(l.stale) > 0 {
+	if l.count > 0 || l.phase != formatDone || len(l.stale) > 0 || l.Queued() > 0 {
 		return ErrBusy
 	}
 	if l.err != ErrClosed {
@@ -517,6 +544,76 @@ func (l *Log) ReplayBytes() uint64 { return l.replayBytes }
 // InFlight is the number of rounds written but not yet durable.
 func (l *Log) InFlight() int { return l.count }
 
+// Queued is the number of items submitted and not yet in a round.
+func (l *Log) Queued() int { return l.queues[Hot].len() + l.queues[Cold].len() + l.own.len() }
+
+// Stalled reports items waiting for room: ordinary items with only the reserve free or held behind a checkpoint that failed for want of space, or the checkpoint's items with no segment free.
+func (l *Log) Stalled() bool {
+	for s := range l.queues {
+		if l.hasWork(Stream(s)) {
+			if _, p := l.place(Stream(s)); p == placeNoRoom {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// FailStalled fails the items waiting for room with NoSpace, each stream's in submit order, and a checkpoint among them, as the owner does when the cleaner has no victim.
+func (l *Log) FailStalled(ctx *core.Context, out *Output) {
+	for l.Stalled() {
+		for s := range l.queues {
+			if !l.hasWork(Stream(s)) {
+				continue
+			}
+			if _, p := l.place(Stream(s)); p != placeNoRoom {
+				continue
+			}
+			if s == int(Cold) && l.own.len() > 0 {
+				l.failCheckpoint(ctx, out)
+				continue
+			}
+			// The whole queue fails, even items behind its head that would fit, since writing
+			// them first would break submit order, which a freeze before its write relies on.
+			ts := len(out.tickets)
+			out.tickets = l.drain(ctx, &l.queues[s], out.tickets)
+			out.emitTickets(Failed, ErrNoSpace, ts)
+		}
+		l.startRounds(ctx, out)
+	}
+}
+
+// ordinaryBytes is the share of a record of bytes holding entries that the hold behind a
+// checkpoint counts: none for a record of checkpoint items alone, else all but their payloads.
+func ordinaryBytes(entries []Entry, bytes uint64) uint64 {
+	var own uint64
+	ordinary := false
+	for i := range entries {
+		e := &entries[i]
+		if e.Kind == EntryBlob && (e.BlobKind == BlobRun || isManifestKind(e)) {
+			own += e.Length
+		} else {
+			ordinary = true
+		}
+	}
+	if !ordinary {
+		return 0
+	}
+	return bytes - min(own, bytes)
+}
+
+// behind reports twice MaxReplayBytes of ordinary records, in flight or durable, after the
+// newest manifest: ordinary items wait for a checkpoint, which bounds the memtables and Raft
+// entries that replay must rebuild. The checkpoint's own records are left out, or one larger
+// than the bound would hold ordinary items past every manifest.
+func (l *Log) behind() bool {
+	n := l.heldBytes
+	for i := range l.count {
+		n += l.round(i).ordinary
+	}
+	return n >= 2*l.cfg.MaxReplayBytes
+}
+
 // CheckpointDue reports whether MaxReplayBytes follow the newest manifest and no checkpoint is running.
 func (l *Log) CheckpointDue() bool {
 	return l.cp == nil && l.err == nil && l.replayBytes >= l.cfg.MaxReplayBytes
@@ -533,7 +630,7 @@ func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ti
 	if err := l.accept(ctx, stream, &it); err != nil {
 		return 0, err
 	}
-	t := l.enqueue(stream, queued{entry: it.Entry, buf: it.Buf})
+	t := l.enqueue(&l.queues[stream], queued{entry: it.Entry, buf: it.Buf})
 	l.startRounds(ctx, out)
 	return t, nil
 }
@@ -571,10 +668,10 @@ func (l *Log) accept(ctx *core.Context, stream Stream, it *Item) error {
 	return nil
 }
 
-func (l *Log) enqueue(stream Stream, q queued) Ticket {
+func (l *Log) enqueue(to *queue, q queued) Ticket {
 	q.ticket = l.nextTicket
 	l.nextTicket++
-	l.queues[stream].push(q)
+	to.push(q)
 	return q.ticket
 }
 
@@ -600,7 +697,7 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Runs: slices.Clone(ix.Runs)}
 	}
 	m.Segments = l.usageRows()
-	cp := &checkpoint{manifest: m, changed: slices.Clone(l.changed), replayAtBegin: l.replayBytes}
+	cp := &checkpoint{manifest: m, changed: slices.Clone(l.changed), replayAtBegin: l.replayBytes, heldAtBegin: l.heldBytes}
 	for w, set := range l.changed {
 		for ; set != 0; set &= set - 1 {
 			s := w*64 + bits.TrailingZeros64(set)
@@ -610,7 +707,7 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 		}
 	}
 	clear(l.changed)
-	l.cp = cp
+	l.cp, l.cpNoSpace = cp, false
 	return nil
 }
 
@@ -661,7 +758,7 @@ func (l *Log) CheckpointPiece(ctx *core.Context, owner uint32, buf core.IOBuf, l
 	if err := l.accept(ctx, Cold, &it); err != nil {
 		return 0, err
 	}
-	t := l.enqueue(Cold, queued{entry: it.Entry, buf: it.Buf})
+	t := l.enqueue(&l.own, queued{entry: it.Entry, buf: it.Buf})
 	l.cp.pending = append(l.cp.pending, pendingPiece{ticket: t, index: index, root: root})
 	l.startRounds(ctx, out)
 	return t, nil
@@ -696,13 +793,13 @@ func (l *Log) advanceManifest(out *Output) {
 		if err == nil {
 			cp.final = true
 			cp.size += uint64(len(piece))
-			cp.piece = l.enqueue(Cold, queued{entry: BlobEntry(BlobManifest, 0, uint64(len(piece))), bytes: piece})
+			cp.piece = l.enqueue(&l.own, queued{entry: BlobEntry(BlobManifest, 0, uint64(len(piece))), bytes: piece})
 			return
 		}
 	} else if len(rest) > 0 && len(cp.earlier) < math.MaxUint16 {
 		n := min(uint64(len(rest)), l.maxBlob)
 		cp.size += n
-		cp.piece = l.enqueue(Cold, queued{entry: BlobEntry(BlobManifestPiece, 0, n), bytes: rest[:n]})
+		cp.piece = l.enqueue(&l.own, queued{entry: BlobEntry(BlobManifestPiece, 0, n), bytes: rest[:n]})
 		cp.written += int(n)
 		return
 	}
@@ -890,6 +987,7 @@ func (l *Log) retire(out *Output) {
 		l.headerDurable(r.named)
 	}
 	l.replayBytes += r.bytes
+	l.heldBytes += r.ordinary
 	l.changed[r.segment/64] |= 1 << (r.segment % 64)
 	u := &l.usage[r.segment]
 	u.State, u.Newest = SegmentUsed, r.lsn
@@ -934,6 +1032,7 @@ func (l *Log) checkpointProgress(r *round, out *Output) {
 		case t == cp.piece && cp.final:
 			l.manifest = ManifestPos{Segment: r.segment, Block: r.block, LSN: r.lsn}
 			l.replayBytes -= cp.replayAtBegin
+			l.heldBytes -= cp.heldAtBegin
 			entry := chainEntry{pieces: append(cp.earlier, ref), size: cp.size}
 			if cp.snapshot {
 				l.chain, l.wantSnap = []chainEntry{entry}, false
@@ -965,8 +1064,9 @@ func (l *Log) fail(ctx *core.Context, err error, out *Output) {
 	}
 	out.emitTickets(InDoubt, err, ts)
 	ts = len(out.tickets)
+	out.tickets = l.drain(ctx, &l.own, out.tickets)
 	for s := range l.queues {
-		out.tickets = l.drain(ctx, Stream(s), out.tickets)
+		out.tickets = l.drain(ctx, &l.queues[s], out.tickets)
 	}
 	out.emitTickets(Failed, err, ts)
 	if l.cp != nil {
@@ -982,8 +1082,7 @@ func (l *Log) dropAbandoned() {
 	}
 }
 
-func (l *Log) drain(ctx *core.Context, s Stream, tickets []Ticket) []Ticket {
-	q := &l.queues[s]
+func (l *Log) drain(ctx *core.Context, q *queue, tickets []Ticket) []Ticket {
 	for i := range q.len() {
 		it := q.at(i)
 		tickets = append(tickets, visible(it.ticket, &it.entry))
@@ -995,99 +1094,99 @@ func (l *Log) drain(ctx *core.Context, s Stream, tickets []Ticket) []Ticket {
 	return tickets
 }
 
-// failNoSpace fails a whole stream's queue, even items behind its head that would fit,
-// since writing them first would break submit order, which a freeze before its write
-// relies on.
-func (l *Log) failNoSpace(ctx *core.Context, s Stream, out *Output) {
+// failCheckpoint fails the checkpoint's queued items when not even the reserve has room for them.
+func (l *Log) failCheckpoint(ctx *core.Context, out *Output) {
 	if l.cp != nil {
-		q := &l.queues[s]
-		for i := range q.len() {
-			if l.cp.owns(q.at(i).ticket) {
-				l.dropCheckpoint(ErrNoSpace, out)
-				break
-			}
-		}
+		l.dropCheckpoint(ErrNoSpace, out)
 	}
 	ts := len(out.tickets)
-	out.tickets = l.drain(ctx, s, out.tickets)
+	out.tickets = l.drain(ctx, &l.own, out.tickets)
 	out.emitTickets(Failed, ErrNoSpace, ts)
+	l.cpNoSpace = true
 }
-
-func (cp *checkpoint) owns(t Ticket) bool {
-	if t == cp.piece {
-		return true
-	}
-	for _, p := range cp.pending {
-		if p.ticket == t {
-			return true
-		}
-	}
-	return false
-}
-
-type targetState uint8
-
-const (
-	targetReady targetState = iota
-	targetBlocked
-	targetNoSpace
-)
 
 type target struct {
-	stream  Stream
-	segment uint32
-	seq     uint64
-	offset  uint32
-	roll    bool
+	stream   Stream
+	segment  uint32
+	seq      uint64
+	offset   uint32
+	roll     bool
+	reserve  bool
+	ordinary bool
 }
 
-func (l *Log) target(ctx *core.Context, out *Output) (target, bool) {
-	for {
-		order := [2]Stream{Hot, Cold}
-		if l.last == Hot {
-			order = [2]Stream{Cold, Hot}
+type placement uint8
+
+const (
+	placeReady placement = iota
+	placeWait
+	placeNoRoom
+)
+
+func (l *Log) hasWork(s Stream) bool {
+	return l.queues[s].len() > 0 || s == Cold && l.own.len() > 0
+}
+
+func (l *Log) target() (target, bool) {
+	order := [2]Stream{Hot, Cold}
+	if l.last == Hot {
+		order = [2]Stream{Cold, Hot}
+	}
+	for _, s := range order {
+		if !l.hasWork(s) {
+			continue
 		}
-		retry := false
-		for _, s := range order {
-			if l.queues[s].len() == 0 {
-				continue
-			}
-			t, state := l.targetFor(s)
-			if state == targetReady {
-				return t, true
-			}
-			if state == targetNoSpace {
-				l.failNoSpace(ctx, s, out)
-				retry = true
-				break
-			}
-		}
-		if !retry {
-			return target{}, false
+		if t, p := l.place(s); p == placeReady {
+			return t, true
 		}
 	}
+	return target{}, false
 }
 
-// targetFor places a round of stream s. A round appends to the stream's segment only once
-// the round that opened it is durable, so a segment whose header never landed holds at
-// most the one record written with it, the record recovery checks at block 1.
-func (l *Log) targetFor(s Stream) (target, targetState) {
+// place places a round of stream s, led by the checkpoint's items on the cold stream, or
+// says why it waits. A round appends to the stream's segment only once the round that opened
+// it is durable, so a segment whose header never landed holds at most the one record written
+// with it, the record recovery checks at block 1. Ordinary items wait while twice
+// MaxReplayBytes follow the newest manifest, and never open or append to a segment of the
+// reserve.
+func (l *Log) place(s Stream) (target, placement) {
+	own := s == Cold && l.own.len() > 0
+	ordinary := !l.behind()
+	q := &l.queues[s]
+	switch {
+	case own:
+		q = &l.own
+	case !ordinary && l.cpNoSpace:
+		return target{}, placeNoRoom
+	case !ordinary:
+		return target{}, placeWait
+	}
 	var acc layoutAcc
-	if err := acc.add(&l.queues[s].at(0).entry); err != nil {
+	if err := acc.add(&q.at(0).entry); err != nil {
 		panic(fmt.Sprintf("disklog: queued entry no longer validates: %v", err))
 	}
 	lay, _ := acc.layout()
 	c := l.asm[s]
-	if c.segment != 0 && uint64(l.sb.SegmentBlocks-c.next) >= lay.Blocks() {
+	if c.segment != 0 && uint64(l.sb.SegmentBlocks-c.next) >= lay.Blocks() && (own || !l.inReserve[s]) {
 		if l.opened[s] > l.durableLSN && !l.appendAnywhere {
-			return target{}, targetBlocked
+			return target{}, placeWait
 		}
-		return target{stream: s, segment: c.segment, seq: c.seq, offset: c.next}, targetReady
+		return target{stream: s, segment: c.segment, seq: c.seq, offset: c.next, reserve: l.inReserve[s], ordinary: ordinary && !l.inReserve[s]}, placeReady
 	}
-	if seg, ok := l.firstFree(); ok {
-		return target{stream: s, segment: seg, seq: l.nextSeq, offset: 1, roll: true}, targetReady
+	seg, ok := l.firstFree()
+	reserve := !ok || l.freeCount() <= l.cfg.Reserve
+	if !ok || reserve && !own {
+		return target{}, placeNoRoom
 	}
-	return target{}, targetNoSpace
+	return target{stream: s, segment: seg, seq: l.nextSeq, offset: 1, roll: true, reserve: reserve, ordinary: ordinary && !reserve}, placeReady
+}
+
+func (l *Log) freeCount() uint32 {
+	n := 0
+	for _, w := range l.free {
+		n += bits.OnesCount64(w)
+	}
+	return uint32(n)
 }
 
 func (l *Log) firstFree() (uint32, bool) {
@@ -1101,7 +1200,7 @@ func (l *Log) firstFree() (uint32, bool) {
 
 func (l *Log) startRounds(ctx *core.Context, out *Output) {
 	for l.err == nil && l.phase == formatDone && l.count < len(l.rounds) {
-		t, ok := l.target(ctx, out)
+		t, ok := l.target()
 		if !ok {
 			return
 		}
@@ -1110,7 +1209,14 @@ func (l *Log) startRounds(ctx *core.Context, out *Output) {
 }
 
 func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
-	q := &l.queues[t.stream]
+	var srcs [2]*queue
+	k := 0
+	if t.stream == Cold && l.own.len() > 0 {
+		srcs[k], k = &l.own, k+1
+	}
+	if t.ordinary {
+		srcs[k], k = &l.queues[t.stream], k+1
+	}
 	lead := uint32(0)
 	if t.roll {
 		lead = 1
@@ -1118,27 +1224,36 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	limit := uint64(min(l.sb.SegmentBlocks-t.offset, l.maxWrite-lead))
 	var acc layoutAcc
 	var lay Layout
+	var taken [2]int
 	n, writeBlocks := 0, uint32(0)
-	for n < q.len() && n < maxRecordEntries {
-		next := acc
-		e := &q.at(n).entry
-		if err := next.add(e); err != nil {
-			break
+fill:
+	for j, q := range srcs[:k] {
+		for taken[j] < q.len() && n < maxRecordEntries {
+			next := acc
+			e := &q.at(taken[j]).entry
+			if err := next.add(e); err != nil {
+				break fill
+			}
+			nl, err := next.layout()
+			if err != nil || nl.Blocks() > limit {
+				break fill
+			}
+			acc, lay = next, nl
+			if e.Kind == EntryWrite {
+				writeBlocks += uint32(e.Count)
+			}
+			taken[j]++
+			n++
 		}
-		nl, err := next.layout()
-		if err != nil || nl.Blocks() > limit {
-			break
-		}
-		acc, lay = next, nl
-		if e.Kind == EntryWrite {
-			writeBlocks += uint32(e.Count)
-		}
-		n++
 	}
 	if n == 0 {
 		panic("disklog: a round built a record with no entries")
 	}
-	items := q.window(n)
+	items := srcs[0].window(taken[0])
+	if taken[1] > 0 {
+		l.items = append(append(l.items[:0], items...), srcs[1].window(taken[1])...)
+		items = l.items
+	}
 	slot := (l.first + l.count) % len(l.rounds)
 	r := &l.rounds[slot]
 	tailBlocks := lay.DataBlocks - writeBlocks
@@ -1203,11 +1318,15 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 			ctx.Pool.Free(it.buf)
 		}
 	}
-	q.drop(n)
+	clear(l.items)
+	for j, q := range srcs[:k] {
+		q.drop(taken[j])
+	}
 
 	if t.roll {
 		l.free[t.segment/64] &^= 1 << (t.segment % 64)
 		l.nextSeq++
+		l.inReserve[t.stream] = t.reserve
 	}
 	bytes := uint64(lead+uint32(lay.Blocks())) * core.BlockSize
 	*r = round{
@@ -1228,6 +1347,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		tickets:      r.tickets,
 		payloads:     r.payloads,
 	}
+	r.ordinary = ordinaryBytes(r.entries, r.bytes)
 	if t.roll {
 		r.opened, r.named = t.seq, l.manifest
 	}

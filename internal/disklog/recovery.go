@@ -223,6 +223,7 @@ type Recovery struct {
 	found       []foundHeader
 	replayFloor uint64
 	replayBytes uint64
+	heldBytes   uint64
 	replayed    uint64
 
 	durable     uint64
@@ -451,6 +452,10 @@ func (r *Recovery) repair(ctx *core.Context, lba core.LBA, out *Output) {
 }
 
 func (r *Recovery) startHeaders(ctx *core.Context, out *Output) {
+	if r.cfg.Reserve >= r.sb.SegmentCount-1 {
+		r.fail(ctx, ErrBadConfig, out)
+		return
+	}
 	r.phase = recHeaders
 	r.segs = make([]segInfo, r.sb.SegmentCount)
 	r.nextSeg = 1
@@ -1062,6 +1067,7 @@ func (r *Recovery) deliver(x *streamScan, out *Output) {
 	r.replayed += blocks * core.BlockSize
 	if d.Record.LSN > r.replayFloor {
 		r.replayBytes += blocks * core.BlockSize
+		r.heldBytes += ordinaryBytes(d.Entries, blocks*core.BlockSize)
 		info := &r.segs[x.headSeg]
 		info.live += d.Layout.DataBlocks
 		info.newest = d.Record.LSN
@@ -1170,6 +1176,7 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 	l.durableSeq = l.nextSeq
 	l.manifest = r.manifestPos
 	l.replayBytes = r.replayBytes
+	l.heldBytes = r.heldBytes
 	l.asm = r.resume
 	if r.hasManifest {
 		l.chain, l.state = r.chain, r.manifest.Indexes
@@ -1197,6 +1204,11 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 		if l.usage[s] != was {
 			l.changed[s/64] |= 1 << (s % 64)
 		}
+	}
+	// Which open segment a checkpoint took from the reserve is not on disk, so with only the
+	// reserve free every open segment counts as taken from it.
+	for st := range l.asm {
+		l.inReserve[st] = l.asm[st].segment != 0 && l.freeCount() <= l.cfg.Reserve
 	}
 	return l, nil
 }

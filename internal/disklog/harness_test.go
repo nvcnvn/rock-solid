@@ -70,6 +70,9 @@ type harness struct {
 	roundOf map[core.IOID]uint64
 	// ignoreErrors hands the log every completion as a success, as a log without its error path would see it.
 	ignoreErrors bool
+	// victim stands for a cleaner with a victim, so stalled items wait; otherwise the harness
+	// reports no victim and they fail with NoSpace.
+	victim bool
 }
 
 func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {
@@ -172,6 +175,9 @@ func formatted(t testing.TB, diskBytes uint64, cfg disklog.Config) *harness {
 }
 
 func (h *harness) absorb() {
+	if !h.victim && h.rec == nil && h.log != nil && h.log.Stalled() {
+		h.log.FailStalled(&h.ctx, &h.out)
+	}
 	if h.sched != nil {
 		h.noteRounds()
 	}
