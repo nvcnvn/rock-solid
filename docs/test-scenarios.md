@@ -390,7 +390,12 @@ types](#event-and-action-types), and this section is their only home.
   reported in order; every finished checkpoint's manifest reads back with its base LSN and runs;
   without an error there is one flush per write; the only refusal is TooLarge; Close then finds
   every buffer back. Coverage: NoSpace, TooLarge, a full pool, InDoubt, deferred flushes, depth
-  above 1, manifest pieces, finished and failed checkpoints all occur.
+  above 1, manifest pieces, finished and failed checkpoints all occur. After a failed checkpoint
+  the next begins only once a record has become durable since, as the chunk store's does, and a
+  seed that has not ended after 100,000 steps fails.
+- Regression (seed 1957 of the property above, found by the seed runner): on a 16-block disk with
+  no free segment every checkpoint fails with NoSpace as it begins; beginning the next at once
+  never ended, and the items it kept grew one process to 12 GB.
 - Checkpoint end to end (max replay 8 blocks, counted in record blocks, segment headers left out):
   after a 3-block write (a 4-block record) a checkpoint is not due; after a second (8 blocks) it is.
   A third write is in flight when the checkpoint begins for owners 5 and 6; a second begin is Busy,
@@ -1013,8 +1018,8 @@ op, diffs histories and reduces a failing ops file; its log stands in for the di
 tree, keeping every live piece, the newest manifest's runs and its replay point. Each index's test generates its ops, runs
 them under every option set and a model, and turns a failure into a regression case.
 
-- [property] `internal/lsm` `TestMetamorphic`: seeds 0-19 per run (`-meta.seeds`, `-meta.first`;
-  `-meta.seed n` replays one), 3,000 ops in a text form (`put aa v26x`, `del aa`, `delrange a ab`,
+- [property] `internal/lsm` `TestMetamorphic`: seeds 0-19 in `go test`, more in the
+  [seed runner](#seed-runner-in-ci), 3,000 ops in a text form (`put aa v26x`, `del aa`, `delrange a ab`,
   `flush`, `flushfail 3`, `floor aca`), drawn by weight: puts 35, removals 10, range removals 3,
   gets 15, floors 8, scans 5, views 11 (open 2, get 5, scan 2, close 2), flushes 5, failed flushes 1,
   compactions 4, restarts 1; keys of 1-6 letters a-f, a put's key new one time in four, a range
@@ -1041,7 +1046,7 @@ them under every option set and a model, and turns a failure into a regression c
 - Each set reaches the extreme it is there for on seed 0: F never flushes, C keeps over 100 runs
   and G 40, E fails flushes and restarts more than A, D installs merges while a memtable is frozen,
   Two merges runs two at once, and Fixed limit compacts.
-- [property] The chunk index's `TestMetamorphic` (`internal/chunkstore`): seeds 0-19 per run, 1,000
+- [property] The chunk index's `TestMetamorphic` (`internal/chunkstore`): seeds 0-19 in `go test`, 1,000
   ops drawn by weight: writes 30, punches 6, whole-chunk punches 1, cuts 2, releases of frozen
   versions 2, cleaner moves 8, reads of blocks live 12 and at a snapshot epoch 10, chunk entries 3,
   `FrozenAt` 3, live counts per record 4, `Check` 2, and the structural ops as above. Writes and
@@ -2342,25 +2347,63 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 
 ## Seed runner in CI
 
-- CI runs thousands of seeds per commit; each failing seed prints a one-line replay command
-  (`go test ./internal/... -run <Test> -seed <n>` or the runner's equivalent) that reproduces it
-  exactly, and its ops file reduced to the fewest ops that still fail. Open: the seed count per commit
-  and CI's time budget, the design's open question "Metamorphic cost in CI". The metamorphic tests
-  already replay with `-meta.seed n` and shard with `-meta.first` and `-meta.seeds`.
-- Reduction drops chunks of ops while the failure persists. Targets from the metamorphic testing
-  spike: the planted flush bug reduces from 3,000 ops to 5, and a second plant to 7, when flushes,
-  failed flushes and restarts are ops. When an option sets the cadence (76 to 354 ops after
-  reduction), the reduced case is rewritten with explicit ops before it is saved. Open: tolerance on
-  the reduced size.
-- The reduced case becomes a data-driven regression file under `testdata/` before the fix: the change
-  shows the new case failing without the fix and passing with it. A fix that lands without its
-  regression case fails review.
-- A change that adds a seeded test runs it over 10,000 seeds once (as Pebble stresses every test a
-  pull request adds); the run's result is recorded in the change.
-- Millions of seeds overnight on idle machines: a failure found overnight produces the same one-line
-  replay command and reduced file.
-- A runner given a seed range shards it across processes, and the union of results equals a single
-  process's run of the range (no seed skipped or run twice).
+Every seeded property test takes its seeds from `internal/sim/seeds` (`seeds.Run(t, first, n, f)`),
+and `scripts/seeds.sh` runs each over its per-commit count. The repository has no hosted CI, so the
+script is the per-commit job, run beside `scripts/lint.sh`.
+
+- Seeds: a test runs its own `n` from `first` under `go test ./...`; `-seeds n` replaces the count,
+  `-seeds.first n` the first seed, `-seed n` runs that one seed, and `-seeds.shard i/k` keeps the
+  i-th of k contiguous parts. A check across seeds (every case seen at least once) runs only on the
+  test's own seeds; the toy protocol's averages run whenever 100 seeds or more do.
+- A failing seed logs one line that reproduces it exactly, with every other flag the run was given,
+  such as `-meta.ops`:
+  `replay: go test ./internal/lsm -run '^TestMetamorphic$' -seed 250`. The package comes from the
+  test binary's build info, so the line is the same from `go test` and from the runner's compiled
+  binaries; a subtest is named `'^TestX$/^sub$'`.
+- **[property]** Shards: the k parts of a range hold each seed exactly once, in order, so the union
+  of k processes' results is one process's run of the range (10,000 seeds in 14 parts, 100 in 3,
+  3 in 8, none in 2).
+- The runner splits each test's seeds over `JOBS` processes (the CPUs, at most 4), each with
+  `GOMEMLIMIT` 1 GiB and a 30-minute timeout, and stops at the first test that fails, printing each
+  failing process's output. `SEEDS` and `SEEDS_FIRST` replace every test's count and first seed, and
+  arguments keep only the tests named, so a change that adds a seeded test runs it over 10,000 seeds
+  once with `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change, and an
+  overnight run of millions takes a fresh `SEEDS_FIRST` and prints the same replay line and reduced
+  case. Open: where the overnight runs live and how their first seeds advance.
+- Per commit, with 4 processes on a 14-core Apple M4 Pro Mac mini, 20,000 seeds in 182 s; the
+  largest process peaked at 540 MiB resident (an `internal/lsm` metamorphic shard), all four at
+  2.0 GiB:
+
+  | Test | Seeds per commit | Time |
+  | --- | --- | --- |
+  | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 3 s |
+  | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 12 s |
+  | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 4 s |
+  | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 42 s |
+  | `internal/disklog` `TestOracleCatchesReplayPastATornRound` | 1,000 | 5 s |
+  | `internal/disklog` `TestQuarantinedSegmentsAreNeverReused` | 500 | 6 s |
+  | `internal/chunkstore` `TestReplayPastPendingWrites` | 2,000 | 9 s |
+  | `internal/lsm` `TestMetamorphic` | 1,000 | 44 s |
+  | `internal/chunkstore` `TestMetamorphic` | 1,000 | 55 s |
+
+- Memory does not grow with the seeds a process runs: a seed that stops making progress fails at a
+  step bound instead of growing (the group commit property's seed 1957, which grew one process to
+  12 GB, is its regression), and the random-crash harness's pool is 16 MiB, the disk log tests'
+  processes staying under 400 MiB.
+- A metamorphic failure also prints its ops reduced to the fewest that still fail under the set that
+  failed, written as a data-driven case for `testdata/regressions`. Reduction drops chunks of ops
+  while the failure persists. Targets from the metamorphic testing spike: the planted flush bug
+  reduces from 3,000 ops to 5, and a second plant to 7, when flushes, failed flushes and restarts
+  are ops. When an option sets the cadence (76 to 354 ops after reduction), the reduced case is
+  rewritten with explicit ops before it is saved. Open: tolerance on the reduced size.
+- Planted bug end to end: with `internal/lsm`'s P5 (a merge drops removals that hide keys in older
+  runs) switched on in `TestMetamorphic`, the runner fails the first seed of every shard (0, 250,
+  500, 750) under set A; `-seed 250` replays the same op and histories; its 1,200 ops reduce to 19,
+  saved in `internal/lsm/testdata/regressions`, which read as the model without the plant and fail
+  with it (`TestMetamorphicRegressionsCatchTheirPlants`).
+- The reduced case, or for a test with no ops form a test of the failing seed, lands before the
+  fix: the change shows it failing without the fix and passing with it. A fix that lands without
+  its regression case fails review.
 
 ## Data-driven files
 
@@ -2433,11 +2476,11 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   as one to the restarted primary's write of the same sequence number (found at seed 4, step 444,
   and in 49 of seeds 0 to 999). With crashes off, `IgnoreEpoch` passes seeds 0 to 99: only a primary
   crash with a reply in flight exposes it.
-- Each bug trips within seeds 0 to 99, the seeds every commit runs; running its first failing seed
+- Each bug trips within seeds 0 to 99, the seeds `go test` runs; running its first failing seed
   twice gives byte-identical traces and the same failure at the same step; the fixed protocol passes
-  that seed. **[property]** The fixed protocol passes seeds 0 to 99 per commit (at least 75% of
-  writes acknowledged and a crash per seed on average) and passed seeds 0 to 9,999 once
-  (`-toy.seeds 10000`, 37 s).
+  that seed. **[property]** The fixed protocol passes seeds 0 to 99 in `go test` and 0 to 9,999
+  in the seed runner (at least 75% of writes acknowledged and a crash per seed on average,
+  whenever 100 seeds or more run).
 - The history holds every write in order; exactly the acknowledged ones complete, never before they
   start, and over seeds 0 to 19 some are left incomplete by a primary crash.
 - The toy package passes the sans-IO analyzer, and a write's whole cycle of events on the primary
@@ -2485,7 +2528,8 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 
 ## Seeded runs and the simulation harness
 
-The seeded runs, each described in its section above:
+The seeded runs, each described in its section above, with the seeds `go test` runs; the
+[seed runner](#seed-runner-in-ci) lists those it runs more of per commit:
 
 - Group commit: seeds 1-100 (every accepted item decodes), each also failing under five broken
   encoders, and seeds 1-20 of random entries (anything Submit accepts decodes).
@@ -2503,7 +2547,7 @@ The seeded runs, each described in its section above:
   index on every run; seeds 0-10,002 and 0-10,001 once.
 - Crash at every action: every k, with three landing sets and a failure each.
 - Cleaner write amplification at 80 / 90 / 95% full.
-- Planted-bug check: seeds 0-99 under each planted bug and the fixed protocol, the replay of each bug's first failing seed, and seeds 0-9,999 of the fixed protocol once.
+- Planted-bug check: seeds 0-99 under each planted bug and the fixed protocol, and the replay of each bug's first failing seed.
 
 The chunk store stand-in of the recovery tests applies every Durable record to its model of the
 chunk index. It starts a checkpoint whenever one is due, snapshots the model, hands one run piece at

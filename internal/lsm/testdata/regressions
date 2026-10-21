@@ -24,3 +24,29 @@ restart
 floor e
 ----
 floor e: none
+
+# Seed runner, plant P5 (a merge drops removals that hide keys in older runs) at seed 250 under A,
+# reduced from 1,200 ops: the merge dropped the removal of fdcbf though an older run held the key,
+# so a scan read it back.
+run set=A
+put fdebde v704xxxxxx
+put fcd v710xxx
+put babcda v711xxxxxx
+put febba v712xxx
+put feeab v719xx
+put fdfca v721x
+put fdcbf v722
+put fabdc v724xx
+put befdc v726xxx
+flushfail 3
+del fdcbf
+flush
+put d v744xxxxxxx
+put dbba v748x
+flush
+put acc v1126xxx
+flush
+compact
+scan dcc 6
+----
+scan dcc 6: [fabdc=v724xx fcd=v710xxx fdebde=v704xxxxxx fdfca=v721x febba=v712xxx feeab=v719xx]

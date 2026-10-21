@@ -10,7 +10,7 @@ Items are in build order within a phase. An item can start once the items it use
 - Hot-path benchmarks report zero allocations per operation.
 - Unit tests feed events and assert on actions, with no mocks; every decoder has a fuzz test.
 - New invariants are registered with the simulator's checker in the same change.
-- Every failing seed found so far is a regression test.
+- `scripts/seeds.sh` passes, with every new seeded property test in its list, and every failing seed found so far is a regression test.
 - `docs/design.md` matches the code, and `docs/tech-debts.md` lists any pin or workaround.
 
 ## Phase 1: sans-IO core and simulator
