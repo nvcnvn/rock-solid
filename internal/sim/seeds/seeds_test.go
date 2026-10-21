@@ -1,7 +1,10 @@
 package seeds
 
 import (
+	"os"
+	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +35,26 @@ func TestRunTakesTheTestsOwnSeedsByDefault(t *testing.T) {
 	Run(t, 5, 3, func(seed uint64) { got = append(got, seed) })
 	if !slices.Equal(got, []uint64{5, 6, 7}) {
 		t.Fatalf("ran %v", got)
+	}
+}
+
+// A seed that panics logs its replay line before the panic ends the test binary, so the run is
+// checked from a second process of this binary.
+func TestAPanickingSeedLogsItsReplay(t *testing.T) {
+	if os.Getenv("SEEDS_TEST_PANIC") != "" {
+		Run(t, 1, 5, func(seed uint64) {
+			if seed == 3 {
+				panic("broken invariant")
+			}
+		})
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestAPanickingSeedLogsItsReplay$")
+	cmd.Env = append(os.Environ(), "SEEDS_TEST_PANIC=1")
+	out, err := cmd.CombinedOutput()
+	const want = "replay: go test ./internal/sim/seeds -run '^TestAPanickingSeedLogsItsReplay$' -seed 3"
+	if err == nil || !strings.Contains(string(out), want) || !strings.Contains(string(out), "broken invariant") {
+		t.Fatalf("exit %v, output:\n%s", err, out)
 	}
 }
 

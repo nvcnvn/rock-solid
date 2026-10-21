@@ -84,16 +84,16 @@ func TestEachPlantedBugIsFoundAndItsSeedReplays(t *testing.T) {
 func TestAStaleReplyNeedsAPrimaryCrash(t *testing.T) {
 	set := chaos()
 	set.CrashNum, set.CrashDen = 0, 0
-	for seed := range uint64(commitSeeds) {
+	seeds.Run(t, 0, commitSeeds, func(seed uint64) {
 		if _, err := run(seed, set, toy.IgnoreEpoch); err != nil {
 			t.Fatalf("seed %d with no crashes: %v", seed, err)
 		}
-	}
+	})
 }
 
 func TestTheHistoryHoldsEveryWriteAndOnlyAcknowledgedOnesComplete(t *testing.T) {
 	incomplete := 0
-	for seed := range uint64(20) {
+	seeds.Run(t, 0, 20, func(seed uint64) {
 		c, err := run(seed, chaos(), toy.NoBug)
 		if err != nil {
 			t.Fatal(err)
@@ -115,6 +115,9 @@ func TestTheHistoryHoldsEveryWriteAndOnlyAcknowledgedOnesComplete(t *testing.T) 
 		if done != c.Acked() {
 			t.Fatalf("seed %d: %d complete, %d acknowledged", seed, done, c.Acked())
 		}
+	})
+	if !seeds.Default() {
+		return
 	}
 	if incomplete == 0 {
 		t.Fatal("no write was left incomplete by a primary crash over 20 seeds")

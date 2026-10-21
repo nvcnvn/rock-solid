@@ -2347,34 +2347,42 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 
 ## Seed runner in CI
 
-Every seeded property test takes its seeds from `internal/sim/seeds` (`seeds.Run(t, first, n, f)`),
-and `scripts/seeds.sh` runs each over its per-commit count. The repository has no hosted CI, so the
-script is the per-commit job, run beside `scripts/lint.sh`.
+Every seeded property test, one whose property must hold seed by seed, takes its seeds from
+`internal/sim/seeds` (`seeds.Run(t, first, n, f)`), and `scripts/seeds.sh` runs those in its list
+over thousands of seeds. The repository has no hosted CI yet, so the script is the job
+every item runs before review ([build checklist](build-checklist.md)), beside `scripts/lint.sh`.
+Tests that check something across a fixed range keep their range: that two seeds give different
+traces, that both outcomes of a seeded choice occur, or that a planted bug trips within the seeds
+`go test` runs.
 
 - Seeds: a test runs its own `n` from `first` under `go test ./...`; `-seeds n` replaces the count,
   `-seeds.first n` the first seed, `-seed n` runs that one seed, and `-seeds.shard i/k` keeps the
-  i-th of k contiguous parts. A check across seeds (every case seen at least once) runs only on the
-  test's own seeds; the toy protocol's averages run whenever 100 seeds or more do.
-- A failing seed logs one line that reproduces it exactly, with every other flag the run was given,
-  such as `-meta.ops`:
+  i-th of k contiguous parts; `-seed` with `-seeds.shard` is refused. A check across seeds (every
+  case seen at least once) runs only on the test's own seeds; the toy protocol's averages run
+  whenever 100 seeds or more do.
+- A seed that fails or panics logs one line that reproduces it exactly, with every other flag the
+  run was given, such as `-meta.ops`:
   `replay: go test ./internal/lsm -run '^TestMetamorphic$' -seed 250`. The package comes from the
   test binary's build info, so the line is the same from `go test` and from the runner's compiled
-  binaries; a subtest is named `'^TestX$/^sub$'`.
+  binaries; a subtest is named `'^TestX$/^sub$'`. A panic is logged, then re-raised (seed 3 of 1-5
+  panicking, checked from a second process).
 - **[property]** Shards: the k parts of a range hold each seed exactly once, in order, so the union
   of k processes' results is one process's run of the range (10,000 seeds in 14 parts, 100 in 3,
   3 in 8, none in 2).
 - The runner splits each test's seeds over `JOBS` processes (the CPUs, at most 4), each with
-  `GOMEMLIMIT` 1 GiB and a 30-minute timeout, and stops at the first test that fails, printing each
-  failing process's output. `SEEDS` and `SEEDS_FIRST` replace every test's count and first seed, and
-  arguments keep only the tests named, so a change that adds a seeded test runs it over 10,000 seeds
-  once with `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change, and an
-  overnight run of millions takes a fresh `SEEDS_FIRST` and prints the same replay line and reduced
-  case. Open: where the overnight runs live and how their first seeds advance.
-- Per commit, with 4 processes on a 14-core Apple M4 Pro Mac mini, 20,000 seeds in 182 s; the
-  largest process peaked at 540 MiB resident (an `internal/lsm` metamorphic shard), all four at
-  2.0 GiB:
+  `GOMEMLIMIT` (1 GiB) and `TIMEOUT` (30 minutes, 0 for none), and stops at the first test that
+  fails, printing each failing process's output. A timeout prints the stack, whose
+  `func1(0x…)` frame holds the seed, but no replay line. A test the list names that the package
+  lacks fails, as does an argument naming no listed test, and Ctrl-C stops every process. `SEEDS`
+  and `SEEDS_FIRST` replace every test's count and first seed and arguments keep only the tests
+  named, so a change that adds a seeded test runs it over 10,000 seeds once with
+  `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
+  runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
+  they take.
+- The list, with 4 processes on a 14-core Apple M4 Pro Mac mini: 20,000 seeds in 182 s; the largest
+  process peaked at 540 MiB resident (an `internal/lsm` metamorphic shard), all four at 2.0 GiB:
 
-  | Test | Seeds per commit | Time |
+  | Test | Seeds | Time |
   | --- | --- | --- |
   | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 3 s |
   | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 12 s |
@@ -2386,21 +2394,19 @@ script is the per-commit job, run beside `scripts/lint.sh`.
   | `internal/lsm` `TestMetamorphic` | 1,000 | 44 s |
   | `internal/chunkstore` `TestMetamorphic` | 1,000 | 55 s |
 
-- Memory does not grow with the seeds a process runs: a seed that stops making progress fails at a
-  step bound instead of growing (the group commit property's seed 1957, which grew one process to
-  12 GB, is its regression), and the random-crash harness's pool is 16 MiB, the disk log tests'
-  processes staying under 400 MiB.
-- A metamorphic failure also prints its ops reduced to the fewest that still fail under the set that
-  failed, written as a data-driven case for `testdata/regressions`. Reduction drops chunks of ops
-  while the failure persists. Targets from the metamorphic testing spike: the planted flush bug
-  reduces from 3,000 ops to 5, and a second plant to 7, when flushes, failed flushes and restarts
-  are ops. When an option sets the cadence (76 to 354 ops after reduction), the reduced case is
-  rewritten with explicit ops before it is saved. Open: tolerance on the reduced size.
-- Planted bug end to end: with `internal/lsm`'s P5 (a merge drops removals that hide keys in older
-  runs) switched on in `TestMetamorphic`, the runner fails the first seed of every shard (0, 250,
-  500, 750) under set A; `-seed 250` replays the same op and histories; its 1,200 ops reduce to 19,
-  saved in `internal/lsm/testdata/regressions`, which read as the model without the plant and fail
-  with it (`TestMetamorphicRegressionsCatchTheirPlants`).
+- A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
+  under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
+  1957 ([Group commit](#group-commit)) is the case that grew one.
+- A metamorphic failure also prints its ops reduced to the fewest whose first difference from the
+  model, under the set that failed, is still the op that failed, written as a data-driven case for
+  `testdata/regressions`. Reduction drops chunks of ops while the failure persists. Targets from
+  the metamorphic testing spike: the planted flush bug reduces from 3,000 ops to 5, and a second
+  plant to 7, when flushes, failed flushes and restarts are ops. When an option sets the cadence
+  (76 to 354 ops after reduction), the reduced case is rewritten with explicit ops before it is
+  saved. Open: tolerance on the reduced size.
+- A case found with a planted bug names it (`run set=A plant=merge-no-older`) and fails with it on
+  (`TestMetamorphicRegressionsCatchTheirPlants`); `internal/lsm`'s P5 case came from the runner,
+  1,200 ops of seed 250 reduced to 27.
 - The reduced case, or for a test with no ops form a test of the failing seed, lands before the
   fix: the change shows it failing without the fix and passing with it. A fix that lands without
   its regression case fails review.
@@ -2412,12 +2418,13 @@ script is the per-commit job, run beside `scripts/lint.sh`.
   output; `go test -rewrite` regenerates the expected output for review, and a run without it fails
   on any difference, naming the file and line.
 - Regression cases of the metamorphic tests: `run set=<option set>` over an ops file, printing each
-  op whose history line is not "ok" (see Metamorphic index tests):
+  op whose history line is not "ok" (see Metamorphic index tests); a case found with a planted bug
+  names it with `plant=`, and must differ from the model with it on:
 
   ```text
   # Metamorphic testing spike, plant P1 at seed 0 under A: a flush dropped a removal that hid a key
   # in an older run.
-  run set=A
+  run set=A plant=drop-removals
   put aa v26x
   flush
   del aa
@@ -2529,7 +2536,7 @@ script is the per-commit job, run beside `scripts/lint.sh`.
 ## Seeded runs and the simulation harness
 
 The seeded runs, each described in its section above, with the seeds `go test` runs; the
-[seed runner](#seed-runner-in-ci) lists those it runs more of per commit:
+[seed runner](#seed-runner-in-ci) lists those it runs more of:
 
 - Group commit: seeds 1-100 (every accepted item decodes), each also failing under five broken
   encoders, and seeds 1-20 of random entries (anything Submit accepts decodes).

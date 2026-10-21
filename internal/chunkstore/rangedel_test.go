@@ -9,6 +9,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 func newIndexWith(t testing.TB, cfg lsm.Config, pointRemovals bool) *Index {
@@ -210,7 +211,7 @@ func TestRewriteOver1024Extents(t *testing.T) {
 // as an index built with point removals does, and the invariants hold.
 func TestRangeRemovalsMatchPointRemovals(t *testing.T) {
 	const chunks = 4
-	for seed := range uint64(6) {
+	seeds.Run(t, 0, 6, func(seed uint64) {
 		r := rand.New(rand.NewPCG(seed, 30))
 		cfg := lsm.Config{MaxPiece: replayMaxPiece, Check: true}
 		x, p := newIndexWith(t, cfg, false), newIndexWith(t, cfg, true)
@@ -301,7 +302,7 @@ func TestRangeRemovalsMatchPointRemovals(t *testing.T) {
 		if x.Tree().Runs() == 0 || epoch == 0 {
 			t.Fatalf("seed %d: %d runs, %d epochs", seed, x.Tree().Runs(), epoch)
 		}
-	}
+	})
 }
 
 // BenchmarkLookupRewritten is BenchmarkLookup's 20,000 one-block extents over 64 chunks, flushed,

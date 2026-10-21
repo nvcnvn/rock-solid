@@ -42,11 +42,18 @@ func Run(t *testing.T, first uint64, n int, f func(seed uint64)) {
 		if _, err := fmt.Sscanf(*shard, "%d/%d", &i, &k); err != nil || i >= k {
 			t.Fatalf("-seeds.shard %q is not i/k with i below k", *shard)
 		}
+		if *one >= 0 {
+			t.Fatalf("-seed %d runs one seed, which -seeds.shard cannot split", *one)
+		}
 		lo, hi = part(lo, hi, i, k)
 	}
 	for seed := lo; seed < hi && !t.Failed(); seed++ {
 		func() {
 			defer func() {
+				if r := recover(); r != nil {
+					t.Logf("replay: %s", Replay(t, seed))
+					panic(r)
+				}
 				if t.Failed() {
 					t.Logf("replay: %s", Replay(t, seed))
 				}

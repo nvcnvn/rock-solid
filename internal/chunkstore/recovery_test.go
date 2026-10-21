@@ -9,6 +9,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 const (
@@ -380,7 +381,7 @@ func (n *node) equal(other *Index, what string) {
 // Replaying the records in LSN order, from the manifest's runs or from the first record, gives the
 // live index exactly, across restarts.
 func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
-	for seed := range 4 {
+	seeds.Run(t, 0, 4, func(seed uint64) {
 		n := newNode(t)
 		w := &workload{r: rand.New(rand.NewPCG(uint64(seed), 7))}
 		for generation := range 3 {
@@ -402,14 +403,14 @@ func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
 		if n.pieces <= n.checkpoints || n.carried == 0 || w.compactions == 0 || w.freezes == 0 {
 			t.Fatalf("seed %d: the workload missed a case", seed)
 		}
-	}
+	})
 }
 
 // A crash after a checkpoint's runs are durable but before its manifest is recovers from an
 // earlier manifest a segment header names plus replay, even when the runs it wrote came from a
 // compaction.
 func TestCrashBetweenRunAndManifest(t *testing.T) {
-	for seed := range 4 {
+	seeds.Run(t, 0, 4, func(seed uint64) {
 		n := newNode(t)
 		w := &workload{r: rand.New(rand.NewPCG(uint64(seed), 8))}
 		for n.checkpoints < 3 {
@@ -449,5 +450,5 @@ func TestCrashBetweenRunAndManifest(t *testing.T) {
 		live = n.ix
 		n.recover(disklog.ModeOpen)
 		n.equal(live, "index after the next checkpoint")
-	}
+	})
 }

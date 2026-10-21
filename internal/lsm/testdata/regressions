@@ -3,7 +3,7 @@
 
 # Metamorphic testing spike, plant P1 at seed 0 under A: a flush dropped a removal that hid a key in
 # an older run.
-run set=A
+run set=A plant=drop-removals
 put aa v26x
 flush
 del aa
@@ -14,7 +14,7 @@ floor aca: none
 
 # Metamorphic testing spike, plant P3 under A: a restore loaded runs in the order the manifest
 # listed them, not by age, after a failed flush left its frozen memtable for the next.
-run set=A
+run set=A plant=load-unordered
 put e v30xxx
 flush
 del e
@@ -25,28 +25,35 @@ floor e
 ----
 floor e: none
 
-# Seed runner, plant P5 (a merge drops removals that hide keys in older runs) at seed 250 under A,
-# reduced from 1,200 ops: the merge dropped the removal of fdcbf though an older run held the key,
-# so a scan read it back.
-run set=A
-put fdebde v704xxxxxx
-put fcd v710xxx
-put babcda v711xxxxxx
-put febba v712xxx
-put feeab v719xx
-put fdfca v721x
-put fdcbf v722
-put fabdc v724xx
-put befdc v726xxx
-flushfail 3
-del fdcbf
+# Seed runner, plant P5 at seed 250 under A, reduced from 1,200 ops: a merge dropped the removal
+# of febba though an older run held the key, so a scan read it back.
+run set=A plant=merge-no-older
+put febba v677xxxxx
+put a v1083xxxx
 flush
-put d v744xxxxxxx
-put dbba v748x
+put cecad v1086xxxxx
+put cda v1089xx
+put dafea v1090xxx
+put ccbda v1091xxxxxx
+put cbaad v1103x
+put fe v1105xxx
+put effe v1106xxxxx
+put bedfe v1107xxxxxxx
+put bafc v1108
+flush
+put feeab v1110xxx
+put fdcbf v1120xxxxxxx
 flush
 put acc v1126xxx
 flush
 compact
+del febba
+flush
+put debdbb v1176xx
+flush
+put edcfcf v1180xxxxxxx
+flush
+compact
 scan dcc 6
 ----
-scan dcc 6: [fabdc=v724xx fcd=v710xxx fdebde=v704xxxxxx fdfca=v721x febba=v712xxx feeab=v719xx]
+scan dcc 6: [debdbb=v1176xx edcfcf=v1180xxxxxxx effe=v1106xxxxx fdcbf=v1120xxxxxxx fe=v1105xxx feeab=v1110xxx]

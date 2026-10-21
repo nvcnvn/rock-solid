@@ -637,9 +637,10 @@ func TestMetamorphic(t *testing.T) {
 		if fail == nil {
 			return
 		}
+		last := ops[fail.at].String()
 		small := metamorphic.Reduce(ops[:fail.at+1], func(c []metamorphic.Op) bool {
 			f, _ := metaRun(c, []metaSet{fail.set})
-			return f != nil
+			return f != nil && f.at == len(c)-1 && c[f.at].String() == last
 		})
 		t.Fatalf("seed %d under %s, op %d %q: got %q, the model %q\nreduced to %d ops, for testdata/regressions:\n%s",
 			seed, fail.set.name, fail.at, ops[fail.at], fail.got[fail.at], fail.want[fail.at], len(small), metaCase(small, fail.set))

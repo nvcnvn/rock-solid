@@ -516,11 +516,13 @@ func metaRun(ops []metamorphic.Op, sets []metaSet, check bool, plant plants) (*m
 	return fail, stats, fromF
 }
 
-// reduceMeta reduces ops to the fewest that still differ from the model under s.
+// reduceMeta reduces ops, whose last op is the first to differ from the model under s, to the
+// fewest whose first difference is still that op.
 func reduceMeta(ops []metamorphic.Op, s metaSet, check bool, plant plants) []metamorphic.Op {
+	last := ops[len(ops)-1].String()
 	return metamorphic.Reduce(ops, func(c []metamorphic.Op) bool {
 		f, _, _ := metaRun(c, []metaSet{s}, check, plant)
-		return f != nil
+		return f != nil && f.at == len(c)-1 && c[f.at].String() == last
 	})
 }
 
@@ -621,23 +623,44 @@ func TestMetamorphicFindsPlantedBugs(t *testing.T) {
 	}
 }
 
+// metaPlants names the planted bugs a regression case can name with plant=, the one that found it.
+var metaPlants = map[string]plants{
+	"drop-removals":  {dropRemovals: true},
+	"load-unordered": {loadUnordered: true},
+	"merge-no-older": {mergeNoOlder: true},
+}
+
+// metaRegression reads a regression case: its option set, its ops and the plant that found it.
+func metaRegression(t *testing.T, d *datadriven.TestData) (metaSet, []metamorphic.Op, plants) {
+	if d.Cmd != "run" {
+		d.Fatalf(t, "unknown command %q", d.Cmd)
+	}
+	var name string
+	d.ScanArgs(t, "set", &name)
+	s, ok := metaSetNamed(name)
+	if !ok {
+		d.Fatalf(t, "unknown option set %q", name)
+	}
+	var plant plants
+	if d.HasArg("plant") {
+		var p string
+		d.ScanArgs(t, "plant", &p)
+		if plant, ok = metaPlants[p]; !ok {
+			d.Fatalf(t, "unknown plant %q", p)
+		}
+	}
+	ops, err := metamorphic.Parse(d.Input, checkMetaOp)
+	if err != nil {
+		d.Fatalf(t, "%v", err)
+	}
+	return s, ops, plant
+}
+
 // The reduced failures of the metamorphic test, each run under its option set, must read as the
-// model does; an unknown command, set or op fails the test at its line.
+// model does; an unknown command, set, plant or op fails the test at its line.
 func TestMetamorphicRegressions(t *testing.T) {
 	datadriven.RunTest(t, "testdata/regressions", func(t *testing.T, d *datadriven.TestData) string {
-		if d.Cmd != "run" {
-			d.Fatalf(t, "unknown command %q", d.Cmd)
-		}
-		var name string
-		d.ScanArgs(t, "set", &name)
-		s, ok := metaSetNamed(name)
-		if !ok {
-			d.Fatalf(t, "unknown option set %q", name)
-		}
-		ops, err := metamorphic.Parse(d.Input, checkMetaOp)
-		if err != nil {
-			d.Fatalf(t, "%v", err)
-		}
+		s, ops, _ := metaRegression(t, d)
 		if fail, _, _ := metaRun(ops, []metaSet{s}, true, plants{}); fail != nil {
 			t.Errorf("%s: op %d %q: got %q, the model %q", d.Pos, fail.at, ops[fail.at], fail.got[fail.at], fail.want[fail.at])
 		}
@@ -645,26 +668,18 @@ func TestMetamorphicRegressions(t *testing.T) {
 	})
 }
 
-// The regression cases found with a planted bug, in the metamorphic testing spike or by the seed
-// runner, fail with that bug on.
+// A regression case that names the planted bug that found it differs from the model with that
+// bug on.
 func TestMetamorphicRegressionsCatchTheirPlants(t *testing.T) {
-	s, _ := metaSetNamed("A")
-	for _, c := range []struct {
-		ops   string
-		plant plants
-	}{
-		{"put aa v26x\nflush\ndel aa\nflush\nfloor aca\n", plants{dropRemovals: true}},
-		{"put e v30xxx\nflush\ndel e\nflushfail 3\nflush\nrestart\nfloor e\n", plants{loadUnordered: true}},
-		{"put fdebde v704xxxxxx\nput fcd v710xxx\nput babcda v711xxxxxx\nput febba v712xxx\nput feeab v719xx\nput fdfca v721x\nput fdcbf v722\nput fabdc v724xx\nput befdc v726xxx\nflushfail 3\ndel fdcbf\nflush\nput d v744xxxxxxx\nput dbba v748x\nflush\nput acc v1126xxx\nflush\ncompact\nscan dcc 6\n", plants{mergeNoOlder: true}},
-	} {
-		ops, err := metamorphic.Parse(c.ops, checkMetaOp)
-		if err != nil {
-			t.Fatal(err)
+	datadriven.RunTest(t, "testdata/regressions", func(t *testing.T, d *datadriven.TestData) string {
+		s, ops, plant := metaRegression(t, d)
+		if plant != (plants{}) {
+			if fail, _, _ := metaRun(ops, []metaSet{s}, false, plant); fail == nil {
+				t.Errorf("%s: reads as the model with %+v", d.Pos, plant)
+			}
 		}
-		if fail, _, _ := metaRun(ops, []metaSet{s}, false, c.plant); fail == nil {
-			t.Fatalf("%+v reads as the model:\n%s", c.plant, c.ops)
-		}
-	}
+		return d.Expected
+	})
 }
 
 func TestMetamorphicParseRejects(t *testing.T) {
