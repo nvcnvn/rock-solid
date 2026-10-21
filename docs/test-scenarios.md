@@ -340,17 +340,20 @@ types](#event-and-action-types), and this section is their only home.
   record may take 2 blocks, so a 3-block write and a blob over 1 block (4,097 bytes) are refused as
   TooLarge at submit; 1-block writes pack two per record once no segment header is needed (LSN 2 =
   two items, LSN 3 = the third).
-- Full segment rolls, full disk fails: a 16-block disk has 3 usable 4-block segments; three 2-block
-  writes fill one segment each (LBAs 4, 8, 12). The next write, even 1 block, fails at once with
-  NoSpace naming its ticket, with no disk action, and its buffer is freed. NoSpace fails the stream's
-  whole queue, items behind its head included, so items are never written out of submit order.
+- Full segment rolls, full disk fails: a 16-block disk has 3 usable 4-block segments and no reserve;
+  three 2-block writes fill one segment each (LBAs 4, 8, 12). The next write, even 1 block, is held
+  with no disk action, and fails with NoSpace naming its ticket, its buffer freed, once the owner
+  reports that the cleaner has no victim (`FailStalled`), as the harness does whenever the log is
+  stalled. NoSpace fails the stream's whole queue, items behind its head that would fit included,
+  so items are never written out of submit order.
 - A full pool never stalls a round: with the pool holding only the log's buffers and eight 1-block
   writes, so that nothing is free, all eight become durable in submit order.
 - A write or punch with zero blocks, or running past block 1,024 of its chunk (a punch of 25 blocks
   at block 1,000), is refused (BadExtent) with no action and no event.
 - A refused item leaves its buffer with the caller: BadBuffer for a write buffer that is not exactly
   its blocks, a missing write buffer, a blob longer than its buffer, or a punch with a buffer;
-  ReservedKind for a manifest or manifest-piece blob, which only the log writes.
+  ReservedKind, on either stream, for a run piece, manifest or manifest-piece blob, which only a
+  checkpoint writes (`CheckpointPiece` and the log's own manifest).
 - A disk error fails the log: an Io error on round 1's write reports its ticket InDoubt and the
   queued items Failed, frees their buffers, and every later submit is refused with that error.
   With depth 2, an error on round 2's write while round 1's is in flight reports both rounds
@@ -397,13 +400,14 @@ types](#event-and-action-types), and this section is their only home.
   one carrying a run in segment 0 or past the durable LSN. A checkpoint carrying a durable run names
   it first, then the run whose root it writes, and a change to the caller's slice after the begin
   does not reach the manifest.
-- The next segment opened after a checkpoint (segment 3, filled by 40-block writes) carries the
+- The next segment opened after a checkpoint (segment 3, opened by a 60-block write) carries the
   manifest's position in its header.
 - Manifest in pieces: with 3-block rounds (4 KiB max blob), a checkpoint of 500 runs writes the
   manifest as several pieces, the last naming the others, and the next segment header points at
   the last piece.
-- A checkpoint on a full disk: its piece fails with NoSpace, which also emits CheckpointFailed(NoSpace).
-  End then says NoCheckpoint, and a new checkpoint can begin.
+- A checkpoint on a full disk with no reserve: its piece waits, and the no-victim report fails it
+  with NoSpace and emits CheckpointFailed(NoSpace). End then says NoCheckpoint, and a new
+  checkpoint can begin.
 - Manifest encoding: a manifest (base LSN 77, two indexes: owner 1 with one run of one piece and
   replay LSN 70, owner 2 with no runs and replay LSN 77) round-trips, at the size it reports. A
   trailing extra byte, or a truncation to 10 bytes, is Malformed, and another format version
@@ -1013,6 +1017,7 @@ merge that made it:
   | Two merges | | | two merges of disjoint adjacent runs at once | |
   | Fixed limit | | | a fixed run limit of 4, against the auto-tuned one | |
   | Point removals | | | | each range removal replaced by the point removals of the keys it covers (Pebble's `replace_single_delete`) |
+  | Linear merge | | | | scans, flushes and merges compare every layer at every step instead of keeping the heap |
 
 - The chunk index runs the same way with its own ops: writes, punches, freezes and cleaner moves, a
   chunk's writes in version order and freezes only after a cut; with range trims it reads as with
@@ -1124,6 +1129,11 @@ entries; counts are the bar, times on the shared VM):
 - [property] Scans forward from every probe, plain and bounded to a prefix, equal the map model
   over the range-removal property's seeds (0-59) under its seven configurations; the metamorphic
   tests run scans under every option set.
+- A seek and the 20 steps after it allocate nothing over 24 runs with range removals.
+- [property] The heap merge and the linear merge, kept for tests, return identical scans from the
+  start and up to 8 steps from every probe, and bounded from every other one, every 300 ops of the
+  range-removal property's seeds (0-59) under its seven configurations. The metamorphic tests
+  extend this to flushes, merges and reads during a flush with their Linear merge option set.
 - A scan over one source (memtable only) and over zero runs works, and a scan that exhausts
   every source reports the end once.
 
@@ -1297,43 +1307,47 @@ Performance: `Write` of a whole block, `Write` of one byte with its base in a pe
 ## Segment reserve
 
 The reserve, ⌈(2 × `max_replay_bytes` + merge workers × `compaction_step_bytes`) ÷ segment⌉ +
-victims per pass (4, as in the cleaner spikes), with both byte settings at 64 MiB:
+victims per pass (4, as in the cleaner spikes), at least 8, with both byte settings at 64 MiB
+(`ReserveSegments`):
 
 | Disk | Segment | Merge workers | Reserve |
 | --- | --- | --- | --- |
-| 256 GiB and up | 64 MiB | 1 | 3 + 4 = 7 by the formula; 8 by default |
+| 256 GiB and up | 64 MiB | 1 | 3 + 4 = 7 by the formula; 8, the floor |
 | 256 GiB and up | 64 MiB | 2 | 4 + 4 = 8 |
 | 255 GiB | 32 MiB | 1 | 6 + 4 = 10 |
 | 1 GiB | 256 KiB | 1 | 768 + 4 = 772 of 4,096 |
 
-- Open: whether 8 is a floor on every disk (it only matters for 64 MiB segments with one worker).
-- Open: a disk whose reserve is larger than its segments allow (a 64 MiB disk of 16 KiB segments
-  needs 12,292 of 4,096) must be refused at format or open, or scale its settings; the design says
-  neither. The small disks of the existing tests set the reserve and their byte settings directly.
-
-Changed existing scenarios:
-
-- "Group commit": "Full segment rolls, full disk fails: a 16-block disk has 3 usable 4-block
-  segments; three 2-block writes fill one segment each ... The next write ... fails at once with
-  NoSpace" becomes "full disk waits", the test setting a reserve of 1 segment directly: two 2-block
-  writes fill the 2 usable segments (LBAs 4 and 8); the next write is held (`Stalled`) with no disk
-  action and keeps its buffer; a checkpoint's piece still goes into the reserve segment (segment
-  header and the 2-block piece record, LBAs 12-14), and the checkpoint completes once a segment is
-  freed; then the held write becomes durable, and any later held items in submit order.
-- Open: how a segment is freed in that test before the cleaner exists (a test hook that reports a
-  segment empty, or a punch the index counts).
-- "Group commit": "A checkpoint on a full disk: its piece fails with NoSpace, which also emits
-  CheckpointFailed(NoSpace)" becomes: with only the reserve free, the checkpoint's pieces and
-  manifest go into the reserve and it completes. CheckpointFailed(NoSpace) remains only for a
-  reserve that is itself full. Open: whether that can happen once the reserve is sized as above,
-  or is a broken invariant (panic).
-- Harnesses that rely on NoSpace: the group commit property ("Every accepted ticket ends Durable,
-  Failed (NoSpace or Io) ... Coverage: NoSpace"), the random-crash property's coverage ("at least
-  one NoSpace") and the quarantine property ("Filling the disk until NoSpace"). With no cleaner yet,
-  each harness's owner reports "no victim" whenever only the reserve is free, so held items fail
-  with NoSpace and the coverage still occurs.
-- NoSpace: held ordinary items fail with NoSpace, in submit order and freeing their buffers, only
-  when the owner reports that the cleaner has no victim that passes its net-gain guard.
+- A reserve of every usable segment or more (3 on a 16-block disk) is BadConfig: Format refuses it
+  and leaves nothing allocated, and open of a formatted disk fails recovery with BadConfig before it
+  reads a segment header. The small disks of the tests set the reserve directly.
+- Full disk waits: a 16-block disk (3 usable 4-block segments) with a reserve of 1 and a cleaner
+  that has a victim. Two 2-block writes fill segments 1 and 2 (LBAs 4 and 8); a third is held:
+  `Stalled`, no disk action, its buffer kept. A checkpoint's 10-byte piece still
+  opens the reserve segment (segment header and the 2-block record, LBAs 12-14); its manifest finds
+  no segment free and waits. Once segments 1 and 2 are freed (a test hook standing in for the
+  cleaner), the held write goes into segment 1 and the manifest into segment 2, the checkpoint
+  completes, and nothing failed.
+- A checkpoint finishes in the reserve: a 32-block disk (7 usable segments) with a reserve of 2.
+  Five 2-block writes fill segments 1 to 5 and a sixth write is held; the checkpoint's piece and
+  manifest go into segments 6 and 7 and it completes, while the held write stays held. A punch on
+  the cold stream that would fit in the block the manifest left free in segment 7 is held too: an
+  ordinary item never appends to a segment opened from the reserve. When the owner reports no
+  victim (`FailStalled`), both fail with NoSpace, one Failed event per stream (hot, then cold),
+  and their buffers are freed.
+- After a restart with only the reserve free, the open segments count as taken from the reserve:
+  the log above, after a checkpoint whose manifest went into segment 6 of 7 and a reopen, holds a
+  cold punch that would fit in segment 6.
+- A stall ends when a segment frees: on that disk with a reserve of 2, a hot write stalls with
+  segments 6 and 7 free; a cold punch then takes the only round slot. Once segment 1 is freed the
+  write is no longer `Stalled`, a no-victim report fails nothing, and the write goes into segment 1.
+  `Stalled` is worked out when asked, never left over from the last round placed.
+- A checkpoint waits until no victim: on the full-disk-waits disk, a checkpoint's first 2-block
+  piece fills the reserve segment and its second finds no segment free; both it and the held write
+  wait, with no disk action. `FailStalled` then reports Failed(NoSpace) for the held write (hot),
+  CheckpointFailed(NoSpace) and Failed(NoSpace) for the waiting piece (cold); End then says
+  NoCheckpoint.
+- Settings: a `max_replay_bytes` past 2^62 is BadConfig, since the hold compares against twice
+  it, and `ReserveSegments` saturates rather than wraps.
 
 Who may use the reserve:
 
@@ -1341,14 +1355,16 @@ Who may use the reserve:
 | --- | --- |
 | Chunk write, punch, freeze, Raft entries | held in submit order |
 | Checkpoint run pieces and manifest | written into the reserve |
-| Merge step output | written into the reserve |
-| Cleaner copy records | written into the reserve |
+| Merge step output | written into the reserve (with Merge steps) |
+| Cleaner copy records | written into the reserve (with the Cleaner) |
 
-- Review: the simulator fills a disk to its reserve, and a checkpoint, a merge step and a cleaner
-  pass all finish; the bytes held beyond what the manifests name never exceed the reserve, checked
-  after every step (simulator invariant).
+- Review, for checkpoints: a disk filled to its reserve still finishes a checkpoint, and an
+  ordinary item never opens or appends to a reserve segment (each fails under a planted bug). The
+  merge step and the cleaner pass join the check with their items; the simulator invariant that the
+  bytes held beyond what the manifests name never exceed the reserve arrives with the invariant
+  checker.
 - Crash with the disk full except the reserve, during a checkpoint in the reserve: recovery
-  succeeds and the held items were never acknowledged.
+  succeeds and the held items were never acknowledged (with Crash at every action).
 
 ## Merge steps
 
@@ -1554,33 +1570,105 @@ a7b8321871e3): a later valid chunk whose synced offset passes the bad one proves
 
 ## Checkpoint backpressure
 
-With `max_replay_bytes` 8 blocks, counted in record blocks after the newest manifest, segment
-headers left out, as in "Checkpoint end to end":
+With `max_replay_bytes` 8 blocks, counted in record blocks of ordinary items after the newest
+manifest, written or in flight, segment headers and the checkpoint's own records left out:
 
-| Record blocks after the newest manifest | Ordinary items | Checkpoint and cleaner items |
+| Ordinary record blocks after the newest manifest | Ordinary items | Checkpoint items |
 | --- | --- | --- |
 | 8 | admitted; a checkpoint is due | admitted |
 | 15 | admitted | admitted |
-| 16 (twice `max_replay_bytes`) | held in submit order, buffers kept | admitted |
+| 17 (past twice `max_replay_bytes`) | held in submit order, buffers kept, not `Stalled` | admitted |
 | a manifest becomes durable | the held items go out in submit order | |
 
-- The table holds items once the records reach twice `max_replay_bytes`, as design.md says;
-  the checklist says "past twice", which should change to match.
-- The checkpoint's own pieces and manifest still count toward the total while items are held,
-  and never wait.
-- A checkpoint that fails while items are held keeps them held; the next checkpoint releases
-  them. Open: what bounds the wait when checkpoints keep failing.
-- Merge-step pieces, written by the checkpoint, count as checkpoint items.
-- Changed existing scenario ("Seeded runs and the simulation harness"): the chunk store stand-in,
-  which "on CheckpointFailed stops checkpointing", begins a new checkpoint whenever one is due
-  after a failure, so held items are released and the random-crash property keeps "every accepted
-  ticket ends ...".
-- Review: a simulator seed with a stalled checkpoint (its index owner withholding pieces for a
-  while) keeps the memtables at most twice `max_replay_bytes` per disk, checked after every step.
-  The Raft entries shards retain join the check with the Raft shard (phase 4).
-- Replay after a crash while items were held reads at most twice `max_replay_bytes` plus a segment
-  per lane and the records written while the checkpoint's runs streamed (the term for replicated
-  primaries' pending writes arrives with phase 3).
+- Three 3-block and a 2-block write leave 15 blocks; a 1-block write is admitted and leaves 17; a
+  hot and a cold write are then held with no disk action. The checkpoint's 100-byte piece goes out
+  at once and adds its 2 blocks to the bytes to replay (19), but not to the hold. Once the
+  manifest is durable the held hot write, then the held cold write, become durable.
+- A checkpoint's pieces and manifest wait in a queue of their own that leads the cold stream, so
+  they never wait behind held items. A round may carry them and ordinary cold items together: with
+  a hot write in flight, a cold 2-block write and a 100-byte piece queued behind it go out as one
+  record, the piece first; what it adds to the hold is under Held items.
+- A checkpoint larger than the bound releases the hold: with `max_replay_bytes` 4 blocks, two
+  3-block writes hold a third; a checkpoint of four 2-block pieces and its manifest (14 blocks)
+  completes and the held write goes out at once. Reopened, recovery replays from the start, since
+  no segment header names the new manifest yet: 24 blocks to replay, of which the hold counts the
+  10 of the three writes.
+- A checkpoint that fails while items are held keeps them held, and the next checkpoint releases
+  them. A failure for want of space, reported when the cleaner has no victim, fails the held items
+  with NoSpace too, which bounds the wait: on a 16-block disk with `max_replay_bytes` 4 blocks,
+  three 2-block writes fill it and hold a fourth; the checkpoint's piece finds no segment, and the
+  no-victim report fails the piece, the checkpoint and the held write. A write submitted next is
+  `Stalled` at once, until a new checkpoint begins.
+- Merge-step pieces, written by the checkpoint, count as checkpoint items (with Merge steps).
+- The chunk store stand-in of the recovery tests begins a new checkpoint after a failure once a
+  record has become durable since, so held items are released and the random-crash property keeps
+  "every accepted ticket ends ...".
+- [property] A stalled checkpoint keeps the memtables bounded: seeds 1-10 on a 1 GiB disk, rounds
+  of 3 to 16 blocks, commit depth 1-3, `max_replay_bytes` 8 to 40 blocks, 1,000 steps of 1- to
+  8-block writes to random streams with completions interleaved, the stand-in withholding its pieces for runs of
+  steps. After every event, the ordinary data durable after the newest manifest's base is at most
+  twice `max_replay_bytes` plus one round; afterwards every write is durable and none failed.
+  Coverage: a write held with nothing in flight. Without the hold it fails at seed 1. The Raft
+  entries shards retain join the check with the Raft shard (phase 4).
+- Replay after a crash while items were held reads at most twice `max_replay_bytes` plus a round,
+  the records the checkpoint wrote and a segment per lane (the term for replicated primaries'
+  pending writes arrives with phase 3).
+
+
+## Held items
+
+- A round that carries checkpoint pieces and ordinary items adds to the hold its header blocks and
+  every data block an ordinary entry's payload touches, so a block it shares with a piece counts
+  whole. With a hot write in flight, a 100-byte piece queued behind two 1-block cold writes goes
+  out with them as one record, the piece first, and adds 3 blocks (the writes' and the header),
+  nothing for the piece's block; a 100-byte piece queued behind a 100-byte cold blob adds 2
+  blocks (the header and the block they share).
+- [property] The hold a record adds, checked against marking each block one by one over 10,000
+  random records of writes, punches, freezes and blobs of every kind: none for a record of
+  checkpoint items alone, the whole record for one with none, else its header blocks and the
+  blocks ordinary payloads touch. Reopened after each mixed round above, with no manifest written,
+  recovery restores the hold the log had.
+- Close fails what still waits: on the full-disk-waits disk of Segment reserve, Close fails the
+  write held for room with Closed and returns its buffer and the log's own. With
+  `max_replay_bytes` 4 blocks, two 3-block writes hold a 1-block cold write behind a checkpoint;
+  Close is Busy while the checkpoint's piece is in flight, and once it is durable Close reports
+  Failed(Closed) for the held write and CheckpointFailed(Closed), leaves no buffer allocated, and a
+  submit after it is refused with Closed. A test's own close fails if anything was still waiting.
+- The checkpoint's pieces lead the cold stream, so while they fill a segment of the reserve an
+  ordinary cold item waits behind them, even with segments free outside the reserve: on a 1 GiB
+  disk (4,095 usable 64-block segments) at commit depth 2 with a reserve of 4,093, two 62-block
+  cold writes fill segments 1 and 2, a 100-byte piece opens segment 3 from the reserve, and
+  segments 1 and 2 are then freed. A second piece waits for the first, which opened segment 3, and
+  a 1-block cold write queued behind it waits too, with a round slot idle and not `Stalled`. Once
+  the first piece is durable, the second goes into segment 3 and the write opens segment 1 beside
+  it. The Metadata stream ends this wait.
+
+## Reserve from settings
+
+- At the default settings (`merge_workers` 1, `compaction_step_bytes` 64 MiB) the log sizes its
+  reserve by `ReserveSegments` from the superblock's segments: 772 on a 1 GiB disk of 256 KiB
+  segments. A reserve set directly (3) replaces it, and `NoReserve`, which the tests' settings ask
+  for by name, gives 0.
+- Open sizes the reserve again: on a 64-block disk (15 usable 4-block segments) with
+  `max_replay_bytes` 8 blocks and a 1-block step, the reserve is 9 at format and after a reopen.
+  Six 1-block writes fill segments 1 to 6 and a checkpoint's manifest opens segment 7 from the
+  reserve; after the reopen a cold punch that would fit in segment 7 is `Stalled`.
+- Before the reopen, a hot write with only the reserve's 9 segments free is `Stalled`, with no
+  disk action.
+- BadConfig at Format, leaving nothing allocated: the default reserve of a 64 MiB disk of 16 KiB
+  segments (12,292 of 4,096), `NoReserve` together with a reserve, no merge worker, and a zero
+  `compaction_step_bytes`. Open refuses the first once it has read the superblock, before a segment
+  header, and the other three, which no geometry changes, in `Recover` itself, with no action and
+  no buffer taken.
+- A reserve set directly or `NoReserve` needs no merge settings: with `merge_workers` and
+  `compaction_step_bytes` both 0, either one formats, writes and reopens.
+
+## Group commit API guards
+
+- Submit refuses a run piece as "Group commit" lists; the same piece through `CheckpointPiece` is
+  accepted and goes out with the checkpoint.
+- Close after Format, at each step until the superblock copy's flush completes, is Busy and leaves
+  every buffer of the log allocated; once it completes, Close succeeds and returns them.
 
 ## Metadata stream
 
@@ -1598,6 +1686,9 @@ headers left out, as in "Checkpoint end to end":
   (segment 2, LBA 128), the metadata item (segment 3, LBA 192, seq 3) and hot B plus a later hot
   item (LBA 67); LSNs are global. The order cold, metadata, hot is an assumption: design.md says
   only "taking the lanes that have work in turn".
+- "Held items": a cold write no longer waits behind the checkpoint's pieces; in the reserve
+  scenario it opens segment 1 while the second piece still waits for the first, since the pieces
+  are on the metadata stream.
 - "Group commit", "Checkpoint end to end": the pieces' record (LSN 4) and the manifest (LSN 5) go to
   a metadata segment, not cold segment 2.
 - "Group commit" property: its "items to random streams" include the metadata stream; and in
@@ -2298,7 +2389,9 @@ The seeded runs, each described in its section above:
 The chunk store stand-in of the recovery tests applies every Durable record to its model of the
 chunk index. It starts a checkpoint whenever one is due, snapshots the model, hands one run piece at
 a time, and the next only after the previous piece is durable, each piece naming the one before. It
-ends the checkpoint after the last piece, and on CheckpointFailed stops checkpointing. Write payloads
+ends the checkpoint after the last piece, and after a CheckpointFailed begins the next once a record
+has become durable since. With no cleaner, the harness reports no victim whenever the log is
+stalled. Write payloads
 are a pattern derived from (chunk, version, block), so any extent can be checked by reading it back.
 
 ## TLA+ and TLC
@@ -3037,7 +3130,8 @@ by 1.
 | PG 7's primary asks because a counter ran out | PG 7 only |
 | Node N restarts and asks | Exactly the PGs whose primary is on N |
 | Member C removed (table e + 1), then added back (e + 2) | +2 over the two tables, though the member list equals table e's |
-| Down mark and refill in one table | +1; in two tables, +2 |
+| Down mark and refill in one table (a lost log) | +1; in two tables, +2 |
+| A member down for `refill_after`, then refilled | +1 at the down mark, +1 at the refill, 10 minutes later |
 
 - A change to the session table or the format level makes no placement table and leaves the table
   epoch alone.
@@ -3047,6 +3141,23 @@ by 1.
 - Open: whether a balance move swaps the member in one table (+1) or adds and then removes it (+2).
   The PG epochs spike ran both (F2: 1,202 against 2,402 tables per staged flap); the "Balance moves
   one member" row assumes one.
+
+**Which members are missing.** `refill_after` 10 minutes, `degraded_refill_after` 1 minute; a `rep3` pool on 4 nodes unless stated.
+
+| State of member M | Refilled |
+| --- | --- |
+| Down for 9 minutes 59 s | No; its PGs write to their two live members |
+| Down for 10 minutes | Yes, in the next table |
+| Down 5 minutes, up, down again 5 minutes | No: the count restarts at each down mark |
+| Down, and its disk then reports a new log ID | At once |
+| Down, and an operator declares its disk lost | At once |
+| Down for 59 s in a `rep2` PG with `min_live` 2 | No; the PG takes no writes meanwhile |
+| Down for 1 minute in a `rep2` PG with `min_live` 2 | Yes, in the next table, since the PG accepts no writes while it waits |
+| Down 5 s (a network hiccup), then up, in a `rep2` PG with `min_live` 2 | No member moves; the PG resyncs the member and takes writes again |
+| Down for 1 minute in a `rep2` PG, and the only member live in an interval since the last activated one | No; peering waits for it whether or not a new member joins |
+| A refill member, still recovering, in a `rep2` PG whose other member is live | Counts toward `min_live` from the table that adds it: the PG takes writes once that interval activates, each acknowledged on both members, while recovery copies the older chunks on its missing list |
+| In `maintenance` for an hour | No; it counts toward `min_live` throughout |
+| Down on a 3-node `rep3` cluster for an hour | No eligible disk on another node; a disk failure on a node with a second disk refills there after 10 minutes |
 
 **Placement rules**
 
@@ -3466,11 +3577,22 @@ it on its missing list.
   one version" when a stale write from its previous run lands after peering.
 - Activation is reported on the next heartbeat. The authority records the last activated interval in
   a later table that starts no interval, and trims the past intervals' member lists.
+- A member back from an outage shorter than `refill_after` is marked up in a new interval and, after
+  peering, receives only the versions on its missing list: in a seed where it missed 100 writes to
+  a PG of 10,000 chunks, recovery copies those 100 chunks' blocks and no others.
+- Open: peering's duration. It compares every chunk's newest version from every member, so it grows
+  with the chunks a PG holds (open question "Peering's cost"). Measure it on 3 nodes with several TB
+  each before setting a bound.
+- Open: the phase 1 trace rules that check peering before a write or read require a reply from every
+  member sent a peering message, but peering needs only one member of each interval it stops, and
+  none of an interval it skips, so it goes ahead without unreachable ones. Revisit them when phase 3
+  builds peering.
 
 ## Failure and fail-slow detection
 
 A simulated single authority stands in for the control plane. `node_down_after` 5 s,
-`member_timeout` 1 s, `slow_disk_factor` 10×, `slow_disk_window` 1 minute.
+`member_timeout` 1 s, `slow_disk_factor` 10×, `slow_disk_window` 1 minute, `refill_after` 10
+minutes, `flap_count` 5, `flap_window` 10 minutes.
 
 **Node failure**
 
@@ -3489,10 +3611,12 @@ A simulated single authority stands in for the control plane. `node_down_after` 
 | A stalled disk whose I/O completes; then normal for 50 s, then a whole minute | Stays down and probed for 50 s; rejoins after the whole `slow_disk_window` |
 | Node A crashes at t = 0 with writes in flight | Writes to A's PGs wait until the down table (at most 5 s); writes to other PGs never wait |
 | The same, for the PGs A led | The new primary then peers once its grantors' grants to A expire on both clocks: with a grantor's `CLOCK_BOOTTIME` −22.6%, 5.2 s after the grant, so up to about 0.2 s after the down table |
-| A node flapping: down 5 s, up, every 10 s | Without refill, two intervals per flap for every PG with a member on the node (F1). With refill staged one member per table, 1,202 tables per flap and 3 intervals for the busiest PG (F2). Nothing damps it |
+| A node flapping: down 5 s, up, every 10 s | Marked down at its 1st to 5th flap, each starting two intervals of every PG with a member on it (F1); in a `rep3` pool never refilled, since no outage reaches `refill_after`, and in a `rep2` pool neither, since none reaches `degraded_refill_after`. At the 5th mark within 10 minutes it stays down |
+| The damped node then heartbeats normally for 9 minutes, then 10 | Stays down for 9 minutes; marked up after the whole `flap_window`. Its members, down for over `refill_after` meanwhile, have been refilled |
+| A disk marked down as stalled 5 times within 10 minutes | Stays down until its I/O ages have been normal for a whole `flap_window` |
+| `rep2` on two storage nodes; node B damped at its 5th mark, then heartbeating normally | Marked up at its first normal heartbeat, since its PGs would otherwise stay below `min_live` with no disk to refill onto |
+| Node A, the control-plane leader, crashes at t = 0 | A new control-plane leader starts the `node_down_after` count from its leader lease, so A is marked down at that start plus 5 s, not at t = 5 s |
 
-- Open: damping a flapping node, and delaying refill after a node goes down, are not decided (PG
-  epochs study, "Not decided").
 - Open: the link between a primary and member M is down while both reach the authority. The primary
   reports M, the probe answers healthy, and the PG's writes wait while the link stays down (open
   question "A link down between a primary and one member"). Today's expected result is that wait;
@@ -3640,7 +3764,7 @@ model](#epoch-change-model) property it checks:
 | P1 | 3 nodes, `rep3`. A is primary of PG 7. A partition cuts A and client X from B, C and the authority. The authority marks A down, interval 42, B primary. Client Y writes "dog"; X writes "cat" and reads | X's write never completes, and no read anywhere returns "cat". X's reads at A return the pre-partition value until A's lease ends (3.96 s on A's clocks), then are refused. Y's "dog" is acknowledged only after B's and C's grants to A expire on both of their clocks |
 | P2 | PG 7 at 41, activated. Two tables bring it to 42 and then 43 before 42's primary peers | 43's primary gets a member of 42 and one of 41 to adopt 43. No write tagged 41 or 42 completes after 43 activates |
 | P3 | Member C removed (42) and added back (43) within one recovery | C refuses tag 41; no write of 41 collects C's acknowledgment |
-| P4 | 10 nodes, one node flapping every 10 s for 10 minutes, refill staged one member per table | About 1,202 tables per flap; the busiest PG gains 3 intervals per flap (F2) |
+| P4 | 10 nodes, one node flapping every 10 s for 10 minutes, refill staged one member per table | Each PG with a member on the node gains two intervals per flap for the first 5 flaps (F1) and none after the 5th mark damps it; no member is refilled, since none has been down for `refill_after` |
 | P5 | Primary A of PG 7 crashes and restarts within 5 s, with a replicated write still in a member's socket | A takes interval 42 and peers (when, see the restart-wait Open under Peering and read leases). The stale write is refused or superseded; no two contents share one version |
 | P6 | The counter case under [Replica primary](#replica-primary), under 4 clients | As stated there; the refusal counter of other PGs stays 0 |
 | P7 | `pg_count` 1,024 → 2,048 with writes in flight to PG 567 | PGs 1,134 and 1,135 start one interval above 567; every chunk's versions keep growing |
@@ -3663,7 +3787,7 @@ model](#epoch-change-model) property it checks:
 | P21 | Capacity layouts C1 to C6 filled with uniformly hashed chunks | The first refusal comes within 1% of the reported available figure |
 | P22 | `rep3`, `min_live` 2, two members down with writes in flight | Writes are rejected until recovery restores a member; no write is acknowledged on one copy |
 | P23 | `rep3` on 3 nodes of 2 disks; a disk fails, and the node's other disk, the only eligible one, fills to its log reserve during the refill, so copying stops | 60 s later on `ctx.Now` the pool raises `Stuck`, naming the PGs; adding a disk lets them copy, and `Stuck` clears |
-| P24 | A node reboots, its disks down and not marked out | No capacity figure or pool condition changes: its disks keep their shares at their last reported fills |
+| P24 | A node reboots, its disks down for less than `refill_after` | No capacity figure or pool condition changes: its disks keep their shares at their last reported fills |
 
 - Open: P20's fault in Testing strategy happens "while grants are out". Grants arrive in phase 4,
   and the row gains them with the control-plane group.
@@ -3678,6 +3802,11 @@ model](#epoch-change-model) property it checks:
   - `read(off, n) → bytes, version`
   - `read(off, n, at_ver) → bytes`
 - Linearizable: each operation takes effect at one instant between its invoke and its complete.
+- Open: a write resent after its first attempt committed is applied again, so a history with
+  another write between the two attempts is not linearizable if the attempts count as one
+  operation. Until the open question on resent chunk writes is settled, the recorder logs each
+  attempt as its own operation, and a planted resend after a lost acknowledgment, with another
+  client's write between, is the case that shows which way it went.
 - An operation with an unknown result is checked as maybe applied, with no completion.
 - Open: which errors are definite (`NoSpace` before ordering, an `expect_ver` mismatch) and which
   leave the result unknown. Unknown results come from a timeout, a `PeerLost`, or an interval
@@ -3763,6 +3892,8 @@ Unit and trace tests for fortification on the per-node-pair leases. Lease time f
 | Same | `MsgVote` with the transfer context, from the target of a planned transfer | Passed to `RawNode`, which votes under Raft's rules |
 | Same | The leader's Raft heartbeats are lost for 2 s while the node-pair grant holds | Its election timer is stopped: no campaign |
 | Grant to L's node lapsed on the grantor's clocks, epoch bumped to e + 1 | `MsgPreVote`, then `MsgVote`, from C | Passed and answered under Raft's rules (the review criterion "votes once its grant lapses") |
+| Same, with no challenger | The lapse | Campaigns, pre-vote first, after a random 150 to 300 ms (`raft_lapse_campaign`), not at its election timeout |
+| Same, and the other follower's grant to L's node still holds on its own clocks | Its own pre-vote | Dropped by that follower; it campaigns again at its election timeout |
 | Supports no leader | `MsgVote` | Passed |
 | Node restarted 2 s ago on both clocks (within `primary_lease`, 4 s) | Any `MsgVote` or `MsgPreVote` | Refused: no vote and no peering for one `primary_lease` after start |
 | Node restarted 4.1 s ago on both clocks | `MsgVote` | Answered under Raft's rules |
@@ -3807,7 +3938,34 @@ The leader counts itself as a fortified voter. Open: "itself included" gives the
 2. **A leader's node suspended past its lease (5 s).** On resume it ends every lease (`Resumed`) before serving. A new leader may have been elected after the grants lapsed on the grantors' clocks. Expected: no overlap.
 3. **A leader transfer while lease reads arrive.** Expected: the old leader serves none after `MsgTimeoutNow` leaves, and the new leader none before it is fortified and has committed an entry of its term.
 4. **A configuration change while a lease is held.** Expected: the lease requires quorums in both halves throughout the joint configuration.
-5. **Lease clocks.** A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±1%, and grants delayed by asymmetric queueing of up to 50 ms. Expected: no overlap. A crash fails over within 5.2 s plus an election, the most a 22.6% slew can stretch a grantor's wait.
+5. **Lease clocks.** A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±1%, and grants delayed by asymmetric queueing of up to 50 ms. Expected: no overlap. A crash fails over within 5.2 s, the most a 22.6% slew can stretch a grantor's wait, plus `raft_lapse_campaign` and an election.
+
+## Voter replacement
+
+Trace tests on one group of three voters A, B and C, with the control-plane leader's shard map as
+input, and simulator seeds for the whole cluster. `refill_after` 10 minutes.
+
+| Events | Expected |
+| --- | --- |
+| C's node down for 9 minutes 59 s | No configuration change; the group commits on A and B |
+| C's node down for 10 minutes, a fourth metadata node D up | The shard map names D in place of C; the leader adds D as a learner. No proposal waits on D while it catches up |
+| D caught up | One `ConfChangeV2`: remove C, promote D. It commits on A and B through the joint configuration and leaves it on its own |
+| D's log compacted past the learner's position | D receives a snapshot from a point-in-time view, then the log |
+| C's disk reports a new log ID | C replaced at once, without waiting for `refill_after` |
+| C returns after the swap | It finds itself removed, deletes its replica's state, and campaigns in no election |
+| B crashes while D is still a learner | The group, on A alone, commits nothing until B or C returns; it never promotes D to make a quorum |
+| Only three metadata nodes, C down for an hour | Nothing replaced; the group runs on A and B |
+| The control-plane group loses a voter for 10 minutes | Its own leader replaces it the same way |
+
+[property] Across seeds, no learner is promoted before it has caught up with the leader's log, and a
+replacement never stalls proposals while two voters of the old configuration are up.
+
+- Open: what "caught up" means for promotion: the learner's match index equal to the leader's last
+  index, or within one round of it.
+- Open: whether a swap whose dead voter returns while the learner catches up goes on or is
+  dropped, with the learner removed.
+- Open: whether the control-plane leader moves the swap to another node when D fails as a learner,
+  and after how long.
 
 ## Raft storage in the disk log
 
@@ -3917,7 +4075,7 @@ Only the last component (a file name, an xattr name or an S3 key) has variable l
 
 - The run filters' inode prefix `T(fs) volume inode` has a fixed length, so every key under an inode has the same prefix and a shorter key has none, as `lsm.Config.Prefix` requires; a prefix taken up to a delimiter would not be (`fs/2/` starts `fs/23/a`).
 
-**Tags**, from the [key layout](design.md#metadata-layer-metastore), frozen by the golden file as disk format: first byte `0x01` ctl, `0x02` volume, `0x03` fs, `0x04` s3; under `ctl/` `0x01` pool, `0x02` placement table, `0x03` membership, `0x04` session, `0x05` format level; under `volume/{id}/` `0x01` attach, `0x02` snap; an inode's keys `0x01` a, `0x02` x, `0x03` t, `0x04` l, `0x05` d, `0x06` c, `0x07` P; a slot's keys `0x10` n, `0x11` u, `0x12` o, `0x13` p, `0x14` r, `0x15` f; a piece key is its value's tag with the high bit set (`0x82`, `0x83`), then a 1-byte piece number. The vectors below write some tags symbolically, as `T(fs)`, `T(a)` and so on, standing for these bytes.
+**Tags**, from the [key layout](design.md#metadata-layer-metastore), frozen by the golden file as disk format: first byte `0x01` ctl, `0x02` volume, `0x03` fs, `0x04` s3; under `ctl/` `0x01` pool, `0x02` placement table, `0x03` membership, `0x04` session, `0x05` format level, `0x06` shard map; under `volume/{id}/` `0x01` attach, `0x02` snap; an inode's keys `0x01` a, `0x02` x, `0x03` t, `0x04` l, `0x05` d, `0x06` c, `0x07` P; a slot's keys `0x10` n, `0x11` u, `0x12` o, `0x13` p, `0x14` r, `0x15` f; a piece key is its value's tag with the high bit set (`0x82`, `0x83`), then a 1-byte piece number. The vectors below write some tags symbolically, as `T(fs)`, `T(a)` and so on, standing for these bytes.
 
 **Golden vectors**, checked into `internal/meta/testdata/` and never edited once frozen:
 
@@ -3982,6 +4140,8 @@ Only the last component (a file name, an xattr name or an S3 key) has variable l
 | Input | Expected |
 | --- | --- |
 | A node misses heartbeats for `node_down_after` (5 s) | Marked down in one table, which starts a new interval of every PG with a member on it |
+| The node stays down for `refill_after` (10 minutes) | Its PG members refilled ([Placement computation](#placement-computation)) and its shard voters replaced ([Voter replacement](#voter-replacement)) |
+| A node marked down for the 5th time within `flap_window` (10 minutes) | Held down until it has been normal for a whole `flap_window` ([Failure and fail-slow detection](#failure-and-fail-slow-detection)) |
 | A primary reports a member after `member_timeout` (1 s), and the member fails a direct probe (its disk stalled, its log failed, or no answer within 1 s) | Marked down at once |
 | The same report, but the probe answers with no stall | Not marked down |
 | A heartbeat shows a disk stalled, with no report | Marked down at once |
@@ -4011,6 +4171,7 @@ Only the last component (a file name, an xattr name or an S3 key) has variable l
 | A storage node marked down sends a heartbeat reporting an older version | It is not marked up |
 | A follower of the control-plane group, or a new leader before its leader lease starts, receives a heartbeat | It answers no renewal |
 | A new leader's leader lease starts | Every live session gets a full `session_lease` from that start |
+| The control-plane leader crashes 1 s after its last renewal of client C, whose `CLOCK_BOOTTIME` runs 22.6% fast; a new leader answers 8 s after the crash | C's lease ends about 8.1 s after that renewal, 7.1 s after the crash, and C holds its writes from then until the new leader answers; no session is fenced. With a new leader at 5 s, C never holds |
 | The leader's loop falls behind by more than a heartbeat interval | Every session's timer restarts from now |
 | An owner reports a recall unanswered for `recall_timeout` | The session is fenced in the next version |
 | An operator evicts a session | The same |

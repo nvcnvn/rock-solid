@@ -87,7 +87,7 @@ func randomRecord(t testing.TB, r *core.Rand, rec Record, maxDataBlocks uint32) 
 			e = FreezeEntry(pool, chunk, version, r.Uint64())
 		case 3:
 			length := int(r.Below(8 << 10))
-			e = BlobEntry(BlobKind(r.Below(5)), r.Uint32(), uint64(length))
+			e = BlobEntry(BlobKind(r.Below(6)), r.Uint32(), uint64(length))
 			payload = randomBytes(r, length)
 		}
 		lay, err := LayoutOf(append(slices.Clone(entries), e))

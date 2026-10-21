@@ -198,19 +198,22 @@ func (st *state) sources(srcs []source) []source {
 	return srcs
 }
 
-// iterState merges sources in key order with a min-heap of the positioned ones, as Pebble's
-// mergingIter does; among equal keys the newest source's entry wins, and a fragment hides the
-// older sources' entries in it. probes counts the searches of a layer's entries, filterProbes the
-// probes of run filters, steps a floor's rounds. With keepDel, as a flush or merge reads, it
-// leaves hidden entries for the caller to drop one by one, so that dropped, with the older entries
-// each key shadows, and fragsDropped account for every entry and fragment of the sources. A prefix
-// lookup leaves out the sources marked out, the runs whose filter rules its prefix out.
+// iterState merges sources in key order with a min-heap of the sources at a key, ordered by key
+// and then age, as Pebble's mergingIter does; among equal keys the newest source's entry wins, and
+// a fragment hides the older sources' entries in it. probes counts the searches of a layer's
+// entries, filterProbes the probes of run filters, steps a floor's rounds. With keepDel, as a flush
+// or merge reads, it leaves hidden entries for the caller to drop one by one, so that dropped, with
+// the older entries each key shadows, and fragsDropped account for every entry and fragment of the
+// sources. A prefix lookup leaves out the sources marked out, the runs whose filter rules its prefix
+// out. With linear, a reference for tests, it compares every source at every step instead of
+// keeping the heap.
 type iterState struct {
 	srcs         []source
 	filter       FilterKeys
 	prefix       func([]byte) int
 	heap         []int
 	cur          int
+	linear       bool
 	keepDel      bool
 	ranges       bool
 	bounded      bool
@@ -256,68 +259,20 @@ func (it *iterState) seek(k []byte) {
 		it.probes++
 		s.seekGE(k)
 	}
-	it.initHeap()
+	it.order()
 	it.settle()
 }
 
-func (it *iterState) next() {
-	if n := it.skip(); it.keepDel {
-		it.dropped += n - 1
-	}
-	it.settle()
-}
-
-// skip moves every source at the current key past it and returns how many it moved.
-func (it *iterState) skip() int {
-	it.prev = append(it.prev[:0], it.key()...)
-	n := 0
-	for len(it.heap) > 0 {
-		s := &it.srcs[it.heap[0]]
-		if !bytes.Equal(s.key(), it.prev) {
-			break
-		}
-		s.next()
-		n++
-		if !s.ok {
-			last := len(it.heap) - 1
-			it.heap[0] = it.heap[last]
-			it.heap = it.heap[:last]
-		}
-		it.down(0)
-	}
-	return n
-}
-
-func (it *iterState) settle() {
-	for {
-		if len(it.heap) == 0 {
-			it.cur = -1
-			return
-		}
-		it.cur = it.heap[0]
-		if it.bounded && bytes.Compare(it.key(), it.upper) >= 0 || it.inPrefix && !bytes.HasPrefix(it.key(), it.pfx) {
-			it.cur = -1
-			return
-		}
-		if it.ranges && !it.keepDel && it.hideRange() {
-			it.initHeap()
-			continue
-		}
-		if it.keepDel || it.value()[0] != kindDel {
-			return
-		}
-		it.skip()
-	}
-}
-
-// before orders the heap by key, then newest source first.
-func (it *iterState) before(a, b int) bool {
+func (it *iterState) less(a, b int) bool {
 	c := bytes.Compare(it.srcs[a].key(), it.srcs[b].key())
 	return c < 0 || c == 0 && a < b
 }
 
-// initHeap builds the heap from the positioned sources.
-func (it *iterState) initHeap() {
+// order rebuilds the heap from the sources positioned at a key.
+func (it *iterState) order() {
+	if it.linear {
+		return
+	}
 	it.heap = it.heap[:0]
 	for i := range it.srcs {
 		if it.srcs[i].ok {
@@ -336,14 +291,91 @@ func (it *iterState) down(i int) {
 		if c >= len(h) {
 			return
 		}
-		if c+1 < len(h) && it.before(h[c+1], h[c]) {
-			c++
+		if r := c + 1; r < len(h) && it.less(h[r], h[c]) {
+			c = r
 		}
-		if !it.before(h[c], h[i]) {
+		if !it.less(h[c], h[i]) {
 			return
 		}
 		h[i], h[c] = h[c], h[i]
 		i = c
+	}
+}
+
+// nextTop moves the source at the top of the heap to its next key.
+func (it *iterState) nextTop() {
+	s := &it.srcs[it.heap[0]]
+	s.next()
+	if !s.ok {
+		last := len(it.heap) - 1
+		it.heap[0] = it.heap[last]
+		it.heap = it.heap[:last]
+	}
+	if len(it.heap) > 0 {
+		it.down(0)
+	}
+}
+
+// top sets cur to the source at the smallest key, the newest among equal keys, or -1.
+func (it *iterState) top() {
+	it.cur = -1
+	if !it.linear {
+		if len(it.heap) > 0 {
+			it.cur = it.heap[0]
+		}
+		return
+	}
+	for i := range it.srcs {
+		if s := &it.srcs[i]; s.ok && (it.cur < 0 || bytes.Compare(s.key(), it.srcs[it.cur].key()) < 0) {
+			it.cur = i
+		}
+	}
+}
+
+func (it *iterState) next() {
+	if n := it.skip(); it.keepDel {
+		it.dropped += n - 1
+	}
+	it.settle()
+}
+
+// skip moves every source at the current key past it and returns how many it moved.
+func (it *iterState) skip() int {
+	it.prev = append(it.prev[:0], it.key()...)
+	n := 0
+	if !it.linear {
+		for len(it.heap) > 0 && (n == 0 || bytes.Equal(it.srcs[it.heap[0]].key(), it.prev)) {
+			it.nextTop()
+			n++
+		}
+		return n
+	}
+	for i := range it.srcs {
+		if s := &it.srcs[i]; s.ok && bytes.Equal(s.key(), it.prev) {
+			s.next()
+			n++
+		}
+	}
+	return n
+}
+
+func (it *iterState) settle() {
+	for {
+		it.top()
+		if it.cur < 0 {
+			return
+		}
+		if it.bounded && bytes.Compare(it.key(), it.upper) >= 0 || it.inPrefix && !bytes.HasPrefix(it.key(), it.pfx) {
+			it.cur = -1
+			return
+		}
+		if it.ranges && !it.keepDel && it.hideRange() {
+			continue
+		}
+		if it.keepDel || it.value()[0] != kindDel {
+			return
+		}
+		it.skip()
 	}
 }
 
@@ -375,6 +407,7 @@ func (it *iterState) hideRange() bool {
 				}
 			}
 		}
+		it.order()
 		return true
 	}
 	return false

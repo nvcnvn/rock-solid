@@ -60,6 +60,7 @@ func testLogConfig() disklog.Config {
 	cfg.MaxRecordBytes = 16 * core.BlockSize
 	cfg.MaxReplayBytes = 96 * core.BlockSize
 	cfg.Check = true
+	cfg.NoReserve = true
 	return cfg
 }
 

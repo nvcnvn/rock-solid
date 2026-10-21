@@ -86,7 +86,7 @@ func TestRecoverReformattedDisk(t *testing.T) {
 	h := formatted(t, gib, testConfig(0))
 	h.logID = 3
 	h.twoBlockWrites(6)
-	h.put(disklog.Cold, h.blob(disklog.BlobRun, 9, 100, 1))
+	h.put(disklog.Cold, h.blob(disklog.BlobRaftEntries, 9, 100, 1))
 	h.reformat(4)
 	n := newNode(h, 0)
 	h.put(disklog.Hot, h.chunkWrite(0, 0, 1, 1))
@@ -266,7 +266,7 @@ func TestRecoverTornRecordLeftInTheOtherStream(t *testing.T) {
 	h := formatted(t, gib, testConfig(0))
 	n := newNode(h, 0)
 	h.twoBlockWrites(2)
-	h.submit(disklog.Cold, h.blob(disklog.BlobRun, 9, 3*core.BlockSize, 1))
+	h.submit(disklog.Cold, h.blob(disklog.BlobRaftEntries, 9, 3*core.BlockSize, 1))
 	h.wantTrace("write 128+5 io108", "fsync io109")
 	h.step(0)
 	h.crashLanding(128, 129)
@@ -313,7 +313,7 @@ func TestRecoverManySegmentsBothStreams(t *testing.T) {
 	for i := range 200 {
 		h.put(disklog.Hot, h.chunkWrite(uint32(r.Below(32)), uint16(r.Below(1000)), uint16(r.Range(1, 2)), uint64(i+1)))
 		if i%5 == 4 {
-			h.put(disklog.Cold, h.blob(disklog.BlobRun, 9, int(r.Range(1, h.log.MaxBlobBytes())), uint64(i)))
+			h.put(disklog.Cold, h.blob(disklog.BlobRaftEntries, 9, int(r.Range(1, h.log.MaxBlobBytes())), uint64(i)))
 		}
 	}
 	durable := h.log.DurableLSN()

@@ -10,3 +10,4 @@ target/
 # Python bytecode from spike scripts
 __pycache__/
 **/vendor/protoc/**
+docs/refs/

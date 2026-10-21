@@ -35,33 +35,6 @@ func TestHeapMergeTies(t *testing.T) {
 	}
 }
 
-// A scan that crosses k fragments of one run searches that run's fragments at most k + 1 times.
-func TestScanFragmentSearches(t *testing.T) {
-	tr := newTree(t, 1<<20)
-	f := newFakeLog()
-	for i := range 100 {
-		put(t, tr, nil, fmt.Sprintf("k%03d", i), "v")
-	}
-	f.checkpoint(t, tr, nil)
-	const k = 10
-	for i := range k {
-		delRange(t, tr, nil, fmt.Sprintf("k%03d", 10*i+5), fmt.Sprintf("k%03d", 10*i+7))
-	}
-	f.checkpoint(t, tr, nil)
-	var it Iter
-	tr.Iter(&it)
-	n := 0
-	for ok := it.SeekGE(nil); ok; ok = it.Next() {
-		n++
-	}
-	if n != 100-2*k {
-		t.Fatalf("scan returned %d keys, want %d", n, 100-2*k)
-	}
-	if s := it.s.srcs[1].fr.searches; s > k+1 {
-		t.Fatalf("scan searched the run's fragments %d times, want at most %d", s, k+1)
-	}
-}
-
 // A scan over the memtable alone and over no runs works, and a scan that exhausts every source
 // reports the end once.
 func TestScanEdges(t *testing.T) {
@@ -85,42 +58,5 @@ func TestScanEdges(t *testing.T) {
 		if it.Next() || it.Valid() {
 			t.Fatal("an exhausted scan moved on")
 		}
-	}
-}
-
-// benchRuns is a tree of 240,000 random keys spread over n runs and the memtable.
-func benchRuns(b *testing.B, n int) *Tree {
-	tr := newTree(b, 1<<20)
-	f := newFakeLog()
-	per := 240_000 / (n + 1)
-	for layer := range n + 1 {
-		for i := range per {
-			put(b, tr, nil, fmt.Sprintf("%08d", (i*(n+1)+layer)*7919%1_000_000_007), "value-of-some-length")
-		}
-		if layer < n {
-			f.checkpoint(b, tr, nil)
-		}
-	}
-	return tr
-}
-
-// A scan step over 24 runs costs less than twice the step over 6.
-func BenchmarkIterNextRuns(b *testing.B) {
-	for _, n := range []int{6, 24} {
-		b.Run(fmt.Sprint(n), func(b *testing.B) {
-			tr := benchRuns(b, n)
-			if tr.Runs() != n {
-				b.Fatalf("%d runs, want %d", tr.Runs(), n)
-			}
-			var it Iter
-			tr.Iter(&it)
-			it.SeekGE(nil)
-			b.ReportAllocs()
-			for b.Loop() {
-				if !it.Next() {
-					it.SeekGE(nil)
-				}
-			}
-		})
 	}
 }

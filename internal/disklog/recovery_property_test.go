@@ -219,7 +219,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 				t.Fatalf("seed %d cycle %d: reopened at LSN %d after undoing the gap, want %d", seed, cycle, again.durable, d)
 			}
 		}
-		n.live, n.running, n.stopped = res.index, false, false
+		n.live, n.running, n.failed = res.index, false, false
 	}
 	return h
 }

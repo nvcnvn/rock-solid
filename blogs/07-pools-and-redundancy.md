@@ -581,7 +581,7 @@ connect to pools.
 
 ```mermaid
 flowchart TD
-    A["Member marked down<br/>new placement table<br/>new interval of its PGs<br/>missing members refilled onto<br/>the disk furthest below its target"] --> E["The new primary of each affected PG peers<br/>before it accepts writes"]
+    A["Member marked down<br/>new placement table<br/>new interval of its PGs<br/>refilled onto the disk furthest below<br/>its target after refill_after, at once<br/>if its log is gone, or after 1 min<br/>if its PG is below min_live"] --> E["The new primary of each affected PG peers<br/>before it accepts writes"]
     E --> F{"Live members<br/>at least min_live?"}
     F -- yes --> G["Writes continue on the live members<br/>encodings are deferred"]
     F -- no --> H["Writes rejected until recovery<br/>restores enough members"]
@@ -593,9 +593,14 @@ flowchart TD
 *Read the diamond: whether writes pause depends only on `min_live`, while recovery runs either way.*
 
 Until the new table, writes to the affected PGs wait, so a crash pauses those writes for up to
-`node_down_after` (default 5 s). The design does not yet say how long a down member waits before it
-is replaced, nor whether an empty replacement takes writes before it is filled. A node in
-`maintenance` keeps its place and resyncs when it returns.
+`node_down_after` (default 5 s). A down member keeps its place for `refill_after` (default 10
+minutes) and is replaced only after that, at once if its disk's log is gone, and after
+`degraded_refill_after` (1 minute) if its PG has fallen below `min_live`
+([Failure detection](../docs/design.md#epoch-changes-and-failure-detection)). So a reboot resyncs
+only what it missed, except in a PG left below `min_live` for over a minute, as a `rep2` PG is by
+any reboot outside `maintenance`. A node in `maintenance` keeps its place however long it is
+marked, and resyncs when it returns. An empty replacement counts toward `min_live` from the moment
+it joins and takes every write from then on, while recovery fills in the older data.
 
 **Per PG, worst first.** A disk holds around 100 PG members, so the loss of one disk becomes about
 100 separate PG repairs, not one giant copy, and table changes can be staged and throttled. The

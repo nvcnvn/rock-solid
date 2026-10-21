@@ -736,7 +736,10 @@ Here is a primary crash, end to end:
              naming B its primary
  t > 5 s     B peers (C adopts 42, B collects the newest versions) before it accepts
              writes, and recovers divergent chunks. Reads resume once B holds read
-             leases from C and the new members.
+             leases from C. A's member stays in the PG, marked down.
+ t = 10 min  A still down for refill_after: its members are refilled onto other disks,
+             each PG in a new interval, and recovery copies their data there. Had A come
+             back sooner, it would have been marked up and caught up on what it missed.
 ```
 
 *`primary_lease` (4 s) is shorter than `node_down_after` (5 s), so by the time A is marked down
@@ -747,6 +750,31 @@ While writes are flowing, a replica that crashes is usually caught sooner. Its p
 within `member_timeout` that a write is not being acknowledged and reports it; the control
 plane's direct probe fails, so the member is marked down without waiting for 5 s of missing
 heartbeats.
+
+**Down is not gone.** A member marked down stays in its PGs for `refill_after` (default 10
+minutes) before anything is copied elsewhere, so a reboot or a network hiccup costs only the
+writes it missed. RADOS makes the same split between a device that is *down* and one that is
+*out* of the mapping, and Ceph waits 10 minutes before marking it out. A disk whose log is gone
+skips the wait, since there is nothing to wait for. A PG left below `min_live` accepts no writes,
+so its down members wait only `degraded_refill_after` (1 minute): long enough that a 5 s hiccup or
+a 1 s disk stall moves nothing, short enough that writes stop for about a minute, not ten. In a
+`rep2` pool that is any PG with a member down, so a reboot there copies the node's PGs away and
+back unless the operator put the node in `maintenance` first. The new member counts toward
+`min_live` while it is still being filled: every write from then on lands on both members, so the
+PG takes writes again as soon as it joins. No member that peering must wait for anyway, the only
+holder of some interval's writes, is ever replaced, since its replacement would only wait too.
+
+A node or disk marked down `flap_count` times (5) within `flap_window` (10 minutes) is held down
+until it has been normal for a whole `flap_window`, so a flapping node cannot keep restarting its
+PGs' intervals. The one exception is a PG that would stay below `min_live` with no disk to refill
+onto, such as `rep2` on two storage nodes: there the damped member comes back at its first normal
+heartbeat, since holding it would stop the PG's writes for the whole window. Ceph stops an OSD at the same count; rock-solid keeps the process running, so a
+damped node still serves its clients and rejoins by itself.
+
+One crash is slower than the rest: the control-plane leader's own. Nobody counts
+`node_down_after` while the control plane elects a new leader, and the new leader starts the
+count from its own lease, so that node's PGs wait for the control-plane failover, about 4 s
+([post 08](08-the-metastore.md)), plus 5 s.
 
 ### 5. Fail-slow disks
 
@@ -1082,10 +1110,13 @@ during peering and a node restarted within a lease it granted.
 - **Peering can wait on a past interval.** If no member of an interval since the last activated
   one can be reached, and that interval had at least `min_live` live members, the PG waits for
   one or for an operator, as Ceph's does in its `down` state.
-- **A flapping node churns its PGs.** Nothing damps a node whose heartbeats stop for 5 s at a
-  time: each flap gives its PGs two new intervals, and with refills moved one member per table,
-  1,202 tables. Interval numbers outlast that for centuries; the data moved back and forth does
-  not come for free.
+- **A down member leaves its PGs degraded for 10 minutes.** Until `refill_after`, a `rep3` PG
+  with a member down keeps two copies of new writes, not three. The wait is what spares a
+  reboot from copying a node's whole data away and back; an operator who prefers earlier
+  re-protection lowers it.
+- **A flapping node still pauses its PGs five times.** Each of its first 5 flaps in 10 minutes
+  gives its PGs two new intervals, and every one pauses their writes; then damping holds it
+  down.
 - **A partitioned primary stops serving reads within 4 s**, even if its disk is fine.
 - **Correctness depends on oscillators, not on the time daemon.** Counting each lease on two
   clocks means a daemon's slew, up to 22.6%, only shortens a holder's lease or lengthens a
@@ -1134,6 +1165,11 @@ during peering and a node restarted within a lease it granted.
   activated interval unless a member live in it neither holds nor lists it, and keep everything
   below a kept version" complete when recovery is cut short by the next interval, or when a
   member the activated interval never reached comes back? The phase 2 model checks it.
+- **Open question: what peering costs.** A new primary compares the newest version of every chunk
+  its members hold, so on 3 nodes a reboot compares every chunk in the cluster while each PG's
+  writes wait. If that takes too long on several TB per node, each member keeps a short per-PG log
+  of recently written chunks, as RADOS does, and a member back from a short outage is compared on
+  those alone.
 - **Open question: admission across a placement group.** A disk whose cleaner falls behind
   slows its own writes, and so its acknowledgments. Should members report admission rates to the
   primary, as CockroachDB's followers return tokens, so one cleaning disk does not stall a whole

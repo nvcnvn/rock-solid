@@ -64,3 +64,9 @@ func NextSeqOf(l *Log) uint64 { return l.durableSeq }
 // TakeNextSeqAtBegin plants the bug of recording the log's next sequence number when a
 // checkpoint begins as its NextSeq, which counts segments rounds in flight have opened.
 func TakeNextSeqAtBegin(l *Log) { l.seqAtBegin = true }
+
+// StartRounds starts the rounds a freed segment makes room for, as the cleaner will once it frees one.
+func StartRounds(l *Log, ctx *core.Context, out *Output) { l.startRounds(ctx, out) }
+
+// HeldBytes is the bytes of records after the newest manifest that count toward the hold behind a checkpoint.
+func HeldBytes(l *Log) uint64 { return l.heldBytes }

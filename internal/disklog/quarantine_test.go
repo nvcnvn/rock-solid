@@ -86,7 +86,12 @@ func TestQuarantinedSegmentsAreNeverReused(t *testing.T) {
 		noSpace := false
 		for i := 0; !noSpace; i++ {
 			h.submit(disklog.Hot, h.chunkWrite(uint32(r.Below(16)), 0, 2, uint64(1000+i)))
-			h.run()
+			for {
+				h.run()
+				if !n.step() {
+					break
+				}
+			}
 			for _, ev := range h.eventsOf(disklog.Failed) {
 				noSpace = noSpace || errors.Is(ev.Err, disklog.ErrNoSpace)
 			}

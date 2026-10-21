@@ -125,7 +125,7 @@ Costs: a delta codec with a fuzz test, a node that holds `e − 1` applies the d
 | Flapping every 10 s, staged refill, two tables per move | 15.8 million | **1.1 years** | 17 years | **272 years** |
 | Damped, staged refill | 0.8 to 1.3 million | 13 to 21 years | 204 to 340 years | 3,266 years or more |
 
-The design has neither a refill delay nor flap damping (only fail-slow disks are damped), so the undamped rows are reachable today by a node whose network drops heartbeats for 5 seconds at a time.
+The design delays refill by `refill_after` (10 minutes) and damps a node or disk marked down 5 times in 10 minutes ([Failure detection](../../docs/design.md#epoch-changes-and-failure-detection)), so a node whose network drops heartbeats for 5 seconds at a time flaps at the "no refill" rows' rate only for its first 5 marks in a window, and the damped rows bound it after that.
 
 **Counter field.** The rate that matters depends on what the counter counts:
 
@@ -234,13 +234,13 @@ The proposal is adopted; the design documents hold the current text, and this li
 - **`docs/build-checklist.md`**: single-node ChunkStore (the layout), epoch change model, wire messages, placement computation, replica primary, peering and read leases, placement faults and invariants, control-plane group.
 - **Blog posts** [02](../../blogs/02-chunks-and-placement.md) (the table, its intervals and deltas, the version layout and why a plain counter fails), [03](../../blogs/03-epochs-leases-and-failures.md) (table epochs and intervals, the per-PG check, peering across intervals, missing lists, restarts, the lease and fencing races), [07](../../blogs/07-pools-and-redundancy.md), [08](../../blogs/08-the-metastore.md), [09](../../blogs/09-rwx-filesystem-and-cache-coherence.md), [10](../../blogs/10-block-snapshots-and-clones.md) (snapshot epochs named) and [12](../../blogs/12-testing-for-trust.md).
 - `docs/test-scenarios.md` is unchanged: no section covers versions yet. When the version helper lands, the section of its checklist item starts from: `(1, 1)` packs to `0x0000000100000001` and orders below `(2, 1)` whatever the counters; interval 0 and counter 0 are refused except as version 0.
-- **Not decided:** damping a flapping node (Ceph stops an OSD after 5 markdowns in 10 minutes) and delaying refill after a node goes down (Ceph waits 10 minutes). The design states the cost of their absence in "Failure detection"; with 32-bit intervals neither is needed for the bit budget.
+- **Damping and the refill delay:** the design takes both from Ceph (5 markdowns in 10 minutes, a 10-minute wait before refill) in "Failure detection", for the pauses each flap costs its PGs; with 32-bit intervals neither is needed for the bit budget.
 
 ## Unverified
 
 - **The keep rule across intervals and the missing list are prose.** Section 3's rule is a candidate built on Ceph's missing sets; the phase 2 model has to check it, including recovery cut short by the next interval and a member that `L`'s peering never reached.
 - **Write rates** per chunk and per disk are estimates from the design's measurements (one loop's throughput flat up to 100,000 writes/s, about 30 µs of CPU per write) and from network limits, not measurements of one chunk.
-- **The model's event rates are assumptions** (24 reboots per node a year, 2 long outages, 2 disk failures); erasure-coded pools, real recovery times and refill delays are not modeled, and the design does not say whether refill waits.
+- **The model's event rates are assumptions** (24 reboots per node a year, 2 long outages, 2 disk failures); erasure-coded pools, real recovery times and the design's refill delay are not modeled.
 - **Vitastor's stale-request check** was not read; only its version and epoch code.
 - **Ceph was read at a branch head**, `b7e6787`, as in the other studies; Vitastor at `df593ba`. `OSD::require_same_or_newer_map`, which the Ceph design notes cite, no longer exists at that commit; its role is the `min_epoch` wait cited above.
 - **No public figure** was found for how fast real Ceph clusters' OSD map epochs grow.

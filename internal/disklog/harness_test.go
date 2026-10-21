@@ -70,6 +70,9 @@ type harness struct {
 	roundOf map[core.IOID]uint64
 	// ignoreErrors hands the log every completion as a success, as a log without its error path would see it.
 	ignoreErrors bool
+	// victim stands for a cleaner with a victim, so stalled items wait; otherwise the harness
+	// reports no victim and they fail with NoSpace.
+	victim bool
 }
 
 func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {
@@ -156,6 +159,7 @@ func blankHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Con
 
 func testConfig(maxRecordBlocks uint64) disklog.Config {
 	cfg := disklog.DefaultConfig()
+	cfg.NoReserve = true
 	if maxRecordBlocks > 0 {
 		cfg.MaxRecordBytes = maxRecordBlocks * core.BlockSize
 	}
@@ -172,6 +176,9 @@ func formatted(t testing.TB, diskBytes uint64, cfg disklog.Config) *harness {
 }
 
 func (h *harness) absorb() {
+	if !h.victim && h.rec == nil && h.log != nil && h.log.Stalled() {
+		h.log.FailStalled(&h.ctx, &h.out)
+	}
 	if h.sched != nil {
 		h.noteRounds()
 	}
@@ -467,12 +474,16 @@ func (h *harness) wantLive(n int) {
 	}
 }
 
-// close closes the log and checks every buffer is back in the pool.
+// close closes the log, which finds no item waiting, and checks every buffer is back in the pool.
 func (h *harness) close() {
 	h.t.Helper()
-	if err := h.log.Close(&h.ctx); err != nil {
+	if err := h.log.Close(&h.ctx, &h.out); err != nil {
 		h.t.Fatalf("close: %v", err)
 	}
+	if i := slices.IndexFunc(h.out.Events, func(ev disklog.Event) bool { return ev.Kind == disklog.Failed }); i >= 0 {
+		h.t.Fatalf("close failed items still waiting: %+v", h.out.Events[i])
+	}
+	h.out.Reset()
 	if h.pool.Live() != 0 {
 		h.t.Fatalf("%d pool buffers live after close", h.pool.Live())
 	}
