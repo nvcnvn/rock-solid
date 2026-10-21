@@ -9,6 +9,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -244,6 +245,36 @@ func TestRunCheckRebuilds(t *testing.T) {
 		write(i)
 	}
 	o.check(t, h, 0, 20, 5)
+}
+
+// A merge that fails its run check takes the same path: the store rebuilds its index from the
+// log, and the rebuilt index equals the byte-range oracle's.
+func TestMergeCheckRebuilds(t *testing.T) {
+	cfg := testConfig()
+	cfg.Log.MaxReplayBytes = 16 * core.BlockSize
+	h := newHarness(t, cfg)
+	o := newByteOracle()
+	var c *lsm.Compaction
+	for i := 0; c == nil; i++ {
+		if i > 500 {
+			t.Fatal("no merge became due")
+		}
+		off := uint32(i%16) * core.BlockSize
+		o.apply(t, chunkC, off, 7, fill(7, byte(i)), h.sync(h.write(chunkC, off, fill(7, byte(i)), 0)), 0)
+		c = h.s.MergeDue()
+	}
+	c.Run()
+	gen := h.s.logGen
+	h.s.plant.failMerge = true
+	if err := h.s.InstallMerge(&h.ctx, c, &h.out); !errors.Is(err, lsm.ErrCheck) {
+		t.Fatalf("install: %v", err)
+	}
+	h.take()
+	h.settle()
+	if !h.s.Serving() || h.s.logGen != gen+1 {
+		t.Fatalf("serving %v after %d restarts of the log", h.s.Serving(), h.s.logGen-gen)
+	}
+	o.check(t, h, 0, 15, 0)
 }
 
 // The store hands the log one run piece at a time, each once the one before is durable.

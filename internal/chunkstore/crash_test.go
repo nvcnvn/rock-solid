@@ -99,15 +99,36 @@ func (m *blockModel) at(c core.ChunkID, b uint16, epoch uint64) []byte {
 	return zero
 }
 
-// checkModel compares blocks [0, blocks) of the chunks, live and at each epoch up to maxEpoch, with the store.
-func checkModel(t testing.TB, h *harness, m *blockModel, chunks []core.ChunkID, blocks uint16, maxEpoch uint64) {
+// checkModel compares every block the model or the index holds of the chunks, live and at each
+// epoch up to maxEpoch, with the store.
+func checkModel(t testing.TB, h *harness, m *blockModel, chunks []core.ChunkID, maxEpoch uint64) {
 	t.Helper()
+	ix := h.s.Index()
 	for _, c := range chunks {
+		blocks := map[uint16]bool{}
+		for k := range m.live {
+			if k.c == c {
+				blocks[k.b] = true
+			}
+		}
+		for _, f := range m.frozen[c] {
+			for b := range f.blocks {
+				blocks[b] = true
+			}
+		}
+		vers := append(ix.frozen(nil, testPool, c), 0, 0)
+		for i := 0; i < len(vers); i += 2 {
+			for _, e := range ix.Extents(nil, testPool, c, vers[i]) {
+				for b := e.First; int(b) < e.end(); b++ {
+					blocks[b] = true
+				}
+			}
+		}
 		for epoch := range maxEpoch + 1 {
 			for b := range blocks {
 				if got, want := h.block(c, b, epoch), m.at(c, b, epoch); !bytes.Equal(got, want) {
-					t.Fatalf("chunk %v block %d at epoch %d: byte %d is %#x, the model holds %#x", c, b, epoch,
-						firstDiff(got, want), got[firstDiff(got, want)], want[firstDiff(got, want)])
+					i := firstDiff(got, want)
+					t.Fatalf("chunk %v block %d at epoch %d: byte %d is %#x, the model holds %#x", c, b, epoch, i, got[i], want[i])
 				}
 			}
 		}
@@ -164,7 +185,7 @@ func (h *harness) recoverStore(mode disklog.Mode) {
 }
 
 // [property] A workload crashed at its k-th disk action, for every k, with no unflushed block
-// landing and with each landing at random, recovers to a prefix of what was written that holds
+// landing, a seeded half of them, and all of them, recovers to a prefix of what was written that holds
 // every acknowledged record, live and at every snapshot, and the rebuilt index equals it.
 func TestCrashAtEveryAction(t *testing.T) {
 	full := newHarness(t, crashConfig())
@@ -174,7 +195,7 @@ func TestCrashAtEveryAction(t *testing.T) {
 		t.Fatal("the workload wrote no manifest")
 	}
 	for k := 0; k < total; k++ {
-		for _, landing := range []string{"none", "random"} {
+		for _, landing := range []string{"none", "half", "all"} {
 			h := newHarness(t, crashConfig())
 			h.oracle = sim.NewOracle[writtenRecord](0, newBlockModel())
 			h.crashAt = k
@@ -186,21 +207,24 @@ func TestCrashAtEveryAction(t *testing.T) {
 				}()
 				crashWorkload(h)
 			}()
-			if landing == "none" {
+			switch landing {
+			case "none":
 				h.disk.Crash(func(int, core.LBA) bool { return false })
-			} else {
+			case "half":
 				h.disk.CrashRandom(core.NewRand(uint64(k)))
+			case "all":
+				h.disk.Crash(func(int, core.LBA) bool { return true })
 			}
 			h.crashAt = -1
 			h.recoverStore(disklog.ModeOpen)
 			m := h.recovered
-			checkModel(t, h, m, crashChunks, 8, 2)
+			checkModel(t, h, m, crashChunks, 2)
 			opened := dumpIndex(h.s.Index())
 			h.recoverStore(disklog.ModeRebuild)
 			if got := dumpIndex(h.s.Index()); !slices.Equal(got, opened) {
 				t.Fatalf("crash at action %d: rebuilt index has %d entries, recovered %d", k, len(got), len(opened))
 			}
-			checkModel(t, h, m, crashChunks, 8, 2)
+			checkModel(t, h, m, crashChunks, 2)
 		}
 	}
 }

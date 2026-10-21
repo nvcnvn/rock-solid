@@ -145,7 +145,6 @@ type sentItem struct {
 	item   int32
 }
 
-// fetch reads n blocks of one record and its header, and checks each block's CRC32C against it.
 type fetch struct {
 	op      int32
 	first   uint16
@@ -174,6 +173,7 @@ type loadingRun struct {
 type plants struct {
 	mergeCommitted bool
 	failCheck      bool
+	failMerge      bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.
@@ -209,6 +209,8 @@ type Store struct {
 	piecesOut     int
 	replayLSN     uint64
 	retryAfter    bool
+	// pieceWait is a flush whose next piece waits for a pool buffer, tried again on every call.
+	pieceWait bool
 
 	loading map[disklog.BlobRef]*loadingRun
 	pieceOf map[disklog.BlobRef]disklog.BlobRef
@@ -288,7 +290,7 @@ func (s *Store) resume(log *disklog.Log) error {
 		}
 		s.ix = ix
 	}
-	s.phase, s.checkpointing, s.inPiece, s.piecesOut = serving, false, false, 0
+	s.phase, s.checkpointing, s.inPiece, s.piecesOut, s.pieceWait = serving, false, false, 0, false
 	return nil
 }
 
@@ -411,7 +413,6 @@ func (s *Store) releaseChunk(i int32) {
 	s.freeChunks = append(s.freeChunks, i)
 }
 
-// orderWaiting orders the chunk's waiting operations in arrival order until one waits for a base read.
 func (s *Store) orderWaiting(ctx *core.Context, ci int32, out *Output) {
 	for {
 		cs := &s.chunks[ci]
@@ -463,7 +464,6 @@ func (s *Store) freeBufs(ctx *core.Context, oi int32) {
 	}
 }
 
-// partial returns the bytes [lo, hi) the range covers of block b, and whether that is less than the block.
 func partial(off, n uint32, b uint16) (lo, hi uint32, part bool) {
 	start := uint32(b) * core.BlockSize
 	lo = max(off, start) - start
@@ -471,8 +471,6 @@ func partial(off, n uint32, b uint16) (lo, hi uint32, part bool) {
 	return lo, hi, lo != 0 || hi != core.BlockSize
 }
 
-// startBases checks the op's version, then fills the blocks it covers in part from their newest
-// ordered bytes, and reports whether it waits for base reads from disk.
 func (s *Store) startBases(ctx *core.Context, oi int32) bool {
 	o := &s.ops[oi]
 	cs := &s.chunks[o.chunk]
@@ -529,7 +527,7 @@ func (s *Store) base(ctx *core.Context, cs *chunkState, b uint16) (src []byte, e
 		o := &s.ops[cs.pending[i]]
 		for j := len(o.items) - 1; j >= 0; j-- {
 			it := &o.items[j]
-			if it.entry.Kind == disklog.EntryFreeze || b < it.entry.First || int(b) >= int(it.entry.First)+int(it.entry.Count) {
+			if it.state == itemFailed || it.entry.Kind == disklog.EntryFreeze || b < it.entry.First || int(b) >= int(it.entry.First)+int(it.entry.Count) {
 				continue
 			}
 			if it.entry.Kind == disklog.EntryPunch {
@@ -545,8 +543,6 @@ func (s *Store) base(ctx *core.Context, cs *chunkState, b uint16) (src []byte, e
 	return nil, e, true
 }
 
-// submit gives the op its version and hands its entries to the log: a freeze first when it is the
-// chunk's first write after a cut, then its blocks as whole-block writes and punches.
 func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	o := &s.ops[oi]
 	ci := o.chunk
@@ -619,7 +615,6 @@ func (s *Store) writeItems(ctx *core.Context, o *op, first, last uint16) error {
 	return nil
 }
 
-// punchItems logs a punch entry for the whole blocks it covers and its merged edge blocks as writes.
 func (s *Store) punchItems(o *op, first, last uint16) {
 	pool, c := s.cfg.Pool, s.chunks[o.chunk].id
 	lo, hi := int(first), int(last)
@@ -641,8 +636,6 @@ func (s *Store) punchItems(o *op, first, last uint16) {
 	}
 }
 
-// nextVersion is the version after newest: its counter plus one within the store's interval, or
-// the interval's first, raising the interval when the counter has run out.
 func (s *Store) nextVersion(newest uint64) uint64 {
 	interval, counter := uint32(newest>>32), uint32(newest)
 	if interval < s.interval {
@@ -864,8 +857,6 @@ func (s *Store) fetchDone(ctx *core.Context, fi int32, derr core.DiskError, out 
 	s.orderWaiting(ctx, o.chunk, out)
 }
 
-// verify checks every block the fetch read against its record header's CRC32C, reading the rest
-// of a header longer than a block first.
 func (s *Store) verify(ctx *core.Context, fi int32) error {
 	f := &s.fetches[fi]
 	offset := uint32(uint64(f.header) % uint64(s.sb.SegmentBlocks))
@@ -901,7 +892,6 @@ func (s *Store) rereadHeader(ctx *core.Context, fi int32, blocks uint32) error {
 	return nil
 }
 
-// deliver copies the fetched blocks to a read's reply, or a base block around the bytes its op covers.
 func (s *Store) deliver(ctx *core.Context, f *fetch, o *op) {
 	src := ctx.Pool.Bytes(f.data)[:int(f.n)*core.BlockSize]
 	first, last := spanOf(o.req.Off, o.req.Len)
@@ -923,8 +913,6 @@ func (s *Store) deliver(ctx *core.Context, f *fetch, o *op) {
 	copy(dst[hi:], src[hi:])
 }
 
-// pump handles the log's events, fails what waits for room the store cannot free, starts a
-// checkpoint when one is due, and passes the log's actions on.
 func (s *Store) pump(ctx *core.Context, out *Output) {
 	i := 0
 	for {
@@ -953,6 +941,9 @@ func (s *Store) housekeep(ctx *core.Context, out *Output) {
 		if s.log.Stalled() {
 			s.log.FailStalled(ctx, &s.lout)
 			return
+		}
+		if s.pieceWait {
+			s.nextPiece(ctx, out)
 		}
 		if !s.checkpointing && !s.retryAfter && s.log.CheckpointDue() {
 			s.beginCheckpoint(ctx, out)
@@ -993,7 +984,7 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 		s.checkpointing = false
 	case disklog.CheckpointFailed:
 		s.ix.Tree().FlushFailed()
-		s.checkpointing, s.inPiece, s.piecesOut, s.retryAfter = false, false, 0, true
+		s.checkpointing, s.inPiece, s.piecesOut, s.retryAfter, s.pieceWait = false, false, 0, true, false
 	case disklog.ManifestLoaded:
 		s.manifestLoaded(ctx)
 	case disklog.BlobRead:
@@ -1038,8 +1029,9 @@ func (s *Store) popSent(t disklog.Ticket) (sentItem, bool) {
 	for s.sentHead < len(s.sent) && s.sent[s.sentHead].op < 0 {
 		s.sentHead++
 	}
-	if s.sentHead == len(s.sent) {
-		s.sent, s.sentHead = s.sent[:0], 0
+	if s.sentHead > len(s.sent)/2 {
+		s.sent = s.sent[:copy(s.sent, s.sent[s.sentHead:])]
+		s.sentHead = 0
 	}
 	return si, true
 }
@@ -1093,11 +1085,7 @@ func (s *Store) itemDone(oi int32) bool {
 	if o.err != nil {
 		// The writes ordered after a failed one may hold its bytes; the log fails them too, since
 		// it fails a lane's queued items together in submit order.
-		durable := false
-		for j := range o.items {
-			durable = durable || o.items[j].state == itemDurable
-		}
-		if !durable {
+		if !o.holdsVersion() {
 			cs.version = min(cs.version, o.prevVer)
 		}
 		if len(o.items) > 0 && o.items[0].entry.Kind == disklog.EntryFreeze && o.items[0].state != itemDurable {
@@ -1107,7 +1095,15 @@ func (s *Store) itemDone(oi int32) bool {
 	return true
 }
 
-// mapResolved maps the chunk's operations whose items are all resolved, oldest first, and answers them.
+func (o *op) holdsVersion() bool {
+	for j := range o.items {
+		if it := &o.items[j]; it.state == itemDurable && it.entry.Kind != disklog.EntryFreeze {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 	cs := &s.chunks[ci]
 	for len(cs.pending) > 0 {
@@ -1127,7 +1123,7 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 			}
 		}
 		r := Reply{ID: o.req.ID, Version: o.version, Err: o.err}
-		if o.err != nil {
+		if o.err != nil && !o.holdsVersion() {
 			r.Version = 0
 		}
 		out.Replies = append(out.Replies, r)
@@ -1188,8 +1184,8 @@ func (s *Store) nextPiece(ctx *core.Context, out *Output) {
 		return
 	}
 	buf, err := ctx.Pool.Alloc(int(s.log.MaxBlobBytes()))
+	s.pieceWait = err != nil
 	if err != nil {
-		s.stop(ctx, err, out)
 		return
 	}
 	length, root, err := s.ix.Tree().NextPiece(ctx.Pool.Bytes(buf))
@@ -1230,7 +1226,12 @@ func (s *Store) InstallMerge(ctx *core.Context, c *lsm.Compaction, out *Output) 
 	if s.phase != serving {
 		return ErrUnavailable
 	}
-	err := s.ix.Tree().Install(c)
+	var err error
+	if s.plant.failMerge {
+		s.plant.failMerge, err = false, lsm.ErrCheck
+	} else {
+		err = s.ix.Tree().Install(c)
+	}
 	if errors.Is(err, lsm.ErrCheck) {
 		s.indexBroken(ctx, out)
 		s.pump(ctx, out)
@@ -1264,7 +1265,6 @@ func (s *Store) drain(ctx *core.Context, out *Output) {
 
 func (s *Store) fetchesOut() int { return len(s.fetches) - len(s.freeFetch) }
 
-// stop ends serving after the log failed: operations waiting to be ordered fail with err.
 func (s *Store) stop(ctx *core.Context, err error, out *Output) {
 	s.phase, s.err = failed, err
 	s.failWaiting(ctx, err, out)

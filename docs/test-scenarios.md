@@ -1318,6 +1318,11 @@ Commit and mapping:
   item's (design.md: a replay point never passes a pending write's record).
 - A crash with some of its items durable recovers them mapped under its version: the
   unacknowledged write is partly visible, and the chunk's next write takes the next version.
+- A write that fails with `NoSpace` part-way stays applied as recovery would replay it, and its
+  error carries its version, against which an `expectVer` write succeeds; one whose only durable
+  item is its freeze gives the chunk its previous version back.
+- A write merging into a block of a failed write still pending behind one in flight takes its base
+  from the versions left, never the failed write's freed buffers; the live index equals a rebuild.
 
 Events from the log:
 
@@ -1329,11 +1334,15 @@ Events from the log:
   `ErrUnavailable` until it is opened again.
 - `CheckpointFailed` (no segment left): the index keeps its frozen memtable and its runs, and reads
   go on; the next checkpoint writes it again from its first piece (the "LSM tree" scenario).
+- A checkpoint that finds the pool full waits for a piece buffer and finishes once one frees; the
+  store keeps serving.
 - A flush that fails a run check (`lsm.ErrCheck`, a plant): the store refuses operations, lets its
   rounds finish, restarts its log once in rebuild mode, and the rebuilt index equals the oracle's,
-  live and at every snapshot. A merge that fails its check takes the same path.
+  live and at every snapshot. A merge that fails its check (a plant) takes the same path.
 - The store hands the log one run piece at a time, each once the one before is durable: no step
   of a workload with multi-piece runs has two pieces in flight.
+- Under steady pipelined load (5,000 writes) the store's list of items handed to the log stays
+  short.
 - `Flush(cs)` completes at once with no disk action when nothing is pending, and otherwise once
   every write and punch to cs submitted before it is answered.
 
@@ -1341,9 +1350,9 @@ Invariants and faults (simulator): acknowledged writes readable; reads equal the
 oracle live and at every snapshot; punched ranges read zeros; no two durable writes of a chunk
 share a version; a live map never holds two entries for one block (`Index.Check`); a rebuilt
 index equals the recovered one. Faults: crash at every action of a workload with unaligned
-writes, a cut, a whole-chunk write and a checkpoint, with no unflushed block landing and with
-each landing at random, each recovery checked against the crash oracle with a block model and
-then rebuilt; unaligned writes pipelined to one block; a merge base failing its checksum; a
+writes, a cut, a whole-chunk write and a checkpoint, with no unflushed block landing, a seeded
+half and all of them, each recovery checked against the crash oracle with a block model over
+every block either holds, then rebuilt; unaligned writes pipelined to one block; a merge base failing its checksum; a
 failed base read; a failed flush.
 
 Performance: `Write` of a whole block, `Write` of one byte with its base in a pending write, and
