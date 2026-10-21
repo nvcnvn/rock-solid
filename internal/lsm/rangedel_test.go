@@ -13,6 +13,7 @@ import (
 	"github.com/cockroachdb/datadriven"
 
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 func delRange(t testing.TB, tr *Tree, m model, lo, hi string) {
@@ -306,11 +307,11 @@ func TestRangeRemovalsMatchModel(t *testing.T) {
 	for i, cfg := range rangeConfigs {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			t.Parallel()
-			for seed := range uint64(60) {
+			seeds.Run(t, 0, 60, func(seed uint64) {
 				if d := rangeModel(t, cfg, seed, plants{}); d != "" {
 					t.Fatalf("%+v seed %d: %s", cfg, seed, d)
 				}
-			}
+			})
 		})
 	}
 }

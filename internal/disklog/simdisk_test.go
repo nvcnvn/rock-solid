@@ -10,6 +10,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
@@ -119,7 +120,7 @@ func driveRandomly(h *harness, r *core.Rand, items int) []disklog.Ticket {
 func TestAFailedWriteOrFlushIsFinalForTheOpenLog(t *testing.T) {
 	failures := 0
 	for _, kind := range []core.ActionKind{core.ActDiskWrite, core.ActDiskFsync} {
-		for seed := uint64(1); seed <= 20; seed++ {
+		seeds.Run(t, 1, 20, func(seed uint64) {
 			r := core.NewRand(seed)
 			cfg := testConfig(0)
 			cfg.CommitDepth = int(r.Range(1, 3))
@@ -165,7 +166,10 @@ func TestAFailedWriteOrFlushIsFinalForTheOpenLog(t *testing.T) {
 			if d := h.eventsOf(disklog.Durable); len(d) != 1 || d[0].LSN != res.durable+1 {
 				t.Fatalf("seed %d: the recovered log's next record: %+v", seed, d)
 			}
-		}
+		})
+	}
+	if !seeds.Default() {
+		return
 	}
 	if failures == 0 {
 		t.Fatal("no seed failed an action")
@@ -174,7 +178,7 @@ func TestAFailedWriteOrFlushIsFinalForTheOpenLog(t *testing.T) {
 
 func TestTheFirstFlushFailedOnEverySeedKeepsTheFailureRule(t *testing.T) {
 	failFirstFlush := func(h *harness) { h.failIO[roundWrite(1)+1] = core.DiskIO }
-	for seed := uint64(1); seed <= 100; seed++ {
+	seeds.Run(t, 1, 100, func(seed uint64) {
 		h := runSeed(t, seed, failFirstFlush, &seedStats{})
 		if !bytes.Contains(h.sched.Trace(), fmt.Appendf(nil, "DiskDone io=%d err=io", roundWrite(1)+1)) {
 			t.Fatalf("seed %d: the first flush did not fail", seed)
@@ -182,7 +186,7 @@ func TestTheFirstFlushFailedOnEverySeedKeepsTheFailureRule(t *testing.T) {
 		if err := trace.Check(h.sched.Trace(), diskLogRules(h.cfg.CommitDepth)...); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
-	}
+	})
 }
 
 func TestALogThatIgnoresAFailedFlushBreaksTheFailureRule(t *testing.T) {
@@ -398,7 +402,7 @@ func formattedOn(t *testing.T, diskBytes uint64, set sim.DiskSettings, cfg diskl
 
 func TestABitFlipInARecordFailsItsChecksum(t *testing.T) {
 	inHeader, inData := 0, 0
-	for seed := uint64(1); seed <= 20; seed++ {
+	seeds.Run(t, 1, 20, func(seed uint64) {
 		set := sim.DefaultDiskSettings()
 		set.Seed = seed
 		h := formattedOn(t, gib, set, testConfig(0))
@@ -442,6 +446,9 @@ func TestABitFlipInARecordFailsItsChecksum(t *testing.T) {
 		if len(flipped) == 0 {
 			t.Fatalf("seed %d flipped nothing", seed)
 		}
+	})
+	if !seeds.Default() {
+		return
 	}
 	if inHeader == 0 || inData == 0 {
 		t.Fatalf("flips hit %d headers and %d data areas", inHeader, inData)
@@ -458,7 +465,7 @@ func TestEveryItemIsAcknowledgedOnAFailSlowDisk(t *testing.T) {
 		h.run()
 		return h, driveRandomly(h, r, 200)
 	}
-	for seed := uint64(1); seed <= 10; seed++ {
+	seeds.Run(t, 1, 10, func(seed uint64) {
 		healthy, _ := run(seed, 1)
 		h, tickets := run(seed, 100)
 		var acked []disklog.Ticket
@@ -476,5 +483,5 @@ func TestEveryItemIsAcknowledgedOnAFailSlowDisk(t *testing.T) {
 		if h.sched.Time() != 100*healthy.sched.Time() {
 			t.Fatalf("seed %d: %d µs on the slow disk, %d on a healthy one", seed, h.sched.Time(), healthy.sched.Time())
 		}
-	}
+	})
 }
