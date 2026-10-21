@@ -17,7 +17,7 @@ func newIndexWith(t testing.TB, cfg lsm.Config, pointRemovals bool) *Index {
 	if err != nil {
 		t.Fatal(err)
 	}
-	x := NewIndex(tree)
+	x := NewIndex(tree, 0)
 	x.pointRemovals = pointRemovals
 	return x
 }

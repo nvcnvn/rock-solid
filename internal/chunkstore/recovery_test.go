@@ -109,7 +109,7 @@ func (n *node) newIndex() *Index {
 	if err != nil {
 		n.t.Fatal(err)
 	}
-	return NewIndex(tree)
+	return NewIndex(tree, 0)
 }
 
 func copyEvent(ev disklog.Event) disklog.Event {

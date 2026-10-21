@@ -12,6 +12,7 @@ const (
 	preludeSize = 56
 
 	writeEntrySize  = 33
+	slotEntrySize   = writeEntrySize + 6
 	freezeEntrySize = 37
 	blobEntrySize   = 14
 
@@ -38,6 +39,7 @@ const (
 	EntryPunch
 	EntryFreeze
 	EntryBlob
+	EntrySlot
 )
 
 // BlobKind says what a blob payload holds; the codec carries it without checking it.
@@ -64,11 +66,18 @@ type Entry struct {
 	BlobKind BlobKind
 	Owner    uint32
 	Length   uint64
+	Segment  uint32
+	Slot     uint16
 }
 
 // WriteEntry is a write of count blocks from block first of a chunk version.
 func WriteEntry(pool core.PoolID, chunk core.ChunkID, version uint64, first, count uint16) Entry {
 	return Entry{Kind: EntryWrite, Pool: pool, Chunk: chunk, Version: version, First: first, Count: count}
+}
+
+// SlotEntry is a write of a whole chunk version to chunk slot slot of segment, whose blocks lie there rather than in the record.
+func SlotEntry(pool core.PoolID, chunk core.ChunkID, version uint64, segment uint32, slot uint16) Entry {
+	return Entry{Kind: EntrySlot, Pool: pool, Chunk: chunk, Version: version, Count: core.BlocksPerChunk, Segment: segment, Slot: slot}
 }
 
 // PunchEntry frees count blocks from block first of a chunk version.
@@ -94,6 +103,11 @@ func (e *Entry) wireSize() (int, error) {
 			return 0, ErrBadExtent
 		}
 		n = writeEntrySize
+	case EntrySlot:
+		if e.First != 0 || e.Count != core.BlocksPerChunk {
+			return 0, ErrBadExtent
+		}
+		n = slotEntrySize
 	case EntryFreeze:
 		n = freezeEntrySize
 	case EntryBlob:
@@ -112,6 +126,8 @@ func (e *Entry) ofKind() Entry {
 	switch e.Kind {
 	case EntryWrite, EntryPunch:
 		return Entry{Kind: e.Kind, Pool: e.Pool, Chunk: e.Chunk, Version: e.Version, First: e.First, Count: e.Count}
+	case EntrySlot:
+		return Entry{Kind: e.Kind, Pool: e.Pool, Chunk: e.Chunk, Version: e.Version, First: e.First, Count: e.Count, Segment: e.Segment, Slot: e.Slot}
 	case EntryFreeze:
 		return FreezeEntry(e.Pool, e.Chunk, e.Version, e.Epoch)
 	}
@@ -124,6 +140,13 @@ func (e *Entry) dataBytes() uint64 {
 		return uint64(e.Count) * core.BlockSize
 	case EntryBlob:
 		return e.Length
+	}
+	return 0
+}
+
+func (e *Entry) slotBlocks() uint64 {
+	if e.Kind == EntrySlot {
+		return uint64(e.Count)
 	}
 	return 0
 }
@@ -142,11 +165,12 @@ type Record struct {
 	Durable uint64
 }
 
-// Layout is the size of a record: its header bytes before padding, and its header and data blocks.
+// Layout is the size of a record: its header bytes before padding, its header and data blocks, and the blocks its slot writes put in chunk slots, whose checksums follow the data blocks'.
 type Layout struct {
 	HeaderBytes  int
 	HeaderBlocks uint32
 	DataBlocks   uint32
+	SlotBlocks   uint32
 }
 
 // Blocks is the length of the whole record.
@@ -169,6 +193,7 @@ func LayoutOf(entries []Entry) (Layout, error) {
 type layoutAcc struct {
 	headerBytes uint64
 	dataBytes   uint64
+	slotBlocks  uint64
 }
 
 func (a *layoutAcc) add(e *Entry) error {
@@ -182,17 +207,18 @@ func (a *layoutAcc) add(e *Entry) error {
 	}
 	a.headerBytes += uint64(n)
 	a.dataBytes += add
+	a.slotBlocks += e.slotBlocks()
 	return nil
 }
 
 func (a *layoutAcc) layout() (Layout, error) {
 	dataBlocks := (a.dataBytes + core.BlockSize - 1) / core.BlockSize
-	headerBytes := preludeSize + a.headerBytes + dataBlocks*core.CRC32CSize
+	headerBytes := preludeSize + a.headerBytes + (dataBlocks+a.slotBlocks)*core.CRC32CSize
 	headerBlocks := (headerBytes + core.BlockSize - 1) / core.BlockSize
 	if headerBlocks > math.MaxUint16 {
 		return Layout{}, ErrTooLarge
 	}
-	return Layout{HeaderBytes: int(headerBytes), HeaderBlocks: uint32(headerBlocks), DataBlocks: uint32(dataBlocks)}, nil
+	return Layout{HeaderBytes: int(headerBytes), HeaderBlocks: uint32(headerBlocks), DataBlocks: uint32(dataBlocks), SlotBlocks: uint32(a.slotBlocks)}, nil
 }
 
 // PayloadOffset is where entry i's payload starts in the data area: writes' blocks first, in order, then blobs' bytes.
@@ -217,13 +243,13 @@ func PayloadOffset(entries []Entry, i int) uint64 {
 	return writeBytes + blobBytes
 }
 
-// AppendHeader appends the record's header blocks; crcs holds one checksum per data block, in order.
+// AppendHeader appends the record's header blocks; crcs holds one checksum per data block, in order, then one per block of each slot write, in entry order.
 func AppendHeader(dst []byte, rec Record, entries []Entry, crcs []uint32) ([]byte, error) {
 	lay, err := LayoutOf(entries)
 	if err != nil {
 		return dst, err
 	}
-	if uint64(len(crcs)) != uint64(lay.DataBlocks) || rec.Durable >= rec.LSN {
+	if uint64(len(crcs)) != uint64(lay.DataBlocks)+uint64(lay.SlotBlocks) || rec.Durable >= rec.LSN {
 		return dst, ErrMalformed
 	}
 	start := len(dst)
@@ -235,13 +261,13 @@ func AppendHeader(dst []byte, rec Record, entries []Entry, crcs []uint32) ([]byt
 	return finishHeader(dst, start, lay), nil
 }
 
-// AppendRecord appends the record's header blocks and then data, which must be exactly its data area.
+// AppendRecord appends the header blocks and then data, which must be exactly the data area, of a record with no slot write.
 func AppendRecord(dst []byte, rec Record, entries []Entry, data []byte) ([]byte, error) {
 	lay, err := LayoutOf(entries)
 	if err != nil {
 		return dst, err
 	}
-	if uint64(len(data)) != uint64(lay.DataBlocks)*core.BlockSize || rec.Durable >= rec.LSN {
+	if uint64(len(data)) != uint64(lay.DataBlocks)*core.BlockSize || lay.SlotBlocks != 0 || rec.Durable >= rec.LSN {
 		return dst, ErrMalformed
 	}
 	start := len(dst)
@@ -275,12 +301,16 @@ func appendEntries(dst []byte, entries []Entry) []byte {
 		e := &entries[i]
 		dst = append(dst, byte(e.Kind))
 		switch e.Kind {
-		case EntryWrite, EntryPunch:
+		case EntryWrite, EntryPunch, EntrySlot:
 			dst = binary.LittleEndian.AppendUint32(dst, uint32(e.Pool))
 			dst = e.Chunk.AppendTo(dst)
 			dst = binary.LittleEndian.AppendUint64(dst, e.Version)
 			dst = binary.LittleEndian.AppendUint16(dst, e.First)
 			dst = binary.LittleEndian.AppendUint16(dst, e.Count)
+			if e.Kind == EntrySlot {
+				dst = binary.LittleEndian.AppendUint32(dst, e.Segment)
+				dst = binary.LittleEndian.AppendUint16(dst, e.Slot)
+			}
 		case EntryFreeze:
 			dst = binary.LittleEndian.AppendUint32(dst, uint32(e.Pool))
 			dst = e.Chunk.AppendTo(dst)
@@ -309,8 +339,12 @@ func decodeEntry(b []byte, e *Entry) (int, error) {
 	}
 	*e = Entry{Kind: EntryKind(b[0])}
 	switch e.Kind {
-	case EntryWrite, EntryPunch:
-		if len(b) < writeEntrySize {
+	case EntryWrite, EntryPunch, EntrySlot:
+		n := writeEntrySize
+		if e.Kind == EntrySlot {
+			n = slotEntrySize
+		}
+		if len(b) < n {
 			return 0, ErrMalformed
 		}
 		e.Pool = core.PoolID(binary.LittleEndian.Uint32(b[1:]))
@@ -321,7 +355,17 @@ func decodeEntry(b []byte, e *Entry) (int, error) {
 		if e.Count == 0 || int(e.First)+int(e.Count) > core.BlocksPerChunk {
 			return 0, ErrBadExtent
 		}
-		return writeEntrySize, nil
+		if e.Kind == EntrySlot {
+			e.Segment = binary.LittleEndian.Uint32(b[33:])
+			e.Slot = binary.LittleEndian.Uint16(b[37:])
+			if e.First != 0 || e.Count != core.BlocksPerChunk {
+				return 0, ErrBadExtent
+			}
+			if e.Segment == 0 {
+				return 0, ErrMalformed
+			}
+		}
+		return n, nil
 	case EntryFreeze:
 		if len(b) < freezeEntrySize {
 			return 0, ErrMalformed
@@ -354,6 +398,23 @@ type RecordHeader struct {
 // DataCRC is the stored checksum of data block i.
 func (h *RecordHeader) DataCRC(i int) uint32 {
 	return core.GetCRC32C(h.crcs[i*core.CRC32CSize:])
+}
+
+// CRCs appends every stored checksum: the data blocks', then each slot write's blocks', in entry order.
+func (h *RecordHeader) CRCs(dst []uint32) []uint32 {
+	for i := 0; i < len(h.crcs); i += core.CRC32CSize {
+		dst = append(dst, core.GetCRC32C(h.crcs[i:]))
+	}
+	return dst
+}
+
+// SlotCRC is the stored checksum of block b of slot write entry i.
+func (h *RecordHeader) SlotCRC(i int, b uint16) uint32 {
+	at := uint64(h.Layout.DataBlocks)
+	for j := range h.Entries[:i] {
+		at += h.Entries[j].slotBlocks()
+	}
+	return core.GetCRC32C(h.crcs[(at+uint64(b))*core.CRC32CSize:])
 }
 
 // DecodeHeader verifies and decodes the header at the start of img, which must name place at and fit in blocksLeft.
@@ -420,14 +481,14 @@ func DecodeHeader(img []byte, at Place, blocksLeft uint32, entries []Entry) (Rec
 	if lay.HeaderBlocks != headerBlocks || lay.DataBlocks != dataBlocks {
 		return RecordHeader{}, ErrMalformed
 	}
-	crcEnd := pos + int(dataBlocks)*core.CRC32CSize
+	crcEnd := pos + int(dataBlocks+lay.SlotBlocks)*core.CRC32CSize
 	if !isZero(h[crcEnd:]) {
 		return RecordHeader{}, ErrMalformed
 	}
 	return RecordHeader{Record: rec, Layout: lay, Entries: entries[first:], crcs: h[pos:crcEnd]}, nil
 }
 
-// DecodedRecord is a record whose header and every data block were verified.
+// DecodedRecord is a record whose header and every data block were verified; a slot write's blocks lie outside it.
 type DecodedRecord struct {
 	RecordHeader
 	Data []byte
@@ -454,7 +515,7 @@ func DecodeRecord(img []byte, at Place, blocksLeft uint32, entries []Entry) (Dec
 	return DecodedRecord{RecordHeader: h, Data: data}, nil
 }
 
-// Payload is entry i's bytes sliced from the image: a write's blocks or a blob's bytes, empty for a punch or freeze.
+// Payload is entry i's bytes sliced from the image: a write's blocks or a blob's bytes, empty for a punch, freeze or slot write.
 func (d *DecodedRecord) Payload(i int) []byte {
 	e := &d.Entries[i]
 	switch e.Kind {
@@ -467,6 +528,45 @@ func (d *DecodedRecord) Payload(i int) []byte {
 
 // BlockCRC verifies the record header at the start of img, which must be logID's at offset in its segment, and returns the stored checksum of its data block i; when img holds less than the header, it returns ErrTruncated and the header's length in blocks.
 func BlockCRC(img []byte, logID uint64, offset uint32, i uint32) (crc uint32, headerBlocks uint32, err error) {
+	return storedCRC(img, logID, offset, func(entries []byte, n, dataBlocks uint32) (uint64, bool) {
+		return uint64(i), i < dataBlocks
+	})
+}
+
+// SlotBlockCRC is BlockCRC for block b of the record's write to slot slot of segment.
+func SlotBlockCRC(img []byte, logID uint64, offset uint32, segment uint32, slot uint16, b uint16) (crc uint32, headerBlocks uint32, err error) {
+	return storedCRC(img, logID, offset, func(entries []byte, n, dataBlocks uint32) (uint64, bool) {
+		at := uint64(dataBlocks)
+		for range n {
+			if EntryKind(entries[0]) == EntrySlot {
+				if binary.LittleEndian.Uint32(entries[33:]) == segment && binary.LittleEndian.Uint16(entries[37:]) == slot {
+					return at + uint64(b), b < core.BlocksPerChunk
+				}
+				at += core.BlocksPerChunk
+			}
+			entries = entries[entrySize(EntryKind(entries[0])):]
+		}
+		return 0, false
+	})
+}
+
+func entrySize(k EntryKind) int {
+	switch k {
+	case EntryWrite, EntryPunch:
+		return writeEntrySize
+	case EntrySlot:
+		return slotEntrySize
+	case EntryFreeze:
+		return freezeEntrySize
+	case EntryBlob:
+		return blobEntrySize
+	}
+	return 0
+}
+
+// storedCRC verifies the header as BlockCRC does and returns the checksum at the index pick
+// finds from its n entries' bytes and its data block count.
+func storedCRC(img []byte, logID uint64, offset uint32, pick func(entries []byte, n, dataBlocks uint32) (uint64, bool)) (uint32, uint32, error) {
 	if len(img) < preludeSize {
 		return 0, 0, ErrTruncated
 	}
@@ -476,7 +576,7 @@ func BlockCRC(img []byte, logID uint64, offset uint32, i uint32) (crc uint32, he
 	if binary.LittleEndian.Uint16(img[recVersion:]) != FormatVersion {
 		return 0, 0, ErrBadVersion
 	}
-	headerBlocks = uint32(binary.LittleEndian.Uint16(img[recHeaderBlocks:]))
+	headerBlocks := uint32(binary.LittleEndian.Uint16(img[recHeaderBlocks:]))
 	if headerBlocks == 0 {
 		return 0, 0, ErrMalformed
 	}
@@ -491,26 +591,27 @@ func BlockCRC(img []byte, logID uint64, offset uint32, i uint32) (crc uint32, he
 	if binary.LittleEndian.Uint64(h[recLogID:]) != logID || binary.LittleEndian.Uint32(h[recOffset:]) != offset {
 		return 0, headerBlocks, ErrMismatch
 	}
+	n := binary.LittleEndian.Uint32(h[recEntries:])
 	pos := preludeSize
-	for range binary.LittleEndian.Uint32(h[recEntries:]) {
-		var n int
+	var crcs uint64
+	for range n {
+		size := 0
 		if pos < len(h) {
-			switch EntryKind(h[pos]) {
-			case EntryWrite, EntryPunch:
-				n = writeEntrySize
-			case EntryFreeze:
-				n = freezeEntrySize
-			case EntryBlob:
-				n = blobEntrySize
-			}
+			size = entrySize(EntryKind(h[pos]))
 		}
-		if n == 0 || pos+n > len(h) {
+		if size == 0 || pos+size > len(h) {
 			return 0, headerBlocks, ErrMalformed
 		}
-		pos += n
+		if EntryKind(h[pos]) == EntrySlot {
+			crcs += core.BlocksPerChunk
+		}
+		pos += size
 	}
-	at := pos + int(i)*core.CRC32CSize
-	if i >= binary.LittleEndian.Uint32(h[recDataBlocks:]) || at+core.CRC32CSize > len(h) {
+	dataBlocks := binary.LittleEndian.Uint32(h[recDataBlocks:])
+	crcs += uint64(dataBlocks)
+	i, ok := pick(h[preludeSize:pos], n, dataBlocks)
+	at := uint64(pos) + i*core.CRC32CSize
+	if !ok || i >= crcs || at+core.CRC32CSize > uint64(len(h)) {
 		return 0, headerBlocks, ErrMalformed
 	}
 	return core.GetCRC32C(h[at:]), headerBlocks, nil

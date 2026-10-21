@@ -1959,17 +1959,23 @@ Invariants (simulator) and faults:
   golden bytes of a record with one such entry and one ordinary write are checked in. Its per-block
   CRCs cover the slot's blocks, so a block damaged in the slot fails the record as a damaged log
   block does.
-- A whole-chunk write puts its data in a slot, its record in the hot stream; the index maps the
-  chunk's 1,024 blocks to the slot. A partial write of the same chunk goes to the log and trims the
+- A whole-chunk write puts its data in a slot, in a DiskWrite of its own from the request's
+  buffer, its record in the hot stream; the round's one flush follows both writes, a round carries
+  one slot write, and the index maps the chunk's 1,024 blocks to the slot in one extent. A partial write of the same chunk goes to the log and trims the
   slot's extent; the slot stays used while any block of it is live.
 - A slot is free for reuse only once the record that rewrote or deleted its chunk is durable: a
   crash before that record is durable reads the old chunk from the slot.
 - A slot segment has no segment header; the usage table lists it as `slot`. Replay marks a slot
   segment opened after the manifest from the records that name its slots, never from its first
   block (which holds chunk data that may look like anything, a valid segment header of this log
-  included).
-- The segment is TRIMmed and freed with its last slot; allocation fills the fullest slot segment
-  first (two segments with 3 and 9 free slots: the next chunk goes to the one with 3).
+  included, whether or not the manifest lists the segment as slot). The resumed log appends no
+  record there.
+- The segment is TRIMmed and freed with its last slot, once the TRIM completes; allocation fills the
+  fullest slot segment first (two segments with 3 and 9 free slots: the next chunk goes to the one
+  with 3), and never opens a segment of the reserve for one.
+- A snapshot's frozen version keeps the slot it reads in use.
+- After every crash in a workload of whole chunks rewritten, trimmed and punched across a cut and
+  checkpoints, the slots the log holds in use are exactly those the index refers to.
 - The tail rule applies to a slot write's record as to any other: a torn slot write under a
   record in flight is dropped, one under a durable record is corruption.
 - Cost (the cleaner streams spike): whole chunks deleted at random cost no cleaning, write

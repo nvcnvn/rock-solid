@@ -27,8 +27,8 @@
 
 ## Workaround: writes larger than one record copied
 - **Where:** `writeItems` in `internal/chunkstore/store.go`
-- **Why:** a write larger than one record goes to the log as several items, each needing a pool buffer of exactly its blocks, and a pool buffer cannot be split, so the store copies such a write into one buffer per item although [chunk blocks are never copied](design.md#on-disk-format) otherwise.
-- **Remove when:** whole chunks go to [chunk slots](design.md#on-disk-format) in one record, and the frontends' receive path hands a larger write as item-sized buffers.
+- **Why:** a write larger than one record goes to the log as several items, each needing a pool buffer of exactly its blocks, and a pool buffer cannot be split, so the store copies such a write into one buffer per item although [chunk blocks are never copied](design.md#on-disk-format) otherwise. A whole chunk on a disk with [chunk slots](design.md#on-disk-format) is one item and is not copied; a larger partial write is, and so is a whole chunk on a disk whose segments are smaller than a chunk.
+- **Remove when:** the frontends' receive path hands a larger write as item-sized buffers.
 
 ## Workaround: writes waiting for room fail at once
 - **Where:** `housekeep` in `internal/chunkstore/store.go`

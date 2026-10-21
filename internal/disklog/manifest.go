@@ -49,9 +49,10 @@ const (
 	SegmentFree SegmentState = iota
 	SegmentUsed
 	SegmentQuarantined
+	SegmentSlot
 )
 
-// SegmentUsage is a segment's row in the usage table: its state, the data blocks of its records and the LSN of its newest record.
+// SegmentUsage is a segment's row in the usage table: its state, the data blocks of its records, or for a slot segment the bitmap of its slots in use, and the LSN of its newest record, or of the newest naming one of its slots.
 type SegmentUsage struct {
 	Segment uint32
 	State   SegmentState
@@ -294,7 +295,7 @@ func (r *reader) rows(base uint64, edit bool) ([]SegmentUsage, error) {
 	for i := range rows {
 		u := SegmentUsage{Segment: r.u32(), State: SegmentState(r.take(1)[0]), Live: r.u32(), Newest: r.u64()}
 		switch {
-		case u.Segment <= prev || u.Newest > base || u.State > SegmentQuarantined:
+		case u.Segment <= prev || u.Newest > base || u.State > SegmentSlot:
 			return nil, ErrMalformed
 		case u.State == SegmentFree && (!edit || u.Live != 0 || u.Newest != 0):
 			return nil, ErrMalformed

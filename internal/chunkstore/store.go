@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"cmp"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 
@@ -214,6 +215,7 @@ type Store struct {
 
 	loading map[disklog.BlobRef]*loadingRun
 	pieceOf map[disklog.BlobRef]disklog.BlobRef
+	freed   []core.LBA
 
 	apply   disklog.Event
 	entry   [1]disklog.Entry
@@ -284,7 +286,7 @@ func (s *Store) recover(ctx *core.Context, diskBlocks uint64, mode disklog.Mode)
 func (s *Store) resume(log *disklog.Log) error {
 	s.log, s.rec, s.sb, s.maxWrite = log, nil, log.Superblock(), log.MaxWriteBlocks()
 	if s.ix == nil {
-		ix, err := s.newIndex(log.MaxBlobBytes())
+		ix, err := s.newIndex(log.MaxBlobBytes(), s.sb.SegmentBlocks)
 		if err != nil {
 			return err
 		}
@@ -294,12 +296,12 @@ func (s *Store) resume(log *disklog.Log) error {
 	return nil
 }
 
-func (s *Store) newIndex(maxPiece uint64) (*Index, error) {
+func (s *Store) newIndex(maxPiece uint64, segmentBlocks uint32) (*Index, error) {
 	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: int(maxPiece), Check: s.cfg.Check}))
 	if err != nil {
 		return nil, err
 	}
-	return NewIndex(tree), nil
+	return NewIndex(tree, segmentBlocks), nil
 }
 
 // Seal exists in the API only.
@@ -590,12 +592,13 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	}
 }
 
-// writeItems cuts the write's blocks into items of at most one record each; a write larger than
-// one item is copied into a buffer per item, since a pool buffer cannot be split.
+// writeItems cuts the write's blocks into items of at most one record each, or one item for a
+// whole chunk the log writes to a chunk slot; a larger write is copied into a buffer per item,
+// since a pool buffer cannot be split.
 func (s *Store) writeItems(ctx *core.Context, o *op, first, last uint16) error {
 	pool, c := s.cfg.Pool, s.chunks[o.chunk].id
 	count := last - first + 1
-	if count <= s.maxWrite {
+	if count <= s.maxWrite || count == core.BlocksPerChunk && s.log.Slots() > 0 {
 		o.items = append(o.items, item{entry: disklog.WriteEntry(pool, c, o.version, first, count), buf: o.req.Buf})
 		o.req.Buf = core.NoBuf
 		return nil
@@ -865,11 +868,15 @@ func (s *Store) verify(ctx *core.Context, fi int32) error {
 	if errors.Is(err, disklog.ErrTruncated) && hb > f.hdrLen {
 		return s.rereadHeader(ctx, fi, hb)
 	}
-	if err != nil {
-		return err
-	}
+	slot, inSlot := s.ix.slotOf(Extent{First: f.first, LBA: f.lba, Header: f.header})
+	segment, index, _ := s.sb.SlotOf(slot)
 	for k := range uint64(f.n) {
-		crc, _, err := disklog.BlockCRC(hdr, s.sb.LogID, offset, uint32(uint64(f.lba)+k-uint64(f.header)-uint64(hb)))
+		var crc uint32
+		if inSlot {
+			crc, _, err = disklog.SlotBlockCRC(hdr, s.sb.LogID, offset, segment, index, f.first+uint16(k))
+		} else {
+			crc, _, err = disklog.BlockCRC(hdr, s.sb.LogID, offset, uint32(uint64(f.lba)+k-uint64(f.header)-uint64(hb)))
+		}
 		if err != nil {
 			return err
 		}
@@ -1003,7 +1010,9 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 		}
 		if err := s.resume(log); err != nil {
 			s.recoveryFailed(ctx, err)
+			return
 		}
+		s.freeSlots(true)
 	case disklog.RecoveryFailed:
 		s.recoveryFailed(ctx, ev.Err)
 	}
@@ -1053,7 +1062,7 @@ func (s *Store) durable(ctx *core.Context, ev *disklog.Event, out *Output) {
 			continue
 		}
 		it := &s.ops[si.op].items[si.item]
-		it.state, it.lba, it.headerBlocks, it.payload, it.lsn = itemDurable, ev.LBA, ev.HeaderBlocks, ev.Payloads[i], ev.LSN
+		it.entry, it.state, it.lba, it.headerBlocks, it.payload, it.lsn = ev.Entries[i], itemDurable, ev.LBA, ev.HeaderBlocks, ev.Payloads[i], ev.LSN
 		if s.itemDone(si.op) {
 			s.mapResolved(ctx, s.ops[si.op].chunk, out)
 		}
@@ -1130,8 +1139,46 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 		cs.pending = cs.pending[:copy(cs.pending, cs.pending[1:])]
 		s.freeOp(oi)
 	}
+	if s.rec == nil {
+		s.freeSlots(false)
+	}
 	s.releaseChunk(ci)
 	s.checkFlushes(out)
+}
+
+// freeSlots hands the log the chunk slots the index no longer refers to, now that the records
+// that rewrote or deleted their chunks are durable. After a recovery some may already be free
+// in the log, which the manifest recorded as of a later record than replay applied again.
+func (s *Store) freeSlots(recovered bool) {
+	s.freed = s.ix.TakeFreed(s.freed[:0])
+	if s.log.Err() != nil {
+		return
+	}
+	for _, lba := range s.freed {
+		if err := s.log.FreeSlot(lba, &s.lout); err != nil && !recovered {
+			panic("chunkstore: the log refused a chunk slot the index freed: " + err.Error())
+		}
+	}
+}
+
+// CheckSlots verifies that the chunk slots the log holds in use are exactly those the index's maps refer to.
+func (s *Store) CheckSlots() error {
+	var referred []core.LBA
+	var it lsm.Iter
+	s.ix.Tree().Iter(&it)
+	for ok := it.SeekGE(nil); ok; ok = it.Next() {
+		if e, ok := decodeExtent(it.Key(), it.Value()); ok {
+			if slot, ok := s.ix.slotOf(e); ok {
+				referred = append(referred, slot)
+			}
+		}
+	}
+	slices.Sort(referred)
+	referred = slices.Compact(referred)
+	if inUse := s.log.SlotsInUse(nil); !slices.Equal(inUse, referred) {
+		return fmt.Errorf("chunkstore: chunk slots in use at %v, the maps refer to %v", inUse, referred)
+	}
+	return nil
 }
 
 func (s *Store) mapItem(it *item) {
@@ -1288,7 +1335,7 @@ func (s *Store) failWaiting(ctx *core.Context, err error, out *Output) {
 }
 
 func (s *Store) manifestLoaded(ctx *core.Context) {
-	ix, err := s.newIndex(s.rec.MaxBlobBytes())
+	ix, err := s.newIndex(s.rec.MaxBlobBytes(), s.rec.Superblock().SegmentBlocks)
 	if err != nil {
 		s.recoveryFailed(ctx, err)
 		return

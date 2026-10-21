@@ -234,6 +234,9 @@ func (h *harness) absorb() {
 			h.pending = append(h.pending, p)
 			h.trace = append(h.trace, fmt.Sprintf("fsync io%d", a.IO))
 			h.fsyncs++
+		case core.ActDiskTrim:
+			h.pending = append(h.pending, pendingIO{act: a})
+			h.trace = append(h.trace, fmt.Sprintf("trim %d+%d io%d", a.LBA, a.Len/core.BlockSize, a.IO))
 		default:
 			h.t.Fatalf("unexpected action %+v", a)
 		}

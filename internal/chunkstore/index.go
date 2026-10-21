@@ -21,7 +21,8 @@ import (
 // appended (0 for the live map) and a first block, an extent of that map; a frozen version alone
 // holds its freeze epoch, sorting before that version's extents. Version 0, the absent chunk, has
 // no extents of its own: its marker sorts before the live map's. A record's live block count sits
-// under RecordPool and its header's LBA, after every chunk.
+// under RecordPool and its header's LBA, after every chunk, and a chunk slot's under its first
+// LBA, which no record header shares: a slot segment holds no records.
 const (
 	chunkKeySize  = 4 + 8 + core.ChunkIDSize
 	frozenKeySize = chunkKeySize + 8
@@ -40,6 +41,8 @@ var (
 	ErrFrozenLive = errors.New("chunkstore: freeze of version 0 of an existing chunk")
 	// ErrBadKey reports a key that is not an extent's.
 	ErrBadKey = errors.New("chunkstore: not an extent key")
+	// ErrNoSlots reports a slot write on a disk whose segments hold no chunk slot.
+	ErrNoSlots = errors.New("chunkstore: slot write on a disk without chunk slots")
 )
 
 // Key is an extent's key: the chunk, the frozen version whose map holds it (0 for the live map) and its first block.
@@ -137,6 +140,9 @@ type Chunk struct {
 // Index is one disk's chunk index in an LSM tree: per chunk its entry, live map and frozen maps, and per record its live blocks.
 type Index struct {
 	tree          *lsm.Tree
+	segmentBlocks uint32
+	// freed is the chunk slots whose count reached zero since the owner last took them.
+	freed         []core.LBA
 	key           []byte
 	val           []byte
 	lo            []byte
@@ -165,8 +171,10 @@ func TreeConfig(cfg lsm.Config) lsm.Config {
 	return cfg
 }
 
-// NewIndex makes an index over tree, which holds the index alone, configured by TreeConfig.
-func NewIndex(tree *lsm.Tree) *Index { return &Index{tree: tree} }
+// NewIndex makes an index over tree, which holds the index alone, configured by TreeConfig, of a disk whose segments are segmentBlocks long.
+func NewIndex(tree *lsm.Tree, segmentBlocks uint32) *Index {
+	return &Index{tree: tree, segmentBlocks: segmentBlocks}
+}
 
 // Tree is the LSM tree the index is in, for its owner to flush and restore.
 func (x *Index) Tree() *lsm.Tree { return x.tree }
@@ -194,6 +202,9 @@ func (x *Index) Apply(ev *disklog.Event) error {
 		if e.Kind != disklog.EntryBlob && e.Pool == RecordPool {
 			return ErrReservedPool
 		}
+		if e.Kind == disklog.EntrySlot && x.segmentBlocks < core.BlocksPerChunk {
+			return ErrNoSlots
+		}
 		if e.Kind == disklog.EntryFreeze && e.Version == 0 && !x.absent(e.Pool, e.Chunk) {
 			if _, ok := x.Chunk(e.Pool, e.Chunk); ok {
 				return ErrFrozenLive
@@ -205,6 +216,9 @@ func (x *Index) Apply(ev *disklog.Event) error {
 		switch e.Kind {
 		case disklog.EntryWrite:
 			lba := ev.LBA + core.LBA(ev.HeaderBlocks) + core.LBA(ev.Payloads[i]/core.BlockSize)
+			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, LBA: lba, Header: ev.LBA})
+		case disklog.EntrySlot:
+			lba := core.LBA(e.Segment)*core.LBA(x.segmentBlocks) + core.LBA(e.Slot)*core.BlocksPerChunk
 			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, LBA: lba, Header: ev.LBA})
 		case disklog.EntryPunch:
 			if e.First == 0 && e.Count == core.BlocksPerChunk {
@@ -237,9 +251,7 @@ func (x *Index) insert(pool core.PoolID, c core.ChunkID, ext Extent) {
 	}
 	for _, o := range x.exts {
 		lo, hi := max(int(o.First), int(ext.First)), min(o.end(), ext.end())
-		if o.LBA != 0 {
-			x.addLive(o.Header, -(hi - lo))
-		}
+		x.refer(o, -(hi - lo))
 		switch {
 		case o.First < ext.First:
 			left := o
@@ -253,9 +265,7 @@ func (x *Index) insert(pool core.PoolID, c core.ChunkID, ext Extent) {
 		}
 	}
 	x.put(x.extentKey(pool, c, 0, ext.First), ext)
-	if ext.LBA != 0 {
-		x.addLive(ext.Header, int(ext.Count))
-	}
+	x.refer(ext, int(ext.Count))
 	ch, _ := x.Chunk(pool, c)
 	ch.Version = ext.Version
 	x.putChunk(pool, c, ch)
@@ -275,9 +285,7 @@ func (x *Index) punchWhole(pool core.PoolID, c core.ChunkID, version uint64) {
 // the live map's extents for version 0, a frozen version's epoch and extents otherwise.
 func (x *Index) removeMap(pool core.PoolID, c core.ChunkID, version uint64, exts []Extent) {
 	for _, e := range exts {
-		if e.LBA != 0 {
-			x.addLive(e.Header, -int(e.Count))
-		}
+		x.refer(e, -int(e.Count))
 	}
 	if x.pointRemovals {
 		if version != 0 {
@@ -346,9 +354,7 @@ func (x *Index) freeze(pool core.PoolID, c core.ChunkID, version, epoch uint64) 
 		x.exts = x.overlapping(x.exts[:0], pool, c, 0, 0, core.BlocksPerChunk)
 		for _, e := range x.exts {
 			x.put(x.extentKey(pool, c, version, e.First), e)
-			if e.LBA != 0 {
-				x.addLive(e.Header, int(e.Count))
-			}
+			x.refer(e, int(e.Count))
 		}
 	}
 	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), version)
@@ -375,7 +381,43 @@ func (x *Index) recordKey(header core.LBA) []byte {
 	return x.key
 }
 
-func (x *Index) addLive(header core.LBA, delta int) {
+// refer counts n more of the extent's blocks referred to, against its record and, for blocks in
+// a chunk slot, its slot.
+func (x *Index) refer(e Extent, n int) {
+	if e.LBA == 0 {
+		return
+	}
+	x.addLive(e.Header, n)
+	if slot, ok := x.slotOf(e); ok {
+		if x.addLive(slot, n) == 0 {
+			x.freed = append(x.freed, slot)
+		}
+	}
+}
+
+// slotOf is the first LBA of the chunk slot holding the extent's blocks, if they lie in one:
+// outside the segment of the record that wrote them, since a record's data follows its header.
+func (x *Index) slotOf(e Extent) (core.LBA, bool) {
+	if x.segmentBlocks < core.BlocksPerChunk || e.LBA == 0 {
+		return 0, false
+	}
+	seg := core.LBA(x.segmentBlocks)
+	return e.LBA - core.LBA(e.First), e.LBA/seg != e.Header/seg
+}
+
+// TakeFreed appends the chunk slots no map refers to any more and forgets them; a slot freed and
+// referred to again since reads as live and is left out.
+func (x *Index) TakeFreed(dst []core.LBA) []core.LBA {
+	for _, slot := range x.freed {
+		if x.Live(slot) == 0 && !slices.Contains(dst, slot) {
+			dst = append(dst, slot)
+		}
+	}
+	x.freed = x.freed[:0]
+	return dst
+}
+
+func (x *Index) addLive(header core.LBA, delta int) int {
 	n := int(x.Live(header)) + delta
 	if n < 0 {
 		panic(fmt.Sprintf("chunkstore: record at LBA %d refers to %d blocks", header, n))
@@ -383,13 +425,14 @@ func (x *Index) addLive(header core.LBA, delta int) {
 	k := x.recordKey(header)
 	if n == 0 {
 		x.must(x.tree.Delete(k))
-		return
+		return 0
 	}
 	x.val = binary.LittleEndian.AppendUint32(x.val[:0], uint32(n))
 	x.must(x.tree.Put(k, x.val))
+	return n
 }
 
-// Live is how many blocks of the record at header the live and frozen maps refer to, a block both refer to counting twice.
+// Live is how many blocks of the record at header, or of the chunk slot starting there, the live and frozen maps refer to, a block both refer to counting twice.
 func (x *Index) Live(header core.LBA) uint32 {
 	v, ok := x.tree.Get(x.recordKey(header))
 	if !ok {
@@ -590,13 +633,14 @@ func (x *Index) Move(pool core.PoolID, c core.ChunkID, first, count uint16, from
 			x.put(x.extentKey(pool, c, v, e.First), left)
 		}
 		mid := e.shifted(first)
-		mid.Count, mid.LBA, mid.Header = count, to, header
+		mid.Count = count
+		x.refer(mid, -int(count))
+		mid.LBA, mid.Header = to, header
 		x.put(x.extentKey(pool, c, v, first), mid)
 		if end := int(first) + int(count); e.end() > end {
 			x.put(x.extentKey(pool, c, v, uint16(end)), e.shifted(uint16(end)))
 		}
-		x.addLive(e.Header, -int(count))
-		x.addLive(header, int(count))
+		x.refer(mid, int(count))
 		moved++
 	}
 	return moved
@@ -607,7 +651,7 @@ type recordCount struct {
 	n      uint32
 }
 
-// Check verifies that no map's extents leave the chunk or share a block, that no freeze is newer than its chunk's entry, and that every record's count is right.
+// Check verifies that no map's extents leave the chunk or share a block, that no freeze is newer than its chunk's entry, and that every record's and chunk slot's count is right.
 func (x *Index) Check() error {
 	x.check = x.check[:0]
 	var stored []recordCount
@@ -650,6 +694,9 @@ func (x *Index) Check() error {
 			prevEnd = e.end()
 			if e.LBA != 0 {
 				x.check = append(x.check, recordCount{e.Header, uint32(e.Count)})
+			}
+			if slot, ok := x.slotOf(e); ok {
+				x.check = append(x.check, recordCount{slot, uint32(e.Count)})
 			}
 		default:
 			return fmt.Errorf("key %x outside any chunk", k)

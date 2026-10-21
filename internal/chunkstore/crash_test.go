@@ -36,7 +36,7 @@ func newStoreModel() *storeModel {
 func (m *storeModel) Apply(r writtenRecord) {
 	for i, e := range r.entries {
 		switch e.Kind {
-		case disklog.EntryWrite:
+		case disklog.EntryWrite, disklog.EntrySlot:
 			for k := range e.Count {
 				m.live[blockKey{e.Chunk, e.First + k}] = r.payloads[i][int(k)*core.BlockSize:][:core.BlockSize]
 			}
@@ -188,15 +188,42 @@ func (h *harness) recoverStore(mode disklog.Mode) {
 // landing, a seeded half of them, and all of them, recovers to a prefix of what was written that holds
 // every acknowledged record, live and at every snapshot, and the rebuilt index equals it.
 func TestCrashAtEveryAction(t *testing.T) {
-	full := newHarness(t, crashConfig())
-	crashWorkload(full)
+	crashEveryAction(t, crashConfig(), nil, crashWorkload)
+}
+
+// crashEveryAction runs the crash property over workload on a disk cut as geo, or the default
+// disk when geo is nil, checking after every recovery that the log's chunk slots in use are
+// those the index refers to. On a disk with chunk slots, a crash also lands every write but
+// those of slots, so a record lands without its slot data.
+func crashEveryAction(t *testing.T, cfg Config, geo *disklog.Geometry, workload func(*harness)) {
+	start := func() *harness {
+		if geo == nil {
+			return newHarness(t, cfg)
+		}
+		return newHarnessOn(t, cfg, *geo)
+	}
+	recoverStore := func(h *harness, k int, mode disklog.Mode) {
+		h.recoverStore(mode)
+		if err := h.s.CheckSlots(); err != nil {
+			t.Fatalf("crash at action %d, recovery in mode %d: %v", k, mode, err)
+		}
+	}
+	full := start()
+	workload(full)
 	total := full.executed
 	if full.s.Log().Manifest().IsNone() {
 		t.Fatal("the workload wrote no manifest")
 	}
+	if err := full.s.CheckSlots(); err != nil {
+		t.Fatal(err)
+	}
+	landings := []string{"none", "half", "all"}
+	if geo != nil {
+		landings = append(landings, "all but slots")
+	}
 	for k := 0; k < total; k++ {
-		for _, landing := range []string{"none", "half", "all"} {
-			h := newHarness(t, crashConfig())
+		for _, landing := range landings {
+			h := start()
 			h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 			h.crashAt = k
 			func() {
@@ -205,7 +232,7 @@ func TestCrashAtEveryAction(t *testing.T) {
 						panic(r)
 					}
 				}()
-				crashWorkload(h)
+				workload(h)
 			}()
 			switch landing {
 			case "none":
@@ -214,13 +241,17 @@ func TestCrashAtEveryAction(t *testing.T) {
 				h.disk.CrashRandom(core.NewRand(uint64(k)))
 			case "all":
 				h.disk.Crash(func(int, core.LBA) bool { return true })
+			case "all but slots":
+				h.disk.Crash(func(_ int, lba core.LBA) bool {
+					return !slices.ContainsFunc(slices.Collect(maps.Keys(h.slotData)), func(s core.LBA) bool { return lba >= s && lba < s+core.BlocksPerChunk })
+				})
 			}
 			h.crashAt = -1
-			h.recoverStore(disklog.ModeOpen)
+			recoverStore(h, k, disklog.ModeOpen)
 			m := h.recovered
 			checkModel(t, h, m, crashChunks, 2)
 			opened := dumpIndex(h.s.Index())
-			h.recoverStore(disklog.ModeRebuild)
+			recoverStore(h, k, disklog.ModeRebuild)
 			if got := dumpIndex(h.s.Index()); !slices.Equal(got, opened) {
 				t.Fatalf("crash at action %d: rebuilt index has %d entries, recovered %d", k, len(got), len(opened))
 			}

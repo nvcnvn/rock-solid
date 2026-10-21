@@ -32,8 +32,10 @@ type harness struct {
 	nextID  uint64
 	acts    []core.Action
 	seqOf   map[uint32]uint64
-	records []writtenRecord
-	oracle  *sim.Oracle[writtenRecord, *storeModel]
+	// slotData is each chunk slot's data as its newest write sent it, by the slot's first LBA.
+	slotData map[core.LBA][]byte
+	records  []writtenRecord
+	oracle   *sim.Oracle[writtenRecord, *storeModel]
 	// recovered is what the oracle expects of the last recovery.
 	recovered *storeModel
 	acked     uint64
@@ -60,13 +62,22 @@ func testConfig() Config {
 }
 
 func newHarness(t testing.TB, cfg Config) *harness {
-	h := &harness{t: t, pool: sim.NewPool(32<<20, 0), disk: sim.NewDisk(diskBytes / core.BlockSize), cfg: cfg,
-		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, crashAt: -1}
-	h.ctx = core.Context{Now: 1, Raw: 2, Pool: h.pool}
 	geo, err := disklog.GeometryFor(diskBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return newHarnessOn(t, cfg, geo)
+}
+
+// slotGeometry is a disk of 40 segments of 16 MiB, each holding 4 chunk slots.
+var slotGeometry = disklog.Geometry{SegmentBlocks: 4096, SegmentCount: 40}
+
+// newHarnessOn is newHarness on a disk cut as geo.
+func newHarnessOn(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
+	h := &harness{t: t, pool: sim.NewPool(32<<20, 0), disk: sim.NewDisk(geo.DiskBlocks()), cfg: cfg,
+		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, slotData: map[core.LBA][]byte{}, crashAt: -1}
+	h.ctx = core.Context{Now: 1, Raw: 2, Pool: h.pool}
+	var err error
 	if h.s, err = Format(&h.ctx, cfg, disklog.Superblock{LogID: 0x5eed, Geometry: geo}, &h.out); err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +156,12 @@ func (h *harness) noteWrite(a *core.Action) {
 	if h.s.sb.LogID == 0 || len(img) < core.BlockSize {
 		return
 	}
+	if a.Len == core.ChunkSize {
+		if h.oracle != nil {
+			h.slotData[a.LBA] = img
+		}
+		return
+	}
 	lba := a.LBA
 	segment := uint32(uint64(lba) / uint64(geo.SegmentBlocks))
 	if sh, err := disklog.DecodeSegmentHeader(img); err == nil && sh.LogID == h.s.sb.LogID {
@@ -157,8 +174,12 @@ func (h *harness) noteWrite(a *core.Action) {
 		return
 	}
 	rec := writtenRecord{lsn: d.Record.LSN, entries: slices.Clone(d.Entries)}
-	for i := range d.Entries {
-		rec.payloads = append(rec.payloads, slices.Clone(d.Payload(i)))
+	for i, e := range d.Entries {
+		p := slices.Clone(d.Payload(i))
+		if e.Kind == disklog.EntrySlot {
+			p = h.slotData[geo.SlotLBA(e.Segment, e.Slot)]
+		}
+		rec.payloads = append(rec.payloads, p)
 	}
 	h.records = append(h.records, rec)
 	if h.oracle != nil {
@@ -301,6 +322,8 @@ func (h *harness) logged(mark int, c core.ChunkID) []string {
 			switch e.Kind {
 			case disklog.EntryWrite:
 				out = append(out, fmt.Sprintf("write %d+%d v%#x", e.First, e.Count, e.Version))
+			case disklog.EntrySlot:
+				out = append(out, fmt.Sprintf("slot %d of %d v%#x", e.Slot, e.Segment, e.Version))
 			case disklog.EntryPunch:
 				out = append(out, fmt.Sprintf("punch %d+%d v%#x", e.First, e.Count, e.Version))
 			case disklog.EntryFreeze:
