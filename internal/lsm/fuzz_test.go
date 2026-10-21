@@ -3,6 +3,7 @@ package lsm
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/disklog"
@@ -109,6 +110,71 @@ func FuzzLoadRun(f *testing.F) {
 			if mayContain(filter, bloomHash(it.Key()[:1])) && (!ok || !bytes.Equal(k, it.Key())) {
 				t.Fatalf("prefix floor %q = %q %v, want itself", it.Key(), k, ok)
 			}
+		}
+	})
+}
+
+// FuzzLoadBoundedRun feeds arbitrary bytes as the live pieces of a run a merge has consumed up to
+// a key, the dead pieces before them as many as the root lists beyond those given: loading never
+// panics, and a run it accepts holds only keys above the bound, in strictly increasing order.
+func FuzzLoadBoundedRun(f *testing.F) {
+	cfg := Config{MaxPiece: 256, Check: true}
+	tr, err := New(cfg)
+	if err != nil {
+		f.Fatal(err)
+	}
+	for i := range 60 {
+		put(f, tr, nil, fmt.Sprintf("k%02d", i), "v")
+	}
+	if err := tr.DeleteRange([]byte("k10"), []byte("k40")); err != nil {
+		f.Fatal(err)
+	}
+	fl := newFakeLog()
+	roots, _ := fl.checkpoint(f, tr, nil)
+	refs, err := RootRefs(fl.blobs[roots[0]], nil)
+	if err != nil {
+		f.Fatal(err)
+	}
+	var ps [][]byte
+	for _, r := range append(refs, roots[0]) {
+		ps = append(ps, fl.blobs[r])
+	}
+	for _, c := range []struct {
+		dead int
+		key  string
+	}{{0, "k00"}, {1, "k20"}, {2, "k45"}, {0, ""}, {1, "zz"}} {
+		f.Add(joinPieces(ps[c.dead:]), []byte(c.key))
+	}
+	f.Fuzz(func(t *testing.T, in, key []byte) {
+		root := disklog.BlobRef{Segment: 1, Block: 1, LSN: 1}
+		pieces := splitPieces(in)
+		if len(pieces) == 0 {
+			return
+		}
+		refs, err := RootRefs(pieces[len(pieces)-1], nil)
+		dead := len(refs) - len(pieces) + 1
+		if err != nil || dead < 0 {
+			return
+		}
+		tr, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tr.LoadBoundedRun(disklog.MergeBound{Run: root, Key: key, Dead: uint32(dead)}, pieces) != nil {
+			return
+		}
+		r := tr.runs[0]
+		if !bytes.Equal(r.lo, key) || r.base < dead || r.bounded && bytes.Compare(r.first, key) <= 0 {
+			t.Fatalf("run bounded at %q, base %d, first %q, loaded past %d dead pieces", r.lo, r.base, r.first, dead)
+		}
+		var prev []byte
+		var it Iter
+		tr.Iter(&it)
+		for ok := it.SeekGE(nil); ok; ok = it.Next() {
+			if bytes.Compare(it.Key(), key) <= 0 || prev != nil && bytes.Compare(it.Key(), prev) <= 0 {
+				t.Fatalf("key %q after %q, bound %q", it.Key(), prev, key)
+			}
+			prev = append(prev[:0], it.Key()...)
 		}
 	})
 }

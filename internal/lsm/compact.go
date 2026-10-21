@@ -197,8 +197,9 @@ type Compaction struct {
 // Worker is the merge worker, from 1, whose lane of the metadata stream the merge's output fills.
 func (c *Compaction) Worker() int { return c.worker }
 
-// Finished reports whether the merge is over: its last step named by a durable manifest, or dropped.
-func (c *Compaction) Finished() bool { return c.finished }
+// Finished reports whether the merge is over: its last step named by a durable manifest, dropped,
+// or failed with its last installed step named.
+func (c *Compaction) Finished() bool { return c.finished || c.failed && c.installed == c.named }
 
 // ready reports whether the merge may run its next step: the manifest naming its last one is durable.
 func (c *Compaction) ready() bool {
@@ -237,6 +238,8 @@ func (t *Tree) PickCompaction() *Compaction {
 	return t.start(t.compaction(i, j, rule))
 }
 
+// start hands c to a worker. A tree alone numbers its merges' workers itself; a Scheduler
+// renumbers a new merge with the disk's lowest free worker, which is what keeps lanes per worker.
 func (t *Tree) start(c *Compaction) *Compaction {
 	c.running = true
 	if c.worker == 0 {
@@ -566,8 +569,9 @@ func (t *Tree) Install(c *Compaction) error {
 			t.failMerge(c)
 			return err
 		}
-		runs[i+k], c.inputs[k] = trimmed, trimmed
+		runs[i+k] = trimmed
 	}
+	copy(c.inputs, runs[i:i+n])
 	output := joinRuns(c.output, out, t.maybeFilter())
 	if c.output == nil {
 		runs = slices.Insert(runs, i+n, output)

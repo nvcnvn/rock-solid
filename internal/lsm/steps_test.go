@@ -503,6 +503,71 @@ func TestTwoMergesInSteps(t *testing.T) {
 	checkReads(t, f.restoreManifest(t, cfg), m, append(stepProbes, "n000", "n030"))
 }
 
+// A merge whose later step fails its check gives its worker back once its last installed step is
+// named, so with one worker the next merge, of another index, still starts.
+func TestFailedMergeFreesItsWorker(t *testing.T) {
+	const piece = 512
+	a, b := stepTree(t, piece, piece), stepTree(t, piece, piece)
+	fa, fb := newFakeLog(), newFakeLog()
+	fourRuns(t, a, fa)
+	fourRuns(t, b, fb)
+	s, err := NewScheduler(SchedulerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Add(a)
+	s.Add(b)
+	c := s.Next()
+	tr, f := a, fa
+	if c.tree == b {
+		tr, f = b, fb
+	}
+	c.Run()
+	if err := s.Install(c); err != nil {
+		t.Fatal(err)
+	}
+	f.checkpoint(t, tr, nil)
+	in := c.inputs[len(c.inputs)-1]
+	flipLastValue(in.blocks[len(in.blocks)-1])
+	failed := false
+	for c = s.Next(); c != nil && c.tree == tr; c = s.Next() {
+		c.Run()
+		if err := s.Install(c); err != nil {
+			if !errors.Is(err, ErrCheck) {
+				t.Fatal(err)
+			}
+			failed = true
+			break
+		}
+		f.checkpoint(t, tr, nil)
+	}
+	if !failed {
+		t.Fatal("no later step read the flipped block")
+	}
+	if next := s.Next(); next == nil || next.tree == tr || s.Running() != 1 {
+		t.Fatalf("after the failed merge the scheduler starts %+v with %d running", next, s.Running())
+	}
+}
+
+// A step whose cut of a later input fails its checksum leaves every input as it was: in the run
+// list, and held only while a merge holds it.
+func TestFailedCutLeavesTheInputs(t *testing.T) {
+	const piece = 256
+	tr := stepTree(t, piece, 2*piece)
+	fourRuns(t, tr, newFakeLog())
+	before := slices.Clone(tr.runs)
+	c := tr.pickSpan(0, 4, ruleNone)
+	c.Run()
+	in := c.inputs[1]
+	flipLastValue(in.blocks[in.blocks.blockFor(c.stepBound, false)])
+	if err := tr.Install(c); !errors.Is(err, ErrCheck) {
+		t.Fatalf("install: %v, want ErrCheck", err)
+	}
+	if !slices.Equal(tr.runs, before) || len(tr.merges) != 0 || slices.ContainsFunc(tr.runs, func(r *run) bool { return r.held }) {
+		t.Fatal("a failed cut changed the run list or left an input held")
+	}
+}
+
 // A run check that fails in a later step, a bit flipped in an input above the bound, fails that
 // step's install with ErrCheck and leaves the merge never ready again, for the index is rebuilt.
 func TestCheckFailsInALaterStep(t *testing.T) {
