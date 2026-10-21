@@ -3,6 +3,7 @@ package lsm
 import (
 	"encoding/binary"
 	"flag"
+	"fmt"
 	"math/rand/v2"
 	"runtime"
 	"testing"
@@ -171,6 +172,36 @@ func BenchmarkIterNext(b *testing.B) {
 		if !it.Next() {
 			it.SeekGE(nil)
 		}
+	}
+}
+
+// BenchmarkIterNextRuns steps a scan over 6 and 24 runs of 240,000 random keys in all; the bar is
+// a step over 24 runs under twice the step over 6 (LSM read path spike: 95 and 360 ns linear).
+func BenchmarkIterNextRuns(b *testing.B) {
+	for _, n := range []int{6, 24} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			tr := newTree(b, 1<<20)
+			r := rand.New(rand.NewPCG(9, uint64(n)))
+			f := newFakeLog()
+			for range n {
+				for range 240_000 / n {
+					put(b, tr, nil, string(binary.BigEndian.AppendUint64(nil, r.Uint64())), "value-of-some-length")
+				}
+				f.checkpoint(b, tr, nil)
+			}
+			if len(tr.runs) != n {
+				b.Fatalf("%d runs, want %d", len(tr.runs), n)
+			}
+			var it Iter
+			tr.Iter(&it)
+			it.SeekGE(nil)
+			b.ReportAllocs()
+			for b.Loop() {
+				if !it.Next() {
+					it.SeekGE(nil)
+				}
+			}
+		})
 	}
 }
 

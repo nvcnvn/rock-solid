@@ -194,14 +194,18 @@ func (st *state) sources(srcs []source) []source {
 	return srcs
 }
 
-// iterState merges sources in key order; among equal keys the newest source's entry wins, and a
-// fragment hides the older sources' entries in it. probes counts the searches of a layer's
+// iterState merges sources in key order with a min-heap of the sources at a key, ordered by key
+// and then age, as Pebble's mergingIter does; among equal keys the newest source's entry wins, and
+// a fragment hides the older sources' entries in it. probes counts the searches of a layer's
 // entries, steps a floor's rounds. With keepDel, as a flush or merge reads, it leaves hidden
 // entries for the caller to drop one by one, so that dropped, with the older entries each key
-// shadows, and fragsDropped account for every entry and fragment of the sources.
+// shadows, and fragsDropped account for every entry and fragment of the sources. With linear, a
+// reference for tests, it compares every source at every step instead of keeping the heap.
 type iterState struct {
 	srcs         []source
+	heap         []int
 	cur          int
+	linear       bool
 	keepDel      bool
 	ranges       bool
 	bounded      bool
@@ -219,7 +223,7 @@ type iterState struct {
 }
 
 func (it *iterState) reset(st *state, keepDel bool) {
-	it.srcs = st.sources(it.srcs)
+	it.srcs, it.heap = st.sources(it.srcs), it.heap[:0]
 	it.cur, it.keepDel, it.bounded, it.uok = -1, keepDel, false, false
 	it.dropped, it.fragsDropped = 0, 0
 	it.ranges = false
@@ -243,7 +247,77 @@ func (it *iterState) seek(k []byte) {
 		it.probes++
 		s.seekGE(k)
 	}
+	it.order()
 	it.settle()
+}
+
+func (it *iterState) less(a, b int) bool {
+	c := bytes.Compare(it.srcs[a].key(), it.srcs[b].key())
+	return c < 0 || c == 0 && a < b
+}
+
+// order rebuilds the heap from the sources positioned at a key.
+func (it *iterState) order() {
+	if it.linear {
+		return
+	}
+	it.heap = it.heap[:0]
+	for i := range it.srcs {
+		if it.srcs[i].ok {
+			it.heap = append(it.heap, i)
+		}
+	}
+	for i := len(it.heap)/2 - 1; i >= 0; i-- {
+		it.down(i)
+	}
+}
+
+func (it *iterState) down(i int) {
+	h := it.heap
+	for {
+		c := 2*i + 1
+		if c >= len(h) {
+			return
+		}
+		if r := c + 1; r < len(h) && it.less(h[r], h[c]) {
+			c = r
+		}
+		if !it.less(h[c], h[i]) {
+			return
+		}
+		h[i], h[c] = h[c], h[i]
+		i = c
+	}
+}
+
+// nextTop moves the source at the top of the heap to its next key.
+func (it *iterState) nextTop() {
+	s := &it.srcs[it.heap[0]]
+	s.next()
+	if !s.ok {
+		last := len(it.heap) - 1
+		it.heap[0] = it.heap[last]
+		it.heap = it.heap[:last]
+	}
+	if len(it.heap) > 0 {
+		it.down(0)
+	}
+}
+
+// top sets cur to the source at the smallest key, the newest among equal keys, or -1.
+func (it *iterState) top() {
+	it.cur = -1
+	if !it.linear {
+		if len(it.heap) > 0 {
+			it.cur = it.heap[0]
+		}
+		return
+	}
+	for i := range it.srcs {
+		if s := &it.srcs[i]; s.ok && (it.cur < 0 || bytes.Compare(s.key(), it.srcs[it.cur].key()) < 0) {
+			it.cur = i
+		}
+	}
 }
 
 func (it *iterState) next() {
@@ -257,6 +331,13 @@ func (it *iterState) next() {
 func (it *iterState) skip() int {
 	it.prev = append(it.prev[:0], it.key()...)
 	n := 0
+	if !it.linear {
+		for len(it.heap) > 0 && (n == 0 || bytes.Equal(it.srcs[it.heap[0]].key(), it.prev)) {
+			it.nextTop()
+			n++
+		}
+		return n
+	}
 	for i := range it.srcs {
 		if s := &it.srcs[i]; s.ok && bytes.Equal(s.key(), it.prev) {
 			s.next()
@@ -268,12 +349,7 @@ func (it *iterState) skip() int {
 
 func (it *iterState) settle() {
 	for {
-		it.cur = -1
-		for i := range it.srcs {
-			if s := &it.srcs[i]; s.ok && (it.cur < 0 || bytes.Compare(s.key(), it.srcs[it.cur].key()) < 0) {
-				it.cur = i
-			}
-		}
+		it.top()
 		if it.cur < 0 {
 			return
 		}
@@ -319,6 +395,7 @@ func (it *iterState) hideRange() bool {
 				}
 			}
 		}
+		it.order()
 		return true
 	}
 	return false

@@ -257,6 +257,11 @@ func rangeModel(t *testing.T, cfg Config, seed uint64, plant plants) string {
 			if d := readsDiffer(tr, m, probes); d != "" {
 				return fmt.Sprintf("step %d: %s", step, d)
 			}
+			if step%300 == 299 {
+				if d := mergesDiffer(tr, probes); d != "" {
+					return fmt.Sprintf("step %d: %s", step, d)
+				}
+			}
 			if view != nil {
 				if d := readsDiffer(view, viewModel, probes); d != "" {
 					return fmt.Sprintf("view at step %d: %s", step, d)
@@ -279,7 +284,8 @@ func rangeModel(t *testing.T, cfg Config, seed uint64, plant plants) string {
 	return ""
 }
 
-// [property] Seeds 0-59 under five configurations: gets, floors and a full scan read as a map.
+// [property] Seeds 0-59 under five configurations: gets, floors and a full scan read as a map, and
+// every 300 steps the heap merge scans as the linear one from the start and from every probe.
 func TestRangeRemovalsMatchModel(t *testing.T) {
 	for _, cfg := range rangeConfigs {
 		for seed := range uint64(60) {

@@ -1012,6 +1012,7 @@ merge that made it:
   | Two merges | | | two merges of disjoint adjacent runs at once | |
   | Fixed limit | | | a fixed run limit of 4, against the auto-tuned one | |
   | Point removals | | | | each range removal replaced by the point removals of the keys it covers (Pebble's `replace_single_delete`) |
+  | Linear merge | | | | scans, flushes and merges compare every layer at every step instead of keeping the heap |
 
 - The chunk index runs the same way with its own ops: writes, punches, freezes and cleaner moves, a
   chunk's writes in version order and freezes only after a cut; with range trims it reads as with
@@ -1107,8 +1108,11 @@ entries; counts are the bar, times on the shared VM):
   others are stepped past; a removal in the newest layer hides the key.
 - A scan of n steps that crosses k fragments of one layer does at most k + 1 fragment searches in
   that layer, checked with a search counter.
-- [property] The heap merge and the linear merge return identical scans, forward from every seek
-  key, over the range-removal property's seeds (0-59) and the metamorphic seeds (0-199).
+- A seek and the 20 steps after it allocate nothing over 24 runs with range removals.
+- [property] The heap merge and the linear merge, kept for tests, return identical scans from the
+  start and up to 8 steps from every probe, and bounded from every other one, every 300 ops of the
+  range-removal property's seeds (0-59) under its five configurations. The metamorphic tests
+  extend this to flushes, merges and reads during a flush with their Linear merge option set.
 - A scan over one source (memtable only) and over zero runs works, and a scan that exhausts
   every source reports the end once.
 
