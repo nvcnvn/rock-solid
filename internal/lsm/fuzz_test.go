@@ -99,15 +99,15 @@ func FuzzLoadRun(f *testing.F) {
 				t.Fatalf("key %q after %q", it.Key(), prev)
 			}
 			prev = append(prev[:0], it.Key()...)
-			filter := tr.runs[0].filter
-			if v, ok := tr.Get(it.Key()); mayContain(filter, bloomHash(it.Key())) && (!ok || !bytes.Equal(v, it.Value())) {
+			r := tr.runs[0]
+			if v, ok := tr.Get(it.Key()); r.mayContain(it.Key(), bloomHash(it.Key())) && (!ok || !bytes.Equal(v, it.Value())) {
 				t.Fatalf("get %q = %q %v, want %q", it.Key(), v, ok, it.Value())
 			}
 			if k, v, ok := tr.Floor(it.Key()); !ok || !bytes.Equal(k, it.Key()) || !bytes.Equal(v, it.Value()) {
 				t.Fatalf("floor %q = %q %q %v, want itself and %q", it.Key(), k, v, ok, it.Value())
 			}
 			k, _, ok := tr.FloorPrefix(it.Key())
-			if mayContain(filter, bloomHash(it.Key()[:1])) && (!ok || !bytes.Equal(k, it.Key())) {
+			if r.mayContain(it.Key()[:1], bloomHash(it.Key()[:1])) && (!ok || !bytes.Equal(k, it.Key())) {
 				t.Fatalf("prefix floor %q = %q %v, want itself", it.Key(), k, ok)
 			}
 		}

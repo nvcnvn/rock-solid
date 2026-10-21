@@ -168,7 +168,7 @@ func TestMergeVerifiesPieceChecksums(t *testing.T) {
 	})
 	t.Run("filter", func(t *testing.T) {
 		tr, _, _ := threeRuns(t)
-		tr.runs[1].filter[1] ^= 0x80
+		tr.runs[1].parts[0].bits[1] ^= 0x80
 		if err := mergeErr(tr, 1, 3); !errors.Is(err, ErrCheck) {
 			t.Fatalf("merge of a run with a flipped filter: %v, want ErrCheck", err)
 		}
@@ -185,7 +185,7 @@ func TestFlushVerifiesRewrittenRuns(t *testing.T) {
 			if part == "block" {
 				flipLastValue(tr.runs[0].blocks[0])
 			} else {
-				tr.runs[0].filter[filterKeyHdr] ^= 1
+				tr.runs[0].parts[0].bits[filterKeyHdr] ^= 1
 			}
 			if _, err := tr.BeginFlush(); err != nil {
 				t.Fatal(err)

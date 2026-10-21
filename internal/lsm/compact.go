@@ -144,8 +144,9 @@ func autoLimit(largest, buffer int, ratio float64) int {
 }
 
 // Compaction merges adjacent runs into one in steps: Run, which may run on a worker while the
-// owner goes on, merges up to Config.StepBytes of output, and Install installs it, bounding the
-// inputs below the step's last key; a checkpoint writes each step to the merge worker's lane.
+// owner goes on, merges up to Config.StepBytes of output with a filter partition of its keys, and
+// Install installs it, bounding the inputs below the step's last key; a checkpoint writes each
+// step to the merge worker's lane.
 type Compaction struct {
 	tree   *Tree
 	rule   rule
@@ -168,7 +169,6 @@ type Compaction struct {
 	it, fit      *iterState
 	olderIt      []runIter
 	olderFrag    []runIter
-	f            filterWriter
 	baseEntries  int
 	baseFrags    int
 	outEntries   int
@@ -180,18 +180,20 @@ type Compaction struct {
 	done         bool
 	err          error
 
-	running   bool
-	failed    bool
-	finished  bool
-	final     bool
-	installed int
-	written   int
-	named     int
-	freed     []int
-	entryRefs []disklog.BlobRef
-	fragRefs  []disklog.BlobRef
-	tail      []disklog.BlobRef
-	stale     []disklog.BlobRef
+	running      bool
+	failed       bool
+	finished     bool
+	final        bool
+	installed    int
+	written      int
+	named        int
+	freed        []int
+	entryRefs    []disklog.BlobRef
+	fragRefs     []disklog.BlobRef
+	partRefs     []disklog.BlobRef
+	tail         []disklog.BlobRef
+	writtenParts int
+	stale        []disklog.BlobRef
 }
 
 // Worker is the merge worker, from 1, whose lane of the metadata stream the merge's output fills.
@@ -315,8 +317,11 @@ func (t *Tree) pairMerges() {
 		out := t.runs[j]
 		out.held = true
 		nb, nf := len(out.blocks), len(out.frags)
+		np := nb + nf + out.filterPieces(0, c.limit)
 		c.output, c.bound = out, r.lo
-		c.entryRefs, c.fragRefs, c.tail = out.pieces[:nb:nb], out.pieces[nb:nb+nf:nb+nf], slices.Clone(out.pieces[nb+nf:])
+		c.entryRefs, c.fragRefs, c.partRefs = out.pieces[:nb:nb], out.pieces[nb:nb+nf:nb+nf], out.pieces[nb+nf:np:np]
+		c.tail = slices.Clone(out.pieces[np:])
+		c.writtenParts = len(out.parts)
 		c.installed, c.written, c.named = 1, 1, 1
 		c.older = t.olderCopies(j + 1)
 		t.written = slices.DeleteFunc(t.written, func(w writtenRun) bool { return w.root() == out.root() })
@@ -380,7 +385,7 @@ func (c *Compaction) Run() {
 	size := 0
 	for it.valid() && (c.step == 0 || len(out.blocks) == 0 || size+c.limit <= c.step) {
 		w.reset(buf)
-		fillBlock(&w, &c.f, it, c.limit, c.olderIt)
+		fillBlock(&w, nil, it, c.limit, c.olderIt)
 		if w.n > 0 {
 			b := bytes.Clone(w.finish())
 			out.addBlock(b, w.n)
@@ -408,9 +413,7 @@ func (c *Compaction) Run() {
 	}
 	c.outEntries += out.entries
 	c.outFrags += out.nfrags
-	if c.done {
-		out.setFilter(c.f.finish())
-	}
+	out.addPart(c.partition(out, upTo))
 	out.setBounds()
 	if !c.plant.noSums {
 		out.checksum()
@@ -429,17 +432,37 @@ func (c *Compaction) Run() {
 	c.out = out
 }
 
+// partition is the filter partition of a step's keys, fenced by its bound unless it is the last,
+// sized for exactly its keys, and so for the prefixes they and the fence have.
+func (c *Compaction) partition(out *run, fence []byte) filterPart {
+	keys := out.entries + 1
+	if c.filter == KeysAndPrefixes {
+		keys += out.entries
+	}
+	var f filterWriter
+	f.reset(c.filter, c.prefix, keys)
+	var bi blockIter
+	for _, b := range out.blocks {
+		bi.init(b)
+		for ok := bi.first(); ok; ok = bi.advance() {
+			f.add(bi.key)
+		}
+	}
+	if fence != nil && !c.plant.noFencePrefix {
+		f.addPrefix(fence)
+	}
+	return newPart(f.finish(), fence, fence != nil)
+}
+
 // begin sets up the merge from its bound: its inputs from the start, or, restored between steps,
-// from past the bound, with the output's keys in the filter and the fragments it holds skipped.
+// from past the bound, with the fragments the output holds skipped.
 func (c *Compaction) begin() bool {
 	c.started = true
-	keys := 0
 	for _, r := range c.runs {
 		if !c.plant.noSums && !r.fragsIntact() {
 			c.err = ErrCheck
 			return false
 		}
-		keys += filterKeyCount(r.filter)
 	}
 	c.it = &iterState{srcs: make([]source, len(c.runs)), cur: -1, keepDel: true, linear: c.linear}
 	c.fit = &iterState{srcs: make([]source, len(c.runs)), cur: -1, linear: c.linear}
@@ -471,16 +494,6 @@ func (c *Compaction) begin() bool {
 			break
 		}
 		c.fragsSkipped += c.fit.united
-	}
-	c.f.reset(c.filter, c.prefix, keys)
-	if c.output != nil {
-		var bi blockIter
-		for _, b := range c.output.blocks {
-			bi.init(b)
-			for ok := bi.first(); ok; ok = bi.advance() {
-				c.f.add(bi.key)
-			}
-		}
 	}
 	return true
 }
@@ -546,7 +559,7 @@ func (t *Tree) Install(c *Compaction) error {
 	if c.done {
 		var final *run
 		if c.output != nil || len(out.blocks)+len(out.frags) > 0 {
-			final = joinRuns(c.output, out, out.filter)
+			final = joinRuns(c.output, out)
 		}
 		runs := slices.Delete(slices.Clone(t.runs), i, i+n)
 		if final != nil && !t.plant.installOldest {
@@ -572,7 +585,7 @@ func (t *Tree) Install(c *Compaction) error {
 		runs[i+k] = trimmed
 	}
 	copy(c.inputs, runs[i:i+n])
-	output := joinRuns(c.output, out, t.maybeFilter())
+	output := joinRuns(c.output, out)
 	if c.output == nil {
 		runs = slices.Insert(runs, i+n, output)
 	} else {
@@ -602,16 +615,6 @@ func (t *Tree) failMerge(c *Compaction) {
 	}
 	t.merges = slices.DeleteFunc(t.merges, func(o *Compaction) bool { return o == c })
 	c.finished = true
-}
-
-// maybeFilter is a filter that may hold every key, which a merge's output carries between steps.
-func (t *Tree) maybeFilter() []byte {
-	var f filterWriter
-	f.reset(t.cfg.Filter, t.cfg.Prefix, 0)
-	for i := filterKeyHdr; i < len(f.blob)-filterTrailer; i++ {
-		f.blob[i] = 0xff
-	}
-	return f.finish()
 }
 
 // SchedulerConfig is a disk's merge scheduler's settings.

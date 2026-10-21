@@ -340,3 +340,12 @@ func firstOr(p *page, i int, hi []byte) []byte {
 
 // pickSpan starts a merge of runs [i, j) by rule, whatever the picker would choose.
 func (t *Tree) pickSpan(i, j int, r rule) *Compaction { return t.start(t.compaction(i, j, r)) }
+
+// filterBytesOf is the bytes of r's filter partitions.
+func filterBytesOf(r *run) int {
+	n := 0
+	for _, p := range r.parts {
+		n += len(p.enc)
+	}
+	return n
+}

@@ -107,7 +107,7 @@ func TestMergeInSteps(t *testing.T) {
 	if bytes.Compare(bound, []byte("k015")) <= 0 || bytes.Compare(bound, []byte("k099")) >= 0 {
 		t.Fatalf("the first step ends at %q, not inside the range removal", bound)
 	}
-	if n := c.output.bytes - len(c.output.filter); n > 2*piece {
+	if n := c.output.bytes - filterBytesOf(c.output); n > 2*piece {
 		t.Fatalf("the first step wrote %d bytes, step 512", n)
 	}
 	for _, r := range tr.runs[1:5] {
@@ -237,7 +237,11 @@ func TestBoundedRunsRead(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, r := range tr.runs[:2] {
-			r.filter = tr.maybeFilter()
+			for _, p := range r.parts {
+				for i := filterKeyHdr; i < len(p.bits)-filterTrailer; i++ {
+					p.bits[i] = 0xff
+				}
+			}
 		}
 		for _, p := range []struct {
 			k, v     string

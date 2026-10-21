@@ -326,7 +326,7 @@ func TestFlushPeakMemory(t *testing.T) {
 		t.Fatalf("froze %v: %v", froze, err)
 	}
 	memPages := checkPages(t, tr.mem, tr.mem.root)
-	filterBytes := len(tr.fl.filter.blob)
+	filterBytes := len(tr.fl.filter.blob) + partHdr + partTrailer
 	buf, spare := make([]byte, maxPiece), make([]byte, maxPiece)
 	refs := make([]disklog.BlobRef, 0, maxPiece/disklog.BlobRefSize)
 	var before, after runtime.MemStats
@@ -349,7 +349,7 @@ func TestFlushPeakMemory(t *testing.T) {
 		if kind != filterBlock && len(block) > emptyBlockSize {
 			held += len(block)
 		}
-		if got := tr.fl.frozen.bytes - len(tr.fl.frozen.filter); tr.pg.inUse != frozenPages+memPages || got != held {
+		if got := tr.fl.frozen.bytes - filterBytesOf(tr.fl.frozen); tr.pg.inUse != frozenPages+memPages || got != held {
 			t.Fatalf("piece %d: %d pages in use, want %d; run holds %d bytes, its pieces' blocks %d", pieces, tr.pg.inUse, frozenPages+memPages, got, held)
 		}
 		if _, _, err := tr.NextPiece(spare); !errors.Is(err, ErrNoFlush) {

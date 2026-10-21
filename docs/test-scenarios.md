@@ -1109,17 +1109,22 @@ Lookups:
 
 Filter build and layout:
 
-- A flush sizes the filter from the frozen memtable's entry count (twice it for whole keys with
-  prefixes), a merge from the sum of its inputs' filter key counts, and either fills it as the run
-  streams out. For 1,000,000 keys at 10 bits per key, Pebble's writer rounds 10,000,000 bits up to
+- A flush sizes its filter partition from the frozen memtable's entry count (twice it for whole keys
+  with prefixes) and fills it as the run streams out; a merge step sizes its partition from the keys
+  it wrote, plus one for its fence's prefix, once its blocks are built. For 1,000,000 keys at 10 bits per key, Pebble's writer rounds 10,000,000 bits up to
   19,532 lines of 64 bytes, then to the odd 19,533: 1,250,112 bytes plus a 5-byte trailer. The
   flush's peak is the frozen tree, one piece, the run and the filter, and its allocations do not grow
   with the entry count.
 - A prefix filter holds each distinct prefix once, so a chunk's extents add one key; a filter of
   whole keys and prefixes holds each key and each prefix that is not a whole key.
-- It follows the run's entries and range removals in pieces of its own, marked in the trailer, its
-  bytes headed by what it holds (whole keys, prefixes or both) and its key count; the run golden
-  bytes cover an entry piece, a fragment piece and the filter piece as root. A run with no filter,
+- It follows the run's entries and range removals in pieces of its own, marked in the trailer, as
+  partitions: each the filter's length, the filter, headed by what it holds (whole keys, prefixes
+  or both) and its key count, then a fence flag, length and key. A flush or a merge in one step
+  writes one unfenced partition; a merge in steps one per step, each fenced by its step's bound but
+  the last. The run golden bytes cover an entry piece, a fragment piece and the filter piece, one
+  unfenced partition, as root, and a fenced partition's bytes are golden too. Decoding partitions
+  refuses an unfenced partition before the last, fences out of order, a bad flag and any truncation
+  but at a partition's end (fuzzed, and with the run loaders). A run with no filter,
   a truncated one, or entries or fragments after it is Malformed on load, and so is a run whose
   filter holds other keys than the tree's `Config.Filter` (fuzzed with the run loader). A restore
   loads each run's filter from its pieces without hashing a key, and lookups search as before the
@@ -1451,9 +1456,7 @@ merges that take several.
 - An input piece wholly at or below the bound is reported dead once the manifest naming that bound
   is durable, and a restore never reads it; the piece the bound falls in stays whole and live. Its
   blocks below the bound leave memory unless a view holds them, so a merge's memory peak is one
-  step.
-- Open: lowering the usage table's live blocks for dead run pieces (design.md, Roadmap and open
-  questions), which no flush or merge does yet.
+  step. The usage table's live blocks for dead run pieces come with the Cleaner.
 - Output fills its merge worker's lane of the metadata stream: with two indexes merging in steps on
   one worker and checkpoint flushes going on, no output piece shares a segment with a flush piece
   or a manifest. When a merge ends, the worker's next merge continues the same open segment,
@@ -1479,6 +1482,14 @@ merges that take several.
 - A step finishes on a disk filled to its reserve: with only the reserve free and a write held, a
   checkpoint writes a merge step into a reserve segment of the worker's lane and its manifest is
   durable.
+- Filter partitions: a merge in steps writes a partition of its keys per step, fenced by the step's
+  bound, and a get, a prefix floor and a prefix seek each probe the one partition covering their key
+  or prefix, allocating nothing (`BenchmarkPartitionedLookups`, over 20 or more partitions). With
+  two-byte prefixes straddling steps and removals the merge drops ending steps, gets, floors, prefix
+  floors and prefix scans read like the map between steps, after and after a restore; with the
+  fence's prefix left out of its partition, a prefix lookup misses keys of a later partition.
+- With steps whose partitions span several pieces, a merge holds at most a step of entries and
+  fragments and its own partition beyond the manifests, the last step included.
 - Metamorphic option sets for the tree: `steps` (384-byte pieces, two-piece steps), `steps-restart`
   (one-piece steps, a failed first flush and a restart after every flush) and `steps-deferred`
   (steps installed between a flush's pieces, two merges at once); each must read as the model, and
@@ -1490,11 +1501,9 @@ merges that take several.
   segments of 4 MiB with 16 and 4 MiB steps on the 16 GiB stand-in; manifest bytes per flushed
   byte at most 0.0080 with full tables (0.0018 whole). Steps sharing the open segment left 30 to
   57 segments stranded against 8 to 10 in a segment of their own (C5).
-- A merge holds at most one step and its root beyond what the manifests name, checked after every
-  checkpoint of the two-index lane test; the simulator checks it after every step together with
-  the reserve invariant once the invariant checker exists.
-- Open: the last step writes the output's whole filter beyond the manifests (design.md, Roadmap and
-  open questions).
+- A merge holds at most one step, with its filter partition, beyond what the manifests name,
+  checked after every checkpoint of the lane tests; the simulator checks it after every step
+  together with the reserve invariant once the invariant checker exists.
 
 ## Write admission
 

@@ -25,17 +25,22 @@ type laneOwner struct {
 	refs  map[disklog.Ticket]disklog.BlobRef
 	kinds map[disklog.Ticket]string
 	segs  map[uint32][]string
-	// mergeSegs is the segment of each merge piece, in order; held the merge bytes each worker
-	// handed over since the newest durable manifest, maxHeld their most.
-	mergeSegs []uint32
-	held      map[int]int
-	maxHeld   int
-	done      bool
+	// mergeSegs is the segment of each merge piece, in order; held the bytes of entry and fragment
+	// blocks each worker handed over since the newest durable manifest, maxHeld their most;
+	// heldFilter and maxFilter the same for filter partitions, and filterPieces the merge filter
+	// pieces of each checkpoint.
+	mergeSegs    []uint32
+	held         map[int]int
+	maxHeld      int
+	heldFilter   map[int]int
+	maxFilter    int
+	filterPieces []int
+	done         bool
 }
 
 func newLaneOwner(t *testing.T, trees int, cfg Config) *laneOwner {
 	o := &laneOwner{t: t, pool: sim.NewPool(64<<20, 0), disk: sim.NewDisk((256 << 20) / core.BlockSize),
-		refs: map[disklog.Ticket]disklog.BlobRef{}, kinds: map[disklog.Ticket]string{}, segs: map[uint32][]string{}, held: map[int]int{}}
+		refs: map[disklog.Ticket]disklog.BlobRef{}, kinds: map[disklog.Ticket]string{}, segs: map[uint32][]string{}, held: map[int]int{}, heldFilter: map[int]int{}}
 	o.ctx = core.Context{Now: 1, Raw: 2, Pool: o.pool}
 	geo, err := disklog.GeometryFor(256 << 20)
 	if err != nil {
@@ -100,6 +105,7 @@ func (o *laneOwner) checkpoint() {
 	if err := o.log.BeginCheckpoint(idx); err != nil {
 		o.t.Fatal(err)
 	}
+	pieces := 0
 	for i, tr := range o.trees {
 		for {
 			buf, err := o.pool.Alloc(int(o.log.MaxBlobBytes()))
@@ -119,10 +125,20 @@ func (o *laneOwner) checkpoint() {
 				tk, err = o.log.CheckpointPiece(&o.ctx, uint32(i+1), buf, uint64(n), root, &o.out)
 				o.kinds[tk] = "flush"
 			} else {
+				block, kind, _, _, perr := splitPiece(o.pool.Bytes(buf)[:n], nil)
+				if perr != nil {
+					o.t.Fatal(perr)
+				}
+				if kind == filterBlock {
+					o.heldFilter[w] += len(block)
+					o.maxFilter = max(o.maxFilter, o.heldFilter[w])
+					pieces++
+				} else if len(block) > emptyBlockSize {
+					o.held[w] += len(block)
+					o.maxHeld = max(o.maxHeld, o.held[w])
+				}
 				tk, err = o.log.MergePiece(&o.ctx, w, uint32(i+1), buf, uint64(n), root, &o.out)
 				o.kinds[tk] = "merge"
-				o.held[w] += n
-				o.maxHeld = max(o.maxHeld, o.held[w])
 			}
 			if err != nil {
 				o.t.Fatal(err)
@@ -142,6 +158,8 @@ func (o *laneOwner) checkpoint() {
 		o.t.Fatalf("the manifest never became durable: in flight %d, queued %d, err %v, %d segments used, stalled %v, seg1 %v seg2 %v seg3 %v", o.log.InFlight(), o.log.Queued(), o.log.Err(), len(o.segs), o.log.Stalled(), o.segs[1], o.segs[2], o.segs[3])
 	}
 	clear(o.held)
+	clear(o.heldFilter)
+	o.filterPieces = append(o.filterPieces, pieces)
 	for _, tr := range o.trees {
 		if _, err := tr.CheckpointDone(); err != nil {
 			o.t.Fatal(err)
@@ -152,7 +170,7 @@ func (o *laneOwner) checkpoint() {
 // Merge output fills its merge worker's lane: with two indexes merging in steps on one worker and
 // checkpoint flushes going on, no merge piece shares a segment with a flush piece or a manifest,
 // the worker's next merge continues the segment the first one left open, every key reads the
-// same throughout, and a merge never holds more than a step and its root beyond the manifests.
+// same throughout, and a merge never holds more than a step of entries and fragments beyond the manifests.
 func TestMergeOutputFillsWorkerLane(t *testing.T) {
 	const piece, step = 1024, 1024
 	o := newLaneOwner(t, 2, stepConfig(piece, step))
@@ -219,10 +237,62 @@ func TestMergeOutputFillsWorkerLane(t *testing.T) {
 			t.Fatalf("segment %d holds %v", seg, kinds)
 		}
 	}
-	if o.maxHeld == 0 || o.maxHeld > step+2*piece {
-		t.Fatalf("a merge held %d bytes beyond the manifests, step %d", o.maxHeld, step)
+	if o.maxHeld == 0 || o.maxHeld > step+piece {
+		t.Fatalf("a merge held %d bytes of entries beyond the manifests, step %d", o.maxHeld, step)
 	}
 	for i, tr := range o.trees {
 		checkReads(t, tr, models[i], []string{fmt.Sprintf("i%d-100", i)})
 	}
+}
+
+// A merge whose steps' filter partitions span several pieces holds at most a step of entries and
+// fragments and its own partition beyond the manifests, the last step included, and its output reads
+// like the map through the partitions, prefix lookups included.
+func TestMergeStepFilterSpansPieces(t *testing.T) {
+	const piece, step = 512, 2048
+	cfg := Config{MaxPiece: piece, StepBytes: step, Check: true, Filter: KeysAndPrefixes, Prefix: func(k []byte) int { return min(len(k), 2) }}
+	fill := func(tr *Tree, m model, n int, checkpoint func()) {
+		for run := range 4 {
+			for k := range n {
+				put(t, tr, m, fmt.Sprintf("%02x%x", (k*7+run)%256, run), "v")
+			}
+			checkpoint()
+		}
+	}
+	keys := 200
+	for ; keys < 256; keys++ {
+		dry, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, dm := newFakeLog(), model{}
+		fill(dry, dm, keys, func() { f.checkpoint(t, dry, nil) })
+		mergeAll(t, dry, f, dm, nil)
+		if parts := dry.runs[0].parts; len(parts) >= 3 && len(parts[len(parts)-1].enc) > piece-pieceOverhead {
+			break
+		}
+	}
+	o := newLaneOwner(t, 1, cfg)
+	tr, m := o.trees[0], model{}
+	fill(tr, m, keys, o.checkpoint)
+	for c := tr.pickSpan(0, 4, ruleNone); c != nil; c = tr.PickCompaction() {
+		c.Run()
+		if err := tr.Install(c); err != nil {
+			t.Fatal(err)
+		}
+		o.checkpoint()
+	}
+	out := tr.runs[0]
+	biggest := 0
+	for _, p := range out.parts {
+		biggest = max(biggest, len(p.enc))
+	}
+	last := o.filterPieces[len(o.filterPieces)-1]
+	if tr.Runs() != 1 || len(out.parts) < 3 || last < 2 {
+		t.Fatalf("%d runs, %d partitions, the last step's filter in %d pieces", tr.Runs(), len(out.parts), last)
+	}
+	if o.maxHeld > step+piece || o.maxFilter > biggest {
+		t.Fatalf("a step held %d bytes of entries and %d of filter beyond the manifests; step %d, largest partition %d", o.maxHeld, o.maxFilter, step, biggest)
+	}
+	checkReads(t, tr, m, []string{"00", "7f", "7f1", "ff", "ff3", "zz"})
 }
