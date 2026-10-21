@@ -221,7 +221,7 @@ func crashEveryAction(t *testing.T, cfg Config, geo *disklog.Geometry, workload 
 	if geo != nil {
 		landings = append(landings, "all but slots")
 	}
-	for k := 0; k < total; k++ {
+	for k := 0; k <= total; k++ {
 		for _, landing := range landings {
 			h := start()
 			h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())

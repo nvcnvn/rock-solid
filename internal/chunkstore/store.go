@@ -598,7 +598,7 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 func (s *Store) writeItems(ctx *core.Context, o *op, first, last uint16) error {
 	pool, c := s.cfg.Pool, s.chunks[o.chunk].id
 	count := last - first + 1
-	if count <= s.maxWrite || count == core.BlocksPerChunk && s.log.Slots() > 0 {
+	if count <= s.maxWrite || count == core.BlocksPerChunk && s.log.SlotAvailable() {
 		o.items = append(o.items, item{entry: disklog.WriteEntry(pool, c, o.version, first, count), buf: o.req.Buf})
 		o.req.Buf = core.NoBuf
 		return nil
@@ -849,7 +849,11 @@ func (s *Store) fetchDone(ctx *core.Context, fi int32, derr core.DiskError, out 
 	}
 	ctx.Pool.Free(f.data)
 	ctx.Pool.Free(f.hdr)
+	f.lba = 0
 	s.freeFetch = append(s.freeFetch, fi)
+	if len(s.freed) > 0 && s.rec == nil {
+		s.freeSlots(false)
+	}
 	if o.reads--; o.reads > 0 {
 		return
 	}
@@ -1149,16 +1153,38 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 // freeSlots hands the log the chunk slots the index no longer refers to, now that the records
 // that rewrote or deleted their chunks are durable. After a recovery some may already be free
 // in the log, which the manifest recorded as of a later record than replay applied again.
+// A slot a read in flight reads from waits until the read completes, so the log never reuses or
+// TRIMs it under the read.
 func (s *Store) freeSlots(recovered bool) {
-	s.freed = s.ix.TakeFreed(s.freed[:0])
+	s.freed = s.ix.TakeFreed(s.freed)
 	if s.log.Err() != nil {
+		s.freed = s.freed[:0]
 		return
 	}
+	waiting := s.freed[:0]
 	for _, lba := range s.freed {
-		if err := s.log.FreeSlot(lba, &s.lout); err != nil && !recovered {
-			panic("chunkstore: the log refused a chunk slot the index freed: " + err.Error())
+		switch {
+		case s.ix.Live(lba) != 0:
+		case s.reading(lba):
+			waiting = append(waiting, lba)
+		default:
+			if err := s.log.FreeSlot(lba, &s.lout); err != nil && !recovered {
+				panic("chunkstore: the log refused a chunk slot the index freed: " + err.Error())
+			}
 		}
 	}
+	s.freed = waiting
+}
+
+// reading reports whether a read in flight reads from the chunk slot starting at slot.
+func (s *Store) reading(slot core.LBA) bool {
+	for i := range s.fetches {
+		f := &s.fetches[i]
+		if at, ok := s.ix.slotOf(Extent{First: f.first, LBA: f.lba, Header: f.header}); f.lba != 0 && ok && at == slot {
+			return true
+		}
+	}
+	return false
 }
 
 // CheckSlots verifies that the chunk slots the log holds in use are exactly those the index's maps refer to.

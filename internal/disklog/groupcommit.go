@@ -458,11 +458,6 @@ type liveChain struct {
 	entries []chainEntry
 }
 
-type trimIO struct {
-	io      core.IOID
-	segment uint32
-}
-
 type formatPhase uint8
 
 const (
@@ -480,7 +475,6 @@ type Log struct {
 	maxItemRec uint32
 	maxBlob    uint64
 	maxWrites  uint16
-	slots      uint16
 
 	phase      formatPhase
 	formatIO   core.IOID
@@ -495,9 +489,7 @@ type Log struct {
 	free       []uint64
 	usage      []SegmentUsage
 	changed    []uint64
-	// taken is each slot segment's slots in use or written by a round in flight; usage holds those in use.
-	taken []uint16
-	trims []trimIO
+	slots      slotTable
 
 	lanes     []lane
 	cpNoSpace bool
@@ -565,7 +557,7 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		maxItemRec: maxWrite - 1,
 		maxBlob:    maxBlobBytes(maxWrite - 1),
 		maxWrites:  maxWriteBlocks(maxWrite - 1),
-		slots:      sb.SlotsPerSegment(),
+		slots:      newSlotTable(sb.Geometry),
 		nextIO:     firstIO,
 		nextTicket: 1,
 		nextLSN:    1,
@@ -574,7 +566,6 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		free:       make([]uint64, (sb.SegmentCount+63)/64),
 		usage:      make([]SegmentUsage, sb.SegmentCount),
 		changed:    make([]uint64, (sb.SegmentCount+63)/64),
-		taken:      make([]uint16, sb.SegmentCount),
 		lanes:      make([]lane, laneMeta+1+workers),
 		rounds:     make([]round, cfg.CommitDepth),
 	}
@@ -611,7 +602,7 @@ func (l *Log) release(ctx *core.Context) {
 
 // Close fails the items still waiting, for room or for a manifest, and the running checkpoint with ErrClosed, and returns their buffers and the log's own to the pool; it refuses until format finishes and while a write or flush is in flight, and the log takes nothing more.
 func (l *Log) Close(ctx *core.Context, out *Output) error {
-	if l.count > 0 || l.phase != formatDone || len(l.stale) > 0 || len(l.trims) > 0 {
+	if l.count > 0 || l.phase != formatDone || len(l.stale) > 0 || len(l.slots.trims) > 0 {
 		return ErrBusy
 	}
 	if l.err != ErrClosed {
@@ -690,21 +681,6 @@ func (l *Log) MaxWriteBlocks() uint16 { return l.maxWrites }
 // FreeSegments is the number of segments free to open, the reserve included.
 func (l *Log) FreeSegments() uint32 { return l.freeCount() }
 
-// Slots is how many chunk slots a slot segment holds, 0 on a disk whose segments are smaller than a chunk.
-func (l *Log) Slots() uint16 { return l.slots }
-
-// SlotsInUse appends the first LBA of every chunk slot in use.
-func (l *Log) SlotsInUse(dst []core.LBA) []core.LBA {
-	for s := range l.usage {
-		if u := &l.usage[s]; u.State == SegmentSlot {
-			for set := u.Live; set != 0; set &= set - 1 {
-				dst = append(dst, l.sb.SlotLBA(uint32(s), uint16(bits.TrailingZeros32(set))))
-			}
-		}
-	}
-	return dst
-}
-
 // ReplayBytes is the size of the records written after the newest manifest's base, which a restart replays.
 func (l *Log) ReplayBytes() uint64 { return l.replayBytes }
 
@@ -759,51 +735,6 @@ func (l *Log) FailStalled(ctx *core.Context, out *Output) {
 	}
 }
 
-// FreeSlot frees the chunk slot whose first block is lba, which its owner's index no longer refers to since a durable record rewrote or deleted its chunk; the segment's last slot frees the segment once a TRIM of it completes. A slot not in use is ErrMalformed.
-func (l *Log) FreeSlot(lba core.LBA, out *Output) error {
-	if l.err != nil {
-		return l.err
-	}
-	s, slot, ok := l.sb.SlotOf(lba)
-	if !ok || slot >= l.slots || l.usage[s].State != SegmentSlot || l.usage[s].Live&(1<<slot) == 0 {
-		return ErrMalformed
-	}
-	u := &l.usage[s]
-	u.Live &^= 1 << slot
-	if u.Live == 0 {
-		*u = SegmentUsage{}
-	}
-	l.changed[s/64] |= 1 << (s % 64)
-	if l.taken[s] &^= 1 << slot; l.taken[s] == 0 {
-		io := l.io()
-		l.trims = append(l.trims, trimIO{io: io, segment: s})
-		out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskTrim, IO: io, LBA: l.sb.LBA(s, 0), Len: l.sb.SegmentBytes()})
-	}
-	return nil
-}
-
-// slotFor picks the slot a slot write takes: the lowest free slot of the fullest slot segment
-// with one, or else slot 0 of a free segment, which an ordinary item may open only while more
-// than the reserve and spare segments are free.
-func (l *Log) slotFor(spare uint32) (segment uint32, slot uint16, open bool, ok bool) {
-	full := uint16(1)<<l.slots - 1
-	most := 0
-	// ponytail: a scan of every segment per slot write; per-fill bitmaps if allocation shows in profiles.
-	for s, t := range l.taken {
-		if n := bits.OnesCount16(t); t != 0 && t != full && n > most {
-			segment, most = uint32(s), n
-		}
-	}
-	if most > 0 {
-		return segment, uint16(bits.TrailingZeros16(^l.taken[segment])), false, true
-	}
-	segment, ok = l.firstFree()
-	if !ok || l.freeCount() <= l.reserve+spare {
-		return 0, 0, false, false
-	}
-	return segment, 0, true, true
-}
-
 // ordinaryBytes is the share of a record laid out as lay that the hold behind a checkpoint
 // counts: none for a record of checkpoint items alone, else its header blocks and every data
 // block an ordinary entry's payload touches, so a block shared with a piece counts whole.
@@ -849,7 +780,7 @@ func (l *Log) CheckpointDue() bool {
 	return l.cp == nil && l.err == nil && l.replayBytes >= l.cfg.MaxReplayBytes
 }
 
-// Submit queues an item for the hot or the cold stream, taking its buffer; a refused item's buffer stays with the caller. A write of a whole chunk to the hot stream of a disk with chunk slots goes to a slot, and its Durable event names it as a slot write.
+// Submit queues an item for the hot or the cold stream, taking its buffer; a refused item's buffer stays with the caller. A write of a whole chunk to the hot stream goes to a chunk slot while SlotAvailable, and its Durable event names it as a slot write.
 func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ticket, error) {
 	if l.err != nil {
 		return 0, l.err
@@ -857,14 +788,17 @@ func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ti
 	if stream > Cold || it.Entry.Kind == EntrySlot {
 		return 0, ErrMalformed
 	}
-	if e := &it.Entry; e.Kind == EntryWrite && e.First == 0 && e.Count == core.BlocksPerChunk && stream == Hot && l.slots > 0 {
-		*e = SlotEntry(e.Pool, e.Chunk, e.Version, 0, 0)
-	}
 	if isCheckpointKind(&it.Entry) {
 		return 0, ErrReservedKind
 	}
+	if e := &it.Entry; e.Kind == EntryWrite && e.First == 0 && e.Count == core.BlocksPerChunk && stream == Hot && l.SlotAvailable() {
+		e.Kind = EntrySlot
+	}
 	if err := l.accept(ctx, &it); err != nil {
 		return 0, err
+	}
+	if it.Entry.Kind == EntrySlot && !l.takeSlot(&it.Entry) {
+		panic("disklog: no slot for a whole chunk submitted while one was available")
 	}
 	t := l.enqueue(&l.lanes[laneOf(stream, 0)].q, queued{entry: it.Entry, buf: it.Buf, keep: it.Keep && (it.Entry.Kind == EntryWrite || it.Entry.Kind == EntrySlot)})
 	l.startRounds(ctx, out)
@@ -1126,10 +1060,7 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 		l.formatDone(ctx, io, derr, out)
 		return
 	}
-	if j := slices.IndexFunc(l.trims, func(t trimIO) bool { return t.io == io }); j >= 0 {
-		s := l.trims[j].segment
-		l.trims = slices.Delete(l.trims, j, j+1)
-		l.free[s/64] |= 1 << (s % 64)
+	if l.trimDone(io) {
 		return
 	}
 	for i := range l.count {
@@ -1281,14 +1212,8 @@ func (l *Log) retire(out *Output) {
 	u := &l.usage[r.segment]
 	u.State, u.Newest = SegmentUsed, r.lsn
 	u.Live += uint32(r.bytes/core.BlockSize) - r.headerBlocks
-	for i := range r.entries {
-		if e := &r.entries[i]; e.Kind == EntrySlot {
-			l.changed[e.Segment/64] |= 1 << (e.Segment % 64)
-			su := &l.usage[e.Segment]
-			su.State, su.Newest = SegmentSlot, r.lsn
-			su.Live |= 1 << e.Slot
-		}
-	}
+	l.useSlots(r)
+	l.releaseHeld(out)
 	out.emitDurable(Event{
 		Kind:         Durable,
 		LSN:          r.lsn,
@@ -1394,6 +1319,9 @@ func (l *Log) drain(ctx *core.Context, q *queue, tickets []Ticket) []Ticket {
 		if it.buf != core.NoBuf && !it.keep {
 			ctx.Pool.Free(it.buf)
 		}
+		if it.entry.Kind == EntrySlot {
+			l.untake(&it.entry)
+		}
 	}
 	q.drop(q.len())
 	return tickets
@@ -1465,26 +1393,13 @@ func (l *Log) place(i int) (target, placement) {
 		if ln.opened > l.durableLSN && !l.appendAnywhere {
 			return target{}, placeWait
 		}
-		if !l.slotRoom(ln, 0) {
-			return target{}, placeNoRoom
-		}
 		return target{lane: i, segment: c.segment, seq: c.seq, offset: c.next}, placeReady
 	}
 	seg, ok := l.firstFree()
-	if !ok || ordinary && l.freeCount() <= l.reserve || !l.slotRoom(ln, 1) {
+	if !ok || ordinary && l.freeCount() <= l.reserve {
 		return target{}, placeNoRoom
 	}
 	return target{lane: i, segment: seg, seq: l.nextSeq, offset: 1, roll: true}, placeReady
-}
-
-// slotRoom reports whether the lane's first item, if a slot write, finds a slot, beside the
-// spare segments its round opens.
-func (l *Log) slotRoom(ln *lane, spare uint32) bool {
-	if ln.q.at(0).entry.Kind != EntrySlot {
-		return true
-	}
-	_, _, _, ok := l.slotFor(spare)
-	return ok
 }
 
 func (l *Log) freeCount() uint32 {
@@ -1542,15 +1457,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 			if slotted {
 				break
 			}
-			seg, slot, open, ok := l.slotFor(0)
-			if !ok {
-				break
-			}
-			if open {
-				l.free[seg/64] &^= 1 << (seg % 64)
-			}
-			l.taken[seg] |= 1 << slot
-			e.Segment, e.Slot, slotted = seg, slot, true
+			slotted = true
 		}
 		acc, lay = next, nl
 		if e.Kind == EntryWrite {
@@ -1586,7 +1493,11 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		r.tickets = append(r.tickets, it.ticket)
 		switch it.entry.Kind {
 		case EntryWrite, EntrySlot:
-			r.payloads = append(r.payloads, writeOff)
+			if it.entry.Kind == EntryWrite {
+				r.payloads = append(r.payloads, writeOff)
+			} else {
+				r.payloads = append(r.payloads, blobOff)
+			}
 			if it.keep {
 				r.keepBufs = append(r.keepBufs, it.buf)
 			} else {

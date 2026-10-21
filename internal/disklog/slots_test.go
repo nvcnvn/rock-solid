@@ -3,6 +3,7 @@ package disklog_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -122,10 +123,12 @@ func TestAWholeChunkGoesToASlot(t *testing.T) {
 	h.wantLive(0)
 }
 
-// A slot is free once its owner frees it; the segment's last slot frees the segment once its
-// TRIM completes, and the next slot write opens it again.
+// A slot its owner frees is held from reuse and TRIM until a round begun after the free is
+// durable; the segment's last slot then frees the segment once its TRIM completes, and the next
+// slot write opens it again.
 func TestFreeingTheLastSlotTrimsAndFreesTheSegment(t *testing.T) {
 	h := slotHarness(t, 4096, 8, testConfig(0))
+	h.submit(disklog.Hot, h.write(9, 1, 9))
 	h.submit(disklog.Hot, h.whole(1, 1, chunkData(1, 1)))
 	h.submit(disklog.Hot, h.whole(2, 1, chunkData(2, 1)))
 	h.run()
@@ -136,33 +139,30 @@ func TestFreeingTheLastSlotTrimsAndFreesTheSegment(t *testing.T) {
 			t.Fatalf("free LBA %d: %v", lba, err)
 		}
 	}
-	h.trace = nil
-	if err := h.log.FreeSlot(8192, &h.out); err != nil {
-		t.Fatal(err)
+	for _, lba := range []core.LBA{8192, 9216} {
+		if err := h.log.FreeSlot(lba, &h.out); err != nil {
+			t.Fatal(err)
+		}
 	}
-	h.absorb()
 	if err := h.log.FreeSlot(8192, &h.out); !errors.Is(err, disklog.ErrMalformed) {
 		t.Fatalf("free a free slot: %v", err)
 	}
-	h.wantSlots(9216)
-	if err := h.log.FreeSlot(9216, &h.out); err != nil {
-		t.Fatal(err)
-	}
 	h.absorb()
-	h.wantTrace("trim 8192+4096 io110")
-	if err := h.log.Close(&h.ctx, &h.out); !errors.Is(err, disklog.ErrBusy) {
-		t.Fatalf("close with a TRIM in flight: %v", err)
-	}
-	if disklog.FreeSegments(h.log) != free {
-		t.Fatal("the segment is free before its TRIM completes")
-	}
+	h.wantSlots()
+	h.trace = nil
 	h.run()
-	if disklog.FreeSegments(h.log) != free+1 || slices.ContainsFunc(disklog.SegmentUsageOf(h.log), func(u disklog.SegmentUsage) bool { return u.Segment == 2 }) {
-		t.Fatalf("after the TRIM: %d free, usage %+v", disklog.FreeSegments(h.log), disklog.SegmentUsageOf(h.log))
+	if len(h.trace) != 0 {
+		t.Fatalf("actions before a round: %q", h.trace)
 	}
-	h.submit(disklog.Hot, h.whole(3, 1, chunkData(3, 1)))
+	h.trace = nil
+	h.submit(disklog.Hot, h.write(4, 1, 4))
 	h.run()
-	h.wantSlots(8192)
+	if !slices.Contains(h.trace, "trim 8192+4096 io114") {
+		t.Fatalf("no TRIM once a round begun after the free is durable: %q", h.trace)
+	}
+	if disklog.FreeSegments(h.log) != free+1 {
+		t.Fatalf("after the TRIM: %d free, want %d", disklog.FreeSegments(h.log), free+1)
+	}
 }
 
 // Allocation fills the fullest slot segment first, its lowest free slot: with segments of 3 and
@@ -172,6 +172,7 @@ func TestSlotAllocationFillsTheFullestSegmentFirst(t *testing.T) {
 	if h.log.Slots() != 16 {
 		t.Fatalf("%d slots in 64 MiB segments", h.log.Slots())
 	}
+	h.submit(disklog.Hot, h.write(99, 1, 99))
 	data := chunkData(1, 1)
 	for i := range uint32(32) {
 		h.submit(disklog.Hot, h.whole(i, 1, data))
@@ -191,6 +192,8 @@ func TestSlotAllocationFillsTheFullestSegmentFirst(t *testing.T) {
 		}
 	}
 	h.absorb()
+	h.submit(disklog.Hot, h.write(98, 1, 98))
+	h.run()
 	h.submit(disklog.Hot, h.whole(40, 1, data))
 	h.run()
 	ev := h.eventsOf(disklog.Durable)
@@ -199,8 +202,9 @@ func TestSlotAllocationFillsTheFullestSegmentFirst(t *testing.T) {
 	}
 }
 
-// An ordinary item never opens a segment of the reserve for a slot: a slot write that finds
-// no slot and only the reserve free waits for room, and fails with NoSpace when there is no victim.
+// An ordinary item never opens a segment of the reserve for a slot: with no slot free and only
+// the reserve, a whole chunk is not available for a slot, and Submit takes it as a write, too
+// large for one record, which its owner then cuts into several; the hot lane's other items go on.
 func TestASlotSegmentIsNeverOpenedFromTheReserve(t *testing.T) {
 	cfg := testConfig(0)
 	cfg.NoReserve, cfg.Reserve = false, 5
@@ -211,13 +215,18 @@ func TestASlotSegmentIsNeverOpenedFromTheReserve(t *testing.T) {
 		h.submit(disklog.Hot, h.whole(i, 1, data))
 		h.run()
 	}
-	if disklog.FreeSegments(h.log) != 5 {
-		t.Fatalf("%d free segments", disklog.FreeSegments(h.log))
+	if disklog.FreeSegments(h.log) != 5 || h.log.SlotAvailable() {
+		t.Fatalf("%d free segments, a slot available: %v", disklog.FreeSegments(h.log), h.log.SlotAvailable())
 	}
-	h.submit(disklog.Hot, h.whole(9, 1, data))
-	failed := h.eventsOf(disklog.Failed)
-	if len(failed) != 1 || !errors.Is(failed[0].Err, disklog.ErrNoSpace) {
-		t.Fatalf("failed %+v", failed)
+	it := h.whole(9, 1, data)
+	if _, err := h.log.Submit(&h.ctx, disklog.Hot, it, &h.out); !errors.Is(err, disklog.ErrTooLarge) {
+		t.Fatalf("a whole chunk with no slot: %v", err)
+	}
+	h.pool.Free(it.Buf)
+	h.submit(disklog.Hot, h.write(2, 1, 2))
+	h.run()
+	if len(h.eventsOf(disklog.Failed)) != 0 || h.log.Queued() != 0 {
+		t.Fatalf("failed %+v, %d queued", h.eventsOf(disklog.Failed), h.log.Queued())
 	}
 	h.wantLive(0)
 }
@@ -282,10 +291,11 @@ func TestRecoveryChecksATailRecordsSlotData(t *testing.T) {
 	}
 }
 
-// A torn slot write under a record that a later header names durable is corruption, as damaged
-// data of a durable record in the log is: at commit_depth 2, LSN 3 was built once LSN 2, a slot
-// write, was durable, and damage to LSN 2's slot gives Corrupt(2).
-func TestADamagedSlotUnderADurableTailRecordIsCorruption(t *testing.T) {
+// Recovery reads no slot under a record a later header names durable: its round's flush
+// covered the slot, and a damaged block of it fails its CRC when read. At commit_depth 2, LSN 3
+// was built once LSN 2, a slot write, was durable, and recovery replays both whether or not LSN
+// 2's slot is damaged, without reading it.
+func TestRecoveryLeavesASlotUnderARecordNamedDurableToReads(t *testing.T) {
 	for _, damage := range []bool{false, true} {
 		cfg := testConfig(0)
 		cfg.CommitDepth = 2
@@ -302,12 +312,11 @@ func TestADamagedSlotUnderADurableTailRecordIsCorruption(t *testing.T) {
 		}
 		h.crashLanding(lbasOf(write)...)
 		res := h.recover(disklog.ModeOpen)
-		var ce *disklog.CorruptError
-		switch {
-		case damage && (!errors.As(res.err, &ce) || ce.LSN != 2):
-			t.Fatalf("damaged slot: %v", res.err)
-		case !damage && (res.err != nil || res.durable != 3):
-			t.Fatalf("intact slot: LSN %d, %v", res.durable, res.err)
+		if res.err != nil || res.durable != 3 {
+			t.Fatalf("damaged %v: LSN %d, %v", damage, res.durable, res.err)
+		}
+		if n := h.readsIn(res.trace, 2); n != 2 {
+			t.Fatalf("damaged %v: recovery read %d blocks of the slot segment, want its first two: %q", damage, n, res.trace)
 		}
 	}
 }
@@ -376,6 +385,7 @@ func TestTheUsageTableListsSlotSegments(t *testing.T) {
 	cfg.MaxReplayBytes = 4 * core.BlockSize
 	h := slotHarness(t, 4096, 8, cfg)
 	n := newNode(h, 0)
+	h.submit(disklog.Hot, h.write(9, 1, 9))
 	h.submit(disklog.Hot, h.whole(1, 1, chunkData(1, 1)))
 	h.submit(disklog.Hot, h.whole(2, 1, chunkData(2, 1)))
 	h.run()
@@ -399,4 +409,21 @@ func TestTheUsageTableListsSlotSegments(t *testing.T) {
 		t.Fatalf("manifest usage %+v", res.loaded.Segments)
 	}
 	h.wantSlots(h.geo.SlotLBA(2, 1))
+}
+
+// readsIn counts the blocks of segment seg a trace's reads cover.
+func (h *harness) readsIn(trace []string, seg uint32) uint64 {
+	h.t.Helper()
+	lo, hi := uint64(h.geo.LBA(seg, 0)), uint64(h.geo.LBA(seg+1, 0))
+	var n uint64
+	for _, a := range trace {
+		var lba, blocks, io uint64
+		if _, err := fmt.Sscanf(a, "read %d+%d io%d", &lba, &blocks, &io); err != nil {
+			continue
+		}
+		if end, start := min(lba+blocks, hi), max(lba, lo); end > start {
+			n += end - start
+		}
+	}
+	return n
 }

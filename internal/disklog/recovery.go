@@ -536,6 +536,7 @@ func (r *Recovery) classify(s uint32, img []byte) {
 		r.checkFirst(s, img[core.BlockSize:])
 	default:
 		*info = segInfo{state: segSuspect}
+		r.checkFirst(s, img[core.BlockSize:])
 	}
 }
 
@@ -750,9 +751,28 @@ func (r *Recovery) applyTable(ctx *core.Context, out *Output) bool {
 }
 
 func (r *Recovery) startQuarantine(ctx *core.Context, out *Output) {
-	if !r.applyTable(ctx, out) {
-		return
+	if r.applyTable(ctx, out) {
+		r.loaded(out)
 	}
+}
+
+// startScan reads in full, once replay has delivered every record, the segments whose first
+// block did not decode or whose block 1 holds a round in flight, except those replay found to be
+// slot segments, whose first block is chunk data: a slot segment opened since the manifest would
+// otherwise be read whole at every start. Its block 1 still counts for the tail rule, the one
+// place a round in flight that opened it again for records can have left a record.
+func (r *Recovery) startScan(ctx *core.Context, out *Output) {
+	r.markSlots()
+	r.scan = slices.DeleteFunc(r.scan, func(s uint32) bool {
+		info := &r.segs[s]
+		if info.state != segSlot {
+			return false
+		}
+		if f := info.first; f.ok && f.seq >= r.nextSeq {
+			r.noteFound(s, 1, f.seq, f.lsn, f.durable)
+		}
+		return true
+	})
 	r.phase, r.qPos = recQuarantine, 1
 	r.pumpQuarantine(ctx, out)
 }
@@ -777,7 +797,7 @@ func (r *Recovery) pumpQuarantine(ctx *core.Context, out *Output) {
 		r.qi++
 		r.qPos = 1
 	}
-	r.loaded(out)
+	r.endReplay(ctx, out)
 }
 
 type readState uint8
@@ -1086,7 +1106,7 @@ func (r *Recovery) pumpReplay(ctx *core.Context, out *Output) {
 			continue
 		}
 		if x == nil {
-			r.endReplay(ctx, out)
+			r.startScan(ctx, out)
 			return
 		}
 		if r.unsure(&x.head) {
@@ -1099,9 +1119,12 @@ func (r *Recovery) pumpReplay(ctx *core.Context, out *Output) {
 }
 
 // unsure reports a record next in the chain whose slot writes may not have landed: no header
-// found so far lies commit_depth or more LSNs past it, so its round may have been in flight.
+// found so far names it durable or lies commit_depth or more LSNs past it, so its round may
+// have been in flight. A slot freed after its record is held until a header names that record
+// durable, so its data is never checked against a later write.
 func (r *Recovery) unsure(d *DecodedRecord) bool {
-	return !r.gapped && d.Record.LSN == r.expected && d.Layout.SlotBlocks > 0 && d.Record.LSN+uint64(r.cfg.CommitDepth) > r.maxKnown
+	lsn := d.Record.LSN
+	return !r.gapped && lsn == r.expected && d.Layout.SlotBlocks > 0 && lsn > r.maxDurable && lsn+uint64(r.cfg.CommitDepth) > r.maxKnown
 }
 
 // hold copies a lane's head out of the lane's window, so the lane reads on.
@@ -1286,7 +1309,6 @@ func (r *Recovery) count(d *DecodedRecord, seg uint32) {
 // rounds that can be in flight, and no durable manifest lies past it; the manifest's LSN is past every LSN its usage table lists, so
 // replay cannot miss a record of a segment the table lists without ending before it.
 func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
-	r.markSlots()
 	var damaged, repeated uint64
 	for _, f := range r.found {
 		info := &r.segs[f.segment]
@@ -1318,6 +1340,13 @@ func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
 	if r.stopEarly && r.durable > 0 {
 		r.durable--
 	}
+	for _, f := range r.found {
+		if info := &r.segs[f.segment]; f.lsn > r.durable && info.state == segSlot {
+			// A round in flight opened the segment for records, which it does only once every
+			// slot of it was freed: the slots the table or replay name were rewritten since.
+			info.state, info.slots = segFree, 0
+		}
+	}
 	for s := range r.segs {
 		info := &r.segs[s]
 		if info.state == segSuspect && info.listed {
@@ -1348,6 +1377,9 @@ func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
 	}
 	for _, f := range r.found {
 		if f.lsn > r.durable {
+			if r.segs[f.segment].state == segSlot {
+				panic(fmt.Sprintf("disklog: erasing a record at block %d of slot segment %d, whose slots are in use", f.block, f.segment))
+			}
 			r.erase = append(r.erase, f)
 		}
 	}
@@ -1428,7 +1460,7 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 			}
 		case segSlot:
 			l.usage[s] = SegmentUsage{State: SegmentSlot, Live: uint32(info.slots), Newest: info.newest}
-			l.taken[s] = info.slots
+			l.slots.setTaken(s, info.slots)
 		}
 	}
 	table := r.manifest.Segments
