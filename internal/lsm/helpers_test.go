@@ -107,6 +107,44 @@ func readsDiffer(r reader, m model, probes []string) string {
 			return d
 		}
 	}
+	return floorsDiffer(r, want, probes)
+}
+
+// prefixFloor is the greatest of want's entries <= p with p's prefix.
+func prefixFloor(r reader, want []kv, p string) (kv, bool) {
+	i, found := slices.BinarySearchFunc(want, p, func(e kv, p string) int { return bytes.Compare([]byte(e.k), []byte(p)) })
+	if found {
+		i++
+	}
+	if i == 0 || !strings.HasPrefix(want[i-1].k, string(prefixOf(prefixFunc(r), []byte(p)))) {
+		return kv{}, false
+	}
+	return want[i-1], true
+}
+
+// floorsDiffer describes the first prefix floor that differs from want, the model's entries in
+// order, through one iterator over probes in order, a prefix seek before every fifth, then in
+// reverse, or returns "".
+func floorsDiffer(r reader, want []kv, probes []string) string {
+	var it Iter
+	r.Iter(&it)
+	for i := range 2 * len(probes) {
+		p := probes[i%len(probes)]
+		if i >= len(probes) {
+			p = probes[2*len(probes)-1-i]
+		} else if i%5 == 0 {
+			j, _ := slices.BinarySearchFunc(want, p, func(e kv, p string) int { return bytes.Compare([]byte(e.k), []byte(p)) })
+			pfx := string(prefixOf(prefixFunc(r), []byte(p)))
+			wok := j < len(want) && strings.HasPrefix(want[j].k, pfx)
+			if ok := it.SeekPrefixGE([]byte(p)); ok != wok || ok && string(it.Key()) != want[j].k {
+				return fmt.Sprintf("prefix seek %q between floors = %v, want %v", p, ok, wok)
+			}
+		}
+		w, wok := prefixFloor(r, want, p)
+		if k, v, ok := it.FloorPrefix([]byte(p)); ok != wok || ok && (string(k) != w.k || string(v) != w.v) {
+			return fmt.Sprintf("stepping prefix floor %d %q = %q %q %v, want %q %q %v", i, p, k, v, ok, w.k, w.v, wok)
+		}
+	}
 	return ""
 }
 

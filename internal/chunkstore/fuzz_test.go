@@ -49,7 +49,8 @@ func FuzzDecodeExtent(f *testing.F) {
 }
 
 // FuzzCheck fills a tree with arbitrary entries, each a length byte and a key then a length byte
-// and a value: Check returns an error or nil and never panics.
+// and a value: Check returns an error or nil and never panics, and when it passes a Reader reads
+// blocks, ascending and back, live and at an epoch, as Lookup and LookupAt do.
 func FuzzCheck(f *testing.F) {
 	x := newIndex(f)
 	if err := x.Apply(record(100,
@@ -92,9 +93,23 @@ func FuzzCheck(f *testing.F) {
 		}
 		x := NewIndex(tree)
 		if x.Check() == nil {
-			x.Lookup(1, chunk(1), 0)
-			x.LookupAt(1, chunk(1), 0, 5)
-			x.LookupAt(1, chunk(2), 0, 5)
+			var r Reader
+			for _, c := range []uint32{1, 2} {
+				x.Open(&r, 1, chunk(c))
+				for _, b := range []uint16{0, 1, 0} {
+					e, ok := x.Lookup(1, chunk(c), b)
+					if re, rok := r.Lookup(b); re != e || rok != ok {
+						t.Fatalf("chunk %d block %d: reader %+v %v, lookup %+v %v", c, b, re, rok, e, ok)
+					}
+				}
+				x.OpenAt(&r, 1, chunk(c), 5)
+				for _, b := range []uint16{0, 1} {
+					e, ok := x.LookupAt(1, chunk(c), b, 5)
+					if re, rok := r.Lookup(b); re != e || rok != ok {
+						t.Fatalf("chunk %d block %d at epoch 5: reader %+v %v, lookup %+v %v", c, b, re, rok, e, ok)
+					}
+				}
+			}
 		}
 	})
 }

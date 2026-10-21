@@ -207,7 +207,8 @@ func TestRewriteOver1024Extents(t *testing.T) {
 
 // [property] Seeds 0-5, 1,500 random writes, punches, freezes, releases and whole rewrites over 4
 // chunks, with checkpoints and compactions: every block, live and at every snapshot epoch, reads
-// as an index built with point removals does, and the invariants hold.
+// as an index built with point removals does, through Lookup and through a Reader, and the
+// invariants hold.
 func TestRangeRemovalsMatchPointRemovals(t *testing.T) {
 	const chunks = 4
 	for seed := range uint64(6) {
@@ -218,23 +219,36 @@ func TestRangeRemovalsMatchPointRemovals(t *testing.T) {
 		var epoch, version uint64
 		var frozen [][2]uint64
 		lba := core.LBA(100)
+		var rx, rp Reader
 		compare := func(step int) {
 			t.Helper()
 			for c := range uint32(chunks) {
+				x.Open(&rx, 1, chunk(c))
+				p.Open(&rp, 1, chunk(c))
 				for b := range uint16(core.BlocksPerChunk) {
 					ex, okx := x.Lookup(1, chunk(c), b)
 					ep, okp := p.Lookup(1, chunk(c), b)
 					if ex != ep || okx != okp {
 						t.Fatalf("seed %d step %d chunk %d block %d: %+v %v, point removals %+v %v", seed, step, c, b, ex, okx, ep, okp)
 					}
+					if rex, rokx := rx.Lookup(b); rex != ex || rokx != okx {
+						t.Fatalf("seed %d step %d chunk %d block %d: reader %+v %v, lookup %+v %v", seed, step, c, b, rex, rokx, ex, okx)
+					}
+					if rep, rokp := rp.Lookup(b); rep != ep || rokp != okp {
+						t.Fatalf("seed %d step %d chunk %d block %d: point removals' reader %+v %v, lookup %+v %v", seed, step, c, b, rep, rokp, ep, okp)
+					}
 				}
 				for s := uint64(1); s <= epoch; s++ {
+					x.OpenAt(&rx, 1, chunk(c), s)
 					for range 16 {
 						b := uint16(r.IntN(core.BlocksPerChunk))
 						ex, okx := x.LookupAt(1, chunk(c), b, s)
 						ep, okp := p.LookupAt(1, chunk(c), b, s)
 						if ex != ep || okx != okp {
 							t.Fatalf("seed %d step %d chunk %d block %d epoch %d: %+v %v, point removals %+v %v", seed, step, c, b, s, ex, okx, ep, okp)
+						}
+						if rex, rokx := rx.Lookup(b); rex != ex || rokx != okx {
+							t.Fatalf("seed %d step %d chunk %d block %d epoch %d: reader %+v %v, lookup %+v %v", seed, step, c, b, s, rex, rokx, ex, okx)
 						}
 					}
 				}

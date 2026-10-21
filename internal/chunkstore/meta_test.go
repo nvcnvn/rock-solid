@@ -399,12 +399,14 @@ type metaStats struct {
 	flushes, failed, compactions, together, deferred, restarts, maxRuns int
 }
 
-// metaIndex runs an Index over a log that keeps every live piece. Its write ops stand in for the
+// metaIndex runs an Index over a log that keeps every live piece, and reads each lookup through a
+// Reader as well, block by block and then its first block again. Its write ops stand in for the
 // disk log's records, a cleaner move's copy record among them: a restart loads the newest
 // manifest's runs and replays the ops after the manifest's replay point.
 type metaIndex struct {
 	set     metaSet
 	x       *Index
+	r       Reader
 	log     *metamorphic.Log
 	writes  []metamorphic.Op
 	pending *lsm.Compaction
@@ -470,6 +472,11 @@ func (m *metaIndex) Do(o metamorphic.Op) string {
 	switch o.Kind {
 	case "lookup", "at":
 		c := metaChunkID(o)
+		if o.Kind == "lookup" {
+			m.x.Open(&m.r, 1, c)
+		} else {
+			m.x.OpenAt(&m.r, 1, c, o.Uint(3))
+		}
 		var out []string
 		for b := o.Int(1); b < o.Int(1)+o.Int(2); b++ {
 			var e Extent
@@ -480,6 +487,13 @@ func (m *metaIndex) Do(o metamorphic.Op) string {
 				e, ok = m.x.LookupAt(1, c, uint16(b), o.Uint(3))
 			}
 			out = append(out, blockLine(e, ok, uint16(b)))
+			if re, rok := m.r.Lookup(uint16(b)); re != e || rok != ok {
+				return fmt.Sprintf("reader at block %d: %s", b, blockLine(re, rok, uint16(b)))
+			}
+		}
+		b := uint16(o.Int(1))
+		if e, ok := m.r.Lookup(b); blockLine(e, ok, b) != out[0] {
+			return fmt.Sprintf("reader back at block %d: %s", b, blockLine(e, ok, b))
 		}
 		return lookupLine(out)
 	case "chunk":

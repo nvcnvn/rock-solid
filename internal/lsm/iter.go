@@ -24,10 +24,13 @@ type source struct {
 	ck       []byte
 	cv       []byte
 	cok      bool
+	fwd      bool
+	ckb      []byte
+	cvb      []byte
 }
 
 func (s *source) setMem(m *memtable, root, froot uint32) {
-	s.mem, s.root, s.froot, s.run, s.ok, s.fpos, s.out = m, root, froot, nil, false, false, false
+	s.mem, s.root, s.froot, s.run, s.ok, s.fpos, s.out, s.fwd = m, root, froot, nil, false, false, false, false
 	s.frags, s.selfHide = m.hasFrags(froot), !m.mixed
 	p := m.pg.get(root)
 	s.empty = p.kind() == leafPage && p.n() == 0
@@ -35,7 +38,7 @@ func (s *source) setMem(m *memtable, root, froot uint32) {
 }
 
 func (s *source) setRun(r *run) {
-	s.mem, s.run, s.ok, s.fpos, s.empty, s.out = nil, r, false, false, false, false
+	s.mem, s.run, s.ok, s.fpos, s.empty, s.out, s.fwd = nil, r, false, false, false, false, false
 	s.frags, s.selfHide = len(r.frags) > 0, false
 	s.ri.init(r.blocks)
 	s.fr.init(r.frags)
@@ -86,6 +89,59 @@ func (s *source) floor(k []byte, strict bool) ([]byte, []byte, bool) {
 		return nil, nil, false
 	}
 	return s.ri.it.key, s.ri.it.val, true
+}
+
+// floorAt sets the candidate to a copy of the greatest entry <= b, or < b when strict, and leaves
+// the cursor at the entry after it, or at the first entry when there is none, for stepTo.
+func (s *source) floorAt(b []byte, strict bool) {
+	s.fwd, s.cok = true, false
+	if s.run != nil {
+		if s.ri.floor(b, strict) {
+			s.take()
+			return
+		}
+		s.ri.b = -1
+		s.ri.nextBlock()
+		return
+	}
+	if s.mc.seekGE(b) && !strict && bytes.Equal(s.mc.key(), b) || s.mc.prev() {
+		s.take()
+	}
+}
+
+// take copies the entry at the cursor into the candidate and moves the cursor past it.
+func (s *source) take() {
+	s.ckb = append(s.ckb[:0], s.key()...)
+	s.cvb = append(s.cvb[:0], s.value()...)
+	s.ck, s.cv, s.cok = s.ckb, s.cvb, true
+	if s.run != nil {
+		s.ri.next()
+	} else {
+		s.mc.next()
+	}
+}
+
+// stepTo moves the candidate forward to the greatest entry <= b, or < b when strict, stepping the
+// cursor floorAt left, and reports false when that would take more than forwardSteps steps or the
+// candidate is already past b.
+func (s *source) stepTo(b []byte, strict bool) bool {
+	if s.cok && !atOrBelow(s.ck, b, strict) {
+		return false
+	}
+	for n := 0; ; n++ {
+		if s.run != nil && !s.ri.valid() || s.run == nil && !s.mc.valid || !atOrBelow(s.key(), b, strict) {
+			return true
+		}
+		if n == forwardSteps {
+			return false
+		}
+		s.take()
+	}
+}
+
+func atOrBelow(k, b []byte, strict bool) bool {
+	c := bytes.Compare(k, b)
+	return c < 0 || c == 0 && !strict
 }
 
 // fragFloor is the fragment with the greatest start <= b, or < b when strict, found by a search.
@@ -207,7 +263,8 @@ func (st *state) sources(srcs []source) []source {
 // the older entries each key shadows, and fragsDropped account for every entry and fragment of the
 // sources. A prefix lookup leaves out the sources marked out, the runs whose filter rules its prefix
 // out. With linear, a reference for tests, it compares every source at every step instead of
-// keeping the heap.
+// keeping the heap. With forward, a floor leaves each layer's cursor after its candidate, so the
+// next floor at or above it steps forward instead of searching.
 type iterState struct {
 	srcs         []source
 	filter       FilterKeys
@@ -215,6 +272,7 @@ type iterState struct {
 	heap         []int
 	cur          int
 	linear       bool
+	forward      bool
 	keepDel      bool
 	ranges       bool
 	bounded      bool
@@ -252,7 +310,7 @@ func (it *iterState) value() []byte { return it.srcs[it.cur].value() }
 func (it *iterState) seek(k []byte) {
 	for i := range it.srcs {
 		s := &it.srcs[i]
-		s.fpos = false
+		s.fpos, s.fwd = false, false
 		if s.empty || s.out || s.run != nil && s.run.beyond(k) {
 			s.ok = false
 			continue
@@ -561,11 +619,22 @@ func (it *iterState) get(k []byte) ([]byte, bool) {
 
 func (it *iterState) candidate(s *source, b []byte, strict bool) {
 	if s.empty || s.out || s.run != nil && s.run.below(b, strict) {
-		s.cok = false
+		s.cok, s.fwd = false, false
 		return
 	}
 	it.probes++
+	if it.forward {
+		s.floorAt(b, strict)
+		return
+	}
 	s.ck, s.cv, s.cok = s.floor(b, strict)
+}
+
+// reach is candidate, stepping forward from the last candidate when it can.
+func (it *iterState) reach(s *source, b []byte, strict bool) {
+	if !s.fwd || !s.stepTo(b, strict) {
+		it.candidate(s, b, strict)
+	}
 }
 
 // lower returns the bound below which older layers are searched: the start of s's fragment that
@@ -610,7 +679,7 @@ func (it *iterState) floor(k []byte) ([]byte, []byte, bool) {
 		if s.selfHide {
 			bound, strict = it.lower(s, bound, strict)
 		}
-		it.candidate(s, bound, strict)
+		it.reach(s, bound, strict)
 		if !s.selfHide {
 			bound, strict = it.lower(s, bound, strict)
 		}
@@ -663,7 +732,11 @@ func (it *iterState) floorPrefix(k []byte) ([]byte, []byte, bool) {
 
 // setPrefix bounds the next floor or scan to k's prefix and marks the runs whose filter rules it out.
 func (it *iterState) setPrefix(k []byte) {
-	it.pfx = append(it.pfx[:0], prefixOf(it.prefix, k)...)
+	p := prefixOf(it.prefix, k)
+	if it.inPrefix && bytes.Equal(p, it.pfx) {
+		return
+	}
+	it.pfx = append(it.pfx[:0], p...)
 	it.inPrefix = true
 	fk, on := it.filterKey(k, false)
 	it.filterOut(fk, on)
@@ -697,6 +770,13 @@ func (it *Iter) SeekPrefixGE(k []byte) bool {
 	return it.s.valid()
 }
 
+// FloorPrefix returns the greatest key <= k with k's prefix, or any when k has none, and its value until the iterator's next read; a floor at or above the last steps each layer forward instead of searching it.
+func (it *Iter) FloorPrefix(k []byte) ([]byte, []byte, bool) {
+	it.s.setPrefix(k)
+	it.s.forward, it.s.cur = true, -1
+	return it.s.floor(k)
+}
+
 // Next moves to the next key.
 func (it *Iter) Next() bool {
 	if it.s.valid() {
@@ -704,6 +784,12 @@ func (it *Iter) Next() bool {
 	}
 	return it.s.valid()
 }
+
+// Searches is how many layer searches the iterator's reads have made.
+func (it *Iter) Searches() int { return it.s.probes }
+
+// FilterProbes is how many run filters the iterator's reads have probed.
+func (it *Iter) FilterProbes() int { return it.s.filterProbes }
 
 // Valid reports whether the iterator is at a key.
 func (it *Iter) Valid() bool { return it.s.valid() }
