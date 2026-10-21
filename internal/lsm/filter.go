@@ -42,6 +42,18 @@ const (
 	KeysAndPrefixes
 )
 
+// FilterProbe is how lookups use run filters; all but ProbeFilters are option sets of the metamorphic tests.
+type FilterProbe uint8
+
+const (
+	// ProbeFilters skips each run whose filter rules a lookup's key out.
+	ProbeFilters FilterProbe = iota
+	// FiltersOff probes no filter and searches every run.
+	FiltersOff
+	// FiltersMaybe probes every filter and takes each answer as "maybe".
+	FiltersMaybe
+)
+
 // A run's filter is what it holds u8 (a FilterKeys) and the key count u64, then RocksDB's full
 // filter: lines of 64 bytes of bits, the probe count u8 and the line count u32, little-endian.
 // Every probe of a key falls in one line.

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 func put(t testing.TB, tr *Tree, m model, k, v string) {
@@ -79,7 +80,7 @@ func TestGetReplaceAndPrefixScan(t *testing.T) {
 // [property] Random puts and removes, with keys up to MaxKey and values up to MaxValue so pages
 // split at every level, read back as the model does at every step, and the page structure holds.
 func TestMemtableMatchesModel(t *testing.T) {
-	for seed := range 12 {
+	seeds.Run(t, 0, 12, func(seed uint64) {
 		r := rand.New(rand.NewPCG(uint64(seed), 1))
 		tr := newTree(t, 1<<20)
 		m := model{}
@@ -97,13 +98,13 @@ func TestMemtableMatchesModel(t *testing.T) {
 				}
 			}
 		}
-	}
+	})
 }
 
 // [property] Views opened at random points read the tree as it was then while writes continue,
 // closing them frees every page they alone held, and only pages a view could reach are copied.
 func TestViewsCopyOnWrite(t *testing.T) {
-	for seed := range 6 {
+	seeds.Run(t, 0, 6, func(seed uint64) {
 		r := rand.New(rand.NewPCG(uint64(seed), 3))
 		tr := newTree(t, 1<<20)
 		m := model{}
@@ -140,7 +141,7 @@ func TestViewsCopyOnWrite(t *testing.T) {
 		if tr.pg.inUse != before {
 			t.Fatalf("a write with no view open copied pages: %d to %d", before, tr.pg.inUse)
 		}
-	}
+	})
 }
 
 // Keys inserted in random order, as files are created, leave leaves well filled because a full

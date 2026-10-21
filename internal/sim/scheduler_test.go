@@ -13,6 +13,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 	"github.com/nvcnvn/rock-solid/internal/sim/toy"
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
@@ -24,7 +25,7 @@ const processSeeds = 20
 // Run under GOMAXPROCS=1 and 8 and with -race too; TestSeedTracesMatchInOtherProcesses does
 // the first two from whatever binary runs it, so a -race run checks its own build.
 func TestTwoRunsOfASeedGiveByteIdenticalTraces(t *testing.T) {
-	for seed := range uint64(50) {
+	seeds.Run(t, 0, 50, func(seed uint64) {
 		a := seedTrace(seed)
 		if err := trace.Check(a); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
@@ -32,7 +33,7 @@ func TestTwoRunsOfASeedGiveByteIdenticalTraces(t *testing.T) {
 		if err := sim.CompareTraces(a, seedTrace(seed)); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
-	}
+	})
 }
 
 func TestSeedsZeroTo99GivePairwiseDifferentTraces(t *testing.T) {

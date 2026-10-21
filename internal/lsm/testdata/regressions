@@ -3,7 +3,7 @@
 
 # Metamorphic testing spike, plant P1 at seed 0 under A: a flush dropped a removal that hid a key in
 # an older run.
-run set=A
+run set=A plant=drop-removals
 put aa v26x
 flush
 del aa
@@ -14,7 +14,7 @@ floor aca: none
 
 # Metamorphic testing spike, plant P3 under A: a restore loaded runs in the order the manifest
 # listed them, not by age, after a failed flush left its frozen memtable for the next.
-run set=A
+run set=A plant=load-unordered
 put e v30xxx
 flush
 del e
@@ -25,46 +25,125 @@ floor e
 ----
 floor e: none
 
-# Seed 0 under steps-restart while merge steps were built: a restart between steps lost a key the
-# merge had already written to its output.
-run set=steps-restart
-put fff v2217x
-put faa v2219xx
-put bbcde v2682xxxxxx
-put fdad v2687xxx
-put fcfc v2689xxxxxxx
-put b v2690xxxxxx
-put dae v2693xxxxxxx
-put eccb v2694xxxxxxx
-put d v2704xxxxxx
-put bccfb v2706xxx
-put ebe v2708xxxxx
-put dcbba v2709xxxx
-put efabf v2724xxxx
-put ceae v2736
-put cdbdbb v2737
-put caefa v2738xxxx
-put ded v2740xxxxxx
-put cf v2744xxxx
-put acfedd v2745xxxx
-put af v2749xxxxxxx
-put de v2750xxxxxx
-put fd v2780xxxxxxx
-put aa v2781
-put feaef v2782xxxxxxx
-put afa v2783xxxx
-put c v2786xxxxxx
-put cadc v2789xx
-put feceaa v2790xxxxx
-put fc v2791
+# Plant P5 under A, reduced from seed 0 of 1,200 ops (the seed runner first found it at seed 250,
+# whose case no longer merges past the older run once merges size each filter partition from the
+# keys they write): a merge dropped a range removal though an older run held keys under it, so a
+# floor read one of them back.
+run set=A plant=merge-no-older
+put deac v507xxxxxxx
 flush
-put aecbc v2793xxxx
+put e v550xxxxx
+put dfea v551xxxx
+put cbdcc v552xxxxxxx
+put adbdaf v553xxxxx
+put bbadaf v554xxxxxxx
 flush
-put abaa v2815xxx
-vopen 48
+put eaeff v560xx
+put fe v561xxxx
+flushfail 2
+put a v568xxxxxxx
+flush
+put cab v583xxxx
+flushfail 1
+delrange aac dcace
+compact
+put efa v606xxxxx
 flush
 flush
-restart
-scan ffe 3
+put fecdac v678
+flush
+compact
+floor beedf
 ----
-scan ffe 3: [fff=v2217x]
+floor beedf: a=v568xxxxxxx
+
+# Found at seed 0 under steps-restart while merge steps were built, then reduced again from seed 19
+# once steps-restart's pieces grew: the merge's order check wrote each key it checked into the
+# merge's bound, so a manifest named a later bound and a restart lost keys the merge had already
+# written to its output.
+run set=steps-restart plant=clobber-bound
+put ddf v1372xxxxx
+put dbd v1375xxxx
+put bcc v1377xxxxxxx
+put eaff v1378xxxxxxx
+put fbbe v1379x
+put bca v1382x
+put fa v1383xxxxxx
+flush
+put df v1386xxxxxxx
+del a
+put c v1388xxx
+put adbfbc v1389xxx
+put ceee v1390x
+put ea v1392
+put bbdec v1393xxx
+put ecadcf v1394
+put ff v1395xxx
+put b v1408xx
+put fbf v1409xxxx
+vopen 31
+put aacab v1411xxxxxx
+del c
+put fe v1416
+put aebb v1418x
+put cd v1419
+put bbbdc v1421x
+put cd v1423x
+put ebc v1424x
+put bbcfe v1425xx
+put aae v1426xxxxx
+flush
+put aabc v1434xxxxxxx
+put fdde v1437xxxx
+flush
+put f v1454xxxxxx
+flushfail 1
+put dbbc v1482xx
+put fffa v1483xxxx
+put cbda v1485xxxxx
+put beafea v1492xxxxxxx
+put ffade v1496xxxxxxx
+put dddc v1509xxxxxxx
+put fdefbb v1510
+put cbfffe v1514x
+put c v1516xxxx
+put dbbaea v1517xxxx
+put ee v1518
+put bbff v1519xxxxx
+put dffaeb v1520xxxxx
+put ecc v1522
+put bbefcf v1524xxx
+put dfcfe v1525xxxxxx
+put ebfeff v1526xxxxxx
+put fd v1527xx
+put feebac v1529xxx
+put afc v1530xxxxxxx
+put ecaf v1535xx
+put dfecea v1537xxxxxxx
+flushfail 3
+del f
+flush
+put aca v1547xxxx
+del bf
+del eb
+del a
+put dddc v1561xxxxxxx
+delrange cd ce
+put c v1578xxxx
+del c
+put cafd v1581xx
+put cd v1583xx
+put ee v1585xxxxxxx
+del fe
+put cac v1603x
+put cdf v1604x
+put dca v1605xxx
+del a
+del ffceff
+put ebc v1611xxxx
+put d v1612xxxxxx
+del ef
+restart
+scan fe 7
+----
+scan fe 7: [feebac=v1529xxx ff=v1395xxx ffade=v1496xxxxxxx fffa=v1483xxxx]

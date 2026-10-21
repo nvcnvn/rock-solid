@@ -9,6 +9,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 const (
@@ -136,9 +137,9 @@ func TestAbsentFreezeE2(t *testing.T) {
 // snapshot reads as a model of whole-volume copies holds it, and a rebuild from the records, and
 // the records applied twice, give the same index.
 func TestAbsentFreezeE3(t *testing.T) {
-	const seeds, steps = 50, 400
+	const n, steps = 50, 400
 	badSeeds, absents := 0, 0
-	for seed := range uint64(seeds) {
+	seeds.Run(t, 0, n, func(seed uint64) {
 		r := rand.New(rand.NewPCG(seed, 10))
 		w := &epochWriter{x: newIndex(t), lba: 100}
 		var live volumeModel
@@ -175,9 +176,12 @@ func TestAbsentFreezeE3(t *testing.T) {
 		if !slices.Equal(dumpIndex(rebuilt), dumpIndex(w.x)) {
 			t.Fatalf("seed %d: the records applied twice differ", seed)
 		}
-	}
+	})
 	if badSeeds > 0 {
-		t.Errorf("%d of %d seeds read a snapshot wrong", badSeeds, seeds)
+		t.Errorf("%d of %d seeds read a snapshot wrong", badSeeds, n)
+	}
+	if !seeds.Default() {
+		return
 	}
 	if absents == 0 {
 		t.Fatal("no seed froze an absent chunk")

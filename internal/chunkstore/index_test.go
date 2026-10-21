@@ -397,6 +397,112 @@ func BenchmarkLookup(b *testing.B) {
 	}
 }
 
+// BenchmarkRead8Blocks is BenchmarkLookup's index read 8 ascending blocks at a time, a lookup per
+// block and through one Reader.
+func BenchmarkRead8Blocks(b *testing.B) {
+	x := newIndex(b)
+	r := rand.New(rand.NewPCG(1, 1))
+	lba := core.LBA(100)
+	for range 20000 {
+		first := uint16(r.IntN(core.BlocksPerChunk))
+		apply(b, x, record(lba, disklog.WriteEntry(1, chunk(uint32(r.IntN(64))), 1, first, 1)))
+		lba += 2
+	}
+	var rd Reader
+	for _, reader := range []bool{false, true} {
+		b.Run(map[bool]string{false: "lookup", true: "reader"}[reader], func(b *testing.B) {
+			b.ReportAllocs()
+			i := 0
+			for b.Loop() {
+				c, first := chunk(uint32(i%64)), uint16(i*7919%(core.BlocksPerChunk-8))
+				x.Open(&rd, 1, c)
+				for blk := first; blk < first+8; blk++ {
+					if reader {
+						rd.Lookup(blk)
+					} else {
+						x.Lookup(1, c, blk)
+					}
+				}
+				i++
+			}
+		})
+	}
+}
+
+// A read of blocks 3, 4 and 700 of a chunk of one-block extents spread over three runs and the
+// memtable, through one Reader, probes each run's filter once with the chunk's prefix, searches
+// each layer holding the chunk once for 3, serves 4 by stepping from 3 without a search, reads as
+// Lookup does, and allocates nothing; 700, too far to step to, and 2, below it, search again. A
+// block 16 extents past each layer's candidate steps; one 17 past searches.
+func TestReaderSteps(t *testing.T) {
+	x := newIndexWith(t, lsm.Config{MaxPiece: replayMaxPiece, Check: true}, false)
+	s := &runStore{blobs: map[disklog.BlobRef][]byte{}}
+	lba, version := core.LBA(100), uint64(0)
+	for layer := range uint16(4) {
+		for b := layer; b < core.BlocksPerChunk; b += 4 {
+			version++
+			apply(t, x, record(lba, disklog.WriteEntry(1, chunk(7), version, b, 1)))
+			lba += 2
+		}
+		if layer < 3 {
+			s.checkpoint(t, x.Tree())
+		}
+		if layer == 2 {
+			apply(t, x, record(lba, disklog.WriteEntry(1, chunk(1), 1, 0, 1), disklog.WriteEntry(1, chunk(30), 1, 0, 1)))
+			lba += 3
+			s.checkpoint(t, x.Tree())
+		}
+	}
+	if x.Tree().Runs() != 4 {
+		t.Fatalf("%d runs", x.Tree().Runs())
+	}
+	var r Reader
+	x.Open(&r, 1, chunk(7))
+	for _, c := range []struct {
+		block    uint16
+		searches int
+	}{{3, 4}, {4, 0}, {700, 4}, {2, 4}, {2 + 4*16, 0}, {2 + 4*(2*16+1), 4}} {
+		before := r.it.Searches()
+		e, ok := r.Lookup(c.block)
+		if le, lok := x.Lookup(1, chunk(7), c.block); !ok || e != le || ok != lok {
+			t.Fatalf("block %d: reader %+v %v, lookup %+v %v", c.block, e, ok, le, lok)
+		}
+		if n := r.it.Searches() - before; n != c.searches {
+			t.Fatalf("block %d: %d searches, want %d", c.block, n, c.searches)
+		}
+	}
+	if n := r.it.FilterProbes(); n != x.Tree().Runs() {
+		t.Fatalf("%d filter probes over %d runs", n, x.Tree().Runs())
+	}
+	if a := testing.AllocsPerRun(100, func() {
+		x.Open(&r, 1, chunk(7))
+		r.Lookup(3)
+		r.Lookup(4)
+		r.Lookup(700)
+	}); a != 0 {
+		t.Fatalf("a read of three blocks allocates %v", a)
+	}
+}
+
+// A Reader read after the index changes panics under Check: the memtable pages it holds may have
+// changed under it.
+func TestReaderAfterChangePanics(t *testing.T) {
+	x := newIndex(t)
+	apply(t, x, record(100, disklog.WriteEntry(1, chunk(1), 1, 0, 1)))
+	var r Reader
+	x.Open(&r, 1, chunk(1))
+	if _, ok := r.Lookup(0); !ok {
+		t.Fatal("block 0 missing")
+	}
+	apply(t, x, record(102, disklog.WriteEntry(1, chunk(1), 2, 1, 1)))
+	defer func() {
+		if recover() == nil {
+			t.Fatal("a read after a write did not panic")
+		}
+	}()
+	r.Lookup(1)
+}
+
 func BenchmarkApplyWrite(b *testing.B) {
 	x := newIndex(b)
 	ev := record(100, disklog.WriteEntry(1, chunk(1), 1, 0, 1))

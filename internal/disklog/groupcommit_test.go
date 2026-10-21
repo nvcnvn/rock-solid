@@ -277,6 +277,39 @@ func TestDiskErrorWithRoundsInFlight(t *testing.T) {
 	h.close()
 }
 
+// A kept write's buffer stays with its submitter once the item is Durable or Failed, and the log
+// frees it for an item in doubt once its write completes.
+func TestKeptBuffers(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	kept := h.write(0, 1, 1)
+	kept.Keep = true
+	h.submit(disklog.Hot, kept)
+	h.run()
+	h.wantLive(1)
+	h.pool.Free(kept.Buf)
+	h.wantLive(0)
+	h.close()
+
+	cfg := testConfig(0)
+	cfg.CommitDepth = 2
+	h = formatted(t, gib, cfg)
+	var items [3]disklog.Item
+	for i, stream := range []disklog.Stream{disklog.Hot, disklog.Cold, disklog.Hot} {
+		items[i] = h.write(uint32(i), 1, uint64(i+1))
+		items[i].Keep = true
+		h.submit(stream, items[i])
+	}
+	h.failIO[firstIO+6] = core.DiskIO
+	h.step(2)
+	if len(h.eventsOf(disklog.InDoubt)) != 1 || len(h.eventsOf(disklog.Failed)) != 1 {
+		t.Fatalf("events %+v", h.events)
+	}
+	h.run()
+	h.wantLive(1)
+	h.pool.Free(items[2].Buf)
+	h.close()
+}
+
 func TestAFlushBeforeItsWriteFailsTheLog(t *testing.T) {
 	h := formatted(t, gib, testConfig(0))
 	a := h.submit(disklog.Hot, h.write(0, 1, 1))

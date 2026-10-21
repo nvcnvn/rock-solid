@@ -428,6 +428,12 @@ func (c *Compaction) Run() {
 	if !c.plant.noSums {
 		out.checksum()
 	}
+	if c.plant.clobberBound {
+		prev := c.bound
+		for i, b := range out.blocks {
+			_, prev, _ = validateBlock(b, prev, i > 0 || c.bound != nil)
+		}
+	}
 	if c.check {
 		c.checkOrder(out)
 	}
@@ -582,6 +588,7 @@ func (t *Tree) Install(c *Compaction) error {
 		if final == nil {
 			c.written = c.installed
 		}
+		t.gen++
 		t.checkRuns()
 		return nil
 	}
@@ -609,6 +616,7 @@ func (t *Tree) Install(c *Compaction) error {
 			r.blocks[c.freed[k]] = nil
 		}
 	}
+	t.gen++
 	t.checkRuns()
 	return nil
 }

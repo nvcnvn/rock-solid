@@ -7,6 +7,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 func TestCheckpointBackpressure(t *testing.T) {
@@ -64,7 +65,7 @@ func TestCheckpointBackpressure(t *testing.T) {
 
 func TestStalledCheckpointBoundsReplay(t *testing.T) {
 	var holds int
-	for seed := uint64(1); seed <= 10; seed++ {
+	seeds.Run(t, 1, 10, func(seed uint64) {
 		r := core.NewRand(seed)
 		cfg := testConfig(r.Range(3, 16))
 		cfg.CommitDepth = int(r.Range(1, 3))
@@ -129,6 +130,9 @@ func TestStalledCheckpointBoundsReplay(t *testing.T) {
 		if len(h.eventsOf(disklog.Failed)) != 0 {
 			t.Fatalf("seed %d: %+v", seed, h.eventsOf(disklog.Failed))
 		}
+	})
+	if !seeds.Default() {
+		return
 	}
 	if holds == 0 {
 		t.Fatal("no seed held a write behind its checkpoint")

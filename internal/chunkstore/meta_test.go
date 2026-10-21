@@ -16,14 +16,10 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim/metamorphic"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
-var (
-	metaSeeds = flag.Int("meta.seeds", 20, "seeds the metamorphic test runs, from meta.first")
-	metaFirst = flag.Int("meta.first", 0, "the first seed the metamorphic test runs")
-	metaSeed  = flag.Int("meta.seed", -1, "the one seed the metamorphic test runs, to replay a failure")
-	metaOps   = flag.Int("meta.ops", 1000, "ops per metamorphic seed")
-)
+var metaOps = flag.Int("meta.ops", 1000, "ops per metamorphic seed")
 
 // metaBlocks is how many blocks of a chunk ops touch; a whole-chunk punch covers all of
 // core.BlocksPerChunk.
@@ -37,6 +33,7 @@ type metaSet struct {
 	runLimit int
 	merges   int
 	points   bool
+	probe    lsm.FilterProbe
 	run      metamorphic.Options
 }
 
@@ -54,6 +51,8 @@ var metaSets = []metaSet{
 	{name: "two-merges", piece: 1024, merges: 2, run: metamorphic.Options{FlushOps: true, FlushEvery: 3, CompactEvery: 8}},
 	{name: "fixed-limit", piece: 1024, runLimit: 4, run: metamorphic.Options{FlushOps: true, FlushEvery: 5, Compact: metamorphic.CompactEager}},
 	{name: "point-removals", piece: 4096, points: true, run: metamorphic.Options{FlushOps: true, FlushEvery: 20, Compact: metamorphic.CompactEager}},
+	{name: "filters-off", piece: 512, probe: lsm.FiltersOff, run: metamorphic.Options{FlushOps: true, FlushEvery: 10}},
+	{name: "filters-maybe", piece: 512, probe: lsm.FiltersMaybe, run: metamorphic.Options{FlushOps: true, FlushEvery: 10}},
 }
 
 func metaSetNamed(name string) (metaSet, bool) {
@@ -396,15 +395,17 @@ func genMetaOps(seed uint64, n int) []metamorphic.Op {
 
 // metaStats counts what an option set made the index's tree do.
 type metaStats struct {
-	flushes, failed, compactions, together, deferred, restarts, maxRuns int
+	flushes, failed, compactions, together, deferred, restarts, maxRuns, searches, filterProbes int
 }
 
-// metaIndex runs an Index over a log that keeps every live piece. Its write ops stand in for the
+// metaIndex runs an Index over a log that keeps every live piece, and reads each lookup through a
+// Reader as well, block by block and then its first block again. Its write ops stand in for the
 // disk log's records, a cleaner move's copy record among them: a restart loads the newest
 // manifest's runs and replays the ops after the manifest's replay point.
 type metaIndex struct {
 	set     metaSet
 	x       *Index
+	r       Reader
 	log     *metamorphic.Log
 	writes  []metamorphic.Op
 	pending *lsm.Compaction
@@ -418,7 +419,7 @@ func newMetaIndex(s metaSet) *metaIndex {
 }
 
 func (m *metaIndex) newTree() *lsm.Tree {
-	tr, err := lsm.New(lsm.Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, Check: true})
+	tr, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, Check: true, Probe: m.set.probe}))
 	if err != nil {
 		panic(err)
 	}
@@ -470,6 +471,11 @@ func (m *metaIndex) Do(o metamorphic.Op) string {
 	switch o.Kind {
 	case "lookup", "at":
 		c := metaChunkID(o)
+		if o.Kind == "lookup" {
+			m.x.Open(&m.r, 1, c)
+		} else {
+			m.x.OpenAt(&m.r, 1, c, o.Uint(3))
+		}
 		var out []string
 		for b := o.Int(1); b < o.Int(1)+o.Int(2); b++ {
 			var e Extent
@@ -480,6 +486,13 @@ func (m *metaIndex) Do(o metamorphic.Op) string {
 				e, ok = m.x.LookupAt(1, c, uint16(b), o.Uint(3))
 			}
 			out = append(out, blockLine(e, ok, uint16(b)))
+			if re, rok := m.r.Lookup(uint16(b)); re != e || rok != ok {
+				return fmt.Sprintf("reader at block %d: %s", b, blockLine(re, rok, uint16(b)))
+			}
+		}
+		b := uint16(o.Int(1))
+		if e, ok := m.r.Lookup(b); blockLine(e, ok, b) != out[0] {
+			return fmt.Sprintf("reader back at block %d: %s", b, blockLine(e, ok, b))
 		}
 		return lookupLine(out)
 	case "chunk":
@@ -579,6 +592,7 @@ func (m *metaIndex) Restart() error {
 			return errors.New(l)
 		}
 	}
+	m.st.searches, m.st.filterProbes = m.st.searches+m.x.Tree().Searches(), m.st.filterProbes+m.x.Tree().FilterProbes()
 	m.x = x
 	m.st.restarts++
 	return nil
@@ -601,6 +615,7 @@ func metaRun(ops []metamorphic.Op, sets []metaSet) (*metaFailure, []metaStats) {
 	for i, s := range sets {
 		e := newMetaIndex(s)
 		got := metamorphic.Run(ops, s.run, e)
+		e.st.searches, e.st.filterProbes = e.st.searches+e.x.Tree().Searches(), e.st.filterProbes+e.x.Tree().FilterProbes()
 		stats[i] = e.st
 		stats[i].flushes, stats[i].failed = e.log.Flushes, e.log.Failed
 		if d := metamorphic.Diff(want, got); d >= 0 && fail == nil {
@@ -622,26 +637,15 @@ func metaCase(ops []metamorphic.Op, s metaSet) string {
 	return b.String()
 }
 
-func metaSeedRange() []uint64 {
-	if *metaSeed >= 0 {
-		return []uint64{uint64(*metaSeed)}
-	}
-	n := *metaSeeds
-	if testing.Short() {
-		n = min(n, 3)
-	}
-	seeds := make([]uint64, n)
-	for i := range seeds {
-		seeds[i] = uint64(*metaFirst + i)
-	}
-	return seeds
-}
-
 // [property] Every seed's ops read the same, block by block, live and at snapshot epochs, under
 // every option set and the model; a failing seed prints its replay command and its ops reduced to
 // a regression case for testdata/regressions.
 func TestMetamorphic(t *testing.T) {
-	for _, seed := range metaSeedRange() {
+	n := 20
+	if testing.Short() {
+		n = 3
+	}
+	seeds.Run(t, 0, n, func(seed uint64) {
 		ops := genMetaOps(seed, *metaOps)
 		fail, stats := metaRun(ops, metaSets)
 		if seed == 0 {
@@ -650,15 +654,16 @@ func TestMetamorphic(t *testing.T) {
 			}
 		}
 		if fail == nil {
-			continue
+			return
 		}
+		last := ops[fail.at].String()
 		small := metamorphic.Reduce(ops[:fail.at+1], func(c []metamorphic.Op) bool {
 			f, _ := metaRun(c, []metaSet{fail.set})
-			return f != nil
+			return f != nil && f.at == len(c)-1 && c[f.at].String() == last
 		})
-		t.Fatalf("seed %d under %s, op %d %q: got %q, the model %q\nreplay: go test ./internal/chunkstore -run 'TestMetamorphic$' -meta.seed=%d -meta.ops=%d\nreduced to %d ops:\n%s",
-			seed, fail.set.name, fail.at, ops[fail.at], fail.got[fail.at], fail.want[fail.at], seed, *metaOps, len(small), metaCase(small, fail.set))
-	}
+		t.Fatalf("seed %d under %s, op %d %q: got %q, the model %q\nreduced to %d ops, for testdata/regressions:\n%s",
+			seed, fail.set.name, fail.at, ops[fail.at], fail.got[fail.at], fail.want[fail.at], len(small), metaCase(small, fail.set))
+	})
 }
 
 // The generated ops exercise what the index does on seed 0: absent freezes, whole-chunk punches,
@@ -705,6 +710,8 @@ func TestMetamorphicOpsCoverTheIndex(t *testing.T) {
 		{"D installs merges during flushes", of("D").deferred > 0},
 		{"two-merges runs two at once", of("two-merges").together > 0},
 		{"fixed-limit compacts", of("fixed-limit").compactions > 0},
+		{"filters-off probes no filter and searches more than C", of("filters-off").filterProbes == 0 && of("filters-off").searches > of("C").searches},
+		{"filters-maybe probes as C does and searches as filters-off does", of("filters-maybe").filterProbes == of("C").filterProbes && of("filters-maybe").searches == of("filters-off").searches},
 	} {
 		if !c.ok {
 			t.Errorf("%s: %+v", c.name, stats)

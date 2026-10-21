@@ -302,6 +302,14 @@ func (r *Recovery) Err() error { return r.err }
 // Superblock is the log's identity and geometry, once read.
 func (r *Recovery) Superblock() Superblock { return r.sb }
 
+// MaxBlobBytes is the largest blob one record of the resumed log holds, once the superblock is read.
+func (r *Recovery) MaxBlobBytes() uint64 {
+	if r.sb.SegmentBlocks < 3 || r.cfg.MaxRecordBytes < 3*core.BlockSize {
+		return 0
+	}
+	return maxBlobBytes(itemRecordBlocks(r.cfg, r.sb))
+}
+
 // Manifest is the manifest recovery loaded, if any.
 func (r *Recovery) Manifest() (Manifest, bool) { return r.manifest, r.hasManifest }
 

@@ -217,6 +217,15 @@ func TestPartitionedLookupsProbeOnce(t *testing.T) {
 		t.Fatalf("%d runs, %d partitions", tr.Runs(), len(tr.runs[0].parts))
 	}
 	var it Iter
+	tr.Iter(&it)
+	for _, k := range []string{"b001", "b041", "b077"} {
+		if _, _, ok := it.FloorPrefix([]byte(k)); !ok {
+			t.Fatalf("stepping prefix floor %s found nothing", k)
+		}
+	}
+	if n := it.FilterProbes(); n != 1 {
+		t.Fatalf("a stepping prefix floor over three keys of one prefix probed %d partitions", n)
+	}
 	for _, k := range []string{"a000", "b041", "c999", "d079", "d0"} {
 		kb := []byte(k)
 		for name, lookup := range map[string]func(){

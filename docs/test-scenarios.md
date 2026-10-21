@@ -390,7 +390,12 @@ types](#event-and-action-types), and this section is their only home.
   reported in order; every finished checkpoint's manifest reads back with its base LSN and runs;
   without an error there is one flush per write; the only refusal is TooLarge; Close then finds
   every buffer back. Coverage: NoSpace, TooLarge, a full pool, InDoubt, deferred flushes, depth
-  above 1, manifest pieces, finished and failed checkpoints all occur.
+  above 1, manifest pieces, finished and failed checkpoints all occur. After a failed checkpoint
+  the next begins only once a record has become durable since, as the chunk store's does, and a
+  seed that has not ended after 100,000 steps fails.
+- Regression (seed 1957 of the property above, found by the seed runner): on a 16-block disk with
+  no free segment every checkpoint fails with NoSpace as it begins; beginning the next at once
+  never ended, and the items it kept grew one process to 12 GB.
 - Checkpoint end to end (max replay 8 blocks, counted in record blocks, segment headers left out):
   after a 3-block write (a 4-block record) a checkpoint is not due; after a second (8 blocks) it is.
   A third write is in flight when the checkpoint begins for owners 5 and 6; a second begin is Busy,
@@ -849,13 +854,17 @@ Edge and negative cases:
 - [property] On a 1 GiB simulated disk (16-block records, a checkpoint every 96 blocks of records,
   the decode check on), seeds 0-3, three generations of 150 rounds of 1-4 items over 12 chunks
   (writes of 1-6 blocks, a whole-chunk punch one time in ten, a partial punch two in ten, a freeze
-  of a written chunk one in eight), with checkpoints and compactions: after each generation a
+  one in eight: of the chunk's version, or of version 0, absent, for a chunk not yet written), plus
+  a freeze of version 0 one item in 32 of two chunks never written, with checkpoints and
+  compactions: after each generation a
   rebuild from every record header, and recovery from the manifest's runs plus replay, both equal
   the live index and pass its check. Every seed writes multi-piece runs, carries runs, compacts and
   freezes.
 - A crash once a checkpoint's manifest record is durable but before any segment header names it,
   with a compaction's result among its runs, recovers from the previous manifest plus replay to the
   live index, and the next checkpoint's restart does too (seeds 0-3).
+- Every recovery in these tests is also checked against the crash oracle's block model ([Chunk
+  index under the crash oracle](#chunk-index-under-the-crash-oracle)).
 - Benchmarks: a lookup among 20,000 one-block extents over 64 chunks, and applying a one-block write.
 
 ## Range removals
@@ -1013,15 +1022,15 @@ op, diffs histories and reduces a failing ops file; its log stands in for the di
 tree, keeping every live piece, the newest manifest's runs and its replay point. Each index's test generates its ops, runs
 them under every option set and a model, and turns a failure into a regression case.
 
-- [property] `internal/lsm` `TestMetamorphic`: seeds 0-19 per run (`-meta.seeds`, `-meta.first`;
-  `-meta.seed n` replays one), 3,000 ops in a text form (`put aa v26x`, `del aa`, `delrange a ab`,
+- [property] `internal/lsm` `TestMetamorphic`: seeds 0-19 in `go test`, more in the
+  [seed runner](#seed-runner-in-ci), 3,000 ops in a text form (`put aa v26x`, `del aa`, `delrange a ab`,
   `flush`, `flushfail 3`, `floor aca`), drawn by weight: puts 35, removals 10, range removals 3,
   gets 15, floors 8, scans 5, views 11 (open 2, get 5, scan 2, close 2), flushes 5, failed flushes 1,
   compactions 4, restarts 1; keys of 1-6 letters a-f, a put's key new one time in four, a range
   removal half the time over every key with its start as prefix. With `Check` on, every set's
   history equals the map model's line by line (Pebble's `internal/metamorphic`, a7b8321871e3).
-  The 11 sets take about 5 s for 20 seeds on an Intel Core Ultra 5 235U; seeds 0-10,002 passed
-  once with the change that added the test.
+  The 13 sets take about 4 s for 20 seeds on an Apple M4 Pro; seeds 0-10,002 passed once with
+  the change that added the test, and seeds 0-199 with the filter sets.
 
   | Set | Pieces | Flushes | Compaction | Other |
   | --- | --- | --- | --- | --- |
@@ -1036,12 +1045,14 @@ them under every option set and a model, and turns a failure into a regression c
   | Fixed limit | 1 KiB | after every 5 writes | eager, with a fixed run limit of 4 against the auto-tuned one | |
   | Point removals | 4 KiB | after every 20 writes | eager | each range removal replaced by the point removals of the keys it covers (Pebble's `replace_single_delete`) |
   | Linear merge | 1 KiB | after every 15 writes | eager | scans, flushes and merges compare every layer at every step instead of keeping the heap, so the flush's and merge's drop counts and reads during a flush meet the reference too; up to 4 ops between a flush's pieces |
+  | Filters off | 256 B | as C | as C | lookups probe no run filter and search every run (`Config.Probe = FiltersOff`) |
+  | Filters maybe | 256 B | as C | as C | lookups probe every run filter and take each answer as "maybe" (`FiltersMaybe`) |
 
-  Run filters adds two sets: Filters off, and every filter probe answering "maybe".
 - Each set reaches the extreme it is there for on seed 0: F never flushes, C keeps over 100 runs
   and G 40, E fails flushes and restarts more than A, D installs merges while a memtable is frozen,
-  Two merges runs two at once, and Fixed limit compacts.
-- [property] The chunk index's `TestMetamorphic` (`internal/chunkstore`): seeds 0-19 per run, 1,000
+  Two merges runs two at once, Fixed limit compacts, and Filters off and Filters maybe search more
+  layers than C ([Filter option sets](#filter-option-sets)).
+- [property] The chunk index's `TestMetamorphic` (`internal/chunkstore`): seeds 0-19 in `go test`, 1,000
   ops drawn by weight: writes 30, punches 6, whole-chunk punches 1, cuts 2, releases of frozen
   versions 2, cleaner moves 8, reads of blocks live 12 and at a snapshot epoch 10, chunk entries 3,
   `FrozenAt` 3, live counts per record 4, `Check` 2, and the structural ops as above. Writes and
@@ -1050,12 +1061,14 @@ them under every option set and a model, and turns a failure into a regression c
   write after each cut; a move copies one block a live or frozen map holds. Every op names its record's LBA, so
   histories are comparable, and a move is logged and replayed after a restart as the cleaner's copy
   record will be. The model is per chunk an entry, a live map and frozen maps, block by block. The
-  sets are internal/lsm's but Linear merge, with C's pieces 512 bytes, since a 256-byte root lists
-  13 pieces, fewer than a flush of 10 index writes takes; Point removals sets the index's own
-  point-removal switch, so range trims read as point removals. A seed costs about 0.3 s over the
-  10 sets; at 3,000 ops it costs 3 s, as runs pile up to 300 under C and Two merges. Seed 0
-  holds an absent freeze, a whole-chunk punch, a move that changes a map, a release and a read
-  that finds a frozen version. Seeds 0-10,001 passed once with the change that added the test.
+  tree is configured by `TreeConfig`, so its filters hold chunk prefixes as in production. The
+  sets are internal/lsm's but Linear merge, with the pieces of C, Filters off and Filters maybe
+  512 bytes, since a 256-byte root lists 13 pieces, fewer than a flush of 10 index writes takes;
+  Point removals sets the index's own point-removal switch, so range trims read as point removals.
+  A seed costs about 0.2 s over the 12 sets on an Apple M4 Pro; at 3,000 ops about 4 s, as runs
+  pile up to 300 under C and Two merges. Seed 0 holds an absent freeze, a whole-chunk punch, a
+  move that changes a map, a release and a read that finds a frozen version. Seeds 0-10,001
+  passed once with the change that added the test, and seeds 0-299 with the filter sets.
 - Planted bugs, each one line behind a test switch in `internal/lsm` and run with `Check` off so
   the history diff alone finds them, fail at least one seed of 20 under the set each is checked
   under, and the failing seed differs from set F too:
@@ -1167,15 +1180,28 @@ entries; counts are the bar, times on the shared VM):
 
 ## Filter option sets
 
-- Both indexes' metamorphic tests pass under two more option sets: filters off, and every filter
-  probe answering "maybe".
+- Both indexes' metamorphic tests (`TestMetamorphic` in `internal/lsm` and `internal/chunkstore`)
+  pass under two more option sets with C's cadence: Filters off, whose lookups probe no run filter,
+  and Filters maybe, whose every probe answers "maybe" (`lsm.Config.Probe`). The chunk index's
+  runs under every set hold its chunk-prefix filters.
+- On seed 0, in both indexes, both sets search the same number of layers, more than C; Filters
+  off probes no filter, and Filters maybe probes as many as C (`Tree.FilterProbes`), so a Filters
+  maybe that skips its probes fails (`TestMetamorphicOpsCoverTheIndex`,
+  `TestMetamorphicSetsReachTheirExtremes`).
 
 ## Chunk reader
 
 - A read of blocks 3, 4 and 700 of one chunk takes one reader: it probes the filters once with the
-  chunk's prefix and serves 4 by stepping forward from 3, as Pebble's `TrySeekUsingNext` does.
-- A read of ascending blocks searches each layer once, then steps; a block below the last one read
-  searches again.
+  chunk's prefix and serves 4 by stepping forward from 3, as Pebble's `TrySeekUsingNext` does, and
+  allocates nothing.
+- A read of ascending blocks searches each layer once, then steps; a block exactly 16 entries past
+  a layer's candidate steps, and one 17 past, or below it, searches that layer again.
+- A reader read after the index changes panics under `Check`.
+- [property] The reader reads every block as the per-block lookup does, live and at snapshot
+  epochs, with range or point removals, with filters on and off: the range-removal property's
+  readers, the metamorphic tests' lookups (each read ascending, then its first block again) and the
+  fuzzed index. In `internal/lsm`, one iterator's prefix floors over every probe, ascending with a
+  prefix seek between, then descending, equal the map model under the range-removal property.
 
 ## Heap merge
 
@@ -1240,7 +1266,8 @@ version 0 outright; the column below is what it read when the writer left that f
 
 The byte-range oracle applies every acknowledged write's and punch's bytes in version order;
 after every step, every block, live and at every snapshot epoch, must equal it. A chunk is 1,024
-blocks. "Pending" is a write whose record is not yet durable.
+blocks. "Pending" is a write whose record is not yet durable. Tests feed requests and disk
+completions to `chunkstore.Store` and read the records it writes back from the disk actions.
 
 Byte ranges to whole blocks:
 
@@ -1251,119 +1278,118 @@ Byte ranges to whole blocks:
 | Write(off 4,000, 200 B) | blocks 0 and 1, both merged | bytes 4,000-4,199 set, rest zeros |
 | Write(off 3 × 4,096 + 10, 3 × 4,096 B) | 4 blocks: 2 merged edges, 2 whole | exact range |
 | Punch(off 0, 8,192) | one punch entry, blocks 0-1 | zeros |
-| Punch(off 100, 8,192) over written blocks 0-2 | one record, one version: block 1 a punch entry, blocks 0 and 2 merged with zeros as write entries | 100..8,291 zeros, the rest unchanged |
+| Punch(off 100, 8,192) over written blocks 0-2 | one version: block 1 a punch entry, blocks 0 and 2 merged with zeros as write entries, 2 base reads | 100..8,291 zeros, the rest unchanged |
 | Punch(off 0, 4 MiB) | whole-chunk punch, tombstone | zeros; the chunk entry stays with the new version |
-| Punch of a chunk that does not exist | succeeds | zeros |
+| Punch of a chunk that does not exist | nothing; version 0 | zeros |
 | Read(off 100, 10 B) of a written block | | those 10 bytes |
-| Read of a chunk never written | | zeros |
+| Read of a chunk never written | | zeros, and no chunk entry |
 | Write after a tombstone | the version continues past the tombstone's | the written bytes, other blocks zeros |
 
-API edges (Open where noted):
+API edges (`TestAPIEdges`):
 
-- A write or punch running past 4 MiB is refused with no disk action. Open: its error, and
-  whether a write is cut at the chunk's end by the caller or refused.
-- Open: a zero-length write, punch or read (refused, or a no-op that returns the current
-  version).
-- Open: the version a punch returns (the new version, as a write does, by design.md's "Every
-  write and punch returns a new version"), and whether a punch of a chunk that does not exist
-  takes one.
-- Open: `expectVer` = 0 on an absent chunk (create-if-absent) succeeds and on an existing chunk
-  fails.
+- A write or punch running past 4 MiB, and a zero-length write, punch or read, is refused with
+  `ErrRange` and no disk action; the store frees a refused write's buffer.
+- A punch returns its new version; a punch of a chunk with no version returns 0.
+- `expectVer` = 0 on an absent chunk creates it; on an existing chunk it fails with `ErrVersion`.
+- `Seal` returns `ErrSeal`.
 
 Merging against the newest ordered version (the [sub-block writes spike](../spikes/sub-block-writes/)):
 
-- W1 = Write(off 0, 10 B 'a') pending, then W2 = Write(off 5, 10 B 'b'): W2's base is W1's merged
-  block, so the block reads `aaaaabbbbbbbbbb` then zeros. Merging against the committed version
-  (zeros) would lose W1's bytes: the spike's M2 lost bytes on 500 of 500 seeds.
+- W1 = Write(off 0, 10 B 'a') pending, then W2 = Write(off 5, 10 B 'b'): W2's base is W1's
+  pending block, with no base read, so the block reads `aaaaabbbbbbbbbb` then zeros.
 - [property] M1 and M9 as a regression bar: seeds 0-499, 400 steps, two clients with 8 writes
-  pipelined each, 1 byte to 3 blocks at random offsets: 0 seeds wrong.
-- A base read from disk checks the block's CRC32C. A base whose CRC fails is never merged into a
-  new version.
+  pipelined each, 1 byte to 3 blocks at random offsets in 4 blocks: 0 seeds wrong. Merging
+  against the committed version instead (M2, a plant) loses bytes on each of seeds 0-19.
+- A base read from disk checks the block's CRC32C. A base that fails it, or whose read fails
+  with Io, is never merged: the write fails with `ErrBadChecksum` or the disk's error, logs
+  nothing, and the chunk's next write goes on; a read of that block fails the same way.
 - A base read in flight holds the chunk's later operations: W1 partial (base on disk), then W2
-  whole-block to the same block, then W3 to another chunk. W3 goes out at once; W2 is ordered and
-  logged after W1, so the block ends as W2. The trace shows no write of C before W1's base read
-  completes.
-- Open: what a single-node store does when a base read fails, by CRC or with Io (the replicated
-  design fetches it from another member), and whether the operations queued behind it fail or go
-  on. It must never carry rot into a new version.
-- Open: the per-loop cache of recently merged blocks (design, Data layer) is unmeasured; whether
-  it is part of this item.
+  whole-block to the same block, then W3 to another chunk. W3's round goes out at once; no record
+  of C is written before W1's base read completes, W2 is ordered after W1, and the block ends as
+  W2.
 
-Versions (fixed here: 32-bit interval over a 32-bit counter):
+Versions (32-bit interval over a 32-bit counter):
 
 | State | Next write's version |
 | --- | --- |
 | Chunk with no version, local interval 1 | (1, 1) = 0x0000000100000001 |
-| Chunk at (1, 7), pending or committed | (1, 8) |
+| Chunk at (1, 7) committed; at (1, 6) with (1, 7) pending | (1, 8) |
 | Chunk at (1, 0xFFFFFFFF) | the local interval is raised: (2, 1) |
-| Another chunk at (1, 5), after that raise | (2, 1), above (1, 5) |
+| Another chunk at (1, 5), and a chunk with no version, after that raise | (2, 1) |
 
 - Version 0 is the absent chunk and is never assigned.
-- No two writes of a chunk get one version (simulator invariant), across restarts too.
-- Open: where the single-node interval number is kept so a restart never reuses a version that a
-  lost, unacknowledged write held; the replicated design takes a new interval on restart.
-- Open: whether the raise waits for the chunk's pending writes to become durable, as the
-  replicated primary lets its PG's pending writes commit first.
-- `expectVer`: Write with expectVer = the chunk's version succeeds; any other value fails with
-  no disk action. Open: whether it compares with the newest ordered version or the newest
-  committed one, and its error.
-- `atVer`: a read at a frozen version returns that version's bytes and never waits for a writer;
-  a read at an old version no snapshot pins is an error. Open: its error.
-- A read without `atVer` while W is pending returns the previous version's blocks at once.
+- No two durable writes of a chunk get one version, across restarts too: the interval starts at
+  1 at each open and never drops below the interval of the version it increments, so a restart
+  reuses only a version no durable record holds.
+- `expectVer`: compared with the newest ordered version, so with W1 pending at v, expectVer = v
+  succeeds and expectVer = the committed version fails with `ErrVersion`.
+- `atVer`: a read at a frozen version returns that version's bytes; a read at version 0 of a
+  chunk frozen absent reads zeros; a read at a version no snapshot pins is `ErrNoVersion`.
+- A read without `atVer` while W is pending issues its block reads at once and returns the
+  previous version's blocks.
 
 Commit and mapping:
 
 - A write is mapped when its record is durable, and a chunk's writes are mapped in version order
-  (the chunk epochs spike's R2 failed 200 of 200 seeds out of order). The log reports Durable in
-  LSN order, so the case that matters is a write of several items: a whole-chunk W1 of 5 items,
-  then a 1-block W2 to the same chunk whose record becomes durable before W1's last item. W2 is
-  mapped after W1. Open: whether W2's acknowledgment waits for W1's; if it does not, a read after
-  W2's acknowledgment misses W2 until W1 completes.
-- Snapshot epochs on the writer side: the first write after a cut to a chunk at version v puts
-  freeze(v, epoch) in its record; with a pending W1 at epoch 1 and a cut, W2 at epoch 2 freezes
-  W1's version; a second write at epoch 2 carries no freeze; a chunk with no version gets a freeze
-  of version 0 (Absent freeze), and so does a punch that gives an absent chunk its first version;
-  in a volume whose snapshot epoch is 0, a chunk's first write carries no freeze.
-- Open: whether a punch of a never-written chunk logs a record at all.
-- Open: the `ChunkStore` interface carries no snapshot epoch, so how the single-node store learns
-  a write's epoch is unstated.
+  (the chunk epochs spike's R2 failed 200 of 200 seeds out of order), each answered when mapped.
+  A lane takes items in submit order, so a 1-block W2 behind a whole-chunk W1 is durable no
+  earlier than W1's last item; W2 is mapped and answered after W1, and merges against W1's
+  pending block.
+- Snapshot epochs on the writer side: each write and punch carries its volume's snapshot epoch.
+  The first write after a cut to a chunk at version v puts freeze(v, epoch) before its blocks;
+  with a pending W1 at epoch 1, W2 at epoch 2 freezes W1's version; a second write at epoch 2
+  carries no freeze; a chunk with no version gets a freeze of version 0 (Absent freeze); a punch
+  of a chunk with no version logs nothing; in a volume whose snapshot epoch is 0 nothing freezes.
 - A write larger than one record goes as several items of one version. Group commit refuses an
   item whose record exceeds the round less one block, so with 1 MiB rounds an item holds 254 data
-  blocks: a whole 4 MiB chunk goes as 5 items (254, 254, 254, 254 and 8), acknowledged once all 5
-  are durable; the freeze, if any, is in the first. On the 1 GiB test disk (64-block rounds) an
-  item holds 62 data blocks and a chunk takes 17 items (16 × 62 + 32).
-- A checkpoint while such a write is partly durable keeps its replay point at the record of the
-  write's first item (design.md: a replay point never passes a pending write's record).
-- Open: a crash with 3 of the 5 items durable. Replay maps those blocks under the version, so an
-  unacknowledged write is partly visible; the design does not say whether that is allowed or must
-  be all or nothing.
+  blocks and a whole 4 MiB chunk goes as 5 items (254, 254, 254, 254 and 8); on the 1 GiB test
+  disk (64-block rounds) an item holds 62 data blocks and a chunk takes 17 items (16 × 62 + 32),
+  acknowledged once all are durable, the freeze, if any, before the first.
+- While such a write is partly durable, the replay point stays at the record before its first
+  item's (design.md: a replay point never passes a pending write's record).
+- A crash with some of its items durable recovers them mapped under its version: the
+  unacknowledged write is partly visible, and the chunk's next write takes the next version.
+- A write that fails with `NoSpace` part-way stays applied as recovery would replay it, and its
+  error carries its version, against which an `expectVer` write succeeds; one whose only durable
+  item is its freeze gives the chunk its previous version back.
+- A write merging into a block of a failed write still pending behind one in flight takes its base
+  from the versions left, never the failed write's freed buffers; the live index equals a rebuild.
 
 Events from the log:
 
-- `Failed(NoSpace)` fails the writes it names to their callers, in submit order.
-- `InDoubt` items are never acknowledged, and the store refuses writes until recovery. Open: what
-  the caller sees for an in-doubt write.
-- `CheckpointFailed`: the index keeps its frozen memtable, and the next checkpoint writes it
-  again from its first piece (the "LSM tree" scenario, through the store).
-- A flush or merge that fails a run check (`lsm.ErrCheck`, see Run checks): the store rebuilds
-  that index from the log, the rebuilt index equals the oracle's, and the disk's other indexes
-  serve throughout.
-- The store hands the log one run piece at a time, each once the one before is durable: the trace
-  never shows two pieces of one run in flight.
-- `Flush(cs)`: completes once every write to cs acknowledged before it is durable; with nothing
-  pending it completes with no disk action. Open: the semantics, since writes are acknowledged
-  only once durable.
-- `Seal` exists in the API only and returns an error. Open: which.
+- `Failed(NoSpace)` fails the writes it names to their callers in submit order: with only the
+  reserve free, every write before the first failure succeeds and every one after it fails, and
+  no buffer is left out of the pool.
+- `InDoubt` items are never acknowledged: a write in flight when a flush fails reports
+  `ErrInDoubt`, one queued behind it the disk's error, and the store refuses writes with
+  `ErrUnavailable` until it is opened again.
+- `CheckpointFailed` (no segment left): the index keeps its frozen memtable and its runs, and reads
+  go on; the next checkpoint writes it again from its first piece (the "LSM tree" scenario).
+- A checkpoint that finds the pool full waits for a piece buffer and finishes once one frees; the
+  store keeps serving.
+- A flush that fails a run check (`lsm.ErrCheck`, a plant): the store refuses operations, lets its
+  rounds finish, restarts its log once in rebuild mode, and the rebuilt index equals the oracle's,
+  live and at every snapshot. A merge that fails its check (a plant) takes the same path.
+- The store hands the log one run piece at a time, each once the one before is durable: no step
+  of a workload with multi-piece runs has two pieces in flight.
+- Under steady pipelined load (5,000 writes) the store's list of items handed to the log stays
+  short.
+- `Flush(cs)` completes at once with no disk action when nothing is pending, and otherwise once
+  every write and punch to cs submitted before it is answered.
 
 Invariants and faults (simulator): acknowledged writes readable; reads equal the byte-range
-oracle live and at every snapshot; punched ranges read zeros; no two writes of a chunk share a
-version; a live map never holds two entries for one block (`Index.Check`); a rebuilt index equals
-the recovered one. Faults: crash at every action of a workload with unaligned writes, a cut, a
-whole-chunk write and a checkpoint; unaligned writes pipelined to one block; a merge base failing
-its checksum; a failed base read.
+oracle live and at every snapshot; punched ranges read zeros; no two durable writes of a chunk
+share a version; a live map never holds two entries for one block (`Index.Check`); a rebuilt
+index equals the recovered one. Faults: crash at every action of a workload with unaligned
+writes, a cut, a whole-chunk write and a checkpoint, with no unflushed block landing, a seeded
+half and all of them, each recovery checked against the crash oracle with a block model over
+every block either holds, then rebuilt; unaligned writes pipelined to one block; a merge base failing its checksum; a
+failed base read; a failed flush.
 
 Performance: `Write` of a whole block, `Write` of one byte with its base in a pending write, and
-`Read` of one block report 0 allocations per operation; a merge uses one 4 KiB pool buffer.
+`Read` of one block report 0 allocations per operation. A merge against a pending write copies
+into the write's own buffer; one against the disk reads the block and its record header block.
+The per-loop cache of recently merged blocks waits for a measurement and is not part of this item.
 
 ## Segment reserve
 
@@ -2262,8 +2288,10 @@ Torn writes, bit flips, fail-slow and discards:
 - Per disk the oracle (`sim.Oracle`) keeps every index's state at the last acknowledged LSN and the
   records written since, in LSN order (RocksDB's crash test: expected state plus trace). It is
   generic over the record and the model: in phase 1 the disk log's tests keep a block map standing
-  in for the chunk index, and the atomic-flush scenario a list of entries per owner; from phase 4
-  each shard replica on the disk joins the model.
+  in for the chunk index, the atomic-flush scenario a list of entries per owner, and the chunk
+  index's tests a block model of the real `Index` ([Chunk index under the crash
+  oracle](#chunk-index-under-the-crash-oracle)); from phase 4 each shard replica on the disk joins
+  the model.
 - After a crash, recovery reports an LSN r. Required: acked ≤ r ≤ acked + in flight. The oracle
   replays its trace from acked to r onto the state at acked, and every index on the disk equals the
   result, with no hole. The window, with 7 acknowledged and 2 in flight:
@@ -2310,6 +2338,33 @@ Torn writes, bit flips, fail-slow and discards:
   recovery reports the same r.
 - The phase 5 real-disk crash test keeps the same oracle in its test driver, in a file outside the
   daemon it kills (Crash tests on real disks).
+
+## Chunk index under the crash oracle
+
+The chunkstore tests' `node` runs the real `Index` over the disk log on a simulated disk. It hands
+`sim.Oracle` each round as its write goes to the disk, decoded from the bytes written with the
+open sequence of the write that opened its segment, and each `Durable` LSN. The oracle's model is a
+plain block model: per chunk its entry, and block by block its live map and frozen maps.
+
+- After every recovery the node's tests run (`TestRecoveryAndRebuildEqualLiveIndex`,
+  `TestCrashBetweenRunAndManifest` and the property below), the recovered LSN must lie in the
+  oracle's window, and the recovered `Index` must read as the model at that LSN: each chunk's
+  entry, the frozen version `FrozenAt` gives at every epoch up to one past the newest freeze, and
+  every block of every chunk the workload writes or freezes, live and in every frozen version.
+  Neither the index nor the model may hold another chunk, and `Check` must pass too.
+- [property] `TestRecoveriesMatchTheCrashOracle`: seeds 0-7, six crashes each at a random write or
+  flush, each unflushed block landing at random, with checkpoints, compactions and freezes between
+  them, absent freezes among them. The run must reach a recovery that keeps a record past the
+  acknowledged LSN, recoveries that load runs and frozen maps, recoveries holding a chunk frozen
+  absent and one written after its absent freeze, and a crashed recovery that had erased records.
+  A snapshot lookup that misses the absent version (`Index.frozen` skipping version 0's marker)
+  trips the oracle at the first recovery.
+- Crash during recovery, then recovery again: every other recovery of the property is crashed
+  before its final flush, with its erasures landing at random. The oracle's window is unchanged
+  by it, and the recovery run again reports the LSN the crashed one had found.
+- Planted bug: replay that leaves out the first record past the replay LSN that maps blocks, as a
+  replay LSN one record too new would (RocksDB #11148), trips the oracle on at least one seed of 8
+  (`TestCrashOracleCatchesLateReplay`; seed 0 names a chunk entry at an older version).
 
 ## Invariant checker
 
@@ -2376,25 +2431,69 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 
 ## Seed runner in CI
 
-- CI runs thousands of seeds per commit; each failing seed prints a one-line replay command
-  (`go test ./internal/... -run <Test> -seed <n>` or the runner's equivalent) that reproduces it
-  exactly, and its ops file reduced to the fewest ops that still fail. Open: the seed count per commit
-  and CI's time budget, the design's open question "Metamorphic cost in CI". The metamorphic tests
-  already replay with `-meta.seed n` and shard with `-meta.first` and `-meta.seeds`.
-- Reduction drops chunks of ops while the failure persists. Targets from the metamorphic testing
-  spike: the planted flush bug reduces from 3,000 ops to 5, and a second plant to 7, when flushes,
-  failed flushes and restarts are ops. When an option sets the cadence (76 to 354 ops after
-  reduction), the reduced case is rewritten with explicit ops before it is saved. Open: tolerance on
-  the reduced size.
-- The reduced case becomes a data-driven regression file under `testdata/` before the fix: the change
-  shows the new case failing without the fix and passing with it. A fix that lands without its
-  regression case fails review.
-- A change that adds a seeded test runs it over 10,000 seeds once (as Pebble stresses every test a
-  pull request adds); the run's result is recorded in the change.
-- Millions of seeds overnight on idle machines: a failure found overnight produces the same one-line
-  replay command and reduced file.
-- A runner given a seed range shards it across processes, and the union of results equals a single
-  process's run of the range (no seed skipped or run twice).
+Every seeded property test, one whose property must hold seed by seed, takes its seeds from
+`internal/sim/seeds` (`seeds.Run(t, first, n, f)`), and `scripts/seeds.sh` runs those in its list
+over thousands of seeds. The repository has no hosted CI yet, so the script is the job
+every item runs before review ([build checklist](build-checklist.md)), beside `scripts/lint.sh`.
+Tests that check something across a fixed range keep their range: that two seeds give different
+traces, that both outcomes of a seeded choice occur, or that a planted bug trips within the seeds
+`go test` runs.
+
+- Seeds: a test runs its own `n` from `first` under `go test ./...`; `-seeds n` replaces the count,
+  `-seeds.first n` the first seed, `-seed n` runs that one seed, and `-seeds.shard i/k` keeps the
+  i-th of k contiguous parts; `-seed` with `-seeds.shard` is refused. A check across seeds (every
+  case seen at least once) runs only on the test's own seeds; the toy protocol's averages run
+  whenever 100 seeds or more do.
+- A seed that fails or panics logs one line that reproduces it exactly, with every other flag the
+  run was given, such as `-meta.ops`:
+  `replay: go test ./internal/lsm -run '^TestMetamorphic$' -seed 250`. The package comes from the
+  test binary's build info, so the line is the same from `go test` and from the runner's compiled
+  binaries; a subtest is named `'^TestX$/^sub$'`. A panic is logged, then re-raised (seed 3 of 1-5
+  panicking, checked from a second process).
+- **[property]** Shards: the k parts of a range hold each seed exactly once, in order, so the union
+  of k processes' results is one process's run of the range (10,000 seeds in 14 parts, 100 in 3,
+  3 in 8, none in 2).
+- The runner splits each test's seeds over `JOBS` processes (the CPUs, at most 4), each with
+  `GOMEMLIMIT` (1 GiB) and `TIMEOUT` (30 minutes, 0 for none), and stops at the first test that
+  fails, printing each failing process's output. A timeout prints the stack, whose
+  `func1(0x…)` frame holds the seed, but no replay line. A test the list names that the package
+  lacks fails, as does an argument naming no listed test, and Ctrl-C stops every process. `SEEDS`
+  and `SEEDS_FIRST` replace every test's count and first seed and arguments keep only the tests
+  named, so a change that adds a seeded test runs it over 10,000 seeds once with
+  `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
+  runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
+  they take.
+- The list, with 4 processes on a 14-core Apple M4 Pro Mac mini: 20,000 seeds in 182 s; the largest
+  process peaked at 540 MiB resident (an `internal/lsm` metamorphic shard), all four at 2.0 GiB:
+
+  | Test | Seeds | Time |
+  | --- | --- | --- |
+  | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 3 s |
+  | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 12 s |
+  | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 4 s |
+  | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 42 s |
+  | `internal/disklog` `TestOracleCatchesReplayPastATornRound` | 1,000 | 5 s |
+  | `internal/disklog` `TestQuarantinedSegmentsAreNeverReused` | 500 | 6 s |
+  | `internal/chunkstore` `TestReplayPastPendingWrites` | 2,000 | 9 s |
+  | `internal/lsm` `TestMetamorphic` | 1,000 | 44 s |
+  | `internal/chunkstore` `TestMetamorphic` | 1,000 | 55 s |
+
+- A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
+  under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
+  1957 ([Group commit](#group-commit)) is the case that grew one.
+- A metamorphic failure also prints its ops reduced to the fewest whose first difference from the
+  model, under the set that failed, is still the op that failed, written as a data-driven case for
+  `testdata/regressions`. Reduction drops chunks of ops while the failure persists. Targets from
+  the metamorphic testing spike: the planted flush bug reduces from 3,000 ops to 5, and a second
+  plant to 7, when flushes, failed flushes and restarts are ops. When an option sets the cadence
+  (76 to 354 ops after reduction), the reduced case is rewritten with explicit ops before it is
+  saved. Open: tolerance on the reduced size.
+- A case found with a planted bug names it (`run set=A plant=merge-no-older`) and fails with it on
+  (`TestMetamorphicRegressionsCatchTheirPlants`); `internal/lsm`'s P5 case came from the runner,
+  1,200 ops of seed 250 reduced to 27.
+- The reduced case, or for a test with no ops form a test of the failing seed, lands before the
+  fix: the change shows it failing without the fix and passing with it. A fix that lands without
+  its regression case fails review.
 
 ## Data-driven files
 
@@ -2403,12 +2502,13 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   output; `go test -rewrite` regenerates the expected output for review, and a run without it fails
   on any difference, naming the file and line.
 - Regression cases of the metamorphic tests: `run set=<option set>` over an ops file, printing each
-  op whose history line is not "ok" (see Metamorphic index tests):
+  op whose history line is not "ok" (see Metamorphic index tests); a case found with a planted bug
+  names it with `plant=`, and must differ from the model with it on:
 
   ```text
   # Metamorphic testing spike, plant P1 at seed 0 under A: a flush dropped a removal that hid a key
   # in an older run.
-  run set=A
+  run set=A plant=drop-removals
   put aa v26x
   flush
   del aa
@@ -2437,17 +2537,25 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   last recovery's index as extents (chunk, blocks, version, pool, LBAs), whether every mapped block
   reads back the data its version wrote, so a block damaged after recovery is named, and whether
   the index is what the crash oracle holds at the recovered LSN, naming the first block that
-  differs. `run plant=stop-early` and `plant=past-gaps` break recovery as the Crash oracle section's
-  planted bugs do. An `index` the oracle rejects fails the case unless it is written
-  `index rejected`, as after a plant or damage to an acknowledged record, and one written so fails
-  if the oracle accepts it, so a careless `go test -rewrite` cannot accept a wrong index or a plant
-  the oracle misses. The Recovery section's torn tail (every landing set), damage in a middle
-  record and in the last one, and both commit-depth-2 cases live only here, each that recovers
-  printing its index.
+  differs. `run plant=stop-early`, `plant=past-gaps` and `plant=swap-tickets` break recovery or
+  rounds as the Crash oracle section's planted bugs do. An `index` the oracle rejects fails the
+  case unless it is written `index rejected`, as after a plant or damage to an acknowledged
+  record, and one written so fails if the oracle accepts it, so a careless `go test -rewrite`
+  cannot accept a wrong index or a plant the oracle misses. Likewise a check the harness makes,
+  such as the ticket check, fails the case unless the case closes with `fails <text>`: then a
+  harness check must fail during the line before it, with a message holding the text's parts,
+  separated by ` ... `, in order, which ends the case and is printed; a `fails` whose failure does
+  not happen, or whose message lacks the text, fails the case. The `plant=swap-tickets` case shows
+  the ticket check catching the swapped round when the next write makes it durable, its text
+  pinning the swap: LSN 3's entry 0, chunk 3, against the item submitted under ticket 4, chunk 4. The Recovery section's torn tail (every
+  landing set), damage in a middle record and in the last one, and both commit-depth-2 cases live
+  only here, each that recovers printing its index.
 - An unknown command, argument or op, or a malformed argument, fails the test with the file and
-  line, never a silent skip. So does a check the harness makes during a scripted recovery case,
-  such as the ticket check, which also quotes the command running: a case built in the test with
-  `plant=swap-tickets` fails at its first write that makes the swapped round durable.
+  line, never a silent skip. So does a check the harness makes during a scripted recovery case
+  that does not expect it, which also quotes the command running: the `plant=swap-tickets` case
+  run without its `fails` line fails at `write hot 5 0 1 5`, naming its line
+  (`TestScriptedHarnessFailuresNameTheirLine`, which also runs the case unplanted and with the
+  wrong text, and checks that each fails).
 
 ## Planted-bug check
 
@@ -2467,11 +2575,11 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   as one to the restarted primary's write of the same sequence number (found at seed 4, step 444,
   and in 49 of seeds 0 to 999). With crashes off, `IgnoreEpoch` passes seeds 0 to 99: only a primary
   crash with a reply in flight exposes it.
-- Each bug trips within seeds 0 to 99, the seeds every commit runs; running its first failing seed
+- Each bug trips within seeds 0 to 99, the seeds `go test` runs; running its first failing seed
   twice gives byte-identical traces and the same failure at the same step; the fixed protocol passes
-  that seed. **[property]** The fixed protocol passes seeds 0 to 99 per commit (at least 75% of
-  writes acknowledged and a crash per seed on average) and passed seeds 0 to 9,999 once
-  (`-toy.seeds 10000`, 37 s).
+  that seed. **[property]** The fixed protocol passes seeds 0 to 99 in `go test` and 0 to 9,999
+  in the seed runner (at least 75% of writes acknowledged and a crash per seed on average,
+  whenever 100 seeds or more run).
 - The history holds every write in order; exactly the acknowledged ones complete, never before they
   start, and over seeds 0 to 19 some are left incomplete by a primary crash.
 - The toy package passes the sans-IO analyzer, and a write's whole cycle of events on the primary
@@ -2519,7 +2627,8 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 
 ## Seeded runs and the simulation harness
 
-The seeded runs, each described in its section above:
+The seeded runs, each described in its section above, with the seeds `go test` runs; the
+[seed runner](#seed-runner-in-ci) lists those it runs more of:
 
 - Group commit: seeds 1-100 (every accepted item decodes), each also failing under five broken
   encoders, and seeds 1-20 of random entries (anything Submit accepts decodes).
@@ -2537,7 +2646,7 @@ The seeded runs, each described in its section above:
   index on every run; seeds 0-10,002 and 0-10,001 once.
 - Crash at every action: every k, with three landing sets and a failure each.
 - Cleaner write amplification at 80 / 90 / 95% full.
-- Planted-bug check: seeds 0-99 under each planted bug and the fixed protocol, the replay of each bug's first failing seed, and seeds 0-9,999 of the fixed protocol once.
+- Planted-bug check: seeds 0-99 under each planted bug and the fixed protocol, and the replay of each bug's first failing seed.
 
 The chunk store stand-in of the recovery tests applies every Durable record to its model of the
 chunk index. It starts a checkpoint whenever one is due, snapshots the model, hands one run piece at

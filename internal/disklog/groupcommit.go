@@ -143,6 +143,8 @@ const NoTicket Ticket = 0
 type Item struct {
 	Entry Entry
 	Buf   core.IOBuf
+	// Keep leaves a write's buffer with its submitter, who frees it once the item is Durable or Failed; the log frees it for an item in doubt.
+	Keep bool
 }
 
 // EventKind tags an Event.
@@ -313,6 +315,7 @@ type queued struct {
 	entry  Entry
 	buf    core.IOBuf
 	bytes  []byte
+	keep   bool
 }
 
 func (q *queued) payload(pool core.BufPool) []byte {
@@ -401,6 +404,7 @@ type round struct {
 	tail         core.IOBuf
 	vec          []core.IOVec
 	writeBufs    []core.IOBuf
+	keepBufs     []core.IOBuf
 	entries      []Entry
 	tickets      []Ticket
 	payloads     []uint64
@@ -465,6 +469,7 @@ type Log struct {
 	maxWrite   uint32
 	maxItemRec uint32
 	maxBlob    uint64
+	maxWrites  uint16
 
 	phase      formatPhase
 	formatIO   core.IOID
@@ -532,7 +537,7 @@ func Format(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID, out
 // newLog sizes the log and takes each round slot's header and blob buffers from the pool
 // for the log's lifetime, so a pool filled by producers never stops a round.
 func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*Log, error) {
-	maxWrite := uint32(min(cfg.MaxRecordBytes/core.BlockSize, uint64(sb.SegmentBlocks)))
+	maxWrite := itemRecordBlocks(cfg, sb) + 1
 	reserve, err := cfg.reserve(&sb)
 	workers, _ := MergeWorkers(cfg.MergeWorkers)
 	if err != nil || cfg.CommitDepth < 1 || maxWrite < 3 || cfg.MaxReplayBytes == 0 || cfg.MaxReplayBytes > math.MaxUint64/4 {
@@ -545,6 +550,7 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		maxWrite:   maxWrite,
 		maxItemRec: maxWrite - 1,
 		maxBlob:    maxBlobBytes(maxWrite - 1),
+		maxWrites:  maxWriteBlocks(maxWrite - 1),
 		nextIO:     firstIO,
 		nextTicket: 1,
 		nextLSN:    1,
@@ -606,13 +612,27 @@ func (l *Log) Close(ctx *core.Context, out *Output) error {
 }
 
 func maxBlobBytes(maxRecBlocks uint32) uint64 {
+	return uint64(maxDataBlocks(maxRecBlocks, blobEntrySize)) * core.BlockSize
+}
+
+func maxWriteBlocks(maxRecBlocks uint32) uint16 {
+	return uint16(min(maxDataBlocks(maxRecBlocks, writeEntrySize), core.BlocksPerChunk))
+}
+
+// maxDataBlocks is the most data blocks a record of one entry of entrySize bytes holds in maxRecBlocks.
+func maxDataBlocks(maxRecBlocks uint32, entrySize int) uint32 {
 	for d := maxRecBlocks - 1; d > 0; d-- {
-		headerBytes := uint64(preludeSize + blobEntrySize + core.CRC32CSize*d)
+		headerBytes := uint64(preludeSize + entrySize + core.CRC32CSize*int(d))
 		if (headerBytes+core.BlockSize-1)/core.BlockSize+uint64(d) <= uint64(maxRecBlocks) {
-			return uint64(d) * core.BlockSize
+			return d
 		}
 	}
 	return 0
+}
+
+// itemRecordBlocks is the longest record one item may take under cfg on a disk of sb's geometry.
+func itemRecordBlocks(cfg Config, sb Superblock) uint32 {
+	return uint32(min(cfg.MaxRecordBytes/core.BlockSize, uint64(sb.SegmentBlocks))) - 1
 }
 
 func (l *Log) io() core.IOID {
@@ -647,6 +667,9 @@ func (l *Log) Err() error { return l.err }
 
 // MaxBlobBytes is the largest blob one record holds.
 func (l *Log) MaxBlobBytes() uint64 { return l.maxBlob }
+
+// MaxWriteBlocks is the most blocks one write item holds.
+func (l *Log) MaxWriteBlocks() uint16 { return l.maxWrites }
 
 // ReplayBytes is the size of the records written after the newest manifest's base, which a restart replays.
 func (l *Log) ReplayBytes() uint64 { return l.replayBytes }
@@ -761,7 +784,7 @@ func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ti
 	if err := l.accept(ctx, &it); err != nil {
 		return 0, err
 	}
-	t := l.enqueue(&l.lanes[laneOf(stream, 0)].q, queued{entry: it.Entry, buf: it.Buf})
+	t := l.enqueue(&l.lanes[laneOf(stream, 0)].q, queued{entry: it.Entry, buf: it.Buf, keep: it.Keep && it.Entry.Kind == EntryWrite})
 	l.startRounds(ctx, out)
 	return t, nil
 }
@@ -1031,6 +1054,7 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 			r.writeDone = true
 			l.freeWriteBufs(ctx, r)
 			if r.abandoned {
+				l.freeKeepBufs(ctx, r)
 				l.dropAbandoned()
 				return
 			}
@@ -1091,6 +1115,14 @@ func (l *Log) formatDone(ctx *core.Context, io core.IOID, derr core.DiskError, o
 
 func (l *Log) round(i int) *round { return &l.rounds[(l.first+i)%len(l.rounds)] }
 
+// freeKeepBufs frees the kept buffers of a round in doubt once its write can no longer read them.
+func (l *Log) freeKeepBufs(ctx *core.Context, r *round) {
+	for _, b := range r.keepBufs {
+		ctx.Pool.Free(b)
+	}
+	r.keepBufs = r.keepBufs[:0]
+}
+
 func (l *Log) freeWriteBufs(ctx *core.Context, r *round) {
 	for _, b := range r.writeBufs {
 		ctx.Pool.Free(b)
@@ -1139,6 +1171,7 @@ func (l *Log) usageRows() []SegmentUsage {
 func (l *Log) retire(out *Output) {
 	r := l.round(0)
 	l.durableLSN = r.lsn
+	r.keepBufs = r.keepBufs[:0]
 	if r.opened != 0 {
 		l.durableSeq = r.opened + 1
 		l.headerDurable(r.named)
@@ -1219,6 +1252,9 @@ func (l *Log) fail(ctx *core.Context, err error, out *Output) {
 			out.tickets = append(out.tickets, visible(t, &r.entries[j]))
 		}
 		r.abandoned = true
+		if r.writeDone {
+			l.freeKeepBufs(ctx, r)
+		}
 	}
 	out.emitTickets(InDoubt, err, ts)
 	ts = len(out.tickets)
@@ -1248,7 +1284,7 @@ func (l *Log) drain(ctx *core.Context, q *queue, tickets []Ticket) []Ticket {
 	for i := range q.len() {
 		it := q.at(i)
 		tickets = append(tickets, visible(it.ticket, &it.entry))
-		if it.buf != core.NoBuf {
+		if it.buf != core.NoBuf && !it.keep {
 			ctx.Pool.Free(it.buf)
 		}
 	}
@@ -1400,6 +1436,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	r.tickets = r.tickets[:0]
 	r.payloads = r.payloads[:0]
 	r.writeBufs = r.writeBufs[:0]
+	r.keepBufs = r.keepBufs[:0]
 	r.vec = append(r.vec[:0], core.IOVec{Buf: r.head, Len: headLen})
 	l.crcs = l.crcs[:0]
 	var writeOff, blobOff uint64
@@ -1411,7 +1448,11 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		case EntryWrite:
 			r.payloads = append(r.payloads, writeOff)
 			writeOff += uint64(it.entry.Count) * core.BlockSize
-			r.writeBufs = append(r.writeBufs, it.buf)
+			if it.keep {
+				r.keepBufs = append(r.keepBufs, it.buf)
+			} else {
+				r.writeBufs = append(r.writeBufs, it.buf)
+			}
 			r.vec = append(r.vec, core.IOVec{Buf: it.buf, Len: uint32(it.entry.Count) * core.BlockSize})
 			l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(it.buf))
 		default:
@@ -1472,6 +1513,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		tail:         r.tail,
 		vec:          r.vec,
 		writeBufs:    r.writeBufs,
+		keepBufs:     r.keepBufs,
 		entries:      r.entries,
 		tickets:      r.tickets,
 		payloads:     r.payloads,

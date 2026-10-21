@@ -60,6 +60,8 @@ type Config struct {
 	Prefix func(k []byte) int
 	// StepBytes is compaction_step_bytes, the most output a merge installs at once; 0 installs a merge whole.
 	StepBytes int
+	// Probe is how lookups use run filters.
+	Probe FilterProbe
 }
 
 // Tree is an LSM tree. Only its owner calls it; a compaction's Run alone may run elsewhere.
@@ -80,6 +82,7 @@ type Tree struct {
 	it          iterState
 	linear      bool
 	plant       plants
+	gen         uint64
 }
 
 // plants are bugs a test turns on to show that its checks catch them.
@@ -97,6 +100,7 @@ type plants struct {
 	skipFrozen    bool
 	mergeNoOlder  bool
 	noFencePrefix bool
+	clobberBound  bool
 }
 
 // writtenRun is a durable run's pieces, its root last, of which the first dead are reported dead.
@@ -153,7 +157,7 @@ type mergeName struct {
 
 // New makes an empty tree.
 func New(cfg Config) (*Tree, error) {
-	if cfg.MaxPiece < MinPiece || cfg.RunLimit < 0 || cfg.StepBytes < 0 || cfg.Filter > KeysAndPrefixes || cfg.Filter != WholeKeys && cfg.Prefix == nil {
+	if cfg.MaxPiece < MinPiece || cfg.RunLimit < 0 || cfg.StepBytes < 0 || cfg.Filter > KeysAndPrefixes || cfg.Probe > FiltersMaybe || cfg.Filter != WholeKeys && cfg.Prefix == nil {
 		return nil, ErrBadConfig
 	}
 	t := &Tree{cfg: cfg, nextSeq: 1, limitBuffer: autoLimitBuffer}
@@ -164,7 +168,7 @@ func New(cfg Config) (*Tree, error) {
 }
 
 func (t *Tree) state() state {
-	st := state{mem: t.mem, memRoot: t.mem.root, memFRoot: t.mem.froot, runs: t.runs, linear: t.linear, filter: t.cfg.Filter, prefix: t.cfg.Prefix}
+	st := state{mem: t.mem, memRoot: t.mem.root, memFRoot: t.mem.froot, runs: t.runs, linear: t.linear, filter: t.cfg.Filter, prefix: t.cfg.Prefix, probe: t.cfg.Probe}
 	if t.frozen != nil && !t.plant.skipFrozen {
 		st.frozen, st.frozenRoot, st.frozenFRoot = t.frozen, t.frozen.root, t.frozen.froot
 	}
@@ -180,6 +184,7 @@ func (t *Tree) Put(k, v []byte) error {
 		t.mem.cut(k, t.maxFrag)
 	}
 	t.mem.put(k, kindSet, v)
+	t.gen++
 	return nil
 }
 
@@ -192,6 +197,7 @@ func (t *Tree) DeleteRange(lo, hi []byte) error {
 		return ErrTooLarge
 	}
 	t.mem.deleteRange(lo, hi)
+	t.gen++
 	return nil
 }
 
@@ -201,6 +207,7 @@ func (t *Tree) Delete(k []byte) error {
 		return ErrTooLarge
 	}
 	t.mem.put(k, kindDel, nil)
+	t.gen++
 	return nil
 }
 
@@ -231,10 +238,11 @@ func (t *Tree) FloorPrefix(k []byte) ([]byte, []byte, bool) {
 	return t.it.floorPrefix(k)
 }
 
-// Iter opens it on the tree; it is valid until the tree's next write. Seek it before reading.
+// Iter opens it on the tree; it is valid until the tree's next write, flush step or merge install, which a prefix floor checks under Check. Seek it before reading.
 func (t *Tree) Iter(it *Iter) {
 	st := t.state()
 	it.s.reset(&st, false)
+	it.tree, it.gen = t, t.gen
 }
 
 // MemtableBytes is the memory the memtables' pages take.
@@ -257,6 +265,9 @@ func (t *Tree) Frozen() bool { return t.frozen != nil }
 
 // Searches is how many layers the tree's gets and floors have searched.
 func (t *Tree) Searches() int { return t.it.probes }
+
+// FilterProbes is how many run filters the tree's gets and floors have probed.
+func (t *Tree) FilterProbes() int { return t.it.filterProbes }
 
 // View is a point-in-time view of a tree that pins what it reads until closed; only the tree's owner reads it.
 type View struct {
@@ -297,7 +308,10 @@ func (v *View) FloorPrefix(k []byte) ([]byte, []byte, bool) {
 }
 
 // Iter opens it on the view. Seek it before reading.
-func (v *View) Iter(it *Iter) { it.s.reset(&v.st, false) }
+func (v *View) Iter(it *Iter) {
+	it.s.reset(&v.st, false)
+	it.tree = nil
+}
 
 // Close releases what the view pins.
 func (v *View) Close() {
@@ -323,6 +337,7 @@ func (t *Tree) BeginFlush() (bool, error) {
 		t.frozen, t.frozenSeq = t.mem, t.nextSeq
 		t.nextSeq++
 		t.mem = newMemtable(&t.pg)
+		t.gen++
 		froze = true
 	}
 	fl := &flush{older: runIters(t.runs), olderFrag: runIters(t.runs)}
@@ -626,6 +641,7 @@ func (t *Tree) finishWrite() {
 		return
 	}
 	fl.written = true
+	t.gen++
 	if fl.frozen != nil {
 		fl.frozen.setBounds()
 		fl.frozen.checksum()
@@ -819,6 +835,7 @@ func (t *Tree) addLoaded(r, raw *run) error {
 		at = 0
 	}
 	t.runs = slices.Insert(t.runs, at, r)
+	t.gen++
 	t.written = append(t.written, writtenRun{pieces: r.pieces, dead: r.base})
 	if raw != nil {
 		t.resume = append(t.resume, raw)

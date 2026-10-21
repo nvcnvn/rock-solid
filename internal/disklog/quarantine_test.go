@@ -8,6 +8,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 // usedSegments reads every segment header and returns the segments of this log, and the
@@ -28,7 +29,7 @@ func (h *harness) usedSegments() ([]uint32, disklog.ManifestPos) {
 }
 
 func TestQuarantinedSegmentsAreNeverReused(t *testing.T) {
-	for seed := uint64(1); seed <= 10; seed++ {
+	seeds.Run(t, 1, 10, func(seed uint64) {
 		r := core.NewRand(seed)
 		cfg := testConfig(4)
 		cfg.MaxReplayBytes = 40 * core.BlockSize
@@ -112,7 +113,7 @@ func TestQuarantinedSegmentsAreNeverReused(t *testing.T) {
 			minLSN = min(minLSN, firstLSN[s])
 		}
 		wantCorrupt(t, h.recover(disklog.ModeRebuild), minLSN)
-	}
+	})
 }
 
 // readManifestAt reads the manifest whose last piece sits at pos.
