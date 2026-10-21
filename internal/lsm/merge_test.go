@@ -14,7 +14,6 @@ import (
 // at the probe four after it, or returns "".
 func mergesDiffer(r reader, probes []string) string {
 	var heap, lin Iter
-	lin.s.linear = true
 	keyOf := func(it *Iter, ok bool) []byte {
 		if !ok {
 			return nil
@@ -24,6 +23,7 @@ func mergesDiffer(r reader, probes []string) string {
 	differ := func(from, upper []byte, steps int) string {
 		r.Iter(&heap)
 		r.Iter(&lin)
+		lin.s.linear = true
 		heap.SetUpperBound(upper)
 		lin.SetUpperBound(upper)
 		hok, lok := heap.SeekGE(from), lin.SeekGE(from)

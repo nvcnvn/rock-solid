@@ -1,0 +1,192 @@
+# Recovery from scripted disk images, each on a freshly formatted 1 GiB disk (64-block segments,
+# segment 1 the hot stream's from block 64, segment 2 the cold stream's from block 128).
+# run [depth=n] takes commands, one per line:
+#   write <hot|cold> <chunk> <first> <count> <version>   a chunk write, submitted and completed
+#   submit <hot|cold> <chunk> <first> <count> <version>  submitted only; prints the actions it queues
+#   exec ioN                                              executes pending action ioN
+#   crash [lba...]                                        crashes, landing only these unflushed blocks
+#   xor <lba> <mask>                                      XORs every byte of a block with mask
+#   flip <lba> <byte> <mask>                              XORs one byte of a block with mask
+#   zeros <lba>                                           whether a block reads as zeros
+#   recover <open|rebuild>                                recovers and prints the LSNs replayed
+# go test -rewrite regenerates the output.
+
+# Torn tail (RocksDB TruncatedTrailingRecord, PartialLast): three 2-block writes, then a fourth
+# round written but not flushed. A crash landing none of its blocks recovers LSNs 1-3.
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+submit hot 3 0 2 4
+exec io110
+crash
+recover open
+----
+submit hot 3 0 2 4: write 74+3 io110, fsync io111
+recover open: LSNs 1-3, durable 3
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+submit hot 3 0 2 4
+exec io110
+crash 74
+recover open
+----
+submit hot 3 0 2 4: write 74+3 io110, fsync io111
+recover open: LSNs 1-3, durable 3, headers erased: 1
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+submit hot 3 0 2 4
+exec io110
+crash 74 75
+recover open
+----
+submit hot 3 0 2 4: write 74+3 io110, fsync io111
+recover open: LSNs 1-3, durable 3, headers erased: 1
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+submit hot 3 0 2 4
+exec io110
+crash 75 76
+recover open
+----
+submit hot 3 0 2 4: write 74+3 io110, fsync io111
+recover open: LSNs 1-3, durable 3
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+submit hot 3 0 2 4
+exec io110
+crash 74 76
+recover open
+----
+submit hot 3 0 2 4: write 74+3 io110, fsync io111
+recover open: LSNs 1-3, durable 3, headers erased: 1
+
+# An unflushed but fully landed last record is kept, although it was never acknowledged.
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+submit hot 3 0 2 4
+exec io110
+crash 74 75 76
+recover open
+recover rebuild
+----
+submit hot 3 0 2 4: write 74+3 io110, fsync io111
+recover open: LSNs 1-4, durable 4
+recover rebuild: LSNs 1-4, durable 4
+
+# Damage in a middle record is corruption, not truncation, and open and rebuild agree: record 2's
+# header XORed with 0x5A (RocksDB ErrorJoinsRecords), and one flipped bit in record 3's header or
+# data, or in record 4's header, the last but one, of 5 records (PAR, FAST 2018).
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+write hot 3 0 2 4
+write hot 4 0 2 5
+xor 68 0x5a
+recover open
+recover rebuild
+----
+recover open: Corrupt(LSN 2)
+recover rebuild: Corrupt(LSN 2)
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+write hot 3 0 2 4
+write hot 4 0 2 5
+flip 71 60 1
+recover open
+recover rebuild
+----
+recover open: Corrupt(LSN 3)
+recover rebuild: Corrupt(LSN 3)
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+write hot 3 0 2 4
+write hot 4 0 2 5
+flip 72 100 0x80
+recover open
+recover rebuild
+----
+recover open: Corrupt(LSN 3)
+recover rebuild: Corrupt(LSN 3)
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+write hot 3 0 2 4
+write hot 4 0 2 5
+flip 74 60 1
+recover open
+recover rebuild
+----
+recover open: Corrupt(LSN 4)
+recover rebuild: Corrupt(LSN 4)
+
+# Damage in the last record's data cannot be told from a torn write, so it recovers as a crash.
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+write hot 3 0 2 4
+write hot 4 0 2 5
+flip 78 7 4
+recover open
+----
+recover open: LSNs 1-4, durable 4, headers erased: 1
+
+# Commit depth 2, both rounds in flight landed whole: a hot and a cold write written but not
+# flushed recover as LSNs 2 and 3.
+run depth=2
+write hot 0 0 1 1
+submit hot 1 0 2 2
+submit cold 2 0 1 3
+exec io108
+exec io106
+crash 67 68 69 128 129 130
+recover open
+----
+submit hot 1 0 2 2: write 67+3 io106, fsync io107
+submit cold 2 0 1 3: write 128+3 io108
+recover open: LSNs 1-3, durable 3
+
+# Commit depth 2, a round missing: of two hot rounds in flight the first's header does not land
+# and the second lands whole. Both are dropped and the second's header is zeroed, so a shorter
+# write that reuses LSN 2 is not followed, on the next open, by the old LSN 3.
+run depth=2
+write hot 0 0 1 1
+submit hot 1 0 2 2
+submit hot 2 0 1 3
+exec io108
+exec io106
+crash 68 69 70 71
+recover open
+zeros 70
+write hot 3 0 1 4
+recover open
+----
+submit hot 1 0 2 2: write 67+3 io106, fsync io107
+submit hot 2 0 1 3: write 70+2 io108
+recover open: LSNs 1-1, durable 1, headers erased: 1
+zeros 70: true
+recover open: LSNs 1-2, durable 2

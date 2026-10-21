@@ -1,0 +1,123 @@
+# Range removals in a memtable: ops on an empty tree, then what it holds. Keys are single letters;
+# k\0 is the key right after k. "memtable" lists the memtable's entries and fragments, "runs" each
+# run's entry and removal counts and fragments, newest first.
+
+ops
+delrange b e
+memtable
+get c
+----
+memtable: entries [] fragments b-e
+get c: absent
+
+ops
+put c c
+delrange b e
+memtable
+get c
+----
+memtable: entries [c removed] fragments b-e
+get c: absent
+
+ops
+delrange b e
+put c c
+memtable
+get c
+get d
+----
+memtable: entries [c=c] fragments b-c c\0-e
+get c: c
+get d: absent
+
+# Fragments that overlap merge.
+ops
+delrange b d
+delrange c f
+memtable
+----
+memtable: entries [] fragments b-f
+
+# Fragments that only abut merge too.
+ops
+delrange b c
+delrange c d
+memtable
+----
+memtable: entries [] fragments b-d
+
+ops
+delrange b e
+delrange c d
+memtable
+----
+memtable: entries [] fragments b-e
+
+ops
+delrange c d
+delrange a c
+memtable
+----
+memtable: entries [] fragments a-d
+
+ops
+delrange b c
+delrange e f
+delrange h i
+delrange a g
+memtable
+----
+memtable: entries [] fragments a-g h-i
+
+# A put at a fragment's start or inside it cuts the key out.
+ops
+delrange b e
+put b b
+memtable
+get b
+----
+memtable: entries [b=b] fragments b\0-e
+get b: b
+
+ops
+delrange b e
+put d d
+memtable
+get d
+----
+memtable: entries [d=d] fragments b-d d\0-e
+get d: d
+
+# A range whose start is not below its end is refused and stores nothing.
+ops
+delrange e b
+delrange c c
+memtable
+----
+delrange e b: lsm: empty range
+delrange c c: lsm: empty range
+memtable: entries [] fragments none
+
+# A flush with nothing older keeps neither the fragment nor the removal of c.
+ops
+put c 1
+delrange b e
+flush
+runs
+----
+runs: 0
+
+# Over an older run holding c, the flush keeps the fragment and drops the removal of c.
+ops
+put c 0
+flush
+put c 1
+delrange b e
+flush
+runs
+get c
+----
+runs: 2
+run 0: 0 entries, 0 removals, fragments b-e
+run 1: 1 entries, 0 removals, fragments none
+get c: absent

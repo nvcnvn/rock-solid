@@ -152,6 +152,7 @@ type Compaction struct {
 	older  []*run
 	plant  plants
 	check  bool
+	linear bool
 	seq    uint64
 	limit  int
 	out    *run
@@ -193,6 +194,7 @@ func (t *Tree) compaction(i, j int, rule rule) *Compaction {
 		limit:  t.cfg.MaxPiece - pieceOverhead,
 		plant:  t.plant,
 		check:  t.cfg.Check,
+		linear: t.linear,
 	}
 	for _, r := range c.inputs {
 		r.held = true
@@ -201,7 +203,9 @@ func (t *Tree) compaction(i, j int, rule rule) *Compaction {
 		c.runs = append(c.runs, &in)
 	}
 	for _, r := range t.runs[j:] {
-		c.older = append(c.older, &run{blocks: slices.Clone(r.blocks), sums: r.sums})
+		if !t.plant.mergeNoOlder {
+			c.older = append(c.older, &run{blocks: slices.Clone(r.blocks), sums: r.sums})
+		}
 	}
 	t.merges = append(t.merges, c)
 	return c
@@ -252,7 +256,7 @@ func (c *Compaction) Run() {
 			return
 		}
 	}
-	it := iterState{srcs: make([]source, len(c.runs)), cur: -1, keepDel: true}
+	it := iterState{srcs: make([]source, len(c.runs)), cur: -1, keepDel: true, linear: c.linear}
 	for i, r := range c.runs {
 		it.srcs[i].setRun(r)
 		it.ranges = it.ranges || it.srcs[i].frags

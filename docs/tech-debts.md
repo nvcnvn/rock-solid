@@ -10,6 +10,11 @@
 - **Why:** the PG hash is disk format, and XXH3-64 is not in the standard library. The module is pure Go with assembly for amd64 and matches the reference XXH3 output; its one indirect dependency, `klauspost/cpuid`, selects the assembly path.
 - **Remove when:** never removed, only bumped, and only after `TestChunkIDGoldenVectors` passes on the new version, since a hash change would move every chunk.
 
+## Version pin: `github.com/cockroachdb/datadriven` v1.0.2
+- **Where:** `go.mod`; the data-driven tests and their `testdata/` files in `internal/lsm`, `internal/chunkstore` and `internal/disklog`
+- **Why:** the file format and the `-rewrite` output are what the checked-in expected outputs are compared against, so an unpinned release could change how a file parses or prints and fail every case without a code change. It is the format Pebble and etcd-raft use ([Testing strategy](design.md#testing-strategy)).
+- **Remove when:** never removed, only bumped. A bump reruns every data-driven test without `-rewrite`, and any changed expected output is reviewed as a format change, not regenerated.
+
 ## Workaround: LSM pages and runs on the Go heap
 - **Where:** `pages` in `internal/lsm/page.go`; the blocks of `run` in `internal/lsm/run.go`
 - **Why:** memtable pages and runs belong in slabs mapped outside the Go heap ([Runtime in Go](design.md#runtime-in-go)), which the event loop's off-heap slabs provide, and those do not exist yet. Until then they are pointer-free Go slices: the collector does not scan them (0.24 ms per collection at 20 million entries) but counts them toward its heap goal, and runs are freed by the collector rather than by hand once no view holds them.

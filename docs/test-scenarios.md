@@ -716,7 +716,7 @@ no buffer allocated.
 The "LSM tree" section holds the merge, removal, staleness, install-during-flush, failed
 checkpoint and restore scenarios; Merge steps rewrites the first two for steps.
 
-Picker cases (a Go table until Data-driven files moves them to files; the universal cases of
+Picker cases (in `internal/lsm/testdata/compaction_picker`; the universal cases of
 RocksDB's `db/compaction/compaction_picker_test.cc` at v11.8.1 that exercise these three rules,
 `NeedsCompactionUniversal` and `UniversalMaxReadAmp*`, are ported as they are, and the rows below
 added; run sizes in MiB newest first; size
@@ -882,7 +882,8 @@ Tree:
 - 262,144 one-chunk fragments in a memtable: a range removal and a cut allocate nothing and cost one
   search each.
 
-Memtable fragments (keys are single letters, `k\0` the key right after `k`):
+Memtable fragments, in `internal/lsm/testdata/fragments` (keys are single letters, `k\0` the key
+right after `k`):
 
 | Ops on an empty memtable | Fragments | Reads |
 | --- | --- | --- |
@@ -1003,12 +1004,22 @@ merge that made it:
 
 ## Metamorphic index tests
 
-- [property] `internal/lsm`, seeds 0-199, 3,000 ops in a text form (`put aa v26x`, `del aa`,
-  `flush`, `flushfail 3`, `floor aca`), drawn by weight: puts 35, removals 10, gets 15, floors 8,
-  scans 5, views 11 (open 2, get 5, scan 2, close 2), flushes 5, failed flushes 1, compactions 4,
-  restarts 1, plus range removals; keys of 1-6 letters a-f, a put's key new one time in four. Each
-  op writes one history line, and the histories of every option set equal each other line by line
-  and the map model's (Pebble's `internal/metamorphic`, a7b8321871e3).
+`internal/sim/metamorphic` runs an ops file under an option set's cadence (which flush, failed
+flush and compact ops run, flushes every n writes, a merge held across a flush, ops between a
+flush's pieces, a restart after every flush that finds no view open), records one history line per op, diffs histories and
+reduces a failing ops file; its log stands in for the disk log under one tree, keeping every live
+piece, the newest manifest's runs and its replay point. Each index's test generates its ops, runs
+them under every option set and a model, and turns a failure into a regression case.
+
+- [property] `internal/lsm` `TestMetamorphic`: seeds 0-19 per run (`-meta.seeds`, `-meta.first`;
+  `-meta.seed n` replays one), 3,000 ops in a text form (`put aa v26x`, `del aa`, `delrange a ab`,
+  `flush`, `flushfail 3`, `floor aca`), drawn by weight: puts 35, removals 10, range removals 3,
+  gets 15, floors 8, scans 5, views 11 (open 2, get 5, scan 2, close 2), flushes 5, failed flushes 1,
+  compactions 4, restarts 1; keys of 1-6 letters a-f, a put's key new one time in four, a range
+  removal half the time over every key with its start as prefix. With `Check` on, every set's
+  history equals the map model's line by line (Pebble's `internal/metamorphic`, a7b8321871e3).
+  The 11 sets take about 5 s for 20 seeds on an Intel Core Ultra 5 235U; seeds 0-10,002 passed
+  once with the change that added the test.
 
   | Set | Pieces | Flushes | Compaction | Other |
   | --- | --- | --- | --- | --- |
@@ -1016,36 +1027,62 @@ merge that made it:
   | A | 1 MiB | the generated ones | the generated ones, installed at once | |
   | B | 4 KiB | generated, and after every 40 writes | after every flush until none is due | |
   | C | 256 B | generated, and after every 10 writes | never | |
-  | D | 512 B | generated, and after every 25 writes | picked at an op, installed between the pieces of the next flush | up to 4 writes between a flush's pieces |
-  | E | 1 KiB | every flush fails after one piece first; also after every 30 writes | eager | a restart after every flush |
+  | D | 512 B | generated, and after every 25 writes | picked at an op, installed between the pieces of the next flush, or at the next compact op if that comes first | up to 4 ops, writes and reads, between a flush's pieces |
+  | E | 1 KiB | every flush fails after one piece first; also after every 30 writes | eager | a restart after every flush that finds no view open |
   | G | 4 KiB | after every 2 writes | only after every 40th flush, so a merge leaves older runs out | |
-  | Filters off | | | | no run filters |
-  | Filters "maybe" | | | | every filter probe answers "maybe" |
-  | Two merges | | | two merges of disjoint adjacent runs at once | |
-  | Fixed limit | | | a fixed run limit of 4, against the auto-tuned one | |
-  | Point removals | | | | each range removal replaced by the point removals of the keys it covers (Pebble's `replace_single_delete`) |
-  | Linear merge | | | | scans, flushes and merges compare every layer at every step instead of keeping the heap |
+  | Two merges | 1 KiB | after every 3 writes | after every 8th flush, two merges of disjoint adjacent runs picked at once, installed newest last | |
+  | Fixed limit | 1 KiB | after every 5 writes | eager, with a fixed run limit of 4 against the auto-tuned one | |
+  | Point removals | 4 KiB | after every 20 writes | eager | each range removal replaced by the point removals of the keys it covers (Pebble's `replace_single_delete`) |
+  | Linear merge | 1 KiB | after every 15 writes | eager | scans, flushes and merges compare every layer at every step instead of keeping the heap, so the flush's and merge's drop counts and reads during a flush meet the reference too; up to 4 ops between a flush's pieces |
 
-- The chunk index runs the same way with its own ops: writes, punches, freezes and cleaner moves, a
-  chunk's writes in version order and freezes only after a cut; with range trims it reads as with
-  point removals.
-- Planted bugs, each one line, fail at least one seed of 20 under the set the
-  [metamorphic testing spike](design.md#appendix-metamorphic-testing-spike) found it with, and every
-  divergence from the model is also a divergence from set F:
+  Run filters adds two sets: Filters off, and every filter probe answering "maybe".
+- Each set reaches the extreme it is there for on seed 0: F never flushes, C keeps over 100 runs
+  and G 40, E fails flushes and restarts more than A, D installs merges while a memtable is frozen,
+  Two merges runs two at once, and Fixed limit compacts.
+- [property] The chunk index's `TestMetamorphic` (`internal/chunkstore`): seeds 0-19 per run, 1,000
+  ops drawn by weight: writes 30, punches 6, whole-chunk punches 1, cuts 2, releases of frozen
+  versions 2, cleaner moves 8, reads of blocks live 12 and at a snapshot epoch 10, chunk entries 3,
+  `FrozenAt` 3, live counts per record 4, `Check` 2, and the structural ops as above. Writes and
+  punches cover 1-4 blocks (one in eight up to 16) of blocks 0-15 of 4 chunks, a chunk's in version
+  order; a freeze of the chunk's newest version (version 0 if it has none) goes before its first
+  write after each cut; a move copies one block a live or frozen map holds. Every op names its record's LBA, so
+  histories are comparable, and a move is logged and replayed after a restart as the cleaner's copy
+  record will be. The model is per chunk an entry, a live map and frozen maps, block by block. The
+  sets are internal/lsm's but Linear merge, with C's pieces 512 bytes, since a 256-byte root lists
+  13 pieces, fewer than a flush of 10 index writes takes; Point removals sets the index's own
+  point-removal switch, so range trims read as point removals. A seed costs about 0.3 s over the
+  10 sets; at 3,000 ops it costs 3 s, as runs pile up to 300 under C and Two merges. Seed 0
+  holds an absent freeze, a whole-chunk punch, a move that changes a map, a release and a read
+  that finds a frozen version. Seeds 0-10,001 passed once with the change that added the test.
+- Planted bugs, each one line behind a test switch in `internal/lsm` and run with `Check` off so
+  the history diff alone finds them, fail at least one seed of 20 under the set the
+  [metamorphic testing spike](design.md#appendix-metamorphic-testing-spike) found them with, and
+  the failing seed differs from set F too:
 
-  | Bug | Fails under |
-  | --- | --- |
-  | A flush drops every removal, even one hiding a key in an older run | every set with flushes |
-  | A merge's output is installed as the oldest run | G only |
-  | A restore loads runs in the order the manifest lists them, not by age | every set with restarts |
-  | Reads skip the frozen memtable | the sets that read while a memtable is frozen: A, B, D, E |
-  | A merge drops removals that hide keys in runs older than its inputs | G only |
+  | Bug | Checked under | The spike found it under |
+  | --- | --- | --- |
+  | A flush drops every removal, even one hiding a key in an older run | A | every set with flushes |
+  | A merge's output is installed as the oldest run | G | G only |
+  | A restore loads runs in the order the manifest lists them, not by age | E | every set with restarts |
+  | Reads skip the frozen memtable | D | the sets that read while a memtable is frozen: A, B, D, E |
+  | A merge drops removals that hide keys in runs older than its inputs | G | G only |
 
-- A failing seed prints its replay command and is reduced to the fewest ops that still fail, its
-  cadence rewritten as explicit ops; the reduced ops file becomes a data-driven regression case
-  under `testdata/` before the fix. Regression cases from the spike: `put aa v26x`, `flush`,
-  `del aa`, `flush`, `floor aca` gives none; `put e v30xxx`, `flush`, `del e`, `flushfail 3`,
-  `flush`, `restart`, `floor e` gives none.
+  The merge bugs show under more sets here than in the spike: with Two merges, Fixed limit and the
+  universal picker, merges leave older runs out under every set that merges (all but F and C).
+
+- A failing seed prints its replay command and its ops reduced to the fewest that still fail, as a
+  data-driven case; a case whose cadence comes from its set is rewritten with explicit ops before it
+  goes under `testdata/regressions`, before the fix. The planted flush bug's first failure on seed
+  0 reduces from 80 ops to under 10 (5: `put f v27xx`, `flush`, `del f`, `flush`, `scan f 4`).
+- Regression cases (`internal/lsm/testdata/regressions`), each also run against the model: from the
+  spike, `put aa v26x`, `flush`, `del aa`, `flush`, `floor aca` gives none, and fails with the
+  planted flush bug; `put e v30xxx`, `flush`, `del e`, `flushfail 3`, `flush`, `restart`, `floor e`
+  gives none. The chunk index's (`internal/chunkstore/testdata/regressions`): a chunk first written
+  after a cut reads absent at the snapshot before and after a restart that replays its absent
+  freeze, and a move after the restart changes only the live map and moves the record's live count.
+- A malformed ops line (an unknown op, a wrong argument count, a range whose start is not below
+  its end, a non-numeric count, a failed flush of 0 pieces, a chunk-index block outside blocks 0-15
+  that is not a whole-chunk punch) is an error naming its line.
 
 ## Run filters
 
@@ -1109,7 +1146,8 @@ entries; counts are the bar, times on the shared VM):
 | Filter memory | 0.76% of the chunk index's run bytes, 2.6 to 2.9% of the MetaStore's | |
 
 - Every probe and lookup allocates nothing.
-- Passes the Metamorphic index tests' sets Filters off and Filters "maybe".
+- Adds the Metamorphic index tests' sets Filters off and Filters "maybe" to both indexes' tests,
+  and passes them.
 
 ## Heap merge
 
@@ -2256,8 +2294,8 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 - CI runs thousands of seeds per commit; each failing seed prints a one-line replay command
   (`go test ./internal/... -run <Test> -seed <n>` or the runner's equivalent) that reproduces it
   exactly, and its ops file reduced to the fewest ops that still fail. Open: the seed count per commit
-  and CI's time budget, the design's open question "Metamorphic cost in CI" (a 3,000-op seed costs
-  about 99 ms per option set, and each set added costs a full run of every seed).
+  and CI's time budget, the design's open question "Metamorphic cost in CI". The metamorphic tests
+  already replay with `-meta.seed n` and shard with `-meta.first` and `-meta.seeds`.
 - Reduction drops chunks of ops while the failure persists. Targets from the metamorphic testing
   spike: the planted flush bug reduces from 3,000 ops to 5, and a second plant to 7, when flushes,
   failed flushes and restarts are ops. When an option sets the cadence (76 to 354 ops after
@@ -2275,16 +2313,16 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 
 ## Data-driven files
 
-- `github.com/cockroachdb/datadriven` v1.0.2. A file holds commands, a `----` separator and the
-  expected output; `go test -rewrite` regenerates the expected output for review, and a run without
-  it fails on any difference, naming the file and line.
-- The change that adds `datadriven` adds "Version pin: `github.com/cockroachdb/datadriven` v1.0.2" to
-  `docs/tech-debts.md`, and the dependency passes the license check (Apache-2.0).
-- Regression cases: the metamorphic spike's reduced plant as a file, which fails against the planted
-  copy and passes against the real package:
+- `github.com/cockroachdb/datadriven` v1.0.2 (Apache-2.0; one dependency, BSD-3 `go-difflib`),
+  pinned in `docs/tech-debts.md`. A file holds commands, a `----` separator and the expected
+  output; `go test -rewrite` regenerates the expected output for review, and a run without it fails
+  on any difference, naming the file and line.
+- Regression cases of the metamorphic tests: `run set=<option set>` over an ops file, printing each
+  op whose history line is not "ok" (see Metamorphic index tests):
 
   ```text
-  # P1, seed 0 under A: a flush dropped a removal that hid a key in an older run.
+  # Metamorphic testing spike, plant P1 at seed 0 under A: a flush dropped a removal that hid a key
+  # in an older run.
   run set=A
   put aa v26x
   flush
@@ -2295,15 +2333,25 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   floor aca: none
   ```
 
-- Compaction picking: the universal picker cases ported from RocksDB's `compaction_picker_test.cc`
-  (listed under Compaction) as data-driven files, each naming its source test and RocksDB version.
-- Range-removal fragments: a memtable's fragments after a sequence of puts and range removals,
-  printed as fragment lists, including a later write cutting its key out of a fragment.
-- Scripted recovery: a disk image built by commands (format, write, flush, crash with a landed set,
-  flip a bit) and the recovery result printed (LSN range, Corrupt LSN, quarantined segments); the
-  Recovery section's torn-tail and depth-2 cases as the first files.
-- An unknown command or a malformed argument fails the test with the file and line, never a silent
-  skip.
+- Compaction picking (`internal/lsm/testdata/compaction_picker`): `pick mib=(…)` with the runs'
+  sizes newest first, the oldest `held`, and any setting a case changes (`trigger`, `ratio`,
+  `size-amp`, `buffer-mib`, `limit`, `max-mib`); each pick prints the rule and the runs it merges,
+  then picks again with those held until none is due. The Compaction section's rows come first,
+  then RocksDB's universal cases (`NeedsCompactionUniversal`, `UniversalMaxReadAmp*`), each naming
+  its source test and RocksDB version.
+- Range-removal fragments (`internal/lsm/testdata/fragments`): ops on an empty tree (`put`,
+  `delrange`, `flush`, `get`) and what it then holds (`memtable`: entries and fragments; `runs`:
+  each run's entry and removal counts and fragments); the Range removals section's memtable table,
+  a later write cutting its key out of a fragment, a refused empty range, and what a flush keeps
+  with and without an older run under the fragment.
+- Scripted recovery (`internal/disklog/testdata/recovery`): on a freshly formatted 1 GiB disk,
+  `run [depth=n]` takes `write` and `submit` of chunk writes (a submit prints the actions it queues),
+  `exec ioN`, `crash` landing the listed unflushed blocks, `xor` and `flip` of a block's bytes,
+  `zeros`, and `recover open|rebuild`, which prints the LSNs replayed, the durable LSN, the headers
+  erased and the segments quarantined, or Corrupt(LSN). The Recovery section's torn tail (every
+  landing set), damage in a middle record and in the last one, and both commit-depth-2 cases.
+- An unknown command, argument or op, or a malformed argument, fails the test with the file and
+  line, never a silent skip.
 
 ## Planted-bug check
 
@@ -2389,7 +2437,8 @@ The seeded runs, each described in its section above:
   run), seed 12 (a flush keeps its frozen view).
 - Chunk index: seed 21 (key order), seed 22 (cleaner moves over 3 chunks), 200 seeds (replay past
   pending writes, chunk epochs spike R1), seeds 0-3 (recovery on a 1 GiB simulated disk).
-- Metamorphic index tests: seeds 0-199 x 12 option sets.
+- Metamorphic index tests: seeds 0-19 x 11 option sets for `internal/lsm` and x 10 for the chunk
+  index on every run; seeds 0-10,002 and 0-10,001 once.
 - Crash at every action: every k, with three landing sets and a failure each.
 - Cleaner write amplification at 80 / 90 / 95% full.
 - Planted-bug check: seeds 0-99 under each planted bug and the fixed protocol, the replay of each bug's first failing seed, and seeds 0-9,999 of the fixed protocol once.

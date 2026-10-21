@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/datadriven"
+
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
@@ -99,77 +101,79 @@ func countPages(pg *pages, root uint32) int {
 	return n
 }
 
-// The memtable fragment table of the range removals scenarios: fragments that overlap or abut
-// merge, a later put cuts its key out, and a range removal turns the memtable's entries into
-// removals.
+// showKey writes k with the byte 0 as \0, the form keys take in testdata/fragments.
+func showKey(k []byte) string { return strings.ReplaceAll(string(k), "\x00", `\0`) }
+
+func showFrags(frags []string) string {
+	if len(frags) == 0 {
+		return "none"
+	}
+	return showKey([]byte(strings.Join(frags, " ")))
+}
+
+// The memtable fragments of testdata/fragments: fragments that overlap or abut merge, a later put
+// cuts its key out, a range removal turns the memtable's entries into removals, and a flush keeps
+// a fragment and a removal only while an older run holds a key they hide.
 func TestMemtableFragments(t *testing.T) {
-	cases := []struct {
-		ops    []string
-		frags  []string
-		absent []string
-		reads  model
-	}{
-		{[]string{"del b e"}, []string{"b-e"}, []string{"c"}, nil},
-		{[]string{"put c", "del b e"}, []string{"b-e"}, []string{"c"}, nil},
-		{[]string{"del b e", "put c"}, []string{"b-c", "c\x00-e"}, []string{"d"}, model{"c": "c"}},
-		{[]string{"del b d", "del c f"}, []string{"b-f"}, nil, nil},
-		{[]string{"del b c", "del c d"}, []string{"b-d"}, nil, nil},
-		{[]string{"del b e", "del c d"}, []string{"b-e"}, nil, nil},
-		{[]string{"del c d", "del a c"}, []string{"a-d"}, nil, nil},
-		{[]string{"del b c", "del e f", "del h i", "del a g"}, []string{"a-g", "h-i"}, nil, nil},
-		{[]string{"del b e", "put b"}, []string{"b\x00-e"}, nil, model{"b": "b"}},
-		{[]string{"del b e", "put d"}, []string{"b-d", "d\x00-e"}, nil, model{"d": "d"}},
-	}
-	for _, c := range cases {
-		tr := newTree(t, 1<<20)
-		for _, op := range c.ops {
-			f := strings.Fields(op)
-			if f[0] == "put" {
-				put(t, tr, nil, f[1], f[1])
-			} else {
-				delRange(t, tr, nil, f[1], f[2])
+	datadriven.RunTest(t, "testdata/fragments", func(t *testing.T, d *datadriven.TestData) string {
+		if d.Cmd != "ops" {
+			d.Fatalf(t, "unknown command %q", d.Cmd)
+		}
+		tr, f := newTree(t, 1<<20), newFakeLog()
+		var b strings.Builder
+		for _, line := range strings.Split(strings.TrimSpace(d.Input), "\n") {
+			op := strings.Fields(line)
+			args := func(n int) {
+				if len(op)-1 != n {
+					d.Fatalf(t, "%q: %s takes %d arguments", line, op[0], n)
+				}
 			}
-		}
-		if got := memFrags(tr.mem, tr.mem.froot); !slices.Equal(got, c.frags) {
-			t.Fatalf("%v: fragments %q, want %q", c.ops, got, c.frags)
-		}
-		checkFrags(t, tr.mem)
-		for _, k := range c.absent {
-			if v, ok := tr.Get([]byte(k)); ok {
-				t.Fatalf("%v: get %s = %q", c.ops, k, v)
+			switch op[0] {
+			case "put":
+				args(2)
+				put(t, tr, nil, op[1], op[2])
+			case "delrange":
+				args(2)
+				if err := tr.DeleteRange([]byte(op[1]), []byte(op[2])); err != nil {
+					fmt.Fprintf(&b, "%s: %v\n", line, err)
+				}
+			case "flush":
+				args(0)
+				f.checkpoint(t, tr, nil)
+			case "get":
+				args(1)
+				if v, ok := tr.Get([]byte(op[1])); ok {
+					fmt.Fprintf(&b, "%s: %s\n", line, v)
+				} else {
+					fmt.Fprintf(&b, "%s: absent\n", line)
+				}
+			case "memtable":
+				args(0)
+				var c memCursor
+				c.init(tr.mem, tr.mem.root)
+				var entries []string
+				for ok := c.seekGE(nil); ok; ok = c.next() {
+					if v := c.value(); v[0] == kindDel {
+						entries = append(entries, showKey(c.key())+" removed")
+					} else {
+						entries = append(entries, showKey(c.key())+"="+string(v[1:]))
+					}
+				}
+				fmt.Fprintf(&b, "memtable: entries [%s] fragments %s\n", strings.Join(entries, ", "), showFrags(memFrags(tr.mem, tr.mem.froot)))
+			case "runs":
+				args(0)
+				fmt.Fprintf(&b, "runs: %d\n", tr.Runs())
+				for i, r := range tr.runs {
+					n, removals := runKinds(r)
+					fmt.Fprintf(&b, "run %d: %d entries, %d removals, fragments %s\n", i, n, removals, showFrags(runFrags(r)))
+				}
+			default:
+				d.Fatalf(t, "unknown op %q", line)
 			}
+			checkFrags(t, tr.mem)
 		}
-		for k, want := range c.reads {
-			if v, ok := tr.Get([]byte(k)); !ok || string(v) != want {
-				t.Fatalf("%v: get %s = %q %v", c.ops, k, v, ok)
-			}
-		}
-	}
-
-	tr := newTree(t, 1<<20)
-	put(t, tr, nil, "c", "1")
-	delRange(t, tr, nil, "b", "e")
-	if v, ok := tr.mem.get(tr.mem.root, []byte("c")); !ok || v[0] != kindDel {
-		t.Fatalf("c is %q %v after the range removal, want a removal", v, ok)
-	}
-	newFakeLog().checkpoint(t, tr, nil)
-	if tr.Runs() != 0 {
-		t.Fatal("a flush with nothing older kept the fragment or the removal of c")
-	}
-
-	tr = newTree(t, 1<<20)
-	f := newFakeLog()
-	put(t, tr, nil, "c", "0")
-	f.checkpoint(t, tr, nil)
-	put(t, tr, nil, "c", "1")
-	delRange(t, tr, nil, "b", "e")
-	f.checkpoint(t, tr, nil)
-	if n, _ := runKinds(tr.runs[0]); n != 0 || !slices.Equal(runFrags(tr.runs[0]), []string{"b-e"}) {
-		t.Fatalf("over an older run holding c the flush kept %d entries and fragments %q, want only b-e", n, runFrags(tr.runs[0]))
-	}
-	if v, ok := tr.Get([]byte("c")); ok {
-		t.Fatalf("get c = %q after the flush", v)
-	}
+		return b.String()
+	})
 }
 
 // A range removal whose start is not below its end is an error and stores nothing.
