@@ -11,6 +11,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
 func (h *harness) put(s disklog.Stream, it disklog.Item) {
@@ -771,6 +772,7 @@ func failedFlush(t *testing.T, depth int) (*harness, *node) {
 	cfg.CommitDepth = depth
 	h := formatted(t, 1024*core.BlockSize, cfg)
 	n := newNode(h, 0)
+	h.watch(n.live)
 	for i := range 3 {
 		h.put(disklog.Hot, h.chunkWrite(uint32(i), 0, 1, uint64(i+1)))
 	}
@@ -809,7 +811,7 @@ func TestRecoverAfterAFailedFlush(t *testing.T) {
 			t.Fatalf("depth %d: %d blocks unflushed", depth, unflushed)
 		}
 		for mask := range 1 << unflushed {
-			h, n := failedFlush(t, depth)
+			h, _ := failedFlush(t, depth)
 			h.disk.Crash(func(i int, _ core.LBA) bool { return mask>>i&1 == 1 })
 			res := h.reopen()
 			if res.durable < 3 || res.durable > uint64(3+depth) {
@@ -824,11 +826,9 @@ func TestRecoverAfterAFailedFlush(t *testing.T) {
 					t.Fatalf("depth %d, landed %b: kept LSN %d with only blocks %b of it", depth, mask, lsn, round)
 				}
 			}
-			want := n.live.clone()
-			for _, ev := range res.replayed[3:] {
-				want.apply(ev)
+			if err := oracleCheck(res); err != nil {
+				t.Fatalf("depth %d, landed %b: %v", depth, mask, err)
 			}
-			h.wantModel("index", res.index, want)
 			h.readBack(res.index)
 		}
 	}
@@ -845,18 +845,36 @@ type fact struct {
 	entry disklog.Entry
 }
 
+// facts is each owner's entries in LSN order.
+type facts map[uint32][]fact
+
+// Apply gives each owner its entries of a Durable or Replayed record.
+func (f facts) Apply(ev disklog.Event) { appendFacts(f, ev, nil) }
+
+// Clone copies every owner's entries.
+func (f facts) Clone() facts {
+	c := facts{}
+	for o, fs := range f {
+		c[o] = slices.Clone(fs)
+	}
+	return c
+}
+
 // owners stands in for two chunk indexes and a shard replica sharing one log: index A owns
 // the writes of pool 1, index B those of pool 2, and the replica its Raft entries. A run
 // holds the number of facts its owner had applied.
 type owners struct {
-	h    *harness
-	seed uint64
-	live map[uint32][]fact
-	refs map[disklog.Ticket]disklog.BlobRef
+	h      *harness
+	seed   uint64
+	live   facts
+	refs   map[disklog.Ticket]disklog.BlobRef
+	oracle *sim.Oracle[disklog.Event, facts]
 }
 
 func newOwners(h *harness) *owners {
-	o := &owners{h: h, live: map[uint32][]fact{}, refs: map[disklog.Ticket]disklog.BlobRef{}}
+	o := &owners{h: h, live: facts{}, refs: map[disklog.Ticket]disklog.BlobRef{}}
+	o.oracle = sim.NewOracle[disklog.Event](h.log.DurableLSN(), facts{})
+	h.oracle = o.oracle
 	h.onEvent = func(ev disklog.Event) {
 		if ev.Kind != disklog.Durable {
 			return
@@ -880,10 +898,10 @@ func ownerOf(e disklog.Entry) (uint32, bool) {
 }
 
 // appendFacts gives each owner the entries of a record past its replay LSN.
-func appendFacts(facts map[uint32][]fact, ev disklog.Event, replayLSN map[uint32]uint64) {
+func appendFacts(f facts, ev disklog.Event, replayLSN map[uint32]uint64) {
 	for _, e := range ev.Entries {
 		if o, ok := ownerOf(e); ok && ev.LSN > replayLSN[o] {
-			facts[o] = append(facts[o], fact{ev.LSN, e})
+			f[o] = append(f[o], fact{ev.LSN, e})
 		}
 	}
 }
@@ -942,11 +960,11 @@ func (o *owners) checkpoint(indexes []disklog.CheckpointIndex, flushed ...uint32
 
 // recover runs an open recovery in which each owner loads its newest run and takes the
 // records past its own replay LSN, and resumes the log.
-func (o *owners) recover() (uint64, map[uint32][]fact) {
+func (o *owners) recover() (uint64, facts) {
 	h := o.h
 	h.t.Helper()
 	h.resetIO()
-	got := map[uint32][]fact{}
+	got := facts{}
 	replayLSN := map[uint32]uint64{}
 	reading := map[disklog.BlobRef]uint32{}
 	var durable uint64
@@ -1066,16 +1084,6 @@ func TestOneCheckpointOverTwoIndexesAndAShardReplica(t *testing.T) {
 		h.round()
 		h.step(0)
 		acked := h.log.DurableLSN()
-		want := map[uint32][]fact{}
-		for owner, facts := range o.live {
-			want[owner] = slices.Clone(facts)
-		}
-		if landed {
-			for _, it := range inFlight {
-				owner, _ := ownerOf(it.Entry)
-				want[owner] = append(want[owner], fact{acked + 1, it.Entry})
-			}
-		}
 		h.disk.Crash(func(int, core.LBA) bool { return landed })
 		durable, got := o.recover()
 		wantLSN := acked
@@ -1084,6 +1092,10 @@ func TestOneCheckpointOverTwoIndexesAndAShardReplica(t *testing.T) {
 		}
 		if durable != wantLSN {
 			t.Fatalf("landed %v: recovered LSN %d, acknowledged %d", landed, durable, acked)
+		}
+		want, err := o.oracle.Recovered(durable)
+		if err != nil {
+			t.Fatalf("landed %v: %v", landed, err)
 		}
 		for _, owner := range all {
 			if !slices.Equal(got[owner], want[owner]) {

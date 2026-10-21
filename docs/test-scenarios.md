@@ -1901,7 +1901,8 @@ Invariants (simulator) and faults:
 - Faults: a crash during cleaning, at every action of a pass (crash at every action); overwrites,
   punches and snapshot cuts landing between the worker's copy and the owner's apply; a crash
   after the copy record is durable and before the moves are applied (replay applies them with the
-  same check); a crash after the victim is free in the table and before its TRIM.
+  same check, and replay applying a move without it trips the crash oracle on at least one seed of
+  50); a crash after the victim is free in the table and before its TRIM.
 - Performance bars (the parallel cleaner spike's P3, at 50,000 writes/s): the owner's work per
   write with a worker 1.6 to 1.8 µs at 90 to 95% full against 5.9 to 11 µs inline, its write p99
   about 6 µs. Open: whether these Rust figures are the Go benchmark's bar.
@@ -2202,9 +2203,11 @@ Torn writes, bit flips, fail-slow and discards:
 
 ## Crash oracle
 
-- Per disk the oracle keeps every index's state at the last acknowledged LSN and the items submitted
-  since, in LSN order (RocksDB's crash test: expected state plus trace). In phase 1 the index is the
-  chunk index; from phase 4 each shard replica on the disk too.
+- Per disk the oracle (`sim.Oracle`) keeps every index's state at the last acknowledged LSN and the
+  records written since, in LSN order (RocksDB's crash test: expected state plus trace). It is
+  generic over the record and the model: in phase 1 the disk log's tests keep a block map standing
+  in for the chunk index, and the atomic-flush scenario a list of entries per owner; from phase 4
+  each shard replica on the disk joins the model.
 - After a crash, recovery reports an LSN r. Required: acked ≤ r ≤ acked + in flight. The oracle
   replays its trace from acked to r onto the state at acked, and every index on the disk equals the
   result, with no hole. The window, with 7 acknowledged and 2 in flight:
@@ -2217,15 +2220,22 @@ Torn writes, bit flips, fail-slow and discards:
   never 9 without 8 (a hole)
   ```
 
-- Planted bugs, each in a copy of the package, each tripping the oracle on at least one seed of 50:
-  recovery that stops one LSN early (reports 6); recovery that keeps a later in-flight record after
-  dropping an earlier one (9 without 8); replay that applies a record twice where it is not
-  idempotent (a cleaner move applied without its source check); a checkpoint whose replay LSN is
-  past an index's oldest unflushed write (RocksDB #11148).
-- The oracle's own state is not built from the code under test: it applies submitted items to a
-  plain model, so a bug shared by the chunk index and the oracle cannot hide.
+- The oracle refuses a record written at any LSN but the next, and an acknowledgment of an LSN
+  already acknowledged or never written. After a recovery to r, r is the acknowledged LSN and the
+  records past it are forgotten, since the resumed log writes over them from r + 1.
+- Planted bugs, each tripping the oracle on at least one seed of 50 of the random-crash property:
+  recovery that stops one LSN early (reports 6, `disklog.StopEarly`); recovery that keeps a later
+  in-flight record after dropping an earlier one (9 without 8, `disklog.ReplayPastGaps`); a
+  checkpoint whose run leaves out the record at its replay LSN, so its replay LSN is past the
+  index's oldest unflushed write (RocksDB #11148). With a bug planted, a seed stops after its first
+  cycle's recoveries, before the checks that would otherwise run after the oracle's. The scripted
+  recovery file shows the first two as cases.
+- The oracle's state is independent of replay and of the index: the harness decodes each record's
+  items from the round's write as it goes to the disk and applies them to a plain model. It shares
+  the record codec and group commit's choice of entries with the code under test, which the
+  write-side decode check covers.
 - The Recovery section's atomic-flush scenario (one checkpoint over two indexes and a shard replica)
-  also passes through the oracle.
+  and the failed-flush cases pass through the oracle.
 - Crash during recovery, then recovery again: the oracle's window is the same, and the second
   recovery reports the same r.
 - The phase 5 real-disk crash test keeps the same oracle in its test driver, in a file outside the
@@ -2354,8 +2364,11 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   `exec ioN`, `crash` landing the listed unflushed blocks, `xor` and `flip` of a block's bytes,
   `zeros`, `recover open|rebuild`, which prints the LSNs replayed, the durable LSN, the headers
   erased and the segments quarantined, or Corrupt(LSN), and `index`, which prints the last
-  recovery's index as extents (chunk, blocks, version, LBAs) and whether every mapped block reads
-  back the data its version wrote, so a block damaged after recovery is named. The Recovery
+  recovery's index as extents (chunk, blocks, version, pool, LBAs), whether every mapped block
+  reads back the data its version wrote, so a block damaged after recovery is named, and whether
+  the index is what the crash oracle holds at the recovered LSN, naming the first block that
+  differs, so a careless `go test -rewrite` cannot hide a wrong index. `run plant=stop-early` and
+  `plant=past-gaps` break recovery as the Crash oracle section's planted bugs do. The Recovery
   section's torn tail (every landing set), damage in a middle record and in the last one, and both
   commit-depth-2 cases live only here, each that recovers printing its index.
 - An unknown command, argument or op, or a malformed argument, fails the test with the file and

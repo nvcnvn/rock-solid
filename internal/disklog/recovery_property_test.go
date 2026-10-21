@@ -2,8 +2,10 @@ package disklog_test
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -18,11 +20,25 @@ type crashStats struct {
 	keptInFlight, droppedInFlight, fromManifest, noSpace, depth2, depth3, erased, restarts, crashesInRecovery, gaps, gapsInsideTheWindow, mergeRecords int
 }
 
+// crashPlant is a bug planted in recovery or in the node that the crash oracle must catch.
+type crashPlant uint8
+
+const (
+	plantNone crashPlant = iota
+	// plantStopEarly makes recovery report the LSN before the last one it replayed.
+	plantStopEarly
+	// plantHole makes recovery replay past a missing record, keeping 9 without 8.
+	plantHole
+	// plantStaleRun makes a checkpoint's run leave out the record at its replay LSN (RocksDB #11148).
+	plantStaleRun
+)
+
 // crashSeed runs four cycles of random items, merge pieces on 1 to 4 lanes, checkpoints and disk completions, each ended
 // by a crash that lands every unflushed block with probability 1/2, and checks every
-// recovery against what was acknowledged before the crash. It runs on a node of the
-// scheduler, whose trace it returns with the harness.
-func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
+// recovery against the crash oracle. It runs on a node of the scheduler, whose trace it
+// returns with the harness, and returns the first recovery the oracle rejects. With a bug
+// planted it stops after the first cycle's recoveries, before any check but the oracle's.
+func crashSeed(t *testing.T, seed uint64, st *crashStats, plant crashPlant) (*harness, error) {
 	r := core.NewRand(seed)
 	disk := [3]uint64{1024, 4096, 1 << 16}[r.Below(3)]
 	cfg := testConfig(r.Range(3, 32))
@@ -44,6 +60,14 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 		pieceLimit = 512
 	}
 	n := newNode(h, pieceLimit)
+	n.stale = plant == plantStaleRun
+	switch plant {
+	case plantStopEarly:
+		h.plant = disklog.StopEarly
+	case plantHole:
+		h.plant = disklog.ReplayPastGaps
+	}
+	h.watch(n.live)
 	h.ioRand = r.Fork()
 	durableAtWrite := map[core.LBA]uint64{}
 	// Rounds are written in LSN order, one write each, so the writes number the records; a
@@ -168,7 +192,6 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 		acked, inFlight := h.log.DurableLSN(), uint64(h.log.InFlight())
 		newest, replayBytes := h.log.Manifest(), h.log.ReplayBytes()
 		usage := disklog.SegmentUsageOf(h.log)
-		before := n.live.clone()
 		if r.Chance(1, 4) {
 			st.restarts++
 		} else {
@@ -186,11 +209,20 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 		if reb.err != nil {
 			t.Fatalf("seed %d cycle %d: rebuild: %v", seed, cycle, reb.err)
 		}
+		if err := oracleCheck(reb); err != nil {
+			return h, fmt.Errorf("seed %d cycle %d: rebuild: %w", seed, cycle, err)
+		}
 		rebuiltReplay := h.log.ReplayBytes()
 		rebuiltUsage := disklog.SegmentUsageOf(h.log)
 		res := h.recover(disklog.ModeOpen)
 		if res.err != nil {
 			t.Fatalf("seed %d cycle %d: open: %v", seed, cycle, res.err)
+		}
+		if err := oracleCheck(res); err != nil {
+			return h, fmt.Errorf("seed %d cycle %d: open: %w", seed, cycle, err)
+		}
+		if plant != plantNone {
+			return h, nil
 		}
 		if h.disk.Unflushed() != 0 {
 			t.Fatalf("seed %d cycle %d: recovered with %d blocks unflushed", seed, cycle, h.disk.Unflushed())
@@ -202,8 +234,8 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 			t.Fatalf("seed %d cycle %d: open leaves %d bytes to replay, rebuild %d", seed, cycle, h.log.ReplayBytes(), rebuiltReplay)
 		}
 		d := res.durable
-		if d < acked || d > acked+inFlight || reb.durable != d {
-			t.Fatalf("seed %d cycle %d: recovered LSN %d (rebuild %d), %d acknowledged and %d in flight", seed, cycle, d, reb.durable, acked, inFlight)
+		if reb.durable != d {
+			t.Fatalf("seed %d cycle %d: open recovered LSN %d, rebuild %d", seed, cycle, d, reb.durable)
 		}
 		switch {
 		case d > acked:
@@ -231,7 +263,6 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 			t.Fatalf("seed %d cycle %d: rebuild replayed %v, want every LSN to %d but the merge records'", seed, cycle, got, d)
 		}
 		nextLSN = d + 1
-		want := before
 		for _, ev := range reb.replayed {
 			for i, e := range ev.Entries {
 				switch {
@@ -246,16 +277,11 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 					}
 				}
 			}
-			if ev.LSN > acked {
-				want.apply(ev)
-			}
 		}
 		if d == acked && res.manifest == newest && h.log.ReplayBytes() != replayBytes {
 			t.Fatalf("seed %d cycle %d: %d bytes to replay after recovery, %d before the crash", seed, cycle, h.log.ReplayBytes(), replayBytes)
 		}
-		h.wantModel("open", res.index, want)
-		h.wantModel("rebuild", reb.index, want)
-		h.readBack(want)
+		h.readBack(res.expect)
 		if gapNamedDurable(t, h, r, res, st) {
 			if again := h.reopen(); again.durable != d {
 				t.Fatalf("seed %d cycle %d: reopened at LSN %d after undoing the gap, want %d", seed, cycle, again.durable, d)
@@ -263,7 +289,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 		}
 		n.live, n.running, n.failed = res.index, false, false
 	}
-	return h
+	return h, nil
 }
 
 // gapNamedDurable damages the header of a random replayed record that a later whole header
@@ -307,11 +333,18 @@ func checkpointRecord(ev disklog.Event) bool {
 func TestRandomCrashesKeepAcknowledgedRecords(t *testing.T) {
 	var st crashStats
 	for seed := uint64(1); seed <= 50; seed++ {
-		h := crashSeed(t, seed, &st)
+		h, err := crashSeed(t, seed, &st, plantNone)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := checkIncarnations(h.sched.Trace(), diskLogRules(h.cfg.CommitDepth)...); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
-		if err := sim.CompareTraces(h.sched.Trace(), crashSeed(t, seed, &crashStats{}).sched.Trace()); err != nil {
+		again, err := crashSeed(t, seed, &crashStats{}, plantNone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sim.CompareTraces(h.sched.Trace(), again.sched.Trace()); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
 	}
@@ -371,4 +404,29 @@ func FuzzRecover(f *testing.F) {
 			t.Fatalf("recovered LSN %d, want the new write's %d", res.durable, durable+1)
 		}
 	})
+}
+
+// Each planted bug makes some recovery among the seeds that pass unplanted fail the crash oracle.
+func TestCrashOracleCatchesPlantedBugs(t *testing.T) {
+	for _, p := range []struct {
+		name  string
+		plant crashPlant
+	}{
+		{"stop one LSN early", plantStopEarly},
+		{"replay past a gap", plantHole},
+		{"stale run at the replay LSN", plantStaleRun},
+	} {
+		tripped := 0
+		var first error
+		for seed := uint64(1); seed <= 50; seed++ {
+			if _, err := crashSeed(t, seed, &crashStats{}, p.plant); err != nil {
+				tripped++
+				first = cmp.Or(first, err)
+			}
+		}
+		if tripped == 0 {
+			t.Fatalf("%s: the oracle passed every seed", p.name)
+		}
+		t.Logf("%s: %d seeds of 50 tripped, first %v", p.name, tripped, first)
+	}
 }

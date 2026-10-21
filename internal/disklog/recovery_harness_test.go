@@ -47,19 +47,20 @@ type blockKey struct {
 type mapping struct {
 	lba     core.LBA
 	version uint64
+	pool    core.PoolID
 }
 
 // model is a stand-in for the chunk index: where each live block of each chunk sits.
 type model map[blockKey]mapping
 
-// apply maps a Durable or Replayed record's writes and drops its punched blocks.
-func (m model) apply(ev disklog.Event) {
+// Apply maps a Durable or Replayed record's writes and drops its punched blocks.
+func (m model) Apply(ev disklog.Event) {
 	for i, e := range ev.Entries {
 		switch e.Kind {
 		case disklog.EntryWrite:
 			base := ev.LBA + core.LBA(ev.HeaderBlocks) + core.LBA(ev.Payloads[i]/core.BlockSize)
 			for b := range e.Count {
-				m[blockKey{e.Chunk, e.First + b}] = mapping{base + core.LBA(b), e.Version}
+				m[blockKey{e.Chunk, e.First + b}] = mapping{base + core.LBA(b), e.Version, e.Pool}
 			}
 		case disklog.EntryPunch:
 			for b := range e.Count {
@@ -85,20 +86,26 @@ func (m model) encode() []byte {
 		b = binary.LittleEndian.AppendUint16(b, k.block)
 		b = binary.LittleEndian.AppendUint64(b, uint64(v.lba))
 		b = binary.LittleEndian.AppendUint64(b, v.version)
+		b = binary.LittleEndian.AppendUint32(b, uint32(v.pool))
 	}
 	return b
 }
 
 func decodeModel(b []byte) model {
 	m := model{}
-	for ; len(b) >= core.ChunkIDSize+18; b = b[core.ChunkIDSize+18:] {
+	for ; len(b) >= core.ChunkIDSize+22; b = b[core.ChunkIDSize+22:] {
 		k := blockKey{core.ChunkIDFromBytes([core.ChunkIDSize]byte(b)), binary.LittleEndian.Uint16(b[core.ChunkIDSize:])}
-		m[k] = mapping{core.LBA(binary.LittleEndian.Uint64(b[core.ChunkIDSize+2:])), binary.LittleEndian.Uint64(b[core.ChunkIDSize+10:])}
+		m[k] = mapping{
+			lba:     core.LBA(binary.LittleEndian.Uint64(b[core.ChunkIDSize+2:])),
+			version: binary.LittleEndian.Uint64(b[core.ChunkIDSize+10:]),
+			pool:    core.PoolID(binary.LittleEndian.Uint32(b[core.ChunkIDSize+18:])),
+		}
 	}
 	return m
 }
 
-func (m model) clone() model { return maps.Clone(m) }
+// Clone copies the model.
+func (m model) Clone() model { return maps.Clone(m) }
 
 // readBack checks that every mapped block reads back the data its version wrote.
 func (h *harness) readBack(m model) {
@@ -140,6 +147,10 @@ type node struct {
 	// expect holds it for every finished checkpoint by where its manifest's last piece sits.
 	begun  disklog.Manifest
 	expect map[disklog.ManifestPos]disklog.Manifest
+	// stale plants RocksDB #11148: a checkpoint's run is the index from before the newest
+	// durable record, which its replay LSN still counts as in the run.
+	stale  bool
+	before model
 }
 
 func newNode(h *harness, pieceLimit int) *node {
@@ -151,7 +162,10 @@ func newNode(h *harness, pieceLimit int) *node {
 func (n *node) onEvent(ev disklog.Event) {
 	switch ev.Kind {
 	case disklog.Durable:
-		n.live.apply(ev)
+		if n.stale {
+			n.before = n.live.Clone()
+		}
+		n.live.Apply(ev)
 		for i, t := range ev.Tickets {
 			if n.running && n.ticket != disklog.NoTicket && t == n.ticket {
 				n.prev = &disklog.BlobRef{Segment: ev.Segment, Block: ev.Block, LSN: ev.LSN, Entry: uint16(i)}
@@ -188,6 +202,9 @@ func (n *node) step() bool {
 			h.t.Fatalf("begin checkpoint: %v", err)
 		}
 		n.running, n.body, n.off, n.prev, n.ticket = true, n.live.encode(), 0, nil, 0
+		if n.stale && n.before != nil {
+			n.body = n.before.encode()
+		}
 	}
 	if n.ticket != 0 || n.off > len(n.body) {
 		return false
@@ -259,6 +276,9 @@ type recovered struct {
 	erased        int
 	loaded        disklog.Manifest
 	replayReads   uint64
+	// expect is what the harness's crash oracle holds at the recovered LSN, or why it holds nothing.
+	expect    model
+	oracleErr error
 }
 
 func (r *recovered) lsns() []uint64 {
@@ -382,7 +402,7 @@ func (h *harness) recoverOnce(mode disklog.Mode, crash func(core.Action) bool) (
 		case disklog.Replayed:
 			res.replayed = append(res.replayed, ev)
 			if ev.LSN > res.replayLSN {
-				res.index.apply(ev)
+				res.index.Apply(ev)
 			}
 		case disklog.Recovered:
 			res.durable = ev.LSN
@@ -431,6 +451,12 @@ func (h *harness) recoverOnce(mode disklog.Mode, crash func(core.Action) bool) (
 	res.erased = h.rec.Erased()
 	if res.durable != h.rec.DurableLSN() {
 		h.t.Fatalf("recovered LSN %d, recovery says %d", res.durable, h.rec.DurableLSN())
+	}
+	if o, ok := h.oracle.(*diskOracle); ok {
+		res.expect, res.oracleErr = o.Recovered(res.durable)
+		if res.oracleErr != nil {
+			h.oracle = sim.NewOracle[disklog.Event](res.durable, res.index.Clone())
+		}
 	}
 	h.log, err = h.rec.Log(&h.ctx)
 	if err != nil {

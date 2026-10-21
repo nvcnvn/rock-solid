@@ -19,6 +19,7 @@ import (
 // returns what its commands print.
 func scriptedRecovery(t *testing.T, d *datadriven.TestData) string {
 	cfg := testConfig(0)
+	var plant func(*disklog.Recovery)
 	for _, a := range d.CmdArgs {
 		switch {
 		case a.Key == "depth" && len(a.Vals) == 1:
@@ -27,11 +28,17 @@ func scriptedRecovery(t *testing.T, d *datadriven.TestData) string {
 				d.Fatalf(t, "depth: %v", err)
 			}
 			cfg.CommitDepth = n
+		case a.Key == "plant" && len(a.Vals) == 1 && a.Vals[0] == "stop-early":
+			plant = disklog.StopEarly
+		case a.Key == "plant" && len(a.Vals) == 1 && a.Vals[0] == "past-gaps":
+			plant = disklog.ReplayPastGaps
 		default:
 			d.Fatalf(t, "unknown argument %q", a.String())
 		}
 	}
 	h := formatted(t, gib, cfg)
+	h.plant = plant
+	h.watch(model{})
 	var b strings.Builder
 	var last *recovered
 	for _, line := range strings.Split(strings.TrimSpace(d.Input), "\n") {
@@ -113,7 +120,7 @@ func scriptedRecovery(t *testing.T, d *datadriven.TestData) string {
 			if len(f) != 1 || last == nil || last.err != nil {
 				d.Fatalf(t, "%q: index takes no arguments and follows a successful recover", line)
 			}
-			b.WriteString(indexResult(h, last.index))
+			b.WriteString(indexResult(h, last))
 		default:
 			d.Fatalf(t, "unknown command %q", line)
 		}
@@ -151,9 +158,11 @@ func recoveryResult(res *recovered) string {
 	return out
 }
 
-// indexResult prints a recovered index as extents, each a run of blocks of one chunk version at
-// consecutive LBAs, and whether every block reads back the data its version wrote.
-func indexResult(h *harness, m model) string {
+// indexResult prints a recovered index as extents, each a run of blocks of one chunk version and
+// pool at consecutive LBAs, whether every block reads back the data its version wrote, and whether
+// the index is what the crash oracle expects at the recovered LSN.
+func indexResult(h *harness, res *recovered) string {
+	m := res.index
 	var lines []string
 	status := ""
 	keys := m.keys()
@@ -162,7 +171,7 @@ func indexResult(h *harness, m model) string {
 		n := 1
 		for ; i+n < len(keys); n++ {
 			nk, nv := keys[i+n], m[keys[i+n]]
-			if nk.chunk != k.chunk || nk.block != k.block+uint16(n) || nv.version != v.version || nv.lba != v.lba+core.LBA(n) {
+			if nk.chunk != k.chunk || nk.block != k.block+uint16(n) || nv.version != v.version || nv.pool != v.pool || nv.lba != v.lba+core.LBA(n) {
 				break
 			}
 		}
@@ -177,19 +186,23 @@ func indexResult(h *harness, m model) string {
 			blocks = fmt.Sprintf("blocks %d-%d", k.block, k.block+uint16(n-1))
 			lbas = fmt.Sprintf("%d-%d", v.lba, v.lba+core.LBA(n-1))
 		}
-		lines = append(lines, fmt.Sprintf("  chunk %d %s v%d at %s\n", k.chunk.Index, blocks, v.version, lbas))
+		lines = append(lines, fmt.Sprintf("  chunk %d %s v%d pool %d at %s\n", k.chunk.Index, blocks, v.version, v.pool, lbas))
 		i += n
 	}
 	if status == "" {
 		status = "every block reads back"
 	}
-	return fmt.Sprintf("index: %d blocks, %s\n", len(keys), status) + strings.Join(lines, "")
+	oracle := fmt.Sprintf("as the oracle expects at LSN %d", res.durable)
+	if err := oracleCheck(res); err != nil {
+		oracle = "oracle: " + err.Error()
+	}
+	return fmt.Sprintf("index: %d blocks, %s, %s\n", len(keys), status, oracle) + strings.Join(lines, "")
 }
 
 // Recovery from disk images that testdata/recovery's commands build: write (submit and complete),
 // submit (only queue, printing the actions), exec ioN, crash landing the listed unflushed blocks,
 // xor a block with a mask, flip bits of a byte, zeros, recover open or rebuild, and index, the
-// last recovery's index read back.
+// last recovery's index read back and checked against the crash oracle.
 func TestScriptedRecovery(t *testing.T) {
 	datadriven.RunTest(t, "testdata/recovery", func(t *testing.T, d *datadriven.TestData) string {
 		if d.Cmd != "run" {

@@ -77,3 +77,9 @@ func ReplayPerStream(r *Recovery) { r.perStream = true }
 
 // SkipMergeLanes plants the bug of leaving merge lanes out of replay.
 func SkipMergeLanes(r *Recovery) { r.skipMerges = true }
+
+// StopEarly plants the bug of reporting the LSN before the last one replay delivered.
+func StopEarly(r *Recovery) { r.stopEarly = true }
+
+// ReplayPastGaps plants the bug of delivering a record past a missing LSN instead of ending the log there.
+func ReplayPastGaps(r *Recovery) { r.pastGaps = true }

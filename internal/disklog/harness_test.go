@@ -77,6 +77,8 @@ type harness struct {
 	plant func(*disklog.Recovery)
 	// poolBytes, when set, sizes the pool of every recovery the harness starts.
 	poolBytes int
+	// oracle, when set, is handed every round the log writes and every LSN it reports durable.
+	oracle oracleFeed
 }
 
 func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {
@@ -204,6 +206,9 @@ func (h *harness) absorb() {
 			if h.onWrite != nil {
 				h.onWrite(a)
 			}
+			if h.oracle != nil && h.log != nil && h.rec == nil {
+				h.noteRound(a)
+			}
 		case core.ActDiskFsync:
 			p := pendingIO{act: a}
 			if a.Linked {
@@ -231,6 +236,11 @@ func (h *harness) absorb() {
 		ev.Payloads = slices.Clone(ev.Payloads)
 		ev.Data = slices.Clone(ev.Data)
 		h.events = append(h.events, ev)
+		if h.oracle != nil && ev.Kind == disklog.Durable {
+			if err := h.oracle.Acked(ev.LSN); err != nil {
+				h.t.Fatalf("oracle: %v", err)
+			}
+		}
 		if h.sched != nil && ev.Kind == disklog.Durable {
 			h.node.Output(h.loop, trace.Record{Name: trace.OutDurable, Fields: [trace.MaxFields]uint64{ev.LSN, ev.LSN}})
 		}

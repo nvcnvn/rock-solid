@@ -234,6 +234,8 @@ type Recovery struct {
 
 	perStream  bool
 	skipMerges bool
+	stopEarly  bool
+	pastGaps   bool
 }
 
 // Recover starts recovering the log on a disk of diskBlocks blocks, with IO IDs counting up from firstIO, taking its read buffers from the pool at once and a window for each lane past the hot and cold ones when Replay starts.
@@ -1036,6 +1038,12 @@ func (r *Recovery) pumpReplay(ctx *core.Context, out *Output) {
 		case !r.gapped && lsn < r.expected:
 			r.fail(ctx, &CorruptError{LSN: lsn}, out)
 			return
+		case r.pastGaps && !r.gapped:
+			r.count(x)
+			if !merge {
+				r.deliver(x, out)
+			}
+			r.expected = lsn + 1
 		default:
 			r.gapped = true
 			r.found = append(r.found, foundHeader{segment: x.headSeg, block: x.headBlock, lsn: lsn})
@@ -1174,6 +1182,9 @@ func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
 		return
 	}
 	r.durable = g - 1
+	if r.stopEarly && r.durable > 0 {
+		r.durable--
+	}
 	for s := range r.segs {
 		info := &r.segs[s]
 		if info.state == segSuspect && info.listed {

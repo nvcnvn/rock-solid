@@ -1266,7 +1266,7 @@ Invariants checked after every step:
 - at most one Raft leader per shard per term, and a committed entry is never lost;
 - no node's table epoch or PG interval number goes backwards, and no two writes of a chunk get one version.
 
-**Crash oracle.** As RocksDB's crash test does with its expected state and trace, the simulator keeps, per disk, the state every index had at the last acknowledged LSN and the items submitted since, in LSN order. After a crash, recovery reports an LSN between the acknowledged one and the last in flight; the oracle replays its trace to that LSN, and every index on the disk, the chunk index and each shard replica, must equal the result, with no hole. The real-disk crash test of phase 5 keeps the same oracle in its driver, outside the daemon it kills.
+**Crash oracle.** As RocksDB's crash test does with its expected state and trace, the simulator keeps, per disk, the state every index had at the last acknowledged LSN and the records written since, in LSN order. After a crash, recovery reports an LSN between the acknowledged one and the last in flight; the oracle replays its trace to that LSN, and every index on the disk, the chunk index and each shard replica, must equal the result, with no hole. The real-disk crash test of phase 5 keeps the same oracle in its driver, outside the daemon it kills.
 
 **Driver tests.** The event loop and the drivers cannot be sans-IO, but most of what they decide is made from what a pass reads, so they are tested in three tiers ([driver testing study](../studies/driver-testing/README.md)):
 
