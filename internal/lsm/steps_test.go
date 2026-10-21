@@ -436,11 +436,17 @@ func TestFailedCheckpointDuringSteps(t *testing.T) {
 // steps; one manifest names both merges' bounds, a restart resumes both, and every key reads the
 // same throughout.
 func TestTwoMergesInSteps(t *testing.T) {
-	const piece = 384
+	const piece = 4096
 	cfg := stepConfig(piece, piece)
 	tr := stepTree(t, piece, piece)
 	f := newFakeLog()
-	m := fourRuns(t, tr, f)
+	m := model{}
+	for run := range 4 {
+		for i := range 200 {
+			put(t, tr, m, fmt.Sprintf("k%03d", i), fmt.Sprintf("%d%040d", run, i))
+		}
+		f.checkpoint(t, tr, nil)
+	}
 	older := tr.pickSpan(0, 4, ruleNone)
 	older.Run()
 	if err := tr.Install(older); err != nil {
@@ -448,7 +454,7 @@ func TestTwoMergesInSteps(t *testing.T) {
 	}
 	for run := range 4 {
 		for i := range 60 {
-			put(t, tr, m, fmt.Sprintf("n%03d", i), fmt.Sprint("n", run))
+			put(t, tr, m, fmt.Sprintf("n%03d", i), fmt.Sprintf("n%d%080d", run, i))
 		}
 		f.checkpoint(t, tr, nil)
 	}
@@ -510,11 +516,20 @@ func TestTwoMergesInSteps(t *testing.T) {
 // A merge whose later step fails its check gives its worker back once its last installed step is
 // named, so with one worker the next merge, of another index, still starts.
 func TestFailedMergeFreesItsWorker(t *testing.T) {
-	const piece = 512
+	const piece = 4096
 	a, b := stepTree(t, piece, piece), stepTree(t, piece, piece)
 	fa, fb := newFakeLog(), newFakeLog()
-	fourRuns(t, a, fa)
-	fourRuns(t, b, fb)
+	for _, x := range []struct {
+		tr *Tree
+		f  *fakeLog
+	}{{a, fa}, {b, fb}} {
+		for run := range 4 {
+			for i := range 300 {
+				put(t, x.tr, nil, fmt.Sprintf("%04d", i), fmt.Sprintf("%d%040d", run, i))
+			}
+			x.f.checkpoint(t, x.tr, nil)
+		}
+	}
 	s, err := NewScheduler(SchedulerConfig{})
 	if err != nil {
 		t.Fatal(err)

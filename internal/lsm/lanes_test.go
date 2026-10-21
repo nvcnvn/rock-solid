@@ -172,7 +172,7 @@ func (o *laneOwner) checkpoint() {
 // the worker's next merge continues the segment the first one left open, every key reads the
 // same throughout, and a merge never holds more than a step of entries and fragments beyond the manifests.
 func TestMergeOutputFillsWorkerLane(t *testing.T) {
-	const piece, step = 1024, 1024
+	const piece, step = 4096, 4096
 	o := newLaneOwner(t, 2, stepConfig(piece, step))
 	s, err := NewScheduler(SchedulerConfig{})
 	if err != nil {
@@ -183,7 +183,7 @@ func TestMergeOutputFillsWorkerLane(t *testing.T) {
 		s.Add(tr)
 		for run := range 4 {
 			for k := range 150 {
-				put(t, tr, models[i], fmt.Sprintf("i%d-%03d", i, (k*7+run)%300), fmt.Sprint("r", run))
+				put(t, tr, models[i], fmt.Sprintf("i%d-%03d", i, (k*7+run)%300), fmt.Sprintf("r%d%040d", run, k))
 			}
 			o.checkpoint()
 		}

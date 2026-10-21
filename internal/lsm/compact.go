@@ -353,17 +353,27 @@ func (t *Tree) score() (free, limit int) {
 	return free, t.runLimit()
 }
 
-// maxRunBytes is the most a run may hold for its root to list every piece. A block is closed only
-// when the next entry would not fit, so it is short of full by less than that entry, and two
-// adjacent blocks together hold more than a piece since the second starts with that entry; the
-// filter fills its pieces. Entries, fragments and the filter may each end in a short piece, so
-// two pieces are spare beyond the root, and a merge's filter may round up to one line more than
-// its inputs' together.
+// maxRunBytes is the most a merge's inputs may hold for its output's root to list every piece. A
+// block is closed only when the next entry would not fit, so it is short of full by less than that
+// entry, and two adjacent blocks together hold more than a piece since the second starts with that
+// entry; a partition fills its pieces. Entries, fragments and the last partition may each end in a
+// short piece, so two pieces are spare beyond the root, and the output's filter may round up to one
+// line more than its inputs' together, plus a partition's framing. Each step before the last adds
+// a fenced partition, which may end in a short piece, round up by two lines and carry a fence of
+// up to a piece, and may end its fragments in a short piece; a step outputs at least
+// StepBytes less a piece, and at least a block.
 func (t *Tree) maxRunBytes() int {
 	room := t.cfg.MaxPiece - pieceOverhead
 	refs := (room - emptyBlockSize) / disklog.BlobRefSize
 	grow := min(room-emptyBlockSize, maxEntryBytes) + 4
-	return (refs-2)*max(room/2, room-grow) - cacheLineSize
+	full := max(room/2, room-grow)
+	budget := (refs-2)*full - cacheLineSize - partHdr - partTrailer
+	if t.cfg.StepBytes == 0 {
+		return budget
+	}
+	perStep := 2*room + 2*cacheLineSize + partHdr + partTrailer + filterKeyHdr + filterTrailer + min(MaxKey, room)
+	stepMin := max(t.cfg.StepBytes-room, full)
+	return max(budget*stepMin/(stepMin+perStep), 1)
 }
 
 var maxEntryBytes = uvarintLen(0) + uvarintLen(MaxKey) + uvarintLen(MaxValue+1) + MaxKey + MaxValue + 1

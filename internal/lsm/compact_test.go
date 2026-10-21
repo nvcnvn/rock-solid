@@ -270,14 +270,26 @@ func TestHoldsForwardCursors(t *testing.T) {
 
 // maxRunBytes leaves a block short of full by at most one entry: with 1 MiB pieces a run holds
 // about 56.8 GiB, and only pieces too small for two of the largest entries fall back to half full.
+// Merging in steps reserves each step's short pieces and fenced partition: 64 MiB steps of 1 MiB
+// pieces keep about 55 GiB, and 512-byte steps of 512-byte pieces, where four runs of 6,120 bytes
+// would need about 40 pieces for 27 references, refuse such a merge.
 func TestMaxRunBytes(t *testing.T) {
 	big, small := newTree(t, 1<<20), newTree(t, 512)
 	if got := big.maxRunBytes(); got < 56<<30 || got > 57<<30 {
 		t.Fatalf("1 MiB pieces: %d bytes", got)
 	}
 	room := 512 - pieceOverhead
-	if got, want := small.maxRunBytes(), ((room-8)/disklog.BlobRefSize-2)*(room/2)-cacheLineSize; got != want {
-		t.Fatalf("512-byte pieces: %d bytes, want %d", got, want)
+	budget := ((room-8)/disklog.BlobRefSize-2)*(room/2) - cacheLineSize - partHdr - partTrailer
+	if got := small.maxRunBytes(); got != budget {
+		t.Fatalf("512-byte pieces: %d bytes, want %d", got, budget)
+	}
+	big.cfg.StepBytes, small.cfg.StepBytes = 64<<20, 512
+	if got := big.maxRunBytes(); got < 54<<30 || got > 56<<30 {
+		t.Fatalf("1 MiB pieces in 64 MiB steps: %d bytes", got)
+	}
+	perStep := 2*room + 2*cacheLineSize + 21 + room
+	if got, want := small.maxRunBytes(), budget*(room/2)/(room/2+perStep); got != want || got >= 6120 {
+		t.Fatalf("512-byte pieces in 512-byte steps: %d bytes, want %d", got, want)
 	}
 }
 

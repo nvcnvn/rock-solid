@@ -1484,10 +1484,16 @@ merges that take several.
   durable.
 - Filter partitions: a merge in steps writes a partition of its keys per step, fenced by the step's
   bound, and a get, a prefix floor and a prefix seek each probe the one partition covering their key
-  or prefix, allocating nothing (`BenchmarkPartitionedLookups`, over 20 or more partitions). With
-  two-byte prefixes straddling steps and removals the merge drops ending steps, gets, floors, prefix
-  floors and prefix scans read like the map between steps, after and after a restore; with the
-  fence's prefix left out of its partition, a prefix lookup misses keys of a later partition.
+  or prefix, allocating nothing (`BenchmarkPartitionedLookups`, over 20 or more partitions). Under
+  filters of whole keys, prefixes and both, with fixed two-byte prefixes and prefixes up to a slash
+  of one or two letters, straddling steps, and removals the merge drops ending steps, gets, floors,
+  prefix floors and prefix scans read like the map between steps, after and after a restore; with
+  the fence's prefix left out of its partition, a lookup by prefix misses keys of a later partition
+  under prefix filters (a prefix filter's get among them) and nothing changes under whole keys.
+- A merge in steps is picked only when its output's root can list every piece with each step's
+  short pieces and fenced partition: four runs of five 270-byte entries (6,120 bytes) are refused
+  in 512-byte pieces and steps, where the output would need about 40 pieces for 27 references, and
+  1 MiB pieces in 64 MiB steps still allow about 55 GiB.
 - With steps whose partitions span several pieces, a merge holds at most a step of entries and
   fragments and its own partition beyond the manifests, the last step included.
 - Metamorphic option sets for the tree: `steps` (384-byte pieces, two-piece steps), `steps-restart`

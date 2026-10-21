@@ -799,6 +799,24 @@ func TestCompactionGuards(t *testing.T) {
 	if c := big.PickCompaction(); c != nil {
 		t.Fatalf("picked %v over %d bytes, more than a root of 512-byte pieces lists (%d)", c.rule, big.RunBytes(), big.maxRunBytes())
 	}
+
+	stepped, err := New(Config{MaxPiece: 512, StepBytes: 512, Check: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 4 {
+		for j := range 5 {
+			put(t, stepped, nil, fmt.Sprintf("k%d-%d", i, j), strings.Repeat("v", 270))
+		}
+		f.checkpoint(t, stepped, nil)
+	}
+	for c := stepped.PickCompaction(); c != nil; c = stepped.PickCompaction() {
+		c.Run()
+		if err := stepped.Install(c); err != nil {
+			t.Fatal(err)
+		}
+		f.checkpoint(t, stepped, nil)
+	}
 }
 
 // A compaction installed while a flush writes one of its inputs leaves that flush's manifest

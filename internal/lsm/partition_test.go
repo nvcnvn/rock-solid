@@ -94,17 +94,57 @@ func mergeAll(t testing.TB, tr *Tree, f *fakeLog, m model, probes []string) int 
 	return steps
 }
 
-// partitionReadsDiffer merges four runs of seed's keys, under two-byte prefixes, in steps, and
-// describes the first read that differs from the map between steps, after them or after a restore.
-func partitionReadsDiffer(t testing.TB, seed uint64, plant plants) string {
+// prefixKeys is how a partition test's keys take prefixes: a fixed two bytes, or the bytes up to
+// and including the first slash, one or two letters before it.
+type prefixKeys struct {
+	name   string
+	prefix func([]byte) int
+	key    func(r *rand.Rand) string
+	probes []string
+}
+
+func prefixCases() []prefixKeys {
+	letter := func(r *rand.Rand) byte { return 'a' + byte(r.IntN(6)) }
+	var fixed, slashed []string
+	for c := 'a'; c <= 'g'; c++ {
+		for d := 'a'; d <= 'g'; d++ {
+			fixed = append(fixed, string(c)+string(d), string(c)+string(d)+"2", string(c)+string(d)+"9")
+			slashed = append(slashed, string(c)+string(d)+"/", string(c)+string(d)+"/2", string(c)+string(d)+"/9")
+		}
+		slashed = append(slashed, string(c)+"/", string(c)+"/2", string(c)+"/9", string(c))
+	}
+	return []prefixKeys{
+		{"fixed", func(k []byte) int {
+			if len(k) < 2 {
+				return 0
+			}
+			return 2
+		}, func(r *rand.Rand) string { return fmt.Sprintf("%c%c%d", letter(r), letter(r), r.IntN(4)) }, fixed},
+		{"slash", func(k []byte) int { return bytes.IndexByte(k, '/') + 1 }, func(r *rand.Rand) string {
+			p := string(letter(r))
+			if r.IntN(2) == 0 {
+				p += string(letter(r))
+			}
+			return fmt.Sprintf("%s/%d", p, r.IntN(4))
+		}, slashed},
+	}
+}
+
+// partitionReadsDiffer merges four runs of seed's keys in steps, under filters holding what and
+// pk's prefixes, and describes the first read that differs from the map between steps, after them
+// or after a restore.
+func partitionReadsDiffer(t testing.TB, seed uint64, what FilterKeys, pk prefixKeys, plant plants) string {
 	r := rand.New(rand.NewPCG(seed, 7))
-	tr := prefixTree(t, 256, 2)
+	tr, err := New(Config{MaxPiece: 256, StepBytes: 256, Check: true, Filter: what, Prefix: pk.prefix})
+	if err != nil {
+		t.Fatal(err)
+	}
 	tr.plant = plant
 	f := newFakeLog()
 	m := model{}
 	for run := range 4 {
 		for range 150 {
-			k := fmt.Sprintf("%c%c%d", 'a'+r.IntN(6), 'a'+r.IntN(6), r.IntN(4))
+			k := pk.key(r)
 			if r.IntN(3) == 0 {
 				del(t, tr, m, k)
 			} else {
@@ -116,19 +156,13 @@ func partitionReadsDiffer(t testing.TB, seed uint64, plant plants) string {
 		}
 		f.checkpoint(t, tr, nil)
 	}
-	var probes []string
-	for c := 'a'; c <= 'g'; c++ {
-		for d := 'a'; d <= 'g'; d++ {
-			probes = append(probes, string(c)+string(d), string(c)+string(d)+"2", string(c)+string(d)+"9")
-		}
-	}
 	steps := 0
 	for c := tr.pickSpan(0, 4, ruleNone); c != nil; c = tr.PickCompaction() {
 		c.Run()
 		if err := tr.Install(c); err != nil {
 			t.Fatal(err)
 		}
-		if d := readsDiffer(tr, m, probes); d != "" {
+		if d := readsDiffer(tr, m, pk.probes); d != "" {
 			return d
 		}
 		_, dead := f.checkpoint(t, tr, nil)
@@ -138,24 +172,31 @@ func partitionReadsDiffer(t testing.TB, seed uint64, plant plants) string {
 	if parts := tr.runs[0].parts; steps < 3 || len(parts) < 3 || parts[len(parts)-1].fenced || !parts[0].fenced {
 		t.Fatalf("seed %d: %d steps, %d partitions", seed, steps, len(parts))
 	}
-	return readsDiffer(f.restoreManifest(t, tr.cfg), m, probes)
+	return readsDiffer(f.restoreManifest(t, tr.cfg), m, pk.probes)
 }
 
 // [property] A run merged in steps has a filter partition per step, fenced by the step's bound, and
-// reads like the map: gets, floors, prefix floors and prefix scans of prefixes whose keys fall in
-// several partitions, between steps and after, restored or not. Removals the merge drops can end a
-// step, and with the fence's prefix left out of its partition a prefix lookup then misses keys of
-// later partitions.
+// reads like the map under whole-key, prefix and both filters, with fixed and variable-length
+// prefixes: gets, floors, prefix floors and prefix scans of prefixes whose keys fall in several
+// partitions, between steps and after, restored or not. Removals the merge drops can end a step,
+// and with the fence's prefix left out of its partition a lookup by prefix, a prefix filter's get
+// among them, then misses keys of later partitions.
 func TestStepPartitionsReadLikeTheMap(t *testing.T) {
-	planted := false
-	for seed := range uint64(16) {
-		if d := partitionReadsDiffer(t, seed, plants{}); d != "" {
-			t.Fatalf("seed %d: %s", seed, d)
+	for _, what := range []FilterKeys{WholeKeys, Prefixes, KeysAndPrefixes} {
+		for _, pk := range prefixCases() {
+			t.Run([]string{"keys", "prefixes", "both"}[what]+"/"+pk.name, func(t *testing.T) {
+				planted := false
+				for seed := range uint64(16) {
+					if d := partitionReadsDiffer(t, seed, what, pk, plants{}); d != "" {
+						t.Fatalf("seed %d: %s", seed, d)
+					}
+					planted = planted || partitionReadsDiffer(t, seed, what, pk, plants{noFencePrefix: true}) != ""
+				}
+				if planted != (what != WholeKeys) {
+					t.Fatalf("with the fence's prefix left out a seed misses a key: %v", planted)
+				}
+			})
 		}
-		planted = planted || partitionReadsDiffer(t, seed, plants{noFencePrefix: true}) != ""
-	}
-	if !planted {
-		t.Fatal("no seed misses a key with the fence's prefix left out of its partition")
 	}
 }
 

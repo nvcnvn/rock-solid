@@ -48,9 +48,9 @@ var metaSets = []metaSet{
 	{name: "fixed-limit", piece: 1024, runLimit: 4, run: metamorphic.Options{FlushOps: true, FlushEvery: 5, Compact: metamorphic.CompactEager}},
 	{name: "point-removals", piece: 4096, points: true, run: metamorphic.Options{FlushOps: true, FlushEvery: 20, Compact: metamorphic.CompactEager}},
 	{name: "linear-merge", piece: 1024, linear: true, run: metamorphic.Options{FlushOps: true, FlushEvery: 15, Compact: metamorphic.CompactEager, Absorb: 4}},
-	{name: "steps", piece: 384, step: 768, run: metamorphic.Options{FlushOps: true, FlushEvery: 10, Compact: metamorphic.CompactEager}},
-	{name: "steps-restart", piece: 512, step: 512, run: metamorphic.Options{FlushOps: true, FlushEvery: 20, Compact: metamorphic.CompactEager, FailFirst: 1, RestartEach: true}},
-	{name: "steps-deferred", piece: 512, step: 512, merges: 2, run: metamorphic.Options{FlushOps: true, FlushEvery: 8, Compact: metamorphic.CompactDeferred, Absorb: 4, CompactEvery: 3}},
+	{name: "steps", piece: 1024, step: 1024, run: metamorphic.Options{FlushOps: true, FlushEvery: 10, Compact: metamorphic.CompactEager}},
+	{name: "steps-restart", piece: 768, step: 768, run: metamorphic.Options{FlushOps: true, FlushEvery: 20, Compact: metamorphic.CompactEager, FailFirst: 1, RestartEach: true}},
+	{name: "steps-deferred", piece: 1024, step: 1024, merges: 2, run: metamorphic.Options{FlushOps: true, FlushEvery: 8, Compact: metamorphic.CompactDeferred, Absorb: 4, CompactEvery: 3}},
 }
 
 func metaSetNamed(name string) (metaSet, bool) {
