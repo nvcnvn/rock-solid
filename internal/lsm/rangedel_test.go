@@ -255,7 +255,7 @@ func rangeModel(t *testing.T, cfg Config, seed uint64, plant plants) string {
 		case x < 89:
 			if n := len(tr.runs); n >= 2 {
 				i := r.IntN(n - 1)
-				err = merge(tr.compaction(i, i+2+r.IntN(n-i-1), ruleNone))
+				err = merge(tr.pickSpan(i, i+2+r.IntN(n-i-1), ruleNone))
 			}
 		case x < 90:
 			if view == nil {
@@ -570,7 +570,7 @@ func TestFragmentOnlyRunBounds(t *testing.T) {
 // compactSpan merges runs [i, j) and installs the result.
 func compactSpan(t *testing.T, tr *Tree, i, j int) {
 	t.Helper()
-	c := tr.compaction(i, j, ruleNone)
+	c := tr.pickSpan(i, j, ruleNone)
 	c.Run()
 	if err := tr.Install(c); err != nil {
 		t.Fatal(err)

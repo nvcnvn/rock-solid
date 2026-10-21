@@ -300,11 +300,12 @@ func isCheckpointKind(e *Entry) bool {
 	return isManifestKind(e) || e.Kind == EntryBlob && e.BlobKind == BlobRun
 }
 
-// CheckpointIndex names an index a checkpoint covers, its replay LSN and the durable runs the manifest names again.
+// CheckpointIndex names an index a checkpoint covers, its replay LSN, the durable runs the manifest names again and the bounds its running merges set on them.
 type CheckpointIndex struct {
 	Owner     uint32
 	ReplayLSN uint64
 	Runs      []BlobRef
+	Bounds    []MergeBound
 }
 
 type queued struct {
@@ -411,6 +412,10 @@ type pendingPiece struct {
 	ticket Ticket
 	index  int
 	root   bool
+}
+
+func (cp *checkpoint) owns(q queued) bool {
+	return slices.ContainsFunc(cp.pending, func(p pendingPiece) bool { return p.ticket == q.ticket })
 }
 
 type checkpoint struct {
@@ -684,6 +689,9 @@ func (l *Log) FailStalled(ctx *core.Context, out *Output) {
 				l.failCheckpoint(ctx, out)
 				continue
 			}
+			if l.cp != nil && slices.ContainsFunc(l.lanes[i].q.window(l.lanes[i].q.len()), l.cp.owns) {
+				l.failCheckpoint(ctx, out)
+			}
 			// The whole queue fails, even items behind its head that would fit, since writing
 			// them first would break submit order, which a freeze before its write relies on.
 			ts := len(out.tickets)
@@ -758,13 +766,19 @@ func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ti
 	return t, nil
 }
 
-// MergePiece queues merge worker w's next output piece for index owner, of length bytes, on the worker's lane of the metadata stream, which may open segments of the reserve; w counts from 1 to the configured merge workers, and the reserve holds one step of each, so a worker hands over a step only once the manifest naming its previous one is durable.
-func (l *Log) MergePiece(ctx *core.Context, w int, owner uint32, buf core.IOBuf, length uint64, out *Output) (Ticket, error) {
+// MergePiece queues merge worker w's next output piece for index owner, of length bytes, on the worker's lane of the metadata stream, which may open segments of the reserve; w counts from 1 to the configured merge workers, and the reserve holds one step of each, so a worker hands over a step only once the manifest naming its previous one is durable. While a checkpoint covering owner is open the piece is one of its pieces, root marking the run's last piece, which the manifest names; otherwise it goes out alone, and root is ErrNoCheckpoint.
+func (l *Log) MergePiece(ctx *core.Context, w int, owner uint32, buf core.IOBuf, length uint64, root bool, out *Output) (Ticket, error) {
 	if l.err != nil {
 		return 0, l.err
 	}
 	if w < 1 || laneMeta+w >= len(l.lanes) {
 		return 0, ErrMalformed
+	}
+	if l.cp != nil && !l.cp.ended && l.cpIndex(owner) >= 0 {
+		return l.checkpointPiece(ctx, laneMeta+w, owner, buf, length, root, out)
+	}
+	if root {
+		return 0, ErrNoCheckpoint
 	}
 	it := Item{Entry: BlobEntry(BlobRun, owner, length), Buf: buf}
 	if err := l.accept(ctx, &it); err != nil {
@@ -828,10 +842,14 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 	for i, ix := range indexes {
 		if ix.ReplayLSN > l.durableLSN || slices.ContainsFunc(indexes[:i], func(o CheckpointIndex) bool { return o.Owner == ix.Owner }) ||
 			slices.ContainsFunc(ix.Runs, func(r BlobRef) bool { return r.Segment == 0 || r.LSN > l.durableLSN }) ||
-			hasDuplicate(ix.Runs) {
+			hasDuplicate(ix.Runs) || !validBounds(ix.Runs, ix.Bounds) {
 			return ErrMalformed
 		}
-		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Runs: slices.Clone(ix.Runs)}
+		var bounds []MergeBound
+		for _, b := range ix.Bounds {
+			bounds = append(bounds, MergeBound{Run: b.Run, Key: slices.Clone(b.Key), Dead: b.Dead})
+		}
+		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Runs: slices.Clone(ix.Runs), Bounds: bounds}
 	}
 	m.Segments = l.usageRows()
 	cp := &checkpoint{manifest: m, changed: slices.Clone(l.changed), replayAtBegin: l.replayBytes, heldAtBegin: l.heldBytes}
@@ -878,16 +896,18 @@ func (l *Log) CheckpointPiece(ctx *core.Context, owner uint32, buf core.IOBuf, l
 	if l.err != nil {
 		return 0, l.err
 	}
+	return l.checkpointPiece(ctx, laneMeta, owner, buf, length, root, out)
+}
+
+func (l *Log) cpIndex(owner uint32) int {
+	return slices.IndexFunc(l.cp.manifest.Indexes, func(ix ManifestIndex) bool { return ix.Owner == owner })
+}
+
+func (l *Log) checkpointPiece(ctx *core.Context, lane int, owner uint32, buf core.IOBuf, length uint64, root bool, out *Output) (Ticket, error) {
 	if l.cp == nil || l.cp.ended {
 		return 0, ErrNoCheckpoint
 	}
-	index := -1
-	for i := range l.cp.manifest.Indexes {
-		if l.cp.manifest.Indexes[i].Owner == owner {
-			index = i
-			break
-		}
-	}
+	index := l.cpIndex(owner)
 	if index < 0 {
 		return 0, ErrUnknownOwner
 	}
@@ -895,7 +915,7 @@ func (l *Log) CheckpointPiece(ctx *core.Context, owner uint32, buf core.IOBuf, l
 	if err := l.accept(ctx, &it); err != nil {
 		return 0, err
 	}
-	t := l.enqueue(&l.lanes[laneMeta].q, queued{entry: it.Entry, buf: it.Buf})
+	t := l.enqueue(&l.lanes[lane].q, queued{entry: it.Entry, buf: it.Buf})
 	l.cp.pending = append(l.cp.pending, pendingPiece{ticket: t, index: index, root: root})
 	l.startRounds(ctx, out)
 	return t, nil
@@ -1158,10 +1178,11 @@ func (l *Log) checkpointProgress(r *round, out *Output) {
 	}
 	for i, t := range r.tickets {
 		ref := BlobRef{Segment: r.segment, Block: r.block, LSN: r.lsn, Entry: uint16(i)}
+		k := slices.IndexFunc(cp.pending, func(p pendingPiece) bool { return p.ticket == t })
 		switch {
-		case len(cp.pending) > 0 && cp.pending[0].ticket == t:
-			p := cp.pending[0]
-			cp.pending = cp.pending[1:]
+		case k >= 0:
+			p := cp.pending[k]
+			cp.pending = slices.Delete(cp.pending, k, k+1)
 			if p.root {
 				ix := &cp.manifest.Indexes[p.index]
 				ix.Runs = append(ix.Runs, ref)

@@ -24,3 +24,47 @@ restart
 floor e
 ----
 floor e: none
+
+# Seed 0 under steps-restart while merge steps were built: a restart between steps lost a key the
+# merge had already written to its output.
+run set=steps-restart
+put fff v2217x
+put faa v2219xx
+put bbcde v2682xxxxxx
+put fdad v2687xxx
+put fcfc v2689xxxxxxx
+put b v2690xxxxxx
+put dae v2693xxxxxxx
+put eccb v2694xxxxxxx
+put d v2704xxxxxx
+put bccfb v2706xxx
+put ebe v2708xxxxx
+put dcbba v2709xxxx
+put efabf v2724xxxx
+put ceae v2736
+put cdbdbb v2737
+put caefa v2738xxxx
+put ded v2740xxxxxx
+put cf v2744xxxx
+put acfedd v2745xxxx
+put af v2749xxxxxxx
+put de v2750xxxxxx
+put fd v2780xxxxxxx
+put aa v2781
+put feaef v2782xxxxxxx
+put afa v2783xxxx
+put c v2786xxxxxx
+put cadc v2789xx
+put feceaa v2790xxxxx
+put fc v2791
+flush
+put aecbc v2793xxxx
+flush
+put abaa v2815xxx
+vopen 48
+flush
+flush
+restart
+scan ffe 3
+----
+scan ffe 3: [fff=v2217x]

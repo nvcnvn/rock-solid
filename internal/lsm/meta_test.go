@@ -27,6 +27,7 @@ type metaSet struct {
 	name     string
 	piece    int
 	runLimit int
+	step     int
 	merges   int
 	linear   bool
 	points   bool
@@ -47,6 +48,9 @@ var metaSets = []metaSet{
 	{name: "fixed-limit", piece: 1024, runLimit: 4, run: metamorphic.Options{FlushOps: true, FlushEvery: 5, Compact: metamorphic.CompactEager}},
 	{name: "point-removals", piece: 4096, points: true, run: metamorphic.Options{FlushOps: true, FlushEvery: 20, Compact: metamorphic.CompactEager}},
 	{name: "linear-merge", piece: 1024, linear: true, run: metamorphic.Options{FlushOps: true, FlushEvery: 15, Compact: metamorphic.CompactEager, Absorb: 4}},
+	{name: "steps", piece: 384, step: 768, run: metamorphic.Options{FlushOps: true, FlushEvery: 10, Compact: metamorphic.CompactEager}},
+	{name: "steps-restart", piece: 512, step: 512, run: metamorphic.Options{FlushOps: true, FlushEvery: 20, Compact: metamorphic.CompactEager, FailFirst: 1, RestartEach: true}},
+	{name: "steps-deferred", piece: 512, step: 512, merges: 2, run: metamorphic.Options{FlushOps: true, FlushEvery: 8, Compact: metamorphic.CompactDeferred, Absorb: 4, CompactEvery: 3}},
 }
 
 func metaSetNamed(name string) (metaSet, bool) {
@@ -273,7 +277,7 @@ type metaWrite struct {
 
 // metaStats counts what an option set made the tree do, to show the set reaches its extreme.
 type metaStats struct {
-	flushes, failed, compactions, together, deferred, restarts, maxRuns int
+	flushes, failed, compactions, together, deferred, restarts, maxRuns, steps, resumed int
 }
 
 // metaTree runs a Tree over a log that keeps every live piece. Its writes stand in for the disk
@@ -299,7 +303,7 @@ func newMetaTree(s metaSet, check bool, plant plants) *metaTree {
 }
 
 func (m *metaTree) newTree() *Tree {
-	tr, err := New(Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, Check: m.check})
+	tr, err := New(Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, StepBytes: m.set.step, Check: m.check})
 	if err != nil {
 		panic(err)
 	}
@@ -414,8 +418,19 @@ func (m *metaTree) install(c *Compaction) error {
 	if err := m.tr.Install(c); err != nil {
 		return err
 	}
+	if !c.final {
+		m.st.steps++
+	}
 	m.st.compactions++
 	return nil
+}
+
+// run runs a merge's next step, counting a merge a restart left between steps.
+func (m *metaTree) run(c *Compaction) {
+	if !c.started && c.bound != nil {
+		m.st.resumed++
+	}
+	c.Run()
 }
 
 // Compact picks as many merges as the set runs at once, runs them all and installs them newest
@@ -436,7 +451,7 @@ func (m *metaTree) Compact() (bool, error) {
 		m.st.together++
 	}
 	for _, c := range cs {
-		c.Run()
+		m.run(c)
 	}
 	for i := len(cs) - 1; i >= 0; i-- {
 		if err := m.install(cs[i]); err != nil {
@@ -460,7 +475,7 @@ func (m *metaTree) CompactFinish() error {
 	if c == nil {
 		return nil
 	}
-	c.Run()
+	m.run(c)
 	if m.tr.Frozen() {
 		m.st.deferred++
 	}
@@ -474,7 +489,7 @@ func (m *metaTree) Restart() error {
 	}
 	m.pending = nil
 	tr := m.newTree()
-	if err := m.log.Restore(RootRefs, tr.LoadRun); err != nil {
+	if err := m.log.Restore(RootRefs, tr.LoadRun, tr.LoadBoundedRun); err != nil {
 		return err
 	}
 	for _, w := range m.writes[m.log.Replay():] {
@@ -594,6 +609,9 @@ func TestMetamorphicSetsReachTheirExtremes(t *testing.T) {
 		{"D installs merges during flushes", of("D").deferred > 0},
 		{"two-merges runs two at once", of("two-merges").together > 0},
 		{"fixed-limit compacts", of("fixed-limit").compactions > 0},
+		{"steps installs merges in steps", of("steps").steps > 0},
+		{"steps-restart resumes merges after restarts", of("steps-restart").resumed > 0},
+		{"steps-deferred installs steps during flushes", of("steps-deferred").steps > 0 && of("steps-deferred").deferred > 0},
 	} {
 		if !c.ok {
 			t.Errorf("%s: %+v", c.name, stats)

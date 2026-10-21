@@ -181,7 +181,7 @@ func runSeed(t testing.TB, seed uint64, setup func(*harness), stats *seedStats) 
 			r.Fill(h.pool.Bytes(buf)[:n])
 			payload := bytes.Clone(h.pool.Bytes(buf)[:n])
 			owner := uint32(r.Range(1, 2))
-			tk, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), owner, buf, uint64(n), &h.out)
+			tk, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), owner, buf, uint64(n), false, &h.out)
 			if err != nil {
 				t.Fatalf("seed %d: merge piece: %v", seed, err)
 			}

@@ -68,7 +68,8 @@ func seqs(tr *Tree) []uint64 {
 }
 
 // A merge running over the oldest runs does not stop a merge of newer runs, the two share no
-// run, and installing them in either order leaves the runs in age order.
+// run, and installing them in either order leaves the runs in age order; both end once a
+// checkpoint names their output.
 func TestTwoMergesInstallInEitherOrder(t *testing.T) {
 	for _, olderFirst := range []bool{true, false} {
 		tr := newTree(t, 512)
@@ -107,7 +108,8 @@ func TestTwoMergesInstallInEitherOrder(t *testing.T) {
 			}
 			checkReads(t, tr, m, []string{"a0", "b3", "c"})
 		}
-		if tr.Runs() != 2 || len(tr.merges) != 0 {
+		f.checkpoint(t, tr, nil)
+		if tr.Runs() != 2 || len(tr.merges) != 0 || !older.Finished() || !newer.Finished() {
 			t.Fatalf("%d runs, %d merges running", tr.Runs(), len(tr.merges))
 		}
 	}
@@ -180,7 +182,8 @@ func TestSchedulerOrder(t *testing.T) {
 	}
 }
 
-// One merge worker by default: index B's merge waits until index A's installs; with two, both run.
+// One merge worker by default: index B's merge waits until a checkpoint names index A's output,
+// then takes worker 1 and so its lane; with two, both run, on workers 1 and 2.
 func TestSchedulerWorkers(t *testing.T) {
 	for _, workers := range []int{-1, disklog.MaxMergeWorkers + 1} {
 		if _, err := NewScheduler(SchedulerConfig{MergeWorkers: workers}); !errors.Is(err, ErrBadConfig) {
@@ -188,7 +191,9 @@ func TestSchedulerWorkers(t *testing.T) {
 		}
 	}
 	for _, workers := range []int{0, 2} {
-		a, b := treeWithRuns(t, 0, 6), treeWithRuns(t, 0, 4)
+		fa := newFakeLog()
+		a, b := newTree(t, 512), treeWithRuns(t, 0, 4)
+		flushRuns(t, fa, a, nil, "k", 6)
 		s, err := NewScheduler(SchedulerConfig{MergeWorkers: workers})
 		if err != nil {
 			t.Fatal(err)
@@ -196,7 +201,7 @@ func TestSchedulerWorkers(t *testing.T) {
 		s.Add(a)
 		s.Add(b)
 		ca := s.Next()
-		if ca == nil || ca.tree != a {
+		if ca == nil || ca.tree != a || ca.Worker() != 1 {
 			t.Fatalf("workers %d: first merge %+v", workers, ca)
 		}
 		cb := s.Next()
@@ -208,13 +213,17 @@ func TestSchedulerWorkers(t *testing.T) {
 			if err := s.Install(ca); err != nil {
 				t.Fatal(err)
 			}
+			if cb = s.Next(); cb != nil {
+				t.Fatal("index B's merge started before a manifest named index A's output")
+			}
+			fa.checkpoint(t, a, nil)
 			cb = s.Next()
 		}
-		want := 1
+		want, worker := 1, 1
 		if workers == 2 {
-			want = 2
+			want, worker = 2, 2
 		}
-		if cb == nil || cb.tree != b || s.Running() != want {
+		if cb == nil || cb.tree != b || s.Running() != want || cb.Worker() != worker {
 			t.Fatalf("workers %d: second merge %+v, %d running", workers, cb, s.Running())
 		}
 	}

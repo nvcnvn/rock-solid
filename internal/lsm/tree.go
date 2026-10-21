@@ -6,6 +6,7 @@ package lsm
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"slices"
@@ -57,6 +58,8 @@ type Config struct {
 	Filter FilterKeys
 	// Prefix is the length of k's prefix, 0 if k has none; every key starting with a prefix must have that prefix.
 	Prefix func(k []byte) int
+	// StepBytes is compaction_step_bytes, the most output a merge installs at once; 0 installs a merge whole.
+	StepBytes int
 }
 
 // Tree is an LSM tree. Only its owner calls it; a compaction's Run alone may run elsewhere.
@@ -69,7 +72,8 @@ type Tree struct {
 	runs        []*run
 	nextSeq     uint64
 	fl          *flush
-	written     []*run
+	written     []writtenRun
+	resume      []*run
 	merges      []*Compaction
 	limitBuffer int
 	maxFrag     int
@@ -94,10 +98,22 @@ type plants struct {
 	mergeNoOlder  bool
 }
 
+// writtenRun is a durable run's pieces, its root last, of which the first dead are reported dead.
+type writtenRun struct {
+	pieces []disklog.BlobRef
+	dead   int
+}
+
+func (w writtenRun) root() disklog.BlobRef { return w.pieces[len(w.pieces)-1] }
+
+// flush is a checkpoint's writes for the tree: a job per merge step not yet durable, then the
+// frozen memtable's, and what its manifest names.
 type flush struct {
 	carried     []disklog.BlobRef
-	named       []*run
-	write       []*run
+	bounds      []disklog.MergeBound
+	merges      []mergeName
+	jobs        []*job
+	roots       []disklog.BlobRef
 	frozen      *run
 	src         iterState
 	bw          blockWriter
@@ -106,16 +122,36 @@ type flush struct {
 	filter      filterWriter
 	entriesDone bool
 	cur         int
-	next        int
-	refs        []disklog.BlobRef
 	inFlight    bool
 	isRoot      bool
 	written     bool
 }
 
+// job writes a run from entry block fromB and fragment block fromF on: the frozen memtable's
+// whole, or a merge's step, whose root lists the output's earlier pieces too.
+type job struct {
+	c            *Compaction
+	r            *run
+	fromB, fromF int
+	step         int
+	final        bool
+	next         int
+	refs         []disklog.BlobRef
+}
+
+// mergeName is what a checkpoint's manifest names of a merge: its steps up to step, and its
+// inputs' roots and first live pieces unless the last step is among them.
+type mergeName struct {
+	c      *Compaction
+	step   int
+	final  bool
+	inputs []disklog.BlobRef
+	bases  []int
+}
+
 // New makes an empty tree.
 func New(cfg Config) (*Tree, error) {
-	if cfg.MaxPiece < MinPiece || cfg.RunLimit < 0 || cfg.Filter > KeysAndPrefixes || cfg.Filter != WholeKeys && cfg.Prefix == nil {
+	if cfg.MaxPiece < MinPiece || cfg.RunLimit < 0 || cfg.StepBytes < 0 || cfg.Filter > KeysAndPrefixes || cfg.Filter != WholeKeys && cfg.Prefix == nil {
 		return nil, ErrBadConfig
 	}
 	t := &Tree{cfg: cfg, nextSeq: 1, limitBuffer: autoLimitBuffer}
@@ -274,11 +310,12 @@ func (v *View) Close() {
 	v.st = state{}
 }
 
-// BeginFlush starts writing the frozen memtable and every run not yet durable, and reports whether it froze the memtable.
+// BeginFlush starts writing the frozen memtable and each merge step not yet durable, and reports whether it froze the memtable.
 func (t *Tree) BeginFlush() (bool, error) {
 	if t.fl != nil {
 		return false, ErrBusy
 	}
+	t.pairMerges()
 	froze := false
 	if t.frozen == nil && (t.mem.count > 0 || t.mem.frags > 0) {
 		t.frozen, t.frozenSeq = t.mem, t.nextSeq
@@ -286,17 +323,18 @@ func (t *Tree) BeginFlush() (bool, error) {
 		t.mem = newMemtable(&t.pg)
 		froze = true
 	}
-	fl := &flush{named: slices.Clone(t.runs), older: runIters(t.runs), olderFrag: runIters(t.runs)}
+	fl := &flush{older: runIters(t.runs), olderFrag: runIters(t.runs)}
 	for _, r := range t.runs {
-		if r.durable() {
+		if !slices.ContainsFunc(t.merges, func(c *Compaction) bool { return c.holds(r) }) {
 			fl.carried = append(fl.carried, r.root())
-		} else {
-			fl.write = append(fl.write, r)
 		}
+	}
+	for _, c := range t.merges {
+		fl.name(c)
 	}
 	if t.frozen != nil {
 		fl.frozen = &run{seq: t.frozenSeq}
-		fl.write = append(fl.write, fl.frozen)
+		fl.jobs = append(fl.jobs, &job{r: fl.frozen})
 		st := state{mem: t.frozen, memRoot: t.frozen.root, memFRoot: t.frozen.froot, linear: t.linear}
 		fl.src.reset(&st, true)
 		fl.src.seek(nil)
@@ -310,12 +348,58 @@ func (t *Tree) BeginFlush() (bool, error) {
 	return froze, nil
 }
 
+// holds reports whether r is one of the merge's inputs or its output.
+func (c *Compaction) holds(r *run) bool {
+	return r == c.output || !c.final && slices.Contains(c.inputs, r)
+}
+
+// name adds what the manifest names of c: the step installed and not yet durable, which the
+// flush writes, or else the last durable one, and the inputs bounded by it until the last step.
+func (fl *flush) name(c *Compaction) {
+	mn := mergeName{c: c, step: c.written, final: c.final && c.written == c.installed}
+	switch {
+	case c.installed > c.written:
+		mn.step, mn.final = c.installed, c.final
+		fl.jobs = append(fl.jobs, &job{c: c, r: c.output, fromB: len(c.entryRefs), fromF: len(c.fragRefs), step: c.installed, final: c.final})
+	case c.written > 0 && c.output != nil:
+		fl.carried = append(fl.carried, c.tail[len(c.tail)-1])
+	}
+	if !mn.final {
+		for _, in := range c.inputs {
+			fl.carried = append(fl.carried, in.root())
+			mn.inputs = append(mn.inputs, in.root())
+			mn.bases = append(mn.bases, in.base)
+			if mn.step > 0 {
+				fl.bounds = append(fl.bounds, disklog.MergeBound{Run: in.root(), Key: c.bound, Dead: uint32(in.base)})
+			}
+		}
+	}
+	fl.merges = append(fl.merges, mn)
+}
+
 // CarriedRuns is the root piece of each durable run the running flush does not rewrite.
 func (t *Tree) CarriedRuns() []disklog.BlobRef {
 	if t.fl == nil {
 		return nil
 	}
 	return t.fl.carried
+}
+
+// Bounds is the merge bound of each run the running flush's manifest names bounded, all among CarriedRuns.
+func (t *Tree) Bounds() []disklog.MergeBound {
+	if t.fl == nil {
+		return nil
+	}
+	return t.fl.bounds
+}
+
+// PieceWorker is the merge worker whose lane takes the piece NextPiece built last, through
+// disklog's MergePiece, or 0 for a piece of the frozen memtable, which CheckpointPiece takes.
+func (t *Tree) PieceWorker() int {
+	if fl := t.fl; fl != nil && fl.cur < len(fl.jobs) && fl.jobs[fl.cur].c != nil {
+		return fl.jobs[fl.cur].c.worker
+	}
+	return 0
 }
 
 // NextPiece builds the flush's next piece in buf and returns its length, 0 when done, and whether it is a run's root.
@@ -328,11 +412,12 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 		return 0, false, ErrBadConfig
 	}
 	buf = buf[:t.cfg.MaxPiece:t.cfg.MaxPiece]
-	if fl.cur == len(fl.write) {
+	if fl.cur == len(fl.jobs) {
 		t.finishWrite()
 		return 0, false, nil
 	}
-	w := fl.write[fl.cur]
+	jb := fl.jobs[fl.cur]
+	w := jb.r
 	limit := t.cfg.MaxPiece - pieceOverhead
 	var block []byte
 	var last, inPlace bool
@@ -353,7 +438,7 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 		}
 		if bw.n == 0 && fl.entriesDone {
 			kind = fragBlock
-			fillFragBlock(bw, &fl.src, limit, fl.olderFrag)
+			fillFragBlock(bw, &fl.src, limit, fl.olderFrag, nil)
 		}
 		done := fl.entriesDone && !fl.src.pendingFrag(fl.olderFrag)
 		if bw.n == 0 && !done {
@@ -375,41 +460,56 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 				return 0, false, err
 			}
 			if len(w.blocks)+len(w.frags) == 0 {
-				fl.frozen, fl.write = nil, fl.write[:fl.cur]
+				fl.frozen, fl.jobs = nil, fl.jobs[:fl.cur]
 				t.finishWrite()
 				return 0, false, nil
 			}
 			w.setFilter(fl.filter.finish())
 		}
 	}
+	nb, nf := len(w.blocks)-jb.fromB, len(w.frags)-jb.fromF
 	if block == nil {
-		nb, nf := len(w.blocks), len(w.frags)
 		total := nb + nf + w.filterPieces(limit)
 		switch {
-		case fl.next < nb:
-			block = w.blocks[fl.next]
-		case fl.next < nb+nf:
-			block, kind = w.frags[fl.next-nb], fragBlock
-		case fl.next < total:
-			block, kind = w.filterPiece(fl.next-nb-nf, limit), filterBlock
+		case jb.next < nb:
+			block = w.blocks[jb.fromB+jb.next]
+		case jb.next < nb+nf:
+			block, kind = w.frags[jb.fromF+jb.next-nb], fragBlock
+		case jb.next < total:
+			block, kind = w.filterPiece(jb.next-nb-nf, limit), filterBlock
 		default:
 			block = emptyBlock[:]
 		}
-		last = fl.next >= total-1
+		last = jb.next >= total-1
 	}
-	if !inPlace && w.sums != nil && !w.pieceIntact(fl.next) {
+	if !inPlace && w.sums != nil && !w.pieceIntact(jb.next, jb.fromB, jb.fromF) {
 		return 0, false, ErrCheck
 	}
-	piece, root, err := writePiece(buf, block, kind, inPlace, last, w.seq, fl.refs, t.cfg.MaxPiece)
+	var earlier []disklog.BlobRef
+	if last {
+		earlier = jb.earlier(nb, nf)
+	}
+	piece, root, err := writePiece(buf, block, kind, inPlace, last, w.seq, earlier, t.cfg.MaxPiece)
 	if err != nil {
 		return 0, false, err
 	}
 	if t.cfg.Check && inPlace {
 		checkPiece(piece, kind, w.seq, fl.bw.taken)
 	}
-	fl.next++
+	jb.next++
 	fl.inFlight, fl.isRoot = true, root
 	return len(piece), root, nil
+}
+
+// earlier is the pieces the job's root lists: the run's entry pieces, its fragment pieces and its
+// filter's, those of a merge's earlier steps included, nb and nf of the entry and fragment pieces
+// the job wrote.
+func (jb *job) earlier(nb, nf int) []disklog.BlobRef {
+	if jb.c == nil {
+		return jb.refs
+	}
+	nb, nf = min(nb, len(jb.refs)), min(nb+nf, len(jb.refs))
+	return slices.Concat(jb.c.entryRefs, jb.refs[:nb], jb.c.fragRefs, jb.refs[nb:nf], jb.refs[nf:])
 }
 
 var emptyBlock = [emptyBlockSize]byte{4: 1}
@@ -460,13 +560,15 @@ func cutUvarint(b []byte) ([]byte, []byte) {
 	return b[n : n+int(l)], b[n+int(l):]
 }
 
-// checkRuns panics, with Check on, unless the run list is newest first with no sequence number twice.
+// checkRuns panics, with Check on, unless the run list is newest first with no sequence number
+// twice, but for a merge's oldest bounded input and the output that follows it.
 func (t *Tree) checkRuns() {
 	if !t.cfg.Check {
 		return
 	}
 	for i := 1; i < len(t.runs); i++ {
-		if t.runs[i].seq >= t.runs[i-1].seq {
+		a, b := t.runs[i-1], t.runs[i]
+		if b.seq > a.seq || b.seq == a.seq && (a.lo == nil || b.lo != nil) {
 			panic("lsm: run list out of sequence order")
 		}
 	}
@@ -479,15 +581,30 @@ func (t *Tree) PieceDurable(ref disklog.BlobRef) error {
 		return ErrNoFlush
 	}
 	fl.inFlight = false
+	jb := fl.jobs[fl.cur]
 	if !fl.isRoot {
-		fl.refs = append(fl.refs, ref)
+		jb.refs = append(jb.refs, ref)
 		return nil
 	}
-	w := fl.write[fl.cur]
-	w.pieces = append(slices.Clone(fl.refs), ref)
-	t.written = append(t.written, w)
-	fl.refs, fl.cur, fl.next = fl.refs[:0], fl.cur+1, 0
-	if fl.cur == len(fl.write) {
+	w := jb.r
+	nb, nf := len(w.blocks)-jb.fromB, len(w.frags)-jb.fromF
+	all := append(jb.earlier(nb, nf), ref)
+	fl.roots = append(fl.roots, ref)
+	if c := jb.c; c != nil {
+		c.entryRefs = append(c.entryRefs, jb.refs[:nb]...)
+		c.fragRefs = append(c.fragRefs, jb.refs[nb:nb+nf]...)
+		c.stale = append(c.stale, c.tail...)
+		c.tail = append(slices.Clone(jb.refs[nb+nf:]), ref)
+		c.written = jb.step
+		if jb.final {
+			w.pieces = all
+		}
+	} else {
+		w.pieces = all
+		t.written = append(t.written, writtenRun{pieces: all})
+	}
+	fl.cur++
+	if fl.cur == len(fl.jobs) {
 		t.finishWrite()
 	}
 	return nil
@@ -511,23 +628,25 @@ func (t *Tree) finishWrite() {
 	}
 }
 
-// CheckpointDone ends the flush once its manifest is durable and returns the pieces of the runs it no longer names.
+// CheckpointDone ends the flush once its manifest is durable and returns the pieces it made dead:
+// those of the runs it no longer names, of each input up to its bound, and of a merge's roots a
+// later step replaced.
 func (t *Tree) CheckpointDone() ([]disklog.BlobRef, error) {
 	fl := t.fl
 	if fl == nil || !fl.written {
 		return nil, ErrNoFlush
 	}
-	named := fl.named
-	if fl.frozen != nil {
-		named = append(named, fl.frozen)
-	}
 	var dead []disklog.BlobRef
+	for _, mn := range fl.merges {
+		dead = t.nameStep(mn, dead)
+	}
+	named := append(slices.Clone(fl.carried), fl.roots...)
 	keep := t.written[:0]
-	for _, r := range t.written {
-		if slices.Contains(named, r) {
-			keep = append(keep, r)
+	for _, w := range t.written {
+		if slices.Contains(named, w.root()) {
+			keep = append(keep, w)
 		} else {
-			dead = append(dead, r.pieces...)
+			dead = append(dead, w.pieces[w.dead:]...)
 		}
 	}
 	clear(t.written[len(keep):])
@@ -536,7 +655,36 @@ func (t *Tree) CheckpointDone() ([]disklog.BlobRef, error) {
 	return dead, nil
 }
 
-// FlushFailed ends a failed flush, keeping its frozen memtable for the next, and returns the pieces nothing names.
+// nameStep records that a durable manifest names a merge up to mn's step, appending to dead what
+// that made dead, and ends the merge when the step is its last.
+func (t *Tree) nameStep(mn mergeName, dead []disklog.BlobRef) []disklog.BlobRef {
+	c := mn.c
+	if mn.step <= c.named {
+		return dead
+	}
+	dead = append(dead, c.stale...)
+	c.stale = nil
+	for k, root := range mn.inputs {
+		i := slices.IndexFunc(t.written, func(w writtenRun) bool { return w.root() == root })
+		if i >= 0 && t.written[i].dead < mn.bases[k] {
+			dead = append(dead, t.written[i].pieces[t.written[i].dead:mn.bases[k]]...)
+			t.written[i].dead = mn.bases[k]
+		}
+	}
+	c.named = mn.step
+	if mn.final {
+		c.finished = true
+		t.merges = slices.DeleteFunc(t.merges, func(o *Compaction) bool { return o == c })
+		if c.output != nil {
+			c.output.held = false
+			t.written = append(t.written, writtenRun{pieces: c.output.pieces})
+		}
+	}
+	return dead
+}
+
+// FlushFailed ends a failed flush, keeping its frozen memtable and any merge step it did not
+// finish writing for the next, and returns the pieces nothing names.
 func (t *Tree) FlushFailed() []disklog.BlobRef {
 	fl := t.fl
 	if fl == nil {
@@ -549,43 +697,69 @@ func (t *Tree) FlushFailed() []disklog.BlobRef {
 	if fl.frozen != nil {
 		*fl.frozen = run{seq: fl.frozen.seq}
 	}
-	return slices.Clone(fl.refs)
+	if fl.cur < len(fl.jobs) {
+		return slices.Clone(fl.jobs[fl.cur].refs)
+	}
+	return nil
 }
 
 // LoadRun restores a run from its pieces in order, its root at ref last; runs may load in any order.
 func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
-	if len(pieces) == 0 {
-		return ErrMalformed
-	}
-	_, _, seq, refs, err := splitPiece(pieces[len(pieces)-1], nil)
+	r, err := t.parseRun(ref, pieces, 0)
 	if err != nil {
 		return err
 	}
-	if len(refs) != len(pieces)-1 || slices.ContainsFunc(t.runs, func(r *run) bool { return r.seq == seq }) {
-		return ErrMalformed
+	return t.addLoaded(r, nil)
+}
+
+// LoadBoundedRun restores a run a merge has consumed up to b.Key from its pieces in order past
+// the first b.Dead, which are dead, its root at b.Run last.
+func (t *Tree) LoadBoundedRun(b disklog.MergeBound, pieces [][]byte) error {
+	raw, err := t.parseRun(b.Run, pieces, int(b.Dead))
+	if err != nil {
+		return err
 	}
-	r := &run{seq: seq, pieces: append(refs, ref)}
+	r, err := raw.above(b.Key)
+	if err != nil {
+		return err
+	}
+	return t.addLoaded(r, raw)
+}
+
+// parseRun decodes a run from its pieces past the first skip, its root at ref last.
+func (t *Tree) parseRun(ref disklog.BlobRef, pieces [][]byte, skip int) (*run, error) {
+	if len(pieces) == 0 {
+		return nil, ErrMalformed
+	}
+	_, _, seq, refs, err := splitPiece(pieces[len(pieces)-1], nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(refs) != len(pieces)-1+skip {
+		return nil, ErrMalformed
+	}
+	r := &run{seq: seq, pieces: append(refs, ref), base: skip}
 	var last, end, filter []byte
 	sawFilter := false
 	for i, p := range pieces {
 		block, kind, s, rr, err := splitPiece(p, nil)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if s != seq || (i < len(pieces)-1 && len(rr) > 0) {
-			return ErrMalformed
+			return nil, ErrMalformed
 		}
 		if kind == filterBlock {
 			filter, sawFilter = append(filter, block...), true
 			continue
 		}
 		if sawFilter && !(i == len(pieces)-1 && bytes.Equal(block, emptyBlock[:])) {
-			return ErrMalformed
+			return nil, ErrMalformed
 		}
 		if kind == fragBlock {
 			n, e, ok := validateFragBlock(block, end, len(r.frags) > 0)
 			if !ok {
-				return ErrMalformed
+				return nil, ErrMalformed
 			}
 			end = e
 			if n > 0 {
@@ -595,7 +769,7 @@ func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
 		}
 		n, l, ok := validateBlock(block, last, len(r.blocks) > 0)
 		if !ok || n > 0 && len(r.frags) > 0 {
-			return ErrMalformed
+			return nil, ErrMalformed
 		}
 		last = l
 		if n > 0 {
@@ -603,16 +777,27 @@ func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
 		}
 	}
 	if !validFilter(filter, t.cfg.Filter) {
-		return ErrMalformed
+		return nil, ErrMalformed
 	}
 	r.setFilter(filter)
 	r.setBounds()
 	r.checksum()
-	at, _ := slices.BinarySearchFunc(t.runs, seq, func(r *run, s uint64) int {
+	return r, nil
+}
+
+// addLoaded puts a restored run in sequence order, a bounded input before the output of its
+// merge, which shares its sequence number; raw is a bounded run's whole pieces, for its merge.
+func (t *Tree) addLoaded(r, raw *run) error {
+	if slices.ContainsFunc(t.runs, func(o *run) bool { return o.seq == r.seq && (o.lo == nil) == (r.lo == nil) }) {
+		return ErrMalformed
+	}
+	at, _ := slices.BinarySearchFunc(t.runs, r, func(a, b *run) int {
 		switch {
-		case r.seq > s:
+		case a.seq != b.seq:
+			return cmp.Compare(b.seq, a.seq)
+		case a.lo != nil && b.lo == nil:
 			return -1
-		case r.seq < s:
+		case a.lo == nil && b.lo != nil:
 			return 1
 		}
 		return 0
@@ -621,7 +806,10 @@ func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
 		at = 0
 	}
 	t.runs = slices.Insert(t.runs, at, r)
-	t.written = append(t.written, r)
-	t.nextSeq = max(t.nextSeq, seq+1)
+	t.written = append(t.written, writtenRun{pieces: r.pieces, dead: r.base})
+	if raw != nil {
+		t.resume = append(t.resume, raw)
+	}
+	t.nextSeq = max(t.nextSeq, r.seq+1)
 	return nil
 }
