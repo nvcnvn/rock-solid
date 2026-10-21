@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"slices"
 	"testing"
@@ -14,11 +15,14 @@ import (
 const (
 	indexOwner = 1
 	diskBytes  = 1 << 30
+	nodeLogID  = 0x5eed
 )
 
 // node runs a chunk index over a disk log on a simulated disk, executing each action at once. It
 // is the owner a ChunkStore will be: it maps durable records, checkpoints the index's tree a piece
-// at a time and restores it from the manifest's runs plus replay.
+// at a time and restores it from the manifest's runs plus replay. It hands the crash oracle each
+// round as its write goes to the disk and each Durable LSN, and checks every recovered index
+// against the oracle's block model.
 type node struct {
 	t    *testing.T
 	pool *sim.Pool
@@ -47,6 +51,23 @@ type node struct {
 	pieceOf   map[disklog.BlobRef]disklog.BlobRef
 	replayed  int
 	recovered bool
+
+	geo    disklog.Geometry
+	opened map[uint32]uint64
+	oracle *sim.Oracle[disklog.Event, blockModel]
+	want   blockModel
+	// recoveredLSN is the LSN the last recovery reported.
+	recoveredLSN uint64
+	// crashAct, when set, crashes the disk before an action it picks.
+	crashAct func(core.Action) bool
+	// landing, when set, lands each unflushed block at a crash at random; otherwise none lands.
+	landing *core.Rand
+	// mismatch, when set, takes each recovered index the oracle rejects instead of failing the test.
+	mismatch func(error)
+	// replayLate plants the bug of replay leaving out the first record past the replay LSN that
+	// maps blocks, as a replay LSN one record too new would (RocksDB #11148).
+	replayLate bool
+	skipped    bool
 }
 
 type runLoad struct {
@@ -65,19 +86,21 @@ func testLogConfig() disklog.Config {
 }
 
 func newNode(t *testing.T) *node {
-	n := &node{t: t, pool: sim.NewPool(64<<20, 0), disk: sim.NewDisk(diskBytes / core.BlockSize), cfg: testLogConfig()}
+	n := &node{t: t, pool: sim.NewPool(64<<20, 0), disk: sim.NewDisk(diskBytes / core.BlockSize), cfg: testLogConfig(), opened: map[uint32]uint64{}}
 	n.ctx = core.Context{Now: 1, Raw: 2, Pool: n.pool}
 	geo, err := disklog.GeometryFor(diskBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n.log, err = disklog.Format(&n.ctx, n.cfg, disklog.Superblock{LogID: 0x5eed, Geometry: geo}, 1000, &n.out)
+	n.geo = geo
+	n.log, err = disklog.Format(&n.ctx, n.cfg, disklog.Superblock{LogID: nodeLogID, Geometry: geo}, 1000, &n.out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	n.maxBlob = int(n.log.MaxBlobBytes())
 	n.ix = n.newIndex()
 	n.settle()
+	n.oracle = sim.NewOracle[disklog.Event](n.log.DurableLSN(), blockModel{})
 	return n
 }
 
@@ -112,6 +135,13 @@ func (n *node) settle() {
 			}
 		}
 		for _, a := range acts {
+			if n.crashAct != nil && n.crashAct(a) {
+				n.crash()
+				return
+			}
+			if a.Kind == core.ActDiskWrite {
+				n.noteWrite(a)
+			}
 			done := n.disk.Execute(n.pool, &a)
 			if n.rec != nil {
 				n.rec.OnEvent(&n.ctx, &done, &n.out)
@@ -124,6 +154,10 @@ func (n *node) settle() {
 
 func (n *node) crash() {
 	n.crashed = true
+	if n.landing != nil {
+		n.disk.CrashRandom(n.landing)
+		return
+	}
 	n.disk.Crash(func(int, core.LBA) bool { return false })
 }
 
@@ -135,6 +169,9 @@ func (n *node) handle(ev *disklog.Event) {
 	tree := n.ix.Tree()
 	switch ev.Kind {
 	case disklog.Durable:
+		if err := n.oracle.Acked(ev.LSN); err != nil {
+			n.t.Fatalf("oracle: %v", err)
+		}
 		if err := n.ix.Apply(ev); err != nil {
 			n.t.Fatal(err)
 		}
@@ -162,12 +199,21 @@ func (n *node) handle(ev *disklog.Event) {
 		n.blobRead(ev)
 	case disklog.Replayed:
 		if ev.LSN > n.replayLSN {
+			if n.replayLate && !n.skipped && mapsBlocks(ev) {
+				n.skipped = true
+				return
+			}
 			if err := n.ix.Apply(ev); err != nil {
 				n.t.Fatal(err)
 			}
 			n.replayed++
 		}
 	case disklog.Recovered:
+		n.recoveredLSN = n.rec.DurableLSN()
+		var err error
+		if n.want, err = n.oracle.Recovered(n.recoveredLSN); err != nil {
+			n.t.Fatalf("oracle: %v", err)
+		}
 		log, err := n.rec.Log(&n.ctx)
 		if err != nil {
 			n.t.Fatal(err)
@@ -219,8 +265,16 @@ func (n *node) nextPiece() {
 
 // recover restarts the node on its disk: recovery, the index's runs, replay, then group commit.
 func (n *node) recover(mode disklog.Mode) {
-	n.log, n.out, n.crashed, n.crashWhen = nil, disklog.Output{}, false, nil
-	n.checkpointing, n.inPiece, n.recovered, n.replayed, n.replayLSN = false, false, false, 0, 0
+	n.t.Helper()
+	n.recoverUntil(mode, nil)
+}
+
+// recoverUntil is recover, checking the recovered index against the crash oracle, unless
+// crashAct crashes the disk before one of recovery's actions, which it reports with false.
+func (n *node) recoverUntil(mode disklog.Mode, crashAct func(core.Action) bool) bool {
+	n.t.Helper()
+	n.log, n.out, n.crashed, n.crashWhen, n.crashAct = nil, disklog.Output{}, false, nil, crashAct
+	n.checkpointing, n.inPiece, n.recovered, n.replayed, n.replayLSN, n.skipped = false, false, false, 0, 0, false
 	n.ix = n.newIndex()
 	n.mode = mode
 	n.loading, n.pieceOf = map[disklog.BlobRef]*runLoad{}, map[disklog.BlobRef]disklog.BlobRef{}
@@ -229,9 +283,21 @@ func (n *node) recover(mode disklog.Mode) {
 		n.t.Fatal(err)
 	}
 	n.settle()
+	n.crashAct = nil
+	if n.crashed {
+		return false
+	}
 	if !n.recovered {
 		n.t.Fatalf("recovery stopped: %v", n.rec.Err())
 	}
+	if err := oracleDiff(n.ix, n.want); err != nil {
+		err = fmt.Errorf("index recovered to LSN %d: %w", n.recoveredLSN, err)
+		if n.mismatch == nil {
+			n.t.Fatalf("oracle: %v", err)
+		}
+		n.mismatch(err)
+	}
+	return true
 }
 
 func (n *node) loadRuns() {
@@ -303,6 +369,7 @@ type workload struct {
 	epoch       uint64
 	compactions int
 	freezes     int
+	written     map[core.ChunkID]bool
 }
 
 func (w *workload) run(n *node, ops int) {
@@ -317,7 +384,9 @@ func (w *workload) run(n *node, ops int) {
 		tree := n.ix.Tree()
 		if !n.checkpointing && n.log.CheckpointDue() {
 			n.checkpoint()
-			n.settle()
+			if n.settle(); n.crashed {
+				return
+			}
 		}
 		if c := tree.PickCompaction(); c != nil {
 			c.Run()
@@ -332,15 +401,25 @@ func (w *workload) run(n *node, ops int) {
 	}
 }
 
+// item is a write, a punch, or a freeze: of a chunk's version, or of version 0, the absent chunk,
+// for a chunk the workload has not written, among them two chunks it never writes.
 func (w *workload) item(n *node) disklog.Item {
+	if w.r.IntN(32) == 0 {
+		return w.freeze(core.ChunkID{Volume: 1, Inode: 4, Index: uint32(w.r.IntN(2))}, 0)
+	}
 	c := core.ChunkID{Volume: 1, Inode: core.InodeID(1 + w.r.IntN(3)), Index: uint32(w.r.IntN(4))}
 	if w.r.IntN(8) == 0 {
 		if ch, ok := n.ix.Chunk(1, c); ok {
-			w.epoch++
-			w.freezes++
-			return disklog.Item{Entry: disklog.FreezeEntry(1, c, ch.Version, w.epoch)}
+			return w.freeze(c, ch.Version)
+		}
+		if !w.written[c] {
+			return w.freeze(c, 0)
 		}
 	}
+	if w.written == nil {
+		w.written = map[core.ChunkID]bool{}
+	}
+	w.written[c] = true
 	w.version++
 	first := uint16(w.r.IntN(core.BlocksPerChunk))
 	count := uint16(1 + w.r.IntN(min(6, core.BlocksPerChunk-int(first))))
@@ -359,6 +438,12 @@ func (w *workload) item(n *node) disklog.Item {
 		b[i] = byte(w.version)
 	}
 	return disklog.Item{Entry: disklog.WriteEntry(1, c, w.version, first, count), Buf: buf}
+}
+
+func (w *workload) freeze(c core.ChunkID, version uint64) disklog.Item {
+	w.epoch++
+	w.freezes++
+	return disklog.Item{Entry: disklog.FreezeEntry(1, c, version, w.epoch)}
 }
 
 func (n *node) submit(it disklog.Item) {

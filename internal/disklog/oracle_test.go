@@ -457,25 +457,52 @@ func (f *failRecorder) Fatal(args ...any) {
 
 func (f *failRecorder) Cleanup(func()) {}
 
-// A ticket check that fails inside a scripted recovery case names the case's testdata line and
-// the command that tripped it.
-func TestScriptedHarnessFailuresNameTheirLine(t *testing.T) {
+// recordedRecovery runs a scripted recovery case and returns the first failure it makes.
+func recordedRecovery(t *testing.T, d datadriven.TestData) string {
 	rec := &failRecorder{TB: t}
-	d := &datadriven.TestData{
-		Pos:     "testdata/recovery:7",
-		Cmd:     "run",
-		CmdArgs: []datadriven.CmdArg{{Key: "plant", Vals: []string{"swap-tickets"}}},
-		Input:   "write hot 1 0 1 1\nsubmit hot 2 0 1 2\nsubmit hot 3 0 1 3\nsubmit hot 4 0 1 4\nwrite hot 5 0 1 5",
-	}
 	func() {
 		defer func() {
 			if r := recover(); r != nil && r != (recordedFailure{}) {
 				panic(r)
 			}
 		}()
-		scriptedRecovery(rec, d)
+		scriptedRecovery(rec, &d)
 	}()
-	if want := `testdata/recovery:7: "write hot 5 0 1 5": oracle: LSN 3 entry 0 is`; !strings.HasPrefix(rec.msg, want) {
-		t.Fatalf("failure %q, want it to start %q", rec.msg, want)
+	return rec.msg
+}
+
+// The swap-tickets case of testdata/recovery without its closing fails line fails at the ticket
+// check, naming the case's testdata line and the command that tripped it. A fails line fails the
+// case when no harness check fails during the command before it, or one fails without its text.
+func TestScriptedHarnessFailuresNameTheirLine(t *testing.T) {
+	var swap datadriven.TestData
+	datadriven.RunTest(t, "testdata/recovery", func(t *testing.T, d *datadriven.TestData) string {
+		for _, a := range d.CmdArgs {
+			if a.Key == "plant" && slices.Equal(a.Vals, []string{"swap-tickets"}) {
+				swap = *d
+			}
+		}
+		return d.Expected
+	})
+	body, closing, ok := strings.Cut(strings.TrimSpace(swap.Input), "\nfails ")
+	if !ok || strings.Contains(closing, "\n") {
+		t.Fatalf("testdata/recovery has no plant=swap-tickets case closing with a fails line: %q", swap.Input)
+	}
+	unplanted := datadriven.TestData{Pos: "testdata/recovery:1", Cmd: "run", Input: body + "\nfails " + closing}
+	wrongText := swap
+	wrongText.Input = body + "\nfails LSN 2"
+	for _, c := range []struct {
+		name string
+		d    datadriven.TestData
+		want string
+	}{
+		{"without fails", datadriven.TestData{Pos: swap.Pos, Cmd: swap.Cmd, CmdArgs: swap.CmdArgs, Input: body},
+			swap.Pos + `: "write hot 5 0 1 5": oracle: LSN 3 entry 0 is`},
+		{"unplanted", unplanted, `testdata/recovery:1: "write hot 5 0 1 5": no harness check failed`},
+		{"wrong text", wrongText, swap.Pos + `: "write hot 5 0 1 5": failed with "oracle: LSN 3 entry 0 is`},
+	} {
+		if msg := recordedRecovery(t, c.d); !strings.HasPrefix(msg, c.want) {
+			t.Errorf("%s: failure %q, want it to start %q", c.name, msg, c.want)
+		}
 	}
 }

@@ -849,13 +849,17 @@ Edge and negative cases:
 - [property] On a 1 GiB simulated disk (16-block records, a checkpoint every 96 blocks of records,
   the decode check on), seeds 0-3, three generations of 150 rounds of 1-4 items over 12 chunks
   (writes of 1-6 blocks, a whole-chunk punch one time in ten, a partial punch two in ten, a freeze
-  of a written chunk one in eight), with checkpoints and compactions: after each generation a
+  one in eight: of the chunk's version, or of version 0, absent, for a chunk not yet written), plus
+  a freeze of version 0 one item in 32 of two chunks never written, with checkpoints and
+  compactions: after each generation a
   rebuild from every record header, and recovery from the manifest's runs plus replay, both equal
   the live index and pass its check. Every seed writes multi-piece runs, carries runs, compacts and
   freezes.
 - A crash once a checkpoint's manifest record is durable but before any segment header names it,
   with a compaction's result among its runs, recovers from the previous manifest plus replay to the
   live index, and the next checkpoint's restart does too (seeds 0-3).
+- Every recovery in these tests is also checked against the crash oracle's block model ([Chunk
+  index under the crash oracle](#chunk-index-under-the-crash-oracle)).
 - Benchmarks: a lookup among 20,000 one-block extents over 64 chunks, and applying a one-block write.
 
 ## Range removals
@@ -1020,8 +1024,8 @@ them under every option set and a model, and turns a failure into a regression c
   compactions 4, restarts 1; keys of 1-6 letters a-f, a put's key new one time in four, a range
   removal half the time over every key with its start as prefix. With `Check` on, every set's
   history equals the map model's line by line (Pebble's `internal/metamorphic`, a7b8321871e3).
-  The 11 sets take about 5 s for 20 seeds on an Intel Core Ultra 5 235U; seeds 0-10,002 passed
-  once with the change that added the test.
+  The 13 sets take about 4 s for 20 seeds on an Apple M4 Pro; seeds 0-10,002 passed once with
+  the change that added the test, and seeds 0-199 with the filter sets.
 
   | Set | Pieces | Flushes | Compaction | Other |
   | --- | --- | --- | --- | --- |
@@ -1036,11 +1040,13 @@ them under every option set and a model, and turns a failure into a regression c
   | Fixed limit | 1 KiB | after every 5 writes | eager, with a fixed run limit of 4 against the auto-tuned one | |
   | Point removals | 4 KiB | after every 20 writes | eager | each range removal replaced by the point removals of the keys it covers (Pebble's `replace_single_delete`) |
   | Linear merge | 1 KiB | after every 15 writes | eager | scans, flushes and merges compare every layer at every step instead of keeping the heap, so the flush's and merge's drop counts and reads during a flush meet the reference too; up to 4 ops between a flush's pieces |
+  | Filters off | 256 B | as C | as C | lookups probe no run filter and search every run (`Config.Probe = FiltersOff`) |
+  | Filters maybe | 256 B | as C | as C | lookups probe every run filter and take each answer as "maybe" (`FiltersMaybe`) |
 
-  Run filters adds two sets: Filters off, and every filter probe answering "maybe".
 - Each set reaches the extreme it is there for on seed 0: F never flushes, C keeps over 100 runs
   and G 40, E fails flushes and restarts more than A, D installs merges while a memtable is frozen,
-  Two merges runs two at once, and Fixed limit compacts.
+  Two merges runs two at once, Fixed limit compacts, and Filters off and Filters maybe search more
+  layers than C ([Filter option sets](#filter-option-sets)).
 - [property] The chunk index's `TestMetamorphic` (`internal/chunkstore`): seeds 0-19 per run, 1,000
   ops drawn by weight: writes 30, punches 6, whole-chunk punches 1, cuts 2, releases of frozen
   versions 2, cleaner moves 8, reads of blocks live 12 and at a snapshot epoch 10, chunk entries 3,
@@ -1050,12 +1056,14 @@ them under every option set and a model, and turns a failure into a regression c
   write after each cut; a move copies one block a live or frozen map holds. Every op names its record's LBA, so
   histories are comparable, and a move is logged and replayed after a restart as the cleaner's copy
   record will be. The model is per chunk an entry, a live map and frozen maps, block by block. The
-  sets are internal/lsm's but Linear merge, with C's pieces 512 bytes, since a 256-byte root lists
-  13 pieces, fewer than a flush of 10 index writes takes; Point removals sets the index's own
-  point-removal switch, so range trims read as point removals. A seed costs about 0.3 s over the
-  10 sets; at 3,000 ops it costs 3 s, as runs pile up to 300 under C and Two merges. Seed 0
-  holds an absent freeze, a whole-chunk punch, a move that changes a map, a release and a read
-  that finds a frozen version. Seeds 0-10,001 passed once with the change that added the test.
+  tree is configured by `TreeConfig`, so its filters hold chunk prefixes as in production. The
+  sets are internal/lsm's but Linear merge, with the pieces of C, Filters off and Filters maybe
+  512 bytes, since a 256-byte root lists 13 pieces, fewer than a flush of 10 index writes takes;
+  Point removals sets the index's own point-removal switch, so range trims read as point removals.
+  A seed costs about 0.2 s over the 12 sets on an Apple M4 Pro; at 3,000 ops about 4 s, as runs
+  pile up to 300 under C and Two merges. Seed 0 holds an absent freeze, a whole-chunk punch, a
+  move that changes a map, a release and a read that finds a frozen version. Seeds 0-10,001
+  passed once with the change that added the test, and seeds 0-299 with the filter sets.
 - Planted bugs, each one line behind a test switch in `internal/lsm` and run with `Check` off so
   the history diff alone finds them, fail at least one seed of 20 under the set each is checked
   under, and the failing seed differs from set F too:
@@ -1162,8 +1170,14 @@ entries; counts are the bar, times on the shared VM):
 
 ## Filter option sets
 
-- Both indexes' metamorphic tests pass under two more option sets: filters off, and every filter
-  probe answering "maybe".
+- Both indexes' metamorphic tests (`TestMetamorphic` in `internal/lsm` and `internal/chunkstore`)
+  pass under two more option sets with C's cadence: Filters off, whose lookups probe no run filter,
+  and Filters maybe, whose every probe answers "maybe" (`lsm.Config.Probe`). The chunk index's
+  runs under every set hold its chunk-prefix filters.
+- On seed 0, in both indexes, both sets search the same number of layers, more than C; Filters
+  off probes no filter, and Filters maybe probes as many as C (`Tree.FilterProbes`), so a Filters
+  maybe that skips its probes fails (`TestMetamorphicOpsCoverTheIndex`,
+  `TestMetamorphicSetsReachTheirExtremes`).
 
 ## Chunk reader
 
@@ -2228,8 +2242,10 @@ Torn writes, bit flips, fail-slow and discards:
 - Per disk the oracle (`sim.Oracle`) keeps every index's state at the last acknowledged LSN and the
   records written since, in LSN order (RocksDB's crash test: expected state plus trace). It is
   generic over the record and the model: in phase 1 the disk log's tests keep a block map standing
-  in for the chunk index, and the atomic-flush scenario a list of entries per owner; from phase 4
-  each shard replica on the disk joins the model.
+  in for the chunk index, the atomic-flush scenario a list of entries per owner, and the chunk
+  index's tests a block model of the real `Index` ([Chunk index under the crash
+  oracle](#chunk-index-under-the-crash-oracle)); from phase 4 each shard replica on the disk joins
+  the model.
 - After a crash, recovery reports an LSN r. Required: acked ≤ r ≤ acked + in flight. The oracle
   replays its trace from acked to r onto the state at acked, and every index on the disk equals the
   result, with no hole. The window, with 7 acknowledged and 2 in flight:
@@ -2276,6 +2292,33 @@ Torn writes, bit flips, fail-slow and discards:
   recovery reports the same r.
 - The phase 5 real-disk crash test keeps the same oracle in its test driver, in a file outside the
   daemon it kills (Crash tests on real disks).
+
+## Chunk index under the crash oracle
+
+The chunkstore tests' `node` runs the real `Index` over the disk log on a simulated disk. It hands
+`sim.Oracle` each round as its write goes to the disk, decoded from the bytes written with the
+open sequence of the write that opened its segment, and each `Durable` LSN. The oracle's model is a
+plain block model: per chunk its entry, and block by block its live map and frozen maps.
+
+- After every recovery the node's tests run (`TestRecoveryAndRebuildEqualLiveIndex`,
+  `TestCrashBetweenRunAndManifest` and the property below), the recovered LSN must lie in the
+  oracle's window, and the recovered `Index` must read as the model at that LSN: each chunk's
+  entry, the frozen version `FrozenAt` gives at every epoch up to one past the newest freeze, and
+  every block of every chunk the workload writes or freezes, live and in every frozen version.
+  Neither the index nor the model may hold another chunk, and `Check` must pass too.
+- [property] `TestRecoveriesMatchTheCrashOracle`: seeds 0-7, six crashes each at a random write or
+  flush, each unflushed block landing at random, with checkpoints, compactions and freezes between
+  them, absent freezes among them. The run must reach a recovery that keeps a record past the
+  acknowledged LSN, recoveries that load runs and frozen maps, recoveries holding a chunk frozen
+  absent and one written after its absent freeze, and a crashed recovery that had erased records.
+  A snapshot lookup that misses the absent version (`Index.frozen` skipping version 0's marker)
+  trips the oracle at the first recovery.
+- Crash during recovery, then recovery again: every other recovery of the property is crashed
+  before its final flush, with its erasures landing at random. The oracle's window is unchanged
+  by it, and the recovery run again reports the LSN the crashed one had found.
+- Planted bug: replay that leaves out the first record past the replay LSN that maps blocks, as a
+  replay LSN one record too new would (RocksDB #11148), trips the oracle on at least one seed of 8
+  (`TestCrashOracleCatchesLateReplay`; seed 0 names a chunk entry at an older version).
 
 ## Invariant checker
 
@@ -2403,17 +2446,25 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   last recovery's index as extents (chunk, blocks, version, pool, LBAs), whether every mapped block
   reads back the data its version wrote, so a block damaged after recovery is named, and whether
   the index is what the crash oracle holds at the recovered LSN, naming the first block that
-  differs. `run plant=stop-early` and `plant=past-gaps` break recovery as the Crash oracle section's
-  planted bugs do. An `index` the oracle rejects fails the case unless it is written
-  `index rejected`, as after a plant or damage to an acknowledged record, and one written so fails
-  if the oracle accepts it, so a careless `go test -rewrite` cannot accept a wrong index or a plant
-  the oracle misses. The Recovery section's torn tail (every landing set), damage in a middle
-  record and in the last one, and both commit-depth-2 cases live only here, each that recovers
-  printing its index.
+  differs. `run plant=stop-early`, `plant=past-gaps` and `plant=swap-tickets` break recovery or
+  rounds as the Crash oracle section's planted bugs do. An `index` the oracle rejects fails the
+  case unless it is written `index rejected`, as after a plant or damage to an acknowledged
+  record, and one written so fails if the oracle accepts it, so a careless `go test -rewrite`
+  cannot accept a wrong index or a plant the oracle misses. Likewise a check the harness makes,
+  such as the ticket check, fails the case unless the case closes with `fails <text>`: then a
+  harness check must fail during the line before it, with a message holding the text's parts,
+  separated by ` ... `, in order, which ends the case and is printed; a `fails` whose failure does
+  not happen, or whose message lacks the text, fails the case. The `plant=swap-tickets` case shows
+  the ticket check catching the swapped round when the next write makes it durable, its text
+  pinning the swap: LSN 3's entry 0, chunk 3, against the item submitted under ticket 4, chunk 4. The Recovery section's torn tail (every
+  landing set), damage in a middle record and in the last one, and both commit-depth-2 cases live
+  only here, each that recovers printing its index.
 - An unknown command, argument or op, or a malformed argument, fails the test with the file and
-  line, never a silent skip. So does a check the harness makes during a scripted recovery case,
-  such as the ticket check, which also quotes the command running: a case built in the test with
-  `plant=swap-tickets` fails at its first write that makes the swapped round durable.
+  line, never a silent skip. So does a check the harness makes during a scripted recovery case
+  that does not expect it, which also quotes the command running: the `plant=swap-tickets` case
+  run without its `fails` line fails at `write hot 5 0 1 5`, naming its line
+  (`TestScriptedHarnessFailuresNameTheirLine`, which also runs the case unplanted and with the
+  wrong text, and checks that each fails).
 
 ## Planted-bug check
 

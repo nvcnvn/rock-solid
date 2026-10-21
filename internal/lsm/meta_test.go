@@ -30,6 +30,7 @@ type metaSet struct {
 	merges   int
 	linear   bool
 	points   bool
+	probe    FilterProbe
 	run      metamorphic.Options
 }
 
@@ -47,6 +48,8 @@ var metaSets = []metaSet{
 	{name: "fixed-limit", piece: 1024, runLimit: 4, run: metamorphic.Options{FlushOps: true, FlushEvery: 5, Compact: metamorphic.CompactEager}},
 	{name: "point-removals", piece: 4096, points: true, run: metamorphic.Options{FlushOps: true, FlushEvery: 20, Compact: metamorphic.CompactEager}},
 	{name: "linear-merge", piece: 1024, linear: true, run: metamorphic.Options{FlushOps: true, FlushEvery: 15, Compact: metamorphic.CompactEager, Absorb: 4}},
+	{name: "filters-off", piece: 256, probe: FiltersOff, run: metamorphic.Options{FlushOps: true, FlushEvery: 10}},
+	{name: "filters-maybe", piece: 256, probe: FiltersMaybe, run: metamorphic.Options{FlushOps: true, FlushEvery: 10}},
 }
 
 func metaSetNamed(name string) (metaSet, bool) {
@@ -273,7 +276,7 @@ type metaWrite struct {
 
 // metaStats counts what an option set made the tree do, to show the set reaches its extreme.
 type metaStats struct {
-	flushes, failed, compactions, together, deferred, restarts, maxRuns int
+	flushes, failed, compactions, together, deferred, restarts, maxRuns, searches, filterProbes int
 }
 
 // metaTree runs a Tree over a log that keeps every live piece. Its writes stand in for the disk
@@ -299,7 +302,7 @@ func newMetaTree(s metaSet, check bool, plant plants) *metaTree {
 }
 
 func (m *metaTree) newTree() *Tree {
-	tr, err := New(Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, Check: m.check})
+	tr, err := New(Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, Check: m.check, Probe: m.set.probe})
 	if err != nil {
 		panic(err)
 	}
@@ -482,9 +485,15 @@ func (m *metaTree) Restart() error {
 			return err
 		}
 	}
+	m.countSearches()
 	m.tr = tr
 	m.st.restarts++
 	return nil
+}
+
+func (m *metaTree) countSearches() {
+	m.st.searches += m.tr.Searches()
+	m.st.filterProbes += m.tr.FilterProbes()
 }
 
 // metaFailure is the first option set whose history differs from the model's.
@@ -506,6 +515,7 @@ func metaRun(ops []metamorphic.Op, sets []metaSet, check bool, plant plants) (*m
 	for i, s := range sets {
 		e := newMetaTree(s, check, plant)
 		got := metamorphic.Run(ops, s.run, e)
+		e.countSearches()
 		stats[i] = e.st
 		stats[i].flushes, stats[i].failed = e.log.Flushes, e.log.Failed
 		if i == 0 {
@@ -594,6 +604,8 @@ func TestMetamorphicSetsReachTheirExtremes(t *testing.T) {
 		{"D installs merges during flushes", of("D").deferred > 0},
 		{"two-merges runs two at once", of("two-merges").together > 0},
 		{"fixed-limit compacts", of("fixed-limit").compactions > 0},
+		{"filters-off probes no filter and searches more than C", of("filters-off").filterProbes == 0 && of("filters-off").searches > of("C").searches},
+		{"filters-maybe probes as C does and searches as filters-off does", of("filters-maybe").filterProbes == of("C").filterProbes && of("filters-maybe").searches == of("filters-off").searches},
 	} {
 		if !c.ok {
 			t.Errorf("%s: %+v", c.name, stats)
