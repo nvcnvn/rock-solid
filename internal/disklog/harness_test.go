@@ -73,6 +73,10 @@ type harness struct {
 	// victim stands for a cleaner with a victim, so stalled items wait; otherwise the harness
 	// reports no victim and they fail with NoSpace.
 	victim bool
+	// plant, when set, plants a bug in every recovery the harness starts.
+	plant func(*disklog.Recovery)
+	// poolBytes, when set, sizes the pool of every recovery the harness starts.
+	poolBytes int
 }
 
 func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {

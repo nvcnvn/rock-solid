@@ -70,3 +70,10 @@ func StartRounds(l *Log, ctx *core.Context, out *Output) { l.startRounds(ctx, ou
 
 // HeldBytes is the bytes of records after the newest manifest that count toward the hold behind a checkpoint.
 func HeldBytes(l *Log) uint64 { return l.heldBytes }
+
+// ReplayPerStream plants the bug of reading each stream, not each lane, from the last of its
+// segments whose first record is at or before the first to replay.
+func ReplayPerStream(r *Recovery) { r.perStream = true }
+
+// SkipMergeLanes plants the bug of leaving merge lanes out of replay.
+func SkipMergeLanes(r *Recovery) { r.skipMerges = true }

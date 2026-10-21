@@ -209,11 +209,13 @@ types](#event-and-action-types), and this section is their only home.
 - Addressing: block b of segment s is at LBA s x segment_blocks + b (1 GiB: segment 3 block 5 is
   LBA 197). Segment 0 holds the superblock in its first block and its copy in its last block (LBA 63).
 - Superblock (magic, version, CRC, log ID, segment blocks, segment count) and segment header (magic,
-  version, stream, CRC, log ID, open sequence, own index, newest manifest position or none)
-  round-trip, hot and cold, with and without a manifest pointer, each as one 4 KiB block. Segment 0
+  version, stream, lane, CRC, log ID, open sequence, own index, newest manifest position or none)
+  round-trip, hot, cold and metadata, with and without a manifest pointer, a merge lane (3) and the
+  last one (255), each as one 4 KiB block. Segment 0
   in the manifest fields means "no manifest". A superblock decodes from a longer buffer, ignoring
   what follows its block.
-- [property, exhaustive] Flipping any single bit of the segment header makes it fail to decode.
+- [property, exhaustive] Flipping any single bit of a cold or a merge-lane segment header makes it
+  fail to decode.
 - Damage, with the checksum recomputed where it says so:
 
   | Damage | Superblock | Segment header |
@@ -222,14 +224,16 @@ types](#event-and-action-types), and this section is their only home.
   | Another version, checksum recomputed | BadVersion | BadVersion |
   | A bit flipped (superblock: in the log ID, the CRC or the last byte; segment header: in the sequence) | BadChecksum | BadChecksum |
   | Non-zero padding or tail, checksum recomputed | Malformed | Malformed |
+  | A lane on the hot or cold stream, checksum recomputed | | Malformed |
   | Segment blocks 3 or 96 (not a power of two of at least 4), or a count of 3, checksum recomputed | Malformed | |
-  | Stream 2, own index 0, manifest block 0, or an LSN with no manifest segment, checksum recomputed | | Malformed |
+  | Stream 3, own index 0, manifest block 0, or an LSN with no manifest segment, checksum recomputed | | Malformed |
   | Shorter than a block | Truncated | Truncated |
 
   Encoding refuses what decoding would: a superblock of 6-block segments, a segment header of
-  stream 2, index 0, a manifest block with no segment, or a manifest segment at block 0.
-- Golden bytes: the superblock for log ID 0x0123456789abcdef on a 1 GiB disk, and the segment header
-  (seq 7, segment 3, cold, manifest at segment 2 block 9 LSN 41), encode to the checked-in
+  stream 3 or of a hot lane 1, index 0, a manifest block with no segment, or a manifest segment at block 0.
+- Golden bytes: the superblock for log ID 0x0123456789abcdef on a 1 GiB disk, and the segment headers
+  (seq 7, segment 3, cold; seq 8, segment 4, metadata lane 0; seq 9, segment 5, metadata lane 3;
+  each with the manifest at segment 2 block 9 LSN 41), encode to the checked-in
   `internal/disklog/testdata/log_format_golden.txt`, followed by zeros to the end of the block.
   Until the first release a format change replaces the fixture in place; after it, a change needs a
   version bump.
@@ -333,9 +337,10 @@ types](#event-and-action-types), and this section is their only home.
 - Opening a segment: round 1 writes the segment header (segment 1, seq 1, hot, no manifest) and the
   record together, starting at segment 1 block 0 (LBA 64); the record sits at block 1 (LBA 65) and
   the data is the submitted bytes. Round 2 appends at block 3 (LBA 67) with LSN 2 and 4 entries.
-- Streams alternate when both have work, and each opens its own segment: with hot items A, B and a
-  cold item queued behind round 1 (A), round 2 is the cold item (segment 2, LBA 128, seq 2) and
-  round 3 is hot B plus a later hot item (LBA 67). LSNs are global across streams.
+- Lanes take turns when several have work, and each opens its own segment: with hot items A, B, a
+  cold item and a checkpoint piece queued behind round 1 (A), round 2 is the cold item (segment 2,
+  LBA 128, seq 2), round 3 the piece (segment 3, LBA 192, seq 3, metadata lane 0) and round 4 hot B
+  plus a later hot item (LBA 67). LSNs are global across lanes.
 - Rounds stop at the maximum round size, segment header included: with 3-block rounds an item's
   record may take 2 blocks, so a 3-block write and a blob over 1 block (4,097 bytes) are refused as
   TooLarge at submit; 1-block writes pack two per record once no segment header is needed (LSN 2 =
@@ -353,7 +358,7 @@ types](#event-and-action-types), and this section is their only home.
 - A refused item leaves its buffer with the caller: BadBuffer for a write buffer that is not exactly
   its blocks, a missing write buffer, a blob longer than its buffer, or a punch with a buffer;
   ReservedKind, on either stream, for a run piece, manifest or manifest-piece blob, which only a
-  checkpoint writes (`CheckpointPiece` and the log's own manifest).
+  checkpoint or a merge writes (`CheckpointPiece`, `MergePiece` and the log's own manifest).
 - A disk error fails the log: an Io error on round 1's write reports its ticket InDoubt and the
   queued items Failed, frees their buffers, and every later submit is refused with that error.
   With depth 2, an error on round 2's write while round 1's is in flight reports both rounds
@@ -376,11 +381,11 @@ types](#event-and-action-types), and this section is their only home.
 - [property] Every accepted item ends durable in a record that decodes to it: seeds 1-100; max round
   3..64 blocks; disk 16 blocks (1 in 4) or 1 GiB; commit depth 1-3; max replay 4-200 blocks; a pool
   of the log's buffers plus a round to 512 blocks; punch share 0-8 of 8; 1-1000 items to random
-  streams, 1 in 8 sized near the round limit; a checkpoint of owners 1 and 2 with 0-3 random pieces
+  streams, 1 in 8 sized near the round limit, and 1 in 8 a merge piece on a random lane of 1-4; a checkpoint of owners 1 and 2 with 0-3 random pieces
   whenever one is due; 1 seed in 8 fails one random disk action with Io; completions interleaved at
   random, a linked flush running only after its write. Every accepted ticket ends Durable, Failed
   (NoSpace or Io) or InDoubt (Io); a Durable record read back from the disk holds its tickets'
-  entries and payloads at the reported offsets, and the log's own manifest pieces carry NoTicket;
+  entries and payloads at the reported offsets, the checkpoint's own manifest pieces carry NoTicket;
   no record is reported durable before a flush that ran after its write completed; LSNs are
   reported in order; every finished checkpoint's manifest reads back with its base LSN and runs;
   without an error there is one flush per write; the only refusal is TooLarge; Close then finds
@@ -390,7 +395,7 @@ types](#event-and-action-types), and this section is their only home.
   after a 3-block write (a 4-block record) a checkpoint is not due; after a second (8 blocks) it is.
   A third write is in flight when the checkpoint begins for owners 5 and 6; a second begin is Busy,
   and "due" turns false while one runs. Two pieces for owner 5 then end. Results: LSN 3 = the
-  in-flight write; LSN 4 = both pieces in one cold record (segment 2 block 1, entries 0 and 1);
+  in-flight write; LSN 4 = both pieces in one record of metadata lane 0 (segment 2 block 1, entries 0 and 1);
   LSN 5 = the manifest, reported as CheckpointDone and kept as the newest manifest. The manifest has
   base LSN 2 (durable at begin, not the in-flight 3), trees [(5, [LSN4#0, LSN4#1]), (6, [])] and a
   usage table of segment 1 alone: used, 6 live blocks (the two writes' data, not their headers),
@@ -429,8 +434,8 @@ types](#event-and-action-types), and this section is their only home.
   the offset Durable will report. A round that would build a record with no entries panics. The
   default configuration leaves `Check` off.
 - The decode check catches a broken encoder: an encoder that writes a wrong version into an entry
-  and fixes the header checksum, flips a padding bit, or writes the segment header of the other
-  stream with its checksum fixed panics in the decode check on every one of the group commit
+  and fixes the header checksum, flips a padding bit, or writes the segment header of either other
+  stream or of another lane with its checksum fixed panics in the decode check on every one of the group commit
   property's 100 seeds, as does a round that reports its last payload a byte late, or writes one
   block more than its record.
 - [property] Anything Submit accepts decodes: seeds 1-20; max round 3..64 blocks; commit depth 1-3;
@@ -538,9 +543,10 @@ no buffer allocated.
   pieces; once a segment header names it, open loads the same manifest, all 500 runs, and replays from
   its replay LSN. A second such checkpoint crashing before the write of its last piece recovers from
   the first.
-- Many segments, both streams: 64K-block disk (16-block segments), 4-block records, 200 writes of 1-2
-  blocks plus a cold blob every 5th, reaching segment 20 or beyond. Open returns exactly the acknowledged
-  records. The index from open and the index from rebuild both equal the live index, and every mapped
+- Many segments, every lane: 64K-block disk (16-block segments), 4-block records, 4 merge workers, max
+  replay 64 blocks, 200 writes of 1-2 blocks plus a cold blob every 5th and a merge piece on a random
+  lane every 3rd, checkpointing when due, reaching segment 20 or beyond. Open returns exactly the
+  acknowledged records after its replay LSN and rebuild every one, merge records left out of both. The index from open and the index from rebuild both equal the live index, and every mapped
   block reads back its written pattern (RocksDB ReadWrite/ManyBlocks/Fragmentation).
 - Checkpoints bound replay: 64K-block disk, max replay 40 blocks, 120 writes of 1-4 blocks over 16
   chunks with a whole-chunk punch every 7th, unlimited or 512-byte run pieces. At least 5 checkpoints
@@ -557,7 +563,7 @@ no buffer allocated.
   a Replay after that is refused with the same error.
 - [property] Random crashes keep acknowledged records: seeds 1-50 x 4 crash/reopen cycles; disk 1,024,
   4,096 or 65,536 blocks; max record 3-32 blocks; commit depth 1-2; max replay 4-200 blocks; run
-  pieces unlimited or 512 bytes; random log ID. Each cycle runs 300 steps, each either submitting 1-4
+  pieces unlimited or 512 bytes; 1-4 merge workers; random log ID. Each cycle runs 300 steps, each either submitting 1-4
   random items (60% writes of 1-3 blocks, 10% whole-chunk punches, 20% hot blobs under 3,000 B, 10%
   cold blobs under 6,000 B) when nothing is pending or with probability 2/5, or executing one random
   pending disk action. The stand-in checkpoints whenever one is due. Then each cycle ends in a crash
@@ -572,9 +578,11 @@ no buffer allocated.
   in flight, so a second recovery after the first, or after a crash inside its writes, gives the
   same LSN and index (RocksDB "column family inconsistency" on second recovery, "SST file is ahead
   of WALs"); every mapped block reads back; both leave the same bytes to replay, and when nothing in
-  flight was kept and the manifest is the newest, as many as before the crash. Coverage: more than 5
+  flight was kept and the manifest is the newest, as many as before the crash. One item in 11 is a
+  merge piece on a random lane of 1-4: rebuild delivers every record up to the recovered LSN but
+  those, and none of those. Coverage: more than 5
   kept in-flight rounds, more than 5 dropped, more than 20 recoveries from a manifest, at least one
-  NoSpace, depth 2, an erased header, a restart and a crash during recovery all occur.
+  NoSpace, depth 2, an erased header, a restart, a crash during recovery and merge records all occur.
 - [fuzz] Bit flips anywhere in a log of 40 writes, cold blobs and checkpoints on a 1,024-block disk:
   rebuild and open either fail with Corrupt, CopyOnly or NotFormatted, or resume a log whose next
   write survives a restart.
@@ -1312,14 +1320,13 @@ victims per pass (4, as in the cleaner spikes), at least 8, with both byte setti
   completes, and nothing failed.
 - A checkpoint finishes in the reserve: a 32-block disk (7 usable segments) with a reserve of 2.
   Five 2-block writes fill segments 1 to 5 and a sixth write is held; the checkpoint's piece and
-  manifest go into segments 6 and 7 and it completes, while the held write stays held. A punch on
-  the cold stream that would fit in the block the manifest left free in segment 7 is held too: an
-  ordinary item never appends to a segment opened from the reserve. When the owner reports no
-  victim (`FailStalled`), both fail with NoSpace, one Failed event per stream (hot, then cold),
-  and their buffers are freed.
-- After a restart with only the reserve free, the open segments count as taken from the reserve:
-  the log above, after a checkpoint whose manifest went into segment 6 of 7 and a reopen, holds a
-  cold punch that would fit in segment 6.
+  manifest go into segments 6 and 7 of the metadata stream and it completes, while the held write
+  stays held. A cold punch is held too, since the cold lane would have to open a segment of the
+  reserve. When the owner reports no victim (`FailStalled`), both fail with NoSpace, one Failed
+  event per stream (hot, then cold), and their buffers are freed.
+- A merge piece opens a segment of the reserve as the checkpoint's items do: on that disk with
+  five 2-block writes in segments 1 to 5 and a sixth write held, a merge piece goes into segment 6
+  and the write stays held until the no-victim report fails it.
 - A stall ends when a segment frees: on that disk with a reserve of 2, a hot write stalls with
   segments 6 and 7 free; a cold punch then takes the only round slot. Once segment 1 is freed the
   write is no longer `Stalled`, a no-victim report fails nothing, and the write goes into segment 1.
@@ -1327,7 +1334,7 @@ victims per pass (4, as in the cleaner spikes), at least 8, with both byte setti
 - A checkpoint waits until no victim: on the full-disk-waits disk, a checkpoint's first 2-block
   piece fills the reserve segment and its second finds no segment free; both it and the held write
   wait, with no disk action. `FailStalled` then reports Failed(NoSpace) for the held write (hot),
-  CheckpointFailed(NoSpace) and Failed(NoSpace) for the waiting piece (cold); End then says
+  CheckpointFailed(NoSpace) and Failed(NoSpace) for the waiting piece (metadata lane 0); End then says
   NoCheckpoint.
 - Settings: a `max_replay_bytes` past 2^62 is BadConfig, since the hold compares against twice
   it, and `ReserveSegments` saturates rather than wraps.
@@ -1338,11 +1345,12 @@ Who may use the reserve:
 | --- | --- |
 | Chunk write, punch, freeze, Raft entries | held in submit order |
 | Checkpoint run pieces and manifest | written into the reserve |
-| Merge step output | written into the reserve (with Merge steps) |
+| Merge output (`MergePiece`) | written into the reserve |
 | Cleaner copy records | written into the reserve (with the Cleaner) |
 
 - Review, for checkpoints: a disk filled to its reserve still finishes a checkpoint, and an
-  ordinary item never opens or appends to a reserve segment (each fails under a planted bug). The
+  ordinary item never opens a reserve segment (each fails under a planted bug); it cannot append to
+  one, since only the metadata stream opens them. The
   merge step and the cleaner pass join the check with their items; the simulator invariant that the
   bytes held beyond what the manifests name never exceed the reserve arrives with the invariant
   checker.
@@ -1351,13 +1359,6 @@ Who may use the reserve:
 
 ## Merge steps
 
-- Open: build order. In the checklist this item comes before Manifest edits and snapshots (which
-  carries its "manifest edit holding the bounds") and Metadata stream (its merge lanes). Either the
-  checklist moves Merge steps after Metadata stream, or until then the bounds go in the whole
-  manifest and the output into a lane of its own in the cold stream, and the lane scenario below
-  moves to Metadata stream. Whichever item first opens a second segment in a stream needs lanes:
-  a second open cold segment breaks the per-stream replay rule as merges break the metadata
-  stream's.
 - Four runs merged in steps of two pieces: after the first step, a get at or below the bound reads
   the output and above it the inputs; a range removal across the bound is clipped to it; a view
   opened before the step still reads the four runs; the manifest edit names the bounded inputs and
@@ -1567,10 +1568,10 @@ manifest, written or in flight, segment headers and the checkpoint's own records
   hot and a cold write are then held with no disk action. The checkpoint's 100-byte piece goes out
   at once and adds its 2 blocks to the bytes to replay (19), but not to the hold. Once the
   manifest is durable the held hot write, then the held cold write, become durable.
-- A checkpoint's pieces and manifest wait in a queue of their own that leads the cold stream, so
-  they never wait behind held items. A round may carry them and ordinary cold items together: with
-  a hot write in flight, a cold 2-block write and a 100-byte piece queued behind it go out as one
-  record, the piece first; what it adds to the hold is under Held items.
+- A checkpoint's pieces and manifest wait in a queue of their own, metadata lane 0, so they never
+  wait behind held items and no round carries them with ordinary items (Held items). Merge pieces
+  are not ordinary either: with two 3-block writes holding a third, a merge piece goes out at
+  once, and the held write after the next checkpoint.
 - A checkpoint larger than the bound releases the hold: with `max_replay_bytes` 4 blocks, two
   3-block writes hold a third; a checkpoint of four 2-block pieces and its manifest (14 blocks)
   completes and the held write goes out at once. Reopened, recovery replays from the start, since
@@ -1582,7 +1583,7 @@ manifest, written or in flight, segment headers and the checkpoint's own records
   three 2-block writes fill it and hold a fourth; the checkpoint's piece finds no segment, and the
   no-victim report fails the piece, the checkpoint and the held write. A write submitted next is
   `Stalled` at once, until a new checkpoint begins.
-- Merge-step pieces, written by the checkpoint, count as checkpoint items (with Merge steps).
+- Merge pieces (`MergePiece`) stay out of the hold and are never held, as checkpoint items.
 - The chunk store stand-in of the recovery tests begins a new checkpoint after a failure once a
   record has become durable since, so held items are released and the random-crash property keeps
   "every accepted ticket ends ...".
@@ -1600,16 +1601,14 @@ manifest, written or in flight, segment headers and the checkpoint's own records
 
 ## Held items
 
-- A round that carries checkpoint pieces and ordinary items adds to the hold its header blocks and
-  every data block an ordinary entry's payload touches, so a block it shares with a piece counts
-  whole. With a hot write in flight, a 100-byte piece queued behind two 1-block cold writes goes
-  out with them as one record, the piece first, and adds 3 blocks (the writes' and the header),
-  nothing for the piece's block; a 100-byte piece queued behind a 100-byte cold blob adds 2
-  blocks (the header and the block they share).
+- Checkpoint pieces go to the metadata stream, so no round carries them with ordinary items. With
+  a hot write in flight, two 1-block cold writes and a 100-byte piece queued behind them go out as
+  two records in different segments: the writes' adds 3 blocks to the hold (their data and the
+  header), the piece's nothing; a 100-byte cold blob's record adds 2 blocks.
 - [property] The hold a record adds, checked against marking each block one by one over 10,000
   random records of writes, punches, freezes and blobs of every kind: none for a record of
   checkpoint items alone, the whole record for one with none, else its header blocks and the
-  blocks ordinary payloads touch. Reopened after each mixed round above, with no manifest written,
+  blocks ordinary payloads touch. Reopened after each case above, with no manifest written,
   recovery restores the hold the log had.
 - Close fails what still waits: on the full-disk-waits disk of Segment reserve, Close fails the
   write held for room with Closed and returns its buffer and the log's own. With
@@ -1617,14 +1616,12 @@ manifest, written or in flight, segment headers and the checkpoint's own records
   Close is Busy while the checkpoint's piece is in flight, and once it is durable Close reports
   Failed(Closed) for the held write and CheckpointFailed(Closed), leaves no buffer allocated, and a
   submit after it is refused with Closed. A test's own close fails if anything was still waiting.
-- The checkpoint's pieces lead the cold stream, so while they fill a segment of the reserve an
-  ordinary cold item waits behind them, even with segments free outside the reserve: on a 1 GiB
-  disk (4,095 usable 64-block segments) at commit depth 2 with a reserve of 4,093, two 62-block
-  cold writes fill segments 1 and 2, a 100-byte piece opens segment 3 from the reserve, and
-  segments 1 and 2 are then freed. A second piece waits for the first, which opened segment 3, and
-  a 1-block cold write queued behind it waits too, with a round slot idle and not `Stalled`. Once
-  the first piece is durable, the second goes into segment 3 and the write opens segment 1 beside
-  it. The Metadata stream ends this wait.
+- An ordinary cold item never waits behind the checkpoint's pieces, which fill a segment of the
+  reserve on the metadata stream: on a 1 GiB disk (4,095 usable 64-block segments) at commit depth
+  2 with a reserve of 4,093, two 62-block cold writes fill segments 1 and 2, a 100-byte piece
+  opens segment 3 from the reserve, and segments 1 and 2 are then freed. A second piece waits for
+  the first, which opened segment 3, while a 1-block cold write opens segment 1 beside it in the
+  other round slot. Then the second piece goes into segment 3.
 
 ## Reserve from settings
 
@@ -1639,7 +1636,8 @@ manifest, written or in flight, segment headers and the checkpoint's own records
 - Before the reopen, a hot write with only the reserve's 9 segments free is `Stalled`, with no
   disk action.
 - BadConfig at Format, leaving nothing allocated: the default reserve of a 64 MiB disk of 16 KiB
-  segments (12,292 of 4,096), `NoReserve` together with a reserve, no merge worker, and a zero
+  segments (12,292 of 4,096), `NoReserve` together with a reserve, `merge_workers` below 0 or above
+  255, and a zero
   `compaction_step_bytes`. Open refuses the first once it has read the superblock, before a segment
   header, and the other three, which no geometry changes, in `Recover` itself, with no action and
   no buffer taken.
@@ -1656,64 +1654,59 @@ manifest, written or in flight, segment headers and the checkpoint's own records
 ## Metadata stream
 
 - A third stream tag (2) for sorted runs, compaction output and manifests; the hot stream keeps
-  chunk writes and Raft entries, the cold stream the cleaner's chunk copies and encoded shards.
-- Changed existing scenarios, "Segments and superblock": the damage row "Stream 2, own index 0,
-  manifest block 0, ..." and "Encoding refuses ... a segment header of stream 2" both change to
-  stream 3; the segment header round trip covers metadata too, and the golden fixture gains a
-  metadata segment header (Open: added beside the cold one, or replacing it) and a merge-lane
-  header. The "Non-zero padding" damage row, which today covers byte 11, keeps covering the bytes
-  still reserved; a lane past the disk's merge workers is not damage (see the lane whose worker is
-  gone below). The format version stays 1 before the first release (see design.md "Upgrades").
-- "Group commit": "Streams alternate when both have work" becomes: with hot items A and B, a cold
-  item and a metadata item queued behind round 1 (A), the rounds that follow are the cold item
-  (segment 2, LBA 128), the metadata item (segment 3, LBA 192, seq 3) and hot B plus a later hot
-  item (LBA 67); LSNs are global. The order cold, metadata, hot is an assumption: design.md says
-  only "taking the lanes that have work in turn".
-- "Held items": a cold write no longer waits behind the checkpoint's pieces; in the reserve
-  scenario it opens segment 1 while the second piece still waits for the first, since the pieces
-  are on the metadata stream.
-- "Group commit", "Checkpoint end to end": the pieces' record (LSN 4) and the manifest (LSN 5) go to
-  a metadata segment, not cold segment 2.
-- "Group commit" property: its "items to random streams" include the metadata stream; and in
-  "Write-side decode check", "writes the segment header of the other stream" covers each wrong
-  stream of three.
-- Which item goes where: a run piece submitted as cold is refused, or routed to the metadata
-  stream (manifests are ReservedKind, written only by the log). Open: whether the cold stream
-  still takes blobs at all; the existing property tests submit "cold blobs".
-- Lanes: lane 0 of each stream is its shared segment, and merge worker *w* writes its output to
-  lane *w* of the metadata stream. Two merge workers running give three open metadata segments, and
-  no flush piece lands in a merge lane. The segment header names the lane in byte 11: a header of
-  lane 0 encodes as today, a merge-lane header round-trips, and the decoder of the current format
-  rejects it, as for a new format version.
-- A merge's partly filled segment stays its worker's open segment when the merge ends, and the
-  worker's next merge, of the same index or another, continues it: no merge segment is left with an
-  unused tail while its worker runs.
+  chunk writes and Raft entries, and the cold stream the cleaner's chunk copies, encoded shards and
+  other blobs. Submit takes only the hot and cold streams (Malformed for the metadata stream) and
+  refuses a run piece with ReservedKind; the checkpoint writes its pieces and manifest to metadata
+  lane 0, and `MergePiece` writes merge worker *w*'s output, a run piece, to lane *w*, 1 to
+  `merge_workers` (Malformed for 0 or past it, the buffer staying with the caller).
+- Segment header round trips, damage rows, golden lines (metadata lane 0 beside the cold header,
+  and merge lane 3) and the write-side check of each wrong stream and lane are in "Segments and
+  superblock" and "Write-side decode check"; turn order in "Group commit". The format version
+  stays 1 before the first release (see design.md "Upgrades").
+- `merge_workers` resolves the same way in the log and the merge scheduler: 0 is the default of 1,
+  below 0 or above 255 is BadConfig in both.
+- Lanes: two merge workers and a checkpoint give three open metadata segments, lanes 0, 1 and 2;
+  worker 1's second piece goes into its first one's segment and the second checkpoint's piece into
+  lane 0's, so no flush piece lands in a merge lane.
+- A worker's segment stays open across its merges, of one index or another (index A's piece at
+  block 1, index B's at block 3), and after a restart its next piece follows at block 5 with the
+  next LSN; a checkpoint after it opens a segment of lane 0. Merge records are replayed to no
+  index (open replays only the hot write, LSN 3) but count for the durable LSN.
 - Group commit keeps a queue, a cursor and the append rule per lane, a round writes one record to
-  one lane, and rounds take the lanes with work in turn. The append rule holds per lane: a round
-  appends to a merge's segment only once the round that opened it is durable.
+  one lane, and rounds take the lanes with work in turn (property: "Every accepted item ends
+  durable", with merge pieces on 1-4 lanes). The append rule holds on a merge lane: at commit depth
+  2, a worker's second piece waits for the round that opened its segment (LBA 64) to be durable,
+  then appends at LBA 67.
+- Merge pieces go out past the hold behind a checkpoint and may open a segment of the reserve
+  (Checkpoint backpressure, Segment reserve).
+- Replay allocates a window for each lane past the hot and cold ones: a pool with room for only
+  one of the two that a log with a checkpoint and a merge lane needs fails recovery with
+  PoolExhausted and leaves no buffer allocated; with room for both it opens.
 - Recovery reads each lane from the last of its segments whose first record is at or before the
-  first record to replay, and merges every lane's records by LSN. Merge M opens segment 10 with its
-  first record at LSN 100 and takes pieces at every checkpoint; shared metadata segment 11 opens at
-  LSN 120; the replay point is 300. Per lane, replay reads M's segment from LSN 100 and every record
-  past 300 in both segments. With the per-stream rule, as a regression test before the fix, it
-  starts at segment 11 and misses M's records past 300: Corrupt(the first of them) while records
-  follow, and, when M's are the newest durable records, a tail cut before them, which a later open
-  that reads segment 10 reports Corrupt.
-- Merge lanes' records count for the LSN chain and the tail rule and are delivered to no index:
-  a crash after a step's pieces are durable and before their manifest recovers every acknowledged
-  record, the index as of the previous manifest's bound; a crash after the manifest recovers the
-  step. Either way each lane resumes appending in its own newest segment, and no flush piece lands
-  in a merge lane afterwards. Skipping merge lanes in the same case reads as a gap: Corrupt.
-- A torn merge record at the tail is found whole or torn by reading it in full, as other records
-  are, never by its header blocks alone.
-- A lane whose worker is gone (fewer merge workers configured after a restart): its last segment
-  is read at every start until the cleaner frees it, and no record goes to it.
-- Replay reads at most one segment per lane before the replay point: the trace check counts the
-  segments read before the first record to replay.
-- Recovery scenarios that carry over to the metadata stream: a torn record left in it at the tail
-  (as "Torn record left in the other stream"), a crash in the round that opens a merge's segment
-  (as "Crash in the round that opens a segment"), and the many-segments and random-crash
-  properties with all three streams and 1 to 4 merge lanes.
+  first record to replay, and merges every lane's records by LSN: merge worker 1 opens its segment
+  (LSN 2) before the checkpoints' shared metadata segment (LSN 3), takes a piece between the two
+  checkpoints and two after the second, whose manifest a hot segment then names. Open replays every
+  record past the replay point but the merges' and recovers the newest LSN, whether hot writes
+  follow the merge pieces or not. With the per-stream rule planted, replay starts at the shared
+  segment and misses the merge records past the replay point: Corrupt at the first of them while a
+  hot write follows; when they are the newest durable records, a tail cut before them, after which
+  a hot write reuses that LSN and a correct open reports Corrupt there.
+- Skipping merge lanes in the same case reads as a gap: Corrupt at the first merge record past the
+  replay point.
+- A torn merge record at the tail (a 3-block piece whose last data block never landed) is dropped
+  and its header erased, and the next piece takes its place and LSN; it is read in full, as other
+  records are, never by its header blocks alone.
+- A crash in the round that opens a merge's segment: with only the record landed, the segment
+  stays free, its record is erased and the next piece opens it again at sequence 3; with the header
+  too, the piece is kept and the next one appends at block 3.
+- A lane whose worker is gone (2 merge workers, then 1 after a restart): at each of two starts
+  recovery reads its segment past the header, keeps its usage row and its record in the durable
+  LSN, refuses `MergePiece` on it, and no hot, cold or merge record goes to it.
+- Replay reads at most one segment per lane that holds no record past the replay point: the hot and
+  merge lanes each fill three segments before it and open a fourth after it, and the trace reads
+  past the header one hot and one merge segment before the replay point.
+- Recovery scenarios that carry over to the metadata stream are above; the many-segments and
+  random-crash properties in "Recovery" run all three streams and 1 to 4 merge lanes.
 - The write amplification bars with runs in this stream (3.86 / 8.04 / 26.4 at 80 / 90 / 95%
   under uniform overwrites) belong to the "Cleaner write amplification in simulation" item.
 

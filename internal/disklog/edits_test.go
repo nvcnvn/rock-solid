@@ -24,14 +24,20 @@ type begun struct {
 // runs the disk until the manifest is durable.
 func (h *harness) checkpointRuns(carried []disklog.BlobRef, n int) begun {
 	h.t.Helper()
+	return h.checkpointPieces(carried, n, 1)
+}
+
+// checkpointPieces is checkpointRuns with pieces of size bytes.
+func (h *harness) checkpointPieces(carried []disklog.BlobRef, n, size int) begun {
+	h.t.Helper()
 	b := begun{base: h.log.DurableLSN(), nextSeq: disklog.NextSeqOf(h.log), rows: disklog.SegmentUsageOf(h.log)}
 	if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: runOwner, ReplayLSN: b.base, Runs: carried}}); err != nil {
 		h.t.Fatal(err)
 	}
 	var tickets []disklog.Ticket
 	for i := range n {
-		it := h.blob(disklog.BlobRun, runOwner, 1, uint64(i))
-		tk, err := h.log.CheckpointPiece(&h.ctx, runOwner, it.Buf, 1, true, &h.out)
+		it := h.blob(disklog.BlobRun, runOwner, size, uint64(i))
+		tk, err := h.log.CheckpointPiece(&h.ctx, runOwner, it.Buf, uint64(size), true, &h.out)
 		if err != nil {
 			h.t.Fatal(err)
 		}
@@ -290,7 +296,8 @@ func TestManifestPiecesStayHeldUntilASnapshotIsNamed(t *testing.T) {
 		t.Fatal("an edit let go of its snapshot's segment")
 	}
 	h.nameManifest()
-	h.put(disklog.Cold, h.blob(disklog.BlobRaftEntries, 9, int(h.log.MaxBlobBytes()), 1))
+	b = h.checkpointPieces(b.runs, 1, int(h.log.MaxBlobBytes()))
+	h.nameManifest()
 	h.log.RequestSnapshot()
 	b = h.checkpointRuns(b.runs, 1)
 	if !h.isSnapshot(b) || b.last.Segment == old {

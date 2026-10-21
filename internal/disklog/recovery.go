@@ -84,7 +84,7 @@ const (
 
 type segInfo struct {
 	state  segState
-	stream Stream
+	lane   int
 	seq    uint64
 	first  firstRecord
 	listed bool
@@ -127,7 +127,7 @@ type tailRecord struct {
 	end uint32
 }
 
-type streamScan struct {
+type laneScan struct {
 	segs      []uint32
 	i         int
 	pos       uint32
@@ -189,7 +189,7 @@ type Recovery struct {
 	slotSeg   []uint32
 	nextSeg   uint32
 	hdrsDone  uint32
-	win       [2]window
+	win       []window
 	scratch   []Entry
 
 	segs   []segInfo
@@ -213,7 +213,7 @@ type Recovery struct {
 	blobs       []BlobRef
 	bi          int
 
-	streams     [2]streamScan
+	lanes       []laneScan
 	minReplay   uint64
 	expected    uint64
 	gapped      bool
@@ -229,19 +229,23 @@ type Recovery struct {
 	durable     uint64
 	erase       []foundHeader
 	eraseLeft   int
-	resume      [2]cursor
+	resume      []cursor
 	quarantined []uint32
+
+	perStream  bool
+	skipMerges bool
 }
 
-// Recover starts recovering the log on a disk of diskBlocks blocks, with IO IDs counting up from firstIO, taking its read buffers from the pool at once.
+// Recover starts recovering the log on a disk of diskBlocks blocks, with IO IDs counting up from firstIO, taking its read buffers from the pool at once and a window for each lane past the hot and cold ones when Replay starts.
 func Recover(ctx *core.Context, cfg Config, diskBlocks uint64, mode Mode, firstIO core.IOID, out *Output) (*Recovery, error) {
 	maxRec := cfg.MaxRecordBytes / core.BlockSize
-	if cfg.CommitDepth < 1 || cfg.ReadDepth < 1 || maxRec < 3 || (mode != ModeOpen && mode != ModeRebuild) || diskBlocks == 0 || !cfg.reserveSettled() {
+	if cfg.CommitDepth < 1 || cfg.ReadDepth < 1 || maxRec < 3 || (mode != ModeOpen && mode != ModeRebuild) || diskBlocks == 0 || !cfg.settled() {
 		return nil, ErrBadConfig
 	}
 	r := &Recovery{cfg: cfg, mode: mode, diskBlocks: diskBlocks, nextIO: firstIO, phase: recSuperblock, nextSeq: 1}
 	r.hdrBufs = make([]core.IOBuf, cfg.ReadDepth)
 	r.slotSeg = make([]uint32, cfg.ReadDepth)
+	r.win = make([]window, 2)
 	winBlocks := uint32(min(maxRec, MaxSegmentBytes/core.BlockSize))
 	r.maxHeader = winBlocks
 	var err error
@@ -492,7 +496,7 @@ func (r *Recovery) classify(s uint32, img []byte) {
 	info := &r.segs[s]
 	switch {
 	case err == nil && h.LogID == r.sb.LogID && h.Index == s:
-		*info = segInfo{state: segUsed, stream: h.Stream, seq: h.Seq}
+		*info = segInfo{state: segUsed, lane: laneOf(h.Stream, h.Lane), seq: h.Seq}
 		r.maxSeq = max(r.maxSeq, h.Seq)
 		if h.Manifest.LSN > r.manifestPos.LSN {
 			r.manifestPos = h.Manifest
@@ -924,18 +928,48 @@ func (r *Recovery) Replay(ctx *core.Context, out *Output) error {
 	if r.hasManifest {
 		r.replayFloor = r.manifest.BaseLSN
 	}
-	for s := range r.streams {
-		r.streams[s] = streamScan{segs: r.replaySegments(Stream(s)), pos: 1, ents: r.streams[s].ents}
+	lanes := laneMeta + 1
+	for s := range r.segs {
+		if r.segs[s].state == segUsed {
+			lanes = max(lanes, r.scanLane(s)+1)
+		}
+	}
+	r.lanes = make([]laneScan, lanes)
+	for i := range r.lanes {
+		r.lanes[i] = laneScan{segs: r.replaySegments(i), pos: 1}
+		if len(r.lanes[i].segs) > 0 && !r.window(ctx, i, out) {
+			return nil
+		}
 	}
 	r.pumpReplay(ctx, out)
 	return nil
 }
 
-func (r *Recovery) replaySegments(s Stream) []uint32 {
+// window gives lane i's scan a read window of its own, past the two recovery starts with.
+func (r *Recovery) window(ctx *core.Context, i int, out *Output) bool {
+	for len(r.win) <= i {
+		r.win = append(r.win, window{})
+	}
+	if r.win[i].buf != core.NoBuf {
+		return true
+	}
+	buf, err := ctx.Pool.Alloc(int(r.maxHeader) * core.BlockSize)
+	if err != nil {
+		r.fail(ctx, err, out)
+		return false
+	}
+	r.win[i] = window{buf: buf, cap: r.maxHeader}
+	return true
+}
+
+// replaySegments starts lane i at the last of its segments whose first record is at or before
+// the first to replay: LSNs rise along a lane, but not along a stream, whose merge lanes keep
+// filling segments opened before the shared lane's.
+func (r *Recovery) replaySegments(i int) []uint32 {
 	var segs []uint32
-	for i := range r.segs {
-		if r.segs[i].state == segUsed && r.segs[i].stream == s {
-			segs = append(segs, uint32(i))
+	for s := range r.segs {
+		if r.segs[s].state == segUsed && r.scanLane(s) == i {
+			segs = append(segs, uint32(s))
 		}
 	}
 	slices.SortFunc(segs, func(a, b uint32) int {
@@ -950,29 +984,54 @@ func (r *Recovery) replaySegments(s Stream) []uint32 {
 	return segs[start:]
 }
 
-// pumpReplay stops delivering at the first missing LSN but scans both streams to their end,
-// since the tail rule needs every record header past it.
+// scanLane is the lane replay reads used segment s in, or -1 for none, as the planted bugs
+// of reading merge lanes per stream or not at all would.
+func (r *Recovery) scanLane(s int) int {
+	lane := r.segs[s].lane
+	switch {
+	case lane <= laneMeta:
+	case r.perStream:
+		return laneMeta
+	case r.skipMerges:
+		return -1
+	}
+	return lane
+}
+
+// pumpReplay merges the lanes by LSN. It stops delivering at the first missing LSN but scans
+// every lane to its end, since the tail rule needs every record header past it. A merge lane's
+// records count for the LSN chain and the tail rule but go to no index: a step's pieces count
+// once a manifest names them.
 func (r *Recovery) pumpReplay(ctx *core.Context, out *Output) {
 	for r.phase == recReplay {
-		for s := range r.streams {
-			r.advance(ctx, s, out)
+		for i := range r.lanes {
+			r.advance(ctx, i, out)
 		}
-		a, b := &r.streams[Hot], &r.streams[Cold]
-		if (!a.hasHead && !a.done) || (!b.hasHead && !b.done) || r.phase != recReplay {
+		if r.phase != recReplay {
 			return
 		}
-		if a.done && b.done {
+		var x *laneScan
+		merge := false
+		for i := range r.lanes {
+			st := &r.lanes[i]
+			if !st.hasHead && !st.done {
+				return
+			}
+			if st.hasHead && (x == nil || st.head.Record.LSN < x.head.Record.LSN) {
+				x, merge = st, i > laneMeta
+			}
+		}
+		if x == nil {
 			r.endReplay(ctx, out)
 			return
-		}
-		x := a
-		if !a.hasHead || (b.hasHead && b.head.Record.LSN < a.head.Record.LSN) {
-			x = b
 		}
 		lsn := x.head.Record.LSN
 		switch {
 		case !r.gapped && lsn == r.expected:
-			r.deliver(x, out)
+			r.count(x)
+			if !merge {
+				r.deliver(x, out)
+			}
 			r.expected++
 		case !r.gapped && lsn < r.expected:
 			r.fail(ctx, &CorruptError{LSN: lsn}, out)
@@ -988,7 +1047,7 @@ func (r *Recovery) pumpReplay(ctx *core.Context, out *Output) {
 // advance searches the rest of a segment after a block that holds no valid record, so damage
 // cannot hide the records behind it.
 func (r *Recovery) advance(ctx *core.Context, s int, out *Output) {
-	st := &r.streams[s]
+	st := &r.lanes[s]
 	for !st.hasHead && !st.done && r.phase == recReplay {
 		if st.i >= len(st.segs) {
 			st.done = true
@@ -1052,7 +1111,7 @@ func (r *Recovery) advance(ctx *core.Context, s int, out *Output) {
 	}
 }
 
-func (r *Recovery) deliver(x *streamScan, out *Output) {
+func (r *Recovery) deliver(x *laneScan, out *Output) {
 	d := &x.head
 	ev := Event{
 		Kind:         Replayed,
@@ -1063,8 +1122,14 @@ func (r *Recovery) deliver(x *streamScan, out *Output) {
 		HeaderBlocks: d.Layout.HeaderBlocks,
 	}
 	out.emitRecord(ev, d)
+	r.replayed += d.Layout.Blocks() * core.BlockSize
+}
+
+// count restores what group commit counted for a record as it retired: the replay and hold
+// bytes after the manifest and its segment's usage row.
+func (r *Recovery) count(x *laneScan) {
+	d := &x.head
 	blocks := d.Layout.Blocks()
-	r.replayed += blocks * core.BlockSize
 	if d.Record.LSN > r.replayFloor {
 		r.replayBytes += blocks * core.BlockSize
 		r.heldBytes += ordinaryBytes(d.Entries, d.Layout)
@@ -1121,8 +1186,9 @@ func (r *Recovery) endReplay(ctx *core.Context, out *Output) {
 			r.quarantined = append(r.quarantined, uint32(s))
 		}
 	}
-	for s := range r.streams {
-		st := &r.streams[s]
+	r.resume = make([]cursor, len(r.lanes))
+	for s := range r.lanes {
+		st := &r.lanes[s]
 		if len(st.segs) == 0 {
 			continue
 		}
@@ -1158,7 +1224,7 @@ func (r *Recovery) finish(out *Output) {
 	out.Events = append(out.Events, Event{Kind: Recovered, LSN: r.durable})
 }
 
-// Log returns recovery's buffers and resumes group commit after the durable log, each stream appending to its newest segment.
+// Log returns recovery's buffers and resumes group commit after the durable log, each lane appending to its newest segment; a lane past the configured merge workers takes no more records.
 func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 	if r.phase != recDone {
 		return nil, r.stepErr()
@@ -1177,7 +1243,9 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 	l.manifest = r.manifestPos
 	l.replayBytes = r.replayBytes
 	l.heldBytes = r.heldBytes
-	l.asm = r.resume
+	for i := range min(len(l.lanes), len(r.resume)) {
+		l.lanes[i].asm = r.resume[i]
+	}
 	if r.hasManifest {
 		l.chain, l.state = r.chain, r.manifest.Indexes
 		l.live = []liveChain{{pos: r.manifestPos, entries: r.chain}}
@@ -1204,11 +1272,6 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 		if l.usage[s] != was {
 			l.changed[s/64] |= 1 << (s % 64)
 		}
-	}
-	// Which open segment a checkpoint took from the reserve is not on disk, so with only the
-	// reserve free every open segment counts as taken from it.
-	for st := range l.asm {
-		l.inReserve[st] = l.asm[st].segment != 0 && l.freeCount() <= l.reserve
 	}
 	return l, nil
 }

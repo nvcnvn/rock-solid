@@ -46,7 +46,7 @@ type Config struct {
 	Check bool
 	// ReadDepth is the most segment-header reads recovery keeps in flight; at least 1.
 	ReadDepth int
-	// MergeWorkers is merge_workers, the merges that run at once on the disk; the reserve holds a step of each, so it is at least 1 unless Reserve or NoReserve is set.
+	// MergeWorkers is merge_workers as MergeWorkers resolves it; each worker writes to a lane of its own, and the reserve holds a step of each.
 	MergeWorkers int
 	// CompactionStepBytes is compaction_step_bytes, the most output a merge installs at once.
 	CompactionStepBytes uint64
@@ -60,6 +60,24 @@ const (
 	victimsPerPass = 4
 	minReserve     = 8
 )
+
+const (
+	// DefaultMergeWorkers is merge_workers when the setting is 0.
+	DefaultMergeWorkers = 1
+	// MaxMergeWorkers is the most merge_workers may be, since a segment header names a merge worker's lane in one byte.
+	MaxMergeWorkers = math.MaxUint8
+)
+
+// MergeWorkers is the merges a disk runs at once for the merge_workers setting n, which the log and the merge scheduler both resolve here: DefaultMergeWorkers for 0, and not ok below 0 or above MaxMergeWorkers.
+func MergeWorkers(n int) (int, bool) {
+	switch {
+	case n < 0 || n > MaxMergeWorkers:
+		return 0, false
+	case n == 0:
+		return DefaultMergeWorkers, true
+	}
+	return n, true
+}
 
 // ReserveSegments is the reserve for segments of segmentBlocks blocks: a checkpoint at its largest, a step per merge worker and a cleaner pass, and at least 8.
 func ReserveSegments(maxReplayBytes, stepBytes uint64, mergeWorkers int, segmentBlocks uint32) uint32 {
@@ -76,19 +94,22 @@ func ReserveSegments(maxReplayBytes, stepBytes uint64, mergeWorkers int, segment
 
 // DefaultConfig is the default settings, with the decode check off.
 func DefaultConfig() Config {
-	return Config{MaxRecordBytes: 1 << 20, MaxReplayBytes: 64 << 20, CommitDepth: 1, ReadDepth: 64, MergeWorkers: 1, CompactionStepBytes: 64 << 20}
+	return Config{MaxRecordBytes: 1 << 20, MaxReplayBytes: 64 << 20, CommitDepth: 1, ReadDepth: 64, CompactionStepBytes: 64 << 20}
 }
 
-// reserveSettled reports whether the reserve settings name one reserve, before any disk's
-// geometry is known.
-func (c *Config) reserveSettled() bool {
+// settled reports whether the merge workers are in range and the reserve settings name one
+// reserve, before any disk's geometry is known.
+func (c *Config) settled() bool {
+	if _, ok := MergeWorkers(c.MergeWorkers); !ok {
+		return false
+	}
 	switch {
 	case c.NoReserve:
 		return c.Reserve == 0
 	case c.Reserve != 0:
 		return true
 	default:
-		return c.MergeWorkers >= 1 && c.CompactionStepBytes > 0
+		return c.CompactionStepBytes > 0
 	}
 }
 
@@ -97,13 +118,14 @@ func (c *Config) reserveSettled() bool {
 func (c *Config) reserve(sb *Superblock) (uint32, error) {
 	var n uint32
 	switch {
-	case !c.reserveSettled():
+	case !c.settled():
 		return 0, ErrBadConfig
 	case c.NoReserve:
 	case c.Reserve != 0:
 		n = c.Reserve
 	default:
-		n = ReserveSegments(c.MaxReplayBytes, c.CompactionStepBytes, c.MergeWorkers, sb.SegmentBlocks)
+		workers, _ := MergeWorkers(c.MergeWorkers)
+		n = ReserveSegments(c.MaxReplayBytes, c.CompactionStepBytes, workers, sb.SegmentBlocks)
 	}
 	if n >= sb.SegmentCount-1 {
 		return 0, ErrBadConfig
@@ -333,8 +355,36 @@ type cursor struct {
 	next    uint32
 }
 
+// Lanes in the order rounds take turns: each stream's shared lane, then merge worker w's lane
+// of the metadata stream at laneMeta + w. Only the hot and cold lanes take ordinary items; the
+// metadata lane takes the checkpoint's pieces and manifest, and a merge lane its worker's output.
+const (
+	laneHot = iota
+	laneCold
+	laneMeta
+)
+
+func laneOf(s Stream, n uint8) int {
+	switch s {
+	case Hot:
+		return laneHot
+	case Cold:
+		return laneCold
+	}
+	return laneMeta + int(n)
+}
+
+// lane is a sequence of segments that fill one after another, at most one open at a time, so
+// LSNs rise along it.
+type lane struct {
+	stream Stream
+	n      uint8
+	q      queue
+	asm    cursor
+	opened uint64
+}
+
 type round struct {
-	stream       Stream
 	lsn          uint64
 	writeIO      core.IOID
 	flushIO      core.IOID
@@ -425,14 +475,9 @@ type Log struct {
 	usage      []SegmentUsage
 	changed    []uint64
 
-	queues    [2]queue
-	own       queue
-	asm       [2]cursor
-	opened    [2]uint64
-	inReserve [2]bool
+	lanes     []lane
 	cpNoSpace bool
-	last      Stream
-	items     []queued
+	last      int
 
 	rounds []round
 	first  int
@@ -484,6 +529,7 @@ func Format(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID, out
 func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*Log, error) {
 	maxWrite := uint32(min(cfg.MaxRecordBytes/core.BlockSize, uint64(sb.SegmentBlocks)))
 	reserve, err := cfg.reserve(&sb)
+	workers, _ := MergeWorkers(cfg.MergeWorkers)
 	if err != nil || cfg.CommitDepth < 1 || maxWrite < 3 || cfg.MaxReplayBytes == 0 || cfg.MaxReplayBytes > math.MaxUint64/4 {
 		return nil, ErrBadConfig
 	}
@@ -502,9 +548,14 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		free:       make([]uint64, (sb.SegmentCount+63)/64),
 		usage:      make([]SegmentUsage, sb.SegmentCount),
 		changed:    make([]uint64, (sb.SegmentCount+63)/64),
-		last:       Cold,
+		lanes:      make([]lane, laneMeta+1+workers),
 		rounds:     make([]round, cfg.CommitDepth),
 	}
+	l.lanes[laneHot].stream, l.lanes[laneCold].stream = Hot, Cold
+	for i := laneMeta; i < len(l.lanes); i++ {
+		l.lanes[i].stream, l.lanes[i].n = Meta, uint8(i-laneMeta)
+	}
+	l.last = len(l.lanes) - 1
 	for i := range l.rounds {
 		r := &l.rounds[i]
 		var err error
@@ -538,10 +589,7 @@ func (l *Log) Close(ctx *core.Context, out *Output) error {
 	}
 	if l.err != ErrClosed {
 		ts := len(out.tickets)
-		out.tickets = l.drain(ctx, &l.own, out.tickets)
-		for s := range l.queues {
-			out.tickets = l.drain(ctx, &l.queues[s], out.tickets)
-		}
+		out.tickets = l.drainLanes(ctx, out.tickets)
 		out.emitTickets(Failed, ErrClosed, ts)
 		if l.cp != nil {
 			l.dropCheckpoint(ErrClosed, out)
@@ -602,13 +650,19 @@ func (l *Log) ReplayBytes() uint64 { return l.replayBytes }
 func (l *Log) InFlight() int { return l.count }
 
 // Queued is the number of items submitted and not yet in a round.
-func (l *Log) Queued() int { return l.queues[Hot].len() + l.queues[Cold].len() + l.own.len() }
+func (l *Log) Queued() int {
+	n := 0
+	for i := range l.lanes {
+		n += l.lanes[i].q.len()
+	}
+	return n
+}
 
-// Stalled reports items waiting for room: ordinary items with only the reserve free or held behind a checkpoint that failed for want of space, or the checkpoint's items with no segment free.
+// Stalled reports items waiting for room: ordinary items with only the reserve free or held behind a checkpoint that failed for want of space, or the checkpoint's or a merge's items with no segment free.
 func (l *Log) Stalled() bool {
-	for s := range l.queues {
-		if l.hasWork(Stream(s)) {
-			if _, p := l.place(Stream(s)); p == placeNoRoom {
+	for i := range l.lanes {
+		if l.lanes[i].q.len() > 0 {
+			if _, p := l.place(i); p == placeNoRoom {
 				return true
 			}
 		}
@@ -616,24 +670,24 @@ func (l *Log) Stalled() bool {
 	return false
 }
 
-// FailStalled fails the items waiting for room with NoSpace, each stream's in submit order, and a checkpoint among them, as the owner does when the cleaner has no victim.
+// FailStalled fails the items waiting for room with NoSpace, each lane's in submit order, and a checkpoint among them, as the owner does when the cleaner has no victim.
 func (l *Log) FailStalled(ctx *core.Context, out *Output) {
 	for l.Stalled() {
-		for s := range l.queues {
-			if !l.hasWork(Stream(s)) {
+		for i := range l.lanes {
+			if l.lanes[i].q.len() == 0 {
 				continue
 			}
-			if _, p := l.place(Stream(s)); p != placeNoRoom {
+			if _, p := l.place(i); p != placeNoRoom {
 				continue
 			}
-			if s == int(Cold) && l.own.len() > 0 {
+			if i == laneMeta {
 				l.failCheckpoint(ctx, out)
 				continue
 			}
 			// The whole queue fails, even items behind its head that would fit, since writing
 			// them first would break submit order, which a freeze before its write relies on.
 			ts := len(out.tickets)
-			out.tickets = l.drain(ctx, &l.queues[s], out.tickets)
+			out.tickets = l.drain(ctx, &l.lanes[i].q, out.tickets)
 			out.emitTickets(Failed, ErrNoSpace, ts)
 		}
 		l.startRounds(ctx, out)
@@ -685,26 +739,43 @@ func (l *Log) CheckpointDue() bool {
 	return l.cp == nil && l.err == nil && l.replayBytes >= l.cfg.MaxReplayBytes
 }
 
-// Submit queues an item for a stream, taking its buffer; a refused item's buffer stays with the caller.
+// Submit queues an item for the hot or the cold stream, taking its buffer; a refused item's buffer stays with the caller.
 func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ticket, error) {
 	if l.err != nil {
 		return 0, l.err
 	}
+	if stream > Cold {
+		return 0, ErrMalformed
+	}
 	if isCheckpointKind(&it.Entry) {
 		return 0, ErrReservedKind
 	}
-	if err := l.accept(ctx, stream, &it); err != nil {
+	if err := l.accept(ctx, &it); err != nil {
 		return 0, err
 	}
-	t := l.enqueue(&l.queues[stream], queued{entry: it.Entry, buf: it.Buf})
+	t := l.enqueue(&l.lanes[laneOf(stream, 0)].q, queued{entry: it.Entry, buf: it.Buf})
 	l.startRounds(ctx, out)
 	return t, nil
 }
 
-func (l *Log) accept(ctx *core.Context, stream Stream, it *Item) error {
-	if stream > Cold {
-		return ErrMalformed
+// MergePiece queues merge worker w's next output piece for index owner, of length bytes, on the worker's lane of the metadata stream, which may open segments of the reserve; w counts from 1 to the configured merge workers, and the reserve holds one step of each, so a worker hands over a step only once the manifest naming its previous one is durable.
+func (l *Log) MergePiece(ctx *core.Context, w int, owner uint32, buf core.IOBuf, length uint64, out *Output) (Ticket, error) {
+	if l.err != nil {
+		return 0, l.err
 	}
+	if w < 1 || laneMeta+w >= len(l.lanes) {
+		return 0, ErrMalformed
+	}
+	it := Item{Entry: BlobEntry(BlobRun, owner, length), Buf: buf}
+	if err := l.accept(ctx, &it); err != nil {
+		return 0, err
+	}
+	t := l.enqueue(&l.lanes[laneMeta+w].q, queued{entry: it.Entry, buf: it.Buf})
+	l.startRounds(ctx, out)
+	return t, nil
+}
+
+func (l *Log) accept(ctx *core.Context, it *Item) error {
 	var acc layoutAcc
 	if err := acc.add(&it.Entry); err != nil {
 		return err
@@ -802,7 +873,7 @@ func (l *Log) HoldsManifestPiece(segment uint32) bool {
 	return l.cp != nil && in(l.cp.earlier)
 }
 
-// CheckpointPiece queues an index's next run piece of length bytes on the cold stream; root marks a run's last piece, the one the manifest names.
+// CheckpointPiece queues an index's next run piece of length bytes on the metadata stream; root marks a run's last piece, the one the manifest names.
 func (l *Log) CheckpointPiece(ctx *core.Context, owner uint32, buf core.IOBuf, length uint64, root bool, out *Output) (Ticket, error) {
 	if l.err != nil {
 		return 0, l.err
@@ -821,10 +892,10 @@ func (l *Log) CheckpointPiece(ctx *core.Context, owner uint32, buf core.IOBuf, l
 		return 0, ErrUnknownOwner
 	}
 	it := Item{Entry: BlobEntry(BlobRun, owner, length), Buf: buf}
-	if err := l.accept(ctx, Cold, &it); err != nil {
+	if err := l.accept(ctx, &it); err != nil {
 		return 0, err
 	}
-	t := l.enqueue(&l.own, queued{entry: it.Entry, buf: it.Buf})
+	t := l.enqueue(&l.lanes[laneMeta].q, queued{entry: it.Entry, buf: it.Buf})
 	l.cp.pending = append(l.cp.pending, pendingPiece{ticket: t, index: index, root: root})
 	l.startRounds(ctx, out)
 	return t, nil
@@ -859,13 +930,13 @@ func (l *Log) advanceManifest(out *Output) {
 		if err == nil {
 			cp.final = true
 			cp.size += uint64(len(piece))
-			cp.piece = l.enqueue(&l.own, queued{entry: BlobEntry(BlobManifest, 0, uint64(len(piece))), bytes: piece})
+			cp.piece = l.enqueue(&l.lanes[laneMeta].q, queued{entry: BlobEntry(BlobManifest, 0, uint64(len(piece))), bytes: piece})
 			return
 		}
 	} else if len(rest) > 0 && len(cp.earlier) < math.MaxUint16 {
 		n := min(uint64(len(rest)), l.maxBlob)
 		cp.size += n
-		cp.piece = l.enqueue(&l.own, queued{entry: BlobEntry(BlobManifestPiece, 0, n), bytes: rest[:n]})
+		cp.piece = l.enqueue(&l.lanes[laneMeta].q, queued{entry: BlobEntry(BlobManifestPiece, 0, n), bytes: rest[:n]})
 		cp.written += int(n)
 		return
 	}
@@ -1130,10 +1201,7 @@ func (l *Log) fail(ctx *core.Context, err error, out *Output) {
 	}
 	out.emitTickets(InDoubt, err, ts)
 	ts = len(out.tickets)
-	out.tickets = l.drain(ctx, &l.own, out.tickets)
-	for s := range l.queues {
-		out.tickets = l.drain(ctx, &l.queues[s], out.tickets)
-	}
+	out.tickets = l.drainLanes(ctx, out.tickets)
 	out.emitTickets(Failed, err, ts)
 	if l.cp != nil {
 		l.dropCheckpoint(err, out)
@@ -1146,6 +1214,13 @@ func (l *Log) dropAbandoned() {
 		l.first = (l.first + 1) % len(l.rounds)
 		l.count--
 	}
+}
+
+func (l *Log) drainLanes(ctx *core.Context, tickets []Ticket) []Ticket {
+	for i := range l.lanes {
+		tickets = l.drain(ctx, &l.lanes[i].q, tickets)
+	}
+	return tickets
 }
 
 func (l *Log) drain(ctx *core.Context, q *queue, tickets []Ticket) []Ticket {
@@ -1166,19 +1241,17 @@ func (l *Log) failCheckpoint(ctx *core.Context, out *Output) {
 		l.dropCheckpoint(ErrNoSpace, out)
 	}
 	ts := len(out.tickets)
-	out.tickets = l.drain(ctx, &l.own, out.tickets)
+	out.tickets = l.drain(ctx, &l.lanes[laneMeta].q, out.tickets)
 	out.emitTickets(Failed, ErrNoSpace, ts)
 	l.cpNoSpace = true
 }
 
 type target struct {
-	stream   Stream
-	segment  uint32
-	seq      uint64
-	offset   uint32
-	roll     bool
-	reserve  bool
-	ordinary bool
+	lane    int
+	segment uint32
+	seq     uint64
+	offset  uint32
+	roll    bool
 }
 
 type placement uint8
@@ -1189,62 +1262,52 @@ const (
 	placeNoRoom
 )
 
-func (l *Log) hasWork(s Stream) bool {
-	return l.queues[s].len() > 0 || s == Cold && l.own.len() > 0
-}
-
+// target takes the lanes with work in turn, starting after the lane of the last round.
 func (l *Log) target() (target, bool) {
-	order := [2]Stream{Hot, Cold}
-	if l.last == Hot {
-		order = [2]Stream{Cold, Hot}
-	}
-	for _, s := range order {
-		if !l.hasWork(s) {
+	for k := 1; k <= len(l.lanes); k++ {
+		i := (l.last + k) % len(l.lanes)
+		if l.lanes[i].q.len() == 0 {
 			continue
 		}
-		if t, p := l.place(s); p == placeReady {
+		if t, p := l.place(i); p == placeReady {
 			return t, true
 		}
 	}
 	return target{}, false
 }
 
-// place places a round of stream s, led by the checkpoint's items on the cold stream, or
-// says why it waits. A round appends to the stream's segment only once the round that opened
-// it is durable, so a segment whose header never landed holds at most the one record written
-// with it, the record recovery checks at block 1. Ordinary items wait while twice
-// MaxReplayBytes follow the newest manifest, and never open or append to a segment of the
-// reserve.
-func (l *Log) place(s Stream) (target, placement) {
-	own := s == Cold && l.own.len() > 0
-	ordinary := !l.behind()
-	q := &l.queues[s]
-	switch {
-	case own:
-		q = &l.own
-	case !ordinary && l.cpNoSpace:
-		return target{}, placeNoRoom
-	case !ordinary:
+// place places a round of lane i, or says why it waits. A round appends to the lane's segment
+// only once the round that opened it is durable, so a segment whose header never landed holds
+// at most the one record written with it, the record recovery checks at block 1. Ordinary
+// items wait while twice MaxReplayBytes follow the newest manifest, and never open a segment of
+// the reserve; the checkpoint's and the merges' items may, and an ordinary lane never shares
+// their segments.
+func (l *Log) place(i int) (target, placement) {
+	ln := &l.lanes[i]
+	ordinary := i < laneMeta
+	if ordinary && l.behind() {
+		if l.cpNoSpace {
+			return target{}, placeNoRoom
+		}
 		return target{}, placeWait
 	}
 	var acc layoutAcc
-	if err := acc.add(&q.at(0).entry); err != nil {
+	if err := acc.add(&ln.q.at(0).entry); err != nil {
 		panic(fmt.Sprintf("disklog: queued entry no longer validates: %v", err))
 	}
 	lay, _ := acc.layout()
-	c := l.asm[s]
-	if c.segment != 0 && uint64(l.sb.SegmentBlocks-c.next) >= lay.Blocks() && (own || !l.inReserve[s]) {
-		if l.opened[s] > l.durableLSN && !l.appendAnywhere {
+	c := ln.asm
+	if c.segment != 0 && uint64(l.sb.SegmentBlocks-c.next) >= lay.Blocks() {
+		if ln.opened > l.durableLSN && !l.appendAnywhere {
 			return target{}, placeWait
 		}
-		return target{stream: s, segment: c.segment, seq: c.seq, offset: c.next, reserve: l.inReserve[s], ordinary: ordinary && !l.inReserve[s]}, placeReady
+		return target{lane: i, segment: c.segment, seq: c.seq, offset: c.next}, placeReady
 	}
 	seg, ok := l.firstFree()
-	reserve := !ok || l.freeCount() <= l.reserve
-	if !ok || reserve && !own {
+	if !ok || ordinary && l.freeCount() <= l.reserve {
 		return target{}, placeNoRoom
 	}
-	return target{stream: s, segment: seg, seq: l.nextSeq, offset: 1, roll: true, reserve: reserve, ordinary: ordinary && !reserve}, placeReady
+	return target{lane: i, segment: seg, seq: l.nextSeq, offset: 1, roll: true}, placeReady
 }
 
 func (l *Log) freeCount() uint32 {
@@ -1275,14 +1338,7 @@ func (l *Log) startRounds(ctx *core.Context, out *Output) {
 }
 
 func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
-	var srcs [2]*queue
-	k := 0
-	if t.stream == Cold && l.own.len() > 0 {
-		srcs[k], k = &l.own, k+1
-	}
-	if t.ordinary {
-		srcs[k], k = &l.queues[t.stream], k+1
-	}
+	ln := &l.lanes[t.lane]
 	lead := uint32(0)
 	if t.roll {
 		lead = 1
@@ -1290,36 +1346,27 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	limit := uint64(min(l.sb.SegmentBlocks-t.offset, l.maxWrite-lead))
 	var acc layoutAcc
 	var lay Layout
-	var taken [2]int
 	n, writeBlocks := 0, uint32(0)
-fill:
-	for j, q := range srcs[:k] {
-		for taken[j] < q.len() && n < maxRecordEntries {
-			next := acc
-			e := &q.at(taken[j]).entry
-			if err := next.add(e); err != nil {
-				break fill
-			}
-			nl, err := next.layout()
-			if err != nil || nl.Blocks() > limit {
-				break fill
-			}
-			acc, lay = next, nl
-			if e.Kind == EntryWrite {
-				writeBlocks += uint32(e.Count)
-			}
-			taken[j]++
-			n++
+	for n < ln.q.len() && n < maxRecordEntries {
+		next := acc
+		e := &ln.q.at(n).entry
+		if err := next.add(e); err != nil {
+			break
 		}
+		nl, err := next.layout()
+		if err != nil || nl.Blocks() > limit {
+			break
+		}
+		acc, lay = next, nl
+		if e.Kind == EntryWrite {
+			writeBlocks += uint32(e.Count)
+		}
+		n++
 	}
 	if n == 0 {
 		panic("disklog: a round built a record with no entries")
 	}
-	items := srcs[0].window(taken[0])
-	if taken[1] > 0 {
-		l.items = append(append(l.items[:0], items...), srcs[1].window(taken[1])...)
-		items = l.items
-	}
+	items := ln.q.window(n)
 	slot := (l.first + l.count) % len(l.rounds)
 	r := &l.rounds[slot]
 	tailBlocks := lay.DataBlocks - writeBlocks
@@ -1384,19 +1431,14 @@ fill:
 			ctx.Pool.Free(it.buf)
 		}
 	}
-	clear(l.items)
-	for j, q := range srcs[:k] {
-		q.drop(taken[j])
-	}
+	ln.q.drop(n)
 
 	if t.roll {
 		l.free[t.segment/64] &^= 1 << (t.segment % 64)
 		l.nextSeq++
-		l.inReserve[t.stream] = t.reserve
 	}
 	bytes := uint64(lead+uint32(lay.Blocks())) * core.BlockSize
 	*r = round{
-		stream:       t.stream,
 		lsn:          l.nextLSN,
 		writeIO:      l.io(),
 		flushIO:      l.io(),
@@ -1417,12 +1459,12 @@ fill:
 	if t.roll {
 		r.opened, r.named = t.seq, l.manifest
 	}
-	l.asm[t.stream] = cursor{segment: t.segment, seq: t.seq, next: t.offset + uint32(lay.Blocks())}
+	ln.asm = cursor{segment: t.segment, seq: t.seq, next: t.offset + uint32(lay.Blocks())}
 	if t.roll {
-		l.opened[t.stream] = l.nextLSN
+		ln.opened = l.nextLSN
 	}
 	l.nextLSN++
-	l.last = t.stream
+	l.last = t.lane
 	l.count++
 	out.Actions = append(out.Actions, core.Action{
 		Kind: core.ActDiskWrite,
@@ -1437,7 +1479,8 @@ fill:
 }
 
 func (l *Log) segmentHeader(t target) SegmentHeader {
-	return SegmentHeader{LogID: l.sb.LogID, Seq: t.seq, Index: t.segment, Stream: t.stream, Manifest: l.manifest}
+	ln := &l.lanes[t.lane]
+	return SegmentHeader{LogID: l.sb.LogID, Seq: t.seq, Index: t.segment, Stream: ln.stream, Lane: ln.n, Manifest: l.manifest}
 }
 
 func (l *Log) fillTail(ctx *core.Context, items []queued, tail []byte) {

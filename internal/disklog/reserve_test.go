@@ -84,7 +84,7 @@ func TestReserveFromSettings(t *testing.T) {
 	h.trace = nil
 	h.submit(disklog.Cold, disklog.Item{Entry: disklog.PunchEntry(1, testChunk, 7, 0, core.BlocksPerChunk)})
 	if len(h.trace) != 0 || !h.log.Stalled() {
-		t.Fatalf("after a restart a punch appended to the reserve segment: %v", h.trace)
+		t.Fatalf("after a restart a punch went into the reserve: %v", h.trace)
 	}
 	h.log.FailStalled(&h.ctx, &h.out)
 	h.absorb()
@@ -100,7 +100,9 @@ func TestBadReserveSettingsAreRefused(t *testing.T) {
 	}{
 		{"reserve of a 64 MiB disk of 16 KiB segments", 64 << 20, true, func(*disklog.Config) {}},
 		{"no reserve and a reserve", gib, false, func(c *disklog.Config) { c.NoReserve, c.Reserve = true, 2 }},
-		{"no merge worker", gib, false, func(c *disklog.Config) { c.MergeWorkers = 0 }},
+		{"negative merge workers", gib, false, func(c *disklog.Config) { c.MergeWorkers = -1 }},
+		{"more merge workers than lanes", gib, false, func(c *disklog.Config) { c.MergeWorkers = disklog.MaxMergeWorkers + 1 }},
+		{"more merge workers than lanes with a reserve set", gib, false, func(c *disklog.Config) { c.Reserve, c.MergeWorkers = 3, disklog.MaxMergeWorkers+1 }},
 		{"no compaction step", gib, false, func(c *disklog.Config) { c.CompactionStepBytes = 0 }},
 	} {
 		name, cfg := c.name, disklog.DefaultConfig()
@@ -262,7 +264,7 @@ func TestCheckpointFinishesInTheReserve(t *testing.T) {
 
 	punch := h.submit(disklog.Cold, disklog.Item{Entry: disklog.PunchEntry(1, testChunk, 7, 0, core.BlocksPerChunk)})
 	if len(h.pending) != 0 {
-		t.Fatalf("a punch appended to the reserve segment the manifest left a block free in: %v", h.trace)
+		t.Fatalf("a punch went into the reserve beside the manifest's segment: %v", h.trace)
 	}
 	h.log.FailStalled(&h.ctx, &h.out)
 	h.absorb()
@@ -342,37 +344,6 @@ func TestStallEndsWhenASegmentFrees(t *testing.T) {
 	h.close()
 }
 
-func TestReserveSegmentSurvivesARestart(t *testing.T) {
-	cfg := testConfig(0)
-	cfg.NoReserve, cfg.Reserve = false, 2
-	h := formatted(t, 32*core.BlockSize, cfg)
-	for i := range 5 {
-		h.put(disklog.Hot, h.write(uint32(i), 2, uint64(i)))
-	}
-	if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: 5, ReplayLSN: 5}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.log.EndCheckpoint(&h.ctx, &h.out); err != nil {
-		t.Fatal(err)
-	}
-	h.absorb()
-	h.run()
-	if done := h.eventsOf(disklog.CheckpointDone); len(done) != 1 || done[0].Manifest.Segment != 6 {
-		t.Fatalf("manifest %+v", done)
-	}
-	h.close()
-	h.reopen()
-	h.victim = true
-	h.trace = nil
-	h.submit(disklog.Cold, disklog.Item{Entry: disklog.PunchEntry(1, testChunk, 7, 0, core.BlocksPerChunk)})
-	if len(h.trace) != 0 || !h.log.Stalled() {
-		t.Fatalf("after a restart a punch appended to the reserve segment: %v", h.trace)
-	}
-	h.log.FailStalled(&h.ctx, &h.out)
-	h.absorb()
-	h.close()
-}
-
 func TestCloseFailsItemsWaitingForRoom(t *testing.T) {
 	h, held := reserveDisk(t)
 	if err := h.log.Close(&h.ctx, &h.out); err != nil {
@@ -385,10 +356,9 @@ func TestCloseFailsItemsWaitingForRoom(t *testing.T) {
 	}
 }
 
-// The checkpoint's pieces lead the cold stream, so while they fill a segment of the reserve an
-// ordinary cold item waits behind them even with segments free outside it and a round slot
-// idle; once their queue empties, the item opens a segment of its own.
-func TestColdItemsWaitForTheCheckpointInTheReserve(t *testing.T) {
+// The checkpoint's pieces go to the metadata stream, so while they fill a segment of the
+// reserve an ordinary cold item opens a segment of its own beside them, outside the reserve.
+func TestColdItemsGoBesideTheCheckpointInTheReserve(t *testing.T) {
 	cfg := testConfig(0)
 	cfg.NoReserve, cfg.Reserve = false, 4093
 	cfg.CommitDepth = 2
@@ -412,13 +382,8 @@ func TestColdItemsWaitForTheCheckpointInTheReserve(t *testing.T) {
 	disklog.FreeSegment(h.log, 2, true)
 	second := piece(2)
 	cold := h.submit(disklog.Cold, h.write(2, 1, 2))
-	if h.log.Queued() != 2 || h.log.InFlight() != 1 || h.log.Stalled() {
-		t.Fatalf("behind the second piece: %d queued, %d in flight, stalled %v", h.log.Queued(), h.log.InFlight(), h.log.Stalled())
-	}
-	h.step(0)
-	h.step(0)
-	if h.log.Queued() != 0 || h.log.InFlight() != 2 {
-		t.Fatalf("once the first piece is durable: %d queued, %d in flight", h.log.Queued(), h.log.InFlight())
+	if h.log.Queued() != 1 || h.log.InFlight() != 2 || h.log.Stalled() {
+		t.Fatalf("beside the second piece: %d queued, %d in flight, stalled %v", h.log.Queued(), h.log.InFlight(), h.log.Stalled())
 	}
 	h.run()
 	d := h.eventsOf(disklog.Durable)
@@ -426,7 +391,7 @@ func TestColdItemsWaitForTheCheckpointInTheReserve(t *testing.T) {
 	for i, want := range []struct {
 		tk  disklog.Ticket
 		seg uint32
-	}{{first, 3}, {second, 3}, {cold, 1}} {
+	}{{first, 3}, {cold, 1}, {second, 3}} {
 		if tk, seg := got(i); tk != want.tk || seg != want.seg {
 			t.Fatalf("round %d is ticket %d in segment %d, want %d in %d: %+v", i, tk, seg, want.tk, want.seg, d)
 		}

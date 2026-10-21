@@ -15,10 +15,10 @@ import (
 const userBlobOwner = 7
 
 type crashStats struct {
-	keptInFlight, droppedInFlight, fromManifest, noSpace, depth2, depth3, erased, restarts, crashesInRecovery, gaps, gapsInsideTheWindow int
+	keptInFlight, droppedInFlight, fromManifest, noSpace, depth2, depth3, erased, restarts, crashesInRecovery, gaps, gapsInsideTheWindow, mergeRecords int
 }
 
-// crashSeed runs four cycles of random items, checkpoints and disk completions, each ended
+// crashSeed runs four cycles of random items, merge pieces on 1 to 4 lanes, checkpoints and disk completions, each ended
 // by a crash that lands every unflushed block with probability 1/2, and checks every
 // recovery against what was acknowledged before the crash. It runs on a node of the
 // scheduler, whose trace it returns with the harness.
@@ -28,6 +28,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 	cfg := testConfig(r.Range(3, 32))
 	cfg.MaxReplayBytes = r.Range(4, 200) * core.BlockSize
 	cfg.CommitDepth = int(r.Range(1, 3))
+	cfg.MergeWorkers = int(r.Range(1, 4))
 	switch cfg.CommitDepth {
 	case 2:
 		st.depth2++
@@ -45,6 +46,12 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 	n := newNode(h, pieceLimit)
 	h.ioRand = r.Fork()
 	durableAtWrite := map[core.LBA]uint64{}
+	// Rounds are written in LSN order, one write each, so the writes number the records; a
+	// segment's lane comes from the header written with its first round.
+	nextLSN := uint64(1)
+	lsnAt := map[core.LBA]uint64{}
+	laneOf := map[uint64]uint8{}
+	mergeLSNs := map[uint64]bool{}
 	h.onWrite = func(a core.Action) {
 		if h.log == nil || h.rec != nil {
 			return
@@ -52,12 +59,26 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 		for b := range core.LBA(a.Len / core.BlockSize) {
 			durableAtWrite[a.LBA+b] = h.log.DurableLSN()
 		}
+		seg, rec := uint64(a.LBA)/uint64(h.geo.SegmentBlocks), a.LBA
+		if uint64(a.LBA)%uint64(h.geo.SegmentBlocks) == 0 {
+			sh, err := disklog.DecodeSegmentHeader(h.pool.Bytes(a.Vec[0].Buf))
+			if err != nil {
+				t.Fatalf("seed %d: a round opens segment %d with a header that does not decode: %v", seed, seg, err)
+			}
+			laneOf[seg], rec = sh.Lane, a.LBA+1
+		}
+		lsnAt[rec] = nextLSN
+		mergeLSNs[nextLSN] = laneOf[seg] > 0
+		nextLSN++
 	}
 	nodeEvent := h.onEvent
 	h.onEvent = func(ev disklog.Event) {
 		nodeEvent(ev)
 		if ev.Kind != disklog.Durable {
 			return
+		}
+		if lsnAt[ev.LBA] != ev.LSN {
+			t.Fatalf("seed %d: LSN %d durable at LBA %d, where LSN %d was written", seed, ev.LSN, ev.LBA, lsnAt[ev.LBA])
 		}
 		if named := h.record(ev).Record.Durable; named >= ev.LSN || named > durableAtWrite[ev.LBA] {
 			t.Fatalf("seed %d: LSN %d names %d durable; the log's durable LSN was %d when its round was written", seed, ev.LSN, named, durableAtWrite[ev.LBA])
@@ -72,7 +93,19 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 		maxBlob := h.log.MaxBlobBytes()
 		var it disklog.Item
 		stream := disklog.Hot
-		switch k := r.Below(10); {
+		switch k := r.Below(11); {
+		case k == 10:
+			size := int(r.Range(8, min(6000, maxBlob)))
+			buf, err := h.pool.Alloc(size)
+			if err != nil {
+				return
+			}
+			copy(h.pool.Bytes(buf), pattern(uint64(size), size))
+			if _, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), indexOwner, buf, uint64(size), &h.out); err != nil {
+				t.Fatalf("seed %d: merge piece: %v", seed, err)
+			}
+			h.absorb()
+			return
 		case k < 6:
 			count := uint16(r.Range(1, min(3, maxWrite-2)))
 			version++
@@ -186,9 +219,18 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats) *harness {
 			}
 		}
 		st.erased += reb.erased + res.erased
-		if len(reb.replayed) != int(d) {
-			t.Fatalf("seed %d cycle %d: rebuild replayed %d records of %d", seed, cycle, len(reb.replayed), d)
+		var wantReplayed []uint64
+		for lsn := uint64(1); lsn <= d; lsn++ {
+			if mergeLSNs[lsn] {
+				st.mergeRecords++
+			} else {
+				wantReplayed = append(wantReplayed, lsn)
+			}
 		}
+		if got := reb.lsns(); !slices.Equal(got, wantReplayed) {
+			t.Fatalf("seed %d cycle %d: rebuild replayed %v, want every LSN to %d but the merge records'", seed, cycle, got, d)
+		}
+		nextLSN = d + 1
 		want := before
 		for _, ev := range reb.replayed {
 			for i, e := range ev.Entries {
@@ -273,7 +315,7 @@ func TestRandomCrashesKeepAcknowledgedRecords(t *testing.T) {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
 	}
-	if st.keptInFlight <= 5 || st.droppedInFlight <= 5 || st.fromManifest <= 20 || st.noSpace == 0 || st.depth2 == 0 || st.depth3 == 0 || st.gapsInsideTheWindow == 0 || st.erased == 0 || st.restarts == 0 || st.crashesInRecovery == 0 {
+	if st.keptInFlight <= 5 || st.droppedInFlight <= 5 || st.fromManifest <= 20 || st.noSpace == 0 || st.depth2 == 0 || st.depth3 == 0 || st.gapsInsideTheWindow == 0 || st.erased == 0 || st.restarts == 0 || st.crashesInRecovery == 0 || st.mergeRecords == 0 {
 		t.Fatalf("seeds missed a case: %+v", st)
 	}
 	t.Logf("%+v", st)

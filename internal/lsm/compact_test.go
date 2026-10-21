@@ -295,8 +295,10 @@ func TestSchedulerOrder(t *testing.T) {
 
 // One merge worker by default: index B's merge waits until index A's installs; with two, both run.
 func TestSchedulerWorkers(t *testing.T) {
-	if _, err := NewScheduler(SchedulerConfig{MergeWorkers: -1}); !errors.Is(err, ErrBadConfig) {
-		t.Fatalf("negative workers: %v", err)
+	for _, workers := range []int{-1, disklog.MaxMergeWorkers + 1} {
+		if _, err := NewScheduler(SchedulerConfig{MergeWorkers: workers}); !errors.Is(err, ErrBadConfig) {
+			t.Fatalf("%d workers: %v", workers, err)
+		}
 	}
 	for _, workers := range []int{0, 2} {
 		a, b := treeWithRuns(t, 0, 6), treeWithRuns(t, 0, 4)

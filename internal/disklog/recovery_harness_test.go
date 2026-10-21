@@ -282,7 +282,7 @@ func (h *harness) resetIO() {
 	h.writes, h.fsyncs, h.unlinked, h.maxPending = 0, 0, 0, 0
 	h.log, h.rec = nil, nil
 	if h.sched == nil {
-		h.pool = sim.NewPool(64<<20, 0)
+		h.pool = sim.NewPool(cmp.Or(h.poolBytes, 64<<20), 0)
 		h.ctx.Pool = h.pool
 		return
 	}
@@ -395,6 +395,9 @@ func (h *harness) recoverOnce(mode disklog.Mode, crash func(core.Action) bool) (
 		h.t.Fatalf("recover: %v", err)
 	}
 	h.rec = rec
+	if h.plant != nil {
+		h.plant(rec)
+	}
 	h.readBytes = 0
 	h.absorb()
 	for len(h.pending) > 0 {

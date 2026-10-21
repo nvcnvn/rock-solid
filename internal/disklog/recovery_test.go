@@ -306,24 +306,45 @@ func TestRecoverReadErrorInASegmentFails(t *testing.T) {
 	}
 }
 
-func TestRecoverManySegmentsBothStreams(t *testing.T) {
-	h := formatted(t, 1<<16*core.BlockSize, testConfig(4))
+func TestRecoverManySegmentsEveryLane(t *testing.T) {
+	cfg := testConfig(4)
+	cfg.MergeWorkers = 4
+	cfg.MaxReplayBytes = 64 * core.BlockSize
+	h := formatted(t, 1<<16*core.BlockSize, cfg)
 	n := newNode(h, 0)
 	r := core.NewRand(7)
+	merges := map[uint64]bool{}
 	for i := range 200 {
 		h.put(disklog.Hot, h.chunkWrite(uint32(r.Below(32)), uint16(r.Below(1000)), uint16(r.Range(1, 2)), uint64(i+1)))
 		if i%5 == 4 {
 			h.put(disklog.Cold, h.blob(disklog.BlobRaftEntries, 9, int(r.Range(1, h.log.MaxBlobBytes())), uint64(i)))
 		}
+		if i%3 == 2 {
+			merges[h.putMerge(int(r.Range(1, 4)), runOwner, int(r.Range(1, h.log.MaxBlobBytes())), uint64(i)).LSN] = true
+		}
+		for n.step() {
+			h.run()
+		}
+	}
+	if n.checkpoints == 0 {
+		t.Fatal("no checkpoint ran")
 	}
 	durable := h.log.DurableLSN()
 	if last := h.eventsOf(disklog.Durable); last[len(last)-1].Segment < 20 {
 		t.Fatalf("200 writes reached only segment %d", last[len(last)-1].Segment)
 	}
+	delivered := func(from uint64) []uint64 {
+		return slices.DeleteFunc(lsnRange(from, durable), func(lsn uint64) bool { return merges[lsn] })
+	}
 	res := h.reopen()
-	h.wantLSNs(res, lsnRange(1, durable))
+	if got := res.lsns(); res.replayLSN == 0 || !slices.Equal(got, delivered(res.replayLSN+1)) || res.durable != durable {
+		t.Fatalf("open replayed %v to LSN %d, want every record but the merges' after %d to %d", got, res.durable, res.replayLSN, durable)
+	}
 	h.wantModel("open", res.index, n.live)
 	reb := h.recover(disklog.ModeRebuild)
+	if got := reb.lsns(); !slices.Equal(got, delivered(1)) || reb.durable != durable {
+		t.Fatalf("rebuild replayed %v to LSN %d, want every record but the merges' to %d", got, reb.durable, durable)
+	}
 	h.wantModel("rebuild", reb.index, n.live)
 	h.readBack(res.index)
 }

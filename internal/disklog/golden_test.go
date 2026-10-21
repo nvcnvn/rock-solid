@@ -48,17 +48,19 @@ func goldenImages(t testing.TB) map[string][]byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sg, err := AppendSegmentHeader(nil, testSegmentHeader())
-	if err != nil {
-		t.Fatal(err)
+	images := map[string][]byte{"superblock": sb, "record_header": goldenRecord(t).image[:core.BlockSize]}
+	for name, h := range map[string]SegmentHeader{"segment_header": testSegmentHeader(), "segment_header_meta": testMetaHeader(), "segment_header_merge": testMergeHeader()} {
+		if images[name], err = AppendSegmentHeader(nil, h); err != nil {
+			t.Fatal(err)
+		}
 	}
-	return map[string][]byte{"superblock": sb, "segment_header": sg, "record_header": goldenRecord(t).image[:core.BlockSize]}
+	return images
 }
 
 func TestGoldenBytes(t *testing.T) {
 	golden := readGolden(t)
 	images := goldenImages(t)
-	for _, name := range []string{"superblock", "segment_header", "record_header"} {
+	for _, name := range []string{"superblock", "segment_header", "segment_header_meta", "segment_header_merge", "record_header"} {
 		t.Run(name, func(t *testing.T) {
 			want, ok := golden[name]
 			if !ok {

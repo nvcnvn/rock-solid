@@ -134,28 +134,6 @@ func TestNoBlockIsCopied(t *testing.T) {
 	h.close()
 }
 
-func TestStreamsAlternate(t *testing.T) {
-	h := formatted(t, gib, testConfig(0))
-	a := h.submit(disklog.Hot, h.write(0, 1, 1))
-	b := h.submit(disklog.Hot, h.write(1, 1, 2))
-	c := h.submit(disklog.Cold, h.blob(disklog.BlobRaftEntries, 5, 10, 3))
-	h.round()
-	h.wantTrace("write 64+3 io104", "fsync io105", "write 128+3 io106", "fsync io107")
-	d := h.submit(disklog.Hot, h.write(2, 1, 4))
-	h.run()
-	h.wantTrace("write 64+3 io104", "fsync io105", "write 128+3 io106", "fsync io107", "write 67+3 io108", "fsync io109")
-	durable := h.eventsOf(disklog.Durable)
-	want := [][]disklog.Ticket{{a}, {c}, {b, d}}
-	for i, ev := range durable {
-		if ev.LSN != uint64(i+1) || !slices.Equal(ev.Tickets, want[i]) {
-			t.Fatalf("round %d: %+v", i+1, ev)
-		}
-	}
-	if sh := h.segmentHeader(2); sh.Stream != disklog.Cold || sh.Seq != 2 {
-		t.Fatalf("segment 2 header %+v", sh)
-	}
-}
-
 func TestRoundsStopAtTheMaximumRecord(t *testing.T) {
 	h := formatted(t, gib, testConfig(3))
 	big := h.write(0, 3, 1)
@@ -467,6 +445,9 @@ func TestCheckpointEndToEnd(t *testing.T) {
 	}
 	if durable[1].LSN != 4 || durable[1].Segment != 2 || durable[1].Block != 1 || !slices.Equal(durable[1].Tickets, pieces) {
 		t.Fatalf("LSN 4: %+v", durable[1])
+	}
+	if sh := h.segmentHeader(2); sh.Stream != disklog.Meta || sh.Lane != 0 {
+		t.Fatalf("the checkpoint's segment 2 header %+v, want the metadata stream's lane 0", sh)
 	}
 	done := h.eventsOf(disklog.CheckpointDone)
 	wantPos := disklog.ManifestPos{Segment: 2, Block: durable[2].Block, LSN: 5}

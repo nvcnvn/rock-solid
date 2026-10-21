@@ -374,12 +374,9 @@ func (t *Tree) Install(c *Compaction) error {
 	return nil
 }
 
-// DefaultMergeWorkers is how many merges a disk's scheduler runs at once unless configured.
-const DefaultMergeWorkers = 1
-
 // SchedulerConfig is a disk's merge scheduler's settings.
 type SchedulerConfig struct {
-	// MergeWorkers is how many merges run at once, DefaultMergeWorkers when 0.
+	// MergeWorkers is merge_workers, how many merges run at once, as disklog.MergeWorkers resolves it for the log too.
 	MergeWorkers int
 }
 
@@ -392,13 +389,11 @@ type Scheduler struct {
 
 // NewScheduler makes a scheduler with no trees.
 func NewScheduler(cfg SchedulerConfig) (*Scheduler, error) {
-	if cfg.MergeWorkers < 0 {
+	workers, ok := disklog.MergeWorkers(cfg.MergeWorkers)
+	if !ok {
 		return nil, ErrBadConfig
 	}
-	if cfg.MergeWorkers == 0 {
-		cfg.MergeWorkers = DefaultMergeWorkers
-	}
-	return &Scheduler{workers: cfg.MergeWorkers}, nil
+	return &Scheduler{workers: workers}, nil
 }
 
 // Add makes the scheduler run t's merges.

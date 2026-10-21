@@ -28,6 +28,7 @@ func FuzzDecodeSuperblock(f *testing.F) {
 func FuzzDecodeSegmentHeader(f *testing.F) {
 	golden := readGolden(f)
 	f.Add(goldenImages(f)["segment_header"])
+	f.Add(goldenImages(f)["segment_header_merge"])
 	f.Add(golden["segment_header"])
 	f.Add(make([]byte, core.BlockSize))
 	f.Fuzz(func(t *testing.T, b []byte) {
