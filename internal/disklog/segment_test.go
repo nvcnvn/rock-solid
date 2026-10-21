@@ -11,6 +11,14 @@ func testSegmentHeader() SegmentHeader {
 	return SegmentHeader{LogID: testLogID, Seq: 7, Index: 3, Stream: Cold, Manifest: ManifestPos{Segment: 2, Block: 9, LSN: 41}}
 }
 
+func testMetaHeader() SegmentHeader {
+	return SegmentHeader{LogID: testLogID, Seq: 8, Index: 4, Stream: Meta, Manifest: ManifestPos{Segment: 2, Block: 9, LSN: 41}}
+}
+
+func testMergeHeader() SegmentHeader {
+	return SegmentHeader{LogID: testLogID, Seq: 9, Index: 5, Stream: Meta, Lane: 3, Manifest: ManifestPos{Segment: 2, Block: 9, LSN: 41}}
+}
+
 func TestSegmentHeaderRoundTrip(t *testing.T) {
 	cases := []struct {
 		name string
@@ -20,6 +28,9 @@ func TestSegmentHeaderRoundTrip(t *testing.T) {
 		{"hot with manifest", SegmentHeader{LogID: 5, Seq: 1, Index: 1, Stream: Hot, Manifest: ManifestPos{Segment: 4000, Block: 1, LSN: 1 << 40}}},
 		{"hot no manifest", SegmentHeader{LogID: testLogID, Seq: 1 << 50, Index: 1 << 20, Stream: Hot}},
 		{"cold no manifest", SegmentHeader{LogID: 1, Seq: 2, Index: 4095, Stream: Cold}},
+		{"metadata", testMetaHeader()},
+		{"merge lane", testMergeHeader()},
+		{"last merge lane no manifest", SegmentHeader{LogID: 1, Seq: 3, Index: 7, Stream: Meta, Lane: MaxMergeWorkers}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -42,22 +53,24 @@ func TestSegmentHeaderRoundTrip(t *testing.T) {
 }
 
 func TestSegmentHeaderBitFlips(t *testing.T) {
-	good, err := AppendSegmentHeader(nil, testSegmentHeader())
-	if err != nil {
-		t.Fatal(err)
-	}
-	b := bytes.Clone(good)
-	for i := range b {
-		for bit := range 8 {
-			b[i] ^= 1 << bit
-			if _, err := DecodeSegmentHeader(b); err == nil {
-				t.Fatalf("flipping bit %d of byte %d still decodes", bit, i)
-			}
-			b[i] ^= 1 << bit
+	for _, h := range []SegmentHeader{testSegmentHeader(), testMergeHeader()} {
+		good, err := AppendSegmentHeader(nil, h)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if !bytes.Equal(b, good) {
-		t.Fatal("header not restored")
+		b := bytes.Clone(good)
+		for i := range b {
+			for bit := range 8 {
+				b[i] ^= 1 << bit
+				if _, err := DecodeSegmentHeader(b); err == nil {
+					t.Fatalf("%+v: flipping bit %d of byte %d still decodes", h, bit, i)
+				}
+				b[i] ^= 1 << bit
+			}
+		}
+		if !bytes.Equal(b, good) {
+			t.Fatal("header not restored")
+		}
 	}
 }
 
@@ -75,8 +88,8 @@ func TestSegmentHeaderErrors(t *testing.T) {
 		{"superblock magic", func(b []byte) { copy(b, superblockMagic) }, ErrBadMagic},
 		{"version", func(b []byte) { b[sgVersion] = 0; fixCRC(b, sgCRC) }, ErrBadVersion},
 		{"checksum", func(b []byte) { b[sgSeq] ^= 0x10 }, ErrBadChecksum},
-		{"stream 2", func(b []byte) { b[sgStream] = 2; fixCRC(b, sgCRC) }, ErrMalformed},
-		{"pad", func(b []byte) { b[sgStream+1] = 1; fixCRC(b, sgCRC) }, ErrMalformed},
+		{"stream 3", func(b []byte) { b[sgStream] = 3; fixCRC(b, sgCRC) }, ErrMalformed},
+		{"lane of the cold stream", func(b []byte) { b[sgLane] = 1; fixCRC(b, sgCRC) }, ErrMalformed},
 		{"tail", func(b []byte) { b[segmentHeaderSize] = 1; fixCRC(b, sgCRC) }, ErrMalformed},
 		{"index 0", func(b []byte) { b[sgIndex] = 0; fixCRC(b, sgCRC) }, ErrMalformed},
 		{"manifest block 0", func(b []byte) { b[sgManifestBlock] = 0; fixCRC(b, sgCRC) }, ErrMalformed},
@@ -98,7 +111,8 @@ func TestSegmentHeaderErrors(t *testing.T) {
 		name string
 		h    SegmentHeader
 	}{
-		{"stream 2", SegmentHeader{LogID: 1, Seq: 1, Index: 1, Stream: 2}},
+		{"stream 3", SegmentHeader{LogID: 1, Seq: 1, Index: 1, Stream: 3}},
+		{"lane of the hot stream", SegmentHeader{LogID: 1, Seq: 1, Index: 1, Lane: 1}},
 		{"index 0", SegmentHeader{LogID: 1, Seq: 1, Index: 0}},
 		{"none with block", SegmentHeader{LogID: 1, Seq: 1, Index: 1, Manifest: ManifestPos{Block: 1}}},
 		{"manifest block 0", SegmentHeader{LogID: 1, Seq: 1, Index: 1, Manifest: ManifestPos{Segment: 2}}},

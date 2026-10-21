@@ -189,24 +189,26 @@ func TestHeldItemsFailWithTheirCheckpointForWantOfSpace(t *testing.T) {
 	h.close()
 }
 
-func TestMixedRoundCountsOrdinaryBlocks(t *testing.T) {
+func TestCheckpointPiecesStayOutOfTheHold(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		cold func(h *harness) []disklog.Item
 		want uint64
 	}{
 		{"two 1-block writes", func(h *harness) []disklog.Item { return []disklog.Item{h.write(2, 1, 2), h.write(3, 1, 3)} }, 3},
-		{"a blob sharing the piece's block", func(h *harness) []disklog.Item { return []disklog.Item{h.blob(disklog.BlobRaftEntries, 7, 100, 2)} }, 2},
+		{"a 100-byte blob", func(h *harness) []disklog.Item { return []disklog.Item{h.blob(disklog.BlobRaftEntries, 7, 100, 2)} }, 2},
 	} {
-		if got := mixedRoundHold(t, c.cold); got != c.want*core.BlockSize {
-			t.Errorf("%s: a mixed round adds %d bytes to the hold, want %d blocks", c.name, got, c.want)
+		cold, piece := roundHolds(t, c.cold)
+		if cold != c.want*core.BlockSize || piece != 0 {
+			t.Errorf("%s: the cold round adds %d bytes to the hold and the piece's %d, want %d blocks and none", c.name, cold, piece, c.want)
 		}
 	}
 }
 
-// mixedRoundHold queues a 100-byte checkpoint piece behind cold items while a hot write is in
-// flight, so that one round carries them all, and is what that round adds to the hold.
-func mixedRoundHold(t *testing.T, cold func(h *harness) []disklog.Item) uint64 {
+// roundHolds queues cold items and then a 100-byte checkpoint piece while a hot write is in
+// flight, and is what the cold items' round and the piece's round each add to the hold. The
+// piece goes to the metadata stream, so no round carries both.
+func roundHolds(t *testing.T, cold func(h *harness) []disklog.Item) (uint64, uint64) {
 	t.Helper()
 	cfg := testConfig(0)
 	cfg.MaxReplayBytes = 64 * core.BlockSize
@@ -226,24 +228,31 @@ func mixedRoundHold(t *testing.T, cold func(h *harness) []disklog.Item) uint64 {
 		t.Fatal(err)
 	}
 	h.absorb()
-	var before, after uint64
+	held := disklog.HeldBytes(h.log)
+	added := map[disklog.Ticket]uint64{}
+	segment := map[disklog.Ticket]uint32{}
 	h.onEvent = func(ev disklog.Event) {
 		if ev.Kind == disklog.Durable {
-			before, after = after, disklog.HeldBytes(h.log)
+			now := disklog.HeldBytes(h.log)
+			added[ev.Tickets[0]], segment[ev.Tickets[0]], held = now-held, ev.Segment, now
 		}
 	}
 	h.run()
 	d := h.eventsOf(disklog.Durable)
-	if mixed := d[len(d)-1]; !slices.Equal(mixed.Tickets, append([]disklog.Ticket{piece}, want...)) {
-		t.Fatalf("round %+v, want the piece then the cold items", mixed)
+	coldRound := slices.IndexFunc(d, func(ev disklog.Event) bool { return ev.Tickets[0] == want[0] })
+	pieceRound := slices.IndexFunc(d, func(ev disklog.Event) bool { return ev.Tickets[0] == piece })
+	if coldRound < 0 || pieceRound < 0 || !slices.Equal(d[coldRound].Tickets, want) || len(d[pieceRound].Tickets) != 1 ||
+		segment[want[0]] == segment[piece] {
+		t.Fatalf("rounds %+v: want the cold items in one round and the piece alone in another segment", d)
 	}
+	after := disklog.HeldBytes(h.log)
 	h.close()
 	h.reopen()
 	if got := disklog.HeldBytes(h.log); got != after {
 		t.Fatalf("recovery restored a hold of %d bytes, the log had %d", got, after)
 	}
 	h.close()
-	return after - before
+	return added[want[0]], added[piece]
 }
 
 func TestCheckpointLargerThanTheHoldReleasesIt(t *testing.T) {

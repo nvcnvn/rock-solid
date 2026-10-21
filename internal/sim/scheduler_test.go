@@ -13,6 +13,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/toy"
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
@@ -105,9 +106,9 @@ func TestCompareTracesNamesTheFirstDifferingLine(t *testing.T) {
 func TestTheToyProtocolMakesProgressUnderChaos(t *testing.T) {
 	acked := 0
 	for seed := range uint64(20) {
-		c := newToyCluster(seed, chaosSettings(), 40)
-		c.s.Run(3000)
-		acked += len(c.nodes[0].acked)
+		c := toy.NewCluster(seed, chaosSettings(), 40, toy.NoBug)
+		c.Scheduler().Run(3000)
+		acked += c.Acked()
 	}
 	if acked < 100 {
 		t.Fatalf("%d writes acknowledged over 20 seeds", acked)
@@ -309,12 +310,12 @@ func TestStaleTimersArriveAndAreIgnored(t *testing.T) {
 	if !slices.Equal(at, []core.Tick{100, 500, 500}) {
 		t.Fatalf("timer 1 delivered at %v after arming, want the replaced deadline, the live one and a stale repeat", at)
 	}
-	m := newToy(core.NewRand(1), core.NodeID{}, nil)
-	ctx := core.Context{Now: 1000}
-	m.arm(&ctx, nil)
-	m.OnEvent(&ctx, &core.Event{Kind: core.EvTimer, Timer: retryTimer}, nil)
-	if m.stale != 1 || !m.armed {
-		t.Fatalf("toy took a timer before its deadline: stale %d, armed %v", m.stale, m.armed)
+	m := toy.New(core.NewRand(1), toy.Config{})
+	ctx := core.Context{Now: 1000, Pool: sim.NewPool(core.BlockSize, 0)}
+	m.Propose(&ctx, 1, nil)
+	m.OnEvent(&ctx, &core.Event{Kind: core.EvTimer, Timer: toy.RetryTimer}, nil)
+	if m.Stale() != 1 || !m.Armed() {
+		t.Fatalf("toy took a timer before its deadline: stale %d, armed %v", m.Stale(), m.Armed())
 	}
 }
 
@@ -329,7 +330,7 @@ func TestMessagesDropAndReorder(t *testing.T) {
 	const sent = 40
 	sender.Call(from, func(_ *core.Context, out []core.Action) []core.Action {
 		for i := range sent {
-			out = append(out, core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: 1}, Msg: toyMsg(trace.MsgWrite, uint64(i))})
+			out = append(out, core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: 1}, Msg: writeMsg(uint64(i))})
 		}
 		return out
 	})
@@ -339,7 +340,7 @@ func TestMessagesDropAndReorder(t *testing.T) {
 		if ev.Kind != core.EvNetRecv || ev.Peer != from {
 			t.Fatalf("event %+v", ev)
 		}
-		got = append(got, uint64(ev.Msg.Body[1]))
+		got = append(got, uint64(ev.Msg.Body[9]))
 	}
 	if len(got) == 0 || len(got) == sent || slices.IsSorted(got) {
 		t.Fatalf("received %v of %d: want some dropped and the rest reordered", got, sent)
@@ -353,7 +354,7 @@ func TestAMessageToACrashedIncarnationIsDropped(t *testing.T) {
 	var to *recorder
 	s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { to = &recorder{}; n.Start(to, nil) })
 	sender.Call(from, func(_ *core.Context, out []core.Action) []core.Action {
-		return append(out, core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: 1}, Msg: toyMsg(trace.MsgWrite, 1)})
+		return append(out, core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: 1}, Msg: writeMsg(1)})
 	})
 	s.Crash(1, func(int, int, core.LBA) bool { return true })
 	s.Restart(1)
@@ -366,21 +367,21 @@ func TestAMessageToACrashedIncarnationIsDropped(t *testing.T) {
 func TestCrashesAndRestartsAreSteps(t *testing.T) {
 	set := chaosSettings()
 	set.CrashNum, set.CrashDen = 1, 20
-	c := newToyCluster(5, set, 40)
-	c.s.Run(400)
-	if c.boots[0]+c.boots[1]+c.boots[2] <= 3 {
-		t.Fatalf("boots %v: no node crashed and restarted", c.boots)
+	c := toy.NewCluster(5, set, 40, toy.NoBug)
+	c.Scheduler().Run(400)
+	if b := c.Boots(); b[0]+b[1]+b[2] <= 3 {
+		t.Fatalf("boots %v: no node crashed and restarted", b)
 	}
 }
 
 func TestAnEventOutsideTheContractIsData(t *testing.T) {
-	c := newToyCluster(1, sim.DefaultSettings(), 0)
-	c.s.Node(1).Feed(core.NodeID{Node: 1}, core.Event{Kind: core.EvDiskDone, IO: 999})
-	if !slices.Equal(c.nodes[1].unknown, []core.IOID{999}) {
-		t.Fatalf("unknown %v", c.nodes[1].unknown)
+	c := toy.NewCluster(1, sim.DefaultSettings(), 0, toy.NoBug)
+	c.Scheduler().Node(1).Feed(core.NodeID{Node: 1}, core.Event{Kind: core.EvDiskDone, IO: 999})
+	if c.Node(1).Unknown() != 1 {
+		t.Fatalf("unknown %d", c.Node(1).Unknown())
 	}
-	if !bytes.Contains(c.s.Trace(), []byte("1000 1.0 event pass=1 DiskDone io=999 err=ok\n")) {
-		t.Fatalf("trace:\n%s", c.s.Trace())
+	if !bytes.Contains(c.Scheduler().Trace(), []byte("1000 1.0 event pass=1 DiskDone io=999 err=ok\n")) {
+		t.Fatalf("trace:\n%s", c.Scheduler().Trace())
 	}
 }
 
@@ -510,11 +511,11 @@ func TestACrashLandsWritesNotYetCompletedWhenToldTo(t *testing.T) {
 func TestTheTraceShowsCrashesRestartsAndDrops(t *testing.T) {
 	set := sim.DefaultSettings()
 	set.DropNum, set.DropDen = 1, 1
-	c := newToyCluster(1, set, 1)
-	c.s.Run(5)
-	c.s.Crash(1, func(int, int, core.LBA) bool { return false })
-	c.s.Restart(1)
-	tr := c.s.Trace()
+	s := toy.NewCluster(1, set, 1, toy.NoBug).Scheduler()
+	s.Run(5)
+	s.Crash(1, func(int, int, core.LBA) bool { return false })
+	s.Restart(1)
+	tr := s.Trace()
 	for _, want := range []string{" 0.0 event pass=1 Drop peer=1 msg=write\n", " 1.0 event pass=1 Crash\n", " 1.0 event pass=2 Restart\n"} {
 		if !bytes.Contains(tr, []byte(want)) {
 			t.Fatalf("no %q in\n%s", want, tr)
@@ -542,7 +543,7 @@ func TestSchedulerDrawsShiftNoNodeStream(t *testing.T) {
 	sender := busy.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { n.Start(&recorder{}, nil) })
 	sender.Call(core.NodeID{}, func(_ *core.Context, out []core.Action) []core.Action {
 		for i := range 20 {
-			out = append(out, core.Action{Kind: core.ActNetSend, Peer: core.NodeID{}, Msg: toyMsg(trace.MsgWrite, uint64(i))})
+			out = append(out, core.Action{Kind: core.ActNetSend, Peer: core.NodeID{}, Msg: writeMsg(uint64(i))})
 		}
 		return out
 	})

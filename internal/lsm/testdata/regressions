@@ -1,0 +1,26 @@
+# Reduced failures of the metamorphic test (meta_test.go), each the ops of one seed under the option
+# set that failed, its cadence written as explicit ops. go test -rewrite regenerates the output.
+
+# Metamorphic testing spike, plant P1 at seed 0 under A: a flush dropped a removal that hid a key in
+# an older run.
+run set=A
+put aa v26x
+flush
+del aa
+flush
+floor aca
+----
+floor aca: none
+
+# Metamorphic testing spike, plant P3 under A: a restore loaded runs in the order the manifest
+# listed them, not by age, after a failed flush left its frozen memtable for the next.
+run set=A
+put e v30xxx
+flush
+del e
+flushfail 3
+flush
+restart
+floor e
+----
+floor e: none

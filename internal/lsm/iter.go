@@ -168,6 +168,7 @@ type state struct {
 	runs        []*run
 	filter      FilterKeys
 	prefix      func([]byte) int
+	linear      bool
 }
 
 // sources lays the state's layers out newest first in srcs, reusing its buffers.
@@ -234,7 +235,7 @@ type iterState struct {
 }
 
 func (it *iterState) reset(st *state, keepDel bool) {
-	it.srcs, it.heap = st.sources(it.srcs), it.heap[:0]
+	it.srcs, it.heap, it.linear = st.sources(it.srcs), it.heap[:0], st.linear
 	it.filter, it.prefix, it.inPrefix = st.filter, st.prefix, false
 	it.cur, it.keepDel, it.bounded, it.uok = -1, keepDel, false, false
 	it.dropped, it.fragsDropped = 0, 0

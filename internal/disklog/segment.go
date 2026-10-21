@@ -12,6 +12,7 @@ const (
 
 	sgVersion         = 8
 	sgStream          = 10
+	sgLane            = 11
 	sgCRC             = 12
 	sgLogID           = 16
 	sgSeq             = 24
@@ -21,13 +22,14 @@ const (
 	sgManifestBlock   = 48
 )
 
-// Stream tags which of the two streams a segment belongs to.
+// Stream tags which of the three streams a segment belongs to.
 type Stream uint8
 
 // Streams.
 const (
 	Hot  Stream = 0
 	Cold Stream = 1
+	Meta Stream = 2
 )
 
 // ManifestPos is where the newest manifest piece sits; Segment 0 means there is none.
@@ -46,11 +48,12 @@ type SegmentHeader struct {
 	Seq      uint64
 	Index    uint32
 	Stream   Stream
+	Lane     uint8
 	Manifest ManifestPos
 }
 
 func (h SegmentHeader) check() error {
-	if h.Stream > Cold || h.Index == 0 {
+	if h.Stream > Meta || h.Lane != 0 && h.Stream != Meta || h.Index == 0 {
 		return ErrMalformed
 	}
 	if h.Manifest.IsNone() {
@@ -73,6 +76,7 @@ func AppendSegmentHeader(dst []byte, h SegmentHeader) ([]byte, error) {
 	copy(b, segmentMagic)
 	binary.LittleEndian.PutUint16(b[sgVersion:], FormatVersion)
 	b[sgStream] = byte(h.Stream)
+	b[sgLane] = h.Lane
 	binary.LittleEndian.PutUint64(b[sgLogID:], h.LogID)
 	binary.LittleEndian.PutUint64(b[sgSeq:], h.Seq)
 	binary.LittleEndian.PutUint64(b[sgManifestLSN:], h.Manifest.LSN)
@@ -98,7 +102,7 @@ func DecodeSegmentHeader(b []byte) (SegmentHeader, error) {
 	if core.GetCRC32C(b[sgCRC:]) != headerCRC(b, sgCRC) {
 		return SegmentHeader{}, ErrBadChecksum
 	}
-	if b[sgStream+1] != 0 || !isZero(b[segmentHeaderSize:]) {
+	if !isZero(b[segmentHeaderSize:]) {
 		return SegmentHeader{}, ErrMalformed
 	}
 	h := SegmentHeader{
@@ -106,6 +110,7 @@ func DecodeSegmentHeader(b []byte) (SegmentHeader, error) {
 		Seq:    binary.LittleEndian.Uint64(b[sgSeq:]),
 		Index:  binary.LittleEndian.Uint32(b[sgIndex:]),
 		Stream: Stream(b[sgStream]),
+		Lane:   b[sgLane],
 		Manifest: ManifestPos{
 			Segment: binary.LittleEndian.Uint32(b[sgManifestSegment:]),
 			Block:   binary.LittleEndian.Uint32(b[sgManifestBlock:]),

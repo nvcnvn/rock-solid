@@ -154,6 +154,7 @@ type Compaction struct {
 	check  bool
 	filter FilterKeys
 	prefix func([]byte) int
+	linear bool
 	seq    uint64
 	limit  int
 	out    *run
@@ -197,6 +198,7 @@ func (t *Tree) compaction(i, j int, rule rule) *Compaction {
 		check:  t.cfg.Check,
 		filter: t.cfg.Filter,
 		prefix: t.cfg.Prefix,
+		linear: t.linear,
 	}
 	for _, r := range c.inputs {
 		r.held = true
@@ -205,7 +207,9 @@ func (t *Tree) compaction(i, j int, rule rule) *Compaction {
 		c.runs = append(c.runs, &in)
 	}
 	for _, r := range t.runs[j:] {
-		c.older = append(c.older, &run{blocks: slices.Clone(r.blocks), sums: r.sums})
+		if !t.plant.mergeNoOlder {
+			c.older = append(c.older, &run{blocks: slices.Clone(r.blocks), sums: r.sums})
+		}
 	}
 	t.merges = append(t.merges, c)
 	return c
@@ -258,7 +262,7 @@ func (c *Compaction) Run() {
 			return
 		}
 	}
-	it := iterState{srcs: make([]source, len(c.runs)), cur: -1, keepDel: true}
+	it := iterState{srcs: make([]source, len(c.runs)), cur: -1, keepDel: true, linear: c.linear}
 	for i, r := range c.runs {
 		it.srcs[i].setRun(r)
 		it.ranges = it.ranges || it.srcs[i].frags
@@ -387,12 +391,9 @@ func (t *Tree) Install(c *Compaction) error {
 	return nil
 }
 
-// DefaultMergeWorkers is how many merges a disk's scheduler runs at once unless configured.
-const DefaultMergeWorkers = 1
-
 // SchedulerConfig is a disk's merge scheduler's settings.
 type SchedulerConfig struct {
-	// MergeWorkers is how many merges run at once, DefaultMergeWorkers when 0.
+	// MergeWorkers is merge_workers, how many merges run at once, as disklog.MergeWorkers resolves it for the log too.
 	MergeWorkers int
 }
 
@@ -405,13 +406,11 @@ type Scheduler struct {
 
 // NewScheduler makes a scheduler with no trees.
 func NewScheduler(cfg SchedulerConfig) (*Scheduler, error) {
-	if cfg.MergeWorkers < 0 {
+	workers, ok := disklog.MergeWorkers(cfg.MergeWorkers)
+	if !ok {
 		return nil, ErrBadConfig
 	}
-	if cfg.MergeWorkers == 0 {
-		cfg.MergeWorkers = DefaultMergeWorkers
-	}
-	return &Scheduler{workers: cfg.MergeWorkers}, nil
+	return &Scheduler{workers: workers}, nil
 }
 
 // Add makes the scheduler run t's merges.

@@ -73,6 +73,20 @@ type harness struct {
 	// victim stands for a cleaner with a victim, so stalled items wait; otherwise the harness
 	// reports no victim and they fail with NoSpace.
 	victim bool
+	// plant, when set, plants a bug in every recovery the harness starts.
+	plant func(*disklog.Recovery)
+	// poolBytes, when set, sizes the pool of every recovery the harness starts.
+	poolBytes int
+	// oracle, when set, is handed every round the log writes and every LSN it reports durable.
+	oracle oracleFeed
+	// opened is each segment's open sequence, from the write that opened it.
+	opened map[uint32]uint64
+	// tickets is the items submitted through the harness.
+	tickets *ticketBook
+	// noted is each round in flight that the oracle was handed, by LSN.
+	noted map[uint64]notedRound
+	// crashed is what was in flight when the last log was dropped, until a recovery settles it.
+	crashed crashedRounds
 }
 
 func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {
@@ -151,7 +165,10 @@ func blankHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Con
 		completed: map[core.IOID]bool{},
 		durable:   map[core.IOID]bool{},
 		writeAt:   map[core.LBA]core.IOID{},
+		opened:    map[uint32]uint64{},
+		noted:     map[uint64]notedRound{},
 	}
+	h.tickets = &ticketBook{t: t, submitted: map[disklog.Ticket]disklog.Entry{}, unanswered: map[disklog.Ticket]bool{}}
 	h.raw = func(now core.Tick) core.Tick { return now*1226/1000 + 7 }
 	h.ctx = core.Context{Now: 1000, Raw: h.raw(1000), Pool: h.pool}
 	return h
@@ -200,6 +217,10 @@ func (h *harness) absorb() {
 			if h.onWrite != nil {
 				h.onWrite(a)
 			}
+			h.noteOpen(a)
+			if h.oracle != nil && h.log != nil && h.rec == nil {
+				h.noteRound(a)
+			}
 		case core.ActDiskFsync:
 			p := pendingIO{act: a}
 			if a.Linked {
@@ -220,6 +241,9 @@ func (h *harness) absorb() {
 	if h.sched != nil {
 		h.handOver()
 	}
+	if h.rec == nil {
+		h.tickets.log = h.log
+	}
 	from := len(h.events)
 	for _, ev := range h.out.Events {
 		ev.Entries = slices.Clone(ev.Entries)
@@ -227,6 +251,15 @@ func (h *harness) absorb() {
 		ev.Payloads = slices.Clone(ev.Payloads)
 		ev.Data = slices.Clone(ev.Data)
 		h.events = append(h.events, ev)
+		h.tickets.answer(ev, h.oracle != nil)
+		if h.oracle != nil && ev.Kind == disklog.Durable {
+			n := h.noted[ev.LSN]
+			delete(h.noted, ev.LSN)
+			h.tickets.mismatch(checkTickets(ev.LSN, n.entries, ev.Tickets, h.tickets.submitted))
+			if err := h.oracle.Acked(ev.LSN); err != nil {
+				h.t.Fatalf("oracle: %v", err)
+			}
+		}
 		if h.sched != nil && ev.Kind == disklog.Durable {
 			h.node.Output(h.loop, trace.Record{Name: trace.OutDurable, Fields: [trace.MaxFields]uint64{ev.LSN, ev.LSN}})
 		}
@@ -455,6 +488,7 @@ func (h *harness) submit(s disklog.Stream, it disklog.Item) disklog.Ticket {
 	if err != nil {
 		h.t.Fatalf("submit %+v: %v", it.Entry, err)
 	}
+	h.tickets.track(t, it.Entry)
 	h.absorb()
 	return t
 }

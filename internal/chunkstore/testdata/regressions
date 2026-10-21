@@ -1,0 +1,35 @@
+# Reduced failures of the chunk index's metamorphic test (meta_test.go), each the ops of one seed
+# under the option set that failed, its cadence written as explicit ops. Ops: write and punch
+# chunk version first count lba; freeze chunk version epoch lba; move chunk block from to header;
+# release chunk version; lookup chunk block count; at chunk block count epoch; chunk c; frozenat
+# chunk epoch; live header; check. A block reads as version:lba:header, or miss. go test -rewrite
+# regenerates the output.
+
+# A chunk first written after a cut reads absent at the snapshot, before and after a restart that
+# replays its absent freeze, and a cleaner move after the restart changes only the live map.
+run set=A
+freeze 0 0 1 100
+write 0 1 0 2 101
+at 0 0 2 1
+flush
+write 0 2 1 1 104
+restart
+at 0 0 2 1
+lookup 0 0 2
+chunk 0
+frozenat 0 1
+move 0 0 102 107 106
+lookup 0 0 2
+live 101
+live 106
+check
+----
+at 0 0 2 1: miss miss
+at 0 0 2 1: miss miss
+lookup 0 0 2: 1:102:101 2:105:104
+chunk 0: 2:1
+frozenat 0 1: 0
+move 0 0 102 107 106: moved 1
+lookup 0 0 2: 1:107:106 2:105:104
+live 101: 0
+live 106: 1

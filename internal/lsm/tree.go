@@ -74,6 +74,7 @@ type Tree struct {
 	limitBuffer int
 	maxFrag     int
 	it          iterState
+	linear      bool
 	plant       plants
 }
 
@@ -87,6 +88,10 @@ type plants struct {
 	repeatBlock   bool
 	installOldest bool
 	noSums        bool
+	dropRemovals  bool
+	loadUnordered bool
+	skipFrozen    bool
+	mergeNoOlder  bool
 }
 
 type flush struct {
@@ -121,8 +126,8 @@ func New(cfg Config) (*Tree, error) {
 }
 
 func (t *Tree) state() state {
-	st := state{mem: t.mem, memRoot: t.mem.root, memFRoot: t.mem.froot, runs: t.runs, filter: t.cfg.Filter, prefix: t.cfg.Prefix}
-	if t.frozen != nil {
+	st := state{mem: t.mem, memRoot: t.mem.root, memFRoot: t.mem.froot, runs: t.runs, linear: t.linear, filter: t.cfg.Filter, prefix: t.cfg.Prefix}
+	if t.frozen != nil && !t.plant.skipFrozen {
 		st.frozen, st.frozenRoot, st.frozenFRoot = t.frozen, t.frozen.root, t.frozen.froot
 	}
 	return st
@@ -292,7 +297,7 @@ func (t *Tree) BeginFlush() (bool, error) {
 	if t.frozen != nil {
 		fl.frozen = &run{seq: t.frozenSeq}
 		fl.write = append(fl.write, fl.frozen)
-		st := state{mem: t.frozen, memRoot: t.frozen.root, memFRoot: t.frozen.froot}
+		st := state{mem: t.frozen, memRoot: t.frozen.root, memFRoot: t.frozen.froot, linear: t.linear}
 		fl.src.reset(&st, true)
 		fl.src.seek(nil)
 		keys := t.frozen.count
@@ -338,7 +343,11 @@ func (t *Tree) NextPiece(buf []byte) (int, bool, error) {
 		bw.record, bw.skipSecond = t.cfg.Check, t.plant.skipEncoded
 		fl.filter.skipSecond = t.plant.skipFiltered
 		if !fl.entriesDone {
-			if fl.entriesDone = fillBlock(bw, &fl.filter, &fl.src, limit, fl.older); fl.entriesDone {
+			older := fl.older
+			if t.plant.dropRemovals {
+				older = nil
+			}
+			if fl.entriesDone = fillBlock(bw, &fl.filter, &fl.src, limit, older); fl.entriesDone {
 				fl.src.fragsFromStart()
 			}
 		}
@@ -608,6 +617,9 @@ func (t *Tree) LoadRun(ref disklog.BlobRef, pieces [][]byte) error {
 		}
 		return 0
 	})
+	if t.plant.loadUnordered {
+		at = 0
+	}
 	t.runs = slices.Insert(t.runs, at, r)
 	t.written = append(t.written, r)
 	t.nextSeq = max(t.nextSeq, seq+1)

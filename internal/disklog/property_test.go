@@ -20,10 +20,10 @@ type submitted struct {
 }
 
 type seedStats struct {
-	noSpace, tooLarge, deferredFlushes, deepRuns, poolFull, inDoubt, errorRuns, checkpoints, checkpointsFailed, manifestPieces int
+	noSpace, tooLarge, deferredFlushes, deepRuns, poolFull, inDoubt, errorRuns, checkpoints, checkpointsFailed, manifestPieces, mergePieces int
 }
 
-// runSeed submits random items to random streams, checkpoints whenever one is due and
+// runSeed submits random items to random streams and merge lanes, checkpoints whenever one is due and
 // may fail one disk action, with completions interleaved at random, on a node of the
 // scheduler, whose trace it returns with the harness. It checks that every
 // accepted item ends durable in a record on disk that decodes to it, failed, or in doubt
@@ -41,6 +41,7 @@ func runSeed(t testing.TB, seed uint64, setup func(*harness), stats *seedStats) 
 	cfg := testConfig(maxRec)
 	cfg.CommitDepth = int(r.Range(1, 3))
 	cfg.MaxReplayBytes = r.Range(4, 200) * core.BlockSize
+	cfg.MergeWorkers = int(r.Range(1, 4))
 	maxWrite := min(maxRec, uint64(geo.SegmentBlocks))
 	own := uint64(cfg.CommitDepth) * (2*maxWrite - 1)
 	h := schedHarness(t, seed, disk, int(own+r.Range(maxWrite, 512))*core.BlockSize, cfg)
@@ -169,6 +170,24 @@ func runSeed(t testing.TB, seed uint64, setup func(*harness), stats *seedStats) 
 				t.Fatalf("seed %d: end: %v", seed, err)
 			}
 			h.absorb()
+		case toSubmit > 0 && h.log.Err() == nil && (len(h.pending) == 0 || r.Chance(2, 5)) && r.Chance(1, 8):
+			toSubmit--
+			n := int(r.Range(1, min(5000, maxBlob)))
+			buf, err := h.pool.Alloc(n)
+			if err != nil {
+				stats.poolFull++
+				continue
+			}
+			r.Fill(h.pool.Bytes(buf)[:n])
+			payload := bytes.Clone(h.pool.Bytes(buf)[:n])
+			owner := uint32(r.Range(1, 2))
+			tk, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), owner, buf, uint64(n), &h.out)
+			if err != nil {
+				t.Fatalf("seed %d: merge piece: %v", seed, err)
+			}
+			items[tk] = &submitted{entry: disklog.BlobEntry(disklog.BlobRun, owner, uint64(n)), payload: payload}
+			stats.mergePieces++
+			h.absorb()
 		case toSubmit > 0 && h.log.Err() == nil && (len(h.pending) == 0 || r.Chance(2, 5)):
 			toSubmit--
 			s := disklog.Stream(r.Below(2))
@@ -259,7 +278,7 @@ func TestEveryAcceptedItemDecodes(t *testing.T) {
 		}
 	}
 	if stats.noSpace == 0 || stats.tooLarge == 0 || stats.deferredFlushes == 0 || stats.deepRuns == 0 ||
-		stats.poolFull == 0 || stats.inDoubt == 0 || stats.checkpoints == 0 || stats.checkpointsFailed == 0 || stats.manifestPieces == 0 {
+		stats.poolFull == 0 || stats.inDoubt == 0 || stats.checkpoints == 0 || stats.checkpointsFailed == 0 || stats.manifestPieces == 0 || stats.mergePieces == 0 {
 		t.Fatalf("seeds missed a case: %+v", stats)
 	}
 	t.Logf("%+v", stats)
@@ -413,9 +432,21 @@ func TestDecodeCheckCatchesABrokenEncoder(t *testing.T) {
 			disklog.FixRecordCRC(rec)
 		})},
 		{"flipped bit", header(func(head []byte) { head[len(head)-1] ^= 1 })},
-		{"segment header of the other stream, checksum fixed", header(func(head []byte) {
+		{"segment header of the next stream, checksum fixed", header(func(head []byte) {
 			if &record(head)[0] != &head[0] {
-				head[10] ^= 1
+				head[10] = (head[10] + 1) % 3
+				disklog.FixSegmentCRC(head)
+			}
+		})},
+		{"segment header of the stream after next, checksum fixed", header(func(head []byte) {
+			if &record(head)[0] != &head[0] {
+				head[10] = (head[10] + 2) % 3
+				disklog.FixSegmentCRC(head)
+			}
+		})},
+		{"segment header of another lane, checksum fixed", header(func(head []byte) {
+			if &record(head)[0] != &head[0] {
+				head[11] ^= 1
 				disklog.FixSegmentCRC(head)
 			}
 		})},

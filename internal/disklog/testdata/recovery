@@ -1,0 +1,308 @@
+# Recovery from scripted disk images, each on a freshly formatted 1 GiB disk (64-block segments,
+# segment 1 the hot stream's from block 64, segment 2 the cold stream's from block 128).
+# run [depth=n] [plant=stop-early|past-gaps] takes commands, one per line; a plant breaks every
+# recovery the case runs, as disklog.StopEarly or disklog.ReplayPastGaps does (plant=swap-tickets,
+# which fails any case, is for TestScriptedHarnessFailuresNameTheirLine):
+#   write <hot|cold> <chunk> <first> <count> <version>   a chunk write, submitted and completed
+#   submit <hot|cold> <chunk> <first> <count> <version>  submitted only; prints the actions it queues
+#   exec ioN                                              executes pending action ioN
+#   crash [lba...]                                        crashes, landing only these unflushed blocks
+#   xor <lba> <mask>                                      XORs every byte of a block with mask
+#   flip <lba> <byte> <mask>                              XORs one byte of a block with mask
+#   zeros <lba>                                           whether a block reads as zeros
+#   recover <open|rebuild>                                recovers and prints the LSNs replayed
+#   index [rejected]                                      prints the last recovery's index, each
+#                                                         extent's chunk, blocks, version, pool and
+#                                                         LBAs, whether every block reads back, and
+#                                                         whether it is what the crash oracle holds
+#                                                         at the recovered LSN: every acknowledged
+#                                                         record and the written ones up to it. The
+#                                                         case fails unless the oracle rejects the
+#                                                         index exactly when it says rejected.
+# go test -rewrite regenerates the output.
+
+# Torn tail (RocksDB TruncatedTrailingRecord, PartialLast): three 2-block writes, then a fourth
+# round written but not flushed. A crash landing none of its blocks recovers LSNs 1-3.
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+submit hot 3 0 2 4
+exec io110
+crash
+recover open
+index
+----
+submit hot 3 0 2 4: write 74+3 io110, fsync io111
+recover open: LSNs 1-3, durable 3
+index: 6 blocks, every block reads back, as the oracle expects at LSN 3
+  chunk 0 blocks 0-1 v1 pool 1 at 66-67
+  chunk 1 blocks 0-1 v2 pool 1 at 69-70
+  chunk 2 blocks 0-1 v3 pool 1 at 72-73
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+submit hot 3 0 2 4
+exec io110
+crash 74
+recover open
+index
+----
+submit hot 3 0 2 4: write 74+3 io110, fsync io111
+recover open: LSNs 1-3, durable 3, headers erased: 1
+index: 6 blocks, every block reads back, as the oracle expects at LSN 3
+  chunk 0 blocks 0-1 v1 pool 1 at 66-67
+  chunk 1 blocks 0-1 v2 pool 1 at 69-70
+  chunk 2 blocks 0-1 v3 pool 1 at 72-73
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+submit hot 3 0 2 4
+exec io110
+crash 74 75
+recover open
+index
+----
+submit hot 3 0 2 4: write 74+3 io110, fsync io111
+recover open: LSNs 1-3, durable 3, headers erased: 1
+index: 6 blocks, every block reads back, as the oracle expects at LSN 3
+  chunk 0 blocks 0-1 v1 pool 1 at 66-67
+  chunk 1 blocks 0-1 v2 pool 1 at 69-70
+  chunk 2 blocks 0-1 v3 pool 1 at 72-73
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+submit hot 3 0 2 4
+exec io110
+crash 75 76
+recover open
+index
+----
+submit hot 3 0 2 4: write 74+3 io110, fsync io111
+recover open: LSNs 1-3, durable 3
+index: 6 blocks, every block reads back, as the oracle expects at LSN 3
+  chunk 0 blocks 0-1 v1 pool 1 at 66-67
+  chunk 1 blocks 0-1 v2 pool 1 at 69-70
+  chunk 2 blocks 0-1 v3 pool 1 at 72-73
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+submit hot 3 0 2 4
+exec io110
+crash 74 76
+recover open
+index
+----
+submit hot 3 0 2 4: write 74+3 io110, fsync io111
+recover open: LSNs 1-3, durable 3, headers erased: 1
+index: 6 blocks, every block reads back, as the oracle expects at LSN 3
+  chunk 0 blocks 0-1 v1 pool 1 at 66-67
+  chunk 1 blocks 0-1 v2 pool 1 at 69-70
+  chunk 2 blocks 0-1 v3 pool 1 at 72-73
+
+# An unflushed but fully landed last record is kept, although it was never acknowledged.
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+submit hot 3 0 2 4
+exec io110
+crash 74 75 76
+recover open
+index
+recover rebuild
+index
+----
+submit hot 3 0 2 4: write 74+3 io110, fsync io111
+recover open: LSNs 1-4, durable 4
+index: 8 blocks, every block reads back, as the oracle expects at LSN 4
+  chunk 0 blocks 0-1 v1 pool 1 at 66-67
+  chunk 1 blocks 0-1 v2 pool 1 at 69-70
+  chunk 2 blocks 0-1 v3 pool 1 at 72-73
+  chunk 3 blocks 0-1 v4 pool 1 at 75-76
+recover rebuild: LSNs 1-4, durable 4
+index: 8 blocks, every block reads back, as the oracle expects at LSN 4
+  chunk 0 blocks 0-1 v1 pool 1 at 66-67
+  chunk 1 blocks 0-1 v2 pool 1 at 69-70
+  chunk 2 blocks 0-1 v3 pool 1 at 72-73
+  chunk 3 blocks 0-1 v4 pool 1 at 75-76
+
+# A mapped block damaged after recovery does not read back.
+run
+write hot 0 0 2 1
+recover open
+xor 66 0xff
+index
+----
+recover open: LSNs 1-1, durable 1
+index: 2 blocks, chunk 0 block 0 does not read back, as the oracle expects at LSN 1
+  chunk 0 blocks 0-1 v1 pool 1 at 66-67
+
+# Damage in a middle record is corruption, not truncation, and open and rebuild agree: record 2's
+# header XORed with 0x5A (RocksDB ErrorJoinsRecords), and one flipped bit in record 3's header or
+# data, or in record 4's header, the last but one, of 5 records (PAR, FAST 2018).
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+write hot 3 0 2 4
+write hot 4 0 2 5
+xor 68 0x5a
+recover open
+recover rebuild
+----
+recover open: Corrupt(LSN 2)
+recover rebuild: Corrupt(LSN 2)
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+write hot 3 0 2 4
+write hot 4 0 2 5
+flip 71 60 1
+recover open
+recover rebuild
+----
+recover open: Corrupt(LSN 3)
+recover rebuild: Corrupt(LSN 3)
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+write hot 3 0 2 4
+write hot 4 0 2 5
+flip 72 100 0x80
+recover open
+recover rebuild
+----
+recover open: Corrupt(LSN 3)
+recover rebuild: Corrupt(LSN 3)
+
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+write hot 3 0 2 4
+write hot 4 0 2 5
+flip 74 60 1
+recover open
+recover rebuild
+----
+recover open: Corrupt(LSN 4)
+recover rebuild: Corrupt(LSN 4)
+
+# Damage in the last record's data cannot be told from a torn write, so it recovers as a crash,
+# and the oracle names the acknowledged record it lost; it then takes the recovered index as its
+# model, so a later write recovers as the oracle expects.
+run
+write hot 0 0 2 1
+write hot 1 0 2 2
+write hot 2 0 2 3
+write hot 3 0 2 4
+write hot 4 0 2 5
+flip 78 7 4
+recover open
+index rejected
+write hot 5 0 1 6
+recover open
+index
+----
+recover open: LSNs 1-4, durable 4, headers erased: 1
+index: 8 blocks, every block reads back, oracle: recovered to LSN 4, acknowledged 5: recovery lost an acknowledged record
+  chunk 0 blocks 0-1 v1 pool 1 at 66-67
+  chunk 1 blocks 0-1 v2 pool 1 at 69-70
+  chunk 2 blocks 0-1 v3 pool 1 at 72-73
+  chunk 3 blocks 0-1 v4 pool 1 at 75-76
+recover open: LSNs 1-5, durable 5
+index: 9 blocks, every block reads back, as the oracle expects at LSN 5
+  chunk 0 blocks 0-1 v1 pool 1 at 66-67
+  chunk 1 blocks 0-1 v2 pool 1 at 69-70
+  chunk 2 blocks 0-1 v3 pool 1 at 72-73
+  chunk 3 blocks 0-1 v4 pool 1 at 75-76
+  chunk 5 block 0 v6 pool 1 at 78
+
+# Commit depth 2, both rounds in flight landed whole: a hot and a cold write written but not
+# flushed recover as LSNs 2 and 3.
+run depth=2
+write hot 0 0 1 1
+submit hot 1 0 2 2
+submit cold 2 0 1 3
+exec io108
+exec io106
+crash 67 68 69 128 129 130
+recover open
+index
+----
+submit hot 1 0 2 2: write 67+3 io106, fsync io107
+submit cold 2 0 1 3: write 128+3 io108
+recover open: LSNs 1-3, durable 3
+index: 4 blocks, every block reads back, as the oracle expects at LSN 3
+  chunk 0 block 0 v1 pool 1 at 66
+  chunk 1 blocks 0-1 v2 pool 1 at 68-69
+  chunk 2 block 0 v3 pool 1 at 130
+
+# Commit depth 2, a round missing: of two hot rounds in flight the first's header does not land
+# and the second lands whole. Both are dropped and the second's header is zeroed, so a shorter
+# write that reuses LSN 2 is not followed, on the next open, by the old LSN 3.
+run depth=2
+write hot 0 0 1 1
+submit hot 1 0 2 2
+submit hot 2 0 1 3
+exec io108
+exec io106
+crash 68 69 70 71
+recover open
+zeros 70
+write hot 3 0 1 4
+recover open
+index
+----
+submit hot 1 0 2 2: write 67+3 io106, fsync io107
+submit hot 2 0 1 3: write 70+2 io108
+recover open: LSNs 1-1, durable 1, headers erased: 1
+zeros 70: true
+recover open: LSNs 1-2, durable 2
+index: 2 blocks, every block reads back, as the oracle expects at LSN 2
+  chunk 0 block 0 v1 pool 1 at 66
+  chunk 3 block 0 v4 pool 1 at 68
+
+# A recovery that reports the LSN before the last it replayed loses an acknowledged record.
+run plant=stop-early
+write hot 0 0 2 1
+write hot 1 0 2 2
+recover open
+index rejected
+----
+recover open: LSNs 1-2, durable 1
+index: 4 blocks, every block reads back, oracle: recovered to LSN 1, acknowledged 2: recovery lost an acknowledged record
+  chunk 0 blocks 0-1 v1 pool 1 at 66-67
+  chunk 1 blocks 0-1 v2 pool 1 at 69-70
+
+# A recovery that replays past a missing record keeps LSN 3 without LSN 2: the depth-2 case of
+# a round missing, whose second round the oracle expects only with the first.
+run depth=2 plant=past-gaps
+write hot 0 0 1 1
+submit hot 1 0 2 2
+submit hot 2 0 1 3
+exec io108
+exec io106
+crash 68 69 70 71
+recover open
+index rejected
+----
+submit hot 1 0 2 2: write 67+3 io106, fsync io107
+submit hot 2 0 1 3: write 70+2 io108
+recover open: LSNs [1 3], durable 3
+index: 2 blocks, every block reads back, oracle: index at LSN 3 differs from the oracle's: chunk 1 block 0 missing, want v2 at 68 (2 blocks differ)
+  chunk 0 block 0 v1 pool 1 at 66
+  chunk 2 block 0 v3 pool 1 at 71

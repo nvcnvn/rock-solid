@@ -11,6 +11,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
 func (h *harness) put(s disklog.Stream, it disklog.Item) {
@@ -41,6 +42,7 @@ func wantCorrupt(t testing.TB, res *recovered, lsn uint64) {
 func (h *harness) reformat(logID uint64) {
 	h.t.Helper()
 	h.resetIO()
+	h.crashed = crashedRounds{}
 	h.logID = logID
 	var err error
 	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: logID, Geometry: h.geo}, firstIO, &h.out)
@@ -102,66 +104,12 @@ func TestRecoverReformattedDisk(t *testing.T) {
 	h.readBack(res.index)
 }
 
-func TestRecoverTornTail(t *testing.T) {
-	for _, landed := range [][]core.LBA{{}, {74}, {74, 75}, {75, 76}, {74, 76}, {74, 75, 76}} {
-		h := formatted(t, gib, testConfig(0))
-		n := newNode(h, 0)
-		h.twoBlockWrites(3)
-		before := n.live.clone()
-		h.submit(disklog.Hot, h.chunkWrite(3, 0, 2, 4))
-		h.wantTrace("write 74+3 io110", "fsync io111")
-		h.step(0)
-		h.crashLanding(landed...)
-		res := h.reopen()
-		if len(landed) == 3 {
-			h.wantLSNs(res, lsnRange(1, 4))
-			if got := res.replayed[3].Entries; !slices.Equal(got, []disklog.Entry{disklog.WriteEntry(1, chunkOf(3), 4, 0, 2)}) {
-				t.Fatalf("kept unflushed record holds %+v", got)
-			}
-			before.apply(res.replayed[3])
-		} else {
-			h.wantLSNs(res, lsnRange(1, 3))
-		}
-		h.wantModel("index", res.index, before)
-		h.readBack(res.index)
-	}
-}
-
 func xorBlock(h *harness, lba core.LBA, mask byte) {
 	b := h.read(lba, 1)
 	for i := range b {
 		b[i] ^= mask
 	}
 	h.disk.Put(lba, b)
-}
-
-func TestRecoverDamageInTheMiddleIsCorruption(t *testing.T) {
-	cases := []struct {
-		name   string
-		damage func(h *harness)
-		lsn    uint64
-	}{
-		{"record 2's header, every byte", func(h *harness) { xorBlock(h, 68, 0x5a) }, 2},
-		{"a bit of record 3's header", func(h *harness) { h.disk.FlipBit(71, 60, 1) }, 3},
-		{"a bit of record 3's data", func(h *harness) { h.disk.FlipBit(72, 100, 0x80) }, 3},
-		{"a bit of record 4's header, the last but one", func(h *harness) { h.disk.FlipBit(74, 60, 1) }, 4},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			h := formatted(t, gib, testConfig(0))
-			h.twoBlockWrites(5)
-			c.damage(h)
-			wantCorrupt(t, h.recover(disklog.ModeOpen), c.lsn)
-			wantCorrupt(t, h.recover(disklog.ModeRebuild), c.lsn)
-		})
-	}
-}
-
-func TestRecoverDamageInTheLastRecordIsACrash(t *testing.T) {
-	h := formatted(t, gib, testConfig(0))
-	h.twoBlockWrites(5)
-	h.disk.FlipBit(78, 7, 4)
-	h.wantLSNs(h.reopen(), lsnRange(1, 4))
 }
 
 func TestRecoverOverwritesATornTail(t *testing.T) {
@@ -306,24 +254,45 @@ func TestRecoverReadErrorInASegmentFails(t *testing.T) {
 	}
 }
 
-func TestRecoverManySegmentsBothStreams(t *testing.T) {
-	h := formatted(t, 1<<16*core.BlockSize, testConfig(4))
+func TestRecoverManySegmentsEveryLane(t *testing.T) {
+	cfg := testConfig(4)
+	cfg.MergeWorkers = 4
+	cfg.MaxReplayBytes = 64 * core.BlockSize
+	h := formatted(t, 1<<16*core.BlockSize, cfg)
 	n := newNode(h, 0)
 	r := core.NewRand(7)
+	merges := map[uint64]bool{}
 	for i := range 200 {
 		h.put(disklog.Hot, h.chunkWrite(uint32(r.Below(32)), uint16(r.Below(1000)), uint16(r.Range(1, 2)), uint64(i+1)))
 		if i%5 == 4 {
 			h.put(disklog.Cold, h.blob(disklog.BlobRaftEntries, 9, int(r.Range(1, h.log.MaxBlobBytes())), uint64(i)))
 		}
+		if i%3 == 2 {
+			merges[h.putMerge(int(r.Range(1, 4)), runOwner, int(r.Range(1, h.log.MaxBlobBytes())), uint64(i)).LSN] = true
+		}
+		for n.step() {
+			h.run()
+		}
+	}
+	if n.checkpoints == 0 {
+		t.Fatal("no checkpoint ran")
 	}
 	durable := h.log.DurableLSN()
 	if last := h.eventsOf(disklog.Durable); last[len(last)-1].Segment < 20 {
 		t.Fatalf("200 writes reached only segment %d", last[len(last)-1].Segment)
 	}
+	delivered := func(from uint64) []uint64 {
+		return slices.DeleteFunc(lsnRange(from, durable), func(lsn uint64) bool { return merges[lsn] })
+	}
 	res := h.reopen()
-	h.wantLSNs(res, lsnRange(1, durable))
+	if got := res.lsns(); res.replayLSN == 0 || !slices.Equal(got, delivered(res.replayLSN+1)) || res.durable != durable {
+		t.Fatalf("open replayed %v to LSN %d, want every record but the merges' after %d to %d", got, res.durable, res.replayLSN, durable)
+	}
 	h.wantModel("open", res.index, n.live)
 	reb := h.recover(disklog.ModeRebuild)
+	if got := reb.lsns(); !slices.Equal(got, delivered(1)) || reb.durable != durable {
+		t.Fatalf("rebuild replayed %v to LSN %d, want every record but the merges' to %d", got, reb.durable, durable)
+	}
 	h.wantModel("rebuild", reb.index, n.live)
 	h.readBack(res.index)
 }
@@ -540,54 +509,6 @@ func TestRecoveryRefusesCallsOutOfStep(t *testing.T) {
 	if h.pool.Live() != 0 {
 		t.Fatalf("%d buffers live after a failed recovery", h.pool.Live())
 	}
-}
-
-func TestCommitDepth2KeepsBothLandedRounds(t *testing.T) {
-	cfg := testConfig(0)
-	cfg.CommitDepth = 2
-	h := formatted(t, gib, cfg)
-	n := newNode(h, 0)
-	h.put(disklog.Hot, h.chunkWrite(0, 0, 1, 1))
-	h.submit(disklog.Hot, h.chunkWrite(1, 0, 2, 2))
-	h.submit(disklog.Cold, h.chunkWrite(2, 0, 1, 3))
-	h.wantTrace("write 64+3 io104", "fsync io105", "write 67+3 io106", "fsync io107", "write 128+3 io108")
-	h.step(2)
-	h.step(0)
-	h.crashLanding(67, 68, 69, 128, 129, 130)
-	res := h.reopen()
-	h.wantLSNs(res, lsnRange(1, 3))
-	want := n.live.clone()
-	want.apply(res.replayed[1])
-	want.apply(res.replayed[2])
-	h.wantModel("index", res.index, want)
-	h.readBack(res.index)
-}
-
-func TestCommitDepth2DropsRoundsAfterAMissingOne(t *testing.T) {
-	cfg := testConfig(0)
-	cfg.CommitDepth = 2
-	h := formatted(t, gib, cfg)
-	h.put(disklog.Hot, h.chunkWrite(0, 0, 1, 1))
-	h.submit(disklog.Hot, h.chunkWrite(1, 0, 2, 2))
-	h.submit(disklog.Hot, h.chunkWrite(2, 0, 1, 3))
-	h.wantTrace("write 64+3 io104", "fsync io105", "write 67+3 io106", "fsync io107", "write 70+2 io108")
-	h.step(2)
-	h.step(0)
-	h.crashLanding(68, 69, 70, 71)
-	res := h.reopen()
-	h.wantLSNs(res, lsnRange(1, 1))
-	if !isZeroBlock(h.read(70, 1)) {
-		t.Fatal("the landed record after the missing one was not erased")
-	}
-	n := newNode(h, 0)
-	n.live = res.index
-	h.put(disklog.Hot, h.chunkWrite(3, 0, 1, 4))
-	if d := h.eventsOf(disklog.Durable); len(d) != 1 || d[0].LSN != 2 || d[0].LBA != 67 {
-		t.Fatalf("next write: %+v", d)
-	}
-	res = h.reopen()
-	h.wantLSNs(res, lsnRange(1, 2))
-	h.wantModel("index", res.index, n.live)
 }
 
 func TestRecoverFlushesBeforeReportingRecovered(t *testing.T) {
@@ -852,6 +773,7 @@ func failedFlush(t *testing.T, depth int) (*harness, *node) {
 	cfg.CommitDepth = depth
 	h := formatted(t, 1024*core.BlockSize, cfg)
 	n := newNode(h, 0)
+	h.watch(n.live)
 	for i := range 3 {
 		h.put(disklog.Hot, h.chunkWrite(uint32(i), 0, 1, uint64(i+1)))
 	}
@@ -890,7 +812,7 @@ func TestRecoverAfterAFailedFlush(t *testing.T) {
 			t.Fatalf("depth %d: %d blocks unflushed", depth, unflushed)
 		}
 		for mask := range 1 << unflushed {
-			h, n := failedFlush(t, depth)
+			h, _ := failedFlush(t, depth)
 			h.disk.Crash(func(i int, _ core.LBA) bool { return mask>>i&1 == 1 })
 			res := h.reopen()
 			if res.durable < 3 || res.durable > uint64(3+depth) {
@@ -905,11 +827,9 @@ func TestRecoverAfterAFailedFlush(t *testing.T) {
 					t.Fatalf("depth %d, landed %b: kept LSN %d with only blocks %b of it", depth, mask, lsn, round)
 				}
 			}
-			want := n.live.clone()
-			for _, ev := range res.replayed[3:] {
-				want.apply(ev)
+			if err := oracleCheck(res); err != nil {
+				t.Fatalf("depth %d, landed %b: %v", depth, mask, err)
 			}
-			h.wantModel("index", res.index, want)
 			h.readBack(res.index)
 		}
 	}
@@ -926,18 +846,36 @@ type fact struct {
 	entry disklog.Entry
 }
 
+// facts is each owner's entries in LSN order.
+type facts map[uint32][]fact
+
+// Apply gives each owner its entries of a Durable or Replayed record.
+func (f facts) Apply(ev disklog.Event) { appendFacts(f, ev, nil) }
+
+// Clone copies every owner's entries.
+func (f facts) Clone() facts {
+	c := facts{}
+	for o, fs := range f {
+		c[o] = slices.Clone(fs)
+	}
+	return c
+}
+
 // owners stands in for two chunk indexes and a shard replica sharing one log: index A owns
 // the writes of pool 1, index B those of pool 2, and the replica its Raft entries. A run
 // holds the number of facts its owner had applied.
 type owners struct {
-	h    *harness
-	seed uint64
-	live map[uint32][]fact
-	refs map[disklog.Ticket]disklog.BlobRef
+	h      *harness
+	seed   uint64
+	live   facts
+	refs   map[disklog.Ticket]disklog.BlobRef
+	oracle *sim.Oracle[disklog.Event, facts]
 }
 
 func newOwners(h *harness) *owners {
-	o := &owners{h: h, live: map[uint32][]fact{}, refs: map[disklog.Ticket]disklog.BlobRef{}}
+	o := &owners{h: h, live: facts{}, refs: map[disklog.Ticket]disklog.BlobRef{}}
+	o.oracle = sim.NewOracle[disklog.Event](h.log.DurableLSN(), facts{})
+	h.feedOracle(o.oracle)
 	h.onEvent = func(ev disklog.Event) {
 		if ev.Kind != disklog.Durable {
 			return
@@ -961,10 +899,10 @@ func ownerOf(e disklog.Entry) (uint32, bool) {
 }
 
 // appendFacts gives each owner the entries of a record past its replay LSN.
-func appendFacts(facts map[uint32][]fact, ev disklog.Event, replayLSN map[uint32]uint64) {
+func appendFacts(f facts, ev disklog.Event, replayLSN map[uint32]uint64) {
 	for _, e := range ev.Entries {
 		if o, ok := ownerOf(e); ok && ev.LSN > replayLSN[o] {
-			facts[o] = append(facts[o], fact{ev.LSN, e})
+			f[o] = append(f[o], fact{ev.LSN, e})
 		}
 	}
 }
@@ -1002,6 +940,7 @@ func (o *owners) checkpoint(indexes []disklog.CheckpointIndex, flushed ...uint32
 		if err != nil {
 			h.t.Fatal(err)
 		}
+		h.tickets.track(t, disklog.BlobEntry(disklog.BlobRun, owner, 8))
 		h.absorb()
 		tickets[owner] = t
 	}
@@ -1023,11 +962,11 @@ func (o *owners) checkpoint(indexes []disklog.CheckpointIndex, flushed ...uint32
 
 // recover runs an open recovery in which each owner loads its newest run and takes the
 // records past its own replay LSN, and resumes the log.
-func (o *owners) recover() (uint64, map[uint32][]fact) {
+func (o *owners) recover() (uint64, facts) {
 	h := o.h
 	h.t.Helper()
 	h.resetIO()
-	got := map[uint32][]fact{}
+	got := facts{}
 	replayLSN := map[uint32]uint64{}
 	reading := map[disklog.BlobRef]uint32{}
 	var durable uint64
@@ -1083,6 +1022,7 @@ func (o *owners) recover() (uint64, map[uint32][]fact) {
 	h.absorb()
 	h.run()
 	h.onEvent = saved
+	h.settle(durable)
 	if h.log, err = h.rec.Log(&h.ctx); err != nil {
 		h.t.Fatalf("resume: %v", err)
 	}
@@ -1147,16 +1087,6 @@ func TestOneCheckpointOverTwoIndexesAndAShardReplica(t *testing.T) {
 		h.round()
 		h.step(0)
 		acked := h.log.DurableLSN()
-		want := map[uint32][]fact{}
-		for owner, facts := range o.live {
-			want[owner] = slices.Clone(facts)
-		}
-		if landed {
-			for _, it := range inFlight {
-				owner, _ := ownerOf(it.Entry)
-				want[owner] = append(want[owner], fact{acked + 1, it.Entry})
-			}
-		}
 		h.disk.Crash(func(int, core.LBA) bool { return landed })
 		durable, got := o.recover()
 		wantLSN := acked
@@ -1165,6 +1095,10 @@ func TestOneCheckpointOverTwoIndexesAndAShardReplica(t *testing.T) {
 		}
 		if durable != wantLSN {
 			t.Fatalf("landed %v: recovered LSN %d, acknowledged %d", landed, durable, acked)
+		}
+		want, err := o.oracle.Recovered(durable)
+		if err != nil {
+			t.Fatalf("landed %v: %v", landed, err)
 		}
 		for _, owner := range all {
 			if !slices.Equal(got[owner], want[owner]) {

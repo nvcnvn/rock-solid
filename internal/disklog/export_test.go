@@ -23,6 +23,79 @@ func PadWrites(l *Log) {
 	l.breakRound = func(_ []byte, r *round) { r.vec = append(r.vec, core.IOVec{Buf: r.head, Len: core.BlockSize}) }
 }
 
+// SwapTickets makes every round of two or more items report its first two items' tickets swapped.
+func SwapTickets(l *Log) {
+	l.breakRound = func(_ []byte, r *round) {
+		if len(r.tickets) >= 2 {
+			r.tickets[0], r.tickets[1] = r.tickets[1], r.tickets[0]
+		}
+	}
+}
+
+// LoseNewest plants the bug of dropping the newest item queued on stream without an event: its
+// ticket was handed out and its buffer is freed. It reports whether an item was queued.
+func LoseNewest(l *Log, ctx *core.Context, stream Stream) bool {
+	q := &l.lanes[laneOf(stream, 0)].q
+	if q.len() == 0 {
+		return false
+	}
+	if it := q.at(q.len() - 1); it.buf != core.NoBuf {
+		ctx.Pool.Free(it.buf)
+	}
+	q.items = q.items[:len(q.items)-1]
+	return true
+}
+
+// LoseOldestRound plants the bug of dropping the oldest round in flight without an event. It
+// reports whether a round was in flight.
+func LoseOldestRound(l *Log) bool {
+	if l.count == 0 {
+		return false
+	}
+	l.first = (l.first + 1) % len(l.rounds)
+	l.count--
+	return true
+}
+
+// QueuedTickets is the tickets of the items waiting for a round, as events would report them.
+func QueuedTickets(l *Log) []Ticket {
+	var ts []Ticket
+	for i := range l.lanes {
+		q := &l.lanes[i].q
+		for j := range q.len() {
+			ts = append(ts, visible(q.at(j).ticket, &q.at(j).entry))
+		}
+	}
+	return ts
+}
+
+// InFlightTickets is the tickets of the rounds in flight that a disk error has not abandoned.
+func InFlightTickets(l *Log) []Ticket {
+	var ts []Ticket
+	for i := range l.count {
+		if r := l.round(i); !r.abandoned {
+			for j, t := range r.tickets {
+				ts = append(ts, visible(t, &r.entries[j]))
+			}
+		}
+	}
+	return ts
+}
+
+// RoundTickets is the tickets of the round in flight at lsn, as its Durable event would report them.
+func RoundTickets(l *Log, lsn uint64) []Ticket {
+	for i := range l.count {
+		if r := l.round(i); r.lsn == lsn {
+			ts := make([]Ticket, len(r.tickets))
+			for j, t := range r.tickets {
+				ts[j] = visible(t, &r.entries[j])
+			}
+			return ts
+		}
+	}
+	return nil
+}
+
 // AppendAnywhere lets rounds append to a segment whose opening round is still in flight, as
 // a log without that rule would.
 func AppendAnywhere(l *Log) { l.appendAnywhere = true }
@@ -70,3 +143,16 @@ func StartRounds(l *Log, ctx *core.Context, out *Output) { l.startRounds(ctx, ou
 
 // HeldBytes is the bytes of records after the newest manifest that count toward the hold behind a checkpoint.
 func HeldBytes(l *Log) uint64 { return l.heldBytes }
+
+// ReplayPerStream plants the bug of reading each stream, not each lane, from the last of its
+// segments whose first record is at or before the first to replay.
+func ReplayPerStream(r *Recovery) { r.perStream = true }
+
+// SkipMergeLanes plants the bug of leaving merge lanes out of replay.
+func SkipMergeLanes(r *Recovery) { r.skipMerges = true }
+
+// StopEarly plants the bug of reporting the LSN before the last one replay delivered.
+func StopEarly(r *Recovery) { r.stopEarly = true }
+
+// ReplayPastGaps plants the bug of delivering a record past a missing LSN instead of ending the log there.
+func ReplayPastGaps(r *Recovery) { r.pastGaps = true }
