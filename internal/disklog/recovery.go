@@ -1067,7 +1067,7 @@ func (r *Recovery) deliver(x *streamScan, out *Output) {
 	r.replayed += blocks * core.BlockSize
 	if d.Record.LSN > r.replayFloor {
 		r.replayBytes += blocks * core.BlockSize
-		r.heldBytes += ordinaryBytes(d.Entries, blocks*core.BlockSize)
+		r.heldBytes += ordinaryBytes(d.Entries, d.Layout)
 		info := &r.segs[x.headSeg]
 		info.live += d.Layout.DataBlocks
 		info.newest = d.Record.LSN

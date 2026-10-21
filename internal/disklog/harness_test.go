@@ -473,12 +473,16 @@ func (h *harness) wantLive(n int) {
 	}
 }
 
-// close closes the log and checks every buffer is back in the pool.
+// close closes the log, which finds no item waiting, and checks every buffer is back in the pool.
 func (h *harness) close() {
 	h.t.Helper()
-	if err := h.log.Close(&h.ctx); err != nil {
+	if err := h.log.Close(&h.ctx, &h.out); err != nil {
 		h.t.Fatalf("close: %v", err)
 	}
+	if i := slices.IndexFunc(h.out.Events, func(ev disklog.Event) bool { return ev.Kind == disklog.Failed }); i >= 0 {
+		h.t.Fatalf("close failed items still waiting: %+v", h.out.Events[i])
+	}
+	h.out.Reset()
 	if h.pool.Live() != 0 {
 		h.t.Fatalf("%d pool buffers live after close", h.pool.Live())
 	}

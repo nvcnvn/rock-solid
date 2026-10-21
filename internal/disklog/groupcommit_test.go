@@ -288,7 +288,7 @@ func TestDiskErrorWithRoundsInFlight(t *testing.T) {
 		len(failed) != 1 || !slices.Equal(failed[0].Tickets, []disklog.Ticket{c}) {
 		t.Fatalf("events %+v", h.events)
 	}
-	if err := h.log.Close(&h.ctx); !errors.Is(err, disklog.ErrBusy) {
+	if err := h.log.Close(&h.ctx, &h.out); !errors.Is(err, disklog.ErrBusy) {
 		t.Fatalf("close with a write in flight: %v", err)
 	}
 	h.wantLive(1)
@@ -326,7 +326,7 @@ func TestAnErrorOnALaterFlushFailsTheLog(t *testing.T) {
 	if len(h.eventsOf(disklog.Durable)) != 2 || h.log.Err() != nil {
 		t.Fatalf("events %+v", h.events)
 	}
-	if err := h.log.Close(&h.ctx); !errors.Is(err, disklog.ErrBusy) {
+	if err := h.log.Close(&h.ctx, &h.out); !errors.Is(err, disklog.ErrBusy) {
 		t.Fatalf("close with a flush outstanding: %v", err)
 	}
 	h.step(0)

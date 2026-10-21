@@ -63,9 +63,6 @@ func reserveDisk(t *testing.T) (*harness, disklog.Ticket) {
 		t.Fatalf("stalled %v, events %+v", h.log.Stalled(), h.events)
 	}
 	h.wantLive(1)
-	if err := h.log.Close(&h.ctx); !errors.Is(err, disklog.ErrBusy) {
-		t.Fatalf("close with an item held: %v", err)
-	}
 	return h, held
 }
 
@@ -255,5 +252,62 @@ func TestReserveSegmentSurvivesARestart(t *testing.T) {
 	}
 	h.log.FailStalled(&h.ctx, &h.out)
 	h.absorb()
+	h.close()
+}
+
+func TestCloseFailsItemsWaitingForRoom(t *testing.T) {
+	h, held := reserveDisk(t)
+	if err := h.log.Close(&h.ctx, &h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.absorb()
+	if failed := h.eventsOf(disklog.Failed); len(failed) != 1 || !errors.Is(failed[0].Err, disklog.ErrClosed) ||
+		!slices.Equal(failed[0].Tickets, []disklog.Ticket{held}) || h.pool.Live() != 0 {
+		t.Fatalf("close with a write waiting for room: %+v, %d buffers live", h.events, h.pool.Live())
+	}
+}
+
+// The checkpoint's pieces lead the cold stream, so while they fill a segment of the reserve an
+// ordinary cold item waits behind them even with segments free outside it; once their queue
+// empties, the item opens a segment of its own.
+func TestColdItemsWaitForTheCheckpointInTheReserve(t *testing.T) {
+	cfg := testConfig(0)
+	cfg.Reserve = 4093
+	h := formatted(t, gib, cfg)
+	h.put(disklog.Cold, h.write(0, 62, 0))
+	h.put(disklog.Cold, h.write(1, 62, 1))
+	if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: 5, ReplayLSN: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	piece := func(seed uint64) disklog.Ticket {
+		it := h.blob(disklog.BlobRun, 5, 100, seed)
+		tk, err := h.log.CheckpointPiece(&h.ctx, 5, it.Buf, 100, false, &h.out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.absorb()
+		return tk
+	}
+	first := piece(1)
+	disklog.FreeSegment(h.log, 1, true)
+	disklog.FreeSegment(h.log, 2, true)
+	cold := h.submit(disklog.Cold, h.write(2, 1, 2))
+	second := piece(2)
+	h.step(0)
+	h.step(0)
+	if h.log.Queued() != 1 || h.log.Stalled() {
+		t.Fatalf("behind the second piece: %d queued, stalled %v", h.log.Queued(), h.log.Stalled())
+	}
+	h.run()
+	d := h.eventsOf(disklog.Durable)
+	got := func(i int) (disklog.Ticket, uint32) { return d[len(d)-3+i].Tickets[0], d[len(d)-3+i].Segment }
+	for i, want := range []struct {
+		tk  disklog.Ticket
+		seg uint32
+	}{{first, 3}, {second, 3}, {cold, 1}} {
+		if tk, seg := got(i); tk != want.tk || seg != want.seg {
+			t.Fatalf("round %d is ticket %d in segment %d, want %d in %d: %+v", i, tk, seg, want.tk, want.seg, d)
+		}
+	}
 	h.close()
 }

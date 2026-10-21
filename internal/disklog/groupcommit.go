@@ -486,12 +486,21 @@ func (l *Log) release(ctx *core.Context) {
 	}
 }
 
-// Close returns the log's own buffers to the pool; it refuses while anything is queued or in flight, and the log takes nothing more.
-func (l *Log) Close(ctx *core.Context) error {
-	if l.count > 0 || l.phase != formatDone || len(l.stale) > 0 || l.Queued() > 0 {
+// Close fails the items still waiting, for room or for a manifest, and the running checkpoint with ErrClosed, and returns their buffers and the log's own to the pool; it refuses while a write or flush is in flight, and the log takes nothing more.
+func (l *Log) Close(ctx *core.Context, out *Output) error {
+	if l.count > 0 || l.phase != formatDone || len(l.stale) > 0 {
 		return ErrBusy
 	}
 	if l.err != ErrClosed {
+		ts := len(out.tickets)
+		out.tickets = l.drain(ctx, &l.own, out.tickets)
+		for s := range l.queues {
+			out.tickets = l.drain(ctx, &l.queues[s], out.tickets)
+		}
+		out.emitTickets(Failed, ErrClosed, ts)
+		if l.cp != nil {
+			l.dropCheckpoint(ErrClosed, out)
+		}
 		l.release(ctx)
 		l.err = ErrClosed
 	}
@@ -583,23 +592,32 @@ func (l *Log) FailStalled(ctx *core.Context, out *Output) {
 	}
 }
 
-// ordinaryBytes is the share of a record of bytes holding entries that the hold behind a
-// checkpoint counts: none for a record of checkpoint items alone, else all but their payloads.
-func ordinaryBytes(entries []Entry, bytes uint64) uint64 {
-	var own uint64
+// ordinaryBytes is the share of a record laid out as lay that the hold behind a checkpoint
+// counts: none for a record of checkpoint items alone, else its header blocks and every data
+// block an ordinary entry's payload touches, so a block shared with a piece counts whole.
+func ordinaryBytes(entries []Entry, lay Layout) uint64 {
+	var blocks, blobOff, counted uint64
 	ordinary := false
 	for i := range entries {
 		e := &entries[i]
-		if e.Kind == EntryBlob && (e.BlobKind == BlobRun || isManifestKind(e)) {
-			own += e.Length
-		} else {
-			ordinary = true
+		own := e.Kind == EntryBlob && (e.BlobKind == BlobRun || isManifestKind(e))
+		ordinary = ordinary || !own
+		switch e.Kind {
+		case EntryWrite:
+			blocks += uint64(e.Count)
+		case EntryBlob:
+			lo, hi := blobOff/core.BlockSize, (blobOff+e.Length+core.BlockSize-1)/core.BlockSize
+			blobOff += e.Length
+			if !own && e.Length > 0 {
+				blocks += hi - max(lo, counted)
+				counted = hi
+			}
 		}
 	}
 	if !ordinary {
 		return 0
 	}
-	return bytes - min(own, bytes)
+	return (uint64(lay.HeaderBlocks) + blocks) * core.BlockSize
 }
 
 // behind reports twice MaxReplayBytes of ordinary records, in flight or durable, after the
@@ -1347,7 +1365,7 @@ fill:
 		tickets:      r.tickets,
 		payloads:     r.payloads,
 	}
-	r.ordinary = ordinaryBytes(r.entries, r.bytes)
+	r.ordinary = ordinaryBytes(r.entries, lay)
 	if t.roll {
 		r.opened, r.named = t.seq, l.manifest
 	}

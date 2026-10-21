@@ -189,34 +189,56 @@ func TestHeldItemsFailWithTheirCheckpointForWantOfSpace(t *testing.T) {
 	h.close()
 }
 
-func TestMixedRoundCountsItsOrdinaryItems(t *testing.T) {
+func TestMixedRoundCountsOrdinaryBlocks(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		cold func(h *harness) []disklog.Item
+		want uint64
+	}{
+		{"two 1-block writes", func(h *harness) []disklog.Item { return []disklog.Item{h.write(2, 1, 2), h.write(3, 1, 3)} }, 3},
+		{"a blob sharing the piece's block", func(h *harness) []disklog.Item { return []disklog.Item{h.blob(disklog.BlobRaftEntries, 7, 100, 2)} }, 2},
+	} {
+		if got := mixedRoundHold(t, c.cold); got != c.want*core.BlockSize {
+			t.Errorf("%s: a mixed round adds %d bytes to the hold, want %d blocks", c.name, got, c.want)
+		}
+	}
+}
+
+// mixedRoundHold queues a 100-byte checkpoint piece behind cold items while a hot write is in
+// flight, so that one round carries them all, and is what that round adds to the hold.
+func mixedRoundHold(t *testing.T, cold func(h *harness) []disklog.Item) uint64 {
+	t.Helper()
 	cfg := testConfig(0)
 	cfg.MaxReplayBytes = 64 * core.BlockSize
 	h := formatted(t, gib, cfg)
 	h.put(disklog.Cold, h.write(0, 1, 0))
-	before := disklog.HeldBytes(h.log)
 	h.submit(disklog.Hot, h.write(1, 1, 1))
 	if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: 5, ReplayLSN: 1}}); err != nil {
 		t.Fatal(err)
 	}
-	cold := h.submit(disklog.Cold, h.write(2, 2, 2))
+	var want []disklog.Ticket
+	for _, it := range cold(h) {
+		want = append(want, h.submit(disklog.Cold, it))
+	}
 	it := h.blob(disklog.BlobRun, 5, 100, 1)
 	piece, err := h.log.CheckpointPiece(&h.ctx, 5, it.Buf, 100, false, &h.out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.absorb()
+	var before, after uint64
+	h.onEvent = func(ev disklog.Event) {
+		if ev.Kind == disklog.Durable {
+			before, after = after, disklog.HeldBytes(h.log)
+		}
+	}
 	h.run()
 	d := h.eventsOf(disklog.Durable)
-	mixed := d[len(d)-1]
-	if !slices.Equal(mixed.Tickets, []disklog.Ticket{piece, cold}) {
-		t.Fatalf("round %+v, want the piece then the cold write", mixed)
-	}
-	added := disklog.HeldBytes(h.log) - before - 3*core.BlockSize
-	if added < 2*core.BlockSize || added >= 5*core.BlockSize {
-		t.Fatalf("the mixed round of 5 blocks added %d bytes to the hold, want the cold write's at least and not the piece's block", added)
+	if mixed := d[len(d)-1]; !slices.Equal(mixed.Tickets, append([]disklog.Ticket{piece}, want...)) {
+		t.Fatalf("round %+v, want the piece then the cold items", mixed)
 	}
 	h.close()
+	return after - before
 }
 
 func TestCheckpointLargerThanTheHoldReleasesIt(t *testing.T) {
@@ -269,5 +291,41 @@ func TestHoldBoundThatOverflowsIsRefused(t *testing.T) {
 	}
 	if got := disklog.ReserveSegments(1<<63, 1<<63, 2, 4); got != 1<<32-1 {
 		t.Fatalf("an overflowing reserve is %d, want the largest", got)
+	}
+}
+
+func TestCloseFailsItemsHeldBehindACheckpoint(t *testing.T) {
+	cfg := testConfig(0)
+	cfg.MaxReplayBytes = 4 * core.BlockSize
+	h := formatted(t, gib, cfg)
+	h.put(disklog.Hot, h.write(0, 3, 0))
+	h.put(disklog.Hot, h.write(1, 3, 1))
+	held := h.submit(disklog.Cold, h.write(2, 1, 2))
+	if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: 5, ReplayLSN: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	it := h.blob(disklog.BlobRun, 5, 100, 1)
+	if _, err := h.log.CheckpointPiece(&h.ctx, 5, it.Buf, 100, true, &h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.absorb()
+	if err := h.log.Close(&h.ctx, &h.out); !errors.Is(err, disklog.ErrBusy) {
+		t.Fatalf("close with the piece in flight: %v", err)
+	}
+	h.run()
+	if err := h.log.Close(&h.ctx, &h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.absorb()
+	failed, cpFailed := h.eventsOf(disklog.Failed), h.eventsOf(disklog.CheckpointFailed)
+	if len(failed) != 1 || !errors.Is(failed[0].Err, disklog.ErrClosed) || !slices.Equal(failed[0].Tickets, []disklog.Ticket{held}) ||
+		len(cpFailed) != 1 || !errors.Is(cpFailed[0].Err, disklog.ErrClosed) {
+		t.Fatalf("close with a write held: %+v", h.events)
+	}
+	if h.pool.Live() != 0 {
+		t.Fatalf("%d buffers live after close", h.pool.Live())
+	}
+	if _, err := h.log.Submit(&h.ctx, disklog.Hot, h.write(3, 1, 3), &h.out); !errors.Is(err, disklog.ErrClosed) {
+		t.Fatalf("submit after close: %v", err)
 	}
 }

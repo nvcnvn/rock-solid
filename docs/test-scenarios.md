@@ -1304,7 +1304,7 @@ victims per pass (4, as in the cleaner spikes), at least 8, with both byte setti
   reads a segment header. The small disks of the tests set the reserve directly.
 - Full disk waits: a 16-block disk (3 usable 4-block segments) with a reserve of 1 and a cleaner
   that has a victim. Two 2-block writes fill segments 1 and 2 (LBAs 4 and 8); a third is held:
-  `Stalled`, no disk action, its buffer kept, and Close is Busy. A checkpoint's 10-byte piece still
+  `Stalled`, no disk action, its buffer kept. A checkpoint's 10-byte piece still
   opens the reserve segment (segment header and the 2-block record, LBAs 12-14); its manifest finds
   no segment free and waits. Once segments 1 and 2 are freed (a test hook standing in for the
   cleaner), the held write goes into segment 1 and the manifest into segment 2, the checkpoint
@@ -1569,8 +1569,7 @@ manifest, written or in flight, segment headers and the checkpoint's own records
 - A checkpoint's pieces and manifest wait in a queue of their own that leads the cold stream, so
   they never wait behind held items. A round may carry them and ordinary cold items together: with
   a hot write in flight, a cold 2-block write and a 100-byte piece queued behind it go out as one
-  record, the piece first, which adds at least the write's 2 blocks to the hold and not
-  the piece's block.
+  record, the piece first; what it adds to the hold is under Held items.
 - A checkpoint larger than the bound releases the hold: with `max_replay_bytes` 4 blocks, two
   3-block writes hold a third; a checkpoint of four 2-block pieces and its manifest (14 blocks)
   completes and the held write goes out at once. Reopened, recovery replays from the start, since
@@ -1598,17 +1597,44 @@ manifest, written or in flight, segment headers and the checkpoint's own records
   pending writes arrives with phase 3).
 
 
-## Held items: open points
+## Held items
 
-- A round of a 100-byte checkpoint piece and two 1-block cold writes adds the writes' blocks and
-  its header block to the hold, and nothing for the piece's block (today it adds all but the
-  piece's 100 bytes).
-- Open: whether `Close` with items held behind a checkpoint fails them with `ErrClosed`, freeing
-  their buffers, or stays Busy.
-- Open: whether ordinary cold items roll into a segment of their own while the checkpoint's queue
-  fills a reserve segment and segments are free outside the reserve.
+- A round that carries checkpoint pieces and ordinary items adds to the hold its header blocks and
+  every data block an ordinary entry's payload touches, so a block it shares with a piece counts
+  whole. With a hot write in flight, a 100-byte piece queued behind two 1-block cold writes goes
+  out with them as one record, the piece first, and adds 3 blocks (the writes' and the header),
+  nothing for the piece's block; a 100-byte piece queued behind a 100-byte cold blob adds 2
+  blocks (the header and the block they share).
+- [property] The hold a record adds, checked against marking each block one by one over 10,000
+  random records of writes, punches, freezes and blobs of every kind: none for a record of
+  checkpoint items alone, the whole record for one with none, else its header blocks and the
+  blocks ordinary payloads touch. Recovery counts each replayed record the same way.
+- Close fails what still waits: on the full-disk-waits disk of Segment reserve, Close fails the
+  write held for room with Closed and returns its buffer and the log's own. With
+  `max_replay_bytes` 4 blocks, two 3-block writes hold a 1-block cold write behind a checkpoint;
+  Close is Busy while the checkpoint's piece is in flight, and once it is durable Close reports
+  Failed(Closed) for the held write and CheckpointFailed(Closed), leaves no buffer allocated, and a
+  submit after it is refused with Closed. A test's own close fails if anything was still waiting.
+- The checkpoint's pieces lead the cold stream, so while they fill a segment of the reserve an
+  ordinary cold item waits behind them, even with segments free outside the reserve: on a 1 GiB
+  disk (4,095 usable 64-block segments) with a reserve of 4,093, two 62-block cold writes fill
+  segments 1 and 2, a 100-byte piece opens segment 3 from the reserve, and segments 1 and 2 are
+  then freed. A 1-block cold write and a second piece queued behind it wait for the first; the
+  second piece goes into segment 3 alone, the write still queued and not `Stalled`, and once the
+  checkpoint's queue is empty the write opens segment 1. The Metadata stream ends this wait.
+
+## Reserve from settings
+
 - Format and open refuse a zero reserve once the daemon sets it from `ReserveSegments`; the tests
   that need none say so.
+
+## Group commit API guards
+
+- Submit of a run piece is refused with ReservedKind, as a manifest or manifest piece is, and its
+  buffer stays with the caller; the same piece through `CheckpointPiece` is accepted.
+- Close after Format, before the superblock copy's flush completes, is Busy and leaves the log's
+  buffers allocated; once it completes, Close succeeds.
+
 ## Metadata stream
 
 - A third stream tag (2) for sorted runs, compaction output and manifests; the hot stream keeps
@@ -1625,6 +1651,9 @@ manifest, written or in flight, segment headers and the checkpoint's own records
   (segment 2, LBA 128), the metadata item (segment 3, LBA 192, seq 3) and hot B plus a later hot
   item (LBA 67); LSNs are global. The order cold, metadata, hot is an assumption: design.md says
   only "taking the lanes that have work in turn".
+- "Held items": a cold write no longer waits behind the checkpoint's pieces; in the reserve
+  scenario it goes out in segment 1 while the second piece goes into segment 3, since the pieces
+  are on the metadata stream.
 - "Group commit", "Checkpoint end to end": the pieces' record (LSN 4) and the manifest (LSN 5) go to
   a metadata segment, not cold segment 2.
 - "Group commit" property: its "items to random streams" include the metadata stream; and in
