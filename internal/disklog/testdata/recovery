@@ -22,7 +22,8 @@
 #   fails <text>                                          only as the last line: a check the
 #                                                         harness makes must fail during the line
 #                                                         before it, with a message containing
-#                                                         text, which ends the case; it prints the
+#                                                         text's parts between " ... " in order,
+#                                                         which ends the case; it prints the
 #                                                         failure. The case fails if none does.
 # go test -rewrite regenerates the output.
 
@@ -321,7 +322,7 @@ submit hot 2 0 1 2
 submit hot 3 0 1 3
 submit hot 4 0 1 4
 write hot 5 0 1 5
-fails oracle: LSN 3 entry 0 is
+fails oracle: LSN 3 entry 0 is ... Index:3} ... ticket 4 submitted ... Index:4}
 ----
 submit hot 2 0 1 2: write 67+2 io106, fsync io107
 submit hot 3 0 1 3: 

@@ -110,7 +110,7 @@ func scriptedRecovery(t testing.TB, d *datadriven.TestData) string {
 		switch {
 		case fail.msg == "":
 			d.Fatalf(t, "%q: no harness check failed, the case expects %q", fail.command, "fails "+want)
-		case !strings.Contains(fail.msg, want):
+		case !containsInOrder(fail.msg, strings.Split(want, " ... ")):
 			d.Fatalf(t, "%q: failed with %q, the case expects it to contain %q", fail.command, fail.msg, want)
 		}
 		// The case stopped inside a harness call, so the tickets it left unanswered say nothing.
@@ -118,6 +118,18 @@ func scriptedRecovery(t testing.TB, d *datadriven.TestData) string {
 		fmt.Fprintf(&b, "%s: fails: %s\n", fail.command, fail.msg)
 	}
 	return b.String()
+}
+
+// containsInOrder reports whether s holds each part, each after the one before.
+func containsInOrder(s string, parts []string) bool {
+	for _, p := range parts {
+		i := strings.Index(s, p)
+		if i < 0 {
+			return false
+		}
+		s = s[i+len(p):]
+	}
+	return true
 }
 
 // runCommands runs a scripted case's commands on h, writing what they print to b; when fail names

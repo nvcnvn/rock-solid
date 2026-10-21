@@ -2452,10 +2452,11 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
   record, and one written so fails if the oracle accepts it, so a careless `go test -rewrite`
   cannot accept a wrong index or a plant the oracle misses. Likewise a check the harness makes,
   such as the ticket check, fails the case unless the case closes with `fails <text>`: then a
-  harness check must fail during the line before it, with a message containing the text, which
-  ends the case and is printed; a `fails` whose failure does not happen, or whose message lacks
-  the text, fails the case. The `plant=swap-tickets` case shows the ticket check catching the
-  swapped round when the next write makes it durable. The Recovery section's torn tail (every
+  harness check must fail during the line before it, with a message holding the text's parts,
+  separated by ` ... `, in order, which ends the case and is printed; a `fails` whose failure does
+  not happen, or whose message lacks the text, fails the case. The `plant=swap-tickets` case shows
+  the ticket check catching the swapped round when the next write makes it durable, its text
+  pinning the swap: LSN 3's entry 0, chunk 3, against the item submitted under ticket 4, chunk 4. The Recovery section's torn tail (every
   landing set), damage in a middle record and in the last one, and both commit-depth-2 cases live
   only here, each that recovers printing its index.
 - An unknown command, argument or op, or a malformed argument, fails the test with the file and
