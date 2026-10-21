@@ -1949,22 +1949,25 @@ A pass:
 
 Freed segments and `NextSeq` (design.md, Recovery: a header of this log below the loaded
 manifest's `NextSeq` is judged by the usage table, one at or past it was opened after the base).
-The cases stage a cleaner pass on segment 1 of the "Segment usage table" log (60 one-block hot
-writes, 16-block segments, a checkpoint whenever 40 blocks follow the manifest), whose records all
-precede the replay point; the [log segments study](../studies/log-segments/)'s
-`testdata/stale_header_test.go` stages them by hand against the built recovery, where all but the
-control case fail, and they become regression tests here, staged by the cleaner itself:
+The cases come from the [log segments study](../studies/log-segments/), whose
+`testdata/stale_header_test.go` staged them by hand; here the cleaner stages them itself
+(`TestCrashOrder*` in `internal/chunkstore`). A store on 16-block segments with a checkpoint
+whenever 40 blocks follow the manifest overwrites block 0 of 16 chunks, then a pass takes every
+chunk segment whose records all precede the replay point. Allocation takes the lowest free
+segment, so an order that needs the segment opened again early watches the lowest victim, and the
+others the highest. Each case crashes at its order, recovers, and checks every block against the
+crash oracle and the usage table against the index:
 
 | Crash order | Header on disk | Expected |
 | --- | --- | --- |
 | Freed in memory, the freeing manifest not durable | Old, below `NextSeq`, listed | Used, with the older manifest's row; replay of the copy records moves what its runs still map there |
-| Freeing manifest durable, no segment header names it yet (control; passes today) | Old, below the loaded older manifest's `NextSeq`, listed | Used; the cleaner frees it again |
-| A segment header naming the freeing manifest durable, not reused, TRIM not run (or a disk that is a file) | Old, below `NextSeq`, not listed | Free (today: used with 0 live blocks, one segment fewer free) |
+| Freeing manifest durable, no segment header names it yet | Old, below the loaded older manifest's `NextSeq`, listed | Used; the cleaner frees it again |
+| A segment header naming the freeing manifest durable, not reused, TRIM not run (or a disk that is a file) | Old, below `NextSeq`, not listed | Free |
 | As above, TRIM run, reading back as zeros | Zeros, not listed | Free |
 | As above, TRIM reading back as ones or garbage | Undecodable | Damaged: read in full, then free, since it holds no record of this log past the replay point; read in full again at every start until reused |
-| Reused before any segment header names the freeing manifest, its new header and one record landed | New, at or past the loaded manifest's `NextSeq` | Used, live 1 and newest LSN the new record's, the old row dropped (today: live 8, the old row's 7 plus 1) |
+| Reused before any segment header names the freeing manifest, its new header and one record landed | New, at or past the loaded manifest's `NextSeq` | Used, live 1 and newest LSN the new record's, the old row dropped |
 | Reused after a header names the freeing manifest | New; at or past `NextSeq` if opened after its base, else listed | Used |
-| Reused by a round in flight: its record at block 1 landed, its header did not; a header naming the freeing manifest durable, or not yet (two cases) | Old, below `NextSeq`; not listed, or listed | The record at block 1, at `NextSeq` or more, is erased and the next segment opened takes a sequence past it; the segment free, or used under the listing until the cleaner frees it again (today: not erased, and the next segment takes the sequence it carries, 11) |
+| Reused by a round in flight: its record at block 1 landed, its header did not; a header naming the freeing manifest durable, or not yet (two cases) | Old, below `NextSeq`; not listed, or listed | The record at block 1, at `NextSeq` or more, is erased and the next segment opened takes a sequence past it; the segment free, or used under the listing until the cleaner frees it again |
 | A round in flight at checkpoint begin opened a segment, and the crash kept the round | New, at or past `NextSeq`, since it counts durable rounds only | Used, its records replayed |
 
 - A freed segment's own old record at block 1, below `NextSeq`, is ignored: recovery reads its

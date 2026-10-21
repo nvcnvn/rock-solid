@@ -50,6 +50,12 @@ type harness struct {
 // advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
 func (h *harness) advance(d core.Tick) {
 	h.t.Helper()
+	h.tick(d)
+	h.settle()
+}
+
+// tick moves the clock on by d and fires the log's TRIM timer if it falls due.
+func (h *harness) tick(d core.Tick) {
 	h.ctx.Now += d
 	h.ctx.Raw += d
 	if h.timerAt != 0 && h.timerAt <= h.ctx.Now {
@@ -57,7 +63,6 @@ func (h *harness) advance(d core.Tick) {
 		h.s.OnEvent(&h.ctx, &core.Event{Kind: core.EvTimer, Timer: disklog.TrimTimer}, &h.out)
 		h.take()
 	}
-	h.settle()
 }
 
 var errCrash = errors.New("crash")

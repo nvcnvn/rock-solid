@@ -53,6 +53,9 @@ func (l *Log) CopiesStalled() bool {
 	return p == placeNoRoom
 }
 
+// NamedLSN is the LSN of the newest manifest a durable segment header names, the one recovery would load.
+func (l *Log) NamedLSN() uint64 { return l.namedLSN }
+
 // FreeOutsideReserve is how many segments are free beyond the reserve, or below zero by how many the reserve lacks.
 func (l *Log) FreeOutsideReserve() int { return int(l.freeCount()) - int(l.reserve) }
 
