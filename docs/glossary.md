@@ -348,7 +348,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Orphan.** A file that was unlinked while still open. POSIX keeps it readable until the last close; rock-solid records it on an orphan list and frees it only then. NFS fakes this with "silly rename" to a hidden `.nfsXXXX` name.
 
-**Grace period.** After a metadata leader crashes, a window in which clients re-register their open files before the new leader accepts new opens. The idea comes from NFS version 4.
+**Grace period.** After a metadata leader crashes, a window in which clients re-register their open files before the new leader accepts new opens. It lasts until every live client has re-registered or been fenced, not for a fixed time. The idea comes from NFS version 4.
 
 **NFS, SMB, Samba.** Network File System and Server Message Block are network file-sharing protocols. Both put a server between clients and storage, which is the bottleneck rock-solid's RWX avoids. Samba is the open-source SMB server.
 
