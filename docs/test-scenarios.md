@@ -1870,14 +1870,25 @@ on the 1 GiB disk one capacity is 262,144 blocks):
 
 - A pass takes the 4 best victims that pass the net-gain guard.
 - Net-gain guard, header blocks rounded up per record (design: "a victim must free more space than
-  copying it costs, header blocks included"). In 16,384-block (64 MiB) segments a copy record of
-  single-block extents holds 253 data blocks and 3 header blocks (56 + 253 × 45 = 11,441 bytes; 256
-  blocks fill the 1 MiB cap), so L live blocks cost L + 3⌈L ÷ 253⌉. Estimated in exact bytes, the
-  guard let the cleaner pick 98.9% live victims and livelock (cleaner streams spike).
+  copying it costs"). In 16,384-block (64 MiB) segments a copy record of single-block extents
+  holds 253 data blocks and 3 header blocks (56 + 253 × 45 = 11,441 bytes; 256 blocks fill the
+  1 MiB cap), and the copies may cross a segment's start, which cuts one record in two, so L live
+  blocks cost L + 3(⌈L ÷ 253⌉ + 1). Estimated in exact bytes, the guard let the cleaner pick 98.9%
+  live victims and livelock (cleaner streams spike).
 - The guard also charges the header of the segment the copies open: a victim is picked only when
-  its cost plus that block is below a segment. A victim of 16,190 live blocks costs 16,382 and is
-  picked; 16,191 costs 16,383 and is refused. Uncharged, a copy of a nearly full 16-block segment
-  filled a new segment exactly, and a disk of live data churned forever without a write failing.
+  its cost plus that block is below a segment. A victim of 16,187 live blocks costs 16,382 and is
+  picked; 16,188 costs 16,383 and is refused. On 16-block segments, without the segment header a
+  copy of a nearly full segment filled a new one exactly, and without the cut record copies of
+  13-block victims filled a segment each (seed 448 of the crash test, and a disk filled with
+  live data at a reserve of 10 or 12, whose copies' checkpoints took the whole reserve): either
+  way the cleaner churned forever on a disk of live data.
+- A victim's copies reach the log together, so they go out in one record where they fit rather
+  than the first alone in a round of its own.
+- A metadata victim is charged the records its live runs' pieces take now, header blocks included,
+  each record once, plus the largest less a block, the tail it can leave unused at a segment's
+  end: a 3-block piece in a 4-block record costs 7. Charged the runs' bytes instead, small pieces
+  of two blocks each looked like a fraction of one, and after a crash (seed 329) the cleaner
+  rewrote the same runs from segment to segment without end.
 - Age cap regression, scripted in Go as the cleaner spike modelled it: a 1 GiB disk of 4,096
   segments at 90% full, 20% of the data frozen by a snapshot, 90/10 hot/cold overwrites, copies in
   age order with moved blocks keeping their write time. Capped, at most a few passes in a row gain
@@ -1958,7 +1969,8 @@ A pass:
 - Workers per disk: one pass, and a second once free segments outside the reserve fall two below
   `clean_free` (14 of the default 16). Write admission covers slowing writes.
 - The cleaner writes into the reserve when only the reserve is free, and a disk filled to its
-  reserve finishes a pass; writes fail with NoSpace only when no victim passes the guard.
+  reserve finishes a pass; writes fail with NoSpace only when no victim passes the guard, at
+  reserves of 8, 10 and 12 segments.
 
 Freed segments and `NextSeq` (design.md, Recovery: a header of this log below the loaded
 manifest's `NextSeq` is judged by the usage table, one at or past it was opened after the base).
