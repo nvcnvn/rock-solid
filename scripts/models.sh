@@ -81,7 +81,9 @@ for model in $models; do
 			echo "ok   $model/$cfg: $(summary)"
 			continue
 		elif [ $status = 142 ]; then
-			echo "FAIL $model/$cfg: over its ${limit}s budget; move its largest constant to deep"
+			fix="move its largest constant to deep"
+			[ "$mode" = deep ] && fix="shrink it"
+			echo "FAIL $model/$cfg: over its ${limit}s budget; $fix"
 		else
 			echo "FAIL $model/$cfg: $(summary)"
 		fi
