@@ -150,6 +150,8 @@ type Item struct {
 	Buf   core.IOBuf
 	// Keep leaves a write's buffer with its submitter, who frees it once the item is Durable or Failed; the log frees it for an item in doubt.
 	Keep bool
+	// CRCs are a copy's block checksums as its source record holds them, checked by the cleaner, which the log writes instead of computing its own; it holds them until the item resolves.
+	CRCs []uint32
 }
 
 // EventKind tags an Event.
@@ -320,6 +322,7 @@ type queued struct {
 	entry  Entry
 	buf    core.IOBuf
 	bytes  []byte
+	crcs   []uint32
 	keep   bool
 }
 
@@ -891,13 +894,13 @@ func (l *Log) Copy(ctx *core.Context, items []Item, tickets []Ticket, out *Outpu
 			return tickets, l.err
 		}
 		src, seg := uint64(it.Entry.Source), uint64(l.sb.SegmentBlocks)
-		if it.Entry.Kind != EntryCopy || src < seg || src >= l.sb.DiskBlocks() || src/seg != (src+uint64(it.Entry.Count)-1)/seg {
+		if it.Entry.Kind != EntryCopy || src < seg || src >= l.sb.DiskBlocks() || src/seg != (src+uint64(it.Entry.Count)-1)/seg || it.CRCs != nil && len(it.CRCs) != int(it.Entry.Count) {
 			return tickets, ErrMalformed
 		}
 		if err := l.accept(ctx, &it); err != nil {
 			return tickets, err
 		}
-		tickets = append(tickets, l.enqueue(&l.lanes[laneClean].q, queued{entry: it.Entry, buf: it.Buf}))
+		tickets = append(tickets, l.enqueue(&l.lanes[laneClean].q, queued{entry: it.Entry, buf: it.Buf, crcs: it.CRCs}))
 	}
 	return tickets, nil
 }
@@ -1616,7 +1619,11 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 			}
 			writeOff += uint64(it.entry.Count) * core.BlockSize
 			r.vec = append(r.vec, v)
-			l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(it.buf))
+			if it.crcs != nil {
+				l.crcs = append(l.crcs, it.crcs...)
+			} else {
+				l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(it.buf))
+			}
 		default:
 			r.payloads = append(r.payloads, blobOff)
 			blobOff += it.entry.Length

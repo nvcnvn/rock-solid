@@ -68,6 +68,12 @@ type harness struct {
 	// maxCleanReads is the most reads a cleaner pass has had in flight, and maxMerging the most
 	// merges begun and not finished at once.
 	maxCleanReads, maxMerging int
+	// held is the cleaner jobs taken from the store and not yet run: with late set, each runs
+	// after a random number of later actions, as a worker may finish after the owner has taken
+	// other events, and with hold set, only when a test runs it.
+	held []*CleanJob
+	late *core.Rand
+	hold bool
 }
 
 // advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
@@ -149,7 +155,11 @@ func (h *harness) take() {
 // open sequences on disk when that ends a recovery.
 func (h *harness) step() bool {
 	if len(h.queue) == 0 {
-		return false
+		if h.hold || len(h.held) == 0 {
+			return false
+		}
+		h.runClean(0)
+		return true
 	}
 	if h.executed == h.crashAt {
 		panic(errCrash)
@@ -206,7 +216,26 @@ func (h *harness) step() bool {
 		h.maxMerging = max(h.maxMerging, running)
 		h.take()
 	}
+	for j := h.s.CleanDue(); j != nil; j = h.s.CleanDue() {
+		h.held = append(h.held, j)
+	}
+	for i := 0; i < len(h.held) && !h.hold; {
+		if h.late != nil && h.late.Below(4) != 0 {
+			i++
+			continue
+		}
+		h.runClean(i)
+	}
 	return true
+}
+
+// runClean runs the held cleaner job i, as its worker does, and hands it back to the store.
+func (h *harness) runClean(i int) {
+	j := h.held[i]
+	h.held = slices.Delete(h.held, i, i+1)
+	j.Run(h.pool)
+	h.s.InstallClean(&h.ctx, j, &h.out)
+	h.take()
 }
 
 // unordered takes a queued action at random, except that a flush completes after the writes

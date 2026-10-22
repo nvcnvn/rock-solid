@@ -29,19 +29,26 @@ type cleanPiece struct {
 	buf     core.IOBuf
 }
 
-// cleanJob is the copy of one victim: the pieces the owner listed from its records, each read
-// into a buffer of its own. Run is the part a worker goroutine does, since it touches nothing but
-// the job.
+// CleanJob is the checksum work of copying one victim: the runs of live blocks the owner listed
+// and read, each in a pool buffer of its own, and the checksums their record headers hold.
+// CleanDue hands it out once its reads complete and InstallClean takes it back; in between the
+// store touches none of it, so its Run may go to a worker goroutine off the loop. The daemon runs
+// that goroutine; this package starts none.
+type CleanJob struct {
+	pieces []cleanPiece
+	crcs   []uint32
+	bad    bool
+}
+
+// cleanJob is the owner's side of copying one victim, around the job it hands out.
 type cleanJob struct {
+	CleanJob
 	segment uint32
 	seq     uint64
 	records []RecordLive
 	next    int
 	reads   int
-	pieces  []cleanPiece
-	crcs    []uint32
 	issued  int
-	bad     bool
 	failed  bool
 	copies  int
 	phase   jobPhase
@@ -50,18 +57,22 @@ type cleanJob struct {
 type jobPhase uint8
 
 // A job reads its victim's segment header, then the headers of its live records, listing their
-// live pieces, then the pieces' data; Run checks and sorts them, and the copies go out.
+// live pieces, then the pieces' data; it is then due, until CleanDue hands it out, and running
+// until InstallClean takes it back, and the copies go out.
 const (
 	jobHeader jobPhase = iota
 	jobRecords
 	jobData
+	jobDue
+	jobRunning
 	jobCopies
 )
 
-// Run checks every block it read against the checksum its record header stored, and sorts the
-// pieces into the index's key order, so a chunk's blocks go out side by side and its moves apply
-// together; a failing block marks the job bad, and nothing of it is copied.
-func (j *cleanJob) Run(pool core.BufPool) {
+// Run checks every block the job read against the checksum its record header stored, and sorts
+// the pieces into the index's key order, so a chunk's blocks go out side by side and its moves
+// apply together; a failing block marks the job bad, and nothing of it is copied. It reads only
+// the job and the bytes of its buffers in pool.
+func (j *CleanJob) Run(pool core.BufPool) {
 	for _, p := range j.pieces {
 		b := pool.Bytes(p.buf)
 		for k := range int(p.count) {
@@ -280,7 +291,7 @@ func (s *Store) startVictim(ctx *core.Context, p *cleanPass) bool {
 		p.cur++
 		return false
 	}
-	p.job = cleanJob{segment: seg, records: p.job.records[:0], pieces: p.job.pieces[:0], crcs: p.job.crcs[:0]}
+	p.job = cleanJob{CleanJob: CleanJob{pieces: p.job.pieces[:0], crcs: p.job.crcs[:0]}, segment: seg, records: p.job.records[:0]}
 	if u.Live == 0 {
 		p.job.phase = jobCopies
 		return true
@@ -327,18 +338,12 @@ func (s *Store) advancePass(ctx *core.Context, p *cleanPass) {
 				return
 			}
 			if !j.failed && !j.bad {
-				j.Run(ctx.Pool)
+				j.phase = jobDue
+				return
 			}
-			if j.bad {
-				if err := s.log.Quarantine(j.segment); err != nil {
-					panic("chunkstore: a victim the cleaner read is not used: " + err.Error())
-				}
-				s.cl.stats.Quarantined++
-			}
-			if !j.failed && !j.bad {
-				s.sendCopies(ctx, p)
-			}
-			j.phase = jobCopies
+			s.endJob(ctx, p)
+		case jobDue, jobRunning:
+			return
 		case jobCopies:
 			if j.copies > 0 || s.readsFrom(j.segment) {
 				return
@@ -346,6 +351,55 @@ func (s *Store) advancePass(ctx *core.Context, p *cleanPass) {
 			s.finishVictim(ctx, p)
 		}
 	}
+}
+
+// CleanDue returns a cleaner job whose reads have completed, whose Run may go to a worker off the
+// loop, or nil; its pass waits until InstallClean takes it back.
+func (s *Store) CleanDue() *CleanJob {
+	if s.phase != serving {
+		return nil
+	}
+	for _, p := range s.cl.passes {
+		if p.job.phase == jobDue {
+			p.job.phase = jobRunning
+			return &p.job.CleanJob
+		}
+	}
+	return nil
+}
+
+// InstallClean takes back a job CleanDue returned, once its Run has finished, and sends its copies
+// to the log, or quarantines its victim if Run found a damaged block. A job whose pass the store
+// dropped since, as a rebuild of its index or a stop does, only frees its buffers.
+func (s *Store) InstallClean(ctx *core.Context, j *CleanJob, out *Output) {
+	var p *cleanPass
+	for _, q := range s.cl.passes {
+		if &q.job.CleanJob == j && q.job.phase == jobRunning && s.phase == serving {
+			p = q
+		}
+	}
+	if p == nil {
+		s.freePieces(ctx, j)
+		return
+	}
+	s.endJob(ctx, p)
+	s.pump(ctx, out)
+}
+
+// endJob ends the current victim's reading and checking: a bad victim is quarantined, and a sound
+// one's copies go to the log.
+func (s *Store) endJob(ctx *core.Context, p *cleanPass) {
+	j := &p.job
+	if j.bad {
+		if err := s.log.Quarantine(j.segment); err != nil {
+			panic("chunkstore: a victim the cleaner read is not used: " + err.Error())
+		}
+		s.cl.stats.Quarantined++
+	}
+	if !j.failed && !j.bad {
+		s.sendCopies(ctx, p)
+	}
+	j.phase = jobCopies
 }
 
 // cleanRead issues a read of blocks blocks at lba, for record r's header or piece pc's data, or
@@ -456,7 +510,7 @@ func (s *Store) listPieces(j *cleanJob, header core.LBA, h *disklog.RecordHeader
 	}
 }
 
-func (s *Store) freePieces(ctx *core.Context, j *cleanJob) {
+func (s *Store) freePieces(ctx *core.Context, j *CleanJob) {
 	for k := range j.pieces {
 		if j.pieces[k].buf != core.NoBuf {
 			ctx.Pool.Free(j.pieces[k].buf)
@@ -470,7 +524,7 @@ func (s *Store) sendCopies(ctx *core.Context, p *cleanPass) {
 	j := &p.job
 	s.cl.items = s.cl.items[:0]
 	for _, pc := range j.pieces {
-		s.cl.items = append(s.cl.items, disklog.Item{Entry: disklog.CopyEntry(pc.pool, pc.chunk, pc.version, pc.first, pc.count, pc.src), Buf: pc.buf})
+		s.cl.items = append(s.cl.items, disklog.Item{Entry: disklog.CopyEntry(pc.pool, pc.chunk, pc.version, pc.first, pc.count, pc.src), Buf: pc.buf, CRCs: j.crcs[pc.crc:][:pc.count]})
 	}
 	var err error
 	s.cl.tickets, err = s.log.Copy(ctx, s.cl.items, s.cl.tickets[:0], &s.lout)
@@ -483,7 +537,7 @@ func (s *Store) sendCopies(ctx *core.Context, p *cleanPass) {
 	}
 	if err != nil {
 		j.failed = true
-		s.freePieces(ctx, j)
+		s.freePieces(ctx, &j.CleanJob)
 	}
 }
 
@@ -523,7 +577,7 @@ func (s *Store) copyResolved(t disklog.Ticket, ev *disklog.Event, i int) bool {
 // and moves the pass on; a victim it cannot free yet stays used and may be chosen again.
 func (s *Store) finishVictim(ctx *core.Context, p *cleanPass) {
 	j := &p.job
-	s.freePieces(ctx, j)
+	s.freePieces(ctx, &j.CleanJob)
 	if !j.failed && !j.bad && s.log.Free(ctx, j.segment, &s.lout) == nil {
 		s.cl.stats.Freed++
 		p.freed++
@@ -533,10 +587,12 @@ func (s *Store) finishVictim(ctx *core.Context, p *cleanPass) {
 }
 
 // resetCleaner drops every pass and frees the blocks it read, as when the store's log stops; their
-// reads have completed.
+// reads have completed. A job out with a worker keeps its buffers until InstallClean frees them.
 func (s *Store) resetCleaner(ctx *core.Context) {
 	for _, p := range s.cl.passes {
-		s.freePieces(ctx, &p.job)
+		if p.job.phase != jobRunning {
+			s.freePieces(ctx, &p.job.CleanJob)
+		}
 	}
 	s.cl.passes, s.cl.sent, s.cl.sentHead, s.cl.tried = nil, s.cl.sent[:0], 0, false
 }

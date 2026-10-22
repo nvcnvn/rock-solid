@@ -48,12 +48,16 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) uint64 {
 // action with a seeded share of unflushed blocks landing, and recovers: the store must hold what
 // the crash oracle holds, live and at every snapshot, with the usage table on the index's counts,
 // and again once it has rebuilt its index, which must equal the opened one; a second rebuild,
-// after the cleaner has moved blocks again, must equal the live index. It returns the
-// difference, if any.
+// after the cleaner has moved blocks again, must equal the live index. A quarter of the seeds
+// take the results of the cleaner's jobs late, after other events. It returns the difference, if
+// any.
 func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
 	r := core.NewRand(seed)
 	h := newHarnessOn(t, cleanConfig(), cleanGeo)
 	h.merging = true
+	if seed%4 == 3 {
+		h.late = core.NewRand(^seed)
+	}
 	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 	h.crashAt = int(r.Range(200, 4000))
 	var epoch uint64
@@ -71,7 +75,7 @@ func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
 	h.crashAt = -1
 	h.cfg.CleanFree = 0
 	h.queue, h.out = nil, Output{}
-	h.abandoned = h.pool.Live()
+	h.abandoned, h.held = h.pool.Live(), nil
 	h.s = newStore(h.cfg)
 	h.s.plant = plant
 	if err := h.s.recover(&h.ctx, h.disk.Blocks(), disklog.ModeOpen); err != nil {

@@ -1958,6 +1958,16 @@ A pass:
   block reads back after its copy. The worker verifies each block's CRC32C and
   sorts the runs; they go to the cold stream's cleaner lane as copy entries, never a manifest
   piece, and each move applies when its copy record's Durable event reaches the owner.
+- The checks run only in the job the store hands out once a victim's reads complete: the store
+  copies nothing while it waits for the job, and a job handed back without running, a block of it
+  damaged in its buffer, copies that block under the checksum its source record stored, so it
+  reads back with a checksum error from its new place (the log's test-only decode check off).
+- A job's result may come back late, after other events. Late after its pass was dropped, while
+  the index rebuilds, after the rebuilt cleaner has handed out a new job for the same victim, or
+  after a failed disk stopped the store, it takes no action and frees exactly its buffers; the new
+  job copies the victim, the store then holds only its log's buffers, and every block reads as
+  written. A quarter of the cleaner's crash seeds take every job's result after a random number of
+  later actions.
 - A victim holding a block whose checksum fails is quarantined: nothing of it is copied, it is
   never a victim again, the pass cleans its other victims, and reads of the block keep failing
   with a checksum error.

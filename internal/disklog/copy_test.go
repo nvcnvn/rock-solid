@@ -103,6 +103,10 @@ func TestCopyRefusesOtherKindsAndSourcesOutsideASegment(t *testing.T) {
 			t.Fatalf("copy of %+v: %v", e, err)
 		}
 	}
+	it.Entry, it.CRCs = disklog.CopyEntry(1, testChunk, 1, 0, 1, core.LBA(h.geo.SegmentBlocks)), []uint32{1, 2}
+	if _, err := h.log.Copy(&h.ctx, []disklog.Item{it}, nil, &h.out); !errors.Is(err, disklog.ErrMalformed) {
+		t.Fatalf("copy of one block with two checksums: %v", err)
+	}
 	h.pool.Free(it.Buf)
 	h.close()
 }

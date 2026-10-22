@@ -181,7 +181,7 @@ func (h *harness) recoverStore(mode disklog.Mode) {
 	h.t.Helper()
 	h.queue, h.out = nil, Output{}
 	var err error
-	h.abandoned = h.pool.Live()
+	h.abandoned, h.held = h.pool.Live(), nil
 	h.s = newStore(h.cfg)
 	if err = h.s.recover(&h.ctx, h.disk.Blocks(), mode); err != nil {
 		h.t.Fatal(err)
