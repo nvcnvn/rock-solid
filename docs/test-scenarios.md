@@ -1880,9 +1880,11 @@ on the 1 GiB disk one capacity is 262,144 blocks):
   blocks cost L + 3(⌈L ÷ 253⌉ + 1) + min(L, 254) + h − 1, with h the header blocks of that
   copy. Estimated in exact bytes, the guard let the cleaner pick 98.9% live victims and livelock
   (cleaner streams spike).
-- The guard also charges the header of the segment the copies open: a victim is picked only when
-  its cost plus that block is below a segment. A victim of 15,936 live blocks costs 16,382 and is
-  picked; 15,937 costs 16,383 and is refused. On 16-block segments, without the segment header a
+- The guard also charges the header of the segment the copies open, and the index entries the
+  moves write, 2 × 67 bytes a moved block (flushed, then merged again): a victim is picked only
+  when its cost plus that block is below a segment. Copies of 15,936 live blocks cost 16,382 and
+  of 15,937 cost 16,383; with the entries, 15,434 live blocks cost 15,877 + 505 = 16,382 and are
+  picked, and 15,435 cost 16,383 and are refused. On 16-block segments, without the segment header a
   copy of a nearly full segment filled a new one exactly, and without the split record copies of
   13-block victims filled a segment each (seed 448 of the crash test, and a disk filled with
   live data at a reserve of 10 or 12, whose copies' checkpoints took the whole reserve): either

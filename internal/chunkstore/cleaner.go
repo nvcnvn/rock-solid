@@ -166,7 +166,10 @@ func (s *Store) clean(ctx *core.Context) bool {
 		if s.cl.tried && s.cl.triedAt == s.log.DurableLSN() {
 			break
 		}
-		victims := s.chooseVictims()
+		victims, snapshot := s.pickVictims()
+		if snapshot {
+			s.log.RequestSnapshot()
+		}
 		if len(victims) == 0 {
 			s.cl.tried, s.cl.triedAt = true, s.log.DurableLSN()
 			break
@@ -200,15 +203,16 @@ func (s *Store) isVictim(seg uint32) bool {
 	return false
 }
 
-// chooseVictims picks up to VictimsPerPass segments by cost-benefit, (1 − u) × age ÷ (1 + u)
+// pickVictims picks up to VictimsPerPass segments by cost-benefit, (1 − u) × age ÷ (1 + u)
 // with u the live share and age capped at a disk's worth of writes, among those whose copy
-// costs less than a segment less the header of the segment it lands in, header blocks
-// included, charging live run pieces at the records of the whole runs a rewrite writes again and
-// what each of its steps writes beside them; a chunk segment's copies must also fit the room the
-// cleaner's lane can reach, and it must hold no header of a live slot write, which no copy moves.
-// A segment holding a piece of a manifest recovery may load waits for the next snapshot, which
-// it asks for, and one holding only pieces about to die waits for them.
-func (s *Store) chooseVictims() []uint32 {
+// costs less than a segment less the header of the segment it lands in, header blocks and the
+// index entries its moves write included, charging live run pieces at the records of the whole
+// runs a rewrite writes again and what each of its steps writes beside them; a chunk segment's
+// copies must also fit the room the cleaner's lane can reach, and it must hold no header of a
+// live slot write, which no copy moves. A segment holding a piece of a manifest recovery may
+// load waits for the next snapshot, which snapshot reports is wanted, and one holding only
+// pieces about to die waits for them.
+func (s *Store) pickVictims() (victims []uint32, snapshot bool) {
 	geo := s.sb.Geometry
 	room := s.log.CleanerRoom()
 	s.cl.candidate = s.cl.candidate[:0]
@@ -217,7 +221,7 @@ func (s *Store) chooseVictims() []uint32 {
 			continue
 		}
 		if s.log.HoldsManifestPiece(seg) {
-			s.log.RequestSnapshot()
+			snapshot = true
 			continue
 		}
 		u, stream := s.log.Usage(seg)
@@ -232,6 +236,8 @@ func (s *Store) chooseVictims() []uint32 {
 			cost = s.log.RewriteCost(s.cl.pieces, steps, extra)
 		} else if cost = s.log.CopyCost(uint64(u.Live)); cost > room || s.ix.SlotHeld(seg) > 0 {
 			continue
+		} else {
+			cost += moveCost(uint64(u.Live))
 		}
 		if cost+1 >= uint64(geo.SegmentBlocks) {
 			continue
@@ -240,11 +246,19 @@ func (s *Store) chooseVictims() []uint32 {
 		s.cl.candidate = append(s.cl.candidate, victimScore{seg, costBenefit(share, s.log.Age(seg))})
 	}
 	slices.SortStableFunc(s.cl.candidate, func(a, b victimScore) int { return cmp.Compare(b.score, a.score) })
-	var victims []uint32
 	for _, c := range s.cl.candidate[:min(len(s.cl.candidate), disklog.VictimsPerPass)] {
 		victims = append(victims, c.segment)
 	}
-	return victims
+	return victims, snapshot
+}
+
+// movedEntryBytes is what a moved block costs the index at most: its extent's key and value with
+// a run block's three length varints, written once by the flush and again by a merge.
+const movedEntryBytes = 2 * (KeySize + extentSize + 3)
+
+// moveCost is the blocks the index entries of live moved blocks take at most.
+func moveCost(live uint64) uint64 {
+	return (live*movedEntryBytes + core.BlockSize - 1) / core.BlockSize
 }
 
 // costBenefit is a victim's score, free space times age over copy cost, as the original

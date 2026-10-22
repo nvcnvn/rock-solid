@@ -75,6 +75,12 @@ func TestCleanerKeepsAFullDiskWriting(t *testing.T) {
 	o.check(t, h, 0, 63, 0)
 }
 
+// chooseVictims is the victims the cleaner's next pass would take.
+func (s *Store) chooseVictims() []uint32 {
+	victims, _ := s.pickVictims()
+	return victims
+}
+
 // primed is a store on the small disk whose cleaner does not run until a test sets CleanFree:
 // two chunks of 64 blocks written once and overwritten at random until several manifests are named.
 func primed(t *testing.T) (*harness, *byteOracle) { return primedWith(t, cleanConfig()) }
@@ -741,4 +747,21 @@ func TestAVictimOfManyPiecesReadsThemAtTheReadDepth(t *testing.T) {
 		t.Fatalf("stats %+v; at most %d reads in flight", h.s.CleanStats(), h.maxCleanReads)
 	}
 	o.check(t, h, 0, 63, 0)
+}
+
+// The net-gain guard charges a chunk victim the index entries its moves write, one per moved
+// block of 67 bytes at most, flushed and merged again: in 64 MiB segments of 1 MiB records a
+// victim of 15,434 live blocks costs 15,877 blocks of copies and 505 of entries, 16,382, and is
+// picked, while 15,435 cost 16,383 and are refused.
+func TestTheGuardChargesTheIndexEntriesOfMoves(t *testing.T) {
+	h := newHarnessOn(t, testConfig(), disklog.Geometry{SegmentBlocks: 16384, SegmentCount: 8})
+	log := h.s.Log()
+	if movedEntryBytes != 2*67 {
+		t.Fatalf("a moved block's entry is charged %d bytes", movedEntryBytes)
+	}
+	for _, c := range []struct{ live, copies, entries uint64 }{{1, 8, 1}, {15434, 15877, 505}, {15435, 15878, 505}} {
+		if got, entries := log.CopyCost(c.live), moveCost(c.live); got != c.copies || entries != c.entries {
+			t.Fatalf("%d live blocks cost %d of copies and %d of entries, want %d and %d", c.live, got, entries, c.copies, c.entries)
+		}
+	}
 }
