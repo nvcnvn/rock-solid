@@ -125,6 +125,8 @@ type cleaner struct {
 	ents      []disklog.Entry
 	candidate []victimScore
 	pieces    []disklog.BlobRef
+	items     []disklog.Item
+	tickets   []disklog.Ticket
 }
 
 type victimScore struct {
@@ -437,22 +439,22 @@ func (s *Store) freePieces(ctx *core.Context, j *cleanJob) {
 // sendCopies hands the log the job's pieces, in key order, as copy items of the cleaner's lane.
 func (s *Store) sendCopies(ctx *core.Context, p *cleanPass) {
 	j := &p.job
-	for k := range j.pieces {
+	s.cl.items = s.cl.items[:0]
+	for _, pc := range j.pieces {
+		s.cl.items = append(s.cl.items, disklog.Item{Entry: disklog.CopyEntry(pc.pool, pc.chunk, pc.version, pc.first, pc.count, pc.src), Buf: pc.buf})
+	}
+	var err error
+	s.cl.tickets, err = s.log.Copy(ctx, s.cl.items, s.cl.tickets[:0], &s.lout)
+	for k, t := range s.cl.tickets {
 		pc := &j.pieces[k]
-		it := disklog.Item{Entry: disklog.CopyEntry(pc.pool, pc.chunk, pc.version, pc.first, pc.count, pc.src), Buf: pc.buf}
-		t, err := s.log.Copy(ctx, it, &s.lout)
-		if err != nil {
-			j.failed = true
-			for ; k < len(j.pieces); k++ {
-				ctx.Pool.Free(j.pieces[k].buf)
-				j.pieces[k].buf = core.NoBuf
-			}
-			return
-		}
 		pc.buf = core.NoBuf
 		j.copies++
 		s.cl.stats.Copied += uint64(pc.count)
 		s.cl.sent = append(s.cl.sent, cleanSent{ticket: t, pass: p, piece: k})
+	}
+	if err != nil {
+		j.failed = true
+		s.freePieces(ctx, j)
 	}
 }
 

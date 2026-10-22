@@ -19,10 +19,11 @@ func (h *harness) copyItem(idx uint32, count uint16, source core.LBA, seed uint6
 
 func (h *harness) submitCopy(it disklog.Item) disklog.Ticket {
 	h.t.Helper()
-	tk, err := h.log.Copy(&h.ctx, it, &h.out)
+	tks, err := h.log.Copy(&h.ctx, []disklog.Item{it}, nil, &h.out)
 	if err != nil {
 		h.t.Fatalf("copy %+v: %v", it.Entry, err)
 	}
+	tk := tks[0]
 	h.tickets.track(tk, it.Entry)
 	h.absorb()
 	return tk
@@ -60,6 +61,31 @@ func TestCopiesGoToTheCleanersLane(t *testing.T) {
 	h.close()
 }
 
+// Copies handed over together go out in one record, as the net-gain guard charges them, rather
+// than the first alone in a round of its own.
+func TestCopiesHandedOverTogetherShareARecord(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	tw := h.submit(disklog.Hot, h.write(0, 3, 1))
+	h.run()
+	w := h.durableOf(tw)
+	items := []disklog.Item{h.copyItem(0, 1, w.LBA+1, 1), h.copyItem(1, 1, w.LBA+2, 2), h.copyItem(2, 1, w.LBA+3, 3)}
+	tks, err := h.log.Copy(&h.ctx, items, nil, &h.out)
+	if err != nil || len(tks) != len(items) {
+		t.Fatalf("%d tickets for %d copies: %v", len(tks), len(items), err)
+	}
+	for i, tk := range tks {
+		h.tickets.track(tk, items[i].Entry)
+	}
+	h.absorb()
+	h.run()
+	for _, tk := range tks[1:] {
+		if lsn := h.durableOf(tk).LSN; lsn != h.durableOf(tks[0]).LSN {
+			t.Fatalf("copies went out in records %d and %d, want one", h.durableOf(tks[0]).LSN, lsn)
+		}
+	}
+	h.close()
+}
+
 func TestCopyRefusesOtherKindsAndSourcesOutsideTheLog(t *testing.T) {
 	h := formatted(t, gib, testConfig(0))
 	it := h.copyItem(0, 1, 5000, 1)
@@ -72,7 +98,7 @@ func TestCopyRefusesOtherKindsAndSourcesOutsideTheLog(t *testing.T) {
 		disklog.CopyEntry(1, testChunk, 1, 0, 1, core.LBA(h.geo.DiskBlocks())),
 	} {
 		it.Entry = e
-		if _, err := h.log.Copy(&h.ctx, it, &h.out); !errors.Is(err, disklog.ErrMalformed) {
+		if _, err := h.log.Copy(&h.ctx, []disklog.Item{it}, nil, &h.out); !errors.Is(err, disklog.ErrMalformed) {
 			t.Fatalf("copy of %+v: %v", e, err)
 		}
 	}

@@ -8,9 +8,10 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
-// The net-gain guard rounds header blocks up per record: in 16,384-block (64 MiB) segments a
-// copy record of one-block entries holds 253 data blocks under 3 header blocks, so 16,191 live
-// blocks cost 16,383 and pass, while 16,192 cost 16,384 and are refused.
+// The net-gain guard rounds header blocks up per record and charges one more record's, for the
+// record a segment's end cuts in two: in 16,384-block (64 MiB) segments a copy record of
+// one-block entries holds 253 data blocks under 3 header blocks, so 16,187 live blocks cost
+// 16,382, which with the header of the segment the copies open fits one, while 16,188 cost 16,383.
 func TestCopyCostRoundsHeadersUpPerRecord(t *testing.T) {
 	h := blankHarness(t, 256<<30, 8<<20, testConfig(0))
 	if h.geo.SegmentBlocks != 16384 {
@@ -20,7 +21,7 @@ func TestCopyCostRoundsHeadersUpPerRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range []struct{ live, cost uint64 }{{1, 4}, {253, 256}, {254, 260}, {16191, 16383}, {16192, 16384}} {
+	for _, c := range []struct{ live, cost uint64 }{{0, 0}, {1, 7}, {253, 259}, {254, 263}, {16187, 16382}, {16188, 16383}} {
 		if got := log.CopyCost(c.live); got != c.cost {
 			t.Fatalf("%d live blocks cost %d, want %d", c.live, got, c.cost)
 		}

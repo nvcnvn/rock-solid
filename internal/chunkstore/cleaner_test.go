@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -270,22 +271,28 @@ func TestAPassFinishesOnADiskFilledToItsReserve(t *testing.T) {
 }
 
 // Writes of new blocks fill the disk with live data: no victim gains space, and only then do
-// writes waiting for room fail with NoSpace.
+// writes waiting for room fail with NoSpace, whatever the reserve.
 func TestWritesFailOnlyWhenNoVictimGainsSpace(t *testing.T) {
-	h := newHarnessOn(t, cleanConfig(), cleanGeo)
-	h.merging = true
-	for i := 0; ; i++ {
-		id := h.write(chunk(uint32(10+i/64)), uint32(i%64)*core.BlockSize, fill(core.BlockSize, byte(i)), 0)
-		h.settle()
-		if err := h.reply(id).Err; err != nil {
-			if !errors.Is(err, disklog.ErrNoSpace) {
-				t.Fatalf("write %d: %v", i, err)
+	for _, reserve := range []uint32{8, 10, 12} {
+		t.Run(fmt.Sprintf("reserve %d", reserve), func(t *testing.T) {
+			cfg := cleanConfig()
+			cfg.Log.Reserve = reserve
+			h := newHarnessOn(t, cfg, cleanGeo)
+			h.merging = true
+			for i := 0; ; i++ {
+				id := h.write(chunk(uint32(10+i/64)), uint32(i%64)*core.BlockSize, fill(core.BlockSize, byte(i)), 0)
+				h.settle()
+				if err := h.reply(id).Err; err != nil {
+					if !errors.Is(err, disklog.ErrNoSpace) {
+						t.Fatalf("write %d: %v", i, err)
+					}
+					if v := h.s.chooseVictims(); len(v) > 0 {
+						t.Fatalf("write %d failed with victims %v left", i, v)
+					}
+					return
+				}
 			}
-			if v := h.s.chooseVictims(); len(v) > 0 {
-				t.Fatalf("write %d failed with victims %v left", i, v)
-			}
-			return
-		}
+		})
 	}
 }
 
@@ -320,7 +327,7 @@ func TestTheCleanerKeepsTheHeadersOfLiveSlotWrites(t *testing.T) {
 }
 
 // A pass takes the 4 best victims by cost-benefit among the segments it may clean whose copy
-// costs less than a segment, header blocks included.
+// costs less than a segment, header blocks included, that of the segment it opens too.
 func TestAPassTakesTheFourBestVictimsThatGainSpace(t *testing.T) {
 	h, _ := primed(t)
 	log := h.s.Log()
@@ -336,7 +343,7 @@ func TestAPassTakesTheFourBestVictimsThatGainSpace(t *testing.T) {
 	for seg := uint32(1); seg < cleanGeo.SegmentCount; seg++ {
 		u, stream := log.Usage(seg)
 		chosen := slices.Contains(victims, seg)
-		gains := stream == disklog.Meta || log.CopyCost(uint64(u.Live)) < uint64(cleanGeo.SegmentBlocks)
+		gains := stream == disklog.Meta || log.CopyCost(uint64(u.Live))+1 < uint64(cleanGeo.SegmentBlocks)
 		if chosen && (!log.Cleanable(seg) || !gains) {
 			t.Fatalf("victim %d is not cleanable or costs more than it frees: %+v", seg, u)
 		}

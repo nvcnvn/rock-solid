@@ -130,6 +130,15 @@ func TestCleanerCrashSeed329Settles(t *testing.T) {
 	}
 }
 
+// Seed 448 of TestCleanerSurvivesCrashes: with the guard not charging the record a segment's end
+// cuts in two, copying victims of 13 live blocks filled a 16-block segment each, and the cleaner
+// copied after recovery without end.
+func TestCleanerCrashSeed448Settles(t *testing.T) {
+	if msg, _ := cleanerCrash(t, 448, plants{}); msg != "" {
+		t.Fatal(msg)
+	}
+}
+
 // Planted bug: replay mapping a copy's blocks as a write, whether or not a map still stores them
 // at the source, brings back a block a later write replaced; the crash oracle sees it within 50
 // seeds.

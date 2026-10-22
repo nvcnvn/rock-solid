@@ -878,20 +878,27 @@ func (l *Log) MergePiece(ctx *core.Context, w int, owner uint32, buf core.IOBuf,
 	return t, nil
 }
 
-// Copy queues a cleaner's copy item on the cleaner's lane of the cold stream, whose rounds may open segments of the reserve and never wait behind a checkpoint, so a pass finishes on a disk filled to its reserve; its source must lie in a segment of the log.
-func (l *Log) Copy(ctx *core.Context, it Item, out *Output) (Ticket, error) {
-	if l.err != nil {
-		return 0, l.err
+// Copy queues a cleaner's copy items on the cleaner's lane of the cold stream, whose rounds may
+// open segments of the reserve and never wait behind a checkpoint, so a pass finishes on a disk
+// filled to its reserve; each source must lie in a segment of the log. It appends a ticket per
+// item to tickets, and on an error the items before the refused one stay queued. It starts
+// rounds only once all are queued, so a victim's copies fill records of the largest size, as
+// the net-gain guard charges them.
+func (l *Log) Copy(ctx *core.Context, items []Item, tickets []Ticket, out *Output) ([]Ticket, error) {
+	defer l.startRounds(ctx, out)
+	for _, it := range items {
+		if l.err != nil {
+			return tickets, l.err
+		}
+		if it.Entry.Kind != EntryCopy || uint64(it.Entry.Source) < uint64(l.sb.SegmentBlocks) || uint64(it.Entry.Source)+uint64(it.Entry.Count) > l.sb.DiskBlocks() {
+			return tickets, ErrMalformed
+		}
+		if err := l.accept(ctx, &it); err != nil {
+			return tickets, err
+		}
+		tickets = append(tickets, l.enqueue(&l.lanes[laneClean].q, queued{entry: it.Entry, buf: it.Buf}))
 	}
-	if it.Entry.Kind != EntryCopy || uint64(it.Entry.Source) < uint64(l.sb.SegmentBlocks) || uint64(it.Entry.Source)+uint64(it.Entry.Count) > l.sb.DiskBlocks() {
-		return 0, ErrMalformed
-	}
-	if err := l.accept(ctx, &it); err != nil {
-		return 0, err
-	}
-	t := l.enqueue(&l.lanes[laneClean].q, queued{entry: it.Entry, buf: it.Buf})
-	l.startRounds(ctx, out)
-	return t, nil
+	return tickets, nil
 }
 
 func (l *Log) accept(ctx *core.Context, it *Item) error {
