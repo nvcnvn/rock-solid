@@ -132,14 +132,14 @@ func slotBlocksOf(entries []Entry) uint32 {
 	return uint32(n)
 }
 
-// AddLive changes segment's live blocks by delta, as the owner of the index whose records it holds reports their counts changing past the blocks each record wrote; ErrMalformed for a segment that is not used or a count that would go below zero.
+// AddLive changes segment's live blocks by delta, as the owner of the index whose records it holds reports their counts changing past the blocks each record wrote; ErrMalformed for a segment that is neither used nor quarantined or a count that would go below zero.
 func (l *Log) AddLive(segment uint32, delta int) error {
 	if segment == 0 || segment >= l.sb.SegmentCount {
 		return ErrMalformed
 	}
 	u := &l.usage[segment]
 	n := int64(u.Live) + int64(delta)
-	if u.State != SegmentUsed || n < 0 {
+	if u.State != SegmentUsed && u.State != SegmentQuarantined || n < 0 {
 		return ErrMalformed
 	}
 	u.Live = uint32(n)

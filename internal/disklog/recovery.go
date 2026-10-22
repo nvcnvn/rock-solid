@@ -240,7 +240,8 @@ type Recovery struct {
 	maxDurable  uint64
 	maxSeq      uint64
 	found       []foundHeader
-	replayFloor uint64
+	baseLSN     uint64
+	replayFrom  uint64
 	replayBytes uint64
 	heldBytes   uint64
 	replayed    uint64
@@ -986,9 +987,9 @@ func (r *Recovery) Replay(ctx *core.Context, out *Output) error {
 		r.minReplay = replayFloor(&r.manifest)
 	}
 	r.expected = r.minReplay + 1
-	r.replayFloor = r.manifestPos.LSN
+	r.baseLSN, r.replayFrom = r.manifestPos.LSN, r.manifestPos.LSN
 	if r.hasManifest {
-		r.replayFloor = r.manifest.BaseLSN
+		r.baseLSN, r.replayFrom = r.manifest.BaseLSN, replayFloor(&r.manifest)
 	}
 	lanes := laneMeta + 1
 	for s := range r.segs {
@@ -1283,12 +1284,14 @@ func (r *Recovery) deliver(d *DecodedRecord, seg, block uint32, out *Output) {
 }
 
 // count restores what group commit counted for a record as it retired: the replay and hold
-// bytes after the manifest, its segment's usage row and the slots it writes.
+// bytes after the manifest's replay floor, which a step checkpoint leaves behind its base, and
+// after its base, its segment's usage row and the slots it writes.
 func (r *Recovery) count(d *DecodedRecord, seg uint32) {
-	blocks := d.Layout.Blocks()
-	if d.Record.LSN > r.replayFloor {
-		r.replayBytes += blocks * core.BlockSize
+	if d.Record.LSN > r.replayFrom {
+		r.replayBytes += d.Layout.Blocks() * core.BlockSize
 		r.heldBytes += ordinaryBytes(d.Entries, d.Layout)
+	}
+	if d.Record.LSN > r.baseLSN {
 		info := &r.segs[seg]
 		info.live += d.Layout.DataBlocks + d.Layout.SlotBlocks
 		info.newest = d.Record.LSN

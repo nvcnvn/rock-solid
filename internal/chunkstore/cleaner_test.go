@@ -482,3 +482,62 @@ func TestAVictimWithABadBlockIsQuarantined(t *testing.T) {
 		t.Fatalf("stats %+v; the quarantined segment is a victim again: %v", h.s.CleanStats(), slices.Contains(h.s.chooseVictims(), bad))
 	}
 }
+
+// Blocks whose record lies in a quarantined segment may still be overwritten and punched, which
+// lowers its live count, before a restart and after one, which keeps it quarantined.
+func TestAQuarantinedSegmentsBlocksAreOverwritten(t *testing.T) {
+	h, o := primed(t)
+	log := h.s.Log()
+	var bad uint32
+	var most uint32
+	for _, v := range h.s.chooseVictims() {
+		if u, stream := log.Usage(v); stream != disklog.Meta && u.Live > most {
+			bad, most = v, u.Live
+		}
+	}
+	lo := cleanGeo.LBA(bad, 0)
+	type block struct {
+		c core.ChunkID
+		b uint16
+	}
+	var held []block
+	for _, c := range []core.ChunkID{chunk(1), chunk(2)} {
+		for b := range uint16(64) {
+			if e, ok := h.s.Index().Lookup(testPool, c, b); ok && e.Header >= lo && e.Header < lo+core.LBA(cleanGeo.SegmentBlocks) {
+				held = append(held, block{c, b})
+			}
+		}
+	}
+	if len(held) < 2 {
+		t.Fatalf("victim %d holds %d live blocks", bad, len(held))
+	}
+	at, _ := h.s.Index().Lookup(testPool, held[0].c, held[0].b)
+	corrupt := h.disk.Read(at.BlockLBA(held[0].b), 1)
+	corrupt[100] ^= 0xff
+	h.disk.Put(at.BlockLBA(held[0].b), corrupt)
+	h.clean(100)
+	h.s.cfg.CleanFree = -1
+	overwriteHeld := func(bl block) {
+		data := fill(core.BlockSize, byte(bl.b))
+		id := h.write(bl.c, uint32(bl.b)*core.BlockSize, data, 0)
+		h.settle()
+		o.apply(t, bl.c, uint32(bl.b)*core.BlockSize, core.BlockSize, data, h.ok(id), 0)
+	}
+	quarantined := func() {
+		t.Helper()
+		if u, _ := log.Usage(bad); u.State != disklog.SegmentQuarantined {
+			t.Fatalf("segment %d is %+v", bad, u)
+		}
+	}
+	quarantined()
+	overwriteHeld(held[0])
+	h.recoverStore(disklog.ModeOpen)
+	h.s.cfg.CleanFree = -1
+	log = h.s.Log()
+	quarantined()
+	for _, bl := range held[1:] {
+		overwriteHeld(bl)
+	}
+	o.check(t, h, 0, 63, 0)
+	quarantined()
+}
