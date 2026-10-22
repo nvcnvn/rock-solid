@@ -263,7 +263,10 @@ func TestWholeChunksDeletedAtRandomCostNoCleaning(t *testing.T) {
 	h.checkSlots()
 }
 
-const slotSegmentBlocks = 4096
+const (
+	slotSegmentBlocks = 4096
+	slotSegments      = 64
+)
 
 // slotIndex is an index of a disk of 16 MiB segments, 4 chunk slots each.
 func slotIndex(t testing.TB) *Index {
@@ -272,7 +275,7 @@ func slotIndex(t testing.TB) *Index {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewIndex(tree, slotSegmentBlocks)
+	return NewIndex(tree, slotSegmentBlocks, slotSegments)
 }
 
 // The index counts the blocks its maps refer to in each chunk slot, beside its record's, and

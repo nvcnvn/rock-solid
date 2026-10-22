@@ -303,14 +303,14 @@ func (s *Store) recover(ctx *core.Context, diskBlocks uint64, mode disklog.Mode)
 func (s *Store) resume(log *disklog.Log) error {
 	s.log, s.rec, s.sb, s.maxWrite = log, nil, log.Superblock(), log.MaxWriteBlocks()
 	if s.ix == nil {
-		if err := s.newIndex(log.MaxBlobBytes(), s.sb.SegmentBlocks); err != nil {
+		if err := s.newIndex(log.MaxBlobBytes(), s.sb.Geometry); err != nil {
 			return err
 		}
 	} else {
 		live := make([]uint32, s.sb.SegmentCount)
 		s.ix.SegmentLive(s.sb.SegmentBlocks, live)
 		log.Recount(live)
-		s.ix.RecountSlotHeld(s.sb.SegmentCount)
+		s.ix.RecountSlotHeld()
 	}
 	s.ix.TrackLive(true)
 	s.phase, s.checkpointing, s.inPiece, s.piecesOut, s.pieceWait = serving, false, false, 0, false
@@ -319,7 +319,7 @@ func (s *Store) resume(log *disklog.Log) error {
 
 // newIndex starts an empty index and the merge scheduler over it, which hands out the merge
 // workers the log keeps a lane for.
-func (s *Store) newIndex(maxPiece uint64, segmentBlocks uint32) error {
+func (s *Store) newIndex(maxPiece uint64, geo disklog.Geometry) error {
 	step := cmp.Or(s.cfg.Log.CompactionStepBytes, disklog.DefaultConfig().CompactionStepBytes)
 	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: int(maxPiece), StepBytes: int(step), Check: s.cfg.Check}))
 	if err != nil {
@@ -330,7 +330,7 @@ func (s *Store) newIndex(maxPiece uint64, segmentBlocks uint32) error {
 		return err
 	}
 	sched.Add(tree)
-	s.ix, s.sched = NewIndex(tree, segmentBlocks), sched
+	s.ix, s.sched = NewIndex(tree, geo.SegmentBlocks, geo.SegmentCount), sched
 	return nil
 }
 
@@ -1469,7 +1469,7 @@ func (s *Store) failWaiting(ctx *core.Context, err error, out *Output) {
 }
 
 func (s *Store) manifestLoaded(ctx *core.Context) {
-	if err := s.newIndex(s.rec.MaxBlobBytes(), s.rec.Superblock().SegmentBlocks); err != nil {
+	if err := s.newIndex(s.rec.MaxBlobBytes(), s.rec.Superblock().Geometry); err != nil {
 		s.recoveryFailed(ctx, err)
 		return
 	}

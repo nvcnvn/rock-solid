@@ -183,9 +183,9 @@ func TreeConfig(cfg lsm.Config) lsm.Config {
 	return cfg
 }
 
-// NewIndex makes an index over tree, which holds the index alone, configured by TreeConfig, of a disk whose segments are segmentBlocks long.
-func NewIndex(tree *lsm.Tree, segmentBlocks uint32) *Index {
-	return &Index{tree: tree, segmentBlocks: segmentBlocks}
+// NewIndex makes an index over tree, which holds the index alone, configured by TreeConfig, of a disk of segments segments segmentBlocks long.
+func NewIndex(tree *lsm.Tree, segmentBlocks, segments uint32) *Index {
+	return &Index{tree: tree, segmentBlocks: segmentBlocks, slotHeld: make([]uint32, segments)}
 }
 
 // TrackLive makes the index keep a LiveChange for every change to a record's count but a write's own blocks, until TakeChanges.
@@ -440,10 +440,7 @@ func (x *Index) refer(e Extent, n int, own bool) {
 		if x.countSlot(slot, e.Header, n) == 0 {
 			x.freed = append(x.freed, slot)
 		}
-		seg := int(uint64(e.Header) / uint64(x.segmentBlocks))
-		if seg >= len(x.slotHeld) {
-			x.slotHeld = append(x.slotHeld, make([]uint32, seg+1-len(x.slotHeld))...)
-		}
+		seg := uint64(e.Header) / uint64(x.segmentBlocks)
 		x.slotHeld[seg] = uint32(int(x.slotHeld[seg]) + n)
 	}
 }
@@ -485,8 +482,7 @@ func (x *Index) SegmentSlotHeld(held []uint32) {
 
 // RecountSlotHeld takes each segment's slot-held blocks from the slots' stored counts, as after a
 // recovery, whose replay counted only the records it applied.
-func (x *Index) RecountSlotHeld(segments uint32) {
-	x.slotHeld = slices.Grow(x.slotHeld[:0], int(segments))[:segments]
+func (x *Index) RecountSlotHeld() {
 	clear(x.slotHeld)
 	x.SegmentSlotHeld(x.slotHeld)
 }
@@ -835,7 +831,7 @@ type recordCount struct {
 func (x *Index) Check() error {
 	x.check = x.check[:0]
 	var stored []recordCount
-	var held []uint32
+	held := make([]uint32, len(x.slotHeld))
 	var prefix []byte
 	var mapVersion, marker, chunkEpoch uint64
 	prevEnd := 0
@@ -878,8 +874,10 @@ func (x *Index) Check() error {
 			}
 			if slot, ok := x.slotOf(e); ok {
 				x.check = append(x.check, recordCount{slot, uint32(e.Count)})
-				seg := int(uint64(e.Header) / uint64(x.segmentBlocks))
-				held = append(held, make([]uint32, max(0, seg+1-len(held)))...)
+				seg := uint64(e.Header) / uint64(x.segmentBlocks)
+				if seg >= uint64(len(held)) {
+					return fmt.Errorf("chunk %v map %d: slot extent's header at LBA %d lies past the disk's %d segments", key.Chunk, key.Version, e.Header, len(held))
+				}
 				held[seg] += uint32(e.Count)
 			}
 		default:
@@ -898,11 +896,9 @@ func (x *Index) Check() error {
 	if !slices.Equal(stored, want) {
 		return fmt.Errorf("record counts %v, the maps refer to %v", stored, want)
 	}
-	n := max(len(held), len(x.slotHeld))
-	kept := make([]uint32, n)
+	kept := make([]uint32, len(held))
 	x.SegmentSlotHeld(kept)
-	held = append(held, make([]uint32, n-len(held))...)
-	for s := range n {
+	for s := range held {
 		if held[s] != x.SlotHeld(uint32(s)) || held[s] != kept[s] {
 			return fmt.Errorf("segment %d: the maps refer to %d blocks in slots its records wrote, the index counts %d and the slots' counts %d", s, held[s], x.SlotHeld(uint32(s)), kept[s])
 		}
