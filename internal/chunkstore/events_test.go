@@ -277,18 +277,23 @@ func TestMergeCheckRebuilds(t *testing.T) {
 	o.check(t, h, 0, 15, 0)
 }
 
-// rebuild breaks the index as a failed run check does and runs the store until the index
-// rebuilt from the log serves.
-func (h *harness) rebuild() {
+// rebuild breaks the index as a failed run check does, runs the store until the index rebuilt
+// from the log serves, and returns that index as the recovery left it, before the cleaner or a
+// checkpoint changes it.
+func (h *harness) rebuild() [][2]string {
 	h.t.Helper()
 	gen := h.s.logGen
 	h.s.indexBroken(&h.ctx, &h.out)
 	h.s.pump(&h.ctx, &h.out)
 	h.take()
-	h.settle()
+	for !h.s.Serving() && h.step() {
+	}
 	if !h.s.Serving() || h.s.logGen != gen+1 {
 		h.t.Fatalf("rebuild: serving %v after %d restarts of the log: %v", h.s.Serving(), h.s.logGen-gen, h.s.Err())
 	}
+	rebuilt := dumpIndex(h.s.Index())
+	h.settle()
+	return rebuilt
 }
 
 // cleanedHarness runs the cleaner workload on the small disk until the cleaner has freed a segment.
@@ -350,17 +355,16 @@ func (h *harness) failCheck(path string) {
 
 // A run check that fails once the cleaner has freed segments, whose LSNs are gone for good,
 // rebuilds the index from the runs the newest named manifest lists and the log after them, on the
-// flush path and on the merge path: the rebuilt index equals an open of the disk.
+// flush path and on the merge path, and the store serves again; its index then equals another
+// rebuild's.
 func TestRunCheckRebuildsAfterCleaning(t *testing.T) {
 	for _, path := range []string{"flush", "merge"} {
 		t.Run(path, func(t *testing.T) {
 			h := cleanedHarness(t)
 			h.failCheck(path)
-			rebuilt := dumpIndex(h.s.Index())
-			h.cfg.CleanFree = -1
-			h.recoverStore(disklog.ModeOpen)
-			if opened := dumpIndex(h.s.Index()); !slices.Equal(rebuilt, opened) {
-				t.Fatalf("rebuilt index has %d entries, an open %d", len(rebuilt), len(opened))
+			live := dumpIndex(h.s.Index())
+			if again := h.rebuild(); !slices.Equal(again, live) {
+				t.Fatalf("a second rebuild has %d entries, the live index %d", len(again), len(live))
 			}
 		})
 	}

@@ -288,11 +288,11 @@ func crashEveryAction(t *testing.T, cfg Config, geo *disklog.Geometry, workload 
 			m := h.recovered
 			checkModel(t, h, m, crashChunks, 2)
 			opened := dumpIndex(h.s.Index())
-			h.rebuild()
+			got := h.rebuild()
 			if err := h.s.CheckSlots(); err != nil {
 				t.Fatalf("crash at action %d, rebuild: %v", k, err)
 			}
-			if got := dumpIndex(h.s.Index()); !slices.Equal(got, opened) {
+			if !slices.Equal(got, opened) {
 				t.Fatalf("crash at action %d: rebuilt index has %d entries, recovered %d", k, len(got), len(opened))
 			}
 			checkModel(t, h, m, crashChunks, 2)

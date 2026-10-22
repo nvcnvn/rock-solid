@@ -85,9 +85,7 @@ func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
 		return msg, freed
 	}
 	opened := dumpIndex(h.s.Index())
-	h.s.cfg.CleanFree = -1
-	h.rebuild()
-	if rebuilt := dumpIndex(h.s.Index()); !slices.Equal(rebuilt, opened) {
+	if rebuilt := h.rebuild(); !slices.Equal(rebuilt, opened) {
 		return fmt.Sprintf("rebuilt index has %d entries, opened %d", len(rebuilt), len(opened)), freed
 	}
 	return modelDiff(h, m, cleanChunks, epoch+1), freed
