@@ -119,9 +119,13 @@ func (h *harness) clean(want int) {
 
 // steppedStore is a primed store whose pieces hold a block, so that its index's runs span
 // several, overwritten further with merges off; merges run in steps of a block.
-func steppedStore(t *testing.T) (*harness, *byteOracle, *core.Rand) {
+func steppedStore(t *testing.T) (*harness, *byteOracle, *core.Rand) { return steppedStoreOf(t, 0) }
+
+// steppedStoreOf is steppedStore with workers merge workers, or the default for 0.
+func steppedStoreOf(t *testing.T, workers int) (*harness, *byteOracle, *core.Rand) {
 	cfg := cleanConfig()
 	cfg.Log.MaxRecordBytes = 3 * core.BlockSize
+	cfg.Log.MergeWorkers = workers
 	h, o := primedWith(t, cfg)
 	h.merging = false
 	r := core.NewRand(9)
@@ -764,4 +768,77 @@ func TestTheGuardChargesTheIndexEntriesOfMoves(t *testing.T) {
 			t.Fatalf("%d live blocks cost %d of copies and %d of entries, want %d and %d", c.live, got, entries, c.copies, c.entries)
 		}
 	}
+}
+
+// fatalCatcher records a Fatalf instead of ending the test, unwinding with errCaught.
+type fatalCatcher struct {
+	testing.TB
+	msg string
+}
+
+var errCaught = errors.New("caught")
+
+func (c *fatalCatcher) Fatalf(format string, args ...any) {
+	c.msg = fmt.Sprintf(format, args...)
+	panic(errCaught)
+}
+
+func (c *fatalCatcher) Helper() {}
+
+// Planted violation: run pieces on a merge worker's lane past a step and its partition and root
+// with no manifest between fail the step check, and a manifest between them passes it.
+func TestNoteStepsCatchesAStepPastItsBound(t *testing.T) {
+	h := newHarnessOn(t, cleanConfig(), cleanGeo)
+	const seg = 5
+	h.laneOf[seg] = 1
+	piece := h.s.Log().MaxBlobBytes()
+	run := disklog.Entry{Kind: disklog.EntryBlob, BlobKind: disklog.BlobRun, Length: piece}
+	manifest := disklog.Entry{Kind: disklog.EntryBlob, BlobKind: disklog.BlobManifest, Length: 1}
+	most := max(h.cfg.Log.CompactionStepBytes, piece) + 2*piece
+	n := int(most/piece) + 1
+	caught := func(entries []disklog.Entry) (msg string) {
+		c := &fatalCatcher{TB: t}
+		h.t = c
+		defer func() {
+			h.t, msg = t, c.msg
+			if v := recover(); v != nil && v != errCaught {
+				panic(v)
+			}
+		}()
+		clear(h.stepHeld)
+		h.noteSteps(seg, entries)
+		return
+	}
+	if msg := caught(slices.Repeat([]disklog.Entry{run}, n)); msg == "" {
+		t.Fatalf("%d run pieces of %d bytes past a manifest passed the step check", n, piece)
+	}
+	split := append(slices.Repeat([]disklog.Entry{run}, n-1), manifest, run)
+	if msg := caught(split); msg != "" {
+		t.Fatal(msg)
+	}
+}
+
+// With two merge workers, the rewrites a cleaner pass marks run beside the merges overwrites
+// make due, two at once, each on its own worker's lane within its step, and every block reads
+// back, after a restart too.
+func TestTwoMergesRunAtOnce(t *testing.T) {
+	h, o, r := steppedStoreOf(t, 2)
+	markRewrites(t, h)
+	h.merging = true
+	for i := 0; h.maxMerging < 2; i++ {
+		if i == 2000 {
+			t.Fatalf("no two of %d merges ran at once", len(h.merges))
+		}
+		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+	}
+	workers := map[int]bool{}
+	for _, c := range h.merges {
+		workers[c.Worker()] = true
+	}
+	if len(workers) != 2 {
+		t.Fatalf("merges ran on workers %v", workers)
+	}
+	o.check(t, h, 0, 63, 0)
+	h.recoverStore(disklog.ModeOpen)
+	o.check(t, h, 0, 63, 0)
 }

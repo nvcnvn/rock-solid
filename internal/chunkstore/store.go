@@ -1336,7 +1336,7 @@ func (s *Store) beginCheckpoint(ctx *core.Context, due bool, out *Output) {
 		begin = s.log.BeginStepCheckpoint
 	}
 	if err := begin(idx[:]); err != nil {
-		tree.FlushFailed()
+		s.piecesDead(tree.FlushFailed())
 		return
 	}
 	s.checkpointing = true

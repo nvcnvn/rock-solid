@@ -13,8 +13,8 @@ import (
 
 var cleanChunks = []core.ChunkID{chunk(1), chunk(2), chunk(3)}
 
-// cleanerWorkload overwrites and punches blocks of three chunks, now and then under a new
-// snapshot epoch, with operations pipelined behind a few disk actions at a time, so writes land
+// cleanerWorkload overwrites and punches blocks of three chunks, now and then a whole chunk or
+// under a new snapshot epoch, with operations pipelined behind a few disk actions at a time, so writes land
 // while the cleaner copies, and merges run as the daemon would run them.
 func cleanerWorkload(h *harness, r *core.Rand, ops int) uint64 {
 	var epoch uint64
@@ -26,6 +26,8 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) uint64 {
 			h.punch(c, b*core.BlockSize, core.BlockSize, epoch)
 		case 3:
 			epoch++
+		case 4:
+			h.punch(c, 0, core.ChunkSize, epoch)
 		default:
 			data := make([]byte, core.BlockSize)
 			r.Fill(data)

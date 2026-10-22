@@ -65,8 +65,9 @@ type harness struct {
 	// shuffle, when set, runs a queued action at random rather than the oldest, as an NVMe queue
 	// may complete the commands it holds in any order but a flush.
 	shuffle *core.Rand
-	// maxCleanReads is the most reads a cleaner pass has had in flight.
-	maxCleanReads int
+	// maxCleanReads is the most reads a cleaner pass has had in flight, and maxMerging the most
+	// merges begun and not finished at once.
+	maxCleanReads, maxMerging int
 }
 
 // advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
@@ -196,6 +197,13 @@ func (h *harness) step() bool {
 			h.merges = append(h.merges, c)
 		}
 		h.steps[c]++
+		running := 0
+		for _, m := range h.merges[max(0, len(h.merges)-8):] {
+			if !m.Finished() {
+				running++
+			}
+		}
+		h.maxMerging = max(h.maxMerging, running)
 		h.take()
 	}
 	return true

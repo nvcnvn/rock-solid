@@ -1973,7 +1973,10 @@ A pass:
   worker's lane and named by a checkpoint begun for it; once the manifest naming its last step is
   durable every old piece is reported dead and the segment holds no live piece, and every key
   reads the same throughout and after a restore. After every record, no merge worker's lane holds
-  more than a step, its partition and its root of run pieces past the newest manifest.
+  more than a step, its partition and its root of run pieces past the newest manifest; a planted
+  record of run pieces past that bound fails the check, and a manifest between them passes it.
+  With two merge workers, a marked rewrite runs beside another merge, on the other worker's lane,
+  and every block reads the same, after a restart too.
 - A crash between two steps of a rewrite, every write landed, recovers the input bounded by the
   first step and the output so far, reading only the input's pieces past its dead ones, and the
   rewrite resumes past the bound to its end; recovery that loads the input whole is Malformed.
@@ -2050,7 +2053,8 @@ crash oracle and the usage table against the index:
   header is at or past `NextSeq` is dropped and rebuilt from replay; a header of this log below
   `NextSeq` that the table leaves out is free, not used.
 - Simulator, extending the random-crash property: `TestCleanerSurvivesCrashes` (500 seeds in the
-  seed runner) crashes overwrites, punches and snapshot cuts on a small disk at a seeded action
+  seed runner) crashes overwrites, punches of blocks and of whole chunks and snapshot cuts on a
+  small disk at a seeded action
   while the cleaner frees and reuses segments, recovers what the crash oracle holds, and checks
   the [invariant](#invariant-checker) on usage counts and open sequences after the recovery. The
   open-sequence half runs after every recovery in the store's tests.
