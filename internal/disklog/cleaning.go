@@ -65,16 +65,20 @@ func (l *Log) MaxCopyBlocks() uint16 {
 	return uint16(min(maxDataBlocks(l.maxItemRec, copyEntrySize), core.BlocksPerChunk))
 }
 
-// CopyCost is what copying blocks live blocks costs the log in blocks at most, as records of
-// one-block copy entries in records of the largest size, header blocks rounded up per record,
-// and the header of one more record, for the record a segment's end cuts in two: in 1 MiB
-// records, 253 data blocks and 3 header blocks each.
+// CopyCost is what copying blocks live blocks costs the log in blocks at most: records of
+// one-block copy entries in records of the largest size, header blocks rounded up per record, the
+// header of one more record, since copies rolling into a new segment split their records between
+// two, and the tail they leave behind in the segment they roll out of, which a record never spans:
+// up to a block short of the largest copy among them and its header. In 1 MiB records, 253 data
+// blocks and 3 header blocks each, and a copy of up to 254 blocks under 1.
 func (l *Log) CopyCost(blocks uint64) uint64 {
 	if blocks == 0 {
 		return 0
 	}
 	per, header := copiesPerRecord(l.maxWrite)
-	return blocks + header*((blocks+per-1)/per+1)
+	largest := min(blocks, uint64(l.MaxCopyBlocks()))
+	tail := largest + (preludeSize+copyEntrySize+largest*core.CRC32CSize+core.BlockSize-1)/core.BlockSize - 1
+	return blocks + header*((blocks+per-1)/per+1) + tail
 }
 
 // RewriteCost is what writing pieces again costs the log in blocks at most: the records holding

@@ -1,6 +1,7 @@
 package disklog
 
 import (
+	"fmt"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -167,7 +168,10 @@ func (l *Log) PiecesDead(refs []BlobRef) error {
 func (l *Log) dropPiece(ref BlobRef) {
 	if n := l.pieces.drop(ref); n > 0 {
 		u := &l.usage[ref.Segment]
-		u.Live -= min(u.Live, n)
+		if u.Live < n {
+			panic(fmt.Sprintf("disklog: segment %d counts %d live blocks, fewer than the %d its dead piece %+v held", ref.Segment, u.Live, n, ref))
+		}
+		u.Live -= n
 		l.changed[ref.Segment/64] |= 1 << (ref.Segment % 64)
 	}
 }

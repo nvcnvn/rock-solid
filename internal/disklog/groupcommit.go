@@ -880,17 +880,18 @@ func (l *Log) MergePiece(ctx *core.Context, w int, owner uint32, buf core.IOBuf,
 
 // Copy queues a cleaner's copy items on the cleaner's lane of the cold stream, whose rounds may
 // open segments of the reserve and never wait behind a checkpoint, so a pass finishes on a disk
-// filled to its reserve; each source must lie in a segment of the log. It appends a ticket per
-// item to tickets, and on an error the items before the refused one stay queued. It starts
-// rounds only once all are queued, so a victim's copies fill records of the largest size, as
-// the net-gain guard charges them.
+// filled to its reserve; each source's blocks must lie in one segment of the log. It appends a
+// ticket per item to tickets, and on an error the items before the refused one stay queued. It
+// starts rounds only once all are queued, so a victim's copies fill records of the largest size,
+// as the net-gain guard charges them.
 func (l *Log) Copy(ctx *core.Context, items []Item, tickets []Ticket, out *Output) ([]Ticket, error) {
 	defer l.startRounds(ctx, out)
 	for _, it := range items {
 		if l.err != nil {
 			return tickets, l.err
 		}
-		if it.Entry.Kind != EntryCopy || uint64(it.Entry.Source) < uint64(l.sb.SegmentBlocks) || uint64(it.Entry.Source)+uint64(it.Entry.Count) > l.sb.DiskBlocks() {
+		src, seg := uint64(it.Entry.Source), uint64(l.sb.SegmentBlocks)
+		if it.Entry.Kind != EntryCopy || src < seg || src >= l.sb.DiskBlocks() || src/seg != (src+uint64(it.Entry.Count)-1)/seg {
 			return tickets, ErrMalformed
 		}
 		if err := l.accept(ctx, &it); err != nil {

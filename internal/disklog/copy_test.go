@@ -86,7 +86,7 @@ func TestCopiesHandedOverTogetherShareARecord(t *testing.T) {
 	h.close()
 }
 
-func TestCopyRefusesOtherKindsAndSourcesOutsideTheLog(t *testing.T) {
+func TestCopyRefusesOtherKindsAndSourcesOutsideASegment(t *testing.T) {
 	h := formatted(t, gib, testConfig(0))
 	it := h.copyItem(0, 1, 5000, 1)
 	if _, err := h.log.Submit(&h.ctx, disklog.Cold, it, &h.out); !errors.Is(err, disklog.ErrReservedKind) {
@@ -96,6 +96,7 @@ func TestCopyRefusesOtherKindsAndSourcesOutsideTheLog(t *testing.T) {
 		disklog.WriteEntry(1, testChunk, 1, 0, 1),
 		disklog.CopyEntry(1, testChunk, 1, 0, 1, core.LBA(h.geo.SegmentBlocks-1)),
 		disklog.CopyEntry(1, testChunk, 1, 0, 1, core.LBA(h.geo.DiskBlocks())),
+		disklog.CopyEntry(1, testChunk, 1, 0, 2, core.LBA(2*h.geo.SegmentBlocks-1)),
 	} {
 		it.Entry = e
 		if _, err := h.log.Copy(&h.ctx, []disklog.Item{it}, nil, &h.out); !errors.Is(err, disklog.ErrMalformed) {

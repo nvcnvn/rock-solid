@@ -8,10 +8,11 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
-// The net-gain guard rounds header blocks up per record and charges one more record's, for the
-// record a segment's end cuts in two: in 16,384-block (64 MiB) segments a copy record of
-// one-block entries holds 253 data blocks under 3 header blocks, so 16,187 live blocks cost
-// 16,382, which with the header of the segment the copies open fits one, while 16,188 cost 16,383.
+// The net-gain guard rounds header blocks up per record, charges one more record's, and the tail
+// the largest copy can leave: in 16,384-block (64 MiB) segments a copy record of one-block entries
+// holds 253 data blocks under 3 header blocks and a copy holds up to 254 blocks under 1, so 15,936
+// live blocks cost 16,382, which with the header of the segment the copies open fits one, while
+// 15,937 cost 16,383.
 func TestCopyCostRoundsHeadersUpPerRecord(t *testing.T) {
 	h := blankHarness(t, 256<<30, 8<<20, testConfig(0))
 	if h.geo.SegmentBlocks != 16384 {
@@ -21,7 +22,7 @@ func TestCopyCostRoundsHeadersUpPerRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range []struct{ live, cost uint64 }{{0, 0}, {1, 7}, {253, 259}, {254, 263}, {16187, 16382}, {16188, 16383}} {
+	for _, c := range []struct{ live, cost uint64 }{{0, 0}, {1, 8}, {253, 512}, {254, 517}, {15936, 16382}, {15937, 16383}} {
 		if got := log.CopyCost(c.live); got != c.cost {
 			t.Fatalf("%d live blocks cost %d, want %d", c.live, got, c.cost)
 		}
@@ -113,4 +114,109 @@ func TestWhatTheCleanerMayFree(t *testing.T) {
 	if fresh.log.Cleanable(1) {
 		t.Fatal("a segment is cleanable before any manifest is named")
 	}
+}
+
+// copyTrial hands the log one victim's copies of counts blocks each and returns the blocks they
+// took from the cleaner's open segment at (segment, block) on: the tail they left behind there when
+// they rolled, the header of the segment they opened and their records, and where the lane's open
+// segment now ends.
+func (h *harness) copyTrial(counts []uint16, source core.LBA, segment, block uint32) (taken uint64, endSeg, endBlock uint32) {
+	h.t.Helper()
+	items := make([]disklog.Item, len(counts))
+	for i, c := range counts {
+		items[i] = h.copyItem(uint32(i%200), c, source, uint64(i))
+	}
+	tks, err := h.log.Copy(&h.ctx, items, nil, &h.out)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	for i, tk := range tks {
+		h.tickets.track(tk, items[i].Entry)
+	}
+	h.absorb()
+	h.run()
+	seg := h.geo.SegmentBlocks
+	endSeg, endBlock = segment, block
+	rolled := false
+	for _, tk := range tks {
+		ev := h.durableOf(tk)
+		d := h.record(ev)
+		end := uint32(uint64(ev.LBA)%uint64(seg)) + d.Layout.HeaderBlocks + d.Layout.DataBlocks
+		switch {
+		case ev.Segment != segment && rolled && ev.Segment != endSeg:
+			h.t.Fatalf("one victim's copies opened segments %d and %d", endSeg, ev.Segment)
+		case ev.Segment != segment:
+			if !rolled {
+				endBlock = 0
+			}
+			rolled, endSeg, endBlock = true, ev.Segment, max(endBlock, end)
+		case !rolled:
+			endBlock = max(endBlock, end)
+		}
+	}
+	if rolled {
+		return uint64(seg-block) + uint64(endBlock), endSeg, endBlock
+	}
+	return uint64(endBlock - block), endSeg, endBlock
+}
+
+// CopyCost bounds what a victim's copies take, with the header of the segment they open, below a
+// segment: a record never spans two segments, so copies rolling into a new segment leave behind a
+// tail up to a block short of the largest copy and its header, and their records split in two.
+// The worst case is a tail just too short for a copy of the largest size; random copies after
+// random fills hold too.
+func TestCopyCostBoundsWhatAVictimsCopiesTake(t *testing.T) {
+	h := formatted(t, gib, testConfig(16))
+	seg := uint64(h.geo.SegmentBlocks)
+	maxc := h.log.MaxCopyBlocks()
+	tw := h.submit(disklog.Hot, h.write(0, 1, 1))
+	h.run()
+	src := h.durableOf(tw).LBA + 1
+	_, s, b := h.copyTrial([]uint16{1}, src, 0, 0)
+	for seg-uint64(b) > uint64(maxc) {
+		_, s, b = h.copyTrial([]uint16{1}, src, s, b)
+	}
+	admit := func(counts []uint16, n uint16) bool {
+		var live uint64
+		for _, c := range counts {
+			live += uint64(c)
+		}
+		return h.log.CopyCost(live+uint64(n))+1 < seg
+	}
+	check := func(counts []uint16) {
+		t.Helper()
+		var live uint64
+		for _, c := range counts {
+			live += uint64(c)
+		}
+		var taken uint64
+		taken, s, b = h.copyTrial(counts, src, s, b)
+		if cost := h.log.CopyCost(live); taken > cost+1 {
+			t.Fatalf("copies of %v (%d live blocks) took %d blocks, charged %d and a segment header", counts, live, taken, cost)
+		}
+	}
+	var counts []uint16
+	for admit(counts, maxc) {
+		counts = append(counts, maxc)
+	}
+	if len(counts) == 0 {
+		t.Fatalf("no copy of %d blocks fits a %d-block segment", maxc, seg)
+	}
+	check(counts)
+	r := core.NewRand(3)
+	for range 300 {
+		for range r.Below(seg / 2) {
+			_, s, b = h.copyTrial([]uint16{1}, src, s, b)
+		}
+		counts = counts[:0]
+		for {
+			n := uint16(1 + r.Below(uint64(maxc)))
+			if !admit(counts, n) {
+				break
+			}
+			counts = append(counts, n)
+		}
+		check(counts)
+	}
+	h.close()
 }
