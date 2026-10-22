@@ -82,6 +82,7 @@ VARIABLES
     dnode,    \* [Disk -> Node \cup {0}]: the node hosting a disk, 0 once its log is gone
     ddisk,    \* [Node -> Disk]: each node's disk
     fmts,     \* disks formatted again so far
+    stale,    \* nodes cut off from the control plane, which adopt no new table
     run,      \* [Node -> Nat]: process incarnation
     rsIv,     \* [Node -> [PG -> Nat]]: the interval a restarted primary may not peer in
     dlog,     \* [Disk -> [Chunk -> SUBSET Nat]]: versions in each disk's log
@@ -114,7 +115,7 @@ VARIABLES
     rterm, rlead, fort, fby, xfer, xto
 
 ctlVars == <<tbl, ivs, reqIv, reports, plan, step>>
-nodeVars == <<ep, dnode, ddisk, fmts, run, rsIv, dlog, miss, persIv, mrecv>>
+nodeVars == <<ep, dnode, ddisk, fmts, stale, run, rsIv, dlog, miss, persIv, mrecv>>
 priVars == <<pr, pv, pin, known, dec, act>>
 dataVars == <<rm, vers, ackd, wst, sends, dmn, bad>>
 leaseVars == <<gr, hl, rw>>
@@ -188,11 +189,12 @@ GrantLive(g, h) ==
 GrantKnown(g, h) == GrantLive(g, h) /\ ~gr[g][h].fg
 
 \* Whether the holder needs the grantor's lease: it leads a PG the grantor is
-\* a live member of, or it leads the Raft group.
+\* a live member of, or, in a plan that checks the Raft group alone, it leads
+\* the group.
 Needs(h, g) ==
     /\ h # g
-    /\ \/ \E p \in PG : Leads(h, p) /\ g \in {dnode[d] : d \in UpIn(p, IvAt(h, p))}
-       \/ Raft /\ rlead[h]
+    /\ IF Raft THEN rlead[h]
+       ELSE \E p \in PG : Leads(h, p) /\ g \in {dnode[d] : d \in UpIn(p, IvAt(h, p))}
 
 -----------------------------------------------------------------------------
 \* Properties' views
@@ -246,6 +248,13 @@ CommitAt(c) ==
 -----------------------------------------------------------------------------
 \* Initial state
 
+\* A plan's raw rates: with "exact" every clock runs at real time, with
+\* "fast" node 2 alone runs at the fastest rate of RawRates.
+PlanRates(n) ==
+    IF "exact" \in plan.f THEN {1000}
+    ELSE IF "fast" \in plan.f THEN IF n = 2 THEN {Max(RawRates[2])} ELSE {1000}
+    ELSE RawRates[n]
+
 \* With lease expiry left open, interval 1's primaries start with their grants.
 InitGrant(g, h) ==
     ~Clocks /\ g # h /\ \E p \in PG : InitMem[p][1] = h /\ \E j \in 1..Len(InitMem[p]) : InitMem[p][j] = g
@@ -263,6 +272,7 @@ Init ==
     /\ dnode = [d \in Disk |-> IF d \in Node THEN d ELSE 0]
     /\ ddisk = [n \in Node |-> n]
     /\ fmts = 0
+    /\ stale = IF "stale1" \in plan.f THEN {1} ELSE {}
     /\ run = [n \in Node |-> 1]
     /\ rsIv = [n \in Node |-> [p \in PG |-> 0]]
     /\ dlog = [d \in Disk |-> [c \in Chunk |-> {}]]
@@ -291,10 +301,10 @@ Init ==
     /\ now = 0
     /\ raw = [n \in Node |-> 0]
     /\ boot = [n \in Node |-> 0]
-    /\ rawR \in [Node -> UNION {RawRates[n] : n \in Node}]
-    /\ \A n \in Node : rawR[n] \in RawRates[n]
-    /\ slew \in [Node -> UNION {Slews[n] : n \in Node}]
-    /\ \A n \in Node : slew[n] \in Slews[n]
+    /\ rawR \in [Node -> UNION {RawRates[n] : n \in Node} \cup {1000}]
+    /\ \A n \in Node : rawR[n] \in PlanRates(n)
+    /\ slew \in [Node -> UNION {Slews[n] : n \in Node} \cup {0}]
+    /\ \A n \in Node : slew[n] \in IF "exact" \in plan.f \/ "fast" \in plan.f THEN {0} ELSE Slews[n]
     /\ bootR = [n \in Node |-> (rawR[n] * (1000 + slew[n])) \div 1000]
     /\ bootId = [n \in Node |-> 1]
     /\ frz = [n \in Node |-> "run"]
@@ -387,9 +397,8 @@ Planned(m) ==
     \/ m.k = "rotate" /\ Rotate(m.p)
 
 \* A free plan makes any change in Moves at any time; another makes its
-\* changes in order. Renewals a primary asks for and folds of activation
-\* reports come whenever they are due.
-ControlPlane ==
+\* changes in order.
+Membership ==
     /\ \/ /\ plan.free
           /\ \/ \E d \in Disk, to \in {"up", "down", "maint"} : to \in Moves /\ MarkDisk(d, to)
              \/ "replace" \in Moves /\ \E p \in PG, old, new \in Disk : Replace(p, old, new)
@@ -399,10 +408,13 @@ ControlPlane ==
           /\ Planned(plan.m[step])
           /\ step' = step + 1
           /\ UNCHANGED plan
-       \/ /\ plan.free \/ Len(tbl) - step < Spare
-          /\ \E p \in PG : Renew(p) \/ \E k \in 1..MaxTable : Fold(p, k)
-          /\ UNCHANGED <<plan, step>>
     /\ UNCHANGED <<nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
+
+\* Renewals a primary asks for and folds of activation reports.
+Reactive ==
+    /\ plan.free \/ Len(tbl) - step < Spare
+    /\ \E p \in PG : Renew(p) \/ \E k \in 1..MaxTable : Fold(p, k)
+    /\ UNCHANGED <<plan, step, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
 
 -----------------------------------------------------------------------------
 \* A node adopts a newer table, possibly skipping some. Where a PG's interval
@@ -431,7 +443,7 @@ Adopt(n, e) ==
            ELSE [w |-> x.w, hold |-> IF x.hold # 0 THEN x.hold ELSE IvAt(n, ChunkPG[Writes[x.w].c])] :
              x \in {y \in pin[n] : LET p == ChunkPG[Writes[y.w].c]
                                    IN tbl[e][p].iv = IvAt(n, p) \/ AdoptPr(n, p, e).iv # 0}}]
-    /\ UNCHANGED <<ctlVars, dnode, ddisk, fmts, run, rsIv, dlog, miss, persIv, mrecv,
+    /\ UNCHANGED <<ctlVars, dnode, ddisk, fmts, stale, run, rsIv, dlog, miss, persIv, mrecv,
                    pv, known, dec, act, dataVars, leaseVars, clockVars, raftVars>>
 
 -----------------------------------------------------------------------------
@@ -546,7 +558,7 @@ Peer(n, p) ==
        /\ pr' = [pr EXCEPT ![n][p] = [@ EXCEPT !.act = TRUE, !.srv = TRUE]]
        /\ act' = act \cup {[p |-> p, k |-> k, r |-> run[n]]}
        /\ reports' = reports \cup {[p |-> p, k |-> k]}
-       /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, ep, dnode, ddisk, fmts, run, rsIv, dlog,
+       /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, ep, dnode, ddisk, fmts, stale, run, rsIv, dlog,
                       pin, known, rm, vers, ackd, wst, sends, dmn,
                       rw, clockVars, raftVars>>
 
@@ -559,7 +571,7 @@ Persist(d) ==
        /\ miss' = [miss EXCEPT ![d] = [c \in Chunk |-> IF c \in ChunksOf(x.p) THEN x.ent[c] ELSE miss[d][c]]]
        /\ persIv' = [persIv EXCEPT ![d][x.p] = x.k]
        /\ mrecv' = [mrecv EXCEPT ![d] = mrecv[d] \ {x}]
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, run, rsIv, dlog, priVars, dataVars,
+       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, stale, run, rsIv, dlog, priVars, dataVars,
                       leaseVars, clockVars, raftVars>>
 
 
@@ -585,7 +597,7 @@ Recover(n, p, c, d) ==
             /\ dlog' = [dlog EXCEPT ![d][c] = {v \in dlog[s][c] : v <= K}
                                                 \cup {v \in dlog[d][c] : IvOfV(v) = k}]
        /\ miss' = [miss EXCEPT ![d][c] = NoMiss]
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, run, rsIv, persIv, mrecv, priVars, dataVars,
+       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, stale, run, rsIv, persIv, mrecv, priVars, dataVars,
                       leaseVars, clockVars, raftVars>>
 
 \* A primary whose chunk counter ran out lets its pending writes complete,
@@ -700,7 +712,7 @@ Order(n, x) ==
        /\ rm' = rm \cup {[p |-> p, c |-> c, v |-> v, iv |-> k, from |-> n, r |-> run[n], to |-> d] :
                           d \in UpIn(p, k) \ {own}}
        /\ IF Acked(r, logs) THEN Ack(r) ELSE UNCHANGED <<ackd, wst, bad>>
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, run, rsIv, miss, persIv, mrecv,
+       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, stale, run, rsIv, miss, persIv, mrecv,
                       pr, known, dec, act, sends, dmn, leaseVars, clockVars, raftVars>>
 
 \* The primary refuses a write it may not order; the client retries.
@@ -737,7 +749,7 @@ Deliver(m) ==
        /\ rm' = rm \ {m}
        /\ IF [c |-> m.c, v |-> m.v] \notin ackd /\ Acked(r, logs) THEN Ack(r)
           ELSE UNCHANGED <<ackd, wst, bad>>
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, run, rsIv, miss, persIv, mrecv, priVars,
+       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, stale, run, rsIv, miss, persIv, mrecv, priVars,
                       vers, sends, dmn, leaseVars, clockVars, raftVars>>
 
 -----------------------------------------------------------------------------
@@ -800,25 +812,131 @@ WaitOver(n) ==
     /\ raw[n] - rstAt[n].r >= L1000
     /\ boot[n] - rstAt[n].b >= L1000
 
+\* On an "ok" pair, a message is due as soon as its receiver runs, and a
+\* request or heartbeat as soon as its sender does.
 Urgent ==
     \E h, g \in Node :
-       \/ rq[h][g].on /\ PairOK(h, g)
-       \/ gm[g][h].on /\ PairOK(h, g)
-       \/ hbm[g][h].on /\ PairOK(h, g)
-       \/ AskDue(h, g) /\ PairOK(h, g)
-       \/ HbDue(g, h) /\ PairOK(h, g)
+       \/ net[h][g] = "ok" /\
+          \/ rq[h][g].on /\ Running(g)
+          \/ gm[g][h].on /\ Running(h)
+          \/ hbm[g][h].on /\ Running(h)
+          \/ AskDue(h, g) /\ Running(h)
+          \/ HbDue(g, h) /\ Running(g)
        \/ rw[h] /\ Running(h) /\ WaitOver(h)
 
+\* The bound on the grantor's raw rate over the holder's, from the window's
+\* first grant and this one, per mille, rounded up.
+Bound(x, s, gx) ==
+    IF s - x.w1r <= 0 THEN x.B
+    ELSE IF gx - x.w1g <= 0 THEN 1
+    ELSE Ceil(1000 * (gx - x.w1g), s - x.w1r)
+
+Margin(B) ==
+    IF Bug("MarginExact") THEN Max({Drift, 1000 - 1000000 \div B})
+    ELSE IF Bug("WidenPastTwoDrift") THEN Drift + Max({0, B - (1000 + 2 * Drift)})
+    ELSE Drift + Max({0, B - (1000 + Drift \div 2)})
+
+\* The step check: the grantor's raw clock moved further since the last grant
+\* than the margin of the lease taken from it allows. A grant that gave no
+\* lease, before the first bound, has nothing to check.
+Trips(x, gx, r) ==
+    /\ x.lg
+    /\ x.a \/ Bug("CheckBeforeBound")
+    /\ IF Bug("StepHalfDrift") THEN 1000 * (gx - x.ag) > (1000 + Drift \div 2) * (r - x.as)
+       ELSE (gx - x.ag) * (1000 - x.am) > 1000 * (r - x.as)
+
+\* A window restarts at a new boot ID or a raw reading below the last.
+NewWindow(x, b, gx) ==
+    \/ ~x.w
+    \/ b # x.boot /\ ~Bug("NoBootWindow")
+    \/ gx < x.lastg
+
+\* Ending every lease and window: on Resumed, or a step-check trip.
+EndAll(h) == [hl EXCEPT ![h] = [g \in Node |-> [NoWin EXCEPT !.ep = hl[h][g].ep]]]
+
+\* The holder's leases after grant m from g: the step check, then the window,
+\* the bound, the margin and the lease, taken only once there is a bound.
+AfterGrant(h, g, m) ==
+    LET x == hl[h][g]
+        r == raw[h]
+        trip == ~Bug("NoStepCheck") /\ (x.boot = m.b \/ Bug("NoBootWindow")) /\ Trips(x, m.x, r)
+        nw == NewWindow(x, m.b, m.x)
+        B == IF nw THEN 0 ELSE Bound(x, m.s, m.x)
+        mg == IF B = 0 THEN Drift ELSE Margin(B)
+        lease == (B # 0 \/ Bug("LeaseBeforeBound")) /\ mg < MaxMargin
+    IN IF trip THEN EndAll(h)
+       ELSE [hl EXCEPT ![h][g] =
+              [w |-> TRUE, boot |-> m.b,
+               w1s |-> IF nw THEN m.s ELSE x.w1s, w1r |-> IF nw THEN r ELSE x.w1r,
+               w1g |-> IF nw THEN m.x ELSE x.w1g, B |-> B,
+               lg |-> TRUE, a |-> lease, as |-> m.s, asB |-> m.sB, ag |-> m.x, am |-> mg,
+               ep |-> m.ep, lastg |-> m.x, has |-> FALSE]]
+
+\* The holder's leases after a heartbeat m from g, which carries g's raw clock
+\* and boot ID.
+AfterHb(h, g, m) ==
+    LET x == hl[h][g]
+        trip == /\ ~Bug("NoStepCheck") /\ ~Bug("StepOnGrantsOnly")
+                /\ (x.boot = m.b \/ Bug("NoBootWindow")) /\ Trips(x, m.x, raw[h])
+    IN IF trip THEN EndAll(h)
+       ELSE IF NewWindow(x, m.b, m.x) /\ x.w
+       THEN [hl EXCEPT ![h][g] = [@ EXCEPT !.w = FALSE, !.B = 0, !.lastg = m.x]]
+       ELSE [hl EXCEPT ![h][g].lastg = Max({m.x, x.lastg})]
+
+\* A grant the grantor gives now, answering a request sent at holder clock
+\* readings s and sB.
+GrantMsg(g, h, s, sB) == [on |-> TRUE, x |-> raw[g], b |-> bootId[g], ep |-> NewEp(g, h), s |-> s, sB |-> sB]
+Granted(g, h) == [gr EXCEPT ![g][h] = [ep |-> NewEp(g, h), live |-> FALSE, fg |-> FALSE, on |-> TRUE,
+                                       tR |-> raw[g], tB |-> boot[g]]]
+
+\* The round trips and heartbeats due at one instant on "ok" pairs all happen
+\* before time passes; they run in the order of their pairs (holder, grantor).
+Due(h, g) == PairOK(h, g) /\ (AskDue(h, g) \/ HbDue(g, h))
+First(h, g) == \A h2, g2 \in Node : (h2 * 16 + g2 < h * 16 + g) => ~Due(h2, g2)
+
+\* On an "ok" pair a request, its grant and its arrival take no time, so the
+\* round trip is one step.
+RoundTrip(h, g) ==
+    /\ Clocks
+    /\ PairOK(h, g)
+    /\ AskDue(h, g)
+    /\ First(h, g)
+    /\ lastAsk' = [lastAsk EXCEPT ![h][g] = now]
+    /\ hs' = IF hs[h][g] = -1 /\ ~dirty[h][g] THEN [hs EXCEPT ![h][g] = now] ELSE hs
+    /\ IF CanGrant(g, h)
+       THEN /\ gr' = Granted(g, h)
+            /\ hl' = AfterGrant(h, g, GrantMsg(g, h, raw[h], boot[h]))
+            /\ lastHb' = [lastHb EXCEPT ![g][h] = now]
+            /\ UNCHANGED dirty
+       ELSE /\ dirty' = [dirty EXCEPT ![h][g] = TRUE]
+            /\ UNCHANGED <<gr, hl, lastHb>>
+    /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, rw, now, raw, boot, rawR, bootR, slew,
+                   bootId, frz, suspAt, rstAt, rq, gm, hbm, net, arrived, faults, raftVars>>
+
+\* On an "ok" pair a heartbeat arrives as it is sent.
+Beat(g, h) ==
+    /\ Clocks
+    /\ PairOK(h, g)
+    /\ HbDue(g, h)
+    /\ First(h, g)
+    /\ hl' = AfterHb(h, g, [Off EXCEPT !.on = TRUE, !.x = raw[g], !.b = bootId[g]])
+    /\ lastHb' = [lastHb EXCEPT ![g][h] = now]
+    /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, boot, rawR, bootR,
+                   slew, bootId, frz, suspAt, rstAt, rq, gm, hbm, lastAsk, net, arrived, dirty, hs,
+                   faults, raftVars>>
+
+\* On a "slow" pair, or to or from a stopped node, each message is its own
+\* step and may wait any time.
 Ask(h, g) ==
     /\ Clocks
     /\ Running(h)
     /\ PairUp(h, g)
+    /\ ~PairOK(h, g)
     /\ AskDue(h, g)
     /\ rq' = [rq EXCEPT ![h][g] = [Off EXCEPT !.on = TRUE, !.s = raw[h], !.sB = boot[h]]]
     /\ lastAsk' = [lastAsk EXCEPT ![h][g] = now]
-    /\ hs' = IF hs[h][g] = -1 /\ ~dirty[h][g] THEN [hs EXCEPT ![h][g] = now] ELSE hs
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
-                   slew, bootId, frz, suspAt, rstAt, gm, hbm, lastHb, net, arrived, dirty, faults,
+                   slew, bootId, frz, suspAt, rstAt, gm, hbm, lastHb, net, arrived, dirty, hs, faults,
                    raftVars>>
 
 \* The grantor grants once the holder reported a table at least as new as its
@@ -829,11 +947,8 @@ Grant(g, h) ==
     /\ Running(g)
     /\ PairUp(h, g)
     /\ CanGrant(g, h)
-    /\ LET e == NewEp(g, h) IN
-       /\ gr' = [gr EXCEPT ![g][h] = [ep |-> e, live |-> FALSE, fg |-> FALSE, on |-> TRUE,
-                                      tR |-> raw[g], tB |-> boot[g]]]
-       /\ gm' = [gm EXCEPT ![g][h] = [on |-> TRUE, x |-> raw[g], b |-> bootId[g], ep |-> e,
-                                      s |-> rq[h][g].s, sB |-> rq[h][g].sB]]
+    /\ gr' = Granted(g, h)
+    /\ gm' = [gm EXCEPT ![g][h] = GrantMsg(g, h, rq[h][g].s, rq[h][g].sB)]
     /\ rq' = [rq EXCEPT ![h][g] = Off]
     /\ lastHb' = [lastHb EXCEPT ![g][h] = now]
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, hl, rw, now, raw, boot, rawR, bootR,
@@ -855,6 +970,7 @@ SendHb(g, h) ==
     /\ Clocks
     /\ Running(g)
     /\ PairUp(h, g)
+    /\ ~PairOK(h, g)
     /\ HbDue(g, h)
     /\ hbm' = [hbm EXCEPT ![g][h] = [Off EXCEPT !.on = TRUE, !.x = raw[g], !.b = bootId[g]]]
     /\ lastHb' = [lastHb EXCEPT ![g][h] = now]
@@ -862,79 +978,29 @@ SendHb(g, h) ==
                    slew, bootId, frz, suspAt, rstAt, rq, gm, lastAsk, net, arrived, dirty, hs,
                    faults, raftVars>>
 
-\* The bound on the grantor's raw rate over the holder's, from the window's
-\* first grant and this one, per mille, rounded up.
-Bound(x, s, gx) ==
-    IF s - x.w1r <= 0 THEN x.B
-    ELSE IF gx - x.w1g <= 0 THEN 1
-    ELSE Ceil(1000 * (gx - x.w1g), s - x.w1r)
-
-Margin(B) ==
-    IF Bug("MarginExact") THEN Max({Drift, 1000 - 1000000 \div B})
-    ELSE IF Bug("WidenPastTwoDrift") THEN Drift + Max({0, B - (1000 + 2 * Drift)})
-    ELSE Drift + Max({0, B - (1000 + Drift \div 2)})
-
-\* The step check: the grantor's raw clock moved further since the last grant
-\* than that grant's margin allows.
-Trips(x, gx, r) ==
-    /\ x.lg
-    /\ IF Bug("StepHalfDrift") THEN 1000 * (gx - x.ag) > (1000 + Drift \div 2) * (r - x.as)
-       ELSE (gx - x.ag) * (1000 - x.am) > 1000 * (r - x.as)
-
-\* A window restarts at a new boot ID or a raw reading below the last.
-NewWindow(x, b, gx) ==
-    \/ ~x.w
-    \/ b # x.boot /\ ~Bug("NoBootWindow")
-    \/ gx < x.lastg
-
-\* Ending every lease and window: on Resumed, or a step-check trip.
-EndAll(h) == [hl EXCEPT ![h] = [g \in Node |-> [NoWin EXCEPT !.ep = hl[h][g].ep]]]
-
 RecvGrant(h, g) ==
-    LET m == gm[g][h]
-        x == hl[h][g]
-        r == raw[h]
-        trip == ~Bug("NoStepCheck") /\ (x.boot = m.b \/ Bug("NoBootWindow")) /\ Trips(x, m.x, r)
-        nw == NewWindow(x, m.b, m.x)
-        B == IF nw THEN 0 ELSE Bound(x, m.s, m.x)
-        mg == IF B = 0 THEN Drift ELSE Margin(B)
-        lease == (B # 0 \/ Bug("LeaseBeforeBound")) /\ mg < MaxMargin
-    IN /\ Clocks
-       /\ m.on
-       /\ Running(h)
-       /\ PairUp(h, g)
-       /\ gm' = [gm EXCEPT ![g][h] = Off]
-       /\ arrived' = [arrived EXCEPT ![h] = @ \ {g}]
-       /\ IF trip
-          THEN hl' = EndAll(h)
-          ELSE hl' = [hl EXCEPT ![h][g] =
-                 [w |-> TRUE, boot |-> m.b,
-                  w1s |-> IF nw THEN m.s ELSE x.w1s, w1r |-> IF nw THEN r ELSE x.w1r,
-                  w1g |-> IF nw THEN m.x ELSE x.w1g, B |-> B,
-                  lg |-> TRUE, a |-> lease, as |-> m.s, asB |-> m.sB, ag |-> m.x, am |-> mg,
-                  ep |-> m.ep, lastg |-> m.x, has |-> FALSE]]
-       /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, boot, rawR, bootR,
-                      slew, bootId, frz, suspAt, rstAt, rq, hbm, lastAsk, lastHb, net, dirty, hs,
-                      faults, raftVars>>
+    /\ Clocks
+    /\ gm[g][h].on
+    /\ Running(h)
+    /\ PairUp(h, g)
+    /\ gm' = [gm EXCEPT ![g][h] = Off]
+    /\ arrived' = [arrived EXCEPT ![h] = @ \ {g}]
+    /\ hl' = AfterGrant(h, g, gm[g][h])
+    /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, boot, rawR, bootR,
+                   slew, bootId, frz, suspAt, rstAt, rq, hbm, lastAsk, lastHb, net, dirty, hs,
+                   faults, raftVars>>
 
 RecvHb(h, g) ==
-    LET m == hbm[g][h]
-        x == hl[h][g]
-        trip == /\ ~Bug("NoStepCheck") /\ ~Bug("StepOnGrantsOnly")
-                /\ (x.boot = m.b \/ Bug("NoBootWindow")) /\ Trips(x, m.x, raw[h])
-    IN /\ Clocks
-       /\ m.on
-       /\ Running(h)
-       /\ PairUp(h, g)
-       /\ hbm' = [hbm EXCEPT ![g][h] = Off]
-       /\ arrived' = [arrived EXCEPT ![h] = @ \ {g}]
-       /\ hl' = IF trip THEN EndAll(h)
-                ELSE IF NewWindow(x, m.b, m.x) /\ x.w
-                THEN [hl EXCEPT ![h][g] = [@ EXCEPT !.w = FALSE, !.B = 0, !.lastg = m.x]]
-                ELSE [hl EXCEPT ![h][g].lastg = Max({m.x, x.lastg})]
-       /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, boot, rawR, bootR,
-                      slew, bootId, frz, suspAt, rstAt, rq, gm, lastAsk, lastHb, net, dirty, hs,
-                      faults, raftVars>>
+    /\ Clocks
+    /\ hbm[g][h].on
+    /\ Running(h)
+    /\ PairUp(h, g)
+    /\ hbm' = [hbm EXCEPT ![g][h] = Off]
+    /\ arrived' = [arrived EXCEPT ![h] = @ \ {g}]
+    /\ hl' = AfterHb(h, g, hbm[g][h])
+    /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, boot, rawR, bootR,
+                   slew, bootId, frz, suspAt, rstAt, rq, gm, lastAsk, lastHb, net, dirty, hs,
+                   faults, raftVars>>
 
 EndWait(n) ==
     /\ Clocks
@@ -957,26 +1023,31 @@ Deadlines ==
     \cup {IF lastAsk[h][g] >= 0 THEN lastAsk[h][g] + HB ELSE Infinity : h, g \in Node}
     \cup {IF lastHb[g][h] >= 0 THEN lastHb[g][h] + HB ELSE Infinity : g, h \in Node}
 
-Tick ==
-    LET t == Min({x \in Deadlines : x > now} \cup {Infinity}) IN
-    /\ Clocks
-    /\ ~Urgent
-    /\ t <= MaxTime
-    /\ now' = t
-    /\ raw' = [n \in Node |-> raw[n] + RateRaw(n) * (t - now)]
-    /\ boot' = [n \in Node |-> boot[n] + RateBoot(n) * (t - now)]
-    /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, rawR, bootR, slew, bootId,
-                   frz, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs,
-                   faults, raftVars>>
+
 
 -----------------------------------------------------------------------------
 \* Faults
+
+\* The nodes faults hit: in a handover of PG 1, its primary (node 1) and the
+\* grantor whose rate varies (node 2); node 3 grants as node 2 does.
+Target(n) == "stale1" \in plan.f => n \in {1, 2}
 
 Fault(kind) == /\ kind \in plan.f
                /\ faults < MaxFault
                /\ faults' = faults + 1
 
-Taint(n) == [h \in Node |-> [g \in Node |-> dirty[h][g] \/ h = n \/ g = n]]
+\* A node cut off from the control plane still reaches its peers but adopts
+\* no new table: node 1 from the start with "stale1", node 2 from any time
+\* with "stale2".
+Isolate(n) ==
+    /\ n = 2
+    /\ "stale2" \in plan.f
+    /\ stale = {}
+    /\ stale' = {n}
+    /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, run, rsIv, dlog, miss, persIv, mrecv, priVars,
+                   dataVars, leaseVars, clockVars, raftVars>>
+
+Taint(n) ==[h \in Node |-> [g \in Node |-> dirty[h][g] \/ h = n \/ g = n]]
 
 \* A suspend stops the raw clock while CLOCK_BOOTTIME gains the sleep.
 Suspend(n) ==
@@ -1092,7 +1163,7 @@ Restart(n) ==
                   ELSE [hl[h] EXCEPT ![n].has = @ /\ ~waited]]
     /\ rstAt' = [rstAt EXCEPT ![n] = [r |-> raw[n], b |-> boot[n]]]
     /\ dirty' = Taint(n)
-    /\ UNCHANGED <<tbl, ivs, plan, step, reports, ep, dnode, ddisk, fmts, dlog, miss, persIv, pv, dec, act,
+    /\ UNCHANGED <<tbl, ivs, plan, step, reports, ep, dnode, ddisk, fmts, stale, dlog, miss, persIv, pv, dec, act,
                    dataVars, now, raw, boot, rawR, bootR, slew, bootId, frz, suspAt, rq, gm, hbm,
                    lastAsk, lastHb, net, arrived, hs, rterm, xto>>
 
@@ -1114,7 +1185,7 @@ Reboot(n) ==
     /\ bootId' = [bootId EXCEPT ![n] = @ + 1]
     /\ rstAt' = [rstAt EXCEPT ![n] = [r |-> 0, b |-> 0]]
     /\ dirty' = Taint(n)
-    /\ UNCHANGED <<tbl, ivs, plan, step, reports, ep, dnode, ddisk, fmts, dlog, miss, persIv, pv, dec, act,
+    /\ UNCHANGED <<tbl, ivs, plan, step, reports, ep, dnode, ddisk, fmts, stale, dlog, miss, persIv, pv, dec, act,
                    dataVars, now, slew, frz, suspAt, rq, gm, hbm, lastAsk, lastHb, net, arrived,
                    hs, rterm, xto>>
 
@@ -1136,7 +1207,7 @@ Format(n) ==
             /\ dnode' = [dnode EXCEPT ![x] = n, ![ddisk[n]] = 0]
             /\ ddisk' = [ddisk EXCEPT ![n] = x]
             /\ UNCHANGED <<dlog, miss, persIv, mrecv>>
-    /\ UNCHANGED <<ctlVars, ep, run, rsIv, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
+    /\ UNCHANGED <<ctlVars, ep, stale, run, rsIv, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
                    slew, bootId, frz, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived,
                    dirty, hs, raftVars>>
 
@@ -1159,7 +1230,7 @@ Elect(n, Q) ==
     IN
     /\ Raft
     /\ n \in Q
-    /\ Cardinality(Q) >= Quorum
+    /\ Cardinality(Q) = Quorum
     /\ ~rlead[n]
     /\ t <= MaxTerm
     /\ \A v \in Q : Running(v) /\ ~rw[v] /\ (~Supports(v, n) \/ xto = n \/ ~Clocks)
@@ -1201,7 +1272,7 @@ StepDown(n) ==
 
 \* Leader transfer: the leader sends MsgTimeoutNow and ends its own lease.
 Transfer(n, t) ==
-    /\ Raft
+    /\ "transfer" \in plan.f
     /\ rlead[n]
     /\ t # n
     /\ xto = 0
@@ -1212,28 +1283,61 @@ Transfer(n, t) ==
 
 -----------------------------------------------------------------------------
 
-Next ==
-    \/ ControlPlane
-    \/ \E n \in Node : \E e \in {ep[n] + 1, Len(tbl)} : Adopt(n, e)
-    \/ \E n \in Node, p \in PG : Peer(n, p)
-    \/ \E n \in Node, p \in PG : CounterOut(n, p)
+\* Steps that follow from the state: with two clocks per node they happen
+\* before time passes, so that time multiplies only the choices below.
+Protocol ==
+    \/ Reactive
+    \/ \E n \in Node \ stale : \E e \in {ep[n] + 1, Len(tbl)} : Adopt(n, e)
+    \/ \E n \in Node, p \in PG : Peer(n, p) \/ CounterOut(n, p)
     \/ \E d \in Disk : Persist(d)
     \/ \E n \in Node, p \in PG, c \in Chunk, d \in Disk : Recover(n, p, c, d)
     \/ \E i \in 1..Len(Writes) : Send(i)
-    \/ Die
     \/ \E n \in Node : \E x \in pin[n] : Order(n, x) \/ Refuse(n, x)
     \/ \E m \in rm : Deliver(m)
-    \/ \E g, h \in Node : OpenGrant(g, h) \/ OpenLapse(g, h)
-    \/ \E h, g \in Node : Ask(h, g) \/ Grant(g, h) \/ GrantRefused(g, h) \/ SendHb(g, h)
-                          \/ RecvGrant(h, g) \/ RecvHb(h, g)
-    \/ \E n \in Node : EndWait(n)
-    \/ Tick
-    \/ \E n \in Node : Suspend(n) \/ Wake(n) \/ Freeze(n, "pause") \/ Freeze(n, "stop") \/ Thaw(n)
-                       \/ RateStep(n) \/ Restart(n) \/ Reboot(n) \/ Format(n)
-    \/ \E h, g \in Node, to \in {"ok", "slow", "cut"} : to \in plan.f \cup {"ok"} /\ NetFault(h, g, to)
-    \/ \E n \in Node, Q \in SUBSET Node : Elect(n, Q)
-    \/ \E n, v \in Node : Fortify(n, v) \/ Transfer(n, v)
+    \/ \E n, v \in Node : Fortify(n, v)
     \/ \E n \in Node : StepDown(n)
+
+\* Choices: membership changes, faults, elections and transfers. With two
+\* clocks per node they come on heartbeat boundaries: what a lease overlap
+\* turns on is the last renewal before them, which keeps its own timing.
+Choices ==
+    \/ Membership
+    \/ Die
+    \/ \E n \in Node : Isolate(n)
+    \/ \E g, h \in Node : OpenGrant(g, h) \/ OpenLapse(g, h)
+    \/ \E n \in Node : Target(n) /\
+         \/ Suspend(n) \/ Wake(n) \/ Freeze(n, "pause") \/ Freeze(n, "stop") \/ Thaw(n)
+         \/ RateStep(n) \/ Restart(n) \/ Reboot(n) \/ Format(n)
+    \/ \E h, g \in Node, to \in {"ok", "slow", "cut"} :
+         to \in plan.f \cup {"ok"} /\ Target(h) /\ Target(g) /\ NetFault(h, g, to)
+    \/ \E n \in Node, Q \in SUBSET Node : Elect(n, Q)
+    \/ \E n, v \in Node : Transfer(n, v)
+
+Choice ==
+    /\ ~Clocks \/ now % HB = 0
+    /\ Choices
+
+LeaseSteps ==
+    \/ \E h, g \in Node : Ask(h, g) \/ Grant(g, h) \/ GrantRefused(g, h) \/ SendHb(g, h)
+                          \/ RecvGrant(h, g) \/ RecvHb(h, g) \/ RoundTrip(h, g) \/ Beat(h, g)
+    \/ \E n \in Node : EndWait(n)
+
+\* Real time advances to the next time something is due, once nothing waits
+\* to happen now.
+Tick ==
+    LET t == Min({x \in Deadlines : x > now} \cup {Infinity}) IN
+    /\ Clocks
+    /\ ~Urgent
+    /\ ~ENABLED Protocol
+    /\ t <= Min({MaxTime, plan.t})
+    /\ now' = t
+    /\ raw' = [n \in Node |-> raw[n] + RateRaw(n) * (t - now)]
+    /\ boot' = [n \in Node |-> boot[n] + RateBoot(n) * (t - now)]
+    /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, rawR, bootR, slew, bootId,
+                   frz, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs,
+                   faults, stale, raftVars>>
+
+Next == Protocol \/ Choice \/ LeaseSteps \/ Tick
 
 Spec == Init /\ [][Next]_vars
 
@@ -1364,7 +1468,7 @@ OneWhole == <<[c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-
 Mark(d, to) == [k |-> "mark", d |-> d, to |-> to]
 Repl(p, old, new) == [k |-> "replace", p |-> p, old |-> old, new |-> new]
 Rot(p) == [k |-> "rotate", p |-> p]
-Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f]
+Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f, t |-> 600]
 
 \* The membership faults of test-scenarios.md "Epoch change model" on 3 nodes,
 \* each with the writes whose rules it tests.
@@ -1397,11 +1501,57 @@ PeerPlans ==
      PrimaryAway, ReplicaThenPrimary, PrimaryThenMaint, ReplicaThenMaint, BelowMinLive,
      Restarted}
 
+\* ci-leases: PG 1's primary is node 1, whose CLOCK_BOOTTIME runs at its raw
+\* rate or 22.6% slow; node 2, its grantor, runs 4% slow or fast, with
+\* CLOCK_BOOTTIME at that rate or 22.6% fast; node 3 is exact. Plans whose
+\* faults do not turn on the ratio of rates take one (PlanRates).
+LeaseRates == [n \in Nodes4 |-> IF n = 2 THEN {960, 1040} ELSE {1000}]
+LeaseSlews == [n \in Nodes4 |-> CASE n = 1 -> {0, -226} [] n = 2 -> {0, 226} [] OTHER -> {0}]
+
+\* Leases form and hold with no change of membership.
+Steady == Plan(<<>>, OneWhole, {})
+\* PG 1's primary is marked down while it still runs on an old table: its
+\* grantors refuse to renew it, wait out their grants and peer the new interval.
+Handover == Plan(<<Mark(1, "down")>>, OneWhole, {"stale1"})
+\* The same, with a grantor's raw rate rising by up to lease_drift / 2.
+HandoverStep == Plan(<<Mark(1, "down")>>, OneWhole, {"stale1", "step", "fast"})
+\* The same, with a suspend or a VM pause that changes the VMClock marker.
+HandoverSuspend == Plan(<<Mark(1, "down")>>, OneWhole, {"stale1", "susp", "pause", "exact"})
+\* The same, with a kvm-clock guest stopped in place.
+HandoverStop == Plan(<<Mark(1, "down")>>, OneWhole, {"stale1", "stop", "exact"})
+\* The same, with a reboot or a process restart.
+HandoverReboot == [Plan(<<Mark(1, "down")>>, OneWhole, {"stale1", "reboot", "restart", "exact"}) EXCEPT !.t = 900]
+\* The same, with a partition or delayed messages.
+HandoverNet == Plan(<<Mark(1, "down")>>, OneWhole, {"stale1", "cut", "slow", "exact"})
+\* Interval 2 of PG 2 replaces 3 with 1 under primary 2, which serves reads
+\* under 1's grant; interval 3 puts 1 in maintenance; interval 4 moves the
+\* primary to 3, which was live in interval 1 but not in 2 or 3.
+Maintenance == Plan(<<Repl(2, 3, 1), Mark(1, "maint"), Repl(2, 2, 3)>>, <<>>, {"stale2", "exact"})
+\* The Raft group with leader transfer.
+RaftTransfer == [Plan(<<>>, <<>>, {"raft", "transfer", "exact"}) EXCEPT !.t = 300]
+\* The Raft group with a partition that heals.
+RaftPartition == [Plan(<<>>, <<>>, {"raft", "cut", "exact"}) EXCEPT !.t = 500]
+
+LeasePlans == {Steady, Handover, HandoverStep, HandoverSuspend, HandoverStop,
+               HandoverReboot, HandoverNet, Maintenance, RaftTransfer, RaftPartition}
+ProbeL == {Steady}
+NeverReads == ~Reading(1, 1)
+NeverActivates == ~\E x \in act : x.k > 1
+ProbeH == {Handover}
+Probe1 == {HandoverStep}
+Probe2 == {HandoverSuspend}
+Probe3 == {HandoverStop}
+Probe4 == {HandoverReboot}
+Probe5 == {HandoverNet}
+Probe6 == {Maintenance}
+ProbeR == {RaftTransfer}
+ProbeP == {RaftPartition}
+
 ProbeA == {RemovedAndBack}
 ProbeC == {[RemovedAndBack EXCEPT !.f = {}]}
 ProbeB == {PrimaryAway}
 
 \* deep: any change at any time, with both families of writes.
-FreePlans == {[free |-> TRUE, m |-> <<>>, w |-> Both, f |-> {"restart", "format", "die"}]}
+FreePlans == {[free |-> TRUE, m |-> <<>>, w |-> Both, f |-> {"restart", "format", "die"}, t |-> 0]}
 
 =============================================================================
