@@ -59,9 +59,10 @@ type harness struct {
 	// stepBlocks counts the blocks of the records merge workers' lanes and manifests take, with the
 	// segment headers they open.
 	stepBlocks uint64
-	// trims is every TRIM executed, and timerAt the time the log's TRIM timer was last armed for.
-	trims   []core.Action
-	timerAt core.Tick
+	// trims is every TRIM executed, timerAt the time the log's TRIM timer was last armed for, and
+	// admitAt the store's AdmitTimer.
+	trims            []core.Action
+	timerAt, admitAt core.Tick
 	// shuffle, when set, runs a queued action at random rather than the oldest, as an NVMe queue
 	// may complete the commands it holds in any order but a flush.
 	shuffle *core.Rand
@@ -74,6 +75,9 @@ type harness struct {
 	held []*CleanJob
 	late *core.Rand
 	hold bool
+	// timed moves the clock on by each disk action's simulated time as it completes, and light
+	// keeps neither the actions nor the records written, for runs that write a disk many times.
+	timed, light bool
 }
 
 // advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
@@ -83,13 +87,19 @@ func (h *harness) advance(d core.Tick) {
 	h.settle()
 }
 
-// tick moves the clock on by d and fires the log's TRIM timer if it falls due.
+// tick moves the clock on by d and fires the log's TRIM timer and the store's AdmitTimer if they
+// fall due.
 func (h *harness) tick(d core.Tick) {
 	h.ctx.Now += d
 	h.ctx.Raw += d
 	if h.timerAt != 0 && h.timerAt <= h.ctx.Now {
 		h.timerAt = 0
 		h.s.OnEvent(&h.ctx, &core.Event{Kind: core.EvTimer, Timer: disklog.TrimTimer}, &h.out)
+		h.take()
+	}
+	if h.admitAt != 0 && h.admitAt <= h.ctx.Now {
+		h.admitAt = 0
+		h.s.OnEvent(&h.ctx, &core.Event{Kind: core.EvTimer, Timer: AdmitTimer}, &h.out)
 		h.take()
 	}
 }
@@ -140,7 +150,9 @@ func newHarnessOn(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
 // take moves the store's actions to the queue and its replies to the reply book.
 func (h *harness) take() {
 	h.queue = append(h.queue, h.out.Actions...)
-	h.acts = append(h.acts, h.out.Actions...)
+	if !h.light {
+		h.acts = append(h.acts, h.out.Actions...)
+	}
 	for _, r := range h.out.Replies {
 		if _, dup := h.replies[r.ID]; dup {
 			h.t.Fatalf("request %d answered twice", r.ID)
@@ -171,6 +183,10 @@ func (h *harness) step() bool {
 	} else {
 		h.queue = h.queue[1:]
 	}
+	if a.Kind == core.ActSetTimer && a.Timer == AdmitTimer {
+		h.admitAt = a.At
+		return true
+	}
 	if a.Kind == core.ActSetTimer {
 		h.timerAt = a.At
 		return true
@@ -178,10 +194,13 @@ func (h *harness) step() bool {
 	if a.Kind == core.ActDiskTrim {
 		h.trims = append(h.trims, a)
 	}
-	if a.Kind == core.ActDiskWrite {
+	if a.Kind == core.ActDiskWrite && !h.light {
 		h.noteWrite(&a)
 	}
-	ev := h.disk.Execute(h.pool, &a)
+	ev, took := h.disk.ExecuteTimed(h.pool, &a)
+	if h.timed {
+		h.tick(took)
+	}
 	recovering := !h.s.Serving()
 	h.s.OnEvent(&h.ctx, &ev, &h.out)
 	if recovering && h.s.Serving() {

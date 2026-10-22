@@ -306,7 +306,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Reserve.** Segments held back for the work that frees space, checkpoints, the cleaner and merge steps, since freeing space itself needs some free space. Ordinary writes wait while only the reserve is free.
 
-**Write stall, admission control.** Slowing or pausing new writes when background work (cleaning, checkpoints) falls behind, so the disk never runs out in the middle of it. RocksDB and Pebble call a pause a write stall; CockroachDB's admission control admits writes at the rate background work measurably keeps up, which is what rock-solid does. See [On-disk format](design.md#on-disk-format).
+**Write stall, admission control.** Slowing or pausing new writes when background work (cleaning, checkpoints) falls behind, so the disk never runs out in the middle of it. RocksDB and Pebble call a pause a write stall; CockroachDB's admission control admits writes at the rate background work measurably keeps up, which is what rock-solid does, through a *token bucket*: a counter of blocks that refills at that rate, which each admitted write draws down by its size, and while it is empty writes wait. See [On-disk format](design.md#on-disk-format).
 
 **Merge step, bound.** A merge installs its output a step at a time; each input run then holds only the keys above a bound key, the last key the step reached, so the pieces it no longer needs are freed before the merge ends. ScyllaDB calls this incremental compaction. See [The LSM tree](design.md#on-disk-format).
 

@@ -157,3 +157,20 @@ func TestCopiesPassTheHoldAndIntoTheReserve(t *testing.T) {
 	}
 	h.close()
 }
+
+// Background blocks count what the cleaner's lane takes, its segment header and record headers
+// included, and nothing an ordinary item writes; write admission measures the cleaner net of them.
+func TestBackgroundBlocksCountTheCleanersLaneOnly(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	tw := h.submit(disklog.Hot, h.write(0, 2, 1))
+	h.submit(disklog.Cold, h.blob(disklog.BlobRaftEntries, 5, 10, 2))
+	h.run()
+	if got := h.log.BackgroundBlocks(); got != 0 {
+		t.Fatalf("ordinary items took %d background blocks", got)
+	}
+	c := h.submitCopy(h.copyItem(0, 2, h.durableOf(tw).LBA+1, 1))
+	h.run()
+	if got, want := h.log.BackgroundBlocks(), uint64(1+h.durableOf(c).HeaderBlocks+2); got != want {
+		t.Fatalf("a copy of 2 blocks opening a segment took %d background blocks, want %d", got, want)
+	}
+}
