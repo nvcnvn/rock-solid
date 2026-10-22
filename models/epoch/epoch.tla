@@ -29,9 +29,10 @@ CONSTANTS
     MaxTerm,    \* Raft terms
     MaxFault,   \* clock and network faults
     Moves,      \* control-plane changes enabled with no plans, and "fold"
-    Plans,      \* set of [free, m, w, f]: with free, any change in Moves at any time,
-                \* otherwise the membership changes m in order; w the client writes,
-                \* Seq([c, blk, whole, inc, re, after]); f the faults enabled
+    Plans,      \* set of [free, m, w, f, t, k (, n)]: with free, any change in Moves
+                \* at any time, up to n tables, otherwise the membership changes m in
+                \* order; w the client writes, Seq([c, blk, whole, inc, re, after]);
+                \* f the faults and flags enabled; t the time bound; k the faults
     Clocks,     \* TRUE: two clocks per node; FALSE: lease expiry left open
     RawRates,   \* [Node -> SUBSET Nat]: CLOCK_MONOTONIC_RAW's rate, per mille of real time
     Slews,      \* [Node -> SUBSET Int]: CLOCK_BOOTTIME's slew, per mille of the raw rate
@@ -330,7 +331,7 @@ Init ==
 -----------------------------------------------------------------------------
 \* Control plane: each change commits one table.
 
-Commit(t) == /\ Len(tbl) < MaxTable
+Commit(t) == /\ Len(tbl) < IF plan.free THEN plan.n ELSE MaxTable
              /\ tbl' = Append(tbl, t)
 
 \* A new interval of each PG in ps, with members from f[p].
@@ -1359,6 +1360,10 @@ Next == Protocol \/ Choice \/ LeaseSteps \/ Tick
 
 Spec == Init /\ [][Next]_vars
 
+\* The unbounded liveness property 12 assumes every step that follows from the
+\* state is eventually taken, and grants a restart forgot eventually lapse.
+FairSpec == Spec /\ WF_vars(Protocol) /\ WF_vars(\E g, h \in Node : OpenLapse(g, h))
+
 -----------------------------------------------------------------------------
 \* Properties
 
@@ -1439,6 +1444,21 @@ NoResurrectedWrite ==
              b == Writes[r].blk
              top == Newest({u.v : u \in {x \in CommitAt(c) : BlkOf(c, x.v) = b}})
          IN top # 0 => WOf(c, top) # Writes[r].re
+
+\* 12. Peering settles: every PG eventually activates its current interval,
+\* unless the interval has fewer than min_live live members, a live member's
+\* disk or every live member of an interval peering needs is gone, or the
+\* table bound left a restarted primary without the interval it asked for.
+Settled(p) ==
+    LET k == Cur(p)
+        n == PrimNode(p, k)
+    IN \/ \E x \in act : x.p = p /\ x.k = k
+       \/ LiveCnt(p, k) < MinLive[p]
+       \/ n = 0
+       \/ \E d \in UpIn(p, k) : dnode[d] = 0
+       \/ \E i \in NeedIv(p, k, tbl[Len(tbl)][p].la) : \A d \in UpIn(p, i) : dnode[d] = 0
+       \/ rsIv[n][p] >= k
+PeeringSettles == <>[](\A p \in PG : Settled(p))
 
 -----------------------------------------------------------------------------
 \* Configurations: the .cfg files substitute these for the constants. PG 1 is
@@ -1564,35 +1584,11 @@ LeasePlans == {Steady, Handover, HandoverStep, HandoverSuspend, HandoverStop,
                HandoverRestart, HandoverCut, Maintenance, RaftTransfer, RaftPartition}
 RebootPlans == {HandoverReboot}
 AllLeasePlans == LeasePlans \cup {HandoverReboot, HandoverSlow}
-Probe7 == {HandoverCut}
-ProbeL == {Steady}
-NeverReads == ~Reading(1, 1)
-NeverTwoLeaders == ~\E n, m \in Node : n # m /\ rlead[n] /\ rlead[m]
-NeverRaftReads == ~\E n \in Node : RaftReads(n)
-NeverTransfers == xto = 0
-NewFortifiedBesideOld == ~\E n, m, v \in Node : rlead[n] /\ fby[n][v] >= 0 /\ m # n /\ rlead[m] /\ xfer[m] /\ rterm[m] < rterm[n]
-NewLeaderBesideOld ==~\E n, m \in Node : rlead[n] /\ m # n /\ rlead[m] /\ rterm[m] < rterm[n] /\ xfer[m]
-NewReadsBesideOld ==~\E n, m \in Node : RaftReads(n) /\ m # n /\ rlead[m] /\ rterm[m] < rterm[n] /\ xfer[m]
-TargetReadsBesideOld ==~\E n, m \in Node : RaftReads(n) /\ m # n /\ rlead[m] /\ xfer[m]
-TargetNeverReads ==~\E n \in Node : rterm[n] = 2 /\ rlead[n] /\ RaftReads(n)
-TargetNeverFortified == ~\E n, v \in Node : rterm[n] = 2 /\ rlead[n] /\ fby[n][v] >= 0
-NeverSecondTerm == \A n \in Node : rterm[n] < 2
-NeverActivates == ~\E x \in act : x.k > 1
-ProbeH == {Handover}
-Probe1 == {HandoverStep}
-Probe2 == {HandoverSuspend}
-Probe3 == {HandoverStop}
-Probe4 == {HandoverReboot}
-Probe5 == {HandoverSlow}
-Probe6 == {Maintenance}
-ProbeR == {RaftTransfer}
-ProbeP == {RaftPartition}
 
-ProbeA == {RemovedAndBack}
-ProbeC == {[RemovedAndBack EXCEPT !.f = {}]}
-ProbeB == {PrimaryAway}
-
-\* deep: any change at any time, with both families of writes.
-FreePlans == {[free |-> TRUE, m |-> <<>>, w |-> Both, f |-> {"restart", "format", "die"}, t |-> 0, k |-> 1]}
+\* deep-peering: every peering plan, and any two changes at any time with
+\* one partial write to chunk 1 and a restart; node 4 starts outside both PGs,
+\* a spare a change can move a member to.
+Free == [free |-> TRUE, m |-> <<>>, w |-> SubSeq(Partial, 1, 1), f |-> {"restart"}, t |-> 0, k |-> 1, n |-> 3]
+DeepPeerPlans == PeerPlans \cup {Free}
 
 =============================================================================
