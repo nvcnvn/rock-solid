@@ -36,7 +36,6 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) uint64 {
 		}
 		if r.Chance(1, 8) {
 			h.settle()
-			h.merge()
 		}
 	}
 	h.settle()
@@ -52,6 +51,7 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) uint64 {
 func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
 	r := core.NewRand(seed)
 	h := newHarnessOn(t, cleanConfig(), cleanGeo)
+	h.merging = true
 	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 	h.crashAt = int(r.Range(200, 4000))
 	var epoch uint64

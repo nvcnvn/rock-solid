@@ -164,7 +164,7 @@ func TestCheckpointFailedKeepsFrozenMemtable(t *testing.T) {
 	}
 	tree := h.s.Index().Tree()
 	runs := tree.Runs()
-	h.s.beginCheckpoint(&h.ctx, &h.out)
+	h.s.beginCheckpoint(&h.ctx, true, &h.out)
 	h.s.pump(&h.ctx, &h.out)
 	h.take()
 	h.settle()

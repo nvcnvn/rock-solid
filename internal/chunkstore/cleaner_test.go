@@ -9,6 +9,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -20,24 +21,8 @@ func cleanConfig() Config {
 	cfg.Log.MaxReplayBytes = 32 * core.BlockSize
 	cfg.Log.NoReserve, cfg.Log.Reserve = false, 8
 	cfg.CleanFree = 4
+	cfg.Log.CompactionStepBytes = core.BlockSize
 	return cfg
-}
-
-// merge runs the index's due merges, rewrites of runs the cleaner marked first, as the daemon
-// does off the loop, each to its end.
-func (h *harness) merge() {
-	h.t.Helper()
-	if h.noMerge {
-		return
-	}
-	for c := h.s.MergeDue(); c != nil; c = h.s.MergeDue() {
-		c.Run()
-		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
-			h.t.Fatal(err)
-		}
-		h.take()
-		h.settle()
-	}
 }
 
 // overwrite writes one block of one of chunks at random, each block a new pattern, and records it.
@@ -49,7 +34,6 @@ func overwrite(h *harness, o *byteOracle, r *core.Rand, chunks []core.ChunkID, b
 	r.Fill(data)
 	id := h.write(c, uint32(b)*core.BlockSize, data, 0)
 	h.settle()
-	h.merge()
 	o.apply(h.t, c, uint32(b)*core.BlockSize, core.BlockSize, data, h.ok(id), 0)
 }
 
@@ -58,6 +42,7 @@ func overwrite(h *harness, o *byteOracle, r *core.Rand, chunks []core.ChunkID, b
 // counts, and a restart reads the same.
 func TestCleanerKeepsAFullDiskWriting(t *testing.T) {
 	h := newHarnessOn(t, cleanConfig(), cleanGeo)
+	h.merging = true
 	r := core.NewRand(7)
 	chunks := []core.ChunkID{chunk(1), chunk(2)}
 	o := newByteOracle()
@@ -91,10 +76,12 @@ func TestCleanerKeepsAFullDiskWriting(t *testing.T) {
 
 // primed is a store on the small disk whose cleaner does not run until a test sets CleanFree:
 // two chunks of 64 blocks written once and overwritten at random until several manifests are named.
-func primed(t *testing.T) (*harness, *byteOracle) {
-	cfg := cleanConfig()
+func primed(t *testing.T) (*harness, *byteOracle) { return primedWith(t, cleanConfig()) }
+
+func primedWith(t *testing.T, cfg Config) (*harness, *byteOracle) {
 	cfg.CleanFree = -1
 	h := newHarnessOn(t, cfg, cleanGeo)
+	h.merging = true
 	r := core.NewRand(5)
 	o := newByteOracle()
 	chunks := []core.ChunkID{chunk(1), chunk(2)}
@@ -123,44 +110,145 @@ func (h *harness) clean(want int) {
 	h.settle()
 }
 
-// A victim holding a piece of a live run is not copied: the run is marked for a rewrite, which
-// the next merge writes elsewhere, and once the manifest naming the rewrite is named the segment
-// holds nothing live and the next pass frees it.
-func TestLiveRunPiecesAreRewrittenNotCopied(t *testing.T) {
-	h, o := primed(t)
-	h.noMerge = true
+// steppedStore is a primed store whose pieces hold a block, so that its index's runs span
+// several, overwritten further with merges off; merges run in steps of a block.
+func steppedStore(t *testing.T) (*harness, *byteOracle, *core.Rand) {
+	cfg := cleanConfig()
+	cfg.Log.MaxRecordBytes = 3 * core.BlockSize
+	h, o := primedWith(t, cfg)
+	h.merging = false
 	r := core.NewRand(9)
 	for range 100 {
 		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 	}
-	h.noMerge = false
+	return h, o, r
+}
+
+// markRewrites runs a pass over the cleanable metadata segment holding the most bytes of live
+// runs, which copies nothing and marks those runs for rewrites, and returns the segment and how
+// many runs it marked; merges stay off.
+func markRewrites(t *testing.T, h *harness) (uint32, int) {
+	t.Helper()
 	log := h.s.Log()
 	var seg uint32
-	for s := uint32(1); s < cleanGeo.SegmentCount && seg == 0; s++ {
+	most := 0
+	for s := uint32(1); s < cleanGeo.SegmentCount; s++ {
 		bytes, held := h.s.Index().Tree().RunsIn(s)
-		if _, stream := log.Usage(s); stream == disklog.Meta && log.Cleanable(s) && bytes > 0 && !held && !log.HoldsManifestPiece(s) {
-			seg = s
+		if _, stream := log.Usage(s); stream == disklog.Meta && log.Cleanable(s) && bytes > most && !held && !log.HoldsManifestPiece(s) {
+			seg, most = s, bytes
 		}
 	}
 	if seg == 0 {
 		t.Fatal("no cleanable metadata segment holding a piece of a live run")
 	}
-	copied := h.s.CleanStats().Copied
+	before := h.s.CleanStats()
+	h.merging = false
 	h.s.cl.passes = append(h.s.cl.passes, &cleanPass{victims: []uint32{seg}})
 	h.clean(-1)
-	if st := h.s.CleanStats(); st.Rewrites == 0 || st.Copied != copied || !log.HoldsPiece(seg) {
+	if st := h.s.CleanStats(); st.Rewrites == before.Rewrites || st.Copied != before.Copied || !log.HoldsPiece(seg) {
 		t.Fatalf("stats %+v after a pass over segment %d; it holds a piece %v", st, seg, log.HoldsPiece(seg))
 	}
+	return seg, int(h.s.CleanStats().Rewrites - before.Rewrites)
+}
+
+// A victim holding a piece of a live run is not copied: the run is marked for a rewrite, which
+// the next merge writes elsewhere in steps, each worker holding at most a step beyond the
+// manifests, and once the manifest naming its last step is named the segment holds nothing live
+// and the next pass frees it.
+func TestLiveRunPiecesAreRewrittenNotCopied(t *testing.T) {
+	h, o, r := steppedStore(t)
+	log := h.s.Log()
+	seg, marked := markRewrites(t, h)
+	h.merging = true
+	started := len(h.merges)
 	for i := 0; log.HoldsPiece(seg) && i < 400; i++ {
 		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 	}
 	if log.HoldsPiece(seg) {
 		t.Fatalf("segment %d still holds a live piece after the rewrite", seg)
 	}
+	rewrites := h.merges[started : started+marked]
+	if !slices.ContainsFunc(rewrites, func(c *lsm.Compaction) bool { return h.steps[c] > 1 }) || h.maxStepHeld == 0 {
+		t.Fatalf("no rewrite of the %d runs ran in steps, and a worker held at most %d bytes beyond the manifests", marked, h.maxStepHeld)
+	}
 	h.s.cl.passes = append(h.s.cl.passes, &cleanPass{victims: []uint32{seg}})
 	h.clean(-1)
 	if u, _ := log.Usage(seg); u.State != disklog.SegmentFree {
 		t.Fatalf("segment %d is %+v after its runs were rewritten", seg, u)
+	}
+	o.check(t, h, 0, 63, 0)
+}
+
+// runToMidStep runs the store's due merge steps until one installs a step its merge does not
+// end with, and returns that merge once the manifest naming the step is durable.
+func runToMidStep(t *testing.T, h *harness) *lsm.Compaction {
+	t.Helper()
+	for {
+		c := h.s.MergeDue()
+		if c == nil {
+			t.Fatal("no merge ran in steps")
+		}
+		c.Run()
+		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
+			t.Fatal(err)
+		}
+		h.take()
+		h.settle()
+		if !c.Finished() {
+			return c
+		}
+	}
+}
+
+// A crash between two steps of a rewrite recovers its input, bounded by the first step, and the
+// output so far from the manifest naming that step; the rewrite resumes past the bound and the
+// segment's pieces die once it ends.
+func TestARewriteResumesAfterACrashBetweenSteps(t *testing.T) {
+	h, o, r := steppedStore(t)
+	seg, _ := markRewrites(t, h)
+	runToMidStep(t, h)
+	h.disk.Crash(func(int, core.LBA) bool { return true })
+	h.recoverStore(disklog.ModeOpen)
+	h.merging = true
+	for i := 0; h.s.Log().HoldsPiece(seg) && i < 400; i++ {
+		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+	}
+	if h.s.Log().HoldsPiece(seg) {
+		t.Fatalf("segment %d still holds a live piece after the resumed rewrite", seg)
+	}
+	o.check(t, h, 0, 63, 0)
+}
+
+// A disk filled to its reserve still finishes a rewrite in steps: each step's checkpoint may write
+// to the merge worker's lane in the reserve, which ordinary writes never open.
+func TestARewriteFinishesOnADiskFilledToItsReserve(t *testing.T) {
+	h, o, r := steppedStore(t)
+	for i := 0; h.s.Log().FreeOutsideReserve() > 0; i++ {
+		if i == 2000 {
+			t.Fatal("the disk never filled to its reserve")
+		}
+		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+	}
+	markRewrites(t, h)
+	if free := h.s.Log().FreeOutsideReserve(); free > 0 {
+		t.Fatalf("the pass left %d segments outside the reserve free", free)
+	}
+	var merges []*lsm.Compaction
+	stepped := false
+	for c := h.s.MergeDue(); c != nil; c = h.s.MergeDue() {
+		c.Run()
+		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
+			t.Fatal(err)
+		}
+		h.take()
+		h.settle()
+		stepped = stepped || slices.Contains(merges, c)
+		if !slices.Contains(merges, c) {
+			merges = append(merges, c)
+		}
+	}
+	if !stepped || slices.ContainsFunc(merges, func(c *lsm.Compaction) bool { return !c.Finished() }) {
+		t.Fatalf("of %d merges, none ran in steps or one did not finish", len(merges))
 	}
 	o.check(t, h, 0, 63, 0)
 }
@@ -185,10 +273,10 @@ func TestAPassFinishesOnADiskFilledToItsReserve(t *testing.T) {
 // writes waiting for room fail with NoSpace.
 func TestWritesFailOnlyWhenNoVictimGainsSpace(t *testing.T) {
 	h := newHarnessOn(t, cleanConfig(), cleanGeo)
+	h.merging = true
 	for i := 0; ; i++ {
 		id := h.write(chunk(uint32(10+i/64)), uint32(i%64)*core.BlockSize, fill(core.BlockSize, byte(i)), 0)
 		h.settle()
-		h.merge()
 		if err := h.reply(id).Err; err != nil {
 			if !errors.Is(err, disklog.ErrNoSpace) {
 				t.Fatalf("write %d: %v", i, err)
@@ -217,7 +305,6 @@ func TestTheCleanerKeepsTheHeadersOfLiveSlotWrites(t *testing.T) {
 		data := fill(64*core.BlockSize, byte(i))
 		id := h.write(chunk(1), 0, data, 0)
 		h.settle()
-		h.merge()
 		o.apply(t, chunk(1), 0, uint32(len(data)), data, h.ok(id), 0)
 	}
 	h.clean(1000)
@@ -292,7 +379,13 @@ func TestAVictimWithNothingLiveIsFreedWithoutCopying(t *testing.T) {
 		t.Fatalf("empty segment %d is %+v after a pass, neither free nor opened again", empty, u)
 	}
 	for _, a := range h.acts[mark:] {
-		if a.Kind == core.ActDiskRead && uint64(a.LBA)/uint64(cleanGeo.SegmentBlocks) == uint64(empty) {
+		if uint64(a.LBA)/uint64(cleanGeo.SegmentBlocks) != uint64(empty) {
+			continue
+		}
+		if a.Kind == core.ActDiskWrite {
+			break
+		}
+		if a.Kind == core.ActDiskRead {
 			t.Fatalf("the cleaner read %+v of the empty segment", a)
 		}
 	}

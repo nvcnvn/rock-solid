@@ -10,6 +10,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -45,8 +46,16 @@ type harness struct {
 	// abandoned is the pool buffers left live by stores the harness dropped at a crash, and own
 	// those a settled store holds for its log once formatted.
 	abandoned, own int
-	// noMerge leaves merges unrun.
-	noMerge bool
+	// merging runs the index's due merge steps after every action, as the disk's owner does;
+	// steps counts each merge's installed steps, merges in the order they started.
+	merging bool
+	steps   map[*lsm.Compaction]int
+	merges  []*lsm.Compaction
+	// laneOf is each metadata segment's lane, and stepHeld the run bytes each merge worker's lane
+	// wrote since the last manifest, which never pass one step and its partition and root.
+	laneOf      map[uint32]uint8
+	stepHeld    map[uint8]uint64
+	maxStepHeld uint64
 	// trims is every TRIM executed, and timerAt the time the log's TRIM timer was last armed for.
 	trims   []core.Action
 	timerAt core.Tick
@@ -101,7 +110,7 @@ var slotGeometry = disklog.Geometry{SegmentBlocks: 4096, SegmentCount: 40}
 // newHarnessOn is newHarness on a disk cut as geo.
 func newHarnessOn(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
 	h := &harness{t: t, pool: sim.NewPool(32<<20, 0), disk: sim.NewDisk(geo.DiskBlocks()), cfg: cfg,
-		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, slotData: map[core.LBA][]byte{}, crashAt: -1}
+		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, steps: map[*lsm.Compaction]int{}, laneOf: map[uint32]uint8{}, stepHeld: map[uint8]uint64{}, slotData: map[core.LBA][]byte{}, crashAt: -1}
 	h.ctx = core.Context{Now: 1, Raw: 2, Pool: h.pool}
 	var err error
 	if h.s, err = Format(&h.ctx, cfg, disklog.Superblock{LogID: 0x5eed, Geometry: geo}, &h.out); err != nil {
@@ -154,6 +163,7 @@ func (h *harness) step() bool {
 	h.s.OnEvent(&h.ctx, &ev, &h.out)
 	if recovering && h.s.Serving() {
 		checkOpenSeqs(h.t, h.disk, h.s.Log())
+		clear(h.stepHeld)
 	}
 	if recovering && h.s.Serving() && h.oracle != nil {
 		m, err := h.oracle.Recovered(h.s.Log().DurableLSN())
@@ -164,7 +174,25 @@ func (h *harness) step() bool {
 	}
 	h.take()
 	h.noteDurable()
+	for c := h.mergeDue(); c != nil; c = h.mergeDue() {
+		c.Run()
+		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
+			h.t.Fatal(err)
+		}
+		if h.steps[c] == 0 {
+			h.merges = append(h.merges, c)
+		}
+		h.steps[c]++
+		h.take()
+	}
 	return true
+}
+
+func (h *harness) mergeDue() *lsm.Compaction {
+	if !h.merging {
+		return nil
+	}
+	return h.s.MergeDue()
 }
 
 // checkOpenSeqs fails unless log opens its next segment past the open sequence of every segment
@@ -180,8 +208,34 @@ func checkOpenSeqs(t testing.TB, disk *sim.Disk, log *disklog.Log) {
 	}
 }
 
+// noteSteps adds the run pieces a record on a merge worker's lane holds to that worker's step,
+// and starts every worker's next step at a manifest.
+func (h *harness) noteSteps(segment uint32, entries []disklog.Entry) {
+	lane, ok := h.laneOf[segment]
+	for _, e := range entries {
+		switch {
+		case e.Kind != disklog.EntryBlob:
+		case e.BlobKind == disklog.BlobManifest:
+			clear(h.stepHeld)
+		case e.BlobKind == disklog.BlobRun && ok && lane > 0:
+			h.stepHeld[lane] += e.Length
+			h.maxStepHeld = max(h.maxStepHeld, h.stepHeld[lane])
+			piece := h.s.Log().MaxBlobBytes()
+			if most := max(h.cfg.Log.CompactionStepBytes, piece) + 2*piece; h.stepHeld[lane] > most {
+				h.t.Fatalf("merge worker %d wrote %d bytes of runs since the last manifest, above a step's %d", lane, h.stepHeld[lane], most)
+			}
+		}
+	}
+}
+
+// settleSteps bounds a settle, so that a store that never goes quiet fails rather than runs away.
+const settleSteps = 100_000
+
 func (h *harness) settle() {
-	for h.step() {
+	for n := 0; h.step(); n++ {
+		if n == settleSteps {
+			h.t.Fatalf("the store did not settle within %d actions: %+v", settleSteps, h.s.CleanStats())
+		}
 	}
 	h.checkUsage()
 }
@@ -235,6 +289,11 @@ func (h *harness) noteWrite(a *core.Action) {
 	segment := uint32(uint64(lba) / uint64(geo.SegmentBlocks))
 	if sh, err := disklog.DecodeSegmentHeader(img); err == nil && sh.LogID == h.s.sb.LogID {
 		h.seqOf[segment] = sh.Seq
+		if sh.Stream == disklog.Meta {
+			h.laneOf[segment] = sh.Lane
+		} else {
+			delete(h.laneOf, segment)
+		}
 		img, lba = img[core.BlockSize:], lba+1
 	}
 	place := disklog.Place{LogID: h.s.sb.LogID, Seq: h.seqOf[segment], Offset: uint32(uint64(lba) % uint64(geo.SegmentBlocks))}
@@ -251,6 +310,7 @@ func (h *harness) noteWrite(a *core.Action) {
 		rec.payloads = append(rec.payloads, p)
 	}
 	h.records = append(h.records, rec)
+	h.noteSteps(segment, d.Entries)
 	if h.oracle != nil {
 		if err := h.oracle.Written(rec.lsn, rec); err != nil {
 			h.t.Fatal(err)

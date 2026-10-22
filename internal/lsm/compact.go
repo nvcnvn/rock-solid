@@ -204,6 +204,12 @@ func (c *Compaction) Worker() int { return c.worker }
 // or failed with its last installed step named.
 func (c *Compaction) Finished() bool { return c.finished || c.failed && c.installed == c.named }
 
+// StepUnnamed reports whether a merge installed a step no durable manifest names yet, which the
+// next checkpoint writes.
+func (t *Tree) StepUnnamed() bool {
+	return slices.ContainsFunc(t.merges, func(c *Compaction) bool { return c.installed > c.named })
+}
+
 // ready reports whether the merge may run its next step: the manifest naming its last one is durable.
 func (c *Compaction) ready() bool {
 	return !c.running && !c.failed && !c.final && !c.finished && c.installed == c.named

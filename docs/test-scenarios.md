@@ -1473,9 +1473,11 @@ merges that take several.
   blocks to the output run and sets each input's bound to the last key the step consumed; the next
   checkpoint writes the step's pieces to the merge worker's lane through `MergePiece`, a new root
   for the output listing all its pieces, and a manifest holding the bounds with each input's dead
-  pieces, as a manifest alone when no checkpoint is due. The manifest waits for those pieces and
-  names the root; a snapshot carries the bounds, an edit replaces them, and a bound on a run the
-  index does not hold is Malformed.
+  pieces. The manifest waits for those pieces and names the root; a snapshot carries the bounds,
+  an edit replaces them, and a bound on a run the index does not hold is Malformed.
+- With no checkpoint due, the owner begins one for the step alone (`BeginStepCheckpoint`): it
+  leaves the memtable unflushed and the replay LSN unchanged, and the log's replay bytes after it
+  are as many as before it, where an ordinary checkpoint lowers them to its own records.
 - Bounded runs: an input holds only its keys above its bound, so output and inputs never share a
   key. With inputs A (newer) and B over keys a..z, B lacking g, and a step ending at f, a get of c
   or f reads the output alone, a get of q reads A, a get of r reads A then B, a scan from a returns
@@ -1919,9 +1921,17 @@ A pass:
   each chunk's entries side by side and ascending. One entry spans blocks whose sources are
   consecutive in one record.
 - Live run pieces in a victim are never copied: the cleaner marks each run holding one for a
-  rewrite, a merge of that run alone, in steps when the tree has them, which writes it again in
-  its place; once the manifest naming it is durable every old piece is reported dead and the
-  segment holds no live piece, and every key reads the same throughout and after a restore.
+  rewrite, a merge of that run alone, which the store runs in steps of `compaction_step_bytes`
+  (one block, with pieces of one block, so a run spans several), each step's pieces on its merge
+  worker's lane and named by a checkpoint begun for it; once the manifest naming its last step is
+  durable every old piece is reported dead and the segment holds no live piece, and every key
+  reads the same throughout and after a restore. After every record, no merge worker's lane holds
+  more than a step, its partition and its root of run pieces past the newest manifest.
+- A crash between two steps of a rewrite, every write landed, recovers the input bounded by the
+  first step and the output so far, reading only the input's pieces past its dead ones, and the
+  rewrite resumes past the bound to its end; recovery that loads the input whole is Malformed.
+- A disk filled to its reserve still finishes a rewrite in steps, each step's checkpoint writing
+  to the merge worker's lane, which may open reserve segments.
 - The owner applies a move only where a map, live or frozen, still points at the source, then
   frees the victim once all its moves are applied. Interleavings (worker copies chunk 7 block 3
   from LBA 100 to LBA 5000):

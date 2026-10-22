@@ -933,6 +933,17 @@ func (l *Log) enqueue(to *queue, q queued) Ticket {
 
 // BeginCheckpoint starts a checkpoint of indexes whose runs hold every record up to DurableLSN after each one's replay LSN; pieces and EndCheckpoint follow.
 func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
+	return l.beginCheckpoint(indexes, false)
+}
+
+// BeginStepCheckpoint starts a checkpoint that writes only merge steps, its indexes' replay LSNs
+// those of the newest manifest, so the records after that manifest still count toward the next
+// checkpoint and the hold behind it.
+func (l *Log) BeginStepCheckpoint(indexes []CheckpointIndex) error {
+	return l.beginCheckpoint(indexes, true)
+}
+
+func (l *Log) beginCheckpoint(indexes []CheckpointIndex, steps bool) error {
 	if l.err != nil {
 		return l.err
 	}
@@ -957,7 +968,10 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Runs: slices.Clone(ix.Runs), Bounds: bounds}
 	}
 	m.Segments = l.usageRows()
-	cp := &checkpoint{manifest: m, changed: slices.Clone(l.changed), replayAtBegin: l.replayBytes, heldAtBegin: l.heldBytes, trims: l.trims.waiting}
+	cp := &checkpoint{manifest: m, changed: slices.Clone(l.changed), trims: l.trims.waiting}
+	if !steps {
+		cp.replayAtBegin, cp.heldAtBegin = l.replayBytes, l.heldBytes
+	}
 	l.trims.waiting = nil
 	for w, set := range l.changed {
 		for ; set != 0; set &= set - 1 {

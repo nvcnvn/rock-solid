@@ -146,3 +146,35 @@ func TestMergeStepFinishesInTheReserve(t *testing.T) {
 	h.victim = false
 	h.close()
 }
+
+// A checkpoint begun for merge steps alone keeps the replay LSN, so the records after the newest
+// manifest keep counting toward the next checkpoint; an ordinary checkpoint restarts the count.
+func TestAStepCheckpointKeepsTheReplayCount(t *testing.T) {
+	h := formatted(t, gib, mergeConfig(1))
+	h.submit(disklog.Hot, h.write(1, 4, 1))
+	h.run()
+	replay := h.log.ReplayBytes()
+	if replay == 0 {
+		t.Fatal("a durable write counts no replay bytes")
+	}
+	checkpoint := func(begin func([]disklog.CheckpointIndex) error) {
+		t.Helper()
+		if err := begin([]disklog.CheckpointIndex{{Owner: runOwner}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.log.EndCheckpoint(&h.ctx, &h.out); err != nil {
+			t.Fatal(err)
+		}
+		h.absorb()
+		h.run()
+	}
+	checkpoint(h.log.BeginStepCheckpoint)
+	if got := h.log.ReplayBytes(); got < replay {
+		t.Fatalf("a step checkpoint left %d replay bytes of %d", got, replay)
+	}
+	checkpoint(h.log.BeginCheckpoint)
+	if got := h.log.ReplayBytes(); got >= replay {
+		t.Fatalf("an ordinary checkpoint left %d replay bytes of %d", got, replay)
+	}
+	h.close()
+}

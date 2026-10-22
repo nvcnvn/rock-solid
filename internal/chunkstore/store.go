@@ -168,9 +168,11 @@ type flushWait struct {
 }
 
 type loadingRun struct {
-	refs []disklog.BlobRef
-	got  map[disklog.BlobRef][]byte
-	root []byte
+	// bound is the merge bound the manifest holds on the run, whose pieces up to bound.Dead are dead and never read.
+	bound *disklog.MergeBound
+	refs  []disklog.BlobRef
+	got   map[disklog.BlobRef][]byte
+	root  []byte
 }
 
 type plants struct {
@@ -193,6 +195,7 @@ type Store struct {
 	mode     disklog.Mode
 	lout     disklog.Output
 	ix       *Index
+	sched    *lsm.Scheduler
 	sb       disklog.Superblock
 	maxWrite uint16
 	interval uint32
@@ -300,11 +303,9 @@ func (s *Store) recover(ctx *core.Context, diskBlocks uint64, mode disklog.Mode)
 func (s *Store) resume(log *disklog.Log) error {
 	s.log, s.rec, s.sb, s.maxWrite = log, nil, log.Superblock(), log.MaxWriteBlocks()
 	if s.ix == nil {
-		ix, err := s.newIndex(log.MaxBlobBytes(), s.sb.SegmentBlocks)
-		if err != nil {
+		if err := s.newIndex(log.MaxBlobBytes(), s.sb.SegmentBlocks); err != nil {
 			return err
 		}
-		s.ix = ix
 	} else {
 		live := make([]uint32, s.sb.SegmentCount)
 		s.ix.SegmentLive(s.sb.SegmentBlocks, live)
@@ -315,12 +316,21 @@ func (s *Store) resume(log *disklog.Log) error {
 	return nil
 }
 
-func (s *Store) newIndex(maxPiece uint64, segmentBlocks uint32) (*Index, error) {
-	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: int(maxPiece), Check: s.cfg.Check}))
+// newIndex starts an empty index and the merge scheduler over it, which hands out the merge
+// workers the log keeps a lane for.
+func (s *Store) newIndex(maxPiece uint64, segmentBlocks uint32) error {
+	step := cmp.Or(s.cfg.Log.CompactionStepBytes, disklog.DefaultConfig().CompactionStepBytes)
+	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: int(maxPiece), StepBytes: int(step), Check: s.cfg.Check}))
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return NewIndex(tree, segmentBlocks), nil
+	sched, err := lsm.NewScheduler(lsm.SchedulerConfig{MergeWorkers: s.cfg.Log.MergeWorkers})
+	if err != nil {
+		return err
+	}
+	sched.Add(tree)
+	s.ix, s.sched = NewIndex(tree, segmentBlocks), sched
+	return nil
 }
 
 // Seal exists in the API only.
@@ -981,8 +991,8 @@ func (s *Store) housekeep(ctx *core.Context, out *Output) {
 		if s.pieceWait {
 			s.nextPiece(ctx, out)
 		}
-		if !s.checkpointing && !s.retryAfter && s.log.CheckpointDue() {
-			s.beginCheckpoint(ctx, out)
+		if due := s.log.CheckpointDue(); !s.checkpointing && !s.retryAfter && (due || s.ix.Tree().StepUnnamed()) {
+			s.beginCheckpoint(ctx, due, out)
 		}
 	case draining:
 		s.drain(ctx, out)
@@ -1291,17 +1301,29 @@ func (s *Store) replayPoint() uint64 {
 	return lsn
 }
 
-func (s *Store) beginCheckpoint(ctx *core.Context, out *Output) {
+// beginCheckpoint starts a checkpoint: one that is due flushes the memtable, and one begun only
+// for a merge step writes the step and a manifest, keeping the replay LSN.
+func (s *Store) beginCheckpoint(ctx *core.Context, due bool, out *Output) {
 	tree := s.ix.Tree()
-	froze, err := tree.BeginFlush()
+	var froze bool
+	var err error
+	if due {
+		froze, err = tree.BeginFlush()
+	} else {
+		err = tree.BeginStepFlush()
+	}
 	if err != nil {
 		panic("chunkstore: flush begun while one runs: " + err.Error())
 	}
-	if froze || !tree.Frozen() {
+	if froze || due && !tree.Frozen() {
 		s.replayLSN = s.replayPoint()
 	}
-	idx := [1]disklog.CheckpointIndex{{Owner: indexOwnerID, ReplayLSN: s.replayLSN, Runs: tree.CarriedRuns()}}
-	if err := s.log.BeginCheckpoint(idx[:]); err != nil {
+	idx := [1]disklog.CheckpointIndex{{Owner: indexOwnerID, ReplayLSN: s.replayLSN, Runs: tree.CarriedRuns(), Bounds: tree.Bounds()}}
+	begin := s.log.BeginCheckpoint
+	if !due {
+		begin = s.log.BeginStepCheckpoint
+	}
+	if err := begin(idx[:]); err != nil {
 		tree.FlushFailed()
 		return
 	}
@@ -1319,7 +1341,8 @@ func (s *Store) nextPiece(ctx *core.Context, out *Output) {
 	if err != nil {
 		return
 	}
-	length, root, err := s.ix.Tree().NextPiece(ctx.Pool.Bytes(buf))
+	tree := s.ix.Tree()
+	length, root, err := tree.NextPiece(ctx.Pool.Bytes(buf))
 	if err == nil && (s.plant.failCheck || s.plant.failChecks) {
 		s.plant.failCheck, err = false, lsm.ErrCheck
 	}
@@ -1335,7 +1358,12 @@ func (s *Store) nextPiece(ctx *core.Context, out *Output) {
 		}
 		return
 	}
-	if s.piece, err = s.log.CheckpointPiece(ctx, indexOwnerID, buf, uint64(length), root, &s.lout); err != nil {
+	if w := tree.PieceWorker(); w > 0 {
+		s.piece, err = s.log.MergePiece(ctx, w, indexOwnerID, buf, uint64(length), root, &s.lout)
+	} else {
+		s.piece, err = s.log.CheckpointPiece(ctx, indexOwnerID, buf, uint64(length), root, &s.lout)
+	}
+	if err != nil {
 		ctx.Pool.Free(buf)
 		s.stop(ctx, err, out)
 		return
@@ -1344,15 +1372,19 @@ func (s *Store) nextPiece(ctx *core.Context, out *Output) {
 	s.piecesOut++
 }
 
-// MergeDue returns the index's next merge, which may run off the loop, or nil.
+// MergeDue returns the index's next merge step, whose Run may go to its merge worker off the
+// loop, or nil: a running merge's next step once the manifest naming its last is durable, else a
+// new merge on a free worker, a rewrite the cleaner marked first.
 func (s *Store) MergeDue() *lsm.Compaction {
 	if s.phase != serving {
 		return nil
 	}
-	return s.ix.Tree().PickCompaction()
+	return s.sched.Next()
 }
 
-// InstallMerge installs a merge MergeDue returned; one that fails its run check rebuilds the index from the log.
+// InstallMerge installs a merge step MergeDue returned, which the next checkpoint writes to the
+// merge worker's lane, beginning one if none is due; a step that fails its run check rebuilds the
+// index from the log.
 func (s *Store) InstallMerge(ctx *core.Context, c *lsm.Compaction, out *Output) error {
 	if s.phase != serving {
 		return ErrUnavailable
@@ -1361,12 +1393,12 @@ func (s *Store) InstallMerge(ctx *core.Context, c *lsm.Compaction, out *Output) 
 	if s.plant.failMerge {
 		s.plant.failMerge, err = false, lsm.ErrCheck
 	} else {
-		err = s.ix.Tree().Install(c)
+		err = s.sched.Install(c)
 	}
 	if errors.Is(err, lsm.ErrCheck) {
 		s.indexBroken(ctx, err, out)
-		s.pump(ctx, out)
 	}
+	s.pump(ctx, out)
 	return err
 }
 
@@ -1425,12 +1457,10 @@ func (s *Store) failWaiting(ctx *core.Context, err error, out *Output) {
 }
 
 func (s *Store) manifestLoaded(ctx *core.Context) {
-	ix, err := s.newIndex(s.rec.MaxBlobBytes(), s.rec.Superblock().SegmentBlocks)
-	if err != nil {
+	if err := s.newIndex(s.rec.MaxBlobBytes(), s.rec.Superblock().SegmentBlocks); err != nil {
 		s.recoveryFailed(ctx, err)
 		return
 	}
-	s.ix = ix
 	if m, ok := s.rec.Manifest(); ok && s.mode == disklog.ModeOpen {
 		for _, mi := range m.Indexes {
 			if mi.Owner != indexOwnerID {
@@ -1438,7 +1468,11 @@ func (s *Store) manifestLoaded(ctx *core.Context) {
 			}
 			s.replayLSN = mi.ReplayLSN
 			for _, root := range mi.Runs {
-				s.loading[root] = &loadingRun{got: map[disklog.BlobRef][]byte{}}
+				l := &loadingRun{got: map[disklog.BlobRef][]byte{}}
+				if k := slices.IndexFunc(mi.Bounds, func(b disklog.MergeBound) bool { return b.Run == root }); k >= 0 {
+					l.bound = &mi.Bounds[k]
+				}
+				s.loading[root] = l
 				if err := s.rec.ReadBlob(ctx, root, &s.lout); err != nil {
 					s.recoveryFailed(ctx, err)
 					return
@@ -1459,6 +1493,9 @@ func (s *Store) blobRead(ctx *core.Context, ev *disklog.Event) {
 			s.recoveryFailed(ctx, err)
 			return
 		}
+		if l.bound != nil {
+			refs = refs[min(int(l.bound.Dead), len(refs)):]
+		}
 		l.refs = refs
 		for _, r := range refs {
 			s.pieceOf[r] = root
@@ -1477,7 +1514,14 @@ func (s *Store) blobRead(ctx *core.Context, ev *disklog.Event) {
 		for _, r := range l.refs {
 			pieces = append(pieces, l.got[r])
 		}
-		if err := s.ix.Tree().LoadRun(root, append(pieces, l.root)); err != nil {
+		pieces = append(pieces, l.root)
+		var err error
+		if l.bound != nil {
+			err = s.ix.Tree().LoadBoundedRun(*l.bound, pieces)
+		} else {
+			err = s.ix.Tree().LoadRun(root, pieces)
+		}
+		if err != nil {
 			s.recoveryFailed(ctx, err)
 			return
 		}
