@@ -518,11 +518,13 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
-\* Liveness needs the purger to keep running and its punches to arrive.
+\* Liveness needs the purger to keep running, and its punches and the chunk writes a drain
+\* waits for to arrive.
 FairSpec ==
     /\ Spec
     /\ WF_vars(Scan) /\ WF_vars(PurgeSend) /\ WF_vars(RemoveRun)
     /\ WF_vars(\E p \in punches : PunchLand(p))
+    /\ WF_vars(\E w \in writes : Land(w))
 
 \* Daemons are interchangeable; ci configurations check up to their permutations.
 NodeSymmetry == Permutations(Nodes)

@@ -3051,7 +3051,7 @@ A TLA+ specification of [Freeing space](design.md#freeing-space), `models/purge/
 | An extension never exposes a cut byte, nor one that a write which read an older size landed past the cut | `ExtensionNeverExposes` | "an extension never exposes a byte a truncate cut off" |
 | Once a deleted inode's purge has settled, none of its chunks remains | `NoChunkOfDeletedInode` | "once a purge settles, no chunk of a deleted inode or volume remains outside what snapshots hold" |
 | An orphaned inode is never freed while a live session has it open | `OrphanNotFreedWhileOpen` | "an orphaned inode is never freed while a live session has it open" |
-| Every purge entry is eventually removed (`deep` only, under a fair purger) | `PurgeSettles` | None: a purge entry pending forever shows as a chunk the settle invariant finds once the run ends, so the simulator needs no liveness check of its own |
+| Every purge entry is eventually removed (`deep` only, under a fair purger and with chunk writes arriving) | `PurgeSettles` | None: a purge entry pending forever shows as a chunk the settle invariant finds once the run ends, so the simulator needs no liveness check of its own |
 
 The property covers the bytes a truncate or unlink cut off and those a write that read an older size landed past the size, not every byte past the size: an extending write whose daemon crashed can land without its size commit, and a later extension may show it, as a write that never returned may take effect. The drain is what keeps a write that read the size before a truncate from landing past the cut after the purge ran; zeroing an extension's gap does not, since the stale write can land in the gap after it was zeroed ([Freeing space](design.md#freeing-space)).
 
@@ -3119,7 +3119,7 @@ Snapshots taken while a purge runs (punches carrying the snapshot epoch) are lef
 - `ci-write`: 1 inode of 7 bytes open on 2 nodes, up to 2 writes at bytes 2 and 6, 2 truncates to 1, 5 or 8 bytes and 2 crashes.
 - `ci-extend`: 1 inode of 3 bytes open on 2 nodes, up to 2 writes at bytes 4 and 6, both extensions, 2 truncates to 2 or 8 bytes and 2 crashes, so two extensions at different offsets overlap.
 - `ci-orphan`: 1 inode of 3 bytes open on 2 nodes, up to 2 writes at byte 5 (past `alloc_end`), 1 unlink, 1 fence, 1 owner failover and 1 crash.
-- `deep-list`: `ci-list` with 2 crashes, safety only, since its liveness check does not finish in 4 hours; `deep-write` and `deep-orphan` add a crash to theirs, and to `deep-orphan` a write, and check `PurgeSettles` under a fair purger.
+- `deep-list`: `ci-list` with 2 crashes, safety only, since its liveness check does not finish in 4 hours; `deep-write` and `deep-orphan` add a crash to theirs, and to `deep-orphan` a write, and check `PurgeSettles` under a fair purger, with chunk writes arriving, since a drain waits for them.
 
 ## Model-to-simulator map
 
