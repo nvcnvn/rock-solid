@@ -710,3 +710,35 @@ func TestAQuarantinedSegmentsBlocksAreOverwritten(t *testing.T) {
 	o.check(t, h, 0, 63, 0)
 	quarantined()
 }
+
+// A victim holding 64 single blocks of one chunk, each between blocks of another since
+// overwritten, and overwrites of a third that roll the log past it, is copied with no more than the read depth of its pieces read at once, and every
+// block reads back.
+func TestAVictimOfManyPiecesReadsThemAtTheReadDepth(t *testing.T) {
+	h := newHarnessOn(t, cleanConfig(), disklog.Geometry{SegmentBlocks: 256, SegmentCount: 64})
+	h.merging = true
+	r := core.NewRand(13)
+	o := newByteOracle()
+	put := func(c core.ChunkID, b uint16) {
+		data := make([]byte, core.BlockSize)
+		r.Fill(data)
+		id := h.write(c, uint32(b)*core.BlockSize, data, 0)
+		h.settle()
+		o.apply(t, c, uint32(b)*core.BlockSize, core.BlockSize, data, h.ok(id), 0)
+	}
+	for b := range uint16(64) {
+		put(chunk(1), b)
+		put(chunk(2), b)
+	}
+	for b := range uint16(64) {
+		put(chunk(2), b)
+	}
+	for range 400 {
+		put(chunk(3), uint16(r.Below(16)))
+	}
+	h.clean(1000)
+	if h.s.CleanStats().Copied < 64 || h.maxCleanReads != cleanReadDepth {
+		t.Fatalf("stats %+v; at most %d reads in flight", h.s.CleanStats(), h.maxCleanReads)
+	}
+	o.check(t, h, 0, 63, 0)
+}

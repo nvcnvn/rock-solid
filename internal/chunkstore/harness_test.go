@@ -65,6 +65,8 @@ type harness struct {
 	// shuffle, when set, runs a queued action at random rather than the oldest, as an NVMe queue
 	// may complete the commands it holds in any order but a flush.
 	shuffle *core.Rand
+	// maxCleanReads is the most reads a cleaner pass has had in flight.
+	maxCleanReads int
 }
 
 // advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
@@ -184,6 +186,7 @@ func (h *harness) step() bool {
 	}
 	h.take()
 	h.noteDurable()
+	h.noteCleanReads()
 	for c := h.mergeDue(); c != nil; c = h.mergeDue() {
 		c.Run()
 		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
@@ -208,6 +211,17 @@ func (h *harness) unordered() core.Action {
 	a := h.queue[k]
 	h.queue = slices.Delete(h.queue, k, k+1)
 	return a
+}
+
+// noteCleanReads fails when a cleaner pass has more reads in flight than the cleaner's read
+// depth, and keeps the most it has seen.
+func (h *harness) noteCleanReads() {
+	for _, p := range h.s.cl.passes {
+		if p.job.reads > cleanReadDepth {
+			h.t.Fatalf("a cleaner pass has %d reads in flight, above its depth of %d", p.job.reads, cleanReadDepth)
+		}
+		h.maxCleanReads = max(h.maxCleanReads, p.job.reads)
+	}
 }
 
 func (h *harness) mergeDue() *lsm.Compaction {

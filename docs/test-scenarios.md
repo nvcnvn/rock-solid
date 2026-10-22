@@ -1951,7 +1951,9 @@ A pass:
 
 - The owner lists each victim's live records from the index's record counts, reads their
   headers around the header-block cache, and finds each entry's blocks a map still stores there;
-  each run of them is read into a buffer of its own. The worker verifies each block's CRC32C and
+  each run of them is read into a buffer of its own, at most 16 reads of a pass in flight: a
+  victim of 64 single-block runs between dead blocks has 16 out at its peak, never more, and every
+  block reads back after its copy. The worker verifies each block's CRC32C and
   sorts the runs; they go to the cold stream's cleaner lane as copy entries, never a manifest
   piece, and each move applies when its copy record's Durable event reaches the owner.
 - A victim holding a block whose checksum fails is quarantined: nothing of it is copied, it is

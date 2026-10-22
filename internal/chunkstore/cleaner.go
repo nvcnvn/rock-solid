@@ -13,7 +13,7 @@ const (
 	// DefaultCleanFree is clean_free, the free segments outside the reserve the cleaner keeps.
 	DefaultCleanFree = 16
 	cleanIOBit       = 1 << 62
-	headerReadDepth  = 16
+	cleanReadDepth   = 16
 )
 
 // cleanPiece is a run of live blocks of one chunk version that the cleaner copies: from block
@@ -115,12 +115,15 @@ type CleanStats struct {
 // CleanStats is what the store's cleaner has done since the store started.
 func (s *Store) CleanStats() CleanStats { return s.cl.stats }
 
-// cleaner is the store's cleaner state machine: its passes, their reads and the copies sent.
+// cleaner is the store's cleaner state machine: its passes, their reads and the copies sent, in
+// ticket order from sentHead on, a resolved one's pass nil.
 type cleaner struct {
 	stats     CleanStats
 	passes    []*cleanPass
 	reads     []cleanRead
+	freeReads []int
 	sent      []cleanSent
+	sentHead  int
 	triedAt   uint64
 	tried     bool
 	ents      []disklog.Entry
@@ -289,7 +292,7 @@ func (s *Store) advancePass(ctx *core.Context, p *cleanPass) {
 			}
 			j.phase = jobRecords
 		case jobRecords:
-			for j.next < len(j.records) && j.reads < headerReadDepth && !j.failed && !j.bad {
+			for j.next < len(j.records) && j.reads < cleanReadDepth && !j.failed && !j.bad {
 				if !s.cleanRead(ctx, p, j.next, -1, j.records[j.next].Header, 1) {
 					return
 				}
@@ -300,13 +303,13 @@ func (s *Store) advancePass(ctx *core.Context, p *cleanPass) {
 			}
 			j.phase = jobData
 		case jobData:
-			for j.issued < len(j.pieces) && !j.failed && !j.bad {
+			for j.issued < len(j.pieces) && j.reads < cleanReadDepth && !j.failed && !j.bad {
 				if !s.cleanRead(ctx, p, -1, j.issued, j.pieces[j.issued].src, uint32(j.pieces[j.issued].count)) {
 					return
 				}
 				j.issued++
 			}
-			if j.reads > 0 {
+			if j.reads > 0 || j.issued < len(j.pieces) && !j.failed && !j.bad {
 				return
 			}
 			if !j.failed && !j.bad {
@@ -347,8 +350,11 @@ func (s *Store) cleanRead(ctx *core.Context, p *cleanPass, r, pc int, lba core.L
 			p.job.pieces[pc].buf = buf
 		}
 	}
-	i := slices.IndexFunc(s.cl.reads, func(c cleanRead) bool { return !c.used })
-	if i < 0 {
+	var i int
+	if k := len(s.cl.freeReads); k > 0 {
+		i = s.cl.freeReads[k-1]
+		s.cl.freeReads = s.cl.freeReads[:k-1]
+	} else {
 		s.cl.reads = append(s.cl.reads, cleanRead{})
 		i = len(s.cl.reads) - 1
 	}
@@ -358,21 +364,14 @@ func (s *Store) cleanRead(ctx *core.Context, p *cleanPass, r, pc int, lba core.L
 	return true
 }
 
-func (s *Store) cleanReadsOut() int {
-	n := 0
-	for _, r := range s.cl.reads {
-		if r.used {
-			n++
-		}
-	}
-	return n
-}
+func (s *Store) cleanReadsOut() int { return len(s.cl.reads) - len(s.cl.freeReads) }
 
 // cleanReadDone takes a completed read: the victim's segment header gives its records' open
 // sequence, a record header lists the record's live pieces, and a piece's data waits for Run.
 func (s *Store) cleanReadDone(ctx *core.Context, i int, derr core.DiskError) {
 	rd := s.cl.reads[i]
 	s.cl.reads[i] = cleanRead{}
+	s.cl.freeReads = append(s.cl.freeReads, i)
 	j := &rd.pass.job
 	j.reads--
 	if derr != core.DiskOK || s.phase != serving {
@@ -477,12 +476,20 @@ func (s *Store) sendCopies(ctx *core.Context, p *cleanPass) {
 // copyResolved takes a copy item the log resolved: durable, it applies as replay would, wherever a
 // map still stores the copied blocks at their source; failed, it leaves its victim used.
 func (s *Store) copyResolved(t disklog.Ticket, ev *disklog.Event, i int) bool {
-	k := slices.IndexFunc(s.cl.sent, func(c cleanSent) bool { return c.ticket == t })
-	if k < 0 {
+	live := s.cl.sent[s.cl.sentHead:]
+	k, ok := slices.BinarySearchFunc(live, t, func(c cleanSent, t disklog.Ticket) int { return cmp.Compare(c.ticket, t) })
+	if !ok || live[k].pass == nil {
 		return false
 	}
-	c := s.cl.sent[k]
-	s.cl.sent = slices.Delete(s.cl.sent, k, k+1)
+	c := live[k]
+	live[k].pass = nil
+	for s.cl.sentHead < len(s.cl.sent) && s.cl.sent[s.cl.sentHead].pass == nil {
+		s.cl.sentHead++
+	}
+	if s.cl.sentHead > len(s.cl.sent)/2 {
+		s.cl.sent = s.cl.sent[:copy(s.cl.sent, s.cl.sent[s.cl.sentHead:])]
+		s.cl.sentHead = 0
+	}
 	j := &c.pass.job
 	j.copies--
 	if ev.Kind != disklog.Durable {
@@ -517,5 +524,5 @@ func (s *Store) resetCleaner(ctx *core.Context) {
 	for _, p := range s.cl.passes {
 		s.freePieces(ctx, &p.job)
 	}
-	s.cl.passes, s.cl.sent, s.cl.tried = nil, s.cl.sent[:0], false
+	s.cl.passes, s.cl.sent, s.cl.sentHead, s.cl.tried = nil, s.cl.sent[:0], 0, false
 }
