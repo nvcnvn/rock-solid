@@ -82,6 +82,7 @@ func (j *cleanJob) Run(pool core.BufPool) {
 type cleanPass struct {
 	victims []uint32
 	cur     int
+	freed   int
 	job     cleanJob
 }
 
@@ -154,7 +155,9 @@ func (s *Store) cleanWorkers() int {
 }
 
 // clean starts passes while free segments outside the reserve are short of clean_free, or while
-// items wait for room, and drives the running ones. It reports whether the cleaner has a victim.
+// items wait for room, and drives the running ones. After a pass that frees nothing, as after
+// finding no victim, it starts none until the durable LSN moves. It reports whether the cleaner
+// has a victim.
 func (s *Store) clean(ctx *core.Context) bool {
 	for len(s.cl.passes) < s.cleanWorkers() && (s.log.FreeOutsideReserve() < s.cleanFree() || s.log.Stalled()) {
 		if s.cl.tried && s.cl.triedAt == s.log.DurableLSN() {
@@ -174,6 +177,9 @@ func (s *Store) clean(ctx *core.Context) bool {
 		p := s.cl.passes[i]
 		s.advancePass(ctx, p)
 		if p.cur == len(p.victims) {
+			if p.freed == 0 {
+				s.cl.tried, s.cl.triedAt = true, s.log.DurableLSN()
+			}
 			s.cl.passes = slices.Delete(s.cl.passes, i, i+1)
 			continue
 		}
@@ -195,11 +201,13 @@ func (s *Store) isVictim(seg uint32) bool {
 // with u the live share and age capped at a disk's worth of writes, among those whose copy
 // costs less than a segment less the header of the segment it lands in, header blocks
 // included, charging live run pieces at the records of the whole runs a rewrite writes again and
-// what each of its steps writes beside them.
+// what each of its steps writes beside them; a chunk segment's copies must also fit the room the
+// cleaner's lane can reach.
 // A segment holding a piece of a manifest recovery may load waits for the next snapshot, which
 // it asks for, and one holding only pieces about to die waits for them.
 func (s *Store) chooseVictims() []uint32 {
 	geo := s.sb.Geometry
+	room := s.log.CleanerRoom()
 	s.cl.candidate = s.cl.candidate[:0]
 	for seg := uint32(1); seg < geo.SegmentCount; seg++ {
 		if !s.log.Cleanable(seg) || s.isVictim(seg) {
@@ -219,8 +227,8 @@ func (s *Store) chooseVictims() []uint32 {
 			}
 			steps, extra := s.ix.Tree().RewriteSteps(seg)
 			cost = s.log.RewriteCost(s.cl.pieces, steps, extra)
-		} else {
-			cost = s.log.CopyCost(uint64(u.Live))
+		} else if cost = s.log.CopyCost(uint64(u.Live)); cost > room {
+			continue
 		}
 		if cost+1 >= uint64(geo.SegmentBlocks) {
 			continue
@@ -250,6 +258,7 @@ func (s *Store) startVictim(ctx *core.Context, p *cleanPass) bool {
 		s.cl.stats.Rewrites += s.ix.Tree().MarkRewrite(seg)
 		if s.log.Free(ctx, seg, &s.lout) == nil {
 			s.cl.stats.Freed++
+			p.freed++
 		}
 		p.cur++
 		return false
@@ -491,6 +500,7 @@ func (s *Store) finishVictim(ctx *core.Context, p *cleanPass) {
 	s.freePieces(ctx, j)
 	if !j.failed && !j.bad && s.log.Free(ctx, j.segment, &s.lout) == nil {
 		s.cl.stats.Freed++
+		p.freed++
 	}
 	p.cur++
 	j.segment = 0

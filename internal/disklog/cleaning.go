@@ -55,6 +55,16 @@ func (l *Log) CopiesStalled() bool {
 	return p == placeNoRoom
 }
 
+// CleanerRoom is the blocks the cleaner's copies can reach: what its lane's open segment has left
+// and every free segment, the reserve included, past its segment header.
+func (l *Log) CleanerRoom() uint64 {
+	room := uint64(l.freeCount()) * uint64(l.sb.SegmentBlocks-1)
+	if c := l.lanes[laneClean].asm; c.segment != 0 {
+		room += uint64(l.sb.SegmentBlocks - c.next)
+	}
+	return room
+}
+
 // NamedLSN is the LSN of the newest manifest a durable segment header names, the one recovery would load.
 func (l *Log) NamedLSN() uint64 { return l.namedLSN }
 

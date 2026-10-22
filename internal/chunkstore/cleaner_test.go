@@ -335,6 +335,53 @@ func TestWritesFailOnlyWhenNoVictimGainsSpace(t *testing.T) {
 	}
 }
 
+// With a reserve of one segment, below what the formula asks, the cleaner's copies and the
+// checkpoints take the disk to zero free segments. A victim whose copies do not fit the room the
+// cleaner's lane can reach is not taken, and a pass that frees nothing starts no other until the
+// durable LSN moves, so a write that finds no room fails with NoSpace at once, no pass starting
+// and nothing copied for it, both while overwrites leave victims and once new blocks fill the disk.
+func TestAFullDiskWithNoFreeSegmentEndsInNoSpace(t *testing.T) {
+	cfg := cleanConfig()
+	cfg.Log.Reserve = 1
+	h, o := primedWith(t, cfg)
+	r := core.NewRand(12)
+	log := h.s.Log()
+	failed, empty := 0, false
+	try := func(c core.ChunkID, b uint32, data []byte) {
+		t.Helper()
+		st := h.s.CleanStats()
+		id := h.write(c, b*core.BlockSize, data, 0)
+		h.settle()
+		empty = empty || log.FreeOutsideReserve() < 0
+		switch err := h.reply(id).Err; {
+		case err == nil:
+			o.apply(t, c, b*core.BlockSize, core.BlockSize, data, h.ok(id), 0)
+		case !errors.Is(err, disklog.ErrNoSpace):
+			t.Fatalf("write %d: %v", failed, err)
+		case h.s.CleanStats().Copied != st.Copied:
+			t.Fatalf("a write failed after the cleaner copied: %+v, then %+v", st, h.s.CleanStats())
+		default:
+			failed++
+		}
+	}
+	chunks := []core.ChunkID{chunk(1), chunk(2), chunk(3), chunk(4)}
+	for range 1500 {
+		data := make([]byte, core.BlockSize)
+		r.Fill(data)
+		try(chunks[r.Below(4)], uint32(r.Below(64)), data)
+	}
+	if !empty {
+		t.Fatal("the disk never ran out of free segments")
+	}
+	for i := 0; failed < 20; i++ {
+		if i == 2000 {
+			t.Fatal("writes of new blocks never failed")
+		}
+		try(chunk(uint32(10+i/64)), uint32(i%64), fill(core.BlockSize, byte(i)))
+	}
+	o.check(t, h, 0, 63, 0)
+}
+
 // A whole chunk's record header, which holds the checksums of its slot, stays live while the chunk
 // does: the usage table counts the slot's blocks against the header's segment, so the cleaner
 // never frees it, and the chunk reads back after every pass.
@@ -363,6 +410,40 @@ func TestTheCleanerKeepsTheHeadersOfLiveSlotWrites(t *testing.T) {
 		t.Fatal("the cleaner freed nothing")
 	}
 	o.check(t, h, 0, 63, 0)
+}
+
+// A segment whose live blocks are only the slot writes its record headers hold the checksums of
+// copies nothing and is never freed. A pass over it frees nothing, so the cleaner, one worker
+// short of clean_free, starts no other until the durable LSN moves, however often the store wakes.
+func TestAPassOverSlotHeadersAloneWaitsForTheLog(t *testing.T) {
+	cfg := cleanConfig()
+	cfg.Log.MaxReplayBytes = 64 * core.BlockSize
+	h := newHarnessOn(t, cfg, slotGeometry)
+	whole := core.ChunkID{Volume: 3, Inode: 1, Index: 1}
+	h.sync(h.write(whole, 0, pattern(0, core.ChunkSize), 0))
+	for i := range 300 {
+		id := h.write(chunk(1), 0, fill(64*core.BlockSize, byte(i)), 0)
+		h.settle()
+		h.ok(id)
+	}
+	h.clean(1000)
+	e, _ := h.s.Index().Lookup(testPool, whole, 0)
+	seg := uint32(uint64(e.Header) / uint64(slotGeometry.SegmentBlocks))
+	if u, _ := h.s.Log().Usage(seg); u.Live != core.BlocksPerChunk || !slices.Equal(h.s.chooseVictims(), []uint32{seg}) {
+		t.Fatalf("segment %d holding the whole chunk's header is %+v; victims %v", seg, u, h.s.chooseVictims())
+	}
+	h.clean(h.s.Log().FreeOutsideReserve() + 1)
+	passes, lsn := h.s.CleanStats().Passes, h.s.Log().DurableLSN()
+	for range 5 {
+		h.read(chunk(1), 0, 1)
+		h.settle()
+	}
+	if got := h.s.CleanStats().Passes; got != passes || h.s.Log().DurableLSN() != lsn {
+		t.Fatalf("%d passes over segment %d after one freed nothing, the durable LSN at %d of %d", got-passes, seg, h.s.Log().DurableLSN(), lsn)
+	}
+	if got, _ := h.s.Log().Usage(seg); got.State != disklog.SegmentUsed {
+		t.Fatalf("segment %d is %+v", seg, got)
+	}
 }
 
 // A pass takes the 4 best victims by cost-benefit among the segments it may clean whose copy
