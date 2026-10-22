@@ -2057,9 +2057,10 @@ Invariants (simulator) and faults:
   record there.
 - The segment is TRIMmed with its last slot, then its first block written with zeros, and freed
   once both complete; a TRIM that fails, or does not read back as zeros, still leaves a first block
-  of zeros. Allocation fills the
-  fullest slot segment first (two segments with 3 and 9 free slots: the next chunk goes to the one
-  with 3), and never opens a segment of the reserve for one.
+  of zeros. Its TRIM joins the cleaner's paced queue at `trim_rate`: two 16 MiB slot segments freed
+  together are trimmed 125 ms apart at 128 MiB/s. Allocation fills the fullest slot segment first
+  (two segments with 3 and 9 free slots: the next chunk goes to the one with 3), and never opens a
+  segment of the reserve for one.
 - A snapshot's frozen version keeps the slot it reads in use.
 - After every crash in a workload of whole chunks rewritten, trimmed and punched across a cut and
   checkpoints, the slots the log holds in use are exactly those the index refers to.

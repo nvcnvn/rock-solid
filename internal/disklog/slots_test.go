@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
@@ -162,6 +163,43 @@ func TestFreeingTheLastSlotTrimsAndFreesTheSegment(t *testing.T) {
 	}
 	if disklog.FreeSegments(h.log) != free+1 {
 		t.Fatalf("after the TRIM: %d free, want %d", disklog.FreeSegments(h.log), free+1)
+	}
+}
+
+// Slot segments freed together go through the paced TRIM queue at trim_rate, as other freed
+// segments do: two 16 MiB segments at 128 MiB/s are trimmed 125 ms apart.
+func TestSlotSegmentTrimsArePaced(t *testing.T) {
+	h := slotHarness(t, 4096, 8, testConfig(0))
+	h.submit(disklog.Hot, h.write(9, 1, 9))
+	for i := range uint32(8) {
+		h.submit(disklog.Hot, h.whole(i+1, 1, chunkData(i+1, 1)))
+	}
+	h.run()
+	h.wantSlots(8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360)
+	for _, lba := range h.log.SlotsInUse(nil) {
+		if err := h.log.FreeSlot(lba, &h.out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.absorb()
+	h.submit(disklog.Hot, h.write(20, 1, 20))
+	h.run()
+	wait := (h.timerAt - h.ctx.Now).Duration()
+	if len(h.trims) != 1 || h.trims[0].LBA != 8192 || wait <= 0 || wait > 125*time.Millisecond {
+		t.Fatalf("trims %+v, the timer %v away, once both slot segments are free", h.trims, wait)
+	}
+	fire := func(at core.Tick) {
+		h.ctx.Now = at
+		h.log.OnEvent(&h.ctx, &core.Event{Kind: core.EvTimer, Timer: disklog.TrimTimer}, &h.out)
+		h.absorb()
+		h.run()
+	}
+	due := h.timerAt
+	if fire(due - 1); len(h.trims) != 1 {
+		t.Fatalf("trims %+v before the second segment's turn", h.trims)
+	}
+	if fire(due); len(h.trims) != 2 || h.trims[1].LBA != 12288 {
+		t.Fatalf("trims %+v once the timer fires", h.trims)
 	}
 }
 
