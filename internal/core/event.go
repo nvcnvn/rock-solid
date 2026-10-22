@@ -49,7 +49,9 @@ type BufPool interface {
 	Alloc(n int) (IOBuf, error)
 	// AllocZeroed is Alloc with the buffer zeroed.
 	AllocZeroed(n int) (IOBuf, error)
-	// Bytes gives access to a buffer's memory; a freed or stale handle is a fatal error.
+	// Bytes gives access to a buffer's memory; a freed or stale handle is a fatal error. It may be
+	// called off the loop, as a worker running a job does, for a buffer the loop hands over and
+	// neither frees nor touches until the job comes back, while the loop allocates and frees others.
 	Bytes(b IOBuf) []byte
 	// Free returns a buffer; freeing twice or freeing a stale handle is a fatal error.
 	Free(b IOBuf)

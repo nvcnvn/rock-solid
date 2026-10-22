@@ -159,3 +159,28 @@ func TestALateCleanJobAfterAStopIsDropped(t *testing.T) {
 	}
 	dropLate(t, h, j)
 }
+
+// A job's Run on a goroutine of its own, while the owner keeps writing, taking and freeing pool
+// buffers, shares nothing with the loop but the pool's Bytes; run it under -race.
+func TestACleanJobRunsOffTheLoop(t *testing.T) {
+	h, o, j, _ := heldJob(t, cleanConfig())
+	done := make(chan struct{})
+	go func() {
+		j.Run(h.pool)
+		close(done)
+	}()
+	r, chunks := core.NewRand(9), []core.ChunkID{chunk(1), chunk(2)}
+	for range 20 {
+		overwrite(h, o, r, chunks, 64)
+	}
+	<-done
+	h.held = slices.DeleteFunc(h.held, func(x *CleanJob) bool { return x == j })
+	h.s.InstallClean(&h.ctx, j, &h.out)
+	h.take()
+	h.hold = false
+	h.settle()
+	if st := h.s.CleanStats(); st.Copied == 0 || st.Quarantined != 0 {
+		t.Fatalf("stats %+v", st)
+	}
+	o.check(t, h, 0, 63, 0)
+}
