@@ -224,7 +224,7 @@ types](#event-and-action-types), and this section is their only home.
   | Another version, checksum recomputed | BadVersion | BadVersion |
   | A bit flipped (superblock: in the log ID, the CRC or the last byte; segment header: in the sequence) | BadChecksum | BadChecksum |
   | Non-zero padding or tail, checksum recomputed | Malformed | Malformed |
-  | A lane on the hot or cold stream, checksum recomputed | | Malformed |
+  | A lane past 1 on the hot or cold stream (the slot lane, the cleaner's), checksum recomputed | | Malformed |
   | Segment blocks 3 or 96 (not a power of two of at least 4), or a count of 3, checksum recomputed | Malformed | |
   | Stream 3, own index 0, manifest block 0, or an LSN with no manifest segment, checksum recomputed | | Malformed |
   | Shorter than a block | Truncated | Truncated |
@@ -232,7 +232,8 @@ types](#event-and-action-types), and this section is their only home.
   Encoding refuses what decoding would: a superblock of 6-block segments, a segment header of
   stream 3 or of a hot lane 1, index 0, a manifest block with no segment, or a manifest segment at block 0.
 - Golden bytes: the superblock for log ID 0x0123456789abcdef on a 1 GiB disk, and the segment headers
-  (seq 7, segment 3, cold; seq 8, segment 4, metadata lane 0; seq 9, segment 5, metadata lane 3;
+  (seq 7, segment 3, cold; seq 10, segment 6, cold lane 1; seq 11, segment 7, hot lane 1; seq 8,
+  segment 4, metadata lane 0; seq 9, segment 5, metadata lane 3;
   each with the manifest at segment 2 block 9 LSN 41), encode to the checked-in
   `internal/disklog/testdata/log_format_golden.txt`, followed by zeros to the end of the block.
   Until the first release a format change replaces the fixture in place; after it, a change needs a
@@ -442,7 +443,8 @@ types](#event-and-action-types), and this section is their only home.
   and fixes the header checksum, flips a padding bit, or writes the segment header of either other
   stream or of another lane with its checksum fixed panics in the decode check on every one of the group commit
   property's 100 seeds, as does a round that reports its last payload a byte late, or writes one
-  block more than its record.
+  block more than its record. The check also panics on a record of the slot lane that holds
+  anything but one slot write, or a record of another lane that holds one.
 - [property] Anything Submit accepts decodes: seeds 1-20; max round 3..64 blocks; commit depth 1-3;
   300 items each of a random kind tag (unknown ones included) and random field values, half with one
   field set beyond what its constructor sets, with a buffer of its size, a block off, or none. Each
@@ -1880,8 +1882,10 @@ on the 1 GiB disk one capacity is 262,144 blocks):
   blocks cost L + 3(⌈L ÷ 253⌉ + 1) + min(L, 254) + h − 1, with h the header blocks of that
   copy. Estimated in exact bytes, the guard let the cleaner pick 98.9% live victims and livelock
   (cleaner streams spike).
-- The guard also charges the header of the segment the copies open, and the index entries the
-  moves write, 2 × 67 bytes a moved block (flushed, then merged again): a victim is picked only
+- The guard also charges the header of the segment the copies open, and an estimate of the index
+  entries the moves write, 2 × 67 bytes per block of the live count, which holds a block once per
+  map referring to it (flushed, then merged again; deeper merges and split extents are not
+  charged): a victim is picked only
   when its cost plus that block is below a segment. Copies of 15,936 live blocks cost 16,382 and
   of 15,937 cost 16,383; with the entries, 15,434 live blocks cost 15,877 + 505 = 16,382 and are
   picked, and 15,435 cost 16,383 and are refused. On 16-block segments, without the segment header a
@@ -1909,10 +1913,15 @@ on the 1 GiB disk one capacity is 262,144 blocks):
   disk reaches zero free segments; before this check every later write started a pass whose
   copies found no room, copied 10 blocks for nothing and failed. Now a write that finds no room
   fails with NoSpace with nothing copied, under overwrites and once new blocks fill the disk.
+- A slot write's record goes alone to the hot stream's slot lane, so slot headers share segments
+  only with each other: six whole chunks written among overwrites of a small chunk leave their
+  headers in one slot-lane segment that holds nothing else, and no other segment holds a slot
+  header once the cleaner has run.
 - A segment holding the record header of a live whole chunk's slot write is never a victim: the
   index counts the slot's blocks against the header's segment, recounted at open from the slots'
-  counts, which keep their record's header. A segment whose only live blocks are those is left
-  alone however short of clean_free. With nine whole chunks' headers among overwrites of a small
+  counts, which keep their record's header. A slot-lane segment the lane has moved on from, whose
+  only live blocks are one chunk's, is left alone however short of clean_free, before and after a
+  restart. With nine whole chunks' headers among overwrites of a small
   chunk, 3,000 more overwrites never fail, and new data then fails with NoSpace only once no
   segment without a slot header would gain space; scored by their age, the header segments took
   every pass and writes failed while 16 segments with nothing live waited.
@@ -2126,13 +2135,15 @@ Invariants (simulator) and faults:
 - Slots per segment: 16 in a 64 MiB segment; one in the 4 MiB segments of a 16 GiB disk; none on a
   disk whose segments are smaller than 4 MiB, where a whole chunk goes to the log as several items.
 - A write entry naming a slot is 39 bytes, its slot's segment and index after the write's fields;
-  golden bytes of a record with one such entry and one ordinary write are checked in. Its per-block
+  golden bytes of a record with one such entry and one ordinary write, and of a segment header
+  of the slot lane (hot stream, lane 1), are checked in. Its per-block
   CRCs cover the slot's blocks, after the record's own data blocks'. Replay checks a slot's blocks
   only under a record that may be a round in flight (below); a read checks every block it
   reads.
 - A whole-chunk write puts its data in a slot, in a DiskWrite of its own from the request's
-  buffer, its record in the hot stream; the round's one flush follows both writes, a round carries
-  one slot write, and the index maps the chunk's 1,024 blocks to the slot in one extent. A partial write of the same chunk goes to the log and trims the
+  buffer, its record alone in the hot stream's slot lane; the round's one flush follows both
+  writes, a round carries one slot write, the two hot lanes take items in submit order, replay
+  delivers them in that order, a restart resumes the slot lane's segment, and the index maps the chunk's 1,024 blocks to the slot in one extent. A partial write of the same chunk goes to the log and trims the
   slot's extent; the slot stays used while any block of it is live.
 - A slot is free for reuse only once the record that rewrote or deleted its chunk is durable: a
   crash before that record is durable reads the old chunk from the slot. The log then holds it
@@ -2172,8 +2183,9 @@ Invariants (simulator) and faults:
   checkpoint between, where only the log's hold on the freed slot keeps it (without the hold,
   recovery loses acknowledged records).
 - Cost (the cleaner streams spike): whole chunks deleted at random cost no cleaning, write
-  amplification near 1.004 at any fill; a pool holding half its data in whole chunks cleans its
-  small writes for about 2.5 at 90% full.
+  amplification near 1.004 at any fill; a pool holding half its data in whole chunks, with the
+  slot headers in their lane, writes 2.75 times what it is sent at 90% full with half its writes
+  whole and 3.57 with a fifth.
 
 ## Trace records
 

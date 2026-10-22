@@ -276,6 +276,8 @@ struct Counters {
     free_samples: u64,
     slot_segs_sum: u64,
     live_sum: u64,
+    lane_segs_sum: u64,
+    lane_samples: u64,
 }
 
 impl Counters {
@@ -301,6 +303,8 @@ impl Counters {
             free_samples: self.free_samples - o.free_samples,
             live_sum: self.live_sum - o.live_sum,
             slot_segs_sum: self.slot_segs_sum - o.slot_segs_sum,
+            lane_segs_sum: self.lane_segs_sum - o.lane_segs_sum,
+            lane_samples: self.lane_samples - o.lane_samples,
         }
     }
     fn total(&self) -> u64 {
@@ -519,7 +523,7 @@ impl Sim {
         self.live_total -= 1;
         if id >= BLOB_BASE {
             let bl = self.bb_blob[(id - BLOB_BASE) as usize];
-            if self.blobs[bl as usize].as_ref().unwrap().kind == Kind::Raft {
+            if self.blobs[bl as usize].as_ref().unwrap().kind == Kind::Raft || (PIN.with(|p| p.get()) && self.blobs[bl as usize].as_ref().unwrap().kind == Kind::SlotHdr) {
                 self.raftlive[seg] -= 1;
             }
         }
@@ -569,7 +573,7 @@ impl Sim {
             }
             self.bb_slot[i] = slot;
             let bl = self.bb_blob[i];
-            if self.blobs[bl as usize].as_ref().unwrap().kind == Kind::Raft {
+            if self.blobs[bl as usize].as_ref().unwrap().kind == Kind::Raft || (PIN.with(|p| p.get()) && self.blobs[bl as usize].as_ref().unwrap().kind == Kind::SlotHdr) {
                 self.raftlive[(slot / b) as usize] += 1;
             }
         }
@@ -981,6 +985,14 @@ impl Sim {
         self.c.free_samples += 1;
         self.c.live_sum += self.live_total;
         self.c.slot_segs_sum += self.slot_segs as u64;
+        if self.slots && self.c.free_samples % 256 == 0 {
+            // segments of the slot headers' own stream (whole_stream), open or sealed
+            let ws = self.whole_stream as u8;
+            self.c.lane_samples += 1;
+            self.c.lane_segs_sum += (0..self.s as usize)
+                .filter(|&i| self.sclass[i] == ws && matches!(self.state[i], State::Open | State::Sealed | State::Cleaning))
+                .count() as u64;
+        }
         if self.slots && self.is_whole(blocks[0].0) {
             debug_assert!(blocks.len() == CHUNK_BLOCKS as usize);
             self.slot_write(blocks[0].0 / CHUNK_BLOCKS);
@@ -1446,9 +1458,13 @@ fn run(cfg: &Cfg) {
         if spread < 0.03 { "OK" } else { "NO" },
         t0.elapsed().as_secs_f64()
     );
+    let lane_segs = if m.lane_samples > 0 { m.lane_segs_sum as f64 / m.lane_samples as f64 } else { 0.0 };
+    println!("LANE tag={} whole_stream={} pin_hdr={} lane_segs={:.2} lane_share={:.5} wa={:.4}", cfg.tag, cfg.whole_stream, PIN.with(|p| p.get()), lane_segs, lane_segs / sim.s as f64, wa);
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     run(&Cfg::parse(&args));
 }
+
+thread_local!{ static PIN: std::cell::Cell<bool> = std::cell::Cell::new(std::env::var("PIN_HDR").is_ok()); }

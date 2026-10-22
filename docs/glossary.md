@@ -248,7 +248,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Stream.** One of three sequences of segments the log appends to: hot (new writes), cold (cleaner copies and shards) and metadata (sorted runs, compactions, manifests). Each segment holds one kind of data, so it tends to empty all at once, which keeps cleaning cheap.
 
-**Lane.** A sequence of segments of one stream that fill one after another, at most one open at a time. Each stream has a shared lane, the cleaner writes its copies to a lane of its own in the cold stream, and each merge worker writes its output to a lane of its own in the metadata stream, so neither mixes with other data. Recovery reads each lane from just before the replay point and merges the lanes in LSN order. See [On-disk format](design.md#on-disk-format).
+**Lane.** A sequence of segments of one stream that fill one after another, at most one open at a time. Each stream has a shared lane; the records of chunk slot writes go to a lane of their own in the hot stream, the cleaner writes its copies to a lane of its own in the cold stream, and each merge worker writes its output to a lane of its own in the metadata stream, so none of them mixes with other data. Recovery reads each lane from just before the replay point and merges the lanes in LSN order. See [On-disk format](design.md#on-disk-format).
 
 **Chunk slot.** A chunk-sized place in a slot segment holding one whole chunk's data. It is freed when the chunk is rewritten or deleted, so whole chunks never need cleaning. See [On-disk format](design.md#on-disk-format).
 

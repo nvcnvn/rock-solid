@@ -263,11 +263,14 @@ func (s *Store) pickVictims() (victims []uint32, snapshot bool) {
 	return victims, snapshot
 }
 
-// movedEntryBytes is what a moved block costs the index at most: its extent's key and value with
-// a run block's three length varints, written once by the flush and again by a merge.
+// movedEntryBytes estimates what a moved block costs the index: its extent's key and value with
+// a run block's three length varints, written by the flush and again by one merge. It is no
+// bound: deeper merges write the entry again, and a copy's edge splits an extent; charging those
+// would cap victims below the 92.7% live a disk 95% full cleans.
 const movedEntryBytes = 2 * (KeySize + extentSize + 3)
 
-// moveCost is the blocks the index entries of live moved blocks take at most.
+// moveCost estimates the blocks the index entries of live moved blocks take; a segment's live
+// count holds a block once per map referring to it, so every map's entry is charged.
 func moveCost(live uint64) uint64 {
 	return (live*movedEntryBytes + core.BlockSize - 1) / core.BlockSize
 }
