@@ -25,7 +25,7 @@ CONSTANTS
     DriftNum, DriftDen,  \* lease_drift = DriftNum / DriftDen of the lease
     Cap,            \* durations saturate here; it exceeds every lease
     DownAfter,      \* node_down_after, in ticks
-    Windows,        \* clients measure each leader's rate (FALSE: every rate is Rates' one)
+    Windows,        \* renewals are messages and clients measure leaders' rates (FALSE: one step)
     WithLock,       \* clients contend for one lock
     MaxTerms, MaxReboots, MaxRises, MaxStops, MaxStalls, MaxEvicts, MaxCrashes,
     MaxPartitions, MaxWrites, MaxInFlight, MaxLost
@@ -70,62 +70,63 @@ Trips(g, h, B) ==
     ELSE g * 2 * DriftDen > h * (2 * DriftDen + DriftNum)
 
 VARIABLES
-    fage,       \* per client: ticks since its fence committed, up to 2
+    fage,       \* per client: ticks since its fence committed in which the leader held its
+                \* lease and every storage node was reachable or marked down, up to 2
     cl,         \* per client: lease, outstanding renewal, rate window, VM state, lock
     rate, boot, rose,   \* per control-plane node: raw rate, boot number, rate risen
-    gs,         \* per control-plane node and client: units since it last answered it
     term, lnode, holding,   \* current term, each term's leader node, the term holding the lease
     stalled,    \* the leader's loop is stalled
     timer,      \* the leader's per-session count, in its units, since it last renewed it
     evicting,   \* per client: the owner asked for an eviction
-    since,      \* per client: ticks since any leader last renewed it
     req, rep,   \* renewals and their answers in flight
     tver, fencedAt, acked,  \* the session table: version, fence versions, acknowledged
     nver, nint, reach, down, unreach,  \* storage nodes: versions held, reachability, down marks
     intv, liveAt, activated, ctr,      \* the PG's intervals, live members, last activated, counters
+    app,        \* per storage node, the writes it has applied
     writes,     \* client writes in flight, queued, or replicating
     lockHolder, lockGen,
     budget,
     hist        \* history: completed writes and violation flags
 
-vars == <<cl, rate, boot, rose, gs, term, lnode, holding, stalled, timer, evicting, since,
+vars == <<fage, cl, rate, boot, rose, term, lnode, holding, stalled, timer, evicting,
           req, rep, tver, fencedAt, acked, nver, nint, reach, down, unreach, intv, liveAt,
-          activated, ctr, writes, lockHolder, lockGen, budget, hist>>
+          activated, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 clientVars == <<cl>>
-leaderVars == <<rate, boot, rose, gs, term, lnode, holding, stalled, timer, evicting, since>>
+leaderVars == <<rate, boot, rose, term, lnode, holding, stalled, timer, evicting>>
 tableVars == <<tver, fencedAt, acked, fage>>
-storageVars == <<nver, nint, reach, down, unreach, intv, liveAt, activated, ctr>>
+storageVars == <<nver, nint, reach, down, unreach, intv, liveAt, activated, ctr, app>>
 
 FirstClient == SetMin(Clients)
 ClientRate == SetMin(Rates)
+\* Ticks a client's rate window lasts: past it the window starts again (rate_window).
+CapT == Cap \div ClientRate + 1
 
 Init ==
     /\ fage = [c \in Clients |-> 0]
-    /\ cl =[c \in Clients |->
+    /\ cl = [c \in Clients |->
                [on |-> FALSE, age |-> 0, len |-> 0, out |-> -1, seq |-> 0,
-                wkey |-> None, wn |-> 0, B |-> None, hs |-> 0, ra |-> 0,
+                wkey |-> None, wn |-> 0, B |-> None, hs |-> 0, ra |-> 0, gt |-> 0,
                 stopped |-> FALSE, crashed |-> FALSE, told |-> FALSE,
                 holds |-> IF WithLock /\ c = FirstClient THEN 1 ELSE 0, inflight |-> 0]]
     /\ rate \in [Leaders -> Rates]
     /\ boot = [n \in Leaders |-> 1]
     /\ rose = [n \in Leaders |-> FALSE]
-    /\ gs = [n \in Leaders |-> [c \in Clients |-> Cap]]
     /\ term = 1
     /\ \E n \in Leaders : lnode = [t \in 1 .. MaxTerms |-> n]
     /\ holding = 1
     /\ stalled = FALSE
     /\ timer = [c \in Clients |-> 0]
     /\ evicting = [c \in Clients |-> FALSE]
-    /\ since = [c \in Clients |-> 0]
     /\ req = {} /\ rep = {}
     /\ tver = 0 /\ fencedAt = [c \in Clients |-> 0] /\ acked = 0
     /\ nver = [s \in Storage |-> 0] /\ nint = [s \in Storage |-> 1]
     /\ reach = [s \in Storage |-> TRUE] /\ down = {} /\ unreach = [s \in Storage |-> 0]
     /\ intv = 1 /\ liveAt = [k \in Intervals |-> IF k = 1 THEN Storage ELSE {}]
     /\ activated = 1 /\ ctr = [k \in Intervals |-> 0]
+    /\ app = [s \in Storage |-> {}]
     /\ writes = {}
-    /\ lockHolder = IF WithLock THEN FirstClient ELSE "none"
+    /\ lockHolder = IF WithLock THEN FirstClient ELSE 0
     /\ lockGen = IF WithLock THEN 1 ELSE 0
     /\ budget = [reboot |-> MaxReboots, rise |-> MaxRises, stop |-> MaxStops,
                  stall |-> MaxStalls, evict |-> MaxEvicts, crash |-> MaxCrashes,
@@ -158,31 +159,53 @@ Urgent ==
 
 Tick ==
     /\ ~Urgent
-    /\ fage' = [c \in Clients |-> IF fencedAt[c] # 0 THEN Min(fage[c] + 1, 2) ELSE 0]
+    /\ fage' = [c \in Clients |->
+                  IF fencedAt[c] # 0 /\ Active /\ \A s \in Storage : reach[s] \/ s \in down
+                  THEN Min(fage[c] + 1, 2) ELSE fage[c]]
     /\ cl' = [c \in Clients |->
                 IF cl[c].stopped THEN cl[c]
                 ELSE LET r == ClientRate IN
                      [cl[c] EXCEPT !.age = Sat(@ + r), !.out = IF @ < 0 THEN @ ELSE Sat(@ + r),
-                                   !.hs = Sat(@ + r), !.ra = Sat(@ + r)]]
-    /\ gs' = [n \in Leaders |-> [c \in Clients |-> Sat(gs[n][c] + rate[n])]]
+                                   !.hs = IF Windows THEN Sat(@ + r) ELSE @,
+                                   !.ra = IF Windows THEN Sat(@ + r) ELSE @,
+                                   !.gt = IF Windows THEN Min(@ + 1, CapT) ELSE @]]
+    /\ rep' = IF Windows THEN {[m EXCEPT !.age = Min(@ + 1, CapT)] : m \in rep} ELSE rep
     /\ timer' = [c \in Clients |-> Sat(timer[c] + rate[Leader])]
-    /\ since' = [c \in Clients |-> Sat(since[c] + 1)]
     /\ unreach' = [s \in Storage |-> IF reach[s] THEN 0 ELSE Min(unreach[s] + 1, DownAfter)]
-    /\ UNCHANGED <<rate, boot, rose, term, lnode, holding, stalled, evicting, req, rep,
-                   tver, fencedAt, acked, nver, nint, reach, down, intv, liveAt, activated, ctr, writes,
+    /\ UNCHANGED <<rate, boot, rose, term, lnode, holding, stalled, evicting, req,
+                   tver, fencedAt, acked, nver, nint, reach, down, intv, liveAt, activated, ctr, app, writes,
                    lockHolder, lockGen, budget, hist>>
 
 -----------------------------------------------------------------------------
 \* The client's side of its session.
 
-\* The client sends a heartbeat naming its session; it keeps one renewal outstanding and
-\* sends another once a tick has passed since its last grant arrived (rate_gap).
+\* (not Windows) a renewal in one step, at a leader holding its lease: configurations that
+\* check fencing rather than lease timing leave out the messages and the rate windows, so
+\* the lease is counted from the leader's processing on equal clocks.
+RenewNow(c) ==
+    /\ ~Windows /\ Acting(c) /\ Active /\ ~(evicting[c] /\ EvictWaitsLease)
+    /\ IF Live(c)
+       THEN /\ timer' = [timer EXCEPT ![c] = 0]
+            /\ cl' = [cl EXCEPT ![c].on = TRUE, ![c].age = 0,
+                                ![c].len = LeaseLen(<<rate[Leader], ClientRate>>)]
+       ELSE /\ cl' = [cl EXCEPT ![c].told = TRUE, ![c].on = FALSE, ![c].holds = 0]
+            /\ UNCHANGED timer
+    /\ UNCHANGED <<rate, boot, rose, term, lnode, holding, stalled, evicting, req, rep,
+                   tableVars, storageVars, writes, lockHolder, lockGen, budget, hist>>
+
+\* The client sends a heartbeat naming its session; it keeps one renewal outstanding,
+\* sending it again once both it and its answer are lost, and sends the next once a tick
+\* has passed since its last grant arrived (rate_gap).
 SendRenewal(c) ==
-    /\ Acting(c) /\ (cl[c].out < 0 \/ cl[c].out >= ClientRate)
+    /\ Windows /\ Acting(c)
+    /\ cl[c].out < 0 \/ ~\E m \in req \cup rep : m.c = c
     /\ cl[c].wn = 0 \/ cl[c].ra >= ClientRate
     /\ cl' = [cl EXCEPT ![c].out = 0, ![c].seq = 1 - @]
-    /\ req' = (req \ {[c |-> c, seq |-> cl[c].seq]}) \cup {[c |-> c, seq |-> 1 - cl[c].seq]}
-    /\ UNCHANGED <<leaderVars, rep, tableVars, storageVars, writes, lockHolder, lockGen,
+    \* Requests carry unique numbers, so the client ignores any answer to an older one; the
+    \* model drops those answers here and numbers requests with one bit.
+    /\ req' = {m \in req : m.c # c} \cup {[c |-> c, seq |-> 1 - cl[c].seq]}
+    /\ rep' = {m \in rep : m.c # c}
+    /\ UNCHANGED <<leaderVars, tableVars, storageVars, writes, lockHolder, lockGen,
                    budget, hist>>
 
 \* An answer to the outstanding renewal arrives. A fenced session learns it and starts
@@ -202,19 +225,22 @@ Answer(c, m) ==
        ELSE LET key == IF WindowPerBoot THEN <<m.node, m.boot>> ELSE <<"any">>
                 from == IF CountFromSend THEN cl[c].out ELSE 0
                 first == [cl[c] EXCEPT !.out = -1, !.wkey = key, !.wn = 1, !.B = None,
-                                       !.hs = cl[c].out, !.ra = 0]
-                bound == IF ~Windows THEN <<rate[m.node], ClientRate>>
+                                       !.hs = cl[c].out, !.ra = 0, !.gt = m.age]
+                \* Units the leader's clock ran between the last grant taken and this one.
+                g == Max(0, cl[c].gt - m.age) * m.rate
+                bound == IF ~Windows THEN <<m.rate, ClientRate>>
                          ELSE IF cl[c].B # None THEN cl[c].B
-                         ELSE <<m.g, cl[c].ra - cl[c].out>>
-                tripped == Windows /\ cl[c].B # None /\ m.g < Cap /\ Trips(m.g, cl[c].hs, cl[c].B)
+                         ELSE <<g, cl[c].ra - cl[c].out>>
+                tripped == Windows /\ cl[c].B # None /\ Trips(g, cl[c].hs, cl[c].B)
             IN IF Windows /\ (cl[c].wkey # key \/ cl[c].wn = 0 \/ cl[c].hs >= Cap
-                              \/ (cl[c].B = None /\ (cl[c].ra <= cl[c].out \/ m.g >= Cap)))
+                              \/ cl[c].gt >= CapT
+                              \/ (cl[c].B = None /\ cl[c].ra <= cl[c].out))
                THEN cl' = [cl EXCEPT ![c] = first] /\ UNCHANGED hist
                ELSE IF tripped
                THEN /\ cl' = [cl EXCEPT ![c] = [first EXCEPT !.on = FALSE]]
                     /\ hist' = [hist EXCEPT !.trip = TRUE]
                ELSE /\ cl' = [cl EXCEPT ![c].out = -1, ![c].wn = 2, ![c].B = bound,
-                                        ![c].hs = cl[c].out, ![c].ra = 0,
+                                        ![c].hs = cl[c].out, ![c].ra = 0, ![c].gt = m.age,
                                         ![c].on = LeaseLen(bound) > 0,
                                         ![c].age = from, ![c].len = LeaseLen(bound)]
                     /\ UNCHANGED hist
@@ -252,8 +278,8 @@ CrashClient(c) ==
 \* The control plane.
 
 \* The leader of term t processes a renewal: a fenced session hears so; a session being
-\* evicted is not renewed; any other has its timer restarted. The answer carries the units
-\* its node's clock moved since it last answered this client.
+\* evicted is not renewed; any other has its timer restarted. The answer carries the
+\* node's boot; its age in flight stands for the leader's raw clock reading it carries.
 Renew(t, m) ==
     /\ m \in req /\ t <= term
     /\ ~stalled \/ t # term
@@ -261,13 +287,11 @@ Renew(t, m) ==
     /\ LET n == lnode[t] IN
        /\ req' = req \ {m}
        /\ rep' = rep \cup {[c |-> m.c, seq |-> m.seq, node |-> n, boot |-> boot[n],
-                            g |-> gs[n][m.c], fenced |-> ~Live(m.c),
+                            age |-> 0, rate |-> rate[n], fenced |-> ~Live(m.c),
                             ok |-> Live(m.c) /\ ~(evicting[m.c] /\ EvictWaitsLease)]}
-       /\ gs' = [gs EXCEPT ![n][m.c] = 0]
        /\ IF Live(m.c) /\ ~(evicting[m.c] /\ EvictWaitsLease)
-          THEN /\ timer' = IF t = term THEN [timer EXCEPT ![m.c] = 0] ELSE timer
-               /\ since' = [since EXCEPT ![m.c] = 0]
-          ELSE UNCHANGED <<timer, since>>
+          THEN timer' = IF t = term THEN [timer EXCEPT ![m.c] = 0] ELSE timer
+          ELSE UNCHANGED timer
     /\ UNCHANGED <<cl, rate, boot, rose, term, lnode, holding, stalled, evicting, tableVars,
                    storageVars, writes, lockHolder, lockGen, budget, hist>>
 
@@ -295,7 +319,7 @@ Evict(c) ==
        ELSE /\ tver' = tver + 1
             /\ fencedAt' = [fencedAt EXCEPT ![c] = tver + 1]
             /\ hist' = [hist EXCEPT !.fenceInLease = @ \/ (Leased(c) /\ ~cl[c].stopped)]
-    /\ UNCHANGED <<cl, rate, boot, rose, gs, term, lnode, holding, stalled, timer, since,
+    /\ UNCHANGED <<cl, rate, boot, rose, term, lnode, holding, stalled, timer,
                    req, rep, acked, fage, storageVars, writes, lockHolder, lockGen>>
 
 \* Once every storage node holds the version, or is marked down, it is committed as
@@ -314,7 +338,7 @@ AckCommit ==
 LoseLease ==
     /\ holding = term /\ term < MaxTerms
     /\ holding' = 0
-    /\ UNCHANGED <<cl, rate, boot, rose, gs, term, lnode, stalled, timer, evicting, since,
+    /\ UNCHANGED <<cl, rate, boot, rose, term, lnode, stalled, timer, evicting,
                    req, rep, tableVars, storageVars, writes, lockHolder, lockGen, budget, hist>>
 
 \* A new leader is elected once no leader lease runs, on any node, and holds its lease. It
@@ -327,9 +351,9 @@ Elect(n) ==
     /\ holding' = term + 1
     /\ stalled' = FALSE
     /\ timer' = IF FullLeaseOnFailover THEN [c \in Clients |-> 0]
-                ELSE [c \in Clients |-> Sat(since[c] * rate[n])]
+                ELSE timer
     /\ evicting' = [c \in Clients |-> FALSE]
-    /\ UNCHANGED <<cl, rate, boot, rose, gs, since, req, rep, tableVars, storageVars, writes,
+    /\ UNCHANGED <<cl, rate, boot, rose, req, rep, tableVars, storageVars, writes,
                    lockHolder, lockGen, budget, hist>>
 
 \* A control-plane node reboots: a new boot, possibly at another raw rate. If it led, its
@@ -340,9 +364,8 @@ Reboot(n) ==
     /\ boot' = [boot EXCEPT ![n] = @ + 1]
     /\ \E r \in Rates : rate' = [rate EXCEPT ![n] = r]
     /\ rose' = [rose EXCEPT ![n] = FALSE]
-    /\ gs' = [gs EXCEPT ![n] = [c \in Clients |-> Cap]]
     /\ holding' = IF Leader = n THEN 0 ELSE holding
-    /\ UNCHANGED <<cl, term, lnode, stalled, timer, evicting, since, req, rep, tableVars,
+    /\ UNCHANGED <<cl, term, lnode, stalled, timer, evicting, req, rep, tableVars,
                    storageVars, writes, lockHolder, lockGen, hist>>
 
 \* A node's raw rate rises within the lease margin's headroom, as a clocksource switch or
@@ -353,7 +376,7 @@ Rise(n) ==
     /\ budget' = [budget EXCEPT !.rise = @ - 1]
     /\ rate' = [rate EXCEPT ![n] = @ + 1]
     /\ rose' = [rose EXCEPT ![n] = TRUE]
-    /\ UNCHANGED <<cl, boot, gs, term, lnode, holding, stalled, timer, evicting, since,
+    /\ UNCHANGED <<cl, boot, term, lnode, holding, stalled, timer, evicting,
                    req, rep, tableVars, storageVars, writes, lockHolder, lockGen, hist>>
 
 \* The leader's loop stalls; when it runs again it restarts every session's timer rather
@@ -362,14 +385,14 @@ Stall ==
     /\ ~stalled /\ budget.stall > 0
     /\ stalled' = TRUE
     /\ budget' = [budget EXCEPT !.stall = @ - 1]
-    /\ UNCHANGED <<cl, rate, boot, rose, gs, term, lnode, holding, timer, evicting, since,
+    /\ UNCHANGED <<cl, rate, boot, rose, term, lnode, holding, timer, evicting,
                    req, rep, tableVars, storageVars, writes, lockHolder, lockGen, hist>>
 
 Wake ==
     /\ stalled
     /\ stalled' = FALSE
     /\ timer' = [c \in Clients |-> 0]
-    /\ UNCHANGED <<cl, rate, boot, rose, gs, term, lnode, holding, evicting, since, req, rep,
+    /\ UNCHANGED <<cl, rate, boot, rose, term, lnode, holding, evicting, req, rep,
                    tableVars, storageVars, writes, lockHolder, lockGen, budget, hist>>
 
 \* A renewal or an answer is lost.
@@ -389,14 +412,14 @@ ApplyTable(s) ==
     /\ reach[s] /\ nver[s] < tver
     /\ nver' = [nver EXCEPT ![s] = tver]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nint, reach, down, unreach, intv,
-                   liveAt, activated, ctr, writes, lockHolder, lockGen, budget, hist>>
+                   liveAt, activated, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 \* A storage node the control plane reaches adopts the PG's current interval.
 AdoptInterval(s) ==
     /\ reach[s] /\ nint[s] < intv
     /\ nint' = [nint EXCEPT ![s] = intv]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, reach, down, unreach, intv,
-                   liveAt, activated, ctr, writes, lockHolder, lockGen, budget, hist>>
+                   liveAt, activated, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 \* A storage node is partitioned from the control plane, but not from clients or the
 \* other storage nodes; or the partition heals.
@@ -405,13 +428,13 @@ Partition(s) ==
     /\ reach' = [reach EXCEPT ![s] = FALSE]
     /\ budget' = [budget EXCEPT !.part = @ - 1]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, down, unreach, intv,
-                   liveAt, activated, ctr, writes, lockHolder, lockGen, hist>>
+                   liveAt, activated, ctr, app, writes, lockHolder, lockGen, hist>>
 
 Heal(s) ==
     /\ ~reach[s]
     /\ reach' = [reach EXCEPT ![s] = TRUE]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, down, unreach, intv,
-                   liveAt, activated, ctr, writes, lockHolder, lockGen, budget, hist>>
+                   liveAt, activated, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 \* After node_down_after without a heartbeat, the leader commits a down mark, which starts
 \* a new interval of the PG.
@@ -421,7 +444,7 @@ MarkDown(s) ==
     /\ intv' = intv + 1
     /\ liveAt' = [liveAt EXCEPT ![intv + 1] = Storage \ (down \cup {s})]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, reach, unreach,
-                   activated, ctr, writes, lockHolder, lockGen, budget, hist>>
+                   activated, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 \* A down node whose heartbeat reports the current session-table version is marked up, in
 \* a new interval.
@@ -432,7 +455,7 @@ MarkUp(s) ==
     /\ intv' = intv + 1
     /\ liveAt' = [liveAt EXCEPT ![intv + 1] = Storage \ (down \ {s})]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, reach, unreach,
-                   activated, ctr, writes, lockHolder, lockGen, budget, hist>>
+                   activated, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 \* The interval's primary activates it once it has peered: every interval since the last
 \* activated one had a live member adopt this one, so none of their writes can complete.
@@ -442,7 +465,7 @@ Activate ==
          \A j \in activated .. intv - 1 : liveAt[j] = {} \/ \E s \in liveAt[j] : nint[s] > j
     /\ activated' = intv
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, reach, down, unreach,
-                   intv, liveAt, ctr, writes, lockHolder, lockGen, budget, hist>>
+                   intv, liveAt, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 -----------------------------------------------------------------------------
 \* Writes and the lock.
@@ -454,7 +477,7 @@ Write(c) ==
     /\ budget.w > 0 /\ Primary(intv) # 0
     /\ budget' = [budget EXCEPT !.w = @ - 1]
     /\ writes' = writes \cup {[id |-> budget.w, c |-> c, gen |-> cl[c].holds, tag |-> intv,
-                               at |-> Primary(intv), st |-> "net", v |-> <<0, 0>>, acks |-> {}]}
+                               at |-> Primary(intv), st |-> "net", v |-> <<0, 0>>, acks |-> {}, base |-> {}]}
     /\ cl' = [cl EXCEPT ![c].inflight = @ + 1]
     /\ UNCHANGED <<leaderVars, req, rep, tableVars, storageVars, lockHolder, lockGen, hist>>
 
@@ -464,9 +487,22 @@ Arrive(w) ==
     /\ w \in writes /\ w.st = "net" /\ w.tag <= nint[w.at]
     /\ writes' = (writes \ {w}) \cup
                  {[w EXCEPT !.st = IF w.tag < nint[w.at] \/ FencedIn(nver[w.at], w.c)
-                                   THEN "stopped" ELSE "queued"]}
+                                   THEN "ended" ELSE "queued"]}
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, storageVars, lockHolder, lockGen,
                    budget, hist>>
+
+\* A write every live member of its interval holds is complete, whenever its answer then
+\* reaches the client. A completed write of an older lock generation must be ordered before
+\* every completed write of a newer one, in its version and in the history (base) its
+\* primary held when it ordered the newer one.
+Completes(w) ==
+    [hist EXCEPT
+       !.done = @ \cup {[gen |-> w.gen, v |-> w.v, id |-> w.id, base |-> w.base]},
+       !.misordered = @ \/ \E d \in hist.done :
+            \/ d.gen > w.gen /\ w.id \notin d.base
+            \/ d.gen < w.gen /\ d.id \notin w.base
+            \/ d.gen < w.gen /\ (d.v[1] > w.v[1] \/ (d.v[1] = w.v[1] /\ d.v[2] > w.v[2]))]
+Held(w, acks) == liveAt[w.tag] \ {w.at} \subseteq acks
 
 \* The primary orders a queued write in the interval it activated, checking the fence
 \* then, and applies it. A write it held across an interval change is ordered again only if
@@ -477,14 +513,20 @@ Order(w) ==
            k == nint[p]
            other == \E j \in w.tag + 1 .. k : Primary(j) \notin {0, p}
            fenced == CheckWhenOrdered /\ FencedIn(nver[p], w.c)
+           \* Peering brought every write a reached member holds into p's history; the
+           \* model takes every write any member has applied, which only weakens the check.
+           w2 == [w EXCEPT !.tag = k, !.v = <<k, ctr[k] + 1>>,
+                           !.base = UNION {app[s] : s \in Storage}]
        IN /\ Primary(k) = p /\ activated = k
           /\ IF other \/ fenced
-             THEN writes' = (writes \ {w}) \cup {[w EXCEPT !.st = "stopped"]}
-                  /\ UNCHANGED <<ctr, hist>>
+             THEN writes' = (writes \ {w}) \cup {[w EXCEPT !.st = "ended"]}
+                  /\ UNCHANGED <<ctr, app, hist>>
              ELSE /\ ctr' = [ctr EXCEPT ![k] = @ + 1]
                   /\ writes' = (writes \ {w}) \cup
-                               {[w EXCEPT !.st = "replicating", !.tag = k, !.v = <<k, ctr[k] + 1>>]}
-                  /\ hist' = [hist EXCEPT !.fencedApplied = @ \/ FencedIn(nver[p], w.c)]
+                               {[w2 EXCEPT !.st = IF Held(w2, {}) THEN "ended" ELSE "replicating"]}
+                  /\ app' = [app EXCEPT ![p] = @ \cup {w.id}]
+                  /\ LET h == IF Held(w2, {}) THEN Completes(w2) ELSE hist
+                     IN hist' = [h EXCEPT !.fencedApplied = @ \/ FencedIn(nver[p], w.c)]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, reach, down, unreach,
                    intv, liveAt, activated, lockHolder, lockGen, budget>>
 
@@ -494,29 +536,19 @@ Replicate(w, s) ==
     /\ w \in writes /\ w.st = "replicating"
     /\ s \in liveAt[w.tag] \ ({w.at} \cup w.acks) /\ w.tag <= nint[s]
     /\ IF w.tag < nint[s] \/ (ReplicaChecks /\ FencedIn(nver[s], w.c))
-       THEN writes' = (writes \ {w}) \cup {[w EXCEPT !.st = "stopped"]} /\ UNCHANGED hist
-       ELSE /\ writes' = (writes \ {w}) \cup {[w EXCEPT !.acks = @ \cup {s}]}
-            /\ hist' = [hist EXCEPT !.fencedApplied = @ \/ FencedIn(nver[s], w.c)]
-    /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, storageVars, lockHolder, lockGen,
-                   budget>>
+       THEN writes' = (writes \ {w}) \cup {[w EXCEPT !.st = "ended"]} /\ UNCHANGED <<app, hist>>
+       ELSE LET acks == w.acks \cup {s}
+                h == IF Held(w, acks) THEN Completes(w) ELSE hist
+            IN /\ writes' = (writes \ {w}) \cup
+                            {[w EXCEPT !.acks = acks, !.st = IF Held(w, acks) THEN "ended" ELSE @]}
+               /\ app' = [app EXCEPT ![s] = @ \cup {w.id}]
+               /\ hist' = [h EXCEPT !.fencedApplied = @ \/ FencedIn(nver[s], w.c)]
+    /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, reach, down, unreach,
+                   intv, liveAt, activated, ctr, lockHolder, lockGen, budget>>
 
-\* Every live member of its interval holds it: the write completes. A write of an older
-\* lock generation must not complete after, or be ordered after, a newer one's.
-Complete(w) ==
-    /\ w \in writes /\ w.st = "replicating"
-    /\ liveAt[w.tag] \ {w.at} \subseteq w.acks
-    /\ writes' = writes \ {w}
-    /\ cl' = [cl EXCEPT ![w.c].inflight = @ - 1]
-    /\ hist' = [hist EXCEPT
-                  !.done = @ \cup {[gen |-> w.gen, v |-> w.v]},
-                  !.misordered = @ \/ \E d \in hist.done :
-                       \/ d.gen > w.gen
-                       \/ d.gen < w.gen /\ (d.v[1] > w.v[1] \/ (d.v[1] = w.v[1] /\ d.v[2] > w.v[2]))]
-    /\ UNCHANGED <<leaderVars, req, rep, tableVars, storageVars, lockHolder, lockGen, budget>>
-
-\* A refused write returns to its client.
-Refused(w) ==
-    /\ w \in writes /\ w.st = "stopped"
+\* The answer to a completed or refused write returns to its client.
+Answered(w) ==
+    /\ w \in writes /\ w.st = "ended"
     /\ writes' = writes \ {w}
     /\ cl' = [cl EXCEPT ![w.c].inflight = @ - 1]
     /\ UNCHANGED <<leaderVars, req, rep, tableVars, storageVars, lockHolder, lockGen,
@@ -526,7 +558,7 @@ Refused(w) ==
 \* table (with the rule off, once its fence commits); the next holder deletes the old key.
 Grant(c) ==
     /\ WithLock /\ lockHolder # c /\ Acting(c) /\ Live(c) /\ lockGen < 2
-    /\ lockHolder = "none" \/ (IF ReleaseOnAck THEN LeftTable(lockHolder) ELSE ~Live(lockHolder))
+    /\ lockHolder = 0 \/ (IF ReleaseOnAck THEN LeftTable(lockHolder) ELSE ~Live(lockHolder))
     /\ lockHolder' = c
     /\ lockGen' = lockGen + 1
     /\ cl' = [cl EXCEPT ![c].holds = lockGen + 1]
@@ -536,7 +568,7 @@ Grant(c) ==
 
 Next ==
     \/ Tick
-    \/ \E c \in Clients : \/ SendRenewal(c) \/ Stop(c) \/ Resume(c) \/ CrashClient(c)
+    \/ \E c \in Clients : \/ SendRenewal(c) \/ RenewNow(c) \/ Stop(c) \/ Resume(c) \/ CrashClient(c)
                           \/ Evict(c) \/ Write(c) \/ Grant(c)
     \/ \E c \in Clients, m \in rep : Answer(c, m)
     \/ \E t \in 1 .. MaxTerms, m \in req : Renew(t, m)
@@ -544,7 +576,7 @@ Next ==
     \/ \E n \in Leaders : Elect(n) \/ Reboot(n) \/ Rise(n)
     \/ \E s \in Storage : \/ ApplyTable(s) \/ AdoptInterval(s) \/ Partition(s) \/ Heal(s)
                           \/ MarkDown(s) \/ MarkUp(s)
-    \/ \E w \in writes : \/ Arrive(w) \/ Order(w) \/ Complete(w) \/ Refused(w)
+    \/ \E w \in writes : \/ Arrive(w) \/ Order(w) \/ Answered(w)
                          \/ \E s \in Storage : Replicate(w, s)
 
 Spec == Init /\ [][Next]_vars
@@ -588,14 +620,12 @@ AtMostOneHolder ==
 \* stays within the margin's headroom.
 NoSpuriousTrip == ~hist.trip
 
-\* A fenced session leaves the table, and its lock is free, within a tick of its fence
-\* commit while the leader holds its lease, unless a storage node it waits for is
-\* unreachable and not yet marked down. The fence itself commits in the tick the session's
+\* A fenced session leaves the table, and its lock is free, within one tick of its fence
+\* commit (the commit, the push and an acknowledgment), not counting ticks in which the
+\* leader lacked its lease or a storage node was unreachable and not yet marked down; time
+\* cannot pass a down mark that is due. The fence itself commits in the tick the session's
 \* lease runs out on the leader's clock, since time cannot pass a fence the leader owes.
-FenceReleasedInTime ==
-    \A c \in Clients :
-        (fencedAt[c] # 0 /\ ~LeftTable(c) /\ fage[c] >= 1 /\ Active)
-            => \E s \in Storage : ~reach[s] /\ s \notin down
+FenceReleasedInTime == \A c \in Clients : fage[c] >= 1 => LeftTable(c)
 
 \* A client that crashed is eventually fenced and leaves the table (deep only).
 CrashedClientReleased == \A c \in Clients : cl[c].crashed ~> LeftTable(c)
