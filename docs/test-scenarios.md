@@ -3005,7 +3005,7 @@ Step 3, opening new handles with direct I/O, has no row: with steps 2 and 4 the 
 - `ci-failover`: 2 nodes with 1 handle each, 2 writes, 1 owner failover, 1 lost recall or acknowledgment, 1 daemon pause and 1 lease that runs out.
 - `ci-handles`: 2 nodes with up to 2 handles each, 3 writes, so old cached handles meet new ones.
 - `ci-extend`: 2 nodes with 1 handle each on a file with a region past its starting size, 2 writes.
-- `deep`: `ci` with 1 owner failover, 1 lost recall or acknowledgment, 1 daemon pause and 1 lease that runs out.
+- `deep`: `ci-failover` with 2 owner failovers. The recall model states no liveness property: a recall's end is bounded by `recall_timeout` and the session lease, which the sessions model checks.
 
 The model covers paused daemons, not suspended machines: whether the kernel's attribute timeouts hold across a machine suspend is the design's open question "FUSE timeouts across a suspend", which a spike answers.
 
