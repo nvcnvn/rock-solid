@@ -124,8 +124,8 @@ func (h *harness) take() {
 	h.out.Reset()
 }
 
-// step runs the oldest queued action and hands its completion to the store. When that ends a
-// recovery, the log must open its next segment at or past the loaded manifest's NextSeq.
+// step runs the oldest queued action and hands its completion to the store, checking the
+// open sequences on disk when that ends a recovery.
 func (h *harness) step() bool {
 	if len(h.queue) == 0 {
 		return false
@@ -148,15 +148,9 @@ func (h *harness) step() bool {
 	}
 	ev := h.disk.Execute(h.pool, &a)
 	recovering := !h.s.Serving()
-	var loaded uint64
-	if recovering && h.s.rec != nil {
-		if m, ok := h.s.rec.Manifest(); ok {
-			loaded = m.NextSeq
-		}
-	}
 	h.s.OnEvent(&h.ctx, &ev, &h.out)
-	if recovering && h.s.Serving() && h.s.Log().NextSeq() < loaded {
-		h.t.Fatalf("the recovered log opens its next segment at sequence %d, below the loaded manifest's NextSeq %d", h.s.Log().NextSeq(), loaded)
+	if recovering && h.s.Serving() {
+		checkOpenSeqs(h.t, h.disk, h.s.Log())
 	}
 	if recovering && h.s.Serving() && h.oracle != nil {
 		m, err := h.oracle.Recovered(h.s.Log().DurableLSN())
@@ -168,6 +162,19 @@ func (h *harness) step() bool {
 	h.take()
 	h.noteDurable()
 	return true
+}
+
+// checkOpenSeqs fails unless log opens its next segment past the open sequence of every segment
+// header of its own on disk, so that open sequences stay unique and increasing.
+func checkOpenSeqs(t testing.TB, disk *sim.Disk, log *disklog.Log) {
+	t.Helper()
+	sb := log.Superblock()
+	for s := uint32(1); s < sb.SegmentCount; s++ {
+		sh, err := disklog.DecodeSegmentHeader(disk.Read(sb.LBA(s, 0), 1))
+		if err == nil && sh.LogID == sb.LogID && sh.Index == s && sh.Seq >= log.NextOpenSeq() {
+			t.Fatalf("the recovered log opens its next segment at sequence %d, and segment %d's header on disk is at %d", log.NextOpenSeq(), s, sh.Seq)
+		}
+	}
 }
 
 func (h *harness) settle() {

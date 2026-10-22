@@ -1255,7 +1255,7 @@ Invariants checked after every step:
 - an orphaned inode is never freed while a live session has it open;
 - a snapshot holds every write acknowledged before its cut and none issued after, in both data and metadata;
 - a frozen version is never dropped, and the cleaner never frees a block, while the live version, a snapshot or an unflattened clone needs it;
-- every cleaner pass frees more segments than it fills, and no segment is reused while it holds a live block, or a piece, run or record that the newest manifest named by a durable segment header needs (a record after its replay points); after every recovery the next open sequence number is at least the loaded manifest's `NextSeq`, and the usage table equals the log's own;
+- every cleaner pass frees more segments than it fills, and no segment is reused while it holds a live block, or a piece, run or record that the newest manifest named by a durable segment header needs (a record after its replay points); after every recovery each chunk segment's live count in the usage table equals the blocks the index's records there refer to, and the log opens its next segment past every open sequence a segment header of this log on disk holds, so open sequences stay unique and increasing;
 - a cleaner move is applied only where a map still points at the location it copied from, live, in replay and in a rebuild, so a write that lands during cleaning is never replaced by the older copy;
 - a disk that is full except for its reserve can still finish a checkpoint, a merge step and a cleaner pass, and the bytes held beyond the manifests never exceed the reserve;
 - no ordinary write fails with `NoSpace` while the cleaner has a victim;

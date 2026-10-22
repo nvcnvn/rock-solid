@@ -220,6 +220,7 @@ func (n *node) handle(ev *disklog.Event) {
 			n.t.Fatal(err)
 		}
 		n.log, n.rec, n.recovered = log, nil, true
+		checkOpenSeqs(n.t, n.disk, log)
 	}
 }
 

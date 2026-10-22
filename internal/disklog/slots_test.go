@@ -184,9 +184,8 @@ func TestSlotSegmentTrimsArePaced(t *testing.T) {
 	h.absorb()
 	h.submit(disklog.Hot, h.write(20, 1, 20))
 	h.run()
-	wait := (h.timerAt - h.ctx.Now).Duration()
-	if len(h.trims) != 1 || h.trims[0].LBA != 8192 || wait <= 0 || wait > 125*time.Millisecond {
-		t.Fatalf("trims %+v, the timer %v away, once both slot segments are free", h.trims, wait)
+	if len(h.trims) != 1 || h.trims[0].LBA != 8192 || (h.timerAt-h.trimAt[0]).Duration() != 125*time.Millisecond {
+		t.Fatalf("trims %+v at %v, the timer at %v, once both slot segments are free", h.trims, h.trimAt, h.timerAt)
 	}
 	fire := func(at core.Tick) {
 		h.ctx.Now = at

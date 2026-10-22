@@ -87,8 +87,10 @@ type harness struct {
 	noted map[uint64]notedRound
 	// crashed is what was in flight when the last log was dropped, until a recovery settles it.
 	crashed crashedRounds
-	// trims is every TRIM the log issued, and timerAt the time its TRIM timer was last armed for.
+	// trims is every TRIM the log issued, trimAt the time it issued each, and timerAt the time its
+	// TRIM timer was last armed for.
 	trims     []core.Action
+	trimAt    []core.Tick
 	timerAt   core.Tick
 	holdTrims bool
 }
@@ -235,6 +237,7 @@ func (h *harness) absorb() {
 			h.pending = append(h.pending, pendingIO{act: a})
 			h.trace = append(h.trace, fmt.Sprintf("trim %d+%d io%d", a.LBA, a.Len/core.BlockSize, a.IO))
 			h.trims = append(h.trims, a)
+			h.trimAt = append(h.trimAt, h.ctx.Now)
 		case core.ActSetTimer:
 			h.timerAt = a.At
 		case core.ActDiskFsync:
