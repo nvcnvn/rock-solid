@@ -26,14 +26,15 @@ Branch `worktree-agent-a6296739ec2d05dec`. Delete this file before merging.
 ## Deep results so far
 
 recall/deep: depth 49, 138,142,376, 1719 s. purge/deep-list: 74, 38,193,992, 402 s.
-purge/deep-orphan: 38, 935,148, 40 s (before the Land fairness; rerun). sessions/deep-down: 50,
+purge/deep-orphan (rerun with Land fairness): 38, 935,148, 44 s. purge/deep-write: 43, 6,337,400,
+430 s. sessions/deep-down: 50,
 151,663,068, 1676 s. sessions/deep-lease: 71, 803,978,256, 4904 s. sessions/deep-terms: 50,
 81,717,036, 415 s. sessions/deep-fence: ran out of 4 GB heap in liveness at 64M states; shrunk to one
 write in flight per client (uncommitted until rerun).
 
 ## Remaining
 
-1. Rerun `purge` deep-write and deep-orphan, and `sessions` deep-fence (one TLC at a time).
+1. Rerun `sessions` deep-fence (shrunk, committed) alone.
 2. Add the deep rows to the map's configuration-results table in `docs/test-scenarios.md`
    (after the `ci-orphan` row), and update `deep-fence`'s line in the sessions Configurations list.
 3. Tick the three checklist items once their deep runs pass; delete this file; report.
