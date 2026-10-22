@@ -19,8 +19,7 @@ CONSTANTS
     Regions,        \* {0} or {0, 1}
     MaxHandles,     \* handles one node can hold open on the file
     MaxWrites, MaxFailovers, MaxLost,
-    MaxPauses, MaxLapses,  \* daemon pauses, and session leases that run out
-    MaxRecalls             \* recalls numbered while earlier ones are still in flight
+    MaxPauses, MaxLapses   \* daemon pauses, and session leases that run out
 
 CONSTANTS
     RecallFlush,            \* step 1: the recalled daemon flushes its buffered writes
@@ -29,7 +28,7 @@ CONSTANTS
     RecallReval,            \* step 4: it revalidates old handles (attribute timeout 0)
     AnswerAfterRecall,      \* the owner answers the open or write only after the recall
     NoTimeoutAnswer,        \* a recall ends only by an acknowledgment or a fence
-    RecallIds,              \* an acknowledgment counts only for the recall and term it names
+    AckNamesTerm,           \* an acknowledgment counts only in the owner term it names
     AttrWithinLease,        \* no attribute timeout reaches past the session lease
     EvictWaitsLease,        \* an eviction fences only once the session's lease ran out
     GraceBlocksOpens,       \* the new owner takes no new opens or writes in its grace period
@@ -37,7 +36,8 @@ CONSTANTS
     ReregCarriesWrote,      \* a re-registration says whether the node has written
     StayWriteShared,        \* WriteShared ends only when one node still has the file open
     SizeBeforeAck,          \* an extending write commits the size before it is acknowledged
-    KeepCacheCheck          \* Tier 1: an open drops pages if the file changed since cached
+    KeepCacheCheck,         \* Tier 1: an open drops pages if the file changed since cached
+    OpenRecallsHolder       \* a second node's open of an Exclusive file recalls the holder
 
 NoPage == -1
 Max(a, b) == IF a >= b THEN a ELSE b
@@ -51,11 +51,11 @@ ModeOf(M, W) == IF M = {} THEN "none" ELSE IF Cardinality(M) = 1 THEN "Ex"
 VARIABLES
     store, size,        \* storage: per region the stored write, and the committed size
     sizeq,              \* (not SizeBeforeAck) extensions acknowledged, size not yet committed
-    members, wrote,     \* the owner's open registry: nodes with the file open, and writers
+    members, wrote,     \* the owner's open registry: nodes with the file open, and those
+                        \* known to have written
     mode,               \* the owner's cache mode: "none", "Ex", "RS" or "WS"
     pend,               \* the open or first write waiting on a recall, or <<>>
     epoch, grace,       \* the owner's term, and whether it is in its grace period
-    nextId,             \* the next recall number
     rmsg, amsg,         \* recalls and acknowledgments in flight
     hc, hd,             \* per node, cached and direct-I/O handles open
     pc, attr,           \* per node, the kernel's pages and whether it trusts its attributes
@@ -69,7 +69,7 @@ VARIABLES
     budget,             \* writes, failovers and lost messages left
     hist                \* history: acked and failed writes, close and open floors, flags
 
-vars == <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, nextId, rmsg, amsg,
+vars == <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, rmsg, amsg,
           hc, hd, pc, attr, dflags, buf, iw, oq, wq, lease, paused, evicted, fenced, rereg,
           budget, hist>>
 
@@ -78,7 +78,7 @@ Init ==
     /\ size = 1
     /\ sizeq = {}
     /\ members = {} /\ wrote = {} /\ mode = "none" /\ pend = <<>>
-    /\ epoch = 1 /\ grace = FALSE /\ nextId = 1
+    /\ epoch = 1 /\ grace = FALSE
     /\ rmsg = {} /\ amsg = {}
     /\ hc = [n \in Nodes |-> 0] /\ hd = [n \in Nodes |-> 0]
     /\ pc = [n \in Nodes |-> [r \in Regions |-> NoPage]]
@@ -141,7 +141,7 @@ ReadCached(n, r) ==
             /\ Check(n, r, DV(n, r))
             /\ pc' = [pc EXCEPT ![n] = [Fresh(n) EXCEPT ![r] = DV(n, r)]]
             /\ attr' = [attr EXCEPT ![n] = ~dflags[n].reval]
-    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, nextId, rmsg,
+    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, rmsg,
                    amsg, hc, hd, dflags, buf, iw, oq, wq, lease, paused, evicted, fenced, rereg,
                    budget>>
 
@@ -149,14 +149,11 @@ ReadCached(n, r) ==
 ReadDirect(n, r) ==
     /\ hd[n] > 0 /\ Serving(n)
     /\ Check(n, r, DV(n, r))
-    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, nextId, rmsg,
+    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, rmsg,
                    amsg, hc, hd, pc, attr, dflags, buf, iw, oq, wq, lease, paused, evicted,
                    fenced, rereg, budget>>
 
 OwnerFree == ~grace \/ ~GraceBlocksOpens
-\* The next recall's number. Numbering starts again once no recall or acknowledgment is in
-\* flight, which keeps the state finite and changes nothing a node or the owner can see.
-Rid == IF rmsg = {} /\ amsg = {} THEN 1 ELSE nextId
 
 \* A handle opened in mode m: cached unless m is WriteShared; a cached open drops the
 \* pages of a file that changed since this node cached it (Tier 1). Attributes come back
@@ -175,22 +172,22 @@ Opened(n, m, firstOpen) ==
                ELSE hist
 
 \* open() of the file's first handle on n registers with the owner. A second node's open
-\* of a file another node has written waits on a recall; otherwise the owner answers with
-\* the mode at once.
+\* of an Exclusive file recalls the holder, whose first write the owner has not seen, and
+\* one of a file another node is known to have written recalls it; the open waits for the
+\* recall. Otherwise the owner answers with the mode at once.
 OpenFirst(n) ==
     /\ hc[n] + hd[n] = 0 /\ Serving(n) /\ OwnerFree /\ pend = <<>> /\ ~rereg[n]
     /\ LET M == members \cup {n}
-           holders == {m \in Others(n) : m \in wrote}
+           holders == {m \in Others(n) : m \in wrote \/ (OpenRecallsHolder /\ mode = "Ex")}
        IN IF holders = {} \/ mode = "WS"
           THEN /\ members' = M
                /\ mode' = ModeOf(M, wrote)
                /\ Opened(n, ModeOf(M, wrote), TRUE)
                /\ oq' = [oq EXCEPT ![n] = FALSE]
-               /\ UNCHANGED <<pend, nextId, rmsg>>
+               /\ UNCHANGED <<pend, rmsg>>
           ELSE /\ pend' = [kind |-> "open", n |-> n, r |-> 0,
-                           ids |-> [m \in Others(n) |-> Rid]]
-               /\ rmsg' = rmsg \cup {[to |-> m, ep |-> epoch, id |-> Rid] : m \in Others(n)}
-               /\ nextId' = Rid + 1 /\ Rid <= MaxRecalls
+                           wait |-> Others(n)]
+               /\ rmsg' = rmsg \cup {[to |-> m, ep |-> epoch, q |-> mode = "Ex"] : m \in Others(n)}
                /\ oq' = [oq EXCEPT ![n] = TRUE]
                /\ IF AnswerAfterRecall
                   THEN UNCHANGED <<members, mode, hc, hd, pc, attr, dflags, hist>>
@@ -205,7 +202,7 @@ OpenMore(n) ==
     /\ IF dflags[n].direct
        THEN hd' = [hd EXCEPT ![n] = @ + 1] /\ UNCHANGED hc
        ELSE hc' = [hc EXCEPT ![n] = @ + 1] /\ UNCHANGED hd
-    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, nextId, rmsg,
+    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, rmsg,
                    amsg, pc, attr, dflags, buf, iw, oq, wq, lease, paused, evicted, fenced,
                    rereg, budget, hist>>
 
@@ -229,19 +226,20 @@ DoWrite(n, r, cachedHandle, buffered) ==
                                !.bufd[n] = IF buffered THEN @ \cup {id} ELSE @]
 
 \* write(): a node's first write to the file registers with the owner, which in
-\* ReadShared first recalls every other member; later writes go straight on.
+\* ReadShared first recalls every other member; later writes go straight on, and so does
+\* a first write while the daemon holds the file Exclusive (a recall asks it later).
 Write(n, r) ==
     /\ hc[n] + hd[n] > 0 /\ Serving(n) /\ budget.w > 0 /\ wq[n] = NoPage
     /\ \E cachedHandle \in {b \in BOOLEAN : IF b THEN hc[n] > 0 ELSE hd[n] > 0} :
-       IF iw[n]
+       IF iw[n] \/ dflags[n].buffer
        THEN /\ DoWrite(n, r, cachedHandle, dflags[n].buffer)
-            /\ UNCHANGED <<members, wrote, mode, pend, nextId, rmsg, dflags, iw, wq, attr>>
+            /\ iw' = [iw EXCEPT ![n] = TRUE]
+            /\ UNCHANGED <<members, wrote, mode, pend, rmsg, dflags, wq, attr>>
        ELSE /\ OwnerFree /\ pend = <<>> /\ ~rereg[n]
             /\ IF mode = "RS" /\ Others(n) # {}
                THEN /\ pend' = [kind |-> "write", n |-> n, r |-> r,
-                                ids |-> [m \in Others(n) |-> Rid]]
-                    /\ rmsg' = rmsg \cup {[to |-> m, ep |-> epoch, id |-> Rid] : m \in Others(n)}
-                    /\ nextId' = Rid + 1 /\ Rid <= MaxRecalls
+                                wait |-> Others(n)]
+                    /\ rmsg' = rmsg \cup {[to |-> m, ep |-> epoch, q |-> FALSE] : m \in Others(n)}
                     /\ IF AnswerAfterRecall
                        THEN /\ wq' = [wq EXCEPT ![n] = r]
                             /\ UNCHANGED <<members, wrote, mode, dflags, iw, pc, attr, buf,
@@ -258,7 +256,7 @@ Write(n, r) ==
                        /\ attr' = IF m = "WS" THEN [attr EXCEPT ![n] = FALSE] ELSE attr
                        /\ iw' = [iw EXCEPT ![n] = TRUE]
                        /\ DoWrite(n, r, cachedHandle, m = "Ex")
-                    /\ UNCHANGED <<members, mode, pend, nextId, rmsg, wq>>
+                    /\ UNCHANGED <<members, mode, pend, rmsg, wq>>
     /\ UNCHANGED <<epoch, grace, amsg, hc, hd, oq, lease, paused, evicted, fenced, rereg>>
 
 \* (not SizeBeforeAck) the size of an acknowledged extension is committed.
@@ -266,7 +264,7 @@ CommitSize(r) ==
     /\ r \in sizeq
     /\ size' = Max(size, r + 1)
     /\ sizeq' = sizeq \ {r}
-    /\ UNCHANGED <<store, members, wrote, mode, pend, epoch, grace, nextId, rmsg, amsg, hc, hd,
+    /\ UNCHANGED <<store, members, wrote, mode, pend, epoch, grace, rmsg, amsg, hc, hd,
                    pc, attr, dflags, buf, iw, oq, wq, lease, paused, evicted, fenced, rereg,
                    budget, hist>>
 
@@ -294,59 +292,69 @@ Close(n) ==
                            Max(@[r], SetMax({w.id : w \in {x \in hist.acked : x.n = n /\ x.r = r}}))],
                                     !.wr[n] = FALSE, !.bufd[n] = {}]
        ELSE UNCHANGED <<store, size, buf, members, wrote, mode, iw, hist>>
-    /\ UNCHANGED <<sizeq, pend, epoch, grace, nextId, rmsg, amsg, pc, attr, dflags, oq, wq,
+    /\ UNCHANGED <<sizeq, pend, epoch, grace, rmsg, amsg, pc, attr, dflags, oq, wq,
                    lease, paused, evicted, fenced, rereg, budget>>
 
 -----------------------------------------------------------------------------
 \* Recalls.
 
 \* The recalled daemon flushes its buffer, drops the kernel's pages and attributes, opens
-\* the file with direct I/O from now on and revalidates its old handles, then acknowledges.
+\* the file with direct I/O from now on and revalidates its old handles, then acknowledges,
+\* saying whether it has written. Recalled from Exclusive by a second open, a daemon that
+\* has not written only stops buffering, so that its first write registers, and keeps its
+\* cache: the file becomes ReadShared.
 Recalled(n, msg) ==
     /\ msg \in rmsg /\ msg.to = n /\ Serving(n)
     /\ rmsg' = rmsg \ {msg}
-    /\ IF RecallFlush THEN FlushBuf(n) ELSE UNCHANGED <<store, size, buf>>
-    /\ pc' = IF RecallDrop THEN [pc EXCEPT ![n] = [r \in Regions |-> NoPage]] ELSE pc
-    /\ attr' = IF RecallDrop THEN [attr EXCEPT ![n] = FALSE] ELSE attr
-    /\ dflags' = [dflags EXCEPT ![n] = [buffer |-> FALSE,
-                                        direct |-> RecallDirect \/ @.direct,
-                                        reval |-> RecallReval \/ @.reval]]
-    /\ amsg' = amsg \cup {[from |-> n, ep |-> msg.ep, id |-> msg.id]}
+    /\ LET full == ~msg.q \/ iw[n]
+       IN /\ IF RecallFlush THEN FlushBuf(n) ELSE UNCHANGED <<store, size, buf>>
+          /\ pc' = IF RecallDrop /\ full THEN [pc EXCEPT ![n] = [r \in Regions |-> NoPage]] ELSE pc
+          /\ attr' = IF RecallDrop /\ full THEN [attr EXCEPT ![n] = FALSE] ELSE attr
+          /\ dflags' = [dflags EXCEPT ![n] = [buffer |-> FALSE,
+                                              direct |-> (RecallDirect /\ full) \/ @.direct,
+                                              reval |-> (RecallReval /\ full) \/ @.reval]]
+    /\ amsg' = amsg \cup {[from |-> n, ep |-> msg.ep, wrote |-> iw[n]]}
     /\ hist' = IF RecallFlush THEN [hist EXCEPT !.bufd[n] = {}] ELSE hist
-    /\ UNCHANGED <<sizeq, members, wrote, mode, pend, epoch, grace, nextId, hc, hd, iw, oq, wq,
+    /\ UNCHANGED <<sizeq, members, wrote, mode, pend, epoch, grace, hc, hd, iw, oq, wq,
                    lease, paused, evicted, fenced, rereg, budget>>
 
-\* The owner takes an acknowledgment for the recall it names, from its own term.
+\* The owner counts an acknowledgment from a node it waits on only if it names the owner's
+\* own term: the owner keeps one recall per file pending, so within its term no other
+\* recall's acknowledgment can arrive. It records whether the node, if it still has the
+\* file open, has written.
 AckRecv(a) ==
     /\ a \in amsg
     /\ amsg' = amsg \ {a}
-    /\ pend' = IF /\ pend # <<>> /\ a.from \in DOMAIN pend.ids
-                  /\ (~RecallIds \/ (a.ep = epoch /\ pend.ids[a.from] = a.id))
-               THEN [pend EXCEPT !.ids = [m \in DOMAIN @ \ {a.from} |-> @[m]]]
-               ELSE pend
-    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, epoch, grace, nextId, rmsg, hc, hd,
+    /\ LET counts == /\ pend # <<>> /\ a.from \in pend.wait
+                     /\ (~AckNamesTerm \/ a.ep = epoch)
+       IN /\ pend' = IF counts THEN [pend EXCEPT !.wait = @ \ {a.from}]
+                     ELSE pend
+          /\ wrote' = IF counts /\ a.wrote /\ a.from \in members THEN wrote \cup {a.from} ELSE wrote
+    /\ UNCHANGED <<store, size, sizeq, members, mode, epoch, grace, rmsg, hc, hd,
                    pc, attr, dflags, buf, iw, oq, wq, lease, paused, evicted, fenced, rereg,
                    budget, hist>>
 
 \* (not NoTimeoutAnswer) the owner counts a recall as answered after a timeout alone.
 TimeoutAnswer(m) ==
-    /\ ~NoTimeoutAnswer /\ pend # <<>> /\ m \in DOMAIN pend.ids
-    /\ pend' = [pend EXCEPT !.ids = [x \in DOMAIN @ \ {m} |-> @[x]]]
-    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, epoch, grace, nextId, rmsg, amsg,
+    /\ ~NoTimeoutAnswer /\ pend # <<>> /\ m \in pend.wait
+    /\ pend' = [pend EXCEPT !.wait = @ \ {m}]
+    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, epoch, grace, rmsg, amsg,
                    hc, hd, pc, attr, dflags, buf, iw, oq, wq, lease, paused, evicted, fenced,
                    rereg, budget, hist>>
 
-\* Every recall answered: the file is WriteShared, and the open or write goes on.
+\* Every recall answered: the open or write goes on, and the file is WriteShared once a
+\* member has written.
 Complete ==
-    /\ pend # <<>> /\ DOMAIN pend.ids = {}
+    /\ pend # <<>> /\ pend.wait = {}
     /\ pend' = <<>>
     /\ LET n == pend.n IN
        IF pend.kind = "open"
        THEN /\ oq' = [oq EXCEPT ![n] = FALSE]
             /\ IF AnswerAfterRecall /\ ~fenced[n]
                THEN /\ Serving(n)
-                    /\ members' = members \cup {n} /\ mode' = "WS"
-                    /\ Opened(n, "WS", TRUE)
+                    /\ members' = members \cup {n}
+                    /\ mode' = ModeOf(members \cup {n}, wrote)
+                    /\ Opened(n, ModeOf(members \cup {n}, wrote), TRUE)
                ELSE UNCHANGED <<members, mode, hc, hd, pc, attr, dflags, hist>>
             /\ UNCHANGED <<wrote, iw, wq, store, size, sizeq, buf, budget>>
        ELSE /\ wq' = [wq EXCEPT ![n] = NoPage]
@@ -360,7 +368,7 @@ Complete ==
                          DoWrite(n, pend.r, cachedHandle, FALSE)
                ELSE UNCHANGED <<wrote, mode, dflags, attr, iw, store, size, sizeq, buf, pc, budget, hist>>
             /\ UNCHANGED <<members, oq, hc, hd>>
-    /\ UNCHANGED <<epoch, grace, nextId, rmsg, amsg, lease, paused, evicted, fenced, rereg>>
+    /\ UNCHANGED <<epoch, grace, rmsg, amsg, lease, paused, evicted, fenced, rereg>>
 
 \* A recall or an acknowledgment is lost.
 Lose ==
@@ -368,7 +376,7 @@ Lose ==
     /\ \/ \E m \in rmsg : rmsg' = rmsg \ {m} /\ UNCHANGED amsg
        \/ \E a \in amsg : amsg' = amsg \ {a} /\ UNCHANGED rmsg
     /\ budget' = [budget EXCEPT !.l = @ - 1]
-    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, nextId, hc, hd,
+    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, hc, hd,
                    pc, attr, dflags, buf, iw, oq, wq, lease, paused, evicted, fenced, rereg, hist>>
 
 -----------------------------------------------------------------------------
@@ -379,7 +387,7 @@ Pause(n) ==
     /\ IF paused[n] THEN UNCHANGED budget
        ELSE budget.p > 0 /\ budget' = [budget EXCEPT !.p = @ - 1]
     /\ paused' = [paused EXCEPT ![n] = ~@]
-    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, nextId, rmsg,
+    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, rmsg,
                    amsg, hc, hd, pc, attr, dflags, buf, iw, oq, wq, lease, evicted, fenced,
                    rereg, hist>>
 
@@ -391,7 +399,7 @@ LeaseEnd(n) ==
     /\ budget' = [budget EXCEPT !.x = @ - 1]
     /\ lease' = [lease EXCEPT ![n] = FALSE]
     /\ attr' = IF AttrWithinLease THEN [attr EXCEPT ![n] = FALSE] ELSE attr
-    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, nextId, rmsg,
+    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, rmsg,
                    amsg, hc, hd, pc, dflags, buf, iw, oq, wq, paused, evicted, fenced, rereg,
                    hist>>
 
@@ -400,16 +408,16 @@ Renew(n) ==
     /\ ~lease[n] /\ ~paused[n] /\ ~evicted[n] /\ ~fenced[n]
     /\ lease' = [lease EXCEPT ![n] = TRUE]
     /\ pc' = [pc EXCEPT ![n] = [r \in Regions |-> NoPage]]
-    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, nextId, rmsg,
+    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, rmsg,
                    amsg, hc, hd, attr, dflags, buf, iw, oq, wq, paused, evicted, fenced, rereg,
                    budget, hist>>
 
 \* The owner asks the control plane to evict a member that left a recall unanswered for
 \* recall_timeout; the control plane stops renewing its session.
 Evict(n) ==
-    /\ pend # <<>> /\ n \in DOMAIN pend.ids /\ ~evicted[n]
+    /\ pend # <<>> /\ n \in pend.wait /\ ~evicted[n]
     /\ evicted' = [evicted EXCEPT ![n] = TRUE]
-    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, nextId, rmsg,
+    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, rmsg,
                    amsg, hc, hd, pc, attr, dflags, buf, iw, oq, wq, lease, paused, fenced,
                    rereg, budget, hist>>
 
@@ -424,10 +432,10 @@ Fence(n) ==
            W == wrote \ {n}
        IN /\ members' = M /\ wrote' = W
           /\ mode' = AfterLeave(M, W)
-    /\ pend' = IF pend # <<>> /\ n \in DOMAIN pend.ids
-               THEN [pend EXCEPT !.ids = [m \in DOMAIN @ \ {n} |-> @[m]]] ELSE pend
+    /\ pend' = IF pend # <<>> /\ n \in pend.wait
+               THEN [pend EXCEPT !.wait = @ \ {n}] ELSE pend
     /\ hist' = [hist EXCEPT !.failed = @ \cup hist.bufd[n], !.bufd[n] = {}]
-    /\ UNCHANGED <<store, size, sizeq, epoch, grace, nextId, rmsg, amsg, hc, hd, pc, attr,
+    /\ UNCHANGED <<store, size, sizeq, epoch, grace, rmsg, amsg, hc, hd, pc, attr,
                    dflags, buf, iw, oq, wq, lease, paused, evicted, rereg, budget>>
 
 \* The owner fails over: its registry and any recall in progress are lost, and the new
@@ -442,7 +450,7 @@ OwnerFailover ==
     /\ rereg' = [n \in Nodes |-> Open(n) /\ ~fenced[n]]
     /\ oq' = [n \in Nodes |-> FALSE]
     /\ wq' = [n \in Nodes |-> NoPage]
-    /\ UNCHANGED <<store, size, sizeq, nextId, rmsg, hc, hd, pc, attr, dflags, buf, iw,
+    /\ UNCHANGED <<store, size, sizeq, rmsg, hc, hd, pc, attr, dflags, buf, iw,
                    lease, paused, evicted, fenced, hist>>
 
 \* A node re-registers its open file with the new owner, with whether it has written.
@@ -452,7 +460,7 @@ Reregister(n) ==
     /\ members' = members \cup {n}
     /\ wrote' = IF iw[n] /\ ReregCarriesWrote THEN wrote \cup {n} ELSE wrote
     /\ mode' = IF grace THEN mode ELSE ModeOf(members', wrote')
-    /\ UNCHANGED <<store, size, sizeq, pend, epoch, grace, nextId, rmsg, amsg, hc, hd, pc, attr,
+    /\ UNCHANGED <<store, size, sizeq, pend, epoch, grace, rmsg, amsg, hc, hd, pc, attr,
                    dflags, buf, iw, oq, wq, lease, paused, evicted, fenced, budget, hist>>
 
 \* The grace period ends once every session that had the file open re-registered or was
@@ -462,7 +470,7 @@ EndGrace ==
     /\ GraceUntilReregistered => \A n \in Nodes : ~rereg[n] \/ fenced[n]
     /\ grace' = FALSE
     /\ mode' = ModeOf(members, wrote)
-    /\ UNCHANGED <<store, size, sizeq, members, wrote, pend, epoch, nextId, rmsg, amsg, hc, hd,
+    /\ UNCHANGED <<store, size, sizeq, members, wrote, pend, epoch, rmsg, amsg, hc, hd,
                    pc, attr, dflags, buf, iw, oq, wq, lease, paused, evicted, fenced, rereg,
                    budget, hist>>
 
@@ -470,7 +478,7 @@ EndGrace ==
 AttrExpire(n) ==
     /\ attr[n]
     /\ attr' = [attr EXCEPT ![n] = FALSE]
-    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, nextId, rmsg,
+    /\ UNCHANGED <<store, size, sizeq, members, wrote, mode, pend, epoch, grace, rmsg,
                    amsg, hc, hd, pc, dflags, buf, iw, oq, wq, lease, paused, evicted, fenced,
                    rereg, budget, hist>>
 
