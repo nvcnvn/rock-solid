@@ -111,6 +111,7 @@ struct Cfg {
     whole_f: f64,
     whole_w: f64,
     whole_stream: usize,
+    pin_hdr: bool,
     file_chunks: u32,
     writers: u32,
     // Q15
@@ -145,7 +146,7 @@ impl Cfg {
         let known = [
             "wl", "u", "pol", "streams", "sep", "seg_mb", "segs", "disk_gb", "rec_kb", "io_kb", "headers", "entry_b",
             "crc_b", "warm", "windows", "win", "free_low", "batch", "age_cap", "hot_w", "hot_f", "theta", "seed", "tag",
-            "slots", "slot_hdr_in_log", "whole_f", "whole_w", "whole_stream", "file_chunks", "writers", "meta",
+            "slots", "slot_hdr_in_log", "whole_f", "whole_w", "whole_stream", "pin_hdr", "file_chunks", "writers", "meta",
             "raft_ratio", "meta_state_ratio", "meta_live", "idx_entry_b", "ckpt_mb", "man_row_b", "small_run_kb",
             "raft_stream", "run_stream", "meta_reserve", "compaction",
         ];
@@ -193,6 +194,7 @@ impl Cfg {
             whole_f: f("whole_f", "0.5"),
             whole_w: f("whole_w", "0.5"),
             whole_stream: get("whole_stream", "0").parse().unwrap(),
+            pin_hdr: get("pin_hdr", "0") == "1",
             file_chunks: get("file_chunks", "16").parse().unwrap(),
             writers: get("writers", "1").parse().unwrap(),
             meta: get("meta", "0") == "1",
@@ -384,6 +386,7 @@ struct Sim {
     chunk_hdr_blob: Vec<u32>,
     whole_chunks: u32,
     whole_stream: usize,
+    pin_hdr: bool,
     // meta
     meta: bool,
     raft_stream: usize,
@@ -465,6 +468,7 @@ impl Sim {
             chunk_hdr_blob: vec![INVALID; whole_chunks as usize],
             whole_chunks,
             whole_stream: cfg.whole_stream,
+            pin_hdr: cfg.pin_hdr,
             meta: cfg.meta,
             raft_stream: cfg.raft_stream,
             run_stream: cfg.run_stream,
@@ -523,7 +527,7 @@ impl Sim {
         self.live_total -= 1;
         if id >= BLOB_BASE {
             let bl = self.bb_blob[(id - BLOB_BASE) as usize];
-            if self.blobs[bl as usize].as_ref().unwrap().kind == Kind::Raft || (PIN.with(|p| p.get()) && self.blobs[bl as usize].as_ref().unwrap().kind == Kind::SlotHdr) {
+            if self.blobs[bl as usize].as_ref().unwrap().kind == Kind::Raft || (self.pin_hdr && self.blobs[bl as usize].as_ref().unwrap().kind == Kind::SlotHdr) {
                 self.raftlive[seg] -= 1;
             }
         }
@@ -573,7 +577,7 @@ impl Sim {
             }
             self.bb_slot[i] = slot;
             let bl = self.bb_blob[i];
-            if self.blobs[bl as usize].as_ref().unwrap().kind == Kind::Raft || (PIN.with(|p| p.get()) && self.blobs[bl as usize].as_ref().unwrap().kind == Kind::SlotHdr) {
+            if self.blobs[bl as usize].as_ref().unwrap().kind == Kind::Raft || (self.pin_hdr && self.blobs[bl as usize].as_ref().unwrap().kind == Kind::SlotHdr) {
                 self.raftlive[(slot / b) as usize] += 1;
             }
         }
@@ -1402,7 +1406,7 @@ fn run(cfg: &Cfg) {
     let runs_idx = sim.idx.runs.len();
     let runs_mst = sim.mst.runs.len();
     println!(
-        "RUN tag={} wl={} u={:.3} pol={} sep={:?} streams={} seg_mb={} segs={} disk_gb={:.0} rec_kb={} io_kb={} slots={} slot_hdr_in_log={} whole_f={} whole_w={} whole_stream={} file_chunks={} writers={} meta={} raft_ratio={} meta_live={} raft_stream={} run_stream={} compaction={} hot={}/{} | wa={:.4} chunk_wa={:.4} copies_per_user={:.4} hdr_per_user={:.4} raft_per_user={:.4} runflush_per_user={:.4} runcompact_per_user={:.4} manifest_per_user={:.4} blobmove_per_user={:.4} slothdr_per_user={:.4} idx_user_entries_per_write={:.4} idx_clean_entries_per_user={:.4} victim_u={:.4} u_data={:.4} u_total={:.4} avg_free={:.1} slot_segs={:.1} slot_occ={:.4} ell={:.0} runs={}/{} windows=[{}] spread={:.4} steady={} secs={:.1}",
+        "RUN tag={} wl={} u={:.3} pol={} sep={:?} streams={} seg_mb={} segs={} disk_gb={:.0} rec_kb={} io_kb={} slots={} slot_hdr_in_log={} whole_f={} whole_w={} whole_stream={} pin_hdr={} file_chunks={} writers={} meta={} raft_ratio={} meta_live={} raft_stream={} run_stream={} compaction={} hot={}/{} | wa={:.4} chunk_wa={:.4} copies_per_user={:.4} hdr_per_user={:.4} raft_per_user={:.4} runflush_per_user={:.4} runcompact_per_user={:.4} manifest_per_user={:.4} blobmove_per_user={:.4} slothdr_per_user={:.4} idx_user_entries_per_write={:.4} idx_clean_entries_per_user={:.4} victim_u={:.4} u_data={:.4} u_total={:.4} avg_free={:.1} slot_segs={:.1} slot_occ={:.4} ell={:.0} runs={}/{} windows=[{}] spread={:.4} steady={} secs={:.1}",
         cfg.tag,
         cfg.wl,
         cfg.u,
@@ -1422,6 +1426,7 @@ fn run(cfg: &Cfg) {
         cfg.whole_f,
         cfg.whole_w,
         cfg.whole_stream,
+        u8::from(cfg.pin_hdr),
         cfg.file_chunks,
         cfg.writers,
         u8::from(cfg.meta),
@@ -1459,7 +1464,7 @@ fn run(cfg: &Cfg) {
         t0.elapsed().as_secs_f64()
     );
     let lane_segs = if m.lane_samples > 0 { m.lane_segs_sum as f64 / m.lane_samples as f64 } else { 0.0 };
-    println!("LANE tag={} whole_stream={} pin_hdr={} lane_segs={:.2} lane_share={:.5} wa={:.4}", cfg.tag, cfg.whole_stream, PIN.with(|p| p.get()), lane_segs, lane_segs / sim.s as f64, wa);
+    println!("LANE tag={} whole_stream={} pin_hdr={} lane_segs={:.2} lane_share={:.5} wa={:.4}", cfg.tag, cfg.whole_stream, u8::from(cfg.pin_hdr), lane_segs, lane_segs / sim.s as f64, wa);
 }
 
 fn main() {
@@ -1467,4 +1472,3 @@ fn main() {
     run(&Cfg::parse(&args));
 }
 
-thread_local!{ static PIN: std::cell::Cell<bool> = std::cell::Cell::new(std::env::var("PIN_HDR").is_ok()); }

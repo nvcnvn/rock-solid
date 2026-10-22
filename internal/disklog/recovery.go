@@ -259,7 +259,7 @@ type Recovery struct {
 	pastGaps   bool
 }
 
-// Recover starts recovering the log on a disk of diskBlocks blocks, with IO IDs counting up from firstIO, taking its read buffers from the pool at once and a window for each lane past the hot and cold ones when Replay starts.
+// Recover starts recovering the log on a disk of diskBlocks blocks, with IO IDs counting up from firstIO, taking its read buffers from the pool at once and a window for each lane past the hot and slot ones when Replay starts.
 func Recover(ctx *core.Context, cfg Config, diskBlocks uint64, mode Mode, firstIO core.IOID, out *Output) (*Recovery, error) {
 	maxRec := cfg.MaxRecordBytes / core.BlockSize
 	if cfg.CommitDepth < 1 || cfg.ReadDepth < 1 || maxRec < 3 || (mode != ModeOpen && mode != ModeRebuild) || diskBlocks == 0 || !cfg.settled() {

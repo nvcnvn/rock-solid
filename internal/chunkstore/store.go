@@ -1148,7 +1148,7 @@ func (s *Store) itemDone(oi int32) bool {
 	cs := &s.chunks[o.chunk]
 	if o.err != nil {
 		// The writes ordered after a failed one may hold its bytes; the log fails them too, since
-		// it fails a lane's queued items together in submit order.
+		// it fails a stalled lane's queued items together in submit order, both hot lanes' at once.
 		if !o.holdsVersion() {
 			cs.version = min(cs.version, o.prevVer)
 		}

@@ -1813,7 +1813,7 @@ manifest, written or in flight, segment headers and the checkpoint's own records
   then appends at LBA 67.
 - Merge pieces go out past the hold behind a checkpoint and may open a segment of the reserve
   (Checkpoint backpressure, Segment reserve).
-- Replay allocates a window for each lane past the hot and cold ones: a pool with room for only
+- Replay allocates a window for each lane past the hot and slot ones: a pool with room for only
   one of the two that a log with a checkpoint and a merge lane needs fails recovery with
   PoolExhausted and leaves no buffer allocated; with room for both it opens.
 - Recovery reads each lane from the last of its segments whose first record is at or before the
@@ -1913,6 +1913,11 @@ on the 1 GiB disk one capacity is 262,144 blocks):
   disk reaches zero free segments; before this check every later write started a pass whose
   copies found no room, copied 10 blocks for nothing and failed. Now a write that finds no room
   fails with NoSpace with nothing copied, under overwrites and once new blocks fill the disk.
+- A stall on either hot lane fails both hot queues in submit order: with the shared hot lane out of
+  room, a freeze and the slot write after it both fail; with the slot lane unable to open a segment
+  outside the reserve and the cleaner's only victim quarantined, a whole chunk and the small write
+  of the same chunk after it both fail with NoSpace, and the chunk's next write gets a newer
+  version.
 - A slot write's record goes alone to the hot stream's slot lane, so slot headers share segments
   only with each other: six whole chunks written among overwrites of a small chunk leave their
   headers in one slot-lane segment that holds nothing else, and no other segment holds a slot

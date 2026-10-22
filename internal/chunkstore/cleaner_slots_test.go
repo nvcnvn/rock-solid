@@ -125,3 +125,64 @@ func TestSlotHeadersShareSegmentsOnlyWithSlotHeaders(t *testing.T) {
 		}
 	}
 }
+
+// A whole chunk that waits for the slot lane to open a segment, with only the reserve left, fails
+// with NoSpace together with the small write of the same chunk submitted after it, which the hot
+// lane had room for: had the small write become durable, the store would give the chunk back the
+// version before the whole chunk's, below the durable one, and hand it out again. The writes wait
+// while the cleaner holds a victim, half live, whose job the test damages, so the victim is
+// quarantined and the cleaner is left with none.
+func TestAStalledSlotWriteFailsTheHotWritesAfterIt(t *testing.T) {
+	cfg := testConfig()
+	cfg.Log.NoReserve, cfg.Log.Reserve = false, 2
+	cfg.Log.MaxReplayBytes = 256 * core.BlockSize
+	cfg.CleanFree = -1
+	geo := disklog.Geometry{SegmentBlocks: 4096, SegmentCount: 16}
+	h := newHarnessOn(t, cfg, geo)
+	o := newByteOracle()
+	for i := uint32(0); h.s.Log().FreeSegments() != cfg.Log.Reserve+1; i++ {
+		if i == 2000 {
+			t.Fatal("the disk never came down to one segment past its reserve")
+		}
+		c, off, data := chunk(200+i/16), (i%16)*64*core.BlockSize, fill(64*core.BlockSize, byte(i))
+		if i < 60 && i%2 == 0 {
+			c, off = chunk(100), 0
+		}
+		id := h.write(c, off, data, 0)
+		h.settle()
+		o.apply(t, c, off, uint32(len(data)), data, h.ok(id), 0)
+	}
+	h.hold = true
+	c := chunk(1)
+	whole := h.write(c, 0, pattern(1, core.ChunkSize), 0)
+	small := h.write(c, 0, fill(core.BlockSize, 2), 0)
+	h.settle()
+	for k := 0; len(h.held) > 0; k++ {
+		if k == 100 {
+			t.Fatal("the cleaner kept handing out jobs")
+		}
+		j := h.held[0]
+		h.held = h.held[1:]
+		for _, pc := range j.pieces {
+			h.pool.Bytes(pc.buf)[0] ^= 0xff
+		}
+		j.Run(h.pool)
+		h.s.InstallClean(&h.ctx, j, &h.out)
+		h.take()
+		h.settle()
+	}
+	if st := h.s.CleanStats(); st.Quarantined == 0 || st.Freed != 0 {
+		t.Fatalf("cleaner stats %+v, want a victim quarantined and none freed", st)
+	}
+	for _, id := range []uint64{whole, small} {
+		if err := h.reply(id).Err; !errors.Is(err, disklog.ErrNoSpace) {
+			t.Fatalf("write %d: %v, want NoSpace", id, err)
+		}
+	}
+	h.hold = false
+	data := fill(core.BlockSize, 3)
+	id := h.write(c, core.BlockSize, data, 0)
+	h.settle()
+	o.apply(t, c, core.BlockSize, uint32(len(data)), data, h.ok(id), 0)
+	o.check(t, h, 0, 15, 0)
+}

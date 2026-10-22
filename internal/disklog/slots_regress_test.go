@@ -149,3 +149,45 @@ func TestAFreedSlotSegmentReadsAsFreeWhateverItsTRIMLeft(t *testing.T) {
 		t.Fatal("the freed slot segment's first block is not durably zero")
 	}
 }
+
+// A stall on either hot lane fails both, in submit order: with the shared hot lane out of room
+// and the slot lane still able to append, a freeze of chunk 7 and its whole-chunk write after it
+// both fail, rather than the freeze alone, which would leave the write durable at the new epoch
+// with no freeze before it.
+func TestAStallFailsBothHotLanes(t *testing.T) {
+	cfg := testConfig(0)
+	cfg.NoReserve, cfg.Reserve = false, 4
+	h := slotHarness(t, 4096, 8, cfg)
+	h.submit(disklog.Hot, h.write(1, 1, 1))
+	h.submit(disklog.Hot, h.whole(2, 2, chunkData(2, 2)))
+	h.run()
+	h.victim = true
+	for n := uint32(1); !h.log.Stalled(); n++ {
+		if n > 200 {
+			t.Fatal("the hot lane never stalled")
+		}
+		h.submit(disklog.Hot, h.write(100+n, 64, uint64(10+n)))
+		h.run()
+	}
+	fz := h.submit(disklog.Hot, disklog.Item{Entry: disklog.FreezeEntry(1, chunkOf(7), 0, 5)})
+	wt := h.submit(disklog.Hot, h.whole(7, 1, chunkData(7, 1)))
+	h.run()
+	h.log.FailStalled(&h.ctx, &h.out)
+	h.absorb()
+	h.run()
+	var failed []disklog.Ticket
+	for _, ev := range h.eventsOf(disklog.Failed) {
+		failed = append(failed, ev.Tickets...)
+	}
+	if !slices.Contains(failed, fz) || !slices.Contains(failed, wt) || !slices.IsSorted(failed) {
+		t.Fatalf("failed %v; want the freeze %d and the slot write %d among them, in submit order", failed, fz, wt)
+	}
+	for _, ev := range h.eventsOf(disklog.Durable) {
+		for _, e := range ev.Entries {
+			if e.Chunk == chunkOf(7) {
+				t.Fatalf("chunk 7's %v became durable at LSN %d after its freeze failed", e.Kind, ev.LSN)
+			}
+		}
+	}
+	h.wantSlots(h.geo.SlotLBA(2, 0))
+}

@@ -783,7 +783,7 @@ func (l *Log) Stalled() bool {
 	return false
 }
 
-// FailStalled fails the items waiting for room with NoSpace, each lane's in submit order, and a checkpoint among them, as the owner does when the cleaner has no victim.
+// FailStalled fails the items waiting for room with NoSpace, each lane's in submit order, both hot lanes' together, and a checkpoint among them, as the owner does when the cleaner has no victim.
 func (l *Log) FailStalled(ctx *core.Context, out *Output) {
 	for l.Stalled() {
 		for i := range l.lanes {
@@ -801,9 +801,15 @@ func (l *Log) FailStalled(ctx *core.Context, out *Output) {
 				l.failCheckpoint(ctx, out)
 			}
 			// The whole queue fails, even items behind its head that would fit, since writing
-			// them first would break submit order, which a freeze before its write relies on.
+			// them first would break submit order, which a freeze before its write relies on; a
+			// stall on either hot lane fails the other too, as the two keep submit order between
+			// them.
 			ts := len(out.tickets)
 			out.tickets = l.drain(ctx, &l.lanes[i].q, out.tickets)
+			if i == laneHot || i == laneSlot {
+				out.tickets = l.drain(ctx, &l.lanes[laneHot+laneSlot-i].q, out.tickets)
+				slices.Sort(out.tickets[ts:])
+			}
 			out.emitTickets(Failed, ErrNoSpace, ts)
 		}
 		l.startRounds(ctx, out)

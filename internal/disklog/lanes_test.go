@@ -412,7 +412,7 @@ func TestMergePiecesGoPastTheHoldAndIntoTheReserve(t *testing.T) {
 	h.close()
 }
 
-// Replay takes a window per lane past the hot and cold ones; a pool too small for them fails
+// Replay takes a window per lane past the hot and slot ones; a pool too small for them fails
 // recovery and leaves no buffer allocated.
 func TestRecoveryFailsWhenALaneWindowDoesNotFit(t *testing.T) {
 	h := formatted(t, gib, mergeConfig(1))
