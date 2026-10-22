@@ -2671,11 +2671,13 @@ activation reports and faults around it. `deep` makes any change at any time.
 | `ci-peering` | 3 | 2 PGs and 2 chunks; lease expiry left open, except that a grantor that answers peering of an interval holds no live grant to that interval's old primary; 11 plans |
 | `ci-leases` | 3 | 1 chunk of 1 block, whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; 10 plans |
 | `deep-peering` | 4 | `ci-peering`'s plans and any membership change at any time with both families of writes, and the unbounded liveness property |
-| `deep-leases` | 4 | Every lease plan: `ci-leases`'s and the reboot and delayed-message plans it leaves out |
+| `deep-leases` | 4 | `ci-leases`'s plans and the reboot plan it leaves out |
+| `deep-slow` | 3 | The delayed-message plan alone, with `ci-leases`'s constants |
 
-`deep` is two configurations because whether nodes have clocks is a constant of the spec. The
-reboot plan alone is 1.6 million states and the delayed-message plan over 3 million, so they run in
-`deep-leases`; the variants that need the reboot plan run on it alone.
+`deep` is three configurations because whether nodes have clocks is a constant of the spec, and
+the delayed-message plan, over 3 million states at 3 nodes, passed 108 million at 4 nodes with the
+other lease plans without finishing in 4 hours, so it runs alone at 3. The reboot plan alone is 1.6
+million states, so it runs in `deep-leases`; the variants that need it run on it alone.
 
 | Constant | Value |
 | --- | --- |
@@ -2785,7 +2787,7 @@ plans enable.
 Not modelled: a PG split with writes in flight, whose children take the parent's interval plus one
 like any new interval; it needs a PG created mid-run, left to the phase 3 simulator.
 
-**Properties.** `ci-leases` and `deep-leases` check every property. `ci-peering` and
+**Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property. `ci-peering` and
 `deep-peering` check every property but 2 and 10: the Raft group and lease time need clocks.
 `deep-peering` adds the unbounded liveness property 12. A counterexample row whose property is 1, 2
 or 10 runs as a variant of `ci-leases`, every other row as a variant of `ci-peering`, except the row
@@ -3135,8 +3137,9 @@ CI runner.
 | --- | --- | --- | --- | --- |
 | `ci-peering` | 3 nodes; PG 1 `rep3`, PG 2 `rep2` with `maintenance`; 2 chunks; 11 plans, each up to 3 changes plus 1 renewal or fold (tables ≤ 5); counter limit 2; 1 fault (restart, format or daemon death) and 1 format; 1 send per write; lease expiry open | 31 | 981,217 | 107 s |
 | `ci-leases` | 3 nodes; the same PGs; 1 chunk of 1 block, 1 whole-block write; 10 plans; raw rates 960 or 1,040 per mille on node 3, `CLOCK_BOOTTIME` slewed 22.6% on nodes 2 and 3; time to 11 s in 10 ms units (6 s in most plans); up to 2 faults; Raft terms ≤ 2 | 73 | 786,018 | 62 s |
-| `deep-peering` | 4 nodes, node 4 a spare; `ci-peering`'s plans and a free plan of any 2 changes with 1 write and a restart; property 12 under weak fairness | DEEPPEERDEPTH | DEEPPEERSTATES | DEEPPEERTIME |
-| `deep-leases` | 4 nodes, node 4 a spare and a Raft voter; `ci-leases`'s plans and the reboot and delayed-message plans | DEEPLEASEDEPTH | DEEPLEASESTATES | DEEPLEASETIME |
+| `deep-peering` | 4 nodes, node 4 a spare; `ci-peering`'s plans and a free plan of any 2 changes with 1 write and a restart; property 12 under weak fairness | 32 | 14,838,803 | 2 h 30 min |
+| `deep-leases` | 4 nodes, node 4 a spare and a Raft voter; `ci-leases`'s plans and the reboot plan | 132 | 5,312,889 | 9 min |
+| `deep-slow` | `ci-leases`'s constants; the delayed-message plan alone | 84 | 137,228,807 | 3 h 59 min |
 
 | Model | Property | Simulator invariant (Testing strategy) | Registered by |
 | --- | --- | --- | --- |

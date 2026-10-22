@@ -24,22 +24,20 @@ heal change, both ok):
 - OneLeaseholder: no-epoch-bump, transfer-keeps-lease
 - LeaseForms: check-before-bound, step-half-drift
 
-## Running now
+## Deep results (coordinator, 2026-10-22)
 
-`scripts/models.sh deep epoch > scratchpad/deep-run.txt` (started about 11:37 on 2026-10-22, in the
-background). Runs deep-leases.cfg then deep-peering.cfg, each capped at 4 h.
-- Both `ok`: put depth/states/time into docs/test-scenarios.md "Epoch change model configurations"
-  (placeholders DEEPPEER*/DEEPLEASE*), tick the build-checklist "Epoch change model" item, commit.
-- A property violated: read the trace; if a real design gap, fix design.md and the spec, keep a
-  neg variant; if a model artifact, fix the spec and rerun ci and the negs.
-- Over 4 h: shrink (deep-peering: Free plan n 3→2 or drop its write; deep-leases: drop HandoverSlow)
-  and say so in the map row.
+The delayed-message plan moved to `deep-slow.cfg` (3 nodes, ci-leases' constants): with it,
+deep-leases passed 108M states in 4 h. All three passed, recorded in test-scenarios:
+deep-peering 32 / 14,838,803 / 2 h 30 min; deep-leases 132 / 5,312,889 / 9 min; deep-slow
+84 / 137,228,807 / 3 h 59 min, too close to its 4 h cap: shrink it a little (e.g. MaxFault 2 → 1
+or a shorter MaxTime) and rerun.
 
 ## Remaining
 
-1. Deep results into the map (above); tick the checklist item.
-2. Rerun `scripts/models.sh ci epoch` once at the end; confirm all ok; commit.
-3. Delete HANDOFF.md before merge; report to the coordinator.
+1. Review by a fresh agent; apply it.
+2. Shrink deep-slow under ~3 h and rerun it; update its row.
+3. Rerun `scripts/models.sh ci epoch`; tick the build-checklist "Epoch change model" item.
+4. Delete HANDOFF.md before merge.
 
 ## Design bugs found and design.md changes
 
