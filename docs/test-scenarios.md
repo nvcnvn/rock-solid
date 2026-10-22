@@ -2829,6 +2829,7 @@ A TLA+ specification, `models/sessions/sessions.tla`, checked with TLC. It cover
   - The grantor (the leader) counts the whole `session_lease` from when it processed the renewal.
   - The holder ends its lease on `Resumed`, and when a grantor's clock moved more than `1/(1 − m)` times its own since the last grant, `m` the lease's margin.
   - The holder keeps its rate bound per leader node and boot, from two grants at least a tick apart, and takes no lease from a leader before it has one: a leader failover starts a new window while the client keeps its old lease.
+  - Each lease's margin also covers every control-plane node's rate, which the client keeps rate windows for; a rebooted node stands for election only after a lease's worth of ticks.
 - Leader leases: only a leader holding its leader lease answers renewals, and a deposed leader's lease ends before its successor's starts. A new leader gives every live session a full lease from its start, and a leader whose loop stalled restarts every session's timer.
 - Session table: versions, each listing the live sessions and those fenced but not yet acknowledged, plus an acknowledged version. Every session due when the leader's count runs out is fenced in one version. An eviction stops renewals and fences the session once its lease runs out.
 - Storage nodes:
@@ -2864,8 +2865,9 @@ The lock property's wording in the design, "no lock is granted to a new holder w
 | `neg-no-drift` | The client does not end its lease `lease_drift` early | The leader's raw rate rises within the headroom after the client measured it, and its count ends first | Same |
 | `neg-ignore-resumed` | The client ignores `Resumed` | Its VM stops with every clock frozen past the leader's count; it resumes believing its lease runs | Same |
 | `neg-answer-without-lease` | A leader answers renewals without holding its leader lease | A deposed leader renews C after the new leader's lease began. The new leader's timer for C started earlier, so it fences C while C's lease runs | Same |
-| `neg-no-full-lease` | A new leader carries on the count from the last renewal it can see, instead of giving every live session a full `session_lease` from the start of its own lease | On a node whose clock runs faster than the old leader's, it fences a client renewed moments before the failover | Same |
-| `neg-bound-across-leaders` | The client keeps one rate bound across leader nodes and boots | Measured against a slow leader, the bound covers too little of a faster successor, which fences first | Same |
+| `neg-no-full-lease` | A new leader counts each session from the last renewal it can see, instead of giving every live session a full `session_lease` from the start of its own lease | Renewals live only in the old leader's memory, so it sees none and fences a client renewed moments before the failover | Same |
+| `neg-margin-leader-only` | The client's margin covers only the leader it renews with, as the design had it | The old leader's node runs at 8 units a tick, the next at 16. After a failover the new leader counts a full lease from its start, which comes right after the old leader processed the client's last renewal, and its count ends before the client's lease, measured against the old leader | Same |
+| `neg-lead-before-measured` | A rebooted control-plane node stands for election at once | It comes back at twice its old rate, leads, and its count ends before a lease the client took against its old boot | Same |
 | `neg-evict-at-once` | An eviction fences the session at once, as the design had it | The evicted client, still renewing, holds its lease when the fence commits | Same |
 | `neg-two-holders` | The same, with two clients | The lock moves while the evicted holder still holds its lease and acts on the lock | `AtMostOneHolder` |
 | `neg-fixed-step-check` | The step check trips at `1 + lease_drift / 2` | It trips on a leader whose rate the margin covers | `NoSpuriousTrip` |
@@ -2923,7 +2925,7 @@ The lock property's wording in the design, "no lock is granted to a new holder w
 
 **Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc); results in the [Model-to-simulator map](#model-to-simulator-map)). The lease is `lease_drift` 1/4 of it, so the margins show at a tick's grain:
 
-- `ci-lease`: 1 client renewing with leaders on 2 control-plane nodes over 2 terms, raw rates of 8 or 16 units a tick, a 34-unit session lease (about 4 ticks), and a VM stop. Renewals and answers are messages, and the client keeps rate windows.
+- `ci-lease`: 1 client renewing with leaders on 2 control-plane nodes over 2 terms, raw rates of 8 or 16 units a tick (a pair at 16 and 8 is beyond `max_margin`, so the client takes no lease from the fast one, but its old lease must still end before that one's count), a 34-unit session lease (about 4 ticks), and a VM stop. Renewals and answers are messages, and the client keeps rate windows.
 - `ci-rates`: the same with 1 control-plane node that reboots once at either rate and whose rate rises once within the headroom.
 - `ci-fence`: 2 clients contending for one lock, one leader, 2 storage nodes in one PG, a 3-tick session lease, up to 2 writes in flight per client and 2 in all, and a storage node partitioned from the control plane. Renewals are single steps at equal clocks, since `ci-lease` checks their timing.
 - `deep-lease`: `ci-lease` with 3 terms. `deep-down`: `ci-fence` with both storage nodes partitioned in turn, so an interval can have a single live member, one write in flight per client and a 2-tick lease. `deep-fence`: `ci-fence` with a second term on another node, a client daemon that dies and `CrashedClientReleased` under weak fairness.
@@ -3097,10 +3099,10 @@ Snapshots taken while a purge runs (punches carrying the snapshot epoch) are lef
 
 **Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc); results in the [Model-to-simulator map](#model-to-simulator-map)). Every configuration has chunks of 2 blocks of 2 bytes and 2 chunks per file:
 
-- `ci-list`: 3 inodes of 7 bytes, no writes, truncates to 1 or 5 bytes, up to 2 truncates, 2 unlinks and 2 crashes (daemon or purger). Two inodes are the slot's list; the third is the one unlinked inside the purger's run.
+- `ci-list`: 3 inodes of 7 bytes, no writes, truncates to 1 or 5 bytes, up to 2 truncates, 2 unlinks and 1 crash (daemon or purger). Two inodes are the slot's list; the third is the one unlinked inside the purger's run.
 - `ci-write`: 1 inode of 7 bytes open on 2 nodes, up to 2 writes at bytes 2 and 6, 2 truncates to 3, 5 or 8 bytes and 2 crashes.
 - `ci-orphan`: 1 inode of 3 bytes open on 2 nodes, up to 2 writes at byte 5 (past `alloc_end`), 1 unlink, 1 fence, 1 owner failover and 1 crash.
-- `deep`: `ci-list` with 3 truncates and 3 crashes, plus `PurgeSettles`; `deep-write` and `deep-orphan` add a crash, and to `deep-orphan` a write, plus `PurgeSettles`.
+- `deep-list`: `ci-list` with 2 crashes, safety only, since its liveness check does not finish in 4 hours; `deep-write` and `deep-orphan` add a crash to theirs, and to `deep-orphan` a write, and check `PurgeSettles` under a fair purger.
 
 ## Model-to-simulator map
 
