@@ -2,6 +2,7 @@ package disklog
 
 import (
 	"errors"
+	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
@@ -70,6 +71,33 @@ func (l *Log) MaxCopyBlocks() uint16 {
 func (l *Log) CopyCost(blocks uint64) uint64 {
 	per, header := copiesPerRecord(l.maxWrite)
 	return blocks + header*((blocks+per-1)/per)
+}
+
+// RewriteCost is what writing pieces again costs the log in blocks at most: the records holding
+// them as they lie now, header blocks included, and the tail that the largest leaves behind in a
+// segment too short for it, since a record never spans two segments. A piece the log does not
+// hold counts as a record of the largest size.
+func (l *Log) RewriteCost(pieces []BlobRef) uint64 {
+	var cost, largest uint64
+	for k, ref := range pieces {
+		if slices.ContainsFunc(pieces[:k], func(p BlobRef) bool { return p.LSN == ref.LSN }) {
+			continue
+		}
+		blocks := uint64(l.maxWrite)
+		if i, ok := l.pieces.at[ref.LSN]; ok && l.pieces.recs[i].segment == ref.Segment {
+			var end uint32
+			for _, sp := range l.pieces.recs[i].spans {
+				end = max(end, sp.hi)
+			}
+			blocks = uint64(end - ref.Block)
+		}
+		cost += blocks
+		largest = max(largest, blocks)
+	}
+	if largest > 0 {
+		cost += largest - 1
+	}
+	return cost
 }
 
 func copiesPerRecord(recordBlocks uint32) (per, header uint64) {

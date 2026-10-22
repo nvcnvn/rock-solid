@@ -121,6 +121,15 @@ func TestCleanerSurvivesCrashes(t *testing.T) {
 	}
 }
 
+// Seed 329 of TestCleanerSurvivesCrashes: with the guard charging runs at their bytes rather
+// than at the records their pieces take, the cleaner kept rewriting metadata segments into new
+// ones as full after recovery, and the store never settled.
+func TestCleanerCrashSeed329Settles(t *testing.T) {
+	if msg, _ := cleanerCrash(t, 329, plants{}); msg != "" {
+		t.Fatal(msg)
+	}
+}
+
 // Planted bug: replay mapping a copy's blocks as a write, whether or not a map still stores them
 // at the source, brings back a block a later write replaced; the crash oracle sees it within 50
 // seeds.

@@ -124,8 +124,8 @@ func steppedStore(t *testing.T) (*harness, *byteOracle, *core.Rand) {
 	return h, o, r
 }
 
-// markRewrites runs a pass over the cleanable metadata segment holding the most bytes of live
-// runs, which copies nothing and marks those runs for rewrites, and returns the segment and how
+// markRewrites runs a pass over the cleanable metadata segment whose live runs have the most
+// pieces, which copies nothing and marks those runs for rewrites, and returns the segment and how
 // many runs it marked; merges stay off.
 func markRewrites(t *testing.T, h *harness) (uint32, int) {
 	t.Helper()
@@ -133,9 +133,9 @@ func markRewrites(t *testing.T, h *harness) (uint32, int) {
 	var seg uint32
 	most := 0
 	for s := uint32(1); s < cleanGeo.SegmentCount; s++ {
-		bytes, held := h.s.Index().Tree().RunsIn(s)
-		if _, stream := log.Usage(s); stream == disklog.Meta && log.Cleanable(s) && bytes > most && !held && !log.HoldsManifestPiece(s) {
-			seg, most = s, bytes
+		pieces, held := h.s.Index().Tree().RunsIn(s, nil)
+		if _, stream := log.Usage(s); stream == disklog.Meta && log.Cleanable(s) && len(pieces) > most && !held && !log.HoldsManifestPiece(s) {
+			seg, most = s, len(pieces)
 		}
 	}
 	if seg == 0 {

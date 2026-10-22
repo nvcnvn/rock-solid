@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
@@ -24,6 +25,30 @@ func TestCopyCostRoundsHeadersUpPerRecord(t *testing.T) {
 			t.Fatalf("%d live blocks cost %d, want %d", c.live, got, c.cost)
 		}
 	}
+}
+
+// A rewrite costs the records holding its pieces as they lie, header blocks included and each
+// record once, and the tail the largest leaves behind in a segment too short for it: without
+// that, a run filling a segment would fill a new one but for a block no record fits in, and its
+// rewrite would gain nothing.
+func TestRewriteCostChargesRecordsAndTheTail(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	h.put(disklog.Hot, h.write(0, 1, 1))
+	big := h.checkpointPieces(nil, 1, 3*core.BlockSize).runs
+	if got := h.log.RewriteCost(big); got != 4+3 {
+		t.Fatalf("a 3-block piece in a 4-block record costs %d, want 7", got)
+	}
+	shared := h.checkpointPieces(nil, 3, 100).runs[1:]
+	if shared[0].LSN != shared[1].LSN {
+		t.Fatalf("the two pieces went out in records %d and %d, want one", shared[0].LSN, shared[1].LSN)
+	}
+	if got := h.log.RewriteCost(shared); got != 2+1 {
+		t.Fatalf("two pieces sharing a 2-block record cost %d, want 3", got)
+	}
+	if got := h.log.RewriteCost(append(big, shared...)); got != 4+2+3 {
+		t.Fatalf("both records cost %d, want 9", got)
+	}
+	h.close()
 }
 
 // Only a used segment that no lane has open and whose records all precede the replay points of

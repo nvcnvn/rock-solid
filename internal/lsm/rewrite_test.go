@@ -24,11 +24,11 @@ func TestRewriteMarkedRun(t *testing.T) {
 				f.checkpoint(t, tr, nil)
 			}
 			old := slices.Clone(tr.runs[1].pieces)
-			if bytes, held := tr.RunsIn(6); bytes != tr.runs[1].bytes || held {
-				t.Fatalf("segment 6 holds runs of %d bytes, held %v; want the middle run's %d", bytes, held, tr.runs[1].bytes)
+			if pieces, held := tr.RunsIn(6, nil); !slices.Equal(pieces, old) || held {
+				t.Fatalf("segment 6 holds run pieces %v, held %v; want the middle run's %v", pieces, held, old)
 			}
-			if bytes, _ := tr.RunsIn(9); bytes != 0 {
-				t.Fatalf("segment 9 holds runs of %d bytes", bytes)
+			if pieces, _ := tr.RunsIn(9, nil); len(pieces) != 0 {
+				t.Fatalf("segment 9 holds run pieces %v", pieces)
 			}
 			if n := tr.MarkRewrite(6); n != 1 || tr.MarkRewrite(6) != 0 {
 				t.Fatalf("marked %d runs, want the middle one once", n)
@@ -40,7 +40,7 @@ func TestRewriteMarkedRun(t *testing.T) {
 				if c.rule != ruleRewrite || len(c.inputs) != 1 {
 					t.Fatalf("picked %v over %d runs, want a rewrite of one", c.rule, len(c.inputs))
 				}
-				if _, held := tr.RunsIn(6); !held {
+				if _, held := tr.RunsIn(6, nil); !held {
 					t.Fatal("a run being rewritten is not held")
 				}
 				c.Run()
@@ -58,8 +58,8 @@ func TestRewriteMarkedRun(t *testing.T) {
 			if len(tr.runs) != 3 || slices.ContainsFunc(old, func(p disklog.BlobRef) bool { return !slices.Contains(dead, p) }) {
 				t.Fatalf("%d runs after the rewrite; dead %v, the old run's pieces %v", len(tr.runs), dead, old)
 			}
-			if bytes, held := tr.RunsIn(6); bytes != 0 || held {
-				t.Fatalf("segment 6 still holds runs of %d bytes after the rewrite, held %v", bytes, held)
+			if pieces, held := tr.RunsIn(6, nil); len(pieces) != 0 || held {
+				t.Fatalf("segment 6 still holds run pieces %v after the rewrite, held %v", pieces, held)
 			}
 			f.drop(dead)
 			checkReads(t, f.restoreManifest(t, stepConfig(384, step)), m, stepProbes)

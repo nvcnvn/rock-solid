@@ -347,10 +347,10 @@ func (t *Tree) pairMerges() {
 	t.resume = nil
 }
 
-// RunsIn is the bytes of the runs holding a live piece in segment, which a rewrite of each would
-// write again, and whether a running merge holds such a run or wrote a step there, which that
-// merge's end makes dead or names.
-func (t *Tree) RunsIn(segment uint32) (bytes int, held bool) {
+// RunsIn appends to pieces the live pieces of the runs holding one in segment, which a rewrite
+// of each would write again, and reports whether a running merge holds such a run or wrote a step
+// there, which that merge's end makes dead or names.
+func (t *Tree) RunsIn(segment uint32, pieces []disklog.BlobRef) (_ []disklog.BlobRef, held bool) {
 	for _, r := range t.runs {
 		if !r.inSegment(segment) {
 			continue
@@ -359,14 +359,14 @@ func (t *Tree) RunsIn(segment uint32) (bytes int, held bool) {
 			held = true
 			continue
 		}
-		bytes += r.bytes
+		pieces = append(pieces, r.pieces[r.base:]...)
 	}
 	for _, c := range t.merges {
 		for _, refs := range [][]disklog.BlobRef{c.entryRefs, c.fragRefs, c.partRefs, c.tail} {
 			held = held || slices.ContainsFunc(refs, func(p disklog.BlobRef) bool { return p.Segment == segment })
 		}
 	}
-	return bytes, held
+	return pieces, held
 }
 
 // MarkRewrite marks every run no merge holds that has a live piece in segment for a merge of that

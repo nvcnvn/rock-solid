@@ -124,6 +124,7 @@ type cleaner struct {
 	tried     bool
 	ents      []disklog.Entry
 	candidate []victimScore
+	pieces    []disklog.BlobRef
 }
 
 type victimScore struct {
@@ -191,9 +192,9 @@ func (s *Store) isVictim(seg uint32) bool {
 // chooseVictims picks up to VictimsPerPass segments by cost-benefit, (1 − u) × age ÷ (1 + u)
 // with u the live share and age capped at a disk's worth of writes, among those whose copy
 // costs less than a segment less the header of the segment it lands in, header blocks
-// included, charging live run pieces at the whole runs a rewrite writes again. A segment
-// holding a piece of a manifest recovery may load waits for the next snapshot, which it asks
-// for, and one holding only pieces about to die waits for them.
+// included, charging live run pieces at the records of the whole runs a rewrite writes again.
+// A segment holding a piece of a manifest recovery may load waits for the next snapshot, which
+// it asks for, and one holding only pieces about to die waits for them.
 func (s *Store) chooseVictims() []uint32 {
 	geo := s.sb.Geometry
 	s.cl.candidate = s.cl.candidate[:0]
@@ -208,11 +209,12 @@ func (s *Store) chooseVictims() []uint32 {
 		u, stream := s.log.Usage(seg)
 		var cost uint64
 		if stream == disklog.Meta {
-			bytes, held := s.ix.Tree().RunsIn(seg)
-			if held || bytes == 0 && s.log.HoldsPiece(seg) {
+			var held bool
+			s.cl.pieces, held = s.ix.Tree().RunsIn(seg, s.cl.pieces[:0])
+			if held || len(s.cl.pieces) == 0 && s.log.HoldsPiece(seg) {
 				continue
 			}
-			cost = (uint64(bytes) + core.BlockSize - 1) / core.BlockSize
+			cost = s.log.RewriteCost(s.cl.pieces)
 		} else {
 			cost = s.log.CopyCost(uint64(u.Live))
 		}
