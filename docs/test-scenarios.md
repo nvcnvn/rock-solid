@@ -1477,7 +1477,9 @@ merges that take several.
   an edit replaces them, and a bound on a run the index does not hold is Malformed.
 - With no checkpoint due, the owner begins one for the step alone (`BeginStepCheckpoint`): it
   leaves the memtable unflushed and the replay LSN unchanged, and the log's replay bytes after it
-  are as many as before it, where an ordinary checkpoint lowers them to its own records.
+  are as many as before it, where an ordinary checkpoint lowers them to its own records. A reopen
+  once a header names the step manifest counts the same replay and held bytes, from the replay
+  floor rather than the step's base.
 - Bounded runs: an input holds only its keys above its bound, so output and inputs never share a
   key. With inputs A (newer) and B over keys a..z, B lacking g, and a step ending at f, a get of c
   or f reads the output alone, a get of q reads A, a get of r reads A then B, a scan from a returns
@@ -1872,23 +1874,42 @@ on the 1 GiB disk one capacity is 262,144 blocks):
 - Net-gain guard, header blocks rounded up per record (design: "a victim must free more space than
   copying it costs"). In 16,384-block (64 MiB) segments a copy record of single-block extents
   holds 253 data blocks and 3 header blocks (56 + 253 × 45 = 11,441 bytes; 256 blocks fill the
-  1 MiB cap), and the copies may cross a segment's start, which cuts one record in two, so L live
-  blocks cost L + 3(⌈L ÷ 253⌉ + 1). Estimated in exact bytes, the guard let the cleaner pick 98.9%
-  live victims and livelock (cleaner streams spike).
+  1 MiB cap), and one copy holds up to 254 blocks under 1 header block. A record never spans two
+  segments, so copies rolling into a new segment split their records between the two and leave
+  the old one's tail unused, up to a block short of the largest copy and its header: L live
+  blocks cost L + 3(⌈L ÷ 253⌉ + 1) + min(L, 254) + h − 1, with h the header blocks of that
+  copy. Estimated in exact bytes, the guard let the cleaner pick 98.9% live victims and livelock
+  (cleaner streams spike).
 - The guard also charges the header of the segment the copies open: a victim is picked only when
-  its cost plus that block is below a segment. A victim of 16,187 live blocks costs 16,382 and is
-  picked; 16,188 costs 16,383 and is refused. On 16-block segments, without the segment header a
-  copy of a nearly full segment filled a new one exactly, and without the cut record copies of
+  its cost plus that block is below a segment. A victim of 15,936 live blocks costs 16,382 and is
+  picked; 15,937 costs 16,383 and is refused. On 16-block segments, without the segment header a
+  copy of a nearly full segment filled a new one exactly, and without the split record copies of
   13-block victims filled a segment each (seed 448 of the crash test, and a disk filled with
   live data at a reserve of 10 or 12, whose copies' checkpoints took the whole reserve): either
   way the cleaner churned forever on a disk of live data.
+- The charge bounds what the copies take: on 64-block segments of 16-block records, copies of
+  14-block items behind a tail just too short for one took 61 blocks of a new segment and
+  stranded 13, against 61 charged before the tail was; with it, 300 victims of random copy sizes
+  after random fills never take more than charged.
 - A victim's copies reach the log together, so they go out in one record where they fit rather
-  than the first alone in a round of its own.
+  than the first alone in a round of its own. A copy whose source crosses a segment is Malformed.
 - A metadata victim is charged the records its live runs' pieces take now, header blocks included,
   each record once, plus the largest less a block, the tail it can leave unused at a segment's
   end: a 3-block piece in a 4-block record costs 7. Charged the runs' bytes instead, small pieces
   of two blocks each looked like a fraction of one, and after a crash (seed 329) the cleaner
   rewrote the same runs from segment to segment without end.
+- Each step of the rewrite is charged too: a record header for its blocks, its filter partition,
+  its root's references and bound, and a manifest as large as a snapshot of every segment. On
+  16-block segments with steps of a block, a victim charged 13 blocks without them had its runs
+  rewritten in 23 blocks of merge-lane records and manifests; with them it is charged 28.
+- A chunk victim is taken only if its charge fits the room the cleaner's lane can reach, its open
+  segment's tail and every free segment, the reserve included. With a reserve of one segment the
+  disk reaches zero free segments; before this check every later write started a pass whose
+  copies found no room, copied 10 blocks for nothing and failed. Now a write that finds no room
+  fails with NoSpace with nothing copied, under overwrites and once new blocks fill the disk.
+- A pass that frees nothing starts no other until the durable LSN moves: a segment whose only
+  live blocks are a whole chunk's slot writes, which its record header checksums, is passed over
+  once, and five reads after it start no pass.
 - Age cap regression, scripted in Go as the cleaner spike modelled it: a 1 GiB disk of 4,096
   segments at 90% full, 20% of the data frozen by a snapshot, 90/10 hot/cold overwrites, copies in
   age order with moved blocks keeping their write time. Capped, at most a few passes in a row gain
@@ -1927,6 +1948,8 @@ A pass:
 - A victim holding a block whose checksum fails is quarantined: nothing of it is copied, it is
   never a victim again, the pass cleans its other victims, and reads of the block keep failing
   with a checksum error.
+- The other blocks of a quarantined segment's records are overwritten and lower its live count,
+  before a restart and after one, and it stays quarantined.
 - Grouping: a victim holding chunk 7 block 3, chunk 3 block 1, chunk 7 block 4 and chunk 3
   block 2 gives copy entries in the index's key order (pool, hash of the chunk, chunk, block):
   each chunk's entries side by side and ascending. One entry spans blocks whose sources are
