@@ -179,6 +179,8 @@ type plants struct {
 	mergeCommitted    bool
 	failCheck         bool
 	failMerge         bool
+	// failChecks fails every flush's run check.
+	failChecks bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.
@@ -196,6 +198,8 @@ type Store struct {
 	interval uint32
 	seq      uint64
 	logGen   uint64
+	// rebuilt is set from a rebuild of the index until a checkpoint completes.
+	rebuilt bool
 
 	ops        []op
 	freeOps    []int32
@@ -1018,7 +1022,7 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 			panic("chunkstore: checkpoint done with no flush running: " + err.Error())
 		}
 		s.piecesDead(dead)
-		s.checkpointing = false
+		s.checkpointing, s.rebuilt = false, false
 	case disklog.CheckpointFailed:
 		s.piecesDead(s.ix.Tree().FlushFailed())
 		s.checkpointing, s.inPiece, s.piecesOut, s.retryAfter, s.pieceWait = false, false, 0, true, false
@@ -1316,12 +1320,12 @@ func (s *Store) nextPiece(ctx *core.Context, out *Output) {
 		return
 	}
 	length, root, err := s.ix.Tree().NextPiece(ctx.Pool.Bytes(buf))
-	if err == nil && s.plant.failCheck {
+	if err == nil && (s.plant.failCheck || s.plant.failChecks) {
 		s.plant.failCheck, err = false, lsm.ErrCheck
 	}
 	if err != nil {
 		ctx.Pool.Free(buf)
-		s.indexBroken(ctx, out)
+		s.indexBroken(ctx, err, out)
 		return
 	}
 	if length == 0 {
@@ -1360,15 +1364,20 @@ func (s *Store) InstallMerge(ctx *core.Context, c *lsm.Compaction, out *Output) 
 		err = s.ix.Tree().Install(c)
 	}
 	if errors.Is(err, lsm.ErrCheck) {
-		s.indexBroken(ctx, out)
+		s.indexBroken(ctx, err, out)
 		s.pump(ctx, out)
 	}
 	return err
 }
 
 // indexBroken starts a rebuild of the index from the log: the store stops taking operations,
-// lets the log's rounds in flight finish and recovers its log again as an open does.
-func (s *Store) indexBroken(ctx *core.Context, out *Output) {
+// lets the log's rounds in flight finish and recovers its log again as an open does. A check that
+// fails again before a checkpoint completes after the rebuild stops the store with err.
+func (s *Store) indexBroken(ctx *core.Context, err error, out *Output) {
+	if s.rebuilt {
+		s.stop(ctx, err, out)
+		return
+	}
 	s.phase = draining
 	s.failWaiting(ctx, ErrUnavailable, out)
 }
@@ -1384,8 +1393,8 @@ func (s *Store) drain(ctx *core.Context, out *Output) {
 	for i := range closed.Events {
 		s.logEvent(ctx, &closed.Events[i], out)
 	}
-	s.phase = recovering
-	s.resetCleaner()
+	s.phase, s.rebuilt = recovering, true
+	s.resetCleaner(ctx)
 	if err := s.recover(ctx, s.sb.Geometry.DiskBlocks(), disklog.ModeOpen); err != nil {
 		s.phase, s.err = failed, err
 	}

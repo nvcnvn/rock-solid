@@ -1370,7 +1370,9 @@ Events from the log:
 - A flush that fails a run check (`lsm.ErrCheck`, a plant): the store refuses operations, lets its
   rounds finish, recovers its log once more as an open does, reloading the named manifest's runs
   and replaying after them, and the rebuilt index equals the oracle's, live and at every snapshot.
-  A merge that fails its check (a plant) takes the same path.
+  A merge that fails its check (a plant) takes the same path. A check that fails again after the
+  rebuild, before any checkpoint completes (a plant failing every flush's check), stops the store
+  with `lsm.ErrCheck` after one rebuild (`TestARunCheckFailingAfterARebuildStopsTheStore`).
 - The store hands the log one run piece at a time, each once the one before is durable: no step
   of a workload with multi-piece runs has two pieces in flight.
 - Under steady pipelined load (5,000 writes) the store's list of items handed to the log stays
@@ -1990,13 +1992,17 @@ crash oracle and the usage table against the index:
   open-sequence half runs after every recovery in the store's tests.
 - Rebuild after cleaning: a run check that fails once the cleaner has freed segments, in a flush
   or in a merge, rebuilds the index from the runs the newest named manifest lists and the log
-  after them, and the store serves again; replay from LSN 1 reported the log corrupt
-  (`TestRunCheckRebuildsAfterCleaning`). `TestCrashAtEveryAction` also crashes, at every action,
-  a workload ending in a cleaner pass that frees segments, and `TestCleanerSurvivesCrashes` runs
-  its 500 seeds; both rebuild after every recovery, and the index as the rebuild's recovery leaves
-  it, before the cleaner moves blocks again, equals the opened one.
+  after them, and the store serves again (`TestRunCheckRebuildsAfterCleaning`).
+  `TestCrashAtEveryAction` also crashes, at every action, a workload ending in a cleaner pass that
+  frees segments, and `TestCleanerSurvivesCrashes` runs its 500 seeds; both rebuild after every
+  recovery, and the index as the rebuild's recovery leaves it, before the cleaner moves blocks
+  again, equals the opened one.
 - A run piece the manifest lists, damaged on disk, fails the rebuild with Corrupt at its record,
   never an index without the run (`TestRebuildFromADamagedRunIsCorrupt`).
+- A rebuild that starts while the cleaner reads the blocks it copies frees their buffers, and every
+  rebuild in the store's tests leaves the store, settled, holding only its log's pool buffers
+  (`TestARebuildFreesTheBlocksTheCleanerRead`). `TestCleanerSurvivesCrashes` also rebuilds a second
+  time, once the cleaner has moved blocks again, and that index equals the live one.
 
 TRIM (one `DiskTrim` per freed segment, `trim_rate` 128 MiB/s, time from `ctx.Now`):
 

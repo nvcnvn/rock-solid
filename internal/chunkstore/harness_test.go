@@ -42,6 +42,9 @@ type harness struct {
 	// executed counts the actions run since format; the step that would run action crashAt panics with errCrash instead.
 	executed int
 	crashAt  int
+	// abandoned is the pool buffers left live by stores the harness dropped at a crash, and own
+	// those a settled store holds for its log once formatted.
+	abandoned, own int
 	// noMerge leaves merges unrun.
 	noMerge bool
 	// trims is every TRIM executed, and timerAt the time the log's TRIM timer was last armed for.
@@ -106,7 +109,7 @@ func newHarnessOn(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
 	}
 	h.take()
 	h.settle()
-	h.executed = 0
+	h.executed, h.own = 0, h.pool.Live()
 	return h
 }
 

@@ -277,13 +277,36 @@ func TestMergeCheckRebuilds(t *testing.T) {
 	o.check(t, h, 0, 15, 0)
 }
 
-// rebuild breaks the index as a failed run check does, runs the store until the index rebuilt
-// from the log serves, and returns that index as the recovery left it, before the cleaner or a
-// checkpoint changes it.
+// A run check that fails again after a rebuild, before any checkpoint completes, stops the store
+// with the check's error instead of rebuilding without end.
+func TestARunCheckFailingAfterARebuildStopsTheStore(t *testing.T) {
+	cfg := testConfig()
+	cfg.Log.MaxReplayBytes = 32 * core.BlockSize
+	h := newHarness(t, cfg)
+	h.s.plant.failChecks = true
+	gen := h.s.logGen
+	for i := 0; h.s.Err() == nil; i++ {
+		if i == 5000 {
+			t.Fatalf("no stop after %d steps and %d restarts of the log", i, h.s.logGen-gen)
+		}
+		if !h.step() {
+			h.write(chunkC, uint32(i%16)*core.BlockSize, fill(core.BlockSize, byte(i)), 0)
+		}
+	}
+	if !errors.Is(h.s.Err(), lsm.ErrCheck) || h.s.logGen != gen+1 {
+		t.Fatalf("stopped with %v after %d restarts of the log", h.s.Err(), h.s.logGen-gen)
+	}
+}
+
+// rebuild breaks the index as a run check failing first since a checkpoint does, runs the store
+// until the index rebuilt from the log serves, and returns that index as the recovery left it,
+// before the cleaner or a checkpoint changes it. Settled after the rebuild, the store holds no
+// pool buffer but its log's own.
 func (h *harness) rebuild() [][2]string {
 	h.t.Helper()
 	gen := h.s.logGen
-	h.s.indexBroken(&h.ctx, &h.out)
+	h.s.rebuilt = false
+	h.s.indexBroken(&h.ctx, lsm.ErrCheck, &h.out)
 	h.s.pump(&h.ctx, &h.out)
 	h.take()
 	for !h.s.Serving() && h.step() {
@@ -293,7 +316,30 @@ func (h *harness) rebuild() [][2]string {
 	}
 	rebuilt := dumpIndex(h.s.Index())
 	h.settle()
+	if held := h.pool.Live() - h.abandoned; held != h.own {
+		h.t.Fatalf("rebuild: once settled the store holds %d pool buffers, want its log's %d", held, h.own)
+	}
 	return rebuilt
+}
+
+// A rebuild that starts while the cleaner reads the blocks it copies frees their buffers.
+func TestARebuildFreesTheBlocksTheCleanerRead(t *testing.T) {
+	h := newHarnessOn(t, cleanConfig(), cleanGeo)
+	r := core.NewRand(1)
+	reading := func() bool {
+		return slices.ContainsFunc(h.s.cl.reads, func(rd cleanRead) bool { return rd.used && rd.piece >= 0 })
+	}
+	for i := 0; !reading(); i++ {
+		if i == 50000 {
+			t.Fatal("the cleaner read no block to copy")
+		}
+		if !h.step() {
+			data := make([]byte, core.BlockSize)
+			r.Fill(data)
+			h.write(cleanChunks[r.Below(uint64(len(cleanChunks)))], uint32(r.Below(48))*core.BlockSize, data, 0)
+		}
+	}
+	h.rebuild()
 }
 
 // cleanedHarness runs the cleaner workload on the small disk until the cleaner has freed a segment.
@@ -392,7 +438,7 @@ func firstPayloadLBA(t *testing.T, h *harness, ref disklog.BlobRef) (core.LBA, i
 // the piece's record, rather than serving an index without the run.
 func TestRebuildFromADamagedRunIsCorrupt(t *testing.T) {
 	h := cleanedHarness(t)
-	h.s.indexBroken(&h.ctx, &h.out)
+	h.s.indexBroken(&h.ctx, lsm.ErrCheck, &h.out)
 	h.s.pump(&h.ctx, &h.out)
 	h.take()
 	for len(h.s.loading) == 0 {

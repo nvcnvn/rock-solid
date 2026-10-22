@@ -490,7 +490,11 @@ func (s *Store) finishVictim(ctx *core.Context, p *cleanPass) {
 	j.segment = 0
 }
 
-// resetCleaner drops every pass, as when the store's log stops; their reads have completed.
-func (s *Store) resetCleaner() {
+// resetCleaner drops every pass and frees the blocks it read, as when the store's log stops; their
+// reads have completed.
+func (s *Store) resetCleaner(ctx *core.Context) {
+	for _, p := range s.cl.passes {
+		s.freePieces(ctx, &p.job)
+	}
 	s.cl.passes, s.cl.sent, s.cl.tried = nil, s.cl.sent[:0], false
 }

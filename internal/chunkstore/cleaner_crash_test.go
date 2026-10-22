@@ -46,7 +46,8 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) uint64 {
 // cleanerCrash runs the workload on the small disk, cleaning as it fills, crashes it at a seeded
 // action with a seeded share of unflushed blocks landing, and recovers: the store must hold what
 // the crash oracle holds, live and at every snapshot, with the usage table on the index's counts,
-// and again once it has rebuilt its index, which must equal the opened one. It returns the
+// and again once it has rebuilt its index, which must equal the opened one; a second rebuild,
+// after the cleaner has moved blocks again, must equal the live index. It returns the
 // difference, if any.
 func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
 	r := core.NewRand(seed)
@@ -68,6 +69,7 @@ func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
 	h.crashAt = -1
 	h.cfg.CleanFree = 0
 	h.queue, h.out = nil, Output{}
+	h.abandoned = h.pool.Live()
 	h.s = newStore(h.cfg)
 	h.s.plant = plant
 	if err := h.s.recover(&h.ctx, h.disk.Blocks(), disklog.ModeOpen); err != nil {
@@ -88,7 +90,14 @@ func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
 	if rebuilt := h.rebuild(); !slices.Equal(rebuilt, opened) {
 		return fmt.Sprintf("rebuilt index has %d entries, opened %d", len(rebuilt), len(opened)), freed
 	}
-	return modelDiff(h, m, cleanChunks, epoch+1), freed
+	if msg := modelDiff(h, m, cleanChunks, epoch+1); msg != "" {
+		return "after a rebuild: " + msg, freed
+	}
+	live := dumpIndex(h.s.Index())
+	if again := h.rebuild(); !slices.Equal(again, live) {
+		return fmt.Sprintf("a second rebuild has %d entries, the live index after the first %d", len(again), len(live)), freed
+	}
+	return "", freed
 }
 
 // [property] Crashes at any action of a workload that the cleaner keeps writing on a small disk
