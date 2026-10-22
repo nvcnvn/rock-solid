@@ -1982,9 +1982,11 @@ crash oracle and the usage table against the index:
   the block-1 rule counts only a record at `NextSeq` or more; a table row for a segment whose
   header is at or past `NextSeq` is dropped and rebuilt from replay; a header of this log below
   `NextSeq` that the table leaves out is free, not used.
-- Simulator, extending the random-crash property: with the cleaner freeing and reusing segments
-  and crashes at every action, the usage table after every recovery equals the log's own, and the
-  next open sequence number is at least the loaded manifest's `NextSeq`.
+- Simulator, extending the random-crash property (`TestCleanerSurvivesCrashes`, 500 seeds in the
+  seed runner): with the cleaner freeing and reusing segments and a crash at a seeded action, the
+  store recovers what the crash oracle holds, and after every recovery the usage table equals the
+  index's counts and the log's next open sequence number is at least the loaded manifest's
+  `NextSeq` (the store's test harness checks both after every recovery of every test).
 - Rebuild after cleaning: a rebuild from LSN 1 meets the LSNs freed segments held, gone for good,
   and reports the log corrupt; freed segments also take punches, freezes and copies' sources that
   surviving records need. Its rule is the design's open question, and its scenarios come with it.
@@ -2448,7 +2450,7 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 | Every cleaner pass frees more segments than it fills | The net-gain guard removed, or age uncapped (the cleaner spike livelocked: 1,000 passes without gaining a free segment) |
 | A cleaner move never replaces a write that landed during cleaning | A move applied without checking that the map still points at its source |
 | No segment is reused while it holds a live block, or a piece, run piece or record that the newest manifest named by a durable segment header needs (a record after its replay points) | Allocation that takes a segment the usage table lists as used with live blocks; a cleaner that judges what is needed by the newest durable manifest, which no segment header names yet |
-| After every recovery the usage table equals the log's own, and the next open sequence number is at least the loaded manifest's `NextSeq` | `NextSeq` taken from the log's next sequence number when the checkpoint begins, counting a segment a round in flight opened (the random-crash property fails at seed 1 in the [log segments study](../studies/log-segments/)) |
+| After every recovery the usage table equals the log's own, and the next open sequence number is at least the loaded manifest's `NextSeq` | `NextSeq` taken from the log's next sequence number when the checkpoint begins, counting a segment a round in flight opened (the random-crash property fails at seed 1 in the [log segments study](../studies/log-segments/)); recovery taking the next sequence number from the headers of the segments the loaded table lists, ignoring `NextSeq` (`TestCleanerSurvivesCrashes` fails at seed 10) |
 | A disk full except for its reserve still finishes a checkpoint, a merge step and a cleaner pass, and the bytes held beyond the manifests never exceed the reserve | A reserve sized without the merge-workers term, so a checkpoint during a merge fails with NoSpace; a merge step that installs its output only at the end, so the bytes held exceed the reserve |
 | No ordinary write fails with `NoSpace` while the cleaner has a victim | Group commit failing held items with NoSpace as soon as only the reserve is free, without asking the owner whether the cleaner has a victim |
 | A rebuilt chunk index equals the one recovered from its manifest | A rebuild that skips freeze entries |

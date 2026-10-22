@@ -82,8 +82,9 @@ func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
 
 // [property] Crashes at any action of a workload that the cleaner keeps writing on a small disk
 // recover what the crash oracle holds: copies durable before their moves applied replay with the
-// owner's check, freed and reused segments come back as the table and NextSeq say, and the
-// usage table equals the index's counts after every recovery.
+// owner's check, freed and reused segments come back as the table and NextSeq say, and after
+// every recovery the usage table equals the index's counts and the next open sequence is at
+// least the loaded manifest's NextSeq.
 func TestCleanerSurvivesCrashes(t *testing.T) {
 	cleaned := 0
 	seeds.Run(t, 0, 20, func(seed uint64) {

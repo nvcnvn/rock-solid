@@ -124,7 +124,8 @@ func (h *harness) take() {
 	h.out.Reset()
 }
 
-// step runs the oldest queued action and hands its completion to the store.
+// step runs the oldest queued action and hands its completion to the store. When that ends a
+// recovery, the log must open its next segment at or past the loaded manifest's NextSeq.
 func (h *harness) step() bool {
 	if len(h.queue) == 0 {
 		return false
@@ -147,7 +148,16 @@ func (h *harness) step() bool {
 	}
 	ev := h.disk.Execute(h.pool, &a)
 	recovering := !h.s.Serving()
+	var loaded uint64
+	if recovering && h.s.rec != nil {
+		if m, ok := h.s.rec.Manifest(); ok {
+			loaded = m.NextSeq
+		}
+	}
 	h.s.OnEvent(&h.ctx, &ev, &h.out)
+	if recovering && h.s.Serving() && h.s.Log().NextSeq() < loaded {
+		h.t.Fatalf("the recovered log opens its next segment at sequence %d, below the loaded manifest's NextSeq %d", h.s.Log().NextSeq(), loaded)
+	}
 	if recovering && h.s.Serving() && h.oracle != nil {
 		m, err := h.oracle.Recovered(h.s.Log().DurableLSN())
 		if err != nil {

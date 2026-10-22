@@ -713,6 +713,9 @@ func (l *Log) Reserve() uint32 { return l.reserve }
 // DurableLSN is the LSN of the newest durable record.
 func (l *Log) DurableLSN() uint64 { return l.durableLSN }
 
+// NextSeq is the open sequence the next segment the log opens takes.
+func (l *Log) NextSeq() uint64 { return l.nextSeq }
+
 // Manifest is the position of the newest durable manifest's last piece.
 func (l *Log) Manifest() ManifestPos { return l.manifest }
 
