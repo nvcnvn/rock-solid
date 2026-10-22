@@ -36,7 +36,6 @@ CONSTANTS
     RawRates,   \* [Node -> SUBSET Nat]: CLOCK_MONOTONIC_RAW's rate, per mille of real time
     Slews,      \* [Node -> SUBSET Int]: CLOCK_BOOTTIME's slew, per mille of the raw rate
     MaxTime,    \* real time bound, in units of 10 ms
-    Raft,       \* TRUE: one Raft group with a voter on every node
     Bugs
 
 \* Lease constants of design.md "Lease time", in units of 10 ms and per mille.
@@ -128,6 +127,8 @@ vars == <<ctlVars, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
 \* Views of tables and intervals
 
 Writes == plan.w
+\* The plan's Raft group, with a voter on every node.
+Raft == "raft" \in plan.f
 
 Mem(p, i) == {ivs[p][i].mem[j] : j \in 1..Len(ivs[p][i].mem)}
 St(p, i, d) == ivs[p][i].st[d]
@@ -497,7 +498,9 @@ Kept(p, L, J, c) ==
 \* A member's missing-list entry: the kept version, unless it holds it as its
 \* newest and lists nothing. Only recovery removes an entry: a member that
 \* still lists a chunk may hold a dropped version's bytes under a newer write.
-Entry(d, c, K) == IF Newest(dlog[d][c]) = K /\ miss[d][c] = NoMiss THEN NoMiss ELSE K
+Entry(d, c, K) ==
+    IF Newest(dlog[d][c]) = K /\ (miss[d][c] = NoMiss \/ Bug("PeeringClearsMissing"))
+    THEN NoMiss ELSE K
 
 \* The new primary of k peers: it reaches every live member of k and a live
 \* member of every interval since the last activated one, decides what
@@ -515,7 +518,11 @@ Peer(n, p) ==
        /\ UpIn(p, k) \subseteq Elig
        /\ \E J \in SUBSET Elig :
           LET K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c) ELSE 0]
+              \* The members the decision counts as holding the kept version:
+              \* the recovery sources it reached, and the live members it
+              \* leaves off the missing list.
               src(c) == {d \in J : Newest(dlog[d][c]) = K[c] /\ miss[d][c] = NoMiss}
+                        \cup {d \in UpIn(p, k) : Entry(d, c, K[c]) = NoMiss}
               torn == \E c \in ChunksOf(p) : K[c] # 0 /\
                         \E s \in src(c) : Content(c, dlog[s][c]) # Content(c, Chain(c, K[c]))
               lists == [d \in UpIn(p, k) |-> [c \in ChunksOf(p) |-> Entry(d, c, K[c])]]
@@ -1380,10 +1387,15 @@ ReplicaThenPrimary == Plan(<<Repl(2, 3, 1), Repl(2, 2, 3)>>, Session, {})
 PrimaryThenMaint == Plan(<<Repl(2, 2, 1), Mark(3, "maint")>>, Session, {})
 \* A replica replaced, then the primary in maintenance.
 ReplicaThenMaint == Plan(<<Repl(2, 3, 1), Mark(2, "maint")>>, Session, {"restart"})
+\* A primary restart with no membership change, and the daemon's successor.
+Restarted == Plan(<<>>, Session, {"restart", "die"})
+\* PG 2 below min_live while its primary stays, then the primary moved away.
+BelowMinLive == Plan(<<Mark(3, "down"), Mark(3, "up"), Mark(2, "maint")>>, Session, {})
 
 PeerPlans ==
     {RemovedAndBack, PrimaryBack, DownBackMoved, Reformatted, MaintKeepsPrimary,
-     PrimaryAway, ReplicaThenPrimary, PrimaryThenMaint, ReplicaThenMaint}
+     PrimaryAway, ReplicaThenPrimary, PrimaryThenMaint, ReplicaThenMaint, BelowMinLive,
+     Restarted}
 
 ProbeA == {RemovedAndBack}
 ProbeC == {[RemovedAndBack EXCEPT !.f = {}]}
