@@ -249,10 +249,10 @@ CommitAt(c) ==
 \* Initial state
 
 \* A plan's raw rates: with "exact" every clock runs at real time, with
-\* "fast" node 2 alone runs at the fastest rate of RawRates.
+\* "fast" node 3 alone runs at the fastest rate of RawRates.
 PlanRates(n) ==
     IF "exact" \in plan.f THEN {1000}
-    ELSE IF "fast" \in plan.f THEN IF n = 2 THEN {Max(RawRates[2])} ELSE {1000}
+    ELSE IF "fast" \in plan.f THEN IF n = 3 THEN {Max(RawRates[3])} ELSE {1000}
     ELSE RawRates[n]
 
 \* With lease expiry left open, interval 1's primaries start with their grants.
@@ -272,7 +272,7 @@ Init ==
     /\ dnode = [d \in Disk |-> IF d \in Node THEN d ELSE 0]
     /\ ddisk = [n \in Node |-> n]
     /\ fmts = 0
-    /\ stale = IF "stale1" \in plan.f THEN {1} ELSE {}
+    /\ stale = IF "stale2" \in plan.f THEN {2} ELSE {}
     /\ run = [n \in Node |-> 1]
     /\ rsIv = [n \in Node |-> [p \in PG |-> 0]]
     /\ dlog = [d \in Disk |-> [c \in Chunk |-> {}]]
@@ -320,8 +320,8 @@ Init ==
     /\ dirty = [h \in Node |-> [g \in Node |-> FALSE]]
     /\ hs = [h \in Node |-> [g \in Node |-> -1]]
     /\ faults = 0
-    /\ rterm = [n \in Node |-> 0]
-    /\ rlead = [n \in Node |-> FALSE]
+    /\ rterm = [n \in Node |-> IF Raft THEN 1 ELSE 0]
+    /\ rlead = [n \in Node |-> Raft /\ n = 1]
     /\ fort = [n \in Node |-> NoFort]
     /\ fby = [n \in Node |-> [v \in Node |-> -1]]
     /\ xfer = [n \in Node |-> FALSE]
@@ -1028,20 +1028,20 @@ Deadlines ==
 -----------------------------------------------------------------------------
 \* Faults
 
-\* The nodes faults hit: in a handover of PG 1, its primary (node 1) and the
-\* grantor whose rate varies (node 2); node 3 grants as node 2 does.
-Target(n) == "stale1" \in plan.f => n \in {1, 2}
+\* The nodes faults hit: in a handover of PG 2, its primary (node 2) and its
+\* grantor (node 3). In a Raft plan, partitions cut the first leader's links.
+Target(n) == "stale2" \in plan.f => n \in {2, 3}
 
 Fault(kind) == /\ kind \in plan.f
-               /\ faults < MaxFault
+               /\ faults < Min({MaxFault, plan.k})
                /\ faults' = faults + 1
 
 \* A node cut off from the control plane still reaches its peers but adopts
-\* no new table: node 1 from the start with "stale1", node 2 from any time
-\* with "stale2".
+\* no new table: node 2 from the start with "stale2", or from any time with
+\* "isolate2".
 Isolate(n) ==
     /\ n = 2
-    /\ "stale2" \in plan.f
+    /\ "isolate2" \in plan.f
     /\ stale = {}
     /\ stale' = {n}
     /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, run, rsIv, dlog, miss, persIv, mrecv, priVars,
@@ -1168,7 +1168,10 @@ Restart(n) ==
                    lastAsk, lastHb, net, arrived, hs, rterm, xto>>
 
 \* A reboot restarts the process and both clocks near 0, with a new boot ID
-\* and a raw rate 2% off its old one.
+\* and a raw rate 2% off its old one. The node is down for at least a
+\* heartbeat first (BootUp): a reboot takes seconds, which the restart wait
+\* relies on, since the new boot's clocks may run faster than the holders
+\* measured the old one.
 Reboot(n) ==
     /\ Clocks
     /\ Running(n)
@@ -1185,9 +1188,19 @@ Reboot(n) ==
     /\ bootId' = [bootId EXCEPT ![n] = @ + 1]
     /\ rstAt' = [rstAt EXCEPT ![n] = [r |-> 0, b |-> 0]]
     /\ dirty' = Taint(n)
+    /\ frz' = [frz EXCEPT ![n] = "boot"]
+    /\ suspAt' = [suspAt EXCEPT ![n] = now]
     /\ UNCHANGED <<tbl, ivs, plan, step, reports, ep, dnode, ddisk, fmts, stale, dlog, miss, persIv, pv, dec, act,
-                   dataVars, now, slew, frz, suspAt, rq, gm, hbm, lastAsk, lastHb, net, arrived,
+                   dataVars, now, slew, rq, gm, hbm, lastAsk, lastHb, net, arrived,
                    hs, rterm, xto>>
+
+BootUp(n) ==
+    /\ frz[n] = "boot"
+    /\ now >= suspAt[n] + HB \/ Bug("InstantReboot")
+    /\ frz' = [frz EXCEPT ![n] = "run"]
+    /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
+                   slew, bootId, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs,
+                   faults, raftVars>>
 
 \* A disk formatted again draws a new log ID, which the control plane treats
 \* as a new, empty disk; the old disk ID stays down.
@@ -1294,10 +1307,11 @@ Protocol ==
     \/ \E i \in 1..Len(Writes) : Send(i)
     \/ \E n \in Node : \E x \in pin[n] : Order(n, x) \/ Refuse(n, x)
     \/ \E m \in rm : Deliver(m)
-    \/ \E n, v \in Node : Fortify(n, v)
-    \/ \E n \in Node : StepDown(n)
+    \/ \E n, v \in Node : ~rlead[v] /\ Fortify(n, v)
+    \/ \E n \in Node : BootUp(n)
 
-\* Choices: membership changes, faults, elections and transfers. With two
+\* Choices: membership changes, faults, elections and transfers, and an old
+\* leader hearing of a newer term, which a message may bring late. With two
 \* clocks per node they come on heartbeat boundaries: what a lease overlap
 \* turns on is the last renewal before them, which keeps its own timing.
 Choices ==
@@ -1309,9 +1323,13 @@ Choices ==
          \/ Suspend(n) \/ Wake(n) \/ Freeze(n, "pause") \/ Freeze(n, "stop") \/ Thaw(n)
          \/ RateStep(n) \/ Restart(n) \/ Reboot(n) \/ Format(n)
     \/ \E h, g \in Node, to \in {"ok", "slow", "cut"} :
-         to \in plan.f \cup {"ok"} /\ Target(h) /\ Target(g) /\ NetFault(h, g, to)
+         to \in plan.f \cup (IF "heal" \in plan.f THEN {"ok"} ELSE {})
+         /\ Target(h) /\ Target(g) /\ (Raft => 1 \in {h, g})
+         /\ NetFault(h, g, to)
     \/ \E n \in Node, Q \in SUBSET Node : Elect(n, Q)
     \/ \E n, v \in Node : Transfer(n, v)
+    \/ \E n \in Node : StepDown(n)
+    \/ \E n, v \in Node : rlead[v] /\ Fortify(n, v)
 
 Choice ==
     /\ ~Clocks \/ now % HB = 0
@@ -1468,7 +1486,7 @@ OneWhole == <<[c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-
 Mark(d, to) == [k |-> "mark", d |-> d, to |-> to]
 Repl(p, old, new) == [k |-> "replace", p |-> p, old |-> old, new |-> new]
 Rot(p) == [k |-> "rotate", p |-> p]
-Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f, t |-> 600]
+Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f, t |-> 600, k |-> 1]
 
 \* The membership faults of test-scenarios.md "Epoch change model" on 3 nodes,
 \* each with the writes whose rules it tests.
@@ -1501,48 +1519,71 @@ PeerPlans ==
      PrimaryAway, ReplicaThenPrimary, PrimaryThenMaint, ReplicaThenMaint, BelowMinLive,
      Restarted}
 
-\* ci-leases: PG 1's primary is node 1, whose CLOCK_BOOTTIME runs at its raw
-\* rate or 22.6% slow; node 2, its grantor, runs 4% slow or fast, with
-\* CLOCK_BOOTTIME at that rate or 22.6% fast; node 3 is exact. Plans whose
+\* ci-leases: PG 2's primary is node 2, whose CLOCK_BOOTTIME runs at its raw
+\* rate or 22.6% slow; node 3, its only grantor, runs 4% slow or fast, with
+\* CLOCK_BOOTTIME at that rate or 22.6% fast; node 1 is exact. Plans whose
 \* faults do not turn on the ratio of rates take one (PlanRates).
-LeaseRates == [n \in Nodes4 |-> IF n = 2 THEN {960, 1040} ELSE {1000}]
-LeaseSlews == [n \in Nodes4 |-> CASE n = 1 -> {0, -226} [] n = 2 -> {0, 226} [] OTHER -> {0}]
+LeaseRates == [n \in Nodes4 |-> IF n = 3 THEN {960, 1040} ELSE {1000}]
+LeaseSlews == [n \in Nodes4 |-> CASE n = 2 -> {0, -226} [] n = 3 -> {0, 226} [] OTHER -> {0}]
 
 \* Leases form and hold with no change of membership.
 Steady == Plan(<<>>, OneWhole, {})
-\* PG 1's primary is marked down while it still runs on an old table: its
-\* grantors refuse to renew it, wait out their grants and peer the new interval.
-Handover == Plan(<<Mark(1, "down")>>, OneWhole, {"stale1"})
-\* The same, with a grantor's raw rate rising by up to lease_drift / 2.
-HandoverStep == Plan(<<Mark(1, "down")>>, OneWhole, {"stale1", "step", "fast"})
+\* PG 2's primary, node 2, is put in maintenance while it still runs, cut off
+\* from the control plane: its grantor, node 3, refuses to renew it, waits out
+\* its grant and peers the new interval as primary.
+Handover == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2"})
+\* The same, with node 3 4% fast, its raw rate rising by 0.4% after it was
+\* measured, and a partition.
+HandoverStep == [Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "step", "cut", "fast"}) EXCEPT !.k = 2]
 \* The same, with a suspend or a VM pause that changes the VMClock marker.
-HandoverSuspend == Plan(<<Mark(1, "down")>>, OneWhole, {"stale1", "susp", "pause", "exact"})
+HandoverSuspend == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "susp", "pause", "exact"})
 \* The same, with a kvm-clock guest stopped in place.
-HandoverStop == Plan(<<Mark(1, "down")>>, OneWhole, {"stale1", "stop", "exact"})
-\* The same, with a reboot or a process restart.
-HandoverReboot == [Plan(<<Mark(1, "down")>>, OneWhole, {"stale1", "reboot", "restart", "exact"}) EXCEPT !.t = 900]
-\* The same, with a partition or delayed messages.
-HandoverNet == Plan(<<Mark(1, "down")>>, OneWhole, {"stale1", "cut", "slow", "exact"})
+HandoverStop == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "stop", "exact"})
+\* The same, with a reboot within rate_window and a partition that may heal.
+HandoverReboot == [Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "reboot", "cut", "heal", "exact"}) EXCEPT !.t = 1100, !.k = 2]
+\* The same, with a process restart.
+HandoverRestart == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "restart", "exact"})
+\* The same, with a partition that may heal.
+HandoverCut == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "cut", "heal", "exact"})
+\* The same, with messages delayed any time.
+HandoverSlow == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "slow", "exact"})
 \* Interval 2 of PG 2 replaces 3 with 1 under primary 2, which serves reads
 \* under 1's grant; interval 3 puts 1 in maintenance; interval 4 moves the
 \* primary to 3, which was live in interval 1 but not in 2 or 3.
-Maintenance == Plan(<<Repl(2, 3, 1), Mark(1, "maint"), Repl(2, 2, 3)>>, <<>>, {"stale2", "exact"})
-\* The Raft group with leader transfer.
+Maintenance == Plan(<<Repl(2, 3, 1), Mark(1, "maint"), Repl(2, 2, 3)>>, <<>>, {"isolate2", "exact"})
+\* The Raft group, node 1 its leader in term 1 at the start, with leader
+\* transfer.
 RaftTransfer == [Plan(<<>>, <<>>, {"raft", "transfer", "exact"}) EXCEPT !.t = 300]
-\* The Raft group with a partition that heals.
-RaftPartition == [Plan(<<>>, <<>>, {"raft", "cut", "exact"}) EXCEPT !.t = 500]
+\* The Raft group with partitions that heal.
+RaftPartition == [Plan(<<>>, <<>>, {"raft", "cut", "heal", "exact"}) EXCEPT !.t = 500, !.k = 2]
 
+\* ci-leases checks these. The reboot plan, at 1.6 million states, runs in
+\* deep and alone for its negative variants; the plan with delayed messages,
+\* at over 3 million, runs in deep.
 LeasePlans == {Steady, Handover, HandoverStep, HandoverSuspend, HandoverStop,
-               HandoverReboot, HandoverNet, Maintenance, RaftTransfer, RaftPartition}
+               HandoverRestart, HandoverCut, Maintenance, RaftTransfer, RaftPartition}
+RebootPlans == {HandoverReboot}
+AllLeasePlans == LeasePlans \cup {HandoverReboot, HandoverSlow}
+Probe7 == {HandoverCut}
 ProbeL == {Steady}
 NeverReads == ~Reading(1, 1)
+NeverTwoLeaders == ~\E n, m \in Node : n # m /\ rlead[n] /\ rlead[m]
+NeverRaftReads == ~\E n \in Node : RaftReads(n)
+NeverTransfers == xto = 0
+NewFortifiedBesideOld == ~\E n, m, v \in Node : rlead[n] /\ fby[n][v] >= 0 /\ m # n /\ rlead[m] /\ xfer[m] /\ rterm[m] < rterm[n]
+NewLeaderBesideOld ==~\E n, m \in Node : rlead[n] /\ m # n /\ rlead[m] /\ rterm[m] < rterm[n] /\ xfer[m]
+NewReadsBesideOld ==~\E n, m \in Node : RaftReads(n) /\ m # n /\ rlead[m] /\ rterm[m] < rterm[n] /\ xfer[m]
+TargetReadsBesideOld ==~\E n, m \in Node : RaftReads(n) /\ m # n /\ rlead[m] /\ xfer[m]
+TargetNeverReads ==~\E n \in Node : rterm[n] = 2 /\ rlead[n] /\ RaftReads(n)
+TargetNeverFortified == ~\E n, v \in Node : rterm[n] = 2 /\ rlead[n] /\ fby[n][v] >= 0
+NeverSecondTerm == \A n \in Node : rterm[n] < 2
 NeverActivates == ~\E x \in act : x.k > 1
 ProbeH == {Handover}
 Probe1 == {HandoverStep}
 Probe2 == {HandoverSuspend}
 Probe3 == {HandoverStop}
 Probe4 == {HandoverReboot}
-Probe5 == {HandoverNet}
+Probe5 == {HandoverSlow}
 Probe6 == {Maintenance}
 ProbeR == {RaftTransfer}
 ProbeP == {RaftPartition}
@@ -1552,6 +1593,6 @@ ProbeC == {[RemovedAndBack EXCEPT !.f = {}]}
 ProbeB == {PrimaryAway}
 
 \* deep: any change at any time, with both families of writes.
-FreePlans == {[free |-> TRUE, m |-> <<>>, w |-> Both, f |-> {"restart", "format", "die"}, t |-> 0]}
+FreePlans == {[free |-> TRUE, m |-> <<>>, w |-> Both, f |-> {"restart", "format", "die"}, t |-> 0, k |-> 1]}
 
 =============================================================================

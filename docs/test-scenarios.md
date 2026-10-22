@@ -3073,7 +3073,7 @@ Open:
 | --- | --- | --- | --- |
 | Epoch change | No PG serves reads from two primaries at once | No PG serves reads from two primaries at once | Placement faults and invariants (phase 3) |
 | Epoch change | No two replicas of a shard serve lease reads at once | No two replicas of a shard serve lease reads at overlapping times | MetaStore invariants (phase 4) |
-| Epoch change | No write tagged with an interval completes after a later interval of its PG activates | No write tagged with an interval completes after a later interval of its PG has activated | Placement faults and invariants (phase 3) |
+| Epoch change | No write tagged with an interval completes after a later interval of its PG activates, unless that interval kept it | No write tagged with an interval completes after a later interval of its PG has activated unless that interval kept it | Placement faults and invariants (phase 3) |
 | Epoch change | No acknowledged version, and no version an activated interval kept, is ever dropped | No acknowledged version is ever dropped, and no version an activated interval kept is dropped later | Placement faults and invariants (phase 3) |
 | Epoch change | The versions peering drops are a suffix of each chunk's pending versions, so no kept version was merged on a dropped one | No version peering keeps follows a dropped version of its chunk (with the byte-range oracle) | Placement faults and invariants (phase 3) |
 | Epoch change | No two writes of a chunk get one version | No two writes of a chunk get one version | Invariant checker (phase 1) |
@@ -3118,7 +3118,7 @@ sender's table epoch (`uint64`, per the PG epochs study) and the PG's interval n
 | Punch | PG fields, session ID, incarnation, chunk ID, byte range, optional `expect_ver`, snapshot epoch; the version when sent to a member |
 | Read | PG fields, chunk ID, byte range, optional `at_ver` |
 | Read reply | Bytes and version; or a refusal (wrong interval, chunk on the missing list, unfound) |
-| Grant | Support epoch, and the grantor's `CLOCK_MONOTONIC_RAW` reading `g`; the grantor's table epoch too if the epoch change model's grant rule needs it |
+| Grant | Support epoch, and the grantor's `CLOCK_MONOTONIC_RAW` reading `g`; no table epoch, since a grantor grants only a holder that reported a table at least as new as its own ([Epoch change model](#epoch-change-model)) |
 | Heartbeat between a node pair | The grantor's `CLOCK_MONOTONIC_RAW`, on every heartbeat |
 | Heartbeat to the authority | Activation reports per PG; each member's acknowledgment latency; per disk its log ID, fill, oldest unfinished I/O age and whether its log has failed |
 | `member_timeout` report, primary to authority | Member, PG |
@@ -3967,7 +3967,7 @@ model](#epoch-change-model) property it checks:
 
 - One read-serving primary per PG (1).
 - No read returns a version before it commits, and no read returns a version that is later lost.
-- No write completes after a later interval of its PG activates (3).
+- No write completes after a later interval of its PG activates, unless that interval kept it (3).
 - No write is refused for its interval while its PG's interval did not change. This is a counter,
   expected to be 0 (7).
 - No acknowledged version, and no version an activated interval kept, is ever dropped (4).
