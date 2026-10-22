@@ -1367,7 +1367,7 @@ func (s *Store) InstallMerge(ctx *core.Context, c *lsm.Compaction, out *Output) 
 }
 
 // indexBroken starts a rebuild of the index from the log: the store stops taking operations,
-// lets the log's rounds in flight finish and restarts its log in rebuild mode.
+// lets the log's rounds in flight finish and recovers its log again as an open does.
 func (s *Store) indexBroken(ctx *core.Context, out *Output) {
 	s.phase = draining
 	s.failWaiting(ctx, ErrUnavailable, out)
@@ -1386,7 +1386,7 @@ func (s *Store) drain(ctx *core.Context, out *Output) {
 	}
 	s.phase = recovering
 	s.resetCleaner()
-	if err := s.recover(ctx, s.sb.Geometry.DiskBlocks(), disklog.ModeRebuild); err != nil {
+	if err := s.recover(ctx, s.sb.Geometry.DiskBlocks(), disklog.ModeOpen); err != nil {
 		s.phase, s.err = failed, err
 	}
 }

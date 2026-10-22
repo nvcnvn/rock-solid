@@ -1,6 +1,8 @@
 package chunkstore
 
 import (
+	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -43,8 +45,9 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) uint64 {
 
 // cleanerCrash runs the workload on the small disk, cleaning as it fills, crashes it at a seeded
 // action with a seeded share of unflushed blocks landing, and recovers: the store must hold what
-// the crash oracle holds, live and at every snapshot, with the usage table on the index's counts.
-// It returns the difference, if any.
+// the crash oracle holds, live and at every snapshot, with the usage table on the index's counts,
+// and again once it has rebuilt its index, which must equal the opened one. It returns the
+// difference, if any.
 func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
 	r := core.NewRand(seed)
 	h := newHarnessOn(t, cleanConfig(), cleanGeo)
@@ -77,14 +80,24 @@ func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
 		t.Fatalf("seed %d: recovery stopped: %v", seed, h.s.Err())
 	}
 	h.checkUsage()
-	return modelDiff(h, h.recovered, cleanChunks, epoch+1), freed
+	m := h.recovered
+	if msg := modelDiff(h, m, cleanChunks, epoch+1); msg != "" {
+		return msg, freed
+	}
+	opened := dumpIndex(h.s.Index())
+	h.s.cfg.CleanFree = -1
+	h.rebuild()
+	if rebuilt := dumpIndex(h.s.Index()); !slices.Equal(rebuilt, opened) {
+		return fmt.Sprintf("rebuilt index has %d entries, opened %d", len(rebuilt), len(opened)), freed
+	}
+	return modelDiff(h, m, cleanChunks, epoch+1), freed
 }
 
 // [property] Crashes at any action of a workload that the cleaner keeps writing on a small disk
 // recover what the crash oracle holds: copies durable before their moves applied replay with the
 // owner's check, freed and reused segments come back as the table and NextSeq say, and after
 // every recovery the usage table equals the index's counts and the log opens its next segment
-// past every open sequence on disk.
+// past every open sequence on disk. A rebuild of the index after the recovery equals it.
 func TestCleanerSurvivesCrashes(t *testing.T) {
 	cleaned := 0
 	seeds.Run(t, 0, 20, func(seed uint64) {

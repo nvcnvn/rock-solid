@@ -195,9 +195,35 @@ func (h *harness) recoverStore(mode disklog.Mode) {
 
 // [property] A workload crashed at its k-th disk action, for every k, with no unflushed block
 // landing, a seeded half of them, and all of them, recovers to a prefix of what was written that holds
-// every acknowledged record, live and at every snapshot, and the rebuilt index equals it.
+// every acknowledged record, live and at every snapshot, and the rebuilt index equals it; so does
+// the workload on a small disk followed by a pass of the cleaner, which frees segments.
 func TestCrashAtEveryAction(t *testing.T) {
 	crashEveryAction(t, crashConfig(), nil, crashWorkload, true)
+	h := newHarnessOn(t, cleanConfig(), cleanGeo)
+	cleanedCrashWorkload(h)
+	if h.s.CleanStats().Freed == 0 {
+		t.Fatal("the cleaner freed no segment")
+	}
+	crashEveryAction(t, cleanConfig(), &cleanGeo, cleanedCrashWorkload, true)
+}
+
+// cleanedCrashWorkload overwrites a few blocks of two chunks, under snapshot epochs up to 2, until
+// their older segments are mostly dead, and ends with a pass of the cleaner that frees every
+// segment it can.
+func cleanedCrashWorkload(h *harness) {
+	c, d := crashChunks[0], crashChunks[1]
+	h.write(c, 100, fill(300, 0xa1), 0)
+	h.punch(c, 0, 50, 0)
+	for i := range 36 {
+		h.write(d, uint32(i%6)*core.BlockSize, fill(core.BlockSize, byte(i)), uint64(i/12))
+		if i%4 == 0 {
+			h.settle()
+		} else {
+			h.step()
+		}
+	}
+	h.settle()
+	h.clean(int(cleanGeo.SegmentCount))
 }
 
 // crashEveryAction runs the crash property over workload on a disk cut as geo, or the default
@@ -227,6 +253,7 @@ func crashEveryAction(t *testing.T, cfg Config, geo *disklog.Geometry, workload 
 	if err := full.s.CheckSlots(); err != nil {
 		t.Fatal(err)
 	}
+	cleaned := full.s.CleanStats().Freed > 0
 	landings := []string{"none", "half", "all"}
 	if geo != nil {
 		landings = append(landings, "all but slots")
@@ -261,11 +288,21 @@ func crashEveryAction(t *testing.T, cfg Config, geo *disklog.Geometry, workload 
 			m := h.recovered
 			checkModel(t, h, m, crashChunks, 2)
 			opened := dumpIndex(h.s.Index())
-			recoverStore(h, k, disklog.ModeRebuild)
+			h.rebuild()
+			if err := h.s.CheckSlots(); err != nil {
+				t.Fatalf("crash at action %d, rebuild: %v", k, err)
+			}
 			if got := dumpIndex(h.s.Index()); !slices.Equal(got, opened) {
 				t.Fatalf("crash at action %d: rebuilt index has %d entries, recovered %d", k, len(got), len(opened))
 			}
 			checkModel(t, h, m, crashChunks, 2)
+			if cleaned {
+				continue
+			}
+			recoverStore(h, k, disklog.ModeRebuild)
+			if got := dumpIndex(h.s.Index()); !slices.Equal(got, opened) {
+				t.Fatalf("crash at action %d: index replayed from LSN 1 has %d entries, recovered %d", k, len(got), len(opened))
+			}
 		}
 	}
 }

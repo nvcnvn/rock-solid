@@ -17,7 +17,7 @@ type Mode uint8
 const (
 	// ModeOpen loads the newest manifest and replays the records after its oldest replay LSN.
 	ModeOpen Mode = iota + 1
-	// ModeRebuild replays every record from the start of the log, taking from the manifest only its usage table and what is left to replay.
+	// ModeRebuild replays every record from the start of the log, taking from the manifest only its usage table and what is left to replay; it checks open on a log the cleaner never freed a segment of, and reports any other corrupt.
 	ModeRebuild
 )
 
