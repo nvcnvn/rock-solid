@@ -142,7 +142,10 @@ type Index struct {
 	tree          *lsm.Tree
 	segmentBlocks uint32
 	// freed is the chunk slots whose count reached zero since the owner last took them.
-	freed         []core.LBA
+	freed []core.LBA
+	// slotHeld is, by segment, the blocks the maps refer to in chunk slots whose records' headers
+	// lie there.
+	slotHeld      []uint32
 	key           []byte
 	val           []byte
 	lo            []byte
@@ -434,10 +437,58 @@ func (x *Index) refer(e Extent, n int, own bool) {
 		x.addLive(e.Header, n)
 	}
 	if slot, ok := x.slotOf(e); ok {
-		if x.count(slot, n) == 0 {
+		if x.countSlot(slot, e.Header, n) == 0 {
 			x.freed = append(x.freed, slot)
 		}
+		seg := int(uint64(e.Header) / uint64(x.segmentBlocks))
+		if seg >= len(x.slotHeld) {
+			x.slotHeld = append(x.slotHeld, make([]uint32, seg+1-len(x.slotHeld))...)
+		}
+		x.slotHeld[seg] = uint32(int(x.slotHeld[seg]) + n)
 	}
+}
+
+// countSlot changes a chunk slot's count as count does a record's, keeping beside it the header
+// of the record that wrote the slot, so that an open can count each segment's slot-held blocks.
+func (x *Index) countSlot(slot, header core.LBA, delta int) int {
+	if v, _ := x.tree.Get(x.recordKey(slot)); len(v) == 12 && delta < 0 {
+		header = core.LBA(binary.LittleEndian.Uint64(v[4:]))
+	}
+	return x.store(slot, delta, header)
+}
+
+// SlotHeld is how many of the blocks the maps refer to in chunk slots have their record's header
+// in segment: the usage table counts them live there, and no copy frees it while they are.
+func (x *Index) SlotHeld(segment uint32) uint32 {
+	if int(segment) < len(x.slotHeld) {
+		return x.slotHeld[segment]
+	}
+	return 0
+}
+
+// SegmentSlotHeld adds to held[s] the blocks the maps refer to in chunk slots whose records'
+// headers lie in segment s, from the slots' stored counts.
+func (x *Index) SegmentSlotHeld(held []uint32) {
+	x.tree.Iter(&x.it)
+	for ok := x.it.SeekGE(x.recordKey(0)); ok; ok = x.it.Next() {
+		k, v := x.it.Key(), x.it.Value()
+		if len(k) != recordSize || core.PoolID(binary.BigEndian.Uint32(k)) != RecordPool {
+			break
+		}
+		if len(v) == 12 {
+			if s := binary.LittleEndian.Uint64(v[4:]) / uint64(x.segmentBlocks); s < uint64(len(held)) {
+				held[s] += binary.LittleEndian.Uint32(v)
+			}
+		}
+	}
+}
+
+// RecountSlotHeld takes each segment's slot-held blocks from the slots' stored counts, as after a
+// recovery, whose replay counted only the records it applied.
+func (x *Index) RecountSlotHeld(segments uint32) {
+	x.slotHeld = slices.Grow(x.slotHeld[:0], int(segments))[:segments]
+	clear(x.slotHeld)
+	x.SegmentSlotHeld(x.slotHeld)
 }
 
 // slotOf is the first LBA of the chunk slot holding the extent's blocks, if they lie in one:
@@ -462,17 +513,24 @@ func (x *Index) TakeFreed(dst []core.LBA) []core.LBA {
 	return dst
 }
 
-func (x *Index) count(header core.LBA, delta int) int {
-	n := int(x.Live(header)) + delta
+func (x *Index) count(header core.LBA, delta int) int { return x.store(header, delta, 0) }
+
+// store changes the count kept at the record or slot at, with the header of a slot's record
+// unless writer is 0.
+func (x *Index) store(at core.LBA, delta int, writer core.LBA) int {
+	n := int(x.Live(at)) + delta
 	if n < 0 {
-		panic(fmt.Sprintf("chunkstore: record at LBA %d refers to %d blocks", header, n))
+		panic(fmt.Sprintf("chunkstore: record at LBA %d refers to %d blocks", at, n))
 	}
-	k := x.recordKey(header)
+	k := x.recordKey(at)
 	if n == 0 {
 		x.must(x.tree.Delete(k))
 		return 0
 	}
 	x.val = binary.LittleEndian.AppendUint32(x.val[:0], uint32(n))
+	if writer != 0 {
+		x.val = binary.LittleEndian.AppendUint64(x.val, uint64(writer))
+	}
 	x.must(x.tree.Put(k, x.val))
 	return n
 }
@@ -777,6 +835,7 @@ type recordCount struct {
 func (x *Index) Check() error {
 	x.check = x.check[:0]
 	var stored []recordCount
+	var held []uint32
 	var prefix []byte
 	var mapVersion, marker, chunkEpoch uint64
 	prevEnd := 0
@@ -785,7 +844,7 @@ func (x *Index) Check() error {
 		k, v := x.it.Key(), x.it.Value()
 		switch {
 		case len(k) == recordSize && core.PoolID(binary.BigEndian.Uint32(k)) == RecordPool:
-			if len(v) != 4 || binary.LittleEndian.Uint32(v) == 0 {
+			if len(v) != 4 && len(v) != 12 || binary.LittleEndian.Uint32(v) == 0 {
 				return fmt.Errorf("record %x: count %x", k, v)
 			}
 			stored = append(stored, recordCount{core.LBA(binary.BigEndian.Uint64(k[4:])), binary.LittleEndian.Uint32(v)})
@@ -819,6 +878,9 @@ func (x *Index) Check() error {
 			}
 			if slot, ok := x.slotOf(e); ok {
 				x.check = append(x.check, recordCount{slot, uint32(e.Count)})
+				seg := int(uint64(e.Header) / uint64(x.segmentBlocks))
+				held = append(held, make([]uint32, max(0, seg+1-len(held)))...)
+				held[seg] += uint32(e.Count)
 			}
 		default:
 			return fmt.Errorf("key %x outside any chunk", k)
@@ -835,6 +897,15 @@ func (x *Index) Check() error {
 	}
 	if !slices.Equal(stored, want) {
 		return fmt.Errorf("record counts %v, the maps refer to %v", stored, want)
+	}
+	n := max(len(held), len(x.slotHeld))
+	kept := make([]uint32, n)
+	x.SegmentSlotHeld(kept)
+	held = append(held, make([]uint32, n-len(held))...)
+	for s := range n {
+		if held[s] != x.SlotHeld(uint32(s)) || held[s] != kept[s] {
+			return fmt.Errorf("segment %d: the maps refer to %d blocks in slots its records wrote, the index counts %d and the slots' counts %d", s, held[s], x.SlotHeld(uint32(s)), kept[s])
+		}
 	}
 	return nil
 }

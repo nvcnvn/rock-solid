@@ -202,7 +202,7 @@ func (s *Store) isVictim(seg uint32) bool {
 // costs less than a segment less the header of the segment it lands in, header blocks
 // included, charging live run pieces at the records of the whole runs a rewrite writes again and
 // what each of its steps writes beside them; a chunk segment's copies must also fit the room the
-// cleaner's lane can reach.
+// cleaner's lane can reach, and it must hold no header of a live slot write, which no copy moves.
 // A segment holding a piece of a manifest recovery may load waits for the next snapshot, which
 // it asks for, and one holding only pieces about to die waits for them.
 func (s *Store) chooseVictims() []uint32 {
@@ -227,7 +227,7 @@ func (s *Store) chooseVictims() []uint32 {
 			}
 			steps, extra := s.ix.Tree().RewriteSteps(seg)
 			cost = s.log.RewriteCost(s.cl.pieces, steps, extra)
-		} else if cost = s.log.CopyCost(uint64(u.Live)); cost > room {
+		} else if cost = s.log.CopyCost(uint64(u.Live)); cost > room || s.ix.SlotHeld(seg) > 0 {
 			continue
 		}
 		if cost+1 >= uint64(geo.SegmentBlocks) {

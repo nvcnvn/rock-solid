@@ -1907,9 +1907,16 @@ on the 1 GiB disk one capacity is 262,144 blocks):
   disk reaches zero free segments; before this check every later write started a pass whose
   copies found no room, copied 10 blocks for nothing and failed. Now a write that finds no room
   fails with NoSpace with nothing copied, under overwrites and once new blocks fill the disk.
-- A pass that frees nothing starts no other until the durable LSN moves: a segment whose only
-  live blocks are a whole chunk's slot writes, which its record header checksums, is passed over
-  once, and five reads after it start no pass.
+- A segment holding the record header of a live whole chunk's slot write is never a victim: the
+  index counts the slot's blocks against the header's segment, recounted at open from the slots'
+  counts, which keep their record's header. A segment whose only live blocks are those is left
+  alone however short of clean_free. With nine whole chunks' headers among overwrites of a small
+  chunk, 3,000 more overwrites never fail, and new data then fails with NoSpace only once no
+  segment without a slot header would gain space; scored by their age, the header segments took
+  every pass and writes failed while 16 segments with nothing live waited.
+- A pass that frees nothing starts no other until the durable LSN moves: once the 4 best victims
+  each hold a block that fails its checksum, a pass quarantines them all, five reads after it
+  start no pass, and a write starts one that frees segments.
 - Age cap regression, scripted in Go as the cleaner spike modelled it: a 1 GiB disk of 4,096
   segments at 90% full, 20% of the data frozen by a snapshot, 90/10 hot/cold overwrites, copies in
   age order with moved blocks keeping their write time. Capped, at most a few passes in a row gain
@@ -1925,9 +1932,11 @@ on the 1 GiB disk one capacity is 262,144 blocks):
 - Live counts come from the usage table. The owner hands the log every change to a record's
   count past the blocks it wrote (the index keeps them while tracking is on): after every step
   of the store's tests, each segment outside the metadata stream counts exactly what the
-  index's records in it refer to, and a property test checks that a record's count is its own
-  blocks plus the changes kept, over writes, punches, freezes and copies. A copy no map takes
-  lowers its own record by its blocks at once.
+  index's records in it refer to, and the index's slot-held count of each segment equals what
+  its slots' stored counts give; a property test checks that a record's count is its own
+  blocks plus the changes kept, over writes, punches, freezes and copies, and the index's check
+  that the slot-held counts are what its maps refer to. A copy no map takes lowers its own
+  record by its blocks at once.
 - Dead run pieces (a dropped run, a merge's consumed inputs, a replaced step root, a failed
   checkpoint's pieces) stay live until a segment header names the manifest that dropped them,
   then leave the count; a block two pieces of a record share stays live until both are dead; a

@@ -413,9 +413,9 @@ func TestTheCleanerKeepsTheHeadersOfLiveSlotWrites(t *testing.T) {
 }
 
 // A segment whose live blocks are only the slot writes its record headers hold the checksums of
-// copies nothing and is never freed. A pass over it frees nothing, so the cleaner, one worker
-// short of clean_free, starts no other until the durable LSN moves, however often the store wakes.
-func TestAPassOverSlotHeadersAloneWaitsForTheLog(t *testing.T) {
+// is never freed while the chunk lives, so it is never a victim, however short of clean_free,
+// and a restart that loads the chunk's record from the index's runs counts them again.
+func TestASegmentOfSlotHeadersAloneIsNoVictim(t *testing.T) {
 	cfg := cleanConfig()
 	cfg.Log.MaxReplayBytes = 64 * core.BlockSize
 	h := newHarnessOn(t, cfg, slotGeometry)
@@ -429,20 +429,69 @@ func TestAPassOverSlotHeadersAloneWaitsForTheLog(t *testing.T) {
 	h.clean(1000)
 	e, _ := h.s.Index().Lookup(testPool, whole, 0)
 	seg := uint32(uint64(e.Header) / uint64(slotGeometry.SegmentBlocks))
-	if u, _ := h.s.Log().Usage(seg); u.Live != core.BlocksPerChunk || !slices.Equal(h.s.chooseVictims(), []uint32{seg}) {
-		t.Fatalf("segment %d holding the whole chunk's header is %+v; victims %v", seg, u, h.s.chooseVictims())
+	if u, _ := h.s.Log().Usage(seg); u.State != disklog.SegmentUsed || u.Live != core.BlocksPerChunk || h.s.Index().SlotHeld(seg) != core.BlocksPerChunk {
+		t.Fatalf("segment %d holding the whole chunk's header is %+v, %d slot-held", seg, u, h.s.Index().SlotHeld(seg))
 	}
-	h.clean(h.s.Log().FreeOutsideReserve() + 1)
-	passes, lsn := h.s.CleanStats().Passes, h.s.Log().DurableLSN()
+	if !h.s.Log().Cleanable(seg) || slices.Contains(h.s.chooseVictims(), seg) {
+		t.Fatalf("segment %d: cleanable %v, victims %v", seg, h.s.Log().Cleanable(seg), h.s.chooseVictims())
+	}
+	if st := h.s.CleanStats(); st.Copied != 0 {
+		t.Fatalf("the cleaner copied %d blocks of a disk whose only live blocks are a chunk slot's", st.Copied)
+	}
+	h.recoverStore(disklog.ModeOpen)
+	if got := h.s.Index().SlotHeld(seg); got != core.BlocksPerChunk || slices.Contains(h.s.chooseVictims(), seg) {
+		t.Fatalf("after a restart segment %d holds %d slot blocks' headers; victims %v", seg, got, h.s.chooseVictims())
+	}
+}
+
+// A pass whose every victim holds a block that fails its checksum quarantines them and frees
+// nothing, so the cleaner, one worker short of clean_free, starts no other until the durable LSN
+// moves, however often the store wakes; a write moves it, and the next pass frees segments.
+func TestAPassThatFreesNothingWaitsForTheLog(t *testing.T) {
+	h, o := primed(t)
+	log := h.s.Log()
+	r := core.NewRand(9)
+	copied := func(v uint32) bool { u, stream := log.Usage(v); return stream != disklog.Meta && u.Live > 0 }
+	victims := h.s.chooseVictims()
+	for i := 0; slices.ContainsFunc(victims, func(v uint32) bool { return !copied(v) }) && i < 1000; i++ {
+		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+		victims = h.s.chooseVictims()
+	}
+	for _, v := range victims {
+		lo := cleanGeo.LBA(v, 0)
+		if !copied(v) {
+			t.Fatalf("victim %d of %v has nothing to copy", v, victims)
+		}
+		rec := h.s.Index().Records(nil, lo, lo+core.LBA(cleanGeo.SegmentBlocks))[0]
+		var at core.LBA
+		for _, c := range []core.ChunkID{chunk(1), chunk(2)} {
+			for b := range uint16(64) {
+				if e, ok := h.s.Index().Lookup(testPool, c, b); ok && e.Header == rec.Header {
+					at = e.BlockLBA(b)
+				}
+			}
+		}
+		corrupt := h.disk.Read(at, 1)
+		corrupt[100] ^= 0xff
+		h.disk.Put(at, corrupt)
+	}
+	was := h.s.CleanStats()
+	h.clean(log.FreeOutsideReserve() + 1)
+	st := h.s.CleanStats()
+	if st.Passes != was.Passes+1 || st.Freed != was.Freed || st.Quarantined != len(victims) {
+		t.Fatalf("stats %+v from %+v over victims %v", st, was, victims)
+	}
+	lsn := log.DurableLSN()
 	for range 5 {
 		h.read(chunk(1), 0, 1)
 		h.settle()
 	}
-	if got := h.s.CleanStats().Passes; got != passes || h.s.Log().DurableLSN() != lsn {
-		t.Fatalf("%d passes over segment %d after one freed nothing, the durable LSN at %d of %d", got-passes, seg, h.s.Log().DurableLSN(), lsn)
+	if got := h.s.CleanStats().Passes; got != st.Passes || log.DurableLSN() != lsn {
+		t.Fatalf("%d passes after one freed nothing, the durable LSN at %d of %d", got-st.Passes, log.DurableLSN(), lsn)
 	}
-	if got, _ := h.s.Log().Usage(seg); got.State != disklog.SegmentUsed {
-		t.Fatalf("segment %d is %+v", seg, got)
+	h.sync(h.write(chunk(1), 0, fill(core.BlockSize, 1), 0))
+	if got := h.s.CleanStats(); got.Passes == st.Passes || got.Freed == st.Freed {
+		t.Fatalf("stats %+v after a write", got)
 	}
 }
 

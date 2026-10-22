@@ -106,7 +106,7 @@ func TestCopyMovesTheBlocksStillAtTheSource(t *testing.T) {
 // index's counts by handing it the changes.
 func TestLiveChangesKeepTheCountsOfEveryRecord(t *testing.T) {
 	r := core.NewRand(31)
-	x := newIndex(t)
+	x := slotIndex(t)
 	x.TrackLive(true)
 	want := map[core.LBA]int{}
 	lba := core.LBA(100)
@@ -116,26 +116,49 @@ func TestLiveChangesKeepTheCountsOfEveryRecord(t *testing.T) {
 		first := uint16(r.Below(16))
 		count := uint16(r.Range(1, 4))
 		var e disklog.Entry
-		switch r.Below(6) {
+		switch r.Below(8) {
 		case 0, 1:
 			e = disklog.WriteEntry(1, c, uint64(i+1), first, count)
 		case 2:
 			e = disklog.PunchEntry(1, c, uint64(i+1), first, count)
 		case 3:
 			e = disklog.FreezeEntry(1, c, uint64(i), uint64(i))
+		case 6:
+			vers := x.frozen(nil, 1, c)
+			if len(vers) == 0 {
+				continue
+			}
+			x.Release(1, c, vers[2*r.Below(uint64(len(vers)/2))])
+			changes = x.TakeChanges(changes[:0])
+			for _, ch := range changes {
+				want[ch.Header] += int(ch.Delta)
+			}
+			continue
+		case 7:
+			slot := uint16(r.Below(4))
+			if x.Live(slotLBA(slot)) != 0 {
+				continue
+			}
+			e = disklog.SlotEntry(1, c, uint64(i+1), slotSegment, slot)
 		default:
 			ext, ok := x.Lookup(1, c, first)
-			if !ok || ext.LBA == 0 {
+			if _, slot := x.slotOf(ext); !ok || ext.LBA == 0 || slot {
 				continue
 			}
 			n := min(count, uint16(ext.end()-int(first)))
 			e = disklog.CopyEntry(1, c, ext.Version, first, n, ext.BlockLBA(first))
 		}
-		ev := record(lba, e)
-		if e.HasBlocks() {
-			want[lba] += int(e.Count)
+		if end := lba%slotSegmentBlocks + 1 + core.LBA(e.Count); e.HasBlocks() && end > slotSegmentBlocks {
+			lba += slotSegmentBlocks - lba%slotSegmentBlocks
 		}
-		lba += core.LBA(1 + e.Count)
+		ev := record(lba, e)
+		lba++
+		if e.HasBlocks() || e.Kind == disklog.EntrySlot {
+			want[ev.LBA] += int(e.Count)
+		}
+		if e.HasBlocks() {
+			lba += core.LBA(e.Count)
+		}
 		if err := x.Apply(ev); err != nil {
 			t.Fatal(err)
 		}
@@ -152,4 +175,11 @@ func TestLiveChangesKeepTheCountsOfEveryRecord(t *testing.T) {
 	if err := x.Check(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// slotSegment is where TestLiveChangesKeepTheCountsOfEveryRecord puts its chunk slots, past its records.
+const slotSegment = 50
+
+func slotLBA(slot uint16) core.LBA {
+	return core.LBA(slotSegment*slotSegmentBlocks) + core.LBA(slot)*core.BlocksPerChunk
 }

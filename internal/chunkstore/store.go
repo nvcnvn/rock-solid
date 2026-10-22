@@ -310,6 +310,7 @@ func (s *Store) resume(log *disklog.Log) error {
 		live := make([]uint32, s.sb.SegmentCount)
 		s.ix.SegmentLive(s.sb.SegmentBlocks, live)
 		log.Recount(live)
+		s.ix.RecountSlotHeld(s.sb.SegmentCount)
 	}
 	s.ix.TrackLive(true)
 	s.phase, s.checkpointing, s.inPiece, s.piecesOut, s.pieceWait = serving, false, false, 0, false

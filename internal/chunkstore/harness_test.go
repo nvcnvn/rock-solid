@@ -263,7 +263,7 @@ func (h *harness) settle() {
 }
 
 // checkUsage checks that every segment outside the metadata stream counts as many live blocks
-// as the index's records in it refer to.
+// as the index's records in it refer to, and the index as many slot-held ones as its slots' counts.
 func (h *harness) checkUsage() {
 	h.t.Helper()
 	if !h.s.Serving() {
@@ -272,10 +272,15 @@ func (h *harness) checkUsage() {
 	geo := h.s.sb.Geometry
 	want := make([]uint32, geo.SegmentCount)
 	h.s.Index().SegmentLive(geo.SegmentBlocks, want)
+	held := make([]uint32, geo.SegmentCount)
+	h.s.Index().SegmentSlotHeld(held)
 	for s := uint32(1); s < geo.SegmentCount; s++ {
 		u, stream := h.s.Log().Usage(s)
 		if stream != disklog.Meta && u.State == disklog.SegmentUsed && u.Live != want[s] {
 			h.t.Fatalf("segment %d counts %d live blocks, the index's records in it %d", s, u.Live, want[s])
+		}
+		if got := h.s.Index().SlotHeld(s); got != held[s] || got > want[s] {
+			h.t.Fatalf("segment %d holds %d slot blocks' headers, the slots' counts %d, of %d live", s, got, held[s], want[s])
 		}
 	}
 }
