@@ -2866,9 +2866,9 @@ The lock property's wording in the design, "no lock is granted to a new holder w
 | `neg-ignore-resumed` | The client ignores `Resumed` | Its VM stops with every clock frozen past the leader's count; it resumes believing its lease runs | Same |
 | `neg-answer-without-lease` | A leader answers renewals without holding its leader lease | A deposed leader renews C after the new leader's lease began. The new leader's timer for C started earlier, so it fences C while C's lease runs | Same |
 | `neg-no-full-lease` | A new leader counts each session from the last renewal it can see, instead of giving every live session a full `session_lease` from the start of its own lease | Renewals live only in the old leader's memory, so it sees none and fences a client renewed moments before the failover | Same |
-| `neg-margin-leader-only` | The client's margin covers only the leader it renews with, as the design had it | The old leader's node runs at 8 units a tick, the next at 16. After a failover the new leader counts a full lease from its start, which comes right after the old leader processed the client's last renewal, and its count ends before the client's lease, measured against the old leader | Same |
+| `neg-margin-leader-only` | The client's margin covers only the leader it renews with | The old leader's node runs at 8 units a tick, the next at 16. After a failover the new leader counts a full lease from its start, which comes right after the old leader processed the client's last renewal, and its count ends before the client's lease, measured against the old leader | Same |
 | `neg-lead-before-measured` | A rebooted control-plane node stands for election at once | It comes back at twice its old rate, leads, and its count ends before a lease the client took against its old boot | Same |
-| `neg-evict-at-once` | An eviction fences the session at once, as the design had it | The evicted client, still renewing, holds its lease when the fence commits | Same |
+| `neg-evict-at-once` | An eviction fences the session at once | The evicted client, still renewing, holds its lease when the fence commits | Same |
 | `neg-two-holders` | The same, with two clients | The lock moves while the evicted holder still holds its lease and acts on the lock | `AtMostOneHolder` |
 | `neg-fixed-step-check` | The step check trips at `1 + lease_drift / 2` | It trips on a leader whose rate the margin covers | `NoSpuriousTrip` |
 | `neg-release-on-commit` | Owners release a fenced session's lock when the fence commits, not when its version is acknowledged | The next holder writes while a storage node that has not applied the fence still orders the old holder's queued write after it | `LockOrder` |
@@ -2879,7 +2879,7 @@ The lock property's wording in the design, "no lock is granted to a new holder w
 | `neg-ack-reachable-only` | The acknowledged version counts only reachable nodes, without a committed down mark | A member alone in its interval, unreachable but not marked down, never applies the fence and orders the old holder's write after the lock moved | Same |
 | `neg-ack-waits-down` | The acknowledged version waits for nodes marked down | A partitioned node holds the lock for as long as it stays away | `FenceReleasedInTime` |
 
-"A down mark starts no new interval", a row the design once listed, has no counterexample in the model: with replicas checking the fence, a partitioned primary's write completes only where it is the interval's only live member, and then what stops it is peering, which `neg-peering-skipped` removes.
+Removing the new interval a down mark starts gives no counterexample of its own: with replicas checking the fence, a partitioned primary's write completes only where it is the interval's only live member, and then what stops it is peering, which `neg-peering-skipped` removes.
 
 **Scripted scenarios.** Each is a model trace to check and a simulator seed to keep. They start from the study's list.
 
@@ -2960,11 +2960,11 @@ Mapped reads are left out: the design promises them within one message delay, a 
 | `neg-no-flush` | Step 1 dropped on the writer's side: from Exclusive to WriteShared, the recalled writer A does not flush its buffer | B opens and reads storage before A's acknowledged buffered write reaches it | Same |
 | `neg-answer-early` | The owner answers the triggering open or write before every acknowledgment or fence | B reads before A has flushed or dropped its pages | Same |
 | `neg-timeout-answer` | A recall counts as answered after a timeout, with no fence | B keeps its cached pages and reads stale data | Same |
-| `neg-any-ack` | Acknowledgments name neither the recall nor the owner's term, as the design had it | A's acknowledgment of the old owner's recall, delayed past the failover, stands for the new owner's recall, which A never saw; A buffers and caches the file again, and B reads storage without A's acknowledged write | Same |
+| `neg-any-ack` | Acknowledgments name neither the recall nor the owner's term | A's acknowledgment of the old owner's recall, delayed past the failover, stands for the new owner's recall, which A never saw; A buffers and caches the file again, and B reads storage without A's acknowledged write | Same |
 | `neg-attr-past-lease` | A kernel attribute timeout reaches past the client's session lease | B's daemon pauses, and B is fenced. Its kernel still trusts cached attributes and serves old pages to a running application | Same |
-| `neg-evict-at-once` | An eviction fences the member at once, as the design had it, while its lease still runs | B, which renews but left the recall unanswered, is fenced and the recall counted as answered while its kernel still trusts its attributes; it serves its old page after A's write | Same |
+| `neg-evict-at-once` | An eviction fences the member at once while its lease still runs | B, which renews but left the recall unanswered, is fenced and the recall counted as answered while its kernel still trusts its attributes; it serves its old page after A's write | Same |
 | `neg-open-in-grace` | After owner failover, the new owner accepts new opens before the grace period ends | It misses B's open and sees A alone. The file goes to Exclusive, A buffers and caches, and B reads stale data | Same |
-| `neg-grace-by-time` | The grace period ends on time alone, as the design had it | B, which holds the file open, has not re-registered when it ends; A's open finds the registry empty, and A buffers in Exclusive while B reads | Same |
+| `neg-grace-by-time` | The grace period ends on time alone | B, which holds the file open, has not re-registered when it ends; A's open finds the registry empty, and A buffers in Exclusive while B reads | Same |
 | `neg-rereg-no-wrote` | A re-registration does not say whether the node has written | The new owner computes ReadShared for a file A writes; B's new open caches it, and B reads stale data after A's next write | Same |
 | `neg-leave-ws-early` | WriteShared returns to Exclusive while two nodes still have the file open | The returning node buffers writes the other node cannot see | Same |
 | `neg-ack-before-size` | An extending write is acknowledged before its size commits | B's `read()` past the old end of file is clamped to the old size and misses acknowledged bytes | Same |
@@ -3038,7 +3038,7 @@ A TLA+ specification of [Freeing space](design.md#freeing-space), `models/purge/
 | An orphaned inode is never freed while a live session has it open | `OrphanNotFreedWhileOpen` | "an orphaned inode is never freed while a live session has it open" |
 | Every purge entry is eventually removed (`deep` only, under a fair purger) | `PurgeSettles` | None: a purge entry pending forever shows as a chunk the settle invariant finds once the run ends, so the simulator needs no liveness check of its own |
 
-The design held "no byte past a file's size is non-zero on disk once its purge has run" until the model found it false: a write that read the size before a truncate from another node lands past the cut after the purge ran, and a write whose daemon crashed lands without its size commit. The design now zeroes an extension's gap instead of relying on it ([Freeing space](design.md#freeing-space)).
+The property covers the bytes a truncate or unlink cut off, not every byte past the size: a write that read the size before a truncate from another node can land past the cut after the purge ran, and a write whose daemon crashed lands without its size commit. So an extension zeroes its gap rather than trusting the bytes past the size ([Freeing space](design.md#freeing-space)).
 
 **A rule removed, and the counterexample the model finds**
 
@@ -3049,17 +3049,17 @@ Each row is a negative configuration in `models/purge/` that TLC must stop at it
 | `neg-trunc-at-chunk` | The truncate's purge entry starts at the next chunk boundary, not at the new size's byte offset | A truncate to an unaligned size: the cut bytes of its last chunk stay after the purge | `TruncatedBytesZero` |
 | `neg-tail-in-memory` | The tail is zeroed only in memory before the size commits (XFS commit `5885ebda`, 2015) | A daemon crash before the zeroed tail reaches the disk leaves old bytes past the size after the purge | Same |
 | `neg-skip-partial-block` | The first punch skips the partial block (FreeBSD fusefs `e312493b`, 2019, found by `fsx`) | The final partial block keeps its stale tail | Same |
-| `neg-daemon-punch` | The truncating daemon sends the first punch itself, as the design had it | Its punch lands after the purger finished the entry and another node extended the file and wrote there, and zeroes that write | `NeverDeletesNewer` |
+| `neg-daemon-punch` | The truncating daemon sends the first punch itself | Its punch lands after the purger finished the entry and another node extended the file and wrote there, and zeroes that write | `NeverDeletesNewer` |
 | `neg-extend-over-purge` | An extension does not wait for the pending purge | A write lands in the purge range, then the purger punches it | Same |
-| `neg-no-rewrite` | An extending write whose size check failed commits without writing its bytes again (and no gap is zeroed), as the design had it | Its byte lands, a truncate from another node cuts below it, its size commit waits for the purge, which zeroes the byte, and it commits and is acknowledged over zeros | Same |
-| `neg-no-gap-zero` | An extension does not zero its gap, as the design had it | A write that read size 7 lands at byte 6 after a truncate to 5 and its purge; a truncate up to 8 shows it | `ExtensionNeverExposes` |
+| `neg-no-rewrite` | An extending write whose size check failed commits without writing its bytes again (and no gap is zeroed) | Its byte lands, a truncate from another node cuts below it, its size commit waits for the purge, which zeroes the byte, and it commits and is acknowledged over zeros | Same |
+| `neg-no-gap-zero` | An extension does not zero its gap | A write that read size 7 lands at byte 6 after a truncate to 5 and its purge; a truncate up to 8 shows it | `ExtensionNeverExposes` |
 | `neg-purger-no-term` | Primaries accept punches from an older purger term | A crashed purger's punch lands after its successor finished the entry and the file was extended and written | `NeverDeletesNewer` |
 | `neg-raise-after-write` | `alloc_end` is raised after the chunk write instead of before | A crash after the chunk write leaves a chunk past `alloc_end`, and a later unlink's purge misses it | `NoChunkOfDeletedInode` |
 | `neg-missing-punch-fails` | A punch to a missing chunk is an error | A rerun after a purger crash fails on the chunks already deleted | `RerunSafe` |
-| `neg-no-incarnation-fence` | A crashed daemon's successor closes its files before the old incarnation is fenced, as the design had it | The dead process's chunk write lands after the unlinked file's purge punched that chunk | `NoChunkOfDeletedInode` |
+| `neg-no-incarnation-fence` | A crashed daemon's successor closes its files before the old incarnation is fenced | The dead process's chunk write lands after the unlinked file's purge punched that chunk | `NoChunkOfDeletedInode` |
 | `neg-unlink-open` | Unlink frees an open file at once | Another node still has it open when it is purged | `OrphanNotFreedWhileOpen` |
 | `neg-orphan-in-grace` | An orphan moves to the purge list during an owner failover's grace period | A node that has not re-registered yet still holds the file open | Same |
-| `neg-grace-by-time` | The grace period ends on time alone, as the design had it | It ends before a live node that holds the file open re-registered, and the orphan is freed | Same |
+| `neg-grace-by-time` | The grace period ends on time alone | It ends before a live node that holds the file open re-registered, and the orphan is freed | Same |
 | `neg-release-on-commit` | An orphan held by a fenced session is released when the fence commits, not when its version is acknowledged | The fenced holder's queued write lands after the purge | `NoChunkOfDeletedInode` |
 | `neg-overwrite-entry` | A new purge entry for an inode with a pending one overwrites it | A truncate, then an unlink before the purge runs: the unlink's `0 .. alloc_end` at the lowered `alloc_end` replaces the truncate's range, and the chunks above it are never deleted | Same |
 | `neg-unchecked-removal` | The consumed run is removed without checks | The purger scans entries for inodes 1 and 3, an unlink adds inode 2's entry between them, and the range removal deletes it unpurged | Same |
