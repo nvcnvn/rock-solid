@@ -1368,8 +1368,9 @@ Events from the log:
 - A checkpoint that finds the pool full waits for a piece buffer and finishes once one frees; the
   store keeps serving.
 - A flush that fails a run check (`lsm.ErrCheck`, a plant): the store refuses operations, lets its
-  rounds finish, restarts its log once in rebuild mode, and the rebuilt index equals the oracle's,
-  live and at every snapshot. A merge that fails its check (a plant) takes the same path.
+  rounds finish, recovers its log once more as an open does, reloading the named manifest's runs
+  and replaying after them, and the rebuilt index equals the oracle's, live and at every snapshot.
+  A merge that fails its check (a plant) takes the same path.
 - The store hands the log one run piece at a time, each once the one before is durable: no step
   of a workload with multi-piece runs has two pieces in flight.
 - Under steady pipelined load (5,000 writes) the store's list of items handed to the log stays
@@ -1898,8 +1899,8 @@ on the 1 GiB disk one capacity is 262,144 blocks):
   log's tests each metadata segment counts exactly the blocks its live pieces touch.
 - At every open the counts are recounted: chunk segments from the index's record counts,
   metadata segments from the pieces of the loaded manifest and its runs, so a merge step
-  written but never named before a crash counts nothing. After a rebuild, which reads no run,
-  every metadata segment is held until a header names a manifest written since.
+  written but never named before a crash counts nothing. After a recovery in rebuild mode, which
+  reads no run, every metadata segment is held until a header names a manifest written since.
 
 A pass:
 
@@ -1937,8 +1938,8 @@ A pass:
   Logged before it, the rebuild applies it and the write then replaces it. Either way the rebuilt
   live map and record counts equal the live index's, and applying the records twice changes
   nothing. A plain write entry in its place would map block 0 back to v1.
-- A rebuild from record headers maps every copy entry exactly where the owner applied its move,
-  record counts included (simulator invariant).
+- Replay maps every copy entry exactly where the owner applied its move, record counts included
+  (simulator invariant).
 - Apply costs the owner one index entry per moved block, 0 allocations (`BenchmarkApplyMove`):
   1.5 µs per move on an Apple M4 Pro, as much as applying a write; the [parallel cleaner
   spike](../spikes/parallel-cleaner/)'s Rust array index took 42 to 72 ns (P4).
@@ -1987,9 +1988,15 @@ crash oracle and the usage table against the index:
   while the cleaner frees and reuses segments, recovers what the crash oracle holds, and checks
   the [invariant](#invariant-checker) on usage counts and open sequences after the recovery. The
   open-sequence half runs after every recovery in the store's tests.
-- Rebuild after cleaning: a rebuild from LSN 1 meets the LSNs freed segments held, gone for good,
-  and reports the log corrupt; freed segments also take punches, freezes and copies' sources that
-  surviving records need. Its rule is the design's open question, and its scenarios come with it.
+- Rebuild after cleaning: a run check that fails once the cleaner has freed segments, in a flush
+  or in a merge, rebuilds the index from the runs the newest named manifest lists and the log
+  after them, and the store serves again; replay from LSN 1 reported the log corrupt
+  (`TestRunCheckRebuildsAfterCleaning`). `TestCrashAtEveryAction` also crashes, at every action,
+  a workload ending in a cleaner pass that frees segments, and `TestCleanerSurvivesCrashes` runs
+  its 500 seeds; both rebuild after every recovery, and the index as the rebuild's recovery leaves
+  it, before the cleaner moves blocks again, equals the opened one.
+- A run piece the manifest lists, damaged on disk, fails the rebuild with Corrupt at its record,
+  never an index without the run (`TestRebuildFromADamagedRunIsCorrupt`).
 
 TRIM (one `DiskTrim` per freed segment, `trim_rate` 128 MiB/s, time from `ctx.Now`):
 
@@ -2331,7 +2338,7 @@ Torn writes, bit flips, fail-slow and discards:
   on a chunk the pass is moving. Its disk actions are numbered 1..N in execution order. Open: N; it
   must stay small enough to run every k in every CI run.
 - For every k in 1..N, three crash runs: crash at action k with no unflushed block landing, with a
-  seeded half landing (seed k), and with all landing. Then recover (open) and, separately, rebuild.
+  seeded half landing (seed k), and with all landing. Then recover (open), then rebuild the index as a failed run check does.
 - For every k, a failure run: action k fails (a write with Io, a flush with Io, a read with Io), the
   machine handles the error, then the node crashes with none, a seeded half and all unflushed and
   undecided blocks landing, as in the crash runs, and recovers.
@@ -2456,7 +2463,7 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 | No ordinary write fails with `NoSpace` while the cleaner has a victim | Group commit failing held items with NoSpace as soon as only the reserve is free, without asking the owner whether the cleaner has a victim |
 | A rebuilt chunk index equals the one recovered from its manifest | A rebuild that skips freeze entries |
 | A chunk's live map never holds two entries for one block, with consistent record counts (`chunkstore.(*Index).Check`) | A trim that shortens the old extent but never splits it; a record count not lowered on trim |
-| A rebuild from record headers maps every copy entry exactly where the owner applied its move, record counts included | A rebuild applying a copy entry as a plain write (maps block 0 back to v1, as in the Cleaner section's copy entries in replay) |
+| Replay maps every copy entry exactly where the owner applied its move, record counts included | Replay applying a copy entry as a plain write (maps block 0 back to v1, as in the Cleaner section's copy entries in replay) |
 
 - The byte-range oracle keeps each chunk's bytes as the acknowledged writes and punches, applied in
   version order, left them, live and per snapshot epoch; it is a plain model, not the index.

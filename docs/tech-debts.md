@@ -32,5 +32,5 @@
 
 ## Workaround: an index rebuild restarts the whole log
 - **Where:** `indexBroken` and `drain` in `internal/chunkstore/store.go`
-- **Why:** a rebuild replays the log through recovery, which only runs on a log that is not appending, so the store stops, closes its log and recovers it in rebuild mode, where the design rebuilds one index while the disk's other indexes serve ([The LSM tree](design.md#on-disk-format)). The chunk index is a disk's only index until MetaStore shards share it.
+- **Why:** a rebuild reloads the runs the newest named manifest lists and replays the log after them through recovery, which only runs on a log that is not appending, so the store stops, closes its log and recovers it again, where the design rebuilds one index while the disk's other indexes serve ([The LSM tree](design.md#on-disk-format)). The chunk index is a disk's only index until MetaStore shards share it.
 - **Remove when:** a second index shares a disk (Raft storage in the disk log) and the log can replay its records to one index while it keeps appending.
