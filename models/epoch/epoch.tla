@@ -1578,12 +1578,14 @@ RaftTransfer == [Plan(<<>>, <<>>, {"raft", "transfer", "exact"}) EXCEPT !.t = 30
 RaftPartition == [Plan(<<>>, <<>>, {"raft", "cut", "heal", "exact"}) EXCEPT !.t = 500, !.k = 2]
 
 \* ci-leases checks these. The reboot plan, at 1.6 million states, runs in
-\* deep and alone for its negative variants; the plan with delayed messages,
-\* at over 3 million, runs in deep.
+\* deep-leases and alone for its negative variants; the plan with delayed
+\* messages, at over 3 million, runs alone in deep-slow at 3 nodes, since with
+\* the others at 4 nodes it passed 108 million states in 4 hours.
 LeasePlans == {Steady, Handover, HandoverStep, HandoverSuspend, HandoverStop,
                HandoverRestart, HandoverCut, Maintenance, RaftTransfer, RaftPartition}
 RebootPlans == {HandoverReboot}
-AllLeasePlans == LeasePlans \cup {HandoverReboot, HandoverSlow}
+AllLeasePlans == LeasePlans \cup RebootPlans
+SlowPlans == {HandoverSlow}
 
 \* deep-peering: every peering plan, and any two changes at any time with
 \* one partial write to chunk 1 and a restart; node 4 starts outside both PGs,
