@@ -30,12 +30,7 @@
 - **Why:** a write larger than one record goes to the log as several items, each needing a pool buffer of exactly its blocks, and a pool buffer cannot be split, so the store copies such a write into one buffer per item although [chunk blocks are never copied](design.md#on-disk-format) otherwise. A whole chunk on a disk with [chunk slots](design.md#on-disk-format) is one item and is not copied; a larger partial write is, and so is a whole chunk on a disk whose segments are smaller than a chunk.
 - **Remove when:** the frontends' receive path hands a larger write as item-sized buffers.
 
-## Workaround: writes waiting for room fail at once
-- **Where:** `housekeep` in `internal/chunkstore/store.go`
-- **Why:** with no cleaner, nothing frees a segment, so the store calls `FailStalled` as soon as group commit holds items for room, where the design fails them only once the cleaner has no victim ([Writers slow down](design.md#on-disk-format)).
-- **Remove when:** the Cleaner item lands and the store calls `FailStalled` only when the cleaner reports no victim.
-
 ## Workaround: an index rebuild restarts the whole log
 - **Where:** `indexBroken` and `drain` in `internal/chunkstore/store.go`
-- **Why:** a rebuild replays the log through recovery, which only runs on a log that is not appending, so the store stops, closes its log and recovers it in rebuild mode, where the design rebuilds one index while the disk's other indexes serve ([The LSM tree](design.md#on-disk-format)). The chunk index is a disk's only index until MetaStore shards share it.
+- **Why:** a rebuild reloads the runs the newest named manifest lists and replays the log after them through recovery, which only runs on a log that is not appending, so the store stops, closes its log and recovers it again, where the design rebuilds one index while the disk's other indexes serve ([The LSM tree](design.md#on-disk-format)). The chunk index is a disk's only index until MetaStore shards share it.
 - **Remove when:** a second index shares a disk (Raft storage in the disk log) and the log can replay its records to one index while it keeps appending.

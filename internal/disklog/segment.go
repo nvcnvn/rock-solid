@@ -53,7 +53,7 @@ type SegmentHeader struct {
 }
 
 func (h SegmentHeader) check() error {
-	if h.Stream > Meta || h.Lane != 0 && h.Stream != Meta || h.Index == 0 {
+	if h.Stream > Meta || h.Stream < Meta && h.Lane > 1 || h.Index == 0 {
 		return ErrMalformed
 	}
 	if h.Manifest.IsNone() {

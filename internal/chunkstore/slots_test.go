@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
@@ -218,7 +219,9 @@ func TestCrashAtEveryActionWithSlots(t *testing.T) {
 }
 
 // Whole chunks deleted at random cost no cleaning: their slots are reused in place, so the disk
-// writes little beyond the chunks, near the cleaner streams spike's 1.004.
+// writes little beyond the chunks, near the cleaner streams spike's 1.004. A second passes between
+// rounds, so the paced TRIMs of slot segments freed whole go out. A small write first opens the
+// hot lane's segment, which the deletes' records go to, while the slot writes' go to the slot lane.
 func TestWholeChunksDeletedAtRandomCostNoCleaning(t *testing.T) {
 	cfg := testConfig()
 	cfg.Log.MaxReplayBytes = 1 << 20
@@ -233,6 +236,7 @@ func TestWholeChunksDeletedAtRandomCostNoCleaning(t *testing.T) {
 		h.sync(h.write(chunk(i), 0, data, 0))
 		ids = append(ids, i)
 	}
+	h.sync(h.write(core.ChunkID{Volume: 2, Inode: 2}, 0, fill(core.BlockSize, 1), 0))
 	freeBefore := h.s.Log().FreeSegments()
 	acts := len(h.acts)
 	next := uint32(live)
@@ -242,6 +246,7 @@ func TestWholeChunksDeletedAtRandomCostNoCleaning(t *testing.T) {
 		h.sync(h.write(chunk(next), 0, data, 0))
 		ids[k] = next
 		next++
+		h.advance(core.Tick(time.Second / time.Microsecond))
 	}
 	var written uint64
 	for _, a := range h.acts[acts:] {
@@ -260,7 +265,10 @@ func TestWholeChunksDeletedAtRandomCostNoCleaning(t *testing.T) {
 	h.checkSlots()
 }
 
-const slotSegmentBlocks = 4096
+const (
+	slotSegmentBlocks = 4096
+	slotSegments      = 64
+)
 
 // slotIndex is an index of a disk of 16 MiB segments, 4 chunk slots each.
 func slotIndex(t testing.TB) *Index {
@@ -269,7 +277,7 @@ func slotIndex(t testing.TB) *Index {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewIndex(tree, slotSegmentBlocks)
+	return NewIndex(tree, slotSegmentBlocks, slotSegments)
 }
 
 // The index counts the blocks its maps refer to in each chunk slot, beside its record's, and

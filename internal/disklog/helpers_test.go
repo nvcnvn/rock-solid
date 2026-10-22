@@ -78,8 +78,8 @@ func randomBytes(r *core.Rand, n int) []byte {
 	return b
 }
 
-// randomRecord draws 1 to 5 entries: writes up to 3 blocks, punches up to 512, blobs under
-// 8 KiB, freezes; an entry that would push the data past maxDataBlocks becomes a punch.
+// randomRecord draws 1 to 5 entries: writes and copies up to 3 blocks, punches up to 512, blobs
+// under 8 KiB, freezes; an entry that would push the data past maxDataBlocks becomes a punch.
 func randomRecord(t testing.TB, r *core.Rand, rec Record, maxDataBlocks uint32) testRecord {
 	t.Helper()
 	n := int(r.Range(1, 5))
@@ -91,10 +91,14 @@ func randomRecord(t testing.TB, r *core.Rand, rec Record, maxDataBlocks uint32) 
 		version := r.Uint64()
 		var e Entry
 		var payload []byte
-		switch r.Below(4) {
+		switch r.Below(5) {
 		case 0:
 			count := uint16(r.Range(1, 3))
 			e = WriteEntry(pool, chunk, version, uint16(r.Below(uint64(core.BlocksPerChunk-count)+1)), count)
+			payload = randomBytes(r, int(count)*core.BlockSize)
+		case 4:
+			count := uint16(r.Range(1, 3))
+			e = CopyEntry(pool, chunk, version, uint16(r.Below(uint64(core.BlocksPerChunk-count)+1)), count, core.LBA(r.Range(1, 1<<40)))
 			payload = randomBytes(r, int(count)*core.BlockSize)
 		case 1:
 			count := uint16(r.Range(1, 512))

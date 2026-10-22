@@ -248,7 +248,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Stream.** One of three sequences of segments the log appends to: hot (new writes), cold (cleaner copies and shards) and metadata (sorted runs, compactions, manifests). Each segment holds one kind of data, so it tends to empty all at once, which keeps cleaning cheap.
 
-**Lane.** A sequence of segments of one stream that fill one after another, at most one open at a time. Each stream has a shared lane, and each merge worker writes its output to a lane of its own in the metadata stream, so merge output does not mix with other data. Recovery reads each lane from just before the replay point and merges the lanes in LSN order. See [On-disk format](design.md#on-disk-format).
+**Lane.** A sequence of segments of one stream that fill one after another, at most one open at a time. Each stream has a shared lane; the records of chunk slot writes go to a lane of their own in the hot stream, the cleaner writes its copies to a lane of its own in the cold stream, and each merge worker writes its output to a lane of its own in the metadata stream, so none of them mixes with other data. Recovery reads each lane from just before the replay point and merges the lanes in LSN order. See [On-disk format](design.md#on-disk-format).
 
 **Chunk slot.** A chunk-sized place in a slot segment holding one whole chunk's data. It is freed when the chunk is rewritten or deleted, so whole chunks never need cleaning. See [On-disk format](design.md#on-disk-format).
 
@@ -286,7 +286,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Delete-only compaction.** Pebble's name for dropping whole tables that a newer range deletion covers, by editing the manifest instead of merging. See [The LSM tree](design.md#on-disk-format).
 
-**Run piece.** A sorted run is written to the log in pieces of at most one record each; the last, the root, lists the others, so a manifest names a run by its root. See [The LSM tree](design.md#on-disk-format).
+**Run piece.** A sorted run is written to the log in pieces of at most one record each; the last, the root, lists the others, so a manifest names a run by its root. No piece is ever listed by two roots. See [The LSM tree](design.md#on-disk-format).
+
+**Run rewrite.** A merge of one run alone, which writes the same keys again elsewhere in the run's place. The cleaner asks for one when a segment it wants to free holds a piece of a live run, instead of copying the piece. See [Cleaning](design.md#on-disk-format).
 
 **Fence pointer, prefix compression.** A run is cut into blocks, and the first key of each block is a fence pointer: binary search over them finds the one block that can hold a key. Inside a block, each key is stored as the bytes it shares with the key before it plus the rest, which shrinks sorted keys with long common prefixes; every 16th key, a restart point, is stored whole so a search can start there. This is LevelDB's block format, which Pebble and RocksDB keep.
 
@@ -298,7 +300,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Point-in-time view.** A frozen view of an LSM tree at one moment, which a reader or a Raft snapshot uses without blocking writers.
 
-**Cleaner, garbage collection.** In a log, overwritten and deleted data leaves dead blocks scattered through old segments. The cleaner picks a **victim** segment, copies its still-live blocks to the head of the log and frees the whole segment for reuse. Also called segment cleaning or log garbage collection, and unrelated to Go's garbage collector.
+**Cleaner, garbage collection.** In a log, overwritten and deleted data leaves dead blocks scattered through old segments. The cleaner picks a **victim** segment, copies its still-live blocks to the head of the log and frees the whole segment for reuse. It weighs each candidate by **cost-benefit**, free space times age over the cost of copying, and skips one whose copy would cost about as much as it frees, the **net-gain guard**. Also called segment cleaning or log garbage collection, and unrelated to Go's garbage collector.
 
 **Write amplification.** Bytes actually written to the drive divided by bytes the user wrote. The cleaner's copying raises it, more so the fuller the disk is, which is why pools stop writes before disks are full. SSDs have their own internal write amplification on top. See [Volume size and capacity](design.md#volume-size-and-capacity).
 
@@ -310,7 +312,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Quarantine.** Setting aside a segment that looks damaged: never reused, and reported for repair from another replica.
 
-**Segment usage table.** The list of which segments are in use or quarantined, how many live blocks each holds and its newest LSN, kept in the manifests: whole in a snapshot, the changed rows in an edit. Recovery takes free space from it instead of guessing from segment headers, and the cleaner picks victims by it. See [On-disk format](design.md#on-disk-format).
+**Segment usage table.** The list of which segments are in use or quarantined, how many live blocks each holds and its newest LSN, kept in the manifests: whole in a snapshot, the changed rows in an edit. Recovery takes free space from it instead of guessing from segment headers, and the cleaner picks victims by it. The live counts are kept current as data dies and recounted at every start, so the copies in a manifest are only a hint. See [On-disk format](design.md#on-disk-format).
 
 ## Files and caching
 

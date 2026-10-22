@@ -160,6 +160,7 @@ func (l *Log) takeSlot(e *Entry) bool {
 	}
 	if open {
 		l.free[s/64] &^= 1 << (s % 64)
+		l.reuseTrim(s)
 	}
 	l.slots.setTaken(s, l.slots.taken[s]|1<<slot)
 	*e = SlotEntry(e.Pool, e.Chunk, e.Version, s, slot)
@@ -210,8 +211,8 @@ func (l *Log) FreeSlot(lba core.LBA, out *Output) error {
 	return nil
 }
 
-// releaseHeld makes the held slots whose round is durable free, and TRIMs each segment that
-// frees.
+// releaseHeld makes the held slots whose round is durable free, and queues the TRIM of each
+// segment that frees with the log's paced TRIMs.
 func (l *Log) releaseHeld(out *Output) {
 	t := &l.slots
 	t.held = slices.DeleteFunc(t.held, func(h heldSlot) bool {
@@ -219,22 +220,20 @@ func (l *Log) releaseHeld(out *Output) {
 			return false
 		}
 		if t.setTaken(h.segment, t.taken[h.segment]&^(1<<h.slot)); t.taken[h.segment] == 0 {
-			io := l.io()
-			t.trims = append(t.trims, trimIO{io: io, segment: h.segment})
-			out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskTrim, IO: io, LBA: l.sb.LBA(h.segment, 0), Len: l.sb.SegmentBytes()})
+			l.trimSlotSegment(h.segment, out)
 		}
 		return true
 	})
 	l.checkSlots()
 }
 
-// trimDone follows a freed slot segment's TRIM, failed or not, with a write of zeros over its
+// slotTrimDone follows a freed slot segment's TRIM, failed or not, with a write of zeros over its
 // first block, and frees the segment once that write completes, failed or not. A slot segment has
 // no header, so recovery tells it free only by a first block of zeros, which a disk that is a
 // file, a discard that does not read back as zeros or a TRIM lost at a crash would not leave;
 // otherwise every start would read the segment in full. A failed write costs only that read, and
 // neither is in flight any more to erase what the segment holds next.
-func (l *Log) trimDone(io core.IOID, out *Output) bool {
+func (l *Log) slotTrimDone(io core.IOID, out *Output) bool {
 	t := &l.slots
 	j := slices.IndexFunc(t.trims, func(t trimIO) bool { return t.io == io })
 	if j < 0 {

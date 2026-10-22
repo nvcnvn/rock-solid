@@ -224,7 +224,7 @@ types](#event-and-action-types), and this section is their only home.
   | Another version, checksum recomputed | BadVersion | BadVersion |
   | A bit flipped (superblock: in the log ID, the CRC or the last byte; segment header: in the sequence) | BadChecksum | BadChecksum |
   | Non-zero padding or tail, checksum recomputed | Malformed | Malformed |
-  | A lane on the hot or cold stream, checksum recomputed | | Malformed |
+  | A lane past 1 on the hot or cold stream (the slot lane, the cleaner's), checksum recomputed | | Malformed |
   | Segment blocks 3 or 96 (not a power of two of at least 4), or a count of 3, checksum recomputed | Malformed | |
   | Stream 3, own index 0, manifest block 0, or an LSN with no manifest segment, checksum recomputed | | Malformed |
   | Shorter than a block | Truncated | Truncated |
@@ -232,7 +232,8 @@ types](#event-and-action-types), and this section is their only home.
   Encoding refuses what decoding would: a superblock of 6-block segments, a segment header of
   stream 3 or of a hot lane 1, index 0, a manifest block with no segment, or a manifest segment at block 0.
 - Golden bytes: the superblock for log ID 0x0123456789abcdef on a 1 GiB disk, and the segment headers
-  (seq 7, segment 3, cold; seq 8, segment 4, metadata lane 0; seq 9, segment 5, metadata lane 3;
+  (seq 7, segment 3, cold; seq 10, segment 6, cold lane 1; seq 11, segment 7, hot lane 1; seq 8,
+  segment 4, metadata lane 0; seq 9, segment 5, metadata lane 3;
   each with the manifest at segment 2 block 9 LSN 41), encode to the checked-in
   `internal/disklog/testdata/log_format_golden.txt`, followed by zeros to the end of the block.
   Until the first release a format change replaces the fixture in place; after it, a change needs a
@@ -442,7 +443,8 @@ types](#event-and-action-types), and this section is their only home.
   and fixes the header checksum, flips a padding bit, or writes the segment header of either other
   stream or of another lane with its checksum fixed panics in the decode check on every one of the group commit
   property's 100 seeds, as does a round that reports its last payload a byte late, or writes one
-  block more than its record.
+  block more than its record. The check also panics on a record of the slot lane that holds
+  anything but one slot write, or a record of another lane that holds one.
 - [property] Anything Submit accepts decodes: seeds 1-20; max round 3..64 blocks; commit depth 1-3;
   300 items each of a random kind tag (unknown ones included) and random field values, half with one
   field set beyond what its constructor sets, with a buffer of its size, a block off, or none. Each
@@ -1368,8 +1370,11 @@ Events from the log:
 - A checkpoint that finds the pool full waits for a piece buffer and finishes once one frees; the
   store keeps serving.
 - A flush that fails a run check (`lsm.ErrCheck`, a plant): the store refuses operations, lets its
-  rounds finish, restarts its log once in rebuild mode, and the rebuilt index equals the oracle's,
-  live and at every snapshot. A merge that fails its check (a plant) takes the same path.
+  rounds finish, recovers its log once more as an open does, reloading the named manifest's runs
+  and replaying after them, and the rebuilt index equals the oracle's, live and at every snapshot.
+  A merge that fails its check (a plant) takes the same path. A check that fails again after the
+  rebuild, before any checkpoint completes (a plant failing every flush's check), stops the store
+  with `lsm.ErrCheck` after one rebuild (`TestARunCheckFailingAfterARebuildStopsTheStore`).
 - The store hands the log one run piece at a time, each once the one before is durable: no step
   of a workload with multi-piece runs has two pieces in flight.
 - Under steady pipelined load (5,000 writes) the store's list of items handed to the log stays
@@ -1470,9 +1475,13 @@ merges that take several.
   blocks to the output run and sets each input's bound to the last key the step consumed; the next
   checkpoint writes the step's pieces to the merge worker's lane through `MergePiece`, a new root
   for the output listing all its pieces, and a manifest holding the bounds with each input's dead
-  pieces, as a manifest alone when no checkpoint is due. The manifest waits for those pieces and
-  names the root; a snapshot carries the bounds, an edit replaces them, and a bound on a run the
-  index does not hold is Malformed.
+  pieces. The manifest waits for those pieces and names the root; a snapshot carries the bounds,
+  an edit replaces them, and a bound on a run the index does not hold is Malformed.
+- With no checkpoint due, the owner begins one for the step alone (`BeginStepCheckpoint`): it
+  leaves the memtable unflushed and the replay LSN unchanged, and the log's replay bytes after it
+  are as many as before it, where an ordinary checkpoint lowers them to its own records. A reopen
+  once a header names the step manifest counts the same replay and held bytes, from the replay
+  floor rather than the step's base.
 - Bounded runs: an input holds only its keys above its bound, so output and inputs never share a
   key. With inputs A (newer) and B over keys a..z, B lacking g, and a step ending at f, a get of c
   or f reads the output alone, a get of q reads A, a get of r reads A then B, a scan from a returns
@@ -1804,7 +1813,7 @@ manifest, written or in flight, segment headers and the checkpoint's own records
   then appends at LBA 67.
 - Merge pieces go out past the hold behind a checkpoint and may open a segment of the reserve
   (Checkpoint backpressure, Segment reserve).
-- Replay allocates a window for each lane past the hot and cold ones: a pool with room for only
+- Replay allocates a window for each lane past the hot and slot ones: a pool with room for only
   one of the two that a log with a checkpoint and a merge lane needs fails recovery with
   PoolExhausted and leaves no buffer allocated; with room for both it opens.
 - Recovery reads each lane from the last of its segments whose first record is at or before the
@@ -1847,8 +1856,10 @@ Copy entry codec:
   and the golden record fixture gains a record of two copy entries. A copy with zero blocks or
   past block 1,024 is BadExtent; a copy entry with a field its kind does not encode set is
   Malformed.
-- Open: a copy entry whose source is location 0 (a punched range): Malformed, or accepted and
-  never applied.
+- A copy whose source is location 0 (a punched range) is Malformed to the codec, and group
+  commit refuses one whose source lies in segment 0 or past the disk: a copy only ever reads a
+  log block. `Submit` refuses a copy entry (ErrReservedKind); only the cleaner's `Copy` writes
+  one, to lane 1 of the cold stream, past the hold behind a checkpoint and into the reserve.
 
 Victim choice (score free space × age ÷ copy cost; the spikes use (1 − u) × age ÷ (1 + u), age in
 user blocks written since the segment's youngest block was written, capped at one disk capacity;
@@ -1863,37 +1874,146 @@ on the 1 GiB disk one capacity is 262,144 blocks):
 
 - A pass takes the 4 best victims that pass the net-gain guard.
 - Net-gain guard, header blocks rounded up per record (design: "a victim must free more space than
-  copying it costs, header blocks included"). In 16,384-block (64 MiB) segments a copy record of
-  single-block extents holds 253 data blocks and 3 header blocks (56 + 253 × 45 = 11,441 bytes; 256
-  blocks fill the 1 MiB cap), so L live blocks cost L + 3⌈L ÷ 253⌉. A victim of 16,191 live blocks
-  costs 16,383 and is picked; 16,192 costs 16,384 and is refused. Estimated in exact bytes, the
-  guard let the cleaner pick 98.9% live victims and livelock (cleaner streams spike).
-- Open: whether a copy record's own segment header is charged.
-- Age cap regression, scripted in Go: a 1 GiB disk at 90% full with 20% of the data frozen by a
-  snapshot; each of 1,000 passes gains at least one segment, and a planted uncapped score
-  livelocks (cleaner spike C2: 1,000 passes without a free segment).
+  copying it costs"). In 16,384-block (64 MiB) segments a copy record of single-block extents
+  holds 253 data blocks and 3 header blocks (56 + 253 × 45 = 11,441 bytes; 256 blocks fill the
+  1 MiB cap), and one copy holds up to 254 blocks under 1 header block. A record never spans two
+  segments, so copies rolling into a new segment split their records between the two and leave
+  the old one's tail unused, up to a block short of the largest copy and its header: L live
+  blocks cost L + 3(⌈L ÷ 253⌉ + 1) + min(L, 254) + h − 1, with h the header blocks of that
+  copy. Estimated in exact bytes, the guard let the cleaner pick 98.9% live victims and livelock
+  (cleaner streams spike).
+- The guard also charges the header of the segment the copies open, and an estimate of the index
+  entries the moves write, 2 × 67 bytes per block of the live count, which holds a block once per
+  map referring to it (flushed, then merged again; deeper merges and split extents are not
+  charged): a victim is picked only
+  when its cost plus that block is below a segment. Copies of 15,936 live blocks cost 16,382 and
+  of 15,937 cost 16,383; with the entries, 15,434 live blocks cost 15,877 + 505 = 16,382 and are
+  picked, and 15,435 cost 16,383 and are refused. On 16-block segments, without the segment header a
+  copy of a nearly full segment filled a new one exactly, and without the split record copies of
+  13-block victims filled a segment each (seed 448 of the crash test, and a disk filled with
+  live data at a reserve of 10 or 12, whose copies' checkpoints took the whole reserve): either
+  way the cleaner churned forever on a disk of live data.
+- The charge bounds what the copies take: on 64-block segments of 16-block records, copies of
+  14-block items behind a tail just too short for one took 61 blocks of a new segment and
+  stranded 13, against 61 charged before the tail was; with it, 300 victims of random copy sizes
+  after random fills never take more than charged.
+- A victim's copies reach the log together, so they go out in one record where they fit rather
+  than the first alone in a round of its own. A copy whose source crosses a segment is Malformed.
+- A metadata victim is charged the records its live runs' pieces take now, header blocks included,
+  each record once, plus the largest less a block, the tail it can leave unused at a segment's
+  end: a 3-block piece in a 4-block record costs 7. Charged the runs' bytes instead, small pieces
+  of two blocks each looked like a fraction of one, and after a crash (seed 329) the cleaner
+  rewrote the same runs from segment to segment without end.
+- Each step of the rewrite is charged too: a record header for its blocks, its filter partition,
+  its root's references and bound, and a manifest as large as a snapshot of every segment. On
+  16-block segments with steps of a block, a victim charged 13 blocks without them had its runs
+  rewritten in 23 blocks of merge-lane records and manifests; with them it is charged 28.
+- A chunk victim is taken only if its charge fits the room the cleaner's lane can reach, its open
+  segment's tail and every free segment, the reserve included. With a reserve of one segment the
+  disk reaches zero free segments; before this check every later write started a pass whose
+  copies found no room, copied 10 blocks for nothing and failed. Now a write that finds no room
+  fails with NoSpace with nothing copied, under overwrites and once new blocks fill the disk.
+- A stall on either hot lane fails both hot queues in submit order: with the shared hot lane out of
+  room, a freeze and the slot write after it both fail; with the slot lane unable to open a segment
+  outside the reserve and the cleaner's only victim quarantined, a whole chunk and the small write
+  of the same chunk after it both fail with NoSpace, and the chunk's next write gets a newer
+  version.
+- A slot write's record goes alone to the hot stream's slot lane, so slot headers share segments
+  only with each other: six whole chunks written among overwrites of a small chunk leave their
+  headers in one slot-lane segment that holds nothing else, and no other segment holds a slot
+  header once the cleaner has run.
+- A segment holding the record header of a live whole chunk's slot write is never a victim: the
+  index counts the slot's blocks against the header's segment, recounted at open from the slots'
+  counts, which keep their record's header. A slot-lane segment the lane has moved on from, whose
+  only live blocks are one chunk's, is left alone however short of clean_free, before and after a
+  restart. With nine whole chunks' headers among overwrites of a small
+  chunk, 3,000 more overwrites never fail, and new data then fails with NoSpace only once no
+  segment without a slot header would gain space; scored by their age, the header segments took
+  every pass and writes failed while 16 segments with nothing live waited.
+- A pass that frees nothing starts no other until the durable LSN moves: once the 4 best victims
+  each hold a block that fails its checksum, a pass quarantines them all, five reads after it
+  start no pass, and a write starts one that frees segments.
+- Age cap regression, scripted in Go as the cleaner spike modelled it: a 1 GiB disk of 4,096
+  segments at 90% full, 20% of the data frozen by a snapshot, 90/10 hot/cold overwrites, copies in
+  age order with moved blocks keeping their write time. Capped, at most a few passes in a row gain
+  no segment over 2 million writes; a planted uncapped score takes more passes for the same writes.
+  This model's guard keeps the uncapped cleaner out of the spike's livelock (C2: 1,000 passes
+  without a free segment), which needed the spike's own record and header layout.
 - A segment holding a piece the current manifest lists (Manifest edits and snapshots), or a run
   piece or record that the newest manifest named by a durable segment header needs (a record after
-  its replay points), or moves not yet applied, is never a victim. A used segment
-  with no live block (one that rounds recovery dropped left empty) is freed without copying
-  anything.
-- Live counts come from the usage table. Open: how the index's per-record counts reach the
-  table's per-segment live counts.
+  its replay points), or moves not yet applied, is never a victim; nor is the open segment of any
+  lane, nor any segment before a manifest is named. A segment holding a manifest's piece asks for
+  an early snapshot instead. A used segment with no live block (one that rounds recovery dropped
+  left empty, or whose blocks were all overwritten) is freed without reading or copying anything.
+- Live counts come from the usage table. The owner hands the log every change to a record's
+  count past the blocks it wrote (the index keeps them while tracking is on): after every step
+  of the store's tests, each segment outside the metadata stream counts exactly what the
+  index's records in it refer to, and the index's slot-held count of each segment equals what
+  its slots' stored counts give; a property test checks that a record's count is its own
+  blocks plus the changes kept, over writes, punches, freezes and copies, and the index's check
+  that the slot-held counts are what its maps refer to. A copy no map takes lowers its own
+  record by its blocks at once.
+- Dead run pieces (a dropped run, a merge's consumed inputs, a replaced step root, a failed
+  checkpoint's pieces) stay live until a segment header names the manifest that dropped them,
+  then leave the count; a block two pieces of a record share stays live until both are dead; a
+  manifest's pieces die once a named manifest no longer lists them. After every step of the
+  log's tests each metadata segment counts exactly the blocks its live pieces touch.
+- At every open the counts are recounted: chunk segments from the index's record counts,
+  metadata segments from the pieces of the loaded manifest and its runs, so a merge step
+  written but never named before a crash counts nothing. After a recovery in rebuild mode, which
+  reads no run, every metadata segment is held until a header names a manifest written since.
 
 A pass:
 
-- The worker checks liveness, verifies each block's CRC32C (a failing block is never copied;
-  Open: what the pass does with it, since a single node has no other copy), reads around the
-  header-block cache, groups blocks by chunk, and writes records of copy entries into the cold
-  stream, never a manifest piece. It sends its moves to the owner as an event.
+- The owner lists each victim's live records from the index's record counts, reads their
+  headers around the header-block cache, and finds each entry's blocks a map still stores there;
+  each run of them is read into a buffer of its own, at most 16 reads of a pass in flight: a
+  victim of 64 single-block runs between dead blocks has 16 out at its peak, never more, and every
+  block reads back after its copy. The worker verifies each block's CRC32C and
+  sorts the runs; they go to the cold stream's cleaner lane as copy entries, never a manifest
+  piece, and each move applies when its copy record's Durable event reaches the owner.
+- The checks run only in the job the store hands out once a victim's reads complete: the store
+  copies nothing while it waits for the job, and a job handed back without running, a block of it
+  damaged in its buffer, copies that block under the checksum its source record stored, so it
+  reads back with a checksum error from its new place (the log's test-only decode check off).
+- A job's result may come back late, after other events. Late after its pass was dropped, while
+  the index rebuilds, after the rebuilt cleaner has handed out a new job for the same victim, or
+  after a failed disk stopped the store, it takes no action and frees exactly its buffers; the new
+  job copies the victim, the store then holds only its log's buffers, and every block reads as
+  written. A quarter of the cleaner's crash seeds take every job's result after a random number of
+  later actions.
+- A victim holding a block whose checksum fails is quarantined: nothing of it is copied, it is
+  never a victim again, the pass cleans its other victims, and reads of the block keep failing
+  with a checksum error.
+- The other blocks of a quarantined segment's records are overwritten and lower its live count,
+  before a restart and after one, and it stays quarantined.
 - Grouping: a victim holding chunk 7 block 3, chunk 3 block 1, chunk 7 block 4 and chunk 3
-  block 2 gives copy entries chunk 3 [1, 2] and chunk 7 [3, 4], each contiguous. Open: the order
-  between chunks.
-- Open: live run pieces in a victim, handled as the open question "Pieces shared between runs"
-  settles (copy a piece and rewrite every root naming it, or have the next checkpoint write those
-  runs again).
+  block 2 gives copy entries in the index's key order (pool, hash of the chunk, chunk, block):
+  each chunk's entries side by side and ascending. One entry spans blocks whose sources are
+  consecutive in one record.
+- Live run pieces in a victim are never copied: the cleaner marks each run holding one for a
+  rewrite, a merge of that run alone, which the store runs in steps of `compaction_step_bytes`
+  (one block, with pieces of one block, so a run spans several), each step's pieces on its merge
+  worker's lane and named by a checkpoint begun for it; once the manifest naming its last step is
+  durable every old piece is reported dead and the segment holds no live piece, and every key
+  reads the same throughout and after a restore. After every record, no merge worker's lane holds
+  more than a step, its partition and its root of run pieces past the newest manifest; a planted
+  record of run pieces past that bound fails the check, and a manifest between them passes it.
+  With two merge workers, a marked rewrite runs beside another merge, on the other worker's lane,
+  and every block reads the same, after a restart too.
+- A crash between two steps of a rewrite, every write landed, recovers the input bounded by the
+  first step and the output so far, reading only the input's pieces past its dead ones, and the
+  rewrite resumes past the bound to its end; recovery that loads the input whole is Malformed.
+- A disk filled to its reserve still finishes a rewrite in steps, each step's checkpoint writing
+  to the merge worker's lane, which may open reserve segments.
 - The owner applies a move only where a map, live or frozen, still points at the source, then
-  frees the victim once all its moves are applied. Interleavings (worker copies chunk 7 block 3
+  frees the victim once all its moves are applied and no read in flight reads from it. A read
+  issued before its block's copy applied, or before overwrites left the victim with nothing live,
+  and held by the disk while 500 more writes fill it, keeps the victim from reuse, returns the
+  block as written, and the victim is freed once it completes. Reads and overwrites of six
+  chunks, with the disk completing commands in any order but a flush, each read return the bytes
+  of a write acknowledged before it or in flight with it, while the cleaner frees 64 segments and
+  more. Interleavings (worker copies chunk 7 block 3
   from LBA 100 to LBA 5000):
 
 | Between the copy and the apply | Live map after | Frozen maps after | Copy at 5000 |
@@ -1910,31 +2030,38 @@ A pass:
   Logged before it, the rebuild applies it and the write then replaces it. Either way the rebuilt
   live map and record counts equal the live index's, and applying the records twice changes
   nothing. A plain write entry in its place would map block 0 back to v1.
-- A rebuild from record headers maps every copy entry exactly where the owner applied its move,
-  record counts included (simulator invariant).
-- Apply costs 42 to 72 ns per move on the owner, one index entry per moved block, 0 allocations
-  (benchmark bar from the [parallel cleaner spike](../spikes/parallel-cleaner/), P4).
-- Workers per disk: see Write admission.
-- The cleaner writes into the reserve when only the reserve is free.
+- Replay maps every copy entry exactly where the owner applied its move, record counts included
+  (simulator invariant).
+- Apply costs the owner one index entry per moved block, 0 allocations (`BenchmarkApplyMove`):
+  1.5 µs per move on an Apple M4 Pro, as much as applying a write; the [parallel cleaner
+  spike](../spikes/parallel-cleaner/)'s Rust array index took 42 to 72 ns (P4).
+- Workers per disk: one pass, and a second once free segments outside the reserve fall two below
+  `clean_free` (14 of the default 16). Write admission covers slowing writes.
+- The cleaner writes into the reserve when only the reserve is free, and a disk filled to its
+  reserve finishes a pass; writes fail with NoSpace only when no victim passes the guard, at
+  reserves of 8, 10 and 12 segments.
 
 Freed segments and `NextSeq` (design.md, Recovery: a header of this log below the loaded
 manifest's `NextSeq` is judged by the usage table, one at or past it was opened after the base).
-The cases stage a cleaner pass on segment 1 of the "Segment usage table" log (60 one-block hot
-writes, 16-block segments, a checkpoint whenever 40 blocks follow the manifest), whose records all
-precede the replay point; the [log segments study](../studies/log-segments/)'s
-`testdata/stale_header_test.go` stages them by hand against the built recovery, where all but the
-control case fail, and they become regression tests here, staged by the cleaner itself:
+The cases come from the [log segments study](../studies/log-segments/), whose
+`testdata/stale_header_test.go` staged them by hand; here the cleaner stages them itself
+(`TestCrashOrder*` in `internal/chunkstore`). A store on 16-block segments with a checkpoint
+whenever 40 blocks follow the manifest overwrites block 0 of 16 chunks, then a pass takes every
+chunk segment whose records all precede the replay point. Allocation takes the lowest free
+segment, so an order that needs the segment opened again early watches the lowest victim, and the
+others the highest. Each case crashes at its order, recovers, and checks every block against the
+crash oracle and the usage table against the index:
 
 | Crash order | Header on disk | Expected |
 | --- | --- | --- |
 | Freed in memory, the freeing manifest not durable | Old, below `NextSeq`, listed | Used, with the older manifest's row; replay of the copy records moves what its runs still map there |
-| Freeing manifest durable, no segment header names it yet (control; passes today) | Old, below the loaded older manifest's `NextSeq`, listed | Used; the cleaner frees it again |
-| A segment header naming the freeing manifest durable, not reused, TRIM not run (or a disk that is a file) | Old, below `NextSeq`, not listed | Free (today: used with 0 live blocks, one segment fewer free) |
+| Freeing manifest durable, no segment header names it yet | Old, below the loaded older manifest's `NextSeq`, listed | Used; the cleaner frees it again |
+| A segment header naming the freeing manifest durable, not reused, TRIM not run (or a disk that is a file) | Old, below `NextSeq`, not listed | Free |
 | As above, TRIM run, reading back as zeros | Zeros, not listed | Free |
 | As above, TRIM reading back as ones or garbage | Undecodable | Damaged: read in full, then free, since it holds no record of this log past the replay point; read in full again at every start until reused |
-| Reused before any segment header names the freeing manifest, its new header and one record landed | New, at or past the loaded manifest's `NextSeq` | Used, live 1 and newest LSN the new record's, the old row dropped (today: live 8, the old row's 7 plus 1) |
+| Reused before any segment header names the freeing manifest, its new header and one record landed | New, at or past the loaded manifest's `NextSeq` | Used, live 1 and newest LSN the new record's, the old row dropped |
 | Reused after a header names the freeing manifest | New; at or past `NextSeq` if opened after its base, else listed | Used |
-| Reused by a round in flight: its record at block 1 landed, its header did not; a header naming the freeing manifest durable, or not yet (two cases) | Old, below `NextSeq`; not listed, or listed | The record at block 1, at `NextSeq` or more, is erased and the next segment opened takes a sequence past it; the segment free, or used under the listing until the cleaner frees it again (today: not erased, and the next segment takes the sequence it carries, 11) |
+| Reused by a round in flight: its record at block 1 landed, its header did not; a header naming the freeing manifest durable, or not yet (two cases) | Old, below `NextSeq`; not listed, or listed | The record at block 1, at `NextSeq` or more, is erased and the next segment opened takes a sequence past it; the segment free, or used under the listing until the cleaner frees it again |
 | A round in flight at checkpoint begin opened a segment, and the crash kept the round | New, at or past `NextSeq`, since it counts durable rounds only | Used, its records replayed |
 
 - A freed segment's own old record at block 1, below `NextSeq`, is ignored: recovery reads its
@@ -1949,11 +2076,25 @@ control case fail, and they become regression tests here, staged by the cleaner 
   the block-1 rule counts only a record at `NextSeq` or more; a table row for a segment whose
   header is at or past `NextSeq` is dropped and rebuilt from replay; a header of this log below
   `NextSeq` that the table leaves out is free, not used.
-- Simulator, extending the random-crash property: with the cleaner freeing and reusing segments
-  and crashes at every action, the usage table after every recovery equals the log's own, and the
-  next open sequence number is at least the loaded manifest's `NextSeq`.
-- Rebuild after cleaning: a rebuild from LSN 1 meets the LSNs freed segments held, gone for good;
-  its rule is the design's open question, and its scenarios come with it.
+- Simulator, extending the random-crash property: `TestCleanerSurvivesCrashes` (500 seeds in the
+  seed runner) crashes overwrites, punches of blocks and of whole chunks and snapshot cuts on a
+  small disk at a seeded action
+  while the cleaner frees and reuses segments, recovers what the crash oracle holds, and checks
+  the [invariant](#invariant-checker) on usage counts and open sequences after the recovery. The
+  open-sequence half runs after every recovery in the store's tests.
+- Rebuild after cleaning: a run check that fails once the cleaner has freed segments, in a flush
+  or in a merge, rebuilds the index from the runs the newest named manifest lists and the log
+  after them, and the store serves again (`TestRunCheckRebuildsAfterCleaning`).
+  `TestCrashAtEveryAction` also crashes, at every action, a workload ending in a cleaner pass that
+  frees segments, and `TestCleanerSurvivesCrashes` runs its 500 seeds; both rebuild after every
+  recovery, and the index as the rebuild's recovery leaves it, before the cleaner moves blocks
+  again, equals the opened one.
+- A run piece the manifest lists, damaged on disk, fails the rebuild with Corrupt at its record,
+  never an index without the run (`TestRebuildFromADamagedRunIsCorrupt`).
+- A rebuild that starts while the cleaner reads the blocks it copies frees their buffers, and every
+  rebuild in the store's tests leaves the store, settled, holding only its log's pool buffers
+  (`TestARebuildFreesTheBlocksTheCleanerRead`). `TestCleanerSurvivesCrashes` also rebuilds a second
+  time, once the cleaner has moved blocks again, and that index equals the live one.
 
 TRIM (one `DiskTrim` per freed segment, `trim_rate` 128 MiB/s, time from `ctx.Now`):
 
@@ -1968,9 +2109,12 @@ TRIM (one `DiskTrim` per freed segment, `trim_rate` 128 MiB/s, time from `ctx.No
 | A crash with TRIMs queued | they are lost, and the segments are free by the table all the same |
 | A disk that is a file | no DiskTrim ever |
 
-- Open: the exact rate for a backlog older than 5 minutes; design.md says "as Pebble's delete
-  pacer does" (Pebble adds the backlog's bytes ÷ 5 minutes to its base rate).
-- Open: a failed DiskTrim (fail the log, or ignore).
+- A backlog older than 5 minutes adds its bytes ÷ 5 minutes to the base rate, held until the
+  backlog is gone (Pebble's constant-horizon drain): the 2,000 segments above go out at the base
+  rate for 5 minutes and then all by 10.
+- A failed DiskTrim is ignored: it costs only the discard, as a TRIM lost at a crash does.
+- A segment freed and allocated again while the checkpoint that frees it runs drops its TRIM too
+  (a cleaner crash seed found it trimmed after reuse, erasing new records).
 
 Invariants (simulator) and faults:
 
@@ -1985,9 +2129,10 @@ Invariants (simulator) and faults:
   after the copy record is durable and before the moves are applied (replay applies them with the
   same check, and replay applying a move without it trips the crash oracle on at least one seed of
   50); a crash after the victim is free in the table and before its TRIM.
-- Performance bars (the parallel cleaner spike's P3, at 50,000 writes/s): the owner's work per
-  write with a worker 1.6 to 1.8 µs at 90 to 95% full against 5.9 to 11 µs inline, its write p99
-  about 6 µs. Open: whether these Rust figures are the Go benchmark's bar.
+- Performance bars: the parallel cleaner spike's P3 figures (at 50,000 writes/s, the owner's work
+  per write with a worker 1.6 to 1.8 µs at 90 to 95% full against 5.9 to 11 µs inline, its write
+  p99 about 6 µs) are Rust's; the Go bar is the measured `BenchmarkApplyMove` above, and the
+  owner's work per write is measured with the event loop.
 - Write amplification at 80 / 90 / 95% belongs to "Cleaner write amplification in simulation".
 
 ## Chunk slots
@@ -1995,13 +2140,15 @@ Invariants (simulator) and faults:
 - Slots per segment: 16 in a 64 MiB segment; one in the 4 MiB segments of a 16 GiB disk; none on a
   disk whose segments are smaller than 4 MiB, where a whole chunk goes to the log as several items.
 - A write entry naming a slot is 39 bytes, its slot's segment and index after the write's fields;
-  golden bytes of a record with one such entry and one ordinary write are checked in. Its per-block
+  golden bytes of a record with one such entry and one ordinary write, and of a segment header
+  of the slot lane (hot stream, lane 1), are checked in. Its per-block
   CRCs cover the slot's blocks, after the record's own data blocks'. Replay checks a slot's blocks
   only under a record that may be a round in flight (below); a read checks every block it
   reads.
 - A whole-chunk write puts its data in a slot, in a DiskWrite of its own from the request's
-  buffer, its record in the hot stream; the round's one flush follows both writes, a round carries
-  one slot write, and the index maps the chunk's 1,024 blocks to the slot in one extent. A partial write of the same chunk goes to the log and trims the
+  buffer, its record alone in the hot stream's slot lane; the round's one flush follows both
+  writes, a round carries one slot write, the two hot lanes take items in submit order, replay
+  delivers them in that order, a restart resumes the slot lane's segment, and the index maps the chunk's 1,024 blocks to the slot in one extent. A partial write of the same chunk goes to the log and trims the
   slot's extent; the slot stays used while any block of it is live.
 - A slot is free for reuse only once the record that rewrote or deleted its chunk is durable: a
   crash before that record is durable reads the old chunk from the slot. The log then holds it
@@ -2017,9 +2164,10 @@ Invariants (simulator) and faults:
   record there.
 - The segment is TRIMmed with its last slot, then its first block written with zeros, and freed
   once both complete; a TRIM that fails, or does not read back as zeros, still leaves a first block
-  of zeros. Allocation fills the
-  fullest slot segment first (two segments with 3 and 9 free slots: the next chunk goes to the one
-  with 3), and never opens a segment of the reserve for one.
+  of zeros. Its TRIM joins the cleaner's paced queue at `trim_rate`: two 16 MiB slot segments freed
+  together are trimmed 125 ms apart at 128 MiB/s. Allocation fills the fullest slot segment first
+  (two segments with 3 and 9 free slots: the next chunk goes to the one with 3), and never opens a
+  segment of the reserve for one.
 - A snapshot's frozen version keeps the slot it reads in use.
 - After every crash in a workload of whole chunks rewritten, trimmed and punched across a cut and
   checkpoints, the slots the log holds in use are exactly those the index refers to.
@@ -2040,8 +2188,9 @@ Invariants (simulator) and faults:
   checkpoint between, where only the log's hold on the freed slot keeps it (without the hold,
   recovery loses acknowledged records).
 - Cost (the cleaner streams spike): whole chunks deleted at random cost no cleaning, write
-  amplification near 1.004 at any fill; a pool holding half its data in whole chunks cleans its
-  small writes for about 2.5 at 90% full.
+  amplification near 1.004 at any fill; a pool holding half its data in whole chunks, with the
+  slot headers in their lane, writes 2.75 times what it is sent at 90% full with half its writes
+  whole and 3.57 with a fifth.
 
 ## Trace records
 
@@ -2290,7 +2439,7 @@ Torn writes, bit flips, fail-slow and discards:
   on a chunk the pass is moving. Its disk actions are numbered 1..N in execution order. Open: N; it
   must stay small enough to run every k in every CI run.
 - For every k in 1..N, three crash runs: crash at action k with no unflushed block landing, with a
-  seeded half landing (seed k), and with all landing. Then recover (open) and, separately, rebuild.
+  seeded half landing (seed k), and with all landing. Then recover (open), then rebuild the index as a failed run check does.
 - For every k, a failure run: action k fails (a write with Io, a flush with Io, a read with Io), the
   machine handles the error, then the node crashes with none, a seeded half and all unflushed and
   undecided blocks landing, as in the crash runs, and recovers.
@@ -2410,12 +2559,12 @@ seeds. Open: the checker's cost per step and whether some invariants run every n
 | Every cleaner pass frees more segments than it fills | The net-gain guard removed, or age uncapped (the cleaner spike livelocked: 1,000 passes without gaining a free segment) |
 | A cleaner move never replaces a write that landed during cleaning | A move applied without checking that the map still points at its source |
 | No segment is reused while it holds a live block, or a piece, run piece or record that the newest manifest named by a durable segment header needs (a record after its replay points) | Allocation that takes a segment the usage table lists as used with live blocks; a cleaner that judges what is needed by the newest durable manifest, which no segment header names yet |
-| After every recovery the usage table equals the log's own, and the next open sequence number is at least the loaded manifest's `NextSeq` | `NextSeq` taken from the log's next sequence number when the checkpoint begins, counting a segment a round in flight opened (the random-crash property fails at seed 1 in the [log segments study](../studies/log-segments/)) |
+| After every recovery each chunk segment's live count in the usage table equals the blocks the index's records there refer to, and the log opens its next segment past every open sequence a segment header of this log on disk holds, so open sequences stay unique and increasing | `NextSeq` taken from the log's next sequence number when the checkpoint begins, counting a segment a round in flight opened (the random-crash property fails at seed 1 in the [log segments study](../studies/log-segments/)); recovery resuming at the newest header's open sequence, not one past it, so the next segment opened shares it and replay reads the two out of order (`TestCleanerSurvivesCrashes` and the store's recovery tests fail at their first recovery; the log's random-crash property loses acknowledged records) |
 | A disk full except for its reserve still finishes a checkpoint, a merge step and a cleaner pass, and the bytes held beyond the manifests never exceed the reserve | A reserve sized without the merge-workers term, so a checkpoint during a merge fails with NoSpace; a merge step that installs its output only at the end, so the bytes held exceed the reserve |
 | No ordinary write fails with `NoSpace` while the cleaner has a victim | Group commit failing held items with NoSpace as soon as only the reserve is free, without asking the owner whether the cleaner has a victim |
 | A rebuilt chunk index equals the one recovered from its manifest | A rebuild that skips freeze entries |
 | A chunk's live map never holds two entries for one block, with consistent record counts (`chunkstore.(*Index).Check`) | A trim that shortens the old extent but never splits it; a record count not lowered on trim |
-| A rebuild from record headers maps every copy entry exactly where the owner applied its move, record counts included | A rebuild applying a copy entry as a plain write (maps block 0 back to v1, as in the Cleaner section's copy entries in replay) |
+| Replay maps every copy entry exactly where the owner applied its move, record counts included | Replay applying a copy entry as a plain write (maps block 0 back to v1, as in the Cleaner section's copy entries in replay) |
 
 - The byte-range oracle keeps each chunk's bytes as the acknowledged writes and punches, applied in
   version order, left them, live and per snapshot epoch; it is a plain model, not the index.

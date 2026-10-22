@@ -77,6 +77,7 @@ type Tree struct {
 	written     []writtenRun
 	resume      []*run
 	merges      []*Compaction
+	rewrite     []disklog.BlobRef
 	limitBuffer int
 	maxFrag     int
 	it          iterState
@@ -327,13 +328,22 @@ func (v *View) Close() {
 }
 
 // BeginFlush starts writing the frozen memtable and each merge step not yet durable, and reports whether it froze the memtable.
-func (t *Tree) BeginFlush() (bool, error) {
+func (t *Tree) BeginFlush() (bool, error) { return t.beginFlush(true) }
+
+// BeginStepFlush starts writing each merge step not yet durable, and a memtable a failed flush
+// froze, leaving the memtable to the next BeginFlush.
+func (t *Tree) BeginStepFlush() error {
+	_, err := t.beginFlush(false)
+	return err
+}
+
+func (t *Tree) beginFlush(freeze bool) (bool, error) {
 	if t.fl != nil {
 		return false, ErrBusy
 	}
 	t.pairMerges()
 	froze := false
-	if t.frozen == nil && (t.mem.count > 0 || t.mem.frags > 0) {
+	if freeze && t.frozen == nil && (t.mem.count > 0 || t.mem.frags > 0) {
 		t.frozen, t.frozenSeq = t.mem, t.nextSeq
 		t.nextSeq++
 		t.mem = newMemtable(&t.pg)

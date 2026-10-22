@@ -41,10 +41,11 @@ const (
 	ruleSizeAmp
 	ruleSizeRatio
 	ruleRunLimit
+	ruleRewrite
 )
 
 func (r rule) String() string {
-	return [...]string{"none", "size amplification", "size ratio", "run limit"}[r]
+	return [...]string{"none", "size amplification", "size ratio", "run limit", "rewrite"}[r]
 }
 
 // pick returns the runs [i, j), newest first, that the first rule to apply merges.
@@ -203,6 +204,12 @@ func (c *Compaction) Worker() int { return c.worker }
 // or failed with its last installed step named.
 func (c *Compaction) Finished() bool { return c.finished || c.failed && c.installed == c.named }
 
+// StepUnnamed reports whether a merge installed a step no durable manifest names yet, which the
+// next checkpoint writes.
+func (t *Tree) StepUnnamed() bool {
+	return slices.ContainsFunc(t.merges, func(c *Compaction) bool { return c.installed > c.named })
+}
+
 // ready reports whether the merge may run its next step: the manifest naming its last one is durable.
 func (c *Compaction) ready() bool {
 	return !c.running && !c.failed && !c.final && !c.finished && c.installed == c.named
@@ -221,12 +228,22 @@ func (t *Tree) opts() pickOpts {
 }
 
 // PickCompaction returns the next merge step due over runs no other merge holds, or nil: first
-// that of a merge whose last step a durable manifest names, a restored one included, then a new merge.
+// that of a merge whose last step a durable manifest names, a restored one included, then the
+// rewrite of a run the cleaner marked, then a new merge.
 func (t *Tree) PickCompaction() *Compaction {
 	t.pairMerges()
 	for _, c := range t.merges {
 		if c.ready() {
 			return t.start(c)
+		}
+	}
+	t.rewrite = slices.DeleteFunc(t.rewrite, func(root disklog.BlobRef) bool {
+		return !slices.ContainsFunc(t.runs, func(r *run) bool { return len(r.pieces) > 0 && r.root() == root })
+	})
+	for i, r := range t.runs {
+		if !r.held && len(r.pieces) > 0 && slices.Contains(t.rewrite, r.root()) {
+			t.rewrite = slices.DeleteFunc(t.rewrite, func(root disklog.BlobRef) bool { return root == r.root() })
+			return t.start(t.compaction(i, i+1, ruleRewrite))
 		}
 	}
 	runs := make([]pickRun, len(t.runs))
@@ -328,6 +345,77 @@ func (t *Tree) pairMerges() {
 		i = j + 1
 	}
 	t.resume = nil
+}
+
+// RunsIn appends to pieces the live pieces of the runs holding one in segment, which a rewrite
+// of each would write again, and reports whether a running merge holds such a run or wrote a step
+// there, which that merge's end makes dead or names.
+func (t *Tree) RunsIn(segment uint32, pieces []disklog.BlobRef) (_ []disklog.BlobRef, held bool) {
+	for _, r := range t.runs {
+		if !r.inSegment(segment) {
+			continue
+		}
+		if r.held {
+			held = true
+			continue
+		}
+		pieces = append(pieces, r.pieces[r.base:]...)
+	}
+	for _, c := range t.merges {
+		for _, refs := range [][]disklog.BlobRef{c.entryRefs, c.fragRefs, c.partRefs, c.tail} {
+			held = held || slices.ContainsFunc(refs, func(p disklog.BlobRef) bool { return p.Segment == segment })
+		}
+	}
+	return pieces, held
+}
+
+// RewriteSteps is how many steps rewriting the runs RunsIn lists for segment takes at most, all
+// together, and the most bytes one step writes beside its entry and fragment blocks: a filter
+// partition sized for at most its run's keys and fenced, the root's references to every piece the
+// output may hold, and the bound key its manifest lists. A step holds at least an entry block,
+// which the run's own blocks bound, and short of the last at least StepBytes less a piece.
+func (t *Tree) RewriteSteps(segment uint32) (steps int, extra uint64) {
+	room := t.cfg.MaxPiece - pieceOverhead
+	for _, r := range t.runs {
+		if r.held || !r.inSegment(segment) {
+			continue
+		}
+		data, filter := 0, 0
+		for _, b := range r.blocks {
+			data += len(b)
+		}
+		for _, p := range r.parts {
+			filter += len(p.enc)
+		}
+		n := max(len(r.blocks), 1)
+		switch {
+		case t.cfg.StepBytes == 0:
+			n = 1
+		case t.cfg.StepBytes > room:
+			n = min(n, data/(t.cfg.StepBytes-room)+1)
+		}
+		part := filter + 2*cacheLineSize + partHdr + partTrailer + filterKeyHdr + filterTrailer + MaxKey
+		written := part/room + 2
+		refs := len(r.pieces) + n*(written+2)
+		steps += n
+		extra = max(extra, uint64(part+written*pieceOverhead+refs*disklog.BlobRefSize+MaxKey))
+	}
+	return steps, extra
+}
+
+// MarkRewrite marks every run no merge holds that has a live piece in segment for a merge of that
+// run alone, which writes it again elsewhere in steps on a merge worker, so that the cleaner
+// never copies a piece of a live run and no piece is ever named by two roots. It returns how
+// many runs it marked.
+func (t *Tree) MarkRewrite(segment uint32) int {
+	n := 0
+	for _, r := range t.runs {
+		if !r.held && r.inSegment(segment) && !slices.Contains(t.rewrite, r.root()) {
+			t.rewrite = append(t.rewrite, r.root())
+			n++
+		}
+	}
+	return n
 }
 
 // runLimit is the most runs the tree keeps before merging the newest whatever their sizes.

@@ -22,6 +22,7 @@ internal/disklog TestSlotRoundsKeepTheTraceRules 300
 internal/chunkstore TestReplayPastPendingWrites 2000
 internal/lsm TestMetamorphic 1000
 internal/chunkstore TestMetamorphic 1000
+internal/chunkstore TestCleanerSurvivesCrashes 500
 "
 
 cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)

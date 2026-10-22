@@ -234,7 +234,7 @@ func TestChangedSegmentsSurviveAFailedCheckpoint(t *testing.T) {
 	}
 	var freed []uint32
 	for s := uint32(1); len(freed) < 4; s++ {
-		if !h.log.HoldsManifestPiece(s) {
+		if !h.log.HoldsPiece(s) {
 			disklog.FreeSegment(h.log, s, true)
 			freed = append(freed, s)
 		}

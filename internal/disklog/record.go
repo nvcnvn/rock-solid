@@ -12,6 +12,7 @@ const (
 	preludeSize = 56
 
 	writeEntrySize  = 33
+	copyEntrySize   = writeEntrySize + 8
 	slotEntrySize   = writeEntrySize + 6
 	freezeEntrySize = 37
 	blobEntrySize   = 14
@@ -40,6 +41,7 @@ const (
 	EntryFreeze
 	EntryBlob
 	EntrySlot
+	EntryCopy
 )
 
 // BlobKind says what a blob payload holds; the codec carries it without checking it.
@@ -66,6 +68,7 @@ type Entry struct {
 	BlobKind BlobKind
 	Owner    uint32
 	Length   uint64
+	Source   core.LBA
 	Segment  uint32
 	Slot     uint16
 }
@@ -74,6 +77,14 @@ type Entry struct {
 func WriteEntry(pool core.PoolID, chunk core.ChunkID, version uint64, first, count uint16) Entry {
 	return Entry{Kind: EntryWrite, Pool: pool, Chunk: chunk, Version: version, First: first, Count: count}
 }
+
+// CopyEntry is the cleaner's copy of count blocks from block first of a chunk version, read from source on, where the blocks were stored.
+func CopyEntry(pool core.PoolID, chunk core.ChunkID, version uint64, first, count uint16, source core.LBA) Entry {
+	return Entry{Kind: EntryCopy, Pool: pool, Chunk: chunk, Version: version, First: first, Count: count, Source: source}
+}
+
+// HasBlocks reports whether the entry carries chunk blocks in the record's data area: a write or a copy.
+func (e *Entry) HasBlocks() bool { return e.Kind == EntryWrite || e.Kind == EntryCopy }
 
 // SlotEntry is a write of a whole chunk version to chunk slot slot of segment, whose blocks lie there rather than in the record.
 func SlotEntry(pool core.PoolID, chunk core.ChunkID, version uint64, segment uint32, slot uint16) Entry {
@@ -103,6 +114,14 @@ func (e *Entry) wireSize() (int, error) {
 			return 0, ErrBadExtent
 		}
 		n = writeEntrySize
+	case EntryCopy:
+		if e.Count == 0 || int(e.First)+int(e.Count) > core.BlocksPerChunk {
+			return 0, ErrBadExtent
+		}
+		if e.Source == 0 {
+			return 0, ErrMalformed
+		}
+		n = copyEntrySize
 	case EntrySlot:
 		if e.First != 0 || e.Count != core.BlocksPerChunk {
 			return 0, ErrBadExtent
@@ -126,6 +145,8 @@ func (e *Entry) ofKind() Entry {
 	switch e.Kind {
 	case EntryWrite, EntryPunch:
 		return Entry{Kind: e.Kind, Pool: e.Pool, Chunk: e.Chunk, Version: e.Version, First: e.First, Count: e.Count}
+	case EntryCopy:
+		return CopyEntry(e.Pool, e.Chunk, e.Version, e.First, e.Count, e.Source)
 	case EntrySlot:
 		return Entry{Kind: e.Kind, Pool: e.Pool, Chunk: e.Chunk, Version: e.Version, First: e.First, Count: e.Count, Segment: e.Segment, Slot: e.Slot}
 	case EntryFreeze:
@@ -136,7 +157,7 @@ func (e *Entry) ofKind() Entry {
 
 func (e *Entry) dataBytes() uint64 {
 	switch e.Kind {
-	case EntryWrite:
+	case EntryWrite, EntryCopy:
 		return uint64(e.Count) * core.BlockSize
 	case EntryBlob:
 		return e.Length
@@ -221,22 +242,22 @@ func (a *layoutAcc) layout() (Layout, error) {
 	return Layout{HeaderBytes: int(headerBytes), HeaderBlocks: uint32(headerBlocks), DataBlocks: uint32(dataBlocks), SlotBlocks: uint32(a.slotBlocks)}, nil
 }
 
-// PayloadOffset is where entry i's payload starts in the data area: writes' blocks first, in order, then blobs' bytes.
+// PayloadOffset is where entry i's payload starts in the data area: writes' and copies' blocks first, in order, then blobs' bytes.
 func PayloadOffset(entries []Entry, i int) uint64 {
 	var writeBytes, blobBytes uint64
 	for j := range entries[:i] {
-		switch entries[j].Kind {
-		case EntryWrite:
+		switch {
+		case entries[j].HasBlocks():
 			writeBytes += entries[j].dataBytes()
-		case EntryBlob:
+		case entries[j].Kind == EntryBlob:
 			blobBytes += entries[j].Length
 		}
 	}
-	if entries[i].Kind == EntryWrite {
+	if entries[i].HasBlocks() {
 		return writeBytes
 	}
 	for j := i; j < len(entries); j++ {
-		if entries[j].Kind == EntryWrite {
+		if entries[j].HasBlocks() {
 			writeBytes += entries[j].dataBytes()
 		}
 	}
@@ -301,13 +322,16 @@ func appendEntries(dst []byte, entries []Entry) []byte {
 		e := &entries[i]
 		dst = append(dst, byte(e.Kind))
 		switch e.Kind {
-		case EntryWrite, EntryPunch, EntrySlot:
+		case EntryWrite, EntryPunch, EntrySlot, EntryCopy:
 			dst = binary.LittleEndian.AppendUint32(dst, uint32(e.Pool))
 			dst = e.Chunk.AppendTo(dst)
 			dst = binary.LittleEndian.AppendUint64(dst, e.Version)
 			dst = binary.LittleEndian.AppendUint16(dst, e.First)
 			dst = binary.LittleEndian.AppendUint16(dst, e.Count)
-			if e.Kind == EntrySlot {
+			switch e.Kind {
+			case EntryCopy:
+				dst = binary.LittleEndian.AppendUint64(dst, uint64(e.Source))
+			case EntrySlot:
 				dst = binary.LittleEndian.AppendUint32(dst, e.Segment)
 				dst = binary.LittleEndian.AppendUint16(dst, e.Slot)
 			}
@@ -339,11 +363,8 @@ func decodeEntry(b []byte, e *Entry) (int, error) {
 	}
 	*e = Entry{Kind: EntryKind(b[0])}
 	switch e.Kind {
-	case EntryWrite, EntryPunch, EntrySlot:
-		n := writeEntrySize
-		if e.Kind == EntrySlot {
-			n = slotEntrySize
-		}
+	case EntryWrite, EntryPunch, EntrySlot, EntryCopy:
+		n := entrySize(e.Kind)
 		if len(b) < n {
 			return 0, ErrMalformed
 		}
@@ -354,6 +375,11 @@ func decodeEntry(b []byte, e *Entry) (int, error) {
 		e.Count = binary.LittleEndian.Uint16(b[31:])
 		if e.Count == 0 || int(e.First)+int(e.Count) > core.BlocksPerChunk {
 			return 0, ErrBadExtent
+		}
+		if e.Kind == EntryCopy {
+			if e.Source = core.LBA(binary.LittleEndian.Uint64(b[33:])); e.Source == 0 {
+				return 0, ErrMalformed
+			}
 		}
 		if e.Kind == EntrySlot {
 			e.Segment = binary.LittleEndian.Uint32(b[33:])
@@ -515,11 +541,11 @@ func DecodeRecord(img []byte, at Place, blocksLeft uint32, entries []Entry) (Dec
 	return DecodedRecord{RecordHeader: h, Data: data}, nil
 }
 
-// Payload is entry i's bytes sliced from the image: a write's blocks or a blob's bytes, empty for a punch, freeze or slot write.
+// Payload is entry i's bytes sliced from the image: a write's or copy's blocks or a blob's bytes, empty for a punch, freeze or slot write.
 func (d *DecodedRecord) Payload(i int) []byte {
 	e := &d.Entries[i]
 	switch e.Kind {
-	case EntryWrite, EntryBlob:
+	case EntryWrite, EntryCopy, EntryBlob:
 		start := PayloadOffset(d.Entries, i)
 		return d.Data[start : start+e.dataBytes()]
 	}
@@ -556,6 +582,8 @@ func entrySize(k EntryKind) int {
 		return writeEntrySize
 	case EntrySlot:
 		return slotEntrySize
+	case EntryCopy:
+		return copyEntrySize
 	case EntryFreeze:
 		return freezeEntrySize
 	case EntryBlob:

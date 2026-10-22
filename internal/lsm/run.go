@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
@@ -92,6 +93,11 @@ type run struct {
 type blockList [][]byte
 
 func (r *run) root() disklog.BlobRef { return r.pieces[len(r.pieces)-1] }
+
+// inSegment reports whether a live piece of the run, one past those a merge bound made dead, lies in segment.
+func (r *run) inSegment(segment uint32) bool {
+	return len(r.pieces) > 0 && slices.ContainsFunc(r.pieces[r.base:], func(p disklog.BlobRef) bool { return p.Segment == segment })
+}
 
 func (r *run) addBlock(b []byte, n int) {
 	r.blocks = append(r.blocks, b)

@@ -17,7 +17,7 @@ type Mode uint8
 const (
 	// ModeOpen loads the newest manifest and replays the records after its oldest replay LSN.
 	ModeOpen Mode = iota + 1
-	// ModeRebuild replays every record from the start of the log, taking from the manifest only its usage table and what is left to replay.
+	// ModeRebuild replays every record from the start of the log, taking from the manifest only its usage table and what is left to replay; it checks open on a log the cleaner never freed a segment of, and reports any other corrupt.
 	ModeRebuild
 )
 
@@ -211,6 +211,7 @@ type Recovery struct {
 	scratch   []Entry
 
 	segs   []segInfo
+	pieces pieceSet
 	follow []followSeg
 	fi     int
 	scan   []uint32
@@ -222,7 +223,7 @@ type Recovery struct {
 	hasManifest bool
 	nextSeq     uint64
 	chain       []chainEntry
-	pieces      [][]BlobRef
+	chainPieces [][]BlobRef
 	mi, pi      int
 	pieceStep   bool
 	rest        []byte
@@ -239,7 +240,8 @@ type Recovery struct {
 	maxDurable  uint64
 	maxSeq      uint64
 	found       []foundHeader
-	replayFloor uint64
+	baseLSN     uint64
+	replayFrom  uint64
 	replayBytes uint64
 	heldBytes   uint64
 	replayed    uint64
@@ -257,7 +259,7 @@ type Recovery struct {
 	pastGaps   bool
 }
 
-// Recover starts recovering the log on a disk of diskBlocks blocks, with IO IDs counting up from firstIO, taking its read buffers from the pool at once and a window for each lane past the hot and cold ones when Replay starts.
+// Recover starts recovering the log on a disk of diskBlocks blocks, with IO IDs counting up from firstIO, taking its read buffers from the pool at once and a window for each lane past the hot and slot ones when Replay starts.
 func Recover(ctx *core.Context, cfg Config, diskBlocks uint64, mode Mode, firstIO core.IOID, out *Output) (*Recovery, error) {
 	maxRec := cfg.MaxRecordBytes / core.BlockSize
 	if cfg.CommitDepth < 1 || cfg.ReadDepth < 1 || maxRec < 3 || (mode != ModeOpen && mode != ModeRebuild) || diskBlocks == 0 || !cfg.settled() {
@@ -491,6 +493,7 @@ func (r *Recovery) startHeaders(ctx *core.Context, out *Output) {
 	}
 	r.phase = recHeaders
 	r.segs = make([]segInfo, r.sb.SegmentCount)
+	r.pieces = newPieceSet(r.sb.SegmentCount)
 	r.nextSeg = 1
 	for slot := range r.hdrBufs {
 		r.readHeader(slot, out)
@@ -847,7 +850,16 @@ func (r *Recovery) readBlob(ctx *core.Context, ref BlobRef, out *Output) ([]byte
 	if d.Record.LSN != ref.LSN || int(ref.Entry) >= len(d.Entries) || d.Entries[ref.Entry].Kind != EntryBlob {
 		return nil, 0, readBad
 	}
+	r.keepPiece(ref, &d)
 	return d.Payload(int(ref.Entry)), d.Entries[ref.Entry].BlobKind, readOK
+}
+
+// keepPiece counts a blob recovery read as live: a piece of the loaded manifest, or one its
+// owner read for the runs that manifest names.
+func (r *Recovery) keepPiece(ref BlobRef, d *DecodedRecord) {
+	e := &d.Entries[ref.Entry]
+	lo, hi := spanOf(ref.Block, d.Layout.HeaderBlocks, PayloadOffset(d.Entries, int(ref.Entry)), e.Length)
+	r.pieces.add(ref, lo, hi)
 }
 
 // pumpManifest reads the newest manifest a segment header names: its last piece, then the
@@ -875,14 +887,15 @@ func (r *Recovery) pumpManifest(ctx *core.Context, out *Output) {
 			r.fail(ctx, corrupt, out)
 			return
 		}
-		r.pieces, r.rest, r.pieceStep = pieces, slices.Clone(rest), true
+		r.chainPieces, r.rest, r.pieceStep = pieces, slices.Clone(rest), true
 		r.container = BlobRef{Segment: pos.Segment, Block: pos.Block, LSN: pos.LSN, Entry: uint16(i)}
+		r.keepPiece(r.container, &d)
 		r.bodies, r.chain = make([][]byte, len(pieces)), make([]chainEntry, len(pieces))
 		r.chain[len(pieces)-1].size = uint64(len(d.Payload(i)))
 	}
-	for ; r.mi < len(r.pieces); r.mi, r.pi = r.mi+1, 0 {
-		list := r.pieces[r.mi]
-		newest := r.mi == len(r.pieces)-1
+	for ; r.mi < len(r.chainPieces); r.mi, r.pi = r.mi+1, 0 {
+		list := r.chainPieces[r.mi]
+		newest := r.mi == len(r.chainPieces)-1
 		for r.pi < len(list) {
 			b, kind, st := r.readBlob(ctx, list[r.pi], out)
 			if st == readPending {
@@ -919,7 +932,7 @@ func (r *Recovery) pumpManifest(ctx *core.Context, out *Output) {
 		return
 	}
 	r.manifest, r.hasManifest, r.nextSeq = m, true, m.NextSeq
-	r.bodies, r.rest, r.pieces = nil, nil, nil
+	r.bodies, r.rest, r.chainPieces = nil, nil, nil
 	r.startFollow(ctx, out)
 }
 
@@ -970,20 +983,13 @@ func (r *Recovery) Replay(ctx *core.Context, out *Output) error {
 		return ErrBusy
 	}
 	r.phase = recReplay
-	switch {
-	case r.mode == ModeRebuild:
-	case r.hasManifest && len(r.manifest.Indexes) > 0:
-		r.minReplay = r.manifest.Indexes[0].ReplayLSN
-		for _, ix := range r.manifest.Indexes[1:] {
-			r.minReplay = min(r.minReplay, ix.ReplayLSN)
-		}
-	case r.hasManifest:
-		r.minReplay = r.manifest.BaseLSN
+	if r.mode != ModeRebuild && r.hasManifest {
+		r.minReplay = replayFloor(&r.manifest)
 	}
 	r.expected = r.minReplay + 1
-	r.replayFloor = r.manifestPos.LSN
+	r.baseLSN, r.replayFrom = r.manifestPos.LSN, r.manifestPos.LSN
 	if r.hasManifest {
-		r.replayFloor = r.manifest.BaseLSN
+		r.baseLSN, r.replayFrom = r.manifest.BaseLSN, replayFloor(&r.manifest)
 	}
 	lanes := laneMeta + 1
 	for s := range r.segs {
@@ -1278,14 +1284,16 @@ func (r *Recovery) deliver(d *DecodedRecord, seg, block uint32, out *Output) {
 }
 
 // count restores what group commit counted for a record as it retired: the replay and hold
-// bytes after the manifest, its segment's usage row and the slots it writes.
+// bytes after the manifest's replay floor, which a step checkpoint leaves behind its base, and
+// after its base, its segment's usage row and the slots it writes.
 func (r *Recovery) count(d *DecodedRecord, seg uint32) {
-	blocks := d.Layout.Blocks()
-	if d.Record.LSN > r.replayFloor {
-		r.replayBytes += blocks * core.BlockSize
+	if d.Record.LSN > r.replayFrom {
+		r.replayBytes += d.Layout.Blocks() * core.BlockSize
 		r.heldBytes += ordinaryBytes(d.Entries, d.Layout)
+	}
+	if d.Record.LSN > r.baseLSN {
 		info := &r.segs[seg]
-		info.live += d.Layout.DataBlocks
+		info.live += d.Layout.DataBlocks + d.Layout.SlotBlocks
 		info.newest = d.Record.LSN
 		for i := range d.Entries {
 			if e := &d.Entries[i]; e.Kind == EntrySlot {
@@ -1441,8 +1449,9 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 	}
 	if r.hasManifest {
 		l.chain, l.state = r.chain, r.manifest.Indexes
-		l.live = []liveChain{{pos: r.manifestPos, entries: r.chain}}
+		l.live = []liveChain{{pos: r.manifestPos, entries: r.chain, replay: replayFloor(&r.manifest)}}
 	}
+	l.pieces, l.namedLSN = r.pieces, r.manifestPos.LSN
 	for s := uint32(1); s < r.sb.SegmentCount; s++ {
 		info := &r.segs[s]
 		switch info.state {
@@ -1450,6 +1459,7 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 			l.free[s/64] |= 1 << (s % 64)
 		case segUsed, segQuarantined:
 			l.usage[s] = SegmentUsage{State: SegmentUsed, Live: info.live, Newest: info.newest}
+			l.streams[s] = streamOfLane(info.lane)
 			if info.state == segQuarantined {
 				l.usage[s].State = SegmentQuarantined
 			}
@@ -1457,6 +1467,11 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 			l.usage[s] = SegmentUsage{State: SegmentSlot, Live: uint32(info.slots), Newest: info.newest}
 			l.slots.setTaken(s, info.slots)
 		}
+	}
+	if r.mode == ModeRebuild && r.hasManifest {
+		l.pinnedLSN = r.manifestPos.LSN
+	} else {
+		l.recount(nil, false)
 	}
 	table := r.manifest.Segments
 	for s := uint32(1); s < r.sb.SegmentCount; s++ {

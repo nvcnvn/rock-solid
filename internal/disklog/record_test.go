@@ -25,6 +25,17 @@ func goldenRecord(t testing.TB) testRecord {
 	return encodeRecord(t, Record{Place: testPlace, LSN: 10, Durable: 9}, entries, payloads)
 }
 
+// goldenCopyRecord is a record of two copy entries, as a cleaner pass writes it.
+func goldenCopyRecord(t testing.TB) testRecord {
+	t.Helper()
+	entries := []Entry{
+		CopyEntry(1, testChunk, 5, 6, 1, 0x1234),
+		CopyEntry(1, testChunk, 7, 8, 2, 0x5678),
+	}
+	payloads := [][]byte{bytes.Repeat([]byte{0xCD}, core.BlockSize), bytes.Repeat([]byte{0xEF}, 2*core.BlockSize)}
+	return encodeRecord(t, Record{Place: testPlace, LSN: 11, Durable: 10}, entries, payloads)
+}
+
 // goldenSlotRecord is a write of a whole chunk to slot 2 of segment 3, its data 0xCD, and a
 // 1-block write of data 0xAB.
 func goldenSlotRecord(t testing.TB) testRecord {
@@ -65,6 +76,8 @@ func TestLayoutExamples(t *testing.T) {
 		{"200 writes", manyWrites, Layout{56 + 200*33 + 200*4, 2, 200, 0}},
 		{"slot write", []Entry{SlotEntry(1, testChunk, 1, 3, 2)}, Layout{56 + 39 + 1024*4, 2, 0, 1024}},
 		{"slot write and a write", []Entry{SlotEntry(1, testChunk, 1, 3, 2), write(1)}, Layout{56 + 39 + 33 + 1025*4, 2, 1, 1024}},
+		{"copy entry", []Entry{CopyEntry(1, testChunk, 1, 0, 1, 9)}, Layout{56 + 41 + 4, 1, 1, 0}},
+		{"253 one-block copies fill a 256-block record", copies(253), Layout{56 + 253*45, 3, 253, 0}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -75,7 +88,8 @@ func TestLayoutExamples(t *testing.T) {
 		})
 	}
 	t.Run("bad extents", func(t *testing.T) {
-		for _, e := range []Entry{write(0), write(1025), WriteEntry(1, testChunk, 1, 1, 1024), PunchEntry(1, testChunk, 1, 1024, 1)} {
+		for _, e := range []Entry{write(0), write(1025), WriteEntry(1, testChunk, 1, 1, 1024), PunchEntry(1, testChunk, 1, 1024, 1),
+			CopyEntry(1, testChunk, 1, 0, 0, 9), CopyEntry(1, testChunk, 1, 1024, 1, 9)} {
 			_, err := LayoutOf([]Entry{e})
 			wantErr(t, "extent", err, ErrBadExtent)
 		}
@@ -93,7 +107,11 @@ func TestLayoutExamples(t *testing.T) {
 		write.Length = 4096
 		blob := BlobEntry(BlobRun, 1, 10)
 		blob.Version = 5
-		for _, e := range []Entry{freeze, punch, write, blob} {
+		sourced := WriteEntry(1, testChunk, 1, 0, 1)
+		sourced.Source = 9
+		copied := CopyEntry(1, testChunk, 1, 0, 1, 9)
+		copied.Epoch = 2
+		for _, e := range []Entry{freeze, punch, write, blob, sourced, copied, CopyEntry(1, testChunk, 1, 0, 1, 0)} {
 			_, err := LayoutOf([]Entry{e})
 			wantErr(t, "field", err, ErrMalformed)
 		}
@@ -106,6 +124,14 @@ func TestLayoutExamples(t *testing.T) {
 	})
 }
 
+func copies(n int) []Entry {
+	entries := make([]Entry, n)
+	for i := range entries {
+		entries[i] = CopyEntry(1, testChunk, 1, uint16(i), 1, core.LBA(100+i))
+	}
+	return entries
+}
+
 func TestPayloadOffset(t *testing.T) {
 	entries := []Entry{
 		BlobEntry(BlobRun, 1, 5),
@@ -114,8 +140,9 @@ func TestPayloadOffset(t *testing.T) {
 		BlobEntry(BlobRun, 1, 7),
 		WriteEntry(1, testChunk, 1, 0, 1),
 		FreezeEntry(1, testChunk, 1, 1),
+		CopyEntry(1, testChunk, 1, 0, 2, 9),
 	}
-	want := []uint64{3 * core.BlockSize, 0, 3*core.BlockSize + 5, 3*core.BlockSize + 5, 2 * core.BlockSize, 3*core.BlockSize + 12}
+	want := []uint64{5 * core.BlockSize, 0, 5*core.BlockSize + 5, 5*core.BlockSize + 5, 2 * core.BlockSize, 5*core.BlockSize + 12, 3 * core.BlockSize}
 	for i, w := range want {
 		if got := PayloadOffset(entries, i); got != w {
 			t.Fatalf("entry %d at %d, want %d", i, got, w)
@@ -132,6 +159,12 @@ func TestRecordRoundTrip(t *testing.T) {
 		}
 		if d.DataCRC(0) != core.CRC32C(d.Data[:core.BlockSize]) || d.Payload(1) != nil {
 			t.Fatal("data CRC or punch payload")
+		}
+	})
+	t.Run("golden copies", func(t *testing.T) {
+		d := decodeExact(t, goldenCopyRecord(t))
+		if d.Layout != (Layout{56 + 2*41 + 3*4, 1, 3, 0}) || d.Entries[1].Source != 0x5678 {
+			t.Fatalf("layout %+v, entries %+v", d.Layout, d.Entries)
 		}
 	})
 	t.Run("1-block write is 2 blocks", func(t *testing.T) {

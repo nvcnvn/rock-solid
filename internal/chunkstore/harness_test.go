@@ -10,6 +10,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -42,6 +43,55 @@ type harness struct {
 	// executed counts the actions run since format; the step that would run action crashAt panics with errCrash instead.
 	executed int
 	crashAt  int
+	// abandoned is the pool buffers left live by stores the harness dropped at a crash, and own
+	// those a settled store holds for its log once formatted.
+	abandoned, own int
+	// merging runs the index's due merge steps after every action, as the disk's owner does;
+	// steps counts each merge's installed steps, merges in the order they started.
+	merging bool
+	steps   map[*lsm.Compaction]int
+	merges  []*lsm.Compaction
+	// laneOf is each metadata segment's lane, and stepHeld the run bytes each merge worker's lane
+	// wrote since the last manifest, which never pass one step and its partition and root.
+	laneOf      map[uint32]uint8
+	stepHeld    map[uint8]uint64
+	maxStepHeld uint64
+	// stepBlocks counts the blocks of the records merge workers' lanes and manifests take, with the
+	// segment headers they open.
+	stepBlocks uint64
+	// trims is every TRIM executed, and timerAt the time the log's TRIM timer was last armed for.
+	trims   []core.Action
+	timerAt core.Tick
+	// shuffle, when set, runs a queued action at random rather than the oldest, as an NVMe queue
+	// may complete the commands it holds in any order but a flush.
+	shuffle *core.Rand
+	// maxCleanReads is the most reads a cleaner pass has had in flight, and maxMerging the most
+	// merges begun and not finished at once.
+	maxCleanReads, maxMerging int
+	// held is the cleaner jobs taken from the store and not yet run: with late set, each runs
+	// after a random number of later actions, as a worker may finish after the owner has taken
+	// other events, and with hold set, only when a test runs it.
+	held []*CleanJob
+	late *core.Rand
+	hold bool
+}
+
+// advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
+func (h *harness) advance(d core.Tick) {
+	h.t.Helper()
+	h.tick(d)
+	h.settle()
+}
+
+// tick moves the clock on by d and fires the log's TRIM timer if it falls due.
+func (h *harness) tick(d core.Tick) {
+	h.ctx.Now += d
+	h.ctx.Raw += d
+	if h.timerAt != 0 && h.timerAt <= h.ctx.Now {
+		h.timerAt = 0
+		h.s.OnEvent(&h.ctx, &core.Event{Kind: core.EvTimer, Timer: disklog.TrimTimer}, &h.out)
+		h.take()
+	}
 }
 
 var errCrash = errors.New("crash")
@@ -75,7 +125,7 @@ var slotGeometry = disklog.Geometry{SegmentBlocks: 4096, SegmentCount: 40}
 // newHarnessOn is newHarness on a disk cut as geo.
 func newHarnessOn(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
 	h := &harness{t: t, pool: sim.NewPool(32<<20, 0), disk: sim.NewDisk(geo.DiskBlocks()), cfg: cfg,
-		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, slotData: map[core.LBA][]byte{}, crashAt: -1}
+		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, steps: map[*lsm.Compaction]int{}, laneOf: map[uint32]uint8{}, stepHeld: map[uint8]uint64{}, slotData: map[core.LBA][]byte{}, crashAt: -1}
 	h.ctx = core.Context{Now: 1, Raw: 2, Pool: h.pool}
 	var err error
 	if h.s, err = Format(&h.ctx, cfg, disklog.Superblock{LogID: 0x5eed, Geometry: geo}, &h.out); err != nil {
@@ -83,7 +133,7 @@ func newHarnessOn(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
 	}
 	h.take()
 	h.settle()
-	h.executed = 0
+	h.executed, h.own = 0, h.pool.Live()
 	return h
 }
 
@@ -101,23 +151,43 @@ func (h *harness) take() {
 	h.out.Reset()
 }
 
-// step runs the oldest queued action and hands its completion to the store.
+// step runs the oldest queued action and hands its completion to the store, checking the
+// open sequences on disk when that ends a recovery.
 func (h *harness) step() bool {
 	if len(h.queue) == 0 {
-		return false
+		if h.hold || len(h.held) == 0 {
+			return false
+		}
+		h.runClean(0)
+		return true
 	}
 	if h.executed == h.crashAt {
 		panic(errCrash)
 	}
 	h.executed++
 	a := h.queue[0]
-	h.queue = h.queue[1:]
+	if h.shuffle != nil {
+		a = h.unordered()
+	} else {
+		h.queue = h.queue[1:]
+	}
+	if a.Kind == core.ActSetTimer {
+		h.timerAt = a.At
+		return true
+	}
+	if a.Kind == core.ActDiskTrim {
+		h.trims = append(h.trims, a)
+	}
 	if a.Kind == core.ActDiskWrite {
 		h.noteWrite(&a)
 	}
 	ev := h.disk.Execute(h.pool, &a)
 	recovering := !h.s.Serving()
 	h.s.OnEvent(&h.ctx, &ev, &h.out)
+	if recovering && h.s.Serving() {
+		checkOpenSeqs(h.t, h.disk, h.s.Log())
+		clear(h.stepHeld)
+	}
 	if recovering && h.s.Serving() && h.oracle != nil {
 		m, err := h.oracle.Recovered(h.s.Log().DurableLSN())
 		if err != nil {
@@ -127,11 +197,142 @@ func (h *harness) step() bool {
 	}
 	h.take()
 	h.noteDurable()
+	h.noteCleanReads()
+	for c := h.mergeDue(); c != nil; c = h.mergeDue() {
+		c.Run()
+		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
+			h.t.Fatal(err)
+		}
+		if h.steps[c] == 0 {
+			h.merges = append(h.merges, c)
+		}
+		h.steps[c]++
+		running := 0
+		for _, m := range h.merges[max(0, len(h.merges)-8):] {
+			if !m.Finished() {
+				running++
+			}
+		}
+		h.maxMerging = max(h.maxMerging, running)
+		h.take()
+	}
+	for j := h.s.CleanDue(); j != nil; j = h.s.CleanDue() {
+		h.held = append(h.held, j)
+	}
+	for i := 0; i < len(h.held) && !h.hold; {
+		if h.late != nil && h.late.Below(4) != 0 {
+			i++
+			continue
+		}
+		h.runClean(i)
+	}
 	return true
 }
 
+// runClean runs the held cleaner job i, as its worker does, and hands it back to the store.
+func (h *harness) runClean(i int) {
+	j := h.held[i]
+	h.held = slices.Delete(h.held, i, i+1)
+	j.Run(h.pool)
+	h.s.InstallClean(&h.ctx, j, &h.out)
+	h.take()
+}
+
+// unordered takes a queued action at random, except that a flush completes after the writes
+// queued before it, as a driver's flush command does.
+func (h *harness) unordered() core.Action {
+	k := int(h.shuffle.Below(uint64(len(h.queue))))
+	if h.queue[k].Kind == core.ActDiskFsync && slices.ContainsFunc(h.queue[:k], func(a core.Action) bool { return a.Kind == core.ActDiskWrite }) {
+		k = 0
+	}
+	a := h.queue[k]
+	h.queue = slices.Delete(h.queue, k, k+1)
+	return a
+}
+
+// noteCleanReads fails when a cleaner pass has more reads in flight than the cleaner's read
+// depth, and keeps the most it has seen.
+func (h *harness) noteCleanReads() {
+	for _, p := range h.s.cl.passes {
+		if p.job.reads > cleanReadDepth {
+			h.t.Fatalf("a cleaner pass has %d reads in flight, above its depth of %d", p.job.reads, cleanReadDepth)
+		}
+		h.maxCleanReads = max(h.maxCleanReads, p.job.reads)
+	}
+}
+
+func (h *harness) mergeDue() *lsm.Compaction {
+	if !h.merging {
+		return nil
+	}
+	return h.s.MergeDue()
+}
+
+// checkOpenSeqs fails unless log opens its next segment past the open sequence of every segment
+// header of its own on disk, so that open sequences stay unique and increasing.
+func checkOpenSeqs(t testing.TB, disk *sim.Disk, log *disklog.Log) {
+	t.Helper()
+	sb := log.Superblock()
+	for s := uint32(1); s < sb.SegmentCount; s++ {
+		sh, err := disklog.DecodeSegmentHeader(disk.Read(sb.LBA(s, 0), 1))
+		if err == nil && sh.LogID == sb.LogID && sh.Index == s && sh.Seq >= log.NextOpenSeq() {
+			t.Fatalf("the recovered log opens its next segment at sequence %d, and segment %d's header on disk is at %d", log.NextOpenSeq(), s, sh.Seq)
+		}
+	}
+}
+
+// noteSteps adds the run pieces a record on a merge worker's lane holds to that worker's step,
+// and starts every worker's next step at a manifest.
+func (h *harness) noteSteps(segment uint32, entries []disklog.Entry) {
+	lane, ok := h.laneOf[segment]
+	for _, e := range entries {
+		switch {
+		case e.Kind != disklog.EntryBlob:
+		case e.BlobKind == disklog.BlobManifest:
+			clear(h.stepHeld)
+		case e.BlobKind == disklog.BlobRun && ok && lane > 0:
+			h.stepHeld[lane] += e.Length
+			h.maxStepHeld = max(h.maxStepHeld, h.stepHeld[lane])
+			piece := h.s.Log().MaxBlobBytes()
+			if most := max(h.cfg.Log.CompactionStepBytes, piece) + 2*piece; h.stepHeld[lane] > most {
+				h.t.Fatalf("merge worker %d wrote %d bytes of runs since the last manifest, above a step's %d", lane, h.stepHeld[lane], most)
+			}
+		}
+	}
+}
+
+// settleSteps bounds a settle, so that a store that never goes quiet fails rather than runs away.
+const settleSteps = 100_000
+
 func (h *harness) settle() {
-	for h.step() {
+	for n := 0; h.step(); n++ {
+		if n == settleSteps {
+			h.t.Fatalf("the store did not settle within %d actions: %+v", settleSteps, h.s.CleanStats())
+		}
+	}
+	h.checkUsage()
+}
+
+// checkUsage checks that every segment outside the metadata stream counts as many live blocks
+// as the index's records in it refer to, and the index as many slot-held ones as its slots' counts.
+func (h *harness) checkUsage() {
+	h.t.Helper()
+	if !h.s.Serving() {
+		return
+	}
+	geo := h.s.sb.Geometry
+	want := make([]uint32, geo.SegmentCount)
+	h.s.Index().SegmentLive(geo.SegmentBlocks, want)
+	held := make([]uint32, geo.SegmentCount)
+	h.s.Index().SegmentSlotHeld(held)
+	for s := uint32(1); s < geo.SegmentCount; s++ {
+		u, stream := h.s.Log().Usage(s)
+		if stream != disklog.Meta && u.State == disklog.SegmentUsed && u.Live != want[s] {
+			h.t.Fatalf("segment %d counts %d live blocks, the index's records in it %d", s, u.Live, want[s])
+		}
+		if got := h.s.Index().SlotHeld(s); got != held[s] || got > want[s] {
+			h.t.Fatalf("segment %d holds %d slot blocks' headers, the slots' counts %d, of %d live", s, got, held[s], want[s])
+		}
 	}
 }
 
@@ -166,12 +367,22 @@ func (h *harness) noteWrite(a *core.Action) {
 	segment := uint32(uint64(lba) / uint64(geo.SegmentBlocks))
 	if sh, err := disklog.DecodeSegmentHeader(img); err == nil && sh.LogID == h.s.sb.LogID {
 		h.seqOf[segment] = sh.Seq
+		if sh.Stream == disklog.Meta {
+			h.laneOf[segment] = sh.Lane
+		} else {
+			delete(h.laneOf, segment)
+		}
 		img, lba = img[core.BlockSize:], lba+1
 	}
 	place := disklog.Place{LogID: h.s.sb.LogID, Seq: h.seqOf[segment], Offset: uint32(uint64(lba) % uint64(geo.SegmentBlocks))}
 	d, err := disklog.DecodeRecord(img, place, math.MaxUint32, nil)
 	if err != nil {
 		return
+	}
+	if lane, ok := h.laneOf[segment]; ok && (lane > 0 || slices.ContainsFunc(d.Entries, func(e disklog.Entry) bool {
+		return e.Kind == disklog.EntryBlob && (e.BlobKind == disklog.BlobManifest || e.BlobKind == disklog.BlobManifestPiece)
+	})) {
+		h.stepBlocks += a.Len / core.BlockSize
 	}
 	rec := writtenRecord{lsn: d.Record.LSN, entries: slices.Clone(d.Entries)}
 	for i, e := range d.Entries {
@@ -182,6 +393,7 @@ func (h *harness) noteWrite(a *core.Action) {
 		rec.payloads = append(rec.payloads, p)
 	}
 	h.records = append(h.records, rec)
+	h.noteSteps(segment, d.Entries)
 	if h.oracle != nil {
 		if err := h.oracle.Written(rec.lsn, rec); err != nil {
 			h.t.Fatal(err)

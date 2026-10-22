@@ -111,6 +111,7 @@ struct Cfg {
     whole_f: f64,
     whole_w: f64,
     whole_stream: usize,
+    pin_hdr: bool,
     file_chunks: u32,
     writers: u32,
     // Q15
@@ -145,7 +146,7 @@ impl Cfg {
         let known = [
             "wl", "u", "pol", "streams", "sep", "seg_mb", "segs", "disk_gb", "rec_kb", "io_kb", "headers", "entry_b",
             "crc_b", "warm", "windows", "win", "free_low", "batch", "age_cap", "hot_w", "hot_f", "theta", "seed", "tag",
-            "slots", "slot_hdr_in_log", "whole_f", "whole_w", "whole_stream", "file_chunks", "writers", "meta",
+            "slots", "slot_hdr_in_log", "whole_f", "whole_w", "whole_stream", "pin_hdr", "file_chunks", "writers", "meta",
             "raft_ratio", "meta_state_ratio", "meta_live", "idx_entry_b", "ckpt_mb", "man_row_b", "small_run_kb",
             "raft_stream", "run_stream", "meta_reserve", "compaction",
         ];
@@ -193,6 +194,7 @@ impl Cfg {
             whole_f: f("whole_f", "0.5"),
             whole_w: f("whole_w", "0.5"),
             whole_stream: get("whole_stream", "0").parse().unwrap(),
+            pin_hdr: get("pin_hdr", "0") == "1",
             file_chunks: get("file_chunks", "16").parse().unwrap(),
             writers: get("writers", "1").parse().unwrap(),
             meta: get("meta", "0") == "1",
@@ -276,6 +278,8 @@ struct Counters {
     free_samples: u64,
     slot_segs_sum: u64,
     live_sum: u64,
+    lane_segs_sum: u64,
+    lane_samples: u64,
 }
 
 impl Counters {
@@ -301,6 +305,8 @@ impl Counters {
             free_samples: self.free_samples - o.free_samples,
             live_sum: self.live_sum - o.live_sum,
             slot_segs_sum: self.slot_segs_sum - o.slot_segs_sum,
+            lane_segs_sum: self.lane_segs_sum - o.lane_segs_sum,
+            lane_samples: self.lane_samples - o.lane_samples,
         }
     }
     fn total(&self) -> u64 {
@@ -380,6 +386,7 @@ struct Sim {
     chunk_hdr_blob: Vec<u32>,
     whole_chunks: u32,
     whole_stream: usize,
+    pin_hdr: bool,
     // meta
     meta: bool,
     raft_stream: usize,
@@ -461,6 +468,7 @@ impl Sim {
             chunk_hdr_blob: vec![INVALID; whole_chunks as usize],
             whole_chunks,
             whole_stream: cfg.whole_stream,
+            pin_hdr: cfg.pin_hdr,
             meta: cfg.meta,
             raft_stream: cfg.raft_stream,
             run_stream: cfg.run_stream,
@@ -519,7 +527,7 @@ impl Sim {
         self.live_total -= 1;
         if id >= BLOB_BASE {
             let bl = self.bb_blob[(id - BLOB_BASE) as usize];
-            if self.blobs[bl as usize].as_ref().unwrap().kind == Kind::Raft {
+            if self.blobs[bl as usize].as_ref().unwrap().kind == Kind::Raft || (self.pin_hdr && self.blobs[bl as usize].as_ref().unwrap().kind == Kind::SlotHdr) {
                 self.raftlive[seg] -= 1;
             }
         }
@@ -569,7 +577,7 @@ impl Sim {
             }
             self.bb_slot[i] = slot;
             let bl = self.bb_blob[i];
-            if self.blobs[bl as usize].as_ref().unwrap().kind == Kind::Raft {
+            if self.blobs[bl as usize].as_ref().unwrap().kind == Kind::Raft || (self.pin_hdr && self.blobs[bl as usize].as_ref().unwrap().kind == Kind::SlotHdr) {
                 self.raftlive[(slot / b) as usize] += 1;
             }
         }
@@ -981,6 +989,14 @@ impl Sim {
         self.c.free_samples += 1;
         self.c.live_sum += self.live_total;
         self.c.slot_segs_sum += self.slot_segs as u64;
+        if self.slots && self.c.free_samples % 256 == 0 {
+            // segments of the slot headers' own stream (whole_stream), open or sealed
+            let ws = self.whole_stream as u8;
+            self.c.lane_samples += 1;
+            self.c.lane_segs_sum += (0..self.s as usize)
+                .filter(|&i| self.sclass[i] == ws && matches!(self.state[i], State::Open | State::Sealed | State::Cleaning))
+                .count() as u64;
+        }
         if self.slots && self.is_whole(blocks[0].0) {
             debug_assert!(blocks.len() == CHUNK_BLOCKS as usize);
             self.slot_write(blocks[0].0 / CHUNK_BLOCKS);
@@ -1390,7 +1406,7 @@ fn run(cfg: &Cfg) {
     let runs_idx = sim.idx.runs.len();
     let runs_mst = sim.mst.runs.len();
     println!(
-        "RUN tag={} wl={} u={:.3} pol={} sep={:?} streams={} seg_mb={} segs={} disk_gb={:.0} rec_kb={} io_kb={} slots={} slot_hdr_in_log={} whole_f={} whole_w={} whole_stream={} file_chunks={} writers={} meta={} raft_ratio={} meta_live={} raft_stream={} run_stream={} compaction={} hot={}/{} | wa={:.4} chunk_wa={:.4} copies_per_user={:.4} hdr_per_user={:.4} raft_per_user={:.4} runflush_per_user={:.4} runcompact_per_user={:.4} manifest_per_user={:.4} blobmove_per_user={:.4} slothdr_per_user={:.4} idx_user_entries_per_write={:.4} idx_clean_entries_per_user={:.4} victim_u={:.4} u_data={:.4} u_total={:.4} avg_free={:.1} slot_segs={:.1} slot_occ={:.4} ell={:.0} runs={}/{} windows=[{}] spread={:.4} steady={} secs={:.1}",
+        "RUN tag={} wl={} u={:.3} pol={} sep={:?} streams={} seg_mb={} segs={} disk_gb={:.0} rec_kb={} io_kb={} slots={} slot_hdr_in_log={} whole_f={} whole_w={} whole_stream={} pin_hdr={} file_chunks={} writers={} meta={} raft_ratio={} meta_live={} raft_stream={} run_stream={} compaction={} hot={}/{} | wa={:.4} chunk_wa={:.4} copies_per_user={:.4} hdr_per_user={:.4} raft_per_user={:.4} runflush_per_user={:.4} runcompact_per_user={:.4} manifest_per_user={:.4} blobmove_per_user={:.4} slothdr_per_user={:.4} idx_user_entries_per_write={:.4} idx_clean_entries_per_user={:.4} victim_u={:.4} u_data={:.4} u_total={:.4} avg_free={:.1} slot_segs={:.1} slot_occ={:.4} ell={:.0} runs={}/{} windows=[{}] spread={:.4} steady={} secs={:.1}",
         cfg.tag,
         cfg.wl,
         cfg.u,
@@ -1410,6 +1426,7 @@ fn run(cfg: &Cfg) {
         cfg.whole_f,
         cfg.whole_w,
         cfg.whole_stream,
+        u8::from(cfg.pin_hdr),
         cfg.file_chunks,
         cfg.writers,
         u8::from(cfg.meta),
@@ -1446,9 +1463,12 @@ fn run(cfg: &Cfg) {
         if spread < 0.03 { "OK" } else { "NO" },
         t0.elapsed().as_secs_f64()
     );
+    let lane_segs = if m.lane_samples > 0 { m.lane_segs_sum as f64 / m.lane_samples as f64 } else { 0.0 };
+    println!("LANE tag={} whole_stream={} pin_hdr={} lane_segs={:.2} lane_share={:.5} wa={:.4}", cfg.tag, cfg.whole_stream, u8::from(cfg.pin_hdr), lane_segs, lane_segs / sim.s as f64, wa);
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     run(&Cfg::parse(&args));
 }
+
