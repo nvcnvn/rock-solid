@@ -1237,6 +1237,17 @@ func (s *Store) reading(slot core.LBA) bool {
 	return false
 }
 
+// readsFrom reports whether a read in flight reads data or a record header from segment seg.
+func (s *Store) readsFrom(seg uint32) bool {
+	n := core.LBA(s.sb.SegmentBlocks)
+	for i := range s.fetches {
+		if f := &s.fetches[i]; f.lba != 0 && (uint32(f.lba/n) == seg || uint32(f.header/n) == seg) {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckSlots verifies that the chunk slots the log holds in use are exactly those the index's maps refer to.
 func (s *Store) CheckSlots() error {
 	var referred []core.LBA

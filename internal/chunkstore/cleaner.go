@@ -254,7 +254,7 @@ func costBenefit(u float64, age uint64) float64 { return (1 - u) * float64(age) 
 func (s *Store) startVictim(ctx *core.Context, p *cleanPass) bool {
 	seg := p.victims[p.cur]
 	u, stream := s.log.Usage(seg)
-	if stream == disklog.Meta || u.Live == 0 {
+	if stream == disklog.Meta {
 		s.cl.stats.Rewrites += s.ix.Tree().MarkRewrite(seg)
 		if s.log.Free(ctx, seg, &s.lout) == nil {
 			s.cl.stats.Freed++
@@ -263,8 +263,13 @@ func (s *Store) startVictim(ctx *core.Context, p *cleanPass) bool {
 		p.cur++
 		return false
 	}
+	p.job = cleanJob{segment: seg, records: p.job.records[:0], pieces: p.job.pieces[:0], crcs: p.job.crcs[:0]}
+	if u.Live == 0 {
+		p.job.phase = jobCopies
+		return true
+	}
 	lo := s.sb.LBA(seg, 0)
-	p.job = cleanJob{segment: seg, records: s.ix.Records(p.job.records[:0], lo, lo+core.LBA(s.sb.SegmentBlocks)), pieces: p.job.pieces[:0], crcs: p.job.crcs[:0]}
+	p.job.records = s.ix.Records(p.job.records, lo, lo+core.LBA(s.sb.SegmentBlocks))
 	return true
 }
 
@@ -318,7 +323,7 @@ func (s *Store) advancePass(ctx *core.Context, p *cleanPass) {
 			}
 			j.phase = jobCopies
 		case jobCopies:
-			if j.copies > 0 {
+			if j.copies > 0 || s.readsFrom(j.segment) {
 				return
 			}
 			s.finishVictim(ctx, p)

@@ -1967,7 +1967,13 @@ A pass:
 - A disk filled to its reserve still finishes a rewrite in steps, each step's checkpoint writing
   to the merge worker's lane, which may open reserve segments.
 - The owner applies a move only where a map, live or frozen, still points at the source, then
-  frees the victim once all its moves are applied. Interleavings (worker copies chunk 7 block 3
+  frees the victim once all its moves are applied and no read in flight reads from it. A read
+  issued before its block's copy applied, or before overwrites left the victim with nothing live,
+  and held by the disk while 500 more writes fill it, keeps the victim from reuse, returns the
+  block as written, and the victim is freed once it completes. Reads and overwrites of six
+  chunks, with the disk completing commands in any order but a flush, each read return the bytes
+  of a write acknowledged before it or in flight with it, while the cleaner frees 64 segments and
+  more. Interleavings (worker copies chunk 7 block 3
   from LBA 100 to LBA 5000):
 
 | Between the copy and the apply | Live map after | Frozen maps after | Copy at 5000 |

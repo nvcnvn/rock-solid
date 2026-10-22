@@ -62,6 +62,9 @@ type harness struct {
 	// trims is every TRIM executed, and timerAt the time the log's TRIM timer was last armed for.
 	trims   []core.Action
 	timerAt core.Tick
+	// shuffle, when set, runs a queued action at random rather than the oldest, as an NVMe queue
+	// may complete the commands it holds in any order but a flush.
+	shuffle *core.Rand
 }
 
 // advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
@@ -150,7 +153,11 @@ func (h *harness) step() bool {
 	}
 	h.executed++
 	a := h.queue[0]
-	h.queue = h.queue[1:]
+	if h.shuffle != nil {
+		a = h.unordered()
+	} else {
+		h.queue = h.queue[1:]
+	}
 	if a.Kind == core.ActSetTimer {
 		h.timerAt = a.At
 		return true
@@ -189,6 +196,18 @@ func (h *harness) step() bool {
 		h.take()
 	}
 	return true
+}
+
+// unordered takes a queued action at random, except that a flush completes after the writes
+// queued before it, as a driver's flush command does.
+func (h *harness) unordered() core.Action {
+	k := int(h.shuffle.Below(uint64(len(h.queue))))
+	if h.queue[k].Kind == core.ActDiskFsync && slices.ContainsFunc(h.queue[:k], func(a core.Action) bool { return a.Kind == core.ActDiskWrite }) {
+		k = 0
+	}
+	a := h.queue[k]
+	h.queue = slices.Delete(h.queue, k, k+1)
+	return a
 }
 
 func (h *harness) mergeDue() *lsm.Compaction {
