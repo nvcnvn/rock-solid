@@ -194,7 +194,8 @@ func (s *Store) isVictim(seg uint32) bool {
 // chooseVictims picks up to VictimsPerPass segments by cost-benefit, (1 − u) × age ÷ (1 + u)
 // with u the live share and age capped at a disk's worth of writes, among those whose copy
 // costs less than a segment less the header of the segment it lands in, header blocks
-// included, charging live run pieces at the records of the whole runs a rewrite writes again.
+// included, charging live run pieces at the records of the whole runs a rewrite writes again and
+// what each of its steps writes beside them.
 // A segment holding a piece of a manifest recovery may load waits for the next snapshot, which
 // it asks for, and one holding only pieces about to die waits for them.
 func (s *Store) chooseVictims() []uint32 {
@@ -216,7 +217,8 @@ func (s *Store) chooseVictims() []uint32 {
 			if held || len(s.cl.pieces) == 0 && s.log.HoldsPiece(seg) {
 				continue
 			}
-			cost = s.log.RewriteCost(s.cl.pieces)
+			steps, extra := s.ix.Tree().RewriteSteps(seg)
+			cost = s.log.RewriteCost(s.cl.pieces, steps, extra)
 		} else {
 			cost = s.log.CopyCost(uint64(u.Live))
 		}

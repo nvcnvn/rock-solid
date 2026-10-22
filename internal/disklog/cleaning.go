@@ -2,6 +2,7 @@ package disklog
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -81,11 +82,13 @@ func (l *Log) CopyCost(blocks uint64) uint64 {
 	return blocks + header*((blocks+per-1)/per+1) + tail
 }
 
-// RewriteCost is what writing pieces again costs the log in blocks at most: the records holding
-// them as they lie now, header blocks included, and the tail that the largest leaves behind in a
-// segment too short for it, since a record never spans two segments. A piece the log does not
-// hold counts as a record of the largest size.
-func (l *Log) RewriteCost(pieces []BlobRef) uint64 {
+// RewriteCost is what writing pieces again in steps steps costs the log in blocks at most: the
+// records holding them as they lie now, header blocks included, and the tail that the largest
+// leaves behind in a segment too short for it, since a record never spans two segments; and for
+// each step a record header more for its blocks, extra bytes of blobs beside them, its filter
+// partition and root, and a manifest as large as a snapshot listing every segment, its run and
+// its bound. A piece the log does not hold counts as a record of the largest size.
+func (l *Log) RewriteCost(pieces []BlobRef, steps int, extra uint64) uint64 {
 	var cost, largest uint64
 	for k, ref := range pieces {
 		if slices.ContainsFunc(pieces[:k], func(p BlobRef) bool { return p.LSN == ref.LSN }) {
@@ -105,7 +108,39 @@ func (l *Log) RewriteCost(pieces []BlobRef) uint64 {
 	if largest > 0 {
 		cost += largest - 1
 	}
+	if steps > 0 {
+		manifest := uint64(manifestFixedSize + SegmentUsageSize*int(l.sb.SegmentCount) + BlobRefSize + mergeBoundSize)
+		for i := range l.state {
+			manifest += uint64(manifestIndexSize + BlobRefSize*len(l.state[i].Runs) + boundsSize(l.state[i].Bounds))
+		}
+		cost += uint64(steps) * (l.blobBlocks(0) + l.blobBlocks(extra) + l.blobBlocks(manifest))
+	}
 	return cost
+}
+
+// blobBlocks is the blocks n bytes of blobs take in pieces of at most the largest a record holds,
+// each in a record of its own, or a record header alone for none.
+func (l *Log) blobBlocks(n uint64) uint64 {
+	var blocks uint64
+	for {
+		k := min(n, l.maxBlob)
+		var acc layoutAcc
+		e := BlobEntry(BlobRun, 0, k)
+		if err := acc.add(&e); err != nil {
+			panic(fmt.Sprintf("disklog: a blob of the largest size does not lay out: %v", err))
+		}
+		lay, err := acc.layout()
+		if err != nil {
+			panic(fmt.Sprintf("disklog: a blob of the largest size does not lay out: %v", err))
+		}
+		if n -= k; n == 0 {
+			if k == 0 {
+				return blocks + uint64(lay.HeaderBlocks)
+			}
+			return blocks + lay.Blocks()
+		}
+		blocks += lay.Blocks()
+	}
 }
 
 func copiesPerRecord(recordBlocks uint32) (per, header uint64) {

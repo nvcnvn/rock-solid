@@ -180,6 +180,45 @@ func TestLiveRunPiecesAreRewrittenNotCopied(t *testing.T) {
 	o.check(t, h, 0, 63, 0)
 }
 
+// A rewrite in steps of a block writes, for each step, a filter partition, a root and a manifest
+// beside its blocks; the net-gain guard charges them, so the rewrite of a victim's runs writes no
+// more blocks than the guard charged it.
+func TestARewriteInStepsWritesNoMoreThanItsCost(t *testing.T) {
+	h, o, _ := steppedStore(t)
+	log := h.s.Log()
+	costs := map[uint32]uint64{}
+	for s := uint32(1); s < cleanGeo.SegmentCount; s++ {
+		if pieces, _ := h.s.Index().Tree().RunsIn(s, nil); len(pieces) > 0 {
+			steps, extra := h.s.Index().Tree().RewriteSteps(s)
+			costs[s] = log.RewriteCost(pieces, steps, extra)
+		}
+	}
+	seg, marked := markRewrites(t, h)
+	written := h.stepBlocks
+	var rewrites []*lsm.Compaction
+	for c := h.s.MergeDue(); c != nil; c = h.s.MergeDue() {
+		if !slices.Contains(rewrites, c) {
+			if len(rewrites) == marked {
+				break
+			}
+			rewrites = append(rewrites, c)
+		}
+		c.Run()
+		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
+			t.Fatal(err)
+		}
+		h.take()
+		h.settle()
+	}
+	if slices.ContainsFunc(rewrites, func(c *lsm.Compaction) bool { return !c.Finished() }) {
+		t.Fatalf("of the %d rewrites of segment %d's runs, one did not finish", marked, seg)
+	}
+	if written = h.stepBlocks - written; written > costs[seg] {
+		t.Fatalf("the rewrite of segment %d's runs wrote %d blocks, charged %d", seg, written, costs[seg])
+	}
+	o.check(t, h, 0, 63, 0)
+}
+
 // runToMidStep runs the store's due merge steps until one installs a step its merge does not
 // end with, and returns that merge once the manifest naming the step is durable.
 func runToMidStep(t *testing.T, h *harness) *lsm.Compaction {

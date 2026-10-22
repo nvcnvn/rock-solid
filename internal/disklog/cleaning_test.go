@@ -37,17 +37,17 @@ func TestRewriteCostChargesRecordsAndTheTail(t *testing.T) {
 	h := formatted(t, gib, testConfig(0))
 	h.put(disklog.Hot, h.write(0, 1, 1))
 	big := h.checkpointPieces(nil, 1, 3*core.BlockSize).runs
-	if got := h.log.RewriteCost(big); got != 4+3 {
+	if got := h.log.RewriteCost(big, 0, 0); got != 4+3 {
 		t.Fatalf("a 3-block piece in a 4-block record costs %d, want 7", got)
 	}
 	shared := h.checkpointPieces(nil, 3, 100).runs[1:]
 	if shared[0].LSN != shared[1].LSN {
 		t.Fatalf("the two pieces went out in records %d and %d, want one", shared[0].LSN, shared[1].LSN)
 	}
-	if got := h.log.RewriteCost(shared); got != 2+1 {
+	if got := h.log.RewriteCost(shared, 0, 0); got != 2+1 {
 		t.Fatalf("two pieces sharing a 2-block record cost %d, want 3", got)
 	}
-	if got := h.log.RewriteCost(append(big, shared...)); got != 4+2+3 {
+	if got := h.log.RewriteCost(append(big, shared...), 0, 0); got != 4+2+3 {
 		t.Fatalf("both records cost %d, want 9", got)
 	}
 	h.close()

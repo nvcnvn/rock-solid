@@ -369,6 +369,40 @@ func (t *Tree) RunsIn(segment uint32, pieces []disklog.BlobRef) (_ []disklog.Blo
 	return pieces, held
 }
 
+// RewriteSteps is how many steps rewriting the runs RunsIn lists for segment takes at most, all
+// together, and the most bytes one step writes beside its entry and fragment blocks: a filter
+// partition sized for at most its run's keys and fenced, the root's references to every piece the
+// output may hold, and the bound key its manifest lists. A step holds at least an entry block,
+// which the run's own blocks bound, and short of the last at least StepBytes less a piece.
+func (t *Tree) RewriteSteps(segment uint32) (steps int, extra uint64) {
+	room := t.cfg.MaxPiece - pieceOverhead
+	for _, r := range t.runs {
+		if r.held || !r.inSegment(segment) {
+			continue
+		}
+		data, filter := 0, 0
+		for _, b := range r.blocks {
+			data += len(b)
+		}
+		for _, p := range r.parts {
+			filter += len(p.enc)
+		}
+		n := max(len(r.blocks), 1)
+		switch {
+		case t.cfg.StepBytes == 0:
+			n = 1
+		case t.cfg.StepBytes > room:
+			n = min(n, data/(t.cfg.StepBytes-room)+1)
+		}
+		part := filter + 2*cacheLineSize + partHdr + partTrailer + filterKeyHdr + filterTrailer + MaxKey
+		written := part/room + 2
+		refs := len(r.pieces) + n*(written+2)
+		steps += n
+		extra = max(extra, uint64(part+written*pieceOverhead+refs*disklog.BlobRefSize+MaxKey))
+	}
+	return steps, extra
+}
+
 // MarkRewrite marks every run no merge holds that has a live piece in segment for a merge of that
 // run alone, which writes it again elsewhere in steps on a merge worker, so that the cleaner
 // never copies a piece of a live run and no piece is ever named by two roots. It returns how

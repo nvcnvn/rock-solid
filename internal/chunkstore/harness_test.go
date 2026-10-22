@@ -56,6 +56,9 @@ type harness struct {
 	laneOf      map[uint32]uint8
 	stepHeld    map[uint8]uint64
 	maxStepHeld uint64
+	// stepBlocks counts the blocks of the records merge workers' lanes and manifests take, with the
+	// segment headers they open.
+	stepBlocks uint64
 	// trims is every TRIM executed, and timerAt the time the log's TRIM timer was last armed for.
 	trims   []core.Action
 	timerAt core.Tick
@@ -300,6 +303,11 @@ func (h *harness) noteWrite(a *core.Action) {
 	d, err := disklog.DecodeRecord(img, place, math.MaxUint32, nil)
 	if err != nil {
 		return
+	}
+	if lane, ok := h.laneOf[segment]; ok && (lane > 0 || slices.ContainsFunc(d.Entries, func(e disklog.Entry) bool {
+		return e.Kind == disklog.EntryBlob && (e.BlobKind == disklog.BlobManifest || e.BlobKind == disklog.BlobManifestPiece)
+	})) {
+		h.stepBlocks += a.Len / core.BlockSize
 	}
 	rec := writtenRecord{lsn: d.Record.LSN, entries: slices.Clone(d.Entries)}
 	for i, e := range d.Entries {
