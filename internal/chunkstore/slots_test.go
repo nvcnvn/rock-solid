@@ -220,7 +220,8 @@ func TestCrashAtEveryActionWithSlots(t *testing.T) {
 
 // Whole chunks deleted at random cost no cleaning: their slots are reused in place, so the disk
 // writes little beyond the chunks, near the cleaner streams spike's 1.004. A second passes between
-// rounds, so the paced TRIMs of slot segments freed whole go out.
+// rounds, so the paced TRIMs of slot segments freed whole go out. A small write first opens the
+// hot lane's segment, which the deletes' records go to, while the slot writes' go to the slot lane.
 func TestWholeChunksDeletedAtRandomCostNoCleaning(t *testing.T) {
 	cfg := testConfig()
 	cfg.Log.MaxReplayBytes = 1 << 20
@@ -235,6 +236,7 @@ func TestWholeChunksDeletedAtRandomCostNoCleaning(t *testing.T) {
 		h.sync(h.write(chunk(i), 0, data, 0))
 		ids = append(ids, i)
 	}
+	h.sync(h.write(core.ChunkID{Volume: 2, Inode: 2}, 0, fill(core.BlockSize, 1), 0))
 	freeBefore := h.s.Log().FreeSegments()
 	acts := len(h.acts)
 	next := uint32(live)

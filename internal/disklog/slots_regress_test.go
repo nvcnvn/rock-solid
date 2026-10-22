@@ -140,7 +140,7 @@ func TestAFreedSlotSegmentReadsAsFreeWhateverItsTRIMLeft(t *testing.T) {
 	h.submit(disklog.Hot, h.write(3, 1, 3))
 	h.run()
 	h.failWhen = nil
-	if !slices.Contains(h.trace, "write 8192+1 io112") || disklog.FreeSegments(h.log) != 6 {
+	if !slices.Contains(h.trace, "write 8192+1 io112") || disklog.FreeSegments(h.log) != 5 {
 		t.Fatalf("no write of zeros over the freed segment's first block: %q, %d free", h.trace, disklog.FreeSegments(h.log))
 	}
 	h.submit(disklog.Hot, h.write(4, 1, 4))

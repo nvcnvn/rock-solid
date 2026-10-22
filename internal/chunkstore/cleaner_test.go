@@ -422,35 +422,45 @@ func TestTheCleanerKeepsTheHeadersOfLiveSlotWrites(t *testing.T) {
 	o.check(t, h, 0, 63, 0)
 }
 
-// A segment whose live blocks are only the slot writes its record headers hold the checksums of
-// is never freed while the chunk lives, so it is never a victim, however short of clean_free,
-// and a restart that loads the chunk's record from the index's runs counts them again.
+// A slot lane segment whose live blocks are only a slot write its record header holds the
+// checksums of is never freed while the chunk lives, so once the lane moves on it is never a
+// victim, however short of clean_free, and a restart that loads the chunk's record from the
+// index's runs counts it again. Rewrites of another whole chunk fill the lane past the segment.
 func TestASegmentOfSlotHeadersAloneIsNoVictim(t *testing.T) {
 	cfg := cleanConfig()
 	cfg.Log.MaxReplayBytes = 64 * core.BlockSize
 	h := newHarnessOn(t, cfg, slotGeometry)
-	whole := core.ChunkID{Volume: 3, Inode: 1, Index: 1}
+	whole, other := core.ChunkID{Volume: 3, Inode: 1, Index: 1}, core.ChunkID{Volume: 3, Inode: 1, Index: 2}
 	h.sync(h.write(whole, 0, pattern(0, core.ChunkSize), 0))
+	e, _ := h.s.Index().Lookup(testPool, whole, 0)
+	seg := uint32(uint64(e.Header) / uint64(slotGeometry.SegmentBlocks))
+	for i := 0; ; i++ {
+		if i == 5000 {
+			t.Fatal("the slot lane never left the segment of the first chunk's header")
+		}
+		h.sync(h.write(other, 0, pattern(uint64(i+1), core.ChunkSize), 0))
+		if o, _ := h.s.Index().Lookup(testPool, other, 0); uint32(uint64(o.Header)/uint64(slotGeometry.SegmentBlocks)) != seg {
+			break
+		}
+	}
 	for i := range 300 {
 		id := h.write(chunk(1), 0, fill(64*core.BlockSize, byte(i)), 0)
 		h.settle()
 		h.ok(id)
 	}
 	h.clean(1000)
-	e, _ := h.s.Index().Lookup(testPool, whole, 0)
-	seg := uint32(uint64(e.Header) / uint64(slotGeometry.SegmentBlocks))
 	if u, _ := h.s.Log().Usage(seg); u.State != disklog.SegmentUsed || u.Live != core.BlocksPerChunk || h.s.Index().SlotHeld(seg) != core.BlocksPerChunk {
 		t.Fatalf("segment %d holding the whole chunk's header is %+v, %d slot-held", seg, u, h.s.Index().SlotHeld(seg))
 	}
 	if !h.s.Log().Cleanable(seg) || slices.Contains(h.s.chooseVictims(), seg) {
 		t.Fatalf("segment %d: cleanable %v, victims %v", seg, h.s.Log().Cleanable(seg), h.s.chooseVictims())
 	}
-	if st := h.s.CleanStats(); st.Copied != 0 {
-		t.Fatalf("the cleaner copied %d blocks of a disk whose only live blocks are a chunk slot's", st.Copied)
-	}
 	h.recoverStore(disklog.ModeOpen)
 	if got := h.s.Index().SlotHeld(seg); got != core.BlocksPerChunk || slices.Contains(h.s.chooseVictims(), seg) {
 		t.Fatalf("after a restart segment %d holds %d slot blocks' headers; victims %v", seg, got, h.s.chooseVictims())
+	}
+	if got := h.readNow(whole, 0, core.ChunkSize); !bytes.Equal(got, pattern(0, core.ChunkSize)) {
+		t.Fatal("the whole chunk does not read back")
 	}
 }
 

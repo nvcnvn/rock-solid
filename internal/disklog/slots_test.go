@@ -79,8 +79,9 @@ func TestSlotsPerSegment(t *testing.T) {
 }
 
 // A whole chunk goes to a slot of a slot segment, which no header precedes, in a DiskWrite of its
-// own beside the round's record in the hot stream; the round's one flush follows both writes,
-// unlinked, and a round takes one slot write.
+// own beside its round's record; the round's one flush follows both writes, unlinked. The record
+// goes alone to lane 1 of the hot stream, so slot headers share segments only with each other,
+// and the two hot lanes take items in submit order. A restart resumes the slot lane's segment.
 func TestAWholeChunkGoesToASlot(t *testing.T) {
 	h := slotHarness(t, 4096, 8, testConfig(0))
 	if h.log.Slots() != 4 {
@@ -94,21 +95,27 @@ func TestAWholeChunkGoesToASlot(t *testing.T) {
 	h.run()
 	h.wantTrace(
 		"write 4096+3 io104", "fsync io105",
-		"write 8192+1024 io108", "write 4099+3 io106", "fsync io107",
-		"write 9216+1024 io111", "write 4102+2 io109", "fsync io110")
+		"write 8192+1024 io108", "write 12288+3 io106", "fsync io107",
+		"write 4099+2 io109", "fsync io110",
+		"write 9216+1024 io113", "write 12291+2 io111", "fsync io112")
 	if h.unlinked != 2 {
 		t.Fatalf("%d unlinked flushes, want the two of the slot rounds", h.unlinked)
 	}
 	durable := h.eventsOf(disklog.Durable)
-	if len(durable) != 3 {
+	if len(durable) != 4 {
 		t.Fatalf("%d durable rounds", len(durable))
 	}
-	if e := durable[1].Entries; len(e) != 2 || e[0] != disklog.SlotEntry(1, chunkOf(2), 2, 2, 0) || e[1].Kind != disklog.EntryWrite {
+	if e := durable[1].Entries; len(e) != 1 || e[0] != disklog.SlotEntry(1, chunkOf(2), 2, 2, 0) {
 		t.Fatalf("LSN 2 entries %+v", e)
 	}
-	if e := durable[2].Entries; len(e) != 1 || e[0] != disklog.SlotEntry(1, chunkOf(3), 3, 2, 1) {
+	if e := durable[2].Entries; len(e) != 1 || e[0].Kind != disklog.EntryWrite || e[0].Version != 4 {
 		t.Fatalf("LSN 3 entries %+v", e)
 	}
+	if e := durable[3].Entries; len(e) != 1 || e[0] != disklog.SlotEntry(1, chunkOf(3), 3, 2, 1) {
+		t.Fatalf("LSN 4 entries %+v", e)
+	}
+	h.wantLane(1, disklog.Hot, 0)
+	h.wantLane(3, disklog.Hot, 1)
 	d := h.record(durable[1])
 	if d.Layout.SlotBlocks != core.BlocksPerChunk || d.SlotCRC(0, 7) != core.CRC32C(first[7*core.BlockSize:8*core.BlockSize]) {
 		t.Fatalf("LSN 2 layout %+v", d.Layout)
@@ -118,10 +125,26 @@ func TestAWholeChunkGoesToASlot(t *testing.T) {
 	}
 	h.wantSlots(8192, 9216)
 	rows := disklog.SegmentUsageOf(h.log)
-	if i := slices.IndexFunc(rows, func(u disklog.SegmentUsage) bool { return u.Segment == 2 }); i < 0 || rows[i] != (disklog.SegmentUsage{Segment: 2, State: disklog.SegmentSlot, Live: 0b11, Newest: 3}) {
+	if i := slices.IndexFunc(rows, func(u disklog.SegmentUsage) bool { return u.Segment == 2 }); i < 0 || rows[i] != (disklog.SegmentUsage{Segment: 2, State: disklog.SegmentSlot, Live: 0b11, Newest: 4}) {
 		t.Fatalf("usage %+v", rows)
 	}
 	h.wantLive(0)
+
+	res := h.reopen()
+	if len(res.replayed) != 4 {
+		t.Fatalf("replayed %d records", len(res.replayed))
+	}
+	for i, ev := range res.replayed {
+		if ev.LSN != uint64(i+1) || !slices.Equal(ev.Entries, durable[i].Entries) {
+			t.Fatalf("replayed LSN %d with %+v, want LSN %d with %+v", ev.LSN, ev.Entries, i+1, durable[i].Entries)
+		}
+	}
+	tk := h.submit(disklog.Hot, h.whole(5, 5, chunkData(5, 5)))
+	h.run()
+	if ev := h.durableOf(tk); ev.Segment != 3 || ev.Entries[0] != disklog.SlotEntry(1, chunkOf(5), 5, 2, 2) {
+		t.Fatalf("after a restart the slot write went to segment %d as %+v, want segment 3's lane resumed", ev.Segment, ev.Entries)
+	}
+	h.close()
 }
 
 // A slot its owner frees is held from reuse and TRIM until a round begun after the free is
@@ -218,7 +241,7 @@ func TestSlotAllocationFillsTheFullestSegmentFirst(t *testing.T) {
 	slot := func(s uint32, k uint16) core.LBA { return h.geo.SlotLBA(s, k) }
 	for k := range uint16(16) {
 		if k < 9 {
-			if err := h.log.FreeSlot(slot(3, k), &h.out); err != nil {
+			if err := h.log.FreeSlot(slot(4, k), &h.out); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -244,7 +267,7 @@ func TestSlotAllocationFillsTheFullestSegmentFirst(t *testing.T) {
 // large for one record, which its owner then cuts into several; the hot lane's other items go on.
 func TestASlotSegmentIsNeverOpenedFromTheReserve(t *testing.T) {
 	cfg := testConfig(0)
-	cfg.NoReserve, cfg.Reserve = false, 5
+	cfg.NoReserve, cfg.Reserve = false, 4
 	h := slotHarness(t, 4096, 8, cfg)
 	h.submit(disklog.Hot, h.write(1, 1, 1))
 	data := chunkData(1, 1)
@@ -252,7 +275,7 @@ func TestASlotSegmentIsNeverOpenedFromTheReserve(t *testing.T) {
 		h.submit(disklog.Hot, h.whole(i, 1, data))
 		h.run()
 	}
-	if disklog.FreeSegments(h.log) != 5 || h.log.SlotAvailable() {
+	if disklog.FreeSegments(h.log) != 4 || h.log.SlotAvailable() {
 		t.Fatalf("%d free segments, a slot available: %v", disklog.FreeSegments(h.log), h.log.SlotAvailable())
 	}
 	it := h.whole(9, 1, data)

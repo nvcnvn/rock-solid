@@ -367,12 +367,15 @@ type cursor struct {
 	next    uint32
 }
 
-// Lanes in the order rounds take turns: each stream's shared lane, the cleaner's lane of the cold
-// stream, then merge worker w's lane of the metadata stream at laneMeta + w. Only the hot and
-// cold lanes take ordinary items; the cleaner's lane takes its copies, the metadata lane the
-// checkpoint's pieces and manifest, and a merge lane its worker's output.
+// Lanes in the order rounds take turns: the hot stream's shared lane and its slot lane, the cold
+// stream's shared lane and the cleaner's, then merge worker w's lane of the metadata stream at
+// laneMeta + w. The slot lane takes the slot writes, one a round, so their record headers share
+// segments only with each other; the shared hot and cold lanes take the other ordinary items;
+// the cleaner's lane takes its copies, the metadata lane the checkpoint's pieces and manifest, and
+// a merge lane its worker's output.
 const (
 	laneHot = iota
+	laneSlot
 	laneCold
 	laneClean
 	laneMeta
@@ -381,7 +384,7 @@ const (
 func laneOf(s Stream, n uint8) int {
 	switch s {
 	case Hot:
-		return laneHot
+		return laneHot + int(n)
 	case Cold:
 		return laneCold + int(n)
 	}
@@ -390,7 +393,7 @@ func laneOf(s Stream, n uint8) int {
 
 func streamOfLane(i int) Stream {
 	switch {
-	case i == laneHot:
+	case i < laneCold:
 		return Hot
 	case i < laneMeta:
 		return Cold
@@ -398,7 +401,25 @@ func streamOfLane(i int) Stream {
 	return Meta
 }
 
-func ordinaryLane(i int) bool { return i == laneHot || i == laneCold }
+func ordinaryLane(i int) bool { return i <= laneCold }
+
+// hotBound is the ticket a round of lane i takes no item from: the head of the other hot lane,
+// so the two hot lanes take items in submit order between them, as replay applies a chunk's
+// writes and freezes in LSN order.
+func (l *Log) hotBound(i int) Ticket {
+	other := laneHot
+	switch i {
+	case laneHot:
+		other = laneSlot
+	case laneSlot:
+	default:
+		return math.MaxUint64
+	}
+	if q := &l.lanes[other].q; q.len() > 0 {
+		return q.at(0).ticket
+	}
+	return math.MaxUint64
+}
 
 // lane is a sequence of segments that fill one after another, at most one open at a time, so
 // LSNs rise along it.
@@ -608,6 +629,7 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 	}
 	l.trims.pacer = trimPacer{rate: float64(cmp.Or(cfg.TrimRate, DefaultTrimRate)), segBytes: float64(uint64(sb.SegmentBlocks) * core.BlockSize)}
 	l.lanes[laneHot].stream, l.lanes[laneCold].stream = Hot, Cold
+	l.lanes[laneSlot].stream, l.lanes[laneSlot].n = Hot, 1
 	l.lanes[laneClean].stream, l.lanes[laneClean].n = Cold, 1
 	for i := laneMeta; i < len(l.lanes); i++ {
 		l.lanes[i].stream, l.lanes[i].n = Meta, uint8(i-laneMeta)
@@ -833,7 +855,7 @@ func (l *Log) CheckpointDue() bool {
 	return l.cp == nil && l.err == nil && l.replayBytes >= l.cfg.MaxReplayBytes
 }
 
-// Submit queues an item for the hot or the cold stream, taking its buffer; a refused item's buffer stays with the caller. A write of a whole chunk to the hot stream goes to a chunk slot while SlotAvailable, and its Durable event names it as a slot write.
+// Submit queues an item for the hot or the cold stream, taking its buffer; a refused item's buffer stays with the caller. A write of a whole chunk to the hot stream goes to a chunk slot while SlotAvailable, its record alone to the hot stream's slot lane, and its Durable event names it as a slot write.
 func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ticket, error) {
 	if l.err != nil {
 		return 0, l.err
@@ -853,7 +875,11 @@ func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ti
 	if it.Entry.Kind == EntrySlot && !l.takeSlot(&it.Entry) {
 		panic("disklog: no slot for a whole chunk submitted while one was available")
 	}
-	t := l.enqueue(&l.lanes[laneOf(stream, 0)].q, queued{entry: it.Entry, buf: it.Buf, keep: it.Keep && (it.Entry.Kind == EntryWrite || it.Entry.Kind == EntrySlot)})
+	lane := laneOf(stream, 0)
+	if it.Entry.Kind == EntrySlot {
+		lane = laneSlot
+	}
+	t := l.enqueue(&l.lanes[lane].q, queued{entry: it.Entry, buf: it.Buf, keep: it.Keep && (it.Entry.Kind == EntryWrite || it.Entry.Kind == EntrySlot)})
 	l.startRounds(ctx, out)
 	return t, nil
 }
@@ -1458,7 +1484,7 @@ const (
 func (l *Log) target() (target, bool) {
 	for k := 1; k <= len(l.lanes); k++ {
 		i := (l.last + k) % len(l.lanes)
-		if l.lanes[i].q.len() == 0 {
+		if l.lanes[i].q.len() == 0 || l.lanes[i].q.at(0).ticket > l.hotBound(i) {
 			continue
 		}
 		if t, p := l.place(i); p == placeReady {
@@ -1550,8 +1576,8 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	limit := uint64(min(l.sb.SegmentBlocks-t.offset, l.maxWrite-lead))
 	var acc layoutAcc
 	var lay Layout
-	n, writeBlocks, slotted := 0, uint32(0), false
-	for n < ln.q.len() && n < maxRecordEntries {
+	n, writeBlocks, slotted, bound := 0, uint32(0), false, l.hotBound(t.lane)
+	for n < ln.q.len() && n < maxRecordEntries && ln.q.at(n).ticket < bound {
 		next := acc
 		e := &ln.q.at(n).entry
 		if err := next.add(e); err != nil {
@@ -1562,7 +1588,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 			break
 		}
 		if e.Kind == EntrySlot {
-			// One slot write a round bounds how long its 4 MiB delays the round's other items.
+			// One slot write a round bounds how long its 4 MiB delays the rounds behind it.
 			if slotted {
 				break
 			}
@@ -1743,6 +1769,15 @@ func appendBlockCRCs(crcs []uint32, b []byte) []uint32 {
 }
 
 func (l *Log) check(ctx *core.Context, t target, rec Record, r *round, items []queued) {
+	slots := 0
+	for i := range items {
+		if items[i].entry.Kind == EntrySlot {
+			slots++
+		}
+	}
+	if t.lane == laneSlot && (len(items) != 1 || slots != 1) || t.lane != laneSlot && slots > 0 {
+		panic(fmt.Sprintf("disklog: decode check: LSN %d on lane %d holds %d entries, %d of them slot writes; a slot write goes alone to the slot lane", rec.LSN, t.lane, len(items), slots))
+	}
 	img := l.checkImg[:0]
 	for _, v := range r.vec {
 		img = append(img, ctx.Pool.Bytes(v.Buf)[:v.Len]...)

@@ -1,7 +1,9 @@
 package chunkstore
 
 import (
+	"bytes"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -67,5 +69,59 @@ func TestSlotHeadersDoNotStarveTheCleaner(t *testing.T) {
 	}
 	if gain > 0 {
 		t.Fatalf("writes failed with NoSpace after %d while %d segments with no slot header would gain space", n, gain)
+	}
+}
+
+// Whole chunks written among overwrites of a small chunk leave their record headers together, in
+// the slot lane's segment, which holds nothing else; the overwrites' segments then hold no slot
+// header and the cleaner frees them.
+func TestSlotHeadersShareSegmentsOnlyWithSlotHeaders(t *testing.T) {
+	cfg := cleanConfig()
+	cfg.Log.MaxReplayBytes = 64 * core.BlockSize
+	geo := slotGeometry
+	h := newHarnessOn(t, cfg, geo)
+	h.merging = true
+	whole := make([]core.ChunkID, 6)
+	for k := range whole {
+		whole[k] = core.ChunkID{Volume: 3, Inode: 1, Index: uint32(k)}
+		h.sync(h.write(whole[k], 0, pattern(uint64(k), core.ChunkSize), 0))
+		for i := range 70 {
+			id := h.write(chunk(1), 0, fill(64*core.BlockSize, byte(i)), 0)
+			h.settle()
+			h.ok(id)
+		}
+	}
+	var segs []uint32
+	for _, c := range whole {
+		e, _ := h.s.Index().Lookup(testPool, c, 0)
+		if seg := uint32(uint64(e.Header) / uint64(geo.SegmentBlocks)); !slices.Contains(segs, seg) {
+			segs = append(segs, seg)
+		}
+	}
+	if len(segs) != 1 {
+		t.Fatalf("the whole chunks' headers lie in segments %v, want one", segs)
+	}
+	seg := segs[0]
+	sh, err := disklog.DecodeSegmentHeader(h.disk.Read(geo.LBA(seg, 0), 1))
+	if err != nil || sh.Stream != disklog.Hot || sh.Lane != 1 {
+		t.Fatalf("segment %d of the headers: %+v, %v; want the hot stream's lane 1", seg, sh, err)
+	}
+	u, _ := h.s.Log().Usage(seg)
+	if held := h.s.Index().SlotHeld(seg); u.Live != held || held != uint32(len(whole))*core.BlocksPerChunk {
+		t.Fatalf("segment %d of the headers: %d live, %d slot-held", seg, u.Live, held)
+	}
+	h.clean(1000)
+	for s := uint32(1); s < geo.SegmentCount; s++ {
+		if s != seg && h.s.Index().SlotHeld(s) > 0 {
+			t.Fatalf("segment %d holds %d slot blocks' headers", s, h.s.Index().SlotHeld(s))
+		}
+	}
+	if h.s.CleanStats().Freed == 0 {
+		t.Fatal("the cleaner freed nothing")
+	}
+	for k, c := range whole {
+		if got := h.readNow(c, 0, core.ChunkSize); !bytes.Equal(got, pattern(uint64(k), core.ChunkSize)) {
+			t.Fatalf("whole chunk %d does not read back after cleaning", k)
+		}
 	}
 }

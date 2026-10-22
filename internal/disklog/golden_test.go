@@ -56,7 +56,7 @@ func goldenImages(t testing.TB) map[string][]byte {
 	images["manifest_edit"] = AppendManifestEdit(nil, &ManifestEdit{BaseLSN: 90, NextSeq: 11,
 		Indexes:  []IndexEdit{{Owner: 1, ReplayLSN: 88, Added: []BlobRef{output}, Removed: []BlobRef{input}, Bounds: []MergeBound{{Run: output, Key: []byte("k"), Dead: 3}}}},
 		Segments: []SegmentUsage{{Segment: 1, State: SegmentFree}, {Segment: 5, State: SegmentUsed, Live: 3, Newest: 90}}})
-	for name, h := range map[string]SegmentHeader{"segment_header": testSegmentHeader(), "segment_header_clean": testCleanHeader(), "segment_header_meta": testMetaHeader(), "segment_header_merge": testMergeHeader()} {
+	for name, h := range map[string]SegmentHeader{"segment_header": testSegmentHeader(), "segment_header_clean": testCleanHeader(), "segment_header_slot": testSlotLaneHeader(), "segment_header_meta": testMetaHeader(), "segment_header_merge": testMergeHeader()} {
 		if images[name], err = AppendSegmentHeader(nil, h); err != nil {
 			t.Fatal(err)
 		}
@@ -67,7 +67,7 @@ func goldenImages(t testing.TB) map[string][]byte {
 func TestGoldenBytes(t *testing.T) {
 	golden := readGolden(t)
 	images := goldenImages(t)
-	for _, name := range []string{"superblock", "segment_header", "segment_header_clean", "segment_header_meta", "segment_header_merge", "record_header", "record_header_slot", "record_copy", "manifest_snapshot", "manifest_edit"} {
+	for _, name := range []string{"superblock", "segment_header", "segment_header_clean", "segment_header_slot", "segment_header_meta", "segment_header_merge", "record_header", "record_header_slot", "record_copy", "manifest_snapshot", "manifest_edit"} {
 		t.Run(name, func(t *testing.T) {
 			want, ok := golden[name]
 			if !ok {
