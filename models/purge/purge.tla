@@ -29,7 +29,6 @@ CONSTANTS
     DaemonPunch,            \* (not a rule) the truncating daemon sends the first punch itself
     ExtendFinishesPurge,    \* an extension waits for a pending purge of its inode to finish
     RewriteAfterCheck,      \* a size commit whose check fails writes the chunk again
-    ZeroGapOnExtend,        \* an extension zeroes the gap between the old size and its start
     RaiseBeforeWrite,       \* alloc_end is raised before the chunk write, not after
     MissingPunchSucceeds,   \* a punch to a missing chunk succeeds
     PurgerTermFence,        \* a primary rejects punches from an older term of the purger
@@ -39,7 +38,9 @@ CONSTANTS
     GraceUntilReregistered, \* the grace period lasts until every live session re-registered
     ReleaseOnAck,           \* a fenced session's opens count as closed at its acknowledgment
     MergeEntries,           \* a new purge range for an inode is merged with its pending one
-    CheckedRemoval          \* the purger's range removal checks each entry and each gap
+    CheckedRemoval,         \* the purger's range removal checks each entry and each gap
+    DrainBeforePurge,       \* the purger waits for chunk writes sent under an older size
+    ProgressAfterPunch      \* the purger records progress only once its punches completed
 
 ChunkBytes == BlockBytes * ChunkBlocks
 FileBytes == ChunkBytes * Chunks
@@ -138,8 +139,6 @@ ApplyPunch(i, c, lo) ==
          /\ exists' = [exists EXCEPT ![i][c] = lo > c * ChunkBytes]
          /\ flags' = [flags EXCEPT !.lost = @ \/ LosesAcked(i, lo, (c + 1) * ChunkBytes)]
 
-\* The gap an extension opens, zeroed by a punch below alloc_end.
-GapData(i, lo, hi) == IF ZeroGapOnExtend THEN ZeroData(i, lo, hi) ELSE data
 Exposes(d, i, lo, hi) ==
     \E b \in Bytes : InRange(b, lo, hi) /\ d[i][b] = 1 /\ (ghost.cut[i][b] \/ ghost.junk[i][b])
 
@@ -188,16 +187,22 @@ Advance(w, st) == IF st = "done" THEN writes \ {w} ELSE (writes \ {w}) \cup {[w 
 
 \* Before writing a chunk at or past alloc_end, the daemon raises it in a MetaStore
 \* transaction, to any later chunk (the design's doubling steps are one such sequence).
+\* With DrainBeforePurge, the daemon sends its chunk write under the newest size it took,
+\* which stands for a drain having handed it a truncate's new size: so a write that has
+\* become an extension waits for a pending purge too.
 Raise(w) ==
     /\ w \in writes /\ w.st = "raise"
-    /\ IF gone[w.i]
-       THEN writes' = writes \ {w} /\ UNCHANGED <<allocEnd, aver>>
-       ELSE IF ChunkOf(w.b) < allocEnd[w.i]
-       THEN writes' = Advance(w, AfterRaise(w)) /\ UNCHANGED <<allocEnd, aver>>
-       ELSE /\ ~(ExtendFinishesPurge /\ entry[w.i] # None)
-            /\ \E e \in ChunkOf(w.b) + 1 .. Chunks : allocEnd' = [allocEnd EXCEPT ![w.i] = e]
-            /\ aver' = [aver EXCEPT ![w.i] = @ + 1]
-            /\ writes' = Advance(w, AfterRaise(w))
+    /\ LET w2 == IF DrainBeforePurge THEN [w EXCEPT !.ext = w.b >= size[w.i], !.av = aver[w.i]] ELSE w
+       IN IF gone[w.i]
+          THEN writes' = writes \ {w} /\ UNCHANGED <<allocEnd, aver>>
+          ELSE IF ChunkOf(w.b) < allocEnd[w.i]
+          THEN /\ ~(DrainBeforePurge /\ ExtendFinishesPurge /\ entry[w.i] # None /\ w2.ext)
+               /\ writes' = (writes \ {w}) \cup {[w2 EXCEPT !.st = AfterRaise(w2)]}
+               /\ UNCHANGED <<allocEnd, aver>>
+          ELSE /\ ~(ExtendFinishesPurge /\ entry[w.i] # None)
+               /\ \E e \in ChunkOf(w.b) + 1 .. Chunks : allocEnd' = [allocEnd EXCEPT ![w.i] = e]
+               /\ aver' = [aver EXCEPT ![w.i] = @ + 1]
+               /\ writes' = (writes \ {w}) \cup {[w2 EXCEPT !.st = AfterRaise(w2), !.av = aver[w.i] + 1]}
     /\ UNCHANGED <<size, linked, orphan, gone, data, exists, seen, entry, tailPunch, memTail,
                    punches, opens, reg, grace, rereg, fence, inc, purger, budget, ghost, flags>>
 
@@ -219,26 +224,24 @@ Land(w) ==
 
 \* An extending write commits the new size with a check on the attributes it read, then
 \* is acknowledged. It waits for a pending purge over its range. If the check fails, it
-\* reads again and sends its chunk write again, since a truncate or another extension
-\* may have zeroed its byte meanwhile. The gap below its byte is zeroed first.
+\* reads again and sends its chunk write again, raising alloc_end again if a truncate
+\* lowered it, since that truncate's purge may have zeroed the byte.
 CommitSize(w) ==
     /\ w \in writes /\ w.st = "size"
     /\ IF gone[w.i]
-       THEN writes' = writes \ {w} /\ UNCHANGED <<size, aver, data, ghost, flags>>
+       THEN writes' = writes \ {w} /\ UNCHANGED <<size, aver, ghost, flags>>
        ELSE /\ ~(ExtendFinishesPurge /\ Overlaps(entry[w.i], size[w.i], w.b + 1))
             /\ IF RewriteAfterCheck /\ aver[w.i] # w.av
-               THEN /\ writes' = (writes \ {w}) \cup {[w EXCEPT !.st = "land", !.av = aver[w.i]]}
-                    /\ UNCHANGED <<size, aver, data, ghost, flags>>
-               ELSE LET d == GapData(w.i, size[w.i], w.b)
-                    IN /\ data' = d
-                       /\ size' = [size EXCEPT ![w.i] = Max(@, w.b + 1)]
-                       /\ aver' = [aver EXCEPT ![w.i] = @ + 1]
-                       /\ ghost' = [ghost EXCEPT !.acked[w.i][w.b] = TRUE]
-                       /\ flags' = [flags EXCEPT !.lost = @ \/ data[w.i][w.b] = 0
-                                                            \/ LosesAcked(w.i, size[w.i], w.b),
-                                                 !.exposed = @ \/ Exposes(d, w.i, size[w.i], w.b)]
-                       /\ writes' = writes \ {w}
-    /\ UNCHANGED <<allocEnd, linked, orphan, gone, exists, seen, entry, tailPunch, memTail,
+               THEN /\ writes' = (writes \ {w}) \cup {[w EXCEPT !.av = aver[w.i],
+                                                           !.st = IF RaiseBeforeWrite THEN "raise" ELSE "land"]}
+                    /\ UNCHANGED <<size, aver, ghost, flags>>
+               ELSE /\ size' = [size EXCEPT ![w.i] = Max(@, w.b + 1)]
+                    /\ aver' = [aver EXCEPT ![w.i] = @ + 1]
+                    /\ ghost' = [ghost EXCEPT !.acked[w.i][w.b] = TRUE]
+                    /\ flags' = [flags EXCEPT !.lost = @ \/ data[w.i][w.b] = 0,
+                                              !.exposed = @ \/ Exposes(data, w.i, size[w.i], w.b)]
+                    /\ writes' = writes \ {w}
+    /\ UNCHANGED <<allocEnd, linked, orphan, gone, data, exists, seen, entry, tailPunch, memTail,
                    punches, opens, reg, grace, rereg, fence, inc, purger, budget>>
 
 \* truncate() down: one transaction commits the new size, alloc_end lowered to the new
@@ -261,18 +264,15 @@ TruncateDown(i, s) ==
     /\ UNCHANGED <<linked, orphan, gone, data, exists, seen, writes, punches, opens, reg, grace,
                    rereg, fence, inc, purger, flags>>
 
-\* truncate() up: waits for a pending purge, zeroes the gap and commits the size.
+\* truncate() up: waits for a pending purge and commits the size.
 TruncateUp(i, s) ==
     /\ ~gone[i] /\ budget.t > 0 /\ s > size[i]
     /\ ~(ExtendFinishesPurge /\ entry[i] # None)
-    /\ LET d == GapData(i, size[i], s)
-       IN /\ data' = d
-          /\ flags' = [flags EXCEPT !.exposed = @ \/ Exposes(d, i, size[i], s),
-                                    !.lost = @ \/ LosesAcked(i, size[i], s)]
+    /\ flags' = [flags EXCEPT !.exposed = @ \/ Exposes(data, i, size[i], s)]
     /\ size' = [size EXCEPT ![i] = s]
     /\ aver' = [aver EXCEPT ![i] = @ + 1]
     /\ budget' = [budget EXCEPT !.t = @ - 1]
-    /\ UNCHANGED <<allocEnd, linked, orphan, gone, exists, seen, entry, tailPunch, memTail,
+    /\ UNCHANGED <<allocEnd, linked, orphan, gone, data, exists, seen, entry, tailPunch, memTail,
                    writes, punches, opens, reg, grace, rereg, fence, inc, purger, ghost>>
 
 \* (DaemonPunch) the truncating daemon's own first punch reaches the primary, possibly
@@ -412,12 +412,15 @@ FenceIncarnation(n) ==
 -----------------------------------------------------------------------------
 \* The purger: the slot's shard leader works through the purge list, one punch at a time.
 
-\* It reads the list and takes the run of every pending entry, in key order.
+\* It reads the list and takes the run of every pending entry, in key order, leaving out
+\* an inode whose drain has not finished: every node that has the file open takes the new
+\* size and answers once each chunk write it sent under an older size has returned.
+Drained(i) == ~(DrainBeforePurge /\ \E w \in writes : w.i = i /\ w.st = "land" /\ w.av < aver[i])
 Scan ==
     /\ ~purger.on
-    /\ \E i \in Inodes : entry[i] # None
+    /\ \E i \in Inodes : entry[i] # None /\ Drained(i)
     /\ purger' = [purger EXCEPT !.on = TRUE, !.read = entry,
-                                !.run = {i \in Inodes : entry[i] # None},
+                                !.run = {i \in Inodes : entry[i] # None /\ Drained(i)},
                                 !.done = {}, !.step = 0, !.wait = FALSE]
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
                    tailPunch, memTail, writes, punches, opens, reg, grace, rereg, fence, inc,
@@ -451,6 +454,25 @@ PunchLand(p) ==
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, entry, tailPunch, memTail, writes,
                    opens, reg, grace, rereg, fence, inc, budget, ghost>>
 
+\* Through a long entry it records progress: the entry, checked to still hold what it read,
+\* is rewritten to start at the next chunk to punch, so a successor resumes there. A failed
+\* check sends the purger back to the list.
+RecordProgress ==
+    /\ purger.on /\ purger.run # purger.done
+    /\ ProgressAfterPunch => ~purger.wait
+    /\ LET i == SetMin(purger.run \ purger.done)
+           en == purger.read[i]
+           new == <<(ChunkOf(en[1]) + purger.step) * ChunkBytes, en[2]>>
+       IN /\ 0 < purger.step /\ purger.step < NPunches(en)
+          /\ IF entry[i] = en
+             THEN /\ entry' = [entry EXCEPT ![i] = new]
+                  /\ purger' = [purger EXCEPT !.read[i] = new, !.step = 0]
+             ELSE /\ purger' = [purger EXCEPT !.on = FALSE]
+                  /\ UNCHANGED entry
+    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, tailPunch,
+                   memTail, writes, punches, opens, reg, grace, rereg, fence, inc, budget,
+                   ghost, flags>>
+
 \* It removes the consumed run with one range removal, checking that each entry still holds
 \* what it read and that each gap between them is empty. A failed check removes nothing,
 \* and the purger reads the list again.
@@ -470,7 +492,8 @@ RemoveRun ==
                    ghost, flags>>
 
 \* The purger's shard leader crashes or loses its term; the next leader, in a newer term,
-\* starts again from the list. A punch the old one sent can still arrive.
+\* starts again from the list, where each entry holds the progress recorded through it. A
+\* punch the old one sent can still arrive.
 CrashPurger ==
     /\ purger.on /\ budget.c > 0
     /\ purger' = [purger EXCEPT !.on = FALSE, !.term = @ + 1, !.wait = FALSE]
@@ -490,7 +513,7 @@ Next ==
     \/ \E n \in Nodes : \/ FenceCommit(n) \/ FenceApply(n) \/ FenceAck(n)
                         \/ Reregister(n) \/ CrashDaemon(n) \/ FenceIncarnation(n)
     \/ OwnerFailover \/ EndGrace
-    \/ Scan \/ PurgeSend \/ RemoveRun \/ CrashPurger
+    \/ Scan \/ PurgeSend \/ RecordProgress \/ RemoveRun \/ CrashPurger
     \/ \E p \in punches : PunchLand(p)
 
 Spec == Init /\ [][Next]_vars
