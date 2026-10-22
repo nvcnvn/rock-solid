@@ -82,6 +82,7 @@ VARIABLES
     tver, fencedAt, acked,  \* the session table: version, fence versions, acknowledged
     nver, nint, reach, down, unreach,  \* storage nodes: versions held, reachability, down marks
     intv, liveAt, activated, ctr,      \* the PG's intervals, live members, last activated, counters
+    actd,       \* per storage node, the interval it last activated as primary
     app,        \* per storage node, the writes it has applied
     writes,     \* client writes in flight, queued, or replicating
     lockHolder, lockGen,
@@ -90,12 +91,12 @@ VARIABLES
 
 vars == <<fage, cl, rate, boot, rose, term, lnode, holding, stalled, timer, evicting,
           req, rep, tver, fencedAt, acked, nver, nint, reach, down, unreach, intv, liveAt,
-          activated, ctr, app, writes, lockHolder, lockGen, budget, hist>>
+          activated, actd, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 clientVars == <<cl>>
 leaderVars == <<rate, boot, rose, term, lnode, holding, stalled, timer, evicting>>
 tableVars == <<tver, fencedAt, acked, fage>>
-storageVars == <<nver, nint, reach, down, unreach, intv, liveAt, activated, ctr, app>>
+storageVars == <<nver, nint, reach, down, unreach, intv, liveAt, activated, actd, ctr, app>>
 
 FirstClient == SetMin(Clients)
 ClientRate == SetMin(Rates)
@@ -123,7 +124,8 @@ Init ==
     /\ nver = [s \in Storage |-> 0] /\ nint = [s \in Storage |-> 1]
     /\ reach = [s \in Storage |-> TRUE] /\ down = {} /\ unreach = [s \in Storage |-> 0]
     /\ intv = 1 /\ liveAt = [k \in Intervals |-> IF k = 1 THEN Storage ELSE {}]
-    /\ activated = 1 /\ ctr = [k \in Intervals |-> 0]
+    /\ activated = 1 /\ actd = [s \in Storage |-> IF s = SetMin(Storage) THEN 1 ELSE 0]
+    /\ ctr = [k \in Intervals |-> 0]
     /\ app = [s \in Storage |-> {}]
     /\ writes = {}
     /\ lockHolder = IF WithLock THEN FirstClient ELSE 0
@@ -173,7 +175,7 @@ Tick ==
     /\ timer' = [c \in Clients |-> Sat(timer[c] + rate[Leader])]
     /\ unreach' = [s \in Storage |-> IF reach[s] THEN 0 ELSE Min(unreach[s] + 1, DownAfter)]
     /\ UNCHANGED <<rate, boot, rose, term, lnode, holding, stalled, evicting, req,
-                   tver, fencedAt, acked, nver, nint, reach, down, intv, liveAt, activated, ctr, app, writes,
+                   tver, fencedAt, acked, nver, nint, reach, down, intv, liveAt, activated, actd, ctr, app, writes,
                    lockHolder, lockGen, budget, hist>>
 
 -----------------------------------------------------------------------------
@@ -412,14 +414,14 @@ ApplyTable(s) ==
     /\ reach[s] /\ nver[s] < tver
     /\ nver' = [nver EXCEPT ![s] = tver]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nint, reach, down, unreach, intv,
-                   liveAt, activated, ctr, app, writes, lockHolder, lockGen, budget, hist>>
+                   liveAt, activated, actd, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 \* A storage node the control plane reaches adopts the PG's current interval.
 AdoptInterval(s) ==
     /\ reach[s] /\ nint[s] < intv
     /\ nint' = [nint EXCEPT ![s] = intv]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, reach, down, unreach, intv,
-                   liveAt, activated, ctr, app, writes, lockHolder, lockGen, budget, hist>>
+                   liveAt, activated, actd, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 \* A storage node is partitioned from the control plane, but not from clients or the
 \* other storage nodes; or the partition heals.
@@ -428,13 +430,13 @@ Partition(s) ==
     /\ reach' = [reach EXCEPT ![s] = FALSE]
     /\ budget' = [budget EXCEPT !.part = @ - 1]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, down, unreach, intv,
-                   liveAt, activated, ctr, app, writes, lockHolder, lockGen, hist>>
+                   liveAt, activated, actd, ctr, app, writes, lockHolder, lockGen, hist>>
 
 Heal(s) ==
     /\ ~reach[s]
     /\ reach' = [reach EXCEPT ![s] = TRUE]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, down, unreach, intv,
-                   liveAt, activated, ctr, app, writes, lockHolder, lockGen, budget, hist>>
+                   liveAt, activated, actd, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 \* After node_down_after without a heartbeat, the leader commits a down mark, which starts
 \* a new interval of the PG.
@@ -444,7 +446,7 @@ MarkDown(s) ==
     /\ intv' = intv + 1
     /\ liveAt' = [liveAt EXCEPT ![intv + 1] = Storage \ (down \cup {s})]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, reach, unreach,
-                   activated, ctr, app, writes, lockHolder, lockGen, budget, hist>>
+                   activated, actd, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 \* A down node whose heartbeat reports the current session-table version is marked up, in
 \* a new interval.
@@ -455,7 +457,7 @@ MarkUp(s) ==
     /\ intv' = intv + 1
     /\ liveAt' = [liveAt EXCEPT ![intv + 1] = Storage \ (down \ {s})]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, reach, unreach,
-                   activated, ctr, app, writes, lockHolder, lockGen, budget, hist>>
+                   activated, actd, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 \* The interval's primary activates it once it has peered: every interval since the last
 \* activated one had a live member adopt this one, so none of their writes can complete.
@@ -464,6 +466,7 @@ Activate ==
     /\ PeeringStops =>
          \A j \in activated .. intv - 1 : liveAt[j] = {} \/ \E s \in liveAt[j] : nint[s] > j
     /\ activated' = intv
+    /\ actd' = [actd EXCEPT ![Primary(intv)] = intv]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, reach, down, unreach,
                    intv, liveAt, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
@@ -504,7 +507,7 @@ Completes(w) ==
             \/ d.gen < w.gen /\ (d.v[1] > w.v[1] \/ (d.v[1] = w.v[1] /\ d.v[2] > w.v[2]))]
 Held(w, acks) == liveAt[w.tag] \ {w.at} \subseteq acks
 
-\* The primary orders a queued write in the interval it activated, checking the fence
+\* The primary orders a queued write in the interval it itself activated, checking the fence
 \* then, and applies it. A write it held across an interval change is ordered again only if
 \* no other primary led the PG since; otherwise it is refused.
 Order(w) ==
@@ -517,7 +520,7 @@ Order(w) ==
            \* model takes every write any member has applied, which only weakens the check.
            w2 == [w EXCEPT !.tag = k, !.v = <<k, ctr[k] + 1>>,
                            !.base = UNION {app[s] : s \in Storage}]
-       IN /\ Primary(k) = p /\ activated = k
+       IN /\ Primary(k) = p /\ actd[p] = k
           /\ IF other \/ fenced
              THEN writes' = (writes \ {w}) \cup {[w EXCEPT !.st = "ended"]}
                   /\ UNCHANGED <<ctr, app, hist>>
@@ -528,7 +531,7 @@ Order(w) ==
                   /\ LET h == IF Held(w2, {}) THEN Completes(w2) ELSE hist
                      IN hist' = [h EXCEPT !.fencedApplied = @ \/ FencedIn(nver[p], w.c)]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, reach, down, unreach,
-                   intv, liveAt, activated, lockHolder, lockGen, budget>>
+                   intv, liveAt, activated, actd, lockHolder, lockGen, budget>>
 
 \* A member receives the replicated write: it refuses an older interval, fetches a newer
 \* table first, checks the fence, and stores and acknowledges it.
@@ -544,7 +547,7 @@ Replicate(w, s) ==
                /\ app' = [app EXCEPT ![s] = @ \cup {w.id}]
                /\ hist' = [h EXCEPT !.fencedApplied = @ \/ FencedIn(nver[s], w.c)]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, reach, down, unreach,
-                   intv, liveAt, activated, ctr, lockHolder, lockGen, budget>>
+                   intv, liveAt, activated, actd, ctr, lockHolder, lockGen, budget>>
 
 \* The answer to a completed or refused write returns to its client.
 Answered(w) ==
