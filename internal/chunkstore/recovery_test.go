@@ -211,30 +211,33 @@ func partedFreeze(h *harness, a, c core.ChunkID, k int) Chunk {
 	return got
 }
 
-// A chunk frozen absent and never written, which a Store write leaves only when a crash or a
-// failure parts its freeze from its blocks, recovers by replay, then from a run, as the crash
-// oracle's model.
+// A chunk frozen absent and never written, which a crash between a write's freeze and its blocks
+// leaves, recovers by replay, then from a run, as the crash oracle's model.
 func TestAbsentOnlyChunkRecovers(t *testing.T) {
-	h := newRecoveryHarness(t)
-	w := &workload{r: rand.New(rand.NewPCG(0, 10)), epoch: 1}
-	c := core.ChunkID{Volume: 1, Inode: 9}
-	if _, err := h.s.log.Submit(&h.ctx, disklog.Hot, disklog.Item{Entry: disklog.FreezeEntry(testPool, c, 0, 1)}, &h.s.lout); err != nil {
-		t.Fatal(err)
-	}
-	h.s.pump(&h.ctx, &h.out)
-	h.take()
-	h.settle()
-	for range 2 {
-		restart(h, w)
-		checkModel(t, h, h.recovered, []core.ChunkID{c}, 2)
-		if got, ok := h.s.Index().Chunk(testPool, c); !ok || got != (Chunk{Epoch: 1}) {
-			t.Fatalf("chunk %v entry %+v %v, want frozen absent at epoch 1", c, got, ok)
+	a, c := recoveryChunks[0], core.ChunkID{Volume: 1, Inode: 9}
+	for k := range 12 {
+		h := newRecoveryHarness(t)
+		h.write(a, 0, fill(core.BlockSize, 1), 0)
+		if partedFreeze(h, a, c, k) != (Chunk{Epoch: 1}) {
+			continue
 		}
-		_, before, _ := written(h)
-		for _, m, _ := written(h); m < before+2; _, m, _ = written(h) {
-			w.run(h, 10)
+		w := &workload{r: rand.New(rand.NewPCG(0, 10)), epoch: 1}
+		for restarts := 0; ; restarts++ {
+			checkModel(t, h, h.recovered, []core.ChunkID{c}, 2)
+			if got, ok := h.s.Index().Chunk(testPool, c); !ok || got != (Chunk{Epoch: 1}) {
+				t.Fatalf("crash at action %d, restart %d: chunk %v entry %+v %v, want frozen absent at epoch 1", k, restarts, c, got, ok)
+			}
+			if restarts == 1 {
+				return
+			}
+			_, before, _ := written(h)
+			for _, m, _ := written(h); m < before+2; _, m, _ = written(h) {
+				w.run(h, 10)
+			}
+			restart(h, w)
 		}
 	}
+	t.Fatal("no crash left a chunk frozen absent without its blocks")
 }
 
 // oracleStats counts what the crash cycles reached.

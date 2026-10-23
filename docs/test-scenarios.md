@@ -1405,16 +1405,17 @@ crash oracle](#chunk-index-under-the-crash-oracle)).
   with a merge's output among the runs, recovers from an earlier manifest plus replay, and the
   next checkpoint's restart recovers from a later one to the live index (seeds 0-3,
   `TestCrashBetweenRunAndManifest`).
-- A chunk frozen absent and never written, which a Store write leaves only when a crash or a failure
-  parts its freeze from its blocks, recovers by replay and then from a run with its entry at
-  version 0 (`TestAbsentOnlyChunkRecovers`). The test hands the log the freeze itself.
-- A version frozen twice (`TestRefreezeAfterLostWrite`): chunk c holds 0x11 at v1; at cut 1 a
-  write of 2 × the record's blocks to c, behind one of the record's blocks less to another chunk,
-  logs its freeze of v1 in a record ahead of its blocks, and a crash at one of the next 12 actions
-  keeps the freeze and loses the blocks. After the next write, 0x44 at cut 2, which freezes v1 again,
-  and a restart, the snapshot at cut 2 reads 0x11, and c's entry and v1's freeze carry epoch 2. An
-  index that kept v1's first freeze epoch read 0x44 there, and `TestRecoveriesMatchTheCrashOracle`
-  caught it on seed 3.
+- A write's freeze kept and its blocks lost: at cut 1, a write of twice a record's blocks to chunk
+  c, behind a write of one block less than a record to another chunk, logs c's freeze in a record
+  ahead of its blocks, and a crash at one of the next 12 actions, nothing unflushed landing, keeps
+  the freeze and loses the blocks.
+  - c never written (`TestAbsentOnlyChunkRecovers`): c is left frozen absent, at version 0 and
+    epoch 1, and recovers by replay, and after two checkpoints from a run, as the crash oracle's
+    model.
+  - c holding 0x11 at v1 (`TestRefreezeAfterLostWrite`): c is left at v1 frozen at epoch 1. After
+    the next write, 0x44 at cut 2, which freezes v1 again, and a restart, the snapshot at cut 2
+    reads 0x11, and c's entry and v1's freeze carry epoch 2. An index that kept v1's first freeze
+    epoch read 0x44 there, and `TestRecoveriesMatchTheCrashOracle` caught it on seed 3.
 - Planted bugs: replay that drops block-range punches fails these tests and the crash oracle's
   property, as it fails `TestCrashAtEveryActionWithCleaning`.
 
