@@ -2932,7 +2932,7 @@ Removing the new interval a down mark starts gives no counterexample of its own:
 - `ci-rates`: `ci-lease` with 1 control-plane node over 2 terms, which reboots once at either rate and whose rate rises once within the headroom, and a lost renewal or answer, with no VM stop, and an 81-unit lease, at which a rise shows at a tick's grain. Base of `neg-no-drift`, `neg-fixed-step-check` and `neg-window-per-boot`.
 - `ci-fence`: 2 clients contending for one lock, one leader, 2 storage nodes in one PG, a 3-tick session lease, up to 2 writes in flight per client and 2 in all, and a storage node partitioned from the control plane. Renewals are single steps at equal clocks, since the lease configurations check their timing.
 - `ci-faults`: `ci-fence` with no partition and one write in flight per client, and a VM stop, a leader stall, an eviction and a client daemon that dies. Base of `neg-two-holders`.
-- `deep-lease`: `ci-lease` with a 145-unit lease, about 8 ticks, so leases overlap failovers part-way through. `deep-terms`: `ci-lease` with 3 terms. `deep-down`: `ci-fence` with both storage nodes partitioned in turn, so an interval can have a single live member, one write in flight per client and a 2-tick lease. `deep-fence`: `ci-fence` with a second term on another node, a client daemon that dies and `CrashedClientReleased` under weak fairness.
+- `deep-lease`: `ci-lease` with a 145-unit lease, about 8 ticks, so leases overlap failovers part-way through. `deep-terms`: `ci-lease` with 3 terms. `deep-down`: `ci-fence` with both storage nodes partitioned in turn, so an interval can have a single live member, one write in flight per client and a 2-tick lease. `deep-fence`: `ci-fence` with one write in flight per client, a second term on another node, a client daemon that dies and `CrashedClientReleased` under weak fairness; with two writes in flight its liveness check ran out of a 4 GB heap at 64 million states.
 
 A `ci` lease of 8 ticks does not fit the 5-minute budget: a 5-tick lease with these rates took about 5 minutes alone, so the longer lease is `deep-lease`'s larger constant.
 
@@ -3162,6 +3162,14 @@ Snapshots taken while a purge runs (punches carrying the snapshot epoch) are lef
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
+| Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
+| Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
+| Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
+| Sessions and fencing | `deep-fence` | `ci-fence` with 1 write in flight per client, 2 terms on 2 nodes, a crash, `CrashedClientReleased` | DEEPFENCE |
+| Cache-mode recall | `deep` | `ci-failover` with 2 owner failovers | 49 | 138,142,376 | 1,719 s |
+| Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
+| Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
+| Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
 
 - The sessions, recall and purge models name the simulator invariant of each property in their own
   sections' property tables, so they have no rows here. Open: the checklist has no phase 6 or 7

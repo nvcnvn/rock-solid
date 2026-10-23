@@ -34,17 +34,14 @@ write in flight per client (uncommitted until rerun).
 
 ## Remaining
 
-1. Rerun `sessions` deep-fence (shrunk, committed) alone.
+1. `sessions` deep-fence still runs out of its 4 GB heap in liveness checking with one write in
+   flight per client (61M states, depth 23, after 3 h 56 min). Shrinking it to one write in all
+   (`MaxWrites = 1`); rerun alone.
 2. Add the deep rows to the map's configuration-results table in `docs/test-scenarios.md`
    (after the `ci-orphan` row), and update `deep-fence`'s line in the sessions Configurations list.
 3. Tick the three checklist items once their deep runs pass; delete this file; report.
 
-## Decisions for the user
+## Decisions
 
-- Item 4: the measured-count rule assumes no voter's raw clock runs twice as fast as a client's,
-  only for sessions a new leader has not heard from (`dead_wait`). Alternatives: client margin over
-  measured bounds of every voter (no lease while any voter is unmeasured; a dead client blocks a
-  fully restarted control plane), or a time-only restart wait (unsafe for a fast new boot).
-- Item 1: the drain costs a round trip to other openers before a truncate's purge; extensions past
-  EOF cost nothing.
-- Item 8: a second open of an Exclusive file always waits for the holder.
+The user accepted all three: the measured-count rule with `dead_wait`, the drain before a
+truncate's purge, and the second open of an Exclusive file waiting for the holder.
