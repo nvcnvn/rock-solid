@@ -62,11 +62,11 @@ Cnt(v) == v % 8
 MaxDisk == Cardinality(Node) + MaxFormat
 Disk == 1..MaxDisk
 NoMiss == -1
-NoWin == [w |-> FALSE, boot |-> 0, w1s |-> 0, w1r |-> 0, w1g |-> 0, B |-> 0,
+NoWin == [w |-> FALSE, w1s |-> 0, w1r |-> 0, w1g |-> 0, B |-> 0,
           lg |-> FALSE, a |-> FALSE, as |-> 0, asB |-> 0, ag |-> 0, am |-> Drift,
           ep |-> 0, lastg |-> 0, has |-> FALSE, rn |-> 0]
 NoPr == [iv |-> 0, act |-> FALSE, srv |-> FALSE, since |-> 0]
-Off == [on |-> FALSE, x |-> 0, b |-> 0, rn |-> 0, ep |-> 0, s |-> 0, sB |-> 0]
+Off == [on |-> FALSE, x |-> 0, rn |-> 0, ep |-> 0, s |-> 0, sB |-> 0]
 NoFort == [l |-> 0, ep |-> 0]
 Quorum == Cardinality(Node) \div 2 + 1
 Infinity == MaxTime + 1
@@ -111,7 +111,7 @@ VARIABLES
     hl,       \* [Node -> [Node -> NoWin]]: holder side
     rw,       \* [Node -> BOOLEAN]: in the restart wait
     \* Clocks (constant when Clocks is FALSE)
-    now, raw, boot, rawR, bootR, slew, bootId, runId, frz, suspAt, rstAt,
+    now, raw, boot, rawR, bootR, slew, runId, frz, suspAt, rstAt,
     rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs, faults,
     \* Raft
     rterm, rlead, fort, fby, xfer, xto
@@ -121,7 +121,7 @@ nodeVars == <<ep, dnode, ddisk, fmts, stale, run, rsIv, dlog, miss, persIv, mrec
 priVars == <<pr, pv, pin, known, dec, act>>
 dataVars == <<rm, vers, ackd, wst, sends, dmn, bad>>
 leaseVars == <<gr, hl, rw>>
-clockVars == <<now, raw, boot, rawR, bootR, slew, bootId, runId, frz, suspAt, rstAt,
+clockVars == <<now, raw, boot, rawR, bootR, slew, runId, frz, suspAt, rstAt,
                rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs, faults>>
 raftVars == <<rterm, rlead, fort, fby, xfer, xto>>
 vars == <<ctlVars, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
@@ -308,7 +308,6 @@ Init ==
     /\ slew \in [Node -> UNION {Slews[n] : n \in Node} \cup {0}]
     /\ \A n \in Node : slew[n] \in IF "exact" \in plan.f \/ "fast" \in plan.f THEN {0} ELSE Slews[n]
     /\ bootR = [n \in Node |-> (rawR[n] * (1000 + slew[n])) \div 1000]
-    /\ bootId = [n \in Node |-> 1]
     /\ runId = [n \in Node |-> 1]
     /\ frz = [n \in Node |-> "run"]
     /\ suspAt = [n \in Node |-> 0]
@@ -908,10 +907,10 @@ Trips(x, gx, r) ==
     /\ IF Bug("StepHalfDrift") THEN 1000 * (gx - x.ag) > (1000 + Drift \div 2) * (r - x.as)
        ELSE (gx - x.ag) * (1000 - x.am) > 1000 * (r - x.as)
 
-\* A window restarts at a new boot ID or run ID, or a raw reading below the last.
+\* A window restarts at a new run ID, which every process start and reboot
+\* draws, or a raw reading below the last.
 NewWindow(x, m) ==
     \/ ~x.w
-    \/ m.b # x.boot /\ ~Bug("NoBootWindow")
     \/ m.rn # x.rn /\ ~Bug("NoRunWindow")
     \/ m.x < x.lastg
 
@@ -920,7 +919,7 @@ EndAll(h) == [hl EXCEPT ![h] = [g \in Node |-> [NoWin EXCEPT !.ep = hl[h][g].ep]
 
 \* Whether grant or heartbeat m from g trips the holder's step check.
 GrantTrips(h, g, m) ==
-    ~Bug("NoStepCheck") /\ (hl[h][g].boot = m.b \/ Bug("NoBootWindow")) /\ Trips(hl[h][g], m.x, raw[h])
+    ~Bug("NoStepCheck") /\ (hl[h][g].rn = m.rn \/ Bug("NoRunWindow")) /\ Trips(hl[h][g], m.x, raw[h])
 HbTrips(h, g, m) == ~Bug("StepOnGrantsOnly") /\ GrantTrips(h, g, m)
 
 \* A trip on a pair a fault touched ends the holder's other leases too, so
@@ -940,14 +939,14 @@ AfterGrant(h, g, m) ==
         lease == (B # 0 \/ Bug("LeaseBeforeBound")) /\ mg < MaxMargin
     IN IF trip THEN EndAll(h)
        ELSE [hl EXCEPT ![h][g] =
-              [w |-> TRUE, boot |-> m.b,
+              [w |-> TRUE,
                w1s |-> IF nw THEN m.s ELSE x.w1s, w1r |-> IF nw THEN r ELSE x.w1r,
                w1g |-> IF nw THEN m.x ELSE x.w1g, B |-> B,
                lg |-> TRUE, a |-> lease, as |-> m.s, asB |-> m.sB, ag |-> m.x, am |-> mg,
                ep |-> m.ep, lastg |-> m.x, has |-> FALSE, rn |-> m.rn]]
 
-\* The holder's leases after a heartbeat m from g, which carries g's raw clock,
-\* boot ID and run ID.
+\* The holder's leases after a heartbeat m from g, which carries g's raw clock
+\* and run ID.
 AfterHb(h, g, m) ==
     LET x == hl[h][g]
     IN IF HbTrips(h, g, m) THEN EndAll(h)
@@ -957,12 +956,12 @@ AfterHb(h, g, m) ==
 
 \* A grant the grantor gives now, answering a request sent at holder clock
 \* readings s and sB.
-GrantMsg(g, h, s, sB) == [on |-> TRUE, x |-> raw[g], b |-> bootId[g], rn |-> runId[g], ep |-> NewEp(g, h),
+GrantMsg(g, h, s, sB) == [on |-> TRUE, x |-> raw[g], rn |-> runId[g], ep |-> NewEp(g, h),
                           s |-> s, sB |-> sB]
 Granted(g, h) == [gr EXCEPT ![g][h] = [ep |-> NewEp(g, h), live |-> FALSE, fg |-> FALSE, on |-> TRUE,
                                        tR |-> raw[g], tB |-> boot[g]]]
 
-HbMsg(g) == [Off EXCEPT !.on = TRUE, !.x = raw[g], !.b = bootId[g], !.rn = runId[g]]
+HbMsg(g) == [Off EXCEPT !.on = TRUE, !.x = raw[g], !.rn = runId[g]]
 
 \* The round trips and heartbeats due at one instant on "ok" pairs all happen
 \* before time passes; they run in the order of their pairs (holder, grantor).
@@ -986,7 +985,7 @@ RoundTrip(h, g) ==
        ELSE /\ dirty' = [dirty EXCEPT ![h][g] = TRUE]
             /\ UNCHANGED <<gr, hl, lastHb>>
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, rw, now, raw, boot, rawR, bootR, slew,
-                   bootId, runId, frz, suspAt, rstAt, rq, gm, hbm, net, arrived, faults, raftVars>>
+                   runId, frz, suspAt, rstAt, rq, gm, hbm, net, arrived, faults, raftVars>>
 
 \* On an "ok" pair a heartbeat arrives as it is sent.
 Beat(g, h) ==
@@ -998,7 +997,7 @@ Beat(g, h) ==
     /\ dirty' = Detected(h, g, HbTrips(h, g, HbMsg(g)))
     /\ lastHb' = [lastHb EXCEPT ![g][h] = now]
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, boot, rawR, bootR,
-                   slew, bootId, runId, frz, suspAt, rstAt, rq, gm, hbm, lastAsk, net, arrived, hs,
+                   slew, runId, frz, suspAt, rstAt, rq, gm, hbm, lastAsk, net, arrived, hs,
                    faults, raftVars>>
 
 \* On a "slow" pair, or to or from a stopped node, each message is its own
@@ -1012,7 +1011,7 @@ Ask(h, g) ==
     /\ rq' = [rq EXCEPT ![h][g] = [Off EXCEPT !.on = TRUE, !.s = raw[h], !.sB = boot[h]]]
     /\ lastAsk' = [lastAsk EXCEPT ![h][g] = now]
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
-                   slew, bootId, runId, frz, suspAt, rstAt, gm, hbm, lastHb, net, arrived, dirty, hs, faults,
+                   slew, runId, frz, suspAt, rstAt, gm, hbm, lastHb, net, arrived, dirty, hs, faults,
                    raftVars>>
 
 \* The grantor grants once the holder reported a table at least as new as its
@@ -1028,7 +1027,7 @@ Grant(g, h) ==
     /\ rq' = [rq EXCEPT ![h][g] = Off]
     /\ lastHb' = [lastHb EXCEPT ![g][h] = now]
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, hl, rw, now, raw, boot, rawR, bootR,
-                   slew, bootId, runId, frz, suspAt, rstAt, hbm, lastAsk, net, arrived, dirty, hs, faults,
+                   slew, runId, frz, suspAt, rstAt, hbm, lastAsk, net, arrived, dirty, hs, faults,
                    raftVars>>
 
 GrantRefused(g, h) ==
@@ -1039,7 +1038,7 @@ GrantRefused(g, h) ==
     /\ rq' = [rq EXCEPT ![h][g] = Off]
     /\ dirty' = [dirty EXCEPT ![h][g] = TRUE]
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
-                   slew, bootId, runId, frz, suspAt, rstAt, gm, hbm, lastAsk, lastHb, net, arrived, hs,
+                   slew, runId, frz, suspAt, rstAt, gm, hbm, lastAsk, lastHb, net, arrived, hs,
                    faults, raftVars>>
 
 SendHb(g, h) ==
@@ -1051,7 +1050,7 @@ SendHb(g, h) ==
     /\ hbm' = [hbm EXCEPT ![g][h] = HbMsg(g)]
     /\ lastHb' = [lastHb EXCEPT ![g][h] = now]
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
-                   slew, bootId, runId, frz, suspAt, rstAt, rq, gm, lastAsk, net, arrived, dirty, hs,
+                   slew, runId, frz, suspAt, rstAt, rq, gm, lastAsk, net, arrived, dirty, hs,
                    faults, raftVars>>
 
 RecvGrant(h, g) ==
@@ -1064,7 +1063,7 @@ RecvGrant(h, g) ==
     /\ hl' = AfterGrant(h, g, gm[g][h])
     /\ dirty' = Detected(h, g, GrantTrips(h, g, gm[g][h]))
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, boot, rawR, bootR,
-                   slew, bootId, runId, frz, suspAt, rstAt, rq, hbm, lastAsk, lastHb, net, hs,
+                   slew, runId, frz, suspAt, rstAt, rq, hbm, lastAsk, lastHb, net, hs,
                    faults, raftVars>>
 
 RecvHb(h, g) ==
@@ -1077,7 +1076,7 @@ RecvHb(h, g) ==
     /\ hl' = AfterHb(h, g, hbm[g][h])
     /\ dirty' = Detected(h, g, HbTrips(h, g, hbm[g][h]))
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, boot, rawR, bootR,
-                   slew, bootId, runId, frz, suspAt, rstAt, rq, gm, lastAsk, lastHb, net, hs,
+                   slew, runId, frz, suspAt, rstAt, rq, gm, lastAsk, lastHb, net, hs,
                    faults, raftVars>>
 
 EndWait(n) ==
@@ -1136,7 +1135,7 @@ Suspend(n) ==
     /\ suspAt' = [suspAt EXCEPT ![n] = boot[n]]
     /\ dirty' = Taint(n)
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
-                   slew, bootId, runId, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, hs, raftVars>>
+                   slew, runId, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, hs, raftVars>>
 
 \* On resume CLOCK_BOOTTIME has gained the sleep, possibly up to 1 s short,
 \* and the loop delivers Resumed, which ends every lease the node holds and
@@ -1151,7 +1150,7 @@ Wake(n) ==
     /\ hl' = IF Bug("NoEndOnResume") THEN hl ELSE EndAll(n)
     /\ runId' = [runId EXCEPT ![n] = @ + 1]
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, rawR, bootR, slew,
-                   bootId, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs,
+                   suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs,
                    faults, raftVars>>
 
 \* A VM pause freezes every clock; "pause" changes the VMClock marker, "stop"
@@ -1163,7 +1162,7 @@ Freeze(n, kind) ==
     /\ frz' = [frz EXCEPT ![n] = kind]
     /\ dirty' = Taint(n)
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
-                   slew, bootId, runId, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, hs,
+                   slew, runId, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, hs,
                    raftVars>>
 
 \* A paused VM continues. After a marker change the loop delivers Resumed,
@@ -1182,7 +1181,7 @@ Thaw(n) ==
     /\ arrived' = [arrived EXCEPT ![n] =
                      IF frz[n] = "stop" THEN {g \in Node : hbm[g][n].on \/ gm[g][n].on} ELSE {}]
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, boot, rawR, bootR,
-                   slew, bootId, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, dirty, hs,
+                   slew, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, dirty, hs,
                    faults, raftVars>>
 
 \* A grantor's raw rate rises by up to lease_drift / 2 after it was measured.
@@ -1192,7 +1191,7 @@ RateStep(n) ==
     /\ rawR' = [rawR EXCEPT ![n] = @ + Drift \div 2 - 1]
     /\ bootR' = [bootR EXCEPT ![n] = @ + Drift \div 2 - 1]
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, now, raw, boot, slew,
-                   bootId, runId, frz, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty,
+                   runId, frz, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty,
                    hs, raftVars>>
 
 NetFault(h, g, to) ==
@@ -1208,7 +1207,7 @@ NetFault(h, g, to) ==
        ELSE UNCHANGED <<rq, gm, hbm>>
     /\ dirty' = [dirty EXCEPT ![h][g] = TRUE, ![g][h] = TRUE]
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
-                   slew, bootId, runId, frz, suspAt, rstAt, lastAsk, lastHb, arrived, hs, raftVars>>
+                   slew, runId, frz, suspAt, rstAt, lastAsk, lastHb, arrived, hs, raftVars>>
 
 \* A process restart forgets everything but the disk, the table and the Raft
 \* term, and draws a new run ID. A restarted primary asks for a new interval
@@ -1248,11 +1247,11 @@ Restart(n) ==
     /\ rstAt' = [rstAt EXCEPT ![n] = [r |-> raw[n], b |-> boot[n]]]
     /\ dirty' = Taint(n)
     /\ UNCHANGED <<tbl, ivs, plan, step, reports, ep, dnode, ddisk, fmts, stale, dlog, miss, persIv, pv, dec, act,
-                   dataVars, now, raw, boot, rawR, bootR, slew, bootId, frz, suspAt, rq, gm, hbm,
+                   dataVars, now, raw, boot, rawR, bootR, slew, frz, suspAt, rq, gm, hbm,
                    lastAsk, lastHb, net, arrived, hs, rterm, xto>>
 
-\* A reboot restarts the process and both clocks near 0, with a new boot ID
-\* and a raw rate 2% off its old one. The node is down for at least a
+\* A reboot restarts the process and both clocks near 0, with a raw rate 2%
+\* off its old one. The node is down for at least a
 \* heartbeat first (BootUp): a reboot takes seconds, which the restart wait
 \* relies on, since the new boot's clocks may run faster than the holders
 \* measured the old one.
@@ -1269,7 +1268,6 @@ Reboot(n) ==
          /\ bootR' = [bootR EXCEPT ![n] = ((rawR[n] + dr) * (1000 + slew[n])) \div 1000]
     /\ raw' = [raw EXCEPT ![n] = 0]
     /\ boot' = [boot EXCEPT ![n] = 0]
-    /\ bootId' = [bootId EXCEPT ![n] = @ + 1]
     /\ rstAt' = [rstAt EXCEPT ![n] = [r |-> 0, b |-> 0]]
     /\ dirty' = Taint(n)
     /\ frz' = [frz EXCEPT ![n] = "boot"]
@@ -1283,7 +1281,7 @@ BootUp(n) ==
     /\ now >= suspAt[n] + HB \/ Bug("InstantReboot")
     /\ frz' = [frz EXCEPT ![n] = "run"]
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
-                   slew, bootId, runId, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs,
+                   slew, runId, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs,
                    faults, raftVars>>
 
 \* A disk formatted again draws a new log ID, which the control plane treats
@@ -1305,7 +1303,7 @@ Format(n) ==
             /\ ddisk' = [ddisk EXCEPT ![n] = x]
             /\ UNCHANGED <<dlog, miss, persIv, mrecv>>
     /\ UNCHANGED <<ctlVars, ep, stale, run, rsIv, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
-                   slew, bootId, runId, frz, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived,
+                   slew, runId, frz, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived,
                    dirty, hs, raftVars>>
 
 -----------------------------------------------------------------------------
@@ -1435,7 +1433,7 @@ Tick ==
     /\ now' = t
     /\ raw' = [n \in Node |-> raw[n] + RateRaw(n) * (t - now)]
     /\ boot' = [n \in Node |-> boot[n] + RateBoot(n) * (t - now)]
-    /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, rawR, bootR, slew, bootId,
+    /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, leaseVars, rawR, bootR, slew,
                    runId, frz, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs,
                    faults, stale, raftVars>>
 

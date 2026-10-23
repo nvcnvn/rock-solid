@@ -3081,11 +3081,12 @@ run in `deep-leases`; the variants that need one run on it alone.
   primary, only while its interval has at least `min_live` live members, and only with an unexpired
   lease from every other live member, having handled every peer message that waited for it.
 - **Leases.** Per node pair, counted on two clocks per node. The holder bounds each grantor's rate
-  from the window's first grant and the latest of one grantor boot, asks again `rate_gap` after a
+  from the window's first grant and the latest of one grantor run, asks again `rate_gap` after a
   window's first grant, and takes no lease before it has a bound. Every grant and heartbeat carries
-  the grantor's raw clock, boot ID and run ID, which the grantor draws again when it restarts and
-  on `Resumed`; a new boot ID or run ID starts a new window. The step check trips at `1/(1 − m)`, with `m` the margin of
-  the lease from the last grant, and runs only against a grant that gave a lease. A grantor grants or
+  the grantor's raw clock and run ID, which the grantor draws again when it restarts or reboots and
+  on `Resumed`; a new run ID starts a new window. The step check trips at `1/(1 − m)`, with `m` the
+  margin of the lease from the last grant of the same run, and runs only against a grant that gave a
+  lease. A grantor grants or
   renews only a holder that reported a table at least as new as its own; a grant after a lapse or a
   restart takes a new support epoch. With lease expiry left open, a grantor's grants to an old
   primary lapse when it answers peering, as if it had waited them out, and a restart's wait lapses
@@ -3194,8 +3195,7 @@ or a format. A variant checks only the property it must break.
 | That, with the step check at `1 + lease_drift / 2` restarting the window on each trip (the one variant that plants two bugs, as the rule it breaks is a combination) | 1 | As above; the pair never gets a bound |
 | Widening only past `1 + 2 lease_drift` | 1 | Grantor 4% fast: the margin stays 3% where 3.85% is needed, and a partition follows a grant |
 | The margin `max(lease_drift, 1 − 1/B)` | 1 | Pair measured at +4%, then the grantor's raw rate rises 0.4% and a partition follows a grant |
-| No new window at a grantor's new run ID | 1 | Grantor 4% fast is paused with a marker change just after a window's first grant; the bound across the pause comes out below 1, the lease on `lease_drift` alone outlasts the grant, and a partition follows |
-| No new window at a grantor's reboot, by its boot ID or its run ID (either alone suffices) | 1 | Grantor reboots within `rate_window` and its new boot runs 2% fast; its first grant gives a bound below 1 and a lease on `lease_drift` alone, and a partition follows |
+| No new window at a grantor's new run ID | 1 | Grantor 4% fast is paused with a marker change just after a window's first grant; the bound across the pause comes out below 1, the lease on `lease_drift` alone outlasts the grant, and a partition follows. A reboot gives the same through a new boot that runs 2% fast |
 | A reboot that takes no time | 1 | Grantor reboots the instant after a grant; its new boot runs 2% fast, so its restart wait ends before the holder's lease |
 | The step check at `1 + lease_drift / 2`, with no lease before a bound | 10 | Grantor 4% fast: the check trips on the first heartbeat after the lease forms |
 | The step check against a grant that gave no lease | 10 | Grantor 4% fast: the window's second grant trips the check, so no bound forms |
@@ -3612,8 +3612,8 @@ sender's table epoch (`uint64`, per the PG epochs study) and the PG's interval n
 | Read | PG fields, chunk ID, byte range, optional `at_ver` |
 | Read reply | Bytes and version; or a refusal (wrong interval, chunk on the missing list, unfound) |
 | Lease request, holder to grantor | The holder's table epoch; the grantor grants only if it is at least its own, and otherwise refuses with its own table epoch |
-| Grant | Support epoch; the grantor's boot ID, run ID and `CLOCK_MONOTONIC_RAW` reading `g`; no table epoch, since the request reported the holder's ([Epoch change model](#epoch-change-model)) |
-| Heartbeat between a node pair | The sender's table epoch; as a grantor, its boot ID, run ID and `CLOCK_MONOTONIC_RAW`, on every heartbeat |
+| Grant | Support epoch; the grantor's run ID and `CLOCK_MONOTONIC_RAW` reading `g`; no table epoch, since the request reported the holder's ([Epoch change model](#epoch-change-model)) |
+| Heartbeat between a node pair | The sender's table epoch; as a grantor, its run ID and `CLOCK_MONOTONIC_RAW`, on every heartbeat |
 | Heartbeat to the authority | Activation reports per PG; each member's acknowledgment latency; per disk its log ID, fill, oldest unfinished I/O age and whether its log has failed |
 | `member_timeout` report, primary to authority | Member, PG |
 | Direct probe, authority to a disk's owner loop | Disk ID |
@@ -4143,7 +4143,7 @@ single-clock column is what counting on `CLOCK_BOOTTIME` alone would give (clock
 bound = (g_b − g_a) / (s_b − r_a)
 ```
 
-The holder keeps a window per grantor node and boot ID. When a window's first grant arrives it
+The holder keeps a window per grantor node and run ID. When a window's first grant arrives it
 asks again `rate_gap` later, and it takes no lease from that grantor until it has a bound. It pairs
 the shortest-round-trip grant of the first third of the window's span with that of its last third.
 It widens its margin for that grantor by the excess of the bound over 1 + `lease_drift` / 2 = 1.005,
@@ -4164,7 +4164,7 @@ and reports the pair; a margin of `max_margin` or more gives no lease. Times are
 | First grant of a window | 0, 100, G0 | | none | No lease from this grantor; a request is sent at r_a + 100,000 |
 | Second grant, sent `rate_gap` after the first arrived, 100 µs, worst ends | 0, 100, G0 | 100,100, 100,200, G0 + 100,200 | 1.000999 | 1% |
 | The same with 1 ms round trips | 0, 1,000, G0 | 101,000, 102,000, G0 + 102,000 | 1.020000 | 2.5%: the first lease ends 3.90 s after the ask |
-| A grant with a new boot ID, g = 1,200 | | | none | A new window starts; no lease until its second grant |
+| A grant with a new run ID after a reboot, g = 1,200 | | | none | A new window starts; no lease until its second grant |
 | Grantor raw about 50% fast | | g_b − g_a = 1.505 × (s_b − r_a) | 1.505 | 51%, past `max_margin`: no lease, reported |
 
 - Open (clock-skew study, recommendation 2): naming the miscalibrated node by majority at the
