@@ -119,9 +119,15 @@ func TestWhatTheCleanerMayFree(t *testing.T) {
 // copyTrial hands the log one victim's copies of counts blocks each and returns the blocks they
 // took from the cleaner's open segment at (segment, block) on: the tail they left behind there when
 // they rolled, the header of the segment they opened and their records, and where the lane's open
-// segment now ends.
+// segment now ends. With a segment open, it fails unless BackgroundBlocks grew by as many.
 func (h *harness) copyTrial(counts []uint16, source core.LBA, segment, block uint32) (taken uint64, endSeg, endBlock uint32) {
 	h.t.Helper()
+	before := h.log.BackgroundBlocks()
+	defer func() {
+		if got := h.log.BackgroundBlocks() - before; segment != 0 && got != taken {
+			h.t.Fatalf("copies of %v took %d blocks and counted %d background blocks", counts, taken, got)
+		}
+	}()
 	items := make([]disklog.Item, len(counts))
 	for i, c := range counts {
 		items[i] = h.copyItem(uint32(i%200), c, source, uint64(i))

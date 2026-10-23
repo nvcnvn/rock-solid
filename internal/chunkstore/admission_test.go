@@ -39,20 +39,20 @@ func TestTheBucketRefillsAtTheCleanersNetRate(t *testing.T) {
 	const seg = 16384
 	mib := func(blocks float64) float64 { return blocks * core.BlockSize / (1 << 20) }
 	var b bucket
-	b.tick(0, 0, 0, 1)
-	b.tick(second/2, seg, seg/2, 1)
+	b.tick(0, 0, 0, 1, true)
+	b.tick(second/2, seg, seg/2, 1, true)
 	if b.measured || b.tokens != 0 {
 		t.Fatalf("half a window measured %v and refilled %v tokens", b.measured, b.tokens)
 	}
-	b.tick(second, 2*seg, 3*seg/2, 1)
+	b.tick(second, 2*seg, 3*seg/2, 1, true)
 	if got := mib(b.rate * float64(second)); !b.measured || got != 32 || b.tokens != 0 {
 		t.Fatalf("the first window measured %v MiB/s, measured %v, and refilled %v", got, b.measured, b.tokens)
 	}
-	b.tick(second+second/4, 2*seg, 3*seg/2, 1)
+	b.tick(second+second/4, 2*seg, 3*seg/2, 1, true)
 	if got := mib(b.tokens); got != 8 {
 		t.Fatalf("a quarter second at 8 free segments refilled %v MiB", got)
 	}
-	b.tick(second+second/2, 2*seg, 3*seg/2, 0.75)
+	b.tick(second+second/2, 2*seg, 3*seg/2, 0.75, true)
 	if got := mib(b.tokens); got != 8+6 {
 		t.Fatalf("a quarter second more at 4 free segments refilled %v MiB in all", got-8)
 	}
@@ -60,19 +60,39 @@ func TestTheBucketRefillsAtTheCleanersNetRate(t *testing.T) {
 	if at := b.refilled(1); at != b.filledAt+second/8+1 {
 		t.Fatalf("a bucket 4 MiB in debt refills %d after its last fill, not an eighth of a second", at-b.filledAt)
 	}
-	b.tick(2*second, 4*seg, 3*seg, 1)
-	b.tick(3*second, 6*seg, 9*seg/2, 1)
+	b.tick(2*second, 4*seg, 3*seg, 1, true)
+	b.tick(3*second, 6*seg, 9*seg/2, 1, true)
 	if got := mib(b.tokens); got != 32 {
 		t.Fatalf("the bucket holds %v MiB, not a window's 32", got)
 	}
-	b.tick(4*second, 6*seg, 9*seg/2, 1)
-	b.tick(4*second+1, 6*seg, 9*seg/2, 1)
+	b.tick(4*second, 6*seg, 9*seg/2, 1, true)
+	b.tick(4*second+1, 6*seg, 9*seg/2, 1, true)
 	if b.rate != 0 || b.tokens != 0 {
 		t.Fatalf("a window that freed nothing measured %v and left %v tokens", b.rate, b.tokens)
 	}
 	b.tokens--
 	if at := b.refilled(1); at != b.windowAt+second {
 		t.Fatalf("a bucket in debt at no rate refills at %d, not at the window's end %d", at, b.windowAt+second)
+	}
+}
+
+// A window that only spends carries its deficit into the next: a victim 90% live whose copies span
+// two windows nets the second a tenth of a segment, not the whole segment less only its own
+// copies. A window in which the cleaner stopped, with clean_free segments free, carries nothing,
+// so what merges spend meanwhile does not starve its next pass.
+func TestTheBucketCarriesAWindowsDeficitWhileTheCleanerRuns(t *testing.T) {
+	const seg = 1000
+	var b bucket
+	b.tick(0, 0, 0, 1, true)
+	b.tick(second, 0, 450, 1, true)
+	b.tick(2*second, seg, 900, 1, true)
+	if want := 100 / float64(second); b.rate != want {
+		t.Fatalf("a victim copied across two windows measured %v blocks/s, want %v", b.rate*float64(second), want*float64(second))
+	}
+	b.tick(3*second, seg, 1350, 1, false)
+	b.tick(4*second, 2*seg, 1350, 1, true)
+	if want := seg / float64(second); b.rate != want {
+		t.Fatalf("a deficit spent while the cleaner stopped cut the next window to %v blocks/s, want %v", b.rate*float64(second), want*float64(second))
 	}
 }
 
@@ -112,10 +132,10 @@ func TestASlowedDiskHoldsChunkWritesUntilTheCleanerFrees(t *testing.T) {
 	b := h.write(chunk(4), 0, fill(core.BlockSize, 'b'), 0)
 	p := h.punch(chunk(1), 0, core.BlockSize, 0)
 	h.settle()
-	if _, ok := h.replies[a]; ok || h.s.Admitting() || len(h.s.adm.held) != 2 {
-		t.Fatalf("at %d free segments and no rate, the writes went out: held %v", free, h.s.adm.held)
+	if _, ok := h.replies[a]; ok || h.s.Admitting() || len(h.s.adm.held)-h.s.adm.heldHead != 2 {
+		t.Fatalf("at %d free segments and no rate, the writes went out: held %v", free, h.s.adm.held[h.s.adm.heldHead:])
 	}
-	for _, ci := range h.s.adm.held {
+	for _, ci := range h.s.adm.held[h.s.adm.heldHead:] {
 		if o := &h.s.ops[h.s.chunks[ci].waiting[0]]; o.req.Buf == core.NoBuf {
 			t.Fatalf("held write %d gave up its buffer", o.req.ID)
 		}
@@ -133,7 +153,7 @@ func TestASlowedDiskHoldsChunkWritesUntilTheCleanerFrees(t *testing.T) {
 	start := h.ctx.Now
 	for i := 0; !h.s.Admitting(); i++ {
 		if i == 100 || h.admitAt == 0 {
-			t.Fatalf("the bucket still holds %v after %d timers, at rate %v", h.s.adm.held, i, h.s.adm.rate)
+			t.Fatalf("the bucket still holds %v after %d timers, at rate %v", h.s.adm.held[h.s.adm.heldHead:], i, h.s.adm.rate)
 		}
 		h.advance(h.admitAt - h.ctx.Now)
 	}
@@ -150,9 +170,11 @@ func TestASlowedDiskHoldsChunkWritesUntilTheCleanerFrees(t *testing.T) {
 	}
 }
 
-// A held write waits only while a pass runs: once the cleaner has no pass, the bucket lets it go
-// to the log.
-func TestAHeldWriteGoesOutWhenNoPassRuns(t *testing.T) {
+// A held write waits while the cleaner can still free space: when its only pass ends having freed,
+// the write stays held until the cleaner starts the next at the store's next call. Once the
+// cleaner has no pass and has found no victim at this LSN, nothing will free space for the write,
+// so it goes to the log, whose wait and NoSpace decide it.
+func TestAHeldWriteWaitsOnlyWhileTheCleanerCanFree(t *testing.T) {
 	h := slowedStore(t)
 	a := h.write(chunk(3), 0, fill(core.BlockSize, 'a'), 0)
 	h.settle()
@@ -164,7 +186,12 @@ func TestAHeldWriteGoesOutWhenNoPassRuns(t *testing.T) {
 	}
 	h.held = nil
 	h.s.resetCleaner(&h.ctx)
-	h.s.cfg.CleanFree = -1
+	h.s.admitHeld(&h.ctx, &h.out)
+	h.take()
+	if h.s.Admitting() {
+		t.Fatal("the write went out uncharged as the cleaner's only pass ended")
+	}
+	h.s.cl.tried, h.s.cl.triedAt = true, h.s.Log().DurableLSN()
 	h.advance(second)
 	h.ok(a)
 }

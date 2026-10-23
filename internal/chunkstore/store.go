@@ -140,6 +140,8 @@ type chunkState struct {
 	epoch   uint64
 	pending []int32
 	waiting []int32
+	// held is whether write admission holds the chunk's next write back.
+	held bool
 }
 
 type sentItem struct {
@@ -183,8 +185,10 @@ type plants struct {
 	failMerge         bool
 	// failChecks fails every flush's run check.
 	failChecks bool
-	// noAdmission admits every chunk write at once, however few segments are free.
+	// noAdmission admits every chunk write at once, however few segments are free, and
+	// copiesOnly measures the cleaner's rate net of its copied blocks alone.
 	noAdmission bool
+	copiesOnly  bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.
@@ -316,7 +320,7 @@ func (s *Store) resume(log *disklog.Log) error {
 		s.ix.RecountSlotHeld()
 	}
 	s.ix.TrackLive(true)
-	s.adm.started = false
+	s.adm.bucket = bucket{}
 	s.phase, s.checkpointing, s.inPiece, s.piecesOut, s.pieceWait = serving, false, false, 0, false
 	return nil
 }
@@ -1466,7 +1470,7 @@ func (s *Store) stop(ctx *core.Context, err error, out *Output) {
 }
 
 func (s *Store) failWaiting(ctx *core.Context, err error, out *Output) {
-	s.adm.held = s.adm.held[:0]
+	s.dropHeld()
 	for ci := range s.chunks {
 		cs := &s.chunks[ci]
 		for k := 0; k < len(cs.waiting); {

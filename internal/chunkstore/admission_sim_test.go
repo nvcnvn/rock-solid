@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"errors"
+	"os"
 	"slices"
 	"testing"
 
@@ -22,6 +23,7 @@ type admitRun struct {
 	jobTime    core.Tick
 	overwrites float64
 	noAdmit    bool
+	copiesOnly bool
 }
 
 // admitResult is what the last three quarters of the overwrites measured: the time with no free
@@ -43,7 +45,7 @@ func (r admitRun) run(t *testing.T, seed uint64) admitResult {
 	cfg.Log.CompactionStepBytes = uint64(r.geo.SegmentBlocks) * core.BlockSize
 	h := newHarnessOn(t, cfg, r.geo)
 	h.merging, h.hold, h.timed, h.light = true, true, true, true
-	h.s.plant.noAdmission = r.noAdmit
+	h.s.plant.noAdmission, h.s.plant.copiesOnly = r.noAdmit, r.copiesOnly
 	rng := core.NewRand(seed)
 	extents := uint64(core.BlocksPerChunk / r.extent)
 	fill := uint64(r.fill*float64(r.geo.DiskBlocks())) / core.BlocksPerChunk * extents
@@ -132,25 +134,58 @@ func (r admitRun) run(t *testing.T, seed uint64) admitResult {
 	return res
 }
 
+// report logs what a run with admission and one without measured.
+func (r admitRun) report(t *testing.T, with, without admitResult) {
+	t.Logf("%.0f%% full: no free segment %.1f%% of %.1f s and the slowest write %.1f ms with admission; %.1f%% and %.1f ms without",
+		100*r.fill, 100*float64(with.zero)/float64(with.total), float64(with.total)/1e6, float64(with.slowest)/1e3,
+		100*float64(without.zero)/float64(without.total), float64(without.slowest)/1e3)
+}
+
 // With closed-loop writers outrunning a cleaner whose worker takes 20 ms a victim, at 50 and 65%
 // full on 512 segments of 64 blocks, the most the cleaner's net-gain guard sustains on segments
 // this small: without admission the disk sits with no free segment outside the reserve most of
-// the time, so the cleaner is the slower; with it, free segments stay above zero all but 1% of
-// the time, no write fails while the cleaner has a victim, and no writer waits more than 200 ms.
+// the time and some writer waits longer than two victims' cleaning, 40 ms; with it, free segments
+// stay above zero all but 1% of the time, no write fails while the cleaner has a victim, and no
+// writer waits 40 ms. The cleaner here frees many victims a window; how long writers wait when it
+// frees fewer than one is the cleaning-debt question in design.md.
 func TestWriteAdmissionKeepsSegmentsFreeAheadOfASlowCleaner(t *testing.T) {
 	for _, fill := range []float64{0.5, 0.65} {
 		r := admitRun{geo: disklog.Geometry{SegmentBlocks: 64, SegmentCount: 512}, fill: fill, extent: 4, writers: 8, jobTime: 20_000, overwrites: 1}
 		slow := r
 		slow.noAdmit = true
 		without, with := slow.run(t, 1), r.run(t, 1)
-		t.Logf("%.0f%% full: no free segment %.1f%% of %.1f s and the slowest write %.1f ms with admission; %.1f%% and %.1f ms without",
-			100*fill, 100*float64(with.zero)/float64(with.total), float64(with.total)/1e6, float64(with.slowest)/1e3,
-			100*float64(without.zero)/float64(without.total), float64(without.slowest)/1e3)
-		if without.zero < without.total/2 {
-			t.Fatalf("%.0f%% full: without admission the cleaner kept a free segment all but %d of %d µs; it is not the slower", 100*fill, without.zero, without.total)
+		r.report(t, with, without)
+		bar := 2 * r.jobTime
+		if without.zero < without.total/2 || without.slowest < bar {
+			t.Fatalf("%.0f%% full: without admission the cleaner kept a free segment all but %d of %d µs and the slowest write took %d µs; it is not the slower", 100*fill, without.zero, without.total, without.slowest)
 		}
-		if with.zero > with.total/100 || with.slowest > 200_000 || with.noSpace > 0 {
+		if with.zero > with.total/100 || with.slowest >= bar || with.noSpace > 0 {
 			t.Fatalf("%.0f%% full: no free segment for %d of %d µs, the slowest write %d µs, %d writes failed", 100*fill, with.zero, with.total, with.slowest, with.noSpace)
 		}
+	}
+}
+
+// longSimEnv names the variable that runs the simulations too large for the test suite.
+const longSimEnv = "ROCKSOLID_LONG_SIM"
+
+// At 85% full on 320 segments of 1,024 blocks, about the most the net-gain guard sustains on
+// segments of that size, the same writers against a cleaner taking 20 ms a victim: admission
+// keeps free segments above none for a larger share of the time than without it, and than a
+// planted rate net of copied blocks alone, and no write fails while the cleaner has a victim. Each
+// run holds 1.25 GiB of disk in memory, so it runs only with ROCKSOLID_LONG_SIM set; its figures
+// feed the cleaning-debt question in design.md.
+func TestWriteAdmissionAt85PercentFull(t *testing.T) {
+	if os.Getenv(longSimEnv) == "" {
+		t.Skip("set " + longSimEnv + " to run")
+	}
+	r := admitRun{geo: disklog.Geometry{SegmentBlocks: 1024, SegmentCount: 320}, fill: 0.85, extent: 4, writers: 8, jobTime: 20_000, overwrites: 1}
+	slow, copies := r, r
+	slow.noAdmit, copies.copiesOnly = true, true
+	without, copied, with := slow.run(t, 1), copies.run(t, 1), r.run(t, 1)
+	r.report(t, with, without)
+	t.Logf("net of copied blocks alone: no free segment %.1f%% of the time, the slowest write %.1f ms", 100*float64(copied.zero)/float64(copied.total), float64(copied.slowest)/1e3)
+	share := func(x admitResult) float64 { return float64(x.zero) / float64(x.total) }
+	if share(with) >= share(without) || share(with) >= share(copied) || with.noSpace > 0 {
+		t.Fatalf("no free segment %.1f%% of the time against %.1f%% without admission and %.1f%% net of copies alone, %d writes failed", 100*share(with), 100*share(without), 100*share(copied), with.noSpace)
 	}
 }
