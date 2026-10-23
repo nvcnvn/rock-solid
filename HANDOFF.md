@@ -54,19 +54,26 @@ all ok (ci-leases 81 / 797,699 / 66 s; ci-peering 31 / 981,217 / 110 s); deep-le
 27,402,416 / 50 min; deep-slow 72 / 21,073,400 / 33 min. deep-peering unchanged, not rerun.
 For the user: the run ID makes the boot ID redundant for rate windows; both are kept.
 
-## Remaining (peering half of the review, for the next agent)
+## Remaining (peering half of the review, in progress)
 
-1. Recovery atomicity.
-2. Incarnation `known` reset.
-3. The two deleted incarnation rows.
-4. Message duplication.
-5. Atomic peering.
-6. Properties 3, 7, 8 and 9.
-7. Plan coverage for maintenance with merges.
-8. The free plan.
-9. Docs and model-to-simulator map placement.
-Then: rerun `scripts/models.sh ci epoch` (and deep-peering if its plans change), tick the
-build-checklist "Epoch change model" item, delete HANDOFF.md before merge.
+Model changes made (commit after this note): incarnation table per PG, reset on a primary change;
+delivered writes stay in rm; restored incarnation rows; peering decides with a subset P of members
+persisting and Activate persisting the rest (CanStall: only where a later interval, restart, reboot or
+format can stop activation); Recover with a chosen read point and RecoveryCoversAtRead; property 3 is
+now "a member that adopted a later interval logs no earlier write" (old 3 is part of 4); property 7
+with the table epoch in rm and CompareTableEpochs; property 8 by Chain; property 9 also "la
+activated" (ReportBeforeActivate) and plan LateReport (2 spare tables); chunk 2 has 2 blocks,
+MaintMerges plan; ci-peering split into ci-peering and ci-restarts. Quick checks (not committed):
+NoLateCompletion fails with CompareMemberLists, MergesOnKept with MergeBeforeKept, TablesForward with
+ReportBeforeActivate and with Fold's guard removed under LateReport.
+
+Still to do: full `scripts/models.sh ci epoch`; docs (item 8: results rows into the Configuration
+results table, property table in the epoch section, build-checklist wording, free plan wording,
+counterexample rows for the new negatives); rerun deep-peering, deep-leases, deep-slow.
+Then item 9 (coordinator): drop the boot ID (run ID covers reboots), commit separately, rerun
+ci-leases, the changed negative and deep-leases.
+Then: fresh review, final ci rerun, tick the build-checklist "Epoch change model" item, delete
+HANDOFF.md before merge.
 
 ## Design bugs found and design.md changes
 

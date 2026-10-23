@@ -29,10 +29,11 @@ CONSTANTS
     MaxTerm,    \* Raft terms
     MaxFault,   \* clock and network faults
     Moves,      \* control-plane changes enabled with no plans, and "fold"
-    Plans,      \* set of [free, m, w, f, t, k (, n)]: with free, any change in Moves
-                \* at any time, up to n tables, otherwise the membership changes m in
-                \* order; w the client writes, Seq([c, blk, whole, inc, re, after]);
-                \* f the faults and flags enabled; t the time bound; k the faults
+    Plans,      \* set of [free, m, w, f, t, k, s (, n)]: with free, any change in
+                \* Moves at any time, up to n tables, otherwise the membership changes
+                \* m in order; w the client writes, Seq([c, blk, whole, inc, re,
+                \* after]); f the faults and flags enabled; t the time bound; k the
+                \* faults; s the spare tables, Spare unless the plan says
     Clocks,     \* TRUE: two clocks per node; FALSE: lease expiry left open
     RawRates,   \* [Node -> SUBSET Nat]: CLOCK_MONOTONIC_RAW's rate, per mille of real time
     Slews,      \* [Node -> SUBSET Int]: CLOCK_BOOTTIME's slew, per mille of the raw rate
@@ -89,7 +90,7 @@ VARIABLES
     dlog,     \* [Disk -> [Chunk -> SUBSET Nat]]: versions in each disk's log
     miss,     \* [Disk -> [Chunk -> Int]]: persisted missing list
     persIv,   \* [Disk -> [PG -> Nat]]: the interval whose missing list a disk persisted
-    mrecv,    \* [Disk -> SUBSET [p, k, ent]]: missing lists received, not yet durable
+    mrecv,    \* [Disk -> SUBSET [p, k, ent]]: with ActivateBeforeDurable, lists not yet durable
     \* Primaries
     pr,       \* [Node -> [PG -> [iv, act, srv, since]]]
     pv,       \* [Node -> [Chunk -> Nat]]: newest version a primary ordered
@@ -414,7 +415,7 @@ Membership ==
 
 \* Renewals a primary asks for and folds of activation reports.
 Reactive ==
-    /\ plan.free \/ Len(tbl) - step < Spare
+    /\ plan.free \/ Len(tbl) - step < plan.s
     /\ \E p \in PG : Renew(p) \/ \E k \in 1..MaxTable : Fold(p, k)
     /\ UNCHANGED <<plan, step, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
 
@@ -519,10 +520,37 @@ Entry(d, c, K) ==
     IF Newest(dlog[d][c]) = K /\ (miss[d][c] = NoMiss \/ Bug("PeeringClearsMissing"))
     THEN NoMiss ELSE K
 
+\* The primary activates and reports it on its next heartbeat.
+Activated(n, p, k) ==
+    /\ pr' = [pr EXCEPT ![n][p] = [@ EXCEPT !.act = TRUE, !.srv = TRUE]]
+    /\ act' = act \cup {[p |-> p, k |-> k, r |-> run[n]]}
+    /\ reports' = reports \cup {[p |-> p, k |-> k]}
+
+\* A decision of the primary's current run for interval k of p.
+Decided(n, p, k) == \E x \in dec : x.p = p /\ x.k = k /\ x.n = n /\ x.r = run[n]
+TheDec(n, p, k) == CHOOSE x \in dec : x.p = p /\ x.k = k /\ x.n = n /\ x.r = run[n]
+
+\* The members in P persist, with interval k, their lists from ls.
+PersistAll(P, p, k, ls) ==
+    /\ miss' = [d \in Disk |-> IF d \in P
+                   THEN [c \in Chunk |-> IF c \in ChunksOf(p) THEN ls[d][c] ELSE miss[d][c]]
+                   ELSE miss[d]]
+    /\ persIv' = [d \in Disk |-> IF d \in P THEN [persIv[d] EXCEPT ![p] = k] ELSE persIv[d]]
+
+\* Whether something can stop interval k of p from activating once decided:
+\* a later interval its members or primary may adopt first, or a restart,
+\* reboot or format.
+CanStall(p, k) == Cur(p) > k \/ plan.f \cap {"restart", "reboot", "format"} # {}
+
 \* The new primary of k peers: it reaches every live member of k and a live
 \* member of every interval since the last activated one, decides what
-\* survives, has every live member persist its missing list, activates and
-\* reports it on its next heartbeat.
+\* survives and sends every live member its missing list, then activates once
+\* all have persisted theirs. Nothing reads a member's list before the next
+\* peering, which the member answers only once it left k, so a member that
+\* persists its list while still in k may as well persist it at the decision:
+\* the members in P do, and the rest at activation (Activate), which a primary
+\* that restarts or moves on never reaches. Where nothing can stop the
+\* interval, every member persists and the primary activates at the decision.
 Peer(n, p) ==
     LET k == IvAt(n, p)
         L == LaAt(n, p)
@@ -531,6 +559,7 @@ Peer(n, p) ==
        /\ pr[n][p].iv = k
        /\ ~pr[n][p].act
        /\ PrimNode(p, k) = n
+       /\ ~Decided(n, p, k)
        /\ LiveCnt(p, k) >= MinLive[p]
        /\ UpIn(p, k) \subseteq Elig
        /\ \E J \in SUBSET Elig :
@@ -549,25 +578,44 @@ Peer(n, p) ==
              /\ dec' = dec \cup {[p |-> p, k |-> k, n |-> n, r |-> run[n], kept |-> K]}
              /\ bad' = IF torn THEN bad \cup {"torn"} ELSE bad
              /\ pv' = [pv EXCEPT ![n] = [c \in Chunk |-> IF c \in ChunksOf(p) THEN K[c] ELSE pv[n][c]]]
-             /\ IF Bug("ActivateBeforeDurable")
-                THEN /\ mrecv' = [d \in Disk |-> IF d \in UpIn(p, k)
-                                    THEN mrecv[d] \cup {[p |-> p, k |-> k, ent |-> lists[d]]}
-                                    ELSE mrecv[d]]
-                     /\ UNCHANGED <<miss, persIv>>
-                ELSE /\ miss' = [d \in Disk |-> IF d \in UpIn(p, k)
-                                   THEN [c \in Chunk |-> IF c \in ChunksOf(p) THEN lists[d][c] ELSE miss[d][c]]
-                                   ELSE miss[d]]
-                     /\ persIv' = [d \in Disk |-> IF d \in UpIn(p, k) THEN [persIv[d] EXCEPT ![p] = k]
-                                                  ELSE persIv[d]]
-                     /\ UNCHANGED mrecv
-       /\ pr' = [pr EXCEPT ![n][p] = [@ EXCEPT !.act = TRUE, !.srv = TRUE]]
-       /\ act' = act \cup {[p |-> p, k |-> k, r |-> run[n]]}
-       /\ reports' = reports \cup {[p |-> p, k |-> k]}
+             /\ \E P \in IF CanStall(p, k) THEN SUBSET UpIn(p, k) ELSE {UpIn(p, k)} :
+                  IF Bug("ActivateBeforeDurable")
+                  THEN /\ mrecv' = [d \in Disk |-> IF d \in UpIn(p, k)
+                                       THEN mrecv[d] \cup {[p |-> p, k |-> k, ent |-> lists[d]]}
+                                       ELSE mrecv[d]]
+                       /\ Activated(n, p, k)
+                       /\ UNCHANGED <<miss, persIv>>
+                  ELSE IF CanStall(p, k)
+                  THEN /\ PersistAll(P, p, k, lists)
+                       /\ reports' = IF Bug("ReportBeforeActivate") THEN reports \cup {[p |-> p, k |-> k]}
+                                     ELSE reports
+                       /\ UNCHANGED <<pr, act, mrecv>>
+                  ELSE /\ PersistAll(P, p, k, lists)
+                       /\ Activated(n, p, k)
+                       /\ UNCHANGED mrecv
        /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, ep, dnode, ddisk, fmts, stale, run, rsIv, dlog,
                       pin, known, rm, vers, ackd, wst, sends, dmn,
                       rw, clockVars, raftVars>>
 
-\* With ActivateBeforeDurable, members persist their lists after activation.
+\* The members still to persist do so, as they could have at the decision:
+\* their logs and lists have not changed since.
+Activate(n, p) ==
+    LET k == IvAt(n, p)
+        R == {d \in UpIn(p, k) : persIv[d][p] # k}
+        K == TheDec(n, p, k).kept
+    IN /\ Running(n)
+       /\ pr[n][p].iv = k
+       /\ ~pr[n][p].act
+       /\ PrimNode(p, k) = n
+       /\ Decided(n, p, k)
+       /\ \A d \in R : dnode[d] # 0 /\ Running(dnode[d]) /\ IvAt(dnode[d], p) = k
+       /\ PersistAll(R, p, k, [d \in R |-> [c \in ChunksOf(p) |-> Entry(d, c, K[c])]])
+       /\ Activated(n, p, k)
+       /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, ep, dnode, ddisk, fmts, stale, run, rsIv, dlog, mrecv,
+                      pv, pin, known, dec, dataVars, leaseVars, clockVars, raftVars>>
+
+\* With ActivateBeforeDurable, a member persists its list after activation,
+\* and a restart loses a list it has not persisted yet.
 Persist(d) ==
     \E x \in mrecv[d] :
        /\ dnode[d] # 0
@@ -580,8 +628,18 @@ Persist(d) ==
                       leaseVars, clockVars, raftVars>>
 
 
-\* Recovery copies a kept version from a member holding it to one that lists
-\* it, replacing any dropped versions; the current interval's own writes stay.
+\* Recovery is a write the primary orders: it reads the kept version's blocks
+\* from a member that holds it, then orders a write of them to a member that
+\* lists the chunk. The real write takes a new version and carries only the
+\* blocks no write of the interval ordered before it covers, so the member's
+\* own writes of the interval stay on top; the model keeps the source's
+\* versions up to the kept one under their own numbers, which Content reads
+\* the same way. What the read returns never changes, since the source lists
+\* nothing and a new interval stops the write, so the model takes the read
+\* with the write and lets "at", the newest version the primary had ordered
+\* when it read, be any since it activated. With RecoveryCoversAtRead, the
+\* primary picks the blocks at the read, so the writes ordered between the
+\* read and the write are overwritten.
 Recover(n, p, c, d) ==
     LET k == IvAt(n, p)
         K == miss[d][c]
@@ -594,13 +652,15 @@ Recover(n, p, c, d) ==
        /\ Running(dnode[d])
        /\ IvAt(dnode[d], p) = k
        /\ K # NoMiss
-       /\ \E s \in UpIn(p, k) :
+       /\ \E s \in UpIn(p, k), at \in {Ver(k, 0)} \cup {v \in Ver(k, 1)..pv[n][c] : IvOfV(v) = k} :
             /\ dnode[s] # 0
             /\ Running(dnode[s])
             /\ miss[s][c] = NoMiss
             /\ K = 0 \/ K \in dlog[s][c]
-            /\ dlog' = [dlog EXCEPT ![d][c] = {v \in dlog[s][c] : v <= K}
-                                                \cup {v \in dlog[d][c] : IvOfV(v) = k}]
+            /\ at = Ver(k, 0) \/ Bug("RecoveryCoversAtRead")
+            /\ dlog' = [dlog EXCEPT ![d][c] =
+                          {v \in dlog[s][c] : v <= K}
+                          \cup {v \in dlog[d][c] : IvOfV(v) = k /\ (v <= at \/ ~Bug("RecoveryCoversAtRead"))}]
        /\ miss' = [miss EXCEPT ![d][c] = NoMiss]
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, stale, run, rsIv, persIv, mrecv, priVars, dataVars,
                       leaseVars, clockVars, raftVars>>
@@ -679,14 +739,9 @@ Acked(r, logs) ==
     /\ Running(r.n)
     /\ \A d \in UpIn(ChunkPG[r.c], IvOfV(r.v)) : r.v \in logs[d][r.c]
 
-\* Acknowledging r: property 3 notes it if a later interval activated and
-\* did not keep it.
 Ack(r) ==
     /\ ackd' = ackd \cup {[c |-> r.c, v |-> r.v]}
     /\ wst' = [wst EXCEPT ![r.w] = 2]
-    /\ bad' = IF \E x \in ActDecs : /\ x.p = ChunkPG[r.c] /\ x.k > IvOfV(r.v)
-                                    /\ r.v \notin Chain(r.c, x.kept[r.c])
-              THEN bad \cup {"late"} ELSE bad
 
 \* The active primary orders a client write: the chunk's next version, merged
 \* on the newest version it holds. A write covering part of a block waits
@@ -714,11 +769,11 @@ Order(n, x) ==
        /\ pv' = [pv EXCEPT ![n][c] = v]
        /\ vers' = vers \cup {r}
        /\ dlog' = logs
-       /\ rm' = rm \cup {[p |-> p, c |-> c, v |-> v, iv |-> k, from |-> n, r |-> run[n], to |-> d] :
+       /\ rm' = rm \cup {[p |-> p, c |-> c, v |-> v, e |-> ep[n], iv |-> k, from |-> n, r |-> run[n], to |-> d] :
                           d \in UpIn(p, k) \ {own}}
-       /\ IF Acked(r, logs) THEN Ack(r) ELSE UNCHANGED <<ackd, wst, bad>>
+       /\ IF Acked(r, logs) THEN Ack(r) ELSE UNCHANGED <<ackd, wst>>
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, stale, run, rsIv, miss, persIv, mrecv,
-                      pr, known, dec, act, sends, dmn, leaseVars, clockVars, raftVars>>
+                      pr, known, dec, act, sends, dmn, bad, leaseVars, clockVars, raftVars>>
 
 \* The primary refuses a write it may not order; the client retries.
 Refuse(n, x) ==
@@ -735,6 +790,7 @@ Refuse(n, x) ==
 Accepts(d, m) ==
     LET k == IvAt(dnode[d], m.p)
     IN IF Bug("CompareMemberLists") THEN UpSeq(m.p, k) = UpSeq(m.p, m.iv)
+       ELSE IF Bug("CompareTableEpochs") THEN ep[dnode[d]] = m.e
        ELSE k = m.iv
 
 \* A member logs a chunk's writes in the order its primary sent them,
@@ -754,7 +810,8 @@ Deliver(m) ==
                               => m2.v \in dlog[d][m.c]
        /\ dlog' = logs
        /\ IF [c |-> m.c, v |-> m.v] \notin ackd /\ Acked(r, logs) THEN Ack(r)
-          ELSE UNCHANGED <<ackd, wst, bad>>
+          ELSE UNCHANGED <<ackd, wst>>
+       /\ bad' = IF IvAt(dnode[d], m.p) > m.iv THEN bad \cup {"late"} ELSE bad
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, stale, run, rsIv, miss, persIv, mrecv, priVars,
                       rm, vers, sends, dmn, leaseVars, clockVars, raftVars>>
 
@@ -1328,7 +1385,7 @@ Transfer(n, t) ==
 Protocol ==
     \/ Reactive
     \/ \E n \in Node \ stale : \E e \in {ep[n] + 1, Len(tbl)} : Adopt(n, e)
-    \/ \E n \in Node, p \in PG : Peer(n, p) \/ CounterOut(n, p)
+    \/ \E n \in Node, p \in PG : Peer(n, p) \/ Activate(n, p) \/ CounterOut(n, p)
     \/ \E d \in Disk : Persist(d)
     \/ \E n \in Node, p \in PG, c \in Chunk, d \in Disk : Recover(n, p, c, d)
     \/ \E i \in 1..Len(Writes) : Send(i)
@@ -1403,14 +1460,15 @@ OneReader ==
 OneLeaseholder ==
     \A n, m \in Node : n # m => ~(RaftReads(n) /\ RaftReads(m))
 
-\* 3. No write tagged with an interval completes after a later interval of its
-\* PG activates, unless that interval's peering kept it: a member peering
-\* reached may have acknowledged the write before it adopted the new interval,
-\* and a member peering did not reach may acknowledge it after.
+\* 3. A member that adopted a later interval of a PG logs no write tagged
+\* with an earlier one, so the members peering reached stop the intervals
+\* they were live in.
 NoLateCompletion == "late" \notin bad
 
 \* 4. No acknowledged version, and no version an activated interval kept, is
 \* ever dropped: every later decision and acknowledged version rests on it.
+\* That includes a write tagged with an interval that completes after a later
+\* one activated, which peering must have kept.
 NothingCommittedDropped ==
     \A c \in Chunk : \A u \in CommitAt(c) :
        /\ \A x \in ActDecs : (x.p = ChunkPG[c] /\ x.k > u.at) => u.v \in Chain(c, x.kept[c])
@@ -1427,23 +1485,26 @@ OneWritePerVersion ==
     \A x, y \in vers : (x.c = y.c /\ x.v = y.v) => x.w = y.w /\ x.on = y.on
 VersionsGrow == \A x \in vers : x.on < x.v
 
-\* 7. A table that leaves a PG's interval alone never fails that PG's writes.
+\* 7. A table that leaves a PG's interval alone never fails that PG's writes:
+\* a write tagged with table epoch e is accepted by a member holding any table
+\* in which the PG's interval is still the one it had in e.
 UnchangedIntervalAccepts ==
-    \A m \in rm : \A d \in Disk :
-       (dnode[d] > 0 /\ IvAt(dnode[d], m.p) = m.iv) => Accepts(d, m)
+    \A m \in rm : dnode[m.to] > 0 /\ IvAt(dnode[m.to], m.p) = m.iv => Accepts(m.to, m)
 
 \* 8. A new primary merges into a chunk only once it holds every version
-\* peering kept for it.
+\* peering kept for it: the version it merges on rests on the kept one.
 MergesOnKept ==
     \A x \in vers : ~Writes[x.w].whole =>
        \A y \in dec : (y.p = ChunkPG[x.c] /\ y.k = IvOfV(x.v) /\ y.n = x.n /\ y.r = x.r)
-                        => x.on >= y.kept[x.c]
+                        => y.kept[x.c] = 0 \/ y.kept[x.c] \in Chain(x.c, x.on)
 
 \* 9. Table epochs, interval numbers and last activated intervals never go
-\* backwards (the node half is the action property Monotonic).
+\* backwards (the node half is the action property Monotonic), and a table's
+\* last activated interval of a PG did activate.
 TablesForward ==
-    \A e \in 1..Len(tbl) - 1, p \in PG :
-       tbl[e + 1][p].iv >= tbl[e][p].iv /\ tbl[e + 1][p].la >= tbl[e][p].la
+    \A e \in 1..Len(tbl), p \in PG :
+       /\ e < Len(tbl) => tbl[e + 1][p].iv >= tbl[e][p].iv /\ tbl[e + 1][p].la >= tbl[e][p].la
+       /\ \E x \in act : x.p = p /\ x.k = tbl[e][p].la
 Monotonic == [][\A n \in Node : ep'[n] >= ep[n]]_vars
 
 \* 10. A pair whose raw rates differ by up to 4%, with no pause, reboot,
@@ -1502,10 +1563,10 @@ Nodes4 == {1, 2, 3, 4}
 Exact == [n \in Nodes4 |-> {1000}]
 NoSlew == [n \in Nodes4 |-> {0}]
 
-\* Chunk 1 is in PG 1 with two blocks; chunk 2 in PG 2 with one.
+\* Chunk 1 is in PG 1, chunk 2 in PG 2, each with two blocks.
 Chunks2 == {1, 2}
 ChunkInPG == [c \in Chunks2 |-> c]
-Blocks21 == [c \in Chunks2 |-> IF c = 1 THEN 2 ELSE 1]
+Blocks22 == [c \in Chunks2 |-> 2]
 Chunks1 == {1}
 ChunkInPG1 == [c \in Chunks1 |-> 1]
 Blocks1 == [c \in Chunks1 |-> 1]
@@ -1514,7 +1575,9 @@ Blocks1 == [c \in Chunks1 |-> 1]
 Partial ==
     <<[c |-> 1, blk |-> 1, whole |-> FALSE, inc |-> 0, re |-> 0, after |-> 0],
       [c |-> 1, blk |-> 2, whole |-> FALSE, inc |-> 0, re |-> 0, after |-> 0]>>
-\* To chunk 2's block: a daemon's write W (incarnation 1), its successor's
+\* The same to chunk 2.
+Partial2 == [i \in 1..2 |-> [Partial[i] EXCEPT !.c = 2]]
+\* To chunk 2's first block: a daemon's write W (incarnation 1), its successor's
 \* reissue W' once it died, and the successor's next write W2 once W' is
 \* acknowledged.
 Session ==
@@ -1533,7 +1596,7 @@ OneWhole == <<[c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-
 Mark(d, to) == [k |-> "mark", d |-> d, to |-> to]
 Repl(p, old, new) == [k |-> "replace", p |-> p, old |-> old, new |-> new]
 Rot(p) == [k |-> "rotate", p |-> p]
-Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f, t |-> 600, k |-> 1]
+Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f, t |-> 600, k |-> 1, s |-> Spare]
 
 \* The membership faults of test-scenarios.md "Epoch change model" on 3 nodes,
 \* each with the writes whose rules it tests.
@@ -1560,11 +1623,19 @@ ReplicaThenMaint == Plan(<<Repl(2, 3, 1), Mark(2, "maint")>>, Session, {"restart
 Restarted == Plan(<<>>, Session, {"restart", "die"})
 \* PG 2 below min_live while its primary stays, then the primary moved away.
 BelowMinLive == Plan(<<Mark(3, "down"), Mark(3, "up"), Mark(2, "maint")>>, Session, {})
+\* The same with maintenance instead of down, and partial writes: the new
+\* primary merges only once recovery brought it every kept version.
+MaintMerges == Plan(<<Mark(3, "maint"), Mark(3, "up"), Mark(2, "maint")>>, Partial2, {})
+\* Two activations and two spare tables, so a report can be folded late.
+LateReport == [Plan(<<Mark(3, "down"), Mark(3, "up")>>, <<>>, {}) EXCEPT !.s = 2]
 
+\* ci-peering checks the plans with membership changes alone, ci-restarts
+\* those with a restart or a format, under which a decision can stop short of
+\* activation (CanStall).
 PeerPlans ==
-    {RemovedAndBack, PrimaryBack, DownBackMoved, Reformatted, MaintKeepsPrimary,
-     PrimaryAway, ReplicaThenPrimary, PrimaryThenMaint, ReplicaThenMaint, BelowMinLive,
-     Restarted}
+    {RemovedAndBack, PrimaryBack, DownBackMoved, MaintKeepsPrimary, PrimaryAway,
+     ReplicaThenPrimary, PrimaryThenMaint, BelowMinLive, MaintMerges, LateReport}
+RestartPlans == {Reformatted, ReplicaThenMaint, Restarted}
 
 \* ci-leases: PG 2's primary is node 2, whose CLOCK_BOOTTIME runs at its raw
 \* rate or 22.6% slow; node 3, its only grantor, runs 4% slow or fast, with
@@ -1630,7 +1701,7 @@ SlowPlans == {HandoverSlow}
 \* deep-peering: every peering plan, and any two changes at any time with
 \* one partial write to chunk 1 and a restart; node 4 starts outside both PGs,
 \* a spare a change can move a member to.
-Free == [free |-> TRUE, m |-> <<>>, w |-> SubSeq(Partial, 1, 1), f |-> {"restart"}, t |-> 0, k |-> 1, n |-> 3]
-DeepPeerPlans == PeerPlans \cup {Free}
+Free == [free |-> TRUE, m |-> <<>>, w |-> SubSeq(Partial, 1, 1), f |-> {"restart"}, t |-> 0, k |-> 1, s |-> 0, n |-> 3]
+DeepPeerPlans == PeerPlans \cup RestartPlans \cup {Free}
 
 =============================================================================
