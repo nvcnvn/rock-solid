@@ -23,35 +23,43 @@ type frozenBlocks struct {
 	blocks  map[uint16][]byte
 }
 
-// storeModel is the crash oracle's plain model of a disk's chunks: each written block's bytes,
-// live and in each frozen version, applying records' entries in LSN order as replay does.
+// storeModel is the crash oracle's plain model of a disk's chunks: each chunk's entry and each
+// written block's bytes, live and as each cut's snapshot reads them, applying records' entries in
+// LSN order. A freeze at cut e keeps the chunk as it then stands for the snapshot of e, and of
+// every earlier cut no earlier freeze kept, whatever version it names.
 type storeModel struct {
+	chunks map[core.ChunkID]Chunk
 	live   map[blockKey][]byte
 	frozen map[core.ChunkID][]frozenBlocks
 }
 
 func newStoreModel() *storeModel {
-	return &storeModel{live: map[blockKey][]byte{}, frozen: map[core.ChunkID][]frozenBlocks{}}
+	return &storeModel{chunks: map[core.ChunkID]Chunk{}, live: map[blockKey][]byte{}, frozen: map[core.ChunkID][]frozenBlocks{}}
 }
 
 func (m *storeModel) Apply(r writtenRecord) {
 	for i, e := range r.entries {
 		switch e.Kind {
 		case disklog.EntryWrite, disklog.EntrySlot:
+			m.chunks[e.Chunk] = Chunk{Version: e.Version, Epoch: m.chunks[e.Chunk].Epoch}
 			for k := range e.Count {
 				m.live[blockKey{e.Chunk, e.First + k}] = r.payloads[i][int(k)*core.BlockSize:][:core.BlockSize]
 			}
 		case disklog.EntryPunch:
+			m.chunks[e.Chunk] = Chunk{Version: e.Version, Epoch: m.chunks[e.Chunk].Epoch}
 			for k := range e.Count {
 				delete(m.live, blockKey{e.Chunk, e.First + k})
 			}
 		case disklog.EntryFreeze:
-			if m.isFrozen(e.Chunk, e.Version) {
-				continue
+			ch, ok := m.chunks[e.Chunk]
+			if !ok {
+				ch.Version = e.Version
 			}
+			ch.Epoch = max(ch.Epoch, e.Epoch)
+			m.chunks[e.Chunk] = ch
 			f := frozenBlocks{version: e.Version, epoch: e.Epoch, blocks: map[uint16][]byte{}}
 			for k, b := range m.live {
-				if k.c == e.Chunk && e.Version != 0 {
+				if k.c == e.Chunk {
 					f.blocks[k.b] = b
 				}
 			}
@@ -70,7 +78,7 @@ func (m *storeModel) isFrozen(c core.ChunkID, v uint64) bool {
 }
 
 func (m *storeModel) Clone() *storeModel {
-	c := &storeModel{live: maps.Clone(m.live), frozen: map[core.ChunkID][]frozenBlocks{}}
+	c := &storeModel{chunks: maps.Clone(m.chunks), live: maps.Clone(m.live), frozen: map[core.ChunkID][]frozenBlocks{}}
 	for k, fs := range m.frozen {
 		c.frozen[k] = append([]frozenBlocks(nil), fs...)
 	}
@@ -100,8 +108,8 @@ func (m *storeModel) at(c core.ChunkID, b uint16, epoch uint64) []byte {
 	return zero
 }
 
-// checkModel compares every block the model or the index holds of the chunks, live and at each
-// epoch up to maxEpoch, with the store.
+// checkModel compares the entry of each of the chunks, and every block the model or the index
+// holds of them, live and at each epoch up to maxEpoch, with the store.
 func checkModel(t testing.TB, h *harness, m *storeModel, chunks []core.ChunkID, maxEpoch uint64) {
 	t.Helper()
 	if msg := modelDiff(h, m, chunks, maxEpoch); msg != "" {
@@ -109,10 +117,18 @@ func checkModel(t testing.TB, h *harness, m *storeModel, chunks []core.ChunkID, 
 	}
 }
 
-// modelDiff describes the first block where the store differs from the model, or is empty.
+// modelDiff describes how the index fails its own check, or the first chunk entry or block where
+// the store differs from the model, or is empty.
 func modelDiff(h *harness, m *storeModel, chunks []core.ChunkID, maxEpoch uint64) string {
 	ix := h.s.Index()
+	if err := ix.Check(); err != nil {
+		return err.Error()
+	}
 	for _, c := range chunks {
+		got, ok := ix.Chunk(testPool, c)
+		if want, wok := m.chunks[c]; ok != wok || got != want {
+			return fmt.Sprintf("chunk %v entry %+v %v, the model holds %+v %v", c, got, ok, want, wok)
+		}
 		blocks := map[uint16]bool{}
 		for k := range m.live {
 			if k.c == c {

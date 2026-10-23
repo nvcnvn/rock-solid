@@ -189,6 +189,10 @@ type plants struct {
 	// copiesOnly measures the cleaner's rate net of its copied blocks alone.
 	noAdmission bool
 	copiesOnly  bool
+	// replayLate leaves out of replay the first record past the replay LSN that maps blocks, as a
+	// replay LSN one record too new would (RocksDB #11148); skipped is set once it has.
+	replayLate bool
+	skipped    bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.
@@ -1066,6 +1070,10 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 					*e = disklog.WriteEntry(e.Pool, e.Chunk, e.Version, e.First, e.Count)
 				}
 			}
+		}
+		if ev.LSN > s.replayLSN && s.plant.replayLate && !s.plant.skipped && slices.ContainsFunc(ev.Entries, func(e disklog.Entry) bool { return e.Kind != disklog.EntryBlob }) {
+			s.plant.skipped = true
+			return
 		}
 		if ev.LSN > s.replayLSN {
 			if err := s.ix.Apply(ev); err != nil {

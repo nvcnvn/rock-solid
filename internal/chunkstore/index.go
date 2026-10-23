@@ -372,14 +372,16 @@ func (x *Index) overlapping(dst []Extent, pool core.PoolID, c core.ChunkID, vers
 	return dst
 }
 
-// freeze copies the live map under version, or records version 0 absent with an empty map, once:
-// replaying a freeze already applied changes nothing.
+// freeze copies the live map under version, or records version 0 absent with an empty map. A
+// version frozen already, which a write lost after its freeze leaves the chunk at, takes the later
+// cut's epoch, since its map is the chunk at both cuts; replaying an older freeze changes nothing.
 func (x *Index) freeze(pool core.PoolID, c core.ChunkID, version, epoch uint64) {
 	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), version)
-	if _, ok := x.tree.Get(x.key); ok {
+	v, frozen := x.tree.Get(x.key)
+	if frozen && binary.LittleEndian.Uint64(v) >= epoch {
 		return
 	}
-	if version != 0 {
+	if !frozen && version != 0 {
 		x.exts = x.overlapping(x.exts[:0], pool, c, 0, 0, core.BlocksPerChunk)
 		for _, e := range x.exts {
 			x.put(x.extentKey(pool, c, version, e.First), e)

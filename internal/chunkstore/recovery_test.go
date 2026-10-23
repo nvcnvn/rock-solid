@@ -1,540 +1,403 @@
 package chunkstore
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
-	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
-const (
-	indexOwner = 1
-	diskBytes  = 1 << 30
-	nodeLogID  = 0x5eed
-)
+const diskBytes = 1 << 30
 
-// node runs a chunk index over a disk log on a simulated disk, executing each action at once. It
-// submits raw entries, freezes and versions a Store request cannot choose, so it repeats the
-// Store's checkpoint and restore steps rather than running the Store. It hands the crash oracle each
-// round as its write goes to the disk and each Durable LSN, and checks every recovered index
-// against the oracle's block model.
-type node struct {
-	t    *testing.T
-	pool *sim.Pool
-	ctx  core.Context
-	disk *sim.Disk
-	cfg  disklog.Config
-	log  *disklog.Log
-	rec  *disklog.Recovery
-	out  disklog.Output
-	ix   *Index
-	// maxBlob is the log's MaxBlobBytes, which a restore needs before the log resumes.
-	maxBlob int
+// recoveryChunks are the recovery workload's chunks: twelve it writes from the start, and two it
+// first writes after a cut, whose first write freezes them absent.
+var recoveryChunks = func() []core.ChunkID {
+	var cs []core.ChunkID
+	for inode := range 4 {
+		for i := range 4 - 2*(inode/3) {
+			cs = append(cs, core.ChunkID{Volume: 1, Inode: core.InodeID(1 + inode), Index: uint32(i)})
+		}
+	}
+	return cs
+}()
 
-	checkpointing bool
-	piece         disklog.Ticket
-	inPiece       bool
-	replayLSN     uint64
-	checkpoints   int
-	carried       int
-	pieces        int
-	crashWhen     func(*disklog.Event) bool
-	crashed       bool
-
-	mode      disklog.Mode
-	loading   map[disklog.BlobRef]*runLoad
-	pieceOf   map[disklog.BlobRef]disklog.BlobRef
-	replayed  int
-	recovered bool
-
-	geo    disklog.Geometry
-	opened map[uint32]uint64
-	oracle *sim.Oracle[disklog.Event, blockModel]
-	want   blockModel
-	// recoveredLSN is the LSN the last recovery reported.
-	recoveredLSN uint64
-	// crashAct, when set, crashes the disk before an action it picks.
-	crashAct func(core.Action) bool
-	// landing, when set, lands each unflushed block at a crash at random; otherwise none lands.
-	landing *core.Rand
-	// mismatch, when set, takes each recovered index the oracle rejects instead of failing the test.
-	mismatch func(error)
-	// replayLate plants the bug of replay leaving out the first record past the replay LSN that
-	// maps blocks, as a replay LSN one record too new would (RocksDB #11148).
-	replayLate bool
-	skipped    bool
+// newRecoveryHarness is a store on the default disk under the crash oracle, with 16-block records,
+// a checkpoint due every 96 blocks of records, and merges running as the daemon runs them.
+func newRecoveryHarness(t *testing.T) *harness {
+	cfg := testConfig()
+	cfg.Log.MaxRecordBytes = 16 * core.BlockSize
+	cfg.Log.MaxReplayBytes = 96 * core.BlockSize
+	h := newHarness(t, cfg)
+	h.merging = true
+	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
+	return h
 }
 
-type runLoad struct {
-	refs []disklog.BlobRef
-	got  map[disklog.BlobRef][]byte
-	root []byte
-}
-
-func testLogConfig() disklog.Config {
-	cfg := disklog.DefaultConfig()
-	cfg.MaxRecordBytes = 16 * core.BlockSize
-	cfg.MaxReplayBytes = 96 * core.BlockSize
-	cfg.Check = true
-	cfg.NoReserve = true
-	return cfg
-}
-
-func newNode(t *testing.T) *node {
-	n := &node{t: t, pool: sim.NewPool(64<<20, 0), disk: sim.NewDisk(diskBytes / core.BlockSize), cfg: testLogConfig(), opened: map[uint32]uint64{}}
-	n.ctx = core.Context{Now: 1, Raw: 2, Pool: n.pool}
-	geo, err := disklog.GeometryFor(diskBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n.geo = geo
-	n.log, err = disklog.Format(&n.ctx, n.cfg, disklog.Superblock{LogID: nodeLogID, Geometry: geo}, 1000, &n.out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n.maxBlob = int(n.log.MaxBlobBytes())
-	n.ix = n.newIndex()
-	n.settle()
-	n.oracle = sim.NewOracle[disklog.Event](n.log.DurableLSN(), blockModel{})
-	return n
-}
-
-func (n *node) newIndex() *Index {
-	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: n.maxBlob, Check: true}))
-	if err != nil {
-		n.t.Fatal(err)
-	}
-	return NewIndex(tree, 0, 0)
-}
-
-func copyEvent(ev disklog.Event) disklog.Event {
-	ev.Entries, ev.Tickets, ev.Payloads, ev.Data = slices.Clone(ev.Entries), slices.Clone(ev.Tickets), slices.Clone(ev.Payloads), slices.Clone(ev.Data)
-	return ev
-}
-
-// settle executes actions and handles events until nothing is left, or the node crashes.
-func (n *node) settle() {
-	for !n.crashed {
-		evs := make([]disklog.Event, len(n.out.Events))
-		for i, ev := range n.out.Events {
-			evs[i] = copyEvent(ev)
-		}
-		acts := slices.Clone(n.out.Actions)
-		n.out.Reset()
-		if len(evs) == 0 && len(acts) == 0 {
-			return
-		}
-		for i := range evs {
-			if n.handle(&evs[i]); n.crashed {
-				return
-			}
-		}
-		for _, a := range acts {
-			if n.crashAct != nil && n.crashAct(a) {
-				n.crash()
-				return
-			}
-			if a.Kind == core.ActDiskWrite {
-				n.noteWrite(a)
-			}
-			done := n.disk.Execute(n.pool, &a)
-			if n.rec != nil {
-				n.rec.OnEvent(&n.ctx, &done, &n.out)
-			} else {
-				n.log.OnEvent(&n.ctx, &done, &n.out)
-			}
-		}
-	}
-}
-
-func (n *node) crash() {
-	n.crashed = true
-	if n.landing != nil {
-		n.disk.CrashRandom(n.landing)
-		return
-	}
-	n.disk.Crash(func(int, core.LBA) bool { return false })
-}
-
-func (n *node) handle(ev *disklog.Event) {
-	if n.crashWhen != nil && n.crashWhen(ev) {
-		n.crash()
-		return
-	}
-	tree := n.ix.Tree()
-	switch ev.Kind {
-	case disklog.Durable:
-		if err := n.oracle.Acked(ev.LSN); err != nil {
-			n.t.Fatalf("oracle: %v", err)
-		}
-		if err := n.ix.Apply(ev); err != nil {
-			n.t.Fatal(err)
-		}
-		for i, tk := range ev.Tickets {
-			if n.inPiece && tk == n.piece {
-				n.inPiece = false
-				ref := disklog.BlobRef{Segment: ev.Segment, Block: ev.Block, LSN: ev.LSN, Entry: uint16(i)}
-				if err := tree.PieceDurable(ref); err != nil {
-					n.t.Fatal(err)
-				}
-				n.nextPiece()
-			}
-		}
-	case disklog.CheckpointDone:
-		if _, err := tree.CheckpointDone(); err != nil {
-			n.t.Fatal(err)
-		}
-		n.checkpointing = false
-		n.checkpoints++
-	case disklog.CheckpointFailed, disklog.Failed, disklog.InDoubt, disklog.RecoveryFailed:
-		n.t.Fatalf("log event %+v", *ev)
-	case disklog.ManifestLoaded:
-		n.loadRuns()
-	case disklog.BlobRead:
-		n.blobRead(ev)
-	case disklog.Replayed:
-		if ev.LSN > n.replayLSN {
-			if n.replayLate && !n.skipped && mapsBlocks(ev) {
-				n.skipped = true
-				return
-			}
-			if err := n.ix.Apply(ev); err != nil {
-				n.t.Fatal(err)
-			}
-			n.replayed++
-		}
-	case disklog.Recovered:
-		n.recoveredLSN = n.rec.DurableLSN()
-		var err error
-		if n.want, err = n.oracle.Recovered(n.recoveredLSN); err != nil {
-			n.t.Fatalf("oracle: %v", err)
-		}
-		log, err := n.rec.Log(&n.ctx)
-		if err != nil {
-			n.t.Fatal(err)
-		}
-		n.log, n.rec, n.recovered = log, nil, true
-		checkOpenSeqs(n.t, n.disk, log)
-	}
-}
-
-func (n *node) checkpoint() {
-	tree := n.ix.Tree()
-	froze, err := tree.BeginFlush()
-	if err != nil {
-		n.t.Fatal(err)
-	}
-	if froze || !tree.Frozen() {
-		n.replayLSN = n.log.DurableLSN()
-	}
-	idx := []disklog.CheckpointIndex{{Owner: indexOwner, ReplayLSN: n.replayLSN, Runs: tree.CarriedRuns()}}
-	n.carried += len(tree.CarriedRuns())
-	if err := n.log.BeginCheckpoint(idx); err != nil {
-		n.t.Fatal(err)
-	}
-	n.checkpointing = true
-	n.nextPiece()
-}
-
-func (n *node) nextPiece() {
-	buf, err := n.pool.Alloc(n.maxBlob)
-	if err != nil {
-		n.t.Fatal(err)
-	}
-	length, root, err := n.ix.Tree().NextPiece(n.pool.Bytes(buf))
-	if err != nil {
-		n.t.Fatal(err)
-	}
-	if length == 0 {
-		n.pool.Free(buf)
-		if err := n.log.EndCheckpoint(&n.ctx, &n.out); err != nil {
-			n.t.Fatal(err)
-		}
-		return
-	}
-	if n.piece, err = n.log.CheckpointPiece(&n.ctx, indexOwner, buf, uint64(length), root, &n.out); err != nil {
-		n.t.Fatal(err)
-	}
-	n.inPiece = true
-	n.pieces++
-}
-
-// recover restarts the node on its disk: recovery, the index's runs, replay, then group commit.
-func (n *node) recover(mode disklog.Mode) {
-	n.t.Helper()
-	n.recoverUntil(mode, nil)
-}
-
-// recoverUntil is recover, checking the recovered index against the crash oracle, unless
-// crashAct crashes the disk before one of recovery's actions, which it reports with false.
-func (n *node) recoverUntil(mode disklog.Mode, crashAct func(core.Action) bool) bool {
-	n.t.Helper()
-	n.log, n.out, n.crashed, n.crashWhen, n.crashAct = nil, disklog.Output{}, false, nil, crashAct
-	n.checkpointing, n.inPiece, n.recovered, n.replayed, n.replayLSN, n.skipped = false, false, false, 0, 0, false
-	n.ix = n.newIndex()
-	n.mode = mode
-	n.loading, n.pieceOf = map[disklog.BlobRef]*runLoad{}, map[disklog.BlobRef]disklog.BlobRef{}
-	var err error
-	if n.rec, err = disklog.Recover(&n.ctx, n.cfg, n.disk.Blocks(), mode, 5000, &n.out); err != nil {
-		n.t.Fatal(err)
-	}
-	n.settle()
-	n.crashAct = nil
-	if n.crashed {
-		return false
-	}
-	if !n.recovered {
-		n.t.Fatalf("recovery stopped: %v", n.rec.Err())
-	}
-	if err := oracleDiff(n.ix, n.want); err != nil {
-		err = fmt.Errorf("index recovered to LSN %d: %w", n.recoveredLSN, err)
-		if n.mismatch == nil {
-			n.t.Fatalf("oracle: %v", err)
-		}
-		n.mismatch(err)
-	}
-	return true
-}
-
-func (n *node) loadRuns() {
-	if m, ok := n.rec.Manifest(); ok && n.mode == disklog.ModeOpen {
-		for _, ix := range m.Indexes {
-			if ix.Owner != indexOwner {
-				continue
-			}
-			n.replayLSN = ix.ReplayLSN
-			for _, root := range ix.Runs {
-				n.loading[root] = &runLoad{got: map[disklog.BlobRef][]byte{}}
-				if err := n.rec.ReadBlob(&n.ctx, root, &n.out); err != nil {
-					n.t.Fatal(err)
-				}
-			}
-		}
-	}
-	n.replayIfLoaded()
-}
-
-func (n *node) blobRead(ev *disklog.Event) {
-	root := ev.Ref
-	l, isRoot := n.loading[root]
-	if isRoot && l.root == nil {
-		l.root = ev.Data
-		refs, err := lsm.RootRefs(ev.Data, nil)
-		if err != nil {
-			n.t.Fatal(err)
-		}
-		l.refs = refs
-		for _, r := range refs {
-			n.pieceOf[r] = root
-			if err := n.rec.ReadBlob(&n.ctx, r, &n.out); err != nil {
-				n.t.Fatal(err)
-			}
-		}
-	} else {
-		root = n.pieceOf[ev.Ref]
-		l = n.loading[root]
-		l.got[ev.Ref] = ev.Data
-	}
-	if len(l.got) == len(l.refs) {
-		var pieces [][]byte
-		for _, r := range l.refs {
-			pieces = append(pieces, l.got[r])
-		}
-		if err := n.ix.Tree().LoadRun(root, append(pieces, l.root)); err != nil {
-			n.t.Fatal(err)
-		}
-		delete(n.loading, root)
-		n.replayIfLoaded()
-	}
-}
-
-func (n *node) replayIfLoaded() {
-	if len(n.loading) > 0 {
-		return
-	}
-	if err := n.rec.Replay(&n.ctx, &n.out); err != nil {
-		n.t.Fatal(err)
-	}
-}
-
-// workload submits random writes, punches and freezes over a few chunks, checkpointing whenever
-// one is due and compacting the index's runs when a compaction is.
+// workload sends random writes and punches over the recovery chunks, now and then after a cut.
 type workload struct {
-	r           *rand.Rand
-	version     uint64
-	epoch       uint64
-	compactions int
-	freezes     int
-	written     map[core.ChunkID]bool
+	r     *rand.Rand
+	epoch uint64
+	ops   int
 }
 
-func (w *workload) run(n *node, ops int) {
-	for range ops {
+// run sends 1 to 4 requests and settles, rounds times.
+func (w *workload) run(h *harness, rounds int) {
+	for range rounds {
 		for range 1 + w.r.IntN(4) {
-			n.submit(w.item(n))
+			w.request(h)
 		}
-		n.settle()
-		if n.crashed {
-			return
-		}
-		tree := n.ix.Tree()
-		if !n.checkpointing && n.log.CheckpointDue() {
-			n.checkpoint()
-			if n.settle(); n.crashed {
-				return
-			}
-		}
-		if c := tree.PickCompaction(); c != nil {
-			c.Run()
-			if err := tree.Install(c); err != nil {
-				n.t.Fatal(err)
-			}
-			w.compactions++
-		}
-		if err := n.ix.Check(); err != nil {
-			n.t.Fatal(err)
-		}
+		h.settle()
 	}
 }
 
-// item is a write, a punch, or a freeze: of a chunk's version, or of version 0, the absent chunk,
-// for a chunk the workload has not written, among them two chunks it never writes.
-func (w *workload) item(n *node) disklog.Item {
-	if w.r.IntN(32) == 0 {
-		return w.freeze(core.ChunkID{Volume: 1, Inode: 4, Index: uint32(w.r.IntN(2))}, 0)
+// request cuts one time in 40, then sends a write of 1 byte to 6 blocks within a chunk's first 64
+// blocks, unaligned one time in two, a punch of such a range two times in ten, or a punch of the
+// whole chunk one in ten.
+func (w *workload) request(h *harness) {
+	if w.r.IntN(40) == 0 {
+		w.epoch++
 	}
-	c := core.ChunkID{Volume: 1, Inode: core.InodeID(1 + w.r.IntN(3)), Index: uint32(w.r.IntN(4))}
-	if w.r.IntN(8) == 0 {
-		if ch, ok := n.ix.Chunk(1, c); ok {
-			return w.freeze(c, ch.Version)
-		}
-		if !w.written[c] {
-			return w.freeze(c, 0)
-		}
+	w.ops++
+	c := recoveryChunks[w.r.IntN(len(recoveryChunks)-2)]
+	if w.epoch > 0 {
+		c = recoveryChunks[w.r.IntN(len(recoveryChunks))]
 	}
-	if w.written == nil {
-		w.written = map[core.ChunkID]bool{}
+	off := uint32(w.r.IntN(58)) * core.BlockSize
+	n := uint32(1+w.r.IntN(6)) * core.BlockSize
+	if w.r.IntN(2) == 0 {
+		off += uint32(w.r.IntN(core.BlockSize))
+		n = uint32(1 + w.r.IntN(int(n)))
 	}
-	w.written[c] = true
-	w.version++
-	first := uint16(w.r.IntN(core.BlocksPerChunk))
-	count := uint16(1 + w.r.IntN(min(6, core.BlocksPerChunk-int(first))))
 	switch w.r.IntN(10) {
 	case 0:
-		return disklog.Item{Entry: disklog.PunchEntry(1, c, w.version, 0, core.BlocksPerChunk)}
+		h.punch(c, 0, core.ChunkSize, w.epoch)
 	case 1, 2:
-		return disklog.Item{Entry: disklog.PunchEntry(1, c, w.version, first, count)}
-	}
-	buf, err := n.pool.Alloc(int(count) * core.BlockSize)
-	if err != nil {
-		n.t.Fatal(err)
-	}
-	b := n.pool.Bytes(buf)
-	for i := range b {
-		b[i] = byte(w.version)
-	}
-	return disklog.Item{Entry: disklog.WriteEntry(1, c, w.version, first, count), Buf: buf}
-}
-
-func (w *workload) freeze(c core.ChunkID, version uint64) disklog.Item {
-	w.epoch++
-	w.freezes++
-	return disklog.Item{Entry: disklog.FreezeEntry(1, c, version, w.epoch)}
-}
-
-func (n *node) submit(it disklog.Item) {
-	if _, err := n.log.Submit(&n.ctx, disklog.Hot, it, &n.out); err != nil {
-		n.t.Fatal(err)
+		h.punch(c, off, n, w.epoch)
+	default:
+		h.write(c, off, fill(int(n), byte(1+w.ops%255)), w.epoch)
 	}
 }
 
-func (n *node) equal(other *Index, what string) {
-	n.t.Helper()
-	if err := other.Check(); err != nil {
-		n.t.Fatalf("%s: %v", what, err)
-	}
-	if got, want := dumpIndex(other), dumpIndex(n.ix); !slices.Equal(got, want) {
-		n.t.Fatalf("%s holds %d entries, the live index %d", what, len(got), len(want))
-	}
-}
-
-// Replaying the records in LSN order, from the manifest's runs or from the first record, gives the
-// live index exactly, across restarts.
-func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
-	seeds.Run(t, 0, 4, func(seed uint64) {
-		n := newNode(t)
-		w := &workload{r: rand.New(rand.NewPCG(uint64(seed), 7))}
-		for generation := range 3 {
-			w.run(n, 150)
-			for n.checkpointing {
-				n.settle()
+// crashes runs f and reports whether the harness crashed it.
+func crashes(f func()) (crashed bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			if r != errCrash {
+				panic(r)
 			}
-			live := n.ix
-			n.recover(disklog.ModeRebuild)
-			n.equal(live, "rebuilt index")
-			n.recover(disklog.ModeOpen)
-			n.equal(live, "recovered index")
-			if n.ix.Tree().Runs() == 0 || n.replayed == 0 {
-				t.Fatalf("seed %d generation %d: %d runs loaded, %d records replayed", seed, generation, n.ix.Tree().Runs(), n.replayed)
+			crashed = true
+		}
+	}()
+	f()
+	return false
+}
+
+// restart crashes the disk with no unflushed block landing and recovers the store on it, which
+// must read as the crash oracle's model.
+func restart(h *harness, w *workload) {
+	h.t.Helper()
+	h.crashIf = nil
+	h.disk.Crash(func(int, core.LBA) bool { return false })
+	h.recoverStore(disklog.ModeOpen)
+	if msg := recoveryDiff(h, h.recovered, w.epoch+1); msg != "" {
+		h.t.Fatal(msg)
+	}
+}
+
+// recoveryDiff is modelDiff over the recovery chunks, which also names a chunk the index or the
+// model holds outside them.
+func recoveryDiff(h *harness, m *storeModel, maxEpoch uint64) string {
+	if msg := modelDiff(h, m, recoveryChunks, maxEpoch); msg != "" {
+		return msg
+	}
+	for c := range m.chunks {
+		if !slices.Contains(recoveryChunks, c) {
+			return fmt.Sprintf("the model holds chunk %v outside the workload", c)
+		}
+	}
+	for _, kv := range dumpIndex(h.s.Index()) {
+		k := []byte(kv[0])
+		pool := core.PoolID(binary.BigEndian.Uint32(k))
+		if pool == RecordPool {
+			continue
+		}
+		if c := core.ChunkIDFromBytes([core.ChunkIDSize]byte(k[12:chunkKeySize])); pool != testPool || !slices.Contains(recoveryChunks, c) {
+			return fmt.Sprintf("the index holds chunk %v of pool %d outside the workload", c, pool)
+		}
+	}
+	return ""
+}
+
+// written counts the run pieces and manifests of the records written, and gives the newest
+// manifest's LSN.
+func written(h *harness) (pieces, manifests int, newest uint64) {
+	for _, r := range h.records {
+		for _, e := range r.entries {
+			switch {
+			case e.Kind != disklog.EntryBlob:
+			case e.BlobKind == disklog.BlobRun:
+				pieces++
+			case e.BlobKind == disklog.BlobManifest:
+				manifests, newest = manifests+1, r.lsn
 			}
 		}
-		t.Logf("seed %d: %d checkpoints of %d pieces, %d runs carried, %d compactions, %d freezes",
-			seed, n.checkpoints, n.pieces, n.carried, w.compactions, w.freezes)
-		if n.pieces <= n.checkpoints || n.carried == 0 || w.compactions == 0 || w.freezes == 0 {
+	}
+	return pieces, manifests, newest
+}
+
+// [property] Rebuilding the index from every record header, and recovering it from the manifest's
+// runs plus replay, both give the live index exactly, across restarts. Each of the test's own seeds
+// must load runs and replay records at every recovery, and write multi-piece runs, carry runs,
+// merge and cut.
+func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
+	seeds.Run(t, 0, 4, func(seed uint64) {
+		h := newRecoveryHarness(t)
+		w := &workload{r: rand.New(rand.NewPCG(seed, 7))}
+		carried, unloaded := 0, 0
+		for generation := range 3 {
+			w.run(h, 150)
+			live := dumpIndex(h.s.Index())
+			restart(h, w)
+			if got := dumpIndex(h.s.Index()); !slices.Equal(got, live) {
+				t.Fatalf("seed %d generation %d: the recovered index holds %d entries, the live one %d", seed, generation, len(got), len(live))
+			}
+			runs := h.s.Index().Tree().Runs()
+			if runs == 0 || h.recoveredLSN <= h.loaded.LSN {
+				unloaded++
+			}
+			carried = max(carried, runs-1)
+			if got := h.rebuild(); !slices.Equal(got, live) {
+				t.Fatalf("seed %d generation %d: the rebuilt index holds %d entries, the live one %d", seed, generation, len(got), len(live))
+			}
+		}
+		pieces, manifests, _ := written(h)
+		t.Logf("seed %d: %d manifests of %d run pieces, %d runs carried, %d merges, %d cuts, %d recoveries without runs or replay", seed, manifests, pieces, carried, len(h.merges), w.epoch, unloaded)
+		if seeds.Default() && (unloaded > 0 || pieces <= manifests || carried == 0 || len(h.merges) == 0 || w.epoch == 0) {
 			t.Fatalf("seed %d: the workload missed a case", seed)
 		}
 	})
 }
 
-// A crash after a checkpoint's runs are durable but before its manifest is recovers from an
-// earlier manifest a segment header names plus replay, even when the runs it wrote came from a
-// compaction.
+// A crash once a checkpoint's manifest record is durable but before any segment header names it,
+// the checkpoint carrying a merge step's output, recovers from an earlier manifest plus replay,
+// and the next checkpoint's restart recovers from a later one.
 func TestCrashBetweenRunAndManifest(t *testing.T) {
 	seeds.Run(t, 0, 4, func(seed uint64) {
-		n := newNode(t)
-		w := &workload{r: rand.New(rand.NewPCG(uint64(seed), 8))}
-		for n.checkpoints < 3 {
-			w.run(n, 10)
+		h := newRecoveryHarness(t)
+		w := &workload{r: rand.New(rand.NewPCG(seed, 8))}
+		for _, m, _ := written(h); m < 3; _, m, _ = written(h) {
+			w.run(h, 10)
 		}
-		w.run(n, 5)
-		for n.checkpointing {
-			n.settle()
+		var named int
+		var lost, held uint64
+		h.crashIf = func(*core.Action) bool {
+			_, m, newest := written(h)
+			if named == 0 {
+				held = 0
+				for lane, n := range h.stepHeld {
+					if lane > 0 {
+						held += n
+					}
+				}
+				if held > 0 {
+					named = m + 1
+				}
+			}
+			if named != 0 && m >= named && newest <= h.s.Log().DurableLSN() {
+				if m != named {
+					t.Fatalf("seed %d: %d manifests written after the merge step's pieces", seed, m-named+1)
+				}
+				lost = newest
+			}
+			return lost != 0
 		}
-		if c := n.ix.Tree().PickCompaction(); c != nil {
-			c.Run()
-			if err := n.ix.Tree().Install(c); err != nil {
-				t.Fatal(err)
+		if !crashes(func() { w.run(h, 1000) }) {
+			t.Fatalf("seed %d: no manifest named a merge step's pieces", seed)
+		}
+		t.Logf("seed %d: lost the manifest at LSN %d, naming %d bytes of a merge step", seed, lost, held)
+		restart(h, w)
+		if h.loaded.IsNone() || h.loaded.LSN >= lost {
+			t.Fatalf("seed %d: recovered from manifest %+v, not one before the manifest at LSN %d no header named", seed, h.loaded, lost)
+		}
+		w.run(h, 40)
+		live := dumpIndex(h.s.Index())
+		restart(h, w)
+		if got := dumpIndex(h.s.Index()); h.loaded.LSN <= lost || !slices.Equal(got, live) {
+			t.Fatalf("seed %d: the index recovered from manifest %+v holds %d entries, the live one %d", seed, h.loaded, len(got), len(live))
+		}
+	})
+}
+
+// partedFreeze settles, then writes maxWrite-1 blocks of chunk a and 2×maxWrite of chunk c at
+// epoch 1 together, so that c's freeze goes in a record ahead of its blocks, crashes the disk
+// before the k-th action after them, with nothing unflushed landing, and recovers; it returns c's
+// entry.
+func partedFreeze(h *harness, a, c core.ChunkID, k int) Chunk {
+	h.t.Helper()
+	h.settle()
+	base, mw := h.executed, int(h.s.maxWrite)
+	h.crashIf = func(*core.Action) bool { return h.executed == base+k }
+	h.write(a, 0, fill((mw-1)*core.BlockSize, 2), 1)
+	h.write(c, 0, fill(2*mw*core.BlockSize, 3), 1)
+	crashes(h.settle)
+	h.crashIf = nil
+	h.disk.Crash(func(int, core.LBA) bool { return false })
+	h.recoverStore(disklog.ModeOpen)
+	got, _ := h.s.Index().Chunk(testPool, c)
+	return got
+}
+
+// A chunk frozen absent and never written, which a crash between a write's freeze and its blocks
+// leaves, recovers by replay, then from a run, as the crash oracle's model.
+func TestAbsentOnlyChunkRecovers(t *testing.T) {
+	a, c := recoveryChunks[0], core.ChunkID{Volume: 1, Inode: 9}
+	for k := range 12 {
+		h := newRecoveryHarness(t)
+		h.write(a, 0, fill(core.BlockSize, 1), 0)
+		if partedFreeze(h, a, c, k) != (Chunk{Epoch: 1}) {
+			continue
+		}
+		w := &workload{r: rand.New(rand.NewPCG(0, 10)), epoch: 1}
+		for restarts := 0; ; restarts++ {
+			checkModel(t, h, h.recovered, []core.ChunkID{c}, 2)
+			if got, ok := h.s.Index().Chunk(testPool, c); !ok || got != (Chunk{Epoch: 1}) {
+				t.Fatalf("crash at action %d, restart %d: chunk %v entry %+v %v, want frozen absent at epoch 1", k, restarts, c, got, ok)
+			}
+			if restarts == 1 {
+				return
+			}
+			_, before, _ := written(h)
+			for _, m, _ := written(h); m < before+2; _, m, _ = written(h) {
+				w.run(h, 10)
+			}
+			h.disk.Crash(func(int, core.LBA) bool { return false })
+			h.recoverStore(disklog.ModeOpen)
+		}
+	}
+	t.Fatal("no crash left a chunk frozen absent without its blocks")
+}
+
+// oracleStats counts what the crash cycles reached.
+type oracleStats struct {
+	recoveries, kept, crashedRecoveries, erasedThenCrashed, withRuns, withFreezes int
+	// absent counts recoveries with a chunk frozen absent, writtenAfterAbsent those with one
+	// written after it.
+	absent, writtenAfterAbsent int
+}
+
+// crashCycles runs the workload on a store crashed at random actions six times, each unflushed
+// block landing at random, and recovers with plant after each crash; every other recovery is first
+// crashed at its final flush and run again. It returns the first recovery the oracle rejects.
+func crashCycles(t *testing.T, seed uint64, plant plants, st *oracleStats) error {
+	t.Helper()
+	h := newRecoveryHarness(t)
+	h.plant = plant
+	w := &workload{r: rand.New(rand.NewPCG(seed, 9))}
+	r := core.NewRand(seed)
+	for cycle := range 6 {
+		h.crashIf = func(a *core.Action) bool { return a.Kind != core.ActDiskRead && r.Chance(1, 300) }
+		crashes(func() { w.run(h, 120) })
+		h.crashIf = nil
+		h.disk.CrashRandom(r)
+		acked, newest := h.oracle.Window()
+		if cycle%2 == 1 {
+			var found uint64
+			h.crashIf = func(a *core.Action) bool {
+				if h.s.rec == nil || a.Kind != core.ActDiskFsync || a.Linked {
+					return false
+				}
+				found = h.s.rec.DurableLSN()
+				if h.s.rec.Erased() > 0 {
+					st.erasedThenCrashed++
+				}
+				return true
+			}
+			if !crashes(func() { h.reopen(disklog.ModeOpen) }) {
+				t.Fatalf("seed %d cycle %d: recovery issued no final flush to crash at", seed, cycle)
+			}
+			h.crashIf = nil
+			st.crashedRecoveries++
+			if a, b := h.oracle.Window(); a != acked || b != newest {
+				t.Fatalf("seed %d cycle %d: a crashed recovery moved the oracle's window from [%d, %d] to [%d, %d]", seed, cycle, acked, newest, a, b)
+			}
+			h.disk.CrashRandom(r)
+			h.recoverStore(disklog.ModeOpen)
+			if h.recoveredLSN != found {
+				t.Fatalf("seed %d cycle %d: recovered to LSN %d, the crashed recovery found %d", seed, cycle, h.recoveredLSN, found)
+			}
+		} else {
+			h.recoverStore(disklog.ModeOpen)
+		}
+		m := h.recovered
+		if msg := recoveryDiff(h, m, w.epoch+1); msg != "" {
+			return fmt.Errorf("store recovered to LSN %d: %s", h.recoveredLSN, msg)
+		}
+		st.recoveries++
+		if h.recoveredLSN > acked {
+			st.kept++
+		}
+		if h.s.Index().Tree().Runs() > 0 {
+			st.withRuns++
+		}
+		absent, after, frozen := false, false, false
+		for _, c := range recoveryChunks {
+			frozen = frozen || len(m.frozen[c]) > 0
+			if m.isFrozen(c, 0) {
+				absent, after = true, after || m.chunks[c].Version != 0
 			}
 		}
-		previous := n.log.Manifest()
-		live := n.ix
-		n.checkpoint()
-		n.crashWhen = func(ev *disklog.Event) bool {
-			return ev.Kind == disklog.Durable && slices.ContainsFunc(ev.Entries, func(e disklog.Entry) bool {
-				return e.Kind == disklog.EntryBlob && e.BlobKind == disklog.BlobManifest
-			})
+		if frozen {
+			st.withFreezes++
 		}
-		n.settle()
-		if !n.crashed {
-			t.Fatalf("seed %d: no manifest written", seed)
+		if absent {
+			st.absent++
 		}
-		n.recover(disklog.ModeOpen)
-		if got := n.log.Manifest(); got.IsNone() || got.LSN > previous.LSN {
-			t.Fatalf("seed %d: recovered from manifest %+v, past the last durable one %+v", seed, got, previous)
+		if after {
+			st.writtenAfterAbsent++
 		}
-		n.equal(live, "index recovered past the lost manifest")
-		w.run(n, 40)
-		for n.checkpointing {
-			n.settle()
+	}
+	return nil
+}
+
+// [property] Seeds 0-7, six crashes each at random actions, each unflushed block landing at
+// random: every recovery reports an LSN in the crash oracle's window and recovers a store that
+// reads, chunk entries and blocks live and at every snapshot epoch, as the oracle's model at that
+// LSN. A recovery crashed at its final flush leaves the window as it was, and the recovery run
+// again reports the LSN it had found.
+func TestRecoveriesMatchTheCrashOracle(t *testing.T) {
+	var st oracleStats
+	seeds.Run(t, 0, 8, func(seed uint64) {
+		if err := crashCycles(t, seed, plants{}, &st); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
 		}
-		live = n.ix
-		n.recover(disklog.ModeOpen)
-		n.equal(live, "index after the next checkpoint")
 	})
+	t.Logf("%+v", st)
+	if !seeds.Default() {
+		return
+	}
+	if st.kept == 0 || st.erasedThenCrashed == 0 || st.withRuns < st.recoveries/2 || st.withFreezes == 0 || st.absent == 0 || st.writtenAfterAbsent == 0 {
+		t.Fatalf("the crashes missed a case: %+v", st)
+	}
+}
+
+// Replay that leaves out the first record past the replay LSN that maps blocks, as a replay LSN
+// one record too new would (RocksDB #11148), trips the crash oracle on some seed of 8.
+func TestCrashOracleCatchesLateReplay(t *testing.T) {
+	for seed := range uint64(8) {
+		if err := crashCycles(t, seed, plants{replayLate: true}, &oracleStats{}); err != nil {
+			if !strings.Contains(err.Error(), "the model holds") {
+				t.Fatalf("seed %d: %v names no expected read", seed, err)
+			}
+			t.Logf("seed %d: %v", seed, err)
+			return
+		}
+	}
+	t.Fatal("no seed of 8 tripped the oracle")
 }
