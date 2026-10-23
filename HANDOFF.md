@@ -47,7 +47,8 @@ or a shorter MaxTime) and rerun.
    `scripts/models.sh ci epoch` passed on 2026-10-23 (ci-leases 81 / 797,699 / 66 s; ci-peering 31 /
    981,217 / 110 s; neg-no-run-window 156 s), apart from neg-no-boot-window, fixed and rerun alone.
 3. Property 10: done; build-checklist promises zero round trips only, the simulator checks the rest.
-4. deep-slow: MaxTime 1100 -> 500 (plan t was 600); rerun pending, after deep-leases (pending).
+   deep-leases passed: depth 132, 27,402,416 states, 2,974 s; recorded in test-scenarios.
+4. deep-slow: MaxTime 1100 -> 500 (plan t was 600); rerun started 2026-10-23 after deep-leases.
 5. Done: design.md Writes and min_live, Failure detection, refill row, glossary, refill scenarios.
 6. Done: wire rows Lease request (table epoch), Grant and node-pair heartbeat (boot ID, run ID).
 Note for the user: the run ID makes the boot ID redundant for rate windows; it is kept.
