@@ -3001,7 +3001,7 @@ constants are as at the head of [Peering and read leases](#peering-and-read-leas
 on 4 workers, so `ci`'s 5 minutes cover about 3 million.
 
 **Configurations.** Property 1 needs peering and leases together, so the spec is not split; its
-`ci` runs are two configurations, each heavy on one part. Any membership change at any time does
+`ci` runs are three configurations, one heavy on leases and two on peering. Any membership change at any time does
 not fit `ci`'s 5 minutes, so each `ci` configuration checks a set of *plans*: a plan is a short
 sequence of membership changes taken from the faults below, with the client writes and the faults
 whose rules it tests, and TLC checks every interleaving of nodes, messages, writes, renewals, folds of
@@ -3032,7 +3032,7 @@ run in `deep-leases`; the variants that need one run on it alone.
 | Writes | A partial write to each block of chunk 1, or of chunk 2. Chunk 2: a daemon's whole-block write W, its successor's reissue W′ once it died, and the successor's next write W2 once W′ is acknowledged. The lease plans: one whole-block write to chunk 1. Each plan takes one family; the free plan one partial write to chunk 1 |
 | Counter limit | 2, so running out is reachable at small depth; the real limit is 2³² − 1 |
 | Clocks per node | The lease plans hand PG 2 over from node 2 to node 3, its only grantor. `CLOCK_MONOTONIC_RAW` runs at 960 or 1,040 per mille of real time on node 3 and exactly elsewhere, and may rise by 0.4% once after measurement; `CLOCK_BOOTTIME` runs at the raw rate (no daemon), 22.6% slow on node 2 or 22.6% fast on node 3. The plans with a rate step, a suspend, a pause, a stop, a restart or the Raft group, and one of the two reboot plans, run node 3 4% fast and the rest exact; the partition, delayed-message and maintenance plans and the other reboot plan run exact clocks. Time runs to 11 s in the reboot plans, 5 s in the pause, suspend-and-partition and Raft-partition plans, 3 s in the Raft transfer plan and 6 s in the rest |
-| Tables | Each plan's changes, plus 1 for a renewal or a fold, at most 5; 3 in the free plan, so two changes, renewals and folds among them |
+| Tables | Each plan's changes, plus 1 for a renewal or a fold (2 in the late-report plan), at most 5; 3 in the free plan, so two changes, renewals and folds among them |
 | Faults per behavior | 1; 2 in the plans that pair a rate step, a pause, a suspend or a reboot with a partition, and in the Raft partition plan. 1 format, 2 process runs per node, 2 Raft terms, 1 send per write |
 
 **State the model holds**
