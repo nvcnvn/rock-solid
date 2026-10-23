@@ -537,6 +537,7 @@ type Log struct {
 	streams    []Stream
 	written    uint64
 	background uint64
+	writes     Writes
 	writtenAt  []uint64
 	pieces     pieceSet
 	trims      trimState
@@ -1729,7 +1730,14 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	if t.roll {
 		r.opened, r.named = t.seq, l.manifest
 	}
-	if !ordinaryLane(t.lane) {
+	l.writes.Disk += uint64(lead) + lay.Blocks()
+	if hasSlot {
+		l.writes.Disk += core.BlocksPerChunk
+		l.writes.Data += core.BlocksPerChunk
+	}
+	if ordinaryLane(t.lane) {
+		l.writes.Data += lay.Blocks() - uint64(lay.HeaderBlocks)
+	} else {
 		l.background += uint64(lead) + uint64(lay.Blocks())
 		if t.roll && ln.asm.segment != 0 {
 			l.background += uint64(l.sb.SegmentBlocks - ln.asm.next)

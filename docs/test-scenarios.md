@@ -1611,9 +1611,11 @@ call, time from `ctx.Now`:
   fewer than one is the open question below.
 - Open: the item asks for 90 and 95% full. On segments small enough for the in-memory simulated
   disk the cleaner's net-gain guard sustains about 65% (64-block segments) and 85% (1,024-block
-  segments). The 85% run (`TestWriteAdmissionAt85PercentFull`, the same writers and cleaner on 320
-  segments of 1,024 blocks, 1.25 GiB of disk in memory and 3.3 GB resident at peak, skipped
-  unless `ROCKSOLID_LONG_SIM` is set, about 10 minutes) checks that admission keeps a free segment
+  segments; see [Cleaner write amplification in
+  simulation](#cleaner-write-amplification-in-simulation) for 90 and 95%). The 85% run
+  (`TestWriteAdmissionAt85PercentFull`, the same writers and cleaner on 320 segments of 1,024
+  blocks, 0.3 GB resident at peak, skipped unless `ROCKSOLID_LONG_SIM` is set, about 4 minutes)
+  checks that admission keeps a free segment
   for a larger share of the time than without it and than a planted rate net of copied blocks
   alone. Measured: no free
   segment 0% of the time with admission, 97.3% net of copied blocks alone, 98.5% without; the
@@ -2846,11 +2848,8 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
 
 ## Cleaner write amplification in simulation
 
-- Setup, from the cleaner spike: a 16 GiB simulated disk (4,096 segments of 4 MiB, as min(64 MiB,
-  disk ÷ 4096) gives), uniform random 4 KiB overwrites over a volume sized to the fill, warm-up of 6
-  disk capacities of writes before measuring. Write amplification counts user, header and copied
-  blocks over user blocks.
-- Targets, cost-benefit with two streams:
+- Targets, uniform 4 KiB overwrites under cost-benefit with two streams, warmed up for 6 disk
+  capacities of writes on a 16 GiB disk of 4,096 segments of 4 MiB:
 
   | Fill | Column 1: no index runs written or counted (cleaner spike) | Column 2: index runs in the metadata stream (cleaner streams spike) |
   | --- | --- | --- |
@@ -2858,22 +2857,62 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | 90% | 7.2 | 8.0 (8.04) |
   | 95% | 17.3 | 26 (26.4) |
 
-  The cleaner spike modelled no index runs; the streams spike's own baseline without them, at 1 MiB
-  records, was 3.35 / 7.15 / 17.3. Column 2 needs the Metadata stream item. Open: how the Go log runs
-  without index runs for column 1, since it always checkpoints. Open: tolerance ("land near" in the
-  checklist). Open: the spikes' records were 64 KiB (C1) and 1 MiB (streams), with 64 B headers and
-  32 B per entry, and they kept 8 segments free with 4 victims per pass; the Go log has a 48-byte
-  prelude (56 with the durable LSN), 33 B per entry, `clean_free` 16 and its own reserve, so the setup
-  must state which it matches.
-- With the index's runs mixed into the cold stream, the streams spike measured 4.27 / 11.0 / 49.6;
+  With the index's runs mixed into the cold stream the streams spike measured 4.27 / 11.0 / 49.6;
   the real layout must stay near the metadata-stream figures, not these.
-- The disk's exported write amplification metric equals the run's own count (user, header, copied
-  and index-run blocks over user blocks) over the measured window, so the drive wear figures in
-  design.md read the same number an operator does.
-- The run reports cleaner CPU per user 4 KiB write against the spike's order of magnitude (about 2.8 /
-  7.5 / 20 µs at 80 / 90 / 95%). Open: tolerance.
-- Invariants hold throughout (Invariant checker), and no ordinary write fails with NoSpace while the
-  cleaner has a victim.
+- Setup (`TestCleanerWriteAmplification`, a subtest per fill, each run alone with
+  `ROCKSOLID_LONG_SIM` set): a 4 GiB simulated disk of 1,024 segments of 4 MiB. The spike's 16 GiB
+  disk does not fit in memory: the simulated disk keeps every block that is not all zeros, and the
+  index's dead runs, which stay on disk until their segments are written again, alone took the
+  16 GiB run past 4 GB within 10 minutes. Records of up to 256 KiB, the size at which the net-gain
+  guard lets victims of 4 MiB segments pass at up to 89.3% live (64 KiB records give 89.4%, 1 MiB
+  ones 71.6%), with 16 writes outstanding so that a user record holds 16 blocks and one header
+  block, as the spike's 64 KiB records did; a checkpoint every 4 MiB of log, the streams spike's
+  stand-in for 64 MiB; merge steps of one segment; the reserve the formula gives (8 segments) and
+  `clean_free` 16; simulated time with write admission on. The volume, fill times the disk, is
+  written once in order in 32-block writes, each followed half the time by a 4 KiB overwrite of
+  a block already written, so that the oldest segments hold dead blocks as the disk fills; then 1
+  disk capacity of uniform 4 KiB overwrites warms it up and 1 more is measured. Write
+  amplification counts every block the disk was asked to write, record and segment headers,
+  copies and the metadata stream included, over the user blocks acknowledged; the run also
+  reports the metadata stream's and the copies' shares.
+- Measured, against column 2 (the Go log always writes its index's runs):
+
+  | Fill | Write amplification | Metadata stream | Copied | Run time, peak resident |
+  | --- | --- | --- | --- | --- |
+  | 80% | 7.34 | 1.05 | 5.15 | 5 min, 1.3 GB |
+  | 90% | fails: a write gets NoSpace while the cleaner has victims, after about a disk capacity of overwrites | | | 4 min, 0.56 GB |
+  | 95% | runs out of space before the volume is written: no victim passes the net-gain guard | | | 8 s, 0.49 GB |
+
+  Not near the targets, so the build checklist item stays open:
+  - At 80% the log writes 7.34 blocks per user block against 3.86. The metadata stream alone
+    takes 1.05, against the streams spike's 0.49 at 90% (flushed 0.085, compacted 0.40), and
+    the space the index, the reserve and `clean_free` hold raises the fill the cleaner sees, so
+    each victim frees less. A checkpoint every 16 MiB cut the metadata to 0.35 and the total to
+    5.55 in an exploratory run on the same disk, though its reserve took 13 segments.
+  - At 95% the victims must be about 93% live (the spike cleaned 92.7% on average), above the
+    guard's 89.3% on 4 MiB segments. The guard's tail charge, up to a block short of the largest
+    copy and its header, and its 134 bytes of index entries per moved block are design rules the
+    spike did not model ([Cleaner](design.md#on-disk-format)): on 64 MiB segments of 1 MiB
+    records they let victims up to 94% live pass, so the 95% figure is out of reach of this
+    stand-in, not of a real disk.
+  - At 90% the reserve runs out: two passes run at once, each with a victim near the guard's
+    limit, the free segments, the reserve included, fall to none, and the cleaner's copies stall,
+    which fails ordinary writes with NoSpace though victims remain (see the cleaning-debt
+    question in design.md).
+- The log's write counters (`disklog.(*Log).Writes`: the data blocks of ordinary items and every
+  block the log asked the disk to write) equal the measured window's own counts: each run checks
+  both against what it acknowledged and what the simulated disk executed, and
+  `TestWriteAmplificationMetricEqualsTheMeasuredFigure` checks the same on every test run, on 128
+  segments of 1 MiB at 40% full, where the cleaner copies and the index writes runs. Each disk
+  exports these counters, so the drive wear figures in design.md read the number an operator
+  does.
+- Open: column 1 cannot run as is, since the Go log always checkpoints; the metadata stream's
+  share, reported apart, gives the chunk data's own write amplification (6.29 at 80%) at the fill
+  the index's space raises. Open: tolerance ("land near" in the checklist). Open: the cleaner CPU
+  per user write against the spike's 2.8 / 7.5 / 20 µs; the simulation's 95 µs per write at 80%
+  is mostly the in-memory index's lookups and the simulator, not a figure for hardware.
+- Invariants hold throughout (Invariant checker), and no ordinary write fails with NoSpace while
+  the cleaner has a victim, which the 90% run breaks.
 
 ## Seeded runs and the simulation harness
 
@@ -2895,7 +2934,7 @@ The seeded runs, each described in its section above, with the seeds `go test` r
 - Metamorphic index tests: seeds 0-19 x 11 option sets for `internal/lsm` and x 10 for the chunk
   index on every run; seeds 0-10,002 and 0-10,001 once.
 - Crash at every action: every k, with three landing sets and a failure each.
-- Cleaner write amplification at 80 / 90 / 95% full.
+- Cleaner write amplification at 80 / 90 / 95% full: seed 1, and the metric check on every run.
 - Planted-bug check: seeds 0-99 under each planted bug and the fixed protocol, and the replay of each bug's first failing seed.
 
 The chunk store stand-in of the recovery tests applies every Durable record to its model of the
