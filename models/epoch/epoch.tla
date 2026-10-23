@@ -1702,10 +1702,10 @@ AllLeasePlans == LeasePlans \cup RebootPlans \cup PausePlans \cup {HandoverSuspe
 SlowPlans == {HandoverSlow}
 
 \* deep-peering: every peering plan; deep-free: any two changes at any time
-\* with one partial write to chunk 1 and a restart, about 10 million states
-\* at 4 nodes, so with liveness each fits 4 hours only alone. Node 4 starts
-\* outside both PGs, a spare a change can move a member to.
-Free == [free |-> TRUE, m |-> <<>>, w |-> SubSeq(Partial, 1, 1), f |-> {"restart"}, t |-> 0, k |-> 1, s |-> 0, n |-> 3]
+\* with one partial write to chunk 1 and no fault, since a restart, which
+\* deep-peering's plans check, took it past 20 million states and 4 hours.
+\* Node 4 starts outside both PGs, a spare a change can move a member to.
+Free == [free |-> TRUE, m |-> <<>>, w |-> SubSeq(Partial, 1, 1), f |-> {}, t |-> 0, k |-> 1, s |-> 0, n |-> 3]
 DeepPeerPlans == PeerPlans \cup RestartPlans
 FreePlans == {Free}
 

@@ -3006,7 +3006,7 @@ not fit `ci`'s 5 minutes, so each `ci` configuration checks a set of *plans*: a 
 sequence of membership changes taken from the faults below, with the client writes and the faults
 whose rules it tests, and TLC checks every interleaving of nodes, messages, writes, renewals, folds of
 activation reports and faults around it. `deep-free` checks a free plan instead: any two changes
-at any time, with one partial write and a restart.
+at any time, with one partial write and no fault.
 
 | Configuration | Nodes | What it holds |
 | --- | --- | --- |
@@ -3019,7 +3019,8 @@ at any time, with one partial write and a restart.
 | `deep-slow` | 3 | The delayed-message plan alone, with `ci-leases`'s constants and time to 5 s |
 
 `deep` is four configurations because whether nodes have clocks is a constant of the spec, the
-free plan, about 10 million states at 4 nodes, fits 4 hours with liveness only alone, and the
+free plan fits 4 hours with liveness only alone, and without the restart that took it past 20
+million states, and the
 delayed-message plan, over 3 million states at 3 nodes, passed 108 million at 4 nodes with the
 other lease plans without finishing in 4 hours, so it runs alone at 3. The plans that pair a
 partition with a pause, a suspend or a reboot are 1.6 to 7.6 million states each at 3 nodes, so they
