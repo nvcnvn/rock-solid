@@ -248,7 +248,8 @@ func TestRunCheckRebuilds(t *testing.T) {
 }
 
 // A merge that fails its run check takes the same path: the store rebuilds its index from the
-// log, and the rebuilt index equals the byte-range oracle's.
+// log, the rebuilt index equals the byte-range oracle's, and write admission measures the new
+// log afresh.
 func TestMergeCheckRebuilds(t *testing.T) {
 	cfg := testConfig()
 	cfg.Log.MaxReplayBytes = 16 * core.BlockSize
@@ -265,6 +266,7 @@ func TestMergeCheckRebuilds(t *testing.T) {
 	}
 	c.Run()
 	gen := h.s.logGen
+	h.s.adm.measured, h.s.adm.rate, h.s.adm.tokens, h.s.adm.carry = true, 1, -5, -5
 	h.s.plant.failMerge = true
 	if err := h.s.InstallMerge(&h.ctx, c, &h.out); !errors.Is(err, lsm.ErrCheck) {
 		t.Fatalf("install: %v", err)
@@ -273,6 +275,9 @@ func TestMergeCheckRebuilds(t *testing.T) {
 	h.settle()
 	if !h.s.Serving() || h.s.logGen != gen+1 {
 		t.Fatalf("serving %v after %d restarts of the log", h.s.Serving(), h.s.logGen-gen)
+	}
+	if a := h.s.adm; a.measured || a.rate != 0 || a.tokens != 0 || a.carry != 0 {
+		t.Fatalf("the rebuilt store's bucket kept the old log's: measured %v, rate %v, tokens %v, carry %v", a.measured, a.rate, a.tokens, a.carry)
 	}
 	o.check(t, h, 0, 15, 0)
 }

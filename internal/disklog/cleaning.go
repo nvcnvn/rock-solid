@@ -71,6 +71,10 @@ func (l *Log) NamedLSN() uint64 { return l.namedLSN }
 // FreeOutsideReserve is how many segments are free beyond the reserve, or below zero by how many the reserve lacks.
 func (l *Log) FreeOutsideReserve() int { return int(l.freeCount()) - int(l.reserve) }
 
+// BackgroundBlocks is the blocks the cleaner's copies, checkpoints and merges have taken since the
+// log opened, segment headers and the tails their lanes left at a segment's end included.
+func (l *Log) BackgroundBlocks() uint64 { return l.background }
+
 // MaxCopyBlocks is the most blocks one copy item holds.
 func (l *Log) MaxCopyBlocks() uint16 {
 	return uint16(min(maxDataBlocks(l.maxItemRec, copyEntrySize), core.BlocksPerChunk))

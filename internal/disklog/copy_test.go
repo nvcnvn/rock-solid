@@ -157,3 +157,32 @@ func TestCopiesPassTheHoldAndIntoTheReserve(t *testing.T) {
 	}
 	h.close()
 }
+
+// Background blocks count what the cleaner's, the checkpoint's and the merges' lanes take, segment
+// and record headers included, and nothing an ordinary item writes; write admission measures the
+// cleaner net of them. Copies rolling into a new segment add the tail they leave
+// (TestCopyCostBoundsWhatAVictimsCopiesTake).
+func TestBackgroundBlocksCountTheBackgroundLanesOnly(t *testing.T) {
+	h := formatted(t, gib, mergeConfig(1))
+	tw := h.submit(disklog.Hot, h.write(0, 2, 1))
+	h.submit(disklog.Cold, h.blob(disklog.BlobRaftEntries, 5, 10, 2))
+	h.run()
+	if got := h.log.BackgroundBlocks(); got != 0 {
+		t.Fatalf("ordinary items took %d background blocks", got)
+	}
+	c := h.submitCopy(h.copyItem(0, 2, h.durableOf(tw).LBA+1, 1))
+	h.run()
+	if got, want := h.log.BackgroundBlocks(), uint64(1+h.durableOf(c).HeaderBlocks+2); got != want {
+		t.Fatalf("a copy of 2 blocks opening a segment took %d background blocks, want %d", got, want)
+	}
+	before := h.log.BackgroundBlocks()
+	m := h.putMerge(1, runOwner, 100, 3)
+	if got, want := h.log.BackgroundBlocks()-before, uint64(1+m.HeaderBlocks+h.record(m).Layout.DataBlocks); got != want {
+		t.Fatalf("a merge piece opening a segment took %d background blocks, want %d", got, want)
+	}
+	before = h.log.BackgroundBlocks()
+	h.checkpointRuns(nil, 1)
+	if h.log.BackgroundBlocks() == before {
+		t.Fatal("a checkpoint took no background blocks")
+	}
+}

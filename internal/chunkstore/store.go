@@ -140,6 +140,8 @@ type chunkState struct {
 	epoch   uint64
 	pending []int32
 	waiting []int32
+	// held is whether write admission holds the chunk's next write back.
+	held bool
 }
 
 type sentItem struct {
@@ -183,6 +185,10 @@ type plants struct {
 	failMerge         bool
 	// failChecks fails every flush's run check.
 	failChecks bool
+	// noAdmission admits every chunk write at once, however few segments are free, and
+	// copiesOnly measures the cleaner's rate net of its copied blocks alone.
+	noAdmission bool
+	copiesOnly  bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.
@@ -233,7 +239,8 @@ type Store struct {
 	payload [1]uint64
 	changes []LiveChange
 
-	cl cleaner
+	cl  cleaner
+	adm admission
 
 	plant plants
 }
@@ -313,6 +320,7 @@ func (s *Store) resume(log *disklog.Log) error {
 		s.ix.RecountSlotHeld()
 	}
 	s.ix.TrackLive(true)
+	s.adm.bucket = bucket{}
 	s.phase, s.checkpointing, s.inPiece, s.piecesOut, s.pieceWait = serving, false, false, 0, false
 	return nil
 }
@@ -462,6 +470,9 @@ func (s *Store) orderWaiting(ctx *core.Context, ci int32, out *Output) {
 				return
 			}
 			continue
+		}
+		if o.err == nil && o.kind == opWrite && !s.admitWrite(ctx, ci, o) {
+			return
 		}
 		cs.waiting = cs.waiting[:copy(cs.waiting, cs.waiting[1:])]
 		if o.err != nil {
@@ -840,8 +851,13 @@ func fetchIO(fi int32, part uint64) core.IOID {
 	return core.IOID(fetchIOBit | uint64(fi)<<1 | part)
 }
 
-// OnEvent takes a disk completion or the log's TRIM timer.
+// OnEvent takes a disk completion, the log's TRIM timer or the store's AdmitTimer.
 func (s *Store) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
+	if ev.Kind == core.EvTimer && ev.Timer == AdmitTimer {
+		s.adm.timerAt = 0
+		s.pump(ctx, out)
+		return
+	}
 	if ev.Kind == core.EvTimer && ev.Timer == disklog.TrimTimer && s.log != nil {
 		s.log.OnEvent(ctx, ev, &s.lout)
 		s.pump(ctx, out)
@@ -985,7 +1001,9 @@ func (s *Store) housekeep(ctx *core.Context, out *Output) {
 			s.stop(ctx, s.log.Err(), out)
 			return
 		}
-		if victim := s.clean(ctx); s.log.Stalled() && (!victim || s.log.CopiesStalled()) {
+		victim := s.clean(ctx)
+		s.admitHeld(ctx, out)
+		if s.log.Stalled() && (!victim || s.log.CopiesStalled()) {
 			s.log.FailStalled(ctx, &s.lout)
 			return
 		}
@@ -1452,6 +1470,7 @@ func (s *Store) stop(ctx *core.Context, err error, out *Output) {
 }
 
 func (s *Store) failWaiting(ctx *core.Context, err error, out *Output) {
+	s.dropHeld()
 	for ci := range s.chunks {
 		cs := &s.chunks[ci]
 		for k := 0; k < len(cs.waiting); {

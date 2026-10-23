@@ -174,7 +174,7 @@ func (s *Store) cleanWorkers() int {
 // has a victim.
 func (s *Store) clean(ctx *core.Context) bool {
 	for len(s.cl.passes) < s.cleanWorkers() && (s.log.FreeOutsideReserve() < s.cleanFree() || s.log.Stalled()) {
-		if s.cl.tried && s.cl.triedAt == s.log.DurableLSN() {
+		if s.cleanerIdle() {
 			break
 		}
 		victims, snapshot := s.pickVictims()
@@ -204,6 +204,10 @@ func (s *Store) clean(ctx *core.Context) bool {
 	}
 	return len(s.cl.passes) > 0
 }
+
+// cleanerIdle reports whether the cleaner starts no pass until the durable LSN moves, having found
+// no victim, or freed nothing, at this one.
+func (s *Store) cleanerIdle() bool { return s.cl.tried && s.cl.triedAt == s.log.DurableLSN() }
 
 func (s *Store) isVictim(seg uint32) bool {
 	for _, p := range s.cl.passes {

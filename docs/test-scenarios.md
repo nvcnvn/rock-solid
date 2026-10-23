@@ -1548,8 +1548,8 @@ merges that take several.
 
 ## Write admission
 
-Free segments outside the reserve against `clean_free` (16), read by the disk's owner every
-round, time from `ctx.Now`:
+Free segments outside the reserve against `clean_free` (16), read by the disk's owner on every
+call, time from `ctx.Now`:
 
 | Free segments outside the reserve | Cleaner workers | Chunk write blocks | Ordinary items |
 | --- | --- | --- | --- |
@@ -1558,31 +1558,65 @@ round, time from `ctx.Now`:
 | 14 | 2 | not charged | admitted |
 | 9 | 2 | not charged | admitted |
 | 8 | 2 | token bucket at 1.0 × the cleaner's net freeing rate | admitted as tokens allow |
-| 4 | 2 | at 0.75 × (linear, assumed) | as tokens allow |
-| 1 | 2 | at 0.5625 × (linear, assumed) | as tokens allow |
-| 0 | 2 | | wait, in submit order |
+| 4 | 2 | at 0.75 × | as tokens allow |
+| 1 | 2 | at 0.5625 × | as tokens allow |
+| 0 | 2 | at 0.5 × | wait, in submit order |
 
-- Open: whether a pass runs at 16 or more free segments; design.md says the cleaner keeps
-  `clean_free` free.
-- Open: the shape of the scaling between 8 and none; design.md says "scaled from 1 down to 0.5 as
-  free segments fall from 8 to none", and the 4 and 1 rows assume linear steps.
-- The rate is what the cleaner measurably frees, net of what it copies, averaged over one-second
-  windows: a cleaner that freed 2 segments of 64 MiB and copied 1.5 segments' worth in the window
-  [0, 1 s) refills the bucket from t = 1 s at 32 MiB/s at 8 free segments and at 24 MiB/s at 4.
-- A cleaner that copies as much as it frees in a window gives a rate of 0, which stops chunk
-  writes at any count from 8 down. Open: what the bucket does with a net rate of 0 or below.
-- Raft entries, punches and freezes are never charged, at any count above 0.
-- A chunk write the bucket refuses is held unsubmitted by the store and reported as refused by
-  the bucket until it refills; it keeps its buffer. How the connection stops being read is the
-  Event loop item's (phase 5).
-- Open: the bucket's starting rate before the first one-second window is measured, and its
-  burst size.
-- Open: whether the second worker leaves again above 14 (hysteresis); the design only says when
-  it joins.
-- Review in the simulator, with the cleaner slower than the writers at 90 and 95% full: free
-  segments outside the reserve stay above zero most of the time, the Cleaner's NoSpace invariant
-  holds, and write latency stays bounded. Open: the bars for "most of the time" and "bounded";
-  the roadmap lists the thresholds as unmeasured.
+- The thresholds follow `clean_free`: the second worker joins two below it and the bucket charges
+  from half of it; a store whose cleaner runs only for waiting items (`clean_free` below 0)
+  never charges.
+- The rate is what the cleaner measurably frees, net of every block its copies, checkpoints and
+  merges take (`BackgroundBlocks`, headers and the tails their lanes leave included), over the last
+  one-second window: a cleaner that freed 2 segments of 64 MiB while those took 1.5 segments'
+  worth in the window [0, 1 s) refills the bucket from t = 1 s at 32 MiB/s at 8 free segments and
+  at 24 MiB/s at 4. The bucket holds at most a window's worth, 32 MiB at 8.
+- An ordinary write and a cold blob add no background blocks; a copy of 2 blocks that opens the
+  cleaner's segment adds its segment header, record header and 2 blocks, and a merge piece that
+  opens a merge lane's segment its headers and data blocks; a checkpoint adds blocks; copies that
+  roll into a new segment add the tail they leave behind in the old one.
+- A write is admitted while the bucket holds a token and charged all its blocks: 18 MiB taken from
+  14 leaves it 4 MiB in debt, and it next holds a token an eighth of a second later at 32 MiB/s.
+- A window that freed no more than it spent measures 0, which empties the bucket until the next
+  window ends, when the held writes are tried again, and carries the difference into the next:
+  450 blocks spent in one window, then a 1,000-block segment freed and 450 more spent in the
+  next, measures 100 blocks a second, not 550. A window in which the cleaner stopped, with
+  `clean_free` segments free, carries nothing.
+- Before the first window ends there is no rate and nothing is charged, also after an index
+  rebuild restarts the log.
+- The bucket charges while the cleaner has a pass running or will start one: when its only pass
+  ends, a held write stays held; once it has found no victim at the current durable LSN, a held
+  write goes out at the next call.
+- Raft entries, punches and freezes are never charged: a punch of another chunk goes out while
+  chunk writes are held. A punch behind a held write of the same chunk waits with it, as the
+  chunk's order requires, and a freeze goes out with the write or punch that carries it, so a
+  held write holds its freeze.
+- A chunk write the bucket refuses is held unsubmitted by the store, keeping its buffer and its
+  place ahead of its chunk's later operations; refused writes go out in the order refused, and a
+  write of another chunk waits behind them. The store reports it is not admitting while any is
+  held and arms `AdmitTimer` for when the bucket next holds a token or the window ends. How the
+  connection stops being read is the Event loop item's (phase 5).
+- Review in the simulator (`TestWriteAdmissionKeepsSegmentsFreeAheadOfASlowCleaner`): 8
+  closed-loop writers of 16 KiB, each sending its next write once its last is answered and the
+  store is admitting, the longest-waiting first; a cleaner worker taking 20 ms a victim; disk
+  actions one at a time at the simulated disk's latencies; 512 segments of 64 blocks, 64 KiB
+  records, a reserve of 8, at 50 and 65% full, overwritten at random for one disk capacity and
+  measured over the last three quarters. Without admission (a planted bug that admits every
+  write) the disk has no free segment outside the reserve at least half the time, so the cleaner
+  is the slower, and some writer waits two victims' cleaning, 40 ms, or longer from its last answer
+  to its next; with it, none for at most 1% of the time, no write fails with NoSpace, and no writer
+  waits 40 ms. Measured: none 0% with admission against 94 and 99.6% without, the slowest write
+  26 and 32 ms against 45 and 102. The 40 ms bar guards against regressions, not a bound on
+  latency: this cleaner frees many victims a window, and how long writers wait when it frees
+  fewer than one is the open question below.
+- Open: the item asks for 90 and 95% full. On segments small enough for the in-memory simulated
+  disk the cleaner's net-gain guard sustains about 65% (64-block segments) and 85% (1,024-block
+  segments). The 85% run (`TestWriteAdmissionAt85PercentFull`, the same writers and cleaner on 320
+  segments of 1,024 blocks, 1.25 GiB of disk in memory and 3.3 GB resident at peak, skipped
+  unless `ROCKSOLID_LONG_SIM` is set, about 10 minutes) checks that admission keeps a free segment
+  for a larger share of the time than without it and than a planted rate net of copied blocks
+  alone. Measured: no free
+  segment 0% of the time with admission, 97.3% net of copied blocks alone, 98.5% without; the
+  slowest write 9.1, 9.4 and 9.2 s. See the cleaning-debt question in design.md.
 - An index over its run limit never slows or stops writes (no run-count stall).
 - The same wait applies at twice `max_replay_bytes` (see Checkpoint backpressure); both
   conditions holding at once hold items until both clear.
