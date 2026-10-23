@@ -7,7 +7,7 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
 - **[property]** marks a randomized or exhaustive test, with its seeds so a run replays. Unless a line names its seeds, a new seeded test runs 10,000 seeds once and thousands per commit, as [Testing strategy](design.md#testing-strategy) asks.
 - **Open:** marks a point the design does not settle yet. It is settled in design.md, and the scenario written, before the item is reviewed.
 - **Benchmarks** lists a section's hot-path benchmarks, each of which must report zero allocations per operation unless the section names its exemption.
-- Settings take their design.md defaults unless a scenario says otherwise: `primary_lease` 4 s, `lease_drift` 1% of the lease, `rate_window` 10 s, `rate_gap` 100 ms, `max_margin` 50%, `node_down_after` 5 s, `member_timeout` 1 s, a heartbeat every second, `session_lease` 10 s, `recall_timeout` 30 s, `writeback_buffer` 256 MiB per node, `write_limit` 90%, `raft_heartbeat` 100 ms, `raft_election_timeout` a random 1 to 2 s, `max_replay_bytes` 64 MiB, `max_group_commit_bytes` 1 MiB, `commit_depth` 1, `compaction_step_bytes` 64 MiB, `clean_free` 16, `shard_split_size` 512 MiB, `statfs_cache` 5 s, `max_file_size` 16 TiB.
+- Settings take their design.md defaults unless a scenario says otherwise: `primary_lease` 4 s, `lease_drift` 1% of the lease, `rate_window` 10 s, `rate_gap` 100 ms, `max_margin` 50%, `node_down_after` 5 s, `member_timeout` 1 s, a heartbeat every second, `session_lease` 10 s, `dead_wait` 20 s, `recall_timeout` 30 s, `writeback_buffer` 256 MiB per node, `write_limit` 90%, `raft_heartbeat` 100 ms, `raft_election_timeout` a random 1 to 2 s, `max_replay_bytes` 64 MiB, `max_group_commit_bytes` 1 MiB, `commit_depth` 1, `compaction_step_bytes` 64 MiB, `clean_free` 16, `shard_split_size` 512 MiB, `statfs_cache` 5 s, `max_file_size` 16 TiB.
 
 ## Module, toolchain and lint
 
@@ -3158,60 +3158,67 @@ variant that passes means the model is too weak.
 
 ## Sessions and fencing model
 
-A TLA+ specification, checked with TLC. It covers the [Sessions and fencing](design.md#sessions-and-fencing) protocol and the [session expiry study](../studies/session-expiry/README.md)'s safety argument, which so far is prose.
+A TLA+ specification, `models/sessions/sessions.tla`, checked with TLC. It covers the [Sessions and fencing](design.md#sessions-and-fencing) protocol and the [session expiry study](../studies/session-expiry/README.md)'s safety argument.
 
 **What the model contains**
 
-- Actors: client daemons, each with one session; a control plane with at least two leaders in turn (terms); storage nodes acting as primaries and replicas; and an inode owner holding one lock.
-- Clocks. Each node's clocks advance at a rate within a bound of real time, and a node's clocks can also stop (a VM stopped with every clock frozen).
-  - The holder (the client) counts from the send of its last answered renewal and ends `lease_drift` early.
-  - The grantor (the leader) counts the whole `session_lease` from when it processed the renewal.
-  - The holder ends its lease on `Resumed` and when a grantor's clock moved more than `1/(1 − m)` times its own since the last grant, `m` the lease's margin (design.md, Lease time).
-  - The holder keeps its rate bound per leader node and boot: a leader failover starts a new window while the client keeps its old lease.
-  - Whether the model carries both clocks per node with the 22.6% slew, or only the abstract rate bound, is the modeller's choice. The epoch change model checks the two-clock rule itself.
-- Leader leases: only a leader holding its leader lease answers renewals, and a deposed leader's lease ends before its successor's starts.
-- Session table: versions, each listing the live sessions and those fenced but not yet acknowledged, plus an acknowledged version.
+- Actors: client daemons, each with one session; a control plane whose leader changes with terms, on two nodes; storage nodes acting as primaries and replicas of one placement group (PG); and an inode owner holding one lock.
+- Clocks. Time advances in ticks, and each node's raw clock runs at a whole number of units per tick, fixed per boot; a node can reboot at another rate, and its rate can rise once within the margin's headroom of `lease_drift / 2`, as a clocksource switch or a migration does. A client's virtual machine can stop with every clock frozen. The model carries this one clock per node, the rate bound the design's two clocks give a lease; the epoch change model checks the two-clock rule itself.
+  - The holder (the client) counts from the send of its last answered renewal and ends `lease_drift` plus its bound's excess over `1 + lease_drift / 2` early.
+  - The grantor (the leader) counts from when it processed the renewal, or from the start of its own lease after a failover, the whole `session_lease` stretched by its own raw rate over the client's, which it measures from two renewals it processed; until it has, it counts `dead_wait`.
+  - The holder ends its lease on `Resumed`, and when a grantor's clock moved more than `1/(1 − m)` times its own since the last grant, `m` the lease's margin.
+  - The holder keeps its rate bound per leader node and boot, from two grants at least a tick apart, and takes no lease from a leader before it has one: a leader failover starts a new window while the client keeps its old lease. Its margin covers only that leader, and a rebooted node may lead at once.
+- Leader leases: only a leader holding its leader lease answers renewals, and a deposed leader's lease ends before its successor's starts. A new leader gives every live session a full lease from its start, and a leader whose loop stalled restarts every session's timer.
+- Session table: versions, each listing the live sessions and those fenced but not yet acknowledged, plus an acknowledged version. Every session due when the leader's count runs out is fenced in one version. An eviction stops renewals and fences the session once its lease runs out.
 - Storage nodes:
-  - each applies table versions in order and acknowledges the version it holds;
-  - each rejects writes from fenced or removed sessions, including writes already queued and writes replicated to it by a primary;
-  - a node can be marked down in a committed table, and is marked up only once its heartbeat reports the current version.
+  - each applies the newest session-table version and acknowledges it;
+  - each rejects writes from fenced sessions, on arrival and again when a primary orders a queued write, and on writes replicated to it;
+  - a node unreachable from the control plane for `node_down_after` is marked down in a committed table, and is marked up only once it holds the current version.
 - PG intervals:
-  - a write completes only once every live member of its PG's interval holds it;
-  - a committed down mark starts a new interval of every PG with a member on that node;
-  - members of the new interval refuse writes tagged with the old one.
+  - a write completes once every live member of its interval holds it;
+  - a committed down or up mark starts a new interval; a member refuses writes tagged with an older interval;
+  - a new interval's primary activates it only once a live member of every interval since the last activated one has adopted a later one, and orders writes only in an interval it activated itself; a write it held across an interval change is ordered again only if no other primary led the PG since.
 - Writes: a write from a client carries its session ID and can sit in the network for any time.
-- Locks: an owner grants a lock to the next holder only once the old holder's session has left the table, that is, once its fence version is acknowledged.
-- Faults:
-  - message loss, delay and reordering;
-  - client daemon pauses of any length with clocks running, and VM stops with clocks frozen;
-  - a leader crash and failover, a deposed leader still answering renewals, and a leader stalled past `session_lease`;
-  - a storage node partitioned.
+- Locks: the owner grants the lock to the next holder only once the old holder's session has left the table, that is, once its fence version is acknowledged.
+- Faults: lost renewals and answers, delays and reordering; client VM stops with clocks frozen; leader lease loss, failover to another node, node reboots and rate rises; a stalled leader; evictions; a client daemon that dies; storage nodes partitioned from the control plane.
 
-**Properties.** Each names the simulator invariant that checks it in the real code, for the model-to-simulator map.
+**Properties**
 
-| Property | Simulator invariant (design.md Testing strategy) |
-| --- | --- |
-| No fence commits while the client's own lease still runs | "no session is fenced while its client's own lease still runs" |
-| No fenced session's write is applied after the storage node applied the fence | "no fenced session's write is applied" |
-| No lock reaches a new holder while a primary would still accept and complete the old holder's writes | "no lock is granted to a new holder while a primary would still accept the fenced holder's writes" |
-| At most one lock holder | "at most one lock holder per lock" |
-| A session whose client stops renewing is fenced, and its lock released, within `session_lease` plus one commit and one acknowledgment round, or once its unreachable storage node is marked down. `ci` checks it as an invariant over the model's clocks; `deep` also checks the unbounded form, that it is fenced eventually, under weak fairness | To register: "a dead client's locks are free within `session_lease` plus one commit and one acknowledgment round, or once an unreachable storage node is marked down" (design.md states this in Sessions and fencing, not in the invariant list) |
-
-**A rule removed, and the counterexample the model must find.** Each row is a model variant that must fail. If TLC finds no counterexample, the model is too weak.
-
-| Rule removed or changed | Counterexample the model must find | Property violated |
+| Property | Model invariant | Simulator invariant (design.md Testing strategy) |
 | --- | --- | --- |
-| The client counts its lease from receiving the reply, not from sending the renewal | The reply is delayed by more than the margin. The client's lease then ends after the leader's count, and the leader fences while the client still writes | No fence while the client's lease runs |
-| The client does not end its lease `lease_drift` early | Its clock runs fast within the rate bound and it overlaps the fence | Same |
-| The client ignores `Resumed` | Its VM stops for 15 s with every clock frozen. It resumes believing 5 s of lease remain, and writes after the fence commits | Same |
-| A leader answers renewals without holding its leader lease | A deposed leader renews C after the new leader's lease began. The new leader's timer for C started earlier, so it fences C while C's lease runs | Same |
-| A new leader expires sessions from the last renewal time it can see, instead of giving every live session a full `session_lease` from the start of its own lease | It fences a client renewed by the old leader moments before the failover | Same |
-| Owners release a fenced session's lock when the fence commits, not when its version is acknowledged | The next holder writes while a storage node that has not applied the fence still applies the old holder's queued write | No lock to a new holder while a primary would still accept the old one's writes |
-| A storage node applies a version only to writes that arrive after it | A write queued before the version is applied after it | No fenced write applied |
-| A replica does not check the fence on replicated writes | A primary that has not yet applied v1 replicates the fenced write, and the replica that applied v1 stores it | Same |
-| A storage node marked down is marked up again with an older session table | The rejoined node accepts the fenced session's late write | Same |
-| A down mark starts no new interval | The partitioned node, as a primary, completes the fenced client's write after the lock moved | No lock to a new holder while a primary would still accept the old one's writes |
-| The acknowledged version counts only reachable nodes, without a committed down mark | Same as the owner-release row | Same |
+| No fence commits while the client's own lease still runs, nor does a client hold a lease once fenced | `NoFenceWhileLeased` | "no session is fenced while its client's own lease still runs" |
+| No fenced session's write is applied after the storage node applied the fence | `NoFencedWriteApplied` | "no fenced session's write is applied" |
+| No lock reaches a new holder before the old holder's writes are ordered: every completed write of the old holder is ordered before every completed write of the next holder, by version and in the history the next holder's write was ordered on | `LockOrder` | "every write of a fenced lock holder that completes is ordered before every write of the next holder" |
+| At most one client holds the lock and can act on it | `AtMostOneHolder` | "at most one lock holder per lock" |
+| The step check never trips between a client never stopped and a leader whose rate stays within the headroom | `NoSpuriousTrip` | "no step check trips between two nodes neither paused nor rebooted" |
+| A fenced session leaves the table, and its lock is free, within one tick of its fence, not counting ticks in which the leader lacked its lease or a storage node was unreachable and not yet marked down; the fence commits in the tick the lease runs out on the leader's clock. `ci` checks it as an invariant over the model's clocks, where it holds mostly by construction: time cannot pass a fence, an acknowledgment or a down mark the leader owes, and acknowledgments are never lost, so it guards the conditions under which they are owed. `deep-release` also checks the unbounded form, that a dead client's session leaves the table, under weak fairness | `FenceReleasedInTime`, `CrashedClientReleased` | "a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval while the leader holds its lease and has measured the client, `dead_wait` instead when it has not, or once an unreachable storage node is marked down" |
+
+The lock property is checked as an order, not as the design's wording, "no lock is granted to a new holder while a primary would still accept the fenced holder's writes", which is stronger than the design gives: when every live member of the old holder's interval is cut off from the control plane, all are marked down and the lock moves, while those members can still complete the old holder's queued write among themselves. That write is ordered before the next holder's, because the next interval activates only once a member of the old one has adopted it, so peering finds the write. The model checks the ordering, and the simulator invariant states it.
+
+**A rule removed, and the counterexample the model finds**
+
+| Configuration | Rule removed or changed | Counterexample the model finds | Property violated |
+| --- | --- | --- | --- |
+| `neg-count-from-reply` | The client counts its lease from receiving the reply, not from sending the renewal | The reply is delayed by more than the margin. The client's lease then ends after the leader's count, and the leader fences while the client still holds it | `NoFenceWhileLeased` |
+| `neg-no-drift` | The client does not end its lease `lease_drift` early | The leader's raw rate rises within the headroom after the client measured it, and its count ends first | Same |
+| `neg-ignore-resumed` | The client ignores `Resumed` | Its VM stops with every clock frozen past the leader's count; it resumes believing its lease runs | Same |
+| `neg-answer-without-lease` | A leader answers renewals without holding its leader lease | A deposed leader renews C after the new leader's lease began. The new leader's timer for C started earlier, so it fences C while C's lease runs | Same |
+| `neg-no-full-lease` | A new leader counts each session from the last renewal it can see, instead of giving every live session a full `session_lease` from the start of its own lease | Renewals live only in the old leader's memory, so it sees none and fences a client renewed moments before the failover | Same |
+| `neg-count-on-own-clock` | A leader counts every session's lease on its own clock alone, measured or not | The old leader's node runs at 16 units a tick, the next at 20. After a failover the new leader counts a full lease from its start, which comes right after the old leader processed the client's last renewal, and its count ends before the client's lease, measured against the old leader | Same |
+| `neg-dead-wait-lease` | A leader that has not measured a session waits only `session_lease` for it, not `dead_wait` | The same failover, before the client's first renewal reaches the new leader | Same |
+| `neg-evict-at-once` | An eviction fences the session at once | The evicted client, still renewing, holds its lease when the fence commits | Same |
+| `neg-two-holders` | The same, with two clients | The lock moves while the evicted holder still holds its lease and acts on the lock | `AtMostOneHolder` |
+| `neg-fixed-step-check` | The step check trips at `1 + lease_drift / 2` | It trips on a leader whose rate the margin covers | `NoSpuriousTrip` |
+| `neg-window-per-boot` | The client keeps one rate bound per leader node, not per node and boot | The leader's node reboots at another rate, and the step check trips on its first grant against the old boot's bound. With leaders counting on their measured rate this costs a lease, not safety | Same |
+| `neg-release-on-commit` | Owners release a fenced session's lock when the fence commits, not when its version is acknowledged | The next holder writes while a storage node that has not applied the fence still orders the old holder's queued write after it | `LockOrder` |
+| `neg-check-on-arrival` | A storage node checks the fence only when a write arrives | A write queued before the version is applied after it | `NoFencedWriteApplied` |
+| `neg-replica-no-check` | A replica does not check the fence on replicated writes | A primary that has not yet applied the version replicates the fenced write, and the replica that applied it stores it | Same |
+| `neg-up-with-old-table` | A storage node marked down is marked up again with an older session table | It leads its PG again in a new interval no other primary led, orders the fenced client's write it held, and completes it after the next holder's | `LockOrder` |
+| `neg-peering-skipped` | A new interval activates without a member of every earlier interval adopting it | A member alone in an older interval, cut off from the control plane, completes the fenced client's write after the next holder's write in the new interval | Same |
+| `neg-ack-reachable-only` | The acknowledged version counts only reachable nodes, without a committed down mark | A member alone in its interval, unreachable but not marked down, never applies the fence and orders the old holder's write after the lock moved | Same |
+| `neg-ack-waits-down` | The acknowledged version waits for nodes marked down | A partitioned node holds the lock for as long as it stays away | `FenceReleasedInTime` |
+
+Removing the new interval a down mark starts gives no counterexample of its own: with replicas checking the fence, a partitioned primary's write completes only where it is the interval's only live member, and then what stops it is peering, which `neg-peering-skipped` removes.
 
 **Scripted scenarios.** Each is a model trace to check and a simulator seed to keep. They start from the study's list.
 
@@ -3227,23 +3234,25 @@ A TLA+ specification, checked with TLC. It covers the [Sessions and fencing](des
    - (c) W reaches P after the acknowledged version was committed. W is rejected.
    - (d) W reaches P before P applies v1, but replica R applied v1 first. R rejects the replicated W, so W is never acknowledged, and the lock is still released only after every storage node acknowledges v1.
    - Expected in every case: the next holder's write is ordered after W, or W is refused.
-4. **A client VM stopped with its clocks frozen.** C's VM stops at 2 s for 15 s. Its session is fenced at about 11 s. On resume, C ends its lease before serving any request (`Resumed`, or the step check on the leader's next reply: its raw clock moved more than `1/(1 − m)` times C's since the last answered renewal), and holds its requests until a renewal is answered. That renewal says it was fenced. Expected: no write from C is applied after the fence.
+4. **A client VM stopped with its clocks frozen.** C's VM stops at 2 s for 15 s. Its session is fenced at about 11 s. On resume, C ends its lease before serving any request (`Resumed`), and an answer to a renewal it sent before the stop counts for no lease. It holds its requests until a renewal is answered. That renewal says it was fenced. Expected: no write from C is applied after the fence.
 5. **A fence while storage node N3 is partitioned.**
    - N3 is partitioned at 0 s and marked down at 5 s, which starts a new interval of every PG with a member on it. C's session expires at 10 s.
    - v1 is committed as acknowledged as soon as every other node has acknowledged it, since N3's down mark is already committed.
    - The partition heals at 20 s, with N3 still holding the session table from before v1.
    - Expected: N3 is not marked up until its heartbeat reports v1. Until then it completes no write, and peering stops any write of C's still tagged with an old interval.
 6. **Two sessions expiring in one batch.** A switch failure strands nodes X and Y at 0 s, and both sessions fall due within the same timer firing. Expected: one session-table version fences both, one acknowledgment from each storage node covers it, and one acknowledged commit follows. Variant: Y falls due 0.5 s after the timer fired for X. Expected: two versions. A node acknowledging the newer one covers both.
-7. **A client that reaches the control plane but not the owner.** C renews normally but leaves a recall unanswered. After `recall_timeout` (30 s) the owner asks the leader to fence C. Once the fence is committed and acknowledged, C's recall counts as answered and its lock is free. C learns it was fenced from its next renewal, starts a new session and reopens its files. Its applications see errors, never stale data.
+7. **A client that reaches the control plane but not the owner.** C renews normally but leaves a recall unanswered. After `recall_timeout` (30 s) the owner asks the leader to evict C: the leader stops renewing it, and fences it when its lease runs out, up to `session_lease` later. Once the fence is committed and acknowledged, C's recall counts as answered and its lock is free. C learns it was fenced from its next renewal, starts a new session and reopens its files. Its applications see errors, never stale data.
 8. **A leader stalled past `session_lease`.**
    - The leader's loop stalls for 12 s while clients keep sending heartbeats. The stall also outlasts its 4 s leader lease, so the followers' grants lapse and they may elect L2.
    - Expected on waking: the old leader answers no renewal until it holds a leader lease again. If L2 was elected, L2 gives every session a full lease from the start of its own lease.
-   - Whichever leader answers restarts every session's timer from now and fences no one. The study sets the threshold for a stall at more than a heartbeat interval (session expiry study, "Failover and stalls"); design.md gives none.
+   - Whichever leader answers restarts every session's timer from now and fences no one. A loop counts as stalled once it fell behind by more than a heartbeat interval, the study's threshold.
    - A client that truly died during the stall is fenced about 10 s after that restart.
-9. **A new session's first write reaching a primary with an older table.** Session S7 starts at a table the primary has not yet received, and its write arrives first. Expected: the primary fetches the session table before judging the write, then accepts it, rather than rejecting it as an unknown session.
+9. **A new session's first write reaching a primary with an older table.** Session S7 starts at a table the primary has not yet received, and its write arrives first. Expected: the primary fetches the session table before judging the write, then accepts it, rather than rejecting it as an unknown session. The model's clients keep their sessions, so this is the simulator's.
 10. **A renewal answered by a deposed leader.** L1 is partitioned from the other voters but still holds its leader lease until t_L. It answers C's renewal at t_L − 0.1 s. L2's leader lease starts after t_L and gives C a full lease from that start. Expected: C's lease, counted from a send before t_L, ends before L2 could fence it.
-11. **Fence latency.** A client node crashes at 0 s. It is marked down at 5 s, and its session falls due at about 10 s. Expected: its locks are free at 10 s plus one commit and one acknowledgment round, with no wait for the down node. Open: the design says "milliseconds on a LAN" without a bound; the simulator's assertion needs one.
+11. **Fence latency.** A client node crashes at 0 s. It is marked down at 5 s, and its session falls due at about 10 s. Expected: its locks are free by 10 s plus one heartbeat interval (11 s), the bound the simulator asserts for the commit, the push and an acknowledgment repeated after a loss, with no wait for the down node.
 12. **A leader whose raw clock runs 2% fast.** No time daemon on L1's node, so both its clocks run 2% fast. C bounds L1's rate from two renewals `rate_gap` apart and widens its margin to 2.5%. Expected: no step-check trip on any renewal, C's lease ends 9.75 s after each answered renewal's send, before L1's count, and C keeps its session and writes with no stall.
+13. **A failover to a voter whose raw clock runs fast.** L1's raw clock runs at the client's rate, L2's 25% faster, and C has never contacted L2. L1 answers C's renewal sent at 0 s and crashes; L2's lease starts at 6 s. Expected: until C's heartbeats give L2 a bound, L2 holds C for `dead_wait`, 20 s on its clock, 16 s of real time; once it has one, it counts 10 s × 1.25 on its clock. Either way C's lease, which ended at 9.9 s, ends first, and no session is fenced while C still renews.
+14. **A client that dies within a lease of a failover.** C's node crashes at 0 s, just after a renewal, and the control-plane leader fails over at 1 s. Expected: the new leader never hears from C, fences it `dead_wait` after the start of its own lease, and C's locks are free about 20 s after that start instead of 10 s.
 
 **Simulator faults covering the same ground** (design.md, simulation faults for coherence and placement):
 
@@ -3255,149 +3264,201 @@ A TLA+ specification, checked with TLC. It covers the [Sessions and fencing](des
 - clients paused past their lease;
 - a holder whose VM stops for longer than a lease with every clock frozen.
 
-**Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc)): `ci` with 2 clients, 2 leader terms, 2 storage nodes, 1 owner, 1 lock, and up to 2 writes in flight per client; `deep` the same with 3 leader terms.
+**Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc); results in the [Model-to-simulator map](#model-to-simulator-map)). Every fault in the list above is on in at least one `ci` configuration with every rule on, and each negative configuration changes one constant of its base:
+
+- `ci-lease`: 1 client renewing with leaders on 2 control-plane nodes over 2 terms, raw rates of 16 or 20 units a tick with `lease_drift` 1/8, so the client holds a lease from a leader 1.25 times as fast as itself, inside `max_margin`; an 80-unit session lease (about 4.4 ticks at the client's rate, where the pair's rates show at a tick's grain), `dead_wait` 100 units, and a VM stop. Renewals and answers are messages, and the client keeps rate windows. Base of the lease-timing negatives.
+- `ci-evict`: `ci-lease` with an eviction instead of the VM stop. Base of `neg-evict-at-once`.
+- `ci-rates`: `ci-lease` with 1 control-plane node over 2 terms, which reboots once at either rate and whose rate rises once within the headroom, and a lost renewal or answer, with no VM stop, and an 81-unit lease, at which a rise shows at a tick's grain. Base of `neg-no-drift`, `neg-fixed-step-check` and `neg-window-per-boot`.
+- `ci-fence`: 2 clients contending for one lock, one leader, 2 storage nodes in one PG, a 3-tick session lease, up to 2 writes in flight per client and 2 in all, and a storage node partitioned from the control plane. Renewals are single steps at equal clocks, since the lease configurations check their timing.
+- `ci-faults`: `ci-fence` with no partition and one write in flight per client, and a VM stop, a leader stall, an eviction and a client daemon that dies. Base of `neg-two-holders`.
+- `deep-lease`: `ci-lease` with a 145-unit lease, about 8 ticks, so leases overlap failovers part-way through. `deep-terms`: `ci-lease` with 3 terms. `deep-down`: `ci-fence` with both storage nodes partitioned in turn, so an interval can have a single live member, one write in flight per client and a 2-tick lease. `deep-fence`: `ci-fence` with one write in flight per client, a second term on another node and a client daemon that dies, safety only. `deep-release`: the same with no writes, checking `CrashedClientReleased` under weak fairness; with writes, the liveness check ran out of a 4 GB heap at about 60 million states.
+
+A `ci` lease of 8 ticks does not fit the 5-minute budget: a 5-tick lease with these rates took about 5 minutes alone, so the longer lease is `deep-lease`'s larger constant.
 
 ## Cache-mode recall model
 
-A TLA+ specification of [Tier 2](design.md#cache-coherence-tiers) for one file. It uses the simulated FUSE client's kernel model from Testing strategy: a page cache per node that refills on reads, direct I/O fixed when a handle is opened, attribute timeouts, `auto_inval_data`, and mapped pages that are not revalidated.
+A TLA+ specification of [Tier 2](design.md#cache-coherence-tiers) for one file, `models/recall/recall.tla`. It uses the simulated FUSE client's kernel model from Testing strategy: a page cache per node that refills on reads, direct I/O fixed when a handle is opened, attribute timeouts, `auto_inval_data`, and mapped pages that are not revalidated.
 
 **What the model contains**
 
-- Two or three nodes. Each has a daemon with a write-back buffer, and a kernel with handles, each handle cached or direct I/O.
-- An inode owner with the open registry (members, which have written, the mode). The owner can fail over, with a grace period of one session lease.
-- Storage: one versioned value and the file's size, written through the chunk primary. A write that extends the file commits the size before it is acknowledged, and reads are clamped to the size.
-- Recalls: sent, delivered, lost or delayed. Each is acknowledged, or ends when the member's session is fenced (by expiry, or by `recall_timeout`).
-- Sessions, abstracted from the sessions model. A client daemon pauses past its lease while its node's kernel and applications keep running, then is fenced. No kernel timeout reaches past the session lease.
+- Two or three nodes. Each has a daemon with a write-back buffer and what it last learned of the mode (buffer, open with direct I/O, revalidate), and a kernel with handles, each cached or direct I/O, a page per region and a flag for trusting its cached attributes.
+- An inode owner with the open registry (members, which have written, the mode). In ReadShared and WriteShared a node's first write waits for the owner to record it; in Exclusive it goes straight to the buffer, and a second node's open recalls the holder, whose acknowledgment says whether it has written. The owner records a writer only while it has the file open. The owner can fail over: the new owner, in a newer term, takes re-registrations (with whether the node has written) during a grace period that ends once every live session has re-registered or been fenced, and takes no new opens or first writes until then.
+- Storage: one value per region and the file's size; region 1 lies past the starting size, so writing it extends the file. A write that extends the file commits the size before it is acknowledged, and reads are clamped to the size.
+- Recalls carrying the owner's term, at most one pending per file: sent, delivered, lost or delayed by any amount. Each is acknowledged, naming the term, or ends when the member's session is fenced.
+- Sessions, abstracted from the sessions model: a lease ends on the client (a pause, a partition, or renewals stopped by an eviction) and takes the kernel's attribute timeouts with it; a fence comes only after the lease ended. A client daemon pauses while its kernel and applications keep running. An owner evicts a member that leaves a recall unanswered.
 
 **Properties**
 
-- No stale read in WriteShared mode: a `read()` on any unmapped handle, invoked after a write was acknowledged to any node, returns that write's bytes or newer ones. Simulator invariant: "no client reads stale data from a file in WriteShared mode".
-- Close-to-open in every mode: an open that starts after another node's close sees that close's data. The consistency checker checks it in simulation.
-- Open: mapped reads. The design promises them within one message delay unless `mmap_sync` is on, and its simulator models mapped pages, but whether this model checks "a mapped read issued one message delay after a write's acknowledgment returns it" or leaves mmap out is the modeller's to state.
-
-**A rule removed, and the counterexample the model must find**
-
-| Rule removed or changed | Counterexample (spike test where it was seen) | Property violated |
+| Property | Model invariant | Simulator invariant |
 | --- | --- | --- |
-| Step 4 dropped: no revalidation of old handles (attributes with timeout 0 and a new change counter in `mtime`) | B's cached handle, opened in ReadShared, refills its page cache after the recall and reads stale data after A's next write (T3) | No stale read in WriteShared |
-| Step 3 dropped: new opens on B stay cached | A handle B opens after the switch reads cached pages (T4 shows the flag is fixed at open) | Same |
-| Step 2 dropped: the recall does not drop cached pages | B's next read hits the old page (T1) | Same |
-| Step 1 dropped on the writer's side: from Exclusive to WriteShared, the recalled writer A does not flush its buffer | B opens and reads storage before A's acknowledged buffered write reaches it | Same, and close-to-open |
-| The owner answers the triggering open or write before every acknowledgment or fence | B reads before A has flushed or dropped its pages | Same |
-| A lost recall counts as answered after a timeout, with no fence | B keeps its cached pages and reads stale data | Same |
-| A kernel attribute timeout reaches past the client's session lease | B's daemon pauses, and B is fenced. Its kernel still trusts cached attributes and serves old pages to a running application | Same |
-| After owner failover, the new owner accepts new opens before the grace period ends | It misses B's open and sees A alone. The file goes to Exclusive, A buffers and caches, and B reads stale data | Same |
-| WriteShared returns to Exclusive while two nodes still have the file open | The returning node buffers writes the other node cannot see | Same |
-| An extending write is acknowledged before its size commits | B's `read()` past the old end of file is clamped to the old size and misses acknowledged bytes | Same |
-| Tier 1's open keeps `keep_cache` although the file changed since this node cached it (T6) | An open after A's close reads B's old pages | Close-to-open |
+| No stale read in WriteShared mode: while two nodes have the file open and one of them has written to it, a `read()` on any unmapped handle returns the bytes of every write acknowledged before it began, or newer ones. Writes lost with a fenced daemon's buffer, which its handles report as errors, are not counted | `NoStaleReadWriteShared` | "no client reads stale data from a file in WriteShared mode" |
+| Close-to-open in every mode: a read on a handle opened after another node's close sees that close's data | `CloseToOpen` | None: the consistency checker checks close-to-open on simulation histories ([Testing strategy](design.md#testing-strategy)), so no step invariant is needed |
+
+Mapped reads are left out: the design promises them within one message delay, a timing that needs the simulator's per-message clock, and its simulated FUSE clients model mapped pages; the model would only restate that `notify_inval_inode` follows each write.
+
+**A rule removed, and the counterexample the model finds**
+
+| Configuration | Rule removed or changed | Counterexample (spike test where it was seen) | Property violated |
+| --- | --- | --- | --- |
+| `neg-no-reval` | Step 4 dropped: no revalidation of old handles (attributes with timeout 0 and a new change counter in `mtime`) | B's cached handle refills its page after the recall, trusts it for an attribute timeout, and reads stale data after A's next write (T3) | `NoStaleReadWriteShared` |
+| `neg-no-drop` | Step 2 dropped: the recall does not drop cached pages and attributes | B's next read hits the old page under the attribute timeout it got before the recall (T1) | Same |
+| `neg-no-flush` | Step 1 dropped on the writer's side: from Exclusive to WriteShared, the recalled writer A does not flush its buffer | B opens and reads storage before A's acknowledged buffered write reaches it | Same |
+| `neg-answer-early` | The owner answers the triggering open or write before every acknowledgment or fence | B reads before A has flushed or dropped its pages | Same |
+| `neg-timeout-answer` | A recall counts as answered after a timeout, with no fence | B keeps its cached pages and reads stale data | Same |
+| `neg-any-ack` | Acknowledgments do not name the owner's term | A's acknowledgment of the old owner's recall, delayed past the failover, stands for the new owner's recall, which A never saw; A buffers and caches the file again, and B reads storage without A's acknowledged write | Same |
+| `neg-attr-past-lease` | A kernel attribute timeout reaches past the client's session lease | B's daemon pauses, and B is fenced. Its kernel still trusts cached attributes and serves old pages to a running application | Same |
+| `neg-evict-at-once` | An eviction fences the member at once while its lease still runs | B, which renews but left the recall unanswered, is fenced and the recall counted as answered while its kernel still trusts its attributes; it serves its old page after A's write | Same |
+| `neg-open-skips-holder` | A second node's open of an Exclusive file recalls only a holder the owner knows has written | A writes in Exclusive without telling the owner; B's open is answered ReadShared at once, and B reads storage without A's buffered write | Same |
+| `neg-open-in-grace` | After owner failover, the new owner accepts new opens before the grace period ends | It misses B's open and sees A alone. The file goes to Exclusive, A buffers and caches, and B reads stale data | Same |
+| `neg-grace-by-time` | The grace period ends on time alone | B, which holds the file open, has not re-registered when it ends; A's open finds the registry empty, and A buffers in Exclusive while B reads | Same |
+| `neg-rereg-no-wrote` | A re-registration does not say whether the node has written | The new owner computes ReadShared for a file A writes; B's new open caches it, and B reads stale data after A's next write | Same |
+| `neg-leave-ws-early` | WriteShared returns to Exclusive while two nodes still have the file open | The returning node buffers writes the other node cannot see | Same |
+| `neg-ack-before-size` | An extending write is acknowledged before its size commits | B's `read()` past the old end of file is clamped to the old size and misses acknowledged bytes | Same |
+| `neg-keep-cache` | Tier 1's open keeps `keep_cache` although the file changed since this node cached it (T6) | An open after A's close reads B's old pages | `CloseToOpen` |
+
+Step 3, opening new handles with direct I/O, has no row: with steps 2 and 4 the kernel revalidates every cached handle of the inode before each read, so a cached handle opened after the recall reads fresh data, and the model passes without step 3 (checked with the `ci-handles` and `ci-failover` constants). Step 3 stays for what it saves, a page cache refilled and dropped on every read, and for mapped pages, which the model leaves out.
 
 **Scripted scenarios**
 
 1. **The two-pod example (design and post 09).**
-   - `web` on node B opens `status.json` first: Exclusive. `uploader` on node A opens it: ReadShared.
+   - `web` on node B opens `status.json` first: Exclusive. `uploader` on node A opens it: the owner recalls B, which answers that it has not written and keeps its cache, and the file is ReadShared.
    - A writes "BBBB". The owner recalls B, and B flushes, drops its pages, opens new handles with `direct_io` and revalidates old handles.
    - B acknowledges, and the mode becomes WriteShared. B's next `read()` on its old handle returns "BBBB".
    - With step 4 removed, B's read after the recall refills its cache with "BBBB", and it still returns "BBBB" after A writes "CCCC".
-2. **Exclusive to WriteShared on a second open.** A has written and holds buffered data, and B opens the file. The owner recalls A, which flushes and drops its pages. The owner answers B's open, uncached, only after A's acknowledgment. B's first read returns A's buffered bytes.
+2. **Exclusive to WriteShared on a second open.** A has written and holds buffered data, which the owner has not heard of, and B opens the file. The owner recalls A, which flushes and drops its pages and acknowledges that it has written. The owner answers B's open, uncached, only after A's acknowledgment. B's first read returns A's buffered bytes.
+   - Variant: A has only read. Its acknowledgment says so; A stops buffering and keeps its cache, B's open is answered ReadShared, and A's first write afterwards recalls B.
+   - Variant: A acknowledges and then closes before the acknowledgment arrives. The owner does not record A as a writer, and B's open is answered Exclusive.
 3. **The writer unreachable.**
    - As in scenario 2, but A's node is partitioned. B's open waits up to A's `session_lease` (10 s), plus the time to fence A: one commit and one acknowledgment round.
-   - Variant: A still renews its session but does not answer the owner. B waits `recall_timeout` (30 s), then A is fenced.
+   - Variant: A still renews its session but does not answer the owner. After `recall_timeout` (30 s) the owner has A evicted: its renewals stop, and it is fenced once its lease runs out, up to `session_lease` later.
    - Expected in both: B's open completes only after the fence is acknowledged, and B reads storage without A's unflushed writes. Those writes are lost, and reported to A's handles as errors.
 4. **Lost recall.** The recall to B is lost and no answer comes. Expected: the owner waits for an acknowledgment or a fence, never for a timeout alone.
-5. **Delayed recall.** The recall reaches B after B closed and reopened the file. Expected: no stale read. Open: recalls carry no stated generation, so it is unspecified whether an acknowledgment of an older recall counts for a newer one.
-6. **Owner failover mid-recall.** Owner O1 has sent a recall to B and crashes before B acknowledges. O2 becomes the owner and, for one session lease (10 s), accepts only re-registrations. A and B re-register. Expected: no stale read before or after, and no new open answered during the grace period. Open: whether a re-registration carries "has written", and whether O2 sends the recall again or waits for it.
-7. **Leaving WriteShared.** B closes. The owner returns the file to Exclusive with no recall, and A's new opens are cached and its writes buffered again. A handle A opened with `direct_io` while the file was WriteShared stays uncached until A reopens it. Stored `mtime` 1,000 s; while WriteShared, B's last `stat` reported 1,000.000000040 s and A's 1,000.000000025 s. B's `close` stores 1,000.000000040 s, and A's next `stat`, no longer bumped, reports no less than 1,000.000000040 s. A planted variant that falls back to the stored `mtime` must fail "no file's `mtime` goes backwards".
+5. **Delayed recall.** The recall reaches B after B closed and reopened the file. Expected: no stale read. Within one owner term the owner sends no new recall for the file while one is outstanding, and a fenced member never returns, so the owner's term in the acknowledgment is what keeps a delayed acknowledgment from counting for a later recall.
+6. **Owner failover mid-recall.** Owner O1 has sent a recall to B and crashes before B acknowledges. O2 becomes the owner and accepts only re-registrations until A and B have re-registered, each saying whether it has written. O1's recall dies with it; A's first write, which waited on it, is sent again to O2 after the grace period, and O2 recalls B again. Expected: no stale read before or after, and no new open answered during the grace period.
+7. **Leaving WriteShared.** B closes. The owner returns the file to Exclusive with no recall, and A's new opens are cached and its writes buffered again. A handle A opened with `direct_io` while the file was WriteShared stays uncached until A reopens it. Stored `mtime` 1,000 s; while WriteShared, B's last `stat` reported 1,000.000000040 s and A's 1,000.000000025 s. B's `close` stores 1,000.000000040 s, and A's next `stat`, no longer bumped, reports no less than 1,000.000000040 s. A planted variant that falls back to the stored `mtime` must fail "no file's `mtime` goes backwards". The model leaves `mtime` to the simulator.
 8. **First write in ReadShared from a handle opened `O_RDWR` that has only read.** The file stays ReadShared until the first actual write.
 9. **An extending write while WriteShared.** A writes 4 KiB past the end of a 10,000-byte file. The size is 14,096 in the MetaStore before A's write is acknowledged. B's `read()` of bytes 10,000 to 14,095 then returns them.
 
 **Simulator faults** (design.md, simulation faults for coherence):
 
 - lost or delayed recalls;
+- an acknowledgment delayed past an owner failover;
 - clients paused past their lease;
 - clock skew;
 - owner failover in the middle of a recall;
+- an owner failover while a node that holds the file open cannot reach the new owner;
+- an eviction of a node that still renews;
+- a second node's open of an Exclusive file racing the holder's first write;
 - a planned leader transfer while opens arrive. The open registry moves with the transfer, so opens do not pause.
 
-**Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc)): `ci` with 3 nodes, 2 handles per node, 3 writes, 1 owner failover, 1 lost recall and 1 delayed recall; `deep` the same with 2 owner failovers.
+**Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc); results in the [Model-to-simulator map](#model-to-simulator-map)). Every configuration lets recalls and acknowledgments arrive after any delay:
 
-Open: FUSE timeouts across a machine suspend. The kernel counts attribute timeouts in jiffies, which stop during suspend. The model covers paused daemons, not suspended machines, until the open question "FUSE timeouts across a suspend" is answered.
+- `ci`: 3 nodes with 1 handle each, 2 writes.
+- `ci-failover`: 2 nodes with 1 handle each, 2 writes, 1 owner failover, 1 lost recall or acknowledgment, 1 daemon pause and 1 lease that runs out.
+- `ci-handles`: 2 nodes with up to 2 handles each, 3 writes, so old cached handles meet new ones.
+- `ci-extend`: 2 nodes with 1 handle each on a file with a region past its starting size, 2 writes.
+- `deep`: `ci-failover` with 2 owner failovers. The recall model states no liveness property: a recall's end is bounded by `recall_timeout` and the session lease, which the sessions model checks.
+
+The model covers paused daemons, not suspended machines: whether the kernel's attribute timeouts hold across a machine suspend is the design's open question "FUSE timeouts across a suspend", which a spike answers.
 
 ## Purge model
 
-A TLA+ specification of [Freeing space](design.md#freeing-space) for two files in one slot, since the purge list is keyed by inode and the purger consumes runs of entries across inodes. It holds each file's size, `alloc_end`, the byte contents of its chunks (the model may use small chunks and blocks, such as a 4-block chunk of 4-byte blocks), the slot's purge list, writers on two nodes, the purger, sessions that can be fenced, and crashes.
+A TLA+ specification of [Freeing space](design.md#freeing-space), `models/purge/purge.tla`, for the inodes of one slot, since the purge list is keyed by inode and the purger consumes runs of entries across inodes. It holds each file's size, `alloc_end` and the byte contents of its chunks (chunks of 2 blocks of 2 bytes, each byte zero or not), the slot's purge list, writers on two nodes, the purger, sessions that can be fenced, an inode owner that can fail over, and crashes of daemons and of the purger. Chunk writes and the purger's punches are messages that can arrive late; MetaStore transactions are single steps.
 
 **Rules the model contains**
 
-- Before writing a chunk at or past `alloc_end`, a daemon raises `alloc_end`. The same transaction commits the size of what it has already written.
-- Unlink. If no one has the file open, one transaction deletes the inode and adds a purge entry for chunks `0 .. alloc_end`. If it is still open, the inode goes on the orphan list instead. It moves to the purge list at its last close, and only after any failover grace period. A fenced session's opens count as closed only once its fence version is acknowledged.
-- Truncate down. One transaction commits the new size, `alloc_end` lowered to the new end, and a purge entry from the new size's *byte offset* to the old `alloc_end`. The entry's first punch zeroes the rest of the block holding the new end (a merge) and the rest of that chunk. The daemon runs that punch before `truncate` returns, and the purger runs it again after a crash. The purger then deletes the whole chunks after it.
-- Anything that extends the file over a range with a pending purge (a write raising `alloc_end`, a write or truncate that raises the size over the range) first finishes that purge.
-- One purge entry per inode: a new purge range for an inode with a pending entry is merged into it as their union, with a check that the entry still holds what was read.
-- The purger removes an entry it finished with a check that it still holds what the purger read, and a consumed run of entries with one range removal carrying a check on each entry and a check that each gap between them is empty.
-- A punch to a chunk that does not exist succeeds.
-- Reads are clamped to the size.
-- Crashes can happen at any step, and the purger restarts from the purge list.
+- Before writing a chunk at or past `alloc_end`, a daemon raises `alloc_end`, to any later chunk, so every sequence of raises the design's doubling steps allow is covered.
+- Unlink. If no one has the file open, one transaction deletes the inode and adds a purge entry for chunks `0 .. alloc_end`. If the owner sees it open, or is in its grace period, the inode goes on the orphan list instead. It moves to the purge list at its last close, and only after any grace period. A fenced session's opens count as closed only once its fence version is acknowledged.
+- Truncate down. One transaction commits the new size, `alloc_end` lowered to the new end, and a purge entry from the new size's *byte offset* to the old `alloc_end`. The purger runs its punches: the first zeroes the rest of the block holding the new end (a merge) and the rest of that chunk, the others delete whole chunks.
+- Anything that extends the file over a range with a pending purge (a write raising `alloc_end` or starting past the size, a truncate upward) waits for that purge, and writes nothing into the gap below its own start.
+- The purger runs an inode's entry only once the file is drained: every chunk write sent under a size older than the current one has returned, and a write sends its chunk under the newest size, so one that has become an extension waits for the purge too.
+- An extending write commits its size with a check on the attributes it read; if the check fails it reads again and sends its chunk write again, raising `alloc_end` again first if a truncate lowered it.
+- One purge entry per inode: a new purge range for an inode with a pending entry is merged into it as their union.
+- The purger removes a consumed run of entries with one range removal carrying a check on each entry and a check that each gap between them is empty. Its punches carry its term, and a chunk's primary rejects a punch from an older term once it has seen a newer one.
+- A punch to a chunk that does not exist succeeds. Reads are clamped to the size.
+- A crashed daemon's chunk writes already sent can still land; its successor closes none of its files until the old incarnation is fenced through the session table.
+- The purger records progress through an entry by rewriting it, with a check, to start at the next chunk to punch, once every punch before that chunk has completed.
+- Crashes can happen at any step, and the purger restarts from the purge list in a newer term, resuming each entry from its recorded progress.
 
 **Properties and their simulator invariants**
 
-| Property | Simulator invariant |
-| --- | --- |
-| An interrupted purge reruns safely: running a purge entry again after any prefix of its punches leaves the same state as running it once | "once a purge settles, no chunk of a deleted inode or volume remains outside what snapshots hold"; "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" |
-| A purge never deletes newer data: no write acknowledged after the purge entry's transaction loses a byte to that purge | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" |
-| Once a file's purge has run, no byte past its size is non-zero on disk, and an extension never exposes one | "no byte past a file's size is non-zero on disk once its purge has run"; "a truncated or punched range reads as zeros" |
-| An orphaned inode is never freed while a live session has it open | "an orphaned inode is never freed while a live session has it open" |
-
-**A rule removed, and the counterexample the model must find**
-
-| Rule removed or changed | Counterexample | Property violated |
+| Property | Model invariant | Simulator invariant |
 | --- | --- | --- |
-| The truncate's purge entry starts at the next chunk boundary, not at the new size's byte offset | A truncate to an unaligned size, then an extension, reads the old tail bytes | No byte past size non-zero; extension exposes none |
-| The tail is zeroed only in memory before the size commits (XFS commit `5885ebda`, 2015) | A crash between the size commit and the zeroing leaves old bytes past the size on disk, and a later extension shows them | Same |
-| The first punch skips the partial block (FreeBSD fusefs `e312493b`, 2019, found by `fsx`) | The final partial block keeps its stale tail | Same |
-| An extension does not finish the pending purge first | A write lands in the purge range, then the purger punches it | Purge never deletes newer data |
-| `alloc_end` is raised after the chunk write instead of before | A crash after the chunk write leaves a chunk past `alloc_end`, and a later unlink's purge misses it | No chunk of a deleted inode remains |
-| A punch to a missing chunk is an error | A rerun after a crash fails on the chunks already deleted | An interrupted purge reruns safely |
-| Unlink frees an open file at once | Another node's open handle reads a purged chunk | Orphan never freed while open |
-| An orphan moves to the purge list during an owner failover's grace period | A node that has not re-registered yet still holds the file open | Same |
-| An orphan held by a fenced session is released when the fence commits, not when its version is acknowledged | The fenced holder's queued write lands after the purge | No chunk of a deleted inode remains |
-| A new purge entry for an inode with a pending one overwrites it | A truncate, then an unlink before the purge runs: the unlink's `0 .. alloc_end` at the lowered `alloc_end` replaces the truncate's range, and the chunks above it are never deleted | No chunk of a deleted inode remains |
-| The consumed run is removed without checks | The purger scans entries for inodes 1 and 3, an unlink adds inode 2's entry between them, and the range removal deletes it unpurged | No chunk of a deleted inode remains |
+| An interrupted purge reruns safely: running a purge entry again after any prefix of its punches fails no punch and leaves the state one run leaves | `RerunSafe` | "a purge rerun after a crash fails no punch" |
+| A purge never deletes newer data: no acknowledged byte is zeroed except by a truncate or unlink that cut it, and an extending write's byte is on disk when it is acknowledged | `NeverDeletesNewer` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" |
+| Once a file's purge has run, no byte a truncate or unlink cut off is non-zero on disk | `TruncatedBytesZero` | "no byte a truncate or unlink cut off is non-zero on disk once its purge has run" |
+| An extension never exposes a cut byte, nor one that a write which read an older size landed past the cut | `ExtensionNeverExposes` | "an extension never exposes a byte a truncate cut off" |
+| Once a deleted inode's purge has settled, none of its chunks remains | `NoChunkOfDeletedInode` | "once a purge settles, no chunk of a deleted inode or volume remains outside what snapshots hold" |
+| An orphaned inode is never freed while a live session has it open | `OrphanNotFreedWhileOpen` | "an orphaned inode is never freed while a live session has it open" |
+| Every purge entry is eventually removed (`deep` only, under a fair purger and with chunk writes arriving) | `PurgeSettles` | None: a purge entry pending forever shows as a chunk the settle invariant finds once the run ends, so the simulator needs no liveness check of its own |
 
-**Scripted scenarios.** Byte numbers are for a real 4 MiB chunk and 4 KiB block; scale them down for the model.
+The property covers the bytes a truncate or unlink cut off and those a write that read an older size landed past the size, not every byte past the size: an extending write whose daemon crashed can land without its size commit, and a later extension may show it, as a write that never returned may take effect. The drain is what keeps a write that read the size before a truncate from landing past the cut after the purge ran; zeroing an extension's gap does not, since the stale write can land in the gap after it was zeroed ([Freeing space](design.md#freeing-space)).
+
+**A rule removed, and the counterexample the model finds**
+
+Each row is a negative configuration in `models/purge/` that TLC must stop at its property.
+
+| Configuration | Rule removed or changed | Counterexample | Property violated |
+| --- | --- | --- | --- |
+| `neg-trunc-at-chunk` | The truncate's purge entry starts at the next chunk boundary, not at the new size's byte offset | A truncate to an unaligned size: the cut bytes of its last chunk stay after the purge | `TruncatedBytesZero` |
+| `neg-tail-in-memory` | The tail is zeroed only in memory before the size commits (XFS commit `5885ebda`, 2015) | A daemon crash before the zeroed tail reaches the disk leaves old bytes past the size after the purge | Same |
+| `neg-skip-partial-block` | The first punch skips the partial block (FreeBSD fusefs `e312493b`, 2019, found by `fsx`) | The final partial block keeps its stale tail | Same |
+| `neg-daemon-punch` | The truncating daemon sends the first punch itself | Its punch lands after the purger finished the entry and another node extended the file and wrote there, and zeroes that write | `NeverDeletesNewer` |
+| `neg-extend-over-purge` | An extension does not wait for the pending purge | A write lands in the purge range, then the purger punches it | Same |
+| `neg-no-rewrite` | An extending write whose size check failed commits without writing its bytes again | Its byte lands, a truncate from another node cuts below it, its size commit waits for the purge, which zeroes the byte, and it commits and is acknowledged over zeros | Same |
+| `neg-no-drain` | The purger runs a truncate's entry without draining the file | A write that read size 7 lands at byte 6 after a truncate to 5 and its purge; a truncate up to 8 shows it | `ExtensionNeverExposes` |
+| `neg-purger-no-term` | Primaries accept punches from an older purger term | A crashed purger's punch lands after its successor finished the entry and the file was extended and written | `NeverDeletesNewer` |
+| `neg-progress-before-punch` | The purger records progress past a chunk while its punch is still in flight | It crashes; its successor resumes past that chunk, finishes the entry, and the file is extended and written there; the old punch then lands on a chunk that never saw the newer term | Same |
+| `neg-raise-after-write` | `alloc_end` is raised after the chunk write instead of before | A crash after the chunk write leaves a chunk past `alloc_end`, and a later unlink's purge misses it | `NoChunkOfDeletedInode` |
+| `neg-missing-punch-fails` | A punch to a missing chunk is an error | A rerun after a purger crash fails on the chunks already deleted | `RerunSafe` |
+| `neg-no-incarnation-fence` | A crashed daemon's successor closes its files before the old incarnation is fenced | The dead process's chunk write lands after the unlinked file's purge punched that chunk | `NoChunkOfDeletedInode` |
+| `neg-unlink-open` | Unlink frees an open file at once | Another node still has it open when it is purged | `OrphanNotFreedWhileOpen` |
+| `neg-orphan-in-grace` | An orphan moves to the purge list during an owner failover's grace period | A node that has not re-registered yet still holds the file open | Same |
+| `neg-grace-by-time` | The grace period ends on time alone | It ends before a live node that holds the file open re-registered, and the orphan is freed | Same |
+| `neg-release-on-commit` | An orphan held by a fenced session is released when the fence commits, not when its version is acknowledged | The fenced holder's queued write lands after the purge | `NoChunkOfDeletedInode` |
+| `neg-overwrite-entry` | A new purge entry for an inode with a pending one overwrites it | A truncate, then an unlink before the purge runs: the unlink's `0 .. alloc_end` at the lowered `alloc_end` replaces the truncate's range, and the chunks above it are never deleted | Same |
+| `neg-unchecked-removal` | The consumed run is removed without checks | The purger scans entries for inodes 1 and 3, an unlink adds inode 2's entry between them, and the range removal deletes it unpurged | Same |
+
+**Scripted scenarios.** Byte numbers are for a real 4 MiB chunk and 4 KiB block; the model's runs cover each with 4-byte chunks.
 
 1. **Truncate to an unaligned size, then extend.** A 10,000-byte file of 0xAA has `alloc_end` 1, with its bytes in blocks 0 to 2 of chunk 0.
-   - `truncate(5000)` commits size 5,000, `alloc_end` 1, and a purge entry from byte 5,000 to the end of chunk 0 (old `alloc_end` 1).
-   - The first punch merges block 1, zeroing bytes 5,000 to 8,191, and punches blocks 2 to 1,023 of chunk 0.
-   - `truncate(10000)` then extends the file.
+   - `truncate(5000)` commits size 5,000, `alloc_end` 1, and a purge entry from byte 5,000 to the end of chunk 0 (old `alloc_end` 1), and returns.
+   - The purger's first punch merges block 1, zeroing bytes 5,000 to 8,191, and punches blocks 2 to 1,023 of chunk 0.
+   - `truncate(10000)` then extends the file, after the purge, writing nothing into bytes 5,000 to 9,999.
    - Expected: bytes 5,000 to 9,999 read zero, and on disk bytes 5,000 to 8,191 of block 1 are zero.
-2. **The same, crashing between the truncate's transaction and its punch.** The daemon crashes after committing size 5,000, before the punch. Until the purger runs it again, reads stop at 5,000, and the extension waits for the purge to finish. Expected: as in scenario 1.
-3. **The same, crashing in the middle of the punch's record.** The record is torn and not durable. Expected: the purger runs the whole punch again, with the same result as scenario 1.
+2. **The same, extending before the purger runs.** `truncate(10000)` waits for the purge, which the purger runs at once. Until it has run, reads stop at 5,000. Expected: as in scenario 1.
+3. **The same, with the purger crashing in the middle of the punch's progress record.** The record is torn and not durable. Expected: the next purger, in a newer term, runs the entry from the progress recorded before it, here its start, with the same result as scenario 1.
 4. **Truncate to a block boundary.** Truncating a 10,000-byte file to 8,192 needs no merge: blocks 2 to 1,023 of chunk 0 are punched.
 5. **Truncate across chunks.** A 16 MiB file (`alloc_end` 4) is truncated to 4 MiB + 100 bytes. The transaction commits `alloc_end` 2 and a purge entry from byte 4,194,404 to the end of chunk 3 (old `alloc_end` 4). The first punch zeroes bytes 100 to 4,095 of chunk 1's block 0 by a merge, and punches the rest of chunk 1. The purger then deletes chunks 2 and 3.
 6. **Truncate to 0.** The entry covers chunks `0 .. alloc_end`. The first punch deletes chunk 0 whole, with no merge.
 7. **Crash in the middle of a long purge.**
    - An unlinked file with `alloc_end` 1,000. The purger crashes after 400 chunks.
-   - On restart it reruns the entry. The punches of the 400 deleted chunks succeed, and the purge ends with no chunk left.
+   - It had recorded progress at chunk 384, every punch below it complete. On restart it resumes the entry there in a newer term. The punches of chunks 384 to 399, already deleted, succeed, and the purge ends with no chunk left. A punch the old leader sent and the network held is rejected wherever the new leader's punch arrived first; none can be for a chunk below 384.
    - The entry is removed, with a check that it still holds what the purger read, once the purge finishes. A consumed run of entries goes with one range removal carrying a check per entry and per gap (design: "Lists consumed in key order").
 8. **Unlink racing a write from another node.**
    - Node B has the file open and is writing chunk 3 (`alloc_end` 4). Node A unlinks it.
    - Expected: the inode goes on the orphan list, with no purge while B has it open. B's writes keep working, and its `alloc_end` raises commit against the orphaned inode.
    - At B's last close, after any grace period, the inode moves to the purge list with chunks `0 .. alloc_end`, and the purge covers every chunk B wrote.
 9. **An orphan whose holder is fenced.** As in scenario 8, but B's session is fenced while it holds the file open, with a write to chunk 3 still queued. Expected: the orphan moves to the purge list only after the fence's version is committed as acknowledged, so B's queued write is rejected before the purge runs.
-10. **Extension racing a pending purge.**
+10. **An orphan whose holder's daemon crashed.** As in scenario 8, but B's daemon crashes with a flush to chunk 3 in its socket. Expected: B's successor closes the file only once its new incarnation's session-table version is acknowledged, so the old flush is rejected before the purge runs.
+11. **Extension racing a pending purge.**
     - A 16 MiB file (`alloc_end` 4) is truncated to 5,000. Before the purger deletes chunks 1 to 3, a write at 9 MiB on node B raises `alloc_end` from 1 to 3.
-    - Expected: the purge finishes first, then the write lands, and a rerun of the entry leaves it alone.
-    - Variant: the daemon crashed before the first punch. A write at 3 MiB extends the size over the pending range without raising `alloc_end`, and it also finishes the purge first.
-11. **Truncate, then unlink before the purge runs.** A 16 MiB file (`alloc_end` 4) is truncated to 5,000, leaving a purge range from byte 5,000 to the end of chunk 3 and `alloc_end` 1; it is then unlinked. Expected: the entry becomes the union, `0 .. 4`, and once the purge settles no chunk of the inode remains.
-12. **Two truncates.** The same file truncated to 8 MiB, then to 5,000, before the purger runs. Expected: the entry covers both ranges, and every chunk past the final size is deleted.
-13. **An unlink of a lower inode between the purger's scan and its range removal.** The purger scans entries for inodes 1 and 3 and purges them; inode 2 is unlinked, adding its entry between them; the purger then removes the run. Expected: the removal's check over the gap fails, inode 2's entry survives, and a later pass purges it.
+    - Expected: the purge finishes first, then the write lands, with nothing written from 5,000 to 9 MiB, which reads as zeros, and a rerun of the entry leaves it alone.
+    - Variant: a write at 3 MiB extends the size over the pending range without raising `alloc_end`, and it also waits for the purge first.
+12. **A write racing a truncate from another node.** A 16 MiB file is open on nodes A and B. B writes at 9 MiB, having read the size first; A truncates the file to 5,000. Before the purge the owner drains the file: B takes size 5,000 and answers once its write has returned, so the write lands before the purge, which zeroes it. A then extends the file to 16 MiB. Expected: bytes 5,000 to 16 MiB read as zeros, and B's bytes never show. If B's write was itself an extension, its size check fails, and it writes its bytes again after the purge before it commits the size. Variant: B is partitioned from the owner; the purge waits until B is fenced and its fence acknowledged, and A's extension waits for the purge.
+13. **Truncate, then unlink before the purge runs.** A 16 MiB file (`alloc_end` 4) is truncated to 5,000, leaving a purge range from byte 5,000 to the end of chunk 3 and `alloc_end` 1; it is then unlinked. Expected: the entry becomes the union, `0 .. 4`, and once the purge settles no chunk of the inode remains.
+14. **Two truncates.** The same file truncated to 8 MiB, then to 5,000, before the purger runs. Expected: the entry covers both ranges, and every chunk past the final size is deleted.
+15. **An unlink of a lower inode between the purger's scan and its range removal.** The purger scans entries for inodes 1 and 3 and purges them; inode 2 is unlinked, adding its entry between them; the purger then removes the run. Expected: the removal's check over the gap fails, inode 2's entry survives, and a later pass purges it.
 
-Open:
+Snapshots taken while a purge runs (punches carrying the snapshot epoch) are left to the phase 11 snapshot-cut model.
 
-- The exact sequence of `alloc_end` raises. The design says "in steps that double up to 16 chunks" and "at most 64 MiB behind", but not whether the step sizes or the values double.
-- Snapshots taken while a purge runs (punches carrying the snapshot epoch) are phase 11, outside this model.
+**Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc); results in the [Model-to-simulator map](#model-to-simulator-map)). Every configuration has chunks of 2 blocks of 2 bytes and 2 chunks per file:
 
-**Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc)): `ci` with 2 inodes of 2 chunks of 4 blocks of 4 bytes, 2 writers, 2 truncates, 1 unlink and up to 2 crashes; `deep` the same with up to 3 crashes.
+- `ci-list`: 3 inodes of 7 bytes, no writes, truncates to 1 or 5 bytes, up to 2 truncates, 2 unlinks and 1 crash (daemon or purger). Two inodes are the slot's list; the third is the one unlinked inside the purger's run.
+- `ci-write`: 1 inode of 7 bytes open on 2 nodes, up to 2 writes at bytes 2 and 6, 2 truncates to 1, 5 or 8 bytes and 2 crashes.
+- `ci-extend`: 1 inode of 3 bytes open on 2 nodes, up to 2 writes at bytes 4 and 6, both extensions, 2 truncates to 2 or 8 bytes and 2 crashes, so two extensions at different offsets overlap.
+- `ci-orphan`: 1 inode of 3 bytes open on 2 nodes, up to 2 writes at byte 5 (past `alloc_end`), 1 unlink, 1 fence, 1 owner failover and 1 crash.
+- `deep-list`: `ci-list` with 2 crashes, safety only, since its liveness check does not finish in 4 hours; `deep-write` and `deep-orphan` add a crash to theirs, and to `deep-orphan` a write, and check `PurgeSettles` under a fair purger, with chunk writes arriving, since a drain waits for them.
 
 ## Model-to-simulator map
 
@@ -3420,16 +3481,40 @@ Open:
 | Epoch change | A new primary merges into a chunk only once it holds every version peering kept | None named. Open: the byte-range oracle catches the effect (a merge on a missing base); the map must say so or the design must add one | Placement faults and invariants (phase 3) |
 | Epoch change | Table epochs and interval numbers never go backwards | No node's table epoch or PG interval number goes backwards | Placement faults and invariants (phase 3) |
 | Epoch change | Once a reissue and a later write to the same block are acknowledged, the block never again holds the dead daemon's write | Every read returns exactly the bytes of the acknowledged writes and punches applied in version order (the byte-range oracle), under the fault "a dead daemon's chunk write delivered after its successor's reissue and the pod's next write to the same block" | Invariant checker (phase 1) |
-| Sessions and fencing | No fence commits while the client's own lease still runs | No session is fenced while its client's own lease still runs | Phase 6 file frontend (sessions and fencing) |
-| Sessions and fencing | No fenced session's write is applied | No fenced session's write is applied | Phase 6 file frontend |
-| Sessions and fencing | No lock reaches a new holder while a primary would still accept the old holder's writes | No lock is granted to a new holder while a primary would still accept the fenced holder's writes | Phase 6 file frontend |
-| Cache-mode recall | No stale read in WriteShared mode | No client reads stale data from a file in WriteShared mode | Phase 7 (Tier 2) |
-| Purge | An interrupted purge reruns safely | Open: no invariant checks a purge rerun directly; "once a purge settles, no chunk of a deleted inode or volume remains outside what snapshots hold" catches only leftovers | Phase 6 file frontend |
-| Purge | A purge never deletes newer data | Every acknowledged write is readable (with the byte-range oracle) | Invariant checker (phase 1) |
-| Purge | Once a file's purge has run, no byte past its size is non-zero, and an extension never exposes one | A truncated or punched range reads as zeros, and no byte past a file's size is non-zero on disk once its purge has run | Phase 6 file frontend |
 
-- Open: the checklist has no phase 6 or 7 items yet, so the "Registered by" entries for sessions,
-  recalls and purges name the roadmap phase.
+**Configuration results.** Each `ci` run as `scripts/models.sh ci` printed it, and each `deep` run as
+`scripts/models.sh deep` printed it, with 4 workers and a 4 GB heap on a Mac mini running two other
+4-worker TLC jobs. Constants are in each configuration's first line and in its model's section.
+
+| Model | Configuration | Constants | Depth | Distinct states | Wall time |
+| --- | --- | --- | --- | --- | --- |
+| Sessions and fencing | `ci-lease` | 1 client, 2 leader nodes, 2 terms, rates 16 or 20, `lease_drift` 1/8, 80-unit lease, `dead_wait` 100, a VM stop | 46 | 16,494,694 | 79 s |
+| Sessions and fencing | `ci-evict` | `ci-lease` with an eviction instead of the stop | 42 | 4,355,364 | 23 s |
+| Sessions and fencing | `ci-rates` | 1 leader node, 2 terms, a reboot, a rate rise, a lost message, 81-unit lease | 49 | 17,276,860 | 101 s |
+| Sessions and fencing | `ci-fence` | 2 clients, a lock, 2 storage nodes, 3-tick lease, 2 writes, a partition | 43 | 12,988,660 | 138 s |
+| Sessions and fencing | `ci-faults` | `ci-fence` without the partition, 1 write in flight per client, a stop, a stall, an eviction, a crash | 37 | 4,453,074 | 40 s |
+| Cache-mode recall | `ci` | 3 nodes, 1 handle each, 2 writes | 46 | 2,541,598 | 33 s |
+| Cache-mode recall | `ci-failover` | 2 nodes, 2 writes, an owner failover, a lost message, a pause, a lease lapse | 41 | 14,447,464 | 131 s |
+| Cache-mode recall | `ci-handles` | 2 nodes, 2 handles each, 3 writes | 40 | 247,682 | 3 s |
+| Cache-mode recall | `ci-extend` | 2 nodes, a region past the size, 2 writes | 37 | 398,236 | 5 s |
+| Purge | `ci-list` | 3 inodes, truncates to 1 or 5, 2 truncates, 2 unlinks, 1 crash | 60 | 3,741,390 | 54 s |
+| Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
+| Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
+| Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
+| Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
+| Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
+| Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
+| Sessions and fencing | `deep-fence` | `ci-fence` with 1 write in flight per client, 2 terms on 2 nodes, a crash | 46 | 230,448,876 | 2,582 s |
+| Sessions and fencing | `deep-release` | `deep-fence` with no writes, `CrashedClientReleased` | 33 | 6,463,560 | 506 s |
+| Cache-mode recall | `deep` | `ci-failover` with 2 owner failovers | 49 | 138,142,376 | 1,719 s |
+| Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
+| Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
+| Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
+
+- The sessions, recall and purge models name the simulator invariant of each property in their own
+  sections' property tables, so they have no rows here. Open: the checklist has no phase 6 or 7
+  items yet; their invariants are registered with the phase 6 file frontend, and the recall
+  model's with phase 7 (Tier 2).
 - The epoch change model's counterexamples (a member logging one version out of order, a new primary
   merging before it holds a kept version, peering that stops only the previous interval, comparing
   member lists instead of interval numbers, a restarted primary peering in its old interval,
