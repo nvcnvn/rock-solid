@@ -23,6 +23,8 @@ internal/chunkstore TestReplayPastPendingWrites 2000
 internal/lsm TestMetamorphic 1000
 internal/chunkstore TestMetamorphic 1000
 internal/chunkstore TestCleanerSurvivesCrashes 500
+internal/chunkstore TestRecoveryAndRebuildEqualLiveIndex 200
+internal/chunkstore TestRecoveriesMatchTheCrashOracle 200
 "
 
 cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)

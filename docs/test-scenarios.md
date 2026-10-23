@@ -1396,11 +1396,12 @@ chunk freezes it, absent for a chunk with no version, and two of the chunks are 
 after the first cut. Every recovery is checked against the crash oracle ([Chunk index under the
 crash oracle](#chunk-index-under-the-crash-oracle)).
 
-- [property] Seeds 0-3, three generations of 150 rounds (`TestRecoveryAndRebuildEqualLiveIndex`):
-  after each, recovery from the manifest's runs plus replay, and then a rebuild from every record
-  header, as a failed run check starts, both equal the live index. Every recovery loads runs and
-  replays records past its manifest, and every seed writes multi-piece runs, carries runs, merges
-  and cuts.
+- [property] Seeds 0-3, 200 in `scripts/seeds.sh`, three generations of 150 rounds
+  (`TestRecoveryAndRebuildEqualLiveIndex`): after each, recovery from the manifest's runs plus
+  replay, and then a rebuild from every record header, as a failed run check starts, both equal
+  the live index. On its own four seeds every recovery loads runs and replays records past its
+  manifest, and every seed writes multi-piece runs, carries runs, merges and cuts; a widened run
+  checks only the equalities.
 - A lost checkpoint carrying merge output (seeds 0-3, `TestCrashBetweenRunAndManifest`): after
   three manifests, the first checkpoint that writes a merge step's pieces to a merge worker's lane
   is crashed once its manifest record is durable and before any segment header names it. Recovery
@@ -2644,13 +2645,14 @@ for a version frozen twice.
   must pass its own `Check`, which every chunkstore test's model check runs, and neither the index
   nor the model may hold a chunk outside the workload. A recovery that invents a chunk, or counts
   one more block against a record than its maps refer to, fails on seed 0's first recovery.
-- [property] `TestRecoveriesMatchTheCrashOracle`: seeds 0-7, six crashes each at a random write or
-  flush, each unflushed block landing at random, of the recovery tests' workload, so checkpoints,
-  merges and freezes, absent ones among them, run between them. The run must reach a recovery that
-  keeps a record past the acknowledged LSN, recoveries that load runs and frozen maps, recoveries
-  holding a chunk frozen absent and one written after its absent freeze, and a crashed recovery
-  that had erased records. A snapshot lookup that misses the absent version (`frozenIn` skipping
-  version 0's marker) trips the oracle at the first recovery.
+- [property] `TestRecoveriesMatchTheCrashOracle`: seeds 0-7, 200 in `scripts/seeds.sh`, six
+  crashes each at a random write or flush, each unflushed block landing at random, of the recovery
+  tests' workload, so checkpoints, merges and freezes, absent ones among them, run between them.
+  Across its own eight seeds the run must reach a recovery that keeps a record past the
+  acknowledged LSN, recoveries that load runs and frozen maps, recoveries holding a chunk frozen
+  absent and one written after its absent freeze, and a crashed recovery that had erased records.
+  A snapshot lookup that misses the absent version (`frozenIn` skipping version 0's marker) trips
+  the oracle at the first recovery.
 - Crash during recovery, then recovery again: every other recovery of the property is crashed
   before its final flush, with its erasures landing at random. The oracle's window is unchanged
   by it, and the recovery run again reports the LSN the crashed one had found.
@@ -2771,6 +2773,8 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/chunkstore` `TestReplayPastPendingWrites` | 2,000 | 9 s |
   | `internal/lsm` `TestMetamorphic` | 1,000 | 44 s |
   | `internal/chunkstore` `TestMetamorphic` | 1,000 | 55 s |
+  | `internal/chunkstore` `TestRecoveryAndRebuildEqualLiveIndex` | 200 | 55 s on 2 processes |
+  | `internal/chunkstore` `TestRecoveriesMatchTheCrashOracle` | 200 | 48 s on 2 processes |
 
 - A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
   under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed

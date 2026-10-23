@@ -153,12 +153,14 @@ func written(h *harness) (pieces, manifests int, newest uint64) {
 }
 
 // [property] Rebuilding the index from every record header, and recovering it from the manifest's
-// runs plus replay, both give the live index exactly, across restarts.
+// runs plus replay, both give the live index exactly, across restarts. Each of the test's own seeds
+// must load runs and replay records at every recovery, and write multi-piece runs, carry runs,
+// merge and cut.
 func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
 	seeds.Run(t, 0, 4, func(seed uint64) {
 		h := newRecoveryHarness(t)
 		w := &workload{r: rand.New(rand.NewPCG(seed, 7))}
-		carried := 0
+		carried, unloaded := 0, 0
 		for generation := range 3 {
 			w.run(h, 150)
 			live := dumpIndex(h.s.Index())
@@ -168,7 +170,7 @@ func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
 			}
 			runs := h.s.Index().Tree().Runs()
 			if runs == 0 || h.recoveredLSN <= h.loaded.LSN {
-				t.Fatalf("seed %d generation %d: %d runs, recovered to LSN %d from the manifest at %d", seed, generation, runs, h.recoveredLSN, h.loaded.LSN)
+				unloaded++
 			}
 			carried = max(carried, runs-1)
 			if got := h.rebuild(); !slices.Equal(got, live) {
@@ -176,8 +178,8 @@ func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
 			}
 		}
 		pieces, manifests, _ := written(h)
-		t.Logf("seed %d: %d manifests of %d run pieces, %d runs carried, %d merges, %d cuts", seed, manifests, pieces, carried, len(h.merges), w.epoch)
-		if pieces <= manifests || carried == 0 || len(h.merges) == 0 || w.epoch == 0 {
+		t.Logf("seed %d: %d manifests of %d run pieces, %d runs carried, %d merges, %d cuts, %d recoveries without runs or replay", seed, manifests, pieces, carried, len(h.merges), w.epoch, unloaded)
+		if seeds.Default() && (unloaded > 0 || pieces <= manifests || carried == 0 || len(h.merges) == 0 || w.epoch == 0) {
 			t.Fatalf("seed %d: the workload missed a case", seed)
 		}
 	})
@@ -371,12 +373,15 @@ func crashCycles(t *testing.T, seed uint64, plant plants, st *oracleStats) error
 // again reports the LSN it had found.
 func TestRecoveriesMatchTheCrashOracle(t *testing.T) {
 	var st oracleStats
-	for seed := range uint64(8) {
+	seeds.Run(t, 0, 8, func(seed uint64) {
 		if err := crashCycles(t, seed, plants{}, &st); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
-	}
+	})
 	t.Logf("%+v", st)
+	if !seeds.Default() {
+		return
+	}
 	if st.kept == 0 || st.erasedThenCrashed == 0 || st.withRuns < st.recoveries/2 || st.withFreezes == 0 || st.absent == 0 || st.writtenAfterAbsent == 0 {
 		t.Fatalf("the crashes missed a case: %+v", st)
 	}
