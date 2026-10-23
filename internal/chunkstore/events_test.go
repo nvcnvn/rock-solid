@@ -52,6 +52,7 @@ func TestWriteOfSeveralItems(t *testing.T) {
 // write's version continues past it.
 func TestPartlyDurableWrite(t *testing.T) {
 	h := newHarness(t, testConfig())
+	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 	rec := len(h.records)
 	w := h.write(chunkC, 0, fill(core.ChunkSize, 0x5a), 0)
 	first := uint64(0)
@@ -135,13 +136,8 @@ func TestNoSpaceFailsInSubmitOrder(t *testing.T) {
 	if failedFrom <= 0 {
 		t.Fatalf("first failure at %d", failedFrom)
 	}
-	o := newByteOracle()
-	for i := range failedFrom {
-		v := h.ok(ids[i])
-		o.apply(t, chunkC, uint32(i%8)*core.BlockSize+1, 1, []byte{byte(i)}, v, 0)
-	}
-	if msg := o.diff(h, 0, 7); msg != "" {
-		t.Fatal(msg)
+	for _, id := range ids[:failedFrom] {
+		h.ok(id)
 	}
 	if h.pool.Live() != h.liveBefore() {
 		t.Fatalf("%d buffers outstanding", h.pool.Live()-h.liveBefore())
@@ -152,7 +148,6 @@ func TestNoSpaceFailsInSubmitOrder(t *testing.T) {
 func TestCheckpointFailedKeepsFrozenMemtable(t *testing.T) {
 	cfg := testConfig()
 	h := smallDisk(t, cfg)
-	o := newByteOracle()
 	for i := 0; ; i++ {
 		id := h.write(chunkC, uint32(i%8)*core.BlockSize, fill(core.BlockSize, byte(i)), 0)
 		h.settle()
@@ -160,7 +155,6 @@ func TestCheckpointFailedKeepsFrozenMemtable(t *testing.T) {
 		if r.Err != nil {
 			break
 		}
-		o.apply(t, chunkC, uint32(i%8)*core.BlockSize, core.BlockSize, fill(core.BlockSize, byte(i)), r.Version, 0)
 	}
 	tree := h.s.Index().Tree()
 	runs := tree.Runs()
@@ -171,9 +165,6 @@ func TestCheckpointFailedKeepsFrozenMemtable(t *testing.T) {
 	if !tree.Frozen() || tree.Runs() != runs || h.s.checkpointing {
 		t.Fatalf("after the failed checkpoint: frozen %v, %d runs (had %d)", tree.Frozen(), tree.Runs(), runs)
 	}
-	if msg := o.diff(h, 0, 7); msg != "" {
-		t.Fatal(msg)
-	}
 	if got := h.readNow(chunkC, 0, 1); len(got) != 1 {
 		t.Fatal("reads stopped")
 	}
@@ -183,6 +174,7 @@ func TestCheckpointFailedKeepsFrozenMemtable(t *testing.T) {
 // the disk's error, and the store refuses writes until it is opened again.
 func TestInDoubt(t *testing.T) {
 	h := newHarness(t, testConfig())
+	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 	h.disk.Inject(sim.Fault{Effect: sim.FailIO, When: sim.OnKind(core.ActDiskFsync)})
 	a := h.write(chunkC, 0, []byte{1}, 0)
 	b := h.write(chunkC, 1, []byte{2}, 0)
@@ -208,14 +200,13 @@ func TestRunCheckRebuilds(t *testing.T) {
 	cfg := testConfig()
 	cfg.Log.MaxReplayBytes = 32 * core.BlockSize
 	h := newHarness(t, cfg)
-	o := newByteOracle()
 	r := core.NewRand(9)
 	write := func(i int) {
 		off := uint32(r.Below(16 * core.BlockSize))
 		data := fill(1+int(r.Below(3*core.BlockSize)), byte(i))
 		id := h.write(chunkC, off, data, uint64(i/10))
 		h.settle()
-		o.apply(t, chunkC, off, uint32(len(data)), data, h.ok(id), uint64(i/10))
+		h.ok(id)
 	}
 	for i := range 30 {
 		write(i)
@@ -232,19 +223,12 @@ func TestRunCheckRebuilds(t *testing.T) {
 		h.step()
 	}
 	h.settle()
-	for i, id := range ids {
-		if r := h.reply(id); r.Err == nil {
-			o.apply(t, chunkC, 0, 1, []byte{byte(i)}, r.Version, 3)
-		}
-	}
 	if refused == 0 || h.s.logGen != gen+1 {
 		t.Fatalf("%d writes refused, %d restarts of the log", refused, h.s.logGen-gen)
 	}
-	o.check(t, h, 0, 20, 3)
 	for i := 40; i < 60; i++ {
 		write(i)
 	}
-	o.check(t, h, 0, 20, 5)
 }
 
 // A merge that fails its run check takes the same path: the store rebuilds its index from the
@@ -254,14 +238,13 @@ func TestMergeCheckRebuilds(t *testing.T) {
 	cfg := testConfig()
 	cfg.Log.MaxReplayBytes = 16 * core.BlockSize
 	h := newHarness(t, cfg)
-	o := newByteOracle()
 	var c *lsm.Compaction
 	for i := 0; c == nil; i++ {
 		if i > 500 {
 			t.Fatal("no merge became due")
 		}
 		off := uint32(i%16) * core.BlockSize
-		o.apply(t, chunkC, off, 7, fill(7, byte(i)), h.sync(h.write(chunkC, off, fill(7, byte(i)), 0)), 0)
+		h.sync(h.write(chunkC, off, fill(7, byte(i)), 0))
 		c = h.s.MergeDue()
 	}
 	c.Run()
@@ -279,7 +262,6 @@ func TestMergeCheckRebuilds(t *testing.T) {
 	if a := h.s.adm; a.measured || a.rate != 0 || a.tokens != 0 || a.carry != 0 {
 		t.Fatalf("the rebuilt store's bucket kept the old log's: measured %v, rate %v, tokens %v, carry %v", a.measured, a.rate, a.tokens, a.carry)
 	}
-	o.check(t, h, 0, 15, 0)
 }
 
 // A run check that fails again after a rebuild, before any checkpoint completes, stops the store
@@ -305,11 +287,15 @@ func TestARunCheckFailingAfterARebuildStopsTheStore(t *testing.T) {
 
 // rebuild breaks the index as a run check failing first since a checkpoint does, runs the store
 // until the index rebuilt from the log serves, and returns that index as the recovery left it,
-// before the cleaner or a checkpoint changes it. Settled after the rebuild, the store holds no
-// pool buffer but its log's own.
+// before the cleaner or a checkpoint changes it. Started on a settled store, the rebuild must
+// give the index the store held. Settled after the rebuild, the store holds no pool buffer but
+// its log's own.
 func (h *harness) rebuild() [][2]string {
 	h.t.Helper()
 	gen := h.s.logGen
+	if len(h.queue) == 0 && len(h.held) == 0 {
+		h.expectIndex(invRebuild)
+	}
 	h.s.rebuilt = false
 	h.s.indexBroken(&h.ctx, lsm.ErrCheck, &h.out)
 	h.s.pump(&h.ctx, &h.out)

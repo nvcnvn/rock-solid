@@ -142,24 +142,17 @@ func crashLanding(h *harness, landing string, seed uint64) {
 	h.crashAt, h.crashIf, h.failIf = -1, nil, nil
 }
 
-// checkEveryAction recovers the crashed store, checks it reads as the crash oracle's model live and
-// at every snapshot, then rebuilds its index, which must equal the recovered one and read the same;
-// it returns the recovered LSN, or how the store differs.
-func checkEveryAction(h *harness) (uint64, error) {
+// checkEveryAction recovers the crashed store, then rebuilds its index, checking the store's
+// invariants after each; it returns the recovered LSN, or the first violation.
+func checkEveryAction(h *harness) (lsn uint64, err error) {
 	h.t.Helper()
-	h.recoverStore(disklog.ModeOpen)
-	lsn, m := h.acked, h.recovered
-	if msg := modelDiff(h, m, everyActionChunks, 3); msg != "" {
-		return 0, errors.New(msg)
-	}
-	opened := dumpIndex(h.s.Index())
-	if got := h.rebuild(); !slices.Equal(got, opened) {
-		return 0, fmt.Errorf("rebuilt index has %d entries, recovered %d", len(got), len(opened))
-	}
-	if msg := modelDiff(h, m, everyActionChunks, 3); msg != "" {
-		return 0, errors.New("rebuilt: " + msg)
-	}
-	return lsn, nil
+	h.catch = true
+	err = violated(func() {
+		h.recoverStore(disklog.ModeOpen)
+		lsn = h.acked
+		h.rebuild()
+	})
+	return lsn, err
 }
 
 // crashedAt is the workload crashed at action k with landing, recovered with plant.
@@ -179,9 +172,6 @@ func sweepCleaning(t *testing.T, total int, disk []bool, plant plants) error {
 	for k := 0; k <= total; k++ {
 		for _, landing := range []string{"none", "half", "all"} {
 			h := crashedAt(t, k, landing, plant)
-			if err := unackedReplies(h); err != nil {
-				return fmt.Errorf("crash at action %d: %w", k, err)
-			}
 			if _, err := checkEveryAction(h); err != nil {
 				return fmt.Errorf("crash at action %d, %s landing: %w", k, landing, err)
 			}
@@ -199,9 +189,6 @@ func sweepCleaning(t *testing.T, total int, disk []bool, plant plants) error {
 				return true
 			}
 			runEveryAction(h)
-			if err := unackedReplies(h); err != nil {
-				return fmt.Errorf("action %d failed: %w", k, err)
-			}
 			if (failed == core.ActDiskWrite || failed == core.ActDiskFsync) && (h.s.Log().Err() == nil || h.s.Log().DurableLSN() != durable) {
 				t.Fatalf("action %d failed: the log's error %v, durable LSN %d, %d at the failure", k, h.s.Log().Err(), h.s.Log().DurableLSN(), durable)
 			}
@@ -210,26 +197,6 @@ func sweepCleaning(t *testing.T, total int, disk []bool, plant plants) error {
 			if _, err := checkEveryAction(h); err != nil {
 				return fmt.Errorf("action %d failed, %s landing: %w", k, landing, err)
 			}
-		}
-	}
-	return nil
-}
-
-// unackedReplies reports an OK reply to a write or punch whose record is not durable: none written
-// carries the chunk at the reply's version, or the first that does is past the log's durable LSN.
-func unackedReplies(h *harness) error {
-	for _, id := range h.order {
-		r, c := h.replies[id], h.changes[id]
-		if _, ok := h.changes[id]; !ok || r.Err != nil {
-			continue
-		}
-		i := slices.IndexFunc(h.records, func(w writtenRecord) bool {
-			return slices.ContainsFunc(w.entries, func(e disklog.Entry) bool {
-				return e.Chunk == c && e.Version == r.Version && (e.Kind == disklog.EntryWrite || e.Kind == disklog.EntryPunch || e.Kind == disklog.EntrySlot)
-			})
-		})
-		if i < 0 || h.records[i].lsn > h.acked {
-			return fmt.Errorf("request %d acknowledged version %#x of chunk %v, whose record is not durable", id, r.Version, c)
 		}
 	}
 	return nil
@@ -336,8 +303,8 @@ func TestCrashAtEveryActionWithCleaning(t *testing.T) {
 func TestCrashAtEveryActionCatchesReplayingCopiesAsWrites(t *testing.T) {
 	total, disk := fullCleaning(t)
 	err := sweepCleaning(t, total, disk, plants{replayCopyAsWrite: true})
-	if err == nil {
-		t.Fatal("every recovery passed")
+	if violationOf(err) != invAcked {
+		t.Fatal(err)
 	}
 	t.Log(err)
 }

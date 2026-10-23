@@ -1,7 +1,6 @@
 package chunkstore
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"math"
@@ -94,6 +93,39 @@ type harness struct {
 	// recoveredLSN is the LSN the last recovery found, and loaded the manifest it loaded.
 	recoveredLSN uint64
 	loaded       disklog.ManifestPos
+	// inv is the registry of the store's invariants, and catch has a broken one panic for
+	// violated to return rather than fail the test.
+	inv   sim.Invariants
+	catch bool
+	// bytes is the byte-range oracle of the acknowledged changes, nil in smallDisk's harness, and
+	// sent each change not yet answered.
+	bytes    *byteOracle
+	sent     map[uint64]change
+	maxEpoch uint64
+	// checking is the chunks the current check compares with the oracle and views what it read of
+	// them, dirty those acknowledged a change since the last check, seen their maps at it, touched
+	// the LBA ranges written or trimmed since it, and full has the next check compare every chunk.
+	checking []core.ChunkID
+	touched  []lbaRange
+	dirty    map[core.ChunkID]bool
+	seen     map[core.ChunkID]*storeView
+	views    map[core.ChunkID]*storeView
+	full     bool
+	// changed is set by a write or punch since the last recovery, unsettled by a crash with
+	// actions queued.
+	changed, unsettled bool
+	// repliedLSN is the newest record that a write or punch answered OK since the last recovery
+	// needs, and repliedID that request; unwritten lists the requests answered OK before a record
+	// carried them, and since is the first record written since the last recovery.
+	repliedLSN, repliedID uint64
+	unwritten             []uint64
+	since                 int
+	// versionErr, recoverErr and indexErr are the violations events found, for the registry to
+	// report; indexBefore is the index the next recovery must finish with, under invariant indexFor.
+	versionErr, recoverErr error
+	indexErr               map[string]error
+	indexBefore            [][2]string
+	indexFor               string
 }
 
 // advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
@@ -151,7 +183,9 @@ var slotGeometry = disklog.Geometry{SegmentBlocks: 4096, SegmentCount: 40}
 // newHarnessOn is newHarness on a disk cut as geo.
 func newHarnessOn(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
 	h := &harness{t: t, pool: sim.NewPool(32<<20, 0), disk: sim.NewDisk(geo.DiskBlocks()), cfg: cfg,
-		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, steps: map[*lsm.Compaction]int{}, laneOf: map[uint32]uint8{}, stepHeld: map[uint8]uint64{}, slotData: map[core.LBA][]byte{}, crashAt: -1}
+		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, steps: map[*lsm.Compaction]int{}, laneOf: map[uint32]uint8{}, stepHeld: map[uint8]uint64{}, slotData: map[core.LBA][]byte{}, crashAt: -1,
+		bytes: newByteOracle(), sent: map[uint64]change{}, indexErr: map[string]error{}, dirty: map[core.ChunkID]bool{}, seen: map[core.ChunkID]*storeView{}, views: map[core.ChunkID]*storeView{}}
+	h.register()
 	h.ctx = core.Context{Now: 1, Raw: 2, Pool: h.pool}
 	var err error
 	if h.s, err = Format(&h.ctx, cfg, disklog.Superblock{LogID: 0x5eed, Geometry: geo}, &h.out); err != nil {
@@ -175,6 +209,17 @@ func (h *harness) take() {
 		}
 		h.replies[r.ID] = r
 		h.order = append(h.order, r.ID)
+		if _, ok := h.changes[r.ID]; ok && r.Err == nil && r.Version != 0 && !h.light {
+			if !h.replied(r.ID) {
+				h.unwritten = append(h.unwritten, r.ID)
+			}
+		}
+		if ch, ok := h.sent[r.ID]; ok {
+			delete(h.sent, r.ID)
+			if r.Err == nil && h.bytes != nil {
+				h.ackChange(ch, r.Version)
+			}
+		}
 	}
 	h.out.Reset()
 }
@@ -210,6 +255,9 @@ func (h *harness) step() bool {
 	if a.Kind == core.ActDiskTrim {
 		h.trims = append(h.trims, a)
 	}
+	if a.Kind == core.ActDiskTrim || a.Kind == core.ActDiskWrite {
+		h.touch(a.LBA, a.LBA+core.LBA(a.Len/core.BlockSize))
+	}
 	if a.Kind == core.ActDiskWrite {
 		h.wrote += a.Len / core.BlockSize
 		if h.s.Serving() {
@@ -235,13 +283,8 @@ func (h *harness) step() bool {
 		checkOpenSeqs(h.t, h.disk, h.s.Log())
 		clear(h.stepHeld)
 	}
-	if recovering && h.s.Serving() && h.oracle != nil {
-		m, err := h.oracle.Recovered(h.s.Log().DurableLSN())
-		if err != nil {
-			h.t.Fatal(err)
-		}
-		h.recovered, h.acked = m, h.s.Log().DurableLSN()
-		h.recoveredLSN, h.loaded = h.acked, h.s.Log().Manifest()
+	if recovering && h.s.Serving() {
+		h.recoveryDone()
 	}
 	h.take()
 	h.noteDurable()
@@ -366,6 +409,31 @@ func (h *harness) settle() {
 		}
 	}
 	h.checkUsage()
+	h.check(false)
+}
+
+// recoveryDone takes a finished recovery to the crash oracle, which the byte-range oracle then
+// follows, and compares its index with the one expected of it.
+func (h *harness) recoveryDone() {
+	h.recoveredIndex()
+	h.repliesSurvive()
+	h.changed, h.full = false, true
+	if h.oracle == nil {
+		if h.unsettled {
+			h.t.Fatal("a crash with actions queued needs the crash oracle to know which changes in flight recovery keeps")
+		}
+		return
+	}
+	m, err := h.oracle.Recovered(h.s.Log().DurableLSN())
+	if err != nil {
+		h.recoverErr = err
+		return
+	}
+	h.recovered, h.acked = m, h.s.Log().DurableLSN()
+	h.recoveredLSN, h.loaded = h.acked, h.s.Log().Manifest()
+	if h.bytes != nil {
+		h.bytes.rebase(m)
+	}
 }
 
 // checkUsage checks that every segment outside the metadata stream counts as many live blocks
@@ -456,6 +524,38 @@ func (h *harness) noteWrite(a *core.Action) {
 	}
 }
 
+// replied raises repliedLSN to the newest record written since the last recovery that carries a
+// write, punch or slot of the change id was answered OK at, and reports whether there is one.
+func (h *harness) replied(id uint64) bool {
+	c, v := h.changes[id], h.replies[id].Version
+	for i := len(h.records) - 1; i >= h.since; i-- {
+		if slices.ContainsFunc(h.records[i].entries, func(e disklog.Entry) bool {
+			return e.Chunk == c && e.Version == v && (e.Kind == disklog.EntryWrite || e.Kind == disklog.EntryPunch || e.Kind == disklog.EntrySlot)
+		}) {
+			if lsn := h.records[i].lsn; lsn > h.repliedLSN {
+				h.repliedLSN, h.repliedID = lsn, id
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// repliesSurvive breaks invAcked unless every write and punch answered OK since the last recovery
+// has its records at or below the LSN the recovery found.
+func (h *harness) repliesSurvive() {
+	lsn := h.s.Log().DurableLSN()
+	for _, id := range h.unwritten {
+		if !h.replied(id) && h.recoverErr == nil {
+			h.recoverErr = fmt.Errorf("request %d was answered OK, and no record written carries it", id)
+		}
+	}
+	if h.repliedLSN > lsn && h.recoverErr == nil {
+		h.recoverErr = fmt.Errorf("request %d was answered OK with its record at LSN %d, and recovery found LSN %d", h.repliedID, h.repliedLSN, lsn)
+	}
+	h.repliedLSN, h.unwritten, h.since = 0, h.unwritten[:0], len(h.records)
+}
+
 func (h *harness) id() uint64 {
 	h.nextID++
 	return h.nextID
@@ -468,7 +568,17 @@ func (h *harness) change(c core.ChunkID) uint64 {
 	}
 	id := h.id()
 	h.changes[id] = c
+	h.changed = true
 	return id
+}
+
+// send keeps change ch, request id, for the byte-range oracle to apply once it is acknowledged.
+func (h *harness) send(id uint64, ch change) {
+	h.maxEpoch = max(h.maxEpoch, ch.epoch)
+	if h.bytes != nil && !h.light {
+		ch.data = slices.Clone(ch.data)
+		h.sent[id] = ch
+	}
 }
 
 // writeBuf lays data out at off in a buffer of the blocks it touches, the rest poisoned.
@@ -484,6 +594,7 @@ func (h *harness) writeBuf(off uint32, data []byte) core.IOBuf {
 
 func (h *harness) write(c core.ChunkID, off uint32, data []byte, epoch uint64) uint64 {
 	id := h.change(c)
+	h.send(id, change{c: c, off: off, n: uint32(len(data)), data: data, epoch: epoch})
 	h.s.Write(&h.ctx, Request{ID: id, Chunk: c, Off: off, Len: uint32(len(data)), Buf: h.writeBuf(off, data), Epoch: epoch}, &h.out)
 	h.take()
 	return id
@@ -491,6 +602,7 @@ func (h *harness) write(c core.ChunkID, off uint32, data []byte, epoch uint64) u
 
 func (h *harness) writeExpect(c core.ChunkID, off uint32, data []byte, ver uint64) uint64 {
 	id := h.change(c)
+	h.send(id, change{c: c, off: off, n: uint32(len(data)), data: data})
 	h.s.Write(&h.ctx, Request{ID: id, Chunk: c, Off: off, Len: uint32(len(data)), Buf: h.writeBuf(off, data), HasVer: true, Ver: ver}, &h.out)
 	h.take()
 	return id
@@ -498,6 +610,7 @@ func (h *harness) writeExpect(c core.ChunkID, off uint32, data []byte, ver uint6
 
 func (h *harness) punch(c core.ChunkID, off, n uint32, epoch uint64) uint64 {
 	id := h.change(c)
+	h.send(id, change{c: c, off: off, n: n, epoch: epoch})
 	h.s.Punch(&h.ctx, Request{ID: id, Chunk: c, Off: off, Len: n, Epoch: epoch}, &h.out)
 	h.take()
 	return id
@@ -609,87 +722,4 @@ func (h *harness) logged(mark int, c core.ChunkID) []string {
 		}
 	}
 	return out
-}
-
-// byteOracle applies every acknowledged write's and punch's bytes in version order, and keeps
-// each snapshot epoch's bytes as the last write before its cut left them.
-type byteOracle struct {
-	chunks map[core.ChunkID]*oracleChunk
-}
-
-type oracleChunk struct {
-	version uint64
-	epoch   uint64
-	live    []byte
-	snaps   map[uint64][]byte
-}
-
-func newByteOracle() *byteOracle { return &byteOracle{chunks: map[core.ChunkID]*oracleChunk{}} }
-
-func (o *byteOracle) chunk(c core.ChunkID) *oracleChunk {
-	ch, ok := o.chunks[c]
-	if !ok {
-		ch = &oracleChunk{live: make([]byte, core.ChunkSize), snaps: map[uint64][]byte{}}
-		o.chunks[c] = ch
-	}
-	return ch
-}
-
-// apply records an acknowledged write (data) or punch (nil data) of version at epoch.
-func (o *byteOracle) apply(t testing.TB, c core.ChunkID, off, n uint32, data []byte, version, epoch uint64) {
-	t.Helper()
-	ch := o.chunk(c)
-	if version <= ch.version {
-		t.Fatalf("chunk %v acknowledged version %#x after %#x", c, version, ch.version)
-	}
-	for e := ch.epoch + 1; e <= epoch; e++ {
-		ch.snaps[e] = slices.Clone(ch.live)
-	}
-	ch.version, ch.epoch = version, max(ch.epoch, epoch)
-	if data == nil {
-		clear(ch.live[off : off+n])
-	} else {
-		copy(ch.live[off:], data)
-	}
-}
-
-// at is the chunk's bytes as the snapshot of epoch reads them, or live for epoch 0.
-func (ch *oracleChunk) at(epoch uint64) []byte {
-	if epoch == 0 || epoch > ch.epoch {
-		return ch.live
-	}
-	return ch.snaps[epoch]
-}
-
-// diff compares blocks [first, last] of every chunk's live bytes with the store and describes the first difference.
-func (o *byteOracle) diff(h *harness, first, last uint16) string {
-	for c, ch := range o.chunks {
-		for b := first; b <= last; b++ {
-			got, want := h.block(c, b, 0), ch.live[int(b)*core.BlockSize:][:core.BlockSize]
-			if i := firstDiff(got, want); i < core.BlockSize {
-				return fmt.Sprintf("chunk %v block %d byte %d is %#x, the oracle holds %#x", c, b, i, got[i], want[i])
-			}
-		}
-	}
-	return ""
-}
-
-// check compares blocks [first, last] of every chunk, live and at each epoch up to maxEpoch, with the store's index and disk.
-func (o *byteOracle) check(t testing.TB, h *harness, first, last uint16, maxEpoch uint64) {
-	t.Helper()
-	for c, ch := range o.chunks {
-		for epoch := range maxEpoch + 1 {
-			want := ch.at(epoch)
-			for b := first; b <= last; b++ {
-				got := h.block(c, b, epoch)
-				if w := want[int(b)*core.BlockSize:][:core.BlockSize]; !bytes.Equal(got, w) {
-					i := 0
-					for got[i] == w[i] {
-						i++
-					}
-					t.Fatalf("chunk %v block %d at epoch %d: byte %d is %#x, the oracle holds %#x", c, b, epoch, i, got[i], w[i])
-				}
-			}
-		}
-	}
 }

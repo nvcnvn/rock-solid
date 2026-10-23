@@ -100,10 +100,10 @@ func TestTheBucketCarriesAWindowsDeficitWhileTheCleanerRuns(t *testing.T) {
 // reserve are free; clean_free then goes to 16, and a read starts passes whose jobs the harness
 // holds, so the cleaner frees nothing more, and the bucket measures that over a whole window.
 func slowedStore(t *testing.T) *harness {
-	h, o := primed(t)
+	h := primed(t)
 	r := core.NewRand(31)
 	for h.freeEmpty(); h.s.Log().FreeOutsideReserve() > 5; h.freeEmpty() {
-		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+		overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 	}
 	h.hold = true
 	h.s.cfg.CleanFree = DefaultCleanFree

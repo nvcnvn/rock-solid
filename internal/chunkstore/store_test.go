@@ -118,9 +118,6 @@ func TestByteRangesToWholeBlocks(t *testing.T) {
 			if got := h.readNow(chunkC, 0, uint32(len(want))); !bytes.Equal(got, want) {
 				t.Fatalf("read back differs at byte %d", firstDiff(got, want))
 			}
-			if err := h.s.Index().Check(); err != nil {
-				t.Fatal(err)
-			}
 		})
 	}
 	h := newHarness(t, testConfig())
@@ -246,49 +243,36 @@ func TestMergeAgainstPendingWrite(t *testing.T) {
 
 // subBlockRun is the sub-block writes spike's merge model through the store: two clients with up
 // to 8 writes pipelined each, 1 byte to 3 blocks at random offsets in the first 4 blocks of one
-// chunk, every acknowledged write applied to the byte-range oracle in version order and the
-// blocks checked after every step. It returns the first difference, if any.
-func subBlockRun(t *testing.T, seed uint64, steps int, plant plants) (wrong string) {
+// chunk, the store's invariants checked after every step. It returns the first violation.
+func subBlockRun(t *testing.T, seed uint64, steps int, plant plants) error {
 	h := newHarness(t, testConfig())
-	h.s.plant = plant
+	h.s.plant, h.catch = plant, true
 	r := core.NewRand(seed)
-	o := newByteOracle()
-	type sent struct {
-		off    uint32
-		data   []byte
-		client int
-	}
-	inflight := map[uint64]sent{}
+	inflight := map[uint64]int{}
 	var clients [2]int
 	seen := 0
-	for step := 0; step < steps || len(inflight) > 0; step++ {
-		c := int(r.Below(2))
-		if step < steps && clients[c] < 8 && r.Chance(1, 2) {
-			n := uint32(1 + r.Below(3*core.BlockSize))
-			off := uint32(r.Below(uint64(4*core.BlockSize - n + 1)))
-			data := make([]byte, n)
-			r.Fill(data)
-			inflight[h.write(chunkC, off, data, 0)] = sent{off, data, c}
-			clients[c]++
-		} else if !h.step() && step >= steps {
-			break
+	return violated(func() {
+		for step := 0; step < steps || len(inflight) > 0; step++ {
+			c := int(r.Below(2))
+			if step < steps && clients[c] < 8 && r.Chance(1, 2) {
+				n := uint32(1 + r.Below(3*core.BlockSize))
+				off := uint32(r.Below(uint64(4*core.BlockSize - n + 1)))
+				data := make([]byte, n)
+				r.Fill(data)
+				inflight[h.write(chunkC, off, data, 0)] = c
+				clients[c]++
+			} else if !h.step() && step >= steps {
+				break
+			}
+			for ; seen < len(h.order); seen++ {
+				id := h.order[seen]
+				h.ok(id)
+				clients[inflight[id]]--
+				delete(inflight, id)
+			}
+			h.holds()
 		}
-		for ; seen < len(h.order); seen++ {
-			id := h.order[seen]
-			w := inflight[id]
-			v := h.ok(id)
-			delete(inflight, id)
-			clients[w.client]--
-			o.apply(t, chunkC, w.off, uint32(len(w.data)), w.data, v, 0)
-		}
-		if msg := o.diff(h, 0, 3); msg != "" {
-			return msg
-		}
-	}
-	if err := h.s.Index().Check(); err != nil {
-		t.Fatal(err)
-	}
-	return ""
+	})
 }
 
 // [property] The spike's M1 and M9 as a regression bar: seeds 0-499, 400 steps each, 0 seeds
@@ -300,13 +284,13 @@ func TestSubBlockWrites(t *testing.T) {
 		seeds = 50
 	}
 	for seed := range seeds {
-		if msg := subBlockRun(t, uint64(seed), 400, plants{}); msg != "" {
-			t.Fatalf("seed %d: %s", seed, msg)
+		if err := subBlockRun(t, uint64(seed), 400, plants{}); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
 		}
 	}
 	for seed := range 20 {
-		if subBlockRun(t, uint64(seed), 400, plants{mergeCommitted: true}) == "" {
-			t.Fatalf("seed %d: merging against the committed version lost no bytes", seed)
+		if err := subBlockRun(t, uint64(seed), 400, plants{mergeCommitted: true}); violationOf(err) != invReads {
+			t.Fatalf("seed %d: merging against the committed version: %v", seed, err)
 		}
 	}
 }

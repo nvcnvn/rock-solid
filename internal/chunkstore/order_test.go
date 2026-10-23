@@ -30,6 +30,7 @@ func TestBaseReadFails(t *testing.T) {
 			h.sync(h.write(chunkC, 0, fill(core.BlockSize, 0x11), 0))
 			lba := liveLBA(t, h, chunkC, 0)
 			want := error(disklog.ErrBadChecksum)
+			h.inv.Off(invReads)
 			if fault == "checksum" {
 				h.disk.FlipBit(lba, 3000, 0x10)
 			} else {

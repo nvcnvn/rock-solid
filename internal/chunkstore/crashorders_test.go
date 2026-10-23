@@ -99,23 +99,14 @@ func (st *stage) until(cond func() bool) {
 
 func (st *stage) named() bool { return st.freeing != 0 && st.h.s.Log().NamedLSN() >= st.freeing }
 
-// crash crashes the disk with the unflushed blocks land chooses landing, recovers, and checks the
-// store holds what the crash oracle holds. It returns the reads recovery issued.
+// crash crashes the disk with the unflushed blocks land chooses landing and recovers, checking the
+// store's invariants. It returns the reads recovery issued.
 func (st *stage) crash(land func(core.LBA) bool) []core.Action {
 	st.h.t.Helper()
 	h := st.h
 	h.disk.Crash(func(_ int, lba core.LBA) bool { return land(lba) })
 	mark := len(h.acts)
 	h.recoverStore(disklog.ModeOpen)
-	if msg := modelDiff(h, h.recovered, cleanChunks[:0], 0); msg != "" {
-		h.t.Fatal(msg)
-	}
-	for c := range uint32(16) {
-		if got, want := h.block(chunk(c), 0, 0), h.recovered.at(chunk(c), 0, 0); !bytes.Equal(got, want) {
-			h.t.Fatalf("chunk %d block 0 does not read as the crash oracle holds", c)
-		}
-	}
-	h.checkUsage()
 	return h.acts[mark:]
 }
 

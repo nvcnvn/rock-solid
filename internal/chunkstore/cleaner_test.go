@@ -27,7 +27,7 @@ func cleanConfig() Config {
 }
 
 // overwrite writes one block of one of chunks at random, each block a new pattern, and records it.
-func overwrite(h *harness, o *byteOracle, r *core.Rand, chunks []core.ChunkID, blocks uint16) {
+func overwrite(h *harness, r *core.Rand, chunks []core.ChunkID, blocks uint16) {
 	h.t.Helper()
 	c := chunks[r.Below(uint64(len(chunks)))]
 	b := uint16(r.Below(uint64(blocks)))
@@ -35,7 +35,7 @@ func overwrite(h *harness, o *byteOracle, r *core.Rand, chunks []core.ChunkID, b
 	r.Fill(data)
 	id := h.write(c, uint32(b)*core.BlockSize, data, 0)
 	h.settle()
-	o.apply(h.t, c, uint32(b)*core.BlockSize, core.BlockSize, data, h.ok(id), 0)
+	h.ok(id)
 }
 
 // Uniform overwrites of a quarter of a small disk write it over many times: the cleaner keeps
@@ -46,11 +46,10 @@ func TestCleanerKeepsAFullDiskWriting(t *testing.T) {
 	h.merging = true
 	r := core.NewRand(7)
 	chunks := []core.ChunkID{chunk(1), chunk(2)}
-	o := newByteOracle()
 	for range 4 * int(cleanGeo.DiskBlocks()) / 2 {
-		overwrite(h, o, r, chunks, 64)
+		overwrite(h, r, chunks, 64)
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 	st := h.s.CleanStats()
 	if st.Freed < int(cleanGeo.SegmentCount) {
 		t.Fatalf("the cleaner freed %d segments over 4 disks of writes", st.Freed)
@@ -68,11 +67,11 @@ func TestCleanerKeepsAFullDiskWriting(t *testing.T) {
 		t.Fatal("no freed segment was trimmed")
 	}
 	h.recoverStore(disklog.ModeOpen)
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 	for range 200 {
-		overwrite(h, o, r, chunks, 64)
+		overwrite(h, r, chunks, 64)
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }
 
 // chooseVictims is the victims the cleaner's next pass would take.
@@ -103,14 +102,13 @@ func (h *harness) freeEmpty() {
 
 // primed is a store on the small disk whose cleaner does not run until a test sets CleanFree:
 // two chunks of 64 blocks written once and overwritten at random until several manifests are named.
-func primed(t *testing.T) (*harness, *byteOracle) { return primedWith(t, cleanConfig()) }
+func primed(t *testing.T) *harness { return primedWith(t, cleanConfig()) }
 
-func primedWith(t *testing.T, cfg Config) (*harness, *byteOracle) {
+func primedWith(t *testing.T, cfg Config) *harness {
 	cfg.CleanFree = -1
 	h := newHarnessOn(t, cfg, cleanGeo)
 	h.merging = true
 	r := core.NewRand(5)
-	o := newByteOracle()
 	chunks := []core.ChunkID{chunk(1), chunk(2)}
 	for _, c := range chunks {
 		for b := range uint16(64) {
@@ -118,13 +116,13 @@ func primedWith(t *testing.T, cfg Config) (*harness, *byteOracle) {
 			r.Fill(data)
 			id := h.write(c, uint32(b)*core.BlockSize, data, 0)
 			h.settle()
-			o.apply(t, c, uint32(b)*core.BlockSize, core.BlockSize, data, h.ok(id), 0)
+			h.ok(id)
 		}
 	}
 	for range 120 {
-		overwrite(h, o, r, chunks, 64)
+		overwrite(h, r, chunks, 64)
 	}
-	return h, o
+	return h
 }
 
 // clean runs the cleaner with clean_free at want: a write, which the store answers once its
@@ -140,20 +138,20 @@ func (h *harness) clean(want int) {
 // steppedStore is a primed store whose pieces hold a block, so that its index's runs span
 // several, overwritten further with merges off, two more chunks among the overwrites so that a
 // run's rewrite outgrows a step; merges run in steps of a block.
-func steppedStore(t *testing.T) (*harness, *byteOracle, *core.Rand) { return steppedStoreOf(t, 0) }
+func steppedStore(t *testing.T) (*harness, *core.Rand) { return steppedStoreOf(t, 0) }
 
 // steppedStoreOf is steppedStore with workers merge workers, or the default for 0.
-func steppedStoreOf(t *testing.T, workers int) (*harness, *byteOracle, *core.Rand) {
+func steppedStoreOf(t *testing.T, workers int) (*harness, *core.Rand) {
 	cfg := cleanConfig()
 	cfg.Log.MaxRecordBytes = 3 * core.BlockSize
 	cfg.Log.MergeWorkers = workers
-	h, o := primedWith(t, cfg)
+	h := primedWith(t, cfg)
 	h.merging = false
 	r := core.NewRand(9)
 	for range 100 {
-		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2), chunk(3), chunk(4)}, 64)
+		overwrite(h, r, []core.ChunkID{chunk(1), chunk(2), chunk(3), chunk(4)}, 64)
 	}
-	return h, o, r
+	return h, r
 }
 
 // markRewrites runs a pass over the cleanable metadata segment whose live runs have the most
@@ -188,13 +186,13 @@ func markRewrites(t *testing.T, h *harness) (uint32, int) {
 // manifests, and once the manifest naming its last step is named the segment holds nothing live
 // and the next pass frees it.
 func TestLiveRunPiecesAreRewrittenNotCopied(t *testing.T) {
-	h, o, r := steppedStore(t)
+	h, r := steppedStore(t)
 	log := h.s.Log()
 	seg, marked := markRewrites(t, h)
 	h.merging = true
 	started := len(h.merges)
 	for i := 0; log.HoldsPiece(seg) && i < 400; i++ {
-		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+		overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 	}
 	if log.HoldsPiece(seg) {
 		t.Fatalf("segment %d still holds a live piece after the rewrite", seg)
@@ -208,14 +206,14 @@ func TestLiveRunPiecesAreRewrittenNotCopied(t *testing.T) {
 	if u, _ := log.Usage(seg); u.State != disklog.SegmentFree {
 		t.Fatalf("segment %d is %+v after its runs were rewritten", seg, u)
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }
 
 // A rewrite in steps of a block writes, for each step, a filter partition, a root and a manifest
 // beside its blocks; the net-gain guard charges them, so the rewrite of a victim's runs writes no
 // more blocks than the guard charged it.
 func TestARewriteInStepsWritesNoMoreThanItsCost(t *testing.T) {
-	h, o, _ := steppedStore(t)
+	h, _ := steppedStore(t)
 	log := h.s.Log()
 	costs := map[uint32]uint64{}
 	for s := uint32(1); s < cleanGeo.SegmentCount; s++ {
@@ -247,7 +245,7 @@ func TestARewriteInStepsWritesNoMoreThanItsCost(t *testing.T) {
 	if written = h.stepBlocks - written; written > costs[seg] {
 		t.Fatalf("the rewrite of segment %d's runs wrote %d blocks, charged %d", seg, written, costs[seg])
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }
 
 // runToMidStep runs the store's due merge steps until one installs a step its merge does not
@@ -275,30 +273,30 @@ func runToMidStep(t *testing.T, h *harness) *lsm.Compaction {
 // output so far from the manifest naming that step; the rewrite resumes past the bound and the
 // segment's pieces die once it ends.
 func TestARewriteResumesAfterACrashBetweenSteps(t *testing.T) {
-	h, o, r := steppedStore(t)
+	h, r := steppedStore(t)
 	seg, _ := markRewrites(t, h)
 	runToMidStep(t, h)
 	h.disk.Crash(func(int, core.LBA) bool { return true })
 	h.recoverStore(disklog.ModeOpen)
 	h.merging = true
 	for i := 0; h.s.Log().HoldsPiece(seg) && i < 400; i++ {
-		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+		overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 	}
 	if h.s.Log().HoldsPiece(seg) {
 		t.Fatalf("segment %d still holds a live piece after the resumed rewrite", seg)
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }
 
 // A disk filled to its reserve still finishes a rewrite in steps: each step's checkpoint may write
 // to the merge worker's lane in the reserve, which ordinary writes never open.
 func TestARewriteFinishesOnADiskFilledToItsReserve(t *testing.T) {
-	h, o, r := steppedStore(t)
+	h, r := steppedStore(t)
 	for i := 0; h.s.Log().FreeOutsideReserve() > 0; i++ {
 		if i == 2000 {
 			t.Fatal("the disk never filled to its reserve")
 		}
-		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+		overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 	}
 	markRewrites(t, h)
 	if free := h.s.Log().FreeOutsideReserve(); free > 0 {
@@ -321,23 +319,23 @@ func TestARewriteFinishesOnADiskFilledToItsReserve(t *testing.T) {
 	if !stepped || slices.ContainsFunc(merges, func(c *lsm.Compaction) bool { return !c.Finished() }) {
 		t.Fatalf("of %d merges, none ran in steps or one did not finish", len(merges))
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }
 
 // With the cleaner running only for writes that wait, the disk fills to its reserve; a pass then
 // copies into the reserve and the waiting writes go out, none failing while there is a victim.
 func TestAPassFinishesOnADiskFilledToItsReserve(t *testing.T) {
-	h, o := primed(t)
+	h := primed(t)
 	r := core.NewRand(13)
 	low, passes := h.s.Log().FreeOutsideReserve(), h.s.CleanStats().Passes
 	for range 600 {
-		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+		overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 		low = min(low, h.s.Log().FreeOutsideReserve())
 	}
 	if low > 0 || h.s.CleanStats().Passes == passes {
 		t.Fatalf("free segments outside the reserve fell to %d; %d passes", low, h.s.CleanStats().Passes-passes)
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }
 
 // Overwrites of four chunks on a disk with a reserve of 4 segments and a cleaner that runs only for
@@ -400,7 +398,7 @@ func TestWritesFailOnlyWhenNoVictimGainsSpace(t *testing.T) {
 func TestAFullDiskWithNoFreeSegmentEndsInNoSpace(t *testing.T) {
 	cfg := cleanConfig()
 	cfg.Log.Reserve = 1
-	h, o := primedWith(t, cfg)
+	h := primedWith(t, cfg)
 	r := core.NewRand(12)
 	log := h.s.Log()
 	failed, empty := 0, false
@@ -412,7 +410,7 @@ func TestAFullDiskWithNoFreeSegmentEndsInNoSpace(t *testing.T) {
 		empty = empty || log.FreeOutsideReserve() < 0
 		switch err := h.reply(id).Err; {
 		case err == nil:
-			o.apply(t, c, b*core.BlockSize, core.BlockSize, data, h.ok(id), 0)
+			h.ok(id)
 		case !errors.Is(err, disklog.ErrNoSpace):
 			t.Fatalf("write %d: %v", failed, err)
 		case h.s.CleanStats().Copied != st.Copied:
@@ -436,7 +434,7 @@ func TestAFullDiskWithNoFreeSegmentEndsInNoSpace(t *testing.T) {
 	if !empty {
 		t.Fatal("the disk never ran out of free segments")
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }
 
 // A whole chunk's record header, which holds the checksums of its slot, stays live while the chunk
@@ -450,12 +448,11 @@ func TestTheCleanerKeepsTheHeadersOfLiveSlotWrites(t *testing.T) {
 	for i, c := range whole {
 		h.sync(h.write(c, 0, pattern(uint64(i), core.ChunkSize), 0))
 	}
-	o := newByteOracle()
 	for i := range 300 {
 		data := fill(64*core.BlockSize, byte(i))
 		id := h.write(chunk(1), 0, data, 0)
 		h.settle()
-		o.apply(t, chunk(1), 0, uint32(len(data)), data, h.ok(id), 0)
+		h.ok(id)
 	}
 	h.clean(1000)
 	for i, c := range whole {
@@ -466,7 +463,7 @@ func TestTheCleanerKeepsTheHeadersOfLiveSlotWrites(t *testing.T) {
 	if h.s.CleanStats().Freed == 0 {
 		t.Fatal("the cleaner freed nothing")
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }
 
 // A slot lane segment whose live blocks are only a slot write its record header holds the
@@ -515,15 +512,16 @@ func TestASegmentOfSlotHeadersAloneIsNoVictim(t *testing.T) {
 // nothing, so the cleaner, one worker short of clean_free, starts no other until the durable LSN
 // moves, however often the store wakes; a write moves it, and the next pass frees segments.
 func TestAPassThatFreesNothingWaitsForTheLog(t *testing.T) {
-	h, o := primed(t)
+	h := primed(t)
 	log := h.s.Log()
 	r := core.NewRand(9)
 	copied := func(v uint32) bool { u, stream := log.Usage(v); return stream != disklog.Meta && u.Live > 0 }
 	victims := h.s.chooseVictims()
 	for i := 0; slices.ContainsFunc(victims, func(v uint32) bool { return !copied(v) }) && i < 1000; i++ {
-		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+		overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 		victims = h.s.chooseVictims()
 	}
+	h.inv.Off(invReads)
 	for _, v := range victims {
 		lo := cleanGeo.LBA(v, 0)
 		if !copied(v) {
@@ -565,7 +563,7 @@ func TestAPassThatFreesNothingWaitsForTheLog(t *testing.T) {
 // A pass takes the 4 best victims by cost-benefit among the segments it may clean whose copy
 // costs less than a segment, header blocks included, that of the segment it opens too.
 func TestAPassTakesTheFourBestVictimsThatGainSpace(t *testing.T) {
-	h, _ := primed(t)
+	h := primed(t)
 	log := h.s.Log()
 	victims := h.s.chooseVictims()
 	if len(victims) != disklog.VictimsPerPass {
@@ -594,7 +592,7 @@ func TestAPassTakesTheFourBestVictimsThatGainSpace(t *testing.T) {
 // ordinary writes: the primed disk's metadata segments emptied by merges ranked below segments
 // with live blocks, and one the index writes while writes wait for room stays at age 0.
 func TestVictimsWithNothingLiveComeFirst(t *testing.T) {
-	h, _ := primed(t)
+	h := primed(t)
 	log := h.s.Log()
 	empty := 0
 	for seg := uint32(1); seg < cleanGeo.SegmentCount; seg++ {
@@ -614,7 +612,7 @@ func TestVictimsWithNothingLiveComeFirst(t *testing.T) {
 
 // A used segment with no live block is freed without reading or copying anything.
 func TestAVictimWithNothingLiveIsFreedWithoutCopying(t *testing.T) {
-	h, o := primed(t)
+	h := primed(t)
 	log := h.s.Log()
 	var empty uint32
 	for seg := uint32(1); seg < cleanGeo.SegmentCount && empty == 0; seg++ {
@@ -630,7 +628,7 @@ func TestAVictimWithNothingLiveIsFreedWithoutCopying(t *testing.T) {
 				r.Fill(data)
 				id := h.write(c, uint32(b)*core.BlockSize, data, 0)
 				h.settle()
-				o.apply(t, c, uint32(b)*core.BlockSize, core.BlockSize, data, h.ok(id), 0)
+				h.ok(id)
 			}
 		}
 	}
@@ -658,7 +656,7 @@ func TestAVictimWithNothingLiveIsFreedWithoutCopying(t *testing.T) {
 	if after := h.s.CleanStats(); after.Freed <= before.Freed {
 		t.Fatalf("stats %+v after %+v", after, before)
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }
 
 // The worker groups a victim's blocks by chunk: copies go out in the index's key order, each
@@ -695,7 +693,7 @@ func TestCopiesGoOutInKeyOrder(t *testing.T) {
 // A victim holding a block whose checksum fails is quarantined: nothing of it is copied, it is
 // never a victim again, the other victims are cleaned, and reads of the block keep failing.
 func TestAVictimWithABadBlockIsQuarantined(t *testing.T) {
-	h, _ := primed(t)
+	h := primed(t)
 	log := h.s.Log()
 	h.freeEmpty()
 	victims := h.s.chooseVictims()
@@ -713,6 +711,7 @@ func TestAVictimWithABadBlockIsQuarantined(t *testing.T) {
 		for b := range uint16(64) {
 			if e, ok := h.s.Index().Lookup(testPool, c, b); ok && e.Header == rec.Header && at == 0 {
 				at = e.BlockLBA(b)
+				h.inv.Off(invReads)
 				corrupt := h.disk.Read(at, 1)
 				corrupt[100] ^= 0xff
 				h.disk.Put(at, corrupt)
@@ -746,7 +745,7 @@ func TestAVictimWithABadBlockIsQuarantined(t *testing.T) {
 // Blocks whose record lies in a quarantined segment may still be overwritten and punched, which
 // lowers its live count, before a restart and after one, which keeps it quarantined.
 func TestAQuarantinedSegmentsBlocksAreOverwritten(t *testing.T) {
-	h, o := primed(t)
+	h := primed(t)
 	log := h.s.Log()
 	h.freeEmpty()
 	var bad uint32
@@ -773,6 +772,7 @@ func TestAQuarantinedSegmentsBlocksAreOverwritten(t *testing.T) {
 		t.Fatalf("victim %d holds %d live blocks", bad, len(held))
 	}
 	at, _ := h.s.Index().Lookup(testPool, held[0].c, held[0].b)
+	h.inv.Off(invReads)
 	corrupt := h.disk.Read(at.BlockLBA(held[0].b), 1)
 	corrupt[100] ^= 0xff
 	h.disk.Put(at.BlockLBA(held[0].b), corrupt)
@@ -782,7 +782,7 @@ func TestAQuarantinedSegmentsBlocksAreOverwritten(t *testing.T) {
 		data := fill(core.BlockSize, byte(bl.b))
 		id := h.write(bl.c, uint32(bl.b)*core.BlockSize, data, 0)
 		h.settle()
-		o.apply(t, bl.c, uint32(bl.b)*core.BlockSize, core.BlockSize, data, h.ok(id), 0)
+		h.ok(id)
 	}
 	quarantined := func() {
 		t.Helper()
@@ -792,6 +792,7 @@ func TestAQuarantinedSegmentsBlocksAreOverwritten(t *testing.T) {
 	}
 	quarantined()
 	overwriteHeld(held[0])
+	h.inv.On(invReads)
 	h.recoverStore(disklog.ModeOpen)
 	h.s.cfg.CleanFree = -1
 	log = h.s.Log()
@@ -799,7 +800,7 @@ func TestAQuarantinedSegmentsBlocksAreOverwritten(t *testing.T) {
 	for _, bl := range held[1:] {
 		overwriteHeld(bl)
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 	quarantined()
 }
 
@@ -810,13 +811,12 @@ func TestAVictimOfManyPiecesReadsThemAtTheReadDepth(t *testing.T) {
 	h := newHarnessOn(t, cleanConfig(), disklog.Geometry{SegmentBlocks: 256, SegmentCount: 64})
 	h.merging = true
 	r := core.NewRand(13)
-	o := newByteOracle()
 	put := func(c core.ChunkID, b uint16) {
 		data := make([]byte, core.BlockSize)
 		r.Fill(data)
 		id := h.write(c, uint32(b)*core.BlockSize, data, 0)
 		h.settle()
-		o.apply(t, c, uint32(b)*core.BlockSize, core.BlockSize, data, h.ok(id), 0)
+		h.ok(id)
 	}
 	for b := range uint16(64) {
 		put(chunk(1), b)
@@ -832,7 +832,7 @@ func TestAVictimOfManyPiecesReadsThemAtTheReadDepth(t *testing.T) {
 	if h.s.CleanStats().Copied < 64 || h.maxCleanReads != cleanReadDepth {
 		t.Fatalf("stats %+v; at most %d reads in flight", h.s.CleanStats(), h.maxCleanReads)
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }
 
 // The net-gain guard charges a chunk victim the index entries its moves write, one per moved
@@ -904,14 +904,14 @@ func TestNoteStepsCatchesAStepPastItsBound(t *testing.T) {
 // make due, two at once, each on its own worker's lane within its step, and every block reads
 // back, after a restart too.
 func TestTwoMergesRunAtOnce(t *testing.T) {
-	h, o, r := steppedStoreOf(t, 2)
+	h, r := steppedStoreOf(t, 2)
 	markRewrites(t, h)
 	h.merging = true
 	for i := 0; h.maxMerging < 2; i++ {
 		if i == 2000 {
 			t.Fatalf("no two of %d merges ran at once", len(h.merges))
 		}
-		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+		overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 	}
 	workers := map[int]bool{}
 	for _, c := range h.merges {
@@ -920,7 +920,7 @@ func TestTwoMergesRunAtOnce(t *testing.T) {
 	if len(workers) != 2 {
 		t.Fatalf("merges ran on workers %v", workers)
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 	h.recoverStore(disklog.ModeOpen)
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }

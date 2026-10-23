@@ -139,7 +139,6 @@ func TestAStalledSlotWriteFailsTheHotWritesAfterIt(t *testing.T) {
 	cfg.CleanFree = -1
 	geo := disklog.Geometry{SegmentBlocks: 4096, SegmentCount: 16}
 	h := newHarnessOn(t, cfg, geo)
-	o := newByteOracle()
 	for i := uint32(0); h.s.Log().FreeSegments() != cfg.Log.Reserve+1; i++ {
 		if i == 2000 {
 			t.Fatal("the disk never came down to one segment past its reserve")
@@ -150,7 +149,7 @@ func TestAStalledSlotWriteFailsTheHotWritesAfterIt(t *testing.T) {
 		}
 		id := h.write(c, off, data, 0)
 		h.settle()
-		o.apply(t, c, off, uint32(len(data)), data, h.ok(id), 0)
+		h.ok(id)
 	}
 	h.hold = true
 	c := chunk(1)
@@ -183,6 +182,6 @@ func TestAStalledSlotWriteFailsTheHotWritesAfterIt(t *testing.T) {
 	data := fill(core.BlockSize, 3)
 	id := h.write(c, core.BlockSize, data, 0)
 	h.settle()
-	o.apply(t, c, core.BlockSize, uint32(len(data)), data, h.ok(id), 0)
-	o.check(t, h, 0, 15, 0)
+	h.ok(id)
+	h.holds()
 }
