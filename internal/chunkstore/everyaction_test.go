@@ -303,8 +303,8 @@ func TestCrashAtEveryActionWithCleaning(t *testing.T) {
 func TestCrashAtEveryActionCatchesReplayingCopiesAsWrites(t *testing.T) {
 	total, disk := fullCleaning(t)
 	err := sweepCleaning(t, total, disk, plants{replayCopyAsWrite: true})
-	if err == nil {
-		t.Fatal("every recovery passed")
+	if violationOf(err) != invAcked {
+		t.Fatal(err)
 	}
 	t.Log(err)
 }

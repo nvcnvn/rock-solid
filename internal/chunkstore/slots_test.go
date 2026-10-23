@@ -11,6 +11,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
+	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
 func pattern(seed uint64, n int) []byte {
@@ -137,6 +138,7 @@ func TestASlotIsFreeOnceItsRewriteIsDurable(t *testing.T) {
 func TestACrashBeforeTheRewriteIsDurableKeepsTheOldChunk(t *testing.T) {
 	for _, landing := range []string{"none", "slot", "record", "slot and part of the record"} {
 		h := newHarnessOn(t, testConfig(), slotGeometry)
+		h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 		old := pattern(5, core.ChunkSize)
 		h.sync(h.write(chunkC, 0, old, 0))
 		h.write(chunkC, 0, pattern(6, core.ChunkSize), 0)

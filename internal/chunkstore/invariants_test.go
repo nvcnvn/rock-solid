@@ -132,7 +132,7 @@ func (h *harness) ackedReadable() error {
 		return h.recoverErr
 	}
 	m := h.recovered
-	if m == nil || h.changed || !h.s.Serving() {
+	if !h.atRecovery() {
 		return nil
 	}
 	ix := h.s.Index()
@@ -172,6 +172,11 @@ func (h *harness) ackedReadable() error {
 	}
 	return nil
 }
+
+// atRecovery reports whether the store is as the last recovery under the crash oracle left it,
+// with no write or punch since, so that ackedReadable compares every block with the model the
+// byte-range oracle was rebased on.
+func (h *harness) atRecovery() bool { return h.recovered != nil && !h.changed && h.s.Serving() }
 
 func hasChunk(m *storeModel, c core.ChunkID) bool {
 	_, ok := m.chunks[c]
@@ -232,8 +237,11 @@ func (h *harness) punchesReadZeros() error {
 
 // readsMatchOracle checks that every block of the chunks checked reads, live and as the snapshot
 // of every epoch up to one past the newest cut, as the byte-range oracle of the acknowledged
-// writes and punches holds it.
+// writes and punches holds it. At a recovery ackedReadable has compared the same blocks.
 func (h *harness) readsMatchOracle() error {
+	if h.atRecovery() {
+		return nil
+	}
 	for _, c := range h.checking {
 		ch, v := h.bytes.chunks[c], h.viewOf(c)
 		for epoch := range h.maxEpoch + 2 {
@@ -452,33 +460,34 @@ func (ch *oracleChunk) apply(c change, version uint64) {
 	first, last := spanOf(c.off, c.n)
 	for b := first; b <= last; b++ {
 		lo, hi, _ := partial(c.off, c.n, b)
-		blk := slices.Clone(ch.live[b])
-		if blk == nil {
-			blk = make([]byte, core.BlockSize)
+		blk := make([]byte, core.BlockSize)
+		if lo != 0 || hi != core.BlockSize {
+			copy(blk, ch.live[b])
 		}
-		mask := slices.Clone(ch.punched[b])
-		if mask == nil {
-			mask = make([]byte, core.BlockSize)
-		}
+		mask := ch.punched[b]
 		if c.data == nil {
 			clear(blk[lo:hi])
+			if mask == nil {
+				mask = make([]byte, core.BlockSize)
+				ch.punched[b] = mask
+			}
 			for i := lo; i < hi; i++ {
 				mask[i] = 1
 			}
 		} else {
 			start := int(b-first)*core.BlockSize + int(lo) - int(c.off%core.BlockSize)
 			copy(blk[lo:hi], c.data[start:])
-			clear(mask[lo:hi])
+			if mask != nil {
+				clear(mask[lo:hi])
+				if bytes.Equal(mask, zeroBlock) {
+					delete(ch.punched, b)
+				}
+			}
 		}
 		if bytes.Equal(blk, zeroBlock) {
 			delete(ch.live, b)
 		} else {
 			ch.live[b] = blk
-		}
-		if bytes.Equal(mask, zeroBlock) {
-			delete(ch.punched, b)
-		} else {
-			ch.punched[b] = mask
 		}
 	}
 }

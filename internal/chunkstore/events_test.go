@@ -52,6 +52,7 @@ func TestWriteOfSeveralItems(t *testing.T) {
 // write's version continues past it.
 func TestPartlyDurableWrite(t *testing.T) {
 	h := newHarness(t, testConfig())
+	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 	rec := len(h.records)
 	w := h.write(chunkC, 0, fill(core.ChunkSize, 0x5a), 0)
 	first := uint64(0)
@@ -173,6 +174,7 @@ func TestCheckpointFailedKeepsFrozenMemtable(t *testing.T) {
 // the disk's error, and the store refuses writes until it is opened again.
 func TestInDoubt(t *testing.T) {
 	h := newHarness(t, testConfig())
+	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 	h.disk.Inject(sim.Fault{Effect: sim.FailIO, When: sim.OnKind(core.ActDiskFsync)})
 	a := h.write(chunkC, 0, []byte{1}, 0)
 	b := h.write(chunkC, 1, []byte{2}, 0)

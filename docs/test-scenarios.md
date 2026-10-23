@@ -2697,8 +2697,8 @@ names the unchanged chunk's reads (`TestFreeingTheNextSlotBreaksReads`). With th
   the store answers OK, with the bytes the request sent, in the order the replies come, and keeps
   each snapshot epoch's blocks as the last change before its cut left them. After a recovery it
   takes the crash oracle's model, which also holds what the recovery kept of the changes in
-  flight; a crash with actions queued and no crash oracle leaves it unknown, and the read
-  invariants skip the rest of that run.
+  flight. A test that crashes with actions queued must run the crash oracle; the harness fails
+  one that does not.
 - The tests that ran these checks on their own now leave them to the registry: the crash at
   every action sweeps, the crash oracle and recovery properties, `TestCleanerSurvivesCrashes`,
   the cleaner and event tests and `subBlockRun`. Unit tests of a bare `Index` still call its

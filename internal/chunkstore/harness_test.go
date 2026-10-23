@@ -97,8 +97,8 @@ type harness struct {
 	// violated to return rather than fail the test.
 	inv   sim.Invariants
 	catch bool
-	// bytes is the byte-range oracle of the acknowledged changes, nil once a crash the crash
-	// oracle does not follow leaves it unknown, and sent each change not yet answered.
+	// bytes is the byte-range oracle of the acknowledged changes, nil in smallDisk's harness, and
+	// sent each change not yet answered.
 	bytes    *byteOracle
 	sent     map[uint64]change
 	maxEpoch uint64
@@ -420,7 +420,7 @@ func (h *harness) recoveryDone() {
 	h.changed, h.full = false, true
 	if h.oracle == nil {
 		if h.unsettled {
-			h.bytes = nil
+			h.t.Fatal("a crash with actions queued needs the crash oracle to know which changes in flight recovery keeps")
 		}
 		return
 	}
