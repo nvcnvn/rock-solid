@@ -3038,11 +3038,11 @@ run in `deep-leases`; the variants that need one run on it alone.
   activated interval; the members of every interval are kept beside them. Nodes adopt the next table
   or the newest, so they may skip some, and never go back. A node cut off from the control plane
   adopts none.
-- **Messages.** Each replicated write is tagged with the PG's interval number. A member accepts it
-  only in the PG's current interval, and catches up to a newer table before it judges a higher
-  number. A primary takes a client write whose number is at least the one its own term began in.
-  Replicated writes stay in the network after delivery, so any may be delivered again or held for
-  any time.
+- **Messages.** Each replicated write is tagged with the sender's table epoch and the PG's interval
+  number. A member accepts it only in the PG's current interval, and catches up to a newer table
+  before it judges a higher number. A primary takes a client write whose number is at least the one
+  its own term began in. Replicated writes stay in the network after delivery, so any may be
+  delivered again or held for any time.
 - **Peering.** It reaches a live member of every interval since the last activated one that had at
   least `min_live` live members, counting any in `maintenance`, and every live member of its own.
   Members' state for the PG stays as they answered until the primary decides, so the model takes
@@ -3051,16 +3051,27 @@ run in `deep-leases`; the variants that need one run on it alone.
   missing lists, versions of that interval or later kept unless a reached member live in their
   interval neither holds nor lists them, every version below a kept one kept.
 - **Missing lists.** Members persist them, with the interval, before the primary activates; only
-  recovery removes an entry.
+  recovery removes an entry. Nothing reads a member's list until the next peering, which it answers
+  only once it has left the interval, so a member that persists its list while still in the
+  interval may as well persist it at the decision: any subset of the members persist theirs there,
+  and the rest when the primary activates. A decision some members persisted can so stay
+  unactivated, for good, when a later interval, a restart, a reboot or a format stops it; where
+  none can, every member persists at the decision and the primary activates at once.
 - **Disks.** Each member is a disk ID. A disk formatted again keeps its node but draws a new disk ID
   and starts empty; the old disk ID stays down.
 - **Activation.** The primary activates once its members' lists are durable and reports it; the
-  leader folds a report, possibly late, into a later table that starts no interval.
+  leader folds a report, possibly late, into a later table that starts no interval. Plans have one
+  table to spare for a renewal or a fold, and one plan two, so a report can be folded after a newer
+  one.
 - **Restarts and counters.** A restarted primary asks for a new interval and peers only in a later
   one. A chunk whose counter runs out lets the PG's pending writes commit, then asks for a new
   interval.
-- **Writes.** A chunk's writes are each merged on the newest version the primary holds; recovery
-  copies a kept version's history to a member that lists it. Connections are per-process: a write
+- **Writes.** A chunk's writes are each merged on the newest version the primary holds. Recovery
+  copies a kept version's history to a member that lists it, under the old version numbers, and
+  keeps the member's own writes of the current interval on top, as the real recovery write leaves
+  out the blocks they cover. What recovery reads from the source never changes before its write, so
+  the model takes the read with the write and lets the read have come at any point since the
+  primary activated, which matters only to the variant that picks the blocks at the read. Connections are per-process: a write
   reaches only the primary process its connection was opened to, and a write that reaches it late is
   the same as one it holds unordered. Every chunk write carries the session's incarnation. A primary
   holds its unordered client writes when an interval ends under it, orders them again once it has
@@ -3103,10 +3114,11 @@ plans enable.
 - A counter running out.
 - An activation report lost or late.
 - Recovery cut short by the next interval.
-- An interval that never activated.
+- An interval that never activated, including one whose decision some of its members persisted.
 - A member live in the last activated interval that its peering never reached, returning after a
   later interval and holding versions the others dropped.
 - A message duplicated or held for any time.
+- A client write ordered between recovery's read of the authoritative member and its write.
 - A member's disk formatted again while its node stays up.
 - A node cut off from the control plane that still reaches its peers.
 - A suspend, or a VM pause with every clock frozen, with or without a marker change, of a holder or
@@ -3131,54 +3143,47 @@ plans enable.
 Not modelled: a PG split with writes in flight, whose children take the parent's interval plus one
 like any new interval; it needs a PG created mid-run, left to the phase 3 simulator.
 
-**Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property. `ci-peering` and
-`deep-peering` check every property but 2 and 10: the Raft group and lease time need clocks.
-`deep-peering` adds the unbounded liveness property 12. A counterexample row whose property is 1, 2
-or 10 runs as a variant of `ci-leases`, every other row as a variant of `ci-peering`, except the row
-for reads below `min_live`, a `ci-peering` variant since its trace needs no clocks. A variant checks
-only the property it must break.
+**Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12.
+`ci-peering`, `ci-restarts` and `deep-peering` check every property but 2 and 10, since the Raft
+group and lease time need clocks, and `deep-peering` adds the unbounded liveness property 12. A
+simulator invariant is registered by [Placement faults and
+invariants](#placement-faults-and-invariants) (phase 3) unless the row names another item.
 
-1. No PG serves reads from two primaries at once: while a primary serves a PG's reads, no later
-   interval of that PG has activated under another primary.
-2. No two replicas of a shard serve lease reads at once.
-3. No write tagged with an interval completes after a later interval of its PG activates, unless
-   that interval's peering kept it. (A member peering reached may have acknowledged the write before
-   it adopted the new interval, and one it did not reach may acknowledge it after, so the stronger
-   form does not hold.)
-4. No acknowledged version, and no version an activated interval kept, is ever dropped: every later
-   activated decision and every later acknowledged version rests on it.
-5. The versions peering drops are a suffix of each chunk's pending versions: every member a decision
-   counts as holding the kept version holds the bytes of every version it was merged on.
-6. No two writes of a chunk get one version, and each version is above the one it was merged on.
-7. A table that leaves a PG's interval alone never fails that PG's writes.
-8. A new primary merges into a chunk only once it holds every version peering kept for it.
-9. No node's table epoch or interval number goes backwards, and no PG's last activated interval goes
-   down: a late report for interval 2, folded after 3 was recorded, changes nothing.
-10. A node pair whose raw rates differ by up to 4%, with no pause, reboot, network fault or refusal
-    since first contact, and whose holder ended no leases on a step-check trip from a pair a fault
-    touched, holds a lease within `rate_gap` (plus rounding, at the model's zero round
-    trips) of first contact and keeps it with no step-check trip. The bound is in time, so `ci`
-    checks it as an invariant over the model's clocks.
-11. Once a dead daemon's reissued write W′ and a later write W2 to the same block are acknowledged,
-    the block never again holds the dead daemon's W.
-12. Peering settles: with every step that is due taken in time, every PG eventually activates its
-    current interval, unless the interval has fewer than `min_live` live members, a live member's
-    disk is gone, or the table bound left a restarted primary without the new interval it asked for.
+| # | Property | Model invariant | Simulator invariant |
+| --- | --- | --- | --- |
+| 1 | No PG serves reads from two primaries at once: while a primary serves a PG's reads, no later interval of that PG has activated under another primary | `OneReader` | "no PG serves reads from two primaries at once" |
+| 2 | No two replicas of a shard serve lease reads at once | `OneLeaseholder` | "no two replicas of a shard serve lease reads at overlapping times", registered by MetaStore invariants (phase 4) |
+| 3 | A member that adopted a later interval of a PG logs no write tagged with an earlier one, so the members peering reaches stop the intervals they were live in | `NoLateCompletion` | "no member logs a write tagged with an earlier interval of its PG than its table's" |
+| 4 | No acknowledged version, and no version an activated interval kept, is ever dropped: every later activated decision and every later acknowledged version rests on it. That covers a write tagged with an interval that completes after a later interval activated: a member peering reached may have acknowledged it before adopting the new interval, and one it did not reach may acknowledge it after, so it completes late but only if the new interval kept it | `NothingCommittedDropped` | "no acknowledged version is ever dropped, and no version an activated interval kept is dropped later" |
+| 5 | The versions peering drops are a suffix of each chunk's pending versions: every member a decision counts as holding the kept version holds the bytes of every version it was merged on | `DropsAreSuffix` | "no version peering keeps follows a dropped version of its chunk", with the byte-range oracle |
+| 6 | No two writes of a chunk get one version, and each version is above the one it was merged on | `OneWritePerVersion`, `VersionsGrow` | "no two writes of a chunk get one version", registered by Invariant checker (phase 1) |
+| 7 | A table that leaves a PG's interval alone never fails that PG's writes: a member accepts a write sent under any table epoch in which the PG's interval is the one its own table holds | `UnchangedIntervalAccepts` | "no write is refused for its interval while its PG's interval has not changed" |
+| 8 | A new primary merges into a chunk only once it holds every version peering kept for it: the version it merges on rests on the kept one | `MergesOnKept` | None named. Open: the byte-range oracle catches the effect, a merge on a missing base; the map must say so or the design must add one |
+| 9 | No node's table epoch or interval number goes backwards; no PG's last activated interval goes down, so a late report for interval 2, folded after 3 was recorded, changes nothing; and a table's last activated interval did activate | `TablesForward`, `Monotonic` | "no node's table epoch or PG interval number goes backwards" |
+| 10 | A node pair whose raw rates differ by up to 4%, with no pause, reboot, network fault or refusal since first contact, and whose holder ended no leases on a step-check trip from a pair a fault touched, holds a lease within `rate_gap` (plus rounding, at the model's zero round trips) of first contact and keeps it with no step-check trip. The bound is in time, so `ci` checks it as an invariant over the model's clocks | `LeaseForms` | None named: with real round trips the bound is `rate_gap` plus two of them, which the simulator's lease runs measure ([Peering and read leases](#peering-and-read-leases)) |
+| 11 | Once a dead daemon's reissued write W′ and a later write W2 to the same block are acknowledged, the block never again holds the dead daemon's W | `NoResurrectedWrite` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), under the fault "a dead daemon's chunk write delivered after its successor's reissue and the pod's next write to the same block", registered by Invariant checker (phase 1) |
+| 12 | Peering settles: with every step that is due taken in time, every PG eventually activates its current interval, unless the interval has fewer than `min_live` live members, a live member's disk is gone, or the table bound left a restarted primary without the new interval it asked for | `PeeringSettles` | "once membership stops changing, every PG whose current interval has at least `min_live` live members on running nodes activates it" |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
 find a violation of the named property, which is never the property that only restates the removed
-rule. A variant that passes means the model is too weak.
+rule. A variant that passes means the model is too weak. A row whose property is 1, 2 or 10 runs
+with `ci-leases`'s constants, except the row for reads below `min_live`, whose trace needs no
+clocks; the rest run with `ci-peering`'s, on `ci-restarts`' plans where the trace needs a restart
+or a format. A variant checks only the property it must break.
 
 | Rule removed or broken | Property broken | Minimal trace |
 | --- | --- | --- |
 | A member logs one version of a chunk out of order (1.2 before 1.1) | 5 | Peering keeps 1.2, which was merged on 1.1, from a member that lacks 1.1's block |
 | A new primary merges before it holds a kept version | 4 | The new primary's partial write merges on its stale block, and the acknowledged result drops the kept version |
-| Peering stops only the previous interval | 3 | PG 2: interval 2 replaces the primary, interval 3 puts the other member in `maintenance`; 3 reaches only a member live in 2, and the old primary's write tagged 1 completes |
-| Members compare member lists instead of interval numbers | 3 | [1,2,3] → [1,2] → [1,2,3]; members at interval 3 accept the old write tagged 1 that 3's peering dropped |
+| Peering stops only the previous interval | 4 | PG 2: interval 2 replaces the primary, interval 3 puts the other member in `maintenance`; 3 reaches only a member live in 2, and the old primary's write tagged 1, which 3 dropped, completes |
+| Members compare member lists instead of interval numbers | 4 | [1,2,3] → [1,2] → [1,2,3]; members at interval 3 accept the old write tagged 1 that 3's peering dropped |
 | A disk ID kept across a new log ID | 4 | 1.1 acknowledged on all three; node 3's disk is formatted again and keeps its ID; node 1 is marked down; peering finds disk 3, live in 1, lacking 1.1, and drops it |
 | A restarted primary peers in its old interval | 6 | A write from its previous run is still in a member's socket; the new run's peering drops it and gives its version to the reissue |
 | An older version is decided by its own interval's members after a later interval kept it | 4 | Interval 2 keeps a version recovering onto node 1; interval 3 reaches node 1 and a member live in 1 that lacks the version, and 1's rule drops what 2 kept |
 | A primary activates before missing lists are durable | 4 | A member crashes after activation, forgets that it lacks the kept version, and the next peering, reaching it, drops the version |
+| The leader records an activation the primary has only decided | 4 | PG 2: interval 2 replaces member 3 with node 1; primary 2 decides to keep W, still in flight to 3, and the leader records 2 before any member persisted the decision; W completes in interval 1; interval 3 puts 2 in `maintenance`, and node 1, peering from interval 2, finds no member that persisted its decision and drops W |
+| Recovery picks the blocks to leave out when it reads the authoritative member, not when it orders its write | 4 | A member that lists a chunk gets a client write ordered after recovery's read; the recovery write copies the older block over it, and the next peering, reaching that member, drops the acknowledged write |
+| Members accept a write only in the table epoch it was sent in | 7 | A fold or a change to the other PG reaches a member while a write is in flight, and the member refuses it though its interval is unchanged |
 | A later peering clears a missing-list entry recovery has not done | 5 | A member holds a dropped version, a write to the chunk's other block lands on it, the next peering clears its entry, and the decision after counts its torn block as the kept version |
 | Incarnations checked when a write arrives, not when it is ordered | 11 | P holds W; the successor's hello reaches P; P orders W after W′ and W2 |
 | A held write ordered again although another primary led the PG since | 11 | The pause fault above: P has never seen the successor's incarnation, and orders W after W′ and W2, which completed on Q in interval k |
@@ -3186,7 +3191,7 @@ rule. A variant that passes means the model is too weak.
 | The holder ends its lease on the slower of its clocks | 1 | Holder `CLOCK_BOOTTIME` −22.6%: the lease outlives the grant |
 | The grantor ends its grant on the faster of its clocks | 1 | Grantor `CLOCK_BOOTTIME` +22.6% |
 | A lease before the first bound, on `lease_drift` alone | 1 | Grantor raw clock 4% fast: the first grant's lease outlives the grant |
-| That, with the step check at `1 + lease_drift / 2` restarting the window on each trip | 1 | As above; the pair never gets a bound |
+| That, with the step check at `1 + lease_drift / 2` restarting the window on each trip (the one variant that plants two bugs, as the rule it breaks is a combination) | 1 | As above; the pair never gets a bound |
 | Widening only past `1 + 2 lease_drift` | 1 | Grantor 4% fast: the margin stays 3% where 3.85% is needed, and a partition follows a grant |
 | The margin `max(lease_drift, 1 − 1/B)` | 1 | Pair measured at +4%, then the grantor's raw rate rises 0.4% and a partition follows a grant |
 | No new window at a grantor's new run ID | 1 | Grantor 4% fast is paused with a marker change just after a window's first grant; the bound across the pause comes out below 1, the lease on `lease_drift` alone outlasts the grant, and a partition follows |
@@ -3214,8 +3219,13 @@ rule. A variant that passes means the model is too weak.
   seconds; one that takes no time breaks property 1 (the row above), so the restart wait relies on it
   ([Epoch changes](design.md#epoch-changes-and-failure-detection)).
 - With incarnations checked when a write is ordered and held writes ordered again only if no other
-  primary led the PG since, property 11 holds in `ci-peering` with no table of incarnations that
-  survives a primary change, and the two incarnation rows above each fail.
+  primary led the PG since, property 11 holds in `ci-peering` and `ci-restarts` with a table of
+  incarnations per PG that a primary forgets whenever another primary may have led the PG, and the
+  two incarnation rows above each fail.
+- Properties 3, 8 and 9 have no row of their own, since the only rules whose removal breaks them are
+  the ones they restate; each was seen to fail once, outside the committed variants: 3 with member
+  lists compared, 8 with a merge before the kept version, and 9 with an activation recorded at the
+  decision, and with a late report folded over a newer one in the plan with two spare tables.
 - The model leaves out a VM stop in place that no queued grantor message spans, whose hypervisor
   dropped or delayed what was sent during it, and a grantor's stop in place followed by a partition:
   a stop in place draws no new run ID, so a holder's bound across it is too low until the step check
@@ -3541,35 +3551,10 @@ Snapshots taken while a purge runs (punches carrying the snapshot epoch) are lef
   that registers it; once that invariant exists, the row quotes its registered name. A property with
   none is listed as such and fails review unless the map says why.
 
-**Epoch change model configurations**, as `scripts/models.sh` printed them with 4 workers on an
-Apple M4 Pro. Each `ci` configuration runs well inside its 5 minutes here, leaving room for a slower
-CI runner.
-
-| Configuration | Constants | Depth | Distinct states | Wall time |
-| --- | --- | --- | --- | --- |
-| `ci-peering` | 3 nodes; PG 1 `rep3`, PG 2 `rep2` with `maintenance`; 2 chunks; 11 plans, each up to 3 changes plus 1 renewal or fold (tables ≤ 5); counter limit 2; 1 fault (restart, format or daemon death) and 1 format; 1 send per write; lease expiry open | 31 | 981,217 | 110 s |
-| `ci-leases` | 3 nodes; the same PGs; 1 chunk of 1 block, 1 whole-block write; 10 plans; raw rates 960 or 1,040 per mille on node 3, `CLOCK_BOOTTIME` slewed 22.6% on nodes 2 and 3; time to 11 s in 10 ms units (6 s in most plans); up to 2 faults; Raft terms ≤ 2; node 3 4% fast in the rate-step, suspend, stop, restart and Raft plans | 81 | 797,699 | 66 s |
-| `deep-peering` | 4 nodes, node 4 a spare; `ci-peering`'s plans and a free plan of any 2 changes with 1 write and a restart; property 12 under weak fairness | 32 | 14,838,803 | 2 h 30 min |
-| `deep-leases` | 4 nodes, node 4 a spare and a Raft voter; `ci-leases`'s plans and the four that pair a partition with a pause, a suspend or a reboot (exact or node 3 4% fast), time to 5 s in the pause and suspend plans | 132 | 27,402,416 | 50 min |
-| `deep-slow` | `ci-leases`'s constants with time to 5 s; the delayed-message plan alone | 72 | 21,073,400 | 33 min |
-
-| Model | Property | Simulator invariant (Testing strategy) | Registered by |
-| --- | --- | --- | --- |
-| Epoch change | No PG serves reads from two primaries at once | No PG serves reads from two primaries at once | Placement faults and invariants (phase 3) |
-| Epoch change | No two replicas of a shard serve lease reads at once | No two replicas of a shard serve lease reads at overlapping times | MetaStore invariants (phase 4) |
-| Epoch change | No write tagged with an interval completes after a later interval of its PG activates, unless that interval kept it | No write tagged with an interval completes after a later interval of its PG has activated unless that interval kept it | Placement faults and invariants (phase 3) |
-| Epoch change | No acknowledged version, and no version an activated interval kept, is ever dropped | No acknowledged version is ever dropped, and no version an activated interval kept is dropped later | Placement faults and invariants (phase 3) |
-| Epoch change | The versions peering drops are a suffix of each chunk's pending versions, so no kept version was merged on a dropped one | No version peering keeps follows a dropped version of its chunk (with the byte-range oracle) | Placement faults and invariants (phase 3) |
-| Epoch change | No two writes of a chunk get one version | No two writes of a chunk get one version | Invariant checker (phase 1) |
-| Epoch change | A table that leaves a PG's interval alone never fails its writes | No write is refused for its interval while its PG's interval has not changed | Placement faults and invariants (phase 3) |
-| Epoch change | A new primary merges into a chunk only once it holds every version peering kept | None named. Open: the byte-range oracle catches the effect (a merge on a missing base); the map must say so or the design must add one | Placement faults and invariants (phase 3) |
-| Epoch change | Table epochs and interval numbers never go backwards | No node's table epoch or PG interval number goes backwards | Placement faults and invariants (phase 3) |
-| Epoch change | Once a reissue and a later write to the same block are acknowledged, the block never again holds the dead daemon's write | Every read returns exactly the bytes of the acknowledged writes and punches applied in version order (the byte-range oracle), under the fault "a dead daemon's chunk write delivered after its successor's reissue and the pod's next write to the same block" | Invariant checker (phase 1) |
-| Epoch change | Peering settles: every PG eventually activates its current interval, unless it is below `min_live`, a disk it needs is gone, or a restarted primary lacks the interval it asked for | Once membership stops changing, every PG whose current interval has at least `min_live` live members on running nodes activates it | Placement faults and invariants (phase 3) |
-
 **Configuration results.** Each `ci` run as `scripts/models.sh ci` printed it, and each `deep` run as
 `scripts/models.sh deep` printed it, with 4 workers and a 4 GB heap on a Mac mini running two other
-4-worker TLC jobs. Constants are in each configuration's first line and in its model's section.
+4-worker TLC jobs; the epoch change model's ran alone. Constants are in each configuration's first
+line and in its model's section.
 
 | Model | Configuration | Constants | Depth | Distinct states | Wall time |
 | --- | --- | --- | --- | --- | --- |
@@ -3586,6 +3571,9 @@ CI runner.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 30 | 2,000,812 | 218 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 25 | 743,289 | 73 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 81 | 1,215,222 | 100 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
@@ -3596,17 +3584,13 @@ CI runner.
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
 
-- The sessions, recall and purge models name the simulator invariant of each property in their own
-  sections' property tables, so they have no rows here. Open: the checklist has no phase 6 or 7
-  items yet; their invariants are registered with the phase 6 file frontend, and the recall
-  model's with phase 7 (Tier 2).
-- The epoch change model's counterexamples (a member logging one version out of order, a new primary
-  merging before it holds a kept version, peering that stops only the previous interval, comparing
-  member lists instead of interval numbers, a restarted primary peering in its old interval,
-  deciding an older version by its own interval's members after a later interval kept it, activating
-  before missing lists are durable) each also appear as a simulator fault or planted bug that trips
-  the mapped invariant. Open: the checklist does not require this; it follows if every property has
-  an invariant.
+- Each model names the simulator invariant of each property in its own section's property table,
+  so this map holds only the configuration results. Open: the checklist has no phase 6 or 7 items
+  yet; the sessions and purge models' invariants are registered with the phase 6 file frontend,
+  and the recall model's with phase 7 (Tier 2).
+- The epoch change model's counterexamples each also appear as a simulator fault or planted bug that
+  trips the mapped invariant. Open: the checklist does not require this; it follows if every
+  property has an invariant.
 - Snapshot cuts and pool moves are modelled in phase 11, and cross-shard commit in phase 13, each
   before its code (design.md Roadmap), so this map has no rows for them yet.
 
