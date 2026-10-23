@@ -210,11 +210,13 @@ type plants struct {
 	// noGainGuard takes victims whose copies cost a segment or more; moveOverWrites applies the
 	// cleaner's copies as writes, wherever a map points; noSpaceWithVictim fails items waiting for
 	// room with NoSpace while the cleaner has a victim; freeLive frees a chunk victim's live count
-	// before copying, so the log frees it with its blocks live.
+	// before copying, so the log frees it with its blocks live; newPassOnly counts as a victim only
+	// a pass the cleaner just started, failing items waiting for room while an older one runs.
 	noGainGuard       bool
 	moveOverWrites    bool
 	noSpaceWithVictim bool
 	freeLive          bool
+	newPassOnly       bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.

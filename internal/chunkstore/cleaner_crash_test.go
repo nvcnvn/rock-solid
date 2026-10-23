@@ -42,15 +42,16 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) {
 }
 
 // cleanerCrash runs the workload on the small disk, cleaning as it fills, crashes it at a seeded
-// action with a seeded share of unflushed blocks landing, recovers with plant and rebuilds the
+// action with a seeded share of unflushed blocks landing, recovers and rebuilds the
 // index twice, the second time after the cleaner has moved blocks again, checking the store's
 // invariants throughout. A quarter of the seeds take the results of the cleaner's jobs late,
-// after other events. It returns the blocks the cleaner freed before the crash and the first
-// violation.
+// after other events. plant is planted throughout. It returns the blocks the cleaner freed before
+// the crash and the first violation.
 func cleanerCrash(t *testing.T, seed uint64, plant plants) (int, error) {
 	r := core.NewRand(seed)
 	h := newHarnessOn(t, cleanConfig(), cleanGeo)
 	h.merging, h.catch = true, true
+	h.s.plant, h.plant = plant, plant
 	if seed%4 == 3 {
 		h.late = core.NewRand(^seed)
 	}
@@ -68,7 +69,6 @@ func cleanerCrash(t *testing.T, seed uint64, plant plants) (int, error) {
 	h.disk.CrashRandom(r)
 	h.crashAt = -1
 	h.cfg.CleanFree = 0
-	h.plant = plant
 	return freed, violated(func() {
 		if !h.reopen(disklog.ModeOpen) {
 			t.Fatalf("seed %d: recovery stopped: %v", seed, h.s.Err())
@@ -124,6 +124,17 @@ func TestCleanerCrashSeed277FailsWritesWithNoVictim(t *testing.T) {
 	if _, err := cleanerCrash(t, 277, plants{}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Planted violation: a cleaner that counts as a victim only a pass it has just started fails
+// writes waiting for room while an older pass still copies, which seed 277's writes 620 to 625 wait
+// through, and invNoSpace names it.
+func TestFailingWritesWhileAPassRunsBreaksNoSpace(t *testing.T) {
+	_, err := cleanerCrash(t, 277, plants{newPassOnly: true})
+	if violationOf(err) != invNoSpace {
+		t.Fatalf("broke %v", err)
+	}
+	t.Log(err)
 }
 
 // Planted bug: replay mapping a copy's blocks as a write, whether or not a map still stores them

@@ -133,6 +133,8 @@ type harness struct {
 	recSeq   map[core.LBA]uint64
 	cleanSeg map[uint32]bool
 	filled   map[uint32]float64
+	// passesBefore is the cleaner's passes before the event the store handles now, or an earlier one.
+	passesBefore []*cleanPass
 }
 
 // advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
@@ -287,6 +289,7 @@ func (h *harness) step() bool {
 		h.tick(took)
 	}
 	recovering := !h.s.Serving()
+	h.passesBefore = append(h.passesBefore[:0], h.s.cl.passes...)
 	h.s.OnEvent(&h.ctx, &ev, &h.out)
 	if recovering && h.s.Serving() {
 		h.recoveryDone()
@@ -337,6 +340,7 @@ func (h *harness) runClean(i int) {
 	j := h.held[i]
 	h.held = slices.Delete(h.held, i, i+1)
 	j.Run(h.pool)
+	h.passesBefore = append(h.passesBefore[:0], h.s.cl.passes...)
 	h.s.InstallClean(&h.ctx, j, &h.out)
 	h.take()
 }

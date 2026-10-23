@@ -174,7 +174,11 @@ func (s *Store) cleanWorkers() int {
 // that frees nothing, as after finding no victim, it starts none until the durable LSN moves. It
 // reports whether the cleaner has a victim: whether a pass is still running.
 func (s *Store) clean(ctx *core.Context) bool {
+	before := s.cl.stats.Passes
 	for s.cleanRound(ctx) {
+	}
+	if s.plant.newPassOnly {
+		return s.cl.stats.Passes > before
 	}
 	return len(s.cl.passes) > 0
 }

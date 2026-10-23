@@ -185,7 +185,7 @@ func TestWriteAmplificationRunChecksNoSpace(t *testing.T) {
 		}()
 		waRun{geo: disklog.Geometry{SegmentBlocks: 256, SegmentCount: 128}, fill: 0.5, warm: 1, cleanFree: -1, plant: plants{noSpaceWithVictim: true}}.run(c, 1)
 	}()
-	if !strings.Contains(c.msg, "failed with NoSpace, with victims") {
+	if !strings.Contains(c.msg, "failed with NoSpace") {
 		t.Fatalf("the run ended with %q", c.msg)
 	}
 	t.Log(c.msg)

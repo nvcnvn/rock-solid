@@ -257,13 +257,18 @@ func (h *harness) victimsGain() error {
 	return h.found[invGain]
 }
 
-// noSpace breaks invNoSpace when request id, a write or punch, fails with NoSpace while the
-// cleaner has a victim that passes its net-gain guard, unless its copies wait with no segment
-// free at all. A pass running is no victim: the event that failed the write may have started it
-// after the store found none.
+// noSpace breaks invNoSpace when request id fails with NoSpace while the cleaner has a victim,
+// unless its copies wait with no segment free at all: a pass that ran before the event and still
+// runs, so ran through it, or a victim that passes the net-gain guard. A pass the event started is
+// no victim: the event may have started it after the store found none.
 func (h *harness) noSpace(id uint64) {
 	if !h.s.Serving() || h.s.Log().CopiesStalled() {
 		return
+	}
+	for _, p := range h.s.cl.passes {
+		if slices.Contains(h.passesBefore, p) {
+			h.violate(invNoSpace, fmt.Errorf("request %d failed with NoSpace while a pass on segments %v ran", id, p.victims[p.cur:]))
+		}
 	}
 	if v := h.s.chooseVictims(); len(v) > 0 {
 		h.violate(invNoSpace, fmt.Errorf("request %d failed with NoSpace, with victims %v", id, v))
