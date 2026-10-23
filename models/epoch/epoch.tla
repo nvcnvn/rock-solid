@@ -536,10 +536,15 @@ PersistAll(P, p, k, ls) ==
                    ELSE miss[d]]
     /\ persIv' = [d \in Disk |-> IF d \in P THEN [persIv[d] EXCEPT ![p] = k] ELSE persIv[d]]
 
-\* Whether something can stop interval k of p from activating once decided:
-\* a later interval its members or primary may adopt first, or a restart,
-\* reboot or format.
-CanStall(p, k) == Cur(p) > k \/ plan.f \cap {"restart", "reboot", "format"} # {}
+\* Whether something can stop interval k of p from activating once its
+\* primary n decided: a later interval its members or primary may adopt
+\* first, or a restart or reboot of n or a format of a member, while the plan
+\* still allows one.
+FaultLeft(kind) == kind \in plan.f /\ faults < Min({MaxFault, plan.k})
+CanStall(n, p, k) ==
+    \/ Cur(p) > k
+    \/ (FaultLeft("restart") \/ FaultLeft("reboot")) /\ run[n] < MaxRestart
+    \/ FaultLeft("format") /\ fmts < MaxFormat
 
 \* The new primary of k peers: it reaches every live member of k and a live
 \* member of every interval since the last activated one, decides what
@@ -577,14 +582,14 @@ Peer(n, p) ==
              /\ dec' = dec \cup {[p |-> p, k |-> k, n |-> n, r |-> run[n], kept |-> K]}
              /\ bad' = IF torn THEN bad \cup {"torn"} ELSE bad
              /\ pv' = [pv EXCEPT ![n] = [c \in Chunk |-> IF c \in ChunksOf(p) THEN K[c] ELSE pv[n][c]]]
-             /\ \E P \in IF CanStall(p, k) THEN SUBSET UpIn(p, k) ELSE {UpIn(p, k)} :
+             /\ \E P \in IF CanStall(n, p, k) THEN SUBSET UpIn(p, k) ELSE {UpIn(p, k)} :
                   IF Bug("ActivateBeforeDurable")
                   THEN /\ mrecv' = [d \in Disk |-> IF d \in UpIn(p, k)
                                        THEN mrecv[d] \cup {[p |-> p, k |-> k, ent |-> lists[d]]}
                                        ELSE mrecv[d]]
                        /\ Activated(n, p, k)
                        /\ UNCHANGED <<miss, persIv>>
-                  ELSE IF CanStall(p, k)
+                  ELSE IF CanStall(n, p, k)
                   THEN /\ PersistAll(P, p, k, lists)
                        /\ reports' = IF Bug("ReportBeforeActivate") THEN reports \cup {[p |-> p, k |-> k]}
                                      ELSE reports
@@ -1109,8 +1114,7 @@ Deadlines ==
 \* grantor (node 3). In a Raft plan, partitions cut the first leader's links.
 Target(n) == "stale2" \in plan.f => n \in {2, 3}
 
-Fault(kind) == /\ kind \in plan.f
-               /\ faults < Min({MaxFault, plan.k})
+Fault(kind) == /\ FaultLeft(kind)
                /\ faults' = faults + 1
 
 \* A node cut off from the control plane still reaches its peers but adopts

@@ -56,22 +56,20 @@ For the user: the run ID makes the boot ID redundant for rate windows; both are 
 
 ## Remaining (peering half of the review, in progress)
 
-Model changes made (commit after this note): incarnation table per PG, reset on a primary change;
-delivered writes stay in rm; restored incarnation rows; peering decides with a subset P of members
-persisting and Activate persisting the rest (CanStall: only where a later interval, restart, reboot or
-format can stop activation); Recover with a chosen read point and RecoveryCoversAtRead; property 3 is
-now "a member that adopted a later interval logs no earlier write" (old 3 is part of 4); property 7
-with the table epoch in rm and CompareTableEpochs; property 8 by Chain; property 9 also "la
-activated" (ReportBeforeActivate) and plan LateReport (2 spare tables); chunk 2 has 2 blocks,
-MaintMerges plan; ci-peering split into ci-peering and ci-restarts. Quick checks (not committed):
+Done and committed: items 1-8 of the review (model b576b75, docs f4a050d) and item 9, the boot ID
+dropped (786ac21; neg-no-boot-window folded into neg-no-run-window). First full ci run (before
+CanStall's fault budget and item 9) all ok: ci-leases 81 / 1,215,222 / 100 s, ci-peering 30 /
+2,000,812 / 218 s, ci-restarts 25 / 743,289 / 73 s. Peering decides with a subset P of members
+persisting; Activate persists the rest; CanStall limits that to where a later interval, or a
+restart, reboot or format still in the fault budget, can stop activation. Recover takes its read
+with its write and picks the read point "at" (matters only under RecoveryCoversAtRead); separate
+read and write steps multiplied ci-peering's states by more than 5. Quick checks (not committed):
 NoLateCompletion fails with CompareMemberLists, MergesOnKept with MergeBeforeKept, TablesForward with
 ReportBeforeActivate and with Fold's guard removed under LateReport.
 
-Still to do: full `scripts/models.sh ci epoch`; docs (item 8: results rows into the Configuration
-results table, property table in the epoch section, build-checklist wording, free plan wording,
-counterexample rows for the new negatives); rerun deep-peering, deep-leases, deep-slow.
-Then item 9 (coordinator): drop the boot ID (run ID covers reboots), commit separately, rerun
-ci-leases, the changed negative and deep-leases.
+In progress: sizing deep-peering, whose free plan grew past 7M states at depth 12 at 4 nodes (it was
+14.8M in all before); split or shrink it to fit 4 h with liveness. Then rerun deep-peering,
+deep-leases, deep-slow and full ci, record results in test-scenarios' Configuration results table.
 Then: fresh review, final ci rerun, tick the build-checklist "Epoch change model" item, delete
 HANDOFF.md before merge.
 
@@ -93,6 +91,11 @@ HANDOFF.md before merge.
 6. Restart wait after a reboot relies on the reboot taking longer than (1 − 1/ρ)·primary_lease;
    stated in Reads. neg-instant-reboot.
 7. Support epoch matters for Raft leader leases (property 2), not primary read leases; stated.
+8. Recovery as designed could lose an acknowledged write: whole-block writes go ahead while a member
+   lacks the kept version, and a recovery write copying the old block over one ordered after its read
+   lost it. Recovery now leaves out the blocks covered by writes of the interval ordered before the
+   recovery write, decided when it is ordered (Recovery paragraph); neg-recovery-covers-at-read.
+   Also stated why an activation is reported only once done (neg-report-before-activate).
 Open questions settled and removed: grant coverage (no table epoch needed; Wire messages Grant row
 updated), incarnation fencing (model confirms). kvm-clock stop and rate-rise-past-headroom questions
 stay open; the model leaves those cases out (stated in both).
@@ -103,3 +106,10 @@ stay open; the model leaves those cases out (stated in both).
   any time, which did not fit 5 min; deep-peering has the free plan. Documented in design.md Testing
   strategy and test-scenarios.
 - Not modelled: PG split with writes in flight (stated in test-scenarios).
+- Boot ID dropped (item 9). The sessions model and its checklist item still key the client's rate
+  bound "per leader node and boot"; under the run-ID rule that is per node and run. Its model's
+  reboot is a superset of a new run for that purpose, but it does not model a leader's daemon
+  restart or pause as a new window. Left unchanged; say if it should follow.
+- The step check now compares only messages of the same run (it compared the same boot). Across a
+  grantor's daemon restart the holder's lease from that grantor ends anyway at the new window, and
+  its other grantors' heartbeats check its own lost time, so nothing found needs the boot ID.
