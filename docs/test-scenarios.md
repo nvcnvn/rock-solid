@@ -3186,7 +3186,7 @@ rule. A variant that passes means the model is too weak.
 | Widening only past `1 + 2 lease_drift` | 1 | Grantor 4% fast: the margin stays 3% where 3.85% is needed, and a partition follows a grant |
 | The margin `max(lease_drift, 1 − 1/B)` | 1 | Pair measured at +4%, then the grantor's raw rate rises 0.4% and a partition follows a grant |
 | No new window at a grantor's new run ID | 1 | Grantor 4% fast is paused with a marker change just after a window's first grant; the bound across the pause comes out below 1, the lease on `lease_drift` alone outlasts the grant, and a partition follows |
-| No new window at a grantor's new boot ID | 1 | Grantor reboots within `rate_window` and its new boot runs 2% fast; its first grant gives a bound below 1 and a lease on `lease_drift` alone, and a partition follows |
+| No new window at a grantor's reboot, by its boot ID or its run ID (either alone suffices) | 1 | Grantor reboots within `rate_window` and its new boot runs 2% fast; its first grant gives a bound below 1 and a lease on `lease_drift` alone, and a partition follows |
 | A reboot that takes no time | 1 | Grantor reboots the instant after a grant; its new boot runs 2% fast, so its restart wait ends before the holder's lease |
 | The step check at `1 + lease_drift / 2`, with no lease before a bound | 10 | Grantor 4% fast: the check trips on the first heartbeat after the lease forms |
 | The step check against a grant that gave no lease | 10 | Grantor 4% fast: the window's second grant trips the check, so no bound forms |

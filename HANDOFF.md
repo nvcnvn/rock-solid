@@ -42,9 +42,15 @@ or a shorter MaxTime) and rerun.
 2. ci plans now run node 3 fast: HandoverSuspend, HandoverStop, HandoverRestart, RaftTransfer,
    RaftPartition; HandoverRebootFast in deep-leases. A trip on a faulted pair taints the holder's
    other pairs (Detected) for property 10. ci-leases: depth 81, 797,699 states, 68 s.
-3. Property 10: keep zero round trips; build-checklist to promise only that (todo).
-4. deep-slow: MaxTime 1100 -> 500 (plan t was 600); rerun pending.
-5, 6: docs pending.
+   neg-no-boot-window now sets NoBootWindow and NoRunWindow (a reboot draws a new run ID too, so either
+   ID alone starts the window); violates OneReader at depth 73 in 111 s.
+   `scripts/models.sh ci epoch` passed on 2026-10-23 (ci-leases 81 / 797,699 / 66 s; ci-peering 31 /
+   981,217 / 110 s; neg-no-run-window 156 s), apart from neg-no-boot-window, fixed and rerun alone.
+3. Property 10: done; build-checklist promises zero round trips only, the simulator checks the rest.
+4. deep-slow: MaxTime 1100 -> 500 (plan t was 600); rerun pending, after deep-leases (pending).
+5. Done: design.md Writes and min_live, Failure detection, refill row, glossary, refill scenarios.
+6. Done: wire rows Lease request (table epoch), Grant and node-pair heartbeat (boot ID, run ID).
+Note for the user: the run ID makes the boot ID redundant for rate windows; it is kept.
 
 ## Remaining
 
