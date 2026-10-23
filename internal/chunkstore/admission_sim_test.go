@@ -171,9 +171,9 @@ const longSimEnv = "ROCKSOLID_LONG_SIM"
 // At 85% full on 320 segments of 1,024 blocks, about the most the net-gain guard sustains on
 // segments of that size, the same writers against a cleaner taking 20 ms a victim: admission
 // keeps free segments above none for a larger share of the time than without it, and than a
-// planted rate net of copied blocks alone, and no write fails while the cleaner has a victim. Each
-// run holds 1.25 GiB of disk in memory, so it runs only with ROCKSOLID_LONG_SIM set; its figures
-// feed the cleaning-debt question in design.md.
+// planted rate net of copied blocks alone, and no write fails while the cleaner has a victim.
+// The three runs take about 2.5 minutes, so they run only with ROCKSOLID_LONG_SIM set; their
+// figures feed the cleaning-debt question in design.md.
 func TestWriteAdmissionAt85PercentFull(t *testing.T) {
 	if os.Getenv(longSimEnv) == "" {
 		t.Skip("set " + longSimEnv + " to run")

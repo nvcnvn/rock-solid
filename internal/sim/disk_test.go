@@ -131,3 +131,32 @@ func TestDiskFaults(t *testing.T) {
 		t.Fatalf("%d of 1000 blocks landed with p = 1/2", landed)
 	}
 }
+
+func TestDiskKeepsBlocksEndingInZerosWhole(t *testing.T) {
+	p := NewPool(1<<20, 0)
+	d := NewDiskWith(4, DiskSettings{Latency: DefaultDiskLatency, TearSectors: true})
+	d.Put(0, filled(1, 2))
+	short := make([]byte, 2*core.BlockSize)
+	copy(short, bytes.Repeat([]byte{2}, 600))
+	w := writeAction(t, p, 1, 0, short)
+	d.Execute(p, &w)
+	if !bytes.Equal(d.Read(0, 2), short) {
+		t.Fatal("reads do not see a block ending in zeros, or a block of zeros, as written")
+	}
+	d.CrashSectors(func(_ int, lba core.LBA, s int) bool { return lba == 0 && s == 0 || lba == 1 && s == 1 })
+	want := filled(1, 2)
+	copy(want, short[:SectorSize])
+	clear(want[core.BlockSize+SectorSize : core.BlockSize+2*SectorSize])
+	if !bytes.Equal(d.Read(0, 2), want) || !bytes.Equal(append(d.Durable(0), d.Durable(1)...), want) {
+		t.Fatal("torn sectors of a block ending in zeros and of a block of zeros landed wrong")
+	}
+	if d.Durable(2) != nil || !bytes.Equal(d.Read(2, 1), make([]byte, core.BlockSize)) {
+		t.Fatal("a block never written is not reported unwritten and read as zeros")
+	}
+	w = writeAction(t, p, 2, 2, short)
+	d.Execute(p, &w)
+	d.Execute(p, &core.Action{Kind: core.ActDiskFsync, IO: 3})
+	if !bytes.Equal(d.Read(2, 2), short) || len(d.ahead) != 0 {
+		t.Fatalf("after a flush reads see %d blocks apart from the durable ones", len(d.ahead))
+	}
+}

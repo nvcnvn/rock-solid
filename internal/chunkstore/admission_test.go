@@ -102,7 +102,7 @@ func TestTheBucketCarriesAWindowsDeficitWhileTheCleanerRuns(t *testing.T) {
 func slowedStore(t *testing.T) *harness {
 	h, o := primed(t)
 	r := core.NewRand(31)
-	for h.s.Log().FreeOutsideReserve() > 5 {
+	for h.freeEmpty(); h.s.Log().FreeOutsideReserve() > 5; h.freeEmpty() {
 		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 	}
 	h.hold = true

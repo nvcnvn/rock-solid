@@ -86,8 +86,11 @@ type harness struct {
 	late *core.Rand
 	hold bool
 	// timed moves the clock on by each disk action's simulated time as it completes, and light
-	// keeps neither the actions nor the records written, for runs that write a disk many times.
+	// keeps neither the actions, the records written nor the merges run, for runs that write a
+	// disk many times.
 	timed, light bool
+	// wrote counts the blocks of every disk write run, and wroteMeta those in the metadata stream.
+	wrote, wroteMeta uint64
 }
 
 // advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
@@ -204,8 +207,16 @@ func (h *harness) step() bool {
 	if a.Kind == core.ActDiskTrim {
 		h.trims = append(h.trims, a)
 	}
-	if a.Kind == core.ActDiskWrite && !h.light {
-		h.noteWrite(&a)
+	if a.Kind == core.ActDiskWrite {
+		h.wrote += a.Len / core.BlockSize
+		if h.s.Serving() {
+			if _, st := h.s.Log().Usage(uint32(uint64(a.LBA) / uint64(h.s.sb.SegmentBlocks))); st == disklog.Meta {
+				h.wroteMeta += a.Len / core.BlockSize
+			}
+		}
+		if !h.light {
+			h.noteWrite(&a)
+		}
 	}
 	if h.failIf != nil && h.failIf(h.executed-1, &a) {
 		io := a.IO
@@ -235,6 +246,10 @@ func (h *harness) step() bool {
 		c.Run()
 		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
 			h.t.Fatal(err)
+		}
+		if h.light {
+			h.take()
+			continue
 		}
 		if h.steps[c] == 0 {
 			h.merges = append(h.merges, c)

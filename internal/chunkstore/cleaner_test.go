@@ -81,6 +81,26 @@ func (s *Store) chooseVictims() []uint32 {
 	return victims
 }
 
+// freeEmpty runs passes over the victims holding nothing live, which a pass takes first, until
+// there are none, so that the next victims are those cost-benefit ranks.
+func (h *harness) freeEmpty() {
+	h.t.Helper()
+	for range 10 {
+		var empty []uint32
+		for _, v := range h.s.chooseVictims() {
+			if u, _ := h.s.Log().Usage(v); u.Live == 0 {
+				empty = append(empty, v)
+			}
+		}
+		if len(empty) == 0 {
+			return
+		}
+		h.s.cl.passes = append(h.s.cl.passes, &cleanPass{victims: empty})
+		h.clean(-1)
+	}
+	h.t.Fatalf("victims %v still hold nothing live", h.s.chooseVictims())
+}
+
 // primed is a store on the small disk whose cleaner does not run until a test sets CleanFree:
 // two chunks of 64 blocks written once and overwritten at random until several manifests are named.
 func primed(t *testing.T) (*harness, *byteOracle) { return primedWith(t, cleanConfig()) }
@@ -118,7 +138,8 @@ func (h *harness) clean(want int) {
 }
 
 // steppedStore is a primed store whose pieces hold a block, so that its index's runs span
-// several, overwritten further with merges off; merges run in steps of a block.
+// several, overwritten further with merges off, two more chunks among the overwrites so that a
+// run's rewrite outgrows a step; merges run in steps of a block.
 func steppedStore(t *testing.T) (*harness, *byteOracle, *core.Rand) { return steppedStoreOf(t, 0) }
 
 // steppedStoreOf is steppedStore with workers merge workers, or the default for 0.
@@ -130,7 +151,7 @@ func steppedStoreOf(t *testing.T, workers int) (*harness, *byteOracle, *core.Ran
 	h.merging = false
 	r := core.NewRand(9)
 	for range 100 {
-		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+		overwrite(h, o, r, []core.ChunkID{chunk(1), chunk(2), chunk(3), chunk(4)}, 64)
 	}
 	return h, o, r
 }
@@ -319,6 +340,32 @@ func TestAPassFinishesOnADiskFilledToItsReserve(t *testing.T) {
 	o.check(t, h, 0, 63, 0)
 }
 
+// Overwrites of four chunks on a disk with a reserve of 4 segments and a cleaner that runs only for
+// writes waiting for room: a pass can end with writes still waiting, its copies having taken what
+// it freed, and the store then starts the next pass rather than failing them, so no write fails
+// with NoSpace while a victim is left. Write 2,163 is the one that did.
+func TestAPassEndingWithWritesWaitingStartsTheNext(t *testing.T) {
+	cfg := cleanConfig()
+	cfg.Log.Reserve, cfg.CleanFree = 4, -1
+	h := newHarnessOn(t, cfg, cleanGeo)
+	h.merging = true
+	r := core.NewRand(1)
+	chunks := []core.ChunkID{chunk(1), chunk(2), chunk(3), chunk(4)}
+	for i := range 2200 {
+		c, b := chunks[r.Below(4)], uint32(r.Below(64))
+		if i < 4*64 {
+			c, b = chunks[i/64], uint32(i%64)
+		}
+		data := make([]byte, core.BlockSize)
+		r.Fill(data)
+		id := h.write(c, b*core.BlockSize, data, 0)
+		h.settle()
+		if err := h.reply(id).Err; err != nil {
+			t.Fatalf("write %d: %v, with victims %v", i, err, h.s.chooseVictims())
+		}
+	}
+}
+
 // Writes of new blocks fill the disk with live data: no victim gains space, and only then do
 // writes waiting for room fail with NoSpace, whatever the reserve.
 func TestWritesFailOnlyWhenNoVictimGainsSpace(t *testing.T) {
@@ -346,10 +393,10 @@ func TestWritesFailOnlyWhenNoVictimGainsSpace(t *testing.T) {
 }
 
 // With a reserve of one segment, below what the formula asks, the cleaner's copies and the
-// checkpoints take the disk to zero free segments. A victim whose copies do not fit the room the
-// cleaner's lane can reach is not taken, and a pass that frees nothing starts no other until the
-// durable LSN moves, so a write that finds no room fails with NoSpace at once, no pass starting
-// and nothing copied for it, both while overwrites leave victims and once new blocks fill the disk.
+// checkpoints take the disk to zero free segments once writes of new blocks fill it, after
+// overwrites. A victim whose copies do not fit the room the cleaner's lane can reach is not taken,
+// and a pass that frees nothing starts no other until the durable LSN moves, so a write that finds
+// no room fails with NoSpace at once, no pass starting and nothing copied for it.
 func TestAFullDiskWithNoFreeSegmentEndsInNoSpace(t *testing.T) {
 	cfg := cleanConfig()
 	cfg.Log.Reserve = 1
@@ -380,14 +427,14 @@ func TestAFullDiskWithNoFreeSegmentEndsInNoSpace(t *testing.T) {
 		r.Fill(data)
 		try(chunks[r.Below(4)], uint32(r.Below(64)), data)
 	}
-	if !empty {
-		t.Fatal("the disk never ran out of free segments")
-	}
 	for i := 0; failed < 20; i++ {
 		if i == 2000 {
 			t.Fatal("writes of new blocks never failed")
 		}
 		try(chunk(uint32(10+i/64)), uint32(i%64), fill(core.BlockSize, byte(i)))
+	}
+	if !empty {
+		t.Fatal("the disk never ran out of free segments")
 	}
 	o.check(t, h, 0, 63, 0)
 }
@@ -542,6 +589,29 @@ func TestAPassTakesTheFourBestVictimsThatGainSpace(t *testing.T) {
 	}
 }
 
+// A used segment with nothing live costs nothing to free, so a pass takes such segments ahead of
+// any with blocks to copy, however young. Cost-benefit alone scores one its age, which counts only
+// ordinary writes: the primed disk's metadata segments emptied by merges ranked below segments
+// with live blocks, and one the index writes while writes wait for room stays at age 0.
+func TestVictimsWithNothingLiveComeFirst(t *testing.T) {
+	h, _ := primed(t)
+	log := h.s.Log()
+	empty := 0
+	for seg := uint32(1); seg < cleanGeo.SegmentCount; seg++ {
+		if u, _ := log.Usage(seg); u.State == disklog.SegmentUsed && u.Live == 0 && log.Cleanable(seg) {
+			empty++
+		}
+	}
+	if empty <= disklog.VictimsPerPass {
+		t.Fatalf("%d cleanable segments hold nothing live", empty)
+	}
+	for _, v := range h.s.chooseVictims() {
+		if u, _ := log.Usage(v); u.Live != 0 {
+			t.Fatalf("victim %d holds %d live blocks, age %d, while %d segments hold none", v, u.Live, log.Age(v), empty)
+		}
+	}
+}
+
 // A used segment with no live block is freed without reading or copying anything.
 func TestAVictimWithNothingLiveIsFreedWithoutCopying(t *testing.T) {
 	h, o := primed(t)
@@ -627,6 +697,7 @@ func TestCopiesGoOutInKeyOrder(t *testing.T) {
 func TestAVictimWithABadBlockIsQuarantined(t *testing.T) {
 	h, _ := primed(t)
 	log := h.s.Log()
+	h.freeEmpty()
 	victims := h.s.chooseVictims()
 	var bad uint32
 	var at core.LBA
@@ -677,6 +748,7 @@ func TestAVictimWithABadBlockIsQuarantined(t *testing.T) {
 func TestAQuarantinedSegmentsBlocksAreOverwritten(t *testing.T) {
 	h, o := primed(t)
 	log := h.s.Log()
+	h.freeEmpty()
 	var bad uint32
 	var most uint32
 	for _, v := range h.s.chooseVictims() {

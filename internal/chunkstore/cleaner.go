@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"cmp"
 	"errors"
+	"math"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -169,10 +170,18 @@ func (s *Store) cleanWorkers() int {
 }
 
 // clean starts passes while free segments outside the reserve are short of clean_free, or while
-// items wait for room, and drives the running ones. After a pass that frees nothing, as after
-// finding no victim, it starts none until the durable LSN moves. It reports whether the cleaner
-// has a victim.
+// items wait for room, and drives the running ones, starting more as passes finish. After a pass
+// that frees nothing, as after finding no victim, it starts none until the durable LSN moves. It
+// reports whether the cleaner has a victim: whether a pass is still running.
 func (s *Store) clean(ctx *core.Context) bool {
+	for s.cleanRound(ctx) {
+	}
+	return len(s.cl.passes) > 0
+}
+
+// cleanRound starts passes as clean does and drives every running one, reporting whether one
+// finished.
+func (s *Store) cleanRound(ctx *core.Context) bool {
 	for len(s.cl.passes) < s.cleanWorkers() && (s.log.FreeOutsideReserve() < s.cleanFree() || s.log.Stalled()) {
 		if s.cleanerIdle() {
 			break
@@ -190,6 +199,7 @@ func (s *Store) clean(ctx *core.Context) bool {
 		s.cl.passes = append(s.cl.passes, &cleanPass{victims: victims})
 		s.cl.stats.PeakPasses = max(s.cl.stats.PeakPasses, len(s.cl.passes))
 	}
+	finished := false
 	for i := 0; i < len(s.cl.passes); {
 		p := s.cl.passes[i]
 		s.advancePass(ctx, p)
@@ -198,11 +208,12 @@ func (s *Store) clean(ctx *core.Context) bool {
 				s.cl.tried, s.cl.triedAt = true, s.log.DurableLSN()
 			}
 			s.cl.passes = slices.Delete(s.cl.passes, i, i+1)
+			finished = true
 			continue
 		}
 		i++
 	}
-	return len(s.cl.passes) > 0
+	return finished
 }
 
 // cleanerIdle reports whether the cleaner starts no pass until the durable LSN moves, having found
@@ -218,8 +229,9 @@ func (s *Store) isVictim(seg uint32) bool {
 	return false
 }
 
-// pickVictims picks up to VictimsPerPass segments by cost-benefit, (1 − u) × age ÷ (1 + u)
-// with u the live share and age capped at a disk's worth of writes, among those whose copy
+// pickVictims picks up to VictimsPerPass segments, those with nothing live first, then by
+// cost-benefit, (1 − u) × age ÷ (1 + u) with u the live share and age capped at a disk's worth of
+// writes, among those whose copy
 // costs less than a segment less the header of the segment it lands in, header blocks and the
 // index entries its moves write included, charging live run pieces at the records of the whole
 // runs a rewrite writes again and what each of its steps writes beside them; a chunk segment's
@@ -280,8 +292,15 @@ func moveCost(live uint64) uint64 {
 }
 
 // costBenefit is a victim's score, free space times age over copy cost, as the original
-// log-structured file system scores it: (1 − u) × age ÷ (1 + u) for live share u.
-func costBenefit(u float64, age uint64) float64 { return (1 - u) * float64(age) / (1 + u) }
+// log-structured file system scores it: (1 − u) × age ÷ (1 + u) for live share u. A segment with
+// nothing live scores +Inf whatever its age, since freeing it costs nothing; age counts only
+// ordinary writes, so a metadata segment written while they wait stays at age 0.
+func costBenefit(u float64, age uint64) float64 {
+	if u == 0 {
+		return math.Inf(1)
+	}
+	return (1 - u) * float64(age) / (1 + u)
+}
 
 // startVictim begins the pass's current victim: a metadata segment marks the runs holding live
 // pieces in it for a rewrite and asks for a snapshot when it holds a manifest's piece, and is

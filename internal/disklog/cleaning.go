@@ -65,6 +65,16 @@ func (l *Log) CleanerRoom() uint64 {
 	return room
 }
 
+// Writes counts the blocks the log has written since it opened: Data those of ordinary items,
+// a chunk slot's whole chunk included, and Disk every block it asked the disk to write.
+type Writes struct {
+	Data, Disk uint64
+}
+
+// Writes is what the log has written since it opened; Disk over Data across a window is the
+// disk's write amplification over it, the metric drive wear is projected from.
+func (l *Log) Writes() Writes { return l.writes }
+
 // NamedLSN is the LSN of the newest manifest a durable segment header names, the one recovery would load.
 func (l *Log) NamedLSN() uint64 { return l.namedLSN }
 

@@ -23,6 +23,7 @@ func TestAReadIssuedBeforeAnOverwriteNeverReadsTheReusedVictim(t *testing.T) {
 
 func testAHeldReadKeepsItsVictim(t *testing.T, kill bool) {
 	h, o := primed(t)
+	h.freeEmpty()
 	log := h.s.Log()
 	var x uint32
 	for _, v := range h.s.chooseVictims() {

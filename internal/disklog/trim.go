@@ -158,6 +158,7 @@ func (l *Log) trimSlotSegment(segment uint32, out *Output) {
 	}
 	io := l.io()
 	l.slots.trims = append(l.slots.trims, trimIO{io: io, segment: segment, zeroing: true})
+	l.writes.Disk++
 	out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskWrite, IO: io, LBA: l.sb.LBA(segment, 0), Buf: l.slots.zero, Len: core.BlockSize})
 }
 

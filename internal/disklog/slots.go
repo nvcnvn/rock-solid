@@ -242,6 +242,7 @@ func (l *Log) slotTrimDone(io core.IOID, out *Output) bool {
 	tr := &t.trims[j]
 	if !tr.zeroing {
 		tr.io, tr.zeroing = l.io(), true
+		l.writes.Disk++
 		out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskWrite, IO: tr.io, LBA: l.sb.LBA(tr.segment, 0), Buf: t.zero, Len: core.BlockSize})
 		return true
 	}
