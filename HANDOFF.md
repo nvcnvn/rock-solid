@@ -72,6 +72,9 @@ Running (started 22:49, one background job, 4 workers, 4 GB): `scratchpad/alljob
 (deep-free, deep-leases, deep-peering, deep-slow) into `scratchpad/deep-epoch-3.txt`; each file ends
 with "exit N". Scratchpad is /private/tmp/claude-501/-Volumes-T5-Codes-rock-solid/
 0d6e40aa-7d63-4eb8-9067-f57610daedfc/scratchpad. If the session dies, rerun what has no result.
+deep-free with a restart was stopped at 20M states, depth 15, 2 h 15 min (would overrun); the
+free plan now has no fault (67ce62b) and reruns alone after the job, via scratchpad/tlc1.sh into
+scratchpad/deep-free-2.txt (ends with "done"). ci results are recorded (69ae593).
 Then record the ci and deep rows in test-scenarios' Configuration results table (ci rows are there
 from an earlier run; replace them) and here, shrink any deep config that overruns 4 h.
 
