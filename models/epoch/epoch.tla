@@ -1061,13 +1061,15 @@ SendHb(g, h) ==
                    slew, runId, frz, suspAt, rstAt, rq, gm, lastAsk, net, arrived, dirty, hs,
                    faults, raftVars>>
 
+\* arrived[h] holds the grantors whose messages waited for h across a stop in
+\* place; h reads again once it has handled all of them.
 RecvGrant(h, g) ==
     /\ Clocks
     /\ gm[g][h].on
     /\ Running(h)
     /\ PairUp(h, g)
     /\ gm' = [gm EXCEPT ![g][h] = Off]
-    /\ arrived' = [arrived EXCEPT ![h] = @ \ {g}]
+    /\ arrived' = IF hbm[g][h].on THEN arrived ELSE [arrived EXCEPT ![h] = @ \ {g}]
     /\ hl' = AfterGrant(h, g, gm[g][h])
     /\ dirty' = Detected(h, g, GrantTrips(h, g, gm[g][h]))
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, boot, rawR, bootR,
@@ -1080,7 +1082,7 @@ RecvHb(h, g) ==
     /\ Running(h)
     /\ PairUp(h, g)
     /\ hbm' = [hbm EXCEPT ![g][h] = Off]
-    /\ arrived' = [arrived EXCEPT ![h] = @ \ {g}]
+    /\ arrived' = IF gm[g][h].on THEN arrived ELSE [arrived EXCEPT ![h] = @ \ {g}]
     /\ hl' = AfterHb(h, g, hbm[g][h])
     /\ dirty' = Detected(h, g, HbTrips(h, g, hbm[g][h]))
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, boot, rawR, bootR,
