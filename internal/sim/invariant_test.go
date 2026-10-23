@@ -6,7 +6,8 @@ import (
 	"testing"
 )
 
-// The registry reports the first broken invariant it checks, by name, and skips one turned off.
+// The registry reports the first broken invariant it checks, by name, and skips one turned off
+// until it is turned on again.
 func TestInvariantsNameTheFirstBrokenOne(t *testing.T) {
 	var r Invariants
 	broken := errors.New("broken")
@@ -32,7 +33,11 @@ func TestInvariantsNameTheFirstBrokenOne(t *testing.T) {
 	if err := r.Check(); err != nil {
 		t.Fatalf("check with both off: %v", err)
 	}
-	if want := []string{"holds", "first", "holds", "second", "holds"}; !slices.Equal(ran, want) {
+	r.On("first")
+	if err := r.Check(); !errors.As(err, &v) || v.Name != "first" {
+		t.Fatalf("check with the first on again: %v", err)
+	}
+	if want := []string{"holds", "first", "holds", "second", "holds", "holds", "first"}; !slices.Equal(ran, want) {
 		t.Fatalf("ran %v, want %v", ran, want)
 	}
 }

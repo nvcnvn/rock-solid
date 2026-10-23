@@ -25,20 +25,17 @@ func (v *Violation) Unwrap() error { return v.Err }
 
 // Register adds the invariant name, which check reports broken by returning an error.
 func (r *Invariants) Register(name string, check func() error) {
-	if r.find(name) >= 0 {
+	if r.index(name) >= 0 {
 		panic("sim: invariant " + name + " registered twice")
 	}
 	r.list = append(r.list, invariant{name: name, check: check})
 }
 
 // Off stops checking the registered invariant name, for a run that breaks it on purpose.
-func (r *Invariants) Off(name string) {
-	i := r.find(name)
-	if i < 0 {
-		panic("sim: no invariant " + name)
-	}
-	r.list[i].off = true
-}
+func (r *Invariants) Off(name string) { r.list[r.find(name)].off = true }
+
+// On checks the registered invariant name again after Off.
+func (r *Invariants) On(name string) { r.list[r.find(name)].off = false }
 
 // Check runs every invariant not turned off, in the order registered, and returns the first broken one as a *Violation.
 func (r *Invariants) Check() error {
@@ -54,6 +51,13 @@ func (r *Invariants) Check() error {
 }
 
 func (r *Invariants) find(name string) int {
+	if i := r.index(name); i >= 0 {
+		return i
+	}
+	panic("sim: no invariant " + name)
+}
+
+func (r *Invariants) index(name string) int {
 	for i, inv := range r.list {
 		if inv.name == name {
 			return i

@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -317,23 +318,74 @@ func (v *storeView) read(h *harness, epoch uint64) map[uint16][]byte {
 }
 
 // toCheck lists the chunks of the byte-range oracle whose reads the next check compares: each one
-// a change was acknowledged on since the last check, or whose maps have moved since, or, with all
-// set, every one. It keeps the maps a check saw.
+// a change was acknowledged on since the last check, whose maps have moved since, or whose maps
+// overlap blocks written or trimmed since, or, with all set, every one. It keeps the maps a check
+// saw.
 func (h *harness) toCheck(all bool) []core.ChunkID {
 	clear(h.views)
+	touched := mergeRanges(h.touched)
+	h.touched = h.touched[:0]
 	if h.bytes == nil || !h.s.Serving() {
 		return nil
 	}
 	var cs []core.ChunkID
 	for _, c := range h.bytes.sorted() {
 		v := h.viewOf(c)
-		if all || h.dirty[c] || !v.same(h.seen[c]) {
+		if all || h.dirty[c] || !v.same(h.seen[c]) || v.overlaps(touched) {
 			cs = append(cs, c)
 		}
 		h.seen[c] = v
 	}
 	clear(h.dirty)
 	return cs
+}
+
+// lbaRange is the blocks from lo up to hi.
+type lbaRange struct{ lo, hi core.LBA }
+
+// touch notes the blocks from lo up to hi written or trimmed, joining them to the last range
+// noted when they follow it.
+func (h *harness) touch(lo, hi core.LBA) {
+	if n := len(h.touched); n > 0 && h.touched[n-1].hi == lo {
+		h.touched[n-1].hi = hi
+		return
+	}
+	h.touched = append(h.touched, lbaRange{lo, hi})
+}
+
+// mergeRanges sorts rs and joins those that overlap or touch, in place.
+func mergeRanges(rs []lbaRange) []lbaRange {
+	slices.SortFunc(rs, func(a, b lbaRange) int { return cmp.Compare(a.lo, b.lo) })
+	out := rs[:0]
+	for _, r := range rs {
+		if n := len(out); n > 0 && r.lo <= out[n-1].hi {
+			out[n-1].hi = max(out[n-1].hi, r.hi)
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// overlaps reports whether a block one of v's maps stores lies in one of the sorted, disjoint
+// ranges rs.
+func (v *storeView) overlaps(rs []lbaRange) bool {
+	if len(rs) == 0 {
+		return false
+	}
+	for _, m := range v.maps {
+		for _, e := range m {
+			if e.LBA == 0 {
+				continue
+			}
+			end := e.LBA + core.LBA(e.Count)
+			i, _ := slices.BinarySearchFunc(rs, e.LBA, func(r lbaRange, lba core.LBA) int { return cmp.Compare(r.hi, lba+1) })
+			if i < len(rs) && rs[i].lo < end {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var zeroBlock = make([]byte, core.BlockSize)

@@ -2666,7 +2666,7 @@ for a version frozen twice.
 
 A run keeps its invariants in one registry, `sim.Invariants`: `Register(name, check)` adds one,
 `Off(name)` turns one off for a test that breaks it on purpose, such as one that damages a block
-on disk, and `Check` runs the rest in the order registered and returns the first broken one as a
+on disk, from the damage until `On(name)` once the damage is overwritten, and `Check` runs the rest in the order registered and returns the first broken one as a
 `*sim.Violation` carrying its name and what its check found. A check either compares state, or
 reports a violation an event recorded when it happened, such as a version acknowledged twice.
 
@@ -2675,8 +2675,12 @@ breaks several is named by the one closest to it. It checks them at the end of e
 no action is queued, so after every recovery and every rebuild; `subBlockRun` checks them after
 every step. A failure names the invariant and the action count, and `seeds.Run` adds the command
 that replays the seed. A settle compares the reads only of the chunks a change was acknowledged
-on, or whose maps moved, since the last check; the first check after a recovery, and one a test
-asks for (`holds`), compare every chunk. With the registry the package's eight slowest tests take
+on, whose maps moved, or whose maps hold a block a disk write or TRIM reached, since the last
+check; the first check after a recovery, and one a test asks for (`holds`), compare every chunk.
+Damage that comes from no disk action, such as a bit a test flips on the simulated disk, shows
+only at the next full check. Planted bug: freeing a chunk slot also frees the next, still another
+chunk's (`freeNextSlot`); the log writes a third chunk over it, and the settle after that write
+names the unchanged chunk's reads (`TestFreeingTheNextSlotBreaksReads`). With the registry the package's eight slowest tests take
 119 s against 106 s without it, the slot tests up to 50% longer.
 
 | Invariant (phase 1) | How the harness checks it | Planted violation and what it trips |

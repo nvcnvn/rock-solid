@@ -103,9 +103,10 @@ type harness struct {
 	sent     map[uint64]change
 	maxEpoch uint64
 	// checking is the chunks the current check compares with the oracle and views what it read of
-	// them, dirty those acknowledged a change since the last check, seen their maps at it, and full
-	// has the next check compare every chunk.
+	// them, dirty those acknowledged a change since the last check, seen their maps at it, touched
+	// the LBA ranges written or trimmed since it, and full has the next check compare every chunk.
 	checking []core.ChunkID
+	touched  []lbaRange
 	dirty    map[core.ChunkID]bool
 	seen     map[core.ChunkID]*storeView
 	views    map[core.ChunkID]*storeView
@@ -253,6 +254,9 @@ func (h *harness) step() bool {
 	}
 	if a.Kind == core.ActDiskTrim {
 		h.trims = append(h.trims, a)
+	}
+	if a.Kind == core.ActDiskTrim || a.Kind == core.ActDiskWrite {
+		h.touch(a.LBA, a.LBA+core.LBA(a.Len/core.BlockSize))
 	}
 	if a.Kind == core.ActDiskWrite {
 		h.wrote += a.Len / core.BlockSize

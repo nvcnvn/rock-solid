@@ -517,11 +517,11 @@ func TestAPassThatFreesNothingWaitsForTheLog(t *testing.T) {
 	r := core.NewRand(9)
 	copied := func(v uint32) bool { u, stream := log.Usage(v); return stream != disklog.Meta && u.Live > 0 }
 	victims := h.s.chooseVictims()
-	h.inv.Off(invReads)
 	for i := 0; slices.ContainsFunc(victims, func(v uint32) bool { return !copied(v) }) && i < 1000; i++ {
 		overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 		victims = h.s.chooseVictims()
 	}
+	h.inv.Off(invReads)
 	for _, v := range victims {
 		lo := cleanGeo.LBA(v, 0)
 		if !copied(v) {
@@ -694,7 +694,6 @@ func TestCopiesGoOutInKeyOrder(t *testing.T) {
 // never a victim again, the other victims are cleaned, and reads of the block keep failing.
 func TestAVictimWithABadBlockIsQuarantined(t *testing.T) {
 	h := primed(t)
-	h.inv.Off(invReads)
 	log := h.s.Log()
 	h.freeEmpty()
 	victims := h.s.chooseVictims()
@@ -712,6 +711,7 @@ func TestAVictimWithABadBlockIsQuarantined(t *testing.T) {
 		for b := range uint16(64) {
 			if e, ok := h.s.Index().Lookup(testPool, c, b); ok && e.Header == rec.Header && at == 0 {
 				at = e.BlockLBA(b)
+				h.inv.Off(invReads)
 				corrupt := h.disk.Read(at, 1)
 				corrupt[100] ^= 0xff
 				h.disk.Put(at, corrupt)
@@ -792,6 +792,7 @@ func TestAQuarantinedSegmentsBlocksAreOverwritten(t *testing.T) {
 	}
 	quarantined()
 	overwriteHeld(held[0])
+	h.inv.On(invReads)
 	h.recoverStore(disklog.ModeOpen)
 	h.s.cfg.CleanFree = -1
 	log = h.s.Log()

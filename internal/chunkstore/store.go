@@ -201,8 +201,10 @@ type plants struct {
 	forgetVersion       bool
 	rebuildSkipsFreezes bool
 	punchKeepsHead      bool
-	// ackEarly answers a write or punch OK as it is submitted, before its records are durable.
-	ackEarly bool
+	// ackEarly answers a write or punch OK as it is submitted, before its records are durable;
+	// freeNextSlot also hands the log the slot after each chunk slot it frees.
+	ackEarly     bool
+	freeNextSlot bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.
@@ -1271,6 +1273,9 @@ func (s *Store) freeSlots(recovered bool) {
 		default:
 			if err := s.log.FreeSlot(lba, &s.lout); err != nil && !recovered {
 				panic("chunkstore: the log refused a chunk slot the index freed: " + err.Error())
+			}
+			if s.plant.freeNextSlot {
+				_ = s.log.FreeSlot(lba+core.BlocksPerChunk, &s.lout)
 			}
 		}
 	}
