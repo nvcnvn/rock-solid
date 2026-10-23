@@ -67,11 +67,16 @@ read and write steps multiplied ci-peering's states by more than 5. Quick checks
 NoLateCompletion fails with CompareMemberLists, MergesOnKept with MergeBeforeKept, TablesForward with
 ReportBeforeActivate and with Fold's guard removed under LateReport.
 
-In progress: sizing deep-peering, whose free plan grew past 7M states at depth 12 at 4 nodes (it was
-14.8M in all before); split or shrink it to fit 4 h with liveness. Then rerun deep-peering,
-deep-leases, deep-slow and full ci, record results in test-scenarios' Configuration results table.
-Then: fresh review, final ci rerun, tick the build-checklist "Epoch change model" item, delete
-HANDOFF.md before merge.
+Running (started 22:49, one background job, 4 workers, 4 GB): `scratchpad/alljob.sh` runs
+`scripts/models.sh ci epoch` into `scratchpad/ci-epoch-3.txt`, then `scripts/models.sh deep epoch`
+(deep-free, deep-leases, deep-peering, deep-slow) into `scratchpad/deep-epoch-3.txt`; each file ends
+with "exit N". Scratchpad is /private/tmp/claude-501/-Volumes-T5-Codes-rock-solid/
+0d6e40aa-7d63-4eb8-9067-f57610daedfc/scratchpad. If the session dies, rerun what has no result.
+Then record the ci and deep rows in test-scenarios' Configuration results table (ci rows are there
+from an earlier run; replace them) and here, shrink any deep config that overruns 4 h.
+
+Remaining after that: fresh review, final ci rerun, tick the build-checklist "Epoch change model"
+item, delete HANDOFF.md before merge.
 
 ## Design bugs found and design.md changes
 
