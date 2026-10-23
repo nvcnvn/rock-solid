@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"cmp"
 	"errors"
+	"math"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -228,8 +229,9 @@ func (s *Store) isVictim(seg uint32) bool {
 	return false
 }
 
-// pickVictims picks up to VictimsPerPass segments by cost-benefit, (1 − u) × age ÷ (1 + u)
-// with u the live share and age capped at a disk's worth of writes, among those whose copy
+// pickVictims picks up to VictimsPerPass segments, those with nothing live first, then by
+// cost-benefit, (1 − u) × age ÷ (1 + u) with u the live share and age capped at a disk's worth of
+// writes, among those whose copy
 // costs less than a segment less the header of the segment it lands in, header blocks and the
 // index entries its moves write included, charging live run pieces at the records of the whole
 // runs a rewrite writes again and what each of its steps writes beside them; a chunk segment's
@@ -290,8 +292,15 @@ func moveCost(live uint64) uint64 {
 }
 
 // costBenefit is a victim's score, free space times age over copy cost, as the original
-// log-structured file system scores it: (1 − u) × age ÷ (1 + u) for live share u.
-func costBenefit(u float64, age uint64) float64 { return (1 - u) * float64(age) / (1 + u) }
+// log-structured file system scores it: (1 − u) × age ÷ (1 + u) for live share u. A segment with
+// nothing live scores +Inf whatever its age, since freeing it costs nothing; age counts only
+// ordinary writes, so a metadata segment written while they wait stays at age 0.
+func costBenefit(u float64, age uint64) float64 {
+	if u == 0 {
+		return math.Inf(1)
+	}
+	return (1 - u) * float64(age) / (1 + u)
+}
 
 // startVictim begins the pass's current victim: a metadata segment marks the runs holding live
 // pieces in it for a rewrite and asks for a snapshot when it holds a manifest's piece, and is
