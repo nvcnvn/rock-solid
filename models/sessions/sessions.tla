@@ -1,7 +1,7 @@
 ------------------------------- MODULE sessions -------------------------------
 \* Sessions and fencing (docs/design.md): client sessions renewed on heartbeats to the
 \* control-plane leader and expired on its clock, leader leases and failover, the client's
-\* rate bound per leader node and boot and its step check, the leader's measurement of its
+\* rate bound per leader node and run and its step check, the leader's measurement of its
 \* own rate over each client's, fences batched into session table versions that storage
 \* nodes apply and acknowledge, the acknowledged version that releases owners, down marks
 \* that start new intervals of a placement group (PG), writes through the PG's primary to
@@ -39,7 +39,7 @@ CONSTANTS
     EndOnResumed,           \* the client ends its leases on Resumed
     AnswerWithLease,        \* only a leader holding its leader lease answers renewals
     FullLeaseOnFailover,    \* a new leader gives every session a full lease from its start
-    WindowPerBoot,          \* the client keeps its rate bound per leader node and boot
+    WindowPerRun,           \* the client keeps its rate bound per leader node and run
     StepAtMargin,           \* the step check trips at 1 / (1 - m), not at 1 + lease_drift / 2
     EvictWaitsLease,        \* an eviction stops renewals and fences once the lease ran out
     ReleaseOnAck,           \* owners release a fenced session's lock at its acknowledgment
@@ -78,7 +78,7 @@ VARIABLES
     fage,       \* per client: ticks since its fence committed in which the leader held its
                 \* lease and every storage node was reachable or marked down, up to 2
     cl,         \* per client: lease, outstanding renewal, rate window, VM state, lock
-    rate, boot, rose,   \* per control-plane node: raw rate, boot number, rate risen
+    rate, run, rose,    \* per control-plane node: raw rate, run number, rate risen
     term, lnode, holding,   \* current term, each term's leader node, the term holding the lease
     stalled,    \* the leader's loop is stalled
     timer,      \* the leader's per-session count, in its units, since it last renewed it
@@ -96,12 +96,12 @@ VARIABLES
     budget,
     hist        \* history: completed writes and violation flags
 
-vars == <<fage, cl, rate, boot, rose, term, lnode, holding, stalled, timer, meas, evicting,
+vars == <<fage, cl, rate, run, rose, term, lnode, holding, stalled, timer, meas, evicting,
           req, rep, tver, fencedAt, acked, nver, nint, reach, down, unreach, intv, liveAt,
           activated, actd, ctr, app, writes, lockHolder, lockGen, budget, hist>>
 
 clientVars == <<cl>>
-leaderVars == <<rate, boot, rose, term, lnode, holding, stalled, timer, meas, evicting>>
+leaderVars == <<rate, run, rose, term, lnode, holding, stalled, timer, meas, evicting>>
 tableVars == <<tver, fencedAt, acked, fage>>
 storageVars == <<nver, nint, reach, down, unreach, intv, liveAt, activated, actd, ctr, app>>
 
@@ -128,7 +128,7 @@ Init ==
                 stopped |-> FALSE, crashed |-> FALSE, told |-> FALSE,
                 holds |-> IF WithLock /\ c = FirstClient THEN 1 ELSE 0, inflight |-> 0]]
     /\ rate \in [Leaders -> Rates]
-    /\ boot = [n \in Leaders |-> 1]
+    /\ run = [n \in Leaders |-> 1]
     /\ rose = [n \in Leaders |-> FALSE]
     /\ term = 1
     /\ \E n \in Leaders : lnode = [t \in 1 .. MaxTerms |-> n]
@@ -193,7 +193,7 @@ Tick ==
     /\ rep' = IF Windows THEN {[m EXCEPT !.age = Min(@ + 1, CapT)] : m \in rep} ELSE rep
     /\ timer' = [c \in Clients |-> Min(timer[c] + rate[Leader], TCap)]
     /\ unreach' = [s \in Storage |-> IF reach[s] THEN 0 ELSE Min(unreach[s] + 1, DownAfter)]
-    /\ UNCHANGED <<rate, boot, rose, term, lnode, holding, stalled, meas, evicting, req,
+    /\ UNCHANGED <<rate, run, rose, term, lnode, holding, stalled, meas, evicting, req,
                    tver, fencedAt, acked, nver, nint, reach, down, intv, liveAt, activated, actd, ctr, app, writes,
                    lockHolder, lockGen, budget, hist>>
 
@@ -213,7 +213,7 @@ RenewNow(c) ==
                                 ![c].len = LeaseLen(<<rate[Leader], ClientRate>>)]
        ELSE /\ cl' = [cl EXCEPT ![c].told = TRUE, ![c].on = FALSE, ![c].holds = 0]
             /\ UNCHANGED <<timer, meas>>
-    /\ UNCHANGED <<rate, boot, rose, term, lnode, holding, stalled, evicting, req, rep,
+    /\ UNCHANGED <<rate, run, rose, term, lnode, holding, stalled, evicting, req, rep,
                    tableVars, storageVars, writes, lockHolder, lockGen, budget, hist>>
 
 \* The client sends a heartbeat naming its session; it keeps one renewal outstanding,
@@ -232,7 +232,7 @@ SendRenewal(c) ==
                    budget, hist>>
 
 \* An answer to the outstanding renewal arrives. A fenced session learns it and starts
-\* over. Otherwise the answer is a grant from one leader node and boot: the first grant of
+\* over. Otherwise the answer is a grant from one leader node and run: the first grant of
 \* a window gives no lease; later ones bound the leader's rate, pass the step check, and
 \* give a lease counted from the renewal's send, lease_drift and the bound's excess early.
 Answer(c, m) ==
@@ -245,7 +245,7 @@ Answer(c, m) ==
             /\ UNCHANGED hist
        ELSE IF ~m.ok
        THEN cl' = [cl EXCEPT ![c].out = -1] /\ UNCHANGED hist
-       ELSE LET key == IF WindowPerBoot THEN <<m.node, m.boot>> ELSE <<"any">>
+       ELSE LET key == IF WindowPerRun THEN <<m.node, m.run>> ELSE <<"any">>
                 from == IF CountFromSend THEN cl[c].out ELSE 0
                 first == [cl[c] EXCEPT !.out = -1, !.wkey = key, !.wn = 1, !.B = None,
                                        !.hs = cl[c].out, !.ra = 0, !.gt = m.age]
@@ -302,21 +302,21 @@ CrashClient(c) ==
 
 \* The leader of term t processes a renewal: a fenced session hears so; a session being
 \* evicted is not renewed; any other has its timer restarted. The answer carries the
-\* node's boot; its age in flight stands for the leader's raw clock reading it carries.
+\* node's run; its age in flight stands for the leader's raw clock reading it carries.
 Renew(t, m) ==
     /\ m \in req /\ t <= term
     /\ ~stalled \/ t # term
     /\ IF AnswerWithLease THEN holding = t /\ t = term ELSE TRUE
     /\ LET n == lnode[t] IN
        /\ req' = req \ {m}
-       /\ rep' = rep \cup {[c |-> m.c, seq |-> m.seq, node |-> n, boot |-> boot[n],
+       /\ rep' = rep \cup {[c |-> m.c, seq |-> m.seq, node |-> n, run |-> run[n],
                             age |-> 0, rate |-> rate[n], fenced |-> ~Live(m.c),
                             ok |-> Live(m.c) /\ ~(evicting[m.c] /\ EvictWaitsLease)]}
        /\ IF Live(m.c) /\ ~(evicting[m.c] /\ EvictWaitsLease) /\ t = term
           THEN /\ timer' = [timer EXCEPT ![m.c] = 0]
                /\ meas' = [meas EXCEPT ![m.c] = Measured(m.c, n)]
           ELSE UNCHANGED <<timer, meas>>
-    /\ UNCHANGED <<cl, rate, boot, rose, term, lnode, holding, stalled, evicting, tableVars,
+    /\ UNCHANGED <<cl, rate, run, rose, term, lnode, holding, stalled, evicting, tableVars,
                    storageVars, writes, lockHolder, lockGen, budget, hist>>
 
 \* The leader commits every session due at this moment as one new session-table version.
@@ -343,7 +343,7 @@ Evict(c) ==
        ELSE /\ tver' = tver + 1
             /\ fencedAt' = [fencedAt EXCEPT ![c] = tver + 1]
             /\ hist' = [hist EXCEPT !.fenceInLease = @ \/ (Leased(c) /\ ~cl[c].stopped)]
-    /\ UNCHANGED <<cl, rate, boot, rose, term, lnode, holding, stalled, timer, meas,
+    /\ UNCHANGED <<cl, rate, run, rose, term, lnode, holding, stalled, timer, meas,
                    req, rep, acked, fage, storageVars, writes, lockHolder, lockGen>>
 
 \* Once every storage node holds the version, or is marked down, it is committed as
@@ -362,7 +362,7 @@ AckCommit ==
 LoseLease ==
     /\ holding = term /\ term < MaxTerms
     /\ holding' = 0
-    /\ UNCHANGED <<cl, rate, boot, rose, term, lnode, stalled, timer, meas, evicting,
+    /\ UNCHANGED <<cl, rate, run, rose, term, lnode, stalled, timer, meas, evicting,
                    req, rep, tableVars, storageVars, writes, lockHolder, lockGen, budget, hist>>
 
 \* A new leader is elected once no leader lease runs, and holds its lease. It gives every
@@ -379,15 +379,15 @@ Elect(n) ==
                 ELSE [c \in Clients |-> TCap]
     /\ meas' = [c \in Clients |-> -1]
     /\ evicting' = [c \in Clients |-> FALSE]
-    /\ UNCHANGED <<cl, rate, boot, rose, req, rep, tableVars, storageVars, writes,
+    /\ UNCHANGED <<cl, rate, run, rose, req, rep, tableVars, storageVars, writes,
                    lockHolder, lockGen, budget, hist>>
 
-\* A control-plane node reboots: a new boot, possibly at another raw rate. If it led, its
-\* leader lease is gone with it.
+\* A control-plane node reboots: a new boot, and so a new run, possibly at another raw rate.
+\* If it led, its leader lease is gone with it.
 Reboot(n) ==
     /\ budget.reboot > 0 /\ (Leader = n => term < MaxTerms)
     /\ budget' = [budget EXCEPT !.reboot = @ - 1]
-    /\ boot' = [boot EXCEPT ![n] = @ + 1]
+    /\ run' = [run EXCEPT ![n] = @ + 1]
     /\ \E r \in Rates : rate' = [rate EXCEPT ![n] = r]
     /\ rose' = [rose EXCEPT ![n] = FALSE]
     /\ holding' = IF Leader = n THEN 0 ELSE holding
@@ -402,7 +402,7 @@ Rise(n) ==
     /\ budget' = [budget EXCEPT !.rise = @ - 1]
     /\ rate' = [rate EXCEPT ![n] = @ + 1]
     /\ rose' = [rose EXCEPT ![n] = TRUE]
-    /\ UNCHANGED <<cl, boot, term, lnode, holding, stalled, timer, meas, evicting,
+    /\ UNCHANGED <<cl, run, term, lnode, holding, stalled, timer, meas, evicting,
                    req, rep, tableVars, storageVars, writes, lockHolder, lockGen, hist>>
 
 \* The leader's loop stalls; when it runs again it restarts every session's timer rather
@@ -411,14 +411,14 @@ Stall ==
     /\ ~stalled /\ budget.stall > 0
     /\ stalled' = TRUE
     /\ budget' = [budget EXCEPT !.stall = @ - 1]
-    /\ UNCHANGED <<cl, rate, boot, rose, term, lnode, holding, timer, meas, evicting,
+    /\ UNCHANGED <<cl, rate, run, rose, term, lnode, holding, timer, meas, evicting,
                    req, rep, tableVars, storageVars, writes, lockHolder, lockGen, hist>>
 
 Wake ==
     /\ stalled
     /\ stalled' = FALSE
     /\ timer' = [c \in Clients |-> 0]
-    /\ UNCHANGED <<cl, rate, boot, rose, term, lnode, holding, meas, evicting, req, rep,
+    /\ UNCHANGED <<cl, rate, run, rose, term, lnode, holding, meas, evicting, req, rep,
                    tableVars, storageVars, writes, lockHolder, lockGen, budget, hist>>
 
 \* A renewal or an answer is lost.
@@ -643,7 +643,7 @@ LockOrder == ~hist.misordered
 AtMostOneHolder ==
     Cardinality({c \in Clients : cl[c].holds # 0 /\ Leased(c) /\ Acting(c)}) <= 1
 
-\* The step check never trips between a client never stopped and a leader boot whose rate
+\* The step check never trips between a client never stopped and a leader run whose rate
 \* stays within the margin's headroom.
 NoSpuriousTrip == ~hist.trip
 
