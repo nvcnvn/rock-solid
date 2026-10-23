@@ -3166,7 +3166,7 @@ Snapshots taken while a purge runs (punches carrying the snapshot epoch) are lef
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
 | Sessions and fencing | `deep-fence` | `ci-fence` with 1 write in flight per client, 2 terms on 2 nodes, a crash | DEEPFENCE |
-| Sessions and fencing | `deep-release` | `deep-fence` with no writes, `CrashedClientReleased` | DEEPRELEASE |
+| Sessions and fencing | `deep-release` | `deep-fence` with no writes, `CrashedClientReleased` | 33 | 6,463,560 | 506 s |
 | Cache-mode recall | `deep` | `ci-failover` with 2 owner failovers | 49 | 138,142,376 | 1,719 s |
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
