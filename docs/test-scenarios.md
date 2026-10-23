@@ -3045,8 +3045,9 @@ run in `deep-leases`; the variants that need one run on it alone.
   before it judges a higher number. A primary takes a client write whose number is at least the one
   its own term began in. Replicated writes stay in the network after delivery, so any may be
   delivered again or held for any time.
-- **Peering.** It reaches a live member of every interval since the last activated one that had at
-  least `min_live` live members, counting any in `maintenance`, and every live member of its own.
+- **Peering.** It reaches an up member of every interval since the last activated one that had at
+  least `min_live` live members, counting any in `maintenance`, and a member up, its primary; and
+  every live member of its own.
   Members' state for the PG stays as they answered until the primary decides, so the model takes
   their answers at the decision. The keep rule is [Which versions
   survive](design.md#epoch-changes-and-failure-detection)'s: decisions known from persisted

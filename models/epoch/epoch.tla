@@ -454,11 +454,13 @@ Adopt(n, e) ==
 -----------------------------------------------------------------------------
 \* Peering
 
-\* The intervals a new primary of k must stop, from the last activated one L.
+\* The intervals a new primary of k must stop, from the last activated one L:
+\* those that could accept writes, with min_live live members and one up, the
+\* primary.
 NeedIv(p, k, L) ==
     LET from == IF Bug("StopPreviousOnly") THEN k - 1 ELSE L
         ivl == IF Bug("ReachLastActivatedOnly") THEN {L} ELSE from..k - 1
-    IN {i \in ivl : i >= 1 /\ LiveCnt(p, i) >= MinLive[p]}
+    IN {i \in ivl : i >= 1 /\ LiveCnt(p, i) >= MinLive[p] /\ UpIn(p, i) # {}}
 
 \* The nodes a grantor n must not grant while it answers peering of interval
 \* k of p: the primaries of the intervals since the last activated one that k
