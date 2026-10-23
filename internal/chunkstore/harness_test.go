@@ -113,6 +113,12 @@ type harness struct {
 	// changed is set by a write or punch since the last recovery, unsettled by a crash with
 	// actions queued.
 	changed, unsettled bool
+	// repliedLSN is the newest record that a write or punch answered OK since the last recovery
+	// needs, and repliedID that request; unwritten lists the requests answered OK before a record
+	// carried them, and since is the first record written since the last recovery.
+	repliedLSN, repliedID uint64
+	unwritten             []uint64
+	since                 int
 	// versionErr, recoverErr and indexErr are the violations events found, for the registry to
 	// report; indexBefore is the index the next recovery must finish with, under invariant indexFor.
 	versionErr, recoverErr error
@@ -202,6 +208,11 @@ func (h *harness) take() {
 		}
 		h.replies[r.ID] = r
 		h.order = append(h.order, r.ID)
+		if _, ok := h.changes[r.ID]; ok && r.Err == nil && r.Version != 0 && !h.light {
+			if !h.replied(r.ID) {
+				h.unwritten = append(h.unwritten, r.ID)
+			}
+		}
 		if ch, ok := h.sent[r.ID]; ok {
 			delete(h.sent, r.ID)
 			if r.Err == nil && h.bytes != nil {
@@ -401,6 +412,7 @@ func (h *harness) settle() {
 // follows, and compares its index with the one expected of it.
 func (h *harness) recoveryDone() {
 	h.recoveredIndex()
+	h.repliesSurvive()
 	h.changed, h.full = false, true
 	if h.oracle == nil {
 		if h.unsettled {
@@ -506,6 +518,38 @@ func (h *harness) noteWrite(a *core.Action) {
 			h.t.Fatal(err)
 		}
 	}
+}
+
+// replied raises repliedLSN to the newest record written since the last recovery that carries a
+// write, punch or slot of the change id was answered OK at, and reports whether there is one.
+func (h *harness) replied(id uint64) bool {
+	c, v := h.changes[id], h.replies[id].Version
+	for i := len(h.records) - 1; i >= h.since; i-- {
+		if slices.ContainsFunc(h.records[i].entries, func(e disklog.Entry) bool {
+			return e.Chunk == c && e.Version == v && (e.Kind == disklog.EntryWrite || e.Kind == disklog.EntryPunch || e.Kind == disklog.EntrySlot)
+		}) {
+			if lsn := h.records[i].lsn; lsn > h.repliedLSN {
+				h.repliedLSN, h.repliedID = lsn, id
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// repliesSurvive breaks invAcked unless every write and punch answered OK since the last recovery
+// has its records at or below the LSN the recovery found.
+func (h *harness) repliesSurvive() {
+	lsn := h.s.Log().DurableLSN()
+	for _, id := range h.unwritten {
+		if !h.replied(id) && h.recoverErr == nil {
+			h.recoverErr = fmt.Errorf("request %d was answered OK, and no record written carries it", id)
+		}
+	}
+	if h.repliedLSN > lsn && h.recoverErr == nil {
+		h.recoverErr = fmt.Errorf("request %d was answered OK with its record at LSN %d, and recovery found LSN %d", h.repliedID, h.repliedLSN, lsn)
+	}
+	h.repliedLSN, h.unwritten, h.since = 0, h.unwritten[:0], len(h.records)
 }
 
 func (h *harness) id() uint64 {

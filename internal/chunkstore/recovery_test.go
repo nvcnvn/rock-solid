@@ -364,3 +364,13 @@ func TestCrashOracleCatchesLateReplay(t *testing.T) {
 	}
 	t.Fatal("no seed of 8 tripped the oracle")
 }
+
+// Planted bug: a store that answers a write or punch OK before its records are durable loses an
+// acknowledged change at some crash, which invAcked names on every seed of 8.
+func TestAcknowledgingBeforeDurableBreaksAcked(t *testing.T) {
+	for seed := range uint64(8) {
+		if err := crashCycles(t, seed, plants{ackEarly: true}, &oracleStats{}); violationOf(err) != invAcked {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+	}
+}

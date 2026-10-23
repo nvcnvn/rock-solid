@@ -172,9 +172,6 @@ func sweepCleaning(t *testing.T, total int, disk []bool, plant plants) error {
 	for k := 0; k <= total; k++ {
 		for _, landing := range []string{"none", "half", "all"} {
 			h := crashedAt(t, k, landing, plant)
-			if err := unackedReplies(h); err != nil {
-				return fmt.Errorf("crash at action %d: %w", k, err)
-			}
 			if _, err := checkEveryAction(h); err != nil {
 				return fmt.Errorf("crash at action %d, %s landing: %w", k, landing, err)
 			}
@@ -192,9 +189,6 @@ func sweepCleaning(t *testing.T, total int, disk []bool, plant plants) error {
 				return true
 			}
 			runEveryAction(h)
-			if err := unackedReplies(h); err != nil {
-				return fmt.Errorf("action %d failed: %w", k, err)
-			}
 			if (failed == core.ActDiskWrite || failed == core.ActDiskFsync) && (h.s.Log().Err() == nil || h.s.Log().DurableLSN() != durable) {
 				t.Fatalf("action %d failed: the log's error %v, durable LSN %d, %d at the failure", k, h.s.Log().Err(), h.s.Log().DurableLSN(), durable)
 			}
@@ -203,26 +197,6 @@ func sweepCleaning(t *testing.T, total int, disk []bool, plant plants) error {
 			if _, err := checkEveryAction(h); err != nil {
 				return fmt.Errorf("action %d failed, %s landing: %w", k, landing, err)
 			}
-		}
-	}
-	return nil
-}
-
-// unackedReplies reports an OK reply to a write or punch whose record is not durable: none written
-// carries the chunk at the reply's version, or the first that does is past the log's durable LSN.
-func unackedReplies(h *harness) error {
-	for _, id := range h.order {
-		r, c := h.replies[id], h.changes[id]
-		if _, ok := h.changes[id]; !ok || r.Err != nil {
-			continue
-		}
-		i := slices.IndexFunc(h.records, func(w writtenRecord) bool {
-			return slices.ContainsFunc(w.entries, func(e disklog.Entry) bool {
-				return e.Chunk == c && e.Version == r.Version && (e.Kind == disklog.EntryWrite || e.Kind == disklog.EntryPunch || e.Kind == disklog.EntrySlot)
-			})
-		})
-		if i < 0 || h.records[i].lsn > h.acked {
-			return fmt.Errorf("request %d acknowledged version %#x of chunk %v, whose record is not durable", id, r.Version, c)
 		}
 	}
 	return nil

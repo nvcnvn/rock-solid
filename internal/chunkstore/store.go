@@ -130,6 +130,8 @@ type op struct {
 	reads     int
 	buf       core.IOBuf
 	err       error
+	// answered is set once the ackEarly plant has replied.
+	answered bool
 }
 
 // chunkState is a chunk with operations not yet answered: those ordered, in version order, and those waiting behind a base read.
@@ -199,6 +201,8 @@ type plants struct {
 	forgetVersion       bool
 	rebuildSkipsFreezes bool
 	punchKeepsHead      bool
+	// ackEarly answers a write or punch OK as it is submitted, before its records are durable.
+	ackEarly bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.
@@ -499,7 +503,9 @@ func (s *Store) orderWaiting(ctx *core.Context, ci int32, out *Output) {
 func (s *Store) finishUnordered(ctx *core.Context, oi int32, out *Output) {
 	o := &s.ops[oi]
 	s.freeBufs(ctx, oi)
-	out.Replies = append(out.Replies, Reply{ID: o.req.ID, Version: o.version, Err: o.err})
+	if !o.answered {
+		out.Replies = append(out.Replies, Reply{ID: o.req.ID, Version: o.version, Err: o.err})
+	}
 	ci := o.chunk
 	s.freeOp(oi)
 	s.releaseChunk(ci)
@@ -627,6 +633,10 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	}
 	cs.pending = append(cs.pending, oi)
 	o.left = len(o.items)
+	if s.plant.ackEarly && o.err == nil {
+		o.answered = true
+		out.Replies = append(out.Replies, Reply{ID: o.req.ID, Version: o.version})
+	}
 	for j := range o.items {
 		it := &o.items[j]
 		if o.err != nil {
@@ -1228,7 +1238,9 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 		if o.err != nil && !o.holdsVersion() {
 			r.Version = 0
 		}
-		out.Replies = append(out.Replies, r)
+		if !o.answered {
+			out.Replies = append(out.Replies, r)
+		}
 		cs.pending = cs.pending[:copy(cs.pending, cs.pending[1:])]
 		s.freeOp(oi)
 	}
