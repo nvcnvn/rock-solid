@@ -3575,9 +3575,9 @@ line and in its model's section.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 30 | 2,000,812 | 218 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 25 | 743,289 | 73 s |
-| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 81 | 1,215,222 | 100 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 30 | 1,789,778 | 193 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 24 | 552,713 | 51 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 81 | 1,212,947 | 94 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
