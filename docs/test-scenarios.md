@@ -1401,10 +1401,11 @@ crash oracle](#chunk-index-under-the-crash-oracle)).
   header, as a failed run check starts, both equal the live index. Every recovery loads runs and
   replays records past its manifest, and every seed writes multi-piece runs, carries runs, merges
   and cuts.
-- A crash once a checkpoint's manifest record is durable but before any segment header names it,
-  with a merge's output among the runs, recovers from an earlier manifest plus replay, and the
-  next checkpoint's restart recovers from a later one to the live index (seeds 0-3,
-  `TestCrashBetweenRunAndManifest`).
+- A lost checkpoint carrying merge output (seeds 0-3, `TestCrashBetweenRunAndManifest`): after
+  three manifests, the first checkpoint that writes a merge step's pieces to a merge worker's lane
+  is crashed once its manifest record is durable and before any segment header names it. Recovery
+  loads an earlier manifest, without the step's output, plus replay, and the next checkpoint's
+  restart recovers from a later one to the live index.
 - A write's freeze kept and its blocks lost: at cut 1, a write of twice a record's blocks to chunk
   c, behind a write of one block less than a record to another chunk, logs c's freeze in a record
   ahead of its blocks, and a crash at one of the next 12 actions, nothing unflushed landing, keeps

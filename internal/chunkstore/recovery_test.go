@@ -10,7 +10,6 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
-	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
@@ -184,28 +183,43 @@ func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
 	})
 }
 
-// A crash once a checkpoint's manifest record is durable but before any segment header names it
-// recovers from an earlier manifest plus replay, even when a merge's output is among its runs, and
-// the next checkpoint's restart does too.
+// A crash once a checkpoint's manifest record is durable but before any segment header names it,
+// the checkpoint carrying a merge step's output, recovers from an earlier manifest plus replay,
+// and the next checkpoint's restart recovers from a later one.
 func TestCrashBetweenRunAndManifest(t *testing.T) {
 	seeds.Run(t, 0, 4, func(seed uint64) {
 		h := newRecoveryHarness(t)
 		w := &workload{r: rand.New(rand.NewPCG(seed, 8))}
-		for _, m, _ := written(h); m < 3 || !slices.ContainsFunc(h.merges, (*lsm.Compaction).Finished); _, m, _ = written(h) {
+		for _, m, _ := written(h); m < 3; _, m, _ = written(h) {
 			w.run(h, 10)
 		}
-		_, _, before := written(h)
-		var lost uint64
+		var named int
+		var lost, held uint64
 		h.crashIf = func(*core.Action) bool {
-			_, _, newest := written(h)
-			if newest > before && newest <= h.s.Log().DurableLSN() {
+			_, m, newest := written(h)
+			if named == 0 {
+				held = 0
+				for lane, n := range h.stepHeld {
+					if lane > 0 {
+						held += n
+					}
+				}
+				if held > 0 {
+					named = m + 1
+				}
+			}
+			if named != 0 && m >= named && newest <= h.s.Log().DurableLSN() {
+				if m != named {
+					t.Fatalf("seed %d: %d manifests written after the merge step's pieces", seed, m-named+1)
+				}
 				lost = newest
 			}
 			return lost != 0
 		}
 		if !crashes(func() { w.run(h, 1000) }) {
-			t.Fatalf("seed %d: no manifest written", seed)
+			t.Fatalf("seed %d: no manifest named a merge step's pieces", seed)
 		}
+		t.Logf("seed %d: lost the manifest at LSN %d, naming %d bytes of a merge step", seed, lost, held)
 		restart(h, w)
 		if h.loaded.IsNone() || h.loaded.LSN >= lost {
 			t.Fatalf("seed %d: recovered from manifest %+v, not one before the manifest at LSN %d no header named", seed, h.loaded, lost)
