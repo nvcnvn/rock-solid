@@ -32,6 +32,20 @@ deep-peering 32 / 14,838,803 / 2 h 30 min; deep-leases 132 / 5,312,889 / 9 min; 
 84 / 137,228,807 / 3 h 59 min, too close to its 4 h cap: shrink it a little (e.g. MaxFault 2 → 1
 or a shorter MaxTime) and rerun.
 
+## Review, lease half (in progress)
+
+1. Grantor pause made the rate bound too low (reviewer's TLC trace). Fix: grantor's run ID, redrawn at
+   process start and every Resumed (Wake, Thaw of a marker pause, Restart, Reboot); a holder starts a
+   new window when it changes. Plans HandoverPause (pause+cut, fast, t 500; 2.67M states, 215 s
+   alone) and HandoverSuspendCut (7.57M, 630 s alone) go to deep-leases; neg-no-run-window
+   (NoRunWindow, PausePlans) violates OneReader at depth 43 in 161 s. design.md Lease time rewritten.
+2. ci plans now run node 3 fast: HandoverSuspend, HandoverStop, HandoverRestart, RaftTransfer,
+   RaftPartition; HandoverRebootFast in deep-leases. A trip on a faulted pair taints the holder's
+   other pairs (Detected) for property 10. ci-leases: depth 81, 797,699 states, 68 s.
+3. Property 10: keep zero round trips; build-checklist to promise only that (todo).
+4. deep-slow: MaxTime 1100 -> 500 (plan t was 600); rerun pending.
+5, 6: docs pending.
+
 ## Remaining
 
 1. Review by a fresh agent; apply it.
