@@ -51,6 +51,8 @@ type harness struct {
 	onStep  func(k int, a *core.Action)
 	// plant is the bug planted in every store a recovery starts.
 	plant plants
+	// changes is the chunk of each write and punch, by request ID.
+	changes map[uint64]core.ChunkID
 	// abandoned is the pool buffers left live by stores the harness dropped at a crash, and own
 	// those a settled store holds for its log once formatted.
 	abandoned, own int
@@ -440,6 +442,16 @@ func (h *harness) id() uint64 {
 	return h.nextID
 }
 
+// change is a new request ID for a write or punch of chunk c.
+func (h *harness) change(c core.ChunkID) uint64 {
+	if h.changes == nil {
+		h.changes = map[uint64]core.ChunkID{}
+	}
+	id := h.id()
+	h.changes[id] = c
+	return id
+}
+
 // writeBuf lays data out at off in a buffer of the blocks it touches, the rest poisoned.
 func (h *harness) writeBuf(off uint32, data []byte) core.IOBuf {
 	first, last := spanOf(off, uint32(len(data)))
@@ -452,21 +464,21 @@ func (h *harness) writeBuf(off uint32, data []byte) core.IOBuf {
 }
 
 func (h *harness) write(c core.ChunkID, off uint32, data []byte, epoch uint64) uint64 {
-	id := h.id()
+	id := h.change(c)
 	h.s.Write(&h.ctx, Request{ID: id, Chunk: c, Off: off, Len: uint32(len(data)), Buf: h.writeBuf(off, data), Epoch: epoch}, &h.out)
 	h.take()
 	return id
 }
 
 func (h *harness) writeExpect(c core.ChunkID, off uint32, data []byte, ver uint64) uint64 {
-	id := h.id()
+	id := h.change(c)
 	h.s.Write(&h.ctx, Request{ID: id, Chunk: c, Off: off, Len: uint32(len(data)), Buf: h.writeBuf(off, data), HasVer: true, Ver: ver}, &h.out)
 	h.take()
 	return id
 }
 
 func (h *harness) punch(c core.ChunkID, off, n uint32, epoch uint64) uint64 {
-	id := h.id()
+	id := h.change(c)
 	h.s.Punch(&h.ctx, Request{ID: id, Chunk: c, Off: off, Len: n, Epoch: epoch}, &h.out)
 	h.take()
 	return id

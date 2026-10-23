@@ -1456,7 +1456,8 @@ Who may use the reserve:
   bytes held beyond what the manifests name never exceed the reserve arrives with the invariant
   checker.
 - Crash with the disk full except the reserve, during a checkpoint in the reserve: recovery
-  succeeds and the held items were never acknowledged (with Crash at every action).
+  succeeds and the held items were never acknowledged (`TestCrashAtEveryActionInTheReserve`, under
+  [Crash at every action](#crash-at-every-action)).
 
 ## Merge steps
 
@@ -2476,8 +2477,9 @@ every acknowledged record, and Corrupt never occurs (Pebble `TestErrors`, `TestD
   before format finished may find no log, and none other may fail.
   - For every k in 0..N, the three crashes at k; for every k below N, action k fails with Io, the
     workload runs on to its end and the disk crashes the three ways. Each recovery, in open mode and
-    then in rebuild mode, matches the oracle and reads back every mapped block, and the two give
-    the same LSN and index.
+    then in rebuild mode, matches the oracle, reads back every mapped block and loads, if any, the
+    manifest the node's checkpoint wrote there, with the merge step's run; the two give the same
+    LSN and index.
   - After a failed action the log acknowledges nothing, issues no write or flush, and reports its
     error.
   - Crash during recovery: for every k, the half-landing crash's recovery is crashed again before
@@ -2488,23 +2490,31 @@ every acknowledged record, and Corrupt never occurs (Pebble `TestErrors`, `TestD
     in flight and a crashed recovery.
   - Planted bugs (`TestCrashAtEveryActionCatchesPlantedRecoveryBugs`): recovery that stops one LSN
     early (`disklog.StopEarly`) and recovery that replays past a gap (`disklog.ReplayPastGaps`) each
-    fail the sweep.
+    fail the sweep. So, when planted by hand, does recovery that drops the merge step's run from
+    the manifest it loads.
   - The whole test, with its recovery pass, runs in about 9 s and 420 MB.
+- [property] Disk log in its reserve (`TestCrashAtEveryActionInTheReserve`, `internal/disklog`):
+  format of a 32-block disk of 4-block segments with a reserve of two, five 2-block writes that
+  fill every segment outside the reserve, a sixth submitted with the fifth and held for room, and
+  the node's checkpoint, which the fifth makes due and which goes into the reserve while the sixth
+  waits. N is 18; the same crashes and failures at every k, checked the same way, and the held
+  write is never acknowledged. `disklog.StopEarly` fails this sweep too.
 - [property] Chunk store (`TestCrashAtEveryActionWithCleaning`, `internal/chunkstore`): the
   single-node ChunkStore on the cleaner tests' small disk (64 segments of 16 blocks, with
   `max_replay_bytes` of 12 blocks) with merges running as the daemon runs them, from a formatted
-  store: writes of 1 byte and of 2 blocks unaligned over 3 blocks, a partial punch, 36 overwrites
-  of 6 blocks of one chunk under snapshot epochs 0 to 2 (cuts with freezes in their records) that
-  checkpoint and compact, a whole-chunk punch, and a cleaner pass with clean_free at every segment.
-  Once the pass has read its first victim, a write lands on the last block it would move; once its
-  copies are out and before their record is durable, a write, a punch and a cut land on the first
-  block they move. N is 199.
+  store: writes of 1 byte and of 2 blocks unaligned over 3 blocks, an unaligned punch over a whole
+  block, 36 overwrites of 6 blocks of one chunk under snapshot epochs 0 to 2 (cuts with freezes in
+  their records) that checkpoint and compact, a whole-chunk punch, and a cleaner pass with
+  clean_free at every segment. Once the pass has read its first victim, a write lands on the last
+  block it would move; once its copies are out and before their record is durable, a write, a punch
+  of the whole block and a cut land on the first block they move. N is 201.
   - For every k in 0..N, the three crashes at k; for every disk action k below N, action k fails
     with Io (a write, a flush or a read), the workload runs on to its end and the disk crashes the
     three ways. Each recovery reads, live and at every snapshot epoch, as the oracle's block model,
     and a rebuild of its index, as a failed run check starts, equals it and reads the same.
   - A failed write or flush leaves the log failed with its durable LSN where it was at the
-    failure.
+    failure. Before every crash, each write or punch the store answered OK has a record, the first
+    carrying its chunk at the reply's version, at or below the log's durable LSN.
   - Crash and failure during recovery: for every k, the half-landing crash's recovery is crashed
     before each of its writes and flushes in turn, landing a second seeded half, and the next
     recovery finds the LSN the uncrashed one found; separately, each of those writes and flushes
@@ -2515,7 +2525,8 @@ every acknowledged record, and Corrupt never occurs (Pebble `TestErrors`, `TestD
     between a copy record and the owner applying its moves, a write opening a segment and a
     manifest write, so a crash or a failure meets each.
   - Planted bug (`TestCrashAtEveryActionCatchesReplayingCopiesAsWrites`): replay that maps a
-    copy's blocks as a write fails the sweep.
+    copy's blocks as a write fails the sweep. So, when planted by hand, do replay that drops
+    block-range punches and a store that answers a failed write OK.
   - The test runs in about 14 s and 210 MB; the planted-bug test in about 6 s.
 - The chunk store's `TestCrashAtEveryAction` also crashes, at every action with the three
   landings, a workload on the default disk with unaligned writes, a cut, a whole-chunk write and a

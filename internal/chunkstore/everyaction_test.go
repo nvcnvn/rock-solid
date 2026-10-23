@@ -15,12 +15,12 @@ import (
 var everyActionChunks = []core.ChunkID{crashChunks[0], crashChunks[1], chunk(9)}
 
 // everyActionWorkload runs on the small disk with merges running as the daemon runs them:
-// unaligned writes of 1 byte to 3 blocks, a partial punch, overwrites of a few blocks under
-// snapshot epochs up to 2 until their older segments are mostly dead, which checkpoints and
-// compacts, a whole-chunk punch, and a cleaner pass that frees every segment it can. Once the
-// pass has read its first victim, a write lands on the last block it would move; once the copies
-// are out and before their record is durable, a write, a punch and a cut land on the first block
-// they move. It reports whether they did.
+// unaligned writes of 1 byte to 3 blocks, an unaligned punch over a whole block, overwrites of a
+// few blocks under snapshot epochs up to 2 until their older segments are mostly dead, which
+// checkpoints and compacts, a whole-chunk punch, and a cleaner pass that frees every segment it
+// can. Once the pass has read its first victim, a write lands on the last block it would move;
+// once the copies are out and before their record is durable, a write, a punch of the whole block
+// and a cut land on the first block they move. It reports whether they did.
 func everyActionWorkload(h *harness) (windowed bool) {
 	h.merging = true
 	c, d, e := everyActionChunks[0], everyActionChunks[1], everyActionChunks[2]
@@ -28,7 +28,7 @@ func everyActionWorkload(h *harness) (windowed bool) {
 	h.write(c, 4000, fill(2*core.BlockSize, 0xa2), 0)
 	h.write(e, 0, fill(2*core.BlockSize, 0xa3), 0)
 	h.step()
-	h.punch(c, 2*core.BlockSize+7, core.BlockSize, 0)
+	h.punch(c, 2*core.BlockSize+7, 2*core.BlockSize, 0)
 	h.settle()
 	for i := range 36 {
 		h.write(d, uint32(i%6)*core.BlockSize, fill(core.BlockSize, byte(i)), uint64(i/12))
@@ -59,7 +59,7 @@ func everyActionWorkload(h *harness) (windowed bool) {
 			pc := sent.pass.job.pieces[sent.piece]
 			off := uint32(pc.first) * core.BlockSize
 			h.write(pc.chunk, off+5, fill(10, 0xb1), 2)
-			h.punch(pc.chunk, off+core.BlockSize/2, core.BlockSize/2, 2)
+			h.punch(pc.chunk, off, core.BlockSize, 2)
 			h.write(pc.chunk, off, fill(3, 0xb2), 3)
 			windowed = true
 		}
@@ -178,13 +178,17 @@ func crashedAt(t *testing.T, k int, landing string, plant plants) *harness {
 func sweepCleaning(t *testing.T, total int, disk []bool, plant plants) error {
 	for k := 0; k <= total; k++ {
 		for _, landing := range []string{"none", "half", "all"} {
-			if _, err := checkEveryAction(crashedAt(t, k, landing, plant)); err != nil {
+			h := crashedAt(t, k, landing, plant)
+			if err := unackedReplies(h); err != nil {
+				return fmt.Errorf("crash at action %d: %w", k, err)
+			}
+			if _, err := checkEveryAction(h); err != nil {
 				return fmt.Errorf("crash at action %d, %s landing: %w", k, landing, err)
 			}
 			if k == total || !disk[k] {
 				continue
 			}
-			h := startEveryAction(t)
+			h = startEveryAction(t)
 			var failed core.ActionKind
 			var durable uint64
 			h.failIf = func(i int, a *core.Action) bool {
@@ -195,6 +199,9 @@ func sweepCleaning(t *testing.T, total int, disk []bool, plant plants) error {
 				return true
 			}
 			runEveryAction(h)
+			if err := unackedReplies(h); err != nil {
+				return fmt.Errorf("action %d failed: %w", k, err)
+			}
 			if (failed == core.ActDiskWrite || failed == core.ActDiskFsync) && (h.s.Log().Err() == nil || h.s.Log().DurableLSN() != durable) {
 				t.Fatalf("action %d failed: the log's error %v, durable LSN %d, %d at the failure", k, h.s.Log().Err(), h.s.Log().DurableLSN(), durable)
 			}
@@ -203,6 +210,26 @@ func sweepCleaning(t *testing.T, total int, disk []bool, plant plants) error {
 			if _, err := checkEveryAction(h); err != nil {
 				return fmt.Errorf("action %d failed, %s landing: %w", k, landing, err)
 			}
+		}
+	}
+	return nil
+}
+
+// unackedReplies reports an OK reply to a write or punch whose record is not durable: none written
+// carries the chunk at the reply's version, or the first that does is past the log's durable LSN.
+func unackedReplies(h *harness) error {
+	for _, id := range h.order {
+		r, c := h.replies[id], h.changes[id]
+		if _, ok := h.changes[id]; !ok || r.Err != nil {
+			continue
+		}
+		i := slices.IndexFunc(h.records, func(w writtenRecord) bool {
+			return slices.ContainsFunc(w.entries, func(e disklog.Entry) bool {
+				return e.Chunk == c && e.Version == r.Version && (e.Kind == disklog.EntryWrite || e.Kind == disklog.EntryPunch || e.Kind == disklog.EntrySlot)
+			})
+		})
+		if i < 0 || h.records[i].lsn > h.acked {
+			return fmt.Errorf("request %d acknowledged version %#x of chunk %v, whose record is not durable", id, r.Version, c)
 		}
 	}
 	return nil
@@ -301,6 +328,7 @@ func TestCrashAtEveryActionWithCleaning(t *testing.T) {
 	if crashes == 0 || failures == 0 {
 		t.Fatalf("recoveries crashed %d times and failed %d times", crashes, failures)
 	}
+	t.Logf("%d actions; recoveries crashed %d times and failed %d times", total, crashes, failures)
 }
 
 // Planted bug: replay mapping a copy's blocks as a write, whether or not a map still stores them
