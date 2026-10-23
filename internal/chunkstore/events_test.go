@@ -95,7 +95,7 @@ func TestPartlyDurableWrite(t *testing.T) {
 // smallDisk is a harness on a 16 MiB disk of 4-block segments.
 func smallDisk(t *testing.T, cfg Config) *harness {
 	h := &harness{t: t, pool: sim.NewPool(16<<20, 0), disk: sim.NewDisk(4096), cfg: cfg,
-		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, crashAt: -1}
+		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, crashAt: -1, found: map[string]error{}, recSeq: map[core.LBA]uint64{}, cleanSeg: map[uint32]bool{}, filled: map[uint32]float64{}}
 	h.ctx = core.Context{Now: 1, Raw: 2, Pool: h.pool}
 	geo, err := disklog.GeometryFor(16 << 20)
 	if err != nil {

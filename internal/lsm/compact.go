@@ -369,6 +369,20 @@ func (t *Tree) RunsIn(segment uint32, pieces []disklog.BlobRef) (_ []disklog.Blo
 	return pieces, held
 }
 
+// Pieces appends to dst the live pieces of every run, those running merges hold included, and
+// the pieces running merges have written of their outputs.
+func (t *Tree) Pieces(dst []disklog.BlobRef) []disklog.BlobRef {
+	for _, r := range t.runs {
+		if len(r.pieces) > 0 {
+			dst = append(dst, r.pieces[r.base:]...)
+		}
+	}
+	for _, c := range t.merges {
+		dst = slices.Concat(dst, c.entryRefs, c.fragRefs, c.partRefs, c.tail)
+	}
+	return dst
+}
+
 // RewriteSteps is how many steps rewriting the runs RunsIn lists for segment takes at most, all
 // together, and the most bytes one step writes beside its entry and fragment blocks: a filter
 // partition sized for at most its run's keys and fenced, the root's references to every piece the

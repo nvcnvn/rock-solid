@@ -207,6 +207,16 @@ type plants struct {
 	// freeNextSlot also hands the log the slot after each chunk slot it frees.
 	ackEarly     bool
 	freeNextSlot bool
+	// noGainGuard takes victims whose copies cost a segment or more; moveOverWrites applies the
+	// cleaner's copies as writes, wherever a map points; noSpaceWithVictim fails items waiting for
+	// room with NoSpace while the cleaner has a victim; freeLive frees a chunk victim's live count
+	// before copying, so the log frees it with its blocks live; newPassOnly counts as a victim only
+	// a pass the cleaner just started, failing items waiting for room while an older one runs.
+	noGainGuard       bool
+	moveOverWrites    bool
+	noSpaceWithVictim bool
+	freeLive          bool
+	newPassOnly       bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.
@@ -1030,7 +1040,7 @@ func (s *Store) housekeep(ctx *core.Context, out *Output) {
 		}
 		victim := s.clean(ctx)
 		s.admitHeld(ctx, out)
-		if s.log.Stalled() && (!victim || s.log.CopiesStalled()) {
+		if s.log.Stalled() && (!victim || s.log.CopiesStalled() || s.plant.noSpaceWithVictim) {
 			s.log.FailStalled(ctx, &s.lout)
 			return
 		}

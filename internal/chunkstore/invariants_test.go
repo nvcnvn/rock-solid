@@ -15,15 +15,22 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
-// The store's phase 1 data invariants, as the harness registers them, most specific first so
-// that a bug breaking several is named by the one closest to it.
+// The store's phase 1 invariants, as the harness registers them, most specific first so that a
+// bug breaking several is named by the one closest to it.
 const (
 	invVersions = "no two writes of a chunk get one version"
 	invRebuild  = "a rebuilt chunk index equals the recovered one"
 	invReplay   = "replay rebuilds the index the store held"
 	invIndex    = "the index passes its own check"
+	invOpenSeqs = "a recovered log opens its next segment past every open sequence on disk"
+	invUsage    = "each chunk segment counts the blocks the index refers to"
+	invReuse    = "no segment is reused while it holds a record the index needs"
+	invGain     = "every chunk victim frees more than its copies fill"
+	invHeld     = "the bytes held beyond the manifests stay within the reserve"
+	invNoSpace  = "no ordinary write fails with NoSpace while the cleaner has a victim"
 	invAcked    = "acknowledged writes are readable"
 	invPunched  = "punched ranges read zeros"
+	invMove     = "a cleaner move never replaces a write that landed during cleaning"
 	invReads    = "every read equals the byte-range oracle"
 )
 
@@ -32,17 +39,25 @@ const (
 // step. A settle compares the reads only of the chunks changed or moved since the last check; the
 // first check after a recovery, and one a test asks for, compare every chunk's.
 func (h *harness) register() {
+	found := func(name string) { h.inv.Register(name, func() error { return h.found[name] }) }
 	h.inv.Register(invVersions, func() error { return h.versionErr })
-	h.inv.Register(invRebuild, func() error { return h.indexErr[invRebuild] })
-	h.inv.Register(invReplay, func() error { return h.indexErr[invReplay] })
+	found(invRebuild)
+	found(invReplay)
 	h.inv.Register(invIndex, func() error {
 		if !h.s.Serving() {
 			return nil
 		}
 		return h.s.Index().Check()
 	})
+	found(invOpenSeqs)
+	h.inv.Register(invUsage, h.usageErr)
+	h.inv.Register(invReuse, h.recordsInPlace)
+	h.inv.Register(invGain, h.victimsGain)
+	found(invHeld)
+	found(invNoSpace)
 	h.inv.Register(invAcked, h.ackedReadable)
 	h.inv.Register(invPunched, h.punchesReadZeros)
+	h.inv.Register(invMove, h.movesKeepWrites)
 	h.inv.Register(invReads, h.readsMatchOracle)
 }
 
@@ -107,10 +122,151 @@ func (h *harness) recoveredIndex() {
 	if h.indexBefore == nil {
 		return
 	}
-	if got := dumpIndex(h.s.Index()); !slices.Equal(got, h.indexBefore) && h.indexErr[h.indexFor] == nil {
-		h.indexErr[h.indexFor] = fmt.Errorf("the index holds %d entries, %s", len(got), indexDiff(got, h.indexBefore))
+	if got := dumpIndex(h.s.Index()); !slices.Equal(got, h.indexBefore) {
+		h.violate(h.indexFor, fmt.Errorf("the index holds %d entries, %s", len(got), indexDiff(got, h.indexBefore)))
 	}
 	h.indexBefore = nil
+}
+
+// violate keeps err, unless nil, as the first violation of invariant name an event found.
+func (h *harness) violate(name string, err error) {
+	if err != nil && h.found[name] == nil {
+		h.found[name] = err
+	}
+}
+
+// headersOnDisk takes each segment's open sequence from its header on disk once a recovery
+// finishes, a header write lost at the crash taking with it the records noted under it, and
+// breaks invOpenSeqs if one is at or past the open sequence the log opens its next segment at,
+// which would make two segments share one or replay read them out of order.
+func (h *harness) headersOnDisk() {
+	log := h.s.Log()
+	sb := log.Superblock()
+	for s := uint32(1); s < sb.SegmentCount; s++ {
+		sh, err := disklog.DecodeSegmentHeader(h.disk.Read(sb.LBA(s, 0), 1))
+		if err != nil || sh.LogID != sb.LogID || sh.Index != s {
+			delete(h.seqOf, s)
+			continue
+		}
+		h.seqOf[s] = sh.Seq
+		if sh.Seq >= log.NextOpenSeq() {
+			h.violate(invOpenSeqs, fmt.Errorf("the recovered log opens its next segment at sequence %d, and segment %d's header on disk is at %d", log.NextOpenSeq(), s, sh.Seq))
+		}
+	}
+	segBlocks := core.LBA(sb.SegmentBlocks)
+	maps.DeleteFunc(h.recSeq, func(lba core.LBA, seq uint64) bool { return h.seqOf[uint32(lba/segBlocks)] < seq })
+}
+
+// movesKeepWrites checks that every live block of the chunks checked carries a version at least
+// that of the newest change acknowledged on it since the last recovery: a cleaner move applied
+// over a write that landed while its copy was out maps the block back to the older version.
+func (h *harness) movesKeepWrites() error {
+	for _, c := range h.checking {
+		ch := h.bytes.chunks[c]
+		for _, e := range h.viewOf(c).maps[0] {
+			for b := e.First; int(b) < e.end(); b++ {
+				if e.Version < ch.blockVer[b] {
+					return fmt.Errorf("chunk %v block %d maps version %#x at LBA %d, after version %#x was acknowledged", c, b, e.Version, e.LBA, ch.blockVer[b])
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// recordsInPlace checks that every record a block of the chunks checked refers to, in a live or
+// frozen map, and every record holding a piece of the index's runs, those merges hold and what
+// running merges have written included, still lies in its segment as written: the segment has not
+// been opened again since, for any stream. A punched extent holds no record. Writes
+// into a segment reused while it held a live block touch it, so its chunks are among those
+// checked.
+func (h *harness) recordsInPlace() error {
+	if !h.s.Serving() {
+		return nil
+	}
+	sb := h.s.sb
+	moved := func(lba core.LBA) (uint64, uint32, bool) {
+		seq, ok := h.recSeq[lba]
+		seg := uint32(lba / core.LBA(sb.SegmentBlocks))
+		return seq, seg, ok && h.seqOf[seg] != seq
+	}
+	for _, c := range h.checking {
+		for ver, m := range h.viewOf(c).maps {
+			for _, e := range m {
+				if seq, seg, bad := moved(e.Header); bad && e.LBA != 0 {
+					return fmt.Errorf("chunk %v version %#x maps block %d to the record at LBA %d, written at open sequence %d, and segment %d was opened again at %d", c, ver, e.First, e.Header, seq, seg, h.seqOf[seg])
+				}
+			}
+		}
+	}
+	for _, p := range h.s.Index().Tree().Pieces(nil) {
+		if seq, seg, bad := moved(sb.LBA(p.Segment, p.Block)); bad {
+			return fmt.Errorf("a run's piece at LSN %d lies in the record at block %d of segment %d, written at open sequence %d, and the segment was opened again at %d", p.LSN, p.Block, seg, seq, h.seqOf[seg])
+		}
+	}
+	return nil
+}
+
+// noteFilled shares the blocks of a record on the cleaner's lane among the victims its copy
+// entries name, by the blocks each copies.
+func (h *harness) noteFilled(blocks uint64, entries []disklog.Entry) {
+	var data uint64
+	for _, e := range entries {
+		data += uint64(e.Count)
+	}
+	segBlocks := uint64(h.s.sb.SegmentBlocks)
+	for _, e := range entries {
+		if e.Kind == disklog.EntryCopy {
+			h.filled[uint32(uint64(e.Source)/segBlocks)] += float64(blocks) * float64(e.Count) / float64(data)
+		}
+	}
+}
+
+// opened ends the victim that segment was, now freed and opened again, breaking invGain if its
+// copies took a segment or more.
+func (h *harness) opened(segment uint32) {
+	h.violate(invGain, h.gainErr(segment))
+	delete(h.filled, segment)
+}
+
+func (h *harness) gainErr(victim uint32) error {
+	if f := h.filled[victim]; f >= float64(h.s.sb.SegmentBlocks) {
+		return fmt.Errorf("the cleaner's copies of segment %d took %.1f blocks, freeing it %d", victim, f, h.s.sb.SegmentBlocks)
+	}
+	return nil
+}
+
+// victimsGain checks invGain for every victim the cleaner has freed and not yet reopened.
+func (h *harness) victimsGain() error {
+	if !h.s.Serving() {
+		return nil
+	}
+	for _, s := range slices.Sorted(maps.Keys(h.filled)) {
+		if u, _ := h.s.Log().Usage(s); u.State == disklog.SegmentFree {
+			if err := h.gainErr(s); err != nil {
+				return err
+			}
+		}
+	}
+	return h.found[invGain]
+}
+
+// noSpace breaks invNoSpace when request id fails with NoSpace while the cleaner has a victim,
+// unless its copies wait with no segment free at all: a pass that ran before the event and still
+// runs, so ran through it, or a victim that passes the net-gain guard. A pass the event started is
+// no victim: the event may have started it after the store found none.
+func (h *harness) noSpace(id uint64) {
+	if !h.s.Serving() || h.s.Log().CopiesStalled() {
+		return
+	}
+	for _, p := range h.s.cl.passes {
+		if slices.Contains(h.passesBefore, p) {
+			h.violate(invNoSpace, fmt.Errorf("request %d failed with NoSpace while a pass on segments %v ran", id, p.victims[p.cur:]))
+		}
+	}
+	if v := h.s.chooseVictims(); len(v) > 0 {
+		h.violate(invNoSpace, fmt.Errorf("request %d failed with NoSpace, with victims %v", id, v))
+	}
 }
 
 // indexDiff names the first entry where got and want differ.
@@ -433,8 +589,10 @@ type oracleChunk struct {
 	// live and each snapshot's blocks, a block absent reading zeros.
 	live  map[uint16][]byte
 	snaps map[uint64]map[uint16][]byte
-	// punched marks, per block, the bytes a punch cleared that no write has written since.
-	punched map[uint16][]byte
+	// punched marks, per block, the bytes a punch cleared that no write has written since, and
+	// blockVer is the newest version acknowledged on each block.
+	punched  map[uint16][]byte
+	blockVer map[uint16]uint64
 }
 
 func newByteOracle() *byteOracle { return &byteOracle{chunks: map[core.ChunkID]*oracleChunk{}} }
@@ -442,7 +600,7 @@ func newByteOracle() *byteOracle { return &byteOracle{chunks: map[core.ChunkID]*
 func (o *byteOracle) chunk(c core.ChunkID) *oracleChunk {
 	ch, ok := o.chunks[c]
 	if !ok {
-		ch = &oracleChunk{live: map[uint16][]byte{}, snaps: map[uint64]map[uint16][]byte{}, punched: map[uint16][]byte{}}
+		ch = &oracleChunk{live: map[uint16][]byte{}, snaps: map[uint64]map[uint16][]byte{}, punched: map[uint16][]byte{}, blockVer: map[uint16]uint64{}}
 		o.chunks[c] = ch
 	}
 	return ch
@@ -459,6 +617,7 @@ func (ch *oracleChunk) apply(c change, version uint64) {
 	ch.version, ch.epoch = max(ch.version, version), max(ch.epoch, c.epoch)
 	first, last := spanOf(c.off, c.n)
 	for b := first; b <= last; b++ {
+		ch.blockVer[b] = max(ch.blockVer[b], version)
 		lo, hi, _ := partial(c.off, c.n, b)
 		blk := make([]byte, core.BlockSize)
 		if lo != 0 || hi != core.BlockSize {
@@ -568,4 +727,107 @@ func TestPlantedBugsBreakTheirInvariants(t *testing.T) {
 			t.Log(err)
 		})
 	}
+}
+
+// A bug planted in the cleaner or the store's handling of space breaks the invariant it violates:
+// on a primed store, a guard that lets a victim's copies cost a segment, copies applied over the
+// writes that landed while a held job was out, and a victim freed with its blocks live; on a
+// store with a reserve of 4 segments, whose cleaner runs only for writes waiting for room, items
+// failed with NoSpace while the cleaner has a victim.
+func TestPlantedCleanerBugsBreakTheirInvariants(t *testing.T) {
+	newBlocks := func(h *harness) {
+		for i := range 64 * 64 {
+			h.write(chunk(uint32(10+i/64)), uint32(i%64)*core.BlockSize, fill(core.BlockSize, byte(i)), 0)
+			h.settle()
+		}
+	}
+	overwrites := func(h *harness) {
+		r := core.NewRand(13)
+		h.s.cfg.CleanFree = 4
+		for range 600 {
+			overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+		}
+	}
+	for _, c := range []struct {
+		want  string
+		plant plants
+		off   string
+		run   func(h *harness)
+	}{
+		{invGain, plants{noGainGuard: true}, "", newBlocks},
+		{invMove, plants{moveOverWrites: true}, "", func(h *harness) {
+			h.hold = true
+			h.s.cfg.CleanFree = 100
+			h.readNow(chunk(1), 0, 1)
+			victim := victimOf(h.t, h, h.held[0])
+			lo, hi := cleanGeo.LBA(victim, 0), cleanGeo.LBA(victim+1, 0)
+			for _, c := range []core.ChunkID{chunk(1), chunk(2)} {
+				for b := range uint16(64) {
+					if e, ok := h.s.Index().Lookup(testPool, c, b); ok && e.BlockLBA(b) >= lo && e.BlockLBA(b) < hi {
+						h.sync(h.write(c, uint32(b)*core.BlockSize, fill(core.BlockSize, 7), 0))
+					}
+				}
+			}
+			h.hold = false
+			h.settle()
+		}},
+		{invReuse, plants{freeLive: true}, invUsage, overwrites},
+		{invUsage, plants{freeLive: true}, "", overwrites},
+		{invNoSpace, plants{noSpaceWithVictim: true}, "", func(h *harness) {
+			r := core.NewRand(1)
+			for range 2200 {
+				overwrite(h, r, []core.ChunkID{chunk(1), chunk(2), chunk(3), chunk(4)}, 64)
+			}
+		}},
+	} {
+		t.Run(c.want, func(t *testing.T) {
+			h := primed(t)
+			if c.want == invNoSpace {
+				cfg := cleanConfig()
+				cfg.Log.Reserve, cfg.CleanFree = 4, -1
+				h = newHarnessOn(t, cfg, cleanGeo)
+				h.merging = true
+			}
+			h.s.plant, h.catch = c.plant, true
+			if c.off != "" {
+				h.inv.Off(c.off)
+			}
+			err := violated(func() { c.run(h) })
+			if violationOf(err) != c.want {
+				t.Fatalf("broke %v", err)
+			}
+			t.Log(err)
+		})
+	}
+}
+
+// Planted violation: a header of this log on a free segment at the open sequence the recovered log
+// opens its next segment at, as a recovery that resumes at the newest header's sequence instead of
+// one past it leaves the disk, breaks invOpenSeqs when the recovery's headers are read.
+func TestAHeaderAtTheNextOpenSequenceBreaksOpenSeqs(t *testing.T) {
+	h := newHarness(t, testConfig())
+	h.sync(h.write(chunkC, 0, fill(10, 1), 0))
+	restart(h)
+	log := h.s.Log()
+	sb := log.Superblock()
+	free := uint32(1)
+	for ; free < sb.SegmentCount; free++ {
+		if u, _ := log.Usage(free); u.State == disklog.SegmentFree {
+			break
+		}
+	}
+	hdr, err := disklog.AppendSegmentHeader(nil, disklog.SegmentHeader{LogID: sb.LogID, Seq: log.NextOpenSeq(), Index: free, Stream: disklog.Hot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.disk.Put(sb.LBA(free, 0), hdr)
+	h.catch = true
+	err = violated(func() {
+		h.headersOnDisk()
+		h.holds()
+	})
+	if violationOf(err) != invOpenSeqs {
+		t.Fatalf("broke %v", err)
+	}
+	t.Log(err)
 }
