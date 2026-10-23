@@ -45,12 +45,20 @@ the restart and format plans; docs moved (results rows to the map's results tabl
 to the epoch section's property table), duplicated constants removed, the free plan and
 build-checklist wording fixed, the 12,000/s figure moved, the two-bug variant noted.
 
+## Final review (findings in the session scratchpad, review-epoch2/findings.md)
+
+Done and committed: F1 run ID ends the old run's lease (35a0197), F5 arrived per message (863964e),
+F2 Settled escape reqIv + neg-restart-no-ask (3f27f44), F8 no-up intervals skipped (e2b2b6f), F7
+recovery version (98d1f53), F3+F4 sessions boot -> run (103dd9f), F9 checklist pointer (332f19f).
+In progress: F6 (move a plan from ci-peering to ci-restarts; per-plan state counts being measured),
+then ci epoch, ci sessions, deep-leases, deep-peering, deep-slow, results into test-scenarios
+(all wall times in seconds).
+
 ## Remaining
 
-1. Fresh review.
-2. Final `scripts/models.sh ci epoch` rerun.
-3. Tick the build-checklist "Epoch change model" item.
-4. Delete HANDOFF.md before merge.
+1. Finish the final review items above.
+2. Tick the build-checklist "Epoch change model" item.
+3. Delete HANDOFF.md before merge.
 
 ## Design bugs found and design.md changes
 
