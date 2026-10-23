@@ -24,8 +24,9 @@ type frozenBlocks struct {
 }
 
 // storeModel is the crash oracle's plain model of a disk's chunks: each chunk's entry and each
-// written block's bytes, live and in each frozen version, applying records' entries in LSN order
-// as replay does.
+// written block's bytes, live and as each cut's snapshot reads them, applying records' entries in
+// LSN order. A freeze at cut e keeps the chunk as it then stands for the snapshot of e, and of
+// every earlier cut no earlier freeze kept, whatever version it names.
 type storeModel struct {
 	chunks map[core.ChunkID]Chunk
 	live   map[blockKey][]byte
@@ -50,9 +51,6 @@ func (m *storeModel) Apply(r writtenRecord) {
 				delete(m.live, blockKey{e.Chunk, e.First + k})
 			}
 		case disklog.EntryFreeze:
-			if m.isFrozen(e.Chunk, e.Version) {
-				continue
-			}
 			ch, ok := m.chunks[e.Chunk]
 			if !ok {
 				ch.Version = e.Version
@@ -61,7 +59,7 @@ func (m *storeModel) Apply(r writtenRecord) {
 			m.chunks[e.Chunk] = ch
 			f := frozenBlocks{version: e.Version, epoch: e.Epoch, blocks: map[uint16][]byte{}}
 			for k, b := range m.live {
-				if k.c == e.Chunk && e.Version != 0 {
+				if k.c == e.Chunk {
 					f.blocks[k.b] = b
 				}
 			}

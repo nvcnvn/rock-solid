@@ -161,3 +161,32 @@ func TestCheckpointWaitsForAPieceBuffer(t *testing.T) {
 		h.sync(h.write(chunkC, 0, []byte{byte(i)}, 0))
 	}
 }
+
+// A write lost in a crash after its freeze leaves the chunk's version frozen at cut 1 and the
+// chunk unchanged; the next write, at cut 2, freezes that version again, and a snapshot at cut 2
+// reads it, not that write.
+func TestRefreezeAfterLostWrite(t *testing.T) {
+	reached := false
+	for k := range 12 {
+		h := newRecoveryHarness(t)
+		a, c := recoveryChunks[0], recoveryChunks[1]
+		h.write(a, 0, fill(core.BlockSize, 1), 0)
+		v := h.sync(h.write(c, 0, fill(core.BlockSize, 0x11), 0))
+		if partedFreeze(h, a, c, k) != (Chunk{Version: v, Epoch: 1}) {
+			continue
+		}
+		reached = true
+		h.sync(h.write(c, 0, fill(core.BlockSize, 0x44), 2))
+		h.disk.Crash(func(int, core.LBA) bool { return false })
+		h.recoverStore(disklog.ModeOpen)
+		if msg := modelDiff(h, h.recovered, []core.ChunkID{a, c}, 3); msg != "" {
+			t.Fatalf("crash at action %d after the cut-1 writes: %s", k, msg)
+		}
+		if got := h.block(c, 0, 2); got[0] != 0x11 {
+			t.Fatalf("crash at action %d after the cut-1 writes: the snapshot at cut 2 reads %#x, the chunk held 0x11", k, got[0])
+		}
+	}
+	if !reached {
+		t.Fatal("no crash left the chunk's version frozen without its write")
+	}
+}

@@ -1408,6 +1408,13 @@ crash oracle](#chunk-index-under-the-crash-oracle)).
 - A chunk frozen absent and never written, which a Store write leaves only when a crash or a failure
   parts its freeze from its blocks, recovers by replay and then from a run with its entry at
   version 0 (`TestAbsentOnlyChunkRecovers`). The test hands the log the freeze itself.
+- A version frozen twice (`TestRefreezeAfterLostWrite`): chunk c holds 0x11 at v1; at cut 1 a
+  write of 2 × the record's blocks to c, behind one of the record's blocks less to another chunk,
+  logs its freeze of v1 in a record ahead of its blocks, and a crash at one of the next 12 actions
+  keeps the freeze and loses the blocks. After the next write, 0x44 at cut 2, which freezes v1 again,
+  and a restart, the snapshot at cut 2 reads 0x11, and c's entry and v1's freeze carry epoch 2. An
+  index that kept v1's first freeze epoch read 0x44 there, and `TestRecoveriesMatchTheCrashOracle`
+  caught it on seed 3.
 - Planted bugs: replay that drops block-range punches fails these tests and the crash oracle's
   property, as it fails `TestCrashAtEveryActionWithCleaning`.
 
@@ -2622,7 +2629,10 @@ The chunkstore tests run the real `Index` inside `chunkstore.Store` over the dis
 simulated disk. Their harness hands `sim.Oracle` each round as its write goes to the disk, decoded
 from the bytes written with the open sequence of the write that opened its segment, and each
 `Durable` LSN. The oracle's model is plain: per chunk its entry, and each written block's bytes,
-live and in each frozen version, applying entries in LSN order as replay does.
+live and as each cut's snapshot reads them, applying entries in LSN order. It keeps a copy of the
+chunk at every freeze, for that freeze's cut and the earlier cuts no earlier freeze kept, whatever
+version the freeze names, so it states what a snapshot reads rather than sharing the index's rule
+for a version frozen twice.
 
 - After every recovery of the recovery tests ([Index recovery tests on the
   Store](#index-recovery-tests-on-the-store)) and the property below, the recovered LSN must lie in

@@ -192,6 +192,25 @@ func TestCrashBetweenRunAndManifest(t *testing.T) {
 	})
 }
 
+// partedFreeze settles, then writes maxWrite-1 blocks of chunk a and 2×maxWrite of chunk c at
+// epoch 1 together, so that c's freeze goes in a record ahead of its blocks, crashes the disk
+// before the k-th action after them, with nothing unflushed landing, and recovers; it returns c's
+// entry.
+func partedFreeze(h *harness, a, c core.ChunkID, k int) Chunk {
+	h.t.Helper()
+	h.settle()
+	base, mw := h.executed, int(h.s.maxWrite)
+	h.crashIf = func(*core.Action) bool { return h.executed == base+k }
+	h.write(a, 0, fill((mw-1)*core.BlockSize, 2), 1)
+	h.write(c, 0, fill(2*mw*core.BlockSize, 3), 1)
+	crashes(h.settle)
+	h.crashIf = nil
+	h.disk.Crash(func(int, core.LBA) bool { return false })
+	h.recoverStore(disklog.ModeOpen)
+	got, _ := h.s.Index().Chunk(testPool, c)
+	return got
+}
+
 // A chunk frozen absent and never written, which a Store write leaves only when a crash or a
 // failure parts its freeze from its blocks, recovers by replay, then from a run, as the crash
 // oracle's model.
