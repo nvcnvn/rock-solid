@@ -3005,22 +3005,20 @@ on 4 workers, so `ci`'s 5 minutes cover about 3 million.
 not fit `ci`'s 5 minutes, so each `ci` configuration checks a set of *plans*: a plan is a short
 sequence of membership changes taken from the faults below, with the client writes and the faults
 whose rules it tests, and TLC checks every interleaving of nodes, messages, writes, renewals, folds of
-activation reports and faults around it. `deep-free` checks a free plan instead: any two changes
-at any time, with one partial write and no fault.
+activation reports and faults around it. `deep-peering` adds a free plan: any two changes at any
+time, with one partial write and no fault, since with a restart it passed 20 million states at 4
+nodes without finishing.
 
 | Configuration | Nodes | What it holds |
 | --- | --- | --- |
 | `ci-peering` | 3 | Both chunks; lease expiry left open, except that a grantor that answers peering of an interval holds no live grant to that interval's old primary; the plans with membership changes alone |
 | `ci-restarts` | 3 | As `ci-peering`, with the plans that restart a primary or format a disk, under which a decision can stop short of activation, and the maintenance plan with merges, which keeps `ci-peering` within its 5 minutes |
 | `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the four below |
-| `deep-peering` | 4 | `ci-peering`'s and `ci-restarts`' plans, and the unbounded liveness property |
-| `deep-free` | 4 | The free plan, and the unbounded liveness property |
+| `deep-peering` | 4 | `ci-peering`'s and `ci-restarts`' plans and the free plan, and the unbounded liveness property |
 | `deep-leases` | 4 | `ci-leases`'s plans and the four it leaves out, which pair a partition with a pause, a suspend or a reboot |
 | `deep-slow` | 3 | The delayed-message plan alone, with `ci-leases`'s constants and time to 5 s |
 
-`deep` is four configurations because whether nodes have clocks is a constant of the spec, the
-free plan fits 4 hours with liveness only alone, and without the restart that took it past 20
-million states, and the
+`deep` is three configurations because whether nodes have clocks is a constant of the spec, and the
 delayed-message plan, over 3 million states at 3 nodes, passed 108 million at 4 nodes with the
 other lease plans without finishing in 4 hours, so it runs alone at 3. The plans that pair a
 partition with a pause, a suspend or a reboot are 1.6 to 7.6 million states each at 3 nodes, so they
@@ -3149,9 +3147,8 @@ Not modelled: a PG split with writes in flight, whose children take the parent's
 like any new interval; it needs a PG created mid-run, left to the phase 3 simulator.
 
 **Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12.
-`ci-peering`, `ci-restarts`, `deep-peering` and `deep-free` check every property but 2 and 10,
-since the Raft group and lease time need clocks, and the two `deep` ones add the unbounded liveness
-property 12. A
+`ci-peering`, `ci-restarts` and `deep-peering` check every property but 2 and 10, since the Raft
+group and lease time need clocks, and `deep-peering` adds the unbounded liveness property 12. A
 simulator invariant is registered by [Placement faults and
 invariants](#placement-faults-and-invariants) (phase 3) unless the row names another item.
 

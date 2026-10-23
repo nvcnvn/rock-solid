@@ -67,16 +67,13 @@ read and write steps multiplied ci-peering's states by more than 5. Quick checks
 NoLateCompletion fails with CompareMemberLists, MergesOnKept with MergeBeforeKept, TablesForward with
 ReportBeforeActivate and with Fold's guard removed under LateReport.
 
-Running (started 22:49, one background job, 4 workers, 4 GB): `scratchpad/alljob.sh` runs
-`scripts/models.sh ci epoch` into `scratchpad/ci-epoch-3.txt`, then `scripts/models.sh deep epoch`
-(deep-free, deep-leases, deep-peering, deep-slow) into `scratchpad/deep-epoch-3.txt`; each file ends
-with "exit N". Scratchpad is /private/tmp/claude-501/-Volumes-T5-Codes-rock-solid/
-0d6e40aa-7d63-4eb8-9067-f57610daedfc/scratchpad. If the session dies, rerun what has no result.
-deep-free with a restart was stopped at 20M states, depth 15, 2 h 15 min (would overrun); the
-free plan now has no fault (67ce62b) and reruns alone after the job, via scratchpad/tlc1.sh into
-scratchpad/deep-free-2.txt (ends with "done"). ci results are recorded (69ae593).
-Then record the ci and deep rows in test-scenarios' Configuration results table (ci rows are there
-from an earlier run; replace them) and here, shrink any deep config that overruns 4 h.
+Results (2026-10-24, 4 workers, 4 GB, recorded in test-scenarios): ci all ok (ci-leases 81 /
+1,212,947 / 94 s, ci-peering 30 / 1,789,778 / 193 s, ci-restarts 24 / 552,713 / 51 s, slowest
+negative neg-no-run-window 212 s); deep-leases 132 / 37,736,534 / 66 min; deep-slow 72 /
+21,444,840 / 33 min. The free plan with a restart passed 20M states at depth 15 in 2 h 15 min and
+was stopped; without the restart it is 21 / 1,070,452 / 7.5 min alone, so it is back in
+deep-peering, which is rerunning (alone 31 / 10,776,861 / 82 min) via scratchpad/tlc1.sh into
+scratchpad/deep-peering-4.txt (ends with "done"); record its row when it ends.
 
 Remaining after that: fresh review, final ci rerun, tick the build-checklist "Epoch change model"
 item, delete HANDOFF.md before merge.
