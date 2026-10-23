@@ -1394,7 +1394,9 @@ a chunk's first 64 blocks, unaligned one time in two, a punch of such a range tw
 a punch of the whole chunk one in ten; one request in 40 first cuts, so the next write of each
 chunk freezes it, absent for a chunk with no version, and two of the chunks are first written
 after the first cut. Every recovery is checked against the crash oracle ([Chunk index under the
-crash oracle](#chunk-index-under-the-crash-oracle)).
+crash oracle](#chunk-index-under-the-crash-oracle)). Each merge here finishes in one step, so no
+recovery lands between two steps of a merge, with its inputs bounded; `TestTwoMergesRunAtOnce`
+([Cleaner](#cleaner)) restarts there, and a recovery that drops a bounded input run fails it.
 
 - [property] Seeds 0-3, 200 in `scripts/seeds.sh`, three generations of 150 rounds
   (`TestRecoveryAndRebuildEqualLiveIndex`): after each, recovery from the manifest's runs plus
