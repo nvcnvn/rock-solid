@@ -266,7 +266,7 @@ func (s *Store) pickVictims() (victims []uint32, snapshot bool) {
 		} else {
 			cost += moveCost(uint64(u.Live))
 		}
-		if cost+1 >= uint64(geo.SegmentBlocks) {
+		if cost+1 >= uint64(geo.SegmentBlocks) && !s.plant.noGainGuard {
 			continue
 		}
 		share := min(float64(u.Live)/float64(geo.SegmentBlocks-1), 1)
@@ -318,6 +318,10 @@ func (s *Store) startVictim(ctx *core.Context, p *cleanPass) bool {
 		return false
 	}
 	p.job = cleanJob{CleanJob: CleanJob{pieces: p.job.pieces[:0], crcs: p.job.crcs[:0]}, segment: seg, records: p.job.records[:0]}
+	if s.plant.freeLive && u.Live > 0 {
+		_ = s.log.AddLive(seg, -int(u.Live))
+		u.Live = 0
+	}
 	if u.Live == 0 {
 		p.job.phase = jobCopies
 		return true
@@ -591,6 +595,9 @@ func (s *Store) copyResolved(t disklog.Ticket, ev *disklog.Event, i int) bool {
 		return true
 	}
 	s.entry[0], s.payload[0] = ev.Entries[i], ev.Payloads[i]
+	if e := &s.entry[0]; s.plant.moveOverWrites {
+		*e = disklog.WriteEntry(e.Pool, e.Chunk, e.Version, e.First, e.Count)
+	}
 	s.apply = disklog.Event{Kind: disklog.Durable, LSN: ev.LSN, LBA: ev.LBA, HeaderBlocks: ev.HeaderBlocks, Entries: s.entry[:], Payloads: s.payload[:]}
 	if err := s.ix.Apply(&s.apply); err != nil {
 		panic("chunkstore: the index refused the cleaner's copy: " + err.Error())

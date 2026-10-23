@@ -117,6 +117,15 @@ func TestCleanerCrashSeed448Settles(t *testing.T) {
 	}
 }
 
+// Seed 277 of TestCleanerSurvivesCrashes: a write fails with NoSpace when the store finds no
+// victim, and the event that failed it then starts a pass on segments its durable LSN made
+// cleanable, so a pass running when the reply comes is no victim the write could have waited for.
+func TestCleanerCrashSeed277FailsWritesWithNoVictim(t *testing.T) {
+	if _, err := cleanerCrash(t, 277, plants{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Planted bug: replay mapping a copy's blocks as a write, whether or not a map still stores them
 // at the source, brings back a block a later write replaced. A crash of the settled store
 // recovers another index than the owner kept, which invReplay names within 50 seeds.

@@ -68,8 +68,8 @@ func (r admitRun) run(t *testing.T, seed uint64) admitResult {
 			delete(h.replies, id)
 			switch {
 			case errors.Is(reply.Err, disklog.ErrNoSpace):
-				if v := h.s.chooseVictims(); len(v) > 0 {
-					t.Fatalf("a write failed with NoSpace while the cleaner had victims %v", v)
+				if err := h.found[invNoSpace]; err != nil {
+					t.Fatal(err)
 				}
 				res.noSpace++
 			case reply.Err != nil:

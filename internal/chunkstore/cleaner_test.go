@@ -57,9 +57,6 @@ func TestCleanerKeepsAFullDiskWriting(t *testing.T) {
 	if st.PeakPasses != 2 {
 		t.Fatalf("at most %d passes ran at once; a second joins two segments below clean_free", st.PeakPasses)
 	}
-	if per := float64(st.Copied) / float64(st.Freed); per >= float64(cleanGeo.SegmentBlocks-1) {
-		t.Fatalf("the cleaner copied %.1f blocks per segment it freed, a segment's worth", per)
-	}
 	for range 20 {
 		h.advance(core.Tick(time.Second / time.Microsecond))
 	}
@@ -364,8 +361,8 @@ func TestAPassEndingWithWritesWaitingStartsTheNext(t *testing.T) {
 	}
 }
 
-// Writes of new blocks fill the disk with live data: no victim gains space, and only then do
-// writes waiting for room fail with NoSpace, whatever the reserve.
+// Writes of new blocks fill the disk with live data until no victim gains space and writes waiting
+// for room fail with NoSpace, whatever the reserve; invNoSpace checks none fails earlier.
 func TestWritesFailOnlyWhenNoVictimGainsSpace(t *testing.T) {
 	for _, reserve := range []uint32{8, 10, 12} {
 		t.Run(fmt.Sprintf("reserve %d", reserve), func(t *testing.T) {
@@ -379,9 +376,6 @@ func TestWritesFailOnlyWhenNoVictimGainsSpace(t *testing.T) {
 				if err := h.reply(id).Err; err != nil {
 					if !errors.Is(err, disklog.ErrNoSpace) {
 						t.Fatalf("write %d: %v", i, err)
-					}
-					if v := h.s.chooseVictims(); len(v) > 0 {
-						t.Fatalf("write %d failed with victims %v left", i, v)
 					}
 					return
 				}
@@ -852,51 +846,28 @@ func TestTheGuardChargesTheIndexEntriesOfMoves(t *testing.T) {
 	}
 }
 
-// fatalCatcher records a Fatalf instead of ending the test, unwinding with errCaught.
-type fatalCatcher struct {
-	testing.TB
-	msg string
-}
-
-var errCaught = errors.New("caught")
-
-func (c *fatalCatcher) Fatalf(format string, args ...any) {
-	c.msg = fmt.Sprintf(format, args...)
-	panic(errCaught)
-}
-
-func (c *fatalCatcher) Helper() {}
-
 // Planted violation: run pieces on a merge worker's lane past a step and its partition and root
-// with no manifest between fail the step check, and a manifest between them passes it.
+// with no manifest between break invHeld, and a manifest between them does not.
 func TestNoteStepsCatchesAStepPastItsBound(t *testing.T) {
-	h := newHarnessOn(t, cleanConfig(), cleanGeo)
 	const seg = 5
-	h.laneOf[seg] = 1
+	h := newHarnessOn(t, cleanConfig(), cleanGeo)
 	piece := h.s.Log().MaxBlobBytes()
 	run := disklog.Entry{Kind: disklog.EntryBlob, BlobKind: disklog.BlobRun, Length: piece}
 	manifest := disklog.Entry{Kind: disklog.EntryBlob, BlobKind: disklog.BlobManifest, Length: 1}
-	most := max(h.cfg.Log.CompactionStepBytes, piece) + 2*piece
-	n := int(most/piece) + 1
-	caught := func(entries []disklog.Entry) (msg string) {
-		c := &fatalCatcher{TB: t}
-		h.t = c
-		defer func() {
-			h.t, msg = t, c.msg
-			if v := recover(); v != nil && v != errCaught {
-				panic(v)
-			}
-		}()
-		clear(h.stepHeld)
-		h.noteSteps(seg, entries)
-		return
+	n := int((max(h.cfg.Log.CompactionStepBytes, piece)+2*piece)/piece) + 1
+	held := func(entries []disklog.Entry) error {
+		h := newHarnessOn(t, cleanConfig(), cleanGeo)
+		h.laneOf[seg], h.catch = 1, true
+		return violated(func() {
+			h.noteSteps(seg, entries)
+			h.holds()
+		})
 	}
-	if msg := caught(slices.Repeat([]disklog.Entry{run}, n)); msg == "" {
-		t.Fatalf("%d run pieces of %d bytes past a manifest passed the step check", n, piece)
+	if err := held(slices.Repeat([]disklog.Entry{run}, n)); violationOf(err) != invHeld {
+		t.Fatalf("%d run pieces of %d bytes past a manifest broke %v", n, piece, err)
 	}
-	split := append(slices.Repeat([]disklog.Entry{run}, n-1), manifest, run)
-	if msg := caught(split); msg != "" {
-		t.Fatal(msg)
+	if err := held(append(slices.Repeat([]disklog.Entry{run}, n-1), manifest, run)); err != nil {
+		t.Fatal(err)
 	}
 }
 

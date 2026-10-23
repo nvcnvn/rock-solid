@@ -79,8 +79,8 @@ func (r waRun) run(t *testing.T, seed uint64) waResult {
 				outstanding--
 				switch {
 				case errors.Is(err, disklog.ErrNoSpace):
-					if v := h.s.chooseVictims(); len(v) > 0 {
-						t.Fatalf("a write failed with NoSpace while the cleaner had victims %v", v)
+					if err := h.found[invNoSpace]; err != nil {
+						t.Fatal(err)
 					}
 					res.ranOut = true
 				case err != nil:

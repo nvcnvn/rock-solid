@@ -26,7 +26,7 @@ func heldJob(t *testing.T, cfg Config) (*harness, *CleanJob, uint32) {
 }
 
 // victimOf is the victim the store's pass holding job j copies.
-func victimOf(t *testing.T, h *harness, j *CleanJob) uint32 {
+func victimOf(t testing.TB, h *harness, j *CleanJob) uint32 {
 	t.Helper()
 	for _, p := range h.s.cl.passes {
 		if &p.job.CleanJob == j {
