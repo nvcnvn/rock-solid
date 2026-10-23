@@ -142,24 +142,17 @@ func crashLanding(h *harness, landing string, seed uint64) {
 	h.crashAt, h.crashIf, h.failIf = -1, nil, nil
 }
 
-// checkEveryAction recovers the crashed store, checks it reads as the crash oracle's model live and
-// at every snapshot, then rebuilds its index, which must equal the recovered one and read the same;
-// it returns the recovered LSN, or how the store differs.
-func checkEveryAction(h *harness) (uint64, error) {
+// checkEveryAction recovers the crashed store, then rebuilds its index, checking the store's
+// invariants after each; it returns the recovered LSN, or the first violation.
+func checkEveryAction(h *harness) (lsn uint64, err error) {
 	h.t.Helper()
-	h.recoverStore(disklog.ModeOpen)
-	lsn, m := h.acked, h.recovered
-	if msg := modelDiff(h, m, everyActionChunks, 3); msg != "" {
-		return 0, errors.New(msg)
-	}
-	opened := dumpIndex(h.s.Index())
-	if got := h.rebuild(); !slices.Equal(got, opened) {
-		return 0, fmt.Errorf("rebuilt index has %d entries, recovered %d", len(got), len(opened))
-	}
-	if msg := modelDiff(h, m, everyActionChunks, 3); msg != "" {
-		return 0, errors.New("rebuilt: " + msg)
-	}
-	return lsn, nil
+	h.catch = true
+	err = violated(func() {
+		h.recoverStore(disklog.ModeOpen)
+		lsn = h.acked
+		h.rebuild()
+	})
+	return lsn, err
 }
 
 // crashedAt is the workload crashed at action k with landing, recovered with plant.

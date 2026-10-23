@@ -1,8 +1,6 @@
 package chunkstore
 
 import (
-	"fmt"
-	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -16,7 +14,7 @@ var cleanChunks = []core.ChunkID{chunk(1), chunk(2), chunk(3)}
 // cleanerWorkload overwrites and punches blocks of three chunks, now and then a whole chunk or
 // under a new snapshot epoch, with operations pipelined behind a few disk actions at a time, so writes land
 // while the cleaner copies, and merges run as the daemon would run them.
-func cleanerWorkload(h *harness, r *core.Rand, ops int) uint64 {
+func cleanerWorkload(h *harness, r *core.Rand, ops int) {
 	var epoch uint64
 	for range ops {
 		c := cleanChunks[r.Below(uint64(len(cleanChunks)))]
@@ -41,69 +39,43 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) uint64 {
 		}
 	}
 	h.settle()
-	return epoch
 }
 
 // cleanerCrash runs the workload on the small disk, cleaning as it fills, crashes it at a seeded
-// action with a seeded share of unflushed blocks landing, and recovers: the store must hold what
-// the crash oracle holds, live and at every snapshot, with the usage table on the index's counts,
-// and again once it has rebuilt its index, which must equal the opened one; a second rebuild,
-// after the cleaner has moved blocks again, must equal the live index. A quarter of the seeds
-// take the results of the cleaner's jobs late, after other events. It returns the difference, if
-// any.
-func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
+// action with a seeded share of unflushed blocks landing, recovers with plant and rebuilds the
+// index twice, the second time after the cleaner has moved blocks again, checking the store's
+// invariants throughout. A quarter of the seeds take the results of the cleaner's jobs late,
+// after other events. It returns the blocks the cleaner freed before the crash and the first
+// violation.
+func cleanerCrash(t *testing.T, seed uint64, plant plants) (int, error) {
 	r := core.NewRand(seed)
 	h := newHarnessOn(t, cleanConfig(), cleanGeo)
-	h.merging = true
+	h.merging, h.catch = true, true
 	if seed%4 == 3 {
 		h.late = core.NewRand(^seed)
 	}
 	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 	h.crashAt = int(r.Range(200, 4000))
-	var epoch uint64
-	func() {
-		defer func() {
-			if v := recover(); v != nil && v != errCrash {
-				panic(v)
-			}
-		}()
-		epoch = cleanerWorkload(h, r, 700)
-		panic(errCrash)
-	}()
+	if err := violated(func() {
+		crashes(func() {
+			cleanerWorkload(h, r, 700)
+			panic(errCrash)
+		})
+	}); err != nil {
+		return 0, err
+	}
 	freed := h.s.CleanStats().Freed
 	h.disk.CrashRandom(r)
 	h.crashAt = -1
 	h.cfg.CleanFree = 0
-	h.queue, h.out = nil, Output{}
-	h.abandoned, h.held = h.pool.Live(), nil
-	h.s = newStore(h.cfg)
-	h.s.plant = plant
-	if err := h.s.recover(&h.ctx, h.disk.Blocks(), disklog.ModeOpen); err != nil {
-		t.Fatal(err)
-	}
-	h.s.pump(&h.ctx, &h.out)
-	h.take()
-	h.settle()
-	if !h.s.Serving() {
-		t.Fatalf("seed %d: recovery stopped: %v", seed, h.s.Err())
-	}
-	h.checkUsage()
-	m := h.recovered
-	if msg := modelDiff(h, m, cleanChunks, epoch+1); msg != "" {
-		return msg, freed
-	}
-	opened := dumpIndex(h.s.Index())
-	if rebuilt := h.rebuild(); !slices.Equal(rebuilt, opened) {
-		return fmt.Sprintf("rebuilt index has %d entries, opened %d", len(rebuilt), len(opened)), freed
-	}
-	if msg := modelDiff(h, m, cleanChunks, epoch+1); msg != "" {
-		return "after a rebuild: " + msg, freed
-	}
-	live := dumpIndex(h.s.Index())
-	if again := h.rebuild(); !slices.Equal(again, live) {
-		return fmt.Sprintf("a second rebuild has %d entries, the live index after the first %d", len(again), len(live)), freed
-	}
-	return "", freed
+	h.plant = plant
+	return freed, violated(func() {
+		if !h.reopen(disklog.ModeOpen) {
+			t.Fatalf("seed %d: recovery stopped: %v", seed, h.s.Err())
+		}
+		h.rebuild()
+		h.rebuild()
+	})
 }
 
 // [property] Crashes at any action of a workload that the cleaner keeps writing on a small disk
@@ -114,9 +86,9 @@ func cleanerCrash(t *testing.T, seed uint64, plant plants) (string, int) {
 func TestCleanerSurvivesCrashes(t *testing.T) {
 	cleaned := 0
 	seeds.Run(t, 0, 20, func(seed uint64) {
-		msg, freed := cleanerCrash(t, seed, plants{})
-		if msg != "" {
-			t.Fatalf("seed %d: %s", seed, msg)
+		freed, err := cleanerCrash(t, seed, plants{})
+		if err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
 		}
 		if freed > 0 {
 			cleaned++
@@ -131,8 +103,8 @@ func TestCleanerSurvivesCrashes(t *testing.T) {
 // than at the records their pieces take, the cleaner kept rewriting metadata segments into new
 // ones as full after recovery, and the store never settled.
 func TestCleanerCrashSeed329Settles(t *testing.T) {
-	if msg, _ := cleanerCrash(t, 329, plants{}); msg != "" {
-		t.Fatal(msg)
+	if _, err := cleanerCrash(t, 329, plants{}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -140,19 +112,33 @@ func TestCleanerCrashSeed329Settles(t *testing.T) {
 // cuts in two, copying victims of 13 live blocks filled a 16-block segment each, and the cleaner
 // copied after recovery without end.
 func TestCleanerCrashSeed448Settles(t *testing.T) {
-	if msg, _ := cleanerCrash(t, 448, plants{}); msg != "" {
-		t.Fatal(msg)
+	if _, err := cleanerCrash(t, 448, plants{}); err != nil {
+		t.Fatal(err)
 	}
 }
 
 // Planted bug: replay mapping a copy's blocks as a write, whether or not a map still stores them
-// at the source, brings back a block a later write replaced; the crash oracle sees it within 50
-// seeds.
-func TestReplayingCopiesAsWritesFailsTheOracle(t *testing.T) {
+// at the source, brings back a block a later write replaced. A crash of the settled store
+// recovers another index than the owner kept, which invReplay names within 50 seeds.
+func TestReplayingCopiesAsWritesBreaksReplay(t *testing.T) {
 	for seed := range uint64(50) {
-		if msg, _ := cleanerCrash(t, seed, plants{replayCopyAsWrite: true}); msg != "" {
-			return
+		h := newHarnessOn(t, cleanConfig(), cleanGeo)
+		h.merging, h.catch = true, true
+		cleanerWorkload(h, core.NewRand(seed), 700)
+		if h.s.CleanStats().Freed == 0 {
+			continue
 		}
+		h.disk.Crash(func(int, core.LBA) bool { return false })
+		h.plant = plants{replayCopyAsWrite: true}
+		err := violated(func() { h.reopen(disklog.ModeOpen) })
+		if err == nil {
+			continue
+		}
+		if violationOf(err) != invReplay {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		t.Logf("seed %d: %v", seed, err)
+		return
 	}
-	t.Fatal("50 seeds replayed copies as writes and the crash oracle saw nothing")
+	t.Fatal("50 seeds replayed copies as writes and no recovery broke an invariant")
 }

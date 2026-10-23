@@ -1,11 +1,7 @@
 package chunkstore
 
 import (
-	"encoding/binary"
-	"fmt"
 	"math/rand/v2"
-	"slices"
-	"strings"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -99,40 +95,13 @@ func crashes(f func()) (crashed bool) {
 	return false
 }
 
-// restart crashes the disk with no unflushed block landing and recovers the store on it, which
-// must read as the crash oracle's model.
-func restart(h *harness, w *workload) {
+// restart crashes the disk with no unflushed block landing and recovers the store on it,
+// checking the store's invariants.
+func restart(h *harness) {
 	h.t.Helper()
 	h.crashIf = nil
 	h.disk.Crash(func(int, core.LBA) bool { return false })
 	h.recoverStore(disklog.ModeOpen)
-	if msg := recoveryDiff(h, h.recovered, w.epoch+1); msg != "" {
-		h.t.Fatal(msg)
-	}
-}
-
-// recoveryDiff is modelDiff over the recovery chunks, which also names a chunk the index or the
-// model holds outside them.
-func recoveryDiff(h *harness, m *storeModel, maxEpoch uint64) string {
-	if msg := modelDiff(h, m, recoveryChunks, maxEpoch); msg != "" {
-		return msg
-	}
-	for c := range m.chunks {
-		if !slices.Contains(recoveryChunks, c) {
-			return fmt.Sprintf("the model holds chunk %v outside the workload", c)
-		}
-	}
-	for _, kv := range dumpIndex(h.s.Index()) {
-		k := []byte(kv[0])
-		pool := core.PoolID(binary.BigEndian.Uint32(k))
-		if pool == RecordPool {
-			continue
-		}
-		if c := core.ChunkIDFromBytes([core.ChunkIDSize]byte(k[12:chunkKeySize])); pool != testPool || !slices.Contains(recoveryChunks, c) {
-			return fmt.Sprintf("the index holds chunk %v of pool %d outside the workload", c, pool)
-		}
-	}
-	return ""
 }
 
 // written counts the run pieces and manifests of the records written, and gives the newest
@@ -152,8 +121,8 @@ func written(h *harness) (pieces, manifests int, newest uint64) {
 	return pieces, manifests, newest
 }
 
-// [property] Rebuilding the index from every record header, and recovering it from the manifest's
-// runs plus replay, both give the live index exactly, across restarts. Each of the test's own seeds
+// [property] Recovering the index from the manifest's runs plus replay, and rebuilding it again
+// from them, both give the live index exactly, across restarts (invReplay and invRebuild). Each of the test's own seeds
 // must load runs and replay records at every recovery, and write multi-piece runs, carry runs,
 // merge and cut.
 func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
@@ -161,21 +130,15 @@ func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
 		h := newRecoveryHarness(t)
 		w := &workload{r: rand.New(rand.NewPCG(seed, 7))}
 		carried, unloaded := 0, 0
-		for generation := range 3 {
+		for range 3 {
 			w.run(h, 150)
-			live := dumpIndex(h.s.Index())
-			restart(h, w)
-			if got := dumpIndex(h.s.Index()); !slices.Equal(got, live) {
-				t.Fatalf("seed %d generation %d: the recovered index holds %d entries, the live one %d", seed, generation, len(got), len(live))
-			}
+			restart(h)
 			runs := h.s.Index().Tree().Runs()
 			if runs == 0 || h.recoveredLSN <= h.loaded.LSN {
 				unloaded++
 			}
 			carried = max(carried, runs-1)
-			if got := h.rebuild(); !slices.Equal(got, live) {
-				t.Fatalf("seed %d generation %d: the rebuilt index holds %d entries, the live one %d", seed, generation, len(got), len(live))
-			}
+			h.rebuild()
 		}
 		pieces, manifests, _ := written(h)
 		t.Logf("seed %d: %d manifests of %d run pieces, %d runs carried, %d merges, %d cuts, %d recoveries without runs or replay", seed, manifests, pieces, carried, len(h.merges), w.epoch, unloaded)
@@ -222,15 +185,14 @@ func TestCrashBetweenRunAndManifest(t *testing.T) {
 			t.Fatalf("seed %d: no manifest named a merge step's pieces", seed)
 		}
 		t.Logf("seed %d: lost the manifest at LSN %d, naming %d bytes of a merge step", seed, lost, held)
-		restart(h, w)
+		restart(h)
 		if h.loaded.IsNone() || h.loaded.LSN >= lost {
 			t.Fatalf("seed %d: recovered from manifest %+v, not one before the manifest at LSN %d no header named", seed, h.loaded, lost)
 		}
 		w.run(h, 40)
-		live := dumpIndex(h.s.Index())
-		restart(h, w)
-		if got := dumpIndex(h.s.Index()); h.loaded.LSN <= lost || !slices.Equal(got, live) {
-			t.Fatalf("seed %d: the index recovered from manifest %+v holds %d entries, the live one %d", seed, h.loaded, len(got), len(live))
+		restart(h)
+		if h.loaded.LSN <= lost {
+			t.Fatalf("seed %d: recovered from manifest %+v, not one after the manifest at LSN %d", seed, h.loaded, lost)
 		}
 	})
 }
@@ -266,7 +228,6 @@ func TestAbsentOnlyChunkRecovers(t *testing.T) {
 		}
 		w := &workload{r: rand.New(rand.NewPCG(0, 10)), epoch: 1}
 		for restarts := 0; ; restarts++ {
-			checkModel(t, h, h.recovered, []core.ChunkID{c}, 2)
 			if got, ok := h.s.Index().Chunk(testPool, c); !ok || got != (Chunk{Epoch: 1}) {
 				t.Fatalf("crash at action %d, restart %d: chunk %v entry %+v %v, want frozen absent at epoch 1", k, restarts, c, got, ok)
 			}
@@ -294,13 +255,19 @@ type oracleStats struct {
 
 // crashCycles runs the workload on a store crashed at random actions six times, each unflushed
 // block landing at random, and recovers with plant after each crash; every other recovery is first
-// crashed at its final flush and run again. It returns the first recovery the oracle rejects.
+// crashed at its final flush and run again. It returns the first violation of the store's
+// invariants.
 func crashCycles(t *testing.T, seed uint64, plant plants, st *oracleStats) error {
 	t.Helper()
 	h := newRecoveryHarness(t)
-	h.plant = plant
+	h.plant, h.catch = plant, true
 	w := &workload{r: rand.New(rand.NewPCG(seed, 9))}
 	r := core.NewRand(seed)
+	return violated(func() { crashCycle(t, h, w, r, seed, st) })
+}
+
+// crashCycle runs crashCycles' six crashes and recoveries on h.
+func crashCycle(t *testing.T, h *harness, w *workload, r *core.Rand, seed uint64, st *oracleStats) {
 	for cycle := range 6 {
 		h.crashIf = func(a *core.Action) bool { return a.Kind != core.ActDiskRead && r.Chance(1, 300) }
 		crashes(func() { w.run(h, 120) })
@@ -336,9 +303,6 @@ func crashCycles(t *testing.T, seed uint64, plant plants, st *oracleStats) error
 			h.recoverStore(disklog.ModeOpen)
 		}
 		m := h.recovered
-		if msg := recoveryDiff(h, m, w.epoch+1); msg != "" {
-			return fmt.Errorf("store recovered to LSN %d: %s", h.recoveredLSN, msg)
-		}
 		st.recoveries++
 		if h.recoveredLSN > acked {
 			st.kept++
@@ -363,7 +327,6 @@ func crashCycles(t *testing.T, seed uint64, plant plants, st *oracleStats) error
 			st.writtenAfterAbsent++
 		}
 	}
-	return nil
 }
 
 // [property] Seeds 0-7, six crashes each at random actions, each unflushed block landing at
@@ -392,8 +355,8 @@ func TestRecoveriesMatchTheCrashOracle(t *testing.T) {
 func TestCrashOracleCatchesLateReplay(t *testing.T) {
 	for seed := range uint64(8) {
 		if err := crashCycles(t, seed, plants{replayLate: true}, &oracleStats{}); err != nil {
-			if !strings.Contains(err.Error(), "the model holds") {
-				t.Fatalf("seed %d: %v names no expected read", seed, err)
+			if violationOf(err) != invAcked {
+				t.Fatalf("seed %d: %v", seed, err)
 			}
 			t.Logf("seed %d: %v", seed, err)
 			return

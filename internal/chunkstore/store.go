@@ -193,6 +193,12 @@ type plants struct {
 	// replay LSN one record too new would (RocksDB #11148); skipped is set once it has.
 	replayLate bool
 	skipped    bool
+	// forgetVersion starts a chunk taken up again at version 0 rather than its newest;
+	// rebuildSkipsFreezes drops the freezes a rebuild replays; punchKeepsHead leaves a punch's
+	// partial first block whole, its old bytes past the punch's start kept.
+	forgetVersion       bool
+	rebuildSkipsFreezes bool
+	punchKeepsHead      bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.
@@ -359,6 +365,9 @@ func (s *Store) Write(ctx *core.Context, r Request, out *Output) {
 // Punch zeroes r.Len bytes at r.Off as a new version; punching the whole chunk deletes it and leaves a tombstone.
 func (s *Store) Punch(ctx *core.Context, r Request, out *Output) {
 	r.Buf = core.NoBuf
+	if s.plant.punchKeepsHead && r.Off%core.BlockSize != 0 && r.Len > core.BlockSize {
+		r.Off, r.Len = r.Off+core.BlockSize-r.Off%core.BlockSize, r.Len-(core.BlockSize-r.Off%core.BlockSize)
+	}
 	if ok := s.admit(ctx, r, opPunch, out); ok {
 		s.pump(ctx, out)
 	}
@@ -440,7 +449,7 @@ func (s *Store) chunkSlot(c core.ChunkID) int32 {
 	cs := &s.chunks[i]
 	cs.live, cs.id, cs.pending, cs.waiting = true, c, cs.pending[:0], cs.waiting[:0]
 	cs.version, cs.epoch = 0, 0
-	if ch, ok := s.ix.Chunk(s.cfg.Pool, c); ok {
+	if ch, ok := s.ix.Chunk(s.cfg.Pool, c); ok && !s.plant.forgetVersion {
 		cs.version, cs.epoch = ch.Version, ch.Epoch
 	}
 	s.chunkOf[c] = i
@@ -1074,6 +1083,9 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 		if ev.LSN > s.replayLSN && s.plant.replayLate && !s.plant.skipped && slices.ContainsFunc(ev.Entries, func(e disklog.Entry) bool { return e.Kind != disklog.EntryBlob }) {
 			s.plant.skipped = true
 			return
+		}
+		if s.plant.rebuildSkipsFreezes && s.rebuilt {
+			ev.Entries = slices.DeleteFunc(ev.Entries, func(e disklog.Entry) bool { return e.Kind == disklog.EntryFreeze })
 		}
 		if ev.LSN > s.replayLSN {
 			if err := s.ix.Apply(ev); err != nil {

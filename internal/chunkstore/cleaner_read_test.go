@@ -22,7 +22,7 @@ func TestAReadIssuedBeforeAnOverwriteNeverReadsTheReusedVictim(t *testing.T) {
 }
 
 func testAHeldReadKeepsItsVictim(t *testing.T, kill bool) {
-	h, o := primed(t)
+	h := primed(t)
 	h.freeEmpty()
 	log := h.s.Log()
 	var x uint32
@@ -67,7 +67,7 @@ func testAHeldReadKeepsItsVictim(t *testing.T, kill bool) {
 	h.s.cl.tried = false
 	r := core.NewRand(3)
 	for range 500 {
-		overwrite(h, o, r, []core.ChunkID{chunk(3)}, 64)
+		overwrite(h, r, []core.ChunkID{chunk(3)}, 64)
 	}
 	if e, _ := h.s.Index().Lookup(testPool, c, b); e.BlockLBA(b) >= lo && e.BlockLBA(b) < hi {
 		t.Fatal("the block is still in the victim")
@@ -81,7 +81,7 @@ func testAHeldReadKeepsItsVictim(t *testing.T, kill bool) {
 		t.Fatalf("the read of block %d of %v returned other bytes", b, c)
 	}
 	for i := 0; h.seqOf[x] == seq && i < 500; i++ {
-		overwrite(h, o, r, []core.ChunkID{chunk(3)}, 64)
+		overwrite(h, r, []core.ChunkID{chunk(3)}, 64)
 	}
 	if h.seqOf[x] == seq {
 		t.Fatalf("segment %d was not freed once its read completed", x)

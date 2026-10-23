@@ -13,8 +13,8 @@ import (
 
 // heldJob runs the cleaner of a store primed with cfg until it hands out a job, which the harness
 // holds, and returns it with the victim it copies.
-func heldJob(t *testing.T, cfg Config) (*harness, *byteOracle, *CleanJob, uint32) {
-	h, o := primedWith(t, cfg)
+func heldJob(t *testing.T, cfg Config) (*harness, *CleanJob, uint32) {
+	h := primedWith(t, cfg)
 	h.hold = true
 	h.s.cfg.CleanFree = 100
 	h.readNow(chunk(1), 0, 1)
@@ -22,7 +22,7 @@ func heldJob(t *testing.T, cfg Config) (*harness, *byteOracle, *CleanJob, uint32
 		t.Fatal("the cleaner handed out no job")
 	}
 	j := h.held[0]
-	return h, o, j, victimOf(t, h, j)
+	return h, j, victimOf(t, h, j)
 }
 
 // victimOf is the victim the store's pass holding job j copies.
@@ -71,11 +71,12 @@ func dropLate(t *testing.T, h *harness, j *CleanJob) {
 func TestTheOwnerChecksNoBlockItCopies(t *testing.T) {
 	cfg := cleanConfig()
 	cfg.Log.Check = false
-	h, _, j, _ := heldJob(t, cfg)
+	h, j, _ := heldJob(t, cfg)
 	if st := h.s.CleanStats(); st.Copied != 0 {
 		t.Fatalf("the store copied with its job out: %+v", st)
 	}
 	pc := j.pieces[0]
+	h.inv.Off(invReads)
 	h.pool.Bytes(pc.buf)[100] ^= 0xff
 	h.held = h.held[1:]
 	h.s.InstallClean(&h.ctx, j, &h.out)
@@ -97,7 +98,7 @@ func TestTheOwnerChecksNoBlockItCopies(t *testing.T) {
 // A job whose result comes back while the store rebuilds its index is dropped with its buffers,
 // and the rebuilt store cleans and reads as before.
 func TestALateCleanJobDuringARebuildIsDropped(t *testing.T) {
-	h, o, j, _ := heldJob(t, cleanConfig())
+	h, j, _ := heldJob(t, cleanConfig())
 	h.s.rebuilt = false
 	h.s.indexBroken(&h.ctx, lsm.ErrCheck, &h.out)
 	h.s.pump(&h.ctx, &h.out)
@@ -113,13 +114,13 @@ func TestALateCleanJobDuringARebuildIsDropped(t *testing.T) {
 	if held := h.pool.Live(); held != h.own {
 		t.Fatalf("the store holds %d pool buffers, want its log's %d", held, h.own)
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }
 
 // A job from before a rebuild that comes back once the rebuilt store's cleaner has handed out a
 // job for the same victim is dropped with its buffers, leaving the new job to copy it.
 func TestALateCleanJobForAVictimTakenAgainIsDropped(t *testing.T) {
-	h, o, j, victim := heldJob(t, cleanConfig())
+	h, j, victim := heldJob(t, cleanConfig())
 	old := slices.Clone(h.held)
 	h.s.rebuilt = false
 	h.s.indexBroken(&h.ctx, lsm.ErrCheck, &h.out)
@@ -145,12 +146,12 @@ func TestALateCleanJobForAVictimTakenAgainIsDropped(t *testing.T) {
 	if held := h.pool.Live(); held != h.own {
 		t.Fatalf("the store holds %d pool buffers, want its log's %d", held, h.own)
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }
 
 // A job whose result comes back after a failed disk stopped the store is dropped with its buffers.
 func TestALateCleanJobAfterAStopIsDropped(t *testing.T) {
-	h, _, j, _ := heldJob(t, cleanConfig())
+	h, j, _ := heldJob(t, cleanConfig())
 	h.disk.Inject(sim.Fault{Effect: sim.FailIO, When: sim.OnKind(core.ActDiskFsync)})
 	h.write(chunk(1), 0, fill(core.BlockSize, 1), 0)
 	h.settle()
@@ -163,7 +164,7 @@ func TestALateCleanJobAfterAStopIsDropped(t *testing.T) {
 // A job's Run on a goroutine of its own, while the owner keeps writing, taking and freeing pool
 // buffers, shares nothing with the loop but the pool's Bytes; run it under -race.
 func TestACleanJobRunsOffTheLoop(t *testing.T) {
-	h, o, j, _ := heldJob(t, cleanConfig())
+	h, j, _ := heldJob(t, cleanConfig())
 	done := make(chan struct{})
 	go func() {
 		j.Run(h.pool)
@@ -171,7 +172,7 @@ func TestACleanJobRunsOffTheLoop(t *testing.T) {
 	}()
 	r, chunks := core.NewRand(9), []core.ChunkID{chunk(1), chunk(2)}
 	for range 20 {
-		overwrite(h, o, r, chunks, 64)
+		overwrite(h, r, chunks, 64)
 	}
 	<-done
 	h.held = slices.DeleteFunc(h.held, func(x *CleanJob) bool { return x == j })
@@ -182,5 +183,5 @@ func TestACleanJobRunsOffTheLoop(t *testing.T) {
 	if st := h.s.CleanStats(); st.Copied == 0 || st.Quarantined != 0 {
 		t.Fatalf("stats %+v", st)
 	}
-	o.check(t, h, 0, 63, 0)
+	h.holds()
 }

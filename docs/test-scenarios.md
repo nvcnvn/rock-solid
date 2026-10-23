@@ -2639,14 +2639,13 @@ chunk at every freeze, for that freeze's cut and the earlier cuts no earlier fre
 version the freeze names, so it states what a snapshot reads rather than sharing the index's rule
 for a version frozen twice.
 
-- After every recovery of the recovery tests ([Index recovery tests on the
-  Store](#index-recovery-tests-on-the-store)) and the property below, the recovered LSN must lie in
-  the oracle's window, and the recovered store must read as the model at that LSN: each chunk's
-  entry, and every block the model or the index holds of each chunk, live and as the snapshot of
-  every epoch up to one past the newest cut reads it through `LookupAt` and the disk. The index
-  must pass its own `Check`, which every chunkstore test's model check runs, and neither the index
-  nor the model may hold a chunk outside the workload. A recovery that invents a chunk, or counts
-  one more block against a record than its maps refer to, fails on seed 0's first recovery.
+- After every recovery of a store under the crash oracle, the [invariant
+  checker](#invariant-checker) requires that the recovered LSN lie in the oracle's window and that
+  the recovered store read as the model at that LSN: each chunk's entry, and every block the model
+  or the index holds of each chunk, live and as the snapshot of every epoch up to one past the
+  newest cut reads it through the map `FrozenAt` picks and the disk. The index must pass its own
+  `Check`, and hold no chunk the model does not. A recovery that invents a chunk, or counts one
+  more block against a record than its maps refer to, fails on seed 0's first recovery.
 - [property] `TestRecoveriesMatchTheCrashOracle`: seeds 0-7, 200 in `scripts/seeds.sh`, six
   crashes each at a random write or flush, each unflushed block landing at random, of the recovery
   tests' workload, so checkpoints, merges and freezes, absent ones among them, run between them.
@@ -2665,35 +2664,61 @@ for a version frozen twice.
 
 ## Invariant checker
 
-Each invariant is registered with the checker, checked after every step of every seed, and reports
-its name, the seed and the step. Each has a planted violation, a one-line bug in a copy of the
-package, that must trip it on at least one seed of 20; the fixed code trips none over the same
-seeds. Open: the checker's cost per step and whether some invariants run every n steps.
+A run keeps its invariants in one registry, `sim.Invariants`: `Register(name, check)` adds one,
+`Off(name)` turns one off for a test that breaks it on purpose, such as one that damages a block
+on disk, and `Check` runs the rest in the order registered and returns the first broken one as a
+`*sim.Violation` carrying its name and what its check found. A check either compares state, or
+reports a violation an event recorded when it happened, such as a version acknowledged twice.
 
-| Invariant (phase 1) | Planted violation that must trip it |
-| --- | --- |
-| Acknowledged writes are readable, and no read returns a version later lost | Group commit reporting a round durable when an earlier round's write completes (the seed-1 bug), then a crash |
-| No two writes of a chunk get one version | A restarted ChunkStore taking a chunk's next version from its runs, not its runs plus replay |
-| Every read equals a byte-range oracle of the acknowledged writes and punches applied in version order, live and at every snapshot | A partial block merged against the committed version instead of the newest ordered one (wrong on every seed in the sub-block writes spike); a chunk's first write after a cut with no absent freeze (35 of 50 seeds in the chunk epochs spike) |
-| Punched ranges read zeros | A punch whose partial first block is not merged, so the old bytes past the punch start stay |
-| Every cleaner pass frees more segments than it fills | The net-gain guard removed, or age uncapped (the cleaner spike livelocked: 1,000 passes without gaining a free segment) |
-| A cleaner move never replaces a write that landed during cleaning | A move applied without checking that the map still points at its source |
-| No segment is reused while it holds a live block, or a piece, run piece or record that the newest manifest named by a durable segment header needs (a record after its replay points) | Allocation that takes a segment the usage table lists as used with live blocks; a cleaner that judges what is needed by the newest durable manifest, which no segment header names yet |
-| After every recovery each chunk segment's live count in the usage table equals the blocks the index's records there refer to, and the log opens its next segment past every open sequence a segment header of this log on disk holds, so open sequences stay unique and increasing | `NextSeq` taken from the log's next sequence number when the checkpoint begins, counting a segment a round in flight opened (the random-crash property fails at seed 1 in the [log segments study](../studies/log-segments/)); recovery resuming at the newest header's open sequence, not one past it, so the next segment opened shares it and replay reads the two out of order (`TestCleanerSurvivesCrashes` and the store's recovery tests fail at their first recovery; the log's random-crash property loses acknowledged records) |
-| A disk full except for its reserve still finishes a checkpoint, a merge step and a cleaner pass, and the bytes held beyond the manifests never exceed the reserve | A reserve sized without the merge-workers term, so a checkpoint during a merge fails with NoSpace; a merge step that installs its output only at the end, so the bytes held exceed the reserve |
-| No ordinary write fails with `NoSpace` while the cleaner has a victim | Group commit failing held items with NoSpace as soon as only the reserve is free, without asking the owner whether the cleaner has a victim |
-| A rebuilt chunk index equals the one recovered from its manifest | A rebuild that skips freeze entries |
-| A chunk's live map never holds two entries for one block, with consistent record counts (`chunkstore.(*Index).Check`) | A trim that shortens the old extent but never splits it; a record count not lowered on trim |
-| Replay maps every copy entry exactly where the owner applied its move, record counts included | Replay applying a copy entry as a plain write (maps block 0 back to v1, as in the Cleaner section's copy entries in replay) |
+The chunk store's harness registers the data invariants below, most specific first, so a bug that
+breaks several is named by the one closest to it. It checks them at the end of every settle, when
+no action is queued, so after every recovery and every rebuild; `subBlockRun` checks them after
+every step. A failure names the invariant and the action count, and `seeds.Run` adds the command
+that replays the seed. A settle compares the reads only of the chunks a change was acknowledged
+on, or whose maps moved, since the last check; the first check after a recovery, and one a test
+asks for (`holds`), compare every chunk. With the registry the package's eight slowest tests take
+119 s against 106 s without it, the slot tests up to 50% longer.
 
-- The byte-range oracle keeps each chunk's bytes as the acknowledged writes and punches, applied in
-  version order, left them, live and per snapshot epoch; it is a plain model, not the index.
+| Invariant (phase 1) | How the harness checks it | Planted violation and what it trips |
+| --- | --- | --- |
+| No two writes of a chunk get one version | Each acknowledged write or punch carries a version above the chunk's last acknowledged one, or, after a recovery, the crash oracle's model's | A chunk taken up again at version 0 instead of its newest (`forgetVersion`): the second write of a chunk (`TestPlantedBugsBreakTheirInvariants`) |
+| A rebuilt chunk index equals the one recovered from its manifest | A rebuild started on a settled store, as a failed run check starts one, and a recovery replaying every record header after a crash of a settled store, each finish with the index the store held | A rebuild that skips freeze entries (`rebuildSkipsFreezes`): a write after a cut, then a rebuild (`TestPlantedBugsBreakTheirInvariants`) |
+| Replay maps every copy entry exactly where the owner applied its move, record counts included | A recovery after a crash of a settled store, nothing queued, finishes with the index the store held, every map and record count | Replay applying a copy entry as a plain write (`replayCopyAsWrite`): seed 2 of 50 of the cleaner workload crashed once settled (`TestReplayingCopiesAsWritesBreaksReplay`) |
+| A chunk's live map never holds two entries for one block, and the record counts hold | `chunkstore.(*Index).Check` on the serving store's index | Planted by hand: a record count not lowered on trim trips `TestSubBlockWrites` at seed 0's fourth action and `TestRecoveryAndRebuildEqualLiveIndex` at its first settle |
+| Acknowledged writes are readable, and no read returns a version later lost | After a recovery, until the next write or punch: the recovered LSN lies in the crash oracle's window, the store reads as the oracle's model at that LSN, each chunk's entry and every block the model or the index holds, live and at every snapshot epoch, and the index holds no chunk the model does not ([Chunk index under the crash oracle](#chunk-index-under-the-crash-oracle)) | Replay leaving out the first record past the replay LSN that maps blocks (`replayLate`): seed 0 of `TestCrashOracleCatchesLateReplay`; replay applying copies as writes trips it in `TestCrashAtEveryActionCatchesReplayingCopiesAsWrites` |
+| Punched ranges read zeros | Every byte an acknowledged punch cleared, and no later acknowledged write wrote, reads zero live | A punch whose partial first block is left whole, its old bytes past the punch start kept (`punchKeepsHead`, `TestPlantedBugsBreakTheirInvariants`) |
+| Every read equals a byte-range oracle of the acknowledged writes and punches applied in version order, live and at every snapshot | Every block a map or the oracle holds of each chunk checked, live and at every epoch up to one past the newest cut, read from the disk where the index maps it | A partial block merged against the committed version instead of the newest ordered one (`mergeCommitted`): every one of seeds 0 to 19 of `TestSubBlockWrites` |
+
+- The byte-range oracle is a plain model, not the index: the harness applies each write and punch
+  the store answers OK, with the bytes the request sent, in the order the replies come, and keeps
+  each snapshot epoch's blocks as the last change before its cut left them. After a recovery it
+  takes the crash oracle's model, which also holds what the recovery kept of the changes in
+  flight; a crash with actions queued and no crash oracle leaves it unknown, and the read
+  invariants skip the rest of that run.
+- The tests that ran these checks on their own now leave them to the registry: the crash at
+  every action sweeps, the crash oracle and recovery properties, `TestCleanerSurvivesCrashes`,
+  the cleaner and event tests and `subBlockRun`. Unit tests of a bare `Index` still call its
+  `Check` and compare rebuilt indexes themselves, outside any harness.
+
+Phase 1 invariants still checked by their own tests, to join the registry:
+
+| Invariant (phase 1) | Checked today by | Planted violation that must trip it |
+| --- | --- | --- |
+| Every cleaner pass frees more segments than it fills | The net-gain guard's tests: `TestAPassTakesTheFourBestVictimsThatGainSpace`, `TestCleanerKeepsAFullDiskWriting`, `TestTheGuardChargesTheIndexEntriesOfMoves` | The net-gain guard removed, or age uncapped (the cleaner spike livelocked: 1,000 passes without gaining a free segment) |
+| A cleaner move never replaces a write that landed during cleaning | `TestCopyAppliesWhereAMapStillPointsAtTheSource`, and the data invariants above under `TestCrashAtEveryActionWithCleaning`, whose writes land while the copies are out | A move applied without checking that the map still points at its source |
+| No segment is reused while it holds a live block, or a piece, run piece or record that the newest manifest named by a durable segment header needs (a record after its replay points) | The harness's usage check after every settle (each chunk segment's live count equals the blocks the index's records there refer to), `TestQuarantinedSegmentsAreNeverReused` and the log's recovery tests of freed and reused segments | Allocation that takes a segment the usage table lists as used with live blocks; a cleaner that judges what is needed by the newest durable manifest, which no segment header names yet |
+| After every recovery the log opens its next segment past every open sequence a segment header of this log on disk holds, so open sequences stay unique and increasing | The store harness's open-sequence check at the end of every recovery, and the log's `NextSeq` tests | `NextSeq` taken from the log's next sequence number when the checkpoint begins, counting a segment a round in flight opened (the random-crash property fails at seed 1 in the [log segments study](../studies/log-segments/)); recovery resuming at the newest header's open sequence, not one past it, so the next segment opened shares it and replay reads the two out of order (`TestCleanerSurvivesCrashes` and the store's recovery tests fail at their first recovery; the log's random-crash property loses acknowledged records) |
+| A disk full except for its reserve still finishes a checkpoint, a merge step and a cleaner pass, and the bytes held beyond the manifests never exceed the reserve | `TestCheckpointFinishesInTheReserve`, `TestMergeStepFinishesInTheReserve`, `TestAPassFinishesOnADiskFilledToItsReserve`, `TestCrashAtEveryActionInTheReserve`, and the harness's bound on the run bytes a merge worker's lane holds beyond the manifests | A reserve sized without the merge-workers term, so a checkpoint during a merge fails with NoSpace; a merge step that installs its output only at the end, so the bytes held exceed the reserve |
+| No ordinary write fails with `NoSpace` while the cleaner has a victim | `TestCleanerWriteAmplification`, the write admission runs and `TestWritesFailOnlyWhenNoVictimGainsSpace` | Group commit failing held items with NoSpace as soon as only the reserve is free, without asking the owner whether the cleaner has a victim |
+
 - Open: the design's invariant "a frozen version is never dropped, and the cleaner never frees a
   block, while the live version, a snapshot or an unflattened clone needs it" applies in phase 1,
   since freezes and the cleaner exist, but is not in the checklist's phase 1 list. Planted violation:
   live counts that leave out frozen maps' blocks, so a segment holding only snapshot blocks is freed.
 - Open: how the acknowledged-write invariant treats writes a misdirected-write fault destroyed (see
   Simulated disk).
+- Open: the disk log's harness keeps its crash oracle checks of its own; whether its tests join a
+  registry of their own with the part of the table above they cover.
 
 ## History recorder
 
