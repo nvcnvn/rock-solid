@@ -214,7 +214,7 @@ func (h *harness) take() {
 		if _, dup := h.replies[r.ID]; dup {
 			h.t.Fatalf("request %d answered twice", r.ID)
 		}
-		if _, ok := h.changes[r.ID]; ok && errors.Is(r.Err, disklog.ErrNoSpace) {
+		if errors.Is(r.Err, disklog.ErrNoSpace) {
 			h.noSpace(r.ID)
 		}
 		h.replies[r.ID] = r

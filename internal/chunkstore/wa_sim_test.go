@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,12 +23,15 @@ import (
 // the net-gain guard lets victims of a 4 MiB segment pass up to 914 of 1,023 blocks live, 89.35%;
 // 128 KiB records let 930 pass, 90.9%, yet measured worse, 5.78 at 80% full against 5.09, and
 // ran out of space sooner at 90%. A checkpoint falls every 4 MiB of log, the cleaner streams spike's stand-in for 64 MiB on a 16 GiB disk. check turns
-// on the store's and the log's invariant checkers.
+// on the store's and the log's invariant checkers, cleanFree sets the store's clean_free, and
+// plant plants bugs in the store.
 type waRun struct {
-	geo   disklog.Geometry
-	fill  float64
-	warm  float64
-	check bool
+	geo       disklog.Geometry
+	fill      float64
+	warm      float64
+	check     bool
+	cleanFree int
+	plant     plants
 }
 
 // waResult is what the measured capacity saw: the user blocks acknowledged, the blocks the disk
@@ -50,16 +54,18 @@ const (
 	waFillBlocks = 32
 )
 
-func (r waRun) run(t *testing.T, seed uint64) waResult {
+func (r waRun) run(t testing.TB, seed uint64) waResult {
 	t.Helper()
 	cfg := testConfig()
 	cfg.Check, cfg.Log.Check = r.check, r.check
 	cfg.Log.NoReserve = false
+	cfg.CleanFree = r.cleanFree
 	cfg.Log.MaxRecordBytes = 256 << 10
 	cfg.Log.MaxReplayBytes = 4 << 20
 	cfg.Log.CompactionStepBytes = uint64(r.geo.SegmentBlocks) * core.BlockSize
 	h := newHarnessOn(t, cfg, r.geo)
 	h.merging, h.light, h.timed = true, true, true
+	h.s.plant = r.plant
 	rng := core.NewRand(seed)
 	blocks := uint64(r.fill*float64(r.geo.DiskBlocks())) / core.BlocksPerChunk * core.BlocksPerChunk
 	data := make([]byte, waFillBlocks*core.BlockSize)
@@ -165,6 +171,42 @@ func TestWriteAmplificationMetricEqualsTheMeasuredFigure(t *testing.T) {
 		t.Fatalf("ran out %v, %d blocks copied, %d in the metadata stream", w.ranOut, w.copied, w.meta)
 	}
 	w.checkMetric(t)
+}
+
+// Planted violation: a store that fails writes waiting for room while the cleaner has a victim
+// fails the run on invNoSpace.
+func TestWriteAmplificationRunChecksNoSpace(t *testing.T) {
+	c := &fatalCatcher{TB: t}
+	func() {
+		defer func() {
+			if v := recover(); v != nil && v != errCaught {
+				panic(v)
+			}
+		}()
+		waRun{geo: disklog.Geometry{SegmentBlocks: 256, SegmentCount: 128}, fill: 0.5, warm: 1, cleanFree: -1, plant: plants{noSpaceWithVictim: true}}.run(c, 1)
+	}()
+	if !strings.Contains(c.msg, "failed with NoSpace, with victims") {
+		t.Fatalf("the run ended with %q", c.msg)
+	}
+	t.Log(c.msg)
+}
+
+// fatalCatcher records a Fatal instead of ending the test, unwinding with errCaught.
+type fatalCatcher struct {
+	testing.TB
+	msg string
+}
+
+var errCaught = errors.New("caught")
+
+func (c *fatalCatcher) Fatal(args ...any) {
+	c.msg = fmt.Sprint(args...)
+	panic(errCaught)
+}
+
+func (c *fatalCatcher) Fatalf(format string, args ...any) {
+	c.msg = fmt.Sprintf(format, args...)
+	panic(errCaught)
 }
 
 // Uniform overwrites at 80, 90 and 95% full on a 4 GiB disk of 1,024 segments of 4 MiB, a
