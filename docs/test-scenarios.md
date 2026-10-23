@@ -2639,7 +2639,10 @@ for a version frozen twice.
   Store](#index-recovery-tests-on-the-store)) and the property below, the recovered LSN must lie in
   the oracle's window, and the recovered store must read as the model at that LSN: each chunk's
   entry, and every block the model or the index holds of each chunk, live and as the snapshot of
-  every epoch up to one past the newest cut reads it through `LookupAt` and the disk.
+  every epoch up to one past the newest cut reads it through `LookupAt` and the disk. The index
+  must pass its own `Check`, which every chunkstore test's model check runs, and neither the index
+  nor the model may hold a chunk outside the workload. A recovery that invents a chunk, or counts
+  one more block against a record than its maps refer to, fails on seed 0's first recovery.
 - [property] `TestRecoveriesMatchTheCrashOracle`: seeds 0-7, six crashes each at a random write or
   flush, each unflushed block landing at random, of the recovery tests' workload, so checkpoints,
   merges and freezes, absent ones among them, run between them. The run must reach a recovery that

@@ -117,10 +117,13 @@ func checkModel(t testing.TB, h *harness, m *storeModel, chunks []core.ChunkID, 
 	}
 }
 
-// modelDiff describes the first chunk entry or block where the store differs from the model, or
-// is empty.
+// modelDiff describes how the index fails its own check, or the first chunk entry or block where
+// the store differs from the model, or is empty.
 func modelDiff(h *harness, m *storeModel, chunks []core.ChunkID, maxEpoch uint64) string {
 	ix := h.s.Index()
+	if err := ix.Check(); err != nil {
+		return err.Error()
+	}
 	for _, c := range chunks {
 		got, ok := ix.Chunk(testPool, c)
 		if want, wok := m.chunks[c]; ok != wok || got != want {

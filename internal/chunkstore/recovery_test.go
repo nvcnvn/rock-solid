@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -106,7 +107,33 @@ func restart(h *harness, w *workload) {
 	h.crashIf = nil
 	h.disk.Crash(func(int, core.LBA) bool { return false })
 	h.recoverStore(disklog.ModeOpen)
-	checkModel(h.t, h, h.recovered, recoveryChunks, w.epoch+1)
+	if msg := recoveryDiff(h, h.recovered, w.epoch+1); msg != "" {
+		h.t.Fatal(msg)
+	}
+}
+
+// recoveryDiff is modelDiff over the recovery chunks, which also names a chunk the index or the
+// model holds outside them.
+func recoveryDiff(h *harness, m *storeModel, maxEpoch uint64) string {
+	if msg := modelDiff(h, m, recoveryChunks, maxEpoch); msg != "" {
+		return msg
+	}
+	for c := range m.chunks {
+		if !slices.Contains(recoveryChunks, c) {
+			return fmt.Sprintf("the model holds chunk %v outside the workload", c)
+		}
+	}
+	for _, kv := range dumpIndex(h.s.Index()) {
+		k := []byte(kv[0])
+		pool := core.PoolID(binary.BigEndian.Uint32(k))
+		if pool == RecordPool {
+			continue
+		}
+		if c := core.ChunkIDFromBytes([core.ChunkIDSize]byte(k[12:chunkKeySize])); pool != testPool || !slices.Contains(recoveryChunks, c) {
+			return fmt.Sprintf("the index holds chunk %v of pool %d outside the workload", c, pool)
+		}
+	}
+	return ""
 }
 
 // written counts the run pieces and manifests of the records written, and gives the newest
@@ -234,7 +261,8 @@ func TestAbsentOnlyChunkRecovers(t *testing.T) {
 			for _, m, _ := written(h); m < before+2; _, m, _ = written(h) {
 				w.run(h, 10)
 			}
-			restart(h, w)
+			h.disk.Crash(func(int, core.LBA) bool { return false })
+			h.recoverStore(disklog.ModeOpen)
 		}
 	}
 	t.Fatal("no crash left a chunk frozen absent without its blocks")
@@ -292,7 +320,7 @@ func crashCycles(t *testing.T, seed uint64, plant plants, st *oracleStats) error
 			h.recoverStore(disklog.ModeOpen)
 		}
 		m := h.recovered
-		if msg := modelDiff(h, m, recoveryChunks, w.epoch+1); msg != "" {
+		if msg := recoveryDiff(h, m, w.epoch+1); msg != "" {
 			return fmt.Errorf("store recovered to LSN %d: %s", h.recoveredLSN, msg)
 		}
 		st.recoveries++
