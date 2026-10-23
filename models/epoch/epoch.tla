@@ -640,7 +640,12 @@ Persist(d) ==
 \* blocks no write of the interval ordered before it covers, so the member's
 \* own writes of the interval stay on top; the model keeps the source's
 \* versions up to the kept one under their own numbers, which Content reads
-\* the same way. What the read returns never changes, since the source lists
+\* the same way. It leaves out the recovery write's own version, which the
+\* real write sends only to the members it recovers: the blocks it carries
+\* are the kept version's, which every other member holds, so keeping or
+\* dropping that version leaves every member's bytes as the model has them.
+\* The real write also takes a counter value, which only makes the counter
+\* run out sooner. What the read returns never changes, since the source lists
 \* nothing and a new interval stops the write, so the model takes the read
 \* with the write and lets "at", the newest version the primary had ordered
 \* when it read, be any since it activated. With RecoveryCoversAtRead, the
