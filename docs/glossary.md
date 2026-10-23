@@ -152,7 +152,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Recovery.** Copying data back onto new or returning members until every PG again has its full redundancy. Not to be confused with a disk log's crash recovery.
 
-**Refill, `refill_after`.** Giving a PG a new member on another disk in place of a missing one, after which recovery copies the data onto it. A member that is only down is not missing until it has been down for `refill_after` (10 minutes by default), Ceph's "marked out", or for `degraded_refill_after` (1 minute) when its PG has fallen below `min_live` and so takes no writes; its disk losing its log makes it missing at once. A member peering must wait for anyway is never refilled. The new member counts toward `min_live` while recovery is still copying onto it. See [Failure detection](design.md#epoch-changes-and-failure-detection).
+**Refill, `refill_after`.** Giving a PG a new member on another disk in place of a missing one, after which recovery copies the data onto it. A member that is only down is not missing until it has been down for `refill_after` (10 minutes by default), Ceph's "marked out", or for `degraded_refill_after` (1 minute) when its PG has fallen below `min_live` and so serves no reads or writes; its disk losing its log makes it missing at once. A member peering must wait for anyway is never refilled. The new member counts toward `min_live` while recovery is still copying onto it. See [Failure detection](design.md#epoch-changes-and-failure-detection).
 
 **Rebalancing.** Moving PGs between disks to even out how full they are, for example after a disk is added.
 

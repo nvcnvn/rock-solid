@@ -3876,11 +3876,11 @@ by 1.
 | Down 5 minutes, up, down again 5 minutes | No: the count restarts at each down mark |
 | Down, and its disk then reports a new log ID | At once |
 | Down, and an operator declares its disk lost | At once |
-| Down for 59 s in a `rep2` PG with `min_live` 2 | No; the PG takes no writes meanwhile |
-| Down for 1 minute in a `rep2` PG with `min_live` 2 | Yes, in the next table, since the PG accepts no writes while it waits |
-| Down 5 s (a network hiccup), then up, in a `rep2` PG with `min_live` 2 | No member moves; the PG resyncs the member and takes writes again |
+| Down for 59 s in a `rep2` PG with `min_live` 2 | No; the PG serves no reads or writes meanwhile |
+| Down for 1 minute in a `rep2` PG with `min_live` 2 | Yes, in the next table, since the PG serves no reads or writes while it waits |
+| Down 5 s (a network hiccup), then up, in a `rep2` PG with `min_live` 2 | No member moves; the PG resyncs the member and serves reads and writes again |
 | Down for 1 minute in a `rep2` PG, and the only member live in an interval since the last activated one | No; peering waits for it whether or not a new member joins |
-| A refill member, still recovering, in a `rep2` PG whose other member is live | Counts toward `min_live` from the table that adds it: the PG takes writes once that interval activates, each acknowledged on both members, while recovery copies the older chunks on its missing list |
+| A refill member, still recovering, in a `rep2` PG whose other member is live | Counts toward `min_live` from the table that adds it: the PG serves reads and writes once that interval activates, each acknowledged on both members, while recovery copies the older chunks on its missing list |
 | In `maintenance` for an hour | No; it counts toward `min_live` throughout |
 | Down on a 3-node `rep3` cluster for an hour | No eligible disk on another node; a disk failure on a node with a second disk refills there after 10 minutes |
 
