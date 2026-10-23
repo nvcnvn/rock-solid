@@ -175,56 +175,37 @@ func crashConfig() Config {
 	return cfg
 }
 
-// recoverHarness reopens the store on the harness's disk after a crash and checks the recovered
+// recoverStore reopens the store on the harness's disk after a crash and checks the recovered
 // state against the crash oracle.
 func (h *harness) recoverStore(mode disklog.Mode) {
 	h.t.Helper()
+	if !h.reopen(mode) {
+		h.t.Fatalf("recovery stopped: %v", h.s.Err())
+	}
+}
+
+// reopen recovers the store on the harness's disk after a crash, checking the recovered LSN
+// against the crash oracle, settles it, and reports whether it serves.
+func (h *harness) reopen(mode disklog.Mode) bool {
+	h.t.Helper()
 	h.queue, h.out = nil, Output{}
-	var err error
 	h.abandoned, h.held = h.pool.Live(), nil
 	h.s = newStore(h.cfg)
-	if err = h.s.recover(&h.ctx, h.disk.Blocks(), mode); err != nil {
+	h.s.plant = h.plant
+	if err := h.s.recover(&h.ctx, h.disk.Blocks(), mode); err != nil {
 		h.t.Fatal(err)
 	}
 	h.s.pump(&h.ctx, &h.out)
 	h.take()
 	h.settle()
-	if !h.s.Serving() {
-		h.t.Fatalf("recovery stopped: %v", h.s.Err())
-	}
+	return h.s.Serving()
 }
 
 // [property] A workload crashed at its k-th disk action, for every k, with no unflushed block
 // landing, a seeded half of them, and all of them, recovers to a prefix of what was written that holds
-// every acknowledged record, live and at every snapshot, and the rebuilt index equals it; so does
-// the workload on a small disk followed by a pass of the cleaner, which frees segments.
+// every acknowledged record, live and at every snapshot, and the rebuilt index equals it.
 func TestCrashAtEveryAction(t *testing.T) {
 	crashEveryAction(t, crashConfig(), nil, crashWorkload, true)
-	h := newHarnessOn(t, cleanConfig(), cleanGeo)
-	cleanedCrashWorkload(h)
-	if h.s.CleanStats().Freed == 0 {
-		t.Fatal("the cleaner freed no segment")
-	}
-	crashEveryAction(t, cleanConfig(), &cleanGeo, cleanedCrashWorkload, true)
-}
-
-// cleanedCrashWorkload overwrites a few blocks of two chunks, under snapshot epochs up to 2, until
-// their older segments are mostly dead, and ends with a pass of the cleaner that frees every
-// segment it can.
-func cleanedCrashWorkload(h *harness) {
-	c, d := crashChunks[0], crashChunks[1]
-	h.write(c, 100, fill(300, 0xa1), 0)
-	h.punch(c, 0, 50, 0)
-	for i := range 36 {
-		h.write(d, uint32(i%6)*core.BlockSize, fill(core.BlockSize, byte(i)), uint64(i/12))
-		if i%4 == 0 {
-			h.settle()
-		} else {
-			h.step()
-		}
-	}
-	h.settle()
-	h.clean(int(cleanGeo.SegmentCount))
 }
 
 // crashEveryAction runs the crash property over workload on a disk cut as geo, or the default

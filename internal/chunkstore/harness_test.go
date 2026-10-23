@@ -43,6 +43,14 @@ type harness struct {
 	// executed counts the actions run since format; the step that would run action crashAt panics with errCrash instead.
 	executed int
 	crashAt  int
+	// crashIf, when set, crashes as crashAt does before an oldest queued action it accepts;
+	// failIf, when set, completes with Io action k, counting from 0, if it accepts it; and onStep,
+	// when set, sees action k once the store has taken its completion.
+	crashIf func(a *core.Action) bool
+	failIf  func(k int, a *core.Action) bool
+	onStep  func(k int, a *core.Action)
+	// plant is the bug planted in every store a recovery starts.
+	plant plants
 	// abandoned is the pool buffers left live by stores the harness dropped at a crash, and own
 	// those a settled store holds for its log once formatted.
 	abandoned, own int
@@ -173,7 +181,7 @@ func (h *harness) step() bool {
 		h.runClean(0)
 		return true
 	}
-	if h.executed == h.crashAt {
+	if h.executed == h.crashAt || h.crashIf != nil && h.crashIf(&h.queue[0]) {
 		panic(errCrash)
 	}
 	h.executed++
@@ -196,6 +204,10 @@ func (h *harness) step() bool {
 	}
 	if a.Kind == core.ActDiskWrite && !h.light {
 		h.noteWrite(&a)
+	}
+	if h.failIf != nil && h.failIf(h.executed-1, &a) {
+		io := a.IO
+		h.disk.Inject(sim.Fault{Effect: sim.FailIO, When: sim.Once(func(op sim.DiskOp, _ *core.Rand) bool { return op.IO == io })})
 	}
 	ev, took := h.disk.ExecuteTimed(h.pool, &a)
 	if h.timed {
@@ -244,6 +256,9 @@ func (h *harness) step() bool {
 			continue
 		}
 		h.runClean(i)
+	}
+	if h.onStep != nil {
+		h.onStep(h.executed-1, &a)
 	}
 	return true
 }
