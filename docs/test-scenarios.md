@@ -3011,7 +3011,7 @@ at any time, with one partial write and a restart.
 | Configuration | Nodes | What it holds |
 | --- | --- | --- |
 | `ci-peering` | 3 | Both chunks; lease expiry left open, except that a grantor that answers peering of an interval holds no live grant to that interval's old primary; the plans with membership changes alone |
-| `ci-restarts` | 3 | As `ci-peering`, with the plans that restart a primary or format a disk, under which a decision can stop short of activation |
+| `ci-restarts` | 3 | As `ci-peering`, with the plans that restart a primary or format a disk, under which a decision can stop short of activation, and the maintenance plan with merges, which keeps `ci-peering` within its 5 minutes |
 | `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the four below |
 | `deep-peering` | 4 | `ci-peering`'s and `ci-restarts`' plans, and the unbounded liveness property |
 | `deep-free` | 4 | The free plan, and the unbounded liveness property |

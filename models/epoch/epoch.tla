@@ -1631,13 +1631,14 @@ MaintMerges == Plan(<<Mark(3, "maint"), Mark(3, "up"), Mark(2, "maint")>>, Parti
 \* Two activations and two spare tables, so a report can be folded late.
 LateReport == [Plan(<<Mark(3, "down"), Mark(3, "up")>>, <<>>, {}) EXCEPT !.s = 2]
 
-\* ci-peering checks the plans with membership changes alone, ci-restarts
+\* ci-peering checks the plans with membership changes alone; ci-restarts
 \* those with a restart or a format, under which a decision can stop short of
-\* activation (CanStall).
+\* activation (CanStall), and, to keep ci-peering within 5 minutes, the
+\* maintenance plan with merges.
 PeerPlans ==
     {RemovedAndBack, PrimaryBack, DownBackMoved, MaintKeepsPrimary, PrimaryAway,
-     ReplicaThenPrimary, PrimaryThenMaint, BelowMinLive, MaintMerges, LateReport}
-RestartPlans == {Reformatted, ReplicaThenMaint, Restarted}
+     ReplicaThenPrimary, PrimaryThenMaint, BelowMinLive, LateReport}
+RestartPlans == {Reformatted, ReplicaThenMaint, Restarted, MaintMerges}
 
 \* ci-leases: PG 2's primary is node 2, whose CLOCK_BOOTTIME runs at its raw
 \* rate or 22.6% slow; node 3, its only grantor, runs 4% slow or fast, with
