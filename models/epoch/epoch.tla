@@ -94,7 +94,7 @@ VARIABLES
     pr,       \* [Node -> [PG -> [iv, act, srv, since]]]
     pv,       \* [Node -> [Chunk -> Nat]]: newest version a primary ordered
     pin,      \* [Node -> SUBSET [w, hold]]: client writes a primary holds unordered
-    known,    \* [Node -> Nat]: newest incarnation of the session a primary has seen
+    known,    \* [Node -> [PG -> Nat]]: newest incarnation of the session a primary has seen
     dec,      \* set of [p, k, n, r, kept]: peering decisions
     act,      \* set of [p, k, r]: activated intervals
     \* Data path
@@ -285,7 +285,7 @@ Init ==
               ELSE NoPr]]
     /\ pv = [n \in Node |-> [c \in Chunk |-> 0]]
     /\ pin = [n \in Node |-> {}]
-    /\ known = [n \in Node |-> 0]
+    /\ known = [n \in Node |-> [p \in PG |-> 0]]
     /\ dec = {[p |-> p, k |-> 1, n |-> InitMem[p][1], r |-> 1, kept |-> [c \in Chunk |-> 0]] : p \in PG}
     /\ act = {[p |-> p, k |-> 1, r |-> 1] : p \in PG}
     /\ rm = {}
@@ -422,7 +422,8 @@ Reactive ==
 \* A node adopts a newer table, possibly skipping some. Where a PG's interval
 \* changed under its primary, the primary holds its unordered client writes
 \* and re-peers; if the new interval kept it as primary since the one it
-\* served in, it goes on serving reads of committed versions.
+\* served in, it goes on serving reads of committed versions and keeps its
+\* table of incarnations, which any other change of primary forgets.
 
 AdoptPr(n, p, e) ==
     LET old == pr[n][p]
@@ -439,6 +440,8 @@ Adopt(n, e) ==
     /\ e \in ep[n] + 1..Len(tbl)
     /\ ep' = [ep EXCEPT ![n] = e]
     /\ pr' = [pr EXCEPT ![n] = [p \in PG |-> AdoptPr(n, p, e)]]
+    /\ known' = [known EXCEPT ![n] = [p \in PG |->
+          IF AdoptPr(n, p, e).iv # 0 /\ AdoptPr(n, p, e).since = pr[n][p].since THEN known[n][p] ELSE 0]]
     /\ pin' = [pin EXCEPT ![n] =
           {IF tbl[e][ChunkPG[Writes[x.w].c]].iv = IvAt(n, ChunkPG[Writes[x.w].c])
            THEN x
@@ -446,7 +449,7 @@ Adopt(n, e) ==
              x \in {y \in pin[n] : LET p == ChunkPG[Writes[y.w].c]
                                    IN tbl[e][p].iv = IvAt(n, p) \/ AdoptPr(n, p, e).iv # 0}}]
     /\ UNCHANGED <<ctlVars, dnode, ddisk, fmts, stale, run, rsIv, dlog, miss, persIv, mrecv,
-                   pv, known, dec, act, dataVars, leaseVars, clockVars, raftVars>>
+                   pv, dec, act, dataVars, leaseVars, clockVars, raftVars>>
 
 -----------------------------------------------------------------------------
 \* Peering
@@ -647,9 +650,9 @@ Send(i) ==
        /\ sends' = [sends EXCEPT ![i] = @ + 1]
        /\ IF /\ pr[n][p].iv # 0
              /\ Cur(p) >= pr[n][p].since
-             /\ w.inc = 0 \/ w.inc >= known[n]
+             /\ w.inc = 0 \/ w.inc >= known[n][p]
           THEN /\ pin' = [pin EXCEPT ![n] = @ \cup {[w |-> i, hold |-> 0]}]
-               /\ known' = [known EXCEPT ![n] = Max({@, w.inc})]
+               /\ known' = [known EXCEPT ![n][p] = Max({@, w.inc})]
           ELSE UNCHANGED <<pin, known>>
        /\ UNCHANGED <<ctlVars, nodeVars, pr, pv, dec, act, rm, vers, ackd, dmn, bad,
                       leaseVars, clockVars, raftVars>>
@@ -666,7 +669,7 @@ Die ==
 Fenced(n, x) ==
     LET w == Writes[x.w]
         p == ChunkPG[w.c]
-    IN \/ ~Bug("FenceOnArrivalOnly") /\ w.inc # 0 /\ w.inc < known[n]
+    IN \/ ~Bug("FenceOnArrivalOnly") /\ w.inc # 0 /\ w.inc < known[n][p]
        \/ ~Bug("ReorderAfterOtherPrimary") /\ x.hold # 0 /\ ~KeptPrimary(n, p, x.hold, IvAt(n, p))
 
 \* The primary acknowledges a version to the client once every member live
@@ -734,8 +737,9 @@ Accepts(d, m) ==
     IN IF Bug("CompareMemberLists") THEN UpSeq(m.p, k) = UpSeq(m.p, m.iv)
        ELSE k = m.iv
 
-\* A member logs a chunk's writes in the order its primary sent them; the
-\* last acknowledgment completes the write.
+\* A member logs a chunk's writes in the order its primary sent them,
+\* skipping those it refuses; the last acknowledgment completes the write. A
+\* delivered write stays in the network, so it may arrive again.
 Deliver(m) ==
     LET d == m.to
         logs == [dlog EXCEPT ![d][m.c] = @ \cup {m.v}]
@@ -745,14 +749,14 @@ Deliver(m) ==
        /\ m.v \notin dlog[d][m.c]
        /\ Accepts(d, m)
        /\ \/ Bug("LogOutOfOrder")
-          \/ \A m2 \in rm : (m2.to = d /\ m2.c = m.c /\ m2.from = m.from /\ m2.r = m.r /\ m2.v < m.v)
+          \/ \A m2 \in rm : (/\ m2.to = d /\ m2.c = m.c /\ m2.from = m.from /\ m2.r = m.r
+                              /\ m2.v < m.v /\ Accepts(d, m2))
                               => m2.v \in dlog[d][m.c]
        /\ dlog' = logs
-       /\ rm' = rm \ {m}
        /\ IF [c |-> m.c, v |-> m.v] \notin ackd /\ Acked(r, logs) THEN Ack(r)
           ELSE UNCHANGED <<ackd, wst, bad>>
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, stale, run, rsIv, miss, persIv, mrecv, priVars,
-                      vers, sends, dmn, leaseVars, clockVars, raftVars>>
+                      rm, vers, sends, dmn, leaseVars, clockVars, raftVars>>
 
 -----------------------------------------------------------------------------
 \* Leases with expiry left open (Clocks = FALSE). A grant sets the holder's
@@ -1164,7 +1168,7 @@ RestartState(n) ==
                   IF PrimNode(p, IvAt(n, p)) = n /\ IvAt(n, p) = Cur(p) /\ ~Bug("RestartSameInterval")
                   THEN Cur(p) ELSE reqIv[p]]
     /\ pin' = [pin EXCEPT ![n] = {}]
-    /\ known' = [known EXCEPT ![n] = 0]
+    /\ known' = [known EXCEPT ![n] = [p \in PG |-> 0]]
     /\ mrecv' = [mrecv EXCEPT ![ddisk[n]] = {}]
     /\ rw' = [rw EXCEPT ![n] = Clocks /\ ~Bug("NoRestartWait")]
     /\ rlead' = [rlead EXCEPT ![n] = FALSE]
