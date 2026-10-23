@@ -3585,7 +3585,7 @@ line and in its model's section.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
-| Epoch change | `deep-peering` | [Epoch change model](#epoch-change-model) | 31 | 10,776,861 | 82 min |
+| Epoch change | `deep-peering` | [Epoch change model](#epoch-change-model) | 31 | 11,847,313 | 89 min |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 37,736,534 | 66 min |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 21,444,840 | 33 min |
 
