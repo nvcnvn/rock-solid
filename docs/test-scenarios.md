@@ -3590,6 +3590,7 @@ line and in its model's section.
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
 | Epoch change | `deep-peering` | [Epoch change model](#epoch-change-model) | 31 | 10,776,861 | 82 min |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 37,736,534 | 66 min |
+| Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 21,444,840 | 33 min |
 
 - Each model names the simulator invariant of each property in its own section's property table,
   so this map holds only the configuration results. Open: the checklist has no phase 6 or 7 items
