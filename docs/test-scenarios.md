@@ -3176,7 +3176,8 @@ find a violation of the named property, which is never the property that only re
 rule. A variant that passes means the model is too weak. A row whose property is 1, 2 or 10 runs
 with `ci-leases`'s constants, except the row for reads below `min_live`, whose trace needs no
 clocks; the rest run with `ci-peering`'s, on `ci-restarts`' plans where the trace needs a restart
-or a format. A variant checks only the property it must break.
+or a format. A variant checks only the property it must break; the one for property 12 does so
+under fairness, as `deep-peering` does, on the restart plan alone.
 
 | Rule removed or broken | Property broken | Minimal trace |
 | --- | --- | --- |
@@ -3186,6 +3187,7 @@ or a format. A variant checks only the property it must break.
 | Members compare member lists instead of interval numbers | 4 | [1,2,3] → [1,2] → [1,2,3]; members at interval 3 accept the old write tagged 1 that 3's peering dropped |
 | A disk ID kept across a new log ID | 4 | 1.1 acknowledged on all three; node 3's disk is formatted again and keeps its ID; node 1 is marked down; peering finds disk 3, live in 1, lacking 1.1, and drops it |
 | A restarted primary peers in its old interval | 6 | A write from its previous run is still in a member's socket; the new run's peering drops it and gives its version to the reissue |
+| A restarted primary never asks for a new interval | 12 | PG 2's primary restarts; no table starts a later interval, so it never peers again and the PG never activates |
 | An older version is decided by its own interval's members after a later interval kept it | 4 | Interval 2 keeps a version recovering onto node 1; interval 3 reaches node 1 and a member live in 1 that lacks the version, and 1's rule drops what 2 kept |
 | A primary activates before missing lists are durable | 4 | A member crashes after activation, forgets that it lacks the kept version, and the next peering, reaching it, drops the version |
 | The leader records an activation the primary has only decided | 4 | PG 2: interval 2 replaces member 3 with node 1; primary 2 decides to keep W, still in flight to 3, and the leader records 2 before any member persisted the decision; W completes in interval 1; interval 3 puts 2 in `maintenance`, and node 1, peering from interval 2, finds no member that persisted its decision and drops W |

@@ -1232,7 +1232,8 @@ RestartState(n) ==
     /\ rsIv' = [rsIv EXCEPT ![n] = [p \in PG |->
                  IF PrimNode(p, IvAt(n, p)) = n THEN IvAt(n, p) ELSE rsIv[n][p]]]
     /\ reqIv' = [p \in PG |->
-                  IF PrimNode(p, IvAt(n, p)) = n /\ IvAt(n, p) = Cur(p) /\ ~Bug("RestartSameInterval")
+                  IF /\ PrimNode(p, IvAt(n, p)) = n /\ IvAt(n, p) = Cur(p)
+                     /\ ~Bug("RestartSameInterval") /\ ~Bug("RestartNoAsk")
                   THEN Cur(p) ELSE reqIv[p]]
     /\ pin' = [pin EXCEPT ![n] = {}]
     /\ known' = [known EXCEPT ![n] = [p \in PG |-> 0]]
@@ -1546,7 +1547,7 @@ NoResurrectedWrite ==
 \* 12. Peering settles: every PG eventually activates its current interval,
 \* unless the interval has fewer than min_live live members, a live member's
 \* disk or every live member of an interval peering needs is gone, or the
-\* table bound left a restarted primary without the interval it asked for.
+\* table bound left its primary without the new interval it asked for.
 Settled(p) ==
     LET k == Cur(p)
         n == PrimNode(p, k)
@@ -1555,7 +1556,7 @@ Settled(p) ==
        \/ n = 0
        \/ \E d \in UpIn(p, k) : dnode[d] = 0
        \/ \E i \in NeedIv(p, k, tbl[Len(tbl)][p].la) : \A d \in UpIn(p, i) : dnode[d] = 0
-       \/ rsIv[n][p] >= k
+       \/ reqIv[p] = k
 PeeringSettles == <>[](\A p \in PG : Settled(p))
 
 -----------------------------------------------------------------------------
@@ -1647,6 +1648,8 @@ PeerPlans ==
     {RemovedAndBack, PrimaryBack, DownBackMoved, MaintKeepsPrimary, PrimaryAway,
      ReplicaThenPrimary, PrimaryThenMaint, BelowMinLive, LateReport}
 RestartPlans == {Reformatted, ReplicaThenMaint, Restarted, MaintMerges}
+\* The liveness variant that breaks renewals runs the restart plan alone.
+RestartedPlans == {Restarted}
 
 \* ci-leases: PG 2's primary is node 2, whose CLOCK_BOOTTIME runs at its raw
 \* rate or 22.6% slow; node 3, its only grantor, runs 4% slow or fast, with
