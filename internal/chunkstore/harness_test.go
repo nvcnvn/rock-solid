@@ -91,6 +91,9 @@ type harness struct {
 	timed, light bool
 	// wrote counts the blocks of every disk write run, and wroteMeta those in the metadata stream.
 	wrote, wroteMeta uint64
+	// recoveredLSN is the LSN the last recovery found, and loaded the manifest it loaded.
+	recoveredLSN uint64
+	loaded       disklog.ManifestPos
 }
 
 // advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
@@ -238,6 +241,7 @@ func (h *harness) step() bool {
 			h.t.Fatal(err)
 		}
 		h.recovered, h.acked = m, h.s.Log().DurableLSN()
+		h.recoveredLSN, h.loaded = h.acked, h.s.Log().Manifest()
 	}
 	h.take()
 	h.noteDurable()

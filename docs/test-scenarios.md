@@ -853,20 +853,8 @@ Edge and negative cases:
   writes at commit, a chunk's in version order, with cleaner moves and checkpoints whose replay
   point is its oldest pending write, restarts from the checkpoint's runs plus every record from the
   replay point, and reads every block, live and at every snapshot epoch, as a rebuild does.
-- [property] On a 1 GiB simulated disk (16-block records, a checkpoint every 96 blocks of records,
-  the decode check on), seeds 0-3, three generations of 150 rounds of 1-4 items over 12 chunks
-  (writes of 1-6 blocks, a whole-chunk punch one time in ten, a partial punch two in ten, a freeze
-  one in eight: of the chunk's version, or of version 0, absent, for a chunk not yet written), plus
-  a freeze of version 0 one item in 32 of two chunks never written, with checkpoints and
-  compactions: after each generation a
-  rebuild from every record header, and recovery from the manifest's runs plus replay, both equal
-  the live index and pass its check. Every seed writes multi-piece runs, carries runs, compacts and
-  freezes.
-- A crash once a checkpoint's manifest record is durable but before any segment header names it,
-  with a compaction's result among its runs, recovers from the previous manifest plus replay to the
-  live index, and the next checkpoint's restart does too (seeds 0-3).
-- Every recovery in these tests is also checked against the crash oracle's block model ([Chunk
-  index under the crash oracle](#chunk-index-under-the-crash-oracle)).
+- Recovery and rebuild of the index over the disk log run through the Store: [Index recovery tests
+  on the Store](#index-recovery-tests-on-the-store).
 - Benchmarks: a lookup among 20,000 one-block extents over 64 chunks, and applying a one-block write.
 
 ## Range removals
@@ -1387,14 +1375,41 @@ oracle live and at every snapshot; punched ranges read zeros; no two durable wri
 share a version; a live map never holds two entries for one block (`Index.Check`); a rebuilt
 index equals the recovered one. Faults: crash at every action of a workload with unaligned
 writes, a cut, a whole-chunk write and a checkpoint, with no unflushed block landing, a seeded
-half and all of them, each recovery checked against the crash oracle with a block model over
-every block either holds, then rebuilt; unaligned writes pipelined to one block; a merge base failing its checksum; a
+half and all of them, each recovery checked against the crash oracle's model, each chunk's entry
+and every block either holds, then rebuilt; unaligned writes pipelined to one block; a merge base failing its checksum; a
 failed base read; a failed flush.
 
 Performance: `Write` of a whole block, `Write` of one byte with its base in a pending write, and
 `Read` of one block report 0 allocations per operation. A merge against a pending write copies
 into the write's own buffer; one against the disk reads the block and its record header block.
 The per-loop cache of recently merged blocks waits for a measurement and is not part of this item.
+
+## Index recovery tests on the Store
+
+The chunk index's recovery tests run through `chunkstore.Store` requests, so recovery, checkpoints
+and restores are the Store's own. Their workload, on a 1 GiB simulated disk with 16-block records,
+a checkpoint due every 96 blocks of records and merges running as the daemon runs them, sends
+rounds of 1-4 requests over 14 chunks and settles after each: a write of 1 byte to 6 blocks within
+a chunk's first 64 blocks, unaligned one time in two, a punch of such a range two times in ten, or
+a punch of the whole chunk one in ten; one request in 40 first cuts, so the next write of each
+chunk freezes it, absent for a chunk with no version, and two of the chunks are first written
+after the first cut. Every recovery is checked against the crash oracle ([Chunk index under the
+crash oracle](#chunk-index-under-the-crash-oracle)).
+
+- [property] Seeds 0-3, three generations of 150 rounds (`TestRecoveryAndRebuildEqualLiveIndex`):
+  after each, recovery from the manifest's runs plus replay, and then a rebuild from every record
+  header, as a failed run check starts, both equal the live index. Every recovery loads runs and
+  replays records past its manifest, and every seed writes multi-piece runs, carries runs, merges
+  and cuts.
+- A crash once a checkpoint's manifest record is durable but before any segment header names it,
+  with a merge's output among the runs, recovers from an earlier manifest plus replay, and the
+  next checkpoint's restart recovers from a later one to the live index (seeds 0-3,
+  `TestCrashBetweenRunAndManifest`).
+- A chunk frozen absent and never written, which a Store write leaves only when a crash or a failure
+  parts its freeze from its blocks, recovers by replay and then from a run with its entry at
+  version 0 (`TestAbsentOnlyChunkRecovers`). The test hands the log the freeze itself.
+- Planted bugs: replay that drops block-range punches fails these tests and the crash oracle's
+  property, as it fails `TestCrashAtEveryActionWithCleaning`.
 
 ## Segment reserve
 
@@ -2522,8 +2537,9 @@ every acknowledged record, and Corrupt never occurs (Pebble `TestErrors`, `TestD
   of the whole block and a cut land on the first block they move. N is 201.
   - For every k in 0..N, the three crashes at k; for every disk action k below N, action k fails
     with Io (a write, a flush or a read), the workload runs on to its end and the disk crashes the
-    three ways. Each recovery reads, live and at every snapshot epoch, as the oracle's block model,
-    and a rebuild of its index, as a failed run check starts, equals it and reads the same.
+    three ways. Each recovery reads, chunk entries and blocks live and at every snapshot epoch, as
+    the oracle's model, and a rebuild of its index, as a failed run check starts, equals it and
+    reads the same.
   - A failed write or flush leaves the log failed with its durable LSN where it was at the
     failure. Before every crash, each write or punch the store answered OK has a record, the first
     carrying its chunk at the reply's version, at or below the log's durable LSN.
@@ -2550,7 +2566,7 @@ every acknowledged record, and Corrupt never occurs (Pebble `TestErrors`, `TestD
   records written since, in LSN order (RocksDB's crash test: expected state plus trace). It is
   generic over the record and the model: in phase 1 the disk log's tests keep a block map standing
   in for the chunk index, the atomic-flush scenario a list of entries per owner, and the chunk
-  index's tests a block model of the real `Index` ([Chunk index under the crash
+  store's tests a model of each chunk's entry and block bytes ([Chunk index under the crash
   oracle](#chunk-index-under-the-crash-oracle)); from phase 4 each shard replica on the disk joins
   the model.
 - After a crash, recovery reports an LSN r. Required: acked ≤ r ≤ acked + in flight. The oracle
@@ -2602,30 +2618,31 @@ every acknowledged record, and Corrupt never occurs (Pebble `TestErrors`, `TestD
 
 ## Chunk index under the crash oracle
 
-The chunkstore tests' `node` runs the real `Index` over the disk log on a simulated disk. It hands
-`sim.Oracle` each round as its write goes to the disk, decoded from the bytes written with the
-open sequence of the write that opened its segment, and each `Durable` LSN. The oracle's model is a
-plain block model: per chunk its entry, and block by block its live map and frozen maps.
+The chunkstore tests run the real `Index` inside `chunkstore.Store` over the disk log on a
+simulated disk. Their harness hands `sim.Oracle` each round as its write goes to the disk, decoded
+from the bytes written with the open sequence of the write that opened its segment, and each
+`Durable` LSN. The oracle's model is plain: per chunk its entry, and each written block's bytes,
+live and in each frozen version, applying entries in LSN order as replay does.
 
-- After every recovery the node's tests run (`TestRecoveryAndRebuildEqualLiveIndex`,
-  `TestCrashBetweenRunAndManifest` and the property below), the recovered LSN must lie in the
-  oracle's window, and the recovered `Index` must read as the model at that LSN: each chunk's
-  entry, the frozen version `FrozenAt` gives at every epoch up to one past the newest freeze, and
-  every block of every chunk the workload writes or freezes, live and in every frozen version.
-  Neither the index nor the model may hold another chunk, and `Check` must pass too.
+- After every recovery of the recovery tests ([Index recovery tests on the
+  Store](#index-recovery-tests-on-the-store)) and the property below, the recovered LSN must lie in
+  the oracle's window, and the recovered store must read as the model at that LSN: each chunk's
+  entry, and every block the model or the index holds of each chunk, live and as the snapshot of
+  every epoch up to one past the newest cut reads it through `LookupAt` and the disk.
 - [property] `TestRecoveriesMatchTheCrashOracle`: seeds 0-7, six crashes each at a random write or
-  flush, each unflushed block landing at random, with checkpoints, compactions and freezes between
-  them, absent freezes among them. The run must reach a recovery that keeps a record past the
-  acknowledged LSN, recoveries that load runs and frozen maps, recoveries holding a chunk frozen
-  absent and one written after its absent freeze, and a crashed recovery that had erased records.
-  A snapshot lookup that misses the absent version (`Index.frozen` skipping version 0's marker)
-  trips the oracle at the first recovery.
+  flush, each unflushed block landing at random, of the recovery tests' workload, so checkpoints,
+  merges and freezes, absent ones among them, run between them. The run must reach a recovery that
+  keeps a record past the acknowledged LSN, recoveries that load runs and frozen maps, recoveries
+  holding a chunk frozen absent and one written after its absent freeze, and a crashed recovery
+  that had erased records. A snapshot lookup that misses the absent version (`frozenIn` skipping
+  version 0's marker) trips the oracle at the first recovery.
 - Crash during recovery, then recovery again: every other recovery of the property is crashed
   before its final flush, with its erasures landing at random. The oracle's window is unchanged
   by it, and the recovery run again reports the LSN the crashed one had found.
 - Planted bug: replay that leaves out the first record past the replay LSN that maps blocks, as a
-  replay LSN one record too new would (RocksDB #11148), trips the oracle on at least one seed of 8
-  (`TestCrashOracleCatchesLateReplay`; seed 0 names a chunk entry at an older version).
+  replay LSN one record too new would (RocksDB #11148, the Store's `replayLate` plant), trips the
+  oracle on at least one seed of 8 (`TestCrashOracleCatchesLateReplay`; seed 0 names a block that
+  reads zeros).
 
 ## Invariant checker
 
