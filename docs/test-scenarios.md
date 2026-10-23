@@ -3547,7 +3547,7 @@ CI runner.
 | `ci-leases` | 3 nodes; the same PGs; 1 chunk of 1 block, 1 whole-block write; 10 plans; raw rates 960 or 1,040 per mille on node 3, `CLOCK_BOOTTIME` slewed 22.6% on nodes 2 and 3; time to 11 s in 10 ms units (6 s in most plans); up to 2 faults; Raft terms ≤ 2; node 3 4% fast in the rate-step, suspend, stop, restart and Raft plans | 81 | 797,699 | 66 s |
 | `deep-peering` | 4 nodes, node 4 a spare; `ci-peering`'s plans and a free plan of any 2 changes with 1 write and a restart; property 12 under weak fairness | 32 | 14,838,803 | 2 h 30 min |
 | `deep-leases` | 4 nodes, node 4 a spare and a Raft voter; `ci-leases`'s plans and the four that pair a partition with a pause, a suspend or a reboot (exact or node 3 4% fast), time to 5 s in the pause and suspend plans | 132 | 27,402,416 | 50 min |
-| `deep-slow` | `ci-leases`'s constants; the delayed-message plan alone | 84 | 137,228,807 | 3 h 59 min |
+| `deep-slow` | `ci-leases`'s constants with time to 5 s; the delayed-message plan alone | 72 | 21,073,400 | 33 min |
 
 | Model | Property | Simulator invariant (Testing strategy) | Registered by |
 | --- | --- | --- | --- |

@@ -32,33 +32,41 @@ deep-peering 32 / 14,838,803 / 2 h 30 min; deep-leases 132 / 5,312,889 / 9 min; 
 84 / 137,228,807 / 3 h 59 min, too close to its 4 h cap: shrink it a little (e.g. MaxFault 2 → 1
 or a shorter MaxTime) and rerun.
 
-## Review, lease half (in progress)
+## Review, lease half (done)
 
-1. Grantor pause made the rate bound too low (reviewer's TLC trace). Fix: grantor's run ID, redrawn at
-   process start and every Resumed (Wake, Thaw of a marker pause, Restart, Reboot); a holder starts a
-   new window when it changes. Plans HandoverPause (pause+cut, fast, t 500; 2.67M states, 215 s
-   alone) and HandoverSuspendCut (7.57M, 630 s alone) go to deep-leases; neg-no-run-window
-   (NoRunWindow, PausePlans) violates OneReader at depth 43 in 161 s. design.md Lease time rewritten.
-2. ci plans now run node 3 fast: HandoverSuspend, HandoverStop, HandoverRestart, RaftTransfer,
-   RaftPartition; HandoverRebootFast in deep-leases. A trip on a faulted pair taints the holder's
-   other pairs (Detected) for property 10. ci-leases: depth 81, 797,699 states, 68 s.
-   neg-no-boot-window now sets NoBootWindow and NoRunWindow (a reboot draws a new run ID too, so either
-   ID alone starts the window); violates OneReader at depth 73 in 111 s.
-   `scripts/models.sh ci epoch` passed on 2026-10-23 (ci-leases 81 / 797,699 / 66 s; ci-peering 31 /
-   981,217 / 110 s; neg-no-run-window 156 s), apart from neg-no-boot-window, fixed and rerun alone.
-3. Property 10: done; build-checklist promises zero round trips only, the simulator checks the rest.
-   deep-leases passed: depth 132, 27,402,416 states, 2,974 s; recorded in test-scenarios.
-4. deep-slow: MaxTime 1100 -> 500 (plan t was 600); rerun started 2026-10-23 after deep-leases.
-5. Done: design.md Writes and min_live, Failure detection, refill row, glossary, refill scenarios.
-6. Done: wire rows Lease request (table epoch), Grant and node-pair heartbeat (boot ID, run ID).
-Note for the user: the run ID makes the boot ID redundant for rate windows; it is kept.
+1. Grantor pause made the rate bound too low (reviewer's TLC trace). Fix: a grantor's run ID, drawn at
+   process start and at every Resumed (model: Wake, Thaw of a marker pause, Restart, Reboot), on every
+   grant and heartbeat; a holder starts a new rate window when it changes. design.md Lease time,
+   Alternatives row, kvm-clock open question (a grantor stopped in place draws none), glossary,
+   build-checklist updated. Plans HandoverPause and HandoverSuspendCut (with a partition, node 3 fast)
+   in deep-leases; neg-no-run-window (NoRunWindow, PausePlans) violates OneReader, 156 s.
+   neg-no-boot-window now sets NoBootWindow and NoRunWindow (a reboot draws a new run ID too).
+2. ci plans with suspend/pause, stop, restart and both Raft plans run node 3 4% fast;
+   HandoverRebootFast in deep-leases. A step-check trip on a faulted pair taints the holder's other
+   pairs (Detected), since it ends all the holder's leases.
+3. Property 10 stays checked at zero round trips; build-checklist now promises only that.
+4. deep-slow: MaxTime 1100 -> 500.
+5. design.md, glossary, test-scenarios: a PG below min_live serves neither reads nor writes.
+6. Wire rows: Lease request (holder's table epoch), Grant and node-pair heartbeat (boot ID, run ID).
 
-## Remaining
+Results (2026-10-23, 4 workers, 4 GB heap), recorded in test-scenarios: `scripts/models.sh ci epoch`
+all ok (ci-leases 81 / 797,699 / 66 s; ci-peering 31 / 981,217 / 110 s); deep-leases 132 /
+27,402,416 / 50 min; deep-slow 72 / 21,073,400 / 33 min. deep-peering unchanged, not rerun.
+For the user: the run ID makes the boot ID redundant for rate windows; both are kept.
 
-1. Review by a fresh agent; apply it.
-2. Shrink deep-slow under ~3 h and rerun it; update its row.
-3. Rerun `scripts/models.sh ci epoch`; tick the build-checklist "Epoch change model" item.
-4. Delete HANDOFF.md before merge.
+## Remaining (peering half of the review, for the next agent)
+
+1. Recovery atomicity.
+2. Incarnation `known` reset.
+3. The two deleted incarnation rows.
+4. Message duplication.
+5. Atomic peering.
+6. Properties 3, 7, 8 and 9.
+7. Plan coverage for maintenance with merges.
+8. The free plan.
+9. Docs and model-to-simulator map placement.
+Then: rerun `scripts/models.sh ci epoch` (and deep-peering if its plans change), tick the
+build-checklist "Epoch change model" item, delete HANDOFF.md before merge.
 
 ## Design bugs found and design.md changes
 
