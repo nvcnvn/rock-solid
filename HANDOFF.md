@@ -34,9 +34,9 @@ write in flight per client (uncommitted until rerun).
 
 ## Remaining
 
-1. `sessions` deep-fence still runs out of its 4 GB heap in liveness checking with one write in
-   flight per client (61M states, depth 23, after 3 h 56 min). Shrinking it to one write in all
-   (`MaxWrites = 1`); rerun alone.
+1. `sessions` deep-fence ran out of heap in liveness twice, so it is split: `deep-fence` (safety,
+   one write in flight per client) and `deep-release` (no writes, `CrashedClientReleased`). Run both
+   alone; fill DEEPFENCE and DEEPRELEASE in the map table of `docs/test-scenarios.md`.
 2. Add the deep rows to the map's configuration-results table in `docs/test-scenarios.md`
    (after the `ci-orphan` row), and update `deep-fence`'s line in the sessions Configurations list.
 3. Tick the three checklist items once their deep runs pass; delete this file; report.
