@@ -3013,9 +3013,9 @@ nodes without finishing.
 | --- | --- | --- |
 | `ci-peering` | 3 | Both chunks; lease expiry left open, except that a grantor that answers peering of an interval holds no live grant to that interval's old primary; the plans with membership changes alone |
 | `ci-restarts` | 3 | As `ci-peering`, with the plans that restart a primary or format a disk, under which a decision can stop short of activation, and the maintenance plan with merges, which keeps `ci-peering` within its 5 minutes |
-| `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the four below |
+| `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the six below |
 | `deep-peering` | 4 | `ci-peering`'s and `ci-restarts`' plans and the free plan, and the unbounded liveness property |
-| `deep-leases` | 4 | `ci-leases`'s plans and the four it leaves out, which pair a partition with a pause, a suspend or a reboot |
+| `deep-leases` | 4 | `ci-leases`'s plans and the six it leaves out: four pair a partition with a pause, a suspend or a reboot, and two stop the holder in place while its grantor pauses or restarts |
 | `deep-slow` | 3 | The delayed-message plan alone, with `ci-leases`'s constants and time to 5 s |
 
 `deep` is three configurations because whether nodes have clocks is a constant of the spec, and the
@@ -3032,7 +3032,7 @@ run in `deep-leases`; the variants that need one run on it alone.
 | Counter limit | 2, so running out is reachable at small depth; the real limit is 2³² − 1 |
 | Clocks per node | The lease plans hand PG 2 over from node 2 to node 3, its only grantor. `CLOCK_MONOTONIC_RAW` runs at 960 or 1,040 per mille of real time on node 3 and exactly elsewhere, and may rise by 0.4% once after measurement; `CLOCK_BOOTTIME` runs at the raw rate (no daemon), 22.6% slow on node 2 or 22.6% fast on node 3. The plans with a rate step, a suspend, a pause, a stop, a restart or the Raft group, and one of the two reboot plans, run node 3 4% fast and the rest exact; the partition, delayed-message and maintenance plans and the other reboot plan run exact clocks. Time runs to 11 s in the reboot plans, 5 s in the pause, suspend-and-partition and Raft-partition plans, 3 s in the Raft transfer plan and 6 s in the rest |
 | Tables | Each plan's changes, plus 1 for a renewal or a fold (2 in the late-report plan), at most 5; 3 in the free plan, so two changes, renewals and folds among them |
-| Faults per behavior | 1; 2 in the plans that pair a rate step, a pause, a suspend or a reboot with a partition, and in the Raft partition plan. 1 format, 2 process runs per node, 2 Raft terms, 1 send per write |
+| Faults per behavior | 1; 2 in the plans that pair a rate step, a pause, a suspend or a reboot with a partition, in the two that stop the holder in place, and in the Raft partition plan. 1 format, 2 process runs per node, 2 Raft terms, 1 send per write |
 
 **State the model holds**
 
@@ -3086,7 +3086,8 @@ run in `deep-leases`; the variants that need one run on it alone.
   from the window's first grant and the latest of one grantor run, asks again `rate_gap` after a
   window's first grant, and takes no lease before it has a bound. Every grant and heartbeat carries
   the grantor's raw clock and run ID, which the grantor draws again when it restarts or reboots and
-  on `Resumed`; a new run ID starts a new window. The step check trips at `1/(1 − m)`, with `m` the
+  on `Resumed`; a new run ID, or a raw reading below the last, starts a new window and ends the lease taken from the
+  grantor's previous run. The step check trips at `1/(1 − m)`, with `m` the
   margin of the lease from the last grant of the same run, and runs only against a grant that gave a
   lease. A grantor grants or
   renews only a holder that reported a table at least as new as its own; a grant after a lapse or a
@@ -3128,6 +3129,9 @@ plans enable.
   of a grantor whose holder's rate window is open.
 - A grantor that reboots within `rate_window`, its raw clock restarted near 0 and its rate changed
   by 2%; a process restart in the same boot.
+- A holder stopped in place while its grantor waits out its grant, peers, and then pauses with a
+  marker change or restarts, so that the only grantor message queued across the stop carries a new
+  run ID.
 - A partition, healing or not, and messages delayed any time.
 - A partitioned Raft leader, and a leader transfer.
 - A grantor's raw rate stepping by 0.4% after it was measured, within the headroom of
@@ -4169,7 +4173,7 @@ and reports the pair; a margin of `max_margin` or more gives no lease. Times are
 | First grant of a window | 0, 100, G0 | | none | No lease from this grantor; a request is sent at r_a + 100,000 |
 | Second grant, sent `rate_gap` after the first arrived, 100 µs, worst ends | 0, 100, G0 | 100,100, 100,200, G0 + 100,200 | 1.000999 | 1% |
 | The same with 1 ms round trips | 0, 1,000, G0 | 101,000, 102,000, G0 + 102,000 | 1.020000 | 2.5%: the first lease ends 3.90 s after the ask |
-| A grant with a new run ID after a reboot, g = 1,200 | | | none | A new window starts; no lease until its second grant |
+| A grant with a new run ID after a reboot, g = 1,200 | | | none | A new window starts and the old run's lease ends; no lease until its second grant |
 | Grantor raw about 50% fast | | g_b − g_a = 1.505 × (s_b − r_a) | 1.505 | 51%, past `max_margin`: no lease, reported |
 
 - Open (clock-skew study, recommendation 2): naming the miscalibrated node by majority at the
@@ -4187,6 +4191,7 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
 | Grantor raw 2% fast, m = 2.5%; g = 51,020,500 | 1,020,000 ≤ 1,001,000 / 0.975 = 1,026,666.7 | Nothing, on every heartbeat |
 | `a` is a window's first grant, which gave no lease; grantor raw 4% fast, the second grant at r = 1,101,000 with g = 50,104,500 | None: no lease was taken from `a` | The bound forms and the lease is taken |
 | The holder's VM stopped 10 s on kvm-clock, its clocks frozen; heartbeat r = 2,001,000, g = 61,000,500 | 11,000,000 > 1,011,111.1 | Ends every lease |
+| A heartbeat with the grantor's new run ID, or with g below the last reading | None: the readings span two runs | Ends the lease taken from that grantor's previous run; a new window starts |
 | `Resumed` after a suspend | | Ends every lease |
 | `Resumed` after the VMClock marker changed | | Ends every lease |
 | `Resumed` at a node that only grants | | Keeps its grants and its waits |

@@ -873,7 +873,7 @@ AskDue(h, g) ==
        \/ x.B # 0 /\ ~LeaseOK(h, g)
        \/ now >= lastAsk[h][g] + HB
 
-HbDue(g, h) == gr[g][h].on /\ ~gr[g][h].fg /\ now >= lastHb[g][h] + HB
+HbDue(g, h) == gr[g][h].on /\ now >= lastHb[g][h] + HB
 
 WaitOver(n) ==
     /\ raw[n] - rstAt[n].r >= L1000
@@ -951,12 +951,15 @@ AfterGrant(h, g, m) ==
                ep |-> m.ep, lastg |-> m.x, has |-> FALSE, rn |-> m.rn]]
 
 \* The holder's leases after a heartbeat m from g, which carries g's raw clock
-\* and run ID.
+\* and run ID. A heartbeat that starts a new window also ends the lease from
+\* g's previous run: the step check spans no runs, so it cannot show that the
+\* holder stood still meanwhile.
 AfterHb(h, g, m) ==
     LET x == hl[h][g]
     IN IF HbTrips(h, g, m) THEN EndAll(h)
-       ELSE IF NewWindow(x, m) /\ x.w
-       THEN [hl EXCEPT ![h][g] = [@ EXCEPT !.w = FALSE, !.B = 0, !.lastg = m.x]]
+       ELSE IF NewWindow(x, m) /\ (x.w \/ x.a)
+       THEN [hl EXCEPT ![h][g] = [@ EXCEPT !.w = FALSE, !.B = 0, !.lastg = m.x,
+                                           !.a = @ /\ Bug("KeepLeaseOnNewRun")]]
        ELSE [hl EXCEPT ![h][g].lastg = Max({m.x, x.lastg})]
 
 \* A grant the grantor gives now, answering a request sent at holder clock
@@ -1158,10 +1161,12 @@ Wake(n) ==
                    faults, raftVars>>
 
 \* A VM pause freezes every clock; "pause" changes the VMClock marker, "stop"
-\* (a kvm-clock guest stopped in place) does not.
+\* (a kvm-clock guest stopped in place) does not. With "stop2", only the
+\* holder, node 2, stops in place, and only its grantor, node 3, pauses.
 Freeze(n, kind) ==
     /\ Clocks
     /\ Running(n)
+    /\ "stop2" \in plan.f => (kind = "stop") = (n = 2)
     /\ Fault(kind)
     /\ frz' = [frz EXCEPT ![n] = kind]
     /\ dirty' = Taint(n)
@@ -1215,7 +1220,7 @@ NetFault(h, g, to) ==
 
 \* A process restart forgets everything but the disk, the table and the Raft
 \* term, and draws a new run ID. A restarted primary asks for a new interval
-\* of each PG it led.
+\* of each PG it led. With "stop2", only node 3 restarts.
 RestartState(n) ==
     /\ run' = [run EXCEPT ![n] = @ + 1]
     /\ pr' = [pr EXCEPT ![n] = [p \in PG |->
@@ -1240,6 +1245,7 @@ RestartState(n) ==
 Restart(n) ==
     /\ Fault("restart")
     /\ Running(n)
+    /\ "stop2" \in plan.f => n = 3
     /\ run[n] < MaxRestart
     /\ RestartState(n)
     /\ LET waited == ~Clocks /\ ~Bug("NoRestartWait") IN
@@ -1670,8 +1676,13 @@ HandoverPause == [Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "pause", "cut"
 \* a suspend and a partition;
 HandoverSuspendCut == [Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "susp", "cut", "fast"}) EXCEPT !.t = 500, !.k = 2]
 \* a reboot within rate_window, the new boot 2% faster or slower, and a
-\* partition that may heal.
+\* partition that may heal;
 HandoverRebootFast == [Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "reboot", "cut", "heal", "fast"}) EXCEPT !.t = 1100, !.k = 2]
+\* the holder stopped in place while its grantor, after waiting out its grant
+\* and peering, pauses with a marker change or restarts, so that the only
+\* message spanning the stop carries a new run ID.
+HandoverStopPause == [Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "stop2", "stop", "pause", "fast"}) EXCEPT !.k = 2]
+HandoverStopRestart == [Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "stop2", "stop", "restart", "fast"}) EXCEPT !.k = 2]
 \* The handover with exact clocks and the same reboot;
 HandoverReboot == [Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "reboot", "cut", "heal", "exact"}) EXCEPT !.t = 1100, !.k = 2]
 \* a partition that may heal;
@@ -1690,7 +1701,8 @@ RaftPartition == [Plan(<<>>, <<>>, {"raft", "cut", "heal", "fast"}) EXCEPT !.t =
 
 \* ci-leases checks LeasePlans. deep-leases adds the plans that pair a
 \* partition with a pause, a suspend or a reboot, at 1.6 to 7.6 million states
-\* each on 3 nodes; the negative variants that need one run it alone. The
+\* each on 3 nodes, and those that stop the holder in place while its grantor
+\* pauses or restarts; the negative variants that need one run it alone. The
 \* plan with delayed messages, at over 3 million states, runs alone in
 \* deep-slow at 3 nodes, since with the others at 4 nodes it passed 108 million
 \* states in 4 hours.
@@ -1698,7 +1710,9 @@ LeasePlans == {Steady, Handover, HandoverStep, HandoverSuspend, HandoverStop,
                HandoverRestart, HandoverCut, Maintenance, RaftTransfer, RaftPartition}
 RebootPlans == {HandoverReboot}
 PausePlans == {HandoverPause}
-AllLeasePlans == LeasePlans \cup RebootPlans \cup PausePlans \cup {HandoverSuspendCut, HandoverRebootFast}
+StopPlans == {HandoverStopRestart}
+AllLeasePlans == LeasePlans \cup RebootPlans \cup PausePlans \cup StopPlans
+                 \cup {HandoverSuspendCut, HandoverRebootFast, HandoverStopPause}
 SlowPlans == {HandoverSlow}
 
 \* deep-peering: every peering plan, and any two changes at any time with one
