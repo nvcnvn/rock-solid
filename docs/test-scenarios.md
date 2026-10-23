@@ -1606,7 +1606,7 @@ call, time from `ctx.Now`:
   is the slower, and some writer waits two victims' cleaning, 40 ms, or longer from its last answer
   to its next; with it, none for at most 1% of the time, no write fails with NoSpace, and no writer
   waits 40 ms. Measured: none 0% with admission against 94 and 99.6% without, the slowest write
-  26 and 32 ms against 45 and 102. The 40 ms bar guards against regressions, not a bound on
+  24 and 29 ms against 57 and 76. The 40 ms bar guards against regressions, not a bound on
   latency: this cleaner frees many victims a window, and how long writers wait when it frees
   fewer than one is the open question below.
 - Open: the item asks for 90 and 95% full. On segments small enough for the in-memory simulated
@@ -1614,12 +1614,12 @@ call, time from `ctx.Now`:
   segments; see [Cleaner write amplification in
   simulation](#cleaner-write-amplification-in-simulation) for 90 and 95%). The 85% run
   (`TestWriteAdmissionAt85PercentFull`, the same writers and cleaner on 320 segments of 1,024
-  blocks, 0.3 GB resident at peak, skipped unless `ROCKSOLID_LONG_SIM` is set, about 4 minutes)
+  blocks, 0.26 GB resident at peak, skipped unless `ROCKSOLID_LONG_SIM` is set, about 2.5 minutes)
   checks that admission keeps a free segment
   for a larger share of the time than without it and than a planted rate net of copied blocks
   alone. Measured: no free
-  segment 0% of the time with admission, 97.3% net of copied blocks alone, 98.5% without; the
-  slowest write 9.1, 9.4 and 9.2 s. See the cleaning-debt question in design.md.
+  segment 0% of the time with admission, 97.6% net of copied blocks alone, 99.1% without; the
+  slowest write 5.0, 5.4 and 4.6 s. See the cleaning-debt question in design.md.
 - An index over its run limit never slows or stops writes (no run-count stall).
 - The same wait applies at twice `max_replay_bytes` (see Checkpoint backpressure); both
   conditions holding at once hold items until both clear.
@@ -1909,7 +1909,12 @@ on the 1 GiB disk one capacity is 262,144 blocks):
 | C, frozen snapshot data | 0.95 | 10,000 capacities, capped at 1 | 0.05 × 262,144 ÷ 1.95 = 6,722 | |
 | D | 0.50 | 30,000 | 10,000 | D, of C and D; uncapped, C would score 6.7 × 10⁷ and always win |
 
-- A pass takes the 4 best victims that pass the net-gain guard.
+- A pass takes the 4 best victims that pass the net-gain guard, every segment with nothing live
+  first: on the primed 64-segment disk, where merges have left 10 metadata segments with nothing
+  live, every victim is one of them. Scored by cost-benefit alone, empty segments ranked by their
+  age, which counts only ordinary writes, and the pass took segments with live blocks to copy
+  instead; at 90% full in simulation the ones the index wrote while writes waited, at age 0,
+  piled up until the free segments, the reserve included, ran out.
 - Net-gain guard, header blocks rounded up per record (design: "a victim must free more space than
   copying it costs"). In 16,384-block (64 MiB) segments a copy record of single-block extents
   holds 253 data blocks and 3 header blocks (56 + 253 × 45 = 11,441 bytes; 256 blocks fill the
@@ -1949,7 +1954,7 @@ on the 1 GiB disk one capacity is 262,144 blocks):
   segment's tail and every free segment, the reserve included. With a reserve of one segment the
   disk reaches zero free segments; before this check every later write started a pass whose
   copies found no room, copied 10 blocks for nothing and failed. Now a write that finds no room
-  fails with NoSpace with nothing copied, under overwrites and once new blocks fill the disk.
+  fails with NoSpace with nothing copied once new blocks fill the disk.
 - A stall on either hot lane fails both hot queues in submit order: with the shared hot lane out of
   room, a freeze and the slot write after it both fail; with the slot lane unable to open a segment
   outside the reserve and the cleaner's only victim quarantined, a whole chunk and the small write
@@ -1967,6 +1972,11 @@ on the 1 GiB disk one capacity is 262,144 blocks):
   chunk, 3,000 more overwrites never fail, and new data then fails with NoSpace only once no
   segment without a slot header would gain space; scored by their age, the header segments took
   every pass and writes failed while 16 segments with nothing live waited.
+- A pass that ends with writes still waiting for room is followed at once by the next, so they
+  fail with NoSpace only once no victim is left: four chunks overwritten on the 64-segment disk
+  with a reserve of 4 and the cleaner running only for waiting writes never fail. Before, the
+  store read "no victim" off a pass that had just finished, and write 2,163 failed with 4 victims
+  left.
 - A pass that frees nothing starts no other until the durable LSN moves: once the 4 best victims
   each hold a block that fails its checksum, a pass quarantines them all, five reads after it
   start no pass, and a write starts one that frees segments.
@@ -2863,56 +2873,62 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   `ROCKSOLID_LONG_SIM` set): a 4 GiB simulated disk of 1,024 segments of 4 MiB. The spike's 16 GiB
   disk does not fit in memory: the simulated disk keeps every block that is not all zeros, and the
   index's dead runs, which stay on disk until their segments are written again, alone took the
-  16 GiB run past 4 GB within 10 minutes. Records of up to 256 KiB, the size at which the net-gain
-  guard lets victims of 4 MiB segments pass at up to 89.3% live (64 KiB records give 89.4%, 1 MiB
-  ones 71.6%), with 16 writes outstanding so that a user record holds 16 blocks and one header
-  block, as the spike's 64 KiB records did; a checkpoint every 4 MiB of log, the streams spike's
-  stand-in for 64 MiB; merge steps of one segment; the reserve the formula gives (8 segments) and
-  `clean_free` 16; simulated time with write admission on. The volume, fill times the disk, is
-  written once in order in 32-block writes, each followed half the time by a 4 KiB overwrite of
-  a block already written, so that the oldest segments hold dead blocks as the disk fills; then 1
-  disk capacity of uniform 4 KiB overwrites warms it up and 1 more is measured. Write
-  amplification counts every block the disk was asked to write, record and segment headers,
-  copies and the metadata stream included, over the user blocks acknowledged; the run also
-  reports the metadata stream's and the copies' shares.
-- Measured, against column 2 (the Go log always writes its index's runs):
+  16 GiB run past 4 GB within 10 minutes. Records of up to 256 KiB, with 16 writes outstanding so
+  that a user record holds 16 blocks and one header block, as the spike's 64 KiB records did; a
+  checkpoint every 4 MiB of log, the streams spike's stand-in for 64 MiB; merge steps of one
+  segment; the reserve the formula gives (8 segments) and `clean_free` 16; simulated time with
+  write admission on. The volume, fill times the disk, is written once in order in 32-block
+  writes, each followed half the time by a 4 KiB overwrite of a block already written, so that
+  the oldest segments hold dead blocks as the disk fills; then 1 disk capacity of uniform 4 KiB
+  overwrites warms it up and 1 more is measured. Write amplification counts every block the disk
+  was asked to write, record and segment headers, copies and the metadata stream included, over
+  the user blocks acknowledged; the run also reports the metadata stream's and the copies' shares.
+- The net-gain guard caps a 4 MiB victim's live blocks by record size: 914 of 1,023 (89.35%) at
+  256 KiB, 930 (90.9%) at 128 KiB, 915 (89.4%) at 64 KiB and 732 (71.6%) at 1 MiB. 128 KiB
+  records measured worse all the same, 5.78 at 80% against 5.09, and at 90% ran out of space
+  after 54% of the measured capacity against 65%.
+- Measured, against column 2 (the Go log always writes its index's runs), seed 1:
 
   | Fill | Write amplification | Metadata stream | Copied | Run time, peak resident |
   | --- | --- | --- | --- | --- |
-  | 80% | 7.34 | 1.05 | 5.15 | 5 min, 1.3 GB |
-  | 90% | fails: a write gets NoSpace while the cleaner has victims, after about a disk capacity of overwrites | | | 4 min, 0.56 GB |
-  | 95% | runs out of space before the volume is written: no victim passes the net-gain guard | | | 8 s, 0.49 GB |
+  | 80% | 5.09 | 0.62 | 3.32 | 3 min, 0.60 GB |
+  | 90% | 13.8 over the 65% of the measured capacity written before the disk ran out of space | 2.18 | 10.26 | 6 min, 0.61 GB |
+  | 95% | runs out of space while the volume is written | | | 6 s, 0.48 GB |
 
   Not near the targets, so the build checklist item stays open:
-  - At 80% the log writes 7.34 blocks per user block against 3.86. The metadata stream alone
-    takes 1.05, against the streams spike's 0.49 at 90% (flushed 0.085, compacted 0.40), and
-    the space the index, the reserve and `clean_free` hold raises the fill the cleaner sees, so
-    each victim frees less. A checkpoint every 16 MiB cut the metadata to 0.35 and the total to
-    5.55 in an exploratory run on the same disk, though its reserve took 13 segments.
-  - At 95% the victims must be about 93% live (the spike cleaned 92.7% on average), above the
-    guard's 89.3% on 4 MiB segments. The guard's tail charge, up to a block short of the largest
-    copy and its header, and its 134 bytes of index entries per moved block are design rules the
-    spike did not model ([Cleaner](design.md#on-disk-format)): on 64 MiB segments of 1 MiB
-    records they let victims up to 94% live pass, so the 95% figure is out of reach of this
-    stand-in, not of a real disk.
-  - At 90% the reserve runs out: two passes run at once, each with a victim near the guard's
-    limit, the free segments, the reserve included, fall to none, and the cleaner's copies stall,
-    which fails ordinary writes with NoSpace though victims remain (see the cleaning-debt
-    question in design.md).
-- The log's write counters (`disklog.(*Log).Writes`: the data blocks of ordinary items and every
-  block the log asked the disk to write) equal the measured window's own counts: each run checks
-  both against what it acknowledged and what the simulated disk executed, and
-  `TestWriteAmplificationMetricEqualsTheMeasuredFigure` checks the same on every test run, on 128
-  segments of 1 MiB at 40% full, where the cleaner copies and the index writes runs. Each disk
-  exports these counters, so the drive wear figures in design.md read the number an operator
-  does.
+  - At 80% the log writes 5.09 blocks per user block against 3.86. The metadata stream takes
+    0.62, against the streams spike's 0.49 at 90% (flushed 0.085, compacted 0.40), and the
+    space the index, the reserve and `clean_free` hold raises the fill the cleaner sees, so each
+    victim frees less.
+  - At 90% and 95% writes fail with NoSpace once no victim passes the net-gain guard; none
+    fails while one does. At 90% the 986 chunk segments then average 956 of 1,023 blocks live,
+    93.5%, and the 29 metadata segments, holding 19 segments' worth of live runs, are too full
+    to rewrite at a gain; at 95% the chunk segments average 94.2% during the fill. The index's
+    segments and the reserve take 37 of the 1,023 segments, 3.6%, so 90% of the disk in user
+    data fills the rest to 93.5%, above the guard's 89.35%. The guard's tail charge, up to a
+    block short of the largest copy and its header, and its 134 bytes of index entries per
+    moved block are design rules the spikes did not model ([Cleaner](design.md#on-disk-format)).
+    On 64 MiB segments of 1 MiB records they let victims up to 94% live pass, above the 92.7%
+    the spike cleaned on average at 95% full, so the guard does not rule out 90 or 95% on a
+    real disk; nobody has run the Go log there.
+- The log's write counters (`disklog.(*Log).Writes`: the data blocks of ordinary items, a whole
+  chunk's slot write included, and every block the log asked the disk to write, slot writes and
+  the zeroing of a freed slot segment's header included) equal what the run acknowledged and
+  what the simulated disk executed. The 80% and 90% runs check that over the capacity they
+  measure; on every test run `TestWriteAmplificationMetricEqualsTheMeasuredFigure` checks it on
+  128 segments of 1 MiB at 40% full, with the invariant checker on, where the cleaner copies and
+  the index writes runs, and `TestWriteAmplificationMetricCountsChunkSlots` on a disk of chunk
+  slots, with whole chunks written again and deleted among 4 KiB overwrites, freed slot segments
+  zeroed after a TRIM and, with TRIM off, without. Dropping the count of a slot write, or of
+  either zeroing write, fails it. Each disk exports these counters, so the drive wear figures in
+  design.md read the number an operator does.
 - Open: column 1 cannot run as is, since the Go log always checkpoints; the metadata stream's
-  share, reported apart, gives the chunk data's own write amplification (6.29 at 80%) at the fill
+  share, reported apart, gives the chunk data's own write amplification (4.47 at 80%) at the fill
   the index's space raises. Open: tolerance ("land near" in the checklist). Open: the cleaner CPU
-  per user write against the spike's 2.8 / 7.5 / 20 µs; the simulation's 95 µs per write at 80%
-  is mostly the in-memory index's lookups and the simulator, not a figure for hardware.
-- Invariants hold throughout (Invariant checker), and no ordinary write fails with NoSpace while
-  the cleaner has a victim, which the 90% run breaks.
+  per user write against the spike's 2.8 / 7.5 / 20 µs; the simulation's time per write is mostly
+  the in-memory index's lookups and the simulator, not a figure for hardware.
+- No ordinary write fails with NoSpace while the cleaner has a victim. The long runs leave the
+  invariant checker off for time.
 
 ## Seeded runs and the simulation harness
 
