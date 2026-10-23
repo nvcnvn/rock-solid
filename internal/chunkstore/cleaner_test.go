@@ -846,28 +846,32 @@ func TestTheGuardChargesTheIndexEntriesOfMoves(t *testing.T) {
 	}
 }
 
-// Planted violation: run pieces on a merge worker's lane past a step and its partition and root
-// with no manifest between break invHeld, and a manifest between them does not.
+// Planted violation: run pieces on a merge worker's lane past a step and its partition and root,
+// and on the checkpoint's lane past twice max_replay_bytes and a step, with no manifest between
+// break invHeld, and a manifest between them does not.
 func TestNoteStepsCatchesAStepPastItsBound(t *testing.T) {
 	const seg = 5
 	h := newHarnessOn(t, cleanConfig(), cleanGeo)
 	piece := h.s.Log().MaxBlobBytes()
 	run := disklog.Entry{Kind: disklog.EntryBlob, BlobKind: disklog.BlobRun, Length: piece}
 	manifest := disklog.Entry{Kind: disklog.EntryBlob, BlobKind: disklog.BlobManifest, Length: 1}
-	n := int((max(h.cfg.Log.CompactionStepBytes, piece)+2*piece)/piece) + 1
-	held := func(entries []disklog.Entry) error {
-		h := newHarnessOn(t, cleanConfig(), cleanGeo)
-		h.laneOf[seg], h.catch = 1, true
-		return violated(func() {
-			h.noteSteps(seg, entries)
-			h.holds()
-		})
-	}
-	if err := held(slices.Repeat([]disklog.Entry{run}, n)); violationOf(err) != invHeld {
-		t.Fatalf("%d run pieces of %d bytes past a manifest broke %v", n, piece, err)
-	}
-	if err := held(append(slices.Repeat([]disklog.Entry{run}, n-1), manifest, run)); err != nil {
-		t.Fatal(err)
+	step := max(h.cfg.Log.CompactionStepBytes, piece) + 2*piece
+	for lane, most := range []uint64{2*h.cfg.Log.MaxReplayBytes + step, step} {
+		n := int(most/piece) + 1
+		held := func(entries []disklog.Entry) error {
+			h := newHarnessOn(t, cleanConfig(), cleanGeo)
+			h.laneOf[seg], h.catch = uint8(lane), true
+			return violated(func() {
+				h.noteSteps(seg, entries)
+				h.holds()
+			})
+		}
+		if err := held(slices.Repeat([]disklog.Entry{run}, n)); violationOf(err) != invHeld {
+			t.Fatalf("lane %d: %d run pieces of %d bytes past a manifest broke %v", lane, n, piece, err)
+		}
+		if err := held(append(slices.Repeat([]disklog.Entry{run}, n-1), manifest, run)); err != nil {
+			t.Fatalf("lane %d: %v", lane, err)
+		}
 	}
 }
 

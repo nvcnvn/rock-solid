@@ -25,7 +25,7 @@ const (
 	invOpenSeqs = "a recovered log opens its next segment past every open sequence on disk"
 	invUsage    = "each chunk segment counts the blocks the index refers to"
 	invReuse    = "no segment is reused while it holds a record the index needs"
-	invGain     = "every cleaner victim frees more than its copies fill"
+	invGain     = "every chunk victim frees more than its copies fill"
 	invHeld     = "the bytes held beyond the manifests stay within the reserve"
 	invNoSpace  = "no ordinary write fails with NoSpace while the cleaner has a victim"
 	invAcked    = "acknowledged writes are readable"
@@ -175,8 +175,9 @@ func (h *harness) movesKeepWrites() error {
 }
 
 // recordsInPlace checks that every record a block of the chunks checked refers to, in a live or
-// frozen map, and every record holding a piece of the index's runs, still lies in its segment as
-// written: the segment has not been opened again since. A punched extent holds no record. Writes
+// frozen map, and every record holding a piece of the index's runs, those merges hold and what
+// running merges have written included, still lies in its segment as written: the segment has not
+// been opened again since, for any stream. A punched extent holds no record. Writes
 // into a segment reused while it held a live block touch it, so its chunks are among those
 // checked.
 func (h *harness) recordsInPlace() error {
@@ -198,16 +199,9 @@ func (h *harness) recordsInPlace() error {
 			}
 		}
 	}
-	var pieces []disklog.BlobRef
-	for s := uint32(1); s < sb.SegmentCount; s++ {
-		if _, stream := h.s.Log().Usage(s); stream != disklog.Meta {
-			continue
-		}
-		pieces, _ = h.s.Index().Tree().RunsIn(s, pieces[:0])
-		for _, p := range pieces {
-			if seq, seg, bad := moved(sb.LBA(p.Segment, p.Block)); bad {
-				return fmt.Errorf("a run's piece at LSN %d lies in the record at block %d of segment %d, written at open sequence %d, and the segment was opened again at %d", p.LSN, p.Block, seg, seq, h.seqOf[seg])
-			}
+	for _, p := range h.s.Index().Tree().Pieces(nil) {
+		if seq, seg, bad := moved(sb.LBA(p.Segment, p.Block)); bad {
+			return fmt.Errorf("a run's piece at LSN %d lies in the record at block %d of segment %d, written at open sequence %d, and the segment was opened again at %d", p.LSN, p.Block, seg, seq, h.seqOf[seg])
 		}
 	}
 	return nil
@@ -805,4 +799,35 @@ func TestPlantedCleanerBugsBreakTheirInvariants(t *testing.T) {
 			t.Log(err)
 		})
 	}
+}
+
+// Planted violation: a header of this log on a free segment at the open sequence the recovered log
+// opens its next segment at, as a recovery that resumes at the newest header's sequence instead of
+// one past it leaves the disk, breaks invOpenSeqs when the recovery's headers are read.
+func TestAHeaderAtTheNextOpenSequenceBreaksOpenSeqs(t *testing.T) {
+	h := newHarness(t, testConfig())
+	h.sync(h.write(chunkC, 0, fill(10, 1), 0))
+	restart(h)
+	log := h.s.Log()
+	sb := log.Superblock()
+	free := uint32(1)
+	for ; free < sb.SegmentCount; free++ {
+		if u, _ := log.Usage(free); u.State == disklog.SegmentFree {
+			break
+		}
+	}
+	hdr, err := disklog.AppendSegmentHeader(nil, disklog.SegmentHeader{LogID: sb.LogID, Seq: log.NextOpenSeq(), Index: free, Stream: disklog.Hot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.disk.Put(sb.LBA(free, 0), hdr)
+	h.catch = true
+	err = violated(func() {
+		h.headersOnDisk()
+		h.holds()
+	})
+	if violationOf(err) != invOpenSeqs {
+		t.Fatalf("broke %v", err)
+	}
+	t.Log(err)
 }

@@ -61,7 +61,8 @@ type harness struct {
 	steps   map[*lsm.Compaction]int
 	merges  []*lsm.Compaction
 	// laneOf is each metadata segment's lane, and stepHeld the run bytes each merge worker's lane
-	// wrote since the last manifest, which never pass one step and its partition and root.
+	// wrote since the last manifest, which never pass one step and its partition and root, and,
+	// under lane 0, the run and manifest piece bytes the checkpoint's lane wrote.
 	laneOf      map[uint32]uint8
 	stepHeld    map[uint8]uint64
 	maxStepHeld uint64
@@ -376,21 +377,29 @@ func (h *harness) mergeDue() *lsm.Compaction {
 }
 
 // noteSteps adds the run pieces a record on a merge worker's lane holds to that worker's step,
-// and starts every worker's next step at a manifest; a worker holding more than a step beyond
-// the manifests, which is what the reserve holds for it, breaks invHeld.
+// and the run and manifest pieces on the checkpoint's lane, lane 0, to the checkpoint's share,
+// and starts every share again at a manifest. A worker holding more than a step beyond the
+// manifests, or a checkpoint more than twice max_replay_bytes and a step, which is what the
+// reserve holds for each, breaks invHeld.
 func (h *harness) noteSteps(segment uint32, entries []disklog.Entry) {
 	lane, ok := h.laneOf[segment]
+	piece := h.s.Log().MaxBlobBytes()
+	step := max(h.cfg.Log.CompactionStepBytes, piece) + 2*piece
 	for _, e := range entries {
 		switch {
-		case e.Kind != disklog.EntryBlob:
+		case e.Kind != disklog.EntryBlob || !ok:
 		case e.BlobKind == disklog.BlobManifest:
 			clear(h.stepHeld)
-		case e.BlobKind == disklog.BlobRun && ok && lane > 0:
+		case lane == 0 && (e.BlobKind == disklog.BlobRun || e.BlobKind == disklog.BlobManifestPiece):
+			h.stepHeld[0] += e.Length
+			if most := 2*h.cfg.Log.MaxReplayBytes + step; h.stepHeld[0] > most {
+				h.violate(invHeld, fmt.Errorf("the checkpoint wrote %d bytes of runs and manifest pieces since the last manifest, above its share of %d", h.stepHeld[0], most))
+			}
+		case e.BlobKind == disklog.BlobRun:
 			h.stepHeld[lane] += e.Length
 			h.maxStepHeld = max(h.maxStepHeld, h.stepHeld[lane])
-			piece := h.s.Log().MaxBlobBytes()
-			if most := max(h.cfg.Log.CompactionStepBytes, piece) + 2*piece; h.stepHeld[lane] > most {
-				h.violate(invHeld, fmt.Errorf("merge worker %d wrote %d bytes of runs since the last manifest, above a step's %d", lane, h.stepHeld[lane], most))
+			if h.stepHeld[lane] > step {
+				h.violate(invHeld, fmt.Errorf("merge worker %d wrote %d bytes of runs since the last manifest, above a step's %d", lane, h.stepHeld[lane], step))
 			}
 		}
 	}
