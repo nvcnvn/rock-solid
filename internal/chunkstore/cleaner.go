@@ -169,10 +169,18 @@ func (s *Store) cleanWorkers() int {
 }
 
 // clean starts passes while free segments outside the reserve are short of clean_free, or while
-// items wait for room, and drives the running ones. After a pass that frees nothing, as after
-// finding no victim, it starts none until the durable LSN moves. It reports whether the cleaner
-// has a victim.
+// items wait for room, and drives the running ones, starting more as passes finish. After a pass
+// that frees nothing, as after finding no victim, it starts none until the durable LSN moves. It
+// reports whether the cleaner has a victim: whether a pass is still running.
 func (s *Store) clean(ctx *core.Context) bool {
+	for s.cleanRound(ctx) {
+	}
+	return len(s.cl.passes) > 0
+}
+
+// cleanRound starts passes as clean does and drives every running one, reporting whether one
+// finished.
+func (s *Store) cleanRound(ctx *core.Context) bool {
 	for len(s.cl.passes) < s.cleanWorkers() && (s.log.FreeOutsideReserve() < s.cleanFree() || s.log.Stalled()) {
 		if s.cleanerIdle() {
 			break
@@ -190,6 +198,7 @@ func (s *Store) clean(ctx *core.Context) bool {
 		s.cl.passes = append(s.cl.passes, &cleanPass{victims: victims})
 		s.cl.stats.PeakPasses = max(s.cl.stats.PeakPasses, len(s.cl.passes))
 	}
+	finished := false
 	for i := 0; i < len(s.cl.passes); {
 		p := s.cl.passes[i]
 		s.advancePass(ctx, p)
@@ -198,11 +207,12 @@ func (s *Store) clean(ctx *core.Context) bool {
 				s.cl.tried, s.cl.triedAt = true, s.log.DurableLSN()
 			}
 			s.cl.passes = slices.Delete(s.cl.passes, i, i+1)
+			finished = true
 			continue
 		}
 		i++
 	}
-	return len(s.cl.passes) > 0
+	return finished
 }
 
 // cleanerIdle reports whether the cleaner starts no pass until the durable LSN moves, having found

@@ -319,6 +319,32 @@ func TestAPassFinishesOnADiskFilledToItsReserve(t *testing.T) {
 	o.check(t, h, 0, 63, 0)
 }
 
+// Overwrites of four chunks on a disk with a reserve of 4 segments and a cleaner that runs only for
+// writes waiting for room: a pass can end with writes still waiting, its copies having taken what
+// it freed, and the store then starts the next pass rather than failing them, so no write fails
+// with NoSpace while a victim is left. Write 2,163 is the one that did.
+func TestAPassEndingWithWritesWaitingStartsTheNext(t *testing.T) {
+	cfg := cleanConfig()
+	cfg.Log.Reserve, cfg.CleanFree = 4, -1
+	h := newHarnessOn(t, cfg, cleanGeo)
+	h.merging = true
+	r := core.NewRand(1)
+	chunks := []core.ChunkID{chunk(1), chunk(2), chunk(3), chunk(4)}
+	for i := range 2200 {
+		c, b := chunks[r.Below(4)], uint32(r.Below(64))
+		if i < 4*64 {
+			c, b = chunks[i/64], uint32(i%64)
+		}
+		data := make([]byte, core.BlockSize)
+		r.Fill(data)
+		id := h.write(c, b*core.BlockSize, data, 0)
+		h.settle()
+		if err := h.reply(id).Err; err != nil {
+			t.Fatalf("write %d: %v, with victims %v", i, err, h.s.chooseVictims())
+		}
+	}
+}
+
 // Writes of new blocks fill the disk with live data: no victim gains space, and only then do
 // writes waiting for room fail with NoSpace, whatever the reserve.
 func TestWritesFailOnlyWhenNoVictimGainsSpace(t *testing.T) {
@@ -346,10 +372,10 @@ func TestWritesFailOnlyWhenNoVictimGainsSpace(t *testing.T) {
 }
 
 // With a reserve of one segment, below what the formula asks, the cleaner's copies and the
-// checkpoints take the disk to zero free segments. A victim whose copies do not fit the room the
-// cleaner's lane can reach is not taken, and a pass that frees nothing starts no other until the
-// durable LSN moves, so a write that finds no room fails with NoSpace at once, no pass starting
-// and nothing copied for it, both while overwrites leave victims and once new blocks fill the disk.
+// checkpoints take the disk to zero free segments once writes of new blocks fill it, after
+// overwrites. A victim whose copies do not fit the room the cleaner's lane can reach is not taken,
+// and a pass that frees nothing starts no other until the durable LSN moves, so a write that finds
+// no room fails with NoSpace at once, no pass starting and nothing copied for it.
 func TestAFullDiskWithNoFreeSegmentEndsInNoSpace(t *testing.T) {
 	cfg := cleanConfig()
 	cfg.Log.Reserve = 1
@@ -380,14 +406,14 @@ func TestAFullDiskWithNoFreeSegmentEndsInNoSpace(t *testing.T) {
 		r.Fill(data)
 		try(chunks[r.Below(4)], uint32(r.Below(64)), data)
 	}
-	if !empty {
-		t.Fatal("the disk never ran out of free segments")
-	}
 	for i := 0; failed < 20; i++ {
 		if i == 2000 {
 			t.Fatal("writes of new blocks never failed")
 		}
 		try(chunk(uint32(10+i/64)), uint32(i%64), fill(core.BlockSize, byte(i)))
+	}
+	if !empty {
+		t.Fatal("the disk never ran out of free segments")
 	}
 	o.check(t, h, 0, 63, 0)
 }
