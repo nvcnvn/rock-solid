@@ -3010,13 +3010,14 @@ activation reports and faults around it. `deep` makes any change at any time.
 | `ci-peering` | 3 | 2 PGs and 2 chunks; lease expiry left open, except that a grantor that answers peering of an interval holds no live grant to that interval's old primary; 11 plans |
 | `ci-leases` | 3 | 1 chunk of 1 block, whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; 10 plans |
 | `deep-peering` | 4 | `ci-peering`'s plans and any membership change at any time with both families of writes, and the unbounded liveness property |
-| `deep-leases` | 4 | `ci-leases`'s plans and the reboot plan it leaves out |
-| `deep-slow` | 3 | The delayed-message plan alone, with `ci-leases`'s constants |
+| `deep-leases` | 4 | `ci-leases`'s plans and the four it leaves out, which pair a partition with a pause, a suspend or a reboot |
+| `deep-slow` | 3 | The delayed-message plan alone, with `ci-leases`'s constants and time to 5 s |
 
 `deep` is three configurations because whether nodes have clocks is a constant of the spec, and
 the delayed-message plan, over 3 million states at 3 nodes, passed 108 million at 4 nodes with the
-other lease plans without finishing in 4 hours, so it runs alone at 3. The reboot plan alone is 1.6
-million states, so it runs in `deep-leases`; the variants that need it run on it alone.
+other lease plans without finishing in 4 hours, so it runs alone at 3. The plans that pair a
+partition with a pause, a suspend or a reboot are 1.6 to 7.6 million states each at 3 nodes, so they
+run in `deep-leases`; the variants that need one run on it alone.
 
 | Constant | Value |
 | --- | --- |
@@ -3025,9 +3026,9 @@ million states, so it runs in `deep-leases`; the variants that need it run on it
 | Chunks | `ci-peering`: chunk 1 in PG 1 with 2 blocks, chunk 2 in PG 2 with 1 block; `ci-leases`: 1 chunk of 1 block in PG 1 |
 | Writes | Chunk 1: a partial write to each block. Chunk 2: a daemon's whole-block write W, its successor's reissue W′ once it died, and the successor's next write W2 once W′ is acknowledged. Each plan takes one family; `deep` takes both |
 | Counter limit | 2, so running out is reachable at small depth; the real limit is 2³² − 1 |
-| Clocks per node | The lease plans hand PG 2 over from node 2 to node 3, its only grantor. `CLOCK_MONOTONIC_RAW` runs at 960 or 1,040 per mille of real time on node 3 and exactly elsewhere, and may rise by 0.4% once after measurement; `CLOCK_BOOTTIME` runs at the raw rate (no daemon), 22.6% slow on node 2 or 22.6% fast on node 3. Plans whose faults do not turn on the ratio of rates run exact clocks |
+| Clocks per node | The lease plans hand PG 2 over from node 2 to node 3, its only grantor. `CLOCK_MONOTONIC_RAW` runs at 960 or 1,040 per mille of real time on node 3 and exactly elsewhere, and may rise by 0.4% once after measurement; `CLOCK_BOOTTIME` runs at the raw rate (no daemon), 22.6% slow on node 2 or 22.6% fast on node 3. The plans with a rate step, a suspend, a pause, a stop, a restart or the Raft group, and one of the two reboot plans, run node 3 4% fast and the rest exact; the partition, delayed-message and maintenance plans and the other reboot plan run exact clocks |
 | Tables | Each plan's changes, plus 1 for a renewal or a fold; up to 5 in `deep-peering`'s free plan |
-| Faults per behavior | 1; 2 in the plans that pair a rate step or a reboot with a partition, and in the Raft partition plan |
+| Faults per behavior | 1; 2 in the plans that pair a rate step, a pause, a suspend or a reboot with a partition, and in the Raft partition plan |
 
 **State the model holds**
 
@@ -3069,7 +3070,8 @@ million states, so it runs in `deep-leases`; the variants that need it run on it
 - **Leases.** Per node pair, counted on two clocks per node. The holder bounds each grantor's rate
   from the window's first grant and the latest of one grantor boot, asks again `rate_gap` after a
   window's first grant, and takes no lease before it has a bound. Every grant and heartbeat carries
-  the grantor's raw clock and boot ID; the step check trips at `1/(1 − m)`, with `m` the margin of
+  the grantor's raw clock, boot ID and run ID, which the grantor draws again when it restarts and
+  on `Resumed`; a new boot ID or run ID starts a new window. The step check trips at `1/(1 − m)`, with `m` the margin of
   the lease from the last grant, and runs only against a grant that gave a lease. A grantor grants or
   renews only a holder that reported a table at least as new as its own; a grant after a lapse or a
   restart takes a new support epoch. With lease expiry left open, a grantor's grants to an old
@@ -3105,7 +3107,8 @@ plans enable.
 - A message duplicated or held for any time.
 - A member's disk formatted again while its node stays up.
 - A node cut off from the control plane that still reaches its peers.
-- A suspend, or a VM pause with every clock frozen, with or without a marker change.
+- A suspend, or a VM pause with every clock frozen, with or without a marker change, of a holder or
+  of a grantor whose holder's rate window is open.
 - A grantor that reboots within `rate_window`, its raw clock restarted near 0 and its rate changed
   by 2%; a process restart in the same boot.
 - A partition, healing or not, and messages delayed any time.
@@ -3150,7 +3153,8 @@ only the property it must break.
 9. No node's table epoch or interval number goes backwards, and no PG's last activated interval goes
    down: a late report for interval 2, folded after 3 was recorded, changes nothing.
 10. A node pair whose raw rates differ by up to 4%, with no pause, reboot, network fault or refusal
-    since first contact, holds a lease within `rate_gap` (plus rounding, at the model's zero round
+    since first contact, and whose holder ended no leases on a step-check trip from a pair a fault
+    touched, holds a lease within `rate_gap` (plus rounding, at the model's zero round
     trips) of first contact and keeps it with no step-check trip. The bound is in time, so `ci`
     checks it as an invariant over the model's clocks.
 11. Once a dead daemon's reissued write W′ and a later write W2 to the same block are acknowledged,
@@ -3181,6 +3185,7 @@ rule. A variant that passes means the model is too weak.
 | That, with the step check at `1 + lease_drift / 2` restarting the window on each trip | 1 | As above; the pair never gets a bound |
 | Widening only past `1 + 2 lease_drift` | 1 | Grantor 4% fast: the margin stays 3% where 3.85% is needed, and a partition follows a grant |
 | The margin `max(lease_drift, 1 − 1/B)` | 1 | Pair measured at +4%, then the grantor's raw rate rises 0.4% and a partition follows a grant |
+| No new window at a grantor's new run ID | 1 | Grantor 4% fast is paused with a marker change just after a window's first grant; the bound across the pause comes out below 1, the lease on `lease_drift` alone outlasts the grant, and a partition follows |
 | No new window at a grantor's new boot ID | 1 | Grantor reboots within `rate_window` and its new boot runs 2% fast; its first grant gives a bound below 1 and a lease on `lease_drift` alone, and a partition follows |
 | A reboot that takes no time | 1 | Grantor reboots the instant after a grant; its new boot runs 2% fast, so its restart wait ends before the holder's lease |
 | The step check at `1 + lease_drift / 2`, with no lease before a bound | 10 | Grantor 4% fast: the check trips on the first heartbeat after the lease forms |
@@ -3208,8 +3213,11 @@ rule. A variant that passes means the model is too weak.
   primary led the PG since, property 11 holds in `ci-peering` with no table of incarnations that
   survives a primary change, and the two incarnation rows above each fail.
 - The model leaves out a VM stop in place that no queued grantor message spans, whose hypervisor
-  dropped or delayed what was sent during it: that case can leave up to a heartbeat of stale reads,
-  and stays the open question "Stops in place on QEMU guests that run on kvm-clock" in design.md.
+  dropped or delayed what was sent during it, and a grantor's stop in place followed by a partition:
+  a stop in place draws no new run ID, so a holder's bound across it is too low until the step check
+  on the next heartbeat. Either can leave up to a heartbeat of stale reads, and stays the open
+  question "Stops in place on QEMU guests that run on kvm-clock" in design.md; the stop plan has no
+  partition.
 - The model leaves out a grantor's raw rate rising past the headroom (`lease_drift / 2`) followed by
   lost or delayed heartbeats, which overlaps by up to `(Δρ − lease_drift / 2) · primary_lease`, and a
   pause just under the step check's threshold seen only by a late heartbeat: its rate steps are
@@ -3615,8 +3623,9 @@ sender's table epoch (`uint64`, per the PG epochs study) and the PG's interval n
 | Punch | PG fields, session ID, incarnation, chunk ID, byte range, optional `expect_ver`, snapshot epoch; the version when sent to a member |
 | Read | PG fields, chunk ID, byte range, optional `at_ver` |
 | Read reply | Bytes and version; or a refusal (wrong interval, chunk on the missing list, unfound) |
-| Grant | Support epoch, and the grantor's `CLOCK_MONOTONIC_RAW` reading `g`; no table epoch, since a grantor grants only a holder that reported a table at least as new as its own ([Epoch change model](#epoch-change-model)) |
-| Heartbeat between a node pair | The grantor's `CLOCK_MONOTONIC_RAW`, on every heartbeat |
+| Lease request, holder to grantor | The holder's table epoch; the grantor grants only if it is at least its own, and otherwise refuses with its own table epoch |
+| Grant | Support epoch; the grantor's boot ID, run ID and `CLOCK_MONOTONIC_RAW` reading `g`; no table epoch, since the request reported the holder's ([Epoch change model](#epoch-change-model)) |
+| Heartbeat between a node pair | The sender's table epoch; as a grantor, its boot ID, run ID and `CLOCK_MONOTONIC_RAW`, on every heartbeat |
 | Heartbeat to the authority | Activation reports per PG; each member's acknowledgment latency; per disk its log ID, fill, oldest unfinished I/O age and whether its log has failed |
 | `member_timeout` report, primary to authority | Member, PG |
 | Direct probe, authority to a disk's owner loop | Disk ID |
