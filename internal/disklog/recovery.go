@@ -1449,7 +1449,7 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 	}
 	if r.hasManifest {
 		l.chain, l.state = r.chain, r.manifest.Indexes
-		l.live = []liveChain{{pos: r.manifestPos, entries: r.chain, replay: replayFloor(&r.manifest)}}
+		l.live = []liveChain{{pos: r.manifestPos, entries: r.chain, indexes: r.manifest.Indexes, replay: replayFloor(&r.manifest)}}
 	}
 	l.pieces, l.namedLSN = r.pieces, r.manifestPos.LSN
 	for s := uint32(1); s < r.sb.SegmentCount; s++ {

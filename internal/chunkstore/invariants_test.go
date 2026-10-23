@@ -12,6 +12,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -25,6 +26,7 @@ const (
 	invOpenSeqs = "a recovered log opens its next segment past every open sequence on disk"
 	invUsage    = "each chunk segment counts the blocks the index refers to"
 	invReuse    = "no segment is reused while it holds a record the index needs"
+	invNamed    = "no segment is reused or trimmed while the named manifest needs it"
 	invGain     = "every chunk victim frees more than its copies fill"
 	invHeld     = "the bytes held beyond the manifests stay within the reserve"
 	invNoSpace  = "no ordinary write fails with NoSpace while the cleaner has a victim"
@@ -52,6 +54,7 @@ func (h *harness) register() {
 	found(invOpenSeqs)
 	h.inv.Register(invUsage, h.usageErr)
 	h.inv.Register(invReuse, h.recordsInPlace)
+	found(invNamed)
 	h.inv.Register(invGain, h.victimsGain)
 	found(invHeld)
 	found(invNoSpace)
@@ -205,6 +208,77 @@ func (h *harness) recordsInPlace() error {
 		}
 	}
 	return nil
+}
+
+// reused breaks invNamed when segment is opened again, written a chunk slot or trimmed while the
+// manifest recovery would load, the one at NamedLSN, needs it: it lists a piece there, of its own
+// or of a run it names past the run's merge bound, or a record there lies past its replay points.
+func (h *harness) reused(segment uint32, how string) {
+	if !h.s.Serving() {
+		return
+	}
+	h.namedNeeds()
+	if need, ok := h.needs[segment]; ok {
+		h.violate(invNamed, fmt.Errorf("segment %d was %s while the manifest at LSN %d, which a durable segment header names, needs %s there", segment, how, h.namedAt, need))
+	}
+	if held := h.s.Index().Tree().Pieces(nil); slices.ContainsFunc(h.namedRuns, func(p disklog.BlobRef) bool { return !slices.Contains(held, p) }) {
+		h.windowReuses++
+	}
+	if n := h.newestIn[segment]; n > h.floor {
+		h.violate(invNamed, fmt.Errorf("segment %d was %s while it holds the record at LSN %d, past the replay point %d of the manifest at LSN %d, which a durable segment header names", segment, how, n, h.floor, h.namedAt))
+	}
+	delete(h.newestIn, segment)
+}
+
+// namedNeeds sets needs and floor from the manifest at NamedLSN, reading each run's pieces from
+// its root as the harness saw it written.
+func (h *harness) namedNeeds() {
+	log := h.s.Log()
+	if h.needs != nil && h.namedAt == log.NamedLSN() {
+		return
+	}
+	h.needs, h.namedRuns, h.namedAt, h.floor = map[uint32]string{}, h.namedRuns[:0], log.NamedLSN(), 0
+	pieces, indexes := log.Named(nil)
+	for _, p := range pieces {
+		h.needs[p.Segment] = fmt.Sprintf("its piece at LSN %d", p.LSN)
+	}
+	for i, ix := range indexes {
+		if i == 0 || ix.ReplayLSN < h.floor {
+			h.floor = ix.ReplayLSN
+		}
+		for _, root := range ix.Runs {
+			h.needs[root.Segment] = fmt.Sprintf("the root at LSN %d of a run it names", root.LSN)
+			h.namedRuns = append(h.namedRuns, root)
+			k, ok := h.recAt[root.LSN]
+			if !ok || int(root.Entry) >= len(h.records[k].payloads) {
+				h.violate(invNamed, fmt.Errorf("the manifest at LSN %d names a run whose root at LSN %d was never written", h.namedAt, root.LSN))
+				continue
+			}
+			refs, err := lsm.RootRefs(h.records[k].payloads[root.Entry], nil)
+			if err != nil {
+				h.violate(invNamed, fmt.Errorf("the root at LSN %d of a run the manifest at LSN %d names: %w", root.LSN, h.namedAt, err))
+			}
+			if b := slices.IndexFunc(ix.Bounds, func(b disklog.MergeBound) bool { return b.Run == root }); b >= 0 {
+				refs = refs[min(int(ix.Bounds[b].Dead), len(refs)):]
+			}
+			h.namedRuns = append(h.namedRuns, refs...)
+			for _, r := range refs {
+				h.needs[r.Segment] = fmt.Sprintf("the piece at LSN %d of the run whose root is at LSN %d", r.LSN, root.LSN)
+			}
+		}
+	}
+}
+
+// recoveredNewest takes each used segment's newest LSN from the recovered usage table, since a
+// crash may have lost the records written to it last, and has needs read again.
+func (h *harness) recoveredNewest() {
+	clear(h.newestIn)
+	for s := uint32(1); s < h.s.sb.SegmentCount; s++ {
+		if u, _ := h.s.Log().Usage(s); u.State == disklog.SegmentUsed {
+			h.newestIn[s] = u.Newest
+		}
+	}
+	h.needs = nil
 }
 
 // noteFilled shares the blocks of a record on the cleaner's lane among the victims its copy
@@ -748,14 +822,21 @@ func TestPlantedCleanerBugsBreakTheirInvariants(t *testing.T) {
 			overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 		}
 	}
+	atReserve := func(h *harness) {
+		r := core.NewRand(13)
+		for range 600 {
+			overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+		}
+	}
 	for _, c := range []struct {
 		want  string
 		plant plants
+		log   disklog.Plants
 		off   string
 		run   func(h *harness)
 	}{
-		{invGain, plants{noGainGuard: true}, "", newBlocks},
-		{invMove, plants{moveOverWrites: true}, "", func(h *harness) {
+		{invGain, plants{noGainGuard: true}, disklog.Plants{}, "", newBlocks},
+		{invMove, plants{moveOverWrites: true}, disklog.Plants{}, "", func(h *harness) {
 			h.hold = true
 			h.s.cfg.CleanFree = 100
 			h.readNow(chunk(1), 0, 1)
@@ -771,9 +852,11 @@ func TestPlantedCleanerBugsBreakTheirInvariants(t *testing.T) {
 			h.hold = false
 			h.settle()
 		}},
-		{invReuse, plants{freeLive: true}, invUsage, overwrites},
-		{invUsage, plants{freeLive: true}, "", overwrites},
-		{invNoSpace, plants{noSpaceWithVictim: true}, "", func(h *harness) {
+		{invReuse, plants{freeLive: true}, disklog.Plants{}, invUsage, overwrites},
+		{invUsage, plants{freeLive: true}, disklog.Plants{}, "", overwrites},
+		{invNamed, plants{}, disklog.Plants{PiecesDeadAtOnce: true}, "", atReserve},
+		{invNamed, plants{}, disklog.Plants{CleanableIgnoresReplay: true}, "", atReserve},
+		{invNoSpace, plants{noSpaceWithVictim: true}, disklog.Plants{}, "", func(h *harness) {
 			r := core.NewRand(1)
 			for range 2200 {
 				overwrite(h, r, []core.ChunkID{chunk(1), chunk(2), chunk(3), chunk(4)}, 64)
@@ -781,7 +864,9 @@ func TestPlantedCleanerBugsBreakTheirInvariants(t *testing.T) {
 		}},
 	} {
 		t.Run(c.want, func(t *testing.T) {
-			h := primed(t)
+			cfg := cleanConfig()
+			cfg.Log.Plants = c.log
+			h := primedWith(t, cfg)
 			if c.want == invNoSpace {
 				cfg := cleanConfig()
 				cfg.Log.Reserve, cfg.CleanFree = 4, -1

@@ -59,6 +59,16 @@ type Config struct {
 	TrimRate uint64
 	// NoTrim never discards a freed segment, as on a disk that is a file, where punching holes would undo writing it in full.
 	NoTrim bool
+	// Plants plants bugs in the log, which only its owners' tests ask for.
+	Plants Plants
+}
+
+// Plants are bugs a test of the log's owner plants to show that its invariants catch them.
+type Plants struct {
+	// PiecesDeadAtOnce drops dead run pieces before a segment header names the manifest that dropped them.
+	PiecesDeadAtOnce bool
+	// CleanableIgnoresReplay lets the cleaner take a segment holding records past the replay points.
+	CleanableIgnoresReplay bool
 }
 
 const (
@@ -500,6 +510,7 @@ type chainEntry struct {
 type liveChain struct {
 	pos     ManifestPos
 	entries []chainEntry
+	indexes []ManifestIndex
 	replay  uint64
 }
 
@@ -1394,7 +1405,7 @@ func (l *Log) checkpointProgress(r *round, out *Output) {
 				l.chain = append(slices.Clip(l.chain), entry)
 			}
 			l.state = cp.state
-			l.live = append(l.live, liveChain{pos: l.manifest, entries: l.chain, replay: replayFloor(&cp.manifest)})
+			l.live = append(l.live, liveChain{pos: l.manifest, entries: l.chain, indexes: cp.state, replay: replayFloor(&cp.manifest)})
 			for _, s := range cp.trims {
 				l.trims.named = append(l.trims.named, namedTrim{segment: s, lsn: l.manifest.LSN})
 			}

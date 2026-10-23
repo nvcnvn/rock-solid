@@ -156,7 +156,7 @@ func (l *Log) PiecesDead(refs []BlobRef) error {
 		}
 	}
 	for _, ref := range refs {
-		if l.manifest.LSN <= l.namedLSN {
+		if l.manifest.LSN <= l.namedLSN || l.cfg.Plants.PiecesDeadAtOnce {
 			l.dropPiece(ref)
 			continue
 		}

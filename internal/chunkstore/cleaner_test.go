@@ -329,9 +329,10 @@ func TestAPassFinishesOnADiskFilledToItsReserve(t *testing.T) {
 		overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 		low = min(low, h.s.Log().FreeOutsideReserve())
 	}
-	if low > 0 || h.s.CleanStats().Passes == passes {
-		t.Fatalf("free segments outside the reserve fell to %d; %d passes", low, h.s.CleanStats().Passes-passes)
+	if low > 0 || h.s.CleanStats().Passes == passes || h.windowReuses == 0 {
+		t.Fatalf("free segments outside the reserve fell to %d; %d passes; %d segments reused while the index no longer held a piece the named manifest needs", low, h.s.CleanStats().Passes-passes, h.windowReuses)
 	}
+	t.Logf("%d segments reused while the index no longer held a piece the named manifest needs", h.windowReuses)
 	h.holds()
 }
 
