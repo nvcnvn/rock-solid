@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -19,7 +20,7 @@ import (
 const (
 	invVersions = "no two writes of a chunk get one version"
 	invRebuild  = "a rebuilt chunk index equals the recovered one"
-	invReplay   = "replay maps every copy entry where the owner applied its move"
+	invReplay   = "replay rebuilds the index the store held"
 	invIndex    = "the index passes its own check"
 	invAcked    = "acknowledged writes are readable"
 	invPunched  = "punched ranges read zeros"
@@ -535,6 +536,13 @@ func TestPlantedBugsBreakTheirInvariants(t *testing.T) {
 			h.sync(h.write(chunkC, 0, fill(10, 1), 0))
 			h.sync(h.write(chunkC, 0, fill(10, 2), 1))
 			h.rebuild()
+		}},
+		{invReplay, plants{}, func(h *harness) {
+			h.sync(h.write(chunkC, 0, fill(3*core.BlockSize, 1), 0))
+			h.sync(h.punch(chunkC, 0, core.BlockSize, 0))
+			h.disk.Crash(func(int, core.LBA) bool { return false })
+			h.plant = plants{replayDropsPunches: true}
+			h.recoverStore(disklog.ModeOpen)
 		}},
 		{invPunched, plants{punchKeepsHead: true}, func(h *harness) {
 			h.sync(h.write(chunkC, 0, fill(3*core.BlockSize, 1), 0))

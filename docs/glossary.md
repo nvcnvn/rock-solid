@@ -386,7 +386,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Deterministic simulation testing (DST), seed.** Running a whole cluster (nodes, disks, network, clients) inside one process, driven by one random number generator. The simulator injects crashes, lost messages and disk faults. The same **seed** produces exactly the same run, so any bug it finds can be replayed. See [Testing strategy](design.md#testing-strategy).
 
-**Invariant.** A property that must hold at every step, such as "every acknowledged write is readable". The simulator keeps them in one registry, the invariant checker, which checks them all whenever a simulated run settles and names the first one broken. See [test scenarios](test-scenarios.md#invariant-checker).
+**Invariant.** A property that must hold at every step, such as "every acknowledged write is readable". Each simulated run keeps its invariants in a registry, the invariant checker, which checks them at the run's check points, after every step unless a component's tests set another cadence, and names the first one broken. See [test scenarios](test-scenarios.md#invariant-checker).
 
 **Fault injection, nemesis.** Deliberately causing failures (kills, partitions, slow disks) to see whether the system survives them. Jepsen calls the component that does this the nemesis.
 

@@ -196,10 +196,12 @@ type plants struct {
 	replayLate bool
 	skipped    bool
 	// forgetVersion starts a chunk taken up again at version 0 rather than its newest;
-	// rebuildSkipsFreezes drops the freezes a rebuild replays; punchKeepsHead leaves a punch's
-	// partial first block whole, its old bytes past the punch's start kept.
+	// rebuildSkipsFreezes drops the freezes a rebuild replays; replayDropsPunches drops the punches
+	// any recovery replays; punchKeepsHead leaves a punch's partial first block whole, its old bytes
+	// past the punch's start kept.
 	forgetVersion       bool
 	rebuildSkipsFreezes bool
+	replayDropsPunches  bool
 	punchKeepsHead      bool
 	// ackEarly answers a write or punch OK as it is submitted, before its records are durable;
 	// freeNextSlot also hands the log the slot after each chunk slot it frees.
@@ -1098,6 +1100,9 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 		}
 		if s.plant.rebuildSkipsFreezes && s.rebuilt {
 			ev.Entries = slices.DeleteFunc(ev.Entries, func(e disklog.Entry) bool { return e.Kind == disklog.EntryFreeze })
+		}
+		if s.plant.replayDropsPunches {
+			ev.Entries = slices.DeleteFunc(ev.Entries, func(e disklog.Entry) bool { return e.Kind == disklog.EntryPunch })
 		}
 		if ev.LSN > s.replayLSN {
 			if err := s.ix.Apply(ev); err != nil {
