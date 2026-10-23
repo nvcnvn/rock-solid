@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"bytes"
 	"fmt"
 	"maps"
 	"slices"
@@ -14,8 +15,6 @@ const SectorSize = 512
 const sectorsPerBlock = core.BlockSize / SectorSize
 
 const allSectors = 1<<sectorsPerBlock - 1
-
-var zeroBlock = make([]byte, core.BlockSize)
 
 // DiskLatency is the simulated time each kind of action takes on a healthy disk.
 type DiskLatency struct {
@@ -39,6 +38,10 @@ type DiskSettings struct {
 func DefaultDiskSettings() DiskSettings { return DiskSettings{Latency: DefaultDiskLatency} }
 
 // Disk is the simulator's disk: writes stay volatile until a flush, reads see them at once, and a crash lands each unflushed block or not.
+//
+// A block is kept without its trailing zeros, in a slice of its own, and what reads see only
+// where it differs from what is durable, so that a disk of zeros and short record headers fits
+// in memory however large it is.
 type Disk struct {
 	blocks      uint64
 	latency     DiskLatency
@@ -48,10 +51,18 @@ type Disk struct {
 	rand        *core.Rand
 	executed    uint64
 	durable     map[core.LBA][]byte
-	view        map[core.LBA][]byte
+	ahead       map[core.LBA]viewBlock
+	scratch     []byte
 	unflushed   []blockWrite
 	faults      []Fault
 	misdirected []MisdirectedWrite
+}
+
+// viewBlock is what reads see of a block whose view differs from its durable content: ok false
+// for a block never written.
+type viewBlock struct {
+	data []byte
+	ok   bool
 }
 
 type blockWrite struct {
@@ -190,7 +201,7 @@ func NewDiskWith(blocks uint64, s DiskSettings) *Disk {
 		predRand: root.Fork(),
 		rand:     root.Fork(),
 		durable:  map[core.LBA][]byte{},
-		view:     map[core.LBA][]byte{},
+		ahead:    map[core.LBA]viewBlock{},
 	}
 }
 
@@ -283,11 +294,8 @@ func (d *Disk) read(pool core.BufPool, a *core.Action, op DiskOp) core.DiskError
 	}
 	for i := range op.Blocks {
 		blk := dst[i*core.BlockSize : (i+1)*core.BlockSize]
-		if src, ok := d.view[a.LBA+core.LBA(i)]; ok {
-			copy(blk, src)
-		} else {
-			clear(blk)
-		}
+		src, _ := d.view(a.LBA + core.LBA(i))
+		clear(blk[copy(blk, src):])
 	}
 	if f != nil && f.Effect == DamageRead {
 		dst[d.rand.Below(a.Len)] ^= byte(d.rand.Range(1, 255))
@@ -299,7 +307,7 @@ func (d *Disk) write(pool core.BufPool, a *core.Action, op DiskOp) core.DiskErro
 	if !d.validRange(a) {
 		return core.DiskInvalidRange
 	}
-	img := gather(pool, a)
+	img := d.gather(pool, a)
 	at := a.LBA
 	f := d.fault(op)
 	if f != nil && f.Effect == Misdirect {
@@ -307,7 +315,7 @@ func (d *Disk) write(pool core.BufPool, a *core.Action, op DiskOp) core.DiskErro
 	}
 	failed := f != nil && f.Effect == FailIO
 	for i := 0; i < len(img); i += core.BlockSize {
-		d.stage(at+core.LBA(i/core.BlockSize), img[i:i+core.BlockSize:i+core.BlockSize], failed)
+		d.stage(at+core.LBA(i/core.BlockSize), compact(img[i:i+core.BlockSize]), failed)
 	}
 	if failed {
 		return core.DiskIO
@@ -315,8 +323,9 @@ func (d *Disk) write(pool core.BufPool, a *core.Action, op DiskOp) core.DiskErro
 	return core.DiskOK
 }
 
-func gather(pool core.BufPool, a *core.Action) []byte {
-	img := make([]byte, 0, a.Len)
+// gather returns a write's bytes in the disk's scratch buffer, valid until the next gather.
+func (d *Disk) gather(pool core.BufPool, a *core.Action) []byte {
+	img := d.scratch[:0]
 	if len(a.Vec) == 0 {
 		img = append(img, pool.Bytes(a.Buf)[:a.Len]...)
 	}
@@ -326,7 +335,20 @@ func gather(pool core.BufPool, a *core.Action) []byte {
 	if uint64(len(img)) != a.Len {
 		panic(fmt.Sprintf("sim: write io%d gathers %d bytes, says %d", a.IO, len(img), a.Len))
 	}
+	d.scratch = img
 	return img
+}
+
+// compact returns block without its trailing zeros, in a slice of its own, or nil for zeros.
+func compact(block []byte) []byte {
+	n := len(block)
+	for n > 0 && block[n-1] == 0 {
+		n--
+	}
+	if n == 0 {
+		return nil
+	}
+	return bytes.Clone(block[:n])
 }
 
 // inFlight adds a write issued but not completed to the block writes the next crash decides, leaving what reads see unchanged.
@@ -334,9 +356,9 @@ func (d *Disk) inFlight(pool core.BufPool, a *core.Action) {
 	if !d.validRange(a) {
 		return
 	}
-	img := gather(pool, a)
+	img := d.gather(pool, a)
 	for i := 0; i < len(img); i += core.BlockSize {
-		d.unflushed = append(d.unflushed, blockWrite{lba: a.LBA + core.LBA(i/core.BlockSize), data: img[i : i+core.BlockSize : i+core.BlockSize]})
+		d.unflushed = append(d.unflushed, blockWrite{lba: a.LBA + core.LBA(i/core.BlockSize), data: compact(img[i : i+core.BlockSize])})
 	}
 }
 
@@ -363,7 +385,36 @@ func (d *Disk) misdirect(f *Fault, op DiskOp) core.LBA {
 
 func (d *Disk) stage(lba core.LBA, data []byte, undecided bool) {
 	d.unflushed = append(d.unflushed, blockWrite{lba: lba, data: data, undecided: undecided})
-	d.view[lba] = data
+	d.ahead[lba] = viewBlock{data, true}
+}
+
+// view returns the block at lba as reads see it, and whether it was ever written.
+func (d *Disk) view(lba core.LBA) ([]byte, bool) {
+	if v, ok := d.ahead[lba]; ok {
+		return v.data, v.ok
+	}
+	b, ok := d.durable[lba]
+	return b, ok
+}
+
+// setDurable makes data the durable block at lba, leaving what reads see as it was.
+func (d *Disk) setDurable(lba core.LBA, data []byte) {
+	if _, ok := d.ahead[lba]; !ok {
+		old, had := d.durable[lba]
+		d.ahead[lba] = viewBlock{old, had}
+	}
+	d.durable[lba] = data
+}
+
+// settle forgets what reads see at lba where it equals what is durable.
+func (d *Disk) settle(lba core.LBA) {
+	v, ok := d.ahead[lba]
+	if !ok {
+		return
+	}
+	if b, had := d.durable[lba]; had == v.ok && bytes.Equal(b, v.data) {
+		delete(d.ahead, lba)
+	}
 }
 
 func (d *Disk) fsync(op DiskOp) core.DiskError {
@@ -384,7 +435,7 @@ func (d *Disk) trim(a *core.Action, op DiskOp) core.DiskError {
 	failed := d.fault(op) != nil
 	if d.rand.Chance(1, 2) {
 		for i := range op.Blocks {
-			d.stage(a.LBA+core.LBA(i), zeroBlock, failed)
+			d.stage(a.LBA+core.LBA(i), nil, failed)
 		}
 	}
 	if failed {
@@ -404,18 +455,13 @@ func (d *Disk) Flush() {
 		reverted = append(reverted, w.lba)
 		d.land(w, d.seededLanding(d.rand))
 	}
-	d.unflushed = nil
 	for _, lba := range reverted {
-		d.showDurable(lba)
+		delete(d.ahead, lba)
 	}
-}
-
-func (d *Disk) showDurable(lba core.LBA) {
-	if blk, ok := d.durable[lba]; ok {
-		d.view[lba] = blk
-	} else {
-		delete(d.view, lba)
+	for _, w := range d.unflushed {
+		d.settle(w.lba)
 	}
+	d.unflushed = nil
 }
 
 func (d *Disk) seededLanding(r *core.Rand) uint8 {
@@ -432,16 +478,17 @@ func (d *Disk) land(w blockWrite, sectors uint8) {
 	switch sectors {
 	case 0:
 	case allSectors:
-		d.durable[w.lba] = w.data
+		d.setDurable(w.lba, w.data)
 	default:
-		blk := make([]byte, core.BlockSize)
+		blk, data := make([]byte, core.BlockSize), make([]byte, core.BlockSize)
 		copy(blk, d.durable[w.lba])
+		copy(data, w.data)
 		for s := range sectorsPerBlock {
 			if sectors&(1<<s) != 0 {
-				copy(blk[s*SectorSize:(s+1)*SectorSize], w.data[s*SectorSize:])
+				copy(blk[s*SectorSize:(s+1)*SectorSize], data[s*SectorSize:])
 			}
 		}
-		d.durable[w.lba] = blk
+		d.setDurable(w.lba, compact(blk))
 	}
 }
 
@@ -481,22 +528,29 @@ func (d *Disk) crash(sectors func(i int, w blockWrite) uint8) {
 		d.land(w, sectors(i, w))
 	}
 	d.unflushed = nil
-	d.view = maps.Clone(d.durable)
+	clear(d.ahead)
 }
 
 // Read returns n blocks from lba as reads see them now.
 func (d *Disk) Read(lba core.LBA, n uint64) []byte {
 	b := make([]byte, n*core.BlockSize)
 	for i := range n {
-		if src, ok := d.view[lba+core.LBA(i)]; ok {
-			copy(b[i*core.BlockSize:], src)
-		}
+		src, _ := d.view(lba + core.LBA(i))
+		copy(b[i*core.BlockSize:], src)
 	}
 	return b
 }
 
-// Durable returns the block at lba as a crash that lands nothing unflushed would leave it, or nil if it was never written; the caller must not change it.
-func (d *Disk) Durable(lba core.LBA) []byte { return d.durable[lba] }
+// Durable returns the block at lba as a crash that lands nothing unflushed would leave it, or nil if it was never written.
+func (d *Disk) Durable(lba core.LBA) []byte {
+	b, ok := d.durable[lba]
+	if !ok {
+		return nil
+	}
+	blk := make([]byte, core.BlockSize)
+	copy(blk, b)
+	return blk
+}
 
 // Put writes whole blocks at lba durably, as content left on the disk before a test starts.
 func (d *Disk) Put(lba core.LBA, data []byte) {
@@ -504,10 +558,11 @@ func (d *Disk) Put(lba core.LBA, data []byte) {
 		panic(fmt.Sprintf("sim: put of %d bytes at LBA %d", len(data), lba))
 	}
 	for i := 0; i < len(data); i += core.BlockSize {
-		blk := append([]byte(nil), data[i:i+core.BlockSize]...)
+		blk := compact(data[i : i+core.BlockSize])
 		at := lba + core.LBA(i/core.BlockSize)
 		d.durable[at] = blk
-		d.view[at] = blk
+		d.ahead[at] = viewBlock{blk, true}
+		d.settle(at)
 	}
 }
 
@@ -519,10 +574,12 @@ func (d *Disk) FlipBit(lba core.LBA, off int, mask byte) {
 	blk := make([]byte, core.BlockSize)
 	copy(blk, d.durable[lba])
 	blk[off] ^= mask
-	d.durable[lba] = blk
+	blk = compact(blk)
+	d.setDurable(lba, blk)
 	if !slices.ContainsFunc(d.unflushed, func(w blockWrite) bool { return w.lba == lba }) {
-		d.view[lba] = blk
+		d.ahead[lba] = viewBlock{blk, true}
 	}
+	d.settle(lba)
 }
 
 // FlipRandomBits flips one seeded bit in each written durable block with probability num/den, in LBA order, and returns the blocks flipped.

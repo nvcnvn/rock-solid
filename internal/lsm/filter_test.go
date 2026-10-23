@@ -241,7 +241,7 @@ func noFalsePositives(t *testing.T, tr *Tree, keys ...string) {
 	var it blockIter
 	for i, r := range tr.runs {
 		for _, k := range keys {
-			if _, held := r.blocks.get(&it, []byte(k)); !held && mayContain(r.filter, bloomHash([]byte(k))) {
+			if _, held := r.blocks.get(&it, []byte(k)); !held && r.mayContain([]byte(k), bloomHash([]byte(k))) {
 				t.Fatalf("run %d's filter lets %q through; pick another key", i, k)
 			}
 		}
@@ -286,7 +286,7 @@ func TestFilterHoldsNoFragments(t *testing.T) {
 	put(t, tr, nil, "a", "new")
 	delRange(t, tr, nil, "c", "f")
 	f.checkpoint(t, tr, nil)
-	if mayContain(tr.runs[0].filter, bloomHash([]byte("d"))) {
+	if tr.runs[0].mayContain([]byte("d"), bloomHash([]byte("d"))) {
 		t.Fatal("the newer run's filter lets d through")
 	}
 	if v, ok := tr.Get([]byte("d")); ok {

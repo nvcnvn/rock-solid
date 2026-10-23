@@ -758,10 +758,16 @@ func (h *harness) readChain(last disklog.Event) chain {
 	return c
 }
 
+func boundsEqual(a, b []disklog.MergeBound) bool {
+	return slices.EqualFunc(a, b, func(p, q disklog.MergeBound) bool {
+		return p.Run == q.Run && p.Dead == q.Dead && bytes.Equal(p.Key, q.Key)
+	})
+}
+
 func manifestsEqual(a, b disklog.Manifest) bool {
 	return a.BaseLSN == b.BaseLSN && a.NextSeq == b.NextSeq &&
 		slices.EqualFunc(a.Indexes, b.Indexes, func(x, y disklog.ManifestIndex) bool {
-			return x.Owner == y.Owner && x.ReplayLSN == y.ReplayLSN && slices.Equal(x.Runs, y.Runs)
+			return x.Owner == y.Owner && x.ReplayLSN == y.ReplayLSN && slices.Equal(x.Runs, y.Runs) && boundsEqual(x.Bounds, y.Bounds)
 		}) &&
 		slices.Equal(a.Segments, b.Segments)
 }

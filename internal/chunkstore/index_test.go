@@ -19,7 +19,7 @@ func newIndex(t testing.TB) *Index {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewIndex(tree)
+	return NewIndex(tree, 0, 0)
 }
 
 // record is a durable record of entries at LBA lba with one header block.
@@ -514,6 +514,40 @@ func BenchmarkApplyWrite(b *testing.B) {
 		ev.LBA = core.LBA(100 + 2*(i%4096))
 		if err := x.Apply(ev); err != nil {
 			b.Fatal(err)
+		}
+		i++
+	}
+}
+
+// The owner's apply of one cleaner move, a one-block copy of a chunk written block by block, with
+// the live counts tracked: the parallel cleaner spike's bar is 42 to 72 ns per move (P4).
+func BenchmarkApplyMove(b *testing.B) {
+	x := newIndex(b)
+	x.TrackLive(true)
+	for blk := range uint16(core.BlocksPerChunk) {
+		if err := x.Apply(record(core.LBA(100+2*int(blk)), disklog.WriteEntry(1, chunk(1), 1, blk, 1))); err != nil {
+			b.Fatal(err)
+		}
+	}
+	ev := record(0, disklog.CopyEntry(1, chunk(1), 1, 0, 1, 1))
+	var changes []LiveChange
+	b.ReportAllocs()
+	i := 0
+	for b.Loop() {
+		blk := i % core.BlocksPerChunk
+		round := i / core.BlocksPerChunk
+		from := core.LBA(101 + 2*blk)
+		if round > 0 {
+			from = core.LBA(1<<20 + 2*(round-1)*core.BlocksPerChunk + 2*blk + 1)
+		}
+		ev.Entries[0].First, ev.Entries[0].Source = uint16(blk), from
+		ev.LBA = core.LBA(1<<20 + 2*round*core.BlocksPerChunk + 2*blk)
+		if err := x.Apply(ev); err != nil {
+			b.Fatal(err)
+		}
+		changes = x.TakeChanges(changes[:0])
+		if len(changes) != 3 {
+			b.Fatalf("move %d kept %d changes; it did not apply", i, len(changes))
 		}
 		i++
 	}

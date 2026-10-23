@@ -232,9 +232,9 @@ func TestRecoverReusedSegmentRowComesFromReplay(t *testing.T) {
 	if i := slices.IndexFunc(listed, func(u disklog.SegmentUsage) bool { return u.Segment == 1 }); i < 0 || h.segmentSeq(1) < h.readManifestAt(h.named()).NextSeq {
 		t.Fatalf("the named manifest's table %+v does not list segment 1, or its new header is below NextSeq", listed)
 	}
-	usage := disklog.SegmentUsageOf(h.log)
+	usage := disklog.ChunkUsageOf(h.log)
 	res := h.reopen()
-	if got := disklog.SegmentUsageOf(h.log); !slices.Equal(got, usage) {
+	if got := disklog.ChunkUsageOf(h.log); !slices.Equal(got, usage) {
 		t.Fatalf("usage after recovery %+v, before %+v", got, usage)
 	}
 	if row, _ := usageRow(h, 1); row.Newest <= res.loaded.BaseLSN {

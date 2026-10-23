@@ -87,6 +87,12 @@ type harness struct {
 	noted map[uint64]notedRound
 	// crashed is what was in flight when the last log was dropped, until a recovery settles it.
 	crashed crashedRounds
+	// trims is every TRIM the log issued, trimAt the time it issued each, and timerAt the time its
+	// TRIM timer was last armed for.
+	trims     []core.Action
+	trimAt    []core.Tick
+	timerAt   core.Tick
+	holdTrims bool
 }
 
 func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Config) *harness {
@@ -135,6 +141,12 @@ func (m logMachine) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action
 	h := m.h
 	h.ctx = *ctx
 	h.inPass, h.passOut = true, out
+	if ev.Kind == core.EvTimer {
+		h.log.OnEvent(ctx, ev, &h.out)
+		h.absorb()
+		h.inPass = false
+		return h.passOut
+	}
 	i := slices.IndexFunc(h.pending, func(p pendingIO) bool { return p.act.IO == ev.IO })
 	if ev.Kind != core.EvDiskDone || i < 0 {
 		h.t.Fatalf("event %+v for no pending action", *ev)
@@ -221,6 +233,13 @@ func (h *harness) absorb() {
 			if h.oracle != nil && h.log != nil && h.rec == nil {
 				h.noteRound(a)
 			}
+		case core.ActDiskTrim:
+			h.pending = append(h.pending, pendingIO{act: a})
+			h.trace = append(h.trace, fmt.Sprintf("trim %d+%d io%d", a.LBA, a.Len/core.BlockSize, a.IO))
+			h.trims = append(h.trims, a)
+			h.trimAt = append(h.trimAt, h.ctx.Now)
+		case core.ActSetTimer:
+			h.timerAt = a.At
 		case core.ActDiskFsync:
 			p := pendingIO{act: a}
 			if a.Linked {
@@ -243,6 +262,11 @@ func (h *harness) absorb() {
 	}
 	if h.rec == nil {
 		h.tickets.log = h.log
+		if h.log != nil {
+			if err := disklog.CheckMetaLive(h.log); err != nil {
+				h.t.Fatal(err)
+			}
+		}
 	}
 	from := len(h.events)
 	for _, ev := range h.out.Events {
@@ -273,15 +297,16 @@ func (h *harness) absorb() {
 	}
 }
 
-// noteRounds numbers the log's round writes and flushes by their record's LSN: the writes a
-// call emits start its newest rounds, and a round's flush takes the IO after its write's.
+// noteRounds numbers the log's round writes and flushes by their record's LSN: the record writes
+// a call emits start its newest rounds, a chunk slot's write goes just before its round's record
+// write, and a round's flush takes the IO after its record write's.
 func (h *harness) noteRounds() {
 	if h.rec != nil || h.log == nil {
 		return
 	}
 	writes := 0
 	for _, a := range h.out.Actions {
-		if a.Kind == core.ActDiskWrite {
+		if a.Kind == core.ActDiskWrite && !isSlotWrite(a) && !disklog.ZeroesASegment(h.log, a.IO) {
 			writes++
 		}
 	}
@@ -292,8 +317,13 @@ func (h *harness) noteRounds() {
 	for _, a := range h.out.Actions {
 		switch a.Kind {
 		case core.ActDiskWrite:
+			if disklog.ZeroesASegment(h.log, a.IO) {
+				continue
+			}
 			h.roundOf[a.IO] = next
-			next++
+			if !isSlotWrite(a) {
+				next++
+			}
 		case core.ActDiskFsync:
 			h.roundOf[a.IO] = h.roundOf[a.IO-1]
 		}
@@ -388,11 +418,18 @@ func (h *harness) feed(ev core.Event) {
 	h.absorb()
 }
 
-// run executes pending actions oldest first until none is left.
+// run executes pending actions oldest first until none is left, but TRIMs while holdTrims is set.
 func (h *harness) run() {
 	h.t.Helper()
 	for len(h.pending) > 0 {
-		h.step(0)
+		i := 0
+		for h.holdTrims && i < len(h.pending) && h.pending[i].act.Kind == core.ActDiskTrim {
+			i++
+		}
+		if i == len(h.pending) {
+			return
+		}
+		h.step(i)
 	}
 }
 
@@ -522,3 +559,5 @@ func (h *harness) close() {
 		h.t.Fatalf("%d pool buffers live after close", h.pool.Live())
 	}
 }
+
+func isSlotWrite(a core.Action) bool { return a.Len == core.ChunkSize && len(a.Vec) == 1 }

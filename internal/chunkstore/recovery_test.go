@@ -110,7 +110,7 @@ func (n *node) newIndex() *Index {
 	if err != nil {
 		n.t.Fatal(err)
 	}
-	return NewIndex(tree)
+	return NewIndex(tree, 0, 0)
 }
 
 func copyEvent(ev disklog.Event) disklog.Event {
@@ -220,6 +220,7 @@ func (n *node) handle(ev *disklog.Event) {
 			n.t.Fatal(err)
 		}
 		n.log, n.rec, n.recovered = log, nil, true
+		checkOpenSeqs(n.t, n.disk, log)
 	}
 }
 

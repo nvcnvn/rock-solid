@@ -230,3 +230,80 @@ func mayContain(b []byte, h uint32) bool {
 	}
 	return true
 }
+
+// addPrefix adds k's prefix alone, as a partition does for the key that fences it.
+func (f *filterWriter) addPrefix(k []byte) {
+	if f.what == WholeKeys {
+		return
+	}
+	p := prefixOf(f.prefix, k)
+	if len(p) == 0 || f.hasPfx && bytes.Equal(p, f.last) {
+		return
+	}
+	f.last, f.hasPfx = append(f.last[:0], p...), true
+	f.addHash(bloomHash(p))
+}
+
+// A run's filter is partitioned as RocksDB's partitioned filters are
+// (table/block_based/partitioned_filter_block.cc), one partition per merge step and one for a
+// flush: the filter's length u32, the filter, then whether a fence follows u8, its length u16 and
+// the fence, the greatest key the partition covers, which every partition but a complete run's
+// last has. A partition also holds its fence's prefix, so a prefix probe, which goes to the
+// partition its prefix falls in, finds keys with that prefix in later partitions.
+const (
+	partHdr     = 4
+	partTrailer = 3
+)
+
+// filterPart is a filter partition: its encoding, its filter and the fence it covers keys up to.
+type filterPart struct {
+	enc    []byte
+	bits   []byte
+	fence  []byte
+	fenced bool
+}
+
+// newPart encodes the partition of filter bits up to fence when fenced.
+func newPart(bits, fence []byte, fenced bool) filterPart {
+	enc := binary.LittleEndian.AppendUint32(make([]byte, 0, partHdr+len(bits)+partTrailer+len(fence)), uint32(len(bits)))
+	enc = append(enc, bits...)
+	var flag byte
+	if fenced {
+		flag = 1
+	} else {
+		fence = nil
+	}
+	enc = append(enc, flag)
+	enc = binary.LittleEndian.AppendUint16(enc, uint16(len(fence)))
+	enc = append(enc, fence...)
+	return filterPart{enc: enc, bits: enc[partHdr : partHdr+len(bits)], fence: enc[len(enc)-len(fence):], fenced: fenced}
+}
+
+// parseParts decodes a run's filter partitions, each holding what, every one but the last fenced,
+// the fences in increasing order.
+func parseParts(b []byte, what FilterKeys) ([]filterPart, bool) {
+	var parts []filterPart
+	for len(b) > 0 {
+		if len(b) < partHdr {
+			return nil, false
+		}
+		n := uint64(binary.LittleEndian.Uint32(b))
+		if n > uint64(len(b)-partHdr) || uint64(len(b)-partHdr)-n < partTrailer {
+			return nil, false
+		}
+		bits := b[partHdr : partHdr+n]
+		rest := b[partHdr+n:]
+		flag, fl := rest[0], int(binary.LittleEndian.Uint16(rest[1:]))
+		if flag > 1 || flag == 0 && fl != 0 || fl > len(rest)-partTrailer || !validFilter(bits, what) {
+			return nil, false
+		}
+		end := partHdr + int(n) + partTrailer + fl
+		p := filterPart{enc: b[:end], bits: bits, fence: rest[partTrailer : partTrailer+fl], fenced: flag == 1}
+		if k := len(parts); k > 0 && (!parts[k-1].fenced || bytes.Compare(p.fence, parts[k-1].fence) <= 0 && p.fenced) {
+			return nil, false
+		}
+		parts = append(parts, p)
+		b = b[end:]
+	}
+	return parts, len(parts) > 0
+}

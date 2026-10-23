@@ -126,7 +126,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats, plant crashPlant) (*ha
 				return
 			}
 			copy(h.pool.Bytes(buf), pattern(uint64(size), size))
-			tk, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), indexOwner, buf, uint64(size), &h.out)
+			tk, err := h.log.MergePiece(&h.ctx, int(r.Range(1, uint64(cfg.MergeWorkers))), indexOwner, buf, uint64(size), false, &h.out)
 			if err != nil {
 				t.Fatalf("seed %d: merge piece: %v", seed, err)
 			}
@@ -196,7 +196,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats, plant crashPlant) (*ha
 		}
 		acked, inFlight := h.log.DurableLSN(), uint64(h.log.InFlight())
 		newest, replayBytes := h.log.Manifest(), h.log.ReplayBytes()
-		usage := disklog.SegmentUsageOf(h.log)
+		usage := disklog.ChunkUsageOf(h.log)
 		if r.Chance(1, 4) {
 			st.restarts++
 		} else {
@@ -218,7 +218,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats, plant crashPlant) (*ha
 			return h, fmt.Errorf("seed %d cycle %d: rebuild: %w", seed, cycle, err)
 		}
 		rebuiltReplay := h.log.ReplayBytes()
-		rebuiltUsage := disklog.SegmentUsageOf(h.log)
+		rebuiltUsage := disklog.ChunkUsageOf(h.log)
 		res := h.recover(disklog.ModeOpen)
 		if res.err != nil {
 			t.Fatalf("seed %d cycle %d: open: %v", seed, cycle, res.err)
@@ -232,7 +232,7 @@ func crashSeed(t *testing.T, seed uint64, st *crashStats, plant crashPlant) (*ha
 		if h.disk.Unflushed() != 0 {
 			t.Fatalf("seed %d cycle %d: recovered with %d blocks unflushed", seed, cycle, h.disk.Unflushed())
 		}
-		if got := disklog.SegmentUsageOf(h.log); !slices.Equal(got, rebuiltUsage) || (inFlight == 0 && !slices.Equal(got, usage)) {
+		if got := disklog.ChunkUsageOf(h.log); !slices.Equal(got, rebuiltUsage) || (inFlight == 0 && !slices.Equal(got, usage)) {
 			t.Fatalf("seed %d cycle %d: open's usage %+v, rebuild's %+v, before the crash %+v", seed, cycle, got, rebuiltUsage, usage)
 		}
 		if h.log.ReplayBytes() != rebuiltReplay {

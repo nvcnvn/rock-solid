@@ -112,7 +112,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Committed version.** A version that every live member of the chunk's PG holds. Reads return only committed versions, so a reader never sees a write that a crash could still undo.
 
-**Punch, tombstone, purge.** A punch zeroes a range of a chunk and frees the blocks it covers whole, zeroing the edges of blocks it covers in part; punching a whole chunk deletes it and leaves a tombstone, a marker that says "deleted" so an older copy cannot bring the chunk back. A purge is the background job that punches every chunk of a deleted or truncated file. See [Freeing space](design.md#freeing-space).
+**Punch, tombstone, purge.** A punch zeroes a range of a chunk and frees the blocks it covers whole, zeroing the edges of blocks it covers in part; punching a whole chunk deletes it and leaves a tombstone, a marker that says "deleted" so an older copy cannot bring the chunk back. A purge is the background job that punches every chunk of a deleted or truncated file. Before it purges a truncated file it **drains** it: every other node with the file open takes the new size and waits for the writes it sent under the old one, so none of them lands past the cut afterwards. See [Freeing space](design.md#freeing-space).
 
 **Extent.** A run of consecutive blocks described by one entry: "blocks 8 to 15 of this chunk are at disk location X". Indexing extents rather than single blocks keeps indexes small.
 
@@ -174,7 +174,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Peering.** What a new primary does before serving a PG: it contacts members of every interval since the PG last activated, makes sure none of those intervals can complete any more writes, and agrees with the members on the newest version of every chunk; the versions it drops, never acknowledged, are always a chunk's newest. Each member keeps a **missing list**, the kept version of every chunk it still has to receive, so the next peering knows what this one decided. The term comes from Ceph. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
-**Session.** A client daemon's registration with the cluster, kept alive by a lease that the control plane renews on the node's heartbeat and alone declares expired. Its locks, open files and cache rights belong to the session, so they all end together when it expires.
+**Session.** A client daemon's registration with the cluster, kept alive by a lease that the control plane renews on the node's heartbeat and alone declares expired. Its locks, open files and cache rights belong to the session, so they all end together when it expires. A leader stretches each session's lease by how much faster its own clock runs than the client's, which it measures from the client's heartbeats, so that a new leader on a faster clock never declares a lease over before the client stops; a session it has not measured yet, such as a dead client's after a control-plane failover, it holds for `dead_wait` (20 s). See [Sessions and fencing](design.md#sessions-and-fencing).
 
 **Fencing.** Making sure a client that lost its rights can no longer act on them, even if it does not know yet: a paused or partitioned client may wake up and keep writing. rock-solid publishes an expired session as **fenced** in its **session table**, the versioned list of live sessions that every node caches, every storage node applies the table and rejects the session's writes, and only once all have acknowledged are its locks given to someone else. Timeouts alone cannot do this, because the client's own clock and scheduling cannot be trusted. See [Sessions and fencing](design.md#sessions-and-fencing).
 
@@ -248,7 +248,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Stream.** One of three sequences of segments the log appends to: hot (new writes), cold (cleaner copies and shards) and metadata (sorted runs, compactions, manifests). Each segment holds one kind of data, so it tends to empty all at once, which keeps cleaning cheap.
 
-**Lane.** A sequence of segments of one stream that fill one after another, at most one open at a time. Each stream has a shared lane, and each merge worker writes its output to a lane of its own in the metadata stream, so merge output does not mix with other data. Recovery reads each lane from just before the replay point and merges the lanes in LSN order. See [On-disk format](design.md#on-disk-format).
+**Lane.** A sequence of segments of one stream that fill one after another, at most one open at a time. Each stream has a shared lane; the records of chunk slot writes go to a lane of their own in the hot stream, the cleaner writes its copies to a lane of its own in the cold stream, and each merge worker writes its output to a lane of its own in the metadata stream, so none of them mixes with other data. Recovery reads each lane from just before the replay point and merges the lanes in LSN order. See [On-disk format](design.md#on-disk-format).
 
 **Chunk slot.** A chunk-sized place in a slot segment holding one whole chunk's data. It is freed when the chunk is rewritten or deleted, so whole chunks never need cleaning. See [On-disk format](design.md#on-disk-format).
 
@@ -286,11 +286,13 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Delete-only compaction.** Pebble's name for dropping whole tables that a newer range deletion covers, by editing the manifest instead of merging. See [The LSM tree](design.md#on-disk-format).
 
-**Run piece.** A sorted run is written to the log in pieces of at most one record each; the last, the root, lists the others, so a manifest names a run by its root. See [The LSM tree](design.md#on-disk-format).
+**Run piece.** A sorted run is written to the log in pieces of at most one record each; the last, the root, lists the others, so a manifest names a run by its root. No piece is ever listed by two roots. See [The LSM tree](design.md#on-disk-format).
+
+**Run rewrite.** A merge of one run alone, which writes the same keys again elsewhere in the run's place. The cleaner asks for one when a segment it wants to free holds a piece of a live run, instead of copying the piece. See [Cleaning](design.md#on-disk-format).
 
 **Fence pointer, prefix compression.** A run is cut into blocks, and the first key of each block is a fence pointer: binary search over them finds the one block that can hold a key. Inside a block, each key is stored as the bytes it shares with the key before it plus the rest, which shrinks sorted keys with long common prefixes; every 16th key, a restart point, is stored whole so a search can start there. This is LevelDB's block format, which Pebble and RocksDB keep.
 
-**Bloom filter, prefix filter.** A small structure that answers "is this key possibly in this run?" with no false negatives and a few false positives (about 1% at 10 bits per key), so a lookup can skip runs that cannot hold its key. A prefix filter holds key prefixes instead, such as a chunk's `(pool, h, chunk_id)`, so a floor or a scan inside one prefix can skip runs too. See [The LSM tree](design.md#on-disk-format).
+**Bloom filter, prefix filter.** A small structure that answers "is this key possibly in this run?" with no false negatives and a few false positives (about 1% at 10 bits per key), so a lookup can skip runs that cannot hold its key. A prefix filter holds key prefixes instead, such as a chunk's `(pool, h, chunk_id)`, so a floor or a scan inside one prefix can skip runs too. A run's filter is cut into *partitions*, one per merge step, each covering the keys up to its fence, so a step writes the filter of its own keys and a lookup probes only the partition covering its key. See [The LSM tree](design.md#on-disk-format).
 
 **Block cache.** Memory holding recently read blocks of runs that live on disk, so repeated lookups skip the disk. rock-solid needs one only when an index outgrows memory. See [The LSM tree](design.md#on-disk-format).
 
@@ -298,19 +300,19 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Point-in-time view.** A frozen view of an LSM tree at one moment, which a reader or a Raft snapshot uses without blocking writers.
 
-**Cleaner, garbage collection.** In a log, overwritten and deleted data leaves dead blocks scattered through old segments. The cleaner picks a **victim** segment, copies its still-live blocks to the head of the log and frees the whole segment for reuse. Also called segment cleaning or log garbage collection, and unrelated to Go's garbage collector.
+**Cleaner, garbage collection.** In a log, overwritten and deleted data leaves dead blocks scattered through old segments. The cleaner picks a **victim** segment, copies its still-live blocks to the head of the log and frees the whole segment for reuse. It weighs each candidate by **cost-benefit**, free space times age over the cost of copying, and skips one whose copy would cost about as much as it frees, the **net-gain guard**. Also called segment cleaning or log garbage collection, and unrelated to Go's garbage collector.
 
 **Write amplification.** Bytes actually written to the drive divided by bytes the user wrote. The cleaner's copying raises it, more so the fuller the disk is, which is why pools stop writes before disks are full. SSDs have their own internal write amplification on top. See [Volume size and capacity](design.md#volume-size-and-capacity).
 
 **Reserve.** Segments held back for the work that frees space, checkpoints, the cleaner and merge steps, since freeing space itself needs some free space. Ordinary writes wait while only the reserve is free.
 
-**Write stall, admission control.** Slowing or pausing new writes when background work (cleaning, checkpoints) falls behind, so the disk never runs out in the middle of it. RocksDB and Pebble call a pause a write stall; CockroachDB's admission control admits writes at the rate background work measurably keeps up, which is what rock-solid does. See [On-disk format](design.md#on-disk-format).
+**Write stall, admission control.** Slowing or pausing new writes when background work (cleaning, checkpoints) falls behind, so the disk never runs out in the middle of it. RocksDB and Pebble call a pause a write stall; CockroachDB's admission control admits writes at the rate background work measurably keeps up, which is what rock-solid does, through a *token bucket*: a counter of blocks that refills at that rate, which each admitted write draws down by its size, and while it is empty writes wait. See [On-disk format](design.md#on-disk-format).
 
-**Merge step, bound.** A merge installs its output a step at a time; each input run then holds only the keys above a bound key, the last key the merge has written, so the pieces it no longer needs are freed before the merge ends. ScyllaDB calls this incremental compaction. See [The LSM tree](design.md#on-disk-format).
+**Merge step, bound.** A merge installs its output a step at a time; each input run then holds only the keys above a bound key, the last key the step reached, so the pieces it no longer needs are freed before the merge ends. ScyllaDB calls this incremental compaction. See [The LSM tree](design.md#on-disk-format).
 
 **Quarantine.** Setting aside a segment that looks damaged: never reused, and reported for repair from another replica.
 
-**Segment usage table.** The list of which segments are in use or quarantined, how many live blocks each holds and its newest LSN, kept in the manifests: whole in a snapshot, the changed rows in an edit. Recovery takes free space from it instead of guessing from segment headers, and the cleaner picks victims by it. See [On-disk format](design.md#on-disk-format).
+**Segment usage table.** The list of which segments are in use or quarantined, how many live blocks each holds and its newest LSN, kept in the manifests: whole in a snapshot, the changed rows in an edit. Recovery takes free space from it instead of guessing from segment headers, and the cleaner picks victims by it. The live counts are kept current as data dies and recounted at every start, so the copies in a manifest are only a hint. See [On-disk format](design.md#on-disk-format).
 
 ## Files and caching
 
@@ -348,7 +350,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Orphan.** A file that was unlinked while still open. POSIX keeps it readable until the last close; rock-solid records it on an orphan list and frees it only then. NFS fakes this with "silly rename" to a hidden `.nfsXXXX` name.
 
-**Grace period.** After a metadata leader crashes, a window in which clients re-register their open files before the new leader accepts new opens. The idea comes from NFS version 4.
+**Grace period.** After a metadata leader crashes, a window in which clients re-register their open files before the new leader accepts new opens. It lasts until every live client has re-registered or been fenced, not for a fixed time. The idea comes from NFS version 4.
 
 **NFS, SMB, Samba.** Network File System and Server Message Block are network file-sharing protocols. Both put a server between clients and storage, which is the bottleneck rock-solid's RWX avoids. Samba is the open-source SMB server.
 

@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"fmt"
 	"maps"
 	"slices"
 	"testing"
@@ -36,7 +37,7 @@ func newStoreModel() *storeModel {
 func (m *storeModel) Apply(r writtenRecord) {
 	for i, e := range r.entries {
 		switch e.Kind {
-		case disklog.EntryWrite:
+		case disklog.EntryWrite, disklog.EntrySlot:
 			for k := range e.Count {
 				m.live[blockKey{e.Chunk, e.First + k}] = r.payloads[i][int(k)*core.BlockSize:][:core.BlockSize]
 			}
@@ -103,6 +104,13 @@ func (m *storeModel) at(c core.ChunkID, b uint16, epoch uint64) []byte {
 // epoch up to maxEpoch, with the store.
 func checkModel(t testing.TB, h *harness, m *storeModel, chunks []core.ChunkID, maxEpoch uint64) {
 	t.Helper()
+	if msg := modelDiff(h, m, chunks, maxEpoch); msg != "" {
+		t.Fatal(msg)
+	}
+}
+
+// modelDiff describes the first block where the store differs from the model, or is empty.
+func modelDiff(h *harness, m *storeModel, chunks []core.ChunkID, maxEpoch uint64) string {
 	ix := h.s.Index()
 	for _, c := range chunks {
 		blocks := map[uint16]bool{}
@@ -128,11 +136,12 @@ func checkModel(t testing.TB, h *harness, m *storeModel, chunks []core.ChunkID, 
 			for b := range blocks {
 				if got, want := h.block(c, b, epoch), m.at(c, b, epoch); !bytes.Equal(got, want) {
 					i := firstDiff(got, want)
-					t.Fatalf("chunk %v block %d at epoch %d: byte %d is %#x, the model holds %#x", c, b, epoch, i, got[i], want[i])
+					return fmt.Sprintf("chunk %v block %d at epoch %d: byte %d is %#x, the model holds %#x", c, b, epoch, i, got[i], want[i])
 				}
 			}
 		}
 	}
+	return ""
 }
 
 // crashChunks are the chunks of the crash workload.
@@ -166,37 +175,74 @@ func crashConfig() Config {
 	return cfg
 }
 
-// recoverHarness reopens the store on the harness's disk after a crash and checks the recovered
+// recoverStore reopens the store on the harness's disk after a crash and checks the recovered
 // state against the crash oracle.
 func (h *harness) recoverStore(mode disklog.Mode) {
 	h.t.Helper()
+	if !h.reopen(mode) {
+		h.t.Fatalf("recovery stopped: %v", h.s.Err())
+	}
+}
+
+// reopen recovers the store on the harness's disk after a crash, checking the recovered LSN
+// against the crash oracle, settles it, and reports whether it serves.
+func (h *harness) reopen(mode disklog.Mode) bool {
+	h.t.Helper()
 	h.queue, h.out = nil, Output{}
-	var err error
+	h.abandoned, h.held = h.pool.Live(), nil
 	h.s = newStore(h.cfg)
-	if err = h.s.recover(&h.ctx, h.disk.Blocks(), mode); err != nil {
+	h.s.plant = h.plant
+	if err := h.s.recover(&h.ctx, h.disk.Blocks(), mode); err != nil {
 		h.t.Fatal(err)
 	}
 	h.s.pump(&h.ctx, &h.out)
 	h.take()
 	h.settle()
-	if !h.s.Serving() {
-		h.t.Fatalf("recovery stopped: %v", h.s.Err())
-	}
+	return h.s.Serving()
 }
 
 // [property] A workload crashed at its k-th disk action, for every k, with no unflushed block
 // landing, a seeded half of them, and all of them, recovers to a prefix of what was written that holds
 // every acknowledged record, live and at every snapshot, and the rebuilt index equals it.
 func TestCrashAtEveryAction(t *testing.T) {
-	full := newHarness(t, crashConfig())
-	crashWorkload(full)
+	crashEveryAction(t, crashConfig(), nil, crashWorkload, true)
+}
+
+// crashEveryAction runs the crash property over workload on a disk cut as geo, or the default
+// disk when geo is nil, checking after every recovery that the log's chunk slots in use are
+// those the index refers to. On a disk with chunk slots, a crash also lands every write but
+// those of slots, so a record lands without its slot data. With checkpoints, the workload must
+// write a manifest.
+func crashEveryAction(t *testing.T, cfg Config, geo *disklog.Geometry, workload func(*harness), checkpoints bool) {
+	start := func() *harness {
+		if geo == nil {
+			return newHarness(t, cfg)
+		}
+		return newHarnessOn(t, cfg, *geo)
+	}
+	recoverStore := func(h *harness, k int, mode disklog.Mode) {
+		h.recoverStore(mode)
+		if err := h.s.CheckSlots(); err != nil {
+			t.Fatalf("crash at action %d, recovery in mode %d: %v", k, mode, err)
+		}
+	}
+	full := start()
+	workload(full)
 	total := full.executed
-	if full.s.Log().Manifest().IsNone() {
+	if checkpoints && full.s.Log().Manifest().IsNone() {
 		t.Fatal("the workload wrote no manifest")
 	}
-	for k := 0; k < total; k++ {
-		for _, landing := range []string{"none", "half", "all"} {
-			h := newHarness(t, crashConfig())
+	if err := full.s.CheckSlots(); err != nil {
+		t.Fatal(err)
+	}
+	cleaned := full.s.CleanStats().Freed > 0
+	landings := []string{"none", "half", "all"}
+	if geo != nil {
+		landings = append(landings, "all but slots")
+	}
+	for k := 0; k <= total; k++ {
+		for _, landing := range landings {
+			h := start()
 			h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 			h.crashAt = k
 			func() {
@@ -205,7 +251,7 @@ func TestCrashAtEveryAction(t *testing.T) {
 						panic(r)
 					}
 				}()
-				crashWorkload(h)
+				workload(h)
 			}()
 			switch landing {
 			case "none":
@@ -214,17 +260,31 @@ func TestCrashAtEveryAction(t *testing.T) {
 				h.disk.CrashRandom(core.NewRand(uint64(k)))
 			case "all":
 				h.disk.Crash(func(int, core.LBA) bool { return true })
+			case "all but slots":
+				h.disk.Crash(func(_ int, lba core.LBA) bool {
+					return !slices.ContainsFunc(slices.Collect(maps.Keys(h.slotData)), func(s core.LBA) bool { return lba >= s && lba < s+core.BlocksPerChunk })
+				})
 			}
 			h.crashAt = -1
-			h.recoverStore(disklog.ModeOpen)
+			recoverStore(h, k, disklog.ModeOpen)
 			m := h.recovered
 			checkModel(t, h, m, crashChunks, 2)
 			opened := dumpIndex(h.s.Index())
-			h.recoverStore(disklog.ModeRebuild)
-			if got := dumpIndex(h.s.Index()); !slices.Equal(got, opened) {
+			got := h.rebuild()
+			if err := h.s.CheckSlots(); err != nil {
+				t.Fatalf("crash at action %d, rebuild: %v", k, err)
+			}
+			if !slices.Equal(got, opened) {
 				t.Fatalf("crash at action %d: rebuilt index has %d entries, recovered %d", k, len(got), len(opened))
 			}
 			checkModel(t, h, m, crashChunks, 2)
+			if cleaned {
+				continue
+			}
+			recoverStore(h, k, disklog.ModeRebuild)
+			if got := dumpIndex(h.s.Index()); !slices.Equal(got, opened) {
+				t.Fatalf("crash at action %d: index replayed from LSN 1 has %d entries, recovered %d", k, len(got), len(opened))
+			}
 		}
 	}
 }

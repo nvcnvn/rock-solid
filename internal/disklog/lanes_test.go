@@ -19,7 +19,7 @@ func mergeConfig(workers int) disklog.Config {
 func (h *harness) mergePiece(w int, owner uint32, n int, seed uint64) disklog.Ticket {
 	h.t.Helper()
 	it := h.blob(disklog.BlobRun, owner, n, seed)
-	tk, err := h.log.MergePiece(&h.ctx, w, owner, it.Buf, uint64(n), &h.out)
+	tk, err := h.log.MergePiece(&h.ctx, w, owner, it.Buf, uint64(n), false, &h.out)
 	if err != nil {
 		h.t.Fatalf("merge piece on lane %d: %v", w, err)
 	}
@@ -113,7 +113,7 @@ func TestMergeLanesOpenSegmentsOfTheirOwn(t *testing.T) {
 	}
 	for _, w := range []int{0, 3} {
 		it := h.blob(disklog.BlobRun, runOwner, 10, 9)
-		if _, err := h.log.MergePiece(&h.ctx, w, runOwner, it.Buf, 10, &h.out); !errors.Is(err, disklog.ErrMalformed) {
+		if _, err := h.log.MergePiece(&h.ctx, w, runOwner, it.Buf, 10, false, &h.out); !errors.Is(err, disklog.ErrMalformed) {
 			t.Fatalf("merge piece on lane %d of 2: %v", w, err)
 		}
 		h.pool.Free(it.Buf)
@@ -290,7 +290,8 @@ func (h *harness) windowReads(trace []string) []uint32 {
 }
 
 // A merge worker configured away leaves its lane: its last segment is read at every start until
-// the cleaner frees it, and no record goes to it.
+// the cleaner frees it, and no record goes to it. Its piece, which no manifest names, counts no
+// live block once the log is open again.
 func TestALaneWhoseWorkerIsGone(t *testing.T) {
 	h := formatted(t, gib, mergeConfig(2))
 	h.put(disklog.Hot, h.write(0, 1, 1))
@@ -302,11 +303,13 @@ func TestALaneWhoseWorkerIsGone(t *testing.T) {
 		if res.durable < gone.LSN || !slices.Contains(h.windowReads(res.trace), gone.Segment) {
 			t.Fatalf("recovered LSN %d, reading segments %v; want LSN %d and segment %d read", res.durable, h.windowReads(res.trace), gone.LSN, gone.Segment)
 		}
-		if !slices.ContainsFunc(disklog.SegmentUsageOf(h.log), func(u disklog.SegmentUsage) bool { return u.Segment == gone.Segment && u.Live == 1 }) {
+		if !slices.ContainsFunc(disklog.SegmentUsageOf(h.log), func(u disklog.SegmentUsage) bool {
+			return u.Segment == gone.Segment && u.State == disklog.SegmentUsed && u.Live == 0
+		}) {
 			t.Fatalf("usage %+v lost lane 2's segment", disklog.SegmentUsageOf(h.log))
 		}
 		it := h.blob(disklog.BlobRun, runOwner, 10, 9)
-		if _, err := h.log.MergePiece(&h.ctx, 2, runOwner, it.Buf, 10, &h.out); !errors.Is(err, disklog.ErrMalformed) {
+		if _, err := h.log.MergePiece(&h.ctx, 2, runOwner, it.Buf, 10, false, &h.out); !errors.Is(err, disklog.ErrMalformed) {
 			t.Fatalf("merge piece on a lane past the merge workers: %v", err)
 		}
 		h.pool.Free(it.Buf)
@@ -409,7 +412,7 @@ func TestMergePiecesGoPastTheHoldAndIntoTheReserve(t *testing.T) {
 	h.close()
 }
 
-// Replay takes a window per lane past the hot and cold ones; a pool too small for them fails
+// Replay takes a window per lane past the hot and slot ones; a pool too small for them fails
 // recovery and leaves no buffer allocated.
 func TestRecoveryFailsWhenALaneWindowDoesNotFit(t *testing.T) {
 	h := formatted(t, gib, mergeConfig(1))

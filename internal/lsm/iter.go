@@ -584,14 +584,14 @@ func (it *iterState) filterOut(fk []byte, on bool) {
 	h := bloomHash(fk)
 	for i := range it.srcs {
 		s := &it.srcs[i]
-		s.out = on && s.run != nil && !it.mayHold(s.run, h)
+		s.out = on && s.run != nil && !it.mayHold(s.run, fk, h)
 		s.fwd = s.fwd && !s.out
 	}
 }
 
-func (it *iterState) mayHold(r *run, h uint32) bool {
+func (it *iterState) mayHold(r *run, fk []byte, h uint32) bool {
 	it.filterProbes++
-	return it.probe == FiltersMaybe || mayContain(r.filter, h)
+	return it.probe == FiltersMaybe || r.mayContain(fk, h)
 }
 
 func (it *iterState) get(k []byte) ([]byte, bool) {
@@ -605,7 +605,7 @@ func (it *iterState) get(k []byte) ([]byte, bool) {
 		if s.run != nil && s.run.outside(k) {
 			continue
 		}
-		if !s.empty && !(on && s.run != nil && !it.mayHold(s.run, h)) {
+		if !s.empty && !(on && s.run != nil && !it.mayHold(s.run, fk, h)) {
 			it.probes++
 			if v, ok := s.get(k); ok {
 				if v[0] == kindDel {

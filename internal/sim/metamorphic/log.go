@@ -13,6 +13,7 @@ type Tree interface {
 	BeginFlush() (bool, error)
 	Frozen() bool
 	CarriedRuns() []disklog.BlobRef
+	Bounds() []disklog.MergeBound
 	NextPiece(buf []byte) (int, bool, error)
 	PieceDurable(ref disklog.BlobRef) error
 	CheckpointDone() ([]disklog.BlobRef, error)
@@ -20,12 +21,14 @@ type Tree interface {
 }
 
 // Log stands in for the disk log under one tree: it keeps every live piece a checkpoint writes,
-// and the newest manifest's runs and replay point, counted in the index's writes before it.
+// and the newest manifest's runs, merge bounds and replay point, counted in the index's writes
+// before it. A restore reading a piece reported dead fails.
 type Log struct {
 	piece    int
 	blobs    map[disklog.BlobRef][]byte
 	lsn      uint64
 	roots    []disklog.BlobRef
+	bounds   []disklog.MergeBound
 	replay   int
 	frozenAt int
 	// Flushes counts the checkpoints whose manifest is durable, Failed those that failed.
@@ -51,7 +54,7 @@ func (l *Log) Checkpoint(t Tree, writes, limit int, between func()) error {
 	} else if t.Frozen() {
 		replay = l.frozenAt
 	}
-	roots := slices.Clone(t.CarriedRuns())
+	roots, bounds := slices.Clone(t.CarriedRuns()), slices.Clone(t.Bounds())
 	buf := make([]byte, l.piece)
 	for n := 0; ; n++ {
 		if limit > 0 && n == limit {
@@ -88,7 +91,7 @@ func (l *Log) Checkpoint(t Tree, writes, limit int, between func()) error {
 	for _, r := range dead {
 		delete(l.blobs, r)
 	}
-	l.roots, l.replay = roots, replay
+	l.roots, l.bounds, l.replay = roots, bounds, replay
 	l.Flushes++
 	return nil
 }
@@ -97,12 +100,17 @@ func (l *Log) Checkpoint(t Tree, writes, limit int, between func()) error {
 func (l *Log) Replay() int { return l.replay }
 
 // Restore hands load each run the newest manifest names, its pieces in order and its root last,
-// finding a root's earlier pieces with rootRefs.
-func (l *Log) Restore(rootRefs func([]byte, []disklog.BlobRef) ([]disklog.BlobRef, error), load func(disklog.BlobRef, [][]byte) error) error {
+// finding a root's earlier pieces with rootRefs, or loadBounded a run a merge bound names, its
+// pieces from the first the bound leaves live.
+func (l *Log) Restore(rootRefs func([]byte, []disklog.BlobRef) ([]disklog.BlobRef, error), load func(disklog.BlobRef, [][]byte) error, loadBounded func(disklog.MergeBound, [][]byte) error) error {
 	for _, root := range l.roots {
 		refs, err := rootRefs(l.blobs[root], nil)
 		if err != nil {
 			return fmt.Errorf("root refs: %w", err)
+		}
+		b := slices.IndexFunc(l.bounds, func(b disklog.MergeBound) bool { return b.Run == root })
+		if b >= 0 {
+			refs = refs[min(int(l.bounds[b].Dead), len(refs)):]
 		}
 		var pieces [][]byte
 		for _, r := range append(refs, root) {
@@ -112,7 +120,12 @@ func (l *Log) Restore(rootRefs func([]byte, []disklog.BlobRef) ([]disklog.BlobRe
 			}
 			pieces = append(pieces, p)
 		}
-		if err := load(root, pieces); err != nil {
+		if b >= 0 {
+			err = loadBounded(l.bounds[b], pieces)
+		} else {
+			err = load(root, pieces)
+		}
+		if err != nil {
 			return fmt.Errorf("load run: %w", err)
 		}
 	}

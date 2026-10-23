@@ -141,6 +141,10 @@ type node struct {
 	off     int
 	prev    *disklog.BlobRef
 	ticket  disklog.Ticket
+	// pieces is the running checkpoint's durable pieces, and named those of the run the newest
+	// durable manifest names, which the node reports dead once a later one replaces it.
+	pieces, named []disklog.BlobRef
+	log           *disklog.Log
 
 	checkpoints, failedCheckpoints int
 	// begun is the snapshot the running checkpoint would write, its run filled in once durable;
@@ -151,6 +155,12 @@ type node struct {
 	// durable record, which its replay LSN still counts as in the run.
 	stale  bool
 	before model
+	// mergeAt, when positive, makes the node's mergeAt-th checkpoint carry a merge step of index
+	// runOwner, one root piece on merge worker 1's lane, whose run every later checkpoint names.
+	mergeAt     int
+	mergeTicket disklog.Ticket
+	mergeRef    *disklog.BlobRef
+	mergeRuns   []disklog.BlobRef
 }
 
 func newNode(h *harness, pieceLimit int) *node {
@@ -160,6 +170,9 @@ func newNode(h *harness, pieceLimit int) *node {
 }
 
 func (n *node) onEvent(ev disklog.Event) {
+	if n.log != n.h.log {
+		n.log, n.pieces, n.named = n.h.log, nil, nil
+	}
 	switch ev.Kind {
 	case disklog.Durable:
 		if n.stale {
@@ -169,19 +182,49 @@ func (n *node) onEvent(ev disklog.Event) {
 		for i, t := range ev.Tickets {
 			if n.running && n.ticket != disklog.NoTicket && t == n.ticket {
 				n.prev = &disklog.BlobRef{Segment: ev.Segment, Block: ev.Block, LSN: ev.LSN, Entry: uint16(i)}
+				n.pieces = append(n.pieces, *n.prev)
 				n.ticket = 0
+			}
+			if n.running && n.mergeTicket != disklog.NoTicket && t == n.mergeTicket {
+				n.mergeRef = &disklog.BlobRef{Segment: ev.Segment, Block: ev.Block, LSN: ev.LSN, Entry: uint16(i)}
+				n.mergeTicket = 0
 			}
 		}
 	case disklog.CheckpointDone:
+		if n.mergeRef != nil {
+			n.mergeRuns, n.mergeRef = []disklog.BlobRef{*n.mergeRef}, nil
+		}
 		if n.running {
 			n.begun.Indexes[0].Runs = []disklog.BlobRef{*n.prev}
+			if len(n.begun.Indexes) > 1 {
+				n.begun.Indexes[1].Runs = n.mergeRuns
+			}
 			n.expect[ev.Manifest] = n.begun
 		}
+		n.retire(n.named)
+		n.named, n.pieces = n.pieces, nil
 		n.running = false
 		n.checkpoints++
 	case disklog.CheckpointFailed:
+		n.retire(n.pieces)
+		n.pieces = nil
+		if n.mergeRef != nil {
+			n.retire([]disklog.BlobRef{*n.mergeRef})
+			n.mergeRef = nil
+		}
+		n.mergeTicket = 0
 		n.running, n.failed, n.failedAt = false, true, n.h.log.DurableLSN()
 		n.failedCheckpoints++
+	}
+}
+
+// retire reports pieces no manifest will name again dead, as an index owner does.
+func (n *node) retire(refs []disklog.BlobRef) {
+	if len(refs) == 0 || n.h.log == nil {
+		return
+	}
+	if err := n.h.log.PiecesDead(refs); err != nil {
+		n.h.t.Fatalf("pieces dead %v: %v", refs, err)
 	}
 }
 
@@ -197,9 +240,18 @@ func (n *node) step() bool {
 			return false
 		}
 		base := h.log.DurableLSN()
+		merging := n.mergeAt > 0 && n.checkpoints+1 == n.mergeAt
 		n.begun = disklog.Manifest{BaseLSN: base, NextSeq: disklog.NextSeqOf(h.log), Indexes: []disklog.ManifestIndex{{Owner: indexOwner, ReplayLSN: base}}, Segments: disklog.SegmentUsageOf(h.log)}
-		if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: indexOwner, ReplayLSN: base}}); err != nil {
+		indexes := []disklog.CheckpointIndex{{Owner: indexOwner, ReplayLSN: base}}
+		if merging || len(n.mergeRuns) > 0 {
+			n.begun.Indexes = append(n.begun.Indexes, disklog.ManifestIndex{Owner: runOwner, ReplayLSN: base, Runs: n.mergeRuns})
+			indexes = append(indexes, disklog.CheckpointIndex{Owner: runOwner, ReplayLSN: base, Runs: n.mergeRuns})
+		}
+		if err := h.log.BeginCheckpoint(indexes); err != nil {
 			h.t.Fatalf("begin checkpoint: %v", err)
+		}
+		if merging {
+			n.mergeStep()
 		}
 		n.running, n.body, n.off, n.prev, n.ticket = true, n.live.encode(), 0, nil, 0
 		if n.stale && n.before != nil {
@@ -243,6 +295,21 @@ func (n *node) step() bool {
 		h.absorb()
 	}
 	return true
+}
+
+// mergeStep hands a merge step's one piece, a root of 600 bytes, to merge worker 1's lane.
+func (n *node) mergeStep() {
+	h := n.h
+	const size = 600
+	buf := h.alloc(size)
+	copy(h.pool.Bytes(buf), pattern(size, size))
+	t, err := h.log.MergePiece(&h.ctx, 1, runOwner, buf, size, true, &h.out)
+	if err != nil {
+		h.t.Fatalf("merge piece: %v", err)
+	}
+	h.tickets.track(t, disklog.BlobEntry(disklog.BlobRun, runOwner, size))
+	n.mergeTicket = t
+	h.absorb()
 }
 
 func appendRef(b []byte, r disklog.BlobRef) []byte {

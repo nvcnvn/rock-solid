@@ -2,6 +2,7 @@ package disklog
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -24,8 +25,8 @@ var (
 	ErrUnknownOwner = errors.New("index not named by the checkpoint")
 	// ErrBadBuffer reports an item whose buffer does not match its entry.
 	ErrBadBuffer = errors.New("buffer does not match its entry")
-	// ErrReservedKind reports an item of a blob kind only a checkpoint writes.
-	ErrReservedKind = errors.New("blob kind reserved for checkpoints")
+	// ErrReservedKind reports an item of a kind only a checkpoint or the cleaner writes.
+	ErrReservedKind = errors.New("kind reserved for checkpoints and the cleaner")
 	// ErrBadConfig reports settings the log cannot run with.
 	ErrBadConfig = errors.New("bad group commit settings")
 	// ErrFlushBeforeWrite reports a driver that completed a round's flush before its write.
@@ -54,6 +55,10 @@ type Config struct {
 	Reserve uint32
 	// NoReserve runs the log with no reserve, which only tests ask for.
 	NoReserve bool
+	// TrimRate is trim_rate, the bytes a second of freed segments the log discards; 0 is DefaultTrimRate.
+	TrimRate uint64
+	// NoTrim never discards a freed segment, as on a disk that is a file, where punching holes would undo writing it in full.
+	NoTrim bool
 }
 
 const (
@@ -145,6 +150,8 @@ type Item struct {
 	Buf   core.IOBuf
 	// Keep leaves a write's buffer with its submitter, who frees it once the item is Durable or Failed; the log frees it for an item in doubt.
 	Keep bool
+	// CRCs are a copy's block checksums as its source record holds them, checked by the cleaner, which the log writes instead of computing its own; it holds them until the item resolves.
+	CRCs []uint32
 }
 
 // EventKind tags an Event.
@@ -195,7 +202,7 @@ type Event struct {
 func (ev *Event) Blob(i int) []byte {
 	var writes uint64
 	for j := range ev.Entries {
-		if ev.Entries[j].Kind == EntryWrite {
+		if ev.Entries[j].HasBlocks() {
 			writes += ev.Entries[j].dataBytes()
 		}
 	}
@@ -243,14 +250,14 @@ func (o *Output) emitRecord(ev Event, d *DecodedRecord) {
 	o.entries = append(o.entries, d.Entries...)
 	var writes uint64
 	for i := range d.Entries {
-		if d.Entries[i].Kind == EntryWrite {
+		if d.Entries[i].HasBlocks() {
 			writes += d.Entries[i].dataBytes()
 		}
 	}
 	var writeOff, blobOff uint64
 	for i := range d.Entries {
 		e := &d.Entries[i]
-		if e.Kind == EntryWrite {
+		if e.HasBlocks() {
 			o.payloads = append(o.payloads, writeOff)
 			writeOff += e.dataBytes()
 			continue
@@ -302,11 +309,12 @@ func isCheckpointKind(e *Entry) bool {
 	return isManifestKind(e) || e.Kind == EntryBlob && e.BlobKind == BlobRun
 }
 
-// CheckpointIndex names an index a checkpoint covers, its replay LSN and the durable runs the manifest names again.
+// CheckpointIndex names an index a checkpoint covers, its replay LSN, the durable runs the manifest names again and the bounds its running merges set on them.
 type CheckpointIndex struct {
 	Owner     uint32
 	ReplayLSN uint64
 	Runs      []BlobRef
+	Bounds    []MergeBound
 }
 
 type queued struct {
@@ -314,6 +322,7 @@ type queued struct {
 	entry  Entry
 	buf    core.IOBuf
 	bytes  []byte
+	crcs   []uint32
 	keep   bool
 }
 
@@ -358,23 +367,58 @@ type cursor struct {
 	next    uint32
 }
 
-// Lanes in the order rounds take turns: each stream's shared lane, then merge worker w's lane
-// of the metadata stream at laneMeta + w. Only the hot and cold lanes take ordinary items; the
-// metadata lane takes the checkpoint's pieces and manifest, and a merge lane its worker's output.
+// Lanes in the order rounds take turns: the hot stream's shared lane and its slot lane, the cold
+// stream's shared lane and the cleaner's, then merge worker w's lane of the metadata stream at
+// laneMeta + w. The slot lane takes the slot writes, one a round, so their record headers share
+// segments only with each other; the shared hot and cold lanes take the other ordinary items;
+// the cleaner's lane takes its copies, the metadata lane the checkpoint's pieces and manifest, and
+// a merge lane its worker's output.
 const (
 	laneHot = iota
+	laneSlot
 	laneCold
+	laneClean
 	laneMeta
 )
 
 func laneOf(s Stream, n uint8) int {
 	switch s {
 	case Hot:
-		return laneHot
+		return laneHot + int(n)
 	case Cold:
-		return laneCold
+		return laneCold + int(n)
 	}
 	return laneMeta + int(n)
+}
+
+func streamOfLane(i int) Stream {
+	switch {
+	case i < laneCold:
+		return Hot
+	case i < laneMeta:
+		return Cold
+	}
+	return Meta
+}
+
+func ordinaryLane(i int) bool { return i <= laneCold }
+
+// hotBound is the ticket a round of lane i takes no item from: the head of the other hot lane,
+// so the two hot lanes take items in submit order between them, as replay applies a chunk's
+// writes and freezes in LSN order.
+func (l *Log) hotBound(i int) Ticket {
+	other := laneHot
+	switch i {
+	case laneHot:
+		other = laneSlot
+	case laneSlot:
+	default:
+		return math.MaxUint64
+	}
+	if q := &l.lanes[other].q; q.len() > 0 {
+		return q.at(0).ticket
+	}
+	return math.MaxUint64
 }
 
 // lane is a sequence of segments that fill one after another, at most one open at a time, so
@@ -392,6 +436,11 @@ type round struct {
 	writeIO      core.IOID
 	flushIO      core.IOID
 	writeDone    bool
+	recordDone   bool
+	hasSlot      bool
+	slotIO       core.IOID
+	slotDone     bool
+	slotVec      []core.IOVec
 	flushSent    bool
 	abandoned    bool
 	segment      uint32
@@ -417,6 +466,10 @@ type pendingPiece struct {
 	root   bool
 }
 
+func (cp *checkpoint) owns(q queued) bool {
+	return slices.ContainsFunc(cp.pending, func(p pendingPiece) bool { return p.ticket == q.ticket })
+}
+
 type checkpoint struct {
 	manifest      Manifest
 	editRows      []SegmentUsage
@@ -434,6 +487,7 @@ type checkpoint struct {
 	size          uint64
 	piece         Ticket
 	final         bool
+	trims         []uint32
 }
 
 // chainEntry is a snapshot or an edit a last piece lists: its pieces, its own last piece
@@ -446,6 +500,7 @@ type chainEntry struct {
 type liveChain struct {
 	pos     ManifestPos
 	entries []chainEntry
+	replay  uint64
 }
 
 type formatPhase uint8
@@ -479,6 +534,18 @@ type Log struct {
 	free       []uint64
 	usage      []SegmentUsage
 	changed    []uint64
+	streams    []Stream
+	written    uint64
+	background uint64
+	writes     Writes
+	writtenAt  []uint64
+	pieces     pieceSet
+	trims      trimState
+	now        core.Tick
+	dying      []dyingPiece
+	namedLSN   uint64
+	pinnedLSN  uint64
+	slots      slotTable
 
 	lanes     []lane
 	cpNoSpace bool
@@ -546,6 +613,7 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		maxItemRec: maxWrite - 1,
 		maxBlob:    maxBlobBytes(maxWrite - 1),
 		maxWrites:  maxWriteBlocks(maxWrite - 1),
+		slots:      newSlotTable(sb.Geometry),
 		nextIO:     firstIO,
 		nextTicket: 1,
 		nextLSN:    1,
@@ -554,10 +622,17 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		free:       make([]uint64, (sb.SegmentCount+63)/64),
 		usage:      make([]SegmentUsage, sb.SegmentCount),
 		changed:    make([]uint64, (sb.SegmentCount+63)/64),
+		streams:    make([]Stream, sb.SegmentCount),
+		written:    sb.DiskBlocks(),
+		writtenAt:  make([]uint64, sb.SegmentCount),
+		pieces:     newPieceSet(sb.SegmentCount),
 		lanes:      make([]lane, laneMeta+1+workers),
 		rounds:     make([]round, cfg.CommitDepth),
 	}
+	l.trims.pacer = trimPacer{rate: float64(cmp.Or(cfg.TrimRate, DefaultTrimRate)), segBytes: float64(uint64(sb.SegmentBlocks) * core.BlockSize)}
 	l.lanes[laneHot].stream, l.lanes[laneCold].stream = Hot, Cold
+	l.lanes[laneSlot].stream, l.lanes[laneSlot].n = Hot, 1
+	l.lanes[laneClean].stream, l.lanes[laneClean].n = Cold, 1
 	for i := laneMeta; i < len(l.lanes); i++ {
 		l.lanes[i].stream, l.lanes[i].n = Meta, uint8(i-laneMeta)
 	}
@@ -573,10 +648,21 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 			return nil, err
 		}
 	}
+	if l.slots.per > 0 {
+		var err error
+		if l.slots.zero, err = ctx.Pool.AllocZeroed(core.BlockSize); err != nil {
+			l.release(ctx)
+			return nil, err
+		}
+	}
 	return l, nil
 }
 
 func (l *Log) release(ctx *core.Context) {
+	if l.slots.zero != core.NoBuf {
+		ctx.Pool.Free(l.slots.zero)
+		l.slots.zero = core.NoBuf
+	}
 	for i := range l.rounds {
 		r := &l.rounds[i]
 		for _, b := range []*core.IOBuf{&r.head, &r.tail} {
@@ -590,7 +676,7 @@ func (l *Log) release(ctx *core.Context) {
 
 // Close fails the items still waiting, for room or for a manifest, and the running checkpoint with ErrClosed, and returns their buffers and the log's own to the pool; it refuses until format finishes and while a write or flush is in flight, and the log takes nothing more.
 func (l *Log) Close(ctx *core.Context, out *Output) error {
-	if l.count > 0 || l.phase != formatDone || len(l.stale) > 0 {
+	if l.count > 0 || l.phase != formatDone || len(l.stale) > 0 || len(l.slots.trims) > 0 {
 		return ErrBusy
 	}
 	if l.err != ErrClosed {
@@ -654,6 +740,9 @@ func (l *Log) Reserve() uint32 { return l.reserve }
 // DurableLSN is the LSN of the newest durable record.
 func (l *Log) DurableLSN() uint64 { return l.durableLSN }
 
+// NextOpenSeq is the open sequence the next segment the log opens takes.
+func (l *Log) NextOpenSeq() uint64 { return l.nextSeq }
+
 // Manifest is the position of the newest durable manifest's last piece.
 func (l *Log) Manifest() ManifestPos { return l.manifest }
 
@@ -663,8 +752,11 @@ func (l *Log) Err() error { return l.err }
 // MaxBlobBytes is the largest blob one record holds.
 func (l *Log) MaxBlobBytes() uint64 { return l.maxBlob }
 
-// MaxWriteBlocks is the most blocks one write item holds.
+// MaxWriteBlocks is the most blocks one write item holds, besides a whole chunk on a disk with chunk slots.
 func (l *Log) MaxWriteBlocks() uint16 { return l.maxWrites }
+
+// FreeSegments is the number of segments free to open, the reserve included.
+func (l *Log) FreeSegments() uint32 { return l.freeCount() }
 
 // ReplayBytes is the size of the records written after the newest manifest's base, which a restart replays.
 func (l *Log) ReplayBytes() uint64 { return l.replayBytes }
@@ -693,7 +785,7 @@ func (l *Log) Stalled() bool {
 	return false
 }
 
-// FailStalled fails the items waiting for room with NoSpace, each lane's in submit order, and a checkpoint among them, as the owner does when the cleaner has no victim.
+// FailStalled fails the items waiting for room with NoSpace, each lane's in submit order, both hot lanes' together, and a checkpoint among them, as the owner does when the cleaner has no victim.
 func (l *Log) FailStalled(ctx *core.Context, out *Output) {
 	for l.Stalled() {
 		for i := range l.lanes {
@@ -707,10 +799,19 @@ func (l *Log) FailStalled(ctx *core.Context, out *Output) {
 				l.failCheckpoint(ctx, out)
 				continue
 			}
+			if l.cp != nil && slices.ContainsFunc(l.lanes[i].q.window(l.lanes[i].q.len()), l.cp.owns) {
+				l.failCheckpoint(ctx, out)
+			}
 			// The whole queue fails, even items behind its head that would fit, since writing
-			// them first would break submit order, which a freeze before its write relies on.
+			// them first would break submit order, which a freeze before its write relies on; a
+			// stall on either hot lane fails the other too, as the two keep submit order between
+			// them.
 			ts := len(out.tickets)
 			out.tickets = l.drain(ctx, &l.lanes[i].q, out.tickets)
+			if i == laneHot || i == laneSlot {
+				out.tickets = l.drain(ctx, &l.lanes[laneHot+laneSlot-i].q, out.tickets)
+				slices.Sort(out.tickets[ts:])
+			}
 			out.emitTickets(Failed, ErrNoSpace, ts)
 		}
 		l.startRounds(ctx, out)
@@ -725,7 +826,7 @@ func ordinaryBytes(entries []Entry, lay Layout) uint64 {
 	ordinary := false
 	for i := range entries {
 		e := &entries[i]
-		own := isCheckpointKind(e)
+		own := isCheckpointKind(e) || e.Kind == EntryCopy
 		ordinary = ordinary || !own
 		switch e.Kind {
 		case EntryWrite:
@@ -762,32 +863,48 @@ func (l *Log) CheckpointDue() bool {
 	return l.cp == nil && l.err == nil && l.replayBytes >= l.cfg.MaxReplayBytes
 }
 
-// Submit queues an item for the hot or the cold stream, taking its buffer; a refused item's buffer stays with the caller.
+// Submit queues an item for the hot or the cold stream, taking its buffer; a refused item's buffer stays with the caller. A write of a whole chunk to the hot stream goes to a chunk slot while SlotAvailable, its record alone to the hot stream's slot lane, and its Durable event names it as a slot write.
 func (l *Log) Submit(ctx *core.Context, stream Stream, it Item, out *Output) (Ticket, error) {
 	if l.err != nil {
 		return 0, l.err
 	}
-	if stream > Cold {
+	if stream > Cold || it.Entry.Kind == EntrySlot {
 		return 0, ErrMalformed
 	}
-	if isCheckpointKind(&it.Entry) {
+	if isCheckpointKind(&it.Entry) || it.Entry.Kind == EntryCopy {
 		return 0, ErrReservedKind
+	}
+	if e := &it.Entry; e.Kind == EntryWrite && e.First == 0 && e.Count == core.BlocksPerChunk && stream == Hot && l.SlotAvailable() {
+		e.Kind = EntrySlot
 	}
 	if err := l.accept(ctx, &it); err != nil {
 		return 0, err
 	}
-	t := l.enqueue(&l.lanes[laneOf(stream, 0)].q, queued{entry: it.Entry, buf: it.Buf, keep: it.Keep && it.Entry.Kind == EntryWrite})
+	if it.Entry.Kind == EntrySlot && !l.takeSlot(&it.Entry) {
+		panic("disklog: no slot for a whole chunk submitted while one was available")
+	}
+	lane := laneOf(stream, 0)
+	if it.Entry.Kind == EntrySlot {
+		lane = laneSlot
+	}
+	t := l.enqueue(&l.lanes[lane].q, queued{entry: it.Entry, buf: it.Buf, keep: it.Keep && (it.Entry.Kind == EntryWrite || it.Entry.Kind == EntrySlot)})
 	l.startRounds(ctx, out)
 	return t, nil
 }
 
-// MergePiece queues merge worker w's next output piece for index owner, of length bytes, on the worker's lane of the metadata stream, which may open segments of the reserve; w counts from 1 to the configured merge workers, and the reserve holds one step of each, so a worker hands over a step only once the manifest naming its previous one is durable.
-func (l *Log) MergePiece(ctx *core.Context, w int, owner uint32, buf core.IOBuf, length uint64, out *Output) (Ticket, error) {
+// MergePiece queues merge worker w's next output piece for index owner, of length bytes, on the worker's lane of the metadata stream, which may open segments of the reserve; w counts from 1 to the configured merge workers, and the reserve holds one step of each, so a worker hands over a step only once the manifest naming its previous one is durable. While a checkpoint covering owner is open the piece is one of its pieces, root marking the run's last piece, which the manifest names; otherwise it goes out alone, and root is ErrNoCheckpoint.
+func (l *Log) MergePiece(ctx *core.Context, w int, owner uint32, buf core.IOBuf, length uint64, root bool, out *Output) (Ticket, error) {
 	if l.err != nil {
 		return 0, l.err
 	}
 	if w < 1 || laneMeta+w >= len(l.lanes) {
 		return 0, ErrMalformed
+	}
+	if l.cp != nil && !l.cp.ended && l.cpIndex(owner) >= 0 {
+		return l.checkpointPiece(ctx, laneMeta+w, owner, buf, length, root, out)
+	}
+	if root {
+		return 0, ErrNoCheckpoint
 	}
 	it := Item{Entry: BlobEntry(BlobRun, owner, length), Buf: buf}
 	if err := l.accept(ctx, &it); err != nil {
@@ -796,6 +913,30 @@ func (l *Log) MergePiece(ctx *core.Context, w int, owner uint32, buf core.IOBuf,
 	t := l.enqueue(&l.lanes[laneMeta+w].q, queued{entry: it.Entry, buf: it.Buf})
 	l.startRounds(ctx, out)
 	return t, nil
+}
+
+// Copy queues a cleaner's copy items on the cleaner's lane of the cold stream, whose rounds may
+// open segments of the reserve and never wait behind a checkpoint, so a pass finishes on a disk
+// filled to its reserve; each source's blocks must lie in one segment of the log. It appends a
+// ticket per item to tickets, and on an error the items before the refused one stay queued. It
+// starts rounds only once all are queued, so a victim's copies fill records of the largest size,
+// as the net-gain guard charges them.
+func (l *Log) Copy(ctx *core.Context, items []Item, tickets []Ticket, out *Output) ([]Ticket, error) {
+	defer l.startRounds(ctx, out)
+	for _, it := range items {
+		if l.err != nil {
+			return tickets, l.err
+		}
+		src, seg := uint64(it.Entry.Source), uint64(l.sb.SegmentBlocks)
+		if it.Entry.Kind != EntryCopy || src < seg || src >= l.sb.DiskBlocks() || src/seg != (src+uint64(it.Entry.Count)-1)/seg || it.CRCs != nil && len(it.CRCs) != int(it.Entry.Count) {
+			return tickets, ErrMalformed
+		}
+		if err := l.accept(ctx, &it); err != nil {
+			return tickets, err
+		}
+		tickets = append(tickets, l.enqueue(&l.lanes[laneClean].q, queued{entry: it.Entry, buf: it.Buf, crcs: it.CRCs}))
+	}
+	return tickets, nil
 }
 
 func (l *Log) accept(ctx *core.Context, it *Item) error {
@@ -808,7 +949,7 @@ func (l *Log) accept(ctx *core.Context, it *Item) error {
 		return ErrTooLarge
 	}
 	switch it.Entry.Kind {
-	case EntryWrite:
+	case EntryWrite, EntryCopy, EntrySlot:
 		if it.Buf == core.NoBuf || len(ctx.Pool.Bytes(it.Buf)) != int(it.Entry.Count)*core.BlockSize {
 			return ErrBadBuffer
 		}
@@ -837,6 +978,17 @@ func (l *Log) enqueue(to *queue, q queued) Ticket {
 
 // BeginCheckpoint starts a checkpoint of indexes whose runs hold every record up to DurableLSN after each one's replay LSN; pieces and EndCheckpoint follow.
 func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
+	return l.beginCheckpoint(indexes, false)
+}
+
+// BeginStepCheckpoint starts a checkpoint that writes only merge steps, its indexes' replay LSNs
+// those of the newest manifest, so the records after that manifest still count toward the next
+// checkpoint and the hold behind it.
+func (l *Log) BeginStepCheckpoint(indexes []CheckpointIndex) error {
+	return l.beginCheckpoint(indexes, true)
+}
+
+func (l *Log) beginCheckpoint(indexes []CheckpointIndex, steps bool) error {
 	if l.err != nil {
 		return l.err
 	}
@@ -851,13 +1003,21 @@ func (l *Log) BeginCheckpoint(indexes []CheckpointIndex) error {
 	for i, ix := range indexes {
 		if ix.ReplayLSN > l.durableLSN || slices.ContainsFunc(indexes[:i], func(o CheckpointIndex) bool { return o.Owner == ix.Owner }) ||
 			slices.ContainsFunc(ix.Runs, func(r BlobRef) bool { return r.Segment == 0 || r.LSN > l.durableLSN }) ||
-			hasDuplicate(ix.Runs) {
+			hasDuplicate(ix.Runs) || !validBounds(ix.Runs, ix.Bounds) {
 			return ErrMalformed
 		}
-		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Runs: slices.Clone(ix.Runs)}
+		var bounds []MergeBound
+		for _, b := range ix.Bounds {
+			bounds = append(bounds, MergeBound{Run: b.Run, Key: slices.Clone(b.Key), Dead: b.Dead})
+		}
+		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Runs: slices.Clone(ix.Runs), Bounds: bounds}
 	}
 	m.Segments = l.usageRows()
-	cp := &checkpoint{manifest: m, changed: slices.Clone(l.changed), replayAtBegin: l.replayBytes, heldAtBegin: l.heldBytes}
+	cp := &checkpoint{manifest: m, changed: slices.Clone(l.changed), trims: l.trims.waiting}
+	if !steps {
+		cp.replayAtBegin, cp.heldAtBegin = l.replayBytes, l.heldBytes
+	}
+	l.trims.waiting = nil
 	for w, set := range l.changed {
 		for ; set != 0; set &= set - 1 {
 			s := w*64 + bits.TrailingZeros64(set)
@@ -901,16 +1061,18 @@ func (l *Log) CheckpointPiece(ctx *core.Context, owner uint32, buf core.IOBuf, l
 	if l.err != nil {
 		return 0, l.err
 	}
+	return l.checkpointPiece(ctx, laneMeta, owner, buf, length, root, out)
+}
+
+func (l *Log) cpIndex(owner uint32) int {
+	return slices.IndexFunc(l.cp.manifest.Indexes, func(ix ManifestIndex) bool { return ix.Owner == owner })
+}
+
+func (l *Log) checkpointPiece(ctx *core.Context, lane int, owner uint32, buf core.IOBuf, length uint64, root bool, out *Output) (Ticket, error) {
 	if l.cp == nil || l.cp.ended {
 		return 0, ErrNoCheckpoint
 	}
-	index := -1
-	for i := range l.cp.manifest.Indexes {
-		if l.cp.manifest.Indexes[i].Owner == owner {
-			index = i
-			break
-		}
-	}
+	index := l.cpIndex(owner)
 	if index < 0 {
 		return 0, ErrUnknownOwner
 	}
@@ -918,7 +1080,7 @@ func (l *Log) CheckpointPiece(ctx *core.Context, owner uint32, buf core.IOBuf, l
 	if err := l.accept(ctx, &it); err != nil {
 		return 0, err
 	}
-	t := l.enqueue(&l.lanes[laneMeta].q, queued{entry: it.Entry, buf: it.Buf})
+	t := l.enqueue(&l.lanes[lane].q, queued{entry: it.Entry, buf: it.Buf})
 	l.cp.pending = append(l.cp.pending, pendingPiece{ticket: t, index: index, root: root})
 	l.startRounds(ctx, out)
 	return t, nil
@@ -1008,15 +1170,27 @@ func (l *Log) dropCheckpoint(err error, out *Output) {
 	for w, set := range l.cp.changed {
 		l.changed[w] |= set
 	}
+	earlier := l.cp.earlier
+	l.trims.waiting = append(l.trims.waiting, l.cp.trims...)
 	l.cp = nil
+	for _, ref := range earlier {
+		l.dropPiece(ref)
+	}
 	out.Events = append(out.Events, Event{Kind: CheckpointFailed, Err: err})
 }
 
-// OnEvent advances rounds on disk completions.
+// OnEvent advances rounds on disk completions and paces TRIMs on TrimTimer.
 func (l *Log) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
-	if ev.Kind == core.EvDiskDone {
+	l.now = ctx.Now
+	switch {
+	case ev.Kind == core.EvTimer && ev.Timer == TrimTimer:
+		l.trims.timerAt = 0
+	case ev.Kind == core.EvDiskDone && l.trimDone(ev.IO):
+		l.startRounds(ctx, out)
+	case ev.Kind == core.EvDiskDone:
 		l.diskDone(ctx, ev.IO, ev.Err, out)
 	}
+	l.pumpTrims(out)
 }
 
 func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out *Output) {
@@ -1024,11 +1198,25 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 		l.formatDone(ctx, io, derr, out)
 		return
 	}
+	if l.slotTrimDone(io, out) {
+		return
+	}
 	for i := range l.count {
 		r := l.round(i)
-		switch io {
-		case r.writeIO:
-			if r.writeDone {
+		switch {
+		case io == r.writeIO || r.hasSlot && io == r.slotIO:
+			done := &r.recordDone
+			if io != r.writeIO {
+				done = &r.slotDone
+			}
+			if *done {
+				return
+			}
+			*done = true
+			if !r.recordDone || r.hasSlot && !r.slotDone {
+				if derr != core.DiskOK && !r.abandoned {
+					l.fail(ctx, derr, out)
+				}
 				return
 			}
 			r.writeDone = true
@@ -1044,7 +1232,7 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 			}
 			l.sendFlushes(out)
 			return
-		case r.flushIO:
+		case io == r.flushIO:
 			if r.abandoned || !r.flushSent {
 				return
 			}
@@ -1152,16 +1340,20 @@ func (l *Log) retire(out *Output) {
 	r := l.round(0)
 	l.durableLSN = r.lsn
 	r.keepBufs = r.keepBufs[:0]
-	if r.opened != 0 {
-		l.durableSeq = r.opened + 1
-		l.headerDurable(r.named)
-	}
 	l.replayBytes += r.bytes
 	l.heldBytes += r.ordinary
 	l.changed[r.segment/64] |= 1 << (r.segment % 64)
 	u := &l.usage[r.segment]
 	u.State, u.Newest = SegmentUsed, r.lsn
-	u.Live += uint32(r.bytes/core.BlockSize) - r.headerBlocks
+	u.Live += uint32(r.bytes/core.BlockSize) - r.headerBlocks + slotBlocksOf(r.entries)
+	l.noteWritten(r)
+	l.registerBlobs(r)
+	if r.opened != 0 {
+		l.durableSeq = r.opened + 1
+		l.namedDurable(r.named)
+	}
+	l.useSlots(r)
+	l.releaseHeld(out)
 	out.emitDurable(Event{
 		Kind:         Durable,
 		LSN:          r.lsn,
@@ -1175,15 +1367,6 @@ func (l *Log) retire(out *Output) {
 	l.count--
 }
 
-// headerDurable drops the manifests older than the one a now durable segment header names:
-// recovery loads that one or a newer one.
-func (l *Log) headerDurable(named ManifestPos) {
-	i := slices.IndexFunc(l.live, func(c liveChain) bool { return c.pos.LSN >= named.LSN })
-	if i > 0 {
-		l.live = slices.Delete(l.live, 0, i)
-	}
-}
-
 func (l *Log) checkpointProgress(r *round, out *Output) {
 	cp := l.cp
 	if cp == nil {
@@ -1191,10 +1374,11 @@ func (l *Log) checkpointProgress(r *round, out *Output) {
 	}
 	for i, t := range r.tickets {
 		ref := BlobRef{Segment: r.segment, Block: r.block, LSN: r.lsn, Entry: uint16(i)}
+		k := slices.IndexFunc(cp.pending, func(p pendingPiece) bool { return p.ticket == t })
 		switch {
-		case len(cp.pending) > 0 && cp.pending[0].ticket == t:
-			p := cp.pending[0]
-			cp.pending = cp.pending[1:]
+		case k >= 0:
+			p := cp.pending[k]
+			cp.pending = slices.Delete(cp.pending, k, k+1)
 			if p.root {
 				ix := &cp.manifest.Indexes[p.index]
 				ix.Runs = append(ix.Runs, ref)
@@ -1210,7 +1394,10 @@ func (l *Log) checkpointProgress(r *round, out *Output) {
 				l.chain = append(slices.Clip(l.chain), entry)
 			}
 			l.state = cp.state
-			l.live = append(l.live, liveChain{pos: l.manifest, entries: l.chain})
+			l.live = append(l.live, liveChain{pos: l.manifest, entries: l.chain, replay: replayFloor(&cp.manifest)})
+			for _, s := range cp.trims {
+				l.trims.named = append(l.trims.named, namedTrim{segment: s, lsn: l.manifest.LSN})
+			}
 			l.cp = nil
 			out.Events = append(out.Events, Event{Kind: CheckpointDone, Manifest: l.manifest})
 			return
@@ -1266,6 +1453,9 @@ func (l *Log) drain(ctx *core.Context, q *queue, tickets []Ticket) []Ticket {
 		if it.buf != core.NoBuf && !it.keep {
 			ctx.Pool.Free(it.buf)
 		}
+		if it.entry.Kind == EntrySlot {
+			l.untake(&it.entry)
+		}
 	}
 	q.drop(q.len())
 	return tickets
@@ -1302,7 +1492,7 @@ const (
 func (l *Log) target() (target, bool) {
 	for k := 1; k <= len(l.lanes); k++ {
 		i := (l.last + k) % len(l.lanes)
-		if l.lanes[i].q.len() == 0 {
+		if l.lanes[i].q.len() == 0 || l.lanes[i].q.at(0).ticket > l.hotBound(i) {
 			continue
 		}
 		if t, p := l.place(i); p == placeReady {
@@ -1320,7 +1510,7 @@ func (l *Log) target() (target, bool) {
 // their segments.
 func (l *Log) place(i int) (target, placement) {
 	ln := &l.lanes[i]
-	ordinary := i < laneMeta
+	ordinary := ordinaryLane(i)
 	if ordinary && l.behind() {
 		if l.cpNoSpace {
 			return target{}, placeNoRoom
@@ -1340,7 +1530,10 @@ func (l *Log) place(i int) (target, placement) {
 		return target{lane: i, segment: c.segment, seq: c.seq, offset: c.next}, placeReady
 	}
 	seg, ok := l.firstFree()
-	if !ok || ordinary && l.freeCount() <= l.reserve {
+	switch {
+	case !ok && len(l.trims.issued) > 0:
+		return target{}, placeWait
+	case !ok || ordinary && l.freeCount() <= l.reserve:
 		return target{}, placeNoRoom
 	}
 	return target{lane: i, segment: seg, seq: l.nextSeq, offset: 1, roll: true}, placeReady
@@ -1354,10 +1547,14 @@ func (l *Log) freeCount() uint32 {
 	return uint32(n)
 }
 
+// firstFree is the lowest free segment no TRIM is discarding: a segment allocated again waits for
+// one issued, so a late discard cannot erase its new records.
 func (l *Log) firstFree() (uint32, bool) {
 	for w, bitsSet := range l.free {
-		if bitsSet != 0 {
-			return uint32(w*64 + bits.TrailingZeros64(bitsSet)), true
+		for ; bitsSet != 0; bitsSet &= bitsSet - 1 {
+			if s := uint32(w*64 + bits.TrailingZeros64(bitsSet)); len(l.trims.issued) == 0 || !l.trimmed(s) {
+				return s, true
+			}
 		}
 	}
 	return 0, false
@@ -1379,11 +1576,16 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	if t.roll {
 		lead = 1
 	}
+	if t.roll {
+		l.free[t.segment/64] &^= 1 << (t.segment % 64)
+		l.reuseTrim(t.segment)
+		l.streams[t.segment] = ln.stream
+	}
 	limit := uint64(min(l.sb.SegmentBlocks-t.offset, l.maxWrite-lead))
 	var acc layoutAcc
 	var lay Layout
-	n, writeBlocks := 0, uint32(0)
-	for n < ln.q.len() && n < maxRecordEntries {
+	n, writeBlocks, slotted, bound := 0, uint32(0), false, l.hotBound(t.lane)
+	for n < ln.q.len() && n < maxRecordEntries && ln.q.at(n).ticket < bound {
 		next := acc
 		e := &ln.q.at(n).entry
 		if err := next.add(e); err != nil {
@@ -1393,8 +1595,15 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		if err != nil || nl.Blocks() > limit {
 			break
 		}
+		if e.Kind == EntrySlot {
+			// One slot write a round bounds how long its 4 MiB delays the rounds behind it.
+			if slotted {
+				break
+			}
+			slotted = true
+		}
 		acc, lay = next, nl
-		if e.Kind == EntryWrite {
+		if e.HasBlocks() {
 			writeBlocks += uint32(e.Count)
 		}
 		n++
@@ -1417,36 +1626,54 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	r.writeBufs = r.writeBufs[:0]
 	r.keepBufs = r.keepBufs[:0]
 	r.vec = append(r.vec[:0], core.IOVec{Buf: r.head, Len: headLen})
+	r.slotVec = r.slotVec[:0]
 	l.crcs = l.crcs[:0]
+	var slotAt core.LBA
 	var writeOff, blobOff uint64
 	for i := range items {
 		it := &items[i]
 		r.entries = append(r.entries, it.entry)
 		r.tickets = append(r.tickets, it.ticket)
 		switch it.entry.Kind {
-		case EntryWrite:
-			r.payloads = append(r.payloads, writeOff)
-			writeOff += uint64(it.entry.Count) * core.BlockSize
+		case EntryWrite, EntryCopy, EntrySlot:
+			if it.entry.HasBlocks() {
+				r.payloads = append(r.payloads, writeOff)
+			} else {
+				r.payloads = append(r.payloads, blobOff)
+			}
 			if it.keep {
 				r.keepBufs = append(r.keepBufs, it.buf)
 			} else {
 				r.writeBufs = append(r.writeBufs, it.buf)
 			}
-			r.vec = append(r.vec, core.IOVec{Buf: it.buf, Len: uint32(it.entry.Count) * core.BlockSize})
-			l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(it.buf))
+			v := core.IOVec{Buf: it.buf, Len: uint32(it.entry.Count) * core.BlockSize}
+			if it.entry.Kind == EntrySlot {
+				r.slotVec, slotAt = append(r.slotVec, v), l.sb.SlotLBA(it.entry.Segment, it.entry.Slot)
+				continue
+			}
+			writeOff += uint64(it.entry.Count) * core.BlockSize
+			r.vec = append(r.vec, v)
+			if it.crcs != nil {
+				l.crcs = append(l.crcs, it.crcs...)
+			} else {
+				l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(it.buf))
+			}
 		default:
 			r.payloads = append(r.payloads, blobOff)
 			blobOff += it.entry.Length
 		}
 	}
 	for i := range items {
-		if items[i].entry.Kind != EntryWrite {
+		if !items[i].entry.HasBlocks() {
 			r.payloads[i] += writeOff
 		}
 	}
 	if tailBlocks > 0 {
 		r.vec = append(r.vec, core.IOVec{Buf: r.tail, Len: tailBlocks * core.BlockSize})
 		l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(r.tail)[:tailBlocks*core.BlockSize])
+	}
+	for _, v := range r.slotVec {
+		l.crcs = appendBlockCRCs(l.crcs, ctx.Pool.Bytes(v.Buf)[:v.Len])
 	}
 
 	rec := Record{Place: Place{LogID: l.sb.LogID, Seq: t.seq, Offset: t.offset}, LSN: l.nextLSN, Durable: l.durableLSN}
@@ -1475,15 +1702,17 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	ln.q.drop(n)
 
 	if t.roll {
-		l.free[t.segment/64] &^= 1 << (t.segment % 64)
 		l.nextSeq++
 	}
 	bytes := uint64(lead+uint32(lay.Blocks())) * core.BlockSize
+	hasSlot := len(r.slotVec) > 0
 	*r = round{
 		lsn:          l.nextLSN,
 		writeIO:      l.io(),
 		flushIO:      l.io(),
-		flushSent:    l.earlierWritten(),
+		hasSlot:      hasSlot,
+		slotVec:      r.slotVec,
+		flushSent:    l.earlierWritten() && !hasSlot,
 		segment:      t.segment,
 		block:        t.offset,
 		headerBlocks: lay.HeaderBlocks,
@@ -1501,6 +1730,19 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	if t.roll {
 		r.opened, r.named = t.seq, l.manifest
 	}
+	l.writes.Disk += uint64(lead) + lay.Blocks()
+	if hasSlot {
+		l.writes.Disk += core.BlocksPerChunk
+		l.writes.Data += core.BlocksPerChunk
+	}
+	if ordinaryLane(t.lane) {
+		l.writes.Data += lay.Blocks() - uint64(lay.HeaderBlocks)
+	} else {
+		l.background += uint64(lead) + uint64(lay.Blocks())
+		if t.roll && ln.asm.segment != 0 {
+			l.background += uint64(l.sb.SegmentBlocks - ln.asm.next)
+		}
+	}
 	ln.asm = cursor{segment: t.segment, seq: t.seq, next: t.offset + uint32(lay.Blocks())}
 	if t.roll {
 		ln.opened = l.nextLSN
@@ -1508,6 +1750,11 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	l.nextLSN++
 	l.last = t.lane
 	l.count++
+	if hasSlot {
+		// The flush must cover the slot's write too, so it goes out once both writes complete.
+		r.slotIO = l.io()
+		out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskWrite, IO: r.slotIO, LBA: slotAt, Vec: r.slotVec, Len: core.ChunkSize})
+	}
 	out.Actions = append(out.Actions, core.Action{
 		Kind: core.ActDiskWrite,
 		IO:   r.writeIO,
@@ -1543,6 +1790,15 @@ func appendBlockCRCs(crcs []uint32, b []byte) []uint32 {
 }
 
 func (l *Log) check(ctx *core.Context, t target, rec Record, r *round, items []queued) {
+	slots := 0
+	for i := range items {
+		if items[i].entry.Kind == EntrySlot {
+			slots++
+		}
+	}
+	if t.lane == laneSlot && (len(items) != 1 || slots != 1) || t.lane != laneSlot && slots > 0 {
+		panic(fmt.Sprintf("disklog: decode check: LSN %d on lane %d holds %d entries, %d of them slot writes; a slot write goes alone to the slot lane", rec.LSN, t.lane, len(items), slots))
+	}
 	img := l.checkImg[:0]
 	for _, v := range r.vec {
 		img = append(img, ctx.Pool.Bytes(v.Buf)[:v.Len]...)
@@ -1570,6 +1826,15 @@ func (l *Log) check(ctx *core.Context, t target, rec Record, r *round, items []q
 		}
 		if off := PayloadOffset(d.Entries, i); r.payloads[i] != off {
 			panic(fmt.Sprintf("disklog: decode check: LSN %d entry %d reported at offset %d; it decodes at %d", rec.LSN, i, r.payloads[i], off))
+		}
+		if it.entry.Kind == EntrySlot {
+			data := ctx.Pool.Bytes(it.buf)
+			for b := range uint16(core.BlocksPerChunk) {
+				if core.CRC32C(data[int(b)*core.BlockSize:][:core.BlockSize]) != d.SlotCRC(i, b) {
+					panic(fmt.Sprintf("disklog: decode check: LSN %d entry %d slot block %d checksum differs", rec.LSN, i, b))
+				}
+			}
+			continue
 		}
 		if !bytes.Equal(d.Payload(i), it.payload(ctx.Pool)) {
 			panic(fmt.Sprintf("disklog: decode check: LSN %d entry %d payload differs", rec.LSN, i))

@@ -17,7 +17,7 @@ func TestOrdinaryBytesCountsTouchedBlocks(t *testing.T) {
 		var own, ordinary int
 		for j := range rec.entries {
 			e := &rec.entries[j]
-			if e.Kind == EntryBlob && (e.BlobKind == BlobRun || isManifestKind(e)) {
+			if e.Kind == EntryBlob && (e.BlobKind == BlobRun || isManifestKind(e)) || e.Kind == EntryCopy {
 				own++
 				continue
 			}

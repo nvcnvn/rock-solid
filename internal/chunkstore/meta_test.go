@@ -427,7 +427,7 @@ func (m *metaIndex) newTree() *lsm.Tree {
 }
 
 func (m *metaIndex) newIndex(tr *lsm.Tree) *Index {
-	x := NewIndex(tr)
+	x := NewIndex(tr, 0, 0)
 	x.pointRemovals = m.set.points
 	return x
 }
@@ -583,7 +583,7 @@ func (m *metaIndex) CompactFinish() error {
 func (m *metaIndex) Restart() error {
 	m.pending = nil
 	tr := m.newTree()
-	if err := m.log.Restore(lsm.RootRefs, tr.LoadRun); err != nil {
+	if err := m.log.Restore(lsm.RootRefs, tr.LoadRun, tr.LoadBoundedRun); err != nil {
 		return err
 	}
 	x := m.newIndex(tr)

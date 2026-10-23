@@ -2,6 +2,8 @@ package chunkstore
 
 import (
 	"bytes"
+	"encoding/binary"
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/disklog"
@@ -52,24 +54,31 @@ func FuzzDecodeExtent(f *testing.F) {
 // and a value: Check returns an error or nil and never panics, and when it passes a Reader reads
 // blocks, ascending and back, live and at an epoch, as Lookup and LookupAt do.
 func FuzzCheck(f *testing.F) {
-	x := newIndex(f)
+	x := slotIndex(f)
 	if err := x.Apply(record(100,
 		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(1), Version: 1, First: 0, Count: 2},
 		disklog.Entry{Kind: disklog.EntryFreeze, Pool: 1, Chunk: chunk(1), Version: 1, Epoch: 5},
 		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(1), Version: 2, First: 1, Count: 1},
 		disklog.Entry{Kind: disklog.EntryFreeze, Pool: 1, Chunk: chunk(2), Version: 0, Epoch: 5},
 		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(2), Version: 1, First: 0, Count: 1},
+		disklog.SlotEntry(1, chunk(3), 1, 2, 1),
+		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(3), Version: 2, First: 7, Count: 1},
 	)); err != nil {
 		f.Fatal(err)
 	}
-	var seed []byte
+	var seed, past []byte
 	for _, kv := range dumpIndex(x) {
-		seed = append(seed, byte(len(kv[0])))
-		seed = append(seed, kv[0]...)
-		seed = append(seed, byte(len(kv[1])))
-		seed = append(seed, kv[1]...)
+		k, v := []byte(kv[0]), []byte(kv[1])
+		seed = append(append(append(append(seed, byte(len(k))), k...), byte(len(v))), v...)
+		if e, ok := decodeExtent(k, v); ok {
+			if _, slot := x.slotOf(e); slot {
+				v = binary.LittleEndian.AppendUint64(slices.Clone(v[:extentSize-8]), 1<<62)
+			}
+		}
+		past = append(append(append(append(past, byte(len(k))), k...), byte(len(v))), v...)
 	}
 	f.Add(seed)
+	f.Add(past)
 	f.Fuzz(func(t *testing.T, b []byte) {
 		tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: 1 << 20, Check: true}))
 		if err != nil {
@@ -91,7 +100,7 @@ func FuzzCheck(f *testing.F) {
 				}
 			}
 		}
-		x := NewIndex(tree)
+		x := NewIndex(tree, slotSegmentBlocks, slotSegments)
 		if x.Check() == nil {
 			var r Reader
 			for _, c := range []uint32{1, 2} {

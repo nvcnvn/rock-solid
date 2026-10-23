@@ -1,6 +1,6 @@
 # Cleaner streams spike
 
-**Question.** Three questions the [cleaner spike](../cleaner-wa/) left open about the per-disk log ([On-disk format](../../docs/design.md#on-disk-format)): what layout should the segments that hold whole chunks have, so that files deleted at random don't pay the write amplification (WA) of 64 MiB segments (Q13)? Does separating data by temperature into more than two streams, by age or by the number of times the cleaner moved it, close the gap to perfect hot/cold separation enough to be worth it now (Q14)? And what do the log's own writes cost, the Raft entries, sorted runs, compactions and manifests that share the log with chunk data, plus the chunk-index entries the cleaner causes when it moves blocks, and should they live in their own stream (Q15)?
+**Question.** Three questions the [cleaner spike](../cleaner-wa/) left open about the per-disk log ([On-disk format](../../docs/design.md#on-disk-format)): what layout should the segments that hold whole chunks have, so that files deleted at random don't pay the write amplification (WA) of 64 MiB segments (Q13)? Does separating data by temperature into more than two streams, by age or by the number of times the cleaner moved it, close the gap to perfect hot/cold separation enough to be worth it now (Q14)? And what do the log's own writes cost, the Raft entries, sorted runs, compactions and manifests that share the log with chunk data, plus the chunk-index entries the cleaner causes when it moves blocks, and should they live in their own stream (Q15)? A fourth came later from the store: a slot write's record header is never moved, since its blocks keep its segment live, so where should those headers go for the cleaner to keep making progress (Q13b)?
 
 **Setup.** The [cleaner-wa](../cleaner-wa/) simulator in Rust, extended ([src/main.rs](src/main.rs), no dependencies, its own `[workspace]`), driven by [run.py](run.py). Written against commit `676095bf` of this repository; it does not import the repo's code. Intel Xeon at 2.1 GHz, 4 vCPUs, 16 GiB, Linux 6.18.44 in a Firecracker VM, rustc 1.97.0, Python 3.13. The machine was shared with six other benchmarking agents; that changes only the `secs` field, since the simulation is deterministic.
 
@@ -22,9 +22,10 @@ python3 run.py --jobs 4                    # Q13, Q14, Q15: 141 runs, about 45 m
 python3 run.py S --jobs 4 --out results2.txt   # supplementary runs S1-S4
 python3 run.py --render results.txt Q13    # tables again from saved RUN lines
 target/release/cleaner-streams wl=hotcold hot_w=0.9 hot_f=0.1 u=0.9 sep=sepbit_gc   # one run; keys in Cfg::parse
+sh lane_runs.sh > results4.txt             # Q13b: A3 with slot headers pinned, in the hot stream and in a lane of their own
 ```
 
-Raw output: [results.txt](results.txt) (Q13 to Q15), [results2.txt](results2.txt) (S1 to S4), [results3.txt](results3.txt) (S4 again, with the run count in its error). results.txt was produced before the slot path counted Raft entries; that changes only C3's slots-with-metadata row, which S3 replaces. Its A3 table shows ERR for "own" cells that were never run; `--render` prints them as "-".
+Raw output: [results.txt](results.txt) (Q13 to Q15), [results2.txt](results2.txt) (S1 to S4), [results3.txt](results3.txt) (S4 again, with the run count in its error), [results4.txt](results4.txt) (Q13b, run later on an Apple M4 Pro with rustc 1.99.1). results.txt was produced before the slot path counted Raft entries; that changes only C3's slots-with-metadata row, which S3 replaces. Its A3 table shows ERR for "own" cells that were never run; `--render` prints them as "-".
 
 ## Results
 
@@ -38,6 +39,15 @@ Raw output: [results.txt](results.txt) (Q13 to Q15), [results2.txt](results2.txt
 | A1, A3: slot fragmentation | Slot segments stay 99.9% full (`slot_occ`); all slots are one size, so any free slot fits |
 
 Segment counts change what a manifest costs. Every manifest carries the whole usage table, 17 B per used segment, and one is written per `max_replay_bytes` (64 MiB): at 64 MiB segments that is 272 KiB per TiB of disk (0.4% of the log per TiB), at 16 MiB 1.1 MiB (1.7%), at 4 MiB 4.25 MiB (6.6%), and recovery reads 16× more segment headers.
+
+### Q13b: where slot record headers go
+
+**Expected:** in the hot stream among small writes (`whole_stream=0`) each pinned header keeps its segment's dead small writes from being reclaimed, so the cleaner runs out of victims well below 90% full; in a lane of their own (`whole_stream=2`) every run completes, with write amplification near A3's slots16 figures (headers moved like data) and the lane holding about 1% of the disk.
+
+| Test | Result |
+| --- | --- |
+| A3p: A3 at 50 / 80 / 90% full with slot headers pinned (`pin_hdr=1`: no segment holding a live slot header is a victim, the store's rule) | In the hot stream among small writes (`whole_stream=0`), every run stops with no victim to take, at 50, 80 and 90% full, half or a fifth of the writes whole. **In a lane of their own (`whole_stream=2`): half the writes whole 1.08 / 1.57 / 2.75 at 50 / 80 / 90%, the lane holding 0.9 / 1.2 / 1.2% of the disk; a fifth 1.12 / 1.89 / 3.57, the lane 0.5 / 0.6 / 0.6%** |
+
 
 ### Q14: more streams
 
@@ -81,8 +91,8 @@ Cost-benefit with the age cap; WA and its ratio to the design's two streams. *He
 
 ## Conclusions
 
-1. **Whole chunks go to chunk slots, not to the log** (Q13). Random deletes of whole chunks cost 4.9 at 90% full and 9.0 at 95% in 64 MiB segments, and slots cost nothing at any fill (1.004, the record headers). A pool that is half whole chunks also cleans its small writes for less, 2.5 instead of 6.1 at 90%, because the whole chunks no longer take spare space. Whole files are no cheaper than single chunks once writers interleave (4.0 to 4.5 with 8 writers), and placement groups spread each file over every disk, so a disk's log sees whole-file deletes as random chunk deletes.
-2. **A slot holds data only, 16 per 64 MiB segment, and each round's record stays in the log** (Q13). Slots that carry their own record headers fit 15 per segment, and a pool of whole chunks then cannot pass about 93% full (A1 at 95%). Records in the log cost 0.4% of the chunk's size there, live while the chunk is, and the cleaner moves them like data. Smaller segments for the whole disk are not the answer: 4 MiB segments still cost 1.5 at 90%, and the usage table every manifest carries grows 16-fold, 6.6% more log writes per TiB of disk.
+1. **Whole chunks go to chunk slots, not to the log** (Q13). Random deletes of whole chunks cost 4.9 at 90% full and 9.0 at 95% in 64 MiB segments, and slots cost nothing at any fill (1.004, the record headers). A pool that is half whole chunks also cleans its small writes for less, 2.75 instead of 6.1 at 90% with the slot headers in a lane of their own, because the whole chunks no longer take spare space. Whole files are no cheaper than single chunks once writers interleave (4.0 to 4.5 with 8 writers), and placement groups spread each file over every disk, so a disk's log sees whole-file deletes as random chunk deletes.
+2. **A slot holds data only, 16 per 64 MiB segment, and each round's record stays in the log, in a lane of its own** (Q13, Q13b). Slots that carry their own record headers fit 15 per segment, and a pool of whole chunks then cannot pass about 93% full (A1 at 95%). Records in the log cost 0.4% of the chunk's size there, live while the chunk is. The store does not move them (a slot write's blocks keep its record's segment live), so they go to a lane of their own: among small writes they pin the small writes' dead space and the cleaner runs out of victims, while in their own lane the 90% figures are 2.75 with half the writes whole and 3.57 with a fifth, against 2.53 and 3.43 with the headers moved like data, and the lane holds at most 1.2% of the disk. Smaller segments for the whole disk are not the answer: 4 MiB segments still cost 1.5 at 90%, and the usage table every manifest carries grows 16-fold, 6.6% more log writes per TiB of disk.
 3. **No more temperature streams for chunk data now** (Q14). No policy simulated is a safe default: the one that closes most of the gap on hot/cold overwrites (SepBIT's age classes for cleaner output, −27 to −30% on hc90 at 90 to 95%) costs up to 63% more on uniform overwrites and 18% more on hc80 at 95%, and zipf gains nothing. The gap is also smaller than cleaner-wa's header-free oracle suggested: 1.08 to 1.56×. The stream tag can carry more streams later.
 4. **Sorted runs, compaction output and manifests get their own stream** (Q15). Mixed with cleaner copies they raise block-volume WA by 25 to 54% at 80 to 90% full and nearly triple it at 95%; in their own stream by 3 to 15% at 80 to 90%. Runs die whole, so their segments empty without copies.
 5. **Raft entries stay with new chunk copies** (Q15). A Raft stream of its own saved 6% more at 80% in the 25%-Raft stand-in, but a round writes one record to one stream, so it would split a commit's chunk write and Raft entries into two rounds and two flushes.

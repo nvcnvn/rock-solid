@@ -164,7 +164,7 @@ func TestCheckpointFailedKeepsFrozenMemtable(t *testing.T) {
 	}
 	tree := h.s.Index().Tree()
 	runs := tree.Runs()
-	h.s.beginCheckpoint(&h.ctx, &h.out)
+	h.s.beginCheckpoint(&h.ctx, true, &h.out)
 	h.s.pump(&h.ctx, &h.out)
 	h.take()
 	h.settle()
@@ -248,7 +248,8 @@ func TestRunCheckRebuilds(t *testing.T) {
 }
 
 // A merge that fails its run check takes the same path: the store rebuilds its index from the
-// log, and the rebuilt index equals the byte-range oracle's.
+// log, the rebuilt index equals the byte-range oracle's, and write admission measures the new
+// log afresh.
 func TestMergeCheckRebuilds(t *testing.T) {
 	cfg := testConfig()
 	cfg.Log.MaxReplayBytes = 16 * core.BlockSize
@@ -265,6 +266,7 @@ func TestMergeCheckRebuilds(t *testing.T) {
 	}
 	c.Run()
 	gen := h.s.logGen
+	h.s.adm.measured, h.s.adm.rate, h.s.adm.tokens, h.s.adm.carry = true, 1, -5, -5
 	h.s.plant.failMerge = true
 	if err := h.s.InstallMerge(&h.ctx, c, &h.out); !errors.Is(err, lsm.ErrCheck) {
 		t.Fatalf("install: %v", err)
@@ -274,7 +276,192 @@ func TestMergeCheckRebuilds(t *testing.T) {
 	if !h.s.Serving() || h.s.logGen != gen+1 {
 		t.Fatalf("serving %v after %d restarts of the log", h.s.Serving(), h.s.logGen-gen)
 	}
+	if a := h.s.adm; a.measured || a.rate != 0 || a.tokens != 0 || a.carry != 0 {
+		t.Fatalf("the rebuilt store's bucket kept the old log's: measured %v, rate %v, tokens %v, carry %v", a.measured, a.rate, a.tokens, a.carry)
+	}
 	o.check(t, h, 0, 15, 0)
+}
+
+// A run check that fails again after a rebuild, before any checkpoint completes, stops the store
+// with the check's error instead of rebuilding without end.
+func TestARunCheckFailingAfterARebuildStopsTheStore(t *testing.T) {
+	cfg := testConfig()
+	cfg.Log.MaxReplayBytes = 32 * core.BlockSize
+	h := newHarness(t, cfg)
+	h.s.plant.failChecks = true
+	gen := h.s.logGen
+	for i := 0; h.s.Err() == nil; i++ {
+		if i == 5000 {
+			t.Fatalf("no stop after %d steps and %d restarts of the log", i, h.s.logGen-gen)
+		}
+		if !h.step() {
+			h.write(chunkC, uint32(i%16)*core.BlockSize, fill(core.BlockSize, byte(i)), 0)
+		}
+	}
+	if !errors.Is(h.s.Err(), lsm.ErrCheck) || h.s.logGen != gen+1 {
+		t.Fatalf("stopped with %v after %d restarts of the log", h.s.Err(), h.s.logGen-gen)
+	}
+}
+
+// rebuild breaks the index as a run check failing first since a checkpoint does, runs the store
+// until the index rebuilt from the log serves, and returns that index as the recovery left it,
+// before the cleaner or a checkpoint changes it. Settled after the rebuild, the store holds no
+// pool buffer but its log's own.
+func (h *harness) rebuild() [][2]string {
+	h.t.Helper()
+	gen := h.s.logGen
+	h.s.rebuilt = false
+	h.s.indexBroken(&h.ctx, lsm.ErrCheck, &h.out)
+	h.s.pump(&h.ctx, &h.out)
+	h.take()
+	for !h.s.Serving() && h.step() {
+	}
+	if !h.s.Serving() || h.s.logGen != gen+1 {
+		h.t.Fatalf("rebuild: serving %v after %d restarts of the log: %v", h.s.Serving(), h.s.logGen-gen, h.s.Err())
+	}
+	rebuilt := dumpIndex(h.s.Index())
+	h.settle()
+	if held := h.pool.Live() - h.abandoned; held != h.own {
+		h.t.Fatalf("rebuild: once settled the store holds %d pool buffers, want its log's %d", held, h.own)
+	}
+	return rebuilt
+}
+
+// A rebuild that starts while the cleaner reads the blocks it copies frees their buffers.
+func TestARebuildFreesTheBlocksTheCleanerRead(t *testing.T) {
+	h := newHarnessOn(t, cleanConfig(), cleanGeo)
+	r := core.NewRand(1)
+	reading := func() bool {
+		return slices.ContainsFunc(h.s.cl.reads, func(rd cleanRead) bool { return rd.used && rd.piece >= 0 })
+	}
+	for i := 0; !reading(); i++ {
+		if i == 50000 {
+			t.Fatal("the cleaner read no block to copy")
+		}
+		if !h.step() {
+			data := make([]byte, core.BlockSize)
+			r.Fill(data)
+			h.write(cleanChunks[r.Below(uint64(len(cleanChunks)))], uint32(r.Below(48))*core.BlockSize, data, 0)
+		}
+	}
+	h.rebuild()
+}
+
+// cleanedHarness runs the cleaner workload on the small disk until the cleaner has freed a segment.
+func cleanedHarness(t *testing.T) *harness {
+	h := newHarnessOn(t, cleanConfig(), cleanGeo)
+	r := core.NewRand(1)
+	for i := 0; h.s.CleanStats().Freed == 0; i++ {
+		if i == 20 {
+			t.Fatal("the cleaner freed no segment")
+		}
+		cleanerWorkload(h, r, 100)
+	}
+	return h
+}
+
+// failCheck fails a run check on path, a flush or a merge, and runs the store until the index
+// rebuilt from the log serves, with writes going on.
+func (h *harness) failCheck(path string) {
+	h.t.Helper()
+	gen := h.s.logGen
+	r := core.NewRand(2)
+	write := func() {
+		data := make([]byte, core.BlockSize)
+		r.Fill(data)
+		h.write(cleanChunks[r.Below(uint64(len(cleanChunks)))], uint32(r.Below(48))*core.BlockSize, data, 0)
+	}
+	switch path {
+	case "flush":
+		h.s.plant.failCheck = true
+		for i := 0; h.s.plant.failCheck || !h.s.Serving(); i++ {
+			if i == 5000 || h.s.Err() != nil {
+				h.t.Fatalf("no rebuild after %d steps: %v", i, h.s.Err())
+			}
+			write()
+			h.step()
+		}
+	case "merge":
+		c := h.s.MergeDue()
+		for i := 0; c == nil; i++ {
+			if i == 500 {
+				h.t.Fatal("no merge became due")
+			}
+			write()
+			h.settle()
+			c = h.s.MergeDue()
+		}
+		c.Run()
+		h.s.plant.failMerge = true
+		if err := h.s.InstallMerge(&h.ctx, c, &h.out); !errors.Is(err, lsm.ErrCheck) {
+			h.t.Fatalf("install: %v", err)
+		}
+		h.take()
+	}
+	h.settle()
+	if !h.s.Serving() || h.s.logGen != gen+1 {
+		h.t.Fatalf("serving %v after %d restarts of the log: %v", h.s.Serving(), h.s.logGen-gen, h.s.Err())
+	}
+}
+
+// A run check that fails once the cleaner has freed segments, whose LSNs are gone for good,
+// rebuilds the index from the runs the newest named manifest lists and the log after them, on the
+// flush path and on the merge path, and the store serves again; its index then equals another
+// rebuild's.
+func TestRunCheckRebuildsAfterCleaning(t *testing.T) {
+	for _, path := range []string{"flush", "merge"} {
+		t.Run(path, func(t *testing.T) {
+			h := cleanedHarness(t)
+			h.failCheck(path)
+			live := dumpIndex(h.s.Index())
+			if again := h.rebuild(); !slices.Equal(again, live) {
+				t.Fatalf("a second rebuild has %d entries, the live index %d", len(again), len(live))
+			}
+		})
+	}
+}
+
+// firstPayloadLBA is the disk block holding the first byte of the blob at ref, and that byte's offset in it.
+func firstPayloadLBA(t *testing.T, h *harness, ref disklog.BlobRef) (core.LBA, int) {
+	t.Helper()
+	sb := h.s.sb
+	sh, err := disklog.DecodeSegmentHeader(h.disk.Read(sb.LBA(ref.Segment, 0), 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	left := sb.SegmentBlocks - ref.Block
+	place := disklog.Place{LogID: sb.LogID, Seq: sh.Seq, Offset: ref.Block}
+	rh, err := disklog.DecodeHeader(h.disk.Read(sb.LBA(ref.Segment, ref.Block), uint64(left)), place, left, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := disklog.PayloadOffset(rh.Entries, int(ref.Entry))
+	return sb.LBA(ref.Segment, ref.Block+rh.Layout.HeaderBlocks+uint32(off/core.BlockSize)), int(off % core.BlockSize)
+}
+
+// A rebuild that finds a run piece the manifest lists damaged on disk reports the log corrupt at
+// the piece's record, rather than serving an index without the run.
+func TestRebuildFromADamagedRunIsCorrupt(t *testing.T) {
+	h := cleanedHarness(t)
+	h.s.indexBroken(&h.ctx, lsm.ErrCheck, &h.out)
+	h.s.pump(&h.ctx, &h.out)
+	h.take()
+	for len(h.s.loading) == 0 {
+		if !h.step() {
+			t.Fatalf("the rebuild loaded no run: %v", h.s.Err())
+		}
+	}
+	var roots []disklog.BlobRef
+	for root := range h.s.loading {
+		roots = append(roots, root)
+		lba, off := firstPayloadLBA(t, h, root)
+		h.disk.FlipBit(lba, off, 0x01)
+	}
+	h.settle()
+	var corrupt *disklog.CorruptError
+	if h.s.Serving() || !errors.As(h.s.Err(), &corrupt) || !slices.ContainsFunc(roots, func(r disklog.BlobRef) bool { return r.LSN == corrupt.LSN }) {
+		t.Fatalf("serving %v, error %v, want Corrupt at one of %v", h.s.Serving(), h.s.Err(), roots)
+	}
 }
 
 // The store hands the log one run piece at a time, each once the one before is durable.
