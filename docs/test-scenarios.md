@@ -3752,12 +3752,17 @@ section.
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 1,939 s |
 
 - Each model names the simulator invariant of each property in its own section's property table,
-  so this map holds only the configuration results. Open: the checklist has no phase 6 or 7 items
-  yet; the sessions and purge models' invariants are registered with the phase 6 file frontend,
-  and the recall model's with phase 7 (Tier 2).
-- The epoch change model's counterexamples each also appear as a simulator fault or planted bug that
-  trips the mapped invariant. Open: the checklist does not require this; it follows if every
-  property has an invariant.
+  so this map holds only the configuration results. The sessions model's invariants are registered
+  by [MetaStore invariants](#metastore-invariants) (phase 4), which plants its leader-side
+  negatives, and [Session fencing on storage nodes](#session-fencing-on-storage-nodes) its
+  storage-side ones. Open: the checklist has no phase 6 or 7 items yet. The sessions model's
+  client-side negatives (`neg-count-from-reply`, `neg-no-drift`, `neg-ignore-resumed`,
+  `neg-fixed-step-check`, `neg-window-per-run`) wait for the phase 6 client daemon, the purge
+  model's invariants are registered with the phase 6 file frontend, and the recall model's with
+  phase 7 (Tier 2).
+- The epoch change model's counterexamples each also appear as a planted bug that trips the mapped
+  invariant: those for property 2 in [MetaStore invariants](#metastore-invariants), the rest in
+  [Placement faults and invariants](#placement-faults-and-invariants).
 - Snapshot cuts and pool moves are modelled in phase 11, and cross-shard commit in phase 13, each
   before its code (design.md Roadmap), so this map has no rows for them yet.
 
@@ -3796,7 +3801,7 @@ sender's table epoch (`uint64`, per the PG epochs study) and the PG's interval n
 | Chunk write, primary to member | The above, plus the version and the merged whole blocks at block-aligned offsets of the frame |
 | Write acknowledgment, member to primary | Version; the member's disk fill |
 | Write reply to the client | Version; or `NoSpace`; or a refusal (the member's table epoch and the PG's interval); or an `expect_ver` mismatch |
-| Punch | PG fields, session ID, incarnation, chunk ID, byte range, optional `expect_ver`, snapshot epoch; the version when sent to a member |
+| Punch | PG fields, session ID, incarnation, chunk ID, byte range, optional `expect_ver`, snapshot epoch; the version when sent to a member; the shard's Raft term when the purger sends it ([Freeing space](design.md#freeing-space)) |
 | Read | PG fields, chunk ID, byte range, optional `at_ver` |
 | Read reply | Bytes and version; or a refusal (wrong interval, chunk on the missing list, unfound) |
 | Lease request, holder to grantor | The holder's table epoch; the grantor grants only if it is at least its own, and otherwise refuses with its own table epoch |
@@ -3847,8 +3852,9 @@ sender's table epoch (`uint64`, per the PG epochs study) and the PG's interval n
 - Whether the phase 3 frame already carries the snapshot epoch. Chunk writes and punches carry one
   ([Snapshots and clones](design.md#snapshots-and-clones), [Freeing
   space](design.md#freeing-space)), but snapshots are phase 11.
-- No phase 3 item names the primary's per-write session check. Every write carries the session ID,
-  and the session table arrives with phase 4's control-plane group.
+- The per-write session check is phase 4's [Session fencing on storage
+  nodes](#session-fencing-on-storage-nodes), once the control-plane group brings the session table;
+  until then every write carries the session ID unchecked.
 
 ## Pools
 
@@ -4416,9 +4422,10 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
 - Open: whether the restart wait also delays a restarted primary's own peering, or only its grants
   and its part in other primaries' peering. A primary restarting at t = 100 s peers in its new
   interval at about 100 s under one reading and at 104 s under the other.
-- Open: which PGs a fresh grant covers (open question "Which PGs a node-pair grant covers"). The
-  epoch change model chooses the rule. Once it is chosen: B holds PG 17 in interval 42, A asks under
-  8 with 41's table, and A gets no lease for PG 17.
+- A fresh grant takes the same table check as a renewal: B holds PG 17 in interval 42, A asks
+  afresh under 8 with 41's table, and B refuses it until A reports a table at least as new, so A
+  gets no lease for PG 17. A planted variant that exempts fresh grants
+  (`neg-fresh-grant-no-table-check`) fails "no PG serves reads from two primaries at once".
 - One grant covers every PG the pair shares and is renewed by the pair's heartbeat. With 2,048 PGs
   on 5 nodes, a pair sends one grant per heartbeat, not one per PG, and the count does not change
   when `pg_count` doubles.
@@ -4639,7 +4646,9 @@ runs of one seed give byte-identical traces, compared with `cmp`.
 
 | Clock fault | Model |
 | --- | --- |
-| Oscillator drift | Raw rate within ±1% of real time, fixed per node per seed |
+| Oscillator drift | Raw rate within ±4% of real time, fixed per node per seed |
+| Raw rate step after measurement | A node's raw rate rises or falls once, by up to `lease_drift / 2`, at a seeded time after its holders have bounded it |
+| Reboot | The node is down for at least a heartbeat; its raw clock restarts near 0 at a rate changed by up to 2%. A process restart keeps the raw clock and its rate |
 | Time-daemon slew | `BOOTTIME` rate differs from raw by up to ±22.6%, changing at seeded times; chrony's 8.33% as a case of its own |
 | Suspend | Raw and `MONOTONIC` stop; `BOOTTIME` gains the sleep rounded down to whole seconds; one `Resumed` when that gain reaches the threshold |
 | Stop or pause in place, `tsc` guest or Firecracker | Every clock gains the pause; marker unchanged |
@@ -4662,7 +4671,9 @@ runs of one seed give byte-identical traces, compared with `cmp`.
 
 Each scenario runs over 10,000 seeds once when it is added, and thousands per commit. A failing seed
 prints its replay command, and its reduced ops become a data-driven regression case before the fix.
-Lease constants are as at the head of [Peering and read leases](#peering-and-read-leases).
+Lease constants are as at the head of [Peering and read leases](#peering-and-read-leases). The
+faults are the placement faults of [Testing strategy](design.md#testing-strategy) and every fault in
+the [Epoch change model](#epoch-change-model)'s list.
 
 **Invariants checked after every step**, each with the number of the [Epoch change
 model](#epoch-change-model) property it checks:
@@ -4677,7 +4688,9 @@ model](#epoch-change-model) property it checks:
 - No kept version follows a dropped version of its chunk (5).
 - No two members hold different data under one version, and no two writes of a chunk get one version
   (6).
-- No node's table epoch or PG interval number goes backwards (9).
+- No node's table epoch or PG interval number goes backwards, no PG's last activated interval goes
+  down, and every activation a table records happened (9).
+- No disk ID names two log IDs, and no log ID is up under two disk IDs.
 - No step check trips between two nodes neither paused nor rebooted, and each such pair holds a
   lease within `rate_gap` plus two round trips of first contact. This is a counter, expected to be
   0 (10).
@@ -4688,7 +4701,12 @@ model](#epoch-change-model) property it checks:
 - A disk passes `write_limit` only through granted flushes, overwrites, punches and recovery.
 - Uniformly hashed fills reach the reported available figure within 1%.
 - Every read equals the byte-range oracle of acknowledged writes and punches applied in version
-  order (11).
+  order (8, 11).
+
+**Planted bugs.** Each row of the epoch change model's counterexample table, except the two for
+property 2, which [MetaStore invariants](#metastore-invariants) plants, is a variant of the code
+(for the reboot that takes no time, of the simulated reboot) that fails the invariant its property
+maps to within the seeds every commit runs.
 
 **Scripted scenarios.** Every one also holds every invariant above.
 
@@ -4703,7 +4721,7 @@ model](#epoch-change-model) property it checks:
 | P7 | `pg_count` 1,024 → 2,048 with writes in flight to PG 567 | PGs 1,134 and 1,135 start one interval above 567; every chunk's versions keep growing |
 | P8 | Disk X turns 100× slow for 90 s, then normal | X is marked down after 60 s and back after a whole normal minute; no PG drops below `min_live` because of it |
 | P9 | Holder `BOOTTIME` −22.6%, grantor `BOOTTIME` +22.6%, holder raw −100 ppm, grantor raw +100 ppm | No overlap: the holder ends by 3.9604 s, the grantor at 4.0001 s or later |
-| P9b | Slews up to ±22.6% changing at seeded times, raw ±1%, 10,000 seeds | No overlap from the first lease |
+| P9b | Slews up to ±22.6% changing at seeded times, raw ±4%, 10,000 seeds | No overlap from the first lease |
 | P10 | No daemon: holder's clocks both −1%, grantor's both +1%, after the first bound, once the window is full | Margin 2.52% plus the bound's overshoot; the holder ends by 3.939 s, the grantor at 3.961 s |
 | P10b | As P10, from either node's start, a partition right after the first grant | No lease before the second grant, `rate_gap` later; no overlap |
 | P11 | Grants delayed by up to 50 ms in one direction | The bound widens only toward safety; no overlap |
@@ -4871,7 +4889,7 @@ The leader counts itself as a fortified voter. Open: "itself included" gives the
 2. **A leader's node suspended past its lease (5 s).** On resume it ends every lease (`Resumed`) before serving. A new leader may have been elected after the grants lapsed on the grantors' clocks. Expected: no overlap.
 3. **A leader transfer while lease reads arrive.** Expected: the old leader serves none after `MsgTimeoutNow` leaves, and the new leader none before it is fortified and has committed an entry of its term.
 4. **A configuration change while a lease is held.** Expected: the lease requires quorums in both halves throughout the joint configuration.
-5. **Lease clocks.** A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±1%, and grants delayed by asymmetric queueing of up to 50 ms. Expected: no overlap. A crash fails over within 5.2 s, the most a 22.6% slew can stretch a grantor's wait, plus `raft_lapse_campaign` and an election.
+5. **Lease clocks.** A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±4%, and grants delayed by asymmetric queueing of up to 50 ms. Expected: no overlap. A crash fails over within 5.2 s, the most a 22.6% slew can stretch a grantor's wait, plus `raft_lapse_campaign` and an election.
 
 ## Voter replacement
 
@@ -5101,7 +5119,6 @@ Only the last component (a file name, an xattr name or an S3 key) has variable l
 | 100 heartbeats renewing 10 sessions | No Raft entry: renewals change only the leader's memory |
 | A session falls due | One commit fencing every session due at that moment, as one new session-table version |
 | Every storage node acknowledges version v, or is marked down in a committed table | v is committed as acknowledged, and the fenced sessions leave the table |
-| A storage node marked down sends a heartbeat reporting an older version | It is not marked up |
 | A follower of the control-plane group, or a new leader before its leader lease starts, receives a heartbeat | It answers no renewal |
 | A new leader's leader lease starts | Every live session gets a full `session_lease` from that start |
 | The control-plane leader crashes 1 s after its last renewal of client C, whose `CLOCK_BOOTTIME` runs 22.6% fast; a new leader answers 8 s after the crash | C's lease ends about 8.1 s after that renewal, 7.1 s after the crash, and C holds its writes from then until the new leader answers; no session is fenced. With a new leader at 5 s, C never holds |
@@ -5171,6 +5188,27 @@ The invariant, checked after every simulator step: for every disk d of the pool,
 - a refill after a disk failure that moves members onto the fullest disks while grants are out.
 
 A write that crosses from a granted chunk into a refused one is a daemon case, covered with phase 6's file frontend.
+
+## Session fencing on storage nodes
+
+`internal/chunkstore`, against the [Control-plane group](#control-plane-group)'s session table. The
+[Sessions and fencing model](#sessions-and-fencing-model)'s scripted scenarios 3, 5 and 9 run as
+simulator seeds against the real primaries and replicas.
+
+| Input | Expected |
+| --- | --- |
+| A storage node receives session-table version v | It applies v and acknowledges it on its next heartbeat; every later heartbeat repeats the version it holds |
+| A write from a session v fences arrives after the primary applied v | Rejected |
+| A write from that session arrived before the primary applied v and is still queued | Checked again when the primary orders it, and rejected |
+| A primary that has not applied v replicates the session's write to a replica that has | The replica rejects it, so the write is never acknowledged |
+| A write from a session newer than the node's table | The node fetches the session table before it judges the write, then accepts it |
+| A node marked down heartbeats again with a version older than the current one | Not marked up until a heartbeat reports the current version |
+
+- Planted bugs, each a variant of the code that must fail its invariant within the seeds every
+  commit runs: checking the session only on arrival (`neg-check-on-arrival`) and no check on
+  replicated writes (`neg-replica-no-check`) fail "no fenced session's write is applied"; marking a
+  node up with an older table (`neg-up-with-old-table`) fails "every write of a fenced lock holder
+  that completes is ordered before every write of the next holder".
 
 ## Filesystem schema
 
@@ -5266,7 +5304,6 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
 - an entry acknowledged before its flush;
 - replay skipping the last record;
 - a flock `Txn` without its compare;
-- a lock granted while the old holder's session is still listed;
 - a fence committed at the holder's lease end without its margin;
 - grants not capped by the gap;
 - grants reusable for the whole session lease;
@@ -5276,7 +5313,18 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
 - a floor grant that can be reused;
 - a replay record ignored;
 - a check failure that is not final stored as the request's result;
-- a purger's `Delete` without its `Check`.
+- a purger's `Delete` without its `Check`;
+- the [Epoch change model](#epoch-change-model)'s two rows for property 2: no support-epoch bump on
+  lapse (`neg-no-epoch-bump`), and a leader transfer that keeps the old leader's lease
+  (`neg-transfer-keeps-lease`);
+- the [Sessions and fencing model](#sessions-and-fencing-model)'s leader-side rows: renewals
+  answered without the leader lease (`neg-answer-without-lease`), no full lease after a failover
+  (`neg-no-full-lease`), counting on the leader's own clock (`neg-count-on-own-clock`), only
+  `session_lease` for an unmeasured session (`neg-dead-wait-lease`), an eviction fenced at once
+  (`neg-evict-at-once`, and `neg-two-holders` with two clients), a lock released at the fence's
+  commit, while the old holder's session is still listed (`neg-release-on-commit`), and an acknowledged version that counts only reachable nodes
+  (`neg-ack-reachable-only`) or waits for nodes marked down (`neg-ack-waits-down`). Its storage-side
+  rows are [Session fencing on storage nodes](#session-fencing-on-storage-nodes)'.
 
 ## Off-heap slabs
 
@@ -5431,7 +5479,7 @@ Reading the clocks:
   grew by at least the threshold between two readings, which the kernel does only when it adds sleep
   time, and reports a marker change. The threshold lies above ε and at most 2 s. Open: its value
   within those bounds.
-- **[property]** Over the clock model: every seeded slew of up to ±22.6% and drift of up to ±1%
+- **[property]** Over the clock model: every seeded slew of up to ±22.6% and drift of up to ±4%
   gives no `Resumed`; every suspend whose gain reaches the threshold gives exactly one; every marker
   change gives exactly one; a suspend the kernel rounded below the threshold gives none, in the loop
   and in the simulator alike.
