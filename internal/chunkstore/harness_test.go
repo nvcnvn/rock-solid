@@ -140,12 +140,12 @@ type harness struct {
 	// newest LSN of the records in each segment since it was last opened.
 	recAt    map[uint64]int
 	newestIn map[uint32]uint64
-	// needs is what the manifest at NamedLSN namedAt needs in each segment, namedRuns the pieces
-	// of the runs it names, and floor its oldest replay point; windowReuses counts the segments
-	// opened again, written a chunk slot or trimmed while the index no longer holds a piece of a
-	// run that manifest names.
+	// needs is what the manifest at NamedLSN namedAt needs in each segment, and floor its oldest
+	// replay point; released is the segments the manifest named before it needed and it does not,
+	// and windowReuses counts those opened again, written a chunk slot or trimmed before the
+	// naming moves on.
 	needs          map[uint32]string
-	namedRuns      []disklog.BlobRef
+	released       map[uint32]bool
 	namedAt, floor uint64
 	windowReuses   int
 }

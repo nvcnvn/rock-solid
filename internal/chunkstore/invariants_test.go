@@ -221,8 +221,9 @@ func (h *harness) reused(segment uint32, how string) {
 	if need, ok := h.needs[segment]; ok {
 		h.violate(invNamed, fmt.Errorf("segment %d was %s while the manifest at LSN %d, which a durable segment header names, needs %s there", segment, how, h.namedAt, need))
 	}
-	if held := h.s.Index().Tree().Pieces(nil); slices.ContainsFunc(h.namedRuns, func(p disklog.BlobRef) bool { return !slices.Contains(held, p) }) {
+	if h.released[segment] {
 		h.windowReuses++
+		delete(h.released, segment)
 	}
 	if n := h.newestIn[segment]; n > h.floor {
 		h.violate(invNamed, fmt.Errorf("segment %d was %s while it holds the record at LSN %d, past the replay point %d of the manifest at LSN %d, which a durable segment header names", segment, how, n, h.floor, h.namedAt))
@@ -231,13 +232,22 @@ func (h *harness) reused(segment uint32, how string) {
 }
 
 // namedNeeds sets needs and floor from the manifest at NamedLSN, reading each run's pieces from
-// its root as the harness saw it written.
+// its root as the harness saw it written, and released from what the manifest named before needed.
 func (h *harness) namedNeeds() {
 	log := h.s.Log()
 	if h.needs != nil && h.namedAt == log.NamedLSN() {
 		return
 	}
-	h.needs, h.namedRuns, h.namedAt, h.floor = map[uint32]string{}, h.namedRuns[:0], log.NamedLSN(), 0
+	before := h.needs
+	h.needs, h.namedAt, h.floor = map[uint32]string{}, log.NamedLSN(), 0
+	defer func() {
+		h.released = map[uint32]bool{}
+		for seg := range before {
+			if _, ok := h.needs[seg]; !ok {
+				h.released[seg] = true
+			}
+		}
+	}()
 	pieces, indexes := h.decodeNamed()
 	for _, p := range pieces {
 		h.needs[p.Segment] = fmt.Sprintf("its piece at LSN %d", p.LSN)
@@ -248,7 +258,6 @@ func (h *harness) namedNeeds() {
 		}
 		for _, root := range ix.Runs {
 			h.needs[root.Segment] = fmt.Sprintf("the root at LSN %d of a run it names", root.LSN)
-			h.namedRuns = append(h.namedRuns, root)
 			k, ok := h.recAt[root.LSN]
 			if !ok || int(root.Entry) >= len(h.records[k].payloads) {
 				h.violate(invNamed, fmt.Errorf("the manifest at LSN %d names a run whose root at LSN %d was never written", h.namedAt, root.LSN))
@@ -261,7 +270,6 @@ func (h *harness) namedNeeds() {
 			if b := slices.IndexFunc(ix.Bounds, func(b disklog.MergeBound) bool { return b.Run == root }); b >= 0 {
 				refs = refs[min(int(ix.Bounds[b].Dead), len(refs)):]
 			}
-			h.namedRuns = append(h.namedRuns, refs...)
 			for _, r := range refs {
 				h.needs[r.Segment] = fmt.Sprintf("the piece at LSN %d of the run whose root is at LSN %d", r.LSN, root.LSN)
 			}

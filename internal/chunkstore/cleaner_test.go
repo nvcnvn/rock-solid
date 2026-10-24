@@ -321,18 +321,22 @@ func TestARewriteFinishesOnADiskFilledToItsReserve(t *testing.T) {
 
 // With the cleaner running only for writes that wait, the disk fills to its reserve; a pass then
 // copies into the reserve and the waiting writes go out, none failing while there is a victim.
+// Those writes open what the cleaner frees at once, so segments that naming a manifest has just
+// released, holding pieces only the manifest named before needed, are reused before the naming
+// moves on: a log that freed them before the naming would reuse them while recovery needs them.
 func TestAPassFinishesOnADiskFilledToItsReserve(t *testing.T) {
 	h := primed(t)
 	r := core.NewRand(13)
 	low, passes := h.s.Log().FreeOutsideReserve(), h.s.CleanStats().Passes
+	h.windowReuses = 0
 	for range 600 {
 		overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 		low = min(low, h.s.Log().FreeOutsideReserve())
 	}
-	if low > 0 || h.s.CleanStats().Passes == passes || h.windowReuses == 0 {
-		t.Fatalf("free segments outside the reserve fell to %d; %d passes; %d segments reused while the index no longer held a piece the named manifest needs", low, h.s.CleanStats().Passes-passes, h.windowReuses)
+	if low > 0 || h.s.CleanStats().Passes == passes || h.windowReuses < 2 {
+		t.Fatalf("free segments outside the reserve fell to %d; %d passes; %d segments reused that naming a manifest had just released", low, h.s.CleanStats().Passes-passes, h.windowReuses)
 	}
-	t.Logf("%d segments reused while the index no longer held a piece the named manifest needs", h.windowReuses)
+	t.Logf("%d segments reused that naming a manifest had just released", h.windowReuses)
 	h.holds()
 }
 
