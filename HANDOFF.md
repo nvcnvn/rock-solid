@@ -8,7 +8,7 @@ Branch `worktree-agent-a805bd9688ebb962d`. Spec `models/epoch/epoch.tla`; config
 `scripts/models.sh ci epoch` all ok: ci-leases 82 / 1,215,647 / 96 s; ci-peering 26 / 547,723 /
 53 s; ci-restarts 30 / 1,794,768 / 190 s; slowest negative neg-no-run-window 223 s.
 `scripts/models.sh ci sessions` all ok, state counts unchanged by the rename.
-Deep: deep-leases 132 / 48,516,248 / 5,021 s; deep-peering 31 / 11,847,313 / 5,488 s; DEEP_RESULTS
+Deep: deep-leases 132 / 48,516,248 / 5,021 s; deep-peering 31 / 11,847,313 / 5,488 s; deep-slow 72 / 20,909,636 / 1,939 s.
 
 Every negative violates its expected property:
 - NothingCommittedDropped: activate-before-durable, compare-member-lists, decide-by-own-interval,
@@ -69,9 +69,8 @@ build-checklist wording fixed, the 12,000/s figure moved, the two-bug variant no
 
 ## Remaining
 
-1. Deep runs in progress (deep-leases, deep-peering, deep-slow), results to test-scenarios.
-2. Tick the build-checklist "Epoch change model" item.
-3. Delete HANDOFF.md before merge.
+1. Tick the build-checklist "Epoch change model" item.
+2. Delete HANDOFF.md before merge.
 
 ## Design bugs found and design.md changes
 
