@@ -8,7 +8,7 @@ Branch `worktree-agent-a805bd9688ebb962d`. Spec `models/epoch/epoch.tla`; config
 `scripts/models.sh ci epoch` all ok: ci-leases 82 / 1,215,647 / 96 s; ci-peering 26 / 547,723 /
 53 s; ci-restarts 30 / 1,794,768 / 190 s; slowest negative neg-no-run-window 223 s.
 `scripts/models.sh ci sessions` all ok, state counts unchanged by the rename.
-Deep: deep-leases 132 / 48,516,248 / 5,021 s; DEEP_RESULTS
+Deep: deep-leases 132 / 48,516,248 / 5,021 s; deep-peering 31 / 11,847,313 / 5,488 s; DEEP_RESULTS
 
 Every negative violates its expected property:
 - NothingCommittedDropped: activate-before-durable, compare-member-lists, decide-by-own-interval,

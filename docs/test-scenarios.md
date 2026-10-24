@@ -3595,7 +3595,7 @@ section.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
-| Epoch change | `deep-peering` | [Epoch change model](#epoch-change-model) | 31 | 11,847,313 | 89 min |
+| Epoch change | `deep-peering` | [Epoch change model](#epoch-change-model) | 31 | 11,847,313 | 5,488 s |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,021 s |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 21,444,840 | 33 min |
 
