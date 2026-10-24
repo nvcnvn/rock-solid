@@ -44,10 +44,12 @@ type harness struct {
 	crashAt  int
 	// crashIf, when set, crashes as crashAt does before an oldest queued action it accepts;
 	// failIf, when set, completes with Io action k, counting from 0, if it accepts it; and onStep,
-	// when set, sees action k once the store has taken its completion.
+	// when set, sees action k once the store has taken its completion; onWrite, when set, sees
+	// a disk write of a serving store's segment in stream st before it runs.
 	crashIf func(a *core.Action) bool
 	failIf  func(k int, a *core.Action) bool
 	onStep  func(k int, a *core.Action)
+	onWrite func(a *core.Action, st disklog.Stream)
 	// plant is the bug planted in every store a recovery starts.
 	plant plants
 	// changes is the chunk of each write and punch, by request ID.
@@ -89,8 +91,9 @@ type harness struct {
 	// keeps neither the actions, the records written nor the merges run, for runs that write a
 	// disk many times.
 	timed, light bool
-	// wrote counts the blocks of every disk write run, and wroteMeta those in the metadata stream.
-	wrote, wroteMeta uint64
+	// wrote counts the blocks of every disk write run, and wroteIn those in each stream.
+	wrote   uint64
+	wroteIn [disklog.Meta + 1]uint64
 	// recoveredLSN is the LSN the last recovery found, and loaded the manifest it loaded.
 	recoveredLSN uint64
 	loaded       disklog.ManifestPos
@@ -299,8 +302,10 @@ func (h *harness) step() bool {
 	if a.Kind == core.ActDiskWrite {
 		h.wrote += a.Len / core.BlockSize
 		if h.s.Serving() {
-			if _, st := h.s.Log().Usage(uint32(uint64(a.LBA) / uint64(h.s.sb.SegmentBlocks))); st == disklog.Meta {
-				h.wroteMeta += a.Len / core.BlockSize
+			_, st := h.s.Log().Usage(uint32(uint64(a.LBA) / uint64(h.s.sb.SegmentBlocks)))
+			h.wroteIn[st] += a.Len / core.BlockSize
+			if h.onWrite != nil {
+				h.onWrite(&a, st)
 			}
 		}
 		if !h.light {

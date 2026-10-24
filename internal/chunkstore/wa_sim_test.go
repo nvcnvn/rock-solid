@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,18 +34,51 @@ type waRun struct {
 	check     bool
 	cleanFree int
 	record    uint64
+	windows   int
+	writers   int
 	plant     plants
 }
 
-// waResult is what the measured capacity saw: the user blocks acknowledged, the blocks the disk
-// was asked to write, those in the metadata stream, the blocks the cleaner copied and the
-// log's own count; measured is set once the measured capacity begins, and ranOut when a write
-// failed with NoSpace with no victim left.
+// waResult is what the measured capacities saw: the user blocks acknowledged, the blocks the
+// disk was asked to write, those in each stream, the blocks the cleaner copied and the log's own
+// count; each measured capacity's write amplification; the chunk victims the cleaner took and
+// their live blocks when taken; and the disk's space, sampled. measured is set once the measured
+// capacities begin, and ranOut when a write failed with NoSpace with no victim left.
 type waResult struct {
-	user, wrote, meta, copied uint64
-	metric                    disklog.Writes
-	measured, ranOut          bool
+	user, wrote, copied uint64
+	in                  [disklog.Meta + 1]uint64
+	metric              disklog.Writes
+	windows             []float64
+	victims, victimLive uint64
+	flushed, merged     uint64
+	manifests           uint64
+	space               waSpace
+	measured, ranOut    bool
 }
+
+// waSpace sums samples of the disk's segments, free and used in each stream, and of the live
+// blocks in each stream.
+type waSpace struct {
+	samples, free uint64
+	used, live    [disklog.Meta + 1]uint64
+}
+
+func (w *waSpace) sample(l *disklog.Log, segments uint32) {
+	w.samples++
+	for seg := uint32(1); seg < segments; seg++ {
+		u, st := l.Usage(seg)
+		if u.State != disklog.SegmentUsed {
+			if u.State == disklog.SegmentFree {
+				w.free++
+			}
+			continue
+		}
+		w.used[st]++
+		w.live[st] += uint64(u.Live)
+	}
+}
+
+func (w waSpace) mean(n uint64) float64 { return float64(n) / float64(w.samples) }
 
 func (w waResult) amplification() float64 { return float64(w.wrote) / float64(w.user) }
 
@@ -55,6 +89,8 @@ const (
 	waWriters    = 16
 	waFillBlocks = 32
 )
+
+func (r waRun) outstanding() int { return cmp.Or(r.writers, waWriters) }
 
 func (r waRun) run(t testing.TB, seed uint64) waResult {
 	t.Helper()
@@ -78,8 +114,74 @@ func (r waRun) run(t testing.TB, seed uint64) waResult {
 	next, outstanding := uint64(0), 0
 	// upTo writes until next reaches limit, then until every write is answered and the store
 	// has nothing left to do; it reports false once a write fails with NoSpace.
+	lane, seq := map[uint32]uint8{}, map[uint32]uint64{}
+	var img []byte
+	h.onWrite = func(a *core.Action, st disklog.Stream) {
+		if st != disklog.Meta {
+			return
+		}
+		img = img[:0]
+		for _, v := range a.Vec {
+			img = append(img, h.pool.Bytes(v.Buf)[:v.Len]...)
+		}
+		seg, at := uint32(uint64(a.LBA)/uint64(r.geo.SegmentBlocks)), uint32(uint64(a.LBA)%uint64(r.geo.SegmentBlocks))
+		rec := img
+		if at == 0 {
+			sh, err := disklog.DecodeSegmentHeader(img)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lane[seg], seq[seg], rec, at = sh.Lane, sh.Seq, img[core.BlockSize:], 1
+		}
+		if !res.measured {
+			return
+		}
+		n := a.Len / core.BlockSize
+		if lane[seg] > 0 {
+			res.merged += n
+			return
+		}
+		d, err := disklog.DecodeRecord(rec, disklog.Place{LogID: h.s.sb.LogID, Seq: seq[seg], Offset: at}, r.geo.SegmentBlocks-at, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.ContainsFunc(d.Entries, func(e disklog.Entry) bool {
+			return e.BlobKind == disklog.BlobManifest || e.BlobKind == disklog.BlobManifestPiece
+		}) {
+			res.manifests += n
+			return
+		}
+		res.flushed += n
+	}
+	seen := map[*cleanPass]int{}
+	sampleEvery, sampleAt := r.geo.DiskBlocks()/256, uint64(0)
+	observe := func() {
+		if !res.measured {
+			return
+		}
+		for _, p := range h.s.cl.passes {
+			for _, v := range p.victims[seen[p]:] {
+				if u, st := h.s.Log().Usage(v); st != disklog.Meta {
+					res.victims++
+					res.victimLive += uint64(u.Live)
+				}
+			}
+			seen[p] = len(p.victims)
+		}
+		if len(seen) > 64 {
+			clear(seen)
+			for _, p := range h.s.cl.passes {
+				seen[p] = len(p.victims)
+			}
+		}
+		if user >= sampleAt {
+			res.space.sample(h.s.Log(), r.geo.SegmentCount)
+			sampleAt = user + sampleEvery
+		}
+	}
 	upTo := func(limit uint64) bool {
 		for {
+			observe()
 			for _, id := range h.order {
 				err, n := h.replies[id].Err, blocksOf[id]
 				delete(h.replies, id)
@@ -98,7 +200,7 @@ func (r waRun) run(t testing.TB, seed uint64) waResult {
 				}
 			}
 			h.order = h.order[:0]
-			for outstanding < waWriters && next < limit && !res.ranOut && h.s.Admitting() {
+			for outstanding < r.outstanding() && next < limit && !res.ranOut && h.s.Admitting() {
 				b, n := next, uint64(waFillBlocks)
 				switch {
 				case next >= blocks:
@@ -139,20 +241,46 @@ func (r waRun) run(t testing.TB, seed uint64) waResult {
 		return res
 	}
 	user, res.measured = 0, true
-	wrote, meta, copied, metric := h.wrote, h.wroteMeta, h.s.CleanStats().Copied, h.s.Log().Writes()
-	limit += r.geo.DiskBlocks()
-	ok := upTo(limit)
+	wrote, in, copied, metric := h.wrote, h.wroteIn, h.s.CleanStats().Copied, h.s.Log().Writes()
+	for range max(r.windows, 1) {
+		was, wrote := user, h.wrote
+		limit += r.geo.DiskBlocks()
+		if !upTo(limit) {
+			t.Logf("%.0f%% full: ran out of space after %d measured blocks", 100*r.fill, user)
+			break
+		}
+		res.windows = append(res.windows, float64(h.wrote-wrote)/float64(user-was))
+	}
 	now := h.s.Log().Writes()
-	res.user, res.wrote, res.meta = user, h.wrote-wrote, h.wroteMeta-meta
+	res.user, res.wrote = user, h.wrote-wrote
+	for st := range res.in {
+		res.in[st] = h.wroteIn[st] - in[st]
+	}
 	res.copied = h.s.CleanStats().Copied - copied
 	res.metric = disklog.Writes{Data: now.Data - metric.Data, Disk: now.Disk - metric.Disk}
-	u := float64(res.user)
-	if !ok {
-		t.Logf("%.0f%% full: ran out of space after %d of %d measured blocks", 100*r.fill, user, r.geo.DiskBlocks())
-	}
-	t.Logf("%.0f%% full: write amplification %.2f, of it metadata %.2f and copies %.2f per user block, in %v",
-		100*r.fill, res.amplification(), float64(res.meta)/u, float64(res.copied)/u, time.Since(start))
+	res.log(t, r, h.s.Log().Reserve(), time.Since(start))
 	return res
+}
+
+// log reports the write amplification and its parts per user block: the user records' headers
+// and segment headers in the hot stream, the blocks copied and the cold stream's headers, and the
+// metadata stream; then the space, as mean segments free and used in each stream, the live share
+// of the disk and of the chunk segments in use, and the chunk victims' mean live share.
+func (w waResult) log(t testing.TB, r waRun, reserve uint32, took time.Duration) {
+	t.Helper()
+	u, sp := float64(w.user), w.space
+	usable := float64(r.geo.SegmentBlocks - 1)
+	chunkSegs := sp.mean(sp.used[disklog.Hot] + sp.used[disklog.Cold])
+	t.Logf("%.0f%% full: write amplification %.3f, windows %.3f, in %v", 100*r.fill, w.amplification(), w.windows, took)
+	t.Logf("  per user block: user headers %.4f, copies %.4f, copy headers %.4f, metadata %.4f (flushes %.4f, merges %.4f, records with manifests %.4f)",
+		float64(w.in[disklog.Hot]-w.user)/u, float64(w.copied)/u, float64(w.in[disklog.Cold]-w.copied)/u, float64(w.in[disklog.Meta])/u,
+		float64(w.flushed)/u, float64(w.merged)/u, float64(w.manifests)/u)
+	t.Logf("  segments of %d: free %.1f, hot %.1f, cold %.1f, meta %.1f; reserve %d", r.geo.SegmentCount,
+		sp.mean(sp.free), sp.mean(sp.used[disklog.Hot]), sp.mean(sp.used[disklog.Cold]), sp.mean(sp.used[disklog.Meta]), reserve)
+	chunkLive, disk := sp.mean(sp.live[disklog.Hot]+sp.live[disklog.Cold]), float64(r.geo.DiskBlocks())
+	t.Logf("  live share of the disk: %.4f, chunk data %.4f, index %.4f; of chunk segments %.4f; %d chunk victims, %.4f live",
+		chunkLive/disk+sp.mean(sp.live[disklog.Meta])/disk, chunkLive/disk, sp.mean(sp.live[disklog.Meta])/disk,
+		chunkLive/(chunkSegs*usable), w.victims, float64(w.victimLive)/float64(w.victims)/usable)
 }
 
 // checkMetric fails unless the log's write counters over the run's measured capacity equal the
@@ -169,8 +297,8 @@ func (w waResult) checkMetric(t *testing.T) {
 // so the write amplification each disk exports is the measured one.
 func TestWriteAmplificationMetricEqualsTheMeasuredFigure(t *testing.T) {
 	w := waRun{geo: disklog.Geometry{SegmentBlocks: 256, SegmentCount: 128}, fill: 0.4, warm: 1, check: true}.run(t, 1)
-	if w.ranOut || w.copied == 0 || w.meta == 0 {
-		t.Fatalf("ran out %v, %d blocks copied, %d in the metadata stream", w.ranOut, w.copied, w.meta)
+	if w.ranOut || w.copied == 0 || w.in[disklog.Meta] == 0 {
+		t.Fatalf("ran out %v, %d blocks copied, %d in the metadata stream", w.ranOut, w.copied, w.in[disklog.Meta])
 	}
 	w.checkMetric(t)
 }
