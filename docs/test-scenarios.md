@@ -2823,8 +2823,10 @@ planted by hand.
 
 Every seeded property test, one whose property must hold seed by seed, takes its seeds from
 `internal/sim/seeds` (`seeds.Run(t, first, n, f)`), and `scripts/seeds.sh` runs those in its list
-over thousands of seeds. The repository has no hosted CI yet, so the script is the job
-every item runs before review ([build checklist](build-checklist.md)), beside `scripts/lint.sh`.
+over thousands of seeds. CI's `go` workflow runs it at the seeds in its list on every push and
+pull request, beside `scripts/lint.sh` and `go test ./...` ([Testing
+strategy](design.md#testing-strategy)), and every item runs it before review ([build
+checklist](build-checklist.md)).
 Tests that check something across a fixed range keep their range: that two seeds give different
 traces, that both outcomes of a seeded choice occur, or that a planted bug trips within the seeds
 `go test` runs.
@@ -3134,8 +3136,9 @@ are a pattern derived from (chunk, version, block), so any extent can be checked
   | --- | --- | --- | --- |
   | `ci` | Exhaustive: safety properties, and liveness with a time bound written as an invariant over the model's clocks | `scripts/models.sh ci`, with the negative variants, each of which stops at its first counterexample | Under 5 minutes with 4 workers; past 300 s the run fails |
   | `deep` | Exhaustive, with one more node, chunk, crash or term, plus the unbounded liveness properties | `scripts/models.sh deep`, once per change to its spec, configuration or TLC version | 4 hours, after which the run fails |
-  | Simulation | `-simulate`, depth 100, a fresh seed printed for replay | `scripts/models.sh sim`, each `ci` configuration for `SIM_SECONDS` (3,600 by default) | About 1 hour per model, nightly |
+  | Simulation | `-simulate`, depth 100, a fresh seed printed for replay | `scripts/models.sh sim`, splitting `SIM_SECONDS` (3,600 by default) per model evenly among its `ci` configurations | About 1 hour per model, nightly |
 
+- An argument `model/config.cfg` runs that one configuration, in a mode it belongs to.
 - A `ci` run that passes its budget fails, and the fix is to move its largest constant to `deep`,
   not to raise the budget.
 - A spec checked in with no `ci` or no `deep` configuration fails.
@@ -3768,24 +3771,31 @@ section.
 
 ## Models in CI
 
-The runs of [TLA+ and TLC](#tla-and-tlc), scheduled. The repository has no hosted CI yet, so until
-it has, a change to a modelled protocol runs `scripts/models.sh ci` itself, by the [build
-checklist](build-checklist.md)'s rule for every item.
+The runs of [TLA+ and TLC](#tla-and-tlc), scheduled by the `models` workflow in
+`.github/workflows/models.yml` on GitHub's hosted runners (4 vCPUs, 16 GB, 6 hours per job). A first
+job lists the models and `deep` configurations, and every other job runs once per item of that list
+(a matrix), each on its own runner.
 
-- The CI job runs `scripts/models.sh ci` on every change under `models/` or to `scripts/models.sh`,
-  which holds the TLC pin, and on no other change.
-- A rule removed from a spec, with no negative configuration changed, fails the job: some `ci`
-  configuration or negative variant fails and its trace is printed.
+- On every push or pull request that changes `models/`, `scripts/models.sh`, which holds the TLC
+  pin, or the workflow, and on no other change, one job per model runs `scripts/models.sh ci` on
+  it.
+- A rule removed from a spec, with no negative configuration changed, fails that model's job: some
+  `ci` configuration or negative variant fails and its trace is printed.
 - A configuration past 300 s on the runner fails the job. `ci-restarts` takes 190 s of 300 on the
-  M4 Pro; on a slower runner it either fits, or its largest plan moves to a `ci` configuration of
-  its own.
-- The nightly job runs `scripts/models.sh sim` per model with `SIM_SECONDS` set to about an hour
-  divided among the model's `ci` configurations, and prints every seed; a failing seed's printed
-  replay reproduces its trace.
-- The nightly job keeps, per model, a hash of its spec, its configurations and the TLC version, runs
-  `scripts/models.sh deep` for each model whose hash changed since its last recorded run, and
-  records the results in the [Model-to-simulator map](#model-to-simulator-map)'s results table. A
-  TLC bump therefore reruns every model's `deep` configurations.
+  M4 Pro; on the runner it either fits, or its largest plan moves to a `ci` configuration of its
+  own.
+- Nightly, and when started by hand, one job per model runs `scripts/models.sh sim` with
+  `SIM_SECONDS` 3,600, split evenly among the model's `ci` configurations, and prints every seed; a
+  failing seed's printed replay reproduces its trace.
+- Nightly, and when started by hand, one job per `deep` configuration hashes the model's spec, the
+  configuration and the TLC version and checksum lines of `scripts/models.sh`. If the job cache
+  holds a pass under that hash, the job prints the pass's result line and stops; otherwise it runs
+  `scripts/models.sh deep` on the configuration and, if it passes, stores its result line in the
+  cache under the hash and in the run's summary, from which it goes into the
+  [Model-to-simulator map](#model-to-simulator-map)'s results table. A TLC bump therefore reruns
+  every `deep` configuration, and a spec change every one of its model's.
+- GitHub evicts a cache entry unused for 7 days. Each nightly run reads every pass, so a pass is
+  lost only when the nightly runs stop for a week, and its configuration then runs again.
 
 ## Wire messages
 

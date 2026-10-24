@@ -1,7 +1,7 @@
 # Tech debts
 
 ## Version pin: Go toolchain 1.27.0 and lint tools
-- **Where:** `toolchain` in `go.mod`; the `staticcheck`, `govulncheck` and `go-licenses` versions in `scripts/lint.sh`
+- **Where:** `toolchain` in `go.mod`, which CI's `actions/setup-go` also installs; the `staticcheck`, `govulncheck` and `go-licenses` versions in `scripts/lint.sh`
 - **Why:** the runtime behaviour the [Runtime in Go](design.md#runtime-in-go) rules are measured against (scheduler, collector) changes between releases, and each linter release adds checks, so unpinned versions would change performance or break the build without any code change.
 - **Remove when:** never removed, only bumped. Bump the toolchain and the tools together, fix new findings and rerun the hot-path benchmarks in the same change.
 
@@ -23,7 +23,7 @@
 ## Version pin: TLC 1.7.4
 - **Where:** `version` and `sha256` in `scripts/models.sh`, which downloads the TLC jar into `~/.cache/rock-solid` (`$XDG_CACHE_HOME` when set) and checks it against the checksum
 - **Why:** a TLC release can change what a configuration explores or how fast, so an unpinned checker would move every model's state counts and `ci` times without a spec change ([Testing strategy](design.md#testing-strategy)). The 1.8 line is a pre-release whose jar is rebuilt in place, so the models use no CommunityModules operator that needs it ([protocol models study](../studies/protocol-models/README.md)).
-- **Remove when:** never removed, only bumped. A bump reruns every `ci`, negative and `deep` configuration (`scripts/models.sh ci` and `deep`) and records the new state counts in the [model-to-simulator map](test-scenarios.md#model-to-simulator-map).
+- **Remove when:** never removed, only bumped. A bump reruns every `ci` and negative configuration (`scripts/models.sh ci`, which CI runs on the change) and every `deep` one (the next nightly CI run, since the pin is part of each configuration's hash), and records the new state counts in the [model-to-simulator map](test-scenarios.md#model-to-simulator-map).
 
 ## Workaround: writes larger than one record copied
 - **Where:** `writeItems` in `internal/chunkstore/store.go`
@@ -34,3 +34,13 @@
 - **Where:** `indexBroken` and `drain` in `internal/chunkstore/store.go`
 - **Why:** a rebuild reloads the runs the newest named manifest lists and replays the log after them through recovery, which only runs on a log that is not appending, so the store stops, closes its log and recovers it again, where the design rebuilds one index while the disk's other indexes serve ([The LSM tree](design.md#on-disk-format)). The chunk index is a disk's only index until MetaStore shards share it.
 - **Remove when:** a second index shares a disk (Raft storage in the disk log) and the log can replay its records to one index while it keeps appending.
+
+## Version pin: GitHub Actions and Java 17 in CI
+- **Where:** each `uses:` in `.github/workflows/go.yml` and `models.yml`, pinned to a commit with its release in a trailing comment; `java-version` of `actions/setup-java` (Temurin 17) in `models.yml`
+- **Why:** a release tag can be moved to other code, so a tag would let an action's owner change what runs with this repository's token; a commit cannot change. TLC's speed depends on the JVM, and the 300 s `ci` budget and the [model-to-simulator map](test-scenarios.md#model-to-simulator-map)'s wall times were measured on Java 17, which TLC 1.7.4 runs on.
+- **Remove when:** never removed, only bumped. Bump an action to a release at least two weeks old, and Java only with a `ci` run of every model whose times are compared with the map's.
+
+## Workaround: `go test -p 3` in CI
+- **Where:** the `test` job in `.github/workflows/go.yml`
+- **Why:** `internal/chunkstore`'s tests peak near 4.3 GB resident ([invariant checker](test-scenarios.md#invariant-checker)), and Go's default runs as many packages at once as the runner has CPUs, 4, so three at a time keeps a runner's 16 GB clear of the heaviest packages running together.
+- **Remove when:** the heaviest test package peaks under 3 GB, or the runner has 32 GB.
