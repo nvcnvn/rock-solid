@@ -3563,17 +3563,17 @@ Snapshots taken while a purge runs (punches carrying the snapshot epoch) are lef
   none is listed as such and fails review unless the map says why.
 
 **Configuration results.** Each `ci` run as `scripts/models.sh ci` printed it, and each `deep` run as
-`scripts/models.sh deep` printed it, with 4 workers and a 4 GB heap on a Mac mini running two other
-4-worker TLC jobs; the epoch change model's ran alone. Constants are in each configuration's first
+`scripts/models.sh deep` printed it, with 4 workers and a 4 GB heap on a Mac mini (M4 Pro). The epoch change model's runs and the
+sessions model's `ci` runs ran alone; the rest ran beside two other 4-worker TLC jobs. Constants are in each configuration's first
 line and in its model's section.
 
 | Model | Configuration | Constants | Depth | Distinct states | Wall time |
 | --- | --- | --- | --- | --- | --- |
-| Sessions and fencing | `ci-lease` | 1 client, 2 leader nodes, 2 terms, rates 16 or 20, `lease_drift` 1/8, 80-unit lease, `dead_wait` 100, a VM stop | 46 | 16,494,694 | 79 s |
-| Sessions and fencing | `ci-evict` | `ci-lease` with an eviction instead of the stop | 42 | 4,355,364 | 23 s |
-| Sessions and fencing | `ci-rates` | 1 leader node, 2 terms, a reboot, a rate rise, a lost message, 81-unit lease | 49 | 17,276,860 | 101 s |
-| Sessions and fencing | `ci-fence` | 2 clients, a lock, 2 storage nodes, 3-tick lease, 2 writes, a partition | 43 | 12,988,660 | 138 s |
-| Sessions and fencing | `ci-faults` | `ci-fence` without the partition, 1 write in flight per client, a stop, a stall, an eviction, a crash | 37 | 4,453,074 | 40 s |
+| Sessions and fencing | `ci-lease` | 1 client, 2 leader nodes, 2 terms, rates 16 or 20, `lease_drift` 1/8, 80-unit lease, `dead_wait` 100, a VM stop | 46 | 16,494,694 | 73 s |
+| Sessions and fencing | `ci-evict` | `ci-lease` with an eviction instead of the stop | 42 | 4,355,364 | 20 s |
+| Sessions and fencing | `ci-rates` | 1 leader node, 2 terms, a reboot, a rate rise, a lost message, 81-unit lease | 49 | 17,276,860 | 88 s |
+| Sessions and fencing | `ci-fence` | 2 clients, a lock, 2 storage nodes, 3-tick lease, 2 writes, a partition | 43 | 12,988,660 | 134 s |
+| Sessions and fencing | `ci-faults` | `ci-fence` without the partition, 1 write in flight per client, a stop, a stall, an eviction, a crash | 37 | 4,453,074 | 35 s |
 | Cache-mode recall | `ci` | 3 nodes, 1 handle each, 2 writes | 46 | 2,541,598 | 33 s |
 | Cache-mode recall | `ci-failover` | 2 nodes, 2 writes, an owner failover, a lost message, a pause, a lease lapse | 41 | 14,447,464 | 131 s |
 | Cache-mode recall | `ci-handles` | 2 nodes, 2 handles each, 3 writes | 40 | 247,682 | 3 s |
@@ -3582,9 +3582,9 @@ line and in its model's section.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 30 | 1,789,778 | 193 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 24 | 552,713 | 51 s |
-| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 81 | 1,212,947 | 94 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 26 | 547,723 | 53 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 30 | 1,794,768 | 190 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 96 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
