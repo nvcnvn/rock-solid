@@ -1,14 +1,14 @@
 # Handoff: phase 2 epoch change model (remove before merge)
 
 Branch `worktree-agent-a805bd9688ebb962d`. Spec `models/epoch/epoch.tla`; configs `ci-peering`,
-`ci-restarts`, `ci-leases`, `deep-peering`, `deep-leases`, `deep-slow`, 34 `neg-*.cfg`.
+`ci-restarts`, `ci-leases`, `deep-peering`, `deep-leases`, `deep-slow`, 36 `neg-*.cfg`.
 
-## Results (2026-10-24, 4 workers, 4 GB heap, M4 Pro; recorded in test-scenarios)
+## Results (2026-10-24, 4 workers, 4 GB heap, M4 Pro, one TLC at a time; recorded in test-scenarios)
 
-`scripts/models.sh ci epoch` all ok: ci-leases 81 / 1,212,947 / 94 s; ci-peering 30 / 1,789,778 /
-193 s; ci-restarts 24 / 552,713 / 51 s; slowest negative neg-no-run-window 212 s. Deep:
-deep-leases 132 / 37,736,534 / 66 min; deep-slow 72 / 21,444,840 / 33 min; deep-peering
-31 / 11,847,313 / 89 min.
+`scripts/models.sh ci epoch` all ok: ci-leases 82 / 1,215,647 / 96 s; ci-peering 26 / 547,723 /
+53 s; ci-restarts 30 / 1,794,768 / 190 s; slowest negative neg-no-run-window 223 s.
+`scripts/models.sh ci sessions` all ok, state counts unchanged by the rename.
+Deep: DEEP_RESULTS
 
 Every negative violates its expected property:
 - NothingCommittedDropped: activate-before-durable, compare-member-lists, decide-by-own-interval,
@@ -22,6 +22,8 @@ Every negative violates its expected property:
   lease-before-bound, lease-before-bound-half-drift, margin-exact, no-end-on-resume,
   no-restart-wait, no-run-window, no-step-check, reach-last-activated-only, read-below-min-live,
   reads-before-peer-messages, step-on-grants-only, widen-past-two-drift
+- OneReader (new): keep-lease-on-new-run
+- PeeringSettles: restart-no-ask
 - OneLeaseholder: no-epoch-bump, transfer-keeps-lease
 - LeaseForms: check-before-bound, step-half-drift
 
@@ -45,18 +47,29 @@ the restart and format plans; docs moved (results rows to the map's results tabl
 to the epoch section's property table), duplicated constants removed, the free plan and
 build-checklist wording fixed, the 12,000/s figure moved, the two-bug variant noted.
 
-## Final review (findings in the session scratchpad, review-epoch2/findings.md)
+## Final review (scratchpad review-epoch2/findings.md), all applied
 
-Done and committed: F1 run ID ends the old run's lease (35a0197), F5 arrived per message (863964e),
-F2 Settled escape reqIv + neg-restart-no-ask (3f27f44), F8 no-up intervals skipped (e2b2b6f), F7
-recovery version (98d1f53), F3+F4 sessions boot -> run (103dd9f), F9 checklist pointer (332f19f).
-In progress: F6 (move a plan from ci-peering to ci-restarts; per-plan state counts being measured),
-then ci epoch, ci sessions, deep-leases, deep-peering, deep-slow, results into test-scenarios
-(all wall times in seconds).
+- F1 (35a0197, 2610ba0): a message with a new run ID or a raw reading below the last ends the lease
+  from that grantor's previous run (AfterHb); a restarted grantor heartbeats (HbDue without ~fg).
+  Lease time, the kvm-clock open question, the VM pause alternatives row, glossary, checklist and
+  test-scenarios state it; neg-keep-lease-on-new-run; deep-leases gains HandoverStopPause (5.4M
+  states at 3 nodes) and HandoverStopRestart (1.2M), flag "stop2".
+- F2 (3f27f44): Settled escapes on reqIv[p] = k; neg-restart-no-ask breaks property 12. TLC does not
+  name a violated liveness property, so models.sh accepts "Temporal properties were violated" when
+  the negative checks only the expected property.
+- F3+F4 (103dd9f): sessions boot -> run, WindowPerRun, neg-window-per-run, doc lines.
+- F5 (863964e): arrived drops g only once neither gm nor hbm from g is pending.
+- F6 (d65253c): DownBackMoved alone is 1.45M of ci-peering's 1.79M states, so no plan move gives
+  both configs headroom; it moved to ci-restarts and MaintMerges moved back: ci-peering 53 s,
+  ci-restarts 190 s.
+- F7 (98d1f53): why recovery's own version can be left out, in design.md and epoch.tla.
+- F8 (e2b2b6f): NeedIv skips intervals with no up member; design.md says so; Settled's escape no
+  longer quantifies over an empty set.
+- F9 (332f19f, results commits): checklist points at the counterexample table; results in seconds.
 
 ## Remaining
 
-1. Finish the final review items above.
+1. Deep runs in progress (deep-leases, deep-peering, deep-slow), results to test-scenarios.
 2. Tick the build-checklist "Epoch change model" item.
 3. Delete HANDOFF.md before merge.
 
@@ -83,6 +96,8 @@ then ci epoch, ci sessions, deep-leases, deep-peering, deep-slow, results into t
    lost it. Recovery now leaves out the blocks covered by writes of the interval ordered before the
    recovery write, decided when it is ordered (Recovery paragraph); neg-recovery-covers-at-read.
    Also stated why an activation is reported only once done (neg-report-before-activate).
+9. A holder stopped in place kept its lease across its grantor's restart or pause, since the step
+   check spans no runs (F1); a new run ID now ends the old run's lease (Lease time).
 Open questions settled and removed: grant coverage (no table epoch needed; Wire messages Grant row
 updated), incarnation fencing (model confirms). kvm-clock stop and rate-rise-past-headroom questions
 stay open; the model leaves those cases out (stated in both).
@@ -93,17 +108,12 @@ stay open; the model leaves those cases out (stated in both).
   any time, which did not fit 5 min; deep-peering has the free plan. Documented in design.md Testing
   strategy and test-scenarios.
 - Not modelled: PG split with writes in flight (stated in test-scenarios).
-- Boot ID dropped (item 9). The sessions model and its checklist item still key the client's rate
-  bound "per leader node and boot"; under the run-ID rule that is per node and run. Its model's
-  reboot is a superset of a new run for that purpose, but it does not model a leader's daemon
-  restart or pause as a new window. Left unchanged; say if it should follow.
-- The step check now compares only messages of the same run (it compared the same boot). Across a
-  grantor's daemon restart the holder's lease from that grantor ends anyway at the new window, and
-  its other grantors' heartbeats check its own lost time, so nothing found needs the boot ID.
 - Recovery is modelled as one step that chooses when its read happened (any point since
   activation), not two steps: what the read returns never changes before the write, and separate
   steps multiplied ci-peering's states by more than 5. Likewise a member persisting its missing list
   is folded into the decision or the activation. Both reductions are argued in epoch.tla's comments.
-- ci-peering takes 193 s of its 300 s on the M4 Pro. If CI's runner is slower, split its plans by
-  write family (partial writes, session writes) rather than raise the budget.
+- ci-restarts takes 190 s of its 300 s on the M4 Pro, mostly DownBackMoved (165 s alone). If CI's
+  runner is slower, give that plan a ci configuration of its own rather than raise the budget.
+- blogs/03-epochs-leases-and-failures.md still describes a grantor boot ID and does not say that a
+  new run ID ends the old run's lease; it needs the run-ID rule if blogs track the design.
 - The free plan has no fault now: with a restart it passed 20M states without finishing.

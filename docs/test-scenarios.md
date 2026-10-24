@@ -3563,9 +3563,10 @@ Snapshots taken while a purge runs (punches carrying the snapshot epoch) are lef
   none is listed as such and fails review unless the map says why.
 
 **Configuration results.** Each `ci` run as `scripts/models.sh ci` printed it, and each `deep` run as
-`scripts/models.sh deep` printed it, with 4 workers and a 4 GB heap on a Mac mini (M4 Pro). The epoch change model's runs and the
-sessions model's `ci` runs ran alone; the rest ran beside two other 4-worker TLC jobs. Constants are in each configuration's first
-line and in its model's section.
+`scripts/models.sh deep` printed it, with 4 workers and a 4 GB heap on a Mac mini (M4 Pro). The
+epoch change model's runs and the sessions model's `ci` runs ran alone; the rest ran beside two
+other 4-worker TLC jobs. Constants are in each configuration's first line and in its model's
+section.
 
 | Model | Configuration | Constants | Depth | Distinct states | Wall time |
 | --- | --- | --- | --- | --- | --- |
