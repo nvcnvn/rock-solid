@@ -48,8 +48,15 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) {
 // after other events. plant is planted throughout. It returns the blocks the cleaner freed before
 // the crash and the first violation.
 func cleanerCrash(t *testing.T, seed uint64, plant plants) (int, error) {
+	return cleanerCrashLog(t, seed, plant, disklog.Plants{})
+}
+
+// cleanerCrashLog is cleanerCrash with the log's planted bugs logPlant too.
+func cleanerCrashLog(t *testing.T, seed uint64, plant plants, logPlant disklog.Plants) (int, error) {
 	r := core.NewRand(seed)
-	h := newHarnessOn(t, cleanConfig(), cleanGeo)
+	cfg := cleanConfig()
+	cfg.Log.Plants = logPlant
+	h := newHarnessOn(t, cfg, cleanGeo)
 	h.merging, h.catch = true, true
 	h.s.plant, h.plant = plant, plant
 	if seed%4 == 3 {
@@ -135,6 +142,33 @@ func TestFailingWritesWhileAPassRunsBreaksNoSpace(t *testing.T) {
 		t.Fatalf("broke %v", err)
 	}
 	t.Log(err)
+}
+
+// Planted violations of the log's bookkeeping, each named by invNamed at the seed given, since the
+// harness decodes the named manifest and each segment's records from the writes it saw rather
+// than from the log: run pieces dropped before a header names the manifest that dropped them,
+// the cleaner ignoring the replay points, a live manifest keeping only the newest entry of its
+// chain, and recovery forgetting each segment's newest LSN. Read from the log, the last two showed
+// only as a corrupt log, at seeds 34 and 0.
+func TestPlantedLogBugsBreakNamed(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		plant disklog.Plants
+		seed  uint64
+	}{
+		{"PiecesDeadAtOnce", disklog.Plants{PiecesDeadAtOnce: true}, 0},
+		{"CleanableIgnoresReplay", disklog.Plants{CleanableIgnoresReplay: true}, 6},
+		{"LiveChainNewestOnly", disklog.Plants{LiveChainNewestOnly: true}, 0},
+		{"RecoveryForgetsNewest", disklog.Plants{RecoveryForgetsNewest: true}, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := cleanerCrashLog(t, c.seed, plants{}, c.plant)
+			if violationOf(err) != invNamed {
+				t.Fatalf("broke %v", err)
+			}
+			t.Log(err)
+		})
+	}
 }
 
 // Planted bug: replay mapping a copy's blocks as a write, whether or not a map still stores them

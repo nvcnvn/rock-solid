@@ -220,7 +220,7 @@ func (l *Log) namedDurable(named ManifestPos) {
 		for _, c := range dropped {
 			for _, e := range c.entries {
 				for _, ref := range e.pieces {
-					if !l.listsPiece(ref) {
+					if !l.listsPiece(ref) || l.cfg.Plants.ChainPiecesDieAtOnce {
 						l.dropPiece(ref)
 					}
 				}

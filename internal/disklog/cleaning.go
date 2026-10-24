@@ -78,19 +78,6 @@ func (l *Log) Writes() Writes { return l.writes }
 // NamedLSN is the LSN of the newest manifest a durable segment header names, the one recovery would load.
 func (l *Log) NamedLSN() uint64 { return l.namedLSN }
 
-// Named is the manifest at NamedLSN, the one recovery would load: dst with its snapshot's and
-// edits' pieces appended, and its indexes, each with its replay point, runs and merge bounds;
-// dst alone before a segment header names one.
-func (l *Log) Named(dst []BlobRef) ([]BlobRef, []ManifestIndex) {
-	if len(l.live) == 0 || l.live[0].pos.LSN != l.namedLSN {
-		return dst, nil
-	}
-	for _, e := range l.live[0].entries {
-		dst = append(dst, e.pieces...)
-	}
-	return dst, l.live[0].indexes
-}
-
 // FreeOutsideReserve is how many segments are free beyond the reserve, or below zero by how many the reserve lacks.
 func (l *Log) FreeOutsideReserve() int { return int(l.freeCount()) - int(l.reserve) }
 

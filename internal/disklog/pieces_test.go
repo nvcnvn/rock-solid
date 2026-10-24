@@ -28,17 +28,10 @@ func TestDeadPiecesWaitForTheirManifestToBeNamed(t *testing.T) {
 	if err := h.log.PiecesDead(first.runs); err != nil {
 		t.Fatal(err)
 	}
-	names := func() bool {
-		_, indexes := h.log.Named(nil)
-		return slices.ContainsFunc(indexes, func(ix disklog.ManifestIndex) bool { return slices.Contains(ix.Runs, piece) })
-	}
-	if !disklog.HoldsLivePiece(h.log, piece) || h.liveOf(piece.Segment) != before || !names() {
-		t.Fatal("a piece the named manifest still names left the live pieces, or Named no longer lists its run")
+	if !disklog.HoldsLivePiece(h.log, piece) || h.liveOf(piece.Segment) != before {
+		t.Fatal("a piece the named manifest still names left the live pieces")
 	}
 	h.nameManifest()
-	if names() {
-		t.Fatal("Named lists a run the newly named manifest dropped")
-	}
 	if disklog.HoldsLivePiece(h.log, piece) || h.liveOf(piece.Segment) > before-3 {
 		t.Fatalf("segment %d counts %d live blocks after its 3-block piece died, %d before", piece.Segment, h.liveOf(piece.Segment), before)
 	}

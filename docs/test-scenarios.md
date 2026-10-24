@@ -2029,7 +2029,7 @@ on the 1 GiB disk one capacity is 262,144 blocks):
   record by its blocks at once.
 - Dead run pieces (a dropped run, a merge's consumed inputs, a replaced step root, a failed
   checkpoint's pieces) stay live until a segment header names the manifest that dropped them,
-  then leave the count, and `Named` lists the dropped run until then; a block two pieces of a record share stays live until both are dead; a
+  then leave the count; a block two pieces of a record share stays live until both are dead; a
   manifest's pieces die once a named manifest no longer lists them. After every step of the
   log's tests each metadata segment counts exactly the blocks its live pieces touch.
 - At every open the counts are recounted: chunk segments from the index's record counts,

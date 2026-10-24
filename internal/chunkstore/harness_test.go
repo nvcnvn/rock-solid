@@ -176,11 +176,15 @@ func (h *harness) tick(d core.Tick) {
 
 var errCrash = errors.New("crash")
 
-// writtenRecord is a record a round wrote: its LSN, entries and each entry's payload.
+// writtenRecord is a record a round wrote: its segment and the open sequence it went under, its
+// LSN, entries and each entry's payload, and whether a recovery found it lost.
 type writtenRecord struct {
+	segment  uint32
+	seq      uint64
 	lsn      uint64
 	entries  []disklog.Entry
 	payloads [][]byte
+	lost     bool
 }
 
 func testConfig() Config {
@@ -546,7 +550,7 @@ func (h *harness) noteWrite(a *core.Action) {
 	}
 	h.newestIn[segment] = max(h.newestIn[segment], d.Record.LSN)
 	h.recAt[d.Record.LSN] = len(h.records)
-	rec := writtenRecord{lsn: d.Record.LSN, entries: slices.Clone(d.Entries)}
+	rec := writtenRecord{segment: segment, seq: h.seqOf[segment], lsn: d.Record.LSN, entries: slices.Clone(d.Entries)}
 	for i, e := range d.Entries {
 		p := slices.Clone(d.Payload(i))
 		if e.Kind == disklog.EntrySlot {

@@ -238,7 +238,7 @@ func (h *harness) namedNeeds() {
 		return
 	}
 	h.needs, h.namedRuns, h.namedAt, h.floor = map[uint32]string{}, h.namedRuns[:0], log.NamedLSN(), 0
-	pieces, indexes := log.Named(nil)
+	pieces, indexes := h.decodeNamed()
 	for _, p := range pieces {
 		h.needs[p.Segment] = fmt.Sprintf("its piece at LSN %d", p.LSN)
 	}
@@ -269,13 +269,65 @@ func (h *harness) namedNeeds() {
 	}
 }
 
-// recoveredNewest takes each used segment's newest LSN from the recovered usage table, since a
-// crash may have lost the records written to it last, and has needs read again.
+// decodeNamed decodes the manifest at NamedLSN from the records the harness saw written, as
+// recovery loads it: the pieces of its chain, its own included, and its indexes.
+func (h *harness) decodeNamed() ([]disklog.BlobRef, []disklog.ManifestIndex) {
+	at := h.s.Log().NamedLSN()
+	k, ok := h.recAt[at]
+	if at == 0 || !ok {
+		return nil, nil
+	}
+	rec := h.records[k]
+	i := slices.IndexFunc(rec.entries, func(e disklog.Entry) bool { return e.Kind == disklog.EntryBlob && e.BlobKind == disklog.BlobManifest })
+	if i < 0 {
+		h.violate(invNamed, fmt.Errorf("a segment header names the record at LSN %d, which holds no manifest", at))
+		return nil, nil
+	}
+	lists, rest, err := disklog.DecodeManifestPiece(rec.payloads[i])
+	if err != nil {
+		h.violate(invNamed, fmt.Errorf("the manifest at LSN %d: %w", at, err))
+		return nil, nil
+	}
+	payload := func(r disklog.BlobRef) []byte {
+		if k, ok := h.recAt[r.LSN]; ok && int(r.Entry) < len(h.records[k].payloads) {
+			return h.records[k].payloads[r.Entry]
+		}
+		h.violate(invNamed, fmt.Errorf("the manifest at LSN %d lists a piece at LSN %d never written", at, r.LSN))
+		return nil
+	}
+	var pieces []disklog.BlobRef
+	bodies := make([][]byte, len(lists))
+	for mi, list := range lists {
+		for pi, r := range list {
+			pieces = append(pieces, r)
+			b := payload(r)
+			if mi < len(lists)-1 && pi == len(list)-1 {
+				_, b, _ = disklog.DecodeManifestPiece(b)
+			}
+			bodies[mi] = append(bodies[mi], b...)
+		}
+	}
+	bodies[len(bodies)-1] = append(bodies[len(bodies)-1], rest...)
+	pieces = append(pieces, disklog.BlobRef{Segment: rec.segment, LSN: at, Entry: uint16(i)})
+	m, err := disklog.LoadManifest(bodies)
+	if err != nil {
+		h.violate(invNamed, fmt.Errorf("the manifest at LSN %d: %w", at, err))
+		return nil, nil
+	}
+	return pieces, m.Indexes
+}
+
+// recoveredNewest marks the records a recovery lost, past the LSN it found, and takes each
+// segment's newest LSN from the records under its open sequence that it kept, then has needs
+// read again.
 func (h *harness) recoveredNewest() {
 	clear(h.newestIn)
-	for s := uint32(1); s < h.s.sb.SegmentCount; s++ {
-		if u, _ := h.s.Log().Usage(s); u.State == disklog.SegmentUsed {
-			h.newestIn[s] = u.Newest
+	durable := h.s.Log().DurableLSN()
+	for i := range h.records {
+		r := &h.records[i]
+		r.lost = r.lost || r.lsn > durable
+		if seq, ok := h.seqOf[r.segment]; ok && seq == r.seq && !r.lost {
+			h.newestIn[r.segment] = max(h.newestIn[r.segment], r.lsn)
 		}
 	}
 	h.needs = nil
