@@ -21,9 +21,9 @@
 - **Remove when:** the off-heap slabs of `internal/loop` exist; the page store takes its slabs from them and runs are released when the last view holding them closes.
 
 ## Version pin: TLC 1.7.4
-- **Where:** the TLC jar the `models/` CI job downloads, by checksum
+- **Where:** `version` and `sha256` in `scripts/models.sh`, which downloads the TLC jar into `~/.cache/rock-solid` (`$XDG_CACHE_HOME` when set) and checks it against the checksum
 - **Why:** a TLC release can change what a configuration explores or how fast, so an unpinned checker would move every model's state counts and `ci` times without a spec change ([Testing strategy](design.md#testing-strategy)). The 1.8 line is a pre-release whose jar is rebuilt in place, so the models use no CommunityModules operator that needs it ([protocol models study](../studies/protocol-models/README.md)).
-- **Remove when:** never removed, only bumped. A bump reruns every `deep` configuration, which the nightly job does once the TLC version in its hash changes, and records the new state counts in the model-to-simulator map.
+- **Remove when:** never removed, only bumped. A bump reruns every `ci`, negative and `deep` configuration (`scripts/models.sh ci` and `deep`) and records the new state counts in the [model-to-simulator map](test-scenarios.md#model-to-simulator-map).
 
 ## Workaround: writes larger than one record copied
 - **Where:** `writeItems` in `internal/chunkstore/store.go`
