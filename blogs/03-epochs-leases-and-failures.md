@@ -871,7 +871,7 @@ owner that fails over leaves every session as it was.
 Both sides count the lease the way every lease in this post is counted
 ([Counting on clocks](#counting-on-clocks-that-never-agree)), on two clocks: the client from when
 it *sent* its last answered renewal, as a holder, the leader from when it *processed* that
-renewal, which is later, as a grantor. The client keeps its rate bound per leader node and boot,
+renewal, which is later, as a grantor. The client keeps its rate bound per leader node and run,
 so a leader failover starts a new window: the client keeps its old lease, counted from its last
 answered renewal, while it sends the new leader a second renewal `rate_gap` after the first, well
 inside `session_lease`. A client daemon that starts holds its writes about 100 ms longer for the

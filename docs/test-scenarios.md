@@ -3116,28 +3116,29 @@ are a pattern derived from (chunk, version, block), so any extent can be checked
 
 - Every specification under `models/` has a TLC configuration checked in beside it that names its
   constants (nodes, PGs, values), its depth or state bound, and the properties and invariants it
-  checks; CI runs TLC on each one and fails on any violation, deadlock the specification does not
-  allow, or a run that stops short of its bound.
-- Each model's checked depth and distinct-state count are printed by the CI job, so the
+  checks; `scripts/models.sh` runs TLC on each one and fails on any violation, deadlock the
+  specification does not allow, or a run that stops short of its bound.
+- `scripts/models.sh` prints each model's checked depth and distinct-state count, so the
   [Model-to-simulator map](#model-to-simulator-map) can state the depth every model was checked to.
-- A planted fault fails CI: one model run with a configuration that removes one of its rules (for
-  the [Epoch change model](#epoch-change-model), any row of its counterexample table) reports the
-  violated property and a trace, and that configuration is kept as a negative check that must keep
-  failing.
+- A planted fault fails `scripts/models.sh ci`: one model run with a configuration that removes one
+  of its rules (for the [Epoch change model](#epoch-change-model), any row of its counterexample
+  table) reports the violated property and a trace, and that configuration is kept as a negative
+  check that must keep failing.
 - TLC is pinned to release 1.7.4, with its entry in [tech-debts.md](tech-debts.md), and no model
   uses a CommunityModules operator that needs the 1.8 pre-release. The template the models follow
   is etcd-raft's own specification (`tla/` in its repository).
-- Every model has these runs ([Testing strategy](design.md#testing-strategy)):
+- Every model has these runs ([Testing strategy](design.md#testing-strategy)); when they run in CI
+  is [Models in CI](#models-in-ci)'s:
 
-  | Run | What it checks | When | Budget |
+  | Run | What it checks | Command | Budget |
   | --- | --- | --- | --- |
-  | `ci` | Exhaustive: safety properties, and liveness with a time bound written as an invariant over the model's clocks | Whenever `models/` or the TLC version changes, with the negative variants, each of which stops at its first counterexample | Under 5 minutes with 4 workers on the CI runner |
-  | `deep` | Exhaustive, with one more node, chunk, crash or term, plus the unbounded liveness properties | Once per change to its spec, configuration or TLC version; the nightly job compares a hash of the three | 4 hours, after which the run fails |
-  | Nightly simulation | `-simulate`, depth 100 or more, a fresh seed printed for replay | Every night, on machines not running the performance runs | About 1 hour per model |
+  | `ci` | Exhaustive: safety properties, and liveness with a time bound written as an invariant over the model's clocks | `scripts/models.sh ci`, with the negative variants, each of which stops at its first counterexample | Under 5 minutes with 4 workers; past 300 s the run fails |
+  | `deep` | Exhaustive, with one more node, chunk, crash or term, plus the unbounded liveness properties | `scripts/models.sh deep`, once per change to its spec, configuration or TLC version | 4 hours, after which the run fails |
+  | Simulation | `-simulate`, depth 100, a fresh seed printed for replay | `scripts/models.sh sim`, each `ci` configuration for `SIM_SECONDS` (3,600 by default) | About 1 hour per model, nightly |
 
-- A `ci` run that passes its budget fails CI, and the fix is to move its largest constant to
-  `deep`, not to raise the budget.
-- A spec checked in with no `ci` or no `deep` configuration fails CI.
+- A `ci` run that passes its budget fails, and the fix is to move its largest constant to `deep`,
+  not to raise the budget.
+- A spec checked in with no `ci` or no `deep` configuration fails.
 
 ## Epoch change model
 
@@ -3318,9 +3319,9 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 5 | The versions peering drops are a suffix of each chunk's pending versions: every member a decision counts as holding the kept version holds the bytes of every version it was merged on | `DropsAreSuffix` | "no version peering keeps follows a dropped version of its chunk", with the byte-range oracle |
 | 6 | No two writes of a chunk get one version, and each version is above the one it was merged on | `OneWritePerVersion`, `VersionsGrow` | "no two writes of a chunk get one version", registered by Invariant checker (phase 1) |
 | 7 | A table that leaves a PG's interval alone never fails that PG's writes: a member accepts a write sent under any table epoch in which the PG's interval is the one its own table holds | `UnchangedIntervalAccepts` | "no write is refused for its interval while its PG's interval has not changed" |
-| 8 | A new primary merges into a chunk only once it holds every version peering kept for it: the version it merges on rests on the kept one | `MergesOnKept` | None named. Open: the byte-range oracle catches the effect, a merge on a missing base; the map must say so or the design must add one |
+| 8 | A new primary merges into a chunk only once it holds every version peering kept for it: the version it merges on rests on the kept one | `MergesOnKept` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), which a merge on a missing base breaks; the sub-block spike's M8, a new primary merging before it holds the kept versions, is the planted bug that trips it ([Peering and read leases](#peering-and-read-leases)), registered by Invariant checker (phase 1) |
 | 9 | No node's table epoch or interval number goes backwards; no PG's last activated interval goes down, so a late report for interval 2, folded after 3 was recorded, changes nothing; and a table's last activated interval did activate | `TablesForward`, `Monotonic` | "no node's table epoch or PG interval number goes backwards" |
-| 10 | A node pair whose raw rates differ by up to 4%, with no pause, reboot, network fault or refusal since first contact, and whose holder ended no leases on a step-check trip from a pair a fault touched, holds a lease within `rate_gap` (plus rounding, at the model's zero round trips) of first contact and keeps it with no step-check trip. The bound is in time, so `ci` checks it as an invariant over the model's clocks | `LeaseForms` | None named: with real round trips the bound is `rate_gap` plus two of them, which the simulator's lease runs measure ([Peering and read leases](#peering-and-read-leases)) |
+| 10 | A node pair whose raw rates differ by up to 4%, with no pause, reboot, network fault or refusal since first contact, and whose holder ended no leases on a step-check trip from a pair a fault touched, holds a lease within `rate_gap` (plus rounding, at the model's zero round trips) of first contact and keeps it with no step-check trip. The bound is in time, so `ci` checks it as an invariant over the model's clocks | `LeaseForms` | "no step check trips between two nodes neither paused nor rebooted, and each such pair holds a lease within `rate_gap` plus two round trips of first contact", a counter expected to be 0: with real round trips the bound is `rate_gap` plus two of them |
 | 11 | Once a dead daemon's reissued write W′ and a later write W2 to the same block are acknowledged, the block never again holds the dead daemon's W | `NoResurrectedWrite` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), under the fault "a dead daemon's chunk write delivered after its successor's reissue and the pod's next write to the same block", registered by Invariant checker (phase 1) |
 | 12 | Peering settles: with every step that is due taken in time, every PG eventually activates its current interval, unless the interval has fewer than `min_live` live members, a live member's disk is gone, or the table bound left a restarted primary without the new interval it asked for | `PeeringSettles` | "once membership stops changing, every PG whose current interval has at least `min_live` live members on running nodes activates it" |
 
@@ -3437,7 +3438,7 @@ A TLA+ specification, `models/sessions/sessions.tla`, checked with TLC. It cover
 | The step check never trips between a client never stopped and a leader whose rate stays within the headroom | `NoSpuriousTrip` | "no step check trips between two nodes neither paused nor rebooted" |
 | A fenced session leaves the table, and its lock is free, within one tick of its fence, not counting ticks in which the leader lacked its lease or a storage node was unreachable and not yet marked down; the fence commits in the tick the lease runs out on the leader's clock. `ci` checks it as an invariant over the model's clocks, where it holds mostly by construction: time cannot pass a fence, an acknowledgment or a down mark the leader owes, and acknowledgments are never lost, so it guards the conditions under which they are owed. `deep-release` also checks the unbounded form, that a dead client's session leaves the table, under weak fairness | `FenceReleasedInTime`, `CrashedClientReleased` | "a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval while the leader holds its lease and has measured the client, `dead_wait` instead when it has not, or once an unreachable storage node is marked down" |
 
-The lock property is checked as an order, not as the design's wording, "no lock is granted to a new holder while a primary would still accept the fenced holder's writes", which is stronger than the design gives: when every live member of the old holder's interval is cut off from the control plane, all are marked down and the lock moves, while those members can still complete the old holder's queued write among themselves. That write is ordered before the next holder's, because the next interval activates only once a member of the old one has adopted it, so peering finds the write. The model checks the ordering, and the simulator invariant states it.
+The lock property is checked as an order, not as "no lock is granted to a new holder while a primary would still accept the fenced holder's writes", which is stronger than the design gives: when every live member of the old holder's interval is cut off from the control plane, all are marked down and the lock moves, while those members can still complete the old holder's queued write among themselves. That write is ordered before the next holder's, because the next interval activates only once a member of the old one has adopted it, so peering finds the write. The model checks the ordering, and the simulator invariant states it.
 
 **A rule removed, and the counterexample the model finds**
 
@@ -3759,6 +3760,27 @@ section.
   property has an invariant.
 - Snapshot cuts and pool moves are modelled in phase 11, and cross-shard commit in phase 13, each
   before its code (design.md Roadmap), so this map has no rows for them yet.
+
+## Models in CI
+
+The runs of [TLA+ and TLC](#tla-and-tlc), scheduled. The repository has no hosted CI yet, so until
+it has, a change to a modelled protocol runs `scripts/models.sh ci` itself, by the [build
+checklist](build-checklist.md)'s rule for every item.
+
+- The CI job runs `scripts/models.sh ci` on every change under `models/` or to the TLC version or
+  checksum in `scripts/models.sh`, and on no other change.
+- A rule removed from a spec, with no negative configuration changed, fails the job: some `ci`
+  configuration or negative variant fails and its trace is printed.
+- A configuration past 300 s on the runner fails the job. `ci-restarts` takes 190 s of 300 on the
+  M4 Pro, 165 s of it the `DownBackMoved` plan alone; on a slower runner it either fits, or that plan
+  moves to a `ci` configuration of its own.
+- The nightly job runs `scripts/models.sh sim` per model with `SIM_SECONDS` set to about an hour
+  divided among the model's `ci` configurations, and prints every seed; a failing seed's printed
+  replay reproduces its trace.
+- The nightly job keeps, per model, a hash of its spec, its configurations and the TLC version, runs
+  `scripts/models.sh deep` for each model whose hash changed since its last recorded run, and
+  records the results in the [Model-to-simulator map](#model-to-simulator-map)'s results table. A
+  TLC bump so reruns every model's `deep` configurations.
 
 ## Wire messages
 
@@ -4463,10 +4485,14 @@ it on its missing list.
   the simulator checks this after every step.
 - A partial-block write to a chunk whose kept versions are not yet on the new primary waits. A
   whole-block write to the same chunk goes ahead, and a partial write to another chunk goes ahead.
-- Open: whether recovery's copy of a block is skipped, or versioned below, a new whole-block write
-  that went ahead to the same block (M8 shows the clobber). Case: kept 41.7 is on B only; new
-  primary C takes a whole-block write to block 0, then recovers block 0 from B. The oracle must show
-  the new write.
+- Recovery leaves out a block that a whole-block write ordered before it covers. Kept 41.7 is on B
+  only; new primary C takes a whole-block write to block 0, then orders the recovery of the chunk
+  from B: the recovery write carries block 1 alone, and the byte-range oracle shows the new write in
+  block 0. The blocks are chosen when the recovery write is ordered: with the whole-block write
+  ordered between recovery's read of B and its write, the recovery write still leaves block 0 out. A
+  planted variant that chooses them at the read (the epoch change model's
+  `neg-recovery-covers-at-read`) copies 41.7's block 0 over the acknowledged write and fails "no
+  acknowledged version is ever dropped" or the oracle.
 - Sub-block spike seeds:
   - M6 (a suffix dropped, 3,670 primary changes, 8 writes pipelined per client) and M9 (writes up to
     3 blocks long): no seed of 500 differs from the oracle.
@@ -4643,7 +4669,8 @@ model](#epoch-change-model) property it checks:
 
 - One read-serving primary per PG (1).
 - No read returns a version before it commits, and no read returns a version that is later lost.
-- No write completes after a later interval of its PG activates, unless that interval kept it (3).
+- No member logs a write tagged with an earlier interval of its PG than its table's (3).
+- No write completes after a later interval of its PG activates, unless that interval kept it (4).
 - No write is refused for its interval while its PG's interval did not change. This is a counter,
   expected to be 0 (7).
 - No acknowledged version, and no version an activated interval kept, is ever dropped (4).
@@ -4812,7 +4839,7 @@ Unit and trace tests for fortification on the per-node-pair leases. Lease time f
 | --- | --- |
 | Grant asked at 0 ms, received at 50 ms | 3.96 s after the ask, on the faster of the holder's clocks, not 4.01 s |
 | The holder's rate bound for this grantor is 1% fast: 0.5% over `lease_drift / 2` | The margin for this grantor widens by the 0.5% excess, to 60 ms: expiry 3.94 s after the ask |
-| No rate bound for this grantor's boot yet, as after either node starts or the grantor reboots | No expiry from this voter: it does not count toward the quorum, though its support stands |
+| No rate bound for this grantor's run yet, as after either node starts or the grantor restarts, reboots or resumes | No expiry from this voter: it does not count toward the quorum, though its support stands |
 
 **Lease end: the quorum-th latest expiry over the fortified voters**
 
@@ -5079,7 +5106,7 @@ Only the last component (a file name, an xattr name or an S3 key) has variable l
 | A new leader's leader lease starts | Every live session gets a full `session_lease` from that start |
 | The control-plane leader crashes 1 s after its last renewal of client C, whose `CLOCK_BOOTTIME` runs 22.6% fast; a new leader answers 8 s after the crash | C's lease ends about 8.1 s after that renewal, 7.1 s after the crash, and C holds its writes from then until the new leader answers; no session is fenced. With a new leader at 5 s, C never holds |
 | The leader's loop falls behind by more than a heartbeat interval | Every session's timer restarts from now |
-| An owner reports a recall unanswered for `recall_timeout` | The session is fenced in the next version |
+| An owner reports a recall unanswered for `recall_timeout` | The leader stops renewing the session and answers its heartbeats without renewing it; the session is fenced once its lease runs out on the leader's clock, like any expiry, never at once |
 | An operator evicts a session | The same |
 
 **Space grants.** They are computed on each heartbeat, per node and pool ([Client design](design.md#client-design)). The inputs:
@@ -5227,7 +5254,7 @@ Simulator invariants checked after every step, with the faults that must exercis
 | A shard recovered from manifest and log equals its state before the crash | Crashes during memtable flushes, compactions, checkpoints and cleaner passes (crash oracle) |
 | At most one lock holder | Racing flock `Txn`s; owner failover; a session fence |
 | No session is fenced while its client's own lease still runs | Control-plane leader failover while sessions renew; a renewal answered by a deposed leader; a leader stalled past `session_lease`; clients paused past their lease; slewed clocks; a client VM stopped with its clocks frozen |
-| No lock reaches a new holder while a primary would still accept the fenced holder's writes | A fence that reaches some primaries late; a storage node partitioned during a fence |
+| Every completed write of a fenced lock holder is ordered before every completed write of the next holder; no fenced session's write is applied; a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval, or within `dead_wait` while the leader has not measured the client | A fence that reaches some primaries late; a storage node partitioned during a fence |
 | On every disk of a pool, (1 + k) times the grants outstanding plus the flushes not yet in fill reports never exceed the disk's gap above the larger of its fill and `write_limit`, and no flush under a grant is refused for space | The pool reaching `write_limit` while daemons buffer and other nodes write through; grant heartbeats lost or delayed, requests and replies; a control-plane failover while daemons stream; a client partitioned from the control-plane leader but not from storage, streaming under its grant; a daemon crash in the middle of a reuse window; a refill moving members onto the fullest disks while grants are out |
 | A replayed request returns its first result and changes nothing | A daemon crash with requests read but unanswered, followed by their resend; an election while requests are in flight |
 | An internal `Txn` repeated after an election changes nothing it did not read | An election while the purger and the control-plane leader have transactions in flight; a truncate merging into a purge entry the purger is consuming |
