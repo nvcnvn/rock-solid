@@ -69,7 +69,7 @@ type Plants struct {
 	PiecesDeadAtOnce bool
 	// CleanableIgnoresReplay lets the cleaner take a segment holding records past the replay points.
 	CleanableIgnoresReplay bool
-	// ChainPiecesDieAtOnce drops the pieces of a manifest no longer loadable even when the named manifest's chain still lists them.
+	// ChainPiecesDieAtOnce drops the manifests a durable one replaces, and the pieces only they list, before a segment header names it.
 	ChainPiecesDieAtOnce bool
 	// LiveChainNewestOnly keeps of a manifest's chain only its newest entry among the live manifests.
 	LiveChainNewestOnly bool
@@ -1415,6 +1415,9 @@ func (l *Log) checkpointProgress(r *round, out *Output) {
 				entries = entries[len(entries)-1:]
 			}
 			l.live = append(l.live, liveChain{pos: l.manifest, entries: entries, replay: replayFloor(&cp.manifest)})
+			if l.cfg.Plants.ChainPiecesDieAtOnce {
+				l.dropChains(l.manifest.LSN)
+			}
 			for _, s := range cp.trims {
 				l.trims.named = append(l.trims.named, namedTrim{segment: s, lsn: l.manifest.LSN})
 			}

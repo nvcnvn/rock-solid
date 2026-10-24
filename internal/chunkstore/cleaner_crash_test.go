@@ -147,8 +147,9 @@ func TestFailingWritesWhileAPassRunsBreaksNoSpace(t *testing.T) {
 // Planted violations of the log's bookkeeping, each named by invNamed at the seed given, since the
 // harness decodes the named manifest and each segment's records from the writes it saw rather
 // than from the log: run pieces dropped before a header names the manifest that dropped them,
-// the cleaner ignoring the replay points, a live manifest keeping only the newest entry of its
-// chain, and recovery forgetting each segment's newest LSN. Read from the log, the last two showed
+// the cleaner ignoring the replay points, the manifests a durable one replaces dropped with their
+// pieces before a header names it, a live manifest keeping only the newest entry of its chain,
+// and recovery forgetting each segment's newest LSN. Read from the log, the last two showed
 // only as a corrupt log, at seeds 34 and 0.
 func TestPlantedLogBugsBreakNamed(t *testing.T) {
 	for _, c := range []struct {
@@ -158,6 +159,7 @@ func TestPlantedLogBugsBreakNamed(t *testing.T) {
 	}{
 		{"PiecesDeadAtOnce", disklog.Plants{PiecesDeadAtOnce: true}, 0},
 		{"CleanableIgnoresReplay", disklog.Plants{CleanableIgnoresReplay: true}, 6},
+		{"ChainPiecesDieAtOnce", disklog.Plants{ChainPiecesDieAtOnce: true}, 4},
 		{"LiveChainNewestOnly", disklog.Plants{LiveChainNewestOnly: true}, 0},
 		{"RecoveryForgetsNewest", disklog.Plants{RecoveryForgetsNewest: true}, 0},
 	} {

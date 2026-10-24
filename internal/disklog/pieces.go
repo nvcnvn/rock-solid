@@ -213,20 +213,7 @@ func (l *Log) namedDurable(named ManifestPos) {
 		l.pinnedLSN = 0
 		l.recount(nil, false)
 	}
-	i := slices.IndexFunc(l.live, func(c liveChain) bool { return c.pos.LSN >= named.LSN })
-	if i > 0 {
-		dropped := slices.Clone(l.live[:i])
-		l.live = slices.Delete(l.live, 0, i)
-		for _, c := range dropped {
-			for _, e := range c.entries {
-				for _, ref := range e.pieces {
-					if !l.listsPiece(ref) || l.cfg.Plants.ChainPiecesDieAtOnce {
-						l.dropPiece(ref)
-					}
-				}
-			}
-		}
-	}
+	l.dropChains(named.LSN)
 	k := 0
 	for _, d := range l.dying {
 		if d.lsn <= l.namedLSN {
@@ -238,6 +225,26 @@ func (l *Log) namedDurable(named ManifestPos) {
 	}
 	clear(l.dying[k:])
 	l.dying = l.dying[:k]
+}
+
+// dropChains drops the live manifests before lsn, which recovery can no longer load, and the
+// pieces only they listed.
+func (l *Log) dropChains(lsn uint64) {
+	i := slices.IndexFunc(l.live, func(c liveChain) bool { return c.pos.LSN >= lsn })
+	if i <= 0 {
+		return
+	}
+	dropped := slices.Clone(l.live[:i])
+	l.live = slices.Delete(l.live, 0, i)
+	for _, c := range dropped {
+		for _, e := range c.entries {
+			for _, ref := range e.pieces {
+				if !l.listsPiece(ref) {
+					l.dropPiece(ref)
+				}
+			}
+		}
+	}
 }
 
 // listsPiece reports whether a manifest recovery may still load, or the running checkpoint, lists ref.
