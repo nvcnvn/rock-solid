@@ -23,9 +23,10 @@ python3 run.py S --jobs 4 --out results2.txt   # supplementary runs S1-S4
 python3 run.py --render results.txt Q13    # tables again from saved RUN lines
 target/release/cleaner-streams wl=hotcold hot_w=0.9 hot_f=0.1 u=0.9 sep=sepbit_gc   # one run; keys in Cfg::parse
 sh lane_runs.sh > results4.txt             # Q13b: A3 with slot headers pinned, in the hot stream and in a lane of their own
+sh store_runs.sh > results5.txt            # Q15b: C1 uniform, runs own, under the store's conditions, about 30 min
 ```
 
-Raw output: [results.txt](results.txt) (Q13 to Q15), [results2.txt](results2.txt) (S1 to S4), [results3.txt](results3.txt) (S4 again, with the run count in its error), [results4.txt](results4.txt) (Q13b, run later on an Apple M4 Pro with rustc 1.99.1). results.txt was produced before the slot path counted Raft entries; that changes only C3's slots-with-metadata row, which S3 replaces. Its A3 table shows ERR for "own" cells that were never run; `--render` prints them as "-".
+Raw output: [results.txt](results.txt) (Q13 to Q15), [results2.txt](results2.txt) (S1 to S4), [results3.txt](results3.txt) (S4 again, with the run count in its error), [results4.txt](results4.txt) (Q13b, run later on an Apple M4 Pro with rustc 1.99.1), [results5.txt](results5.txt) (Q15b, the same machine). results.txt was produced before the slot path counted Raft entries; that changes only C3's slots-with-metadata row, which S3 replaces. Its A3 table shows ERR for "own" cells that were never run; `--render` prints them as "-".
 
 ## Results
 
@@ -89,6 +90,19 @@ Cost-benefit with the age cap; WA and its ratio to the design's two streams. *He
 | C3, S3: file pool of whole chunks, Raft 1% of data, 90% | Log 4.93 → 5.53 with metadata; **slots 1.004 → 1.035** (Raft 0.010, runs 0.020 blocks per user block) |
 | S4: the design's compaction rule, buckets of runs adjacent in age | **Ran out of space at 80% full: 13,025 chunk-index runs holding 18.5% of the disk** ([FAIL] as a check that the run count stays bounded). Checkpoint flushes alternate between small (no cleaning in the interval) and large (a cleaner pass's moves), so no four adjacent runs fall within 0.5 to 1.5× of their average, and none ever merge. Size classes that may take any runs of a class (C1) end with 6 to 16 runs |
 
+
+### Q15b: C1 under the store's conditions
+
+Run for the targets of the store's write amplification test ([test scenarios](../../docs/test-scenarios.md#cleaner-write-amplification-in-simulation)). The Go store differs from C1 in four ways, each measured in its simulation: it runs on 1,024 or 2,048 segments, which its simulator holds in memory; write admission keeps it at 15 to 17 free segments, where C1 cleans synchronously and keeps 8; at the same disk fill its index takes 1.25% of the disk, where C1's took about 1.6%, so it holds more data; and admission paces its writers, so a round carries 12 writes at 80% full and 7 to 8 at 85 to 90%, not 16.
+
+| Test | Result |
+| --- | --- |
+| Targets: uniform, runs own, store's segments, 16 free, `meta_reserve=0.0125`, records of the store's writes | Chunk data (`chunk_wa`) **4.03 at 80%** (1,024 × 4 MiB, 12 writes), **6.03 at 85%** (1,024 × 4 MiB, 8), **10.50 at 90%** (2,048 × 8 MiB, 7). The store measured 4.02, 6.17 and 10.90 |
+| 80% with 80% of the disk in data, a condition at a time | 3.86 → 1,024 segments 3.85 → 15 free 3.98 → records of 11 writes 4.13 → data at 80% 4.69 |
+| 4,096 segments of 64 MiB, a condition at a time | 80%: 3.95 → 16 free 3.98 → the store's data share 4.14 → records of 12 writes 4.27. 90%: 8.15 → 8.33 → 9.11 → records of 7 writes **10.07** |
+| 95%, 4,096 × 4 MiB, 15 free, records of 11 writes | 29.5 |
+
+Records under admission cost most at 90%: 7-write records instead of 16 add 0.96 on 64 MiB segments, as much as the store's index writes beyond C1's model.
 ## Conclusions
 
 1. **Whole chunks go to chunk slots, not to the log** (Q13). Random deletes of whole chunks cost 4.9 at 90% full and 9.0 at 95% in 64 MiB segments, and slots cost nothing at any fill (1.004, the record headers). A pool that is half whole chunks also cleans its small writes for less, 2.75 instead of 6.1 at 90% with the slot headers in a lane of their own, because the whole chunks no longer take spare space. Whole files are no cheaper than single chunks once writers interleave (4.0 to 4.5 with 8 writers), and placement groups spread each file over every disk, so a disk's log sees whole-file deletes as random chunk deletes.

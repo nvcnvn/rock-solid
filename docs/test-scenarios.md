@@ -1905,8 +1905,8 @@ manifest, written or in flight, segment headers and the checkpoint's own records
   past the header one hot and one merge segment before the replay point.
 - Recovery scenarios that carry over to the metadata stream are above; the many-segments and
   random-crash properties in "Recovery" run all three streams and 1 to 4 merge lanes.
-- The write amplification bars with runs in this stream (3.86 / 8.04 / 26.4 at 80 / 90 / 95%
-  under uniform overwrites) belong to the "Cleaner write amplification in simulation" item.
+- Write amplification with runs in this stream belongs to "Cleaner write amplification in
+  simulation".
 
 ## Cleaner
 
@@ -2207,7 +2207,8 @@ Invariants (simulator) and faults:
   per write with a worker 1.6 to 1.8 µs at 90 to 95% full against 5.9 to 11 µs inline, its write
   p99 about 6 µs) are Rust's; the Go bar is the measured `BenchmarkApplyMove` above, and the
   owner's work per write is measured with the event loop.
-- Write amplification at 80 / 90 / 95% belongs to "Cleaner write amplification in simulation".
+- Write amplification at 80, 85 and 90% full belongs to "Cleaner write amplification in
+  simulation".
 
 ## Chunk slots
 
@@ -2989,63 +2990,95 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
 
 ## Cleaner write amplification in simulation
 
-- Targets, uniform 4 KiB overwrites under cost-benefit with two streams, warmed up for 6 disk
-  capacities of writes on a 16 GiB disk of 4,096 segments of 4 MiB:
+- Targets: the chunk data's write amplification, every block the disk was asked to write outside
+  the metadata stream (user blocks, record and segment headers, the cleaner's copies and the tails
+  they leave) over the user blocks acknowledged, within 5% of the cleaner streams spike run under
+  the store's conditions (below), runs in their own stream, warmed up for 4 capacities and
+  measured over 2. The index's runs are reported beside it, not held to the spike, whose 40-byte
+  entries and size-tiered merges undercount them. Measured, seed 1, deterministic:
 
-  | Fill | Column 1: no index runs written or counted (cleaner spike) | Column 2: index runs in the metadata stream (cleaner streams spike) |
-  | --- | --- | --- |
-  | 80% | 3.4 | 3.9 (3.86) |
-  | 90% | 7.2 | 8.0 (8.04) |
-  | 95% | 17.3 | 26 (26.4) |
+  | Fill | Disk | Spike, store's conditions | Store: chunk data | Store: every block (metadata stream) | Run time, peak resident |
+  | --- | --- | --- | --- | --- | --- |
+  | 80% | 1,024 segments of 4 MiB | 4.03 | 4.02 | 4.58 (0.56) | 2.3 min, 0.60 GB |
+  | 85% | 1,024 segments of 4 MiB | 6.03 | 6.17 | 6.90 (0.72) | 3.3 min, 0.59 GB |
+  | 90% | 2,048 segments of 8 MiB, 192 KiB records | 10.50 | 10.90 | 12.6 (1.70) | 29 min, 2.5 GB |
 
-  With the index's runs mixed into the cold stream the streams spike measured 4.27 / 11.0 / 49.6;
-  the real layout must stay near the metadata-stream figures, not these.
+- The store's conditions, each measured in the store's run and given to the spike:
+  - Fill is the disk's fill as `write_limit` counts it, its live blocks over its size, the index's
+    runs included. Those hold 1.25% of the disk (1.24% at 80%, 1.07% at 85%, 1.25% at 90%), so
+    the volume is the fill less 1.25 points, and the run fails unless its mean fill is within half
+    a point of the target. The spike gets the same share of data (`meta_reserve=0.0125`).
+  - 16 segments free (`free_low=16`): the 8 of the reserve and the 8 outside it at which write
+    admission starts slowing writers, where the store sat, 15.5 to 17 free on average. The
+    cleaner runs beside the writers on simulated time and falls behind, so writes wait on the
+    token bucket; the spike cleans synchronously and keeps 8 free.
+  - User records of as many writes as the store's rounds carried (`rec_kb=48`, `32`, `28`: 12, 8
+    and 7 writes). Admission releases the 16 outstanding writes a few at a time, and a round takes
+    those waiting when it begins: 0.085, 0.133 and 0.140 header blocks per user block at 80, 85
+    and 90%, where the spike's 64 KiB records of 16 writes cost 0.0625.
 - Setup (`TestCleanerWriteAmplification`, a subtest per fill, each run alone with
-  `ROCKSOLID_LONG_SIM` set): a 4 GiB simulated disk of 1,024 segments of 4 MiB. The spike's 16 GiB
-  disk does not fit in memory: the simulated disk keeps every block that is not all zeros, and the
-  index's dead runs, which stay on disk until their segments are written again, alone took the
-  16 GiB run past 4 GB within 10 minutes. Records of up to 256 KiB, with 16 writes outstanding so
-  that a user record holds 16 blocks and one header block, as the spike's 64 KiB records did; a
-  checkpoint every 4 MiB of log, the streams spike's stand-in for 64 MiB; merge steps of one
-  segment; the reserve the formula gives (8 segments) and `clean_free` 16; simulated time with
-  write admission on. The volume, fill times the disk, is written once in order in 32-block
-  writes, each followed half the time by a 4 KiB overwrite of a block already written, so that
-  the oldest segments hold dead blocks as the disk fills; then 1 disk capacity of uniform 4 KiB
-  overwrites warms it up and 1 more is measured. Write amplification counts every block the disk
-  was asked to write, record and segment headers, copies and the metadata stream included, over
-  the user blocks acknowledged; the run also reports the metadata stream's and the copies' shares.
-- The net-gain guard caps a 4 MiB victim's live blocks by record size: 914 of 1,023 (89.35%) at
-  256 KiB, 930 (90.9%) at 128 KiB, 915 (89.4%) at 64 KiB and 732 (71.6%) at 1 MiB. 128 KiB
-  records measured worse all the same, 5.78 at 80% against 5.09, and at 90% ran out of space
-  after 54% of the measured capacity against 65%.
-- Measured, against column 2 (the Go log always writes its index's runs), seed 1:
+  `ROCKSOLID_LONG_SIM` set): records of up to 256 KiB, 192 KiB at 90%; a checkpoint every 4 MiB of
+  log, the streams spike's stand-in for 64 MiB; merge steps of one segment; the reserve the
+  formula gives (8 segments) and `clean_free` 16; simulated time with write admission on. The
+  volume is written once in order in 32-block writes, each followed half the time by a 4 KiB
+  overwrite of a block already written, so that the oldest segments hold dead blocks as the disk
+  fills; then 1 disk capacity of uniform 4 KiB overwrites warms it up and 1 more is measured.
+  Write amplification counts every block the disk was asked to write over the user blocks
+  acknowledged, and the run breaks it down by stream and by what wrote the metadata stream, and
+  samples free and used segments, live blocks per stream and the victims' live shares.
+- 90% runs on 8 MiB segments because 4 MiB ones run out of victims. The net-gain guard passes a
+  4 MiB victim up to 89.35% live in 256 KiB records, and at 90% full the chunk segments are 91%
+  live: during the first capacity of overwrites every segment decays at about the same rate, and
+  none passes. 4,096 segments of 4 MiB ran out there after 7.7 minutes at 2.3 GB, as 1,024 did
+  with 90% of the disk in data. On 2,048 segments of 8 MiB in 192 KiB records the guard passes
+  92.6%, and the fullest victim was 92.57% live.
+- With 80% of the disk in user data and the index's runs on top, the store writes 5.02 over three
+  capacities (5.09, 4.93, 5.04), against the streams spike's 3.86 at 80% full. Running the spike
+  with each of the store's conditions in turn, and adding the index's writes from the store's own
+  count, accounts for the gap:
 
-  | Fill | Write amplification | Metadata stream | Copied | Run time, peak resident |
-  | --- | --- | --- | --- | --- |
-  | 80% | 5.09 | 0.62 | 3.32 | 3 min, 0.60 GB |
-  | 90% | 13.8 over the 65% of the measured capacity written before the disk ran out of space | 2.18 | 10.26 | 6 min, 0.61 GB |
-  | 95% | runs out of space while the volume is written | | | 6 s, 0.48 GB |
+  | Step | Write amplification |
+  | --- | --- |
+  | Streams spike, 4,096 segments of 4 MiB, 8 free, records of 16 writes, 80% full with its index (78% data) | 3.86 |
+  | 1,024 segments | 3.85 |
+  | 15 segments free | 3.98 |
+  | Records of 11 writes | 4.13 |
+  | 80% of the disk in data, as that test filled it (81.2% with the index) | 4.69 |
+  | The store's index writes, 0.59 against the spike's 0.29 | 4.99 |
 
-  Not near the targets, so the build checklist item stays open:
-  - At 80% the log writes 5.09 blocks per user block against 3.86. The metadata stream takes
-    0.62, against the streams spike's 0.49 at 90% (flushed 0.085, compacted 0.40), and the
-    space the index, the reserve and `clean_free` hold raises the fill the cleaner sees, so each
-    victim frees less.
-  - At 90% and 95% writes fail with NoSpace once no victim passes the net-gain guard; none
-    fails while one does. At 90% the 986 chunk segments then average 956 of 1,023 blocks live,
-    93.5%, and the 29 metadata segments, holding 19 segments' worth of live runs, are too full
-    to rewrite at a gain; at 95% the chunk segments average 94.2% during the fill. The index's
-    segments and the reserve take 37 of the 1,023 segments, 3.6%, so 90% of the disk in user
-    data fills the rest to 93.5%, above the guard's 89.35%. The guard's tail charge, up to a
-    block short of the largest copy and its header, and its 134 bytes of index entries per
-    moved block are design rules the spikes did not model ([Cleaner](design.md#on-disk-format)).
-    On 64 MiB segments of 1 MiB records they let victims up to 94% live pass, above the 92.7%
-    the spike cleaned on average at 95% full, so the guard does not rule out 90 or 95% on a
-    real disk; nobody has run the Go log there.
+  The fill and the index's writes are most of it, and the store's cleaner itself is within 1% of
+  the spike's. The test fills the disk as `write_limit` counts it.
+- The index writes twice what the spike modelled: at 80% 0.069 per user block in flushes against
+  0.051, 0.47 in merges against 0.21, and 0.020 in records holding manifests against 0.004; at
+  90% 0.18, 1.48 and 0.047. An extent costs a 38-byte key and a 26-byte value, a write also
+  rewrites its chunk's entry and the live counts of its record and of the one it overwrote, and
+  RocksDB's universal rules rewrite a flushed entry about 7 times where the spike's size classes
+  did 4. The cleaner never rewrote a
+  run: no metadata segment was a victim that needed copying.
+- 90% on 64 MiB segments, a 256 GiB disk of 4,096, is not run: the simulator holds about 600
+  bytes per block resident, so 2.5 GB at 16 GiB would be about 40 GB. Its estimate is 11.4,
+  between 11.0 and 11.5: the streams spike at 4,096 segments of 64 MiB with each condition in turn, then the
+  store's index writes and its cleaner's residual at 2,048 segments of 8 MiB:
+
+  | Step | Write amplification |
+  | --- | --- |
+  | Streams spike, 8 free, records of 16 writes, 90% full with its index (88% data) | 8.15 |
+  | 16 segments free | 8.33 |
+  | 88.75% data, the store's at 90% of the disk | 9.11 |
+  | Records of 7 writes | 10.07 |
+  | The store's index writes beyond the spike's: 1.12 at 2,048 segments, scaled by the copies to 1.0 | 11.1 |
+  | The store's cleaner, 3.8% above the spike's at 2,048 segments (0.3% below to 2.3% above at 80 and 85%) | 11.4 |
+
+  The same way, 80% on 64 MiB segments comes to 4.5: 4.27 in the spike under the store's
+  conditions, plus the 0.28 the store's index writes beyond the spike's.
+- 95% is not run: no default `write_limit` allows it, and at 95% full the chunk segments would be
+  about 96% live, above the guard's cap on 4 MiB and 8 MiB segments. The streams spike at 4,096
+  segments with 15 free and records of 11 writes gives 29.5 there.
 - Default `write_limit` by segment size ([Volume size and capacity](design.md#volume-size-and-capacity)):
   the same run, seed 1, on 1,024 segments in records of `max_group_commit_bytes`' default, 1 MiB,
   at each band's default on the band's smallest segment, completes the measured capacity with no
-  NoSpace (`TestDefaultWriteLimitBySegmentSize`, `ROCKSOLID_LONG_SIM` set, 2.3 minutes and
+  NoSpace, its user data alone at the default's share of the disk, a point or so fuller than the
+  disk's fill with the index's runs (`TestDefaultWriteLimitBySegmentSize`, `ROCKSOLID_LONG_SIM` set, 2.3 minutes and
   0.58 GB in all). The fill a step higher runs out of space within seconds, before the measured
   capacity, no victim passing the guard. Bands above 4 MiB are checked on smaller segments with
   records giving a cap no higher than the band's, through `TestCleanerWriteAmplification` with

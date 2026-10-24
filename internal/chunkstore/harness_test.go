@@ -45,11 +45,13 @@ type harness struct {
 	// crashIf, when set, crashes as crashAt does before an oldest queued action it accepts;
 	// failIf, when set, completes with Io action k, counting from 0, if it accepts it; and onStep,
 	// when set, sees action k once the store has taken its completion; onWrite, when set, sees
-	// a disk write of a serving store's segment in stream st before it runs.
+	// a disk write of a serving store's segment in stream st before it runs, and onMerge each
+	// merge step before it runs.
 	crashIf func(a *core.Action) bool
 	failIf  func(k int, a *core.Action) bool
 	onStep  func(k int, a *core.Action)
 	onWrite func(a *core.Action, st disklog.Stream)
+	onMerge func(c *lsm.Compaction)
 	// plant is the bug planted in every store a recovery starts.
 	plant plants
 	// changes is the chunk of each write and punch, by request ID.
@@ -330,6 +332,9 @@ func (h *harness) step() bool {
 	h.noteDurable()
 	h.noteCleanReads()
 	for c := h.mergeDue(); c != nil; c = h.mergeDue() {
+		if h.onMerge != nil {
+			h.onMerge(c)
+		}
 		c.Run()
 		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
 			h.t.Fatal(err)
