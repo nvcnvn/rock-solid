@@ -554,12 +554,15 @@ give a looser one. So after the first grant from a grantor, the holder asks agai
 (100 ms) later, and takes no lease from that grantor until it has those two. The first lease is a
 little shorter (3.90 s instead of 3.96 s at 1 ms round trips, 3.18 s at the 10 ms of an event loop
 at 90% load) and lengthens as the window fills. A holder keeps its window per grantor and per
-boot: every grant and heartbeat carries the grantor's boot ID, because its raw clock starts again
-near zero at every boot and a new boot may calibrate differently. A window starts again at a new
-boot ID, at a raw reading below the last one, after a detected pause (below), and when the last
-grant ages out of the window. So a holder goes about 100 ms without reads on a grantor's leases
-when it starts, when that grantor reboots and after every pause it detects; a grantor's daemon
-restarting within one boot costs nothing, since its raw clock and boot ID carry on
+*run*: every grant and heartbeat carries the grantor's run ID, a random number the grantor draws
+when its daemon starts and again after every pause it detects. A start covers every reboot, after
+which its raw clock starts again near zero and may calibrate differently, and every daemon restart,
+during which nothing was watching for a pause. A window starts again at a new run ID, at a raw
+reading below the last one, after a pause the holder detects itself (below), and when the last
+grant ages out of the window. A new run ID also ends the lease from the grantor's previous run,
+since the holder can no longer check its own clock against that run's readings. So a holder goes
+about 100 ms without reads on a grantor's leases when it starts, when that grantor reboots,
+restarts its daemon or resumes from a pause, and after every pause it detects
 ([lease margins study](../studies/lease-margins/README.md)).
 
 #### A holder that slept gives up its leases

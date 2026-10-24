@@ -1,7 +1,9 @@
 #!/bin/bash
 # Checks the TLA+ models under models/ with TLC 1.7.4. Each models/<name>/ holds the spec <name>.tla
 # and its configurations: ci*.cfg and deep*.cfg must pass, neg-*.cfg must fail, and a negative
-# configuration's first line, "\* expect: <name>", names the invariant or property it must violate.
+# configuration's first line, "\* expect: <name>", names the invariant or property it must violate;
+# TLC does not name a liveness property it finds violated, so a negative that expects one checks it
+# alone.
 #   scripts/models.sh [ci|deep|sim] [model...]
 # ci (the default) runs the ci and negative configurations, each failing past 5 minutes; deep runs
 # the deep ones, each failing past 4 hours; sim runs TLC's random simulation of each ci
@@ -46,6 +48,11 @@ tlc() {
 	secs=$((SECONDS - start))
 	rm -rf "$tmp/meta"
 	return $status
+}
+
+# checked cfg: the invariants and properties a configuration checks, one per line.
+checked() {
+	awk '/^(INVARIANTS?|PROPERT(Y|IES))/ { on = 1; next } /^[A-Z]/ { on = 0 } on && NF { print $1 }' "$1"
 }
 
 summary() {
@@ -99,7 +106,9 @@ for model in $models; do
 		elif tlc "$model" "$cfg"; then
 			echo "FAIL $model/$cfg: passed, but must violate $want"
 			failed=1
-		elif grep -Eq "(Invariant|Temporal property|Action property) $want (is|was) violated" "$tmp/out"; then
+		elif grep -Eq "(Invariant|Temporal property|Action property) $want (is|was) violated" "$tmp/out" ||
+			{ grep -q "Temporal properties were violated" "$tmp/out" &&
+				[ "$(checked "models/$model/$cfg")" = "$want" ]; }; then
 			echo "ok   $model/$cfg: violates $want, ${secs}s"
 		else
 			echo "FAIL $model/$cfg: did not violate $want"
