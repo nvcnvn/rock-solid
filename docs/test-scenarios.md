@@ -3042,6 +3042,26 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
     On 64 MiB segments of 1 MiB records they let victims up to 94% live pass, above the 92.7%
     the spike cleaned on average at 95% full, so the guard does not rule out 90 or 95% on a
     real disk; nobody has run the Go log there.
+- Default `write_limit` by segment size ([Volume size and capacity](design.md#volume-size-and-capacity)):
+  the same run, seed 1, on 1,024 segments in records of `max_group_commit_bytes`' default, 1 MiB,
+  at each band's default on the band's smallest segment, completes the measured capacity with no
+  NoSpace (`TestDefaultWriteLimitBySegmentSize`, `ROCKSOLID_LONG_SIM` set, 2.3 minutes and
+  0.58 GB in all). The fill a step higher runs out of space within seconds, before the measured
+  capacity, no victim passing the guard. Bands above 4 MiB are checked on smaller segments with
+  records giving a cap no higher than the band's, through `TestCleanerWriteAmplification` with
+  the record size and geometry changed by hand, each run alone:
+
+  | Segments, records | Guard's cap | Runs: write amplification, metadata, copied; time, peak resident | Runs out |
+  | --- | --- | --- | --- |
+  | 64 KiB, 1 MiB | 33.3% | 45%: 2.20, 0.09, 0.61; 0.6 s | 50% |
+  | 128 KiB, 1 MiB | 41.9% | 50%: 1.86, 0.10, 0.55; 1.1 s | |
+  | 256 KiB, 1 MiB | 46.0% | 50% | 55% |
+  | 512 KiB, 1 MiB | 47.2% | 55%: 1.97, 0.21, 0.62; 6 s | |
+  | 2 MiB, 1 MiB | 48.3% | 55%: 1.89, 0.17, 0.60; 30 s, 0.30 GB | 60% |
+  | 4 MiB, 1 MiB | 71.6% | 75%: 3.67, 0.40, 2.13; 2.2 min, 0.58 GB | 80% |
+  | 4 MiB, 512 KiB (for 8 MiB) | 83.3% | 85%: 7.39, 1.03, 5.14; 4.1 min, 0.65 GB | |
+  | 4 MiB, 256 KiB (for 16 MiB) | 89.35% | 85%: 8.15, 0.94, 5.96; 4.4 min, 0.61 GB | 90% (above) |
+  | 8 MiB, 192 KiB (for 32 and 64 MiB) | 92.6% | 90%: 17.99, 2.41, 14.13; 20 min, 1.33 GB | |
 - The log's write counters (`disklog.(*Log).Writes`: the data blocks of ordinary items, a whole
   chunk's slot write included, and every block the log asked the disk to write, slot writes and
   the zeroing of a freed slot segment's header included) equal what the run acknowledged and
@@ -3731,7 +3751,7 @@ Unit and data-driven tests for pool settings, creation rules and capacity figure
 
 | Input | Expected |
 | --- | --- |
-| A pool created with no settings | `replicas` 3, `min_live` 2, `failure_domain` node, `max_per_domain` 1, `locality` spread, `overcommit` on, `write_limit` 90%, `disk_class` any, `pg_count` a power of two sized from the disk count |
+| A pool created with no settings | `replicas` 3, `min_live` 2, `failure_domain` node, `max_per_domain` 1, `locality` spread, `overcommit` on, `write_limit` unset (each disk's default, below), `disk_class` any, `pg_count` a power of two sized from the disk count |
 | `replicas` 1 | `min_live` 1, `locality` node |
 | `replicas` 2 | `min_live` 2, `locality` spread |
 | `replicas` 0 or 4 | Rejected with an error naming the setting, never a panic |
@@ -3741,6 +3761,8 @@ Unit and data-driven tests for pool settings, creation rules and capacity figure
 | `pg_count` sized for 60 disks, `rep3` alone | 2048 (2048 × 3 ÷ 60 ≈ 102 members per disk). Open: the exact rounding rule ("sized for the largest expected cluster ... around 100") |
 | `min_live` above `replicas`, or 0 | Rejected: it must be 1 to `replicas`, as Ceph's `min_size` must be 1 to `size` |
 | `write_limit` of 10% or less | Rejected: `NearFull` starts 10 points below it |
+| `write_limit` unset, member disks of 1 TiB, 256 GiB, 128 GiB, 64 GiB, 32 GiB, 16 GiB, 8 GiB and 1 GiB (segments of 64, 64, 32, 16, 8, 4, 2 MiB and 256 KiB) | Each disk's limit is ⌊size in blocks × its default⌋: 90%, 90%, 90%, 85%, 85%, 75%, 55%, 50%. `NearFull` is 10 points below each |
+| `write_limit` 90% set, the same disks | Every disk's limit is 90% of its size |
 | Installing a cluster | Creates one pool, `rep3`, as the default |
 | `replicas` or `min_live` changed later | Accepted. The next table starts a new interval of every PG of the pool (asserted in Placement computation) |
 | `failure_domain`, `write_limit`, `disk_class` or `overcommit` changed later | Accepted ("every other setting can change later") |
