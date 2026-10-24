@@ -3116,8 +3116,8 @@ are a pattern derived from (chunk, version, block), so any extent can be checked
 
 - Every specification under `models/` has a TLC configuration checked in beside it that names its
   constants (nodes, PGs, values), its depth or state bound, and the properties and invariants it
-  checks; `scripts/models.sh` runs TLC on each one and fails on any violation, deadlock the
-  specification does not allow, or a run that stops short of its bound.
+  checks; `scripts/models.sh` runs TLC on each one and fails on any violation or a run that
+  stops short of its bound.
 - `scripts/models.sh` prints each model's checked depth and distinct-state count, so the
   [Model-to-simulator map](#model-to-simulator-map) can state the depth every model was checked to.
 - A planted fault fails `scripts/models.sh ci`: one model run with a configuration that removes one
@@ -3772,20 +3772,20 @@ The runs of [TLA+ and TLC](#tla-and-tlc), scheduled. The repository has no hoste
 it has, a change to a modelled protocol runs `scripts/models.sh ci` itself, by the [build
 checklist](build-checklist.md)'s rule for every item.
 
-- The CI job runs `scripts/models.sh ci` on every change under `models/` or to the TLC version or
-  checksum in `scripts/models.sh`, and on no other change.
+- The CI job runs `scripts/models.sh ci` on every change under `models/` or to `scripts/models.sh`,
+  which holds the TLC pin, and on no other change.
 - A rule removed from a spec, with no negative configuration changed, fails the job: some `ci`
   configuration or negative variant fails and its trace is printed.
 - A configuration past 300 s on the runner fails the job. `ci-restarts` takes 190 s of 300 on the
-  M4 Pro, 165 s of it the `DownBackMoved` plan alone; on a slower runner it either fits, or that plan
-  moves to a `ci` configuration of its own.
+  M4 Pro; on a slower runner it either fits, or its largest plan moves to a `ci` configuration of
+  its own.
 - The nightly job runs `scripts/models.sh sim` per model with `SIM_SECONDS` set to about an hour
   divided among the model's `ci` configurations, and prints every seed; a failing seed's printed
   replay reproduces its trace.
 - The nightly job keeps, per model, a hash of its spec, its configurations and the TLC version, runs
   `scripts/models.sh deep` for each model whose hash changed since its last recorded run, and
   records the results in the [Model-to-simulator map](#model-to-simulator-map)'s results table. A
-  TLC bump so reruns every model's `deep` configurations.
+  TLC bump therefore reruns every model's `deep` configurations.
 
 ## Wire messages
 
@@ -4492,14 +4492,6 @@ it on its missing list.
   the simulator checks this after every step.
 - A partial-block write to a chunk whose kept versions are not yet on the new primary waits. A
   whole-block write to the same chunk goes ahead, and a partial write to another chunk goes ahead.
-- Recovery leaves out a block that a whole-block write ordered before it covers. Kept 41.7 is on B
-  only; new primary C takes a whole-block write to block 0, then orders the recovery of the chunk
-  from B: the recovery write carries block 1 alone, and the byte-range oracle shows the new write in
-  block 0. The blocks are chosen when the recovery write is ordered: with the whole-block write
-  ordered between recovery's read of B and its write, the recovery write still leaves block 0 out. A
-  planted variant that chooses them at the read (the epoch change model's
-  `neg-recovery-covers-at-read`) copies 41.7's block 0 over the acknowledged write and fails "no
-  acknowledged version is ever dropped" or the oracle.
 - Sub-block spike seeds:
   - M6 (a suffix dropped, 3,670 primary changes, 8 writes pipelined per client) and M9 (writes up to
     3 blocks long): no seed of 500 differs from the oracle.
@@ -4590,6 +4582,14 @@ to the pool median.
   - Chunk epochs spike R3: without that record, replay from a checkpoint taken while the dropped
     write was pending brings it back.
   - R3b: with it, replay ends at the recovered blocks.
+- Recovery leaves out a block that a whole-block write ordered before it covers. Kept 41.7 is on B
+  only; new primary C takes a whole-block write to block 0, then orders the recovery of the chunk
+  from B: the recovery write carries block 1 alone, and the byte-range oracle shows the new write in
+  block 0. The blocks are chosen when the recovery write is ordered: with the whole-block write
+  ordered between recovery's read of B and its write, the recovery write still leaves block 0 out. A
+  planted variant that chooses them at the read (the epoch change model's
+  `neg-recovery-covers-at-read`) copies 41.7's block 0 over the acknowledged write and fails "no
+  acknowledged version is ever dropped" or the oracle.
 - A member's missing-list entry goes once the recovered blocks are durable on it.
 - Recovery cut short by the next interval: the missing lists survive. The next primary reads them
   and keeps what the activated interval kept (the keep-rule table under [Peering and read
@@ -5207,8 +5207,9 @@ simulator seeds against the real primaries and replicas.
 - Planted bugs, each a variant of the code that must fail its invariant within the seeds every
   commit runs: checking the session only on arrival (`neg-check-on-arrival`) and no check on
   replicated writes (`neg-replica-no-check`) fail "no fenced session's write is applied"; marking a
-  node up with an older table (`neg-up-with-old-table`) fails "every write of a fenced lock holder
-  that completes is ordered before every write of the next holder".
+  node up with an older table (`neg-up-with-old-table`) and a new interval activated without a
+  member of every earlier interval adopting it (`neg-peering-skipped`) fail "every write of a fenced
+  lock holder that completes is ordered before every write of the next holder".
 
 ## Filesystem schema
 
@@ -5292,7 +5293,7 @@ Simulator invariants checked after every step, with the faults that must exercis
 | A shard recovered from manifest and log equals its state before the crash | Crashes during memtable flushes, compactions, checkpoints and cleaner passes (crash oracle) |
 | At most one lock holder | Racing flock `Txn`s; owner failover; a session fence |
 | No session is fenced while its client's own lease still runs | Control-plane leader failover while sessions renew; a renewal answered by a deposed leader; a leader stalled past `session_lease`; clients paused past their lease; slewed clocks; a client VM stopped with its clocks frozen |
-| Every completed write of a fenced lock holder is ordered before every completed write of the next holder; no fenced session's write is applied; a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval, or within `dead_wait` while the leader has not measured the client | A fence that reaches some primaries late; a storage node partitioned during a fence |
+| Every write of a fenced lock holder that completes is ordered before every write of the next holder; no fenced session's write is applied; a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval while the leader holds its lease and has measured the client, `dead_wait` instead when it has not, or once an unreachable storage node is marked down | A fence that reaches some primaries late; a storage node partitioned during a fence |
 | On every disk of a pool, (1 + k) times the grants outstanding plus the flushes not yet in fill reports never exceed the disk's gap above the larger of its fill and `write_limit`, and no flush under a grant is refused for space | The pool reaching `write_limit` while daemons buffer and other nodes write through; grant heartbeats lost or delayed, requests and replies; a control-plane failover while daemons stream; a client partitioned from the control-plane leader but not from storage, streaming under its grant; a daemon crash in the middle of a reuse window; a refill moving members onto the fullest disks while grants are out |
 | A replayed request returns its first result and changes nothing | A daemon crash with requests read but unanswered, followed by their resend; an election while requests are in flight |
 | An internal `Txn` repeated after an election changes nothing it did not read | An election while the purger and the control-plane leader have transactions in flight; a truncate merging into a purge entry the purger is consuming |
@@ -5322,9 +5323,10 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
   (`neg-no-full-lease`), counting on the leader's own clock (`neg-count-on-own-clock`), only
   `session_lease` for an unmeasured session (`neg-dead-wait-lease`), an eviction fenced at once
   (`neg-evict-at-once`, and `neg-two-holders` with two clients), a lock released at the fence's
-  commit, while the old holder's session is still listed (`neg-release-on-commit`), and an acknowledged version that counts only reachable nodes
-  (`neg-ack-reachable-only`) or waits for nodes marked down (`neg-ack-waits-down`). Its storage-side
-  rows are [Session fencing on storage nodes](#session-fencing-on-storage-nodes)'.
+  commit, while the old holder's session is still listed (`neg-release-on-commit`), and an
+  acknowledged version that counts only reachable nodes (`neg-ack-reachable-only`) or waits for
+  nodes marked down (`neg-ack-waits-down`). Its storage-side rows are planted under [Session
+  fencing on storage nodes](#session-fencing-on-storage-nodes).
 
 ## Off-heap slabs
 
