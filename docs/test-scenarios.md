@@ -3021,7 +3021,8 @@ nodes without finishing.
 `deep` is three configurations because whether nodes have clocks is a constant of the spec, and the
 delayed-message plan, over 3 million states at 3 nodes, passed 108 million at 4 nodes with the
 other lease plans without finishing in 4 hours, so it runs alone at 3. The plans that pair a
-partition with a pause, a suspend or a reboot are 1.6 to 7.6 million states each at 3 nodes, so they
+partition with a pause, a suspend or a reboot are 1.6 to 7.6 million states each at 3 nodes, and the
+two that stop the holder in place while its grantor pauses or restarts 5.4 and 1.2 million, so they
 run in `deep-leases`; the variants that need one run on it alone.
 
 | Constant | Value |
