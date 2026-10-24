@@ -136,6 +136,22 @@ type harness struct {
 	filled   map[uint32]float64
 	// passesBefore is the cleaner's passes before the event the store handles now, or an earlier one.
 	passesBefore []*cleanPass
+	// recAt is the index in records of the newest record written at each LSN, and newestIn the
+	// newest LSN of the records in each segment since it was last opened.
+	recAt    map[uint64]int
+	newestIn map[uint32]uint64
+	// needs is what the manifest at NamedLSN namedAt needs in each segment, and floor its oldest
+	// replay point; released is the segments the manifest named before it needed and it does not,
+	// and windowReuses counts those opened again, written a chunk slot or trimmed before the
+	// naming moves on.
+	needs          map[uint32]string
+	released       map[uint32]bool
+	namedAt, floor uint64
+	windowReuses   int
+	// rw follows what each metadata victim's rewrites write; metaFreed counts the metadata victims
+	// it charged once freed, and unrewritten the runs they held that no rewrite wrote again.
+	rw                     rewrites
+	metaFreed, unrewritten int
 }
 
 // advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
@@ -164,11 +180,15 @@ func (h *harness) tick(d core.Tick) {
 
 var errCrash = errors.New("crash")
 
-// writtenRecord is a record a round wrote: its LSN, entries and each entry's payload.
+// writtenRecord is a record a round wrote: its segment and the open sequence it went under, its
+// LSN, entries and each entry's payload, and whether a recovery found it lost.
 type writtenRecord struct {
+	segment  uint32
+	seq      uint64
 	lsn      uint64
 	entries  []disklog.Entry
 	payloads [][]byte
+	lost     bool
 }
 
 func testConfig() Config {
@@ -194,13 +214,14 @@ var slotGeometry = disklog.Geometry{SegmentBlocks: 4096, SegmentCount: 40}
 func newHarnessOn(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
 	h := &harness{t: t, pool: sim.NewPool(32<<20, 0), disk: sim.NewDisk(geo.DiskBlocks()), cfg: cfg,
 		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, steps: map[*lsm.Compaction]int{}, laneOf: map[uint32]uint8{}, stepHeld: map[uint8]uint64{}, slotData: map[core.LBA][]byte{}, crashAt: -1,
-		bytes: newByteOracle(), sent: map[uint64]change{}, found: map[string]error{}, recSeq: map[core.LBA]uint64{}, cleanSeg: map[uint32]bool{}, filled: map[uint32]float64{}, dirty: map[core.ChunkID]bool{}, seen: map[core.ChunkID]*storeView{}, views: map[core.ChunkID]*storeView{}}
+		bytes: newByteOracle(), sent: map[uint64]change{}, found: map[string]error{}, recSeq: map[core.LBA]uint64{}, cleanSeg: map[uint32]bool{}, recAt: map[uint64]int{}, newestIn: map[uint32]uint64{}, filled: map[uint32]float64{}, dirty: map[core.ChunkID]bool{}, seen: map[core.ChunkID]*storeView{}, views: map[core.ChunkID]*storeView{}}
 	h.register()
 	h.ctx = core.Context{Now: 1, Raw: 2, Pool: h.pool}
 	var err error
 	if h.s, err = Format(&h.ctx, cfg, disklog.Superblock{LogID: 0x5eed, Geometry: geo}, &h.out); err != nil {
 		t.Fatal(err)
 	}
+	h.s.metaVictim = h.noteMetaVictim
 	h.take()
 	h.settle()
 	h.executed, h.own = 0, h.pool.Live()
@@ -266,6 +287,11 @@ func (h *harness) step() bool {
 	}
 	if a.Kind == core.ActDiskTrim {
 		h.trims = append(h.trims, a)
+		if !h.light {
+			for s := uint32(uint64(a.LBA) / uint64(h.s.sb.SegmentBlocks)); uint64(s)*uint64(h.s.sb.SegmentBlocks) < uint64(a.LBA)+a.Len/core.BlockSize; s++ {
+				h.reused(s, "trimmed")
+			}
+		}
 	}
 	if a.Kind == core.ActDiskTrim || a.Kind == core.ActDiskWrite {
 		h.touch(a.LBA, a.LBA+core.LBA(a.Len/core.BlockSize))
@@ -307,6 +333,7 @@ func (h *harness) step() bool {
 			h.take()
 			continue
 		}
+		h.noteMerge(c)
 		if h.steps[c] == 0 {
 			h.merges = append(h.merges, c)
 		}
@@ -421,6 +448,8 @@ func (h *harness) settle() {
 // follows, and compares its index with the one expected of it.
 func (h *harness) recoveryDone() {
 	h.headersOnDisk()
+	h.recoveredNewest()
+	h.rw = rewrites{}
 	clear(h.stepHeld)
 	clear(h.filled)
 	h.recoveredIndex()
@@ -492,6 +521,7 @@ func (h *harness) noteWrite(a *core.Action) {
 		return
 	}
 	if a.Len == core.ChunkSize {
+		h.reused(uint32(uint64(a.LBA)/uint64(geo.SegmentBlocks)), "written a chunk slot")
 		if h.oracle != nil {
 			h.slotData[a.LBA] = img
 		}
@@ -500,7 +530,9 @@ func (h *harness) noteWrite(a *core.Action) {
 	lba := a.LBA
 	segment := uint32(uint64(lba) / uint64(geo.SegmentBlocks))
 	if sh, err := disklog.DecodeSegmentHeader(img); err == nil && sh.LogID == h.s.sb.LogID {
+		h.reused(segment, "opened again")
 		h.opened(segment)
+		h.rewriteOpened(segment)
 		h.seqOf[segment] = sh.Seq
 		h.cleanSeg[segment] = sh.Stream == disklog.Cold && sh.Lane == 1
 		if sh.Stream == disklog.Meta {
@@ -521,10 +553,15 @@ func (h *harness) noteWrite(a *core.Action) {
 	})) {
 		h.stepBlocks += a.Len / core.BlockSize
 	}
+	if lane, ok := h.laneOf[segment]; ok {
+		h.noteRewrite(lane, a, d.Entries)
+	}
 	if h.cleanSeg[segment] {
 		h.noteFilled(a.Len/core.BlockSize, d.Entries)
 	}
-	rec := writtenRecord{lsn: d.Record.LSN, entries: slices.Clone(d.Entries)}
+	h.newestIn[segment] = max(h.newestIn[segment], d.Record.LSN)
+	h.recAt[d.Record.LSN] = len(h.records)
+	rec := writtenRecord{segment: segment, seq: h.seqOf[segment], lsn: d.Record.LSN, entries: slices.Clone(d.Entries)}
 	for i, e := range d.Entries {
 		p := slices.Clone(d.Payload(i))
 		if e.Kind == disklog.EntrySlot {

@@ -2699,7 +2699,9 @@ planted by hand.
 | After every recovery the log opens its next segment past every open sequence a segment header of this log on disk holds, so open sequences stay unique and increasing | When a recovery finishes, every segment header of the log on disk is read; the harness also takes each segment's open sequence from it, a header write the crash lost taking the records noted under it along | A header of the log at the next open sequence put on a free segment after a recovery, as recovery resuming at the newest header's sequence leaves one (`TestAHeaderAtTheNextOpenSequenceBreaksOpenSeqs`). Planted by hand: that recovery itself trips `TestCleanerSurvivesCrashes` at seed 0, `TestCrashAtEveryActionWithCleaning` at its first case and `TestRecoveryAndRebuildEqualLiveIndex`, each at its first recovery. The log's own `NextSeq` tests plant `NextSeq` taken when the checkpoint begins (`TakeNextSeqAtBegin`) |
 | Each chunk segment's live count in the usage table equals the blocks the index's records there refer to, and a free or metadata segment holds none | Every segment's count against the index's per-segment sums, and the index's slot-held counts against its slots' | A victim's live count dropped before its copies (`freeLive`), so the log frees it with its blocks live: the settle of that pass (`TestPlantedCleanerBugsBreakTheirInvariants`) |
 | No segment is reused while it holds a record the index needs: one a block of a live or frozen map refers to, or one holding a piece of a run the index holds | Each record a block of the chunks checked refers to, in a live or frozen map, and each record holding a piece of a run the index holds, a run a merge holds and what a running merge has written of its output included (`lsm.(*Tree).Pieces`), lies in its segment at the open sequence it was written under, whatever stream reopened the segment: the harness notes each record's, by its header's LBA | `freeLive` with the usage invariant off: the settle after the freed victim is opened again. Planted by hand: the log freeing a metadata victim that holds live run pieces names, in `TestARewriteInStepsWritesNoMoreThanItsCost`, a piece of a run a merge holds |
-| Every chunk victim frees more than its copies fill | Each chunk victim's copies, by the copy entries naming it, with a share of their records' headers and of the segment headers the cleaner's lane opened, take fewer blocks than the segment they free; a pass is its victims. A metadata victim's rewrite is not measured here: `TestARewriteInStepsWritesNoMoreThanItsCost` bounds one by what the guard charged it, and the "Reuse checked against the named manifest" item takes the rest | The net-gain guard removed (`noGainGuard`): writes of new blocks fill the disk, and the first victim freed took 16.4 blocks to free 16 |
+| No segment is reused or trimmed while the manifest named by a durable segment header needs it | At every segment opened again, written a chunk slot or trimmed, against the manifest at `NamedLSN` as decoded from the records the harness saw written: no piece of its chain, no root of a run it names nor piece that root lists past the run's merge bound, lies in the segment, and no record the harness saw written there under its open sequence lies past its oldest replay point ([Reuse checked against the named manifest](#reuse-checked-against-the-named-manifest)) | Run pieces dropped before a header names the manifest that dropped them (`disklog.Plants.PiecesDeadAtOnce`), `Cleanable` ignoring the replay points (`CleanableIgnoresReplay`), replaced manifests' pieces dropped before the naming (`ChainPiecesDieAtOnce`), a live chain keeping only its newest entry (`LiveChainNewestOnly`) and recovery forgetting segments' newest LSNs (`RecoveryForgetsNewest`): `TestPlantedLogBugsBreakNamed`, and the first two in `TestPlantedCleanerBugsBreakTheirInvariants` |
+| Every metadata victim frees more than its rewrites write | Each metadata victim, once free, is charged the blocks the harness saw written by every rewrite of every run it held live pieces of when the cleaner started it, in full however many victims shared the run: the rewrite's lane's records, the segment headers it opened and the tails it left, and the whole manifest of each checkpoint naming a step of it. The charge stays below the segment it frees. A run an ordinary merge consumed costs nothing, and `TestCleanerSurvivesCrashes` fails a seed with one ([Reuse checked against the named manifest](#reuse-checked-against-the-named-manifest)) | The guard charging a rewrite as if it took no steps (`rewriteNoSteps`): seed 15 of the crash workload, a victim whose one run's rewrite wrote 16 blocks to free 16 (`TestARewriteChargedBelowWhatItWritesBreaksRewrite`) |
+| Every chunk victim frees more than its copies fill | Each chunk victim's copies, by the copy entries naming it, with a share of their records' headers and of the segment headers the cleaner's lane opened, take fewer blocks than the segment they free; a pass is its victims. Metadata victims have a row of their own | The net-gain guard removed (`noGainGuard`): writes of new blocks fill the disk, and the first victim freed took 16.4 blocks to free 16 |
 | A disk full except for its reserve still finishes a checkpoint, a merge step and a cleaner pass, and the bytes held beyond the manifests never exceed the reserve | The run bytes each merge worker's lane writes between manifests stay within a step and its filter partition and root, the reserve's share for each worker, and the run and manifest piece bytes the checkpoint's lane writes within twice `max_replay_bytes` and a step, the checkpoint's share; the cleaner's share is its victims, which the chunk victim row bounds. The scenarios run under the registry: `TestAPassFinishesOnADiskFilledToItsReserve` and `TestARewriteFinishesOnADiskFilledToItsReserve`; the log's `TestCheckpointFinishesInTheReserve`, `TestMergeStepFinishesInTheReserve` and `TestCrashAtEveryActionInTheReserve` run the log alone | Run pieces past a worker's step, or past the checkpoint's share on its lane, with no manifest between (`TestNoteStepsCatchesAStepPastItsBound`) |
 | No ordinary write fails with `NoSpace` while the cleaner has a victim | When any request fails with `NoSpace`, unless the cleaner's copies wait with no segment free at all, no pass that ran before the failing event still runs, and the cleaner has no victim passing its net-gain guard. A pass the event started does not count: the event may have started it after the store found no victim, as seed 277 of `TestCleanerSurvivesCrashes` shows. Every reply goes through the check, the write amplification and admission runs' included | Items waiting for room failed at once while the cleaner has a victim (`noSpaceWithVictim`): overwrites of four chunks with a reserve of 4 segments, the first write that waits, and a 50%-full write amplification run with `clean_free` off (`TestWriteAmplificationRunChecksNoSpace`). A cleaner that counts as a victim only a pass it just started (`newPassOnly`): seed 277's writes failing while an older pass copies (`TestFailingWritesWhileAPassRunsBreaksNoSpace`) |
 | Acknowledged writes are readable: every write or punch answered OK survives recovery | At every recovery, each write or punch the store answered OK since the last one has its records, up to the newest that carries its chunk at the reply's version, at or below the LSN the recovery found. Under the crash oracle, after a recovery until the next write or punch: the recovered LSN lies in the oracle's window, the store reads as the oracle's model at that LSN, each chunk's entry and every block the model or the index holds, live and at every snapshot epoch, and the index holds no chunk the model does not ([Chunk index under the crash oracle](#chunk-index-under-the-crash-oracle)) | A store that answers a write or punch OK as it submits its records (`ackEarly`): every seed of 8 of the crash oracle's property (`TestAcknowledgingBeforeDurableBreaksAcked`); replay leaving out the first record past the replay LSN that maps blocks (`replayLate`): seed 0 of `TestCrashOracleCatchesLateReplay`; replay applying copies as writes trips it in `TestCrashAtEveryActionCatchesReplayingCopiesAsWrites` |
@@ -2720,16 +2722,14 @@ planted by hand.
   (`TestAPassTakesTheFourBestVictimsThatGainSpace`, `TestTheGuardChargesTheIndexEntriesOfMoves`)
   and `TestCopyAppliesWhereAMapStillPointsAtTheSource` check the mechanisms the cleaner rows rest on.
 - Runs that keep no records (`light`, the write amplification and admission runs) check neither
-  record placement, nor what victims fill, nor the reserve shares, since all three read the
-  records the harness decodes.
+  record placement, nor reuse against the named manifest, nor what victims fill or rewrite, nor
+  the reserve shares, since all four read the records the harness decodes.
 - The disk log's harness has no registry of its own: its checks, the crash oracle at each
   recovery, every ticket resolving and `CheckMetaLive`, each run from one place. The open-sequence
   and checkpoint-share checks need only the disk and the log, yet run in the store's harness,
   whose crash tests recover cleaning and merging workloads; the reuse, usage and gain checks need
   the chunk index. The log's scenario tests of reserves, `NextSeq` and freed segments test its
   mechanisms alone.
-- Not yet checked: the named-manifest and replay-point part of the reuse invariant, and metadata
-  victims' gain ([Reuse checked against the named manifest](#reuse-checked-against-the-named-manifest)).
 - Open: the design's invariant "a frozen version is never dropped, and the cleaner never frees a
   block, while the live version, a snapshot or an unflattened clone needs it" applies in phase 1,
   since freezes and the cleaner exist, but is not in the checklist's phase 1 list. Planted violation:
@@ -2739,19 +2739,54 @@ planted by hand.
 
 ## Reuse checked against the named manifest
 
-- A segment is reused or trimmed only once nothing the manifest named by a durable segment header
-  lists lies in it, and no record in it lies after that manifest's replay points: the check runs
-  at each segment the log opens or trims, against that manifest's pieces and replay points.
-- A workload reuses or trims a freed segment inside the window between a manifest that drops run
-  pieces turning durable and a header naming it: a disk at its reserve with checkpoints held
-  back, or the TRIM timer firing early. Today no chunk store workload reuses a segment there, so
-  the registered checks and every crash test pass with run pieces dropped at once
-  (`PiecesDead`); only the log's `TestDeadPiecesWaitForTheirManifestToBeNamed` catches it.
-- Each metadata victim's rewrite takes fewer blocks than the segment it frees, counted in every
-  workload, not only by `TestARewriteInStepsWritesNoMoreThanItsCost`, which runs one rewrite alone.
-- Planted violations, each named by its invariant: `PiecesDead` dropping run pieces at once;
-  `Cleanable` ignoring the replay points, which today fails `TestCleanerSurvivesCrashes` at seed 6
-  only as a corrupt log; a rewrite charged below what it writes.
+- Recovery loads the manifest the newest durable segment header names, so a segment is opened
+  again, written a chunk slot or trimmed only once that manifest needs nothing in it: none of the
+  pieces of its chain, no root of a run it names, no piece a root lists past its run's merge
+  bound, and no record past its oldest replay point. The harness checks this at each of those
+  actions as it runs. It takes nothing from the log's own bookkeeping, which decides what is safe
+  to free: it decodes the manifest at `NamedLSN` from the records it saw written, as recovery
+  loads it, reads each root's piece list with `lsm.RootRefs`, and takes each segment's newest LSN
+  from the records written under its open sequence, leaving out those a recovery lost.
+- The window between a manifest dropping pieces and a header naming it is reached on a disk at
+  its reserve, where the cleaner runs only for writes waiting for room and those writes open
+  what it frees at once: in `TestAPassFinishesOnADiskFilledToItsReserve`, at least 2 segments
+  (3 today) that naming a manifest had just released are reused before the naming moves on. The
+  crash workload of `TestCleanerSurvivesCrashes`, with `clean_free` at 4, reaches it too.
+- Planted violations, each named by `invNamed`, through `disklog.Config.Plants`:
+  - on the disk at its reserve (`TestPlantedCleanerBugsBreakTheirInvariants`): `PiecesDeadAtOnce`,
+    run pieces dropped as soon as the manifest that dropped them is durable, at action 1430;
+    `CleanableIgnoresReplay`, the cleaner taking a segment with records past the replay points,
+    at action 1878;
+  - in the crash workload (`TestPlantedLogBugsBreakNamed`): `PiecesDeadAtOnce` at seed 0;
+    `CleanableIgnoresReplay` at seed 6; `ChainPiecesDieAtOnce`, the manifests a durable one
+    replaces dropped with their pieces before a header names it, at seed 4, on a piece of the
+    named chain; `LiveChainNewestOnly`, a live manifest keeping only the newest entry of its
+    chain, at seed 0; and `RecoveryForgetsNewest`, recovery recording each segment's newest LSN
+    as 0, at seed 0. Checked against the log's own state, the last two showed only as a corrupt
+    log, at seeds 34 and 0.
+- Each metadata victim's rewrites write fewer blocks than the segment it frees, counted in every
+  workload that keeps records (`invRewrite`). A metadata victim marks its runs for rewrites and
+  frees in a later pass once their manifest is named, so the count runs per victim, from the
+  start that marked its runs to its free, not per pass. It counts blocks written, never the
+  guard's own estimate (`RewriteCost`, `RewriteSteps`), so that a guard charging too little is
+  caught, which a check built on the estimate would share. The decisions behind it:
+  - A run with live pieces in two victims is charged in full to each, as the guard charges each
+    victim the whole runs in it; a per-pass sum of distinct rewrites would let an undercharged
+    victim hide behind a cheap one in its pass.
+  - Each rewrite step is charged the whole manifest of the checkpoint that names it, though that
+    manifest may also name other merges' steps or an ordinary flush: the guard charges a manifest
+    as large as a snapshot per step, and sharing the real one out would hide a manifest grown
+    past that estimate.
+  - A run an ordinary merge consumed instead costs its victim nothing, since that merge would have
+    run without the cleaner. Such runs are counted, not skipped: `PickCompaction` runs a marked
+    rewrite before any new merge, so `TestCleanerSurvivesCrashes` fails a seed with one.
+  - A victim forced past the guard, as `markRewrites` forces one, and one not yet free at a crash
+    are not charged.
+- Over 200 seeds of the crash workload, 58 metadata victims were charged, the most 13 blocks of
+  16, and no run was left unrewritten. The guard charging a rewrite as if it took no steps
+  (`rewriteNoSteps`, no step's record header, extra blobs or manifest) is named by `invRewrite` at
+  seed 15, a victim whose one run's rewrite wrote 16 blocks to free 16 (also seeds 29 and 47 of
+  the first 60).
 
 ## History recorder
 

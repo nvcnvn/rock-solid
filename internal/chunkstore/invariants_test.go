@@ -12,6 +12,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -25,7 +26,9 @@ const (
 	invOpenSeqs = "a recovered log opens its next segment past every open sequence on disk"
 	invUsage    = "each chunk segment counts the blocks the index refers to"
 	invReuse    = "no segment is reused while it holds a record the index needs"
+	invNamed    = "no segment is reused or trimmed while the named manifest needs it"
 	invGain     = "every chunk victim frees more than its copies fill"
+	invRewrite  = "every metadata victim frees more than its rewrites write"
 	invHeld     = "the bytes held beyond the manifests stay within the reserve"
 	invNoSpace  = "no ordinary write fails with NoSpace while the cleaner has a victim"
 	invAcked    = "acknowledged writes are readable"
@@ -52,7 +55,9 @@ func (h *harness) register() {
 	found(invOpenSeqs)
 	h.inv.Register(invUsage, h.usageErr)
 	h.inv.Register(invReuse, h.recordsInPlace)
+	found(invNamed)
 	h.inv.Register(invGain, h.victimsGain)
+	h.inv.Register(invRewrite, h.rewritesGain)
 	found(invHeld)
 	found(invNoSpace)
 	h.inv.Register(invAcked, h.ackedReadable)
@@ -207,6 +212,137 @@ func (h *harness) recordsInPlace() error {
 	return nil
 }
 
+// reused breaks invNamed when segment is opened again, written a chunk slot or trimmed while the
+// manifest recovery would load, the one at NamedLSN, needs it: it lists a piece there, of its own
+// or of a run it names past the run's merge bound, or a record there lies past its replay points.
+func (h *harness) reused(segment uint32, how string) {
+	if !h.s.Serving() {
+		return
+	}
+	h.namedNeeds()
+	if need, ok := h.needs[segment]; ok {
+		h.violate(invNamed, fmt.Errorf("segment %d was %s while the manifest at LSN %d, which a durable segment header names, needs %s there", segment, how, h.namedAt, need))
+	}
+	if h.released[segment] {
+		h.windowReuses++
+		delete(h.released, segment)
+	}
+	if n := h.newestIn[segment]; n > h.floor {
+		h.violate(invNamed, fmt.Errorf("segment %d was %s while it holds the record at LSN %d, past the replay point %d of the manifest at LSN %d, which a durable segment header names", segment, how, n, h.floor, h.namedAt))
+	}
+	delete(h.newestIn, segment)
+}
+
+// namedNeeds sets needs and floor from the manifest at NamedLSN, reading each run's pieces from
+// its root as the harness saw it written, and released from what the manifest named before needed.
+func (h *harness) namedNeeds() {
+	log := h.s.Log()
+	if h.needs != nil && h.namedAt == log.NamedLSN() {
+		return
+	}
+	before := h.needs
+	h.needs, h.namedAt, h.floor = map[uint32]string{}, log.NamedLSN(), 0
+	defer func() {
+		h.released = map[uint32]bool{}
+		for seg := range before {
+			if _, ok := h.needs[seg]; !ok {
+				h.released[seg] = true
+			}
+		}
+	}()
+	pieces, indexes := h.decodeNamed()
+	for _, p := range pieces {
+		h.needs[p.Segment] = fmt.Sprintf("its piece at LSN %d", p.LSN)
+	}
+	for i, ix := range indexes {
+		if i == 0 || ix.ReplayLSN < h.floor {
+			h.floor = ix.ReplayLSN
+		}
+		for _, root := range ix.Runs {
+			h.needs[root.Segment] = fmt.Sprintf("the root at LSN %d of a run it names", root.LSN)
+			k, ok := h.recAt[root.LSN]
+			if !ok || int(root.Entry) >= len(h.records[k].payloads) {
+				h.violate(invNamed, fmt.Errorf("the manifest at LSN %d names a run whose root at LSN %d was never written", h.namedAt, root.LSN))
+				continue
+			}
+			refs, err := lsm.RootRefs(h.records[k].payloads[root.Entry], nil)
+			if err != nil {
+				h.violate(invNamed, fmt.Errorf("the root at LSN %d of a run the manifest at LSN %d names: %w", root.LSN, h.namedAt, err))
+			}
+			if b := slices.IndexFunc(ix.Bounds, func(b disklog.MergeBound) bool { return b.Run == root }); b >= 0 {
+				refs = refs[min(int(ix.Bounds[b].Dead), len(refs)):]
+			}
+			for _, r := range refs {
+				h.needs[r.Segment] = fmt.Sprintf("the piece at LSN %d of the run whose root is at LSN %d", r.LSN, root.LSN)
+			}
+		}
+	}
+}
+
+// decodeNamed decodes the manifest at NamedLSN from the records the harness saw written, as
+// recovery loads it: the pieces of its chain, its own included, and its indexes.
+func (h *harness) decodeNamed() ([]disklog.BlobRef, []disklog.ManifestIndex) {
+	at := h.s.Log().NamedLSN()
+	k, ok := h.recAt[at]
+	if at == 0 || !ok {
+		return nil, nil
+	}
+	rec := h.records[k]
+	i := slices.IndexFunc(rec.entries, func(e disklog.Entry) bool { return e.Kind == disklog.EntryBlob && e.BlobKind == disklog.BlobManifest })
+	if i < 0 {
+		h.violate(invNamed, fmt.Errorf("a segment header names the record at LSN %d, which holds no manifest", at))
+		return nil, nil
+	}
+	lists, rest, err := disklog.DecodeManifestPiece(rec.payloads[i])
+	if err != nil {
+		h.violate(invNamed, fmt.Errorf("the manifest at LSN %d: %w", at, err))
+		return nil, nil
+	}
+	payload := func(r disklog.BlobRef) []byte {
+		if k, ok := h.recAt[r.LSN]; ok && int(r.Entry) < len(h.records[k].payloads) {
+			return h.records[k].payloads[r.Entry]
+		}
+		h.violate(invNamed, fmt.Errorf("the manifest at LSN %d lists a piece at LSN %d never written", at, r.LSN))
+		return nil
+	}
+	var pieces []disklog.BlobRef
+	bodies := make([][]byte, len(lists))
+	for mi, list := range lists {
+		for pi, r := range list {
+			pieces = append(pieces, r)
+			b := payload(r)
+			if mi < len(lists)-1 && pi == len(list)-1 {
+				_, b, _ = disklog.DecodeManifestPiece(b)
+			}
+			bodies[mi] = append(bodies[mi], b...)
+		}
+	}
+	bodies[len(bodies)-1] = append(bodies[len(bodies)-1], rest...)
+	pieces = append(pieces, disklog.BlobRef{Segment: rec.segment, LSN: at, Entry: uint16(i)})
+	m, err := disklog.LoadManifest(bodies)
+	if err != nil {
+		h.violate(invNamed, fmt.Errorf("the manifest at LSN %d: %w", at, err))
+		return nil, nil
+	}
+	return pieces, m.Indexes
+}
+
+// recoveredNewest marks the records a recovery lost, past the LSN it found, and takes each
+// segment's newest LSN from the records under its open sequence that it kept, then has needs
+// read again.
+func (h *harness) recoveredNewest() {
+	clear(h.newestIn)
+	durable := h.s.Log().DurableLSN()
+	for i := range h.records {
+		r := &h.records[i]
+		r.lost = r.lost || r.lsn > durable
+		if seq, ok := h.seqOf[r.segment]; ok && seq == r.seq && !r.lost {
+			h.newestIn[r.segment] = max(h.newestIn[r.segment], r.lsn)
+		}
+	}
+	h.needs = nil
+}
+
 // noteFilled shares the blocks of a record on the cleaner's lane among the victims its copy
 // entries name, by the blocks each copies.
 func (h *harness) noteFilled(blocks uint64, entries []disklog.Entry) {
@@ -249,6 +385,124 @@ func (h *harness) victimsGain() error {
 		}
 	}
 	return h.found[invGain]
+}
+
+// rewrites follows what each metadata victim's rewrites write, in blocks the harness saw written:
+// the runs each victim held live pieces of when the cleaner started it, by root; the rewrite
+// merging each, and the worker each merge runs on; each rewrite's blocks, those its lane wrote,
+// segment headers included, the tail it left at the end of each segment its lane rolled out of,
+// and the whole manifest of each checkpoint that named a step of it; the rewrites that wrote a
+// step no manifest has named yet; and where each lane last wrote. A victim pays every rewrite of a
+// run it held in full, as the net-gain guard charges it, and nothing for a run an ordinary merge
+// consumed, which the harness's unrewritten counts.
+type rewrites struct {
+	victims  map[uint32][]disklog.BlobRef
+	of       map[disklog.BlobRef]*lsm.Compaction
+	onWorker map[uint8]*lsm.Compaction
+	blocks   map[*lsm.Compaction]uint64
+	unnamed  []*lsm.Compaction
+	laneAt   map[uint8]core.LBA
+}
+
+// noteMetaVictim keeps the runs the metadata victim segment holds as the cleaner starts it.
+func (h *harness) noteMetaVictim(segment uint32) {
+	if h.rw.victims == nil {
+		h.rw.victims = map[uint32][]disklog.BlobRef{}
+	}
+	for _, r := range h.s.Index().Tree().RootsIn(segment, nil) {
+		if !slices.Contains(h.rw.victims[segment], r) {
+			h.rw.victims[segment] = append(h.rw.victims[segment], r)
+		}
+	}
+}
+
+// noteMerge notes merge c's worker as a step of it installs, and the run it rewrites.
+func (h *harness) noteMerge(c *lsm.Compaction) {
+	if h.rw.onWorker == nil {
+		h.rw.onWorker, h.rw.of, h.rw.blocks = map[uint8]*lsm.Compaction{}, map[disklog.BlobRef]*lsm.Compaction{}, map[*lsm.Compaction]uint64{}
+	}
+	h.rw.onWorker[uint8(c.Worker())] = c
+	if root, ok := c.Rewrite(); ok && h.rw.of[root] == nil {
+		h.rw.of[root] = c
+	}
+}
+
+// noteRewrite charges a write a on metadata lane lane: on a merge worker's lane to the rewrite
+// running there, with the tail its lane left in the segment it rolled out of, and a manifest
+// piece to every rewrite with a step no manifest has named.
+func (h *harness) noteRewrite(lane uint8, a *core.Action, entries []disklog.Entry) {
+	if h.rw.laneAt == nil {
+		h.rw.laneAt = map[uint8]core.LBA{}
+	}
+	segBlocks := core.LBA(h.s.sb.SegmentBlocks)
+	blocks := a.Len / core.BlockSize
+	at, ok := h.rw.laneAt[lane]
+	h.rw.laneAt[lane] = a.LBA + core.LBA(blocks)
+	if c := h.rw.onWorker[lane]; lane > 0 && c != nil {
+		if _, rewrite := c.Rewrite(); rewrite {
+			if ok && at/segBlocks != a.LBA/segBlocks && at%segBlocks != 0 {
+				blocks += uint64(segBlocks - at%segBlocks)
+			}
+			h.rw.blocks[c] += blocks
+			if !slices.Contains(h.rw.unnamed, c) {
+				h.rw.unnamed = append(h.rw.unnamed, c)
+			}
+		}
+		return
+	}
+	for _, e := range entries {
+		if e.Kind != disklog.EntryBlob || e.BlobKind != disklog.BlobManifest && e.BlobKind != disklog.BlobManifestPiece {
+			continue
+		}
+		for _, c := range h.rw.unnamed {
+			h.rw.blocks[c] += a.Len / core.BlockSize
+		}
+		if e.BlobKind == disklog.BlobManifest {
+			h.rw.unnamed = h.rw.unnamed[:0]
+		}
+		return
+	}
+}
+
+// rewriteErr is the metadata victim segment's charge, now that it is free: the blocks every
+// rewrite of a run it held wrote, which must fall short of the segment it frees.
+func (h *harness) rewriteErr(segment uint32) error {
+	var blocks uint64
+	for _, r := range h.rw.victims[segment] {
+		c := h.rw.of[r]
+		if c == nil {
+			h.unrewritten++
+			continue
+		}
+		blocks += h.rw.blocks[c]
+	}
+	h.metaFreed++
+	if blocks >= uint64(h.s.sb.SegmentBlocks) {
+		return fmt.Errorf("the rewrites of metadata victim %d's %d runs wrote %d blocks, freeing it %d", segment, len(h.rw.victims[segment]), blocks, h.s.sb.SegmentBlocks)
+	}
+	return nil
+}
+
+// rewriteOpened ends the metadata victim that segment was, now freed and opened again.
+func (h *harness) rewriteOpened(segment uint32) {
+	if _, ok := h.rw.victims[segment]; ok {
+		h.violate(invRewrite, h.rewriteErr(segment))
+		delete(h.rw.victims, segment)
+	}
+}
+
+// rewritesGain checks invRewrite for every metadata victim freed and not yet opened again.
+func (h *harness) rewritesGain() error {
+	if !h.s.Serving() {
+		return nil
+	}
+	for _, s := range slices.Sorted(maps.Keys(h.rw.victims)) {
+		if u, _ := h.s.Log().Usage(s); u.State == disklog.SegmentFree {
+			h.violate(invRewrite, h.rewriteErr(s))
+			delete(h.rw.victims, s)
+		}
+	}
+	return h.found[invRewrite]
 }
 
 // noSpace breaks invNoSpace when request id fails with NoSpace while the cleaner has a victim,
@@ -748,14 +1002,21 @@ func TestPlantedCleanerBugsBreakTheirInvariants(t *testing.T) {
 			overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 		}
 	}
+	atReserve := func(h *harness) {
+		r := core.NewRand(13)
+		for range 600 {
+			overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
+		}
+	}
 	for _, c := range []struct {
 		want  string
 		plant plants
+		log   disklog.Plants
 		off   string
 		run   func(h *harness)
 	}{
-		{invGain, plants{noGainGuard: true}, "", newBlocks},
-		{invMove, plants{moveOverWrites: true}, "", func(h *harness) {
+		{invGain, plants{noGainGuard: true}, disklog.Plants{}, "", newBlocks},
+		{invMove, plants{moveOverWrites: true}, disklog.Plants{}, "", func(h *harness) {
 			h.hold = true
 			h.s.cfg.CleanFree = 100
 			h.readNow(chunk(1), 0, 1)
@@ -771,9 +1032,11 @@ func TestPlantedCleanerBugsBreakTheirInvariants(t *testing.T) {
 			h.hold = false
 			h.settle()
 		}},
-		{invReuse, plants{freeLive: true}, invUsage, overwrites},
-		{invUsage, plants{freeLive: true}, "", overwrites},
-		{invNoSpace, plants{noSpaceWithVictim: true}, "", func(h *harness) {
+		{invReuse, plants{freeLive: true}, disklog.Plants{}, invUsage, overwrites},
+		{invUsage, plants{freeLive: true}, disklog.Plants{}, "", overwrites},
+		{invNamed, plants{}, disklog.Plants{PiecesDeadAtOnce: true}, "", atReserve},
+		{invNamed, plants{}, disklog.Plants{CleanableIgnoresReplay: true}, "", atReserve},
+		{invNoSpace, plants{noSpaceWithVictim: true}, disklog.Plants{}, "", func(h *harness) {
 			r := core.NewRand(1)
 			for range 2200 {
 				overwrite(h, r, []core.ChunkID{chunk(1), chunk(2), chunk(3), chunk(4)}, 64)
@@ -781,7 +1044,9 @@ func TestPlantedCleanerBugsBreakTheirInvariants(t *testing.T) {
 		}},
 	} {
 		t.Run(c.want, func(t *testing.T) {
-			h := primed(t)
+			cfg := cleanConfig()
+			cfg.Log.Plants = c.log
+			h := primedWith(t, cfg)
 			if c.want == invNoSpace {
 				cfg := cleanConfig()
 				cfg.Log.Reserve, cfg.CleanFree = 4, -1

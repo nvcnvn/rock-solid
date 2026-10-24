@@ -1459,6 +1459,9 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 			l.free[s/64] |= 1 << (s % 64)
 		case segUsed, segQuarantined:
 			l.usage[s] = SegmentUsage{State: SegmentUsed, Live: info.live, Newest: info.newest}
+			if r.cfg.Plants.RecoveryForgetsNewest {
+				l.usage[s].Newest = 0
+			}
 			l.streams[s] = streamOfLane(info.lane)
 			if info.state == segQuarantined {
 				l.usage[s].State = SegmentQuarantined

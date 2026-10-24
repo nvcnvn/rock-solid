@@ -189,7 +189,7 @@ func (l *Log) Cleanable(segment uint32) bool {
 			return false
 		}
 	}
-	return l.usage[segment].Newest <= l.live[0].replay
+	return l.usage[segment].Newest <= l.live[0].replay || l.cfg.Plants.CleanableIgnoresReplay
 }
 
 // Free frees segment once the cleaner has moved everything live out of it: it must be cleanable,

@@ -59,6 +59,22 @@ type Config struct {
 	TrimRate uint64
 	// NoTrim never discards a freed segment, as on a disk that is a file, where punching holes would undo writing it in full.
 	NoTrim bool
+	// Plants plants bugs in the log, which only its owners' tests ask for.
+	Plants Plants
+}
+
+// Plants are bugs a test of the log's owner plants to show that its invariants catch them.
+type Plants struct {
+	// PiecesDeadAtOnce drops dead run pieces before a segment header names the manifest that dropped them.
+	PiecesDeadAtOnce bool
+	// CleanableIgnoresReplay lets the cleaner take a segment holding records past the replay points.
+	CleanableIgnoresReplay bool
+	// ChainPiecesDieAtOnce drops the manifests a durable one replaces, and the pieces only they list, before a segment header names it.
+	ChainPiecesDieAtOnce bool
+	// LiveChainNewestOnly keeps of a manifest's chain only its newest entry among the live manifests.
+	LiveChainNewestOnly bool
+	// RecoveryForgetsNewest records every used segment's newest LSN as 0 at recovery.
+	RecoveryForgetsNewest bool
 }
 
 const (
@@ -1394,7 +1410,14 @@ func (l *Log) checkpointProgress(r *round, out *Output) {
 				l.chain = append(slices.Clip(l.chain), entry)
 			}
 			l.state = cp.state
-			l.live = append(l.live, liveChain{pos: l.manifest, entries: l.chain, replay: replayFloor(&cp.manifest)})
+			entries := l.chain
+			if l.cfg.Plants.LiveChainNewestOnly {
+				entries = entries[len(entries)-1:]
+			}
+			l.live = append(l.live, liveChain{pos: l.manifest, entries: entries, replay: replayFloor(&cp.manifest)})
+			if l.cfg.Plants.ChainPiecesDieAtOnce {
+				l.dropChains(l.manifest.LSN)
+			}
 			for _, s := range cp.trims {
 				l.trims.named = append(l.trims.named, namedTrim{segment: s, lsn: l.manifest.LSN})
 			}

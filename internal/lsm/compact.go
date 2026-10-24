@@ -197,6 +197,14 @@ type Compaction struct {
 	stale        []disklog.BlobRef
 }
 
+// Rewrite is the root of the run a rewrite the cleaner marked merges alone, and false for any other merge.
+func (c *Compaction) Rewrite() (disklog.BlobRef, bool) {
+	if c.rule != ruleRewrite {
+		return disklog.BlobRef{}, false
+	}
+	return c.inputs[0].root(), true
+}
+
 // Worker is the merge worker, from 1, whose lane of the metadata stream the merge's output fills.
 func (c *Compaction) Worker() int { return c.worker }
 
@@ -367,6 +375,17 @@ func (t *Tree) RunsIn(segment uint32, pieces []disklog.BlobRef) (_ []disklog.Blo
 		}
 	}
 	return pieces, held
+}
+
+// RootsIn appends to roots the root of every run no merge holds with a live piece in segment,
+// those MarkRewrite marks.
+func (t *Tree) RootsIn(segment uint32, roots []disklog.BlobRef) []disklog.BlobRef {
+	for _, r := range t.runs {
+		if !r.held && r.inSegment(segment) {
+			roots = append(roots, r.root())
+		}
+	}
+	return roots
 }
 
 // Pieces appends to dst the live pieces of every run, those running merges hold included, and

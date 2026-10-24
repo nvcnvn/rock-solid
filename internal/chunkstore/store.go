@@ -217,6 +217,9 @@ type plants struct {
 	noSpaceWithVictim bool
 	freeLive          bool
 	newPassOnly       bool
+	// rewriteNoSteps charges a metadata victim's rewrite as if it took no steps, leaving out each
+	// step's record header, extra blobs and manifest.
+	rewriteNoSteps bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.
@@ -271,6 +274,9 @@ type Store struct {
 	adm admission
 
 	plant plants
+	// metaVictim, when set, sees each metadata victim the cleaner starts, before it marks the
+	// victim's runs for a rewrite, as the tests that measure what the rewrite writes do.
+	metaVictim func(segment uint32)
 }
 
 func newStore(cfg Config) *Store {

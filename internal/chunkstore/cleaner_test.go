@@ -172,6 +172,8 @@ func markRewrites(t *testing.T, h *harness) (uint32, int) {
 	h.merging = false
 	h.s.cl.passes = append(h.s.cl.passes, &cleanPass{victims: []uint32{seg}})
 	h.clean(-1)
+	// The pass takes seg past the net-gain guard, so invRewrite holds it to nothing.
+	delete(h.rw.victims, seg)
 	if st := h.s.CleanStats(); st.Rewrites == before.Rewrites || st.Copied != before.Copied || !log.HoldsPiece(seg) {
 		t.Fatalf("stats %+v after a pass over segment %d; it holds a piece %v", st, seg, log.HoldsPiece(seg))
 	}
@@ -233,6 +235,7 @@ func TestARewriteInStepsWritesNoMoreThanItsCost(t *testing.T) {
 		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
 			t.Fatal(err)
 		}
+		h.noteMerge(c)
 		h.take()
 		h.settle()
 	}
@@ -258,6 +261,7 @@ func runToMidStep(t *testing.T, h *harness) *lsm.Compaction {
 		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
 			t.Fatal(err)
 		}
+		h.noteMerge(c)
 		h.take()
 		h.settle()
 		if !c.Finished() {
@@ -306,6 +310,7 @@ func TestARewriteFinishesOnADiskFilledToItsReserve(t *testing.T) {
 		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
 			t.Fatal(err)
 		}
+		h.noteMerge(c)
 		h.take()
 		h.settle()
 		stepped = stepped || slices.Contains(merges, c)
@@ -321,17 +326,22 @@ func TestARewriteFinishesOnADiskFilledToItsReserve(t *testing.T) {
 
 // With the cleaner running only for writes that wait, the disk fills to its reserve; a pass then
 // copies into the reserve and the waiting writes go out, none failing while there is a victim.
+// Those writes open what the cleaner frees at once, so segments that naming a manifest has just
+// released, holding pieces only the manifest named before needed, are reused before the naming
+// moves on: a log that freed them before the naming would reuse them while recovery needs them.
 func TestAPassFinishesOnADiskFilledToItsReserve(t *testing.T) {
 	h := primed(t)
 	r := core.NewRand(13)
 	low, passes := h.s.Log().FreeOutsideReserve(), h.s.CleanStats().Passes
+	h.windowReuses = 0
 	for range 600 {
 		overwrite(h, r, []core.ChunkID{chunk(1), chunk(2)}, 64)
 		low = min(low, h.s.Log().FreeOutsideReserve())
 	}
-	if low > 0 || h.s.CleanStats().Passes == passes {
-		t.Fatalf("free segments outside the reserve fell to %d; %d passes", low, h.s.CleanStats().Passes-passes)
+	if low > 0 || h.s.CleanStats().Passes == passes || h.windowReuses < 2 {
+		t.Fatalf("free segments outside the reserve fell to %d; %d passes; %d segments reused that naming a manifest had just released", low, h.s.CleanStats().Passes-passes, h.windowReuses)
 	}
+	t.Logf("%d segments reused that naming a manifest had just released", h.windowReuses)
 	h.holds()
 }
 
