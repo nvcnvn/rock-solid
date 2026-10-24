@@ -626,8 +626,8 @@ sequenceDiagram
   lease is: on two clocks, `CLOCK_BOOTTIME` and `CLOCK_MONOTONIC_RAW`, ending at whichever
   runs faster, while the grantor waits for the slower. A time daemon's slew then cannot stretch
   a lease, and the clocks need not be synchronized. In case both of a node's clocks err the same
-  way, each grant also carries the grantor's raw clock reading and boot ID, from which the holder
-  bounds how fast that grantor's clock can run. It takes no lease from a grantor boot until it has
+  way, each grant also carries the grantor's raw clock reading and run ID, from which the holder
+  bounds how fast that grantor's clock can run. It takes no lease from a grantor run until it has
   that bound, from two grants 100 ms apart, and widens its margin if the bound is too fast
   ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
   A voter whose node has no bound yet gives no expiry, though it still refuses to vote for a
