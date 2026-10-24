@@ -4,11 +4,12 @@
 # configuration's first line, "\* expect: <name>", names the invariant or property it must violate;
 # TLC does not name a liveness property it finds violated, so a negative that expects one checks it
 # alone.
-#   scripts/models.sh [ci|deep|sim] [model...]
+#   scripts/models.sh [ci|deep|sim] [model | model/config.cfg ...]
 # ci (the default) runs the ci and negative configurations, each failing past 5 minutes; deep runs
-# the deep ones, each failing past 4 hours; sim runs TLC's random simulation of each ci
-# configuration for SIM_SECONDS (default 3600) at depth 100 with a fresh seed, printed for replay.
-# TLC uses WORKERS (default 4) workers and a heap of HEAP (default 4g).
+# the deep ones, each failing past 4 hours; sim runs TLC's random simulation of each model's ci
+# configurations at depth 100, splitting SIM_SECONDS (default 3600) per model evenly among them,
+# each with a fresh seed, printed for replay. A model/config.cfg argument runs that configuration
+# alone. TLC uses WORKERS (default 4) workers and a heap of HEAP (default 4g).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -27,7 +28,7 @@ shift || true
 case $mode in
 ci) limit=300 ;;
 deep) limit=14400 ;;
-sim) limit=${SIM_SECONDS:-3600} ;;
+sim) ;;
 *) echo "usage: $0 [ci|deep|sim] [model...]" >&2; exit 2 ;;
 esac
 models=${*:-$(ls models)}
@@ -62,7 +63,8 @@ summary() {
 	echo "depth ${depth:-?}, ${states:-?} distinct states, ${secs}s"
 }
 
-for model in $models; do
+for arg in $models; do
+	model=${arg%%/*}
 	[ -f "models/$model/$model.tla" ] || { echo "FAIL $model: no models/$model/$model.tla"; failed=1; continue; }
 	for kind in ci deep; do
 		if ! compgen -G "models/$model/$kind*.cfg" >/dev/null; then
@@ -74,6 +76,16 @@ for model in $models; do
 	ci | deep) cfgs=$(cd "models/$model" && ls "$mode"*.cfg 2>/dev/null || true) ;;
 	sim) cfgs=$(cd "models/$model" && ls ci*.cfg 2>/dev/null || true) ;;
 	esac
+	negs=$(cd "models/$model" && ls neg-*.cfg 2>/dev/null || true)
+	if [ "$arg" != "$model" ]; then
+		cfgs=$(grep -Fx "${arg#*/}" <<<"$cfgs" || true)
+		negs=$(grep -Fx "${arg#*/}" <<<"$negs" || true)
+		[ "$mode" = ci ] || negs=
+		[ -n "$cfgs$negs" ] || { echo "FAIL $arg: not a $mode configuration"; failed=1; continue; }
+	fi
+	if [ "$mode" = sim ] && [ -n "$cfgs" ]; then
+		limit=$((${SIM_SECONDS:-3600} / $(wc -l <<<"$cfgs")))
+	fi
 	for cfg in $cfgs; do
 		if [ "$mode" = sim ]; then
 			seed=$RANDOM$RANDOM
@@ -98,7 +110,7 @@ for model in $models; do
 		failed=1
 	done
 	[ "$mode" = ci ] || continue
-	for cfg in $(cd "models/$model" && ls neg-*.cfg 2>/dev/null || true); do
+	for cfg in $negs; do
 		want=$(sed -n '1s/^\\\* expect: *//p' "models/$model/$cfg")
 		if [ -z "$want" ]; then
 			echo "FAIL $model/$cfg: first line must be \"\\* expect: <name>\""

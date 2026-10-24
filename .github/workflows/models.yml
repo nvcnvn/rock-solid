@@ -1,0 +1,110 @@
+name: models
+
+on:
+  push:
+    paths: [models/**, scripts/models.sh, .github/workflows/models.yml]
+  pull_request:
+    paths: [models/**, scripts/models.sh, .github/workflows/models.yml]
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      models: ${{ steps.list.outputs.models }}
+      deep: ${{ steps.list.outputs.deep }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: list
+        working-directory: models
+        run: |
+          echo "models=$(ls | jq -Rnc '[inputs]')" >>"$GITHUB_OUTPUT"
+          echo "deep=$(ls -- */deep*.cfg | jq -Rnc '[inputs]')" >>"$GITHUB_OUTPUT"
+
+  ci:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        model: ${{ fromJSON(needs.plan.outputs.models) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: scripts/models.sh ci "$MODEL"
+        env:
+          MODEL: ${{ matrix.model }}
+
+  sim:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        model: ${{ fromJSON(needs.plan.outputs.models) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: scripts/models.sh sim "$MODEL"
+        env:
+          MODEL: ${{ matrix.model }}
+          SIM_SECONDS: 3600
+
+  # One job per deep configuration, since one may take 4 hours and a job at most 6. A pass is a
+  # cache entry keyed on the spec, the configuration and the TLC pin, holding the result line.
+  deep:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON(needs.plan.outputs.deep) }}
+    runs-on: ubuntu-latest
+    env:
+      CONFIG: ${{ matrix.config }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: hash
+        run: |
+          sum=$({ cat "models/${CONFIG%%/*}"/*.tla "models/$CONFIG"; grep -E '^(version|sha256)=' scripts/models.sh; } | sha256sum)
+          echo "key=deep-${CONFIG/\//-}-${sum%% *}" >>"$GITHUB_OUTPUT"
+      - id: passed
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deep-passed
+          key: ${{ steps.hash.outputs.key }}
+      - if: steps.passed.outputs.cache-hit == 'true'
+        run: tee -a "$GITHUB_STEP_SUMMARY" <deep-passed/result
+      - if: steps.passed.outputs.cache-hit != 'true'
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - if: steps.passed.outputs.cache-hit != 'true'
+        run: |
+          scripts/models.sh deep "$CONFIG" | tee deep.log
+          mkdir deep-passed
+          grep '^ok ' deep.log >deep-passed/result
+          tee -a "$GITHUB_STEP_SUMMARY" <deep-passed/result
+      - if: steps.passed.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deep-passed
+          key: ${{ steps.hash.outputs.key }}
