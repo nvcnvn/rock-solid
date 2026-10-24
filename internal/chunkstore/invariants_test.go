@@ -28,6 +28,7 @@ const (
 	invReuse    = "no segment is reused while it holds a record the index needs"
 	invNamed    = "no segment is reused or trimmed while the named manifest needs it"
 	invGain     = "every chunk victim frees more than its copies fill"
+	invRewrite  = "every metadata victim frees more than its rewrites write"
 	invHeld     = "the bytes held beyond the manifests stay within the reserve"
 	invNoSpace  = "no ordinary write fails with NoSpace while the cleaner has a victim"
 	invAcked    = "acknowledged writes are readable"
@@ -56,6 +57,7 @@ func (h *harness) register() {
 	h.inv.Register(invReuse, h.recordsInPlace)
 	found(invNamed)
 	h.inv.Register(invGain, h.victimsGain)
+	h.inv.Register(invRewrite, h.rewritesGain)
 	found(invHeld)
 	found(invNoSpace)
 	h.inv.Register(invAcked, h.ackedReadable)
@@ -383,6 +385,124 @@ func (h *harness) victimsGain() error {
 		}
 	}
 	return h.found[invGain]
+}
+
+// rewrites follows what each metadata victim's rewrites write, in blocks the harness saw written:
+// the runs each victim held live pieces of when the cleaner started it, by root; the rewrite
+// merging each, and the worker each merge runs on; each rewrite's blocks, those its lane wrote,
+// segment headers included, the tail it left at the end of each segment its lane rolled out of,
+// and the whole manifest of each checkpoint that named a step of it; the rewrites that wrote a
+// step no manifest has named yet; and where each lane last wrote. A victim pays every rewrite of a
+// run it held in full, as the net-gain guard charges it, and nothing for a run an ordinary merge
+// consumed, which the harness's unrewritten counts.
+type rewrites struct {
+	victims  map[uint32][]disklog.BlobRef
+	of       map[disklog.BlobRef]*lsm.Compaction
+	onWorker map[uint8]*lsm.Compaction
+	blocks   map[*lsm.Compaction]uint64
+	unnamed  []*lsm.Compaction
+	laneAt   map[uint8]core.LBA
+}
+
+// noteMetaVictim keeps the runs the metadata victim segment holds as the cleaner starts it.
+func (h *harness) noteMetaVictim(segment uint32) {
+	if h.rw.victims == nil {
+		h.rw.victims = map[uint32][]disklog.BlobRef{}
+	}
+	for _, r := range h.s.Index().Tree().RootsIn(segment, nil) {
+		if !slices.Contains(h.rw.victims[segment], r) {
+			h.rw.victims[segment] = append(h.rw.victims[segment], r)
+		}
+	}
+}
+
+// noteMerge notes merge c's worker as a step of it installs, and the run it rewrites.
+func (h *harness) noteMerge(c *lsm.Compaction) {
+	if h.rw.onWorker == nil {
+		h.rw.onWorker, h.rw.of, h.rw.blocks = map[uint8]*lsm.Compaction{}, map[disklog.BlobRef]*lsm.Compaction{}, map[*lsm.Compaction]uint64{}
+	}
+	h.rw.onWorker[uint8(c.Worker())] = c
+	if root, ok := c.Rewrite(); ok && h.rw.of[root] == nil {
+		h.rw.of[root] = c
+	}
+}
+
+// noteRewrite charges a write a on metadata lane lane: on a merge worker's lane to the rewrite
+// running there, with the tail its lane left in the segment it rolled out of, and a manifest
+// piece to every rewrite with a step no manifest has named.
+func (h *harness) noteRewrite(lane uint8, a *core.Action, entries []disklog.Entry) {
+	if h.rw.laneAt == nil {
+		h.rw.laneAt = map[uint8]core.LBA{}
+	}
+	segBlocks := core.LBA(h.s.sb.SegmentBlocks)
+	blocks := a.Len / core.BlockSize
+	at, ok := h.rw.laneAt[lane]
+	h.rw.laneAt[lane] = a.LBA + core.LBA(blocks)
+	if c := h.rw.onWorker[lane]; lane > 0 && c != nil {
+		if _, rewrite := c.Rewrite(); rewrite {
+			if ok && at/segBlocks != a.LBA/segBlocks && at%segBlocks != 0 {
+				blocks += uint64(segBlocks - at%segBlocks)
+			}
+			h.rw.blocks[c] += blocks
+			if !slices.Contains(h.rw.unnamed, c) {
+				h.rw.unnamed = append(h.rw.unnamed, c)
+			}
+		}
+		return
+	}
+	for _, e := range entries {
+		if e.Kind != disklog.EntryBlob || e.BlobKind != disklog.BlobManifest && e.BlobKind != disklog.BlobManifestPiece {
+			continue
+		}
+		for _, c := range h.rw.unnamed {
+			h.rw.blocks[c] += a.Len / core.BlockSize
+		}
+		if e.BlobKind == disklog.BlobManifest {
+			h.rw.unnamed = h.rw.unnamed[:0]
+		}
+		return
+	}
+}
+
+// rewriteErr is the metadata victim segment's charge, now that it is free: the blocks every
+// rewrite of a run it held wrote, which must fall short of the segment it frees.
+func (h *harness) rewriteErr(segment uint32) error {
+	var blocks uint64
+	for _, r := range h.rw.victims[segment] {
+		c := h.rw.of[r]
+		if c == nil {
+			h.unrewritten++
+			continue
+		}
+		blocks += h.rw.blocks[c]
+	}
+	h.metaFreed++
+	if blocks >= uint64(h.s.sb.SegmentBlocks) {
+		return fmt.Errorf("the rewrites of metadata victim %d's %d runs wrote %d blocks, freeing it %d", segment, len(h.rw.victims[segment]), blocks, h.s.sb.SegmentBlocks)
+	}
+	return nil
+}
+
+// rewriteOpened ends the metadata victim that segment was, now freed and opened again.
+func (h *harness) rewriteOpened(segment uint32) {
+	if _, ok := h.rw.victims[segment]; ok {
+		h.violate(invRewrite, h.rewriteErr(segment))
+		delete(h.rw.victims, segment)
+	}
+}
+
+// rewritesGain checks invRewrite for every metadata victim freed and not yet opened again.
+func (h *harness) rewritesGain() error {
+	if !h.s.Serving() {
+		return nil
+	}
+	for _, s := range slices.Sorted(maps.Keys(h.rw.victims)) {
+		if u, _ := h.s.Log().Usage(s); u.State == disklog.SegmentFree {
+			h.violate(invRewrite, h.rewriteErr(s))
+			delete(h.rw.victims, s)
+		}
+	}
+	return h.found[invRewrite]
 }
 
 // noSpace breaks invNoSpace when request id fails with NoSpace while the cleaner has a victim,

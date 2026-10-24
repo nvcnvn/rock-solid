@@ -264,6 +264,9 @@ func (s *Store) pickVictims() (victims []uint32, snapshot bool) {
 				continue
 			}
 			steps, extra := s.ix.Tree().RewriteSteps(seg)
+			if s.plant.rewriteNoSteps {
+				steps = 0
+			}
 			cost = s.log.RewriteCost(s.cl.pieces, steps, extra)
 		} else if cost = s.log.CopyCost(uint64(u.Live)); cost > room || s.ix.SlotHeld(seg) > 0 {
 			continue
@@ -313,6 +316,9 @@ func (s *Store) startVictim(ctx *core.Context, p *cleanPass) bool {
 	seg := p.victims[p.cur]
 	u, stream := s.log.Usage(seg)
 	if stream == disklog.Meta {
+		if s.metaVictim != nil {
+			s.metaVictim(seg)
+		}
 		s.cl.stats.Rewrites += s.ix.Tree().MarkRewrite(seg)
 		if s.log.Free(ctx, seg, &s.lout) == nil {
 			s.cl.stats.Freed++

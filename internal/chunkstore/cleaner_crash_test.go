@@ -48,11 +48,12 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) {
 // after other events. plant is planted throughout. It returns the blocks the cleaner freed before
 // the crash and the first violation.
 func cleanerCrash(t *testing.T, seed uint64, plant plants) (int, error) {
-	return cleanerCrashLog(t, seed, plant, disklog.Plants{})
+	_, freed, err := cleanerCrashLog(t, seed, plant, disklog.Plants{})
+	return freed, err
 }
 
-// cleanerCrashLog is cleanerCrash with the log's planted bugs logPlant too.
-func cleanerCrashLog(t *testing.T, seed uint64, plant plants, logPlant disklog.Plants) (int, error) {
+// cleanerCrashLog is cleanerCrash with the log's planted bugs logPlant too, returning its harness.
+func cleanerCrashLog(t *testing.T, seed uint64, plant plants, logPlant disklog.Plants) (*harness, int, error) {
 	r := core.NewRand(seed)
 	cfg := cleanConfig()
 	cfg.Log.Plants = logPlant
@@ -70,13 +71,13 @@ func cleanerCrashLog(t *testing.T, seed uint64, plant plants, logPlant disklog.P
 			panic(errCrash)
 		})
 	}); err != nil {
-		return 0, err
+		return h, 0, err
 	}
 	freed := h.s.CleanStats().Freed
 	h.disk.CrashRandom(r)
 	h.crashAt = -1
 	h.cfg.CleanFree = 0
-	return freed, violated(func() {
+	return h, freed, violated(func() {
 		if !h.reopen(disklog.ModeOpen) {
 			t.Fatalf("seed %d: recovery stopped: %v", seed, h.s.Err())
 		}
@@ -89,18 +90,24 @@ func cleanerCrashLog(t *testing.T, seed uint64, plant plants, logPlant disklog.P
 // recover what the crash oracle holds: copies durable before their moves applied replay with the
 // owner's check, freed and reused segments come back as the table and NextSeq say, and after
 // every recovery the usage table equals the index's counts and the log opens its next segment
-// past every open sequence on disk. A rebuild of the index after the recovery equals it.
+// past every open sequence on disk. A rebuild of the index after the recovery equals it. Every
+// run a freed metadata victim held is rewritten, none taken by an ordinary merge instead.
 func TestCleanerSurvivesCrashes(t *testing.T) {
-	cleaned := 0
+	cleaned, metaFreed := 0, 0
 	seeds.Run(t, 0, 20, func(seed uint64) {
-		freed, err := cleanerCrash(t, seed, plants{})
+		h, freed, err := cleanerCrashLog(t, seed, plants{}, disklog.Plants{})
 		if err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
+		}
+		if h.unrewritten > 0 {
+			t.Fatalf("seed %d: %d runs of freed metadata victims were merged by ordinary merges rather than rewritten", seed, h.unrewritten)
 		}
 		if freed > 0 {
 			cleaned++
 		}
+		metaFreed += h.metaFreed
 	})
+	t.Logf("%d metadata victims freed and charged their rewrites", metaFreed)
 	if seeds.Default() && cleaned < 10 {
 		t.Fatalf("the cleaner freed a segment before the crash in only %d of 20 seeds", cleaned)
 	}
@@ -164,13 +171,25 @@ func TestPlantedLogBugsBreakNamed(t *testing.T) {
 		{"RecoveryForgetsNewest", disklog.Plants{RecoveryForgetsNewest: true}, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := cleanerCrashLog(t, c.seed, plants{}, c.plant)
+			_, _, err := cleanerCrashLog(t, c.seed, plants{}, c.plant)
 			if violationOf(err) != invNamed {
 				t.Fatalf("broke %v", err)
 			}
 			t.Log(err)
 		})
 	}
+}
+
+// Planted violation: the net-gain guard charging a metadata victim's rewrite as if it took no
+// steps, leaving out each step's record header, extra blobs and manifest, takes victims whose
+// rewrites write a segment or more, and invRewrite, counting the blocks they wrote, names it at
+// seed 15 (also 29 and 47 of the first 60).
+func TestARewriteChargedBelowWhatItWritesBreaksRewrite(t *testing.T) {
+	_, err := cleanerCrash(t, 15, plants{rewriteNoSteps: true})
+	if violationOf(err) != invRewrite {
+		t.Fatalf("broke %v", err)
+	}
+	t.Log(err)
 }
 
 // Planted bug: replay mapping a copy's blocks as a write, whether or not a map still stores them

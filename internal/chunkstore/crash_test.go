@@ -166,7 +166,7 @@ func (h *harness) reopen(mode disklog.Mode) bool {
 	h.queue, h.out = nil, Output{}
 	h.abandoned, h.held = h.pool.Live(), nil
 	h.s = newStore(h.cfg)
-	h.s.plant = h.plant
+	h.s.plant, h.s.metaVictim = h.plant, h.noteMetaVictim
 	if err := h.s.recover(&h.ctx, h.disk.Blocks(), mode); err != nil {
 		h.t.Fatal(err)
 	}

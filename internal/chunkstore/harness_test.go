@@ -148,6 +148,10 @@ type harness struct {
 	released       map[uint32]bool
 	namedAt, floor uint64
 	windowReuses   int
+	// rw follows what each metadata victim's rewrites write; metaFreed counts the metadata victims
+	// it charged once freed, and unrewritten the runs they held that no rewrite wrote again.
+	rw                     rewrites
+	metaFreed, unrewritten int
 }
 
 // advance moves the clock on by d, firing the log's TRIM timer if it falls due, and settles.
@@ -217,6 +221,7 @@ func newHarnessOn(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
 	if h.s, err = Format(&h.ctx, cfg, disklog.Superblock{LogID: 0x5eed, Geometry: geo}, &h.out); err != nil {
 		t.Fatal(err)
 	}
+	h.s.metaVictim = h.noteMetaVictim
 	h.take()
 	h.settle()
 	h.executed, h.own = 0, h.pool.Live()
@@ -328,6 +333,7 @@ func (h *harness) step() bool {
 			h.take()
 			continue
 		}
+		h.noteMerge(c)
 		if h.steps[c] == 0 {
 			h.merges = append(h.merges, c)
 		}
@@ -443,6 +449,7 @@ func (h *harness) settle() {
 func (h *harness) recoveryDone() {
 	h.headersOnDisk()
 	h.recoveredNewest()
+	h.rw = rewrites{}
 	clear(h.stepHeld)
 	clear(h.filled)
 	h.recoveredIndex()
@@ -525,6 +532,7 @@ func (h *harness) noteWrite(a *core.Action) {
 	if sh, err := disklog.DecodeSegmentHeader(img); err == nil && sh.LogID == h.s.sb.LogID {
 		h.reused(segment, "opened again")
 		h.opened(segment)
+		h.rewriteOpened(segment)
 		h.seqOf[segment] = sh.Seq
 		h.cleanSeg[segment] = sh.Stream == disklog.Cold && sh.Lane == 1
 		if sh.Stream == disklog.Meta {
@@ -544,6 +552,9 @@ func (h *harness) noteWrite(a *core.Action) {
 		return e.Kind == disklog.EntryBlob && (e.BlobKind == disklog.BlobManifest || e.BlobKind == disklog.BlobManifestPiece)
 	})) {
 		h.stepBlocks += a.Len / core.BlockSize
+	}
+	if lane, ok := h.laneOf[segment]; ok {
+		h.noteRewrite(lane, a, d.Entries)
 	}
 	if h.cleanSeg[segment] {
 		h.noteFilled(a.Len/core.BlockSize, d.Entries)

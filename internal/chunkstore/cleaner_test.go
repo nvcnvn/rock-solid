@@ -172,6 +172,8 @@ func markRewrites(t *testing.T, h *harness) (uint32, int) {
 	h.merging = false
 	h.s.cl.passes = append(h.s.cl.passes, &cleanPass{victims: []uint32{seg}})
 	h.clean(-1)
+	// The pass takes seg past the net-gain guard, so invRewrite holds it to nothing.
+	delete(h.rw.victims, seg)
 	if st := h.s.CleanStats(); st.Rewrites == before.Rewrites || st.Copied != before.Copied || !log.HoldsPiece(seg) {
 		t.Fatalf("stats %+v after a pass over segment %d; it holds a piece %v", st, seg, log.HoldsPiece(seg))
 	}
@@ -233,6 +235,7 @@ func TestARewriteInStepsWritesNoMoreThanItsCost(t *testing.T) {
 		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
 			t.Fatal(err)
 		}
+		h.noteMerge(c)
 		h.take()
 		h.settle()
 	}
@@ -258,6 +261,7 @@ func runToMidStep(t *testing.T, h *harness) *lsm.Compaction {
 		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
 			t.Fatal(err)
 		}
+		h.noteMerge(c)
 		h.take()
 		h.settle()
 		if !c.Finished() {
@@ -306,6 +310,7 @@ func TestARewriteFinishesOnADiskFilledToItsReserve(t *testing.T) {
 		if err := h.s.InstallMerge(&h.ctx, c, &h.out); err != nil {
 			t.Fatal(err)
 		}
+		h.noteMerge(c)
 		h.take()
 		h.settle()
 		stepped = stepped || slices.Contains(merges, c)
