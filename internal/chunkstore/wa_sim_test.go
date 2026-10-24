@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
@@ -23,14 +24,15 @@ import (
 // the net-gain guard lets victims of a 4 MiB segment pass up to 914 of 1,023 blocks live, 89.35%;
 // 128 KiB records let 930 pass, 90.9%, yet measured worse, 5.78 at 80% full against 5.09, and
 // ran out of space sooner at 90%. A checkpoint falls every 4 MiB of log, the cleaner streams spike's stand-in for 64 MiB on a 16 GiB disk. check turns
-// on the store's and the log's invariant checkers, cleanFree sets the store's clean_free, and
-// plant plants bugs in the store.
+// on the store's and the log's invariant checkers, cleanFree sets the store's clean_free, record
+// sets the largest record in bytes in place of 256 KiB, and plant plants bugs in the store.
 type waRun struct {
 	geo       disklog.Geometry
 	fill      float64
 	warm      float64
 	check     bool
 	cleanFree int
+	record    uint64
 	plant     plants
 }
 
@@ -60,7 +62,7 @@ func (r waRun) run(t testing.TB, seed uint64) waResult {
 	cfg.Check, cfg.Log.Check = r.check, r.check
 	cfg.Log.NoReserve = false
 	cfg.CleanFree = r.cleanFree
-	cfg.Log.MaxRecordBytes = 256 << 10
+	cfg.Log.MaxRecordBytes = cmp.Or(r.record, 256<<10)
 	cfg.Log.MaxReplayBytes = 4 << 20
 	cfg.Log.CompactionStepBytes = uint64(r.geo.SegmentBlocks) * core.BlockSize
 	h := newHarnessOn(t, cfg, r.geo)
@@ -227,6 +229,30 @@ func TestCleanerWriteAmplification(t *testing.T) {
 			w := waRun{geo: geo, fill: float64(pct) / 100, warm: 1}.run(t, 1)
 			if !w.measured {
 				t.Skipf("%d%% full: the disk ran out of space before the measured capacity, no victim passing the net-gain guard", pct)
+			}
+			w.checkMetric(t)
+		})
+	}
+}
+
+// At the default write_limit of each band of segment sizes below 8 MiB, a disk of 1,024 of the
+// band's smallest segments, in records of max_group_commit_bytes' default, 1 MiB, runs a measured
+// capacity of uniform overwrites without NoSpace: 45% on 64 KiB segments, 50% on 128 KiB, 55% on
+// 512 KiB and 75% on 4 MiB. Run alone: the 4 MiB subtest takes 2 minutes and 0.6 GB.
+func TestDefaultWriteLimitBySegmentSize(t *testing.T) {
+	if os.Getenv(longSimEnv) == "" {
+		t.Skip("set " + longSimEnv + " to run")
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(50))
+	for _, c := range []struct {
+		segmentBlocks uint32
+		limit         float64
+	}{{16, 0.45}, {32, 0.50}, {128, 0.55}, {1024, 0.75}} {
+		t.Run(fmt.Sprintf("%d KiB", c.segmentBlocks*4), func(t *testing.T) {
+			geo := disklog.Geometry{SegmentBlocks: c.segmentBlocks, SegmentCount: 1024}
+			w := waRun{geo: geo, fill: c.limit, warm: 1, record: 1 << 20}.run(t, 1)
+			if !w.measured || w.ranOut {
+				t.Fatalf("%.0f%% full on %d KiB segments ran out of space", 100*c.limit, c.segmentBlocks*4)
 			}
 			w.checkMetric(t)
 		})
