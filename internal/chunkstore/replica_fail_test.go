@@ -351,3 +351,20 @@ func TestAMemberRefusesTheVersionsAfterOneItFailed(t *testing.T) {
 		t.Fatalf("disk 2 holds %#x", v)
 	}
 }
+
+// Disk 2 restarts and gets 1.1 while its store still recovers: it refuses it.
+func TestARecoveringMemberRefusesWrites(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.s.CrashRandom(1)
+	for !c.s.Node(1).Up() && c.step() {
+	}
+	if c.reps[1].Store().Serving() {
+		t.Fatal("the store serves as it restarts")
+	}
+	w := c.replicaWrite(1, ch, MakeVersion(1, 1))
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusRefused {
+		t.Fatalf("answered %+v", rp)
+	}
+}

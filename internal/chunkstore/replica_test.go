@@ -36,6 +36,8 @@ type rcluster struct {
 	// counting adds the heap allocations each replica's OnEvent makes to mallocs.
 	counting bool
 	mallocs  uint64
+	// onPass, when set, sees the actions of each pass of each replica's loop.
+	onPass func(d int, acts []core.Action)
 }
 
 type sendKey struct {
@@ -128,7 +130,14 @@ func newRClusterOn(t *testing.T, tbl Table, s *sim.Scheduler) *rcluster {
 				var sout Output
 				cfg := testConfig()
 				cfg.MergeCache = DefaultMergeCache
-				st, err := Format(ctx, cfg, disklog.Superblock{LogID: 0x5eed + uint64(d), Geometry: geo}, &sout)
+				restart := c.reps[d] != nil
+				var st *Store
+				var err error
+				if restart {
+					st, err = Open(ctx, cfg, geo.DiskBlocks(), &sout)
+				} else {
+					st, err = Format(ctx, cfg, disklog.Superblock{LogID: 0x5eed + uint64(d), Geometry: geo}, &sout)
+				}
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -136,7 +145,13 @@ func newRClusterOn(t *testing.T, tbl Table, s *sim.Scheduler) *rcluster {
 				for k := range disks {
 					c.reps[d].SetAddr(uint32(k+1), core.NodeID{Node: uint32(k)})
 				}
-				return append(acts, sout.Actions...)
+				acts = append(acts, sout.Actions...)
+				if !restart {
+					return acts
+				}
+				var out ReplicaOutput
+				c.reps[d].SetTable(ctx, c.table, &out)
+				return c.took(d, &out, acts)
 			})
 		})
 	}
@@ -151,6 +166,9 @@ func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Ac
 	c.whole[d] = c.whole[d] || out.Whole
 	c.asks = append(c.asks, out.Asks...)
 	c.passes[d] = append(c.passes[d], slices.Clone(out.Actions))
+	if c.onPass != nil {
+		c.onPass(d, out.Actions)
+	}
 	for i := range out.Actions {
 		a := &out.Actions[i]
 		var u Update

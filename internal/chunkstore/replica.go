@@ -185,9 +185,9 @@ func (r *Replica) SetPool(id core.PoolID, p Pool) { r.pool(id).pool = p }
 // SetGrants records the space grants outstanding on a pool, in blocks, as the leader's heartbeat reply carries them.
 func (r *Replica) SetGrants(id core.PoolID, blocks uint64) { r.pool(id).grants = blocks }
 
-// fill is this disk's live blocks, summed again once fillEvery has passed.
+// fill is this disk's live blocks, summed again once fillEvery has passed while the store serves.
 func (r *Replica) fill(ctx *core.Context) uint64 {
-	if r.liveAt == 0 || ctx.Now-r.liveAt >= fillEvery {
+	if r.st.Serving() && (r.liveAt == 0 || ctx.Now-r.liveAt >= fillEvery) {
 		r.live, r.liveAt = r.st.Log().LiveBlocks(), max(ctx.Now, 1)
 	}
 	return r.live
