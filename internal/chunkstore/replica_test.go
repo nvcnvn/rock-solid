@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -23,7 +24,22 @@ type rcluster struct {
 	// fetch is the newest table epoch each replica asked for, and whole whether it asked for the whole table.
 	fetch []uint64
 	whole []bool
+	inv   sim.Invariants
+	// sentVer is the newest version of each chunk a primary sent each member on its current connection, lost counting the connections each lost; orderErr is the first send out of order.
+	sentVer  map[sendKey]uint64
+	lost     map[[2]core.NodeID]int
+	orderErr error
+	// passes is each pass of each replica's loop: the actions it emitted.
+	passes [][][]core.Action
 }
+
+type sendKey struct {
+	from, to core.NodeID
+	conn     int
+	chunk    core.ChunkID
+}
+
+const invSendOrder = "a primary sends a chunk's writes to each member in version order, again after a reconnect"
 
 type rclient struct {
 	replies map[core.RequestID]Response
@@ -73,14 +89,19 @@ func newRCluster(t *testing.T, tbl Table) *rcluster {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &rcluster{t: t, s: sim.New(1, sim.DefaultSettings()), table: tbl, cl: &rclient{replies: map[core.RequestID]Response{}, data: map[core.RequestID][]byte{}, sent: map[core.RequestID]core.IOBuf{}}}
+	c := &rcluster{t: t, s: sim.New(1, sim.DefaultSettings()), table: tbl, cl: &rclient{replies: map[core.RequestID]Response{}, data: map[core.RequestID][]byte{}, sent: map[core.RequestID]core.IOBuf{}},
+		sentVer: map[sendKey]uint64{}, lost: map[[2]core.NodeID]int{}}
+	c.inv.Register(invSendOrder, func() error { return c.orderErr })
 	const disks = 3
-	c.reps, c.loops, c.fetch, c.whole = make([]*Replica, disks), make([]core.NodeID, disks), make([]uint64, disks), make([]bool, disks)
+	c.reps, c.loops, c.fetch, c.whole, c.passes = make([]*Replica, disks), make([]core.NodeID, disks), make([]uint64, disks), make([]bool, disks), make([][][]core.Action, disks)
 	for d := range disks {
 		c.s.AddNode(sim.DefaultClock, []sim.DiskSpec{{Blocks: geo.DiskBlocks(), Settings: sim.DefaultDiskSettings()}}, func(n *sim.Node) {
 			var out ReplicaOutput
 			m := sim.MachineFunc(func(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
 				out.Reset()
+				if ev.Kind == core.EvPeerLost {
+					c.lost[[2]core.NodeID{c.loops[d], ev.Peer}]++
+				}
 				c.reps[d].OnEvent(ctx, ev, &out)
 				return c.took(d, &out, acts)
 			})
@@ -108,6 +129,26 @@ func newRCluster(t *testing.T, tbl Table) *rcluster {
 func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Action {
 	c.fetch[d] = max(c.fetch[d], out.Fetch)
 	c.whole[d] = c.whole[d] || out.Whole
+	c.passes[d] = append(c.passes[d], slices.Clone(out.Actions))
+	for i := range out.Actions {
+		a := &out.Actions[i]
+		var u Update
+		if k := Kind(a.Msg.Body[1]); a.Kind != core.ActNetSend || a.Msg.Len < headSize || k != KindReplicaWrite && k != KindReplicaPunch {
+			continue
+		}
+		var data int
+		if a.Msg.Buf != core.NoBuf {
+			data = len(c.s.Node(uint32(d)).Pool().Bytes(a.Msg.Buf))
+		}
+		if DecodeUpdate(a.Msg.Inline(), data, &u) != nil || u.Version == 0 {
+			continue
+		}
+		k := sendKey{from: c.loops[d], to: a.Peer, conn: c.lost[[2]core.NodeID{c.loops[d], a.Peer}], chunk: u.Chunk}
+		if u.Version <= c.sentVer[k] && c.orderErr == nil {
+			c.orderErr = fmt.Errorf("disk %d sent %#x of %v to %v after %#x on one connection", d+1, u.Version, u.Chunk, a.Peer, c.sentVer[k])
+		}
+		c.sentVer[k] = u.Version
+	}
 	return append(acts, out.Actions...)
 }
 
@@ -144,18 +185,32 @@ func (c *rcluster) activate(d int, pg core.PGID) {
 }
 
 func (c *rcluster) settle() {
+	c.t.Helper()
 	for range 1_000_000 {
-		if !c.s.Step() {
+		if !c.step() {
 			return
 		}
 	}
 	c.t.Fatal("the cluster did not settle")
 }
 
+func (c *rcluster) step() bool {
+	c.t.Helper()
+	more := c.s.Step()
+	if err := c.inv.Check(); err != nil {
+		c.t.Fatal(err)
+	}
+	if err := c.s.DriverContract(); err != nil {
+		c.t.Fatal(err)
+	}
+	return more
+}
+
 // runFor steps the cluster until simulated time d has passed or nothing is pending.
 func (c *rcluster) runFor(d core.Tick) {
+	c.t.Helper()
 	end := c.s.Time() + d
-	for c.s.Time() < end && c.s.Step() {
+	for c.s.Time() < end && c.step() {
 	}
 }
 

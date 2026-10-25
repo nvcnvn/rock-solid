@@ -21,8 +21,24 @@ type Op struct {
 
 // History records client operations on the scheduler's time, not a node's clock, which drifts and slews.
 type History struct {
-	s   *Scheduler
-	ops []Op
+	s      *Scheduler
+	ops    []Op
+	decode func(m *core.Msg) (op int, out [OpWords]uint64, ok bool)
+}
+
+// Replies completes operations from the client replies any machine sends: decode names the operation a send marked Reply answers and its result, or reports false for any other.
+func (h *History) Replies(decode func(m *core.Msg) (op int, out [OpWords]uint64, ok bool)) {
+	h.decode = decode
+	h.s.history = h
+}
+
+func (h *History) sent(a *core.Action) {
+	if !a.Reply {
+		return
+	}
+	if op, out, ok := h.decode(&a.Msg); ok && op >= 0 && op < len(h.ops) {
+		h.Complete(op, out)
+	}
 }
 
 // NewHistory records operations at s's time, with room for capacity of them before it allocates.
