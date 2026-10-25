@@ -305,6 +305,18 @@ func TestWireRejectsDataLength(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustMalformed(t, "1,023 blocks for 1,024", whole, core.ChunkSize-core.BlockSize)
+	for _, c := range []struct{ off, n uint32 }{{100, 2*core.BlockSize - 100}, {0, core.BlockSize + 1}, {100, 1}, {100, 2 * core.BlockSize}} {
+		edges := edgeBytes(c.off, c.n)
+		p := AppendUpdate(nil, &Update{Kind: KindReplicaPunch, PG: wirePG, Off: c.off, Len: c.n, Version: 1<<32 | 1})
+		if _, err := decodeMsg(p, edges); err != nil || edges == 0 {
+			t.Fatalf("member punch %d+%d with %d bytes of edges: %v", c.off, c.n, edges, err)
+		}
+		mustMalformed(t, "member punch without its edges", p, 0)
+		mustMalformed(t, "client punch with data", AppendUpdate(nil, &Update{Kind: KindPunch, PG: wirePG, Off: c.off, Len: c.n}), edges)
+	}
+	if edgeBytes(100, 2*core.BlockSize) != 2*core.BlockSize || edgeBytes(100, 1) != core.BlockSize {
+		t.Fatal("edge count")
+	}
 	mustMalformed(t, "read reply with no data", encodeMsg(&Response{Kind: KindReadReply}), 0)
 	mustMalformed(t, "read reply past a chunk", encodeMsg(&Response{Kind: KindReadReply}), core.ChunkSize+core.BlockSize)
 	mustMalformed(t, "read reply refused with data", encodeMsg(&Response{Kind: KindReadReply, Status: StatusRefused, Interval: 42}), core.BlockSize)

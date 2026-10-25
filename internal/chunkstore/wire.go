@@ -85,6 +85,19 @@ func dataBytes(off, n uint32) int {
 	return (int(last) - int(first) + 1) * core.BlockSize
 }
 
+// edgeBytes is the data of a member's punch: the blocks its range covers in part, merged by the primary.
+func edgeBytes(off, n uint32) int {
+	first, last := spanOf(off, n)
+	edges := 0
+	if _, _, part := partial(off, n, first); part {
+		edges++
+	}
+	if _, _, part := partial(off, n, last); part && last != first {
+		edges++
+	}
+	return edges * core.BlockSize
+}
+
 // PGFields name a PG as its sender's table has it: the table's epoch and the PG's interval in it.
 type PGFields struct {
 	Epoch    uint64
@@ -99,7 +112,7 @@ type Hello struct {
 	Incarnation uint64
 }
 
-// Update is a chunk write or punch, from a client to the primary or, with the version it ordered, from the primary to a member; a purger's punch names its shard and Raft term.
+// Update is a chunk write or punch, from a client to the primary or, with the version it ordered, from the primary to a member, a member's punch carrying the edge blocks the primary merged; a purger's punch names its shard and Raft term.
 type Update struct {
 	Kind        Kind
 	ID          core.RequestID
@@ -321,8 +334,12 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 	replica := u.Kind == KindReplicaWrite || u.Kind == KindReplicaPunch
 	write := u.Kind == KindWrite || u.Kind == KindReplicaWrite
 	want := 0
-	if write && validRange(u.Off, u.Len) {
+	switch {
+	case !validRange(u.Off, u.Len):
+	case write:
 		want = dataBytes(u.Off, u.Len)
+	case u.Kind == KindReplicaPunch:
+		want = edgeBytes(u.Off, u.Len)
 	}
 	if !validRange(u.Off, u.Len) || data != want || !validVersion(u.Version) || replica != (u.Version != 0) ||
 		write && (u.Shard != 0 || u.Term != 0) {
