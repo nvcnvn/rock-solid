@@ -198,5 +198,6 @@ type Clocks struct {
 
 // Resumed reports whether the node stood still between two readings of one boot: CLOCK_BOOTTIME gained at least threshold on CLOCK_MONOTONIC, which only a suspend makes it do, or the disruption marker changed.
 func Resumed(prev, cur Clocks, threshold Tick) bool {
-	return cur.Marker != prev.Marker || cur.Boot-cur.Mono >= prev.Boot-prev.Mono+threshold
+	d := (cur.Boot - cur.Mono) - (prev.Boot - prev.Mono)
+	return cur.Marker != prev.Marker || int64(d) >= int64(threshold)
 }

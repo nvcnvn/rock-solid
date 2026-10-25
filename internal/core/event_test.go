@@ -101,4 +101,7 @@ func TestResumedSeesASuspendOrAMarkerChangeOnly(t *testing.T) {
 			t.Errorf("%s: Resumed %v, want %v", c.name, got, c.want)
 		}
 	}
+	if Resumed(Clocks{Boot: 5_000_000, Mono: 5_000_000}, Clocks{Boot: 5_000_100, Mono: 5_000_101}, threshold) {
+		t.Error("MONOTONIC read 1 µs past BOOTTIME: Resumed")
+	}
 }
