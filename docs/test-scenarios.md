@@ -3358,8 +3358,9 @@ its disk leaves the pool. It checks only that moves keep copies, never that a mo
 placement tests that settle every move check that.
 
 **Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12.
-`ci-peering`, `ci-restarts` and `deep-peering` check every property but 2, 10 and 13, since the Raft
-group and lease time need clocks, and `deep-peering` adds the unbounded liveness property 12.
+`ci-peering`, `ci-restarts` and `deep-peering` check every property but 2 and 10, since the Raft
+group and lease time need clocks, and 13, since their plans make no move; `deep-peering` adds the
+unbounded liveness property 12.
 `ci-moves` checks the same and property 13, an action property checked at each removal. Its plans
 send only the daemon's one write W, which keeps it well within its 5 minutes: the replica's move
 with the successor's writes and a process restart, run alone, passes property 13 at 2.3 million
