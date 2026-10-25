@@ -64,7 +64,7 @@ func (t *Table) pool(id core.PoolID) *PoolTable {
 }
 
 func (e *PGEntry) equal(o *PGEntry) bool {
-	return e.Interval == o.Interval && e.Activated == o.Activated && e.Pinned == o.Pinned && slices.Equal(e.Members, o.Members) &&
+	return e.Interval == o.Interval && e.Activated == o.Activated && e.Pinned == o.Pinned && e.Recovered == o.Recovered && slices.Equal(e.Members, o.Members) &&
 		slices.EqualFunc(e.Past, o.Past, func(a, b PastInterval) bool { return a.Interval == b.Interval && slices.Equal(a.Members, b.Members) })
 }
 
@@ -149,13 +149,26 @@ func appendDeltaPool(dst []byte, p DeltaPool) []byte {
 
 func appendEntry(dst []byte, e *PGEntry) []byte {
 	dst = le.AppendUint32(le.AppendUint32(dst, e.Interval), e.Activated)
-	dst = appendBool(dst, e.Pinned)
+	dst = append(dst, flagIf(e.Pinned, pinnedFlag)|flagIf(e.Recovered, recoveredFlag))
 	dst = appendMembers(dst, e.Members)
 	dst = binary.AppendUvarint(dst, uint64(len(e.Past)))
 	for _, pi := range e.Past {
 		dst = appendMembers(le.AppendUint32(dst, pi.Interval), pi.Members)
 	}
 	return dst
+}
+
+// The flags byte of a PG entry.
+const (
+	pinnedFlag    = 0x01
+	recoveredFlag = 0x02
+)
+
+func flagIf(on bool, flag uint8) uint8 {
+	if on {
+		return flag
+	}
+	return 0
 }
 
 // leavingBit marks a leaving member in its mark byte.
@@ -238,13 +251,15 @@ func (r *reader) deltaPool() DeltaPool {
 	return p
 }
 
-// entry reads a PG entry: an interval of at least 1, a last activated interval not above it, at most one leaving member, and past intervals rising from the last activated one to below it.
+// entry reads a PG entry: an interval of at least 1, a last activated interval not above it, at most one leaving member and none in a recovered interval, and past intervals rising from the last activated one to below it.
 func (r *reader) entry() PGEntry {
-	e := PGEntry{Interval: r.u32(), Activated: r.u32(), Pinned: r.bool(), Members: r.members()}
-	if e.Interval == 0 || e.Activated > e.Interval {
+	e := PGEntry{Interval: r.u32(), Activated: r.u32()}
+	flags := r.u8()
+	e.Pinned, e.Recovered, e.Members = flags&pinnedFlag != 0, flags&recoveredFlag != 0, r.members()
+	if e.Interval == 0 || e.Activated > e.Interval || flags&^(pinnedFlag|recoveredFlag) != 0 {
 		r.bad = true
 	}
-	if leavingIn(e.Members) > 1 {
+	if n := leavingIn(e.Members); n > 1 || n == 1 && e.Recovered {
 		r.bad = true
 	}
 	n := r.uvarint()

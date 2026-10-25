@@ -38,13 +38,14 @@ type PastInterval struct {
 	Members  []Member
 }
 
-// PGEntry is a PG's entry in the placement table: its members with the primary first, its interval, its last activated interval, the intervals since, and whether an operator pinned it.
+// PGEntry is a PG's entry in the placement table: its members with the primary first, its interval, its last activated interval, the intervals since, whether an operator pinned it, and whether its primary reported the interval recovered.
 type PGEntry struct {
 	Members   []Member
 	Interval  uint32
 	Activated uint32
 	Past      []PastInterval
 	Pinned    bool
+	Recovered bool
 }
 
 // PoolTable is a pool's part of the placement table: the settings its intervals depend on, and its PGs.
@@ -117,6 +118,7 @@ type placer struct {
 	disks   []Disk
 	target  []float64
 	load    []int
+	base    []PGEntry
 	entries []PGEntry
 }
 
@@ -139,7 +141,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 	}
 	settings := old != nil && (int(old.Replicas) != p.Replicas || int(old.MinLive) != p.MinLive)
 
-	pl := &placer{pool: p, now: all.Now, disks: slices.Clone(in.Disks), entries: make([]PGEntry, n)}
+	pl := &placer{pool: p, now: all.Now, disks: slices.Clone(in.Disks), base: base, entries: make([]PGEntry, n)}
 	slices.SortFunc(pl.disks, func(a, b Disk) int { return cmp.Compare(a.ID, b.ID) })
 	pl.target = p.targets(pl.disks, all.Now)
 	pl.load = make([]int, len(pl.disks))
@@ -191,6 +193,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 		if !split && r.PG.Pool == in.ID && int(r.PG.Index) < n {
 			if e := &pl.entries[r.PG.Index]; r.Interval == e.Interval && recovers(e.Members) {
 				e.dropLeaving()
+				e.Recovered = true
 			}
 		}
 	}
@@ -206,7 +209,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 		if b.Interval > 0 {
 			e.Past = append(e.Past, PastInterval{Interval: b.Interval, Members: b.Members})
 		}
-		e.Interval = b.Interval + 1
+		e.Interval, e.Recovered = b.Interval+1, false
 	}
 	return PoolTable{ID: in.ID, Replicas: uint8(p.Replicas), MinLive: uint8(p.MinLive), PGs: pl.entries}, moves
 }
@@ -550,13 +553,13 @@ func (pl *placer) moveNearer(order, dests []int) bool {
 	return false
 }
 
-// move adds disk k to the lowest unpinned PG with no leaving member whose up member on disk src it may replace, marking that member leaving, if there is one.
+// move adds disk k to the lowest unpinned PG with no leaving member whose up member on disk src it may replace, marking that member leaving, if there is one; the PG's interval must be recovered and its members unchanged since, so each is complete when the move starts.
 func (pl *placer) move(src, k int) bool {
 	id := pl.disks[src].ID
 	for i := range pl.entries {
 		e := &pl.entries[i]
 		j := slices.Index(e.Members, Member{Disk: id, Mark: MarkUp})
-		if j >= 0 && !e.Pinned && e.leaving() < 0 && pl.eligible(e, k, j) {
+		if j >= 0 && !e.Pinned && e.Recovered && e.leaving() < 0 && slices.Equal(e.Members, pl.base[i].Members) && pl.eligible(e, k, j) {
 			e.Members[j].Leaving = true
 			e.Members = append(e.Members, Member{Disk: pl.disks[k].ID})
 			pl.load[src]--

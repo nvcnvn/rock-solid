@@ -30,7 +30,7 @@ func TestBalanceTakesFromTheFurthestAbove(t *testing.T) {
 		if i < 88 {
 			disk = uint32(i % 2)
 		}
-		pt.PGs[i] = PGEntry{Members: []Member{{Disk: disk}}, Interval: 1, Activated: 1}
+		pt.PGs[i] = PGEntry{Members: []Member{{Disk: disk}}, Interval: 1, Activated: 1, Recovered: true}
 	}
 	l.table = Table{Epoch: 1, Pools: []PoolTable{pt}}
 	if moves := l.step(t, l.inputs(allMoves)); moves != 1 || !slices.Equal(l.loads(), []uint32{43, 44, 41}) {
@@ -188,7 +188,7 @@ func TestFiguresListPlacementTargets(t *testing.T) {
 	}
 }
 
-// After a disk is added to a pool holding data, the second computation, once the first one's moves have copied, proposes no move.
+// After a disk is added to a pool holding data, the second computation, once the first one's moves have copied, proposes no move, and the third, once their removals have recovered, starts no interval.
 func TestMovesAfterADiskAdded(t *testing.T) {
 	c6 := capacityLayouts()["C6"]
 	c2 := capacityLayouts()["C2"]
@@ -209,7 +209,7 @@ func TestMovesAfterADiskAdded(t *testing.T) {
 		l.held = tb(c.held)
 		l.grow(c.node, c.size, 0)
 		moves, computations := l.settle(t)
-		if moves != c.moves || computations != 2 {
+		if moves != c.moves || computations != 3 {
 			t.Errorf("%s: %d moves over %d computations", c.name, moves, computations)
 		}
 	}
@@ -479,6 +479,22 @@ func TestMovesAddThenRemove(t *testing.T) {
 			}
 		})
 	}
+	t.Run("only from a recovered interval", func(t *testing.T) {
+		l := placed(t, nodesOf(rep(2, 128), 4, 1, 2))
+		refilled := l.holding(l.onNode(3)...)
+		l.remove(l.onNode(3)[0])
+		l.step(t, l.inputs(0))
+		l.grow(3, 4, 0)
+		l.step(t, l.inputs(allMoves))
+		for _, i := range l.moving() {
+			if slices.Contains(refilled, i) {
+				t.Fatalf("PG %d moved a member in an interval with no recovered report, its refill member still recovering: %v", i, l.pools().PGs[i].Members)
+			}
+		}
+		if len(l.moving()) == 0 {
+			t.Fatal("no recovered PG moved")
+		}
+	})
 	t.Run("within a node on 3 nodes", func(t *testing.T) {
 		l := placed(t, nodesOf(rep(3, 128), 3, 1, 2))
 		added := l.grow(0, 2, 0)

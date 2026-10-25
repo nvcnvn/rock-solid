@@ -90,7 +90,7 @@ func TestDeltaBases(t *testing.T) {
 	}
 }
 
-// A truncated delta, an entry for a PG past its pool's count, an interval number that goes backwards and two leaving members are malformed.
+// A truncated delta, an entry for a PG past its pool's count, an interval number that goes backwards, two leaving members, a leaving member in a recovered interval and an unknown entry flag are malformed.
 func TestMalformedDeltas(t *testing.T) {
 	prev := fullTable(16, 3)
 	next := fullTable(16, 3)
@@ -109,13 +109,24 @@ func TestMalformedDeltas(t *testing.T) {
 	if _, err := next.Apply(&Delta{Epoch: 3, CRC: prev.CRC(), Pools: d.Pools, Entries: []DeltaEntry{{core.PGID{Pool: 1, Index: 3}, prev.Pools[0].PGs[3]}}}); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("an interval going backwards: %v", err)
 	}
-	bad := fullTable(16, 3)
-	bad.Epoch = 2
-	e := &bad.Pools[0].PGs[3]
-	e.Interval, e.Members[0].Leaving, e.Members[1].Leaving = 2, true, true
-	d = MakeDelta(&prev, &bad)
-	if _, err := DecodeDelta(AppendDelta(nil, &d)); !errors.Is(err, ErrMalformed) {
-		t.Fatalf("two leaving members: %v", err)
+	for name, leave := range map[string]func(e *PGEntry){
+		"two leaving members":                      func(e *PGEntry) { e.Members[0].Leaving, e.Members[1].Leaving = true, true },
+		"a leaving member in a recovered interval": func(e *PGEntry) { e.Members[0].Leaving, e.Recovered = true, true },
+	} {
+		bad := fullTable(16, 3)
+		bad.Epoch = 2
+		e := &bad.Pools[0].PGs[3]
+		e.Interval = 2
+		leave(e)
+		d := MakeDelta(&prev, &bad)
+		if _, err := DecodeDelta(AppendDelta(nil, &d)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	flags := AppendDelta(nil, &d)
+	flags[len(flags)-1-1-3*5-1] = 0x04
+	if _, err := DecodeDelta(flags); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("an unknown entry flag: %v", err)
 	}
 }
 

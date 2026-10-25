@@ -192,7 +192,7 @@ func (h *history) next(t *testing.T, l *layout, in *Inputs) {
 	}
 }
 
-// check holds every table to the rules: the pool's width and at most one leaving member beside it, more members only beside a leaving one after replicas went down and never more than the table before, at most perDomain members per domain but a leaving one, live members kept when replicas go down, an interval raised by one exactly when the rules say, a member removed and added back in a new interval, a live leaving member removed exactly in the first table after a recovered report for its current interval that marks no other member down or in maintenance, and no live member that holds all the PG's data removed unless the width still does.
+// check holds every table to the rules: the pool's width and at most one leaving member beside it, more members only beside a leaving one after replicas went down and never more than the table before, at most perDomain members per domain but a leaving one, live members kept when replicas go down, an interval raised by one exactly when the rules say, a member removed and added back in a new interval, a live leaving member removed exactly in the first table after a recovered report for its current interval that marks no other member down or in maintenance, an entry recovered exactly while its interval has had such a report, a move only from a recovered interval, and no live member that holds all the PG's data removed unless the width still does.
 func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 	p, pt := l.pool, l.pools()
 	var old *PoolTable
@@ -336,6 +336,18 @@ func (h *history) checkCopies(i int, old *PoolTable, b, e *PGEntry, l *layout, i
 			return fmt.Errorf("PG %d removed live member %d, which holds all its data, leaving %d such of %v", i, m.Disk, held, e.Members)
 		}
 	}
+	reported := slices.Contains(in.Recovered, PGInterval{pg(i), b.Interval}) && !slices.ContainsFunc(b.Members, func(m Member) bool {
+		return !slices.ContainsFunc(l.disks, func(d Disk) bool { return d.ID == m.Disk && d.Mark == MarkUp })
+	})
+	if e.Recovered != (e.Interval == b.Interval && (b.Recovered || reported)) {
+		return fmt.Errorf("PG %d at interval %d after %d, recovered %v after %v, reported %v", i, e.Interval, b.Interval, e.Recovered, b.Recovered, reported)
+	}
+	if j := e.leaving(); j >= 0 && slices.ContainsFunc(e.Members, func(m Member) bool {
+		return !slices.ContainsFunc(b.Members, func(o Member) bool { return o.Disk == m.Disk })
+	}) &&
+		b.leaving() < 0 && !b.Recovered && !reported {
+		return fmt.Errorf("PG %d moved %v to %v from an interval with no recovered report", i, b.Members, e.Members)
+	}
 	if j := b.leaving(); due && j >= 0 && slices.Contains(e.Members, b.Members[j]) {
 		return fmt.Errorf("PG %d kept leaving member %d after a recovered report", i, b.Members[j].Disk)
 	}
@@ -374,7 +386,7 @@ func (h *history) settle(t *testing.T, l *layout) int {
 			t.Fatalf("table %d: %v", l.table.Epoch, err)
 		}
 		moves += n
-		if n == 0 && len(l.moving()) == 0 {
+		if l.settled(&prev, n) {
 			h.stats.computations = max(h.stats.computations, c+1)
 			break
 		}
