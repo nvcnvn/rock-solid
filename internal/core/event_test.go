@@ -81,3 +81,24 @@ func TestResumedNeedsNoOtherField(t *testing.T) {
 		}
 	}
 }
+
+func TestResumedSeesASuspendOrAMarkerChangeOnly(t *testing.T) {
+	const threshold = 1_000_000
+	prev := Clocks{Boot: 5_000_000, Raw: 4_000_000, Mono: 4_500_000, Marker: 3}
+	for _, c := range []struct {
+		name string
+		cur  Clocks
+		want bool
+	}{
+		{"no time passed", prev, false},
+		{"a slew moves BOOTTIME and MONOTONIC alike", Clocks{Boot: 7_260_000, Raw: 5_000_000, Mono: 6_760_000, Marker: 3}, false},
+		{"a pause every clock counted", Clocks{Boot: 15_000_000, Raw: 14_000_000, Mono: 14_500_000, Marker: 3}, false},
+		{"a suspend that gained the threshold", Clocks{Boot: 6_000_010, Raw: 4_000_010, Mono: 4_500_010, Marker: 3}, true},
+		{"a suspend the kernel rounded below it", Clocks{Boot: 5_999_999, Raw: 4_000_000, Mono: 4_500_000, Marker: 3}, false},
+		{"a restore with every clock frozen", Clocks{Boot: 5_000_000, Raw: 4_000_000, Mono: 4_500_000, Marker: 4}, true},
+	} {
+		if got := Resumed(prev, c.cur, threshold); got != c.want {
+			t.Errorf("%s: Resumed %v, want %v", c.name, got, c.want)
+		}
+	}
+}
