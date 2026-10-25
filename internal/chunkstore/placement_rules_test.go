@@ -359,7 +359,7 @@ func (l *layout) moving() []int {
 	return pgs
 }
 
-// A move adds the new member and marks the old one leaving; a later table removes every leaving member a recovered report covers, starting an interval and counting no move. A leaving member missing for refill_after is dropped, one a missing member's refill can keep stays in its place, and on 3 nodes a move within a node keeps the failure-domain rule but for the leaving member. A report for an interval before the PG's current one removes nothing, nor does one in a table that marks another member down or in maintenance.
+// A move adds the new member and marks the old one leaving; a later table removes every leaving member a recovered report covers, starting an interval and counting no move. A leaving member down for refill_after stays until the recovered report, on rep1 too where it holds the only copy, and is dropped once its disk leaves the pool; one a missing member's refill can keep stays in its place, and on 3 nodes a move within a node keeps the failure-domain rule but for the leaving member. A report for an interval before the PG's current one removes nothing, nor does one in a table that marks another member down or in maintenance.
 func TestMovesAddThenRemove(t *testing.T) {
 	t.Run("removals share one table", func(t *testing.T) {
 		l := placed(t, nodesOf(rep(3, 256), 4, 2, 2))
@@ -396,9 +396,40 @@ func TestMovesAddThenRemove(t *testing.T) {
 		}
 		l.now += RefillAfter
 		l.step(t, l.inputs(0))
+		got := l.pools().PGs[i]
+		if !slices.Equal(disksOf(&got), disksOf(&e)) || got.leaving() != e.leaving() {
+			t.Fatalf("a leaving member down for refill_after: %v, from %v", got.Members, e.Members)
+		}
+		in := l.inputs(0)
+		in.Recovered = []PGInterval{{pg(i), got.Interval}}
+		l.step(t, in)
 		want := slices.DeleteFunc(slices.Clone(e.Members), func(m Member) bool { return m.Leaving })
 		if got := l.pools().PGs[i]; !slices.Equal(disksOf(&got), disksOf(&PGEntry{Members: want})) {
-			t.Fatalf("a leaving member down for refill_after: %v, from %v", got.Members, e.Members)
+			t.Fatalf("a recovered report left %v, from %v", got.Members, e.Members)
+		}
+	})
+	t.Run("leaving member down on rep1", func(t *testing.T) {
+		l := placed(t, nodesOf(rep(1, 64), 3, 1, 2))
+		l.grow(0, 2, 0)
+		l.step(t, l.inputs(1))
+		i := l.moving()[0]
+		e := l.pools().PGs[i]
+		in := l.inputs(0)
+		in.Activations = []PGInterval{{pg(i), e.Interval}}
+		l.step(t, in)
+		l.mark(MarkDown, e.Members[e.leaving()].Disk)
+		l.step(t, l.inputs(0))
+		for range 2 {
+			l.now += RefillAfter
+			l.step(t, l.inputs(0))
+		}
+		if got := l.pools().PGs[i]; !slices.Contains(disksOf(&got), e.Members[e.leaving()].Disk) {
+			t.Fatalf("the leaving member of %v, down and holding the only copy, left: %v", e.Members, got.Members)
+		}
+		l.remove(e.Members[e.leaving()].Disk)
+		l.step(t, l.inputs(0))
+		if got := l.pools().PGs[i]; got.leaving() >= 0 || len(got.Members) != 1 {
+			t.Fatalf("a leaving member whose disk left the pool stayed: %v", got.Members)
 		}
 	})
 	t.Run("refill keeps the leaving member", func(t *testing.T) {

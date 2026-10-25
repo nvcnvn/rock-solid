@@ -338,14 +338,18 @@ func (pl *placer) find(id uint32) int {
 	return k
 }
 
-// refill drops a missing leaving member, narrows e, keeps the other leaving member in place of a missing member or where the width needs it, replaces every other missing member of e, and adds members until all but a leaving one fill the width, each on the eligible disk furthest below its target; a member with no eligible disk stays.
+// refill drops a leaving member whose disk left the pool, narrows e, keeps the other leaving member in place of a missing member or where the width needs it, replaces every other missing member of e, and adds members until all but a leaving one fill the width, each on the eligible disk furthest below its target; a member with no eligible disk stays.
 func (pl *placer) refill(e *PGEntry, base *PGEntry) {
-	if j := e.leaving(); j >= 0 && pl.missing(e, base, j) {
+	// A leaving member merely down stays however long: the member that replaces it is no copy
+	// until the recovered report, and may never become one if the leaving member holds the only
+	// copy, while activations with the new member live drop the past intervals that would have
+	// made peering wait for it.
+	if j := e.leaving(); j >= 0 && pl.find(e.Members[j].Disk) < 0 {
 		e.dropLeaving()
 	}
 	pl.narrow(e, base)
 	for j := 0; j < len(e.Members); j++ {
-		if !pl.missing(e, base, j) {
+		if e.Members[j].Leaving || !pl.missing(e, base, j) {
 			continue
 		}
 		if e.leaving() >= 0 && pl.stay(e, j) {

@@ -4139,7 +4139,7 @@ row says otherwise).
 | Down for 1 minute in a `rep2` PG with `min_live` 1, both members down, and the only member live in an interval since the last activated one | No; peering waits for it whether or not a new member joins. The other member, down longer, is refilled (`TestAwaitedMemberStays`) |
 | A refill member, still recovering, in a `rep2` PG whose other member is live | Counts toward `min_live` from the table that adds it, marked up: the PG serves reads and writes once that interval activates, each acknowledged on both members, while recovery copies the older chunks on its missing list (`TestRefillMemberCountsAtOnce`) |
 | In `maintenance` for an hour | No; it counts toward `min_live` throughout |
-| A leaving member, down for 10 minutes | Dropped in the next table, not refilled: its replacement has joined (`TestMovesAddThenRemove`) |
+| A leaving member, down for 10 minutes | No, nor dropped: it stays until a recovered report for the current interval removes it, since its replacement holds no copy until then; on `rep1` it may hold the only one. Once its disk leaves the pool it is dropped, not refilled (`TestMovesAddThenRemove`) |
 | Down on a 3-node `rep3` cluster for an hour | No eligible disk on another node; a disk failure on a node with a second disk refills there after 10 minutes (`TestRefillWithNoEligibleDisk`) |
 
 **Placement rules**
