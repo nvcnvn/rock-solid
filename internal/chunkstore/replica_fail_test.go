@@ -147,3 +147,28 @@ func TestAFailedVersionEndsTheInterval(t *testing.T) {
 		}
 	}
 }
+
+// 1.1 waits for cut-off disk 3 when interval 2 marks it down: peering, standing in, keeps 1.1, which is then mapped and acknowledged.
+func TestPeeringKeepsAPendingVersionOfAnEndedInterval(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.s.Partition(0, 2, false)
+	w := c.write(pg0, ch, 0, []byte{1})
+	c.runFor(100_000)
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkDown) }), false)
+	c.settle()
+	if _, ok := c.cl.replies[w]; ok {
+		t.Fatal("answered before peering")
+	}
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.Settle(ctx, ch, MakeVersion(1, 1), out)
+		r.Activate(ctx, pg0, 2, out)
+	})
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusOK || rp.Version != MakeVersion(1, 1) {
+		t.Fatalf("answered %+v", rp)
+	}
+	if got := c.readNow(pg0, ch, 0, 1); got[0] != 1 {
+		t.Fatalf("read %d", got[0])
+	}
+}
