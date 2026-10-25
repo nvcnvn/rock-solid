@@ -58,7 +58,7 @@ func (l *layout) settle(t *testing.T) (moves, computations int) {
 	t.Helper()
 	for computations = 1; ; computations++ {
 		l.hold()
-		n := l.step(t, l.activateAll(allMoves))
+		n := l.step(t, l.reportAll(allMoves))
 		moves += n
 		if n == 0 || computations == 20 {
 			return moves, computations
@@ -66,22 +66,31 @@ func (l *layout) settle(t *testing.T) (moves, computations int) {
 	}
 }
 
-func (l *layout) activateAll(moves int) *Inputs {
+// reportAll reports every PG activated at its interval, and recovered where every member but a leaving one is up, as its primary does.
+func (l *layout) reportAll(moves int) *Inputs {
 	in := l.inputs(moves)
 	for i, e := range l.pools().PGs {
-		in.Activations = append(in.Activations, PGInterval{core.PGID{Pool: 1, Index: uint32(i)}, e.Interval})
+		in.Activations = append(in.Activations, PGInterval{pg(i), e.Interval})
+		if recovers(&e) {
+			in.Recovered = append(in.Recovered, PGInterval{pg(i), e.Interval})
+		}
 	}
 	return in
 }
 
+// recovers reports whether e's primary reports it recovered once recovery has copied: every member but a leaving one is up.
+func recovers(e *PGEntry) bool {
+	return !slices.ContainsFunc(e.Members, func(m Member) bool { return !m.Leaving && m.Mark != MarkUp })
+}
+
 func (l *layout) pools() *PoolTable { return &l.table.Pools[0] }
 
-// loads counts each disk's members in the table.
+// loads counts each disk's members in the table but leaving ones.
 func (l *layout) loads() []uint32 {
 	n := make([]uint32, len(l.disks))
 	for _, e := range l.pools().PGs {
 		for _, m := range e.Members {
-			if k := slices.IndexFunc(l.disks, func(d Disk) bool { return d.ID == m.Disk }); k >= 0 {
+			if k := slices.IndexFunc(l.disks, func(d Disk) bool { return d.ID == m.Disk }); k >= 0 && !m.Leaving {
 				n[k]++
 			}
 		}
@@ -113,7 +122,7 @@ func (l *layout) placer() *placer {
 	pl.load = make([]int, len(pl.disks))
 	for _, e := range l.pools().PGs {
 		for _, m := range e.Members {
-			if k := pl.find(m.Disk); k >= 0 {
+			if k := pl.find(m.Disk); k >= 0 && !m.Leaving {
 				pl.load[k]++
 			}
 		}
@@ -319,25 +328,34 @@ func TestIntervalsRaisedByTableChanges(t *testing.T) {
 	})
 	t.Run("disk added, then balance moves one member", func(t *testing.T) {
 		l := fresh()
-		l.grow(0, 2, 0)
+		disk := l.grow(0, 2, 0)
 		samePGs(t, "disk added", l.raised(t, l.inputs(0)), nil)
 		prev := l.table
 		got := l.raised(t, l.inputs(1))
 		if len(got) != 1 {
 			t.Fatalf("one balance move raised %v", got)
 		}
-		was, is := prev.Pools[0].PGs[got[0]].Members, l.pools().PGs[got[0]].Members
-		diff := 0
-		for j := range was {
-			if was[j] != is[j] {
-				diff++
-			}
+		i := got[0]
+		was, is := prev.Pools[0].PGs[i].Members, l.pools().PGs[i]
+		j := is.leaving()
+		moving := append(slices.Clone(was), Member{Disk: disk})
+		if j >= 0 {
+			moving[j].Leaving = true
 		}
-		if diff != 1 {
-			t.Fatalf("PG %d went from %v to %v", got[0], was, is)
+		if j < 0 || is.Added != is.Interval || !slices.Equal(is.Members, moving) {
+			t.Fatalf("PG %d went from %v to %v, added at %d", i, was, is.Members, is.Added)
 		}
 		if d := MakeDelta(&prev, &l.table); len(d.Entries) != 1 {
 			t.Fatalf("the delta holds %d entries", len(d.Entries))
+		}
+		in := l.inputs(0)
+		in.Recovered = []PGInterval{{pg(i), is.Interval - 1}}
+		samePGs(t, "recovered before the add", l.raised(t, in), nil)
+		in.Recovered = []PGInterval{{pg(i), is.Interval}}
+		samePGs(t, "recovered at the add", l.raised(t, in), []int{i})
+		want := append(slices.Delete(slices.Clone(was), j, j+1), Member{Disk: disk})
+		if e := l.pools().PGs[i]; !slices.Equal(e.Members, want) || e.Added != 0 {
+			t.Fatalf("after its recovery PG %d holds %v, added at %d", i, e.Members, e.Added)
 		}
 	})
 	t.Run("disk and node marks", func(t *testing.T) {
@@ -392,7 +410,7 @@ func TestIntervalsRaisedByTableChanges(t *testing.T) {
 			t.Fatalf("after a down mark, PG entry %+v", e)
 		}
 		prev := l.table
-		samePGs(t, "activation folded", l.raised(t, l.activateAll(0)), nil)
+		samePGs(t, "activation folded", l.raised(t, l.reportAll(0)), nil)
 		changed := MakeDelta(&prev, &l.table).Entries
 		if len(changed) != len(l.holding(d)) {
 			t.Fatalf("the activation delta holds %d entries, not %d", len(changed), len(l.holding(d)))

@@ -300,3 +300,99 @@ func TestAddedDiskNeverUnbalances(t *testing.T) {
 	}
 	t.Logf("at worst available + held %.1f%% under balanced", 100*worst)
 }
+
+// moving lists the PGs with a leaving member.
+func (l *layout) moving() []int {
+	var pgs []int
+	for i, e := range l.pools().PGs {
+		if e.leaving() >= 0 {
+			pgs = append(pgs, i)
+		}
+	}
+	return pgs
+}
+
+// A move adds the new member and marks the old one leaving; a later table removes every leaving member a recovered report covers, starting an interval and counting no move. A leaving member missing for refill_after is dropped, one a missing member's refill can keep stays in its place, and on 3 nodes a move within a node keeps the failure-domain rule but for the leaving member.
+func TestMovesAddThenRemove(t *testing.T) {
+	t.Run("removals share one table", func(t *testing.T) {
+		l := placed(t, nodesOf(rep(3, 256), 4, 2, 2))
+		l.grow(1, 2, 0)
+		moves := l.step(t, l.inputs(allMoves))
+		pgs := l.moving()
+		if moves == 0 || len(pgs) != moves {
+			t.Fatalf("%d moves left %d PGs moving", moves, len(pgs))
+		}
+		in := l.inputs(0)
+		for _, i := range pgs {
+			in.Recovered = append(in.Recovered, PGInterval{pg(i), l.pools().PGs[i].Interval})
+		}
+		prev := l.table
+		samePGs(t, "every recovered move", l.raised(t, in), pgs)
+		if len(l.moving()) != 0 {
+			t.Fatalf("PGs %v still move", l.moving())
+		}
+		if _, n := Next(&prev, in); n != 0 {
+			t.Fatalf("the removals counted %d moves", n)
+		}
+	})
+	t.Run("leaving member down", func(t *testing.T) {
+		l := placed(t, nodesOf(rep(3, 256), 4, 2, 2))
+		l.grow(1, 2, 0)
+		l.step(t, l.inputs(1))
+		i := l.moving()[0]
+		e := l.pools().PGs[i]
+		gone := e.Members[e.leaving()].Disk
+		l.mark(MarkDown, gone)
+		l.step(t, l.inputs(0))
+		if got := l.pools().PGs[i]; got.leaving() < 0 || len(got.Members) != 4 {
+			t.Fatalf("a leaving member just down: %v", got.Members)
+		}
+		l.now += RefillAfter
+		l.step(t, l.inputs(0))
+		want := slices.DeleteFunc(slices.Clone(e.Members), func(m Member) bool { return m.Leaving })
+		if got := l.pools().PGs[i]; !slices.Equal(disksOf(&got), disksOf(&PGEntry{Members: want})) || got.Added != 0 {
+			t.Fatalf("a leaving member down for refill_after: %v, added at %d, from %v", got.Members, got.Added, e.Members)
+		}
+	})
+	t.Run("refill keeps the leaving member", func(t *testing.T) {
+		l := placed(t, nodesOf(rep(3, 256), 4, 2, 2))
+		l.grow(1, 2, 0)
+		l.step(t, l.inputs(allMoves))
+		i := slices.IndexFunc(l.moving(), func(i int) bool {
+			e := l.pools().PGs[i]
+			return e.leaving() != 0 && l.disk(e.Members[e.leaving()].Disk).Node != l.disk(e.Members[3].Disk).Node
+		})
+		if i < 0 {
+			t.Fatal("no move between nodes")
+		}
+		i = l.moving()[i]
+		e := l.pools().PGs[i]
+		l.remove(e.Members[0].Disk)
+		l.step(t, l.inputs(0))
+		got := l.pools().PGs[i]
+		want := slices.Clone(e.Members[1:])
+		want[e.leaving()-1].Leaving = false
+		if !slices.Equal(got.Members, want) || got.Added != 0 {
+			t.Fatalf("a missing member of %v left %v, added at %d", e.Members, got.Members, got.Added)
+		}
+	})
+	t.Run("within a node on 3 nodes", func(t *testing.T) {
+		l := placed(t, nodesOf(rep(3, 128), 3, 1, 2))
+		added := l.grow(0, 2, 0)
+		l.step(t, l.inputs(allMoves))
+		pgs := l.moving()
+		if len(pgs) == 0 {
+			t.Fatal("no move onto the added disk")
+		}
+		for _, i := range pgs {
+			e := l.pools().PGs[i]
+			if out := e.Members[e.leaving()].Disk; l.disk(out).Node != 0 || e.Members[3].Disk != added {
+				t.Fatalf("PG %d moved within no node: %v", i, e.Members)
+			}
+		}
+		l.settle(t)
+		if ok, s := l.converged(); !ok || len(l.moving()) != 0 {
+			t.Fatalf("PGs %v moving, converged %v:%s", l.moving(), ok, s)
+		}
+	})
+}

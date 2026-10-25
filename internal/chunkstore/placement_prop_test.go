@@ -31,11 +31,12 @@ func randomLayout(r *core.Rand) *layout {
 
 func randomSize(r *core.Rand) float64 { return []float64{0.5, 1, 2, 4, 8}[r.Below(5)] }
 
-// history is what the property test remembers of a run: every node a disk had, and for each PG and disk the interval of the last table the disk left the PG in.
+// history is what the property test remembers of a run: every node a disk had, for each PG and disk the interval of the last table the disk left the PG in, and for each PG the members that hold all its data, those it started with and those a recovered report covered since they joined.
 type history struct {
-	nodeOf []uint32
-	left   [][]leftAt
-	stats  *placementStats
+	nodeOf   []uint32
+	left     [][]leftAt
+	complete [][]uint32
+	stats    *placementStats
 }
 
 type leftAt struct {
@@ -44,8 +45,8 @@ type leftAt struct {
 }
 
 type placementStats struct {
-	runs, moves, bound int
-	worstReach         float64
+	runs, moves, bound, computations int
+	worstReach                       float64
 }
 
 func TestPlacementKeepsItsRules(t *testing.T) {
@@ -55,8 +56,8 @@ func TestPlacementKeepsItsRules(t *testing.T) {
 	}
 	stats := &placementStats{}
 	seeds.Run(t, 0, n, func(seed uint64) { placementRun(t, seed, stats) })
-	t.Logf("%d seeds: a disk added moved %d members against a lower bound of %d; available + held at worst %.2f%% under balanced",
-		stats.runs, stats.moves, stats.bound, 100*stats.worstReach)
+	t.Logf("%d seeds: a disk added moved %d members against a lower bound of %d; available + held at worst %.2f%% under balanced; at most %d computations to settle",
+		stats.runs, stats.moves, stats.bound, 100*stats.worstReach, stats.computations)
 	// A single seed can sit well above its own bound; the 5% holds over at least 8 runs.
 	if stats.runs >= 8 && 100*stats.moves > 105*stats.bound {
 		t.Fatalf("disk additions over %d seeds moved %d members, over 5%% above the lower bound %d", stats.runs, stats.moves, stats.bound)
@@ -134,7 +135,10 @@ func (h *history) event(r *core.Rand, l *layout) *Inputs {
 	case 10:
 		for i, e := range pt.PGs {
 			if r.Chance(1, 2) {
-				in.Activations = append(in.Activations, PGInterval{core.PGID{Pool: 1, Index: uint32(i)}, e.Interval})
+				in.Activations = append(in.Activations, PGInterval{pg(i), e.Interval})
+				if recovers(&e) {
+					in.Recovered = append(in.Recovered, PGInterval{pg(i), e.Interval})
+				}
 			}
 		}
 	case 11:
@@ -183,7 +187,7 @@ func (h *history) next(t *testing.T, l *layout, in *Inputs) {
 	}
 }
 
-// check holds every table to the rules: the pool's width, at most perDomain members per domain, live members kept when replicas go down, an interval raised by one exactly when the rules say, and a member removed and added back in a new interval.
+// check holds every table to the rules: the pool's width and at most one leaving member beside it, at most perDomain members per domain but a leaving one, live members kept when replicas go down, an interval raised by one exactly when the rules say, a member removed and added back in a new interval, a live leaving member removed exactly in the first table after a recovered report for an interval since its replacement joined, and no live member that holds all the PG's data removed unless the width still does.
 func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 	p, pt := l.pool, l.pools()
 	var old *PoolTable
@@ -193,21 +197,38 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 	split := old != nil && len(old.PGs) != len(pt.PGs)
 	if split {
 		h.left = nil
+		complete := make([][]uint32, len(pt.PGs))
+		for i := range complete {
+			complete[i] = h.complete[i/2]
+		}
+		h.complete = complete
 	}
 	for uint32(len(h.left)) < p.PGCount {
 		h.left = append(h.left, nil)
 	}
+	for len(h.complete) < len(pt.PGs) {
+		h.complete = append(h.complete, nil)
+	}
+	isLive := func(disk uint32) bool {
+		return slices.ContainsFunc(l.disks, func(d Disk) bool { return d.ID == disk && d.Mark != MarkDown })
+	}
 	for i := range pt.PGs {
 		e := &pt.PGs[i]
-		if len(e.Members) != p.width() {
-			return fmt.Errorf("PG %d has %d members, not %d", i, len(e.Members), p.width())
+		leaving := 0
+		for _, m := range e.Members {
+			if m.Leaving {
+				leaving++
+			}
+		}
+		if leaving > 1 || len(e.Members)-leaving != p.width() || (leaving == 1) != (e.Added > 0) || e.Added > e.Interval {
+			return fmt.Errorf("PG %d at interval %d has members %v, added at %d, for a width of %d", i, e.Interval, e.Members, e.Added, p.width())
 		}
 		perDomain := map[uint32]int{}
 		for j, m := range e.Members {
 			if slices.ContainsFunc(e.Members[:j], func(o Member) bool { return o.Disk == m.Disk }) {
 				return fmt.Errorf("PG %d has disk %d twice", i, m.Disk)
 			}
-			if slices.ContainsFunc(l.disks, func(d Disk) bool { return d.ID == m.Disk }) {
+			if !m.Leaving && slices.ContainsFunc(l.disks, func(d Disk) bool { return d.ID == m.Disk }) {
 				if perDomain[h.nodeOf[m.Disk]]++; perDomain[h.nodeOf[m.Disk]] > p.perDomain() {
 					return fmt.Errorf("PG %d has %d members on node %d", i, perDomain[h.nodeOf[m.Disk]], h.nodeOf[m.Disk])
 				}
@@ -233,6 +254,9 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 		if e.Activated < b.Activated || slices.ContainsFunc(e.Past, func(pi PastInterval) bool { return pi.Interval < e.Activated }) {
 			return fmt.Errorf("PG %d activated %d after %d, past %v", i, e.Activated, b.Activated, e.Past)
 		}
+		if err := h.checkCopies(i, old, &b, e, l, in, isLive); err != nil {
+			return err
+		}
 		for _, m := range b.Members {
 			if !slices.ContainsFunc(e.Members, func(o Member) bool { return o.Disk == m.Disk }) {
 				h.left[i] = append(h.left[i], leftAt{m.Disk, e.Interval})
@@ -246,6 +270,52 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 			}
 		}
 	}
+	return nil
+}
+
+// checkCopies holds PG i's step from b to e to the move rules, and keeps the members that hold all of its data. An edit or a lower replicas count may remove any member.
+func (h *history) checkCopies(i int, old *PoolTable, b, e *PGEntry, l *layout, in *Inputs, isLive func(uint32) bool) error {
+	disks := disksOf(e)
+	if old == nil {
+		h.complete[i] = disks
+		return nil
+	}
+	edited := slices.ContainsFunc(in.Edits, func(ed Edit) bool { return ed.PG == pg(i) }) || l.pool.width() < int(old.Replicas)
+	due := false
+	for _, r := range in.Recovered {
+		if r.PG != pg(i) {
+			continue
+		}
+		due = due || b.Added > 0 && r.Interval >= b.Added && r.Interval <= b.Interval
+		if r.Interval == b.Interval {
+			for _, m := range b.Members {
+				if !m.Leaving && !slices.Contains(h.complete[i], m.Disk) {
+					h.complete[i] = append(h.complete[i], m.Disk)
+				}
+			}
+		}
+	}
+	held := 0
+	for _, d := range disks {
+		if slices.Contains(h.complete[i], d) {
+			held++
+		}
+	}
+	for _, m := range b.Members {
+		if slices.Contains(disks, m.Disk) || edited || !isLive(m.Disk) {
+			continue
+		}
+		if m.Leaving && !due {
+			return fmt.Errorf("PG %d removed leaving member %d with no recovered report since interval %d", i, m.Disk, b.Added)
+		}
+		if slices.Contains(h.complete[i], m.Disk) && held < l.pool.width() {
+			return fmt.Errorf("PG %d removed live member %d, which holds all its data, leaving %d such of %v", i, m.Disk, held, e.Members)
+		}
+	}
+	if j := b.leaving(); due && j >= 0 && slices.Contains(e.Members, b.Members[j]) {
+		return fmt.Errorf("PG %d kept leaving member %d after a recovered report", i, b.Members[j].Disk)
+	}
+	h.complete[i] = slices.DeleteFunc(h.complete[i], func(d uint32) bool { return !slices.Contains(disks, d) })
 	return nil
 }
 
@@ -274,16 +344,17 @@ func (h *history) settle(t *testing.T, l *layout) int {
 	moves := 0
 	for c := 0; ; c++ {
 		l.hold()
-		prev := l.table
-		n := l.step(t, l.activateAll(allMoves))
-		if err := h.check(&prev, l, l.activateAll(allMoves)); err != nil {
+		prev, in := l.table, l.reportAll(allMoves)
+		n := l.step(t, in)
+		if err := h.check(&prev, l, in); err != nil {
 			t.Fatalf("table %d: %v", l.table.Epoch, err)
 		}
 		moves += n
 		if n == 0 {
+			h.stats.computations = max(h.stats.computations, c+1)
 			break
 		}
-		if c > 0 {
+		if c == 20 {
 			t.Fatalf("a computation once the moves copied proposed %d more", n)
 		}
 	}

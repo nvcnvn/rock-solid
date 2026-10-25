@@ -31,18 +31,25 @@ func TestTableSize(t *testing.T) {
 	}
 }
 
-// A delta costs a 30-byte header for one pool, 34 bytes per changed rep3 entry, 20 more with its previous interval's members.
+// A delta costs a 30-byte header for one pool, 34 bytes per changed rep3 entry, 20 more with its previous interval's members, 9 more during a move for the member added and the interval that added it.
 func TestDeltaSize(t *testing.T) {
 	prev := fullTable(2048, 3)
 	next := fullTable(2048, 3)
 	next.Epoch = 2
 	e := &next.Pools[0].PGs[7]
 	e.Past = []PastInterval{{1, e.Members}}
-	e.Interval, e.Members = 2, []Member{{0, MarkUp}, {1, MarkUp}, {9, MarkUp}}
+	e.Interval, e.Members = 2, []Member{{Disk: 0}, {Disk: 1}, {Disk: 9}}
 	next.Pools[0].PGs[8].Pinned = true
 	d := MakeDelta(&prev, &next)
 	if got := len(AppendDelta(nil, &d)); got != 30+2*34+20 {
 		t.Fatalf("a delta of two entries, one with a past interval: %d bytes", got)
+	}
+	moving := &next.Pools[0].PGs[9]
+	moving.Members = append(moving.Members, Member{Disk: 9})
+	moving.Members[0].Leaving, moving.Interval, moving.Added = true, 2, 2
+	d = MakeDelta(&prev, &next)
+	if got := len(AppendDelta(nil, &d)); got != 30+3*34+20+9 {
+		t.Fatalf("a delta of three entries, one moving: %d bytes", got)
 	}
 }
 
@@ -83,7 +90,7 @@ func TestDeltaBases(t *testing.T) {
 	}
 }
 
-// A truncated delta, an entry for a PG past its pool's count, and an interval number that goes backwards are malformed.
+// A truncated delta, an entry for a PG past its pool's count, an interval number that goes backwards, two leaving members, and a leaving member's replacement added at interval 0 or past the entry's interval are malformed.
 func TestMalformedDeltas(t *testing.T) {
 	prev := fullTable(16, 3)
 	next := fullTable(16, 3)
@@ -101,6 +108,23 @@ func TestMalformedDeltas(t *testing.T) {
 	}
 	if _, err := next.Apply(&Delta{Epoch: 3, CRC: prev.CRC(), Pools: d.Pools, Entries: []DeltaEntry{{core.PGID{Pool: 1, Index: 3}, prev.Pools[0].PGs[3]}}}); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("an interval going backwards: %v", err)
+	}
+	for _, c := range []struct {
+		name    string
+		leaving []int
+		added   uint32
+	}{{"two leaving members", []int{0, 1}, 2}, {"added at interval 0", []int{0}, 0}, {"added past the interval", []int{0}, 3}} {
+		bad := fullTable(16, 3)
+		bad.Epoch = 2
+		e := &bad.Pools[0].PGs[3]
+		e.Interval, e.Added = 2, c.added
+		for _, j := range c.leaving {
+			e.Members[j].Leaving = true
+		}
+		d := MakeDelta(&prev, &bad)
+		if _, err := DecodeDelta(AppendDelta(nil, &d)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v", c.name, err)
+		}
 	}
 }
 
@@ -133,6 +157,9 @@ func FuzzDecodeTable(f *testing.F) {
 	tbl := fullTable(4, 3)
 	tbl.Pools[0].PGs[1].Interval = 3
 	tbl.Pools[0].PGs[1].Past = []PastInterval{{1, tbl.Pools[0].PGs[1].Members}, {2, nil}}
+	moving := &tbl.Pools[0].PGs[3]
+	moving.Members = append(moving.Members, Member{Disk: 7})
+	moving.Members[1].Leaving, moving.Interval, moving.Added = true, 2, 2
 	f.Add(AppendTable(nil, &tbl))
 	stalled := &tbl.Pools[0].PGs[2]
 	for i := range uint32(300) {
@@ -159,6 +186,11 @@ func FuzzDecodeDelta(f *testing.F) {
 	f.Add(AppendDelta(nil, &d))
 	next = fullTable(4, 3)
 	next.Epoch, next.Pools[0].PGs[2].Interval = 2, 2
+	d = MakeDelta(&prev, &next)
+	f.Add(AppendDelta(nil, &d))
+	moving := &next.Pools[0].PGs[3]
+	moving.Members = append(moving.Members, Member{Disk: 7})
+	moving.Members[0].Leaving, moving.Interval, moving.Added = true, 2, 2
 	d = MakeDelta(&prev, &next)
 	f.Add(AppendDelta(nil, &d))
 	d = hugeDelta(&prev)
