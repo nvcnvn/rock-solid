@@ -23,9 +23,9 @@ import (
 // live blocks over its size, is fill, is written once in order in writes of waFillBlocks, each
 // followed half the time by a 4 KiB overwrite of what is written so far, so that the cleaner finds
 // dead blocks in the oldest segments as the disk fills; then it is overwritten at random for warm
-// disk capacities of writes before windows measured capacities, one by default, with 16 writes
-// outstanding. Write admission paces them once the cleaner falls behind, and a round takes the
-// writes waiting when it begins: 12 at 80% full and 7 at 90%, where the spike's records held 16.
+// disk capacities of writes before one measured capacity, with 16 writes outstanding. Write
+// admission paces them once the cleaner falls behind, and a round takes the writes waiting when it
+// begins: 12, 8 and 7 at 80, 85 and 90% full, where the spike's records held 16.
 // Records hold up to 256 KiB, where the net-gain guard lets victims of a 4 MiB segment pass up to
 // 914 of 1,023 blocks live, 89.35%. A checkpoint falls every 4 MiB of log, the cleaner streams
 // spike's stand-in for 64 MiB on a 16 GiB disk. check turns on the store's and the log's invariant
@@ -39,13 +39,12 @@ type waRun struct {
 	check     bool
 	cleanFree int
 	record    uint64
-	windows   int
 	plant     plants
 }
 
 // waResult is what the measured capacities saw: the user blocks acknowledged, the blocks the
 // disk was asked to write, those in each stream, the blocks the cleaner copied and the log's own
-// count; each measured capacity's write amplification; the chunk victims the cleaner took, their
+// count; the chunk victims the cleaner took, their
 // live blocks when taken, and the fullest over the whole run; the metadata stream's blocks by
 // what wrote them, and the tails the cold and metadata streams left at segments' ends; and the
 // disk's space, sampled. measured is set once the measured capacities begin, and ranOut when a
@@ -54,7 +53,6 @@ type waResult struct {
 	user, wrote, copied uint64
 	in                  [disklog.Meta + 1]uint64
 	metric              disklog.Writes
-	windows             []float64
 	victims, victimLive uint64
 	victimMost          uint64
 	flushed, merged     uint64
@@ -267,14 +265,8 @@ func (r waRun) run(t testing.TB, seed uint64) waResult {
 	}
 	user, res.measured, res.victims, res.victimLive = 0, true, 0, 0
 	wrote, in, copied, metric, background := h.wrote, h.wroteIn, h.s.CleanStats().Copied, h.s.Log().Writes(), h.s.Log().BackgroundBlocks()
-	for range max(r.windows, 1) {
-		was, wrote := user, h.wrote
-		limit += r.geo.DiskBlocks()
-		if !upTo(limit) {
-			t.Logf("%.0f%% full: ran out of space after %d measured blocks", 100*r.fill, user)
-			break
-		}
-		res.windows = append(res.windows, float64(h.wrote-wrote)/float64(user-was))
+	if !upTo(limit + r.geo.DiskBlocks()) {
+		t.Logf("%.0f%% full: ran out of space after %d measured blocks", 100*r.fill, user)
 	}
 	now := h.s.Log().Writes()
 	res.user, res.wrote = user, h.wrote-wrote
@@ -297,7 +289,7 @@ func (w waResult) log(t testing.TB, r waRun, reserve uint32, took time.Duration)
 	u, sp := float64(w.user), w.space
 	usable := float64(r.geo.SegmentBlocks - 1)
 	chunkSegs := sp.mean(sp.used[disklog.Hot] + sp.used[disklog.Cold])
-	t.Logf("%.0f%% full: write amplification %.3f, of chunk data %.3f, windows %.3f, in %v", 100*r.fill, w.amplification(), w.chunkAmplification(), w.windows, took)
+	t.Logf("%.0f%% full: write amplification %.3f, of chunk data %.3f, in %v", 100*r.fill, w.amplification(), w.chunkAmplification(), took)
 	t.Logf("  per user block: user headers %.4f, copies %.4f, copy headers %.4f, metadata %.4f (flushes %.4f, merges %.4f of which rewrites %.4f, records with manifests %.4f)",
 		float64(w.in[disklog.Hot]-w.user)/u, float64(w.copied)/u, float64(w.in[disklog.Cold]-w.copied)/u, float64(w.in[disklog.Meta])/u,
 		float64(w.flushed)/u, float64(w.merged)/u, float64(w.rewritten)/u, float64(w.manifests)/u)
@@ -379,9 +371,10 @@ const waIndex = 0.0125
 // victims up to 92.6% live in records of 192 KiB, where 4 MiB segments pass at most 89.35% and
 // run out of victims; 16 segments free, the reserve and the admission point write admission
 // holds them at; and user records of as many writes as the store's rounds carried under
-// admission, 12 at 80% and 7 or 8 above. The run's disk fill is within half a point of the
+// admission, 12, 8 and 7 at 80, 85 and 90%. The index's own writes per user block stay within 10%
+// of those measured, 0.56, 0.72 and 1.70. The run's disk fill is within half a point of the
 // subtest's, the log's counters equal what it measured, and no write fails with NoSpace while
-// the cleaner has a victim. The 80% run takes 2.5 minutes and 0.6 GB, 85% 3.5 minutes and
+// the cleaner has a victim. The 80% run takes 2.3 minutes and 0.6 GB, 85% 3.5 minutes and
 // 0.6 GB, and 90% 29 minutes and 2.5 GB.
 func TestCleanerWriteAmplification(t *testing.T) {
 	if os.Getenv(longSimEnv) == "" {
@@ -393,10 +386,11 @@ func TestCleanerWriteAmplification(t *testing.T) {
 		geo    disklog.Geometry
 		record uint64
 		spike  float64
+		meta   float64
 	}{
-		{0.80, disklog.Geometry{SegmentBlocks: 1024, SegmentCount: 1024}, 0, 4.03},
-		{0.85, disklog.Geometry{SegmentBlocks: 1024, SegmentCount: 1024}, 0, 6.03},
-		{0.90, disklog.Geometry{SegmentBlocks: 2048, SegmentCount: 2048}, 192 << 10, 10.50},
+		{0.80, disklog.Geometry{SegmentBlocks: 1024, SegmentCount: 1024}, 0, 4.03, 0.56},
+		{0.85, disklog.Geometry{SegmentBlocks: 1024, SegmentCount: 1024}, 0, 6.03, 0.72},
+		{0.90, disklog.Geometry{SegmentBlocks: 2048, SegmentCount: 2048}, 192 << 10, 10.50, 1.70},
 	} {
 		t.Run(strconv.Itoa(int(100*c.fill)), func(t *testing.T) {
 			w := waRun{geo: c.geo, fill: c.fill, index: waIndex, warm: 1, record: c.record}.run(t, 1)
@@ -409,6 +403,9 @@ func TestCleanerWriteAmplification(t *testing.T) {
 			}
 			if chunk := w.chunkAmplification(); math.Abs(chunk/c.spike-1) > 0.05 {
 				t.Fatalf("the chunk data's write amplification is %.3f, against the spike's %.2f", chunk, c.spike)
+			}
+			if meta := float64(w.in[disklog.Meta]) / float64(w.user); math.Abs(meta/c.meta-1) > 0.10 {
+				t.Fatalf("the index writes %.3f blocks per user block, against the %.2f measured", meta, c.meta)
 			}
 		})
 	}

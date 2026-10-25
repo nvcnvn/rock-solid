@@ -90,7 +90,6 @@ Cost-benefit with the age cap; WA and its ratio to the design's two streams. *He
 | C3, S3: file pool of whole chunks, Raft 1% of data, 90% | Log 4.93 → 5.53 with metadata; **slots 1.004 → 1.035** (Raft 0.010, runs 0.020 blocks per user block) |
 | S4: the design's compaction rule, buckets of runs adjacent in age | **Ran out of space at 80% full: 13,025 chunk-index runs holding 18.5% of the disk** ([FAIL] as a check that the run count stays bounded). Checkpoint flushes alternate between small (no cleaning in the interval) and large (a cleaner pass's moves), so no four adjacent runs fall within 0.5 to 1.5× of their average, and none ever merge. Size classes that may take any runs of a class (C1) end with 6 to 16 runs |
 
-
 ### Q15b: C1 under the store's conditions
 
 Run for the targets of the store's write amplification test ([test scenarios](../../docs/test-scenarios.md#cleaner-write-amplification-in-simulation)). The Go store differs from C1 in four ways, each measured in its simulation: it runs on 1,024 or 2,048 segments, which its simulator holds in memory; write admission keeps it at 15 to 17 free segments, where C1 cleans synchronously and keeps 8; at the same disk fill its index takes 1.25% of the disk, where C1's took about 1.6%, so it holds more data; and admission paces its writers, so a round carries 12 writes at 80% full and 7 to 8 at 85 to 90%, not 16.
@@ -103,6 +102,7 @@ Run for the targets of the store's write amplification test ([test scenarios](..
 | 95%, 4,096 × 4 MiB, 15 free, records of 11 writes | 29.5 |
 
 Records under admission cost most at 90%: 7-write records instead of 16 add 0.96 on 64 MiB segments, as much as the store's index writes beyond C1's model.
+
 ## Conclusions
 
 1. **Whole chunks go to chunk slots, not to the log** (Q13). Random deletes of whole chunks cost 4.9 at 90% full and 9.0 at 95% in 64 MiB segments, and slots cost nothing at any fill (1.004, the record headers). A pool that is half whole chunks also cleans its small writes for less, 2.75 instead of 6.1 at 90% with the slot headers in a lane of their own, because the whole chunks no longer take spare space. Whole files are no cheaper than single chunks once writers interleave (4.0 to 4.5 with 8 writers), and placement groups spread each file over every disk, so a disk's log sees whole-file deletes as random chunk deletes.

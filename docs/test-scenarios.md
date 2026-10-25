@@ -2991,11 +2991,12 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
 ## Cleaner write amplification in simulation
 
 - Targets: the chunk data's write amplification, every block the disk was asked to write outside
-  the metadata stream (user blocks, record and segment headers, the cleaner's copies and the tails
-  they leave) over the user blocks acknowledged, within 5% of the cleaner streams spike run under
-  the store's conditions (below), runs in their own stream, warmed up for 4 capacities and
-  measured over 2. The index's runs are reported beside it, not held to the spike, whose 40-byte
-  entries and size-tiered merges undercount them. Measured, seed 1, deterministic:
+  the metadata stream (user blocks, record and segment headers, and the cleaner's copies) over
+  the user blocks acknowledged, within 5% of the cleaner streams spike run under the store's
+  conditions (below), the spike warmed up for 4 capacities and measured over 2. The index's
+  writes per user block, the metadata stream's share, are reported beside it and held within 10%
+  of those measured, not to the spike, whose 40-byte entries and size-tiered merges undercount
+  them. Measured, seed 1, deterministic:
 
   | Fill | Disk | Spike, store's conditions | Store: chunk data | Store: every block (metadata stream) | Run time, peak resident |
   | --- | --- | --- | --- | --- | --- |
@@ -3043,11 +3044,11 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | 1,024 segments | 3.85 |
   | 15 segments free | 3.98 |
   | Records of 11 writes | 4.13 |
-  | 80% of the disk in data, as that test filled it (81.2% with the index) | 4.69 |
+  | 80% of the disk in data, the index's runs on top (81.2% full, `index` 0) | 4.69 |
   | The store's index writes, 0.59 against the spike's 0.29 | 4.99 |
 
   The fill and the index's writes are most of it, and the store's cleaner itself is within 1% of
-  the spike's. The test fills the disk as `write_limit` counts it.
+  the spike's.
 - The index writes twice what the spike modelled: at 80% 0.069 per user block in flushes against
   0.051, 0.47 in merges against 0.21, and 0.020 in records holding manifests against 0.004; at
   90% 0.18, 1.48 and 0.047. An extent costs a 38-byte key and a 26-byte value, a write also
@@ -3077,8 +3078,8 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
 - Default `write_limit` by segment size ([Volume size and capacity](design.md#volume-size-and-capacity)):
   the same run, seed 1, on 1,024 segments in records of `max_group_commit_bytes`' default, 1 MiB,
   at each band's default on the band's smallest segment, completes the measured capacity with no
-  NoSpace, its user data alone at the default's share of the disk, a point or so fuller than the
-  disk's fill with the index's runs (`TestDefaultWriteLimitBySegmentSize`, `ROCKSOLID_LONG_SIM` set, 2.3 minutes and
+  NoSpace, its user data alone at the default's share of the disk, so the disk, with the index's
+  runs, is a point or so fuller than the default (`TestDefaultWriteLimitBySegmentSize`, `ROCKSOLID_LONG_SIM` set, 2.3 minutes and
   0.58 GB in all). The fill a step higher runs out of space within seconds, before the measured
   capacity, no victim passing the guard. Bands above 4 MiB are checked on smaller segments with
   records giving a cap no higher than the band's, through `TestCleanerWriteAmplification` with
@@ -3098,7 +3099,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
 - The log's write counters (`disklog.(*Log).Writes`: the data blocks of ordinary items, a whole
   chunk's slot write included, and every block the log asked the disk to write, slot writes and
   the zeroing of a freed slot segment's header included) equal what the run acknowledged and
-  what the simulated disk executed. The 80% and 90% runs check that over the capacity they
+  what the simulated disk executed. The 80, 85 and 90% runs check that over the capacity they
   measure; on every test run `TestWriteAmplificationMetricEqualsTheMeasuredFigure` checks it on
   128 segments of 1 MiB at 40% full, with the invariant checker on, where the cleaner copies and
   the index writes runs, and `TestWriteAmplificationMetricCountsChunkSlots` on a disk of chunk
@@ -3106,10 +3107,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   zeroed after a TRIM and, with TRIM off, without. Dropping the count of a slot write, or of
   either zeroing write, fails it. Each disk exports these counters, so the drive wear figures in
   design.md read the number an operator does.
-- Open: column 1 cannot run as is, since the Go log always checkpoints; the metadata stream's
-  share, reported apart, gives the chunk data's own write amplification (4.47 at 80%) at the fill
-  the index's space raises. Open: tolerance ("land near" in the checklist). Open: the cleaner CPU
-  per user write against the spike's 2.8 / 7.5 / 20 µs; the simulation's time per write is mostly
+- Not held: the cleaner's CPU per user write against the spike's 2.8 / 7.5 / 20 µs; the simulation's time per write is mostly
   the in-memory index's lookups and the simulator, not a figure for hardware.
 - No ordinary write fails with NoSpace while the cleaner has a victim. The long runs leave the
   invariant checker off for time.
