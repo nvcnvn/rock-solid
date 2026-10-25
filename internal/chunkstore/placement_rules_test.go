@@ -38,6 +38,36 @@ func TestBalanceTakesFromTheFurthestAbove(t *testing.T) {
 	}
 }
 
+// An operator's edit that names more disks than the width, a disk twice or two disks in one domain is ignored, pin and all.
+func TestEditsKeepTheRules(t *testing.T) {
+	l := placed(t, nodesOf(rep(3, 16), 4, 2, 2))
+	e := l.pools().PGs[0]
+	a, b, c := e.Members[0].Disk, e.Members[1].Disk, e.Members[2].Disk
+	sibling := l.onNode(l.disk(a).Node)[0]
+	if sibling == a {
+		sibling = l.onNode(l.disk(a).Node)[1]
+	}
+	other := l.onNode(l.freeNode(&e))[0]
+	for _, row := range []struct {
+		name  string
+		disks []uint32
+		want  []uint32
+	}{
+		{"a disk twice", []uint32{a, a, b}, []uint32{a, b, c}},
+		{"two disks on one node", []uint32{a, sibling, b}, []uint32{a, b, c}},
+		{"four disks for rep3", []uint32{a, b, c, other}, []uint32{a, b, c}},
+		{"another node's disk in place of C", []uint32{a, b, other}, []uint32{a, b, other}},
+	} {
+		in := l.inputs(0)
+		in.Edits = []Edit{{PG: pg(0), Disks: row.disks, Pinned: true}}
+		l.step(t, in)
+		got := l.pools().PGs[0]
+		if accepted := slices.Equal(row.want, row.disks); !slices.Equal(disksOf(&got), row.want) || got.Pinned != accepted {
+			t.Errorf("%s: members %v, pinned %v", row.name, disksOf(&got), got.Pinned)
+		}
+	}
+}
+
 // Lowering replicas drops the last down member first, then the last member, so the live copies stay.
 func TestLoweringReplicasKeepsLiveMembers(t *testing.T) {
 	const a, b, c = 0, 1, 2

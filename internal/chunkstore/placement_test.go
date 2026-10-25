@@ -253,6 +253,15 @@ func (l *layout) onNode(node uint32) []uint32 {
 	return ids
 }
 
+// freeNode is the lowest node holding no member of e.
+func (l *layout) freeNode(e *PGEntry) uint32 {
+	for node := uint32(0); ; node++ {
+		if !slices.ContainsFunc(e.Members, func(m Member) bool { return l.disk(m.Disk).Node == node }) {
+			return node
+		}
+	}
+}
+
 func (l *layout) mark(m Mark, ids ...uint32) {
 	for _, id := range ids {
 		d := l.disk(id)
@@ -438,12 +447,9 @@ func TestIntervalsRaisedByTableChanges(t *testing.T) {
 		e := l.pools().PGs[7]
 		start := e.Interval
 		disks := disksOf(&e)
+		free := l.freeNode(&e)
 		in := l.inputs(0)
-		in.Edits = []Edit{{PG: pg(7), Disks: []uint32{disks[0], disks[1], l.onNode(3)[0]}}}
-		if !slices.Contains(l.onNode(3), disks[2]) {
-			in.Edits[0].Disks[2] = l.onNode(3)[0]
-		}
-		in.Edits[0].Disks = slices.Clone(in.Edits[0].Disks)
+		in.Edits = []Edit{{PG: pg(7), Disks: []uint32{disks[0], disks[1], l.onNode(free)[0]}}}
 		samePGs(t, "member C removed", l.raised(t, in), []int{7})
 		in = l.inputs(0)
 		in.Edits = []Edit{{PG: pg(7), Disks: disks}}

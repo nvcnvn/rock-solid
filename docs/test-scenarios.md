@@ -4147,6 +4147,9 @@ row says otherwise).
 - A disk's target is its capacity for the pool: `write_limit` less other pools' data on it, so this
   pool's own data counts, water-filled over domains capped at `max_per_domain` of the width, and
   split within a domain by capacity (`TestTargetsFollowCapacity`).
+- An operator's edit that names more disks than the width, a disk twice or two disks on one node
+  under `rep3` is ignored, pin and all; one that swaps a member for a disk on a node the PG lacks
+  is applied (`TestEditsKeepTheRules`).
 - Balance never moves a member of a pinned PG, and refill still replaces one on a lost disk. A
   draining disk keeps its members up while balance moves them all off (`TestPinAndDrain`).
 - Targets by capacity: after a disk is added to a pool holding data, the second computation, run

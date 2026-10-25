@@ -149,7 +149,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 	}
 	edits := make([]*Edit, n)
 	for i, ed := range all.Edits {
-		if ed.PG.Pool == in.ID && int(ed.PG.Index) < n {
+		if ed.PG.Pool == in.ID && int(ed.PG.Index) < n && pl.accepts(&ed) {
 			edits[ed.PG.Index] = &all.Edits[i]
 		}
 	}
@@ -201,6 +201,32 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 		e.Interval = b.Interval + 1
 	}
 	return PoolTable{ID: in.ID, Replicas: uint8(p.Replicas), MinLive: uint8(p.MinLive), PGs: pl.entries}, moves
+}
+
+// accepts reports whether an operator's edit keeps the pool's rules: no more disks than its width, no disk twice and no domain over perDomain; nextPool ignores any other.
+func (pl *placer) accepts(ed *Edit) bool {
+	if len(ed.Disks) > pl.pool.width() {
+		return false
+	}
+	for j, d := range ed.Disks {
+		if slices.Contains(ed.Disks[:j], d) {
+			return false
+		}
+		k := pl.find(d)
+		if k < 0 {
+			continue
+		}
+		same := 0
+		for _, o := range ed.Disks[:j] {
+			if ko := pl.find(o); ko >= 0 && pl.pool.domainOf(&pl.disks[ko]) == pl.pool.domainOf(&pl.disks[k]) {
+				same++
+			}
+		}
+		if same >= pl.pool.perDomain() {
+			return false
+		}
+	}
+	return true
 }
 
 // narrow drops members past width, the last down member first and then the last member, so lowering replicas keeps the live copies.
