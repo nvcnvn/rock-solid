@@ -74,9 +74,8 @@ Infinity == MaxTime + 1
 VARIABLES
     \* Control plane and tables
     tbl,      \* Seq([PG -> [iv, la]]): every committed table
-    ivs,      \* [PG -> Seq([mem: Seq(Disk), st: [Disk -> mark], lv: Disk \cup {0}, ad: Nat])]:
-              \* each interval's members, its leaving member (0 for none) and the first
-              \* interval whose recovered report removes it
+    ivs,      \* [PG -> Seq([mem: Seq(Disk), st: [Disk -> mark], lv: Disk \cup {0}])]:
+              \* each interval's members and its leaving member (0 for none)
     reqIv,    \* [PG -> Nat]: the interval whose primary asked for a new one
     reports,  \* set of [p, k]: activation reports on heartbeats, possibly late or repeated
     recd,     \* set of [p, k]: recovered reports on heartbeats, possibly late or repeated
@@ -265,7 +264,7 @@ PlanRates(n) ==
 InitGrant(g, h) ==
     ~Clocks /\ g # h /\ \E p \in PG : InitMem[p][1] = h /\ \E j \in 1..Len(InitMem[p]) : InitMem[p][j] = g
 
-InitIv(p) ==[mem |-> InitMem[p], st |-> [d \in Disk |-> IF d \in Node THEN "up" ELSE "down"], lv |-> 0, ad |-> 0]
+InitIv(p) ==[mem |-> InitMem[p], st |-> [d \in Disk |-> IF d \in Node THEN "up" ELSE "down"], lv |-> 0]
 
 Init ==
     /\ tbl = <<[p \in PG |-> [iv |-> 1, la |-> 1]]>>
@@ -340,22 +339,11 @@ Init ==
 Commit(t) == /\ Len(tbl) < IF plan.free THEN plan.n ELSE MaxTable
              /\ tbl' = Append(tbl, t)
 
-\* The interval that marks a member leaving, and any later one in which
-\* another member joins or is down, is the first whose recovered report
-\* removes it: a report from before says nothing of copies that member lacks.
-Stamp(p, x) ==
-    IF \/ x.lv = 0
-       \/ /\ x.ad # 0
-          /\ \/ Bug("ReportBeforeJoin")
-             \/ \A d \in Range(x.mem) \ {x.lv} : d \in Mem(p, Cur(p)) /\ x.st[d] # "down"
-    THEN x
-    ELSE [x EXCEPT !.ad = Cur(p) + 1]
-
 \* A new interval of each PG in ps, with members from f[p].
 NewIntervals(ps, f) ==
     /\ Commit([p \in PG |-> IF p \in ps THEN [iv |-> Cur(p) + 1, la |-> tbl[Len(tbl)][p].la]
                             ELSE tbl[Len(tbl)][p]])
-    /\ ivs' = [p \in PG |-> IF p \in ps THEN Append(ivs[p], Stamp(p, f[p])) ELSE ivs[p]]
+    /\ ivs' = [p \in PG |-> IF p \in ps THEN Append(ivs[p], f[p]) ELSE ivs[p]]
 
 Allowed(p, d, from, to) ==
     \/ from = "up" /\ to = "down"
@@ -395,15 +383,15 @@ Add(p, old, new) ==
          [ivs[p][Cur(p)] EXCEPT !.mem = Append(@, new), !.st[new] = "up", !.lv = old]])
     /\ UNCHANGED <<reqIv, reports, recd>>
 
-\* The leader removes the leaving member on a recovered report, possibly late,
-\* for an interval at or after the first that may remove it.
+\* The leader removes the leaving member on a recovered report for the PG's
+\* current interval; a late one, for an earlier interval, does nothing.
 Remove(p) ==
     LET x == ivs[p][Cur(p)]
     IN /\ x.lv # 0
-       /\ \/ \E r \in recd : r.p = p /\ r.k >= x.ad
+       /\ \/ \E r \in recd : r.p = p /\ (r.k = Cur(p) \/ Bug("AcceptOldReport"))
           \/ Bug("RemoveBeforeRecovered")
        /\ NewIntervals({p}, [q \in PG |->
-            [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # x.lv), !.lv = 0, !.ad = 0]])
+            [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # x.lv), !.lv = 0]])
        /\ UNCHANGED <<reqIv, reports, recd>>
 
 \* Moving the primary: the first two members swap.
@@ -1730,15 +1718,18 @@ RestartedPlans == {Restarted}
 \* ci-moves: PG 2's replica 3, or its primary 2, moved to node 1 by adding
 \* node 1 and removing the leaving member on a recovered report; the
 \* replica's move with the leaving member marked down before its replacement
-\* recovers, or with a process restart; and the replica's move refilled
-\* before the removal: a disk is formatted again and replaces node 1's old
-\* disk. With no "die", each sends only the daemon's one write W.
+\* recovers, or with a process restart; the replica's move with its primary
+\* in maintenance and back, so a report from before W was written arrives
+\* late; and the replica's move refilled before the removal: a disk is
+\* formatted again and replaces node 1's old disk. With no "die", each sends
+\* only the daemon's one write W.
 MoveReplica == Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Session, {})
 MovePrimary == Plan(<<AddM(2, 2, 1), RemoveM(2)>>, Session, {})
 MoveLeavingDown == Plan(<<AddM(2, 3, 1), Mark(3, "down"), RemoveM(2)>>, Session, {})
 MoveRestart == Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Session, {"restart"})
+MoveMaint == Plan(<<AddM(2, 3, 1), Mark(2, "maint"), Mark(2, "up"), RemoveM(2)>>, Session, {})
 MoveRefill == Plan(<<AddM(2, 3, 1), Repl(2, 1, 4), RemoveM(2)>>, Session, {"format"})
-MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveRefill}
+MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveMaint, MoveRefill}
 
 \* ci-leases: PG 2's primary is node 2, whose CLOCK_BOOTTIME runs at its raw
 \* rate or 22.6% slow; node 3, its only grantor, runs 4% slow or fast, with
