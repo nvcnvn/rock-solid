@@ -85,11 +85,16 @@ func rtable(pgs uint32, minLive uint8) Table {
 }
 
 func newRCluster(t *testing.T, tbl Table) *rcluster {
+	return newRClusterOn(t, tbl, sim.New(1, sim.DefaultSettings()))
+}
+
+// newRClusterOn is newRCluster on scheduler s.
+func newRClusterOn(t *testing.T, tbl Table, s *sim.Scheduler) *rcluster {
 	geo, err := disklog.GeometryFor(diskBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &rcluster{t: t, s: sim.New(1, sim.DefaultSettings()), table: tbl, cl: &rclient{replies: map[core.RequestID]Response{}, data: map[core.RequestID][]byte{}, sent: map[core.RequestID]core.IOBuf{}},
+	c := &rcluster{t: t, s: s, table: tbl, cl: &rclient{replies: map[core.RequestID]Response{}, data: map[core.RequestID][]byte{}, sent: map[core.RequestID]core.IOBuf{}},
 		sentVer: map[sendKey]uint64{}, lost: map[[2]core.NodeID]int{}}
 	c.inv.Register(invSendOrder, func() error { return c.orderErr })
 	const disks = 3

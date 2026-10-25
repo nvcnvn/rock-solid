@@ -4425,12 +4425,15 @@ swaps**
 | Partial write whose base read fails its CRC32C | Fetched from another member before merging; the chunk's later operations wait behind it, in order | A block merged on the good copy, never on the rotten one |
 | Punch of bytes 100 to 8,191 | Block 0 merged with zeros; block 1 gets a punch entry | One record |
 
-- Sub-block spike M1, M6 and M9 as seeds: 2 clients, 8 writes pipelined each, writes of 1 to 300
-  bytes (up to 3 blocks in M9) at random offsets, primary changes in about 2% of steps. No seed of
-  500 differs from the byte oracle.
+- Sub-block spike M1 and M9 as seeds: 2 clients, 8 writes pipelined each, 24 writes each, of 1 to
+  300 bytes (up to 3 blocks in M9) at random offsets in the first 3 blocks of a chunk, on 3
+  simulated nodes, the history completed from the primary's replies. No seed of 500 leaves any
+  member's disk different from the acknowledged writes applied in version order. M6's primary
+  changes need peering and run under [Peering and read leases](#peering-and-read-leases).
 - M2 and M3 as planted bugs: merging on the committed version fails at least one seed of 500, with
-  one client pipelining 4 writes or two clients with one write each. The spike's model failed every
-  seed.
+  one client pipelining 4 writes or two clients with one write each. Both fail at seed 0, as the
+  spike's model failed every seed.
+- A base fetch with every member's copy rotten fails the write, refused.
 
 **`min_live` and `maintenance`**
 
