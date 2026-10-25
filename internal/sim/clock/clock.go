@@ -31,11 +31,7 @@ const (
 	Restore
 	// HeldMigration is a QEMU migration held at switchover, seen by a kvm-clock guest: every clock counts the hold, the marker changed.
 	HeldMigration
-	numStops
 )
-
-// Stops is the number of kinds of stop, Running included.
-const Stops = int(numStops)
 
 // Model is one node's clocks, piecewise linear in real time: CLOCK_MONOTONIC_RAW at its rate, CLOCK_BOOTTIME and CLOCK_MONOTONIC at that rate slewed by the time daemon.
 type Model struct {

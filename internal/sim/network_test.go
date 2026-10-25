@@ -428,7 +428,7 @@ func (k *ticker) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) [
 	return append(out, core.Action{Kind: core.ActSetTimer, Timer: 1, At: ctx.Now + 100_000})
 }
 
-func tick(s *sim.Scheduler, n *sim.Node, until core.Tick) {
+func tick(n *sim.Node, until core.Tick) {
 	k := &ticker{until: until}
 	id := n.Start(k, nil)
 	n.Feed(id, core.Event{Kind: core.EvTimer, Timer: 1})
@@ -441,7 +441,7 @@ func TestEachNodesRawClockRunsAtAFixedRateWithinFourPercent(t *testing.T) {
 	for seed := range uint64(10) {
 		s := sim.New(seed, set)
 		for range 3 {
-			s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { tick(s, n, 10*second) })
+			s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { tick(n, 10*second) })
 		}
 		before := s.Node(0).Context()
 		s.Run(1000)
@@ -471,7 +471,7 @@ func TestARawRateStepsOnceAfterTheRateWindowAndSlewsStayWithinBounds(t *testing.
 		s := sim.New(seed, set)
 		start := make([]uint64, 3)
 		for i := range 3 {
-			s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { tick(s, n, 30*second) })
+			s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { tick(n, 30*second) })
 			start[i] = s.Node(uint32(i)).Clock().Rate()
 		}
 		for s.Step() {

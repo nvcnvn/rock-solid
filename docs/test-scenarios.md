@@ -2862,6 +2862,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | Test | Seeds | Time |
   | --- | --- | --- |
   | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 3 s |
+  | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 2 s |
   | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 12 s |
   | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 4 s |
   | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 42 s |
@@ -4657,42 +4658,45 @@ runs of one seed give byte-identical traces, compared with `cmp`.
 
 **Message faults**
 
+Each loop pair has one connection, which delivers each direction in order, as TCP does.
+
 | Fault | What a test checks |
 | --- | --- |
-| Drop with probability p | The sender's deadline on `ctx.Now` fires; nothing hangs |
+| Drop with probability p | The message is lost and its connection breaks; the sender's deadline on `ctx.Now` fires; nothing hangs |
 | Delay up to D | Delivery after the delay, in seeded order |
-| Round-trip jitter, seeded per message | The rate bound's shortest-round-trip choice in each third is exercised |
+| Round-trip jitter, seeded per message | Round trips vary message by message within the delay's bounds, as the rate bound's shortest-round-trip choice in each third needs |
 | Asymmetric queueing up to 50 ms on grants | One direction only |
-| Reorder | Two messages arrive swapped (see the Open below) |
-| Duplicate | A duplicated replica write of one version with identical data changes nothing (see the Open below) |
+| Reorder | Two messages on different connections arrive swapped; one connection never reorders |
+| Duplicate | The copy arrives right behind its original; a duplicated replica write of one value with identical data changes nothing (the toy protocol's replicas) |
 | Partition, symmetric or one-way | Messages across it are lost. A partitioned connection fails after a seeded delay, or never, and both are run. On failure every request outstanding on it fails with one `PeerLost` |
-| Node crash and restart | Every connection of the node gives its peers a `PeerLost`; unflushed disk state follows the simulated disk |
+| Node crash and restart | Every connection of the node gives its peers a `PeerLost`, after what the node had sent; unflushed disk state follows the simulated disk |
 
-- Open: TCP keeps order within a connection, and the in-order send rule assumes it. Reorder should
-  apply only across connections, or a reordered stream should count as a reconnect.
-- Open: how a duplicated client write is recognized at the primary. The design gives a replay rule
-  for MetaStore requests and incarnations for restarts, but nothing per chunk write.
+How the primary recognizes a resent client write is the open question on
+[resent chunk writes](design.md#roadmap-and-open-questions), which the
+[Consistency check of chunk histories](#consistency-check-of-chunk-histories) depends on.
 
 **Driver contract** (Modularity), shared with the phase 5 network suite
 
 - A reply is delivered only after its send's buffer has been released.
 - A peer's `PeerLost` comes after every buffer of that peer has been released.
 - A request that timed out keeps its buffer until the reply or `PeerLost`.
+- A `Reply`'s buffer is freed by the network once the reply is delivered or lost, and a machine
+  that frees a send's buffer while the network still holds it is reported.
 
 **Clocks per node**
 
 | Clock fault | Model |
 | --- | --- |
 | Oscillator drift | Raw rate within ±4% of real time, fixed per node per seed |
-| Raw rate step after measurement | A node's raw rate rises or falls once, by up to `lease_drift / 2`, at a seeded time after its holders have bounded it |
+| Raw rate step after measurement | A node's raw rate rises or falls once per boot, by up to `lease_drift / 2`, at a seeded step once its clocks have run `rate_window`, so its holders have bounded it |
 | Reboot | The node is down for at least a heartbeat; its raw clock restarts near 0 at a rate changed by up to 2%. A process restart keeps the raw clock and its rate |
-| Time-daemon slew | `BOOTTIME` rate differs from raw by up to ±22.6%, changing at seeded times; chrony's 8.33% as a case of its own |
+| Time-daemon slew | `BOOTTIME` rate differs from raw by up to ±22.6%, changing at seeded steps; chrony's 8.33% as a case of its own |
 | Suspend | Raw and `MONOTONIC` stop; `BOOTTIME` gains the sleep rounded down to whole seconds; one `Resumed` when that gain reaches the threshold |
 | Stop or pause in place, `tsc` guest or Firecracker | Every clock gains the pause; marker unchanged |
 | Stop in place, QEMU kvm-clock guest | Every clock frozen; marker unchanged |
 | Restore or live migration, any hypervisor or clocksource | Every clock frozen; marker changed |
 | QEMU migration held at switchover | kvmclock counts the hold, the TSC does not; marker changed (VM pause spike T4b) |
-| Messages to a paused node | Queued, then delivered on resume ahead of any request sent later; or lost |
+| Messages to a paused node | Queued, then delivered on resume ahead of its clients' requests and any message sent later; or lost, its connections broken |
 
 - The simulated driver delivers `Resumed` when `core.Resumed` reports it from the model's readings,
   the loop's own rule: a suspend whose `BOOTTIME − MONOTONIC` gain reaches the threshold, or a marker
@@ -4700,9 +4704,10 @@ runs of one seed give byte-identical traces, compared with `cmp`.
 - The clock model can be imported alone, by `internal/loop/looptest`, which scripts the event
   loop's clocks from it.
 - No message carries simulator time: a node sees only its own clocks.
-- Open: a stop on a kvm-clock guest with its messages lost leaves up to a heartbeat of stale reads
-  (open question). [Placement faults and invariants](#placement-faults-and-invariants) P15 must
-  either exclude it or tolerate exactly that.
+- **[property]** Under every message and clock fault at once, a machine that keeps the driver
+  contract never trips the network's buffer check, every buffer is freed once the run settles,
+  each `Resumed` comes in a loop's first pass after a pause that calls for it and no other, and the
+  seed replays to a byte-identical trace.
 
 ## Placement faults and invariants
 

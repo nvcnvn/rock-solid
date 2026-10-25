@@ -357,7 +357,7 @@ func (s *Scheduler) fault() bool {
 	}
 	if s.chance(s.set.PauseNum, s.set.PauseDen) {
 		if id, ok := s.pick(true); ok {
-			stop := clock.Stop(1 + s.rand.Below(uint64(clock.Stops-1)))
+			stop := clock.Stop(1 + s.rand.Below(uint64(clock.HeldMigration)))
 			s.Pause(id, stop, 1+core.Tick(s.rand.Below(uint64(maxPause))), s.rand.Chance(1, 2))
 			return true
 		}
@@ -620,9 +620,6 @@ func (n *Node) ID() uint32 { return n.id }
 
 // Up reports whether the node is running.
 func (n *Node) Up() bool { return n.up }
-
-// Paused reports whether the node stands still.
-func (n *Node) Paused() bool { return n.paused }
 
 // Pool is the buffer pool of the node's current incarnation.
 func (n *Node) Pool() *Pool { return n.pool }
