@@ -22,16 +22,19 @@ func TestWritesAreSentAgainInOrderAfterAReconnect(t *testing.T) {
 		c.runFor(50_000)
 		c.s.Heal(0, 2)
 		c.settle()
+		if plant != (c.orderErr != nil) {
+			t.Fatalf("plant %v: %v", plant, c.orderErr)
+		}
+		if plant {
+			continue
+		}
 		for _, w := range ws {
 			if rp := c.reply(w); rp.Status != StatusOK {
-				t.Fatalf("plant %v: write answered %+v", plant, rp)
+				t.Fatalf("write answered %+v", rp)
 			}
 		}
 		if c.newest(2, a) != MakeVersion(1, 2) || c.newest(2, b) != MakeVersion(1, 1) {
-			t.Fatalf("plant %v: the member that missed them holds %#x and %#x", plant, c.newest(2, a), c.newest(2, b))
-		}
-		if plant != (c.orderErr != nil) {
-			t.Fatalf("plant %v: %v", plant, c.orderErr)
+			t.Fatalf("the member that missed them holds %#x and %#x", c.newest(2, a), c.newest(2, b))
 		}
 	}
 }

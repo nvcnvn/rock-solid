@@ -590,30 +590,30 @@ func (r *Replica) order(ctx *core.Context, ev *core.Event, u *Update, interval u
 	}
 }
 
-// memberUpdate takes a write or punch the PG's primary ordered: accepted only in the PG's current interval, by an up member, and refused once an earlier version of its chunk in the interval failed here, so the member logs a chunk's versions without a gap. A version sent again is answered with its first copy's outcome: at once if that copy is done, which it is unless it failed, else once it is.
+// memberUpdate takes a write or punch the PG's primary ordered: accepted only in the PG's current interval, by an up member, and refused once an earlier version of its chunk in the interval failed here, so the member logs a chunk's versions without a gap. A version sent again while its first copy is in flight is answered with that copy's outcome; one whose copy is done is refused, since after a failure or a restart the member may hold only some of its records.
 func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) {
 	_, e := r.table.entry(u.PG.PG)
 	if e != nil && u.PG.Interval > e.Interval && u.PG.Epoch > r.table.Epoch {
 		r.park(ev, u.PG.Epoch, out)
 		return
 	}
-	if e == nil || u.PG.Interval != e.Interval || !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) ||
+	refuse := e == nil || u.PG.Interval != e.Interval || !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) ||
 		slices.ContainsFunc(r.failed, func(f failedVer) bool {
 			return f.chunk == u.Chunk && f.version>>32 == u.Version>>32 && f.version <= u.Version
-		}) {
-		freeBuf(ctx, ev.Msg.Buf)
-		rp := r.refusal(u.PG.PG)
-		rp.Kind, rp.Fill = KindAck, r.fill(ctx)
-		r.answer(ctx, ev.Peer, u.ID, &rp, core.NoBuf, out)
-		return
-	}
-	if u.Version <= r.st.Newest(u.Chunk) {
-		freeBuf(ctx, ev.Msg.Buf)
+		})
+	if !refuse && u.Version <= r.st.Newest(u.Chunk) {
 		if j := slices.IndexFunc(r.reqs, func(q storeReq) bool { return q.kind == reqMember && q.chunk == u.Chunk && q.version == u.Version }); j >= 0 {
+			freeBuf(ctx, ev.Msg.Buf)
 			r.dups = append(r.dups, dup{orig: r.reqs[j].id, peer: ev.Peer, msgID: u.ID})
 			return
 		}
-		rp := Response{Kind: KindAck, Version: u.Version, Fill: r.fill(ctx)}
+		r.failed = append(r.failed, failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
+		refuse = true
+	}
+	if refuse {
+		freeBuf(ctx, ev.Msg.Buf)
+		rp := r.refusal(u.PG.PG)
+		rp.Kind, rp.Fill = KindAck, r.fill(ctx)
 		r.answer(ctx, ev.Peer, u.ID, &rp, core.NoBuf, out)
 		return
 	}

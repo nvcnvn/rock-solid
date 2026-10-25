@@ -187,3 +187,23 @@ func TestARefusalFromTheOnlyMemberSentToEndsTheVersion(t *testing.T) {
 		t.Fatalf("answered %+v", rp)
 	}
 }
+
+// Disk 2 logged 1.1 and acknowledged it. Sent again once that copy is done, 1.1 is refused, since after a failure or a restart the member may hold only some of its records, and 1.2 after it is refused too.
+func TestAVersionSentAgainAfterItsCopyIsDoneIsRefused(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	first := c.replicaWrite(1, ch, MakeVersion(1, 1))
+	c.settle()
+	if rp := c.reply(first); rp.Status != StatusOK {
+		t.Fatalf("1.1 answered %+v", rp)
+	}
+	again := c.replicaWrite(1, ch, MakeVersion(1, 1))
+	c.settle()
+	next := c.replicaWrite(1, ch, MakeVersion(1, 2))
+	c.settle()
+	for _, w := range []core.RequestID{again, next} {
+		if rp := c.reply(w); rp.Status != StatusRefused {
+			t.Fatalf("answered %+v", rp)
+		}
+	}
+}
