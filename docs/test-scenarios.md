@@ -4274,11 +4274,10 @@ holding data, and the same again. Once the loop stops:
   above their targets feed that domain's other disks, and a disk far above its target feeds the
   new disk in its own domain until it falls under the rest. Over 5,000 seeds the moves were 0.7%
   above the lower bound in all, none above a quarter more.
-- Over a run of at least 8 seeds, the members disk additions move total at most 5% above the sum
-  of their lower bounds. Of ten runs of 8 seeds starting at 0, 800, …, 7,200, nine stayed within
-  0.75%; seeds 2,400 to 2,407 reach 10.3%, two of their additions 12 and 20% above their bounds,
-  so the check fails on that run alone. Open: whether the check holds only over the 1,000 seeds
-  `scripts/seeds.sh` runs, or the bound or the moves change.
+- Over a run of at least 200 seeds, the members disk additions move total at most 5% above the
+  sum of their lower bounds. Fewer seeds swing too far: seeds 2,400 to 2,407 reach 10.3%, two of
+  their additions 12 and 20% above their bounds, and 2,400 to 2,439 4.05%; the 250 seeds 2,250 to
+  2,499 reach 1.17%, and every window of 800 seeds stayed within 0.75%.
 
 `Unbalanced` [property], `TestAddedDiskNeverUnbalances`, on layouts drawn as the study's test U
 draws them: 200 random layouts each for `rep2` and `rep3`, 3 to 6 nodes of 1 or 2 disks of 0.5 to

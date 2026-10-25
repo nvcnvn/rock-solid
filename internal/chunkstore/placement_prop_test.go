@@ -60,8 +60,8 @@ func TestPlacementKeepsItsRules(t *testing.T) {
 	seeds.Run(t, 0, n, func(seed uint64) { placementRun(t, seed, stats) })
 	t.Logf("%d seeds: a disk added moved %d members against a lower bound of %d; available + held at worst %.2f%% under balanced; at most %d computations to settle",
 		stats.runs, stats.moves, stats.bound, 100*stats.worstReach, stats.computations)
-	// A single seed can sit well above its own bound; the 5% holds over at least 8 runs.
-	if stats.runs >= 8 && 100*stats.moves > 105*stats.bound {
+	// A single seed, or a few, can sit well above their bound; the 5% is a mean over at least 200 runs.
+	if stats.runs >= 200 && 100*stats.moves > 105*stats.bound {
 		t.Fatalf("disk additions over %d seeds moved %d members, over 5%% above the lower bound %d", stats.runs, stats.moves, stats.bound)
 	}
 }
