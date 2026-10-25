@@ -486,7 +486,7 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 	freeBuf(ctx, buf)
 }
 
-// askBase sends the next up member of the PG a read of the base block at its version, or fails the write once none is left to ask.
+// askBase sends the next up member of the PG a read of the base block at its version, or fails the write once none is left to ask: after a member's refusal or a lost connection to it.
 func (r *Replica) askBase(ctx *core.Context, i int, out *ReplicaOutput) {
 	f := &r.bases[i]
 	_, e := r.table.entry(f.pg)
@@ -502,6 +502,7 @@ func (r *Replica) askBase(ctx *core.Context, i int, out *ReplicaOutput) {
 		a := core.Action{Kind: core.ActNetSend, Peer: r.addr(m.Disk)}
 		a.Msg.Len = uint16(copy(a.Msg.Body[:], r.frame))
 		out.Actions = append(out.Actions, a)
+		f.asked = a.Peer
 		return
 	}
 	id, b := f.ID, f.Block
@@ -628,12 +629,13 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	}
 }
 
-// baseFetch is a base block the primary asks another member for, tried from member tried of the PG, under read ID rid.
+// baseFetch is a base block the primary asks another member for, tried from member tried of the PG, under read ID rid, of the loop at asked.
 type baseFetch struct {
 	BaseFetch
 	pg    core.PGID
 	tried int
 	rid   core.RequestID
+	asked core.NodeID
 }
 
 // dup is a write sent again to a member while its first copy, store request orig, is in flight; it is answered as that copy is.
@@ -996,8 +998,13 @@ func (r *Replica) ask(out *ReplicaOutput) {
 	}
 }
 
-// peerLost ends every send to the peer and has the writes it left unacknowledged sent again after ResendAfter, new writes to it waiting behind them.
+// peerLost ends every send to the peer and has the writes it left unacknowledged sent again after ResendAfter, new writes to it waiting behind them; a base asked of it is asked of the next member.
 func (r *Replica) peerLost(ctx *core.Context, peer core.NodeID, out *ReplicaOutput) {
+	for i := len(r.bases) - 1; i >= 0; i-- {
+		if r.bases[i].asked == peer {
+			r.askBase(ctx, i, out)
+		}
+	}
 	lost := false
 	for i := len(r.vers) - 1; i >= 0; i-- {
 		v := &r.vers[i]

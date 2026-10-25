@@ -274,6 +274,28 @@ func TestAWriteWaitingWhenAnotherChunkEndsTheIntervalIsRefused(t *testing.T) {
 	}
 }
 
+// The primary's copy of a base is rotten and disk 2, which it asks first, is cut off: once the connection is lost it asks disk 3.
+func TestABaseIsAskedOfTheNextMemberWhenOneIsLost(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 2, 1, 0xaa)
+	e, _ := c.reps[0].Store().Index().Lookup(testPool, ch, 2)
+	c.s.Node(0).Disk(0).FlipBit(e.BlockLBA(2), 4000, 1)
+	c.s.Partition(0, 1, false)
+	w := c.write(pg0, ch, 2*core.BlockSize, []byte{1})
+	c.runFor(50_000)
+	c.s.Heal(0, 1)
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusOK {
+		t.Fatalf("answered %+v", rp)
+	}
+	for d := range 3 {
+		if got := c.diskBlock(d, ch, 2); got[0] != 1 || got[4000] != 0xaa {
+			t.Fatalf("disk %d merged on % x", d+1, []byte{got[0], got[4000]})
+		}
+	}
+}
+
 // Settle is refused once the primary has activated the PG's interval, since the chunk's next versions could then take the numbers of those it drops.
 func TestSettleIsRefusedOnceThePGIsActive(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
