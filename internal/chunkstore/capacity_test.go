@@ -89,17 +89,17 @@ func (c *capacityCase) run(t *testing.T, d *datadriven.TestData) string {
 		c.grants = blocksOf(t, d.CmdArgs[0].Key)
 		return ""
 	case "figures":
-		f := c.pool.Capacity(c.disks, c.grants)
+		f := c.pool.Capacity(c.disks, c.grants, 0)
 		if bound := mulDiv(f.Capacity, uint64(c.pool.dataShards()), uint64(c.pool.width())); f.Available+f.Held > f.Balanced || f.Balanced > bound {
 			t.Errorf("available %d + held %d, balanced %d, capacity ÷ b %d", f.Available, f.Held, f.Balanced, bound)
 		}
 		return c.print(&f)
 	case "conditions":
-		f := c.pool.Capacity(c.disks, c.grants)
+		f := c.pool.Capacity(c.disks, c.grants, 0)
 		c.cond.Update(&f, d.HasArg("settled"))
 		return c.conditions()
 	case "confirm":
-		f := c.pool.Capacity(c.disks, c.grants)
+		f := c.pool.Capacity(c.disks, c.grants, 0)
 		c.cond.Confirm(&f)
 		return fmt.Sprintf("confirmed %.1f%%\n", 100*c.cond.Confirmed)
 	}
@@ -129,7 +129,7 @@ func (c *capacityCase) diskName(id uint32) string {
 // hold puts held blocks of the pool's data on its disks at balanced proportions: each domain its load at
 // balance scaled to held, split over the domain's disks by capacity.
 func (c *capacityCase) hold(held uint64) {
-	f := c.pool.Capacity(c.disks, 0)
+	f := c.pool.Capacity(c.disks, 0, 0)
 	for i := range c.disks {
 		d := &c.disks[i]
 		di := slices.IndexFunc(f.Disks, func(x DiskFigures) bool { return x.ID == d.ID })

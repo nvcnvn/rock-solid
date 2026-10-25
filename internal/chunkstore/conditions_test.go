@@ -58,7 +58,7 @@ func TestFillConditions(t *testing.T) {
 		{"79% again", blocks * 79 / 100, false, false, limit - blocks*79/100},
 	} {
 		disks[0].Live = s.live
-		f := p.Capacity(disks, 0)
+		f := p.Capacity(disks, 0, 0)
 		c.Update(&f, true)
 		if c.Full != s.full || c.NearFull != s.nearFull || f.Available != s.available || f.Disks[0].Full() != (s.live >= limit) {
 			t.Fatalf("%s: %s, available %d, want Full %v NearFull %v, available %d", s.name, raised(&c), f.Available, s.full, s.nearFull, s.available)
@@ -71,13 +71,13 @@ func TestGrantsMakeAPoolFull(t *testing.T) {
 	p, disks := rep(3, 128), c2()
 	d := &disks[3]
 	d.Live = d.Blocks*90/100 - (1<<30/core.BlockSize)*42/128
-	f := p.Capacity(disks, 4*(256<<20)/core.BlockSize)
+	f := p.Capacity(disks, 4*(256<<20)/core.BlockSize, 0)
 	var c Conditions
 	c.Update(&f, true)
 	if !c.Full || f.Available != 0 || !f.Disks[3].Full() {
 		t.Fatalf("%s, available %d, D admits: %v", raised(&c), f.Available, !f.Disks[3].Full())
 	}
-	f = p.Capacity(disks, 0)
+	f = p.Capacity(disks, 0, 0)
 	var fresh Conditions
 	fresh.Update(&f, true)
 	if fresh.Full || f.Disks[3].Full() {
@@ -95,7 +95,7 @@ func TestTwoPoolsOnOneDisk(t *testing.T) {
 	}{{90, true, false}, {95, false, true}} {
 		p := rep(3, 1)
 		p.WriteLimit = s.limit
-		f := p.Capacity(disks, 0)
+		f := p.Capacity(disks, 0, 0)
 		var c Conditions
 		if c.Update(&f, true); c.Full != s.full || c.NearFull != s.nearFull {
 			t.Fatalf("limit %d%%: %s", s.limit, raised(&c))
@@ -105,19 +105,19 @@ func TestTwoPoolsOnOneDisk(t *testing.T) {
 
 func TestAvailable(t *testing.T) {
 	p := rep(3, 128)
-	empty := p.Capacity(c2(), 0)
+	empty := p.Capacity(c2(), 0, 0)
 	grants := uint64(4 * (256 << 20) / core.BlockSize)
-	granted := p.Capacity(c2(), grants)
+	granted := p.Capacity(c2(), grants, 0)
 	if gap := int64(empty.Available) - int64(granted.Available) - int64(grants); gap < 0 || gap > 4 {
 		t.Fatalf("four 256 MiB grants take %d blocks off available, want 1 GiB to within rounding", empty.Available-granted.Available)
 	}
 	outside := append(c2(), Disk{ID: 4, Node: 4, Blocks: 1, Class: "hdd"})
-	if f := p.Capacity(outside, 0); f.Available != empty.Available || len(f.Disks) != 4 || f.Capacity != empty.Capacity {
+	if f := p.Capacity(outside, 0, 0); f.Available != empty.Available || len(f.Disks) != 4 || f.Capacity != empty.Capacity {
 		t.Fatalf("a disk without members of the pool changes its figures: %+v", f)
 	}
 	full := c2()
 	full[3].Live = tb(0.95)
-	f := p.Capacity(full, 0)
+	f := p.Capacity(full, 0, 0)
 	if f.Disks[3].Capacity != 0 || f.Disks[3].Room != 0 || f.Available != 0 {
 		t.Fatalf("a disk past write_limit because of another pool: capacity %d, room %d, available %d", f.Disks[3].Capacity, f.Disks[3].Room, f.Available)
 	}
@@ -129,7 +129,7 @@ func TestNoCapacityStrandsNothing(t *testing.T) {
 	for i := range disks {
 		disks[i].Slots, disks[i].Live = 64, disks[i].Blocks
 	}
-	f := rep(2, 128).Capacity(disks, 0)
+	f := rep(2, 128).Capacity(disks, 0, 0)
 	var c Conditions
 	if c.Update(&f, true); f.Capacity != 0 || f.Stranded != 0 || c.Stranded {
 		t.Fatalf("capacity %d, f %v, Stranded %v", f.Capacity, f.Stranded, c.Stranded)
@@ -145,7 +145,7 @@ func TestPerNodeAvailable(t *testing.T) {
 	for i, want := range []string{"0.600 TB", "1.800 TB", "1.800 TB"} {
 		d := disks[i]
 		d.Slots = 256
-		if f := p.Capacity([]Disk{d}, 0); size(f.Available) != want {
+		if f := p.Capacity([]Disk{d}, 0, 0); size(f.Available) != want {
 			t.Fatalf("node %d: available %s, want %s", i, size(f.Available), want)
 		}
 	}
@@ -154,10 +154,10 @@ func TestPerNodeAvailable(t *testing.T) {
 // Pools that share disks draw on the same capacity, so their figures overlap.
 func TestPoolsShareCapacity(t *testing.T) {
 	disks := c2()
-	if f := rep(3, 128).Capacity(disks, 0); size(f.Balanced) != "2.700 TB" || size(f.Capacity) != "9.900 TB" {
+	if f := rep(3, 128).Capacity(disks, 0, 0); size(f.Balanced) != "2.700 TB" || size(f.Capacity) != "9.900 TB" {
 		t.Fatalf("rep3: balanced %s of %s", size(f.Balanced), size(f.Capacity))
 	}
-	if f := rep(1, 128).Capacity(disks, 0); size(f.Balanced) != "9.900 TB" {
+	if f := rep(1, 128).Capacity(disks, 0, 0); size(f.Balanced) != "9.900 TB" {
 		t.Fatalf("none: balanced %s", size(f.Balanced))
 	}
 }
@@ -167,7 +167,7 @@ func TestReservations(t *testing.T) {
 	p := rep(3, 128)
 	p.Overcommit = false
 	c := &capacityCase{pool: p, disks: c2()}
-	f := p.Capacity(c.disks, 0)
+	f := p.Capacity(c.disks, 0, 0)
 	const T = 1e12
 	for _, s := range []struct {
 		name                     string
@@ -190,7 +190,7 @@ func TestReservations(t *testing.T) {
 		}
 	}
 	c.hold(tb(2))
-	f = p.Capacity(c.disks, 0)
+	f = p.Capacity(c.disks, 0, 0)
 	if !p.Reserves(&f, 2.5*T, 0, 0.1*T) || p.Reserves(&f, 2.5*T, 0, 0.3*T) {
 		t.Fatalf("with 2 TB written, balanced %s", size(f.Balanced))
 	}
@@ -210,7 +210,7 @@ func TestStuck(t *testing.T) {
 		t.Fatalf("Stuck %v once the PG copies again", c.Stuck)
 	}
 	if c.Watch(10*StuckAfter, nil); len(c.Stuck) != 0 {
-		t.Fatalf("Stuck %v once the past members are trimmed", c.Stuck)
+		t.Fatalf("Stuck %v once the PG has nothing left to copy", c.Stuck)
 	}
 }
 
@@ -221,12 +221,12 @@ func TestRebootChangesNoFigure(t *testing.T) {
 	for i := range disks {
 		disks[i].Slots, disks[i].Live, disks[i].Own = 128, tb(1), tb(1)
 	}
-	before := p.Capacity(disks, 0)
+	before := p.Capacity(disks, 0, 0)
 	var c Conditions
 	c.Update(&before, true)
 	was := c
 	lastReported := slices.Clone(disks)
-	during := p.Capacity(lastReported, 0)
+	during := p.Capacity(lastReported, 0, 0)
 	if c.Update(&during, true); !reflect.DeepEqual(before, during) || !reflect.DeepEqual(c, was) {
 		t.Fatal("a reboot changed the figures")
 	}
@@ -240,7 +240,7 @@ func TestStrandingLayoutsAreAccepted(t *testing.T) {
 	if _, err := p.CheckLayout(disks); err != nil {
 		t.Fatal(err)
 	}
-	if f := p.Capacity(disks, 0); !f.Asks() {
+	if f := p.Capacity(disks, 0, 0); !f.Asks() {
 		t.Fatal("C6 does not ask for confirmation")
 	}
 }
@@ -280,13 +280,13 @@ func TestPoolFiguresHoldTheirBounds(t *testing.T) {
 				disks[perNode[node][r.Below(uint64(len(perNode[node])))]].Slots++
 			}
 		}
-		empty := p.Capacity(disks, 0)
+		empty := p.Capacity(disks, 0, 0)
 		held := r.Below(empty.Available/uint64(p.PGCount)+1) * uint64(p.PGCount)
 		for i := range disks {
 			own := held * uint64(disks[i].Slots) / uint64(p.PGCount)
 			disks[i].Own, disks[i].Live = own, disks[i].Live+own
 		}
-		f := p.Capacity(disks, 0)
+		f := p.Capacity(disks, 0, 0)
 
 		if err := figureBounds(p, &f); err != nil {
 			t.Fatalf("pool %+v held %d: %v", p, held, err)

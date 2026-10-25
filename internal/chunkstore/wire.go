@@ -177,10 +177,11 @@ type DiskState struct {
 	Failed bool
 }
 
-// Report is a node's heartbeat to the authority: the PGs whose primary activated, member latencies and its disks.
+// Report is a node's heartbeat to the authority: the PGs whose primary activated, the PGs whose activated primary has recovered every member but a leaving one, member latencies and its disks.
 type Report struct {
 	ID          core.RequestID
 	Activations []PGFields
+	Recovered   []PGFields
 	Latencies   []Latency
 	Disks       []DiskState
 }
@@ -435,6 +436,10 @@ func AppendReport(dst []byte, rp *Report) []byte {
 	for i := range rp.Activations {
 		dst = appendPG(dst, &rp.Activations[i])
 	}
+	dst = le.AppendUint32(dst, uint32(len(rp.Recovered)))
+	for i := range rp.Recovered {
+		dst = appendPG(dst, &rp.Recovered[i])
+	}
 	dst = le.AppendUint32(dst, uint32(len(rp.Latencies)))
 	for _, l := range rp.Latencies {
 		dst = le.AppendUint64(le.AppendUint32(dst, l.Disk), uint64(l.Latency))
@@ -454,6 +459,10 @@ func DecodeReport(b []byte, data int, rp *Report) error {
 	rp.Activations = rp.Activations[:0]
 	for n := r.count(pgFieldsSize); n > 0; n-- {
 		rp.Activations = append(rp.Activations, r.pg())
+	}
+	rp.Recovered = rp.Recovered[:0]
+	for n := r.count(pgFieldsSize); n > 0; n-- {
+		rp.Recovered = append(rp.Recovered, r.pg())
 	}
 	rp.Latencies = rp.Latencies[:0]
 	for n := r.count(latencySize); n > 0; n-- {

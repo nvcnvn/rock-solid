@@ -27,6 +27,7 @@ internal/chunkstore TestCleanerSurvivesCrashes 500
 internal/chunkstore TestRecoveryAndRebuildEqualLiveIndex 200
 internal/chunkstore TestRecoveriesMatchTheCrashOracle 200
 internal/chunkstore TestPoolFiguresHoldTheirBounds 20000
+internal/chunkstore TestPlacementKeepsItsRules 1000
 "
 
 cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)

@@ -21,7 +21,7 @@ f 0.0%, stranded room: none
 asks false, spare domain true
 reprotectable 2.400 TB, losing domain B
 
-# Placement still proposes moves, or a PG still lists past members: Unbalanced keeps its value.
+# Placement still proposes moves, or a PG has no recovered report for its current interval: Unbalanced keeps its value.
 conditions
 ----
 none
