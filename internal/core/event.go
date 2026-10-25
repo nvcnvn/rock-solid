@@ -165,7 +165,7 @@ type IOVec struct {
 	Len uint32
 }
 
-// Action is one output of a state machine, executed by a driver: a DiskWrite gathers Vec, or Buf when Vec is empty; a DiskRead fills Buf; Len is in bytes; a SetTimer re-arms Timer at At; a DiskFsync makes durable every write completed before it runs, and with Linked set runs only once the DiskWrite just before it in the same output completes.
+// Action is one output of a state machine, executed by a driver: a DiskWrite gathers Vec, or Buf when Vec is empty; a DiskRead fills Buf; Len is in bytes; a SetTimer re-arms Timer at At; a DiskFsync makes durable every write completed before it runs, and with Linked set runs only once the DiskWrite just before it in the same output completes; a NetSend with Reply set answers a request, so the driver frees its Msg.Buf once sent.
 type Action struct {
 	Kind   ActionKind
 	Peer   NodeID
@@ -176,6 +176,7 @@ type Action struct {
 	Vec    []IOVec
 	Len    uint64
 	Linked bool
+	Reply  bool
 	Timer  TimerID
 	At     Tick
 }
