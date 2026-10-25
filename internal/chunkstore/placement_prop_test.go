@@ -192,7 +192,7 @@ func (h *history) next(t *testing.T, l *layout, in *Inputs) {
 	}
 }
 
-// check holds every table to the rules: the pool's width and at most one leaving member beside it, at most perDomain members per domain but a leaving one, live members kept when replicas go down, an interval raised by one exactly when the rules say, a member removed and added back in a new interval, a live leaving member removed exactly in the first table after a recovered report for an interval since the last that added a member or had one down, and no live member that holds all the PG's data removed unless the width still does.
+// check holds every table to the rules: the pool's width and at most one leaving member beside it, more members only beside a leaving one after replicas went down and never more than the table before, at most perDomain members per domain but a leaving one, live members kept when replicas go down, an interval raised by one exactly when the rules say, a member removed and added back in a new interval, a live leaving member removed exactly in the first table after a recovered report for an interval since the last that added a member or had one down, and no live member that holds all the PG's data removed unless the width still does.
 func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 	p, pt := l.pool, l.pools()
 	var old *PoolTable
@@ -227,7 +227,12 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 				leaving++
 			}
 		}
-		if leaving > 1 || len(e.Members)-leaving != p.width() || (leaving == 1) != (e.Added > 0) || e.Added > e.Interval {
+		var b PGEntry
+		if old != nil {
+			b = old.PGs[i*len(old.PGs)/len(pt.PGs)]
+		}
+		n, surplus := len(e.Members)-leaving, len(b.Members)-leavingIn(b.Members)
+		if leaving > 1 || n < p.width() || n > p.width() && (leaving == 0 || n > surplus) || (leaving == 1) != (e.Added > 0) || e.Added > e.Interval {
 			return fmt.Errorf("PG %d at interval %d has members %v, added at %d, for a width of %d", i, e.Interval, e.Members, e.Added, p.width())
 		}
 		perDomain := map[uint32]int{}
@@ -240,10 +245,6 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 					return fmt.Errorf("PG %d has %d members on node %d", i, perDomain[h.nodeOf[m.Disk]], h.nodeOf[m.Disk])
 				}
 			}
-		}
-		var b PGEntry
-		if old != nil {
-			b = old.PGs[i*len(old.PGs)/len(pt.PGs)]
 		}
 		raise := old == nil || split || int(old.Replicas) != p.Replicas || int(old.MinLive) != p.MinLive ||
 			!slices.Equal(b.Members, e.Members) ||
@@ -296,14 +297,14 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 	return nil
 }
 
-// checkCopies holds PG i's step from b to e to the move rules, and keeps the members that hold all of its data. An edit or a lower replicas count may remove any member.
+// checkCopies holds PG i's step from b to e to the move rules, and keeps the members that hold all of its data. An edit may remove any member.
 func (h *history) checkCopies(i int, old *PoolTable, b, e *PGEntry, l *layout, in *Inputs, isLive func(uint32) bool) error {
 	disks := disksOf(e)
 	if old == nil {
 		h.complete[i] = disks
 		return nil
 	}
-	edited := slices.ContainsFunc(in.Edits, func(ed Edit) bool { return ed.PG == pg(i) }) || l.pool.width() < int(old.Replicas)
+	edited := slices.ContainsFunc(in.Edits, func(ed Edit) bool { return ed.PG == pg(i) })
 	due := false
 	for _, r := range in.Recovered {
 		if r.PG != pg(i) {
@@ -345,7 +346,7 @@ func (h *history) checkCopies(i int, old *PoolTable, b, e *PGEntry, l *layout, i
 	return nil
 }
 
-// heal brings every disk up, undrained and unpinned, and computes tables, each once the last one's moves have copied, until one proposes no move: every disk is then within its margin and available + held within the largest margin of balanced.
+// heal brings every disk up, undrained and unpinned, and computes tables, each once the last one's moves have copied, until one proposes no move and leaves no PG moving: every disk is then within its margin and available + held within the largest margin of balanced.
 func (h *history) heal(t *testing.T, l *layout) {
 	t.Helper()
 	for i := range l.disks {
@@ -376,7 +377,7 @@ func (h *history) settle(t *testing.T, l *layout) int {
 			t.Fatalf("table %d: %v", l.table.Epoch, err)
 		}
 		moves += n
-		if n == 0 {
+		if n == 0 && len(l.moving()) == 0 {
 			h.stats.computations = max(h.stats.computations, c+1)
 			break
 		}

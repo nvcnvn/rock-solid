@@ -173,7 +173,6 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 				e.Members[j].Mark = pl.disks[k].Mark
 			}
 		}
-		e.Members = narrow(e.Members, p.width())
 		if e.leaving() < 0 {
 			e.Added = 0
 		}
@@ -245,16 +244,32 @@ func (pl *placer) accepts(ed *Edit) bool {
 	return true
 }
 
-// narrow drops members past width, a leaving member aside, the last down member first and then the last member, so lowering replicas keeps the live copies.
-func narrow(ms []Member, width int) []Member {
-	for len(ms) > width+leavingIn(ms) {
-		j := len(ms) - 1
-		if k := lastDown(ms); k >= 0 {
+// narrow brings e's members but a leaving one down to the width after replicas went down: it deletes a member refill would replace anyway, and marks the one it would otherwise drop, its last down member or else its last, leaving, so that it goes once the others have recovered; a PG with a leaving member keeps the rest until its removal.
+func (pl *placer) narrow(e, base *PGEntry) {
+	for len(e.Members)-leavingIn(e.Members) > pl.pool.width() {
+		j := len(e.Members) - 1
+		for j >= 0 && (e.Members[j].Leaving || !pl.missing(e, base, j)) {
+			j--
+		}
+		if j >= 0 {
+			if k := pl.find(e.Members[j].Disk); k >= 0 {
+				pl.load[k]--
+			}
+			e.Members = slices.Delete(e.Members, j, j+1)
+			continue
+		}
+		if e.leaving() >= 0 {
+			return
+		}
+		j = len(e.Members) - 1
+		if k := lastDown(e.Members); k >= 0 {
 			j = k
 		}
-		ms = slices.Delete(ms, j, j+1)
+		e.Members[j].Leaving = true
+		if k := pl.find(e.Members[j].Disk); k >= 0 {
+			pl.load[k]--
+		}
 	}
-	return ms
 }
 
 func leavingIn(ms []Member) int {
@@ -333,11 +348,12 @@ func (pl *placer) find(id uint32) int {
 	return k
 }
 
-// refill drops a missing leaving member, keeps the other leaving member in place of a missing member or where the width needs it, replaces every other missing member of e, and adds members until all but a leaving one fill the width, each on the eligible disk furthest below its target; a member with no eligible disk stays.
+// refill drops a missing leaving member, narrows e, keeps the other leaving member in place of a missing member or where the width needs it, replaces every other missing member of e, and adds members until all but a leaving one fill the width, each on the eligible disk furthest below its target; a member with no eligible disk stays.
 func (pl *placer) refill(e *PGEntry, base *PGEntry) {
 	if j := e.leaving(); j >= 0 && pl.missing(e, base, j) {
 		e.dropLeaving()
 	}
+	pl.narrow(e, base)
 	for j := 0; j < len(e.Members); j++ {
 		if !pl.missing(e, base, j) {
 			continue

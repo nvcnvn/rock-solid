@@ -53,14 +53,14 @@ func (l *layout) step(t *testing.T, in *Inputs) int {
 	return moves
 }
 
-// settle runs computations, each once the last one's moves have copied and activated, until one proposes no move.
+// settle runs computations, each once the last one's moves have copied and activated, until one proposes no move and leaves no PG moving.
 func (l *layout) settle(t *testing.T) (moves, computations int) {
 	t.Helper()
 	for computations = 1; ; computations++ {
 		l.hold()
 		n := l.step(t, l.reportAll(allMoves))
 		moves += n
-		if n == 0 || computations == 20 {
+		if n == 0 && len(l.moving()) == 0 || computations == 20 {
 			return moves, computations
 		}
 	}

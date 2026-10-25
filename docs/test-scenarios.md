@@ -4150,9 +4150,14 @@ row says otherwise).
   neither exists. The property test's seed 207 needed the second kind, and is a regression test
   (`TestPlacementSeed207`): every PG on the disks above their targets already had a member on the
   node of the disk below its margin.
-- Lowering `replicas` drops a PG's last down member first, then its last member
-  (`TestLoweringReplicasKeepsLiveMembers`): members A and B down and C up, `rep3` to `rep2`, keeps
-  A and C; the property test checks that no live member leaves while a down one stays.
+- Lowering `replicas` marks the member it would drop, the PG's last down member or else its last,
+  leaving, and the recovered report removes it; only a member refill would replace anyway is
+  deleted at once, and a PG with a leaving member keeps any further surplus until that removal
+  (`TestLoweringReplicasKeepsLiveMembers`). All up, `rep3` to `rep2`, marks C leaving; A and C
+  down, `rep3` to `rep1`, marks C and keeps A; C's disk gone deletes C. With only B holding every
+  chunk and A and C refill members still recovering, `rep3` to `rep1` takes two recovered reports
+  and never leaves B's chunks without a member, with every member up or with A, B or C down for
+  three tables.
 - A disk's fill margin is max(5% of its target, 1 member). A 0.5 TB disk beside 8 TB disks, with a
   target of 10 to 20 members, has a margin of 1 member.
 - Both steps keep the failure-domain rule. With `failure_domain: node`, no PG ever has two members
@@ -4243,9 +4248,10 @@ pinned, each table allowed 0, 1, 5 or every balance move.
 
 After every table:
 
-- Every PG keeps its pool's width beside at most one leaving member, with at most
+- Every PG keeps its pool's width beside at most one leaving member, or more, never more than the
+  table before, beside a leaving member after `replicas` went down, with at most
   `max_per_domain` per domain but the leaving member and no disk twice; its entry names the
-  interval that added the leaving member's replacement exactly while a member leaves.
+  first interval whose recovered report removes the leaving member exactly while a member leaves.
 - No table raises an interval it need not, and every table raises one it must, by exactly 1, by
   the table above; no last activated interval goes down.
 - A member removed and added back gets a new interval.
@@ -4253,12 +4259,12 @@ After every table:
   or after the add, and after the last that added a member or had one but the leaving member down,
   and never before.
 - No live member that holds all of a PG's data, one it started with or one a recovered report
-  covered that has stayed live since, leaves unless the members left that hold it still number the width; an
-  edit or a lower `replicas` may remove any member.
+  covered that has stayed live since, leaves unless the members left that hold it still number the
+  width; an edit may remove any member.
 - A delta reproduces the whole table and its CRC.
 
 Then every disk comes back up, undrained and unpinned, and tables are computed, each once the last
-one's moves have copied and activated, until one proposes no move; then a disk is added to the pool
+one's moves have copied and activated, until one proposes no move and leaves no PG moving; then a disk is added to the pool
 holding data, and the same again. Once the loop stops:
 
 - It settles within a few computations, at most 4 over 5,000 seeds: one after the moves copied

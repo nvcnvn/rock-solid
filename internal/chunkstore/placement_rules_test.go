@@ -68,28 +68,72 @@ func TestEditsKeepTheRules(t *testing.T) {
 	}
 }
 
-// Lowering replicas drops the last down member first, then the last member, so the live copies stay.
+// Lowering replicas marks the member it would drop, the last down one or else the last, leaving, so that the move's removal takes it once the others have recovered; it deletes at once only a member refill would replace anyway, and a PG keeps any further surplus until that removal.
 func TestLoweringReplicasKeepsLiveMembers(t *testing.T) {
 	const a, b, c = 0, 1, 2
+	start := func() *layout {
+		l := newLayout(rep(3, 1), 2, 2, 2)
+		l.table = Table{Epoch: 1, Pools: []PoolTable{{ID: 1, Replicas: 3, MinLive: 1, PGs: []PGEntry{{Members: []Member{{Disk: a}, {Disk: b}, {Disk: c}}, Interval: 1, Activated: 1}}}}}
+		l.pool.MinLive = 1
+		return l
+	}
 	for _, row := range []struct {
 		name     string
 		down     []uint32
+		lost     []uint32
 		replicas int
-		want     []uint32
+		want     []Member
 	}{
-		{"all up, rep3 to rep2", nil, 2, []uint32{a, b}},
-		{"A and B down, rep3 to rep2", []uint32{a, b}, 2, []uint32{a, c}},
-		{"B down, rep3 to rep2", []uint32{b}, 2, []uint32{a, c}},
-		{"A and C down, rep3 to rep1", []uint32{a, c}, 1, []uint32{b}},
-		{"all down, rep3 to rep1", []uint32{a, b, c}, 1, []uint32{a}},
+		{"all up, rep3 to rep2", nil, nil, 2, []Member{{Disk: a}, {Disk: b}, {Disk: c, Leaving: true}}},
+		{"B down, rep3 to rep2", []uint32{b}, nil, 2, []Member{{Disk: a}, {Disk: b, Mark: MarkDown, Leaving: true}, {Disk: c}}},
+		{"A and C down, rep3 to rep1", []uint32{a, c}, nil, 1, []Member{{Disk: a, Mark: MarkDown}, {Disk: b}, {Disk: c, Mark: MarkDown, Leaving: true}}},
+		{"C's disk gone, rep3 to rep2", nil, []uint32{c}, 2, []Member{{Disk: a}, {Disk: b}}},
+		{"C's disk gone, rep3 to rep1", nil, []uint32{c}, 1, []Member{{Disk: a}, {Disk: b, Leaving: true}}},
 	} {
-		l := newLayout(rep(3, 1), 2, 2, 2)
-		l.table = Table{Epoch: 1, Pools: []PoolTable{{ID: 1, Replicas: 3, MinLive: 1, PGs: []PGEntry{{Members: []Member{{Disk: a}, {Disk: b}, {Disk: c}}, Interval: 1, Activated: 1}}}}}
+		l := start()
 		l.mark(MarkDown, row.down...)
+		for _, d := range row.lost {
+			l.remove(d)
+		}
 		l.pool.Replicas = row.replicas
 		l.step(t, l.inputs(0))
-		if got := disksOf(&l.pools().PGs[0]); !slices.Equal(got, row.want) {
+		if got := l.pools().PGs[0].Members; !slices.Equal(got, row.want) {
 			t.Errorf("%s: members %v, want %v", row.name, got, row.want)
+		}
+	}
+	// Only B holds every chunk, A and C being refill members still recovering. A primary reports
+	// recovered only once every member but a leaving one is up and has copied from an up member
+	// that holds the chunks; the down members come back up after three tables.
+	for _, row := range []struct {
+		name string
+		down []uint32
+	}{{"all up", nil}, {"A down", []uint32{a}}, {"B down", []uint32{b}}, {"C down", []uint32{c}}} {
+		l := start()
+		complete := []uint32{b}
+		l.mark(MarkDown, row.down...)
+		l.pool.Replicas = 1
+		for round := range 6 {
+			if round == 3 {
+				l.mark(MarkUp, row.down...)
+			}
+			e := l.pools().PGs[0]
+			in := l.inputs(0)
+			source := slices.ContainsFunc(e.Members, func(m Member) bool { return m.Mark == MarkUp && slices.Contains(complete, m.Disk) })
+			if round > 0 && source && recovers(&e) {
+				in.Recovered = []PGInterval{{pg(0), e.Interval}}
+				for _, m := range e.Members {
+					if !m.Leaving && !slices.Contains(complete, m.Disk) {
+						complete = append(complete, m.Disk)
+					}
+				}
+			}
+			l.step(t, in)
+			if got := l.pools().PGs[0].Members; !slices.ContainsFunc(got, func(m Member) bool { return slices.Contains(complete, m.Disk) }) {
+				t.Fatalf("%s, table %d: members %v, none of them holding every chunk of %v", row.name, round, got, complete)
+			}
+		}
+		if got := l.pools().PGs[0].Members; len(got) != 1 || got[0].Leaving || !slices.Contains(complete, got[0].Disk) {
+			t.Errorf("%s: ended with members %v, complete %v", row.name, got, complete)
 		}
 	}
 }
