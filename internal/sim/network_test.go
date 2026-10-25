@@ -709,6 +709,7 @@ func (p *pinger) Next(ctx *core.Context, out []core.Action) []core.Action {
 func faultSettings() sim.Settings {
 	set := sim.DefaultSettings()
 	set.NetJitter = 200
+	set.FailAfter = 3 * second
 	set.DropNum, set.DropDen = 1, 50
 	set.DupNum, set.DupDen = 1, 50
 	set.CrashNum, set.CrashDen = 1, 500

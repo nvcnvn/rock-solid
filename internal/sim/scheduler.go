@@ -77,7 +77,9 @@ type Settings struct {
 	DropDen uint64
 	DupNum  uint64
 	DupDen  uint64
-	// FailAfter is the most a broken connection takes to fail with PeerLost at both ends; 0 means it never does.
+	// FailAfter is the most a broken connection takes to fail with PeerLost at both ends; 0 means it
+	// never does, so a pair whose connection a drop or partition broke stays cut, Heal or not, and the
+	// buffers sent on it stay held, until one end restarts.
 	FailAfter core.Tick
 	StaleNum  uint64
 	StaleDen  uint64
