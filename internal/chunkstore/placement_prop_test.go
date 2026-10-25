@@ -54,19 +54,24 @@ func TestPlacementKeepsItsRules(t *testing.T) {
 		n = 8
 	}
 	stats := &placementStats{}
-	seeds.Run(t, 0, n, func(seed uint64) {
-		r := core.NewRand(seed)
-		l := randomLayout(r)
-		h := &history{stats: stats}
-		h.next(t, l, l.inputs(allMoves))
-		for range 30 {
-			h.next(t, l, h.event(r, l))
-		}
-		h.heal(t, l)
-		h.addDisk(t, r, l)
-	})
+	seeds.Run(t, 0, n, func(seed uint64) { placementRun(t, seed, stats) })
 	t.Logf("%d seeds: a disk added moved %d members against a lower bound of %d; available + held at worst %.2f%% under balanced",
 		stats.runs, stats.moves, stats.bound, 100*stats.worstReach)
+}
+
+// Seed 207 stalled outside the margins before balance had its second kind of move: every PG on the disks above their targets had a member on the node of the disk below its margin.
+func TestPlacementSeed207(t *testing.T) { placementRun(t, 207, &placementStats{}) }
+
+func placementRun(t *testing.T, seed uint64, stats *placementStats) {
+	r := core.NewRand(seed)
+	l := randomLayout(r)
+	h := &history{stats: stats}
+	h.next(t, l, l.inputs(allMoves))
+	for range 30 {
+		h.next(t, l, h.event(r, l))
+	}
+	h.heal(t, l)
+	h.addDisk(t, r, l)
 }
 
 // event changes the layout at random and returns the next computation's inputs.

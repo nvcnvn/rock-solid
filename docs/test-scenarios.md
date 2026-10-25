@@ -2856,10 +2856,10 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
   runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
   they take.
-- The list, with 4 processes on a 14-core Apple M4 Pro Mac mini running other work: 43,200 seeds in
-  about 320 s, building the test binaries included; the largest process peaked at 528 MiB resident
-  (an `internal/lsm` metamorphic shard), all four at 1.9 GiB. The pool figures' row was timed on
-  2 processes, where the whole list took 567 s:
+- The list, with 4 processes on a 14-core Apple M4 Pro Mac mini running other work: 44,200 seeds in
+  about 330 s, building the test binaries included; the largest process peaked at 528 MiB resident
+  (an `internal/lsm` metamorphic shard), all four at 1.9 GiB. The pool figures' and placement rows
+  were timed on 2 processes, where the whole list took 603 s:
 
   | Test | Seeds | Time |
   | --- | --- | --- |
@@ -2878,6 +2878,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/chunkstore` `TestRecoveryAndRebuildEqualLiveIndex` | 200 | 37 s |
   | `internal/chunkstore` `TestRecoveriesMatchTheCrashOracle` | 200 | 24 s |
   | `internal/chunkstore` `TestPoolFiguresHoldTheirBounds` | 20,000 | about 1 s |
+  | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 21 s |
 
 - A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
   under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
@@ -4133,8 +4134,9 @@ row says otherwise).
   (`TestBalanceTakesFromTheFurthestAbove`: loads of 44, 44 and 40 against targets of 42.7 take one
   move, from the first 44, to 43, 44 and 41). When no such move is left, a move that brings a disk
   outside its margin nearer and takes neither disk outside its margin on the other side; stop when
-  neither exists. The property test's seed 207 needed the second kind: every PG on the disks above
-  their targets already had a member on the node of the disk below its margin.
+  neither exists. The property test's seed 207 needed the second kind, and is a regression test
+  (`TestPlacementSeed207`): every PG on the disks above their targets already had a member on the
+  node of the disk below its margin.
 - A disk's fill margin is max(5% of its target, 1 member). A 0.5 TB disk beside 8 TB disks, with a
   target of 10 to 20 members, has a margin of 1 member.
 - Both steps keep the failure-domain rule. With `failure_domain: node`, no PG ever has two members
@@ -4190,9 +4192,9 @@ Past intervals' member lists come on top of these sizes and are usually empty (`
   a 30-byte header for one pool and 34 bytes per changed `rep3` entry, 20 more with its previous
   interval's members (`TestDeltaSize`).
 
-**[property] tests.** `TestPlacementKeepsItsRules`, 1,000 seeds in `scripts/seeds.sh` (about 40 ms
-each). Each seed draws a layout from the matrix in Testing strategy, 3 or 5 nodes of 1 or 4 disks of
-0.5 to 8 TB, some holding another pool's data, under `none`, `rep2` or `rep3` with a random
+**[property] tests.** `TestPlacementKeepsItsRules`, 1,000 seeds in `scripts/seeds.sh`, about 40 ms
+each; 10,000 passed once in 204 s on 2 processes. Each seed draws a layout from the matrix in
+Testing strategy, 3 or 5 nodes of 1 or 4 disks of 0.5 to 8 TB, some holding another pool's data, under `none`, `rep2` or `rep3` with a random
 `min_live`, places it, and computes 30 tables after random events: a disk added or removed, a disk
 or node marked down, up or in `maintenance`, a drain set or cleared, time passing, primaries asking,
 activations folded, `replicas` or `min_live` changed, `pg_count` doubled, or a PG reordered and
