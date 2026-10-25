@@ -194,6 +194,8 @@ type chunkState struct {
 	waiting []int32
 	// held is whether write admission holds the chunk's next write back.
 	held bool
+	// failed is the lowest version a member's write or punch of the chunk failed at, after which the chunk's later versions of that interval are refused, so a member never logs one without the versions below it.
+	failed uint64
 }
 
 type sentItem struct {
@@ -532,7 +534,7 @@ func (s *Store) chunkSlot(c core.ChunkID) int32 {
 	}
 	cs := &s.chunks[i]
 	cs.live, cs.id, cs.pending, cs.waiting = true, c, cs.pending[:0], cs.waiting[:0]
-	cs.version, cs.epoch = 0, 0
+	cs.version, cs.epoch, cs.failed = 0, 0, 0
 	if ch, ok := s.ix.Chunk(s.cfg.Pool, c); ok && !s.plant.forgetVersion {
 		cs.version, cs.epoch = ch.Version, ch.Epoch
 	}
@@ -574,6 +576,9 @@ func (s *Store) orderWaiting(ctx *core.Context, ci int32, out *Output) {
 			}
 			continue
 		}
+		if o.err == nil && cs.failed != 0 && o.req.Version > cs.failed && o.req.Version>>32 == cs.failed>>32 {
+			o.err = ErrVersion
+		}
 		if o.err == nil && o.kind == opWrite && !s.admitWrite(ctx, ci, o) {
 			return
 		}
@@ -596,6 +601,9 @@ func (s *Store) finishUnordered(ctx *core.Context, oi int32, out *Output) {
 		back, o.req.Buf = o.req.Buf, core.NoBuf
 	}
 	s.freeBufs(ctx, oi)
+	if o.err != nil && o.req.Version > s.chunks[o.chunk].version {
+		s.memberFailed(o)
+	}
 	if !o.answered {
 		out.Replies = append(out.Replies, Reply{ID: o.req.ID, Version: o.version, Err: o.err, Buf: back})
 	}
@@ -844,6 +852,7 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 		if err := s.writeItems(ctx, o, first, last); err != nil {
 			o.err = err
 			s.freeBufs(ctx, oi)
+			s.memberFailed(o)
 		}
 	} else {
 		s.punchItems(o, first, last)
@@ -1596,6 +1605,7 @@ func (s *Store) itemDone(oi int32, out *Output) bool {
 	}
 	cs := &s.chunks[o.chunk]
 	if o.err != nil {
+		s.memberFailed(o)
 		// The writes ordered after a failed one may hold its bytes; the log fails them too, since
 		// it fails a stalled lane's queued items together in submit order, both hot lanes' at once.
 		if !o.holdsVersion() && !o.req.Gated {
@@ -1606,6 +1616,13 @@ func (s *Store) itemDone(oi int32, out *Output) bool {
 		}
 	}
 	return true
+}
+
+// memberFailed notes that op o failed if it is a member's, so the chunk's later versions of its interval waiting behind it are refused.
+func (s *Store) memberFailed(o *op) {
+	if cs := &s.chunks[o.chunk]; o.req.Version != 0 && (cs.failed == 0 || o.req.Version < cs.failed) {
+		cs.failed = o.req.Version
+	}
 }
 
 func (o *op) holdsVersion() bool {

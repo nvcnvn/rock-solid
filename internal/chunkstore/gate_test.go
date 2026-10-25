@@ -293,6 +293,48 @@ func TestSettleMapsTheKeptVersionsAndDropsTheRest(t *testing.T) {
 	}
 }
 
+// A member's 3.1 and 3.2 wait for write admission, and 3.1 then fails before it is logged, the pool too full to cut it into records: 3.2 is refused, never logged without 3.1.
+func TestAMemberNeverLogsAVersionAfterOneThatFailed(t *testing.T) {
+	h := newHarness(t, testConfig())
+	other := core.ChunkID{Volume: 1, Inode: 7, Index: 4}
+	h.gated(other, 0, []byte{1}, 3)
+	h.settle()
+	oi := h.s.chunkOf[other]
+	h.s.adm.held, h.s.chunks[oi].held = []int32{oi}, true
+	n := int(h.s.maxWrite) + 1
+	if n >= core.BlocksPerChunk {
+		t.Fatalf("a write of %d blocks is one item", n)
+	}
+	member := func(v uint64, blocks int) uint64 {
+		id := h.id()
+		h.s.Write(&h.ctx, Request{ID: id, Chunk: chunkC, Len: uint32(blocks) * core.BlockSize, Buf: h.writeBuf(0, make([]byte, blocks*core.BlockSize)), Version: v}, &h.out)
+		h.take()
+		return id
+	}
+	first, next := member(MakeVersion(3, 1), n), member(MakeVersion(3, 2), 1)
+	var hog []core.IOBuf
+	for {
+		b, err := h.pool.Alloc(core.BlockSize)
+		if err != nil {
+			break
+		}
+		hog = append(hog, b)
+	}
+	h.s.adm.heldHead = 1
+	h.s.OnEvent(&h.ctx, &core.Event{Kind: core.EvTimer, Timer: AdmitTimer}, &h.out)
+	h.take()
+	for _, b := range hog {
+		h.pool.Free(b)
+	}
+	h.settle()
+	if r := h.reply(first); r.Err == nil {
+		t.Fatalf("3.1 answered %+v with the pool full", r)
+	}
+	if r := h.reply(next); r.Err == nil {
+		t.Fatalf("3.2 answered %+v after 3.1 failed", r)
+	}
+}
+
 // A gated write that fails with none of its items durable leaves the chunk at its version: its primary may have sent that version to members, so it is never handed out again with other bytes.
 func TestAFailedGatedWriteKeepsItsVersion(t *testing.T) {
 	h := newHarness(t, testConfig())

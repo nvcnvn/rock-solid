@@ -285,3 +285,47 @@ func TestSettleIsRefusedOnceThePGIsActive(t *testing.T) {
 		t.Fatalf("Settle in an active interval: %v", err)
 	}
 }
+
+// Disk 2 fails to log 1.1, a punch whose edge block finds its pool full: 1.2, sent after it, is refused, so the member never holds 1.2 without 1.1.
+func TestAMemberRefusesTheVersionsAfterOneItFailed(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	var hog []core.IOBuf
+	c.call(1, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		for {
+			b, err := ctx.Pool.Alloc(core.BlockSize)
+			if err != nil {
+				break
+			}
+			hog = append(hog, b)
+		}
+		ctx.Pool.Free(hog[len(hog)-1])
+		hog = hog[:len(hog)-1]
+	})
+	c.nextID++
+	punch := c.nextID
+	u := Update{Kind: KindReplicaPunch, ID: punch, PG: c.pgFields(pg0), Chunk: ch, Off: 10, Len: 100, Version: MakeVersion(1, 1)}
+	c.s.Node(c.client.Node).Call(c.client, func(ctx *core.Context, acts []core.Action) []core.Action {
+		a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: 1}}
+		a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))
+		a.Msg.Buf, _ = ctx.Pool.AllocZeroed(core.BlockSize)
+		c.cl.sent[punch] = a.Msg.Buf
+		return append(acts, a)
+	})
+	c.until(punch)
+	c.call(1, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		for _, b := range hog {
+			ctx.Pool.Free(b)
+		}
+	})
+	next := c.replicaWrite(1, ch, MakeVersion(1, 2))
+	c.settle()
+	for _, w := range []core.RequestID{punch, next} {
+		if rp := c.reply(w); rp.Status != StatusRefused {
+			t.Fatalf("answered %+v", rp)
+		}
+	}
+	if v := c.newest(1, ch); v != 0 {
+		t.Fatalf("disk 2 holds %#x", v)
+	}
+}
