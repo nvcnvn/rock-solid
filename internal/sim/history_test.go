@@ -60,7 +60,9 @@ func TestRepliesAMachineSendsCompleteTheHistory(t *testing.T) {
 		}
 		return int(b[1]), [sim.OpWords]uint64{uint64(b[1]) + 10}, true
 	})
-	s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { n.Start(sim.MachineFunc(func(_ *core.Context, _ *core.Event, out []core.Action) []core.Action { return out }), nil) })
+	s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) {
+		n.Start(sim.MachineFunc(func(_ *core.Context, _ *core.Event, out []core.Action) []core.Action { return out }), nil)
+	})
 	a, b := h.Invoke(0, [sim.OpWords]uint64{}), h.Invoke(1, [sim.OpWords]uint64{})
 	send := func(body string, reply bool) {
 		s.Node(0).Call(core.NodeID{}, func(_ *core.Context, out []core.Action) []core.Action {
