@@ -3830,72 +3830,67 @@ job lists the models and `deep` configurations, and every other job runs once pe
 
 ## Wire messages
 
-Hand-written encodings with a version byte, over `encoding/binary`'s `Append*` and `PutUint*` into
-buffers the caller provides. No reflection. Every message about a PG carries its *PG fields*: the
-sender's table epoch (`uint64`, per the PG epochs study) and the PG's interval number in that table
-(`uint32`). k.n means version (interval k, counter n), packed as k << 32 | n.
+The frame, the PG fields and the version packing are in [Wire messages](design.md#wire-messages).
+k.n is version (interval k, counter n).
 
-| Message | Fields required by the design |
+| Message | Fields |
 | --- | --- |
 | Connection hello | The client's session ID and incarnation (the daemon's start time on `CLOCK_BOOTTIME`) |
-| Chunk write, client to primary | PG fields, session ID, incarnation (8 bytes), chunk ID (16 bytes), byte range within the chunk, optional `expect_ver`, snapshot epoch, the data |
-| Chunk write, primary to member | The above, plus the version and the merged whole blocks at block-aligned offsets of the frame |
-| Write acknowledgment, member to primary | Version; the member's disk fill |
+| Chunk write, client to primary | PG fields, session ID, incarnation (8 bytes), chunk ID (16 bytes), byte range within the chunk, optional `expect_ver`, snapshot epoch; as data, the blocks the range touches |
+| Chunk write, primary to member | The above, plus the version; as data, the merged whole blocks |
+| Write acknowledgment, member to primary | Version and the member's disk fill; or `NoSpace`; or a refusal (the member's table epoch and the PG's interval) |
 | Write reply to the client | Version; or `NoSpace`; or a refusal (the member's table epoch and the PG's interval); or an `expect_ver` mismatch |
-| Punch | PG fields, session ID, incarnation, chunk ID, byte range, optional `expect_ver`, snapshot epoch; the version when sent to a member; the shard's Raft term when the purger sends it ([Freeing space](design.md#freeing-space)) |
+| Punch | PG fields, session ID, incarnation, chunk ID, byte range, optional `expect_ver`, snapshot epoch; the version when sent to a member; the shard and its Raft term when the purger sends it ([Freeing space](design.md#freeing-space)). Answered as a write is |
 | Read | PG fields, chunk ID, byte range, optional `at_ver` |
-| Read reply | Bytes and version; or a refusal (wrong interval, chunk on the missing list, unfound) |
-| Lease request, holder to grantor | The holder's table epoch; the grantor grants only if it is at least its own, and otherwise refuses with its own table epoch |
-| Grant | Support epoch; the grantor's run ID and `CLOCK_MONOTONIC_RAW` reading `g`; no table epoch, since the request reported the holder's ([Epoch change model](#epoch-change-model)) |
+| Read reply | Version, and as data the blocks read; or a refusal (wrong interval, chunk on the missing list, unfound) |
+| Lease request, holder to grantor | The holder's table epoch; the grantor grants only if it is at least its own |
+| Grant | Support epoch; the grantor's run ID and `CLOCK_MONOTONIC_RAW` reading `g`; no table epoch, since the request reported the holder's ([Epoch change model](#epoch-change-model)); or a refusal with the grantor's table epoch |
 | Heartbeat between a node pair | The sender's table epoch; as a grantor, its run ID and `CLOCK_MONOTONIC_RAW`, on every heartbeat |
-| Heartbeat to the authority | Activation reports per PG; each member's acknowledgment latency; per disk its log ID, fill, oldest unfinished I/O age and whether its log has failed |
-| `member_timeout` report, primary to authority | Member, PG |
+| Heartbeat to the authority | Activation reports (PG fields); each member's acknowledgment latency; per disk its log ID, fill, oldest unfinished I/O age and whether its log has failed |
+| `member_timeout` report, primary to authority | PG fields, member disk |
 | Direct probe, authority to a disk's owner loop | Disk ID |
 | Probe reply | Log ID, oldest unfinished I/O age, whether the log has failed |
-| Peering | The adopted interval; per chunk, the newest version; the member's missing list |
+| Peering request | PG fields naming the interval to adopt |
+| Peering reply | The adopted interval; per chunk, the newest version; the member's missing list |
 
 **Cases**
 
-- Every kind round-trips, with each optional field present and absent.
+- Every kind round-trips, with each optional field present and absent and each list empty and not.
+- The frame of every kind matches `internal/chunkstore/testdata/wire_golden.txt`.
 - 1.1 packs to `0x0000000100000001`.
-- In a primary-to-member write of 1 block and of 1,024 blocks, each block starts at a block-aligned
-  offset of the frame. The receiver hands each block to a pool buffer without a copy; the receive
-  path's trace records no copy of data bytes.
-- An encoder whose frame exceeds 256 bytes attaches a pool buffer instead of failing. The 256-byte
-  inline limit itself is under [Event and Action types](#event-and-action-types).
-- Every request that carries data gets a reply, even a refusal. That reply is what lets the driver
+- In a primary-to-member write of 1 block and of 1,024 blocks, the data is the message's own pool
+  buffer and each block starts at a block-aligned offset of it. Decoding reads the frame and only
+  the buffer's length, so the receiver keeps the buffer it received and copies no data byte.
+- A frame over 256 bytes (257 bytes) travels in a pool buffer, zero-padded to whole blocks, with no
+  inline bytes; one of exactly 256 bytes stays inline. The 256-byte inline limit itself is under
+  [Event and Action types](#event-and-action-types).
+- Each request that carries data has a reply that carries a refusal (`Refused`, `NoSpace`): a
+  client write's reply and a member write's acknowledgment. That reply is what lets the driver
   release the send buffer (driver contract).
+- A long frame given a data buffer is a broken invariant of the sender's own state, and panics.
+- Encoding and decoding a member write, a read and a read reply allocate nothing.
 
 **Rejects.** Each is an error returned to the caller, never a panic.
 
 | Input | Result |
 | --- | --- |
 | Unknown version byte | Rejected as another version |
-| Unknown message kind | Malformed |
+| Unknown message kind, or a kind its decoder does not take | Malformed |
 | Truncated at every length from 0 to full − 1 | Malformed |
 | A trailing extra byte | Malformed |
-| Byte range with offset + length > 4 MiB | Malformed |
-| Primary-to-member data length ≠ block count × 4,096 | Malformed |
+| A frame in a pool buffer with a non-zero pad byte, an extra block of padding, or 256 bytes or fewer | Malformed |
+| Byte range with offset + length > 4 MiB, or a length of 0 | Malformed |
+| Write data length ≠ the range's block count × 4,096, client or member; data on a kind that carries none | Malformed |
+| A read reply's data not a whole number of blocks, past 4 MiB, or none on success | Malformed |
 | A version with interval 0 and counter ≠ 0, or counter 0 and interval ≠ 0 | Malformed (0 alone is the absent chunk) |
-| Data that does not start at a block-aligned offset | Malformed |
-| Interval number 0 in the PG fields | Malformed (intervals start at 1) |
+| A member write or punch at version 0, a client's with a version, an acknowledgment of success at version 0 | Malformed |
+| A write, client or member, with a shard or Raft term | Malformed |
+| An absent optional version that is not 0, or a flag byte other than 0 or 1 | Malformed |
+| Interval number 0 in the PG fields or a refusal | Malformed (intervals start at 1) |
+| A status its reply kind does not take (an acknowledgment takes success, `NoSpace` and `Refused`; a client's reply also a mismatch; a read reply success, `Refused`, missing and unfound), a grant status other than granted or refused; a peering request with lists | Malformed |
 
 - [fuzz] The seed corpus holds one valid frame of every kind. Random mutations never panic the
   decoder, and anything that decodes re-encodes to the same bytes.
-
-**Open**
-
-- The frame layout is not designed yet. A golden fixture under `testdata/` is due once it is, as for
-  the log format.
-- How a client's unaligned byte range is laid out in the frame, and so the data-length check for
-  client writes. The checklist puts whole-block data at block-aligned offsets, but a client sends
-  only some bytes of an edge block. A zero-length write's treatment is unstated too.
-- Whether the phase 3 frame already carries the snapshot epoch. Chunk writes and punches carry one
-  ([Snapshots and clones](design.md#snapshots-and-clones), [Freeing
-  space](design.md#freeing-space)), but snapshots are phase 11.
-- The per-write session check is phase 4's [Session fencing on storage
-  nodes](#session-fencing-on-storage-nodes), once the control-plane group brings the session table;
-  until then every write carries the session ID unchecked.
 
 ## Pools
 
@@ -4450,9 +4445,10 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
   - B's grant lapses on both of B's clocks. B moves to support epoch 8 and helps peer interval 42,
     which moves PG 17 to C.
   - The partition heals before A sees that table.
-  - A asks to renew under 7 and is refused; nothing A held under 7 survives. A asks afresh under 8.
+  - A asks to renew, and B answers under 8, not 7: nothing A held under 7 survives, and A counts
+    the grant as a fresh lease under 8.
 - A grant under a lapsed support epoch is never renewed, whatever the message delay. A duplicated
-  old renewal arriving after the bump is refused.
+  old request arriving after the bump gets a grant under 8, never one under 7.
 - A holds B's grant and reaches B but not the control plane. B adopts a table that moves PG 17's
   primary away from A; A's heartbeats still report the older table. B refuses A's renewals until A
   reports a table at least as new, so A's lease on B lapses within one `primary_lease` and A serves
@@ -4464,7 +4460,7 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
   and its part in other primaries' peering. A primary restarting at t = 100 s peers in its new
   interval at about 100 s under one reading and at 104 s under the other.
 - A fresh grant takes the same table check as a renewal: B holds PG 17 in interval 42, A asks
-  afresh under 8 with 41's table, and B refuses it until A reports a table at least as new, so A
+  afresh with 41's table, and B refuses it until A reports a table at least as new, so A
   gets no lease for PG 17. A planted variant that exempts fresh grants
   (`neg-fresh-grant-no-table-check`) fails "no PG serves reads from two primaries at once".
 - One grant covers every PG the pair shares and is renewed by the pair's heartbeat. With 2,048 PGs
@@ -5642,10 +5638,12 @@ Timers:
 - Framing: hand-written encodings with a version; every frame decoder has a native fuzz test.
   Messages up to 256 bytes travel inline; bulk data travels in pool buffers. Open: whether frames
   carry a checksum, and whether a frame that fails to decode is a `PeerLost` or a corrupt message
-  delivered as data.
-- A received chunk write's blocks are read straight into 4 KiB-aligned pool buffers (Wire messages:
-  whole-block data at block-aligned offsets of the frame): no copy and no allocation per message
-  (`b.ReportAllocs` 0).
+  delivered as data. The recommendation, decided here in phase 5: a CRC32C over frame and data in
+  the connection's framing, as Ceph's msgr2 does in its crc mode, a mismatch becoming a `PeerLost`;
+  the chunk store's frames stay as they are ([Wire messages](design.md#wire-messages)).
+- A received chunk write's blocks are read straight into a 4 KiB-aligned pool buffer, the
+  message's data buffer ([Wire messages](design.md#wire-messages)): no copy and no allocation per
+  message (`b.ReportAllocs` 0).
 - Messages are batched per connection: everything ready for one connection in a pass goes in one
   `writev` (as under Event loop).
 - Dial and listen are functions the driver is given, so stepped tests hand it AF_UNIX socketpairs
@@ -5656,8 +5654,9 @@ Timers:
   reset by closing the peer with `SO_LINGER` 0, an EOF by `shutdown`, a peer that stops reading with
   a small receive buffer.
 - Buffers (driver contract): a `NetSend`'s buffer is released before the peer's reply is delivered,
-  and all of a peer's buffers are released before its `PeerLost` is emitted; a timeout releases
-  nothing; one buffer sent to several peers is freed once every one is done. A test checks the slab's
+  and all of a peer's buffers are released before its `PeerLost` is emitted; a `NetSend` marked
+  `Reply` (a read reply's blocks, a long peering reply) has its buffer freed by the driver once
+  sent, or before that peer's `PeerLost`; a timeout releases nothing; one buffer sent to several peers is freed once every one is done. A test checks the slab's
   live count is zero after a fan-out to three peers where one is lost.
 - A peer answers every request that carries data, even to reject it.
 - The core keeps its own deadlines: the driver sets no transport timeout that fails a request on its

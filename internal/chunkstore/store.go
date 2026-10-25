@@ -403,12 +403,11 @@ func spanOf(off, n uint32) (first, last uint16) {
 
 func (s *Store) admit(ctx *core.Context, r Request, kind opKind, out *Output) bool {
 	err := s.unavailable()
-	if err == nil && (r.Len == 0 || r.Off >= core.ChunkSize || r.Len > core.ChunkSize-r.Off) {
+	if err == nil && !validRange(r.Off, r.Len) {
 		err = ErrRange
 	}
 	if err == nil && kind == opWrite {
-		first, last := spanOf(r.Off, r.Len)
-		if r.Buf == core.NoBuf || len(ctx.Pool.Bytes(r.Buf)) != (int(last)-int(first)+1)*core.BlockSize {
+		if r.Buf == core.NoBuf || len(ctx.Pool.Bytes(r.Buf)) != dataBytes(r.Off, r.Len) {
 			err = disklog.ErrBadBuffer
 		}
 	}
@@ -726,11 +725,11 @@ func (s *Store) punchItems(o *op, first, last uint16) {
 func (s *Store) nextVersion(newest uint64) uint64 {
 	interval, counter := uint32(newest>>32), uint32(newest)
 	if interval < s.interval {
-		return uint64(s.interval)<<32 | 1
+		return MakeVersion(s.interval, 1)
 	}
 	if counter == math.MaxUint32 {
 		s.interval = interval + 1
-		return uint64(s.interval)<<32 | 1
+		return MakeVersion(s.interval, 1)
 	}
 	s.interval = interval
 	return newest + 1
@@ -740,7 +739,7 @@ func (s *Store) nextVersion(newest uint64) uint64 {
 func (s *Store) Read(ctx *core.Context, r Request, out *Output) {
 	r.Buf = core.NoBuf
 	err := s.unavailable()
-	if err == nil && (r.Len == 0 || r.Off >= core.ChunkSize || r.Len > core.ChunkSize-r.Off) {
+	if err == nil && !validRange(r.Off, r.Len) {
 		err = ErrRange
 	}
 	pool := s.cfg.Pool
