@@ -4264,7 +4264,7 @@ these sizes; both are usually absent (`TestTableSize`).
   interval's members, 5 more during a move (`TestDeltaSize`).
 
 **[property] tests.** `TestPlacementKeepsItsRules`, 1,000 seeds in `scripts/seeds.sh`, about 40 ms
-each; 10,000 passed once in 236 s on 2 processes. Each seed draws a layout from the matrix in
+each; 10,000 passed once in 227 s on 2 processes. Each seed draws a layout from the matrix in
 Testing strategy, 3 or 5 nodes of 1 or 4 disks of 0.5 to 8 TB, some holding another pool's data, under `none`, `rep2` or `rep3` with a random
 `min_live`, places it, and computes 30 tables after random events: a disk added or removed, a disk
 or node marked down, up or in `maintenance`, a drain set or cleared, time passing, primaries asking,
