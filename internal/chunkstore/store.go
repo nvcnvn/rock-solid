@@ -1131,6 +1131,30 @@ func (s *Store) Newest(c core.ChunkID) uint64 {
 	return ch.Version
 }
 
+// Overwrites reports whether a write of bytes [off, off+n) of chunk c at snapshot epoch epoch adds no live data: every block it covers is in the chunk's live map, written after the chunk's latest freeze, and it needs no new freeze. It looks up the index once per run of blocks.
+func (s *Store) Overwrites(c core.ChunkID, off, n uint32, epoch uint64) bool {
+	if s.ix == nil || !validRange(off, n) {
+		return false
+	}
+	ch, ok := s.ix.Chunk(s.cfg.Pool, c)
+	if !ok || epoch > ch.Epoch {
+		return false
+	}
+	var frozen uint64
+	if ch.Epoch > 0 {
+		frozen, _ = s.ix.FrozenAt(s.cfg.Pool, c, ch.Epoch)
+	}
+	first, last := spanOf(off, n)
+	for b := int(first); b <= int(last); {
+		e, ok := s.ix.Lookup(s.cfg.Pool, c, uint16(b))
+		if !ok || e.LBA == 0 || e.Version <= frozen {
+			return false
+		}
+		b = e.end()
+	}
+	return true
+}
+
 // SeeIncarnation records incarnation inc of a client session; the store refuses the older incarnations' writes and punches with ErrFenced when it orders them.
 func (s *Store) SeeIncarnation(session, inc uint64) {
 	if inc > s.sessions[session] {

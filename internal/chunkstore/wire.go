@@ -128,6 +128,8 @@ type Update struct {
 	Version     uint64
 	HasExpect   bool
 	Expect      uint64
+	// Granted marks a client's flush of buffered data under a space grant, which write_limit admits.
+	Granted bool
 }
 
 // Read asks for a chunk's committed bytes, or for version At when HasAt.
@@ -310,6 +312,12 @@ func DecodeHello(b []byte, data int, h *Hello) error {
 	return r.done(err)
 }
 
+// The flags byte of an update: its expect_ver is present, and it is a flush under a space grant.
+const (
+	expectFlag  = 0x01
+	grantedFlag = 0x02
+)
+
 // AppendUpdate appends u's frame; a write's data travels as the message's buffer.
 func AppendUpdate(dst []byte, u *Update) []byte {
 	dst = appendPG(appendHead(dst, u.Kind, u.ID), &u.PG)
@@ -318,7 +326,7 @@ func AppendUpdate(dst []byte, u *Update) []byte {
 	dst = le.AppendUint32(le.AppendUint32(dst, u.Off), u.Len)
 	dst = le.AppendUint64(le.AppendUint64(le.AppendUint64(dst, u.Snapshot), u.Shard), u.Term)
 	dst = le.AppendUint64(dst, u.Version)
-	return le.AppendUint64(appendBool(dst, u.HasExpect), u.Expect)
+	return le.AppendUint64(append(dst, flagIf(u.HasExpect, expectFlag)|flagIf(u.Granted, grantedFlag)), u.Expect)
 }
 
 // DecodeUpdate decodes a write or punch frame whose data buffer holds data bytes: a write's are the blocks its range touches.
@@ -330,7 +338,11 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 	u.Chunk = r.chunk()
 	u.Off, u.Len = r.u32(), r.u32()
 	u.Snapshot, u.Shard, u.Term, u.Version = r.u64(), r.u64(), r.u64(), r.u64()
-	u.HasExpect, u.Expect = r.optional()
+	flags := r.u8()
+	u.HasExpect, u.Granted, u.Expect = flags&expectFlag != 0, flags&grantedFlag != 0, r.u64()
+	if flags&^(expectFlag|grantedFlag) != 0 || !validVersion(u.Expect) || !u.HasExpect && u.Expect != 0 || u.Granted && u.Kind != KindWrite {
+		r.bad = true
+	}
 	replica := u.Kind == KindReplicaWrite || u.Kind == KindReplicaPunch
 	write := u.Kind == KindWrite || u.Kind == KindReplicaWrite
 	want := 0

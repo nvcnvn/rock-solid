@@ -322,6 +322,28 @@ func TestWireRejectsDataLength(t *testing.T) {
 	mustMalformed(t, "read reply refused with data", encodeMsg(&Response{Kind: KindReadReply, Status: StatusRefused, Interval: 42}), core.BlockSize)
 }
 
+func TestWireCarriesAGrantedFlushOnClientWritesOnly(t *testing.T) {
+	g := &Update{Kind: KindWrite, ID: 3, PG: wirePG, Session: 9, Incarnation: 1, Chunk: wireChunk, Len: 1, HasExpect: true, Expect: 1<<32 | 1, Granted: true}
+	m, err := decodeMsg(AppendUpdate(nil, g), core.BlockSize)
+	if err != nil || !reflect.DeepEqual(m, g) {
+		t.Fatalf("%+v, %v", m, err)
+	}
+	for _, k := range []Kind{KindReplicaWrite, KindPunch, KindReplicaPunch} {
+		u := &Update{Kind: k, PG: wirePG, Len: core.BlockSize, Granted: true}
+		data := 0
+		if k != KindPunch {
+			u.Version = 1<<32 | 1
+		}
+		if k == KindReplicaWrite {
+			data = core.BlockSize
+		}
+		mustMalformed(t, "granted member write or punch", AppendUpdate(nil, u), data)
+	}
+	b := AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1})
+	b[len(b)-9] = 4
+	mustMalformed(t, "unknown update flag", b, core.BlockSize)
+}
+
 func TestWireRejectsVersions(t *testing.T) {
 	for _, v := range []uint64{MakeVersion(0, 5), MakeVersion(5, 0)} {
 		mustMalformed(t, "replica write version", AppendUpdate(nil, &Update{Kind: KindReplicaWrite, PG: wirePG, Len: 1, Version: v}), core.BlockSize)

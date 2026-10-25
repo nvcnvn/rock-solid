@@ -126,6 +126,113 @@ type Replica struct {
 	frame  []byte
 	armed  bool
 	plant  replicaPlants
+	// disks is each disk's size and the live blocks it last reported, by disk ID; pools the pools'
+	// settings and outstanding grants; slots each pool's member slots on each disk in the table.
+	disks  []diskInfo
+	pools  []poolInfo
+	slots  []diskSlots
+	live   uint64
+	liveAt core.Tick
+}
+
+type diskInfo struct {
+	blocks uint64
+	live   uint64
+}
+
+type poolInfo struct {
+	id     core.PoolID
+	pool   Pool
+	grants uint64
+}
+
+type diskSlots struct {
+	pool core.PoolID
+	disk uint32
+	n    uint64
+}
+
+// fillEvery is how often a replica sums its disk's live blocks for the fill it reports: 100 ms.
+const fillEvery = core.Tick(100_000)
+
+func (r *Replica) disk(d uint32) *diskInfo {
+	if int(d) >= len(r.disks) {
+		r.disks = append(r.disks, make([]diskInfo, int(d)+1-len(r.disks))...)
+	}
+	return &r.disks[d]
+}
+
+func (r *Replica) pool(id core.PoolID) *poolInfo {
+	for i := range r.pools {
+		if r.pools[i].id == id {
+			return &r.pools[i]
+		}
+	}
+	r.pools = append(r.pools, poolInfo{id: id})
+	return &r.pools[len(r.pools)-1]
+}
+
+// SetDisk records a disk's size in blocks, as the membership record publishes it.
+func (r *Replica) SetDisk(disk uint32, blocks uint64) { r.disk(disk).blocks = blocks }
+
+// MemberFill records the live blocks a member disk reported on its heartbeat.
+func (r *Replica) MemberFill(disk uint32, live uint64) { r.disk(disk).live = live }
+
+// SetPool records a pool's settings; a pool never set takes each disk's default write_limit.
+func (r *Replica) SetPool(id core.PoolID, p Pool) { r.pool(id).pool = p }
+
+// SetGrants records the space grants outstanding on a pool, in blocks, as the leader's heartbeat reply carries them.
+func (r *Replica) SetGrants(id core.PoolID, blocks uint64) { r.pool(id).grants = blocks }
+
+// fill is this disk's live blocks, summed again once fillEvery has passed.
+func (r *Replica) fill(ctx *core.Context) uint64 {
+	if r.liveAt == 0 || ctx.Now-r.liveAt >= fillEvery {
+		r.live, r.liveAt = r.st.Log().LiveBlocks(), max(ctx.Now, 1)
+	}
+	return r.live
+}
+
+// full reports whether a disk holding one of the PG's members has reached its pool's write_limit: its live blocks plus the pool's outstanding grants times the disk's share, rounded up, against ⌊its size in blocks × write_limit⌋.
+func (r *Replica) full(ctx *core.Context, pg core.PGID, p *PoolTable, e *PGEntry) bool {
+	pi := r.pool(pg.Pool)
+	for _, m := range e.Members {
+		d := r.disk(m.Disk)
+		if d.blocks == 0 {
+			continue
+		}
+		live := d.live
+		if m.Disk == r.cfg.Disk {
+			live = r.fill(ctx)
+		}
+		var slots uint64
+		for _, s := range r.slots {
+			if s.pool == pg.Pool && s.disk == m.Disk {
+				slots = s.n
+			}
+		}
+		if live+mulDivUp(pi.grants, slots, uint64(len(p.PGs))) >= d.blocks*uint64(pi.pool.limitPercent(d.blocks))/100 {
+			return true
+		}
+	}
+	return false
+}
+
+// countSlots counts each pool's member slots on each disk in the table.
+func (r *Replica) countSlots() {
+	r.slots = r.slots[:0]
+	for pi := range r.table.Pools {
+		p := &r.table.Pools[pi]
+		for i := range p.PGs {
+			for _, m := range p.PGs[i].Members {
+				j := slices.IndexFunc(r.slots, func(s diskSlots) bool { return s.pool == p.ID && s.disk == m.Disk })
+				if j < 0 {
+					r.slots = append(r.slots, diskSlots{pool: p.ID, disk: m.Disk})
+					j = len(r.slots) - 1
+				}
+				r.slots[j].n++
+			}
+		}
+	}
 }
 
 type replicaPlants struct {
@@ -224,6 +331,7 @@ func comparePG(a, b core.PGID) int {
 // adopt takes t as the replica's table. A PG this disk leads in t keeps its term if no other primary led it in between, as the PG's listed past intervals show, and holds its client writes until it has peered in its new interval; a PG it no longer leads refuses the writes it held.
 func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 	r.table = t
+	r.countSlots()
 	kept := r.leads[:0:0]
 	for pi := range t.Pools {
 		p := &t.Pools[pi]
@@ -459,6 +567,10 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		l := &r.leads[i]
 		l.held = append(l.held, heldMsg{peer: ev.Peer, msg: ev.Msg, hold: l.interval})
 		return
+	case u.Kind == KindWrite && !u.Granted && r.full(ctx, u.PG.PG, p, e) && !r.st.Overwrites(u.Chunk, u.Off, u.Len, u.Snapshot):
+		freeBuf(ctx, ev.Msg.Buf)
+		r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusNoSpace}, out)
+		return
 	default:
 		r.order(ctx, ev, u, r.leads[i].interval)
 		return
@@ -491,7 +603,7 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	if e == nil || u.PG.Interval != e.Interval || !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) {
 		freeBuf(ctx, ev.Msg.Buf)
 		rp := r.refusal(u.PG.PG)
-		rp.Kind = KindAck
+		rp.Kind, rp.Fill = KindAck, r.fill(ctx)
 		r.answer(ctx, ev.Peer, u.ID, &rp, core.NoBuf, out)
 		return
 	}
@@ -621,7 +733,7 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 
 func (r *Replica) send(v *version, k int, out *ReplicaOutput) {
 	u := v.u
-	u.ID, u.HasExpect, u.Expect = v.seq, false, 0
+	u.ID, u.HasExpect, u.Expect, u.Granted = v.seq, false, 0, false
 	u.PG.Epoch, u.PG.Interval = v.epoch, uint32(v.u.Version>>32)
 	if u.Kind == KindWrite {
 		first, last := spanOf(u.Off, u.Len)
@@ -685,6 +797,7 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 		return
 	}
 	v.out &^= 1 << k
+	r.disk(v.members[k]).live = rp.Fill
 	switch {
 	case rp.Status == StatusOK && rp.Version == v.u.Version:
 		v.acked |= 1 << k
@@ -780,7 +893,7 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 			r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
 		}
 	case reqMember:
-		resp := Response{Kind: KindAck, Status: statusOf(rp.Err), Version: rp.Version}
+		resp := Response{Kind: KindAck, Status: statusOf(rp.Err), Version: rp.Version, Fill: r.fill(ctx)}
 		if j := slices.IndexFunc(r.dups, func(d dup) bool { return d.id == rp.ID }); j >= 0 {
 			resp.Version = r.dups[j].version
 			r.dups = slices.Delete(r.dups, j, j+1)
