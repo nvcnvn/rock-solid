@@ -2859,7 +2859,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
 - The list, with 4 processes on a 14-core Apple M4 Pro Mac mini running other work: 44,200 seeds in
   about 330 s, building the test binaries included; the largest process peaked at 528 MiB resident
   (an `internal/lsm` metamorphic shard), all four at 1.9 GiB. The pool figures' and placement rows
-  were timed on 2 processes, where the whole list took 605 s:
+  were timed on 2 processes, where the whole list took 597 s:
 
   | Test | Seeds | Time |
   | --- | --- | --- |
