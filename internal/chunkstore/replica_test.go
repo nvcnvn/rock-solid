@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"bytes"
 	"fmt"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -32,6 +33,9 @@ type rcluster struct {
 	orderErr error
 	// passes is each pass of each replica's loop: the actions it emitted.
 	passes [][][]core.Action
+	// counting adds the heap allocations each replica's OnEvent makes to mallocs.
+	counting bool
+	mallocs  uint64
 }
 
 type sendKey struct {
@@ -108,7 +112,15 @@ func newRClusterOn(t *testing.T, tbl Table, s *sim.Scheduler) *rcluster {
 				if ev.Kind == core.EvPeerLost {
 					c.lost[[2]core.NodeID{c.loops[d], ev.Peer}]++
 				}
-				c.reps[d].OnEvent(ctx, ev, &out)
+				if c.counting {
+					var before, after runtime.MemStats
+					runtime.ReadMemStats(&before)
+					c.reps[d].OnEvent(ctx, ev, &out)
+					runtime.ReadMemStats(&after)
+					c.mallocs += after.Mallocs - before.Mallocs
+				} else {
+					c.reps[d].OnEvent(ctx, ev, &out)
+				}
 				return c.took(d, &out, acts)
 			})
 			c.loops[d] = n.Start(m, n.Disk(0))

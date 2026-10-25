@@ -115,6 +115,29 @@ func TestEdgesAloneNeedABase(t *testing.T) {
 	}
 }
 
+// Once warm, a replicated write allocates nothing in any replica's events: the primary's ordering, fan-out, commit and reply, and each member's logging and acknowledgment.
+func TestReplicatedWritesAllocateNothing(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	write := func(i int) {
+		w := c.write(pg0, ch, uint32(i%8)*core.BlockSize+100, []byte{byte(i)})
+		c.until(w)
+		if c.reply(w).Status != StatusOK {
+			t.Fatal(c.reply(w))
+		}
+	}
+	for i := range 200 {
+		write(i)
+	}
+	c.counting = true
+	for i := range 100 {
+		write(i)
+	}
+	if c.mallocs != 0 {
+		t.Fatalf("%d heap allocations over 100 writes' events", c.mallocs)
+	}
+}
+
 // The primary's copy of a base fails its CRC32C: the base comes from another member, and the write merges on that good copy.
 func TestARottenBaseIsFetchedFromAnotherMember(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
