@@ -2859,7 +2859,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
 - The list, with 4 processes on a 14-core Apple M4 Pro Mac mini running other work: 44,200 seeds in
   about 330 s, building the test binaries included; the largest process peaked at 528 MiB resident
   (an `internal/lsm` metamorphic shard), all four at 1.9 GiB. The pool figures' and placement rows
-  were timed on 2 processes, where the whole list took 622 s:
+  were timed on 2 processes, where the whole list took 605 s:
 
   | Test | Seeds | Time |
   | --- | --- | --- |
@@ -2878,7 +2878,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/chunkstore` `TestRecoveryAndRebuildEqualLiveIndex` | 200 | 37 s |
   | `internal/chunkstore` `TestRecoveriesMatchTheCrashOracle` | 200 | 24 s |
   | `internal/chunkstore` `TestPoolFiguresHoldTheirBounds` | 20,000 | about 1 s |
-  | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 32 s |
+  | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 24 s |
 
 - A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
   under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
@@ -4254,7 +4254,7 @@ these sizes; both are usually absent (`TestTableSize`).
   interval's members, 5 more during a move (`TestDeltaSize`).
 
 **[property] tests.** `TestPlacementKeepsItsRules`, 1,000 seeds in `scripts/seeds.sh`, about 40 ms
-each; 10,000 passed once in 249 s on 2 processes. Each seed draws a layout from the matrix in
+each; 10,000 passed once in 252 s on 2 processes. Each seed draws a layout from the matrix in
 Testing strategy, 3 or 5 nodes of 1 or 4 disks of 0.5 to 8 TB, some holding another pool's data, under `none`, `rep2` or `rep3` with a random
 `min_live`, places it, and computes 30 tables after random events: a disk added or removed, a disk
 or node marked down, up or in `maintenance`, a drain set or cleared, time passing, primaries asking,
