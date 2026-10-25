@@ -93,6 +93,10 @@ type harness struct {
 	// keeps neither the actions, the records written nor the merges run, for runs that write a
 	// disk many times.
 	timed, light bool
+	// ordered is the merged blocks of each gated write or punch as it was ordered, and logged its
+	// answer once its records were durable or failed.
+	ordered   map[uint64][]byte
+	durableAt map[uint64]Reply
 	// wrote counts the blocks of every disk write run, and wroteIn those in each stream.
 	wrote   uint64
 	wroteIn [disklog.Meta + 1]uint64
@@ -259,6 +263,22 @@ func (h *harness) take() {
 				h.ackChange(ch, r.Version)
 			}
 		}
+	}
+	for _, r := range h.out.Ordered {
+		if h.ordered == nil {
+			h.ordered, h.durableAt = map[uint64][]byte{}, map[uint64]Reply{}
+		}
+		h.ordered[r.ID] = []byte{}
+		if r.Buf != core.NoBuf {
+			h.ordered[r.ID] = slices.Clone(h.pool.Bytes(r.Buf))
+			h.pool.Free(r.Buf)
+		}
+	}
+	for _, r := range h.out.Logged {
+		if h.durableAt == nil {
+			h.ordered, h.durableAt = map[uint64][]byte{}, map[uint64]Reply{}
+		}
+		h.durableAt[r.ID] = r
 	}
 	h.out.Reset()
 }
