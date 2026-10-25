@@ -4179,7 +4179,9 @@ row says otherwise).
   `rep1`: the only copy of the writes taken while the other member was down went with the leaving
   member.
 - Balance never moves a member of a pinned PG, and refill still replaces one on a lost disk. A
-  draining disk keeps its members up while balance moves them all off (`TestPinAndDrain`), except
+  draining disk keeps its members up while balance moves them all off, and holds none, a leaving
+  one included, once the moves' recovered reports are in, which is when its drain finishes
+  (`TestPinAndDrain`), except
   a pinned PG's, which keeps the drain from finishing until an operator edits or unpins that PG.
 - Targets by capacity: after a disk is added to a pool holding data, the second computation, run
   once the first one's moves have copied, proposes no move (`TestMovesAfterADiskAdded`; the

@@ -217,7 +217,7 @@ func TestConvergenceOnCapacityLayouts(t *testing.T) {
 	}
 }
 
-// Balance never moves a member of a pinned PG, though refill replaces a missing one; a drained disk's members move off while they stay up.
+// Balance never moves a member of a pinned PG, though refill replaces a missing one; a drained disk's members move off while they stay up, and it holds none, a leaving one included, once the moves have recovered.
 func TestPinAndDrain(t *testing.T) {
 	l := placed(t, nodesOf(rep(3, 256), 4, 1, 2))
 	in := l.inputs(0)
