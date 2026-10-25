@@ -101,7 +101,7 @@ func TestWriteLimitPerDisk(t *testing.T) {
 	}
 	for _, limit := range []uint8{0, 90} {
 		p := Pool{Replicas: 1, FailureDomain: DomainNode, PGCount: 1, WriteLimit: limit}
-		f := p.Capacity(disks, 0)
+		f := p.Capacity(disks, 0, 0)
 		for i, d := range f.Disks {
 			pct := cmp.Or(limit, defaults[i])
 			if d.Percent != pct || d.Limit != d.Blocks*uint64(pct)/100 || d.level(10) != d.Blocks*uint64(pct-10)/100 {
@@ -151,7 +151,7 @@ func TestPoolCreationRules(t *testing.T) {
 		if c.ok != (err == nil) || c.ok && l != c.layout || !c.ok && !errors.Is(err, ErrTooFewDomains) {
 			t.Fatalf("%s: %+v, %v", c.name, l, err)
 		}
-		if f := c.pool.Capacity(c.disks, 0); c.ok && f.SpareDomain != c.spare {
+		if f := c.pool.Capacity(c.disks, 0, 0); c.ok && f.SpareDomain != c.spare {
 			t.Fatalf("%s: spare domain %v", c.name, f.SpareDomain)
 		}
 	}
@@ -172,7 +172,7 @@ func TestPresets(t *testing.T) {
 		if err != nil || l.NodeFailures != i {
 			t.Fatalf("%s survives %d node failures, %v", name, l.NodeFailures, err)
 		}
-		f := p.Capacity(nodes(1, 1, 1, 1, 1, 1), 0)
+		f := p.Capacity(nodes(1, 1, 1, 1, 1, 1), 0, 0)
 		if f.Balanced != f.Capacity/uint64(i+1) {
 			t.Fatalf("%s holds %d of %d", name, f.Balanced, f.Capacity)
 		}

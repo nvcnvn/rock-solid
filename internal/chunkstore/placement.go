@@ -139,7 +139,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 
 	pl := &placer{pool: p, now: all.Now, disks: slices.Clone(in.Disks), entries: make([]PGEntry, n)}
 	slices.SortFunc(pl.disks, func(a, b Disk) int { return cmp.Compare(a.ID, b.ID) })
-	pl.target = p.targets(pl.disks, pl.sheds)
+	pl.target = p.targets(pl.disks, all.Now)
 	pl.load = make([]int, len(pl.disks))
 	asked := make([]bool, n)
 	for _, a := range all.Asks {
@@ -250,15 +250,15 @@ func lastDown(ms []Member) int {
 	return -1
 }
 
-// targets gives each disk its target in members, zero for a disk that sheds its members: its domain's water-filled share of the others, split within the domain by capacity.
-func (p Pool) targets(disks []Disk, sheds func(*Disk) bool) []float64 {
+// targets gives each disk its target in members, zero for a disk that sheds its members at now: its domain's water-filled share of the others, split within the domain by capacity.
+func (p Pool) targets(disks []Disk, now core.Tick) []float64 {
 	caps := make([]uint64, len(disks))
 	var domains []uint32
 	var domainCaps []uint64
 	domainOf := make([]int, len(disks))
 	for i := range disks {
 		d := &disks[i]
-		if !sheds(d) {
+		if !d.sheds(now) {
 			_, caps[i] = p.diskCapacity(d)
 		}
 		j := slices.Index(domains, p.domainOf(d))
@@ -279,12 +279,12 @@ func (p Pool) targets(disks []Disk, sheds func(*Disk) bool) []float64 {
 	return target
 }
 
-// sheds reports whether d gives up its members: it drains, or its members are refilled for having been down for refill_after.
-func (pl *placer) sheds(d *Disk) bool {
-	return d.Drain || d.Mark == MarkDown && pl.downFor(d) >= RefillAfter
+// sheds reports whether d gives up its members at now: it drains, or its members are refilled for having been down for refill_after.
+func (d *Disk) sheds(now core.Tick) bool {
+	return d.Drain || d.Mark == MarkDown && d.downFor(now) >= RefillAfter
 }
 
-func (pl *placer) downFor(d *Disk) core.Tick { return pl.now - min(d.DownSince, pl.now) }
+func (d *Disk) downFor(now core.Tick) core.Tick { return now - min(d.DownSince, now) }
 
 func (pl *placer) find(id uint32) int {
 	k, ok := slices.BinarySearchFunc(pl.disks, id, func(d Disk, id uint32) int { return cmp.Compare(d.ID, id) })
@@ -323,7 +323,7 @@ func (pl *placer) missing(e, base *PGEntry, j int) bool {
 	if m.Mark != MarkDown {
 		return false
 	}
-	down := pl.downFor(&pl.disks[k])
+	down := pl.disks[k].downFor(pl.now)
 	if down < RefillAfter && (down < DegradedRefillAfter || live(e.Members) >= pl.pool.MinLive) {
 		return false
 	}

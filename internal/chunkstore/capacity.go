@@ -25,7 +25,7 @@ type Disk struct {
 	Drain     bool
 }
 
-// DiskFigures is what the CLI lists for one disk; Used counts the pool's grants at the disk's share.
+// DiskFigures is what the CLI lists for one disk; Used counts the pool's grants at the disk's share, and Target is placement's.
 type DiskFigures struct {
 	ID        uint32
 	Percent   uint8
@@ -99,19 +99,20 @@ func (f *Figures) Asks() bool {
 	return false
 }
 
-// Capacity computes p's figures from its disks' fills, its own data and member slots on each, and the grants outstanding on it.
-func (p Pool) Capacity(disks []Disk, grants uint64) Figures {
+// Capacity computes p's figures at now from its disks' fills, its own data and member slots on each, and the grants outstanding on it.
+func (p Pool) Capacity(disks []Disk, grants uint64, now core.Tick) Figures {
 	w, q, k := uint64(p.width()), uint64(p.perDomain()), uint64(p.dataShards())
 	den := uint64(p.PGCount) * k
 	f := Figures{Copies: p.Replicas, SetsAvailable: -1}
 	var own uint64
 	var domainOf []uint32
+	target := p.targets(disks, now)
 	for i := range disks {
 		d := &disks[i]
 		if d.Slots == 0 {
 			continue
 		}
-		df := DiskFigures{ID: d.ID, Percent: p.limitPercent(d.Blocks), Blocks: d.Blocks, Live: d.Live, Slots: d.Slots}
+		df := DiskFigures{ID: d.ID, Percent: p.limitPercent(d.Blocks), Blocks: d.Blocks, Live: d.Live, Slots: d.Slots, Target: target[i]}
 		df.Limit, df.Capacity = p.diskCapacity(d)
 		df.Room = df.Limit - min(df.Limit, d.Live)
 		granted := mulDivUp(grants, uint64(d.Slots), den)
@@ -149,7 +150,6 @@ func (p Pool) Capacity(disks []Disk, grants uint64) Figures {
 	}
 	f.SpareDomain = len(f.Domains) > 0 && uint64(len(f.Domains)-1)*q >= w
 	f.reprotect(caps, domainOf, w, q, k)
-	f.targets(caps, domainOf, p.PGCount, w, q)
 	return f
 }
 
@@ -208,17 +208,6 @@ func (f *Figures) reprotect(caps []uint64, domainOf []uint32, w, q, k uint64) {
 		left[j] = caps[j]
 		if f.Loss.Kind == LossNone || b < f.Reprotectable {
 			f.Reprotectable, f.Loss = b, Loss{LossDisk, f.Disks[i].ID}
-		}
-	}
-}
-
-// targets sets each disk's target in member slots: its domain's water-filled share split over the domain's disks by capacity.
-func (f *Figures) targets(caps []uint64, domainOf []uint32, pgs uint32, w, q uint64) {
-	share := waterFill(caps, float64(q)/float64(w))
-	for i, id := range domainOf {
-		j := f.domainIndex(id)
-		if caps[j] > 0 {
-			f.Disks[i].Target = share[j] * float64(f.Disks[i].Capacity) / float64(caps[j]) * float64(pgs) * float64(w)
 		}
 	}
 }

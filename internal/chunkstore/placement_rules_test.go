@@ -100,7 +100,7 @@ func TestFillMargin(t *testing.T) {
 		t.Fatalf("margins %v and %v", margin(100), margin(15))
 	}
 	l := placed(t, newLayout(rep(3, PGCountFor(4, 3)), 8, 8, 8, 0.5))
-	target := l.pool.targets(l.disks, func(*Disk) bool { return false })
+	target := l.pool.targets(l.disks, 0)
 	if target[3] < 10 || target[3] > 20 || margin(target[3]) != 1 {
 		t.Fatalf("the 0.5 TB disk's target %.1f", target[3])
 	}
@@ -113,8 +113,7 @@ func TestFillMargin(t *testing.T) {
 func TestTargetsFollowCapacity(t *testing.T) {
 	l := newLayout(rep(3, 256), 2, 2, 2, 2)
 	l.disks[0].Live = tb(1)
-	none := func(*Disk) bool { return false }
-	before := l.pool.targets(l.disks, none)
+	before := l.pool.targets(l.disks, 0)
 	if before[0] >= before[1] {
 		t.Fatalf("another pool's data leaves targets %v", before)
 	}
@@ -122,8 +121,26 @@ func TestTargetsFollowCapacity(t *testing.T) {
 		l.disks[i].Own = tb(0.3)
 		l.disks[i].Live += tb(0.3)
 	}
-	if after := l.pool.targets(l.disks, none); !slices.Equal(before, after) {
+	if after := l.pool.targets(l.disks, 0); !slices.Equal(before, after) {
 		t.Fatalf("the pool's own data moves targets from %v to %v", before, after)
+	}
+}
+
+// The capacity figures list placement's targets, counting a disk added with no member yet and none for a draining disk.
+func TestFiguresListPlacementTargets(t *testing.T) {
+	l := placed(t, nodesOf(rep(3, 256), 4, 2, 2))
+	l.disk(l.onNode(1)[0]).Drain = true
+	l.hold()
+	l.grow(2, 4, 0)
+	f := l.pool.Capacity(l.disks, 0, l.now)
+	pl := l.placer()
+	for _, d := range f.Disks {
+		if want := pl.target[pl.find(d.ID)]; d.Target != want {
+			t.Errorf("disk %d: figures' target %.2f, placement's %.2f", d.ID, d.Target, want)
+		}
+	}
+	if len(f.Disks) != len(l.disks)-1 {
+		t.Fatalf("figures list %d disks", len(f.Disks))
 	}
 }
 

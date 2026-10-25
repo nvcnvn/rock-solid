@@ -4147,7 +4147,9 @@ row says otherwise).
   on one node, and no domain holds more than `max_per_domain` of a PG's width.
 - A disk's target is its capacity for the pool: `write_limit` less other pools' data on it, so this
   pool's own data counts, water-filled over domains capped at `max_per_domain` of the width, and
-  split within a domain by capacity (`TestTargetsFollowCapacity`).
+  split within a domain by capacity (`TestTargetsFollowCapacity`). The capacity figures list the
+  same targets, counting a disk added with no member yet and giving a draining disk none
+  (`TestFiguresListPlacementTargets`).
 - An operator's edit that names more disks than the width, a disk twice or two disks on one node
   under `rep3` is ignored, pin and all; one that swaps a member for a disk on a node the PG lacks
   is applied (`TestEditsKeepTheRules`).

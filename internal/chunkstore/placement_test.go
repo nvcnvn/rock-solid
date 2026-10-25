@@ -102,14 +102,14 @@ func (l *layout) hold() {
 
 func (l *layout) figures() Figures {
 	l.hold()
-	return l.pool.Capacity(l.disks, 0)
+	return l.pool.Capacity(l.disks, 0, l.now)
 }
 
 // placer is the computation's view of the layout's table: its disks by ID with their targets and loads.
 func (l *layout) placer() *placer {
 	pl := &placer{pool: l.pool, now: l.now, disks: slices.Clone(l.disks)}
 	slices.SortFunc(pl.disks, func(a, b Disk) int { return cmp.Compare(a.ID, b.ID) })
-	pl.target = l.pool.targets(pl.disks, pl.sheds)
+	pl.target = l.pool.targets(pl.disks, l.now)
 	pl.load = make([]int, len(pl.disks))
 	for _, e := range l.pools().PGs {
 		for _, m := range e.Members {
