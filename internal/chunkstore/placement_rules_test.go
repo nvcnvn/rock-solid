@@ -119,7 +119,7 @@ func TestLoweringReplicasKeepsLiveMembers(t *testing.T) {
 			e := l.pools().PGs[0]
 			in := l.inputs(0)
 			source := slices.ContainsFunc(e.Members, func(m Member) bool { return m.Mark == MarkUp && slices.Contains(complete, m.Disk) })
-			if round > 0 && source && recovers(&e) {
+			if round > 0 && source && recovers(e.Members) {
 				in.Recovered = []PGInterval{{pg(0), e.Interval}}
 				for _, m := range e.Members {
 					if !m.Leaving && !slices.Contains(complete, m.Disk) {
@@ -359,7 +359,7 @@ func (l *layout) moving() []int {
 	return pgs
 }
 
-// A move adds the new member and marks the old one leaving; a later table removes every leaving member a recovered report covers, starting an interval and counting no move. A leaving member missing for refill_after is dropped, one a missing member's refill can keep stays in its place, and on 3 nodes a move within a node keeps the failure-domain rule but for the leaving member. A report for an interval before the PG's current one removes nothing.
+// A move adds the new member and marks the old one leaving; a later table removes every leaving member a recovered report covers, starting an interval and counting no move. A leaving member missing for refill_after is dropped, one a missing member's refill can keep stays in its place, and on 3 nodes a move within a node keeps the failure-domain rule but for the leaving member. A report for an interval before the PG's current one removes nothing, nor does one in a table that marks another member down or in maintenance.
 func TestMovesAddThenRemove(t *testing.T) {
 	t.Run("removals share one table", func(t *testing.T) {
 		l := placed(t, nodesOf(rep(3, 256), 4, 2, 2))
@@ -501,6 +501,23 @@ func TestMovesAddThenRemove(t *testing.T) {
 			l.step(t, in)
 			if got := l.pools().PGs[i]; got.leaving() >= 0 {
 				t.Fatalf("a report for the current interval kept the leaving member: %v", got.Members)
+			}
+		})
+	}
+	for name, mark := range map[string]Mark{"down": MarkDown, "in maintenance": MarkMaint} {
+		t.Run("a report in the table that marks the new member "+name+" on rep1", func(t *testing.T) {
+			l := placed(t, nodesOf(rep(1, 64), 3, 1, 2))
+			l.grow(0, 2, 0)
+			l.step(t, l.inputs(1))
+			i := l.moving()[0]
+			e := l.pools().PGs[i]
+			l.mark(mark, e.Members[1-e.leaving()].Disk)
+			in := l.inputs(0)
+			in.Activations = []PGInterval{{pg(i), e.Interval}}
+			in.Recovered = []PGInterval{{pg(i), e.Interval}}
+			l.step(t, in)
+			if got := l.pools().PGs[i]; got.leaving() < 0 {
+				t.Fatalf("a report for interval %d removed the leaving member of %v in the table that marks the other one: %v", e.Interval, e.Members, got.Members)
 			}
 		})
 	}

@@ -71,16 +71,11 @@ func (l *layout) reportAll(moves int) *Inputs {
 	in := l.inputs(moves)
 	for i, e := range l.pools().PGs {
 		in.Activations = append(in.Activations, PGInterval{pg(i), e.Interval})
-		if recovers(&e) {
+		if recovers(e.Members) {
 			in.Recovered = append(in.Recovered, PGInterval{pg(i), e.Interval})
 		}
 	}
 	return in
-}
-
-// recovers reports whether e's primary reports it recovered once recovery has copied: every member but a leaving one is up.
-func recovers(e *PGEntry) bool {
-	return !slices.ContainsFunc(e.Members, func(m Member) bool { return !m.Leaving && m.Mark != MarkUp })
 }
 
 func (l *layout) pools() *PoolTable { return &l.table.Pools[0] }

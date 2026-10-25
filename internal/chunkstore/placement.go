@@ -92,7 +92,7 @@ type Inputs struct {
 	Moves       int
 }
 
-// Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members removed on a recovered report for their PG's current interval, reports ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves. It reports the moves it made.
+// Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members removed on a recovered report for their PG's current interval while its other members stay up, reports ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves. It reports the moves it made.
 func Next(prev *Table, in *Inputs) (Table, int) {
 	pools := slices.Clone(in.Pools)
 	slices.SortFunc(pools, func(a, b PoolInputs) int { return cmp.Compare(a.ID, b.ID) })
@@ -189,7 +189,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 	}
 	for _, r := range all.Recovered {
 		if !split && r.PG.Pool == in.ID && int(r.PG.Index) < n {
-			if e := &pl.entries[r.PG.Index]; r.Interval == e.Interval {
+			if e := &pl.entries[r.PG.Index]; r.Interval == e.Interval && recovers(e.Members) {
 				e.dropLeaving()
 			}
 		}
@@ -263,6 +263,11 @@ func (pl *placer) narrow(e, base *PGEntry) {
 			pl.load[k]--
 		}
 	}
+}
+
+// recovers reports whether every member but a leaving one is up, as a recovered report needs: a table that marks one otherwise ignores the report.
+func recovers(ms []Member) bool {
+	return !slices.ContainsFunc(ms, func(m Member) bool { return !m.Leaving && m.Mark != MarkUp })
 }
 
 func leavingIn(ms []Member) int {

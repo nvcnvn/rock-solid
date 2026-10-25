@@ -138,7 +138,7 @@ func (h *history) event(r *core.Rand, l *layout) *Inputs {
 		for i, e := range pt.PGs {
 			if r.Chance(1, 2) {
 				in.Activations = append(in.Activations, PGInterval{pg(i), e.Interval})
-				if recovers(&e) {
+				if recovers(e.Members) {
 					in.Recovered = append(in.Recovered, PGInterval{pg(i), e.Interval})
 				}
 			}
@@ -192,7 +192,7 @@ func (h *history) next(t *testing.T, l *layout, in *Inputs) {
 	}
 }
 
-// check holds every table to the rules: the pool's width and at most one leaving member beside it, more members only beside a leaving one after replicas went down and never more than the table before, at most perDomain members per domain but a leaving one, live members kept when replicas go down, an interval raised by one exactly when the rules say, a member removed and added back in a new interval, a live leaving member removed exactly in the first table after a recovered report for its current interval, and no live member that holds all the PG's data removed unless the width still does.
+// check holds every table to the rules: the pool's width and at most one leaving member beside it, more members only beside a leaving one after replicas went down and never more than the table before, at most perDomain members per domain but a leaving one, live members kept when replicas go down, an interval raised by one exactly when the rules say, a member removed and added back in a new interval, a live leaving member removed exactly in the first table after a recovered report for its current interval that marks no other member down or in maintenance, and no live member that holds all the PG's data removed unless the width still does.
 func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 	p, pt := l.pool, l.pools()
 	var old *PoolTable
@@ -278,7 +278,7 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 			liveSince = append(liveSince, diskAt{m.Disk, since})
 		}
 		h.liveSince[i] = liveSince
-		if recovers(e) && !slices.ContainsFunc(h.recoverable[i], func(pi PastInterval) bool { return pi.Interval == e.Interval }) {
+		if recovers(e.Members) && !slices.ContainsFunc(h.recoverable[i], func(pi PastInterval) bool { return pi.Interval == e.Interval }) {
 			h.recoverable[i] = append(h.recoverable[i], PastInterval{e.Interval, e.Members})
 		}
 		for _, m := range b.Members {
@@ -310,7 +310,9 @@ func (h *history) checkCopies(i int, old *PoolTable, b, e *PGEntry, l *layout, i
 		if r.PG != pg(i) {
 			continue
 		}
-		due = due || b.leaving() >= 0 && r.Interval == b.Interval
+		due = due || b.leaving() >= 0 && r.Interval == b.Interval && !slices.ContainsFunc(b.Members, func(m Member) bool {
+			return !m.Leaving && !slices.ContainsFunc(l.disks, func(d Disk) bool { return d.ID == m.Disk && d.Mark == MarkUp })
+		})
 		k := slices.IndexFunc(h.recoverable[i], func(pi PastInterval) bool { return pi.Interval == r.Interval })
 		if k < 0 {
 			return fmt.Errorf("PG %d reported recovered at interval %d, which never was", i, r.Interval)

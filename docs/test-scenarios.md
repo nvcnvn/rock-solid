@@ -4184,8 +4184,10 @@ row says otherwise).
   A report for an interval before the current one removes nothing: on 3 nodes of 2 disks, a move
   within node A, then a refill onto another disk of node C, or C's member down and back up, or in
   `maintenance` and back up, and then a late report for the add's interval keep the leaving member,
-  which a report for the current interval removes. Activation and recovered reports in the table
-  that doubles `pg_count` change no PG. The property test found the down case on `rep1`: the only
+  which a report for the current interval removes. On `rep1`, a report for the current interval in
+  the table that marks the new member down or in `maintenance` keeps the leaving member, which may
+  hold the only copy. Activation and recovered reports in the table that doubles `pg_count` change
+  no PG. The property test found the down case on `rep1`: the only
   copy of the writes taken while the other member was down went with the leaving member.
 - Balance never moves a member of a pinned PG, and refill still replaces one on a lost disk. A
   draining disk keeps its members up while balance moves them all off, and holds none, a leaving
@@ -4258,7 +4260,7 @@ After every table:
   the table above; no last activated interval goes down.
 - A member removed and added back gets a new interval.
 - A live leaving member is removed in the first table after a recovered report for its PG's
-  current interval, and never before.
+  current interval that marks no other member down or in `maintenance`, and never before.
 - No live member that holds all of a PG's data, one it started with or one a recovered report
   covered that has stayed live since, leaves unless the members left that hold it still number the
   width; an edit may remove any member.
