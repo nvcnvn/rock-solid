@@ -11,15 +11,18 @@ import (
 // StuckAfter is stuck_after: how long a PG with past or missing members may copy nothing before its pool is Stuck.
 const StuckAfter = core.Tick(60_000_000)
 
-// Disk is one disk of a pool's figures, at its last reported fill; sizes and fills are in blocks.
+// Disk is one disk of a pool, at its last reported fill, with its live mark and whether it drains; sizes and fills are in blocks.
 type Disk struct {
-	ID     uint32
-	Node   uint32
-	Class  string
-	Blocks uint64
-	Live   uint64
-	Own    uint64
-	Slots  uint32
+	ID        uint32
+	Node      uint32
+	Class     string
+	Blocks    uint64
+	Live      uint64
+	Own       uint64
+	Slots     uint32
+	Mark      Mark
+	DownSince core.Tick
+	Drain     bool
 }
 
 // DiskFigures is what the CLI lists for one disk; Used counts the pool's grants at the disk's share.
@@ -109,8 +112,7 @@ func (p Pool) Capacity(disks []Disk, grants uint64) Figures {
 			continue
 		}
 		df := DiskFigures{ID: d.ID, Percent: p.limitPercent(d.Blocks), Blocks: d.Blocks, Live: d.Live, Slots: d.Slots}
-		df.Limit = d.Blocks * uint64(df.Percent) / 100
-		df.Capacity = df.Limit - min(df.Limit, d.Live-min(d.Own, d.Live))
+		df.Limit, df.Capacity = p.diskCapacity(d)
 		df.Room = df.Limit - min(df.Limit, d.Live)
 		granted := mulDivUp(grants, uint64(d.Slots), den)
 		df.Used = d.Live + granted
@@ -149,6 +151,12 @@ func (p Pool) Capacity(disks []Disk, grants uint64) Figures {
 	f.reprotect(caps, domainOf, w, q, k)
 	f.targets(caps, domainOf, p.PGCount, w, q)
 	return f
+}
+
+// diskCapacity is d's limit under write_limit and its capacity for p: the limit less other pools' data.
+func (p Pool) diskCapacity(d *Disk) (limit, capacity uint64) {
+	limit = d.Blocks * uint64(p.limitPercent(d.Blocks)) / 100
+	return limit, limit - min(limit, d.Live-min(d.Own, d.Live))
 }
 
 func addTo(domains []DomainFigures, id uint32, capacity uint64) []DomainFigures {
@@ -204,12 +212,21 @@ func (f *Figures) reprotect(caps []uint64, domainOf []uint32, w, q, k uint64) {
 	}
 }
 
-// targets sets each disk's target in member slots: its domain's capacity water-filled with each domain
-// capped at perDomain of a PG's width, split over the domain's disks by capacity.
+// targets sets each disk's target in member slots: its domain's water-filled share split over the domain's disks by capacity.
 func (f *Figures) targets(caps []uint64, domainOf []uint32, pgs uint32, w, q uint64) {
+	share := waterFill(caps, float64(q)/float64(w))
+	for i, id := range domainOf {
+		j := f.domainIndex(id)
+		if caps[j] > 0 {
+			f.Disks[i].Target = share[j] * float64(f.Disks[i].Capacity) / float64(caps[j]) * float64(pgs) * float64(w)
+		}
+	}
+}
+
+// waterFill gives each domain its share of a PG's members, in proportion to its capacity with each capped at limit.
+func waterFill(caps []uint64, limit float64) []float64 {
 	share := make([]float64, len(caps))
 	capped := make([]bool, len(caps))
-	limit := float64(q) / float64(w)
 	for {
 		var rest float64
 		var held int
@@ -221,7 +238,7 @@ func (f *Figures) targets(caps []uint64, domainOf []uint32, pgs uint32, w, q uin
 			}
 		}
 		if rest == 0 {
-			break
+			return share
 		}
 		lambda := (1 - limit*float64(held)) / rest
 		over := false
@@ -234,13 +251,7 @@ func (f *Figures) targets(caps []uint64, domainOf []uint32, pgs uint32, w, q uin
 			}
 		}
 		if !over {
-			break
-		}
-	}
-	for i, id := range domainOf {
-		j := f.domainIndex(id)
-		if caps[j] > 0 {
-			f.Disks[i].Target = share[j] * float64(f.Disks[i].Capacity) / float64(caps[j]) * float64(pgs) * float64(w)
+			return share
 		}
 	}
 }
