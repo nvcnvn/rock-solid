@@ -361,9 +361,11 @@ MarkDisk(d, to) ==
     /\ UNCHANGED <<reqIv, reports, recd>>
 
 \* A refill replaces a member with another disk in one table. The model lets
-\* it replace any member, up or not.
+\* it replace any member, up or not, but a leaving one: that stays until a
+\* recovered report removes it, however long it is down.
 Replace(p, old, new) ==
     /\ old \in Mem(p, Cur(p))
+    /\ old # ivs[p][Cur(p)].lv
     /\ new \notin Mem(p, Cur(p))
     /\ dnode[new] # 0
     /\ LET m == ivs[p][Cur(p)].mem
