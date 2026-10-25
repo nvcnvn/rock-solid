@@ -68,19 +68,23 @@ func (e *PGEntry) equal(o *PGEntry) bool {
 		slices.EqualFunc(e.Past, o.Past, func(a, b PastInterval) bool { return a.Interval == b.Interval && slices.Equal(a.Members, b.Members) })
 }
 
-// Apply gives the table d makes of t: ErrTableGap unless d follows t, ErrMalformed for an entry whose interval goes backwards or a new PG it leaves out, ErrTableCRC if the result fails d's CRC.
+// Apply gives the table d makes of t: ErrTableGap unless d follows t, ErrMalformed for an entry whose interval goes backwards or a new or resized pool without exactly its PG count of entries, ErrTableCRC if the result fails d's CRC.
 func (t *Table) Apply(d *Delta) (Table, error) {
 	if d.Epoch != t.Epoch+1 {
 		return Table{}, ErrTableGap
 	}
 	next := Table{Epoch: d.Epoch, Pools: make([]PoolTable, len(d.Pools))}
 	for i, dp := range d.Pools {
-		p := PoolTable{ID: dp.ID, Replicas: dp.Replicas, MinLive: dp.MinLive, PGs: make([]PGEntry, dp.PGCount)}
 		old := t.pool(dp.ID)
-		if old != nil && len(old.PGs) == len(p.PGs) {
-			copy(p.PGs, old.PGs)
-		} else {
+		if old != nil && len(old.PGs) != int(dp.PGCount) {
 			old = nil
+		}
+		if old == nil && d.entries(dp.ID) != int(dp.PGCount) {
+			return Table{}, ErrMalformed
+		}
+		p := PoolTable{ID: dp.ID, Replicas: dp.Replicas, MinLive: dp.MinLive, PGs: make([]PGEntry, dp.PGCount)}
+		if old != nil {
+			copy(p.PGs, old.PGs)
 		}
 		for _, e := range d.Entries {
 			if e.PG.Pool != dp.ID {
@@ -100,6 +104,16 @@ func (t *Table) Apply(d *Delta) (Table, error) {
 		return Table{}, ErrTableCRC
 	}
 	return next, nil
+}
+
+func (d *Delta) entries(pool core.PoolID) int {
+	n := 0
+	for _, e := range d.Entries {
+		if e.PG.Pool == pool {
+			n++
+		}
+	}
+	return n
 }
 
 // AppendTable appends t's encoding: its epoch, then each pool's settings and entries.

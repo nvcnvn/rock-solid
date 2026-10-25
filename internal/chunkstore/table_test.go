@@ -104,6 +104,31 @@ func TestMalformedDeltas(t *testing.T) {
 	}
 }
 
+// A delta for a new or resized pool carries every one of its PGs: one entry under a pg_count of 2³¹ is malformed before the table is allocated.
+func TestDeltaCarriesEveryNewPG(t *testing.T) {
+	prev := fullTable(4, 3)
+	huge := hugeDelta(&prev)
+	got, err := DecodeDelta(AppendDelta(nil, &huge))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prev.Apply(&got); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a new pool of 2³¹ PGs with one entry: %v", err)
+	}
+	resized := fullTable(8, 3)
+	resized.Epoch = 2
+	d := MakeDelta(&prev, &resized)
+	d.Entries = d.Entries[1:]
+	if _, err := prev.Apply(&d); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a split pool missing an entry: %v", err)
+	}
+}
+
+func hugeDelta(prev *Table) Delta {
+	e := prev.Pools[0].PGs[0]
+	return Delta{Epoch: prev.Epoch + 1, Pools: []DeltaPool{{1, 3, 1, 4}, {2, 3, 1, 1 << 31}}, Entries: []DeltaEntry{{core.PGID{Pool: 2, Index: 1<<31 - 1}, e}}}
+}
+
 func FuzzDecodeTable(f *testing.F) {
 	tbl := fullTable(4, 3)
 	tbl.Pools[0].PGs[1].Interval = 3
@@ -135,6 +160,8 @@ func FuzzDecodeDelta(f *testing.F) {
 	next = fullTable(4, 3)
 	next.Epoch, next.Pools[0].PGs[2].Interval = 2, 2
 	d = MakeDelta(&prev, &next)
+	f.Add(AppendDelta(nil, &d))
+	d = hugeDelta(&prev)
 	f.Add(AppendDelta(nil, &d))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		got, err := DecodeDelta(b)

@@ -4186,7 +4186,9 @@ Past intervals' member lists come on top of these sizes and are usually empty (`
   interval numbers goes backwards (`TestDeltaBases`).
 - [fuzz] Delta and whole-table decoders (`FuzzDecodeTable`, `FuzzDecodeDelta`): what they accept
   encodes back to the same bytes. A truncated delta, an entry for a PG past `pg_count`, or a
-  decreasing interval number is Malformed (`TestMalformedDeltas`).
+  decreasing interval number is Malformed (`TestMalformedDeltas`), as is a new or resized pool
+  without exactly `pg_count` entries, refused before the table is allocated: a 50-byte delta naming
+  2³¹ PGs costs nothing (`TestDeltaCarriesEveryNewPG`).
 - PG epochs spike B1, a homelab year on 10 nodes: 104 to 105 MB of deltas against 399 MB to 2.25 GB
   of whole tables. F2, one flap with refill staged one member per table: 1,202 tables. A delta costs
   a 30-byte header for one pool and 34 bytes per changed `rep3` entry, 20 more with its previous
