@@ -3354,7 +3354,9 @@ out a leaving member kept as an ordinary one in place of a missing member (`stay
 marks a member and removes the leaving member at once, which the model cannot make since its mark
 change starts an interval, and which placement prevents by ignoring a report in a table that marks
 another member; a removal and a new move of the PG in one table; and a leaving member dropped once
-its disk leaves the pool. It checks only that moves keep copies, never that a move completes; the
+its disk leaves the pool. Nor is the rule that a move starts only from an interval reported
+recovered: the model's refills are planned, not chosen by whether peering waits for a member, so
+the loss that rule prevents cannot arise there. It checks only that moves keep copies, never that a move completes; the
 placement tests that settle every move check that.
 
 **Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12.
@@ -3874,7 +3876,7 @@ k.n is version (interval k, counter n).
 | Lease request, holder to grantor | The holder's table epoch; the grantor grants only if it is at least its own |
 | Grant | Support epoch; the grantor's run ID and `CLOCK_MONOTONIC_RAW` reading `g`; no table epoch, since the request reported the holder's ([Epoch change model](#epoch-change-model)); or a refusal with the grantor's table epoch |
 | Heartbeat between a node pair | The sender's table epoch; as a grantor, its run ID and `CLOCK_MONOTONIC_RAW`, on every heartbeat |
-| Heartbeat to the authority | Activation reports (PG fields); recovered reports (PG fields), once every member of the interval but a leaving one is up and lists nothing; each member's acknowledgment latency; per disk its log ID, fill, oldest unfinished I/O age and whether its log has failed |
+| Heartbeat to the authority | Activation reports (PG fields); recovered reports (PG fields), once every member of the interval but a leaving one is up and lists nothing, on each heartbeat until a table records the interval recovered or starts another; each member's acknowledgment latency; per disk its log ID, fill, oldest unfinished I/O age and whether its log has failed |
 | `member_timeout` report, primary to authority | PG fields, member disk |
 | Direct probe, authority to a disk's owner loop | Disk ID |
 | Probe reply | Log ID, oldest unfinished I/O age, whether the log has failed |
@@ -4184,7 +4186,12 @@ row says otherwise).
   is applied (`TestEditsKeepTheRules`).
 - A move adds the new member and marks the old one leaving; the first table after a recovered
   report for the PG's current interval removes it, and removals count no move, so every
-  recovered PG's removal shares one table (`TestMovesAddThenRemove`). A PG makes one move at a time.
+  recovered PG's removal shares one table (`TestMovesAddThenRemove`). A PG makes one move at a time,
+  and starts one only once its entry records a recovered report for its current interval, its
+  members unchanged since: on 4 nodes of `rep2`, after a node's disk leaves the pool, a disk added
+  to it draws moves only from PGs the refill left alone, not from those whose refill members are
+  still recovering. The table that removes the leaving members moves nothing from their PGs, so
+  settling takes one table more, which starts no interval.
   Balance counts the leaving member as gone and the failure-domain rule ignores it: on 3 nodes of
   `rep3`, a disk added to node A takes members from A's other disk. A missing member of a moving PG
   is replaced by the leaving member, which becomes an ordinary member, when its domain allows and
@@ -4205,14 +4212,15 @@ row says otherwise).
   (`TestPinAndDrain`), except
   a pinned PG's, which keeps the drain from finishing until an operator edits or unpins that PG.
 - Targets by capacity: after a disk is added to a pool holding data, the second computation, run
-  once the first one's moves have copied, proposes no move (`TestMovesAfterADiskAdded`; the
+  once the first one's moves have copied, proposes no move, and the third, once the removals have
+  recovered, starts no interval (`TestMovesAfterADiskAdded`; the
   counts by room are the capacity conditions study's).
 
   | Layout | Moves, over computations |
   | --- | --- |
-  | `none`, one 2 TB node holding 1 TB, a 2 TB node added | 61, over 2 (124 over 4 with targets by room) |
-  | C6 holding 0.8 TB, a 2 TB disk added to node B | 62, over 2 (98 over 3) |
-  | C2 holding 1.5 TB, a 4 TB disk added to node D | 98, over 2 (153 over 5) |
+  | `none`, one 2 TB node holding 1 TB, a 2 TB node added | 61, over 3 (124 over 4 with targets by room) |
+  | C6 holding 0.8 TB, a 2 TB disk added to node B | 62, over 3 (98 over 3) |
+  | C2 holding 1.5 TB, a 4 TB disk added to node D | 98, over 3 (153 over 5) |
 
 **Convergence on the capacity model layouts.** C1 to C6 are the data-driven cases of the "Pools"
 item, which holds their capacity figures ([capacity model
@@ -4230,7 +4238,7 @@ spike](../spikes/capacity-model/README.md)). Here they check only placement
 
 | Table | Size |
 | --- | --- |
-| 2,048 `rep3` PGs, each 3 × (4-byte disk ID + mark byte) + 11 bytes of intervals, pin flag and counts | 52 KiB (53,270 bytes) |
+| 2,048 `rep3` PGs, each 3 × (4-byte disk ID + mark byte) + 11 bytes of intervals, flags and counts | 52 KiB (53,270 bytes) |
 | 4,096 PGs × 18 members, `ec16-2` | About 404 KiB (413,718 bytes) |
 
 Past intervals' member lists and, for a PG with a leaving member, its extra member come on top of
@@ -4245,7 +4253,8 @@ these sizes; both are usually absent (`TestTableSize`).
   interval numbers goes backwards (`TestDeltaBases`).
 - [fuzz] Delta and whole-table decoders (`FuzzDecodeTable`, `FuzzDecodeDelta`): what they accept
   encodes back to the same bytes. A truncated delta, an entry for a PG past `pg_count`, a
-  decreasing interval number or two leaving members is Malformed (`TestMalformedDeltas`), as is a new or resized pool
+  decreasing interval number, two leaving members, a leaving member in a recovered interval or an
+  unknown entry flag is Malformed (`TestMalformedDeltas`), as is a new or resized pool
   without exactly `pg_count` entries, refused before the table is allocated: a 50-byte delta naming
   2³¹ PGs costs nothing (`TestDeltaCarriesEveryNewPG`).
 - PG epochs spike B1, a homelab year on 10 nodes: 104 to 105 MB of deltas against 399 MB to 2.25 GB
@@ -4271,13 +4280,15 @@ After every table:
 - A member removed and added back gets a new interval.
 - A live leaving member is removed in the first table after a recovered report for its PG's
   current interval that marks no other member down or in `maintenance`, and never before.
+- An entry is recovered exactly while its interval has had such a report, and a move adds a member
+  only to a PG whose entry was recovered or got such a report in that table.
 - No live member that holds all of a PG's data, one it started with or one a recovered report
   covered that has stayed live since, leaves unless the members left that hold it still number the
   width; an edit may remove any member.
 - A delta reproduces the whole table and its CRC.
 
 Then every disk comes back up, undrained and unpinned, and tables are computed, each once the last
-one's moves have copied and activated, until one proposes no move and leaves no PG moving; then a disk is added to the pool
+one's moves have copied and activated, until one proposes no move, leaves no PG moving and starts no interval; then a disk is added to the pool
 holding data, and the same again. Once the loop stops:
 
 - It settles within a few computations, at most 4 over 1,000 seeds: one after the moves copied
