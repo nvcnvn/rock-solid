@@ -1,0 +1,45 @@
+# C2 confirmed at 18.2%, then node D's 1 TB disk marked out after a failure; refilling its members
+# puts every PG on A, B and C.
+
+pool replicas=3
+----
+
+disks
+A node=A size=4TB slots=128
+B node=B size=4TB slots=128
+C node=C size=2TB slots=86
+D node=D size=1TB slots=42
+----
+
+confirm
+----
+confirmed 18.2%
+
+disks
+A node=A size=4TB slots=128
+B node=B size=4TB slots=128
+C node=C size=2TB slots=128
+----
+
+figures
+----
+capacity 9.000 TB: A 3.600 TB, B 3.600 TB, C 1.800 TB
+capacity/b 3.000 TB
+balanced 1.800 TB
+available 1.800 TB, set by C (128 of 128 slots, target 128.0); available + held 0.0% under balanced
+held 0.000 GB
+f 40.0%, stranded room: A 1.800 TB (50%), B 1.800 TB (50%)
+asks false
+reprotectable none
+
+conditions
+----
+Stranded
+
+confirm
+----
+confirmed 40.0%
+
+conditions
+----
+none

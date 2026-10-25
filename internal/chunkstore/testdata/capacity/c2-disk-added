@@ -1,0 +1,52 @@
+# C2 with a 4 TB disk added to node D and confirmed; the table is the study's test T: the spike's
+# table at seed 1, balanced from at seed 2 under the floored margin, moving from the disk furthest
+# above its target.
+
+pool replicas=3
+----
+
+disks
+A node=A size=4TB slots=104
+B node=B size=4TB slots=104
+C node=C size=2TB slots=52
+D1 node=D size=1TB slots=26
+D2 node=D size=4TB slots=98
+----
+
+confirm
+----
+confirmed 0.0%
+
+figures
+----
+capacity 13.500 TB: A 3.600 TB, B 3.600 TB, C 1.800 TB, D 4.500 TB
+capacity/b 4.500 TB
+balanced 4.500 TB
+available 4.431 TB, set by D1 (26 of 128 slots, target 25.6); available + held 1.5% under balanced
+held 0.000 GB
+f 0.0%, stranded room: none
+asks false
+reprotectable 1.800 TB, losing domain D
+
+conditions settled
+----
+none
+
+# 90% held.
+hold 4.05TB
+----
+
+figures
+----
+capacity 13.500 TB: A 3.600 TB, B 3.600 TB, C 1.800 TB, D 4.500 TB
+capacity/b 4.500 TB
+balanced 4.500 TB
+available 0.443 TB, set by A (104 of 128 slots, target 102.4); available + held 0.2% under balanced
+held 4.050 TB
+f 0.0%, stranded room: none
+asks false
+reprotectable 1.800 TB, losing domain D
+
+conditions settled
+----
+NearFull CannotReprotect
