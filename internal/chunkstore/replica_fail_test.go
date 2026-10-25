@@ -405,3 +405,23 @@ func TestAFailureBelowACommittedVersionStillAsks(t *testing.T) {
 		}
 	}
 }
+
+// Disk 2's acknowledgment of 1.1's first send, which a lost connection left unanswered, arrives once 1.1 has gone out again: the primary keeps 1.1's buffer until the second send has its answer too.
+func TestALateAcknowledgmentKeepsTheBufferOfASendAgain(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.s.Partition(0, 1, false)
+	c.write(pg0, ch, 0, []byte{1})
+	for c.lost[[2]core.NodeID{c.loops[0], c.loops[1]}] == 0 && c.step() {
+	}
+	c.s.Heal(0, 1)
+	for len(c.reps[0].vers) > 0 && c.reps[0].vers[0].out&1 == 0 && c.step() {
+	}
+	if len(c.reps[0].vers) == 0 {
+		t.Fatal("1.1 was not sent again")
+	}
+	ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 1}}
+	ev.Msg.Len = uint16(copy(ev.Msg.Body[:], AppendResponse(nil, &Response{Kind: KindAck, ID: 1, Version: MakeVersion(1, 1)})))
+	c.s.Node(0).Feed(c.loops[0], ev)
+	c.settle()
+}

@@ -87,7 +87,7 @@ type storeReq struct {
 	version uint64
 }
 
-// version is a client write or punch the primary took in interval and fans out once its store orders it: the members that must hold it, those that do, and those whose send has neither a reply nor a PeerLost yet; done once its client is answered.
+// version is a client write or punch the primary took in interval and fans out once its store orders it: the members that must hold it, those that do, and those whose latest send, numbered in sends, has neither a reply nor a PeerLost yet; done once its client is answered.
 type version struct {
 	seq      core.RequestID
 	req      uint64
@@ -98,6 +98,7 @@ type version struct {
 	u        Update
 	buf     core.IOBuf
 	members [maxMembers]uint32
+	sends   [maxMembers]uint8
 	n       int
 	acked   uint8
 	out     uint8
@@ -761,9 +762,13 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 	}
 }
 
+// sendShift places a send's number in the ID of the update it carries, above the version's sequence, so an answer to a send a lost connection left behind is told from the answer to the send after it, whose buffer is still in the network.
+const sendShift = 56
+
 func (r *Replica) send(v *version, k int, out *ReplicaOutput) {
+	v.sends[k]++
 	u := v.u
-	u.ID, u.HasExpect, u.Expect, u.Granted = v.seq, false, 0, false
+	u.ID, u.HasExpect, u.Expect, u.Granted = v.seq|core.RequestID(v.sends[k])<<sendShift, false, 0, false
 	u.PG.Epoch, u.PG.Interval = v.epoch, uint32(v.u.Version>>32)
 	if u.Kind == KindWrite {
 		first, last := spanOf(u.Off, u.Len)
@@ -813,9 +818,10 @@ func statusOf(err error) Status {
 	return StatusRefused
 }
 
-// ack takes a member's acknowledgment of a version.
+// ack takes a member's acknowledgment of a version, which ends its send only if it answers the latest.
 func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *ReplicaOutput) {
-	i := r.versionBySeq(rp.ID)
+	seq := rp.ID & (1<<sendShift - 1)
+	i := r.versionBySeq(seq)
 	if i < 0 {
 		return
 	}
@@ -829,7 +835,9 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 	if k < 0 {
 		return
 	}
-	v.out &^= 1 << k
+	if uint8(rp.ID>>sendShift) == v.sends[k] {
+		v.out &^= 1 << k
+	}
 	r.disk(v.members[k]).live = rp.Fill
 	switch {
 	case rp.Status == StatusOK && rp.Version == v.u.Version:
@@ -841,7 +849,7 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 		}
 		r.fail(ctx, i, *rp, out)
 	}
-	if i = r.versionBySeq(rp.ID); i >= 0 {
+	if i = r.versionBySeq(seq); i >= 0 {
 		r.release(ctx, i)
 	}
 }
