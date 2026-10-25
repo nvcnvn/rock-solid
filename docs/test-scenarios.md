@@ -4380,6 +4380,9 @@ swaps**
 
 - A client write that B held when interval 43 ended under it is ordered again, once B has re-peered
   in 44, with a version of interval 44.
+- Held across a whole table: B holds a write in interval 2 and next adopts a table at interval 4
+  whose past intervals show B leading 3: the write is ordered as 4.1 once B has re-peered. When
+  they show another primary leading 3, the write is refused with 4.
 
 **Commit, map and read**
 
@@ -4407,8 +4410,14 @@ swaps**
   sent again from the oldest unacknowledged one, in the same order. Invariant, checked after every
   step of the replica tests: no `NetSend` of k.(n + 1) to a member before k.n on one connection.
 - A member answers a version it already holds, sent again, once it is durable, and logs it once.
-- A version peering dropped is superseded in every log that holds it; see [Recovery per
+- A version that fails in the primary's own interval is superseded in every log that holds it,
+  the primary's included: a member refuses 1.2 of a chunk at 1.1, and the primary orders 1.3 with
+  1.1's bytes to every up member; the members that logged 1.2 map 1.3, holding 1.1's bytes, and
+  the next write gets 1.4. A version peering dropped is superseded by recovery; see [Recovery per
   PG](#recovery-per-pg).
+- Writes 1.1 and 1.2 of one chunk and 1.1 of another, sent while a member is cut off, reach it in
+  that order once it is reachable again, and all commit. A planted variant that sends them again
+  newest first breaks the send-order invariant.
 
 **Partial blocks** (sub-block writes spike). Block 5 is committed at 7.7.
 
@@ -4461,7 +4470,8 @@ its acknowledgments and heartbeats.
 | Pool P1 (limit 95%) and pool P2 (limit 90%) on one disk at 92% total fill | P1 admitted, P2 refused: each checks its own limit against the disk's total fill |
 
 - Tables applied as deltas and fetched whole after a gap or CRC mismatch: the cases under [Placement
-  computation](#placement-computation), seen from the primary.
+  computation](#placement-computation), seen from the primary: a delta that follows its table is
+  applied, and a gap or a CRC mismatch leaves the table as it was and asks for the whole table.
 - Open: space grants arrive with phase 4's control-plane group; the checklist does not say how phase
   3's stand-in authority marks a flush as granted.
 
