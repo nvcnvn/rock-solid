@@ -192,7 +192,7 @@ func (h *history) next(t *testing.T, l *layout, in *Inputs) {
 	}
 }
 
-// check holds every table to the rules: the pool's width and at most one leaving member beside it, more members only beside a leaving one after replicas went down and never more than the table before, at most perDomain members per domain but a leaving one, live members kept when replicas go down, an interval raised by one exactly when the rules say, a member removed and added back in a new interval, a live leaving member removed exactly in the first table after a recovered report for an interval since the last that added a member or had one down, and no live member that holds all the PG's data removed unless the width still does.
+// check holds every table to the rules: the pool's width and at most one leaving member beside it, more members only beside a leaving one after replicas went down and never more than the table before, at most perDomain members per domain but a leaving one, live members kept when replicas go down, an interval raised by one exactly when the rules say, a member removed and added back in a new interval, a live leaving member removed exactly in the first table after a recovered report for its current interval, and no live member that holds all the PG's data removed unless the width still does.
 func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 	p, pt := l.pool, l.pools()
 	var old *PoolTable
@@ -232,8 +232,8 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 			b = old.PGs[i*len(old.PGs)/len(pt.PGs)]
 		}
 		n, surplus := len(e.Members)-leaving, len(b.Members)-leavingIn(b.Members)
-		if leaving > 1 || n < p.width() || n > p.width() && (leaving == 0 || n > surplus) || (leaving == 1) != (e.Added > 0) || e.Added > e.Interval {
-			return fmt.Errorf("PG %d at interval %d has members %v, added at %d, for a width of %d", i, e.Interval, e.Members, e.Added, p.width())
+		if leaving > 1 || n < p.width() || n > p.width() && (leaving == 0 || n > surplus) {
+			return fmt.Errorf("PG %d at interval %d has members %v for a width of %d", i, e.Interval, e.Members, p.width())
 		}
 		perDomain := map[uint32]int{}
 		for j, m := range e.Members {
@@ -310,7 +310,7 @@ func (h *history) checkCopies(i int, old *PoolTable, b, e *PGEntry, l *layout, i
 		if r.PG != pg(i) {
 			continue
 		}
-		due = due || b.Added > 0 && r.Interval >= b.Added && r.Interval <= b.Interval
+		due = due || b.leaving() >= 0 && r.Interval == b.Interval
 		k := slices.IndexFunc(h.recoverable[i], func(pi PastInterval) bool { return pi.Interval == r.Interval })
 		if k < 0 {
 			return fmt.Errorf("PG %d reported recovered at interval %d, which never was", i, r.Interval)
@@ -333,7 +333,7 @@ func (h *history) checkCopies(i int, old *PoolTable, b, e *PGEntry, l *layout, i
 			continue
 		}
 		if m.Leaving && !due {
-			return fmt.Errorf("PG %d removed leaving member %d with no recovered report since interval %d", i, m.Disk, b.Added)
+			return fmt.Errorf("PG %d removed leaving member %d with no recovered report for interval %d", i, m.Disk, b.Interval)
 		}
 		if slices.Contains(h.complete[i], m.Disk) && held < l.pool.width() {
 			return fmt.Errorf("PG %d removed live member %d, which holds all its data, leaving %d such of %v", i, m.Disk, held, e.Members)

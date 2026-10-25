@@ -64,7 +64,7 @@ func (t *Table) pool(id core.PoolID) *PoolTable {
 }
 
 func (e *PGEntry) equal(o *PGEntry) bool {
-	return e.Interval == o.Interval && e.Activated == o.Activated && e.Pinned == o.Pinned && e.Added == o.Added && slices.Equal(e.Members, o.Members) &&
+	return e.Interval == o.Interval && e.Activated == o.Activated && e.Pinned == o.Pinned && slices.Equal(e.Members, o.Members) &&
 		slices.EqualFunc(e.Past, o.Past, func(a, b PastInterval) bool { return a.Interval == b.Interval && slices.Equal(a.Members, b.Members) })
 }
 
@@ -151,9 +151,6 @@ func appendEntry(dst []byte, e *PGEntry) []byte {
 	dst = le.AppendUint32(le.AppendUint32(dst, e.Interval), e.Activated)
 	dst = appendBool(dst, e.Pinned)
 	dst = appendMembers(dst, e.Members)
-	if leavingIn(e.Members) > 0 {
-		dst = le.AppendUint32(dst, e.Added)
-	}
 	dst = binary.AppendUvarint(dst, uint64(len(e.Past)))
 	for _, pi := range e.Past {
 		dst = appendMembers(le.AppendUint32(dst, pi.Interval), pi.Members)
@@ -241,7 +238,7 @@ func (r *reader) deltaPool() DeltaPool {
 	return p
 }
 
-// entry reads a PG entry: an interval of at least 1, a last activated interval not above it, at most one leaving member and, with one, the interval that added its replacement, from 1 to the interval, and past intervals rising from the last activated one to below it.
+// entry reads a PG entry: an interval of at least 1, a last activated interval not above it, at most one leaving member, and past intervals rising from the last activated one to below it.
 func (r *reader) entry() PGEntry {
 	e := PGEntry{Interval: r.u32(), Activated: r.u32(), Pinned: r.bool(), Members: r.members()}
 	if e.Interval == 0 || e.Activated > e.Interval {
@@ -255,11 +252,6 @@ func (r *reader) entry() PGEntry {
 	}
 	if leaving > 1 {
 		r.bad = true
-	}
-	if leaving == 1 {
-		if e.Added = r.u32(); e.Added == 0 || e.Added > e.Interval {
-			r.bad = true
-		}
 	}
 	n := r.uvarint()
 	low := e.Activated

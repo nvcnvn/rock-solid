@@ -359,7 +359,7 @@ func (l *layout) moving() []int {
 	return pgs
 }
 
-// A move adds the new member and marks the old one leaving; a later table removes every leaving member a recovered report covers, starting an interval and counting no move. A leaving member missing for refill_after is dropped, one a missing member's refill can keep stays in its place, and on 3 nodes a move within a node keeps the failure-domain rule but for the leaving member. A report for an interval before one that adds another member or has one down removes nothing.
+// A move adds the new member and marks the old one leaving; a later table removes every leaving member a recovered report covers, starting an interval and counting no move. A leaving member missing for refill_after is dropped, one a missing member's refill can keep stays in its place, and on 3 nodes a move within a node keeps the failure-domain rule but for the leaving member. A report for an interval before the PG's current one removes nothing.
 func TestMovesAddThenRemove(t *testing.T) {
 	t.Run("removals share one table", func(t *testing.T) {
 		l := placed(t, nodesOf(rep(3, 256), 4, 2, 2))
@@ -397,8 +397,8 @@ func TestMovesAddThenRemove(t *testing.T) {
 		l.now += RefillAfter
 		l.step(t, l.inputs(0))
 		want := slices.DeleteFunc(slices.Clone(e.Members), func(m Member) bool { return m.Leaving })
-		if got := l.pools().PGs[i]; !slices.Equal(disksOf(&got), disksOf(&PGEntry{Members: want})) || got.Added != 0 {
-			t.Fatalf("a leaving member down for refill_after: %v, added at %d, from %v", got.Members, got.Added, e.Members)
+		if got := l.pools().PGs[i]; !slices.Equal(disksOf(&got), disksOf(&PGEntry{Members: want})) {
+			t.Fatalf("a leaving member down for refill_after: %v, from %v", got.Members, e.Members)
 		}
 	})
 	t.Run("refill keeps the leaving member", func(t *testing.T) {
@@ -419,8 +419,8 @@ func TestMovesAddThenRemove(t *testing.T) {
 		got := l.pools().PGs[i]
 		want := slices.Clone(e.Members[1:])
 		want[e.leaving()-1].Leaving = false
-		if !slices.Equal(got.Members, want) || got.Added != 0 {
-			t.Fatalf("a missing member of %v left %v, added at %d", e.Members, got.Members, got.Added)
+		if !slices.Equal(got.Members, want) {
+			t.Fatalf("a missing member of %v left %v", e.Members, got.Members)
 		}
 	})
 	t.Run("within a node on 3 nodes", func(t *testing.T) {
@@ -460,7 +460,7 @@ func TestMovesAddThenRemove(t *testing.T) {
 		l.step(t, in)
 		for i, e := range l.pools().PGs {
 			parent := prev.Pools[0].PGs[i/2]
-			if !slices.Equal(e.Members, parent.Members) || e.Activated != parent.Activated || e.Added != parent.Added {
+			if !slices.Equal(e.Members, parent.Members) || e.Activated != parent.Activated {
 				t.Fatalf("a report for PG %d before the split changed PG %d: %+v from %+v", i/2, i, e, parent)
 			}
 		}
@@ -472,6 +472,11 @@ func TestMovesAddThenRemove(t *testing.T) {
 		{"a refill joins", func(t *testing.T, l *layout, disk uint32) { l.remove(disk) }},
 		{"a member goes down and back up", func(t *testing.T, l *layout, disk uint32) {
 			l.mark(MarkDown, disk)
+			l.step(t, l.inputs(0))
+			l.mark(MarkUp, disk)
+		}},
+		{"a member goes to maintenance and back up", func(t *testing.T, l *layout, disk uint32) {
+			l.mark(MarkMaint, disk)
 			l.step(t, l.inputs(0))
 			l.mark(MarkUp, disk)
 		}},

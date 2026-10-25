@@ -342,8 +342,8 @@ func TestIntervalsRaisedByTableChanges(t *testing.T) {
 		if j >= 0 {
 			moving[j].Leaving = true
 		}
-		if j < 0 || is.Added != is.Interval || !slices.Equal(is.Members, moving) {
-			t.Fatalf("PG %d went from %v to %v, added at %d", i, was, is.Members, is.Added)
+		if j < 0 || !slices.Equal(is.Members, moving) {
+			t.Fatalf("PG %d went from %v to %v", i, was, is.Members)
 		}
 		if d := MakeDelta(&prev, &l.table); len(d.Entries) != 1 {
 			t.Fatalf("the delta holds %d entries", len(d.Entries))
@@ -354,8 +354,8 @@ func TestIntervalsRaisedByTableChanges(t *testing.T) {
 		in.Recovered = []PGInterval{{pg(i), is.Interval}}
 		samePGs(t, "recovered at the add", l.raised(t, in), []int{i})
 		want := append(slices.Delete(slices.Clone(was), j, j+1), Member{Disk: disk})
-		if e := l.pools().PGs[i]; !slices.Equal(e.Members, want) || e.Added != 0 {
-			t.Fatalf("after its recovery PG %d holds %v, added at %d", i, e.Members, e.Added)
+		if e := l.pools().PGs[i]; !slices.Equal(e.Members, want) {
+			t.Fatalf("after its recovery PG %d holds %v", i, e.Members)
 		}
 	})
 	t.Run("disk and node marks", func(t *testing.T) {

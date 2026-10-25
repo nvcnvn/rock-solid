@@ -38,14 +38,13 @@ type PastInterval struct {
 	Members  []Member
 }
 
-// PGEntry is a PG's entry in the placement table: its members with the primary first, its interval, its last activated interval, the intervals since, whether an operator pinned it, and, while a member leaves, the first interval a recovered report must be for to remove it: the last that added a member or had one but the leaving member down, 0 with none.
+// PGEntry is a PG's entry in the placement table: its members with the primary first, its interval, its last activated interval, the intervals since, and whether an operator pinned it.
 type PGEntry struct {
 	Members   []Member
 	Interval  uint32
 	Activated uint32
 	Past      []PastInterval
 	Pinned    bool
-	Added     uint32
 }
 
 // PoolTable is a pool's part of the placement table: the settings its intervals depend on, and its PGs.
@@ -93,7 +92,7 @@ type Inputs struct {
 	Moves       int
 }
 
-// Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members whose replacements recovered removed, reports ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves. It reports the moves it made.
+// Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members removed on a recovered report for their PG's current interval, reports ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves. It reports the moves it made.
 func Next(prev *Table, in *Inputs) (Table, int) {
 	pools := slices.Clone(in.Pools)
 	slices.SortFunc(pools, func(a, b PoolInputs) int { return cmp.Compare(a.ID, b.ID) })
@@ -162,7 +161,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 		e.Members = slices.Clone(e.Members)
 		e.Past = slices.Clone(e.Past)
 		if ed := edits[i]; ed != nil {
-			e.Members, e.Pinned, e.Added = e.Members[:0], ed.Pinned, 0
+			e.Members, e.Pinned = e.Members[:0], ed.Pinned
 			for _, d := range ed.Disks {
 				e.Members = append(e.Members, Member{Disk: d})
 			}
@@ -172,9 +171,6 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 			if k := pl.find(e.Members[j].Disk); k >= 0 {
 				e.Members[j].Mark = pl.disks[k].Mark
 			}
-		}
-		if e.leaving() < 0 {
-			e.Added = 0
 		}
 		for _, m := range e.Members {
 			if k := pl.find(m.Disk); k >= 0 && !m.Leaving {
@@ -193,7 +189,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 	}
 	for _, r := range all.Recovered {
 		if !split && r.PG.Pool == in.ID && int(r.PG.Index) < n {
-			if e := &pl.entries[r.PG.Index]; e.Added > 0 && r.Interval >= e.Added && r.Interval <= e.Interval {
+			if e := &pl.entries[r.PG.Index]; r.Interval == e.Interval {
 				e.dropLeaving()
 			}
 		}
@@ -211,9 +207,6 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 			e.Past = append(e.Past, PastInterval{Interval: b.Interval, Members: b.Members})
 		}
 		e.Interval = b.Interval + 1
-		if e.leaving() >= 0 && (e.Added == 0 || e.uncovered(b)) {
-			e.Added = e.Interval
-		}
 	}
 	return PoolTable{ID: in.ID, Replicas: uint8(p.Replicas), MinLive: uint8(p.MinLive), PGs: pl.entries}, moves
 }
@@ -283,16 +276,8 @@ func (e *PGEntry) leaving() int {
 	return slices.IndexFunc(e.Members, func(m Member) bool { return m.Leaving })
 }
 
-// uncovered reports whether a member of e but a leaving one is down or was not in b, so that a recovered report for an interval before e's does not cover its copies.
-func (e *PGEntry) uncovered(b *PGEntry) bool {
-	return slices.ContainsFunc(e.Members, func(m Member) bool {
-		return !m.Leaving && (m.Mark == MarkDown || !slices.ContainsFunc(b.Members, func(o Member) bool { return o.Disk == m.Disk }))
-	})
-}
-
 func (e *PGEntry) dropLeaving() {
 	e.Members = slices.DeleteFunc(e.Members, func(m Member) bool { return m.Leaving })
-	e.Added = 0
 }
 
 func lastDown(ms []Member) int {
@@ -388,7 +373,7 @@ func (pl *placer) stay(e *PGEntry, out int) bool {
 	if k < 0 || !pl.room(e, k, out) {
 		return false
 	}
-	e.Members[j].Leaving, e.Added = false, 0
+	e.Members[j].Leaving = false
 	pl.load[k]++
 	return true
 }
