@@ -4263,7 +4263,7 @@ these sizes; both are usually absent (`TestTableSize`).
   interval's members, 5 more during a move (`TestDeltaSize`).
 
 **[property] tests.** `TestPlacementKeepsItsRules`, 1,000 seeds in `scripts/seeds.sh`, about 40 ms
-each; 10,000 passed once in 252 s on 2 processes. Each seed draws a layout from the matrix in
+each; 10,000 passed once in 236 s on 2 processes. Each seed draws a layout from the matrix in
 Testing strategy, 3 or 5 nodes of 1 or 4 disks of 0.5 to 8 TB, some holding another pool's data, under `none`, `rep2` or `rep3` with a random
 `min_live`, places it, and computes 30 tables after random events: a disk added or removed, a disk
 or node marked down, up or in `maintenance`, a drain set or cleared, time passing, primaries asking,
@@ -4291,9 +4291,10 @@ Then every disk comes back up, undrained and unpinned, and tables are computed, 
 one's moves have copied and activated, until one proposes no move, leaves no PG moving and starts no interval; then a disk is added to the pool
 holding data, and the same again. Once the loop stops:
 
-- It settles within a few computations, at most 4 over 1,000 seeds: one after the moves copied
+- It settles within a few computations, at most 8 over 10,000 seeds: one after the moves copied
   proposes more only where the one before found every PG it would move from a disk still moving,
-  since a PG makes one move at a time.
+  since a PG makes one move at a time, and a PG's next move waits a table more, for the report of
+  the interval its removal started.
 - It has converged: no disk is outside its fill margin.
 - Available + held is at least balanced ÷ (1 + the largest margin of the pool's disks) and never
   above balanced.
@@ -4302,7 +4303,7 @@ holding data, and the same again. Once the loop stops:
   Moving from the disk furthest above its target even inside its margin costs those extra moves:
   when a disk joins a domain whose capped share rises, the disks of other domains that are just
   above their targets feed that domain's other disks, and a disk far above its target feeds the
-  new disk in its own domain until it falls under the rest. Over 10,000 seeds the moves were 0.79%
+  new disk in its own domain until it falls under the rest. Over 10,000 seeds the moves were 0.69%
   above the lower bound in all, none above a quarter more.
 - Over a run of at least 200 seeds, the members disk additions move total at most 5% above the
   sum of their lower bounds. Fewer seeds swing too far: of the 1,250 runs of 8 seeds from 0 to
