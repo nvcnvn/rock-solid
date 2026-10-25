@@ -44,3 +44,8 @@
 - **Where:** the `test` job in `.github/workflows/go.yml`
 - **Why:** `internal/chunkstore`'s tests peak near 4.3 GB resident ([invariant checker](test-scenarios.md#invariant-checker)), and Go's default runs as many packages at once as the runner has CPUs, 4, so three at a time keeps a runner's 16 GB clear of the heaviest packages running together.
 - **Remove when:** the heaviest test package peaks under 3 GB, or the runner has 32 GB.
+
+## Workaround: a primary's whole-chunk writes skip chunk slots
+- **Where:** `writeItems` in `internal/chunkstore/store.go`, for gated writes
+- **Why:** a primary's write stays unmapped until it commits and may be aborted; an aborted write in a chunk slot would leave the slot held by the log while no map refers to it, and `CheckSlots` requires the two to match. So a primary logs a whole chunk as ordinary items, as many records as `max_group_commit_bytes` takes, while its members, which map as they log, still write it to a slot.
+- **Remove when:** the store frees the slot of an aborted write, as it frees a slot a later write replaces; then gated whole-chunk writes take a slot like any other.

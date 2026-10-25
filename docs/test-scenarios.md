@@ -3869,7 +3869,7 @@ k.n is version (interval k, counter n).
 | Message | Fields |
 | --- | --- |
 | Connection hello | The client's session ID and incarnation (the daemon's start time on `CLOCK_BOOTTIME`) |
-| Chunk write, client to primary | PG fields, session ID, incarnation (8 bytes), chunk ID (16 bytes), byte range within the chunk, optional `expect_ver`, snapshot epoch; as data, the blocks the range touches |
+| Chunk write, client to primary | PG fields, session ID, incarnation (8 bytes), chunk ID (16 bytes), byte range within the chunk, optional `expect_ver` and whether it flushes under a space grant, in one flags byte, snapshot epoch; as data, the blocks the range touches |
 | Chunk write, primary to member | The above, plus the version; as data, the merged whole blocks |
 | Write acknowledgment, member to primary | Version and the member's disk fill; or `NoSpace`; or a refusal (the member's table epoch and the PG's interval) |
 | Write reply to the client | Version; or `NoSpace`; or a refusal (the member's table epoch and the PG's interval); or an `expect_ver` mismatch |
@@ -4460,20 +4460,24 @@ its acknowledgments and heartbeats.
 | --- | --- |
 | Adds live data to a PG with X as a member | Refused with `NoSpace` |
 | The same, with every member under 90% (outstanding grants counted by each disk's share) | Admitted |
-| Flush under a space grant | Admitted on the grant alone |
+| X at 88%, 20 blocks of 1,000 granted on the pool, X's share 1 | Refused: 880 + 20 reaches 900 |
+| The same with 19 blocks granted | Admitted |
+| Flush under a space grant, marked granted in the update's flags | Admitted on the grant alone |
 | Overwrite of blocks held live, written after the chunk's latest freeze, held as copies, no freeze due | Admitted; the check costs one index lookup per run of blocks |
 | Overwrite of live blocks 3 and 4 plus never-written block 5, in one write | Refused with `NoSpace` (it adds live data) |
 | Overwrite of a block a snapshot shares (a freeze is due) | Refused like a new write |
 | Punch | Admitted |
-| Recovery copy | Admitted |
+| Recovery copy, or a write superseding a failed version | Admitted |
 | Any write while no member is past the limit | No overwrite lookup is made |
 | Pool P1 (limit 95%) and pool P2 (limit 90%) on one disk at 92% total fill | P1 admitted, P2 refused: each checks its own limit against the disk's total fill |
 
 - Tables applied as deltas and fetched whole after a gap or CRC mismatch: the cases under [Placement
   computation](#placement-computation), seen from the primary: a delta that follows its table is
   applied, and a gap or a CRC mismatch leaves the table as it was and asks for the whole table.
-- Open: space grants arrive with phase 4's control-plane group; the checklist does not say how phase
-  3's stand-in authority marks a flush as granted.
+- A member's acknowledgment carries its disk's live blocks, which the primary then holds as its
+  fill.
+- A space grant's flush is marked by its client in the update's flags; the primary trusts the mark
+  until phase 4's control-plane group gives it the grants to check it against.
 
 ## Peering and read leases
 
