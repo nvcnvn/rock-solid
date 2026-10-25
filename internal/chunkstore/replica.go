@@ -12,21 +12,30 @@ import (
 // maxMembers is the widest PG a replica primary fans out to: rep3 with a leaving member.
 const maxMembers = 8
 
+// ResendTimer is the timer on which a primary sends its members again, in order, the writes a lost connection left unacknowledged.
+const ResendTimer core.TimerID = 0x72736e64
+
+// ResendAfter is how long after a PeerLost the primary sends again: 10 ms.
+const ResendAfter = core.Tick(10_000)
+
 // ReplicaConfig is a disk's place in the cluster.
 type ReplicaConfig struct {
 	// Disk is the disk whose store the replica runs, by its ID in the placement table.
 	Disk uint32
 }
 
-// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole.
+// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, and a new interval of each PG in Asks, whose chunk spent its version counter.
 type ReplicaOutput struct {
 	Actions []core.Action
 	Fetch   uint64
 	Whole   bool
+	Asks    []PGFields
 }
 
 // Reset empties the output for reuse.
-func (o *ReplicaOutput) Reset() { o.Actions, o.Fetch, o.Whole = o.Actions[:0], 0, false }
+func (o *ReplicaOutput) Reset() {
+	o.Actions, o.Fetch, o.Whole, o.Asks = o.Actions[:0], 0, false, o.Asks[:0]
+}
 
 func (o *ReplicaOutput) fetch(epoch uint64, whole bool) {
 	o.Fetch = max(o.Fetch, epoch)
@@ -40,6 +49,10 @@ type lead struct {
 	since    uint32
 	active   bool
 	held     []heldMsg
+	// asking is set once a chunk of the PG spent its counter, and asked once the primary asked for the next interval; spent counts the held writes the store refused for it, which go ahead of those held since.
+	asking bool
+	asked  bool
+	spent  int
 }
 
 type heldMsg struct {
@@ -88,6 +101,8 @@ type version struct {
 	logged  bool
 	commit  bool
 	done    bool
+	// restore marks the write that supersedes a chunk's failed versions, which no client asked for.
+	restore bool
 	status  Status
 	refEp   uint64
 	refIv   uint32
@@ -109,6 +124,13 @@ type Replica struct {
 	nextID uint64
 	seq    core.RequestID
 	frame  []byte
+	armed  bool
+	plant  replicaPlants
+}
+
+type replicaPlants struct {
+	// resendNewestFirst sends a member a lost connection's writes again newest first.
+	resendNewestFirst bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk.
@@ -297,8 +319,14 @@ func (r *Replica) OnEvent(ctx *core.Context, ev *core.Event, out *ReplicaOutput)
 	case core.EvNetRecv:
 		r.recv(ctx, ev, out)
 	case core.EvPeerLost:
-		r.peerLost(ev.Peer)
-	case core.EvDiskDone, core.EvTimer:
+		r.peerLost(ctx, ev.Peer, out)
+	case core.EvTimer:
+		if ev.Timer == ResendTimer {
+			r.resend(out)
+			break
+		}
+		r.st.OnEvent(ctx, ev, &r.sout)
+	case core.EvDiskDone:
 		r.st.OnEvent(ctx, ev, &r.sout)
 	}
 	r.drain(ctx, out)
@@ -427,7 +455,7 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 			r.park(ev, u.PG.Epoch, out)
 			return
 		}
-	case !r.leads[i].active:
+	case !r.leads[i].active || r.leads[i].asking:
 		l := &r.leads[i]
 		l.held = append(l.held, heldMsg{peer: ev.Peer, msg: ev.Msg, hold: l.interval})
 		return
@@ -567,6 +595,7 @@ func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 	}
 	out.Actions = append(out.Actions, r.sout.Actions...)
 	r.sout.Reset()
+	r.ask(out)
 }
 
 // ordered fans a version out to every up member of its interval but this disk, in parallel with the store logging it.
@@ -684,14 +713,34 @@ func (r *Replica) fail(ctx *core.Context, i int, st Status, epoch uint64, interv
 	if v.status != StatusOK || v.commit {
 		return
 	}
-	c, from := v.u.Chunk, v.u.Version
+	c, from, pg := v.u.Chunk, v.u.Version, v.u.PG.PG
+	first, last, restore := uint16(core.BlocksPerChunk), uint16(0), true
 	for j := range r.vers {
 		w := &r.vers[j]
 		if w.u.Chunk == c && w.u.Version >= from && w.u.Version != 0 && !w.commit && w.status == StatusOK {
 			w.status, w.refEp, w.refIv = st, epoch, interval
+			f, l := spanOf(w.u.Off, w.u.Len)
+			first, last, restore = min(first, f), max(last, l), restore && !w.restore
 		}
 	}
 	r.st.Abort(ctx, c, from, &r.sout)
+	if l := r.lead(pg); restore && l >= 0 && r.leads[l].interval == uint32(from>>32) && epoch <= r.table.Epoch {
+		r.supersede(ctx, pg, c, first, last, r.leads[l].interval)
+	}
+}
+
+// supersede writes the chunk's bytes again over blocks first to last, under a new version to every up member, so that no member's log, the primary's included, ends with the failed versions there: their replay would map them back. A supersede that fails is not tried again: it carries bytes the chunk already holds, so the failed one is harmless where it was logged.
+func (r *Replica) supersede(ctx *core.Context, pg core.PGID, c core.ChunkID, first, last uint16, interval uint32) {
+	n := int(last-first) + 1
+	buf, err := ctx.Pool.AllocZeroed(n * core.BlockSize)
+	if err != nil {
+		return // ponytail: an exhausted pool leaves the failed versions to the next peering's recovery.
+	}
+	id := r.newReq(storeReq{kind: reqClient, pg: pg, chunk: c})
+	r.seq++
+	u := Update{Kind: KindWrite, PG: PGFields{PG: pg, Interval: interval}, Chunk: c, Off: uint32(first) * core.BlockSize, Len: uint32(n) * core.BlockSize}
+	r.vers = append(r.vers, version{seq: r.seq, req: id, epoch: r.table.Epoch, u: u, restore: true})
+	r.st.Write(ctx, Request{ID: id, Chunk: c, Off: u.Off, Len: u.Len, Buf: buf, Interval: interval, Gated: true, Restore: true}, &r.sout)
 }
 
 // finished answers a request the store completed: a client's write or punch once its version is mapped or failed, a member's once durable, a read with its blocks.
@@ -704,8 +753,14 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 	case reqClient:
 		resp := Response{Kind: KindReply, Status: statusOf(rp.Err), Version: rp.Version}
 		ref := r.refusal(q.pg)
+		restore := false
+		if i := r.versionOf(rp.ID); i >= 0 && errors.Is(rp.Err, ErrCounter) {
+			r.counterSpent(ctx, i, rp.Buf)
+			return
+		}
 		if i := r.versionOf(rp.ID); i >= 0 {
 			v := &r.vers[i]
+			restore = v.restore
 			if v.status != StatusOK {
 				resp.Status = v.status
 			}
@@ -721,7 +776,9 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		if resp.Status == StatusRefused {
 			resp.Epoch, resp.Interval = ref.Epoch, ref.Interval
 		}
-		r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
+		if !restore {
+			r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
+		}
 	case reqMember:
 		resp := Response{Kind: KindAck, Status: statusOf(rp.Err), Version: rp.Version}
 		if j := slices.IndexFunc(r.dups, func(d dup) bool { return d.id == rp.ID }); j >= 0 {
@@ -754,12 +811,70 @@ func (r *Replica) release(ctx *core.Context, i int) {
 	}
 }
 
-func (r *Replica) peerLost(peer core.NodeID) {
+// counterSpent holds a client write whose chunk spent its counter in the PG's interval, its buffer handed back, until the PG has a new interval: the PG's next writes are held behind it, and once its pending writes are done the primary asks for the interval.
+func (r *Replica) counterSpent(ctx *core.Context, i int, buf core.IOBuf) {
+	v := r.vers[i]
+	r.vers = slices.Delete(r.vers, i, i+1)
+	l := r.lead(v.u.PG.PG)
+	if l < 0 {
+		freeBuf(ctx, buf)
+		return
+	}
+	h := heldMsg{peer: v.client, hold: r.leads[l].interval}
+	h.msg.Len, h.msg.Buf = uint16(copy(h.msg.Body[:], AppendUpdate(r.frame[:0], &v.u))), buf
+	ld := &r.leads[l]
+	ld.held = slices.Insert(ld.held, ld.spent, h)
+	ld.spent++
+	ld.asking = true
+}
+
+// ask asks for the next interval of each PG whose chunk spent its counter, once none of its writes is pending.
+func (r *Replica) ask(out *ReplicaOutput) {
+	for i := range r.leads {
+		l := &r.leads[i]
+		if !l.asking || l.asked || slices.ContainsFunc(r.vers, func(v version) bool { return v.u.PG.PG == l.pg }) {
+			continue
+		}
+		l.asked = true
+		out.Asks = append(out.Asks, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
+	}
+}
+
+// peerLost ends every send to the peer and has the writes it left unacknowledged sent again after ResendAfter.
+func (r *Replica) peerLost(ctx *core.Context, peer core.NodeID, out *ReplicaOutput) {
+	lost := false
 	for i := len(r.vers) - 1; i >= 0; i-- {
 		v := &r.vers[i]
 		for k := range v.n {
 			if r.addr(v.members[k]) == peer {
 				v.out &^= 1 << k
+				lost = lost || v.acked&(1<<k) == 0 && !v.done
+			}
+		}
+		r.release(ctx, i)
+	}
+	if lost && !r.armed {
+		r.armed = true
+		out.Actions = append(out.Actions, core.Action{Kind: core.ActSetTimer, Timer: ResendTimer, At: ctx.Now + ResendAfter})
+	}
+}
+
+// resend sends each member, in the order they were ordered, so a chunk's in version order, the writes of the PGs' current intervals it has neither acknowledged nor has a send of outstanding; a write of an interval that ended is left to the next interval's peering.
+func (r *Replica) resend(out *ReplicaOutput) {
+	r.armed = false
+	for n := range r.vers {
+		i := n
+		if r.plant.resendNewestFirst {
+			i = len(r.vers) - 1 - n
+		}
+		v := &r.vers[i]
+		_, e := r.table.entry(v.u.PG.PG)
+		if v.done || v.status != StatusOK || v.u.Version == 0 || e == nil || uint32(v.u.Version>>32) != e.Interval {
+			continue
+		}
+		for k := range v.n {
+			if v.acked&(1<<k) == 0 && v.out&(1<<k) == 0 {
+				r.send(v, k, out)
 			}
 		}
 	}

@@ -78,12 +78,14 @@ type Request struct {
 	FrozenOnly bool
 	// Base makes a read serve its blocks of the live map only while they are at version Ver, as a primary fetches a base whose own copy failed its checksum.
 	Base bool
+	// Restore makes a write of whole blocks take every block from its base, the newest ordered version not aborted, writing the chunk's bytes again under a new version.
+	Restore bool
 	// Session and Incarnation name the client process a write or punch came from.
 	Session     uint64
 	Incarnation uint64
 }
 
-// Reply completes the request ID: the version written or read, and a read's blocks in Buf laid out as a write's, which the caller frees.
+// Reply completes the request ID: the version written or read, and a read's blocks in Buf laid out as a write's, which the caller frees; a write refused with ErrCounter hands its Buf back.
 type Reply struct {
 	ID      uint64
 	Version uint64
@@ -587,9 +589,13 @@ func (s *Store) orderWaiting(ctx *core.Context, ci int32, out *Output) {
 
 func (s *Store) finishUnordered(ctx *core.Context, oi int32, out *Output) {
 	o := &s.ops[oi]
+	var back core.IOBuf
+	if errors.Is(o.err, ErrCounter) {
+		back, o.req.Buf = o.req.Buf, core.NoBuf
+	}
 	s.freeBufs(ctx, oi)
 	if !o.answered {
-		out.Replies = append(out.Replies, Reply{ID: o.req.ID, Version: o.version, Err: o.err})
+		out.Replies = append(out.Replies, Reply{ID: o.req.ID, Version: o.version, Err: o.err, Buf: back})
 	}
 	ci := o.chunk
 	s.freeOp(oi)
@@ -639,6 +645,23 @@ func (s *Store) startBases(ctx *core.Context, oi int32) bool {
 		return false
 	}
 	first, last := spanOf(o.req.Off, o.req.Len)
+	if o.req.Restore {
+		for b := first; b <= last; b++ {
+			dst := ctx.Pool.Bytes(o.req.Buf)[int(b-first)*core.BlockSize:][:core.BlockSize]
+			switch src, ext, read := s.base(ctx, cs, b); {
+			case read:
+				if err := s.startFetch(ctx, oi, b, 1, ext); err != nil {
+					o.err = err
+					return o.reads > 0
+				}
+			case src != nil:
+				copy(dst, src)
+			default:
+				clear(dst)
+			}
+		}
+		return o.reads > 0
+	}
 	for k, b := range [2]uint16{first, last} {
 		if k == 1 && last == first {
 			break
@@ -1317,6 +1340,9 @@ func (s *Store) deliver(ctx *core.Context, f *fetch, o *op) {
 		return
 	}
 	lo, hi, _ := partial(o.req.Off, o.req.Len, f.first)
+	if o.req.Restore {
+		lo, hi = 0, 0
+	}
 	var dst []byte
 	switch {
 	case o.kind == opWrite:

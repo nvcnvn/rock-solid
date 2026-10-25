@@ -24,6 +24,7 @@ type rcluster struct {
 	// fetch is the newest table epoch each replica asked for, and whole whether it asked for the whole table.
 	fetch []uint64
 	whole []bool
+	asks  []PGFields
 	inv   sim.Invariants
 	// sentVer is the newest version of each chunk a primary sent each member on its current connection, lost counting the connections each lost; orderErr is the first send out of order.
 	sentVer  map[sendKey]uint64
@@ -136,6 +137,7 @@ func newRClusterOn(t *testing.T, tbl Table, s *sim.Scheduler) *rcluster {
 func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Action {
 	c.fetch[d] = max(c.fetch[d], out.Fetch)
 	c.whole[d] = c.whole[d] || out.Whole
+	c.asks = append(c.asks, out.Asks...)
 	c.passes[d] = append(c.passes[d], slices.Clone(out.Actions))
 	for i := range out.Actions {
 		a := &out.Actions[i]
@@ -303,7 +305,7 @@ func (c *rcluster) reply(id core.RequestID) Response {
 func (c *rcluster) readNow(pg core.PGID, ch core.ChunkID, off, n uint32) []byte {
 	c.t.Helper()
 	id := c.read(pg, ch, off, n, c.primary(pg))
-	c.settle()
+	c.until(id)
 	rp := c.reply(id)
 	if rp.Status != StatusOK {
 		c.t.Fatalf("read answered %+v", rp)
@@ -312,6 +314,17 @@ func (c *rcluster) readNow(pg core.PGID, ch core.ChunkID, off, n uint32) []byte 
 }
 
 func (c *rcluster) newest(d int, ch core.ChunkID) uint64 { return c.reps[d].Store().Newest(ch) }
+
+// until steps the cluster until request id is answered.
+func (c *rcluster) until(id core.RequestID) {
+	c.t.Helper()
+	for range 1_000_000 {
+		if _, ok := c.cl.replies[id]; ok || !c.step() {
+			return
+		}
+	}
+	c.t.Fatalf("request %d not answered", id)
+}
 
 var pg0 = core.PGID{Pool: testPool, Index: 0}
 
