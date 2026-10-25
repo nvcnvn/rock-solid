@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/sim/clock"
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
@@ -48,23 +49,56 @@ type Clock struct {
 // DefaultClock starts Now at 1,000 and Raw at 1,226, so a machine that mixes the clocks up reads the wrong one.
 var DefaultClock = Clock{Now: 1000, Raw: 1226}
 
+const (
+	second = core.Tick(1_000_000)
+	// heartbeat is the least time a rebooted node stays down.
+	heartbeat = second
+	// rateWindow is how long a node's clocks run before its raw rate may step, so that holders have bounded it first.
+	rateWindow = 10 * second
+	maxPause   = 5 * second
+	maxDrift   = clock.Unit / 25
+	// rebootDrift is the most a reboot changes the raw rate by.
+	rebootDrift = clock.Unit / 50
+	// maxStep is lease_drift / 2 at the default lease_drift of 1%.
+	maxStep    = clock.Unit / 200
+	maxSlew    = 226_000_000
+	chronySlew = 83_333_333
+)
+
 // Settings are the scheduler's tunables; each chance is num/den, and a den of 0 means never.
 type Settings struct {
 	PoolBytes int
 	PoolLive  int
+	// NetDelay is every message's least delay and NetJitter the most a seeded draw adds per message.
 	NetDelay  core.Tick
-	DropNum   uint64
-	DropDen   uint64
+	NetJitter core.Tick
+	// Drop loses a message and breaks its connection; Dup delivers a message twice in a row.
+	DropNum uint64
+	DropDen uint64
+	DupNum  uint64
+	DupDen  uint64
+	// FailAfter is the most a broken connection takes to fail with PeerLost at both ends; 0 means it never does.
+	FailAfter core.Tick
 	StaleNum  uint64
 	StaleDen  uint64
-	CrashNum  uint64
-	CrashDen  uint64
-	MsgType   func(m *core.Msg) uint64
+	// Each step, with these chances, a node crashes, reboots or pauses, a partition is cut or healed, or a node's slew or raw rate changes.
+	CrashNum     uint64
+	CrashDen     uint64
+	RebootNum    uint64
+	RebootDen    uint64
+	PauseNum     uint64
+	PauseDen     uint64
+	PartitionNum uint64
+	PartitionDen uint64
+	// With ClockDen above 0 every node's raw clock also runs within ±4% of real time.
+	ClockNum uint64
+	ClockDen uint64
+	MsgType  func(m *core.Msg) uint64
 }
 
-// DefaultSettings are a 4 MiB pool per node, 50 µs network delay, no drops or crashes, and a stale Timer for one replaced or fired timer in 8.
+// DefaultSettings are a 4 MiB pool per node, 50 µs network delay, connections that fail within 1 ms of breaking, no faults, and a stale Timer for one replaced or fired timer in 8.
 func DefaultSettings() Settings {
-	return Settings{PoolBytes: 4 << 20, NetDelay: 50, StaleNum: 1, StaleDen: 8}
+	return Settings{PoolBytes: 4 << 20, NetDelay: 50, FailAfter: 1000, StaleNum: 1, StaleDen: 8}
 }
 
 // ChoiceKind is what a step does.
@@ -77,9 +111,11 @@ const (
 	ChooseTimer
 	ChooseActor
 	ChooseRestart
+	ChoosePeerLost
+	ChooseResume
 )
 
-// Choice is one step the scheduler could take now: a disk action's completion, a message delivery, a due timer, an actor's operation or a node's restart.
+// Choice is one step the scheduler could take now: a disk action's completion, a message delivery, a due timer, an actor's operation, a connection failure reaching one end, or a node's restart or resume.
 type Choice struct {
 	Kind   ChoiceKind
 	Node   uint32
@@ -92,54 +128,67 @@ type Choice struct {
 
 // Scheduler runs simulated nodes, their disks, actors and messages in one goroutine from one seed, in simulated time.
 type Scheduler struct {
-	set     Settings
-	root    *core.Rand
-	rand    *core.Rand
-	now     core.Tick
-	nodes   []*Node
-	items   []item
-	choices []Choice
-	out     []core.Action
-	trace   []byte
-	steps   uint64
+	set      Settings
+	root     *core.Rand
+	rand     *core.Rand
+	now      core.Tick
+	nodes    []*Node
+	items    []item
+	conns    []conn
+	connID   uint64
+	cuts     []link
+	queues   []link
+	choices  []Choice
+	out      []core.Action
+	trace    []byte
+	steps    uint64
+	contract error
 }
 
 type item struct {
-	kind   ChoiceKind
-	node   uint32
-	loop   uint32
-	gen    uint64
-	act    core.Action
-	issued core.Tick
-	at     core.Tick
-	disk   *Disk
-	linked bool
-	link   core.IOID
-	failed bool
-	stale  bool
-	from   core.NodeID
-	data   []byte
+	kind    ChoiceKind
+	node    uint32
+	loop    uint32
+	gen     uint64
+	act     core.Action
+	issued  core.Tick
+	at      core.Tick
+	disk    *Disk
+	linked  bool
+	link    core.IOID
+	failed  bool
+	stale   bool
+	from    core.NodeID
+	fromGen uint64
+	conn    uint64
+	data    []byte
 }
 
 // Node is one simulated node: its clocks, disks and buffer pool, and the loops and actors of its current incarnation.
 type Node struct {
-	s      *Scheduler
-	id     uint32
-	rand   *core.Rand
-	boot   Boot
-	clock  Clock
-	up     bool
-	gen    uint64
-	pool   *Pool
-	disks  []*Disk
-	loops  []loop
-	passes []uint64
-	actors []actor
+	s        *Scheduler
+	id       uint32
+	rand     *core.Rand
+	boot     Boot
+	clock    *clock.Model
+	clockAt  core.Tick
+	stepped  bool
+	rebooted bool
+	up       bool
+	until    core.Tick
+	paused   bool
+	gen      uint64
+	pool     *Pool
+	disks    []*Disk
+	loops    []loop
+	passes   []uint64
+	actors   []actor
 }
 
 type loop struct {
 	m    Machine
 	disk *Disk
+	last core.Clocks
 }
 
 type actor struct {
@@ -162,9 +211,14 @@ type DiskSpec struct {
 	Settings DiskSettings
 }
 
-// AddNode adds a node with the next ID, forking its source from the run's, makes its disks and boots it.
+// AddNode adds a node with the next ID, forking its source from the run's, makes its disks and boots it; with clock faults on, its raw rate is drawn from the scheduler's source.
 func (s *Scheduler) AddNode(c Clock, disks []DiskSpec, boot Boot) *Node {
-	n := &Node{s: s, id: uint32(len(s.nodes)), rand: s.root.Fork(), boot: boot, clock: c}
+	rate := uint64(clock.Unit)
+	if s.set.ClockDen > 0 {
+		rate = clock.Unit - maxDrift + s.rand.Below(2*maxDrift+1)
+	}
+	n := &Node{s: s, id: uint32(len(s.nodes)), rand: s.root.Fork(), boot: boot, clockAt: s.now}
+	n.clock = clock.New(s.now, core.Clocks{Boot: c.Now, Raw: c.Raw, Mono: c.Now}, rate)
 	s.nodes = append(s.nodes, n)
 	for _, d := range disks {
 		set := d.Settings
@@ -187,44 +241,79 @@ func (s *Scheduler) Steps() uint64 { return s.steps }
 // Trace is the run's trace, one trace.Record line per event delivered and action emitted.
 func (s *Scheduler) Trace() []byte { return s.trace }
 
-// Choices lists the steps the scheduler could take now, in a fixed order; the list is valid until the next step.
+// DriverContract is the first time a machine broke the driver contract the network checks: it freed a send's buffer before the network was done with it.
+func (s *Scheduler) DriverContract() error { return s.contract }
+
+// Choices lists the steps the scheduler could take now, in a fixed order, first moving time to the next one when none is due; the list is valid until the next step.
 func (s *Scheduler) Choices() []Choice {
-	s.choices = s.collect(s.choices[:0])
-	if len(s.choices) > 0 {
-		return s.choices
+	for {
+		var wake core.Tick
+		s.choices, wake = s.collect(s.choices[:0])
+		if len(s.choices) > 0 || wake == 0 {
+			return s.choices
+		}
+		s.now = wake
 	}
-	next, ok := s.nextTimer()
-	if !ok {
-		return s.choices
-	}
-	s.now = next
-	s.choices = s.collect(s.choices[:0])
-	return s.choices
 }
 
-func (s *Scheduler) collect(cs []Choice) []Choice {
+// collect lists the choices due now and the earliest later time one falls due, 0 for none.
+func (s *Scheduler) collect(cs []Choice) ([]Choice, core.Tick) {
+	var wake core.Tick
+	later := func(t core.Tick) {
+		if wake == 0 || t < wake {
+			wake = t
+		}
+	}
 	for i := range s.items {
 		it := &s.items[i]
-		if it.kind == ChooseTimer && it.at > s.now {
+		n := s.nodes[it.node]
+		if n.paused {
 			continue
 		}
-		if it.kind == ChooseDisk && it.linked && s.writePending(it) {
-			continue
+		switch it.kind {
+		case ChooseTimer:
+			if n.clock.Read(s.now).Boot < it.act.At {
+				if t, ok := n.clock.When(s.now, it.act.At); ok {
+					later(t)
+				}
+				continue
+			}
+		case ChooseDisk:
+			if it.linked && s.writePending(it) {
+				continue
+			}
+		case ChooseDeliver, ChoosePeerLost:
+			if !s.head(i) {
+				continue
+			}
+			if it.at > s.now {
+				later(it.at)
+				continue
+			}
 		}
 		cs = append(cs, Choice{Kind: it.kind, Node: it.node, Loop: it.loop, From: it.from, Action: it.act, Stale: it.stale, ref: i})
 	}
 	for _, n := range s.nodes {
-		if !n.up {
-			cs = append(cs, Choice{Kind: ChooseRestart, Node: n.id})
-			continue
-		}
-		for i, a := range n.actors {
-			if a.a.Ready() {
-				cs = append(cs, Choice{Kind: ChooseActor, Node: n.id, Loop: a.loop, ref: i})
+		switch {
+		case !n.up || n.paused:
+			if n.until > s.now {
+				later(n.until)
+				continue
+			}
+			kind := ChooseRestart
+			if n.up {
+				kind = ChooseResume
+			}
+			cs = append(cs, Choice{Kind: kind, Node: n.id})
+		default:
+			for i, a := range n.actors {
+				if a.a.Ready() {
+					cs = append(cs, Choice{Kind: ChooseActor, Node: n.id, Loop: a.loop, ref: i})
+				}
 			}
 		}
 	}
-	return cs
+	return cs, wake
 }
 
 func (s *Scheduler) writePending(fsync *item) bool {
@@ -237,30 +326,10 @@ func (s *Scheduler) writePending(fsync *item) bool {
 	return false
 }
 
-func (s *Scheduler) nextTimer() (core.Tick, bool) {
-	var next core.Tick
-	found := false
-	for i := range s.items {
-		if it := &s.items[i]; it.kind == ChooseTimer && (!found || it.at < next) {
-			next, found = it.at, true
-		}
-	}
-	return next, found
-}
-
-// Step takes one step chosen from the run's source, a crash with the settings' chance, and reports false once nothing is pending.
+// Step takes one step chosen from the run's source, or a fault with the settings' chances, and reports false once nothing is pending.
 func (s *Scheduler) Step() bool {
-	if s.set.CrashDen > 0 && s.rand.Chance(s.set.CrashNum, s.set.CrashDen) {
-		var up []uint32
-		for _, n := range s.nodes {
-			if n.up {
-				up = append(up, n.id)
-			}
-		}
-		if len(up) > 0 {
-			s.CrashRandom(up[s.rand.Below(uint64(len(up)))])
-			return true
-		}
+	if s.fault() {
+		return true
 	}
 	cs := s.Choices()
 	if len(cs) == 0 {
@@ -268,6 +337,88 @@ func (s *Scheduler) Step() bool {
 	}
 	s.Take(cs[s.rand.Below(uint64(len(cs)))])
 	return true
+}
+
+func (s *Scheduler) chance(num, den uint64) bool { return den > 0 && s.rand.Chance(num, den) }
+
+// fault draws the settings' faults, reporting true for one that is a step of its own.
+func (s *Scheduler) fault() bool {
+	if s.chance(s.set.CrashNum, s.set.CrashDen) {
+		if id, ok := s.pick(false); ok {
+			s.CrashRandom(id)
+			return true
+		}
+	}
+	if s.chance(s.set.RebootNum, s.set.RebootDen) {
+		if id, ok := s.pick(false); ok {
+			s.Reboot(id)
+			return true
+		}
+	}
+	if s.chance(s.set.PauseNum, s.set.PauseDen) {
+		if id, ok := s.pick(true); ok {
+			stop := clock.Stop(1 + s.rand.Below(uint64(clock.Stops-1)))
+			s.Pause(id, stop, 1+core.Tick(s.rand.Below(uint64(maxPause))), s.rand.Chance(1, 2))
+			return true
+		}
+	}
+	if s.chance(s.set.PartitionNum, s.set.PartitionDen) && len(s.nodes) > 1 {
+		if len(s.cuts) > 0 && s.rand.Chance(1, 2) {
+			c := s.cuts[s.rand.Below(uint64(len(s.cuts)))]
+			s.Heal(c.from, c.to)
+		} else {
+			a := uint32(s.rand.Below(uint64(len(s.nodes))))
+			b := (a + 1 + uint32(s.rand.Below(uint64(len(s.nodes)-1)))) % uint32(len(s.nodes))
+			s.Partition(a, b, s.rand.Chance(1, 2))
+		}
+	}
+	if s.chance(s.set.ClockNum, s.set.ClockDen) {
+		if id, ok := s.pick(false); ok {
+			s.clockFault(s.nodes[id])
+		}
+	}
+	return false
+}
+
+// pick draws a running node, one not paused when unpaused is set.
+func (s *Scheduler) pick(unpaused bool) (uint32, bool) {
+	var ids []uint32
+	for _, n := range s.nodes {
+		if n.up && !(unpaused && n.paused) {
+			ids = append(ids, n.id)
+		}
+	}
+	if len(ids) == 0 {
+		return 0, false
+	}
+	return ids[s.rand.Below(uint64(len(ids)))], true
+}
+
+// clockFault steps the node's raw rate once per boot, after rateWindow, or else gives its time daemon a new slew: none, chrony's 8.33% either way, or any up to ±22.6%.
+func (s *Scheduler) clockFault(n *Node) {
+	if !n.stepped && s.now-n.clockAt >= rateWindow && s.rand.Chance(1, 2) {
+		n.stepped = true
+		d := 1 + s.rand.Below(maxStep)
+		r := n.clock.Rate()
+		if s.rand.Chance(1, 2) {
+			r += d
+		} else {
+			r -= d
+		}
+		n.clock.SetRate(s.now, r)
+		return
+	}
+	var slew int64
+	switch s.rand.Below(3) {
+	case 1:
+		slew = chronySlew
+		if s.rand.Chance(1, 2) {
+			slew = -slew
+		}
+	case 2:
+		slew = int64(s.rand.Below(2*maxSlew+1)) - maxSlew
+	}
+	n.clock.SetSlew(s.now, slew)
 }
 
 // Run takes up to max steps and returns how many it took.
@@ -288,6 +439,8 @@ func (s *Scheduler) Take(c Choice) {
 		s.complete(s.remove(c.ref))
 	case ChooseDeliver:
 		s.deliver(s.remove(c.ref))
+	case ChoosePeerLost:
+		s.peerLost(s.remove(c.ref))
 	case ChooseTimer:
 		s.fire(s.remove(c.ref))
 	case ChooseActor:
@@ -296,6 +449,8 @@ func (s *Scheduler) Take(c Choice) {
 		n.pass(a.loop, nil, a.a.Next)
 	case ChooseRestart:
 		s.Restart(c.Node)
+	case ChooseResume:
+		s.resume(s.nodes[c.Node])
 	default:
 		panic(fmt.Sprintf("sim: choice %+v", c))
 	}
@@ -328,33 +483,6 @@ func (s *Scheduler) complete(it item) {
 	n.feed(it.loop, &ev)
 }
 
-func (s *Scheduler) drop(from, to core.NodeID, m *core.Msg) {
-	n := s.nodes[from.Node]
-	s.record(n, from.Loop, n.Context().Now, trace.Record{Name: trace.EvDrop, Fields: [trace.MaxFields]uint64{trace.Peer(to), msgType(m, s.set.MsgType)}})
-}
-
-func (s *Scheduler) deliver(it item) {
-	s.now = max(s.now, it.at)
-	n := s.nodes[it.node]
-	to := core.NodeID{Node: it.node, Loop: it.loop}
-	if !n.up || n.gen != it.gen || int(it.loop) >= len(n.loops) {
-		s.drop(it.from, to, &it.act.Msg)
-		return
-	}
-	ev := core.Event{Kind: core.EvNetRecv, Peer: it.from, Msg: it.act.Msg}
-	ev.Msg.Buf = core.NoBuf
-	if it.data != nil {
-		b, err := n.pool.Alloc(len(it.data))
-		if err != nil {
-			s.drop(it.from, to, &it.act.Msg)
-			return
-		}
-		copy(n.pool.Bytes(b), it.data)
-		ev.Msg.Buf = b
-	}
-	n.feed(it.loop, &ev)
-}
-
 func (s *Scheduler) fire(it item) {
 	if !it.stale && s.set.StaleDen > 0 && s.rand.Chance(s.set.StaleNum, s.set.StaleDen) {
 		dup := it
@@ -365,7 +493,7 @@ func (s *Scheduler) fire(it item) {
 	s.nodes[it.node].feed(it.loop, &ev)
 }
 
-// Crash crashes node id, dropping its loops, actors, timers and pending disk actions, and lands the i-th block write of a disk, completed and unflushed then issued and not completed, only if landed says so.
+// Crash crashes node id, dropping its loops, actors, timers, pending disk actions and connections, and lands the i-th block write of a disk, completed and unflushed then issued and not completed, only if landed says so.
 func (s *Scheduler) Crash(id uint32, landed func(disk, i int, lba core.LBA) bool) {
 	n := s.down(id)
 	for d, disk := range n.disks {
@@ -381,6 +509,14 @@ func (s *Scheduler) CrashRandom(id uint32) {
 	}
 }
 
+// Reboot crashes node id as CrashRandom does and keeps it down for at least a heartbeat; it comes back with its clocks restarted near 0 and its raw rate changed by up to 2%.
+func (s *Scheduler) Reboot(id uint32) {
+	s.CrashRandom(id)
+	n := s.nodes[id]
+	n.rebooted = true
+	n.until = s.now + heartbeat
+}
+
 func (s *Scheduler) down(id uint32) *Node {
 	n := s.nodes[id]
 	if !n.up {
@@ -388,8 +524,12 @@ func (s *Scheduler) down(id uint32) *Node {
 	}
 	s.steps++
 	for i := range s.items {
-		if it := &s.items[i]; it.kind == ChooseDisk && it.node == id && it.act.Kind == core.ActDiskWrite {
+		it := &s.items[i]
+		if it.kind == ChooseDisk && it.node == id && it.act.Kind == core.ActDiskWrite {
 			it.disk.inFlight(n.pool, &it.act)
+		}
+		if it.kind == ChooseDeliver && it.from.Node == id && it.fromGen == n.gen && it.data == nil && n.pool.Valid(it.act.Msg.Buf) {
+			it.data = slices.Clone(n.pool.Bytes(it.act.Msg.Buf))
 		}
 	}
 	now := n.Context().Now
@@ -397,10 +537,12 @@ func (s *Scheduler) down(id uint32) *Node {
 		n.passes[l]++
 		s.record(n, uint32(l), now, trace.Record{Name: trace.EvCrash})
 	}
-	s.items = slices.DeleteFunc(s.items, func(it item) bool {
-		return it.node == id && it.kind != ChooseDeliver
-	})
-	n.up = false
+	if n.paused {
+		n.clock.Resume(s.now)
+	}
+	n.up, n.paused, n.until = false, false, s.now
+	s.closeConns(id)
+	s.items = slices.DeleteFunc(s.items, func(it item) bool { return it.node == id })
 	n.gen++
 	n.loops = nil
 	n.actors = nil
@@ -408,19 +550,69 @@ func (s *Scheduler) down(id uint32) *Node {
 	return n
 }
 
-// Restart boots node id again with a fresh pool, its disks as the crash left them and its clocks running on.
+// Restart boots node id again with a fresh pool and its disks as the crash left them; a process restart keeps its clocks running, a reboot restarts them.
 func (s *Scheduler) Restart(id uint32) {
 	n := s.nodes[id]
-	if n.up {
-		panic(fmt.Sprintf("sim: restarting node %d, which is up", id))
+	if n.up || s.now < n.until {
+		panic(fmt.Sprintf("sim: restarting node %d, up %v, at %d before %d", id, n.up, s.now, n.until))
 	}
 	n.start()
 }
 
 func (n *Node) start() {
+	s := n.s
+	if n.rebooted {
+		r := n.clock.Rate() + s.rand.Below(2*rebootDrift+1) - rebootDrift
+		r = min(max(r, clock.Unit-maxDrift), clock.Unit+maxDrift)
+		boot := second + core.Tick(s.rand.Below(uint64(second)))
+		start := core.Clocks{Boot: boot, Raw: second + core.Tick(s.rand.Below(uint64(second))), Mono: boot}
+		n.clock = clock.New(s.now, start, r)
+		n.clockAt, n.stepped, n.rebooted = s.now, false, false
+	}
 	n.up = true
-	n.pool = NewPool(n.s.set.PoolBytes, n.s.set.PoolLive)
+	n.pool = NewPool(s.set.PoolBytes, s.set.PoolLive)
 	n.boot(n)
+}
+
+// Pause stands node id still for d from now, its clocks as stop says; the messages sent to it wait for it, or with lost its connections break.
+func (s *Scheduler) Pause(id uint32, stop clock.Stop, d core.Tick, lost bool) {
+	n := s.nodes[id]
+	if !n.up || n.paused || stop == clock.Running {
+		panic(fmt.Sprintf("sim: pausing node %d, up %v, paused %v, with stop %d", id, n.up, n.paused, stop))
+	}
+	s.steps++
+	r := trace.Record{Name: trace.EvPause, Fields: [trace.MaxFields]uint64{uint64(stop), 0, uint64(d)}}
+	if lost {
+		r.Fields[1] = 1
+	}
+	now := n.Context().Now
+	for l := range n.loops {
+		n.passes[l]++
+		s.record(n, uint32(l), now, r)
+	}
+	n.paused, n.until = true, s.now+d
+	n.clock.Stop(s.now, stop)
+	if lost {
+		s.breakConns(id)
+	}
+}
+
+// resume ends the node's pause and, as its loop's first pass would, delivers every message that arrived while it stood still, in arrival order.
+func (s *Scheduler) resume(n *Node) {
+	n.clock.Resume(s.now)
+	n.paused = false
+	now := n.Context().Now
+	for l := range n.loops {
+		n.passes[l]++
+		s.record(n, uint32(l), now, trace.Record{Name: trace.EvResume})
+	}
+	for n.up && !n.paused {
+		i := s.arrived(n.id)
+		if i < 0 {
+			return
+		}
+		s.Take(Choice{Kind: s.items[i].kind, ref: i})
+	}
 }
 
 // ID is the node's number, its place in node order.
@@ -429,8 +621,14 @@ func (n *Node) ID() uint32 { return n.id }
 // Up reports whether the node is running.
 func (n *Node) Up() bool { return n.up }
 
+// Paused reports whether the node stands still.
+func (n *Node) Paused() bool { return n.paused }
+
 // Pool is the buffer pool of the node's current incarnation.
 func (n *Node) Pool() *Pool { return n.pool }
+
+// Clock is the model of the node's clocks, which a test may slew or step; a reboot replaces it.
+func (n *Node) Clock() *clock.Model { return n.clock }
 
 // Fork returns the next child of the node's source, one per machine or actor in the order the node creates them.
 func (n *Node) Fork() *core.Rand { return n.rand.Fork() }
@@ -440,12 +638,13 @@ func (n *Node) Disk(i int) *Disk { return n.disks[i] }
 
 // Context is the node's context now: its two clocks and its pool.
 func (n *Node) Context() core.Context {
-	return core.Context{Now: n.clock.Now + n.s.now, Raw: n.clock.Raw + n.s.now, Pool: n.pool}
+	c := n.clock.Read(n.s.now)
+	return core.Context{Now: c.Boot, Raw: c.Raw, Pool: n.pool}
 }
 
 // Start runs m on the node's next loop, its disk actions going to disk, and returns the loop's ID.
 func (n *Node) Start(m Machine, disk *Disk) core.NodeID {
-	n.loops = append(n.loops, loop{m: m, disk: disk})
+	n.loops = append(n.loops, loop{m: m, disk: disk, last: n.clock.Read(n.s.now)})
 	l := uint32(len(n.loops) - 1)
 	if len(n.loops) > len(n.passes) {
 		n.passes = append(n.passes, 0)
@@ -494,17 +693,27 @@ func (n *Node) feed(l uint32, ev *core.Event) {
 	n.pass(l, ev, nil)
 }
 
+// pass is one pass of loop l: Resumed first if core.Resumed sees a suspend or marker change since the loop's last pass, then ev or f.
 func (n *Node) pass(l uint32, ev *core.Event, f func(ctx *core.Context, out []core.Action) []core.Action) {
 	s := n.s
 	n.passes[l]++
 	ctx := n.Context()
+	lp := &n.loops[l]
+	s.out = s.out[:0]
+	cur := n.clock.Read(s.now)
+	if core.Resumed(lp.last, cur, clock.Threshold) {
+		resumed := core.Event{Kind: core.EvResumed}
+		s.record(n, l, ctx.Now, eventRecord(&resumed, s.set.MsgType))
+		s.out = lp.m.OnEvent(&ctx, &resumed, s.out)
+	}
+	lp.last = cur
 	if ev != nil {
 		s.record(n, l, ctx.Now, eventRecord(ev, s.set.MsgType))
-		s.out = n.loops[l].m.OnEvent(&ctx, ev, s.out[:0])
+		s.out = lp.m.OnEvent(&ctx, ev, s.out)
 	} else {
-		s.out = f(&ctx, s.out[:0])
+		s.out = f(&ctx, s.out)
 	}
-	rounder, _ := n.loops[l].m.(Rounder)
+	rounder, _ := lp.m.(Rounder)
 	for i := range s.out {
 		r := actionRecord(&s.out[i], s.set.MsgType)
 		if rounder != nil && (r.Name == trace.ActDiskWrite || r.Name == trace.ActDiskFsync) {
@@ -535,34 +744,16 @@ func (n *Node) absorb(l uint32, acts []core.Action) {
 				it.linked, it.link = true, acts[i-1].IO
 			}
 		case core.ActNetSend:
-			if int(a.Peer.Node) >= len(s.nodes) || s.set.DropDen > 0 && s.rand.Chance(s.set.DropNum, s.set.DropDen) {
-				s.drop(core.NodeID{Node: n.id, Loop: l}, a.Peer, &a.Msg)
-				continue
-			}
-			to := s.nodes[a.Peer.Node]
-			it.kind = ChooseDeliver
-			it.from = core.NodeID{Node: n.id, Loop: l}
-			it.node, it.loop, it.gen = to.id, a.Peer.Loop, to.gen
-			it.at = s.now + s.set.NetDelay
-			if a.Msg.Buf != core.NoBuf {
-				it.data = slices.Clone(n.pool.Bytes(a.Msg.Buf))
-			}
+			s.send(n, l, &a)
+			continue
 		case core.ActSetTimer:
 			it.kind = ChooseTimer
-			it.at = n.deadline(a.At)
 			s.replaceTimer(n.id, l, a.Timer)
 		default:
 			panic(fmt.Sprintf("sim: loop %d.%d emits %+v", n.id, l, a))
 		}
 		s.items = append(s.items, it)
 	}
-}
-
-func (n *Node) deadline(at core.Tick) core.Tick {
-	if at <= n.clock.Now {
-		return 0
-	}
-	return at - n.clock.Now
 }
 
 func (s *Scheduler) replaceTimer(node, l uint32, t core.TimerID) {

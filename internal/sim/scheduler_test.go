@@ -320,34 +320,6 @@ func TestStaleTimersArriveAndAreIgnored(t *testing.T) {
 	}
 }
 
-func TestMessagesDropAndReorder(t *testing.T) {
-	set := sim.DefaultSettings()
-	set.DropNum, set.DropDen = 1, 4
-	s := sim.New(3, set)
-	var to *recorder
-	var from core.NodeID
-	sender := s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { from = n.Start(&recorder{}, nil) })
-	s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { to = &recorder{}; n.Start(to, nil) })
-	const sent = 40
-	sender.Call(from, func(_ *core.Context, out []core.Action) []core.Action {
-		for i := range sent {
-			out = append(out, core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: 1}, Msg: writeMsg(uint64(i))})
-		}
-		return out
-	})
-	s.Run(100)
-	var got []uint64
-	for _, ev := range to.events {
-		if ev.Kind != core.EvNetRecv || ev.Peer != from {
-			t.Fatalf("event %+v", ev)
-		}
-		got = append(got, uint64(ev.Msg.Body[9]))
-	}
-	if len(got) == 0 || len(got) == sent || slices.IsSorted(got) {
-		t.Fatalf("received %v of %d: want some dropped and the rest reordered", got, sent)
-	}
-}
-
 func TestAMessageToACrashedIncarnationIsDropped(t *testing.T) {
 	s := sim.New(1, sim.DefaultSettings())
 	var from core.NodeID

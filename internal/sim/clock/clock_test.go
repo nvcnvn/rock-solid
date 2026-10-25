@@ -102,7 +102,7 @@ func TestEachStopMovesTheClocksAndMarkerAsMeasured(t *testing.T) {
 		if core.Resumed(before, after, Threshold) != c.resumed {
 			t.Errorf("stop %d: Resumed %v", c.stop, !c.resumed)
 		}
-		if d := m.Read(2_000_000 + pause).Raw - after.Raw; d != 1_000_000 {
+		if d := m.Read(2_000_000+pause).Raw - after.Raw; d != 1_000_000 {
 			t.Errorf("stop %d: raw gained %d in the second after resuming", c.stop, d)
 		}
 	}

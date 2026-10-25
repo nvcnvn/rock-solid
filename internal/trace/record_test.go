@@ -35,6 +35,8 @@ var everyName = []string{
 	"1001207 2 event pass=82 Crash",
 	"1001207 2 event pass=82 Restart",
 	"1000253 2 event pass=81 Drop peer=7.3 msg=write_reply",
+	"1001207 2 event pass=82 Pause stop=1 lost=0 len=2500000",
+	"1001207 2 event pass=83 Resume",
 }
 
 const scenarioExample = `1000250 2 syscall pass=81 epoll_wait ready=3

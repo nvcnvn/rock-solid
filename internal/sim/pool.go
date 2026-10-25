@@ -130,6 +130,11 @@ func (p *Pool) slot(b core.IOBuf) *block {
 	return s
 }
 
+// Valid reports whether b is a buffer handed out and not freed.
+func (p *Pool) Valid(b core.IOBuf) bool {
+	return b.Gen != 0 && int(b.Slot) < len(p.blocks) && p.blocks[b.Slot].gen == b.Gen && p.blocks[b.Slot].run != 0
+}
+
 // Used is the bytes handed out.
 func (p *Pool) Used() int { return p.used }
 

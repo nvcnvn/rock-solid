@@ -51,6 +51,10 @@ const (
 	EvRestart
 	// EvDrop, the simulator dropping a message the loop sent: peer msg.
 	EvDrop
+	// EvPause, the simulator standing the loop's node still: stop lost len, the clocks' sim/clock.Stop, whether its connections break, and the pause's length in real ticks.
+	EvPause
+	// EvResume, the simulator ending the node's pause, has no fields.
+	EvResume
 	// ActNetSend: peer msg.
 	ActNetSend
 	// ActDiskRead: io lba len.
@@ -135,6 +139,8 @@ var schemas = [numNames]schema{
 	EvCrash:           {"Crash", KindEvent, nil},
 	EvRestart:         {"Restart", KindEvent, nil},
 	EvDrop:            {"Drop", KindEvent, []field{fPeer, fMsg}},
+	EvPause:           {"Pause", KindEvent, []field{{"stop", typeNum}, {"lost", typeBool}, fLen}},
+	EvResume:          {"Resume", KindEvent, nil},
 	ActNetSend:        {"NetSend", KindAction, []field{fPeer, fMsg}},
 	ActDiskRead:       {"DiskRead", KindAction, []field{fIO, fLBA, fLen}},
 	ActDiskWrite:      {"DiskWrite", KindAction, []field{fRound, fIO, fLBA, fLen, {"vec", typeNum}}},
