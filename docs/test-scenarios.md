@@ -4174,7 +4174,8 @@ row says otherwise).
   A report for an interval before one that adds another member or has one down removes nothing:
   on 3 nodes of 2 disks, a move within node A, then a refill onto another disk of node C, or C's
   member down and back up, and then a late report for the add's interval keep the leaving member,
-  which a report for the current interval removes. The property test found the second case on
+  which a report for the current interval removes. Activation and recovered reports in the table
+  that doubles `pg_count` change no PG. The property test found the second case on
   `rep1`: the only copy of the writes taken while the other member was down went with the leaving
   member.
 - Balance never moves a member of a pinned PG, and refill still replaces one on a lost disk. A

@@ -93,7 +93,7 @@ type Inputs struct {
 	Moves       int
 }
 
-// Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members whose replacements recovered removed, every missing member refilled, then up to in.Moves balance moves. It reports the moves it made.
+// Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members whose replacements recovered removed, reports ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves. It reports the moves it made.
 func Next(prev *Table, in *Inputs) (Table, int) {
 	pools := slices.Clone(in.Pools)
 	slices.SortFunc(pools, func(a, b PoolInputs) int { return cmp.Compare(a.ID, b.ID) })
@@ -184,7 +184,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 		}
 	}
 	for _, a := range all.Activations {
-		if a.PG.Pool == in.ID && int(a.PG.Index) < n {
+		if !split && a.PG.Pool == in.ID && int(a.PG.Index) < n {
 			e := &pl.entries[a.PG.Index]
 			if a.Interval > e.Activated && a.Interval <= e.Interval {
 				e.Activated = a.Interval
@@ -193,7 +193,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 		}
 	}
 	for _, r := range all.Recovered {
-		if r.PG.Pool == in.ID && int(r.PG.Index) < n {
+		if !split && r.PG.Pool == in.ID && int(r.PG.Index) < n {
 			if e := &pl.entries[r.PG.Index]; e.Added > 0 && r.Interval >= e.Added && r.Interval <= e.Interval {
 				e.dropLeaving()
 			}

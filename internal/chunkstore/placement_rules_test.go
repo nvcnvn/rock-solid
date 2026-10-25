@@ -395,6 +395,29 @@ func TestMovesAddThenRemove(t *testing.T) {
 			t.Fatalf("PGs %v moving, converged %v:%s", l.moving(), ok, s)
 		}
 	})
+	t.Run("reports across a split", func(t *testing.T) {
+		l := placed(t, nodesOf(rep(3, 64), 4, 2, 2))
+		l.grow(1, 2, 0)
+		l.step(t, l.inputs(allMoves))
+		if len(l.moving()) == 0 {
+			t.Fatal("no move")
+		}
+		prev := l.table
+		in := l.inputs(0)
+		for i, e := range l.pools().PGs {
+			in.Activations = append(in.Activations, PGInterval{pg(i), e.Interval})
+			in.Recovered = append(in.Recovered, PGInterval{pg(i), e.Interval})
+		}
+		l.pool.PGCount = 128
+		in.Pools = l.inputs(0).Pools
+		l.step(t, in)
+		for i, e := range l.pools().PGs {
+			parent := prev.Pools[0].PGs[i/2]
+			if !slices.Equal(e.Members, parent.Members) || e.Activated != parent.Activated || e.Added != parent.Added {
+				t.Fatalf("a report for PG %d before the split changed PG %d: %+v from %+v", i/2, i, e, parent)
+			}
+		}
+	})
 	for _, c := range []struct {
 		name  string
 		event func(t *testing.T, l *layout, disk uint32)
