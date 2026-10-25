@@ -246,10 +246,13 @@ func TestAMemberServesOnlyFrozenVersions(t *testing.T) {
 func TestADroppedVersionGivesBackItsFreeze(t *testing.T) {
 	h := newHarness(t, testConfig())
 	base := h.sync(h.write(chunkC, 0, []byte{1}, 0))
-	w := h.gatedAt(chunkC, 0, []byte{2}, 1, 1)
+	dropped := h.gatedAt(chunkC, 0, []byte{2}, 1, 1)
 	h.settle()
 	h.settleChunk(chunkC, base)
-	w = h.gatedAt(chunkC, 0, []byte{3}, 2, 1)
+	if r := h.reply(dropped); !errors.Is(r.Err, ErrDropped) {
+		t.Fatalf("the dropped write answered %+v", r)
+	}
+	w := h.gatedAt(chunkC, 0, []byte{3}, 2, 1)
 	h.settle()
 	h.commit(chunkC, h.durableAt[w].Version)
 	h.settle()
