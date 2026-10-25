@@ -147,17 +147,21 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 			asked[a.PG.Index] = true
 		}
 	}
+	edits := make([]*Edit, n)
+	for i, ed := range all.Edits {
+		if ed.PG.Pool == in.ID && int(ed.PG.Index) < n {
+			edits[ed.PG.Index] = &all.Edits[i]
+		}
+	}
 	for i := range base {
 		e := &pl.entries[i]
 		*e = base[i]
 		e.Members = slices.Clone(e.Members)
 		e.Past = slices.Clone(e.Past)
-		for _, ed := range all.Edits {
-			if ed.PG == (core.PGID{Pool: in.ID, Index: uint32(i)}) {
-				e.Members, e.Pinned = e.Members[:0], ed.Pinned
-				for _, d := range ed.Disks {
-					e.Members = append(e.Members, Member{Disk: d})
-				}
+		if ed := edits[i]; ed != nil {
+			e.Members, e.Pinned = e.Members[:0], ed.Pinned
+			for _, d := range ed.Disks {
+				e.Members = append(e.Members, Member{Disk: d})
 			}
 		}
 		for j := range e.Members {

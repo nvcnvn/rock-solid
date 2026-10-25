@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"cmp"
+	"encoding/binary"
 	"errors"
 	"slices"
 
@@ -136,7 +137,7 @@ func appendEntry(dst []byte, e *PGEntry) []byte {
 	dst = le.AppendUint32(le.AppendUint32(dst, e.Interval), e.Activated)
 	dst = appendBool(dst, e.Pinned)
 	dst = appendMembers(dst, e.Members)
-	dst = append(dst, uint8(len(e.Past)))
+	dst = binary.AppendUvarint(dst, uint64(len(e.Past)))
 	for _, pi := range e.Past {
 		dst = appendMembers(le.AppendUint32(dst, pi.Interval), pi.Members)
 	}
@@ -222,7 +223,7 @@ func (r *reader) entry() PGEntry {
 	if e.Interval == 0 || e.Activated > e.Interval {
 		r.bad = true
 	}
-	n := int(r.u8())
+	n := r.uvarint()
 	low := e.Activated
 	for i := range n {
 		pi := PastInterval{Interval: r.u32(), Members: r.members()}
@@ -236,6 +237,17 @@ func (r *reader) entry() PGEntry {
 		e.Past = append(e.Past, pi)
 	}
 	return e
+}
+
+// uvarint reads a count in its shortest varint encoding.
+func (r *reader) uvarint() int {
+	v, n := binary.Uvarint(r.b)
+	if r.bad || n <= 0 || n != len(binary.AppendUvarint(nil, v)) || v > uint64(len(r.b)) {
+		r.bad = true
+		return 0
+	}
+	r.b = r.b[n:]
+	return int(v)
 }
 
 func (r *reader) members() []Member {

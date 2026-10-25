@@ -109,6 +109,12 @@ func FuzzDecodeTable(f *testing.F) {
 	tbl.Pools[0].PGs[1].Interval = 3
 	tbl.Pools[0].PGs[1].Past = []PastInterval{{1, tbl.Pools[0].PGs[1].Members}, {2, nil}}
 	f.Add(AppendTable(nil, &tbl))
+	stalled := &tbl.Pools[0].PGs[2]
+	for i := range uint32(300) {
+		stalled.Past = append(stalled.Past, PastInterval{Interval: i + 1, Members: stalled.Members})
+	}
+	stalled.Interval = 301
+	f.Add(AppendTable(nil, &tbl))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		got, err := DecodeTable(b)
 		if err != nil {

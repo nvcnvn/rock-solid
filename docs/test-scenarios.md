@@ -4066,11 +4066,15 @@ Every PG's first `replicas` members, which hold its copies, sit in distinct doma
 
 ## Placement computation
 
-A pure function in the sans-IO core: the previous table plus an event gives a new table, with a
-deterministic order of moves (no `range` over a map, ties broken in a fixed order).
+A pure function in the sans-IO core, `Next` in `internal/chunkstore`: the previous table plus
+its inputs (the pools with their disks' marks, fills and drains, the primaries' asks, activation
+reports, operators' edits and how many balance moves the table may make) gives the next table, with
+a deterministic order of moves: no `range` over a map, and a tie between equally placed disks goes
+to the lowest disk ID, then the lowest PG number.
 
 **Which PGs get a new interval.** Each row is one placement table, and each raises the table epoch
-by 1.
+by 1 (`TestIntervalsRaisedByTableChanges`, on 4 nodes of 3 disks with 2,048 `rep3` PGs unless the
+row says otherwise).
 
 | Table change | PGs whose interval goes up by 1 |
 | --- | --- |
@@ -4093,16 +4097,17 @@ by 1.
 | Down mark and refill in one table (a lost log) | +1; in two tables, +2 |
 | A member down for `refill_after`, then refilled | +1 at the down mark, +1 at the refill, 10 minutes later |
 
-- A change to the session table or the format level makes no placement table and leaves the table
-  epoch alone.
+- A change to the session table or the format level is no input of the computation: it makes no
+  placement table and leaves the table epoch alone.
 - A delta's changed entries are exactly the PGs whose member list, order, live marks, interval, last
   activated interval or past members changed. Every other entry is byte for byte the previous
   table's.
-- Open: whether a balance move swaps the member in one table (+1) or adds and then removes it (+2).
-  The PG epochs spike ran both (F2: 1,202 against 2,402 tables per staged flap); the "Balance moves
-  one member" row assumes one.
+- A balance move swaps the member in one table, so it starts one interval, as the epoch change
+  model's `Replace` does; adding and then removing the member would start two (the PG epochs
+  spike's F2: 2,402 against 1,202 tables per staged flap).
+- Pinning a PG without changing its members starts no interval.
 
-**Which members are missing.** `refill_after` 10 minutes, `degraded_refill_after` 1 minute; a `rep3` pool on 4 nodes unless stated.
+**Which members are missing.** `refill_after` 10 minutes, `degraded_refill_after` 1 minute; a `rep3` pool on 4 nodes unless stated (`TestMissingMembers` and the tests named in the rows).
 
 | State of member M | Refilled |
 | --- | --- |
@@ -4113,27 +4118,35 @@ by 1.
 | Down, and an operator declares its disk lost | At once |
 | Down for 59 s in a `rep2` PG with `min_live` 2 | No; the PG serves no reads or writes meanwhile |
 | Down for 1 minute in a `rep2` PG with `min_live` 2 | Yes, in the next table, since the PG serves no reads or writes while it waits |
-| Down 5 s (a network hiccup), then up, in a `rep2` PG with `min_live` 2 | No member moves; the PG resyncs the member and serves reads and writes again |
-| Down for 1 minute in a `rep2` PG, and the only member live in an interval since the last activated one | No; peering waits for it whether or not a new member joins |
-| A refill member, still recovering, in a `rep2` PG whose other member is live | Counts toward `min_live` from the table that adds it: the PG serves reads and writes once that interval activates, each acknowledged on both members, while recovery copies the older chunks on its missing list |
+| Down 5 s (a network hiccup), then up, in a `rep2` PG with `min_live` 2 | No member moves; the PG resyncs the member and serves reads and writes again (`TestHiccupMovesNoMember`) |
+| Down for 1 minute in a `rep2` PG with `min_live` 1, both members down, and the only member live in an interval since the last activated one | No; peering waits for it whether or not a new member joins. The other member, down longer, is refilled (`TestAwaitedMemberStays`) |
+| A refill member, still recovering, in a `rep2` PG whose other member is live | Counts toward `min_live` from the table that adds it, marked up: the PG serves reads and writes once that interval activates, each acknowledged on both members, while recovery copies the older chunks on its missing list (`TestRefillMemberCountsAtOnce`) |
 | In `maintenance` for an hour | No; it counts toward `min_live` throughout |
-| Down on a 3-node `rep3` cluster for an hour | No eligible disk on another node; a disk failure on a node with a second disk refills there after 10 minutes |
+| Down on a 3-node `rep3` cluster for an hour | No eligible disk on another node; a disk failure on a node with a second disk refills there after 10 minutes (`TestRefillWithNoEligibleDisk`) |
 
 **Placement rules**
 
-- Refill puts every missing member on the eligible disk furthest below its target. Balance then
-  runs: while any disk is outside its fill margin, move one member from the disk furthest above its
-  target, even one inside its own margin, to the eligible disk furthest below, and stop when no move
-  brings that disk nearer.
+- Refill puts every missing member on the eligible disk furthest below its target
+  (`TestRefillFillsTheDiskFurthestBelow`). Balance then runs: while any disk is outside its fill
+  margin, move one member from the disk furthest above its target, even one inside its own margin,
+  to the eligible disk furthest below, if that leaves it below the source
+  (`TestBalanceTakesFromTheFurthestAbove`: loads of 44, 44 and 40 against targets of 42.7 take one
+  move, from the first 44, to 43, 44 and 41). When no such move is left, a move that brings a disk
+  outside its margin nearer and takes neither disk outside its margin on the other side; stop when
+  neither exists. The property test's seed 207 needed the second kind: every PG on the disks above
+  their targets already had a member on the node of the disk below its margin.
 - A disk's fill margin is max(5% of its target, 1 member). A 0.5 TB disk beside 8 TB disks, with a
   target of 10 to 20 members, has a margin of 1 member.
 - Both steps keep the failure-domain rule. With `failure_domain: node`, no PG ever has two members
   on one node, and no domain holds more than `max_per_domain` of a PG's width.
 - A disk's target is its capacity for the pool: `write_limit` less other pools' data on it, so this
   pool's own data counts, water-filled over domains capped at `max_per_domain` of the width, and
-  split within a domain by capacity.
+  split within a domain by capacity (`TestTargetsFollowCapacity`).
+- Balance never moves a member of a pinned PG, and refill still replaces one on a lost disk. A
+  draining disk keeps its members up while balance moves them all off (`TestPinAndDrain`).
 - Targets by capacity: after a disk is added to a pool holding data, the second computation, run
-  once the first one's moves have copied, proposes no move.
+  once the first one's moves have copied, proposes no move (`TestMovesAfterADiskAdded`; the
+  counts by room are the capacity conditions study's).
 
   | Layout | Moves, over computations |
   | --- | --- |
@@ -4143,12 +4156,13 @@ by 1.
 
 **Convergence on the capacity model layouts.** C1 to C6 are the data-driven cases of the "Pools"
 item, which holds their capacity figures ([capacity model
-spike](../spikes/capacity-model/README.md)). Here they check only placement:
+spike](../spikes/capacity-model/README.md)). Here they check only placement
+(`TestConvergenceOnCapacityLayouts`):
 
 - With capped targets, the loop converges on all six, and the table's available figure comes
   within 1% of balanced.
 - With size-proportional targets on C1, C2, C3 and C6, the loop never reaches its margin (worst disk
-  23 to 200% off). It still terminates, because it stops when no move helps.
+  93, 23, 200 and 50% off). It still terminates, because it stops when no move helps.
 - In C4 (three 2 TB disks, one holding 1.2 TB of another pool), targets by capacity are what keep
   the table near the 4.2 TB bound.
 
@@ -4156,61 +4170,76 @@ spike](../spikes/capacity-model/README.md)). Here they check only placement:
 
 | Table | Size |
 | --- | --- |
-| 2,048 PGs × 3 replicas × 4-byte disk ID + 8 bytes of interval numbers | 40 KiB |
-| 4,096 PGs × 18 members, `ec16-2` | About 320 KiB |
+| 2,048 `rep3` PGs, each 3 × (4-byte disk ID + mark byte) + 11 bytes of intervals, pin flag and counts | 52 KiB (53,270 bytes) |
+| 4,096 PGs × 18 members, `ec16-2` | About 404 KiB (413,718 bytes) |
 
-Past intervals' member lists come on top of these sizes and are usually empty.
+Past intervals' member lists come on top of these sizes and are usually empty (`TestTableSize`).
 
 - A delta holds the changed PG entries and the CRC32C of the resulting table. Applied to the
   previous table, it reproduces the whole table and its CRC byte for byte.
-- A delta applied to the wrong base, table e − 1 instead of e, fails the CRC, and the node fetches
-  the whole table.
+- A delta applied to the wrong base fails, and the node fetches the whole table: another table at
+  epoch e fails the CRC, and table e − 1 is a gap.
 - A gap fetches the whole table: the node holds e and receives the delta for e + 2.
 - A node that jumps from e to e + 5 by fetching a whole table loses nothing, and none of its
-  interval numbers goes backwards.
-- [fuzz] Delta and whole-table decoders. A truncated delta, an entry for a PG past `pg_count`, or a
-  decreasing interval number is Malformed.
+  interval numbers goes backwards (`TestDeltaBases`).
+- [fuzz] Delta and whole-table decoders (`FuzzDecodeTable`, `FuzzDecodeDelta`): what they accept
+  encodes back to the same bytes. A truncated delta, an entry for a PG past `pg_count`, or a
+  decreasing interval number is Malformed (`TestMalformedDeltas`).
 - PG epochs spike B1, a homelab year on 10 nodes: 104 to 105 MB of deltas against 399 MB to 2.25 GB
   of whole tables. F2, one flap with refill staged one member per table: 1,202 tables. A delta costs
-  about 29 bytes per changed `rep3` PG entry plus its header (study's estimate).
+  a 30-byte header for one pool and 34 bytes per changed `rep3` entry, 20 more with its previous
+  interval's members (`TestDeltaSize`).
 
-**[property] tests.** 1,000 seeds of random add, remove and failure sequences and disk drains, over
-the matrix in Testing strategy: 3 and 5 nodes, 1 or 4 disks per node, mixed sizes; `none`, `rep2`,
-`rep3`.
+**[property] tests.** `TestPlacementKeepsItsRules`, 1,000 seeds in `scripts/seeds.sh` (about 40 ms
+each). Each seed draws a layout from the matrix in Testing strategy, 3 or 5 nodes of 1 or 4 disks of
+0.5 to 8 TB, some holding another pool's data, under `none`, `rep2` or `rep3` with a random
+`min_live`, places it, and computes 30 tables after random events: a disk added or removed, a disk
+or node marked down, up or in `maintenance`, a drain set or cleared, time passing, primaries asking,
+activations folded, `replicas` or `min_live` changed, `pg_count` doubled, or a PG reordered and
+pinned, each table allowed 0, 1, 5 or every balance move.
 
 After every table:
 
-- Every PG keeps its pool's width, with at most `max_per_domain` per domain.
-- No table raises an interval it need not, by the table above.
+- Every PG keeps its pool's width, with at most `max_per_domain` per domain and no disk twice.
+- No table raises an interval it need not, and every table raises one it must, by exactly 1, by
+  the table above; no last activated interval goes down.
 - A member removed and added back gets a new interval.
 - A delta reproduces the whole table and its CRC.
 
-Once the loop stops:
+Then every disk comes back up, undrained and unpinned, and tables are computed, each once the last
+one's moves have copied and activated, until one proposes no move; then a disk is added to the pool
+holding data, and the same again. Once the loop stops:
 
+- The computation after the moves copied proposes none.
 - It has converged: no disk is outside its fill margin.
 - Available + held is at least balanced ÷ (1 + the largest margin of the pool's disks) and never
   above balanced.
-- Members moved stay near the minimum.
+- The members a disk addition moves stay near the minimum: at most a quarter above the lower bound,
+  the larger of the members above and below the disks' margins, plus the sum of the disks' margins.
+  Moving from the disk furthest above its target even inside its margin costs those extra moves:
+  when a disk joins a domain whose capped share rises, the disks of other domains that are just
+  above their targets feed that domain's other disks, and a disk far above its target feeds the
+  new disk in its own domain until it falls under the rest. Over 5,000 seeds the moves were 1.5%
+  above the lower bound in all, three runs above the lower bound plus the margins, none above a
+  quarter more.
 
-`Unbalanced` [property], on the study's test U seeds: 200 random layouts each for `rep2` and `rep3`,
-3 to 6 nodes of 1 or 2 disks of 0.5 to 8 TB, some partly used by other pools, one disk added to a
-random node of a converged table:
+`Unbalanced` [property], `TestAddedDiskNeverUnbalances`, on layouts drawn as the study's test U
+draws them: 200 random layouts each for `rep2` and `rep3`, 3 to 6 nodes of 1 or 2 disks of 0.5 to
+8 TB, some partly used by other pools, one disk added to a random node of a converged table:
 
-- No addition raises `Unbalanced`, at any fill; the worst leaves available + held 9.4% under
-  balanced, a disk of about ten members one member above its target.
+- No addition raises `Unbalanced`, at fills of 0, 50, 70 and 90% of balanced; the worst leaves
+  available + held 6.9% under balanced (9.4% in the study's draws), a small disk one member above
+  its target.
 - `Unbalanced` keeps its value while the computation proposes moves or a PG lists past members.
 
-**Errors and open points**
+**Errors**
 
 - Refill that finds no eligible disk never panics, keeps the failure-domain rule, and leaves the
-  member marked down. One example: `rep3` on 3 nodes after one node fails.
+  member marked down. One example: `rep3` on 3 nodes after one node fails
+  (`TestRefillWithNoEligibleDisk`).
 - A PG with no eligible disk for refill raises `Stuck` once it has copied nothing for 60 s, and
   `rock-solid pool status` states the layout fact (`rep3` on 3 nodes: losing a node leaves its PGs
   degraded until it returns). It never raises `CannotReprotect`.
-- Open: the tolerance for "moves stay near the minimum".
-- Open: the tie-break between equally placed disks.
-- Open: how an operator's pin or drain is represented in the table, and that balance never moves a
-  pinned PG.
 
 ## Replica primary
 
