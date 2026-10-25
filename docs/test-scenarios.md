@@ -4180,7 +4180,9 @@ row says otherwise).
   recovered PG's removal shares one table (`TestMovesAddThenRemove`). A PG makes one move at a time.
   Balance counts the leaving member as gone and the failure-domain rule ignores it: on 3 nodes of
   `rep3`, a disk added to node A takes members from A's other disk. A missing member of a moving PG
-  is replaced by the leaving member, which becomes an ordinary member, when its domain allows.
+  is replaced by the leaving member, which becomes an ordinary member, when its domain allows and
+  its disk is up and not draining; a down or draining one stays leaving and a new disk takes the
+  missing member's place.
   A report for an interval before the current one removes nothing: on 3 nodes of 2 disks, a move
   within node A, then a refill onto another disk of node C, or C's member down and back up, or in
   `maintenance` and back up, and then a late report for the add's interval keep the leaving member,

@@ -375,11 +375,11 @@ func (pl *placer) refill(e *PGEntry, base *PGEntry) {
 	}
 }
 
-// stay makes e's leaving member an ordinary member in place of member out (-1 for none) if its domain has room, and reports whether it did.
+// stay makes e's leaving member an ordinary member in place of member out (-1 for none) if its disk is up and not draining and its domain has room, and reports whether it did.
 func (pl *placer) stay(e *PGEntry, out int) bool {
 	j := e.leaving()
 	k := pl.find(e.Members[j].Disk)
-	if k < 0 || !pl.room(e, k, out) {
+	if k < 0 || pl.disks[k].Mark != MarkUp || pl.disks[k].Drain || !pl.room(e, k, out) {
 		return false
 	}
 	e.Members[j].Leaving = false

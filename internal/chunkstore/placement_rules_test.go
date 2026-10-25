@@ -359,7 +359,7 @@ func (l *layout) moving() []int {
 	return pgs
 }
 
-// A move adds the new member and marks the old one leaving; a later table removes every leaving member a recovered report covers, starting an interval and counting no move. A leaving member down for refill_after stays until the recovered report, on rep1 too where it holds the only copy, and is dropped once its disk leaves the pool; one a missing member's refill can keep stays in its place, and on 3 nodes a move within a node keeps the failure-domain rule but for the leaving member. A report for an interval before the PG's current one removes nothing, nor does one in a table that marks another member down or in maintenance.
+// A move adds the new member and marks the old one leaving; a later table removes every leaving member a recovered report covers, starting an interval and counting no move. A leaving member down for refill_after stays until the recovered report, on rep1 too where it holds the only copy, and is dropped once its disk leaves the pool; one up and not draining that a missing member's refill can keep stays in its place, and on 3 nodes a move within a node keeps the failure-domain rule but for the leaving member. A report for an interval before the PG's current one removes nothing, nor does one in a table that marks another member down or in maintenance.
 func TestMovesAddThenRemove(t *testing.T) {
 	t.Run("removals share one table", func(t *testing.T) {
 		l := placed(t, nodesOf(rep(3, 256), 4, 2, 2))
@@ -454,6 +454,31 @@ func TestMovesAddThenRemove(t *testing.T) {
 			t.Fatalf("a missing member of %v left %v", e.Members, got.Members)
 		}
 	})
+	for name, leave := range map[string]func(l *layout, disk uint32){
+		"down":     func(l *layout, disk uint32) { l.mark(MarkDown, disk) },
+		"draining": func(l *layout, disk uint32) { l.disk(disk).Drain = true },
+	} {
+		t.Run("refill keeps no "+name+" leaving member", func(t *testing.T) {
+			l := placed(t, nodesOf(rep(3, 256), 4, 2, 2))
+			l.grow(1, 2, 0)
+			l.step(t, l.inputs(allMoves))
+			i := slices.IndexFunc(l.moving(), func(i int) bool {
+				e := l.pools().PGs[i]
+				return e.leaving() != 0 && l.disk(e.Members[e.leaving()].Disk).Node != l.disk(e.Members[3].Disk).Node
+			})
+			if i < 0 {
+				t.Fatal("no move between nodes")
+			}
+			i = l.moving()[i]
+			e := l.pools().PGs[i]
+			leave(l, e.Members[e.leaving()].Disk)
+			l.remove(e.Members[0].Disk)
+			l.step(t, l.inputs(0))
+			if got := l.pools().PGs[i]; got.leaving() < 0 || len(got.Members) != 4 {
+				t.Fatalf("a missing member of %v left %v", e.Members, got.Members)
+			}
+		})
+	}
 	t.Run("within a node on 3 nodes", func(t *testing.T) {
 		l := placed(t, nodesOf(rep(3, 128), 3, 1, 2))
 		added := l.grow(0, 2, 0)
