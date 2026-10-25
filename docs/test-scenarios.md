@@ -4308,8 +4308,8 @@ one's moves have copied and activated, until one proposes no move and records ev
   above the lower bound in all, none above a quarter more.
 - Over a run of at least 200 seeds, the members disk additions move total at most 5% above the
   sum of their lower bounds. Fewer seeds swing too far: of the 1,250 runs of 8 seeds from 0 to
-  9,999, 27 exceed 5%, seeds 8,720 to 8,727 reaching 17.2%, and runs of 40 reach 3.97%; any 200
-  consecutive seeds stay within 1.52%, and runs of 800 within 1.05%. Each process checks it over
+  9,999, 23 exceed 5%, seeds 7,752 to 7,759 reaching 16.85%, and runs of 40 reach 4.69%; any 200
+  consecutive seeds stay within 1.66%, and any 800 within 0.95%. Each process checks it over
   its own seeds, so only one given at least 200 does: `scripts/seeds.sh`'s 1,000 seeds on up to 5
   processes, never `go test`'s 40.
 
