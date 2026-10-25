@@ -268,11 +268,17 @@ func TestAQueueDelaysOneDirectionOnly(t *testing.T) {
 func TestADuplicateArrivesTwiceInARowAndChangesNothing(t *testing.T) {
 	set := sim.DefaultSettings()
 	set.DupNum, set.DupDen = 1, 1
+	set.NetJitter = 1000
 	c := newCluster(1, set, nodes(2)...)
 	c.ping(0, 1)
+	c.ping(0, 1)
 	c.settle(t)
-	if len(c.m[1].received(msgRequest)) != 2 || len(c.m[0].received(msgReply)) != 4 || len(c.m[0].rtts) != 1 {
-		t.Fatalf("requests %d, replies %d, completed %d", len(c.m[1].received(msgRequest)), len(c.m[0].received(msgReply)), len(c.m[0].rtts))
+	var ids []uint64
+	for _, ev := range c.m[1].received(msgRequest) {
+		ids = append(ids, binary.LittleEndian.Uint64(ev.Msg.Body[1:]))
+	}
+	if !slices.Equal(ids, []uint64{1, 1, 2, 2}) || len(c.m[0].received(msgReply)) != 8 || len(c.m[0].rtts) != 2 {
+		t.Fatalf("requests %v, replies %d, completed %d", ids, len(c.m[0].received(msgReply)), len(c.m[0].rtts))
 	}
 	if c.live(0) != 0 || c.live(1) != 0 {
 		t.Fatalf("buffers live: %d and %d", c.live(0), c.live(1))
@@ -349,6 +355,30 @@ func TestACrashGivesEachPeerOnePeerLostAfterWhatTheNodeSent(t *testing.T) {
 		if !slices.Equal(kinds, []core.EventKind{core.EvNetRecv, core.EvPeerLost}) {
 			t.Fatalf("node %d saw %v from the crashed node", p, kinds)
 		}
+	}
+}
+
+func TestARestartedSendersPeerSeesPeerLostBeforeItsNewMessages(t *testing.T) {
+	set := sim.DefaultSettings()
+	set.FailAfter = 10 * second
+	c := newCluster(1, set, nodes(2)...)
+	c.ping(0, 1)
+	c.settle(t)
+	c.s.CrashRandom(0)
+	c.s.Restart(0)
+	restarted := c.s.Time()
+	c.ping(0, 1)
+	for len(c.m[1].received(msgRequest)) < 2 {
+		c.s.Step()
+	}
+	var kinds []core.EventKind
+	for _, ev := range c.m[1].events {
+		if ev.Peer.Node == 0 && (ev.Kind == core.EvPeerLost || ev.Kind == core.EvNetRecv && ev.Msg.Body[0] == msgRequest) {
+			kinds = append(kinds, ev.Kind)
+		}
+	}
+	if !slices.Equal(kinds, []core.EventKind{core.EvNetRecv, core.EvPeerLost, core.EvNetRecv}) || c.s.Time()-restarted > 1000 {
+		t.Fatalf("node 1 saw %v from node 0, the new request %d after the restart", kinds, c.s.Time()-restarted)
 	}
 }
 
@@ -463,26 +493,41 @@ func TestEachNodesRawClockRunsAtAFixedRateWithinFourPercent(t *testing.T) {
 	}
 }
 
-func TestARawRateStepsOnceAfterTheRateWindowAndSlewsStayWithinBounds(t *testing.T) {
+func TestARawRateStepsOncePerBootAfterTheRateWindowAndSlewsStayWithinBounds(t *testing.T) {
 	set := sim.DefaultSettings()
 	set.ClockNum, set.ClockDen = 1, 1
 	stepped, chrony, wide := 0, false, false
 	for seed := range uint64(10) {
 		s := sim.New(seed, set)
 		start := make([]uint64, 3)
+		models := make([]*clock.Model, 3)
+		booted := make([]core.Tick, 3)
+		steps := make([]int, 3)
 		for i := range 3 {
 			s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { tick(n, 30*second) })
-			start[i] = s.Node(uint32(i)).Clock().Rate()
+			models[i] = s.Node(uint32(i)).Clock()
+			start[i] = models[i].Rate()
 		}
+		rebooted := false
 		for s.Step() {
+			if !rebooted && s.Time() >= 15*second {
+				rebooted = true
+				for i := range uint32(3) {
+					s.Reboot(i)
+				}
+			}
 			for i := range uint32(3) {
 				m := s.Node(i).Clock()
+				if m != models[i] {
+					models[i], start[i], booted[i], steps[i] = m, m.Rate(), s.Time(), 0
+				}
 				if m.Rate() != start[i] {
 					d := int64(m.Rate()) - int64(start[i])
-					if s.Time() < 10*second || d > clock.Unit/200 || d < -clock.Unit/200 {
-						t.Fatalf("seed %d node %d: raw rate stepped by %d at %d", seed, i, d, s.Time())
+					if steps[i] > 0 || s.Time()-booted[i] < 10*second || d > clock.Unit/200 || d < -clock.Unit/200 {
+						t.Fatalf("seed %d node %d: raw rate stepped by %d at %d, %d steps into its boot at %d", seed, i, d, s.Time(), steps[i], booted[i])
 					}
 					stepped++
+					steps[i]++
 					start[i] = m.Rate()
 				}
 				if sl := m.Slew(); sl > 226_000_000 || sl < -226_000_000 {
@@ -495,8 +540,8 @@ func TestARawRateStepsOnceAfterTheRateWindowAndSlewsStayWithinBounds(t *testing.
 			}
 		}
 	}
-	if stepped < 15 || stepped > 30 || !chrony || !wide {
-		t.Fatalf("%d of 30 nodes stepped; chrony's slew drawn %v, others %v", stepped, chrony, wide)
+	if stepped < 45 || stepped > 60 || !chrony || !wide {
+		t.Fatalf("%d of 60 boots stepped; chrony's slew drawn %v, others %v", stepped, chrony, wide)
 	}
 }
 
@@ -782,7 +827,7 @@ func TestFaultsKeepTheDriverContractAndTheResumedRule(t *testing.T) {
 	seen := map[string]int{}
 	seeds.Run(t, 0, 20, func(seed uint64) {
 		c := faultRun(t, seed)
-		for _, name := range []string{"Resumed", "PeerLost", "Drop", "Pause stop=1", "Pause stop=3", "lost=1", "Restart", "NetRecv"} {
+		for _, name := range []string{"Resumed", "PeerLost", "Drop", "Pause stop=1", "Pause stop=3", "Pause stop=4", "Pause stop=5", "lost=1", "Restart", "NetRecv"} {
 			seen[name] += bytes.Count(c.s.Trace(), []byte(" "+name))
 		}
 		for i, m := range c.m {
