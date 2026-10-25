@@ -3907,10 +3907,10 @@ Unit and data-driven tests for pool settings, creation rules and capacity figure
 | `replicas` 1 | `min_live` 1, `locality` node |
 | `replicas` 2 | `min_live` 2, `locality` spread |
 | `replicas` 0 or 4 | Rejected with an error naming the setting, never a panic |
-| `sealed: ec`, `data`, `parity` or `encode_on_write` set (phase 3) | Rejected as not supported yet. Open: the design states only that erasure coding waits for phase 10, not the error |
+| `sealed: ec`, `data`, `parity` or `encode_on_write` set (phase 3) | Rejected as not supported yet, with an error naming the setting |
 | `failure_domain` other than `node` or `disk` | Rejected |
 | `pg_count` 0, 3 or 1,000 | Rejected: it must be a non-zero power of two (as in IDs and hashing) |
-| `pg_count` sized for 60 disks, `rep3` alone | 2048 (2048 × 3 ÷ 60 ≈ 102 members per disk). Open: the exact rounding rule ("sized for the largest expected cluster ... around 100") |
+| `pg_count` sized for 60 disks, `rep3` alone | 2048, the smallest power of two giving each disk at least 100 members (2048 × 3 ÷ 60 ≈ 102; 1024 would give 51) |
 | `min_live` above `replicas`, or 0 | Rejected: it must be 1 to `replicas`, as Ceph's `min_size` must be 1 to `size` |
 | `write_limit` of 10% or less | Rejected: `NearFull` starts 10 points below it |
 | `write_limit` unset, member disks of 1 TiB, 256 GiB, 128 GiB, 64 GiB, 32 GiB, 16 GiB, 8 GiB and 1 GiB (segments of 64, 64, 32, 16, 8, 4, 2 MiB and 256 KiB) | Each disk's limit is ⌊size in blocks × its default⌋: 90%, 90%, 90%, 85%, 85%, 75%, 55%, 50%. `NearFull` is 10 points below each |
@@ -3919,7 +3919,7 @@ Unit and data-driven tests for pool settings, creation rules and capacity figure
 | `replicas` or `min_live` changed later | Accepted. The next table starts a new interval of every PG of the pool (asserted in Placement computation) |
 | `failure_domain`, `write_limit`, `disk_class` or `overcommit` changed later | Accepted ("every other setting can change later") |
 | `pg_count` doubled | Accepted. PG p splits into 2p and 2p + 1 |
-| `pg_count` halved, or set to a value that is not a double of the current one | Open: rejected or not |
+| `pg_count` halved, or set to a value that is not a double of the current one | Rejected: it only doubles |
 
 **Creation rules**
 
@@ -3930,7 +3930,7 @@ Unit and data-driven tests for pool settings, creation rules and capacity figure
 | 2 nodes | `rep3`, `failure_domain` node | Rejected: width 3 > 2 domains |
 | 2 nodes | `rep3`, `max_per_domain` 2 | Rejected: copies always sit in distinct failure domains |
 | 2 nodes | `rep2` | Accepted. Survives 1 node failure |
-| 1 node with 3 disks | `rep3`, `failure_domain` disk | Accepted, surviving 0 node failures. Open: how the CLI counts node tolerance for copies under `failure_domain: disk` |
+| 1 node with 3 disks | `rep3`, `failure_domain` disk | Accepted, surviving 0 node failures: under `failure_domain: disk` nothing keeps a PG's copies on distinct nodes |
 | 3 nodes, 2 of them with NVMe disks | `rep3`, `disk_class` NVMe | Rejected: only domains with disks of the class count |
 | 1 node | `none` | Accepted |
 | Any | Presets `none`, `rep2`, `rep3` | Survive nothing, 1 and 2 failures; need 1, 2 and 3 failure domains; usable/raw 1, 1/2 and 1/3 |
@@ -3938,7 +3938,7 @@ Unit and data-driven tests for pool settings, creation rules and capacity figure
 **Capacity figures: the capacity model spike's cases as data-driven files.** Each case file carries:
 
 - the layout;
-- the spike's converged integer table with capped targets, as member slots per disk, exported from `spikes/capacity-model/model.py` with its seed;
+- the spike's converged integer table with capped targets, as member slots per disk, exported at seed 1 from the [capacity conditions study](../studies/capacity-conditions/README.md)'s port of `spikes/capacity-model/model.py`, which reproduces the spike's available figures to the digit (`internal/chunkstore/testdata/capacity`);
 - the fills, and the pool's own data on each disk.
 
 The terms:
@@ -4050,12 +4050,12 @@ Block volumes in an erasure-coded pool reserve at the copies' overhead. That cas
 
 Every PG's first `replicas` members, which hold its copies, sit in distinct domains. [property] On random layouts of 4 to 6 nodes, reprotectable is the least over each domain in turn; the largest domain alone was not the worst in 367 of 3,000 (the study's test E2).
 
-**Property tests.** [property] For random layouts of 3 to 10 nodes with 1 to 4 disks of 0.5 to 4 TB, some disks holding other pools' data, random valid tables and random amounts held at balanced proportions:
+**Property tests.** [property] For random layouts of 3 to 10 nodes with 1 to 4 disks of 0.5 to 4 TB, some disks holding other pools' data, random valid tables of 1 to 3 copies and random amounts held, laid out as the table sends data (`TestPoolFiguresHoldTheirBounds`, each check registered as a `sim.Invariants` invariant):
 
-- available + held ≤ balanced ≤ Σcᵢ ÷ b;
-- balanced equals the largest D with Σᵢ min(cᵢ, a·D) ≥ b·D, found by bisection to 0.1%;
-- the domains' stranded rooms sum to Σcᵢ − b·B;
-- f does not change with the amount held;
+- available + held ≤ balanced ≤ Σcᵢ ÷ b, exactly in whole blocks;
+- balanced is the largest whole number of blocks D with Σᵢ min(cᵢ, a·D) ≥ b·D;
+- the domains' stranded rooms sum to Σcᵢ − b·B, to within a block per domain and copy;
+- f, balanced and reprotectable do not change with the amount held;
 - for copies, balanced without the largest-capacity domain equals the least over single domains, and is at most balanced after any single disk loss;
 - `CannotReprotect` never fires on a one-copy pool, nor for a loss whose survivors cannot hold the width.
 

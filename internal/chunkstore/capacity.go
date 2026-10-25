@@ -311,8 +311,7 @@ type Conditions struct {
 	Confirmed       float64
 }
 
-// Update raises and clears the conditions on f; settled reports that placement proposes no move for the
-// pool and no PG of it lists past members, without which Unbalanced keeps its value.
+// Update raises and clears the conditions on f; Unbalanced keeps its value unless settled: no move proposed, no past members listed.
 func (c *Conditions) Update(f *Figures, settled bool) {
 	if c.Full {
 		c.Full = f.anyAbove(1)
@@ -334,6 +333,7 @@ func (c *Conditions) Update(f *Figures, settled bool) {
 		c.Stranded = f.Stranded > threshold
 	}
 	if settled {
+		// Before grants, which may take half of available and say nothing of the table.
 		reach := f.Ungranted + f.Held
 		if c.Unbalanced {
 			c.Unbalanced = 100*reach < 91*f.Balanced
