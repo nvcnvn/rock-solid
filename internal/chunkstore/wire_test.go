@@ -58,7 +58,7 @@ func wireCases() []wireCase {
 		{"grant_refused", &Grant{ID: 7, Status: StatusRefused, Epoch: 80}, 0},
 		{"heartbeat", &Heartbeat{ID: 8, Epoch: 77, Run: 0x0123456789abcdef, Raw: 51_020_500}, 0},
 		{"report_empty", &Report{ID: 9}, 0},
-		{"report", &Report{ID: 9, Activations: []PGFields{wirePG}, Latencies: []Latency{{Disk: 3, Latency: 250}},
+		{"report", &Report{ID: 9, Activations: []PGFields{wirePG}, Recovered: []PGFields{wirePG}, Latencies: []Latency{{Disk: 3, Latency: 250}},
 			Disks: []DiskState{{Log: 0x0123456789abcdef, Fill: 1000, Oldest: 40}, {Log: 2, Fill: 5, Oldest: 1_500_000, Failed: true}}}, 0},
 		{"member_timeout", &MemberTimeout{ID: 10, PG: wirePG, Disk: 3}, 0},
 		{"probe", &Probe{ID: 11, Disk: 3}, 0},
@@ -332,6 +332,7 @@ func TestWireRejectsIntervalZero(t *testing.T) {
 		"member timeout": AppendMemberTimeout(nil, &MemberTimeout{PG: pg}),
 		"peering":        AppendPeering(nil, &Peering{Kind: KindPeer, PG: pg}),
 		"activation":     AppendReport(nil, &Report{Activations: []PGFields{pg}}),
+		"recovery":       AppendReport(nil, &Report{Recovered: []PGFields{pg}}),
 		"refusal":        AppendResponse(nil, &Response{Kind: KindReply, Status: StatusRefused, Epoch: 80}),
 	} {
 		mustMalformed(t, what, b, 0)
@@ -405,7 +406,7 @@ func TestWireLongFrameTravelsInABuffer(t *testing.T) {
 	for _, c := range []struct {
 		r      *Report
 		inline bool
-	}{{report(2, 12, 2), true}, {report(2, 10, 3), false}, {report(0, 0, 200), false}} {
+	}{{report(3, 10, 2), true}, {report(3, 8, 3), false}, {report(0, 0, 200), false}} {
 		for i := range c.r.Activations {
 			c.r.Activations[i] = wirePG
 		}
