@@ -172,3 +172,18 @@ func TestPeeringKeepsAPendingVersionOfAnEndedInterval(t *testing.T) {
 		t.Fatalf("read %d", got[0])
 	}
 }
+
+// Disk 2 is in maintenance, so disk 3 is the only member 1.1 is sent to, and it refuses it: the refusal ends the version without the primary failing.
+func TestARefusalFromTheOnlyMemberSentToEndsTheVersion(t *testing.T) {
+	tbl := rtable(4, 2)
+	_, e := tbl.entry(pg0)
+	e.Members[1].Mark = MarkMaint
+	c := newRCluster(t, tbl)
+	ch := chunkIn(pg0, 4, 0)
+	c.refuse()
+	w := c.write(pg0, ch, 0, []byte{1})
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusRefused {
+		t.Fatalf("answered %+v", rp)
+	}
+}

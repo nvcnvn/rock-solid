@@ -837,7 +837,9 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 		}
 		r.fail(ctx, i, *rp, out)
 	}
-	r.release(ctx, i)
+	if i = r.versionBySeq(rp.ID); i >= 0 {
+		r.release(ctx, i)
+	}
 }
 
 func (r *Replica) tryCommit(ctx *core.Context, i int) {
