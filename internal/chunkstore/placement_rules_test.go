@@ -348,6 +348,42 @@ func TestAddedDiskNeverUnbalances(t *testing.T) {
 	t.Logf("at worst available + held %.1f%% under balanced", 100*worst)
 }
 
+// A split, then a disk added: the pool is settled for Unbalanced only once a further computation, every report in, changes nothing in the table.
+func TestSettledOnlyOncePlacementIsDone(t *testing.T) {
+	r := core.NewRand(7)
+	for _, replicas := range []int{2, 3} {
+		for run := range 200 {
+			l := &layout{}
+			nodes := int(r.Range(3, 6))
+			for node := range nodes {
+				for range r.Range(1, 2) {
+					l.grow(uint32(node), []float64{0.5, 1, 2, 4, 8}[r.Below(5)], 0)
+				}
+			}
+			l.pool = rep(replicas, PGCountFor(len(l.disks), replicas))
+			placed(t, l)
+			l.pool.PGCount *= 2
+			l.step(t, l.reportAll(allMoves))
+			l.grow(uint32(r.Below(uint64(nodes))), []float64{1, 2, 4, 8}[r.Below(4)], 0)
+			for c := 0; ; c++ {
+				if c == 20 {
+					t.Fatalf("rep%d run %d: not settled after %d computations", replicas, run, c)
+				}
+				l.hold()
+				if n := l.step(t, l.reportAll(allMoves)); n > 0 || !l.pools().Recovered() {
+					continue
+				}
+				prev := l.table
+				l.step(t, l.reportAll(allMoves))
+				if n := len(MakeDelta(&prev, &l.table).Entries); n != 0 {
+					t.Fatalf("rep%d run %d, computation %d: settled, yet the next table changes %d entries", replicas, run, c, n)
+				}
+				break
+			}
+		}
+	}
+}
+
 // moving lists the PGs with a leaving member.
 func (l *layout) moving() []int {
 	var pgs []int

@@ -4018,7 +4018,7 @@ The first refused write landing within 0.3% of available is a fill-based check. 
 | A pool whose disks have no capacity left (Σcᵢ = 0) | f = 0, no `Stranded` |
 | C1 to C6 with their capped tables, placement proposing no move | No `Unbalanced`: available + held is 0.0 to 0.8% under balanced |
 | C4 with a size-weighted table and every PG pinned, placement proposing no move | `Unbalanced` (57% under balanced), naming disk A with its share and target |
-| C4 with a size-weighted table while placement still proposes moves, or a PG still has a leaving member | `Unbalanced` keeps its last value |
+| C4 with a size-weighted table while placement still proposes moves, or a PG has no recovered report for its current interval | `Unbalanced` keeps its last value |
 | C2 with a 4 TB disk added to D by `rock-solid` and confirmed, the pool 90% held | No `Unbalanced`: available + held is within 1.5% of balanced at any fill |
 | C2 holding 0.8 TB | No `CannotReprotect` |
 | C2 holding 1.0 TB | `CannotReprotect`, naming node A |
@@ -4288,8 +4288,8 @@ After every table:
 - A delta reproduces the whole table and its CRC.
 
 Then every disk comes back up, undrained and unpinned, and tables are computed, each once the last
-one's moves have copied and activated, until one proposes no move, leaves no PG moving and starts no interval; then a disk is added to the pool
-holding data, and the same again. Once the loop stops:
+one's moves have copied and activated, until one proposes no move and records every PG recovered, as
+`Unbalanced` is evaluated; then a disk is added to the pool holding data, and the same again. Once the loop stops:
 
 - It settles within a few computations, at most 8 over 10,000 seeds: one after the moves copied
   proposes more only where the one before found every PG it would move from a disk still moving,
@@ -4320,6 +4320,11 @@ draws them: 200 random layouts each for `rep2` and `rep3`, 3 to 6 nodes of 1 or 
   available + held 6.9% under balanced (9.4% in the study's draws), a small disk one member above
   its target.
 - `Unbalanced` keeps its value while the computation proposes moves.
+
+`Unbalanced` [property], `TestSettledOnlyOncePlacementIsDone`: 200 random layouts each for `rep2`
+and `rep3`, split, then a disk added. Once a computation proposes no move and records every PG
+recovered, the next one, every report in, changes no entry. Counting only no move and no leaving
+member settled every run while the split's PGs, not yet reported, could not move.
 
 **Errors**
 

@@ -307,7 +307,7 @@ type Conditions struct {
 	Confirmed       float64
 }
 
-// Update raises and clears the conditions on f; Unbalanced keeps its value unless settled: no move proposed and no PG has a leaving member.
+// Update raises and clears the conditions on f; Unbalanced keeps its value unless settled: placement proposes no move for the pool and its table records every PG recovered (PoolTable.Recovered).
 func (c *Conditions) Update(f *Figures, settled bool) {
 	if c.Full {
 		c.Full = f.anyAbove(1)

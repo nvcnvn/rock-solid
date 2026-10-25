@@ -53,24 +53,21 @@ func (l *layout) step(t *testing.T, in *Inputs) int {
 	return moves
 }
 
-// settle runs computations, each once the last one's moves have copied and activated, until one proposes no move, leaves no PG moving and starts no interval, so that no move waits for a recovered report.
+// settle runs computations, each once the last one's moves have copied and activated, until one proposes no move and leaves every PG recovered, so that no move waits for a recovered report.
 func (l *layout) settle(t *testing.T) (moves, computations int) {
 	t.Helper()
 	for computations = 1; ; computations++ {
 		l.hold()
-		prev := l.table
 		n := l.step(t, l.reportAll(allMoves))
 		moves += n
-		if l.settled(&prev, n) || computations == 20 {
+		if l.settled(n) || computations == 20 {
 			return moves, computations
 		}
 	}
 }
 
-// settled reports whether the step from prev made no move, left no PG moving and started no interval.
-func (l *layout) settled(prev *Table, moves int) bool {
-	return moves == 0 && len(l.moving()) == 0 && slices.EqualFunc(prev.Pools[0].PGs, l.pools().PGs, func(a, b PGEntry) bool { return a.Interval == b.Interval })
-}
+// settled reports whether the step made no move and left every PG recovered, as Unbalanced is evaluated.
+func (l *layout) settled(moves int) bool { return moves == 0 && l.pools().Recovered() }
 
 // reportAll reports every PG activated at its interval, and recovered where every member but a leaving one is up, as its primary does.
 func (l *layout) reportAll(moves int) *Inputs {

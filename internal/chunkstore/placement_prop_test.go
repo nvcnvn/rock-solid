@@ -386,7 +386,7 @@ func (h *history) settle(t *testing.T, l *layout) int {
 			t.Fatalf("table %d: %v", l.table.Epoch, err)
 		}
 		moves += n
-		if l.settled(&prev, n) {
+		if l.settled(n) {
 			h.stats.computations = max(h.stats.computations, c+1)
 			break
 		}

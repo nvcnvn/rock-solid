@@ -569,3 +569,8 @@ func (pl *placer) move(src, k int) bool {
 	}
 	return false
 }
+
+// Recovered reports whether every PG of p records a recovered report for its current interval, so none has a leaving member and balance may move any unpinned one.
+func (p *PoolTable) Recovered() bool {
+	return !slices.ContainsFunc(p.PGs, func(e PGEntry) bool { return !e.Recovered })
+}
