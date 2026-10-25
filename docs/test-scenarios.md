@@ -4234,6 +4234,8 @@ holding data, and the same again. Once the loop stops:
   new disk in its own domain until it falls under the rest. Over 5,000 seeds the moves were 1.5%
   above the lower bound in all, three runs above the lower bound plus the margins, none above a
   quarter more.
+- Over any run of at least 8 seeds, the members disk additions move total at most 5% above the sum
+  of their lower bounds; ten sampled runs of 8 seeds stayed within 2.7%.
 
 `Unbalanced` [property], `TestAddedDiskNeverUnbalances`, on layouts drawn as the study's test U
 draws them: 200 random layouts each for `rep2` and `rep3`, 3 to 6 nodes of 1 or 2 disks of 0.5 to
