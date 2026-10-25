@@ -3205,7 +3205,7 @@ nodes without finishing.
 | --- | --- | --- |
 | `ci-peering` | 3 | Both chunks; lease expiry left open, except that a grantor that answers peering of an interval holds no live grant to that interval's old primary; the plans with membership changes alone, but the largest |
 | `ci-restarts` | 3 | As `ci-peering`, with the plans that restart a primary or format a disk, under which a decision can stop short of activation, and the largest membership plan, a member down and back and then the primary moved to it, at 1.5 million states alone, so that neither configuration takes most of its 5 minutes |
-| `ci-moves` | 3 | As `ci-peering`, with the move plans: PG 2's replica and then its primary moved to node 1, and the replica's move with the leaving member marked down before its replacement recovers, each with the daemon's write W |
+| `ci-moves` | 3 | As `ci-peering`, with the move plans: PG 2's replica and then its primary moved to node 1; the replica's move with the leaving member marked down before its replacement recovers, or with a process restart; and the replica's move with a refill before the removal, a disk formatted again replacing node 1's. Each sends only the daemon's one write W |
 | `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the six below |
 | `deep-peering` | 4 | `ci-peering`'s and `ci-restarts`' plans and the free plan, and the unbounded liveness property |
 | `deep-leases` | 4 | `ci-leases`'s plans and the six it leaves out: four pair a partition with a pause, a suspend or a reboot, and two stop the holder in place while its grantor pauses or restarts |
@@ -3309,9 +3309,10 @@ plans enable.
 - An interval with fewer than `min_live` live members, then the primary moved away.
 - An interval short of `min_live` only by members in `maintenance`: it accepted writes and is not skipped.
 - A replica replaced under a primary that stays.
-- A move: a member added and the leaving one removed once a primary reported an interval since the
-  add recovered, of a replica, of the primary, and with the leaving member down before its
-  replacement recovers.
+- A move: a member added and the leaving one removed on a recovered report, possibly late or
+  repeated, for an interval at or after the last that marked it leaving, added a member or had one
+  down; of a replica and of the primary, with the leaving member down before its replacement
+  recovers, with a process restart, and with the new member refilled before the removal.
 - A primary restart.
 - A counter running out.
 - An activation report lost or late.
@@ -3346,14 +3347,17 @@ plans enable.
   under a fresh support epoch while the old primary still holds the older table.
 
 Not modelled: a PG split with writes in flight, whose children take the parent's interval plus one
-like any new interval; it needs a PG created mid-run, left to the phase 3 simulator.
+like any new interval, and the recovered reports placement ignores in the table that splits a pool;
+both need a PG created mid-run, left to the phase 3 simulator. Nor is a change of `replicas`, so
+neither is the leaving mark that narrows a PG when `replicas` goes down.
 
 **Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12.
 `ci-peering`, `ci-restarts` and `deep-peering` check every property but 2, 10 and 13, since the Raft
 group and lease time need clocks, and `deep-peering` adds the unbounded liveness property 12.
-`ci-moves` checks the same and property 13, which holds only where every membership change is a
-move and each chunk takes one write: a refill, or a dropped write logged over an acknowledged one,
-lowers the count until recovery. A
+`ci-moves` checks the same and property 13, an action property checked at each removal. Its plans
+send only the daemon's one write W: with the successor's writes, a peering after the report can
+leave a member listing a chunk whose acknowledged version it still holds, which property 13 does
+not tell from a lost copy. A
 simulator invariant is registered by [Placement faults and
 invariants](#placement-faults-and-invariants) (phase 3) unless the row names another item.
 
@@ -3371,7 +3375,7 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 10 | A node pair whose raw rates differ by up to 4%, with no pause, reboot, network fault or refusal since first contact, and whose holder ended no leases on a step-check trip from a pair a fault touched, holds a lease within `rate_gap` (plus rounding, at the model's zero round trips) of first contact and keeps it with no step-check trip. The bound is in time, so `ci` checks it as an invariant over the model's clocks | `LeaseForms` | "no step check trips between two nodes neither paused nor rebooted, and each such pair holds a lease within `rate_gap` plus two round trips of first contact", a counter expected to be 0: with real round trips the bound is `rate_gap` plus two of them |
 | 11 | Once a dead daemon's reissued write W′ and a later write W2 to the same block are acknowledged, the block never again holds the dead daemon's W | `NoResurrectedWrite` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), under the fault "a dead daemon's chunk write delivered after its successor's reissue and the pod's next write to the same block", registered by Invariant checker (phase 1) |
 | 12 | Peering settles: with every step that is due taken in time, every PG eventually activates its current interval, unless the interval has fewer than `min_live` live members, a live member's disk is gone, or the table bound left a restarted primary without the new interval it asked for | `PeeringSettles` | "once membership stops changing, every PG whose current interval has at least `min_live` live members on running nodes activates it" |
-| 13 | A move keeps every acknowledged version on as many members of the PG's current interval, holding it and listing nothing, as the PG's width: the leader removes a leaving member only once a primary reported its replacement recovered | `MovesKeepCopies` | "no move lowers the members of a PG holding an acknowledged version below its width" |
+| 13 | When the leader removes a leaving member, every other member of the PG's current interval holds every acknowledged version and lists nothing: a recovered report counts only for an interval at or after the last that marked the member leaving, added another member or had one down | `RemovalKeepsCopies` | "no move lowers the members of a PG holding an acknowledged version below its width" |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
 find a violation of the named property, which is never the property that only restates the removed
@@ -3395,6 +3399,7 @@ under fairness, as `deep-peering` does, on the restart plan alone.
 | The leader records an activation the primary has only decided | 4 | PG 2: interval 2 replaces member 3 with node 1; primary 2 decides to keep W, still in flight to 3, and the leader records 2 before any member persisted the decision; W completes in interval 1; interval 3 puts 2 in `maintenance`, and node 1, peering from interval 2, finds no member that persisted its decision and drops W |
 | Recovery picks the blocks to leave out when it reads the authoritative member, not when it orders its write | 4 | A member that lists a chunk gets a client write ordered after recovery's read; the recovery write copies the older block over it, and the next peering, reaching that member, drops the acknowledged write |
 | The leader removes a leaving member before its replacement recovered | 13 | PG 2: W acknowledged on nodes 2 and 3; interval 2 adds node 1 with 3 leaving; interval 3 removes 3 before node 1 holds W, which only node 2 then holds |
+| A recovered report from before a refill's join removes the leaving member | 13 | PG 2: interval 2 adds node 1 with 3 leaving, and primary 2 activates it before any write and reports it recovered; W is acknowledged on nodes 2, 3 and 1; node 1's disk is formatted again, and interval 3 replaces it with the new, empty disk; interval 4 removes 3 on the report for 2 while the new disk lacks W |
 | Members accept a write only in the table epoch it was sent in | 7 | A fold or a change to the other PG reaches a member while a write is in flight, and the member refuses it though its interval is unchanged |
 | A later peering clears a missing-list entry recovery has not done | 5 | A member holds a dropped version, a write to the chunk's other block lands on it, the next peering clears its entry, and the decision after counts its torn block as the kept version |
 | Incarnations checked when a write arrives, not when it is ordered | 11 | P holds W; the successor's hello reaches P; P orders W after W′ and W2 |
@@ -3787,7 +3792,7 @@ section.
 | Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 26 | 547,723 | 53 s |
 | Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 30 | 1,794,768 | 190 s |
 | Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 97 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 25 | 129,370 | 17 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 29 | 323,780 | 35 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |

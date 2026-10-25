@@ -75,11 +75,11 @@ VARIABLES
     \* Control plane and tables
     tbl,      \* Seq([PG -> [iv, la]]): every committed table
     ivs,      \* [PG -> Seq([mem: Seq(Disk), st: [Disk -> mark], lv: Disk \cup {0}, ad: Nat])]:
-              \* each interval's members, its leaving member and the interval that added
-              \* its replacement (0 for none)
+              \* each interval's members, its leaving member (0 for none) and the first
+              \* interval whose recovered report removes it
     reqIv,    \* [PG -> Nat]: the interval whose primary asked for a new one
     reports,  \* set of [p, k]: activation reports on heartbeats, possibly late or repeated
-    recd,     \* [PG -> Nat]: the newest interval reported recovered
+    recd,     \* set of [p, k]: recovered reports on heartbeats, possibly late or repeated
     plan,     \* the planned membership changes of this behavior
     step,     \* the next planned change
     \* Nodes and disks
@@ -136,7 +136,8 @@ Writes == plan.w
 \* The plan's Raft group, with a voter on every node.
 Raft == "raft" \in plan.f
 
-Mem(p, i) == {ivs[p][i].mem[j] : j \in 1..Len(ivs[p][i].mem)}
+Range(s) == {s[j] : j \in 1..Len(s)}
+Mem(p, i) == Range(ivs[p][i].mem)
 St(p, i, d) == ivs[p][i].st[d]
 UpIn(p, i) == {d \in Mem(p, i) : St(p, i, d) = "up"}
 LiveCnt(p, i) == Cardinality({d \in Mem(p, i) : St(p, i, d) # "down"})
@@ -273,7 +274,7 @@ Init ==
     /\ plan \in Plans
     /\ step = 1
     /\ reports = {}
-    /\ recd = [p \in PG |-> 0]
+    /\ recd = {}
     /\ ep = [n \in Node |-> 1]
     /\ dnode = [d \in Disk |-> IF d \in Node THEN d ELSE 0]
     /\ ddisk = [n \in Node |-> n]
@@ -339,11 +340,22 @@ Init ==
 Commit(t) == /\ Len(tbl) < IF plan.free THEN plan.n ELSE MaxTable
              /\ tbl' = Append(tbl, t)
 
+\* The interval that marks a member leaving, and any later one in which
+\* another member joins or is down, is the first whose recovered report
+\* removes it: a report from before says nothing of copies that member lacks.
+Stamp(p, x) ==
+    IF \/ x.lv = 0
+       \/ /\ x.ad # 0
+          /\ \/ Bug("ReportBeforeJoin")
+             \/ \A d \in Range(x.mem) \ {x.lv} : d \in Mem(p, Cur(p)) /\ x.st[d] # "down"
+    THEN x
+    ELSE [x EXCEPT !.ad = Cur(p) + 1]
+
 \* A new interval of each PG in ps, with members from f[p].
 NewIntervals(ps, f) ==
     /\ Commit([p \in PG |-> IF p \in ps THEN [iv |-> Cur(p) + 1, la |-> tbl[Len(tbl)][p].la]
                             ELSE tbl[Len(tbl)][p]])
-    /\ ivs' = [p \in PG |-> IF p \in ps THEN Append(ivs[p], f[p]) ELSE ivs[p]]
+    /\ ivs' = [p \in PG |-> IF p \in ps THEN Append(ivs[p], Stamp(p, f[p])) ELSE ivs[p]]
 
 Allowed(p, d, from, to) ==
     \/ from = "up" /\ to = "down"
@@ -380,15 +392,16 @@ Add(p, old, new) ==
     /\ new \notin Mem(p, Cur(p))
     /\ dnode[new] # 0
     /\ NewIntervals({p}, [q \in PG |->
-         [ivs[p][Cur(p)] EXCEPT !.mem = Append(@, new), !.st[new] = "up", !.lv = old, !.ad = Cur(p) + 1]])
+         [ivs[p][Cur(p)] EXCEPT !.mem = Append(@, new), !.st[new] = "up", !.lv = old]])
     /\ UNCHANGED <<reqIv, reports, recd>>
 
-\* The leader removes the leaving member once a primary has reported an
-\* interval since the add recovered.
+\* The leader removes the leaving member on a recovered report, possibly late,
+\* for an interval at or after the first that may remove it.
 Remove(p) ==
     LET x == ivs[p][Cur(p)]
     IN /\ x.lv # 0
-       /\ recd[p] >= x.ad \/ Bug("RemoveBeforeRecovered")
+       /\ \/ \E r \in recd : r.p = p /\ r.k >= x.ad
+          \/ Bug("RemoveBeforeRecovered")
        /\ NewIntervals({p}, [q \in PG |->
             [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # x.lv), !.lv = 0, !.ad = 0]])
        /\ UNCHANGED <<reqIv, reports, recd>>
@@ -715,9 +728,9 @@ ReportRecovered(n, p) ==
        /\ Leads(n, p)
        /\ pr[n][p].act
        /\ x.lv # 0
-       /\ k > recd[p]
+       /\ [p |-> p, k |-> k] \notin recd
        /\ \A d \in Mem(p, k) \ {x.lv} : St(p, k, d) = "up" /\ \A c \in ChunksOf(p) : miss[d][c] = NoMiss
-       /\ recd' = [recd EXCEPT ![p] = k]
+       /\ recd' = recd \cup {[p |-> p, k |-> k]}
        /\ UNCHANGED <<tbl, ivs, reqIv, reports, plan, step, nodeVars, priVars, dataVars, leaseVars,
                       clockVars, raftVars>>
 
@@ -1611,16 +1624,14 @@ Settled(p) ==
        \/ reqIv[p] = k
 PeeringSettles == <>[](\A p \in PG : Settled(p))
 
-\* 13. A move keeps every acknowledged version on as many members of the
-\* PG's current interval, holding it and listing nothing, as the PG had in
-\* interval 1: the leader removes a leaving member only once a primary
-\* reported its replacement recovered. Refills lower the count, and so does
-\* a dropped write logged over an acknowledged one until recovery, so only
-\* the plans whose membership changes are moves, with one write, check it.
-MovesKeepCopies ==
-    \A c \in Chunk : \A v \in AckedV(c) :
-       LET p == ChunkPG[c]
-       IN Cardinality({d \in Mem(p, Cur(p)) : v \in dlog[d][c] /\ miss[d][c] = NoMiss}) >= Len(InitMem[p])
+\* 13. When the leader removes a leaving member, every other member of the
+\* PG's current interval holds every acknowledged version and lists nothing.
+RemovalKeepsCopies ==
+    [][\A p \in PG :
+         LET x == ivs[p][Len(ivs[p])]
+         IN (x.lv # 0 /\ Len(ivs'[p]) > Len(ivs[p]) /\ ivs'[p][Len(ivs'[p])].lv = 0)
+            => \A c \in ChunksOf(p) : \A v \in AckedV(c) : \A d \in Range(x.mem) \ {x.lv} :
+                 v \in dlog[d][c] /\ miss[d][c] = NoMiss]_vars
 
 -----------------------------------------------------------------------------
 \* Configurations: the .cfg files substitute these for the constants. PG 1 is
@@ -1717,12 +1728,17 @@ RestartPlans == {Reformatted, ReplicaThenMaint, Restarted, DownBackMoved}
 RestartedPlans == {Restarted}
 
 \* ci-moves: PG 2's replica 3, or its primary 2, moved to node 1 by adding
-\* node 1 and removing the leaving member once recovered; and the replica's
-\* move with the leaving member marked down before its replacement recovers.
+\* node 1 and removing the leaving member on a recovered report; the
+\* replica's move with the leaving member marked down before its replacement
+\* recovers, or with a process restart; and the replica's move refilled
+\* before the removal: a disk is formatted again and replaces node 1's old
+\* disk. With no "die", each sends only the daemon's one write W.
 MoveReplica == Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Session, {})
 MovePrimary == Plan(<<AddM(2, 2, 1), RemoveM(2)>>, Session, {})
 MoveLeavingDown == Plan(<<AddM(2, 3, 1), Mark(3, "down"), RemoveM(2)>>, Session, {})
-MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown}
+MoveRestart == Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Session, {"restart"})
+MoveRefill == Plan(<<AddM(2, 3, 1), Repl(2, 1, 4), RemoveM(2)>>, Session, {"format"})
+MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveRefill}
 
 \* ci-leases: PG 2's primary is node 2, whose CLOCK_BOOTTIME runs at its raw
 \* rate or 22.6% slow; node 3, its only grantor, runs 4% slow or fast, with
