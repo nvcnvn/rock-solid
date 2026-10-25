@@ -87,14 +87,15 @@ type storeReq struct {
 	version uint64
 }
 
-// version is a client write or punch the primary ordered and fans out: the members that must hold it, those that do, and those whose send has neither a reply nor a PeerLost yet; done once its client is answered.
+// version is a client write or punch the primary took in interval and fans out once its store orders it: the members that must hold it, those that do, and those whose send has neither a reply nor a PeerLost yet; done once its client is answered.
 type version struct {
-	seq     core.RequestID
-	req     uint64
-	client  core.NodeID
-	msgID   core.RequestID
-	epoch   uint64
-	u       Update
+	seq      core.RequestID
+	req      uint64
+	client   core.NodeID
+	msgID    core.RequestID
+	epoch    uint64
+	interval uint32
+	u        Update
 	buf     core.IOBuf
 	members [maxMembers]uint32
 	n       int
@@ -359,6 +360,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 		}
 	}
 	r.leads = kept
+	r.dropWaiting(ctx, out)
 	parked := r.parked
 	r.parked = nil
 	for _, p := range parked {
@@ -581,7 +583,7 @@ func (r *Replica) order(ctx *core.Context, ev *core.Event, u *Update, interval u
 	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, HasVer: u.HasExpect, Ver: u.Expect,
 		Epoch: u.Snapshot, Interval: interval, Gated: true, Session: u.Session, Incarnation: u.Incarnation}
 	r.seq++
-	r.vers = append(r.vers, version{seq: r.seq, req: id, client: ev.Peer, msgID: u.ID, epoch: r.table.Epoch, u: *u})
+	r.vers = append(r.vers, version{seq: r.seq, req: id, client: ev.Peer, msgID: u.ID, epoch: r.table.Epoch, interval: interval, u: *u})
 	if u.Kind == KindWrite {
 		r.st.Write(ctx, req, &r.sout)
 	} else {
@@ -875,6 +877,30 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 		r.answer(ctx, w.client, w.msgID, &ref, core.NoBuf, out)
 		r.release(ctx, j)
 	}
+	r.dropWaiting(ctx, out)
+}
+
+// dropWaiting refuses the client writes and punches still waiting in the store, for a base read or behind one, whose PG's interval has ended since they were taken, and has the store drop them, so none is ordered in an interval that ended. One the store has already ordered or answered is left to that answer.
+func (r *Replica) dropWaiting(ctx *core.Context, out *ReplicaOutput) {
+	for i := len(r.vers) - 1; i >= 0; i-- {
+		v := &r.vers[i]
+		if v.done || v.u.Version != 0 {
+			continue
+		}
+		if l := r.lead(v.u.PG.PG); l >= 0 && !r.leads[l].asking && r.leads[l].interval == v.interval || !r.st.Cancel(ctx, v.u.Chunk, v.req, &r.sout) {
+			continue
+		}
+		v.done = true
+		r.takeReq(v.req)
+		for j := len(r.bases) - 1; j >= 0; j-- {
+			if f := r.bases[j]; f.ID == v.req {
+				r.bases = slices.Delete(r.bases, j, j+1)
+				r.st.SupplyBase(ctx, f.ID, f.Block, core.NoBuf, ErrDropped, &r.sout)
+			}
+		}
+		r.reply(ctx, v.client, v.msgID, r.refusal(v.u.PG.PG), out)
+		r.release(ctx, i)
+	}
 }
 
 // finished answers a request the store completed: a client's write or punch once its version is mapped or failed, a member's once durable, a read with its blocks.
@@ -887,7 +913,7 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 	case reqClient:
 		i := r.versionOf(rp.ID)
 		if i >= 0 && errors.Is(rp.Err, ErrCounter) {
-			r.counterSpent(ctx, i, rp.Buf)
+			r.counterSpent(ctx, i, rp.Buf, out)
 			return
 		}
 		resp := Response{Kind: KindReply, Status: statusOf(rp.Err), Version: rp.Version}
@@ -941,7 +967,7 @@ func (r *Replica) release(ctx *core.Context, i int) {
 }
 
 // counterSpent holds a client write whose chunk spent its counter in the PG's interval, its buffer handed back, until the PG has a new interval: the PG's next writes are held behind it, and once its pending writes are done the primary asks for the interval.
-func (r *Replica) counterSpent(ctx *core.Context, i int, buf core.IOBuf) {
+func (r *Replica) counterSpent(ctx *core.Context, i int, buf core.IOBuf, out *ReplicaOutput) {
 	v := r.vers[i]
 	r.vers = slices.Delete(r.vers, i, i+1)
 	l := r.lead(v.u.PG.PG)
@@ -955,6 +981,7 @@ func (r *Replica) counterSpent(ctx *core.Context, i int, buf core.IOBuf) {
 	ld.held = slices.Insert(ld.held, ld.spent, h)
 	ld.spent++
 	ld.asking = true
+	r.dropWaiting(ctx, out)
 }
 
 // ask asks for the next interval of each PG whose interval ended, once none of its versions is pending.
@@ -1012,15 +1039,26 @@ func (r *Replica) resend(out *ReplicaOutput) {
 	}
 }
 
-// Settle is peering's decision on chunk c, made before this disk activates as primary in a new interval: the chunk's pending versions up to keep are mapped and their clients answered, and the later ones are dropped and their clients refused.
-func (r *Replica) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *ReplicaOutput) {
+// ErrActive reports a Settle of a chunk whose PG this disk leads and has activated in its current interval, where the chunk's next versions could take the numbers of those it drops.
+var ErrActive = errors.New("chunkstore: settle of a chunk its primary has activated")
+
+// Settle is peering's decision on chunk c, made before this disk activates as primary in a new interval: the chunk's pending versions up to keep are mapped and their clients answered, and the later ones are dropped and their clients refused. It settles nothing and returns ErrActive once the PG is active, or ErrUnresolved while one of the chunk's writes waits to be ordered or its records here are neither durable nor failed, which peering waits for, since a version whose local write then failed would be kept torn.
+func (r *Replica) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *ReplicaOutput) error {
+	if p := r.table.pool(r.st.cfg.Pool); p != nil {
+		if l := r.lead(core.PGID{Pool: p.ID, Index: core.PGIndexOf(c.Hash(), uint32(len(p.PGs)))}); l >= 0 && r.leads[l].active {
+			return ErrActive
+		}
+	}
+	if err := r.st.Settle(ctx, c, keep, &r.sout); err != nil {
+		return err
+	}
 	for i := range r.vers {
 		if v := &r.vers[i]; v.u.Chunk == c && v.u.Version != 0 && v.u.Version <= keep {
 			v.commit = true
 		}
 	}
-	r.st.Settle(ctx, c, keep, &r.sout)
 	r.drain(ctx, out)
+	return nil
 }
 
 // reply answers a client's write or punch.

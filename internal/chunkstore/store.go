@@ -29,8 +29,10 @@ var (
 	ErrCounter = errors.New("chunkstore: chunk's version counter spent in this interval")
 	// ErrFenced reports a write or punch of a client incarnation older than the newest the store has seen of its session.
 	ErrFenced = errors.New("chunkstore: write from an older incarnation of its session")
-	// ErrDropped reports a gated write or punch that Settle dropped.
+	// ErrDropped reports a gated write or punch that Settle dropped, or one Cancel dropped before it was ordered.
 	ErrDropped = errors.New("chunkstore: write dropped")
+	// ErrUnresolved reports a Settle of a chunk with a write or punch still waiting to be ordered or with records not yet durable or failed.
+	ErrUnresolved = errors.New("chunkstore: chunk has writes not yet resolved")
 )
 
 const (
@@ -542,6 +544,12 @@ func (s *Store) releaseChunk(i int32) {
 	cs := &s.chunks[i]
 	if !cs.live || len(cs.pending) > 0 || len(cs.waiting) > 0 {
 		return
+	}
+	if cs.held {
+		cs.held = false
+		a := &s.adm
+		a.held = slices.DeleteFunc(a.held[a.heldHead:], func(ci int32) bool { return ci == i })
+		a.heldHead = 0
 	}
 	cs.live = false
 	delete(s.chunkOf, cs.id)
@@ -1076,13 +1084,16 @@ func (s *Store) Commit(ctx *core.Context, c core.ChunkID, v uint64, out *Output)
 	s.mapResolved(ctx, ci, out)
 }
 
-// Settle is peering's decision on chunk c's gated writes and punches not committed: those at version keep or below are mapped in version order, and the later ones dropped, never mapped, the chunk's version and snapshot epoch given back to what the first dropped one found. Their records stay in the log until recovery supersedes their blocks, and the caller numbers the chunk's next versions from a later interval, since members may have logged the dropped ones.
-func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Output) {
+// Settle is peering's decision on chunk c's gated writes and punches not committed: those at version keep or below are mapped in version order, and the later ones dropped, never mapped, the chunk's version and snapshot epoch given back to what the first dropped one found. Their records stay in the log until recovery supersedes their blocks, and the caller numbers the chunk's next versions from a later interval, since members may have logged the dropped ones. It returns ErrUnresolved, settling nothing, while a write or punch of the chunk waits to be ordered or has records neither durable nor failed.
+func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Output) error {
 	ci, ok := s.chunkOf[c]
 	if !ok {
-		return
+		return nil
 	}
 	cs := &s.chunks[ci]
+	if len(cs.waiting) > 0 || slices.ContainsFunc(cs.pending, func(oi int32) bool { return s.ops[oi].left > 0 }) {
+		return ErrUnresolved
+	}
 	for _, oi := range cs.pending {
 		switch o := &s.ops[oi]; {
 		case !o.req.Gated || o.committed || o.dropped:
@@ -1094,6 +1105,26 @@ func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Outp
 		}
 	}
 	s.mapResolved(ctx, ci, out)
+	return nil
+}
+
+// Cancel drops chunk c's write or punch of request id if it still waits to be ordered, reporting whether it did: it is never ordered, and is answered with ErrDropped once no base read of its own is in flight.
+func (s *Store) Cancel(ctx *core.Context, c core.ChunkID, id uint64, out *Output) bool {
+	ci, ok := s.chunkOf[c]
+	if !ok {
+		return false
+	}
+	for _, oi := range s.chunks[ci].waiting {
+		if o := &s.ops[oi]; o.req.ID == id {
+			if o.err == nil {
+				o.err = ErrDropped
+			}
+			s.orderWaiting(ctx, ci, out)
+			s.pump(ctx, out)
+			return true
+		}
+	}
+	return false
 }
 
 // Newest is chunk c's newest ordered version, counting the versions a member was handed and has yet to order.
@@ -1552,7 +1583,9 @@ func (s *Store) itemFailed(ctx *core.Context, oi, ii int32, err error, out *Outp
 }
 
 // itemDone counts an item of the op resolved and reports whether all are; a failed op gives back
-// the chunk's version and epoch when none of its items, or not its freeze, became durable.
+// the chunk's epoch when its freeze did not become durable, and its version when none of its items
+// did, unless it is gated: a primary may have sent a gated version to members, so it is never
+// handed out again.
 func (s *Store) itemDone(oi int32, out *Output) bool {
 	o := &s.ops[oi]
 	if o.left--; o.left > 0 {
@@ -1565,7 +1598,7 @@ func (s *Store) itemDone(oi int32, out *Output) bool {
 	if o.err != nil {
 		// The writes ordered after a failed one may hold its bytes; the log fails them too, since
 		// it fails a stalled lane's queued items together in submit order, both hot lanes' at once.
-		if !o.holdsVersion() {
+		if !o.holdsVersion() && !o.req.Gated {
 			cs.version = min(cs.version, o.prevVer)
 		}
 		if len(o.items) > 0 && o.items[0].entry.Kind == disklog.EntryFreeze && o.items[0].state != itemDurable {

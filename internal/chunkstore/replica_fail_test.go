@@ -1,6 +1,9 @@
 package chunkstore
 
 import (
+	"errors"
+	"math"
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -205,5 +208,80 @@ func TestAVersionSentAgainAfterItsCopyIsDoneIsRefused(t *testing.T) {
 		if rp := c.reply(w); rp.Status != StatusRefused {
 			t.Fatalf("answered %+v", rp)
 		}
+	}
+}
+
+// A partial write waits for its base read when interval 2 begins, and peering, standing in, settles the chunk at 1.1 and activates before the read completes: the waiting write is refused and never ordered, and the next write is 2.1 on every member.
+func TestAWriteWaitingWhenItsIntervalEndsIsRefused(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 0, 1, 0xaa)
+	w := c.write(pg0, ch, 10, []byte{1})
+	for len(c.reps[0].vers) == 0 && c.step() {
+	}
+	c.publish(c.next(func(t *Table) { setInterval(t, pg0, 2) }), false)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.Settle(ctx, ch, MakeVersion(1, 1), out)
+		r.Activate(ctx, pg0, 2, out)
+	})
+	next := c.write(pg0, ch, 20, []byte{2})
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusRefused {
+		t.Fatalf("the waiting write answered %+v", rp)
+	}
+	if rp := c.reply(next); rp.Status != StatusOK || rp.Version != MakeVersion(2, 1) {
+		t.Fatalf("the next write answered %+v", rp)
+	}
+	for d := range 3 {
+		if got := c.diskBlock(d, ch, 0); got[10] != 0xaa || got[20] != 2 {
+			t.Fatalf("disk %d maps % x", d+1, []byte{got[10], got[20]})
+		}
+	}
+}
+
+// A partial write of chunk A waits for its base read when a write to chunk B spends B's counter, which ends the interval: the waiting write is refused at once.
+func TestAWriteWaitingWhenAnotherChunkEndsTheIntervalIsRefused(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	a, b := chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)
+	c.writeWhole(pg0, a, 0, 1, 0xaa)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		buf, _ := ctx.Pool.AllocZeroed(core.BlockSize)
+		r.Store().Write(ctx, Request{ID: 1 << 60, Chunk: b, Len: core.BlockSize, Buf: buf, Version: MakeVersion(1, math.MaxUint32)}, &r.sout)
+		r.drain(ctx, out)
+	})
+	c.settle()
+	w := c.write(pg0, a, 10, []byte{1})
+	for len(c.reps[0].vers) == 0 && c.step() {
+	}
+	c.nextID++
+	spend := c.nextID
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		u := Update{Kind: KindWrite, ID: spend, PG: c.pgFields(pg0), Session: 1, Incarnation: 1, Chunk: b, Len: core.BlockSize}
+		ev := core.Event{Kind: core.EvNetRecv, Peer: c.client}
+		ev.Msg.Len = uint16(copy(ev.Msg.Body[:], AppendUpdate(nil, &u)))
+		ev.Msg.Buf, _ = ctx.Pool.AllocZeroed(core.BlockSize)
+		r.OnEvent(ctx, &ev, out)
+	})
+	if slices.ContainsFunc(c.reps[0].vers, func(v version) bool { return v.msgID == w && !v.done }) {
+		t.Fatal("the waiting write is still pending once the interval ended")
+	}
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusRefused {
+		t.Fatalf("the waiting write answered %+v", rp)
+	}
+	if v := c.newest(1, a); v != MakeVersion(1, 1) {
+		t.Fatalf("disk 2 holds %#x", v)
+	}
+}
+
+// Settle is refused once the primary has activated the PG's interval, since the chunk's next versions could then take the numbers of those it drops.
+func TestSettleIsRefusedOnceThePGIsActive(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 0, 1, 1)
+	var err error
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { err = r.Settle(ctx, ch, 0, out) })
+	if !errors.Is(err, ErrActive) {
+		t.Fatalf("Settle in an active interval: %v", err)
 	}
 }

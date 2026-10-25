@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
 func (h *harness) gated(c core.ChunkID, off uint32, data []byte, interval uint32) uint64 {
@@ -122,7 +123,9 @@ func TestCommitsAreMappedInVersionOrder(t *testing.T) {
 }
 
 func (h *harness) settleChunk(c core.ChunkID, keep uint64) {
-	h.s.Settle(&h.ctx, c, keep, &h.out)
+	if err := h.s.Settle(&h.ctx, c, keep, &h.out); err != nil {
+		h.t.Fatal(err)
+	}
 	h.take()
 	h.settle()
 }
@@ -287,5 +290,42 @@ func TestSettleMapsTheKeptVersionsAndDropsTheRest(t *testing.T) {
 	h.settle()
 	if got, v := h.ordered[w][:4], h.durableAt[w].Version; !bytes.Equal(got, []byte{1, 2, 0, 4}) || v != MakeVersion(5, 1) {
 		t.Fatalf("the next write is %#x, merged on % x", v, got)
+	}
+}
+
+// A gated write that fails with none of its items durable leaves the chunk at its version: its primary may have sent that version to members, so it is never handed out again with other bytes.
+func TestAFailedGatedWriteKeepsItsVersion(t *testing.T) {
+	h := newHarness(t, testConfig())
+	ci := h.s.chunkSlot(chunkC)
+	oi := h.s.newOp(opWrite, Request{Chunk: chunkC, Gated: true, Interval: 4})
+	o := &h.s.ops[oi]
+	v := MakeVersion(4, 1)
+	o.chunk, o.version, o.left = ci, v, 1
+	o.items = append(o.items, item{entry: disklog.WriteEntry(testPool, chunkC, v, 0, 1)})
+	cs := &h.s.chunks[ci]
+	cs.version = v
+	cs.pending = append(cs.pending, oi)
+	h.s.itemFailed(&h.ctx, oi, 0, disklog.ErrNoSpace, &h.out)
+	h.take()
+	if cs.version != v {
+		t.Fatalf("chunk at %#x after 4.1 failed, want 4.1", cs.version)
+	}
+}
+
+// Settle refuses a chunk whose gated write has a record neither durable nor failed, settling nothing, and settles it once the record is durable.
+func TestSettleWaitsForTheChunksWritesToResolve(t *testing.T) {
+	h := newHarness(t, testConfig())
+	w := h.gated(chunkC, 0, []byte{1}, 4)
+	if err := h.s.Settle(&h.ctx, chunkC, MakeVersion(4, 1), &h.out); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("Settle with 4.1 in flight: %v", err)
+	}
+	h.take()
+	h.settle()
+	if r, ok := h.replies[w]; ok {
+		t.Fatalf("4.1 answered %+v before a Settle took", r)
+	}
+	h.settleChunk(chunkC, MakeVersion(4, 1))
+	if v := h.ok(w); v != MakeVersion(4, 1) {
+		t.Fatalf("answered %#x", v)
 	}
 }
