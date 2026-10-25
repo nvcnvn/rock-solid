@@ -47,5 +47,10 @@
 
 ## Workaround: a primary's whole-chunk writes skip chunk slots
 - **Where:** `writeItems` in `internal/chunkstore/store.go`, for gated writes
-- **Why:** a primary's write stays unmapped until it commits and may be aborted; an aborted write in a chunk slot would leave the slot held by the log while no map refers to it, and `CheckSlots` requires the two to match. So a primary logs a whole chunk as ordinary items, as many records as `max_group_commit_bytes` takes, while its members, which map as they log, still write it to a slot.
-- **Remove when:** the store frees the slot of an aborted write, as it frees a slot a later write replaces; then gated whole-chunk writes take a slot like any other.
+- **Why:** a primary's write stays unmapped until it commits and may be dropped by peering; a dropped write in a chunk slot would leave the slot held by the log while no map refers to it, and `CheckSlots` requires the two to match. So a primary logs a whole chunk as ordinary items, as many records as `max_group_commit_bytes` takes, while its members, which map as they log, still write it to a slot.
+- **Remove when:** the store frees the slot of a dropped write, as it frees a slot a later write replaces; then gated whole-chunk writes take a slot like any other.
+
+## Workaround: a primary trusts a flush's granted flag
+- **Where:** `clientUpdate` in `internal/chunkstore/replica.go`
+- **Why:** a client marks a flush under a space grant in the update's flags, and `write_limit` admission lets it through on that mark alone, since phase 3 has no record of which client holds which grant; a client that sets the flag wrongly can fill a disk past its `write_limit` ([Admission against `write_limit`](design.md#data-layer-chunkstore)).
+- **Remove when:** phase 4's control-plane group gives the primary each session's outstanding grants, and the primary admits a granted flush only within its session's grant.

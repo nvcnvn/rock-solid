@@ -4391,8 +4391,14 @@ swaps**
   and writes the primary's disk. With one member cut off, the write is not acknowledged, the other
   two hold it, and a read returns the version before it.
 - A version that fails at a member or on the primary's own disk fails with every later pending
-  version of its chunk; their clients get the failure, none is mapped, and the next write gets a
-  version above them.
+  version of its chunk; their clients are refused with the newest table the primary knows of, and
+  none is mapped.
+- A failed version ends the interval. Disk 3 refuses 1.1 of an absent chunk: the client is
+  refused, the primary asks for interval 2 once nothing of the PG is pending, holds the next write,
+  and writes nothing over the absent chunk. Once peering, standing in, drops 1.1 and the primary
+  activates in 2, the held write is 2.1 on every member, merged on zeros.
+- A write that waited behind a base read and is ordered after a table that drops its PG, or after
+  its interval ended, is refused, never sent.
 - The primary maps the write into its index at commit, not when its own log entry is durable. A
   replica maps it when durable.
 - A read without `at_ver` while 7.6 is pending returns 7.5's blocks without waiting. Once 7.6
@@ -4409,12 +4415,19 @@ swaps**
 - A chunk's writes go to each member in version order. After a `PeerLost` and reconnect they are
   sent again from the oldest unacknowledged one, in the same order. Invariant, checked after every
   step of the replica tests: no `NetSend` of k.(n + 1) to a member before k.n on one connection.
-- A member answers a version it already holds, sent again, once it is durable, and logs it once.
-- A version that fails in the primary's own interval is superseded in every log that holds it,
-  the primary's included: a member refuses 1.2 of a chunk at 1.1, and the primary orders 1.3 with
-  1.1's bytes to every up member; the members that logged 1.2 map 1.3, holding 1.1's bytes, and
-  the next write gets 1.4. A version peering dropped is superseded by recovery; see [Recovery per
-  PG](#recovery-per-pg).
+- A write ordered between a `PeerLost` and the resend waits behind the resend: 1.1 is written while
+  disk 3 is cut off, the cut heals, and 1.2 is written before the resend is due; disk 3 gets 1.1
+  and then 1.2, and maps both.
+- A member answers a version sent again with its first copy's outcome, and logs it once: OK once
+  that copy is durable. A member whose disk fails the first copy of 1.1 refuses both copies.
+- A member that failed to log k.n of a chunk refuses the chunk's later versions in interval k.
+- Peering's decision on a chunk (`Settle`), as the store takes it: with 4.1 to 4.3 pending, keeping
+  4.2 maps and acknowledges 4.1 and 4.2 and drops 4.3, whose client is refused; the next interval's
+  first write is 5.1, merged on 4.2's bytes. At the primary, 1.1 waiting for a member that interval
+  2 marks down is acknowledged once peering keeps it.
+- A dropped version that froze snapshot epoch 1 gives the freeze back: the next write at epoch 1
+  freezes the kept version again, and epoch 1 reads it. Superseding dropped versions in the logs
+  that hold them is under [Recovery per PG](#recovery-per-pg).
 - Writes 1.1 and 1.2 of one chunk and 1.1 of another, sent while a member is cut off, reach it in
   that order once it is reachable again, and all commit. A planted variant that sends them again
   newest first breaks the send-order invariant.
@@ -4425,13 +4438,14 @@ swaps**
 | --- | --- | --- |
 | Bytes 0 to 99 of block 5, nothing pending | 7.7's block 5 from the live map, CRC32C checked | One merged whole block, 7.8 |
 | Bytes 100 to 199 of block 5 while 7.8 is pending | 7.8's merged block | Whole block 7.9 holding both writes' bytes; 7.9 is acknowledged only after 7.8 commits |
-| As above, but a member refuses 7.8 (its session fenced, or a new interval reached the member first) | 7.8 never commits | 7.9 is refused too, and no later version carries 7.8's bytes; the client retries against 7.7 |
+| As above, but a member refuses 7.8 (its session fenced, or a new interval reached the member first) | 7.8 never commits in interval 7 | 7.9 is refused too and interval 7 ends; peering decides both, and the client retries in the next interval |
 | Bytes 0 to 99 of a block never written | Zeros | Whole block |
 | Bytes 0 to 99 of a punched block | Zeros | Whole block |
 | Bytes 100 to 8,291 of a chunk (blocks 0 to 2) | Edge blocks 0 and 2 only; block 1 is whole | Three whole blocks; at most two edge blocks are merged per write |
 | Whole blocks 3 and 4 | None | Two blocks, no base read |
 | Partial write whose base is in the loop's merged-block cache | The cache, no disk read | Whole block |
 | Partial write whose base read fails its CRC32C | Fetched from another member before merging; the chunk's later operations wait behind it, in order | A block merged on the good copy, never on the rotten one |
+| Partial write whose two edge blocks' bases both fail their CRC32C | Each fetched from another member | Both edges merged on the good copies |
 | Punch of bytes 100 to 8,191 | Block 0 merged with zeros; block 1 gets a punch entry | One record |
 
 - Sub-block spike M1 and M9 as seeds: 2 clients, 8 writes pipelined each, 24 writes each, of 1 to
@@ -4467,7 +4481,7 @@ its acknowledgments and heartbeats.
 | Overwrite of live blocks 3 and 4 plus never-written block 5, in one write | Refused with `NoSpace` (it adds live data) |
 | Overwrite of a block a snapshot shares (a freeze is due) | Refused like a new write |
 | Punch | Admitted |
-| Recovery copy, or a write superseding a failed version | Admitted |
+| Recovery copy | Admitted |
 | Any write while no member is past the limit | No overwrite lookup is made |
 | Pool P1 (limit 95%) and pool P2 (limit 90%) on one disk at 92% total fill | P1 admitted, P2 refused: each checks its own limit against the disk's total fill |
 
@@ -4690,6 +4704,11 @@ it on its missing list.
   one version" when a stale write from its previous run lands after peering.
 - Activation is reported on the next heartbeat. The authority records the last activated interval in
   a later table that starts no interval, and trims the past intervals' member lists.
+- Before it activates, the new primary hands its store the decision on every chunk with versions
+  still pending from an earlier interval (`Replica.Settle`): a primary that kept leading after a
+  version failed at a member keeps or drops that version and the chunk's later ones by the keep
+  rule, maps the kept ones and answers their clients, and its next write to the chunk merges on the
+  newest kept version.
 - A member back from an outage shorter than `refill_after` is marked up in a new interval and, after
   peering, receives only the versions on its missing list: in a seed where it missed 100 writes to
   a PG of 10,000 chunks, recovery copies those 100 chunks' blocks and no others.
