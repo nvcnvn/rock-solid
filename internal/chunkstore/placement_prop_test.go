@@ -134,14 +134,15 @@ func (h *history) event(r *core.Rand, l *layout) *Inputs {
 			}
 		}
 	case 11:
-		if slices.ContainsFunc(l.disks, func(d Disk) bool { return d.Mark != MarkUp || d.Drain }) {
-			break
+		most := l.pool.Replicas
+		if !slices.ContainsFunc(l.disks, func(d Disk) bool { return d.Mark != MarkUp || d.Drain }) {
+			nodes := 0
+			for _, d := range l.disks {
+				nodes = max(nodes, int(d.Node)+1)
+			}
+			most = min(3, nodes)
 		}
-		nodes := 0
-		for _, d := range l.disks {
-			nodes = max(nodes, int(d.Node)+1)
-		}
-		l.pool.Replicas = int(r.Range(1, uint64(min(3, nodes))))
+		l.pool.Replicas = int(r.Range(1, uint64(most)))
 		l.pool.MinLive = min(l.pool.MinLive, l.pool.Replicas)
 	case 12:
 		l.pool.MinLive = int(r.Range(1, uint64(l.pool.Replicas)))
@@ -178,7 +179,7 @@ func (h *history) next(t *testing.T, l *layout, in *Inputs) {
 	}
 }
 
-// check holds every table to the rules: the pool's width, at most perDomain members per domain, an interval raised by one exactly when the rules say, and a member removed and added back in a new interval.
+// check holds every table to the rules: the pool's width, at most perDomain members per domain, live members kept when replicas go down, an interval raised by one exactly when the rules say, and a member removed and added back in a new interval.
 func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 	p, pt := l.pool, l.pools()
 	var old *PoolTable
@@ -221,6 +222,9 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 		}
 		if e.Interval != want {
 			return fmt.Errorf("PG %d at interval %d after %d, want %d (members %v after %v)", i, e.Interval, b.Interval, want, e.Members, b.Members)
+		}
+		if old != nil && !split && p.width() < int(old.Replicas) && live(e.Members) < min(live(b.Members), p.width()) {
+			return fmt.Errorf("PG %d narrowed from %v to %v, dropping a live member", i, b.Members, e.Members)
 		}
 		if e.Activated < b.Activated || slices.ContainsFunc(e.Past, func(pi PastInterval) bool { return pi.Interval < e.Activated }) {
 			return fmt.Errorf("PG %d activated %d after %d, past %v", i, e.Activated, b.Activated, e.Past)

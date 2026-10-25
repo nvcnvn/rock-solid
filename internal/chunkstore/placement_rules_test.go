@@ -38,6 +38,32 @@ func TestBalanceTakesFromTheFurthestAbove(t *testing.T) {
 	}
 }
 
+// Lowering replicas drops the last down member first, then the last member, so the live copies stay.
+func TestLoweringReplicasKeepsLiveMembers(t *testing.T) {
+	const a, b, c = 0, 1, 2
+	for _, row := range []struct {
+		name     string
+		down     []uint32
+		replicas int
+		want     []uint32
+	}{
+		{"all up, rep3 to rep2", nil, 2, []uint32{a, b}},
+		{"A and B down, rep3 to rep2", []uint32{a, b}, 2, []uint32{a, c}},
+		{"B down, rep3 to rep2", []uint32{b}, 2, []uint32{a, c}},
+		{"A and C down, rep3 to rep1", []uint32{a, c}, 1, []uint32{b}},
+		{"all down, rep3 to rep1", []uint32{a, b, c}, 1, []uint32{a}},
+	} {
+		l := newLayout(rep(3, 1), 2, 2, 2)
+		l.table = Table{Epoch: 1, Pools: []PoolTable{{ID: 1, Replicas: 3, MinLive: 1, PGs: []PGEntry{{Members: []Member{{Disk: a}, {Disk: b}, {Disk: c}}, Interval: 1, Activated: 1}}}}}
+		l.mark(MarkDown, row.down...)
+		l.pool.Replicas = row.replicas
+		l.step(t, l.inputs(0))
+		if got := disksOf(&l.pools().PGs[0]); !slices.Equal(got, row.want) {
+			t.Errorf("%s: members %v, want %v", row.name, got, row.want)
+		}
+	}
+}
+
 // A disk's fill margin is max(5% of its target, 1 member): a 0.5 TB disk beside 8 TB disks has a target of 10 to 20 members and a margin of 1.
 func TestFillMargin(t *testing.T) {
 	if margin(100) != 5 || margin(15) != 1 {

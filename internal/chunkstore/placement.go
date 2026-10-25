@@ -170,9 +170,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 				e.Members[j].Mark = pl.disks[k].Mark
 			}
 		}
-		if len(e.Members) > p.width() {
-			e.Members = e.Members[:p.width()]
-		}
+		e.Members = narrow(e.Members, p.width())
 		for _, m := range e.Members {
 			if k := pl.find(m.Disk); k >= 0 {
 				pl.load[k]++
@@ -203,6 +201,27 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 		e.Interval = b.Interval + 1
 	}
 	return PoolTable{ID: in.ID, Replicas: uint8(p.Replicas), MinLive: uint8(p.MinLive), PGs: pl.entries}, moves
+}
+
+// narrow drops members past width, the last down member first and then the last member, so lowering replicas keeps the live copies.
+func narrow(ms []Member, width int) []Member {
+	for len(ms) > width {
+		j := len(ms) - 1
+		if k := lastDown(ms); k >= 0 {
+			j = k
+		}
+		ms = slices.Delete(ms, j, j+1)
+	}
+	return ms
+}
+
+func lastDown(ms []Member) int {
+	for j := len(ms) - 1; j >= 0; j-- {
+		if ms[j].Mark == MarkDown {
+			return j
+		}
+	}
+	return -1
 }
 
 // targets gives each disk its target in members, zero for a disk that sheds its members: its domain's water-filled share of the others, split within the domain by capacity.

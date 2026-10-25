@@ -4137,6 +4137,9 @@ row says otherwise).
   neither exists. The property test's seed 207 needed the second kind, and is a regression test
   (`TestPlacementSeed207`): every PG on the disks above their targets already had a member on the
   node of the disk below its margin.
+- Lowering `replicas` drops a PG's last down member first, then its last member
+  (`TestLoweringReplicasKeepsLiveMembers`): members A and B down and C up, `rep3` to `rep2`, keeps
+  A and C; the property test checks that no live member leaves while a down one stays.
 - A disk's fill margin is max(5% of its target, 1 member). A 0.5 TB disk beside 8 TB disks, with a
   target of 10 to 20 members, has a margin of 1 member.
 - Both steps keep the failure-domain rule. With `failure_domain: node`, no PG ever has two members
