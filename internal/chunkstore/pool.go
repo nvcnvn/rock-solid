@@ -30,7 +30,9 @@ type SettingError struct {
 	Reason  string
 }
 
-func (e *SettingError) Error() string { return "chunkstore: pool setting " + e.Setting + ": " + e.Reason }
+func (e *SettingError) Error() string {
+	return "chunkstore: pool setting " + e.Setting + ": " + e.Reason
+}
 
 var writeLimitRefused = &SettingError{"write_limit", "must be above 10% and at most 100%, so NearFull has a range below it"}
 
@@ -127,7 +129,7 @@ func value[T any](v *T, def T) T {
 // PGCountFor is the smallest power of two that gives each of disks at least 100 members of a pool of width.
 func PGCountFor(disks, width int) uint32 {
 	p := uint32(1)
-	for int(p)*width < 100*disks {
+	for p < 1<<31 && int(p)*max(width, 1) < 100*disks {
 		p *= 2
 	}
 	return p
