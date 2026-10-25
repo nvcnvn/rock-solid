@@ -4171,6 +4171,12 @@ row says otherwise).
   Balance counts the leaving member as gone and the failure-domain rule ignores it: on 3 nodes of
   `rep3`, a disk added to node A takes members from A's other disk. A missing member of a moving PG
   is replaced by the leaving member, which becomes an ordinary member, when its domain allows.
+  A report for an interval before one that adds another member or has one down removes nothing:
+  on 3 nodes of 2 disks, a move within node A, then a refill onto another disk of node C, or C's
+  member down and back up, and then a late report for the add's interval keep the leaving member,
+  which a report for the current interval removes. The property test found the second case on
+  `rep1`: the only copy of the writes taken while the other member was down went with the leaving
+  member.
 - Balance never moves a member of a pinned PG, and refill still replaces one on a lost disk. A
   draining disk keeps its members up while balance moves them all off (`TestPinAndDrain`), except
   a pinned PG's, which keeps the drain from finishing until an operator edits or unpins that PG.
@@ -4229,7 +4235,7 @@ each; 10,000 passed once in 228 s on 2 processes. Each seed draws a layout from 
 Testing strategy, 3 or 5 nodes of 1 or 4 disks of 0.5 to 8 TB, some holding another pool's data, under `none`, `rep2` or `rep3` with a random
 `min_live`, places it, and computes 30 tables after random events: a disk added or removed, a disk
 or node marked down, up or in `maintenance`, a drain set or cleared, time passing, primaries asking,
-activations folded with recovered reports where every member but a leaving one is up, `replicas` or `min_live` changed, `pg_count` doubled, or a PG reordered and
+activations folded with recovered reports where every member but a leaving one is up and late reports for earlier such intervals, `replicas` or `min_live` changed, `pg_count` doubled, or a PG reordered and
 pinned, each table allowed 0, 1, 5 or every balance move.
 
 After every table:
@@ -4241,9 +4247,10 @@ After every table:
   the table above; no last activated interval goes down.
 - A member removed and added back gets a new interval.
 - A live leaving member is removed in the first table after a recovered report for an interval at
-  or after the add, and never before.
+  or after the add, and after the last that added a member or had one but the leaving member down,
+  and never before.
 - No live member that holds all of a PG's data, one it started with or one a recovered report
-  covered since it joined, leaves unless the members left that hold it still number the width; an
+  covered that has stayed live since, leaves unless the members left that hold it still number the width; an
   edit or a lower `replicas` may remove any member.
 - A delta reproduces the whole table and its CRC.
 

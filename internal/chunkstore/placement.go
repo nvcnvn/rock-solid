@@ -38,7 +38,7 @@ type PastInterval struct {
 	Members  []Member
 }
 
-// PGEntry is a PG's entry in the placement table: its members with the primary first, its interval, its last activated interval, the intervals since, whether an operator pinned it, and the interval that added the replacement of its leaving member, 0 with none.
+// PGEntry is a PG's entry in the placement table: its members with the primary first, its interval, its last activated interval, the intervals since, whether an operator pinned it, and, while a member leaves, the first interval a recovered report must be for to remove it: the last that added a member or had one but the leaving member down, 0 with none.
 type PGEntry struct {
 	Members   []Member
 	Interval  uint32
@@ -212,7 +212,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 			e.Past = append(e.Past, PastInterval{Interval: b.Interval, Members: b.Members})
 		}
 		e.Interval = b.Interval + 1
-		if e.Added == 0 && e.leaving() >= 0 {
+		if e.leaving() >= 0 && (e.Added == 0 || e.uncovered(b)) {
 			e.Added = e.Interval
 		}
 	}
@@ -266,6 +266,13 @@ func leavingIn(ms []Member) int {
 
 func (e *PGEntry) leaving() int {
 	return slices.IndexFunc(e.Members, func(m Member) bool { return m.Leaving })
+}
+
+// uncovered reports whether a member of e but a leaving one is down or was not in b, so that a recovered report for an interval before e's does not cover its copies.
+func (e *PGEntry) uncovered(b *PGEntry) bool {
+	return slices.ContainsFunc(e.Members, func(m Member) bool {
+		return !m.Leaving && (m.Mark == MarkDown || !slices.ContainsFunc(b.Members, func(o Member) bool { return o.Disk == m.Disk }))
+	})
 }
 
 func (e *PGEntry) dropLeaving() {

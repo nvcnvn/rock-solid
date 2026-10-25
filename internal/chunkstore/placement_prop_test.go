@@ -31,15 +31,17 @@ func randomLayout(r *core.Rand) *layout {
 
 func randomSize(r *core.Rand) float64 { return []float64{0.5, 1, 2, 4, 8}[r.Below(5)] }
 
-// history is what the property test remembers of a run: every node a disk had, for each PG and disk the interval of the last table the disk left the PG in, and for each PG the members that hold all its data, those it started with and those a recovered report covered since they joined.
+// history is what the property test remembers of a run: every node a disk had; for each PG and disk the interval of the last table the disk left the PG in, and the interval since which it has been a live member; and for each PG the members that hold all its data, those it started with and those a recovered report covered that stayed live since, and the intervals its primary could report recovered, with their members.
 type history struct {
-	nodeOf   []uint32
-	left     [][]leftAt
-	complete [][]uint32
-	stats    *placementStats
+	nodeOf      []uint32
+	left        [][]diskAt
+	liveSince   [][]diskAt
+	complete    [][]uint32
+	recoverable [][]PastInterval
+	stats       *placementStats
 }
 
-type leftAt struct {
+type diskAt struct {
 	disk     uint32
 	interval uint32
 }
@@ -140,6 +142,9 @@ func (h *history) event(r *core.Rand, l *layout) *Inputs {
 					in.Recovered = append(in.Recovered, PGInterval{pg(i), e.Interval})
 				}
 			}
+			if past := h.recoverable[i]; len(past) > 0 && r.Chance(1, 4) {
+				in.Recovered = append(in.Recovered, PGInterval{pg(i), past[r.Below(uint64(len(past)))].Interval})
+			}
 		}
 	case 11:
 		most := l.pool.Replicas
@@ -187,7 +192,7 @@ func (h *history) next(t *testing.T, l *layout, in *Inputs) {
 	}
 }
 
-// check holds every table to the rules: the pool's width and at most one leaving member beside it, at most perDomain members per domain but a leaving one, live members kept when replicas go down, an interval raised by one exactly when the rules say, a member removed and added back in a new interval, a live leaving member removed exactly in the first table after a recovered report for an interval since its replacement joined, and no live member that holds all the PG's data removed unless the width still does.
+// check holds every table to the rules: the pool's width and at most one leaving member beside it, at most perDomain members per domain but a leaving one, live members kept when replicas go down, an interval raised by one exactly when the rules say, a member removed and added back in a new interval, a live leaving member removed exactly in the first table after a recovered report for an interval since the last that added a member or had one down, and no live member that holds all the PG's data removed unless the width still does.
 func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 	p, pt := l.pool, l.pools()
 	var old *PoolTable
@@ -196,18 +201,20 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 	}
 	split := old != nil && len(old.PGs) != len(pt.PGs)
 	if split {
-		h.left = nil
-		complete := make([][]uint32, len(pt.PGs))
+		h.left, h.recoverable = nil, nil
+		complete, liveSince := make([][]uint32, len(pt.PGs)), make([][]diskAt, len(pt.PGs))
 		for i := range complete {
-			complete[i] = h.complete[i/2]
+			complete[i], liveSince[i] = h.complete[i/2], h.liveSince[i/2]
 		}
-		h.complete = complete
+		h.complete, h.liveSince = complete, liveSince
 	}
 	for uint32(len(h.left)) < p.PGCount {
 		h.left = append(h.left, nil)
+		h.recoverable = append(h.recoverable, nil)
 	}
 	for len(h.complete) < len(pt.PGs) {
 		h.complete = append(h.complete, nil)
+		h.liveSince = append(h.liveSince, nil)
 	}
 	isLive := func(disk uint32) bool {
 		return slices.ContainsFunc(l.disks, func(d Disk) bool { return d.ID == disk && d.Mark != MarkDown })
@@ -257,9 +264,25 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 		if err := h.checkCopies(i, old, &b, e, l, in, isLive); err != nil {
 			return err
 		}
+		var liveSince []diskAt
+		for _, m := range e.Members {
+			if m.Mark == MarkDown {
+				continue
+			}
+			since := e.Interval
+			wasLive := slices.ContainsFunc(b.Members, func(o Member) bool { return o.Disk == m.Disk && o.Mark != MarkDown })
+			if j := slices.IndexFunc(h.liveSince[i], func(s diskAt) bool { return s.disk == m.Disk }); j >= 0 && wasLive {
+				since = h.liveSince[i][j].interval
+			}
+			liveSince = append(liveSince, diskAt{m.Disk, since})
+		}
+		h.liveSince[i] = liveSince
+		if recovers(e) && !slices.ContainsFunc(h.recoverable[i], func(pi PastInterval) bool { return pi.Interval == e.Interval }) {
+			h.recoverable[i] = append(h.recoverable[i], PastInterval{e.Interval, e.Members})
+		}
 		for _, m := range b.Members {
 			if !slices.ContainsFunc(e.Members, func(o Member) bool { return o.Disk == m.Disk }) {
-				h.left[i] = append(h.left[i], leftAt{m.Disk, e.Interval})
+				h.left[i] = append(h.left[i], diskAt{m.Disk, e.Interval})
 			}
 		}
 		for _, m := range e.Members {
@@ -287,11 +310,14 @@ func (h *history) checkCopies(i int, old *PoolTable, b, e *PGEntry, l *layout, i
 			continue
 		}
 		due = due || b.Added > 0 && r.Interval >= b.Added && r.Interval <= b.Interval
-		if r.Interval == b.Interval {
-			for _, m := range b.Members {
-				if !m.Leaving && !slices.Contains(h.complete[i], m.Disk) {
-					h.complete[i] = append(h.complete[i], m.Disk)
-				}
+		k := slices.IndexFunc(h.recoverable[i], func(pi PastInterval) bool { return pi.Interval == r.Interval })
+		if k < 0 {
+			return fmt.Errorf("PG %d reported recovered at interval %d, which never was", i, r.Interval)
+		}
+		for _, m := range h.recoverable[i][k].Members {
+			covered := slices.ContainsFunc(h.liveSince[i], func(s diskAt) bool { return s.disk == m.Disk && s.interval <= r.Interval })
+			if !m.Leaving && covered && !slices.Contains(h.complete[i], m.Disk) {
+				h.complete[i] = append(h.complete[i], m.Disk)
 			}
 		}
 	}
@@ -315,7 +341,7 @@ func (h *history) checkCopies(i int, old *PoolTable, b, e *PGEntry, l *layout, i
 	if j := b.leaving(); due && j >= 0 && slices.Contains(e.Members, b.Members[j]) {
 		return fmt.Errorf("PG %d kept leaving member %d after a recovered report", i, b.Members[j].Disk)
 	}
-	h.complete[i] = slices.DeleteFunc(h.complete[i], func(d uint32) bool { return !slices.Contains(disks, d) })
+	h.complete[i] = slices.DeleteFunc(h.complete[i], func(d uint32) bool { return !slices.Contains(disks, d) || !isLive(d) })
 	return nil
 }
 

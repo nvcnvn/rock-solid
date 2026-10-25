@@ -312,7 +312,7 @@ func (l *layout) moving() []int {
 	return pgs
 }
 
-// A move adds the new member and marks the old one leaving; a later table removes every leaving member a recovered report covers, starting an interval and counting no move. A leaving member missing for refill_after is dropped, one a missing member's refill can keep stays in its place, and on 3 nodes a move within a node keeps the failure-domain rule but for the leaving member.
+// A move adds the new member and marks the old one leaving; a later table removes every leaving member a recovered report covers, starting an interval and counting no move. A leaving member missing for refill_after is dropped, one a missing member's refill can keep stays in its place, and on 3 nodes a move within a node keeps the failure-domain rule but for the leaving member. A report for an interval before one that adds another member or has one down removes nothing.
 func TestMovesAddThenRemove(t *testing.T) {
 	t.Run("removals share one table", func(t *testing.T) {
 		l := placed(t, nodesOf(rep(3, 256), 4, 2, 2))
@@ -395,4 +395,38 @@ func TestMovesAddThenRemove(t *testing.T) {
 			t.Fatalf("PGs %v moving, converged %v:%s", l.moving(), ok, s)
 		}
 	})
+	for _, c := range []struct {
+		name  string
+		event func(t *testing.T, l *layout, disk uint32)
+	}{
+		{"a refill joins", func(t *testing.T, l *layout, disk uint32) { l.remove(disk) }},
+		{"a member goes down and back up", func(t *testing.T, l *layout, disk uint32) {
+			l.mark(MarkDown, disk)
+			l.step(t, l.inputs(0))
+			l.mark(MarkUp, disk)
+		}},
+	} {
+		t.Run(c.name+" after a recovered interval", func(t *testing.T) {
+			l := placed(t, nodesOf(rep(3, 128), 3, 2, 2))
+			l.grow(0, 2, 0)
+			l.step(t, l.inputs(1))
+			i := l.moving()[0]
+			e := l.pools().PGs[i]
+			j := slices.IndexFunc(e.Members, func(m Member) bool { return !m.Leaving && l.disk(m.Disk).Node != 0 })
+			c.event(t, l, e.Members[j].Disk)
+			l.step(t, l.inputs(0))
+			in := l.inputs(0)
+			in.Recovered = []PGInterval{{pg(i), e.Interval}}
+			l.step(t, in)
+			got := l.pools().PGs[i]
+			if got.leaving() < 0 {
+				t.Fatalf("a report for the add's interval %d, from before the member's copies, removed the leaving member of %v: %v", e.Interval, e.Members, got.Members)
+			}
+			in.Recovered = []PGInterval{{pg(i), got.Interval}}
+			l.step(t, in)
+			if got := l.pools().PGs[i]; got.leaving() >= 0 {
+				t.Fatalf("a report for the current interval kept the leaving member: %v", got.Members)
+			}
+		})
+	}
 }
