@@ -336,24 +336,33 @@ func TestAPartitionLosesMessagesAndFailsItsConnectionOnceOrNever(t *testing.T) {
 	}
 }
 
+// A crashed process's kernel still sends what it had sent; a reboot loses it.
 func TestACrashGivesEachPeerOnePeerLostAfterWhatTheNodeSent(t *testing.T) {
-	c := newCluster(1, sim.DefaultSettings(), nodes(3)...)
-	c.ping(1, 0)
-	c.ping(2, 0)
-	c.s.Run(100)
-	c.ping(0, 1)
-	c.ping(0, 2)
-	c.s.CrashRandom(0)
-	c.settle(t)
-	for _, p := range []int{1, 2} {
-		var kinds []core.EventKind
-		for _, ev := range c.m[p].events {
-			if ev.Peer.Node == 0 && (ev.Kind == core.EvPeerLost || ev.Kind == core.EvNetRecv && ev.Msg.Body[0] == msgRequest) {
-				kinds = append(kinds, ev.Kind)
-			}
+	for _, reboot := range []bool{false, true} {
+		c := newCluster(1, sim.DefaultSettings(), nodes(3)...)
+		c.ping(1, 0)
+		c.ping(2, 0)
+		c.s.Run(100)
+		c.ping(0, 1)
+		c.ping(0, 2)
+		want := []core.EventKind{core.EvNetRecv, core.EvPeerLost}
+		if reboot {
+			c.s.Reboot(0)
+			want = want[1:]
+		} else {
+			c.s.CrashRandom(0)
 		}
-		if !slices.Equal(kinds, []core.EventKind{core.EvNetRecv, core.EvPeerLost}) {
-			t.Fatalf("node %d saw %v from the crashed node", p, kinds)
+		c.settle(t)
+		for _, p := range []int{1, 2} {
+			var kinds []core.EventKind
+			for _, ev := range c.m[p].events {
+				if ev.Peer.Node == 0 && (ev.Kind == core.EvPeerLost || ev.Kind == core.EvNetRecv && ev.Msg.Body[0] == msgRequest) {
+					kinds = append(kinds, ev.Kind)
+				}
+			}
+			if !slices.Equal(kinds, want) {
+				t.Fatalf("reboot %v: node %d saw %v from the crashed node", reboot, p, kinds)
+			}
 		}
 	}
 }

@@ -4669,7 +4669,7 @@ Each loop pair has one connection, which delivers each direction in order, as TC
 | Reorder | Two messages on different connections arrive swapped; one connection never reorders |
 | Duplicate | The copy arrives right behind its original; a duplicated replica write of one value with identical data changes nothing (the toy protocol's replicas) |
 | Partition, symmetric or one-way | Messages across it are lost. A partitioned connection fails after a seeded delay, or never, and both are run. On failure every request outstanding on it fails with one `PeerLost` |
-| Node crash and restart | Every connection of the node gives its peers a `PeerLost`, after what the node had sent; unflushed disk state follows the simulated disk |
+| Node crash and restart | Every connection of the node gives its peers a `PeerLost`, after what the node had sent unless it rebooted, and before anything it sends once restarted; unflushed disk state follows the simulated disk |
 
 How the primary recognizes a resent client write is the open question on
 [resent chunk writes](design.md#roadmap-and-open-questions), which the

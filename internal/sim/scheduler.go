@@ -497,29 +497,32 @@ func (s *Scheduler) fire(it item) {
 
 // Crash crashes node id, dropping its loops, actors, timers, pending disk actions and connections, and lands the i-th block write of a disk, completed and unflushed then issued and not completed, only if landed says so.
 func (s *Scheduler) Crash(id uint32, landed func(disk, i int, lba core.LBA) bool) {
-	n := s.down(id)
+	n := s.down(id, true)
 	for d, disk := range n.disks {
 		disk.Crash(func(i int, lba core.LBA) bool { return landed(d, i, lba) })
 	}
 }
 
 // CrashRandom crashes node id with each block write unflushed or not yet completed landing from the scheduler's source.
-func (s *Scheduler) CrashRandom(id uint32) {
-	n := s.down(id)
+func (s *Scheduler) CrashRandom(id uint32) { s.crashRandom(id, true) }
+
+func (s *Scheduler) crashRandom(id uint32, sent bool) *Node {
+	n := s.down(id, sent)
 	for _, disk := range n.disks {
 		disk.CrashRandom(s.rand)
 	}
+	return n
 }
 
-// Reboot crashes node id as CrashRandom does and keeps it down for at least a heartbeat; it comes back with its clocks restarted near 0 and its raw rate changed by up to 2%.
+// Reboot crashes node id as CrashRandom does, losing what it sent that is still in the network as a power loss or kernel panic loses its socket buffers, and keeps it down for at least a heartbeat; it comes back with its clocks restarted near 0 and its raw rate changed by up to 2%.
 func (s *Scheduler) Reboot(id uint32) {
-	s.CrashRandom(id)
-	n := s.nodes[id]
+	n := s.crashRandom(id, false)
 	n.rebooted = true
 	n.until = s.now + heartbeat
 }
 
-func (s *Scheduler) down(id uint32) *Node {
+// down stops node id; with sent, its connections still deliver what it sent, as its kernel sends a crashed process's socket data.
+func (s *Scheduler) down(id uint32, sent bool) *Node {
 	n := s.nodes[id]
 	if !n.up {
 		panic(fmt.Sprintf("sim: crashing node %d, which is down", id))
@@ -530,7 +533,7 @@ func (s *Scheduler) down(id uint32) *Node {
 		if it.kind == ChooseDisk && it.node == id && it.act.Kind == core.ActDiskWrite {
 			it.disk.inFlight(n.pool, &it.act)
 		}
-		if it.kind == ChooseDeliver && it.from.Node == id && it.fromGen == n.gen && it.data == nil && n.pool.Valid(it.act.Msg.Buf) {
+		if sent && it.kind == ChooseDeliver && it.from.Node == id && it.fromGen == n.gen && it.data == nil && n.pool.Valid(it.act.Msg.Buf) {
 			it.data = slices.Clone(n.pool.Bytes(it.act.Msg.Buf))
 		}
 	}
@@ -543,7 +546,7 @@ func (s *Scheduler) down(id uint32) *Node {
 		n.clock.Resume(s.now)
 	}
 	n.up, n.paused, n.lossy, n.until = false, false, false, s.now
-	s.closeConns(id)
+	s.closeConns(id, sent)
 	s.items = slices.DeleteFunc(s.items, func(it item) bool { return it.node == id })
 	n.gen++
 	n.loops = nil

@@ -169,14 +169,18 @@ func (s *Scheduler) failAt(c *conn, e int, at core.Tick) {
 	s.items = append(s.items, item{kind: ChoosePeerLost, node: to.Node, loop: to.Loop, at: at, from: c.ends[1-e], conn: c.id})
 }
 
-// closeConns ends node id's side of every connection when it crashes, breaking those still up after what it already sent.
-func (s *Scheduler) closeConns(id uint32) {
+// closeConns ends node id's side of every connection when it goes down, breaking those still up, after what it already sent if sent.
+func (s *Scheduler) closeConns(id uint32, sent bool) {
 	for i := range s.conns {
 		c := &s.conns[i]
 		for e, end := range c.ends {
 			if end.Node == id && !c.done[e] {
 				c.done[e] = true
-				s.breakConnKeeping(c, e)
+				keep := -1
+				if sent {
+					keep = e
+				}
+				s.breakConnKeeping(c, keep)
 			}
 		}
 	}
