@@ -24,7 +24,7 @@ type ReplicaConfig struct {
 	Disk uint32
 }
 
-// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, and a new interval of each PG in Asks, whose chunk spent its version counter.
+// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, and a new interval of each PG in Asks, whose interval a spent version counter or a failed version ended.
 type ReplicaOutput struct {
 	Actions []core.Action
 	Fetch   uint64

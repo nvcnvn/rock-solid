@@ -112,7 +112,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Committed version.** A version that every live member of the chunk's PG holds. Reads return only committed versions, so a reader never sees a write that a crash could still undo.
 
-**Superseded version.** A version peering dropped, because it failed or was never acknowledged, but that some member's log already holds. Recovery writes the same blocks again under a later version, with the bytes the chunk keeps, on every member that may hold it, so replaying a log never brings the dropped bytes back. See [Recovery](design.md#epoch-changes-and-failure-detection).
+**Superseded version.** A version peering dropped, because some member live in its interval lacks it or holds it only in part, which proves it was never acknowledged, but that some member's log already holds. Recovery writes the same blocks again under a later version, with the bytes the chunk keeps, on every member that may hold it, so replaying a log never brings the dropped bytes back. See [Recovery](design.md#epoch-changes-and-failure-detection).
 
 **Punch, tombstone, purge.** A punch zeroes a range of a chunk and frees the blocks it covers whole, zeroing the edges of blocks it covers in part; punching a whole chunk deletes it and leaves a tombstone, a marker that says "deleted" so an older copy cannot bring the chunk back. A purge is the background job that punches every chunk of a deleted or truncated file. Before it purges a truncated file it **drains** it: every other node with the file open takes the new size and waits for the writes it sent under the old one, so none of them lands past the cut afterwards. See [Freeing space](design.md#freeing-space).
 
