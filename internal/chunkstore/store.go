@@ -29,8 +29,8 @@ var (
 	ErrCounter = errors.New("chunkstore: chunk's version counter spent in this interval")
 	// ErrFenced reports a write or punch of a client incarnation older than the newest the store has seen of its session.
 	ErrFenced = errors.New("chunkstore: write from an older incarnation of its session")
-	// ErrAborted reports a gated write or punch its caller aborted.
-	ErrAborted = errors.New("chunkstore: write aborted")
+	// ErrDropped reports a gated write or punch that Settle dropped.
+	ErrDropped = errors.New("chunkstore: write dropped")
 )
 
 const (
@@ -72,14 +72,12 @@ type Request struct {
 	Interval uint32
 	// Version, when set, is the version a PG's primary gave a write or punch, logged as is: a write's blocks are whole and a punch's Buf holds its merged edge blocks.
 	Version uint64
-	// Gated keeps a write or punch unmapped, its buffers kept, until Commit or Abort.
+	// Gated keeps a write or punch unmapped, its buffers kept, until Commit or Settle.
 	Gated bool
 	// FrozenOnly makes a read serve only a version a snapshot froze.
 	FrozenOnly bool
 	// Base makes a read serve its blocks of the live map only while they are at version Ver, as a primary fetches a base whose own copy failed its checksum.
 	Base bool
-	// Restore makes a write of whole blocks take every block from its base, the newest ordered version not aborted, writing the chunk's bytes again under a new version.
-	Restore bool
 	// Session and Incarnation name the client process a write or punch came from.
 	Session     uint64
 	Incarnation uint64
@@ -170,12 +168,11 @@ type op struct {
 	// answered is set once the ackEarly plant has replied.
 	answered  bool
 	committed bool
-	aborted   bool
+	dropped   bool
 	// mapped is set once the mapOnCommit plant has mapped a gated op out of turn.
 	mapped bool
-	// remote is set while the op waits for block remoteBlock of its base from another member.
-	remote      bool
-	remoteBlock uint16
+	// remote counts the blocks of its base the op waits for from another member.
+	remote int
 }
 
 // cachedBlock is a merged block the store keeps: block b of chunk c as version wrote it.
@@ -195,9 +192,6 @@ type chunkState struct {
 	waiting []int32
 	// held is whether write admission holds the chunk's next write back.
 	held bool
-	// ahead keeps the chunk's state after an abort until a later version is mapped, so the
-	// aborted versions, which members may have logged, are never given again.
-	ahead bool
 }
 
 type sentItem struct {
@@ -535,7 +529,7 @@ func (s *Store) chunkSlot(c core.ChunkID) int32 {
 		i = int32(len(s.chunks) - 1)
 	}
 	cs := &s.chunks[i]
-	cs.live, cs.id, cs.pending, cs.waiting, cs.ahead = true, c, cs.pending[:0], cs.waiting[:0], false
+	cs.live, cs.id, cs.pending, cs.waiting = true, c, cs.pending[:0], cs.waiting[:0]
 	cs.version, cs.epoch = 0, 0
 	if ch, ok := s.ix.Chunk(s.cfg.Pool, c); ok && !s.plant.forgetVersion {
 		cs.version, cs.epoch = ch.Version, ch.Epoch
@@ -546,7 +540,7 @@ func (s *Store) chunkSlot(c core.ChunkID) int32 {
 
 func (s *Store) releaseChunk(i int32) {
 	cs := &s.chunks[i]
-	if !cs.live || len(cs.pending) > 0 || len(cs.waiting) > 0 || cs.ahead {
+	if !cs.live || len(cs.pending) > 0 || len(cs.waiting) > 0 {
 		return
 	}
 	cs.live = false
@@ -645,23 +639,6 @@ func (s *Store) startBases(ctx *core.Context, oi int32) bool {
 		return false
 	}
 	first, last := spanOf(o.req.Off, o.req.Len)
-	if o.req.Restore {
-		for b := first; b <= last; b++ {
-			dst := ctx.Pool.Bytes(o.req.Buf)[int(b-first)*core.BlockSize:][:core.BlockSize]
-			switch src, ext, read := s.base(ctx, cs, b); {
-			case read:
-				if err := s.startFetch(ctx, oi, b, 1, ext); err != nil {
-					o.err = err
-					return o.reads > 0
-				}
-			case src != nil:
-				copy(dst, src)
-			default:
-				clear(dst)
-			}
-		}
-		return o.reads > 0
-	}
 	for k, b := range [2]uint16{first, last} {
 		if k == 1 && last == first {
 			break
@@ -736,7 +713,7 @@ func (s *Store) memberEdges(ctx *core.Context, o *op) error {
 func (s *Store) base(ctx *core.Context, cs *chunkState, b uint16) (src []byte, ext Extent, read bool) {
 	for i := len(cs.pending) - 1; i >= 0 && !s.plant.mergeCommitted; i-- {
 		o := &s.ops[cs.pending[i]]
-		if o.aborted || o.req.Gated && o.err != nil {
+		if o.dropped || o.req.Gated && o.err != nil {
 			continue
 		}
 		for j := len(o.items) - 1; j >= 0; j-- {
@@ -800,17 +777,17 @@ func (s *Store) remember(ctx *core.Context, o *op) {
 	}
 }
 
-// SupplyBase hands the op waiting on request id the base block another member sent, in buf, which the store frees, or fails it with ErrBadChecksum when no member could send it.
-func (s *Store) SupplyBase(ctx *core.Context, id uint64, buf core.IOBuf, err error, out *Output) {
+// SupplyBase hands the op waiting on request id the base block b another member sent, in buf, which the store frees, or fails it with ErrBadChecksum when no member could send it.
+func (s *Store) SupplyBase(ctx *core.Context, id uint64, b uint16, buf core.IOBuf, err error, out *Output) {
 	defer s.pump(ctx, out)
 	for oi := range s.ops {
 		o := &s.ops[oi]
-		if o.kind == 0 || o.kind == opRead || o.req.ID != id || !o.remote {
+		if o.kind == 0 || o.kind == opRead || o.req.ID != id || o.remote == 0 {
 			continue
 		}
-		o.remote = false
+		o.remote--
 		if err == nil && buf != core.NoBuf && len(ctx.Pool.Bytes(buf)) >= core.BlockSize {
-			s.deliver(ctx, &fetch{first: o.remoteBlock, n: 1, data: buf}, o)
+			s.deliver(ctx, &fetch{first: b, n: 1, data: buf}, o)
 		} else if o.err == nil {
 			o.err = disklog.ErrBadChecksum
 		}
@@ -1099,16 +1076,21 @@ func (s *Store) Commit(ctx *core.Context, c core.ChunkID, v uint64, out *Output)
 	s.mapResolved(ctx, ci, out)
 }
 
-// Abort drops every gated write and punch of chunk c ordered at version from or later and not committed, which the store then never maps; their records stay in the log until a later version supersedes their blocks.
-func (s *Store) Abort(ctx *core.Context, c core.ChunkID, from uint64, out *Output) {
+// Settle is peering's decision on chunk c's gated writes and punches not committed: those at version keep or below are mapped in version order, and the later ones dropped, never mapped, the chunk's version and snapshot epoch given back to what the first dropped one found. Their records stay in the log until recovery supersedes their blocks, and the caller numbers the chunk's next versions from a later interval, since members may have logged the dropped ones.
+func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Output) {
 	ci, ok := s.chunkOf[c]
 	if !ok {
 		return
 	}
-	for _, oi := range s.chunks[ci].pending {
-		if o := &s.ops[oi]; o.req.Gated && o.version >= from && !o.committed {
-			o.aborted = true
-			s.chunks[ci].ahead = true
+	cs := &s.chunks[ci]
+	for _, oi := range cs.pending {
+		switch o := &s.ops[oi]; {
+		case !o.req.Gated || o.committed || o.dropped:
+		case o.version <= keep:
+			o.committed = true
+		default:
+			o.dropped = true
+			cs.version, cs.epoch = min(cs.version, o.prevVer), min(cs.epoch, o.prevEpoch)
 		}
 	}
 	s.mapResolved(ctx, ci, out)
@@ -1286,9 +1268,9 @@ func (s *Store) fetchDone(ctx *core.Context, fi int32, derr core.DiskError, out 
 	}
 	oi := f.op
 	o := &s.ops[oi]
-	remote := errors.Is(f.err, disklog.ErrBadChecksum) && o.kind != opRead && o.req.Gated && !o.remote && o.err == nil
+	remote := errors.Is(f.err, disklog.ErrBadChecksum) && o.kind != opRead && o.req.Gated && o.err == nil
 	if remote {
-		o.remote, o.remoteBlock = true, f.first
+		o.remote++
 		out.Bases = append(out.Bases, BaseFetch{ID: o.req.ID, Chunk: s.chunks[o.chunk].id, Block: f.first, Version: f.version})
 	}
 	if f.err != nil && o.err == nil && !remote {
@@ -1364,9 +1346,6 @@ func (s *Store) deliver(ctx *core.Context, f *fetch, o *op) {
 		return
 	}
 	lo, hi, _ := partial(o.req.Off, o.req.Len, f.first)
-	if o.req.Restore {
-		lo, hi = 0, 0
-	}
 	var dst []byte
 	switch {
 	case o.kind == opWrite:
@@ -1610,10 +1589,10 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 	for len(cs.pending) > 0 {
 		oi := cs.pending[0]
 		o := &s.ops[oi]
-		if o.left > 0 || o.req.Gated && o.err == nil && !o.committed && !o.aborted {
+		if o.left > 0 || o.req.Gated && o.err == nil && !o.committed && !o.dropped {
 			break
 		}
-		mapped := o.req.Gated && (o.err != nil || o.aborted || o.mapped)
+		mapped := o.req.Gated && (o.err != nil || o.dropped || o.mapped)
 		if !mapped && o.err == nil && s.rec == nil {
 			s.remember(ctx, o)
 		}
@@ -1624,7 +1603,6 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 					s.unmappedLive(it, 1)
 				}
 				s.mapItem(it)
-				cs.ahead = false
 			}
 			if it.buf != core.NoBuf {
 				ctx.Pool.Free(it.buf)
@@ -1635,8 +1613,8 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 		if o.err != nil && !o.holdsVersion() {
 			r.Version = 0
 		}
-		if o.aborted && o.err == nil {
-			r.Err = ErrAborted
+		if o.dropped && o.err == nil {
+			r.Err = ErrDropped
 		}
 		if !o.answered {
 			out.Replies = append(out.Replies, r)

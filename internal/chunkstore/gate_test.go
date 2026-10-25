@@ -10,9 +10,13 @@ import (
 )
 
 func (h *harness) gated(c core.ChunkID, off uint32, data []byte, interval uint32) uint64 {
+	return h.gatedAt(c, off, data, interval, 0)
+}
+
+func (h *harness) gatedAt(c core.ChunkID, off uint32, data []byte, interval uint32, epoch uint64) uint64 {
 	id := h.change(c)
-	h.send(id, change{c: c, off: off, n: uint32(len(data)), data: data})
-	h.s.Write(&h.ctx, Request{ID: id, Chunk: c, Off: off, Len: uint32(len(data)), Buf: h.writeBuf(off, data), Interval: interval, Gated: true}, &h.out)
+	h.send(id, change{c: c, off: off, n: uint32(len(data)), data: data, epoch: epoch})
+	h.s.Write(&h.ctx, Request{ID: id, Chunk: c, Off: off, Len: uint32(len(data)), Buf: h.writeBuf(off, data), Interval: interval, Epoch: epoch, Gated: true}, &h.out)
 	h.take()
 	return id
 }
@@ -117,27 +121,31 @@ func TestCommitsAreMappedInVersionOrder(t *testing.T) {
 	}
 }
 
-func TestAnAbortedWriteIsNeverMappedNorMergedOn(t *testing.T) {
+func (h *harness) settleChunk(c core.ChunkID, keep uint64) {
+	h.s.Settle(&h.ctx, c, keep, &h.out)
+	h.take()
+	h.settle()
+}
+
+func TestADroppedWriteIsNeverMappedNorMergedOn(t *testing.T) {
 	h := newHarness(t, testConfig())
-	h.sync(h.write(chunkC, 0, []byte{1, 1, 1}, 0))
+	base := h.sync(h.write(chunkC, 0, []byte{1, 1, 1}, 0))
 	w1 := h.gated(chunkC, 0, []byte{5}, 4)
 	w2 := h.gated(chunkC, 1, []byte{6}, 4)
 	h.settle()
-	h.s.Abort(&h.ctx, chunkC, h.durableAt[w1].Version, &h.out)
-	h.take()
-	h.settle()
+	h.settleChunk(chunkC, base)
 	for _, w := range []uint64{w1, w2} {
-		if r := h.reply(w); !errors.Is(r.Err, ErrAborted) {
-			t.Fatalf("aborted write answered %+v", r)
+		if r := h.reply(w); !errors.Is(r.Err, ErrDropped) {
+			t.Fatalf("dropped write answered %+v", r)
 		}
 	}
-	w3 := h.gated(chunkC, 2, []byte{7}, 4)
+	w3 := h.gated(chunkC, 2, []byte{7}, 5)
 	h.settle()
 	if got := h.ordered[w3][:3]; !bytes.Equal(got, []byte{1, 1, 7}) {
-		t.Fatalf("a write after the abort merged on % x, want the committed bytes", got)
+		t.Fatalf("a write after the drop merged on % x, want the committed bytes", got)
 	}
-	if v := h.durableAt[w3].Version; v != MakeVersion(4, 3) {
-		t.Fatalf("the next version is %#x, want 4.3 past the aborted ones", v)
+	if v := h.durableAt[w3].Version; v != MakeVersion(5, 1) {
+		t.Fatalf("the next version is %#x, want 5.1", v)
 	}
 	h.commit(chunkC, h.durableAt[w3].Version)
 	h.settle()
@@ -231,5 +239,50 @@ func TestAMemberServesOnlyFrozenVersions(t *testing.T) {
 	h.take()
 	if r := h.settleReply(id); !errors.Is(r.Err, ErrNoVersion) {
 		t.Fatalf("a member's read at its newest version, not frozen, answered %+v", r)
+	}
+}
+
+// A dropped gated write that froze epoch 1 gives the freeze back: the next write at epoch 1 freezes 1.1 again before it overwrites block 0.
+func TestADroppedVersionGivesBackItsFreeze(t *testing.T) {
+	h := newHarness(t, testConfig())
+	base := h.sync(h.write(chunkC, 0, []byte{1}, 0))
+	w := h.gatedAt(chunkC, 0, []byte{2}, 1, 1)
+	h.settle()
+	h.settleChunk(chunkC, base)
+	w = h.gatedAt(chunkC, 0, []byte{3}, 2, 1)
+	h.settle()
+	h.commit(chunkC, h.durableAt[w].Version)
+	h.settle()
+	h.ok(w)
+	if v, ok := h.s.Index().FrozenAt(testPool, chunkC, 1); !ok || v != base {
+		t.Fatalf("epoch 1 froze %#x %v, want %#x", v, ok, base)
+	}
+	if got := h.block(chunkC, 0, 1); got[0] != 1 {
+		t.Fatalf("epoch 1 reads %d", got[0])
+	}
+}
+
+// Peering's decision on a chunk with 4.1 to 4.3 pending keeps 4.2: 4.1 and 4.2 are mapped, 4.3 is dropped, and the next interval's first write merges on 4.2.
+func TestSettleMapsTheKeptVersionsAndDropsTheRest(t *testing.T) {
+	h := newHarness(t, testConfig())
+	w1 := h.gated(chunkC, 0, []byte{1}, 4)
+	w2 := h.gated(chunkC, 1, []byte{2}, 4)
+	w3 := h.gated(chunkC, 2, []byte{3}, 4)
+	h.settle()
+	h.settleChunk(chunkC, MakeVersion(4, 2))
+	if v := h.ok(w2); v != MakeVersion(4, 2) {
+		t.Fatalf("kept 4.2 answered %#x", v)
+	}
+	h.ok(w1)
+	if r := h.reply(w3); !errors.Is(r.Err, ErrDropped) {
+		t.Fatalf("dropped 4.3 answered %+v", r)
+	}
+	if got := h.readNow(chunkC, 0, 3); !bytes.Equal(got, []byte{1, 2, 0}) {
+		t.Fatalf("reads % x", got)
+	}
+	w := h.gated(chunkC, 3, []byte{4}, 5)
+	h.settle()
+	if got, v := h.ordered[w][:4], h.durableAt[w].Version; !bytes.Equal(got, []byte{1, 2, 0, 4}) || v != MakeVersion(5, 1) {
+		t.Fatalf("the next write is %#x, merged on % x", v, got)
 	}
 }

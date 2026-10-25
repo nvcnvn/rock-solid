@@ -1,0 +1,149 @@
+package chunkstore
+
+import (
+	"testing"
+
+	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/sim"
+)
+
+// replicaWrite sends disk node+1 a primary's whole-block write of block 0 of ch at version v, as if from its primary.
+func (c *rcluster) replicaWrite(node int, ch core.ChunkID, v uint64) core.RequestID {
+	c.nextID++
+	id := c.nextID
+	u := Update{Kind: KindReplicaWrite, ID: id, PG: c.pgFields(pg0), Chunk: ch, Len: core.BlockSize, Version: v}
+	c.s.Node(c.client.Node).Call(c.client, func(ctx *core.Context, acts []core.Action) []core.Action {
+		a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(node)}}
+		a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))
+		a.Msg.Buf, _ = ctx.Pool.AllocZeroed(core.BlockSize)
+		c.cl.sent[id] = a.Msg.Buf
+		return append(acts, a)
+	})
+	return id
+}
+
+// refuse makes disk 3 refuse pg0's writes, its table marking it in maintenance in the same interval, until the returned func restores the cluster's table.
+func (c *rcluster) refuse() func() {
+	refusing := cloneTable(c.table)
+	_, e := refusing.entry(pg0)
+	e.Members[2].Mark = MarkMaint
+	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.table = refusing })
+	return func() { c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.table = c.table }) }
+}
+
+// A write ordered while a member's resend is due waits behind it: 1.2 never reaches disk 3 before 1.1.
+func TestANewWriteToAMemberWaitsBehindTheResend(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.s.Partition(0, 2, false)
+	w1 := c.write(pg0, ch, 0, []byte{1})
+	key := [2]core.NodeID{c.loops[0], c.loops[2]}
+	for c.lost[key] == 0 && c.step() {
+	}
+	c.s.Heal(0, 2)
+	w2 := c.write(pg0, ch, core.BlockSize, []byte{2})
+	c.settle()
+	for _, w := range []core.RequestID{w1, w2} {
+		if rp := c.reply(w); rp.Status != StatusOK {
+			t.Fatalf("answered %+v", rp)
+		}
+	}
+	if b0, b1 := c.diskBlock(2, ch, 0), c.diskBlock(2, ch, 1); b0[0] != 1 || b1[0] != 2 {
+		t.Fatalf("disk 3 maps block 0 as %x and block 1 as %x", b0[0], b1[0])
+	}
+}
+
+// Disk 2 gets 1.1 twice and its disk fails the first: the second is answered with the first's failure, not acknowledged.
+func TestADuplicateIsAnsweredWithItsOriginalsOutcome(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.s.Node(1).Disk(0).Inject(sim.Fault{Effect: sim.FailIO, When: sim.OnKind(core.ActDiskWrite)})
+	first, again := c.replicaWrite(1, ch, MakeVersion(1, 1)), c.replicaWrite(1, ch, MakeVersion(1, 1))
+	c.settle()
+	if rp := c.reply(first); rp.Status == StatusOK {
+		t.Fatalf("a write the disk failed answered %+v", rp)
+	}
+	if rp := c.reply(again); rp.Status == StatusOK {
+		t.Fatalf("its duplicate answered %+v", rp)
+	}
+}
+
+// A write that waited behind a base read is ordered after a table that drops its pool: it is refused, not sent.
+func TestAWriteOrderedAfterItsPGLeftTheTableIsRefused(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 0, 1, 0xaa)
+	w := c.write(pg0, ch, 10, []byte{1})
+	for len(c.reps[0].vers) == 0 && c.step() {
+	}
+	gone := c.next(func(t *Table) { t.Pools = nil })
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetTable(ctx, gone, out) })
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusRefused {
+		t.Fatalf("answered %+v", rp)
+	}
+}
+
+// Both edge blocks of a write fail their CRC32C at the primary: both come from another member.
+func TestTwoRottenEdgeBlocksAreBothFetched(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 2, 2, 0xaa)
+	for _, b := range []uint16{2, 3} {
+		e, _ := c.reps[0].Store().Index().Lookup(testPool, ch, b)
+		c.s.Node(0).Disk(0).FlipBit(e.BlockLBA(b), 4000, 1)
+	}
+	data := make([]byte, core.BlockSize)
+	for i := range data {
+		data[i] = 1
+	}
+	w := c.write(pg0, ch, 2*core.BlockSize+10, data)
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusOK {
+		t.Fatalf("answered %+v", rp)
+	}
+	for d := range 3 {
+		b2, b3 := c.diskBlock(d, ch, 2), c.diskBlock(d, ch, 3)
+		if b2[9] != 0xaa || b2[10] != 1 || b3[9] != 1 || b3[10] != 0xaa || b3[4000] != 0xaa {
+			t.Fatalf("disk %d merged % x and % x", d+1, b2[9:11], []byte{b3[9], b3[10], b3[4000]})
+		}
+	}
+}
+
+// Disk 3 refuses 1.1 of an absent chunk: the client hears a refusal, the primary asks for interval 2, orders nothing more in 1 and writes nothing over the absent chunk. Peering, standing in, drops 1.1, and the write held meanwhile is 2.1 on every member, merged on no trace of 1.1.
+func TestAFailedVersionEndsTheInterval(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	restore := c.refuse()
+	w := c.write(pg0, ch, 10, []byte{1, 2, 3})
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusRefused {
+		t.Fatalf("answered %+v", rp)
+	}
+	if _, ok := c.reps[0].Store().Index().Chunk(testPool, ch); ok {
+		t.Fatal("the primary maps the absent chunk")
+	}
+	if len(c.asks) != 1 || c.asks[0] != (PGFields{Epoch: 1, PG: pg0, Interval: 1}) {
+		t.Fatalf("asks %+v", c.asks)
+	}
+	restore()
+	next := c.write(pg0, ch, 20, []byte{4})
+	c.settle()
+	if rp, ok := c.cl.replies[next]; ok {
+		t.Fatalf("a write after the failure answered %+v in interval 1", rp)
+	}
+	c.publish(c.next(func(t *Table) { setInterval(t, pg0, 2) }), false)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.Settle(ctx, ch, 0, out)
+		r.Activate(ctx, pg0, 2, out)
+	})
+	c.settle()
+	if rp := c.reply(next); rp.Status != StatusOK || rp.Version != MakeVersion(2, 1) {
+		t.Fatalf("the held write answered %+v once peering dropped 1.1", rp)
+	}
+	for d := range 3 {
+		if got := c.diskBlock(d, ch, 0); got[10] != 0 || got[20] != 4 {
+			t.Fatalf("disk %d maps % x", d+1, []byte{got[10], got[20]})
+		}
+	}
+}

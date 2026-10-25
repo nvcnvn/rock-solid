@@ -49,7 +49,7 @@ type lead struct {
 	since    uint32
 	active   bool
 	held     []heldMsg
-	// asking is set once a chunk of the PG spent its counter, and asked once the primary asked for the next interval; spent counts the held writes the store refused for it, which go ahead of those held since.
+	// asking is set once a chunk of the PG spent its counter or a version failed, which ends the interval: the primary orders nothing more in it and asks for the next once none of its versions is pending, setting asked. spent counts the held writes the store refused for a spent counter, which go ahead of those held since.
 	asking bool
 	asked  bool
 	spent  int
@@ -83,9 +83,11 @@ type storeReq struct {
 	msgID core.RequestID
 	pg    core.PGID
 	chunk core.ChunkID
+	// version is the version a member's write or punch was handed.
+	version uint64
 }
 
-// version is a client write or punch the primary ordered and fans out: the members that must hold it, those that do, and those whose send has neither a reply nor a PeerLost yet.
+// version is a client write or punch the primary ordered and fans out: the members that must hold it, those that do, and those whose send has neither a reply nor a PeerLost yet; done once its client is answered.
 type version struct {
 	seq     core.RequestID
 	req     uint64
@@ -101,11 +103,6 @@ type version struct {
 	logged  bool
 	commit  bool
 	done    bool
-	// restore marks the write that supersedes a chunk's failed versions, which no client asked for.
-	restore bool
-	status  Status
-	refEp   uint64
-	refIv   uint32
 }
 
 // Replica runs a disk's store as a member of the PGs the placement table puts on it: primary of those it leads, ordering client writes, fanning them out and committing them once every live member holds them, and a replica of the rest.
@@ -120,7 +117,10 @@ type Replica struct {
 	vers   []version
 	parked []parkedMsg
 	dups   []dup
+	failed []failedVer
 	bases  []baseFetch
+	// lost is the peers a PeerLost left with writes to send again, which new writes to them wait behind.
+	lost   []core.NodeID
 	nextID uint64
 	seq    core.RequestID
 	frame  []byte
@@ -205,10 +205,8 @@ func (r *Replica) full(ctx *core.Context, pg core.PGID, p *PoolTable, e *PGEntry
 			live = r.fill(ctx)
 		}
 		var slots uint64
-		for _, s := range r.slots {
-			if s.pool == pg.Pool && s.disk == m.Disk {
-				slots = s.n
-			}
+		if j, ok := slices.BinarySearchFunc(r.slots, diskSlots{pool: pg.Pool, disk: m.Disk}, compareSlots); ok {
+			slots = r.slots[j].n
 		}
 		if live+mulDivUp(pi.grants, slots, uint64(len(p.PGs))) >= d.blocks*uint64(pi.pool.limitPercent(d.blocks))/100 {
 			return true
@@ -217,22 +215,26 @@ func (r *Replica) full(ctx *core.Context, pg core.PGID, p *PoolTable, e *PGEntry
 	return false
 }
 
-// countSlots counts each pool's member slots on each disk in the table.
+// countSlots counts each pool's member slots on each disk in the table, in (pool, disk) order.
 func (r *Replica) countSlots() {
 	r.slots = r.slots[:0]
 	for pi := range r.table.Pools {
 		p := &r.table.Pools[pi]
 		for i := range p.PGs {
 			for _, m := range p.PGs[i].Members {
-				j := slices.IndexFunc(r.slots, func(s diskSlots) bool { return s.pool == p.ID && s.disk == m.Disk })
-				if j < 0 {
-					r.slots = append(r.slots, diskSlots{pool: p.ID, disk: m.Disk})
-					j = len(r.slots) - 1
+				key := diskSlots{pool: p.ID, disk: m.Disk}
+				j, ok := slices.BinarySearchFunc(r.slots, key, compareSlots)
+				if !ok {
+					r.slots = slices.Insert(r.slots, j, key)
 				}
 				r.slots[j].n++
 			}
 		}
 	}
+}
+
+func compareSlots(a, b diskSlots) int {
+	return cmp.Or(cmp.Compare(a.pool, b.pool), cmp.Compare(a.disk, b.disk))
 }
 
 type replicaPlants struct {
@@ -323,6 +325,10 @@ func comparePG(a, b core.PGID) int {
 func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 	r.table = t
 	r.countSlots()
+	r.failed = slices.DeleteFunc(r.failed, func(f failedVer) bool {
+		_, e := r.table.entry(f.pg)
+		return e == nil || e.Interval != uint32(f.version>>32)
+	})
 	kept := r.leads[:0:0]
 	for pi := range t.Pools {
 		p := &t.Pools[pi]
@@ -488,7 +494,7 @@ func (r *Replica) askBase(ctx *core.Context, i int, out *ReplicaOutput) {
 		if m.Mark != MarkUp || m.Disk == r.cfg.Disk {
 			continue
 		}
-		rd := Read{ID: core.RequestID(f.ID), PG: PGFields{Epoch: r.table.Epoch, PG: f.pg, Interval: e.Interval}, Chunk: f.Chunk,
+		rd := Read{ID: f.rid, PG: PGFields{Epoch: r.table.Epoch, PG: f.pg, Interval: e.Interval}, Chunk: f.Chunk,
 			Off: uint32(f.Block) * core.BlockSize, Len: core.BlockSize, HasAt: true, At: f.Version}
 		r.frame = AppendRead(r.frame[:0], &rd)
 		a := core.Action{Kind: core.ActNetSend, Peer: r.addr(m.Disk)}
@@ -496,14 +502,14 @@ func (r *Replica) askBase(ctx *core.Context, i int, out *ReplicaOutput) {
 		out.Actions = append(out.Actions, a)
 		return
 	}
-	id := f.ID
+	id, b := f.ID, f.Block
 	r.bases = slices.Delete(r.bases, i, i+1)
-	r.st.SupplyBase(ctx, id, core.NoBuf, disklog.ErrBadChecksum, &r.sout)
+	r.st.SupplyBase(ctx, id, b, core.NoBuf, disklog.ErrBadChecksum, &r.sout)
 }
 
 // baseReply takes a member's answer to a base fetch, reporting whether it was one; it takes buf.
 func (r *Replica) baseReply(ctx *core.Context, rp *Response, buf core.IOBuf, out *ReplicaOutput) bool {
-	i := slices.IndexFunc(r.bases, func(f baseFetch) bool { return core.RequestID(f.ID) == rp.ID })
+	i := slices.IndexFunc(r.bases, func(f baseFetch) bool { return f.rid == rp.ID })
 	if i < 0 {
 		return false
 	}
@@ -512,9 +518,9 @@ func (r *Replica) baseReply(ctx *core.Context, rp *Response, buf core.IOBuf, out
 		r.askBase(ctx, i, out)
 		return true
 	}
-	id := r.bases[i].ID
+	id, b := r.bases[i].ID, r.bases[i].Block
 	r.bases = slices.Delete(r.bases, i, i+1)
-	r.st.SupplyBase(ctx, id, buf, nil, &r.sout)
+	r.st.SupplyBase(ctx, id, b, buf, nil, &r.sout)
 	return true
 }
 
@@ -584,27 +590,34 @@ func (r *Replica) order(ctx *core.Context, ev *core.Event, u *Update, interval u
 	}
 }
 
-// memberUpdate takes a write or punch the PG's primary ordered: accepted only in the PG's current interval, by an up member; a version the store already holds is answered once it is durable.
+// memberUpdate takes a write or punch the PG's primary ordered: accepted only in the PG's current interval, by an up member, and refused once an earlier version of its chunk in the interval failed here, so the member logs a chunk's versions without a gap. A version sent again is answered with its first copy's outcome: at once if that copy is done, which it is unless it failed, else once it is.
 func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) {
 	_, e := r.table.entry(u.PG.PG)
 	if e != nil && u.PG.Interval > e.Interval && u.PG.Epoch > r.table.Epoch {
 		r.park(ev, u.PG.Epoch, out)
 		return
 	}
-	if e == nil || u.PG.Interval != e.Interval || !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) {
+	if e == nil || u.PG.Interval != e.Interval || !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) ||
+		slices.ContainsFunc(r.failed, func(f failedVer) bool {
+			return f.chunk == u.Chunk && f.version>>32 == u.Version>>32 && f.version <= u.Version
+		}) {
 		freeBuf(ctx, ev.Msg.Buf)
 		rp := r.refusal(u.PG.PG)
 		rp.Kind, rp.Fill = KindAck, r.fill(ctx)
 		r.answer(ctx, ev.Peer, u.ID, &rp, core.NoBuf, out)
 		return
 	}
-	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk})
 	if u.Version <= r.st.Newest(u.Chunk) {
 		freeBuf(ctx, ev.Msg.Buf)
-		r.dups = append(r.dups, dup{id: id, version: u.Version})
-		r.st.Flush(ctx, id, []core.ChunkID{u.Chunk}, &r.sout)
+		if j := slices.IndexFunc(r.reqs, func(q storeReq) bool { return q.kind == reqMember && q.chunk == u.Chunk && q.version == u.Version }); j >= 0 {
+			r.dups = append(r.dups, dup{orig: r.reqs[j].id, peer: ev.Peer, msgID: u.ID})
+			return
+		}
+		rp := Response{Kind: KindAck, Version: u.Version, Fill: r.fill(ctx)}
+		r.answer(ctx, ev.Peer, u.ID, &rp, core.NoBuf, out)
 		return
 	}
+	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
 	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, Epoch: u.Snapshot, Version: u.Version}
 	if u.Kind == KindReplicaWrite {
 		r.st.Write(ctx, req, &r.sout)
@@ -613,16 +626,25 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	}
 }
 
-// baseFetch is a base block the primary asks another member for, tried from member tried of the PG.
+// baseFetch is a base block the primary asks another member for, tried from member tried of the PG, under read ID rid.
 type baseFetch struct {
 	BaseFetch
 	pg    core.PGID
 	tried int
+	rid   core.RequestID
 }
 
-// dup is a resent write a member already holds, answered with its version once the chunk's flush completes.
+// dup is a write sent again to a member while its first copy, store request orig, is in flight; it is answered as that copy is.
 type dup struct {
-	id      uint64
+	orig  uint64
+	peer  core.NodeID
+	msgID core.RequestID
+}
+
+// failedVer is a version of a chunk a member failed to log, after which it refuses the chunk's later versions in that interval.
+type failedVer struct {
+	pg      core.PGID
+	chunk   core.ChunkID
 	version uint64
 }
 
@@ -663,8 +685,13 @@ func (r *Replica) takeReq(id uint64) (storeReq, bool) {
 	return q, true
 }
 
+// versionOf finds a version by its store request, which, like seq, grows in the order r.vers holds them.
 func (r *Replica) versionOf(req uint64) int {
-	return slices.IndexFunc(r.vers, func(v version) bool { return v.req == req })
+	i, ok := slices.BinarySearchFunc(r.vers, req, func(v version, req uint64) int { return cmp.Compare(v.req, req) })
+	if !ok {
+		return -1
+	}
+	return i
 }
 
 func (r *Replica) versionBySeq(seq core.RequestID) int {
@@ -679,7 +706,8 @@ func (r *Replica) versionBySeq(seq core.RequestID) int {
 func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 	for o, l, p, b := 0, 0, 0, 0; o < len(r.sout.Ordered) || l < len(r.sout.Logged) || p < len(r.sout.Replies) || b < len(r.sout.Bases); {
 		for ; b < len(r.sout.Bases); b++ {
-			f := baseFetch{BaseFetch: r.sout.Bases[b]}
+			r.nextID++
+			f := baseFetch{BaseFetch: r.sout.Bases[b], rid: core.RequestID(r.nextID)}
 			if i, ok := slices.BinarySearchFunc(r.reqs, f.ID, func(q storeReq, id uint64) int { return cmp.Compare(q.id, id) }); ok {
 				f.pg = r.reqs[i].pg
 			}
@@ -701,11 +729,16 @@ func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 	r.ask(out)
 }
 
-// ordered fans a version out to every up member of its interval but this disk, in parallel with the store logging it.
+// ordered fans a version out to every up member of its interval but this disk, in parallel with the store logging it, unless the interval has ended since the client's write was taken: then the version fails at once. A member a resend is due to gets it with the resend.
 func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 	i := r.versionOf(o.ID)
 	v := &r.vers[i]
 	v.u.Version, v.buf = o.Version, o.Buf
+	l := r.lead(v.u.PG.PG)
+	if l < 0 || r.leads[l].asking || r.leads[l].interval != uint32(o.Version>>32) {
+		r.fail(ctx, i, Response{}, out)
+		return
+	}
 	_, e := r.table.entry(v.u.PG.PG)
 	for _, m := range e.Members {
 		if m.Mark != MarkUp || m.Disk == r.cfg.Disk {
@@ -718,7 +751,9 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 		v.n++
 	}
 	for k := range v.n {
-		r.send(v, k, out)
+		if !slices.Contains(r.lost, r.addr(v.members[k])) {
+			r.send(v, k, out)
+		}
 	}
 }
 
@@ -751,8 +786,11 @@ func (r *Replica) logged(ctx *core.Context, l Reply, out *ReplicaOutput) {
 	if i < 0 {
 		return
 	}
+	if r.vers[i].u.Version == 0 {
+		r.vers[i].u.Version = l.Version
+	}
 	if l.Err != nil {
-		r.fail(ctx, i, statusOf(l.Err), 0, 0, out)
+		r.fail(ctx, i, Response{}, out)
 		return
 	}
 	r.vers[i].logged = true
@@ -797,54 +835,44 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 		if rp.Status == StatusRefused && rp.Epoch > r.table.Epoch {
 			out.fetch(rp.Epoch, false)
 		}
-		r.fail(ctx, i, rp.Status, rp.Epoch, rp.Interval, out)
+		r.fail(ctx, i, *rp, out)
 	}
 	r.release(ctx, i)
 }
 
 func (r *Replica) tryCommit(ctx *core.Context, i int) {
 	v := &r.vers[i]
-	if v.status != StatusOK || !v.logged || v.commit || v.acked != 1<<v.n-1 {
+	if v.done || !v.logged || v.commit || v.acked != 1<<v.n-1 {
 		return
 	}
 	v.commit = true
 	r.st.Commit(ctx, v.u.Chunk, v.u.Version, &r.sout)
 }
 
-// fail fails the version and every later one of its chunk, which may hold its bytes, so none of them commits.
-func (r *Replica) fail(ctx *core.Context, i int, st Status, epoch uint64, interval uint32, out *ReplicaOutput) {
+// fail ends a version that failed and every later one of its chunk, which may hold its bytes, so none of them commits: their clients are refused, with ref's table if it is newer, since peering decides whether they stay, and the PG's interval ends, as for a spent counter. The store keeps them pending until Settle.
+func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutput) {
 	v := &r.vers[i]
-	if v.status != StatusOK || v.commit {
+	if v.done || v.commit {
 		return
 	}
 	c, from, pg := v.u.Chunk, v.u.Version, v.u.PG.PG
-	first, last, restore := uint16(core.BlocksPerChunk), uint16(0), true
-	for j := range r.vers {
+	if l := r.lead(pg); l >= 0 && r.leads[l].interval == uint32(from>>32) {
+		r.leads[l].asking = true
+	}
+	if own := r.refusal(pg); ref.Epoch <= own.Epoch {
+		ref = own
+	}
+	ref.Kind, ref.Status, ref.Version, ref.Fill = KindReply, StatusRefused, 0, 0
+	for j := len(r.vers) - 1; j >= 0; j-- {
 		w := &r.vers[j]
-		if w.u.Chunk == c && w.u.Version >= from && w.u.Version != 0 && !w.commit && w.status == StatusOK {
-			w.status, w.refEp, w.refIv = st, epoch, interval
-			f, l := spanOf(w.u.Off, w.u.Len)
-			first, last, restore = min(first, f), max(last, l), restore && !w.restore
+		if w.u.Chunk != c || w.u.Version < from || w.done || w.commit {
+			continue
 		}
+		w.done = true
+		r.takeReq(w.req)
+		r.answer(ctx, w.client, w.msgID, &ref, core.NoBuf, out)
+		r.release(ctx, j)
 	}
-	r.st.Abort(ctx, c, from, &r.sout)
-	if l := r.lead(pg); restore && l >= 0 && r.leads[l].interval == uint32(from>>32) && epoch <= r.table.Epoch {
-		r.supersede(ctx, pg, c, first, last, r.leads[l].interval)
-	}
-}
-
-// supersede writes the chunk's bytes again over blocks first to last, under a new version to every up member, so that no member's log, the primary's included, ends with the failed versions there: their replay would map them back. A supersede that fails is not tried again: it carries bytes the chunk already holds, so the failed one is harmless where it was logged.
-func (r *Replica) supersede(ctx *core.Context, pg core.PGID, c core.ChunkID, first, last uint16, interval uint32) {
-	n := int(last-first) + 1
-	buf, err := ctx.Pool.AllocZeroed(n * core.BlockSize)
-	if err != nil {
-		return // ponytail: an exhausted pool leaves the failed versions to the next peering's recovery.
-	}
-	id := r.newReq(storeReq{kind: reqClient, pg: pg, chunk: c})
-	r.seq++
-	u := Update{Kind: KindWrite, PG: PGFields{PG: pg, Interval: interval}, Chunk: c, Off: uint32(first) * core.BlockSize, Len: uint32(n) * core.BlockSize}
-	r.vers = append(r.vers, version{seq: r.seq, req: id, epoch: r.table.Epoch, u: u, restore: true})
-	r.st.Write(ctx, Request{ID: id, Chunk: c, Off: u.Off, Len: u.Len, Buf: buf, Interval: interval, Gated: true, Restore: true}, &r.sout)
 }
 
 // finished answers a request the store completed: a client's write or punch once its version is mapped or failed, a member's once durable, a read with its blocks.
@@ -855,48 +883,43 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 	}
 	switch q.kind {
 	case reqClient:
-		resp := Response{Kind: KindReply, Status: statusOf(rp.Err), Version: rp.Version}
-		ref := r.refusal(q.pg)
-		restore := false
-		if i := r.versionOf(rp.ID); i >= 0 && errors.Is(rp.Err, ErrCounter) {
+		i := r.versionOf(rp.ID)
+		if i >= 0 && errors.Is(rp.Err, ErrCounter) {
 			r.counterSpent(ctx, i, rp.Buf)
 			return
 		}
-		if i := r.versionOf(rp.ID); i >= 0 {
-			v := &r.vers[i]
-			restore = v.restore
-			if v.status != StatusOK {
-				resp.Status = v.status
-			}
-			if v.refEp > ref.Epoch {
-				ref.Epoch, ref.Interval = v.refEp, v.refIv
-			}
-			v.done = true
-			r.release(ctx, i)
-		}
+		resp := Response{Kind: KindReply, Status: statusOf(rp.Err), Version: rp.Version}
 		if resp.Status != StatusOK {
 			resp.Version = 0
 		}
 		if resp.Status == StatusRefused {
+			ref := r.refusal(q.pg)
 			resp.Epoch, resp.Interval = ref.Epoch, ref.Interval
 		}
-		if !restore {
-			r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
+		if i >= 0 {
+			r.vers[i].done = true
+			r.release(ctx, i)
 		}
+		r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
 	case reqMember:
 		resp := Response{Kind: KindAck, Status: statusOf(rp.Err), Version: rp.Version, Fill: r.fill(ctx)}
-		if j := slices.IndexFunc(r.dups, func(d dup) bool { return d.id == rp.ID }); j >= 0 {
-			resp.Version = r.dups[j].version
-			r.dups = slices.Delete(r.dups, j, j+1)
-		}
 		if resp.Status == StatusMismatch {
 			resp.Status = StatusRefused
 		}
 		if resp.Status != StatusOK {
 			ref := r.refusal(q.pg)
 			resp.Version, resp.Epoch, resp.Interval = 0, ref.Epoch, ref.Interval
+			r.failed = append(r.failed, failedVer{pg: q.pg, chunk: q.chunk, version: q.version})
 		}
 		r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
+		for j := 0; j < len(r.dups); {
+			if d := r.dups[j]; d.orig == q.id {
+				r.answer(ctx, d.peer, d.msgID, &resp, core.NoBuf, out)
+				r.dups = slices.Delete(r.dups, j, j+1)
+				continue
+			}
+			j++
+		}
 	case reqRead:
 		resp := Response{Kind: KindReadReply, Version: rp.Version}
 		if rp.Err != nil {
@@ -932,11 +955,11 @@ func (r *Replica) counterSpent(ctx *core.Context, i int, buf core.IOBuf) {
 	ld.asking = true
 }
 
-// ask asks for the next interval of each PG whose chunk spent its counter, once none of its writes is pending.
+// ask asks for the next interval of each PG whose interval ended, once none of its versions is pending.
 func (r *Replica) ask(out *ReplicaOutput) {
 	for i := range r.leads {
 		l := &r.leads[i]
-		if !l.asking || l.asked || slices.ContainsFunc(r.vers, func(v version) bool { return v.u.PG.PG == l.pg }) {
+		if !l.asking || l.asked || slices.ContainsFunc(r.vers, func(v version) bool { return v.u.PG.PG == l.pg && !v.done }) {
 			continue
 		}
 		l.asked = true
@@ -944,7 +967,7 @@ func (r *Replica) ask(out *ReplicaOutput) {
 	}
 }
 
-// peerLost ends every send to the peer and has the writes it left unacknowledged sent again after ResendAfter.
+// peerLost ends every send to the peer and has the writes it left unacknowledged sent again after ResendAfter, new writes to it waiting behind them.
 func (r *Replica) peerLost(ctx *core.Context, peer core.NodeID, out *ReplicaOutput) {
 	lost := false
 	for i := len(r.vers) - 1; i >= 0; i-- {
@@ -957,6 +980,9 @@ func (r *Replica) peerLost(ctx *core.Context, peer core.NodeID, out *ReplicaOutp
 		}
 		r.release(ctx, i)
 	}
+	if lost && !slices.Contains(r.lost, peer) {
+		r.lost = append(r.lost, peer)
+	}
 	if lost && !r.armed {
 		r.armed = true
 		out.Actions = append(out.Actions, core.Action{Kind: core.ActSetTimer, Timer: ResendTimer, At: ctx.Now + ResendAfter})
@@ -965,7 +991,7 @@ func (r *Replica) peerLost(ctx *core.Context, peer core.NodeID, out *ReplicaOutp
 
 // resend sends each member, in the order they were ordered, so a chunk's in version order, the writes of the PGs' current intervals it has neither acknowledged nor has a send of outstanding; a write of an interval that ended is left to the next interval's peering.
 func (r *Replica) resend(out *ReplicaOutput) {
-	r.armed = false
+	r.armed, r.lost = false, r.lost[:0]
 	for n := range r.vers {
 		i := n
 		if r.plant.resendNewestFirst {
@@ -973,7 +999,7 @@ func (r *Replica) resend(out *ReplicaOutput) {
 		}
 		v := &r.vers[i]
 		_, e := r.table.entry(v.u.PG.PG)
-		if v.done || v.status != StatusOK || v.u.Version == 0 || e == nil || uint32(v.u.Version>>32) != e.Interval {
+		if v.done || v.u.Version == 0 || e == nil || uint32(v.u.Version>>32) != e.Interval {
 			continue
 		}
 		for k := range v.n {
@@ -982,6 +1008,17 @@ func (r *Replica) resend(out *ReplicaOutput) {
 			}
 		}
 	}
+}
+
+// Settle is peering's decision on chunk c, made before this disk activates as primary in a new interval: the chunk's pending versions up to keep are mapped and their clients answered, and the later ones are dropped and their clients refused.
+func (r *Replica) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *ReplicaOutput) {
+	for i := range r.vers {
+		if v := &r.vers[i]; v.u.Chunk == c && v.u.Version != 0 && v.u.Version <= keep {
+			v.commit = true
+		}
+	}
+	r.st.Settle(ctx, c, keep, &r.sout)
+	r.drain(ctx, out)
 }
 
 // reply answers a client's write or punch.
@@ -993,7 +1030,7 @@ func (r *Replica) reply(ctx *core.Context, peer core.NodeID, id core.RequestID, 
 func (r *Replica) answer(ctx *core.Context, peer core.NodeID, id core.RequestID, rp *Response, buf core.IOBuf, out *ReplicaOutput) {
 	rp.ID = id
 	r.frame = AppendResponse(r.frame[:0], rp)
-	a := core.Action{Kind: core.ActNetSend, Peer: peer, Reply: true}
+	a := core.Action{Kind: core.ActNetSend, Peer: peer, Reply: rp.Kind != KindAck}
 	a.Msg.Len, a.Msg.Buf = uint16(copy(a.Msg.Body[:], r.frame)), buf
 	out.Actions = append(out.Actions, a)
 }

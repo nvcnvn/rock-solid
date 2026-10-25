@@ -103,26 +103,3 @@ func TestEachPoolChecksItsOwnLimit(t *testing.T) {
 		t.Fatalf("P1 at 92%% of a 95%% limit: %v", st)
 	}
 }
-
-// A disk past its limit still takes the write that supersedes a failed version, as it takes recovery's copies.
-func TestASupersedingWritePassesWriteLimit(t *testing.T) {
-	c := admitCluster(t, 90)
-	ch := chunkIn(pg0, 4, 0)
-	c.writeWhole(pg0, ch, 0, 1, 0xaa)
-	refusing := cloneTable(c.table)
-	_, e := refusing.entry(pg0)
-	e.Members[2].Mark = MarkMaint
-	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.table = refusing })
-	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.MemberFill(2, 990) })
-	w := c.update(c.pgFields(pg0), ch, 10, []byte{1}, 0, func(u *Update) { u.Granted = true })
-	c.settle()
-	if c.reply(w).Status != StatusRefused || c.newest(1, ch) != MakeVersion(1, 3) {
-		t.Fatalf("answered %+v; disk 2 at %#x, want the superseding 1.3", c.reply(w), c.newest(1, ch))
-	}
-	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.MemberFill(2, 990) })
-	w = c.write(pg0, ch, 4*core.BlockSize, []byte{1})
-	c.settle()
-	if c.reply(w).Status != StatusNoSpace {
-		t.Fatalf("a new write with disk 2 at 99%%: %+v", c.reply(w))
-	}
-}

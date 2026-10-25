@@ -36,37 +36,6 @@ func TestWritesAreSentAgainInOrderAfterAReconnect(t *testing.T) {
 	}
 }
 
-// A member refuses 1.2 in the primary's own interval: the primary writes the chunk's committed bytes again as 1.3 to every member, so no log ends with 1.2's bytes.
-func TestAFailedVersionIsSupersededInEveryLog(t *testing.T) {
-	c := newRCluster(t, rtable(4, 2))
-	ch := chunkIn(pg0, 4, 0)
-	c.writeWhole(pg0, ch, 0, 1, 0xaa)
-	refusing := cloneTable(c.table)
-	_, e := refusing.entry(pg0)
-	e.Members[2].Mark = MarkMaint
-	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.table = refusing })
-	w := c.write(pg0, ch, 10, []byte{1, 2, 3})
-	c.settle()
-	if rp := c.reply(w); rp.Status != StatusRefused {
-		t.Fatalf("answered %+v", rp)
-	}
-	want := bytes.Repeat([]byte{0xaa}, core.BlockSize)
-	for d := range 2 {
-		if v := c.newest(d, ch); v != MakeVersion(1, 3) {
-			t.Fatalf("disk %d's newest is %#x, want the superseding 1.3", d+1, v)
-		}
-		if got := c.diskBlock(d, ch, 0); !bytes.Equal(got, want) {
-			t.Fatalf("disk %d maps % x", d+1, got[8:14])
-		}
-	}
-	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.table = c.table })
-	w = c.write(pg0, ch, 10, []byte{4})
-	c.settle()
-	if rp := c.reply(w); rp.Status != StatusOK || rp.Version != MakeVersion(1, 4) {
-		t.Fatalf("the next write answered %+v", rp)
-	}
-}
-
 // PG 7 is led by disk 2. Its writes are held while it re-peers; they are ordered again in the new interval if disk 2 led every interval since, and refused otherwise.
 func TestHeldWritesAreOrderedAgainOnlyIfNoOtherPrimaryLed(t *testing.T) {
 	pg7 := core.PGID{Pool: testPool, Index: 7}
