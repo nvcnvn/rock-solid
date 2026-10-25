@@ -4696,7 +4696,7 @@ How the primary recognizes a resent client write is the open question on
 | Stop in place, QEMU kvm-clock guest | Every clock frozen; marker unchanged |
 | Restore or live migration, any hypervisor or clocksource | Every clock frozen; marker changed |
 | QEMU migration held at switchover | kvmclock counts the hold, the TSC does not; marker changed (VM pause spike T4b) |
-| Messages to a paused node | Queued, then delivered on resume ahead of its clients' requests and any message sent later; or lost, its connections broken |
+| Messages to a paused node | Queued, then delivered on resume ahead of its clients' requests and any message sent later; or lost until it resumes, on reconnected and new connections too, each loss breaking its connection |
 
 - The simulated driver delivers `Resumed` when `core.Resumed` reports it from the model's readings,
   the loop's own rule: a suspend whose `BOOTTIME − MONOTONIC` gain reaches the threshold, or a marker

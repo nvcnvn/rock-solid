@@ -84,7 +84,7 @@ func (s *Scheduler) send(n *Node, l uint32, a *core.Action) {
 	switch {
 	case c.broken:
 		s.lose(&it)
-	case !to.up || int(a.Peer.Loop) >= len(to.loops) || s.cut(n.id, to.id) || s.chance(s.set.DropNum, s.set.DropDen):
+	case !to.reachable() || int(a.Peer.Loop) >= len(to.loops) || s.cut(n.id, to.id) || s.chance(s.set.DropNum, s.set.DropDen):
 		s.lose(&it)
 		s.breakConn(c)
 	default:
@@ -115,9 +115,12 @@ func (s *Scheduler) connect(from, to core.NodeID) *conn {
 		}
 	}
 	s.connID++
-	s.conns = append(s.conns, conn{id: s.connID, ends: [2]core.NodeID{from, to}, done: [2]bool{false, !s.nodes[to.Node].up}})
+	s.conns = append(s.conns, conn{id: s.connID, ends: [2]core.NodeID{from, to}, done: [2]bool{false, !s.nodes[to.Node].reachable()}})
 	return &s.conns[len(s.conns)-1]
 }
+
+// reachable reports whether the node takes messages: it runs, and no pause that loses them stands it still.
+func (n *Node) reachable() bool { return n.up && !(n.paused && n.lossy) }
 
 func (s *Scheduler) connIndex(id uint64) int {
 	return slices.IndexFunc(s.conns, func(c conn) bool { return c.id == id })

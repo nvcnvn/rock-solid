@@ -615,9 +615,22 @@ func TestMessagesToAPausedNodeWaitForItOrAreLost(t *testing.T) {
 	c.settle(t)
 	c.s.Pause(0, clock.PauseCounted, second, true)
 	c.ping(1, 0)
+	for len(c.m[1].lostWith) == 0 {
+		c.s.Step()
+	}
+	c.ping(1, 0)
 	c.settle(t)
-	if len(c.m[0].received(msgRequest)) != 1 || !slices.Equal(c.m[1].lostWith, []int{1}) || !slices.Equal(c.m[0].lostWith, []int{0}) {
+	if len(c.m[0].received(msgRequest)) != 1 || !slices.Equal(c.m[1].lostWith, []int{1, 1}) || !slices.Equal(c.m[0].lostWith, []int{0}) {
 		t.Fatalf("lost: node 0 got %d requests; PeerLost %v and %v", len(c.m[0].received(msgRequest)), c.m[0].lostWith, c.m[1].lostWith)
+	}
+
+	c = newCluster(1, sim.DefaultSettings(), nodes(2)...)
+	c.m[1].timeout = 10 * second
+	c.s.Pause(0, clock.PauseCounted, second, true)
+	c.ping(1, 0)
+	c.settle(t)
+	if len(c.m[0].received(msgRequest)) != 0 || !slices.Equal(c.m[1].lostWith, []int{1}) || c.m[0].lostWith != nil {
+		t.Fatalf("lost with no connection: node 0 got %d requests; PeerLost %v and %v", len(c.m[0].received(msgRequest)), c.m[0].lostWith, c.m[1].lostWith)
 	}
 }
 

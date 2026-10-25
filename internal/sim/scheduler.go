@@ -177,6 +177,7 @@ type Node struct {
 	up       bool
 	until    core.Tick
 	paused   bool
+	lossy    bool
 	gen      uint64
 	pool     *Pool
 	disks    []*Disk
@@ -540,7 +541,7 @@ func (s *Scheduler) down(id uint32) *Node {
 	if n.paused {
 		n.clock.Resume(s.now)
 	}
-	n.up, n.paused, n.until = false, false, s.now
+	n.up, n.paused, n.lossy, n.until = false, false, false, s.now
 	s.closeConns(id)
 	s.items = slices.DeleteFunc(s.items, func(it item) bool { return it.node == id })
 	n.gen++
@@ -574,7 +575,7 @@ func (n *Node) start() {
 	n.boot(n)
 }
 
-// Pause stands node id still for d from now, its clocks as stop says; the messages sent to it wait for it, or with lost its connections break.
+// Pause stands node id still for d from now, its clocks as stop says; the messages sent to it wait for it, or with lost are lost and break their connections.
 func (s *Scheduler) Pause(id uint32, stop clock.Stop, d core.Tick, lost bool) {
 	n := s.nodes[id]
 	if !n.up || n.paused || stop == clock.Running {
@@ -590,7 +591,7 @@ func (s *Scheduler) Pause(id uint32, stop clock.Stop, d core.Tick, lost bool) {
 		n.passes[l]++
 		s.record(n, uint32(l), now, r)
 	}
-	n.paused, n.until = true, s.now+d
+	n.paused, n.lossy, n.until = true, lost, s.now+d
 	n.clock.Stop(s.now, stop)
 	if lost {
 		s.breakConns(id)
@@ -600,7 +601,7 @@ func (s *Scheduler) Pause(id uint32, stop clock.Stop, d core.Tick, lost bool) {
 // resume ends the node's pause and, as its loop's first pass would, delivers every message that arrived while it stood still, in arrival order.
 func (s *Scheduler) resume(n *Node) {
 	n.clock.Resume(s.now)
-	n.paused = false
+	n.paused, n.lossy = false, false
 	now := n.Context().Now
 	for l := range n.loops {
 		n.passes[l]++
