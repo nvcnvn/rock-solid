@@ -18,7 +18,7 @@ balanced 0.630 GB
 available 0.630 GB, set by A (128 of 128 slots, target 128.0); available + held 0.0% under balanced
 held 0.000 GB
 f 48.1%, stranded room: B 1.170 GB (65%)
-asks true
+asks true, spare domain false
 reprotectable none
 
 # A Pool applied without the CLI has a confirmed fraction of 0.

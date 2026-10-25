@@ -90,6 +90,9 @@ func (c *capacityCase) run(t *testing.T, d *datadriven.TestData) string {
 		return ""
 	case "figures":
 		f := c.pool.Capacity(c.disks, c.grants)
+		if bound := mulDiv(f.Capacity, uint64(c.pool.dataShards()), uint64(c.pool.width())); f.Available+f.Held > f.Balanced || f.Balanced > bound {
+			t.Errorf("available %d + held %d, balanced %d, capacity ÷ b %d", f.Available, f.Held, f.Balanced, bound)
+		}
 		return c.print(&f)
 	case "conditions":
 		f := c.pool.Capacity(c.disks, c.grants)
@@ -164,7 +167,7 @@ func (c *capacityCase) print(f *Figures) string {
 	if n == 0 {
 		b.WriteString(" none")
 	}
-	fmt.Fprintf(&b, "\nasks %v\n", f.Asks())
+	fmt.Fprintf(&b, "\nasks %v, spare domain %v\n", f.Asks(), f.SpareDomain)
 	switch f.Loss.Kind {
 	case LossNone:
 		b.WriteString("reprotectable none\n")

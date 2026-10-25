@@ -29,7 +29,7 @@ balanced 1.800 TB
 available 1.800 TB, set by C (128 of 128 slots, target 128.0); available + held 0.0% under balanced
 held 0.000 GB
 f 40.0%, stranded room: A 1.800 TB (50%), B 1.800 TB (50%)
-asks false
+asks false, spare domain false
 reprotectable none
 
 conditions

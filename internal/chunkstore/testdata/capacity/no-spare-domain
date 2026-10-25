@@ -21,7 +21,7 @@ balanced 3.600 TB
 available 3.600 TB, set by A1 (64 of 128 slots, target 64.0); available + held 0.0% under balanced
 held 0.000 GB
 f 0.0%, stranded room: none
-asks false
+asks false, spare domain false
 reprotectable 1.800 TB, losing disk A1
 
 hold 1.7TB
@@ -55,7 +55,7 @@ balanced 3.600 TB
 available 3.600 TB, set by A1 (64 of 128 slots, target 64.0); available + held 0.0% under balanced
 held 0.000 GB
 f 7.7%, stranded room: C 0.900 TB (20%)
-asks false
+asks false, spare domain false
 reprotectable 0.900 TB, losing disk C1
 
 disks
@@ -72,5 +72,5 @@ balanced 3.600 TB
 available 3.600 TB, set by A (128 of 128 slots, target 128.0); available + held 0.0% under balanced
 held 0.000 GB
 f 0.0%, stranded room: none
-asks false
+asks false, spare domain false
 reprotectable none

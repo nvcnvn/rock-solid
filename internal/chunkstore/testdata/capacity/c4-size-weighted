@@ -18,7 +18,7 @@ balanced 4.200 TB
 available 1.786 TB, set by A (86 of 256 slots, target 36.6); available + held 57.5% under balanced
 held 0.000 GB
 f 0.0%, stranded room: none
-asks false
+asks false, spare domain true
 reprotectable 2.400 TB, losing domain B
 
 # Placement still proposes moves, or a PG still lists past members: Unbalanced keeps its value.

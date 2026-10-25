@@ -18,7 +18,7 @@ balanced 4.200 TB
 available 4.189 TB, set by B (110 of 256 slots, target 109.7); available + held 0.3% under balanced
 held 0.000 GB
 f 0.0%, stranded room: none
-asks false
+asks false, spare domain true
 reprotectable 2.400 TB, losing domain B
 
 conditions settled

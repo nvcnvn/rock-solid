@@ -124,6 +124,19 @@ func TestAvailable(t *testing.T) {
 	}
 }
 
+// A pool whose disks have no capacity left has a stranded fraction of 0, and no Stranded.
+func TestNoCapacityStrandsNothing(t *testing.T) {
+	disks := nodes(4, 1, 1)
+	for i := range disks {
+		disks[i].Slots, disks[i].Live = 64, disks[i].Blocks
+	}
+	f := rep(2, 128).Capacity(disks, 0)
+	var c Conditions
+	if c.Update(&f, true); f.Capacity != 0 || f.Stranded != 0 || c.Stranded {
+		t.Fatalf("capacity %d, f %v, Stranded %v", f.Capacity, f.Stranded, c.Stranded)
+	}
+}
+
 // A none pool with locality node has per-node figures, each over the node's own PGs.
 func TestPerNodeAvailable(t *testing.T) {
 	p := rep(1, 256)

@@ -18,7 +18,7 @@ balanced 2.700 TB
 available 2.679 TB, set by C (86 of 128 slots, target 85.3); available + held 0.8% under balanced
 held 0.000 GB
 f 18.2%, stranded room: A 0.900 TB (25%), B 0.900 TB (25%)
-asks false
+asks false, spare domain true
 reprotectable 0.900 TB, losing domain A
 
 conditions settled
@@ -45,7 +45,7 @@ balanced 2.700 TB
 available 1.885 TB, set by C (86 of 128 slots, target 85.3); available + held 0.5% under balanced
 held 0.800 TB
 f 18.2%, stranded room: A 0.900 TB (25%), B 0.900 TB (25%)
-asks false
+asks false, spare domain true
 reprotectable 0.900 TB, losing domain A
 
 conditions settled
@@ -63,7 +63,7 @@ balanced 2.700 TB
 available 1.687 TB, set by C (86 of 128 slots, target 85.3); available + held 0.5% under balanced
 held 1.000 TB
 f 18.2%, stranded room: A 0.900 TB (25%), B 0.900 TB (25%)
-asks false
+asks false, spare domain true
 reprotectable 0.900 TB, losing domain A
 
 conditions settled
@@ -81,5 +81,5 @@ balanced 2.700 TB
 available 0.695 TB, set by C (86 of 128 slots, target 85.3); available + held 0.2% under balanced
 held 2.000 TB
 f 18.2%, stranded room: A 0.900 TB (25%), B 0.900 TB (25%)
-asks false
+asks false, spare domain true
 reprotectable 0.900 TB, losing domain A

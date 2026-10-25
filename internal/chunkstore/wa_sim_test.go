@@ -422,13 +422,16 @@ func TestDefaultWriteLimitBySegmentSize(t *testing.T) {
 	defer debug.SetGCPercent(debug.SetGCPercent(50))
 	for _, c := range []struct {
 		segmentBlocks uint32
-		limit         float64
-	}{{16, 0.45}, {32, 0.50}, {128, 0.55}, {1024, 0.75}} {
+		limit         uint8
+	}{{16, 45}, {32, 50}, {128, 55}, {1024, 75}} {
 		t.Run(fmt.Sprintf("%d KiB", c.segmentBlocks*4), func(t *testing.T) {
+			if got := DefaultWriteLimit(4096 * uint64(c.segmentBlocks) * core.BlockSize); got != c.limit {
+				t.Fatalf("the default write_limit on %d KiB segments is %d%%, want %d%%", c.segmentBlocks*4, got, c.limit)
+			}
 			geo := disklog.Geometry{SegmentBlocks: c.segmentBlocks, SegmentCount: 1024}
-			w := waRun{geo: geo, fill: c.limit, warm: 1, record: 1 << 20}.run(t, 1)
+			w := waRun{geo: geo, fill: float64(c.limit) / 100, warm: 1, record: 1 << 20}.run(t, 1)
 			if !w.measured || w.ranOut {
-				t.Fatalf("%.0f%% full on %d KiB segments ran out of space", 100*c.limit, c.segmentBlocks*4)
+				t.Fatalf("%d%% full on %d KiB segments ran out of space", c.limit, c.segmentBlocks*4)
 			}
 			w.checkMetric(t)
 		})
