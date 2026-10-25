@@ -31,6 +31,7 @@ const (
 	KindReply
 	KindRead
 	KindReadReply
+	KindLeaseRequest
 	KindGrant
 	KindHeartbeat
 	KindReport
@@ -86,7 +87,7 @@ type Hello struct {
 	Incarnation uint64
 }
 
-// Update is a chunk write or punch, from a client to the primary or, with the version it ordered, from the primary to a member.
+// Update is a chunk write or punch, from a client to the primary or, with the version it ordered, from the primary to a member; a purger's punch names its shard and Raft term.
 type Update struct {
 	Kind        Kind
 	ID          core.RequestID
@@ -97,6 +98,8 @@ type Update struct {
 	Off         uint32
 	Len         uint32
 	Snapshot    uint64
+	Shard       uint64
+	Term        uint64
 	Version     uint64
 	HasExpect   bool
 	Expect      uint64
@@ -124,21 +127,29 @@ type Response struct {
 	Fill     uint64
 }
 
-// Grant is a node-pair lease under a support epoch, with the grantor's CLOCK_MONOTONIC_RAW reading and boot ID.
-type Grant struct {
-	ID      core.RequestID
-	Support uint64
-	Raw     core.Tick
-	Boot    [16]byte
-}
-
-// Heartbeat between a node pair carries the sender's table epoch, the support epoch it holds, its CLOCK_MONOTONIC_RAW reading and boot ID.
-type Heartbeat struct {
+// LeaseRequest asks a grantor for a node-pair lease under a support epoch, reporting the holder's table epoch.
+type LeaseRequest struct {
 	ID      core.RequestID
 	Epoch   uint64
 	Support uint64
+}
+
+// Grant answers a LeaseRequest: StatusOK with the support epoch and the grantor's run ID and CLOCK_MONOTONIC_RAW reading, or StatusRefused with the grantor's table epoch.
+type Grant struct {
+	ID      core.RequestID
+	Status  Status
+	Epoch   uint64
+	Support uint64
+	Run     uint64
 	Raw     core.Tick
-	Boot    [16]byte
+}
+
+// Heartbeat between a node pair carries the sender's table epoch and, as a grantor, its run ID and CLOCK_MONOTONIC_RAW reading.
+type Heartbeat struct {
+	ID    core.RequestID
+	Epoch uint64
+	Run   uint64
+	Raw   core.Tick
 }
 
 // Latency is a member disk's acknowledgment latency as its primary saw it.
@@ -277,7 +288,8 @@ func AppendUpdate(dst []byte, u *Update) []byte {
 	dst = le.AppendUint64(le.AppendUint64(dst, u.Session), u.Incarnation)
 	dst = u.Chunk.AppendTo(dst)
 	dst = le.AppendUint32(le.AppendUint32(dst, u.Off), u.Len)
-	dst = le.AppendUint64(le.AppendUint64(dst, u.Snapshot), u.Version)
+	dst = le.AppendUint64(le.AppendUint64(le.AppendUint64(dst, u.Snapshot), u.Shard), u.Term)
+	dst = le.AppendUint64(dst, u.Version)
 	return le.AppendUint64(appendBool(dst, u.HasExpect), u.Expect)
 }
 
@@ -289,7 +301,7 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 	u.Session, u.Incarnation = r.u64(), r.u64()
 	u.Chunk = r.chunk()
 	u.Off, u.Len = r.u32(), r.u32()
-	u.Snapshot, u.Version = r.u64(), r.u64()
+	u.Snapshot, u.Shard, u.Term, u.Version = r.u64(), r.u64(), r.u64(), r.u64()
 	u.HasExpect, u.Expect = r.optional()
 	replica := u.Kind == KindReplicaWrite || u.Kind == KindReplicaPunch
 	want := 0
@@ -348,35 +360,48 @@ func DecodeResponse(b []byte, data int, rp *Response) error {
 	return r.done(err)
 }
 
+// AppendLeaseRequest appends lr's frame.
+func AppendLeaseRequest(dst []byte, lr *LeaseRequest) []byte {
+	return le.AppendUint64(le.AppendUint64(appendHead(dst, KindLeaseRequest, lr.ID), lr.Epoch), lr.Support)
+}
+
+// DecodeLeaseRequest decodes a lease request frame.
+func DecodeLeaseRequest(b []byte, data int, lr *LeaseRequest) error {
+	r, err := open(b, data, KindLeaseRequest)
+	lr.ID = r.id
+	lr.Epoch, lr.Support = r.u64(), r.u64()
+	return r.done(err)
+}
+
 // AppendGrant appends g's frame.
 func AppendGrant(dst []byte, g *Grant) []byte {
-	dst = appendHead(dst, KindGrant, g.ID)
-	dst = le.AppendUint64(le.AppendUint64(dst, g.Support), uint64(g.Raw))
-	return append(dst, g.Boot[:]...)
+	dst = le.AppendUint64(append(appendHead(dst, KindGrant, g.ID), byte(g.Status)), g.Epoch)
+	return le.AppendUint64(le.AppendUint64(le.AppendUint64(dst, g.Support), g.Run), uint64(g.Raw))
 }
 
 // DecodeGrant decodes a grant frame.
 func DecodeGrant(b []byte, data int, g *Grant) error {
 	r, err := open(b, data, KindGrant)
 	g.ID = r.id
-	g.Support, g.Raw = r.u64(), core.Tick(r.u64())
-	g.Boot = [16]byte(r.take(16))
+	g.Status, g.Epoch = Status(r.u8()), r.u64()
+	g.Support, g.Run, g.Raw = r.u64(), r.u64(), core.Tick(r.u64())
+	if g.Status != StatusOK && g.Status != StatusRefused {
+		r.bad = true
+	}
 	return r.done(err)
 }
 
 // AppendHeartbeat appends h's frame.
 func AppendHeartbeat(dst []byte, h *Heartbeat) []byte {
-	dst = appendHead(dst, KindHeartbeat, h.ID)
-	dst = le.AppendUint64(le.AppendUint64(dst, h.Epoch), h.Support)
-	return append(le.AppendUint64(dst, uint64(h.Raw)), h.Boot[:]...)
+	dst = le.AppendUint64(le.AppendUint64(appendHead(dst, KindHeartbeat, h.ID), h.Epoch), h.Run)
+	return le.AppendUint64(dst, uint64(h.Raw))
 }
 
 // DecodeHeartbeat decodes a node-pair heartbeat frame.
 func DecodeHeartbeat(b []byte, data int, h *Heartbeat) error {
 	r, err := open(b, data, KindHeartbeat)
 	h.ID = r.id
-	h.Epoch, h.Support, h.Raw = r.u64(), r.u64(), core.Tick(r.u64())
-	h.Boot = [16]byte(r.take(16))
+	h.Epoch, h.Run, h.Raw = r.u64(), r.u64(), core.Tick(r.u64())
 	return r.done(err)
 }
 

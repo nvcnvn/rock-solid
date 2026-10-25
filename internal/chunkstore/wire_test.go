@@ -18,7 +18,6 @@ import (
 var (
 	wirePG    = PGFields{Epoch: 77, PG: core.PGID{Pool: 1, Index: 17}, Interval: 41}
 	wireChunk = core.ChunkID{Volume: 2, Inode: 3, Index: 4}
-	wireBoot  = [16]byte{0xb0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0xbf}
 )
 
 type wireCase struct {
@@ -42,6 +41,8 @@ func wireCases() []wireCase {
 		{"punch", upd(KindPunch, 0, core.ChunkSize, 0, false, 0), 0},
 		{"punch_expect_absent_chunk", upd(KindPunch, 8192, 1, 0, true, 0), 0},
 		{"replica_punch", upd(KindReplicaPunch, 0, core.ChunkSize, v, false, 0), 0},
+		{"purger_punch", &Update{Kind: KindPunch, ID: 5, PG: wirePG, Session: 9, Incarnation: 1_000_000, Chunk: wireChunk,
+			Len: core.ChunkSize, Snapshot: 2, Shard: 0x51, Term: 6}, 0},
 		{"ack", &Response{Kind: KindAck, ID: 5, Version: v, Fill: 123_456}, 0},
 		{"ack_no_space", &Response{Kind: KindAck, ID: 5, Status: StatusNoSpace, Fill: 900_000}, 0},
 		{"reply", &Response{Kind: KindReply, ID: 5, Version: v}, 0},
@@ -52,8 +53,10 @@ func wireCases() []wireCase {
 		{"read_reply", &Response{Kind: KindReadReply, ID: 6, Version: v}, 2 * core.BlockSize},
 		{"read_reply_missing", &Response{Kind: KindReadReply, ID: 6, Status: StatusMissing}, 0},
 		{"read_reply_unfound", &Response{Kind: KindReadReply, ID: 6, Status: StatusUnfound}, 0},
-		{"grant", &Grant{ID: 7, Support: 8, Raw: 51_020_500, Boot: wireBoot}, 0},
-		{"heartbeat", &Heartbeat{ID: 8, Epoch: 77, Support: 8, Raw: 51_020_500, Boot: wireBoot}, 0},
+		{"lease_request", &LeaseRequest{ID: 7, Epoch: 77, Support: 8}, 0},
+		{"grant", &Grant{ID: 7, Support: 8, Run: 0x0123456789abcdef, Raw: 51_020_500}, 0},
+		{"grant_refused", &Grant{ID: 7, Status: StatusRefused, Epoch: 80}, 0},
+		{"heartbeat", &Heartbeat{ID: 8, Epoch: 77, Run: 0x0123456789abcdef, Raw: 51_020_500}, 0},
 		{"report_empty", &Report{ID: 9}, 0},
 		{"report", &Report{ID: 9, Activations: []PGFields{wirePG}, Latencies: []Latency{{Disk: 3, Latency: 250}},
 			Disks: []DiskState{{Log: 0x0123456789abcdef, Fill: 1000, Oldest: 40}, {Log: 2, Fill: 5, Oldest: 1_500_000, Failed: true}}}, 0},
@@ -77,6 +80,8 @@ func encodeMsg(msg any) []byte {
 		return AppendRead(nil, m)
 	case *Response:
 		return AppendResponse(nil, m)
+	case *LeaseRequest:
+		return AppendLeaseRequest(nil, m)
 	case *Grant:
 		return AppendGrant(nil, m)
 	case *Heartbeat:
@@ -113,6 +118,9 @@ func decodeMsg(b []byte, data int) (any, error) {
 	case KindAck, KindReply, KindReadReply:
 		var m Response
 		return &m, DecodeResponse(b, data, &m)
+	case KindLeaseRequest:
+		var m LeaseRequest
+		return &m, DecodeLeaseRequest(b, data, &m)
 	case KindGrant:
 		var m Grant
 		return &m, DecodeGrant(b, data, &m)
@@ -331,6 +339,7 @@ func TestWireRejectsIntervalZero(t *testing.T) {
 
 func TestWireRejectsBadFields(t *testing.T) {
 	mustMalformed(t, "status past the last", AppendResponse(nil, &Response{Kind: KindReply, Status: statusEnd}), 0)
+	mustMalformed(t, "a grant neither granted nor refused", AppendGrant(nil, &Grant{Status: StatusNoSpace}), 0)
 	mustMalformed(t, "peering request with lists", AppendPeering(nil, &Peering{Kind: KindPeer, PG: wirePG, Newest: []ChunkVersion{{}}}), 0)
 	b := AppendProbeReply(nil, &ProbeReply{})
 	b[len(b)-1] = 2
