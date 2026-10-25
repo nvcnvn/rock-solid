@@ -2859,7 +2859,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
 - The list, with 4 processes on a 14-core Apple M4 Pro Mac mini running other work: 44,200 seeds in
   about 330 s, building the test binaries included; the largest process peaked at 528 MiB resident
   (an `internal/lsm` metamorphic shard), all four at 1.9 GiB. The pool figures' and placement rows
-  were timed on 2 processes, where the whole list took 603 s:
+  were timed on 2 processes, where the whole list took 599 s:
 
   | Test | Seeds | Time |
   | --- | --- | --- |
@@ -2878,7 +2878,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/chunkstore` `TestRecoveryAndRebuildEqualLiveIndex` | 200 | 37 s |
   | `internal/chunkstore` `TestRecoveriesMatchTheCrashOracle` | 200 | 24 s |
   | `internal/chunkstore` `TestPoolFiguresHoldTheirBounds` | 20,000 | about 1 s |
-  | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 21 s |
+  | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 24 s |
 
 - A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
   under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
@@ -4225,7 +4225,7 @@ interval that added it come on top of these sizes; both are usually absent (`Tes
   interval's members, 9 more during a move (`TestDeltaSize`).
 
 **[property] tests.** `TestPlacementKeepsItsRules`, 1,000 seeds in `scripts/seeds.sh`, about 40 ms
-each; 10,000 passed once in 204 s on 2 processes. Each seed draws a layout from the matrix in
+each; 10,000 passed once in 228 s on 2 processes. Each seed draws a layout from the matrix in
 Testing strategy, 3 or 5 nodes of 1 or 4 disks of 0.5 to 8 TB, some holding another pool's data, under `none`, `rep2` or `rep3` with a random
 `min_live`, places it, and computes 30 tables after random events: a disk added or removed, a disk
 or node marked down, up or in `maintenance`, a drain set or cleared, time passing, primaries asking,
@@ -4251,7 +4251,9 @@ Then every disk comes back up, undrained and unpinned, and tables are computed, 
 one's moves have copied and activated, until one proposes no move; then a disk is added to the pool
 holding data, and the same again. Once the loop stops:
 
-- The computation after the moves copied proposes none.
+- It settles within a few computations, at most 4 over 5,000 seeds: one after the moves copied
+  proposes more only where the one before found every PG it would move from a disk still moving,
+  since a PG makes one move at a time.
 - It has converged: no disk is outside its fill margin.
 - Available + held is at least balanced ÷ (1 + the largest margin of the pool's disks) and never
   above balanced.
@@ -4260,11 +4262,13 @@ holding data, and the same again. Once the loop stops:
   Moving from the disk furthest above its target even inside its margin costs those extra moves:
   when a disk joins a domain whose capped share rises, the disks of other domains that are just
   above their targets feed that domain's other disks, and a disk far above its target feeds the
-  new disk in its own domain until it falls under the rest. Over 5,000 seeds the moves were 1.5%
-  above the lower bound in all, three runs above the lower bound plus the margins, none above a
-  quarter more.
-- Over any run of at least 8 seeds, the members disk additions move total at most 5% above the sum
-  of their lower bounds; ten sampled runs of 8 seeds stayed within 2.7%.
+  new disk in its own domain until it falls under the rest. Over 5,000 seeds the moves were 0.7%
+  above the lower bound in all, none above a quarter more.
+- Over a run of at least 8 seeds, the members disk additions move total at most 5% above the sum
+  of their lower bounds. Of ten runs of 8 seeds starting at 0, 800, …, 7,200, nine stayed within
+  0.75%; seeds 2,400 to 2,407 reach 10.3%, two of their additions 12 and 20% above their bounds,
+  so the check fails on that run alone. Open: whether the check holds only over the 1,000 seeds
+  `scripts/seeds.sh` runs, or the bound or the moves change.
 
 `Unbalanced` [property], `TestAddedDiskNeverUnbalances`, on layouts drawn as the study's test U
 draws them: 200 random layouts each for `rep2` and `rep3`, 3 to 6 nodes of 1 or 2 disks of 0.5 to
