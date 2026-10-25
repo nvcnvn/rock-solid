@@ -412,7 +412,7 @@ func (pl *placer) converged() bool {
 	return true
 }
 
-// balance makes up to limit moves while some disk is outside its fill margin: from the disk furthest above its target that has an up member of an unpinned PG to the eligible disk furthest below, if that leaves it below the source; else one that brings a disk outside its margin nearer it and takes none outside its own.
+// balance makes up to limit moves while some disk is outside its fill margin: from the disk furthest above its target that has an up member of an unpinned PG to the eligible disk furthest below, if that leaves it no higher than the source; else one that brings a disk outside its margin nearer it and takes none outside its own.
 func (pl *placer) balance(limit int) int {
 	order := make([]int, len(pl.disks))
 	dests := make([]int, len(pl.disks))

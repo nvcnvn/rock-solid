@@ -4129,8 +4129,9 @@ row says otherwise).
 
 - Refill puts every missing member on the eligible disk furthest below its target
   (`TestRefillFillsTheDiskFurthestBelow`). Balance then runs: while any disk is outside its fill
-  margin, move one member from the disk furthest above its target, even one inside its own margin,
-  to the eligible disk furthest below, if that leaves it below the source
+  margin, move one member from the disk furthest above its target by its fill now, even one inside
+  its own margin, to the eligible disk furthest below by its fill after one more member, if that
+  leaves it no higher than the source
   (`TestBalanceTakesFromTheFurthestAbove`: loads of 44, 44 and 40 against targets of 42.7 take one
   move, from the first 44, to 43, 44 and 41). When no such move is left, a move that brings a disk
   outside its margin nearer and takes neither disk outside its margin on the other side; stop when
@@ -4151,7 +4152,8 @@ row says otherwise).
   under `rep3` is ignored, pin and all; one that swaps a member for a disk on a node the PG lacks
   is applied (`TestEditsKeepTheRules`).
 - Balance never moves a member of a pinned PG, and refill still replaces one on a lost disk. A
-  draining disk keeps its members up while balance moves them all off (`TestPinAndDrain`).
+  draining disk keeps its members up while balance moves them all off (`TestPinAndDrain`), except
+  a pinned PG's, which keeps the drain from finishing until an operator edits or unpins that PG.
 - Targets by capacity: after a disk is added to a pool holding data, the second computation, run
   once the first one's moves have copied, proposes no move (`TestMovesAfterADiskAdded`; the
   counts by room are the capacity conditions study's).
