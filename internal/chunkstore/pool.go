@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
@@ -84,8 +85,10 @@ func Preset(name string) (PoolSpec, bool) {
 // NewPool resolves spec's defaults, sizing an unset pg_count for disks, and checks every setting.
 func NewPool(spec PoolSpec, disks int) (Pool, error) {
 	switch {
-	case spec.Sealed != "" && spec.Sealed != "replicated":
+	case spec.Sealed == "ec":
 		return Pool{}, ecRefused("sealed")
+	case spec.Sealed != "" && spec.Sealed != "replicated":
+		return Pool{}, &SettingError{"sealed", "must be replicated or ec"}
 	case spec.Data != nil:
 		return Pool{}, ecRefused("data")
 	case spec.Parity != nil:
@@ -189,7 +192,6 @@ func (p Pool) dataShards() int { return max(p.Data, 1) }
 type Layout struct {
 	Domains      int
 	NodeFailures int
-	SpareDomain  bool
 }
 
 // CheckLayout refuses p unless its copies fit in distinct domains with disks of its class, and states what the layout survives.
@@ -197,10 +199,12 @@ func (p Pool) CheckLayout(disks []Disk) (Layout, error) {
 	var keys []uint32
 	for i := range disks {
 		if p.DiskClass == "" || disks[i].Class == p.DiskClass {
-			keys = appendUnique(keys, p.domainOf(&disks[i]))
+			if k := p.domainOf(&disks[i]); !slices.Contains(keys, k) {
+				keys = append(keys, k)
+			}
 		}
 	}
-	l := Layout{Domains: len(keys), SpareDomain: len(keys)-1 >= p.width()}
+	l := Layout{Domains: len(keys)}
 	if l.Domains < p.width() {
 		return l, fmt.Errorf("%w: width %d, %d domains with disks of the class", ErrTooFewDomains, p.width(), l.Domains)
 	}
@@ -209,15 +213,6 @@ func (p Pool) CheckLayout(disks []Disk) (Layout, error) {
 		l.NodeFailures = p.Replicas - 1
 	}
 	return l, nil
-}
-
-func appendUnique(s []uint32, v uint32) []uint32 {
-	for _, x := range s {
-		if x == v {
-			return s
-		}
-	}
-	return append(s, v)
 }
 
 func (p Pool) domainOf(d *Disk) uint32 {

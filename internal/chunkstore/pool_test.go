@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"cmp"
 	"errors"
 	"testing"
 
@@ -40,6 +41,7 @@ func TestPoolSettingsRefused(t *testing.T) {
 		{"replicas", PoolSpec{Replicas: new(0)}},
 		{"replicas", PoolSpec{Replicas: new(4)}},
 		{"sealed", PoolSpec{Sealed: "ec"}},
+		{"sealed", PoolSpec{Sealed: "striped"}},
 		{"data", PoolSpec{Data: new(4)}},
 		{"parity", PoolSpec{Parity: new(2)}},
 		{"encode_on_write", PoolSpec{EncodeOnWrite: &on}},
@@ -101,19 +103,12 @@ func TestWriteLimitPerDisk(t *testing.T) {
 		p := Pool{Replicas: 1, FailureDomain: DomainNode, PGCount: 1, WriteLimit: limit}
 		f := p.Capacity(disks, 0)
 		for i, d := range f.Disks {
-			pct := cmpOr(limit, defaults[i])
+			pct := cmp.Or(limit, defaults[i])
 			if d.Percent != pct || d.Limit != d.Blocks*uint64(pct)/100 || d.level(10) != d.Blocks*uint64(pct-10)/100 {
 				t.Fatalf("write_limit %d, %d GiB disk: %d%%, limit %d, NearFull at %d", limit, sizes[i]>>30, d.Percent, d.Limit, d.level(10))
 			}
 		}
 	}
-}
-
-func cmpOr(v, def uint8) uint8 {
-	if v == 0 {
-		return def
-	}
-	return v
 }
 
 func nodes(sizes ...float64) []Disk {
@@ -139,21 +134,25 @@ func TestPoolCreationRules(t *testing.T) {
 		disks  []Disk
 		ok     bool
 		layout Layout
+		spare  bool
 	}{
-		{"rep3 on 3 nodes", rep3, nodes(1, 1, 1), true, Layout{Domains: 3, NodeFailures: 2}},
-		{"rep3 on 4 nodes", rep3, nodes(1, 1, 1, 1), true, Layout{Domains: 4, NodeFailures: 2, SpareDomain: true}},
-		{"rep3 on 2 nodes", rep3, nodes(1, 1), false, Layout{}},
-		{"rep3 at 2 per node on 2 nodes", pool(PoolSpec{MaxPerDomain: new(2)}), nodes(1, 1), false, Layout{}},
-		{"rep2 on 2 nodes", rep2, nodes(1, 1), true, Layout{Domains: 2, NodeFailures: 1}},
+		{"rep3 on 3 nodes", rep3, nodes(1, 1, 1), true, Layout{Domains: 3, NodeFailures: 2}, false},
+		{"rep3 on 4 nodes", rep3, nodes(1, 1, 1, 1), true, Layout{Domains: 4, NodeFailures: 2}, true},
+		{"rep3 on 2 nodes", rep3, nodes(1, 1), false, Layout{}, false},
+		{"rep3 at 2 per node on 2 nodes", pool(PoolSpec{MaxPerDomain: new(2)}), nodes(1, 1), false, Layout{}, false},
+		{"rep2 on 2 nodes", rep2, nodes(1, 1), true, Layout{Domains: 2, NodeFailures: 1}, false},
 		{"rep3 by disk on 1 node of 3 disks", pool(PoolSpec{FailureDomain: DomainDisk}),
-			[]Disk{{ID: 0, Node: 7, Slots: 1}, {ID: 1, Node: 7, Slots: 1}, {ID: 2, Node: 7, Slots: 1}}, true, Layout{Domains: 3}},
+			[]Disk{{ID: 0, Node: 7, Slots: 1}, {ID: 1, Node: 7, Slots: 1}, {ID: 2, Node: 7, Slots: 1}}, true, Layout{Domains: 3}, false},
 		{"rep3 of NVMe on 3 nodes, 2 with NVMe", pool(PoolSpec{DiskClass: "nvme"}),
-			[]Disk{{ID: 0, Node: 0, Class: "nvme"}, {ID: 1, Node: 1, Class: "nvme"}, {ID: 2, Node: 2, Class: "hdd"}}, false, Layout{}},
-		{"none on 1 node", none, nodes(1), true, Layout{Domains: 1, SpareDomain: false}},
+			[]Disk{{ID: 0, Node: 0, Class: "nvme"}, {ID: 1, Node: 1, Class: "nvme"}, {ID: 2, Node: 2, Class: "hdd"}}, false, Layout{}, false},
+		{"none on 1 node", none, nodes(1), true, Layout{Domains: 1}, false},
 	} {
 		l, err := c.pool.CheckLayout(c.disks)
 		if c.ok != (err == nil) || c.ok && l != c.layout || !c.ok && !errors.Is(err, ErrTooFewDomains) {
 			t.Fatalf("%s: %+v, %v", c.name, l, err)
+		}
+		if f := c.pool.Capacity(c.disks, 0); c.ok && f.SpareDomain != c.spare {
+			t.Fatalf("%s: spare domain %v", c.name, f.SpareDomain)
 		}
 	}
 }

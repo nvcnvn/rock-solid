@@ -2856,9 +2856,10 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
   runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
   they take.
-- The list, with 4 processes on a 14-core Apple M4 Pro Mac mini running other work: 23,200 seeds in
-  320 s, building the test binaries included; the largest process peaked at 528 MiB resident (an
-  `internal/lsm` metamorphic shard), all four at 1.9 GiB:
+- The list, with 4 processes on a 14-core Apple M4 Pro Mac mini running other work: 43,200 seeds in
+  about 320 s, building the test binaries included; the largest process peaked at 528 MiB resident
+  (an `internal/lsm` metamorphic shard), all four at 1.9 GiB. The pool figures' row was timed on
+  2 processes, where the whole list took 567 s:
 
   | Test | Seeds | Time |
   | --- | --- | --- |
@@ -2876,6 +2877,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/chunkstore` `TestCleanerSurvivesCrashes` | 500 | 11 s |
   | `internal/chunkstore` `TestRecoveryAndRebuildEqualLiveIndex` | 200 | 37 s |
   | `internal/chunkstore` `TestRecoveriesMatchTheCrashOracle` | 200 | 24 s |
+  | `internal/chunkstore` `TestPoolFiguresHoldTheirBounds` | 20,000 | about 1 s |
 
 - A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
   under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
@@ -3958,7 +3960,7 @@ The terms:
 | C1 | `rep2`, nodes of 0.7 and 2 GB | 0.63, 1.8 GB | 1.215 GB | 0.63 GB | 0.63 GB | 48.1% | B 1.17 GB (65%) | None: no spare domain, and no node has a second disk |
 | C2 | `rep3`, nodes of 4, 4, 2, 1 TB | 3.6, 3.6, 1.8, 0.9 TB | 3.300 TB | 2.700 TB | 2.679 TB | 18.2% | A, B 0.9 TB each (25%) | 0.900 TB (node A) |
 | C3 | `ec4-2` at 2 per node, nodes of 4, 4, 1 TB (2 disks each) | 3.6, 3.6, 0.9 TB | 5.400 TB | 1.800 TB | 1.800 TB | 66.7% | A, B 2.7 TB each (75%) | None: losing a node, or a disk of any node, leaves fewer than 6 members |
-| C4 | `none`, spread, three 2 TB disks, A holding 1.2 TB of another pool | 0.6, 1.8, 1.8 TB | 4.200 TB | 4.200 TB | 4.189 TB (capped targets); 1.786 TB (size-weighted) | 0 | None | Not computed: one copy. It would be 2.400 TB (B or C), not the 3.6 TB of losing A |
+| C4 | `none`, spread, three 2 TB disks, A holding 1.2 TB of another pool | 0.6, 1.8, 1.8 TB | 4.200 TB | 4.200 TB | 4.189 TB (capped targets); 1.786 TB (size-weighted) | 0 | None | Computed (2.400 TB, B or C, not the 3.6 TB of losing A) but never raises `CannotReprotect`: one copy |
 | C5 | `rep3`, ten nodes of 4, 4, 4, 2, 2, 2, 1, 1, 1, 0.5 TB | 3.6 ×3, 1.8 ×3, 0.9 ×3, 0.45 TB | 6.450 TB | 6.450 TB | 6.422 TB | 0 | None | 5.250 TB (node A) |
 | C6 | `rep2`, nodes of 4, 1, 1 TB | 3.6, 0.9, 0.9 TB | 2.700 TB | 1.800 TB | 1.800 TB | 33.3% | A 1.8 TB (50%; in whole blocks 439,453,126 of 878,906,250) | 0.900 TB (node A) |
 
@@ -4050,11 +4052,12 @@ Block volumes in an erasure-coded pool reserve at the copies' overhead. That cas
 
 Every PG's first `replicas` members, which hold its copies, sit in distinct domains. [property] On random layouts of 4 to 6 nodes, reprotectable is the least over each domain in turn; the largest domain alone was not the worst in 367 of 3,000 (the study's test E2).
 
-**Property tests.** [property] For random layouts of 3 to 10 nodes with 1 to 4 disks of 0.5 to 4 TB, some disks holding other pools' data, random valid tables of 1 to 3 copies and random amounts held, laid out as the table sends data (`TestPoolFiguresHoldTheirBounds`, each check registered as a `sim.Invariants` invariant):
+**Property tests.** [property] For random layouts of 3 to 10 nodes with 1 to 4 disks of 0.5 to 4 TB, some disks holding other pools' data, random valid tables of 1 to 3 copies and random amounts held, laid out as the table sends data (`TestPoolFiguresHoldTheirBounds`: 20,000 seeds per commit rather than thousands, since they take about a second; 300,000 passed once in 3 s on 2 processes):
 
 - available + held ≤ balanced ≤ Σcᵢ ÷ b, exactly in whole blocks;
+- available + held stays within a block of the empty pool's available as the pool fills;
 - balanced is the largest whole number of blocks D with Σᵢ min(cᵢ, a·D) ≥ b·D;
-- the domains' stranded rooms sum to Σcᵢ − b·B, to within a block per domain and copy;
+- the domains' stranded rooms sum to Σcᵢ − b·B, to within b blocks;
 - f, balanced and reprotectable do not change with the amount held;
 - for copies, balanced without the largest-capacity domain equals the least over single domains, and is at most balanced after any single disk loss;
 - `CannotReprotect` never fires on a one-copy pool, nor for a loss whose survivors cannot hold the width.
@@ -4744,6 +4747,9 @@ model](#epoch-change-model) property it checks:
 - Too few copies return an error, never wrong data.
 - A disk passes `write_limit` only through granted flushes, overwrites, punches and recovery.
 - Uniformly hashed fills reach the reported available figure within 1%.
+- Each pool's figures keep the bounds [Pools](#pools)' property test checks (available + held ≤
+  balanced ≤ Σcᵢ ÷ b, and reprotectable the worst single loss) as its table changes under events:
+  the test's checks are registered with `sim.Invariants` here.
 - Every read equals the byte-range oracle of acknowledged writes and punches applied in version
   order (8, 11).
 

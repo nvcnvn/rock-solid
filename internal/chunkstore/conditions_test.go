@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
-	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
@@ -289,16 +288,16 @@ func TestPoolFiguresHoldTheirBounds(t *testing.T) {
 		}
 		f := p.Capacity(disks, 0)
 
-		var inv sim.Invariants
-		inv.Register("pool figures within balanced", func() error { return figureBounds(p, &f) })
-		inv.Register("pool stranded fraction does not move as the pool fills", func() error {
-			if f.Stranded != empty.Stranded || f.Balanced != empty.Balanced || f.Reprotectable != empty.Reprotectable {
-				return fmt.Errorf("holding %d moves f from %v to %v, balanced from %d to %d", held, empty.Stranded, f.Stranded, empty.Balanced, f.Balanced)
-			}
-			return nil
-		})
-		inv.Register("pool reprotectable is the worst single loss", func() error { return worstLoss(p, disks, &f) })
-		if err := inv.Check(); err != nil {
+		if err := figureBounds(p, &f); err != nil {
+			t.Fatalf("pool %+v held %d: %v", p, held, err)
+		}
+		if f.Stranded != empty.Stranded || f.Balanced != empty.Balanced || f.Reprotectable != empty.Reprotectable {
+			t.Fatalf("holding %d moves f from %v to %v, balanced from %d to %d", held, empty.Stranded, f.Stranded, empty.Balanced, f.Balanced)
+		}
+		if reach := f.Available + f.Held; reach > empty.Available+1 || reach+1 < empty.Available {
+			t.Fatalf("holding %d moves available + held to %d from %d", held, reach, empty.Available)
+		}
+		if err := worstLoss(p, disks, &f); err != nil {
 			t.Fatalf("pool %+v held %d: %v", p, held, err)
 		}
 		var c Conditions
@@ -343,7 +342,7 @@ func figureBounds(p Pool, f *Figures) error {
 	for _, d := range f.Domains {
 		stranded += d.Stranded
 	}
-	if want := f.Capacity - w*f.Balanced; stranded > want || want-stranded > uint64(len(f.Domains))*w {
+	if want := f.Capacity - w*f.Balanced; stranded > want || want-stranded >= w {
 		return fmt.Errorf("stranded rooms sum to %d, capacity − b·balanced is %d", stranded, want)
 	}
 	return nil

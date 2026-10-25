@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"cmp"
 	"math/bits"
 	"slices"
 
@@ -246,9 +247,14 @@ func (f *Figures) targets(caps []uint64, domainOf []uint32, pgs uint32, w, q uin
 
 // balanced is the most a pool of width w, at most q members of a PG per domain and k data shards, holds over
 // the domains' capacities: min over j of S₍>ⱼ₎ ÷ (b − j·a), with b = w ÷ k and a = q ÷ k, rounded down.
+// It is exact for copies and q = 1; above that it ignores that a domain holds one member per disk.
+//
+// ponytail: closed form only, so q > 1 overstates (ec4-2 at 2 per node on 2×2, 2×2, 2×2 and 1×4 TB gives
+// 9.60 TB, not 8.64), reprotect's largest-domain loss and CheckLayout's domain count share the gap; phase 10
+// adds the bisection with min(cₖ, D ÷ data) per disk, each domain in turn for reprotect, and min(q, disks) per domain.
 func balanced(caps []uint64, w, q, k uint64) uint64 {
 	sorted := slices.Clone(caps)
-	slices.SortFunc(sorted, func(a, b uint64) int { return cmpDesc(a, b) })
+	slices.SortFunc(sorted, func(a, b uint64) int { return cmp.Compare(b, a) })
 	var rest uint64
 	for _, c := range sorted {
 		rest += c
@@ -262,16 +268,6 @@ func balanced(caps []uint64, w, q, k uint64) uint64 {
 		rest -= sorted[j]
 	}
 	return best
-}
-
-func cmpDesc(a, b uint64) int {
-	switch {
-	case a > b:
-		return -1
-	case a < b:
-		return 1
-	}
-	return 0
 }
 
 func mulDiv(a, b, c uint64) uint64 {
@@ -358,7 +354,7 @@ func (f *Figures) anyAbove(points uint8) bool {
 func (c *Conditions) Watch(now core.Tick, pgs []Copying) {
 	c.Stuck = c.Stuck[:0]
 	for _, pg := range pgs {
-		if now-pg.Since >= StuckAfter {
+		if now >= pg.Since && now-pg.Since >= StuckAfter {
 			c.Stuck = append(c.Stuck, pg.PG)
 		}
 	}

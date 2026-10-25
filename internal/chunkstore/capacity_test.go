@@ -117,7 +117,7 @@ func (c *capacityCase) node(name string) uint32 {
 
 func (c *capacityCase) domainName(id uint32) string {
 	if c.pool.FailureDomain == DomainDisk {
-		return c.names[slices.IndexFunc(c.disks, func(d Disk) bool { return d.ID == id })]
+		return c.diskName(id)
 	}
 	return c.nodes[id]
 }
@@ -213,14 +213,16 @@ func size(blocks uint64) string {
 
 // blocksOf reads a decimal size such as 0.7GB or 1.2TB as whole blocks, rounded down.
 func blocksOf(t *testing.T, s string) uint64 {
-	unit := map[string]float64{"GB": 1e9, "TB": 1e12, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40}
-	for u, m := range unit {
-		if v, ok := strings.CutSuffix(s, u); ok {
+	for _, u := range []struct {
+		suffix string
+		bytes  float64
+	}{{"GB", 1e9}, {"TB", 1e12}, {"MiB", 1 << 20}, {"GiB", 1 << 30}, {"TiB", 1 << 40}} {
+		if v, ok := strings.CutSuffix(s, u.suffix); ok {
 			x, err := strconv.ParseFloat(v, 64)
 			if err != nil {
 				t.Fatal(err)
 			}
-			return uint64(x*m+0.5) / core.BlockSize
+			return uint64(x*u.bytes+0.5) / core.BlockSize
 		}
 	}
 	t.Fatalf("size %q has no unit", s)
