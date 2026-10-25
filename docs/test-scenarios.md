@@ -3772,7 +3772,7 @@ section.
 ## Models in CI
 
 The runs of [TLA+ and TLC](#tla-and-tlc), scheduled by the `models` workflow in
-`.github/workflows/models.yml` on GitHub's hosted runners (4 vCPUs, 16 GB, 6 hours per job). A first
+`.github/workflows/models.yml` on GitHub's hosted runners ([Continuous integration](design.md#testing-strategy)). A first
 job lists the models and `deep` configurations, and every other job runs once per item of that list
 (a matrix), each on its own runner.
 

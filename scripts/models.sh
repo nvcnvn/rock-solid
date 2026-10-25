@@ -29,7 +29,7 @@ case $mode in
 ci) limit=300 ;;
 deep) limit=14400 ;;
 sim) ;;
-*) echo "usage: $0 [ci|deep|sim] [model...]" >&2; exit 2 ;;
+*) echo "usage: $0 [ci|deep|sim] [model | model/config.cfg ...]" >&2; exit 2 ;;
 esac
 models=${*:-$(ls models)}
 tmp=$(mktemp -d)
