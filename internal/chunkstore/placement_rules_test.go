@@ -242,7 +242,7 @@ func TestPinAndDrain(t *testing.T) {
 	}
 }
 
-// The study's test U: 200 random layouts each for rep2 and rep3, 3 to 6 nodes of 1 or 2 disks of 0.5 to 8 TB, some partly used by other pools, and one disk added to a random node of a converged table. No addition raises Unbalanced at any fill, and Unbalanced keeps its value while the computation proposes moves or a PG lists past members.
+// The study's test U: 200 random layouts each for rep2 and rep3, 3 to 6 nodes of 1 or 2 disks of 0.5 to 8 TB, some partly used by other pools, and one disk added to a random node of a converged table. No addition raises Unbalanced at any fill, and Unbalanced keeps its value while the computation proposes moves.
 func TestAddedDiskNeverUnbalances(t *testing.T) {
 	r := core.NewRand(42)
 	worst := 0.0

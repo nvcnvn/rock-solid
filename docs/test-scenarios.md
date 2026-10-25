@@ -4244,7 +4244,7 @@ draws them: 200 random layouts each for `rep2` and `rep3`, 3 to 6 nodes of 1 or 
 - No addition raises `Unbalanced`, at fills of 0, 50, 70 and 90% of balanced; the worst leaves
   available + held 6.9% under balanced (9.4% in the study's draws), a small disk one member above
   its target.
-- `Unbalanced` keeps its value while the computation proposes moves or a PG lists past members.
+- `Unbalanced` keeps its value while the computation proposes moves.
 
 **Errors**
 
