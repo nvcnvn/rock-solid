@@ -124,7 +124,7 @@ func TestMalformedDeltas(t *testing.T) {
 		}
 	}
 	flags := AppendDelta(nil, &d)
-	flags[len(flags)-1-1-3*5-1] = 0x04
+	flags[len(flags)-len(appendEntry(nil, &d.Entries[0].Entry))+8] = 0x04
 	if _, err := DecodeDelta(flags); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("an unknown entry flag: %v", err)
 	}
