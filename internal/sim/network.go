@@ -69,11 +69,11 @@ func (s *Scheduler) queued(from, to uint32) core.Tick {
 
 // send puts a NetSend from loop l of n on its connection, or loses it.
 func (s *Scheduler) send(n *Node, l uint32, a *core.Action) {
-	if a.Msg.Buf != core.NoBuf {
-		n.pool.Bytes(a.Msg.Buf)
+	if a.Msg.Buf != core.NoBuf && !n.pool.Valid(a.Msg.Buf) {
+		panic(fmt.Sprintf("sim: loop %d.%d sends buffer %+v, which its pool does not hold", n.id, l, a.Msg.Buf))
 	}
 	from := core.NodeID{Node: n.id, Loop: l}
-	it := item{kind: ChooseDeliver, node: a.Peer.Node, loop: a.Peer.Loop, act: *a, issued: s.now, from: from, fromGen: n.gen}
+	it := item{kind: ChooseDeliver, node: a.Peer.Node, loop: a.Peer.Loop, act: *a, from: from, fromGen: n.gen}
 	if int(a.Peer.Node) >= len(s.nodes) {
 		s.lose(&it)
 		return
@@ -166,7 +166,7 @@ func (s *Scheduler) failAt(c *conn, e int, at core.Tick) {
 			return
 		}
 	}
-	s.items = append(s.items, item{kind: ChoosePeerLost, node: to.Node, loop: to.Loop, gen: s.nodes[to.Node].gen, issued: s.now, at: at, from: c.ends[1-e], conn: c.id})
+	s.items = append(s.items, item{kind: ChoosePeerLost, node: to.Node, loop: to.Loop, at: at, from: c.ends[1-e], conn: c.id})
 }
 
 // closeConns ends node id's side of every connection when it crashes, breaking those still up after what it already sent.

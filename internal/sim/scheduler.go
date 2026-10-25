@@ -151,7 +151,6 @@ type item struct {
 	kind    ChoiceKind
 	node    uint32
 	loop    uint32
-	gen     uint64
 	act     core.Action
 	issued  core.Tick
 	at      core.Tick
@@ -728,7 +727,7 @@ func (n *Node) absorb(l uint32, acts []core.Action) {
 	s := n.s
 	for i := range acts {
 		a := acts[i]
-		it := item{node: n.id, loop: l, gen: n.gen, act: a, issued: s.now}
+		it := item{node: n.id, loop: l, act: a, issued: s.now}
 		switch a.Kind {
 		case core.ActDiskRead, core.ActDiskWrite, core.ActDiskFsync, core.ActDiskTrim:
 			it.kind = ChooseDisk
