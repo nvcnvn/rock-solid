@@ -11,7 +11,7 @@
 # reply, reply_refused, reply_mismatch: version 41.7; refused at table epoch 80, interval 42; expect_ver mismatch, at 41.7.
 # read, read_at: request 6, bytes 100 to 5,099; the first block at version 41.7.
 # read_reply, read_reply_missing, read_reply_unfound: version 41.7 (two blocks of data); the chunk is on the missing list; unfound.
-# lease_request: request 7, table epoch 77, support epoch 8.
+# lease_request: request 7, table epoch 77.
 # grant, grant_refused: request 7, support epoch 8, run ID 0x0123456789abcdef, raw 51,020,500; refused at table epoch 80.
 # heartbeat: request 8, table epoch 77, the same run ID and raw reading.
 # report_empty, report: request 9; nothing, then one activation, disk 3's latency 250, and disks of log 0x0123456789abcdef
@@ -37,7 +37,7 @@ read_at 010806000000000000004d00000000000000010000001100000029000000000000020000
 read_reply 010906000000000000000007000000290000000000000000000000000000000000000000000000
 read_reply_missing 010906000000000000000400000000000000000000000000000000000000000000000000000000
 read_reply_unfound 010906000000000000000500000000000000000000000000000000000000000000000000000000
-lease_request 010a07000000000000004d000000000000000800000000000000
+lease_request 010a07000000000000004d00000000000000
 grant 010b07000000000000000000000000000000000800000000000000efcdab8967452301d4820a0300000000
 grant_refused 010b0700000000000000025000000000000000000000000000000000000000000000000000000000000000
 heartbeat 010c08000000000000004d00000000000000efcdab8967452301d4820a0300000000

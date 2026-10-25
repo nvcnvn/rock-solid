@@ -54,8 +54,20 @@ const (
 	StatusMismatch
 	StatusMissing
 	StatusUnfound
-	statusEnd
 )
+
+func replyTakes(k Kind, st Status) bool {
+	var set uint8
+	switch k {
+	case KindAck:
+		set = 1<<StatusOK | 1<<StatusNoSpace | 1<<StatusRefused
+	case KindReply:
+		set = 1<<StatusOK | 1<<StatusNoSpace | 1<<StatusRefused | 1<<StatusMismatch
+	case KindReadReply:
+		set = 1<<StatusOK | 1<<StatusRefused | 1<<StatusMissing | 1<<StatusUnfound
+	}
+	return st < 8 && set&(1<<st) != 0
+}
 
 const headSize = 10
 
@@ -127,11 +139,10 @@ type Response struct {
 	Fill     uint64
 }
 
-// LeaseRequest asks a grantor for a node-pair lease under a support epoch, reporting the holder's table epoch.
+// LeaseRequest asks a grantor for a node-pair lease, reporting the holder's table epoch.
 type LeaseRequest struct {
-	ID      core.RequestID
-	Epoch   uint64
-	Support uint64
+	ID    core.RequestID
+	Epoch uint64
 }
 
 // Grant answers a LeaseRequest: StatusOK with the support epoch and the grantor's run ID and CLOCK_MONOTONIC_RAW reading, or StatusRefused with the grantor's table epoch.
@@ -215,6 +226,9 @@ func Attach(pool core.BufPool, m *core.Msg, frame []byte, data core.IOBuf) error
 	if len(frame) <= core.MaxInlineMsg {
 		m.Len, m.Buf = uint16(copy(m.Body[:], frame)), data
 		return nil
+	}
+	if data != core.NoBuf {
+		panic("chunkstore: a frame over MaxInlineMsg bytes with a data buffer")
 	}
 	buf, err := pool.AllocZeroed(len(frame))
 	if err != nil {
@@ -304,11 +318,13 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 	u.Snapshot, u.Shard, u.Term, u.Version = r.u64(), r.u64(), r.u64(), r.u64()
 	u.HasExpect, u.Expect = r.optional()
 	replica := u.Kind == KindReplicaWrite || u.Kind == KindReplicaPunch
+	write := u.Kind == KindWrite || u.Kind == KindReplicaWrite
 	want := 0
-	if u.Kind == KindWrite || u.Kind == KindReplicaWrite {
+	if write && validRange(u.Off, u.Len) {
 		want = dataBytes(u.Off, u.Len)
 	}
-	if !validRange(u.Off, u.Len) || data != want || !validVersion(u.Version) || replica != (u.Version != 0) {
+	if !validRange(u.Off, u.Len) || data != want || !validVersion(u.Version) || replica != (u.Version != 0) ||
+		write && (u.Shard != 0 || u.Term != 0) {
 		r.bad = true
 	}
 	return r.done(err)
@@ -352,9 +368,10 @@ func DecodeResponse(b []byte, data int, rp *Response) error {
 	rp.Interval, rp.Fill = r.u32(), r.u64()
 	dataOK := data == 0
 	if rp.Kind == KindReadReply && rp.Status == StatusOK {
-		dataOK = data > 0 && data%core.BlockSize == 0
+		dataOK = data > 0 && data <= core.ChunkSize && data%core.BlockSize == 0
 	}
-	if rp.Status >= statusEnd || !validVersion(rp.Version) || rp.Status == StatusRefused && rp.Interval == 0 || !dataOK {
+	if !replyTakes(rp.Kind, rp.Status) || !validVersion(rp.Version) || rp.Status == StatusRefused && rp.Interval == 0 ||
+		rp.Kind == KindAck && rp.Status == StatusOK && rp.Version == 0 || !dataOK {
 		r.bad = true
 	}
 	return r.done(err)
@@ -362,14 +379,14 @@ func DecodeResponse(b []byte, data int, rp *Response) error {
 
 // AppendLeaseRequest appends lr's frame.
 func AppendLeaseRequest(dst []byte, lr *LeaseRequest) []byte {
-	return le.AppendUint64(le.AppendUint64(appendHead(dst, KindLeaseRequest, lr.ID), lr.Epoch), lr.Support)
+	return le.AppendUint64(appendHead(dst, KindLeaseRequest, lr.ID), lr.Epoch)
 }
 
 // DecodeLeaseRequest decodes a lease request frame.
 func DecodeLeaseRequest(b []byte, data int, lr *LeaseRequest) error {
 	r, err := open(b, data, KindLeaseRequest)
 	lr.ID = r.id
-	lr.Epoch, lr.Support = r.u64(), r.u64()
+	lr.Epoch = r.u64()
 	return r.done(err)
 }
 

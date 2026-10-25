@@ -53,7 +53,7 @@ func wireCases() []wireCase {
 		{"read_reply", &Response{Kind: KindReadReply, ID: 6, Version: v}, 2 * core.BlockSize},
 		{"read_reply_missing", &Response{Kind: KindReadReply, ID: 6, Status: StatusMissing}, 0},
 		{"read_reply_unfound", &Response{Kind: KindReadReply, ID: 6, Status: StatusUnfound}, 0},
-		{"lease_request", &LeaseRequest{ID: 7, Epoch: 77, Support: 8}, 0},
+		{"lease_request", &LeaseRequest{ID: 7, Epoch: 77}, 0},
 		{"grant", &Grant{ID: 7, Support: 8, Run: 0x0123456789abcdef, Raw: 51_020_500}, 0},
 		{"grant_refused", &Grant{ID: 7, Status: StatusRefused, Epoch: 80}, 0},
 		{"heartbeat", &Heartbeat{ID: 8, Epoch: 77, Run: 0x0123456789abcdef, Raw: 51_020_500}, 0},
@@ -306,6 +306,7 @@ func TestWireRejectsDataLength(t *testing.T) {
 	}
 	mustMalformed(t, "1,023 blocks for 1,024", whole, core.ChunkSize-core.BlockSize)
 	mustMalformed(t, "read reply with no data", encodeMsg(&Response{Kind: KindReadReply}), 0)
+	mustMalformed(t, "read reply past a chunk", encodeMsg(&Response{Kind: KindReadReply}), core.ChunkSize+core.BlockSize)
 	mustMalformed(t, "read reply refused with data", encodeMsg(&Response{Kind: KindReadReply, Status: StatusRefused, Interval: 42}), core.BlockSize)
 }
 
@@ -338,7 +339,15 @@ func TestWireRejectsIntervalZero(t *testing.T) {
 }
 
 func TestWireRejectsBadFields(t *testing.T) {
-	mustMalformed(t, "status past the last", AppendResponse(nil, &Response{Kind: KindReply, Status: statusEnd}), 0)
+	for _, c := range []struct {
+		k  Kind
+		st Status
+	}{{KindAck, StatusMismatch}, {KindAck, StatusMissing}, {KindReply, StatusUnfound}, {KindReadReply, StatusNoSpace}, {KindReadReply, StatusMismatch}, {KindReply, 6}, {KindAck, 255}} {
+		mustMalformed(t, "a status its reply kind does not take", AppendResponse(nil, &Response{Kind: c.k, Status: c.st, Interval: 1}), 0)
+	}
+	mustMalformed(t, "an acknowledgment of version 0", AppendResponse(nil, &Response{Kind: KindAck}), 0)
+	mustMalformed(t, "a purger's shard on a write", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1, Shard: 1}), core.BlockSize)
+	mustMalformed(t, "a purger's term on a member write", AppendUpdate(nil, &Update{Kind: KindReplicaWrite, PG: wirePG, Len: 1, Version: 1<<32 | 1, Term: 1}), core.BlockSize)
 	mustMalformed(t, "a grant neither granted nor refused", AppendGrant(nil, &Grant{Status: StatusNoSpace}), 0)
 	mustMalformed(t, "peering request with lists", AppendPeering(nil, &Peering{Kind: KindPeer, PG: wirePG, Newest: []ChunkVersion{{}}}), 0)
 	b := AppendProbeReply(nil, &ProbeReply{})
@@ -424,13 +433,21 @@ func TestWireLongFrameTravelsInABuffer(t *testing.T) {
 			pool.Free(m.Buf)
 		}
 	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("a long frame with a data buffer did not panic")
+			}
+		}()
+		_ = Attach(pool, &core.Msg{}, make([]byte, core.MaxInlineMsg+1), core.IOBuf{Slot: 1, Gen: 1})
+	}()
 	mustMalformed(t, "a short frame padded to a block", padded(append(AppendHello(nil, &Hello{}), make([]byte, 300)...)), 0)
 }
 
 // Each kind that carries data has a reply kind that carries a refusal, which is what lets a driver release the send buffer.
 func TestWireDataRequestsHaveRefusals(t *testing.T) {
 	for req, reply := range map[Kind]Kind{KindWrite: KindReply, KindReplicaWrite: KindAck} {
-		for _, st := range []Status{StatusRefused, StatusNoSpace, StatusMismatch} {
+		for _, st := range []Status{StatusRefused, StatusNoSpace} {
 			r := &Response{Kind: reply, ID: 5, Status: st, Epoch: 80, Interval: 42}
 			got, err := decodeMsg(encodeMsg(r), 0)
 			if err != nil || !reflect.DeepEqual(got, r) {
