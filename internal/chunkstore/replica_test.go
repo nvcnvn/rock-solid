@@ -97,6 +97,11 @@ func newRCluster(t *testing.T, tbl Table) *rcluster {
 
 // newRClusterOn is newRCluster on scheduler s.
 func newRClusterOn(t *testing.T, tbl Table, s *sim.Scheduler) *rcluster {
+	return newRClusterWith(t, tbl, s, nil)
+}
+
+// newRClusterWith is newRClusterOn with each store's settings edited by edit, if set.
+func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Config)) *rcluster {
 	geo, err := disklog.GeometryFor(diskBytes)
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +135,9 @@ func newRClusterOn(t *testing.T, tbl Table, s *sim.Scheduler) *rcluster {
 				var sout Output
 				cfg := testConfig()
 				cfg.MergeCache = DefaultMergeCache
+				if edit != nil {
+					edit(&cfg)
+				}
 				restart := c.reps[d] != nil
 				var st *Store
 				var err error

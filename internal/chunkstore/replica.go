@@ -96,15 +96,15 @@ type version struct {
 	epoch    uint64
 	interval uint32
 	u        Update
-	buf     core.IOBuf
-	members [maxMembers]uint32
-	sends   [maxMembers]uint8
-	n       int
-	acked   uint8
-	out     uint8
-	logged  bool
-	commit  bool
-	done    bool
+	buf      core.IOBuf
+	members  [maxMembers]uint32
+	sends    [maxMembers]uint8
+	n        int
+	acked    uint8
+	out      uint8
+	logged   bool
+	commit   bool
+	done     bool
 }
 
 // Replica runs a disk's store as a member of the PGs the placement table puts on it: primary of those it leads, ordering client writes, fanning them out and committing them once every live member holds them, and a replica of the rest.
