@@ -2991,10 +2991,12 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
 
 ## Client replies as outputs
 
-- The toy primary acknowledges a value through an output of the kind the replica primary answers
-  clients with, not a callback, and the cluster completes the history from the outputs the
-  scheduler records; the Planted-bug check's scenarios pass unchanged.
-- Open: the output's form, settled with the replica primary's client replies in phase 3.
+- The toy primary acknowledges a value with a `NetSend` marked `Reply` to its client, as the
+  replica primary answers its clients, not through a callback, and the cluster completes the
+  history from the replies the scheduler sees sent; the Planted-bug check's scenarios pass
+  unchanged.
+- A send not marked `Reply`, or one the run's decoder does not name, completes nothing; a reply
+  completes its operation at the send, wherever the network takes it.
 
 ## Cleaner write amplification in simulation
 
@@ -4365,9 +4367,7 @@ version (interval k, counter n), as under [Wire messages](#wire-messages).
 | 41 | Any | Refused, with the member's table epoch and 42 |
 | 43 | Newer | The member fetches a table at least as new as the sender's; if PG 7 is then at 43, accepted |
 | 43 | Newer | As above, but PG 7 is at 44 after the fetch: refused with 44 |
-
-- Open: a tag of 43 with a sender's table epoch older than the member's cannot come from a correct
-  sender. Whether it is Malformed or refused is not stated.
+| 43 | Older | Refused with the member's table epoch and 42: no correct sender sends it, and a refusal costs nothing |
 
 **Client writes at primary B, whose term began in interval 42; PG 7 is now at 44 after two replica
 swaps**
@@ -4384,25 +4384,29 @@ swaps**
 **Commit, map and read**
 
 - A write goes to every member in parallel while the primary appends it to its own log, and is
-  acknowledged once every live member holds it.
+  acknowledged once every live member holds it: the pass that orders it sends it to both replicas
+  and writes the primary's disk. With one member cut off, the write is not acknowledged, the other
+  two hold it, and a read returns the version before it.
+- A version that fails at a member or on the primary's own disk fails with every later pending
+  version of its chunk; their clients get the failure, none is mapped, and the next write gets a
+  version above them.
 - The primary maps the write into its index at commit, not when its own log entry is durable. A
   replica maps it when durable.
 - A read without `at_ver` while 7.6 is pending returns 7.5's blocks without waiting. Once 7.6
   commits, the read returns 7.6.
 - `at_ver` of a frozen version is served by any member holding it and never waits for a writer.
-- `at_ver` of a version still pending at a replica never returns its bytes.
-- Open: what `at_ver` of a version that is neither frozen nor current returns. There are no
-  snapshots before phase 11.
-- `expect_ver` equal to the chunk's version: the write succeeds. An older `expect_ver`: the write
-  fails and changes nothing.
-- Open: whether `expect_ver` is compared with the newest ordered version or the newest committed
-  one. Case: 7.6 is pending, and two writes arrive, one with `expect_ver` 7.6 and one with 7.5.
+- `at_ver` of a version still pending at a replica never returns its bytes: a replica serves only
+  frozen versions, and `at_ver` of a version neither frozen nor committed is refused.
+- `expect_ver` is compared with the newest ordered version, pending ones included. 7.6 is pending:
+  a write with `expect_ver` 7.6 is ordered as 7.7, and one with 7.5 fails with a mismatch and
+  changes nothing.
 - Commits that arrive out of version order are still mapped in version order. A planted variant that
   maps them in arrival order must fail, as chunk epochs spike R2 did; replay itself is covered by
   the [Chunk index](#chunk-index) section's R1 case.
 - A chunk's writes go to each member in version order. After a `PeerLost` and reconnect they are
-  sent again from the oldest unacknowledged one, in the same order. Trace check: no `NetSend` of
-  k.(n + 1) to a member before k.n on that connection.
+  sent again from the oldest unacknowledged one, in the same order. Invariant, checked after every
+  step of the replica tests: no `NetSend` of k.(n + 1) to a member before k.n on one connection.
+- A member answers a version it already holds, sent again, once it is durable, and logs it once.
 - A version peering dropped is superseded in every log that holds it; see [Recovery per
   PG](#recovery-per-pg).
 

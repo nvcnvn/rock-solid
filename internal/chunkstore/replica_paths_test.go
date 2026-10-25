@@ -279,3 +279,91 @@ func TestVersionsFollowThePGsInterval(t *testing.T) {
 		t.Fatalf("first write in interval 8, after 7.1: %+v", rp)
 	}
 }
+
+// A member that moved to a newer interval refuses 1.2; it fails with 1.3, ordered after it, and neither is mapped.
+func TestAFailedVersionFailsTheLaterOnesOfItsChunk(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.write(pg0, ch, 0, []byte{1})
+	c.settle()
+	newer := c.next(func(t *Table) { setInterval(t, pg0, 2) })
+	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetTable(ctx, newer, out) })
+	w2 := c.write(pg0, ch, 0, []byte{2})
+	w3 := c.write(pg0, ch, core.BlockSize, []byte{3})
+	c.settle()
+	for _, w := range []core.RequestID{w2, w3} {
+		if rp := c.reply(w); rp.Status != StatusRefused || rp.Epoch != 2 || rp.Interval != 2 {
+			t.Fatalf("answered %+v, want refused with the member's table", rp)
+		}
+	}
+	if c.fetch[0] != 2 {
+		t.Fatalf("the primary asked for table %d", c.fetch[0])
+	}
+	if got := c.readNow(pg0, ch, 0, 1); got[0] != 1 {
+		t.Fatalf("read %d after both failed", got[0])
+	}
+	if c.newest(1, ch) != MakeVersion(1, 3) || c.newest(0, ch) != MakeVersion(1, 3) {
+		t.Fatalf("newest %#x and %#x, want 1.3 logged", c.newest(0, ch), c.newest(1, ch))
+	}
+}
+
+func TestAMemberLogsAVersionSentAgainOnce(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	send := func() core.RequestID {
+		c.nextID++
+		id := c.nextID
+		u := Update{Kind: KindReplicaWrite, ID: id, PG: c.pgFields(pg0), Chunk: ch, Len: core.BlockSize, Version: MakeVersion(1, 1)}
+		c.s.Node(c.client.Node).Call(c.client, func(ctx *core.Context, acts []core.Action) []core.Action {
+			a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: 1}}
+			a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))
+			a.Msg.Buf, _ = ctx.Pool.AllocZeroed(core.BlockSize)
+			c.cl.sent[id] = a.Msg.Buf
+			return append(acts, a)
+		})
+		return id
+	}
+	first, again := send(), send()
+	c.settle()
+	for _, id := range []core.RequestID{first, again} {
+		if rp := c.reply(id); rp.Status != StatusOK || rp.Version != MakeVersion(1, 1) {
+			t.Fatalf("answered %+v", rp)
+		}
+	}
+	writes := 0
+	for _, acts := range c.passes[1] {
+		for _, a := range acts {
+			if a.Kind == core.ActDiskWrite && a.Len >= 2*core.BlockSize {
+				writes++
+			}
+		}
+	}
+	if writes != 1 {
+		t.Fatalf("the member wrote %d records of data", writes)
+	}
+}
+
+// expect_ver is compared with the chunk's newest ordered version, pending ones included.
+func TestExpectVerIsComparedWithTheNewestOrderedVersion(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.write(pg0, ch, 0, []byte{1})
+	c.settle()
+	c.s.Partition(0, 2, false)
+	c.write(pg0, ch, 0, []byte{2})
+	c.runFor(100_000)
+	c.s.Heal(0, 2)
+	expect := func(v uint64) core.RequestID {
+		return c.update(c.pgFields(pg0), ch, 0, []byte{3}, 0, func(u *Update) { u.HasExpect, u.Expect = true, v })
+	}
+	stale := expect(MakeVersion(1, 1))
+	c.runFor(100_000)
+	if rp := c.reply(stale); rp.Status != StatusMismatch {
+		t.Fatalf("expect_ver 1.1 with 1.2 pending: %+v", rp)
+	}
+	expect(MakeVersion(1, 2))
+	c.runFor(100_000)
+	if v := c.newest(0, ch); v != MakeVersion(1, 3) {
+		t.Fatalf("expect_ver 1.2 with 1.2 pending was not ordered: newest %#x", v)
+	}
+}

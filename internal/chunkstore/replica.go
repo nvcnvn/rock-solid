@@ -636,10 +636,14 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 	switch q.kind {
 	case reqClient:
 		resp := Response{Kind: KindReply, Status: statusOf(rp.Err), Version: rp.Version}
+		ref := r.refusal(q.pg)
 		if i := r.versionOf(rp.ID); i >= 0 {
 			v := &r.vers[i]
 			if v.status != StatusOK {
-				resp.Status, resp.Version = v.status, 0
+				resp.Status = v.status
+			}
+			if v.refEp > ref.Epoch {
+				ref.Epoch, ref.Interval = v.refEp, v.refIv
 			}
 			v.done = true
 			r.release(ctx, i)
@@ -648,7 +652,6 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 			resp.Version = 0
 		}
 		if resp.Status == StatusRefused {
-			ref := r.refusal(q.pg)
 			resp.Epoch, resp.Interval = ref.Epoch, ref.Interval
 		}
 		r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
