@@ -105,6 +105,7 @@ type Replica struct {
 	vers   []version
 	parked []parkedMsg
 	dups   []dup
+	bases  []baseFetch
 	nextID uint64
 	seq    core.RequestID
 	frame  []byte
@@ -341,8 +342,53 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 		if DecodeResponse(frame, data, &rp) == nil {
 			r.ack(ctx, ev.Peer, &rp, out)
 		}
+	case KindReadReply:
+		var rp Response
+		if DecodeResponse(frame, data, &rp) == nil && r.baseReply(ctx, &rp, buf, out) {
+			return
+		}
 	}
 	freeBuf(ctx, buf)
+}
+
+// askBase sends the next up member of the PG a read of the base block at its version, or fails the write once none is left to ask.
+func (r *Replica) askBase(ctx *core.Context, i int, out *ReplicaOutput) {
+	f := &r.bases[i]
+	_, e := r.table.entry(f.pg)
+	for e != nil && f.tried < len(e.Members) {
+		m := e.Members[f.tried]
+		f.tried++
+		if m.Mark != MarkUp || m.Disk == r.cfg.Disk {
+			continue
+		}
+		rd := Read{ID: core.RequestID(f.ID), PG: PGFields{Epoch: r.table.Epoch, PG: f.pg, Interval: e.Interval}, Chunk: f.Chunk,
+			Off: uint32(f.Block) * core.BlockSize, Len: core.BlockSize, HasAt: true, At: f.Version}
+		r.frame = AppendRead(r.frame[:0], &rd)
+		a := core.Action{Kind: core.ActNetSend, Peer: r.addr(m.Disk)}
+		a.Msg.Len = uint16(copy(a.Msg.Body[:], r.frame))
+		out.Actions = append(out.Actions, a)
+		return
+	}
+	id := f.ID
+	r.bases = slices.Delete(r.bases, i, i+1)
+	r.st.SupplyBase(ctx, id, core.NoBuf, disklog.ErrBadChecksum, &r.sout)
+}
+
+// baseReply takes a member's answer to a base fetch, reporting whether it was one; it takes buf.
+func (r *Replica) baseReply(ctx *core.Context, rp *Response, buf core.IOBuf, out *ReplicaOutput) bool {
+	i := slices.IndexFunc(r.bases, func(f baseFetch) bool { return core.RequestID(f.ID) == rp.ID })
+	if i < 0 {
+		return false
+	}
+	if rp.Status != StatusOK {
+		freeBuf(ctx, buf)
+		r.askBase(ctx, i, out)
+		return true
+	}
+	id := r.bases[i].ID
+	r.bases = slices.Delete(r.bases, i, i+1)
+	r.st.SupplyBase(ctx, id, buf, nil, &r.sout)
+	return true
 }
 
 func freeBuf(ctx *core.Context, b core.IOBuf) {
@@ -436,16 +482,29 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	}
 }
 
+// baseFetch is a base block the primary asks another member for, tried from member tried of the PG.
+type baseFetch struct {
+	BaseFetch
+	pg    core.PGID
+	tried int
+}
+
 // dup is a resent write a member already holds, answered with its version once the chunk's flush completes.
 type dup struct {
 	id      uint64
 	version uint64
 }
 
+// read serves a client's read at the PG's primary, a read of a frozen version at any member, and at a member a base its primary fetches, the blocks at the version the primary's index names.
 func (r *Replica) read(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) {
 	_, e := r.table.entry(rd.PG.PG)
 	i := r.lead(rd.PG.PG)
 	primary := i >= 0 && r.leads[i].active && rd.PG.Interval >= r.leads[i].since && rd.PG.Interval <= r.leads[i].interval
+	base := false
+	if e != nil && i < 0 && rd.HasAt && rd.PG.Interval == e.Interval {
+		d, ok := e.primary()
+		base = ok && r.addr(d) == ev.Peer
+	}
 	if e == nil || i >= 0 && !primary {
 		rp := r.refusal(rd.PG.PG)
 		rp.Kind = KindReadReply
@@ -453,7 +512,7 @@ func (r *Replica) read(ctx *core.Context, ev *core.Event, rd *Read, out *Replica
 		return
 	}
 	id := r.newReq(storeReq{kind: reqRead, peer: ev.Peer, msgID: rd.ID, pg: rd.PG.PG, chunk: rd.Chunk})
-	r.st.Read(ctx, Request{ID: id, Chunk: rd.Chunk, Off: rd.Off, Len: rd.Len, HasVer: rd.HasAt, Ver: rd.At, FrozenOnly: !primary}, &r.sout)
+	r.st.Read(ctx, Request{ID: id, Chunk: rd.Chunk, Off: rd.Off, Len: rd.Len, HasVer: rd.HasAt, Ver: rd.At, FrozenOnly: !primary && !base, Base: base}, &r.sout)
 }
 
 func (r *Replica) newReq(q storeReq) uint64 {
@@ -487,7 +546,15 @@ func (r *Replica) versionBySeq(seq core.RequestID) int {
 
 // drain handles what the store answered until it has nothing more to say: the versions it ordered, those durable on its disk and the requests it finished.
 func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
-	for o, l, p := 0, 0, 0; o < len(r.sout.Ordered) || l < len(r.sout.Logged) || p < len(r.sout.Replies); {
+	for o, l, p, b := 0, 0, 0, 0; o < len(r.sout.Ordered) || l < len(r.sout.Logged) || p < len(r.sout.Replies) || b < len(r.sout.Bases); {
+		for ; b < len(r.sout.Bases); b++ {
+			f := baseFetch{BaseFetch: r.sout.Bases[b]}
+			if i, ok := slices.BinarySearchFunc(r.reqs, f.ID, func(q storeReq, id uint64) int { return cmp.Compare(q.id, id) }); ok {
+				f.pg = r.reqs[i].pg
+			}
+			r.bases = append(r.bases, f)
+			r.askBase(ctx, len(r.bases)-1, out)
+		}
 		for ; o < len(r.sout.Ordered); o++ {
 			r.ordered(ctx, r.sout.Ordered[o], out)
 		}

@@ -48,7 +48,12 @@ type Config struct {
 	Check bool
 	// CleanFree is clean_free, the free segments outside the reserve the cleaner keeps; 0 is DefaultCleanFree, and below 0 the cleaner runs only for items waiting for room.
 	CleanFree int
+	// MergeCache is how many recently merged blocks the store keeps to merge on without a read; 0 keeps none.
+	MergeCache int
 }
+
+// DefaultMergeCache is the merged-block cache of a replica primary's store: 64 blocks, 256 KiB per loop.
+const DefaultMergeCache = 64
 
 // Request is a Write, Punch or Read of a chunk's bytes [Off, Off+Len).
 type Request struct {
@@ -71,6 +76,8 @@ type Request struct {
 	Gated bool
 	// FrozenOnly makes a read serve only a version a snapshot froze.
 	FrozenOnly bool
+	// Base makes a read serve its blocks of the live map only while they are at version Ver, as a primary fetches a base whose own copy failed its checksum.
+	Base bool
 	// Session and Incarnation name the client process a write or punch came from.
 	Session     uint64
 	Incarnation uint64
@@ -84,18 +91,27 @@ type Reply struct {
 	Err     error
 }
 
-// Output is the actions and replies of calls into the store, reused by the caller: Ordered hands over each gated write's or punch's merged blocks as it is ordered (a write's whole blocks, a punch's merged edge blocks, none for a punch without them) in a buffer the caller frees, and Logged answers it once its records are durable or have failed.
+// BaseFetch asks the caller for block Block of a chunk at version Version from another member: the store's copy of a gated write's base failed its checksum, and request ID waits for SupplyBase.
+type BaseFetch struct {
+	ID      uint64
+	Chunk   core.ChunkID
+	Block   uint16
+	Version uint64
+}
+
+// Output is the actions and replies of calls into the store, reused by the caller: Bases asks for gated writes' bases from other members; Ordered hands over each gated write's or punch's merged blocks as it is ordered (a write's whole blocks, a punch's merged edge blocks, none for a punch without them) in a buffer the caller frees, and Logged answers it once its records are durable or have failed.
 type Output struct {
 	Actions []core.Action
 	Replies []Reply
 	Ordered []Reply
 	Logged  []Reply
+	Bases   []BaseFetch
 }
 
 // Reset empties the output for reuse.
 func (o *Output) Reset() {
 	clear(o.Replies)
-	o.Actions, o.Replies, o.Ordered, o.Logged = o.Actions[:0], o.Replies[:0], o.Ordered[:0], o.Logged[:0]
+	o.Actions, o.Replies, o.Ordered, o.Logged, o.Bases = o.Actions[:0], o.Replies[:0], o.Ordered[:0], o.Logged[:0], o.Bases[:0]
 }
 
 type phase uint8
@@ -155,6 +171,16 @@ type op struct {
 	aborted   bool
 	// mapped is set once the mapOnCommit plant has mapped a gated op out of turn.
 	mapped bool
+	// remote is set while the op waits for block remoteBlock of its base from another member.
+	remote      bool
+	remoteBlock uint16
+}
+
+// cachedBlock is a merged block the store keeps: block b of chunk c as version wrote it.
+type cachedBlock struct {
+	c       core.ChunkID
+	b       uint16
+	version uint64
 }
 
 // chunkState is a chunk with operations not yet answered: those ordered, in version order, and those waiting behind a base read.
@@ -182,6 +208,7 @@ type fetch struct {
 	op      int32
 	first   uint16
 	n       uint16
+	version uint64
 	lba     core.LBA
 	header  core.LBA
 	data    core.IOBuf
@@ -302,6 +329,10 @@ type Store struct {
 	adm admission
 	// sessions is the newest incarnation seen of each client session.
 	sessions map[uint64]uint64
+	// cache is the recently merged blocks, held in cacheBuf block for block, replaced in turn from cacheNext.
+	cache     []cachedBlock
+	cacheBuf  core.IOBuf
+	cacheNext int
 
 	plant plants
 	// metaVictim, when set, sees each metadata victim the cleaner starts, before it marks the
@@ -700,7 +731,74 @@ func (s *Store) base(ctx *core.Context, cs *chunkState, b uint16) (src []byte, e
 	if !ok || e.LBA == 0 {
 		return nil, Extent{}, false
 	}
+	for i, k := range s.cache {
+		if k.c == cs.id && k.b == b && k.version == e.Version {
+			return ctx.Pool.Bytes(s.cacheBuf)[i*core.BlockSize:][:core.BlockSize], Extent{}, false
+		}
+	}
 	return nil, e, true
+}
+
+// remember keeps the blocks op o merged, its edges that its range covers in part, once o is mapped.
+func (s *Store) remember(ctx *core.Context, o *op) {
+	if s.cfg.MergeCache == 0 || o.req.Version != 0 {
+		return
+	}
+	if s.cacheBuf == core.NoBuf {
+		buf, err := ctx.Pool.Alloc(s.cfg.MergeCache * core.BlockSize)
+		if err != nil {
+			return
+		}
+		s.cacheBuf = buf
+	}
+	c := s.chunks[o.chunk].id
+	first, last := spanOf(o.req.Off, o.req.Len)
+	for k, b := range [2]uint16{first, last} {
+		if _, _, part := partial(o.req.Off, o.req.Len, b); !part || k == 1 && last == first {
+			continue
+		}
+		for j := range o.items {
+			it := &o.items[j]
+			if it.state != itemDurable || it.entry.Kind != disklog.EntryWrite || b < it.entry.First || int(b) >= int(it.entry.First)+int(it.entry.Count) {
+				continue
+			}
+			i := slices.IndexFunc(s.cache, func(k cachedBlock) bool { return k.c == c && k.b == b })
+			if i < 0 && len(s.cache) < s.cfg.MergeCache {
+				s.cache = append(s.cache, cachedBlock{})
+				i = len(s.cache) - 1
+			}
+			if i < 0 {
+				i = s.cacheNext
+				s.cacheNext = (s.cacheNext + 1) % s.cfg.MergeCache
+			}
+			s.cache[i] = cachedBlock{c: c, b: b, version: o.version}
+			copy(ctx.Pool.Bytes(s.cacheBuf)[i*core.BlockSize:][:core.BlockSize], ctx.Pool.Bytes(it.buf)[int(b-it.entry.First)*core.BlockSize:])
+		}
+	}
+}
+
+// SupplyBase hands the op waiting on request id the base block another member sent, in buf, which the store frees, or fails it with ErrBadChecksum when no member could send it.
+func (s *Store) SupplyBase(ctx *core.Context, id uint64, buf core.IOBuf, err error, out *Output) {
+	defer s.pump(ctx, out)
+	for oi := range s.ops {
+		o := &s.ops[oi]
+		if o.kind == 0 || o.kind == opRead || o.req.ID != id || !o.remote {
+			continue
+		}
+		o.remote = false
+		if err == nil && buf != core.NoBuf && len(ctx.Pool.Bytes(buf)) >= core.BlockSize {
+			s.deliver(ctx, &fetch{first: o.remoteBlock, n: 1, data: buf}, o)
+		} else if o.err == nil {
+			o.err = disklog.ErrBadChecksum
+		}
+		if o.reads--; o.reads == 0 {
+			s.orderWaiting(ctx, o.chunk, out)
+		}
+		break
+	}
+	if buf != core.NoBuf {
+		ctx.Pool.Free(buf)
+	}
 }
 
 func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
@@ -922,6 +1020,14 @@ func (s *Store) Read(ctx *core.Context, r Request, out *Output) {
 // frozen version's map, or none when it reads the absent version 0.
 func (s *Store) readable(r Request, committed uint64) (mapVer uint64, zeros bool, err error) {
 	switch {
+	case r.Base:
+		first, last := spanOf(r.Off, r.Len)
+		for b := first; b <= last; b++ {
+			if e, ok := s.ix.Lookup(s.cfg.Pool, r.Chunk, b); !ok || e.Version != r.Ver {
+				return 0, false, ErrNoVersion
+			}
+		}
+		return 0, false, nil
 	case r.FrozenOnly && (!r.HasVer || r.Ver == 0):
 	case !r.FrozenOnly && (!r.HasVer || r.Ver == committed):
 		return 0, false, nil
@@ -1078,7 +1184,7 @@ func (s *Store) startFetch(ctx *core.Context, oi int32, first, n uint16, e Exten
 		s.fetches = append(s.fetches, fetch{})
 		fi = int32(len(s.fetches) - 1)
 	}
-	s.fetches[fi] = fetch{op: oi, first: first, n: n, lba: e.BlockLBA(first), header: e.Header, data: data, hdr: hdr, hdrLen: 1, waiting: 2}
+	s.fetches[fi] = fetch{op: oi, first: first, n: n, version: e.Version, lba: e.BlockLBA(first), header: e.Header, data: data, hdr: hdr, hdrLen: 1, waiting: 2}
 	s.ops[oi].reads++
 	s.lout.Actions = append(s.lout.Actions,
 		core.Action{Kind: core.ActDiskRead, IO: fetchIO(fi, 0), LBA: e.BlockLBA(first), Buf: data, Len: uint64(n) * core.BlockSize},
@@ -1133,7 +1239,12 @@ func (s *Store) fetchDone(ctx *core.Context, fi int32, derr core.DiskError, out 
 	}
 	oi := f.op
 	o := &s.ops[oi]
-	if f.err != nil && o.err == nil {
+	remote := errors.Is(f.err, disklog.ErrBadChecksum) && o.kind != opRead && o.req.Gated && !o.remote && o.err == nil
+	if remote {
+		o.remote, o.remoteBlock = true, f.first
+		out.Bases = append(out.Bases, BaseFetch{ID: o.req.ID, Chunk: s.chunks[o.chunk].id, Block: f.first, Version: f.version})
+	}
+	if f.err != nil && o.err == nil && !remote {
 		o.err = f.err
 	}
 	if f.err == nil {
@@ -1145,6 +1256,9 @@ func (s *Store) fetchDone(ctx *core.Context, fi int32, derr core.DiskError, out 
 	s.freeFetch = append(s.freeFetch, fi)
 	if len(s.freed) > 0 && s.rec == nil {
 		s.freeSlots(false)
+	}
+	if remote {
+		return
 	}
 	if o.reads--; o.reads > 0 {
 		return
@@ -1450,6 +1564,9 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 			break
 		}
 		mapped := o.req.Gated && (o.err != nil || o.aborted || o.mapped)
+		if !mapped && o.err == nil && s.rec == nil {
+			s.remember(ctx, o)
+		}
 		for j := range o.items {
 			it := &o.items[j]
 			if it.state == itemDurable && s.rec == nil && !mapped {

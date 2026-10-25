@@ -108,7 +108,9 @@ func newRCluster(t *testing.T, tbl Table) *rcluster {
 			c.loops[d] = n.Start(m, n.Disk(0))
 			n.Call(c.loops[d], func(ctx *core.Context, acts []core.Action) []core.Action {
 				var sout Output
-				st, err := Format(ctx, testConfig(), disklog.Superblock{LogID: 0x5eed + uint64(d), Geometry: geo}, &sout)
+				cfg := testConfig()
+				cfg.MergeCache = DefaultMergeCache
+				st, err := Format(ctx, cfg, disklog.Superblock{LogID: 0x5eed + uint64(d), Geometry: geo}, &sout)
 				if err != nil {
 					t.Fatal(err)
 				}
