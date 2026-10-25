@@ -74,9 +74,12 @@ Infinity == MaxTime + 1
 VARIABLES
     \* Control plane and tables
     tbl,      \* Seq([PG -> [iv, la]]): every committed table
-    ivs,      \* [PG -> Seq([mem: Seq(Disk), st: [Disk -> mark]])]: each interval's members
+    ivs,      \* [PG -> Seq([mem: Seq(Disk), st: [Disk -> mark], lv: Disk \cup {0}, ad: Nat])]:
+              \* each interval's members, its leaving member and the interval that added
+              \* its replacement (0 for none)
     reqIv,    \* [PG -> Nat]: the interval whose primary asked for a new one
     reports,  \* set of [p, k]: activation reports on heartbeats, possibly late or repeated
+    recd,     \* [PG -> Nat]: the newest interval reported recovered
     plan,     \* the planned membership changes of this behavior
     step,     \* the next planned change
     \* Nodes and disks
@@ -116,7 +119,7 @@ VARIABLES
     \* Raft
     rterm, rlead, fort, fby, xfer, xto
 
-ctlVars == <<tbl, ivs, reqIv, reports, plan, step>>
+ctlVars == <<tbl, ivs, reqIv, reports, recd, plan, step>>
 nodeVars == <<ep, dnode, ddisk, fmts, stale, run, rsIv, dlog, miss, persIv, mrecv>>
 priVars == <<pr, pv, pin, known, dec, act>>
 dataVars == <<rm, vers, ackd, wst, sends, dmn, bad>>
@@ -261,7 +264,7 @@ PlanRates(n) ==
 InitGrant(g, h) ==
     ~Clocks /\ g # h /\ \E p \in PG : InitMem[p][1] = h /\ \E j \in 1..Len(InitMem[p]) : InitMem[p][j] = g
 
-InitIv(p) ==[mem |-> InitMem[p], st |-> [d \in Disk |-> IF d \in Node THEN "up" ELSE "down"]]
+InitIv(p) ==[mem |-> InitMem[p], st |-> [d \in Disk |-> IF d \in Node THEN "up" ELSE "down"], lv |-> 0, ad |-> 0]
 
 Init ==
     /\ tbl = <<[p \in PG |-> [iv |-> 1, la |-> 1]]>>
@@ -270,6 +273,7 @@ Init ==
     /\ plan \in Plans
     /\ step = 1
     /\ reports = {}
+    /\ recd = [p \in PG |-> 0]
     /\ ep = [n \in Node |-> 1]
     /\ dnode = [d \in Disk |-> IF d \in Node THEN d ELSE 0]
     /\ ddisk = [n \in Node |-> n]
@@ -354,9 +358,10 @@ MarkDisk(d, to) ==
        IN /\ ps # {}
           /\ NewIntervals(ps, [p \in PG |->
                [ivs[p][Cur(p)] EXCEPT !.st[d] = to]])
-    /\ UNCHANGED <<reqIv, reports>>
+    /\ UNCHANGED <<reqIv, reports, recd>>
 
-\* A refill or move replaces a member with another disk.
+\* A refill replaces a member with another disk in one table. The model lets
+\* it replace any member, up or not.
 Replace(p, old, new) ==
     /\ old \in Mem(p, Cur(p))
     /\ new \notin Mem(p, Cur(p))
@@ -364,8 +369,29 @@ Replace(p, old, new) ==
     /\ LET m == ivs[p][Cur(p)].mem
            j == CHOOSE j \in 1..Len(m) : m[j] = old
        IN NewIntervals({p}, [q \in PG |->
-            [mem |-> [m EXCEPT ![j] = new], st |-> [ivs[p][Cur(p)].st EXCEPT ![new] = "up"]]])
-    /\ UNCHANGED <<reqIv, reports>>
+            [ivs[p][Cur(p)] EXCEPT !.mem = [m EXCEPT ![j] = new], !.st[new] = "up"]])
+    /\ UNCHANGED <<reqIv, reports, recd>>
+
+\* A move adds the new member and marks the old one leaving, so the PG is one
+\* member wider until Remove.
+Add(p, old, new) ==
+    /\ ivs[p][Cur(p)].lv = 0
+    /\ old \in Mem(p, Cur(p))
+    /\ new \notin Mem(p, Cur(p))
+    /\ dnode[new] # 0
+    /\ NewIntervals({p}, [q \in PG |->
+         [ivs[p][Cur(p)] EXCEPT !.mem = Append(@, new), !.st[new] = "up", !.lv = old, !.ad = Cur(p) + 1]])
+    /\ UNCHANGED <<reqIv, reports, recd>>
+
+\* The leader removes the leaving member once a primary has reported an
+\* interval since the add recovered.
+Remove(p) ==
+    LET x == ivs[p][Cur(p)]
+    IN /\ x.lv # 0
+       /\ recd[p] >= x.ad \/ Bug("RemoveBeforeRecovered")
+       /\ NewIntervals({p}, [q \in PG |->
+            [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # x.lv), !.lv = 0, !.ad = 0]])
+       /\ UNCHANGED <<reqIv, reports, recd>>
 
 \* Moving the primary: the first two members swap.
 Rotate(p) ==
@@ -373,14 +399,14 @@ Rotate(p) ==
        IN /\ Len(m) >= 2
           /\ NewIntervals({p}, [q \in PG |->
                [ivs[p][Cur(p)] EXCEPT !.mem = <<m[2], m[1]>> \o SubSeq(m, 3, Len(m))]])
-    /\ UNCHANGED <<reqIv, reports>>
+    /\ UNCHANGED <<reqIv, reports, recd>>
 
 \* A primary that restarted, or whose chunk counter ran out, gets a new interval.
 Renew(p) ==
     /\ reqIv[p] = Cur(p)
     /\ NewIntervals({p}, [q \in PG |-> ivs[p][Cur(p)]])
     /\ reqIv' = [reqIv EXCEPT ![p] = 0]
-    /\ UNCHANGED reports
+    /\ UNCHANGED <<reports, recd>>
 
 \* The leader folds an activation report, possibly late, into a table that
 \* starts no interval.
@@ -389,14 +415,17 @@ Fold(p, k) ==
     /\ [p |-> p, k |-> k] \in reports
     /\ k > tbl[Len(tbl)][p].la
     /\ Commit([tbl[Len(tbl)] EXCEPT ![p].la = Max({k, tbl[Len(tbl)][p].la})])
-    /\ UNCHANGED <<ivs, reqIv, reports>>
+    /\ UNCHANGED <<ivs, reqIv, reports, recd>>
 
 \* A planned membership change: [k |-> "mark", d, to], [k |-> "replace", p,
-\* old, new] or [k |-> "rotate", p].
+\* old, new], [k |-> "rotate", p], [k |-> "add", p, old, new] or [k |->
+\* "remove", p].
 Planned(m) ==
     \/ m.k = "mark" /\ MarkDisk(m.d, m.to)
     \/ m.k = "replace" /\ Replace(m.p, m.old, m.new)
     \/ m.k = "rotate" /\ Rotate(m.p)
+    \/ m.k = "add" /\ Add(m.p, m.old, m.new)
+    \/ m.k = "remove" /\ Remove(m.p)
 
 \* A free plan makes any change in Moves at any time; another makes its
 \* changes in order.
@@ -599,7 +628,7 @@ Peer(n, p) ==
                   ELSE /\ PersistAll(P, p, k, lists)
                        /\ Activated(n, p, k)
                        /\ UNCHANGED mrecv
-       /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, ep, dnode, ddisk, fmts, stale, run, rsIv, dlog,
+       /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, fmts, stale, run, rsIv, dlog,
                       pin, known, rm, vers, ackd, wst, sends, dmn,
                       rw, clockVars, raftVars>>
 
@@ -617,7 +646,7 @@ Activate(n, p) ==
        /\ \A d \in R : dnode[d] # 0 /\ Running(dnode[d]) /\ IvAt(dnode[d], p) = k
        /\ PersistAll(R, p, k, [d \in R |-> [c \in ChunksOf(p) |-> Entry(d, c, K[c])]])
        /\ Activated(n, p, k)
-       /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, ep, dnode, ddisk, fmts, stale, run, rsIv, dlog, mrecv,
+       /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, fmts, stale, run, rsIv, dlog, mrecv,
                       pv, pin, known, dec, dataVars, leaseVars, clockVars, raftVars>>
 
 \* With ActivateBeforeDurable, a member persists its list after activation,
@@ -676,6 +705,22 @@ Recover(n, p, c, d) ==
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, fmts, stale, run, rsIv, persIv, mrecv, priVars, dataVars,
                       leaseVars, clockVars, raftVars>>
 
+\* A primary that activated reports, on its next heartbeat, that every member
+\* of its interval but a leaving one is up and lists nothing. The model sends
+\* the report only while a member leaves, the one time the leader reads it.
+ReportRecovered(n, p) ==
+    LET k == IvAt(n, p)
+        x == ivs[p][k]
+    IN /\ Running(n)
+       /\ Leads(n, p)
+       /\ pr[n][p].act
+       /\ x.lv # 0
+       /\ k > recd[p]
+       /\ \A d \in Mem(p, k) \ {x.lv} : St(p, k, d) = "up" /\ \A c \in ChunksOf(p) : miss[d][c] = NoMiss
+       /\ recd' = [recd EXCEPT ![p] = k]
+       /\ UNCHANGED <<tbl, ivs, reqIv, reports, plan, step, nodeVars, priVars, dataVars, leaseVars,
+                      clockVars, raftVars>>
+
 \* A primary whose chunk counter ran out lets its pending writes complete,
 \* then asks for a new interval.
 CounterOut(n, p) ==
@@ -689,7 +734,7 @@ CounterOut(n, p) ==
        /\ \A r \in vers : r.n = n /\ r.r = run[n] /\ ChunkPG[r.c] = p
                             => [c |-> r.c, v |-> r.v] \in ackd
        /\ reqIv' = [reqIv EXCEPT ![p] = k]
-       /\ UNCHANGED <<tbl, ivs, plan, step, reports, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
+       /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
 
 -----------------------------------------------------------------------------
 \* Client writes. The client sends each write to the primary of its newest
@@ -1266,7 +1311,7 @@ Restart(n) ==
                   ELSE [hl[h] EXCEPT ![n].has = @ /\ ~waited]]
     /\ rstAt' = [rstAt EXCEPT ![n] = [r |-> raw[n], b |-> boot[n]]]
     /\ dirty' = Taint(n)
-    /\ UNCHANGED <<tbl, ivs, plan, step, reports, ep, dnode, ddisk, fmts, stale, dlog, miss, persIv, pv, dec, act,
+    /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, ep, dnode, ddisk, fmts, stale, dlog, miss, persIv, pv, dec, act,
                    dataVars, now, raw, boot, rawR, bootR, slew, frz, suspAt, rq, gm, hbm,
                    lastAsk, lastHb, net, arrived, hs, rterm, xto>>
 
@@ -1292,7 +1337,7 @@ Reboot(n) ==
     /\ dirty' = Taint(n)
     /\ frz' = [frz EXCEPT ![n] = "boot"]
     /\ suspAt' = [suspAt EXCEPT ![n] = now]
-    /\ UNCHANGED <<tbl, ivs, plan, step, reports, ep, dnode, ddisk, fmts, stale, dlog, miss, persIv, pv, dec, act,
+    /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, ep, dnode, ddisk, fmts, stale, dlog, miss, persIv, pv, dec, act,
                    dataVars, now, slew, rq, gm, hbm, lastAsk, lastHb, net, arrived,
                    hs, rterm, xto>>
 
@@ -1403,7 +1448,7 @@ Transfer(n, t) ==
 Protocol ==
     \/ Reactive
     \/ \E n \in Node \ stale : \E e \in {ep[n] + 1, Len(tbl)} : Adopt(n, e)
-    \/ \E n \in Node, p \in PG : Peer(n, p) \/ Activate(n, p) \/ CounterOut(n, p)
+    \/ \E n \in Node, p \in PG : Peer(n, p) \/ Activate(n, p) \/ CounterOut(n, p) \/ ReportRecovered(n, p)
     \/ \E d \in Disk : Persist(d)
     \/ \E n \in Node, p \in PG, c \in Chunk, d \in Disk : Recover(n, p, c, d)
     \/ \E i \in 1..Len(Writes) : Send(i)
@@ -1566,6 +1611,17 @@ Settled(p) ==
        \/ reqIv[p] = k
 PeeringSettles == <>[](\A p \in PG : Settled(p))
 
+\* 13. A move keeps every acknowledged version on as many members of the
+\* PG's current interval, holding it and listing nothing, as the PG had in
+\* interval 1: the leader removes a leaving member only once a primary
+\* reported its replacement recovered. Refills lower the count, and so does
+\* a dropped write logged over an acknowledged one until recovery, so only
+\* the plans whose membership changes are moves, with one write, check it.
+MovesKeepCopies ==
+    \A c \in Chunk : \A v \in AckedV(c) :
+       LET p == ChunkPG[c]
+       IN Cardinality({d \in Mem(p, Cur(p)) : v \in dlog[d][c] /\ miss[d][c] = NoMiss}) >= Len(InitMem[p])
+
 -----------------------------------------------------------------------------
 \* Configurations: the .cfg files substitute these for the constants. PG 1 is
 \* in a rep3 pool with min_live 2; PG 2 in a rep2 pool with min_live 2 that
@@ -1614,6 +1670,8 @@ OneWhole == <<[c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-
 Mark(d, to) == [k |-> "mark", d |-> d, to |-> to]
 Repl(p, old, new) == [k |-> "replace", p |-> p, old |-> old, new |-> new]
 Rot(p) == [k |-> "rotate", p |-> p]
+AddM(p, old, new) == [k |-> "add", p |-> p, old |-> old, new |-> new]
+RemoveM(p) == [k |-> "remove", p |-> p]
 Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f, t |-> 600, k |-> 1, s |-> Spare]
 
 \* The membership faults of test-scenarios.md "Epoch change model" on 3 nodes,
@@ -1657,6 +1715,14 @@ PeerPlans ==
 RestartPlans == {Reformatted, ReplicaThenMaint, Restarted, DownBackMoved}
 \* The liveness variant that breaks renewals runs the restart plan alone.
 RestartedPlans == {Restarted}
+
+\* ci-moves: PG 2's replica 3, or its primary 2, moved to node 1 by adding
+\* node 1 and removing the leaving member once recovered; and the replica's
+\* move with the leaving member marked down before its replacement recovers.
+MoveReplica == Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Session, {})
+MovePrimary == Plan(<<AddM(2, 2, 1), RemoveM(2)>>, Session, {})
+MoveLeavingDown == Plan(<<AddM(2, 3, 1), Mark(3, "down"), RemoveM(2)>>, Session, {})
+MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown}
 
 \* ci-leases: PG 2's primary is node 2, whose CLOCK_BOOTTIME runs at its raw
 \* rate or 22.6% slow; node 3, its only grantor, runs 4% slow or fast, with

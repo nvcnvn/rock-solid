@@ -3193,7 +3193,7 @@ constants are as at the head of [Peering and read leases](#peering-and-read-leas
 on 4 workers, so `ci`'s 5 minutes cover about 3 million.
 
 **Configurations.** Property 1 needs peering and leases together, so the spec is not split; its
-`ci` runs are three configurations, one heavy on leases and two on peering. Any membership change at any time does
+`ci` runs are four configurations, one heavy on leases, two on peering and one on moves. Any membership change at any time does
 not fit `ci`'s 5 minutes, so each `ci` configuration checks a set of *plans*: a plan is a short
 sequence of membership changes taken from the faults below, with the client writes and the faults
 whose rules it tests, and TLC checks every interleaving of nodes, messages, writes, renewals, folds of
@@ -3205,6 +3205,7 @@ nodes without finishing.
 | --- | --- | --- |
 | `ci-peering` | 3 | Both chunks; lease expiry left open, except that a grantor that answers peering of an interval holds no live grant to that interval's old primary; the plans with membership changes alone, but the largest |
 | `ci-restarts` | 3 | As `ci-peering`, with the plans that restart a primary or format a disk, under which a decision can stop short of activation, and the largest membership plan, a member down and back and then the primary moved to it, at 1.5 million states alone, so that neither configuration takes most of its 5 minutes |
+| `ci-moves` | 3 | As `ci-peering`, with the move plans: PG 2's replica and then its primary moved to node 1, and the replica's move with the leaving member marked down before its replacement recovers, each with the daemon's write W |
 | `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the six below |
 | `deep-peering` | 4 | `ci-peering`'s and `ci-restarts`' plans and the free plan, and the unbounded liveness property |
 | `deep-leases` | 4 | `ci-leases`'s plans and the six it leaves out: four pair a partition with a pause, a suspend or a reboot, and two stop the holder in place while its grantor pauses or restarts |
@@ -3308,6 +3309,9 @@ plans enable.
 - An interval with fewer than `min_live` live members, then the primary moved away.
 - An interval short of `min_live` only by members in `maintenance`: it accepted writes and is not skipped.
 - A replica replaced under a primary that stays.
+- A move: a member added and the leaving one removed once a primary reported an interval since the
+  add recovered, of a replica, of the primary, and with the leaving member down before its
+  replacement recovers.
 - A primary restart.
 - A counter running out.
 - An activation report lost or late.
@@ -3345,8 +3349,11 @@ Not modelled: a PG split with writes in flight, whose children take the parent's
 like any new interval; it needs a PG created mid-run, left to the phase 3 simulator.
 
 **Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12.
-`ci-peering`, `ci-restarts` and `deep-peering` check every property but 2 and 10, since the Raft
-group and lease time need clocks, and `deep-peering` adds the unbounded liveness property 12. A
+`ci-peering`, `ci-restarts` and `deep-peering` check every property but 2, 10 and 13, since the Raft
+group and lease time need clocks, and `deep-peering` adds the unbounded liveness property 12.
+`ci-moves` checks the same and property 13, which holds only where every membership change is a
+move and each chunk takes one write: a refill, or a dropped write logged over an acknowledged one,
+lowers the count until recovery. A
 simulator invariant is registered by [Placement faults and
 invariants](#placement-faults-and-invariants) (phase 3) unless the row names another item.
 
@@ -3364,13 +3371,14 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 10 | A node pair whose raw rates differ by up to 4%, with no pause, reboot, network fault or refusal since first contact, and whose holder ended no leases on a step-check trip from a pair a fault touched, holds a lease within `rate_gap` (plus rounding, at the model's zero round trips) of first contact and keeps it with no step-check trip. The bound is in time, so `ci` checks it as an invariant over the model's clocks | `LeaseForms` | "no step check trips between two nodes neither paused nor rebooted, and each such pair holds a lease within `rate_gap` plus two round trips of first contact", a counter expected to be 0: with real round trips the bound is `rate_gap` plus two of them |
 | 11 | Once a dead daemon's reissued write W′ and a later write W2 to the same block are acknowledged, the block never again holds the dead daemon's W | `NoResurrectedWrite` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), under the fault "a dead daemon's chunk write delivered after its successor's reissue and the pod's next write to the same block", registered by Invariant checker (phase 1) |
 | 12 | Peering settles: with every step that is due taken in time, every PG eventually activates its current interval, unless the interval has fewer than `min_live` live members, a live member's disk is gone, or the table bound left a restarted primary without the new interval it asked for | `PeeringSettles` | "once membership stops changing, every PG whose current interval has at least `min_live` live members on running nodes activates it" |
+| 13 | A move keeps every acknowledged version on as many members of the PG's current interval, holding it and listing nothing, as the PG's width: the leader removes a leaving member only once a primary reported its replacement recovered | `MovesKeepCopies` | "no move lowers the members of a PG holding an acknowledged version below its width" |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
 find a violation of the named property, which is never the property that only restates the removed
 rule. A variant that passes means the model is too weak. A row whose property is 1, 2 or 10 runs
 with `ci-leases`'s constants, except the row for reads below `min_live`, whose trace needs no
 clocks; the rest run with `ci-peering`'s, on `ci-restarts`' plans where the trace needs a restart
-or a format. A variant checks only the property it must break; the one for property 12 does so
+or a format and on `ci-moves`' where it needs a move. A variant checks only the property it must break; the one for property 12 does so
 under fairness, as `deep-peering` does, on the restart plan alone.
 
 | Rule removed or broken | Property broken | Minimal trace |
@@ -3386,6 +3394,7 @@ under fairness, as `deep-peering` does, on the restart plan alone.
 | A primary activates before missing lists are durable | 4 | A member crashes after activation, forgets that it lacks the kept version, and the next peering, reaching it, drops the version |
 | The leader records an activation the primary has only decided | 4 | PG 2: interval 2 replaces member 3 with node 1; primary 2 decides to keep W, still in flight to 3, and the leader records 2 before any member persisted the decision; W completes in interval 1; interval 3 puts 2 in `maintenance`, and node 1, peering from interval 2, finds no member that persisted its decision and drops W |
 | Recovery picks the blocks to leave out when it reads the authoritative member, not when it orders its write | 4 | A member that lists a chunk gets a client write ordered after recovery's read; the recovery write copies the older block over it, and the next peering, reaching that member, drops the acknowledged write |
+| The leader removes a leaving member before its replacement recovered | 13 | PG 2: W acknowledged on nodes 2 and 3; interval 2 adds node 1 with 3 leaving; interval 3 removes 3 before node 1 holds W, which only node 2 then holds |
 | Members accept a write only in the table epoch it was sent in | 7 | A fold or a change to the other PG reaches a member while a write is in flight, and the member refuses it though its interval is unchanged |
 | A later peering clears a missing-list entry recovery has not done | 5 | A member holds a dropped version, a write to the chunk's other block lands on it, the next peering clears its entry, and the decision after counts its torn block as the kept version |
 | Incarnations checked when a write arrives, not when it is ordered | 11 | P holds W; the successor's hello reaches P; P orders W after W′ and W2 |
@@ -3777,7 +3786,8 @@ section.
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
 | Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 26 | 547,723 | 53 s |
 | Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 30 | 1,794,768 | 190 s |
-| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 96 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 97 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 25 | 129,370 | 17 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
@@ -3852,7 +3862,7 @@ k.n is version (interval k, counter n).
 | Lease request, holder to grantor | The holder's table epoch; the grantor grants only if it is at least its own |
 | Grant | Support epoch; the grantor's run ID and `CLOCK_MONOTONIC_RAW` reading `g`; no table epoch, since the request reported the holder's ([Epoch change model](#epoch-change-model)); or a refusal with the grantor's table epoch |
 | Heartbeat between a node pair | The sender's table epoch; as a grantor, its run ID and `CLOCK_MONOTONIC_RAW`, on every heartbeat |
-| Heartbeat to the authority | Activation reports (PG fields); each member's acknowledgment latency; per disk its log ID, fill, oldest unfinished I/O age and whether its log has failed |
+| Heartbeat to the authority | Activation reports (PG fields); recovered reports (PG fields), once every member of the interval but a leaving one is up and lists nothing; each member's acknowledgment latency; per disk its log ID, fill, oldest unfinished I/O age and whether its log has failed |
 | `member_timeout` report, primary to authority | PG fields, member disk |
 | Direct probe, authority to a disk's owner loop | Disk ID |
 | Probe reply | Log ID, oldest unfinished I/O age, whether the log has failed |
@@ -4069,7 +4079,7 @@ Every PG's first `replicas` members, which hold its copies, sit in distinct doma
 
 A pure function in the sans-IO core, `Next` in `internal/chunkstore`: the previous table plus
 its inputs (the pools with their disks' marks, fills and drains, the primaries' asks, activation
-reports, operators' edits and how many balance moves the table may make) gives the next table, with
+and recovered reports, operators' edits and how many balance moves the table may make) gives the next table, with
 a deterministic order of moves: no `range` over a map, and a tie between equally placed disks goes
 to the lowest disk ID, then the lowest PG number.
 
@@ -4081,7 +4091,8 @@ row says otherwise).
 | --- | --- |
 | Pool B created | None in other pools; B's PGs start at interval 1 |
 | Disk added, before balance moves anything | None |
-| Balance moves one member of PG 7 | PG 7 only; the other 2,047 keep theirs |
+| Balance moves one member of PG 7: the new member added, the old one marked leaving | PG 7 only; the other 2,047 keep theirs |
+| A recovered report for PG 7's interval before the add, then for the add's | None, then PG 7, whose leaving member is removed |
 | Disk D, one of a node's 3, marked down | Only the PGs with a member on D |
 | Node marked down | Every PG with a member on the node: all 2,048 on 3 nodes; 615 of 2,048 on 10 nodes of 3 disks (PG epochs spike F1) |
 | Node marked up again | The same PGs again |
@@ -4103,9 +4114,9 @@ row says otherwise).
 - A delta's changed entries are exactly the PGs whose member list, order, live marks, interval, last
   activated interval or past members changed. Every other entry is byte for byte the previous
   table's.
-- A balance move swaps the member in one table, so it starts one interval, as the epoch change
-  model's `Replace` does; adding and then removing the member would start two (the PG epochs
-  spike's F2: 2,402 against 1,202 tables per staged flap).
+- A move starts two intervals of its PG, one when it adds the new member and marks the old one
+  leaving, one when it removes the leaving member, as the epoch change model's `Add` and `Remove`
+  do; a refill starts one, as its `Replace` does.
 - Pinning a PG without changing its members starts no interval.
 
 **Which members are missing.** `refill_after` 10 minutes, `degraded_refill_after` 1 minute; a `rep3` pool on 4 nodes unless stated (`TestMissingMembers` and the tests named in the rows).
@@ -4123,6 +4134,7 @@ row says otherwise).
 | Down for 1 minute in a `rep2` PG with `min_live` 1, both members down, and the only member live in an interval since the last activated one | No; peering waits for it whether or not a new member joins. The other member, down longer, is refilled (`TestAwaitedMemberStays`) |
 | A refill member, still recovering, in a `rep2` PG whose other member is live | Counts toward `min_live` from the table that adds it, marked up: the PG serves reads and writes once that interval activates, each acknowledged on both members, while recovery copies the older chunks on its missing list (`TestRefillMemberCountsAtOnce`) |
 | In `maintenance` for an hour | No; it counts toward `min_live` throughout |
+| A leaving member, down for 10 minutes | Dropped in the next table, not refilled: its replacement has joined (`TestMovesAddThenRemove`) |
 | Down on a 3-node `rep3` cluster for an hour | No eligible disk on another node; a disk failure on a node with a second disk refills there after 10 minutes (`TestRefillWithNoEligibleDisk`) |
 
 **Placement rules**
@@ -4153,6 +4165,12 @@ row says otherwise).
 - An operator's edit that names more disks than the width, a disk twice or two disks on one node
   under `rep3` is ignored, pin and all; one that swaps a member for a disk on a node the PG lacks
   is applied (`TestEditsKeepTheRules`).
+- A move adds the new member and marks the old one leaving; the first table after a recovered
+  report for an interval at or after the add removes it, and removals count no move, so every
+  recovered PG's removal shares one table (`TestMovesAddThenRemove`). A PG makes one move at a time.
+  Balance counts the leaving member as gone and the failure-domain rule ignores it: on 3 nodes of
+  `rep3`, a disk added to node A takes members from A's other disk. A missing member of a moving PG
+  is replaced by the leaving member, which becomes an ordinary member, when its domain allows.
 - Balance never moves a member of a pinned PG, and refill still replaces one on a lost disk. A
   draining disk keeps its members up while balance moves them all off (`TestPinAndDrain`), except
   a pinned PG's, which keeps the drain from finishing until an operator edits or unpins that PG.
@@ -4185,7 +4203,8 @@ spike](../spikes/capacity-model/README.md)). Here they check only placement
 | 2,048 `rep3` PGs, each 3 × (4-byte disk ID + mark byte) + 11 bytes of intervals, pin flag and counts | 52 KiB (53,270 bytes) |
 | 4,096 PGs × 18 members, `ec16-2` | About 404 KiB (413,718 bytes) |
 
-Past intervals' member lists come on top of these sizes and are usually empty (`TestTableSize`).
+Past intervals' member lists and, for a PG with a leaving member, its extra member and the 4-byte
+interval that added it come on top of these sizes; both are usually absent (`TestTableSize`).
 
 - A delta holds the changed PG entries and the CRC32C of the resulting table. Applied to the
   previous table, it reproduces the whole table and its CRC byte for byte.
@@ -4195,29 +4214,37 @@ Past intervals' member lists come on top of these sizes and are usually empty (`
 - A node that jumps from e to e + 5 by fetching a whole table loses nothing, and none of its
   interval numbers goes backwards (`TestDeltaBases`).
 - [fuzz] Delta and whole-table decoders (`FuzzDecodeTable`, `FuzzDecodeDelta`): what they accept
-  encodes back to the same bytes. A truncated delta, an entry for a PG past `pg_count`, or a
-  decreasing interval number is Malformed (`TestMalformedDeltas`), as is a new or resized pool
+  encodes back to the same bytes. A truncated delta, an entry for a PG past `pg_count`, a
+  decreasing interval number, two leaving members, or a leaving member's replacement added at
+  interval 0 or past the entry's interval is Malformed (`TestMalformedDeltas`), as is a new or resized pool
   without exactly `pg_count` entries, refused before the table is allocated: a 50-byte delta naming
   2³¹ PGs costs nothing (`TestDeltaCarriesEveryNewPG`).
 - PG epochs spike B1, a homelab year on 10 nodes: 104 to 105 MB of deltas against 399 MB to 2.25 GB
   of whole tables. F2, one flap with refill staged one member per table: 1,202 tables. A delta costs
   a 30-byte header for one pool and 34 bytes per changed `rep3` entry, 20 more with its previous
-  interval's members (`TestDeltaSize`).
+  interval's members, 9 more during a move (`TestDeltaSize`).
 
 **[property] tests.** `TestPlacementKeepsItsRules`, 1,000 seeds in `scripts/seeds.sh`, about 40 ms
 each; 10,000 passed once in 204 s on 2 processes. Each seed draws a layout from the matrix in
 Testing strategy, 3 or 5 nodes of 1 or 4 disks of 0.5 to 8 TB, some holding another pool's data, under `none`, `rep2` or `rep3` with a random
 `min_live`, places it, and computes 30 tables after random events: a disk added or removed, a disk
 or node marked down, up or in `maintenance`, a drain set or cleared, time passing, primaries asking,
-activations folded, `replicas` or `min_live` changed, `pg_count` doubled, or a PG reordered and
+activations folded with recovered reports where every member but a leaving one is up, `replicas` or `min_live` changed, `pg_count` doubled, or a PG reordered and
 pinned, each table allowed 0, 1, 5 or every balance move.
 
 After every table:
 
-- Every PG keeps its pool's width, with at most `max_per_domain` per domain and no disk twice.
+- Every PG keeps its pool's width beside at most one leaving member, with at most
+  `max_per_domain` per domain but the leaving member and no disk twice; its entry names the
+  interval that added the leaving member's replacement exactly while a member leaves.
 - No table raises an interval it need not, and every table raises one it must, by exactly 1, by
   the table above; no last activated interval goes down.
 - A member removed and added back gets a new interval.
+- A live leaving member is removed in the first table after a recovered report for an interval at
+  or after the add, and never before.
+- No live member that holds all of a PG's data, one it started with or one a recovered report
+  covered since it joined, leaves unless the members left that hold it still number the width; an
+  edit or a lower `replicas` may remove any member.
 - A delta reproduces the whole table and its CRC.
 
 Then every disk comes back up, undrained and unpinned, and tables are computed, each once the last
