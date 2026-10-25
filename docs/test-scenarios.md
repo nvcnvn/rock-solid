@@ -5666,6 +5666,9 @@ Timers:
 - A peer answers every request that carries data, even to reject it.
 - The core keeps its own deadlines: the driver sets no transport timeout that fails a request on its
   own. Open: whether the driver uses keepalive or `TCP_USER_TIMEOUT`.
+- Open: a message that finds the receiving loop's pool full. The simulator breaks its connection, a
+  simplification; the driver may apply backpressure instead, reading no more from that connection
+  until buffers are freed.
 - The read budget per connection per pass and the replication queue cap apply as under Event loop.
 - TCP first: RDMA upgrades the same connection's peers in phase 9; nodes without rdma-core stay on TCP
   with no error.
