@@ -14,6 +14,12 @@ func chaosSettings() sim.Settings {
 	set.DropNum, set.DropDen = 1, 8
 	set.CrashNum, set.CrashDen = 1, 300
 	set.StaleNum, set.StaleDen = 1, 4
+	set.NetJitter = 100
+	set.DupNum, set.DupDen = 1, 20
+	set.RebootNum, set.RebootDen = 1, 600
+	set.PauseNum, set.PauseDen = 1, 300
+	set.PartitionNum, set.PartitionDen = 1, 200
+	set.ClockNum, set.ClockDen = 1, 50
 	return set
 }
 

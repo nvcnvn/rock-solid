@@ -13,6 +13,7 @@ export GOTOOLCHAIN GOMEMLIMIT
 # package, test, seeds
 tests="
 internal/sim/toy TestTheFixedProtocolKeepsEveryAcknowledgedWrite 10000
+internal/sim TestFaultsKeepTheDriverContractAndTheResumedRule 2000
 internal/disklog TestEveryAcceptedItemDecodes 2000
 internal/disklog TestAnythingSubmitAcceptsDecodes 2000
 internal/disklog TestRandomCrashesKeepAcknowledgedRecords 500

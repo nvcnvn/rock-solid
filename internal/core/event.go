@@ -187,3 +187,17 @@ type Context struct {
 	Raw  Tick
 	Pool BufPool
 }
+
+// Clocks is one reading of every clock a loop reads together: CLOCK_BOOTTIME, CLOCK_MONOTONIC_RAW, CLOCK_MONOTONIC and the VMClock disruption marker.
+type Clocks struct {
+	Boot   Tick
+	Raw    Tick
+	Mono   Tick
+	Marker uint64
+}
+
+// Resumed reports whether the node stood still between two readings of one boot: CLOCK_BOOTTIME gained at least threshold on CLOCK_MONOTONIC, which only a suspend makes it do, or the disruption marker changed.
+func Resumed(prev, cur Clocks, threshold Tick) bool {
+	d := (cur.Boot - cur.Mono) - (prev.Boot - prev.Mono)
+	return cur.Marker != prev.Marker || int64(d) >= int64(threshold)
+}
