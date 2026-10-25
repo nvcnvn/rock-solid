@@ -198,13 +198,6 @@ func (c *rcluster) publish(t Table, activate bool) {
 	}
 }
 
-func (c *rcluster) activate(d int, pg core.PGID) {
-	c.call(d, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
-		_, e := c.table.entry(pg)
-		r.Activate(ctx, pg, e.Interval, out)
-	})
-}
-
 func (c *rcluster) settle() {
 	c.t.Helper()
 	for range 1_000_000 {

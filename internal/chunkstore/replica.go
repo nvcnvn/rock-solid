@@ -259,15 +259,6 @@ func (r *Replica) SetAddr(disk uint32, addr core.NodeID) {
 	r.addrs[disk] = addr
 }
 
-func (r *Replica) diskAt(addr core.NodeID) (uint32, bool) {
-	for d, a := range r.addrs {
-		if a == addr {
-			return uint32(d), true
-		}
-	}
-	return 0, false
-}
-
 // SetTable adopts t if it is newer than the table the replica holds.
 func (r *Replica) SetTable(ctx *core.Context, t Table, out *ReplicaOutput) {
 	if t.Epoch > r.table.Epoch {
