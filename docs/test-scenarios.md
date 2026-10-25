@@ -3353,11 +3353,12 @@ neither is the leaving mark that narrows a PG when `replicas` goes down. Of move
 out a leaving member kept as an ordinary one in place of a missing member (`stay`); a table that
 marks a member and removes the leaving member at once, which the model cannot make since its mark
 change starts an interval, and which placement prevents by ignoring a report in a table that marks
-another member; a removal and a new move of the PG in one table; and a leaving member dropped once
+another member; a removal and a new move of the PG in one table, which placement prevents since a
+move needs the PG's members unchanged from the table before; and a leaving member dropped once
 its disk leaves the pool. Nor is the rule that a move starts only from an interval reported
 recovered: the model's refills are planned, not chosen by whether peering waits for a member, so
-the loss that rule prevents cannot arise there. It checks only that moves keep copies, never that a move completes; the
-placement tests that settle every move check that.
+the loss that rule prevents cannot arise there. It checks only that moves keep copies, never that a
+move completes; the placement tests that settle every move check that.
 
 **Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12.
 `ci-peering`, `ci-restarts` and `deep-peering` check every property but 2 and 10, since the Raft
