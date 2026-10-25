@@ -4296,7 +4296,9 @@ holding data, and the same again. Once the loop stops:
 - Over a run of at least 200 seeds, the members disk additions move total at most 5% above the
   sum of their lower bounds. Fewer seeds swing too far: of the 1,250 runs of 8 seeds from 0 to
   9,999, 27 exceed 5%, seeds 8,720 to 8,727 reaching 17.2%, and runs of 40 reach 3.97%; any 200
-  consecutive seeds stay within 1.52%, and runs of 800 within 1.05%.
+  consecutive seeds stay within 1.52%, and runs of 800 within 1.05%. Each process checks it over
+  its own seeds, so only one given at least 200 does: `scripts/seeds.sh`'s 1,000 seeds on up to 5
+  processes, never `go test`'s 40.
 
 `Unbalanced` [property], `TestAddedDiskNeverUnbalances`, on layouts drawn as the study's test U
 draws them: 200 random layouts each for `rep2` and `rep3`, 3 to 6 nodes of 1 or 2 disks of 0.5 to
