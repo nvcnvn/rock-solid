@@ -3349,7 +3349,13 @@ plans enable.
 Not modelled: a PG split with writes in flight, whose children take the parent's interval plus one
 like any new interval, and the recovered reports placement ignores in the table that splits a pool;
 both need a PG created mid-run, left to the phase 3 simulator. Nor is a change of `replicas`, so
-neither is the leaving mark that narrows a PG when `replicas` goes down.
+neither is the leaving mark that narrows a PG when `replicas` goes down. Of moves, the model leaves
+out a leaving member kept as an ordinary one in place of a missing member (`stay`); a table that
+marks a member and removes the leaving member at once, which the model cannot make since its mark
+change starts an interval, and which placement prevents by ignoring a report in a table that marks
+another member; a removal and a new move of the PG in one table; and a leaving member dropped once
+its disk leaves the pool. It checks only that moves keep copies, never that a move completes; the
+placement tests that settle every move check that.
 
 **Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12.
 `ci-peering`, `ci-restarts` and `deep-peering` check every property but 2, 10 and 13, since the Raft
