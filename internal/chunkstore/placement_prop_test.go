@@ -221,12 +221,7 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 	}
 	for i := range pt.PGs {
 		e := &pt.PGs[i]
-		leaving := 0
-		for _, m := range e.Members {
-			if m.Leaving {
-				leaving++
-			}
-		}
+		leaving := leavingIn(e.Members)
 		var b PGEntry
 		if old != nil {
 			b = old.PGs[i*len(old.PGs)/len(pt.PGs)]

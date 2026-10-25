@@ -244,13 +244,7 @@ func (r *reader) entry() PGEntry {
 	if e.Interval == 0 || e.Activated > e.Interval {
 		r.bad = true
 	}
-	leaving := 0
-	for _, m := range e.Members {
-		if m.Leaving {
-			leaving++
-		}
-	}
-	if leaving > 1 {
+	if leavingIn(e.Members) > 1 {
 		r.bad = true
 	}
 	n := r.uvarint()

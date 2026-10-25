@@ -271,10 +271,13 @@ func recovers(ms []Member) bool {
 }
 
 func leavingIn(ms []Member) int {
-	if slices.ContainsFunc(ms, func(m Member) bool { return m.Leaving }) {
-		return 1
+	n := 0
+	for _, m := range ms {
+		if m.Leaving {
+			n++
+		}
 	}
-	return 0
+	return n
 }
 
 func (e *PGEntry) leaving() int {
