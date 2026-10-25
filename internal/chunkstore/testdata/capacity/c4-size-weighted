@@ -1,0 +1,46 @@
+# C4 with the spike's size-weighted table: every disk 2 TB, so a third of the slots each, which puts
+# available 57% under balanced.
+
+pool replicas=1 pgs=256
+----
+
+disks
+A node=A size=2TB other=1.2TB slots=86
+B node=B size=2TB slots=85
+C node=C size=2TB slots=85
+----
+
+figures
+----
+capacity 4.200 TB: A 0.600 TB, B 1.800 TB, C 1.800 TB
+capacity/b 4.200 TB
+balanced 4.200 TB
+available 1.786 TB, set by A (86 of 256 slots, target 36.6); available + held 57.5% under balanced
+held 0.000 GB
+f 0.0%, stranded room: none
+asks false, spare domain true
+reprotectable 2.400 TB, losing domain B
+
+# Placement still proposes moves, or a PG still lists past members: Unbalanced keeps its value.
+conditions
+----
+none
+
+# Every PG pinned, placement proposing no move.
+conditions settled
+----
+Unbalanced
+
+disks
+A node=A size=2TB other=1.2TB slots=36
+B node=B size=2TB slots=110
+C node=C size=2TB slots=110
+----
+
+conditions
+----
+Unbalanced
+
+conditions settled
+----
+none

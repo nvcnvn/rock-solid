@@ -1,0 +1,85 @@
+# C2: rep3 on nodes of 4, 4, 2 and 1 TB; the spike's table at seed 1.
+
+pool replicas=3
+----
+
+disks
+A node=A size=4TB slots=128
+B node=B size=4TB slots=128
+C node=C size=2TB slots=86
+D node=D size=1TB slots=42
+----
+
+figures
+----
+capacity 9.900 TB: A 3.600 TB, B 3.600 TB, C 1.800 TB, D 0.900 TB
+capacity/b 3.300 TB
+balanced 2.700 TB
+available 2.679 TB, set by C (86 of 128 slots, target 85.3); available + held 0.8% under balanced
+held 0.000 GB
+f 18.2%, stranded room: A 0.900 TB (25%), B 0.900 TB (25%)
+asks false, spare domain true
+reprotectable 0.900 TB, losing domain A
+
+conditions settled
+----
+Stranded
+
+confirm
+----
+confirmed 18.2%
+
+conditions settled
+----
+none
+
+# Held at balanced proportions, the figures over capacity do not move.
+hold 0.8TB
+----
+
+figures
+----
+capacity 9.900 TB: A 3.600 TB, B 3.600 TB, C 1.800 TB, D 0.900 TB
+capacity/b 3.300 TB
+balanced 2.700 TB
+available 1.885 TB, set by C (86 of 128 slots, target 85.3); available + held 0.5% under balanced
+held 0.800 TB
+f 18.2%, stranded room: A 0.900 TB (25%), B 0.900 TB (25%)
+asks false, spare domain true
+reprotectable 0.900 TB, losing domain A
+
+conditions settled
+----
+none
+
+hold 0.2TB
+----
+
+figures
+----
+capacity 9.900 TB: A 3.600 TB, B 3.600 TB, C 1.800 TB, D 0.900 TB
+capacity/b 3.300 TB
+balanced 2.700 TB
+available 1.687 TB, set by C (86 of 128 slots, target 85.3); available + held 0.5% under balanced
+held 1.000 TB
+f 18.2%, stranded room: A 0.900 TB (25%), B 0.900 TB (25%)
+asks false, spare domain true
+reprotectable 0.900 TB, losing domain A
+
+conditions settled
+----
+CannotReprotect
+
+hold 1TB
+----
+
+figures
+----
+capacity 9.900 TB: A 3.600 TB, B 3.600 TB, C 1.800 TB, D 0.900 TB
+capacity/b 3.300 TB
+balanced 2.700 TB
+available 0.695 TB, set by C (86 of 128 slots, target 85.3); available + held 0.2% under balanced
+held 2.000 TB
+f 18.2%, stranded room: A 0.900 TB (25%), B 0.900 TB (25%)
+asks false, spare domain true
+reprotectable 0.900 TB, losing domain A

@@ -1,0 +1,39 @@
+# C5: rep3 on ten nodes of 4, 4, 4, 2, 2, 2, 1, 1, 1 and 0.5 TB; the spike's table at seed 1.
+
+pool replicas=3 pgs=512
+----
+
+disks
+A node=A size=4TB slots=286
+B node=B size=4TB slots=287
+C node=C size=4TB slots=286
+D node=D size=2TB slots=143
+E node=E size=2TB slots=143
+F node=F size=2TB slots=143
+G node=G size=1TB slots=71
+H node=H size=1TB slots=71
+I node=I size=1TB slots=71
+J node=J size=0.5TB slots=35
+----
+
+figures
+----
+capacity 19.350 TB: A 3.600 TB, B 3.600 TB, C 3.600 TB, D 1.800 TB, E 1.800 TB, F 1.800 TB, G 0.900 TB, H 0.900 TB, I 0.900 TB, J 0.450 TB
+capacity/b 6.450 TB
+balanced 6.450 TB
+available 6.422 TB, set by B (287 of 512 slots, target 285.8); available + held 0.4% under balanced
+held 0.000 GB
+f 0.0%, stranded room: none
+asks false, spare domain true
+reprotectable 5.250 TB, losing domain A
+
+conditions settled
+----
+none
+
+hold 5.3TB
+----
+
+conditions settled
+----
+CannotReprotect

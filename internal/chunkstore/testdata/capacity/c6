@@ -1,0 +1,37 @@
+# C6: rep2 on nodes of 4, 1 and 1 TB; the spike's table at seed 1. In whole blocks A strands
+# 439,453,126 of 878,906,250, two blocks over half, so creating it asks for confirmation.
+
+pool replicas=2
+----
+
+disks
+A node=A size=4TB slots=128
+B node=B size=1TB slots=64
+C node=C size=1TB slots=64
+----
+
+figures
+----
+capacity 5.400 TB: A 3.600 TB, B 0.900 TB, C 0.900 TB
+capacity/b 2.700 TB
+balanced 1.800 TB
+available 1.800 TB, set by B (64 of 128 slots, target 64.0); available + held 0.0% under balanced
+held 0.000 GB
+f 33.3%, stranded room: A 1.800 TB (50%)
+asks true, spare domain true
+reprotectable 0.900 TB, losing domain A
+
+confirm
+----
+confirmed 33.3%
+
+conditions settled
+----
+none
+
+hold 1TB
+----
+
+conditions settled
+----
+CannotReprotect

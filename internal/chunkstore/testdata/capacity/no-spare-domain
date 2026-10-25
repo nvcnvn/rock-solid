@@ -1,0 +1,76 @@
+# rep3 on three nodes, which has no spare domain: reprotectable is the least balanced after losing
+# one disk of a node that has another.
+
+pool replicas=3
+----
+
+disks
+A1 node=A size=2TB slots=64
+A2 node=A size=2TB slots=64
+B1 node=B size=2TB slots=64
+B2 node=B size=2TB slots=64
+C1 node=C size=2TB slots=64
+C2 node=C size=2TB slots=64
+----
+
+figures
+----
+capacity 10.800 TB: A 3.600 TB, B 3.600 TB, C 3.600 TB
+capacity/b 3.600 TB
+balanced 3.600 TB
+available 3.600 TB, set by A1 (64 of 128 slots, target 64.0); available + held 0.0% under balanced
+held 0.000 GB
+f 0.0%, stranded room: none
+asks false, spare domain false
+reprotectable 1.800 TB, losing disk A1
+
+hold 1.7TB
+----
+
+conditions settled
+----
+none
+
+hold 0.3TB
+----
+
+conditions settled
+----
+CannotReprotect
+
+disks
+A1 node=A size=2TB slots=64
+A2 node=A size=2TB slots=64
+B1 node=B size=2TB slots=64
+B2 node=B size=2TB slots=64
+C1 node=C size=4TB slots=102
+C2 node=C size=1TB slots=26
+----
+
+figures
+----
+capacity 11.700 TB: A 3.600 TB, B 3.600 TB, C 4.500 TB
+capacity/b 3.900 TB
+balanced 3.600 TB
+available 3.600 TB, set by A1 (64 of 128 slots, target 64.0); available + held 0.0% under balanced
+held 0.000 GB
+f 7.7%, stranded room: C 0.900 TB (20%)
+asks false, spare domain false
+reprotectable 0.900 TB, losing disk C1
+
+disks
+A node=A size=4TB slots=128
+B node=B size=4TB slots=128
+C node=C size=4TB slots=128
+----
+
+figures
+----
+capacity 10.800 TB: A 3.600 TB, B 3.600 TB, C 3.600 TB
+capacity/b 3.600 TB
+balanced 3.600 TB
+available 3.600 TB, set by A (128 of 128 slots, target 128.0); available + held 0.0% under balanced
+held 0.000 GB
+f 0.0%, stranded room: none
+asks false, spare domain false
+reprotectable none

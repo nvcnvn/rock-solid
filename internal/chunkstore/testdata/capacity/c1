@@ -1,0 +1,43 @@
+# C1: rep2 on nodes of 0.7 and 2 GB. Every table here is the capacity model spike's capped placement
+# (spikes/capacity-model/model.py) at seed 1, as studies/capacity-conditions/conditions.py ports it
+# and reproduces the spike's available figure to the digit.
+
+pool replicas=2
+----
+
+disks
+A node=A size=0.7GB slots=128
+B node=B size=2GB slots=128
+----
+
+figures
+----
+capacity 2.430 GB: A 0.630 GB, B 1.800 GB
+capacity/b 1.215 GB
+balanced 0.630 GB
+available 0.630 GB, set by A (128 of 128 slots, target 128.0); available + held 0.0% under balanced
+held 0.000 GB
+f 48.1%, stranded room: B 1.170 GB (65%)
+asks true, spare domain false
+reprotectable none
+
+# A Pool applied without the CLI has a confirmed fraction of 0.
+conditions settled
+----
+Stranded
+
+confirm
+----
+confirmed 48.1%
+
+conditions settled
+----
+none
+
+# No spare domain and no node with a second disk: nothing to reprotect, whatever the pool holds.
+hold 0.5GB
+----
+
+conditions settled
+----
+none

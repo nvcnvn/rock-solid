@@ -1,0 +1,40 @@
+# C3: ec4-2 at 2 per node on nodes of 2 x 2, 2 x 2 and 2 x 0.5 TB; the spike's table at seed 1.
+# Phase 3 refuses erasure-coded pools; the figures are a pure function of the shape.
+
+pool replicas=3 data=4 parity=2 per=2
+----
+
+disks
+A1 node=A size=2TB slots=128
+A2 node=A size=2TB slots=128
+B1 node=B size=2TB slots=128
+B2 node=B size=2TB slots=128
+C1 node=C size=0.5TB slots=128
+C2 node=C size=0.5TB slots=128
+----
+
+figures
+----
+capacity 8.100 TB: A 3.600 TB, B 3.600 TB, C 0.900 TB
+capacity/b 5.400 TB
+balanced 1.800 TB
+available 1.800 TB, set by C1 (128 of 128 slots, target 128.0); available + held 0.0% under balanced
+held 0.000 GB
+f 66.7%, stranded room: A 2.700 TB (75%), B 2.700 TB (75%)
+asks true, spare domain false
+reprotectable none
+
+conditions settled
+----
+Stranded
+
+confirm
+----
+confirmed 66.7%
+
+hold 1TB
+----
+
+conditions settled
+----
+none
