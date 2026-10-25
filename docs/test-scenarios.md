@@ -4239,7 +4239,7 @@ interval that added it come on top of these sizes; both are usually absent (`Tes
   interval's members, 9 more during a move (`TestDeltaSize`).
 
 **[property] tests.** `TestPlacementKeepsItsRules`, 1,000 seeds in `scripts/seeds.sh`, about 40 ms
-each; 10,000 passed once in 228 s on 2 processes. Each seed draws a layout from the matrix in
+each; 10,000 passed once in 251 s on 2 processes. Each seed draws a layout from the matrix in
 Testing strategy, 3 or 5 nodes of 1 or 4 disks of 0.5 to 8 TB, some holding another pool's data, under `none`, `rep2` or `rep3` with a random
 `min_live`, places it, and computes 30 tables after random events: a disk added or removed, a disk
 or node marked down, up or in `maintenance`, a drain set or cleared, time passing, primaries asking,
@@ -4267,7 +4267,7 @@ Then every disk comes back up, undrained and unpinned, and tables are computed, 
 one's moves have copied and activated, until one proposes no move and leaves no PG moving; then a disk is added to the pool
 holding data, and the same again. Once the loop stops:
 
-- It settles within a few computations, at most 4 over 5,000 seeds: one after the moves copied
+- It settles within a few computations, at most 4 over 1,000 seeds: one after the moves copied
   proposes more only where the one before found every PG it would move from a disk still moving,
   since a PG makes one move at a time.
 - It has converged: no disk is outside its fill margin.
@@ -4278,12 +4278,12 @@ holding data, and the same again. Once the loop stops:
   Moving from the disk furthest above its target even inside its margin costs those extra moves:
   when a disk joins a domain whose capped share rises, the disks of other domains that are just
   above their targets feed that domain's other disks, and a disk far above its target feeds the
-  new disk in its own domain until it falls under the rest. Over 5,000 seeds the moves were 0.7%
+  new disk in its own domain until it falls under the rest. Over 10,000 seeds the moves were 0.79%
   above the lower bound in all, none above a quarter more.
 - Over a run of at least 200 seeds, the members disk additions move total at most 5% above the
-  sum of their lower bounds. Fewer seeds swing too far: seeds 2,400 to 2,407 reach 10.3%, two of
-  their additions 12 and 20% above their bounds, and 2,400 to 2,439 4.05%; the 250 seeds 2,250 to
-  2,499 reach 1.17%, and every window of 800 seeds stayed within 0.75%.
+  sum of their lower bounds. Fewer seeds swing too far: of the 1,250 runs of 8 seeds from 0 to
+  9,999, 27 exceed 5%, seeds 8,720 to 8,727 reaching 17.2%, and runs of 40 reach 3.97%; any 200
+  consecutive seeds stay within 1.52%, and runs of 800 within 1.05%.
 
 `Unbalanced` [property], `TestAddedDiskNeverUnbalances`, on layouts drawn as the study's test U
 draws them: 200 random layouts each for `rep2` and `rep3`, 3 to 6 nodes of 1 or 2 disks of 0.5 to
