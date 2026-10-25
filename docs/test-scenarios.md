@@ -4004,7 +4004,7 @@ The first refused write landing within 0.3% of available is a fill-based check. 
 | A pool whose disks have no capacity left (Σcᵢ = 0) | f = 0, no `Stranded` |
 | C1 to C6 with their capped tables, placement proposing no move | No `Unbalanced`: available + held is 0.0 to 0.8% under balanced |
 | C4 with a size-weighted table and every PG pinned, placement proposing no move | `Unbalanced` (57% under balanced), naming disk A with its share and target |
-| C4 with a size-weighted table while placement still proposes moves, or a PG still lists past members | `Unbalanced` keeps its last value |
+| C4 with a size-weighted table while placement still proposes moves, or a PG still has a leaving member | `Unbalanced` keeps its last value |
 | C2 with a 4 TB disk added to D by `rock-solid` and confirmed, the pool 90% held | No `Unbalanced`: available + held is within 1.5% of balanced at any fill |
 | C2 holding 0.8 TB | No `CannotReprotect` |
 | C2 holding 1.0 TB | `CannotReprotect`, naming node A |
@@ -4013,7 +4013,7 @@ The first refused write landing within 0.3% of available is a fill-based check. 
 | C4 (`none`) at any fill | No `CannotReprotect`: one copy |
 | `rep3` on three nodes of 2 × 2 TB, holding 1.7 TB, then 2.0 TB | None, then `CannotReprotect` naming one disk (reprotectable 1.8 TB) |
 | `rep3` on three nodes, one node rebooting | No figure or condition changes: its disks keep their shares at their last fills |
-| A PG with a missing member that copies nothing for 60 s on `ctx.Now` | `Stuck`, naming the PG; it clears when the PG copies again or its past members are trimmed |
+| A PG with a missing member that copies nothing for 60 s on `ctx.Now` | `Stuck`, naming the PG; it clears when the PG copies again or has nothing left to copy |
 
 **Confirmation.** `rock-solid pool create` and disk changes print, per domain, cᵢ, its load at balance min(cᵢ, a·B) and its stranded room. They ask for confirmation when some domain has 2 × stranded room > cᵢ, and record f as the confirmed fraction.
 

@@ -289,6 +289,9 @@ func TestAddedDiskNeverUnbalances(t *testing.T) {
 			for _, fill := range []float64{0, 0.5, 0.7, 0.9} {
 				l.held = uint64(fill * float64(f.Balanced))
 				l.settle(t)
+				if len(l.moving()) != 0 {
+					t.Fatalf("PGs %v still move once placement proposes none", l.moving())
+				}
 				f = l.figures()
 				c.Update(&f, true)
 				if c.Unbalanced {

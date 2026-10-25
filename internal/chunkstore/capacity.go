@@ -290,7 +290,7 @@ func (p Pool) Reserves(f *Figures, reserved, snapshots, add uint64) bool {
 	return p.Overcommit || reserved+snapshots+add <= f.Balanced*core.BlockSize
 }
 
-// Copying is a PG of the pool with past or missing members, and when it last copied or began to need copying.
+// Copying is a PG of the pool with a leaving or missing member or a chunk on a member's missing list, and when it last copied or began to need copying.
 type Copying struct {
 	PG    uint32
 	Since core.Tick
@@ -307,7 +307,7 @@ type Conditions struct {
 	Confirmed       float64
 }
 
-// Update raises and clears the conditions on f; Unbalanced keeps its value unless settled: no move proposed, no past members listed.
+// Update raises and clears the conditions on f; Unbalanced keeps its value unless settled: no move proposed and no PG has a leaving member.
 func (c *Conditions) Update(f *Figures, settled bool) {
 	if c.Full {
 		c.Full = f.anyAbove(1)

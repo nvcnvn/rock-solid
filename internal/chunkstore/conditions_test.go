@@ -210,7 +210,7 @@ func TestStuck(t *testing.T) {
 		t.Fatalf("Stuck %v once the PG copies again", c.Stuck)
 	}
 	if c.Watch(10*StuckAfter, nil); len(c.Stuck) != 0 {
-		t.Fatalf("Stuck %v once the past members are trimmed", c.Stuck)
+		t.Fatalf("Stuck %v once the PG has nothing left to copy", c.Stuck)
 	}
 }
 
