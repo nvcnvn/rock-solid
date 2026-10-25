@@ -177,7 +177,7 @@ type DiskState struct {
 	Failed bool
 }
 
-// Report is a node's heartbeat to the authority: the PGs whose primary activated, those whose members but a leaving one it recovered, member latencies and its disks.
+// Report is a node's heartbeat to the authority: the PGs whose primary activated, the PGs whose activated primary has recovered every member but a leaving one, member latencies and its disks.
 type Report struct {
 	ID          core.RequestID
 	Activations []PGFields

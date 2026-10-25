@@ -396,20 +396,23 @@ func TestWireDataStaysInItsBuffer(t *testing.T) {
 
 func TestWireLongFrameTravelsInABuffer(t *testing.T) {
 	pool := sim.NewPool(1<<20, 0)
-	report := func(activations, latencies, disks int) *Report {
-		r := &Report{ID: 1, Activations: make([]PGFields, activations), Latencies: make([]Latency, latencies), Disks: make([]DiskState, disks)}
+	report := func(activations, recovered, latencies, disks int) *Report {
+		r := &Report{ID: 1, Activations: make([]PGFields, activations), Recovered: make([]PGFields, recovered), Latencies: make([]Latency, latencies), Disks: make([]DiskState, disks)}
 		if activations == 0 {
-			r.Activations, r.Latencies = nil, nil
+			r.Activations, r.Recovered, r.Latencies = nil, nil, nil
+		}
+		for i := range r.Activations {
+			r.Activations[i] = wirePG
+		}
+		for i := range r.Recovered {
+			r.Recovered[i] = wirePG
 		}
 		return r
 	}
 	for _, c := range []struct {
 		r      *Report
 		inline bool
-	}{{report(3, 10, 2), true}, {report(3, 8, 3), false}, {report(0, 0, 200), false}} {
-		for i := range c.r.Activations {
-			c.r.Activations[i] = wirePG
-		}
+	}{{report(2, 1, 10, 2), true}, {report(2, 1, 8, 3), false}, {report(0, 0, 0, 200), false}} {
 		frame := AppendReport(nil, c.r)
 		var m core.Msg
 		if err := Attach(pool, &m, frame, core.NoBuf); err != nil {
