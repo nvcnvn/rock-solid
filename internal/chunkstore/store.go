@@ -1093,7 +1093,7 @@ func (s *Store) Commit(ctx *core.Context, c core.ChunkID, v uint64, out *Output)
 	s.mapResolved(ctx, ci, out)
 }
 
-// Settle is peering's decision on chunk c's gated writes and punches not committed: those at version keep or below are mapped in version order, and the later ones dropped, never mapped, the chunk's version and snapshot epoch given back to what the first dropped one found. Their records stay in the log until recovery supersedes their blocks, and the caller numbers the chunk's next versions from a later interval, since members may have logged the dropped ones. It returns ErrUnresolved, settling nothing, while a write or punch of the chunk waits to be ordered or has records neither durable nor failed.
+// Settle is peering's decision on chunk c's gated writes and punches not mapped yet: those at version keep or below are mapped in version order, and the later ones dropped, never mapped, even if committed, the chunk's version and snapshot epoch given back to what the first dropped one found. Their records stay in the log until recovery supersedes their blocks, and the caller numbers the chunk's next versions from a later interval, since members may have logged the dropped ones. It returns ErrUnresolved, settling nothing, while a write or punch of the chunk waits to be ordered or has records neither durable nor failed.
 func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Output) error {
 	ci, ok := s.chunkOf[c]
 	if !ok {
@@ -1105,7 +1105,7 @@ func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Outp
 	}
 	for _, oi := range cs.pending {
 		switch o := &s.ops[oi]; {
-		case !o.req.Gated || o.committed || o.dropped:
+		case !o.req.Gated || o.dropped:
 		case o.version <= keep:
 			o.committed = true
 		default:

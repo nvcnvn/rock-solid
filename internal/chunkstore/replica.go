@@ -986,11 +986,11 @@ func (r *Replica) counterSpent(ctx *core.Context, i int, buf core.IOBuf, out *Re
 	r.dropWaiting(ctx, out)
 }
 
-// ask asks for the next interval of each PG whose interval ended, once none of its versions is pending.
+// ask asks for the next interval of each PG whose interval ended, once none of its versions waits for a member or its own log: a committed version may wait behind a failed one, which only Settle resolves.
 func (r *Replica) ask(out *ReplicaOutput) {
 	for i := range r.leads {
 		l := &r.leads[i]
-		if !l.asking || l.asked || slices.ContainsFunc(r.vers, func(v version) bool { return v.u.PG.PG == l.pg && !v.done }) {
+		if !l.asking || l.asked || slices.ContainsFunc(r.vers, func(v version) bool { return v.u.PG.PG == l.pg && !v.done && !v.commit }) {
 			continue
 		}
 		l.asked = true

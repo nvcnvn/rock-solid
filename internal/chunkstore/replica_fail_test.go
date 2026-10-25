@@ -368,3 +368,40 @@ func TestARecoveringMemberRefusesWrites(t *testing.T) {
 		t.Fatalf("answered %+v", rp)
 	}
 }
+
+// Disk 3, cut off, acknowledges 1.2 and then refuses 1.1, as a member does that logged both and refuses 1.1 sent again after the acknowledgment was lost: 1.2 has committed and waits behind 1.1, and the primary still asks for the next interval, whose peering settles both.
+func TestAFailureBelowACommittedVersionStillAsks(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.s.Partition(0, 2, false)
+	w1, w2 := c.write(pg0, ch, 0, []byte{1}), c.write(pg0, ch, 1, []byte{2})
+	c.runFor(5_000)
+	from3 := func(rp Response) {
+		ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 2}}
+		ev.Msg.Len = uint16(copy(ev.Msg.Body[:], AppendResponse(nil, &rp)))
+		c.s.Node(0).Feed(c.loops[0], ev)
+	}
+	from3(Response{Kind: KindAck, ID: 2, Version: MakeVersion(1, 2)})
+	if !c.reps[0].vers[1].commit {
+		t.Fatal("1.2 did not commit")
+	}
+	from3(Response{Kind: KindAck, ID: 1, Status: StatusRefused, Epoch: 1, Interval: 1})
+	c.s.Heal(0, 2)
+	c.settle()
+	if len(c.asks) != 1 {
+		t.Fatalf("asks %+v", c.asks)
+	}
+	c.publish(c.next(func(t *Table) { setInterval(t, pg0, 2) }), false)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		if err := r.Settle(ctx, ch, 0, out); err != nil {
+			t.Fatal(err)
+		}
+		r.Activate(ctx, pg0, 2, out)
+	})
+	c.settle()
+	for _, w := range []core.RequestID{w1, w2} {
+		if rp := c.reply(w); rp.Status != StatusRefused {
+			t.Fatalf("answered %+v", rp)
+		}
+	}
+}
