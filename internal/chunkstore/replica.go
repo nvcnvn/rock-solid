@@ -1035,6 +1035,7 @@ func (r *Replica) drainStore(ctx *core.Context, out *ReplicaOutput) {
 		for i := range r.leads {
 			r.leads[i].active, r.leads[i].serving, r.leads[i].asking, r.leads[i].peer = false, false, true, nil
 		}
+		r.recs = r.recs[:0]
 	}
 	acts := r.sout.Actions
 	r.sout.Reset()

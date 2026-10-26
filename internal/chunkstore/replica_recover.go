@@ -298,7 +298,7 @@ func (r *Replica) recoveryWritten(ctx *core.Context, rp Reply, out *ReplicaOutpu
 func (r *Replica) orderRecovery(ctx *core.Context, k int, buf core.IOBuf) {
 	rc := &r.recs[k]
 	i := r.lead(rc.pg)
-	if i < 0 || r.leads[i].interval != rc.interval {
+	if i < 0 || r.leads[i].interval != rc.interval || !r.leads[i].active || r.leads[i].asking {
 		freeBuf(ctx, buf)
 		r.endRecovery(k, false)
 		return

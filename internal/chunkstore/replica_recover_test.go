@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
+	"github.com/nvcnvn/rock-solid/internal/sim/clock"
 )
 
 // recSend is a recovery write a primary sent a member: its update, and when it carried a buffer,
@@ -425,4 +427,52 @@ func TestHeldPartialWritesAreBounded(t *testing.T) {
 			t.Fatalf("a held write answered %+v", rp)
 		}
 	}
+}
+
+// Disk 3, the new primary, lacks the chunk and asks disk 2 for its image; its index rebuilds while
+// the read is out, ending its leads and the covers its store kept. The reply then arrives and is
+// dropped: the recovery ended with the rebuild, rather than ordering a write of a chunk the store
+// no longer covers.
+func TestARebuildEndsTheRecoveriesUnderWay(t *testing.T) {
+	tbl := rtable(4, 1)
+	_, e := tbl.entry(pg0)
+	e.Members = []Member{{Disk: 2}, {Disk: 1, Mark: MarkDown}, {Disk: 3, Mark: MarkDown}}
+	c := newRCluster(t, tbl)
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 0, 2, 1)
+	c.reps[2].plant.noRecovery = true
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 2)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 3}, {Disk: 1}, {Disk: 2}}
+	}), true)
+	sent := false
+	c.onPass = func(d int, acts []core.Action) {
+		for i := range acts {
+			if a := &acts[i]; d == 2 && a.Kind == core.ActNetSend && a.Msg.Len >= headSize && Kind(a.Msg.Body[1]) == KindRecoverRead {
+				sent = true
+			}
+		}
+	}
+	c.reps[2].plant.noRecovery = false
+	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.drain(ctx, out) })
+	for range 100_000 {
+		if sent {
+			break
+		}
+		c.step()
+	}
+	if !sent {
+		t.Fatal("no recovery read")
+	}
+	c.s.Pause(1, clock.PauseFrozen, 2_000_000, false)
+	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.st.indexBroken(ctx, lsm.ErrCheck, &r.sout)
+		r.st.pump(ctx, &r.sout)
+		r.drain(ctx, out)
+	})
+	if n := len(c.reps[2].recs); n != 0 {
+		t.Fatalf("%d recoveries outlived the rebuild", n)
+	}
+	c.runFor(5_000_000)
 }
