@@ -517,7 +517,7 @@ func TestNoLeaseOutlastsItsGrant(t *testing.T) {
 // 1 + 2 lease_drift (20), the margin max(lease_drift, 1 − 1/B) (3 of 5,000), no new window at a new
 // run ID (12), no end of leases on Resumed (8), no step check (55), one on grants only (56) and no
 // restart wait (96); the step check trips between a pair no fault touched at 1 + lease_drift / 2
-// (23) and against a grant that gave no lease (1).
+// (25) and against a grant that gave no lease (3).
 func TestPlantedLeaseBugsBreakThePair(t *testing.T) {
 	const outlasts, trips = "no longer keeps", "tripped"
 	for _, p := range []struct {
@@ -538,7 +538,7 @@ func TestPlantedLeaseBugsBreakThePair(t *testing.T) {
 		{"step check on grants only", 1, outlasts, plants{stepOnGrantsOnly: true}},
 		{"no restart wait", 0, outlasts, plants{noRestartWait: true}},
 		{"half-drift step check", 3, trips, plants{halfStep: true}},
-		{"step check before the bound", 482, trips, plants{checkBeforeBound: true}},
+		{"step check before the bound", 265, trips, plants{checkBeforeBound: true}},
 	} {
 		if err := runPair(p.seed, p.pl); err == nil || !strings.Contains(err.Error(), p.want) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)
