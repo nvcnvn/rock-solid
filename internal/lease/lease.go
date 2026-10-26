@@ -131,7 +131,7 @@ func (h *Holder) Next(g core.NodeID, t Time) core.Tick {
 		return max(at, t.Boot)
 	}
 	if len(p.win) > 0 && p.bound == 0 {
-		at = min(at, t.Boot+sub(h.cfg.RateGap, t.Raw-p.win[0].r))
+		return t.Boot + sub(h.cfg.RateGap, t.Raw-p.win[0].r)
 	}
 	if p.gave {
 		at = min(at, h.end(p, t))

@@ -175,6 +175,19 @@ func TestTheFirstGrantOfAWindowGivesNoLease(t *testing.T) {
 	}
 }
 
+// A window's first grant that arrives over a heartbeat after its request still has the next ask due rate_gap after it arrived, and no sooner, so that a timer set for it does not fire again and again at once.
+func TestALateFirstGrantSetsTheNextAskRateGapLater(t *testing.T) {
+	h := NewHolder(cfg)
+	grants(h, [3]core.Tick{0, 1_500_000, 50_000_000})
+	at := Time{Boot: 1_500_000, Raw: 1_500_000}
+	if h.Due(grantor, at) {
+		t.Fatal("the second ask is due as the late first grant arrives")
+	}
+	if n := h.Next(grantor, at); n != 1_600_000 {
+		t.Fatalf("next ask at %d, want rate_gap after the grant arrived", n)
+	}
+}
+
 // A grant or heartbeat from a grantor's new run, or with a raw reading below the last, ends the lease taken from its previous run and starts a new window.
 func TestANewRunEndsTheOldRunsLease(t *testing.T) {
 	for _, viaHeartbeat := range []bool{false, true} {
@@ -341,6 +354,9 @@ type pairMsg struct {
 	raw  core.Tick
 }
 
+// firstLease is the most real time a pair no fault touches, on 1 ms round trips, takes to hold a lease after the first request its grantor grants: rate_gap on a holder raw clock up to 4% slow, two round trips, and three steps of the run.
+var firstLease = cfg.RateGap*100/96 + 2*2_000 + 3*10_000
+
 // runPair runs a holder and a grantor for 60 s of real time with random clock rates, renewals and
 // heartbeats; in three seeds of four, requests and heartbeats lost for up to 8 s at a time, at
 // times from just after a grant, the grantor's VM stopped, the grantor rebooted, its raw rate
@@ -358,6 +374,15 @@ func runPair(seed uint64, pl plants) error {
 		rawLim = 40_000_000
 	}
 	quiet := rng.Chance(1, 4)
+	// Drawn from the seed rather than rng, so that the other seeds run as they did before it existed.
+	fast := quiet && seed%4 == 1
+	delay := func() core.Tick {
+		d := core.Tick(rng.Below(20_000))
+		if fast {
+			d /= 20
+		}
+		return d
+	}
 	node := func() clocks {
 		c := clocks{boot: int64(rng.Below(1e12)), raw: int64(rng.Below(1e12)), rawRate: rate(pick(rawLim))}
 		c.bootRate = c.rawRate + pick(226_000_000)
@@ -375,7 +400,8 @@ func runPair(seed uint64, pl plants) error {
 	var cutUntil, gDownUntil, hDownUntil, beatAt core.Tick
 	var msgs []pairMsg
 	covered, gStopped, hStopped, raised := false, false, false, false
-	var keepUntil core.Tick
+	var keepUntil, firstAsk core.Tick
+	leased := false
 	lost := func() bool { return !quiet && real >= keepUntil && (real < cutUntil || rng.Chance(1, 20)) }
 	for real < 60_000_000 {
 		if !quiet && real >= cutUntil && real >= keepUntil && rng.Chance(1, 2000) {
@@ -417,7 +443,7 @@ func runPair(seed uint64, pl plants) error {
 		if gUp && gt.Boot >= beatAt {
 			beatAt = gt.Boot + cfg.Heartbeat
 			if g.Live(holder, gt) && !lost() {
-				msgs = append(msgs, pairMsg{at: real + core.Tick(rng.Below(20_000)), beat: true, run: g.Run(), raw: gt.Raw})
+				msgs = append(msgs, pairMsg{at: real + delay(), beat: true, run: g.Run(), raw: gt.Raw})
 			}
 		}
 		if hUp && hDownUntil != 0 {
@@ -447,6 +473,10 @@ func runPair(seed uint64, pl plants) error {
 			continue
 		}
 		ht := hc.at(real)
+		leased = leased || h.Valid(grantor, ht)
+		if fast && !leased && firstAsk != 0 && real > firstAsk+firstLease {
+			return fmt.Errorf("at real %d µs the pair holds no lease, %d µs after the first request granted", real, real-firstAsk)
+		}
 		booting := !gUp && !gStopped
 		if h.Valid(grantor, ht) && !(!booting && g.Live(holder, gc.at(real))) && !(covered && (booting || g.Waiting(gc.at(real)))) {
 			return fmt.Errorf("at real %d µs the holder holds a lease its grantor no longer keeps", real)
@@ -454,9 +484,12 @@ func runPair(seed uint64, pl plants) error {
 		if h.Due(grantor, ht) && (quiet || rng.Chance(9, 10)) {
 			id++
 			h.Ask(grantor, id, ht)
-			d1, d2 := core.Tick(rng.Below(20_000)), core.Tick(rng.Below(20_000))
+			d1, d2 := delay(), delay()
 			if gUp && real+d1 >= gDownUntil && !lost() {
 				if sup, ok := g.Grant(holder, 1, 1, gc.at(real+d1)); ok && !lost() {
+					if firstAsk == 0 {
+						firstAsk = real
+					}
 					msgs = append(msgs, pairMsg{at: real + d1 + d2, gr: Grant{ID: id, Run: g.Run(), Raw: gc.at(real + d1).Raw, Support: sup}})
 					slices.SortStableFunc(msgs, func(a, b pairMsg) int { return cmp.Compare(a.at, b.at) })
 				}
