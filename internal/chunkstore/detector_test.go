@@ -137,7 +137,10 @@ func (h *dharness) wantUp(disk uint32) {
 	}
 }
 
-var rep3Pool = Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 8}
+var (
+	rep3Pool     = Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 8}
+	failSlowPool = Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 16}
+)
 
 // A disk whose heartbeats stop is marked down node_down_after after the last, in a table that starts a new interval of every PG with a member on it; one heartbeat before that restarts the count.
 func TestADiskSilentForNodeDownAfterIsMarkedDown(t *testing.T) {
@@ -167,6 +170,44 @@ func TestADiskSilentForNodeDownAfterIsMarkedDown(t *testing.T) {
 	h.wantDown(3, 19*sec+900_000)
 }
 
+// A detector that may have stood still, on Resumed or when its last event is more than two heartbeats old, gives every disk one more heartbeat before it counts as silent: heartbeats queued behind a stop of its own node mark nothing down, while every disk falling silent at once is marked down within a heartbeat after node_down_after.
+func TestADetectorThatStoodStillGivesEveryDiskAHeartbeat(t *testing.T) {
+	for _, timerFirst := range []bool{false, true} {
+		h := newDetector(t, 3, rep3Pool, sec)
+		h.beats(sec, 3*sec)
+		h.timerAt, h.ctx.Now = 0, 8*sec+500_000
+		if timerFirst {
+			h.feed(&core.Event{Kind: core.EvTimer, Timer: DetectTimer})
+		}
+		h.beats(8*sec+500_000, 8*sec+500_000)
+		for id := uint32(1); id <= 3; id++ {
+			h.wantUp(id)
+		}
+	}
+
+	h := newDetector(t, 3, rep3Pool, sec)
+	h.beats(sec, 3*sec)
+	h.beats(4*sec, 7*sec, 1)
+	h.at(7*sec + 500_000)
+	h.feed(&core.Event{Kind: core.EvResumed})
+	h.beats(8*sec, 8*sec, 1)
+	h.at(8*sec + 499_999)
+	h.wantUp(1)
+	h.at(8*sec + 500_000)
+	h.wantDown(1, 8*sec+500_000)
+
+	h = newDetector(t, 3, rep3Pool, sec)
+	h.beats(sec, 10*sec)
+	h.at(15*sec - 1)
+	h.wantUp(1)
+	h.at(16 * sec)
+	for id := uint32(1); id <= 3; id++ {
+		if down, _ := h.down(id); !down {
+			t.Fatalf("disk %d up a heartbeat after node_down_after of every disk's silence", id)
+		}
+	}
+}
+
 // A new control-plane leader counts node_down_after from its own leader lease: a disk last heard from before it is marked down at the lease's start plus node_down_after.
 func TestANewLeaderCountsNodeDownAfterFromItsLease(t *testing.T) {
 	const start = 30 * sec
@@ -178,7 +219,7 @@ func TestANewLeaderCountsNodeDownAfterFromItsLease(t *testing.T) {
 	h.wantDown(1, start+NodeDownAfter)
 }
 
-// A primary's member_timeout report is answered by a probe of the member's loop: a failed log, an I/O older than member_timeout, another log or no answer within member_timeout marks it down at once, and an answer with no I/O that old leaves it up.
+// A primary's member_timeout report is answered by a probe of the member's loop: a failed log, an I/O older than member_timeout, another log or no answer within member_timeout marks it down at once, and an answer with no I/O that old leaves it up. A disk whose loop did not answer rejoins at its next normal heartbeat, as a silent one does; the others wait slow_disk_window.
 func TestAMemberTimeoutReportIsAnsweredByAProbe(t *testing.T) {
 	for _, c := range []struct {
 		name   string
@@ -213,6 +254,10 @@ func TestAMemberTimeoutReportIsAnsweredByAProbe(t *testing.T) {
 			h.at(at)
 			if c.down {
 				h.wantDown(2, at)
+				h.beats(at+sec, at+sec)
+				if down, _ := h.down(2); down != c.answer {
+					t.Fatalf("at %d, after a normal heartbeat: disk 2 down %v", h.ctx.Now, down)
+				}
 			} else {
 				h.at(4*sec - 1)
 				h.wantUp(2)
@@ -227,6 +272,41 @@ func TestAMemberTimeoutReportIsAnsweredByAProbe(t *testing.T) {
 		t.Fatalf("a report of an unknown disk sent %+v", h.probes)
 	}
 	h.wantUp(1)
+}
+
+// A member_timeout report that reaches a new leader before the disk's first heartbeat sends no probe: the heartbeat, due within a second, stands for it.
+func TestAReportBeforeAFirstHeartbeatSendsNoProbe(t *testing.T) {
+	h := newDetector(t, 3, rep3Pool, 10*sec)
+	h.timeout(10*sec+100, 2)
+	h.beats(10*sec+500_000, 10*sec+500_000)
+	h.at(11*sec + 200_000)
+	if len(h.probes) != 0 {
+		t.Fatalf("probes sent: %+v", h.probes)
+	}
+	h.wantUp(2)
+}
+
+// A new control-plane leader keeps the marks of the leader before, as the disk record holds them: a disk down stays down from when it was marked, and rejoins as a disk that failed.
+func TestANewLeaderKeepsTheRecordedMarks(t *testing.T) {
+	h := newDetector(t, 3, rep3Pool, sec)
+	h.beats(sec, 2*sec)
+	h.beat(3*sec, 1, MemberTimeoutAfter, false)
+	h.wantDown(1, 3*sec)
+	h.publish()
+	if r := h.rec.Disks()[0]; r.Up || r.DownSince != 3*sec {
+		t.Fatalf("the record has %+v", r)
+	}
+	h.d = NewDetector(&h.rec, 10*sec)
+	h.d.View(&h.table, h.pools())
+	h.timerAt, h.ctx.Now = 0, 10*sec
+	h.wantDown(1, 3*sec)
+	h.beats(10*sec, 69*sec)
+	h.wantDown(1, 3*sec)
+	h.beats(70*sec, 70*sec)
+	h.wantUp(1)
+	if !h.rec.Disks()[0].Up {
+		t.Fatal("the record still has disk 1 down")
+	}
 }
 
 // A heartbeat naming a disk whose oldest unfinished I/O passed member_timeout, or whose log failed, marks it down at once, even when that leaves a PG below min_live; it rejoins only once a whole slow_disk_window passes normal.
@@ -248,6 +328,32 @@ func TestAStalledOrFailedDiskIsMarkedDownFromItsHeartbeat(t *testing.T) {
 	h.beats(sec, 2*sec)
 	h.beat(3*sec, 2, 2*sec, false)
 	h.wantDown(2, 3*sec)
+}
+
+// A disk marked down as stalled rejoins at its first normal heartbeat while a PG it belongs to is below min_live without it, which stops that PG anyway: a 1 s stall on rep2 copies nothing away, though a third disk could take its members.
+func TestAStalledDiskRejoinsAPGStoppedWithoutIt(t *testing.T) {
+	rep2 := Pool{Replicas: 2, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 8}
+	h := newDetector(t, 3, rep2, sec)
+	on := func() []int {
+		var pgs []int
+		for i, e := range h.table.Pools[0].PGs {
+			if slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == 1 && !m.Leaving }) {
+				pgs = append(pgs, i)
+			}
+		}
+		return pgs
+	}
+	h.beats(sec, 2*sec)
+	before := on()
+	h.beat(3*sec, 1, MemberTimeoutAfter, false)
+	h.wantDown(1, 3*sec)
+	h.publish()
+	h.beats(4*sec, 4*sec)
+	h.wantUp(1)
+	h.publish()
+	if !slices.Equal(on(), before) {
+		t.Fatalf("a 1 s stall moved disk 1's PGs from %v to %v", before, on())
+	}
 }
 
 // A probe or heartbeat of a disk marked stalled restarts its normal window.
@@ -358,6 +464,32 @@ func TestADampedDiskNeededForMinLiveIsReleased(t *testing.T) {
 	h.wantUp(2)
 }
 
+// A damped disk peering waits for is released at its first normal heartbeat, though another disk could take its place: on rep2 with min_live 1, the PGs it ran alone after their other member went down cannot activate without it, and placement does not refill a member peering waits for.
+func TestADampedDiskPeeringWaitsForIsReleased(t *testing.T) {
+	h := newDetector(t, 3, Pool{Replicas: 2, MinLive: 1, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 8}, sec)
+	alone := slices.ContainsFunc(h.table.Pools[0].PGs, func(e PGEntry) bool {
+		return slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == 1 }) && slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == 2 })
+	})
+	if !alone {
+		t.Fatal("no PG on disks 1 and 2")
+	}
+	h.beats(sec, 2*sec)
+	h.beats(3*sec, 7*sec, 2)
+	h.wantDown(2, 7*sec)
+	h.publish()
+	at := 8 * sec
+	for range FlapCount {
+		h.beats(at, at+sec, 2)
+		h.beats(at+2*sec, at+7*sec, 1, 2)
+		h.at(at + 7*sec)
+		h.publish()
+		at += 8 * sec
+	}
+	h.wantDown(1, at-2*sec)
+	h.beat(at, 1, 0, false)
+	h.wantUp(1)
+}
+
 // Each primary's member latencies are judged against the pool: a disk above slow_disk_factor times the median of the others for a whole slow_disk_window is marked down unless a PG would drop below min_live, and rejoins after a whole window normal.
 func TestAFailSlowDiskIsMarkedDown(t *testing.T) {
 	const base = core.Tick(2_000)
@@ -376,7 +508,7 @@ func TestAFailSlowDiskIsMarkedDown(t *testing.T) {
 		}
 	}
 	steady := func(r core.Tick) func(core.Tick) core.Tick { return func(core.Tick) core.Tick { return r } }
-	pool6 := Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 16}
+	pool6 := failSlowPool
 
 	h := newDetector(t, 6, pool6, sec)
 	run(h, sec, 60*sec, steady(120))
@@ -417,6 +549,57 @@ func TestAFailSlowDiskIsMarkedDown(t *testing.T) {
 		t.Fatalf("slow disks kept up for min_live: %v", h.d.Slow())
 	}
 	h.beat(121*sec, 6, 0, false, Latency{Disk: 42, Latency: sec})
+}
+
+// A disk is marked down as fail-slow only once it has been slow for a whole slow_disk_window: two slow figures a window apart with none between leave it up.
+func TestFailSlowNeedsAWholeSlowWindow(t *testing.T) {
+	const base = core.Tick(2_000)
+	h := newDetector(t, 6, failSlowPool, sec)
+	for at := sec; at <= 61*sec; at += sec {
+		var lats []Latency
+		for id := uint32(2); id <= 5; id++ {
+			lats = append(lats, Latency{Disk: id, Latency: base})
+		}
+		if at == sec || at == 61*sec {
+			lats = append(lats, Latency{Disk: 1, Latency: 12 * base})
+		}
+		for id := uint32(1); id <= 6; id++ {
+			h.beat(at, id, 0, false)
+		}
+		h.beat(at, 6, 0, false, lats...)
+	}
+	h.wantUp(1)
+}
+
+// Two disks slow at once are judged against the marks the detector made, not only the table's: the second is kept up where marking both would leave a PG below min_live.
+func TestTwoSlowDisksKeepMinLive(t *testing.T) {
+	const base = core.Tick(2_000)
+	h := newDetector(t, 6, failSlowPool, sec)
+	for at := sec; at <= 61*sec; at += sec {
+		var lats []Latency
+		for id := uint32(3); id <= 5; id++ {
+			lats = append(lats, Latency{Disk: id, Latency: base})
+		}
+		lats = append(lats, Latency{Disk: 1, Latency: 12 * base}, Latency{Disk: 2, Latency: 12 * base})
+		for id := uint32(1); id <= 6; id++ {
+			h.beat(at, id, 0, false)
+		}
+		h.beat(at, 6, 0, false, lats...)
+	}
+	for i, e := range h.table.Pools[0].PGs {
+		live := 0
+		for _, m := range e.Members {
+			if down, _ := h.down(m.Disk); !down {
+				live++
+			}
+		}
+		if live < int(failSlowPool.MinLive) {
+			t.Fatalf("PG %d members %v: %d live by the detector's marks", i, e.Members, live)
+		}
+	}
+	if len(h.d.Slow()) != 1 {
+		t.Fatalf("slow disks kept up: %v", h.d.Slow())
+	}
 }
 
 // The primary reports each member's 99th-percentile acknowledgment latency from buckets of an eighth of an octave, at the bucket's lower bound.

@@ -334,7 +334,7 @@ func (c *rcluster) runFor(d core.Tick) {
 	end := c.s.Time() + d
 	for {
 		if next := c.s.Next(); next == 0 || next > end {
-			c.s.Advance(end)
+			c.s.Advance(max(end, c.s.Time()))
 			return
 		}
 		c.step()

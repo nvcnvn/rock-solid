@@ -31,9 +31,9 @@ const latencyFresh = 2 * RetryAfter
 type downCause uint8
 
 const (
-	// causeSilent: no heartbeat for node_down_after; it rejoins at its next normal one.
+	// causeSilent: no heartbeat for node_down_after or no answer to a probe; it rejoins at its next normal heartbeat.
 	causeSilent downCause = iota + 1
-	// causeFailed: stalled, a failed log, a failed probe or fail-slow; it rejoins after a whole slow_disk_window normal.
+	// causeFailed: stalled, a failed log, a probe answer showing either, or fail-slow; it rejoins after a whole slow_disk_window normal, or at once while a PG it belongs to cannot serve without it.
 	causeFailed
 )
 
@@ -66,15 +66,16 @@ type Detector struct {
 	table    *Table
 	pools    []PoolInputs
 	nextID   uint64
+	last     core.Tick
 	timerAt  core.Tick
 	changes  uint64
 	slowKept []uint32
 	rep      Report
 }
 
-// NewDetector watches the disks of rec from start, the beginning of this leader's lease: a disk not heard from by start plus node_down_after is marked down then.
+// NewDetector watches the disks of rec from start, the beginning of this leader's lease: a disk not heard from by start plus node_down_after is marked down then, and a disk rec has down stays down from when rec says, as if it had failed.
 func NewDetector(rec *DiskRecord, start core.Tick) *Detector {
-	d := &Detector{rec: rec}
+	d := &Detector{rec: rec, last: start}
 	d.sync(start)
 	return d
 }
@@ -93,13 +94,17 @@ func (d *Detector) Mark(id uint32) (Mark, core.Tick) {
 // Changes counts the marks the detector has changed.
 func (d *Detector) Changes() uint64 { return d.changes }
 
-// Slow lists the disks slow for slow_disk_window that stay up because marking them down would leave a PG below min_live; the pool reports them.
+// Slow lists the disks slow for slow_disk_window that stay up because marking them down would leave a PG below min_live; the pool reports them, and the caller must not change it.
 func (d *Detector) Slow() []uint32 { return d.slowKept }
 
-// sync watches every disk the record gained, heard from at now.
+// sync watches every disk the record gained, heard from at now, down since the record's time if the record has it down.
 func (d *Detector) sync(now core.Tick) {
 	for len(d.disks) < len(d.rec.Disks()) {
-		d.disks = append(d.disks, watched{heard: now})
+		w := watched{heard: now}
+		if r := d.rec.Disks()[len(d.disks)]; !r.Up {
+			w.down, w.since, w.cause = true, r.DownSince, causeFailed
+		}
+		d.disks = append(d.disks, w)
 	}
 }
 
@@ -119,9 +124,13 @@ func (d *Detector) byLog(log uint64) (uint32, *watched) {
 	return uint32(i + 1), d.watch(uint32(i + 1))
 }
 
-// OnEvent takes a disk's heartbeat, a primary's member_timeout report, a probe's answer or DetectTimer, sends probes and arms DetectTimer for the next deadline.
+// OnEvent takes a disk's heartbeat, a primary's member_timeout report, a probe's answer, DetectTimer or Resumed, sends probes and arms DetectTimer for the next deadline.
 func (d *Detector) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
 	d.sync(ctx.Now)
+	if ev.Kind == core.EvResumed || ctx.Now-d.last > latencyFresh {
+		d.wake(ctx.Now)
+	}
+	d.last = ctx.Now
 	switch ev.Kind {
 	case core.EvNetRecv:
 		out = d.recv(ctx, ev, out)
@@ -159,6 +168,17 @@ func (d *Detector) recv(ctx *core.Context, ev *core.Event, out []core.Action) []
 	return out
 }
 
+// wake gives every disk at least one more heartbeat before it counts as silent, and every probe out a whole member_timeout, once the detector may have stood still: on Resumed, or when its last event is more than two heartbeats old, which, while any loop heartbeats each second, only a stop of its own node makes it.
+func (d *Detector) wake(now core.Tick) {
+	for i := range d.disks {
+		w := &d.disks[i]
+		w.heard = max(w.heard, now-NodeDownAfter+RetryAfter)
+		if w.probe != 0 {
+			w.probeAt = now
+		}
+	}
+}
+
 // report takes a heartbeat from the loop at peer: each disk it names is heard from, marked down if stalled or failed, and judged for rejoining; each member latency it carries is judged against the pool.
 func (d *Detector) report(now core.Tick, peer core.NodeID, rp *Report) {
 	for _, s := range rp.Disks {
@@ -179,23 +199,23 @@ func (d *Detector) report(now core.Tick, peer core.NodeID, rp *Report) {
 	}
 	for _, l := range rp.Latencies {
 		if w := d.watch(l.Disk); w != nil {
+			if now-w.latAt > latencyFresh {
+				w.slow = false
+			}
 			w.lat, w.latAt = l.Latency, now
 			d.judge(l.Disk, w, now)
 		}
 	}
 }
 
-// timedOut probes the disk a primary waited on past member_timeout, unless it is down or a probe of it is out.
+// timedOut probes the disk a primary waited on past member_timeout, unless it is down, a probe of it is out or no heartbeat gave its loop's address yet, which its first heartbeat, due within a second, then stands for.
 func (d *Detector) timedOut(now core.Tick, mt *MemberTimeout, out []core.Action) []core.Action {
 	w := d.watch(mt.Disk)
-	if w == nil || w.down || w.probe != 0 {
+	if w == nil || w.down || w.probe != 0 || !w.known {
 		return out
 	}
 	d.nextID++
 	w.probe, w.probeAt = core.RequestID(d.nextID), now
-	if !w.known {
-		return out
-	}
 	a := core.Action{Kind: core.ActNetSend, Peer: w.addr}
 	a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendProbe(nil, &Probe{ID: w.probe, Disk: mt.Disk})))
 	return append(out, a)
@@ -217,7 +237,7 @@ func (d *Detector) probed(now core.Tick, pr *ProbeReply) {
 	}
 }
 
-// check marks down every disk silent for node_down_after or whose probe went unanswered for member_timeout, and arms DetectTimer for the next such deadline.
+// check marks down as silent every disk not heard from for node_down_after or whose probe went unanswered for member_timeout, and arms DetectTimer for the next such deadline.
 func (d *Detector) check(now core.Tick, out []core.Action) []core.Action {
 	next := core.Tick(0)
 	soonest := func(t core.Tick) {
@@ -234,7 +254,8 @@ func (d *Detector) check(now core.Tick, out []core.Action) []core.Action {
 		if w.probe != 0 {
 			if now-w.probeAt >= MemberTimeoutAfter {
 				w.probe = 0
-				d.markDown(id, w, now, causeFailed)
+				w.normal = false
+				d.markDown(id, w, now, causeSilent)
 			} else {
 				soonest(w.probeAt + MemberTimeoutAfter)
 			}
@@ -268,23 +289,24 @@ func (d *Detector) markDown(id uint32, w *watched, now core.Tick, cause downCaus
 		w.damped = true
 	}
 	d.slowKept = slices.DeleteFunc(d.slowKept, func(x uint32) bool { return x == id })
-	d.rec.Down(id)
+	d.rec.Down(id, now)
 	d.changes++
 }
 
-// rejoin marks a down disk up once it has been normal for its cause's wait, or for flap_window if damped, unless a PG it belongs to would otherwise stay below min_live with no disk to refill onto, which lifts the damping.
+// rejoin marks a down disk up once it has been normal for its cause's wait, or for flap_window if damped. A PG it belongs to that cannot serve without it lifts the wait, and the damping too when placement would not refill the disk's member there.
 func (d *Detector) rejoin(id uint32, w *watched, now core.Tick) {
 	if !w.down || !w.normal {
 		return
 	}
-	if w.damped && now-w.normalFrom < FlapWindow && !d.needed(id, now) {
+	stopped, unrefilled := d.held(id, now)
+	if w.damped && now-w.normalFrom < FlapWindow && !unrefilled {
 		return
 	}
-	if w.cause == causeFailed && now-w.normalFrom < SlowDiskWindow {
+	if w.cause == causeFailed && now-w.normalFrom < SlowDiskWindow && !stopped {
 		return
 	}
 	w.down, w.damped, w.cause = false, false, 0
-	d.rec.disks[id-1].Up = true
+	d.rec.Up(id)
 	d.changes++
 }
 
@@ -335,7 +357,7 @@ func (d *Detector) slower(id uint32, w *watched, now core.Tick) bool {
 	return false
 }
 
-// keepsMinLive reports whether marking disk id down leaves every PG it is a live member of with at least min_live live members.
+// keepsMinLive reports whether marking disk id down leaves every PG it is a live member of with at least min_live live members, by the table's marks and the detector's own.
 func (d *Detector) keepsMinLive(id uint32) bool {
 	if d.table == nil {
 		return true
@@ -344,7 +366,7 @@ func (d *Detector) keepsMinLive(id uint32) bool {
 		p := &d.table.Pools[pi]
 		for i := range p.PGs {
 			e := &p.PGs[i]
-			if slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == id && !m.Leaving && m.Mark != MarkDown }) && e.live()-1 < int(p.MinLive) {
+			if slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == id && !m.Leaving && m.Mark != MarkDown }) && d.live(e)-1 < int(p.MinLive) {
 				return false
 			}
 		}
@@ -352,10 +374,21 @@ func (d *Detector) keepsMinLive(id uint32) bool {
 	return true
 }
 
-// needed reports whether a PG disk id belongs to is below min_live with no eligible disk to refill it onto.
-func (d *Detector) needed(id uint32, now core.Tick) bool {
+// live counts e's members that neither the table nor the detector has down.
+func (d *Detector) live(e *PGEntry) int {
+	n := 0
+	for _, m := range e.Members {
+		if w := d.watch(m.Disk); m.Mark != MarkDown && (w == nil || !w.down) {
+			n++
+		}
+	}
+	return n
+}
+
+// held reports whether a PG disk id belongs to cannot serve while the disk is down, being below min_live by the table's and the detector's marks or waiting in peering for it, and whether placement would not refill the disk's member in such a PG either.
+func (d *Detector) held(id uint32, now core.Tick) (stopped, unrefilled bool) {
 	if d.table == nil {
-		return false
+		return false, false
 	}
 	for pi := range d.table.Pools {
 		p := &d.table.Pools[pi]
@@ -363,12 +396,19 @@ func (d *Detector) needed(id uint32, now core.Tick) bool {
 		for i := range p.PGs {
 			e := &p.PGs[i]
 			j := slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == id && !m.Leaving })
-			if j >= 0 && e.live() < int(p.MinLive) && (in == nil || !refillable(in, e, j, now)) {
-				return true
+			if j < 0 {
+				continue
+			}
+			waits, refilled := false, false
+			if in != nil {
+				waits, refilled = refills(in, p.MinLive, e, j, now)
+			}
+			if waits || d.live(e) < int(p.MinLive) {
+				stopped, unrefilled = true, unrefilled || !refilled
 			}
 		}
 	}
-	return false
+	return stopped, unrefilled
 }
 
 func (d *Detector) poolInputs(id core.PoolID) *PoolInputs {

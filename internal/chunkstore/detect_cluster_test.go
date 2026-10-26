@@ -7,6 +7,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/clock"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
@@ -23,8 +24,8 @@ type dcluster struct {
 	downAt map[uint32]core.Tick
 }
 
-func newDCluster(t *testing.T, seed uint64) *dcluster {
-	s := sim.New(seed, sim.DefaultSettings())
+func newDCluster(t *testing.T, seed uint64, set sim.Settings) *dcluster {
+	s := sim.New(seed, set)
 	a := &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4}, down: map[uint32]core.Tick{}}
 	for n := range 3 {
 		if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n)); err != nil {
@@ -156,11 +157,29 @@ func (f diskFault) String() string {
 	return [...]string{"node cut off", "hang", "failed log"}[f]
 }
 
-// runDetection loads every PG with writes, then fails disk with fault and runs on: the detector marks it down within the fault's bound, marks no other disk, and the PGs take writes again.
-func runDetection(t *testing.T, seed uint64, fault diskFault, disk uint32) {
-	d := newDCluster(t, seed)
+// noisy is the settings of a run with slewed and drifting clocks and jittered delivery.
+func noisy() sim.Settings {
+	set := sim.DefaultSettings()
+	set.ClockNum, set.ClockDen, set.NetJitter = 1, 200, 20_000
+	return set
+}
+
+// runDetection loads every PG with writes, then fails disk with fault and runs on: the detector marks it down within the fault's bound, a quarter wider either way with noise, which slews clocks by up to 22.6%, and only once, marks no other disk, and the PGs take writes again. With noise, clocks slew and drift, delivery is jittered, and the detector's own node stops for up to 4.5 s, counted by its clocks, before the fault.
+func runDetection(t *testing.T, seed uint64, fault diskFault, disk uint32, noise bool) {
+	set := sim.DefaultSettings()
+	if noise {
+		set = noisy()
+	}
+	d := newDCluster(t, seed, set)
 	cl := &dclient{c: d.rcluster, rng: core.NewRand(seed ^ 0xdec), pipe: 6, at: map[core.RequestID]core.Tick{}}
 	d.s.Node(d.client.Node).AddActor(d.client, cl)
+	if noise {
+		rng := core.NewRand(seed ^ 0x9a05e)
+		d.run(sec + core.Tick(rng.Below(uint64(sec))))
+		stop := core.Tick(rng.Below(4_500_000))
+		d.s.Pause(uint32(len(d.reps)+1), clock.PauseCounted, stop, false)
+		d.run(stop)
+	}
 	d.run(3 * sec)
 	if cl.ok == 0 || !slices.ContainsFunc(d.det.disks, func(w watched) bool { return w.lat > 0 }) {
 		t.Fatalf("seed %d: before the fault, %d writes completed and no primary reported a member's latency", seed, cl.ok)
@@ -184,28 +203,34 @@ func runDetection(t *testing.T, seed uint64, fault diskFault, disk uint32) {
 		d.s.Node(n).Disk(0).Inject(sim.Fault{Effect: sim.FailIO, When: sim.Once(sim.OnKind(core.ActDiskWrite))})
 		earliest, latest = 0, RetryAfter+500_000
 	}
+	if noise {
+		earliest, latest = earliest*3/4, latest*5/4
+	}
 	d.run(latest + sec)
 	at := d.downAt[disk]
 	if at == 0 || at-from < earliest || at-from > latest {
 		t.Fatalf("seed %d: %v of disk %d at %d: marked down at %d, want within [%d, %d] of the fault", seed, fault, disk, from, at, earliest, latest)
 	}
+	if d.det.Changes() != 1 {
+		t.Fatalf("seed %d: %d marks changed, want the one of disk %d", seed, d.det.Changes(), disk)
+	}
 	before := cl.ok
-	d.run(3 * sec)
+	d.run(5 * sec)
 	if cl.ok == before {
 		t.Fatalf("seed %d: no write completed after disk %d was marked down", seed, disk)
 	}
 }
 
-// Each seed fails one disk of a loaded rep3 cluster: its node is cut off from every other, its I/O hangs or its log fails. The detector marks it down within the bound of its fault and no other disk, and the PGs take writes again. Fail-slow is judged on the latencies primaries report (TestAFailSlowDiskIsMarkedDown): the simulator advances its one clock to each completion it takes, so a slow disk delays the other disks' completions in flight as much as its own.
+// Each seed fails one disk of a loaded rep3 cluster: its node is cut off from every other, its I/O hangs or its log fails, on a clean network and clocks or, every other nine seeds, on noisy ones with a stop of the detector's node. The detector marks it down within the bound of its fault and no other disk, and the PGs take writes again. Fail-slow is judged on the latencies primaries report (TestAFailSlowDiskIsMarkedDown): the simulator advances its one clock to each completion it takes, so a slow disk delays the other disks' completions in flight as much as its own.
 func TestTheDetectorMarksAFailedDiskDown(t *testing.T) {
 	seeds.Run(t, 0, 9, func(seed uint64) {
-		runDetection(t, seed, diskFault(seed%3), uint32(1+seed/3%3))
+		runDetection(t, seed, diskFault(seed%3), uint32(1+seed/3%3), seed/9%2 == 1)
 	})
 }
 
 // A primary waiting on a member whose disk hangs reports it and the member's loop answers the probe from memory; the member is marked down within 2 s of the write, by the probe or, when the hung write was not yet member_timeout old as the probe arrived, by the member's next heartbeat.
 func TestAHungMemberIsMarkedDownOnItsPrimarysReport(t *testing.T) {
-	d := newDCluster(t, 3)
+	d := newDCluster(t, 3, sim.DefaultSettings())
 	d.run(3 * sec)
 	_, e := d.table.entry(pg0)
 	member := e.Members[1].Disk
@@ -236,7 +261,7 @@ func TestAHungMemberIsMarkedDownOnItsPrimarysReport(t *testing.T) {
 
 // Once warm, a replicated write allocates nothing in any replica's events with reporting on: the acknowledgment latencies, the waits watched and the heartbeats included.
 func TestReportingAllocatesNothingPerWrite(t *testing.T) {
-	d := newDCluster(t, 5)
+	d := newDCluster(t, 5, sim.DefaultSettings())
 	ch := chunkIn(pg0, 4, 0)
 	write := func(i int) {
 		w := d.write(pg0, ch, uint32(i%8)*core.BlockSize, fill(core.BlockSize, byte(i)))
@@ -260,4 +285,32 @@ func TestReportingAllocatesNothingPerWrite(t *testing.T) {
 	if d.mallocs != 0 {
 		t.Fatalf("%d heap allocations over 100 writes' events and 3 heartbeats", d.mallocs)
 	}
+}
+
+// A node cut off for 2.5 s while writes wait on it is marked down when its probe goes unanswered, as silent, and rejoins at its first heartbeat after the cut heals.
+func TestADiskCutOffBrieflyRejoinsAfterTheHeal(t *testing.T) {
+	seeds.Run(t, 0, 6, func(seed uint64) {
+		d := newDCluster(t, seed, sim.DefaultSettings())
+		cl := &dclient{c: d.rcluster, rng: core.NewRand(seed ^ 0xdec), pipe: 6, at: map[core.RequestID]core.Tick{}}
+		d.s.Node(d.client.Node).AddActor(d.client, cl)
+		d.run(3 * sec)
+		disk := uint32(1 + seed%3)
+		n := uint32(d.node(disk))
+		d.faulty[disk] = true
+		for k := range uint32(5) {
+			if k != n {
+				d.s.Partition(n, k, false)
+			}
+		}
+		d.run(2_500_000)
+		for k := range uint32(5) {
+			if k != n {
+				d.s.Heal(n, k)
+			}
+		}
+		d.run(2 * sec)
+		if m, since := d.det.Mark(disk); m == MarkDown {
+			t.Fatalf("seed %d: disk %d cut off 2.5 s, still down 2 s after the heal, since %d", seed, disk, since)
+		}
+	})
 }
