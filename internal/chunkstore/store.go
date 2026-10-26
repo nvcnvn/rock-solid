@@ -1975,6 +1975,7 @@ func (s *Store) abandonPending(ctx *core.Context, out *Output) {
 			continue
 		}
 		for _, oi := range cs.pending {
+			s.freeBufs(ctx, oi)
 			o := &s.ops[oi]
 			for j := range o.items {
 				if it := &o.items[j]; it.buf != core.NoBuf {
