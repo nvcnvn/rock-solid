@@ -31,8 +31,9 @@ type rcluster struct {
 	// activations is every activation a primary reported, which next records in its table.
 	activations []PGFields
 	inv         sim.Invariants
-	// sentVer is the newest version of each chunk a primary sent each member on its current connection, lost counting the connections each lost; orderErr is the first send out of order.
+	// sentVer is the newest version of each chunk a primary sent each member on its current connection, boots counting each node's starts and lost the connections each lost; orderErr is the first send out of order.
 	sentVer  map[sendKey]uint64
+	boots    []int
 	lost     map[[2]core.NodeID]int
 	orderErr error
 	// passes is each pass of each replica's loop: the actions it emitted.
@@ -42,12 +43,20 @@ type rcluster struct {
 	mallocs  uint64
 	// onPass, when set, sees the actions of each pass of each replica's loop.
 	onPass func(d int, acts []core.Action)
+	// ids is the disk ID of node d's disk and logs its log ID; reformat has node d's next start format its disk with the log ID in logs, and onFormat, when set, then gives its disk ID.
+	ids      []uint32
+	logs     []uint64
+	reformat []bool
+	onFormat func(d int) uint32
+	// storePlants and replicaPlants are planted in every store and replica the cluster starts.
+	storePlants   plants
+	replicaPlants replicaPlants
 }
 
 type sendKey struct {
-	from, to core.NodeID
-	conn     int
-	chunk    core.ChunkID
+	from, to   core.NodeID
+	boot, conn int
+	chunk      core.ChunkID
 }
 
 const invSendOrder = "a primary sends a chunk's writes to each member in version order, again after a reconnect"
@@ -116,6 +125,10 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 	const disks = 3
 	c.reps, c.loops, c.fetch, c.whole, c.passes = make([]*Replica, disks), make([]core.NodeID, disks), make([]uint64, disks), make([]bool, disks), make([][][]core.Action, disks)
 	c.fetches = make([]int, disks)
+	c.ids, c.logs, c.reformat, c.boots = make([]uint32, disks), make([]uint64, disks), make([]bool, disks), make([]int, disks)
+	for d := range disks {
+		c.ids[d], c.logs[d] = uint32(d+1), 0x5eed+uint64(d)
+	}
 	for d := range disks {
 		c.s.AddNode(sim.DefaultClock, []sim.DiskSpec{{Blocks: geo.DiskBlocks(), Settings: sim.DefaultDiskSettings()}}, func(n *sim.Node) {
 			var out ReplicaOutput
@@ -144,23 +157,31 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 				if edit != nil {
 					edit(&cfg)
 				}
-				restart := c.reps[d] != nil
+				c.boots[d]++
+				first := c.reps[d] == nil
+				fresh := first || c.reformat[d]
 				var st *Store
 				var err error
-				if restart {
-					st, err = Open(ctx, cfg, geo.DiskBlocks(), &sout)
+				if fresh {
+					st, err = Format(ctx, cfg, disklog.Superblock{LogID: c.logs[d], Geometry: geo}, &sout)
 				} else {
-					st, err = Format(ctx, cfg, disklog.Superblock{LogID: 0x5eed + uint64(d), Geometry: geo}, &sout)
+					st, err = Open(ctx, cfg, geo.DiskBlocks(), &sout)
 				}
 				if err != nil {
 					t.Fatal(err)
 				}
-				c.reps[d] = NewReplica(ReplicaConfig{Disk: uint32(d + 1), Seed: seed, Start: lease.Now(ctx), Restarted: restart}, st)
+				if c.reformat[d] && c.onFormat != nil {
+					c.ids[d] = c.onFormat(d)
+				}
+				c.reformat[d] = false
+				st.plant = c.storePlants
+				c.reps[d] = NewReplica(ReplicaConfig{Disk: c.ids[d], Seed: seed, Start: lease.Now(ctx), Restarted: !fresh}, st)
+				c.reps[d].plant = c.replicaPlants
 				for k := range disks {
-					c.reps[d].SetAddr(uint32(k+1), core.NodeID{Node: uint32(k)})
+					c.reps[d].SetAddr(c.ids[k], core.NodeID{Node: uint32(k)})
 				}
 				acts = append(acts, sout.Actions...)
-				if !restart {
+				if first {
 					return acts
 				}
 				var out ReplicaOutput
@@ -202,7 +223,7 @@ func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Ac
 		if DecodeUpdate(a.Msg.Inline(), data, &u) != nil || u.Version == 0 {
 			continue
 		}
-		k := sendKey{from: c.loops[d], to: a.Peer, conn: c.lost[[2]core.NodeID{c.loops[d], a.Peer}], chunk: u.Chunk}
+		k := sendKey{from: c.loops[d], to: a.Peer, boot: c.boots[d], conn: c.lost[[2]core.NodeID{c.loops[d], a.Peer}], chunk: u.Chunk}
 		if u.Version <= c.sentVer[k] && c.orderErr == nil {
 			c.orderErr = fmt.Errorf("disk %d sent %#x of %v to %v after %#x on one connection", d+1, u.Version, u.Chunk, a.Peer, c.sentVer[k])
 		}
@@ -251,10 +272,11 @@ func (c *rcluster) active() bool {
 		for i := range p.PGs {
 			e := &p.PGs[i]
 			d, ok := e.primary()
-			if !ok || e.live() < int(p.MinLive) || !c.s.Node(d-1).Up() {
+			n := c.node(d)
+			if !ok || e.live() < int(p.MinLive) || n < 0 || !c.s.Node(uint32(n)).Up() {
 				continue
 			}
-			r := c.reps[d-1]
+			r := c.reps[n]
 			j := r.lead(core.PGID{Pool: p.ID, Index: uint32(i)})
 			if j < 0 || r.leads[j].interval != e.Interval || !r.leads[j].active && !r.leads[j].asking {
 				return false
@@ -322,10 +344,16 @@ func (c *rcluster) pgFields(pg core.PGID) PGFields {
 	return PGFields{Epoch: c.table.Epoch, PG: pg, Interval: e.Interval}
 }
 
+// primary is the node of pg's primary.
 func (c *rcluster) primary(pg core.PGID) int {
 	_, e := c.table.entry(pg)
 	d, _ := e.primary()
-	return int(d) - 1
+	return c.node(d)
+}
+
+// node is the node whose disk is disk.
+func (c *rcluster) node(disk uint32) int {
+	return slices.Index(c.ids, disk)
 }
 
 // update sends a client's write (data set) or punch of chunk ch to the PG's primary, tagged as pgf.

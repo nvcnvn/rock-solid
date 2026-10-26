@@ -237,6 +237,8 @@ type loadingRun struct {
 }
 
 type plants struct {
+	// settleSubset has Settle drop the first gated version below the kept one, as a peering that drops any subset of pending versions rather than a suffix would (sub-block spike M7).
+	settleSubset bool
 	// replayCopyAsWrite replays a copy entry as a write of its blocks, mapping them whether or not a map still stores them at the source.
 	replayCopyAsWrite bool
 	mergeCommitted    bool
@@ -1117,9 +1119,12 @@ func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Outp
 	if len(cs.waiting) > 0 || slices.ContainsFunc(cs.pending, func(oi int32) bool { return s.ops[oi].left > 0 }) {
 		return ErrUnresolved
 	}
+	subset := s.plant.settleSubset
 	for _, oi := range cs.pending {
 		switch o := &s.ops[oi]; {
 		case !o.req.Gated || o.dropped:
+		case subset && o.version < keep:
+			o.dropped, subset = true, false
 		case o.version <= keep:
 			o.committed = true
 		default:

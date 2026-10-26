@@ -316,6 +316,9 @@ func compareSlots(a, b diskSlots) int {
 type replicaPlants struct {
 	// resendNewestFirst sends a member a lost connection's writes again newest first.
 	resendNewestFirst bool
+	// peerInOldInterval has a restarted primary peer in the interval it led before, asking for none; mergeWhileLacking merges a partial-block write on a chunk before the primary holds the version peering kept (sub-block spike M8).
+	peerInOldInterval bool
+	mergeWhileLacking bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.
@@ -428,7 +431,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 				continue
 			}
 			pg := core.PGID{Pool: p.ID, Index: uint32(i)}
-			l := lead{pg: pg, interval: e.Interval, since: e.Interval, asking: first && r.cfg.Restarted}
+			l := lead{pg: pg, interval: e.Interval, since: e.Interval, asking: first && r.cfg.Restarted && !r.plant.peerInOldInterval}
 			if j := r.lead(pg); j >= 0 {
 				old := r.leads[j]
 				l.held = old.held
@@ -765,7 +768,7 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 			r.park(ev, u.PG.Epoch, out)
 			return
 		}
-	case !r.leads[i].active || r.leads[i].asking || edgeBytes(u.Off, u.Len) > 0 && r.leads[i].lacks(u.Chunk):
+	case !r.leads[i].active || r.leads[i].asking || edgeBytes(u.Off, u.Len) > 0 && r.leads[i].lacks(u.Chunk) && !r.plant.mergeWhileLacking:
 		l := &r.leads[i]
 		l.held = append(l.held, heldMsg{peer: ev.Peer, msg: ev.Msg, hold: l.interval})
 		return
