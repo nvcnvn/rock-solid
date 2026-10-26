@@ -74,3 +74,8 @@
 - **Where:** `TestAFailSlowDiskIsMarkedDown` in `internal/chunkstore/detector_test.go`, which feeds the detector the latencies primaries would report; `TestTheDetectorMarksAFailedDiskDown` leaves fail-slow out
 - **Why:** the simulator's scheduler keeps one clock and moves it to an action's end when it takes the completion, so a disk slowed 100× delays the completions in flight on the other disks as much as its own, and no disk looks slow beside its pool.
 - **Remove when:** the scheduler times each disk's completions on that disk alone; then a seeded cluster run slows one disk 100× and expects it marked down after `slow_disk_window`.
+
+## Workaround: decoder fuzzers run with `-fuzzminimizetime 1x`
+- **Where:** `FuzzDecodeRecord` in `internal/disklog/fuzz_test.go` and `FuzzDecodeMessage` in `internal/chunkstore/wire_test.go`, run by hand as `go test -fuzz … -fuzzminimizetime 1x`
+- **Why:** Go's fuzzer minimizes each new interesting input byte by byte, for up to 60 s by default, before it fuzzes on, and these fuzzers' inputs are whole log records of several 4 KiB blocks, or 256-byte frames: a 30 s run at the default made 1,952 and 268,447 executions, against 5.3 and 3.2 million with minimization capped. A record's data blocks carry checksums, so the short zero-padded head `FuzzDecodeBlockMap` fuzzes cannot stand for one.
+- **Remove when:** the fuzzers take inputs short enough to minimize quickly, or a Go release minimizes large inputs without stalling the run; a 30 s run at the default then makes about as many executions as one with `-fuzzminimizetime 1x`.
