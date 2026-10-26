@@ -4989,7 +4989,7 @@ own ([Testing strategy](design.md#testing-strategy)).
 - Recovery writes pass `write_limit`: with disk 3 at 91% under a 90% limit, a client write adding
   data is refused while recovery still copies disk 3 what it missed
   (`TestRecoveryWritesPassWriteLimit`).
-- The replica primary's seeded fault run, 20 seeds a commit and 500 in `scripts/seeds.sh`, also
+- The replica primary's seeded fault run, 20 seeds a commit and 1,000 in `scripts/seeds.sh`, also
   crashes the primary, rebuilds its index and moves it, at most one disk lost: every disk that
   answers for a version with its chunk whole at it and listed nowhere maps the same bytes ("no two
   members hold different data under one version"), and once recovery settles every member lists
