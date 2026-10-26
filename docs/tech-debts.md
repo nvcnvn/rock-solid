@@ -50,6 +50,16 @@
 - **Why:** a primary's write stays unmapped until it commits and may be dropped by peering; a dropped write in a chunk slot would leave the slot held by the log while no map refers to it, and `CheckSlots` requires the two to match. So a primary logs a whole chunk as ordinary items, as many records as `max_group_commit_bytes` takes, while its members, which map as they log, still write it to a slot.
 - **Remove when:** the store frees the slot of a dropped write, as it frees a slot a later write replaces; then gated whole-chunk writes take a slot like any other.
 
+## Workaround: a store keeps every client session's newest incarnation
+- **Where:** `sessions` and `SeeIncarnation` in `internal/chunkstore/store.go`
+- **Why:** a store fences an older incarnation of a client session by the newest it has seen of that session, and phase 3 has no record of when a session ends, so the map keeps one entry for every session that ever wrote to the disk and grows without bound.
+- **Remove when:** phase 4's session table tells a replica that a session ended, and the store drops that session's entry.
+
+## Workaround: messages for a newer table parked without bound
+- **Where:** `park` and `parked` in `internal/chunkstore/replica.go`
+- **Why:** a replica keeps a message tagged with a newer table epoch than its own, with its pool buffer, until it adopts a table at least that new, and nothing bounds how many it keeps, so a client or peer naming an epoch the control plane never publishes holds pool buffers until a table that new arrives.
+- **Remove when:** a table fetch from the control plane answers with its newest epoch; the replica then refuses a parked message once the newest table is older than the epoch it names, and refuses messages past a bound.
+
 ## Workaround: a primary trusts a flush's granted flag
 - **Where:** `clientUpdate` in `internal/chunkstore/replica.go`
 - **Why:** a client marks a flush under a space grant in the update's flags, and `write_limit` admission lets it through on that mark alone, since phase 3 has no record of which client holds which grant; a client that sets the flag wrongly can fill a disk past its `write_limit` ([Admission against `write_limit`](design.md#data-layer-chunkstore)).
