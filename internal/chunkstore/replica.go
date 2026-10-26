@@ -24,7 +24,7 @@ type ReplicaConfig struct {
 	Disk uint32
 }
 
-// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, and a new interval of each PG in Asks, whose interval a spent version counter or a failed version ended.
+// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, and a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended. Each is asked once; the loop asks again until a table answers it.
 type ReplicaOutput struct {
 	Actions []core.Action
 	Fetch   uint64
@@ -89,7 +89,6 @@ type storeReq struct {
 
 // version is a client write or punch the primary took in interval and fans out once its store orders it: the members that must hold it, those that do, and those whose latest send, numbered in sends, has neither a reply nor a PeerLost yet; done once its client is answered.
 type version struct {
-	seq      core.RequestID
 	req      uint64
 	client   core.NodeID
 	msgID    core.RequestID
@@ -125,7 +124,6 @@ type Replica struct {
 	lost      []core.NodeID
 	unsettled []core.ChunkID
 	nextID    uint64
-	seq       core.RequestID
 	frame     []byte
 	armed     bool
 	plant     replicaPlants
@@ -632,8 +630,7 @@ func (r *Replica) order(ctx *core.Context, ev *core.Event, u *Update, interval u
 	id := r.newReq(storeReq{kind: reqClient, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk})
 	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, HasVer: u.HasExpect, Ver: u.Expect,
 		Epoch: u.Snapshot, Interval: interval, Gated: true, Session: u.Session, Incarnation: u.Incarnation}
-	r.seq++
-	r.vers = append(r.vers, version{seq: r.seq, req: id, client: ev.Peer, msgID: u.ID, epoch: r.table.Epoch, interval: interval, u: *u})
+	r.vers = append(r.vers, version{req: id, client: ev.Peer, msgID: u.ID, epoch: r.table.Epoch, interval: interval, u: *u})
 	if u.Kind == KindWrite {
 		r.st.Write(ctx, req, &r.sout)
 	} else {
@@ -659,7 +656,7 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 			r.dups = append(r.dups, dup{orig: r.reqs[j].id, peer: ev.Peer, msgID: u.ID})
 			return
 		}
-		r.failed = append(r.failed, failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
+		r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
 		refuse = true
 	}
 	if refuse {
@@ -701,6 +698,12 @@ type failedVer struct {
 	version uint64
 }
 
+func (r *Replica) noteFailed(f failedVer) {
+	if !slices.Contains(r.failed, f) {
+		r.failed = append(r.failed, f)
+	}
+}
+
 // read serves a client's read at the PG's primary, a read of a frozen version at any member, and at a member a base its primary fetches, the blocks at the version the primary's index names.
 func (r *Replica) read(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) {
 	_, e := r.table.entry(rd.PG.PG)
@@ -728,8 +731,12 @@ func (r *Replica) newReq(q storeReq) uint64 {
 	return q.id
 }
 
+func (r *Replica) reqIndex(id uint64) (int, bool) {
+	return slices.BinarySearchFunc(r.reqs, id, func(q storeReq, id uint64) int { return cmp.Compare(q.id, id) })
+}
+
 func (r *Replica) takeReq(id uint64) (storeReq, bool) {
-	i, ok := slices.BinarySearchFunc(r.reqs, id, func(q storeReq, id uint64) int { return cmp.Compare(q.id, id) })
+	i, ok := r.reqIndex(id)
 	if !ok {
 		return storeReq{}, false
 	}
@@ -738,17 +745,9 @@ func (r *Replica) takeReq(id uint64) (storeReq, bool) {
 	return q, true
 }
 
-// versionOf finds a version by its store request, which, like seq, grows in the order r.vers holds them.
+// versionOf finds a version by its store request, which grows in the order r.vers holds them and numbers its sends to members.
 func (r *Replica) versionOf(req uint64) int {
 	i, ok := slices.BinarySearchFunc(r.vers, req, func(v version, req uint64) int { return cmp.Compare(v.req, req) })
-	if !ok {
-		return -1
-	}
-	return i
-}
-
-func (r *Replica) versionBySeq(seq core.RequestID) int {
-	i, ok := slices.BinarySearchFunc(r.vers, seq, func(v version, seq core.RequestID) int { return cmp.Compare(v.seq, seq) })
 	if !ok {
 		return -1
 	}
@@ -761,7 +760,7 @@ func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 		for ; b < len(r.sout.Bases); b++ {
 			r.nextID++
 			f := baseFetch{BaseFetch: r.sout.Bases[b], rid: core.RequestID(r.nextID)}
-			if i, ok := slices.BinarySearchFunc(r.reqs, f.ID, func(q storeReq, id uint64) int { return cmp.Compare(q.id, id) }); ok {
+			if i, ok := r.reqIndex(f.ID); ok {
 				f.pg = r.reqs[i].pg
 			}
 			r.bases = append(r.bases, f)
@@ -816,13 +815,14 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 	}
 }
 
-// sendShift places a send's number in the ID of the update it carries, above the version's sequence, so an answer to a send a lost connection left behind is told from the answer to the send after it, whose buffer is still in the network.
+// sendShift places a send's number in the ID of the update it carries, above the version's store request, so an answer to a send a lost connection left behind is told from the answer to the send after it, whose buffer is still in the network.
+// The 8-bit number wraps after 256 sends of one version to one member, which ResendAfter spaces over at least 2.56 s: an answer that late waits on a member write stalled past member_timeout (1 s), whose disk failure detection marks down, ending the interval and its resends.
 const sendShift = 56
 
 func (r *Replica) send(v *version, k int, out *ReplicaOutput) {
 	v.sends[k]++
 	u := v.u
-	u.ID, u.HasExpect, u.Expect, u.Granted = v.seq|core.RequestID(v.sends[k])<<sendShift, false, 0, false
+	u.ID, u.HasExpect, u.Expect, u.Granted = core.RequestID(v.req)|core.RequestID(v.sends[k])<<sendShift, false, 0, false
 	u.PG.Epoch, u.PG.Interval = v.epoch, uint32(v.u.Version>>32)
 	if u.Kind == KindWrite {
 		first, last := spanOf(u.Off, u.Len)
@@ -874,8 +874,8 @@ func statusOf(err error) Status {
 
 // ack takes a member's acknowledgment of a version, which ends its send only if it answers the latest.
 func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *ReplicaOutput) {
-	seq := rp.ID & (1<<sendShift - 1)
-	i := r.versionBySeq(seq)
+	req := uint64(rp.ID & (1<<sendShift - 1))
+	i := r.versionOf(req)
 	if i < 0 {
 		return
 	}
@@ -903,7 +903,7 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 		}
 		r.fail(ctx, i, *rp, out)
 	}
-	if i = r.versionBySeq(seq); i >= 0 {
+	if i = r.versionOf(req); i >= 0 {
 		r.release(ctx, i)
 	}
 }
@@ -1001,7 +1001,7 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		if resp.Status != StatusOK {
 			ref := r.refusal(q.pg)
 			resp.Version, resp.Epoch, resp.Interval = 0, ref.Epoch, ref.Interval
-			r.failed = append(r.failed, failedVer{pg: q.pg, chunk: q.chunk, version: q.version})
+			r.noteFailed(failedVer{pg: q.pg, chunk: q.chunk, version: q.version})
 		}
 		r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
 		for j := 0; j < len(r.dups); {

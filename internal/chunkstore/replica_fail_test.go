@@ -529,7 +529,7 @@ func TestASpentCounterWithNoLeadRefusesTheWrite(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	pg1 := core.PGID{Pool: testPool, Index: 1}
 	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
-		r.vers = append(r.vers, version{seq: 1, client: c.client, msgID: 99, u: Update{Kind: KindWrite, ID: 99, PG: PGFields{PG: pg1}, Chunk: chunkIn(pg1, 4, 0)}})
+		r.vers = append(r.vers, version{req: 1, client: c.client, msgID: 99, u: Update{Kind: KindWrite, ID: 99, PG: PGFields{PG: pg1}, Chunk: chunkIn(pg1, 4, 0)}})
 		r.counterSpent(ctx, len(r.vers)-1, core.NoBuf, out)
 	})
 	c.settle()

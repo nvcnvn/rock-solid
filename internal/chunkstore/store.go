@@ -54,7 +54,7 @@ type Config struct {
 	MergeCache int
 }
 
-// DefaultMergeCache is the merged-block cache of a replica primary's store: 64 blocks, 256 KiB per loop.
+// DefaultMergeCache is the merged-block cache of a replica primary's store: 64 blocks, 256 KiB per disk.
 const DefaultMergeCache = 64
 
 // Request is a Write, Punch or Read of a chunk's bytes [Off, Off+Len).
