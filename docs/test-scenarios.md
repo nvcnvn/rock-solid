@@ -3209,7 +3209,7 @@ nodes without finishing.
 | Configuration | Nodes | What it holds |
 | --- | --- | --- |
 | `ci-peering` | 3 | Both chunks; lease expiry left open, except that a grantor that answers peering of an interval holds no live grant to that interval's old primary; the plans with membership changes alone, but the largest |
-| `ci-restarts` | 3 | As `ci-peering`, with the plans that restart a primary or format a disk, under which a decision can stop short of activation, and the largest membership plan, a member down and back and then the primary moved to it, at 1.5 million states alone, so that neither configuration takes most of its 5 minutes |
+| `ci-restarts` | 3 | As `ci-peering`, with the plans that restart a primary or format a disk, under which a decision can stop short of activation, and the largest membership plan, a member down and back and then the primary moved to it, at 1.5 million states alone, kept apart from `ci-peering` so that each fits its 5 minutes |
 | `ci-moves` | 3 | As `ci-peering`, with the move plans: PG 2's replica and then its primary moved to node 1; the replica's move with the leaving member marked down before its replacement recovers, or with a process restart; the replica's move with primary 2 put in `maintenance` and back before the removal; and the replica's move with a refill before the removal, a disk formatted again replacing node 1's. Each sends only the daemon's one write W |
 | `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the six below |
 | `deep-peering` | 4 | `ci-peering`'s and `ci-restarts`' plans and the free plan, and the unbounded liveness property |
@@ -3271,9 +3271,14 @@ run in `deep-leases`; the variants that need one run on it alone.
 - **Writes.** A chunk's writes are each merged on the newest version the primary holds. Recovery
   copies a kept version's history to a member that lists it, under the old version numbers, and
   keeps the member's own writes of the current interval on top, as the real recovery write leaves
-  out the blocks they cover. What recovery reads from the source never changes before its write, so
-  the model takes the read with the write and lets the read have come at any point since the
-  primary activated, which matters only to the variant that picks the blocks at the read. Connections are per-process: a write
+  out the blocks they cover. The source is an up member that lists nothing, or the primary when it
+  lists the chunk only from the current peering and holds the kept version, as the replica primary
+  takes one whose index maps the kept image; the model tells no mapped version from a logged one
+  and reads only the source's versions up to the kept one, so it also takes a primary that mapped a
+  dropped version, which the code does not. What recovery reads from the source never changes
+  before its write, so the model takes the read with the write and lets the read have come at any
+  point since the primary activated, which matters only to the variant that picks the blocks at
+  the read. Connections are per-process: a write
   reaches only the primary process its connection was opened to, and a write that reaches it late is
   the same as one it holds unordered. Every chunk write carries the session's incarnation. A primary
   holds its unordered client writes when an interval ends under it, orders them again once it has
@@ -3804,10 +3809,10 @@ section.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 26 | 547,723 | 52 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 30 | 1,794,768 | 190 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 26 | 593,079 | 55 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 30 | 2,080,827 | 228 s |
 | Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 105 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 30 | 643,050 | 64 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 30 | 654,324 | 68 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
@@ -3848,7 +3853,7 @@ job lists the models and `deep` configurations, and every other job runs once pe
   it.
 - A rule removed from a spec, with no negative configuration changed, fails that model's job: some
   `ci` configuration or negative variant fails and its trace is printed.
-- A configuration past 300 s on the runner fails the job. `ci-restarts` takes 190 s of 300 on the
+- A configuration past 300 s on the runner fails the job. `ci-restarts` takes 228 s of 300 on the
   M4 Pro; on the runner it either fits, or its largest plan moves to a `ci` configuration of its
   own.
 - Nightly, and when started by hand, one job per model runs `scripts/models.sh sim` with
