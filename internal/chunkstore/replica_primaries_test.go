@@ -154,11 +154,6 @@ func (r *primaryRun) fail(inv string, err error) {
 	}
 }
 
-// failed is the first invariant the run's passes found broken.
-func (r *primaryRun) failed() error {
-	return cmp.Or(r.errs[invAckedWhole], r.errs[invOneVersion])
-}
-
 // publish computes the next table and hands it to every running replica, with the address of every disk ID, if it changes any entry.
 func (r *primaryRun) publish() {
 	c := r.c
@@ -463,7 +458,16 @@ func (r *primaryRun) tend() {
 	}
 }
 
-func runPrimaries(t *testing.T, seed uint64, edit func(r *primaryRun)) error {
+// peerPlant is a bug planted in the primary-change run and the invariant it must break.
+type peerPlant struct {
+	inv string
+	set func(r *primaryRun)
+}
+
+// runPrimaries runs the primary-change workload, failing t on a broken invariant registered with the
+// simulator and returning a broken end check; with a plant, it checks only the plant's invariant and
+// returns its first violation.
+func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	s := sim.New(seed, sim.DefaultSettings())
 	a := &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4}, down: map[uint32]core.Tick{}}
 	for n := range 3 {
@@ -480,21 +484,22 @@ func runPrimaries(t *testing.T, seed uint64, edit func(r *primaryRun)) error {
 	r.returns = r.rng.Chance(1, 2)
 	for _, inv := range []string{invAckedWhole, invOneVersion} {
 		c.inv.Register(inv, func() error { return r.errs[inv] })
-		if edit != nil {
-			// A planted bug's run returns the invariant it broke, through failed, rather than failing the test.
-			c.inv.Off(inv)
-		}
 	}
 	// Drawn from the seed rather than r.rng, so that the other seeds run as they did before it existed.
 	r.duringPeering = seed%4 == 3
-	if edit != nil {
-		edit(r)
+	if plant != nil {
+		plant.set(r)
 	}
 	for n := range c.reps {
 		c.reps[n].plant, c.reps[n].Store().plant = c.replicaPlants, c.storePlants
 	}
 	c.onPass = r.pass
 	c.onFormat = r.formatted
+	watchEpochs(c, &a.rec)
+	if plant != nil {
+		c.planted = true
+		c.inv.Only(plant.inv)
+	}
 	for range 2 {
 		pc := &primaryClient{r: r, rng: r.rng.Fork(), left: 48, pipe: 8, at: map[core.RequestID]core.Tick{}}
 		r.clients = append(r.clients, pc)
@@ -508,8 +513,8 @@ func runPrimaries(t *testing.T, seed uint64, edit func(r *primaryRun)) error {
 		if !busy() && c.quiet() || !c.step() {
 			break
 		}
-		if err := r.failed(); err != nil {
-			return err
+		if c.found != nil {
+			return c.found
 		}
 		if busy() && r.rng.Chance(1, 40) && (c.active() || r.duringPeering && r.rng.Chance(1, 10)) && !slices.ContainsFunc(r.members(), func(m Member) bool { return m.Mark == MarkUp && !r.running(m) }) {
 			r.inject()
@@ -524,10 +529,12 @@ func runPrimaries(t *testing.T, seed uint64, edit func(r *primaryRun)) error {
 	a.asks = append(a.asks, PGInterval{pg0, e.Interval})
 	r.publish()
 	r.settled()
-	if err := r.failed(); err != nil {
-		return err
+	for _, err := range []error{c.found, c.inactive(), r.check()} {
+		if err != nil && (plant == nil || strings.Contains(err.Error(), plant.inv)) {
+			return err
+		}
 	}
-	return r.check()
+	return nil
 }
 
 // Sub-block spike M6 on replicas: two clients pipeline 8 writes each to two chunks while the authority moves the PG's primary, to members that stayed live throughout or, in half the seeds, to members marked up again that missed writes, marks replicas down and up, restarts the primary and formats a member again. Every acknowledged version is kept, members hold the same bytes under a version, and every member that lists nothing maps the kept writes applied in version order.
@@ -539,20 +546,21 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks the run's oracle at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 2 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 58 of 500), a restarted primary peering in its old interval (52 of 500) and a disk formatted again keeping its old disk ID (72 of 500).
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 2 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 58 of 500), a restarted primary peering in its old interval (52 of 500), a disk formatted again keeping its old disk ID (72 of 500), and the epoch change model's neg-compare-table-epochs (494 of 500) and neg-compare-member-lists (391 of 500), which breaks property 3 first: a member that compares member lists logs the old primary's write tagged with an interval its table left.
 func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	for _, p := range []struct {
-		name  string
-		seed  uint64
-		inv   string
-		plant func(r *primaryRun)
+		name string
+		seed uint64
+		peerPlant
 	}{
-		{"M7", 37, invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }},
-		{"M8", 6, invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking = true }},
-		{"restart in the old interval", 10, invOneVersion, func(r *primaryRun) { r.c.replicaPlants.peerInOldInterval = true }},
-		{"old disk ID kept", 0, invAckedKept, func(r *primaryRun) { r.a.keepID = true }},
+		{"M7", 37, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }}},
+		{"M8", 6, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking = true }}},
+		{"restart in the old interval", 10, peerPlant{invOneVersion, func(r *primaryRun) { r.c.replicaPlants.peerInOldInterval = true }}},
+		{"old disk ID kept", 0, peerPlant{invAckedKept, func(r *primaryRun) { r.a.keepID = true }}},
+		{"accepted only in the send epoch", 0, peerPlant{invSameInterval, func(r *primaryRun) { r.c.replicaPlants.sendEpoch = true }}},
+		{"member lists compared", 0, peerPlant{invLateLog, func(r *primaryRun) { r.c.replicaPlants.sameMembers = true }}},
 	} {
-		if err := runPrimaries(t, p.seed, p.plant); err == nil || !strings.HasPrefix(err.Error(), p.inv) {
+		if err := runPrimaries(t, p.seed, &p.peerPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)
 		}
 	}

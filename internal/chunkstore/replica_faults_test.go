@@ -694,9 +694,15 @@ func (f *faultRun) settled() error {
 	return nil
 }
 
-// runFaults runs the fault workload, failing t on a broken invariant; with a plant, it returns the
-// first difference between two disks under one version instead.
-func runFaults(t *testing.T, seed uint64, clients, writes int, plant func(c *rcluster)) error {
+// faultPlant is a bug planted in the fault run and the invariant it must break.
+type faultPlant struct {
+	inv string
+	set func(c *rcluster)
+}
+
+// runFaults runs the fault workload, failing t on a broken invariant; with a plant, it checks only
+// the plant's invariant and returns its first violation instead.
+func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant) error {
 	s := sim.New(seed, sim.DefaultSettings())
 	c := newRClusterWith(t, rtable(4, 2), s, func(cfg *Config) { cfg.Log.MaxRecordBytes = 3 * core.BlockSize })
 	f := &faultRun{t: t, c: c, rng: core.NewRand(seed ^ 0xfa17), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)},
@@ -710,6 +716,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant func(c *rcl
 		}
 	}
 	c.detect(f.a)
+	watchEpochs(c, &f.a.rec)
 	c.onPass = f.pass
 	c.cl.lost = func(peer core.NodeID) {
 		for id, to := range f.to {
@@ -723,18 +730,27 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant func(c *rcl
 	}
 	c.inv.Register(invMappedAnswers, f.mapped)
 	if plant != nil {
-		c.inv.Off(invOneVersion)
-		plant(c)
+		plant.set(c)
 		for n := range c.reps {
 			c.reps[n].plant = c.replicaPlants
 		}
 	}
+	c.inv.Register(invActivates, func() error {
+		if !f.ended {
+			return nil
+		}
+		return c.inactive()
+	})
 	c.inv.Register(invRecovered, func() error {
 		if !f.ended {
 			return nil
 		}
 		return f.settled()
 	})
+	if plant != nil {
+		c.planted = true
+		c.inv.Only(plant.inv)
+	}
 	if f.rng.Chance(1, 2) {
 		c.reps[0].Store().cfg.MergeCache = 0
 	}
@@ -762,8 +778,8 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant func(c *rcl
 			continue
 		}
 		idle = 0
-		if err := f.errs[invOneVersion]; plant != nil && err != nil {
-			return err
+		if c.found != nil {
+			return c.found
 		}
 		if busy() && f.rng.Chance(1, 200) {
 			f.inject()
@@ -771,15 +787,18 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant func(c *rcl
 		f.tend(false)
 	}
 	for id := core.RequestID(1); id <= c.nextID; id++ {
-		if _, ok := f.ops[id]; ok && f.replied[id] != 1 && !(f.replied[id] == 0 && f.lost[id]) {
+		if _, ok := f.ops[id]; ok && f.replied[id] != 1 && !(f.replied[id] == 0 && f.lost[id]) && plant == nil {
 			t.Fatalf("request %d answered %d times", id, f.replied[id])
 		}
 	}
 	f.dirty, f.ended = true, true
 	if err := c.inv.Check(); err != nil {
-		t.Fatal(err)
+		if plant == nil {
+			t.Fatal(err)
+		}
+		return err
 	}
-	return f.errs[invOneVersion]
+	return c.found
 }
 
 // Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail, the stand-in authority's failure detector marking them down and up, and they refuse, the primary's bases rot, the PG's interval changes and the primary crashes, rebuilds its index and moves, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once unless a crash of its primary lost it, the primary maps exactly the writes it answered OK in every chunk it lists nothing of, and once recovery settles every member lists nothing and maps them.
@@ -803,9 +822,17 @@ func TestAMemberThatRefusesAVersionRefusesTheLaterOnes(t *testing.T) {
 // A recovery write that leaves out the blocks covered when it read its source, not when it was
 // ordered (the epoch change model's neg-recovery-covers-at-read), puts a source's block over a
 // write ordered in between, and two disks then hold different bytes under one version, the first
-// invariant it breaks at 128 of the first 500 seeds.
+// invariant it breaks, checked alone, at 183 of the first 500 seeds.
 func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
-	if runFaults(t, 4, 2, 24, func(c *rcluster) { c.replicaPlants.coverAtRead = true }) == nil {
+	if runFaults(t, 4, 2, 24, &faultPlant{invOneVersion, func(c *rcluster) { c.replicaPlants.coverAtRead = true }}) == nil {
 		t.Fatalf("seed 4 kept %q", invOneVersion)
+	}
+}
+
+// A restarted primary that never asks for a new interval (the epoch change model's
+// neg-restart-no-ask) leaves its PGs unactivated once the run settles, at 69 of the first 500 seeds.
+func TestPlantedRestartWithoutAskBreaksTheFaultRun(t *testing.T) {
+	if runFaults(t, 7, 2, 24, &faultPlant{invActivates, func(c *rcluster) { c.replicaPlants.neverAsk = true }}) == nil {
+		t.Fatalf("seed 7 kept %q", invActivates)
 	}
 }

@@ -364,6 +364,12 @@ type replicaPlants struct {
 	// (the epoch change model's RecoveryCoversAtRead).
 	noRecovery  bool
 	coverAtRead bool
+	// neverAsk has a restarted primary ask for no new interval; sendEpoch has a member accept a
+	// write only under the table epoch it was sent in; sameMembers has a member accept a write
+	// tagged with an earlier interval whose members' disks are those of its current one.
+	neverAsk    bool
+	sendEpoch   bool
+	sameMembers bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.
@@ -874,7 +880,7 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		return
 	}
 	recover := u.Kind == KindRecover
-	refuse := e == nil || u.PG.Interval != e.Interval || !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) ||
+	refuse := e == nil || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) ||
 		slices.ContainsFunc(r.failed, func(f failedVer) bool {
 			return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version <= u.Version || recover)
 		})
@@ -911,6 +917,15 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	} else {
 		r.st.Punch(ctx, req, &r.sout)
 	}
+}
+
+// sameMembersAt reports, under the sameMembers plant, whether e's past interval k had the disks of its current members, in order.
+func (r *Replica) sameMembersAt(e *PGEntry, k uint32) bool {
+	if !r.plant.sameMembers {
+		return false
+	}
+	i := slices.IndexFunc(e.Past, func(p PastInterval) bool { return p.Interval == k })
+	return i >= 0 && slices.EqualFunc(e.Past[i].Members, e.Members, func(a, b Member) bool { return a.Disk == b.Disk })
 }
 
 // baseFetch is a base block the primary asks another member for, tried from member tried of the PG, under read ID rid, of the loop at asked.
@@ -1345,7 +1360,7 @@ func (r *Replica) counterSpent(ctx *core.Context, i int, buf core.IOBuf, out *Re
 func (r *Replica) ask(out *ReplicaOutput) {
 	for i := range r.leads {
 		l := &r.leads[i]
-		if !l.asking || l.asked || slices.ContainsFunc(r.vers, func(v version) bool { return v.u.PG.PG == l.pg && !v.done && !v.commit }) {
+		if !l.asking || l.asked || r.plant.neverAsk && r.cfg.Restarted || slices.ContainsFunc(r.vers, func(v version) bool { return v.u.PG.PG == l.pg && !v.done && !v.commit }) {
 			continue
 		}
 		l.asked = true

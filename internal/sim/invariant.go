@@ -37,6 +37,13 @@ func (r *Invariants) Off(name string) { r.list[r.find(name)].off = true }
 // On checks the registered invariant name again after Off.
 func (r *Invariants) On(name string) { r.list[r.find(name)].off = false }
 
+// Only checks the registered invariant name alone, if registered, for a run that plants a bug which must break it.
+func (r *Invariants) Only(name string) {
+	for i := range r.list {
+		r.list[i].off = r.list[i].name != name
+	}
+}
+
 // Check runs every invariant not turned off, in the order registered, and returns the first broken one as a *Violation.
 func (r *Invariants) Check() error {
 	for _, inv := range r.list {

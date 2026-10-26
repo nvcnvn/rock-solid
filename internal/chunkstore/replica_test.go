@@ -46,6 +46,8 @@ type rcluster struct {
 	// onPass, when set, sees the actions of each pass of each replica's loop, and drop, when set, removes those it reports.
 	onPass func(d int, acts []core.Action)
 	drop   func(d int, a *core.Action) bool
+	// onEvent, when set, sees each event before each replica takes it, and again after with done.
+	onEvent func(d int, ev *core.Event, done bool)
 	// ids is the disk ID of node d's disk and logs its log ID; reformat has node d's next start format its disk with the log ID in logs, and onFormat, when set, then gives its disk ID.
 	ids      []uint32
 	logs     []uint64
@@ -54,6 +56,9 @@ type rcluster struct {
 	// storePlants and replicaPlants are planted in every store and replica the cluster starts.
 	storePlants   plants
 	replicaPlants replicaPlants
+	// planted has step note the first broken invariant in found rather than fail the test.
+	planted bool
+	found   error
 	// auth, once reporting is set, is the authority every replica heartbeats, from each start.
 	auth      core.NodeID
 	reporting bool
@@ -147,6 +152,10 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 				out.Reset()
 				if ev.Kind == core.EvPeerLost {
 					c.lost[[2]core.NodeID{c.loops[d], ev.Peer}]++
+				}
+				if c.onEvent != nil {
+					c.onEvent(d, ev, false)
+					defer c.onEvent(d, ev, true)
 				}
 				if c.counting {
 					var before, after runtime.MemStats
@@ -328,7 +337,12 @@ func (c *rcluster) step() bool {
 	c.t.Helper()
 	more := c.s.Step()
 	if err := c.inv.Check(); err != nil {
-		c.t.Fatal(err)
+		if !c.planted {
+			c.t.Fatal(err)
+		}
+		if c.found == nil {
+			c.found = err
+		}
 	}
 	if err := c.s.DriverContract(); err != nil {
 		c.t.Fatal(err)
