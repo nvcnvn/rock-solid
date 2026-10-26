@@ -168,7 +168,7 @@ func TestPlantedLogBugsBreakNamed(t *testing.T) {
 		{"CleanableIgnoresReplay", disklog.Plants{CleanableIgnoresReplay: true}, 6},
 		{"ChainPiecesDieAtOnce", disklog.Plants{ChainPiecesDieAtOnce: true}, 4},
 		{"LiveChainNewestOnly", disklog.Plants{LiveChainNewestOnly: true}, 0},
-		{"RecoveryForgetsNewest", disklog.Plants{RecoveryForgetsNewest: true}, 0},
+		{"RecoveryForgetsNewest", disklog.Plants{RecoveryForgetsNewest: true}, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, _, err := cleanerCrashLog(t, c.seed, plants{}, c.plant)
@@ -183,9 +183,9 @@ func TestPlantedLogBugsBreakNamed(t *testing.T) {
 // Planted violation: the net-gain guard charging a metadata victim's rewrite as if it took no
 // steps, leaving out each step's record header, extra blobs and manifest, takes victims whose
 // rewrites write a segment or more, and invRewrite, counting the blocks they wrote, names it at
-// seed 15 (also 29 and 47 of the first 60).
+// seed 29 (also 47 of the first 80).
 func TestARewriteChargedBelowWhatItWritesBreaksRewrite(t *testing.T) {
-	_, err := cleanerCrash(t, 15, plants{rewriteNoSteps: true})
+	_, err := cleanerCrash(t, 29, plants{rewriteNoSteps: true})
 	if violationOf(err) != invRewrite {
 		t.Fatalf("broke %v", err)
 	}
