@@ -33,7 +33,7 @@ type answered struct {
 	id      core.RequestID
 }
 
-// faultRun runs clients pipelining sub-block writes and punches to two chunks of PG 0, led by disk 1, while a seeded schedule cuts members off, crashes them, often while they hold a version in part, fails their disks, has them refuse, rots the primary's copy of blocks, sometimes cutting off the member it asks first for a base, and changes the PG's interval, with peering stood in by Settle and Activate. Records of at most 3 blocks cut a version into several.
+// faultRun runs clients pipelining sub-block writes and punches to two chunks of PG 0, led by disk 1, while a seeded schedule cuts members off, crashes them, often while they hold a version in part, fails their disks and at times the primary's, has them refuse, rots the primary's copy of blocks, sometimes cutting off the member it asks first for a base, and changes the PG's interval, with peering stood in by Settle, which at times keeps pending versions, and Activate. Records of at most 3 blocks cut a version into several.
 type faultRun struct {
 	t      *testing.T
 	c      *rcluster
@@ -53,6 +53,8 @@ type faultRun struct {
 	crashes [3]core.Tick
 	peering bool
 	asked   int
+	// primaryFailed is set once the primary's disk has been made to fail.
+	primaryFailed bool
 }
 
 type flip struct {
@@ -240,7 +242,7 @@ func (f *faultRun) publish(t Table) {
 	}
 }
 
-// settle stands in for the end of peering: once every local write of each chunk has resolved, the primary drops the chunk's pending versions and activates the PG's interval.
+// settle stands in for the end of peering: once every local write of each chunk has resolved, the primary keeps, at times, a prefix of the chunk's pending versions whose clients wait, drops the rest and activates the PG's interval.
 func (f *faultRun) settle() {
 	st := f.c.reps[0].Store()
 	for _, ch := range f.chunks {
@@ -255,11 +257,23 @@ func (f *faultRun) settle() {
 			if x, ok := r.Store().Index().Chunk(testPool, ch); ok {
 				keep = x.Version
 			}
+			if ci, ok := st.chunkOf[ch]; ok && f.rng.Chance(1, 2) {
+				for _, oi := range st.chunks[ci].pending {
+					o := &st.ops[oi]
+					j := r.versionOf(o.req.ID)
+					if o.err != nil || o.dropped || j < 0 || r.vers[j].done || !f.rng.Chance(2, 3) {
+						break
+					}
+					keep = o.version
+				}
+			}
 			if err := r.Settle(ctx, ch, keep, out); err != nil {
 				f.t.Fatalf("Settle of %v with its writes resolved: %v", ch, err)
 			}
 		}
-		r.Activate(ctx, pg0, e.Interval, out)
+		if err := r.Activate(ctx, pg0, e.Interval, out); err != nil {
+			f.t.Fatalf("Activate with every chunk settled: %v", err)
+		}
 		f.peering = false
 	})
 }
@@ -277,7 +291,7 @@ func (f *faultRun) inject() {
 	c, now := f.c, f.c.s.Time()
 	m := uint32(1 + f.rng.Below(2))
 	up := c.s.Node(m).Up()
-	switch f.rng.Below(6) {
+	switch f.rng.Below(7) {
 	case 0:
 		if f.heals[m] == 0 {
 			c.s.Partition(0, m, false)
@@ -313,6 +327,11 @@ func (f *faultRun) inject() {
 	case 5:
 		if !f.peering {
 			f.newInterval()
+		}
+	case 6:
+		if !f.primaryFailed && f.rng.Chance(1, 40) {
+			f.primaryFailed = true
+			c.s.Node(0).Disk(0).Inject(sim.Fault{Effect: sim.FailIO, When: sim.Once(sim.OnKind(core.ActDiskWrite))})
 		}
 	}
 }
@@ -411,7 +430,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int) {
 	}
 }
 
-// Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks fail and they refuse, the primary's bases rot and the PG's interval changes: every acknowledged version is whole on every member that acknowledged it, every write is answered once, and the primary maps exactly the writes it answered OK.
+// Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail and they refuse, the primary's bases rot and the PG's interval changes, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once, and the primary maps exactly the writes it answered OK.
 func TestReplicatedWritesSurviveFaults(t *testing.T) {
 	seeds.Run(t, 0, 20, func(seed uint64) {
 		runFaults(t, seed, 2, 24)

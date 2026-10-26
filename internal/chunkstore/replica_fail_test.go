@@ -554,3 +554,22 @@ func TestAPGWiderThanThePrimaryFansOutToRefusesWrites(t *testing.T) {
 		t.Fatalf("answered %+v", rp)
 	}
 }
+
+// The primary's own disk fails 1.2's write: its client and that of 1.3 behind it are refused, and the primary asks for interval 2 once.
+func TestThePrimarysOwnDiskFailingAVersionEndsTheInterval(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 0, 1, 0xaa)
+	c.s.Node(0).Disk(0).Inject(sim.Fault{Effect: sim.FailIO, When: sim.Once(sim.OnKind(core.ActDiskWrite))})
+	w1 := c.write(pg0, ch, 10, []byte{1})
+	w2 := c.write(pg0, ch, 20, []byte{2})
+	c.settle()
+	for _, w := range []core.RequestID{w1, w2} {
+		if rp := c.reply(w); rp.Status != StatusRefused {
+			t.Fatalf("answered %+v", rp)
+		}
+	}
+	if len(c.asks) != 1 || c.asks[0] != (PGFields{Epoch: 1, PG: pg0, Interval: 1}) {
+		t.Fatalf("asks %+v", c.asks)
+	}
+}
