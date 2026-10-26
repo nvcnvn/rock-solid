@@ -35,19 +35,7 @@ func newDCluster(t *testing.T, seed uint64, set sim.Settings) *dcluster {
 	var empty Table
 	tbl, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	c := newRClusterOn(t, tbl, s)
-	d := &dcluster{rcluster: c, a: a, faulty: map[uint32]bool{}, downAt: map[uint32]core.Tick{}}
-	node := s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) {
-		c.auth = n.Start(sim.MachineFunc(func(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
-			return d.det.OnEvent(ctx, ev, out)
-		}), nil)
-	})
-	d.det = NewDetector(&a.rec, node.Context().Now)
-	a.det = d.det
-	d.det.View(&c.table, a.pools())
-	c.reporting = true
-	for k := range c.reps {
-		c.call(k, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetAuthority(ctx, c.auth, out) })
-	}
+	d := &dcluster{rcluster: c, a: a, det: c.detect(a), faulty: map[uint32]bool{}, downAt: map[uint32]core.Tick{}}
 	c.inv.Register(invMarkedFaulty, func() error {
 		for _, r := range a.rec.Disks() {
 			if m, since := d.det.Mark(r.ID); m == MarkDown && !d.faulty[r.ID] {
@@ -57,6 +45,24 @@ func newDCluster(t *testing.T, seed uint64, set sim.Settings) *dcluster {
 		return nil
 	})
 	return d
+}
+
+// detect starts a detector on a node of its own as a's marks, which every replica heartbeats from each start.
+func (c *rcluster) detect(a *authority) *Detector {
+	var det *Detector
+	node := c.s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) {
+		c.auth = n.Start(sim.MachineFunc(func(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
+			return det.OnEvent(ctx, ev, out)
+		}), nil)
+	})
+	det = NewDetector(&a.rec, node.Context().Now)
+	a.det = det
+	det.View(&c.table, a.pools())
+	c.reporting = true
+	for k := range c.reps {
+		c.call(k, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetAuthority(ctx, c.auth, out) })
+	}
+	return det
 }
 
 // tend publishes a table when the detector's marks changed or a replica asked or activated, noting when each disk was first marked down.
