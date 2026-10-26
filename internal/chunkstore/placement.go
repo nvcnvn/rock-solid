@@ -449,6 +449,19 @@ func (pl *placer) pick(e *PGEntry, out int) int {
 
 func (pl *placer) after(k int) float64 { return float64(pl.load[k]+1) / pl.target[k] }
 
+// refillable reports whether some disk of in may take e's member j in its place at now: up with a target, not in e, and with room in its domain.
+func refillable(in *PoolInputs, e *PGEntry, j int, now core.Tick) bool {
+	pl := &placer{pool: in.Pool, now: now, disks: slices.Clone(in.Disks)}
+	slices.SortFunc(pl.disks, func(a, b Disk) int { return cmp.Compare(a.ID, b.ID) })
+	pl.target = in.Pool.targets(pl.disks, now)
+	for k := range pl.disks {
+		if pl.eligible(e, k, j) {
+			return true
+		}
+	}
+	return false
+}
+
 // eligible reports whether disk k may take a member of e in place of member out: it is up with a target, not in e, and its domain holds fewer than perDomain of e's other members but a leaving one.
 func (pl *placer) eligible(e *PGEntry, k, out int) bool {
 	d := &pl.disks[k]
