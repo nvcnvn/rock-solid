@@ -537,3 +537,20 @@ func TestASpentCounterWithNoLeadRefusesTheWrite(t *testing.T) {
 		t.Fatalf("answered %+v", rp)
 	}
 }
+
+// A table naming more up members of a PG than a primary fans out to makes its writes refused, not the primary panic.
+func TestAPGWiderThanThePrimaryFansOutToRefusesWrites(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	c.publish(c.next(func(t *Table) {
+		_, e := t.entry(pg0)
+		for d := uint32(4); d <= maxMembers+2; d++ {
+			e.Members = append(e.Members, Member{Disk: d})
+		}
+		e.Interval = 2
+	}), true)
+	w := c.write(pg0, chunkIn(pg0, 4, 0), 0, []byte{1})
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusRefused {
+		t.Fatalf("answered %+v", rp)
+	}
+}

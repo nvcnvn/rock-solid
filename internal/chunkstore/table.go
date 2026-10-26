@@ -300,7 +300,7 @@ func (r *reader) members() []Member {
 		m := Member{Disk: r.u32()}
 		mark := r.u8()
 		m.Mark, m.Leaving = Mark(mark&^leavingBit), mark&leavingBit != 0
-		if m.Mark > MarkMaint {
+		if m.Mark > MarkMaint || slices.ContainsFunc(ms, func(o Member) bool { return o.Disk == m.Disk }) {
 			r.bad = true
 		}
 		ms = append(ms, m)

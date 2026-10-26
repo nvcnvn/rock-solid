@@ -787,7 +787,7 @@ func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 	r.ask(out)
 }
 
-// ordered fans a version out to every up member of its interval but this disk, in parallel with the store logging it, unless the interval has ended since the client's write was taken: then the version fails at once. A member a resend is due to gets it with the resend.
+// ordered fans a version out to every up member of its interval but this disk, in parallel with the store logging it, unless the interval has ended since the client's write was taken or the PG is wider than maxMembers: then the version fails at once. A member a resend is due to gets it with the resend.
 func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 	i := r.versionOf(o.ID)
 	v := &r.vers[i]
@@ -803,7 +803,8 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 			continue
 		}
 		if v.n == maxMembers {
-			panic("chunkstore: a PG wider than a replica primary fans out to")
+			r.fail(ctx, i, Response{}, out)
+			return
 		}
 		v.members[v.n] = m.Disk
 		v.n++
