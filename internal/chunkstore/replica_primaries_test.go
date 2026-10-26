@@ -533,7 +533,7 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks the run's oracle at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 2 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 55 of 500), a restarted primary peering in its old interval (43 of 500) and a disk formatted again keeping its old disk ID (70 of 500).
+// Each planted bug breaks the run's oracle at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 2 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 58 of 500), a restarted primary peering in its old interval (48 of 500) and a disk formatted again keeping its old disk ID (68 of 500).
 func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	for _, p := range []struct {
 		name  string
