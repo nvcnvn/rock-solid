@@ -70,8 +70,9 @@ type faultRun struct {
 	// detector would.
 	fails [3]int
 	gone  [3]bool
-	// failing is the nodes a disk fault was injected into that have not served since; one at a time,
-	// and none once a disk is gone, so no more than one disk is ever lost.
+	// failing is the nodes a disk fault was injected into until the fault stops the store and it
+	// serves again; one at a time, and none once a disk is gone, so no more than one disk is ever
+	// lost.
 	failing [3]bool
 }
 
@@ -81,7 +82,7 @@ func (f *faultRun) sound() bool {
 }
 
 // rotted reports whether bits rotted on node n's disk, whose log would then fail to replay: such a
-// node is neither crashed nor rebuilt.
+// node is neither crashed, rebuilt nor given a disk fault, whose stop a restart would follow.
 func (f *faultRun) rotted(n int) bool {
 	for k := range f.flips {
 		if k.node == n {
@@ -441,7 +442,7 @@ func (f *faultRun) inject() {
 			f.peerFault = f.peering
 		}
 	case 2:
-		if up && !(f.peering && f.peerFault) && f.sound() {
+		if up && !(f.peering && f.peerFault) && f.sound() && !f.rotted(m) {
 			f.peerFault, f.failing[m] = f.peering, true
 			c.s.Node(uint32(m)).Disk(0).Inject(sim.Fault{Effect: sim.FailIO, When: sim.Once(sim.OnKind(core.ActDiskWrite))})
 		}
@@ -476,7 +477,7 @@ func (f *faultRun) inject() {
 			f.newInterval(-1)
 		}
 	case 6:
-		if !f.primaryFailed && f.rng.Chance(1, 40) && c.s.Node(uint32(p)).Up() && f.sound() {
+		if !f.primaryFailed && f.rng.Chance(1, 40) && c.s.Node(uint32(p)).Up() && f.sound() && !f.rotted(p) {
 			f.primaryFailed, f.failing[p] = true, true
 			c.s.Node(uint32(p)).Disk(0).Inject(sim.Fault{Effect: sim.FailIO, When: sim.Once(sim.OnKind(core.ActDiskWrite))})
 		}
@@ -532,10 +533,10 @@ func (f *faultRun) tend(all bool) {
 		switch st := c.reps[m].Store(); {
 		case !c.s.Node(uint32(m)).Up() || f.gone[m]:
 		case st.Serving():
-			f.fails[m] = 0
-			if st.Err() == nil && f.failing[m] && c.reps[m].Store().Log() != nil {
+			if f.fails[m] > 0 && st.Err() == nil && c.reps[m].Store().Log() != nil {
 				f.failing[m] = false
 			}
+			f.fails[m] = 0
 		case st.Err() != nil && f.fails[m] < 2:
 			f.fails[m]++
 			f.crash(m)
