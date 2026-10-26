@@ -602,12 +602,12 @@ func TestTwoSlowDisksKeepMinLive(t *testing.T) {
 	}
 }
 
-// The primary reports each member's 99th-percentile acknowledgment latency from buckets of an eighth of an octave, at the bucket's lower bound.
+// The primary reports each member's 99th-percentile acknowledgment latency from buckets of half an octave, at the bucket's lower bound.
 func TestLatencyBuckets(t *testing.T) {
 	prev := -1
 	for v := core.Tick(0); v < 1<<20; v += 1 + v/64 {
 		b := latBucket(v)
-		if b < prev || b >= latBuckets || latFloor(b) > v || v-latFloor(b) > latFloor(b)/8+1 {
+		if b < prev || b >= latBuckets || latFloor(b) > v || v-latFloor(b) > latFloor(b)/2 {
 			t.Fatalf("latency %d: bucket %d, floor %d, after %d", v, b, latFloor(b), prev)
 		}
 		prev = b
@@ -615,7 +615,7 @@ func TestLatencyBuckets(t *testing.T) {
 	if latBucket(1<<40) != latBuckets-1 {
 		t.Fatal("a latency past the last bucket")
 	}
-	var m memberLat
+	var m latHist
 	for i := range 1000 {
 		took := core.Tick(100)
 		if i%100 == 0 {

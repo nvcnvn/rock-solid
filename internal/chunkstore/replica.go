@@ -155,11 +155,13 @@ type version struct {
 	sends    [maxMembers]uint8
 	n        int
 	sentAt   core.Tick
-	acked    uint8
-	out      uint8
-	logged   bool
-	commit   bool
-	done     bool
+	// timed is the members sent the version when it was ordered, whose first acknowledgment of that send is a latency.
+	timed  uint8
+	acked  uint8
+	out    uint8
+	logged bool
+	commit bool
+	done   bool
 }
 
 // Replica runs a disk's store as a member of the PGs the placement table puts on it: primary of those it leads, ordering client writes, fanning them out and committing them once every live member holds them, and a replica of the rest.
@@ -214,19 +216,20 @@ type Replica struct {
 	slots  []diskSlots
 	live   uint64
 	liveAt core.Tick
-	// auth is the control plane's address once reporting is set; rep the heartbeat reused, lats each member disk's acknowledgment latencies since the last, waitAt when WaitTimer is armed for, 0 when it is not, and waits when each member disk was last reported for a wait past member_timeout.
+	// auth is the control plane's address once reporting is set; rep the heartbeat reused, and waitAt when WaitTimer is armed for, 0 when it is not.
 	auth      core.NodeID
 	reporting bool
 	reportID  uint64
 	rep       Report
-	lats      []memberLat
 	waitAt    core.Tick
-	waits     []diskTick
 }
 
+// diskInfo is what a replica knows of a disk: its size and live blocks as it last reported them and, as a member of PGs this disk leads, its acknowledgment latencies since the last heartbeat and when it was last reported for a wait past member_timeout.
 type diskInfo struct {
 	blocks uint64
 	live   uint64
+	lat    latHist
+	waited core.Tick
 }
 
 type poolInfo struct {
@@ -1016,6 +1019,7 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 	for k := range v.n {
 		if !slices.Contains(r.lost, r.addr(v.members[k])) {
 			r.send(v, k, out)
+			v.timed |= 1 << k
 		}
 	}
 	if v.n > 0 {
@@ -1103,7 +1107,7 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 	r.disk(v.members[k]).live = rp.Fill
 	switch {
 	case rp.Status == StatusOK && rp.Version == v.u.Version:
-		if v.acked&(1<<k) == 0 {
+		if v.acked&(1<<k) == 0 && v.timed&(1<<k) != 0 && uint8(rp.ID>>sendShift) == 1 {
 			r.noteAck(v.members[k], ctx.Now-v.sentAt)
 		}
 		v.acked |= 1 << k

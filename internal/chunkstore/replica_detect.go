@@ -2,7 +2,6 @@ package chunkstore
 
 import (
 	"math/bits"
-	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
@@ -16,39 +15,33 @@ const ReportTimer core.TimerID = 0x72707274
 // WaitTimer is the timer on which a primary looks for members that kept it waiting past member_timeout.
 const WaitTimer core.TimerID = 0x77616974
 
-// latBuckets is the acknowledgment-latency histogram's buckets: 8 per octave of microseconds, up to 2^34.
-const latBuckets = 256
+// latBuckets is the acknowledgment-latency histogram's buckets: 2 per octave of microseconds, up to 2^34.
+const latBuckets = 68
 
-// memberLat is the acknowledgments a member disk gave since the last report, by latency bucket.
-type memberLat struct {
-	disk uint32
+// latHist is the acknowledgments a member disk gave since the last report, by latency bucket.
+type latHist struct {
 	n    uint32
 	hist [latBuckets]uint32
 }
 
-type diskTick struct {
-	disk uint32
-	at   core.Tick
-}
-
 func latBucket(t core.Tick) int {
 	v := uint64(min(t, 1<<34-1))
-	if v < 16 {
+	if v < 4 {
 		return int(v)
 	}
-	e := bits.Len64(v) - 4
-	return e*8 + int(v>>e)
+	e := bits.Len64(v) - 2
+	return e*2 + int(v>>e)
 }
 
 func latFloor(i int) core.Tick {
-	if i < 16 {
+	if i < 4 {
 		return core.Tick(i)
 	}
-	return core.Tick(uint64(i%8+8) << (i/8 - 1))
+	return core.Tick(uint64(i%2+2) << (i/2 - 1))
 }
 
 // p99 is the lower bound of the bucket holding the 99th percentile.
-func (m *memberLat) p99() core.Tick {
+func (m *latHist) p99() core.Tick {
 	rank := (99*uint64(m.n) + 99) / 100
 	var sum uint64
 	for i, c := range m.hist {
@@ -75,10 +68,10 @@ func (r *Replica) report(ctx *core.Context, out *ReplicaOutput) {
 	rp := &r.rep
 	r.reportID++
 	rp.ID, rp.Disks, rp.Latencies = core.RequestID(r.reportID), append(rp.Disks[:0], r.diskState(ctx)), rp.Latencies[:0]
-	for i := range r.lats {
-		if m := &r.lats[i]; m.n > 0 {
-			rp.Latencies = append(rp.Latencies, Latency{Disk: m.disk, Latency: m.p99()})
-			m.n, m.hist = 0, [latBuckets]uint32{}
+	for id := range r.disks {
+		if m := &r.disks[id].lat; m.n > 0 {
+			rp.Latencies = append(rp.Latencies, Latency{Disk: uint32(id), Latency: m.p99()})
+			*m = latHist{}
 		}
 	}
 	r.frame = AppendReport(r.frame[:0], rp)
@@ -98,18 +91,13 @@ func (r *Replica) probe(ctx *core.Context, peer core.NodeID, p *Probe, out *Repl
 	out.Actions = append(out.Actions, a)
 }
 
-// acked records how long a member disk took to acknowledge a version.
+// noteAck records how long a member disk took to acknowledge a version.
 func (r *Replica) noteAck(disk uint32, took core.Tick) {
-	if !r.reporting {
-		return
+	if r.reporting {
+		m := &r.disk(disk).lat
+		m.n++
+		m.hist[latBucket(took)]++
 	}
-	i := slices.IndexFunc(r.lats, func(m memberLat) bool { return m.disk == disk })
-	if i < 0 {
-		i = len(r.lats)
-		r.lats = append(r.lats, memberLat{disk: disk})
-	}
-	r.lats[i].n++
-	r.lats[i].hist[latBucket(took)]++
 }
 
 // armWait arms WaitTimer for when a version just sent would keep its primary waiting past member_timeout, unless it is armed.
@@ -120,7 +108,7 @@ func (r *Replica) armWait(ctx *core.Context, out *ReplicaOutput) {
 	}
 }
 
-// waited reports to the authority each member disk that has kept a version waiting for its acknowledgment past member_timeout, once per member_timeout, and arms WaitTimer for the next such deadline.
+// waited reports to the authority each member disk that has kept a version waiting for its acknowledgment past member_timeout, once per member_timeout for as long as it does, and arms WaitTimer for the next such deadline.
 func (r *Replica) waited(ctx *core.Context, out *ReplicaOutput) {
 	if r.waitAt == 0 || ctx.Now < r.waitAt {
 		return
@@ -136,13 +124,14 @@ func (r *Replica) waited(ctx *core.Context, out *ReplicaOutput) {
 			if v.acked&(1<<k) != 0 {
 				continue
 			}
-			if due := v.sentAt + MemberTimeoutAfter; due > ctx.Now {
-				if next == 0 || due < next {
-					next = due
-				}
-				continue
+			due := v.sentAt + MemberTimeoutAfter
+			if due <= ctx.Now {
+				r.timedOut(ctx, v, v.members[k], out)
+				due = r.disk(v.members[k]).waited + MemberTimeoutAfter
 			}
-			r.timedOut(ctx, v, v.members[k], out)
+			if next == 0 || due < next {
+				next = due
+			}
 		}
 	}
 	if next != 0 {
@@ -152,15 +141,11 @@ func (r *Replica) waited(ctx *core.Context, out *ReplicaOutput) {
 }
 
 func (r *Replica) timedOut(ctx *core.Context, v *version, disk uint32, out *ReplicaOutput) {
-	i := slices.IndexFunc(r.waits, func(w diskTick) bool { return w.disk == disk })
-	if i >= 0 && ctx.Now-r.waits[i].at < MemberTimeoutAfter {
+	di := r.disk(disk)
+	if di.waited != 0 && ctx.Now-di.waited < MemberTimeoutAfter {
 		return
 	}
-	if i < 0 {
-		i = len(r.waits)
-		r.waits = append(r.waits, diskTick{disk: disk})
-	}
-	r.waits[i].at = ctx.Now
+	di.waited = ctx.Now
 	r.reportID++
 	mt := MemberTimeout{ID: core.RequestID(r.reportID), PG: PGFields{Epoch: r.table.Epoch, PG: v.u.PG.PG, Interval: uint32(v.u.Version >> 32)}, Disk: disk}
 	r.frame = AppendMemberTimeout(r.frame[:0], &mt)

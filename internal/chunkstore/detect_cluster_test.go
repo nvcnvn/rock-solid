@@ -254,7 +254,7 @@ func TestAHungMemberIsMarkedDownOnItsPrimarysReport(t *testing.T) {
 	if _, ok := d.cl.replies[id]; !ok {
 		t.Fatal("the write waiting on the hung member got no reply")
 	}
-	if slices.ContainsFunc(d.reps[d.primary(pg0)].lats, func(m memberLat) bool { return m.disk == member && m.n > 0 }) {
+	if d.reps[d.primary(pg0)].disk(member).lat.n > 0 {
 		t.Fatal("a member that never acknowledged has a latency")
 	}
 }
@@ -313,4 +313,46 @@ func TestADiskCutOffBrieflyRejoinsAfterTheHeal(t *testing.T) {
 			t.Fatalf("seed %d: disk %d cut off 2.5 s, still down 2 s after the heal, since %d", seed, disk, since)
 		}
 	})
+}
+
+// A primary cut off from one member, which still answers the detector's probes, reports it once per member_timeout for as long as its write waits, not once.
+func TestAPrimaryReportsAWaitEveryMemberTimeout(t *testing.T) {
+	d := newDCluster(t, 3, sim.DefaultSettings())
+	d.run(3 * sec)
+	_, e := d.table.entry(pg0)
+	p, m := uint32(d.node(e.Members[0].Disk)), uint32(d.node(e.Members[1].Disk))
+	reports := 0
+	d.onPass = func(n int, acts []core.Action) {
+		for _, a := range acts {
+			if k, _ := Peek(a.Msg.Inline()); a.Kind == core.ActNetSend && k == KindMemberTimeout && uint32(n) == p {
+				reports++
+			}
+		}
+	}
+	d.s.Partition(p, m, false)
+	d.write(pg0, chunkIn(pg0, 4, 0), 0, fill(core.BlockSize, 7))
+	d.run(3*MemberTimeoutAfter + 500_000)
+	if reports != 3 {
+		t.Fatalf("%d member_timeout reports over 3.5 s of waiting", reports)
+	}
+}
+
+// A version sent again after its member's connection broke gives no acknowledgment latency: the wait for the reconnect is not the disk's.
+func TestAResentVersionGivesNoLatency(t *testing.T) {
+	d := newDCluster(t, 3, sim.DefaultSettings())
+	d.run(3 * sec)
+	_, e := d.table.entry(pg0)
+	member := e.Members[1].Disk
+	p, m := uint32(d.node(e.Members[0].Disk)), uint32(d.node(member))
+	d.s.Partition(p, m, false)
+	id := d.write(pg0, chunkIn(pg0, 4, 0), 0, fill(core.BlockSize, 7))
+	d.run(500_000)
+	d.s.Heal(p, m)
+	d.run(2 * sec)
+	if d.reply(id).Status != StatusOK {
+		t.Fatal(d.reply(id))
+	}
+	if w := d.det.disks[member-1]; w.latAt != 0 {
+		t.Fatalf("disk %d reported a latency of %d at %d", member, w.lat, w.latAt)
+	}
 }
