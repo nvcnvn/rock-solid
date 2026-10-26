@@ -792,3 +792,21 @@ func TestEachRecordNamesTheDurableLSNOfItsRound(t *testing.T) {
 		}
 	}
 }
+
+// A decision marker keeps the PG count in its Length, which is no payload: a blob in the same
+// record is reported at the offset it decodes at.
+func TestADecisionMarkerTakesNoPayload(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	h.submit(disklog.Hot, h.write(0, 1, 1))
+	h.submit(disklog.Hot, disklog.Item{Entry: disklog.DecisionEntry(1, 1, 4, 2)})
+	b := h.submit(disklog.Hot, h.blob(disklog.BlobRaftEntries, 1, 10, 1))
+	h.run()
+	for _, ev := range h.eventsOf(disklog.Durable) {
+		for i, tk := range ev.Tickets {
+			if tk == b && ev.Payloads[i] != 0 {
+				t.Fatalf("the blob reported at %d", ev.Payloads[i])
+			}
+		}
+	}
+	h.close()
+}

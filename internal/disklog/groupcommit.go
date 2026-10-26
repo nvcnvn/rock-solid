@@ -1692,7 +1692,9 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 			}
 		default:
 			r.payloads = append(r.payloads, blobOff)
-			blobOff += it.entry.Length
+			if it.entry.Kind == EntryBlob {
+				blobOff += it.entry.Length
+			}
 		}
 	}
 	for i := range items {
