@@ -4575,7 +4575,7 @@ single-clock column is what counting on `CLOCK_BOOTTIME` alone would give (clock
 | exact, exact | −22.6%, exact | 3.960 | 5.168 | Same |
 | −22.6%, exact | +22.6%, exact | 3.960 | 4.0005 | 1.85 s overlap |
 | −8.33% (chrony), exact | +8.33%, exact | 3.960 | 4.0005 | 0.63 s overlap |
-| exact, −1% | exact, +1% | 3.960 | 4.0005 | |
+| exact, −1% | exact, +1% | 3.899 (margin 2.52%: the bound sees the raw clocks 2% apart) | 4.0005 | |
 | −100 ppm, −100 ppm (no daemon) | +100 ppm, +100 ppm | 3.9604 | 4.0001 | |
 | −1%, −1% (no daemon), before the first bound | +1%, +1% | No lease taken | | |
 | −1%, −1%, first lease, from grants `rate_gap` apart, 100 µs round trips | +1%, +1% | By 3.931 (margin up to 2.72%) | 3.961 | |
@@ -4613,9 +4613,9 @@ and reports the pair; a margin of `max_margin` or more gives no lease. Times are
 | Grantor 1% slow | As above | g_b − g_a = 3,300,000 | 0.99 | 1%: the margin never drops below `lease_drift` |
 | Every grant in the first third took 50 ms, worst ends | 0, 50,000, G0 | 3,333,333, 3,333,433, G0 + 3,333,433 | 1.015259 | 2.026%: a false widening, in the safe direction |
 | One 50 ms grant among 100 µs ones in the first third | The shortest is chosen | | 1.000060 | 1% |
-| The pair started 6 s ago: thirds of the 6 s span, 100 µs, worst ends | 0, 100, G0 | 4,000,000, 4,000,100, G0 + 4,000,100 | 1.000025 | 1% |
+| The pair started 6 s ago: thirds of the 6 s span, 100 µs, worst ends | 0, 100, G0 | 4,000,000, 4,000,100, G0 + 4,000,100 | 1.000051 | 1% |
 | First grant of a window | 0, 100, G0 | | none | No lease from this grantor; a request is sent at r_a + 100,000 |
-| Second grant, sent `rate_gap` after the first arrived, 100 µs, worst ends | 0, 100, G0 | 100,100, 100,200, G0 + 100,200 | 1.000999 | 1% |
+| Second grant, sent `rate_gap` after the first arrived, 100 µs, worst ends | 0, 100, G0 | 100,100, 100,200, G0 + 100,200 | 1.002000 | 1% |
 | The same with 1 ms round trips | 0, 1,000, G0 | 101,000, 102,000, G0 + 102,000 | 1.020000 | 2.5%: the first lease ends 3.90 s after the ask |
 | A grant with a new run ID after a reboot, g = 1,200 | | | none | A new window starts and the old run's lease ends; no lease until its second grant |
 | Grantor raw about 50% fast | | g_b − g_a = 1.505 × (s_b − r_a) | 1.505 | 51%, past `max_margin`: no lease, reported |
