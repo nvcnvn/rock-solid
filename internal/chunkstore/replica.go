@@ -388,6 +388,8 @@ type replicaPlants struct {
 	// so its held writes are ordered again.
 	fenceOnArrival    bool
 	reorderAfterOther bool
+	// admitPastLimit orders a plain write that adds live data past a member's write_limit.
+	admitPastLimit bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.
@@ -871,7 +873,7 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		}
 		l.held = append(l.held, heldMsg{peer: ev.Peer, msg: ev.Msg, hold: l.interval})
 		return
-	case u.Kind == KindWrite && !u.Granted && r.full(ctx, u.PG.PG, p, e) && !r.st.Overwrites(u.Chunk, u.Off, u.Len, u.Snapshot):
+	case u.Kind == KindWrite && !u.Granted && !r.plant.admitPastLimit && r.full(ctx, u.PG.PG, p, e) && !r.st.Overwrites(u.Chunk, u.Off, u.Len, u.Snapshot):
 		freeBuf(ctx, ev.Msg.Buf)
 		r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusNoSpace}, out)
 		return
