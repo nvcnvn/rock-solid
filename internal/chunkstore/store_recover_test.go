@@ -326,3 +326,21 @@ func TestAWriteFailedBeforeItIsOrderedCoversNothing(t *testing.T) {
 		t.Fatalf("the recovery write carries %d of 40 blocks at %#x, want all at %#x", m.data.count(), v, kept)
 	}
 }
+
+// A member refuses a recovery write logged under a version it does not stand at: one of the
+// interval other than its own newest, or the kept version once it holds a write of the interval,
+// since the write would then lie under a version whose bytes the other members hold differently.
+func TestAMemberRefusesARecoveryWriteAtAVersionItLacks(t *testing.T) {
+	h := newRecoveryHarness(t)
+	kept := MakeVersion(3, 1)
+	h.sync(h.memberWrite(chunkC, 0, 4, kept, 1))
+	h.sync(h.memberWrite(chunkC, 0, 1, MakeVersion(4, 1), 5))
+	img := map[uint16]byte{1: 1}
+	for _, v := range []uint64{MakeVersion(4, 2), kept} {
+		id := h.recoverWrite(Request{Chunk: chunkC, HasVer: true, Ver: v, Interval: 4, Buf: recoveryBuf(h, img)})
+		h.settle()
+		if !errors.Is(h.replies[id].Err, ErrVersion) {
+			t.Fatalf("a recovery write at %#x over 4.1 answered %+v", v, h.replies[id])
+		}
+	}
+}

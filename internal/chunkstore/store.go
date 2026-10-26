@@ -674,6 +674,9 @@ func (s *Store) startBases(ctx *core.Context, oi int32) bool {
 	cs := &s.chunks[o.chunk]
 	o.based = true
 	if o.req.Recover {
+		if iv := uint32(o.req.Ver >> 32); o.req.HasVer && (iv == o.req.Interval && cs.version != o.req.Ver || iv < o.req.Interval && uint32(cs.version>>32) == o.req.Interval) {
+			o.err = ErrVersion
+		}
 		return false
 	}
 	if o.req.Version != 0 {
