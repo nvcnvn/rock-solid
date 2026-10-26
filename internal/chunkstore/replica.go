@@ -1113,7 +1113,10 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		}
 	case reqRead:
 		resp := Response{Kind: KindReadReply, Version: rp.Version}
-		if rp.Err != nil {
+		switch {
+		case errors.Is(rp.Err, ErrMissing):
+			resp.Status, resp.Version = StatusMissing, 0
+		case rp.Err != nil:
 			ref := r.refusal(q.pg)
 			resp.Status, resp.Version, resp.Epoch, resp.Interval = StatusRefused, 0, ref.Epoch, ref.Interval
 		}

@@ -29,6 +29,8 @@ type storeModel struct {
 	chunks map[core.ChunkID]Chunk
 	live   map[blockKey][]byte
 	frozen map[core.ChunkID][]frozenBlocks
+	// unmarked is the missing-list entries no decision marker of theirs has followed yet.
+	unmarked []disklog.Entry
 }
 
 func newStoreModel() *storeModel {
@@ -39,12 +41,12 @@ func (m *storeModel) Apply(r writtenRecord) {
 	for i, e := range r.entries {
 		switch e.Kind {
 		case disklog.EntryWrite, disklog.EntrySlot:
-			m.chunks[e.Chunk] = Chunk{Version: e.Version, Epoch: m.chunks[e.Chunk].Epoch}
+			m.version(e)
 			for k := range e.Count {
 				m.live[blockKey{e.Chunk, e.First + k}] = r.payloads[i][int(k)*core.BlockSize:][:core.BlockSize]
 			}
 		case disklog.EntryPunch:
-			m.chunks[e.Chunk] = Chunk{Version: e.Version, Epoch: m.chunks[e.Chunk].Epoch}
+			m.version(e)
 			for k := range e.Count {
 				delete(m.live, blockKey{e.Chunk, e.First + k})
 			}
@@ -62,8 +64,30 @@ func (m *storeModel) Apply(r writtenRecord) {
 				}
 			}
 			m.frozen[e.Chunk] = append(m.frozen[e.Chunk], f)
+		case disklog.EntryMissing:
+			m.unmarked = append(m.unmarked, e)
+		case disklog.EntryDecision:
+			m.unmarked = slices.DeleteFunc(m.unmarked, func(u disklog.Entry) bool {
+				if u.Interval != e.Interval || core.PGIndexOf(u.Chunk.Hash(), uint32(e.Length)) != e.Owner {
+					return false
+				}
+				ch := m.chunks[u.Chunk]
+				ch.Listed, ch.ListedIn = u.Version, u.Interval
+				m.chunks[u.Chunk] = ch
+				return true
+			})
 		}
 	}
+}
+
+// version moves the chunk to e's version, which the disk holds whole once e is its last entry.
+func (m *storeModel) version(e disklog.Entry) {
+	ch := m.chunks[e.Chunk]
+	ch.Version = e.Version
+	if e.Last {
+		ch.Whole = e.Version
+	}
+	m.chunks[e.Chunk] = ch
 }
 
 func (m *storeModel) isFrozen(c core.ChunkID, v uint64) bool {
@@ -76,7 +100,7 @@ func (m *storeModel) isFrozen(c core.ChunkID, v uint64) bool {
 }
 
 func (m *storeModel) Clone() *storeModel {
-	c := &storeModel{chunks: maps.Clone(m.chunks), live: maps.Clone(m.live), frozen: map[core.ChunkID][]frozenBlocks{}}
+	c := &storeModel{chunks: maps.Clone(m.chunks), live: maps.Clone(m.live), frozen: map[core.ChunkID][]frozenBlocks{}, unmarked: slices.Clone(m.unmarked)}
 	for k, fs := range m.frozen {
 		c.frozen[k] = append([]frozenBlocks(nil), fs...)
 	}

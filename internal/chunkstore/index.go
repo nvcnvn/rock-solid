@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -20,22 +21,27 @@ import (
 // group's chunks are one key range. That prefix alone holds the chunk's entry; with a version
 // appended (0 for the live map) and a first block, an extent of that map; a frozen version alone
 // holds its freeze epoch, sorting before that version's extents. Version 0, the absent chunk, has
-// no extents of its own: its marker sorts before the live map's. A record's live block count sits
-// under RecordPool and its header's LBA, after every chunk, and a chunk slot's under its first
-// LBA, which no record header shares: a slot segment holds no records.
+// no extents of its own: its marker sorts before the live map's. A PG's decision marker sits under
+// DecisionPool, its pool, the base-2 log of its pool's PG count and its index, after every chunk. A
+// record's live block count sits under RecordPool and its header's LBA, after every marker, and a
+// chunk slot's under its first LBA, which no record header shares: a slot segment holds no records.
 const (
 	chunkKeySize  = 4 + 8 + core.ChunkIDSize
 	frozenKeySize = chunkKeySize + 8
 	// KeySize is the length of an extent's key.
-	KeySize    = frozenKeySize + 2
-	recordSize = 4 + 8
-	extentSize = 8 + 8 + 2 + 8
+	KeySize        = frozenKeySize + 2
+	recordSize     = 4 + 8
+	extentSize     = 8 + 8 + 2 + 8
+	chunkValueSize = 8 + 8 + 8 + 8 + 4
+	decisionSize   = 4 + 4 + 1 + 4
 	// RecordPool is the pool ID the index keeps record counts under; no chunk may use it.
 	RecordPool core.PoolID = math.MaxUint32
+	// DecisionPool is the pool ID the index keeps PGs' decision markers under; no chunk may use it.
+	DecisionPool core.PoolID = math.MaxUint32 - 1
 )
 
 var (
-	// ErrReservedPool reports a record entry for RecordPool.
+	// ErrReservedPool reports a record entry for RecordPool or DecisionPool.
 	ErrReservedPool = errors.New("chunkstore: pool reserved for the index")
 	// ErrFrozenLive reports a freeze of version 0, the absent chunk, of a chunk that exists.
 	ErrFrozenLive = errors.New("chunkstore: freeze of version 0 of an existing chunk")
@@ -68,7 +74,7 @@ func appendChunkPrefix(dst []byte, pool core.PoolID, c core.ChunkID) []byte {
 
 // DecodeKey decodes an extent's key, checking its hash names its chunk.
 func DecodeKey(b []byte) (Key, error) {
-	if len(b) != KeySize || core.PoolID(binary.BigEndian.Uint32(b)) == RecordPool {
+	if len(b) != KeySize || reserved(core.PoolID(binary.BigEndian.Uint32(b))) {
 		return Key{}, ErrBadKey
 	}
 	k := Key{
@@ -131,10 +137,18 @@ func decodeExtent(key, v []byte) (Extent, bool) {
 	}, true
 }
 
-// Chunk is a chunk's entry: its current version and the snapshot epoch of its last freeze.
+func reserved(pool core.PoolID) bool { return pool == RecordPool || pool == DecisionPool }
+
+// Chunk is a chunk's entry: its current version, the snapshot epoch of its last freeze, the newest
+// version whose last entry the index applied, which the disk holds whole, and the kept version
+// the peering of interval ListedIn put the chunk on the missing list for, ListedIn 0 when it is
+// not listed.
 type Chunk struct {
-	Version uint64
-	Epoch   uint64
+	Version  uint64
+	Epoch    uint64
+	Whole    uint64
+	Listed   uint64
+	ListedIn uint32
 }
 
 // Index is one disk's chunk index in an LSM tree: per chunk its entry, live map and frozen maps, and per record its live blocks.
@@ -157,6 +171,9 @@ type Index struct {
 	pointRemovals bool
 	track         bool
 	changes       []LiveChange
+	// unmarked is the missing-list entries applied since the last decision marker, which take effect
+	// only with their PG's marker: a member persists a peering's whole list or none of it.
+	unmarked []disklog.Entry
 }
 
 // LiveChange is a change of Delta to the blocks the maps refer to in the record at Header, past
@@ -171,6 +188,8 @@ func Prefix(k []byte) int {
 	switch {
 	case len(k) >= recordSize && core.PoolID(binary.BigEndian.Uint32(k)) == RecordPool:
 		return recordSize
+	case len(k) >= decisionSize && core.PoolID(binary.BigEndian.Uint32(k)) == DecisionPool:
+		return decisionSize
 	case len(k) >= chunkKeySize:
 		return chunkKeySize
 	}
@@ -220,18 +239,18 @@ func (x *Index) must(err error) {
 	}
 }
 
-// Apply maps a Durable or Replayed record's entries in order: writes and punches into the live map, freezes as copies of it, and copies wherever a map still stores the copied blocks at their source.
+// Apply maps a Durable or Replayed record's entries in order: writes and punches into the live map, freezes as copies of it, copies wherever a map still stores the copied blocks at their source, and missing-list entries once their PG's decision marker follows.
 func (x *Index) Apply(ev *disklog.Event) error {
 	for i := range ev.Entries {
 		e := &ev.Entries[i]
-		if e.Kind != disklog.EntryBlob && e.Pool == RecordPool {
+		if e.Kind != disklog.EntryBlob && reserved(e.Pool) {
 			return ErrReservedPool
 		}
 		if e.Kind == disklog.EntrySlot && x.segmentBlocks < core.BlocksPerChunk {
 			return ErrNoSlots
 		}
 		if e.Kind == disklog.EntryFreeze && e.Version == 0 && !x.absent(e.Pool, e.Chunk) {
-			if _, ok := x.Chunk(e.Pool, e.Chunk); ok {
+			if ch, ok := x.Chunk(e.Pool, e.Chunk); ok && ch.Version != 0 {
 				return ErrFrozenLive
 			}
 		}
@@ -241,30 +260,118 @@ func (x *Index) Apply(ev *disklog.Event) error {
 		switch e.Kind {
 		case disklog.EntryWrite:
 			lba := ev.LBA + core.LBA(ev.HeaderBlocks) + core.LBA(ev.Payloads[i]/core.BlockSize)
-			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, LBA: lba, Header: ev.LBA})
+			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, LBA: lba, Header: ev.LBA}, e.Last)
 		case disklog.EntryCopy:
 			lba := ev.LBA + core.LBA(ev.HeaderBlocks) + core.LBA(ev.Payloads[i]/core.BlockSize)
 			x.move(e.Pool, e.Chunk, e.First, e.Count, e.Source, lba, ev.LBA)
 			x.note(ev.LBA, -int(e.Count))
 		case disklog.EntrySlot:
 			lba := core.LBA(e.Segment)*core.LBA(x.segmentBlocks) + core.LBA(e.Slot)*core.BlocksPerChunk
-			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, LBA: lba, Header: ev.LBA})
+			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, LBA: lba, Header: ev.LBA}, e.Last)
 		case disklog.EntryPunch:
 			if e.First == 0 && e.Count == core.BlocksPerChunk {
-				x.punchWhole(e.Pool, e.Chunk, e.Version)
+				x.punchWhole(e.Pool, e.Chunk, e.Version, e.Last)
 				continue
 			}
-			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, Header: ev.LBA})
+			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, Header: ev.LBA}, e.Last)
 		case disklog.EntryFreeze:
 			x.freeze(e.Pool, e.Chunk, e.Version, e.Epoch)
+		case disklog.EntryMissing:
+			x.unmarked = append(x.unmarked, *e)
+		case disklog.EntryDecision:
+			x.decide(e)
 		}
 	}
 	return nil
 }
 
+// decide lists the chunks of the unmarked missing-list entries the decision marker e covers, those
+// of its PG and interval, and records the marker.
+func (x *Index) decide(e *disklog.Entry) {
+	pgs := uint32(e.Length)
+	x.unmarked = slices.DeleteFunc(x.unmarked, func(m disklog.Entry) bool {
+		if m.Pool != e.Pool || m.Interval != e.Interval || core.PGIndexOf(m.Chunk.Hash(), pgs) != e.Owner {
+			return false
+		}
+		ch, _ := x.Chunk(m.Pool, m.Chunk)
+		ch.Listed, ch.ListedIn = m.Version, m.Interval
+		x.putChunk(m.Pool, m.Chunk, ch)
+		return true
+	})
+	k := x.decisionKey(e.Pool, e.Owner, pgs)
+	if v, ok := x.tree.Get(k); ok && binary.LittleEndian.Uint32(v) >= e.Interval {
+		return
+	}
+	x.val = binary.LittleEndian.AppendUint32(x.val[:0], e.Interval)
+	x.must(x.tree.Put(k, x.val))
+}
+
+func (x *Index) decisionKey(pool core.PoolID, pg, pgs uint32) []byte {
+	x.key = binary.BigEndian.AppendUint32(x.key[:0], uint32(DecisionPool))
+	x.key = binary.BigEndian.AppendUint32(x.key, uint32(pool))
+	x.key = append(x.key, byte(bits.TrailingZeros32(pgs)))
+	x.key = binary.BigEndian.AppendUint32(x.key, pg)
+	return x.key
+}
+
+// Decided is the newest interval whose peering decision the disk persisted for PG pg of the pool's
+// pgs PGs, or for the PG it split from, 0 for none.
+func (x *Index) Decided(pool core.PoolID, pg, pgs uint32) uint32 {
+	var newest uint32
+	for {
+		if v, ok := x.tree.Get(x.decisionKey(pool, pg, pgs)); ok {
+			newest = max(newest, binary.LittleEndian.Uint32(v))
+		}
+		if pgs <= 1 {
+			return newest
+		}
+		pg, pgs = pg/2, pgs/2
+	}
+}
+
+// EndReplay forgets the missing-list entries no decision marker followed: a crash cut short the
+// list they belong to, which the disk never persisted.
+func (x *Index) EndReplay() { x.unmarked = x.unmarked[:0] }
+
+// PGChunks appends to dst, in key order, each chunk of PG pg of the pool's pgs PGs that the disk
+// logged or lists, seeking past each chunk's maps: a PG's chunks are one key range.
+func (x *Index) PGChunks(dst []ChunkPeer, pool core.PoolID, pg, pgs uint32) []ChunkPeer {
+	shift := 64 - bits.TrailingZeros32(pgs)
+	x.lo = binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint32(x.lo[:0], uint32(pool)), uint64(pg)<<shift)
+	x.tree.Iter(&x.it)
+	for ok := x.it.SeekGE(x.lo); ok; {
+		k := x.it.Key()
+		if len(k) < chunkKeySize || core.PoolID(binary.BigEndian.Uint32(k)) != pool || binary.BigEndian.Uint64(k[4:])>>shift != uint64(pg) {
+			break
+		}
+		if v := x.it.Value(); len(k) == chunkKeySize && len(v) == chunkValueSize {
+			if ch := decodeChunk(v); ch.Version != 0 || ch.ListedIn != 0 {
+				dst = append(dst, ChunkPeer{Chunk: core.ChunkIDFromBytes([core.ChunkIDSize]byte(k[12:])), Whole: ch.Whole, Logged: ch.Version,
+					Listed: ch.ListedIn != 0, Kept: ch.Listed})
+			}
+		}
+		x.hi = append(x.hi[:0], k[:chunkKeySize]...)
+		if !increment(x.hi) {
+			break
+		}
+		ok = x.it.SeekGE(x.hi)
+	}
+	return dst
+}
+
+// increment makes b the next byte string of its length, reporting false when it was the last.
+func increment(b []byte) bool {
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i]++; b[i] != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // insert maps ext into the chunk's live map, trimming and splitting the extents it covers, and
 // removing the keys of those starting inside it with one range removal when there are two or more.
-func (x *Index) insert(pool core.PoolID, c core.ChunkID, ext Extent) {
+func (x *Index) insert(pool core.PoolID, c core.ChunkID, ext Extent, last bool) {
 	x.exts = x.overlapping(x.exts[:0], pool, c, 0, ext.First, ext.end())
 	inside := 0
 	for _, o := range x.exts {
@@ -297,16 +404,22 @@ func (x *Index) insert(pool core.PoolID, c core.ChunkID, ext Extent) {
 	x.refer(ext, int(ext.Count), true)
 	ch, _ := x.Chunk(pool, c)
 	ch.Version = ext.Version
+	if last {
+		ch.Whole = ext.Version
+	}
 	x.putChunk(pool, c, ch)
 }
 
 // punchWhole empties the chunk's live map with one range removal, keeping its entry, at version,
 // as its tombstone.
-func (x *Index) punchWhole(pool core.PoolID, c core.ChunkID, version uint64) {
+func (x *Index) punchWhole(pool core.PoolID, c core.ChunkID, version uint64, last bool) {
 	x.exts = x.overlapping(x.exts[:0], pool, c, 0, 0, core.BlocksPerChunk)
 	x.removeMap(pool, c, 0, x.exts)
 	ch, _ := x.Chunk(pool, c)
 	ch.Version = version
+	if last {
+		ch.Whole = version
+	}
 	x.putChunk(pool, c, ch)
 }
 
@@ -401,9 +514,21 @@ func (x *Index) freeze(pool core.PoolID, c core.ChunkID, version, epoch uint64) 
 
 func (x *Index) putChunk(pool core.PoolID, c core.ChunkID, ch Chunk) {
 	x.key = appendChunkPrefix(x.key[:0], pool, c)
-	x.val = binary.LittleEndian.AppendUint64(x.val[:0], ch.Version)
-	x.val = binary.LittleEndian.AppendUint64(x.val, ch.Epoch)
+	x.val = appendChunk(x.val[:0], ch)
 	x.must(x.tree.Put(x.key, x.val))
+}
+
+func appendChunk(dst []byte, ch Chunk) []byte {
+	dst = binary.LittleEndian.AppendUint64(dst, ch.Version)
+	dst = binary.LittleEndian.AppendUint64(dst, ch.Epoch)
+	dst = binary.LittleEndian.AppendUint64(dst, ch.Whole)
+	dst = binary.LittleEndian.AppendUint64(dst, ch.Listed)
+	return binary.LittleEndian.AppendUint32(dst, ch.ListedIn)
+}
+
+func decodeChunk(v []byte) Chunk {
+	return Chunk{Version: binary.LittleEndian.Uint64(v), Epoch: binary.LittleEndian.Uint64(v[8:]), Whole: binary.LittleEndian.Uint64(v[16:]),
+		Listed: binary.LittleEndian.Uint64(v[24:]), ListedIn: binary.LittleEndian.Uint32(v[32:])}
 }
 
 func (x *Index) recordKey(header core.LBA) []byte {
@@ -610,7 +735,7 @@ func (x *Index) Chunk(pool core.PoolID, c core.ChunkID) (Chunk, bool) {
 	if !ok {
 		return Chunk{}, false
 	}
-	return Chunk{Version: binary.LittleEndian.Uint64(v), Epoch: binary.LittleEndian.Uint64(v[8:])}, true
+	return decodeChunk(v), true
 }
 
 // Lookup returns the live extent holding block b of the chunk, a one-block extent of zeros at version 0 when the chunk has an entry and no extent holds b, or false when the chunk has no entry or only the absent version.
@@ -657,7 +782,7 @@ func floorExtent(k, fk, v []byte, ok bool, version uint64, b uint16) (Extent, bo
 		}
 		return zeros, version != 0, version == 0
 	case chunkKeySize:
-		if version != 0 || len(v) != 16 || binary.LittleEndian.Uint64(v) == 0 {
+		if version != 0 || len(v) != chunkValueSize || binary.LittleEndian.Uint64(v) == 0 {
 			return Extent{}, false, false
 		}
 		return zeros, true, false
@@ -765,7 +890,7 @@ func (r *Reader) Lookup(b uint16) (Extent, bool) {
 	if !entry {
 		return e, ok
 	}
-	if fk, v, ok := r.it.FloorPrefix(r.key[:chunkKeySize]); ok && len(fk) == chunkKeySize && len(v) == 16 && binary.LittleEndian.Uint64(v) != 0 {
+	if fk, v, ok := r.it.FloorPrefix(r.key[:chunkKeySize]); ok && len(fk) == chunkKeySize && len(v) == chunkValueSize && binary.LittleEndian.Uint64(v) != 0 {
 		return e, true
 	}
 	return Extent{}, false
@@ -846,8 +971,13 @@ func (x *Index) Check() error {
 				return fmt.Errorf("record %x: count %x", k, v)
 			}
 			stored = append(stored, recordCount{core.LBA(binary.BigEndian.Uint64(k[4:])), binary.LittleEndian.Uint32(v)})
+		case len(k) == decisionSize && core.PoolID(binary.BigEndian.Uint32(k)) == DecisionPool:
+			if len(v) != 4 || binary.LittleEndian.Uint32(v) == 0 || k[8] > 31 || binary.BigEndian.Uint32(k[9:]) >= 1<<k[8] {
+				return fmt.Errorf("decision %x: interval %x", k, v)
+			}
+			prefix = prefix[:0]
 		case len(k) == chunkKeySize:
-			if len(v) != 16 {
+			if len(v) != chunkValueSize {
 				return fmt.Errorf("chunk %x: entry %x", k, v)
 			}
 			prefix = append(prefix[:0], k...)
