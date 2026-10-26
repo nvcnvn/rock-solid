@@ -9,6 +9,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -151,7 +152,7 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 				if err != nil {
 					t.Fatal(err)
 				}
-				c.reps[d] = NewReplica(ReplicaConfig{Disk: uint32(d + 1)}, st)
+				c.reps[d] = NewReplica(ReplicaConfig{Disk: uint32(d + 1), Seed: uint64(d), Start: lease.Now(ctx)}, st)
 				for k := range disks {
 					c.reps[d].SetAddr(uint32(k+1), core.NodeID{Node: uint32(k)})
 				}
@@ -168,6 +169,7 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 	c.s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { c.client = n.Start(c.cl, nil) })
 	c.settle()
 	c.publish(tbl, true)
+	c.runFor(lease.DefaultConfig.Lease + 500_000)
 	return c
 }
 
@@ -242,7 +244,7 @@ func (c *rcluster) settle() {
 
 // quiet reports whether every step pending is a periodic timer: a replica asking the control plane again.
 func (c *rcluster) quiet() bool {
-	return c.s.Idle(func(id core.TimerID) bool { return id == RetryTimer })
+	return c.s.Idle(func(id core.TimerID) bool { return id == RetryTimer || id == LeaseTimer })
 }
 
 func (c *rcluster) step() bool {
@@ -261,7 +263,12 @@ func (c *rcluster) step() bool {
 func (c *rcluster) runFor(d core.Tick) {
 	c.t.Helper()
 	end := c.s.Time() + d
-	for c.s.Time() < end && c.step() {
+	for {
+		if next := c.s.Next(); next == 0 || next > end {
+			c.s.Advance(end)
+			return
+		}
+		c.step()
 	}
 }
 

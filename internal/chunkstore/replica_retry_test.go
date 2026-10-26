@@ -18,7 +18,7 @@ func TestAsksAndFetchesAreSentAgainUntilATableAnswers(t *testing.T) {
 	if len(c.asks) != 1 {
 		t.Fatalf("asks %+v", c.asks)
 	}
-	c.runFor(3 * RetryAfter)
+	c.runFor(3*RetryAfter + 1)
 	if len(c.asks) < 4 || len(c.asks) > 5 || slices.ContainsFunc(c.asks, func(a PGFields) bool { return a != c.asks[0] }) {
 		t.Fatalf("after 3 s, asks %+v", c.asks)
 	}
@@ -34,7 +34,7 @@ func TestAsksAndFetchesAreSentAgainUntilATableAnswers(t *testing.T) {
 	g := MakeDelta(&next, &gap)
 	c.call(1, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.ApplyDelta(ctx, &g, out) })
 	before := c.fetches[1]
-	c.runFor(2 * RetryAfter)
+	c.runFor(2*RetryAfter + 1)
 	if n := c.fetches[1] - before; n < 2 || n > 3 || c.fetch[1] != gap.Epoch || !c.whole[1] {
 		t.Fatalf("fetches %d after %d, for epoch %d whole %v", c.fetches[1], before, c.fetch[1], c.whole[1])
 	}

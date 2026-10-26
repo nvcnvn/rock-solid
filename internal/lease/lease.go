@@ -41,6 +41,9 @@ func (c *Config) Margin(bound uint64) uint64 {
 	return c.Drift + max(bound, PPM+c.Drift/2) - (PPM + c.Drift/2)
 }
 
+// windowCap is the grants a window holds without growing: a rate_window of renewals a heartbeat apart, with room for asks after detections.
+const windowCap = 32
+
 // sample is a grant in a holder's rate window: its request's send and its arrival on the holder's raw clock, and the grantor's raw reading.
 type sample struct {
 	s, r, g core.Tick
@@ -149,6 +152,9 @@ func (h *Holder) OnGrant(g core.NodeID, gr Grant, t Time) (tripped bool) {
 		return true
 	}
 	s := sample{s: p.askS, r: t.Raw, g: gr.Raw}
+	if p.win == nil {
+		p.win = make([]sample, 0, windowCap)
+	}
 	if len(p.win) == 0 || gr.Run != p.run || gr.Raw < p.newestG || t.Raw-p.win[len(p.win)-1].r > h.cfg.Window {
 		p.win, p.bound, p.run = append(p.win[:0], s), 0, gr.Run
 	} else {

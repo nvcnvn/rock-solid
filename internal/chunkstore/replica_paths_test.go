@@ -50,13 +50,16 @@ func TestThePrimaryFansOutWhileItLogs(t *testing.T) {
 	c.write(pg0, chunkIn(pg0, 4, 0), 0, []byte{1})
 	c.settle()
 	for _, acts := range c.passes[0][mark:] {
-		sends := slices.IndexFunc(acts, func(a core.Action) bool { return a.Kind == core.ActNetSend && !a.Reply })
+		update := func(a core.Action) bool {
+			return a.Kind == core.ActNetSend && !a.Reply && Kind(a.Msg.Body[1]) == KindReplicaWrite
+		}
+		sends := slices.IndexFunc(acts, update)
 		if sends < 0 {
 			continue
 		}
 		peers := 0
 		for _, a := range acts {
-			if a.Kind == core.ActNetSend && !a.Reply {
+			if update(a) {
 				peers |= 1 << a.Peer.Node
 			}
 		}

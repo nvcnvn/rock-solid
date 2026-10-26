@@ -555,7 +555,7 @@ func TestAPGWiderThanThePrimaryFansOutToRefusesWrites(t *testing.T) {
 	}
 }
 
-// The primary's own disk fails 1.2's write: its client and that of 1.3 behind it are refused, and the primary asks for interval 2 once.
+// The primary's own disk fails 1.2's write: its client is refused, and so is that of 1.3 behind it if the primary took it before the failure, holding it for the next interval otherwise; the primary asks for interval 2 once.
 func TestThePrimarysOwnDiskFailingAVersionEndsTheInterval(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	ch := chunkIn(pg0, 4, 0)
@@ -564,10 +564,11 @@ func TestThePrimarysOwnDiskFailingAVersionEndsTheInterval(t *testing.T) {
 	w1 := c.write(pg0, ch, 10, []byte{1})
 	w2 := c.write(pg0, ch, 20, []byte{2})
 	c.settle()
-	for _, w := range []core.RequestID{w1, w2} {
-		if rp := c.reply(w); rp.Status != StatusRefused {
-			t.Fatalf("answered %+v", rp)
-		}
+	if rp := c.reply(w1); rp.Status != StatusRefused {
+		t.Fatalf("answered %+v", rp)
+	}
+	if rp, ok := c.cl.replies[w2]; ok && rp.Status != StatusRefused || !ok && len(c.reps[0].leads[0].held) != 1 {
+		t.Fatalf("1.3 answered %+v, or neither answered nor held", rp)
 	}
 	if len(c.asks) != 1 || c.asks[0] != (PGFields{Epoch: 1, PG: pg0, Interval: 1}) {
 		t.Fatalf("asks %+v", c.asks)

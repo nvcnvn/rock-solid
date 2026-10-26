@@ -407,7 +407,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int) {
 	}
 	busy := func() bool { return slices.ContainsFunc(fcs, func(fc *faultClient) bool { return fc.left > 0 }) }
 	for range 2_000_000 {
-		if !c.step() {
+		if c.quiet() || !c.step() {
 			if f.heals == [3]core.Tick{} && f.crashes == [3]core.Tick{} && !f.peering && len(c.asks) == f.asked {
 				break
 			}

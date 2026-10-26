@@ -7,6 +7,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/lease"
 )
 
 // maxMembers is the widest PG a replica primary fans out to: rep3 with a leaving member.
@@ -24,10 +25,17 @@ const RetryTimer core.TimerID = 0x72747279
 // RetryAfter is how often a replica asks again: 1 s, a heartbeat.
 const RetryAfter = core.Tick(1_000_000)
 
+// LeaseTimer is the timer on which a replica asks its grantors for leases and heartbeats the holders of its grants.
+const LeaseTimer core.TimerID = 0x6c736574
+
 // ReplicaConfig is a disk's place in the cluster.
 type ReplicaConfig struct {
 	// Disk is the disk whose store the replica runs, by its ID in the placement table.
 	Disk uint32
+	// Seed seeds the source the replica draws its run IDs from; Start is when its loop started, from which the restart wait counts; Lease is the lease settings, lease.DefaultConfig when zero.
+	Seed  uint64
+	Start lease.Time
+	Lease lease.Config
 }
 
 // ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, and a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended. The replica asks again every RetryAfter until a table answers.
@@ -167,7 +175,17 @@ type Replica struct {
 	want      uint64
 	wantWhole bool
 	retryAt   core.Tick
-	plant     replicaPlants
+	// holder is the leases this disk holds as a primary, from the loops in grantors; grantor the grants it gives; leaseAt when LeaseTimer is armed for, 0 when it is not; beatAt when the next heartbeat to its holders is due.
+	holder   *lease.Holder
+	grantor  *lease.Grantor
+	lcfg     lease.Config
+	rng      *core.Rand
+	grantors []core.NodeID
+	holders  []core.NodeID
+	leaseAt  core.Tick
+	leaseID  uint64
+	beatAt   core.Tick
+	plant    replicaPlants
 	// disks is each disk's size and the live blocks it last reported, by disk ID; pools the pools'
 	// settings and outstanding grants; slots each pool's member slots on each disk in the table.
 	disks  []diskInfo
@@ -284,9 +302,14 @@ type replicaPlants struct {
 	resendNewestFirst bool
 }
 
-// NewReplica runs st, a serving store, as disk cfg.Disk.
+// NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.
 func NewReplica(cfg ReplicaConfig, st *Store) *Replica {
-	return &Replica{cfg: cfg, st: st}
+	lc := cfg.Lease
+	if lc == (lease.Config{}) {
+		lc = lease.DefaultConfig
+	}
+	rng := core.NewRand(cfg.Seed)
+	return &Replica{cfg: cfg, st: st, lcfg: lc, rng: rng, holder: lease.NewHolder(lc), grantor: lease.NewGrantor(lc, rng.Uint64(), cfg.Start)}
 }
 
 // Store is the replica's store.
@@ -405,6 +428,8 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 		}
 	}
 	r.leads = kept
+	r.noteGrantors()
+	r.armLease(ctx, out)
 	r.dropWaiting(ctx, out)
 	r.demote(ctx, out)
 	parked := r.parked
@@ -528,9 +553,15 @@ func (r *Replica) OnEvent(ctx *core.Context, ev *core.Event, out *ReplicaOutput)
 			r.retry(ctx, out)
 			break
 		}
+		if ev.Timer == LeaseTimer {
+			r.leaseTick(ctx, out)
+			break
+		}
 		r.st.OnEvent(ctx, ev, &r.sout)
 	case core.EvDiskDone:
 		r.st.OnEvent(ctx, ev, &r.sout)
+	case core.EvResumed:
+		r.resumed(ctx, out)
 	}
 	r.drain(ctx, out)
 }
@@ -577,6 +608,21 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 		var rp Response
 		if DecodeResponse(frame, data, &rp) == nil && r.baseReply(ctx, &rp, buf, out) {
 			return
+		}
+	case KindLeaseRequest:
+		var lr LeaseRequest
+		if DecodeLeaseRequest(frame, data, &lr) == nil {
+			r.leaseRequest(ctx, ev.Peer, &lr, out)
+		}
+	case KindGrant:
+		var g Grant
+		if DecodeGrant(frame, data, &g) == nil {
+			r.grant(ctx, ev.Peer, &g, out)
+		}
+	case KindHeartbeat:
+		var hb Heartbeat
+		if DecodeHeartbeat(frame, data, &hb) == nil {
+			r.heartbeat(ctx, ev.Peer, &hb, out)
 		}
 	}
 	freeBuf(ctx, buf)
@@ -753,11 +799,11 @@ func (r *Replica) noteFailed(f failedVer) {
 	}
 }
 
-// read serves a client's read at the PG's primary, a read of a frozen version at any member, and at a member a base its primary fetches, the blocks at the version the primary's index names.
+// read serves a client's read at the PG's primary while it may serve reads, a read of a frozen version at any member, and at a member a base its primary fetches, the blocks at the version the primary's index names.
 func (r *Replica) read(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) {
-	_, e := r.table.entry(rd.PG.PG)
+	p, e := r.table.entry(rd.PG.PG)
 	i := r.lead(rd.PG.PG)
-	primary := i >= 0 && r.leads[i].active && rd.PG.Interval >= r.leads[i].since && rd.PG.Interval <= r.leads[i].interval
+	primary := i >= 0 && r.leads[i].active && rd.PG.Interval >= r.leads[i].since && rd.PG.Interval <= r.leads[i].interval && r.readable(ctx, p, e)
 	base := false
 	if e != nil && i < 0 && rd.HasAt && rd.PG.Interval == e.Interval {
 		d, ok := e.primary()
