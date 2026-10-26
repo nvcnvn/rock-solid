@@ -8,6 +8,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
 )
 
 func (h *harness) gated(c core.ChunkID, off uint32, data []byte, interval uint32) uint64 {
@@ -370,4 +371,22 @@ func TestSettleWaitsForTheChunksWritesToResolve(t *testing.T) {
 	if v := h.ok(w); v != MakeVersion(4, 1) {
 		t.Fatalf("answered %#x", v)
 	}
+}
+
+// The index rebuilds while 4.1 is durable and not committed. The rebuilt index maps 4.1, as a restart's would, so the store answers 4.1 in doubt, and a late commit maps nothing twice.
+func TestARebuildLeavesAPendingGatedWriteInDoubt(t *testing.T) {
+	h := newHarness(t, testConfig())
+	h.inv.Off(invReads)
+	h.sync(h.write(chunkC, 0, []byte{1}, 0))
+	w := h.gated(chunkC, 0, []byte{9}, 4)
+	h.settle()
+	h.s.indexBroken(&h.ctx, lsm.ErrCheck, &h.out)
+	h.s.pump(&h.ctx, &h.out)
+	h.take()
+	h.settle()
+	if r, ok := h.replies[w]; !ok || !errors.Is(r.Err, ErrInDoubt) || r.Version != MakeVersion(4, 1) {
+		t.Fatalf("4.1 answered %+v %v after the rebuild, want in doubt", r, ok)
+	}
+	h.commit(chunkC, MakeVersion(4, 1))
+	h.settle()
 }

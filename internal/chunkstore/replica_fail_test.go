@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -424,4 +425,32 @@ func TestALateAcknowledgmentKeepsTheBufferOfASendAgain(t *testing.T) {
 	ev.Msg.Len = uint16(copy(ev.Msg.Body[:], AppendResponse(nil, &Response{Kind: KindAck, ID: 1, Version: MakeVersion(1, 1)})))
 	c.s.Node(0).Feed(c.loops[0], ev)
 	c.settle()
+}
+
+// Disk 1's index rebuilds while 1.1 waits for cut-off disk 3. The rebuilt index maps 1.1, as a restart's would, so disk 1 refuses 1.1's client, refuses pg0's reads and asks for interval 2, to peer again as after a restart.
+func TestAnIndexRebuildEndsTheIntervalsItsDiskLeads(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 0, 1, 1)
+	c.s.Partition(0, 2, false)
+	w := c.write(pg0, ch, 0, []byte{9})
+	c.runFor(100_000)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.st.indexBroken(ctx, lsm.ErrCheck, &r.sout)
+		r.st.pump(ctx, &r.sout)
+		r.drain(ctx, out)
+	})
+	c.s.Heal(0, 2)
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusRefused {
+		t.Fatalf("1.1 answered %+v after the rebuild", rp)
+	}
+	if !slices.Contains(c.asks, PGFields{Epoch: 1, PG: pg0, Interval: 1}) {
+		t.Fatalf("asks %+v", c.asks)
+	}
+	rd := c.read(pg0, ch, 0, 1, 0)
+	c.until(rd)
+	if rp := c.reply(rd); rp.Status != StatusRefused {
+		t.Fatalf("a read after the rebuild answered %+v", rp)
+	}
 }

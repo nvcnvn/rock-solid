@@ -19,7 +19,7 @@ var (
 	ErrVersion = errors.New("chunkstore: chunk is not at the expected version")
 	// ErrNoVersion reports an atVer that is neither the chunk's committed version nor one a snapshot froze.
 	ErrNoVersion = errors.New("chunkstore: no such version to read")
-	// ErrInDoubt reports a write whose record was in flight when the disk failed; recovery decides whether it is durable.
+	// ErrInDoubt reports a write whose record was in flight when the disk failed, or one still pending when the index was rebuilt; recovery decides whether it holds.
 	ErrInDoubt = errors.New("chunkstore: write in doubt")
 	// ErrUnavailable reports an operation while the store recovers, rebuilds its index or after its log failed.
 	ErrUnavailable = errors.New("chunkstore: store unavailable")
@@ -101,19 +101,20 @@ type BaseFetch struct {
 	Version uint64
 }
 
-// Output is the actions and replies of calls into the store, reused by the caller: Bases asks for gated writes' bases from other members; Ordered hands over each gated write's or punch's merged blocks as it is ordered (a write's whole blocks, a punch's merged edge blocks, none for a punch without them) in a buffer the caller frees, and Logged answers it once its records are durable or have failed.
+// Output is the actions and replies of calls into the store, reused by the caller: Bases asks for gated writes' bases from other members; Ordered hands over each gated write's or punch's merged blocks as it is ordered (a write's whole blocks, a punch's merged edge blocks, none for a punch without them) in a buffer the caller frees, and Logged answers it once its records are durable or have failed; Rebuilt reports that the index started a rebuild, after which the store holds what a restart would.
 type Output struct {
 	Actions []core.Action
 	Replies []Reply
 	Ordered []Reply
 	Logged  []Reply
 	Bases   []BaseFetch
+	Rebuilt bool
 }
 
 // Reset empties the output for reuse.
 func (o *Output) Reset() {
 	clear(o.Replies)
-	o.Actions, o.Replies, o.Ordered, o.Logged, o.Bases = o.Actions[:0], o.Replies[:0], o.Ordered[:0], o.Logged[:0], o.Bases[:0]
+	o.Actions, o.Replies, o.Ordered, o.Logged, o.Bases, o.Rebuilt = o.Actions[:0], o.Replies[:0], o.Ordered[:0], o.Logged[:0], o.Bases[:0], false
 }
 
 type phase uint8
@@ -1917,7 +1918,7 @@ func (s *Store) indexBroken(ctx *core.Context, err error, out *Output) {
 		s.stop(ctx, err, out)
 		return
 	}
-	s.phase = draining
+	s.phase, out.Rebuilt = draining, true
 	s.failWaiting(ctx, ErrUnavailable, out)
 }
 
@@ -1934,9 +1935,42 @@ func (s *Store) drain(ctx *core.Context, out *Output) {
 	}
 	s.phase, s.rebuilt = recovering, true
 	s.resetCleaner(ctx)
+	s.abandonPending(ctx, out)
 	if err := s.recover(ctx, s.sb.Geometry.DiskBlocks(), disklog.ModeOpen); err != nil {
 		s.phase, s.err = failed, err
 	}
+}
+
+// abandonPending answers in doubt the writes and punches still pending once the log closed for a
+// rebuild, gated ones waiting for a commit and those behind them: replay maps every durable
+// record, as after a restart, so the store can neither map them again nor keep them unmapped.
+func (s *Store) abandonPending(ctx *core.Context, out *Output) {
+	for ci := range s.chunks {
+		cs := &s.chunks[ci]
+		if !cs.live {
+			continue
+		}
+		for _, oi := range cs.pending {
+			o := &s.ops[oi]
+			for j := range o.items {
+				if it := &o.items[j]; it.buf != core.NoBuf {
+					ctx.Pool.Free(it.buf)
+					it.buf = core.NoBuf
+				}
+			}
+			r := Reply{ID: o.req.ID, Err: ErrInDoubt}
+			if o.holdsVersion() {
+				r.Version = o.version
+			}
+			if !o.answered {
+				out.Replies = append(out.Replies, r)
+			}
+			s.freeOp(oi)
+		}
+		cs.pending = cs.pending[:0]
+		s.releaseChunk(int32(ci))
+	}
+	s.checkFlushes(out)
 }
 
 func (s *Store) fetchesOut() int { return len(s.fetches) - len(s.freeFetch) + s.cleanReadsOut() }

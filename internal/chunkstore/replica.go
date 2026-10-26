@@ -707,7 +707,7 @@ func (r *Replica) versionBySeq(seq core.RequestID) int {
 	return i
 }
 
-// drain handles what the store answered until it has nothing more to say: the versions it ordered, those durable on its disk and the requests it finished.
+// drain handles what the store answered until it has nothing more to say: the versions it ordered, those durable on its disk and the requests it finished. A rebuild of the store's index ends the interval of every PG this disk leads, as a restart would: the rebuilt index maps what the log holds, versions peering has yet to decide included.
 func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 	for o, l, p, b := 0, 0, 0, 0; o < len(r.sout.Ordered) || l < len(r.sout.Logged) || p < len(r.sout.Replies) || b < len(r.sout.Bases); {
 		for ; b < len(r.sout.Bases); b++ {
@@ -727,6 +727,11 @@ func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 		}
 		for ; p < len(r.sout.Replies); p++ {
 			r.finished(ctx, r.sout.Replies[p], out)
+		}
+	}
+	if r.sout.Rebuilt {
+		for i := range r.leads {
+			r.leads[i].active, r.leads[i].asking = false, true
 		}
 	}
 	out.Actions = append(out.Actions, r.sout.Actions...)
