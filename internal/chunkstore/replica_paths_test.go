@@ -20,10 +20,16 @@ func cloneTable(t Table) Table {
 	return t
 }
 
-// next is the cluster's table one epoch on, edited by edit.
+// next is the cluster's table one epoch on, recording the activations its primaries reported as the control plane does, edited by edit.
 func (c *rcluster) next(edit func(t *Table)) Table {
 	t := cloneTable(c.table)
 	t.Epoch++
+	for _, a := range c.activations {
+		if _, e := t.entry(a.PG); e != nil && a.Interval > e.Activated && a.Interval <= e.Interval {
+			e.Activated = a.Interval
+			e.Past = slices.DeleteFunc(e.Past, func(p PastInterval) bool { return p.Interval < a.Interval })
+		}
+	}
 	edit(&t)
 	return t
 }
@@ -31,16 +37,18 @@ func (c *rcluster) next(edit func(t *Table)) Table {
 // mark sets disk's mark in pg and starts the PG's next interval.
 func mark(t *Table, pg core.PGID, disk uint32, m Mark) {
 	_, e := t.entry(pg)
+	setInterval(t, pg, e.Interval+1)
 	for i := range e.Members {
 		if e.Members[i].Disk == disk {
 			e.Members[i].Mark = m
 		}
 	}
-	e.Interval++
 }
 
+// setInterval starts interval k of pg, listing the interval it ends among the past ones.
 func setInterval(t *Table, pg core.PGID, k uint32) {
 	_, e := t.entry(pg)
+	e.Past = append(e.Past, PastInterval{Interval: e.Interval, MinLive: t.pool(pg.Pool).MinLive, Members: slices.Clone(e.Members)})
 	e.Interval = k
 }
 
@@ -50,13 +58,16 @@ func TestThePrimaryFansOutWhileItLogs(t *testing.T) {
 	c.write(pg0, chunkIn(pg0, 4, 0), 0, []byte{1})
 	c.settle()
 	for _, acts := range c.passes[0][mark:] {
-		sends := slices.IndexFunc(acts, func(a core.Action) bool { return a.Kind == core.ActNetSend && !a.Reply })
+		update := func(a core.Action) bool {
+			return a.Kind == core.ActNetSend && !a.Reply && Kind(a.Msg.Body[1]) == KindReplicaWrite
+		}
+		sends := slices.IndexFunc(acts, update)
 		if sends < 0 {
 			continue
 		}
 		peers := 0
 		for _, a := range acts {
-			if a.Kind == core.ActNetSend && !a.Reply {
+			if update(a) {
 				peers |= 1 << a.Peer.Node
 			}
 		}
@@ -280,7 +291,7 @@ func TestVersionsFollowThePGsInterval(t *testing.T) {
 	}
 }
 
-// A member that moved to a newer interval refuses 1.2; it fails with 1.3, ordered after it, and neither is mapped.
+// A member that moved to a newer interval refuses 1.2; it fails with 1.3, ordered after it, and neither is mapped. A cut to the member, healed once both are ordered, has it refuse them only then.
 func TestAFailedVersionFailsTheLaterOnesOfItsChunk(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	ch := chunkIn(pg0, 4, 0)
@@ -288,8 +299,11 @@ func TestAFailedVersionFailsTheLaterOnesOfItsChunk(t *testing.T) {
 	c.settle()
 	newer := c.next(func(t *Table) { setInterval(t, pg0, 2) })
 	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetTable(ctx, newer, out) })
+	c.s.Partition(0, 2, false)
 	w2 := c.write(pg0, ch, 0, []byte{2})
 	w3 := c.write(pg0, ch, core.BlockSize, []byte{3})
+	c.runFor(20_000)
+	c.s.Heal(0, 2)
 	c.settle()
 	for _, w := range []core.RequestID{w2, w3} {
 		if rp := c.reply(w); rp.Status != StatusRefused || rp.Epoch != 2 || rp.Interval != 2 {
@@ -323,6 +337,7 @@ func TestAMemberLogsAVersionSentAgainOnce(t *testing.T) {
 		})
 		return id
 	}
+	mark := len(c.passes[1])
 	first, again := send(), send()
 	c.settle()
 	for _, id := range []core.RequestID{first, again} {
@@ -331,7 +346,7 @@ func TestAMemberLogsAVersionSentAgainOnce(t *testing.T) {
 		}
 	}
 	writes := 0
-	for _, acts := range c.passes[1] {
+	for _, acts := range c.passes[1][mark:] {
 		for _, a := range acts {
 			if a.Kind == core.ActDiskWrite && a.Len >= 2*core.BlockSize {
 				writes++

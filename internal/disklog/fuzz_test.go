@@ -52,6 +52,7 @@ func FuzzDecodeRecord(f *testing.F) {
 	f.Add(golden["record_header"])
 	f.Add(randomRecord(f, core.NewRand(6), rec.rec, 3).image)
 	f.Add(goldenSlotRecord(f).image)
+	f.Add(goldenPeeringRecord(f).image)
 	f.Fuzz(func(t *testing.T, img []byte) {
 		d, err := DecodeRecord(img, testPlace, math.MaxUint32, nil)
 		if err != nil {

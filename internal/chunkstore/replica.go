@@ -7,6 +7,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/lease"
 )
 
 // maxMembers is the widest PG a replica primary fans out to: rep3 with a leaving member.
@@ -18,23 +19,39 @@ const ResendTimer core.TimerID = 0x72736e64
 // ResendAfter is how long after a PeerLost the primary sends again: 10 ms.
 const ResendAfter = core.Tick(10_000)
 
+// RetryTimer is the timer on which a replica asks the control plane again for the table and the intervals no table has answered yet.
+const RetryTimer core.TimerID = 0x72747279
+
+// RetryAfter is how often a replica asks again: 1 s, a heartbeat.
+const RetryAfter = core.Tick(1_000_000)
+
+// LeaseTimer is the timer on which a replica asks its grantors for leases and heartbeats the holders of its grants.
+const LeaseTimer core.TimerID = 0x6c736574
+
 // ReplicaConfig is a disk's place in the cluster.
 type ReplicaConfig struct {
 	// Disk is the disk whose store the replica runs, by its ID in the placement table.
 	Disk uint32
+	// Seed seeds the source the replica draws its run IDs from; Start is when its loop started, from which the restart wait counts; Lease is the lease settings, lease.DefaultConfig when zero.
+	Seed  uint64
+	Start lease.Time
+	Lease lease.Config
+	// Restarted is set when the store was opened rather than formatted: an earlier run may have writes in flight, so the replica asks for a new interval of each PG it leads in its first table and peers in it before it serves.
+	Restarted bool
 }
 
-// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, and a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended. Each is asked once; the loop asks again until a table answers it.
+// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations, which the node's heartbeat reports. The replica asks again, and reports again, every RetryAfter until a table answers.
 type ReplicaOutput struct {
-	Actions []core.Action
-	Fetch   uint64
-	Whole   bool
-	Asks    []PGFields
+	Actions     []core.Action
+	Fetch       uint64
+	Whole       bool
+	Asks        []PGFields
+	Activations []PGFields
 }
 
 // Reset empties the output for reuse.
 func (o *ReplicaOutput) Reset() {
-	o.Actions, o.Fetch, o.Whole, o.Asks = o.Actions[:0], 0, false, o.Asks[:0]
+	o.Actions, o.Fetch, o.Whole, o.Asks, o.Activations = o.Actions[:0], 0, false, o.Asks[:0], o.Activations[:0]
 }
 
 func (o *ReplicaOutput) fetch(epoch uint64, whole bool) {
@@ -42,13 +59,49 @@ func (o *ReplicaOutput) fetch(epoch uint64, whole bool) {
 	o.Whole = o.Whole || whole
 }
 
-// lead is a PG this disk is primary of: its interval in the replica's table, the interval its term began in, whether it has peered in the interval, and the client writes it holds until it has.
+// fetch asks for a table at least as new as epoch, whole if whole, until the replica holds one.
+func (r *Replica) fetch(epoch uint64, whole bool, out *ReplicaOutput) {
+	r.want, r.wantWhole = max(r.want, epoch), r.wantWhole || whole
+	out.fetch(epoch, whole)
+}
+
+// retry asks again for what no table has answered: the table wanted and each lead's next interval; a stale firing asks nothing.
+func (r *Replica) retry(ctx *core.Context, out *ReplicaOutput) {
+	if r.retryAt == 0 || ctx.Now < r.retryAt {
+		return
+	}
+	r.retryAt = 0
+	if r.want != 0 {
+		out.fetch(r.want, r.wantWhole)
+	}
+	r.peerRetry(ctx, out)
+	for i := range r.leads {
+		if l := &r.leads[i]; l.asked {
+			out.Asks = append(out.Asks, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
+		}
+	}
+}
+
+// armRetry arms RetryTimer while a table or an interval is asked for.
+func (r *Replica) armRetry(ctx *core.Context, out *ReplicaOutput) {
+	if r.retryAt != 0 || r.want == 0 && !slices.ContainsFunc(r.leads, func(l lead) bool { return l.asked }) && !r.peering() {
+		return
+	}
+	r.retryAt = ctx.Now + RetryAfter
+	out.Actions = append(out.Actions, core.Action{Kind: core.ActSetTimer, Timer: RetryTimer, At: ctx.Now + RetryAfter})
+}
+
+// lead is a PG this disk is primary of: its interval in the replica's table, the interval its term began in, whether it has peered in the interval, its peering until it has, the decision of its last peering, and the client writes it holds until it has peered, or until it holds the versions peering kept for their chunk.
 type lead struct {
 	pg       core.PGID
 	interval uint32
 	since    uint32
 	active   bool
-	held     []heldMsg
+	// serving is set once the lead activated, and kept while it re-peers in a later interval that kept this disk as primary: no other node can have committed to the PG since.
+	serving bool
+	peer    *peering
+	kept    []keptChunk
+	held    []heldMsg
 	// asking is set once a chunk of the PG spent its counter or a version failed, which ends the interval: the primary orders nothing more in it and asks for the next once none of its versions is pending, setting asked. spent counts the held writes the store refused for a spent counter, which go ahead of those held since.
 	asking bool
 	asked  bool
@@ -112,6 +165,7 @@ type Replica struct {
 	st     *Store
 	table  Table
 	addrs  []core.NodeID
+	known  []bool
 	sout   Output
 	leads  []lead
 	reqs   []storeReq
@@ -126,7 +180,30 @@ type Replica struct {
 	nextID    uint64
 	frame     []byte
 	armed     bool
-	plant     replicaPlants
+	// want is the newest table epoch asked for and not yet held, whole if wantWhole; retryAt is when RetryTimer is armed for, 0 when it is not.
+	want      uint64
+	wantWhole bool
+	retryAt   core.Tick
+	// holder is the leases this disk holds as a primary, from the loops in grantors; grantor the grants it gives; leaseAt when LeaseTimer is armed for, 0 when it is not; beatAt when the next heartbeat to its holders is due.
+	holder   *lease.Holder
+	grantor  *lease.Grantor
+	lcfg     lease.Config
+	rng      *core.Rand
+	grantors []core.NodeID
+	holders  []core.NodeID
+	leaseAt  core.Tick
+	leaseID  uint64
+	beatAt   core.Tick
+	// answers is the peering requests this disk has yet to answer as a member, peerAt when PeerTimer is armed for, seen the table epoch each holder last reported, persists the missing lists its store persists; peerID numbers peering's requests and persists.
+	answers    []peerAsk
+	peerAt     core.Tick
+	seen       []seenEpoch
+	persists   []persistReq
+	peerID     uint64
+	peerDisks  []uint32
+	peerChunks []ChunkPeer
+	peerMsg    Peering
+	plant      replicaPlants
 	// disks is each disk's size and the live blocks it last reported, by disk ID; pools the pools'
 	// settings and outstanding grants; slots each pool's member slots on each disk in the table.
 	disks  []diskInfo
@@ -241,11 +318,19 @@ func compareSlots(a, b diskSlots) int {
 type replicaPlants struct {
 	// resendNewestFirst sends a member a lost connection's writes again newest first.
 	resendNewestFirst bool
+	// peerInOldInterval has a restarted primary peer in the interval it led before, asking for none; mergeWhileLacking merges a partial-block write on a chunk before the primary holds the version peering kept (sub-block spike M8).
+	peerInOldInterval bool
+	mergeWhileLacking bool
 }
 
-// NewReplica runs st, a serving store, as disk cfg.Disk.
+// NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.
 func NewReplica(cfg ReplicaConfig, st *Store) *Replica {
-	return &Replica{cfg: cfg, st: st}
+	lc := cfg.Lease
+	if lc == (lease.Config{}) {
+		lc = lease.DefaultConfig
+	}
+	rng := core.NewRand(cfg.Seed)
+	return &Replica{cfg: cfg, st: st, lcfg: lc, rng: rng, holder: lease.NewHolder(lc), grantor: lease.NewGrantor(lc, rng.Uint64(), cfg.Start)}
 }
 
 // Store is the replica's store.
@@ -258,9 +343,14 @@ func (r *Replica) Table() *Table { return &r.table }
 func (r *Replica) SetAddr(disk uint32, addr core.NodeID) {
 	if int(disk) >= len(r.addrs) {
 		r.addrs = append(r.addrs, make([]core.NodeID, int(disk)+1-len(r.addrs))...)
+		r.known = append(r.known, make([]bool, int(disk)+1-len(r.known))...)
 	}
-	r.addrs[disk] = addr
+	r.addrs[disk], r.known[disk] = addr, true
+	r.noteGrantors()
 }
+
+// reachable reports whether the membership record names the loop that owns disk.
+func (r *Replica) reachable(disk uint32) bool { return int(disk) < len(r.known) && r.known[disk] }
 
 // SetTable adopts t if it is newer than the table the replica holds.
 func (r *Replica) SetTable(ctx *core.Context, t Table, out *ReplicaOutput) {
@@ -276,7 +366,8 @@ func (r *Replica) ApplyDelta(ctx *core.Context, d *Delta, out *ReplicaOutput) {
 	}
 	t, err := r.table.Apply(d)
 	if err != nil {
-		out.fetch(d.Epoch, true)
+		r.fetch(d.Epoch, true, out)
+		r.armRetry(ctx, out)
 		return
 	}
 	r.adopt(ctx, t, out)
@@ -322,9 +413,13 @@ func comparePG(a, b core.PGID) int {
 	return cmp.Or(cmp.Compare(a.Pool, b.Pool), cmp.Compare(a.Index, b.Index))
 }
 
-// adopt takes t as the replica's table. A PG this disk leads in t keeps its term if no other primary led it in between, as the PG's listed past intervals show, and holds its client writes until it has peered in its new interval; a PG it no longer leads refuses the writes it held.
+// adopt takes t as the replica's table. In the first table after a restart, every PG this disk leads asks for a new interval. A PG this disk leads in t keeps its term if no other primary led it in between, as the PG's listed past intervals show, and holds its client writes until it has peered in its new interval; a PG it no longer leads refuses the writes it held.
 func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
+	first := r.table.Epoch == 0
 	r.table = t
+	if t.Epoch >= r.want {
+		r.want, r.wantWhole = 0, false
+	}
 	r.countSlots()
 	r.failed = slices.DeleteFunc(r.failed, func(f failedVer) bool {
 		_, e := r.table.entry(f.pg)
@@ -339,7 +434,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 				continue
 			}
 			pg := core.PGID{Pool: p.ID, Index: uint32(i)}
-			l := lead{pg: pg, interval: e.Interval, since: e.Interval}
+			l := lead{pg: pg, interval: e.Interval, since: e.Interval, asking: first && r.cfg.Restarted && !r.plant.peerInOldInterval}
 			if j := r.lead(pg); j >= 0 {
 				old := r.leads[j]
 				l.held = old.held
@@ -348,7 +443,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 				case old.interval == e.Interval:
 					l = old
 				case r.keptPrimary(e, old.interval):
-					l.since = old.since
+					l.since, l.serving, l.kept = old.since, old.serving, old.kept
 				}
 			}
 			kept = append(kept, l)
@@ -360,6 +455,8 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 		}
 	}
 	r.leads = kept
+	r.noteGrantors()
+	r.armLease(ctx, out)
 	r.dropWaiting(ctx, out)
 	r.demote(ctx, out)
 	parked := r.parked
@@ -419,16 +516,16 @@ func (r *Replica) keptPrimary(e *PGEntry, from uint32) bool {
 	return from < e.Interval
 }
 
-// Activate is peering's end: the PG this disk leads is now active in interval, and the client writes it held are ordered again, unless another primary led the PG since the interval they were held in. It returns ErrUnresolved, activating nothing, while a chunk of the PG has versions peering has not settled.
+// Activate is peering's end, which the replica reaches itself once every up member persisted its list: the PG this disk leads is now active in interval, and the client writes it held are ordered again, unless another primary led the PG since the interval they were held in. It returns ErrUnresolved, activating nothing, while a chunk of the PG has versions peering has not settled.
 func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out *ReplicaOutput) error {
 	i := r.lead(pg)
-	if i < 0 || r.leads[i].interval != interval {
+	if i < 0 || r.leads[i].interval != interval || r.leads[i].asking && !r.leads[i].active {
 		return nil
 	}
 	if r.unsettled = r.Unsettled(pg, r.unsettled[:0]); len(r.unsettled) > 0 {
 		return ErrUnresolved
 	}
-	r.leads[i].active = true
+	r.leads[i].active, r.leads[i].serving, r.leads[i].peer = true, true, nil
 	held := r.leads[i].held
 	r.leads[i].held = nil
 	for _, h := range held {
@@ -456,6 +553,25 @@ func (r *Replica) Unsettled(pg core.PGID, dst []core.ChunkID) []core.ChunkID {
 	return dst
 }
 
+// storeFailed refuses every client write held or not yet answered once the store has failed, which then answers nothing more: the PGs will peer on another primary, which decides whether their versions stay.
+func (r *Replica) storeFailed(ctx *core.Context, out *ReplicaOutput) {
+	for i := range r.leads {
+		held := r.leads[i].held
+		r.leads[i].held, r.leads[i].spent = nil, 0
+		for _, h := range held {
+			r.refuseHeld(ctx, h, out)
+		}
+	}
+	for i := len(r.vers) - 1; i >= 0; i-- {
+		if v := &r.vers[i]; !v.done {
+			v.done = true
+			r.takeReq(v.req)
+			r.reply(ctx, v.client, v.msgID, r.refusal(v.u.PG.PG), out)
+			r.release(ctx, i)
+		}
+	}
+}
+
 func (r *Replica) refuseHeld(ctx *core.Context, h heldMsg, out *ReplicaOutput) {
 	frame, data := Frame(ctx.Pool, &h.msg)
 	var u Update
@@ -479,9 +595,23 @@ func (r *Replica) OnEvent(ctx *core.Context, ev *core.Event, out *ReplicaOutput)
 			r.resend(out)
 			break
 		}
+		if ev.Timer == RetryTimer {
+			r.retry(ctx, out)
+			break
+		}
+		if ev.Timer == LeaseTimer {
+			r.leaseTick(ctx, out)
+			break
+		}
+		if ev.Timer == PeerTimer {
+			r.peerTick(ctx)
+			break
+		}
 		r.st.OnEvent(ctx, ev, &r.sout)
 	case core.EvDiskDone:
 		r.st.OnEvent(ctx, ev, &r.sout)
+	case core.EvResumed:
+		r.resumed(ctx, out)
 	}
 	r.drain(ctx, out)
 }
@@ -527,6 +657,34 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 	case KindReadReply:
 		var rp Response
 		if DecodeResponse(frame, data, &rp) == nil && r.baseReply(ctx, &rp, buf, out) {
+			return
+		}
+	case KindLeaseRequest:
+		var lr LeaseRequest
+		if DecodeLeaseRequest(frame, data, &lr) == nil {
+			r.leaseRequest(ctx, ev.Peer, &lr, out)
+		}
+	case KindGrant:
+		var g Grant
+		if DecodeGrant(frame, data, &g) == nil {
+			r.grant(ctx, ev.Peer, &g, out)
+		}
+	case KindHeartbeat:
+		var hb Heartbeat
+		if DecodeHeartbeat(frame, data, &hb) == nil {
+			r.heartbeat(ctx, ev.Peer, &hb, out)
+		}
+	case KindPeer, KindPeerReply, KindPersist, KindPersistAck:
+		p := &r.peerMsg
+		if DecodePeering(frame, data, p) != nil {
+			break
+		}
+		switch {
+		case kind == KindPeerReply:
+			r.peerReplied(ctx, ev.Peer, p, out)
+		case kind == KindPersistAck:
+			r.persistAck(ev.Peer, p, out)
+		case kind == KindPeer && r.peerAsked(ctx, ev, p, out), kind == KindPersist && r.persistAsked(ctx, ev, p, out):
 			return
 		}
 	}
@@ -592,7 +750,7 @@ func (r *Replica) refusal(pg core.PGID) Response {
 // park keeps a message tagged with a newer table than the replica holds until it has one at least as new as the sender's.
 func (r *Replica) park(ev *core.Event, epoch uint64, out *ReplicaOutput) {
 	r.parked = append(r.parked, parkedMsg{epoch: epoch, peer: ev.Peer, msg: ev.Msg})
-	out.fetch(epoch, false)
+	r.fetch(epoch, false, out)
 }
 
 // clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered.
@@ -604,13 +762,13 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	case e != nil && i < 0 && u.PG.Interval > e.Interval && u.PG.Epoch > r.table.Epoch:
 		r.park(ev, u.PG.Epoch, out)
 		return
-	case i < 0 || u.PG.Interval < r.leads[i].since || e.live() < int(p.MinLive):
+	case i < 0 || u.PG.Interval < r.leads[i].since || e.live() < int(p.MinLive) || r.st.Err() != nil:
 	case u.PG.Interval > r.leads[i].interval:
 		if u.PG.Epoch > r.table.Epoch {
 			r.park(ev, u.PG.Epoch, out)
 			return
 		}
-	case !r.leads[i].active || r.leads[i].asking:
+	case !r.leads[i].active || r.leads[i].asking || edgeBytes(u.Off, u.Len) > 0 && r.leads[i].lacks(u.Chunk) && !r.plant.mergeWhileLacking:
 		l := &r.leads[i]
 		l.held = append(l.held, heldMsg{peer: ev.Peer, msg: ev.Msg, hold: l.interval})
 		return
@@ -704,11 +862,11 @@ func (r *Replica) noteFailed(f failedVer) {
 	}
 }
 
-// read serves a client's read at the PG's primary, a read of a frozen version at any member, and at a member a base its primary fetches, the blocks at the version the primary's index names.
+// read serves a client's read at the PG's primary while it may serve reads, a read of a frozen version at any member, and at a member a base its primary fetches, the blocks at the version the primary's index names.
 func (r *Replica) read(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) {
-	_, e := r.table.entry(rd.PG.PG)
+	p, e := r.table.entry(rd.PG.PG)
 	i := r.lead(rd.PG.PG)
-	primary := i >= 0 && r.leads[i].active && rd.PG.Interval >= r.leads[i].since && rd.PG.Interval <= r.leads[i].interval
+	primary := i >= 0 && r.leads[i].serving && rd.PG.Interval >= r.leads[i].since && rd.PG.Interval <= r.leads[i].interval && r.readable(ctx, p, e)
 	base := false
 	if e != nil && i < 0 && rd.HasAt && rd.PG.Interval == e.Interval {
 		d, ok := e.primary()
@@ -717,6 +875,11 @@ func (r *Replica) read(ctx *core.Context, ev *core.Event, rd *Read, out *Replica
 	if e == nil || i >= 0 && !primary {
 		rp := r.refusal(rd.PG.PG)
 		rp.Kind = KindReadReply
+		r.answer(ctx, ev.Peer, rd.ID, &rp, core.NoBuf, out)
+		return
+	}
+	if primary && r.leads[i].isUnfound(rd.Chunk) {
+		rp := Response{Kind: KindReadReply, Status: StatusUnfound}
 		r.answer(ctx, ev.Peer, rd.ID, &rp, core.NoBuf, out)
 		return
 	}
@@ -756,6 +919,23 @@ func (r *Replica) versionOf(req uint64) int {
 
 // drain handles what the store answered until it has nothing more to say: the versions it ordered, those durable on its disk and the requests it finished. A rebuild of the store's index ends the interval of every PG this disk leads, as a restart would: the rebuilt index maps what the log holds, versions peering has yet to decide included.
 func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
+	r.drainStore(ctx, out)
+	r.peerWork(ctx, out)
+	for len(r.sout.Ordered)+len(r.sout.Logged)+len(r.sout.Replies)+len(r.sout.Bases) > 0 || r.sout.Rebuilt {
+		r.drainStore(ctx, out)
+		r.peerWork(ctx, out)
+	}
+	if r.st.Err() != nil {
+		r.storeFailed(ctx, out)
+	}
+	out.Actions = append(out.Actions, r.sout.Actions...)
+	r.sout.Actions = r.sout.Actions[:0]
+	r.ask(out)
+	r.armRetry(ctx, out)
+}
+
+// drainStore handles what the store has said so far, which it then forgets but for its actions.
+func (r *Replica) drainStore(ctx *core.Context, out *ReplicaOutput) {
 	for o, l, p, b := 0, 0, 0, 0; o < len(r.sout.Ordered) || l < len(r.sout.Logged) || p < len(r.sout.Replies) || b < len(r.sout.Bases); {
 		for ; b < len(r.sout.Bases); b++ {
 			r.nextID++
@@ -778,12 +958,12 @@ func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 	}
 	if r.sout.Rebuilt {
 		for i := range r.leads {
-			r.leads[i].active, r.leads[i].asking = false, true
+			r.leads[i].active, r.leads[i].serving, r.leads[i].asking, r.leads[i].peer = false, false, true, nil
 		}
 	}
-	out.Actions = append(out.Actions, r.sout.Actions...)
+	acts := r.sout.Actions
 	r.sout.Reset()
-	r.ask(out)
+	r.sout.Actions = acts
 }
 
 // ordered fans a version out to every up member of its interval but this disk, in parallel with the store logging it, unless the interval has ended since the client's write was taken or the PG is wider than maxMembers: then the version fails at once. A member a resend is due to gets it with the resend.
@@ -899,7 +1079,7 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 		r.tryCommit(ctx, i)
 	case rp.Status != StatusOK:
 		if rp.Status == StatusRefused && rp.Epoch > r.table.Epoch {
-			out.fetch(rp.Epoch, false)
+			r.fetch(rp.Epoch, false, out)
 		}
 		r.fail(ctx, i, *rp, out)
 	}
@@ -969,6 +1149,10 @@ func (r *Replica) dropWaiting(ctx *core.Context, out *ReplicaOutput) {
 
 // finished answers a request the store completed: a client's write or punch once its version is mapped or failed, a member's once durable, a read with its blocks.
 func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
+	if rp.ID&persistBit != 0 {
+		r.persisted(ctx, rp, out)
+		return
+	}
 	q, ok := r.takeReq(rp.ID)
 	if !ok {
 		return
@@ -1014,7 +1198,10 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		}
 	case reqRead:
 		resp := Response{Kind: KindReadReply, Version: rp.Version}
-		if rp.Err != nil {
+		switch {
+		case errors.Is(rp.Err, ErrMissing):
+			resp.Status, resp.Version = StatusMissing, 0
+		case rp.Err != nil:
 			ref := r.refusal(q.pg)
 			resp.Status, resp.Version, resp.Epoch, resp.Interval = StatusRefused, 0, ref.Epoch, ref.Interval
 		}
@@ -1119,6 +1306,15 @@ func (r *Replica) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Re
 			return ErrActive
 		}
 	}
+	if err := r.settle(ctx, c, keep); err != nil {
+		return err
+	}
+	r.drain(ctx, out)
+	return nil
+}
+
+// settle hands the store peering's decision on chunk c and marks the versions it keeps committed.
+func (r *Replica) settle(ctx *core.Context, c core.ChunkID, keep uint64) error {
 	if err := r.st.Settle(ctx, c, keep, &r.sout); err != nil {
 		return err
 	}
@@ -1127,7 +1323,6 @@ func (r *Replica) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Re
 			v.commit = true
 		}
 	}
-	r.drain(ctx, out)
 	return nil
 }
 

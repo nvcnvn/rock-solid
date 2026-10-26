@@ -242,24 +242,25 @@ types](#event-and-action-types), and this section is their only home.
 
 ## Record codec
 
-- Layout: a record is header blocks then data blocks. The header holds a 56-byte prelude, 33 bytes
-  per write/punch entry, 37 per freeze, 14 per blob entry, and a 4-byte CRC32C per data block, zero
-  padded to whole blocks. Data holds each write's blocks in entry order, then blob payloads packed
-  back to back.
+- Layout: a record is header blocks then data blocks. The header holds a 56-byte prelude, 34 bytes
+  per write/punch entry (its flags byte marks the last entry of its version), 37 per freeze, 33 per
+  missing-list entry, 17 per decision entry, 14 per blob entry, and a 4-byte CRC32C per data block,
+  zero padded to whole blocks. Data holds each write's blocks in entry order, then blob payloads
+  packed back to back.
 
   | Entries | Header bytes | Header blocks | Data blocks |
   | --- | --- | --- | --- |
-  | A 1-block write | 93 | 1 | 1 |
-  | A punch | 89 | 1 | 0 |
+  | A 1-block write | 94 | 1 | 1 |
+  | A punch | 90 | 1 | 0 |
   | A freeze | 93 | 1 | 0 |
   | An empty blob | 70 | 1 | 0 |
   | Blobs of 1 and 4,095 bytes | 88 | 1 | 1 |
   | A blob of 4,097 bytes | 78 | 1 | 2 |
-  | A 1,001-block write | 4,093 | 1 | 1,001 |
-  | A 1,002-block write | 4,097 | 2 | 1,002 |
-  | A 1,003-block write | 4,101 | 2 | 1,003 |
-  | A 1,004-block write | 4,105 | 2 | 1,004 |
-  | 200 one-block writes | 7,456 | 2 | 200 |
+  | A 1,001-block write | 4,094 | 1 | 1,001 |
+  | A 1,002-block write | 4,098 | 2 | 1,002 |
+  | A 1,003-block write | 4,102 | 2 | 1,003 |
+  | A 1,004-block write | 4,106 | 2 | 1,004 |
+  | 200 one-block writes | 7,656 | 2 | 200 |
 
   A 1-block write is a 2-block record. Payload offsets, for a blob of 5 bytes, a 2-block write, a
   punch, a blob of 7, a 1-block write and a freeze: 12,288 (after the 3 write blocks), 0, 12,293,
@@ -3883,8 +3884,9 @@ k.n is version (interval k, counter n).
 | `member_timeout` report, primary to authority | PG fields, member disk |
 | Direct probe, authority to a disk's owner loop | Disk ID |
 | Probe reply | Log ID, oldest unfinished I/O age, whether the log has failed |
-| Peering request | PG fields naming the interval to adopt |
-| Peering reply | The adopted interval; per chunk, the newest version; the member's missing list |
+| Peering request | PG fields naming the interval to adopt; the disk asked |
+| Peering reply | The disk that answers; the interval of the newest decision the member persisted for the PG, 0 for none; per chunk it logged or lists, the newest version held whole, the newest version logged, and the kept version it lists, if any |
+| Missing list | PG fields; the disk it is for; per chunk, the kept version the member must receive; answered by a persist acknowledgment naming the member's disk and the interval whose decision it persisted, or 0 with the member's table epoch and interval for a refusal |
 
 **Cases**
 
@@ -4504,9 +4506,9 @@ swaps**
   member refuse through a table that puts it in `maintenance`, rots a block of the primary's copy,
   half the time cutting off disk 2, which a base fetch asks first, fails the primary's disk in about
   one seed in ten, after which every write is refused, and starts the PG's next interval; the
-  primary's own asks start one too. Peering is stood in by `Settle` once the chunk's writes
-  resolve, half the time at its committed version and otherwise keeping a random prefix of the
-  pending versions whose clients wait, then `Activate`, which must accept. A primary crash, index
+  primary's own asks start one too. The primary peers in it, and at most one member crash or disk
+  failure lands while it does: each restart waits 4 s, and with no failure detection to mark a
+  failed disk down, a member's failed writes would pile up across its restarts. A primary crash, index
   rebuild or move joins the schedule under [Recovery per PG](#recovery-per-pg): each leaves versions
   peering may drop mapped on the next primary until recovery supersedes them. Invariants, checked after every step:
   a member acknowledges a version only once it maps every block of it; every client write or punch
@@ -4575,7 +4577,7 @@ single-clock column is what counting on `CLOCK_BOOTTIME` alone would give (clock
 | exact, exact | −22.6%, exact | 3.960 | 5.168 | Same |
 | −22.6%, exact | +22.6%, exact | 3.960 | 4.0005 | 1.85 s overlap |
 | −8.33% (chrony), exact | +8.33%, exact | 3.960 | 4.0005 | 0.63 s overlap |
-| exact, −1% | exact, +1% | 3.960 | 4.0005 | |
+| exact, −1% | exact, +1% | 3.899 (margin 2.52%: the bound sees the raw clocks 2% apart) | 4.0005 | |
 | −100 ppm, −100 ppm (no daemon) | +100 ppm, +100 ppm | 3.9604 | 4.0001 | |
 | −1%, −1% (no daemon), before the first bound | +1%, +1% | No lease taken | | |
 | −1%, −1%, first lease, from grants `rate_gap` apart, 100 µs round trips | +1%, +1% | By 3.931 (margin up to 2.72%) | 3.961 | |
@@ -4613,9 +4615,9 @@ and reports the pair; a margin of `max_margin` or more gives no lease. Times are
 | Grantor 1% slow | As above | g_b − g_a = 3,300,000 | 0.99 | 1%: the margin never drops below `lease_drift` |
 | Every grant in the first third took 50 ms, worst ends | 0, 50,000, G0 | 3,333,333, 3,333,433, G0 + 3,333,433 | 1.015259 | 2.026%: a false widening, in the safe direction |
 | One 50 ms grant among 100 µs ones in the first third | The shortest is chosen | | 1.000060 | 1% |
-| The pair started 6 s ago: thirds of the 6 s span, 100 µs, worst ends | 0, 100, G0 | 4,000,000, 4,000,100, G0 + 4,000,100 | 1.000025 | 1% |
+| The pair started 6 s ago: thirds of the 6 s span, 100 µs, worst ends | 0, 100, G0 | 4,000,000, 4,000,100, G0 + 4,000,100 | 1.000051 | 1% |
 | First grant of a window | 0, 100, G0 | | none | No lease from this grantor; a request is sent at r_a + 100,000 |
-| Second grant, sent `rate_gap` after the first arrived, 100 µs, worst ends | 0, 100, G0 | 100,100, 100,200, G0 + 100,200 | 1.000999 | 1% |
+| Second grant, sent `rate_gap` after the first arrived, 100 µs, worst ends | 0, 100, G0 | 100,100, 100,200, G0 + 100,200 | 1.002000 | 1% |
 | The same with 1 ms round trips | 0, 1,000, G0 | 101,000, 102,000, G0 + 102,000 | 1.020000 | 2.5%: the first lease ends 3.90 s after the ask |
 | A grant with a new run ID after a reboot, g = 1,200 | | | none | A new window starts and the old run's lease ends; no lease until its second grant |
 | Grantor raw about 50% fast | | g_b − g_a = 1.505 × (s_b − r_a) | 1.505 | 51%, past `max_margin`: no lease, reported |
@@ -4677,13 +4679,18 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
 - A node that starts at t = 100 s grants no vote and joins no peering before 104 s. The wait is a
   grantor's, so it lasts until both clocks show 4 s: with its `BOOTTIME` 1% fast, not before its raw
   clock shows 4 s too.
-- Open: whether the restart wait also delays a restarted primary's own peering, or only its grants
-  and its part in other primaries' peering. A primary restarting at t = 100 s peers in its new
-  interval at about 100 s under one reading and at 104 s under the other.
+- The restart wait also delays a restarted primary's own peering: its own disk answers its peering
+  like any member's, so a primary restarting at t = 100 s activates its new interval at about 104 s.
+  A member restarted 0.5 s before a new interval of its PG is published holds that interval's
+  activation back until its wait is over.
 - A fresh grant takes the same table check as a renewal: B holds PG 17 in interval 42, A asks
   afresh with 41's table, and B refuses it until A reports a table at least as new, so A
   gets no lease for PG 17. A planted variant that exempts fresh grants
   (`neg-fresh-grant-no-table-check`) fails "no PG serves reads from two primaries at once".
+- A primary asks a lease of each other up member's loop as the membership record names it when it
+  learns the loop, not only when it adopts a table: disk 1 adopts a table while it still places disk
+  3 at disk 2's loop, then learns disk 3's loop, and keeps serving reads
+  (`TestAPrimaryAsksAMemberLearnedAfterItsTableForALease`).
 - One grant covers every PG the pair shares and is renewed by the pair's heartbeat. With 2,048 PGs
   on 5 nodes, a pair sends one grant per heartbeat, not one per PG, and the count does not change
   when `pg_count` doubles.
@@ -4691,10 +4698,16 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
 **Leases and peering**
 
 - A grantor joins no peering of a new interval that moves the primary off the holder until its grant
-  expires on both clocks, or until the holder has adopted that interval (a planned move, no wait).
+  expires on both clocks, or until the holder has adopted that interval, which its next lease
+  request shows by reporting a table at least as new as the grantor's. Interval 2 moves PG 0's
+  primary from disk 1 to disk 2: if disk 1 adopts the table too, peering waits at most a heartbeat
+  (a planned move); if it does not, the grantors refuse its renewals and join peering once their
+  last grant to it ends, 3 to 4 s later.
 - A new interval that keeps the primary, such as a replica replaced or a counter bump, needs no
-  lease wait. The primary keeps serving reads of committed versions and holds writes until it has
-  re-peered.
+  lease wait. The primary keeps serving reads of committed versions, a chunk its last peering found
+  unfound still answered unfound, and holds writes until it has re-peered: interval 2 keeps disk 1
+  as primary and a member's list acknowledgments are lost, so it does not activate, yet it reads 1.1
+  (`TestAPrimaryThatKeepsLeadingServesReadsWhileItPeers`).
 - Peering across several intervals adds no wait: only the last activated interval's primary, or the
   primary of later intervals that kept it, can have served reads, and peering reaches a live member
   of each of those intervals.
@@ -4709,11 +4722,17 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
 | Intervals since 41 | Members peering must get to adopt k |
 | --- | --- |
 | 42 only, the usual case | One member live in 42 |
-| 42 (never activated), now 43 | One live in 42 and one live in 41 |
-| 42 had fewer than `min_live` live members | 42 skipped |
+| 42 (never activated), now 43 | One live in 42 and one live in 41 (`TestPeeringStopsEveryIntervalSinceTheLastActivated`) |
+| 42 had fewer than the `min_live` it ran under | 42 skipped |
 | 42 was short of `min_live` only by members in `maintenance` | 42 stopped and read like any interval that accepted writes |
 | No member of an interval to stop is reachable | The PG waits (down) until one returns or an operator declares its disks lost; it accepts no writes, and this is not an error |
 
+- A past interval is judged by the `min_live` it ran under, which the table keeps with its members:
+  interval 2 runs under `min_live` 1 with only disk 1 live and takes 2.1; interval 3 raises
+  `min_live` to 2 and moves the primary to disk 2. Peering waits for disk 1, crashed and then in its
+  restart wait, and keeps 2.1 (`TestPeeringJudgesAPastIntervalByItsOwnMinLive`); judged by the
+  pool's current value it activated without disk 1. Refill keeps such a member the same way
+  (`TestAwaitedMemberStays`).
 - Activation report lost. 42's primary activates and its heartbeat report is lost, then 43 starts.
   43's peering still reaches members of 41 and 42, since the last activated interval is still 41. A
   report for 42 that arrives after 43 was recorded does not lower it.
@@ -4734,32 +4753,75 @@ it on its missing list.
 | Unreachable | 41.8, and lists 41.7 from 42's peering, which activated but whose report is lost | Live in 42 only, holds 41.7 | Keep 41.7: 42's decision is the newest one a reached member persisted, and 41.8 is below it only in number |
 | Live in 41 only, lacks 41.8 | Not reached | Live in 42 only, lists 41.8 from 42's peering | Keep 41.8: deciding it by 41's members would drop what 42 kept |
 | Any | Any | Any; D, new in 43 and not live in 41, holds nothing | D does not affect the decision; recovery gives D the kept versions |
+| Unreachable | 41.8 | 41.7, and 41.8 in part | Drop 41.8; keep 41.7, unfound: C's 41.7 has 41.8's records on top, so no reached member can serve it, and both list it |
 
 - A disk formatted again or replaced comes back as a new disk, not as the member it was: on
   41.8 acknowledged by A, B and C, C's disk is formatted again and its node reports a new log ID.
   The authority gives it a new disk ID, keeps C's old disk ID down, and peering keeps 41.8 from B.
-  The planted variant that keeps C's old disk ID for the new log must drop 41.8 and fail "no
-  acknowledged version is ever dropped".
+  The planted variant that keeps C's old disk ID for the new log drops acknowledged versions in the
+  primary-change seeds (below): 97 of 500 seeds fail, the first, seed 0, on "no acknowledged version
+  is ever dropped".
+- A member answers only peering messages that name its own disk. Disk 3, which took 1.1, is
+  formatted again and comes back as disk 4 at the same loop while the table still lists disk 3 up
+  there; interval 2 moves PG 0's primary to disk 2, and peering waits for disk 3 rather than taking
+  disk 4's empty answer and dropping 1.1 (`TestADiskFormattedAgainAnswersNoPeeringForItsOldID`).
 - A second device reporting a log ID that is already up (a cloned drive) is refused, and the disk
   that reported it first keeps its ID.
 - Before the primary activates, each member persists its missing list: for each chunk it lacks or
-  holds a dropped version of, the kept version it must get. Trace check: no activation report before
-  every member's missing-list write has its `DiskDone`. Reads and removal of entries are under
-  [Recovery per PG](#recovery-per-pg).
+  holds a dropped version of, the kept version it must get. With one member's acknowledgments of
+  its list lost, the primary reports no activation and answers no held write until one arrives
+  (`TestNoActivationBeforeEveryMemberPersistedItsList`); the planted variant that waits only for the
+  primary's own list fails the primary-change seeds first at seed 41. Reads and removal of entries
+  are under [Recovery per PG](#recovery-per-pg).
 - A member's log holds a chunk's versions in order, so a kept version never follows a dropped one;
   the simulator checks this after every step.
-- A partial-block write to a chunk whose kept versions are not yet on the new primary waits. A
-  whole-block write to the same chunk goes ahead, and a partial write to another chunk goes ahead.
-- Sub-block spike seeds:
-  - M6 (a suffix dropped, 3,670 primary changes, 8 writes pipelined per client) and M9 (writes up to
-    3 blocks long): no seed of 500 differs from the oracle.
-  - M7 (any subset dropped) and M8 (merging before the kept versions are held) are planted bugs that
-    fail at least one seed of 500. The spike's model failed 500 and 458 seeds.
-- A restarted primary asks for a new interval of each PG it leads, peers in it, then serves. A
-  planted variant that peers in its old interval must fail "no two members hold different data under
-  one version" when a stale write from its previous run lands after peering.
-- Activation is reported on the next heartbeat. The authority records the last activated interval in
-  a later table that starts no interval, and trims the past intervals' member lists.
+- A partial-block write to a chunk whose kept versions are not yet on the new primary waits: once
+  it has settled the chunk, its index maps a version other than the kept one, lacking it or, after a
+  restart, mapping a dropped one, or its own store listed the chunk before the decision. Disk 3, down
+  in interval 1, leads interval 2 and lacks 1.1, which peering keeps from disk 2: a partial write to
+  the chunk waits, while a whole-block write to it and a partial write to another chunk go ahead
+  (`TestAPartialWriteWaitsForTheKeptVersion`). Disk 3, down in interval 2, misses 2.1 of block 0 and
+  lists it in interval 3, where a whole-block write to block 1 brings its copy to 3.1; leading
+  interval 4, which keeps 3.1, it still lists the chunk, and a partial write to block 0 waits rather
+  than merging on 1.1 (`TestAPartialWriteWaitsWhileThePrimaryListsTheChunk`; found by the
+  primary-change seeds). A primary that kept leading and dropped its own pending version, never
+  mapped, lists the chunk, since replay would map it, and still merges on it
+  (`TestAFailedVersionEndsTheInterval`).
+- A read of a chunk the primary's peering found unfound is answered unfound.
+- A primary whose store failed refuses the writes it holds and every one not yet answered, and takes
+  no more: its PGs peer on another primary, which decides whether their versions stay.
+- A version whose client the primary refused when it failed at a member can still be kept: a member
+  that logged it and refused it when it was sent again holds it. The replica primary's seeded fault
+  run checks that the primary maps exactly the versions it answered and those the next peering kept.
+- Sub-block spike seeds on replicas, the primary-change seeds
+  (`TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`, 500 seeds in `scripts/seeds.sh`): two
+  clients pipeline 8 sub-block or whole-block writes each to two chunks of PG 0 while a stand-in
+  authority, knowing disks by `DiskRecord` and computing every table with `Next`, records the
+  activations and asks the replicas report, marks the primary down and moves it to a member it picks,
+  marks replicas down and up, restarts the primary and formats a member's disk again. In half the
+  seeds the primary moves only to members that stayed live throughout (M6); in the rest a member
+  marked up again may lead though it missed writes. In a quarter of the seeds these changes also land
+  while the PG peers, at a tenth of the rate: at the full rate a primary restarts every ~40 steps and
+  the run spends its time taking new intervals. Every acknowledged version is kept, no two
+  members hold different data under one version, and every member that lists nothing maps the kept
+  writes applied in version order. M9's writes up to 3 blocks long are the replica primary's
+  byte-oracle seeds.
+- Planted variants fail the primary-change seeds (`TestPlantedPeeringBugsBreakTheOracle`), where the
+  spike's model failed 500 and 458 seeds of 500 for M7 and M8:
+
+| Planted bug | Seeds of 500 failing | First | Invariant |
+| --- | --- | --- | --- |
+| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest; `TestSettleMapsTheKeptVersionsAndDropsTheRest` fails at once) | 4 | 242 | A member listing nothing maps the kept writes applied in version order |
+| M8: a partial-block write merges before the primary holds the versions peering kept | 45 | 6 | The same |
+| A restarted primary peers in its old interval | 48 | 1 | No two members hold different data under one version (37 of the 48) |
+| A disk formatted again keeps its old disk ID | 97 | 0 | No acknowledged version is ever dropped (72 of the 97) |
+
+- A restarted primary asks for a new interval of each PG it leads, peers in it, then serves
+  (`TestARestartedPrimaryTakesANewIntervalBeforeItServes`); only a store opened at start, not one
+  formatted, asks.
+- Activation is reported on the next heartbeat, and on every heartbeat after until a table records
+  it. The authority records the last activated interval in a later table that starts no interval,
+  and trims the past intervals' member lists.
 - Before it activates, the new primary hands its store the decision on every chunk with versions
   still pending from an earlier interval (`Replica.Settle`): a primary that kept leading after a
   version failed at a member keeps or drops that version and the chunk's later ones by the keep
@@ -4771,10 +4833,11 @@ it on its missing list.
 - Open: peering's duration. It compares every chunk's newest version from every member, so it grows
   with the chunks a PG holds (open question "Peering's cost"). Measure it on 3 nodes with several TB
   each before setting a bound.
-- Open: the phase 1 trace rules that check peering before a write or read require a reply from every
-  member sent a peering message, but peering needs only one member of each interval it stops, and
-  none of an interval it skips, so it goes ahead without unreachable ones. Revisit them when phase 3
-  builds peering.
+- The phase 1 trace rules `peering-before-write` and `peering-before-read` require a reply from
+  every peer a loop asked, which replica peering does not meet: it asks every up member of the
+  interval and of each past interval it must stop, then decides once every up member of the interval
+  and one up member of each such past interval answered. They check no replica trace; the
+  primary-change seeds and the per-wait tests above check replica peering.
 
 ## Failure and fail-slow detection
 

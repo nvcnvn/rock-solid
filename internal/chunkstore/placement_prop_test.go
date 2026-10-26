@@ -274,7 +274,7 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 		}
 		h.liveSince[i] = liveSince
 		if recovers(e.Members) && !slices.ContainsFunc(h.recoverable[i], func(pi PastInterval) bool { return pi.Interval == e.Interval }) {
-			h.recoverable[i] = append(h.recoverable[i], PastInterval{e.Interval, e.Members})
+			h.recoverable[i] = append(h.recoverable[i], PastInterval{Interval: e.Interval, Members: e.Members})
 		}
 		for _, m := range b.Members {
 			if !slices.ContainsFunc(e.Members, func(o Member) bool { return o.Disk == m.Disk }) {

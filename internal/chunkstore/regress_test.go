@@ -164,7 +164,7 @@ func TestRefreezeAfterLostWrite(t *testing.T) {
 		a, c := recoveryChunks[0], recoveryChunks[1]
 		h.write(a, 0, fill(core.BlockSize, 1), 0)
 		v := h.sync(h.write(c, 0, fill(core.BlockSize, 0x11), 0))
-		if partedFreeze(h, a, c, k) != (Chunk{Version: v, Epoch: 1}) {
+		if partedFreeze(h, a, c, k) != (Chunk{Version: v, Epoch: 1, Whole: v}) {
 			continue
 		}
 		reached = true

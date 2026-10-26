@@ -25,6 +25,16 @@ func goldenRecord(t testing.TB) testRecord {
 	return encodeRecord(t, Record{Place: testPlace, LSN: 10, Durable: 9}, entries, payloads)
 }
 
+// goldenPeeringRecord is a record of a write that is its version's last entry, a missing-list
+// entry and a PG's decision marker.
+func goldenPeeringRecord(t testing.TB) testRecord {
+	t.Helper()
+	write := WriteEntry(1, testChunk, 5, 6, 1)
+	write.Last = true
+	entries := []Entry{write, MissingEntry(1, testChunk, 0x200000003, 4), DecisionEntry(1, 5, 8, 4)}
+	return encodeRecord(t, Record{Place: testPlace, LSN: 12, Durable: 11}, entries, [][]byte{bytes.Repeat([]byte{0xAB}, core.BlockSize), nil, nil})
+}
+
 // goldenCopyRecord is a record of two copy entries, as a cleaner pass writes it.
 func goldenCopyRecord(t testing.TB) testRecord {
 	t.Helper()
@@ -63,21 +73,21 @@ func TestLayoutExamples(t *testing.T) {
 		entries []Entry
 		want    Layout
 	}{
-		{"write entry", []Entry{write(1)}, Layout{56 + 33 + 4, 1, 1, 0}},
-		{"punch entry", []Entry{PunchEntry(1, testChunk, 1, 0, 1)}, Layout{56 + 33, 1, 0, 0}},
+		{"write entry", []Entry{write(1)}, Layout{56 + 34 + 4, 1, 1, 0}},
+		{"punch entry", []Entry{PunchEntry(1, testChunk, 1, 0, 1)}, Layout{56 + 34, 1, 0, 0}},
 		{"freeze entry", []Entry{FreezeEntry(1, testChunk, 1, 2)}, Layout{56 + 37, 1, 0, 0}},
 		{"empty blob", []Entry{blob(0)}, Layout{56 + 14, 1, 0, 0}},
 		{"blobs 1 and 4095", []Entry{blob(1), blob(4095)}, Layout{56 + 28 + 4, 1, 1, 0}},
 		{"blob 4097", []Entry{blob(4097)}, Layout{56 + 14 + 8, 1, 2, 0}},
-		{"write 1001", []Entry{write(1001)}, Layout{4093, 1, 1001, 0}},
-		{"write 1002", []Entry{write(1002)}, Layout{4097, 2, 1002, 0}},
-		{"write 1003", []Entry{write(1003)}, Layout{4101, 2, 1003, 0}},
-		{"write 1004", []Entry{write(1004)}, Layout{4105, 2, 1004, 0}},
-		{"200 writes", manyWrites, Layout{56 + 200*33 + 200*4, 2, 200, 0}},
-		{"slot write", []Entry{SlotEntry(1, testChunk, 1, 3, 2)}, Layout{56 + 39 + 1024*4, 2, 0, 1024}},
-		{"slot write and a write", []Entry{SlotEntry(1, testChunk, 1, 3, 2), write(1)}, Layout{56 + 39 + 33 + 1025*4, 2, 1, 1024}},
-		{"copy entry", []Entry{CopyEntry(1, testChunk, 1, 0, 1, 9)}, Layout{56 + 41 + 4, 1, 1, 0}},
-		{"253 one-block copies fill a 256-block record", copies(253), Layout{56 + 253*45, 3, 253, 0}},
+		{"write 1001", []Entry{write(1001)}, Layout{4094, 1, 1001, 0}},
+		{"write 1002", []Entry{write(1002)}, Layout{4098, 2, 1002, 0}},
+		{"write 1003", []Entry{write(1003)}, Layout{4102, 2, 1003, 0}},
+		{"write 1004", []Entry{write(1004)}, Layout{4106, 2, 1004, 0}},
+		{"200 writes", manyWrites, Layout{56 + 200*34 + 200*4, 2, 200, 0}},
+		{"slot write", []Entry{SlotEntry(1, testChunk, 1, 3, 2)}, Layout{56 + 40 + 1024*4, 2, 0, 1024}},
+		{"slot write and a write", []Entry{SlotEntry(1, testChunk, 1, 3, 2), write(1)}, Layout{56 + 40 + 34 + 1025*4, 2, 1, 1024}},
+		{"copy entry", []Entry{CopyEntry(1, testChunk, 1, 0, 1, 9)}, Layout{56 + 42 + 4, 1, 1, 0}},
+		{"253 one-block copies fill a 256-block record", copies(253), Layout{56 + 253*46, 3, 253, 0}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -154,7 +164,7 @@ func TestRecordRoundTrip(t *testing.T) {
 	r := core.NewRand(11)
 	t.Run("golden", func(t *testing.T) {
 		d := decodeExact(t, goldenRecord(t))
-		if d.Layout != (Layout{56 + 33 + 33 + 14 + 8, 1, 2, 0}) {
+		if d.Layout != (Layout{56 + 34 + 34 + 14 + 8, 1, 2, 0}) {
 			t.Fatalf("layout %+v", d.Layout)
 		}
 		if d.DataCRC(0) != core.CRC32C(d.Data[:core.BlockSize]) || d.Payload(1) != nil {
@@ -163,7 +173,7 @@ func TestRecordRoundTrip(t *testing.T) {
 	})
 	t.Run("golden copies", func(t *testing.T) {
 		d := decodeExact(t, goldenCopyRecord(t))
-		if d.Layout != (Layout{56 + 2*41 + 3*4, 1, 3, 0}) || d.Entries[1].Source != 0x5678 {
+		if d.Layout != (Layout{56 + 2*42 + 3*4, 1, 3, 0}) || d.Entries[1].Source != 0x5678 {
 			t.Fatalf("layout %+v, entries %+v", d.Layout, d.Entries)
 		}
 	})
@@ -279,6 +289,44 @@ func TestRecordCorruptByte(t *testing.T) {
 	decodeExact(t, tr)
 }
 
+// A write's flags byte holds only its last-entry flag, a copy's none; a missing-list entry and a
+// decision marker need an interval, and a marker a PG among a power of two of them.
+func TestPeeringEntryErrors(t *testing.T) {
+	tr := goldenPeeringRecord(t)
+	d := decodeExact(t, tr)
+	if !d.Entries[0].Last || d.Entries[1] != MissingEntry(1, testChunk, 0x200000003, 4) || d.Entries[2] != DecisionEntry(1, 5, 8, 4) {
+		t.Fatalf("decoded %+v", d.Entries)
+	}
+	missing, decision := preludeSize+writeEntrySize, preludeSize+writeEntrySize+missingEntrySize
+	hdr := func(b []byte) []byte { return b[:core.BlockSize] }
+	for name, mod := range map[string]func(b []byte){
+		"unknown flag":        func(b []byte) { b[preludeSize+33] = 2 },
+		"missing interval 0":  func(b []byte) { clear(b[missing+29 : missing+33]) },
+		"decision interval 0": func(b []byte) { clear(b[decision+13 : decision+17]) },
+		"decision 0 PGs":      func(b []byte) { clear(b[decision+9 : decision+13]) },
+		"decision 6 PGs":      func(b []byte) { b[decision+9] = 6 },
+		"decision PG 8 of 8":  func(b []byte) { b[decision+5] = 8 },
+	} {
+		b := bytes.Clone(tr.image)
+		mod(b)
+		fixCRC(hdr(b), recCRC)
+		_, err := DecodeRecord(b, testPlace, manyLeft, nil)
+		wantErr(t, name, err, ErrMalformed)
+	}
+	flagged := CopyEntry(1, testChunk, 1, 0, 1, 9)
+	flagged.Last = true
+	for _, e := range []Entry{flagged, MissingEntry(1, testChunk, 1, 0), DecisionEntry(1, 0, 3, 1), DecisionEntry(1, 2, 2, 1), DecisionEntry(1, 0, 1, 0)} {
+		_, err := LayoutOf([]Entry{e})
+		wantErr(t, "layout", err, ErrMalformed)
+	}
+	copies := goldenCopyRecord(t)
+	b := bytes.Clone(copies.image)
+	b[preludeSize+33] = lastFlag
+	fixCRC(hdr(b), recCRC)
+	_, err := DecodeRecord(b, testPlace, manyLeft, nil)
+	wantErr(t, "flagged copy", err, ErrMalformed)
+}
+
 func TestRecordErrors(t *testing.T) {
 	tr := goldenRecord(t)
 	hdr := func(b []byte) []byte { return b[:core.BlockSize] }
@@ -306,7 +354,7 @@ func TestRecordErrors(t *testing.T) {
 		{"entry count 0", func(b []byte) { b[recEntries] = 0; fixCRC(hdr(b), recCRC) }, ErrMalformed},
 		{"header pad", func(b []byte) { b[tr.layout.HeaderBytes] = 1; fixCRC(hdr(b), recCRC) }, ErrMalformed},
 		{"write count 0", func(b []byte) { b[preludeSize+31] = 0; fixCRC(hdr(b), recCRC) }, ErrBadExtent},
-		{"punch past chunk", func(b []byte) { b[preludeSize+33+29] = 1; fixCRC(hdr(b), recCRC) }, ErrBadExtent},
+		{"punch past chunk", func(b []byte) { b[preludeSize+34+29] = 1; fixCRC(hdr(b), recCRC) }, ErrBadExtent},
 		{"log id", func(b []byte) { b[recLogID] ^= 1; fixCRC(hdr(b), recCRC) }, ErrMismatch},
 		{"segment seq", func(b []byte) { b[recSeq] = 10; fixCRC(hdr(b), recCRC) }, ErrMismatch},
 		{"offset", func(b []byte) { b[recOffset] = 2; fixCRC(hdr(b), recCRC) }, ErrMismatch},
@@ -349,8 +397,8 @@ func TestRecordErrors(t *testing.T) {
 	})
 	t.Run("entry sizes", func(t *testing.T) {
 		h := tr.image
-		if h[preludeSize] != byte(EntryWrite) || h[preludeSize+33] != byte(EntryPunch) || h[preludeSize+66] != byte(EntryBlob) {
-			t.Fatal("entry tags not at 56, 89 and 122")
+		if h[preludeSize] != byte(EntryWrite) || h[preludeSize+34] != byte(EntryPunch) || h[preludeSize+68] != byte(EntryBlob) {
+			t.Fatal("entry tags not at 56, 90 and 124")
 		}
 		if binary.LittleEndian.Uint16(h[preludeSize+29:]) != 6 || binary.LittleEndian.Uint16(h[preludeSize+31:]) != 1 {
 			t.Fatal("write extent not at the end of the entry")
@@ -360,11 +408,11 @@ func TestRecordErrors(t *testing.T) {
 
 func TestSlotRecord(t *testing.T) {
 	tr := goldenSlotRecord(t)
-	if tr.layout != (Layout{56 + 39 + 33 + 1025*4, 2, 1, 1024}) || len(tr.image) != 3*core.BlockSize {
+	if tr.layout != (Layout{56 + 40 + 34 + 1025*4, 2, 1, 1024}) || len(tr.image) != 3*core.BlockSize {
 		t.Fatalf("layout %+v, image of %d bytes", tr.layout, len(tr.image))
 	}
 	h := tr.image
-	if h[preludeSize] != byte(EntrySlot) || binary.LittleEndian.Uint32(h[preludeSize+33:]) != 3 || binary.LittleEndian.Uint16(h[preludeSize+37:]) != 2 || h[preludeSize+39] != byte(EntryWrite) {
+	if h[preludeSize] != byte(EntrySlot) || binary.LittleEndian.Uint32(h[preludeSize+34:]) != 3 || binary.LittleEndian.Uint16(h[preludeSize+38:]) != 2 || h[preludeSize+40] != byte(EntryWrite) {
 		t.Fatal("the slot's segment and index do not follow the write's fields")
 	}
 	d := decodeExact(t, tr)
@@ -403,8 +451,8 @@ func TestSlotRecord(t *testing.T) {
 	}{
 		"not the whole chunk": {func(b []byte) { b[preludeSize+31] = 1; fix(b) }, ErrBadExtent},
 		"from block 1":        {func(b []byte) { b[preludeSize+29] = 1; fix(b) }, ErrBadExtent},
-		"segment 0":           {func(b []byte) { clear(b[preludeSize+33 : preludeSize+37]); fix(b) }, ErrMalformed},
-		"a slot checksum":     {func(b []byte) { b[preludeSize+39+33+4+100] ^= 1 }, ErrBadChecksum},
+		"segment 0":           {func(b []byte) { clear(b[preludeSize+34 : preludeSize+38]); fix(b) }, ErrMalformed},
+		"a slot checksum":     {func(b []byte) { b[preludeSize+40+34+4+100] ^= 1 }, ErrBadChecksum},
 	} {
 		b := bytes.Clone(tr.image)
 		c.mod(b)

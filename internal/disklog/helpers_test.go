@@ -91,11 +91,17 @@ func randomRecord(t testing.TB, r *core.Rand, rec Record, maxDataBlocks uint32) 
 		version := r.Uint64()
 		var e Entry
 		var payload []byte
-		switch r.Below(5) {
+		switch r.Below(7) {
 		case 0:
 			count := uint16(r.Range(1, 3))
 			e = WriteEntry(pool, chunk, version, uint16(r.Below(uint64(core.BlocksPerChunk-count)+1)), count)
+			e.Last = r.Below(2) == 0
 			payload = randomBytes(r, int(count)*core.BlockSize)
+		case 5:
+			e = MissingEntry(pool, chunk, version, uint32(r.Range(1, 1<<32)))
+		case 6:
+			shift := r.Below(32)
+			e = DecisionEntry(pool, uint32(r.Below(1<<shift)), 1<<shift, uint32(r.Range(1, 1<<32)))
 		case 4:
 			count := uint16(r.Range(1, 3))
 			e = CopyEntry(pool, chunk, version, uint16(r.Below(uint64(core.BlocksPerChunk-count)+1)), count, core.LBA(r.Range(1, 1<<40)))
@@ -103,6 +109,7 @@ func randomRecord(t testing.TB, r *core.Rand, rec Record, maxDataBlocks uint32) 
 		case 1:
 			count := uint16(r.Range(1, 512))
 			e = PunchEntry(pool, chunk, version, uint16(r.Below(uint64(core.BlocksPerChunk-count)+1)), count)
+			e.Last = r.Below(2) == 0
 		case 2:
 			e = FreezeEntry(pool, chunk, version, r.Uint64())
 		case 3:

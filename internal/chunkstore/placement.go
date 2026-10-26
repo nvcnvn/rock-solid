@@ -32,9 +32,10 @@ type Member struct {
 	Leaving bool
 }
 
-// PastInterval is an interval of a PG since its last activated one, with that interval's members.
+// PastInterval is an interval of a PG since its last activated one, with that interval's members and the min_live it ran under.
 type PastInterval struct {
 	Interval uint32
+	MinLive  uint8
 	Members  []Member
 }
 
@@ -114,6 +115,7 @@ func Next(prev *Table, in *Inputs) (Table, int) {
 // placer is one pool's computation: its disks by ascending ID with their targets and member counts.
 type placer struct {
 	pool    Pool
+	ran     uint8
 	now     core.Tick
 	disks   []Disk
 	target  []float64
@@ -141,7 +143,11 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 	}
 	settings := old != nil && (int(old.Replicas) != p.Replicas || int(old.MinLive) != p.MinLive)
 
-	pl := &placer{pool: p, now: all.Now, disks: slices.Clone(in.Disks), base: base, entries: make([]PGEntry, n)}
+	ran := uint8(p.MinLive)
+	if old != nil {
+		ran = old.MinLive
+	}
+	pl := &placer{pool: p, ran: ran, now: all.Now, disks: slices.Clone(in.Disks), base: base, entries: make([]PGEntry, n)}
 	slices.SortFunc(pl.disks, func(a, b Disk) int { return cmp.Compare(a.ID, b.ID) })
 	pl.target = p.targets(pl.disks, all.Now)
 	pl.load = make([]int, len(pl.disks))
@@ -207,7 +213,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 			continue
 		}
 		if b.Interval > 0 {
-			e.Past = append(e.Past, PastInterval{Interval: b.Interval, Members: b.Members})
+			e.Past = append(e.Past, PastInterval{Interval: b.Interval, MinLive: ran, Members: b.Members})
 		}
 		e.Interval, e.Recovered = b.Interval+1, false
 	}
@@ -407,13 +413,13 @@ func (pl *placer) missing(e, base *PGEntry, j int) bool {
 	if down < RefillAfter && (down < DegradedRefillAfter || live(e.Members) >= pl.pool.MinLive) {
 		return false
 	}
-	return !pl.awaited(m.Disk, e.Past) && !pl.awaited(m.Disk, []PastInterval{{base.Interval, base.Members}})
+	return !pl.awaited(m.Disk, e.Past) && !pl.awaited(m.Disk, []PastInterval{{base.Interval, pl.ran, base.Members}})
 }
 
 // awaited reports whether disk was the only live member of an interval that accepted writes, among intervals, so peering waits for it.
 func (pl *placer) awaited(disk uint32, intervals []PastInterval) bool {
 	for _, pi := range intervals {
-		if pl.pool.MinLive <= 1 && live(pi.Members) == 1 && slices.ContainsFunc(pi.Members, func(m Member) bool { return m.Disk == disk && m.Mark == MarkUp }) {
+		if pi.MinLive <= 1 && live(pi.Members) == 1 && slices.ContainsFunc(pi.Members, func(m Member) bool { return m.Disk == disk && m.Mark == MarkUp }) {
 			return true
 		}
 	}

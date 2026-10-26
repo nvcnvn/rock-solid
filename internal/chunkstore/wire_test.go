@@ -63,10 +63,15 @@ func wireCases() []wireCase {
 		{"member_timeout", &MemberTimeout{ID: 10, PG: wirePG, Disk: 3}, 0},
 		{"probe", &Probe{ID: 11, Disk: 3}, 0},
 		{"probe_reply", &ProbeReply{ID: 11, Log: 0x0123456789abcdef, Oldest: 1_500_000, Failed: true}, 0},
-		{"peer", &Peering{Kind: KindPeer, ID: 12, PG: wirePG}, 0},
-		{"peer_reply", &Peering{Kind: KindPeerReply, ID: 12, PG: wirePG,
-			Newest:  []ChunkVersion{{Chunk: wireChunk, Version: v}, {Chunk: core.ChunkID{Volume: 2, Inode: 3, Index: 5}, Version: MakeVersion(40, 1)}},
-			Missing: []ChunkVersion{{Chunk: wireChunk, Version: v}}}, 0},
+		{"peer", &Peering{Kind: KindPeer, ID: 12, PG: wirePG, Disk: 3}, 0},
+		{"peer_reply", &Peering{Kind: KindPeerReply, ID: 12, PG: wirePG, Disk: 3, Decided: 40, Chunks: []ChunkPeer{
+			{Chunk: wireChunk, Whole: MakeVersion(40, 1), Logged: v, Listed: true, Kept: MakeVersion(40, 1)},
+			{Chunk: core.ChunkID{Volume: 2, Inode: 3, Index: 5}, Whole: v, Logged: v}}}, 0},
+		{"peer_reply_empty", &Peering{Kind: KindPeerReply, ID: 12, PG: wirePG, Disk: 3}, 0},
+		{"persist", &Peering{Kind: KindPersist, ID: 13, PG: wirePG, Disk: 3,
+			Missing: []ChunkVersion{{Chunk: wireChunk, Version: v}, {Chunk: core.ChunkID{Volume: 2, Inode: 3, Index: 5}}}}, 0},
+		{"persist_ack", &Peering{Kind: KindPersistAck, ID: 13, PG: wirePG, Disk: 3, Decided: 41}, 0},
+		{"persist_ack_refused", &Peering{Kind: KindPersistAck, ID: 13, PG: PGFields{Epoch: 80, PG: wirePG.PG, Interval: 42}, Disk: 3}, 0},
 	}
 }
 
@@ -139,7 +144,7 @@ func decodeMsg(b []byte, data int) (any, error) {
 	case KindProbeReply:
 		var m ProbeReply
 		return &m, DecodeProbeReply(b, data, &m)
-	case KindPeer, KindPeerReply:
+	case KindPeer, KindPeerReply, KindPersist, KindPersistAck:
 		var m Peering
 		return &m, DecodePeering(b, data, &m)
 	}
@@ -350,7 +355,10 @@ func TestWireRejectsVersions(t *testing.T) {
 		mustMalformed(t, "expect_ver", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1, HasExpect: true, Expect: v}), core.BlockSize)
 		mustMalformed(t, "at_ver", AppendRead(nil, &Read{PG: wirePG, Len: 1, HasAt: true, At: v}), 0)
 		mustMalformed(t, "reply version", AppendResponse(nil, &Response{Kind: KindAck, Version: v}), 0)
-		mustMalformed(t, "peering entry", AppendPeering(nil, &Peering{Kind: KindPeerReply, PG: wirePG, Missing: []ChunkVersion{{Version: v}}}), 0)
+		mustMalformed(t, "missing-list entry", AppendPeering(nil, &Peering{Kind: KindPersist, PG: wirePG, Disk: 3, Missing: []ChunkVersion{{Version: v}}}), 0)
+		for _, c := range []ChunkPeer{{Whole: v}, {Logged: v}, {Listed: true, Kept: v}} {
+			mustMalformed(t, "peering chunk", AppendPeering(nil, &Peering{Kind: KindPeerReply, PG: wirePG, Disk: 3, Chunks: []ChunkPeer{c}}), 0)
+		}
 	}
 	mustMalformed(t, "replica punch at version 0", AppendUpdate(nil, &Update{Kind: KindReplicaPunch, PG: wirePG, Len: 1}), 0)
 	mustMalformed(t, "client write with a version", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1, Version: 1<<32 | 1}), core.BlockSize)
@@ -364,7 +372,7 @@ func TestWireRejectsIntervalZero(t *testing.T) {
 		"update":         AppendUpdate(nil, &Update{Kind: KindPunch, PG: pg, Len: 1}),
 		"read":           AppendRead(nil, &Read{PG: pg, Len: 1}),
 		"member timeout": AppendMemberTimeout(nil, &MemberTimeout{PG: pg}),
-		"peering":        AppendPeering(nil, &Peering{Kind: KindPeer, PG: pg}),
+		"peering":        AppendPeering(nil, &Peering{Kind: KindPeer, PG: pg, Disk: 3}),
 		"activation":     AppendReport(nil, &Report{Activations: []PGFields{pg}}),
 		"recovery":       AppendReport(nil, &Report{Recovered: []PGFields{pg}}),
 		"refusal":        AppendResponse(nil, &Response{Kind: KindReply, Status: StatusRefused, Epoch: 80}),
@@ -384,7 +392,21 @@ func TestWireRejectsBadFields(t *testing.T) {
 	mustMalformed(t, "a purger's shard on a write", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1, Shard: 1}), core.BlockSize)
 	mustMalformed(t, "a purger's term on a member write", AppendUpdate(nil, &Update{Kind: KindReplicaWrite, PG: wirePG, Len: 1, Version: 1<<32 | 1, Term: 1}), core.BlockSize)
 	mustMalformed(t, "a grant neither granted nor refused", AppendGrant(nil, &Grant{Status: StatusNoSpace}), 0)
-	mustMalformed(t, "peering request with lists", AppendPeering(nil, &Peering{Kind: KindPeer, PG: wirePG, Newest: []ChunkVersion{{}}}), 0)
+	for what, p := range map[string]*Peering{
+		"peering request for disk 0":         {Kind: KindPeer, PG: wirePG},
+		"peering request with chunks":        {Kind: KindPeer, PG: wirePG, Disk: 3, Chunks: []ChunkPeer{{}}},
+		"peering request with a decision":    {Kind: KindPeer, PG: wirePG, Disk: 3, Decided: 1},
+		"peering request with a list":        {Kind: KindPeer, PG: wirePG, Disk: 3, Missing: []ChunkVersion{{}}},
+		"peering reply from disk 0":          {Kind: KindPeerReply, PG: wirePG},
+		"peering reply with a list":          {Kind: KindPeerReply, PG: wirePG, Disk: 3, Missing: []ChunkVersion{{}}},
+		"missing list with chunks":           {Kind: KindPersist, PG: wirePG, Disk: 3, Chunks: []ChunkPeer{{}}},
+		"missing list with a decision":       {Kind: KindPersist, PG: wirePG, Disk: 3, Decided: 1},
+		"persist ack with chunks":            {Kind: KindPersistAck, PG: wirePG, Disk: 3, Decided: 1, Chunks: []ChunkPeer{{}}},
+		"persist ack with a list":            {Kind: KindPersistAck, PG: wirePG, Disk: 3, Decided: 1, Missing: []ChunkVersion{{}}},
+		"chunk unlisted with a kept version": {Kind: KindPeerReply, PG: wirePG, Disk: 3, Chunks: []ChunkPeer{{Kept: 1<<32 | 1}}},
+	} {
+		mustMalformed(t, what, AppendPeering(nil, p), 0)
+	}
 	b := AppendProbeReply(nil, &ProbeReply{})
 	b[len(b)-1] = 2
 	mustMalformed(t, "a flag of 2", b, 0)

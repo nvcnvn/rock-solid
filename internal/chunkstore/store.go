@@ -31,8 +31,10 @@ var (
 	ErrFenced = errors.New("chunkstore: write from an older incarnation of its session")
 	// ErrDropped reports a gated write or punch that Settle dropped, or one Cancel dropped before it was ordered.
 	ErrDropped = errors.New("chunkstore: write dropped")
-	// ErrUnresolved reports a Settle of a chunk with a write or punch still waiting to be ordered or with records not yet durable or failed.
+	// ErrUnresolved reports a Settle of a chunk with a write or punch still waiting to be ordered or with records not yet durable or failed, or a PeerState of a PG with such a chunk or a missing list still being persisted.
 	ErrUnresolved = errors.New("chunkstore: chunk has writes not yet resolved")
+	// ErrMissing reports a read of a chunk on the missing list, whose kept version the disk may lack.
+	ErrMissing = errors.New("chunkstore: chunk on the missing list")
 )
 
 const (
@@ -132,6 +134,7 @@ const (
 	opWrite opKind = iota + 1
 	opPunch
 	opRead
+	opPersist
 )
 
 type itemState uint8
@@ -234,6 +237,8 @@ type loadingRun struct {
 }
 
 type plants struct {
+	// settleSubset has Settle drop the first gated version below the kept one, as a peering that drops any subset of pending versions rather than a suffix would (sub-block spike M7).
+	settleSubset bool
 	// replayCopyAsWrite replays a copy entry as a write of its blocks, mapping them whether or not a map still stores them at the source.
 	replayCopyAsWrite bool
 	mergeCommitted    bool
@@ -304,9 +309,11 @@ type Store struct {
 	chunkOf    map[core.ChunkID]int32
 	sent       []sentItem
 	sentHead   int
-	fetches    []fetch
-	freeFetch  []int32
-	flushes    []flushWait
+	// persists is the ops persisting missing lists, until their records are durable or failed.
+	persists  []int32
+	fetches   []fetch
+	freeFetch []int32
+	flushes   []flushWait
 
 	checkpointing bool
 	piece         disklog.Ticket
@@ -322,6 +329,7 @@ type Store struct {
 	freed   []core.LBA
 
 	apply   disklog.Event
+	marks   []disklog.Entry
 	entry   [1]disklog.Entry
 	payload [1]uint64
 	changes []LiveChange
@@ -342,7 +350,7 @@ type Store struct {
 }
 
 func newStore(cfg Config) *Store {
-	if cfg.Pool == RecordPool {
+	if reserved(cfg.Pool) {
 		panic("chunkstore: a store of the index's reserved pool")
 	}
 	return &Store{cfg: cfg, interval: 1, chunkOf: map[core.ChunkID]int32{}, sessions: map[uint64]uint64{}}
@@ -414,6 +422,7 @@ func (s *Store) resume(log *disklog.Log) error {
 		s.ix.SegmentLive(s.sb.SegmentBlocks, live)
 		log.Recount(live)
 		s.ix.RecountSlotHeld()
+		s.ix.EndReplay()
 	}
 	s.ix.TrackLive(true)
 	s.adm.bucket = bucket{}
@@ -858,6 +867,9 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	} else {
 		s.punchItems(o, first, last)
 	}
+	if n := len(o.items); o.err == nil && n > 0 {
+		o.items[n-1].entry.Last = true
+	}
 	if o.req.Gated && o.err == nil {
 		r := Reply{ID: o.req.ID, Version: o.version}
 		if r.Buf, o.err = s.mergedCopy(ctx, o); o.err == nil {
@@ -997,6 +1009,9 @@ func (s *Store) Read(ctx *core.Context, r Request, out *Output) {
 	if err == nil {
 		ch, _ := s.ix.Chunk(pool, r.Chunk)
 		mapVer, zeros, err = s.readable(r, ch.Version)
+		if ch.ListedIn != 0 {
+			err = ErrMissing
+		}
 	}
 	if err != nil {
 		out.Replies = append(out.Replies, Reply{ID: r.ID, Err: err})
@@ -1104,9 +1119,12 @@ func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Outp
 	if len(cs.waiting) > 0 || slices.ContainsFunc(cs.pending, func(oi int32) bool { return s.ops[oi].left > 0 }) {
 		return ErrUnresolved
 	}
+	subset := s.plant.settleSubset
 	for _, oi := range cs.pending {
 		switch o := &s.ops[oi]; {
 		case !o.req.Gated || o.dropped:
+		case subset && o.version < keep:
+			o.dropped, subset = true, false
 		case o.version <= keep:
 			o.committed = true
 		default:
@@ -1137,6 +1155,133 @@ func (s *Store) Unsettled(dst []core.ChunkID) []core.ChunkID {
 	for ci := range s.chunks {
 		if cs := &s.chunks[ci]; cs.live && slices.ContainsFunc(cs.pending, func(oi int32) bool { return s.ops[oi].req.Gated }) {
 			dst = append(dst, cs.id)
+		}
+	}
+	return dst
+}
+
+// Persist logs the missing list the peering of interval decided for PG pg of the pool's pgs PGs,
+// each chunk's kept version, and after it the PG's decision marker, and answers id once all are
+// durable, as the index takes them together: replay after a crash takes a list only with its
+// marker, so a disk persists a decision whole or not at all. A PG count that is not a power of two,
+// a PG or interval that does not exist or a chunk outside the PG is refused with ErrRange.
+func (s *Store) Persist(ctx *core.Context, id uint64, pg, pgs, interval uint32, missing []ChunkVersion, out *Output) {
+	err := s.unavailable()
+	if err == nil && (core.CheckPGCount(pgs) != nil || pg >= pgs || interval == 0 ||
+		slices.ContainsFunc(missing, func(m ChunkVersion) bool { return core.PGIndexOf(m.Chunk.Hash(), pgs) != pg })) {
+		err = ErrRange
+	}
+	if err != nil {
+		out.Replies = append(out.Replies, Reply{ID: id, Err: err})
+		return
+	}
+	oi := s.newOp(opPersist, Request{ID: id})
+	o := &s.ops[oi]
+	for _, m := range missing {
+		o.items = append(o.items, item{entry: disklog.MissingEntry(s.cfg.Pool, m.Chunk, m.Version, interval)})
+	}
+	o.items = append(o.items, item{entry: disklog.DecisionEntry(s.cfg.Pool, pg, pgs, interval)})
+	o.left = len(o.items)
+	s.persists = append(s.persists, oi)
+	for j := range o.items {
+		t, err := s.log.Submit(ctx, disklog.Hot, disklog.Item{Entry: s.ops[oi].items[j].entry}, &s.lout)
+		if err != nil {
+			s.ops[oi].items[j].state = itemFailed
+			s.persisted(oi, err, out)
+			continue
+		}
+		s.ops[oi].items[j].ticket = t
+		s.sent = append(s.sent, sentItem{ticket: t, op: oi, item: int32(j)})
+	}
+	s.pump(ctx, out)
+}
+
+// persisted counts an item of persist oi resolved, with err if it failed; once all are, a persist
+// whose items are all durable hands the index its list and marker, and its caller is answered.
+func (s *Store) persisted(oi int32, err error, out *Output) {
+	o := &s.ops[oi]
+	if o.err == nil {
+		o.err = err
+	}
+	if o.left--; o.left > 0 {
+		return
+	}
+	if o.err == nil {
+		s.marks = s.marks[:0]
+		for j := range o.items {
+			s.marks = append(s.marks, o.items[j].entry)
+		}
+		s.apply = disklog.Event{Kind: disklog.Durable, Entries: s.marks}
+		if err := s.ix.Apply(&s.apply); err != nil {
+			panic("chunkstore: the index refused the store's own missing list: " + err.Error())
+		}
+	}
+	out.Replies = append(out.Replies, Reply{ID: o.req.ID, Err: o.err})
+	s.persists = slices.DeleteFunc(s.persists, func(i int32) bool { return i == oi })
+	s.freeOp(oi)
+}
+
+// PeerState appends to dst what a member reports to peering of PG pg of the pool's pgs PGs: each
+// chunk of the PG it logged or lists, and the newest interval whose decision it persisted for the
+// PG, 0 for none. A primary's gated writes and punches that wait for peering's decision count as
+// logged, and as held whole up to the first whose records failed. Until every write and punch of
+// the PG's chunks has its records durable or failed, those of a member mapped too, and every
+// missing list being persisted is resolved, it returns ErrUnresolved, since what it reports would
+// change after the member answered.
+func (s *Store) PeerState(pg, pgs uint32, dst []ChunkPeer) ([]ChunkPeer, uint32, error) {
+	if err := s.unavailable(); err != nil {
+		return dst, 0, err
+	}
+	if core.CheckPGCount(pgs) != nil || pg >= pgs {
+		return dst, 0, ErrRange
+	}
+	gated := false
+	for i := range s.chunks {
+		cs := &s.chunks[i]
+		if !cs.live || core.PGIndexOf(cs.id.Hash(), pgs) != pg {
+			continue
+		}
+		if len(cs.waiting) > 0 || slices.ContainsFunc(cs.pending, func(oi int32) bool { return s.ops[oi].left > 0 || !s.ops[oi].req.Gated }) {
+			return dst, 0, ErrUnresolved
+		}
+		gated = gated || len(cs.pending) > 0
+	}
+	if len(s.persists) > 0 {
+		return dst, 0, ErrUnresolved
+	}
+	n := len(dst)
+	dst = s.ix.PGChunks(dst, s.cfg.Pool, pg, pgs)
+	for i := range s.chunks {
+		if cs := &s.chunks[i]; gated && cs.live && len(cs.pending) > 0 && core.PGIndexOf(cs.id.Hash(), pgs) == pg {
+			dst = s.peerGated(dst, n, cs)
+		}
+	}
+	return dst, s.ix.Decided(s.cfg.Pool, pg, pgs), nil
+}
+
+// peerGated folds chunk cs's gated writes and punches into its report among dst[from:], adding
+// one for a chunk the index does not hold.
+func (s *Store) peerGated(dst []ChunkPeer, from int, cs *chunkState) []ChunkPeer {
+	j := slices.IndexFunc(dst[from:], func(c ChunkPeer) bool { return c.Chunk == cs.id })
+	if j < 0 {
+		dst = append(dst, ChunkPeer{Chunk: cs.id})
+		j = len(dst) - 1
+	} else {
+		j += from
+	}
+	c := &dst[j]
+	whole := true
+	for _, oi := range cs.pending {
+		o := &s.ops[oi]
+		if o.dropped {
+			continue
+		}
+		whole = whole && o.err == nil
+		if whole {
+			c.Whole = o.version
+		}
+		if o.holdsVersion() {
+			c.Logged = max(c.Logged, o.version)
 		}
 	}
 	return dst
@@ -1484,6 +1629,11 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 					err = ErrInDoubt
 					s.ops[si.op].items[si.item].buf = core.NoBuf
 				}
+				if s.ops[si.op].kind == opPersist {
+					s.ops[si.op].items[si.item].state = itemFailed
+					s.persisted(si.op, err, out)
+					continue
+				}
 				if s.itemFailed(ctx, si.op, si.item, err, out) {
 					s.mapResolved(ctx, s.ops[si.op].chunk, out)
 				}
@@ -1593,6 +1743,10 @@ func (s *Store) durable(ctx *core.Context, ev *disklog.Event, out *Output) {
 		}
 		it := &s.ops[si.op].items[si.item]
 		it.entry, it.state, it.lba, it.headerBlocks, it.payload, it.lsn = ev.Entries[i], itemDurable, ev.LBA, ev.HeaderBlocks, ev.Payloads[i], ev.LSN
+		if s.ops[si.op].kind == opPersist {
+			s.persisted(si.op, nil, out)
+			continue
+		}
 		if s.ops[si.op].req.Gated {
 			s.unmappedLive(it, -1)
 		}
@@ -1995,6 +2149,11 @@ func (s *Store) abandonPending(ctx *core.Context, out *Output) {
 		cs.pending = cs.pending[:0]
 		s.releaseChunk(int32(ci))
 	}
+	for _, oi := range s.persists {
+		out.Replies = append(out.Replies, Reply{ID: s.ops[oi].req.ID, Err: ErrInDoubt})
+		s.freeOp(oi)
+	}
+	s.persists = s.persists[:0]
 	s.checkFlushes(out)
 }
 

@@ -259,6 +259,39 @@ func (s *Scheduler) Choices() []Choice {
 	}
 }
 
+// Next is the time the next step falls due, now if one is due, without moving time; 0 when nothing is pending.
+func (s *Scheduler) Next() core.Tick {
+	var wake core.Tick
+	s.choices, wake = s.collect(s.choices[:0])
+	if len(s.choices) > 0 {
+		return s.now
+	}
+	return wake
+}
+
+// Advance moves time to t, which no pending step falls due before.
+func (s *Scheduler) Advance(t core.Tick) {
+	if next := s.Next(); next != 0 && next < t || t < s.now {
+		panic(fmt.Sprintf("sim: advancing to %d past a step due at %d, now %d", t, next, s.now))
+	}
+	s.now = t
+}
+
+// Idle reports, without moving time, whether nothing is pending but timers periodic accepts: no message, disk action, other timer, restart, resume or ready actor.
+func (s *Scheduler) Idle(periodic func(core.TimerID) bool) bool {
+	for i := range s.items {
+		if it := &s.items[i]; it.kind != ChooseTimer || !periodic(it.act.Timer) {
+			return false
+		}
+	}
+	for _, n := range s.nodes {
+		if !n.up || n.paused || slices.ContainsFunc(n.actors, func(a actor) bool { return a.a.Ready() }) {
+			return false
+		}
+	}
+	return true
+}
+
 // collect lists the choices due now and the earliest later time one falls due, 0 for none.
 func (s *Scheduler) collect(cs []Choice) ([]Choice, core.Tick) {
 	var wake core.Tick

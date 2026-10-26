@@ -15,14 +15,15 @@ import (
 func FuzzDecodeKey(f *testing.F) {
 	f.Add(AppendKey(nil, Key{Pool: 1, Chunk: chunk(7), Version: 3, First: 9}))
 	f.Add(AppendKey(nil, Key{Pool: RecordPool, Chunk: chunk(7)}))
+	f.Add(AppendKey(nil, Key{Pool: DecisionPool, Chunk: chunk(7)}))
 	f.Add(make([]byte, KeySize))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		k, err := DecodeKey(b)
 		if err != nil {
 			return
 		}
-		if k.Pool == RecordPool {
-			t.Fatalf("accepted a key in the reserved pool: %x", b)
+		if reserved(k.Pool) {
+			t.Fatalf("accepted a key in a reserved pool: %x", b)
 		}
 		if got := AppendKey(nil, k); !bytes.Equal(got, b) {
 			t.Fatalf("key %x decodes to %+v, which encodes to %x", b, k, got)
@@ -50,6 +51,20 @@ func FuzzDecodeExtent(f *testing.F) {
 	})
 }
 
+// FuzzDecodeChunk feeds arbitrary bytes as a chunk's entry: a value of the entry's size decodes
+// and encodes back to the same bytes.
+func FuzzDecodeChunk(f *testing.F) {
+	f.Add(appendChunk(nil, Chunk{Version: 1<<32 | 2, Epoch: 3, Whole: 1<<32 | 1, Listed: 2<<32 | 5, ListedIn: 4}))
+	f.Fuzz(func(t *testing.T, v []byte) {
+		if len(v) != chunkValueSize {
+			return
+		}
+		if got := appendChunk(nil, decodeChunk(v)); !bytes.Equal(got, v) {
+			t.Fatalf("entry %x decodes to %+v, which encodes to %x", v, decodeChunk(v), got)
+		}
+	})
+}
+
 // FuzzCheck fills a tree with arbitrary entries, each a length byte and a key then a length byte
 // and a value: Check returns an error or nil and never panics, and when it passes a Reader reads
 // blocks, ascending and back, live and at an epoch, as Lookup and LookupAt do.
@@ -62,7 +77,10 @@ func FuzzCheck(f *testing.F) {
 		disklog.Entry{Kind: disklog.EntryFreeze, Pool: 1, Chunk: chunk(2), Version: 0, Epoch: 5},
 		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(2), Version: 1, First: 0, Count: 1},
 		disklog.SlotEntry(1, chunk(3), 1, 2, 1),
-		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(3), Version: 2, First: 7, Count: 1},
+		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(3), Version: 2, First: 7, Count: 1, Last: true},
+		disklog.MissingEntry(1, chunk(2), 1<<32|1, 2),
+		disklog.MissingEntry(1, chunk(4), 0, 2),
+		disklog.DecisionEntry(1, 0, 1, 2),
 	)); err != nil {
 		f.Fatal(err)
 	}

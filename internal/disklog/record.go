@@ -11,11 +11,16 @@ const (
 	recordMagic = "RSRC"
 	preludeSize = 56
 
-	writeEntrySize  = 33
-	copyEntrySize   = writeEntrySize + 8
-	slotEntrySize   = writeEntrySize + 6
-	freezeEntrySize = 37
-	blobEntrySize   = 14
+	writeEntrySize    = 34
+	copyEntrySize     = writeEntrySize + 8
+	slotEntrySize     = writeEntrySize + 6
+	freezeEntrySize   = 37
+	blobEntrySize     = 14
+	missingEntrySize  = 33
+	decisionEntrySize = 17
+
+	// lastFlag marks a write's, punch's or slot write's entry as the last of its version.
+	lastFlag = 0x01
 
 	recVersion      = 4
 	recHeaderBlocks = 6
@@ -42,6 +47,8 @@ const (
 	EntryBlob
 	EntrySlot
 	EntryCopy
+	EntryMissing
+	EntryDecision
 )
 
 // BlobKind says what a blob payload holds; the codec carries it without checking it.
@@ -71,6 +78,9 @@ type Entry struct {
 	Source   core.LBA
 	Segment  uint32
 	Slot     uint16
+	// Last marks a write, punch or slot write as its version's last entry.
+	Last     bool
+	Interval uint32
 }
 
 // WriteEntry is a write of count blocks from block first of a chunk version.
@@ -99,6 +109,16 @@ func PunchEntry(pool core.PoolID, chunk core.ChunkID, version uint64, first, cou
 // FreezeEntry pins a chunk version for the snapshot epoch.
 func FreezeEntry(pool core.PoolID, chunk core.ChunkID, version, epoch uint64) Entry {
 	return Entry{Kind: EntryFreeze, Pool: pool, Chunk: chunk, Version: version, Epoch: epoch}
+}
+
+// MissingEntry lists a chunk on a PG member's missing list: the member must receive version, which the peering of interval kept.
+func MissingEntry(pool core.PoolID, chunk core.ChunkID, version uint64, interval uint32) Entry {
+	return Entry{Kind: EntryMissing, Pool: pool, Chunk: chunk, Version: version, Interval: interval}
+}
+
+// DecisionEntry marks the decision of the peering of interval persisted for PG pg of the pool's pgs PGs, held in Owner and Length.
+func DecisionEntry(pool core.PoolID, pg, pgs, interval uint32) Entry {
+	return Entry{Kind: EntryDecision, Pool: pool, Owner: pg, Length: uint64(pgs), Interval: interval}
 }
 
 // BlobEntry is a payload of length bytes of the given kind for owner.
@@ -131,10 +151,14 @@ func (e *Entry) wireSize() (int, error) {
 		n = freezeEntrySize
 	case EntryBlob:
 		n = blobEntrySize
+	case EntryMissing:
+		n = missingEntrySize
+	case EntryDecision:
+		n = decisionEntrySize
 	default:
 		return 0, ErrMalformed
 	}
-	if *e != e.ofKind() {
+	if !e.valid() || *e != e.ofKind() {
 		return 0, ErrMalformed
 	}
 	return n, nil
@@ -144,15 +168,31 @@ func (e *Entry) wireSize() (int, error) {
 func (e *Entry) ofKind() Entry {
 	switch e.Kind {
 	case EntryWrite, EntryPunch:
-		return Entry{Kind: e.Kind, Pool: e.Pool, Chunk: e.Chunk, Version: e.Version, First: e.First, Count: e.Count}
+		return Entry{Kind: e.Kind, Pool: e.Pool, Chunk: e.Chunk, Version: e.Version, First: e.First, Count: e.Count, Last: e.Last}
 	case EntryCopy:
 		return CopyEntry(e.Pool, e.Chunk, e.Version, e.First, e.Count, e.Source)
 	case EntrySlot:
-		return Entry{Kind: e.Kind, Pool: e.Pool, Chunk: e.Chunk, Version: e.Version, First: e.First, Count: e.Count, Segment: e.Segment, Slot: e.Slot}
+		return Entry{Kind: e.Kind, Pool: e.Pool, Chunk: e.Chunk, Version: e.Version, First: e.First, Count: e.Count, Segment: e.Segment, Slot: e.Slot, Last: e.Last}
 	case EntryFreeze:
 		return FreezeEntry(e.Pool, e.Chunk, e.Version, e.Epoch)
+	case EntryMissing:
+		return MissingEntry(e.Pool, e.Chunk, e.Version, e.Interval)
+	case EntryDecision:
+		return Entry{Kind: e.Kind, Pool: e.Pool, Owner: e.Owner, Length: e.Length, Interval: e.Interval}
 	}
 	return BlobEntry(e.BlobKind, e.Owner, e.Length)
+}
+
+// valid checks the fields a missing-list entry or decision marker carries: an interval, and a PG
+// among a power of two of them.
+func (e *Entry) valid() bool {
+	switch e.Kind {
+	case EntryMissing:
+		return e.Interval != 0
+	case EntryDecision:
+		return e.Interval != 0 && e.Length != 0 && e.Length <= 1<<31 && e.Length&(e.Length-1) == 0 && uint64(e.Owner) < e.Length
+	}
+	return true
 }
 
 func (e *Entry) dataBytes() uint64 {
@@ -328,6 +368,11 @@ func appendEntries(dst []byte, entries []Entry) []byte {
 			dst = binary.LittleEndian.AppendUint64(dst, e.Version)
 			dst = binary.LittleEndian.AppendUint16(dst, e.First)
 			dst = binary.LittleEndian.AppendUint16(dst, e.Count)
+			var flags byte
+			if e.Last {
+				flags = lastFlag
+			}
+			dst = append(dst, flags)
 			switch e.Kind {
 			case EntryCopy:
 				dst = binary.LittleEndian.AppendUint64(dst, uint64(e.Source))
@@ -344,6 +389,16 @@ func appendEntries(dst []byte, entries []Entry) []byte {
 			dst = append(dst, byte(e.BlobKind))
 			dst = binary.LittleEndian.AppendUint32(dst, e.Owner)
 			dst = binary.LittleEndian.AppendUint64(dst, e.Length)
+		case EntryMissing:
+			dst = binary.LittleEndian.AppendUint32(dst, uint32(e.Pool))
+			dst = e.Chunk.AppendTo(dst)
+			dst = binary.LittleEndian.AppendUint64(dst, e.Version)
+			dst = binary.LittleEndian.AppendUint32(dst, e.Interval)
+		case EntryDecision:
+			dst = binary.LittleEndian.AppendUint32(dst, uint32(e.Pool))
+			dst = binary.LittleEndian.AppendUint32(dst, e.Owner)
+			dst = binary.LittleEndian.AppendUint32(dst, uint32(e.Length))
+			dst = binary.LittleEndian.AppendUint32(dst, e.Interval)
 		}
 	}
 	return dst
@@ -376,14 +431,18 @@ func decodeEntry(b []byte, e *Entry) (int, error) {
 		if e.Count == 0 || int(e.First)+int(e.Count) > core.BlocksPerChunk {
 			return 0, ErrBadExtent
 		}
+		if flags := b[33]; flags&^lastFlag != 0 || e.Kind == EntryCopy && flags != 0 {
+			return 0, ErrMalformed
+		}
+		e.Last = b[33]&lastFlag != 0
 		if e.Kind == EntryCopy {
-			if e.Source = core.LBA(binary.LittleEndian.Uint64(b[33:])); e.Source == 0 {
+			if e.Source = core.LBA(binary.LittleEndian.Uint64(b[34:])); e.Source == 0 {
 				return 0, ErrMalformed
 			}
 		}
 		if e.Kind == EntrySlot {
-			e.Segment = binary.LittleEndian.Uint32(b[33:])
-			e.Slot = binary.LittleEndian.Uint16(b[37:])
+			e.Segment = binary.LittleEndian.Uint32(b[34:])
+			e.Slot = binary.LittleEndian.Uint16(b[38:])
 			if e.First != 0 || e.Count != core.BlocksPerChunk {
 				return 0, ErrBadExtent
 			}
@@ -409,8 +468,29 @@ func decodeEntry(b []byte, e *Entry) (int, error) {
 		e.Owner = binary.LittleEndian.Uint32(b[2:])
 		e.Length = binary.LittleEndian.Uint64(b[6:])
 		return blobEntrySize, nil
+	case EntryMissing:
+		if len(b) < missingEntrySize {
+			return 0, ErrMalformed
+		}
+		e.Pool = core.PoolID(binary.LittleEndian.Uint32(b[1:]))
+		e.Chunk = core.ChunkIDFromBytes([core.ChunkIDSize]byte(b[5:21]))
+		e.Version = binary.LittleEndian.Uint64(b[21:])
+		e.Interval = binary.LittleEndian.Uint32(b[29:])
+	case EntryDecision:
+		if len(b) < decisionEntrySize {
+			return 0, ErrMalformed
+		}
+		e.Pool = core.PoolID(binary.LittleEndian.Uint32(b[1:]))
+		e.Owner = binary.LittleEndian.Uint32(b[5:])
+		e.Length = uint64(binary.LittleEndian.Uint32(b[9:]))
+		e.Interval = binary.LittleEndian.Uint32(b[13:])
+	default:
+		return 0, ErrMalformed
 	}
-	return 0, ErrMalformed
+	if !e.valid() {
+		return 0, ErrMalformed
+	}
+	return entrySize(e.Kind), nil
 }
 
 // RecordHeader is a decoded record header; its entries share the slice the decoder was given.
@@ -541,7 +621,7 @@ func DecodeRecord(img []byte, at Place, blocksLeft uint32, entries []Entry) (Dec
 	return DecodedRecord{RecordHeader: h, Data: data}, nil
 }
 
-// Payload is entry i's bytes sliced from the image: a write's or copy's blocks or a blob's bytes, empty for a punch, freeze or slot write.
+// Payload is entry i's bytes sliced from the image: a write's or copy's blocks or a blob's bytes, empty for any other entry.
 func (d *DecodedRecord) Payload(i int) []byte {
 	e := &d.Entries[i]
 	switch e.Kind {
@@ -565,7 +645,7 @@ func SlotBlockCRC(img []byte, logID uint64, offset uint32, segment uint32, slot 
 		at := uint64(dataBlocks)
 		for range n {
 			if EntryKind(entries[0]) == EntrySlot {
-				if binary.LittleEndian.Uint32(entries[33:]) == segment && binary.LittleEndian.Uint16(entries[37:]) == slot {
+				if binary.LittleEndian.Uint32(entries[34:]) == segment && binary.LittleEndian.Uint16(entries[38:]) == slot {
 					return at + uint64(b), b < core.BlocksPerChunk
 				}
 				at += core.BlocksPerChunk
@@ -588,6 +668,10 @@ func entrySize(k EntryKind) int {
 		return freezeEntrySize
 	case EntryBlob:
 		return blobEntrySize
+	case EntryMissing:
+		return missingEntrySize
+	case EntryDecision:
+		return decisionEntrySize
 	}
 	return 0
 }

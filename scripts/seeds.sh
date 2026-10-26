@@ -14,6 +14,7 @@ export GOTOOLCHAIN GOMEMLIMIT
 tests="
 internal/sim/toy TestTheFixedProtocolKeepsEveryAcknowledgedWrite 10000
 internal/sim TestFaultsKeepTheDriverContractAndTheResumedRule 2000
+internal/lease TestNoLeaseOutlastsItsGrant 10000
 internal/disklog TestEveryAcceptedItemDecodes 2000
 internal/disklog TestAnythingSubmitAcceptsDecodes 2000
 internal/disklog TestRandomCrashesKeepAcknowledgedRecords 500
@@ -30,6 +31,7 @@ internal/chunkstore TestPoolFiguresHoldTheirBounds 20000
 internal/chunkstore TestPlacementKeepsItsRules 1000
 internal/chunkstore TestSubBlockWritesMatchTheByteOracle 500
 internal/chunkstore TestReplicatedWritesSurviveFaults 1000
+internal/chunkstore TestPeeringKeepsAcknowledgedWritesAcrossPrimaries 500
 "
 
 cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)

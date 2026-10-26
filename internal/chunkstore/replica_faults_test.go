@@ -14,7 +14,7 @@ import (
 const (
 	invAckedWhole    = "a member acknowledges a version only once it maps every block of it"
 	invOneReply      = "every client write or punch gets one reply"
-	invMappedAnswers = "the primary maps exactly the writes and punches it answered OK, in version order"
+	invMappedAnswers = "the primary maps exactly the writes and punches it answered OK and those peering kept, in version order"
 )
 
 // faultSpan is the bytes of each chunk the fault workload writes: 3 blocks.
@@ -33,26 +33,30 @@ type answered struct {
 	id      core.RequestID
 }
 
-// faultRun runs clients pipelining sub-block writes and punches to two chunks of PG 0, led by disk 1, while a seeded schedule cuts members off, crashes them, often while they hold a version in part, fails their disks and at times the primary's, has them refuse, rots the primary's copy of blocks, sometimes cutting off the member it asks first for a base, and changes the PG's interval, with peering stood in by Settle, which at times keeps pending versions, and Activate. Records of at most 3 blocks cut a version into several.
+// faultRun runs clients pipelining sub-block writes and punches to two chunks of PG 0, led by disk 1, while a seeded schedule cuts members off, crashes them, often while they hold a version in part, fails their disks and at times the primary's, has them refuse, rots the primary's copy of blocks, sometimes cutting off the member it asks first for a base, and changes the PG's interval, after which the primary peers. Records of at most 3 blocks cut a version into several.
 type faultRun struct {
 	t      *testing.T
 	c      *rcluster
 	rng    *core.Rand
 	chunks [2]core.ChunkID
 	ops    map[core.RequestID]faultOp
-	// ok is the writes and punches the primary answered OK, in version order, and replied each it answered.
+	// ok is the writes and punches the primary answered OK, in version order, and replied each it answered; refused is those it refused, version each one's version once the primary sent it, and kept the decision of the peering of each interval of PG 0.
 	ok      []answered
 	replied map[core.RequestID]int
+	refused []core.RequestID
+	version map[core.RequestID]uint64
+	kept    map[uint32][]keptChunk
 	dirty   bool
 	// sent is each version the primary sent, by its sequence, as an update; flips the bits rotted on the primary's disk.
 	sent  map[core.RequestID]Update
 	flips map[core.LBA][]flip
 	errs  map[string]error
-	// heals is when each cut member is healed, and crashes when each member is crashed at the latest, 0 for none; peering is whether an interval change waits for Settle.
-	heals   [3]core.Tick
-	crashes [3]core.Tick
-	peering bool
-	asked   int
+	// heals is when each cut member is healed, and crashes when each member is crashed at the latest, 0 for none; peering is whether PG 0's new interval waits for the primary to peer, and peerFault whether a member crashed or its disk failed since it started. One fault per peering at most: each restart waits 4 s, and with no failure detection to mark a failed disk down, its failures pile up across restarts.
+	heals     [3]core.Tick
+	crashes   [3]core.Tick
+	peering   bool
+	peerFault bool
+	asked     int
 	// primaryFailed is set once the primary's disk has been made to fail.
 	primaryFailed bool
 }
@@ -126,6 +130,12 @@ func (f *faultRun) fail(inv string, err error) {
 
 // pass follows what each replica's loop sends: the primary's client replies and member updates, and each member's acknowledgments, which it checks against the member's index as it sends them.
 func (f *faultRun) pass(d int, acts []core.Action) {
+	if r := f.c.reps[0]; d == 0 {
+		if i := r.lead(pg0); i >= 0 && r.leads[i].active && f.kept[r.leads[i].interval] == nil {
+			f.kept[r.leads[i].interval] = append([]keptChunk{}, r.leads[i].kept...)
+			f.dirty = true
+		}
+	}
 	for i := range acts {
 		a := &acts[i]
 		if a.Kind != core.ActNetSend || a.Msg.Len < headSize {
@@ -140,6 +150,9 @@ func (f *faultRun) pass(d int, acts []core.Action) {
 			}
 			if DecodeUpdate(a.Msg.Inline(), data, &u) == nil {
 				f.sent[u.ID] = u
+				if j := f.c.reps[0].versionOf(uint64(u.ID & (1<<sendShift - 1))); j >= 0 {
+					f.version[f.c.reps[0].vers[j].msgID] = u.Version
+				}
 			}
 		case d == 0 && k == KindReply:
 			var rp Response
@@ -156,6 +169,8 @@ func (f *faultRun) pass(d int, acts []core.Action) {
 				j, _ := slices.BinarySearchFunc(f.ok, rp.Version, func(a answered, v uint64) int { return cmpU64(a.version, v) })
 				f.ok = slices.Insert(f.ok, j, answered{version: rp.Version, id: rp.ID})
 				f.dirty = true
+			} else {
+				f.refused = append(f.refused, rp.ID)
 			}
 		case d != 0 && k == KindAck:
 			var rp Response
@@ -186,15 +201,42 @@ func cmpU64(a, b uint64) int {
 	return 0
 }
 
-// mapped checks that the primary's index maps each chunk's blocks as the writes and punches it answered OK give them, applied in version order.
+// keptRefused reports whether peering kept a version the primary refused: the first peering after its interval kept it or a later version of its chunk.
+func (f *faultRun) keptRefused(id core.RequestID) (uint64, bool) {
+	v, ok := f.version[id]
+	if !ok {
+		return 0, false
+	}
+	k := uint32(v>>32) + 1
+	for ; f.kept[k] == nil; k++ {
+		if _, e := f.c.table.entry(pg0); k > e.Interval {
+			return 0, false
+		}
+	}
+	for _, x := range f.kept[k] {
+		if x.chunk == f.ops[id].c {
+			return v, v <= x.kept
+		}
+	}
+	return 0, false
+}
+
+// mapped checks that the primary's index maps each chunk's blocks as the writes and punches it answered OK, and those it refused that peering kept, give them, applied in version order.
 func (f *faultRun) mapped() error {
 	if !f.dirty {
 		return nil
 	}
 	f.dirty = false
+	all := slices.Clone(f.ok)
+	for _, id := range f.refused {
+		if v, ok := f.keptRefused(id); ok {
+			all = append(all, answered{version: v, id: id})
+		}
+	}
+	slices.SortFunc(all, func(a, b answered) int { return cmpU64(a.version, b.version) })
 	for _, ch := range f.chunks {
 		want := make([]byte, 2*faultSpan)
-		for _, a := range f.ok {
+		for _, a := range all {
 			op := f.ops[a.id]
 			if op.c != ch {
 				continue
@@ -242,40 +284,12 @@ func (f *faultRun) publish(t Table) {
 	}
 }
 
-// settle stands in for the end of peering: once every local write of each chunk has resolved, the primary keeps, at times, a prefix of the chunk's pending versions whose clients wait, drops the rest and activates the PG's interval.
-func (f *faultRun) settle() {
-	st := f.c.reps[0].Store()
-	for _, ch := range f.chunks {
-		if ci, ok := st.chunkOf[ch]; ok && (len(st.chunks[ci].waiting) > 0 || slices.ContainsFunc(st.chunks[ci].pending, func(oi int32) bool { return st.ops[oi].left > 0 })) {
-			return
-		}
-	}
+// activated reports whether the primary has peered in PG 0's interval in the cluster's table.
+func (f *faultRun) activated() bool {
 	_, e := f.c.table.entry(pg0)
-	f.c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
-		for _, ch := range f.chunks {
-			var keep uint64
-			if x, ok := r.Store().Index().Chunk(testPool, ch); ok {
-				keep = x.Version
-			}
-			if ci, ok := st.chunkOf[ch]; ok && f.rng.Chance(1, 2) {
-				for _, oi := range st.chunks[ci].pending {
-					o := &st.ops[oi]
-					j := r.versionOf(o.req.ID)
-					if o.err != nil || o.dropped || j < 0 || r.vers[j].done || !f.rng.Chance(2, 3) {
-						break
-					}
-					keep = o.version
-				}
-			}
-			if err := r.Settle(ctx, ch, keep, out); err != nil {
-				f.t.Fatalf("Settle of %v with its writes resolved: %v", ch, err)
-			}
-		}
-		if err := r.Activate(ctx, pg0, e.Interval, out); err != nil {
-			f.t.Fatalf("Activate with every chunk settled: %v", err)
-		}
-		f.peering = false
-	})
+	r := f.c.reps[0]
+	i := r.lead(pg0)
+	return i >= 0 && r.leads[i].interval == e.Interval && r.leads[i].active
 }
 
 // newInterval starts the PG's next interval, as the control plane does when the primary asks for one.
@@ -283,7 +297,26 @@ func (f *faultRun) newInterval() {
 	_, e := f.c.table.entry(pg0)
 	k := e.Interval + 1
 	f.publish(f.c.next(func(t *Table) { setInterval(t, pg0, k) }))
-	f.peering = true
+	f.peering, f.peerFault = true, false
+}
+
+// answerOthers starts the next interval of each PG but PG 0 a restarted member asked for, which takes no writes.
+func (f *faultRun) answerOthers(asks []PGFields) {
+	var pgs []core.PGID
+	for _, a := range asks {
+		if _, e := f.c.table.entry(a.PG); a.PG != pg0 && e.Interval == a.Interval && !slices.Contains(pgs, a.PG) {
+			pgs = append(pgs, a.PG)
+		}
+	}
+	if len(pgs) == 0 {
+		return
+	}
+	f.publish(f.c.next(func(t *Table) {
+		for _, pg := range pgs {
+			_, e := t.entry(pg)
+			setInterval(t, pg, e.Interval+1)
+		}
+	}))
 }
 
 // inject draws one fault.
@@ -298,11 +331,13 @@ func (f *faultRun) inject() {
 			f.heals[m] = now + 1 + core.Tick(f.rng.Below(30_000))
 		}
 	case 1:
-		if up && f.crashes[m] == 0 {
+		if up && f.crashes[m] == 0 && !(f.peering && f.peerFault) {
 			f.crashes[m] = now + 1 + core.Tick(f.rng.Below(20_000))
+			f.peerFault = f.peering
 		}
 	case 2:
-		if up {
+		if up && !(f.peering && f.peerFault) {
+			f.peerFault = f.peering
 			c.s.Node(m).Disk(0).Inject(sim.Fault{Effect: sim.FailIO, When: sim.Once(sim.OnKind(core.ActDiskWrite))})
 		}
 	case 3:
@@ -375,13 +410,15 @@ func (f *faultRun) tend(all bool) {
 		}
 	}
 	if len(c.asks) > f.asked {
+		asks := c.asks[f.asked:]
 		f.asked = len(c.asks)
-		if !f.peering {
+		f.answerOthers(asks)
+		if !f.peering && slices.ContainsFunc(asks, func(a PGFields) bool { return a.PG == pg0 }) {
 			f.newInterval()
 		}
 	}
-	if f.peering {
-		f.settle()
+	if f.peering && f.activated() {
+		f.peering = false
 	}
 }
 
@@ -390,7 +427,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int) {
 	c := newRClusterWith(t, rtable(4, 2), s, func(cfg *Config) { cfg.Log.MaxRecordBytes = 3 * core.BlockSize })
 	f := &faultRun{t: t, c: c, rng: core.NewRand(seed ^ 0xfa17), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)},
 		ops: map[core.RequestID]faultOp{}, replied: map[core.RequestID]int{}, sent: map[core.RequestID]Update{}, flips: map[core.LBA][]flip{},
-		errs: map[string]error{}}
+		errs: map[string]error{}, version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}}
 	c.onPass = f.pass
 	for _, inv := range []string{invAckedWhole, invOneReply} {
 		c.inv.Register(inv, func() error { return f.errs[inv] })
@@ -407,7 +444,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int) {
 	}
 	busy := func() bool { return slices.ContainsFunc(fcs, func(fc *faultClient) bool { return fc.left > 0 }) }
 	for range 2_000_000 {
-		if !c.step() {
+		if c.quiet() && !f.peering || !c.step() {
 			if f.heals == [3]core.Tick{} && f.crashes == [3]core.Tick{} && !f.peering && len(c.asks) == f.asked {
 				break
 			}
@@ -424,7 +461,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int) {
 		t.Fatal(err)
 	}
 	for id := core.RequestID(1); id <= c.nextID; id++ {
-		if _, ok := f.ops[id]; ok && f.replied[id] != 1 {
+		if op, ok := f.ops[id]; ok && f.replied[id] != 1 && !(f.replied[id] == 0 && edgeBytes(op.off, op.n) > 0 && c.reps[0].leads[c.reps[0].lead(pg0)].lacks(op.c)) {
 			t.Fatalf("request %d answered %d times", id, f.replied[id])
 		}
 	}

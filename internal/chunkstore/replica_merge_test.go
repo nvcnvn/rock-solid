@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/lease"
 )
 
 // diskBlock is block b of chunk ch as disk d's index maps it, read off its disk; zeros if unmapped.
@@ -115,7 +116,7 @@ func TestEdgesAloneNeedABase(t *testing.T) {
 	}
 }
 
-// Once warm, a replicated write allocates nothing in any replica's events: the primary's ordering, fan-out, commit and reply, and each member's logging and acknowledgment.
+// Once warm, its leases' rate windows full, a replicated write allocates nothing in any replica's events: the primary's ordering, fan-out, commit and reply, and each member's logging and acknowledgment.
 func TestReplicatedWritesAllocateNothing(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	ch := chunkIn(pg0, 4, 0)
@@ -126,6 +127,10 @@ func TestReplicatedWritesAllocateNothing(t *testing.T) {
 			t.Fatal(c.reply(w))
 		}
 	}
+	for i := range 200 {
+		write(i)
+	}
+	c.runFor(lease.DefaultConfig.Window + 2_000_000)
 	for i := range 200 {
 		write(i)
 	}

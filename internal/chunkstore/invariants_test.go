@@ -573,7 +573,7 @@ func (h *harness) ackedReadable() error {
 	}
 	for _, kv := range dumpIndex(ix) {
 		k := []byte(kv[0])
-		if pool := core.PoolID(binary.BigEndian.Uint32(k)); pool == RecordPool {
+		if reserved(core.PoolID(binary.BigEndian.Uint32(k))) {
 			continue
 		}
 		if c := core.ChunkIDFromBytes([core.ChunkIDSize]byte(k[12:chunkKeySize])); !hasChunk(m, c) {

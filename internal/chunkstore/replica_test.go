@@ -9,6 +9,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -23,12 +24,16 @@ type rcluster struct {
 	cl     *rclient
 	nextID core.RequestID
 	// fetch is the newest table epoch each replica asked for, and whole whether it asked for the whole table.
-	fetch []uint64
-	whole []bool
-	asks  []PGFields
-	inv   sim.Invariants
-	// sentVer is the newest version of each chunk a primary sent each member on its current connection, lost counting the connections each lost; orderErr is the first send out of order.
+	fetch   []uint64
+	whole   []bool
+	fetches []int
+	asks    []PGFields
+	// activations is every activation a primary reported, which next records in its table.
+	activations []PGFields
+	inv         sim.Invariants
+	// sentVer is the newest version of each chunk a primary sent each member on its current connection, boots counting each node's starts and lost the connections each lost; orderErr is the first send out of order.
 	sentVer  map[sendKey]uint64
+	boots    []int
 	lost     map[[2]core.NodeID]int
 	orderErr error
 	// passes is each pass of each replica's loop: the actions it emitted.
@@ -36,14 +41,23 @@ type rcluster struct {
 	// counting adds the heap allocations each replica's OnEvent makes to mallocs.
 	counting bool
 	mallocs  uint64
-	// onPass, when set, sees the actions of each pass of each replica's loop.
+	// onPass, when set, sees the actions of each pass of each replica's loop, and drop, when set, removes those it reports.
 	onPass func(d int, acts []core.Action)
+	drop   func(d int, a *core.Action) bool
+	// ids is the disk ID of node d's disk and logs its log ID; reformat has node d's next start format its disk with the log ID in logs, and onFormat, when set, then gives its disk ID.
+	ids      []uint32
+	logs     []uint64
+	reformat []bool
+	onFormat func(d int) uint32
+	// storePlants and replicaPlants are planted in every store and replica the cluster starts.
+	storePlants   plants
+	replicaPlants replicaPlants
 }
 
 type sendKey struct {
-	from, to core.NodeID
-	conn     int
-	chunk    core.ChunkID
+	from, to   core.NodeID
+	boot, conn int
+	chunk      core.ChunkID
 }
 
 const invSendOrder = "a primary sends a chunk's writes to each member in version order, again after a reconnect"
@@ -111,6 +125,11 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 	c.inv.Register(invSendOrder, func() error { return c.orderErr })
 	const disks = 3
 	c.reps, c.loops, c.fetch, c.whole, c.passes = make([]*Replica, disks), make([]core.NodeID, disks), make([]uint64, disks), make([]bool, disks), make([][][]core.Action, disks)
+	c.fetches = make([]int, disks)
+	c.ids, c.logs, c.reformat, c.boots = make([]uint32, disks), make([]uint64, disks), make([]bool, disks), make([]int, disks)
+	for d := range disks {
+		c.ids[d], c.logs[d] = uint32(d+1), 0x5eed+uint64(d)
+	}
 	for d := range disks {
 		c.s.AddNode(sim.DefaultClock, []sim.DiskSpec{{Blocks: geo.DiskBlocks(), Settings: sim.DefaultDiskSettings()}}, func(n *sim.Node) {
 			var out ReplicaOutput
@@ -131,6 +150,7 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 				return c.took(d, &out, acts)
 			})
 			c.loops[d] = n.Start(m, n.Disk(0))
+			seed := n.Fork().Uint64()
 			n.Call(c.loops[d], func(ctx *core.Context, acts []core.Action) []core.Action {
 				var sout Output
 				cfg := testConfig()
@@ -138,23 +158,31 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 				if edit != nil {
 					edit(&cfg)
 				}
-				restart := c.reps[d] != nil
+				c.boots[d]++
+				first := c.reps[d] == nil
+				fresh := first || c.reformat[d]
 				var st *Store
 				var err error
-				if restart {
-					st, err = Open(ctx, cfg, geo.DiskBlocks(), &sout)
+				if fresh {
+					st, err = Format(ctx, cfg, disklog.Superblock{LogID: c.logs[d], Geometry: geo}, &sout)
 				} else {
-					st, err = Format(ctx, cfg, disklog.Superblock{LogID: 0x5eed + uint64(d), Geometry: geo}, &sout)
+					st, err = Open(ctx, cfg, geo.DiskBlocks(), &sout)
 				}
 				if err != nil {
 					t.Fatal(err)
 				}
-				c.reps[d] = NewReplica(ReplicaConfig{Disk: uint32(d + 1)}, st)
+				if c.reformat[d] && c.onFormat != nil {
+					c.ids[d] = c.onFormat(d)
+				}
+				c.reformat[d] = false
+				st.plant = c.storePlants
+				c.reps[d] = NewReplica(ReplicaConfig{Disk: c.ids[d], Seed: seed, Start: lease.Now(ctx), Restarted: !fresh}, st)
+				c.reps[d].plant = c.replicaPlants
 				for k := range disks {
-					c.reps[d].SetAddr(uint32(k+1), core.NodeID{Node: uint32(k)})
+					c.reps[d].SetAddr(c.ids[k], core.NodeID{Node: uint32(k)})
 				}
 				acts = append(acts, sout.Actions...)
-				if !restart {
+				if first {
 					return acts
 				}
 				var out ReplicaOutput
@@ -165,14 +193,23 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 	}
 	c.s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { c.client = n.Start(c.cl, nil) })
 	c.settle()
-	c.publish(tbl, true)
+	c.publish(tbl, false)
+	c.runFor(lease.DefaultConfig.Lease + 500_000)
+	c.untilActive()
 	return c
 }
 
 func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Action {
+	if c.drop != nil {
+		out.Actions = slices.DeleteFunc(out.Actions, func(a core.Action) bool { return c.drop(d, &a) })
+	}
 	c.fetch[d] = max(c.fetch[d], out.Fetch)
 	c.whole[d] = c.whole[d] || out.Whole
+	if out.Fetch != 0 {
+		c.fetches[d]++
+	}
 	c.asks = append(c.asks, out.Asks...)
+	c.activations = append(c.activations, out.Activations...)
 	c.passes[d] = append(c.passes[d], slices.Clone(out.Actions))
 	if c.onPass != nil {
 		c.onPass(d, out.Actions)
@@ -190,7 +227,7 @@ func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Ac
 		if DecodeUpdate(a.Msg.Inline(), data, &u) != nil || u.Version == 0 {
 			continue
 		}
-		k := sendKey{from: c.loops[d], to: a.Peer, conn: c.lost[[2]core.NodeID{c.loops[d], a.Peer}], chunk: u.Chunk}
+		k := sendKey{from: c.loops[d], to: a.Peer, boot: c.boots[d], conn: c.lost[[2]core.NodeID{c.loops[d], a.Peer}], chunk: u.Chunk}
 		if u.Version <= c.sentVer[k] && c.orderErr == nil {
 			c.orderErr = fmt.Errorf("disk %d sent %#x of %v to %v after %#x on one connection", d+1, u.Version, u.Chunk, a.Peer, c.sentVer[k])
 		}
@@ -208,30 +245,65 @@ func (c *rcluster) call(d int, f func(ctx *core.Context, r *Replica, out *Replic
 	})
 }
 
-// publish hands every replica t and, with activate, ends peering for every PG each leads.
+// publish hands every replica t and, with activate, runs the cluster until every PG a running replica leads has peered.
 func (c *rcluster) publish(t Table, activate bool) {
 	c.table = t
 	for d := range c.reps {
-		c.call(d, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
-			r.SetTable(ctx, t, out)
-			if !activate {
-				return
-			}
-			for _, l := range r.leads {
-				r.Activate(ctx, l.pg, l.interval, out)
-			}
-		})
+		c.call(d, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetTable(ctx, t, out) })
+	}
+	if activate {
+		c.untilActive()
 	}
 }
 
+// untilActive steps the cluster until every PG that a running replica leads in the cluster's table, with min_live members live, is active in its interval.
+func (c *rcluster) untilActive() {
+	c.t.Helper()
+	for range 1_000_000 {
+		if c.active() {
+			return
+		}
+		if !c.step() {
+			break
+		}
+	}
+	c.t.Fatal("peering did not end")
+}
+
+func (c *rcluster) active() bool {
+	for pi := range c.table.Pools {
+		p := &c.table.Pools[pi]
+		for i := range p.PGs {
+			e := &p.PGs[i]
+			d, ok := e.primary()
+			n := c.node(d)
+			if !ok || e.live() < int(p.MinLive) || n < 0 || !c.s.Node(uint32(n)).Up() {
+				continue
+			}
+			r := c.reps[n]
+			j := r.lead(core.PGID{Pool: p.ID, Index: uint32(i)})
+			if j < 0 || r.leads[j].interval != e.Interval || !r.leads[j].active && !r.leads[j].asking {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// settle steps the cluster until nothing but the replicas' periodic timers is pending.
 func (c *rcluster) settle() {
 	c.t.Helper()
 	for range 1_000_000 {
-		if !c.step() {
+		if c.quiet() || !c.step() {
 			return
 		}
 	}
 	c.t.Fatal("the cluster did not settle")
+}
+
+// quiet reports whether every step pending is a periodic timer: a replica asking the control plane again.
+func (c *rcluster) quiet() bool {
+	return c.s.Idle(func(id core.TimerID) bool { return id == RetryTimer || id == LeaseTimer })
 }
 
 func (c *rcluster) step() bool {
@@ -250,7 +322,12 @@ func (c *rcluster) step() bool {
 func (c *rcluster) runFor(d core.Tick) {
 	c.t.Helper()
 	end := c.s.Time() + d
-	for c.s.Time() < end && c.step() {
+	for {
+		if next := c.s.Next(); next == 0 || next > end {
+			c.s.Advance(end)
+			return
+		}
+		c.step()
 	}
 }
 
@@ -271,10 +348,16 @@ func (c *rcluster) pgFields(pg core.PGID) PGFields {
 	return PGFields{Epoch: c.table.Epoch, PG: pg, Interval: e.Interval}
 }
 
+// primary is the node of pg's primary.
 func (c *rcluster) primary(pg core.PGID) int {
 	_, e := c.table.entry(pg)
 	d, _ := e.primary()
-	return int(d) - 1
+	return c.node(d)
+}
+
+// node is the node whose disk is disk.
+func (c *rcluster) node(disk uint32) int {
+	return slices.Index(c.ids, disk)
 }
 
 // update sends a client's write (data set) or punch of chunk ch to the PG's primary, tagged as pgf.

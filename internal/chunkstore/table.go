@@ -65,7 +65,9 @@ func (t *Table) pool(id core.PoolID) *PoolTable {
 
 func (e *PGEntry) equal(o *PGEntry) bool {
 	return e.Interval == o.Interval && e.Activated == o.Activated && e.Pinned == o.Pinned && e.Recovered == o.Recovered && slices.Equal(e.Members, o.Members) &&
-		slices.EqualFunc(e.Past, o.Past, func(a, b PastInterval) bool { return a.Interval == b.Interval && slices.Equal(a.Members, b.Members) })
+		slices.EqualFunc(e.Past, o.Past, func(a, b PastInterval) bool {
+			return a.Interval == b.Interval && a.MinLive == b.MinLive && slices.Equal(a.Members, b.Members)
+		})
 }
 
 // Apply gives the table d makes of t: ErrTableGap unless d follows t, ErrMalformed for an entry whose interval goes backwards or a new or resized pool without exactly its PG count of entries, ErrTableCRC if the result fails d's CRC.
@@ -153,7 +155,7 @@ func appendEntry(dst []byte, e *PGEntry) []byte {
 	dst = appendMembers(dst, e.Members)
 	dst = binary.AppendUvarint(dst, uint64(len(e.Past)))
 	for _, pi := range e.Past {
-		dst = appendMembers(le.AppendUint32(dst, pi.Interval), pi.Members)
+		dst = appendMembers(append(le.AppendUint32(dst, pi.Interval), pi.MinLive), pi.Members)
 	}
 	return dst
 }
@@ -251,7 +253,7 @@ func (r *reader) deltaPool() DeltaPool {
 	return p
 }
 
-// entry reads a PG entry: an interval of at least 1, a last activated interval not above it, at most one leaving member and none in a recovered interval, and past intervals rising from the last activated one to below it.
+// entry reads a PG entry: an interval of at least 1, a last activated interval not above it, at most one leaving member and none in a recovered interval, and past intervals rising from the last activated one to below it, each with a min_live of at least 1.
 func (r *reader) entry() PGEntry {
 	e := PGEntry{Interval: r.u32(), Activated: r.u32()}
 	flags := r.u8()
@@ -265,8 +267,8 @@ func (r *reader) entry() PGEntry {
 	n := r.uvarint()
 	low := e.Activated
 	for i := range n {
-		pi := PastInterval{Interval: r.u32(), Members: r.members()}
-		if pi.Interval < low || i > 0 && pi.Interval == low || pi.Interval >= e.Interval {
+		pi := PastInterval{Interval: r.u32(), MinLive: r.u8(), Members: r.members()}
+		if pi.MinLive == 0 || pi.Interval < low || i > 0 && pi.Interval == low || pi.Interval >= e.Interval {
 			r.bad = true
 		}
 		low = pi.Interval
