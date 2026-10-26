@@ -370,7 +370,7 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 		want = edgeBytes(u.Off, u.Len)
 	case u.Kind == KindRecover:
 		want = data
-		if u.Off != 0 || u.Len != core.ChunkSize || data%core.BlockSize != 0 || data > core.BlockSize+core.ChunkSize || u.Shard != 0 || u.Term != 0 {
+		if u.Off != 0 || u.Len != core.ChunkSize || data%core.BlockSize != 0 || data > core.BlockSize+core.ChunkSize || u.Shard != 0 || u.Term != 0 || u.HasExpect {
 			r.bad = true
 		}
 	}

@@ -46,11 +46,6 @@ type recovery struct {
 // the missing lists it had the members persist and its own copy, which lacks the kept version where
 // a merge on it waits, and starts tracking the blocks the interval's writes cover in each.
 func (r *Replica) planRecovery(l *lead, pr *peering, e *PGEntry) {
-	for _, t := range l.todo {
-		if t.targets != 0 {
-			r.st.Uncover(t.chunk)
-		}
-	}
 	l.todo, l.cursor, l.listed, l.reported = l.todo[:0], 0, [maxMembers]int{}, false
 	slot := func(disk uint32) int {
 		return slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == disk })

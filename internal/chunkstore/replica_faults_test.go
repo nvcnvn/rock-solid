@@ -607,8 +607,7 @@ func (f *faultRun) lose(m int) {
 // recovered reports whether PG 0's primary reported its interval recovered.
 func (f *faultRun) recovered() bool {
 	_, e := f.c.table.entry(pg0)
-	return slices.Contains(f.c.recovered, PGFields{Epoch: f.c.table.Epoch, PG: pg0, Interval: e.Interval}) ||
-		slices.ContainsFunc(f.c.recovered, func(r PGFields) bool { return r.PG == pg0 && r.Interval == e.Interval })
+	return slices.ContainsFunc(f.c.recovered, func(r PGFields) bool { return r.PG == pg0 && r.Interval == e.Interval })
 }
 
 // settled checks the run's end: every member but a lost one runs, lists nothing and maps what the primaries answered, but in a chunk the last peering found no member to recover from, which faults that overlap before recovery ends can leave (unfound).

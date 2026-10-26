@@ -392,6 +392,7 @@ func TestWireRejectsBadFields(t *testing.T) {
 	}{{KindAck, StatusMismatch}, {KindAck, StatusMissing}, {KindReply, StatusMissing}, {KindReadReply, StatusNoSpace}, {KindReadReply, StatusMismatch}, {KindReply, 6}, {KindAck, 255}} {
 		mustMalformed(t, "a status its reply kind does not take", AppendResponse(nil, &Response{Kind: c.k, Status: c.st, Interval: 1}), 0)
 	}
+	mustMalformed(t, "an expected version on a recovery write", AppendUpdate(nil, &Update{Kind: KindRecover, PG: wirePG, Len: core.ChunkSize, Version: MakeVersion(1, 1), HasExpect: true, Expect: MakeVersion(1, 1)}), 0)
 	mustMalformed(t, "a purger's shard on a write", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1, Shard: 1}), core.BlockSize)
 	mustMalformed(t, "a purger's term on a member write", AppendUpdate(nil, &Update{Kind: KindReplicaWrite, PG: wirePG, Len: 1, Version: 1<<32 | 1, Term: 1}), core.BlockSize)
 	mustMalformed(t, "a grant neither granted nor refused", AppendGrant(nil, &Grant{Status: StatusNoSpace}), 0)
