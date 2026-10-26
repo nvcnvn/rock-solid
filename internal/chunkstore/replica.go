@@ -36,6 +36,8 @@ type ReplicaConfig struct {
 	Seed  uint64
 	Start lease.Time
 	Lease lease.Config
+	// Restarted is set when the store was opened rather than formatted: an earlier run may have writes in flight, so the replica asks for a new interval of each PG it leads in its first table and peers in it before it serves.
+	Restarted bool
 }
 
 // ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, and a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended. The replica asks again every RetryAfter until a table answers.
@@ -387,8 +389,9 @@ func comparePG(a, b core.PGID) int {
 	return cmp.Or(cmp.Compare(a.Pool, b.Pool), cmp.Compare(a.Index, b.Index))
 }
 
-// adopt takes t as the replica's table. A PG this disk leads in t keeps its term if no other primary led it in between, as the PG's listed past intervals show, and holds its client writes until it has peered in its new interval; a PG it no longer leads refuses the writes it held.
+// adopt takes t as the replica's table. In the first table after a restart, every PG this disk leads asks for a new interval. A PG this disk leads in t keeps its term if no other primary led it in between, as the PG's listed past intervals show, and holds its client writes until it has peered in its new interval; a PG it no longer leads refuses the writes it held.
 func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
+	first := r.table.Epoch == 0
 	r.table = t
 	if t.Epoch >= r.want {
 		r.want, r.wantWhole = 0, false
@@ -407,7 +410,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 				continue
 			}
 			pg := core.PGID{Pool: p.ID, Index: uint32(i)}
-			l := lead{pg: pg, interval: e.Interval, since: e.Interval}
+			l := lead{pg: pg, interval: e.Interval, since: e.Interval, asking: first && r.cfg.Restarted}
 			if j := r.lead(pg); j >= 0 {
 				old := r.leads[j]
 				l.held = old.held
@@ -492,7 +495,7 @@ func (r *Replica) keptPrimary(e *PGEntry, from uint32) bool {
 // Activate is peering's end: the PG this disk leads is now active in interval, and the client writes it held are ordered again, unless another primary led the PG since the interval they were held in. It returns ErrUnresolved, activating nothing, while a chunk of the PG has versions peering has not settled.
 func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out *ReplicaOutput) error {
 	i := r.lead(pg)
-	if i < 0 || r.leads[i].interval != interval {
+	if i < 0 || r.leads[i].interval != interval || r.leads[i].asking && !r.leads[i].active {
 		return nil
 	}
 	if r.unsettled = r.Unsettled(pg, r.unsettled[:0]); len(r.unsettled) > 0 {

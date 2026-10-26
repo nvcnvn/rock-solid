@@ -64,3 +64,8 @@
 - **Where:** `clientUpdate` in `internal/chunkstore/replica.go`
 - **Why:** a client marks a flush under a space grant in the update's flags, and `write_limit` admission lets it through on that mark alone, since phase 3 has no record of which client holds which grant; a client that sets the flag wrongly can fill a disk past its `write_limit` ([Admission against `write_limit`](design.md#data-layer-chunkstore)).
 - **Remove when:** phase 4's control-plane group gives the primary each session's outstanding grants, and the primary admits a granted flush only within its session's grant.
+
+## Workaround: leases per loop pair
+- **Where:** `internal/chunkstore/replica_lease.go`
+- **Why:** each disk's replica holds and grants leases on its own loop, keyed by the peer loop, while the design grants them per node pair so one grant covers every PG two nodes share ([Reads](design.md#epoch-changes-and-failure-detection)); phase 3's simulator runs one disk loop per node, where the two are the same, and no node loop exists yet to own the pair's leases.
+- **Remove when:** a node runs several disk loops (the phase 5 drivers); its leases then move to one per node pair, shared by its loops.

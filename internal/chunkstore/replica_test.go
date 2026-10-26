@@ -134,6 +134,7 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 				return c.took(d, &out, acts)
 			})
 			c.loops[d] = n.Start(m, n.Disk(0))
+			seed := n.Fork().Uint64()
 			n.Call(c.loops[d], func(ctx *core.Context, acts []core.Action) []core.Action {
 				var sout Output
 				cfg := testConfig()
@@ -152,7 +153,7 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 				if err != nil {
 					t.Fatal(err)
 				}
-				c.reps[d] = NewReplica(ReplicaConfig{Disk: uint32(d + 1), Seed: uint64(d), Start: lease.Now(ctx)}, st)
+				c.reps[d] = NewReplica(ReplicaConfig{Disk: uint32(d + 1), Seed: seed, Start: lease.Now(ctx), Restarted: restart}, st)
 				for k := range disks {
 					c.reps[d].SetAddr(uint32(k+1), core.NodeID{Node: uint32(k)})
 				}

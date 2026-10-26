@@ -286,6 +286,33 @@ func (f *faultRun) newInterval() {
 	f.peering = true
 }
 
+// answerOthers starts the next interval of each PG but PG 0 a restarted member asked for, which takes no writes, and activates it at once.
+func (f *faultRun) answerOthers(asks []PGFields) {
+	var pgs []core.PGID
+	for _, a := range asks {
+		if _, e := f.c.table.entry(a.PG); a.PG != pg0 && e.Interval == a.Interval && !slices.Contains(pgs, a.PG) {
+			pgs = append(pgs, a.PG)
+		}
+	}
+	if len(pgs) == 0 {
+		return
+	}
+	f.publish(f.c.next(func(t *Table) {
+		for _, pg := range pgs {
+			_, e := t.entry(pg)
+			e.Interval++
+		}
+	}))
+	for _, pg := range pgs {
+		d := f.c.primary(pg)
+		if !f.c.s.Node(uint32(d)).Up() {
+			continue
+		}
+		_, e := f.c.table.entry(pg)
+		f.c.call(d, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.Activate(ctx, pg, e.Interval, out) })
+	}
+}
+
 // inject draws one fault.
 func (f *faultRun) inject() {
 	c, now := f.c, f.c.s.Time()
@@ -375,8 +402,10 @@ func (f *faultRun) tend(all bool) {
 		}
 	}
 	if len(c.asks) > f.asked {
+		asks := c.asks[f.asked:]
 		f.asked = len(c.asks)
-		if !f.peering {
+		f.answerOthers(asks)
+		if !f.peering && slices.ContainsFunc(asks, func(a PGFields) bool { return a.PG == pg0 }) {
 			f.newInterval()
 		}
 	}
