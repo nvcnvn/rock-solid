@@ -136,11 +136,7 @@ func TestAFailedVersionEndsTheInterval(t *testing.T) {
 	if rp, ok := c.cl.replies[next]; ok {
 		t.Fatalf("a write after the failure answered %+v in interval 1", rp)
 	}
-	c.publish(c.next(func(t *Table) { setInterval(t, pg0, 2) }), false)
-	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
-		r.Settle(ctx, ch, 0, out)
-		r.Activate(ctx, pg0, 2, out)
-	})
+	c.publish(c.next(func(t *Table) { setInterval(t, pg0, 2) }), true)
 	c.settle()
 	if rp := c.reply(next); rp.Status != StatusOK || rp.Version != MakeVersion(2, 1) {
 		t.Fatalf("the held write answered %+v once peering dropped 1.1", rp)
@@ -152,22 +148,17 @@ func TestAFailedVersionEndsTheInterval(t *testing.T) {
 	}
 }
 
-// 1.1 waits for cut-off disk 3 when interval 2 marks it down: peering, standing in, keeps 1.1, which is then mapped and acknowledged.
+// 1.1 waits for cut-off disk 3 when interval 2 marks it down: peering keeps 1.1, which every member it reached live in interval 1 holds, and it is then mapped and acknowledged.
 func TestPeeringKeepsAPendingVersionOfAnEndedInterval(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	ch := chunkIn(pg0, 4, 0)
 	c.s.Partition(0, 2, false)
 	w := c.write(pg0, ch, 0, []byte{1})
 	c.runFor(100_000)
-	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkDown) }), false)
-	c.settle()
 	if _, ok := c.cl.replies[w]; ok {
-		t.Fatal("answered before peering")
+		t.Fatal("answered without disk 3")
 	}
-	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
-		r.Settle(ctx, ch, MakeVersion(1, 1), out)
-		r.Activate(ctx, pg0, 2, out)
-	})
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkDown) }), true)
 	c.settle()
 	if rp := c.reply(w); rp.Status != StatusOK || rp.Version != MakeVersion(1, 1) {
 		t.Fatalf("answered %+v", rp)
@@ -212,7 +203,7 @@ func TestAVersionSentAgainAfterItsCopyIsDoneIsRefused(t *testing.T) {
 	}
 }
 
-// A partial write waits for its base read when interval 2 begins, and peering, standing in, settles the chunk at 1.1 and activates before the read completes: the waiting write is refused and never ordered, and the next write is 2.1 on every member.
+// A partial write waits for its base read when interval 2 begins, and peering settles the chunk at 1.1 once the read completes: the waiting write is refused and never ordered, and the next write is 2.1 on every member.
 func TestAWriteWaitingWhenItsIntervalEndsIsRefused(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	ch := chunkIn(pg0, 4, 0)
@@ -221,10 +212,6 @@ func TestAWriteWaitingWhenItsIntervalEndsIsRefused(t *testing.T) {
 	for len(c.reps[0].vers) == 0 && c.step() {
 	}
 	c.publish(c.next(func(t *Table) { setInterval(t, pg0, 2) }), false)
-	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
-		r.Settle(ctx, ch, MakeVersion(1, 1), out)
-		r.Activate(ctx, pg0, 2, out)
-	})
 	next := c.write(pg0, ch, 20, []byte{2})
 	c.settle()
 	if rp := c.reply(w); rp.Status != StatusRefused {
@@ -392,13 +379,7 @@ func TestAFailureBelowACommittedVersionStillAsks(t *testing.T) {
 	if len(c.asks) != 1 {
 		t.Fatalf("asks %+v", c.asks)
 	}
-	c.publish(c.next(func(t *Table) { setInterval(t, pg0, 2) }), false)
-	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
-		if err := r.Settle(ctx, ch, 0, out); err != nil {
-			t.Fatal(err)
-		}
-		r.Activate(ctx, pg0, 2, out)
-	})
+	c.publish(c.next(func(t *Table) { setInterval(t, pg0, 2) }), true)
 	c.settle()
 	for _, w := range []core.RequestID{w1, w2} {
 		if rp := c.reply(w); rp.Status != StatusRefused {
@@ -538,7 +519,7 @@ func TestASpentCounterWithNoLeadRefusesTheWrite(t *testing.T) {
 	}
 }
 
-// A table naming more up members of a PG than a primary fans out to makes its writes refused, not the primary panic.
+// A table naming more up members of a PG than a primary fans out to makes its writes refused, not the primary panic. Its peering cannot reach the members no loop owns, so the test activates the PG.
 func TestAPGWiderThanThePrimaryFansOutToRefusesWrites(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	c.publish(c.next(func(t *Table) {
@@ -547,7 +528,8 @@ func TestAPGWiderThanThePrimaryFansOutToRefusesWrites(t *testing.T) {
 			e.Members = append(e.Members, Member{Disk: d})
 		}
 		e.Interval = 2
-	}), true)
+	}), false)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.Activate(ctx, pg0, 2, out) })
 	w := c.write(pg0, chunkIn(pg0, 4, 0), 0, []byte{1})
 	c.settle()
 	if rp := c.reply(w); rp.Status != StatusRefused {

@@ -28,7 +28,9 @@ type rcluster struct {
 	whole   []bool
 	fetches []int
 	asks    []PGFields
-	inv     sim.Invariants
+	// activations is every activation a primary reported, which next records in its table.
+	activations []PGFields
+	inv         sim.Invariants
 	// sentVer is the newest version of each chunk a primary sent each member on its current connection, lost counting the connections each lost; orderErr is the first send out of order.
 	sentVer  map[sendKey]uint64
 	lost     map[[2]core.NodeID]int
@@ -169,8 +171,9 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 	}
 	c.s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { c.client = n.Start(c.cl, nil) })
 	c.settle()
-	c.publish(tbl, true)
+	c.publish(tbl, false)
 	c.runFor(lease.DefaultConfig.Lease + 500_000)
+	c.untilActive()
 	return c
 }
 
@@ -181,6 +184,7 @@ func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Ac
 		c.fetches[d]++
 	}
 	c.asks = append(c.asks, out.Asks...)
+	c.activations = append(c.activations, out.Activations...)
 	c.passes[d] = append(c.passes[d], slices.Clone(out.Actions))
 	if c.onPass != nil {
 		c.onPass(d, out.Actions)
@@ -216,20 +220,48 @@ func (c *rcluster) call(d int, f func(ctx *core.Context, r *Replica, out *Replic
 	})
 }
 
-// publish hands every replica t and, with activate, ends peering for every PG each leads.
+// publish hands every replica t and, with activate, runs the cluster until every PG a running replica leads has peered.
 func (c *rcluster) publish(t Table, activate bool) {
 	c.table = t
 	for d := range c.reps {
-		c.call(d, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
-			r.SetTable(ctx, t, out)
-			if !activate {
-				return
-			}
-			for _, l := range r.leads {
-				r.Activate(ctx, l.pg, l.interval, out)
-			}
-		})
+		c.call(d, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetTable(ctx, t, out) })
 	}
+	if activate {
+		c.untilActive()
+	}
+}
+
+// untilActive steps the cluster until every PG that a running replica leads in the cluster's table, with min_live members live, is active in its interval.
+func (c *rcluster) untilActive() {
+	c.t.Helper()
+	for range 1_000_000 {
+		if c.active() {
+			return
+		}
+		if !c.step() {
+			break
+		}
+	}
+	c.t.Fatal("peering did not end")
+}
+
+func (c *rcluster) active() bool {
+	for pi := range c.table.Pools {
+		p := &c.table.Pools[pi]
+		for i := range p.PGs {
+			e := &p.PGs[i]
+			d, ok := e.primary()
+			if !ok || e.live() < int(p.MinLive) || !c.s.Node(d-1).Up() {
+				continue
+			}
+			r := c.reps[d-1]
+			j := r.lead(core.PGID{Pool: p.ID, Index: uint32(i)})
+			if j < 0 || r.leads[j].interval != e.Interval || !r.leads[j].active && !r.leads[j].asking {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // settle steps the cluster until nothing but the replicas' periodic timers is pending.

@@ -15,11 +15,12 @@ type peerReply struct {
 	list    []ChunkVersion
 }
 
-// keptChunk is peering's decision on a chunk: the version it keeps, and whether no member it reached holds that version whole with nothing newer logged and nothing listed, so none can serve it.
+// keptChunk is peering's decision on a chunk: the version it keeps, whether no member it reached holds that version whole with nothing newer logged and nothing listed, so none can serve it, and whether the primary's index maps another version once it settled the chunk, so a merge on it waits for recovery.
 type keptChunk struct {
 	chunk   core.ChunkID
 	kept    uint64
 	unfound bool
+	lacking bool
 }
 
 // replyChunk is one member's report of a chunk, by its reply's index.

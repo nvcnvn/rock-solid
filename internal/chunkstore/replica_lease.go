@@ -45,6 +45,7 @@ func (r *Replica) readable(ctx *core.Context, p *PoolTable, e *PGEntry) bool {
 
 // leaseRequest answers a holder's request as a grantor: a grant, renewing the pair's support epoch while the last grant runs, if the holder reported a table at least as new and the restart wait is over, else a refusal naming this disk's table epoch.
 func (r *Replica) leaseRequest(ctx *core.Context, peer core.NodeID, lr *LeaseRequest, out *ReplicaOutput) {
+	r.see(peer, lr.Epoch)
 	t := lease.Now(ctx)
 	g := Grant{ID: lr.ID, Status: StatusRefused, Epoch: r.table.Epoch, Run: r.grantor.Run(), Raw: ctx.Raw}
 	if sup, ok := r.grantor.Grant(peer, lr.Epoch, r.table.Epoch, t); ok {

@@ -39,12 +39,13 @@ func TestWritesAreSentAgainInOrderAfterAReconnect(t *testing.T) {
 	}
 }
 
-// PG 7 is led by disk 2. Its writes are held while it re-peers; they are ordered again in the new interval if disk 2 led every interval since, and refused otherwise.
+// PG 7 is led by disk 2. Its writes are held while it re-peers, here until disk 1 is reachable; they are ordered again in the new interval if disk 2 led every interval since, and refused otherwise.
 func TestHeldWritesAreOrderedAgainOnlyIfNoOtherPrimaryLed(t *testing.T) {
 	pg7 := core.PGID{Pool: testPool, Index: 7}
 	for _, kept := range []bool{true, false} {
 		c := newRCluster(t, rtable(8, 2))
 		ch := chunkIn(pg7, 8, 0)
+		c.s.Partition(0, 1, false)
 		c.publish(c.next(func(t *Table) { mark(t, pg7, 3, MarkDown) }), false)
 		w := c.write(pg7, ch, 0, []byte{1})
 		c.settle()
@@ -62,6 +63,7 @@ func TestHeldWritesAreOrderedAgainOnlyIfNoOtherPrimaryLed(t *testing.T) {
 			e.Members = []Member{{Disk: 2}, {Disk: 3}, {Disk: 1}}
 		})
 		jump.Epoch += 2
+		c.s.Heal(0, 1)
 		c.publish(jump, true)
 		c.settle()
 		rp := c.reply(w)
