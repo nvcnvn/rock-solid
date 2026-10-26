@@ -340,6 +340,26 @@ func TestAMemberRefusesTheVersionsAfterOneItFailed(t *testing.T) {
 	}
 }
 
+// Disk 3 refuses 1.1 while its table marks it in maintenance in the same interval: once marked up again it refuses 1.2 too, so it never logs 1.2 without 1.1.
+func TestAMemberThatRefusesAVersionRefusesTheLaterOnes(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	restore := c.refuse()
+	first := c.replicaWrite(2, ch, MakeVersion(1, 1))
+	c.until(first)
+	restore()
+	next := c.replicaWrite(2, ch, MakeVersion(1, 2))
+	c.settle()
+	for _, w := range []core.RequestID{first, next} {
+		if rp := c.reply(w); rp.Status != StatusRefused {
+			t.Fatalf("answered %+v", rp)
+		}
+	}
+	if v := c.newest(2, ch); v != 0 {
+		t.Fatalf("disk 3 holds %#x", v)
+	}
+}
+
 // Disk 2 restarts and gets 1.1 while its store still recovers: it refuses it.
 func TestARecoveringMemberRefusesWrites(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))

@@ -4446,7 +4446,7 @@ swaps**
   behind 3.1 for write admission when 3.1 fails before it is logged. A member that refuses a
   version of its current interval for any other reason, as under a table marking it in
   `maintenance` at that interval, refuses the later ones too, even once its table marks it up
-  again: the fault run's seed 73 had it log 1.6 without 1.3 to 1.5
+  again: disk 3 refuses 1.1 under such a table and then 1.2 under the table marking it up
   (`TestAMemberThatRefusesAVersionRefusesTheLaterOnes`).
 - A member restarting from its disk refuses 1.1 while its store recovers.
 - Disk 2 answers 1.1's first send, which a lost connection left unanswered, after the primary sent

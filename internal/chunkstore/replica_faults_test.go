@@ -810,15 +810,6 @@ func TestReplicatedWritesSurviveFaults(t *testing.T) {
 	})
 }
 
-// A member that refuses a version of its PG's current interval, here because its table marks it
-// in maintenance, refuses the chunk's later versions of that interval too, even once its table
-// marks it up again: seed 73 had it log 1.6 without 1.3 to 1.5, unlike the member that took them.
-func TestAMemberThatRefusesAVersionRefusesTheLaterOnes(t *testing.T) {
-	if err := runFaults(t, 73, 2, 24, nil); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // A recovery write that leaves out the blocks covered when it read its source, not when it was
 // ordered (the epoch change model's neg-recovery-covers-at-read), puts a source's block over a
 // write ordered in between, and two disks then hold different bytes under one version, the first
