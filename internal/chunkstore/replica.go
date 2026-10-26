@@ -122,12 +122,13 @@ type Replica struct {
 	failed []failedVer
 	bases  []baseFetch
 	// lost is the peers a PeerLost left with writes to send again, which new writes to them wait behind.
-	lost   []core.NodeID
-	nextID uint64
-	seq    core.RequestID
-	frame  []byte
-	armed  bool
-	plant  replicaPlants
+	lost      []core.NodeID
+	unsettled []core.ChunkID
+	nextID    uint64
+	seq       core.RequestID
+	frame     []byte
+	armed     bool
+	plant     replicaPlants
 	// disks is each disk's size and the live blocks it last reported, by disk ID; pools the pools'
 	// settings and outstanding grants; slots each pool's member slots on each disk in the table.
 	disks  []diskInfo
@@ -362,6 +363,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 	}
 	r.leads = kept
 	r.dropWaiting(ctx, out)
+	r.demote(ctx, out)
 	parked := r.parked
 	r.parked = nil
 	for _, p := range parked {
@@ -373,6 +375,35 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 		r.recv(ctx, &ev, out)
 	}
 	r.drain(ctx, out)
+}
+
+// demote refuses the clients of the versions this disk ordered as the primary of a PG it no longer leads, since peering decides whether those versions stay, and has the store map them as a member maps what it logs, so the PG's new primary finds the disk a member like any other.
+func (r *Replica) demote(ctx *core.Context, out *ReplicaOutput) {
+	for i := len(r.vers) - 1; i >= 0; i-- {
+		v := &r.vers[i]
+		if v.done || v.u.Version == 0 || r.lead(v.u.PG.PG) >= 0 {
+			continue
+		}
+		v.done = true
+		r.takeReq(v.req)
+		r.reply(ctx, v.client, v.msgID, r.refusal(v.u.PG.PG), out)
+		r.release(ctx, i)
+	}
+	r.unsettled = r.st.Unsettled(r.unsettled[:0])
+	for _, c := range r.unsettled {
+		if pg, ok := r.pgOf(c); !ok || r.lead(pg) < 0 {
+			r.st.Ungate(ctx, c, &r.sout)
+		}
+	}
+}
+
+// pgOf is the PG chunk c belongs to in the replica's table.
+func (r *Replica) pgOf(c core.ChunkID) (core.PGID, bool) {
+	p := r.table.pool(r.st.cfg.Pool)
+	if p == nil {
+		return core.PGID{}, false
+	}
+	return core.PGID{Pool: p.ID, Index: core.PGIndexOf(c.Hash(), uint32(len(p.PGs)))}, true
 }
 
 // keptPrimary reports whether this disk was the primary of every interval of e after from: e's past intervals list them back to its last activated one.
@@ -1064,8 +1095,8 @@ var ErrActive = errors.New("chunkstore: settle of a chunk its primary has activa
 
 // Settle is peering's decision on chunk c, made before this disk activates as primary in a new interval: the chunk's pending versions up to keep are mapped and their clients answered, and the later ones are dropped and their clients refused. It settles nothing and returns ErrActive once the PG is active, or ErrUnresolved while one of the chunk's writes waits to be ordered or its records here are neither durable nor failed, which peering waits for, since a version whose local write then failed would be kept torn.
 func (r *Replica) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *ReplicaOutput) error {
-	if p := r.table.pool(r.st.cfg.Pool); p != nil {
-		if l := r.lead(core.PGID{Pool: p.ID, Index: core.PGIndexOf(c.Hash(), uint32(len(p.PGs)))}); l >= 0 && r.leads[l].active {
+	if pg, ok := r.pgOf(c); ok {
+		if l := r.lead(pg); l >= 0 && r.leads[l].active {
 			return ErrActive
 		}
 	}

@@ -1118,6 +1118,30 @@ func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Outp
 	return nil
 }
 
+// Ungate maps chunk c's gated writes and punches as a member maps what it logs, each once its records are durable, for a disk that no longer leads the chunk's PG; those whose records failed are never mapped.
+func (s *Store) Ungate(ctx *core.Context, c core.ChunkID, out *Output) {
+	ci, ok := s.chunkOf[c]
+	if !ok {
+		return
+	}
+	for _, oi := range s.chunks[ci].pending {
+		if o := &s.ops[oi]; o.req.Gated && !o.dropped {
+			o.committed = true
+		}
+	}
+	s.mapResolved(ctx, ci, out)
+}
+
+// Unsettled appends to dst the chunks with gated writes or punches ordered and neither mapped nor dropped.
+func (s *Store) Unsettled(dst []core.ChunkID) []core.ChunkID {
+	for ci := range s.chunks {
+		if cs := &s.chunks[ci]; cs.live && slices.ContainsFunc(cs.pending, func(oi int32) bool { return s.ops[oi].req.Gated }) {
+			dst = append(dst, cs.id)
+		}
+	}
+	return dst
+}
+
 // Cancel drops chunk c's write or punch of request id if it still waits to be ordered, reporting whether it did: it is never ordered, and is answered with ErrDropped once no base read of its own is in flight.
 func (s *Store) Cancel(ctx *core.Context, c core.ChunkID, id uint64, out *Output) bool {
 	ci, ok := s.chunkOf[c]

@@ -454,3 +454,31 @@ func TestAnIndexRebuildEndsTheIntervalsItsDiskLeads(t *testing.T) {
 		t.Fatalf("a read after the rebuild answered %+v", rp)
 	}
 }
+
+// Disk 1 orders 1.1 while disk 3 is cut off, and interval 2 makes disk 2 the primary with disk 1 an up member. Disk 1 refuses 1.1's client and maps 1.1 as a member maps what it logs, so the new primary's 2.1 is answered once the cut heals, and disk 1 frees 1.1's buffer.
+func TestADemotedPrimaryMapsItsPendingVersionsAsAMember(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.s.Partition(0, 2, false)
+	w1 := c.write(pg0, ch, 0, []byte{1})
+	c.runFor(100_000)
+	moved := c.next(func(t *Table) {
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 2}, {Disk: 3}, {Disk: 1}}
+		e.Interval = 2
+	})
+	c.s.Heal(0, 2)
+	c.publish(moved, true)
+	c.settle()
+	if rp := c.reply(w1); rp.Status != StatusRefused {
+		t.Fatalf("1.1 answered %+v once disk 1 lost its lead", rp)
+	}
+	w2 := c.write(pg0, ch, 1, []byte{2})
+	c.settle()
+	if rp, ok := c.cl.replies[w2]; !ok || rp.Status != StatusOK || rp.Version != MakeVersion(2, 1) {
+		t.Fatalf("the new primary's write answered %+v %v", rp, ok)
+	}
+	if n := len(c.reps[0].vers); n != 0 {
+		t.Fatalf("disk 1 holds %d versions", n)
+	}
+}
