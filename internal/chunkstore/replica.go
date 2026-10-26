@@ -346,6 +346,7 @@ func (r *Replica) SetAddr(disk uint32, addr core.NodeID) {
 		r.known = append(r.known, make([]bool, int(disk)+1-len(r.known))...)
 	}
 	r.addrs[disk], r.known[disk] = addr, true
+	r.noteGrantors()
 }
 
 // reachable reports whether the membership record names the loop that owns disk.

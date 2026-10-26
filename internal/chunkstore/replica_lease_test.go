@@ -151,3 +151,20 @@ func TestAPrimaryThatKeepsLeadingServesReadsWhileItPeers(t *testing.T) {
 		t.Fatalf("the write was answered %+v", rp)
 	}
 }
+
+// Disk 1 adopts a table while it still places disk 3 at disk 2's loop, then learns disk 3's loop:
+// it asks disk 3's loop for leases from then on and goes on serving reads.
+func TestAPrimaryAsksAMemberLearnedAfterItsTableForALease(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	newer := c.next(func(*Table) {})
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.SetAddr(3, c.loops[1])
+		r.SetTable(ctx, newer, out)
+		r.SetAddr(3, c.loops[2])
+	})
+	c.publish(newer, false)
+	c.runFor(lease.DefaultConfig.Lease + 500_000)
+	if st := c.readStatus(pg0, chunkIn(pg0, 4, 0)); st != StatusOK {
+		t.Fatalf("a read: %v", st)
+	}
+}

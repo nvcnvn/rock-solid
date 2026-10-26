@@ -4687,6 +4687,10 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
   afresh with 41's table, and B refuses it until A reports a table at least as new, so A
   gets no lease for PG 17. A planted variant that exempts fresh grants
   (`neg-fresh-grant-no-table-check`) fails "no PG serves reads from two primaries at once".
+- A primary asks a lease of each other up member's loop as the membership record names it when it
+  learns the loop, not only when it adopts a table: disk 1 adopts a table while it still places disk
+  3 at disk 2's loop, then learns disk 3's loop, and keeps serving reads
+  (`TestAPrimaryAsksAMemberLearnedAfterItsTableForALease`).
 - One grant covers every PG the pair shares and is renewed by the pair's heartbeat. With 2,048 PGs
   on 5 nodes, a pair sends one grant per heartbeat, not one per PG, and the count does not change
   when `pg_count` doubles.
