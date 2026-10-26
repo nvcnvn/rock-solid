@@ -413,7 +413,12 @@ func (pl *placer) missing(e, base *PGEntry, j int) bool {
 	if down < RefillAfter && (down < DegradedRefillAfter || live(e.Members) >= pl.pool.MinLive) {
 		return false
 	}
-	return !pl.awaited(m.Disk, e.Past) && !pl.awaited(m.Disk, []PastInterval{{base.Interval, pl.ran, base.Members}})
+	return !pl.waits(m.Disk, e, base)
+}
+
+// waits reports whether peering waits for disk in e, whose interval before this table is base's: it was the only live member of an interval since the last activated one that accepted writes.
+func (pl *placer) waits(disk uint32, e, base *PGEntry) bool {
+	return pl.awaited(disk, e.Past) || pl.awaited(disk, []PastInterval{{base.Interval, pl.ran, base.Members}})
 }
 
 // awaited reports whether disk was the only live member of an interval that accepted writes, among intervals, so peering waits for it.
@@ -448,6 +453,18 @@ func (pl *placer) pick(e *PGEntry, out int) int {
 }
 
 func (pl *placer) after(k int) float64 { return float64(pl.load[k]+1) / pl.target[k] }
+
+// refills reports whether peering waits for e's member j, in a table whose pool runs under minLive, and otherwise whether placement would refill the member once it is down long enough, some disk of in being eligible to take it at now.
+func refills(in *PoolInputs, minLive uint8, e *PGEntry, j int, now core.Tick) (waits, refilled bool) {
+	pl := &placer{pool: in.Pool, ran: minLive, now: now, disks: slices.Clone(in.Disks)}
+	slices.SortFunc(pl.disks, func(a, b Disk) int { return cmp.Compare(a.ID, b.ID) })
+	pl.target = in.Pool.targets(pl.disks, now)
+	pl.load = make([]int, len(pl.disks))
+	if pl.waits(e.Members[j].Disk, e, e) {
+		return true, false
+	}
+	return false, pl.pick(e, j) >= 0
+}
 
 // eligible reports whether disk k may take a member of e in place of member out: it is up with a target, not in e, and its domain holds fewer than perDomain of e's other members but a leaving one.
 func (pl *placer) eligible(e *PGEntry, k, out int) bool {

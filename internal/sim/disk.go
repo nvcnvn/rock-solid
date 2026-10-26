@@ -46,6 +46,7 @@ type Disk struct {
 	blocks      uint64
 	latency     DiskLatency
 	slow        core.Tick
+	hung        bool
 	tear        bool
 	predRand    *core.Rand
 	rand        *core.Rand
@@ -215,6 +216,9 @@ func (d *Disk) SetSlow(factor uint64) {
 	}
 	d.slow = core.Tick(factor)
 }
+
+// Hang holds every action issued to the disk, before or after, uncompleted while on, as a drive whose I/O never returns does; its node and loops keep running.
+func (d *Disk) Hang(on bool) { d.hung = on }
 
 // Inject adds a fault on later actions; for each action the first fault added whose effect fits its kind and whose predicate matches applies.
 func (d *Disk) Inject(f Fault) {

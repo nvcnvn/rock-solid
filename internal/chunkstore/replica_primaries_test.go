@@ -27,6 +27,8 @@ type authority struct {
 	edits      []Edit
 	asks       []PGInterval
 	acts, seen int
+	// det, when set, gives the disks' marks in place of down.
+	det *Detector
 	// keepID plants the bug of a reformatted disk keeping its old disk ID.
 	keepID bool
 }
@@ -54,6 +56,9 @@ func (a *authority) pools() []PoolInputs {
 		dk := Disk{ID: d.ID, Node: d.Node, Blocks: tb(1)}
 		if since, ok := a.down[d.ID]; ok {
 			dk.Mark, dk.DownSince = MarkDown, since
+		}
+		if a.det != nil {
+			dk.Mark, dk.DownSince = a.det.Mark(d.ID)
 		}
 		disks = append(disks, dk)
 	}

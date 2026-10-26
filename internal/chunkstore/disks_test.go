@@ -20,7 +20,7 @@ func TestDisksAreKnownByTheirLogIDs(t *testing.T) {
 	if a != 1 || b != 2 || c != 3 {
 		t.Fatalf("disk IDs %d %d %d", a, b, c)
 	}
-	r.Down(c)
+	r.Down(c, 1)
 	if got := report(2, 0, 0xc); got != c || !r.Disks()[c-1].Up {
 		t.Fatalf("a restarted disk came back as %d", got)
 	}
@@ -36,7 +36,7 @@ func TestDisksAreKnownByTheirLogIDs(t *testing.T) {
 	if d := r.Disks()[a-1]; d.Node != 0 || d.Device != 0 || !d.Up {
 		t.Fatalf("the disk that reported first lost its place: %+v", d)
 	}
-	r.Down(a)
+	r.Down(a, 1)
 	if got := report(1, 1, 0xa); got != a {
 		t.Fatalf("a down disk moved to another device came back as %d", got)
 	}

@@ -310,7 +310,9 @@ type Store struct {
 	sent       []sentItem
 	sentHead   int
 	// persists is the ops persisting missing lists, until their records are durable or failed.
-	persists  []int32
+	persists []int32
+	// issued is every disk read, write and flush not yet done, in the order the store issued them, with when.
+	issued    []issuedIO
 	fetches   []fetch
 	freeFetch []int32
 	flushes   []flushWait
@@ -1450,6 +1452,7 @@ func (s *Store) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	if ev.Kind != core.EvDiskDone {
 		return
 	}
+	s.completed(ev.IO)
 	if ev.IO&fetchIOBit != 0 {
 		s.fetchDone(ctx, int32(uint64(ev.IO)&^fetchIOBit>>1), ev.Err, out)
 	} else if ev.IO&cleanIOBit != 0 {
@@ -1582,8 +1585,32 @@ func (s *Store) pump(ctx *core.Context, out *Output) {
 			break
 		}
 	}
+	for i := range s.lout.Actions {
+		if a := &s.lout.Actions[i]; a.Kind == core.ActDiskRead || a.Kind == core.ActDiskWrite || a.Kind == core.ActDiskFsync {
+			s.issued = append(s.issued, issuedIO{a.IO, ctx.Now})
+		}
+	}
 	out.Actions = append(out.Actions, s.lout.Actions...)
 	s.lout.Reset()
+}
+
+type issuedIO struct {
+	io core.IOID
+	at core.Tick
+}
+
+// Oldest is the age at now of the oldest disk read, write or flush the store issued that has not completed, 0 if none; trims are left out.
+func (s *Store) Oldest(now core.Tick) core.Tick {
+	if len(s.issued) == 0 {
+		return 0
+	}
+	return now - min(s.issued[0].at, now)
+}
+
+func (s *Store) completed(io core.IOID) {
+	if i := slices.IndexFunc(s.issued, func(x issuedIO) bool { return x.io == io }); i >= 0 {
+		s.issued = slices.Delete(s.issued, i, i+1)
+	}
 }
 
 func (s *Store) housekeep(ctx *core.Context, out *Output) {

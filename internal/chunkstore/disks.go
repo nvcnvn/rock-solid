@@ -3,19 +3,22 @@ package chunkstore
 import (
 	"errors"
 	"slices"
+
+	"github.com/nvcnvn/rock-solid/internal/core"
 )
 
 // ErrLogRefused reports a disk whose log ID is already up on another node or device, as a cloned drive's is, or belongs to a disk whose log was replaced.
 var ErrLogRefused = errors.New("chunkstore: log ID refused")
 
-// RecordedDisk is a disk as the control plane records it: its ID, the log ID it reported, where it was last reported, whether it is up, and whether its log is gone, a new log having been reported in its place.
+// RecordedDisk is a disk as the control plane records it: its ID, the log ID it reported, where it was last reported, whether it is up or else since when it is down, and whether its log is gone, a new log having been reported in its place.
 type RecordedDisk struct {
-	ID     uint32
-	Log    uint64
-	Node   uint32
-	Device uint32
-	Up     bool
-	Gone   bool
+	ID        uint32
+	Log       uint64
+	Node      uint32
+	Device    uint32
+	Up        bool
+	DownSince core.Tick
+	Gone      bool
 }
 
 // DiskRecord is the control plane's record of disks, each known by the log ID it reports: a disk ID never names another log, and is never reused.
@@ -43,10 +46,17 @@ func (r *DiskRecord) Report(node, device uint32, log uint64) (uint32, error) {
 	return id, nil
 }
 
-// Down marks disk id down; it stays known by its log ID.
-func (r *DiskRecord) Down(id uint32) {
+// Down marks disk id down since since; it stays known by its log ID.
+func (r *DiskRecord) Down(id uint32, since core.Tick) {
 	if id >= 1 && int(id) <= len(r.disks) {
-		r.disks[id-1].Up = false
+		r.disks[id-1].Up, r.disks[id-1].DownSince = false, since
+	}
+}
+
+// Up marks disk id up.
+func (r *DiskRecord) Up(id uint32) {
+	if id >= 1 && int(id) <= len(r.disks) {
+		r.disks[id-1].Up = true
 	}
 }
 

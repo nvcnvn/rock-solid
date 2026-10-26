@@ -36,11 +36,13 @@ type ReplicaConfig struct {
 	Seed  uint64
 	Start lease.Time
 	Lease lease.Config
+	// Log is the log ID of the disk's store, which its heartbeats and probe answers carry.
+	Log uint64
 	// Restarted is set when the store was opened rather than formatted: an earlier run may have writes in flight, so the replica asks for a new interval of each PG it leads in its first table and peers in it before it serves.
 	Restarted bool
 }
 
-// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations, which the node's heartbeat reports. The replica asks again, and reports again, every RetryAfter until a table answers.
+// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers.
 type ReplicaOutput struct {
 	Actions     []core.Action
 	Fetch       uint64
@@ -152,11 +154,14 @@ type version struct {
 	members  [maxMembers]uint32
 	sends    [maxMembers]uint8
 	n        int
-	acked    uint8
-	out      uint8
-	logged   bool
-	commit   bool
-	done     bool
+	sentAt   core.Tick
+	// timed is the members sent the version when it was ordered, whose first acknowledgment of that send is a latency.
+	timed  uint8
+	acked  uint8
+	out    uint8
+	logged bool
+	commit bool
+	done   bool
 }
 
 // Replica runs a disk's store as a member of the PGs the placement table puts on it: primary of those it leads, ordering client writes, fanning them out and committing them once every live member holds them, and a replica of the rest.
@@ -211,11 +216,20 @@ type Replica struct {
 	slots  []diskSlots
 	live   uint64
 	liveAt core.Tick
+	// auth is the control plane's address once reporting is set; rep the heartbeat reused, and waitAt when WaitTimer is armed for, 0 when it is not.
+	auth      core.NodeID
+	reporting bool
+	reportID  uint64
+	rep       Report
+	waitAt    core.Tick
 }
 
+// diskInfo is what a replica knows of a disk: its size and live blocks as it last reported them and, as a member of PGs this disk leads, its acknowledgment latencies since the last heartbeat and when it was last reported for a wait past member_timeout.
 type diskInfo struct {
 	blocks uint64
 	live   uint64
+	lat    latHist
+	waited core.Tick
 }
 
 type poolInfo struct {
@@ -607,6 +621,14 @@ func (r *Replica) OnEvent(ctx *core.Context, ev *core.Event, out *ReplicaOutput)
 			r.peerTick(ctx)
 			break
 		}
+		if ev.Timer == ReportTimer {
+			r.report(ctx, out)
+			break
+		}
+		if ev.Timer == WaitTimer {
+			r.waited(ctx, out)
+			break
+		}
 		r.st.OnEvent(ctx, ev, &r.sout)
 	case core.EvDiskDone:
 		r.st.OnEvent(ctx, ev, &r.sout)
@@ -673,6 +695,11 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 		var hb Heartbeat
 		if DecodeHeartbeat(frame, data, &hb) == nil {
 			r.heartbeat(ctx, ev.Peer, &hb, out)
+		}
+	case KindProbe:
+		var p Probe
+		if DecodeProbe(frame, data, &p) == nil {
+			r.probe(ctx, ev.Peer, &p, out)
 		}
 	case KindPeer, KindPeerReply, KindPersist, KindPersistAck:
 		p := &r.peerMsg
@@ -988,10 +1015,15 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 		v.members[v.n] = m.Disk
 		v.n++
 	}
+	v.sentAt = ctx.Now
 	for k := range v.n {
 		if !slices.Contains(r.lost, r.addr(v.members[k])) {
 			r.send(v, k, out)
+			v.timed |= 1 << k
 		}
+	}
+	if v.n > 0 {
+		r.armWait(ctx, out)
 	}
 }
 
@@ -1075,6 +1107,9 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 	r.disk(v.members[k]).live = rp.Fill
 	switch {
 	case rp.Status == StatusOK && rp.Version == v.u.Version:
+		if v.acked&(1<<k) == 0 && v.timed&(1<<k) != 0 && uint8(rp.ID>>sendShift) == 1 {
+			r.noteAck(v.members[k], ctx.Now-v.sentAt)
+		}
 		v.acked |= 1 << k
 		r.tryCommit(ctx, i)
 	case rp.Status != StatusOK:
