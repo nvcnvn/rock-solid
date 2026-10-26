@@ -1029,13 +1029,14 @@ func (r *Replica) release(ctx *core.Context, i int) {
 	}
 }
 
-// counterSpent holds a client write whose chunk spent its counter in the PG's interval, its buffer handed back, until the PG has a new interval: the PG's next writes are held behind it, and once its pending writes are done the primary asks for the interval.
+// counterSpent holds a client write whose chunk spent its counter in the PG's interval, its buffer handed back, until the PG has a new interval: the PG's next writes are held behind it, and once its pending writes are done the primary asks for the interval. A write of a PG this disk no longer leads is refused.
 func (r *Replica) counterSpent(ctx *core.Context, i int, buf core.IOBuf, out *ReplicaOutput) {
 	v := r.vers[i]
 	r.vers = slices.Delete(r.vers, i, i+1)
 	l := r.lead(v.u.PG.PG)
 	if l < 0 {
 		freeBuf(ctx, buf)
+		r.reply(ctx, v.client, v.msgID, r.refusal(v.u.PG.PG), out)
 		return
 	}
 	h := heldMsg{peer: v.client, hold: r.leads[l].interval}

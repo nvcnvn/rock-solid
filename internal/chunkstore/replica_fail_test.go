@@ -523,3 +523,17 @@ func TestActivateWaitsForEveryPendingVersionToBeSettled(t *testing.T) {
 		}
 	}
 }
+
+// A write whose chunk spent its counter after its PG's lead moved away is refused rather than dropped unanswered.
+func TestASpentCounterWithNoLeadRefusesTheWrite(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	pg1 := core.PGID{Pool: testPool, Index: 1}
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.vers = append(r.vers, version{seq: 1, client: c.client, msgID: 99, u: Update{Kind: KindWrite, ID: 99, PG: PGFields{PG: pg1}, Chunk: chunkIn(pg1, 4, 0)}})
+		r.counterSpent(ctx, len(r.vers)-1, core.NoBuf, out)
+	})
+	c.settle()
+	if rp := c.reply(99); rp.Status != StatusRefused {
+		t.Fatalf("answered %+v", rp)
+	}
+}
