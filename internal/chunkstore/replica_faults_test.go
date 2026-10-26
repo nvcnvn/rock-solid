@@ -51,10 +51,11 @@ type faultRun struct {
 	sent  map[core.RequestID]Update
 	flips map[core.LBA][]flip
 	errs  map[string]error
-	// heals is when each cut member is healed, and crashes when each member is crashed at the latest, 0 for none; peering is whether PG 0's new interval waits for the primary to peer.
-	heals   [3]core.Tick
-	crashes [3]core.Tick
-	peering bool
+	// heals is when each cut member is healed, and crashes when each member is crashed at the latest, 0 for none; peering is whether PG 0's new interval waits for the primary to peer, and peerFault whether a member crashed or its disk failed since it started. One fault per peering at most: each restart waits 4 s, and with no failure detection to mark a failed disk down, its failures pile up across restarts.
+	heals     [3]core.Tick
+	crashes   [3]core.Tick
+	peering   bool
+	peerFault bool
 	asked   int
 	// primaryFailed is set once the primary's disk has been made to fail.
 	primaryFailed bool
@@ -296,7 +297,7 @@ func (f *faultRun) newInterval() {
 	_, e := f.c.table.entry(pg0)
 	k := e.Interval + 1
 	f.publish(f.c.next(func(t *Table) { setInterval(t, pg0, k) }))
-	f.peering = true
+	f.peering, f.peerFault = true, false
 }
 
 // answerOthers starts the next interval of each PG but PG 0 a restarted member asked for, which takes no writes.
@@ -330,11 +331,13 @@ func (f *faultRun) inject() {
 			f.heals[m] = now + 1 + core.Tick(f.rng.Below(30_000))
 		}
 	case 1:
-		if up && f.crashes[m] == 0 && !f.peering {
+		if up && f.crashes[m] == 0 && !(f.peering && f.peerFault) {
 			f.crashes[m] = now + 1 + core.Tick(f.rng.Below(20_000))
+			f.peerFault = f.peering
 		}
 	case 2:
-		if up && !f.peering {
+		if up && !(f.peering && f.peerFault) {
+			f.peerFault = f.peering
 			c.s.Node(m).Disk(0).Inject(sim.Fault{Effect: sim.FailIO, When: sim.Once(sim.OnKind(core.ActDiskWrite))})
 		}
 	case 3:

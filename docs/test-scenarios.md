@@ -4506,9 +4506,9 @@ swaps**
   member refuse through a table that puts it in `maintenance`, rots a block of the primary's copy,
   half the time cutting off disk 2, which a base fetch asks first, fails the primary's disk in about
   one seed in ten, after which every write is refused, and starts the PG's next interval; the
-  primary's own asks start one too. Peering is stood in by `Settle` once the chunk's writes
-  resolve, half the time at its committed version and otherwise keeping a random prefix of the
-  pending versions whose clients wait, then `Activate`, which must accept. A primary crash, index
+  primary's own asks start one too. The primary peers in it, and at most one member crash or disk
+  failure lands while it does: each restart waits 4 s, and with no failure detection to mark a
+  failed disk down, a member's failed writes would pile up across its restarts. A primary crash, index
   rebuild or move joins the schedule under [Recovery per PG](#recovery-per-pg): each leaves versions
   peering may drop mapped on the next primary until recovery supersedes them. Invariants, checked after every step:
   a member acknowledges a version only once it maps every block of it; every client write or punch
