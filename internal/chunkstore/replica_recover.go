@@ -1,7 +1,6 @@
 package chunkstore
 
 import (
-	"errors"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -274,13 +273,14 @@ func listedIn(ix *Index, pool core.PoolID, c core.ChunkID) uint32 {
 }
 
 // recoveryWritten takes the store's answer to a recovery write: mapped, its chunk is recovered;
-// refused for a spent counter, the interval ends as for a client's write.
+// failed, even before the store logged any of it, the interval ends, since the store no longer
+// tracks what the interval covered in the chunk.
 func (r *Replica) recoveryWritten(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 	if i := r.versionOf(rp.ID); i >= 0 {
 		r.vers[i].done = true
 		r.release(ctx, i)
 	}
-	if errors.Is(rp.Err, ErrCounter) {
+	if rp.Err != nil {
 		freeBuf(ctx, rp.Buf)
 		if k := slices.IndexFunc(r.recs, func(rc recovery) bool { return rc.req == rp.ID }); k >= 0 {
 			if i := r.lead(r.recs[k].pg); i >= 0 {

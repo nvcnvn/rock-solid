@@ -476,3 +476,33 @@ func TestARebuildEndsTheRecoveriesUnderWay(t *testing.T) {
 	}
 	c.runFor(5_000_000)
 }
+
+// Disk 1, the primary, orders a recovery write of disk 3's chunk, and its store fails it before
+// logging any of it, as it does when its pool has no buffer for the blocks the members get: the
+// primary asks for the next interval, whose recovery brings disk 3 the chunk, rather than leaving
+// it listed with its cover spent.
+func TestARecoveryWriteThatFailsEndsItsInterval(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	a := chunkIn(pg0, 4, 0)
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkDown) }), true)
+	c.writeWhole(pg0, a, 0, 2, 5)
+	c.reps[0].plant.noRecovery = true
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkUp) }), true)
+	c.settle()
+	c.reps[0].plant.noRecovery = false
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.drain(ctx, out) })
+	for len(c.reps[0].recs) > 0 && c.reps[0].recs[0].req == 0 && c.step() {
+	}
+	if len(c.reps[0].recs) != 1 {
+		t.Fatalf("recoveries %+v", c.reps[0].recs)
+	}
+	req := c.reps[0].recs[0].req
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.finished(ctx, Reply{ID: req, Err: core.ErrPoolExhausted}, out)
+		r.drain(ctx, out)
+	})
+	c.settle()
+	if !slices.ContainsFunc(c.asks, func(f PGFields) bool { return f.PG == pg0 && f.Interval == 3 }) {
+		t.Fatalf("no ask for interval 3's successor: %+v", c.asks)
+	}
+}
