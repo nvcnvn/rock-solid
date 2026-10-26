@@ -239,7 +239,7 @@ func (x *Index) must(err error) {
 	}
 }
 
-// Apply maps a Durable or Replayed record's entries in order: writes and punches into the live map, freezes as copies of it, copies wherever a map still stores the copied blocks at their source, and missing-list entries once their PG's decision marker follows.
+// Apply maps a Durable or Replayed record's entries in order: writes and punches into the live map, freezes as copies of it, copies wherever a map still stores the copied blocks at their source, missing-list entries once their PG's decision marker follows, and recovery's end.
 func (x *Index) Apply(ev *disklog.Event) error {
 	for i := range ev.Entries {
 		e := &ev.Entries[i]
@@ -280,6 +280,8 @@ func (x *Index) Apply(ev *disklog.Event) error {
 			x.unmarked = append(x.unmarked, *e)
 		case disklog.EntryDecision:
 			x.decide(e)
+		case disklog.EntryRecovered:
+			x.recovered(e)
 		}
 	}
 	return nil
@@ -304,6 +306,18 @@ func (x *Index) decide(e *disklog.Entry) {
 	}
 	x.val = binary.LittleEndian.AppendUint32(x.val[:0], e.Interval)
 	x.must(x.tree.Put(k, x.val))
+}
+
+// recovered applies recovery's end: the chunk is whole at its version, and a missing-list entry
+// for it from a peering no later than the version's interval is removed, recovery being the only
+// thing that removes one.
+func (x *Index) recovered(e *disklog.Entry) {
+	ch, _ := x.Chunk(e.Pool, e.Chunk)
+	ch.Version, ch.Whole = e.Version, e.Version
+	if ch.ListedIn <= e.Interval {
+		ch.Listed, ch.ListedIn = 0, 0
+	}
+	x.putChunk(e.Pool, e.Chunk, ch)
 }
 
 func (x *Index) decisionKey(pool core.PoolID, pg, pgs uint32) []byte {

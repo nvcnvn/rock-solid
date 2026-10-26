@@ -197,7 +197,7 @@ func (r *primaryRun) pass(d int, acts []core.Action) {
 			continue
 		}
 		switch k := Kind(a.Msg.Body[1]); k {
-		case KindReplicaWrite, KindReplicaPunch:
+		case KindReplicaWrite, KindReplicaPunch, KindRecover:
 			var u Update
 			data := 0
 			if a.Msg.Buf != core.NoBuf {
@@ -213,6 +213,12 @@ func (r *primaryRun) pass(d int, acts []core.Action) {
 			}
 			u, ok := r.sent[[2]uint64{uint64(a.Peer.Node), uint64(rp.ID)}]
 			if !ok || !slices.Contains(r.chunks[:], u.Chunk) {
+				continue
+			}
+			if u.Kind == KindRecover {
+				if x, _ := rep.Store().Index().Chunk(testPool, u.Chunk); x.Whole < u.Version {
+					r.fail(invAckedWhole, fmt.Errorf("disk %d acknowledged recovery %#x of %v holding %+v", rep.cfg.Disk, u.Version, u.Chunk, x))
+				}
 				continue
 			}
 			first, last := spanOf(u.Off, u.Len)
@@ -533,7 +539,7 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks the run's oracle at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 4 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 45 of 500), a restarted primary peering in its old interval (48 of 500) and a disk formatted again keeping its old disk ID (97 of 500).
+// Each planted bug breaks the run's oracle at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 2 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 58 of 500), a restarted primary peering in its old interval (52 of 500) and a disk formatted again keeping its old disk ID (72 of 500).
 func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	for _, p := range []struct {
 		name  string
@@ -541,9 +547,9 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 		inv   string
 		plant func(r *primaryRun)
 	}{
-		{"M7", 242, invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }},
+		{"M7", 37, invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }},
 		{"M8", 6, invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking = true }},
-		{"restart in the old interval", 1, invOneVersion, func(r *primaryRun) { r.c.replicaPlants.peerInOldInterval = true }},
+		{"restart in the old interval", 10, invOneVersion, func(r *primaryRun) { r.c.replicaPlants.peerInOldInterval = true }},
 		{"old disk ID kept", 0, invAckedKept, func(r *primaryRun) { r.a.keepID = true }},
 	} {
 		if err := runPrimaries(t, p.seed, p.plant); err == nil || !strings.HasPrefix(err.Error(), p.inv) {

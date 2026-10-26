@@ -6,6 +6,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 )
@@ -147,4 +148,39 @@ func field(b []byte) (f, rest []byte, ok bool) {
 	}
 	n := int(b[0])
 	return b[1 : 1+n], b[1+n:], true
+}
+
+// FuzzDecodeBlockMap feeds arbitrary bytes as a recovery buffer: decoding never panics, and a map it
+// accepts writes no block it punches, puts back to the same first block and counts the buffer's
+// blocks.
+func FuzzDecodeBlockMap(f *testing.F) {
+	var m blockMap
+	m.data.setRange(2, 4)
+	m.holes.set(9)
+	head := make([]byte, 4096)
+	m.put(head)
+	head = head[:16*blockWords]
+	f.Add(head, uint32(4*4096))
+	f.Add(head, uint32(4096))
+	f.Add([]byte{}, uint32(4096))
+	// A buffer is the head padded with zeros to size bytes, so the fuzzer mutates a few hundred
+	// bytes: it minimizes each new input byte by byte, which stalls it on buffers of whole blocks.
+	f.Fuzz(func(t *testing.T, head []byte, size uint32) {
+		b := make([]byte, max(int(size%((core.BlocksPerChunk+2)*4096)), len(head)))
+		copy(b, head)
+		var m blockMap
+		if decodeBlockMap(b, &m) != nil {
+			return
+		}
+		for w := range blockWords {
+			if m.data[w]&m.holes[w] != 0 {
+				t.Fatalf("block map %+v writes and punches a block", m)
+			}
+		}
+		again := make([]byte, 4096)
+		m.put(again)
+		if !bytes.Equal(again, b[:4096]) || len(b) != (1+m.data.count())*4096 {
+			t.Fatalf("block map %+v of %d bytes does not put back", m, len(b))
+		}
+	})
 }

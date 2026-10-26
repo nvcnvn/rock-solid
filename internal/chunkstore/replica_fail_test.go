@@ -436,7 +436,7 @@ func TestAnIndexRebuildEndsTheIntervalsItsDiskLeads(t *testing.T) {
 	}
 }
 
-// Disk 1 orders 1.1 while disk 3 is cut off, and interval 2 makes disk 2 the primary with disk 1 an up member. Disk 1 refuses 1.1's client and maps 1.1 as a member maps what it logs, so the new primary's 2.1 is answered once the cut heals, and disk 1 frees 1.1's buffer.
+// Disk 1 orders 1.1 while disk 3 is cut off, and interval 2 makes disk 2 the primary with disk 1 an up member. Disk 1 refuses 1.1's client and maps 1.1 as a member maps what it logs, so the new primary's write of interval 2 is answered once the cut heals, and disk 1 frees 1.1's buffer.
 func TestADemotedPrimaryMapsItsPendingVersionsAsAMember(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	ch := chunkIn(pg0, 4, 0)
@@ -456,7 +456,7 @@ func TestADemotedPrimaryMapsItsPendingVersionsAsAMember(t *testing.T) {
 	}
 	w2 := c.write(pg0, ch, 1, []byte{2})
 	c.settle()
-	if rp, ok := c.cl.replies[w2]; !ok || rp.Status != StatusOK || rp.Version != MakeVersion(2, 1) {
+	if rp, ok := c.cl.replies[w2]; !ok || rp.Status != StatusOK || intervalOf(rp.Version) != 2 {
 		t.Fatalf("the new primary's write answered %+v %v", rp, ok)
 	}
 	if n := len(c.reps[0].vers); n != 0 {

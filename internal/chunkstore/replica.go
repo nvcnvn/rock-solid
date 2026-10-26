@@ -42,18 +42,19 @@ type ReplicaConfig struct {
 	Restarted bool
 }
 
-// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers.
+// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations and in Recovered, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers.
 type ReplicaOutput struct {
 	Actions     []core.Action
 	Fetch       uint64
 	Whole       bool
 	Asks        []PGFields
 	Activations []PGFields
+	Recovered   []PGFields
 }
 
 // Reset empties the output for reuse.
 func (o *ReplicaOutput) Reset() {
-	o.Actions, o.Fetch, o.Whole, o.Asks, o.Activations = o.Actions[:0], 0, false, o.Asks[:0], o.Activations[:0]
+	o.Actions, o.Fetch, o.Whole, o.Asks, o.Activations, o.Recovered = o.Actions[:0], 0, false, o.Asks[:0], o.Activations[:0], o.Recovered[:0]
 }
 
 func (o *ReplicaOutput) fetch(epoch uint64, whole bool) {
@@ -77,6 +78,8 @@ func (r *Replica) retry(ctx *core.Context, out *ReplicaOutput) {
 		out.fetch(r.want, r.wantWhole)
 	}
 	r.peerRetry(ctx, out)
+	r.reportRecovered(true, out)
+	r.retryReads()
 	for i := range r.leads {
 		if l := &r.leads[i]; l.asked {
 			out.Asks = append(out.Asks, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
@@ -86,7 +89,7 @@ func (r *Replica) retry(ctx *core.Context, out *ReplicaOutput) {
 
 // armRetry arms RetryTimer while a table or an interval is asked for.
 func (r *Replica) armRetry(ctx *core.Context, out *ReplicaOutput) {
-	if r.retryAt != 0 || r.want == 0 && !slices.ContainsFunc(r.leads, func(l lead) bool { return l.asked }) && !r.peering() {
+	if r.retryAt != 0 || r.want == 0 && !slices.ContainsFunc(r.leads, func(l lead) bool { return l.asked }) && !r.peering() && !r.unrecorded() && !r.waits {
 		return
 	}
 	r.retryAt = ctx.Now + RetryAfter
@@ -108,6 +111,14 @@ type lead struct {
 	asking bool
 	asked  bool
 	spent  int
+	// todo is the chunks the decision left a member lacking, in chunk order, done before cursor, and
+	// scan where a pass of recoverWork goes on looking; listed counts, by place in the interval's
+	// members, the chunks each still lacks; reported is set once the interval was reported recovered.
+	todo     []recoverChunk
+	cursor   int
+	scan     int
+	listed   [maxMembers]int
+	reported bool
 }
 
 type heldMsg struct {
@@ -128,6 +139,8 @@ const (
 	reqClient reqKind = iota + 1
 	reqMember
 	reqRead
+	reqRecover
+	reqRecoverRead
 )
 
 // storeReq is a store request in flight: who asked, and for a client's write or punch its version's state.
@@ -138,8 +151,10 @@ type storeReq struct {
 	msgID core.RequestID
 	pg    core.PGID
 	chunk core.ChunkID
-	// version is the version a member's write or punch was handed.
+	// version is the version a member's write or punch was handed, and recover marks a recovery
+	// write, whose version is the chunk's write before it.
 	version uint64
+	recover bool
 }
 
 // version is a client write or punch the primary took in interval and fans out once its store orders it: the members that must hold it, those that do, and those whose latest send, numbered in sends, has neither a reply nor a PeerLost yet; done once its client is answered.
@@ -162,6 +177,11 @@ type version struct {
 	logged bool
 	commit bool
 	done   bool
+	// recover marks a recovery write, which answers no client and goes only to the members that
+	// lack its chunk; ordered is set once the store ordered the version, whose number a recovery
+	// write shares with the chunk's write before it and which is 0 for one that leaves it absent.
+	recover bool
+	ordered bool
 }
 
 // Replica runs a disk's store as a member of the PGs the placement table puts on it: primary of those it leads, ordering client writes, fanning them out and committing them once every live member holds them, and a replica of the rest.
@@ -208,7 +228,11 @@ type Replica struct {
 	peerDisks  []uint32
 	peerChunks []ChunkPeer
 	peerMsg    Peering
-	plant      replicaPlants
+	// recs is the recoveries under way, released the held writes a recovery lets go.
+	recs     []recovery
+	released []heldMsg
+	waits    bool
+	plant    replicaPlants
 	// disks is each disk's size and the live blocks it last reported, by disk ID; pools the pools'
 	// settings and outstanding grants; slots each pool's member slots on each disk in the table.
 	disks  []diskInfo
@@ -335,6 +359,11 @@ type replicaPlants struct {
 	// peerInOldInterval has a restarted primary peer in the interval it led before, asking for none; mergeWhileLacking merges a partial-block write on a chunk before the primary holds the version peering kept (sub-block spike M8).
 	peerInOldInterval bool
 	mergeWhileLacking bool
+	// noRecovery recovers nothing, as a primary without recovery would; coverAtRead picks the
+	// blocks a recovery write leaves out when it reads the source rather than when it is ordered
+	// (the epoch change model's RecoveryCoversAtRead).
+	noRecovery  bool
+	coverAtRead bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.
@@ -468,7 +497,9 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 			r.refuseHeld(ctx, h, out)
 		}
 	}
+	old := r.leads
 	r.leads = kept
+	r.dropRecoveries(old)
 	r.noteGrantors()
 	r.armLease(ctx, out)
 	r.dropWaiting(ctx, out)
@@ -490,12 +521,12 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 func (r *Replica) demote(ctx *core.Context, out *ReplicaOutput) {
 	for i := len(r.vers) - 1; i >= 0; i-- {
 		v := &r.vers[i]
-		if v.done || v.u.Version == 0 || r.lead(v.u.PG.PG) >= 0 {
+		if v.done || !v.ordered || r.lead(v.u.PG.PG) >= 0 {
 			continue
 		}
 		v.done = true
 		r.takeReq(v.req)
-		r.reply(ctx, v.client, v.msgID, r.refusal(v.u.PG.PG), out)
+		r.answerClient(ctx, v, r.refusal(v.u.PG.PG), out)
 		r.release(ctx, i)
 	}
 	r.unsettled = r.st.Unsettled(r.unsettled[:0])
@@ -580,7 +611,7 @@ func (r *Replica) storeFailed(ctx *core.Context, out *ReplicaOutput) {
 		if v := &r.vers[i]; !v.done {
 			v.done = true
 			r.takeReq(v.req)
-			r.reply(ctx, v.client, v.msgID, r.refusal(v.u.PG.PG), out)
+			r.answerClient(ctx, v, r.refusal(v.u.PG.PG), out)
 			r.release(ctx, i)
 		}
 	}
@@ -659,14 +690,14 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 		}
 		r.clientUpdate(ctx, ev, &u, out)
 		return
-	case KindReplicaWrite, KindReplicaPunch:
+	case KindReplicaWrite, KindReplicaPunch, KindRecover:
 		var u Update
 		if DecodeUpdate(frame, data, &u) != nil {
 			break
 		}
 		r.memberUpdate(ctx, ev, &u, out)
 		return
-	case KindRead:
+	case KindRead, KindRecoverRead:
 		var rd Read
 		if DecodeRead(frame, data, &rd) == nil {
 			r.read(ctx, ev, &rd, out)
@@ -678,7 +709,7 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 		}
 	case KindReadReply:
 		var rp Response
-		if DecodeResponse(frame, data, &rp) == nil && r.baseReply(ctx, &rp, buf, out) {
+		if DecodeResponse(frame, data, &rp) == nil && (r.baseReply(ctx, &rp, buf, out) || r.recoverReply(ctx, ev.Peer, &rp, buf)) {
 			return
 		}
 	case KindLeaseRequest:
@@ -780,7 +811,7 @@ func (r *Replica) park(ev *core.Event, epoch uint64, out *ReplicaOutput) {
 	r.fetch(epoch, false, out)
 }
 
-// clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered.
+// clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered. A partial-block write to a chunk whose kept version the primary lacks is held until recovery brings it, up to maxHeld writes held, and answered unfound when no member can be its source.
 func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) {
 	r.st.SeeIncarnation(u.Session, u.Incarnation)
 	p, e := r.table.entry(u.PG.PG)
@@ -797,6 +828,14 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		}
 	case !r.leads[i].active || r.leads[i].asking || edgeBytes(u.Off, u.Len) > 0 && r.leads[i].lacks(u.Chunk) && !r.plant.mergeWhileLacking:
 		l := &r.leads[i]
+		if l.active && !l.asking && l.isUnfound(u.Chunk) {
+			freeBuf(ctx, ev.Msg.Buf)
+			r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusUnfound}, out)
+			return
+		}
+		if l.active && !l.asking && len(l.held) >= maxHeld {
+			break
+		}
 		l.held = append(l.held, heldMsg{peer: ev.Peer, msg: ev.Msg, hold: l.interval})
 		return
 	case u.Kind == KindWrite && !u.Granted && r.full(ctx, u.PG.PG, p, e) && !r.st.Overwrites(u.Chunk, u.Off, u.Len, u.Snapshot):
@@ -815,6 +854,9 @@ func (r *Replica) order(ctx *core.Context, ev *core.Event, u *Update, interval u
 	id := r.newReq(storeReq{kind: reqClient, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk})
 	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, HasVer: u.HasExpect, Ver: u.Expect,
 		Epoch: u.Snapshot, Interval: interval, Gated: true, Session: u.Session, Incarnation: u.Incarnation}
+	if l := r.lead(u.PG.PG); l >= 0 {
+		req.Lacking = r.leads[l].lacks(u.Chunk)
+	}
 	r.vers = append(r.vers, version{req: id, client: ev.Peer, msgID: u.ID, epoch: r.table.Epoch, interval: interval, u: *u})
 	if u.Kind == KindWrite {
 		r.st.Write(ctx, req, &r.sout)
@@ -831,29 +873,40 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		r.park(ev, u.PG.Epoch, out)
 		return
 	}
+	recover := u.Kind == KindRecover
 	refuse := e == nil || u.PG.Interval != e.Interval || !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) ||
 		slices.ContainsFunc(r.failed, func(f failedVer) bool {
-			return f.chunk == u.Chunk && f.version>>32 == u.Version>>32 && f.version <= u.Version
+			return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version <= u.Version || recover)
 		})
-	if !refuse && u.Version <= r.st.Newest(u.Chunk) {
-		if j := slices.IndexFunc(r.reqs, func(q storeReq) bool { return q.kind == reqMember && q.chunk == u.Chunk && q.version == u.Version }); j >= 0 {
+	if !refuse && (recover || u.Version <= r.st.Newest(u.Chunk)) {
+		if j := slices.IndexFunc(r.reqs, func(q storeReq) bool {
+			return q.kind == reqMember && q.chunk == u.Chunk && q.version == u.Version && q.recover == recover
+		}); j >= 0 {
 			freeBuf(ctx, ev.Msg.Buf)
 			r.dups = append(r.dups, dup{orig: r.reqs[j].id, peer: ev.Peer, msgID: u.ID})
 			return
 		}
-		r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
-		refuse = true
+		if !recover || r.listedIn(u.Chunk) == 0 {
+			r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
+			refuse = true
+		}
 	}
 	if refuse {
+		if e != nil && u.PG.Interval == e.Interval {
+			r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
+		}
 		freeBuf(ctx, ev.Msg.Buf)
 		rp := r.refusal(u.PG.PG)
 		rp.Kind, rp.Fill = KindAck, r.fill(ctx)
 		r.answer(ctx, ev.Peer, u.ID, &rp, core.NoBuf, out)
 		return
 	}
-	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
+	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk, version: u.Version, recover: recover})
 	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, Epoch: u.Snapshot, Version: u.Version}
-	if u.Kind == KindReplicaWrite {
+	if recover {
+		req.Version, req.HasVer, req.Ver, req.Interval, req.Recover = 0, true, u.Version, u.PG.Interval, true
+	}
+	if u.Kind == KindReplicaWrite || recover {
 		r.st.Write(ctx, req, &r.sout)
 	} else {
 		r.st.Punch(ctx, req, &r.sout)
@@ -891,6 +944,10 @@ func (r *Replica) noteFailed(f failedVer) {
 
 // read serves a client's read at the PG's primary while it may serve reads, a read of a frozen version at any member, and at a member a base its primary fetches, the blocks at the version the primary's index names.
 func (r *Replica) read(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) {
+	if rd.Recover {
+		r.recoveryAsked(ctx, ev, rd, out)
+		return
+	}
 	p, e := r.table.entry(rd.PG.PG)
 	i := r.lead(rd.PG.PG)
 	primary := i >= 0 && r.leads[i].serving && rd.PG.Interval >= r.leads[i].since && rd.PG.Interval <= r.leads[i].interval && r.readable(ctx, p, e)
@@ -948,10 +1005,13 @@ func (r *Replica) versionOf(req uint64) int {
 func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 	r.drainStore(ctx, out)
 	r.peerWork(ctx, out)
+	r.recoverWork(ctx, out)
 	for len(r.sout.Ordered)+len(r.sout.Logged)+len(r.sout.Replies)+len(r.sout.Bases) > 0 || r.sout.Rebuilt {
 		r.drainStore(ctx, out)
 		r.peerWork(ctx, out)
+		r.recoverWork(ctx, out)
 	}
+	r.reportRecovered(false, out)
 	if r.st.Err() != nil {
 		r.storeFailed(ctx, out)
 	}
@@ -987,6 +1047,7 @@ func (r *Replica) drainStore(ctx *core.Context, out *ReplicaOutput) {
 		for i := range r.leads {
 			r.leads[i].active, r.leads[i].serving, r.leads[i].asking, r.leads[i].peer = false, false, true, nil
 		}
+		r.recs = r.recs[:0]
 	}
 	acts := r.sout.Actions
 	r.sout.Reset()
@@ -997,15 +1058,15 @@ func (r *Replica) drainStore(ctx *core.Context, out *ReplicaOutput) {
 func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 	i := r.versionOf(o.ID)
 	v := &r.vers[i]
-	v.u.Version, v.buf = o.Version, o.Buf
+	v.u.Version, v.buf, v.ordered = o.Version, o.Buf, true
 	l := r.lead(v.u.PG.PG)
-	if l < 0 || r.leads[l].asking || r.leads[l].interval != uint32(o.Version>>32) {
+	if l < 0 || r.leads[l].asking || r.leads[l].interval != v.interval {
 		r.fail(ctx, i, Response{}, out)
 		return
 	}
 	_, e := r.table.entry(v.u.PG.PG)
 	for _, m := range e.Members {
-		if m.Mark != MarkUp || m.Disk == r.cfg.Disk {
+		if m.Mark != MarkUp || m.Disk == r.cfg.Disk || v.recover && !r.recoveryTarget(v, m.Disk) {
 			continue
 		}
 		if v.n == maxMembers {
@@ -1035,11 +1096,12 @@ func (r *Replica) send(v *version, k int, out *ReplicaOutput) {
 	v.sends[k]++
 	u := v.u
 	u.ID, u.HasExpect, u.Expect, u.Granted = core.RequestID(v.req)|core.RequestID(v.sends[k])<<sendShift, false, 0, false
-	u.PG.Epoch, u.PG.Interval = v.epoch, uint32(v.u.Version>>32)
-	if u.Kind == KindWrite {
+	u.PG.Epoch, u.PG.Interval = v.epoch, v.interval
+	switch u.Kind {
+	case KindWrite:
 		first, last := spanOf(u.Off, u.Len)
 		u.Kind, u.Off, u.Len = KindReplicaWrite, uint32(first)*core.BlockSize, uint32(last-first+1)*core.BlockSize
-	} else {
+	case KindPunch:
 		u.Kind = KindReplicaPunch
 	}
 	r.frame = AppendUpdate(r.frame[:0], &u)
@@ -1061,8 +1123,8 @@ func (r *Replica) logged(ctx *core.Context, l Reply, out *ReplicaOutput) {
 	if i < 0 {
 		return
 	}
-	if r.vers[i].u.Version == 0 {
-		r.vers[i].u.Version = l.Version
+	if !r.vers[i].ordered {
+		r.vers[i].u.Version, r.vers[i].ordered = l.Version, true
 	}
 	if l.Err != nil {
 		r.fail(ctx, i, Response{}, out)
@@ -1129,7 +1191,7 @@ func (r *Replica) tryCommit(ctx *core.Context, i int) {
 		return
 	}
 	v.commit = true
-	r.st.Commit(ctx, v.u.Chunk, v.u.Version, &r.sout)
+	r.st.Commit(ctx, v.u.Chunk, v.req, &r.sout)
 }
 
 // fail ends a version that failed and every later one of its chunk, which may hold its bytes, so none of them commits: their clients are refused, with ref's table if it is newer, since peering decides whether they stay, and the PG's interval ends, as for a spent counter. The store keeps them pending until Settle.
@@ -1139,7 +1201,7 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 		return
 	}
 	c, from, pg := v.u.Chunk, v.u.Version, v.u.PG.PG
-	if l := r.lead(pg); l >= 0 && r.leads[l].interval == uint32(from>>32) {
+	if l := r.lead(pg); l >= 0 && r.leads[l].interval == v.interval {
 		r.leads[l].asking = true
 	}
 	if own := r.refusal(pg); ref.Epoch <= own.Epoch {
@@ -1148,12 +1210,12 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 	ref.Kind, ref.Status, ref.Version, ref.Fill = KindReply, StatusRefused, 0, 0
 	for j := len(r.vers) - 1; j >= 0; j-- {
 		w := &r.vers[j]
-		if w.u.Chunk != c || w.u.Version < from || w.done || w.commit {
+		if w.u.Chunk != c || w.u.Version < from || w.u.Version == from && j < i || w.done || w.commit {
 			continue
 		}
 		w.done = true
 		r.takeReq(w.req)
-		r.answer(ctx, w.client, w.msgID, &ref, core.NoBuf, out)
+		r.answerClient(ctx, w, ref, out)
 		r.release(ctx, j)
 	}
 	r.dropWaiting(ctx, out)
@@ -1163,7 +1225,7 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 func (r *Replica) dropWaiting(ctx *core.Context, out *ReplicaOutput) {
 	for i := len(r.vers) - 1; i >= 0; i-- {
 		v := &r.vers[i]
-		if v.done || v.u.Version != 0 {
+		if v.done || v.ordered {
 			continue
 		}
 		if l := r.lead(v.u.PG.PG); l >= 0 && !r.leads[l].asking && r.leads[l].interval == v.interval || !r.st.Cancel(ctx, v.u.Chunk, v.req, &r.sout) {
@@ -1177,7 +1239,7 @@ func (r *Replica) dropWaiting(ctx *core.Context, out *ReplicaOutput) {
 				r.st.SupplyBase(ctx, f.ID, f.Block, core.NoBuf, ErrDropped, &r.sout)
 			}
 		}
-		r.reply(ctx, v.client, v.msgID, r.refusal(v.u.PG.PG), out)
+		r.answerClient(ctx, v, r.refusal(v.u.PG.PG), out)
 		r.release(ctx, i)
 	}
 }
@@ -1193,6 +1255,14 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		return
 	}
 	switch q.kind {
+	case reqRecover:
+		r.recoveryWritten(ctx, rp, out)
+	case reqRecoverRead:
+		if k := slices.IndexFunc(r.recs, func(rc recovery) bool { return rc.read == rp.ID }); k >= 0 {
+			r.recoveryRead(ctx, k, rp.Buf, rp.Err == nil)
+		} else {
+			freeBuf(ctx, rp.Buf)
+		}
 	case reqClient:
 		i := r.versionOf(rp.ID)
 		if i >= 0 && errors.Is(rp.Err, ErrCounter) {
@@ -1285,6 +1355,7 @@ func (r *Replica) ask(out *ReplicaOutput) {
 
 // peerLost ends every send to the peer and has the writes it left unacknowledged sent again after ResendAfter, new writes to it waiting behind them; a base asked of it is asked of the next member.
 func (r *Replica) peerLost(ctx *core.Context, peer core.NodeID, out *ReplicaOutput) {
+	r.recoverLost(ctx, peer)
 	for i := len(r.bases) - 1; i >= 0; i-- {
 		if r.bases[i].asked == peer {
 			r.askBase(ctx, i, out)
@@ -1320,7 +1391,7 @@ func (r *Replica) resend(out *ReplicaOutput) {
 		}
 		v := &r.vers[i]
 		_, e := r.table.entry(v.u.PG.PG)
-		if v.done || v.u.Version == 0 || e == nil || uint32(v.u.Version>>32) != e.Interval {
+		if v.done || !v.ordered || e == nil || v.interval != e.Interval {
 			continue
 		}
 		for k := range v.n {
@@ -1354,11 +1425,24 @@ func (r *Replica) settle(ctx *core.Context, c core.ChunkID, keep uint64) error {
 		return err
 	}
 	for i := range r.vers {
-		if v := &r.vers[i]; v.u.Chunk == c && v.u.Version != 0 && v.u.Version <= keep {
+		if v := &r.vers[i]; v.u.Chunk == c && v.ordered && v.u.Version <= keep {
 			v.commit = true
 		}
 	}
 	return nil
+}
+
+// answerClient answers the client of version v with rp, a refusal; a recovery write has none, and
+// its chunk is recovered again unless its interval ended.
+func (r *Replica) answerClient(ctx *core.Context, v *version, rp Response, out *ReplicaOutput) {
+	if v.recover {
+		if k := slices.IndexFunc(r.recs, func(rc recovery) bool { return rc.req == v.req }); k >= 0 {
+			r.endRecovery(k, false)
+		}
+		return
+	}
+	rp.Kind = KindReply
+	r.answer(ctx, v.client, v.msgID, &rp, core.NoBuf, out)
 }
 
 // reply answers a client's write or punch.

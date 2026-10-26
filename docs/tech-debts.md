@@ -70,12 +70,12 @@
 - **Why:** each disk's replica holds and grants leases on its own loop, keyed by the peer loop, while the design grants them per node pair so one grant covers every PG two nodes share ([Reads](design.md#epoch-changes-and-failure-detection)); phase 3's simulator runs one disk loop per node, where the two are the same, and no node loop exists yet to own the pair's leases.
 - **Remove when:** a node runs several disk loops (the phase 5 drivers); its leases then move to one per node pair, shared by its loops.
 
-## Workaround: partial writes held on a lacking chunk without bound
-- **Where:** `lead.held` in `internal/chunkstore/replica.go`
-- **Why:** a primary holds a partial-block write to a chunk whose kept version it lacks ([Which versions survive](design.md#epoch-changes-and-failure-detection)) until it holds that version, and only recovery brings it; with no recovery yet, every write a client resends after its timeout joins the list and pins a pool buffer.
-- **Remove when:** Recovery per PG releases the held writes as it recovers the chunk and the primary refuses a partial write to a lacking chunk once a bound of held writes is reached.
-
 ## Workaround: fail-slow judged on reported latencies, not in a simulated cluster
 - **Where:** `TestAFailSlowDiskIsMarkedDown` in `internal/chunkstore/detector_test.go`, which feeds the detector the latencies primaries would report; `TestTheDetectorMarksAFailedDiskDown` leaves fail-slow out
 - **Why:** the simulator's scheduler keeps one clock and moves it to an action's end when it takes the completion, so a disk slowed 100× delays the completions in flight on the other disks as much as its own, and no disk looks slow beside its pool.
 - **Remove when:** the scheduler times each disk's completions on that disk alone; then a seeded cluster run slows one disk 100× and expects it marked down after `slow_disk_window`.
+
+## Workaround: decoder fuzzers run with `-fuzzminimizetime 1x`
+- **Where:** `FuzzDecodeRecord` in `internal/disklog/fuzz_test.go` and `FuzzDecodeMessage` in `internal/chunkstore/wire_test.go`, run by hand as `go test -fuzz … -fuzzminimizetime 1x`
+- **Why:** Go's fuzzer minimizes each new interesting input byte by byte, for up to 60 s by default, before it fuzzes on, and these fuzzers' inputs are whole log records of several 4 KiB blocks, or 256-byte frames: a 30 s run at the default made 1,952 and 268,447 executions, against 5.3 and 3.2 million with minimization capped. A record's data blocks carry checksums, so the short zero-padded head `FuzzDecodeBlockMap` fuzzes cannot stand for one.
+- **Remove when:** the fuzzers take inputs short enough to minimize quickly, or a Go release minimizes large inputs without stalling the run; a 30 s run at the default then makes about as many executions as one with `-fuzzminimizetime 1x`.

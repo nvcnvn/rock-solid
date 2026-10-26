@@ -49,6 +49,7 @@ const (
 	EntryCopy
 	EntryMissing
 	EntryDecision
+	EntryRecovered
 )
 
 // BlobKind says what a blob payload holds; the codec carries it without checking it.
@@ -116,6 +117,11 @@ func MissingEntry(pool core.PoolID, chunk core.ChunkID, version uint64, interval
 	return Entry{Kind: EntryMissing, Pool: pool, Chunk: chunk, Version: version, Interval: interval}
 }
 
+// RecoveredEntry ends a recovery write of a chunk in a PG's interval: the member holds the chunk whole at version, and a missing-list entry a peering of that interval or earlier made for the chunk is removed.
+func RecoveredEntry(pool core.PoolID, chunk core.ChunkID, version uint64, interval uint32) Entry {
+	return Entry{Kind: EntryRecovered, Pool: pool, Chunk: chunk, Version: version, Interval: interval}
+}
+
 // DecisionEntry marks the decision of the peering of interval persisted for PG pg of the pool's pgs PGs, held in Owner and Length.
 func DecisionEntry(pool core.PoolID, pg, pgs, interval uint32) Entry {
 	return Entry{Kind: EntryDecision, Pool: pool, Owner: pg, Length: uint64(pgs), Interval: interval}
@@ -151,7 +157,7 @@ func (e *Entry) wireSize() (int, error) {
 		n = freezeEntrySize
 	case EntryBlob:
 		n = blobEntrySize
-	case EntryMissing:
+	case EntryMissing, EntryRecovered:
 		n = missingEntrySize
 	case EntryDecision:
 		n = decisionEntrySize
@@ -177,18 +183,23 @@ func (e *Entry) ofKind() Entry {
 		return FreezeEntry(e.Pool, e.Chunk, e.Version, e.Epoch)
 	case EntryMissing:
 		return MissingEntry(e.Pool, e.Chunk, e.Version, e.Interval)
+	case EntryRecovered:
+		return RecoveredEntry(e.Pool, e.Chunk, e.Version, e.Interval)
 	case EntryDecision:
 		return Entry{Kind: e.Kind, Pool: e.Pool, Owner: e.Owner, Length: e.Length, Interval: e.Interval}
 	}
 	return BlobEntry(e.BlobKind, e.Owner, e.Length)
 }
 
-// valid checks the fields a missing-list entry or decision marker carries: an interval, and a PG
-// among a power of two of them.
+// valid checks the fields a missing-list entry, recovery's end or decision marker carries: an
+// interval, for recovery's end no earlier than its version's, and a PG among a power of two of
+// them.
 func (e *Entry) valid() bool {
 	switch e.Kind {
 	case EntryMissing:
 		return e.Interval != 0
+	case EntryRecovered:
+		return e.Interval != 0 && uint32(e.Version>>32) <= e.Interval
 	case EntryDecision:
 		return e.Interval != 0 && e.Length != 0 && e.Length <= 1<<31 && e.Length&(e.Length-1) == 0 && uint64(e.Owner) < e.Length
 	}
@@ -389,7 +400,7 @@ func appendEntries(dst []byte, entries []Entry) []byte {
 			dst = append(dst, byte(e.BlobKind))
 			dst = binary.LittleEndian.AppendUint32(dst, e.Owner)
 			dst = binary.LittleEndian.AppendUint64(dst, e.Length)
-		case EntryMissing:
+		case EntryMissing, EntryRecovered:
 			dst = binary.LittleEndian.AppendUint32(dst, uint32(e.Pool))
 			dst = e.Chunk.AppendTo(dst)
 			dst = binary.LittleEndian.AppendUint64(dst, e.Version)
@@ -468,7 +479,7 @@ func decodeEntry(b []byte, e *Entry) (int, error) {
 		e.Owner = binary.LittleEndian.Uint32(b[2:])
 		e.Length = binary.LittleEndian.Uint64(b[6:])
 		return blobEntrySize, nil
-	case EntryMissing:
+	case EntryMissing, EntryRecovered:
 		if len(b) < missingEntrySize {
 			return 0, ErrMalformed
 		}
@@ -668,7 +679,7 @@ func entrySize(k EntryKind) int {
 		return freezeEntrySize
 	case EntryBlob:
 		return blobEntrySize
-	case EntryMissing:
+	case EntryMissing, EntryRecovered:
 		return missingEntrySize
 	case EntryDecision:
 		return decisionEntrySize

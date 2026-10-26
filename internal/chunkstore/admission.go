@@ -123,11 +123,12 @@ func (s *Store) charging(now core.Tick) (float64, bool) {
 }
 
 // admitWrite charges the chunk's next write its blocks, or holds it back, keeping it first among
-// the chunk's operations, when the bucket is empty or the write of a chunk held before it waits.
+// the chunk's operations, when the bucket is empty or the write of a chunk held before it waits. A
+// recovery write that relays logs nothing here and takes no token.
 func (s *Store) admitWrite(ctx *core.Context, ci int32, o *op) bool {
 	a := &s.adm
 	_, charged := s.charging(ctx.Now)
-	charged = charged && !s.plant.noAdmission
+	charged = charged && !s.plant.noAdmission && !o.req.Relay
 	first := a.firstHeld()
 	if first >= 0 && first != ci || charged && a.tokens <= 0 {
 		if cs := &s.chunks[ci]; !cs.held {
@@ -146,7 +147,11 @@ func (s *Store) admitWrite(ctx *core.Context, ci int32, o *op) bool {
 	}
 	if charged {
 		first, last := spanOf(o.req.Off, o.req.Len)
-		a.tokens -= float64(last - first + 1)
+		n := int(last-first) + 1
+		if o.req.Recover {
+			n = recoveryBlocks(ctx.Pool, o.req.Buf)
+		}
+		a.tokens -= float64(n)
 	}
 	return true
 }

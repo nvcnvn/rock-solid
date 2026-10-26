@@ -28,8 +28,10 @@ type rcluster struct {
 	whole   []bool
 	fetches []int
 	asks    []PGFields
-	// activations is every activation a primary reported, which next records in its table.
+	// activations is every activation a primary reported, which next records in its table, and
+	// recovered every recovered interval.
 	activations []PGFields
+	recovered   []PGFields
 	inv         sim.Invariants
 	// sentVer is the newest version of each chunk a primary sent each member on its current connection, boots counting each node's starts and lost the connections each lost; orderErr is the first send out of order.
 	sentVer  map[sendKey]uint64
@@ -69,9 +71,14 @@ type rclient struct {
 	replies map[core.RequestID]Response
 	data    map[core.RequestID][]byte
 	sent    map[core.RequestID]core.IOBuf
+	// lost, when set, sees each peer whose connection broke.
+	lost func(peer core.NodeID)
 }
 
 func (c *rclient) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
+	if ev.Kind == core.EvPeerLost && c.lost != nil {
+		c.lost(ev.Peer)
+	}
 	if ev.Kind != core.EvNetRecv {
 		return out
 	}
@@ -218,6 +225,7 @@ func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Ac
 	}
 	c.asks = append(c.asks, out.Asks...)
 	c.activations = append(c.activations, out.Activations...)
+	c.recovered = append(c.recovered, out.Recovered...)
 	c.passes[d] = append(c.passes[d], slices.Clone(out.Actions))
 	if c.onPass != nil {
 		c.onPass(d, out.Actions)
