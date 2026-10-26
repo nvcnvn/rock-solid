@@ -4510,7 +4510,8 @@ swaps**
   one seed in ten, after which every write is refused, and starts the PG's next interval; the
   primary's own asks start one too. The primary peers in it, and at most one member crash or disk
   failure lands while it does: each restart waits 4 s, and the run's authority does not run the
-  failure detector, so nothing marks a failed disk down and a member's failed writes would pile up
+  failure detector yet ([Placement faults and invariants](#placement-faults-and-invariants)
+  wires it in), so nothing marks a failed disk down and a member's failed writes would pile up
   across its restarts. A primary crash, index
   rebuild or move joins the schedule under [Recovery per PG](#recovery-per-pg): each leaves versions
   peering may drop mapped on the next primary until recovery supersedes them. Invariants, checked after every step:
@@ -4862,7 +4863,8 @@ its marks change (`detect_cluster_test.go`). `node_down_after` 5 s, `member_time
 | A primary reports member M after waiting 1 s; the direct probe answers that M's log failed | M is marked down at once, not after 5 s; a second report while the probe is out sends no second probe |
 | The same report; M's node and loop are up, but a write M's disk took 1.2 s ago has not completed | The probe answers from memory with age 1.2 s; M is marked down at once |
 | The same report, and the answer names another log | M is marked down |
-| The same report, and M's loop does not answer within 1 s | M is marked down 1 s after the probe |
+| The same report, and M's loop does not answer within 1 s | M is marked down 1 s after the probe, as silent: it is marked up at its next normal heartbeat |
+| The same report reaches a new leader before M's first heartbeat to it | No probe: M's heartbeat, due within a second, stands for it, and a healthy one leaves M up |
 | The same report, and the probe answers with no I/O older than 1 s | M is not marked |
 | A report naming a disk the record does not know, or an answer to no probe out | Ignored |
 | No report; a disk's heartbeat shows its oldest unfinished I/O 1 s old (the primary's own disk, or one holding only shard replicas) | Marked down from that heartbeat |
@@ -4870,18 +4872,26 @@ its marks change (`detect_cluster_test.go`). `node_down_after` 5 s, `member_time
 | A discard has been unfinished for 3 s; no read, write or flush is older than 1 s | The store's oldest age is 0: discards are left out (`detect_store_test.go`) |
 | A stalled disk whose marking leaves a PG below `min_live` | Marked down anyway |
 | A stalled disk whose I/O completes; then normal for 50 s, then a whole minute | Stays down for 50 s; rejoins after the whole `slow_disk_window` |
+| `rep2` with `min_live` 2 on three disks; disk A stalls once, then heartbeats normally | Marked down, and up at its first normal heartbeat: its PGs are below `min_live` without it, so they serve nothing either way. No member moves, though the third disk could take A's |
 | A stalled disk normal for 58 s, then stalled again, then normal for a whole minute | The second stall restarts the window; it rejoins a whole minute after it |
 | A new control-plane leader whose lease starts at t = 30 s; disk A is never heard from again | A is marked down at 35 s: the count starts from the lease, not from A's last heartbeat under the old leader |
+| A new control-plane leader at t = 10 s; disk A was marked down as stalled at 3 s | A stays down since 3 s, as the disk record holds it, and rejoins after a whole `slow_disk_window` of normal heartbeats, the record marking it up then |
+| The detector's own node stops for 4.5 s, counted by its clocks, and the heartbeats sent meanwhile arrive together after it, its timer firing late or not | Nothing is marked: an event more than two heartbeats after the detector's last, or `Resumed`, gives every disk one more heartbeat |
+| Every disk falls silent at once after t = 10 s | All are marked down by 16 s, within a heartbeat after `node_down_after` |
 | A disk flapping: silent 5 s, then heartbeating, every 10 s | Marked down at its 1st to 5th flap and up at its next heartbeat after the first four, each flap starting two intervals of every PG with a member on it (F1); in a `rep3` pool and in a `rep2` pool never refilled, since no outage reaches `refill_after` or `degraded_refill_after`. At the 5th mark within 10 minutes it stays down |
 | The damped disk then heartbeats normally for 9 minutes, then 10 | Stays down for 9 minutes; marked up after the whole `flap_window`. In `rep3` its members, down for `refill_after` meanwhile, have been refilled |
 | A disk marked down as stalled 5 times within 10 minutes | Stays down until its heartbeats have been normal for a whole `flap_window` |
 | `rep2` on two storage nodes; disk B damped at its 5th mark, then heartbeating normally | Marked up at its first normal heartbeat, since its PGs would otherwise stay below `min_live` with no disk to refill onto |
+| `rep2` with `min_live` 1 on three disks; disk B goes down, then disk A, which ran their PGs alone, is damped at its 5th mark | Marked up at its first normal heartbeat, though the third disk could take its members: peering waits for A in those PGs, so placement would not refill it |
 
 Cluster runs, each with a client keeping six one-block writes in flight over all four PGs:
 
 | Run | Result |
 | --- | --- |
-| Seeded, 9 seeds a commit and 500 in `scripts/seeds.sh`: one disk's node cut off from every other node, its disk hung, or its log failing a write | Marked down within 1 to 5.1 s of the cut (sooner than `node_down_after` when a primary waits on it: its probe goes unanswered), 1 to 2.5 s of the hang, or 1.5 s of the failure; before it, primaries report their members' latencies; no other disk is ever marked down ("the detector marks down only a disk whose node was cut off, whose I/O stalled or slowed, or whose log failed", registered with `sim.Invariants`); the PGs take writes again afterwards |
+| Seeded, 9 seeds a commit and 500 in `scripts/seeds.sh`: one disk's node cut off from every other node, its disk hung, or its log failing a write; in every other nine seeds, clocks slewed and drifting, delivery jittered up to 20 ms, and the detector's own node stopped for up to 4.5 s before the fault | Marked down within 1 to 5.1 s of the cut (sooner than `node_down_after` when a primary waits on it: its probe goes unanswered), 1 to 2.5 s of the hang, or 1.5 s of the failure, a quarter wider either way on noisy clocks; before it, primaries report their members' latencies; its mark is the only one that ever changes, and no other disk is ever marked down ("the detector marks down only a disk whose node was cut off, whose I/O stalled or slowed, or whose log failed", registered with `sim.Invariants`); the PGs take writes again within 5 s afterwards |
+| A disk's node is cut off for 2.5 s while writes wait on it | Marked down as silent when its probe goes unanswered, and up within 2 s of the heal |
+| A primary is cut off from one member only, which still answers the detector's probes | The primary reports the member once per `member_timeout` for as long as its write waits: three reports in 3.5 s |
+| A primary is cut off from a member for 0.5 s under a write, which it sends again after the heal | The member's acknowledgment of the resend gives no latency: the reconnect is not the disk's |
 | A member's disk hangs under a write | The primary reports it, the member's loop answers the probe from memory, and the member is marked down within 2 s of the write: by the probe, or by its next heartbeat when the hung write was not yet 1 s old as the probe arrived; the write is answered; a member that never acknowledged has no latency |
 
 - The new primary of the PGs a crashed node led peers once its grantors' grants to the node have
@@ -4894,6 +4904,9 @@ Cluster runs, each with a client keeping six one-block writes in flight over all
   the row changes with the rule the open question picks.
 - Open: the 1 s stall threshold is a default, not a measurement (open question "The stall
   threshold").
+- Open: node A crashes with writes in flight, and writes to PGs with no member on A never wait. The
+  three-node `rep3` cluster cannot express it, since every PG has a member on every node; a cluster
+  of more nodes than the pool is wide can.
 
 **Fail-slow.** Disk X is in a pool of 6 disks. Each second, every disk heartbeats and a primary
 reports each disk's 99th-percentile acknowledgment latency, X's at the stated ratio to the others'.
@@ -4907,6 +4920,8 @@ own ([Testing strategy](design.md#testing-strategy)).
 | 12× for 59 s, then normal | Not marked |
 | 9× for 10 minutes | Not marked |
 | 12× for 2 minutes, but marking X down would leave a PG below `min_live` | Not marked; `Detector.Slow` lists X for the pool to report |
+| X and Y both 12× for 60 s, in one primary's reports, where marking both down would leave a PG below `min_live` | One is marked down; the other is kept up and listed by `Detector.Slow`: the guard counts the detector's own marks, not only the last table's |
+| 12× at 1 s and at 61 s, with no figure for X between | Not marked: a gap of more than two heartbeats between figures restarts the window |
 | Marked down, then heartbeats normal for 59 s | Stays down: a disk marked down takes no writes, so its heartbeats judge it |
 | Marked down, then normal for a whole 60 s | Rejoins, with a new interval of its PGs |
 | Alternating 50 s slow and 10 s normal for 10 minutes | Never marked, and its PGs' intervals never churn |
@@ -4914,8 +4929,8 @@ own ([Testing strategy](design.md#testing-strategy)).
 
 - The primary's figure: 1,000 acknowledgments, 10 of them slow, give the fast bucket as the 99th
   percentile, and an 11th slow one the slow bucket; every latency up to 2^20 µs falls in a bucket
-  whose lower bound is at most 12.5% below it, and buckets rise with latency.
-- The median is over the other disks of the pool with a figure at most two heartbeats old, the lower
+  whose lower bound is at most a third below it, and buckets rise with latency.
+- The median is over the pool's other disks that are up and have a figure at most two heartbeats old, the lower
   of the two middle ones for an even count, so a pool of 2 compares a disk with the other; a disk
   with no fresh figure from the others is not judged.
 
