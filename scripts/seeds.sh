@@ -32,6 +32,7 @@ internal/chunkstore TestPlacementKeepsItsRules 1000
 internal/chunkstore TestSubBlockWritesMatchTheByteOracle 500
 internal/chunkstore TestReplicatedWritesSurviveFaults 1000
 internal/chunkstore TestPeeringKeepsAcknowledgedWritesAcrossPrimaries 500
+internal/chunkstore TestTheDetectorMarksAFailedDiskDown 500
 "
 
 cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)

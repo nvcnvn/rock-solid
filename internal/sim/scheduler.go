@@ -315,7 +315,7 @@ func (s *Scheduler) collect(cs []Choice) ([]Choice, core.Tick) {
 				continue
 			}
 		case ChooseDisk:
-			if it.linked && s.writePending(it) {
+			if it.disk.hung || it.linked && s.writePending(it) {
 				continue
 			}
 		case ChooseDeliver, ChoosePeerLost:

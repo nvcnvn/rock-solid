@@ -52,6 +52,9 @@ type rcluster struct {
 	// storePlants and replicaPlants are planted in every store and replica the cluster starts.
 	storePlants   plants
 	replicaPlants replicaPlants
+	// auth, once reporting is set, is the authority every replica heartbeats, from each start.
+	auth      core.NodeID
+	reporting bool
 }
 
 type sendKey struct {
@@ -176,17 +179,22 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 				}
 				c.reformat[d] = false
 				st.plant = c.storePlants
-				c.reps[d] = NewReplica(ReplicaConfig{Disk: c.ids[d], Seed: seed, Start: lease.Now(ctx), Restarted: !fresh}, st)
+				c.reps[d] = NewReplica(ReplicaConfig{Disk: c.ids[d], Seed: seed, Start: lease.Now(ctx), Log: c.logs[d], Restarted: !fresh}, st)
 				c.reps[d].plant = c.replicaPlants
 				for k := range disks {
 					c.reps[d].SetAddr(c.ids[k], core.NodeID{Node: uint32(k)})
 				}
 				acts = append(acts, sout.Actions...)
-				if first {
+				if first && !c.reporting {
 					return acts
 				}
 				var out ReplicaOutput
-				c.reps[d].SetTable(ctx, c.table, &out)
+				if c.reporting {
+					c.reps[d].SetAuthority(ctx, c.auth, &out)
+				}
+				if !first {
+					c.reps[d].SetTable(ctx, c.table, &out)
+				}
 				return c.took(d, &out, acts)
 			})
 		})
@@ -303,7 +311,7 @@ func (c *rcluster) settle() {
 
 // quiet reports whether every step pending is a periodic timer: a replica asking the control plane again.
 func (c *rcluster) quiet() bool {
-	return c.s.Idle(func(id core.TimerID) bool { return id == RetryTimer || id == LeaseTimer })
+	return c.s.Idle(func(id core.TimerID) bool { return id == RetryTimer || id == LeaseTimer || id == ReportTimer || id == DetectTimer })
 }
 
 func (c *rcluster) step() bool {

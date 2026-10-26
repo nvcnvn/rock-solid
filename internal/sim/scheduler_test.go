@@ -214,6 +214,22 @@ func TestADiskCompletionArrivesNoSoonerThanItsLatency(t *testing.T) {
 	}
 }
 
+func TestAHungDiskCompletesNothingUntilReleased(t *testing.T) {
+	x := newSingle(1, sim.DefaultSettings())
+	x.n.Disk(0).Hang(true)
+	x.n.Call(x.loop, x.m.emit(core.Action{Kind: core.ActDiskFsync, IO: 1}))
+	x.s.Run(10)
+	if len(x.m.events) != 0 || x.s.Next() != 0 {
+		t.Fatalf("a hung disk completed %+v, next step at %d", x.m.events, x.s.Next())
+	}
+	x.s.Advance(x.s.Time() + 3_000_000)
+	x.n.Disk(0).Hang(false)
+	x.s.Run(10)
+	if len(x.m.events) != 1 || x.m.events[0].IO != 1 {
+		t.Fatalf("released, the disk completed %+v", x.m.events)
+	}
+}
+
 func TestCompletionsReorder(t *testing.T) {
 	reordered := 0
 	for seed := range uint64(20) {
