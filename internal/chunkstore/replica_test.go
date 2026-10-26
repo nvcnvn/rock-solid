@@ -129,7 +129,7 @@ func newRClusterOn(t *testing.T, tbl Table, s *sim.Scheduler) *rcluster {
 	return newRClusterWith(t, tbl, s, nil)
 }
 
-// newRClusterWith is newRClusterOn with each store's settings edited by edit, if set.
+// newRClusterWith is newRClusterOn with each store's settings edited by edit, if set, and a node for each disk up to the highest the table names.
 func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Config)) *rcluster {
 	geo, err := disklog.GeometryFor(diskBytes)
 	if err != nil {
@@ -138,7 +138,14 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 	c := &rcluster{t: t, s: s, table: tbl, cl: &rclient{replies: map[core.RequestID]Response{}, data: map[core.RequestID][]byte{}, sent: map[core.RequestID]core.IOBuf{}},
 		sentVer: map[sendKey]uint64{}, lost: map[[2]core.NodeID]int{}}
 	c.inv.Register(invSendOrder, func() error { return c.orderErr })
-	const disks = 3
+	disks := 0
+	for _, p := range tbl.Pools {
+		for _, e := range p.PGs {
+			for _, m := range e.Members {
+				disks = max(disks, int(m.Disk))
+			}
+		}
+	}
 	c.reps, c.loops, c.fetch, c.whole, c.passes = make([]*Replica, disks), make([]core.NodeID, disks), make([]uint64, disks), make([]bool, disks), make([][][]core.Action, disks)
 	c.fetches = make([]int, disks)
 	c.ids, c.logs, c.reformat, c.boots = make([]uint32, disks), make([]uint64, disks), make([]bool, disks), make([]int, disks)
