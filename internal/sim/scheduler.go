@@ -259,7 +259,6 @@ func (s *Scheduler) Choices() []Choice {
 	}
 }
 
-// collect lists the choices due now and the earliest later time one falls due, 0 for none.
 // Next is the time the next step falls due, now if one is due, without moving time; 0 when nothing is pending.
 func (s *Scheduler) Next() core.Tick {
 	var wake core.Tick
@@ -293,6 +292,7 @@ func (s *Scheduler) Idle(periodic func(core.TimerID) bool) bool {
 	return true
 }
 
+// collect lists the choices due now and the earliest later time one falls due, 0 for none.
 func (s *Scheduler) collect(cs []Choice) ([]Choice, core.Tick) {
 	var wake core.Tick
 	later := func(t core.Tick) {

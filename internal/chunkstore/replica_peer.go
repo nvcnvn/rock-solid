@@ -15,13 +15,12 @@ const persistBit = 1 << 63
 
 // peering is a primary's peering of its lead's interval: the request ID its messages carry, the replies it reached, and once it decided, each chunk's kept version, in chunk order, and the up members that persisted their lists.
 type peering struct {
-	interval uint32
-	id       core.RequestID
-	replies  []peerReply
-	decided  bool
-	kept     []keptChunk
-	acked    []uint32
-	all      []replyChunk
+	id      core.RequestID
+	replies []peerReply
+	decided bool
+	kept    []keptChunk
+	acked   []uint32
+	all     []replyChunk
 }
 
 // peerAsk is a peering request a member has yet to answer: from a primary's loop, or from this disk's own lead when local.
@@ -75,7 +74,7 @@ func (r *Replica) peerWork(ctx *core.Context, out *ReplicaOutput) {
 		}
 		if l.peer == nil {
 			r.peerID++
-			l.peer = &peering{interval: l.interval, id: core.RequestID(r.peerID)}
+			l.peer = &peering{id: core.RequestID(r.peerID)}
 			r.askPeers(i, false, out)
 		}
 	}
@@ -256,7 +255,7 @@ func (r *Replica) peerReply(ctx *core.Context, disk uint32, pg core.PGID, interv
 	}
 	l := &r.leads[i]
 	pr := l.peer
-	if pr == nil || pr.decided || pr.interval != interval || pr.id != id || l.interval != interval {
+	if pr == nil || pr.decided || pr.id != id || l.interval != interval {
 		return
 	}
 	rp := peerReply{disk: disk, decided: decided, chunks: slices.Clone(chunks)}
@@ -414,13 +413,8 @@ func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 		if j, ok := slices.BinarySearchFunc(pr.kept, c, func(k keptChunk, c core.ChunkID) int { return compareChunk(k.chunk, c) }); ok {
 			kept = pr.kept[j].kept
 		}
-		if err := r.st.Settle(ctx, c, kept, &r.sout); err != nil {
+		if r.settle(ctx, c, kept) != nil {
 			return
-		}
-		for j := range r.vers {
-			if v := &r.vers[j]; v.u.Chunk == c && v.u.Version != 0 && v.u.Version <= kept {
-				v.commit = true
-			}
 		}
 	}
 	var own []ChunkPeer

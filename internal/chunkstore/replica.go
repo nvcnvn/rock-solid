@@ -1305,6 +1305,15 @@ func (r *Replica) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Re
 			return ErrActive
 		}
 	}
+	if err := r.settle(ctx, c, keep); err != nil {
+		return err
+	}
+	r.drain(ctx, out)
+	return nil
+}
+
+// settle hands the store peering's decision on chunk c and marks the versions it keeps committed.
+func (r *Replica) settle(ctx *core.Context, c core.ChunkID, keep uint64) error {
 	if err := r.st.Settle(ctx, c, keep, &r.sout); err != nil {
 		return err
 	}
@@ -1313,7 +1322,6 @@ func (r *Replica) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Re
 			v.commit = true
 		}
 	}
-	r.drain(ctx, out)
 	return nil
 }
 

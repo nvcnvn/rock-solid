@@ -4807,7 +4807,7 @@ it on its missing list.
 
 | Planted bug | Seeds of 500 failing | First | Invariant |
 | --- | --- | --- | --- |
-| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest) | 4 | 242 | A member listing nothing maps the kept writes applied in version order |
+| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest; `TestSettleMapsTheKeptVersionsAndDropsTheRest` fails at once) | 4 | 242 | A member listing nothing maps the kept writes applied in version order |
 | M8: a partial-block write merges before the primary holds the versions peering kept | 45 | 6 | The same |
 | A restarted primary peers in its old interval | 48 | 1 | No two members hold different data under one version (37 of the 48) |
 | A disk formatted again keeps its old disk ID | 97 | 0 | No acknowledged version is ever dropped (72 of the 97) |

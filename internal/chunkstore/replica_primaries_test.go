@@ -467,6 +467,13 @@ func runPrimaries(t *testing.T, seed uint64, edit func(r *primaryRun)) error {
 		version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, tainted: map[uint32]bool{},
 		sent: map[[2]uint64]Update{}, acked: map[blockVersion][]byte{}, errs: map[string]error{}}
 	r.returns = r.rng.Chance(1, 2)
+	for _, inv := range []string{invAckedWhole, invOneVersion} {
+		c.inv.Register(inv, func() error { return r.errs[inv] })
+		if edit != nil {
+			// A planted bug's run returns the invariant it broke, through failed, rather than failing the test.
+			c.inv.Off(inv)
+		}
+	}
 	// Drawn from the seed rather than r.rng, so that the other seeds run as they did before it existed.
 	r.duringPeering = seed%4 == 3
 	if edit != nil {

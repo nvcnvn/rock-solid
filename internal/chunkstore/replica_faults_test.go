@@ -56,7 +56,7 @@ type faultRun struct {
 	crashes   [3]core.Tick
 	peering   bool
 	peerFault bool
-	asked   int
+	asked     int
 	// primaryFailed is set once the primary's disk has been made to fail.
 	primaryFailed bool
 }
