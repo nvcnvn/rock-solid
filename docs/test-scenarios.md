@@ -4815,10 +4815,10 @@ it on its missing list.
 
 | Planted bug | Seeds of 500 failing | First | Invariant |
 | --- | --- | --- | --- |
-| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest; `TestSettleMapsTheKeptVersionsAndDropsTheRest` fails at once) | 13 | 37 | A member listing nothing maps the kept writes applied in version order (2 of the 13) |
-| M8: a partial-block write merges before the primary holds the versions peering kept | 63 | 3 | The same (58 of the 63) |
-| A restarted primary peers in its old interval | 82 | 4 | No two members hold different data under one version (48 of the 82) |
-| A disk formatted again keeps its old disk ID | 102 | 0 | No acknowledged version is ever dropped (68 of the 102) |
+| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest; `TestSettleMapsTheKeptVersionsAndDropsTheRest` fails at once) | 2 | 37 | A member listing nothing maps the kept writes applied in version order |
+| M8: a partial-block write merges before the primary holds the versions peering kept | 58 | 3 | The same |
+| A restarted primary peers in its old interval | 76 | 4 | No two members hold different data under one version (52 of the 76) |
+| A disk formatted again keeps its old disk ID | 91 | 0 | No acknowledged version is ever dropped (72 of the 91) |
 
 - A restarted primary asks for a new interval of each PG it leads, peers in it, then serves
   (`TestARestartedPrimaryTakesANewIntervalBeforeItServes`); only a store opened at start, not one
