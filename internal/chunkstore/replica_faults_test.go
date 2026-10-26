@@ -49,6 +49,11 @@ type faultRun struct {
 	version map[core.RequestID]uint64
 	kept    map[uint32][]keptChunk
 	dirty   bool
+	// images is each chunk's bytes, by its place in chunks and a version, as the first disk that
+	// answered for that version with its chunk whole at it and listing nothing mapped them; ended
+	// is set once the run stops for its final checks.
+	images map[[2]uint64][]byte
+	ended  bool
 	// sent is each update a primary sent, by its node and the update's ID; flips the bits rotted on each node's disk; to the node each request went to, and lost the requests a crash of that node left unanswered.
 	sent  map[[2]uint64]Update
 	flips map[flipAt][]flip
@@ -214,6 +219,7 @@ func (f *faultRun) pass(d int, acts []core.Action) {
 				f.fail(invOneReply, fmt.Errorf("request %d answered twice", rp.ID))
 			}
 			if rp.Status == StatusOK {
+				f.sameImage(d, f.ops[rp.ID].c, rp.Version)
 				j, _ := slices.BinarySearchFunc(f.ok, rp.Version, func(a answered, v uint64) int { return cmpU64(a.version, v) })
 				f.ok = slices.Insert(f.ok, j, answered{version: rp.Version, id: rp.ID})
 				f.dirty = true
@@ -229,6 +235,7 @@ func (f *faultRun) pass(d int, acts []core.Action) {
 			if !ok {
 				continue
 			}
+			f.sameImage(d, u.Chunk, u.Version)
 			ix := f.c.reps[d].Store().Index()
 			if u.Kind == KindRecover {
 				if x, _ := ix.Chunk(testPool, u.Chunk); x.Whole < u.Version {
@@ -338,6 +345,25 @@ func (f *faultRun) mapped() error {
 		}
 	}
 	return nil
+}
+
+// sameImage checks that node n, if its chunk ch is whole at version v and listed nowhere, maps the
+// same bytes of it as every other disk that answered for v so.
+func (f *faultRun) sameImage(n int, ch core.ChunkID, v uint64) {
+	k := slices.Index(f.chunks[:], ch)
+	if x, _ := f.c.reps[n].Store().Index().Chunk(testPool, ch); k < 0 || x.Version != v || x.Whole != v || x.ListedIn != 0 {
+		return
+	}
+	var img []byte
+	for b := range uint16(2 * faultSpan / core.BlockSize) {
+		img = append(img, f.block(n, ch, b)...)
+	}
+	key := [2]uint64{uint64(k), v}
+	if want, ok := f.images[key]; !ok {
+		f.images[key] = img
+	} else if !bytes.Equal(img, want) {
+		f.fail(invOneVersion, fmt.Errorf("disk %d holds %v at %#x unlike another disk", f.c.ids[n], ch, v))
+	}
 }
 
 // block is block b of ch as node n maps it, the bits rotted on its disk put back.
@@ -614,13 +640,15 @@ func (f *faultRun) settled() error {
 	return nil
 }
 
-func runFaults(t *testing.T, seed uint64, clients, writes int) {
+// runFaults runs the fault workload, failing t on a broken invariant; with a plant, it returns the
+// first difference between two disks under one version instead.
+func runFaults(t *testing.T, seed uint64, clients, writes int, plant func(c *rcluster)) error {
 	s := sim.New(seed, sim.DefaultSettings())
 	c := newRClusterWith(t, rtable(4, 2), s, func(cfg *Config) { cfg.Log.MaxRecordBytes = 3 * core.BlockSize })
 	f := &faultRun{t: t, c: c, rng: core.NewRand(seed ^ 0xfa17), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)},
 		ops: map[core.RequestID]faultOp{}, replied: map[core.RequestID]int{}, sent: map[[2]uint64]Update{}, flips: map[flipAt][]flip{},
 		errs: map[string]error{}, version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, to: map[core.RequestID]int{},
-		lost: map[core.RequestID]bool{}, heals: map[[2]uint32]core.Tick{}}
+		lost: map[core.RequestID]bool{}, heals: map[[2]uint32]core.Tick{}, images: map[[2]uint64][]byte{}}
 	c.onPass = f.pass
 	c.cl.lost = func(peer core.NodeID) {
 		for id, to := range f.to {
@@ -629,10 +657,23 @@ func runFaults(t *testing.T, seed uint64, clients, writes int) {
 			}
 		}
 	}
-	for _, inv := range []string{invAckedWhole, invOneReply} {
+	for _, inv := range []string{invAckedWhole, invOneReply, invOneVersion} {
 		c.inv.Register(inv, func() error { return f.errs[inv] })
 	}
 	c.inv.Register(invMappedAnswers, f.mapped)
+	if plant != nil {
+		c.inv.Off(invOneVersion)
+		plant(c)
+		for n := range c.reps {
+			c.reps[n].plant = c.replicaPlants
+		}
+	}
+	c.inv.Register(invRecovered, func() error {
+		if !f.ended {
+			return nil
+		}
+		return f.settled()
+	})
 	if f.rng.Chance(1, 2) {
 		c.reps[0].Store().cfg.MergeCache = 0
 	}
@@ -660,28 +701,41 @@ func runFaults(t *testing.T, seed uint64, clients, writes int) {
 			continue
 		}
 		idle = 0
+		if err := f.errs[invOneVersion]; plant != nil && err != nil {
+			return err
+		}
 		if busy() && f.rng.Chance(1, 200) {
 			f.inject()
 		}
 		f.tend(false)
-	}
-	f.dirty = true
-	if err := c.inv.Check(); err != nil {
-		t.Fatal(err)
 	}
 	for id := core.RequestID(1); id <= c.nextID; id++ {
 		if _, ok := f.ops[id]; ok && f.replied[id] != 1 && !(f.replied[id] == 0 && f.lost[id]) {
 			t.Fatalf("request %d answered %d times", id, f.replied[id])
 		}
 	}
-	if err := f.settled(); err != nil {
+	f.dirty, f.ended = true, true
+	if err := c.inv.Check(); err != nil {
 		t.Fatal(err)
 	}
+	return f.errs[invOneVersion]
 }
 
 // Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail and they refuse, the primary's bases rot, the PG's interval changes and the primary crashes, rebuilds its index and moves, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once unless a crash of its primary lost it, the primary maps exactly the writes it answered OK in every chunk it lists nothing of, and once recovery settles every member lists nothing and maps them.
 func TestReplicatedWritesSurviveFaults(t *testing.T) {
 	seeds.Run(t, 0, 20, func(seed uint64) {
-		runFaults(t, seed, 2, 24)
+		if err := runFaults(t, seed, 2, 24, nil); err != nil {
+			t.Fatal(err)
+		}
 	})
+}
+
+// A recovery write that leaves out the blocks covered when it read its source, not when it was
+// ordered (the epoch change model's neg-recovery-covers-at-read), puts a source's block over a
+// write ordered in between, and two disks then hold different bytes under one version, the first
+// invariant it breaks at 156 of the first 500 seeds.
+func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
+	if runFaults(t, 4, 2, 24, func(c *rcluster) { c.replicaPlants.coverAtRead = true }) == nil {
+		t.Fatalf("seed 4 kept %q", invOneVersion)
+	}
 }

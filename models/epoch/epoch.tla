@@ -668,16 +668,14 @@ Persist(d) ==
 
 \* Recovery is a write the primary orders: it reads the kept version's blocks
 \* from a member that holds it, then orders a write of them to a member that
-\* lists the chunk. The real write takes a new version and carries only the
-\* blocks no write of the interval ordered before it covers, so the member's
-\* own writes of the interval stay on top; the model keeps the source's
-\* versions up to the kept one under their own numbers, which Content reads
-\* the same way. It leaves out the recovery write's own version, which the
-\* real write sends only to the members it recovers: the blocks it carries
-\* are the kept version's, which every other member holds, so keeping or
-\* dropping that version leaves every member's bytes as the model has them.
-\* The real write also takes a counter value, which only makes the counter
-\* run out sooner. What the read returns never changes, since the source lists
+\* lists the chunk. The real write carries only the blocks no write of the
+\* interval ordered before it covers, so the member's own writes of the
+\* interval stay on top; the model keeps the source's versions up to the kept
+\* one under their own numbers, which Content reads the same way. Neither
+\* takes a version of its own: the real write is logged under the newest
+\* version the interval ordered before it, or the kept one, and goes only to
+\* the members that list the chunk, so peering keeps or drops it with that
+\* version. What the read returns never changes, since the source lists
 \* nothing and a new interval stops the write, so the model takes the read
 \* with the write and lets "at", the newest version the primary had ordered
 \* when it read, be any since it activated. With RecoveryCoversAtRead, the
