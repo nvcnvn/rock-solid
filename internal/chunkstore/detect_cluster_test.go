@@ -233,3 +233,31 @@ func TestAHungMemberIsMarkedDownOnItsPrimarysReport(t *testing.T) {
 		t.Fatal("a member that never acknowledged has a latency")
 	}
 }
+
+// Once warm, a replicated write allocates nothing in any replica's events with reporting on: the acknowledgment latencies, the waits watched and the heartbeats included.
+func TestReportingAllocatesNothingPerWrite(t *testing.T) {
+	d := newDCluster(t, 5)
+	ch := chunkIn(pg0, 4, 0)
+	write := func(i int) {
+		w := d.write(pg0, ch, uint32(i%8)*core.BlockSize, fill(core.BlockSize, byte(i)))
+		d.until(w)
+		if d.reply(w).Status != StatusOK {
+			t.Fatal(d.reply(w))
+		}
+	}
+	for i := range 200 {
+		write(i)
+	}
+	d.run(12 * sec)
+	for i := range 200 {
+		write(i)
+	}
+	d.counting = true
+	for i := range 100 {
+		write(i)
+	}
+	d.run(3 * sec)
+	if d.mallocs != 0 {
+		t.Fatalf("%d heap allocations over 100 writes' events and 3 heartbeats", d.mallocs)
+	}
+}
