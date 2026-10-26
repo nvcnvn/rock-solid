@@ -198,7 +198,7 @@ func TestAPrimarysRecoveryWriteLeavesOutWhatTheIntervalCovered(t *testing.T) {
 	c2 := core.ChunkID{Volume: 1, Inode: 7, Index: 9}
 	h.s.Cover(c2, k)
 	p := h.id()
-	h.s.Punch(&h.ctx, Request{ID: p, Chunk: c2, Off: 0, Len: core.ChunkSize, Interval: k, Gated: true}, &h.out)
+	h.s.Punch(&h.ctx, Request{ID: p, Chunk: c2, Off: 0, Len: core.ChunkSize, Interval: k, Gated: true, Lacking: true}, &h.out)
 	h.take()
 	rec = h.recoverWrite(Request{Chunk: c2, Interval: k, Gated: true, Buf: recoveryBuf(h, img)})
 	h.settle()
@@ -255,13 +255,14 @@ func TestBlockMapErrors(t *testing.T) {
 	}
 }
 
-// A primary orders a punch of a chunk its own store holds nothing of, which its members may hold
-// (a primary that lacks the chunk's kept version), rather than answering it done: the punch would
-// otherwise be acknowledged and never reach them.
+// A primary that lacks a chunk's kept version orders a punch of it although its own store holds
+// nothing of the chunk, which its members may hold, rather than answering it done: the punch would
+// otherwise be acknowledged and never reach them. One that does not lack the chunk logs nothing for
+// a punch of a chunk with no version, as a lone store does.
 func TestAPrimaryOrdersAPunchOfAChunkItHoldsNothingOf(t *testing.T) {
 	h := newRecoveryHarness(t)
 	p := h.id()
-	h.s.Punch(&h.ctx, Request{ID: p, Chunk: chunkC, Len: core.ChunkSize, Interval: 7, Gated: true}, &h.out)
+	h.s.Punch(&h.ctx, Request{ID: p, Chunk: chunkC, Len: core.ChunkSize, Interval: 7, Gated: true, Lacking: true}, &h.out)
 	h.take()
 	h.settle()
 	if _, ok := h.ordered[p]; !ok {
@@ -269,11 +270,19 @@ func TestAPrimaryOrdersAPunchOfAChunkItHoldsNothingOf(t *testing.T) {
 	}
 	c := core.ChunkID{Volume: 1, Inode: 7, Index: 9}
 	p = h.id()
-	h.s.Punch(&h.ctx, Request{ID: p, Chunk: c, Off: 100, Len: core.BlockSize, Interval: 7, Gated: true}, &h.out)
+	h.s.Punch(&h.ctx, Request{ID: p, Chunk: c, Off: 100, Len: core.BlockSize, Interval: 7, Gated: true, Lacking: true}, &h.out)
 	h.take()
 	h.settle()
 	if got := h.ordered[p]; !bytes.Equal(got, make([]byte, 2*core.BlockSize)) {
 		t.Fatalf("a punch in part of two blocks hands the members %d bytes of edges", len(got))
+	}
+	c.Index = 10
+	p = h.id()
+	h.s.Punch(&h.ctx, Request{ID: p, Chunk: c, Len: core.ChunkSize, Interval: 7, Gated: true}, &h.out)
+	h.take()
+	h.settle()
+	if _, ok := h.ordered[p]; ok || h.replies[p].Err != nil {
+		t.Fatalf("a punch of a chunk absent everywhere was ordered (%v) or answered %+v", ok, h.replies[p])
 	}
 }
 

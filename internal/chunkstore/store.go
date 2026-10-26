@@ -93,6 +93,9 @@ type Request struct {
 	// log nothing, its buffer going to the members that lack the chunk.
 	Recover bool
 	Relay   bool
+	// Lacking has a gated punch of a chunk the store holds nothing of ordered rather than answered
+	// done: the primary lacks the chunk's kept version, which its members may hold.
+	Lacking bool
 }
 
 // Reply completes the request ID: the version written or read, and a read's blocks in Buf laid out as a write's, which the caller frees; a write refused with ErrCounter hands its Buf back.
@@ -686,7 +689,7 @@ func (s *Store) startBases(ctx *core.Context, oi int32) bool {
 		o.err = ErrVersion
 		return false
 	}
-	if o.kind == opPunch && cs.version == 0 && !o.req.Gated {
+	if o.kind == opPunch && cs.version == 0 && !o.req.Lacking {
 		return false
 	}
 	first, last := spanOf(o.req.Off, o.req.Len)
@@ -856,7 +859,7 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	o := &s.ops[oi]
 	ci := o.chunk
 	cs := &s.chunks[ci]
-	if o.kind == opPunch && cs.version == 0 && o.req.Version == 0 && !o.req.Gated {
+	if o.kind == opPunch && cs.version == 0 && o.req.Version == 0 && !o.req.Lacking {
 		o.err = nil
 		s.finishUnordered(ctx, oi, out)
 		return

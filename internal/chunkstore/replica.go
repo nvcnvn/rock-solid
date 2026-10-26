@@ -848,6 +848,9 @@ func (r *Replica) order(ctx *core.Context, ev *core.Event, u *Update, interval u
 	id := r.newReq(storeReq{kind: reqClient, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk})
 	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, HasVer: u.HasExpect, Ver: u.Expect,
 		Epoch: u.Snapshot, Interval: interval, Gated: true, Session: u.Session, Incarnation: u.Incarnation}
+	if l := r.lead(u.PG.PG); l >= 0 {
+		req.Lacking = r.leads[l].lacks(u.Chunk)
+	}
 	r.vers = append(r.vers, version{req: id, client: ev.Peer, msgID: u.ID, epoch: r.table.Epoch, interval: interval, u: *u})
 	if u.Kind == KindWrite {
 		r.st.Write(ctx, req, &r.sout)
@@ -883,6 +886,9 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		}
 	}
 	if refuse {
+		if e != nil && u.PG.Interval == e.Interval {
+			r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
+		}
 		freeBuf(ctx, ev.Msg.Buf)
 		rp := r.refusal(u.PG.PG)
 		rp.Kind, rp.Fill = KindAck, r.fill(ctx)
