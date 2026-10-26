@@ -260,6 +260,21 @@ func (s *Scheduler) Choices() []Choice {
 }
 
 // collect lists the choices due now and the earliest later time one falls due, 0 for none.
+// Idle reports, without moving time, whether nothing is pending but timers periodic accepts: no message, disk action, other timer, restart, resume or ready actor.
+func (s *Scheduler) Idle(periodic func(core.TimerID) bool) bool {
+	for i := range s.items {
+		if it := &s.items[i]; it.kind != ChooseTimer || !periodic(it.act.Timer) {
+			return false
+		}
+	}
+	for _, n := range s.nodes {
+		if !n.up || n.paused || slices.ContainsFunc(n.actors, func(a actor) bool { return a.a.Ready() }) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Scheduler) collect(cs []Choice) ([]Choice, core.Tick) {
 	var wake core.Tick
 	later := func(t core.Tick) {

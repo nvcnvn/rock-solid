@@ -23,10 +23,11 @@ type rcluster struct {
 	cl     *rclient
 	nextID core.RequestID
 	// fetch is the newest table epoch each replica asked for, and whole whether it asked for the whole table.
-	fetch []uint64
-	whole []bool
-	asks  []PGFields
-	inv   sim.Invariants
+	fetch   []uint64
+	whole   []bool
+	fetches []int
+	asks    []PGFields
+	inv     sim.Invariants
 	// sentVer is the newest version of each chunk a primary sent each member on its current connection, lost counting the connections each lost; orderErr is the first send out of order.
 	sentVer  map[sendKey]uint64
 	lost     map[[2]core.NodeID]int
@@ -111,6 +112,7 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 	c.inv.Register(invSendOrder, func() error { return c.orderErr })
 	const disks = 3
 	c.reps, c.loops, c.fetch, c.whole, c.passes = make([]*Replica, disks), make([]core.NodeID, disks), make([]uint64, disks), make([]bool, disks), make([][][]core.Action, disks)
+	c.fetches = make([]int, disks)
 	for d := range disks {
 		c.s.AddNode(sim.DefaultClock, []sim.DiskSpec{{Blocks: geo.DiskBlocks(), Settings: sim.DefaultDiskSettings()}}, func(n *sim.Node) {
 			var out ReplicaOutput
@@ -172,6 +174,9 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Action {
 	c.fetch[d] = max(c.fetch[d], out.Fetch)
 	c.whole[d] = c.whole[d] || out.Whole
+	if out.Fetch != 0 {
+		c.fetches[d]++
+	}
 	c.asks = append(c.asks, out.Asks...)
 	c.passes[d] = append(c.passes[d], slices.Clone(out.Actions))
 	if c.onPass != nil {
@@ -224,14 +229,20 @@ func (c *rcluster) publish(t Table, activate bool) {
 	}
 }
 
+// settle steps the cluster until nothing but the replicas' periodic timers is pending.
 func (c *rcluster) settle() {
 	c.t.Helper()
 	for range 1_000_000 {
-		if !c.step() {
+		if c.quiet() || !c.step() {
 			return
 		}
 	}
 	c.t.Fatal("the cluster did not settle")
+}
+
+// quiet reports whether every step pending is a periodic timer: a replica asking the control plane again.
+func (c *rcluster) quiet() bool {
+	return c.s.Idle(func(id core.TimerID) bool { return id == RetryTimer })
 }
 
 func (c *rcluster) step() bool {

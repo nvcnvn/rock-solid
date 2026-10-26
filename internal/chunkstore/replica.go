@@ -18,13 +18,19 @@ const ResendTimer core.TimerID = 0x72736e64
 // ResendAfter is how long after a PeerLost the primary sends again: 10 ms.
 const ResendAfter = core.Tick(10_000)
 
+// RetryTimer is the timer on which a replica asks the control plane again for the table and the intervals no table has answered yet.
+const RetryTimer core.TimerID = 0x72747279
+
+// RetryAfter is how often a replica asks again: 1 s, a heartbeat.
+const RetryAfter = core.Tick(1_000_000)
+
 // ReplicaConfig is a disk's place in the cluster.
 type ReplicaConfig struct {
 	// Disk is the disk whose store the replica runs, by its ID in the placement table.
 	Disk uint32
 }
 
-// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, and a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended. Each is asked once; the loop asks again until a table answers it.
+// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, and a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended. The replica asks again every RetryAfter until a table answers.
 type ReplicaOutput struct {
 	Actions []core.Action
 	Fetch   uint64
@@ -40,6 +46,37 @@ func (o *ReplicaOutput) Reset() {
 func (o *ReplicaOutput) fetch(epoch uint64, whole bool) {
 	o.Fetch = max(o.Fetch, epoch)
 	o.Whole = o.Whole || whole
+}
+
+// fetch asks for a table at least as new as epoch, whole if whole, until the replica holds one.
+func (r *Replica) fetch(epoch uint64, whole bool, out *ReplicaOutput) {
+	r.want, r.wantWhole = max(r.want, epoch), r.wantWhole || whole
+	out.fetch(epoch, whole)
+}
+
+// retry asks again for what no table has answered: the table wanted and each lead's next interval; a stale firing asks nothing.
+func (r *Replica) retry(ctx *core.Context, out *ReplicaOutput) {
+	if r.retryAt == 0 || ctx.Now < r.retryAt {
+		return
+	}
+	r.retryAt = 0
+	if r.want != 0 {
+		out.fetch(r.want, r.wantWhole)
+	}
+	for i := range r.leads {
+		if l := &r.leads[i]; l.asked {
+			out.Asks = append(out.Asks, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
+		}
+	}
+}
+
+// armRetry arms RetryTimer while a table or an interval is asked for.
+func (r *Replica) armRetry(ctx *core.Context, out *ReplicaOutput) {
+	if r.retryAt != 0 || r.want == 0 && !slices.ContainsFunc(r.leads, func(l lead) bool { return l.asked }) {
+		return
+	}
+	r.retryAt = ctx.Now + RetryAfter
+	out.Actions = append(out.Actions, core.Action{Kind: core.ActSetTimer, Timer: RetryTimer, At: ctx.Now + RetryAfter})
 }
 
 // lead is a PG this disk is primary of: its interval in the replica's table, the interval its term began in, whether it has peered in the interval, and the client writes it holds until it has.
@@ -126,6 +163,10 @@ type Replica struct {
 	nextID    uint64
 	frame     []byte
 	armed     bool
+	// want is the newest table epoch asked for and not yet held, whole if wantWhole; retryAt is when RetryTimer is armed for, 0 when it is not.
+	want      uint64
+	wantWhole bool
+	retryAt   core.Tick
 	plant     replicaPlants
 	// disks is each disk's size and the live blocks it last reported, by disk ID; pools the pools'
 	// settings and outstanding grants; slots each pool's member slots on each disk in the table.
@@ -276,7 +317,8 @@ func (r *Replica) ApplyDelta(ctx *core.Context, d *Delta, out *ReplicaOutput) {
 	}
 	t, err := r.table.Apply(d)
 	if err != nil {
-		out.fetch(d.Epoch, true)
+		r.fetch(d.Epoch, true, out)
+		r.armRetry(ctx, out)
 		return
 	}
 	r.adopt(ctx, t, out)
@@ -325,6 +367,9 @@ func comparePG(a, b core.PGID) int {
 // adopt takes t as the replica's table. A PG this disk leads in t keeps its term if no other primary led it in between, as the PG's listed past intervals show, and holds its client writes until it has peered in its new interval; a PG it no longer leads refuses the writes it held.
 func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 	r.table = t
+	if t.Epoch >= r.want {
+		r.want, r.wantWhole = 0, false
+	}
 	r.countSlots()
 	r.failed = slices.DeleteFunc(r.failed, func(f failedVer) bool {
 		_, e := r.table.entry(f.pg)
@@ -479,6 +524,10 @@ func (r *Replica) OnEvent(ctx *core.Context, ev *core.Event, out *ReplicaOutput)
 			r.resend(out)
 			break
 		}
+		if ev.Timer == RetryTimer {
+			r.retry(ctx, out)
+			break
+		}
 		r.st.OnEvent(ctx, ev, &r.sout)
 	case core.EvDiskDone:
 		r.st.OnEvent(ctx, ev, &r.sout)
@@ -592,7 +641,7 @@ func (r *Replica) refusal(pg core.PGID) Response {
 // park keeps a message tagged with a newer table than the replica holds until it has one at least as new as the sender's.
 func (r *Replica) park(ev *core.Event, epoch uint64, out *ReplicaOutput) {
 	r.parked = append(r.parked, parkedMsg{epoch: epoch, peer: ev.Peer, msg: ev.Msg})
-	out.fetch(epoch, false)
+	r.fetch(epoch, false, out)
 }
 
 // clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered.
@@ -784,6 +833,7 @@ func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 	out.Actions = append(out.Actions, r.sout.Actions...)
 	r.sout.Reset()
 	r.ask(out)
+	r.armRetry(ctx, out)
 }
 
 // ordered fans a version out to every up member of its interval but this disk, in parallel with the store logging it, unless the interval has ended since the client's write was taken or the PG is wider than maxMembers: then the version fails at once. A member a resend is due to gets it with the resend.
@@ -899,7 +949,7 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 		r.tryCommit(ctx, i)
 	case rp.Status != StatusOK:
 		if rp.Status == StatusRefused && rp.Epoch > r.table.Epoch {
-			out.fetch(rp.Epoch, false)
+			r.fetch(rp.Epoch, false, out)
 		}
 		r.fail(ctx, i, *rp, out)
 	}
