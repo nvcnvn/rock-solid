@@ -242,24 +242,25 @@ types](#event-and-action-types), and this section is their only home.
 
 ## Record codec
 
-- Layout: a record is header blocks then data blocks. The header holds a 56-byte prelude, 33 bytes
-  per write/punch entry, 37 per freeze, 14 per blob entry, and a 4-byte CRC32C per data block, zero
-  padded to whole blocks. Data holds each write's blocks in entry order, then blob payloads packed
-  back to back.
+- Layout: a record is header blocks then data blocks. The header holds a 56-byte prelude, 34 bytes
+  per write/punch entry (its flags byte marks the last entry of its version), 37 per freeze, 33 per
+  missing-list entry, 17 per decision entry, 14 per blob entry, and a 4-byte CRC32C per data block,
+  zero padded to whole blocks. Data holds each write's blocks in entry order, then blob payloads
+  packed back to back.
 
   | Entries | Header bytes | Header blocks | Data blocks |
   | --- | --- | --- | --- |
-  | A 1-block write | 93 | 1 | 1 |
-  | A punch | 89 | 1 | 0 |
+  | A 1-block write | 94 | 1 | 1 |
+  | A punch | 90 | 1 | 0 |
   | A freeze | 93 | 1 | 0 |
   | An empty blob | 70 | 1 | 0 |
   | Blobs of 1 and 4,095 bytes | 88 | 1 | 1 |
   | A blob of 4,097 bytes | 78 | 1 | 2 |
-  | A 1,001-block write | 4,093 | 1 | 1,001 |
-  | A 1,002-block write | 4,097 | 2 | 1,002 |
-  | A 1,003-block write | 4,101 | 2 | 1,003 |
-  | A 1,004-block write | 4,105 | 2 | 1,004 |
-  | 200 one-block writes | 7,456 | 2 | 200 |
+  | A 1,001-block write | 4,094 | 1 | 1,001 |
+  | A 1,002-block write | 4,098 | 2 | 1,002 |
+  | A 1,003-block write | 4,102 | 2 | 1,003 |
+  | A 1,004-block write | 4,106 | 2 | 1,004 |
+  | 200 one-block writes | 7,656 | 2 | 200 |
 
   A 1-block write is a 2-block record. Payload offsets, for a blob of 5 bytes, a 2-block write, a
   punch, a blob of 7, a 1-block write and a freeze: 12,288 (after the 3 write blocks), 0, 12,293,
@@ -3884,7 +3885,8 @@ k.n is version (interval k, counter n).
 | Direct probe, authority to a disk's owner loop | Disk ID |
 | Probe reply | Log ID, oldest unfinished I/O age, whether the log has failed |
 | Peering request | PG fields naming the interval to adopt |
-| Peering reply | The adopted interval; per chunk, the newest version; the member's missing list |
+| Peering reply | The interval of the newest decision the member persisted for the PG, 0 for none; per chunk it logged or lists, the newest version held whole, the newest version logged, and the kept version it lists, if any |
+| Missing list | PG fields; per chunk, the kept version the member must receive; answered by a persist acknowledgment, success or a refusal with the member's table epoch and interval |
 
 **Cases**
 
@@ -4715,10 +4717,16 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
 | --- | --- |
 | 42 only, the usual case | One member live in 42 |
 | 42 (never activated), now 43 | One live in 42 and one live in 41 |
-| 42 had fewer than `min_live` live members | 42 skipped |
+| 42 had fewer than the `min_live` it ran under | 42 skipped |
 | 42 was short of `min_live` only by members in `maintenance` | 42 stopped and read like any interval that accepted writes |
 | No member of an interval to stop is reachable | The PG waits (down) until one returns or an operator declares its disks lost; it accepts no writes, and this is not an error |
 
+- A past interval is judged by the `min_live` it ran under, which the table keeps with its members:
+  interval 2 runs under `min_live` 1 with only disk 1 live and takes 2.1; interval 3 raises
+  `min_live` to 2 and moves the primary to disk 2. Peering waits for disk 1, crashed and then in its
+  restart wait, and keeps 2.1 (`TestPeeringJudgesAPastIntervalByItsOwnMinLive`); judged by the
+  pool's current value it activated without disk 1. Refill keeps such a member the same way
+  (`TestAwaitedMemberStays`).
 - Activation report lost. 42's primary activates and its heartbeat report is lost, then 43 starts.
   43's peering still reaches members of 41 and 42, since the last activated interval is still 41. A
   report for 42 that arrives after 43 was recorded does not lower it.
@@ -4744,8 +4752,11 @@ it on its missing list.
 - A disk formatted again or replaced comes back as a new disk, not as the member it was: on
   41.8 acknowledged by A, B and C, C's disk is formatted again and its node reports a new log ID.
   The authority gives it a new disk ID, keeps C's old disk ID down, and peering keeps 41.8 from B.
-  The planted variant that keeps C's old disk ID for the new log must drop 41.8 and fail "no
-  acknowledged version is ever dropped".
+  The planted variant that keeps C's old disk ID for the new log drops acknowledged versions in the
+  primary-change seeds (below): 93 of 500 seeds fail, the first, seed 0, on "no acknowledged version
+  is ever dropped".
+- Peering matches each reply to a disk by the loop that sent it, so the membership record names no
+  loop for a disk whose log is gone.
 - A second device reporting a log ID that is already up (a cloned drive) is refused, and the disk
   that reported it first keeps its ID.
 - Before the primary activates, each member persists its missing list: for each chunk it lacks or
@@ -4756,24 +4767,46 @@ it on its missing list.
   the simulator checks this after every step.
 - A partial-block write to a chunk whose kept versions are not yet on the new primary waits: once
   it has settled the chunk, its index maps a version other than the kept one, lacking it or, after a
-  restart, mapping a dropped one. Disk 3, down in interval 1, leads interval 2 and lacks 1.1, which
-  peering keeps from disk 2: a partial write to the chunk waits, while a whole-block write to it and
-  a partial write to another chunk go ahead. A primary that kept leading and dropped its own pending
-  version, never mapped, lists the chunk, since replay would map it, and still merges on it.
+  restart, mapping a dropped one, or its own store listed the chunk before the decision. Disk 3, down
+  in interval 1, leads interval 2 and lacks 1.1, which peering keeps from disk 2: a partial write to
+  the chunk waits, while a whole-block write to it and a partial write to another chunk go ahead
+  (`TestAPartialWriteWaitsForTheKeptVersion`). Disk 3, down in interval 2, misses 2.1 of block 0 and
+  lists it in interval 3, where a whole-block write to block 1 brings its copy to 3.1; leading
+  interval 4, which keeps 3.1, it still lists the chunk, and a partial write to block 0 waits rather
+  than merging on 1.1 (`TestAPartialWriteWaitsWhileThePrimaryListsTheChunk`; found by the
+  primary-change seeds). A primary that kept leading and dropped its own pending version, never
+  mapped, lists the chunk, since replay would map it, and still merges on it
+  (`TestAFailedVersionEndsTheInterval`).
 - A read of a chunk the primary's peering found unfound is answered unfound.
 - A primary whose store failed refuses the writes it holds and every one not yet answered, and takes
   no more: its PGs peer on another primary, which decides whether their versions stay.
 - A version whose client the primary refused when it failed at a member can still be kept: a member
   that logged it and refused it when it was sent again holds it. The replica primary's seeded fault
   run checks that the primary maps exactly the versions it answered and those the next peering kept.
-- Sub-block spike seeds:
-  - M6 (a suffix dropped, 3,670 primary changes, 8 writes pipelined per client) and M9 (writes up to
-    3 blocks long): no seed of 500 differs from the oracle.
-  - M7 (any subset dropped) and M8 (merging before the kept versions are held) are planted bugs that
-    fail at least one seed of 500. The spike's model failed 500 and 458 seeds.
-- A restarted primary asks for a new interval of each PG it leads, peers in it, then serves. A
-  planted variant that peers in its old interval must fail "no two members hold different data under
-  one version" when a stale write from its previous run lands after peering.
+- Sub-block spike seeds on replicas, the primary-change seeds
+  (`TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`, 500 seeds in `scripts/seeds.sh`): two
+  clients pipeline 8 sub-block or whole-block writes each to two chunks of PG 0 while a stand-in
+  authority, knowing disks by `DiskRecord` and computing every table with `Next`, records the
+  activations and asks the replicas report, marks the primary down and moves it to a member it picks,
+  marks replicas down and up, restarts the primary and formats a member's disk again. In half the
+  seeds the primary moves only to members that stayed live throughout (M6); in the rest a member
+  marked up again may lead though it missed writes. Every acknowledged version is kept, no two
+  members hold different data under one version, and every member that lists nothing maps the kept
+  writes applied in version order. M9's writes up to 3 blocks long are the replica primary's
+  byte-oracle seeds.
+- Planted variants fail the primary-change seeds (`TestPlantedPeeringBugsBreakTheOracle`), where the
+  spike's model failed 500 and 458 seeds of 500 for M7 and M8:
+
+| Planted bug | Seeds of 500 failing | First | Invariant |
+| --- | --- | --- | --- |
+| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest) | 5 | 242 | A member listing nothing maps the kept writes applied in version order |
+| M8: a partial-block write merges before the primary holds the versions peering kept | 51 | 6 | The same |
+| A restarted primary peers in its old interval | 65 | 1 | No two members hold different data under one version (47 of the 65) |
+| A disk formatted again keeps its old disk ID | 93 | 0 | No acknowledged version is ever dropped (70 of the 93) |
+
+- A restarted primary asks for a new interval of each PG it leads, peers in it, then serves
+  (`TestARestartedPrimaryTakesANewIntervalBeforeItServes`); only a store opened at start, not one
+  formatted, asks.
 - Activation is reported on the next heartbeat, and on every heartbeat after until a table records
   it. The authority records the last activated interval in a later table that starts no interval,
   and trims the past intervals' member lists.
@@ -4788,10 +4821,11 @@ it on its missing list.
 - Open: peering's duration. It compares every chunk's newest version from every member, so it grows
   with the chunks a PG holds (open question "Peering's cost"). Measure it on 3 nodes with several TB
   each before setting a bound.
-- Open: the phase 1 trace rules that check peering before a write or read require a reply from every
-  member sent a peering message, but peering needs only one member of each interval it stops, and
-  none of an interval it skips, so it goes ahead without unreachable ones. Revisit them when phase 3
-  builds peering.
+- The phase 1 trace rules `peering-before-write` and `peering-before-read` require a reply from
+  every peer a loop asked, which replica peering does not meet: it asks every up member of the
+  interval and of each past interval it must stop, then decides once every up member of the interval
+  and one up member of each such past interval answered. They check no replica trace; the
+  primary-change seeds and the per-wait tests above check replica peering.
 
 ## Failure and fail-slow detection
 
