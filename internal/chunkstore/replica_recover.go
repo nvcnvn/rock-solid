@@ -292,9 +292,9 @@ func (r *Replica) recoveryWritten(ctx *core.Context, rp Reply, out *ReplicaOutpu
 }
 
 // orderRecovery hands the store recovery k's write of image buf, which the store orders under the
-// chunk's next version, leaving out what the interval's writes ordered before it cover, and the
-// primary then sends like any write: the image to the members that lack the chunk, the entry ending
-// the version alone to the rest. The primary logs the image only if it lacks the chunk itself.
+// version of the interval's last write of the chunk before it, or the kept version, leaving out what
+// those writes cover, and the primary then sends to the members that list the chunk alone. The
+// primary logs the image only if it lacks the chunk itself.
 func (r *Replica) orderRecovery(ctx *core.Context, k int, buf core.IOBuf) {
 	rc := &r.recs[k]
 	i := r.lead(rc.pg)

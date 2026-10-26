@@ -4936,46 +4936,75 @@ own ([Testing strategy](design.md#testing-strategy)).
 
 ## Recovery per PG
 
-- Most degraded first. In a `rep3` pool where PG 4 is missing 2 members and PGs 9 and 12 are missing
-  1 each, recovery's first copies are for PG 4.
-- Resync after maintenance comes first. A node returns from `maintenance` with `rep2` PGs that took
-  writes on one copy; those PGs resync before any rebalance move, and the trace shows their recovery
-  copies first.
-- Open: the order between a maintenance resync and a more degraded PG. Case: `rep2` PG 3 resyncing
-  while `rep3` PG 4 is missing 2 members.
-- Recovery writes the authoritative member's blocks under a new version to every member that lacks
-  the kept version or logged a dropped one, the new primary included.
-  - Chunk epochs spike R3: without that record, replay from a checkpoint taken while the dropped
-    write was pending brings it back.
-  - R3b: with it, replay ends at the recovered blocks.
-- Recovery leaves out a block that a whole-block write ordered before it covers. Kept 41.7 is on B
-  only; new primary C takes a whole-block write to block 0, then orders the recovery of the chunk
-  from B: the recovery write carries block 1 alone, and the byte-range oracle shows the new write in
-  block 0. The blocks are chosen when the recovery write is ordered: with the whole-block write
-  ordered between recovery's read of B and its write, the recovery write still leaves block 0 out. A
-  planted variant that chooses them at the read (the epoch change model's
-  `neg-recovery-covers-at-read`) copies 41.7's block 0 over the acknowledged write and fails "no
-  acknowledged version is ever dropped" or the oracle.
-- A member's missing-list entry goes once the recovered blocks are durable on it.
-- Recovery cut short by the next interval: the missing lists survive. The next primary reads them
-  and keeps what the activated interval kept (the keep-rule table under [Peering and read
-  leases](#peering-and-read-leases)).
-- Only recovery removes an entry. B holds dropped 41.8, which wrote block 1, and lists 41.7; 42.1,
-  writing block 2, lands on B before recovery reaches it. The next peering keeps 42.1, whose newest
-  copy B holds, and raises B's entry to 42.1 rather than clearing it; recovery then copies block 1 of
-  41.7's history to B, and no peering uses B as a source before that.
+- Most degraded first. PG 4, led by disk 1 like PGs 9 and 12, misses two members and they one
+  each: recovery's first write is PG 4's, and PG 12, last among the equally degraded, starts only
+  once PG 4's have (`TestTheMostDegradedPGRecoversFirst`). A member still listing a chunk counts
+  like one not up, and equals go to the lower PG.
+- Resync copies only what the returning member missed. Disk 3 misses a write to chunk a while down;
+  marked up again, it lists a alone, and recovery copies a's blocks to it alone, never touching chunk
+  b, which it missed nothing of, nor disk 2. The primary then reports the interval recovered, and
+  again on each retry until a table records it (`TestAReturningMemberGetsOnlyTheChunksItMissed`).
+- A dropped version is superseded on every member that logged it, the new primary included, by a
+  recovery write logged under an existing version
+  (`TestRecoverySupersedesADroppedVersionOnEveryMemberThatLoggedIt`):
+  - Chunk epochs spike R3: without recovery, a restart's replay maps the dropped write again.
+  - R3b: with it, replay ends at the recovered block.
+- A recovery write is logged under the version of the interval's last write of the chunk before
+  it, or under the kept version, by the members that list the chunk alone. In the store, a member's
+  recovery write replaces its chunk with the image past the dropped versions and alone removes the
+  entry, across a restart too (`TestARecoveryWriteReplacesAMembersChunk`); the primary's leaves out
+  what the interval covered, a whole-chunk punch of the interval leaving it nothing to carry
+  (`TestAPrimarysRecoveryWriteLeavesOutWhatTheIntervalCovered`).
+- A recovery read gives the chunk's live image: the written blocks' bytes after the map, and every
+  other block, punched or never written, a hole (`TestARecoveryReadIsTheChunksLiveImage`). The
+  map's decoder refuses a block both written and punched, bytes past the map in its first block
+  and a length other than its written blocks (`TestBlockMapErrors`, fuzzed by
+  `FuzzDecodeBlockMap`).
+- Recovery leaves out a block that a whole-block write ordered before it covers. Kept 1.1 is on
+  disk 2 only; the new primary takes a whole-block write to block 0, then orders the recovery of the
+  chunk from disk 2: the recovery write carries block 1 alone, and the byte-range oracle shows the
+  new write in block 0. The blocks are chosen when the recovery write is ordered: with the
+  whole-block write ordered between recovery's read and its write, the recovery write still leaves
+  block 0 out. A planted variant that chooses them at the read (the epoch change model's
+  `neg-recovery-covers-at-read`) copies 1.1's block 0 over the acknowledged write
+  (`TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover`).
+- A primary orders a punch of a chunk its own store holds nothing of, as one lacking the chunk's
+  kept version does, rather than answering it done unsent
+  (`TestAPrimaryOrdersAPunchOfAChunkItHoldsNothingOf`).
+- Recovery cut short by the next interval: the missing lists survive. Interval 4's peering raises
+  disk 3's entry to its decision, and interval 4's recovery brings the kept version
+  (`TestRecoveryCutShortByTheNextIntervalLeavesTheListsInPlace`).
+- Only recovery removes an entry. Disk 2 holds dropped 1.2, which wrote block 1, and lists 1.1;
+  2.1, writing block 2, lands on disk 2 before recovery reaches it. The next peering keeps 2.1,
+  whose newest copy disk 2 holds, and raises its entry to 2.1 rather than clearing it; recovery then
+  brings it block 1 of 1.1's history (`TestOnlyRecoveryRemovesAMissingListEntry`).
+- A partial-block write to a chunk the primary lacks waits for its recovery
+  (`TestAPartialWriteWaitsForTheKeptVersion`, `TestAPartialWriteWaitsWhileThePrimaryListsTheChunk`);
+  the primary holds at most 64 client writes and refuses the next
+  (`TestHeldPartialWritesAreBounded`).
 - A member never serves a chunk while it is on its own missing list, and never returns an older
   version instead.
 - Open: whether a primary whose own list holds the chunk waits for recovery, forwards the read, or
   returns an error.
-- Recovery writes pass `write_limit`: a disk at 91% under a 90% limit still takes recovery copies.
-- [property] 1,000 seeds of random failures and returns within what the pool survives: once recovery
-  settles, every chunk reaches its pool's copy count within the failure-domain rule.
+- Recovery writes pass `write_limit`: with disk 3 at 91% under a 90% limit, a client write adding
+  data is refused while recovery still copies disk 3 what it missed
+  (`TestRecoveryWritesPassWriteLimit`).
+- The replica primary's seeded fault run, 20 seeds a commit and 500 in `scripts/seeds.sh`, also
+  crashes the primary, rebuilds its index and moves it, at most one disk lost: every disk that
+  answers for a version with its chunk whole at it and listed nowhere maps the same bytes ("no two
+  members hold different data under one version"), and once recovery settles every member lists
+  nothing and maps the kept writes but in an unfound chunk ("once recovery settles, every member
+  lists nothing and maps the kept writes, but in an unfound chunk"), both registered with
+  `sim.Invariants` (`TestReplicatedWritesSurviveFaults`). The planted `neg-recovery-covers-at-read`
+  variant breaks the first at seed 4, the first invariant it breaks at 156 of the first 500 seeds
+  (`TestPlantedRecoveryBugBreaksTheFaultRun`).
+- Open: two faults that overlap before recovery finishes leave a chunk unfound although a member
+  listed by the earlier interval holds its kept image (open question "Recovery sources across
+  overlapping faults").
 - Losses beyond what the pool survives, for example both members of `rep2` PG 4:
   - Before an operator declares the disks lost, the PG is down and writes wait. Open: whether reads
     wait or return an error.
   - After the declaration, reads return an error, never wrong data or zeros, and the PG is reported.
-- Open: the order among equally degraded PGs, and recovery's rate limit or throttle.
 - Open: how an empty refilled member is filled. The design says only that a PG is one key range of
   the chunk index; a scan of `(pool, h)` over that range would fit.
 
@@ -5064,7 +5093,8 @@ model](#epoch-change-model) property it checks:
 - No step check trips between two nodes neither paused nor rebooted, and each such pair holds a
   lease within `rate_gap` plus two round trips of first contact. This is a counter, expected to be
   0 (10).
-- Every chunk reaches its pool's copy count once recovery settles.
+- Every chunk reaches its pool's copy count within the failure-domain rule once recovery settles,
+  over 1,000 seeds of random failures and returns within what the pool survives.
 - Once membership stops changing, every PG whose current interval has at least `min_live` live
   members on running nodes activates it (12).
 - Too few copies return an error, never wrong data.
