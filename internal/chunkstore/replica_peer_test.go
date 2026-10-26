@@ -168,6 +168,67 @@ func TestPeeringJudgesAPastIntervalByItsOwnMinLive(t *testing.T) {
 	}
 }
 
+// Interval 2 moves PG 0's primary off disk 1 to disk 2, and disk 3's acknowledgments of its missing
+// list are lost: disk 2 reports no activation and answers no held write until disk 3's
+// acknowledgment arrives, so no decision is acted on before every member persisted its list.
+func TestNoActivationBeforeEveryMemberPersistedItsList(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	c.drop = func(d int, a *core.Action) bool {
+		return d == 2 && a.Kind == core.ActNetSend && a.Msg.Len >= headSize && Kind(a.Msg.Body[1]) == KindPersistAck
+	}
+	c.publish(c.next(moveOff), false)
+	w := c.write(pg0, chunkIn(pg0, 4, 0), 0, []byte{1})
+	acts := len(c.activations)
+	c.runFor(3 * RetryAfter)
+	if x := c.reps[2].Store().Index().Decided(testPool, 0, 4); x != 2 {
+		t.Fatalf("disk 3 persisted the decision of interval %d", x)
+	}
+	if l := c.reps[1].leads[c.reps[1].lead(pg0)]; l.active || len(c.activations) > acts && slices.ContainsFunc(c.activations[acts:], func(a PGFields) bool { return a.PG == pg0 }) {
+		t.Fatal("disk 2 activated before disk 3 acknowledged its list")
+	}
+	if rp, ok := c.cl.replies[w]; ok {
+		t.Fatalf("the held write was answered %+v", rp)
+	}
+	c.drop = nil
+	c.until(w)
+}
+
+// Interval 2 of PG 0, the last activated, runs under min_live 1 with only disk 1 live and takes
+// 2.1. Interval 3 moves the primary to disk 2, which crashed, so it never activates; interval 4 moves
+// it to disk 3. Peering in 4 must stop interval 2 as well as 3, so it waits for disk 1, crashed too
+// and then in its restart wait, and keeps 2.1 once disk 1 answers.
+func TestPeeringStopsEveryIntervalSinceTheLastActivated(t *testing.T) {
+	c := newRCluster(t, rtable(4, 1))
+	ch := chunkIn(pg0, 4, 0)
+	c.publish(c.next(func(t *Table) {
+		mark(t, pg0, 2, MarkDown)
+		_, e := t.entry(pg0)
+		e.Members[2].Mark = MarkDown
+	}), true)
+	c.until(c.write(pg0, ch, 0, []byte{1}))
+	c.s.CrashRandom(0)
+	c.s.CrashRandom(1)
+	for _, ms := range [][]Member{{{Disk: 2}, {Disk: 3}, {Disk: 1, Mark: MarkDown}}, {{Disk: 3}, {Disk: 2, Mark: MarkDown}, {Disk: 1, Mark: MarkDown}}} {
+		c.table = c.next(func(t *Table) {
+			_, e := t.entry(pg0)
+			setInterval(t, pg0, e.Interval+1)
+			e.Members = ms
+		})
+		c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetTable(ctx, c.table, out) })
+	}
+	c.runFor(2 * RetryAfter)
+	if l := c.reps[2].leads[c.reps[2].lead(pg0)]; l.active {
+		t.Fatalf("interval 4 activated without disk 1, the only live member of interval 2, keeping %+v", l.kept)
+	}
+	if !c.s.Node(0).Up() {
+		c.s.Restart(0)
+	}
+	c.untilActive()
+	if x, _ := c.reps[2].Store().Index().Chunk(testPool, ch); x.ListedIn != 4 || x.Listed != MakeVersion(2, 1) {
+		t.Fatalf("disk 3 lists %+v", x)
+	}
+}
+
 // Disk 3, down in interval 2, misses 2.1 of block 0 and lists it in interval 3, where a whole-block
 // write to block 1 brings its copy of the chunk to 3.1 while its block 0 stays at 1.1. Leading
 // interval 4, which keeps 3.1, it still lists the chunk: a partial write to block 0 waits rather

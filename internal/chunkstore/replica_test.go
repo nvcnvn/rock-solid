@@ -41,8 +41,9 @@ type rcluster struct {
 	// counting adds the heap allocations each replica's OnEvent makes to mallocs.
 	counting bool
 	mallocs  uint64
-	// onPass, when set, sees the actions of each pass of each replica's loop.
+	// onPass, when set, sees the actions of each pass of each replica's loop, and drop, when set, removes those it reports.
 	onPass func(d int, acts []core.Action)
+	drop   func(d int, a *core.Action) bool
 	// ids is the disk ID of node d's disk and logs its log ID; reformat has node d's next start format its disk with the log ID in logs, and onFormat, when set, then gives its disk ID.
 	ids      []uint32
 	logs     []uint64
@@ -199,6 +200,9 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 }
 
 func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Action {
+	if c.drop != nil {
+		out.Actions = slices.DeleteFunc(out.Actions, func(a core.Action) bool { return c.drop(d, &a) })
+	}
 	c.fetch[d] = max(c.fetch[d], out.Fetch)
 	c.whole[d] = c.whole[d] || out.Whole
 	if out.Fetch != 0 {

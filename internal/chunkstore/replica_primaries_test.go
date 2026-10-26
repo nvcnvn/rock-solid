@@ -60,14 +60,15 @@ func (a *authority) pools() []PoolInputs {
 	return []PoolInputs{{ID: testPool, Pool: a.pool, Disks: disks}}
 }
 
-// primaryRun is clients pipelining sub-block writes to two chunks of PG 0 while the authority moves the PG's primary, marking it down and the next member it picks up, marks replicas down and up, restarts the primary and formats a member's disk again, after which the PG peers. With returns, a member marked up again may lead though it missed writes; without, the primary only moves to members that stayed live throughout (sub-block spike M6).
+// primaryRun is clients pipelining sub-block writes to two chunks of PG 0 while the authority moves the PG's primary, marking it down and the next member it picks up, marks replicas down and up, restarts the primary and formats a member's disk again, after which the PG peers. With returns, a member marked up again may lead though it missed writes; without, the primary only moves to members that stayed live throughout (sub-block spike M6). With duringPeering, changes also land while the PG peers, at a tenth of the rate.
 type primaryRun struct {
-	c       *rcluster
-	a       *authority
-	rng     *core.Rand
-	chunks  [2]core.ChunkID
-	returns bool
-	ops     map[core.RequestID]faultOp
+	c             *rcluster
+	a             *authority
+	rng           *core.Rand
+	chunks        [2]core.ChunkID
+	returns       bool
+	duringPeering bool
+	ops           map[core.RequestID]faultOp
 	// version is each write's version once a primary ordered it, kept each activated interval's decision, and tainted the disks that may lack writes.
 	version map[core.RequestID]uint64
 	kept    map[uint32][]keptChunk
@@ -466,6 +467,8 @@ func runPrimaries(t *testing.T, seed uint64, edit func(r *primaryRun)) error {
 		version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, tainted: map[uint32]bool{},
 		sent: map[[2]uint64]Update{}, acked: map[blockVersion][]byte{}, errs: map[string]error{}}
 	r.returns = r.rng.Chance(1, 2)
+	// Drawn from the seed rather than r.rng, so that the other seeds run as they did before it existed.
+	r.duringPeering = seed%4 == 3
 	if edit != nil {
 		edit(r)
 	}
@@ -490,7 +493,7 @@ func runPrimaries(t *testing.T, seed uint64, edit func(r *primaryRun)) error {
 		if err := r.failed(); err != nil {
 			return err
 		}
-		if busy() && r.rng.Chance(1, 40) && c.active() && !slices.ContainsFunc(r.members(), func(m Member) bool { return m.Mark == MarkUp && !r.running(m) }) {
+		if busy() && r.rng.Chance(1, 40) && (c.active() || r.duringPeering && r.rng.Chance(1, 10)) && !slices.ContainsFunc(r.members(), func(m Member) bool { return m.Mark == MarkUp && !r.running(m) }) {
 			r.inject()
 		}
 	}
@@ -518,7 +521,7 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks the run's oracle at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 5 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 51 of 500), a restarted primary peering in its old interval (65 of 500) and a disk formatted again keeping its old disk ID (93 of 500).
+// Each planted bug breaks the run's oracle at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 4 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 45 of 500), a restarted primary peering in its old interval (48 of 500) and a disk formatted again keeping its old disk ID (97 of 500).
 func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	for _, p := range []struct {
 		name  string

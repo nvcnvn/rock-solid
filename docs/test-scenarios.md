@@ -4716,7 +4716,7 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
 | Intervals since 41 | Members peering must get to adopt k |
 | --- | --- |
 | 42 only, the usual case | One member live in 42 |
-| 42 (never activated), now 43 | One live in 42 and one live in 41 |
+| 42 (never activated), now 43 | One live in 42 and one live in 41 (`TestPeeringStopsEveryIntervalSinceTheLastActivated`) |
 | 42 had fewer than the `min_live` it ran under | 42 skipped |
 | 42 was short of `min_live` only by members in `maintenance` | 42 stopped and read like any interval that accepted writes |
 | No member of an interval to stop is reachable | The PG waits (down) until one returns or an operator declares its disks lost; it accepts no writes, and this is not an error |
@@ -4753,7 +4753,7 @@ it on its missing list.
   41.8 acknowledged by A, B and C, C's disk is formatted again and its node reports a new log ID.
   The authority gives it a new disk ID, keeps C's old disk ID down, and peering keeps 41.8 from B.
   The planted variant that keeps C's old disk ID for the new log drops acknowledged versions in the
-  primary-change seeds (below): 93 of 500 seeds fail, the first, seed 0, on "no acknowledged version
+  primary-change seeds (below): 97 of 500 seeds fail, the first, seed 0, on "no acknowledged version
   is ever dropped".
 - A member answers only peering messages that name its own disk. Disk 3, which took 1.1, is
   formatted again and comes back as disk 4 at the same loop while the table still lists disk 3 up
@@ -4762,9 +4762,11 @@ it on its missing list.
 - A second device reporting a log ID that is already up (a cloned drive) is refused, and the disk
   that reported it first keeps its ID.
 - Before the primary activates, each member persists its missing list: for each chunk it lacks or
-  holds a dropped version of, the kept version it must get. Trace check: no activation report before
-  every member's missing-list write has its `DiskDone`. Reads and removal of entries are under
-  [Recovery per PG](#recovery-per-pg).
+  holds a dropped version of, the kept version it must get. With one member's acknowledgments of
+  its list lost, the primary reports no activation and answers no held write until one arrives
+  (`TestNoActivationBeforeEveryMemberPersistedItsList`); the planted variant that waits only for the
+  primary's own list fails the primary-change seeds first at seed 41. Reads and removal of entries
+  are under [Recovery per PG](#recovery-per-pg).
 - A member's log holds a chunk's versions in order, so a kept version never follows a dropped one;
   the simulator checks this after every step.
 - A partial-block write to a chunk whose kept versions are not yet on the new primary waits: once
@@ -4792,7 +4794,9 @@ it on its missing list.
   activations and asks the replicas report, marks the primary down and moves it to a member it picks,
   marks replicas down and up, restarts the primary and formats a member's disk again. In half the
   seeds the primary moves only to members that stayed live throughout (M6); in the rest a member
-  marked up again may lead though it missed writes. Every acknowledged version is kept, no two
+  marked up again may lead though it missed writes. In a quarter of the seeds these changes also land
+  while the PG peers, at a tenth of the rate: at the full rate a primary restarts every ~40 steps and
+  the run spends its time taking new intervals. Every acknowledged version is kept, no two
   members hold different data under one version, and every member that lists nothing maps the kept
   writes applied in version order. M9's writes up to 3 blocks long are the replica primary's
   byte-oracle seeds.
@@ -4801,10 +4805,10 @@ it on its missing list.
 
 | Planted bug | Seeds of 500 failing | First | Invariant |
 | --- | --- | --- | --- |
-| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest) | 5 | 242 | A member listing nothing maps the kept writes applied in version order |
-| M8: a partial-block write merges before the primary holds the versions peering kept | 51 | 6 | The same |
-| A restarted primary peers in its old interval | 65 | 1 | No two members hold different data under one version (47 of the 65) |
-| A disk formatted again keeps its old disk ID | 93 | 0 | No acknowledged version is ever dropped (70 of the 93) |
+| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest) | 4 | 242 | A member listing nothing maps the kept writes applied in version order |
+| M8: a partial-block write merges before the primary holds the versions peering kept | 45 | 6 | The same |
+| A restarted primary peers in its old interval | 48 | 1 | No two members hold different data under one version (37 of the 48) |
+| A disk formatted again keeps its old disk ID | 97 | 0 | No acknowledged version is ever dropped (72 of the 97) |
 
 - A restarted primary asks for a new interval of each PG it leads, peers in it, then serves
   (`TestARestartedPrimaryTakesANewIntervalBeforeItServes`); only a store opened at start, not one
