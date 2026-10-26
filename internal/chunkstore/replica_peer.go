@@ -435,9 +435,14 @@ func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 			}
 		}
 	}
+	var own []ChunkPeer
+	if j := slices.IndexFunc(pr.replies, func(p peerReply) bool { return p.disk == r.cfg.Disk }); j >= 0 {
+		own = pr.replies[j].chunks
+	}
 	for j := range pr.kept {
-		x, _ := r.st.Index().Chunk(r.st.cfg.Pool, pr.kept[j].chunk)
-		pr.kept[j].lacking = x.Version != pr.kept[j].kept || x.Whole != pr.kept[j].kept
+		k := &pr.kept[j]
+		x, _ := r.st.Index().Chunk(r.st.cfg.Pool, k.chunk)
+		k.lacking = x.Version != k.kept || x.Whole != k.kept || slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed })
 	}
 	l.kept, pr.kept = pr.kept, l.kept[:0]
 	pg, k := l.pg, l.interval
@@ -480,7 +485,7 @@ func (l *lead) isUnfound(c core.ChunkID) bool {
 	return ok && k.unfound
 }
 
-// lacks reports whether the primary's index did not map the version the lead's last peering kept for chunk c, which a partial-block write waits for.
+// lacks reports whether the primary's copy of chunk c may differ from the version the lead's last peering kept, which a partial-block write waits for.
 func (l *lead) lacks(c core.ChunkID) bool {
 	k, ok := l.decision(c)
 	return ok && k.lacking

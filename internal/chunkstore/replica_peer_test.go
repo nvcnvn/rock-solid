@@ -143,3 +143,30 @@ func TestPeeringJudgesAPastIntervalByItsOwnMinLive(t *testing.T) {
 		t.Fatalf("disk 2 lists %+v", x)
 	}
 }
+
+// Disk 3, down in interval 2, misses 2.1 of block 0 and lists it in interval 3, where a whole-block
+// write to block 1 brings its copy of the chunk to 3.1 while its block 0 stays at 1.1. Leading
+// interval 4, which keeps 3.1, it still lists the chunk: a partial write to block 0 waits rather
+// than merging on 1.1 and losing 2.1's byte.
+func TestAPartialWriteWaitsWhileThePrimaryListsTheChunk(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.until(c.write(pg0, ch, 0, []byte{1}))
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkDown) }), true)
+	c.until(c.write(pg0, ch, 0, []byte{2}))
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkUp) }), true)
+	c.until(c.write(pg0, ch, core.BlockSize, make([]byte, core.BlockSize)))
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 4)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 3}, {Disk: 1}, {Disk: 2}}
+	}), true)
+	if x, _ := c.reps[2].Store().Index().Chunk(testPool, ch); x.Version != MakeVersion(3, 1) || x.ListedIn != 4 {
+		t.Fatalf("disk 3 holds %+v", x)
+	}
+	w := c.write(pg0, ch, 1, []byte{3})
+	c.settle()
+	if rp, ok := c.cl.replies[w]; ok {
+		t.Fatalf("the partial write was answered %+v; disk 3's block 0 reads %v", rp, c.diskBlock(2, ch, 0)[:2])
+	}
+}
