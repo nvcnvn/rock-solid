@@ -97,9 +97,11 @@ type lead struct {
 	interval uint32
 	since    uint32
 	active   bool
-	peer     *peering
-	kept     []keptChunk
-	held     []heldMsg
+	// serving is set once the lead activated, and kept while it re-peers in a later interval that kept this disk as primary: no other node can have committed to the PG since.
+	serving bool
+	peer    *peering
+	kept    []keptChunk
+	held    []heldMsg
 	// asking is set once a chunk of the PG spent its counter or a version failed, which ends the interval: the primary orders nothing more in it and asks for the next once none of its versions is pending, setting asked. spent counts the held writes the store refused for a spent counter, which go ahead of those held since.
 	asking bool
 	asked  bool
@@ -440,7 +442,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 				case old.interval == e.Interval:
 					l = old
 				case r.keptPrimary(e, old.interval):
-					l.since = old.since
+					l.since, l.serving, l.kept = old.since, old.serving, old.kept
 				}
 			}
 			kept = append(kept, l)
@@ -522,7 +524,7 @@ func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out
 	if r.unsettled = r.Unsettled(pg, r.unsettled[:0]); len(r.unsettled) > 0 {
 		return ErrUnresolved
 	}
-	r.leads[i].active, r.leads[i].peer = true, nil
+	r.leads[i].active, r.leads[i].serving, r.leads[i].peer = true, true, nil
 	held := r.leads[i].held
 	r.leads[i].held = nil
 	for _, h := range held {
@@ -863,7 +865,7 @@ func (r *Replica) noteFailed(f failedVer) {
 func (r *Replica) read(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) {
 	p, e := r.table.entry(rd.PG.PG)
 	i := r.lead(rd.PG.PG)
-	primary := i >= 0 && r.leads[i].active && rd.PG.Interval >= r.leads[i].since && rd.PG.Interval <= r.leads[i].interval && r.readable(ctx, p, e)
+	primary := i >= 0 && r.leads[i].serving && rd.PG.Interval >= r.leads[i].since && rd.PG.Interval <= r.leads[i].interval && r.readable(ctx, p, e)
 	base := false
 	if e != nil && i < 0 && rd.HasAt && rd.PG.Interval == e.Interval {
 		d, ok := e.primary()
@@ -955,7 +957,7 @@ func (r *Replica) drainStore(ctx *core.Context, out *ReplicaOutput) {
 	}
 	if r.sout.Rebuilt {
 		for i := range r.leads {
-			r.leads[i].active, r.leads[i].asking, r.leads[i].peer = false, true, nil
+			r.leads[i].active, r.leads[i].serving, r.leads[i].asking, r.leads[i].peer = false, false, true, nil
 		}
 	}
 	acts := r.sout.Actions

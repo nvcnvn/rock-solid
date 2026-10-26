@@ -120,3 +120,34 @@ func TestTheRestartWaitAndResumedStopReads(t *testing.T) {
 		t.Fatalf("a read rate_gap after Resumed: %v", st)
 	}
 }
+
+// Interval 2 of PG 0 keeps disk 1 as primary, and disk 3's acknowledgments of its missing list are
+// lost, so disk 1 does not activate: it holds a write but goes on serving reads of committed versions,
+// answering a chunk the last peering found unfound as unfound.
+func TestAPrimaryThatKeepsLeadingServesReadsWhileItPeers(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch, lost := chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)
+	c.until(c.write(pg0, ch, 0, []byte{1}))
+	l := &c.reps[0].leads[c.reps[0].lead(pg0)]
+	l.kept = []keptChunk{{chunk: lost, kept: MakeVersion(1, 9), unfound: true}}
+	c.drop = func(d int, a *core.Action) bool {
+		return d == 2 && a.Kind == core.ActNetSend && a.Msg.Len >= headSize && Kind(a.Msg.Body[1]) == KindPersistAck
+	}
+	c.publish(c.next(func(t *Table) { setInterval(t, pg0, 2) }), false)
+	w := c.write(pg0, ch, 0, []byte{2})
+	c.runFor(RetryAfter)
+	if c.reps[0].leads[c.reps[0].lead(pg0)].active {
+		t.Fatal("disk 1 activated interval 2")
+	}
+	if got := c.readNow(pg0, ch, 0, 1); got[0] != 1 {
+		t.Fatalf("read %v", got)
+	}
+	unfound := c.read(pg0, lost, 0, 1, 0)
+	c.until(unfound)
+	if rp := c.reply(unfound); rp.Status != StatusUnfound {
+		t.Fatalf("the unfound chunk read %+v", rp)
+	}
+	if rp, ok := c.cl.replies[w]; ok {
+		t.Fatalf("the write was answered %+v", rp)
+	}
+}

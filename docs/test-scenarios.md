@@ -4700,8 +4700,10 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
   (a planned move); if it does not, the grantors refuse its renewals and join peering once their
   last grant to it ends, 3 to 4 s later.
 - A new interval that keeps the primary, such as a replica replaced or a counter bump, needs no
-  lease wait. The primary keeps serving reads of committed versions and holds writes until it has
-  re-peered.
+  lease wait. The primary keeps serving reads of committed versions, a chunk its last peering found
+  unfound still answered unfound, and holds writes until it has re-peered: interval 2 keeps disk 1
+  as primary and a member's list acknowledgments are lost, so it does not activate, yet it reads 1.1
+  (`TestAPrimaryThatKeepsLeadingServesReadsWhileItPeers`).
 - Peering across several intervals adds no wait: only the last activated interval's primary, or the
   primary of later intervals that kept it, can have served reads, and peering reaches a live member
   of each of those intervals.
