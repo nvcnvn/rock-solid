@@ -49,8 +49,7 @@ type readPlant struct {
 }
 
 // serving is a node other than skip that may serve pg's reads now: running, not standing still, and leading pg with a lease on every other up member of its table's entry; -1 when none.
-func (r *readRun) serving(pg core.PGID, skip int) int {
-	c := r.d.rcluster
+func (c *rcluster) serving(pg core.PGID, skip int) int {
 	for n, rep := range c.reps {
 		nd := c.s.Node(uint32(n))
 		if n == skip || !nd.Up() || nd.Paused() {
@@ -73,10 +72,15 @@ func (r *readRun) oneReader() error {
 	if r.err != nil {
 		return r.err
 	}
-	for i := range uint32(4) {
+	return r.d.oneReader(4)
+}
+
+// oneReader checks that no two nodes may serve the reads of any of the first pgs PGs.
+func (c *rcluster) oneReader(pgs uint32) error {
+	for i := range pgs {
 		pg := core.PGID{Pool: testPool, Index: i}
-		if a := r.serving(pg, -1); a >= 0 {
-			if b := r.serving(pg, a); b >= 0 {
+		if a := c.serving(pg, -1); a >= 0 {
+			if b := c.serving(pg, a); b >= 0 {
 				return fmt.Errorf("nodes %d and %d may both serve reads of %v", a, b, pg)
 			}
 		}
@@ -104,16 +108,15 @@ func (r *readRun) read(d int, ev *core.Event) {
 		return
 	}
 	r.served++
-	if b := r.serving(rd.PG.PG, d); b >= 0 && r.err == nil {
+	if b := c.serving(rd.PG.PG, d); b >= 0 && r.err == nil {
 		r.err = fmt.Errorf("node %d serves read %d of %v while node %d may serve its reads", d, rd.ID, rd.PG.PG, b)
 	}
 }
 
 // incarnations checks that no acknowledged write of the session's first incarnation has a later version of its chunk than an acknowledged write of the second.
-func (r *readRun) incarnations() error {
-	c := r.d.rcluster
+func (c *rcluster) incarnations(writes map[core.RequestID]incWrite) error {
 	first, second := map[core.ChunkID]core.RequestID{}, map[core.ChunkID]core.RequestID{}
-	for id, w := range r.writes {
+	for id, w := range writes {
 		rp, ok := c.cl.replies[id]
 		if !ok || rp.Status != StatusOK {
 			continue
@@ -388,7 +391,7 @@ func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 			return c.found
 		}
 	}
-	if err := r.incarnations(); err != nil && (plant == nil || strings.Contains(err.Error(), plant.inv)) {
+	if err := c.incarnations(r.writes); err != nil && (plant == nil || strings.Contains(err.Error(), plant.inv)) {
 		return err
 	}
 	return nil
