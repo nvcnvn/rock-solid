@@ -510,7 +510,7 @@ func (r *Replica) keptPrimary(e *PGEntry, from uint32) bool {
 	return from < e.Interval
 }
 
-// Activate is peering's end: the PG this disk leads is now active in interval, and the client writes it held are ordered again, unless another primary led the PG since the interval they were held in. It returns ErrUnresolved, activating nothing, while a chunk of the PG has versions peering has not settled.
+// Activate is peering's end, which the replica reaches itself once every up member persisted its list: the PG this disk leads is now active in interval, and the client writes it held are ordered again, unless another primary led the PG since the interval they were held in. It returns ErrUnresolved, activating nothing, while a chunk of the PG has versions peering has not settled.
 func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out *ReplicaOutput) error {
 	i := r.lead(pg)
 	if i < 0 || r.leads[i].interval != interval || r.leads[i].asking && !r.leads[i].active {
@@ -595,6 +595,10 @@ func (r *Replica) OnEvent(ctx *core.Context, ev *core.Event, out *ReplicaOutput)
 		}
 		if ev.Timer == LeaseTimer {
 			r.leaseTick(ctx, out)
+			break
+		}
+		if ev.Timer == PeerTimer {
+			r.peerTick(ctx)
 			break
 		}
 		r.st.OnEvent(ctx, ev, &r.sout)
