@@ -9,6 +9,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/clock"
 )
 
 // pg2Table is the epoch change model's PG 2: one rep2 pool with min_live 2 whose one PG has disks 2 and 3, led by disk 2, beside a disk 1 in no PG.
@@ -165,6 +166,38 @@ func reportDecidedTrace(t *testing.T, plant bool) error {
 	return c.found
 }
 
+// instantTrace is neg-instant-reboot's trace: grantor 3 reboots the instant after it renewed primary 2's lease, cut off from it, and its new boot runs 2% fast; it comes back primary with disk 2 in maintenance, which disk 2, cut off from the control plane, never learns.
+func instantTrace(t *testing.T, plant bool) error {
+	set := sim.DefaultSettings()
+	set.RebootInstantly = plant
+	c := newRClusterOn(t, pg2Table(), sim.New(1, set))
+	c.planted = true
+	c.inv.Register(invOneReader, func() error { return c.oneReader(1) })
+	granted := false
+	c.onEvent = func(d int, ev *core.Event, done bool) {
+		if d == 1 && done && ev.Kind == core.EvNetRecv && ev.Peer.Node == 2 && ev.Msg.Len >= headSize && Kind(ev.Msg.Body[1]) == KindGrant {
+			granted = true
+		}
+	}
+	for !granted && c.step() {
+	}
+	c.onEvent = nil
+	c.s.Reboot(2)
+	c.s.Partition(1, 2, false)
+	c.hand(c.next(members(Member{Disk: 3}, Member{Disk: 2, Mark: MarkMaint})))
+	for !c.s.Node(2).Up() && c.step() {
+	}
+	c.s.Node(2).Clock().SetRate(c.s.Time(), clock.Unit*102/100)
+	for len(c.asks) == 0 && c.step() {
+	}
+	c.hand(c.next(members(Member{Disk: 3}, Member{Disk: 2, Mark: MarkMaint})), 0, 2)
+	c.runFor(2 * lease.DefaultConfig.Lease)
+	if c.serving(pg0, -1) != 2 {
+		t.Fatal("disk 3 never serves reads")
+	}
+	return c.found
+}
+
 // Each planted bug whose counterexample needs a trace no seeded run reaches breaks its invariant on that trace, which the correct code passes.
 func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 	for _, tc := range []struct {
@@ -175,6 +208,7 @@ func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 		{"held write reordered after another primary led", invIncarnation, reorderTrace},
 		{"peering stops only the previous interval", invAckedKept, stopPreviousTrace},
 		{"activation reported once decided", invAckedKept, reportDecidedTrace},
+		{"reboot that takes no time", invOneReader, instantTrace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.trace(t, false); err != nil {

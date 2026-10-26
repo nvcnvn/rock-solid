@@ -41,11 +41,10 @@ type incWrite struct {
 	chunk core.ChunkID
 }
 
-// readPlant is a bug planted in the read run and the invariant it must break; instant plants a reboot that takes no time.
+// readPlant is a bug planted in the read run and the invariant it must break.
 type readPlant struct {
-	inv     string
-	set     func(r *readRun)
-	instant bool
+	inv string
+	set func(r *readRun)
 }
 
 // serving is a node other than skip that may serve pg's reads now: running, not standing still, and leading pg with a lease on every other up member of its table's entry; -1 when none.
@@ -323,7 +322,6 @@ func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 	set := noisy()
 	r := &readRun{rng: core.NewRand(seed ^ 0x4ead), reads: map[core.RequestID]core.PGID{}, writes: map[core.RequestID]incWrite{}, faulted: -1, back: -1}
 	r.returns = r.rng.Chance(1, 2)
-	set.RebootInstantly = plant != nil && plant.instant
 	d := newDCluster(t, seed, set)
 	r.d, d.cut = d, map[int]bool{}
 	c := d.rcluster
