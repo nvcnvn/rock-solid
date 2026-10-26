@@ -482,3 +482,44 @@ func TestADemotedPrimaryMapsItsPendingVersionsAsAMember(t *testing.T) {
 		t.Fatalf("disk 1 holds %d versions", n)
 	}
 }
+
+// 1.1 of an absent chunk goes only to disk 3, disk 2 being in maintenance, and disk 3 refuses it. No member holds 1.1, so only the primary can name the chunk to peering: Activate refuses while 1.1 is pending and Unsettled lists the chunk. Once peering drops 1.1 the PG activates, and the next write is 2.1 on every member, merged on no trace of 1.1.
+func TestActivateWaitsForEveryPendingVersionToBeSettled(t *testing.T) {
+	tbl := rtable(4, 2)
+	_, e := tbl.entry(pg0)
+	e.Members[1].Mark = MarkMaint
+	c := newRCluster(t, tbl)
+	ch := chunkIn(pg0, 4, 0)
+	restore := c.refuse()
+	w := c.write(pg0, ch, 0, []byte{1})
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusRefused {
+		t.Fatalf("answered %+v", rp)
+	}
+	restore()
+	c.publish(c.next(func(t *Table) { setInterval(t, pg0, 2) }), false)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		if err := r.Activate(ctx, pg0, 2, out); !errors.Is(err, ErrUnresolved) {
+			t.Fatalf("Activate with 1.1 pending: %v", err)
+		}
+		if got := r.Unsettled(pg0, nil); !slices.Equal(got, []core.ChunkID{ch}) {
+			t.Fatalf("unsettled %v, want %v", got, ch)
+		}
+		if err := r.Settle(ctx, ch, 0, out); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Activate(ctx, pg0, 2, out); err != nil {
+			t.Fatalf("Activate once 1.1 was dropped: %v", err)
+		}
+	})
+	next := c.write(pg0, ch, 1, []byte{2})
+	c.settle()
+	if rp := c.reply(next); rp.Status != StatusOK || rp.Version != MakeVersion(2, 1) {
+		t.Fatalf("the write after activation answered %+v", rp)
+	}
+	for d := range 3 {
+		if got := c.diskBlock(d, ch, 0); d != 1 && (got[0] != 0 || got[1] != 2) {
+			t.Fatalf("disk %d maps % x", d+1, got[:2])
+		}
+	}
+}

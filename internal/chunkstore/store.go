@@ -1161,7 +1161,7 @@ func (s *Store) Cancel(ctx *core.Context, c core.ChunkID, id uint64, out *Output
 	return false
 }
 
-// Newest is chunk c's newest ordered version, counting the versions a member was handed and has yet to order.
+// Newest is chunk c's newest ordered version, counting the versions a member was handed and has yet to order and a primary's versions whose records failed, whose numbers are never given again: not the newest version the disk holds whole.
 func (s *Store) Newest(c core.ChunkID) uint64 {
 	if ci, ok := s.chunkOf[c]; ok {
 		cs := &s.chunks[ci]

@@ -421,11 +421,14 @@ func (r *Replica) keptPrimary(e *PGEntry, from uint32) bool {
 	return from < e.Interval
 }
 
-// Activate is peering's end: the PG this disk leads is now active in interval, and the client writes it held are ordered again, unless another primary led the PG since the interval they were held in.
-func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out *ReplicaOutput) {
+// Activate is peering's end: the PG this disk leads is now active in interval, and the client writes it held are ordered again, unless another primary led the PG since the interval they were held in. It returns ErrUnresolved, activating nothing, while a chunk of the PG has versions peering has not settled.
+func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out *ReplicaOutput) error {
 	i := r.lead(pg)
 	if i < 0 || r.leads[i].interval != interval {
-		return
+		return nil
+	}
+	if r.unsettled = r.Unsettled(pg, r.unsettled[:0]); len(r.unsettled) > 0 {
+		return ErrUnresolved
 	}
 	r.leads[i].active = true
 	held := r.leads[i].held
@@ -439,6 +442,20 @@ func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out
 		r.recv(ctx, &ev, out)
 	}
 	r.drain(ctx, out)
+	return nil
+}
+
+// Unsettled appends to dst the chunks of pg with versions pending in the store, which, before the PG activates, are an earlier interval's for peering to settle: no member may hold them, so only this disk can name them.
+func (r *Replica) Unsettled(pg core.PGID, dst []core.ChunkID) []core.ChunkID {
+	n := len(dst)
+	all := r.st.Unsettled(dst)
+	dst = all[:n]
+	for _, c := range all[n:] {
+		if p, ok := r.pgOf(c); ok && p == pg {
+			dst = append(dst, c)
+		}
+	}
+	return dst
 }
 
 func (r *Replica) refuseHeld(ctx *core.Context, h heldMsg, out *ReplicaOutput) {
