@@ -67,8 +67,6 @@ func replyTakes(k Kind, st Status) bool {
 		set = 1<<StatusOK | 1<<StatusNoSpace | 1<<StatusRefused | 1<<StatusMismatch
 	case KindReadReply:
 		set = 1<<StatusOK | 1<<StatusRefused | 1<<StatusMissing | 1<<StatusUnfound
-	case KindPersistAck:
-		set = 1<<StatusOK | 1<<StatusRefused
 	}
 	return st < 8 && set&(1<<st) != 0
 }
@@ -147,7 +145,7 @@ type Read struct {
 	At    uint64
 }
 
-// Response answers an Update, a Read or a missing list to persist (KindPersistAck); a refusal names the refuser's table epoch and the PG's interval in it.
+// Response answers an Update or a Read; a refusal names the refuser's table epoch and the PG's interval in it.
 type Response struct {
 	Kind     Kind
 	ID       core.RequestID
@@ -241,11 +239,12 @@ type ChunkPeer struct {
 	Kept   uint64
 }
 
-// Peering asks a member to adopt the interval in PG (KindPeer); the member answers with the newest interval whose decision it persisted for the PG, 0 for none, and each chunk of the PG it logged or lists (KindPeerReply). The primary then hands it its missing list, each chunk's kept version (KindPersist), which a KindPersistAck answers once durable.
+// Peering asks member disk Disk to adopt the interval in PG (KindPeer); the member answers, naming its disk, with the newest interval whose decision it persisted for the PG, 0 for none, and each chunk of the PG it logged or lists (KindPeerReply). The primary then hands it its missing list, each chunk's kept version (KindPersist), which a KindPersistAck answers once durable with the interval in Decided, or refuses with Decided 0 and the member's own PG fields.
 type Peering struct {
 	Kind    Kind
 	ID      core.RequestID
 	PG      PGFields
+	Disk    uint32
 	Decided uint32
 	Chunks  []ChunkPeer
 	Missing []ChunkVersion
@@ -405,7 +404,7 @@ func AppendResponse(dst []byte, rp *Response) []byte {
 
 // DecodeResponse decodes an acknowledgment, reply or read reply frame whose data buffer holds data bytes.
 func DecodeResponse(b []byte, data int, rp *Response) error {
-	r, err := open(b, 0, KindAck, KindReply, KindReadReply, KindPersistAck)
+	r, err := open(b, 0, KindAck, KindReply, KindReadReply)
 	rp.Kind, rp.ID = r.kind, r.id
 	rp.Status = Status(r.u8())
 	rp.Version, rp.Epoch = r.u64(), r.u64()
@@ -415,7 +414,7 @@ func DecodeResponse(b []byte, data int, rp *Response) error {
 		dataOK = data > 0 && data <= core.ChunkSize && data%core.BlockSize == 0
 	}
 	if !replyTakes(rp.Kind, rp.Status) || !validVersion(rp.Version) || rp.Status == StatusRefused && rp.Interval == 0 ||
-		rp.Kind == KindAck && rp.Status == StatusOK && rp.Version == 0 || rp.Kind == KindPersistAck && rp.Version != 0 || !dataOK {
+		rp.Kind == KindAck && rp.Status == StatusOK && rp.Version == 0 || !dataOK {
 		r.bad = true
 	}
 	return r.done(err)
@@ -560,7 +559,7 @@ func DecodeProbeReply(b []byte, data int, p *ProbeReply) error {
 
 // AppendPeering appends p's frame.
 func AppendPeering(dst []byte, p *Peering) []byte {
-	dst = le.AppendUint32(appendPG(appendHead(dst, p.Kind, p.ID), &p.PG), p.Decided)
+	dst = le.AppendUint32(le.AppendUint32(appendPG(appendHead(dst, p.Kind, p.ID), &p.PG), p.Disk), p.Decided)
 	dst = le.AppendUint32(dst, uint32(len(p.Chunks)))
 	for _, c := range p.Chunks {
 		dst = le.AppendUint64(le.AppendUint64(c.Chunk.AppendTo(dst), c.Whole), c.Logged)
@@ -577,12 +576,12 @@ func appendChunkVersions(dst []byte, cvs []ChunkVersion) []byte {
 	return dst
 }
 
-// DecodePeering decodes a peering frame into p, reusing its slices: a request carries nothing more, a reply no missing list and a list to persist nothing but it.
+// DecodePeering decodes a peering frame into p, reusing its slices: a request carries nothing more, a reply no missing list, a list to persist nothing but it and an acknowledgment only the interval it persisted.
 func DecodePeering(b []byte, data int, p *Peering) error {
-	r, err := open(b, data, KindPeer, KindPeerReply, KindPersist)
+	r, err := open(b, data, KindPeer, KindPeerReply, KindPersist, KindPersistAck)
 	p.Kind, p.ID = r.kind, r.id
 	p.PG = r.pg()
-	p.Decided = r.u32()
+	p.Disk, p.Decided = r.u32(), r.u32()
 	p.Chunks = p.Chunks[:0]
 	for n := r.count(chunkPeerSize); n > 0; n-- {
 		c := ChunkPeer{Chunk: r.chunk(), Whole: r.u64(), Logged: r.u64()}
@@ -593,7 +592,8 @@ func DecodePeering(b []byte, data int, p *Peering) error {
 		p.Chunks = append(p.Chunks, c)
 	}
 	p.Missing = r.chunkVersions(p.Missing[:0])
-	if p.Kind != KindPeerReply && (p.Decided != 0 || len(p.Chunks) > 0) || p.Kind != KindPersist && len(p.Missing) > 0 {
+	if p.Disk == 0 || p.Kind != KindPeerReply && len(p.Chunks) > 0 || p.Kind != KindPersist && len(p.Missing) > 0 ||
+		p.Decided != 0 && p.Kind != KindPeerReply && p.Kind != KindPersistAck {
 		r.bad = true
 	}
 	return r.done(err)

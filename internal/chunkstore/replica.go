@@ -671,7 +671,7 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 		if DecodeHeartbeat(frame, data, &hb) == nil {
 			r.heartbeat(ctx, ev.Peer, &hb, out)
 		}
-	case KindPeer, KindPeerReply, KindPersist:
+	case KindPeer, KindPeerReply, KindPersist, KindPersistAck:
 		p := &r.peerMsg
 		if DecodePeering(frame, data, p) != nil {
 			break
@@ -679,13 +679,10 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 		switch {
 		case kind == KindPeerReply:
 			r.peerReplied(ctx, ev.Peer, p, out)
+		case kind == KindPersistAck:
+			r.persistAck(ev.Peer, p, out)
 		case kind == KindPeer && r.peerAsked(ctx, ev, p, out), kind == KindPersist && r.persistAsked(ctx, ev, p, out):
 			return
-		}
-	case KindPersistAck:
-		var rp Response
-		if DecodeResponse(frame, data, &rp) == nil {
-			r.persistAck(ev.Peer, &rp, out)
 		}
 	}
 	freeBuf(ctx, buf)

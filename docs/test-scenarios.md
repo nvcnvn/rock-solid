@@ -3884,9 +3884,9 @@ k.n is version (interval k, counter n).
 | `member_timeout` report, primary to authority | PG fields, member disk |
 | Direct probe, authority to a disk's owner loop | Disk ID |
 | Probe reply | Log ID, oldest unfinished I/O age, whether the log has failed |
-| Peering request | PG fields naming the interval to adopt |
-| Peering reply | The interval of the newest decision the member persisted for the PG, 0 for none; per chunk it logged or lists, the newest version held whole, the newest version logged, and the kept version it lists, if any |
-| Missing list | PG fields; per chunk, the kept version the member must receive; answered by a persist acknowledgment, success or a refusal with the member's table epoch and interval |
+| Peering request | PG fields naming the interval to adopt; the disk asked |
+| Peering reply | The disk that answers; the interval of the newest decision the member persisted for the PG, 0 for none; per chunk it logged or lists, the newest version held whole, the newest version logged, and the kept version it lists, if any |
+| Missing list | PG fields; the disk it is for; per chunk, the kept version the member must receive; answered by a persist acknowledgment naming the member's disk and the interval whose decision it persisted, or 0 with the member's table epoch and interval for a refusal |
 
 **Cases**
 
@@ -4755,8 +4755,10 @@ it on its missing list.
   The planted variant that keeps C's old disk ID for the new log drops acknowledged versions in the
   primary-change seeds (below): 93 of 500 seeds fail, the first, seed 0, on "no acknowledged version
   is ever dropped".
-- Peering matches each reply to a disk by the loop that sent it, so the membership record names no
-  loop for a disk whose log is gone.
+- A member answers only peering messages that name its own disk. Disk 3, which took 1.1, is
+  formatted again and comes back as disk 4 at the same loop while the table still lists disk 3 up
+  there; interval 2 moves PG 0's primary to disk 2, and peering waits for disk 3 rather than taking
+  disk 4's empty answer and dropping 1.1 (`TestADiskFormattedAgainAnswersNoPeeringForItsOldID`).
 - A second device reporting a log ID that is already up (a cloned drive) is refused, and the disk
   that reported it first keeps its ID.
 - Before the primary activates, each member persists its missing list: for each chunk it lacks or

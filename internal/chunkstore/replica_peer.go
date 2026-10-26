@@ -102,7 +102,7 @@ func (r *Replica) askPeers(i int, again bool, out *ReplicaOutput) {
 		if !r.reachable(disk) {
 			return
 		}
-		r.frame = AppendPeering(r.frame[:0], &Peering{Kind: KindPeer, ID: l.peer.id, PG: PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval}})
+		r.frame = AppendPeering(r.frame[:0], &Peering{Kind: KindPeer, ID: l.peer.id, PG: PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval}, Disk: disk})
 		r.sendFrame(r.addr(disk), out)
 	}
 	r.peerDisks = peerDisks(e, r.peerDisks[:0])
@@ -139,11 +139,11 @@ func (r *Replica) queueAsk(a peerAsk) {
 	r.answers = append(r.answers, a)
 }
 
-// peerAsked takes a primary's peering request: one for an interval newer than the replica's table waits for that table, one for an older interval is ignored, as the primary learns of the newer table from the control plane.
+// peerAsked takes a primary's peering request: one for another disk, which this loop's disk replaced, is ignored, one for an interval newer than the replica's table waits for that table, and one for an older interval is ignored, as the primary learns of the newer table from the control plane.
 func (r *Replica) peerAsked(ctx *core.Context, ev *core.Event, p *Peering, out *ReplicaOutput) bool {
 	_, e := r.table.entry(p.PG.PG)
 	switch {
-	case e == nil:
+	case e == nil || p.Disk != r.cfg.Disk:
 	case p.PG.Interval > e.Interval && p.PG.Epoch > r.table.Epoch:
 		r.park(ev, p.PG.Epoch, out)
 		return true
@@ -177,7 +177,7 @@ func (r *Replica) answerPeers(ctx *core.Context, out *ReplicaOutput) {
 			r.peerReply(ctx, r.cfg.Disk, a.pg, a.interval, a.id, decided, chunks, out)
 			continue
 		}
-		r.frame = AppendPeering(r.frame[:0], &Peering{Kind: KindPeerReply, ID: a.id, PG: PGFields{Epoch: r.table.Epoch, PG: a.pg, Interval: a.interval}, Decided: decided, Chunks: chunks})
+		r.frame = AppendPeering(r.frame[:0], &Peering{Kind: KindPeerReply, ID: a.id, PG: PGFields{Epoch: r.table.Epoch, PG: a.pg, Interval: a.interval}, Disk: r.cfg.Disk, Decided: decided, Chunks: chunks})
 		r.sendLong(ctx, a.peer, out)
 	}
 }
@@ -236,28 +236,16 @@ func (r *Replica) sendLong(ctx *core.Context, peer core.NodeID, out *ReplicaOutp
 	out.Actions = append(out.Actions, a)
 }
 
-// peerReplied takes a member's answer to peering.
+// peerReplied takes a member's answer to peering, from the loop that owns the disk it names.
 func (r *Replica) peerReplied(ctx *core.Context, peer core.NodeID, p *Peering, out *ReplicaOutput) {
 	i := r.lead(p.PG.PG)
-	if i < 0 {
+	if i < 0 || r.leads[i].peer == nil || p.Disk == r.cfg.Disk || !r.reachable(p.Disk) || r.addr(p.Disk) != peer {
 		return
 	}
-	l := &r.leads[i]
-	if l.peer == nil {
-		return
+	_, e := r.table.entry(p.PG.PG)
+	if r.peerDisks = peerDisks(e, r.peerDisks[:0]); slices.Contains(r.peerDisks, p.Disk) {
+		r.peerReply(ctx, p.Disk, p.PG.PG, p.PG.Interval, p.ID, p.Decided, p.Chunks, out)
 	}
-	r.peerDisks = peerDisks(r.entryOf(l.pg), r.peerDisks[:0])
-	for _, d := range r.peerDisks {
-		if r.reachable(d) && r.addr(d) == peer && d != r.cfg.Disk {
-			r.peerReply(ctx, d, p.PG.PG, p.PG.Interval, p.ID, p.Decided, p.Chunks, out)
-			return
-		}
-	}
-}
-
-func (r *Replica) entryOf(pg core.PGID) *PGEntry {
-	_, e := r.table.entry(pg)
-	return e
 }
 
 // peerReply records disk's answer to the lead's peering and decides once every up member of the interval answered and a member up in each past interval that could have taken writes did: those since the last activated one with min_live live members and one up.
@@ -306,7 +294,8 @@ func (r *Replica) peerReply(ctx *core.Context, disk uint32, pg core.PGID, interv
 func (r *Replica) decide(ctx *core.Context, i int, out *ReplicaOutput) {
 	l := &r.leads[i]
 	pr := l.peer
-	pr.all, pr.kept = keep(r.entryOf(l.pg), pr.replies, pr.all, pr.kept[:0])
+	_, e := r.table.entry(l.pg)
+	pr.all, pr.kept = keep(e, pr.replies, pr.all, pr.kept[:0])
 	pr.decided = true
 	r.persistLists(ctx, i, out)
 }
@@ -321,7 +310,7 @@ func (r *Replica) persistLists(ctx *core.Context, i int, out *ReplicaOutput) {
 			continue
 		}
 		if rp.disk != r.cfg.Disk {
-			r.frame = AppendPeering(r.frame[:0], &Peering{Kind: KindPersist, ID: pr.id, PG: PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval}, Missing: rp.list})
+			r.frame = AppendPeering(r.frame[:0], &Peering{Kind: KindPersist, ID: pr.id, PG: PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval}, Disk: rp.disk, Missing: rp.list})
 			r.sendLong(ctx, r.addr(rp.disk), out)
 			continue
 		}
@@ -339,17 +328,16 @@ func (r *Replica) persist(ctx *core.Context, q persistReq, pgs uint32, list []Ch
 	r.st.Persist(ctx, q.id, q.pg.Index, pgs, q.interval, list, &r.sout)
 }
 
-// persistAsked takes a primary's missing list for the PG's current interval, persisting it; one for a newer interval waits for that table, and one for an older interval is refused.
+// persistAsked takes a primary's missing list for the PG's current interval, persisting it; one for another disk is ignored, one for a newer interval waits for that table, and one for an older interval is refused.
 func (r *Replica) persistAsked(ctx *core.Context, ev *core.Event, p *Peering, out *ReplicaOutput) bool {
 	pt, e := r.table.entry(p.PG.PG)
 	switch {
+	case p.Disk != r.cfg.Disk:
 	case e != nil && p.PG.Interval > e.Interval && p.PG.Epoch > r.table.Epoch:
 		r.park(ev, p.PG.Epoch, out)
 		return true
 	case e == nil || p.PG.Interval != e.Interval:
-		rp := r.refusal(p.PG.PG)
-		rp.Kind = KindPersistAck
-		r.answer(ctx, ev.Peer, p.ID, &rp, core.NoBuf, out)
+		r.persistAnswer(ctx, ev.Peer, p.ID, p.PG.PG, 0, out)
 	default:
 		r.persist(ctx, persistReq{peer: ev.Peer, msgID: p.ID, pg: p.PG.PG, interval: p.PG.Interval}, uint32(len(pt.PGs)), p.Missing)
 	}
@@ -370,33 +358,33 @@ func (r *Replica) persisted(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		}
 		return
 	}
-	ack := Response{Kind: KindPersistAck, Status: StatusOK}
-	if rp.Err != nil {
-		ack = r.refusal(q.pg)
-		ack.Kind = KindPersistAck
+	var done uint32
+	if rp.Err == nil {
+		done = q.interval
 	}
-	r.answer(ctx, q.peer, q.msgID, &ack, core.NoBuf, out)
+	r.persistAnswer(ctx, q.peer, q.msgID, q.pg, done, out)
 }
 
-// persistAck takes a member's acknowledgment of its missing list.
-func (r *Replica) persistAck(peer core.NodeID, rp *Response, out *ReplicaOutput) {
-	if rp.Status != StatusOK {
-		if rp.Epoch > r.table.Epoch {
-			r.fetch(rp.Epoch, false, out)
+// persistAnswer acknowledges a missing list persisted for interval done, or refuses it when done is 0, naming the replica's table and the PG's interval in it.
+func (r *Replica) persistAnswer(ctx *core.Context, peer core.NodeID, id core.RequestID, pg core.PGID, done uint32, out *ReplicaOutput) {
+	ref := r.refusal(pg)
+	r.frame = AppendPeering(r.frame[:0], &Peering{Kind: KindPersistAck, ID: id, PG: PGFields{Epoch: ref.Epoch, PG: pg, Interval: ref.Interval}, Disk: r.cfg.Disk, Decided: done})
+	r.sendLong(ctx, peer, out)
+}
+
+// persistAck takes a member's acknowledgment of its missing list, from the loop that owns the disk it names.
+func (r *Replica) persistAck(peer core.NodeID, p *Peering, out *ReplicaOutput) {
+	if p.Decided == 0 {
+		if p.PG.Epoch > r.table.Epoch {
+			r.fetch(p.PG.Epoch, false, out)
 		}
 		return
 	}
-	for i := range r.leads {
-		l := &r.leads[i]
-		if l.peer == nil || l.peer.id != rp.ID {
-			continue
-		}
-		for _, rpl := range l.peer.replies {
-			if r.reachable(rpl.disk) && r.addr(rpl.disk) == peer && rpl.disk != r.cfg.Disk {
-				r.persistAcked(l.pg, l.interval, rpl.disk)
-			}
-		}
+	i := r.lead(p.PG.PG)
+	if i < 0 || r.leads[i].peer == nil || r.leads[i].peer.id != p.ID || p.Disk == r.cfg.Disk || !r.reachable(p.Disk) || r.addr(p.Disk) != peer {
+		return
 	}
+	r.persistAcked(p.PG.PG, p.Decided, p.Disk)
 }
 
 func (r *Replica) persistAcked(pg core.PGID, interval uint32, disk uint32) {
