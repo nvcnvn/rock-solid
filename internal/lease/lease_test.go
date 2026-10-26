@@ -334,12 +334,11 @@ func TestUntilSetsAnotherTimerForTheRemainder(t *testing.T) {
 
 // pairMsg is a grant or heartbeat in flight to the holder, arriving at real time at.
 type pairMsg struct {
-	at    core.Tick
-	beat  bool
-	gr    Grant
-	run   uint64
-	raw   core.Tick
-	sendT Time
+	at   core.Tick
+	beat bool
+	gr   Grant
+	run  uint64
+	raw  core.Tick
 }
 
 // runPair runs a holder and a grantor for 60 s of real time with random clock rates, renewals and
