@@ -20,7 +20,7 @@ func cloneTable(t Table) Table {
 	return t
 }
 
-// next is the cluster's table one epoch on, recording the activations its primaries reported as the control plane does, edited by edit.
+// next is the cluster's table one epoch on, recording the activations and recovered intervals its primaries reported as the control plane does, edited by edit.
 func (c *rcluster) next(edit func(t *Table)) Table {
 	t := cloneTable(c.table)
 	t.Epoch++
@@ -28,6 +28,11 @@ func (c *rcluster) next(edit func(t *Table)) Table {
 		if _, e := t.entry(a.PG); e != nil && a.Interval > e.Activated && a.Interval <= e.Interval {
 			e.Activated = a.Interval
 			e.Past = slices.DeleteFunc(e.Past, func(p PastInterval) bool { return p.Interval < a.Interval })
+		}
+	}
+	for _, r := range c.recovered {
+		if _, e := t.entry(r.PG); e != nil && r.Interval == e.Interval {
+			e.Recovered = true
 		}
 	}
 	edit(&t)
@@ -49,7 +54,7 @@ func mark(t *Table, pg core.PGID, disk uint32, m Mark) {
 func setInterval(t *Table, pg core.PGID, k uint32) {
 	_, e := t.entry(pg)
 	e.Past = append(e.Past, PastInterval{Interval: e.Interval, MinLive: t.pool(pg.Pool).MinLive, Members: slices.Clone(e.Members)})
-	e.Interval = k
+	e.Interval, e.Recovered = k, false
 }
 
 func TestThePrimaryFansOutWhileItLogs(t *testing.T) {

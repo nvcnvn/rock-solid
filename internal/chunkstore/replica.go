@@ -42,18 +42,19 @@ type ReplicaConfig struct {
 	Restarted bool
 }
 
-// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers.
+// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations and in Recovered, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers.
 type ReplicaOutput struct {
 	Actions     []core.Action
 	Fetch       uint64
 	Whole       bool
 	Asks        []PGFields
 	Activations []PGFields
+	Recovered   []PGFields
 }
 
 // Reset empties the output for reuse.
 func (o *ReplicaOutput) Reset() {
-	o.Actions, o.Fetch, o.Whole, o.Asks, o.Activations = o.Actions[:0], 0, false, o.Asks[:0], o.Activations[:0]
+	o.Actions, o.Fetch, o.Whole, o.Asks, o.Activations, o.Recovered = o.Actions[:0], 0, false, o.Asks[:0], o.Activations[:0], o.Recovered[:0]
 }
 
 func (o *ReplicaOutput) fetch(epoch uint64, whole bool) {
@@ -77,6 +78,8 @@ func (r *Replica) retry(ctx *core.Context, out *ReplicaOutput) {
 		out.fetch(r.want, r.wantWhole)
 	}
 	r.peerRetry(ctx, out)
+	r.reportRecovered(true, out)
+	r.retryReads()
 	for i := range r.leads {
 		if l := &r.leads[i]; l.asked {
 			out.Asks = append(out.Asks, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
@@ -86,7 +89,7 @@ func (r *Replica) retry(ctx *core.Context, out *ReplicaOutput) {
 
 // armRetry arms RetryTimer while a table or an interval is asked for.
 func (r *Replica) armRetry(ctx *core.Context, out *ReplicaOutput) {
-	if r.retryAt != 0 || r.want == 0 && !slices.ContainsFunc(r.leads, func(l lead) bool { return l.asked }) && !r.peering() {
+	if r.retryAt != 0 || r.want == 0 && !slices.ContainsFunc(r.leads, func(l lead) bool { return l.asked }) && !r.peering() && !r.unrecorded() && !r.waits {
 		return
 	}
 	r.retryAt = ctx.Now + RetryAfter
@@ -108,6 +111,13 @@ type lead struct {
 	asking bool
 	asked  bool
 	spent  int
+	// todo is the chunks the decision left a member lacking, in chunk order, done before cursor;
+	// listed counts, by place in the interval's members, the chunks each still lacks; reported is set
+	// once the interval was reported recovered.
+	todo     []recoverChunk
+	cursor   int
+	listed   [maxMembers]int
+	reported bool
 }
 
 type heldMsg struct {
@@ -128,6 +138,8 @@ const (
 	reqClient reqKind = iota + 1
 	reqMember
 	reqRead
+	reqRecover
+	reqRecoverRead
 )
 
 // storeReq is a store request in flight: who asked, and for a client's write or punch its version's state.
@@ -162,6 +174,9 @@ type version struct {
 	logged bool
 	commit bool
 	done   bool
+	// recover marks a recovery write, which answers no client; tgt the members it carries blocks to.
+	recover bool
+	tgt     uint8
 }
 
 // Replica runs a disk's store as a member of the PGs the placement table puts on it: primary of those it leads, ordering client writes, fanning them out and committing them once every live member holds them, and a replica of the rest.
@@ -208,7 +223,11 @@ type Replica struct {
 	peerDisks  []uint32
 	peerChunks []ChunkPeer
 	peerMsg    Peering
-	plant      replicaPlants
+	// recs is the recoveries under way, released the held writes a recovery lets go.
+	recs     []recovery
+	released []heldMsg
+	waits    bool
+	plant    replicaPlants
 	// disks is each disk's size and the live blocks it last reported, by disk ID; pools the pools'
 	// settings and outstanding grants; slots each pool's member slots on each disk in the table.
 	disks  []diskInfo
@@ -335,6 +354,11 @@ type replicaPlants struct {
 	// peerInOldInterval has a restarted primary peer in the interval it led before, asking for none; mergeWhileLacking merges a partial-block write on a chunk before the primary holds the version peering kept (sub-block spike M8).
 	peerInOldInterval bool
 	mergeWhileLacking bool
+	// noRecovery recovers nothing, as a primary without recovery would; coverAtRead picks the
+	// blocks a recovery write leaves out when it reads the source rather than when it is ordered
+	// (the epoch change model's RecoveryCoversAtRead).
+	noRecovery  bool
+	coverAtRead bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.
@@ -468,7 +492,9 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 			r.refuseHeld(ctx, h, out)
 		}
 	}
+	old := r.leads
 	r.leads = kept
+	r.dropRecoveries(old)
 	r.noteGrantors()
 	r.armLease(ctx, out)
 	r.dropWaiting(ctx, out)
@@ -495,7 +521,7 @@ func (r *Replica) demote(ctx *core.Context, out *ReplicaOutput) {
 		}
 		v.done = true
 		r.takeReq(v.req)
-		r.reply(ctx, v.client, v.msgID, r.refusal(v.u.PG.PG), out)
+		r.answerClient(ctx, v, r.refusal(v.u.PG.PG), out)
 		r.release(ctx, i)
 	}
 	r.unsettled = r.st.Unsettled(r.unsettled[:0])
@@ -580,7 +606,7 @@ func (r *Replica) storeFailed(ctx *core.Context, out *ReplicaOutput) {
 		if v := &r.vers[i]; !v.done {
 			v.done = true
 			r.takeReq(v.req)
-			r.reply(ctx, v.client, v.msgID, r.refusal(v.u.PG.PG), out)
+			r.answerClient(ctx, v, r.refusal(v.u.PG.PG), out)
 			r.release(ctx, i)
 		}
 	}
@@ -659,14 +685,14 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 		}
 		r.clientUpdate(ctx, ev, &u, out)
 		return
-	case KindReplicaWrite, KindReplicaPunch:
+	case KindReplicaWrite, KindReplicaPunch, KindRecover:
 		var u Update
 		if DecodeUpdate(frame, data, &u) != nil {
 			break
 		}
 		r.memberUpdate(ctx, ev, &u, out)
 		return
-	case KindRead:
+	case KindRead, KindRecoverRead:
 		var rd Read
 		if DecodeRead(frame, data, &rd) == nil {
 			r.read(ctx, ev, &rd, out)
@@ -678,7 +704,7 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 		}
 	case KindReadReply:
 		var rp Response
-		if DecodeResponse(frame, data, &rp) == nil && r.baseReply(ctx, &rp, buf, out) {
+		if DecodeResponse(frame, data, &rp) == nil && (r.baseReply(ctx, &rp, buf, out) || r.recoverReply(ctx, ev.Peer, &rp, buf)) {
 			return
 		}
 	case KindLeaseRequest:
@@ -797,6 +823,9 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		}
 	case !r.leads[i].active || r.leads[i].asking || edgeBytes(u.Off, u.Len) > 0 && r.leads[i].lacks(u.Chunk) && !r.plant.mergeWhileLacking:
 		l := &r.leads[i]
+		if l.active && !l.asking && len(l.held) >= maxHeld {
+			break
+		}
 		l.held = append(l.held, heldMsg{peer: ev.Peer, msg: ev.Msg, hold: l.interval})
 		return
 	case u.Kind == KindWrite && !u.Granted && r.full(ctx, u.PG.PG, p, e) && !r.st.Overwrites(u.Chunk, u.Off, u.Len, u.Snapshot):
@@ -852,8 +881,8 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		return
 	}
 	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
-	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, Epoch: u.Snapshot, Version: u.Version}
-	if u.Kind == KindReplicaWrite {
+	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, Epoch: u.Snapshot, Version: u.Version, Recover: u.Kind == KindRecover}
+	if u.Kind == KindReplicaWrite || u.Kind == KindRecover {
 		r.st.Write(ctx, req, &r.sout)
 	} else {
 		r.st.Punch(ctx, req, &r.sout)
@@ -891,6 +920,10 @@ func (r *Replica) noteFailed(f failedVer) {
 
 // read serves a client's read at the PG's primary while it may serve reads, a read of a frozen version at any member, and at a member a base its primary fetches, the blocks at the version the primary's index names.
 func (r *Replica) read(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) {
+	if rd.Recover {
+		r.recoveryAsked(ctx, ev, rd, out)
+		return
+	}
 	p, e := r.table.entry(rd.PG.PG)
 	i := r.lead(rd.PG.PG)
 	primary := i >= 0 && r.leads[i].serving && rd.PG.Interval >= r.leads[i].since && rd.PG.Interval <= r.leads[i].interval && r.readable(ctx, p, e)
@@ -948,10 +981,13 @@ func (r *Replica) versionOf(req uint64) int {
 func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 	r.drainStore(ctx, out)
 	r.peerWork(ctx, out)
+	r.recoverWork(ctx, out)
 	for len(r.sout.Ordered)+len(r.sout.Logged)+len(r.sout.Replies)+len(r.sout.Bases) > 0 || r.sout.Rebuilt {
 		r.drainStore(ctx, out)
 		r.peerWork(ctx, out)
+		r.recoverWork(ctx, out)
 	}
+	r.reportRecovered(false, out)
 	if r.st.Err() != nil {
 		r.storeFailed(ctx, out)
 	}
@@ -1015,6 +1051,9 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 		v.members[v.n] = m.Disk
 		v.n++
 	}
+	if v.recover {
+		r.recoveryTargets(v)
+	}
 	v.sentAt = ctx.Now
 	for k := range v.n {
 		if !slices.Contains(r.lost, r.addr(v.members[k])) {
@@ -1036,15 +1075,19 @@ func (r *Replica) send(v *version, k int, out *ReplicaOutput) {
 	u := v.u
 	u.ID, u.HasExpect, u.Expect, u.Granted = core.RequestID(v.req)|core.RequestID(v.sends[k])<<sendShift, false, 0, false
 	u.PG.Epoch, u.PG.Interval = v.epoch, uint32(v.u.Version>>32)
-	if u.Kind == KindWrite {
+	switch u.Kind {
+	case KindWrite:
 		first, last := spanOf(u.Off, u.Len)
 		u.Kind, u.Off, u.Len = KindReplicaWrite, uint32(first)*core.BlockSize, uint32(last-first+1)*core.BlockSize
-	} else {
+	case KindPunch:
 		u.Kind = KindReplicaPunch
 	}
 	r.frame = AppendUpdate(r.frame[:0], &u)
 	a := core.Action{Kind: core.ActNetSend, Peer: r.addr(v.members[k])}
 	a.Msg.Len, a.Msg.Buf = uint16(copy(a.Msg.Body[:], r.frame)), v.buf
+	if v.recover && v.tgt&(1<<k) == 0 {
+		a.Msg.Buf = core.NoBuf
+	}
 	out.Actions = append(out.Actions, a)
 	v.out |= 1 << k
 }
@@ -1153,7 +1196,7 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 		}
 		w.done = true
 		r.takeReq(w.req)
-		r.answer(ctx, w.client, w.msgID, &ref, core.NoBuf, out)
+		r.answerClient(ctx, w, ref, out)
 		r.release(ctx, j)
 	}
 	r.dropWaiting(ctx, out)
@@ -1177,7 +1220,7 @@ func (r *Replica) dropWaiting(ctx *core.Context, out *ReplicaOutput) {
 				r.st.SupplyBase(ctx, f.ID, f.Block, core.NoBuf, ErrDropped, &r.sout)
 			}
 		}
-		r.reply(ctx, v.client, v.msgID, r.refusal(v.u.PG.PG), out)
+		r.answerClient(ctx, v, r.refusal(v.u.PG.PG), out)
 		r.release(ctx, i)
 	}
 }
@@ -1193,6 +1236,14 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		return
 	}
 	switch q.kind {
+	case reqRecover:
+		r.recoveryWritten(ctx, rp, out)
+	case reqRecoverRead:
+		if k := slices.IndexFunc(r.recs, func(rc recovery) bool { return rc.read == rp.ID }); k >= 0 {
+			r.recoveryRead(ctx, k, rp.Buf, rp.Err == nil)
+		} else {
+			freeBuf(ctx, rp.Buf)
+		}
 	case reqClient:
 		i := r.versionOf(rp.ID)
 		if i >= 0 && errors.Is(rp.Err, ErrCounter) {
@@ -1285,6 +1336,7 @@ func (r *Replica) ask(out *ReplicaOutput) {
 
 // peerLost ends every send to the peer and has the writes it left unacknowledged sent again after ResendAfter, new writes to it waiting behind them; a base asked of it is asked of the next member.
 func (r *Replica) peerLost(ctx *core.Context, peer core.NodeID, out *ReplicaOutput) {
+	r.recoverLost(ctx, peer)
 	for i := len(r.bases) - 1; i >= 0; i-- {
 		if r.bases[i].asked == peer {
 			r.askBase(ctx, i, out)
@@ -1359,6 +1411,19 @@ func (r *Replica) settle(ctx *core.Context, c core.ChunkID, keep uint64) error {
 		}
 	}
 	return nil
+}
+
+// answerClient answers the client of version v with rp, a refusal; a recovery write has none, and
+// its chunk is recovered again unless its interval ended.
+func (r *Replica) answerClient(ctx *core.Context, v *version, rp Response, out *ReplicaOutput) {
+	if v.recover {
+		if k := slices.IndexFunc(r.recs, func(rc recovery) bool { return rc.req == v.req }); k >= 0 {
+			r.endRecovery(k, false)
+		}
+		return
+	}
+	rp.Kind = KindReply
+	r.answer(ctx, v.client, v.msgID, &rp, core.NoBuf, out)
 }
 
 // reply answers a client's write or punch.

@@ -85,6 +85,12 @@ type Request struct {
 	// Session and Incarnation name the client process a write or punch came from.
 	Session     uint64
 	Incarnation uint64
+	// Recover makes a Write a recovery write of the whole chunk, whose Buf is a recovery buffer, or
+	// none for a member that takes only the entry ending its version, and a Read one of the chunk's
+	// live image as a recovery buffer. MarkOnly has a primary's recovery write log only that entry,
+	// its buffer going to the members.
+	Recover  bool
+	MarkOnly bool
 }
 
 // Reply completes the request ID: the version written or read, and a read's blocks in Buf laid out as a write's, which the caller frees; a write refused with ErrCounter hands its Buf back.
@@ -340,6 +346,10 @@ type Store struct {
 	adm admission
 	// sessions is the newest incarnation seen of each client session.
 	sessions map[uint64]uint64
+	// covers is, for each chunk a recovery write waits on at this primary, the blocks the writes of
+	// its interval ordered so far cover; rexts the extents a recovery read reads.
+	covers map[core.ChunkID]cover
+	rexts  []Extent
 	// cache is the recently merged blocks, held in cacheBuf block for block, replaced in turn from cacheNext.
 	cache     []cachedBlock
 	cacheBuf  core.IOBuf
@@ -481,10 +491,15 @@ func (s *Store) admit(ctx *core.Context, r Request, kind opKind, out *Output) bo
 	if err == nil && !validRange(r.Off, r.Len) {
 		err = ErrRange
 	}
-	if err == nil && kind == opWrite {
-		if r.Buf == core.NoBuf || len(ctx.Pool.Bytes(r.Buf)) != dataBytes(r.Off, r.Len) {
+	switch {
+	case err != nil || kind != opWrite:
+	case r.Recover:
+		var m blockMap
+		if r.Buf != core.NoBuf && decodeBlockMap(ctx.Pool.Bytes(r.Buf), &m) != nil || r.Buf == core.NoBuf && r.Gated {
 			err = disklog.ErrBadBuffer
 		}
+	case r.Buf == core.NoBuf || len(ctx.Pool.Bytes(r.Buf)) != dataBytes(r.Off, r.Len):
+		err = disklog.ErrBadBuffer
 	}
 	if err != nil {
 		if r.Buf != core.NoBuf {
@@ -663,7 +678,7 @@ func (s *Store) startBases(ctx *core.Context, oi int32) bool {
 		o.err = ErrVersion
 		return false
 	}
-	if o.kind == opPunch && cs.version == 0 {
+	if o.kind == opPunch && cs.version == 0 && !o.req.Gated {
 		return false
 	}
 	first, last := spanOf(o.req.Off, o.req.Len)
@@ -833,7 +848,7 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	o := &s.ops[oi]
 	ci := o.chunk
 	cs := &s.chunks[ci]
-	if o.kind == opPunch && cs.version == 0 && o.req.Version == 0 {
+	if o.kind == opPunch && cs.version == 0 && o.req.Version == 0 && !o.req.Gated {
 		o.err = nil
 		s.finishUnordered(ctx, oi, out)
 		return
@@ -860,21 +875,36 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	}
 	cs.version = o.version
 	first, last := spanOf(o.req.Off, o.req.Len)
-	if o.kind == opWrite {
+	if o.req.Gated && !o.req.Recover && len(s.covers) > 0 {
+		s.covered(c, o)
+	}
+	switch {
+	case o.req.Recover:
+		if err := s.recoverItems(ctx, o); err != nil {
+			o.err = err
+			s.memberFailed(o)
+		}
+		s.freeBufs(ctx, oi)
+	case o.kind == opWrite:
 		if err := s.writeItems(ctx, o, first, last); err != nil {
 			o.err = err
 			s.freeBufs(ctx, oi)
 			s.memberFailed(o)
 		}
-	} else {
+	default:
 		s.punchItems(o, first, last)
 	}
-	if n := len(o.items); o.err == nil && n > 0 {
+	if n := len(o.items); o.err == nil && n > 0 && !o.req.Recover {
 		o.items[n-1].entry.Last = true
 	}
 	if o.req.Gated && o.err == nil {
 		r := Reply{ID: o.req.ID, Version: o.version}
-		if r.Buf, o.err = s.mergedCopy(ctx, o); o.err == nil {
+		if o.req.Recover {
+			r.Buf, o.buf = o.buf, core.NoBuf
+		} else {
+			r.Buf, o.err = s.mergedCopy(ctx, o)
+		}
+		if o.err == nil {
 			out.Ordered = append(out.Ordered, r)
 		}
 	}
@@ -1017,6 +1047,19 @@ func (s *Store) Read(ctx *core.Context, r Request, out *Output) {
 	}
 	if err != nil {
 		out.Replies = append(out.Replies, Reply{ID: r.ID, Err: err})
+		return
+	}
+	if r.Recover {
+		oi := s.newOp(opRead, r)
+		ch, _ := s.ix.Chunk(pool, r.Chunk)
+		s.ops[oi].version = ch.Version
+		if err := s.recoveryRead(ctx, oi); err != nil {
+			s.ops[oi].err = err
+		}
+		if s.ops[oi].reads == 0 {
+			s.finishRead(ctx, oi, out)
+		}
+		s.pump(ctx, out)
 		return
 	}
 	first, last := spanOf(r.Off, r.Len)
@@ -1554,6 +1597,11 @@ func (s *Store) rereadHeader(ctx *core.Context, fi int32, blocks uint32) error {
 func (s *Store) deliver(ctx *core.Context, f *fetch, o *op) {
 	src := ctx.Pool.Bytes(f.data)[:int(f.n)*core.BlockSize]
 	first, last := spanOf(o.req.Off, o.req.Len)
+	if o.kind == opRead && o.req.Recover {
+		dst := ctx.Pool.Bytes(o.buf)
+		copy(dst[recoveryAt(dst, f.first):], src)
+		return
+	}
 	if o.kind == opRead {
 		copy(ctx.Pool.Bytes(o.buf)[int(f.first-first)*core.BlockSize:], src)
 		return
@@ -2181,6 +2229,7 @@ func (s *Store) abandonPending(ctx *core.Context, out *Output) {
 		s.freeOp(oi)
 	}
 	s.persists = s.persists[:0]
+	clear(s.covers)
 	s.checkFlushes(out)
 }
 

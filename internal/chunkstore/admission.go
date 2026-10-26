@@ -146,7 +146,11 @@ func (s *Store) admitWrite(ctx *core.Context, ci int32, o *op) bool {
 	}
 	if charged {
 		first, last := spanOf(o.req.Off, o.req.Len)
-		a.tokens -= float64(last - first + 1)
+		n := int(last-first) + 1
+		if o.req.Recover {
+			n = recoveryBlocks(ctx.Pool, o.req.Buf)
+		}
+		a.tokens -= float64(n)
 	}
 	return true
 }

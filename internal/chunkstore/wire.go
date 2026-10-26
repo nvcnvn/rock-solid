@@ -42,6 +42,8 @@ const (
 	KindPeerReply
 	KindPersist
 	KindPersistAck
+	KindRecover
+	KindRecoverRead
 	kindEnd
 )
 
@@ -114,7 +116,7 @@ type Hello struct {
 	Incarnation uint64
 }
 
-// Update is a chunk write or punch, from a client to the primary or, with the version it ordered, from the primary to a member, a member's punch carrying the edge blocks the primary merged; a purger's punch names its shard and Raft term.
+// Update is a chunk write or punch, from a client to the primary or, with the version it ordered, from the primary to a member, a member's punch carrying the edge blocks the primary merged; a purger's punch names its shard and Raft term. A recovery write (KindRecover) covers the whole chunk and carries a recovery buffer, or none for a member that takes only the entry ending its version.
 type Update struct {
 	Kind        Kind
 	ID          core.RequestID
@@ -134,15 +136,16 @@ type Update struct {
 	Granted bool
 }
 
-// Read asks for a chunk's committed bytes, or for version At when HasAt.
+// Read asks for a chunk's committed bytes, or for version At when HasAt; with Recover (KindRecoverRead), a primary asks a member for the whole chunk's live image as a recovery buffer.
 type Read struct {
-	ID    core.RequestID
-	PG    PGFields
-	Chunk core.ChunkID
-	Off   uint32
-	Len   uint32
-	HasAt bool
-	At    uint64
+	ID      core.RequestID
+	PG      PGFields
+	Chunk   core.ChunkID
+	Off     uint32
+	Len     uint32
+	HasAt   bool
+	At      uint64
+	Recover bool
 }
 
 // Response answers an Update or a Read; a refusal names the refuser's table epoch and the PG's interval in it.
@@ -344,7 +347,7 @@ func AppendUpdate(dst []byte, u *Update) []byte {
 
 // DecodeUpdate decodes a write or punch frame whose data buffer holds data bytes: a write's are the blocks its range touches.
 func DecodeUpdate(b []byte, data int, u *Update) error {
-	r, err := open(b, 0, KindWrite, KindReplicaWrite, KindPunch, KindReplicaPunch)
+	r, err := open(b, 0, KindWrite, KindReplicaWrite, KindPunch, KindReplicaPunch, KindRecover)
 	u.Kind, u.ID = r.kind, r.id
 	u.PG = r.pg()
 	u.Session, u.Incarnation = r.u64(), r.u64()
@@ -356,7 +359,7 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 	if flags&^(expectFlag|grantedFlag) != 0 || !validVersion(u.Expect) || !u.HasExpect && u.Expect != 0 || u.Granted && u.Kind != KindWrite {
 		r.bad = true
 	}
-	replica := u.Kind == KindReplicaWrite || u.Kind == KindReplicaPunch
+	replica := u.Kind == KindReplicaWrite || u.Kind == KindReplicaPunch || u.Kind == KindRecover
 	write := u.Kind == KindWrite || u.Kind == KindReplicaWrite
 	want := 0
 	switch {
@@ -365,6 +368,11 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 		want = dataBytes(u.Off, u.Len)
 	case u.Kind == KindReplicaPunch:
 		want = edgeBytes(u.Off, u.Len)
+	case u.Kind == KindRecover:
+		want = data
+		if u.Off != 0 || u.Len != core.ChunkSize || data%core.BlockSize != 0 || data > core.BlockSize+core.ChunkSize || u.Shard != 0 || u.Term != 0 {
+			r.bad = true
+		}
 	}
 	if !validRange(u.Off, u.Len) || data != want || !validVersion(u.Version) || replica != (u.Version != 0) ||
 		write && (u.Shard != 0 || u.Term != 0) {
@@ -375,7 +383,11 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 
 // AppendRead appends rd's frame.
 func AppendRead(dst []byte, rd *Read) []byte {
-	dst = appendPG(appendHead(dst, KindRead, rd.ID), &rd.PG)
+	k := KindRead
+	if rd.Recover {
+		k = KindRecoverRead
+	}
+	dst = appendPG(appendHead(dst, k, rd.ID), &rd.PG)
 	dst = rd.Chunk.AppendTo(dst)
 	dst = le.AppendUint32(le.AppendUint32(dst, rd.Off), rd.Len)
 	return le.AppendUint64(appendBool(dst, rd.HasAt), rd.At)
@@ -383,19 +395,19 @@ func AppendRead(dst []byte, rd *Read) []byte {
 
 // DecodeRead decodes a read frame.
 func DecodeRead(b []byte, data int, rd *Read) error {
-	r, err := open(b, data, KindRead)
-	rd.ID = r.id
+	r, err := open(b, data, KindRead, KindRecoverRead)
+	rd.ID, rd.Recover = r.id, r.kind == KindRecoverRead
 	rd.PG = r.pg()
 	rd.Chunk = r.chunk()
 	rd.Off, rd.Len = r.u32(), r.u32()
 	rd.HasAt, rd.At = r.optional()
-	if !validRange(rd.Off, rd.Len) {
+	if !validRange(rd.Off, rd.Len) || rd.Recover && (rd.Off != 0 || rd.Len != core.ChunkSize || rd.HasAt) {
 		r.bad = true
 	}
 	return r.done(err)
 }
 
-// AppendResponse appends rp's frame; a read reply's blocks travel as the message's buffer, laid out as a write's.
+// AppendResponse appends rp's frame; a read reply's blocks travel as the message's buffer, laid out as a write's, or a recovery buffer for a recovery read.
 func AppendResponse(dst []byte, rp *Response) []byte {
 	dst = append(appendHead(dst, rp.Kind, rp.ID), byte(rp.Status))
 	dst = le.AppendUint64(le.AppendUint64(dst, rp.Version), rp.Epoch)
@@ -411,7 +423,7 @@ func DecodeResponse(b []byte, data int, rp *Response) error {
 	rp.Interval, rp.Fill = r.u32(), r.u64()
 	dataOK := data == 0
 	if rp.Kind == KindReadReply && rp.Status == StatusOK {
-		dataOK = data > 0 && data <= core.ChunkSize && data%core.BlockSize == 0
+		dataOK = data > 0 && data <= core.BlockSize+core.ChunkSize && data%core.BlockSize == 0
 	}
 	if !replyTakes(rp.Kind, rp.Status) || !validVersion(rp.Version) || rp.Status == StatusRefused && rp.Interval == 0 ||
 		rp.Kind == KindAck && rp.Status == StatusOK && rp.Version == 0 || !dataOK {

@@ -72,6 +72,10 @@ func wireCases() []wireCase {
 			Missing: []ChunkVersion{{Chunk: wireChunk, Version: v}, {Chunk: core.ChunkID{Volume: 2, Inode: 3, Index: 5}}}}, 0},
 		{"persist_ack", &Peering{Kind: KindPersistAck, ID: 13, PG: wirePG, Disk: 3, Decided: 41}, 0},
 		{"persist_ack_refused", &Peering{Kind: KindPersistAck, ID: 13, PG: PGFields{Epoch: 80, PG: wirePG.PG, Interval: 42}, Disk: 3}, 0},
+		{"recover", &Update{Kind: KindRecover, ID: 14, PG: wirePG, Chunk: wireChunk, Len: core.ChunkSize, Version: v}, 3 * core.BlockSize},
+		{"recover_marker", &Update{Kind: KindRecover, ID: 14, PG: wirePG, Chunk: wireChunk, Len: core.ChunkSize, Version: v}, 0},
+		{"recover_read", &Read{ID: 15, PG: wirePG, Chunk: wireChunk, Len: core.ChunkSize, Recover: true}, 0},
+		{"read_reply_recovery", &Response{Kind: KindReadReply, ID: 15, Version: v}, core.BlockSize + core.ChunkSize},
 	}
 }
 
@@ -114,10 +118,10 @@ func decodeMsg(b []byte, data int) (any, error) {
 	case KindHello:
 		var m Hello
 		return &m, DecodeHello(b, data, &m)
-	case KindWrite, KindReplicaWrite, KindPunch, KindReplicaPunch:
+	case KindWrite, KindReplicaWrite, KindPunch, KindReplicaPunch, KindRecover:
 		var m Update
 		return &m, DecodeUpdate(b, data, &m)
-	case KindRead:
+	case KindRead, KindRecoverRead:
 		var m Read
 		return &m, DecodeRead(b, data, &m)
 	case KindAck, KindReply, KindReadReply:
@@ -296,7 +300,7 @@ func TestWireRejectsDataLength(t *testing.T) {
 	for _, c := range wireCases() {
 		b := encodeMsg(c.msg)
 		deltas := []int{-1, 1, -core.BlockSize, core.BlockSize}
-		if Kind(b[1]) == KindReadReply {
+		if k := Kind(b[1]); k == KindReadReply || k == KindRecover {
 			deltas = deltas[:2]
 		}
 		for _, delta := range deltas {
@@ -323,7 +327,7 @@ func TestWireRejectsDataLength(t *testing.T) {
 		t.Fatal("edge count")
 	}
 	mustMalformed(t, "read reply with no data", encodeMsg(&Response{Kind: KindReadReply}), 0)
-	mustMalformed(t, "read reply past a chunk", encodeMsg(&Response{Kind: KindReadReply}), core.ChunkSize+core.BlockSize)
+	mustMalformed(t, "read reply past a recovery buffer", encodeMsg(&Response{Kind: KindReadReply}), core.ChunkSize+2*core.BlockSize)
 	mustMalformed(t, "read reply refused with data", encodeMsg(&Response{Kind: KindReadReply, Status: StatusRefused, Interval: 42}), core.BlockSize)
 }
 
@@ -392,6 +396,26 @@ func TestWireRejectsBadFields(t *testing.T) {
 	mustMalformed(t, "a purger's shard on a write", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1, Shard: 1}), core.BlockSize)
 	mustMalformed(t, "a purger's term on a member write", AppendUpdate(nil, &Update{Kind: KindReplicaWrite, PG: wirePG, Len: 1, Version: 1<<32 | 1, Term: 1}), core.BlockSize)
 	mustMalformed(t, "a grant neither granted nor refused", AppendGrant(nil, &Grant{Status: StatusNoSpace}), 0)
+	rec := Update{Kind: KindRecover, PG: wirePG, Len: core.ChunkSize, Version: 1<<32 | 1}
+	for what, c := range map[string]struct {
+		edit func(u *Update)
+		data int
+	}{
+		"a recovery write of part of a chunk": {func(u *Update) { u.Off, u.Len = core.BlockSize, core.BlockSize }, 0},
+		"a recovery write of no version":      {func(u *Update) { u.Version = 0 }, 0},
+		"a recovery write of part of a block": {nil, 100},
+		"a recovery write past its chunk":     {nil, 2*core.BlockSize + core.ChunkSize},
+		"a purger's shard on a recovery":      {func(u *Update) { u.Shard = 1 }, 0},
+	} {
+		u := rec
+		if c.edit != nil {
+			c.edit(&u)
+		}
+		mustMalformed(t, what, AppendUpdate(nil, &u), c.data)
+	}
+	mustMalformed(t, "a recovery read of part of a chunk", AppendRead(nil, &Read{PG: wirePG, Len: core.BlockSize, Recover: true}), 0)
+	mustMalformed(t, "a recovery read at a version", AppendRead(nil, &Read{PG: wirePG, Len: core.ChunkSize, HasAt: true, At: 1<<32 | 1, Recover: true}), 0)
+
 	for what, p := range map[string]*Peering{
 		"peering request for disk 0":         {Kind: KindPeer, PG: wirePG},
 		"peering request with chunks":        {Kind: KindPeer, PG: wirePG, Disk: 3, Chunks: []ChunkPeer{{}}},

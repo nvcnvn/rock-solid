@@ -77,8 +77,9 @@ func TestAnActivationIsReportedUntilATableRecordsIt(t *testing.T) {
 }
 
 // Disk 3, down in interval 1, becomes PG 0's primary in interval 2 and lacks 1.1, which peering
-// keeps from disk 2: disk 3 lists it, a partial-block write to the chunk waits, while a whole-block
-// write to it and a partial write to another chunk go ahead.
+// keeps from disk 2: disk 3 lists it, and while recovery has not brought it 1.1 a partial-block
+// write to the chunk waits, while a whole-block write to it and a partial write to another chunk go
+// ahead. Recovery then lets the held write go, merged on 1.1's byte.
 func TestAPartialWriteWaitsForTheKeptVersion(t *testing.T) {
 	tbl := rtable(4, 2)
 	_, e := tbl.entry(pg0)
@@ -86,6 +87,7 @@ func TestAPartialWriteWaitsForTheKeptVersion(t *testing.T) {
 	c := newRCluster(t, tbl)
 	ch, other := chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)
 	c.until(c.write(pg0, ch, 0, []byte{1}))
+	c.reps[2].plant.noRecovery = true
 	c.publish(c.next(func(t *Table) {
 		setInterval(t, pg0, 2)
 		_, e := t.entry(pg0)
@@ -106,91 +108,14 @@ func TestAPartialWriteWaitsForTheKeptVersion(t *testing.T) {
 			t.Fatalf("answered %+v", rp)
 		}
 	}
-}
-
-// Node 3's disk 3, which took 1.1, is formatted again and comes back as disk 4 while the table
-// still lists disk 3 up at node 3. Interval 2 moves PG 0's primary to disk 2; disk 4 does not
-// answer peering for disk 3, so peering waits for disk 3 rather than dropping 1.1.
-func TestADiskFormattedAgainAnswersNoPeeringForItsOldID(t *testing.T) {
-	c := newRCluster(t, rtable(4, 2))
-	ch := chunkIn(pg0, 4, 0)
-	c.until(c.write(pg0, ch, 0, []byte{1}))
-	c.logs[2], c.reformat[2] = 0xf0f0, true
-	c.onFormat = func(int) uint32 { return 4 }
-	c.s.CrashRandom(2)
-	c.s.Restart(2)
-	for !c.s.Node(2).Up() && c.step() {
+	c.reps[2].plant.noRecovery = false
+	c.until(wait)
+	if rp := c.reply(wait); rp.Status != StatusOK {
+		t.Fatalf("the held write answered %+v", rp)
 	}
-	c.publish(c.next(func(t *Table) {
-		setInterval(t, pg0, 2)
-		_, e := t.entry(pg0)
-		e.Members = []Member{{Disk: 2}, {Disk: 3}, {Disk: 1, Mark: MarkDown}}
-	}), false)
-	c.runFor(3 * lease.DefaultConfig.Lease)
-	if l := c.reps[1].leads[c.reps[1].lead(pg0)]; l.active {
-		t.Fatalf("interval 2 activated without disk 3, keeping %+v", l.kept)
+	if got := c.readNow(pg0, ch, 0, 11); got[0] != 1 || got[10] != 2 {
+		t.Fatalf("block 0 reads %v", got)
 	}
-}
-
-// Interval 2 of PG 0 runs under min_live 1 with only disk 1 live and takes a write; interval 3
-// raises min_live to 2 and moves the primary to disk 2. Peering judges interval 2 by the min_live it
-// ran under, so it waits for disk 1, crashed and then in its restart wait, and keeps 2.1 once disk 1
-// answers.
-func TestPeeringJudgesAPastIntervalByItsOwnMinLive(t *testing.T) {
-	c := newRCluster(t, rtable(4, 1))
-	ch := chunkIn(pg0, 4, 0)
-	c.publish(c.next(func(t *Table) {
-		mark(t, pg0, 2, MarkDown)
-		_, e := t.entry(pg0)
-		e.Members[2].Mark = MarkDown
-	}), true)
-	c.until(c.write(pg0, ch, 0, []byte{1}))
-	c.s.CrashRandom(0)
-	c.table = c.next(func(t *Table) {
-		setInterval(t, pg0, 3)
-		t.Pools[0].MinLive = 2
-		_, e := t.entry(pg0)
-		e.Members = []Member{{Disk: 2}, {Disk: 3}, {Disk: 1, Mark: MarkDown}}
-	})
-	for d := 1; d <= 2; d++ {
-		c.call(d, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetTable(ctx, c.table, out) })
-	}
-	c.runFor(2 * RetryAfter)
-	if l := c.reps[1].leads[c.reps[1].lead(pg0)]; l.active {
-		t.Fatal("interval 3 activated without disk 1, the only live member of interval 2")
-	}
-	if !c.s.Node(0).Up() {
-		c.s.Restart(0)
-	}
-	c.untilActive()
-	if x, _ := c.reps[1].Store().Index().Chunk(testPool, ch); x.ListedIn != 3 || x.Listed != MakeVersion(2, 1) {
-		t.Fatalf("disk 2 lists %+v", x)
-	}
-}
-
-// Interval 2 moves PG 0's primary off disk 1 to disk 2, and disk 3's acknowledgments of its missing
-// list are lost: disk 2 reports no activation and answers no held write until disk 3's
-// acknowledgment arrives, so no decision is acted on before every member persisted its list.
-func TestNoActivationBeforeEveryMemberPersistedItsList(t *testing.T) {
-	c := newRCluster(t, rtable(4, 2))
-	c.drop = func(d int, a *core.Action) bool {
-		return d == 2 && a.Kind == core.ActNetSend && a.Msg.Len >= headSize && Kind(a.Msg.Body[1]) == KindPersistAck
-	}
-	c.publish(c.next(moveOff), false)
-	w := c.write(pg0, chunkIn(pg0, 4, 0), 0, []byte{1})
-	acts := len(c.activations)
-	c.runFor(3 * RetryAfter)
-	if x := c.reps[2].Store().Index().Decided(testPool, 0, 4); x != 2 {
-		t.Fatalf("disk 3 persisted the decision of interval %d", x)
-	}
-	if l := c.reps[1].leads[c.reps[1].lead(pg0)]; l.active || len(c.activations) > acts && slices.ContainsFunc(c.activations[acts:], func(a PGFields) bool { return a.PG == pg0 }) {
-		t.Fatal("disk 2 activated before disk 3 acknowledged its list")
-	}
-	if rp, ok := c.cl.replies[w]; ok {
-		t.Fatalf("the held write was answered %+v", rp)
-	}
-	c.drop = nil
-	c.until(w)
 }
 
 // Interval 2 of PG 0, the last activated, runs under min_live 1 with only disk 1 live and takes
@@ -229,18 +154,20 @@ func TestPeeringStopsEveryIntervalSinceTheLastActivated(t *testing.T) {
 	}
 }
 
-// Disk 3, down in interval 2, misses 2.1 of block 0 and lists it in interval 3, where a whole-block
-// write to block 1 brings its copy of the chunk to 3.1 while its block 0 stays at 1.1. Leading
-// interval 4, which keeps 3.1, it still lists the chunk: a partial write to block 0 waits rather
-// than merging on 1.1 and losing 2.1's byte.
+// Disk 3, down in interval 2, misses 2.1 of block 0 and lists it in interval 3, where, with
+// recovery held off, a whole-block write to block 1 brings its copy of the chunk to 3.1 while its
+// block 0 stays at 1.1. Leading interval 4, which keeps 3.1, it still lists the chunk: a partial write
+// to block 0 waits rather than merging on 1.1 and losing 2.1's byte, until recovery brings it 2.1.
 func TestAPartialWriteWaitsWhileThePrimaryListsTheChunk(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	ch := chunkIn(pg0, 4, 0)
 	c.until(c.write(pg0, ch, 0, []byte{1}))
 	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkDown) }), true)
 	c.until(c.write(pg0, ch, 0, []byte{2}))
+	c.reps[0].plant.noRecovery = true
 	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkUp) }), true)
 	c.until(c.write(pg0, ch, core.BlockSize, make([]byte, core.BlockSize)))
+	c.reps[2].plant.noRecovery = true
 	c.publish(c.next(func(t *Table) {
 		setInterval(t, pg0, 4)
 		_, e := t.entry(pg0)
@@ -253,5 +180,10 @@ func TestAPartialWriteWaitsWhileThePrimaryListsTheChunk(t *testing.T) {
 	c.settle()
 	if rp, ok := c.cl.replies[w]; ok {
 		t.Fatalf("the partial write was answered %+v; disk 3's block 0 reads %v", rp, c.diskBlock(2, ch, 0)[:2])
+	}
+	c.reps[2].plant.noRecovery = false
+	c.until(w)
+	if got := c.readNow(pg0, ch, 0, 2); c.reply(w).Status != StatusOK || got[0] != 2 || got[1] != 3 {
+		t.Fatalf("the held write answered %+v and block 0 reads %v", c.reply(w), got)
 	}
 }

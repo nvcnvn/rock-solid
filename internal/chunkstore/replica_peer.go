@@ -394,7 +394,7 @@ func (r *Replica) persistAcked(pg core.PGID, interval uint32, disk uint32) {
 	r.leads[i].peer.acked = append(r.leads[i].peer.acked, disk)
 }
 
-// tryActivate activates the lead once every up member of its interval persisted its list: it hands the store the decision on each chunk with versions pending from earlier intervals, then activates and reports it.
+// tryActivate activates the lead once every up member of its interval persisted its list: it hands the store the decision on each chunk with versions pending from earlier intervals, lists the chunks to recover, then activates and reports it.
 func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 	l := &r.leads[i]
 	pr := l.peer
@@ -426,6 +426,7 @@ func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 		x, _ := r.st.Index().Chunk(r.st.cfg.Pool, k.chunk)
 		k.lacking = x.Version != k.kept || x.Whole != k.kept || slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed })
 	}
+	r.planRecovery(l, pr, e)
 	l.kept, pr.kept = pr.kept, l.kept[:0]
 	pg, k := l.pg, l.interval
 	if r.Activate(ctx, pg, k, out) != nil {

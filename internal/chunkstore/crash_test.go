@@ -76,6 +76,13 @@ func (m *storeModel) Apply(r writtenRecord) {
 				m.chunks[u.Chunk] = ch
 				return true
 			})
+		case disklog.EntryRecovered:
+			ch := m.chunks[e.Chunk]
+			ch.Version, ch.Whole = e.Version, e.Version
+			if ch.ListedIn <= e.Interval {
+				ch.Listed, ch.ListedIn = 0, 0
+			}
+			m.chunks[e.Chunk] = ch
 		}
 	}
 }
