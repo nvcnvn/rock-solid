@@ -6,6 +6,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 )
@@ -156,12 +157,17 @@ func FuzzDecodeBlockMap(f *testing.F) {
 	var m blockMap
 	m.data.setRange(2, 4)
 	m.holes.set(9)
-	buf := make([]byte, 4*4096)
-	m.put(buf)
-	f.Add(buf)
-	f.Add(buf[:4096])
-	f.Add(make([]byte, 4096))
-	f.Fuzz(func(t *testing.T, b []byte) {
+	head := make([]byte, 4096)
+	m.put(head)
+	head = head[:16*blockWords]
+	f.Add(head, uint32(4*4096))
+	f.Add(head, uint32(4096))
+	f.Add([]byte{}, uint32(4096))
+	// A buffer is the head padded with zeros to size bytes, so the fuzzer mutates a few hundred
+	// bytes: it minimizes each new input byte by byte, which stalls it on buffers of whole blocks.
+	f.Fuzz(func(t *testing.T, head []byte, size uint32) {
+		b := make([]byte, max(int(size%((core.BlocksPerChunk+2)*4096)), len(head)))
+		copy(b, head)
 		var m blockMap
 		if decodeBlockMap(b, &m) != nil {
 			return
