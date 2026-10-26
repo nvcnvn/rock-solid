@@ -311,7 +311,9 @@ func (c *rcluster) settle() {
 
 // quiet reports whether every step pending is a periodic timer: a replica asking the control plane again.
 func (c *rcluster) quiet() bool {
-	return c.s.Idle(func(id core.TimerID) bool { return id == RetryTimer || id == LeaseTimer || id == ReportTimer || id == DetectTimer })
+	return c.s.Idle(func(id core.TimerID) bool {
+		return id == RetryTimer || id == LeaseTimer || id == ReportTimer || id == DetectTimer
+	})
 }
 
 func (c *rcluster) step() bool {

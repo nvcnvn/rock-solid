@@ -36,7 +36,9 @@ func newDCluster(t *testing.T, seed uint64) *dcluster {
 	c := newRClusterOn(t, tbl, s)
 	d := &dcluster{rcluster: c, a: a, faulty: map[uint32]bool{}, downAt: map[uint32]core.Tick{}}
 	node := s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) {
-		c.auth = n.Start(sim.MachineFunc(func(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action { return d.det.OnEvent(ctx, ev, out) }), nil)
+		c.auth = n.Start(sim.MachineFunc(func(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
+			return d.det.OnEvent(ctx, ev, out)
+		}), nil)
 	})
 	d.det = NewDetector(&a.rec, node.Context().Now)
 	a.det = d.det

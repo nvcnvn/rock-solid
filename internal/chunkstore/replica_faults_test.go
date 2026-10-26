@@ -51,7 +51,7 @@ type faultRun struct {
 	sent  map[core.RequestID]Update
 	flips map[core.LBA][]flip
 	errs  map[string]error
-	// heals is when each cut member is healed, and crashes when each member is crashed at the latest, 0 for none; peering is whether PG 0's new interval waits for the primary to peer, and peerFault whether a member crashed or its disk failed since it started. One fault per peering at most: each restart waits 4 s, and with no failure detection to mark a failed disk down, its failures pile up across restarts.
+	// heals is when each cut member is healed, and crashes when each member is crashed at the latest, 0 for none; peering is whether PG 0's new interval waits for the primary to peer, and peerFault whether a member crashed or its disk failed since it started. One fault per peering at most: each restart waits 4 s, and with no detector to mark a failed disk down, its failures pile up across restarts.
 	heals     [3]core.Tick
 	crashes   [3]core.Tick
 	peering   bool
