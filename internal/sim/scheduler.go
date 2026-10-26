@@ -96,6 +96,8 @@ type Settings struct {
 	ClockNum uint64
 	ClockDen uint64
 	MsgType  func(m *core.Msg) uint64
+	// RebootInstantly plants a reboot that takes no time, for a run that must catch it.
+	RebootInstantly bool
 }
 
 // DefaultSettings are a 4 MiB pool per node, 50 µs network delay, connections that fail within 1 ms of breaking, no faults, and a stale Timer for one replaced or fired timer in 8.
@@ -553,6 +555,9 @@ func (s *Scheduler) Reboot(id uint32) {
 	n := s.crashRandom(id, false)
 	n.rebooted = true
 	n.until = s.now + heartbeat
+	if s.set.RebootInstantly {
+		n.until = s.now
+	}
 }
 
 // down stops node id; with sent, its connections still deliver what it sent, as its kernel sends a crashed process's socket data.
@@ -659,6 +664,9 @@ func (n *Node) ID() uint32 { return n.id }
 
 // Up reports whether the node is running.
 func (n *Node) Up() bool { return n.up }
+
+// Paused reports whether the node stands still.
+func (n *Node) Paused() bool { return n.paused }
 
 // Pool is the buffer pool of the node's current incarnation.
 func (n *Node) Pool() *Pool { return n.pool }

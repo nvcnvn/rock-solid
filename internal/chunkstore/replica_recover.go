@@ -400,10 +400,12 @@ func (r *Replica) releaseHeld(ctx *core.Context, i int, c core.ChunkID, out *Rep
 		r.released = append(r.released, h)
 		return true
 	})
+	r.replaying = true
 	for _, h := range r.released {
 		ev := core.Event{Kind: core.EvNetRecv, Peer: h.peer, Msg: h.msg}
 		r.recv(ctx, &ev, out)
 	}
+	r.replaying = false
 }
 
 // recoverReply takes a member's answer to a recovery read, reporting whether it was one; it takes

@@ -22,6 +22,8 @@ type dcluster struct {
 	// faulty is the disks the run made fail; downAt when each disk was first marked down.
 	faulty map[uint32]bool
 	downAt map[uint32]core.Tick
+	// cut is the nodes cut off from the authority, which get no tables.
+	cut map[int]bool
 }
 
 func newDCluster(t *testing.T, seed uint64, set sim.Settings) *dcluster {
@@ -68,7 +70,7 @@ func (c *rcluster) detect(a *authority) *Detector {
 // tend publishes a table when the detector's marks changed or a replica asked or activated, noting when each disk was first marked down.
 func (d *dcluster) tend() {
 	c := d.rcluster
-	if d.det.Changes() == d.changes && len(c.asks) == d.a.seen && len(c.activations) == d.a.acts {
+	if d.det.Changes() == d.changes && len(c.asks) == d.a.seen && len(c.activations) == d.a.acts && len(d.a.edits) == 0 {
 		return
 	}
 	d.changes = d.det.Changes()
@@ -81,7 +83,7 @@ func (d *dcluster) tend() {
 	if len(MakeDelta(&c.table, &next).Entries) > 0 {
 		c.table = next
 		for n := range c.reps {
-			if c.s.Node(uint32(n)).Up() {
+			if c.s.Node(uint32(n)).Up() && !d.cut[n] {
 				c.call(n, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetTable(ctx, next, out) })
 			}
 		}

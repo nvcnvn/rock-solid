@@ -231,8 +231,10 @@ type Replica struct {
 	// recs is the recoveries under way, released the held writes a recovery lets go.
 	recs     []recovery
 	released []heldMsg
-	waits    bool
-	plant    replicaPlants
+	// replaying is set while held writes are taken again, for the fenceOnArrival plant.
+	replaying bool
+	waits     bool
+	plant     replicaPlants
 	// disks is each disk's size and the live blocks it last reported, by disk ID; pools the pools'
 	// settings and outstanding grants; slots each pool's member slots on each disk in the table.
 	disks  []diskInfo
@@ -381,6 +383,11 @@ type replicaPlants struct {
 	activateEarly    bool
 	reportDecided    bool
 	relistNever      bool
+	// fenceOnArrival refuses an older incarnation's write when it reaches the primary, not when the
+	// store orders it; reorderAfterOther keeps a lead's term across intervals another primary led,
+	// so its held writes are ordered again.
+	fenceOnArrival    bool
+	reorderAfterOther bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.
@@ -504,6 +511,8 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 					l = old
 				case r.keptPrimary(e, old.interval):
 					l.since, l.serving, l.kept = old.since, old.serving, old.kept
+				case r.plant.reorderAfterOther:
+					l.since = old.since
 				}
 			}
 			kept = append(kept, l)
@@ -590,6 +599,7 @@ func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out
 	r.leads[i].active, r.leads[i].serving, r.leads[i].peer = true, true, nil
 	held := r.leads[i].held
 	r.leads[i].held = nil
+	r.replaying = true
 	for _, h := range held {
 		if h.hold < r.leads[i].since {
 			r.refuseHeld(ctx, h, out)
@@ -598,6 +608,7 @@ func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out
 		ev := core.Event{Kind: core.EvNetRecv, Peer: h.peer, Msg: h.msg}
 		r.recv(ctx, &ev, out)
 	}
+	r.replaying = false
 	r.drain(ctx, out)
 	return nil
 }
@@ -830,6 +841,11 @@ func (r *Replica) park(ev *core.Event, epoch uint64, out *ReplicaOutput) {
 
 // clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered. A partial-block write to a chunk whose kept version the primary lacks is held until recovery brings it, up to maxHeld writes held, and answered unfound when no member can be its source.
 func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) {
+	if r.plant.fenceOnArrival && !r.replaying && u.Session != 0 && u.Incarnation < r.st.sessions[u.Session] {
+		freeBuf(ctx, ev.Msg.Buf)
+		r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusRefused}, out)
+		return
+	}
 	r.st.SeeIncarnation(u.Session, u.Incarnation)
 	p, e := r.table.entry(u.PG.PG)
 	i := r.lead(u.PG.PG)
@@ -873,6 +889,9 @@ func (r *Replica) order(ctx *core.Context, ev *core.Event, u *Update, interval u
 		Epoch: u.Snapshot, Interval: interval, Gated: true, Session: u.Session, Incarnation: u.Incarnation}
 	if l := r.lead(u.PG.PG); l >= 0 {
 		req.Lacking = r.leads[l].lacks(u.Chunk)
+	}
+	if r.plant.fenceOnArrival {
+		req.Session = 0
 	}
 	r.vers = append(r.vers, version{req: id, client: ev.Peer, msgID: u.ID, epoch: r.table.Epoch, interval: interval, u: *u})
 	if u.Kind == KindWrite {
