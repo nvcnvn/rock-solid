@@ -506,3 +506,18 @@ func TestARecoveryWriteThatFailsEndsItsInterval(t *testing.T) {
 		t.Fatalf("no ask for interval 3's successor: %+v", c.asks)
 	}
 }
+
+// A partial-block write to a chunk the last peering found unfound is answered as unfound at once,
+// not held for a recovery no member can source, nor refused as if the interval had ended.
+func TestAPartialWriteToAnUnfoundChunkIsAnsweredUnfound(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch, lost := chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)
+	c.until(c.write(pg0, ch, 0, []byte{1}))
+	l := &c.reps[0].leads[c.reps[0].lead(pg0)]
+	l.kept = []keptChunk{{chunk: lost, kept: MakeVersion(1, 9), unfound: true, lacking: true}}
+	w := c.write(pg0, lost, 0, []byte{2})
+	c.until(w)
+	if rp := c.reply(w); rp.Status != StatusUnfound || len(l.held) != 0 {
+		t.Fatalf("the write answered %+v with %d held", rp, len(l.held))
+	}
+}

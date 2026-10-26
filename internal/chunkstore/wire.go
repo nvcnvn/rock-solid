@@ -66,7 +66,7 @@ func replyTakes(k Kind, st Status) bool {
 	case KindAck:
 		set = 1<<StatusOK | 1<<StatusNoSpace | 1<<StatusRefused
 	case KindReply:
-		set = 1<<StatusOK | 1<<StatusNoSpace | 1<<StatusRefused | 1<<StatusMismatch
+		set = 1<<StatusOK | 1<<StatusNoSpace | 1<<StatusRefused | 1<<StatusMismatch | 1<<StatusUnfound
 	case KindReadReply:
 		set = 1<<StatusOK | 1<<StatusRefused | 1<<StatusMissing | 1<<StatusUnfound
 	}

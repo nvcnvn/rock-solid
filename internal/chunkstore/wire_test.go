@@ -389,7 +389,7 @@ func TestWireRejectsBadFields(t *testing.T) {
 	for _, c := range []struct {
 		k  Kind
 		st Status
-	}{{KindAck, StatusMismatch}, {KindAck, StatusMissing}, {KindReply, StatusUnfound}, {KindReadReply, StatusNoSpace}, {KindReadReply, StatusMismatch}, {KindReply, 6}, {KindAck, 255}} {
+	}{{KindAck, StatusMismatch}, {KindAck, StatusMissing}, {KindReply, StatusMissing}, {KindReadReply, StatusNoSpace}, {KindReadReply, StatusMismatch}, {KindReply, 6}, {KindAck, 255}} {
 		mustMalformed(t, "a status its reply kind does not take", AppendResponse(nil, &Response{Kind: c.k, Status: c.st, Interval: 1}), 0)
 	}
 	mustMalformed(t, "a purger's shard on a write", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1, Shard: 1}), core.BlockSize)

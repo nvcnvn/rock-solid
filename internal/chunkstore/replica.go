@@ -810,7 +810,7 @@ func (r *Replica) park(ev *core.Event, epoch uint64, out *ReplicaOutput) {
 	r.fetch(epoch, false, out)
 }
 
-// clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered. A partial-block write to a chunk whose kept version the primary lacks is held until recovery brings it, up to maxHeld writes held, and refused when no member can be its source.
+// clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered. A partial-block write to a chunk whose kept version the primary lacks is held until recovery brings it, up to maxHeld writes held, and answered unfound when no member can be its source.
 func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) {
 	r.st.SeeIncarnation(u.Session, u.Incarnation)
 	p, e := r.table.entry(u.PG.PG)
@@ -827,7 +827,12 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		}
 	case !r.leads[i].active || r.leads[i].asking || edgeBytes(u.Off, u.Len) > 0 && r.leads[i].lacks(u.Chunk) && !r.plant.mergeWhileLacking:
 		l := &r.leads[i]
-		if l.active && !l.asking && (len(l.held) >= maxHeld || l.isUnfound(u.Chunk)) {
+		if l.active && !l.asking && l.isUnfound(u.Chunk) {
+			freeBuf(ctx, ev.Msg.Buf)
+			r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusUnfound}, out)
+			return
+		}
+		if l.active && !l.asking && len(l.held) >= maxHeld {
 			break
 		}
 		l.held = append(l.held, heldMsg{peer: ev.Peer, msg: ev.Msg, hold: l.interval})
