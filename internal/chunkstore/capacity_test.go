@@ -236,3 +236,62 @@ func atoi(t *testing.T, s string) int {
 	}
 	return v
 }
+
+// P21: the capacity model spike's layouts C1 to C6, placed by Next and filled with uniformly hashed
+// chunks, each write landing on every member of its PG, refuse their first write within 1% of the
+// available figure their table reports.
+func TestUniformFillsReachAvailable(t *testing.T) {
+	type disk struct {
+		node        uint32
+		size, other float64
+	}
+	for _, tc := range []struct {
+		name  string
+		pool  Pool
+		disks []disk
+	}{
+		{"C1", rep(2, 128), []disk{{0, 0.0007, 0}, {1, 0.002, 0}}},
+		{"C2", rep(3, 128), []disk{{0, 4, 0}, {1, 4, 0}, {2, 2, 0}, {3, 1, 0}}},
+		{"C3", func() Pool { p := rep(3, 128); p.Data, p.Parity, p.MaxPerDomain = 4, 2, 2; return p }(),
+			[]disk{{0, 2, 0}, {0, 2, 0}, {1, 2, 0}, {1, 2, 0}, {2, 0.5, 0}, {2, 0.5, 0}}},
+		{"C4", rep(1, 256), []disk{{0, 2, 1.2}, {1, 2, 0}, {2, 2, 0}}},
+		{"C5", rep(3, 512), []disk{{0, 4, 0}, {1, 4, 0}, {2, 4, 0}, {3, 2, 0}, {4, 2, 0}, {5, 2, 0}, {6, 1, 0}, {7, 1, 0}, {8, 1, 0}, {9, 0.5, 0}}},
+		{"C6", rep(2, 128), []disk{{0, 4, 0}, {1, 1, 0}, {2, 1, 0}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &layout{pool: tc.pool}
+			for _, d := range tc.disks {
+				l.grow(d.node, d.size, d.other)
+			}
+			l.step(t, l.inputs(allMoves))
+			l.settle(t)
+			f := l.figures()
+			k := uint64(tc.pool.dataShards())
+			unit := max(k, f.Available/200_000/k*k)
+			live, limit := make(map[uint32]uint64), make(map[uint32]uint64)
+			for _, d := range l.disks {
+				live[d.ID], limit[d.ID] = d.Live, d.Blocks*uint64(tc.pool.limitPercent(d.Blocks))/100
+			}
+			r := core.NewRand(21)
+			var held uint64
+		fill:
+			for {
+				ch := core.ChunkID{Volume: 1, Inode: core.InodeID(r.Uint64()), Index: uint32(r.Below(1024))}
+				e := &l.pools().PGs[core.PGIndexOf(ch.Hash(), tc.pool.PGCount)]
+				for _, m := range e.Members {
+					if live[m.Disk] >= limit[m.Disk] {
+						break fill
+					}
+				}
+				for _, m := range e.Members {
+					live[m.Disk] += unit / k
+				}
+				held += unit
+			}
+			if diff := float64(held) - float64(f.Available); diff > 0.01*float64(f.Available) || -diff > 0.01*float64(f.Available) {
+				t.Fatalf("the first refusal came at %d blocks held, available %d", held, f.Available)
+			}
+			t.Logf("first refusal at %.2f%% of available", 100*float64(held)/float64(f.Available))
+		})
+	}
+}
