@@ -69,3 +69,8 @@
 - **Where:** `internal/chunkstore/replica_lease.go`
 - **Why:** each disk's replica holds and grants leases on its own loop, keyed by the peer loop, while the design grants them per node pair so one grant covers every PG two nodes share ([Reads](design.md#epoch-changes-and-failure-detection)); phase 3's simulator runs one disk loop per node, where the two are the same, and no node loop exists yet to own the pair's leases.
 - **Remove when:** a node runs several disk loops (the phase 5 drivers); its leases then move to one per node pair, shared by its loops.
+
+## Workaround: partial writes held on a lacking chunk without bound
+- **Where:** `lead.held` in `internal/chunkstore/replica.go`
+- **Why:** a primary holds a partial-block write to a chunk whose kept version it lacks ([Which versions survive](design.md#epoch-changes-and-failure-detection)) until it holds that version, and only recovery brings it; with no recovery yet, every write a client resends after its timeout joins the list and pins a pool buffer.
+- **Remove when:** Recovery per PG releases the held writes as it recovers the chunk and the primary refuses a partial write to a lacking chunk once a bound of held writes is reached.
