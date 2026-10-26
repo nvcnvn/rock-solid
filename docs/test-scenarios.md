@@ -4198,7 +4198,10 @@ row says otherwise).
   members unchanged since: on 4 nodes of `rep2`, after a node's disk leaves the pool, a disk added
   to it draws moves only from PGs the refill left alone, not from those whose refill members are
   still recovering. The table that removes the leaving members moves nothing from their PGs, so
-  settling takes one table more, which starts no interval.
+  settling takes one table more, which starts no interval. So a resync comes before any rebalance
+  move of its PG: a node back from `maintenance` with `rep2` PGs that took writes on one copy draws
+  no move from them until their recovery has copied what it missed and the interval is reported
+  recovered.
   Balance counts the leaving member as gone and the failure-domain rule ignores it: on 3 nodes of
   `rep3`, a disk added to node A takes members from A's other disk. A missing member of a moving PG
   is replaced by the leaving member, which becomes an ordinary member, when its domain allows and
@@ -4440,7 +4443,11 @@ swaps**
   copies. 1.1 sent again once its copy is done is refused, and so is 1.2 after it.
 - A member that failed to log k.n of a chunk refuses the chunk's later versions in interval k: 1.1,
   a punch whose edge block finds the pool full, then 1.2 arriving later; and 3.2 already waiting
-  behind 3.1 for write admission when 3.1 fails before it is logged.
+  behind 3.1 for write admission when 3.1 fails before it is logged. A member that refuses a
+  version of its current interval for any other reason, as under a table marking it in
+  `maintenance` at that interval, refuses the later ones too, even once its table marks it up
+  again: the fault run's seed 73 had it log 1.6 without 1.3 to 1.5
+  (`TestAMemberThatRefusesAVersionRefusesTheLaterOnes`).
 - A member restarting from its disk refuses 1.1 while its store recovers.
 - Disk 2 answers 1.1's first send, which a lost connection left unanswered, after the primary sent
   1.1 again: the primary keeps the buffer until the second send is answered too (driver contract).
@@ -4954,7 +4961,15 @@ own ([Testing strategy](design.md#testing-strategy)).
   recovery write replaces its chunk with the image past the dropped versions and alone removes the
   entry, across a restart too (`TestARecoveryWriteReplacesAMembersChunk`); the primary's leaves out
   what the interval covered, a whole-chunk punch of the interval leaving it nothing to carry
-  (`TestAPrimarysRecoveryWriteLeavesOutWhatTheIntervalCovered`).
+  (`TestAPrimarysRecoveryWriteLeavesOutWhatTheIntervalCovered`). A gated write the store fails
+  before ordering it, for want of a pool buffer, covers nothing and lends the recovery write no
+  version (`TestAWriteFailedBeforeItIsOrderedCoversNothing`). A member refuses a recovery write
+  under a version it does not stand at: another of the interval than its newest, or the kept one
+  once it holds a write of the interval (`TestAMemberRefusesARecoveryWriteAtAVersionItLacks`).
+- A recovery write that fails, even before the store logged any of it, ends the interval, whose
+  successor recovers the chunk (`TestARecoveryWriteThatFailsEndsItsInterval`). An index rebuild
+  ends the recoveries under way: a source's reply arriving after it is dropped
+  (`TestARebuildEndsTheRecoveriesUnderWay`).
 - A recovery read gives the chunk's live image: the written blocks' bytes after the map, and every
   other block, punched or never written, a hole (`TestARecoveryReadIsTheChunksLiveImage`). The
   map's decoder refuses a block both written and punched, bytes past the map in its first block
@@ -4968,9 +4983,9 @@ own ([Testing strategy](design.md#testing-strategy)).
   block 0 out. A planted variant that chooses them at the read (the epoch change model's
   `neg-recovery-covers-at-read`) copies 1.1's block 0 over the acknowledged write
   (`TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover`).
-- A primary orders a punch of a chunk its own store holds nothing of, as one lacking the chunk's
-  kept version does, rather than answering it done unsent
-  (`TestAPrimaryOrdersAPunchOfAChunkItHoldsNothingOf`).
+- A primary that lacks a chunk's kept version orders a punch of it although its own store holds
+  nothing of the chunk, rather than answering it done unsent; a punch of a chunk absent everywhere
+  still logs nothing (`TestAPrimaryOrdersAPunchOfAChunkItHoldsNothingOf`).
 - Recovery cut short by the next interval: the missing lists survive. Interval 4's peering raises
   disk 3's entry to its decision, and interval 4's recovery brings the kept version
   (`TestRecoveryCutShortByTheNextIntervalLeavesTheListsInPlace`).
@@ -4981,7 +4996,10 @@ own ([Testing strategy](design.md#testing-strategy)).
 - A partial-block write to a chunk the primary lacks waits for its recovery
   (`TestAPartialWriteWaitsForTheKeptVersion`, `TestAPartialWriteWaitsWhileThePrimaryListsTheChunk`);
   the primary holds at most 64 client writes and refuses the next
-  (`TestHeldPartialWritesAreBounded`).
+  (`TestHeldPartialWritesAreBounded`). One to a chunk the last peering found unfound is answered
+  unfound at once (`TestAPartialWriteToAnUnfoundChunkIsAnsweredUnfound`).
+- Warm recovery allocates nothing: a fourth round of recovering 6 chunks makes no heap allocation
+  (`TestRecoveryAllocatesNothing`).
 - A member never serves a chunk while it is on its own missing list, and never returns an older
   version instead.
 - Open: whether a primary whose own list holds the chunk waits for recovery, forwards the read, or
