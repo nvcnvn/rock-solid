@@ -251,6 +251,9 @@ type loadingRun struct {
 }
 
 type plants struct {
+	// clearListed has a persisted missing list clear, in the index alone, every listing of its PG
+	// from an earlier peering that it leaves out.
+	clearListed bool
 	// settleSubset has Settle drop the first gated version below the kept one, as a peering that drops any subset of pending versions rather than a suffix would (sub-block spike M7).
 	settleSubset bool
 	// replayCopyAsWrite replays a copy entry as a write of its blocks, mapping them whether or not a map still stores them at the source.
@@ -1282,10 +1285,23 @@ func (s *Store) persisted(oi int32, err error, out *Output) {
 		if err := s.ix.Apply(&s.apply); err != nil {
 			panic("chunkstore: the index refused the store's own missing list: " + err.Error())
 		}
+		if s.plant.clearListed {
+			s.clearListed(o.items[len(o.items)-1].entry)
+		}
 	}
 	out.Replies = append(out.Replies, Reply{ID: o.req.ID, Err: o.err})
 	s.persists = slices.DeleteFunc(s.persists, func(i int32) bool { return i == oi })
 	s.freeOp(oi)
+}
+
+// clearListed clears the listings of decision d's PG from peerings before d's, for the clearListed plant.
+func (s *Store) clearListed(d disklog.Entry) {
+	for _, c := range s.ix.PGChunks(nil, d.Pool, d.Owner, uint32(d.Length)) {
+		if ch, _ := s.ix.Chunk(d.Pool, c.Chunk); ch.ListedIn != 0 && ch.ListedIn < d.Interval {
+			ch.Listed, ch.ListedIn = 0, 0
+			s.ix.putChunk(d.Pool, c.Chunk, ch)
+		}
+	}
 }
 
 // PeerState appends to dst what a member reports to peering of PG pg of the pool's pgs PGs: each

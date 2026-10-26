@@ -370,6 +370,17 @@ type replicaPlants struct {
 	neverAsk    bool
 	sendEpoch   bool
 	sameMembers bool
+	// stopPreviousOnly has peering reach only the interval just before its own; ownInterval decides
+	// each version by the members of its own interval alone; activateEarly activates before every
+	// member persisted its list; reportDecided reports an activation once the decision is made;
+	// relistNever leaves off the missing list a member that lists a chunk but holds the kept
+	// version as its newest, which with the store's clearListed has a later peering clear the
+	// entry before recovery did.
+	stopPreviousOnly bool
+	ownInterval      bool
+	activateEarly    bool
+	reportDecided    bool
+	relistNever      bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.

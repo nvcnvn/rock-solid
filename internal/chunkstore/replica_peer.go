@@ -104,14 +104,14 @@ func (r *Replica) askPeers(i int, again bool, out *ReplicaOutput) {
 		r.frame = AppendPeering(r.frame[:0], &Peering{Kind: KindPeer, ID: l.peer.id, PG: PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval}, Disk: disk})
 		r.sendFrame(r.addr(disk), out)
 	}
-	r.peerDisks = peerDisks(e, r.peerDisks[:0])
+	r.peerDisks = r.peerDisksOf(e, r.peerDisks[:0])
 	for _, d := range r.peerDisks {
 		ask(d)
 	}
 }
 
-// peerDisks appends the disks peering of e's interval asks: the up members of the interval and of its past intervals since the last activated one.
-func peerDisks(e *PGEntry, dst []uint32) []uint32 {
+// peerDisksOf appends the disks peering of e's interval asks: the up members of the interval and of its past intervals since the last activated one.
+func (r *Replica) peerDisksOf(e *PGEntry, dst []uint32) []uint32 {
 	add := func(ms []Member) {
 		for _, m := range ms {
 			if m.Mark == MarkUp && !slices.Contains(dst, m.Disk) {
@@ -121,11 +121,16 @@ func peerDisks(e *PGEntry, dst []uint32) []uint32 {
 	}
 	add(e.Members)
 	for _, p := range e.Past {
-		if p.Interval >= e.Activated && p.Interval < e.Interval {
+		if r.peers(e, p.Interval) {
 			add(p.Members)
 		}
 	}
 	return dst
+}
+
+// peers reports whether peering of e's interval reaches past interval k: one since the last activated.
+func (r *Replica) peers(e *PGEntry, k uint32) bool {
+	return k >= e.Activated && k < e.Interval && (!r.plant.stopPreviousOnly || k+1 == e.Interval)
 }
 
 func (r *Replica) queueAsk(a peerAsk) {
@@ -242,7 +247,7 @@ func (r *Replica) peerReplied(ctx *core.Context, peer core.NodeID, p *Peering, o
 		return
 	}
 	_, e := r.table.entry(p.PG.PG)
-	if r.peerDisks = peerDisks(e, r.peerDisks[:0]); slices.Contains(r.peerDisks, p.Disk) {
+	if r.peerDisks = r.peerDisksOf(e, r.peerDisks[:0]); slices.Contains(r.peerDisks, p.Disk) {
 		r.peerReply(ctx, p.Disk, p.PG.PG, p.PG.Interval, p.ID, p.Decided, p.Chunks, out)
 	}
 }
@@ -282,7 +287,7 @@ func (r *Replica) peerReply(ctx *core.Context, disk uint32, pg core.PGID, interv
 	}
 	for _, past := range e.Past {
 		x := PGEntry{Members: past.Members}
-		if _, up := x.primary(); past.Interval >= e.Activated && past.Interval < e.Interval && up && x.live() >= int(past.MinLive) && !answered(past.Members, false) {
+		if _, up := x.primary(); r.peers(e, past.Interval) && up && x.live() >= int(past.MinLive) && !answered(past.Members, false) {
 			return
 		}
 	}
@@ -294,8 +299,11 @@ func (r *Replica) decide(ctx *core.Context, i int, out *ReplicaOutput) {
 	l := &r.leads[i]
 	pr := l.peer
 	_, e := r.table.entry(l.pg)
-	pr.all, pr.kept = keep(e, pr.replies, pr.all, pr.kept[:0])
+	pr.all, pr.kept = keep(e, pr.replies, pr.all, pr.kept[:0], r.plant)
 	pr.decided = true
+	if r.plant.reportDecided {
+		out.Activations = append(out.Activations, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
+	}
 	r.persistLists(ctx, i, out)
 }
 
@@ -403,7 +411,7 @@ func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 		return
 	}
 	for _, m := range e.Members {
-		if m.Mark == MarkUp && !slices.Contains(pr.acked, m.Disk) {
+		if m.Mark == MarkUp && !slices.Contains(pr.acked, m.Disk) && !r.plant.activateEarly {
 			return
 		}
 	}
