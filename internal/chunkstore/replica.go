@@ -111,11 +111,12 @@ type lead struct {
 	asking bool
 	asked  bool
 	spent  int
-	// todo is the chunks the decision left a member lacking, in chunk order, done before cursor;
-	// listed counts, by place in the interval's members, the chunks each still lacks; reported is set
-	// once the interval was reported recovered.
+	// todo is the chunks the decision left a member lacking, in chunk order, done before cursor, and
+	// scan where a pass of recoverWork goes on looking; listed counts, by place in the interval's
+	// members, the chunks each still lacks; reported is set once the interval was reported recovered.
 	todo     []recoverChunk
 	cursor   int
+	scan     int
 	listed   [maxMembers]int
 	reported bool
 }

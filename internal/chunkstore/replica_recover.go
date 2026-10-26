@@ -105,9 +105,10 @@ func (r *Replica) degraded(l *lead, e *PGEntry) int {
 	return n
 }
 
-// next is the lead's first chunk to recover that no recovery has under way, or -1.
+// next is the lead's first chunk to recover, from where the pass of recoverWork stands, that no
+// recovery has under way, or -1.
 func (l *lead) next() int {
-	for j := l.cursor; j < len(l.todo); j++ {
+	for j := max(l.cursor, l.scan); j < len(l.todo); j++ {
 		switch t := &l.todo[j]; {
 		case t.targets == 0:
 			if j == l.cursor {
@@ -123,6 +124,9 @@ func (l *lead) next() int {
 // recoverWork starts recoveries while fewer than maxRecoveries run: each time the next chunk of
 // the active lead whose PG is most degraded, the lower PG first among equals.
 func (r *Replica) recoverWork(ctx *core.Context, out *ReplicaOutput) {
+	for i := range r.leads {
+		r.leads[i].scan = 0
+	}
 	for len(r.recs) < maxRecoveries && !r.plant.noRecovery {
 		best, bestN, bestJ := -1, 0, -1
 		for i := range r.leads {
@@ -140,6 +144,7 @@ func (r *Replica) recoverWork(ctx *core.Context, out *ReplicaOutput) {
 		if best < 0 {
 			return
 		}
+		r.leads[best].scan = bestJ + 1
 		r.startRecovery(ctx, best, bestJ, out)
 	}
 }
