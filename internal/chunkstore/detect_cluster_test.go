@@ -364,3 +364,61 @@ func TestAResentVersionGivesNoLatency(t *testing.T) {
 		t.Fatalf("disk %d reported a latency of %d at %d", member, w.lat, w.latAt)
 	}
 }
+
+// P22: rep3 with min_live 2 loses two members, cut off, while writes are in flight: no write is
+// acknowledged on the one copy left, every write sent then is refused, the last once a member
+// returns, and the writes after are acknowledged on two copies at least.
+func TestWritesWaitForMinLiveAfterTwoMembersGoDown(t *testing.T) {
+	d := newDCluster(t, 1, sim.DefaultSettings())
+	d.run(3 * sec)
+	_, e := d.table.entry(pg0)
+	m1, m2 := uint32(d.node(e.Members[1].Disk)), uint32(d.node(e.Members[2].Disk))
+	d.faulty[e.Members[1].Disk], d.faulty[e.Members[2].Disk] = true, true
+	for _, n := range []uint32{m1, m2} {
+		for k := range uint32(5) {
+			if k != n {
+				d.s.Partition(n, k, false)
+			}
+		}
+	}
+	ch := chunkIn(pg0, 4, 0)
+	var ids []core.RequestID
+	for i := range 4 {
+		ids = append(ids, d.write(pg0, ch, uint32(i)*core.BlockSize, fill(core.BlockSize, byte(i+1))))
+	}
+	d.run(NodeDownAfter + 2*sec)
+	if _, e := d.table.entry(pg0); e.live() >= 2 {
+		t.Fatalf("both cut-off members not marked down: %+v", e.Members)
+	}
+	ids = append(ids, d.write(pg0, ch, 0, fill(core.BlockSize, 9)))
+	d.run(sec)
+	for _, id := range ids {
+		if rp, ok := d.cl.replies[id]; ok && rp.Status == StatusOK {
+			t.Fatalf("write %d acknowledged as %+v with one member live", id, rp)
+		}
+	}
+	for k := range uint32(5) {
+		d.s.Heal(m1, k)
+	}
+	d.run(5 * sec)
+	w := d.write(pg0, ch, 0, fill(core.BlockSize, 10))
+	d.run(2 * sec)
+	rp, ok := d.cl.replies[w]
+	if !ok || rp.Status != StatusOK {
+		t.Fatalf("a write once a member returned: %+v", rp)
+	}
+	for _, id := range ids {
+		if rp, ok := d.cl.replies[id]; !ok || rp.Status != StatusRefused {
+			t.Fatalf("write %d sent with one member live: answered %v, %+v", id, ok, rp)
+		}
+	}
+	holders := 0
+	for n := range d.reps {
+		if d.newest(n, ch) >= rp.Version {
+			holders++
+		}
+	}
+	if holders < 2 {
+		t.Fatalf("%#x acknowledged with %d disks holding it", rp.Version, holders)
+	}
+}
