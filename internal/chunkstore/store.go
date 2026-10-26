@@ -1218,9 +1218,11 @@ func (s *Store) persisted(oi int32, err error, out *Output) {
 
 // PeerState appends to dst what a member reports to peering of PG pg of the pool's pgs PGs: each
 // chunk of the PG it logged or lists, and the newest interval whose decision it persisted for the
-// PG, 0 for none. Until every write and punch of the PG's chunks and every missing list being
-// persisted is resolved it returns ErrUnresolved, since what it reports would change after the
-// member answered.
+// PG, 0 for none. A primary's gated writes and punches that wait for peering's decision count as
+// logged, and as held whole up to the first whose records failed. Until every write and punch of
+// the PG's chunks has its records durable or failed, those of a member mapped too, and every
+// missing list being persisted is resolved, it returns ErrUnresolved, since what it reports would
+// change after the member answered.
 func (s *Store) PeerState(pg, pgs uint32, dst []ChunkPeer) ([]ChunkPeer, uint32, error) {
 	if err := s.unavailable(); err != nil {
 		return dst, 0, err
@@ -1228,15 +1230,56 @@ func (s *Store) PeerState(pg, pgs uint32, dst []ChunkPeer) ([]ChunkPeer, uint32,
 	if core.CheckPGCount(pgs) != nil || pg >= pgs {
 		return dst, 0, ErrRange
 	}
+	gated := false
 	for i := range s.chunks {
-		if cs := &s.chunks[i]; cs.live && core.PGIndexOf(cs.id.Hash(), pgs) == pg && len(cs.pending)+len(cs.waiting) > 0 {
+		cs := &s.chunks[i]
+		if !cs.live || core.PGIndexOf(cs.id.Hash(), pgs) != pg {
+			continue
+		}
+		if len(cs.waiting) > 0 || slices.ContainsFunc(cs.pending, func(oi int32) bool { return s.ops[oi].left > 0 || !s.ops[oi].req.Gated }) {
 			return dst, 0, ErrUnresolved
 		}
+		gated = gated || len(cs.pending) > 0
 	}
 	if len(s.persists) > 0 {
 		return dst, 0, ErrUnresolved
 	}
-	return s.ix.PGChunks(dst, s.cfg.Pool, pg, pgs), s.ix.Decided(s.cfg.Pool, pg, pgs), nil
+	n := len(dst)
+	dst = s.ix.PGChunks(dst, s.cfg.Pool, pg, pgs)
+	for i := range s.chunks {
+		if cs := &s.chunks[i]; gated && cs.live && len(cs.pending) > 0 && core.PGIndexOf(cs.id.Hash(), pgs) == pg {
+			dst = s.peerGated(dst, n, cs)
+		}
+	}
+	return dst, s.ix.Decided(s.cfg.Pool, pg, pgs), nil
+}
+
+// peerGated folds chunk cs's gated writes and punches into its report among dst[from:], adding
+// one for a chunk the index does not hold.
+func (s *Store) peerGated(dst []ChunkPeer, from int, cs *chunkState) []ChunkPeer {
+	j := slices.IndexFunc(dst[from:], func(c ChunkPeer) bool { return c.Chunk == cs.id })
+	if j < 0 {
+		dst = append(dst, ChunkPeer{Chunk: cs.id})
+		j = len(dst) - 1
+	} else {
+		j += from
+	}
+	c := &dst[j]
+	whole := true
+	for _, oi := range cs.pending {
+		o := &s.ops[oi]
+		if o.dropped {
+			continue
+		}
+		whole = whole && o.err == nil
+		if whole {
+			c.Whole = o.version
+		}
+		if o.holdsVersion() {
+			c.Logged = max(c.Logged, o.version)
+		}
+	}
+	return dst
 }
 
 // Cancel drops chunk c's write or punch of request id if it still waits to be ordered, reporting whether it did: it is never ordered, and is answered with ErrDropped once no base read of its own is in flight.

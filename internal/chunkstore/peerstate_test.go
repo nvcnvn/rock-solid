@@ -301,3 +301,32 @@ func TestMissingEntriesWaitForTheirMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A primary's gated writes count once their records resolve: logged, and held whole up to the
+// first whose records failed, here 4.2, though 4.3 after it is durable.
+func TestAPrimaryReportsItsGatedWrites(t *testing.T) {
+	h := newHarness(t, testConfig())
+	h.sync(h.write(chunkC, 0, []byte{1}, 0))
+	h.gated(chunkC, 0, []byte{2}, 4)
+	if _, _, err := h.s.PeerState(0, 1, nil); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("PeerState with 4.1 in flight: %v", err)
+	}
+	h.settle()
+	if got, _ := h.peerState(0, 1); len(got) != 1 || got[0].Whole != MakeVersion(4, 1) || got[0].Logged != MakeVersion(4, 1) {
+		t.Fatalf("reports %+v with 4.1 durable", got)
+	}
+	ci := h.s.chunkSlot(chunkC)
+	oi := h.s.newOp(opWrite, Request{Chunk: chunkC, Gated: true, Interval: 4})
+	o := &h.s.ops[oi]
+	o.chunk, o.version, o.left = ci, MakeVersion(4, 2), 1
+	o.items = append(o.items, item{entry: disklog.WriteEntry(testPool, chunkC, o.version, 0, 1)})
+	h.s.chunks[ci].version = o.version
+	h.s.chunks[ci].pending = append(h.s.chunks[ci].pending, oi)
+	h.s.itemFailed(&h.ctx, oi, 0, disklog.ErrNoSpace, &h.out)
+	h.take()
+	h.gated(chunkC, 0, []byte{3}, 4)
+	h.settle()
+	if got, _ := h.peerState(0, 1); len(got) != 1 || got[0].Whole != MakeVersion(4, 1) || got[0].Logged != MakeVersion(4, 3) {
+		t.Fatalf("reports %+v after 4.2 failed", got)
+	}
+}
