@@ -208,6 +208,9 @@ type chunkState struct {
 	held bool
 	// failed is the lowest version a member's write or punch of the chunk failed at, after which the chunk's later versions of that interval are refused, so a member never logs one without the versions below it.
 	failed uint64
+	// ordered is the version of the chunk's last write or punch the store ordered, which a gated
+	// one that fails before it is ordered leaves behind version.
+	ordered uint64
 }
 
 type sentItem struct {
@@ -563,9 +566,9 @@ func (s *Store) chunkSlot(c core.ChunkID) int32 {
 	}
 	cs := &s.chunks[i]
 	cs.live, cs.id, cs.pending, cs.waiting = true, c, cs.pending[:0], cs.waiting[:0]
-	cs.version, cs.epoch, cs.failed = 0, 0, 0
+	cs.version, cs.epoch, cs.failed, cs.ordered = 0, 0, 0, 0
 	if ch, ok := s.ix.Chunk(s.cfg.Pool, c); ok && !s.plant.forgetVersion {
-		cs.version, cs.epoch = ch.Version, ch.Epoch
+		cs.version, cs.epoch, cs.ordered = ch.Version, ch.Epoch, ch.Version
 	}
 	s.chunkOf[c] = i
 	return i
@@ -860,10 +863,10 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	}
 	o.prevVer, o.prevEpoch = cs.version, cs.epoch
 	switch {
-	case o.req.Recover && (o.req.HasVer || uint32(cs.version>>32) != o.req.Interval):
+	case o.req.Recover && (o.req.HasVer || uint32(cs.ordered>>32) != o.req.Interval):
 		o.version = o.req.Ver
 	case o.req.Recover:
-		o.version = cs.version
+		o.version = cs.ordered
 	case o.req.Version != 0:
 		o.version = o.req.Version
 	case o.req.Interval != 0:
@@ -884,9 +887,6 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	}
 	cs.version = o.version
 	first, last := spanOf(o.req.Off, o.req.Len)
-	if o.req.Gated && !o.req.Recover && len(s.covers) > 0 {
-		s.covered(c, o)
-	}
 	switch {
 	case o.req.Recover:
 		if err := s.recoverItems(ctx, o); err != nil {
@@ -918,6 +918,10 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 		}
 		if o.err == nil {
 			out.Ordered = append(out.Ordered, r)
+			if !o.req.Recover {
+				cs.ordered = o.version
+				s.covered(c, o)
+			}
 		}
 	}
 	cs.pending = append(cs.pending, oi)

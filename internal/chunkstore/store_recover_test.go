@@ -276,3 +276,44 @@ func TestAPrimaryOrdersAPunchOfAChunkItHoldsNothingOf(t *testing.T) {
 		t.Fatalf("a punch in part of two blocks hands the members %d bytes of edges", len(got))
 	}
 }
+
+// A gated write the store fails before ordering it, for want of a pool buffer for its second
+// record, neither covers blocks of a recovery write nor lends it its version: the recovery write
+// ordered next carries every block and takes the kept version, so the member it recovers holds the
+// image the others hold.
+func TestAWriteFailedBeforeItIsOrderedCoversNothing(t *testing.T) {
+	h := newRecoveryHarness(t)
+	k := uint32(7)
+	h.s.Cover(chunkC, k)
+	n := 32
+	wbuf := h.writeBuf(0, fill(n*core.BlockSize, 8))
+	var hoard []core.IOBuf
+	for {
+		b, err := h.pool.Alloc(core.BlockSize)
+		if err != nil {
+			break
+		}
+		hoard = append(hoard, b)
+	}
+	w := h.id()
+	h.s.Write(&h.ctx, Request{ID: w, Chunk: chunkC, Len: uint32(n * core.BlockSize), Buf: wbuf, Interval: k, Gated: true}, &h.out)
+	h.take()
+	for _, b := range hoard {
+		h.pool.Free(b)
+	}
+	h.settle()
+	if _, ordered := h.ordered[w]; ordered || h.replies[w].Err == nil {
+		t.Fatalf("the write was ordered (%v) or answered %+v with no pool buffer", ordered, h.replies[w])
+	}
+	img := map[uint16]byte{}
+	for b := range uint16(40) {
+		img[b] = 1
+	}
+	kept := MakeVersion(3, 1)
+	rec := h.recoverWrite(Request{Chunk: chunkC, Interval: k, Gated: true, Ver: kept, Buf: recoveryBuf(h, img)})
+	h.settle()
+	m, _ := mapOf(t, h.ordered[rec])
+	if v := h.durableAt[rec].Version; m.data.count() != 40 || v != kept {
+		t.Fatalf("the recovery write carries %d of 40 blocks at %#x, want all at %#x", m.data.count(), v, kept)
+	}
+}
