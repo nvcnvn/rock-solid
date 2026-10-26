@@ -48,3 +48,34 @@ func BenchmarkHistoryRecord(b *testing.B) {
 		h.Complete(h.Invoke(0, in), in)
 	}
 }
+
+// A machine's client reply completes its operation from the send itself, whichever machine sends it; a send not marked Reply, or one the decoder does not name, completes nothing.
+func TestRepliesAMachineSendsCompleteTheHistory(t *testing.T) {
+	s := sim.New(1, sim.DefaultSettings())
+	h := sim.NewHistory(s, 2)
+	h.Replies(func(m *core.Msg) (int, [sim.OpWords]uint64, bool) {
+		b := m.Inline()
+		if len(b) != 2 || b[0] != 'r' {
+			return 0, [sim.OpWords]uint64{}, false
+		}
+		return int(b[1]), [sim.OpWords]uint64{uint64(b[1]) + 10}, true
+	})
+	s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) {
+		n.Start(sim.MachineFunc(func(_ *core.Context, _ *core.Event, out []core.Action) []core.Action { return out }), nil)
+	})
+	a, b := h.Invoke(0, [sim.OpWords]uint64{}), h.Invoke(1, [sim.OpWords]uint64{})
+	send := func(body string, reply bool) {
+		s.Node(0).Call(core.NodeID{}, func(_ *core.Context, out []core.Action) []core.Action {
+			act := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: 7}, Reply: reply}
+			act.Msg.Len = uint16(copy(act.Msg.Body[:], body))
+			return append(out, act)
+		})
+	}
+	send("r\x01", false)
+	send("x\x00", true)
+	send("r\x01", true)
+	ops := h.Ops()
+	if ops[a].Done || !ops[b].Done || ops[b].Output[0] != 11 {
+		t.Fatalf("%+v", ops)
+	}
+}

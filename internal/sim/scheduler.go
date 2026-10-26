@@ -145,6 +145,7 @@ type Scheduler struct {
 	trace    []byte
 	steps    uint64
 	contract error
+	history  *History
 }
 
 type item struct {
@@ -746,6 +747,9 @@ func (n *Node) absorb(l uint32, acts []core.Action) {
 				it.linked, it.link = true, acts[i-1].IO
 			}
 		case core.ActNetSend:
+			if s.history != nil {
+				s.history.sent(&a)
+			}
 			s.send(n, l, &a)
 			continue
 		case core.ActSetTimer:

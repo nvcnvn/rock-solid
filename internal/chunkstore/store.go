@@ -19,12 +19,20 @@ var (
 	ErrVersion = errors.New("chunkstore: chunk is not at the expected version")
 	// ErrNoVersion reports an atVer that is neither the chunk's committed version nor one a snapshot froze.
 	ErrNoVersion = errors.New("chunkstore: no such version to read")
-	// ErrInDoubt reports a write whose record was in flight when the disk failed; recovery decides whether it is durable.
+	// ErrInDoubt reports a write whose record was in flight when the disk failed, or one still pending when the index was rebuilt; recovery decides whether it holds.
 	ErrInDoubt = errors.New("chunkstore: write in doubt")
 	// ErrUnavailable reports an operation while the store recovers, rebuilds its index or after its log failed.
 	ErrUnavailable = errors.New("chunkstore: store unavailable")
 	// ErrSeal reports a Seal, which the single-node store does not do.
 	ErrSeal = errors.New("chunkstore: seal not supported")
+	// ErrCounter reports a write or punch whose chunk has spent its version counter in the request's interval, or whose newest version is from a later one.
+	ErrCounter = errors.New("chunkstore: chunk's version counter spent in this interval")
+	// ErrFenced reports a write or punch of a client incarnation older than the newest the store has seen of its session.
+	ErrFenced = errors.New("chunkstore: write from an older incarnation of its session")
+	// ErrDropped reports a gated write or punch that Settle dropped, or one Cancel dropped before it was ordered.
+	ErrDropped = errors.New("chunkstore: write dropped")
+	// ErrUnresolved reports a Settle of a chunk with a write or punch still waiting to be ordered or with records not yet durable or failed.
+	ErrUnresolved = errors.New("chunkstore: chunk has writes not yet resolved")
 )
 
 const (
@@ -42,7 +50,12 @@ type Config struct {
 	Check bool
 	// CleanFree is clean_free, the free segments outside the reserve the cleaner keeps; 0 is DefaultCleanFree, and below 0 the cleaner runs only for items waiting for room.
 	CleanFree int
+	// MergeCache is how many recently merged blocks the store keeps to merge on without a read; 0 keeps none.
+	MergeCache int
 }
+
+// DefaultMergeCache is the merged-block cache of a replica primary's store: 64 blocks, 256 KiB per disk.
+const DefaultMergeCache = 64
 
 // Request is a Write, Punch or Read of a chunk's bytes [Off, Off+Len).
 type Request struct {
@@ -57,9 +70,22 @@ type Request struct {
 	Ver    uint64
 	// Epoch is the snapshot epoch of the chunk's volume, which a write or punch carries.
 	Epoch uint64
+	// Interval, when set, numbers a write's or punch's version in the chunk's PG interval rather than the store's own.
+	Interval uint32
+	// Version, when set, is the version a PG's primary gave a write or punch, logged as is: a write's blocks are whole and a punch's Buf holds its merged edge blocks.
+	Version uint64
+	// Gated keeps a write or punch unmapped, its buffers kept, until Commit or Settle.
+	Gated bool
+	// FrozenOnly makes a read serve only a version a snapshot froze.
+	FrozenOnly bool
+	// Base makes a read serve its blocks of the live map only while they are at version Ver, as a primary fetches a base whose own copy failed its checksum.
+	Base bool
+	// Session and Incarnation name the client process a write or punch came from.
+	Session     uint64
+	Incarnation uint64
 }
 
-// Reply completes the request ID: the version written or read, and a read's blocks in Buf laid out as a write's, which the caller frees.
+// Reply completes the request ID: the version written or read, and a read's blocks in Buf laid out as a write's, which the caller frees; a write refused with ErrCounter hands its Buf back.
 type Reply struct {
 	ID      uint64
 	Version uint64
@@ -67,16 +93,28 @@ type Reply struct {
 	Err     error
 }
 
-// Output is the actions and replies of calls into the store, reused by the caller.
+// BaseFetch asks the caller for block Block of a chunk at version Version from another member: the store's copy of a gated write's base failed its checksum, and request ID waits for SupplyBase.
+type BaseFetch struct {
+	ID      uint64
+	Chunk   core.ChunkID
+	Block   uint16
+	Version uint64
+}
+
+// Output is the actions and replies of calls into the store, reused by the caller: Bases asks for gated writes' bases from other members; Ordered hands over each gated write's or punch's merged blocks as it is ordered (a write's whole blocks, a punch's merged edge blocks, none for a punch without them) in a buffer the caller frees, and Logged answers it once its records are durable or have failed; Rebuilt reports that the index started a rebuild, after which the store holds what a restart would.
 type Output struct {
 	Actions []core.Action
 	Replies []Reply
+	Ordered []Reply
+	Logged  []Reply
+	Bases   []BaseFetch
+	Rebuilt bool
 }
 
 // Reset empties the output for reuse.
 func (o *Output) Reset() {
 	clear(o.Replies)
-	o.Actions, o.Replies = o.Actions[:0], o.Replies[:0]
+	o.Actions, o.Replies, o.Ordered, o.Logged, o.Bases, o.Rebuilt = o.Actions[:0], o.Replies[:0], o.Ordered[:0], o.Logged[:0], o.Bases[:0], false
 }
 
 type phase uint8
@@ -131,7 +169,20 @@ type op struct {
 	buf       core.IOBuf
 	err       error
 	// answered is set once the ackEarly plant has replied.
-	answered bool
+	answered  bool
+	committed bool
+	dropped   bool
+	// mapped is set once the mapOnCommit plant has mapped a gated op out of turn.
+	mapped bool
+	// remote counts the blocks of its base the op waits for from another member.
+	remote int
+}
+
+// cachedBlock is a merged block the store keeps: block b of chunk c as version wrote it.
+type cachedBlock struct {
+	c       core.ChunkID
+	b       uint16
+	version uint64
 }
 
 // chunkState is a chunk with operations not yet answered: those ordered, in version order, and those waiting behind a base read.
@@ -144,6 +195,8 @@ type chunkState struct {
 	waiting []int32
 	// held is whether write admission holds the chunk's next write back.
 	held bool
+	// failed is the lowest version a member's write or punch of the chunk failed at, after which the chunk's later versions of that interval are refused, so a member never logs one without the versions below it.
+	failed uint64
 }
 
 type sentItem struct {
@@ -156,6 +209,7 @@ type fetch struct {
 	op      int32
 	first   uint16
 	n       uint16
+	version uint64
 	lba     core.LBA
 	header  core.LBA
 	data    core.IOBuf
@@ -220,6 +274,8 @@ type plants struct {
 	// rewriteNoSteps charges a metadata victim's rewrite as if it took no steps, leaving out each
 	// step's record header, extra blobs and manifest.
 	rewriteNoSteps bool
+	// mapOnCommit maps a gated op when it commits, ahead of earlier versions still uncommitted.
+	mapOnCommit bool
 }
 
 // Store is the single-node ChunkStore of one disk: its log, its chunk index and the operations on them.
@@ -272,6 +328,12 @@ type Store struct {
 
 	cl  cleaner
 	adm admission
+	// sessions is the newest incarnation seen of each client session.
+	sessions map[uint64]uint64
+	// cache is the recently merged blocks, held in cacheBuf block for block, replaced in turn from cacheNext.
+	cache     []cachedBlock
+	cacheBuf  core.IOBuf
+	cacheNext int
 
 	plant plants
 	// metaVictim, when set, sees each metadata victim the cleaner starts, before it marks the
@@ -283,7 +345,7 @@ func newStore(cfg Config) *Store {
 	if cfg.Pool == RecordPool {
 		panic("chunkstore: a store of the index's reserved pool")
 	}
-	return &Store{cfg: cfg, interval: 1, chunkOf: map[core.ChunkID]int32{}}
+	return &Store{cfg: cfg, interval: 1, chunkOf: map[core.ChunkID]int32{}, sessions: map[uint64]uint64{}}
 }
 
 // Format starts a store on an empty disk.
@@ -388,7 +450,9 @@ func (s *Store) Write(ctx *core.Context, r Request, out *Output) {
 
 // Punch zeroes r.Len bytes at r.Off as a new version; punching the whole chunk deletes it and leaves a tombstone.
 func (s *Store) Punch(ctx *core.Context, r Request, out *Output) {
-	r.Buf = core.NoBuf
+	if r.Version == 0 {
+		r.Buf = core.NoBuf
+	}
 	if s.plant.punchKeepsHead && r.Off%core.BlockSize != 0 && r.Len > core.BlockSize {
 		r.Off, r.Len = r.Off+core.BlockSize-r.Off%core.BlockSize, r.Len-(core.BlockSize-r.Off%core.BlockSize)
 	}
@@ -471,7 +535,7 @@ func (s *Store) chunkSlot(c core.ChunkID) int32 {
 	}
 	cs := &s.chunks[i]
 	cs.live, cs.id, cs.pending, cs.waiting = true, c, cs.pending[:0], cs.waiting[:0]
-	cs.version, cs.epoch = 0, 0
+	cs.version, cs.epoch, cs.failed = 0, 0, 0
 	if ch, ok := s.ix.Chunk(s.cfg.Pool, c); ok && !s.plant.forgetVersion {
 		cs.version, cs.epoch = ch.Version, ch.Epoch
 	}
@@ -483,6 +547,12 @@ func (s *Store) releaseChunk(i int32) {
 	cs := &s.chunks[i]
 	if !cs.live || len(cs.pending) > 0 || len(cs.waiting) > 0 {
 		return
+	}
+	if cs.held {
+		cs.held = false
+		a := &s.adm
+		a.held = slices.DeleteFunc(a.held[a.heldHead:], func(ci int32) bool { return ci == i })
+		a.heldHead = 0
 	}
 	cs.live = false
 	delete(s.chunkOf, cs.id)
@@ -507,8 +577,14 @@ func (s *Store) orderWaiting(ctx *core.Context, ci int32, out *Output) {
 			}
 			continue
 		}
+		if o.err == nil && cs.failed != 0 && o.req.Version > cs.failed && o.req.Version>>32 == cs.failed>>32 {
+			o.err = ErrVersion
+		}
 		if o.err == nil && o.kind == opWrite && !s.admitWrite(ctx, ci, o) {
 			return
+		}
+		if o.err == nil && o.req.Session != 0 && o.req.Incarnation < s.sessions[o.req.Session] {
+			o.err = ErrFenced
 		}
 		cs.waiting = cs.waiting[:copy(cs.waiting, cs.waiting[1:])]
 		if o.err != nil {
@@ -521,9 +597,16 @@ func (s *Store) orderWaiting(ctx *core.Context, ci int32, out *Output) {
 
 func (s *Store) finishUnordered(ctx *core.Context, oi int32, out *Output) {
 	o := &s.ops[oi]
+	var back core.IOBuf
+	if errors.Is(o.err, ErrCounter) {
+		back, o.req.Buf = o.req.Buf, core.NoBuf
+	}
 	s.freeBufs(ctx, oi)
+	if o.err != nil && o.req.Version > s.chunks[o.chunk].version {
+		s.memberFailed(o)
+	}
 	if !o.answered {
-		out.Replies = append(out.Replies, Reply{ID: o.req.ID, Version: o.version, Err: o.err})
+		out.Replies = append(out.Replies, Reply{ID: o.req.ID, Version: o.version, Err: o.err, Buf: back})
 	}
 	ci := o.chunk
 	s.freeOp(oi)
@@ -556,6 +639,15 @@ func (s *Store) startBases(ctx *core.Context, oi int32) bool {
 	o := &s.ops[oi]
 	cs := &s.chunks[o.chunk]
 	o.based = true
+	if o.req.Version != 0 {
+		switch {
+		case o.req.Version <= cs.version:
+			o.err = ErrVersion
+		case o.kind == opPunch:
+			o.err = s.memberEdges(ctx, o)
+		}
+		return false
+	}
 	if o.req.HasVer && o.req.Ver != cs.version {
 		o.err = ErrVersion
 		return false
@@ -602,10 +694,45 @@ func (s *Store) startBases(ctx *core.Context, oi int32) bool {
 	return o.reads > 0
 }
 
+// memberEdges splits a member's punch buffer into the merged edge blocks its primary sent, one per block the punch covers in part.
+func (s *Store) memberEdges(ctx *core.Context, o *op) error {
+	var src []byte
+	if o.req.Buf != core.NoBuf {
+		src = ctx.Pool.Bytes(o.req.Buf)
+	}
+	first, last := spanOf(o.req.Off, o.req.Len)
+	n := 0
+	for k, b := range [2]uint16{first, last} {
+		if k == 1 && last == first {
+			break
+		}
+		if _, _, part := partial(o.req.Off, o.req.Len, b); !part {
+			continue
+		}
+		if len(src) < (n+1)*core.BlockSize {
+			return disklog.ErrBadBuffer
+		}
+		buf, err := ctx.Pool.Alloc(core.BlockSize)
+		if err != nil {
+			return err
+		}
+		copy(ctx.Pool.Bytes(buf), src[n*core.BlockSize:])
+		o.edges[k] = buf
+		n++
+	}
+	if len(src) != n*core.BlockSize {
+		return disklog.ErrBadBuffer
+	}
+	return nil
+}
+
 // base finds block b's newest ordered bytes: a pending operation's block, zeros (nil), or a live extent to read.
 func (s *Store) base(ctx *core.Context, cs *chunkState, b uint16) (src []byte, ext Extent, read bool) {
 	for i := len(cs.pending) - 1; i >= 0 && !s.plant.mergeCommitted; i-- {
 		o := &s.ops[cs.pending[i]]
+		if o.dropped || o.req.Gated && o.err != nil {
+			continue
+		}
 		for j := len(o.items) - 1; j >= 0; j-- {
 			it := &o.items[j]
 			if it.state == itemFailed || it.entry.Kind == disklog.EntryFreeze || b < it.entry.First || int(b) >= int(it.entry.First)+int(it.entry.Count) {
@@ -621,20 +748,100 @@ func (s *Store) base(ctx *core.Context, cs *chunkState, b uint16) (src []byte, e
 	if !ok || e.LBA == 0 {
 		return nil, Extent{}, false
 	}
+	for i, k := range s.cache {
+		if k.c == cs.id && k.b == b && k.version == e.Version {
+			return ctx.Pool.Bytes(s.cacheBuf)[i*core.BlockSize:][:core.BlockSize], Extent{}, false
+		}
+	}
 	return nil, e, true
+}
+
+// remember keeps the blocks op o merged, its edges that its range covers in part, once o is mapped.
+func (s *Store) remember(ctx *core.Context, o *op) {
+	if s.cfg.MergeCache == 0 || o.req.Version != 0 {
+		return
+	}
+	if s.cacheBuf == core.NoBuf {
+		buf, err := ctx.Pool.Alloc(s.cfg.MergeCache * core.BlockSize)
+		if err != nil {
+			return
+		}
+		s.cacheBuf = buf
+	}
+	c := s.chunks[o.chunk].id
+	first, last := spanOf(o.req.Off, o.req.Len)
+	for k, b := range [2]uint16{first, last} {
+		if _, _, part := partial(o.req.Off, o.req.Len, b); !part || k == 1 && last == first {
+			continue
+		}
+		for j := range o.items {
+			it := &o.items[j]
+			if it.state != itemDurable || it.entry.Kind != disklog.EntryWrite || b < it.entry.First || int(b) >= int(it.entry.First)+int(it.entry.Count) {
+				continue
+			}
+			i := slices.IndexFunc(s.cache, func(k cachedBlock) bool { return k.c == c && k.b == b })
+			if i < 0 && len(s.cache) < s.cfg.MergeCache {
+				s.cache = append(s.cache, cachedBlock{})
+				i = len(s.cache) - 1
+			}
+			if i < 0 {
+				i = s.cacheNext
+				s.cacheNext = (s.cacheNext + 1) % s.cfg.MergeCache
+			}
+			s.cache[i] = cachedBlock{c: c, b: b, version: o.version}
+			copy(ctx.Pool.Bytes(s.cacheBuf)[i*core.BlockSize:][:core.BlockSize], ctx.Pool.Bytes(it.buf)[int(b-it.entry.First)*core.BlockSize:])
+		}
+	}
+}
+
+// SupplyBase hands the op waiting on request id the base block b another member sent, in buf, which the store frees, or fails it with ErrBadChecksum when no member could send it.
+func (s *Store) SupplyBase(ctx *core.Context, id uint64, b uint16, buf core.IOBuf, err error, out *Output) {
+	defer s.pump(ctx, out)
+	for oi := range s.ops {
+		o := &s.ops[oi]
+		if o.kind == 0 || o.kind == opRead || o.req.ID != id || o.remote == 0 {
+			continue
+		}
+		o.remote--
+		if err == nil && buf != core.NoBuf && len(ctx.Pool.Bytes(buf)) >= core.BlockSize {
+			s.deliver(ctx, &fetch{first: b, n: 1, data: buf}, o)
+		} else if o.err == nil {
+			o.err = disklog.ErrBadChecksum
+		}
+		if o.reads--; o.reads == 0 {
+			s.orderWaiting(ctx, o.chunk, out)
+		}
+		break
+	}
+	if buf != core.NoBuf {
+		ctx.Pool.Free(buf)
+	}
 }
 
 func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	o := &s.ops[oi]
 	ci := o.chunk
 	cs := &s.chunks[ci]
-	if o.kind == opPunch && cs.version == 0 {
+	if o.kind == opPunch && cs.version == 0 && o.req.Version == 0 {
 		o.err = nil
 		s.finishUnordered(ctx, oi, out)
 		return
 	}
 	o.prevVer, o.prevEpoch = cs.version, cs.epoch
-	o.version = s.nextVersion(cs.version)
+	switch {
+	case o.req.Version != 0:
+		o.version = o.req.Version
+	case o.req.Interval != 0:
+		v, ok := intervalVersion(cs.version, o.req.Interval)
+		if !ok {
+			o.err = ErrCounter
+			s.finishUnordered(ctx, oi, out)
+			return
+		}
+		o.version = v
+	default:
+		o.version = s.nextVersion(cs.version)
+	}
 	pool, c := s.cfg.Pool, cs.id
 	if o.req.Epoch > cs.epoch {
 		o.items = append(o.items, item{entry: disklog.FreezeEntry(pool, c, cs.version, o.req.Epoch)})
@@ -646,9 +853,16 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 		if err := s.writeItems(ctx, o, first, last); err != nil {
 			o.err = err
 			s.freeBufs(ctx, oi)
+			s.memberFailed(o)
 		}
 	} else {
 		s.punchItems(o, first, last)
+	}
+	if o.req.Gated && o.err == nil {
+		r := Reply{ID: o.req.ID, Version: o.version}
+		if r.Buf, o.err = s.mergedCopy(ctx, o); o.err == nil {
+			out.Ordered = append(out.Ordered, r)
+		}
 	}
 	cs.pending = append(cs.pending, oi)
 	o.left = len(o.items)
@@ -659,12 +873,12 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	for j := range o.items {
 		it := &o.items[j]
 		if o.err != nil {
-			s.itemFailed(ctx, oi, int32(j), o.err)
+			s.itemFailed(ctx, oi, int32(j), o.err, out)
 			continue
 		}
 		t, err := s.log.Submit(ctx, disklog.Hot, disklog.Item{Entry: it.entry, Buf: it.buf, Keep: true}, &s.lout)
 		if err != nil {
-			s.itemFailed(ctx, oi, int32(j), err)
+			s.itemFailed(ctx, oi, int32(j), err, out)
 			continue
 		}
 		it.ticket = t
@@ -681,7 +895,7 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 func (s *Store) writeItems(ctx *core.Context, o *op, first, last uint16) error {
 	pool, c := s.cfg.Pool, s.chunks[o.chunk].id
 	count := last - first + 1
-	if count <= s.maxWrite || count == core.BlocksPerChunk && s.log.SlotAvailable() {
+	if count <= s.maxWrite || count == core.BlocksPerChunk && s.log.SlotAvailable() && !o.req.Gated {
 		o.items = append(o.items, item{entry: disklog.WriteEntry(pool, c, o.version, first, count), buf: o.req.Buf})
 		o.req.Buf = core.NoBuf
 		return nil
@@ -720,6 +934,41 @@ func (s *Store) punchItems(o *op, first, last uint16) {
 	if tail != core.NoBuf {
 		o.items = append(o.items, item{entry: disklog.WriteEntry(pool, c, o.version, last, 1), buf: tail})
 	}
+}
+
+// mergedCopy copies the blocks o's items write, in order, into one buffer: a write's whole blocks or a punch's merged edges, none for a punch without them.
+func (s *Store) mergedCopy(ctx *core.Context, o *op) (core.IOBuf, error) {
+	n := 0
+	for j := range o.items {
+		if e := &o.items[j].entry; e.Kind == disklog.EntryWrite {
+			n += int(e.Count)
+		}
+	}
+	if n == 0 {
+		return core.NoBuf, nil
+	}
+	buf, err := ctx.Pool.Alloc(n * core.BlockSize)
+	if err != nil {
+		return core.NoBuf, err
+	}
+	dst := ctx.Pool.Bytes(buf)
+	for j := range o.items {
+		if it := &o.items[j]; it.entry.Kind == disklog.EntryWrite {
+			dst = dst[copy(dst, ctx.Pool.Bytes(it.buf)[:int(it.entry.Count)*core.BlockSize]):]
+		}
+	}
+	return buf, nil
+}
+
+// intervalVersion is the version after newest in a PG's interval: interval.1 above an earlier interval's version, else newest plus one, unless the counter is spent or newest is from a later interval.
+func intervalVersion(newest uint64, interval uint32) (uint64, bool) {
+	switch k := uint32(newest >> 32); {
+	case k < interval:
+		return MakeVersion(interval, 1), true
+	case k > interval || uint32(newest) == math.MaxUint32:
+		return 0, false
+	}
+	return newest + 1, true
 }
 
 func (s *Store) nextVersion(newest uint64) uint64 {
@@ -789,7 +1038,16 @@ func (s *Store) Read(ctx *core.Context, r Request, out *Output) {
 // frozen version's map, or none when it reads the absent version 0.
 func (s *Store) readable(r Request, committed uint64) (mapVer uint64, zeros bool, err error) {
 	switch {
-	case !r.HasVer || r.Ver == committed:
+	case r.Base:
+		first, last := spanOf(r.Off, r.Len)
+		for b := first; b <= last; b++ {
+			if e, ok := s.ix.Lookup(s.cfg.Pool, r.Chunk, b); !ok || e.Version != r.Ver {
+				return 0, false, ErrNoVersion
+			}
+		}
+		return 0, false, nil
+	case r.FrozenOnly && (!r.HasVer || r.Ver == 0):
+	case !r.FrozenOnly && (!r.HasVer || r.Ver == committed):
 		return 0, false, nil
 	case r.Ver == 0 && s.ix.absent(s.cfg.Pool, r.Chunk):
 		return 0, true, nil
@@ -810,6 +1068,145 @@ func (s *Store) finishRead(ctx *core.Context, oi int32, out *Output) {
 	}
 	out.Replies = append(out.Replies, r)
 	s.freeOp(oi)
+}
+
+// Commit lets the gated write or punch of chunk c at version v be mapped, once the chunk's earlier versions are.
+func (s *Store) Commit(ctx *core.Context, c core.ChunkID, v uint64, out *Output) {
+	ci, ok := s.chunkOf[c]
+	if !ok {
+		return
+	}
+	for _, oi := range s.chunks[ci].pending {
+		if o := &s.ops[oi]; o.req.Gated && o.version == v {
+			o.committed = true
+			if s.plant.mapOnCommit && o.left == 0 && o.err == nil {
+				for j := range o.items {
+					if it := &o.items[j]; it.state == itemDurable {
+						s.unmappedLive(it, 1)
+						s.mapItem(it)
+					}
+				}
+				o.mapped = true
+			}
+			break
+		}
+	}
+	s.mapResolved(ctx, ci, out)
+}
+
+// Settle is peering's decision on chunk c's gated writes and punches not mapped yet: those at version keep or below are mapped in version order, and the later ones dropped, never mapped, even if committed, the chunk's version and snapshot epoch given back to what the first dropped one found. Their records stay in the log until recovery supersedes their blocks, and the caller numbers the chunk's next versions from a later interval, since members may have logged the dropped ones. It returns ErrUnresolved, settling nothing, while a write or punch of the chunk waits to be ordered or has records neither durable nor failed.
+func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Output) error {
+	ci, ok := s.chunkOf[c]
+	if !ok {
+		return nil
+	}
+	cs := &s.chunks[ci]
+	if len(cs.waiting) > 0 || slices.ContainsFunc(cs.pending, func(oi int32) bool { return s.ops[oi].left > 0 }) {
+		return ErrUnresolved
+	}
+	for _, oi := range cs.pending {
+		switch o := &s.ops[oi]; {
+		case !o.req.Gated || o.dropped:
+		case o.version <= keep:
+			o.committed = true
+		default:
+			o.dropped = true
+			cs.version, cs.epoch = min(cs.version, o.prevVer), min(cs.epoch, o.prevEpoch)
+		}
+	}
+	s.mapResolved(ctx, ci, out)
+	return nil
+}
+
+// Ungate maps chunk c's gated writes and punches as a member maps what it logs, each once its records are durable, for a disk that no longer leads the chunk's PG; those whose records failed are never mapped.
+func (s *Store) Ungate(ctx *core.Context, c core.ChunkID, out *Output) {
+	ci, ok := s.chunkOf[c]
+	if !ok {
+		return
+	}
+	for _, oi := range s.chunks[ci].pending {
+		if o := &s.ops[oi]; o.req.Gated && !o.dropped {
+			o.committed = true
+		}
+	}
+	s.mapResolved(ctx, ci, out)
+}
+
+// Unsettled appends to dst the chunks with gated writes or punches ordered and neither mapped nor dropped.
+func (s *Store) Unsettled(dst []core.ChunkID) []core.ChunkID {
+	for ci := range s.chunks {
+		if cs := &s.chunks[ci]; cs.live && slices.ContainsFunc(cs.pending, func(oi int32) bool { return s.ops[oi].req.Gated }) {
+			dst = append(dst, cs.id)
+		}
+	}
+	return dst
+}
+
+// Cancel drops chunk c's write or punch of request id if it still waits to be ordered, reporting whether it did: it is never ordered, and is answered with ErrDropped once no base read of its own is in flight.
+func (s *Store) Cancel(ctx *core.Context, c core.ChunkID, id uint64, out *Output) bool {
+	ci, ok := s.chunkOf[c]
+	if !ok {
+		return false
+	}
+	for _, oi := range s.chunks[ci].waiting {
+		if o := &s.ops[oi]; o.req.ID == id {
+			if o.err == nil {
+				o.err = ErrDropped
+			}
+			s.orderWaiting(ctx, ci, out)
+			s.pump(ctx, out)
+			return true
+		}
+	}
+	return false
+}
+
+// Newest is chunk c's newest ordered version, counting the versions a member was handed and has yet to order and a primary's versions whose records failed, whose numbers are never given again: not the newest version the disk holds whole.
+func (s *Store) Newest(c core.ChunkID) uint64 {
+	if ci, ok := s.chunkOf[c]; ok {
+		cs := &s.chunks[ci]
+		v := cs.version
+		for _, oi := range cs.waiting {
+			v = max(v, s.ops[oi].req.Version)
+		}
+		return v
+	}
+	if s.ix == nil {
+		return 0
+	}
+	ch, _ := s.ix.Chunk(s.cfg.Pool, c)
+	return ch.Version
+}
+
+// Overwrites reports whether a write of bytes [off, off+n) of chunk c at snapshot epoch epoch adds no live data: every block it covers is in the chunk's live map, written after the chunk's latest freeze, and it needs no new freeze. It looks up the index once per run of blocks.
+func (s *Store) Overwrites(c core.ChunkID, off, n uint32, epoch uint64) bool {
+	if s.ix == nil || !validRange(off, n) {
+		return false
+	}
+	ch, ok := s.ix.Chunk(s.cfg.Pool, c)
+	if !ok || epoch > ch.Epoch {
+		return false
+	}
+	var frozen uint64
+	if ch.Epoch > 0 {
+		frozen, _ = s.ix.FrozenAt(s.cfg.Pool, c, ch.Epoch)
+	}
+	first, last := spanOf(off, n)
+	for b := int(first); b <= int(last); {
+		e, ok := s.ix.Lookup(s.cfg.Pool, c, uint16(b))
+		if !ok || e.LBA == 0 || e.Version <= frozen {
+			return false
+		}
+		b = e.end()
+	}
+	return true
+}
+
+// SeeIncarnation records incarnation inc of a client session; the store refuses the older incarnations' writes and punches with ErrFenced when it orders them.
+func (s *Store) SeeIncarnation(session, inc uint64) {
+	if inc > s.sessions[session] {
+		s.sessions[session] = inc
+	}
 }
 
 // Flush completes once every write and punch of the chunks cs submitted before it is answered: since writes are answered once durable, it adds no disk action.
@@ -881,7 +1278,7 @@ func (s *Store) startFetch(ctx *core.Context, oi int32, first, n uint16, e Exten
 		s.fetches = append(s.fetches, fetch{})
 		fi = int32(len(s.fetches) - 1)
 	}
-	s.fetches[fi] = fetch{op: oi, first: first, n: n, lba: e.BlockLBA(first), header: e.Header, data: data, hdr: hdr, hdrLen: 1, waiting: 2}
+	s.fetches[fi] = fetch{op: oi, first: first, n: n, version: e.Version, lba: e.BlockLBA(first), header: e.Header, data: data, hdr: hdr, hdrLen: 1, waiting: 2}
 	s.ops[oi].reads++
 	s.lout.Actions = append(s.lout.Actions,
 		core.Action{Kind: core.ActDiskRead, IO: fetchIO(fi, 0), LBA: e.BlockLBA(first), Buf: data, Len: uint64(n) * core.BlockSize},
@@ -936,7 +1333,12 @@ func (s *Store) fetchDone(ctx *core.Context, fi int32, derr core.DiskError, out 
 	}
 	oi := f.op
 	o := &s.ops[oi]
-	if f.err != nil && o.err == nil {
+	remote := errors.Is(f.err, disklog.ErrBadChecksum) && o.kind != opRead && o.req.Gated && o.err == nil
+	if remote {
+		o.remote++
+		out.Bases = append(out.Bases, BaseFetch{ID: o.req.ID, Chunk: s.chunks[o.chunk].id, Block: f.first, Version: f.version})
+	}
+	if f.err != nil && o.err == nil && !remote {
 		o.err = f.err
 	}
 	if f.err == nil {
@@ -948,6 +1350,9 @@ func (s *Store) fetchDone(ctx *core.Context, fi int32, derr core.DiskError, out 
 	s.freeFetch = append(s.freeFetch, fi)
 	if len(s.freed) > 0 && s.rec == nil {
 		s.freeSlots(false)
+	}
+	if remote {
+		return
 	}
 	if o.reads--; o.reads > 0 {
 		return
@@ -1079,7 +1484,7 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 					err = ErrInDoubt
 					s.ops[si.op].items[si.item].buf = core.NoBuf
 				}
-				if s.itemFailed(ctx, si.op, si.item, err) {
+				if s.itemFailed(ctx, si.op, si.item, err, out) {
 					s.mapResolved(ctx, s.ops[si.op].chunk, out)
 				}
 			}
@@ -1188,13 +1593,16 @@ func (s *Store) durable(ctx *core.Context, ev *disklog.Event, out *Output) {
 		}
 		it := &s.ops[si.op].items[si.item]
 		it.entry, it.state, it.lba, it.headerBlocks, it.payload, it.lsn = ev.Entries[i], itemDurable, ev.LBA, ev.HeaderBlocks, ev.Payloads[i], ev.LSN
-		if s.itemDone(si.op) {
+		if s.ops[si.op].req.Gated {
+			s.unmappedLive(it, -1)
+		}
+		if s.itemDone(si.op, out) {
 			s.mapResolved(ctx, s.ops[si.op].chunk, out)
 		}
 	}
 }
 
-func (s *Store) itemFailed(ctx *core.Context, oi, ii int32, err error) bool {
+func (s *Store) itemFailed(ctx *core.Context, oi, ii int32, err error, out *Output) bool {
 	o := &s.ops[oi]
 	it := &o.items[ii]
 	it.state = itemFailed
@@ -1205,21 +1613,27 @@ func (s *Store) itemFailed(ctx *core.Context, oi, ii int32, err error) bool {
 	if o.err == nil {
 		o.err = err
 	}
-	return s.itemDone(oi)
+	return s.itemDone(oi, out)
 }
 
 // itemDone counts an item of the op resolved and reports whether all are; a failed op gives back
-// the chunk's version and epoch when none of its items, or not its freeze, became durable.
-func (s *Store) itemDone(oi int32) bool {
+// the chunk's epoch when its freeze did not become durable, and its version when none of its items
+// did, unless it is gated: a primary may have sent a gated version to members, so it is never
+// handed out again.
+func (s *Store) itemDone(oi int32, out *Output) bool {
 	o := &s.ops[oi]
 	if o.left--; o.left > 0 {
 		return false
 	}
+	if o.req.Gated {
+		out.Logged = append(out.Logged, Reply{ID: o.req.ID, Version: o.version, Err: o.err})
+	}
 	cs := &s.chunks[o.chunk]
 	if o.err != nil {
+		s.memberFailed(o)
 		// The writes ordered after a failed one may hold its bytes; the log fails them too, since
 		// it fails a stalled lane's queued items together in submit order, both hot lanes' at once.
-		if !o.holdsVersion() {
+		if !o.holdsVersion() && !o.req.Gated {
 			cs.version = min(cs.version, o.prevVer)
 		}
 		if len(o.items) > 0 && o.items[0].entry.Kind == disklog.EntryFreeze && o.items[0].state != itemDurable {
@@ -1227,6 +1641,13 @@ func (s *Store) itemDone(oi int32) bool {
 		}
 	}
 	return true
+}
+
+// memberFailed notes that op o failed if it is a member's, so the chunk's later versions of its interval waiting behind it are refused.
+func (s *Store) memberFailed(o *op) {
+	if cs := &s.chunks[o.chunk]; o.req.Version != 0 && (cs.failed == 0 || o.req.Version < cs.failed) {
+		cs.failed = o.req.Version
+	}
 }
 
 func (o *op) holdsVersion() bool {
@@ -1243,12 +1664,19 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 	for len(cs.pending) > 0 {
 		oi := cs.pending[0]
 		o := &s.ops[oi]
-		if o.left > 0 {
+		if o.left > 0 || o.req.Gated && o.err == nil && !o.committed && !o.dropped {
 			break
+		}
+		mapped := o.req.Gated && (o.err != nil || o.dropped || o.mapped)
+		if !mapped && o.err == nil && s.rec == nil {
+			s.remember(ctx, o)
 		}
 		for j := range o.items {
 			it := &o.items[j]
-			if it.state == itemDurable && s.rec == nil {
+			if it.state == itemDurable && s.rec == nil && !mapped {
+				if o.req.Gated {
+					s.unmappedLive(it, 1)
+				}
 				s.mapItem(it)
 			}
 			if it.buf != core.NoBuf {
@@ -1259,6 +1687,9 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 		r := Reply{ID: o.req.ID, Version: o.version, Err: o.err}
 		if o.err != nil && !o.holdsVersion() {
 			r.Version = 0
+		}
+		if o.dropped && o.err == nil {
+			r.Err = ErrDropped
 		}
 		if !o.answered {
 			out.Replies = append(out.Replies, r)
@@ -1351,6 +1782,20 @@ func (s *Store) mapItem(it *item) {
 		panic("chunkstore: the index refused the store's own entry: " + err.Error())
 	}
 	s.reportLive()
+}
+
+// unmappedLive takes a gated item's blocks out of its segment's live count while the index does not map it (sign -1), or puts them back as it does (+1): the log counts a record's blocks live once durable.
+func (s *Store) unmappedLive(it *item, sign int) {
+	n := 0
+	if it.entry.Kind == disklog.EntryWrite {
+		n = int(it.entry.Count)
+	}
+	if n == 0 {
+		return
+	}
+	if err := s.log.AddLive(uint32(uint64(it.lba)/uint64(s.sb.SegmentBlocks)), sign*n); err != nil {
+		panic("chunkstore: the usage table refused a gated item's count: " + err.Error())
+	}
 }
 
 // reportLive hands the log's usage table the changes to record counts the index made.
@@ -1497,7 +1942,7 @@ func (s *Store) indexBroken(ctx *core.Context, err error, out *Output) {
 		s.stop(ctx, err, out)
 		return
 	}
-	s.phase = draining
+	s.phase, out.Rebuilt = draining, true
 	s.failWaiting(ctx, ErrUnavailable, out)
 }
 
@@ -1514,9 +1959,43 @@ func (s *Store) drain(ctx *core.Context, out *Output) {
 	}
 	s.phase, s.rebuilt = recovering, true
 	s.resetCleaner(ctx)
+	s.abandonPending(ctx, out)
 	if err := s.recover(ctx, s.sb.Geometry.DiskBlocks(), disklog.ModeOpen); err != nil {
 		s.phase, s.err = failed, err
 	}
+}
+
+// abandonPending answers in doubt the writes and punches still pending once the log closed for a
+// rebuild, gated ones waiting for a commit and those behind them: replay maps every durable
+// record, as after a restart, so the store can neither map them again nor keep them unmapped.
+func (s *Store) abandonPending(ctx *core.Context, out *Output) {
+	for ci := range s.chunks {
+		cs := &s.chunks[ci]
+		if !cs.live {
+			continue
+		}
+		for _, oi := range cs.pending {
+			s.freeBufs(ctx, oi)
+			o := &s.ops[oi]
+			for j := range o.items {
+				if it := &o.items[j]; it.buf != core.NoBuf {
+					ctx.Pool.Free(it.buf)
+					it.buf = core.NoBuf
+				}
+			}
+			r := Reply{ID: o.req.ID, Err: ErrInDoubt}
+			if o.holdsVersion() {
+				r.Version = o.version
+			}
+			if !o.answered {
+				out.Replies = append(out.Replies, r)
+			}
+			s.freeOp(oi)
+		}
+		cs.pending = cs.pending[:0]
+		s.releaseChunk(int32(ci))
+	}
+	s.checkFlushes(out)
 }
 
 func (s *Store) fetchesOut() int { return len(s.fetches) - len(s.freeFetch) + s.cleanReadsOut() }

@@ -6,12 +6,13 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 // Nodes is the number of nodes in a cluster: a primary and two replicas.
 const Nodes = 3
 
-// Cluster is the protocol on three simulated nodes, node 0 the primary, whose client writes values 1 to ops, two at most in flight, into a history that outlives crashes.
+// Cluster is the protocol on three simulated nodes, node 0 the primary, whose client writes values 1 to ops, two at most in flight, into a history that outlives crashes and that the primary's acknowledgments complete.
 type Cluster struct {
 	s       *sim.Scheduler
 	history *sim.History
@@ -19,22 +20,24 @@ type Cluster struct {
 	boots   [Nodes]uint64
 	next    uint64
 	ops     uint64
-	acked   []uint64
-	checked int
+	checked []bool
 }
+
+// client is the address the primary acknowledges to, outside the cluster, so the network loses what it sends there once the history has taken it.
+var clientAddr = core.NodeID{Node: Nodes}
 
 // NewCluster makes a cluster on a scheduler seeded with seed and set, with bug planted in every node.
 func NewCluster(seed uint64, set sim.Settings, ops int, bug Bug) *Cluster {
 	s := sim.New(seed, set)
-	c := &Cluster{s: s, history: sim.NewHistory(s, ops), next: 1, ops: uint64(ops)}
+	c := &Cluster{s: s, history: sim.NewHistory(s, ops), next: 1, ops: uint64(ops), checked: make([]bool, ops)}
+	c.history.Replies(reply)
 	disk := []sim.DiskSpec{{Blocks: uint64(ops) + 1, Settings: sim.DefaultDiskSettings()}}
 	for id := range uint32(Nodes) {
 		s.AddNode(sim.DefaultClock, disk, func(n *sim.Node) {
 			c.boots[id]++
-			cfg := Config{Self: core.NodeID{Node: id}, Epoch: c.boots[id], Bug: bug}
+			cfg := Config{Self: core.NodeID{Node: id}, Epoch: c.boots[id], Bug: bug, Client: clientAddr}
 			if id == 0 {
 				cfg.Peers = []core.NodeID{{Node: 1}, {Node: 2}}
-				cfg.Ack = c.ack
 			}
 			m := New(n.Fork(), cfg)
 			c.nodes[id] = m
@@ -60,11 +63,23 @@ func (c *Cluster) Node(id int) *Machine { return c.nodes[id] }
 func (c *Cluster) Boots() [Nodes]uint64 { return c.boots }
 
 // Acked is the number of values acknowledged.
-func (c *Cluster) Acked() int { return len(c.acked) }
+func (c *Cluster) Acked() int {
+	n := 0
+	for _, op := range c.history.Ops() {
+		if op.Done {
+			n++
+		}
+	}
+	return n
+}
 
-func (c *Cluster) ack(value uint64) {
-	c.history.Complete(int(value-1), [sim.OpWords]uint64{})
-	c.acked = append(c.acked, value)
+// reply decodes the primary's acknowledgment of value v, which completes operation v − 1.
+func reply(m *core.Msg) (int, [sim.OpWords]uint64, bool) {
+	b := m.Inline()
+	if len(b) != replyLen || trace.Msg(b[0]) != trace.MsgWriteReply {
+		return 0, [sim.OpWords]uint64{}, false
+	}
+	return int(binary.LittleEndian.Uint64(b[9:])) - 1, [sim.OpWords]uint64{}, true
 }
 
 // LostWriteError reports an acknowledged value fewer than two disks hold durably, which a crash of every node and the loss of one disk could lose.
@@ -83,8 +98,12 @@ func (e *LostWriteError) Error() string {
 func (c *Cluster) Check() error {
 	// Each value goes to a block of its own and the cluster's disks have no faults, so a value
 	// once durable stays so and is checked only once; disk faults would need every value rechecked.
-	for ; c.checked < len(c.acked); c.checked++ {
-		v := c.acked[c.checked]
+	for i, op := range c.history.Ops() {
+		if !op.Done || c.checked[i] {
+			continue
+		}
+		c.checked[i] = true
+		v := op.Input[0]
 		copies := 0
 		for id := range uint32(Nodes) {
 			if b := c.s.Node(id).Disk(0).Durable(core.LBA(v)); b != nil && binary.LittleEndian.Uint64(b) == v {

@@ -36,8 +36,8 @@ type Config struct {
 	// Epoch is the machine's incarnation, raised at every start.
 	Epoch uint64
 	Bug   Bug
-	// Ack is called with each value the primary acknowledges.
-	Ack func(value uint64)
+	// Client is where the primary sends each value's acknowledgment, as a reply.
+	Client core.NodeID
 }
 
 type diskIO struct {
@@ -171,7 +171,7 @@ func (m *Machine) recv(ctx *core.Context, ev *core.Event, out []core.Action) []c
 		}
 		if i := m.find(seq); i >= 0 {
 			m.pending[i].replicas++
-			m.commit()
+			return m.commit(out)
 		}
 	}
 	return out
@@ -223,7 +223,7 @@ func (m *Machine) diskDone(ctx *core.Context, ev *core.Event, out []core.Action)
 	}
 	if j := m.find(x.seq); j >= 0 {
 		m.pending[j].local = true
-		m.commit()
+		return m.commit(out)
 	}
 	return out
 }
@@ -237,16 +237,16 @@ func (m *Machine) find(seq uint64) int {
 	return -1
 }
 
-func (m *Machine) commit() {
+// commit acknowledges to the client, as a reply, each value durable locally and on a replica.
+func (m *Machine) commit(out []core.Action) []core.Action {
 	kept := m.pending[:0]
 	for _, p := range m.pending {
 		if p.local && (p.replicas > 0 || m.cfg.Bug == AckBeforeReplica) {
-			if m.cfg.Ack != nil {
-				m.cfg.Ack(p.value)
-			}
+			out = append(out, core.Action{Kind: core.ActNetSend, Peer: m.cfg.Client, Msg: Msg(trace.MsgWriteReply, 0, p.value, 0), Reply: true})
 			continue
 		}
 		kept = append(kept, p)
 	}
 	m.pending = kept
+	return out
 }

@@ -750,6 +750,15 @@ func (l *Log) writeFormat(lba core.LBA, out *Output) {
 // Superblock is the log's identity and geometry.
 func (l *Log) Superblock() Superblock { return l.sb }
 
+// LiveBlocks is the live blocks the usage table counts over every segment: the disk's fill.
+func (l *Log) LiveBlocks() uint64 {
+	var n uint64
+	for i := range l.usage {
+		n += uint64(l.usage[i].Live)
+	}
+	return n
+}
+
 // Reserve is the free segments only checkpoints may open, sized for a checkpoint, the merge steps and a cleaner pass.
 func (l *Log) Reserve() uint32 { return l.reserve }
 

@@ -108,8 +108,8 @@ func TestFailedWriteWithOnlyItsFreezeDurable(t *testing.T) {
 	cs := &h.s.chunks[ci]
 	cs.version, cs.epoch = v+1, 1
 	cs.pending = append(cs.pending, oi)
-	h.s.itemDone(oi)
-	h.s.itemFailed(&h.ctx, oi, 1, disklog.ErrNoSpace)
+	h.s.itemDone(oi, &h.out)
+	h.s.itemFailed(&h.ctx, oi, 1, disklog.ErrNoSpace, &h.out)
 	if cs.version != v || cs.epoch != 1 {
 		t.Fatalf("chunk at %#x epoch %d after the failure, want %#x epoch 1", cs.version, cs.epoch, v)
 	}

@@ -90,7 +90,7 @@ func TestDeltaBases(t *testing.T) {
 	}
 }
 
-// A truncated delta, an entry for a PG past its pool's count, an interval number that goes backwards, two leaving members, a leaving member in a recovered interval and an unknown entry flag are malformed.
+// A truncated delta, an entry for a PG past its pool's count, an interval number that goes backwards, two leaving members, a leaving member in a recovered interval, a disk listed twice and an unknown entry flag are malformed.
 func TestMalformedDeltas(t *testing.T) {
 	prev := fullTable(16, 3)
 	next := fullTable(16, 3)
@@ -112,6 +112,7 @@ func TestMalformedDeltas(t *testing.T) {
 	for name, leave := range map[string]func(e *PGEntry){
 		"two leaving members":                      func(e *PGEntry) { e.Members[0].Leaving, e.Members[1].Leaving = true, true },
 		"a leaving member in a recovered interval": func(e *PGEntry) { e.Members[0].Leaving, e.Recovered = true, true },
+		"a disk listed twice":                      func(e *PGEntry) { e.Members[1].Disk = e.Members[0].Disk },
 	} {
 		bad := fullTable(16, 3)
 		bad.Epoch = 2

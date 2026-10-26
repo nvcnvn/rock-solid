@@ -127,7 +127,8 @@ func TestTheHistoryHoldsEveryWriteAndOnlyAcknowledgedOnesComplete(t *testing.T) 
 func TestTheMachineAllocatesNothingPerEvent(t *testing.T) {
 	pool := sim.NewPool(64*core.BlockSize, 0)
 	acks := 0
-	primary := toy.New(core.NewRand(1), toy.Config{Self: core.NodeID{}, Peers: []core.NodeID{{Node: 1}, {Node: 2}}, Epoch: 1, Ack: func(uint64) { acks++ }})
+	client := core.NodeID{Node: 3}
+	primary := toy.New(core.NewRand(1), toy.Config{Self: core.NodeID{}, Peers: []core.NodeID{{Node: 1}, {Node: 2}}, Epoch: 1, Client: client})
 	replica := toy.New(core.NewRand(2), toy.Config{Self: core.NodeID{Node: 1}})
 	ctx := core.Context{Now: 1000, Pool: pool}
 	out := make([]core.Action, 0, 16)
@@ -149,6 +150,11 @@ func TestTheMachineAllocatesNothingPerEvent(t *testing.T) {
 			t.Fatalf("replica emitted %+v", out)
 		}
 		out = primary.OnEvent(&ctx, &core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 1}, Msg: reply.Msg}, out[:0])
+		for _, a := range out {
+			if a.Kind == core.ActNetSend && a.Reply && a.Peer == client {
+				acks++
+			}
+		}
 	}
 	cycle()
 	if got := testing.AllocsPerRun(100, cycle); got != 0 {
