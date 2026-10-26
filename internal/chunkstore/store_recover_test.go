@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
-	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
 // recoveryBuf builds a recovery buffer: the given blocks written, each filled with its byte, and
@@ -76,7 +75,8 @@ func mapOf(t *testing.T, b []byte) (blockMap, map[uint16]byte) {
 }
 
 // A recovery read gives the chunk's live image: the written blocks' bytes packed after the map,
-// and every other block, punched or never written, a hole.
+// and every other block, punched or never written, a hole. The store reads a chunk it lists too:
+// its replica decides whether its copy can be a source.
 func TestARecoveryReadIsTheChunksLiveImage(t *testing.T) {
 	h := newRecoveryHarness(t)
 	h.sync(h.write(chunkC, 0, fill(2*core.BlockSize, 3), 0))
@@ -100,52 +100,68 @@ func TestARecoveryReadIsTheChunksLiveImage(t *testing.T) {
 	h.s.Read(&h.ctx, Request{ID: id, Chunk: chunkC, Len: core.ChunkSize, Recover: true}, &h.out)
 	h.take()
 	h.settle()
-	if err := h.reply(id).Err; !errors.Is(err, ErrMissing) {
-		t.Fatalf("a recovery read of a listed chunk: %v", err)
+	if r := h.reply(id); r.Err != nil {
+		t.Fatalf("a recovery read of a listed chunk, as a primary whose index holds the kept version reads itself: %v", r.Err)
+	} else {
+		h.pool.Free(r.Buf)
 	}
 }
 
 // A member's recovery write makes the chunk the image it carries, punching its holes over a
-// dropped version's blocks, holds its version whole, and alone removes the chunk's missing-list
-// entry: a later peering's entry stays, and so does every entry across a restart.
+// dropped version's blocks, at the version of the chunk's write before it, which it takes no
+// version above: one that only kept versions preceded in the interval brings the member back down
+// to the kept version past the dropped ones. It holds that version whole, and alone removes the
+// chunk's missing-list entry: a later peering's entry stays, and so does every entry across a
+// restart.
 func TestARecoveryWriteReplacesAMembersChunk(t *testing.T) {
 	h := newRecoveryHarness(t)
-	h.sync(h.memberWrite(chunkC, 0, 4, MakeVersion(3, 1), 1))
-	h.sync(h.memberWrite(chunkC, 2, 2, MakeVersion(3, 2), 9))
+	c2 := core.ChunkID{Volume: 1, Inode: 7, Index: 9}
 	kept := MakeVersion(3, 1)
-	h.sync(h.persist(0, 1, 4, []ChunkVersion{{Chunk: chunkC, Version: kept}}))
+	for _, c := range []core.ChunkID{chunkC, c2} {
+		h.sync(h.memberWrite(c, 0, 4, kept, 1))
+		h.sync(h.memberWrite(c, 2, 2, MakeVersion(3, 2), 9))
+	}
+	h.changed = true
+	h.sync(h.persist(0, 1, 4, []ChunkVersion{{Chunk: chunkC, Version: kept}, {Chunk: c2, Version: kept}}))
 	h.sync(h.memberWrite(chunkC, 0, 1, MakeVersion(4, 1), 5))
 	if ch, _ := h.s.Index().Chunk(testPool, chunkC); ch.ListedIn != 4 || ch.Listed != kept {
 		t.Fatalf("a write of the interval cleared the entry: %+v", ch)
 	}
-	rv := MakeVersion(4, 2)
-	h.sync(h.recoverWrite(Request{Chunk: chunkC, Version: rv, Buf: recoveryBuf(h, map[uint16]byte{1: 1, 2: 1}, 3)}))
+	img := map[uint16]byte{1: 1, 2: 1}
+	h.sync(h.recoverWrite(Request{Chunk: chunkC, HasVer: true, Ver: MakeVersion(4, 1), Interval: 4, Buf: recoveryBuf(h, img, 3)}))
+	h.sync(h.recoverWrite(Request{Chunk: c2, HasVer: true, Ver: kept, Interval: 4, Buf: recoveryBuf(h, map[uint16]byte{0: 1, 1: 1, 2: 1, 3: 1})}))
 	restart(h)
-	ch, _ := h.s.Index().Chunk(testPool, chunkC)
-	if ch.ListedIn != 0 || ch.Version != rv || ch.Whole != rv {
-		t.Fatalf("after recovery %+v", ch)
+	for c, v := range map[core.ChunkID]uint64{chunkC: MakeVersion(4, 1), c2: kept} {
+		if ch, _ := h.s.Index().Chunk(testPool, c); ch.ListedIn != 0 || ch.Version != v || ch.Whole != v {
+			t.Fatalf("after recovery %v holds %+v", c, ch)
+		}
 	}
 	for b, want := range []byte{5, 1, 1, 0, 0} {
 		if got := h.readNow(chunkC, uint32(b)*core.BlockSize, core.BlockSize); !bytes.Equal(got, fill(core.BlockSize, want)) {
 			t.Fatalf("block %d reads %#x, want %#x", b, got[0], want)
 		}
 	}
+	for b := range uint32(4) {
+		if got := h.readNow(c2, b*core.BlockSize, core.BlockSize); !bytes.Equal(got, fill(core.BlockSize, 1)) {
+			t.Fatalf("block %d of the chunk brought back to the kept version reads %#x", b, got[0])
+		}
+	}
 	h.changed = true
-	h.sync(h.persist(0, 1, 6, []ChunkVersion{{Chunk: chunkC, Version: rv}}))
-	h.sync(h.recoverWrite(Request{Chunk: chunkC, Version: MakeVersion(5, 1)}))
+	h.sync(h.persist(0, 1, 6, []ChunkVersion{{Chunk: chunkC, Version: MakeVersion(4, 1)}}))
+	h.sync(h.recoverWrite(Request{Chunk: chunkC, HasVer: true, Ver: MakeVersion(4, 1), Interval: 5}))
 	restart(h)
-	if ch, _ := h.s.Index().Chunk(testPool, chunkC); ch.ListedIn != 6 || ch.Version != MakeVersion(5, 1) || ch.Whole != MakeVersion(5, 1) {
+	if ch, _ := h.s.Index().Chunk(testPool, chunkC); ch.ListedIn != 6 {
 		t.Fatalf("recovery of interval 5 over an entry of interval 6: %+v", ch)
 	}
 	if got := h.block(chunkC, 1, 0); got[0] != 1 {
-		t.Fatalf("a marker changed block 1 to %#x", got[0])
+		t.Fatalf("a recovery write with no buffer changed block 1 to %#x", got[0])
 	}
 }
 
 // A primary's recovery write leaves out every block a gated write of its interval ordered before it
-// covers, writing or punching only the rest, and hands the members that remainder; a whole-chunk
-// punch of the interval leaves it nothing to carry. With MarkOnly the primary logs only the entry
-// ending the version.
+// covers, writing or punching only the rest, at that write's version, and hands the members that
+// remainder; a whole-chunk punch of the interval leaves it nothing to carry, and one ordered before
+// any write of the interval takes the kept version. One that relays logs nothing.
 func TestAPrimarysRecoveryWriteLeavesOutWhatTheIntervalCovered(t *testing.T) {
 	h := newRecoveryHarness(t)
 	k := uint32(7)
@@ -154,18 +170,24 @@ func TestAPrimarysRecoveryWriteLeavesOutWhatTheIntervalCovered(t *testing.T) {
 	h.s.Write(&h.ctx, Request{ID: w, Chunk: chunkC, Len: core.BlockSize, Buf: h.writeBuf(0, fill(core.BlockSize, 8)), Interval: k, Gated: true}, &h.out)
 	h.take()
 	img := map[uint16]byte{0: 1, 1: 1, 2: 1}
-	rec := h.recoverWrite(Request{Chunk: chunkC, Interval: k, Gated: true, Buf: recoveryBuf(h, img, 3, 4)})
+	rec := h.recoverWrite(Request{Chunk: chunkC, Interval: k, Gated: true, Ver: MakeVersion(3, 1), Buf: recoveryBuf(h, img, 3, 4)})
 	h.settle()
 	m, got := mapOf(t, h.ordered[rec])
 	if len(got) != 2 || got[1] != 1 || got[2] != 1 || m.holes.count() != 2 || m.data.has(0) {
 		t.Fatalf("the members get %v with holes %d", got, m.holes.count())
 	}
 	v1, v2 := h.durableAt[w].Version, h.durableAt[rec].Version
-	if v2 != v1+1 {
+	if v2 != v1 || intervalOf(v1) != k {
 		t.Fatalf("recovery took %#x after %#x", v2, v1)
 	}
-	h.commit(chunkC, v1)
-	h.commit(chunkC, v2)
+	h.s.Commit(&h.ctx, chunkC, rec, &h.out)
+	h.take()
+	h.settle()
+	if ch, _ := h.s.Index().Chunk(testPool, chunkC); ch.Version != 0 {
+		t.Fatalf("the recovery write, committed before the write it follows, was mapped: %+v", ch)
+	}
+	h.s.Commit(&h.ctx, chunkC, w, &h.out)
+	h.take()
 	h.settle()
 	for b, want := range []byte{8, 1, 1, 0} {
 		if got := h.readNow(chunkC, uint32(b)*core.BlockSize, core.BlockSize); !bytes.Equal(got, fill(core.BlockSize, want)) {
@@ -186,24 +208,17 @@ func TestAPrimarysRecoveryWriteLeavesOutWhatTheIntervalCovered(t *testing.T) {
 
 	c3 := core.ChunkID{Volume: 1, Inode: 7, Index: 10}
 	h.s.Cover(c3, k)
-	rec = h.recoverWrite(Request{Chunk: c3, Interval: k, Gated: true, MarkOnly: true, Buf: recoveryBuf(h, img)})
+	rec = h.recoverWrite(Request{Chunk: c3, Interval: k, Gated: true, Relay: true, Ver: MakeVersion(3, 1), Buf: recoveryBuf(h, img)})
 	h.settle()
-	if _, got := mapOf(t, h.ordered[rec]); len(got) != 3 {
-		t.Fatalf("MarkOnly hands the members %v", got)
+	if _, got := mapOf(t, h.ordered[rec]); len(got) != 3 || h.durableAt[rec].Version != MakeVersion(3, 1) {
+		t.Fatalf("relaying at %#x hands the members %v", h.durableAt[rec].Version, got)
 	}
-	logged := 0
 	for _, r := range h.records {
 		for _, e := range r.entries {
 			if e.Chunk == c3 {
-				logged++
-				if e.Kind != disklog.EntryRecovered {
-					t.Fatalf("MarkOnly logged %+v", e)
-				}
+				t.Fatalf("relaying logged %+v", e)
 			}
 		}
-	}
-	if logged != 1 {
-		t.Fatalf("MarkOnly logged %d entries", logged)
 	}
 }
 

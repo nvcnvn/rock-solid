@@ -71,8 +71,8 @@ func (c *rcluster) blockIs(d int, ch core.ChunkID, b uint16, v byte) {
 }
 
 // Disk 3 misses a write to chunk a while down; marked up again, it lists a alone, and recovery
-// copies a's blocks to it and the entry ending the version to disk 2, never touching chunk b, which
-// it missed nothing of. The primary then reports the interval recovered, and again on each retry
+// copies a's blocks to it alone, at the version they were written at, never touching chunk b, which
+// it missed nothing of, nor disk 2. The primary then reports the interval recovered, and again on each retry
 // until a table records it.
 func TestAReturningMemberGetsOnlyTheChunksItMissed(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
@@ -94,18 +94,11 @@ func TestAReturningMemberGetsOnlyTheChunksItMissed(t *testing.T) {
 	c.reps[0].plant.noRecovery = false
 	c.runFor(RetryAfter / 2)
 	c.settle()
-	if len(*sends) != 2 {
+	if len(*sends) != 1 {
 		t.Fatalf("%d recovery writes", len(*sends))
 	}
-	for _, s := range *sends {
-		switch {
-		case s.u.Chunk != a:
-			t.Fatalf("a recovery write of %v", s.u.Chunk)
-		case s.to == 2 && (!s.carries || len(s.bytes) != 2 || s.bytes[0] != 5 || s.bytes[1] != 5 || s.m.holes.count() != core.BlocksPerChunk-2):
-			t.Fatalf("disk 3 got %+v", s)
-		case s.to == 1 && s.carries:
-			t.Fatalf("disk 2, which lacks nothing, got blocks %v", s.bytes)
-		}
+	if s := (*sends)[0]; s.u.Chunk != a || s.to != 2 || s.u.Version != MakeVersion(2, 1) || !s.carries || len(s.bytes) != 2 || s.bytes[0] != 5 || s.bytes[1] != 5 || s.m.holes.count() != core.BlocksPerChunk-2 {
+		t.Fatalf("recovery wrote %+v", s)
 	}
 	for d := range 3 {
 		if x := c.listed(d, a); x.ListedIn != 0 || x.Whole != (*sends)[0].u.Version {
@@ -229,8 +222,8 @@ func TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover(t *testing.T) {
 				toDisk1 = s
 			}
 		}
-		if toDisk1 == nil || toDisk1.u.Version <= c.reply(w).Version {
-			t.Fatalf("%s: recovery writes %+v after the write's %#x", tc.name, *sends, c.reply(w).Version)
+		if toDisk1 == nil || toDisk1.u.Version != c.reply(w).Version {
+			t.Fatalf("%s: recovery writes %+v, the write before them %#x", tc.name, *sends, c.reply(w).Version)
 		}
 		if tc.atRead {
 			if c.diskBlock(0, ch, 0)[0] != 1 {

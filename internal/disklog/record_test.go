@@ -39,7 +39,7 @@ func goldenPeeringRecord(t testing.TB) testRecord {
 // ends the version.
 func recoveryRecord(t testing.TB) testRecord {
 	t.Helper()
-	entries := []Entry{WriteEntry(1, testChunk, 0x400000002, 0, 1), PunchEntry(1, testChunk, 0x400000002, 1, 3), RecoveredEntry(1, testChunk, 0x400000002)}
+	entries := []Entry{WriteEntry(1, testChunk, 0x400000002, 0, 1), PunchEntry(1, testChunk, 0x400000002, 1, 3), RecoveredEntry(1, testChunk, 0x400000002, 5)}
 	return encodeRecord(t, Record{Place: testPlace, LSN: 14, Durable: 13}, entries, [][]byte{bytes.Repeat([]byte{0x5A}, core.BlockSize), nil, nil})
 }
 
@@ -335,17 +335,21 @@ func TestPeeringEntryErrors(t *testing.T) {
 	wantErr(t, "flagged copy", err, ErrMalformed)
 }
 
-// Recovery's end round-trips and names its version's interval, which must not be 0.
+// Recovery's end round-trips and names its interval, which is not 0 nor before its version's;
+// its version may be 0, a chunk recovery leaves absent.
 func TestRecoveredEntryErrors(t *testing.T) {
 	tr := recoveryRecord(t)
 	d := decodeExact(t, tr)
-	if d.Entries[2] != RecoveredEntry(1, testChunk, 0x400000002) || d.Entries[2].Interval != 4 {
+	if d.Entries[2] != RecoveredEntry(1, testChunk, 0x400000002, 5) {
 		t.Fatalf("decoded %+v", d.Entries)
+	}
+	if _, err := LayoutOf([]Entry{RecoveredEntry(1, testChunk, 0, 5)}); err != nil {
+		t.Fatalf("recovery's end at version 0: %v", err)
 	}
 	end := preludeSize + 2*writeEntrySize
 	for name, mod := range map[string]func(b []byte){
-		"interval not the version's": func(b []byte) { b[end+29] = 5 },
-		"version 0":                  func(b []byte) { clear(b[end+21 : end+33]) },
+		"interval before the version's": func(b []byte) { b[end+29] = 3 },
+		"interval 0":                    func(b []byte) { clear(b[end+29 : end+33]) },
 	} {
 		b := bytes.Clone(tr.image)
 		mod(b)
@@ -353,8 +357,7 @@ func TestRecoveredEntryErrors(t *testing.T) {
 		_, err := DecodeRecord(b, testPlace, manyLeft, nil)
 		wantErr(t, name, err, ErrMalformed)
 	}
-	bad := RecoveredEntry(1, testChunk, 0x400000002)
-	bad.Interval = 3
+	bad := RecoveredEntry(1, testChunk, 0x400000002, 3)
 	_, err := LayoutOf([]Entry{bad})
 	wantErr(t, "layout", err, ErrMalformed)
 }

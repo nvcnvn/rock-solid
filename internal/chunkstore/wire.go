@@ -116,7 +116,7 @@ type Hello struct {
 	Incarnation uint64
 }
 
-// Update is a chunk write or punch, from a client to the primary or, with the version it ordered, from the primary to a member, a member's punch carrying the edge blocks the primary merged; a purger's punch names its shard and Raft term. A recovery write (KindRecover) covers the whole chunk and carries a recovery buffer, or none for a member that takes only the entry ending its version.
+// Update is a chunk write or punch, from a client to the primary or, with the version it ordered, from the primary to a member, a member's punch carrying the edge blocks the primary merged; a purger's punch names its shard and Raft term. A recovery write (KindRecover) covers the whole chunk at the version, 0 for an absent chunk, it brings the member to, and carries a recovery buffer, or none when it only ends the chunk's listing.
 type Update struct {
 	Kind        Kind
 	ID          core.RequestID
@@ -374,7 +374,7 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 			r.bad = true
 		}
 	}
-	if !validRange(u.Off, u.Len) || data != want || !validVersion(u.Version) || replica != (u.Version != 0) ||
+	if !validRange(u.Off, u.Len) || data != want || !validVersion(u.Version) || replica != (u.Version != 0) && u.Kind != KindRecover ||
 		write && (u.Shard != 0 || u.Term != 0) {
 		r.bad = true
 	}
@@ -426,7 +426,7 @@ func DecodeResponse(b []byte, data int, rp *Response) error {
 		dataOK = data > 0 && data <= core.BlockSize+core.ChunkSize && data%core.BlockSize == 0
 	}
 	if !replyTakes(rp.Kind, rp.Status) || !validVersion(rp.Version) || rp.Status == StatusRefused && rp.Interval == 0 ||
-		rp.Kind == KindAck && rp.Status == StatusOK && rp.Version == 0 || !dataOK {
+		!dataOK {
 		r.bad = true
 	}
 	return r.done(err)

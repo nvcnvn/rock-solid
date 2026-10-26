@@ -23,8 +23,10 @@ type recoverChunk struct {
 	kept    uint64
 	targets uint8
 	busy    bool
-	// wait is set once a read of the chunk failed, until the next retry.
-	wait bool
+	// wait is set once a read of the chunk failed, until the next retry; failed is the members,
+	// by place, a read failed at, which are tried last.
+	wait   bool
+	failed uint8
 }
 
 // recovery is a chunk being recovered: its image read from a source, by store request read or by
@@ -34,6 +36,7 @@ type recovery struct {
 	pg       core.PGID
 	interval uint32
 	todo     int
+	src      int
 	read     uint64
 	rid      core.RequestID
 	source   core.NodeID
@@ -142,10 +145,12 @@ func (r *Replica) recoverWork(ctx *core.Context, out *ReplicaOutput) {
 	}
 }
 
-// startRecovery reads chunk j of lead i's list from a source, a member of the interval that holds
-// the kept version and lacks nothing of it: the primary itself if it can, else the first such member
-// up. A chunk no member keeps anything of needs no source, and one no member can be a source of is
-// left listed for this interval.
+// startRecovery reads chunk j of lead i's list from a source, an up member of the interval that
+// holds the kept version and lacks nothing of it: the primary itself if it can, even one that lists
+// the chunk only for versions of its own its index never mapped, else the first such member, those
+// a read already failed at last. A chunk no member keeps anything of needs no source, and one no member can be a source of
+// is left listed for this interval; one whose sources the replica cannot reach yet is tried again
+// at the next retry.
 func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput) {
 	l := &r.leads[i]
 	_, e := r.table.entry(l.pg)
@@ -154,6 +159,7 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 	if t.kept == 0 {
 		buf, err := ctx.Pool.Alloc(core.BlockSize)
 		if err != nil {
+			t.wait, r.waits = true, true
 			return
 		}
 		var m blockMap
@@ -166,20 +172,29 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 		r.orderRecovery(ctx, len(r.recs)-1, buf)
 		return
 	}
-	src := -1
+	src, clean := -1, false
 	for s, m := range e.Members {
-		if s >= maxMembers || m.Mark != MarkUp || t.targets&(1<<s) != 0 || m.Disk != r.cfg.Disk && !r.reachable(m.Disk) {
+		if s >= maxMembers || m.Mark != MarkUp || t.targets&(1<<s) != 0 && (m.Disk != r.cfg.Disk || l.lacks(t.chunk)) {
 			continue
 		}
-		if src < 0 || m.Disk == r.cfg.Disk {
+		clean = true
+		if m.Disk != r.cfg.Disk && !r.reachable(m.Disk) {
+			continue
+		}
+		if better := src < 0 || t.failed&(1<<src) != 0 && t.failed&(1<<s) == 0 || m.Disk == r.cfg.Disk && t.failed&(1<<s) == 0; better {
 			src = s
 		}
 	}
-	if src < 0 {
+	switch {
+	case !clean:
 		t.targets = 0
+		r.st.Uncover(t.chunk)
+		return
+	case src < 0:
+		t.wait, r.waits = true, true
 		return
 	}
-	t.busy = true
+	t.busy, rc.src = true, src
 	if r.plant.coverAtRead {
 		r.st.freezeCover(t.chunk)
 	}
@@ -207,8 +222,8 @@ func (r *Replica) recoveryRead(ctx *core.Context, k int, buf core.IOBuf, ok bool
 		rc := r.recs[k]
 		r.endRecovery(k, false)
 		if i := r.lead(rc.pg); i >= 0 && r.leads[i].interval == rc.interval {
-			r.leads[i].todo[rc.todo].wait = true
-			r.waits = true
+			t := &r.leads[i].todo[rc.todo]
+			t.wait, t.failed, r.waits = true, t.failed|1<<rc.src, true
 		}
 		return
 	}
@@ -244,8 +259,18 @@ func (r *Replica) recoveryAsked(ctx *core.Context, ev *core.Event, rd *Read, out
 		r.answer(ctx, ev.Peer, rd.ID, &rp, core.NoBuf, out)
 		return
 	}
+	if ix := r.st.Index(); ix == nil || listedIn(ix, r.st.cfg.Pool, rd.Chunk) != 0 {
+		rp := Response{Kind: KindReadReply, Status: StatusMissing}
+		r.answer(ctx, ev.Peer, rd.ID, &rp, core.NoBuf, out)
+		return
+	}
 	id := r.newReq(storeReq{kind: reqRead, peer: ev.Peer, msgID: rd.ID, pg: rd.PG.PG, chunk: rd.Chunk})
 	r.st.Read(ctx, Request{ID: id, Chunk: rd.Chunk, Len: core.ChunkSize, Recover: true}, &r.sout)
+}
+
+func listedIn(ix *Index, pool core.PoolID, c core.ChunkID) uint32 {
+	x, _ := ix.Chunk(pool, c)
+	return x.ListedIn
 }
 
 // recoveryWritten takes the store's answer to a recovery write: mapped, its chunk is recovered;
@@ -286,28 +311,32 @@ func (r *Replica) orderRecovery(ctx *core.Context, k int, buf core.IOBuf) {
 	rc.req = r.newReq(storeReq{kind: reqRecover, pg: rc.pg, chunk: t.chunk})
 	u := Update{Kind: KindRecover, PG: PGFields{Epoch: r.table.Epoch, PG: rc.pg, Interval: rc.interval}, Chunk: t.chunk, Len: core.ChunkSize}
 	r.vers = append(r.vers, version{req: rc.req, epoch: r.table.Epoch, interval: rc.interval, u: u, recover: true})
-	r.st.Write(ctx, Request{ID: rc.req, Chunk: t.chunk, Len: core.ChunkSize, Buf: buf, Interval: rc.interval, Gated: true, Recover: true,
-		MarkOnly: self < 0 || t.targets&(1<<self) == 0}, &r.sout)
+	r.st.Write(ctx, Request{ID: rc.req, Chunk: t.chunk, Len: core.ChunkSize, Buf: buf, Interval: rc.interval, Gated: true, Recover: true, Ver: t.kept,
+		Relay: self < 0 || t.targets&(1<<self) == 0}, &r.sout)
 }
 
-// recoveryTargets marks, among version v's members, those recovery lacks the chunk on.
-func (r *Replica) recoveryTargets(v *version) {
+// recoveryTarget reports whether recovery write v goes to disk: a member that lacks its chunk.
+func (r *Replica) recoveryTarget(v *version, disk uint32) bool {
 	k := slices.IndexFunc(r.recs, func(rc recovery) bool { return rc.req == v.req })
 	if k < 0 {
-		return
+		return false
 	}
 	rc := &r.recs[k]
 	i := r.lead(rc.pg)
 	if i < 0 {
-		return
+		return false
 	}
 	_, e := r.table.entry(rc.pg)
-	t := r.leads[i].todo[rc.todo].targets
-	for n := range v.n {
-		if s := slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == v.members[n] }); s >= 0 && s < maxMembers && t&(1<<s) != 0 {
-			v.tgt |= 1 << n
-		}
+	s := slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == disk })
+	return s >= 0 && s < maxMembers && r.leads[i].todo[rc.todo].targets&(1<<s) != 0
+}
+
+// listedIn is the interval whose peering listed chunk c on this disk, 0 for none.
+func (r *Replica) listedIn(c core.ChunkID) uint32 {
+	if r.st.Index() == nil {
+		return 0
 	}
+	return listedIn(r.st.Index(), r.st.cfg.Pool, c)
 }
 
 // recoveryDone ends the recovery whose write is store request req: once mapped, the chunk's members
@@ -324,8 +353,10 @@ func (r *Replica) recoveryDone(ctx *core.Context, req uint64, ok bool, out *Repl
 	}
 }
 
-// endRecovery drops recovery k: done, its chunk's members lack it no longer; failed, the chunk is
-// tried again, unless its interval ended.
+// endRecovery drops recovery k: done, its chunk's members lack it no longer; failed before its
+// write was ordered, the chunk is tried again. A write that fails ends its interval, and the store
+// no longer tracks what the interval covered in the chunk, so the chunk stays listed until the next
+// interval peers.
 func (r *Replica) endRecovery(k int, ok bool) {
 	rc := r.recs[k]
 	r.recs = slices.Delete(r.recs, k, k+1)
@@ -336,10 +367,11 @@ func (r *Replica) endRecovery(k int, ok bool) {
 	l := &r.leads[i]
 	t := &l.todo[rc.todo]
 	t.busy = false
+	if !ok && rc.req != 0 {
+		t.targets = 0
+		return
+	}
 	if !ok {
-		if rc.req != 0 {
-			r.st.Cover(t.chunk, rc.interval)
-		}
 		l.cursor = min(l.cursor, rc.todo)
 		return
 	}

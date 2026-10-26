@@ -147,7 +147,7 @@ func (r *Replica) timedOut(ctx *core.Context, v *version, disk uint32, out *Repl
 	}
 	di.waited = ctx.Now
 	r.reportID++
-	mt := MemberTimeout{ID: core.RequestID(r.reportID), PG: PGFields{Epoch: r.table.Epoch, PG: v.u.PG.PG, Interval: uint32(v.u.Version >> 32)}, Disk: disk}
+	mt := MemberTimeout{ID: core.RequestID(r.reportID), PG: PGFields{Epoch: r.table.Epoch, PG: v.u.PG.PG, Interval: v.interval}, Disk: disk}
 	r.frame = AppendMemberTimeout(r.frame[:0], &mt)
 	a := core.Action{Kind: core.ActNetSend, Peer: r.auth}
 	a.Msg.Len = uint16(copy(a.Msg.Body[:], r.frame))

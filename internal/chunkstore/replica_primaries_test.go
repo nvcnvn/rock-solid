@@ -533,7 +533,7 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks the run's oracle at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 4 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 55 of 500), a restarted primary peering in its old interval (43 of 500) and a disk formatted again keeping its old disk ID (70 of 500).
+// Each planted bug breaks the run's oracle at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 2 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 55 of 500), a restarted primary peering in its old interval (43 of 500) and a disk formatted again keeping its old disk ID (70 of 500).
 func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	for _, p := range []struct {
 		name  string
@@ -541,7 +541,7 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 		inv   string
 		plant func(r *primaryRun)
 	}{
-		{"M7", 180, invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }},
+		{"M7", 37, invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }},
 		{"M8", 6, invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking = true }},
 		{"restart in the old interval", 10, invOneVersion, func(r *primaryRun) { r.c.replicaPlants.peerInOldInterval = true }},
 		{"old disk ID kept", 0, invAckedKept, func(r *primaryRun) { r.a.keepID = true }},

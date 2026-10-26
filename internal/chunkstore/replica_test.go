@@ -71,9 +71,14 @@ type rclient struct {
 	replies map[core.RequestID]Response
 	data    map[core.RequestID][]byte
 	sent    map[core.RequestID]core.IOBuf
+	// lost, when set, sees each peer whose connection broke.
+	lost func(peer core.NodeID)
 }
 
 func (c *rclient) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
+	if ev.Kind == core.EvPeerLost && c.lost != nil {
+		c.lost(ev.Peer)
+	}
 	if ev.Kind != core.EvNetRecv {
 		return out
 	}

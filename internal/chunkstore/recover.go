@@ -152,11 +152,10 @@ func recoveryBlocks(pool core.BufPool, buf core.IOBuf) int {
 	return len(pool.Bytes(buf))/core.BlockSize - 1
 }
 
-// recoverItems builds a recovery write's items: unless it is a marker or MarkOnly, a write of
-// each run of the blocks its buffer carries and a punch of each run of holes, and then the entry
-// that ends the version. At the primary the blocks a gated write of the interval ordered before it
-// covers are left out first, and the buffer that remains, for the members, is kept in o.buf: none
-// when nothing is left.
+// recoverItems builds a recovery write's items: unless it relays, a write of each run of the blocks
+// its buffer carries and a punch of each run of holes, and then the entry that ends it. At the
+// primary the blocks a gated write of the interval ordered before it covers are left out first,
+// and the buffer that remains, for the members, is kept in o.buf: none when nothing is left.
 func (s *Store) recoverItems(ctx *core.Context, o *op) error {
 	pool, c := s.cfg.Pool, s.chunks[o.chunk].id
 	var m blockMap
@@ -170,7 +169,7 @@ func (s *Store) recoverItems(ctx *core.Context, o *op) error {
 	orig := m.data
 	if o.req.Gated {
 		cv, ok := s.covers[c]
-		if !ok || cv.interval != uint32(o.version>>32) {
+		if !ok || cv.interval != o.req.Interval {
 			panic("chunkstore: a recovery write of a chunk whose covered blocks are not tracked")
 		}
 		delete(s.covers, c)
@@ -178,7 +177,7 @@ func (s *Store) recoverItems(ctx *core.Context, o *op) error {
 	}
 	at := func(b uint16) []byte { return src[(1+orig.rank(b))*core.BlockSize:][:core.BlockSize] }
 	var err error
-	if !o.req.MarkOnly {
+	if !o.req.Relay {
 		m.data.runs(func(first, n uint16) {
 			for b := first; b < first+n && err == nil; b += s.maxWrite {
 				k := min(s.maxWrite, first+n-b)
@@ -200,7 +199,9 @@ func (s *Store) recoverItems(ctx *core.Context, o *op) error {
 	if err != nil {
 		return err
 	}
-	o.items = append(o.items, item{entry: disklog.RecoveredEntry(pool, c, o.version)})
+	if !o.req.Relay {
+		o.items = append(o.items, item{entry: disklog.RecoveredEntry(pool, c, o.version, o.req.Interval)})
+	}
 	if !o.req.Gated || m.empty() {
 		return nil
 	}

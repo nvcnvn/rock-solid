@@ -24,7 +24,15 @@ func (h *harness) gatedAt(c core.ChunkID, off uint32, data []byte, interval uint
 }
 
 func (h *harness) commit(c core.ChunkID, v uint64) {
-	h.s.Commit(&h.ctx, c, v, &h.out)
+	var id uint64
+	if ci, ok := h.s.chunkOf[c]; ok {
+		for _, oi := range h.s.chunks[ci].pending {
+			if o := &h.s.ops[oi]; o.req.Gated && o.version == v {
+				id = o.req.ID
+			}
+		}
+	}
+	h.s.Commit(&h.ctx, c, id, &h.out)
 	h.take()
 }
 

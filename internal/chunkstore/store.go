@@ -85,12 +85,14 @@ type Request struct {
 	// Session and Incarnation name the client process a write or punch came from.
 	Session     uint64
 	Incarnation uint64
-	// Recover makes a Write a recovery write of the whole chunk, whose Buf is a recovery buffer, or
-	// none for a member that takes only the entry ending its version, and a Read one of the chunk's
-	// live image as a recovery buffer. MarkOnly has a primary's recovery write log only that entry,
-	// its buffer going to the members.
-	Recover  bool
-	MarkOnly bool
+	// Recover makes a Write a recovery write of the whole chunk in PG interval Interval, whose Buf is
+	// a recovery buffer, or none when it only ends the chunk's listing, and a Read one of the chunk's
+	// live image as a recovery buffer. A recovery write takes no version of its own: a member's is
+	// at Ver, which HasVer marks, and a primary's, which is Gated, at the chunk's newest version of
+	// the interval or else at Ver, the version peering kept. Relay has a primary's recovery write
+	// log nothing, its buffer going to the members that lack the chunk.
+	Recover bool
+	Relay   bool
 }
 
 // Reply completes the request ID: the version written or read, and a read's blocks in Buf laid out as a write's, which the caller frees; a write refused with ErrCounter hands its Buf back.
@@ -665,6 +667,9 @@ func (s *Store) startBases(ctx *core.Context, oi int32) bool {
 	o := &s.ops[oi]
 	cs := &s.chunks[o.chunk]
 	o.based = true
+	if o.req.Recover {
+		return false
+	}
 	if o.req.Version != 0 {
 		switch {
 		case o.req.Version <= cs.version:
@@ -855,6 +860,10 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	}
 	o.prevVer, o.prevEpoch = cs.version, cs.epoch
 	switch {
+	case o.req.Recover && (o.req.HasVer || uint32(cs.version>>32) != o.req.Interval):
+		o.version = o.req.Ver
+	case o.req.Recover:
+		o.version = cs.version
 	case o.req.Version != 0:
 		o.version = o.req.Version
 	case o.req.Interval != 0:
@@ -896,6 +905,9 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	}
 	if n := len(o.items); o.err == nil && n > 0 && !o.req.Recover {
 		o.items[n-1].entry.Last = true
+	}
+	if o.req.Gated && o.err == nil && len(o.items) == 0 {
+		out.Logged = append(out.Logged, Reply{ID: o.req.ID, Version: o.version})
 	}
 	if o.req.Gated && o.err == nil {
 		r := Reply{ID: o.req.ID, Version: o.version}
@@ -1041,7 +1053,7 @@ func (s *Store) Read(ctx *core.Context, r Request, out *Output) {
 	if err == nil {
 		ch, _ := s.ix.Chunk(pool, r.Chunk)
 		mapVer, zeros, err = s.readable(r, ch.Version)
-		if ch.ListedIn != 0 {
+		if ch.ListedIn != 0 && !r.Recover {
 			err = ErrMissing
 		}
 	}
@@ -1130,14 +1142,14 @@ func (s *Store) finishRead(ctx *core.Context, oi int32, out *Output) {
 	s.freeOp(oi)
 }
 
-// Commit lets the gated write or punch of chunk c at version v be mapped, once the chunk's earlier versions are.
-func (s *Store) Commit(ctx *core.Context, c core.ChunkID, v uint64, out *Output) {
+// Commit lets the gated write or punch of chunk c that request id ordered be mapped, once the chunk's earlier versions are.
+func (s *Store) Commit(ctx *core.Context, c core.ChunkID, id uint64, out *Output) {
 	ci, ok := s.chunkOf[c]
 	if !ok {
 		return
 	}
 	for _, oi := range s.chunks[ci].pending {
-		if o := &s.ops[oi]; o.req.Gated && o.version == v {
+		if o := &s.ops[oi]; o.req.Gated && o.req.ID == id {
 			o.committed = true
 			if s.plant.mapOnCommit && o.left == 0 && o.err == nil {
 				for j := range o.items {

@@ -117,9 +117,9 @@ func MissingEntry(pool core.PoolID, chunk core.ChunkID, version uint64, interval
 	return Entry{Kind: EntryMissing, Pool: pool, Chunk: chunk, Version: version, Interval: interval}
 }
 
-// RecoveredEntry ends a recovery write of a chunk, which version numbers: the member holds the version whole, and a missing-list entry a peering of the version's interval or earlier made for the chunk is removed.
-func RecoveredEntry(pool core.PoolID, chunk core.ChunkID, version uint64) Entry {
-	return Entry{Kind: EntryRecovered, Pool: pool, Chunk: chunk, Version: version, Interval: uint32(version >> 32)}
+// RecoveredEntry ends a recovery write of a chunk in a PG's interval: the member holds the chunk whole at version, and a missing-list entry a peering of that interval or earlier made for the chunk is removed.
+func RecoveredEntry(pool core.PoolID, chunk core.ChunkID, version uint64, interval uint32) Entry {
+	return Entry{Kind: EntryRecovered, Pool: pool, Chunk: chunk, Version: version, Interval: interval}
 }
 
 // DecisionEntry marks the decision of the peering of interval persisted for PG pg of the pool's pgs PGs, held in Owner and Length.
@@ -184,7 +184,7 @@ func (e *Entry) ofKind() Entry {
 	case EntryMissing:
 		return MissingEntry(e.Pool, e.Chunk, e.Version, e.Interval)
 	case EntryRecovered:
-		return RecoveredEntry(e.Pool, e.Chunk, e.Version)
+		return RecoveredEntry(e.Pool, e.Chunk, e.Version, e.Interval)
 	case EntryDecision:
 		return Entry{Kind: e.Kind, Pool: e.Pool, Owner: e.Owner, Length: e.Length, Interval: e.Interval}
 	}
@@ -192,13 +192,14 @@ func (e *Entry) ofKind() Entry {
 }
 
 // valid checks the fields a missing-list entry, recovery's end or decision marker carries: an
-// interval, the version's own for recovery's end, and a PG among a power of two of them.
+// interval, for recovery's end no earlier than its version's, and a PG among a power of two of
+// them.
 func (e *Entry) valid() bool {
 	switch e.Kind {
 	case EntryMissing:
 		return e.Interval != 0
 	case EntryRecovered:
-		return e.Interval != 0 && e.Interval == uint32(e.Version>>32)
+		return e.Interval != 0 && uint32(e.Version>>32) <= e.Interval
 	case EntryDecision:
 		return e.Interval != 0 && e.Length != 0 && e.Length <= 1<<31 && e.Length&(e.Length-1) == 0 && uint64(e.Owner) < e.Length
 	}

@@ -392,7 +392,6 @@ func TestWireRejectsBadFields(t *testing.T) {
 	}{{KindAck, StatusMismatch}, {KindAck, StatusMissing}, {KindReply, StatusUnfound}, {KindReadReply, StatusNoSpace}, {KindReadReply, StatusMismatch}, {KindReply, 6}, {KindAck, 255}} {
 		mustMalformed(t, "a status its reply kind does not take", AppendResponse(nil, &Response{Kind: c.k, Status: c.st, Interval: 1}), 0)
 	}
-	mustMalformed(t, "an acknowledgment of version 0", AppendResponse(nil, &Response{Kind: KindAck}), 0)
 	mustMalformed(t, "a purger's shard on a write", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1, Shard: 1}), core.BlockSize)
 	mustMalformed(t, "a purger's term on a member write", AppendUpdate(nil, &Update{Kind: KindReplicaWrite, PG: wirePG, Len: 1, Version: 1<<32 | 1, Term: 1}), core.BlockSize)
 	mustMalformed(t, "a grant neither granted nor refused", AppendGrant(nil, &Grant{Status: StatusNoSpace}), 0)
@@ -402,7 +401,6 @@ func TestWireRejectsBadFields(t *testing.T) {
 		data int
 	}{
 		"a recovery write of part of a chunk": {func(u *Update) { u.Off, u.Len = core.BlockSize, core.BlockSize }, 0},
-		"a recovery write of no version":      {func(u *Update) { u.Version = 0 }, 0},
 		"a recovery write of part of a block": {nil, 100},
 		"a recovery write past its chunk":     {nil, 2*core.BlockSize + core.ChunkSize},
 		"a purger's shard on a recovery":      {func(u *Update) { u.Shard = 1 }, 0},
