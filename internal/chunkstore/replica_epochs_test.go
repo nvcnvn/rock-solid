@@ -59,7 +59,7 @@ func TestHeldWritesAreOrderedAgainOnlyIfNoOtherPrimaryLed(t *testing.T) {
 				past = []Member{{Disk: 3}, {Disk: 1}, {Disk: 2}}
 			}
 			e.Activated, e.Interval = 1, 4
-			e.Past = []PastInterval{{Interval: 2, Members: e.Members}, {Interval: 3, Members: past}}
+			e.Past = []PastInterval{{Interval: 2, MinLive: 2, Members: e.Members}, {Interval: 3, MinLive: 2, Members: past}}
 			e.Members = []Member{{Disk: 2}, {Disk: 3}, {Disk: 1}}
 		})
 		jump.Epoch += 2

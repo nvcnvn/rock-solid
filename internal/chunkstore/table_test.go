@@ -31,24 +31,24 @@ func TestTableSize(t *testing.T) {
 	}
 }
 
-// A delta costs a 30-byte header for one pool, 34 bytes per changed rep3 entry, 20 more with its previous interval's members, 5 more during a move for the member added.
+// A delta costs a 30-byte header for one pool, 34 bytes per changed rep3 entry, 21 more with its previous interval's members, 5 more during a move for the member added.
 func TestDeltaSize(t *testing.T) {
 	prev := fullTable(2048, 3)
 	next := fullTable(2048, 3)
 	next.Epoch = 2
 	e := &next.Pools[0].PGs[7]
-	e.Past = []PastInterval{{1, e.Members}}
+	e.Past = []PastInterval{{1, 1, e.Members}}
 	e.Interval, e.Members = 2, []Member{{Disk: 0}, {Disk: 1}, {Disk: 9}}
 	next.Pools[0].PGs[8].Pinned = true
 	d := MakeDelta(&prev, &next)
-	if got := len(AppendDelta(nil, &d)); got != 30+2*34+20 {
+	if got := len(AppendDelta(nil, &d)); got != 30+2*34+21 {
 		t.Fatalf("a delta of two entries, one with a past interval: %d bytes", got)
 	}
 	moving := &next.Pools[0].PGs[9]
 	moving.Members = append(moving.Members, Member{Disk: 9})
 	moving.Members[0].Leaving, moving.Interval = true, 2
 	d = MakeDelta(&prev, &next)
-	if got := len(AppendDelta(nil, &d)); got != 30+3*34+20+5 {
+	if got := len(AppendDelta(nil, &d)); got != 30+3*34+21+5 {
 		t.Fatalf("a delta of three entries, one moving: %d bytes", got)
 	}
 }
@@ -159,14 +159,14 @@ func hugeDelta(prev *Table) Delta {
 func FuzzDecodeTable(f *testing.F) {
 	tbl := fullTable(4, 3)
 	tbl.Pools[0].PGs[1].Interval = 3
-	tbl.Pools[0].PGs[1].Past = []PastInterval{{1, tbl.Pools[0].PGs[1].Members}, {2, nil}}
+	tbl.Pools[0].PGs[1].Past = []PastInterval{{1, 1, tbl.Pools[0].PGs[1].Members}, {2, 1, nil}}
 	moving := &tbl.Pools[0].PGs[3]
 	moving.Members = append(moving.Members, Member{Disk: 7})
 	moving.Members[1].Leaving, moving.Interval = true, 2
 	f.Add(AppendTable(nil, &tbl))
 	stalled := &tbl.Pools[0].PGs[2]
 	for i := range uint32(300) {
-		stalled.Past = append(stalled.Past, PastInterval{Interval: i + 1, Members: stalled.Members})
+		stalled.Past = append(stalled.Past, PastInterval{Interval: i + 1, MinLive: 1, Members: stalled.Members})
 	}
 	stalled.Interval = 301
 	f.Add(AppendTable(nil, &tbl))

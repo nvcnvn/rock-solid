@@ -48,7 +48,7 @@ func mark(t *Table, pg core.PGID, disk uint32, m Mark) {
 // setInterval starts interval k of pg, listing the interval it ends among the past ones.
 func setInterval(t *Table, pg core.PGID, k uint32) {
 	_, e := t.entry(pg)
-	e.Past = append(e.Past, PastInterval{Interval: e.Interval, Members: slices.Clone(e.Members)})
+	e.Past = append(e.Past, PastInterval{Interval: e.Interval, MinLive: t.pool(pg.Pool).MinLive, Members: slices.Clone(e.Members)})
 	e.Interval = k
 }
 

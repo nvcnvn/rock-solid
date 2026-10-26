@@ -277,7 +277,7 @@ func (r *Replica) peerReply(ctx *core.Context, disk uint32, pg core.PGID, interv
 	} else {
 		pr.replies = append(pr.replies, rp)
 	}
-	p, e := r.table.entry(pg)
+	_, e := r.table.entry(pg)
 	answered := func(ms []Member, all bool) bool {
 		for _, m := range ms {
 			got := m.Mark == MarkUp && slices.ContainsFunc(pr.replies, func(p peerReply) bool { return p.disk == m.Disk })
@@ -295,7 +295,7 @@ func (r *Replica) peerReply(ctx *core.Context, disk uint32, pg core.PGID, interv
 	}
 	for _, past := range e.Past {
 		x := PGEntry{Members: past.Members}
-		if _, up := x.primary(); past.Interval >= e.Activated && past.Interval < e.Interval && up && x.live() >= int(p.MinLive) && !answered(past.Members, false) {
+		if _, up := x.primary(); past.Interval >= e.Activated && past.Interval < e.Interval && up && x.live() >= int(past.MinLive) && !answered(past.Members, false) {
 			return
 		}
 	}

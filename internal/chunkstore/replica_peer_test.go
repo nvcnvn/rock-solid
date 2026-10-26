@@ -107,3 +107,39 @@ func TestAPartialWriteWaitsForTheKeptVersion(t *testing.T) {
 		}
 	}
 }
+
+// Interval 2 of PG 0 runs under min_live 1 with only disk 1 live and takes a write; interval 3
+// raises min_live to 2 and moves the primary to disk 2. Peering judges interval 2 by the min_live it
+// ran under, so it waits for disk 1, crashed and then in its restart wait, and keeps 2.1 once disk 1
+// answers.
+func TestPeeringJudgesAPastIntervalByItsOwnMinLive(t *testing.T) {
+	c := newRCluster(t, rtable(4, 1))
+	ch := chunkIn(pg0, 4, 0)
+	c.publish(c.next(func(t *Table) {
+		mark(t, pg0, 2, MarkDown)
+		_, e := t.entry(pg0)
+		e.Members[2].Mark = MarkDown
+	}), true)
+	c.until(c.write(pg0, ch, 0, []byte{1}))
+	c.s.CrashRandom(0)
+	c.table = c.next(func(t *Table) {
+		setInterval(t, pg0, 3)
+		t.Pools[0].MinLive = 2
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 2}, {Disk: 3}, {Disk: 1, Mark: MarkDown}}
+	})
+	for d := 1; d <= 2; d++ {
+		c.call(d, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetTable(ctx, c.table, out) })
+	}
+	c.runFor(2 * RetryAfter)
+	if l := c.reps[1].leads[c.reps[1].lead(pg0)]; l.active {
+		t.Fatal("interval 3 activated without disk 1, the only live member of interval 2")
+	}
+	if !c.s.Node(0).Up() {
+		c.s.Restart(0)
+	}
+	c.untilActive()
+	if x, _ := c.reps[1].Store().Index().Chunk(testPool, ch); x.ListedIn != 3 || x.Listed != MakeVersion(2, 1) {
+		t.Fatalf("disk 2 lists %+v", x)
+	}
+}

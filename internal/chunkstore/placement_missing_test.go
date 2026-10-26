@@ -112,21 +112,26 @@ func TestRefillMemberCountsAtOnce(t *testing.T) {
 	}
 }
 
-// Peering waits for the only member live in an interval since the last activated one, so no refill rule replaces it, while a member it does not wait for in the same PG is refilled.
+// Peering waits for the only member live in an interval since the last activated one, so no refill rule replaces it, while a member it does not wait for in the same PG is refilled. The interval counts by the min_live it ran under: raising min_live to 2 after it keeps the member awaited.
 func TestAwaitedMemberStays(t *testing.T) {
-	l := placed(t, nodesOf(rep(2, 128), 4, 1, 2))
-	e := l.pools().PGs[0]
-	a, m := e.Members[0].Disk, e.Members[1].Disk
-	l.mark(MarkDown, a)
-	l.step(t, l.inputs(0))
-	l.now += DegradedRefillAfter / 2
-	l.mark(MarkDown, m)
-	l.step(t, l.inputs(0))
-	l.now += DegradedRefillAfter
-	l.step(t, l.inputs(0))
-	got := disksOf(&l.pools().PGs[0])
-	if slices.Contains(got, a) || !slices.Contains(got, m) {
-		t.Fatalf("PG 0 went from %v to %v: A refilled and M kept expected", e.Members, got)
+	for _, raise := range []bool{false, true} {
+		l := placed(t, nodesOf(rep(2, 128), 4, 1, 2))
+		e := l.pools().PGs[0]
+		a, m := e.Members[0].Disk, e.Members[1].Disk
+		l.mark(MarkDown, a)
+		l.step(t, l.inputs(0))
+		l.now += DegradedRefillAfter / 2
+		l.mark(MarkDown, m)
+		if raise {
+			l.pool.MinLive = 2
+		}
+		l.step(t, l.inputs(0))
+		l.now += DegradedRefillAfter
+		l.step(t, l.inputs(0))
+		got := disksOf(&l.pools().PGs[0])
+		if slices.Contains(got, a) || !slices.Contains(got, m) {
+			t.Fatalf("min_live raised %v: PG 0 went from %v to %v: A refilled and M kept expected", raise, e.Members, got)
+		}
 	}
 }
 
