@@ -1,6 +1,10 @@
 package lease
 
 import (
+	"cmp"
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -15,6 +19,18 @@ var grantor = core.NodeID{Node: 2}
 type clocks struct {
 	boot, raw         int64
 	bootRate, rawRate int64
+}
+
+// freeze stops the clocks at real for p, CLOCK_BOOTTIME advancing only p − boot of it.
+func (c *clocks) freeze(real, boot, p core.Tick) {
+	c.boot -= int64(p-boot) * c.bootRate / 1e9
+	c.raw -= int64(p) * c.rawRate / 1e9
+}
+
+// setRaw changes the raw rate at real, the clock continuous.
+func (c *clocks) setRaw(real core.Tick, rawRate int64) {
+	c.raw += int64(real)*c.rawRate/1e9 - int64(real)*rawRate/1e9
+	c.rawRate = rawRate
 }
 
 func (c clocks) at(real core.Tick) Time {
@@ -316,57 +332,184 @@ func TestUntilSetsAnotherTimerForTheRemainder(t *testing.T) {
 	}
 }
 
-// Random clock rates per node, random renewal timing and requests lost for up to 8 s at a time: no holder's lease ever ends after its grantor's, with BOOTTIME slewed up to 22.6% and raw rates within 100 ppm, or raw within 4% and BOOTTIME slewed or at the raw rate, from the first lease.
+// pairMsg is a grant or heartbeat in flight to the holder, arriving at real time at.
+type pairMsg struct {
+	at    core.Tick
+	beat  bool
+	gr    Grant
+	run   uint64
+	raw   core.Tick
+	sendT Time
+}
+
+// runPair runs a holder and a grantor for 60 s of real time with random clock rates, renewals and
+// heartbeats; in three seeds of four, requests and heartbeats lost for up to 8 s at a time, at
+// times from just after a grant, the grantor's VM stopped, the grantor rebooted, its raw rate
+// rising 0.4%, the holder suspended with CLOCK_BOOTTIME up to 1 s short, and the holder's VM
+// stopped in place for over a heartbeat while its grant has two heartbeats to run, nothing lost
+// from then until a lease after it ends (the design leaves out a stop no queued grantor message
+// shows, and lost heartbeats after one). It returns the first time the holder holds a lease while
+// its grantor neither keeps the grant nor, having rebooted while it ran, waits; or, in a quiet
+// seed with raw rates within 4%, a step check that tripped.
+func runPair(seed uint64, pl plants) error {
+	rng := core.NewRand(seed)
+	pick := func(lim int64) int64 { return int64(rng.Below(uint64(2*lim+1))) - lim }
+	rawLim := int64(100_000)
+	if rng.Chance(1, 2) {
+		rawLim = 40_000_000
+	}
+	quiet := rng.Chance(1, 4)
+	node := func() clocks {
+		c := clocks{boot: int64(rng.Below(1e12)), raw: int64(rng.Below(1e12)), rawRate: rate(pick(rawLim))}
+		c.bootRate = c.rawRate + pick(226_000_000)
+		if rng.Chance(1, 3) {
+			c.bootRate = c.rawRate
+		}
+		return c
+	}
+	hc, gc := node(), node()
+	h, g := NewHolder(cfg), NewGrantor(cfg, rng.Uint64(), gc.at(0))
+	h.plant, g.plant = pl, pl
+	holder := core.NodeID{Node: 1}
+	real := core.Tick(5_000_000)
+	id := core.RequestID(0)
+	var cutUntil, gDownUntil, hDownUntil, beatAt core.Tick
+	var msgs []pairMsg
+	covered, gStopped, hStopped, raised := false, false, false, false
+	var keepUntil core.Tick
+	lost := func() bool { return !quiet && real >= keepUntil && (real < cutUntil || rng.Chance(1, 20)) }
+	for real < 60_000_000 {
+		if !quiet && real >= cutUntil && real >= keepUntil && rng.Chance(1, 2000) {
+			cutUntil = real + core.Tick(rng.Below(8_000_000))
+		}
+		gUp, hUp := real >= gDownUntil, real >= hDownUntil
+		if gStopped && gUp {
+			gStopped = false
+			g.Resumed(rng.Uint64())
+		}
+		if !quiet && gUp && hUp {
+			switch {
+			case rng.Chance(1, 20_000):
+				p := core.Tick(100_000 + rng.Below(6_000_000))
+				gc.freeze(real, p, p)
+				gDownUntil, gStopped = real+p, true
+			case rng.Chance(1, 20_000):
+				covered = g.Live(holder, gc.at(real)) || covered && g.Waiting(gc.at(real))
+				gDownUntil = real + core.Tick(1_000_000+rng.Below(2_000_000))
+				gc = node()
+				g = NewGrantor(cfg, rng.Uint64(), gc.at(gDownUntil))
+				g.plant = pl
+				beatAt = 0
+			case !raised && rng.Chance(1, 20_000):
+				raised = true
+				gc.setRaw(real, gc.rawRate+gc.rawRate*4/1000)
+			case rng.Chance(1, 20_000):
+				p := core.Tick(100_000 + rng.Below(6_000_000))
+				hc.freeze(real, p-min(p, core.Tick(rng.Below(1_000_000))), p)
+				hDownUntil = real + p
+			case real >= cutUntil && g.Live(holder, gc.at(real+2*cfg.Heartbeat)) && rng.Chance(1, 20_000):
+				p := cfg.Heartbeat + core.Tick(100_000+rng.Below(5_000_000))
+				hc.freeze(real, 0, p)
+				hDownUntil, hStopped, keepUntil = real+p, true, real+p+cfg.Lease
+			}
+			gUp, hUp = real >= gDownUntil, real >= hDownUntil
+		}
+		gt := gc.at(real)
+		if gUp && gt.Boot >= beatAt {
+			beatAt = gt.Boot + cfg.Heartbeat
+			if g.Live(holder, gt) && !lost() {
+				msgs = append(msgs, pairMsg{at: real + core.Tick(rng.Below(20_000)), beat: true, run: g.Run(), raw: gt.Raw})
+			}
+		}
+		if hUp && hDownUntil != 0 {
+			if !hStopped {
+				h.Resumed()
+			}
+			hDownUntil, hStopped = 0, false
+		}
+		for hUp && len(msgs) > 0 && msgs[0].at <= real {
+			m := msgs[0]
+			msgs = msgs[1:]
+			var tripped bool
+			if m.beat {
+				tripped = h.OnHeartbeat(grantor, m.run, m.raw, hc.at(real))
+			} else {
+				tripped = h.OnGrant(grantor, m.gr, hc.at(real))
+				if !quiet && real >= keepUntil && rng.Chance(1, 30) {
+					cutUntil = max(cutUntil, real+core.Tick(rng.Below(8_000_000)))
+				}
+			}
+			if tripped && quiet && rawLim <= 40_000_000 {
+				return fmt.Errorf("at real %d µs the step check tripped between a pair no fault touched", real)
+			}
+		}
+		if !hUp {
+			real += core.Tick(1 + rng.Below(10_000))
+			continue
+		}
+		ht := hc.at(real)
+		booting := !gUp && !gStopped
+		if h.Valid(grantor, ht) && !(!booting && g.Live(holder, gc.at(real))) && !(covered && (booting || g.Waiting(gc.at(real)))) {
+			return fmt.Errorf("at real %d µs the holder holds a lease its grantor no longer keeps", real)
+		}
+		if h.Due(grantor, ht) && (quiet || rng.Chance(9, 10)) {
+			id++
+			h.Ask(grantor, id, ht)
+			d1, d2 := core.Tick(rng.Below(20_000)), core.Tick(rng.Below(20_000))
+			if gUp && real+d1 >= gDownUntil && !lost() {
+				if sup, ok := g.Grant(holder, 1, 1, gc.at(real+d1)); ok && !lost() {
+					msgs = append(msgs, pairMsg{at: real + d1 + d2, gr: Grant{ID: id, Run: g.Run(), Raw: gc.at(real + d1).Raw, Support: sup}})
+					slices.SortStableFunc(msgs, func(a, b pairMsg) int { return cmp.Compare(a.at, b.at) })
+				}
+			}
+		}
+		real += core.Tick(1 + rng.Below(10_000))
+	}
+	return nil
+}
+
+// Random clock rates per node, random renewal timing and heartbeats, requests and heartbeats lost for up to 8 s at a time, VM stops, reboots and suspends: no holder's lease ever ends after its grantor's count or the restart wait that covers it, with BOOTTIME slewed up to 22.6% and raw rates within 100 ppm, or raw within 4% and BOOTTIME slewed or at the raw rate, from the first lease; and no step check trips between a pair no fault touched.
 func TestNoLeaseOutlastsItsGrant(t *testing.T) {
 	seeds.Run(t, 0, 100, func(seed uint64) {
-		rng := core.NewRand(seed)
-		pick := func(lim int64) int64 { return int64(rng.Below(uint64(2*lim+1))) - lim }
-		rawLim := int64(100_000)
-		if rng.Chance(1, 2) {
-			rawLim = 40_000_000
-		}
-		node := func() clocks {
-			c := clocks{boot: int64(rng.Below(1e12)), raw: int64(rng.Below(1e12)), rawRate: rate(pick(rawLim))}
-			c.bootRate = c.rawRate + pick(226_000_000)
-			if rng.Chance(1, 3) {
-				c.bootRate = c.rawRate
-			}
-			return c
-		}
-		hc, gc := node(), node()
-		h, g := NewHolder(cfg), NewGrantor(cfg, rng.Uint64(), gc.at(0))
-		holder := core.NodeID{Node: 1}
-		real := core.Tick(5_000_000)
-		id := core.RequestID(0)
-		var cutUntil core.Tick
-		for real < 60_000_000 {
-			if real >= cutUntil && rng.Chance(1, 2000) {
-				cutUntil = real + core.Tick(rng.Below(8_000_000))
-			}
-			ht := hc.at(real)
-			if h.Valid(grantor, ht) && !g.Live(holder, gc.at(real)) {
-				t.Fatalf("seed %d: at real %d µs the holder holds a lease its grantor no longer keeps", seed, real)
-			}
-			if h.Due(grantor, ht) && rng.Chance(9, 10) {
-				id++
-				h.Ask(grantor, id, ht)
-				d1, d2 := core.Tick(rng.Below(20_000)), core.Tick(rng.Below(20_000))
-				if real < cutUntil {
-					real += core.Tick(1 + rng.Below(10_000))
-					continue
-				}
-				sup, ok := g.Grant(holder, 1, 1, gc.at(real+d1))
-				if ok && rng.Chance(19, 20) {
-					h.OnGrant(grantor, Grant{ID: id, Run: g.Run(), Raw: gc.at(real + d1).Raw, Support: sup}, hc.at(real+d1+d2))
-				}
-				for at := real; at < real+d1+d2; at += 1_000 {
-					if h.Valid(grantor, hc.at(at)) && !g.Live(holder, gc.at(at)) {
-						t.Fatalf("seed %d: at real %d µs, inside a round trip, the holder outlasts its grant", seed, at)
-					}
-				}
-				real += d1 + d2
-			}
-			real += core.Tick(1 + rng.Below(10_000))
+		if err := runPair(seed, plants{}); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
 		}
 	})
+}
+
+// Each planted bug, the epoch change model's counterexample of the same name, breaks the pair run
+// at a seed of the first 500 (of 5,000 for the exact margin, which needs a rate rise after the
+// bound and a partition after a grant): a lease outlasts its grant with the holder ending it on the
+// slower of its clocks (68 of 500), the grantor ending it on the faster (96), a lease before the
+// first bound (1), that with the step check at 1 + lease_drift / 2 (14), widening only past
+// 1 + 2 lease_drift (20), the margin max(lease_drift, 1 − 1/B) (3 of 5,000), no new window at a new
+// run ID (12), no end of leases on Resumed (8), no step check (55), one on grants only (56) and no
+// restart wait (96); the step check trips between a pair no fault touched at 1 + lease_drift / 2
+// (23) and against a grant that gave no lease (1).
+func TestPlantedLeaseBugsBreakThePair(t *testing.T) {
+	const outlasts, trips = "no longer keeps", "tripped"
+	for _, p := range []struct {
+		name string
+		seed uint64
+		want string
+		pl   plants
+	}{
+		{"holder on the slower clock", 6, outlasts, plants{slowerClock: true}},
+		{"grantor on the faster clock", 8, outlasts, plants{fasterClock: true}},
+		{"lease before the bound", 21, outlasts, plants{beforeBound: true}},
+		{"lease before the bound, half-drift step check", 6, outlasts, plants{beforeBound: true, halfStep: true}},
+		{"widened only past twice the drift", 9, outlasts, plants{widenLate: true}},
+		{"exact margin", 1056, outlasts, plants{marginExact: true}},
+		{"no window per run", 6, outlasts, plants{noRunWindow: true}},
+		{"no end on Resumed", 28, outlasts, plants{noResumedEnd: true}},
+		{"no step check", 1, outlasts, plants{noStepCheck: true}},
+		{"step check on grants only", 1, outlasts, plants{stepOnGrantsOnly: true}},
+		{"no restart wait", 0, outlasts, plants{noRestartWait: true}},
+		{"half-drift step check", 3, trips, plants{halfStep: true}},
+		{"step check before the bound", 482, trips, plants{checkBeforeBound: true}},
+	} {
+		if err := runPair(p.seed, p.pl); err == nil || !strings.Contains(err.Error(), p.want) {
+			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)
+		}
+	}
 }
