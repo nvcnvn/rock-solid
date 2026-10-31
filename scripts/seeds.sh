@@ -32,6 +32,8 @@ internal/chunkstore TestPlacementKeepsItsRules 1000
 internal/chunkstore TestSubBlockWritesMatchTheByteOracle 500
 internal/chunkstore TestReplicatedWritesSurviveFaults 1000
 internal/chunkstore TestPeeringKeepsAcknowledgedWritesAcrossPrimaries 500
+internal/chunkstore TestNoPGServesReadsFromTwoPrimaries 500
+internal/chunkstore TestWritesPassTheWriteLimitOnlyWhereAdmitted 200
 internal/chunkstore TestTheDetectorMarksAFailedDiskDown 500
 "
 

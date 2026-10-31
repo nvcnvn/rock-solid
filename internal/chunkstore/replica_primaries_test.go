@@ -17,16 +17,20 @@ const (
 	invAckedKept   = "no acknowledged version is ever dropped"
 	invOneVersion  = "no two members hold different data under one version"
 	invKeptWritten = "a member listing nothing maps the kept writes applied in version order"
+	invRemoval     = "no move lowers the members of a PG holding an acknowledged version below its width"
 )
 
-// authority stands in for the control plane: it knows each disk by the log ID it reports, computes every table with Next from the disks' marks and operators' edits, and records the activations and asks the replicas report.
+// authority stands in for the control plane: it knows each disk by the log ID it reports, computes every table with Next from the disks' marks and drains and operators' edits, and records the activations and asks the replicas report; with moves it makes a balance move per table and hands Next every recovered report again each time, as reports delivered late or twice.
 type authority struct {
 	rec        DiskRecord
 	pool       Pool
 	down       map[uint32]core.Tick
+	drain      map[uint32]bool
 	edits      []Edit
 	asks       []PGInterval
 	acts, seen int
+	moves      bool
+	plant      placementPlants
 	// det, when set, gives the disks' marks in place of down.
 	det *Detector
 	// keepID plants the bug of a reformatted disk keeping its old disk ID.
@@ -43,6 +47,13 @@ func (a *authority) inputs(c *rcluster) *Inputs {
 		in.Asks = append(in.Asks, PGInterval{x.PG, x.Interval})
 	}
 	a.acts, a.seen = len(c.activations), len(c.asks)
+	if a.moves {
+		in.Moves = 1
+		for _, x := range c.recovered {
+			in.Recovered = append(in.Recovered, PGInterval{x.PG, x.Interval})
+		}
+	}
+	in.plant = a.plant
 	return in
 }
 
@@ -53,7 +64,7 @@ func (a *authority) pools() []PoolInputs {
 		if d.Gone {
 			continue
 		}
-		dk := Disk{ID: d.ID, Node: d.Node, Blocks: tb(1)}
+		dk := Disk{ID: d.ID, Node: d.Node, Blocks: tb(1), Drain: a.drain[d.ID]}
 		if since, ok := a.down[d.ID]; ok {
 			dk.Mark, dk.DownSince = MarkDown, since
 		}
@@ -65,7 +76,7 @@ func (a *authority) pools() []PoolInputs {
 	return []PoolInputs{{ID: testPool, Pool: a.pool, Disks: disks}}
 }
 
-// primaryRun is clients pipelining sub-block writes to two chunks of PG 0 while the authority moves the PG's primary, marking it down and the next member it picks up, marks replicas down and up, restarts the primary and formats a member's disk again, after which the PG peers. With returns, a member marked up again may lead though it missed writes; without, the primary only moves to members that stayed live throughout (sub-block spike M6). With duringPeering, changes also land while the PG peers, at a tenth of the rate.
+// primaryRun is clients pipelining sub-block writes to two chunks of PG 0 while the authority moves the PG's primary, marking it down and the next member it picks up, marks replicas down and up, restarts the primary, formats a member's disk again and drains a disk and ends the drain, which moves members to another disk and back, after which the PG peers. With returns, a member marked up again may lead though it missed writes; without, the primary only moves to members that stayed live throughout (sub-block spike M6). With duringPeering, changes also land while the PG peers, at a tenth of the rate.
 type primaryRun struct {
 	c             *rcluster
 	a             *authority
@@ -73,6 +84,7 @@ type primaryRun struct {
 	chunks        [2]core.ChunkID
 	returns       bool
 	duringPeering bool
+	ended         bool
 	ops           map[core.RequestID]faultOp
 	// version is each write's version once a primary ordered it, kept each activated interval's decision, and tainted the disks that may lack writes.
 	version map[core.RequestID]uint64
@@ -154,11 +166,6 @@ func (r *primaryRun) fail(inv string, err error) {
 	}
 }
 
-// failed is the first invariant the run's passes found broken.
-func (r *primaryRun) failed() error {
-	return cmp.Or(r.errs[invAckedWhole], r.errs[invOneVersion])
-}
-
 // publish computes the next table and hands it to every running replica, with the address of every disk ID, if it changes any entry.
 func (r *primaryRun) publish() {
 	c := r.c
@@ -166,6 +173,7 @@ func (r *primaryRun) publish() {
 	if d := MakeDelta(&c.table, &next); len(d.Entries) == 0 {
 		return
 	}
+	r.removal(&next)
 	c.table = next
 	for n := range c.reps {
 		if !c.s.Node(uint32(n)).Up() {
@@ -177,6 +185,35 @@ func (r *primaryRun) publish() {
 			}
 			rep.SetTable(ctx, next, out)
 		})
+	}
+}
+
+// removal checks a table that removes PG 0's leaving member, its disk still in the pool: every other member holds every acknowledged version and lists nothing of its chunk, but one whose store is starting, which it cannot see.
+func (r *primaryRun) removal(next *Table) {
+	c := r.c
+	ms := r.members()
+	j := slices.IndexFunc(ms, func(m Member) bool { return m.Leaving })
+	_, e := next.entry(pg0)
+	if j < 0 || slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == ms[j].Disk }) ||
+		!slices.ContainsFunc(r.a.rec.Disks(), func(d RecordedDisk) bool { return d.ID == ms[j].Disk && !d.Gone }) {
+		return
+	}
+	for id := range c.nextID + 1 {
+		rp, ok := c.cl.replies[id]
+		if _, op := r.ops[id]; !ok || !op || rp.Status != StatusOK {
+			continue
+		}
+		ch := r.ops[id].c
+		for _, m := range e.Members {
+			n := c.node(m.Disk)
+			if m.Leaving || n >= 0 && c.reps[n].Store().Index() == nil {
+				continue
+			}
+			if x, _ := c.reps[max(n, 0)].Store().Index().Chunk(testPool, ch); n < 0 || x.ListedIn != 0 || x.Version < rp.Version {
+				r.fail(invRemoval, fmt.Errorf("interval %d removes disk %d while disk %d lacks write %d's %#x of %v", e.Interval, ms[j].Disk, m.Disk, id, rp.Version, ch))
+				return
+			}
+		}
 	}
 }
 
@@ -282,10 +319,11 @@ func (r *primaryRun) inject() {
 	}
 	primary := ms[slices.IndexFunc(ms, func(m Member) bool { return m.Mark == MarkUp })].Disk
 	all := !slices.ContainsFunc(ms, func(m Member) bool { return !r.running(m) })
-	switch r.rng.Below(5) {
+	moving := slices.ContainsFunc(ms, func(m Member) bool { return m.Leaving })
+	switch r.rng.Below(6) {
 	case 0:
 		next := slices.IndexFunc(ms, func(m Member) bool { return m.Disk != primary && (r.returns || !r.tainted[m.Disk]) })
-		if !all || next < 0 {
+		if !all || moving || next < 0 {
 			return
 		}
 		a.down[primary], r.tainted[primary] = now, true
@@ -304,7 +342,7 @@ func (r *primaryRun) inject() {
 		}
 	case 2:
 		for _, m := range ms {
-			if n := c.node(m.Disk); m.Mark == MarkDown && c.s.Node(uint32(n)).Up() {
+			if n := c.node(m.Disk); !moving && m.Mark == MarkDown && c.s.Node(uint32(n)).Up() {
 				delete(a.down, m.Disk)
 				if r.returns && r.rng.Chance(1, 2) {
 					a.edits = append(a.edits, Edit{PG: pg0, Disks: r.order(m.Disk, 0)})
@@ -327,6 +365,12 @@ func (r *primaryRun) inject() {
 		n := c.node(m)
 		c.logs[n], c.reformat[n] = 0xf0f0+uint64(n), true
 		c.s.CrashRandom(uint32(n))
+	case 5:
+		if len(a.drain) > 0 {
+			clear(a.drain)
+		} else if d := a.rec.Disks()[r.rng.Below(uint64(len(a.rec.Disks())))]; all && !d.Gone {
+			a.drain[d.ID] = true
+		}
 	}
 	r.publish()
 }
@@ -374,7 +418,8 @@ func (r *primaryRun) decision(ch core.ChunkID, i uint32) (uint64, bool) {
 }
 
 // check holds the run's end against its oracle: every acknowledged version kept, and every member that runs, is up and lists nothing mapping the kept writes applied in version order, and every two members mapping a block at one version holding the same bytes.
-func (r *primaryRun) check() error {
+// check checks the run's end: no acknowledged version dropped, and every member listing nothing maps the kept writes, holding no version unlike another's.
+func (r *primaryRun) check() {
 	c := r.c
 	type keptOp struct {
 		version uint64
@@ -388,7 +433,7 @@ func (r *primaryRun) check() error {
 		v, ok := r.keptVersion(id)
 		if rp, acked := c.cl.replies[id]; acked && rp.Status == StatusOK {
 			if k, decided := r.decision(r.ops[id].c, intervalOf(v)); decided && v > k {
-				return fmt.Errorf("%s: write %d acknowledged as %#x, interval %d kept %#x", invAckedKept, id, v, intervalOf(v), k)
+				r.fail(invAckedKept, fmt.Errorf("write %d acknowledged as %#x, interval %d kept %#x", id, v, intervalOf(v), k))
 			}
 		}
 		if ok {
@@ -407,8 +452,8 @@ func (r *primaryRun) check() error {
 			}
 		}
 	}
-	if err := r.errs[invOneVersion]; err != nil {
-		return err
+	if r.errs[invOneVersion] != nil {
+		return
 	}
 	for _, ch := range r.chunks {
 		want := make([]byte, 2*faultSpan)
@@ -432,12 +477,47 @@ func (r *primaryRun) check() error {
 					for got[i] == w[i] {
 						i++
 					}
-					return fmt.Errorf("%s: disk %d maps byte %d of block %d of %v as %#x, the kept writes give %#x", invKeptWritten, m.Disk, i, b, ch, got[i], w[i])
+					r.fail(invKeptWritten, fmt.Errorf("disk %d maps byte %d of block %d of %v as %#x, the kept writes give %#x", m.Disk, i, b, ch, got[i], w[i]))
+					return
 				}
 			}
 		}
 	}
-	return nil
+}
+
+// recover steps the cluster, the authority tending, until no running member lists a chunk but an unfound one, for up to 30 s: a member that still does fails the copy count.
+func (r *primaryRun) recover() {
+	c := r.c
+	end := c.s.Time() + 30_000_000
+	for {
+		var left error
+		p := c.reps[c.node(r.members()[0].Disk)]
+		i := p.lead(pg0)
+		for _, ch := range r.chunks {
+			if i >= 0 && p.leads[i].isUnfound(ch) {
+				continue
+			}
+			for _, m := range r.members() {
+				if r.running(m) {
+					if x, _ := c.reps[c.node(m.Disk)].Store().Index().Chunk(testPool, ch); x.ListedIn != 0 && left == nil {
+						left = fmt.Errorf("disk %d lists %+v of %v", m.Disk, x, ch)
+					}
+				}
+			}
+		}
+		if left == nil {
+			return
+		}
+		if c.s.Time() >= end {
+			r.fail(invRecovered, left)
+			return
+		}
+		r.tend()
+		if !c.step() {
+			r.fail(invRecovered, left)
+			return
+		}
+	}
 }
 
 // settled steps the cluster, the authority answering asks and recording activations, until every led PG is active and nothing but periodic timers is pending.
@@ -463,10 +543,20 @@ func (r *primaryRun) tend() {
 	}
 }
 
-func runPrimaries(t *testing.T, seed uint64, edit func(r *primaryRun)) error {
+// peerPlant is a bug planted in the primary-change run and the invariant it must break.
+type peerPlant struct {
+	inv string
+	set func(r *primaryRun)
+}
+
+// runPrimaries runs the primary-change workload, failing t on a broken invariant registered with the
+// simulator and returning a broken end check; with a plant, it checks only the plant's invariant and
+// returns its first violation.
+func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	s := sim.New(seed, sim.DefaultSettings())
-	a := &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4}, down: map[uint32]core.Tick{}}
-	for n := range 3 {
+	a := &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4},
+		down: map[uint32]core.Tick{}, drain: map[uint32]bool{}, moves: true}
+	for n := range 4 {
 		if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n)); err != nil {
 			t.Fatal(err)
 		}
@@ -478,23 +568,30 @@ func runPrimaries(t *testing.T, seed uint64, edit func(r *primaryRun)) error {
 		version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, tainted: map[uint32]bool{},
 		sent: map[[2]uint64]Update{}, acked: map[blockVersion][]byte{}, errs: map[string]error{}}
 	r.returns = r.rng.Chance(1, 2)
-	for _, inv := range []string{invAckedWhole, invOneVersion} {
+	for _, inv := range []string{invAckedWhole, invOneVersion, invRemoval, invAckedKept, invKeptWritten, invRecovered} {
 		c.inv.Register(inv, func() error { return r.errs[inv] })
-		if edit != nil {
-			// A planted bug's run returns the invariant it broke, through failed, rather than failing the test.
-			c.inv.Off(inv)
-		}
 	}
-	// Drawn from the seed rather than r.rng, so that the other seeds run as they did before it existed.
+	c.inv.Register(invActivates, func() error {
+		if !r.ended {
+			return nil
+		}
+		return c.inactive()
+	})
+	// Drawn from the seed so other draws keep their order.
 	r.duringPeering = seed%4 == 3
-	if edit != nil {
-		edit(r)
+	if plant != nil {
+		plant.set(r)
 	}
 	for n := range c.reps {
 		c.reps[n].plant, c.reps[n].Store().plant = c.replicaPlants, c.storePlants
 	}
 	c.onPass = r.pass
 	c.onFormat = r.formatted
+	watchEpochs(c, &a.rec)
+	if plant != nil {
+		c.planted = true
+		c.inv.Only(plant.inv)
+	}
 	for range 2 {
 		pc := &primaryClient{r: r, rng: r.rng.Fork(), left: 48, pipe: 8, at: map[core.RequestID]core.Tick{}}
 		r.clients = append(r.clients, pc)
@@ -508,8 +605,8 @@ func runPrimaries(t *testing.T, seed uint64, edit func(r *primaryRun)) error {
 		if !busy() && c.quiet() || !c.step() {
 			break
 		}
-		if err := r.failed(); err != nil {
-			return err
+		if c.found != nil {
+			return c.found
 		}
 		if busy() && r.rng.Chance(1, 40) && (c.active() || r.duringPeering && r.rng.Chance(1, 10)) && !slices.ContainsFunc(r.members(), func(m Member) bool { return m.Mark == MarkUp && !r.running(m) }) {
 			r.inject()
@@ -524,13 +621,16 @@ func runPrimaries(t *testing.T, seed uint64, edit func(r *primaryRun)) error {
 	a.asks = append(a.asks, PGInterval{pg0, e.Interval})
 	r.publish()
 	r.settled()
-	if err := r.failed(); err != nil {
+	r.recover()
+	r.check()
+	r.ended = true
+	if err := c.inv.Check(); err != nil {
 		return err
 	}
-	return r.check()
+	return c.found
 }
 
-// Sub-block spike M6 on replicas: two clients pipeline 8 writes each to two chunks while the authority moves the PG's primary, to members that stayed live throughout or, in half the seeds, to members marked up again that missed writes, marks replicas down and up, restarts the primary and formats a member again. Every acknowledged version is kept, members hold the same bytes under a version, and every member that lists nothing maps the kept writes applied in version order.
+// Sub-block spike M6 on replicas: two clients pipeline 8 writes each to two chunks while the authority moves the PG's primary, to members that stayed live throughout or, in half the seeds, to members marked up again that missed writes, marks replicas down and up, restarts the primary, formats a member again and drains a disk of four and ends the drain, moving members. Every acknowledged version is kept, members hold the same bytes under a version, every member that lists nothing maps the kept writes applied in version order, and no move removes a leaving member while another member lacks an acknowledged version.
 func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 	seeds.Run(t, 0, 10, func(seed uint64) {
 		if err := runPrimaries(t, seed, nil); err != nil {
@@ -539,20 +639,25 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks the run's oracle at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 2 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 58 of 500), a restarted primary peering in its old interval (52 of 500) and a disk formatted again keeping its old disk ID (72 of 500).
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 4 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 47 of 500), a restarted primary peering in its old interval (32 of 500), a disk formatted again keeping its old disk ID (211 of 500), the epoch change model's neg-compare-table-epochs (497 of 500) and neg-compare-member-lists (303 of 500), which breaks property 3 first: a member that compares member lists logs the old primary's write tagged with an interval its table left; and the model's neg-remove-before-recovered (123 of 500), here a leaving member removed once its PG's interval activates, and neg-accept-old-report (145 of 500), each removing a moved member while its replacement lacks acknowledged writes; and neg-report-before-activate (500 of 500), a primary that reports its interval activated once it decides, before it activates; and a primary that recovers only its own copies (434 of 500), whose members, those a drain refilled among them, never reach the copy count.
 func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	for _, p := range []struct {
-		name  string
-		seed  uint64
-		inv   string
-		plant func(r *primaryRun)
+		name string
+		seed uint64
+		peerPlant
 	}{
-		{"M7", 37, invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }},
-		{"M8", 6, invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking = true }},
-		{"restart in the old interval", 10, invOneVersion, func(r *primaryRun) { r.c.replicaPlants.peerInOldInterval = true }},
-		{"old disk ID kept", 0, invAckedKept, func(r *primaryRun) { r.a.keepID = true }},
+		{"M7", 38, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }}},
+		{"M8", 37, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking = true }}},
+		{"restart in the old interval", 6, peerPlant{invOneVersion, func(r *primaryRun) { r.c.replicaPlants.peerInOldInterval = true }}},
+		{"old disk ID kept", 2, peerPlant{invDiskIDs, func(r *primaryRun) { r.a.keepID = true }}},
+		{"accepted only in the send epoch", 0, peerPlant{invSameInterval, func(r *primaryRun) { r.c.replicaPlants.sendEpoch = true }}},
+		{"member lists compared", 1, peerPlant{invLateLog, func(r *primaryRun) { r.c.replicaPlants.sameMembers = true }}},
+		{"removed before recovered", 3, peerPlant{invRemoval, func(r *primaryRun) { r.a.plant.removeOnActivation = true }}},
+		{"old recovered report", 3, peerPlant{invRemoval, func(r *primaryRun) { r.a.plant.oldReport = true }}},
+		{"activation reported once decided", 0, peerPlant{invActivations, func(r *primaryRun) { r.c.replicaPlants.reportDecided = true }}},
+		{"members never recovered", 1, peerPlant{invRecovered, func(r *primaryRun) { r.c.replicaPlants.recoverSelfOnly = true }}},
 	} {
-		if err := runPrimaries(t, p.seed, p.plant); err == nil || !strings.HasPrefix(err.Error(), p.inv) {
+		if err := runPrimaries(t, p.seed, &p.peerPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)
 		}
 	}

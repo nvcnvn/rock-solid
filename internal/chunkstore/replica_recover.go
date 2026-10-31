@@ -52,7 +52,7 @@ func (r *Replica) planRecovery(l *lead, pr *peering, e *PGEntry) {
 	}
 	for _, rp := range pr.replies {
 		s := slot(rp.disk)
-		if s < 0 || s >= maxMembers || !upIn(e, rp.disk, e.Interval) {
+		if s < 0 || s >= maxMembers || !upIn(e, rp.disk, e.Interval) || r.plant.recoverSelfOnly && rp.disk != r.cfg.Disk {
 			continue
 		}
 		for _, cv := range rp.list {
@@ -400,10 +400,13 @@ func (r *Replica) releaseHeld(ctx *core.Context, i int, c core.ChunkID, out *Rep
 		r.released = append(r.released, h)
 		return true
 	})
+	was := r.replaying
+	r.replaying = true
 	for _, h := range r.released {
 		ev := core.Event{Kind: core.EvNetRecv, Peer: h.peer, Msg: h.msg}
 		r.recv(ctx, &ev, out)
 	}
+	r.replaying = was
 }
 
 // recoverReply takes a member's answer to a recovery read, reporting whether it was one; it takes

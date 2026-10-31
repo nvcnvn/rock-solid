@@ -1,13 +1,17 @@
 package chunkstore
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
+
+const invPoolFigures = "each pool's figures keep their bounds as its table changes"
 
 // randomLayout is the Testing strategy matrix: 3 or 5 nodes of 1 or 4 disks of mixed sizes, some holding another pool's data, under none, rep2 or rep3.
 func randomLayout(r *core.Rand) *layout {
@@ -39,6 +43,7 @@ type history struct {
 	complete    [][]uint32
 	recoverable [][]PastInterval
 	stats       *placementStats
+	inv         sim.Invariants
 }
 
 type diskAt struct {
@@ -47,8 +52,8 @@ type diskAt struct {
 }
 
 type placementStats struct {
-	runs, moves, bound, computations int
-	worstReach                       float64
+	runs, moves, bound, computations, figures, partial int
+	worstReach                                         float64
 }
 
 func TestPlacementKeepsItsRules(t *testing.T) {
@@ -58,8 +63,8 @@ func TestPlacementKeepsItsRules(t *testing.T) {
 	}
 	stats := &placementStats{}
 	seeds.Run(t, 0, n, func(seed uint64) { placementRun(t, seed, stats) })
-	t.Logf("%d seeds: a disk added moved %d members against a lower bound of %d; available + held at worst %.2f%% under balanced; at most %d computations to settle",
-		stats.runs, stats.moves, stats.bound, 100*stats.worstReach, stats.computations)
+	t.Logf("%d seeds: a disk added moved %d members against a lower bound of %d; available + held at worst %.2f%% under balanced; at most %d computations to settle; pool figures checked on %d tables, %d partial tables skipped",
+		stats.runs, stats.moves, stats.bound, 100*stats.worstReach, stats.computations, stats.figures, stats.partial)
 	// A single seed, or a few, can sit well above their bound; the 5% is a mean over at least 200 runs.
 	if stats.runs >= 200 && 100*stats.moves > 105*stats.bound {
 		t.Fatalf("disk additions over %d seeds moved %d members, over 5%% above the lower bound %d", stats.runs, stats.moves, stats.bound)
@@ -73,6 +78,27 @@ func placementRun(t *testing.T, seed uint64, stats *placementStats) {
 	r := core.NewRand(seed)
 	l := randomLayout(r)
 	h := &history{stats: stats}
+	h.inv.Register(invPoolFigures, func() error {
+		// The bounds are claims about a table that places every PG at the pool's width on its
+		// disks: a member left on a disk that left the pool, or short of a raised width, lets
+		// available, taken over the disks the table names, pass balanced.
+		slots := 0
+		for _, n := range l.loads() {
+			slots += int(n)
+		}
+		if slots != int(l.pool.PGCount)*l.pool.width() {
+			stats.partial++
+			return nil
+		}
+		stats.figures++
+		f := l.figures()
+		if err := figureBounds(l.pool, &f); err != nil {
+			return err
+		}
+		return worstLoss(l.pool, func(id uint32) uint32 {
+			return l.disks[slices.IndexFunc(l.disks, func(d Disk) bool { return d.ID == id })].Node
+		}, &f)
+	})
 	h.next(t, l, l.inputs(allMoves))
 	for range 30 {
 		h.next(t, l, h.event(r, l))
@@ -187,7 +213,7 @@ func (h *history) next(t *testing.T, l *layout, in *Inputs) {
 	}
 	prev := l.table
 	l.step(t, in)
-	if err := h.check(&prev, l, in); err != nil {
+	if err := cmp.Or(h.check(&prev, l, in), h.inv.Check()); err != nil {
 		t.Fatalf("table %d: %v", l.table.Epoch, err)
 	}
 }
@@ -382,7 +408,7 @@ func (h *history) settle(t *testing.T, l *layout) int {
 		l.hold()
 		prev, in := l.table, l.reportAll(allMoves)
 		n := l.step(t, in)
-		if err := h.check(&prev, l, in); err != nil {
+		if err := cmp.Or(h.check(&prev, l, in), h.inv.Check()); err != nil {
 			t.Fatalf("table %d: %v", l.table.Epoch, err)
 		}
 		moves += n

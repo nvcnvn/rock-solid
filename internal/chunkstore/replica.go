@@ -231,8 +231,10 @@ type Replica struct {
 	// recs is the recoveries under way, released the held writes a recovery lets go.
 	recs     []recovery
 	released []heldMsg
-	waits    bool
-	plant    replicaPlants
+	// replaying is set while held writes are taken again, for the fenceOnArrival plant.
+	replaying bool
+	waits     bool
+	plant     replicaPlants
 	// disks is each disk's size and the live blocks it last reported, by disk ID; pools the pools'
 	// settings and outstanding grants; slots each pool's member slots on each disk in the table.
 	disks  []diskInfo
@@ -364,6 +366,40 @@ type replicaPlants struct {
 	// (the epoch change model's RecoveryCoversAtRead).
 	noRecovery  bool
 	coverAtRead bool
+	// neverAsk has a restarted primary ask for no new interval; sendEpoch has a member accept a
+	// write only under the table epoch it was sent in; sameMembers has a member accept a write
+	// tagged with an earlier interval whose members' disks are those of its current one.
+	neverAsk    bool
+	sendEpoch   bool
+	sameMembers bool
+	// stopPreviousOnly has peering reach only the interval just before its own, and lastActivatedOnly
+	// only the last activated one; ownInterval decides
+	// each version by the members of its own interval alone; activateEarly activates before every
+	// member persisted its list; reportDecided reports an activation once the decision is made;
+	// relistNever leaves off the missing list a member that lists a chunk but holds the kept
+	// version as its newest, which with the store's clearListed has a later peering clear the
+	// entry before recovery did.
+	stopPreviousOnly  bool
+	lastActivatedOnly bool
+	ownInterval       bool
+	activateEarly     bool
+	reportDecided     bool
+	relistNever       bool
+	// fenceOnArrival refuses an older incarnation's write when it reaches the primary, not when the
+	// store orders it; reorderAfterOther keeps a lead's term across intervals another primary led,
+	// so its held writes are ordered again.
+	fenceOnArrival    bool
+	reorderAfterOther bool
+	// admitPastLimit orders a plain write that adds live data past a member's write_limit.
+	admitPastLimit bool
+	// commitOnOwnLog commits a version once the primary's own log holds it, before its members do.
+	commitOnOwnLog bool
+	// recoverSelfOnly has the primary recover only its own copies, never a member's.
+	recoverSelfOnly bool
+	// readBelowMinLive serves reads in an interval with fewer than min_live live members;
+	// freshGrantNoCheck grants a lease afresh to a holder that reported an older table.
+	readBelowMinLive  bool
+	freshGrantNoCheck bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.
@@ -487,6 +523,8 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 					l = old
 				case r.keptPrimary(e, old.interval):
 					l.since, l.serving, l.kept = old.since, old.serving, old.kept
+				case r.plant.reorderAfterOther:
+					l.since = old.since
 				}
 			}
 			kept = append(kept, l)
@@ -573,6 +611,8 @@ func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out
 	r.leads[i].active, r.leads[i].serving, r.leads[i].peer = true, true, nil
 	held := r.leads[i].held
 	r.leads[i].held = nil
+	was := r.replaying
+	r.replaying = true
 	for _, h := range held {
 		if h.hold < r.leads[i].since {
 			r.refuseHeld(ctx, h, out)
@@ -581,6 +621,7 @@ func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out
 		ev := core.Event{Kind: core.EvNetRecv, Peer: h.peer, Msg: h.msg}
 		r.recv(ctx, &ev, out)
 	}
+	r.replaying = was
 	r.drain(ctx, out)
 	return nil
 }
@@ -813,6 +854,11 @@ func (r *Replica) park(ev *core.Event, epoch uint64, out *ReplicaOutput) {
 
 // clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered. A partial-block write to a chunk whose kept version the primary lacks is held until recovery brings it, up to maxHeld writes held, and answered unfound when no member can be its source.
 func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) {
+	if r.plant.fenceOnArrival && !r.replaying && u.Session != 0 && u.Incarnation < r.st.sessions[u.Session] {
+		freeBuf(ctx, ev.Msg.Buf)
+		r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusRefused}, out)
+		return
+	}
 	r.st.SeeIncarnation(u.Session, u.Incarnation)
 	p, e := r.table.entry(u.PG.PG)
 	i := r.lead(u.PG.PG)
@@ -838,7 +884,7 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		}
 		l.held = append(l.held, heldMsg{peer: ev.Peer, msg: ev.Msg, hold: l.interval})
 		return
-	case u.Kind == KindWrite && !u.Granted && r.full(ctx, u.PG.PG, p, e) && !r.st.Overwrites(u.Chunk, u.Off, u.Len, u.Snapshot):
+	case u.Kind == KindWrite && !u.Granted && !r.plant.admitPastLimit && r.full(ctx, u.PG.PG, p, e) && !r.st.Overwrites(u.Chunk, u.Off, u.Len, u.Snapshot):
 		freeBuf(ctx, ev.Msg.Buf)
 		r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusNoSpace}, out)
 		return
@@ -857,6 +903,9 @@ func (r *Replica) order(ctx *core.Context, ev *core.Event, u *Update, interval u
 	if l := r.lead(u.PG.PG); l >= 0 {
 		req.Lacking = r.leads[l].lacks(u.Chunk)
 	}
+	if r.plant.fenceOnArrival {
+		req.Session = 0
+	}
 	r.vers = append(r.vers, version{req: id, client: ev.Peer, msgID: u.ID, epoch: r.table.Epoch, interval: interval, u: *u})
 	if u.Kind == KindWrite {
 		r.st.Write(ctx, req, &r.sout)
@@ -874,7 +923,7 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		return
 	}
 	recover := u.Kind == KindRecover
-	refuse := e == nil || u.PG.Interval != e.Interval || !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) ||
+	refuse := e == nil || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) ||
 		slices.ContainsFunc(r.failed, func(f failedVer) bool {
 			return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version <= u.Version || recover)
 		})
@@ -911,6 +960,15 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	} else {
 		r.st.Punch(ctx, req, &r.sout)
 	}
+}
+
+// sameMembersAt reports, under the sameMembers plant, whether e's past interval k had the disks of its current members, in order.
+func (r *Replica) sameMembersAt(e *PGEntry, k uint32) bool {
+	if !r.plant.sameMembers {
+		return false
+	}
+	i := slices.IndexFunc(e.Past, func(p PastInterval) bool { return p.Interval == k })
+	return i >= 0 && slices.EqualFunc(e.Past[i].Members, e.Members, func(a, b Member) bool { return a.Disk == b.Disk })
 }
 
 // baseFetch is a base block the primary asks another member for, tried from member tried of the PG, under read ID rid, of the loop at asked.
@@ -1187,7 +1245,7 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 
 func (r *Replica) tryCommit(ctx *core.Context, i int) {
 	v := &r.vers[i]
-	if v.done || !v.logged || v.commit || v.acked != 1<<v.n-1 {
+	if v.done || !v.logged || v.commit || v.acked != 1<<v.n-1 && !r.plant.commitOnOwnLog {
 		return
 	}
 	v.commit = true
@@ -1345,7 +1403,7 @@ func (r *Replica) counterSpent(ctx *core.Context, i int, buf core.IOBuf, out *Re
 func (r *Replica) ask(out *ReplicaOutput) {
 	for i := range r.leads {
 		l := &r.leads[i]
-		if !l.asking || l.asked || slices.ContainsFunc(r.vers, func(v version) bool { return v.u.PG.PG == l.pg && !v.done && !v.commit }) {
+		if !l.asking || l.asked || r.plant.neverAsk && r.cfg.Restarted || slices.ContainsFunc(r.vers, func(v version) bool { return v.u.PG.PG == l.pg && !v.done && !v.commit }) {
 			continue
 		}
 		l.asked = true

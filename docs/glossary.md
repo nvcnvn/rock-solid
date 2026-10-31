@@ -394,6 +394,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Invariant.** A property that must hold at every step, such as "every acknowledged write is readable". Each simulated run keeps its invariants in a registry, the invariant checker, which checks them at the run's check points, after every step unless a component's tests set another cadence, and names the first one broken. See [test scenarios](test-scenarios.md#invariant-checker).
 
+**Planted bug, planted variant.** A known bug switched on in the code under test, such as a rule a model's counterexample removes, to show that a test catches it: the test must fail with the bug planted and pass without it. A test that passes either way would miss the real bug too. See [test scenarios](test-scenarios.md#planted-bug-check).
+
 **Fault injection, nemesis.** Deliberately causing failures (kills, partitions, slow disks) to see whether the system survives them. Jepsen calls the component that does this the nemesis.
 
 **TLA+, TLC, model checking.** TLA+ is a language for describing a protocol precisely; the TLC model checker explores every reachable state of a small instance and reports any that breaks an invariant, catching design bugs before code exists.

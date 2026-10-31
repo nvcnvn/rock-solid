@@ -387,3 +387,39 @@ func TestExpectVerIsComparedWithTheNewestOrderedVersion(t *testing.T) {
 		t.Fatalf("expect_ver 1.2 with 1.2 pending was not ordered: newest %#x", v)
 	}
 }
+
+// P3: member C (disk 3) is removed from PG 0 in interval 2 and added back in interval 3 before
+// any recovery: a replicated write tagged 1 that reaches C only then, as from its primary, is
+// refused, and C logs nothing of it.
+func TestAMemberRemovedAndAddedBackRefusesItsOldInterval(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	old := c.pgFields(pg0)
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 2)
+		_, e := t.entry(pg0)
+		e.Members = e.Members[:2]
+	}), true)
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 3)
+		_, e := t.entry(pg0)
+		e.Members = append(e.Members, Member{Disk: 3})
+	}), true)
+	c.nextID++
+	id := c.nextID
+	u := Update{Kind: KindReplicaWrite, ID: id, PG: old, Chunk: ch, Len: core.BlockSize, Version: MakeVersion(1, 1)}
+	c.s.Node(c.client.Node).Call(c.client, func(ctx *core.Context, acts []core.Action) []core.Action {
+		a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: 2}}
+		a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))
+		a.Msg.Buf, _ = ctx.Pool.AllocZeroed(core.BlockSize)
+		c.cl.sent[id] = a.Msg.Buf
+		return append(acts, a)
+	})
+	c.settle()
+	if rp := c.reply(id); rp.Status != StatusRefused || rp.Interval != 3 {
+		t.Fatalf("a write tagged 1 at C, back in interval 3: %+v", rp)
+	}
+	if v := c.newest(2, ch); v != 0 {
+		t.Fatalf("C holds %#x", v)
+	}
+}

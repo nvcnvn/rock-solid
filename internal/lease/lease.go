@@ -73,6 +73,19 @@ type held struct {
 type Holder struct {
 	cfg   Config
 	peers []held
+	plant plants
+}
+
+// plants are bugs a test plants in a holder or a grantor, each the epoch change model's
+// counterexample of the same name: the holder ending its lease on the slower of its clocks; a
+// lease before the first bound, on lease_drift alone; widening only past 1 + 2 lease_drift; the
+// margin max(lease_drift, 1 − 1/B); no new window at a grantor's new run ID; a lease kept across a
+// grantor's new run ID; no end of leases on Resumed; no step check, or one on grants only, at 1 + lease_drift / 2, or against a grant that
+// gave no lease; the grantor ending its grant on the faster of its clocks; no restart wait.
+type plants struct {
+	slowerClock, beforeBound, widenLate, marginExact, noRunWindow, keepOnNewRun bool
+	noResumedEnd, noStepCheck, stepOnGrantsOnly, halfStep, checkBeforeBound     bool
+	fasterClock, noRestartWait                                                  bool
 }
 
 // NewHolder holds no lease.
@@ -118,7 +131,7 @@ func (h *Holder) Next(g core.NodeID, t Time) core.Tick {
 		return max(at, t.Boot)
 	}
 	if len(p.win) > 0 && p.bound == 0 {
-		at = min(at, t.Boot+sub(h.cfg.RateGap, t.Raw-p.win[0].r))
+		return t.Boot + sub(h.cfg.RateGap, t.Raw-p.win[0].r)
 	}
 	if p.gave {
 		at = min(at, h.end(p, t))
@@ -155,7 +168,7 @@ func (h *Holder) OnGrant(g core.NodeID, gr Grant, t Time) (tripped bool) {
 	if p.win == nil {
 		p.win = make([]sample, 0, windowCap)
 	}
-	if len(p.win) == 0 || gr.Run != p.run || gr.Raw < p.newestG || t.Raw-p.win[len(p.win)-1].r > h.cfg.Window {
+	if len(p.win) == 0 || gr.Run != p.run && !h.plant.noRunWindow || gr.Raw < p.newestG || t.Raw-p.win[len(p.win)-1].r > h.cfg.Window {
 		p.win, p.bound, p.run = append(p.win[:0], s), 0, gr.Run
 	} else {
 		p.win = append(p.win, s)
@@ -171,22 +184,28 @@ func (h *Holder) OnGrant(g core.NodeID, gr Grant, t Time) (tripped bool) {
 	p.newestG = gr.Raw
 	p.as, p.asB, p.ag, p.support = p.askS, p.askSB, gr.Raw, gr.Support
 	p.am = h.cfg.Drift
-	if p.bound != 0 {
+	switch {
+	case p.bound == 0:
+	case h.plant.widenLate:
+		p.am = h.cfg.Drift + max(p.bound, PPM+2*h.cfg.Drift) - (PPM + 2*h.cfg.Drift)
+	case h.plant.marginExact:
+		p.am = max(h.cfg.Drift, (max(p.bound, PPM)-PPM)*PPM/max(p.bound, PPM))
+	default:
 		p.am = h.cfg.Margin(p.bound)
 	}
 	p.widened = p.am > h.cfg.Drift
-	p.gave = p.bound != 0 && p.am < h.cfg.MaxMargin
+	p.gave = (p.bound != 0 || h.plant.beforeBound) && p.am < h.cfg.MaxMargin
 	return false
 }
 
 // OnHeartbeat takes g's heartbeat arriving now, carrying its run ID and raw reading: the step check runs as on a grant, and a new run ID or a raw reading below the last ends the lease taken from g's previous run and its window.
 func (h *Holder) OnHeartbeat(g core.NodeID, run uint64, raw core.Tick, t Time) (tripped bool) {
 	p := h.find(g)
-	if h.trips(p, run, raw, t) {
+	if !h.plant.stepOnGrantsOnly && h.trips(p, run, raw, t) {
 		h.EndAll()
 		return true
 	}
-	if len(p.win) > 0 && (run != p.run || raw < p.newestG) {
+	if len(p.win) > 0 && (run != p.run && !h.plant.noRunWindow && !h.plant.keepOnNewRun || raw < p.newestG) {
 		p.win, p.bound, p.gave = p.win[:0], 0, false
 	}
 	p.newestG = max(p.newestG, raw)
@@ -195,11 +214,15 @@ func (h *Holder) OnHeartbeat(g core.NodeID, run uint64, raw core.Tick, t Time) (
 
 // trips is the step check against the last grant from g, run only if it gave a lease and of the same run: g's raw clock moved further since than the lease's margin m allows, g − g_a > (r − s_a) / (1 − m).
 func (h *Holder) trips(p *held, run uint64, raw core.Tick, t Time) bool {
-	if !p.gave || run != p.run || raw < p.ag {
+	if h.plant.noStepCheck || !p.gave && (!h.plant.checkBeforeBound || len(p.win) == 0) || run != p.run || raw < p.ag {
 		return false
 	}
 	gHi, gLo := bits.Mul64(uint64(raw-p.ag), PPM-p.am)
 	rHi, rLo := bits.Mul64(uint64(sub(t.Raw, p.as)), PPM)
+	if h.plant.halfStep {
+		gHi, gLo = bits.Mul64(uint64(raw-p.ag), PPM)
+		rHi, rLo = bits.Mul64(uint64(sub(t.Raw, p.as)), PPM+h.cfg.Drift/2)
+	}
 	return gHi > rHi || gHi == rHi && gLo > rLo
 }
 
@@ -239,7 +262,11 @@ func rateBound(dg, dr core.Tick) uint64 {
 }
 
 // Resumed ends every lease, as after a pause: each grantor is asked again at once and its window restarts.
-func (h *Holder) Resumed() { h.EndAll() }
+func (h *Holder) Resumed() {
+	if !h.plant.noResumedEnd {
+		h.EndAll()
+	}
+}
 
 // EndAll ends every lease and window, so the holder asks each grantor again at once.
 func (h *Holder) EndAll() {
@@ -260,6 +287,9 @@ func (h *Holder) valid(p *held, t Time) bool {
 		return false
 	}
 	left := h.left(p)
+	if h.plant.slowerClock {
+		return sub(t.Raw, p.as) < left || sub(t.Boot, p.asB) < left
+	}
 	return sub(t.Raw, p.as) < left && sub(t.Boot, p.asB) < left
 }
 
@@ -305,6 +335,7 @@ type Grantor struct {
 	run     uint64
 	start   Time
 	holders []granted
+	plant   plants
 }
 
 // NewGrantor is a grantor that starts now, drawing run as its run ID; it forgot every grant an earlier run gave, so it grants nothing until both clocks show one lease.
@@ -320,7 +351,7 @@ func (g *Grantor) Resumed(run uint64) { g.run = run }
 
 // Waiting reports whether the restart wait runs: either clock shows less than one lease since the start, during which the node grants nothing and joins no peering.
 func (g *Grantor) Waiting(t Time) bool {
-	return sub(t.Raw, g.start.Raw) < g.cfg.Lease || sub(t.Boot, g.start.Boot) < g.cfg.Lease
+	return !g.plant.noRestartWait && (sub(t.Raw, g.start.Raw) < g.cfg.Lease || sub(t.Boot, g.start.Boot) < g.cfg.Lease)
 }
 
 // WaitEnd is the boot time at which the restart wait may end, which a timer on CLOCK_BOOTTIME may reach early.
@@ -356,6 +387,9 @@ func (g *Grantor) Live(h core.NodeID, t Time) bool {
 }
 
 func (g *Grantor) live(x *granted, t Time) bool {
+	if g.plant.fasterClock {
+		return x.on && sub(t.Raw, x.at.Raw) < g.cfg.Lease && sub(t.Boot, x.at.Boot) < g.cfg.Lease
+	}
 	return x.on && (sub(t.Raw, x.at.Raw) < g.cfg.Lease || sub(t.Boot, x.at.Boot) < g.cfg.Lease)
 }
 

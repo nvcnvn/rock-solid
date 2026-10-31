@@ -22,6 +22,8 @@ type dcluster struct {
 	// faulty is the disks the run made fail; downAt when each disk was first marked down.
 	faulty map[uint32]bool
 	downAt map[uint32]core.Tick
+	// cut is the nodes cut off from the authority, which get no tables.
+	cut map[int]bool
 }
 
 func newDCluster(t *testing.T, seed uint64, set sim.Settings) *dcluster {
@@ -35,19 +37,7 @@ func newDCluster(t *testing.T, seed uint64, set sim.Settings) *dcluster {
 	var empty Table
 	tbl, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	c := newRClusterOn(t, tbl, s)
-	d := &dcluster{rcluster: c, a: a, faulty: map[uint32]bool{}, downAt: map[uint32]core.Tick{}}
-	node := s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) {
-		c.auth = n.Start(sim.MachineFunc(func(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
-			return d.det.OnEvent(ctx, ev, out)
-		}), nil)
-	})
-	d.det = NewDetector(&a.rec, node.Context().Now)
-	a.det = d.det
-	d.det.View(&c.table, a.pools())
-	c.reporting = true
-	for k := range c.reps {
-		c.call(k, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetAuthority(ctx, c.auth, out) })
-	}
+	d := &dcluster{rcluster: c, a: a, det: c.detect(a), faulty: map[uint32]bool{}, downAt: map[uint32]core.Tick{}}
 	c.inv.Register(invMarkedFaulty, func() error {
 		for _, r := range a.rec.Disks() {
 			if m, since := d.det.Mark(r.ID); m == MarkDown && !d.faulty[r.ID] {
@@ -59,10 +49,28 @@ func newDCluster(t *testing.T, seed uint64, set sim.Settings) *dcluster {
 	return d
 }
 
+// detect starts a detector on a node of its own as a's marks, which every replica heartbeats from each start.
+func (c *rcluster) detect(a *authority) *Detector {
+	var det *Detector
+	node := c.s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) {
+		c.auth = n.Start(sim.MachineFunc(func(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
+			return det.OnEvent(ctx, ev, out)
+		}), nil)
+	})
+	det = NewDetector(&a.rec, node.Context().Now)
+	a.det = det
+	det.View(&c.table, a.pools())
+	c.reporting = true
+	for k := range c.reps {
+		c.call(k, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetAuthority(ctx, c.auth, out) })
+	}
+	return det
+}
+
 // tend publishes a table when the detector's marks changed or a replica asked or activated, noting when each disk was first marked down.
 func (d *dcluster) tend() {
 	c := d.rcluster
-	if d.det.Changes() == d.changes && len(c.asks) == d.a.seen && len(c.activations) == d.a.acts {
+	if d.det.Changes() == d.changes && len(c.asks) == d.a.seen && len(c.activations) == d.a.acts && len(d.a.edits) == 0 {
 		return
 	}
 	d.changes = d.det.Changes()
@@ -75,7 +83,7 @@ func (d *dcluster) tend() {
 	if len(MakeDelta(&c.table, &next).Entries) > 0 {
 		c.table = next
 		for n := range c.reps {
-			if c.s.Node(uint32(n)).Up() {
+			if c.s.Node(uint32(n)).Up() && !d.cut[n] {
 				c.call(n, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetTable(ctx, next, out) })
 			}
 		}
@@ -354,5 +362,63 @@ func TestAResentVersionGivesNoLatency(t *testing.T) {
 	}
 	if w := d.det.disks[member-1]; w.latAt != 0 {
 		t.Fatalf("disk %d reported a latency of %d at %d", member, w.lat, w.latAt)
+	}
+}
+
+// P22: rep3 with min_live 2 loses two members, cut off, while writes are in flight: no write is
+// acknowledged on the one copy left, every write sent then is refused, the last once a member
+// returns, and the writes after are acknowledged on two copies at least.
+func TestWritesWaitForMinLiveAfterTwoMembersGoDown(t *testing.T) {
+	d := newDCluster(t, 1, sim.DefaultSettings())
+	d.run(3 * sec)
+	_, e := d.table.entry(pg0)
+	m1, m2 := uint32(d.node(e.Members[1].Disk)), uint32(d.node(e.Members[2].Disk))
+	d.faulty[e.Members[1].Disk], d.faulty[e.Members[2].Disk] = true, true
+	for _, n := range []uint32{m1, m2} {
+		for k := range uint32(5) {
+			if k != n {
+				d.s.Partition(n, k, false)
+			}
+		}
+	}
+	ch := chunkIn(pg0, 4, 0)
+	var ids []core.RequestID
+	for i := range 4 {
+		ids = append(ids, d.write(pg0, ch, uint32(i)*core.BlockSize, fill(core.BlockSize, byte(i+1))))
+	}
+	d.run(NodeDownAfter + 2*sec)
+	if _, e := d.table.entry(pg0); e.live() >= 2 {
+		t.Fatalf("both cut-off members not marked down: %+v", e.Members)
+	}
+	ids = append(ids, d.write(pg0, ch, 0, fill(core.BlockSize, 9)))
+	d.run(sec)
+	for _, id := range ids {
+		if rp, ok := d.cl.replies[id]; ok && rp.Status == StatusOK {
+			t.Fatalf("write %d acknowledged as %+v with one member live", id, rp)
+		}
+	}
+	for k := range uint32(5) {
+		d.s.Heal(m1, k)
+	}
+	d.run(5 * sec)
+	w := d.write(pg0, ch, 0, fill(core.BlockSize, 10))
+	d.run(2 * sec)
+	rp, ok := d.cl.replies[w]
+	if !ok || rp.Status != StatusOK {
+		t.Fatalf("a write once a member returned: %+v", rp)
+	}
+	for _, id := range ids {
+		if rp, ok := d.cl.replies[id]; !ok || rp.Status != StatusRefused {
+			t.Fatalf("write %d sent with one member live: answered %v, %+v", id, ok, rp)
+		}
+	}
+	holders := 0
+	for n := range d.reps {
+		if d.newest(n, ch) >= rp.Version {
+			holders++
+		}
+	}
+	if holders < 2 {
+		t.Fatalf("%#x acknowledged with %d disks holding it", rp.Version, holders)
 	}
 }

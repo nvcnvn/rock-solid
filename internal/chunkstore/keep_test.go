@@ -57,7 +57,7 @@ func TestTheKeepRule(t *testing.T) {
 		{"D new in 43", nil, []peerReply{{disk: 2, decided: 41, chunks: holds(v41(8))}, {disk: 3, decided: 41, chunks: holds(v41(7))}, {disk: 4}}, v41(7), false, []uint32{2, 4}},
 		{"C holds 41.8 in part", nil, []peerReply{{disk: 2, decided: 41, chunks: holds(v41(8))}, {disk: 3, decided: 41, chunks: []ChunkPeer{{Chunk: ch, Whole: v41(7), Logged: v41(8)}}}}, v41(7), true, []uint32{2, 3}},
 	} {
-		_, got := keep(keepEntry(tc.down), tc.replies, nil, nil)
+		_, got := keep(keepEntry(tc.down), tc.replies, nil, nil, replicaPlants{})
 		if len(got) != 1 || got[0].kept != tc.kept || got[0].unfound != tc.unfound {
 			t.Errorf("%s: decided %+v, want %#x unfound %v", tc.name, got, tc.kept, tc.unfound)
 			continue
@@ -89,7 +89,7 @@ func TestTheKeepRuleOverSeveralChunks(t *testing.T) {
 	e := keepEntry(map[uint32][]uint32{41: {3}})
 	e.Interval, e.Members = 44, e.Members[:3]
 	e.Past = append(e.Past, PastInterval{Interval: 43, Members: e.Members})
-	_, got := keep(e, replies, nil, nil)
+	_, got := keep(e, replies, nil, nil, replicaPlants{})
 	if want := []keptChunk{{chunk: a}, {chunk: b, kept: v41(3)}}; !slices.Equal(got, want) {
 		t.Fatalf("decided %+v, want %+v", got, want)
 	}

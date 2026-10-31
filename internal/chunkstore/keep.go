@@ -47,7 +47,7 @@ func upIn(e *PGEntry, disk, i uint32) bool {
 }
 
 // keep is the keep rule over the replies peering of e's interval reached, appending to dst each chunk a reply names, in chunk order, and setting the list of each reply from an up member of the interval. LS, the newest interval whose decision a reached member persisted and at least e's last activated one, fixes every version below it: a member that persisted LS lists the version LS kept or, listing nothing, holds it as its newest below LS. A version of LS or later is kept unless a reached member up in its interval holds neither it nor a later version nor a listing of one, and every version below a kept one is kept. Members report only their newest whole version, which suffices: the newest kept version is the newest whole version of some reached member, since a later interval that took writes activated, so its members persisted it and LS would be at least it. A member is left off the list only if it holds the kept version as its newest, logged nothing later and lists nothing.
-func keep(e *PGEntry, replies []peerReply, all []replyChunk, dst []keptChunk) ([]replyChunk, []keptChunk) {
+func keep(e *PGEntry, replies []peerReply, all []replyChunk, dst []keptChunk, plant replicaPlants) ([]replyChunk, []keptChunk) {
 	ls := e.Activated
 	for _, r := range replies {
 		ls = max(ls, r.decided)
@@ -68,7 +68,7 @@ func keep(e *PGEntry, replies []peerReply, all []replyChunk, dst []keptChunk) ([
 			hi++
 		}
 		g := all[lo:hi]
-		k := keepChunk(e, replies, g, ls)
+		k := keepChunk(e, replies, g, ls, plant.ownInterval)
 		k.unfound = k.kept != 0 && !slices.ContainsFunc(g, func(c replyChunk) bool { return clean(&c.ChunkPeer, k.kept) })
 		dst = append(dst, k)
 		for i := range replies {
@@ -77,7 +77,7 @@ func keep(e *PGEntry, replies []peerReply, all []replyChunk, dst []keptChunk) ([
 				continue
 			}
 			j := slices.IndexFunc(g, func(c replyChunk) bool { return c.reply == i })
-			if j < 0 && k.kept != 0 || j >= 0 && !clean(&g[j].ChunkPeer, k.kept) {
+			if j < 0 && k.kept != 0 || j >= 0 && !clean(&g[j].ChunkPeer, k.kept) && !(plant.relistNever && g[j].Whole == k.kept && g[j].Logged == k.kept) {
 				r.list = append(r.list, ChunkVersion{Chunk: k.chunk, Version: k.kept})
 			}
 		}
@@ -89,11 +89,11 @@ func keep(e *PGEntry, replies []peerReply, all []replyChunk, dst []keptChunk) ([
 // clean reports whether a member holds version v as its newest, logged nothing later and lists nothing.
 func clean(c *ChunkPeer, v uint64) bool { return c.Whole == v && c.Logged == v && !c.Listed }
 
-func keepChunk(e *PGEntry, replies []peerReply, g []replyChunk, ls uint32) keptChunk {
+func keepChunk(e *PGEntry, replies []peerReply, g []replyChunk, ls uint32, own bool) keptChunk {
 	k := keptChunk{chunk: g[0].Chunk}
 	for _, c := range g {
 		switch {
-		case replies[c.reply].decided != ls:
+		case own || replies[c.reply].decided != ls:
 		case c.Listed:
 			k.kept = max(k.kept, c.Kept)
 		case intervalOf(c.Whole) < ls:
@@ -101,7 +101,7 @@ func keepChunk(e *PGEntry, replies []peerReply, g []replyChunk, ls uint32) keptC
 		}
 	}
 	for _, c := range g {
-		if v := c.Whole; v > k.kept && intervalOf(v) >= ls && heldByUp(e, replies, g, v) {
+		if v := c.Whole; v > k.kept && (own || intervalOf(v) >= ls) && heldByUp(e, replies, g, v) {
 			k.kept = v
 		}
 	}

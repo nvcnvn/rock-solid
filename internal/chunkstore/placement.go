@@ -92,6 +92,14 @@ type Inputs struct {
 	Recovered   []PGInterval
 	Edits       []Edit
 	Moves       int
+	plant       placementPlants
+}
+
+type placementPlants struct {
+	// removeOnActivation removes a leaving member once its PG's interval activates, before its
+	// replacement recovered; oldReport removes it on a recovered report for any interval of its PG.
+	removeOnActivation bool
+	oldReport          bool
 }
 
 // Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members removed on a recovered report for their PG's current interval while its other members stay up, reports ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves. It reports the moves it made.
@@ -193,11 +201,14 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 				e.Activated = a.Interval
 				e.Past = slices.DeleteFunc(e.Past, func(pi PastInterval) bool { return pi.Interval < a.Interval })
 			}
+			if all.plant.removeOnActivation && a.Interval == e.Interval && recovers(e.Members) {
+				e.dropLeaving()
+			}
 		}
 	}
 	for _, r := range all.Recovered {
 		if !split && r.PG.Pool == in.ID && int(r.PG.Index) < n {
-			if e := &pl.entries[r.PG.Index]; r.Interval == e.Interval && recovers(e.Members) {
+			if e := &pl.entries[r.PG.Index]; (r.Interval == e.Interval || all.plant.oldReport && r.Interval < e.Interval) && recovers(e.Members) {
 				e.dropLeaving()
 				e.Recovered = true
 			}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -60,19 +61,20 @@ type faultRun struct {
 	to    map[core.RequestID]int
 	lost  map[core.RequestID]bool
 	errs  map[string]error
-	// heals is when each cut between two nodes is healed, and crashes when each node is crashed at the latest, 0 for none; peering is whether PG 0's new interval waits for the primary to peer, and peerFault whether a member crashed or its disk failed since it started. One fault per peering at most: each restart waits 4 s, and with no detector to mark a failed disk down, its failures pile up across restarts.
-	heals     map[[2]uint32]core.Tick
-	crashes   [3]core.Tick
-	peering   bool
-	peerFault bool
-	asked     int
+	// heals is when each cut between two nodes is healed, and crashes when each node is crashed at the latest, 0 for none; peering is whether PG 0's new interval waits for the primary to peer.
+	heals   map[[2]uint32]core.Tick
+	crashes [3]core.Tick
+	peering bool
+	asked   int
+	// a is the stand-in authority, whose detector marks the disks; changes is the detector's count of marks the table follows.
+	a       *authority
+	changes uint64
 	// primaryFailed is set once a primary's disk has been made to fail, and rebuilt once a primary's index has rebuilt; listed is the primary's listing of each chunk at its last pass.
 	primaryFailed bool
 	rebuilt       bool
 	listed        [2]uint32
 	// fails counts the restarts of each node since its store last served, and gone is the nodes
-	// whose store failed again as it opened, which the table marks down for good, as a failure
-	// detector would.
+	// whose store failed again as it opened, which stay down: the detector marks them down for good.
 	fails [3]int
 	gone  [3]bool
 	// failing is the nodes a disk fault was injected into until the fault stops the store and it
@@ -170,8 +172,14 @@ func (f *faultRun) fail(inv string, err error) {
 	}
 }
 
-// p is the node of PG 0's primary in the cluster's table.
-func (f *faultRun) p() int { return f.c.primary(pg0) }
+// p is the node of PG 0's primary in the cluster's table, or of its first member while every member is marked down.
+func (f *faultRun) p() int {
+	if n := f.c.primary(pg0); n >= 0 {
+		return n
+	}
+	_, e := f.c.table.entry(pg0)
+	return f.c.node(e.Members[0].Disk)
+}
 
 // pass follows what each replica's loop sends: a primary's client replies and member updates, and each member's acknowledgments, which it checks against the member's index as it sends them.
 func (f *faultRun) pass(d int, acts []core.Action) {
@@ -410,7 +418,7 @@ func (f *faultRun) newInterval(first int) {
 			e.Members = append([]Member{{Disk: d}}, slices.DeleteFunc(e.Members, func(m Member) bool { return m.Disk == d })...)
 		}
 	}))
-	f.peering, f.peerFault = true, false
+	f.peering = true
 }
 
 // answerOthers starts the next interval of each PG but PG 0 a restarted member asked for, which takes no writes.
@@ -459,17 +467,21 @@ func (f *faultRun) inject() {
 	others := []int{(p + 1) % 3, (p + 2) % 3}
 	m := others[f.rng.Below(2)]
 	up := c.s.Node(uint32(m)).Up()
-	switch f.rng.Below(10) {
+	// While the PG peers, member crashes and disk failures land at a tenth of the rate: each restart waits 4 s, so at the full rate they would keep it peering.
+	k := f.rng.Below(10)
+	if (k == 1 || k == 2) && f.peering && !f.rng.Chance(1, 10) {
+		return
+	}
+	switch k {
 	case 0:
 		f.cut(p, m, 30_000)
 	case 1:
-		if up && f.crashes[m] == 0 && !(f.peering && f.peerFault) && !f.rotted(m) {
+		if up && f.crashes[m] == 0 && !f.rotted(m) {
 			f.crashes[m] = c.s.Time() + 1 + core.Tick(f.rng.Below(20_000))
-			f.peerFault = f.peering
 		}
 	case 2:
-		if up && !(f.peering && f.peerFault) && f.sound() && !f.rotted(m) {
-			f.peerFault, f.failing[m] = f.peering, true
+		if up && f.sound() && !f.rotted(m) {
+			f.failing[m] = true
 			c.s.Node(uint32(m)).Disk(0).Inject(sim.Fault{Effect: sim.FailIO, When: sim.Once(sim.OnKind(core.ActDiskWrite))})
 		}
 	case 3:
@@ -521,7 +533,7 @@ func (f *faultRun) inject() {
 			})
 		}
 	case 9:
-		if !f.peering && f.rng.Chance(1, 4) && up {
+		if mk, _ := f.a.det.Mark(c.ids[m]); !f.peering && f.rng.Chance(1, 4) && up && mk == MarkUp {
 			f.newInterval(m)
 		}
 	}
@@ -563,11 +575,11 @@ func (f *faultRun) tend(all bool) {
 				f.failing[m] = false
 			}
 			f.fails[m] = 0
-		case st.Err() != nil && f.fails[m] < 2:
+		case st.Err() != nil && f.fails[m] < 2 && f.downMarked(m):
 			f.fails[m]++
 			f.crash(m)
-		case st.Err() != nil:
-			f.lose(m)
+		case st.Err() != nil && f.fails[m] == 2:
+			f.gone[m] = true
 		}
 	}
 	for k, at := range f.heals {
@@ -575,6 +587,9 @@ func (f *faultRun) tend(all bool) {
 			c.s.Heal(k[0], k[1])
 			delete(f.heals, k)
 		}
+	}
+	if f.a.det.Changes() != f.changes {
+		f.remark()
 	}
 	if len(c.asks) > f.asked {
 		asks := c.asks[f.asked:]
@@ -590,18 +605,41 @@ func (f *faultRun) tend(all bool) {
 	}
 }
 
-// lose marks node m's disk down for good in a new interval of PG 0, after the other members.
-func (f *faultRun) lose(m int) {
-	f.gone[m] = true
-	_, e := f.c.table.entry(pg0)
-	k := e.Interval + 1
+// remark starts the next interval of each PG whose members' marks the detector changed, with the detector's marks.
+func (f *faultRun) remark() {
+	f.changes = f.a.det.Changes()
+	moved := false
 	f.publish(f.c.next(func(t *Table) {
-		setInterval(t, pg0, k)
-		_, e := t.entry(pg0)
-		d := f.c.ids[m]
-		e.Members = append(slices.DeleteFunc(e.Members, func(x Member) bool { return x.Disk == d }), Member{Disk: d, Mark: MarkDown})
+		for i := range t.Pools[0].PGs {
+			e := &t.Pools[0].PGs[i]
+			pg := core.PGID{Pool: testPool, Index: uint32(i)}
+			if !slices.ContainsFunc(e.Members, func(m Member) bool { mk, _ := f.a.det.Mark(m.Disk); return mk != m.Mark }) {
+				continue
+			}
+			setInterval(t, pg, e.Interval+1)
+			for j := range e.Members {
+				e.Members[j].Mark, _ = f.a.det.Mark(e.Members[j].Disk)
+			}
+			moved = moved || pg == pg0
+		}
 	}))
-	f.peering, f.peerFault = true, false
+	f.peering = f.peering || moved
+}
+
+// downMarked reports whether the detector has node m's disk down, which a failed store waits for before its node restarts.
+func (f *faultRun) downMarked(m int) bool {
+	mk, _ := f.a.det.Mark(f.c.ids[m])
+	return mk == MarkDown
+}
+
+// marked reports whether the table follows the detector's marks and the detector has every disk up but a gone one.
+func (f *faultRun) marked() bool {
+	for n := range 3 {
+		if mk, _ := f.a.det.Mark(f.c.ids[n]); mk == MarkDown && !f.gone[n] {
+			return false
+		}
+	}
+	return f.a.det.Changes() == f.changes
 }
 
 // recovered reports whether PG 0's primary reported its interval recovered.
@@ -610,7 +648,25 @@ func (f *faultRun) recovered() bool {
 	return slices.ContainsFunc(f.c.recovered, func(r PGFields) bool { return r.PG == pg0 && r.Interval == e.Interval })
 }
 
-// settled checks the run's end: every member but a lost one runs, lists nothing and maps what the primaries answered, but in a chunk the last peering found no member to recover from, which faults that overlap before recovery ends can leave (unfound).
+// unreadable reports whether every source lead i could recover ch from failed a read of it on a disk whose bits the run rotted: a second fault, which leaves the chunk listed as unfound does.
+func (f *faultRun) unreadable(i int, ch core.ChunkID) bool {
+	r := f.c.reps[f.p()]
+	_, e := r.table.entry(pg0)
+	for _, t := range r.leads[i].todo {
+		if t.chunk != ch || t.targets == 0 {
+			continue
+		}
+		for s, m := range e.Members {
+			if m.Mark == MarkUp && t.targets&(1<<s) == 0 && (t.failed&(1<<s) == 0 || !f.rotted(f.c.node(m.Disk))) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// settled checks the run's end: every member but a lost one runs, lists nothing and maps what the primaries answered, but in a chunk the last peering found no member to recover from, which faults that overlap before recovery ends can leave (unfound), or whose every source holds rotted bits of it.
 func (f *faultRun) settled() error {
 	for n := range 3 {
 		if !f.gone[n] && (!f.c.s.Node(uint32(n)).Up() || !f.c.reps[n].Store().Serving()) {
@@ -625,7 +681,7 @@ func (f *faultRun) settled() error {
 			continue
 		}
 		for k, ch := range f.chunks {
-			if i >= 0 && r.leads[i].isUnfound(ch) {
+			if i >= 0 && (r.leads[i].isUnfound(ch) || f.unreadable(i, ch)) {
 				continue
 			}
 			if x, _ := f.c.reps[n].Store().Index().Chunk(testPool, ch); x.ListedIn != 0 {
@@ -639,15 +695,29 @@ func (f *faultRun) settled() error {
 	return nil
 }
 
-// runFaults runs the fault workload, failing t on a broken invariant; with a plant, it returns the
-// first difference between two disks under one version instead.
-func runFaults(t *testing.T, seed uint64, clients, writes int, plant func(c *rcluster)) error {
+// faultPlant is a bug planted in the fault run and the invariant it must break.
+type faultPlant struct {
+	inv string
+	set func(c *rcluster)
+}
+
+// runFaults runs the fault workload, failing t on a broken invariant; with a plant, it checks only
+// the plant's invariant and returns its first violation instead.
+func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant) error {
 	s := sim.New(seed, sim.DefaultSettings())
 	c := newRClusterWith(t, rtable(4, 2), s, func(cfg *Config) { cfg.Log.MaxRecordBytes = 3 * core.BlockSize })
 	f := &faultRun{t: t, c: c, rng: core.NewRand(seed ^ 0xfa17), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)},
 		ops: map[core.RequestID]faultOp{}, replied: map[core.RequestID]int{}, sent: map[[2]uint64]Update{}, flips: map[flipAt][]flip{},
 		errs: map[string]error{}, version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, to: map[core.RequestID]int{},
 		lost: map[core.RequestID]bool{}, heals: map[[2]uint32]core.Tick{}, images: map[[2]uint64][]byte{}}
+	f.a = &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4}}
+	for n := range 3 {
+		if _, err := f.a.rec.Report(uint32(n), 0, c.logs[n]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.detect(f.a)
+	watchEpochs(c, &f.a.rec)
 	c.onPass = f.pass
 	c.cl.lost = func(peer core.NodeID) {
 		for id, to := range f.to {
@@ -661,18 +731,27 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant func(c *rcl
 	}
 	c.inv.Register(invMappedAnswers, f.mapped)
 	if plant != nil {
-		c.inv.Off(invOneVersion)
-		plant(c)
+		plant.set(c)
 		for n := range c.reps {
 			c.reps[n].plant = c.replicaPlants
 		}
 	}
+	c.inv.Register(invActivates, func() error {
+		if !f.ended {
+			return nil
+		}
+		return c.inactive()
+	})
 	c.inv.Register(invRecovered, func() error {
 		if !f.ended {
 			return nil
 		}
 		return f.settled()
 	})
+	if plant != nil {
+		c.planted = true
+		c.inv.Only(plant.inv)
+	}
 	if f.rng.Chance(1, 2) {
 		c.reps[0].Store().cfg.MergeCache = 0
 	}
@@ -690,7 +769,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant func(c *rcl
 	for range 2_000_000 {
 		if c.quiet() && !f.peering && !down() || !c.step() {
 			calm := len(f.heals) == 0 && f.crashes == [3]core.Tick{} && !f.peering && len(c.asks) == f.asked && !down()
-			if calm && (!busy() && f.recovered() || idle == 60) {
+			if calm && f.marked() && (!busy() && f.recovered() || idle >= 60) {
 				break
 			}
 			f.tend(true)
@@ -700,8 +779,8 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant func(c *rcl
 			continue
 		}
 		idle = 0
-		if err := f.errs[invOneVersion]; plant != nil && err != nil {
-			return err
+		if c.found != nil {
+			return c.found
 		}
 		if busy() && f.rng.Chance(1, 200) {
 			f.inject()
@@ -709,18 +788,21 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant func(c *rcl
 		f.tend(false)
 	}
 	for id := core.RequestID(1); id <= c.nextID; id++ {
-		if _, ok := f.ops[id]; ok && f.replied[id] != 1 && !(f.replied[id] == 0 && f.lost[id]) {
+		if _, ok := f.ops[id]; ok && f.replied[id] != 1 && !(f.replied[id] == 0 && f.lost[id]) && plant == nil {
 			t.Fatalf("request %d answered %d times", id, f.replied[id])
 		}
 	}
 	f.dirty, f.ended = true, true
 	if err := c.inv.Check(); err != nil {
-		t.Fatal(err)
+		if plant == nil {
+			t.Fatal(err)
+		}
+		return err
 	}
-	return f.errs[invOneVersion]
+	return c.found
 }
 
-// Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail and they refuse, the primary's bases rot, the PG's interval changes and the primary crashes, rebuilds its index and moves, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once unless a crash of its primary lost it, the primary maps exactly the writes it answered OK in every chunk it lists nothing of, and once recovery settles every member lists nothing and maps them.
+// Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail, the stand-in authority's failure detector marking them down and up, and they refuse, the primary's bases rot, the PG's interval changes and the primary crashes, rebuilds its index and moves, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once unless a crash of its primary lost it, the primary maps exactly the writes it answered OK in every chunk it lists nothing of, and once recovery settles every member lists nothing and maps them.
 func TestReplicatedWritesSurviveFaults(t *testing.T) {
 	seeds.Run(t, 0, 20, func(seed uint64) {
 		if err := runFaults(t, seed, 2, 24, nil); err != nil {
@@ -729,21 +811,40 @@ func TestReplicatedWritesSurviveFaults(t *testing.T) {
 	})
 }
 
-// A member that refuses a version of its PG's current interval, here because its table marks it
-// in maintenance, refuses the chunk's later versions of that interval too, even once its table
-// marks it up again: seed 73 had it log 1.6 without 1.3 to 1.5, unlike the member that took them.
-func TestAMemberThatRefusesAVersionRefusesTheLaterOnes(t *testing.T) {
-	if err := runFaults(t, 73, 2, 24, nil); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // A recovery write that leaves out the blocks covered when it read its source, not when it was
 // ordered (the epoch change model's neg-recovery-covers-at-read), puts a source's block over a
 // write ordered in between, and two disks then hold different bytes under one version, the first
-// invariant it breaks at 156 of the first 500 seeds.
+// invariant it breaks, checked alone, at 183 of the first 500 seeds.
 func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
-	if runFaults(t, 4, 2, 24, func(c *rcluster) { c.replicaPlants.coverAtRead = true }) == nil {
+	if runFaults(t, 4, 2, 24, &faultPlant{invOneVersion, func(c *rcluster) { c.replicaPlants.coverAtRead = true }}) == nil {
 		t.Fatalf("seed 4 kept %q", invOneVersion)
+	}
+}
+
+// Each planted peering bug breaks its invariant, checked alone, at a seed of the first 500, as the
+// epoch change model's counterexample for it does: a restarted primary that never asks for a new
+// interval (neg-restart-no-ask) leaves its PG unactivated (69 of 500); a member logging a version
+// out of order (neg-log-out-of-order), here as writes sent again newest first after a reconnect,
+// leaves a member mapping other bytes once recovery settles (24 of 500); a version decided by its
+// own interval's members after a later interval kept it (neg-decide-by-own-interval, 17 of 500) and
+// a primary activating before every member persisted its missing list
+// (neg-activate-before-durable, 92 of 500) each drop a write the primary answered; and a later
+// peering that clears a missing-list entry recovery has not done (neg-peering-clears-missing)
+// leaves a member mapping other bytes once recovery settles (13 of 500).
+func TestPlantedPeeringBugsBreakTheFaultRun(t *testing.T) {
+	for _, p := range []struct {
+		name string
+		seed uint64
+		faultPlant
+	}{
+		{"no ask after a restart", 7, faultPlant{invActivates, func(c *rcluster) { c.replicaPlants.neverAsk = true }}},
+		{"logged out of order", 6, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.resendNewestFirst = true }}},
+		{"decided by its own interval", 50, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.ownInterval = true }}},
+		{"activated before lists are durable", 2, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
+		{"missing entry cleared", 51, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.relistNever, c.storePlants.clearListed = true, true }}},
+	} {
+		if err := runFaults(t, p.seed, 2, 24, &p.faultPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
+			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)
+		}
 	}
 }

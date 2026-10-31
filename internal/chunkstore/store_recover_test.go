@@ -344,3 +344,21 @@ func TestAMemberRefusesARecoveryWriteAtAVersionItLacks(t *testing.T) {
 		}
 	}
 }
+
+// A recovery read the buffer pool cannot hold fails with the pool's error.
+func TestARecoveryReadIntoAFullPoolFails(t *testing.T) {
+	h := newRecoveryHarness(t)
+	h.sync(h.write(chunkC, 0, fill(core.BlockSize, 3), 0))
+	hog, err := h.pool.Alloc(h.pool.Available())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := h.id()
+	h.s.Read(&h.ctx, Request{ID: id, Chunk: chunkC, Len: core.ChunkSize, Recover: true}, &h.out)
+	h.take()
+	var full *core.PoolExhaustedError
+	if r := h.reply(id); !errors.As(r.Err, &full) || r.Buf != core.NoBuf {
+		t.Fatalf("reply %+v", r)
+	}
+	h.pool.Free(hog)
+}

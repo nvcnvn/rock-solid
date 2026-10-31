@@ -98,7 +98,7 @@ VARIABLES
     pv,       \* [Node -> [Chunk -> Nat]]: newest version a primary ordered
     pin,      \* [Node -> SUBSET [w, hold]]: client writes a primary holds unordered
     known,    \* [Node -> [PG -> Nat]]: newest incarnation of the session a primary has seen
-    dec,      \* set of [p, k, n, r, kept]: peering decisions
+    dec,      \* set of [p, k, n, r, kept, own]: peering decisions; own: chunks the primary listed before
     act,      \* set of [p, k, r]: activated intervals
     \* Data path
     rm,       \* set of replicated writes in flight or delivered (kept, so duplicated)
@@ -291,7 +291,7 @@ Init ==
     /\ pv = [n \in Node |-> [c \in Chunk |-> 0]]
     /\ pin = [n \in Node |-> {}]
     /\ known = [n \in Node |-> [p \in PG |-> 0]]
-    /\ dec = {[p |-> p, k |-> 1, n |-> InitMem[p][1], r |-> 1, kept |-> [c \in Chunk |-> 0]] : p \in PG}
+    /\ dec = {[p |-> p, k |-> 1, n |-> InitMem[p][1], r |-> 1, kept |-> [c \in Chunk |-> 0], own |-> {}] : p \in PG}
     /\ act = {[p |-> p, k |-> 1, r |-> 1] : p \in PG}
     /\ rm = {}
     /\ vers = {}
@@ -613,7 +613,8 @@ Peer(n, p) ==
           IN /\ UpIn(p, k) \subseteq J
              /\ \A i \in NeedIv(p, k, L) : J \cap UpIn(p, i) # {}
              /\ LapseFor(J, p, k)
-             /\ dec' = dec \cup {[p |-> p, k |-> k, n |-> n, r |-> run[n], kept |-> K]}
+             /\ dec' = dec \cup {[p |-> p, k |-> k, n |-> n, r |-> run[n], kept |-> K,
+                                  own |-> {c \in ChunksOf(p) : miss[PrimDisk(p, k)][c] # NoMiss}]}
              /\ bad' = IF torn THEN bad \cup {"torn"} ELSE bad
              /\ pv' = [pv EXCEPT ![n] = [c \in Chunk |-> IF c \in ChunksOf(p) THEN K[c] ELSE pv[n][c]]]
              /\ \E P \in IF CanStall(n, p, k) THEN SUBSET UpIn(p, k) ELSE {UpIn(p, k)} :
@@ -680,7 +681,13 @@ Persist(d) ==
 \* with the write and lets "at", the newest version the primary had ordered
 \* when it read, be any since it activated. With RecoveryCoversAtRead, the
 \* primary picks the blocks at the read, so the writes ordered between the
-\* read and the write are overwritten.
+\* read and the write are overwritten. The source lists nothing, or is the
+\* primary, which lists the chunk only from this peering, for dropped
+\* versions of its own, and holds the kept version: the code takes such a
+\* primary when its index maps the kept image. The model reads only the
+\* source's versions up to the kept one and tells no mapped version from a
+\* logged one, so it lets a primary that mapped a dropped version be the
+\* source too, which the code does not.
 Recover(n, p, c, d) ==
     LET k == IvAt(n, p)
         K == miss[d][c]
@@ -696,7 +703,8 @@ Recover(n, p, c, d) ==
        /\ \E s \in UpIn(p, k), at \in {Ver(k, 0)} \cup {v \in Ver(k, 1)..pv[n][c] : IvOfV(v) = k} :
             /\ dnode[s] # 0
             /\ Running(dnode[s])
-            /\ miss[s][c] = NoMiss
+            /\ \/ miss[s][c] = NoMiss
+               \/ s = PrimDisk(p, k) /\ c \notin TheDec(n, p, k).own
             /\ K = 0 \/ K \in dlog[s][c]
             /\ at = Ver(k, 0) \/ Bug("RecoveryCoversAtRead")
             /\ dlog' = [dlog EXCEPT ![d][c] =

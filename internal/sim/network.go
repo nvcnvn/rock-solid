@@ -211,8 +211,15 @@ func (s *Scheduler) head(i int) bool {
 	return true
 }
 
-// arrived is the first message or PeerLost due at node id that its connection can deliver, or -1.
+// arrived is the first message or PeerLost due at node id that its connection can deliver, or -1; with ReadsFirst planted, a message it marks comes before the others.
 func (s *Scheduler) arrived(id uint32) int {
+	if first := s.set.ReadsFirst; first != nil {
+		for i := range s.items {
+			if it := &s.items[i]; it.node == id && it.kind == ChooseDeliver && it.at <= s.now && first(&it.act.Msg) && s.head(i) {
+				return i
+			}
+		}
+	}
 	for i := range s.items {
 		it := &s.items[i]
 		if it.node == id && (it.kind == ChooseDeliver || it.kind == ChoosePeerLost) && it.at <= s.now && s.head(i) {
