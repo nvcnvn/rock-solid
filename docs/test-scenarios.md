@@ -2859,7 +2859,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
   runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
   they take.
-- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 57,400 seeds in 812 s,
+- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 57,400 seeds in 818 s,
   building the test binaries included. On 4 processes the largest process peaked at 528 MiB
   resident (an `internal/lsm` metamorphic shard), all four at 1.9 GiB:
 
@@ -2884,10 +2884,10 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 25 s |
   | `internal/chunkstore` `TestSubBlockWritesMatchTheByteOracle` | 500 | 2 s |
   | `internal/chunkstore` `TestReplicatedWritesSurviveFaults` | 1,000 | 16 s |
-  | `internal/chunkstore` `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` | 500 | 6 s |
+  | `internal/chunkstore` `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` | 500 | 7 s |
   | `internal/chunkstore` `TestNoPGServesReadsFromTwoPrimaries` | 500 | 30 s |
-  | `internal/chunkstore` `TestWritesPassTheWriteLimitOnlyWhereAdmitted` | 200 | 94 s |
-  | `internal/chunkstore` `TestTheDetectorMarksAFailedDiskDown` | 500 | 45 s |
+  | `internal/chunkstore` `TestWritesPassTheWriteLimitOnlyWhereAdmitted` | 200 | 95 s |
+  | `internal/chunkstore` `TestTheDetectorMarksAFailedDiskDown` | 500 | 46 s |
 
 - A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
   under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
@@ -5366,8 +5366,8 @@ test's alone.
   are the lease pair run's (`internal/lease`) and the read run's one-reader check's.
 - **Cost.** Histories are split by chunk, so the check's cost is per chunk, and each run's check
   stops at 30 s, failing the seed. The model builds a state's bytes only when a read needs them.
-  The checks add about 25 s to the seed runner's list on 2 processes, the write-limit run's 10 s the
-  most.
+  The checks add a few seconds to the seed runner's list on 2 processes: none of the five runs'
+  times moved by more than a second.
 - Close-to-open and the file-level checks of Testing strategy's layer 3 belong to the file frontend
   (phase 6).
 
