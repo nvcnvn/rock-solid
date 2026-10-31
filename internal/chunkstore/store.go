@@ -1148,7 +1148,9 @@ func (s *Store) finishRead(ctx *core.Context, oi int32, out *Output) {
 	o := &s.ops[oi]
 	r := Reply{ID: o.req.ID, Version: o.version, Buf: o.buf, Err: o.err}
 	if o.err != nil {
-		ctx.Pool.Free(o.buf)
+		if o.buf != core.NoBuf {
+			ctx.Pool.Free(o.buf)
+		}
 		r.Buf, r.Version = core.NoBuf, 0
 	}
 	out.Replies = append(out.Replies, r)
