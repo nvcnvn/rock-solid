@@ -535,6 +535,26 @@ func (r *primaryRun) settled() {
 	c.t.Fatal("the cluster did not settle")
 }
 
+// readEach reads PG 0's chunks back, recorded, with each up member its primary in turn, so a member
+// holding other bytes than the primary shows in the history once it leads.
+func (r *primaryRun) readEach(x *chunkHist) {
+	for _, m := range slices.Clone(r.members()) {
+		if m.Mark != MarkUp || !r.running(m) {
+			continue
+		}
+		ds := []uint32{m.Disk}
+		for _, o := range r.members() {
+			if o.Disk != m.Disk {
+				ds = append(ds, o.Disk)
+			}
+		}
+		r.a.edits = append(r.a.edits, Edit{PG: pg0, Disks: ds})
+		r.publish()
+		r.settled()
+		x.readBack(2*faultSpan, r.chunks[:]...)
+	}
+}
+
 // tend publishes a table for the asks and activations replicas reported, and for a disk formatted again.
 func (r *primaryRun) tend() {
 	c := r.c
@@ -630,7 +650,7 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	r.settled()
 	r.recover()
 	r.check()
-	x.readBack(2*faultSpan, r.chunks[:]...)
+	r.readEach(x)
 	r.ended = true
 	if err := c.inv.Check(); err != nil {
 		return err

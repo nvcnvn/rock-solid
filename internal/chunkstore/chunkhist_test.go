@@ -187,12 +187,12 @@ func (x *chunkHist) ordered(r *Replica) {
 
 // settle gives each operation with no completion the fate the first peering after its version's
 // interval gave the version, if one has.
-func (x *chunkHist) settle() {
+func (x *chunkHist) settle(ops []sim.Op) {
 	top := uint32(0)
 	for k := range x.activated {
 		top = max(top, k.Interval)
 	}
-	for i, o := range x.h.Ops() {
+	for i, o := range ops {
 		op := &x.ops[i]
 		if o.Done || op.kind == histRead || op.version == 0 {
 			continue
@@ -363,11 +363,12 @@ func (x *chunkHist) model() porcupine.Model {
 	}
 }
 
-// check looks for a linearizable order of every chunk's history.
-func (x *chunkHist) check() error {
-	x.settle()
+// prepare settles the fates of ops, the recorded operations, and gathers the versions each chunk's
+// writes must take.
+func (x *chunkHist) prepare(ops []sim.Op) {
+	x.settle(ops)
 	x.acked = make([][]uint64, len(x.chunks))
-	for i, o := range x.h.Ops() {
+	for i, o := range ops {
 		switch {
 		case o.Done && x.ops[i].kind != histRead && o.Output[0] != 0:
 			x.acked[o.Input[1]] = append(x.acked[o.Input[1]], o.Output[0])
@@ -378,6 +379,11 @@ func (x *chunkHist) check() error {
 	for _, a := range x.acked {
 		slices.Sort(a)
 	}
+}
+
+// check looks for a linearizable order of every chunk's history.
+func (x *chunkHist) check() error {
+	x.prepare(x.h.Ops())
 	i, res := lincheck.Illegal(x.model(), x.h, checkTimeout)
 	switch res {
 	case porcupine.Illegal:
