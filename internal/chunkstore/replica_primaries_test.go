@@ -595,7 +595,7 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 4 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 47 of 500), a restarted primary peering in its old interval (32 of 500), a disk formatted again keeping its old disk ID (20 of 500), the epoch change model's neg-compare-table-epochs (497 of 500) and neg-compare-member-lists (303 of 500), which breaks property 3 first: a member that compares member lists logs the old primary's write tagged with an interval its table left; and the model's neg-remove-before-recovered (123 of 500), here a leaving member removed once its PG's interval activates, and neg-accept-old-report (145 of 500), each removing a moved member while its replacement lacks acknowledged writes.
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 4 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 47 of 500), a restarted primary peering in its old interval (32 of 500), a disk formatted again keeping its old disk ID (20 of 500), the epoch change model's neg-compare-table-epochs (497 of 500) and neg-compare-member-lists (303 of 500), which breaks property 3 first: a member that compares member lists logs the old primary's write tagged with an interval its table left; and the model's neg-remove-before-recovered (123 of 500), here a leaving member removed once its PG's interval activates, and neg-accept-old-report (145 of 500), each removing a moved member while its replacement lacks acknowledged writes; and neg-report-before-activate (500 of 500), a primary that reports its interval activated once it decides, before it activates.
 func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	for _, p := range []struct {
 		name string
@@ -610,6 +610,7 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 		{"member lists compared", 1, peerPlant{invLateLog, func(r *primaryRun) { r.c.replicaPlants.sameMembers = true }}},
 		{"removed before recovered", 3, peerPlant{invRemoval, func(r *primaryRun) { r.a.plant.removeOnActivation = true }}},
 		{"old recovered report", 3, peerPlant{invRemoval, func(r *primaryRun) { r.a.plant.oldReport = true }}},
+		{"activation reported once decided", 0, peerPlant{invActivations, func(r *primaryRun) { r.c.replicaPlants.reportDecided = true }}},
 	} {
 		if err := runPrimaries(t, p.seed, &p.peerPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)

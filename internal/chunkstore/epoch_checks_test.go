@@ -212,16 +212,19 @@ func (x *epochChecks) decided(r *Replica) {
 	}
 }
 
-// activations checks the cluster's table: no PG's last activated interval went down, and each is one a primary reported activated.
+// activations checks the cluster's table: no PG's last activated interval went down, and each is one a primary activated.
 func (x *epochChecks) activations() error {
+	for _, r := range x.c.reps {
+		x.decided(r)
+	}
 	for _, p := range x.c.table.Pools {
 		for i, e := range p.PGs {
 			pg := core.PGID{Pool: p.ID, Index: uint32(i)}
 			if e.Activated < x.activated[pg] {
 				return fmt.Errorf("%s: %v last activated %d after %d", invActivations, pg, e.Activated, x.activated[pg])
 			}
-			if e.Activated > x.activated[pg] && !slices.ContainsFunc(x.c.activations, func(a PGFields) bool { return a.PG == pg && a.Interval == e.Activated }) {
-				return fmt.Errorf("%s: %v records interval %d activated, which no primary reported", invActivations, pg, e.Activated)
+			if _, ok := x.decisions[pg][e.Activated]; e.Activated > x.activated[pg] && !ok {
+				return fmt.Errorf("%s: %v records interval %d activated, which no primary activated", invActivations, pg, e.Activated)
 			}
 			x.activated[pg] = e.Activated
 		}

@@ -5209,7 +5209,7 @@ commit, it must pass unplanted and break its invariant planted.
 | A restarted primary never asks for a new interval | | Fault (the primary-change run's end asks itself) | 69 | 7 | Property 12's |
 | An older version decided by its own interval's members | | Fault | 17 | 50 | "the primary maps exactly …" |
 | A primary activates before missing lists are durable | | Fault | 92 | 2 | "the primary maps exactly …" |
-| The leader records an activation only decided | Decide reports it | Trace: W on its way to disk 3 when interval 2 replaces it with disk 1; disk 2's list to disk 1 lost; interval 3 puts disk 2 in `maintenance`, handed to disk 1 alone | | | "no acknowledged version is ever dropped" |
+| The leader records an activation only decided | Decide reports it | Primary-change; and a trace: W on its way to disk 3 when interval 2 replaces it with disk 1; disk 2's list to disk 1 lost; interval 3 puts disk 2 in `maintenance`, handed to disk 1 alone | 500 | 0 | "no PG's last activated interval goes down, and every activation a table records happened": the recorded interval is not one a primary activated; on the trace, "no acknowledged version is ever dropped" |
 | Recovery picks its blocks at read | | Fault | 183 | 0 | "no two members hold different data under one version" |
 | A leaving member removed before its replacement recovered | Removed once its PG's interval activates | Primary-change | 123 | 3 | Property 13's |
 | A recovered report for an earlier interval removes the leaving member | | Primary-change | 145 | 3 | Property 13's |
