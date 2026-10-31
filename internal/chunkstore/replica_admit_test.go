@@ -2,7 +2,9 @@ package chunkstore
 
 import (
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -249,7 +251,8 @@ type limitClient struct {
 func (lc *limitClient) Ready() bool {
 	c := lc.r.d.rcluster
 	out := 0
-	for id, at := range lc.at {
+	for _, id := range slices.Sorted(maps.Keys(lc.at)) {
+		at := lc.at[id]
 		rp, done := c.cl.replies[id]
 		switch {
 		case done && rp.Status == StatusOK:

@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -185,7 +186,8 @@ func (r *readRun) keptLater(rd readVersion, ok func(kept uint64) bool) bool {
 
 // lost checks that no read returned a version an activated interval after it dropped.
 func (r *readRun) lost() error {
-	for id, rd := range r.reads {
+	for _, id := range slices.Sorted(maps.Keys(r.reads)) {
+		rd := r.reads[id]
 		if rd.ver != 0 && r.keptLater(rd, func(kept uint64) bool { return kept < rd.ver }) {
 			return fmt.Errorf("%s: read %d returned %#x of %v, which a later interval dropped", invReadVersion, id, rd.ver, rd.chunk)
 		}
@@ -196,7 +198,8 @@ func (r *readRun) lost() error {
 // incarnations checks that no acknowledged write of the session's first incarnation has a later version of its chunk than an acknowledged write of the second.
 func (c *rcluster) incarnations(writes map[core.RequestID]incWrite) error {
 	first, second := map[core.ChunkID]core.RequestID{}, map[core.ChunkID]core.RequestID{}
-	for id, w := range writes {
+	for _, id := range slices.Sorted(maps.Keys(writes)) {
+		w := writes[id]
 		rp, ok := c.cl.replies[id]
 		if !ok || rp.Status != StatusOK {
 			continue
@@ -209,7 +212,8 @@ func (c *rcluster) incarnations(writes map[core.RequestID]incWrite) error {
 			second[w.chunk] = id
 		}
 	}
-	for ch, a := range first {
+	for _, ch := range slices.SortedFunc(maps.Keys(first), compareChunk) {
+		a := first[ch]
 		if b, ok := second[ch]; ok && c.cl.replies[a].Version > c.cl.replies[b].Version {
 			return fmt.Errorf("%s: write %d of incarnation 1 acknowledged as %#x of %v, write %d of incarnation 2 as %#x", invIncarnation, a, c.cl.replies[a].Version, ch, b, c.cl.replies[b].Version)
 		}
@@ -450,7 +454,7 @@ func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 		}
 		if second.reissue == nil && c.s.Time() >= second.start {
 			second.reissue = []faultOp{}
-			for id := range first.at {
+			for _, id := range slices.Sorted(maps.Keys(first.at)) {
 				if _, done := c.cl.replies[id]; !done {
 					second.reissue = append(second.reissue, first.ops[id])
 				}

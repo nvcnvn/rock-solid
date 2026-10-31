@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -196,7 +197,8 @@ func (x *epochChecks) decided(r *Replica) {
 			continue
 		}
 		byPG[l.interval] = slices.Clone(l.kept)
-		for k, earlier := range byPG {
+		for _, k := range slices.Sorted(maps.Keys(byPG)) {
+			earlier := byPG[k]
 			if k >= l.interval {
 				continue
 			}
