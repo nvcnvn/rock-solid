@@ -31,10 +31,11 @@ type readRun struct {
 	until   core.Tick
 	next    core.Tick
 	err     error
-	// epochs holds the decisions of the PGs' activated intervals, acked each version a primary answered a write OK with, and verErr the first read answered OK with a version neither acknowledged nor kept.
+	// epochs holds the decisions of the PGs' activated intervals, acked each version a primary answered a write OK with, verErr the first read answered OK with a version neither acknowledged nor kept, or once ended one later lost.
 	epochs *epochChecks
 	acked  map[chunkVersion]bool
 	verErr error
+	ended  bool
 	// returns has a node cut off lead its PGs once marked up again; back is the node cut off that gets no tables until then, or until backBy.
 	returns bool
 	back    int
@@ -402,7 +403,7 @@ func (rd *pgReader) Next(ctx *core.Context, acts []core.Action) []core.Action {
 	return append(acts, a)
 }
 
-// runReads runs the read workload for 30 s of faults and 10 s after, failing t on a broken invariant registered with the simulator and returning a broken end check; with a plant, it checks only the plant's invariant and returns its first violation.
+// runReads runs the read workload for 30 s of faults and 10 s after, failing t on a broken invariant registered with the simulator; with a plant, it checks only the plant's invariant and returns its first violation.
 func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 	set := noisy()
 	r := &readRun{rng: core.NewRand(seed ^ 0x4ead), reads: map[core.RequestID]readVersion{}, writes: map[core.RequestID]incWrite{}, acked: map[chunkVersion]bool{}, faulted: -1, back: -1}
@@ -422,6 +423,12 @@ func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 	c.inv.Register(invOneReader, r.oneReader)
 	r.epochs = watchEpochs(c, &d.a.rec)
 	c.inv.Register(invReadVersion, func() error { return r.verErr })
+	c.inv.Register(invIncarnation, func() error {
+		if !r.ended {
+			return nil
+		}
+		return c.incarnations(r.writes)
+	})
 	c.onPass = r.pass
 	epochs := c.onEvent
 	c.onEvent = func(d int, ev *core.Event, done bool) {
@@ -476,10 +483,15 @@ func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 			return c.found
 		}
 	}
-	for _, err := range []error{c.incarnations(r.writes), r.lost()} {
-		if err != nil && (plant == nil || strings.Contains(err.Error(), plant.inv)) {
-			return err
+	if r.verErr == nil {
+		r.verErr = r.lost()
+	}
+	r.ended = true
+	if err := c.inv.Check(); err != nil {
+		if plant == nil {
+			t.Fatal(err)
 		}
+		return err
 	}
 	return nil
 }

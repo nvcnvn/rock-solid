@@ -84,6 +84,7 @@ type primaryRun struct {
 	chunks        [2]core.ChunkID
 	returns       bool
 	duringPeering bool
+	ended         bool
 	ops           map[core.RequestID]faultOp
 	// version is each write's version once a primary ordered it, kept each activated interval's decision, and tainted the disks that may lack writes.
 	version map[core.RequestID]uint64
@@ -417,7 +418,8 @@ func (r *primaryRun) decision(ch core.ChunkID, i uint32) (uint64, bool) {
 }
 
 // check holds the run's end against its oracle: every acknowledged version kept, and every member that runs, is up and lists nothing mapping the kept writes applied in version order, and every two members mapping a block at one version holding the same bytes.
-func (r *primaryRun) check() error {
+// check checks the run's end: no acknowledged version dropped, and every member listing nothing maps the kept writes, holding no version unlike another's.
+func (r *primaryRun) check() {
 	c := r.c
 	type keptOp struct {
 		version uint64
@@ -431,7 +433,7 @@ func (r *primaryRun) check() error {
 		v, ok := r.keptVersion(id)
 		if rp, acked := c.cl.replies[id]; acked && rp.Status == StatusOK {
 			if k, decided := r.decision(r.ops[id].c, intervalOf(v)); decided && v > k {
-				return fmt.Errorf("%s: write %d acknowledged as %#x, interval %d kept %#x", invAckedKept, id, v, intervalOf(v), k)
+				r.fail(invAckedKept, fmt.Errorf("write %d acknowledged as %#x, interval %d kept %#x", id, v, intervalOf(v), k))
 			}
 		}
 		if ok {
@@ -450,8 +452,8 @@ func (r *primaryRun) check() error {
 			}
 		}
 	}
-	if err := r.errs[invOneVersion]; err != nil {
-		return err
+	if r.errs[invOneVersion] != nil {
+		return
 	}
 	for _, ch := range r.chunks {
 		want := make([]byte, 2*faultSpan)
@@ -475,12 +477,47 @@ func (r *primaryRun) check() error {
 					for got[i] == w[i] {
 						i++
 					}
-					return fmt.Errorf("%s: disk %d maps byte %d of block %d of %v as %#x, the kept writes give %#x", invKeptWritten, m.Disk, i, b, ch, got[i], w[i])
+					r.fail(invKeptWritten, fmt.Errorf("disk %d maps byte %d of block %d of %v as %#x, the kept writes give %#x", m.Disk, i, b, ch, got[i], w[i]))
+					return
 				}
 			}
 		}
 	}
-	return nil
+}
+
+// recover steps the cluster, the authority tending, until no running member lists a chunk but an unfound one, for up to 30 s: a member that still does fails the copy count.
+func (r *primaryRun) recover() {
+	c := r.c
+	end := c.s.Time() + 30_000_000
+	for {
+		var left error
+		p := c.reps[c.node(r.members()[0].Disk)]
+		i := p.lead(pg0)
+		for _, ch := range r.chunks {
+			if i >= 0 && p.leads[i].isUnfound(ch) {
+				continue
+			}
+			for _, m := range r.members() {
+				if r.running(m) {
+					if x, _ := c.reps[c.node(m.Disk)].Store().Index().Chunk(testPool, ch); x.ListedIn != 0 && left == nil {
+						left = fmt.Errorf("disk %d lists %+v of %v", m.Disk, x, ch)
+					}
+				}
+			}
+		}
+		if left == nil {
+			return
+		}
+		if c.s.Time() >= end {
+			r.fail(invRecovered, left)
+			return
+		}
+		r.tend()
+		if !c.step() {
+			r.fail(invRecovered, left)
+			return
+		}
+	}
 }
 
 // settled steps the cluster, the authority answering asks and recording activations, until every led PG is active and nothing but periodic timers is pending.
@@ -531,10 +568,16 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 		version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, tainted: map[uint32]bool{},
 		sent: map[[2]uint64]Update{}, acked: map[blockVersion][]byte{}, errs: map[string]error{}}
 	r.returns = r.rng.Chance(1, 2)
-	for _, inv := range []string{invAckedWhole, invOneVersion, invRemoval} {
+	for _, inv := range []string{invAckedWhole, invOneVersion, invRemoval, invAckedKept, invKeptWritten, invRecovered} {
 		c.inv.Register(inv, func() error { return r.errs[inv] })
 	}
-	// Drawn from the seed rather than r.rng, so that the other seeds run as they did before it existed.
+	c.inv.Register(invActivates, func() error {
+		if !r.ended {
+			return nil
+		}
+		return c.inactive()
+	})
+	// Drawn from the seed so other draws keep their order.
 	r.duringPeering = seed%4 == 3
 	if plant != nil {
 		plant.set(r)
@@ -578,12 +621,13 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	a.asks = append(a.asks, PGInterval{pg0, e.Interval})
 	r.publish()
 	r.settled()
-	for _, err := range []error{c.found, c.inactive(), r.check()} {
-		if err != nil && (plant == nil || strings.Contains(err.Error(), plant.inv)) {
-			return err
-		}
+	r.recover()
+	r.check()
+	r.ended = true
+	if err := c.inv.Check(); err != nil {
+		return err
 	}
-	return nil
+	return c.found
 }
 
 // Sub-block spike M6 on replicas: two clients pipeline 8 writes each to two chunks while the authority moves the PG's primary, to members that stayed live throughout or, in half the seeds, to members marked up again that missed writes, marks replicas down and up, restarts the primary, formats a member again and drains a disk of four and ends the drain, moving members. Every acknowledged version is kept, members hold the same bytes under a version, every member that lists nothing maps the kept writes applied in version order, and no move removes a leaving member while another member lacks an acknowledged version.
@@ -595,7 +639,7 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 4 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 47 of 500), a restarted primary peering in its old interval (32 of 500), a disk formatted again keeping its old disk ID (211 of 500), the epoch change model's neg-compare-table-epochs (497 of 500) and neg-compare-member-lists (303 of 500), which breaks property 3 first: a member that compares member lists logs the old primary's write tagged with an interval its table left; and the model's neg-remove-before-recovered (123 of 500), here a leaving member removed once its PG's interval activates, and neg-accept-old-report (145 of 500), each removing a moved member while its replacement lacks acknowledged writes; and neg-report-before-activate (500 of 500), a primary that reports its interval activated once it decides, before it activates.
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 4 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 47 of 500), a restarted primary peering in its old interval (32 of 500), a disk formatted again keeping its old disk ID (211 of 500), the epoch change model's neg-compare-table-epochs (497 of 500) and neg-compare-member-lists (303 of 500), which breaks property 3 first: a member that compares member lists logs the old primary's write tagged with an interval its table left; and the model's neg-remove-before-recovered (123 of 500), here a leaving member removed once its PG's interval activates, and neg-accept-old-report (145 of 500), each removing a moved member while its replacement lacks acknowledged writes; and neg-report-before-activate (500 of 500), a primary that reports its interval activated once it decides, before it activates; and a primary that recovers only its own copies (434 of 500), whose members, those a drain refilled among them, never reach the copy count.
 func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	for _, p := range []struct {
 		name string
@@ -611,6 +655,7 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 		{"removed before recovered", 3, peerPlant{invRemoval, func(r *primaryRun) { r.a.plant.removeOnActivation = true }}},
 		{"old recovered report", 3, peerPlant{invRemoval, func(r *primaryRun) { r.a.plant.oldReport = true }}},
 		{"activation reported once decided", 0, peerPlant{invActivations, func(r *primaryRun) { r.c.replicaPlants.reportDecided = true }}},
+		{"members never recovered", 1, peerPlant{invRecovered, func(r *primaryRun) { r.c.replicaPlants.recoverSelfOnly = true }}},
 	} {
 		if err := runPrimaries(t, p.seed, &p.peerPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)

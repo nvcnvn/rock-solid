@@ -394,6 +394,8 @@ type replicaPlants struct {
 	admitPastLimit bool
 	// commitOnOwnLog commits a version once the primary's own log holds it, before its members do.
 	commitOnOwnLog bool
+	// recoverSelfOnly has the primary recover only its own copies, never a member's.
+	recoverSelfOnly bool
 	// readBelowMinLive serves reads in an interval with fewer than min_live live members;
 	// freshGrantNoCheck grants a lease afresh to a holder that reported an older table.
 	readBelowMinLive  bool
@@ -609,6 +611,7 @@ func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out
 	r.leads[i].active, r.leads[i].serving, r.leads[i].peer = true, true, nil
 	held := r.leads[i].held
 	r.leads[i].held = nil
+	was := r.replaying
 	r.replaying = true
 	for _, h := range held {
 		if h.hold < r.leads[i].since {
@@ -618,7 +621,7 @@ func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out
 		ev := core.Event{Kind: core.EvNetRecv, Peer: h.peer, Msg: h.msg}
 		r.recv(ctx, &ev, out)
 	}
-	r.replaying = false
+	r.replaying = was
 	r.drain(ctx, out)
 	return nil
 }
