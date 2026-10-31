@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"testing"
 
@@ -25,13 +26,11 @@ var errOracle = errors.New("a disk differs from the acknowledged writes applied 
 
 type subClient struct {
 	c    *rcluster
-	h    *sim.History
 	rng  *core.Rand
 	run  *replicatedSubBlocks
-	id   uint32
 	left int
 	ids  []core.RequestID
-	ops  *[]subOp
+	ops  map[core.RequestID]subOp
 }
 
 type subOp struct {
@@ -60,9 +59,9 @@ func (sc *subClient) Next(ctx *core.Context, acts []core.Action) []core.Action {
 	for i := range data {
 		data[i] = byte(sc.rng.Below(255) + 1)
 	}
-	op := sc.h.Invoke(sc.id, [sim.OpWords]uint64{uint64(off), uint64(n)})
-	*sc.ops = append(*sc.ops, subOp{off: off, data: data})
-	id := core.RequestID(op + 1)
+	sc.c.nextID++
+	id := sc.c.nextID
+	sc.ops[id] = subOp{off: off, data: data}
 	sc.ids = append(sc.ids, id)
 	ch := chunkIn(pg0, 4, 0)
 	u := Update{Kind: KindWrite, ID: id, PG: sc.c.pgFields(pg0), Session: 1, Incarnation: 1, Chunk: ch, Off: off, Len: n}
@@ -78,38 +77,29 @@ func (sc *subClient) Next(ctx *core.Context, acts []core.Action) []core.Action {
 	return append(acts, a)
 }
 
-// clientReply decodes a replica primary's reply to a client's write as the history's operation ID − 1, with its version and status.
-func clientReply(m *core.Msg) (int, [sim.OpWords]uint64, bool) {
-	var rp Response
-	if m.Len == 0 || DecodeResponse(m.Inline(), 0, &rp) != nil || rp.Kind != KindReply {
-		return 0, [sim.OpWords]uint64{}, false
-	}
-	return int(rp.ID) - 1, [sim.OpWords]uint64{rp.Version, uint64(rp.Status)}, true
-}
-
-// run reports the first byte where the primary's reads or a member's disk differ from the acknowledged writes applied in version order.
+// run reports the first byte where a member's disk differs from the acknowledged writes applied in version order, or a chunk history with no linearizable order.
 func (r replicatedSubBlocks) run(t *testing.T, seed uint64) error {
 	s := sim.New(seed, sim.DefaultSettings())
-	h := sim.NewHistory(s, r.clients*r.writes)
-	h.Replies(clientReply)
 	c := newRClusterOn(t, rtable(4, 2), s)
+	x := c.record()
 	c.reps[c.primary(pg0)].Store().plant.mergeCommitted = r.mergeCommitted
 	rng := core.NewRand(seed)
-	var ops []subOp
-	for i := range r.clients {
-		c.s.Node(c.client.Node).AddActor(c.client, &subClient{c: c, h: h, rng: rng.Fork(), run: &r, id: uint32(i), left: r.writes, ops: &ops})
+	ops := map[core.RequestID]subOp{}
+	for range r.clients {
+		c.addClient(&subClient{c: c, rng: rng.Fork(), run: &r, left: r.writes, ops: ops})
 	}
 	c.settle()
 	type acked struct {
 		version uint64
-		op      int
+		id      core.RequestID
 	}
 	var done []acked
-	for i, op := range h.Ops() {
-		if !op.Done || Status(op.Output[1]) != StatusOK {
-			return fmt.Errorf("write %d answered %+v", i, op)
+	for _, id := range slices.Sorted(maps.Keys(ops)) {
+		rp, ok := c.cl.replies[id]
+		if !ok || rp.Status != StatusOK {
+			return fmt.Errorf("write %d answered %+v", id, rp)
 		}
-		done = append(done, acked{op.Output[0], i})
+		done = append(done, acked{rp.Version, id})
 	}
 	if len(done) != r.clients*r.writes {
 		return fmt.Errorf("%d writes of %d made", len(done), r.clients*r.writes)
@@ -117,12 +107,16 @@ func (r replicatedSubBlocks) run(t *testing.T, seed uint64) error {
 	slices.SortFunc(done, func(a, b acked) int { return cmp.Compare(a.version, b.version) })
 	want := make([]byte, r.span+r.maxLen+core.BlockSize)
 	for _, a := range done {
-		copy(want[ops[a.op].off:], ops[a.op].data)
+		copy(want[ops[a.id].off:], ops[a.id].data)
 	}
 	ch := chunkIn(pg0, 4, 0)
-	blocks := uint16(len(want) / core.BlockSize)
+	x.readBack(uint32(len(want)), ch)
+	return errors.Join(sameBytes(c, ch, want), x.check())
+}
+
+func sameBytes(c *rcluster, ch core.ChunkID, want []byte) error {
 	for d := range 3 {
-		for b := range blocks {
+		for b := range uint16(len(want) / core.BlockSize) {
 			if got := c.diskBlock(d, ch, b); !bytes.Equal(got, want[int(b)*core.BlockSize:][:core.BlockSize]) {
 				i := 0
 				for got[i] == want[int(b)*core.BlockSize+i] {

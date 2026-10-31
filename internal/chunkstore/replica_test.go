@@ -62,6 +62,8 @@ type rcluster struct {
 	// auth, once reporting is set, is the authority every replica heartbeats, from each start.
 	auth      core.NodeID
 	reporting bool
+	// hist, once set, records every client write, punch and read.
+	hist *chunkHist
 }
 
 type sendKey struct {
@@ -246,6 +248,9 @@ func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Ac
 	if c.onPass != nil {
 		c.onPass(d, out.Actions)
 	}
+	if c.hist != nil {
+		c.hist.ordered(c.reps[d])
+	}
 	for i := range out.Actions {
 		a := &out.Actions[i]
 		var u Update
@@ -424,6 +429,7 @@ func (c *rcluster) update(pgf PGFields, ch core.ChunkID, off uint32, data []byte
 			a.Msg.Buf = buf
 			c.cl.sent[id] = buf
 		}
+		c.hist.invoke(ctx, 0, &a)
 		return append(acts, a)
 	})
 	return id
@@ -440,6 +446,7 @@ func (c *rcluster) read(pg core.PGID, ch core.ChunkID, off, n uint32, to int) co
 	c.s.Node(c.client.Node).Call(c.client, func(ctx *core.Context, acts []core.Action) []core.Action {
 		a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(to)}}
 		a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendRead(nil, &rd)))
+		c.hist.invoke(ctx, 0, &a)
 		return append(acts, a)
 	})
 	return id

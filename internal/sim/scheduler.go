@@ -791,7 +791,7 @@ func (n *Node) absorb(l uint32, acts []core.Action) {
 			}
 		case core.ActNetSend:
 			if s.history != nil {
-				s.history.sent(&a)
+				s.history.sent(n.pool, &a)
 			}
 			s.send(n, l, &a)
 			continue

@@ -588,6 +588,13 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	c.onPass = r.pass
 	c.onFormat = r.formatted
 	watchEpochs(c, &a.rec)
+	x := c.record()
+	c.inv.Register(invLinearizable, func() error {
+		if !r.ended {
+			return nil
+		}
+		return x.check()
+	})
 	if plant != nil {
 		c.planted = true
 		c.inv.Only(plant.inv)
@@ -595,7 +602,7 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	for range 2 {
 		pc := &primaryClient{r: r, rng: r.rng.Fork(), left: 48, pipe: 8, at: map[core.RequestID]core.Tick{}}
 		r.clients = append(r.clients, pc)
-		c.s.Node(c.client.Node).AddActor(c.client, pc)
+		c.addClient(pc)
 	}
 	busy := func() bool {
 		return slices.ContainsFunc(r.clients, func(pc *primaryClient) bool { return pc.left > 0 })
@@ -623,6 +630,7 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	r.settled()
 	r.recover()
 	r.check()
+	x.readBack(2*faultSpan, r.chunks[:]...)
 	r.ended = true
 	if err := c.inv.Check(); err != nil {
 		return err

@@ -748,6 +748,13 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 		}
 		return f.settled()
 	})
+	x := c.record()
+	c.inv.Register(invLinearizable, func() error {
+		if !f.ended {
+			return nil
+		}
+		return x.check()
+	})
 	if plant != nil {
 		c.planted = true
 		c.inv.Only(plant.inv)
@@ -759,7 +766,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 	for range clients {
 		fc := &faultClient{f: f, rng: f.rng.Fork(), left: writes, pipe: 1 + int(f.rng.Below(8))}
 		fcs = append(fcs, fc)
-		c.s.Node(c.client.Node).AddActor(c.client, fc)
+		c.addClient(fc)
 	}
 	busy := func() bool { return slices.ContainsFunc(fcs, func(fc *faultClient) bool { return fc.left > 0 }) }
 	down := func() bool {
@@ -792,6 +799,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 			t.Fatalf("request %d answered %d times", id, f.replied[id])
 		}
 	}
+	x.readBack(2*faultSpan, f.chunks[:]...)
 	f.dirty, f.ended = true, true
 	if err := c.inv.Check(); err != nil {
 		if plant == nil {

@@ -429,6 +429,13 @@ func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 		}
 		return c.incarnations(r.writes)
 	})
+	x := c.record()
+	c.inv.Register(invLinearizable, func() error {
+		if !r.ended {
+			return nil
+		}
+		return x.check()
+	})
 	c.onPass = r.pass
 	epochs := c.onEvent
 	c.onEvent = func(d int, ev *core.Event, done bool) {
@@ -448,10 +455,9 @@ func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 	die := now + 4_000_000 + core.Tick(r.rng.Below(8_000_000))
 	first := &incWriter{r: r, rng: r.rng.Fork(), inc: 1, start: now, stop: die, at: map[core.RequestID]core.Tick{}, ops: map[core.RequestID]faultOp{}, hello: true}
 	second := &incWriter{r: r, rng: r.rng.Fork(), inc: 2, start: die + core.Tick(r.rng.Below(1_000_000)), stop: now + 25_000_000, at: map[core.RequestID]core.Tick{}, ops: map[core.RequestID]faultOp{}}
-	cl := c.s.Node(c.client.Node)
-	cl.AddActor(c.client, first)
-	cl.AddActor(c.client, second)
-	cl.AddActor(c.client, &pgReader{r: r, rng: r.rng.Fork()})
+	c.addClient(first)
+	c.addClient(second)
+	c.addClient(&pgReader{r: r, rng: r.rng.Fork()})
 	r.next = now + 1_000_000
 	end := now + 30_000_000
 	for c.s.Time() < end+10_000_000 {

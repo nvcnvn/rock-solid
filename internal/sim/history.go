@@ -23,20 +23,24 @@ type Op struct {
 type History struct {
 	s      *Scheduler
 	ops    []Op
-	decode func(m *core.Msg) (op int, out [OpWords]uint64, ok bool)
+	decode func(a *core.Action, data []byte) (op int, out [OpWords]uint64, ok bool)
 }
 
-// Replies completes operations from the client replies any machine sends: decode names the operation a send marked Reply answers and its result, or reports false for any other.
-func (h *History) Replies(decode func(m *core.Msg) (op int, out [OpWords]uint64, ok bool)) {
+// Replies completes operations from the client replies any machine sends: decode, given a send marked Reply and the sender's bytes of its buffer, nil for none, names the operation it answers and its result, or reports false for any other.
+func (h *History) Replies(decode func(a *core.Action, data []byte) (op int, out [OpWords]uint64, ok bool)) {
 	h.decode = decode
 	h.s.history = h
 }
 
-func (h *History) sent(a *core.Action) {
+func (h *History) sent(p *Pool, a *core.Action) {
 	if !a.Reply {
 		return
 	}
-	if op, out, ok := h.decode(&a.Msg); ok && op >= 0 && op < len(h.ops) {
+	var data []byte
+	if a.Msg.Buf != core.NoBuf {
+		data = p.Bytes(a.Msg.Buf)
+	}
+	if op, out, ok := h.decode(a, data); ok && op >= 0 && op < len(h.ops) {
 		h.Complete(op, out)
 	}
 }
