@@ -392,6 +392,8 @@ type replicaPlants struct {
 	reorderAfterOther bool
 	// admitPastLimit orders a plain write that adds live data past a member's write_limit.
 	admitPastLimit bool
+	// commitOnOwnLog commits a version once the primary's own log holds it, before its members do.
+	commitOnOwnLog bool
 	// readBelowMinLive serves reads in an interval with fewer than min_live live members;
 	// freshGrantNoCheck grants a lease afresh to a holder that reported an older table.
 	readBelowMinLive  bool
@@ -1240,7 +1242,7 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 
 func (r *Replica) tryCommit(ctx *core.Context, i int) {
 	v := &r.vers[i]
-	if v.done || !v.logged || v.commit || v.acked != 1<<v.n-1 {
+	if v.done || !v.logged || v.commit || v.acked != 1<<v.n-1 && !r.plant.commitOnOwnLog {
 		return
 	}
 	v.commit = true
