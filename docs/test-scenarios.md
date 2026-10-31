@@ -5331,12 +5331,13 @@ test's alone.
   answered OK with. A read returns the chunk's version and bytes; a read at a version, that
   version's bytes. A punch of an absent chunk is answered OK with no version and changes nothing.
   `TestTheChunkModel` gives each rule a history that holds and one that breaks it.
-- **Results.** A write or punch answered OK, and one refused for its `expect_ver`, which the store
-  checks as it orders it, are definite; so is a read answered OK. Every other answer, `NoSpace` and
-  interval refusals included, and no answer leave the result unknown: the store refuses `NoSpace`
-  after ordering when its log stalls, and peering can keep a version refused after it was sent to
-  members. A write the primary never ordered cannot take effect and is left out, as is a read with
-  no answer.
+- **Results.** A write, punch or read answered OK is definite. Every other answer and no answer
+  leave the result unknown: the store refuses `NoSpace` after ordering when its log stalls, peering
+  can keep a version refused for its interval after it was sent to members, and a refusal for an
+  `expect_ver` compares it with the newest version ordered, pending ones included, which a later
+  peering can drop, so the refusal fits no order of what the chunk kept. A write the primary never
+  ordered cannot take effect and is left out, as is a read with no answer. No run sends an
+  `expect_ver` or reads `at_ver` yet; `TestTheChunkModel` alone checks their rules.
 - **An unknown write** is checked as maybe applied, with no completion, unless a later interval's
   peering decided its version: kept, it takes effect like one answered OK; dropped, it is left out.
   Without that, the writes a failed primary refuses, a few dozen in a fault seed, each taking effect
@@ -5348,7 +5349,8 @@ test's alone.
   `TestAResendAfterALostAcknowledgmentIsASecondWrite` plants the case: client A's write of X
   commits as 1.1 and its reply is lost, a read sees X, client B writes Y as 1.2, a read sees Y, A
   sends X again, which commits as 1.3, and a read sees X. As two writes the history is
-  linearizable; with the two attempts one operation, the reads' X, Y, X fit no order. So today a
+  linearizable. As one operation, answered 1.3, no write takes 1.1, which the first read returned,
+  so no order fits; the reads' X, Y, X are the bytes a client sees. So today a
   client gets the weaker guarantee, and the check passes only because it counts each attempt.
 - Porcupine finds a linearizable order for every chunk of every history the runs record, over the
   seeds `scripts/seeds.sh` gives them: 1,000 fault seeds, 500 each of the primary-change, read and

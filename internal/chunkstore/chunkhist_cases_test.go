@@ -60,11 +60,8 @@ func read(off uint32, data string, call, ret int64, ver uint64) scripted {
 	return scripted{histOp: histOp{kind: histRead, off: off, n: uint32(len(data))}, call: call, ret: ret, out: [sim.OpWords]uint64{ver, uint64(StatusOK), hashOf([]byte(data))}}
 }
 
-func expecting(s scripted, ver uint64, st Status) scripted {
-	s.expect, s.hasExpect, s.out[1] = ver, true, uint64(st)
-	if st != StatusOK {
-		s.out[0] = 0
-	}
+func expecting(s scripted, ver uint64) scripted {
+	s.expect, s.hasExpect = ver, true
 	return s
 }
 
@@ -87,10 +84,8 @@ func TestTheChunkModel(t *testing.T) {
 			read(9, "\x00a\x00\x00", 5, 6, v1), "a read missing a byte the write gave"},
 		{"a punch", []scripted{write(0, "abcd", 1, 2, v1), punch(1, 2, 3, 4, v2), read(0, "a\x00\x00d", 5, 6, v2)},
 			read(0, "abcd", 7, 8, v1), "a read of the version the punch replaced"},
-		{"a write expecting the chunk's version", []scripted{write(0, "a", 1, 2, v1), expecting(write(0, "b", 3, 4, v2), v1, StatusOK)},
-			expecting(write(0, "c", 5, 6, v3), v1, StatusOK), "a write expecting a version the chunk passed, answered OK"},
-		{"a write refused for its expected version", []scripted{write(0, "a", 1, 2, v1), expecting(write(0, "b", 3, 4, 0), 0, StatusMismatch)},
-			expecting(write(0, "b", 5, 6, 0), v1, StatusMismatch), "a write refused though it expected the chunk's version"},
+		{"a write expecting the chunk's version", []scripted{write(0, "a", 1, 2, v1), expecting(write(0, "b", 3, 4, v2), v1)},
+			expecting(write(0, "c", 5, 6, v3), v1), "a write expecting a version the chunk passed, answered OK"},
 		{"a read at a version", []scripted{write(0, "a", 1, 2, v1), write(0, "b", 3, 4, v2), readAt(read(0, "a", 5, 6, 0), v1)},
 			readAt(read(0, "b", 7, 8, 0), v1), "a read at a version returning a later version's bytes"},
 		{"an unknown write seen", []scripted{write(0, "a", 1, 2, v1), write(0, "b", 3, 0, v2), read(0, "b", 5, 6, v2)},
@@ -147,8 +142,8 @@ func TestPlantedBugsBreakChunkHistories(t *testing.T) {
 // A planted resend after a lost acknowledgment, with another client's write between: client A's
 // write of X commits as 1.1 and its reply is lost, a read sees X, client B writes Y as 1.2, a read
 // sees Y, A sends X again, which commits as 1.3, and a read sees X. With each attempt its own write,
-// as the recorder logs them, the history is linearizable; with the two attempts one write, the
-// reads' X, Y, X fit no order.
+// as the recorder logs them, the history is linearizable; with the two attempts one write answered
+// 1.3, no write takes the 1.1 the first read returned, so no order fits.
 func TestAResendAfterALostAcknowledgmentIsASecondWrite(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	x := c.record()

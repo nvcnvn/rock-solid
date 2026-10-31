@@ -141,9 +141,10 @@ func (x *chunkHist) invoke(ctx *core.Context, client uint32, a *core.Action) {
 	x.ops = append(x.ops, op)
 }
 
-// reply completes an operation from a replica's reply to the client: a write or punch answered OK
-// or refused for its expected version, which it was never ordered under, and a read answered OK.
-// Any other answer leaves the result unknown, so the operation stays without a completion.
+// reply completes an operation from a replica's reply to the client: a write, punch or read
+// answered OK. Any other answer leaves the result unknown, so the operation stays without a
+// completion; a refusal for an expected version among them, since the version it was compared with
+// may be pending and later dropped.
 func (x *chunkHist) reply(a *core.Action, data []byte) (int, [sim.OpWords]uint64, bool) {
 	var rp Response
 	if a.Peer != x.c.client || a.Msg.Len < headSize || DecodeResponse(a.Msg.Inline(), len(data), &rp) != nil {
@@ -157,7 +158,7 @@ func (x *chunkHist) reply(a *core.Action, data []byte) (int, [sim.OpWords]uint64
 	switch {
 	case op.kind == histRead && rp.Kind == KindReadReply && rp.Status == StatusOK:
 		return i, [sim.OpWords]uint64{rp.Version, uint64(rp.Status), hashOf(data[op.off%core.BlockSize:][:op.n])}, true
-	case op.kind != histRead && rp.Kind == KindReply && (rp.Status == StatusOK || rp.Status == StatusMismatch):
+	case op.kind != histRead && rp.Kind == KindReply && rp.Status == StatusOK:
 		return i, [sim.OpWords]uint64{rp.Version, uint64(rp.Status)}, true
 	}
 	return 0, [sim.OpWords]uint64{}, false
@@ -299,8 +300,7 @@ func sameState(a, b *modelState) bool {
 // primary numbers a chunk's versions from its interval and peering keeps every version below a kept
 // one; and it never passes over a version another write was answered OK with, which could then
 // never take effect. A punch answered OK with no version, as one of an absent chunk is, finds the
-// chunk at version 0 and changes nothing; a write refused for its expected version takes no effect
-// while the chunk is at another. One with no completion whose version a later peering kept takes
+// chunk at version 0 and changes nothing. One with no completion whose version a later peering kept takes
 // effect at it like one answered OK, one whose version it dropped is left out, and one no peering
 // decided takes effect at its version if it can there, and is otherwise no operation, so it may take
 // effect or never: placed after a later version of its chunk, or last. A read returns the chunk's
@@ -331,7 +331,7 @@ func (x *chunkHist) model() porcupine.Model {
 					}
 					v := x.ops[o.Input.([sim.OpWords]uint64)[3]].version
 					for _, q := range part {
-						if r := q.Output.(lincheck.Result); r.Done && r.Output[0] > v && q.Return < o.Return {
+						if r := q.Output.(lincheck.Result); r.Done && !x.ops[q.Input.([sim.OpWords]uint64)[3]].hasAt && r.Output[0] > v && q.Return < o.Return {
 							o.Return = q.Return
 						}
 					}
@@ -355,9 +355,6 @@ func (x *chunkHist) model() porcupine.Model {
 				return at != nil && hashOf(at.bytes(op.off, op.n)) == out.Output[2], s
 			}
 			expected := !op.hasExpect || op.expect == s.ver
-			if out.Done && Status(out.Output[1]) == StatusMismatch {
-				return !expected, s
-			}
 			v := op.version
 			if out.Done {
 				v = out.Output[0]
