@@ -52,8 +52,8 @@ type diskAt struct {
 }
 
 type placementStats struct {
-	runs, moves, bound, computations, figures int
-	worstReach                                float64
+	runs, moves, bound, computations, figures, partial int
+	worstReach                                         float64
 }
 
 func TestPlacementKeepsItsRules(t *testing.T) {
@@ -63,8 +63,8 @@ func TestPlacementKeepsItsRules(t *testing.T) {
 	}
 	stats := &placementStats{}
 	seeds.Run(t, 0, n, func(seed uint64) { placementRun(t, seed, stats) })
-	t.Logf("%d seeds: a disk added moved %d members against a lower bound of %d; available + held at worst %.2f%% under balanced; at most %d computations to settle; pool figures checked on %d tables",
-		stats.runs, stats.moves, stats.bound, 100*stats.worstReach, stats.computations, stats.figures)
+	t.Logf("%d seeds: a disk added moved %d members against a lower bound of %d; available + held at worst %.2f%% under balanced; at most %d computations to settle; pool figures checked on %d tables, %d partial tables skipped",
+		stats.runs, stats.moves, stats.bound, 100*stats.worstReach, stats.computations, stats.figures, stats.partial)
 	// A single seed, or a few, can sit well above their bound; the 5% is a mean over at least 200 runs.
 	if stats.runs >= 200 && 100*stats.moves > 105*stats.bound {
 		t.Fatalf("disk additions over %d seeds moved %d members, over 5%% above the lower bound %d", stats.runs, stats.moves, stats.bound)
@@ -87,11 +87,17 @@ func placementRun(t *testing.T, seed uint64, stats *placementStats) {
 			slots += int(n)
 		}
 		if slots != int(l.pool.PGCount)*l.pool.width() {
+			stats.partial++
 			return nil
 		}
 		stats.figures++
 		f := l.figures()
-		return figureBounds(l.pool, &f)
+		if err := figureBounds(l.pool, &f); err != nil {
+			return err
+		}
+		return worstLoss(l.pool, func(id uint32) uint32 {
+			return l.disks[slices.IndexFunc(l.disks, func(d Disk) bool { return d.ID == id })].Node
+		}, &f)
 	})
 	h.next(t, l, l.inputs(allMoves))
 	for range 30 {

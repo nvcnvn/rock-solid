@@ -297,7 +297,7 @@ func TestPoolFiguresHoldTheirBounds(t *testing.T) {
 		if reach := f.Available + f.Held; reach > empty.Available+1 || reach+1 < empty.Available {
 			t.Fatalf("holding %d moves available + held to %d from %d", held, reach, empty.Available)
 		}
-		if err := worstLoss(p, disks, &f); err != nil {
+		if err := worstLoss(p, func(id uint32) uint32 { return disks[id].Node }, &f); err != nil {
 			t.Fatalf("pool %+v held %d: %v", p, held, err)
 		}
 		var c Conditions
@@ -348,7 +348,8 @@ func figureBounds(p Pool, f *Figures) error {
 	return nil
 }
 
-func worstLoss(p Pool, disks []Disk, f *Figures) error {
+// worstLoss checks the figures against the worst single loss: the CannotReprotect rules, and reprotectable the least balanced over the domains left by any one domain's loss, and no more than balanced after any one disk's; nodeOf is each disk ID's node.
+func worstLoss(p Pool, nodeOf func(id uint32) uint32, f *Figures) error {
 	w := uint64(p.Replicas)
 	caps := make([]uint64, len(f.Domains))
 	for i, d := range f.Domains {
@@ -376,7 +377,7 @@ func worstLoss(p Pool, disks []Disk, f *Figures) error {
 	}
 	for i := range f.Disks {
 		left := slices.Clone(caps)
-		left[f.domainIndex(disks[f.Disks[i].ID].Node)] -= f.Disks[i].Capacity
+		left[f.domainIndex(nodeOf(f.Disks[i].ID))] -= f.Disks[i].Capacity
 		if b := balanced(left, w, 1, 1); f.Reprotectable > b {
 			return fmt.Errorf("reprotectable %d above balanced %d after losing disk %d", f.Reprotectable, b, f.Disks[i].ID)
 		}
