@@ -5126,7 +5126,9 @@ the head of [Peering and read leases](#peering-and-read-leases).
   question "Stops in place on QEMU guests that run on kvm-clock"). Invariant 1 is judged on the
   replicas' own state, after every step and as each read arrives, by the condition `read` itself
   serves on: a read's reply can come a store read after its lease check, and any member answers a
-  read of a frozen version.
+  read of a frozen version. A read's version is judged on the replies: one answered OK leaves with
+  a version a primary already acknowledged to a write, or one a later activated interval kept, and
+  at the run's end no interval activated after it keeps less of its chunk.
 - The write-limit run (`TestWritesPassTheWriteLimitOnlyWhereAdmitted`, 200): 3 disks and 4 PGs on
   all three, the detector, every disk's `write_limit` 300 blocks above its fill at the start. A
   client writes 16 chunks of 64 blocks, 8 at a time: a punch 1 write in 10, an overwrite of an
@@ -5158,7 +5160,7 @@ run reports it; the lease pair run has no simulated cluster, and checks its own 
 | Invariant | Property | Runs |
 | --- | --- | --- |
 | "no PG serves reads from two primaries at once" | 1 | Read run, scripted traces; "the holder holds a lease its grantor no longer keeps" in the lease pair run |
-| No read returns a version before it commits, or one later lost | 1, 4 | Not checked by a run yet: no seeded run compares the versions reads return with the commits and decisions. A primary reads from its index, which maps a version only once it commits (`TestPartialBlocksAreMergedAtThePrimary`), and the fault run's byte check below holds that index to the answered and kept writes after every step |
+| "no read returns a version before it commits, or one later lost" | 1, 4 | Read run, as each reply leaves and at its end |
 | "no member logs a write tagged with an earlier interval of its PG than its table's" | 3 | Fault and primary-change runs |
 | "no acknowledged version is ever dropped" | 4 | Primary-change run, at its end |
 | "a member listing nothing maps the kept writes applied in version order" | 4, 8 | Primary-change run, at its end |
@@ -5189,11 +5191,12 @@ is out of reach.
 
 **Planted bugs.** Each row of the epoch change model's counterexample table, except the two for
 property 2, which [MetaStore invariants](#metastore-invariants) plants, is a variant of the code
-(for the reboot that takes no time, of the simulated reboot) that fails the invariant its property
-maps to. A planted run checks that invariant alone, and the test runs a failing seed of the first
-500. A counterexample whose trace needs several faults coordinated, which the seeded runs land one
-at a time, is a scripted trace in `TestPlantedBugsBreakTheirTraces` instead: run every commit, it
-must pass unplanted and break its invariant planted.
+(for the reboot that takes no time and for peer messages handled after reads, of the simulated
+reboot and loop) that fails the invariant its property maps to. A planted run checks that
+invariant alone, and the test runs a failing seed of the first 500. A counterexample whose trace
+needs several faults coordinated, which the seeded runs land one at a time, is a scripted trace in
+`TestPlantedBugsBreakTheirTraces` instead, or for a lease rule in `internal/lease`'s own: run every
+commit, it must pass unplanted and break its invariant planted.
 
 | Counterexample | Planted as | Run | Seeds of 500 | First | Invariant |
 | --- | --- | --- | --- | --- | --- |
@@ -5216,10 +5219,10 @@ must pass unplanted and break its invariant planted.
 | A held write ordered again although another primary led | The lead's term kept across another primary's interval | Trace: P, peering cut off from Q, holds W; interval 3 makes Q primary with P in `maintenance`; the successor's W′ and W2 complete at Q; interval 4 makes P primary again | | | Property 11's |
 | A kept primary reads below `min_live` | | Trace: interval 2 marks disk 3 down; disk 3 restarts, and interval 3 makes it primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone | | | Property 1's |
 | The 13 lease clock rows from the holder's slower clock to step check on grants only, and no restart wait | `internal/lease` plants on `Holder` and `Grantor` | Lease pair | Below | | "the holder holds a lease its grantor no longer keeps", or for property 10 "tripped" |
-| A lease kept across a grantor's new run ID | Not planted yet | | | | |
+| A lease kept across a grantor's new run ID | The holder keeps its lease and window at a heartbeat from a new run | Trace in `internal/lease` (`TestALeaseKeptAcrossANewRunBreaksItsTrace`): the holder stops in place 1 s after its lease formed, the grantor's heartbeats lost; the grantor resumes with a new run ID, heartbeats once and lets its grant end; the holder continues at 5 s. The pair run stops one side at a time and never reaches it (0 of 5,000) | | | "the holder holds a lease its grantor no longer keeps" |
 | A reboot that takes no time | The simulated reboot | Trace: grantor 3 reboots the instant after a grant, cut off from primary 2, its new boot 2% fast, and comes back primary with disk 2 in `maintenance` | | | Property 1's |
-| Peer messages handled after reads in a pass | Not planted yet | | | | |
-| Peering reaches only the last activated interval and the current one | Not planted yet | | | | |
+| Peer messages handled after reads in a pass | The simulated loop's first pass after a pause delivers client reads first | Trace: primary 2 stops in place with its clocks frozen for 10 s; interval 2 makes disk 3 primary with disk 2 in `maintenance`, handed to disks 1 and 3; a read tagged with interval 1 reaches disk 2 at 9 s, behind disk 3's heartbeats | | | Property 1's, as the read arrives |
+| Peering reaches only the last activated interval and the current one | | Trace: intervals 2 (disk 1 replaces disk 3) and 3 (disk 1 in `maintenance`) activate under primary 2 but the leader records neither; disk 2, cut off from disks 1 and 3, reads on in 3 with no lease while interval 4 makes disk 3 primary with disk 2 in `maintenance` | | | Property 1's |
 | A fresh grant with no table check | | Trace: interval 2 makes disk 3 primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone; disk 2 asks afresh once its lease lapses | | | Property 1's |
 
 The lease pair run's plants, seeds of 500 failing and the first: the holder ending on its slower
@@ -5229,6 +5232,11 @@ margin `max(lease_drift, 1 − 1/B)` 3 of 5,000 (1,056: it needs a rate rise aft
 partition after a grant), no new window at a new run ID 12 (6), no end of leases on `Resumed` 8
 (28), no step check 55 (1), one on grants only 56 (1), no restart wait 96 (0); for property 10, the
 step check at `1 + lease_drift / 2` 25 (3) and against a grant that gave no lease 3 (265).
+
+The read run also plants a primary that commits a version once its own log holds it, before its
+members do: a read returns a version the next interval drops at 279 seeds of 500, seed 0 first
+(`TestPlantedReadBugsBreakTheReadRun`). It is no row of the model's table; it shows the read
+version check firing.
 
 The write-limit run's planted bug, a primary ordering a plain write that adds live data past a
 member's limit, fails all 500 seeds, seed 0 first (`TestPlantedLimitBugBreaksTheLimitRun`).
