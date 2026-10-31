@@ -379,7 +379,7 @@ func (w *incWriter) Next(ctx *core.Context, acts []core.Action) []core.Action {
 	return append(acts, a)
 }
 
-// pgReader reads a block of a chunk of a random PG at a random disk node every 5 to 25 ms, tagged with one of the last four tables.
+// pgReader reads the first 4 blocks of a chunk of a random PG at a random disk node every 5 to 25 ms, tagged with one of the last four tables or, half the time, with the node's own, as a client that missed tables with it would.
 type pgReader struct {
 	r    *readRun
 	rng  *core.Rand
@@ -396,9 +396,14 @@ func (rd *pgReader) Next(ctx *core.Context, acts []core.Action) []core.Action {
 	_, e := tbl.entry(pg)
 	c.nextID++
 	id := c.nextID
-	read := Read{ID: id, PG: PGFields{Epoch: tbl.Epoch, PG: pg, Interval: e.Interval}, Chunk: chunkIn(pg, 4, uint32(rd.rng.Below(2))), Len: core.BlockSize}
+	read := Read{ID: id, PG: PGFields{Epoch: tbl.Epoch, PG: pg, Interval: e.Interval}, Chunk: chunkIn(pg, 4, uint32(rd.rng.Below(2))), Len: 4 * core.BlockSize}
 	r.reads[id] = readVersion{pg: pg, chunk: read.Chunk}
 	a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(rd.rng.Below(uint64(len(c.reps))))}}
+	if own := c.reps[a.Peer.Node].table; rd.rng.Chance(1, 2) {
+		if _, e := own.entry(pg); e != nil {
+			read.PG = PGFields{Epoch: own.Epoch, PG: pg, Interval: e.Interval}
+		}
+	}
 	a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendRead(nil, &read)))
 	return append(acts, a)
 }
@@ -511,14 +516,14 @@ func TestNoPGServesReadsFromTwoPrimaries(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (27 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's; and a primary that commits a version once its own log holds it (279 of 500), so that a read returns a version the next interval drops.
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (22 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's; and a primary that commits a version once its own log holds it (294 of 500), so that a read returns a version the next interval drops.
 func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 	for _, p := range []struct {
 		name string
 		seed uint64
 		readPlant
 	}{
-		{"incarnation checked on arrival", 29, readPlant{inv: invIncarnation, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
+		{"incarnation checked on arrival", 27, readPlant{inv: invIncarnation, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
 		{"commit on the primary's own log", 0, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.commitOnOwnLog = true }}},
 	} {
 		if err := runReads(t, p.seed, &p.readPlant); err == nil || !strings.Contains(err.Error(), p.inv) {

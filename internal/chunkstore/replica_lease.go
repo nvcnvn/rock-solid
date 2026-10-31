@@ -34,6 +34,9 @@ func (r *Replica) readable(ctx *core.Context, p *PoolTable, e *PGEntry) bool {
 	if e.live() < int(p.MinLive) && !r.plant.readBelowMinLive {
 		return false
 	}
+	if r.plant.noLeaseCheck {
+		return true
+	}
 	t := lease.Now(ctx)
 	for _, m := range e.Members {
 		if m.Mark == MarkUp && m.Disk != r.cfg.Disk && !r.holder.Valid(r.addr(m.Disk), t) {

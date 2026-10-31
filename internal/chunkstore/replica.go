@@ -397,9 +397,11 @@ type replicaPlants struct {
 	// recoverSelfOnly has the primary recover only its own copies, never a member's.
 	recoverSelfOnly bool
 	// readBelowMinLive serves reads in an interval with fewer than min_live live members;
-	// freshGrantNoCheck grants a lease afresh to a holder that reported an older table.
+	// freshGrantNoCheck grants a lease afresh to a holder that reported an older table; noLeaseCheck
+	// serves reads with no lease from the other up members.
 	readBelowMinLive  bool
 	freshGrantNoCheck bool
+	noLeaseCheck      bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.

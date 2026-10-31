@@ -111,12 +111,14 @@ func TestTheChunkModel(t *testing.T) {
 	}
 }
 
-// Each planted bug breaks the check of chunk histories, checked alone, at the first of the seeds of
-// 100 that fail it: a primary committing a version once its own log holds it, whose reads return a
-// pending version the next interval drops (71 of 100); merging on the committed version (sub-block
-// spike M2, 100 of 100), which loses bytes a read back sees; and peering dropping a subset of a
-// chunk's pending versions rather than a suffix (M7, 1 of 100), which leaves a member with other
-// bytes that a read sees once that member leads.
+// Each planted bug breaks the check of chunk histories, checked alone, at the first seed that fails
+// it: a primary committing a version once its own log holds it, whose reads return a pending version
+// the next interval drops (77 of 100); an old primary serving reads with no lease check (P1, 10 of
+// 100), which a client that missed the new primary's table reads from after the new one
+// acknowledged a write; merging on the committed version (sub-block spike M2, 100 of 100), which
+// loses bytes a read back sees; and peering dropping a subset of a chunk's pending versions rather
+// than a suffix (M7, 4 of 500), which leaves a member with other bytes that a read sees once that
+// member leads.
 func TestPlantedBugsBreakChunkHistories(t *testing.T) {
 	for _, p := range []struct {
 		name string
@@ -125,6 +127,9 @@ func TestPlantedBugsBreakChunkHistories(t *testing.T) {
 	}{
 		{"commit on the primary's own log", 0, func(seed uint64) error {
 			return runReads(t, seed, &readPlant{inv: invLinearizable, set: func(r *readRun) { r.d.replicaPlants.commitOnOwnLog = true }})
+		}},
+		{"no lease check", 12, func(seed uint64) error {
+			return runReads(t, seed, &readPlant{inv: invLinearizable, set: func(r *readRun) { r.d.replicaPlants.noLeaseCheck = true }})
 		}},
 		{"M2", 0, func(seed uint64) error {
 			return replicatedSubBlocks{clients: 1, pipeline: 4, writes: 8, maxLen: 300, span: core.BlockSize, mergeCommitted: true}.run(t, seed)

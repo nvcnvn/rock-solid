@@ -5129,8 +5129,9 @@ the head of [Peering and read leases](#peering-and-read-leases).
   newest table once the detector marks it up, or after 3 s, and in half the seeds that table makes
   it lead every PG it is a member of. A client incarnation writes whole and partial blocks to 2
   chunks of each PG and dies at 4 to 12 s; its successor says hello to every disk node, reissues
-  the unanswered writes and writes on. Reads go to a random PG at a random node every 5 to 25 ms,
-  about 300 served by primaries a seed. A VM stop with every clock frozen is left out (open
+  the unanswered writes and writes on. Reads of a chunk's first 4 blocks go to a random PG at a
+  random node every 5 to 25 ms, tagged with one of the last 4 tables or, half the time, with the
+  node's own, as a client cut off with it would; about 300 are served by primaries a seed. A VM stop with every clock frozen is left out (open
   question "Stops in place on QEMU guests that run on kvm-clock"). Invariant 1 is judged on the
   replicas' own state, after every step and as each read arrives, by the condition `read` itself
   serves on: a read's reply can come a store read after its lease check, and any member answers a
@@ -5253,7 +5254,7 @@ partition after a grant), no new window at a new run ID 12 (6), no end of leases
 step check at `1 + lease_drift / 2` 25 (3) and against a grant that gave no lease 3 (265).
 
 The read run also plants a primary that commits a version once its own log holds it, before its
-members do: a read returns a version the next interval drops at 279 seeds of 500, seed 0 first
+members do: a read returns a version the next interval drops at 294 seeds of 500, seed 0 first
 (`TestPlantedReadBugsBreakTheReadRun`). It is no row of the model's table; it shows the read
 version check firing.
 
@@ -5350,20 +5351,21 @@ test's alone.
   invariants](#placement-faults-and-invariants) assert actions and record no history; the seeded
   runs land their faults.
 - **Planted bugs** (`TestPlantedBugsBreakChunkHistories`), each checking the history invariant alone,
-  with the seeds of 100 failing and the first:
+  with the seeds failing and the first:
 
-  | Planted bug | Run | Seeds of 100 | First |
+  | Planted bug | Run | Seeds failing | First |
   | --- | --- | --- | --- |
-  | A read served from a pending version: the primary commits once its own log holds a version (`commitOnOwnLog`), and the next interval drops it | Read | 71 | 0 |
-  | Merging on the committed version (sub-block M2), one client pipelining 4 writes | Sub-block | 100 | 0 |
-  | Peering dropping a subset of a chunk's pending versions, not a suffix (M7, `settleSubset`) | Primary-change | 1 | 38 |
+  | A read served from a pending version: the primary commits once its own log holds a version (`commitOnOwnLog`), and the next interval drops it | Read | 77 of 100 | 0 |
+  | An old primary serving reads with no lease check (P1, `noLeaseCheck`): a client that missed the new primary's table reads from the old one after the new one acknowledged a write | Read | 10 of 100 | 12 |
+  | Merging on the committed version (sub-block M2), one client pipelining 4 writes | Sub-block | 100 of 100 | 0 |
+  | Peering dropping a subset of a chunk's pending versions, not a suffix (M7, `settleSubset`) | Primary-change | 4 of 500 | 38 |
 
-  Not found: an old primary serving reads with no lease check (P1), and the holder ending its lease
-  on the slower of its clocks (P9's slews), each planted on the replica's read check, found no seed
-  of 100 in the read run. With no lease check two nodes may serve a PG's reads in 5 of the first 30
-  seeds, which "no PG serves reads from two primaries at once" catches, but no read reached the old
-  primary in such a window after the new one acknowledged a write to the chunk read. The lease rows
-  are the lease pair run's (`internal/lease`) and the read run's one-reader check's.
+  The M7 rate is that of the primary-change run's own check of kept bytes, which fails on the same
+  seeds. The holder ending its lease on the slower of its clocks (P9's slews) is not planted here:
+  the read run marks a cut node down after `node_down_after` (5 s), past every 4 s lease it held,
+  and a new primary waits for its members' grants to end, so no lease of the old primary outlasts
+  its grant and the plant fails no seed of 100 in either this check or the one-reader check. The
+  lease pair run (`internal/lease`) plants it alone.
 - **Cost.** Histories are split by chunk, so the check's cost is per chunk, and each run's check
   stops at 30 s, failing the seed. The model builds a state's bytes only when a read needs them.
   The checks add a few seconds to the seed runner's list on 2 processes: none of the five runs'
