@@ -5204,7 +5204,7 @@ commit, it must pass unplanted and break its invariant planted.
 | A new primary merges before it holds a kept version | Sub-block spike M8 | Primary-change | 47 | 37 | "a member listing nothing maps …" |
 | Peering stops only the previous interval | | Trace: W acknowledged on disks 2 and 3; interval 2 replaces primary 2 with disk 1, interval 3 puts disk 3 in `maintenance`, both handed to disk 1 alone | | | "no acknowledged version is ever dropped" |
 | Members compare member lists | A member accepts a write tagged with an earlier interval whose disks are its current one's | Primary-change | 303 | 1 | Property 3's: the authority trims a past interval's members once a later activation is recorded, so peering of the next interval already stopped the late write |
-| A disk ID kept across a new log ID | | Primary-change | 20 | 55 | "no acknowledged version is ever dropped" |
+| A disk ID kept across a new log ID | | Primary-change | 211 | 2 | "no disk ID names two log IDs, and no log ID is up under two disk IDs": the node runs its new log under the old disk ID |
 | A restarted primary peers in its old interval | | Primary-change | 32 | 6 | "no two members hold different data under one version" |
 | A restarted primary never asks for a new interval | | Fault (the primary-change run's end asks itself) | 69 | 7 | Property 12's |
 | An older version decided by its own interval's members | | Fault | 17 | 50 | "the primary maps exactly …" |

@@ -232,7 +232,7 @@ func (x *epochChecks) activations() error {
 	return nil
 }
 
-// identities checks the disk record: each disk ID keeps the log ID it was first given, and no log ID is up under two disk IDs.
+// identities checks the disk record and the disks the nodes run: each disk ID keeps the log ID it was first given, and no log ID is up under two disk IDs.
 func (x *epochChecks) identities() error {
 	up := map[uint64]uint32{}
 	for _, d := range x.rec.Disks() {
@@ -247,6 +247,20 @@ func (x *epochChecks) identities() error {
 			return fmt.Errorf("%s: log %#x is up under disks %d and %d", invDiskIDs, d.Log, o, d.ID)
 		}
 		up[d.Log] = d.ID
+	}
+	ran := map[uint64]uint32{}
+	for n, r := range x.c.reps {
+		if r == nil || !x.c.s.Node(uint32(n)).Up() {
+			continue
+		}
+		if l, ok := x.logs[r.cfg.Disk]; ok && l != r.cfg.Log {
+			return fmt.Errorf("%s: disk %d runs log %#x, named %#x", invDiskIDs, r.cfg.Disk, r.cfg.Log, l)
+		}
+		x.logs[r.cfg.Disk] = r.cfg.Log
+		if o, ok := ran[r.cfg.Log]; ok {
+			return fmt.Errorf("%s: log %#x runs under disks %d and %d", invDiskIDs, r.cfg.Log, o, r.cfg.Disk)
+		}
+		ran[r.cfg.Log] = r.cfg.Disk
 	}
 	return nil
 }
