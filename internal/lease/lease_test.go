@@ -21,7 +21,7 @@ type clocks struct {
 	bootRate, rawRate int64
 }
 
-// freeze stops the clocks at real for p, CLOCK_BOOTTIME advancing only p − boot of it.
+// freeze stops the clocks at real for p, CLOCK_BOOTTIME advancing boot of it, as they read from real + p on; until then they read behind.
 func (c *clocks) freeze(real, boot, p core.Tick) {
 	c.boot -= int64(p-boot) * c.bootRate / 1e9
 	c.raw -= int64(p) * c.rawRate / 1e9
@@ -374,7 +374,7 @@ func runPair(seed uint64, pl plants) error {
 		rawLim = 40_000_000
 	}
 	quiet := rng.Chance(1, 4)
-	// Drawn from the seed rather than rng, so that the other seeds run as they did before it existed.
+	// Drawn from the seed so other draws keep their order.
 	fast := quiet && seed%4 == 1
 	delay := func() core.Tick {
 		d := core.Tick(rng.Below(20_000))
@@ -464,7 +464,7 @@ func runPair(seed uint64, pl plants) error {
 					cutUntil = max(cutUntil, real+core.Tick(rng.Below(8_000_000)))
 				}
 			}
-			if tripped && quiet && rawLim <= 40_000_000 {
+			if tripped && quiet {
 				return fmt.Errorf("at real %d µs the step check tripped between a pair no fault touched", real)
 			}
 		}
@@ -478,7 +478,11 @@ func runPair(seed uint64, pl plants) error {
 			return fmt.Errorf("at real %d µs the pair holds no lease, %d µs after the first request granted", real, real-firstAsk)
 		}
 		booting := !gUp && !gStopped
-		if h.Valid(grantor, ht) && !(!booting && g.Live(holder, gc.at(real))) && !(covered && (booting || g.Waiting(gc.at(real)))) {
+		gt = gc.at(real)
+		if gStopped {
+			gt.Raw = gc.at(gDownUntil).Raw
+		}
+		if h.Valid(grantor, ht) && !(!booting && g.Live(holder, gt)) && !(covered && (booting || g.Waiting(gt))) {
 			return fmt.Errorf("at real %d µs the holder holds a lease its grantor no longer keeps", real)
 		}
 		if h.Due(grantor, ht) && (quiet || rng.Chance(9, 10)) {

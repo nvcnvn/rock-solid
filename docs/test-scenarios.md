@@ -3392,7 +3392,7 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 7 | A table that leaves a PG's interval alone never fails that PG's writes: a member accepts a write sent under any table epoch in which the PG's interval is the one its own table holds | `UnchangedIntervalAccepts` | "no write is refused for its interval while its PG's interval has not changed" |
 | 8 | A new primary merges into a chunk only once it holds every version peering kept for it: the version it merges on rests on the kept one | `MergesOnKept` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), which a merge on a missing base breaks; the sub-block spike's M8, a new primary merging before it holds the kept versions, is the planted bug that trips it ([Peering and read leases](#peering-and-read-leases)), registered by Invariant checker (phase 1) |
 | 9 | No node's table epoch or interval number goes backwards; no PG's last activated interval goes down, so a late report for interval 2, folded after 3 was recorded, changes nothing; and a table's last activated interval did activate | `TablesForward`, `Monotonic` | "no node's table epoch or PG interval number goes backwards" and "no PG's last activated interval goes down, and every activation a table records happened" |
-| 10 | A node pair whose raw rates differ by up to 4%, with no pause, reboot, network fault or refusal since first contact, and whose holder ended no leases on a step-check trip from a pair a fault touched, holds a lease within `rate_gap` (plus rounding, at the model's zero round trips) of first contact and keeps it with no step-check trip. The bound is in time, so `ci` checks it as an invariant over the model's clocks | `LeaseForms` | The lease pair run's quiet seeds: "the step check tripped between a pair no fault touched" never shows, and on 1 ms round trips a lease forms within `rate_gap` plus two round trips of the first granted request: with real round trips the bound is `rate_gap` plus two of them |
+| 10 | A node pair whose raw rates differ by up to 4%, with no pause, reboot, network fault or refusal since first contact, and whose holder ended no leases on a step-check trip from a pair a fault touched, holds a lease within `rate_gap` (plus rounding, at the model's zero round trips) of first contact and keeps it with no step-check trip. The bound is in time, so `ci` checks it as an invariant over the model's clocks | `LeaseForms` | The lease pair run's quiet seeds: "the step check tripped between a pair no fault touched" never shows, and on 1 ms round trips a lease forms within `rate_gap` plus two round trips of the first granted request, give or take the run's 10 ms steps: with real round trips the bound is `rate_gap` plus two of them |
 | 11 | Once a dead daemon's reissued write W′ and a later write W2 to the same block are acknowledged, the block never again holds the dead daemon's W | `NoResurrectedWrite` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), under the fault "a dead daemon's chunk write delivered after its successor's reissue and the pod's next write to the same block", registered by Invariant checker (phase 1), and the read run's "no write of an incarnation is acknowledged after a later incarnation's write to its chunk" |
 | 12 | Peering settles: with every step that is due taken in time, every PG eventually activates its current interval, unless the interval has fewer than `min_live` live members, a live member's disk is gone, or the table bound left a restarted primary without the new interval it asked for | `PeeringSettles` | "once membership stops changing, every PG whose current interval has at least `min_live` live members on running nodes activates it" |
 | 13 | When the leader removes a leaving member, every other member of the PG's current interval holds every acknowledged version and lists nothing: a recovered report counts only for the PG's current interval | `RemovalKeepsCopies` | "no move lowers the members of a PG holding an acknowledged version below its width" |
@@ -5139,16 +5139,18 @@ the head of [Peering and read leases](#peering-and-read-leases).
   by at most 87 blocks over the first 100 seeds; no disk may pass its limit by more than the 300
   blocks of room it had below it, a bound on the disks' own live blocks that holds whatever fills
   the primaries held and however the stores classed overwrites. Held fills are compared with the
-  limit without grants, which arrive with phase 4. A run of its own, not the read run: capacity needs punches, overwrites and grants the
-  read run's writers do not send.
-- The lease pair run (`TestNoLeaseOutlastsItsGrant` in `internal/lease`, 10,000): one holder and
-  one grantor with heartbeats, clock rates and slews drawn per seed, and in 3 seeds of 4 cuts (some
+  limit without grants, which arrive with phase 4. A run of its own, not the read run: capacity
+  needs punches, overwrites and grants the read run's writers do not send.
+- The lease pair run (`TestNoLeaseOutlastsItsGrant` in `internal/lease`, 10,000): one holder and one
+  grantor with heartbeats, clock rates and slews drawn per seed, and in 3 seeds of 4 cuts (some
   right after a grant), a grantor VM stop, a grantor reboot of 1 to 3 s, one raw-rate rise of 0.4%,
   a holder suspend and a holder stop in place. The holder's lease is valid only while the grantor
-  keeps the grant, or reboots or waits out a restart that began while the grant ran. A quarter of
-  the seeds are quiet: no step check may trip, and in a quarter of those, on 1 ms round trips, the
-  holder must hold a lease `rate_gap` plus two round trips after the grantor first granted its
-  request. The lease clock counterexamples are planted here rather than in a cluster run: the run
+  keeps the grant, or reboots or waits out a restart that began while the grant ran, judged during a
+  grantor VM stop at its frozen raw clock. A quarter of the seeds are quiet: no step check may trip,
+  and in a quarter of those, on 1 ms round trips, the holder must hold a lease `rate_gap` plus two
+  round trips after the grantor first granted its request, `rate_gap` counted on a holder raw clock
+  up to 4% slow and the run's steps of up to 10 ms allowed three times over: 138 ms against a 100 ms
+  `rate_gap`. The lease clock counterexamples are planted here rather than in a cluster run: the run
   reaches every clock trace, 500 seeds in 0.3 s.
 - The placement run (`TestPlacementKeepsItsRules`, 1,000) under [Placement
   computation](#placement-computation) checks each pool's figure bounds after every table whose
