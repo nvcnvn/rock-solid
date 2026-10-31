@@ -1465,7 +1465,7 @@ func (r *Replica) resend(out *ReplicaOutput) {
 // ErrActive reports a Settle of a chunk whose PG this disk leads and has activated in its current interval, where the chunk's next versions could take the numbers of those it drops.
 var ErrActive = errors.New("chunkstore: settle of a chunk its primary has activated")
 
-// Settle is peering's decision on chunk c, made before this disk activates as primary in a new interval: the chunk's pending versions up to keep are mapped and their clients answered, and the later ones are dropped and their clients refused. It settles nothing and returns ErrActive once the PG is active, or ErrUnresolved while one of the chunk's writes waits to be ordered or its records here are neither durable nor failed, which peering waits for, since a version whose local write then failed would be kept torn.
+// Settle is peering's decision on chunk c, made before this disk activates as primary in a new interval: the chunk's pending versions on the chain of the version keep it kept are mapped and their clients answered, and the others are dropped and their clients refused, as the store settles them. It settles nothing and returns ErrActive once the PG is active, or ErrUnresolved while one of the chunk's writes waits to be ordered or its records here are neither durable nor failed, which peering waits for, since a version whose local write then failed would be kept torn.
 func (r *Replica) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *ReplicaOutput) error {
 	if pg, ok := r.pgOf(c); ok {
 		if l := r.lead(pg); l >= 0 && r.leads[l].active {
@@ -1481,11 +1481,12 @@ func (r *Replica) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Re
 
 // settle hands the store peering's decision on chunk c and marks the versions it keeps committed.
 func (r *Replica) settle(ctx *core.Context, c core.ChunkID, keep uint64) error {
-	if err := r.st.Settle(ctx, c, keep, &r.sout); err != nil {
+	top, err := r.st.Settle(ctx, c, keep, &r.sout)
+	if err != nil {
 		return err
 	}
 	for i := range r.vers {
-		if v := &r.vers[i]; v.u.Chunk == c && v.ordered && v.u.Version <= keep {
+		if v := &r.vers[i]; v.u.Chunk == c && v.ordered && v.u.Version <= top {
 			v.commit = true
 		}
 	}

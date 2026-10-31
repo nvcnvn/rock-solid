@@ -132,7 +132,7 @@ func TestCommitsAreMappedInVersionOrder(t *testing.T) {
 }
 
 func (h *harness) settleChunk(c core.ChunkID, keep uint64) {
-	if err := h.s.Settle(&h.ctx, c, keep, &h.out); err != nil {
+	if _, err := h.s.Settle(&h.ctx, c, keep, &h.out); err != nil {
 		h.t.Fatal(err)
 	}
 	h.take()
@@ -367,7 +367,7 @@ func TestAFailedGatedWriteKeepsItsVersion(t *testing.T) {
 func TestSettleWaitsForTheChunksWritesToResolve(t *testing.T) {
 	h := newHarness(t, testConfig())
 	w := h.gated(chunkC, 0, []byte{1}, 4)
-	if err := h.s.Settle(&h.ctx, chunkC, MakeVersion(4, 1), &h.out); !errors.Is(err, ErrUnresolved) {
+	if _, err := h.s.Settle(&h.ctx, chunkC, MakeVersion(4, 1), &h.out); !errors.Is(err, ErrUnresolved) {
 		t.Fatalf("Settle with 4.1 in flight: %v", err)
 	}
 	h.take()
