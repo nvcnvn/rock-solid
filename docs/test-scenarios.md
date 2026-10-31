@@ -2859,29 +2859,35 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
   runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
   they take.
-- The list, with 4 processes on a 14-core Apple M4 Pro Mac mini running other work: 44,200 seeds in
-  about 330 s, building the test binaries included; the largest process peaked at 528 MiB resident
-  (an `internal/lsm` metamorphic shard), all four at 1.9 GiB. The pool figures' and placement rows
-  were timed on 2 processes, where the whole list took 597 s:
+- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 57,400 seeds in 812 s,
+  building the test binaries included. On 4 processes the largest process peaked at 528 MiB
+  resident (an `internal/lsm` metamorphic shard), all four at 1.9 GiB:
 
   | Test | Seeds | Time |
   | --- | --- | --- |
-  | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 5 s |
-  | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 2 s |
-  | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 16 s |
-  | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 3 s |
-  | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 40 s |
-  | `internal/disklog` `TestOracleCatchesReplayPastATornRound` | 1,000 | 5 s |
-  | `internal/disklog` `TestQuarantinedSegmentsAreNeverReused` | 500 | 5 s |
-  | `internal/disklog` `TestSlotRoundsKeepTheTraceRules` | 300 | 10 s |
-  | `internal/chunkstore` `TestReplayPastPendingWrites` | 2,000 | 8 s |
-  | `internal/lsm` `TestMetamorphic` | 1,000 | 78 s |
-  | `internal/chunkstore` `TestMetamorphic` | 1,000 | 76 s |
-  | `internal/chunkstore` `TestCleanerSurvivesCrashes` | 500 | 11 s |
-  | `internal/chunkstore` `TestRecoveryAndRebuildEqualLiveIndex` | 200 | 37 s |
-  | `internal/chunkstore` `TestRecoveriesMatchTheCrashOracle` | 200 | 24 s |
+  | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 9 s |
+  | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 3 s |
+  | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 4 s |
+  | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 28 s |
+  | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 7 s |
+  | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 78 s |
+  | `internal/disklog` `TestOracleCatchesReplayPastATornRound` | 1,000 | 9 s |
+  | `internal/disklog` `TestQuarantinedSegmentsAreNeverReused` | 500 | 12 s |
+  | `internal/disklog` `TestSlotRoundsKeepTheTraceRules` | 300 | 18 s |
+  | `internal/chunkstore` `TestReplayPastPendingWrites` | 2,000 | 16 s |
+  | `internal/lsm` `TestMetamorphic` | 1,000 | 135 s |
+  | `internal/chunkstore` `TestMetamorphic` | 1,000 | 140 s |
+  | `internal/chunkstore` `TestCleanerSurvivesCrashes` | 500 | 19 s |
+  | `internal/chunkstore` `TestRecoveryAndRebuildEqualLiveIndex` | 200 | 70 s |
+  | `internal/chunkstore` `TestRecoveriesMatchTheCrashOracle` | 200 | 44 s |
   | `internal/chunkstore` `TestPoolFiguresHoldTheirBounds` | 20,000 | about 1 s |
-  | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 24 s |
+  | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 25 s |
+  | `internal/chunkstore` `TestSubBlockWritesMatchTheByteOracle` | 500 | 2 s |
+  | `internal/chunkstore` `TestReplicatedWritesSurviveFaults` | 1,000 | 16 s |
+  | `internal/chunkstore` `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` | 500 | 6 s |
+  | `internal/chunkstore` `TestNoPGServesReadsFromTwoPrimaries` | 500 | 30 s |
+  | `internal/chunkstore` `TestWritesPassTheWriteLimitOnlyWhereAdmitted` | 200 | 94 s |
+  | `internal/chunkstore` `TestTheDetectorMarksAFailedDiskDown` | 500 | 45 s |
 
 - A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
   under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
