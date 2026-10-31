@@ -5313,7 +5313,12 @@ test's alone.
   fault run (`TestReplicatedWritesSurviveFaults`), the primary-change run, the read run, the
   write-limit run and the sub-block seeds. The runs with no reads of their own read each chunk back
   once they settle, the primary-change run once with each up member primary in turn, so a member
-  holding other bytes than the primary shows once it leads.
+  holding other bytes than the primary shows once it leads. A read back the primary refuses is sent
+  again every 200 ms, up to 20 times. One answered unfound is left unchecked, the open question on
+  [recovery sources across overlapping faults](design.md#roadmap-and-open-questions): 353 of 3,032
+  over 500 primary-change seeds, 228 of 2,000 over 1,000 fault seeds. One never answered OK or
+  unfound fails the run, except in the fault run on a primary whose disk the run rotted, which
+  refuses a block whose checksum fails: 66 of the 2,000.
 - **The model** is per chunk: a 4 MiB byte array and a version. Operations:
   - `write(off, bytes, expect_ver?) → version or error`
   - `punch(off, n, expect_ver?) → version or error`

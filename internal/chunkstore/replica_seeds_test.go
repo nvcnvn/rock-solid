@@ -110,8 +110,11 @@ func (r replicatedSubBlocks) run(t *testing.T, seed uint64) error {
 		copy(want[ops[a.id].off:], ops[a.id].data)
 	}
 	ch := chunkIn(pg0, 4, 0)
-	x.readBack(uint32(len(want)), ch)
-	return errors.Join(sameBytes(c, ch, want), x.check())
+	var unread error
+	if x.readBack(uint32(len(want)), ch) != nil {
+		unread = fmt.Errorf("no read back of %v answered", ch)
+	}
+	return errors.Join(sameBytes(c, ch, want), unread, x.check())
 }
 
 func sameBytes(c *rcluster, ch core.ChunkID, want []byte) error {

@@ -551,7 +551,9 @@ func (r *primaryRun) readEach(x *chunkHist) {
 		r.a.edits = append(r.a.edits, Edit{PG: pg0, Disks: ds})
 		r.publish()
 		r.settled()
-		x.readBack(2*faultSpan, r.chunks[:]...)
+		if unread := x.readBack(2*faultSpan, r.chunks[:]...); len(unread) > 0 && !r.c.planted {
+			r.c.t.Fatalf("disk %d as primary answered no read back of %v", m.Disk, unread)
+		}
 	}
 }
 

@@ -208,22 +208,36 @@ func (x *chunkHist) settle(ops []sim.Op) {
 }
 
 // readBack reads the first n bytes of each chunk at its PG's primary, recorded, once the run has
-// settled, and steps the cluster until each is answered or 100,000 steps pass.
-func (x *chunkHist) readBack(n uint32, chunks ...core.ChunkID) {
+// settled: it steps the cluster until each read is answered or 100,000 steps pass, and reads again
+// every 200 ms, up to 20 times, until one is answered OK or unfound, the open question on recovery
+// sources across overlapping faults. It returns the chunks none was, which the check leaves
+// unchecked.
+func (x *chunkHist) readBack(n uint32, chunks ...core.ChunkID) []core.ChunkID {
 	c := x.c
+	var unread []core.ChunkID
 	for _, ch := range chunks {
 		pg := core.PGID{Pool: testPool, Index: core.PGIndexOf(ch.Hash(), uint32(len(c.table.Pools[0].PGs)))}
-		p := c.primary(pg)
-		if p < 0 {
-			continue
-		}
-		id := c.read(pg, ch, 0, n, p)
-		for range 100_000 {
-			if _, ok := c.cl.replies[id]; ok || !c.step() {
-				break
+		read := false
+		for try := 0; try < 20 && !read; try++ {
+			if try > 0 {
+				c.runFor(200_000)
+			}
+			if p := c.primary(pg); p >= 0 {
+				id := c.read(pg, ch, 0, n, p)
+				for range 100_000 {
+					if _, ok := c.cl.replies[id]; ok || !c.step() {
+						break
+					}
+				}
+				rp, ok := c.cl.replies[id]
+				read = ok && (rp.Status == StatusOK || rp.Status == StatusUnfound)
 			}
 		}
+		if !read {
+			unread = append(unread, ch)
+		}
 	}
+	return unread
 }
 
 func hashOf(b []byte) uint64 {

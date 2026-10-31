@@ -799,7 +799,11 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 			t.Fatalf("request %d answered %d times", id, f.replied[id])
 		}
 	}
-	x.readBack(2*faultSpan, f.chunks[:]...)
+	for _, ch := range x.readBack(2*faultSpan, f.chunks[:]...) {
+		if i := c.reps[f.p()].lead(pg0); !f.rotted(f.p()) && (i < 0 || !f.unreadable(i, ch)) && plant == nil {
+			t.Fatalf("no read back of %v answered, though the primary's bits are whole and a source holds it unrotted", ch)
+		}
+	}
 	f.dirty, f.ended = true, true
 	if err := c.inv.Check(); err != nil {
 		if plant == nil {
