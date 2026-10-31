@@ -5355,8 +5355,7 @@ test's alone.
 - Porcupine finds a linearizable order for every chunk of every history the runs record, over the
   seeds `scripts/seeds.sh` gives them: 1,000 fault seeds, 500 each of the primary-change, read and
   sub-block runs and 200 write-limit seeds. The scripted rows P1 to P22 of [Placement faults and
-  invariants](#placement-faults-and-invariants) assert actions and record no history; the seeded
-  runs land their faults.
+  invariants](#placement-faults-and-invariants) assert actions and record no history.
 - **Planted bugs** (`TestPlantedBugsBreakChunkHistories`), each checking the history invariant alone,
   with the seeds failing and the first:
 
@@ -5376,7 +5375,8 @@ test's alone.
 - **Cost.** Histories are split by chunk, so the check's cost is per chunk, and each run's check
   stops at 30 s, failing the seed. The model builds a state's bytes only when a read needs them.
   The checks add a few seconds to the seed runner's list on 2 processes: none of the five runs'
-  times moved by more than a second.
+  times moved by more than a second. Open: the check's time on a long history of one chunk, for
+  example 3 clients × 400 operations, which no run records.
 - Close-to-open and the file-level checks of Testing strategy's layer 3 belong to the file frontend
   (phase 6).
 
