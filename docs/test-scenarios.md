@@ -2859,7 +2859,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
   runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
   they take.
-- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 57,400 seeds in 812 s,
+- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 57,400 seeds in 799 s,
   building the test binaries included. On 4 processes the largest process peaked at 528 MiB
   resident (an `internal/lsm` metamorphic shard), all four at 1.9 GiB:
 
@@ -2869,23 +2869,23 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 3 s |
   | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 4 s |
   | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 28 s |
-  | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 7 s |
-  | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 78 s |
+  | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 6 s |
+  | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 76 s |
   | `internal/disklog` `TestOracleCatchesReplayPastATornRound` | 1,000 | 9 s |
-  | `internal/disklog` `TestQuarantinedSegmentsAreNeverReused` | 500 | 12 s |
-  | `internal/disklog` `TestSlotRoundsKeepTheTraceRules` | 300 | 18 s |
-  | `internal/chunkstore` `TestReplayPastPendingWrites` | 2,000 | 16 s |
-  | `internal/lsm` `TestMetamorphic` | 1,000 | 135 s |
-  | `internal/chunkstore` `TestMetamorphic` | 1,000 | 140 s |
-  | `internal/chunkstore` `TestCleanerSurvivesCrashes` | 500 | 19 s |
-  | `internal/chunkstore` `TestRecoveryAndRebuildEqualLiveIndex` | 200 | 70 s |
-  | `internal/chunkstore` `TestRecoveriesMatchTheCrashOracle` | 200 | 44 s |
+  | `internal/disklog` `TestQuarantinedSegmentsAreNeverReused` | 500 | 11 s |
+  | `internal/disklog` `TestSlotRoundsKeepTheTraceRules` | 300 | 17 s |
+  | `internal/chunkstore` `TestReplayPastPendingWrites` | 2,000 | 15 s |
+  | `internal/lsm` `TestMetamorphic` | 1,000 | 129 s |
+  | `internal/chunkstore` `TestMetamorphic` | 1,000 | 138 s |
+  | `internal/chunkstore` `TestCleanerSurvivesCrashes` | 500 | 18 s |
+  | `internal/chunkstore` `TestRecoveryAndRebuildEqualLiveIndex` | 200 | 69 s |
+  | `internal/chunkstore` `TestRecoveriesMatchTheCrashOracle` | 200 | 42 s |
   | `internal/chunkstore` `TestPoolFiguresHoldTheirBounds` | 20,000 | about 1 s |
-  | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 25 s |
+  | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 24 s |
   | `internal/chunkstore` `TestSubBlockWritesMatchTheByteOracle` | 500 | 2 s |
   | `internal/chunkstore` `TestReplicatedWritesSurviveFaults` | 1,000 | 16 s |
-  | `internal/chunkstore` `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` | 500 | 6 s |
-  | `internal/chunkstore` `TestNoPGServesReadsFromTwoPrimaries` | 500 | 30 s |
+  | `internal/chunkstore` `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` | 500 | 7 s |
+  | `internal/chunkstore` `TestNoPGServesReadsFromTwoPrimaries` | 500 | 35 s |
   | `internal/chunkstore` `TestWritesPassTheWriteLimitOnlyWhereAdmitted` | 200 | 94 s |
   | `internal/chunkstore` `TestTheDetectorMarksAFailedDiskDown` | 500 | 45 s |
 
@@ -3257,7 +3257,7 @@ run in `deep-leases`; the variants that need one run on it alone.
   their answers at the decision. The keep rule is [Which versions
   survive](design.md#epoch-changes-and-failure-detection)'s: decisions known from persisted
   missing lists, versions of that interval or later kept unless a reached member live in their
-  interval neither holds nor lists them, every version below a kept one kept.
+  interval neither holds nor lists them, every version a kept one rests on kept.
 - **Missing lists.** Members persist them, with the interval, before the primary activates; only
   recovery removes an entry. Nothing reads a member's list until the next peering, which it answers
   only once it has left the interval, so a member that persists its list while still in the
@@ -5129,8 +5129,9 @@ the head of [Peering and read leases](#peering-and-read-leases).
   newest table once the detector marks it up, or after 3 s, and in half the seeds that table makes
   it lead every PG it is a member of. A client incarnation writes whole and partial blocks to 2
   chunks of each PG and dies at 4 to 12 s; its successor says hello to every disk node, reissues
-  the unanswered writes and writes on. Reads go to a random PG at a random node every 5 to 25 ms,
-  about 300 served by primaries a seed. A VM stop with every clock frozen is left out (open
+  the unanswered writes and writes on. Reads of a chunk's first 4 blocks go to a random PG at a
+  random node every 5 to 25 ms, tagged with one of the last 4 tables or, half the time, with the
+  node's own, as a client cut off with it would; about 300 are served by primaries a seed. A VM stop with every clock frozen is left out (open
   question "Stops in place on QEMU guests that run on kvm-clock"). Invariant 1 is judged on the
   replicas' own state, after every step and as each read arrives, by the condition `read` itself
   serves on: a read's reply can come a store read after its lease check, and any member answers a
@@ -5236,6 +5237,7 @@ commit, it must pass unplanted and break its invariant planted.
 | A later peering clears a missing-list entry | A listed member holding the kept version as its newest left off the list, and a persisted list clearing the PG's earlier listings it leaves out | Fault | 13 | 51 | "once recovery settles …" |
 | Incarnations checked when a write arrives | At the primary, held replays exempt, with the store's fence off | Read | 27 | 29 | Property 11's: a dead incarnation's partial write held on a chunk the primary lacks is released after its successor's |
 | A held write ordered again although another primary led | The lead's term kept across another primary's interval | Trace: P, peering cut off from Q, holds W; interval 3 makes Q primary with P in `maintenance`; the successor's W′ and W2 complete at Q; interval 4 makes P primary again | | | Property 11's |
+| A returning primary keeps its pending versions by number | `Settle` keeps every pending version at or below the kept one (`settleByNumber`); no model row, since the model answers no client at peering | Trace: primary 2, cut off from disk 3, orders W as 1.1; interval 2, handed to disks 1 and 3 alone, makes disk 3 primary without disk 2, and W2 is acknowledged as 2.1; interval 3 makes disk 2 primary again, its peering keeping 2.1 (`TestAReturningPrimaryRefusesAPendingVersionOffTheKeptChain` runs it unplanted, the read run's seed 366 found it) | | | "no acknowledged version is ever dropped", checked against the first interval activated after the version's |
 | A kept primary reads below `min_live` | | Trace: interval 2 marks disk 3 down; disk 3 restarts, and interval 3 makes it primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone | | | Property 1's |
 | The 13 lease clock rows from the holder's slower clock to step check on grants only, and no restart wait | `internal/lease` plants on `Holder` and `Grantor` | Lease pair | Below | | "the holder holds a lease its grantor no longer keeps", or for property 10 "tripped" |
 | A lease kept across a grantor's new run ID | The holder keeps its lease and window at a heartbeat from a new run | Trace in `internal/lease` (`TestALeaseKeptAcrossANewRunBreaksItsTrace`): the holder stops in place at 1 s, about 0.9 s after its lease formed, the grantor's heartbeats lost; the grantor resumes with a new run ID, heartbeats once and lets its grant end; the holder continues at 5 s. The pair run stops one side at a time and never reaches it (0 of 5,000) | | | "the holder holds a lease its grantor no longer keeps" |
@@ -5253,7 +5255,7 @@ partition after a grant), no new window at a new run ID 12 (6), no end of leases
 step check at `1 + lease_drift / 2` 25 (3) and against a grant that gave no lease 3 (265).
 
 The read run also plants a primary that commits a version once its own log holds it, before its
-members do: a read returns a version the next interval drops at 279 seeds of 500, seed 0 first
+members do: a read returns a version the next interval drops at 294 seeds of 500, seed 0 first
 (`TestPlantedReadBugsBreakTheReadRun`). It is no row of the model's table; it shows the read
 version check firing.
 
@@ -5304,33 +5306,78 @@ test's alone.
 
 ## Consistency check of chunk histories
 
-- The simulator records `(invoke_time, complete_time, op, result)` for every client chunk operation,
-  in a format Porcupine reads (the phase 1 history recorder).
-- The model is per chunk: a 4 MiB byte array and a version. Operations:
+- **Recording.** The replica runs record every client write, punch and read in the phase 1 history
+  recorder (`chunkHist` in `internal/chunkstore`): a client actor's requests as it sends them, and
+  the replies a replica sends the client, the decoder getting the sender's bytes of a read's
+  buffer, which it records as their FNV-1a hash. Each run checks every chunk's history at its end,
+  as the invariant "every chunk's history of client writes, punches and reads is linearizable": the
+  fault run (`TestReplicatedWritesSurviveFaults`), the primary-change run, the read run, the
+  write-limit run and the sub-block seeds. The runs with no reads of their own read each chunk back
+  once they settle, the primary-change run once with each up member primary in turn, so a member
+  holding other bytes than the primary shows once it leads. A read back the primary refuses is sent
+  again every 200 ms, up to 20 times. One answered unfound is left unchecked, the open question on
+  [recovery sources across overlapping faults](design.md#roadmap-and-open-questions): 353 of 3,032
+  over 500 primary-change seeds, 228 of 2,000 over 1,000 fault seeds. One never answered OK or
+  unfound fails the run, except in the fault run on a primary whose disk the run rotted, which
+  refuses a block whose checksum fails: 66 of the 2,000.
+- **The model** is per chunk: a 4 MiB byte array and a version. Operations:
   - `write(off, bytes, expect_ver?) → version or error`
   - `punch(off, n, expect_ver?) → version or error`
   - `read(off, n) → bytes, version`
   - `read(off, n, at_ver) → bytes`
-- Linearizable: each operation takes effect at one instant between its invoke and its complete.
-- Open: a write resent after its first attempt committed is applied again, so a history with
-  another write between the two attempts is not linearizable if the attempts count as one
-  operation. Until the open question on resent chunk writes is settled, the recorder logs each
-  attempt as its own operation, and a planted resend after a lost acknowledgment, with another
-  client's write between, is the case that shows which way it went.
-- An operation with an unknown result is checked as maybe applied, with no completion.
-- Open: which errors are definite (`NoSpace` before ordering, an `expect_ver` mismatch) and which
-  leave the result unknown. Unknown results come from a timeout, a `PeerLost`, or an interval
-  refusal after the write was sent to members, since peering can keep such a write.
-- Porcupine finds a linearizable order for every chunk of every history from scenarios P1 to P22 and
-  from 1,000 random seeds.
-- Planted bugs, each found non-linearizable on at least one seed of 100:
-  - A read served from a pending version.
-  - An old primary serving reads with the lease check disabled (P1).
-  - The holder ending its lease on the slower clock (P9's slews).
-  - Merging on the committed version (sub-block M2).
-  - Peering dropping a non-suffix (M7).
-- Histories are split by chunk, so the check's cost is per chunk. Open: its CI time budget, for
-  example for a history of 3 clients × 400 operations on one chunk.
+- Linearizable: each operation takes effect at one instant between its invoke and its complete. A
+  write takes effect at its version, which must follow the chunk's: the next of its interval, or
+  `k.1` of a later interval `k`, since a primary numbers a chunk's versions from its interval and
+  peering keeps every version a kept one rests on; and it never passes over a version another write was
+  answered OK with. A read returns the chunk's version and bytes; a read at a version, that
+  version's bytes. A punch of an absent chunk is answered OK with no version and changes nothing.
+  `TestTheChunkModel` gives each rule a history that holds and one that breaks it.
+- **Results.** A write, punch or read answered OK is definite. Every other answer and no answer
+  leave the result unknown: the store refuses `NoSpace` after ordering when its log stalls, peering
+  can keep a version refused for its interval after it was sent to members, and a refusal for an
+  `expect_ver` compares it with the newest version ordered, pending ones included, which a later
+  peering can drop, so the refusal fits no order of what the chunk kept. A write the primary never
+  ordered cannot take effect and is left out, as is a read with no answer. No run sends an
+  `expect_ver` or reads `at_ver` yet; `TestTheChunkModel` alone checks their rules.
+- **An unknown write** is checked as maybe applied, with no completion, unless a later interval's
+  peering decided its version: kept, it takes effect like one answered OK; dropped, it is left out.
+  Without that, the writes a failed primary refuses, a few dozen in a fault seed, each taking effect
+  or not, ran Porcupine past its timeout on histories of 50 operations. An undecided one is
+  concurrent with everything after its call, so once an operation showing a later version of its
+  chunk completes, where it could only be no operation, its return is moved there.
+- **Resent writes.** Each attempt of a write sent again is its own operation, until the [open
+  question](design.md#roadmap-and-open-questions) on resent chunk writes is settled.
+  `TestAResendAfterALostAcknowledgmentIsASecondWrite` plants the case: client A's write of X
+  commits as 1.1 and its reply is lost, a read sees X, client B writes Y as 1.2, a read sees Y, A
+  sends X again, which commits as 1.3, and a read sees X. As two writes the history is
+  linearizable. As one operation, answered 1.3, no write takes 1.1, which the first read returned,
+  so no order fits; the reads' X, Y, X are the bytes a client sees. So today a
+  client gets the weaker guarantee, and the check passes only because it counts each attempt.
+- Porcupine finds a linearizable order for every chunk of every history the runs record, over the
+  seeds `scripts/seeds.sh` gives them: 1,000 fault seeds, 500 each of the primary-change, read and
+  sub-block runs and 200 write-limit seeds. The scripted rows P1 to P22 of [Placement faults and
+  invariants](#placement-faults-and-invariants) assert actions and record no history.
+- **Planted bugs** (`TestPlantedBugsBreakChunkHistories`), each checking the history invariant alone,
+  with the seeds failing and the first:
+
+  | Planted bug | Run | Seeds failing | First |
+  | --- | --- | --- | --- |
+  | A read served from a pending version: the primary commits once its own log holds a version (`commitOnOwnLog`), and the next interval drops it | Read | 77 of 100 | 0 |
+  | An old primary serving reads with no lease check (P1, `noLeaseCheck`): a client that missed the new primary's table reads from the old one after the new one acknowledged a write | Read | 10 of 100 | 12 |
+  | Merging on the committed version (sub-block M2), one client pipelining 4 writes | Sub-block | 100 of 100 | 0 |
+  | Peering dropping a subset of a chunk's pending versions, not a suffix (M7, `settleSubset`) | Primary-change | 4 of 500 | 38 |
+
+  The M7 rate is that of the primary-change run's own check of kept bytes, which fails on the same
+  seeds. The holder ending its lease on the slower of its clocks (P9's slews) is not planted here:
+  the read run marks a cut node down after `node_down_after` (5 s), past every 4 s lease it held,
+  and a new primary waits for its members' grants to end, so no lease of the old primary outlasts
+  its grant and the plant fails no seed of 100 in either this check or the one-reader check. The
+  lease pair run (`internal/lease`) plants it alone.
+- **Cost.** Histories are split by chunk, so the check's cost is per chunk, and each run's check
+  stops at 30 s, failing the seed. The model builds a state's bytes only when a read needs them.
+  The checks add a few seconds to the seed runner's list on 2 processes: none of the five runs'
+  times moved by more than a second. Open: the check's time on a long history of one chunk, for
+  example 3 clients × 400 operations, which no run records.
 - Close-to-open and the file-level checks of Testing strategy's layer 3 belong to the file frontend
   (phase 6).
 

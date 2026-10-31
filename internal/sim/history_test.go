@@ -53,8 +53,8 @@ func BenchmarkHistoryRecord(b *testing.B) {
 func TestRepliesAMachineSendsCompleteTheHistory(t *testing.T) {
 	s := sim.New(1, sim.DefaultSettings())
 	h := sim.NewHistory(s, 2)
-	h.Replies(func(m *core.Msg) (int, [sim.OpWords]uint64, bool) {
-		b := m.Inline()
+	h.Replies(func(a *core.Action, _ []byte) (int, [sim.OpWords]uint64, bool) {
+		b := a.Msg.Inline()
 		if len(b) != 2 || b[0] != 'r' {
 			return 0, [sim.OpWords]uint64{}, false
 		}

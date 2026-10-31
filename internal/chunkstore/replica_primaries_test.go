@@ -417,7 +417,6 @@ func (r *primaryRun) decision(ch core.ChunkID, i uint32) (uint64, bool) {
 	return 0, false
 }
 
-// check holds the run's end against its oracle: every acknowledged version kept, and every member that runs, is up and lists nothing mapping the kept writes applied in version order, and every two members mapping a block at one version holding the same bytes.
 // check checks the run's end: no acknowledged version dropped, and every member listing nothing maps the kept writes, holding no version unlike another's.
 func (r *primaryRun) check() {
 	c := r.c
@@ -535,6 +534,28 @@ func (r *primaryRun) settled() {
 	c.t.Fatal("the cluster did not settle")
 }
 
+// readEach reads PG 0's chunks back, recorded, with each up member its primary in turn, so a member
+// holding other bytes than the primary shows in the history once it leads.
+func (r *primaryRun) readEach(x *chunkHist) {
+	for _, m := range slices.Clone(r.members()) {
+		if m.Mark != MarkUp || !r.running(m) {
+			continue
+		}
+		ds := []uint32{m.Disk}
+		for _, o := range r.members() {
+			if o.Disk != m.Disk {
+				ds = append(ds, o.Disk)
+			}
+		}
+		r.a.edits = append(r.a.edits, Edit{PG: pg0, Disks: ds})
+		r.publish()
+		r.settled()
+		if unread := x.readBack(2*faultSpan, r.chunks[:]...); len(unread) > 0 && !r.c.planted {
+			r.c.t.Fatalf("disk %d as primary answered no read back of %v", m.Disk, unread)
+		}
+	}
+}
+
 // tend publishes a table for the asks and activations replicas reported, and for a disk formatted again.
 func (r *primaryRun) tend() {
 	c := r.c
@@ -588,6 +609,13 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	c.onPass = r.pass
 	c.onFormat = r.formatted
 	watchEpochs(c, &a.rec)
+	x := c.record()
+	c.inv.Register(invLinearizable, func() error {
+		if !r.ended {
+			return nil
+		}
+		return x.check()
+	})
 	if plant != nil {
 		c.planted = true
 		c.inv.Only(plant.inv)
@@ -595,7 +623,7 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	for range 2 {
 		pc := &primaryClient{r: r, rng: r.rng.Fork(), left: 48, pipe: 8, at: map[core.RequestID]core.Tick{}}
 		r.clients = append(r.clients, pc)
-		c.s.Node(c.client.Node).AddActor(c.client, pc)
+		c.addClient(pc)
 	}
 	busy := func() bool {
 		return slices.ContainsFunc(r.clients, func(pc *primaryClient) bool { return pc.left > 0 })
@@ -623,6 +651,7 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	r.settled()
 	r.recover()
 	r.check()
+	r.readEach(x)
 	r.ended = true
 	if err := c.inv.Check(); err != nil {
 		return err

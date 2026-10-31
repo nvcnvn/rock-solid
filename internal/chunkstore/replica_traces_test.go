@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -98,26 +99,26 @@ func reorderTrace(t *testing.T, plant bool) error {
 	return c.found
 }
 
-// keepsAcked checks that every active lead of pg0 keeps every version of ch acknowledged to ids in an earlier interval.
+// keepsAcked checks that no interval of pg0 activated after the interval of each version of ch acknowledged to ids keeps a version below it. Every such interval is remembered once it activates, since the first one after the version's is the one whose number compare is exact: a later interval's newer version may rest on a base that dropped it.
 func (c *rcluster) keepsAcked(ch core.ChunkID, ids ...core.RequestID) func() error {
+	decided := map[uint32]uint64{}
 	return func() error {
+		for _, r := range c.reps {
+			if i := r.lead(pg0); i >= 0 && r.leads[i].active {
+				if _, ok := decided[r.leads[i].interval]; !ok {
+					k, _ := r.leads[i].decision(ch)
+					decided[r.leads[i].interval] = k.kept
+				}
+			}
+		}
 		for _, id := range ids {
 			rp, ok := c.cl.replies[id]
 			if !ok || rp.Status != StatusOK {
 				continue
 			}
-			for n, r := range c.reps {
-				i := r.lead(pg0)
-				if i < 0 || !r.leads[i].active || r.leads[i].interval <= intervalOf(rp.Version) {
-					continue
-				}
-				l := &r.leads[i]
-				kept := uint64(0)
-				if j := slices.IndexFunc(l.kept, func(k keptChunk) bool { return k.chunk == ch }); j >= 0 {
-					kept = l.kept[j].kept
-				}
-				if kept < rp.Version {
-					return fmt.Errorf("write %d acknowledged as %#x, disk %d's interval %d keeps %#x", id, rp.Version, c.ids[n], l.interval, kept)
+			for _, k := range slices.Sorted(maps.Keys(decided)) {
+				if k > intervalOf(rp.Version) && decided[k] < rp.Version {
+					return fmt.Errorf("write %d acknowledged as %#x, interval %d keeps %#x", id, rp.Version, k, decided[k])
 				}
 			}
 		}
@@ -165,6 +166,42 @@ func reportDecidedTrace(t *testing.T, plant bool) error {
 	c.hand(c.next(members(Member{Disk: 1}, Member{Disk: 2, Mark: MarkMaint})), 0)
 	c.runFor(2 * lease.DefaultConfig.Lease)
 	return c.found
+}
+
+// settleChainTrace is the trace of a returning primary settling its pending versions by number: primary 2, cut off from disk 3, orders W as 1.1; interval 2, handed to disks 1 and 3 alone, makes disk 3 primary without disk 2 and drops W, and W2 is acknowledged there as 2.1; interval 3 makes disk 2 primary again, and its peering keeps 2.1, above W's 1.1 by number but not resting on it.
+func settleChainTrace(t *testing.T, plant bool) error {
+	c := newRCluster(t, pg2Table())
+	c.storePlants.settleByNumber = plant
+	for _, r := range c.reps {
+		r.Store().plant = c.storePlants
+	}
+	c.planted = true
+	ch := chunkIn(pg0, 1, 0)
+	c.s.Partition(1, 2, false)
+	w := c.incWrite(map[core.RequestID]incWrite{}, ch, 1, 1)
+	c.inv.Register(invAckedKept, c.keepsAcked(ch, w))
+	c.runFor(100_000)
+	c.hand(c.next(members(Member{Disk: 3}, Member{Disk: 1})), 0, 2)
+	c.untilActive()
+	w2 := c.incWrite(map[core.RequestID]incWrite{}, ch, 1, 2)
+	c.until(w2)
+	if rp := c.reply(w2); rp.Status != StatusOK || rp.Version != MakeVersion(2, 1) {
+		t.Fatalf("W2 answered %+v", rp)
+	}
+	c.s.Heal(1, 2)
+	c.hand(c.next(members(Member{Disk: 2}, Member{Disk: 3})), 0, 1, 2)
+	c.settle()
+	if rp, ok := c.cl.replies[w]; !ok || rp.Status == StatusOK && c.found == nil {
+		t.Fatalf("W answered %+v, %v", rp, ok)
+	}
+	return c.found
+}
+
+// A primary that returns after an interval it missed dropped its pending version refuses that version's client, though the version its peering keeps is above it by number.
+func TestAReturningPrimaryRefusesAPendingVersionOffTheKeptChain(t *testing.T) {
+	if err := settleChainTrace(t, false); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // instantTrace is neg-instant-reboot's trace: grantor 3 reboots the instant after it renewed primary 2's lease, cut off from it, and its new boot runs 2% fast; it comes back primary with disk 2 in maintenance, which disk 2, cut off from the control plane, never learns.
@@ -302,6 +339,7 @@ func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 		{"fresh grant with no table check", invOneReader, freshGrantTrace},
 		{"peering reaches only the last activated interval", invOneReader, lastActivatedTrace},
 		{"peer messages handled after reads in a pass", invOneReader, readsFirstTrace},
+		{"pending versions settled by number", invAckedKept, settleChainTrace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.trace(t, false); err != nil {

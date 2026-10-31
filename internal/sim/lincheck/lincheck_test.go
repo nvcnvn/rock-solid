@@ -116,7 +116,7 @@ func regRead(key, v uint64, at, done core.Tick) timed {
 func TestPorcupineAcceptsALinearizableRegisterHistory(t *testing.T) {
 	const a, b = 10, 11
 	h := scripted(t, []timed{regWrite(7, a, 10, 20), regRead(7, a, 15, 30), regWrite(7, b, 25, 40), regRead(7, b, 45, 50)})
-	if i, bad := lincheck.Illegal(register, h); bad {
+	if i, res := lincheck.Illegal(register, h, 0); res != porcupine.Ok {
 		t.Fatalf("op %d named in a linearizable history", i)
 	}
 }
@@ -124,8 +124,8 @@ func TestPorcupineAcceptsALinearizableRegisterHistory(t *testing.T) {
 func TestPorcupineRejectsAStaleReadAndNamesIt(t *testing.T) {
 	const a, b = 10, 11
 	h := scripted(t, []timed{regWrite(7, a, 10, 20), regWrite(7, b, 25, 40), regRead(7, a, 45, 50), regWrite(8, a, 10, 20), regRead(8, a, 45, 50)})
-	i, bad := lincheck.Illegal(register, h)
-	if !bad {
+	i, res := lincheck.Illegal(register, h, 0)
+	if res != porcupine.Illegal {
 		t.Fatal("a read of A after B was written was accepted")
 	}
 	if op := h.Ops()[i]; op.Input[0] != opRead || op.Input[1] != 7 || op.Output[0] != a {
@@ -137,12 +137,12 @@ func TestAnIncompleteWriteMayTakeEffectOrNot(t *testing.T) {
 	const a, b = 10, 11
 	for _, seen := range []uint64{a, b} {
 		h := scripted(t, []timed{regWrite(7, a, 10, 20), regWrite(7, b, 25, 0), regRead(7, seen, 45, 50)})
-		if i, bad := lincheck.Illegal(register, h); bad {
+		if i, res := lincheck.Illegal(register, h, 0); res != porcupine.Ok {
 			t.Fatalf("reading %d after an incomplete write: op %d named", seen, i)
 		}
 	}
 	h := scripted(t, []timed{regWrite(7, a, 10, 20), regWrite(7, b, 25, 0), regRead(7, b, 45, 50), regRead(7, a, 55, 60)})
-	if _, bad := lincheck.Illegal(register, h); !bad {
+	if _, res := lincheck.Illegal(register, h, 0); res != porcupine.Illegal {
 		t.Fatal("an incomplete write was undone after a read saw it")
 	}
 }
@@ -150,7 +150,7 @@ func TestAnIncompleteWriteMayTakeEffectOrNot(t *testing.T) {
 func TestPipelinedOperationsOfOneClientOverlap(t *testing.T) {
 	const a, b = 10, 11
 	h := scripted(t, []timed{regWrite(7, a, 10, 30), regWrite(7, b, 15, 25), regRead(7, a, 40, 50)})
-	if i, bad := lincheck.Illegal(register, h); bad {
+	if i, res := lincheck.Illegal(register, h, 0); res != porcupine.Ok {
 		t.Fatalf("op %d named; B may take effect before A", i)
 	}
 }
@@ -172,12 +172,12 @@ func TestOperationsRoundTrip(t *testing.T) {
 
 func TestTheNamedOperationIsTheSameEveryRun(t *testing.T) {
 	h := scripted(t, []timed{regWrite(7, 1, 1, 5), regWrite(7, 2, 1, 5), regRead(7, 1, 10, 20), regRead(7, 2, 10, 21)})
-	first, bad := lincheck.Illegal(register, h)
-	if !bad {
+	first, res := lincheck.Illegal(register, h, 0)
+	if res != porcupine.Illegal {
 		t.Fatal("two reads of different values after both writes were accepted")
 	}
 	for range 100 {
-		if i, _ := lincheck.Illegal(register, h); i != first {
+		if i, _ := lincheck.Illegal(register, h, 0); i != first {
 			t.Fatalf("named op %d, then op %d", first, i)
 		}
 	}
@@ -189,7 +189,7 @@ func TestTheNamedOperationIsTheSameEveryRun(t *testing.T) {
 func TestOfTwoUnplaceableOperationsTheFirstToReturnIsNamed(t *testing.T) {
 	const a, b, c = 10, 11, 12
 	h := scripted(t, []timed{regWrite(7, a, 10, 20), regWrite(7, b, 25, 30), regRead(7, c, 40, 60), regRead(7, c, 41, 50)})
-	if i, bad := lincheck.Illegal(register, h); !bad || i != 3 {
-		t.Fatalf("named op %d (illegal %v), want 3, the read of a value never written that returns first", i, bad)
+	if i, res := lincheck.Illegal(register, h, 0); res != porcupine.Illegal || i != 3 {
+		t.Fatalf("named op %d (%v), want 3, the read of a value never written that returns first", i, res)
 	}
 }

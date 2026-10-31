@@ -748,6 +748,13 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 		}
 		return f.settled()
 	})
+	x := c.record()
+	c.inv.Register(invLinearizable, func() error {
+		if !f.ended {
+			return nil
+		}
+		return x.check()
+	})
 	if plant != nil {
 		c.planted = true
 		c.inv.Only(plant.inv)
@@ -759,7 +766,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 	for range clients {
 		fc := &faultClient{f: f, rng: f.rng.Fork(), left: writes, pipe: 1 + int(f.rng.Below(8))}
 		fcs = append(fcs, fc)
-		c.s.Node(c.client.Node).AddActor(c.client, fc)
+		c.addClient(fc)
 	}
 	busy := func() bool { return slices.ContainsFunc(fcs, func(fc *faultClient) bool { return fc.left > 0 }) }
 	down := func() bool {
@@ -790,6 +797,11 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 	for id := core.RequestID(1); id <= c.nextID; id++ {
 		if _, ok := f.ops[id]; ok && f.replied[id] != 1 && !(f.replied[id] == 0 && f.lost[id]) && plant == nil {
 			t.Fatalf("request %d answered %d times", id, f.replied[id])
+		}
+	}
+	for _, ch := range x.readBack(2*faultSpan, f.chunks[:]...) {
+		if i := c.reps[f.p()].lead(pg0); !f.rotted(f.p()) && (i < 0 || !f.unreadable(i, ch)) && plant == nil {
+			t.Fatalf("no read back of %v answered, though the primary's bits are whole and a source holds it unrotted", ch)
 		}
 	}
 	f.dirty, f.ended = true, true

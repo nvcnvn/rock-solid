@@ -4,6 +4,7 @@ package lincheck
 import (
 	"math"
 	"slices"
+	"time"
 
 	"github.com/anishathalye/porcupine"
 
@@ -50,15 +51,26 @@ func OpOf(o porcupine.Operation) sim.Op {
 	return op
 }
 
-// Illegal checks the history against model and, if no order is legal, returns the index of an operation the longest legal prefixes leave out.
-func Illegal(model porcupine.Model, h *sim.History) (int, bool) {
+// Illegal checks the history against model within timeout, 0 for none, and, if no order is legal, returns porcupine.Illegal with the index of an operation the longest legal prefixes leave out; porcupine.Unknown reports a check that ran out of time.
+func Illegal(model porcupine.Model, h *sim.History, timeout time.Duration) (int, porcupine.CheckResult) {
 	ops := Operations(h)
-	res, info := porcupine.CheckOperationsVerbose(model, ops, 0)
+	res, info := porcupine.CheckOperationsVerbose(model, ops, timeout)
 	if res != porcupine.Illegal {
-		return 0, false
+		return 0, res
 	}
 	// Porcupine gathers the partial orders in a map, so their order varies from run to run; the
 	// choice below depends only on which operations they hold.
+	// An operation the model's partition leaves out cannot be the one at fault.
+	checked := make([]bool, len(ops))
+	parts := [][]porcupine.Operation{ops}
+	if model.Partition != nil {
+		parts = model.Partition(ops)
+	}
+	for _, part := range parts {
+		for _, o := range part {
+			checked[o.Metadata.(int)] = true
+		}
+	}
 	placed := make([]bool, len(ops))
 	partitions := info.PartialLinearizationsOperations()
 	for _, orders := range partitions {
@@ -68,8 +80,8 @@ func Illegal(model porcupine.Model, h *sim.History) (int, bool) {
 			}
 		}
 	}
-	if bad := firstToReturn(ops, func(i int) bool { return !placed[i] }); bad >= 0 {
-		return bad, true
+	if bad := firstToReturn(ops, func(i int) bool { return checked[i] && !placed[i] }); bad >= 0 {
+		return bad, res
 	}
 	// Every operation fits some partial order, as when two conflict symmetrically: take each
 	// partition's longest order with the smallest sorted indices and name what it leaves out.
@@ -92,7 +104,7 @@ func Illegal(model porcupine.Model, h *sim.History) (int, bool) {
 			placed[i] = true
 		}
 	}
-	return firstToReturn(ops, func(i int) bool { return member[i] && !placed[i] }), true
+	return firstToReturn(ops, func(i int) bool { return member[i] && !placed[i] }), res
 }
 
 func firstToReturn(ops []porcupine.Operation, left func(i int) bool) int {

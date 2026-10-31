@@ -256,6 +256,8 @@ type plants struct {
 	clearListed bool
 	// settleSubset has Settle drop the first gated version below the kept one, as a peering that drops any subset of pending versions rather than a suffix would (sub-block spike M7).
 	settleSubset bool
+	// settleByNumber has Settle keep every gated version up to the kept one by number, whatever interval it was ordered in.
+	settleByNumber bool
 	// replayCopyAsWrite replays a copy entry as a write of its blocks, mapping them whether or not a map still stores them at the source.
 	replayCopyAsWrite bool
 	mergeCommitted    bool
@@ -1181,23 +1183,32 @@ func (s *Store) Commit(ctx *core.Context, c core.ChunkID, id uint64, out *Output
 	s.mapResolved(ctx, ci, out)
 }
 
-// Settle is peering's decision on chunk c's gated writes and punches not mapped yet: those at version keep or below are mapped in version order, and the later ones dropped, never mapped, even if committed, the chunk's version and snapshot epoch given back to what the first dropped one found. Their records stay in the log until recovery supersedes their blocks, and the caller numbers the chunk's next versions from a later interval, since members may have logged the dropped ones. It returns ErrUnresolved, settling nothing, while a write or punch of the chunk waits to be ordered or has records neither durable nor failed.
-func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Output) error {
+// Settle is peering's decision on chunk c's gated writes and punches not mapped yet, given as the version keep it kept: those on keep's chain, at keep or below it in keep's interval, and every one before such a one, are mapped in version order, and the others dropped, never mapped, even if committed, the chunk's version and snapshot epoch given back to what the first dropped one found. One ordered in an earlier interval than keep's with none of keep's interval after it is dropped even if keep is above it by number, since an interval this disk missed may have dropped it and built keep on an older version. It returns the newest version it keeps, 0 for none. Dropped records stay in the log until recovery supersedes their blocks, and the caller numbers the chunk's next versions from a later interval, since members may have logged the dropped ones. It returns ErrUnresolved, settling nothing, while a write or punch of the chunk waits to be ordered or has records neither durable nor failed.
+func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Output) (uint64, error) {
 	ci, ok := s.chunkOf[c]
 	if !ok {
-		return nil
+		return 0, nil
 	}
 	cs := &s.chunks[ci]
 	if len(cs.waiting) > 0 || slices.ContainsFunc(cs.pending, func(oi int32) bool { return s.ops[oi].left > 0 }) {
-		return ErrUnresolved
+		return 0, ErrUnresolved
+	}
+	top := keep
+	if !s.plant.settleByNumber {
+		top = 0
+		for _, oi := range cs.pending {
+			if o := &s.ops[oi]; o.req.Gated && !o.dropped && o.version <= keep && intervalOf(o.version) == intervalOf(keep) {
+				top = max(top, o.version)
+			}
+		}
 	}
 	subset := s.plant.settleSubset
 	for _, oi := range cs.pending {
 		switch o := &s.ops[oi]; {
 		case !o.req.Gated || o.dropped:
-		case subset && o.version < keep:
+		case subset && o.version < top:
 			o.dropped, subset = true, false
-		case o.version <= keep:
+		case o.version <= top:
 			o.committed = true
 		default:
 			o.dropped = true
@@ -1205,7 +1216,7 @@ func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Outp
 		}
 	}
 	s.mapResolved(ctx, ci, out)
-	return nil
+	return top, nil
 }
 
 // Ungate maps chunk c's gated writes and punches as a member maps what it logs, each once its records are durable, for a disk that no longer leads the chunk's PG; those whose records failed are never mapped.

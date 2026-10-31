@@ -74,8 +74,8 @@ func (c *Cluster) Acked() int {
 }
 
 // reply decodes the primary's acknowledgment of value v, which completes operation v − 1.
-func reply(m *core.Msg) (int, [sim.OpWords]uint64, bool) {
-	b := m.Inline()
+func reply(a *core.Action, _ []byte) (int, [sim.OpWords]uint64, bool) {
+	b := a.Msg.Inline()
 	if len(b) != replyLen || trace.Msg(b[0]) != trace.MsgWriteReply {
 		return 0, [sim.OpWords]uint64{}, false
 	}

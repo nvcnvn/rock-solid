@@ -339,11 +339,18 @@ func runLimit(t *testing.T, seed uint64, plant string) error {
 	}
 	c.inv.Register(invWriteLimit, func() error { return r.err })
 	c.inv.Register(invLimitRoom, func() error { return r.roomErr })
+	x, ended := c.record(), false
+	c.inv.Register(invLinearizable, func() error {
+		if !ended {
+			return nil
+		}
+		return x.check()
+	})
 	if planted {
 		c.inv.Only(plant)
 	}
 	c.onEvent = r.onEvent
-	c.s.Node(c.client.Node).AddActor(c.client, &limitClient{r: r, rng: r.rng.Fork(), at: map[core.RequestID]core.Tick{}, ops: map[core.RequestID]blockAt{}})
+	c.addClient(&limitClient{r: r, rng: r.rng.Fork(), at: map[core.RequestID]core.Tick{}, ops: map[core.RequestID]blockAt{}})
 	faulted, kind, other := -1, uint64(0), uint32(0)
 	next, until := c.s.Time()+sec, core.Tick(0)
 	end := c.s.Time() + 20*sec
@@ -380,7 +387,8 @@ func runLimit(t *testing.T, seed uint64, plant string) error {
 	if !planted && r.noSpace == 0 {
 		t.Fatalf("seed %d: no write was refused for space", seed)
 	}
-	return nil
+	ended = true
+	return c.inv.Check()
 }
 
 // A disk passes write_limit only through granted flushes, overwrites, punches and recovery: the primaries of four PGs fill three disks to their limits at once while disk nodes reboot or slow on a path.
