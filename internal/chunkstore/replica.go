@@ -1465,7 +1465,7 @@ func (r *Replica) resend(out *ReplicaOutput) {
 // ErrActive reports a Settle of a chunk whose PG this disk leads and has activated in its current interval, where the chunk's next versions could take the numbers of those it drops.
 var ErrActive = errors.New("chunkstore: settle of a chunk its primary has activated")
 
-// Settle is peering's decision on chunk c, made before this disk activates as primary in a new interval: the chunk's pending versions on the chain of the version keep it kept are mapped and their clients answered, and the others are dropped and their clients refused, as the store settles them. It settles nothing and returns ErrActive once the PG is active, or ErrUnresolved while one of the chunk's writes waits to be ordered or its records here are neither durable nor failed, which peering waits for, since a version whose local write then failed would be kept torn.
+// Settle is peering's decision on chunk c, made before this disk activates as primary in a new interval: the chunk's pending versions on the chain of keep, the version peering kept, are mapped and their clients answered, and the others are dropped and their clients refused, as the store settles them. It settles nothing and returns ErrActive once the PG is active, or ErrUnresolved while one of the chunk's writes waits to be ordered or its records here are neither durable nor failed, which peering waits for, since a version whose local write then failed would be kept torn.
 func (r *Replica) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *ReplicaOutput) error {
 	if pg, ok := r.pgOf(c); ok {
 		if l := r.lead(pg); l >= 0 && r.leads[l].active {

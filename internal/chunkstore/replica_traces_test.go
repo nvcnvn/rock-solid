@@ -3,6 +3,8 @@ package chunkstore
 import (
 	"cmp"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -97,7 +99,7 @@ func reorderTrace(t *testing.T, plant bool) error {
 	return c.found
 }
 
-// keepsAcked checks that the first interval of pg0 activated after the interval of each version of ch acknowledged to ids keeps that version: a later interval's newer version is not enough, since it may rest on a base that dropped it.
+// keepsAcked checks that no interval of pg0 activated after the interval of each version of ch acknowledged to ids keeps a version below it. Every such interval is remembered once it activates, since the first one after the version's is the one whose number compare is exact: a later interval's newer version may rest on a base that dropped it.
 func (c *rcluster) keepsAcked(ch core.ChunkID, ids ...core.RequestID) func() error {
 	decided := map[uint32]uint64{}
 	return func() error {
@@ -114,14 +116,10 @@ func (c *rcluster) keepsAcked(ch core.ChunkID, ids ...core.RequestID) func() err
 			if !ok || rp.Status != StatusOK {
 				continue
 			}
-			first := uint32(0)
-			for k := range decided {
-				if k > intervalOf(rp.Version) && (first == 0 || k < first) {
-					first = k
+			for _, k := range slices.Sorted(maps.Keys(decided)) {
+				if k > intervalOf(rp.Version) && decided[k] < rp.Version {
+					return fmt.Errorf("write %d acknowledged as %#x, interval %d keeps %#x", id, rp.Version, k, decided[k])
 				}
-			}
-			if first != 0 && decided[first] < rp.Version {
-				return fmt.Errorf("write %d acknowledged as %#x, interval %d, the first activated after it, keeps %#x", id, rp.Version, first, decided[first])
 			}
 		}
 		return nil

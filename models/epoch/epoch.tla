@@ -533,7 +533,7 @@ Holds(d, c, v) == Newest(dlog[d][c]) >= v \/ miss[d][c] >= v
 \* member persisted (at least the table's last activated interval L); members
 \* that persisted it know, held or listed, the version it kept below LS.
 \* A version of LS or later is kept unless a reached member live in its
-\* interval neither holds nor lists it; every version below a kept one is kept.
+\* interval neither holds nor lists it; every version a kept one rests on is kept.
 Kept(p, L, J, c) ==
     LET LS == Max({persIv[d][p] : d \in J} \cup {L})
         RS == {d \in J : persIv[d][p] = LS}

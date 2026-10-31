@@ -417,7 +417,6 @@ func (r *primaryRun) decision(ch core.ChunkID, i uint32) (uint64, bool) {
 	return 0, false
 }
 
-// check holds the run's end against its oracle: every acknowledged version kept, and every member that runs, is up and lists nothing mapping the kept writes applied in version order, and every two members mapping a block at one version holding the same bytes.
 // check checks the run's end: no acknowledged version dropped, and every member listing nothing maps the kept writes, holding no version unlike another's.
 func (r *primaryRun) check() {
 	c := r.c

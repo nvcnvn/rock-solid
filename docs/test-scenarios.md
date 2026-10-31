@@ -3257,7 +3257,7 @@ run in `deep-leases`; the variants that need one run on it alone.
   their answers at the decision. The keep rule is [Which versions
   survive](design.md#epoch-changes-and-failure-detection)'s: decisions known from persisted
   missing lists, versions of that interval or later kept unless a reached member live in their
-  interval neither holds nor lists them, every version below a kept one kept.
+  interval neither holds nor lists them, every version a kept one rests on kept.
 - **Missing lists.** Members persist them, with the interval, before the primary activates; only
   recovery removes an entry. Nothing reads a member's list until the next peering, which it answers
   only once it has left the interval, so a member that persists its list while still in the
@@ -5328,7 +5328,7 @@ test's alone.
 - Linearizable: each operation takes effect at one instant between its invoke and its complete. A
   write takes effect at its version, which must follow the chunk's: the next of its interval, or
   `k.1` of a later interval `k`, since a primary numbers a chunk's versions from its interval and
-  peering keeps every version below a kept one; and it never passes over a version another write was
+  peering keeps every version a kept one rests on; and it never passes over a version another write was
   answered OK with. A read returns the chunk's version and bytes; a read at a version, that
   version's bytes. A punch of an absent chunk is answered OK with no version and changes nothing.
   `TestTheChunkModel` gives each rule a history that holds and one that breaks it.
