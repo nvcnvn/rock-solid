@@ -390,6 +390,10 @@ type replicaPlants struct {
 	reorderAfterOther bool
 	// admitPastLimit orders a plain write that adds live data past a member's write_limit.
 	admitPastLimit bool
+	// readBelowMinLive serves reads in an interval with fewer than min_live live members;
+	// freshGrantNoCheck grants a lease afresh to a holder that reported an older table.
+	readBelowMinLive  bool
+	freshGrantNoCheck bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.

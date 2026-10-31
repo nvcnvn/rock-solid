@@ -5214,13 +5214,13 @@ must pass unplanted and break its invariant planted.
 | A later peering clears a missing-list entry | A listed member holding the kept version as its newest left off the list, and a persisted list clearing the PG's earlier listings it leaves out | Fault | 13 | 51 | "once recovery settles …" |
 | Incarnations checked when a write arrives | At the primary, held replays exempt, with the store's fence off | Read | 27 | 29 | Property 11's: a dead incarnation's partial write held on a chunk the primary lacks is released after its successor's |
 | A held write ordered again although another primary led | The lead's term kept across another primary's interval | Trace: P, peering cut off from Q, holds W; interval 3 makes Q primary with P in `maintenance`; the successor's W′ and W2 complete at Q; interval 4 makes P primary again | | | Property 11's |
-| A kept primary reads below `min_live` | Not planted yet | | | | |
+| A kept primary reads below `min_live` | | Trace: interval 2 marks disk 3 down; disk 3 restarts, and interval 3 makes it primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone | | | Property 1's |
 | The 13 lease clock rows from the holder's slower clock to step check on grants only, and no restart wait | `internal/lease` plants on `Holder` and `Grantor` | Lease pair | Below | | "the holder holds a lease its grantor no longer keeps", or for property 10 "tripped" |
 | A lease kept across a grantor's new run ID | Not planted yet | | | | |
 | A reboot that takes no time | The simulated reboot | Trace: grantor 3 reboots the instant after a grant, cut off from primary 2, its new boot 2% fast, and comes back primary with disk 2 in `maintenance` | | | Property 1's |
 | Peer messages handled after reads in a pass | Not planted yet | | | | |
 | Peering reaches only the last activated interval and the current one | Not planted yet | | | | |
-| A fresh grant with no table check | Not planted yet | | | | |
+| A fresh grant with no table check | | Trace: interval 2 makes disk 3 primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone; disk 2 asks afresh once its lease lapses | | | Property 1's |
 
 The lease pair run's plants, seeds of 500 failing and the first: the holder ending on its slower
 clock 68 (6), the grantor on its faster 96 (8), a lease before the first bound 1 (21), that with the

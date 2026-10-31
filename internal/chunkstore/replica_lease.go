@@ -31,7 +31,7 @@ func compareNode(a, b core.NodeID) int {
 
 // readable reports whether this disk, primary of the PG in e, may serve its reads now: the interval has min_live live members, maintenance counting, and the disk holds a lease from every other up member.
 func (r *Replica) readable(ctx *core.Context, p *PoolTable, e *PGEntry) bool {
-	if e.live() < int(p.MinLive) {
+	if e.live() < int(p.MinLive) && !r.plant.readBelowMinLive {
 		return false
 	}
 	t := lease.Now(ctx)
@@ -48,7 +48,11 @@ func (r *Replica) leaseRequest(ctx *core.Context, peer core.NodeID, lr *LeaseReq
 	r.see(peer, lr.Epoch)
 	t := lease.Now(ctx)
 	g := Grant{ID: lr.ID, Status: StatusRefused, Epoch: r.table.Epoch, Run: r.grantor.Run(), Raw: ctx.Raw}
-	if sup, ok := r.grantor.Grant(peer, lr.Epoch, r.table.Epoch, t); ok {
+	reported := lr.Epoch
+	if r.plant.freshGrantNoCheck && !r.grantor.Live(peer, t) {
+		reported = max(reported, r.table.Epoch)
+	}
+	if sup, ok := r.grantor.Grant(peer, reported, r.table.Epoch, t); ok {
 		g.Status, g.Epoch, g.Support = StatusOK, 0, sup
 		if r.beatAt == 0 {
 			r.beatAt = ctx.Now + r.lcfg.Heartbeat

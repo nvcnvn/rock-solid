@@ -198,6 +198,35 @@ func instantTrace(t *testing.T, plant bool) error {
 	return c.found
 }
 
+// minLiveTrace is neg-read-below-min-live's trace: interval 2 marks disk 3 down, so primary 2 reads needing no lease; disk 3 restarts, and interval 3 makes it primary with disk 2 in maintenance, handed to disks 1 and 3 alone, so disk 2 reads on in interval 2 while peering of 3 skips that interval, which had fewer than min_live live members.
+func minLiveTrace(t *testing.T, plant bool) error {
+	c := plantedPG2(t, func(p *replicaPlants) { p.readBelowMinLive = plant })
+	c.inv.Register(invOneReader, func() error { return c.oneReader(1) })
+	c.hand(c.next(members(Member{Disk: 2}, Member{Disk: 3, Mark: MarkDown})), 0, 1, 2)
+	c.s.CrashRandom(2)
+	c.s.Restart(2)
+	for !c.s.Node(2).Up() && c.step() {
+	}
+	c.hand(c.next(members(Member{Disk: 3}, Member{Disk: 2, Mark: MarkMaint})), 0, 2)
+	c.runFor(2 * lease.DefaultConfig.Lease)
+	if c.serving(pg0, 1) != 2 {
+		t.Fatal("disk 3 never serves reads")
+	}
+	return c.found
+}
+
+// freshGrantTrace is neg-fresh-grant-no-table-check's trace: interval 2 puts primary 2 in maintenance and makes disk 3 primary, handed to disks 1 and 3 alone; disk 3 refuses disk 2's renewals, peers once its grant ends and serves, while disk 2, still on interval 1's table, asks for a lease afresh.
+func freshGrantTrace(t *testing.T, plant bool) error {
+	c := plantedPG2(t, func(p *replicaPlants) { p.freshGrantNoCheck = plant })
+	c.inv.Register(invOneReader, func() error { return c.oneReader(1) })
+	c.hand(c.next(members(Member{Disk: 3}, Member{Disk: 2, Mark: MarkMaint})), 0, 2)
+	c.runFor(3 * lease.DefaultConfig.Lease)
+	if c.serving(pg0, 1) != 2 {
+		t.Fatal("disk 3 never serves reads")
+	}
+	return c.found
+}
+
 // Each planted bug whose counterexample needs a trace no seeded run reaches breaks its invariant on that trace, which the correct code passes.
 func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 	for _, tc := range []struct {
@@ -209,6 +238,8 @@ func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 		{"peering stops only the previous interval", invAckedKept, stopPreviousTrace},
 		{"activation reported once decided", invAckedKept, reportDecidedTrace},
 		{"reboot that takes no time", invOneReader, instantTrace},
+		{"kept primary reads below min_live", invOneReader, minLiveTrace},
+		{"fresh grant with no table check", invOneReader, freshGrantTrace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.trace(t, false); err != nil {
