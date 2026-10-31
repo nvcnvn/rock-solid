@@ -98,6 +98,8 @@ type Settings struct {
 	MsgType  func(m *core.Msg) uint64
 	// RebootInstantly plants a reboot that takes no time, for a run that must catch it.
 	RebootInstantly bool
+	// ReadsFirst plants a loop that, in its first pass after a pause, handles the messages it marks before the others, for a run that must catch it.
+	ReadsFirst func(m *core.Msg) bool
 }
 
 // DefaultSettings are a 4 MiB pool per node, 50 µs network delay, connections that fail within 1 ms of breaking, no faults, and a stale Timer for one replaced or fired timer in 8.

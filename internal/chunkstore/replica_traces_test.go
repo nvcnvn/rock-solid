@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strings"
@@ -252,6 +253,40 @@ func lastActivatedTrace(t *testing.T, plant bool) error {
 	return c.found
 }
 
+// readsFirstTrace is the trace of peer messages handled after reads in a pass: primary 2 stops in place with its clocks frozen for 10 s; interval 2 makes disk 3 primary with disk 2 in maintenance, handed to disks 1 and 3, and disk 3 serves once its grant to disk 2 ends; a read tagged with interval 1 reaches disk 2 at 9 s, behind disk 3's heartbeats.
+func readsFirstTrace(t *testing.T, plant bool) error {
+	set := sim.DefaultSettings()
+	if plant {
+		set.ReadsFirst = func(m *core.Msg) bool { return m.Len >= headSize && Kind(m.Body[1]) == KindRead }
+	}
+	c := newRClusterOn(t, pg2Table(), sim.New(1, set))
+	c.planted = true
+	var served error
+	c.onEvent = func(d int, ev *core.Event, done bool) {
+		if err := c.readArrives(d, ev); !done && err != nil && served == nil {
+			served = err
+		}
+	}
+	c.inv.Register(invOneReader, func() error { return cmp.Or(served, c.oneReader(1)) })
+	c.runFor(1_000_000)
+	if c.serving(pg0, -1) != 1 {
+		t.Fatal("disk 2 does not serve reads")
+	}
+	old := c.table
+	c.s.Pause(1, clock.PauseFrozen, 10_000_000, false)
+	c.hand(c.next(members(Member{Disk: 3}, Member{Disk: 2, Mark: MarkMaint})), 0, 2)
+	c.runFor(9_000_000)
+	if c.serving(pg0, 1) != 2 {
+		t.Fatal("disk 3 never serves reads")
+	}
+	cur := c.table
+	c.table = old
+	id := c.read(pg0, chunkIn(pg0, 1, 0), 0, 1, 1)
+	c.table = cur
+	c.until(id)
+	return c.found
+}
+
 // Each planted bug whose counterexample needs a trace no seeded run reaches breaks its invariant on that trace, which the correct code passes.
 func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 	for _, tc := range []struct {
@@ -266,6 +301,7 @@ func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 		{"kept primary reads below min_live", invOneReader, minLiveTrace},
 		{"fresh grant with no table check", invOneReader, freshGrantTrace},
 		{"peering reaches only the last activated interval", invOneReader, lastActivatedTrace},
+		{"peer messages handled after reads in a pass", invOneReader, readsFirstTrace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.trace(t, false); err != nil {

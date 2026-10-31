@@ -29,7 +29,6 @@ type readRun struct {
 	until   core.Tick
 	next    core.Tick
 	err     error
-	served  int
 	// returns has a node cut off lead its PGs once marked up again; back is the node cut off that gets no tables until then, or until backBy.
 	returns bool
 	back    int
@@ -87,29 +86,35 @@ func (c *rcluster) oneReader(pgs uint32) error {
 	return nil
 }
 
-// read checks a client read node d is about to take: if it would serve it as the PG's primary, no other node may serve the PG's reads.
+// read notes the first read a node serves while another may serve its PG's reads.
 func (r *readRun) read(d int, ev *core.Event) {
-	c := r.d.rcluster
+	if err := r.d.readArrives(d, ev); err != nil && r.err == nil {
+		r.err = err
+	}
+}
+
+// readArrives checks a client read node d is about to take: if it would serve it as the PG's primary, no other node may serve the PG's reads.
+func (c *rcluster) readArrives(d int, ev *core.Event) error {
 	nd := c.s.Node(uint32(d))
 	if ev.Kind != core.EvNetRecv || ev.Peer != c.client || ev.Msg.Len < headSize || Kind(ev.Msg.Body[1]) != KindRead {
-		return
+		return nil
 	}
 	frame, data := Frame(nd.Pool(), &ev.Msg)
 	var rd Read
 	if DecodeRead(frame, data, &rd) != nil {
-		return
+		return nil
 	}
 	rep := c.reps[d]
 	i := rep.lead(rd.PG.PG)
 	p, e := rep.table.entry(rd.PG.PG)
 	ctx := nd.Context()
 	if i < 0 || !rep.leads[i].serving || rd.PG.Interval < rep.leads[i].since || rd.PG.Interval > rep.leads[i].interval || !rep.readable(&ctx, p, e) {
-		return
+		return nil
 	}
-	r.served++
-	if b := c.serving(rd.PG.PG, d); b >= 0 && r.err == nil {
-		r.err = fmt.Errorf("node %d serves read %d of %v while node %d may serve its reads", d, rd.ID, rd.PG.PG, b)
+	if b := c.serving(rd.PG.PG, d); b >= 0 {
+		return fmt.Errorf("node %d serves read %d of %v while node %d may serve its reads", d, rd.ID, rd.PG.PG, b)
 	}
+	return nil
 }
 
 // incarnations checks that no acknowledged write of the session's first incarnation has a later version of its chunk than an acknowledged write of the second.
