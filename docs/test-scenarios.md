@@ -5304,33 +5304,70 @@ test's alone.
 
 ## Consistency check of chunk histories
 
-- The simulator records `(invoke_time, complete_time, op, result)` for every client chunk operation,
-  in a format Porcupine reads (the phase 1 history recorder).
-- The model is per chunk: a 4 MiB byte array and a version. Operations:
+- **Recording.** The replica runs record every client write, punch and read in the phase 1 history
+  recorder (`chunkHist` in `internal/chunkstore`): a client actor's requests as it sends them, and
+  the replies a replica sends the client, the decoder getting the sender's bytes of a read's
+  buffer, which it records as their FNV-1a hash. Each run checks every chunk's history at its end,
+  as the invariant "every chunk's history of client writes, punches and reads is linearizable": the
+  fault run (`TestReplicatedWritesSurviveFaults`), the primary-change run, the read run, the
+  write-limit run and the sub-block seeds. The runs with no reads of their own read each chunk back
+  once they settle, the primary-change run once with each up member primary in turn, so a member
+  holding other bytes than the primary shows once it leads.
+- **The model** is per chunk: a 4 MiB byte array and a version. Operations:
   - `write(off, bytes, expect_ver?) → version or error`
   - `punch(off, n, expect_ver?) → version or error`
   - `read(off, n) → bytes, version`
   - `read(off, n, at_ver) → bytes`
-- Linearizable: each operation takes effect at one instant between its invoke and its complete.
-- Open: a write resent after its first attempt committed is applied again, so a history with
-  another write between the two attempts is not linearizable if the attempts count as one
-  operation. Until the open question on resent chunk writes is settled, the recorder logs each
-  attempt as its own operation, and a planted resend after a lost acknowledgment, with another
-  client's write between, is the case that shows which way it went.
-- An operation with an unknown result is checked as maybe applied, with no completion.
-- Open: which errors are definite (`NoSpace` before ordering, an `expect_ver` mismatch) and which
-  leave the result unknown. Unknown results come from a timeout, a `PeerLost`, or an interval
-  refusal after the write was sent to members, since peering can keep such a write.
-- Porcupine finds a linearizable order for every chunk of every history from scenarios P1 to P22 and
-  from 1,000 random seeds.
-- Planted bugs, each found non-linearizable on at least one seed of 100:
-  - A read served from a pending version.
-  - An old primary serving reads with the lease check disabled (P1).
-  - The holder ending its lease on the slower clock (P9's slews).
-  - Merging on the committed version (sub-block M2).
-  - Peering dropping a non-suffix (M7).
-- Histories are split by chunk, so the check's cost is per chunk. Open: its CI time budget, for
-  example for a history of 3 clients × 400 operations on one chunk.
+- Linearizable: each operation takes effect at one instant between its invoke and its complete. A
+  write takes effect at its version, which must follow the chunk's: the next of its interval, or
+  `k.1` of a later interval `k`, since a primary numbers a chunk's versions from its interval and
+  peering keeps every version below a kept one; and it never passes over a version another write was
+  answered OK with. A read returns the chunk's version and bytes; a read at a version, that
+  version's bytes. A punch of an absent chunk is answered OK with no version and changes nothing.
+  `TestTheChunkModel` gives each rule a history that holds and one that breaks it.
+- **Results.** A write or punch answered OK, and one refused for its `expect_ver`, which the store
+  checks as it orders it, are definite; so is a read answered OK. Every other answer, `NoSpace` and
+  interval refusals included, and no answer leave the result unknown: the store refuses `NoSpace`
+  after ordering when its log stalls, and peering can keep a version refused after it was sent to
+  members. A write the primary never ordered cannot take effect and is left out, as is a read with
+  no answer.
+- **An unknown write** is checked as maybe applied, with no completion, unless a later interval's
+  peering decided its version: kept, it takes effect like one answered OK; dropped, it is left out.
+  Without that, the writes a failed primary refuses, a few dozen in a fault seed, each taking effect
+  or not, ran Porcupine past its timeout on histories of 50 operations. An undecided one is
+  concurrent with everything after its call, so once an operation showing a later version of its
+  chunk completes, where it could only be no operation, its return is moved there.
+- **Resent writes.** Each attempt of a write sent again is its own operation, until the [open
+  question](design.md#roadmap-and-open-questions) on resent chunk writes is settled.
+  `TestAResendAfterALostAcknowledgmentIsASecondWrite` plants the case: client A's write of X
+  commits as 1.1 and its reply is lost, a read sees X, client B writes Y as 1.2, a read sees Y, A
+  sends X again, which commits as 1.3, and a read sees X. As two writes the history is
+  linearizable; with the two attempts one operation, the reads' X, Y, X fit no order. So today a
+  client gets the weaker guarantee, and the check passes only because it counts each attempt.
+- Porcupine finds a linearizable order for every chunk of every history the runs record, over the
+  seeds `scripts/seeds.sh` gives them: 1,000 fault seeds, 500 each of the primary-change, read and
+  sub-block runs and 200 write-limit seeds. The scripted rows P1 to P22 of [Placement faults and
+  invariants](#placement-faults-and-invariants) assert actions and record no history; the seeded
+  runs land their faults.
+- **Planted bugs** (`TestPlantedBugsBreakChunkHistories`), each checking the history invariant alone,
+  with the seeds of 100 failing and the first:
+
+  | Planted bug | Run | Seeds of 100 | First |
+  | --- | --- | --- | --- |
+  | A read served from a pending version: the primary commits once its own log holds a version (`commitOnOwnLog`), and the next interval drops it | Read | 71 | 0 |
+  | Merging on the committed version (sub-block M2), one client pipelining 4 writes | Sub-block | 100 | 0 |
+  | Peering dropping a subset of a chunk's pending versions, not a suffix (M7, `settleSubset`) | Primary-change | 1 | 38 |
+
+  Not found: an old primary serving reads with no lease check (P1), and the holder ending its lease
+  on the slower of its clocks (P9's slews), each planted on the replica's read check, found no seed
+  of 100 in the read run. With no lease check two nodes may serve a PG's reads in 5 of the first 30
+  seeds, which "no PG serves reads from two primaries at once" catches, but no read reached the old
+  primary in such a window after the new one acknowledged a write to the chunk read. The lease rows
+  are the lease pair run's (`internal/lease`) and the read run's one-reader check's.
+- **Cost.** Histories are split by chunk, so the check's cost is per chunk, and each run's check
+  stops at 30 s, failing the seed. The model builds a state's bytes only when a read needs them.
+  The checks add about 25 s to the seed runner's list on 2 processes, the write-limit run's 10 s the
+  most.
 - Close-to-open and the file-level checks of Testing strategy's layer 3 belong to the file frontend
   (phase 6).
 
