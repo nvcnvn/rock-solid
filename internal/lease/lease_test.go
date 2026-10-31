@@ -545,3 +545,35 @@ func TestPlantedLeaseBugsBreakThePair(t *testing.T) {
 		}
 	}
 }
+
+// keptAcrossRunTrace is the trace of a lease kept across a grantor's new run ID, which the pair run, stopping one side at a time, never reaches: the holder stops in place 1 s after its lease formed while the grantor's heartbeats are lost; the grantor resumes with a new run ID at 2 s and heartbeats once more, its grant ends, and the holder continues at 5 s with only that heartbeat queued.
+func keptAcrossRunTrace(pl plants) error {
+	hc, gc := clocks{bootRate: rate(0), rawRate: rate(0)}, clocks{boot: 10_000_000, raw: 10_000_000, bootRate: rate(0), rawRate: rate(0)}
+	h, g := NewHolder(cfg), NewGrantor(cfg, 1, Time{})
+	h.plant, g.plant = pl, pl
+	holder := core.NodeID{Node: 1}
+	round(h, g, hc, gc, 0, 100, 1)
+	round(h, g, hc, gc, cfg.RateGap+200, 100, 2)
+	if !h.Valid(grantor, hc.at(cfg.RateGap+400)) {
+		return fmt.Errorf("no lease")
+	}
+	hc.freeze(1_000_000, 0, 4_000_000)
+	g.Resumed(2)
+	raw := gc.at(2_000_000).Raw
+	at := core.Tick(5_000_000)
+	h.OnHeartbeat(grantor, g.Run(), raw, hc.at(at))
+	if h.Valid(grantor, hc.at(at)) && !g.Live(holder, gc.at(at)) {
+		return fmt.Errorf("at real %d µs the holder holds a lease its grantor no longer keeps", at)
+	}
+	return nil
+}
+
+// A lease kept across a grantor's new run ID outlasts its grant on its trace, which the correct holder passes.
+func TestALeaseKeptAcrossANewRunBreaksItsTrace(t *testing.T) {
+	if err := keptAcrossRunTrace(plants{}); err != nil {
+		t.Fatalf("unplanted: %v", err)
+	}
+	if err := keptAcrossRunTrace(plants{keepOnNewRun: true}); err == nil || !strings.Contains(err.Error(), "no longer keeps") {
+		t.Fatalf("planted: %v", err)
+	}
+}

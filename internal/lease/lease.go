@@ -79,12 +79,12 @@ type Holder struct {
 // plants are bugs a test plants in a holder or a grantor, each the epoch change model's
 // counterexample of the same name: the holder ending its lease on the slower of its clocks; a
 // lease before the first bound, on lease_drift alone; widening only past 1 + 2 lease_drift; the
-// margin max(lease_drift, 1 − 1/B); no new window at a grantor's new run ID; no end of leases on
-// Resumed; no step check, or one on grants only, at 1 + lease_drift / 2, or against a grant that
+// margin max(lease_drift, 1 − 1/B); no new window at a grantor's new run ID; a lease kept across a
+// grantor's new run ID; no end of leases on Resumed; no step check, or one on grants only, at 1 + lease_drift / 2, or against a grant that
 // gave no lease; the grantor ending its grant on the faster of its clocks; no restart wait.
 type plants struct {
-	slowerClock, beforeBound, widenLate, marginExact, noRunWindow, noResumedEnd bool
-	noStepCheck, stepOnGrantsOnly, halfStep, checkBeforeBound                   bool
+	slowerClock, beforeBound, widenLate, marginExact, noRunWindow, keepOnNewRun bool
+	noResumedEnd, noStepCheck, stepOnGrantsOnly, halfStep, checkBeforeBound     bool
 	fasterClock, noRestartWait                                                  bool
 }
 
@@ -205,7 +205,7 @@ func (h *Holder) OnHeartbeat(g core.NodeID, run uint64, raw core.Tick, t Time) (
 		h.EndAll()
 		return true
 	}
-	if len(p.win) > 0 && (run != p.run && !h.plant.noRunWindow || raw < p.newestG) {
+	if len(p.win) > 0 && (run != p.run && !h.plant.noRunWindow && !h.plant.keepOnNewRun || raw < p.newestG) {
 		p.win, p.bound, p.gave = p.win[:0], 0, false
 	}
 	p.newestG = max(p.newestG, raw)

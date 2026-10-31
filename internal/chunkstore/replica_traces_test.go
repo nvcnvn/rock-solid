@@ -227,6 +227,31 @@ func freshGrantTrace(t *testing.T, plant bool) error {
 	return c.found
 }
 
+// lastActivatedTrace is the trace of peering that reaches only the last activated interval and the current one: interval 2 replaces disk 3 with disk 1 under primary 2, and interval 3 puts disk 1 in maintenance; primary 2 activates both, but the leader records neither; cut off from disks 1 and 3, disk 2 reads on in 3 with no lease while interval 4 makes disk 3, live in interval 1 only, primary with disk 2 in maintenance, handed to disks 1 and 3; once the cut heals, disk 2 gets it too.
+func lastActivatedTrace(t *testing.T, plant bool) error {
+	c := plantedPG2(t, func(p *replicaPlants) { p.lastActivatedOnly = plant })
+	c.inv.Register(invOneReader, func() error { return c.oneReader(1) })
+	c.publish(c.next(members(Member{Disk: 2}, Member{Disk: 1})), true)
+	c.activations = nil
+	c.publish(c.next(members(Member{Disk: 2}, Member{Disk: 1, Mark: MarkMaint})), true)
+	c.activations = nil
+	c.s.Partition(1, 0, false)
+	c.s.Partition(1, 2, false)
+	if c.serving(pg0, -1) != 1 {
+		t.Fatal("disk 2 does not read in interval 3")
+	}
+	c.hand(c.next(members(Member{Disk: 3}, Member{Disk: 2, Mark: MarkMaint})), 0, 2)
+	c.runFor(2 * lease.DefaultConfig.Lease)
+	c.s.Heal(1, 0)
+	c.s.Heal(1, 2)
+	c.hand(c.table, 1)
+	c.runFor(2 * lease.DefaultConfig.Lease)
+	if c.serving(pg0, 1) != 2 {
+		t.Fatal("disk 3 never serves reads")
+	}
+	return c.found
+}
+
 // Each planted bug whose counterexample needs a trace no seeded run reaches breaks its invariant on that trace, which the correct code passes.
 func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 	for _, tc := range []struct {
@@ -240,6 +265,7 @@ func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 		{"reboot that takes no time", invOneReader, instantTrace},
 		{"kept primary reads below min_live", invOneReader, minLiveTrace},
 		{"fresh grant with no table check", invOneReader, freshGrantTrace},
+		{"peering reaches only the last activated interval", invOneReader, lastActivatedTrace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.trace(t, false); err != nil {
