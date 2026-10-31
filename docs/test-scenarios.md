@@ -5135,9 +5135,11 @@ the head of [Peering and read leases](#peering-and-read-leases).
   acknowledged block 3 in 10, a granted new block 1 in 10, else a new block, while one fault at a
   time reboots a disk node or delays a path for 0.2 to 1 s. A write the primary orders while it
   holds a member at its limit, neither granted nor an overwrite, must never become a version a disk
-  past its limit maps. Correct runs pass the limits by tens of blocks, through granted writes and
-  fills reported late. Held fills are compared with the limit without grants, which arrive with
-  phase 4. A run of its own, not the read run: capacity needs punches, overwrites and grants the
+  past its limit maps. Correct runs pass the limits through granted writes and fills reported late,
+  by at most 87 blocks over the first 100 seeds; no disk may pass its limit by more than the 300
+  blocks of room it had below it, a bound on the disks' own live blocks that holds whatever fills
+  the primaries held and however the stores classed overwrites. Held fills are compared with the
+  limit without grants, which arrive with phase 4. A run of its own, not the read run: capacity needs punches, overwrites and grants the
   read run's writers do not send.
 - The lease pair run (`TestNoLeaseOutlastsItsGrant` in `internal/lease`, 10,000): one holder and
   one grantor with heartbeats, clock rates and slews drawn per seed, and in 3 seeds of 4 cuts (some
@@ -5177,6 +5179,7 @@ run reports it; the lease pair run has no simulated cluster, and checks its own 
 | "once membership stops changing, every PG whose current interval has at least min_live live members on running nodes activates it" | 12 | Fault and primary-change runs, at their end |
 | "no move lowers the members of a PG holding an acknowledged version below its width" | 13 | Primary-change run, at each removal of a leaving member |
 | "a disk passes write_limit only through granted flushes, overwrites, punches and recovery" | | Write-limit run |
+| "no disk passes write_limit by more than the room it had below it" | | Write-limit run |
 | "each pool's figures keep their bounds as its table changes" | | Placement run |
 
 Too few copies return an error, never wrong data: a chunk peering found unfound is answered
@@ -5239,7 +5242,8 @@ members do: a read returns a version the next interval drops at 279 seeds of 500
 version check firing.
 
 The write-limit run's planted bug, a primary ordering a plain write that adds live data past a
-member's limit, fails all 500 seeds, seed 0 first (`TestPlantedLimitBugBreaksTheLimitRun`).
+member's limit, fails each of the run's two invariants, checked alone, at all 500 seeds, seed 0
+first (`TestPlantedLimitBugBreaksTheLimitRun`): its disks pass their limits by about 500 blocks.
 
 **Scripted scenarios.** Each row states what its tests check, and every one also holds the invariants
 above that its tests register. A row whose tests check less than the fault in [Testing
