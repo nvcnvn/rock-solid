@@ -35,6 +35,7 @@ jobs:
       # internal/chunkstore alone peaks near 4.3 GB, so three packages at a time keep within the
       # runner's 16 GB.
       - run: go test -p 3 -timeout 30m ./...
+      - run: scripts/raft-tests.sh
 
   seeds:
     runs-on: ubuntu-latest

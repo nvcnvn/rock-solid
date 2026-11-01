@@ -40,4 +40,4 @@ case $status in
 3) exit 3 ;;
 *) echo "govulncheck could not run (exit $status); skipping the vulnerability check" >&2 ;;
 esac
-go run "$GO_LICENSES" check ./... --allowed_licenses="$ALLOWED_LICENSES"
+go run "$GO_LICENSES" check ./... go.etcd.io/raft/v3 --allowed_licenses="$ALLOWED_LICENSES"
