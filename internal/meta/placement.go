@@ -1,4 +1,4 @@
-// Package meta is the MetaStore: so far, where the control-plane leader places each Raft group's voters.
+// Package meta is the MetaStore: a shard's state machine and the replica that proposes and applies its Txns, and where the control-plane leader places each Raft group's voters.
 package meta
 
 import (

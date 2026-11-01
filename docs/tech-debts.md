@@ -35,10 +35,10 @@
 - **Why:** memtable pages, runs and the Raft entries a shard keeps after its last compaction belong in slabs mapped outside the Go heap ([Runtime in Go](design.md#runtime-in-go)), which the event loop's off-heap slabs provide, and those do not exist yet. Until then they are pointer-free Go slices: the collector does not scan them (0.24 ms per collection at 20 million entries) but counts them toward its heap goal, runs are freed by the collector rather than by hand once no view holds them, and a Raft entry chunk once a compaction passes its last entry.
 - **Remove when:** the off-heap slabs of `internal/loop` exist; the page store and the Raft storage take their slabs from them, runs are released when the last view holding them closes, and a Raft entry chunk when a compaction passes it.
 
-## Workaround: a restored Raft snapshot's data in its round
-- **Where:** `AppendRound` and `Storage.Replay` in `internal/raftshard/round.go`
-- **Why:** a follower that restores a snapshot must keep it across a crash, and its data belongs in sorted runs of the shard's LSM tree, with only its index, term and configuration in the round ([Raft shard](design.md#metadata-layer-metastore)). No shard has an LSM tree yet, so the round's record carries the snapshot's data too, cut across as many blobs as it takes, and a replay holds it in memory until the round's last blob arrives.
-- **Remove when:** the Shard state machine writes a restored snapshot as runs of its LSM tree; then the round's record drops the data.
+## Workaround: a restored Raft snapshot's data in its round and memtable
+- **Where:** `AppendRound` and `Storage.Replay` in `internal/raftshard/round.go`; `walkSnapshot` in `internal/meta/state.go`
+- **Why:** a follower that restores a snapshot must keep it across a crash, and its data belongs in sorted runs of the shard's LSM tree, named by the disk owner's checkpoint, with only its index, term and configuration in the round ([Raft shard](design.md#metadata-layer-metastore)). No checkpoint names a shard's runs yet, so the state machine puts a restored snapshot's keys into a fresh tree's memtable, and the round's record carries the snapshot's data too, cut across as many blobs as it takes, while a replay holds it in memory until the round's last blob arrives.
+- **Remove when:** Shard indexes in the disk owner's checkpoint writes a restored snapshot as runs its manifest names; then the round's record drops the data.
 
 ## Version pin: TLC 1.7.4
 - **Where:** `version` and `sha256` in `scripts/models.sh`, which downloads the TLC jar into `~/.cache/rock-solid` (`$XDG_CACHE_HOME` when set) and checks it against the checksum

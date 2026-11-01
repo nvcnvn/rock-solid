@@ -531,16 +531,18 @@ func TestUndecodableMessagesAreDroppedAndCounted(t *testing.T) {
 			_ = m.SetInline(append(le.AppendUint64(nil, testGroup), kindRaft, 0xff, 0xff, 0xff))
 			return m
 		}(),
-		"unknown type":           frame(raftpb.Message{Type: 99, To: 2, From: 1, Term: 1}),
-		"local type":             frame(raftpb.Message{Type: raftpb.MsgHup, To: 2, From: 1}),
-		"forwarded proposal":     frame(raftpb.Message{Type: raftpb.MsgProp, To: 2, From: 1, Entries: []raftpb.Entry{{Data: []byte("x")}}}),
-		"buffer length past end": buffered(head(core.BlockSize+1), 10),
-		"buffer header short":    buffered(head(3)[:kindBytes+1], 10),
-		"unknown kind":           fort(kindRemoved+1, 40),
-		"short fortification":    fort(kindFortify, 39),
-		"long fortification":     fort(kindFortified, 41),
-		"buffered fortification": buffered(append(append(le.AppendUint64(nil, testGroup), kindFortify), make([]byte, 40)...), 10),
+		"unknown type":                   frame(raftpb.Message{Type: 99, To: 2, From: 1, Term: 1}),
+		"local type":                     frame(raftpb.Message{Type: raftpb.MsgHup, To: 2, From: 1}),
+		"forwarded proposal":             frame(raftpb.Message{Type: raftpb.MsgProp, To: 2, From: 1, Entries: []raftpb.Entry{{Data: []byte("x")}}}),
+		"buffer length past end":         buffered(head(core.BlockSize+1), 10),
+		"buffer header short":            buffered(head(3)[:kindBytes+1], 10),
+		"unknown kind":                   fort(kindRemoved+1, 40),
+		"short fortification":            fort(kindFortify, 39),
+		"long fortification":             fort(kindFortified, 41),
+		"buffered fortification":         buffered(append(append(le.AppendUint64(nil, testGroup), kindFortify), make([]byte, 40)...), 10),
+		"snapshot that does not restore": frame(raftpb.Message{Type: raftpb.MsgSnap, To: 2, From: 1, Term: good.Term, Snapshot: &raftpb.Snapshot{Data: []byte("bad"), Metadata: raftpb.SnapshotMetadata{Index: 100, Term: good.Term, ConfState: raftpb.ConfState{Voters: []uint64{1, 2, 3}}}}}),
 	}
+	f.s.cfg.CheckSnapshot = func(data []byte) bool { return string(data) == "ok" }
 	for name, msg := range cases {
 		before := f.s.rn.Status()
 		was := f.s.Stats().Undecodable

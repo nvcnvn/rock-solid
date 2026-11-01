@@ -2859,9 +2859,9 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
   runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
   they take.
-- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 65,400 seeds in about
-  888 s, building the test binaries included (the two voter-replacement tests and the disk-log
-  crash run timed alone and added). On 4 processes the largest process peaked at 528 MiB
+- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 85,400 seeds in about
+  899 s, building the test binaries included (the two voter-replacement tests, the disk-log
+  crash run and the two shard state machine tests timed alone and added). On 4 processes the largest process peaked at 528 MiB
   resident (an `internal/lsm` metamorphic shard), all four at 1.9 GiB:
 
   | Test | Seeds | Time |
@@ -2873,6 +2873,8 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/raftshard` `TestVoterReplacementRunsReplayFromTheirSeed` | 2,000 | 25 s |
   | `internal/raftshard` `TestAReplacementNeverStallsProposals` | 2,000 | 9 s |
   | `internal/raftshard` `TestCommittedEntriesSurviveCrashesOnTheDiskLog` | 2,000 | 43 s |
+  | `internal/meta` `TestTxnsMatchTheOracle` | 10,000 | 5 s |
+  | `internal/meta` `TestReplayedRequestsReturnTheirFirstFinalResult` | 10,000 | 6 s |
   | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 28 s |
   | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 6 s |
   | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 76 s |
@@ -5466,7 +5468,7 @@ place of replaying the disk log.
 | A peer message of 256 bytes, framing included | Carried inline |
 | A peer message of 257 bytes or more (an append with entries) | Carried as an `IOBuf` handle, never inline, and decodes to the same message |
 | An append over 256 bytes while the buffer pool is exhausted | The message is dropped as lost and counted (`Unsent`), never a panic or a heap fallback. Once the pool has room, Raft resends it and both followers catch up |
-| A `NetRecv` that fails to decode (truncated framing, garbage body, an unknown type, a type only a node sends itself, a forwarded proposal, a buffer length past the buffer) | Dropped and counted (`Undecodable`), its buffer freed. No panic, no step into `RawNode` |
+| A `NetRecv` that fails to decode (truncated framing, garbage body, an unknown type, a type only a node sends itself, a forwarded proposal, a buffer length past the buffer, a snapshot whose data `Config.CheckSnapshot` refuses) | Dropped and counted (`Undecodable`), its buffer freed. No panic, no step into `RawNode` |
 | A message for another group, or for another replica of this one | Dropped and counted (`Misrouted`), not answered: a removed replica learns from its own log |
 | `PeerLost` for a follower's node | The leader calls `ReportUnreachable`, so that follower goes from replicate to probe; the other follower stays in replicate |
 | A leader with proposals in a round | The `MsgApp` to followers goes out in the same pass as the round to flush, not after the flush, and not again once it is durable. Batching into one entry per round is under Shard state machine |
@@ -5788,7 +5790,8 @@ Every 3- and 5-node run had the workload valid, with no checker invalid.
 | `CheckEmpty(d/, PrefixEnd(d/))` over a directory with one entry, then after that entry's delete | Fails, then passes. `rmdir` of a non-empty directory fails with `ENOTEMPTY` |
 | `DeleteRange(k1, k3)` over k1, k2, k3 | k1 and k2 removed, k3 kept: the range is half-open |
 | A key of 1,033 bytes, or a value of 1,001 bytes | Refused with an error before proposing, never a panic (`MaxKey` 1,032, `MaxValue` 1,000) |
-| A `DeleteRange` or `CheckEmpty` bound of 1,001 bytes | Refused before proposing; a bound of 1,000 bytes commits |
+| A `DeleteRange` or `CheckEmpty` bound of 1,001 bytes, or a start not below its end | Refused before proposing; a bound of 1,000 bytes commits |
+| A `Txn` with a replay key and 125 `Update`s | Refused before proposing; 124 commit, and their record fits `MaxValue` |
 | A `Txn` encoding to more than 256 KiB (`max_txn_bytes`), as an 82 KiB xattr in pieces fits and 1 MiB does not | Refused before proposing with a size error, never split |
 | Empty ops | An error |
 | Two racing `Txn`s, each check a absent, put a=x | Exactly one commits (the design's lock-race example) |
@@ -5810,16 +5813,19 @@ Every 3- and 5-node run had the workload valid, with no checker invalid.
 | Same | Scan(k, k + 0x00, 1) | The point read of k |
 | Keys and values totalling 1 MiB | Scan with limit 10,000 | Stops at 256 KiB (`max_scan_bytes`) with `more` true; resuming from the last key + 0x00 returns the rest |
 | A key of `MaxKey` bytes | Resume from it + 0x00 | Accepted: a scan bound of `MaxKey` + 1 bytes is never stored |
-| Same | A scan over the whole key space, with the control-plane group and one data shard | Refused by routing, as every range spanning groups is |
 | 1,000 directory entries under one directory | Scan of the directory's `d/` prefix | All 1,000 in name order, from one point-in-time view, while writes continue |
 
 **Rounds and reads**
 
 - **One log entry per leader per round.** 100 `Txn`s arriving at a leader during one round become one Raft entry. The trace shows one entry per round.
-- **Reads never wait for writers.** A scan running while 1,000 puts commit returns the view as of its start.
-- **Snapshot data at the handed-over index.** A snapshot the Raft shard builds in the step that hands entries over to apply carries the state machine's contents with every one of them applied, since `Config.SnapshotData` is called with the last index handed over.
+- **Reads never wait for writers.** A scan's reply is read from the state in one call and copied into the caller's buffer, so the 1,000 puts that commit after it change neither the state it read nor the reply.
+- **Answers.** A leader answers each `Txn` it proposed as it applies its entry. A follower refuses a `Txn` with `ErrProposalDropped`; a leader cut off with two `Txn`s proposed answers both dropped once it applies the new leader's first entry, and neither applies anywhere; a replica restarted from its log rebuilds the same state.
+- **[property]** Txns against an oracle (`TestTxnsMatchTheOracle`): 300 random `Txn`s per seed over six keys, every op kind and mode, half of them under replay keys of three mounts with random oldest-outstanding values, applied through their log encoding; each result and the whole state, replay records decoded, equal a map-based model's after every `Txn`.
+- **[property]** Replayed requests (`TestReplayedRequestsReturnTheirFirstFinalResult`): requests of three mounts, each resent 0 to 3 times at random later points with honest oldest-outstanding values; a resend of a request whose result was final returns that result and leaves the state byte for byte as it was, and a result that was not final leaves no record. The planted bugs "a replay record ignored" and "a check failure that is not final stored as the request's result" each fail within 20 seeds.
+- **Fuzzing.** The `Txn` decoder (a `Txn` that decodes is within the limits, encodes back to the same bytes and applies without a panic), the snapshot data decoder (`CheckSnapshot` accepts exactly what restores, and a refused snapshot leaves the state as it was) and the replay record decoder.
+- **Snapshot data at the handed-over index.** A snapshot the Raft shard builds in the step that hands entries over to apply carries the state machine's contents with every one of them applied, since `Config.SnapshotData` is called with the last index handed over and `Config.Apply` hands them over within the call. A leader whose durable round hands over an entry and commits the next, probing a follower cut off behind its compaction, builds the snapshot in that call and the follower restores the leader's state; a state machine that applies only once the call returns has the snapshot asked at an index it has not reached.
 - **Consumed lists.** A purge list consumed in key order has each consumed run removed by one `DeleteRange` op in a `Txn`, so it replicates like every other write and a seek to the queue's head steps over 1 removal, against 10,820 point removals in the LSM deletions study.
-- **Benchmarks** (bars from the KV engines and MetaStore memory spikes): a get from a shard of 10 million files at about 1 µs (0.96 to 1.00 µs from the memtable in the spike), and no slower than redb's 7.2 µs; a 1,000-entry listing at about 3.5 µs from memory (redb 196 µs).
+- **Benchmarks** (bars from the KV engines and MetaStore memory spikes): a get from a shard of 10 million files at about 1 µs (0.96 to 1.00 µs from the memtable in the spike), and no slower than redb's 7.2 µs; a 1,000-entry listing at about 3.5 µs from memory (redb 196 µs). Measured on a 14-core Apple M4 Pro, from the memtable, with no allocation per operation: a point read `Scan(k, k + 0x00, 1)` takes 509 ns among 10 million files (1.1 GiB resident) and 431 ns among 1 million; a create's decode and apply 750 ns; a 1,000-entry listing 31 µs, about 9 times the bar, as the memtable's iterator steps in 35 ns (`BenchmarkIterNext` in `internal/lsm`), against the spike's flat array.
 
 Recovery from manifest and log is under Shard indexes in the disk owner's checkpoint and MetaStore invariants. Bytes per file are under the LSM tree item.
 
@@ -5893,7 +5899,7 @@ Only the last component (a file name, an xattr name or an S3 key) has variable l
 ## Sharded API, one shard
 
 - **Routing.** `Txn` routes its ops through the shard map, sorted and deduplicated. With one shard every key maps to it, and a trace shows one `Propose` to that shard's leader per `Txn`, never a cross-shard path.
-- **Two shards.** A shard map with two ranges, used only in a unit test of the router, routes a `Txn` touching both to the slow path, which in phase 4 refuses it with `ErrCrossShard` naming both groups and proposes nothing. A `Txn` touching a `ctl/` key and a data key is refused the same way, since the control-plane group is a Raft group of its own; no designed transaction does that. Cross-shard transactions arrive in phase 13.
+- **Two shards.** A shard map with two ranges, used only in a unit test of the router, routes a `Txn` touching both to the slow path, which in phase 4 refuses it with `ErrCrossShard` naming both groups and proposes nothing. A `Txn` touching a `ctl/` key and a data key is refused the same way, since the control-plane group is a Raft group of its own; no designed transaction does that, and so is a `Scan` over the whole key space, with the control-plane group and one data shard, since one point-in-time view covers one group. Cross-shard transactions arrive in phase 13.
 - **At a follower.** A `Txn` sent to a follower or a candidate is never forwarded: it is answered `NotLeader{shard, leader node, term}` and proposes nothing. The daemon updates its route cache and resends to that node, and the trace shows one `Propose`, at the leader. With no known leader the reply names none, and the daemon retries after the election.
 - **During an election.** A client request arriving during an election fails retryably and is never applied twice: its resend carries the same replay key and returns the first final result (see Filesystem schema).
 - **Internal `Txn`s across a leader change.** The purger's `Check(p/i = v)` with `Delete(p/i)` applies, its reply is lost, a new leader is elected, a truncate merges a new range into `p/i`, and the purger resends: the check fails and nothing is deleted. The same with a blind `Delete(p/i)` (planted bug) loses the merged range, and the purge invariant fires. A control-plane table version `Check(e)`, `Put(e + 1)` repeated after an election fails its check.
