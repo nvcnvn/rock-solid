@@ -228,6 +228,18 @@ func TestARoundsBlobsDieOnceCompactedAndItsHardStateIsReplaced(t *testing.T) {
 	}
 }
 
+// A removed shard's round still in flight is dead once durable, and never done.
+func TestARemovedShardsRoundInFlightDiesOnceDurable(t *testing.T) {
+	r := newRig(t)
+	r.host.Add(5, NewStorage())
+	r.write(5, 1, &Round{Entries: entries(1, 3, 1, 10<<10)})
+	r.host.Remove(5)
+	r.run()
+	if len(r.done) != 0 || r.live() != 0 {
+		t.Fatalf("a removed shard's round was done (%v) or its blobs count %d live blocks", r.done, r.live())
+	}
+}
+
 // A round the pool has no buffers for waits, and goes out on the next Durable event once buffers are back.
 func TestARoundWaitsForPoolBuffers(t *testing.T) {
 	r := newRig(t)
