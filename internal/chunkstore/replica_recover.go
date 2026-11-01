@@ -242,12 +242,13 @@ func (r *Replica) retryReads() {
 	}
 }
 
-// recoveryAsked serves a recovery read from the PG's primary in the PG's current interval: the
-// chunk's live image as a recovery buffer, or StatusMissing while the chunk is on this disk's
-// missing list.
+// recoveryAsked serves a recovery read from the PG's primary in the PG's current interval, if this
+// disk is a member of it: the chunk's live image as a recovery buffer, or StatusMissing while the
+// chunk is on this disk's missing list. A disk formatted again at a member's loop answers no read
+// for the member's old disk ID.
 func (r *Replica) recoveryAsked(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) {
 	_, e := r.table.entry(rd.PG.PG)
-	ok := e != nil && r.lead(rd.PG.PG) < 0 && rd.PG.Interval == e.Interval
+	ok := e != nil && r.lead(rd.PG.PG) < 0 && rd.PG.Interval == e.Interval && slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk })
 	if ok {
 		d, has := e.primary()
 		ok = has && r.addr(d) == ev.Peer

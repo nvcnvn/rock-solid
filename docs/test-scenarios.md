@@ -4790,6 +4790,11 @@ it on its missing list.
   formatted again and comes back as disk 4 at the same loop while the table still lists disk 3 up
   there; interval 2 moves PG 0's primary to disk 2, and peering waits for disk 3 rather than taking
   disk 4's empty answer and dropping 1.1 (`TestADiskFormattedAgainAnswersNoPeeringForItsOldID`).
+  Recovery reads too: disk 1, down in interval 2, misses 2.1 and leads interval 3 with disk 2
+  down, so disk 3 is its only source; disk 3 is formatted again as disk 4, which answers no
+  recovery read for disk 3, and disk 1 keeps the chunk listed rather than taking disk 4's empty
+  image over 2.1 (`TestADiskFormattedAgainAnswersNoRecoveryReadForItsOldID`; the primary-change
+  run's seed 34 found it).
 - A second device reporting a log ID that is already up (a cloned drive) is refused, and the disk
   that reported it first keeps its ID.
 - Before the primary activates, each member persists its missing list: for each chunk it lacks or

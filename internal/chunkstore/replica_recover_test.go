@@ -307,6 +307,40 @@ func TestOnlyRecoveryRemovesAMissingListEntry(t *testing.T) {
 	}
 }
 
+// Disk 1, down in interval 2, misses 2.1 and lists the chunk as it leads interval 3, where disk 2
+// is down and disk 3 is its only source. Node 3's disk is then formatted again and comes back as
+// disk 4 while the table still lists disk 3 up there; disk 4 answers no recovery read for disk 3,
+// so disk 1 keeps the chunk listed rather than taking disk 4's empty image over 2.1 (the
+// primary-change run's seed 34 found it).
+func TestADiskFormattedAgainAnswersNoRecoveryReadForItsOldID(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 0, 1, 1)
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 2)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 2}, {Disk: 3}, {Disk: 1, Mark: MarkDown}}
+	}), true)
+	c.writeWhole(pg0, ch, 0, 1, 2)
+	c.reps[0].plant.noRecovery = true
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 3)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 1}, {Disk: 3}, {Disk: 2, Mark: MarkDown}}
+	}), true)
+	c.logs[2], c.reformat[2] = 0xf0f0, true
+	c.onFormat = func(int) uint32 { return 4 }
+	c.s.CrashRandom(2)
+	c.s.Restart(2)
+	for !c.s.Node(2).Up() && c.step() {
+	}
+	c.reps[0].plant.noRecovery = false
+	c.runFor(2 * RetryAfter)
+	if x := c.listed(0, ch); x.ListedIn == 0 {
+		c.blockIs(0, ch, 0, 2)
+	}
+}
+
 // Recovery writes pass write_limit: with disk 3 at 91% under a 90% limit, a client write adding
 // data is refused, while recovery still copies disk 3 what it missed.
 func TestRecoveryWritesPassWriteLimit(t *testing.T) {
