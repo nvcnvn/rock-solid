@@ -248,6 +248,10 @@ func FuzzDecodeRound(f *testing.F) {
 	f.Add(AppendRound(nil, &Round{HardState: raftpb.HardState{Term: 1, Commit: 2}, Entries: ents(1, 1, 2, 3)}))
 	f.Add(AppendRound(nil, &Round{Snapshot: raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 3, Term: 1, ConfState: raftpb.ConfState{Voters: []uint64{1}}}}}))
 	f.Fuzz(func(t *testing.T, b []byte) {
+		k := len(b) / 2
+		split := NewStorage()
+		_ = split.Replay(disklog.BlobRaftEntries, append([]byte{1}, b[:k]...))
+		_ = split.Replay(disklog.BlobRaftState, append([]byte{0}, b[k:]...))
 		var r Round
 		if DecodeRound(b, &r) != nil {
 			return
@@ -255,8 +259,16 @@ func FuzzDecodeRound(f *testing.F) {
 		if again := AppendRound(nil, &r); !bytes.Equal(again, b) {
 			t.Fatalf("decoded record encodes as %x, was %x", again, b)
 		}
-		st := NewStorage()
-		_ = st.Replay(disklog.BlobRaftState, append([]byte{1}, b...))
+		whole := NewStorage()
+		wholeErr := whole.Replay(disklog.BlobRaftState, append([]byte{1}, b...))
+		cut := NewStorage()
+		var cutErr error
+		for _, bl := range roundBlobs(t, &r, 3+uint64(len(b)%13)) {
+			cutErr = cut.Replay(bl.kind, bl.payload)
+		}
+		if (wholeErr == nil) != (cutErr == nil) || whole.last() != cut.last() || whole.hs != cut.hs || whole.base.Index != cut.base.Index {
+			t.Fatalf("a round in one blob replays to last %d, %+v (%v), in several to last %d, %+v (%v)", whole.last(), whole.hs, wholeErr, cut.last(), cut.hs, cutErr)
+		}
 	})
 }
 
