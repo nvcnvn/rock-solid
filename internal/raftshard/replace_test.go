@@ -292,3 +292,37 @@ func TestALeaderThePlanDropsTransfersLeadership(t *testing.T) {
 		}
 	}
 }
+
+// A leader cut off while the others elect a new leader and swap it out still leads its old term,
+// so it asks no membership question; a peer answers its messages with the removal notice.
+func TestAPartitionedLeaderLearnsItWasRemoved(t *testing.T) {
+	n := newReplaceNet(t, plants{})
+	n.propose(rA, []byte("a"))
+	n.settleWithout(rD)
+	n.call(rB, func(ctx *core.Context, out *Output) {
+		if err := n.r[rB].s.rn.Campaign(); err != nil {
+			t.Fatal(err)
+		}
+		n.r[rB].s.ready(ctx, out)
+	})
+	n.settleWithout(rA, rD)
+	n.r[rB].s.SetPlan([]Peer{{ID: 2, Node: core.NodeID{Node: 1}}, {ID: 3, Node: core.NodeID{Node: 2}}, {ID: 4, Node: core.NodeID{Node: 3}}})
+	n.propose(rB, []byte("b"))
+	n.heartbeat(rA, rD)
+	for range 10 {
+		n.snapshot(rB)
+		n.heartbeat(rA)
+	}
+	if c := n.conf(rB); !slices.Equal(sorted(c.Voters), []uint64{2, 3, 4}) {
+		t.Fatalf("the swap did not finish: %+v", c)
+	}
+	if st := n.r[rA].s.rn.BasicStatus(); st.RaftState != raft.StateLeader {
+		t.Fatalf("A is %v, want still leading its old term", st.RaftState)
+	}
+	for k := 0; !n.r[rA].removed; k++ {
+		if k == 30 {
+			t.Fatal("A never learned it was removed")
+		}
+		n.heartbeat()
+	}
+}

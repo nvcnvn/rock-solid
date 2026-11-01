@@ -214,6 +214,9 @@ func (s *Shard) Propose(ctx *core.Context, data []byte, out *Output) error {
 
 // Durable reports the round in flight durable: the shard writes it to storage, sends the messages it held, hands over its committed entries and takes the next Ready.
 func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
+	if s.removed {
+		return
+	}
 	if round == 0 || round != s.round {
 		panic(fmt.Sprintf("raftshard: round %d reported durable while round %d is in flight", round, s.round))
 	}
@@ -389,6 +392,24 @@ func (s *Shard) recv(ctx *core.Context, ev *core.Event, out *Output) {
 		} else if m.From == s.rn.BasicStatus().Lead {
 			s.heard = ctx.Now
 		}
+	}
+	if err == nil && kind == kindRaft && group == s.cfg.Group && to == s.cfg.ID {
+		s.sender(from, ev.Peer, out)
+	}
+}
+
+// sender learns the node of a member of the applied configuration that sent a Raft message, and
+// tells one outside it that it was removed, as it answers a membership question: a partitioned old
+// leader asks none, since it still leads its old term.
+func (s *Shard) sender(id uint64, node core.NodeID, out *Output) {
+	switch {
+	case member(&s.conf, id):
+		if s.peer(id) < 0 {
+			s.cfg.Peers = append(s.cfg.Peers, Peer{ID: id, Node: node})
+			s.fort = append(s.fort, fortified{})
+		}
+	case member(&s.conf, s.cfg.ID):
+		s.sendFortify(&fortify{kind: kindRemoved, from: s.cfg.ID, to: id, term: s.applied}, node, out)
 	}
 }
 

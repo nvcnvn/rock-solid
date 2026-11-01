@@ -22,18 +22,18 @@ const (
 )
 
 // replacement is one voter replacement in a simulated run: from cutAt, once one of the first three
-// nodes leads, a follower among them is cut off from every other node, planDelay later the shard
+// nodes leads, a follower among them, or with cutLeader the leader, is cut off from every other node, planDelay later the shard
 // map's plan names the fourth node's replica in its place, and the cut-off replica is reconnected,
 // in half the runs up to a second after the plan, mid-swap, and otherwise a second after a replica
 // applies the configuration without it; either way it must learn that it was removed.
 type replacement struct {
-	crash, pauseD, early        bool
-	cutAt, planDelay, healDelay core.Tick
-	dead                        int
-	planAt                      core.Tick
-	plan                        []Peer
-	swappedAt                   core.Tick
-	healed                      bool
+	crash, pauseD, early, cutLeader bool
+	cutAt, planDelay, healDelay     core.Tick
+	dead                            int
+	planAt                          core.Tick
+	plan                            []Peer
+	swappedAt                       core.Tick
+	healed                          bool
 	// removed is whether the cut-off replica reported itself removed, sinceSwap the first value
 	// proposed after the swap, and caughtUp whether the fourth replica applied one from then on.
 	removed   bool
@@ -78,7 +78,7 @@ func newReplaceCluster(seed uint64, p plants, set sim.Settings, crash, pauseD bo
 	rng := core.NewRand(seed ^ 0x7e91ace)
 	return newCluster(seed, p, set, &replacement{crash: crash, pauseD: pauseD, dead: -1,
 		cutAt: 2_000_000 + core.Tick(rng.Below(2_000_001)), planDelay: core.Tick(rng.Below(2_000_001)),
-		early: rng.Chance(1, 2), healDelay: core.Tick(rng.Below(1_000_001))})
+		early: rng.Chance(1, 2), healDelay: core.Tick(rng.Below(1_000_001)), cutLeader: crash && rng.Chance(1, 2)})
 }
 
 // replace moves the replacement on after a step: cut a follower off, hand every replica the plan, reconnect the removed one.
@@ -90,7 +90,7 @@ func (c *simCluster) replace() {
 	now := c.s.Time()
 	switch {
 	case p.dead < 0 && now >= p.cutAt && slices.ContainsFunc(c.reps[:simNodes], func(r *simReplica) bool { return r != nil && r.leads }):
-		p.dead = slices.IndexFunc(c.reps[:simNodes], func(r *simReplica) bool { return !r.leads })
+		p.dead = slices.IndexFunc(c.reps[:simNodes], func(r *simReplica) bool { return r.leads == p.cutLeader })
 		p.planAt = now + p.planDelay
 	case p.dead >= 0 && p.plan == nil && now >= p.planAt:
 		for i := range simNodes {
