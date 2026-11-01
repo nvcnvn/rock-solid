@@ -1338,7 +1338,7 @@ Invariants, each registered by name, as its component is built, in the run's inv
 - every failed write the daemon acknowledged reaches each handle open on its file at the time, once, at its next `write()`, `fsync` or `close`;
 - no block write that needs new space completes with an error while the pool is full, unless an operator failed it;
 - a chunk index rebuilt from the log equals the one recovered from its manifest, a chunk's live map never holds two entries for one block, and a shard recovered from its manifest and log equals its state before the crash;
-- at most one Raft leader per shard per term, and a committed entry is never lost;
+- at most one Raft leader per shard per term, a committed entry is never lost, and a replica keeps its term and vote across a crash;
 - no node's table epoch or PG interval number goes backwards, no PG's last activated interval goes down, every activation a table records happened, and no two writes of a chunk get one version.
 
 **Crash oracle.** As RocksDB's crash test does with its expected state and trace, the simulator keeps, per disk, the state every index had at the last acknowledged LSN and the records written since, in LSN order. After a crash, recovery reports an LSN between the acknowledged one and the last in flight; the oracle replays its trace to that LSN, and every index on the disk, the chunk index and each shard replica, must equal the result, with no hole. The real-disk crash test of phase 5 keeps the same oracle in its driver, outside the daemon it kills.

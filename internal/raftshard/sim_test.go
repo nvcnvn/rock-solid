@@ -131,6 +131,7 @@ func newCluster(seed uint64, p plants, set sim.Settings, rep *replacement, disk 
 	if disk != nil {
 		disks[0].Blocks = simGeometry.DiskBlocks()
 		c.inv.Register(invNeverLost, c.committedHeld)
+		c.inv.Register(invKeepsVote, func() error { return c.disk.forgot })
 	}
 	for id := range nodes {
 		// Without a disk log the storage outlives crashes: it is what the replica's rounds made durable.

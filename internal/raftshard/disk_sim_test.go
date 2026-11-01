@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 
+	"go.etcd.io/raft/v3/raftpb"
+
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/sim"
@@ -12,6 +14,7 @@ import (
 
 const (
 	invNeverLost = "a committed entry is never lost"
+	invKeepsVote = "a replica keeps its term and vote across a crash"
 	// diskCrashes is how many crashes a disk run makes, simOwner the owner its shard's blobs carry.
 	diskCrashes = 3
 	simOwner    = 1
@@ -31,9 +34,9 @@ type diskRun struct {
 	crashes   int
 	// unreported counts the restarts whose replay found a round its shard was never told was durable.
 	unreported int
-	// skipReplay plants a restart that replays nothing.
-	skipReplay bool
-	lost       error
+	// skipReplay plants a restart that replays nothing, dropVote one that forgets its vote.
+	skipReplay, dropVote bool
+	lost, forgot         error
 }
 
 // bootDisk formats the replica's disk on its first boot and recovers it on a restart, reporting
@@ -109,6 +112,9 @@ func (r *simReplica) flushDisk(ctx *core.Context, acts []core.Action) []core.Act
 			if log, err = r.rec.Log(ctx); err == nil {
 				r.host.Recovered(log)
 				r.rec = nil
+				if r.c.disk.dropVote {
+					r.cfg.Storage.hs.Vote = 0
+				}
 				r.c.recovered(r)
 				r.start(ctx)
 			}
@@ -134,19 +140,29 @@ func (r *simReplica) flushDisk(ctx *core.Context, acts []core.Action) []core.Act
 }
 
 // recovered swaps in the storage a restart's replay rebuilt, which must hold every committed entry
-// the storage before the crash held.
+// the storage before the crash held, and its term and vote or a later term.
 func (c *simCluster) recovered(r *simReplica) {
 	was, now := c.storage[r.id], r.cfg.Storage
-	if m := min(was.last(), uint64(len(c.log))-1); len(c.log) > 0 && m > was.base.Index && c.disk.lost == nil {
-		want, _ := was.Term(m)
-		if got, err := now.Term(m); want == c.log[m].Term && (err != nil || got != want) {
-			c.disk.lost = fmt.Errorf("replica %d held committed entry %d of term %d before its crash and replayed term %d (%v)", r.id, m, want, got, err)
-		}
+	if c.disk.lost == nil {
+		c.disk.lost = heldAfterCrash(r.id, was, now, c.log)
+	}
+	if c.disk.forgot == nil && (now.hs.Term < was.hs.Term || now.hs.Term == was.hs.Term && was.hs.Vote != 0 && now.hs.Vote != was.hs.Vote) {
+		c.disk.forgot = fmt.Errorf("replica %d held term %d and vote %d before its crash and replayed term %d and vote %d", r.id, was.hs.Term, was.hs.Vote, now.hs.Term, now.hs.Vote)
 	}
 	if now.last() > was.last() || now.hs.Term != was.hs.Term || now.hs.Vote != was.hs.Vote {
 		c.disk.unreported++
 	}
 	c.storage[r.id] = now
+}
+
+func heldAfterCrash(id int, was, now *Storage, log []raftpb.Entry) error {
+	for i := was.base.Index + 1; i <= was.last() && i < uint64(len(log)); i++ {
+		want, _ := was.Term(i)
+		if got, err := now.Term(i); want == log[i].Term && (err != nil || got != want) {
+			return fmt.Errorf("replica %d held committed entry %d of term %d before its crash and replayed term %d (%v)", id, i, want, got, err)
+		}
+	}
+	return nil
 }
 
 // committedHeld checks that a majority of the replicas' storages hold the newest entry any replica
@@ -227,4 +243,18 @@ func TestARestartThatReplaysNothingLosesCommittedEntries(t *testing.T) {
 		}
 	}
 	t.Fatal("20 seeds restarting replicas that replay nothing broke no invariant")
+}
+
+func TestARestartThatForgetsItsVoteBreaksAnInvariant(t *testing.T) {
+	for seed := range uint64(20) {
+		c := newDiskCluster(seed, &diskRun{dropVote: true})
+		c.inv.Only(invKeepsVote)
+		for c.s.Time() < simRunFor && c.s.Step() {
+			if c.inv.Check() != nil {
+				return
+			}
+			c.after(t, seed)
+		}
+	}
+	t.Fatal("20 seeds restarting replicas that forget their vote broke no invariant")
 }
