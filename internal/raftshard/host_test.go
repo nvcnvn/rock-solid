@@ -240,6 +240,20 @@ func TestARemovedShardsRoundInFlightDiesOnceDurable(t *testing.T) {
 	}
 }
 
+// A removed owner hosted again while its old round is in flight would take that round's Done.
+func TestAnOwnerWithARoundInFlightIsNotHostedAgain(t *testing.T) {
+	r := newRig(t)
+	r.host.Add(5, NewStorage())
+	r.write(5, 1, &Round{Entries: entries(1, 1, 1, 100)})
+	r.host.Remove(5)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("hosting an owner with a round in flight did not panic")
+		}
+	}()
+	r.host.Add(5, NewStorage())
+}
+
 // A round the pool has no buffers for waits, and goes out on the next Durable event once buffers are back.
 func TestARoundWaitsForPoolBuffers(t *testing.T) {
 	r := newRig(t)

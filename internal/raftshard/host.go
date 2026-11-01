@@ -67,10 +67,16 @@ type Done struct {
 // NewHost is a host writing to log, nil until a restart's replay ends.
 func NewHost(log *disklog.Log) *Host { return &Host{Log: log, at: map[uint32]int{}} }
 
-// Add hosts the shard whose blobs carry owner and whose storage is st; an owner hosted twice is a broken invariant of the caller.
+// Add hosts the shard whose blobs carry owner and whose storage is st. An owner hosted twice, or
+// hosted again while a round of its removed shard is in flight, is a broken invariant of the caller.
 func (h *Host) Add(owner uint32, st *Storage) {
 	if _, ok := h.at[owner]; ok {
 		panic(fmt.Sprintf("raftshard: owner %d hosted twice", owner))
+	}
+	for _, f := range h.flights[h.head:] {
+		if f.owner == owner {
+			panic(fmt.Sprintf("raftshard: owner %d hosted again with a round of its removed shard in flight", owner))
+		}
 	}
 	h.at[owner] = len(h.shards)
 	h.shards = append(h.shards, hosted{owner: owner, st: st, newest: -1})
