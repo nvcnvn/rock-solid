@@ -20,6 +20,7 @@ type replica struct {
 	st      *raft.MemoryStorage
 	pool    *sim.Pool
 	out     Output
+	ctx     core.Context
 	flush   uint64
 	applied []raftpb.Entry
 }
@@ -31,11 +32,13 @@ type envelope struct {
 
 // testNet runs replicas by hand: the test delivers messages, completes flushes and moves the clock.
 type testNet struct {
-	t     *testing.T
+	t     testing.TB
 	now   core.Tick
 	seed  uint64
 	r     []*replica
 	inbox []envelope
+	// lean skips decoding sends and recording what replicas apply, for a benchmark.
+	lean bool
 }
 
 func bootStorage(n int) *raft.MemoryStorage {
@@ -58,7 +61,7 @@ func testConfig(n, i int, st *raft.MemoryStorage, seed uint64) Config {
 	return cfg
 }
 
-func newNet(t *testing.T, n int, seed uint64) *testNet {
+func newNet(t testing.TB, n int, seed uint64) *testNet {
 	net := &testNet{t: t, now: 1_000_000, seed: seed}
 	for range n {
 		net.r = append(net.r, &replica{st: bootStorage(n), pool: sim.NewPool(4<<20, 0)})
@@ -87,26 +90,30 @@ func (n *testNet) ctx(i int) core.Context {
 // call runs f on replica i and returns the messages it sent, queued for delivery.
 func (n *testNet) call(i int, f func(ctx *core.Context, out *Output)) []raftpb.Message {
 	r := n.r[i]
-	ctx := n.ctx(i)
+	r.ctx = n.ctx(i)
 	r.out.Reset()
-	f(&ctx, &r.out)
+	f(&r.ctx, &r.out)
+	if !n.lean {
+		r.applied = append(r.applied, r.out.Committed...)
+	}
 	if r.out.Flush != 0 {
 		if r.flush != 0 {
 			n.t.Fatalf("replica %d took round %d with round %d in flight", i, r.out.Flush, r.flush)
 		}
 		r.flush = r.out.Flush
 	}
-	r.applied = append(r.applied, r.out.Committed...)
 	var sent []raftpb.Message
 	for _, a := range r.out.Actions {
 		if a.Kind != core.ActNetSend {
 			continue
 		}
-		var m raftpb.Message
-		if _, err := decode(r.pool, &a.Msg, &m); err != nil {
-			n.t.Fatalf("replica %d sent an undecodable message: %v", i, err)
+		if !n.lean {
+			var m raftpb.Message
+			if _, err := decode(r.pool, &a.Msg, &m); err != nil {
+				n.t.Fatalf("replica %d sent an undecodable message: %v", i, err)
+			}
+			sent = append(sent, m)
 		}
-		sent = append(sent, m)
 		e := envelope{from: i, to: int(a.Peer.Node), msg: a.Msg}
 		if a.Msg.Buf != core.NoBuf {
 			to := n.r[e.to].pool
@@ -148,9 +155,8 @@ func (n *testNet) durable(i int) []raftpb.Message {
 
 // deliver hands over every queued message, those it causes included, keeping those keep refuses out.
 func (n *testNet) deliver(keep func(e envelope) bool) {
-	for len(n.inbox) > 0 {
-		e := n.inbox[0]
-		n.inbox = n.inbox[1:]
+	for i := 0; i < len(n.inbox); i++ {
+		e := n.inbox[i]
 		if keep != nil && !keep(e) {
 			if e.msg.Buf != core.NoBuf {
 				n.r[e.to].pool.Free(e.msg.Buf)
@@ -159,6 +165,7 @@ func (n *testNet) deliver(keep func(e envelope) bool) {
 		}
 		n.event(e.to, core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: uint32(e.from)}, Msg: e.msg})
 	}
+	n.inbox = n.inbox[:0]
 }
 
 // settle delivers and flushes until nothing is left to do.
@@ -614,5 +621,19 @@ func TestACrashBeforeTheFlushLosesTheEntryAndTheLeaderResendsIt(t *testing.T) {
 	n.settle()
 	if last, _ := n.r[1].st.LastIndex(); last != index {
 		t.Fatalf("the restarted follower holds %d, want %d resent", last, index)
+	}
+}
+
+// BenchmarkProposal is one 128-byte proposal replicated, flushed and committed on three replicas
+// delivered by hand; its allocations are etcd-raft's, which the Raft cost per group item budgets.
+func BenchmarkProposal(b *testing.B) {
+	n := newNet(b, 3, 1)
+	n.elect(0)
+	n.lean = true
+	data := make([]byte, 128)
+	b.ReportAllocs()
+	for b.Loop() {
+		n.propose(0, data)
+		n.settle()
 	}
 }
