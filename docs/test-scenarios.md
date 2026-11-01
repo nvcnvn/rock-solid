@@ -2868,7 +2868,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 9 s |
   | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 3 s |
   | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 4 s |
-  | `internal/sim` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 12 s |
+  | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 16 s |
   | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 28 s |
   | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 6 s |
   | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 76 s |
@@ -5394,18 +5394,12 @@ test's alone.
   - With a panicking `crypto/rand.Reader` installed, three seeded replicas elect a leader, take a
     proposal and, once the leader is isolated, elect another on their own timeouts. The test first checks
     that `crypto/rand.Int`, as `globalRand` calls it, does reach the panicking reader.
-- **Replay** (the review criterion; `internal/sim`'s `TestRaftRunsReplayFromTheirSeed`, 20 seeds in
-  `go test`, 2,000 per commit in `scripts/seeds.sh` (12 s at `JOBS=2`), 10,000 once in 87 s). One Raft group of three
-  `RawNode`s on the simulated network, with 1-in-100 drops, 1-in-50 duplicates, up to 200 µs of
-  jitter and partitions cut and healed, a 10 ms tick, `ElectionTick` 100 and `HeartbeatTick` 10.
-  Leaders propose a value per tick until a replica has applied 40, and the first leader to apply
-  20 crashes and restarts from its storage. Each seed must show the crash, an election after it
-  and more than 20 values applied; run twice, it gives a byte-identical scheduler trace (Raft
-  message types included) and a byte-identical history of every `Ready` (`raft.DescribeReady`).
-  The storage is a `MemoryStorage` that outlives crashes, written in the pass before its messages
-  leave; the Raft shard puts it in the disk log.
+- **Replay** (the review criterion). The [Raft shard](#raft-shard)'s simulator run,
+  `TestRaftRunsReplayFromTheirSeed`, run twice from one seed gives a byte-identical scheduler trace
+  (Raft message types included) and a byte-identical history of every entry applied.
 - **Unseeded randomness is caught** (`TestUnseededElectionTimeoutsBreakReplay`). The same run with no
-  `Config.Rand`, so the fork falls back to `crypto/rand`, gives two different traces for one seed.
+  `Config.Rand`, a bug planted in the shard, so the fork falls back to `crypto/rand`, gives two
+  different traces for one seed.
 - **ReadIndex retry fix** (etcd-io/raft#397, its behaviour in [Raft shard](design.md#metadata-layer-metastore)).
   The fork carries upstream commits `9b9d6ee` and `63903dd`; `read_only.go` equals v3.7.0's but
   for v3.7.0's pointer messages. The fix's own `TestReadOnlyDuplicateRequest` passes on the fork
@@ -5416,8 +5410,8 @@ test's alone.
     `spikes/raft-rounds`;
   - [the fork](tech-debts.md#workaround-etcd-raft-fork-in-third_partyraft), removed when an upstream
     release takes a configurable random source, includes #397 and meets the pin's bar.
-- `scripts/lint.sh`'s license check names `go.etcd.io/raft/v3` as well as `./...`, which reaches
-  it only from tests until the Raft shard imports it, and passes for etcd-raft (Apache-2.0) and its
+- `scripts/lint.sh`'s license check over `./...` reaches `go.etcd.io/raft/v3` through the Raft
+  shard, and passes for etcd-raft (Apache-2.0) and its
   dependencies (`gogo/protobuf`, `golang/protobuf` and `google.golang.org/protobuf`,
   BSD-3-Clause); with only MIT allowed it names each of them. No CockroachDB-licensed code is in
   the fork or the shard.
@@ -5434,37 +5428,72 @@ test's alone.
 
 ## Raft shard
 
-Trace tests that feed events to the shard (`OnEvent`) and assert on its actions.
+Trace tests (`internal/raftshard`) feed events to three shards by hand, delivering their messages,
+completing their flushes and moving the clock, and assert on each shard's actions. The round's
+durable write is the seam the [disk log](#raft-storage-in-the-disk-log) fills: a call's output
+names the round to flush, the driver reports it with `Durable`, and only then does the shard write
+the round to its `raft.MemoryStorage`, which stands for the durable log until then.
 
 **Configuration.** The shard builds its `raft.Config` with:
 
 - synchronous `Ready`/`Advance`, with `AsyncStorageWrites` off;
 - `CheckQuorum` off and `PreVote` on;
-- an election tick of 10 ms, `HeartbeatTick` 10 (100 ms) and `ElectionTick` 100.
+- an election tick of 10 ms, `HeartbeatTick` 10 (100 ms) and `ElectionTick` 100;
+- election timeouts drawn from a source seeded from the replica's own seed.
 
-A test asserts each of these from the config. Raft storage in the disk log and Leader leases refer to this test rather than repeating it.
+`TestConfig` asserts each of these from the config. Raft storage in the disk log and Leader leases refer to this test rather than repeating it.
 
 | Input | Expected actions |
 | --- | --- |
-| `ctx.Now` advances 10 ms | One `Tick` to `RawNode` |
+| `ctx.Now` advances 10 ms | One `Tick` to `RawNode`: a leader sends no heartbeat for nine such steps |
 | `ctx.Now` advances 100 ms on a leader of an active group | 10 ticks, and a heartbeat to each follower |
-| `ctx.Now` advances 35 ms | Open: three ticks with the 5 ms remainder carried, or three ticks with it dropped. The design says only that ticks come from `ctx.Now` |
-| `ctx.Now` advances 5 s in one event, as after a suspend or with `Resumed` | Open: 500 ticks at once, or a capped count |
-| No event for 2 s on a follower that supports no leader | It campaigns, pre-vote first, at its randomized timeout, between 1.00 and 1.99 s |
-| A peer message of 256 bytes | Delivered inline |
-| A peer message of 257 bytes or more (an append with entries) | Carried as an `IOBuf` handle, never inline |
-| An append over 256 bytes while the buffer pool is exhausted | The message is dropped as lost and counted, never a panic or a heap fallback. Raft resends it |
-| A `NetRecv` that fails to decode (truncated, bad type) | Dropped and counted. No panic, and no step into `RawNode` |
-| A message for a group the node does not host | Dropped. Open: whether it is answered |
-| `PeerLost` for a follower's node | Open: whether the shard calls `ReportUnreachable` |
-| A leader with proposals in a round | The `MsgApp` to followers goes out in the same pass as the leader's own `DiskWrite`, not after its flush. Batching into one entry per round is under Shard state machine |
-| A follower receiving an append | `MsgAppResp` held until the durable notice for the round that holds the entry, then sent |
+| `ctx.Now` advances 35 ms, 35 ms, then 30 ms | Three ticks each time with the 5 ms remainders carried, so the third step makes the tenth tick and the heartbeat |
+| `ctx.Now` advances 5 s in one event, as after a suspend or with `Resumed` | 10 ticks, one heartbeat of them, and the rest dropped: a leader sends one heartbeat to each follower, not 50, and a follower does not campaign |
+| No event but the tick timer for 2 s on a follower that supports no leader | It campaigns, pre-vote first, at its randomized timeout, between 1.00 and 1.99 s; 20 seeds give at least 10 different times |
+| A peer message of 256 bytes, framing included | Carried inline |
+| A peer message of 257 bytes or more (an append with entries) | Carried as an `IOBuf` handle, never inline, and decodes to the same message |
+| An append over 256 bytes while the buffer pool is exhausted | The message is dropped as lost and counted (`Unsent`), never a panic or a heap fallback. Once the pool has room, Raft resends it and both followers catch up |
+| A `NetRecv` that fails to decode (truncated framing, garbage body, an unknown type, a type only a node sends itself, a buffer length past the buffer) | Dropped and counted (`Undecodable`), its buffer freed. No panic, no step into `RawNode` |
+| A message for another group, or for another replica of this one | Dropped and counted (`Misrouted`), not answered: a removed replica learns from its own log |
+| `PeerLost` for a follower's node | The leader calls `ReportUnreachable`, so that follower goes from replicate to probe; the other follower stays in replicate |
+| A leader with proposals in a round | The `MsgApp` to followers goes out in the same pass as the round to flush, not after the flush. Batching into one entry per round is under Shard state machine |
+| A follower receiving an append | `MsgAppResp` held until the round that holds the entry is durable, then sent; storage holds the entry only from then |
 | A node granting a vote | `MsgVoteResp` held until the round holding the new term and vote is durable |
-| A node answering a pre-vote | `MsgPreVoteResp` goes out with the `Ready`'s other messages, since a pre-vote changes no hard state |
-| A `Ready` with committed entries | Applied to the state machine after persistence, then `Advance`. No second `Ready` is taken before `Advance` |
+| A node answering a pre-vote while a round holding an append is in flight | `MsgPreVoteResp` goes out with the write, since a pre-vote changes no hard state; the append's `MsgAppResp` waits |
+| A `Ready` with committed entries | Applied after persistence, then `Advance`. A message stepped while the round is in flight takes no second `Ready` before `Advance`; it comes out in the next round |
 | A crash before the durable notice | On restart the follower's log lacks the entry, and the leader resends it. No acknowledgment was sent for it |
 
-[property] Across seeds, a follower never acknowledges an entry, and no node grants a vote, before the round that holds it is durable.
+**Simulator runs.** `TestRaftRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000 per commit in
+`scripts/seeds.sh` (16 s at `JOBS=2`), 10,000 once in 68 s. One group of three shards on the
+simulated network, with 1-in-100 drops, 1-in-50 duplicates, up to 200 µs of jitter, partitions cut
+and healed, and nodes paused for up to 5 s; each round flushes as an fsync on its node's simulated
+disk, so a crash loses the rounds in flight. Leaders propose a numbered value per tick, every third
+over 256 bytes, and the first leader to apply 20 crashes and restarts from its storage. After 30 s
+every partition is healed, and the run must apply a value proposed after the crash within 30 s
+more. Every seed checks, after every step:
+
+- [property] "acknowledged only once durable": no accepting `MsgAppResp` leaves before its replica's
+  storage holds the entry, and no granted `MsgVoteResp` before it holds the term and vote, unless
+  storage already holds a later term. One `Ready` can carry a vote or an acknowledgment together
+  with a later term the replica moved to before that `Ready` was taken; once the later term is
+  durable the replica never acts in the older one again. Seed 135 of the first 2,000 is such a
+  case.
+- "applied entries agree": no two replicas apply different entries at one index.
+- the simulator's driver contract.
+
+Across the 20 seeds, traces show buffered messages, pauses, restarts and lost connections. Planted
+bugs show the checks bite: a shard that sends every message before its round's flush breaks
+"acknowledged only once durable" within 20 seeds, and one drawing election timeouts from
+`crypto/rand` breaks replay (etcd-raft module, above).
+
+**Decoder.** `FuzzDecode` feeds arbitrary framing and bodies, inline and in a buffer: decoding never
+panics, never accepts a type no peer sends, and a message it accepts encodes and decodes back to
+itself.
+
+**Benchmarks.** Encoding allocates nothing, inline or into a pool buffer. One 128-byte proposal
+replicated, flushed and committed on three replicas makes 21 allocations, all etcd-raft's own
+(its message and `Ready` slices and decoded entries), against the spike's 22.6 under load; the
+budget belongs to [Raft cost per group](#raft-cost-per-group).
 
 ## Leader leases
 
