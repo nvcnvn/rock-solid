@@ -726,7 +726,8 @@ func TestACrashBeforeTheFlushLosesTheEntryAndTheLeaderResendsIt(t *testing.T) {
 }
 
 // BenchmarkProposal is one 128-byte proposal replicated, flushed and committed on three replicas
-// delivered by hand; its allocations are etcd-raft's, which the Raft cost per group item budgets.
+// delivered by hand; its allocations are etcd-raft's and the Storage.Entries results it reads,
+// which TestCostPerGroup budgets.
 func BenchmarkProposal(b *testing.B) {
 	n := newNet(b, 3, 1)
 	n.elect(0)

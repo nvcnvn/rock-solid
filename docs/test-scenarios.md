@@ -5506,9 +5506,9 @@ panics, never accepts a type no peer sends, and a message it accepts encodes and
 itself.
 
 **Benchmarks.** Encoding allocates nothing, inline or into a pool buffer. One 128-byte proposal
-replicated, flushed and committed on three replicas makes 21 allocations, all etcd-raft's own
-(its message and `Ready` slices and decoded entries), against the spike's 22.6 under load; the
-budget belongs to [Raft cost per group](#raft-cost-per-group).
+replicated, flushed and committed on three replicas makes 24 allocations: etcd-raft's message
+and `Ready` slices and decoded entries, and three `Storage.Entries` results, one per replica
+reading the committed entry; the budget belongs to [Raft cost per group](#raft-cost-per-group).
 
 ## Leader leases
 
@@ -5706,6 +5706,7 @@ replacement as a voter instead stalls them past 100 ms within 20 seeds
   - `Term(i)` returns `ErrCompacted` below the first index and `ErrUnavailable` past the last, as etcd-raft's `MemoryStorage` does.
   - A hi past last + 1 is a broken invariant of the caller.
   - `FirstIndex` and `LastIndex` are consistent with `Entries`.
+  - Chunks start at the larger of 4 KiB and the payload and double up to 64 KiB; a compaction drops the chunks only compacted entries used, keeps those the rest still read, and frees every chunk once no payload is left (`TestCompactionFreesChunks`).
 - **Round blobs.** A round larger than a log record goes out as several blobs of at most a record each, every one but the last a `BlobRaftEntries` and the last a `BlobRaftState`, and the host reports it done only once its last blob is durable. A round the pool has no buffers for waits, and goes out on the next `Durable` event once buffers are back, after a round submitted meanwhile; with nothing in flight it goes out when the driver's timer retries it. Fuzzed: a round record decodes only when it encodes back to the same bytes, and replays the same in one blob as cut into several.
 - **Compaction.** Once the memtable that applied entries up to index i has been flushed, the state machine compacts the shard to i through the host. A round's blobs leave the usage table's live count once every index it holds is at or below i and a later durable round holds a newer hard state; a round without a hard state needs only the compaction. Until then they stay live, and a block two rounds' blobs share stays live until both are dead. A Raft blob reported dead twice is refused, and an open's recount adds the replayed Raft blobs to the owner's chunk counts.
 - **Removed replica.** Once a replica reports itself removed, every blob of its rounds is dead, those still in flight once they are durable. Hosting its owner again while one of its rounds is in flight panics, since the new shard would take that round as its own.
@@ -5718,18 +5719,29 @@ replacement as a voter instead stalls them past 100 ms within 20 seeds
 
 ## Raft cost per group
 
-A regression benchmark against the [raft rounds spike](design.md#appendix-raft-rounds-spike), run nightly. A 20% regression is a bug. This benchmark is exempt from the zero-allocation rule for "Benchmarks", by the etcd-raft version pin in `docs/tech-debts.md`, whose exit condition is at most 3 allocations per message.
+`internal/raftshard`, `cost_test.go`. Three nodes run 1,000 groups each through `Shard` and
+`Storage`, every shard of a node sharing its buffer pool, node-pair leases and output, as the
+shards of one loop do: 128 B proposals to random groups at 60,000 proposals/s in 1 ms passes, a
+10 ms tick, a 100 ms heartbeat, synchronous `Ready`, flushes and network that take no time, and
+every storage compacted to its applied index once a second, more often than checkpoints would.
+The node-pair leases are never granted, so no group fortifies and no fortification message is
+counted. `TestCostPerGroup` fails `go test` past any bar, in about 0.2 s. `BenchmarkCostPerGroup`
+reports every row but the written idle group, `load` a pass and `idle` a tick with no proposals,
+and runs nightly; a tracked figure 20% worse than measured is a bug. The benchmark is exempt from
+the zero-allocation rule for "Benchmarks" by the etcd-raft version pin in `docs/tech-debts.md`,
+whose exit condition is this test's bar of 3 allocations per message.
 
-| Measure | Setup | Bar | Spike figure |
-| --- | --- | --- | --- |
-| Allocations per Raft message | 3 nodes × 1,000 groups per node, 128 B proposals, open load at 60,000 proposals/s, 10 ms tick, 100 ms heartbeat, synchronous `Ready` | ≤ 3 | 2.7 (v3.6.0) |
-| Heap per idle group | 1,000 groups per node, no proposals | ≤ 4 KiB | 2.8 KiB (2.7 MiB per node) |
-| Allocations per proposal | As above | Tracked | 22.6 |
-| CPU per proposal, across its three replicas | As above | Tracked | about 27 µs |
-| Collection's share of CPU | As above | Tracked | 14% |
-| Idle CPU per node, 10 ms tick, not quiesced | 1,000 groups | Tracked | 2 to 8% of a core |
+| Measure | Setup | Bar | Measured (M4 Pro) | Spike figure |
+| --- | --- | --- | --- | --- |
+| Allocations per Raft message | Under load | ≤ 3 | 2.9 | 2.7 |
+| Heap per idle group, never written | One second after the elections, per replica | ≤ 4 KiB | 3.0 KiB (2.9 MiB per node) | 2.8 KiB (2.7 MiB per node) |
+| Heap per idle group, written | After the load, compacted to its applied index, one second idle | ≤ 4 KiB | 3.0 KiB | Not measured |
+| Allocations per proposal | Under load | Tracked | 25, over 8.7 messages | 22.6, over 8.4 |
+| CPU per proposal, across its three replicas | Under load | Tracked | 4.2 µs | about 27 µs on a shared VM |
+| Collection's share of CPU | Under load, the runtime's estimate | Tracked | 8% | 14% |
+| Idle CPU per node, 10 ms tick, not quiesced | 1,000 groups | Tracked | 0.9% of a core | 2 to 8% |
 
-The benchmark calls `b.ReportAllocs`. Quiesced groups (0.07% of a core in the multi-raft spike) are phase 13.
+Quiesced groups (0.07% of a core in the multi-raft spike) are phase 13.
 
 ## Maelstrom harness
 

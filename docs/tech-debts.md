@@ -18,7 +18,7 @@
 ## Version pin: `go.etcd.io/raft/v3` v3.6.0
 - **Where:** the `require` in `go.mod`, which the `replace` below points at `third_party/raft`
 - **Why:** v3.7.0 generates its messages with `google.golang.org/protobuf`, a pointer per field: 16 allocations per message against v3.6.0's 2.7, 1.64× the CPU per proposal, and a `Storage` returning `[]*pb.Entry` that would allocate on every read of entries kept off the Go heap ([raft rounds spike](design.md#appendix-raft-rounds-spike)).
-- **Remove when:** an etcd-raft release keeps messages and entries without per-field allocations, at most 3 allocations per message in `spikes/raft-rounds`. Moving to it is a tag update of the fork below.
+- **Remove when:** an etcd-raft release keeps messages and entries without per-field allocations, at most 3 allocations per message in `TestCostPerGroup` ([Raft cost per group](test-scenarios.md#raft-cost-per-group)), which a tag update of the fork below runs with `go test ./...`. Moving to it is that tag update.
 
 ## Workaround: etcd-raft fork in `third_party/raft`
 - **Where:** `third_party/raft`, a copy of etcd-raft v3.6.0 (commit `f35a0221`) that `replace go.etcd.io/raft/v3 => ./third_party/raft` in `go.mod` builds in its place; `scripts/raft-tests.sh`
