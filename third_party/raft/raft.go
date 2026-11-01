@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	mathrand "math/rand/v2"
 	"slices"
 	"strings"
 	"sync"
@@ -286,6 +287,10 @@ type Config struct {
 
 	// raft state tracer
 	TraceLogger TraceLogger
+
+	// Rand, when set, draws the randomized election timeouts in place of the
+	// process-wide crypto/rand source, so a run seeded the same draws the same.
+	Rand *mathrand.Rand
 }
 
 func (c *Config) validate() error {
@@ -417,6 +422,7 @@ type raft struct {
 	// [electiontimeout, 2 * electiontimeout - 1]. It gets reset
 	// when raft changes its state to follower or candidate.
 	randomizedElectionTimeout int
+	rand                      *mathrand.Rand
 	disableProposalForwarding bool
 	stepDownOnRemoval         bool
 
@@ -462,6 +468,7 @@ func newRaft(c *Config) *raft {
 		disableConfChangeValidation: c.DisableConfChangeValidation,
 		stepDownOnRemoval:           c.StepDownOnRemoval,
 		traceLogger:                 c.TraceLogger,
+		rand:                        c.Rand,
 	}
 
 	traceInitState(r)
@@ -2047,6 +2054,10 @@ func (r *raft) pastElectionTimeout() bool {
 }
 
 func (r *raft) resetRandomizedElectionTimeout() {
+	if r.rand != nil {
+		r.randomizedElectionTimeout = r.electionTimeout + r.rand.IntN(r.electionTimeout)
+		return
+	}
 	r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout)
 }
 
