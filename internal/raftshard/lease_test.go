@@ -190,7 +190,7 @@ func TestALeaseIsTheQuorumthExpiryOverFortifiedVoters(t *testing.T) {
 		{"joint, the old half alone", raftpb.ConfState{Voters: voters(1, 4, 5), VotersOutgoing: voters(1, 2, 3)}, 5, map[int]core.Tick{1: 0, 2: 1}, none},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			n := newConfNet(t, tc.n, 1, func(int) *raft.MemoryStorage { return confStorage(tc.conf) })
+			n := newConfNet(t, tc.n, 1, func(int) *Storage { return confStorage(tc.conf) })
 			base := n.now
 			for f := 1; f < tc.n; f++ {
 				if at, ok := tc.asks[f]; ok {

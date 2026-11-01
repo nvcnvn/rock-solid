@@ -17,9 +17,9 @@ const (
 
 // newReplaceNet is a group of three voters, IDs 1 to 3, and an empty replica with ID 4, every one knowing every node; A leads.
 func newReplaceNet(t *testing.T, p plants) *testNet {
-	n := newConfNet(t, 4, 1, func(i int) *raft.MemoryStorage {
+	n := newConfNet(t, 4, 1, func(i int) *Storage {
 		if i == rD {
-			return raft.NewMemoryStorage()
+			return NewStorage()
 		}
 		return bootStorage(3)
 	})
@@ -60,11 +60,11 @@ func (n *testNet) settleWithout(cut ...int) {
 	n.t.Fatal("the group did not settle")
 }
 
-// snapshot has replica i's storage take a snapshot at its applied index, as a point-in-time view gives one on demand.
+// snapshot has replica i compact its log to its applied index, as the flush of the memtable that applied it lets it, so a replica behind it needs a snapshot.
 func (n *testNet) snapshot(i int) {
 	r := n.r[i]
-	if snap, _ := r.st.Snapshot(); r.s.applied > snap.Metadata.Index {
-		if _, err := r.st.CreateSnapshot(r.s.applied, &r.s.conf, le.AppendUint64(nil, uint64(len(r.applied)))); err != nil {
+	if r.s.applied > r.st.Base().Index {
+		if err := r.st.Compact(r.s.Applied()); err != nil {
 			n.t.Fatal(err)
 		}
 	}
@@ -348,9 +348,9 @@ func TestALeaderTransfersOnlyToAPlannedVoterThatIsUp(t *testing.T) {
 
 // With no planned voter yet, a leader the plan drops swaps the planned replicas in for the other voters first.
 func TestALeaderThePlanDropsWithEveryVoterSwapsTheOthersFirst(t *testing.T) {
-	n := newConfNet(t, 6, 1, func(i int) *raft.MemoryStorage {
+	n := newConfNet(t, 6, 1, func(i int) *Storage {
 		if i >= 3 {
-			return raft.NewMemoryStorage()
+			return NewStorage()
 		}
 		return bootStorage(3)
 	})
@@ -547,5 +547,24 @@ func TestAReplicaLearnsTheNodeOfAMemberThatSendsToIt(t *testing.T) {
 	n.settle()
 	if i := s.peer(1); i < 0 || s.cfg.Peers[i].Node != (core.NodeID{Node: 0}) || s.Stats().Unsent != 0 {
 		t.Fatalf("peers %+v, stats %+v: want the leader learned at node 0 and the reply sent", s.cfg.Peers, s.Stats())
+	}
+}
+
+// A snapshot is built at the leader's applied index when a learner needs one, so it holds the
+// learner; one kept from the last compaction, before the learner joined, does not, the learner
+// refuses it and never catches up.
+func TestALearnerCatchesUpFromASnapshotBuiltAtTheAppliedIndex(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		n := newReplaceNet(t, plants{staleSnapshot: stale})
+		n.r[rA].s.SetPlan(replacing)
+		n.propose(rA, []byte("a"))
+		for range 5 {
+			n.heartbeat(rC)
+		}
+		n.propose(rA, []byte("b"))
+		n.heartbeat(rC)
+		if caughtUp := n.r[rD].snaps == 1 && n.committed(rD, "b"); caughtUp == stale {
+			t.Fatalf("snapshots kept from the last compaction %v: D restored %d snapshots and applied b: %v", stale, n.r[rD].snaps, n.committed(rD, "b"))
+		}
 	}
 }

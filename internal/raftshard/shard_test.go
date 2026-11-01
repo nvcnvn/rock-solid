@@ -18,7 +18,7 @@ const testGroup = 5
 // replica is one shard of a testNet with its durable storage, pool, node-pair leases, pending flush and what it applied; its raw clock runs rawLag behind CLOCK_BOOTTIME.
 type replica struct {
 	s       *Shard
-	st      *raft.MemoryStorage
+	st      *Storage
 	pool    *sim.Pool
 	holder  *lease.Holder
 	grantor *lease.Grantor
@@ -52,7 +52,7 @@ type testNet struct {
 	leaseID uint64
 }
 
-func bootStorage(n int) *raft.MemoryStorage {
+func bootStorage(n int) *Storage {
 	var voters []uint64
 	for i := range n {
 		voters = append(voters, uint64(i)+1)
@@ -60,15 +60,15 @@ func bootStorage(n int) *raft.MemoryStorage {
 	return confStorage(raftpb.ConfState{Voters: voters})
 }
 
-func confStorage(cs raftpb.ConfState) *raft.MemoryStorage {
-	st := raft.NewMemoryStorage()
+func confStorage(cs raftpb.ConfState) *Storage {
+	st := NewStorage()
 	if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 1, Term: 1, ConfState: cs}}); err != nil {
 		panic(err)
 	}
 	return st
 }
 
-func testConfig(n, i int, st *raft.MemoryStorage, seed uint64) Config {
+func testConfig(n, i int, st *Storage, seed uint64) Config {
 	cfg := Config{Group: testGroup, ID: uint64(i) + 1, Storage: st, Seed: seed + uint64(i), Timer: 1}
 	for j := range n {
 		cfg.Peers = append(cfg.Peers, Peer{ID: uint64(j) + 1, Node: core.NodeID{Node: uint32(j)}})
@@ -77,11 +77,11 @@ func testConfig(n, i int, st *raft.MemoryStorage, seed uint64) Config {
 }
 
 func newNet(t testing.TB, n int, seed uint64) *testNet {
-	return newConfNet(t, n, seed, func(int) *raft.MemoryStorage { return bootStorage(n) })
+	return newConfNet(t, n, seed, func(int) *Storage { return bootStorage(n) })
 }
 
 // newConfNet starts n replicas from the storage boot gives each, past their nodes' restart wait.
-func newConfNet(t testing.TB, n int, seed uint64, boot func(i int) *raft.MemoryStorage) *testNet {
+func newConfNet(t testing.TB, n int, seed uint64, boot func(i int) *Storage) *testNet {
 	net := &testNet{t: t, now: 5_000_000, seed: seed}
 	for i := range n {
 		net.r = append(net.r, &replica{st: boot(i), pool: sim.NewPool(4<<20, 0)})
@@ -327,7 +327,7 @@ func types(ms []raftpb.Message) []raftpb.MessageType {
 }
 
 func TestConfig(t *testing.T) {
-	rc := raftConfig(&Config{ID: 1, Storage: raft.NewMemoryStorage()})
+	rc := raftConfig(&Config{ID: 1, Storage: NewStorage()})
 	if rc.AsyncStorageWrites {
 		t.Error("asynchronous storage writes are on")
 	}

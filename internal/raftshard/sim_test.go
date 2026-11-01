@@ -31,7 +31,7 @@ type simCluster struct {
 	rng     *core.Rand
 	plant   plants
 	inv     sim.Invariants
-	storage []*raft.MemoryStorage
+	storage []*Storage
 	reps    []*simReplica
 	// rep is the voter replacement the run makes, if any.
 	rep *replacement
@@ -110,13 +110,13 @@ func newCluster(seed uint64, p plants, set sim.Settings, rep *replacement) *simC
 	if rep != nil {
 		nodes++
 	}
-	c.storage, c.reps = make([]*raft.MemoryStorage, nodes), make([]*simReplica, nodes)
+	c.storage, c.reps = make([]*Storage, nodes), make([]*simReplica, nodes)
 	disk := []sim.DiskSpec{{Blocks: 16, Settings: sim.DefaultDiskSettings()}}
 	for id := range nodes {
 		// The storage outlives crashes: it is what the replica's rounds made durable.
 		c.storage[id] = bootStorage(simNodes)
 		if id == simNodes {
-			c.storage[id] = raft.NewMemoryStorage()
+			c.storage[id] = NewStorage()
 		}
 		c.s.AddNode(sim.DefaultClock, disk, func(n *sim.Node) { c.boot(n, id) })
 	}

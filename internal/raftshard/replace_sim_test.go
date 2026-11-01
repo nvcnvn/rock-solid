@@ -178,14 +178,9 @@ func (c *simCluster) replaced(r *simReplica, st *raft.BasicStatus) {
 		p.gap = max(p.gap, p.swappedAt-p.last)
 	}
 	stor := c.storage[r.id]
-	if snap, _ := stor.Snapshot(); r.s.applied > snap.Metadata.Index && !r.s.removed {
-		if _, err := stor.CreateSnapshot(r.s.applied, &r.s.conf, le.AppendUint64(nil, uint64(r.applied))); err != nil {
+	if first, _ := stor.FirstIndex(); r.s.applied >= first+20 && !r.s.removed {
+		if err := stor.Compact(r.s.Applied()); err != nil {
 			panic(err)
-		}
-		if first, _ := stor.FirstIndex(); r.s.applied >= first+20 {
-			if err := stor.Compact(r.s.applied - 10); err != nil {
-				panic(err)
-			}
 		}
 	}
 }
