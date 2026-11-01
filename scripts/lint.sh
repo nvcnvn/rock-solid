@@ -14,9 +14,9 @@ ALLOWED_LICENSES=Apache-2.0,MIT,BSD-2-Clause,BSD-3-Clause,ISC,Zlib,CC0-1.0,Unico
 files=()
 while IFS= read -r f; do
 	files+=("$f")
-done < <(git ls-files --cached --others --exclude-standard '*.go' ':!:spikes/**' ':!:studies/**')
+done < <(git ls-files --cached --others --exclude-standard '*.go' ':!:spikes/**' ':!:studies/**' ':!:third_party/**')
 if [ ${#files[@]} -eq 0 ]; then
-	echo "no Go files outside spikes/ and studies/; nothing to lint"
+	echo "no Go files outside spikes/, studies/ and third_party/; nothing to lint"
 	exit 0
 fi
 
@@ -40,4 +40,4 @@ case $status in
 3) exit 3 ;;
 *) echo "govulncheck could not run (exit $status); skipping the vulnerability check" >&2 ;;
 esac
-go run "$GO_LICENSES" check ./... --allowed_licenses="$ALLOWED_LICENSES"
+go run "$GO_LICENSES" check ./... go.etcd.io/raft/v3 --allowed_licenses="$ALLOWED_LICENSES"

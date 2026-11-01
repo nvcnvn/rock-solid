@@ -15,8 +15,8 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   `scripts/lint.sh` runs every step with `GOTOOLCHAIN` set from that line, so a newer local Go
   changes nothing. The toolchain and the three tool versions are pinned in
   [tech-debts.md](tech-debts.md#version-pin-go-toolchain-1270-and-lint-tools).
-- The script fails, naming the cause, on each of these planted faults: a Go file outside `spikes/`
-  and `studies/` that `gofmt` would change (the file is listed); a `go vet` finding; a sans-IO analyzer finding
+- The script fails, naming the cause, on each of these planted faults: a Go file outside `spikes/`,
+  `studies/` and `third_party/` that `gofmt` would change (the file is listed); a `go vet` finding; a sans-IO analyzer finding
   ([next section](#sans-io-analyzer)); a `staticcheck` (v0.8.2) finding; a vulnerability
   `govulncheck` (v1.9.0) finds in code the module calls (its exit status 3); a dependency whose
   license is not Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, CC0-1.0 or Unicode-3.0
@@ -25,6 +25,8 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   skips; every other check still decides the result.
 - Go files under `spikes/` and `studies/` are never linted, tracked or not; untracked Go files
   elsewhere are. With no Go file outside them, the script prints "nothing to lint" and passes.
+- `third_party/raft`, the etcd-raft fork, is a module of its own: `gofmt` skips its files and
+  `./...` does not reach them, while the license check covers it by name.
 
 ## Sans-IO analyzer
 
@@ -5383,24 +5385,57 @@ test's alone.
 
 ## etcd-raft module
 
-- The module graph resolves `go.etcd.io/raft/v3` v3.6.0 through a `replace` to the pinned fork, and `go mod verify` passes.
-- **Seeded election timeouts.**
-  - Two replicas built with the same seed draw the same sequence of randomized election timeouts. Seeds 1 and 2 differ within their first 100 draws.
-  - Every draw lies in [`ElectionTick`, 2 × `ElectionTick` − 1]: 100 to 199 ticks of 10 ms, so 1.00 to 1.99 s.
-  - No call reaches `crypto/rand` or `globalRand`: a test with a panicking `crypto/rand` reader installed passes.
-- **Replay** (the review criterion). A simulator seed with 3 nodes, one shard, an election, proposals and a leader crash, replayed twice, gives byte-identical traces. A planted call to unseeded randomness inside the fork makes the two traces differ, and the test must catch it.
-- **ReadIndex retry fix** (etcd-io/raft#397). The upstream test that came with the fix passes on the fork, and fails on plain v3.6.0. Open: the design names the fix but not its behaviour, so the reviewer checks the fork's diff against the upstream commit.
-- **Tech-debt entries.** `docs/tech-debts.md` holds two entries, added in the same change:
-  - the version pin, removed when an etcd-raft release keeps messages and entries without per-field allocations, at most 3 per message in `spikes/raft-rounds`;
-  - the fork, removed when an upstream release takes a configurable random source, includes #397 and meets the pin's bar of 3 allocations per message.
-- `scripts/lint.sh`'s license check passes for etcd-raft (Apache-2.0) and its dependencies. No CockroachDB-licensed code is in the fork or the shard.
+- The module graph resolves `go.etcd.io/raft/v3` v3.6.0 through a `replace` to the fork in
+  `third_party/raft`, and `go mod verify` passes.
+- **Seeded election timeouts** (`third_party/raft/seeded_rand_test.go`).
+  - Two replicas built with the same seed draw the same sequence of randomized election timeouts.
+    Seeds 1 and 2 differ within their first 100 draws.
+  - Every draw lies in [`ElectionTick`, 2 × `ElectionTick` − 1]: 100 to 199 ticks of 10 ms, so 1.00
+    to 1.99 s, and 10,000 draws reach both ends.
+  - With a panicking `crypto/rand.Reader` installed, three seeded replicas elect a leader, take a
+    proposal and, once the leader is isolated, elect another on their own timeouts. The test first checks
+    that `crypto/rand.Int`, as `globalRand` calls it, does reach the panicking reader.
+- **Replay** (the review criterion; `internal/sim`'s `TestRaftRunsReplayFromTheirSeed`, 20 seeds in
+  `go test`, 2,000 per commit in `scripts/seeds.sh` (12 s at `JOBS=2`), 10,000 once in 87 s). One Raft group of three
+  `RawNode`s on the simulated network, with 1-in-100 drops, 1-in-50 duplicates, up to 200 µs of
+  jitter and partitions cut and healed, a 10 ms tick, `ElectionTick` 100 and `HeartbeatTick` 10.
+  Leaders propose a value per tick until a replica has applied 40, and the first leader to apply
+  20 crashes and restarts from its storage. Each seed must show the crash, an election after it
+  and more than 20 values applied; run twice, it gives a byte-identical scheduler trace (Raft
+  message types included) and a byte-identical history of every `Ready` (`raft.DescribeReady`).
+  The storage is a `MemoryStorage` that outlives crashes, written in the pass before its messages
+  leave; the Raft shard puts it in the disk log.
+- **Unseeded randomness is caught** (`TestUnseededElectionTimeoutsBreakReplay`). The same run with no
+  `Config.Rand`, so the fork falls back to `crypto/rand`, gives two different traces for one seed.
+- **ReadIndex retry fix** (etcd-io/raft#397). The fork carries upstream commits `9b9d6ee` and
+  `63903dd`; `read_only.go` equals v3.7.0's but for v3.7.0's pointer messages. The fix's own
+  `TestReadOnlyDuplicateRequest` passes on the fork and fails on plain v3.6.0 ("readIndex for B is
+  1 (should be >= 3)"): a stale leader's read B, queued behind a retried read A, is confirmed by
+  late acknowledgments of A's first heartbeat. The behaviour is in [Raft shard](design.md#metadata-layer-metastore).
+- **Tech-debt entries.** `docs/tech-debts.md` holds two entries:
+  - [the version pin](tech-debts.md#version-pin-goetcdioraftv3-v360), removed when an etcd-raft
+    release keeps messages and entries without per-field allocations, at most 3 per message in
+    `spikes/raft-rounds`;
+  - [the fork](tech-debts.md#workaround-etcd-raft-fork-in-third_partyraft), removed when an upstream
+    release takes a configurable random source, includes #397 and meets the pin's bar.
+- `scripts/lint.sh`'s license check names `go.etcd.io/raft/v3` as well as `./...`, which reaches
+  it only from tests until the Raft shard imports it, and passes for etcd-raft (Apache-2.0) and its
+  dependencies (`gogo/protobuf`, `golang/protobuf` and `google.golang.org/protobuf`,
+  BSD-3-Clause); with only MIT allowed it names each of them. No CockroachDB-licensed code is in
+  the fork or the shard.
 
 ## Upstream Raft tests
 
-- Every test package of etcd-raft v3.6.0 passes on the fork: the unit tests and the datadriven interaction tests under `testdata/`, with `confchange`, `quorum` and `tracker` included.
-- Tests that depend on randomized election timeouts pass with the seeded source. If one depended on `crypto/rand`'s distribution, that is a finding to report, not a test to skip.
-- Each of the fork's two changes comes with a test: the seeded timeouts (etcd-raft module, above), and #397's own test.
-- Whenever the fork moves to a new upstream tag, the whole suite must pass on that tag before the `replace` changes. A failing test blocks the move and is recorded by name.
+- `scripts/raft-tests.sh` runs every test package of the fork with the main module's toolchain, in
+  CI's test job: `raft` (the unit tests and the datadriven interaction tests under `testdata/`),
+  `confchange`, `quorum`, `raftpb`, `rafttest` and `tracker`. All pass on the fork, and all passed
+  on the pristine v3.6.0 copy before the patches.
+- No upstream test depends on `crypto/rand`'s distribution: every one builds its replicas without
+  `Config.Rand`, so they run upstream's source unchanged.
+- Each of the fork's two changes comes with a test: the seeded timeouts (etcd-raft module, above),
+  and #397's own test.
+- Whenever the fork moves to a new upstream tag, the whole suite must pass on that tag before the
+  `require` changes. A failing test blocks the move and is recorded by name.
 
 ## Raft shard
 

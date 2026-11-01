@@ -15,6 +15,19 @@
 - **Why:** the file format and the `-rewrite` output are what the checked-in expected outputs are compared against, so an unpinned release could change how a file parses or prints and fail every case without a code change. It is the format Pebble and etcd-raft use ([Testing strategy](design.md#testing-strategy)).
 - **Remove when:** never removed, only bumped. A bump reruns every data-driven test without `-rewrite`, and any changed expected output is reviewed as a format change, not regenerated.
 
+## Version pin: `go.etcd.io/raft/v3` v3.6.0
+- **Where:** the `require` in `go.mod`, which the `replace` below points at `third_party/raft`
+- **Why:** v3.7.0 generates its messages with `google.golang.org/protobuf`, a pointer per field: 16 allocations per message against v3.6.0's 2.7, 1.64× the CPU per proposal, and a `Storage` returning `[]*pb.Entry` that would allocate on every read of entries kept off the Go heap ([raft rounds spike](design.md#appendix-raft-rounds-spike)).
+- **Remove when:** an etcd-raft release keeps messages and entries without per-field allocations, at most 3 allocations per message in `spikes/raft-rounds`. Moving to it is a tag update of the fork below.
+
+## Workaround: etcd-raft fork in `third_party/raft`
+- **Where:** `third_party/raft`, a copy of etcd-raft v3.6.0 (commit `f35a0221`) that `replace go.etcd.io/raft/v3 => ./third_party/raft` in `go.mod` builds in its place; `scripts/raft-tests.sh`
+- **Why:** upstream draws election timeouts from `crypto/rand` behind a process-wide mutex (`globalRand` in `raft.go`), so the simulator could not replay a Raft shard from its seed ([Raft shard](design.md#metadata-layer-metastore)), and v3.6.0 lacks v3.7.0's ReadIndex retry fix. The copy's first commit is the pristine tag, and each patch is a commit of its own on top:
+  - `Config.Rand`, a `math/rand/v2` source a replica draws its election timeouts from; nil keeps `globalRand`. Tested in `seeded_rand_test.go`.
+  - etcd-io/raft#397, upstream commits `9b9d6ee` (its test, `TestReadOnlyDuplicateRequest`) and `63903dd` (the fix).
+- **Moving to a new tag:** replace the copy with the new tag's tree in one commit, apply the patches still needed as one commit each, and run `scripts/raft-tests.sh`; the `require` changes only once every test passes, and a failing test blocks the move and is recorded by name.
+- **Remove when:** an etcd-raft release takes a configurable random source, includes #397 and meets the pin's bar of 3 allocations per message; then the `replace` and `third_party/raft` go.
+
 ## Workaround: LSM pages and runs on the Go heap
 - **Where:** `pages` in `internal/lsm/page.go`; the blocks of `run` in `internal/lsm/run.go`
 - **Why:** memtable pages and runs belong in slabs mapped outside the Go heap ([Runtime in Go](design.md#runtime-in-go)), which the event loop's off-heap slabs provide, and those do not exist yet. Until then they are pointer-free Go slices: the collector does not scan them (0.24 ms per collection at 20 million entries) but counts them toward its heap goal, and runs are freed by the collector rather than by hand once no view holds them.
