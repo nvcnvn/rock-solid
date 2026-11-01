@@ -62,6 +62,9 @@ type Shard struct {
 	free  [][]byte
 	txn   Txn
 	res   Result
+	// halted is the index of the committed entry the replica could not decode and stopped applying at, or 0; newest is the newest entry format it decodes.
+	halted uint64
+	newest byte
 }
 
 // proposal is an entry this replica proposed as leader: its term, its Txn count, and its buffer,
@@ -85,7 +88,8 @@ func NewShard(cfg Config) (*Shard, error) {
 		}
 	}
 	s := &Shard{state: st, id: cfg.Raft.ID}
-	cfg.Raft.SnapshotData, cfg.Raft.Apply, cfg.Raft.CheckSnapshot = st.SnapshotData, s.apply, CheckSnapshot
+	s.newest = entryFormat
+	cfg.Raft.SnapshotData, cfg.Raft.Apply, cfg.Raft.CheckSnapshot = s.snapshotData, s.apply, CheckSnapshot
 	if s.raft, err = raftshard.New(cfg.Raft); err != nil {
 		return nil, err
 	}
@@ -108,14 +112,14 @@ func (s *Shard) Start(ctx *core.Context, out *Output) {
 func (s *Shard) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	s.out = out
 	s.raft.OnEvent(ctx, ev, &out.Raft)
-	s.dropIfRemoved()
+	s.after(ctx)
 }
 
 // ReadIndex asks for a read's commit index, as raftshard.Shard.ReadIndex.
 func (s *Shard) ReadIndex(ctx *core.Context, rctx []byte, out *Output) {
 	s.out = out
 	s.raft.ReadIndex(ctx, rctx, &out.Raft)
-	s.dropIfRemoved()
+	s.after(ctx)
 }
 
 // Durable reports the round in flight durable, as raftshard.Shard.Durable, after proposing the Txns gathered during it.
@@ -126,7 +130,7 @@ func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
 		s.propose(ctx)
 	}
 	s.raft.Durable(ctx, round, &out.Raft)
-	s.dropIfRemoved()
+	s.after(ctx)
 }
 
 // Txn proposes t, which an Answer under token settles, or refuses it with Check's error or, off the leader, raft.ErrProposalDropped.
@@ -136,6 +140,9 @@ func (s *Shard) Txn(ctx *core.Context, t *Txn, token uint64, out *Output) error 
 	n, err := t.Check()
 	if err != nil {
 		return err
+	}
+	if s.halted != 0 {
+		return ErrHalted
 	}
 	if s.raft.Leader() != s.id {
 		return raft.ErrProposalDropped
@@ -152,13 +159,14 @@ func (s *Shard) Txn(ctx *core.Context, t *Txn, token uint64, out *Output) error 
 	if !s.raft.Flushing() {
 		s.propose(ctx)
 	}
-	s.dropIfRemoved()
+	s.after(ctx)
 	return nil
 }
 
-// dropIfRemoved answers every Txn waiting or gathered dropped once the replica learns it left its group, as it does nothing more.
-func (s *Shard) dropIfRemoved() {
-	if !s.out.Raft.Removed {
+// after answers every Txn waiting or gathered dropped once the replica left its group or halted,
+// as it applies nothing more, and has a halted leader hand its leadership to another voter.
+func (s *Shard) after(ctx *core.Context) {
+	if !s.out.Raft.Removed && s.halted == 0 {
 		return
 	}
 	for len(s.waits) > 0 {
@@ -168,10 +176,27 @@ func (s *Shard) dropIfRemoved() {
 		s.answer(token).Err = raft.ErrProposalDropped
 	}
 	s.batch, s.queued = nil, s.queued[:0]
+	if s.halted != 0 {
+		s.raft.StepDown(ctx, &s.out.Raft)
+	}
+}
+
+// Halted is the index of the committed entry the replica could not decode and stopped applying at, or 0.
+func (s *Shard) Halted() uint64 { return s.halted }
+
+// snapshotData is the state at index, or nil from a halted replica, whose state stopped before it; a follower refuses a snapshot without data.
+func (s *Shard) snapshotData(index uint64) []byte {
+	if s.halted != 0 {
+		return nil
+	}
+	return s.state.SnapshotData(index)
 }
 
 // Scan reads [start, end) from the replica's applied state, as State.Scan; whether a replica may serve it is its caller's to decide.
 func (s *Shard) Scan(start, end []byte, limit int, r *ScanResult) error {
+	if s.halted != 0 {
+		return ErrHalted
+	}
 	return s.state.Scan(start, end, limit, r)
 }
 
@@ -198,8 +223,11 @@ func (s *Shard) takeBuf() []byte {
 	return make([]byte, 0, 4<<10)
 }
 
-// apply restores a snapshot and applies committed entries as the Raft replica hands them over.
+// apply restores a snapshot and applies committed entries as the Raft replica hands them over; a halted replica takes neither.
 func (s *Shard) apply(snap raftpb.Snapshot, ents []raftpb.Entry) {
+	if s.halted != 0 {
+		return
+	}
 	if !raft.IsEmptySnap(snap) {
 		if err := s.state.Restore(snap.Metadata.Index, snap.Data); err != nil {
 			panic(fmt.Sprintf("meta: a snapshot that passed CheckSnapshot does not restore: %v", err))
@@ -209,30 +237,32 @@ func (s *Shard) apply(snap raftpb.Snapshot, ents []raftpb.Entry) {
 		}
 	}
 	for i := range ents {
-		s.applyEntry(&ents[i])
+		if s.applyEntry(&ents[i]); s.halted != 0 {
+			return
+		}
 	}
 }
 
-// applyEntry applies e's Txns, answering those this replica proposed. A proposal of an earlier
-// term than e's still waiting never committed, since a log's terms only rise.
+// applyEntry applies e's Txns, answering those this replica proposed, or halts at e if it does
+// not decode whole: skipping it would leave this replica's state apart from those that applied it.
 func (s *Shard) applyEntry(e *raftpb.Entry) {
-	s.state.applied = e.Index
+	// A proposal of an earlier term than e's still waiting never committed, since a log's terms only rise.
 	for len(s.waits) > 0 && s.waits[0].term < e.Term {
 		s.settle(0, raft.ErrProposalDropped)
 	}
 	if e.Type != raftpb.EntryNormal || len(e.Data) == 0 {
+		s.state.applied = e.Index
 		return
 	}
-	mine := len(s.waits) > 0 && s.waits[0].term == e.Term
-	b, n := e.Data[1:], 0
-	if e.Data[0] != entryFormat {
-		b = nil
+	if !s.decodes(e.Data) {
+		s.halted = e.Index
+		return
 	}
-	var err error
-	for ; len(b) > 0; n++ {
-		if b, err = decodeTxn(b, &s.txn); err != nil {
-			break
-		}
+	s.state.applied = e.Index
+	mine := len(s.waits) > 0 && s.waits[0].term == e.Term
+	n := 0
+	for b := e.Data[1:]; len(b) > 0; n++ {
+		b, _ = decodeTxn(b, &s.txn)
 		if !mine {
 			_ = s.state.Apply(&s.txn, &s.res)
 			continue
@@ -244,6 +274,18 @@ func (s *Shard) applyEntry(e *raftpb.Entry) {
 	if mine {
 		s.settle(n, ErrMalformed)
 	}
+}
+
+// decodes reports whether every Txn of an entry's data decodes in a format this replica knows.
+func (s *Shard) decodes(data []byte) bool {
+	if data[0] < entryFormat || data[0] > s.newest {
+		return false
+	}
+	var err error
+	for b := data[1:]; len(b) > 0 && err == nil; {
+		b, err = decodeTxn(b, &s.txn)
+	}
+	return err == nil
 }
 
 // settle answers the oldest proposal's Txns from the done-th on with err, and frees its buffer.

@@ -126,6 +126,8 @@ type Shard struct {
 	// applying is set while etcd-raft applies a configuration change, and snaps are the snapshots sent but not yet reported.
 	applying bool
 	snaps    []sentSnap
+	// stepDown counts StepDown's transfers, which take the voters in turn.
+	stepDown int
 }
 
 // fortified is a fortification: its term, and the run and support epoch of the follower's node's grant to the leader's node.
@@ -277,6 +279,22 @@ func (s *Shard) Leader() uint64 { return s.rn.BasicStatus().Lead }
 
 // Term is the replica's current term, which every entry it appends while it leads carries.
 func (s *Shard) Term() uint64 { return s.rn.BasicStatus().Term }
+
+// StepDown has a leader with no transfer pending hand its leadership to another voter of its applied configuration, the next in turn each time.
+func (s *Shard) StepDown(ctx *core.Context, out *Output) {
+	st := s.rn.BasicStatus()
+	if s.removed || st.RaftState != raft.StateLeader || st.LeadTransferee != 0 {
+		return
+	}
+	for range s.conf.Voters {
+		s.stepDown++
+		if id := s.conf.Voters[s.stepDown%len(s.conf.Voters)]; id != s.cfg.ID {
+			s.rn.TransferLeader(id)
+			break
+		}
+	}
+	s.ready(ctx, out)
+}
 
 // Flushing reports whether a round is in flight, so the next Ready waits for its Durable.
 func (s *Shard) Flushing() bool { return s.round != 0 }

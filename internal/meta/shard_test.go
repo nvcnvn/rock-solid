@@ -115,7 +115,7 @@ func newLateShard(cfg Config, r *node) (*Shard, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Shard{state: st, id: cfg.Raft.ID}
+	s := &Shard{state: st, id: cfg.Raft.ID, newest: entryFormat}
 	cfg.Raft.SnapshotData, cfg.Raft.CheckSnapshot = st.SnapshotData, CheckSnapshot
 	cfg.Raft.Apply = func(_ raftpb.Snapshot, ents []raftpb.Entry) { r.late = append(r.late, ents...) }
 	s.raft, err = raftshard.New(cfg.Raft)
@@ -493,25 +493,89 @@ func TestADeposedLeadersCommittedTxnIsAnsweredWithItsResult(t *testing.T) {
 	}
 }
 
-// An entry whose Txns stop decoding part way answers each of its Txns from there on ErrMalformed,
-// so no caller waits for good.
-func TestAMalformedEntryAnswersItsTail(t *testing.T) {
+// proposeNewer has replica i propose, as a newer release would, an entry of format 2 holding
+// t, which only replicas whose newest format is 2 decode, and returns its index.
+func (c *group) proposeNewer(i int, t Txn) uint64 {
+	data := appendTxn([]byte{entryFormat + 1}, &t)
+	c.call(i, func(ctx *core.Context, out *Output) {
+		if err := c.n[i].s.Raft().Propose(ctx, data, &out.Raft); err != nil {
+			c.t.Fatal(err)
+		}
+	})
+	last, _ := c.n[i].s.Raft().Applied()
+	return last + 1
+}
+
+// A follower that cannot decode a committed entry stops applying before it, refuses Txns and
+// reads, and halts there again after a restart, while the others keep committing.
+func TestAFollowerHaltsAtAnEntryItCannotDecode(t *testing.T) {
 	c := newGroup(t, 3, false)
 	l := c.elect()
+	g, f := (l+1)%3, (l+2)%3
+	c.n[l].s.newest, c.n[g].s.newest = 2, 2
 	c.txn(l, ops(Put(b("a"), b("1"))), 1)
-	c.txn(l, ops(Put(b("b"), b("1"))), 2)
-	s := c.n[l].s
-	s.batch, s.queued = append(s.batch, 0xff), append(s.queued, 3)
-	c.txn(l, ops(Put(b("c"), b("1"))), 4)
 	c.settle()
-	for token, want := range map[uint64]error{1: nil, 2: nil, 3: ErrMalformed, 4: ErrMalformed} {
-		if a := c.answer(l, token); !errors.Is(a.Err, want) {
-			t.Fatalf("token %d answered %+v, want %v", token, a, want)
+	at := c.proposeNewer(l, ops(Put(b("x"), b("1"))))
+	c.settle()
+	c.txn(l, ops(Put(b("c"), b("1"))), 2)
+	c.settle()
+	halted := func() {
+		t.Helper()
+		if h, applied := c.n[f].s.Halted(), c.n[f].s.State().Applied(); h != at || applied != at-1 {
+			t.Fatalf("the follower halted at %d with %d applied, want %d and %d", h, applied, at, at-1)
 		}
 	}
-	c.agree()
-	if _, ok := get(s.State(), "c"); ok {
-		t.Fatal("a Txn after the malformed one applied")
+	halted()
+	if a := c.answer(l, 2); a.Err != nil || c.dump(l) != c.dump(g) {
+		t.Fatalf("the others stopped committing: %+v", a)
+	}
+	tx := ops(Put(b("d"), b("1")))
+	var r ScanResult
+	c.call(f, func(ctx *core.Context, out *Output) {
+		if err := c.n[f].s.Txn(ctx, &tx, 9, out); !errors.Is(err, ErrHalted) {
+			t.Fatalf("a halted replica took a Txn: %v", err)
+		}
+	})
+	if err := c.n[f].s.Scan(nil, nil, 10, &r); !errors.Is(err, ErrHalted) {
+		t.Fatalf("a halted replica served a scan: %v", err)
+	}
+	c.restart(f)
+	c.heartbeat()
+	halted()
+}
+
+// A leader that cannot decode a committed entry halts, answers its Txns dropped and hands its
+// leadership to a voter, under which the group keeps committing.
+func TestAHaltedLeaderHandsOverItsLeadership(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	for i := range c.n {
+		if i != l {
+			c.n[i].s.newest = 2
+		}
+	}
+	c.txn(l, ops(Put(b("a"), b("1"))), 1)
+	at := c.proposeNewer(l, ops(Put(b("x"), b("1"))))
+	c.txn(l, ops(Put(b("b"), b("1"))), 2)
+	c.settle()
+	c.heartbeat()
+	if h := c.n[l].s.Halted(); h < at {
+		t.Fatalf("the leader halted at %d, want at least %d", h, at)
+	}
+	if a := c.answer(l, 1); a.Err != nil {
+		t.Fatalf("the Txn before the entry answered %+v", a)
+	}
+	if a := c.answer(l, 2); !errors.Is(a.Err, raft.ErrProposalDropped) {
+		t.Fatalf("the Txn after the entry answered %+v", a)
+	}
+	nl := c.leader()
+	if nl < 0 || nl == l {
+		t.Fatalf("leader %d after the halted leader stepped down", nl)
+	}
+	c.txn(nl, ops(Put(b("c"), b("1"))), 3)
+	c.settle()
+	if a := c.answer(nl, 3); a.Err != nil || a.Result.FailedCheck != -1 {
+		t.Fatalf("the new leader answered %+v", a)
 	}
 }
 

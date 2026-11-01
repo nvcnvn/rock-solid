@@ -40,6 +40,8 @@ var (
 	ErrBadReplay = errors.New("meta: bad replay key")
 	// ErrMalformed reports a log entry whose Txns do not decode; none of them applies.
 	ErrMalformed = errors.New("meta: malformed entry")
+	// ErrHalted reports a Txn or Scan refused by a replica that halted at an entry it could not decode.
+	ErrHalted = errors.New("meta: replica halted at an entry it does not decode")
 	// ErrLimit reports a Scan limit below 1.
 	ErrLimit = errors.New("meta: scan limit below 1")
 )
