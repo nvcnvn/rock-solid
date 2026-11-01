@@ -402,7 +402,6 @@ func swapUnderLoad(t *testing.T, p plants) bool {
 			switch {
 			case e.from == rC || e.to == rC:
 				if e.msg.Buf != core.NoBuf {
-					n.r[e.to].pool.Free(e.msg.Buf)
 				}
 			case e.from == rD || e.to == rD:
 				late = append(late, e)
@@ -598,5 +597,47 @@ func TestASnapshotWaitsOutAConfigurationChangeAsItApplies(t *testing.T) {
 	n.propose(rA, []byte("d"))
 	if pr := n.r[rA].s.rn.Status().Progress[3]; pr.State != tracker.StateSnapshot || pr.PendingSnapshot < add {
 		t.Fatalf("C is in %v with snapshot %d pending, want one at or past D's addition at %d", pr.State, pr.PendingSnapshot, add)
+	}
+}
+
+// A snapshot to a follower behind the compaction, lost on its way, is reported finished a
+// heartbeat after it left, not sooner, and the follower gets another, at most one a heartbeat.
+func TestALostSnapshotIsReportedFinishedAHeartbeatAfterItLeft(t *testing.T) {
+	n := newNet(t, 3, 1)
+	n.elect(0)
+	n.propose(0, []byte("a"))
+	n.settleWithout(2)
+	n.snapshot(0)
+	snaps, sentAt := 0, -1
+	lose := func(e envelope) bool {
+		var m raftpb.Message
+		var f fortify
+		if kind, err := decodeKind(n.r[e.to].pool, &e.msg, &m, &f); err == nil && kind == kindRaft && m.Type == raftpb.MsgSnap {
+			snaps++
+			return false
+		}
+		return true
+	}
+	const heartbeats = 10
+	for tick := range heartbeats * HeartbeatTick {
+		n.advance(TickInterval)
+		for range 20 {
+			was := snaps
+			n.deliver(lose)
+			if snaps != was {
+				sentAt = tick
+			}
+			for i, r := range n.r {
+				if r.flush != 0 {
+					n.durable(i)
+				}
+			}
+		}
+		if st := n.r[0].s.rn.Status().Progress[3].State; sentAt >= 0 && st != tracker.StateSnapshot && tick-sentAt < HeartbeatTick {
+			t.Fatalf("the snapshot sent at tick %d was reported finished at tick %d, before a heartbeat", sentAt, tick)
+		}
+	}
+	if snaps < 2 || snaps > heartbeats {
+		t.Fatalf("%d snapshots in %d heartbeats, want a second once the first is reported, and at most one a heartbeat", snaps, heartbeats)
 	}
 }
