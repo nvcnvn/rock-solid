@@ -157,9 +157,10 @@ func DecodeRound(rec []byte, r *Round) error {
 				*ids = append(*ids, d.u64())
 			}
 		}
-		m.ConfState.AutoLeave = d.byte() == 1
+		auto := d.byte()
+		m.ConfState.AutoLeave = auto == 1
 		r.Snapshot.Data = d.bytes(d.u32())
-		if m.Index == 0 {
+		if m.Index == 0 || auto > 1 {
 			return ErrBadRound
 		}
 	}
@@ -180,6 +181,9 @@ func DecodeRound(rec []byte, r *Round) error {
 	}
 	if flags&flagHardState != 0 {
 		r.HardState = raftpb.HardState{Term: d.u64(), Vote: d.u64(), Commit: d.u64()}
+		if r.HardState == (raftpb.HardState{}) {
+			return ErrBadRound
+		}
 	}
 	if d.bad || len(d.b) != 0 {
 		return ErrBadRound
