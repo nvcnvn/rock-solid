@@ -12,7 +12,7 @@ import (
 
 func newTestState(t testing.TB) *State {
 	t.Helper()
-	s, err := NewState(lsm.Config{MaxPiece: 64 << 10, Check: true}, 0)
+	s, err := NewState(lsm.Config{MaxPiece: 64 << 10, Check: *checkTree}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
