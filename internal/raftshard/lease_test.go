@@ -85,6 +85,22 @@ func TestASupportingFollowerDropsChallengersButPassesATransfer(t *testing.T) {
 	}
 }
 
+// A vote request from the supported leader itself, for a later term, shows that it no longer leads,
+// as after its node restarted in place and renewed the grant: the follower stops supporting it and
+// passes the request.
+func TestTheSupportedLeadersOwnCampaignEndsSupport(t *testing.T) {
+	n := newNet(t, 3, 1)
+	n.leases(0, 1, 2)
+	n.elect(0)
+	f := n.r[1]
+	if sent := n.recv(1, 0, n.challenge(raftpb.MsgPreVote, 0, 1, "")); count(sent, raftpb.MsgPreVoteResp) != 1 || sent[0].Reject {
+		t.Fatalf("the leader's own pre-vote got %v", types(sent))
+	}
+	if f.s.support.term != 0 {
+		t.Fatal("still supports the leader that campaigned")
+	}
+}
+
 // A follower whose grant lapses campaigns raft_lapse_campaign after it sees the lapse, not at its
 // election timeout, and its election timer stands still before: 4 s without the leader's
 // heartbeats is past any election timeout.

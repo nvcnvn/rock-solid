@@ -3391,7 +3391,7 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | # | Property | Model invariant | Simulator invariant |
 | --- | --- | --- | --- |
 | 1 | No PG serves reads from two primaries at once: while a primary serves a PG's reads, no later interval of that PG has activated under another primary | `OneReader` | "no PG serves reads from two primaries at once"; for the lease clocks, the lease pair run's "the holder holds a lease its grantor no longer keeps" |
-| 2 | No two replicas of a shard serve lease reads at once | `OneLeaseholder` | "no two replicas of a shard serve lease reads at overlapping times", registered by MetaStore invariants (phase 4) |
+| 2 | No two replicas of a shard serve lease reads at once | `OneLeaseholder` | "no two replicas of a shard serve lease reads at overlapping times", registered by [Leader leases](#leader-leases) (phase 4) |
 | 3 | A member that adopted a later interval of a PG logs no write tagged with an earlier one, so the members peering reaches stop the intervals they were live in | `NoLateCompletion` | "no member logs a write tagged with an earlier interval of its PG than its table's" |
 | 4 | No acknowledged version, and no version an activated interval kept, is ever dropped: every later activated decision and every later acknowledged version rests on it. That covers a write tagged with an interval that completes after a later interval activated: a member peering reached may have acknowledged it before adopting the new interval, and one it did not reach may acknowledge it after, so it completes late but only if the new interval kept it | `NothingCommittedDropped` | "no acknowledged version is ever dropped", with the byte checks "a member listing nothing maps the kept writes applied in version order" and "the primary maps exactly the writes and punches it answered OK and those peering kept, in version order, in every chunk it lists nothing of" |
 | 5 | The versions peering drops are a suffix of each chunk's pending versions: every member a decision counts as holding the kept version holds the bytes of every version it was merged on | `DropsAreSuffix` | "no version peering keeps follows a dropped version of its chunk", with "once recovery settles, every member lists nothing and maps the kept writes, but in an unfound chunk" |
@@ -5465,9 +5465,10 @@ the round to its `raft.MemoryStorage`, which stands for the durable log until th
 | A crash before the durable notice | On restart the follower's log lacks the entry, and the leader resends it. No acknowledgment was sent for it |
 
 **Simulator runs.** `TestRaftRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000 per commit in
-`scripts/seeds.sh` (16 s at `JOBS=2`), 10,000 once in 68 s. One group of three shards on the
-simulated network, with 1-in-100 drops, 1-in-50 duplicates, up to 200 µs of jitter, partitions cut
-and healed, and nodes paused for up to 5 s; each round flushes as an fsync on its node's simulated
+`scripts/seeds.sh` (16 s at `JOBS=2`), 10,000 once in 150 s. One group of three shards on the
+simulated network and on node-pair leases, with 1-in-100 drops, 1-in-50 duplicates, up to 200 µs
+of jitter, partitions cut and healed, and the lease faults of [Leader leases](#leader-leases)
+(pauses of up to 5 s, slewed and drifting clocks, links held); each round flushes as an fsync on its node's simulated
 disk, so a crash loses the rounds in flight. Leaders propose a numbered value per tick, every third
 over 256 bytes, and the first leader to apply 20 crashes and restarts from its storage. After 30 s
 every partition is healed, and the run must apply a value proposed after the crash within 30 s
@@ -5477,9 +5478,10 @@ more. Every seed checks, after every step:
   storage holds the entry, and no granted `MsgVoteResp` before it holds the term and vote, unless
   storage already holds a later term. One `Ready` can carry a vote together with a later term the
   replica moved to before that `Ready` was taken; once the later term is durable the replica never
-  votes in the older one again. Seed 135 of the first 2,000 is such a case.
+  votes in the older one again.
 - "applied entries agree": no two replicas apply different entries at one index.
 - the simulator's driver contract.
+- the three lease invariants of [Leader leases](#leader-leases).
 
 Across the 20 seeds, traces show buffered messages, pauses, restarts and lost connections. In the
 trace tests, every pool holds no buffer once the group settles. Planted
@@ -5498,56 +5500,89 @@ budget belongs to [Raft cost per group](#raft-cost-per-group).
 
 ## Leader leases
 
-Unit and trace tests for fortification on the per-node-pair leases. Lease time follows the two-clock rule: the holder ends a grant `lease_drift` (40 ms of 4 s) early on its faster clock, counted from when it asked; the grantor waits the whole lease on its slower one.
+Trace tests (`internal/raftshard`, `lease_test.go`) for fortification on the per-node-pair leases,
+on the [Raft shard](#raft-shard)'s hand-driven network. Each replica's node has its own
+`lease.Holder` and `lease.Grantor`, which the test renews by hand: a lease takes two grants
+`rate_gap` apart, so the holder has a rate bound. Lease time follows the two-clock rule: the
+holder ends a grant `lease_drift` (40 ms of 4 s) early on its faster clock, counted from when it
+asked; the grantor waits the whole lease on its slower one. The expiry of one grant on the holder
+(3.96 s after the ask, a widened margin, no lease before a rate bound) is the lease package's, and
+its tests under [Peering and read leases](#peering-and-read-leases) cover it; here the shard only
+reads it. `TestConfig` (Raft shard) asserts `CheckQuorum` off and `PreVote` on.
 
 **Votes and campaigns while supporting a leader**
 
 | Follower state | Message or event | Expected |
 | --- | --- | --- |
-| Supports leader L under its node's grant to L's node, support epoch e, grant held | `MsgPreVote` from challenger C | Dropped before `RawNode`. No response |
+| Supports leader L under its node's grant to L's node, support epoch e, grant held | `MsgPreVote` from challenger C | Dropped before `RawNode`. No response, no round, term unchanged |
 | Same | `MsgVote` from C | Dropped |
-| Same | `MsgVote` with the transfer context, from the target of a planned transfer | Passed to `RawNode`, which votes under Raft's rules |
-| Same | The leader's Raft heartbeats are lost for 2 s while the node-pair grant holds | Its election timer is stopped: no campaign |
-| Grant to L's node lapsed on the grantor's clocks, epoch bumped to e + 1 | `MsgPreVote`, then `MsgVote`, from C | Passed and answered under Raft's rules (the review criterion "votes once its grant lapses") |
-| Same, with no challenger | The lapse | Campaigns, pre-vote first, after a random 150 to 300 ms (`raft_lapse_campaign`), not at its election timeout |
-| Same, and the other follower's grant to L's node still holds on its own clocks | Its own pre-vote | Dropped by that follower; it campaigns again at its election timeout |
-| Supports no leader | `MsgVote` | Passed |
-| Node restarted 2 s ago on both clocks (within `primary_lease`, 4 s) | Any `MsgVote` or `MsgPreVote` | Refused: no vote and no peering for one `primary_lease` after start |
-| Node restarted 4.1 s ago on both clocks | `MsgVote` | Answered under Raft's rules |
-| Node restarted 4.1 s ago on `CLOCK_BOOTTIME`, 3.9 s on `CLOCK_MONOTONIC_RAW` | `MsgVote` | Refused |
-| Holder's renewal naming lapsed support epoch e, after the grantor moved to e + 1 | Renewal | Refused. A new grant comes under e + 1, and every fortification under e has ended |
+| Same | `MsgVote` with the transfer context, from the target of a planned transfer | Passed to `RawNode`, which votes under Raft's rules: the granted vote leaves once its round is durable |
+| Same | The leader's Raft messages lost from its election until the grant lapses, 4 s | Its election timer is stopped: no campaign, though 4 s is past any election timeout |
+| Grant to L's node lapsed on the grantor's clocks | `MsgPreVote`, then `MsgVote`, from C | Passed and granted under Raft's rules (the review criterion "votes once its grant lapses") |
+| Same, with no challenger | The lapse | Campaigns, pre-vote first, 150 to 300 ms (`raft_lapse_campaign`) after the first event that sees the lapse, not at its election timeout; 20 seeds give at least 10 different delays. The lapse comes no earlier than 4 s after the grant |
+| Same, and the other follower's grant to L's node still holds, L unreachable | Its own pre-vote | Dropped by that follower, which sends nothing; it campaigns again at its election timeout, 1.00 to 1.99 s after the lapse |
+| Supports L, and L itself asks for a (pre-)vote in a later term | The request | Support ends and the request is passed: L asks only once it no longer leads, as after its node restarted in place and renewed the grant (simulator runs, below) |
+| Node restarted 2 s ago on both clocks (within `primary_lease`, 4 s) | `MsgPreVote`, `MsgVote` | Dropped: no answer and no round |
+| Node restarted 4.1 s ago on both clocks | `MsgPreVote`, `MsgVote` | Answered under Raft's rules |
+| Node restarted 4.1 s ago on `CLOCK_BOOTTIME`, 3.9 s on `CLOCK_MONOTONIC_RAW` | `MsgPreVote`, `MsgVote` | Dropped |
+| Node restarted, 3.9 s of 10 ms timer events | Its election timer | Stopped: no campaign during the restart wait |
+| The leader's grant from follower F lapsed in support epoch e, and the leader's node renewed it, under e + 1 | Lease read | Refused: the renewal is fresh, under e + 1, and F's fortification under e no longer counts. Once the leader's next fortification request (a heartbeat later) reaches F, F supports it under e + 1 and the leader reads again |
 
-**Expiry of one grant, on the holder**
+**Lease end: a quorum of unexpired fortifications per half**
 
-| Input | Expected expiry |
-| --- | --- |
-| Grant asked at 0 ms, received at 50 ms | 3.96 s after the ask, on the faster of the holder's clocks, not 4.01 s |
-| The holder's rate bound for this grantor is 1% fast: 0.5% over `lease_drift / 2` | The margin for this grantor widens by the 0.5% excess, to 60 ms: expiry 3.94 s after the ask |
-| No rate bound for this grantor's run yet, as after either node starts or the grantor restarts, reboots or resumes | No expiry from this voter: it does not count toward the quorum, though its support stands |
+The leader counts itself as a fortified voter whose entry never expires: it votes for a
+challenger only after stepping down, and a replica that does not lead serves no lease read. The
+follower nodes' grants are asked at the times given; the test checks a lease read 1 µs before and
+at the end, 3.96 s after the ask named.
 
-**Lease end: the quorum-th latest expiry over the fortified voters**
-
-The leader counts itself as a fortified voter. Open: "itself included" gives the leader's own entry no expiry. The cases treat it as unbounded, so it never sets the lease.
-
-| Voters | Fortified, with expiries | Lease ends |
+| Voters | Fortified, asked at | Lease ends |
 | --- | --- | --- |
-| 3: L, F1, F2 | L, F1 (t1) | t1 (the review criterion: lease to that follower's expiry) |
-| 3 | L, F1 (t1 = 10 s), F2 (t2 = 12 s) | 12 s (2nd latest of ∞, 12, 10) |
+| 3: L, F1, F2 | F1 (0 s) | 3.96 s, F1's expiry (the review criterion: a lease to that follower's expiry) |
+| 3 | F1 (0 s), F2 (2 s) | 5.96 s, the later expiry: the 2nd latest of ∞, 5.96 and 3.96 |
 | 3 | L only | No lease: reads go through ReadIndex |
-| 5 | L, a (10), b (20), c (30) | 20 s (3rd latest) |
-| 5 | L, a (10) | No lease |
-| Joint, old {L, B, C}, new {L, D, E} | B (10), D (12) | min(10, 12) = 10 s: each half gives its own quorum-th expiry |
-| Joint, as above | B (10) only | No lease: the new half has no quorum |
+| 5 | a (0 s), b (1 s), c (2 s) | 4.96 s, the 3rd latest of ∞, 5.96, 4.96 and 3.96 |
+| 5 | a (0 s) | No lease |
+| Joint, new {L, D, E}, old {L, B, C} | B (0 s), D (1 s) | 3.96 s: each half gives its own quorum, and the old half's ends first |
+| Joint, as above | B (0 s), C (1 s) | No lease: the new half has no quorum |
 
 **Reads**
 
 | State | Read | Expected |
 | --- | --- | --- |
-| New leader, fortified, no entry of its term committed yet | Lease read | Served through ReadIndex instead |
-| Fortified, an entry of its term committed, lease unexpired | Lease read | Served from memory, with no round trip |
-| `Ready` carrying `MsgTimeoutNow` to the transfer target has left | Lease read | No lease read from this point on. Served through ReadIndex or refused |
-| Holder receives `Resumed` (a suspend, or a VMClock marker change) | Lease read | Stops serving lease reads at once, asks each grantor again, and restarts its rate window |
-| A grantor's heartbeat shows its `CLOCK_MONOTONIC_RAW` moved further since the last grant than the holder's could have | Lease read | Ends its leases as on `Resumed`. Peer messages in the pass are handled before reads |
+| New leader, fortified, its first entry not yet acknowledged | `LeaseRead` | False. `ReadIndex` gives nothing until the entry commits, then the commit index once a quorum answers the read's heartbeat |
+| Fortified, an entry of its term committed, lease unexpired | `LeaseRead` | True: served from memory, with no round trip. `BenchmarkLeaseRead` allocates nothing |
+| The `Ready` carrying `MsgTimeoutNow` to the transfer target taken | `LeaseRead` | False from that point to the end of the term. The target, whose vote request the supporting follower passes, leads, fortifies and serves lease reads |
+| Holder ends its leases on `Resumed` (a suspend, or a VMClock marker change) | `LeaseRead` | False at once. Once the holder holds its leases again, in the same support epochs, true with no new fortification |
+| A grantor's heartbeat shows its `CLOCK_MONOTONIC_RAW` moved further since the last grant than the margin allows | `LeaseRead` | False at once, as on `Resumed`. Peer messages in a pass are handled before reads (the event loop's rule) |
+
+**Decoder.** `FuzzDecode` (Raft shard) also feeds fortification messages: one of another length,
+in a buffer or of an unknown kind is dropped as undecodable, and one it accepts encodes and decodes
+back to itself.
+
+**Simulator runs.** `TestRaftRunsReplayFromTheirSeed` (Raft shard) runs the group on node-pair
+leases: every node asks every other for a lease when its holder is due, grants as its grantor
+allows, heartbeats the holders it grants once a second and handles `Resumed` on both, through
+frames of its own on the simulated network. Its faults cover the MetaStore faults below that a
+single group without transfers or configuration changes can meet: partitions cut and healed, the
+first leader crashed and restarted in place, pauses of up to 5 s of every kind but a stop in place
+on kvm-clock (`PauseFrozen`, whose lost heartbeats leave a holder serving on an old lease for up
+to a heartbeat, an [open question](design.md#roadmap-and-open-questions)), slews of
+`CLOCK_BOOTTIME` up to ±22.6%, raw clocks within ±4% and a raw rate step after measurement, and
+one direction of a link held up to 50 ms. After every step it checks:
+
+- [property] "at most one leader per shard per term".
+- [property] "no two replicas of a shard serve lease reads at overlapping times": when a replica's
+  pass ends able to serve a lease read, no other running, unpaused replica could, at its own
+  clocks, unless its next pass would first see `Resumed`.
+- [property] "a lease read sees every applied entry": a replica able to serve a lease read has
+  applied every index any replica applied.
+
+A shard whose followers vote and campaign while they support a leader breaks the second within 20
+seeds (`TestFollowersVotingWhileSupportingBreakTheLeaseInvariant`), and across the 20 `go test`
+seeds some pass can serve a lease read, so the checks are not vacuous.
+
+The leader transfer and configuration change of the MetaStore faults are covered by the trace tests
+above; the simulator gets them with leader balancing and [Voter replacement](#voter-replacement).
 
 **Simulator faults** (MetaStore), with the invariant "no two replicas of a shard serve lease reads at overlapping times":
 
@@ -5555,7 +5590,7 @@ The leader counts itself as a fortified voter. Open: "itself included" gives the
 2. **A leader's node suspended past its lease (5 s).** On resume it ends every lease (`Resumed`) before serving. A new leader may have been elected after the grants lapsed on the grantors' clocks. Expected: no overlap.
 3. **A leader transfer while lease reads arrive.** Expected: the old leader serves none after `MsgTimeoutNow` leaves, and the new leader none before it is fortified and has committed an entry of its term.
 4. **A configuration change while a lease is held.** Expected: the lease requires quorums in both halves throughout the joint configuration.
-5. **Lease clocks.** A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±4%, and grants delayed by asymmetric queueing of up to 50 ms. Expected: no overlap. A crash fails over within 5.2 s, the most a 22.6% slew can stretch a grantor's wait, plus `raft_lapse_campaign` and an election.
+5. **Lease clocks.** A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±4%, and grants delayed by asymmetric queueing of up to 50 ms. Expected: no overlap. A crash fails over within 5.2 s, the most a 22.6% slew can stretch a grantor's wait, plus `raft_lapse_campaign` and an election; a leader restarted in place, within its restart wait plus an election timeout and an election.
 
 ## Voter replacement
 
