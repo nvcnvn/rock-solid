@@ -15,8 +15,8 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   `scripts/lint.sh` runs every step with `GOTOOLCHAIN` set from that line, so a newer local Go
   changes nothing. The toolchain and the three tool versions are pinned in
   [tech-debts.md](tech-debts.md#version-pin-go-toolchain-1270-and-lint-tools).
-- The script fails, naming the cause, on each of these planted faults: a Go file outside `spikes/`,
-  `studies/` and `third_party/` that `gofmt` would change (the file is listed); a `go vet` finding; a sans-IO analyzer finding
+- The script fails, naming the cause, on each of these planted faults: a Go file outside `spikes/`
+  and `studies/` that `gofmt` would change (the file is listed); a `go vet` finding; a sans-IO analyzer finding
   ([next section](#sans-io-analyzer)); a `staticcheck` (v0.8.2) finding; a vulnerability
   `govulncheck` (v1.9.0) finds in code the module calls (its exit status 3); a dependency whose
   license is not Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, CC0-1.0 or Unicode-3.0
@@ -25,8 +25,6 @@ A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks 
   skips; every other check still decides the result.
 - Go files under `spikes/` and `studies/` are never linted, tracked or not; untracked Go files
   elsewhere are. With no Go file outside them, the script prints "nothing to lint" and passes.
-- `third_party/raft`, the etcd-raft fork, is a module of its own: `gofmt` skips its files and
-  `./...` does not reach them, while the license check covers it by name.
 
 ## Sans-IO analyzer
 
@@ -2861,7 +2859,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
   runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
   they take.
-- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 57,400 seeds in 799 s,
+- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 59,400 seeds in 811 s,
   building the test binaries included. On 4 processes the largest process peaked at 528 MiB
   resident (an `internal/lsm` metamorphic shard), all four at 1.9 GiB:
 
@@ -2870,6 +2868,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 9 s |
   | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 3 s |
   | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 4 s |
+  | `internal/sim` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 12 s |
   | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 28 s |
   | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 6 s |
   | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 76 s |
@@ -5407,11 +5406,10 @@ test's alone.
   leave; the Raft shard puts it in the disk log.
 - **Unseeded randomness is caught** (`TestUnseededElectionTimeoutsBreakReplay`). The same run with no
   `Config.Rand`, so the fork falls back to `crypto/rand`, gives two different traces for one seed.
-- **ReadIndex retry fix** (etcd-io/raft#397). The fork carries upstream commits `9b9d6ee` and
-  `63903dd`; `read_only.go` equals v3.7.0's but for v3.7.0's pointer messages. The fix's own
-  `TestReadOnlyDuplicateRequest` passes on the fork and fails on plain v3.6.0 ("readIndex for B is
-  1 (should be >= 3)"): a stale leader's read B, queued behind a retried read A, is confirmed by
-  late acknowledgments of A's first heartbeat. The behaviour is in [Raft shard](design.md#metadata-layer-metastore).
+- **ReadIndex retry fix** (etcd-io/raft#397, its behaviour in [Raft shard](design.md#metadata-layer-metastore)).
+  The fork carries upstream commits `9b9d6ee` and `63903dd`; `read_only.go` equals v3.7.0's but
+  for v3.7.0's pointer messages. The fix's own `TestReadOnlyDuplicateRequest` passes on the fork
+  and fails on plain v3.6.0 ("readIndex for B is 1 (should be >= 3)").
 - **Tech-debt entries.** `docs/tech-debts.md` holds two entries:
   - [the version pin](tech-debts.md#version-pin-goetcdioraftv3-v360), removed when an etcd-raft
     release keeps messages and entries without per-field allocations, at most 3 per message in
@@ -5428,14 +5426,11 @@ test's alone.
 
 - `scripts/raft-tests.sh` runs every test package of the fork with the main module's toolchain, in
   CI's test job: `raft` (the unit tests and the datadriven interaction tests under `testdata/`),
-  `confchange`, `quorum`, `raftpb`, `rafttest` and `tracker`. All pass on the fork, and all passed
-  on the pristine v3.6.0 copy before the patches.
-- No upstream test depends on `crypto/rand`'s distribution: every one builds its replicas without
-  `Config.Rand`, so they run upstream's source unchanged.
+  `confchange`, `quorum`, `raftpb`, `rafttest` and `tracker`. All pass on the fork.
 - Each of the fork's two changes comes with a test: the seeded timeouts (etcd-raft module, above),
   and #397's own test.
-- Whenever the fork moves to a new upstream tag, the whole suite must pass on that tag before the
-  `require` changes. A failing test blocks the move and is recorded by name.
+- A move to a new upstream tag follows the fork's [tech-debt entry](tech-debts.md#workaround-etcd-raft-fork-in-third_partyraft):
+  it merges only once this suite passes on the new tag.
 
 ## Raft shard
 

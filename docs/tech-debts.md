@@ -25,7 +25,9 @@
 - **Why:** upstream draws election timeouts from `crypto/rand` behind a process-wide mutex (`globalRand` in `raft.go`), so the simulator could not replay a Raft shard from its seed ([Raft shard](design.md#metadata-layer-metastore)), and v3.6.0 lacks v3.7.0's ReadIndex retry fix. The copy's first commit is the pristine tag, and each patch is a commit of its own on top:
   - `Config.Rand`, a `math/rand/v2` source a replica draws its election timeouts from; nil keeps `globalRand`. Tested in `seeded_rand_test.go`.
   - etcd-io/raft#397, upstream commits `9b9d6ee` (its test, `TestReadOnlyDuplicateRequest`) and `63903dd` (the fix).
-- **Moving to a new tag:** replace the copy with the new tag's tree in one commit, apply the patches still needed as one commit each, and run `scripts/raft-tests.sh`; the `require` changes only once every test passes, and a failing test blocks the move and is recorded by name.
+
+  Upstream main's single-voter ReadIndex fixes, #535 (`b8a3280`) and #536 (`1917bb4`, `3009105`), are left out: every group has three voters ([Replica placement and replacement](design.md#metadata-layer-metastore)), and carrying either means carrying all three commits.
+- **Moving to a new tag:** replace the copy with the new tag's tree in one commit, apply the patches still needed as one commit each, and bump the `require` in `go.mod` in the same change. The change merges only once `scripts/raft-tests.sh`, `go test ./...` and `scripts/seeds.sh` pass; a failing test blocks the move and is recorded by name.
 - **Remove when:** an etcd-raft release takes a configurable random source, includes #397 and meets the pin's bar of 3 allocations per message; then the `replace` and `third_party/raft` go.
 
 ## Workaround: LSM pages and runs on the Go heap
