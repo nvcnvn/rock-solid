@@ -595,7 +595,7 @@ func member(cs *raftpb.ConfState, id uint64) bool {
 // the current commit index never catches up under steady writes over a slower link.
 func (s *Shard) reconcile(ctx *core.Context) {
 	now := ctx.Now
-	if len(s.plan) == 0 {
+	if len(s.plan) == 0 || s.settled() {
 		return
 	}
 	st := s.rn.BasicStatus()
@@ -633,6 +633,15 @@ func (s *Shard) target(t lease.Time) uint64 {
 		}
 	})
 	return to
+}
+
+// settled reports whether the applied configuration is the plan: its voters, no learner, not joint.
+// Most groups are, so a Ready costs them a few comparisons.
+func (s *Shard) settled() bool {
+	if len(s.conf.Learners)+len(s.conf.VotersOutgoing) != 0 || len(s.conf.Voters) != len(s.plan) {
+		return false
+	}
+	return !slices.ContainsFunc(s.conf.Voters, func(id uint64) bool { return !s.planned(id) })
 }
 
 func (s *Shard) planned(id uint64) bool {

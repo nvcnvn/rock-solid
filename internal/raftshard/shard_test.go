@@ -730,6 +730,7 @@ func TestACrashBeforeTheFlushLosesTheEntryAndTheLeaderResendsIt(t *testing.T) {
 func BenchmarkProposal(b *testing.B) {
 	n := newNet(b, 3, 1)
 	n.elect(0)
+	n.r[0].s.SetPlan([]Peer{{ID: 1}, {ID: 2}, {ID: 3}})
 	n.lean = true
 	data := make([]byte, 128)
 	b.ReportAllocs()
