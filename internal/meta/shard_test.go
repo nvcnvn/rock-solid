@@ -228,7 +228,9 @@ func (c *group) tick() {
 	c.now += raftshard.TickInterval
 	for i := range c.n {
 		if !c.cut[i] {
-			c.call(i, func(ctx *core.Context, out *Output) { c.n[i].s.OnEvent(ctx, &core.Event{Kind: core.EvTimer, Timer: 1}, out) })
+			c.call(i, func(ctx *core.Context, out *Output) {
+				c.n[i].s.OnEvent(ctx, &core.Event{Kind: core.EvTimer, Timer: 1}, out)
+			})
 		}
 	}
 	c.settle()
