@@ -128,13 +128,19 @@ func (s *Storage) ApplySnapshot(snap raftpb.Snapshot) error {
 }
 
 // Append adds entries, replacing those from the first one's index on; entries at or below the
-// base are skipped, and a gap after the last entry is a broken invariant of the caller.
+// base are skipped, and a gap after the last entry is a broken invariant of the caller. Entries
+// all at or below the base replaced every entry after it, which only a replay meets: a live append
+// starts above the commit index.
 func (s *Storage) Append(ents []raftpb.Entry) {
-	for len(ents) > 0 && ents[0].Index <= s.base.Index {
-		ents = ents[1:]
-	}
 	if len(ents) == 0 {
 		return
+	}
+	if ents[len(ents)-1].Index <= s.base.Index {
+		s.ents = s.ents[:0]
+		return
+	}
+	for ents[0].Index <= s.base.Index {
+		ents = ents[1:]
 	}
 	if ents[0].Index > s.last()+1 {
 		panic(fmt.Sprintf("raftshard: entry %d appended after last entry %d", ents[0].Index, s.last()))

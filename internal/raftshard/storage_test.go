@@ -153,6 +153,21 @@ func TestReplayLaterRecordsWin(t *testing.T) {
 	}
 }
 
+// Replay on a recorded base drops a tail that a later round at or below the base replaced: the
+// log was 5..12 of term 1, then 7..8 and 9..10 of term 2, compacted to 10.
+func TestReplayOnABaseDropsATailReplacedBelowIt(t *testing.T) {
+	st := NewStorage()
+	if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 10, Term: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	replay(t, st, &Round{Entries: ents(1, 5, 8, 10)}, 1<<20)
+	replay(t, st, &Round{Entries: ents(2, 7, 2, 10)}, 1<<20)
+	replay(t, st, &Round{Entries: ents(2, 9, 2, 10)}, 1<<20)
+	if last, _ := st.LastIndex(); last != 10 {
+		t.Fatalf("last %d after replaying a log that ends at the base 10", last)
+	}
+}
+
 // A round larger than a blob goes out as several, and only its last, of kind BlobRaftState,
 // applies it: a round torn before its last blob changes nothing, nor does one missing its first.
 func TestARoundSpansBlobsAndATornOneChangesNothing(t *testing.T) {
