@@ -181,15 +181,11 @@ func (s *State) Scan(start, end []byte, limit int, r *ScanResult) error {
 			r.More = true
 			break
 		}
+		// Once the buffer grows, the earlier KVs stay in the old array, which nothing writes again.
+		off := len(r.buf)
 		r.buf = append(append(r.buf, k...), v...)
-		r.KVs = append(r.KVs, KV{Key: k, Value: v})
-	}
-	off := 0
-	for i := range r.KVs {
-		kv := &r.KVs[i]
-		k, v := off+len(kv.Key), off+len(kv.Key)+len(kv.Value)
-		kv.Key, kv.Value = r.buf[off:k:k], r.buf[k:v:v]
-		off = v
+		kl, n := off+len(k), len(r.buf)
+		r.KVs = append(r.KVs, KV{Key: r.buf[off:kl:kl], Value: r.buf[kl:n:n]})
 	}
 	return nil
 }
