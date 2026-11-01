@@ -189,9 +189,6 @@ func (s *Shard) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	switch ev.Kind {
 	case core.EvNetRecv:
 		s.recv(ctx, ev, out)
-		if s.removed {
-			return
-		}
 	case core.EvPeerLost:
 		for _, p := range s.cfg.Peers {
 			if p.Node == ev.Peer {
@@ -200,8 +197,9 @@ func (s *Shard) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 			}
 		}
 	}
-	s.ready(ctx, out)
-	s.fortify(ctx, out)
+	if s.ready(ctx, out); !s.removed {
+		s.fortify(ctx, out)
+	}
 }
 
 // Propose appends data to the group's log if this replica leads, and returns raft.ErrProposalDropped otherwise.
@@ -437,7 +435,7 @@ func (s *Shard) ready(ctx *core.Context, out *Output) {
 	if s.round == 0 {
 		s.reconcile(ctx.Now)
 	}
-	for s.round == 0 && s.rn.HasReady() {
+	for s.round == 0 && !s.removed && s.rn.HasReady() {
 		rd := s.rn.Ready()
 		if rd.SoftState != nil && rd.SoftState.RaftState == raft.StateLeader {
 			s.fortifyAt = 0
@@ -457,8 +455,12 @@ func (s *Shard) ready(ctx *core.Context, out *Output) {
 	}
 }
 
+// done writes a Ready to storage, sends its messages, applies its configuration changes and hands
+// over its committed entries; a replica whose own log takes it out of the configuration reports
+// itself removed.
 func (s *Shard) done(ctx *core.Context, rd *raft.Ready, p part, out *Output) {
 	st := s.cfg.Storage
+	in := member(&s.conf, s.cfg.ID)
 	if !raft.IsEmptySnap(rd.Snapshot) {
 		if err := st.ApplySnapshot(rd.Snapshot); err != nil {
 			panic(err)
@@ -488,6 +490,9 @@ func (s *Shard) done(ctx *core.Context, rd *raft.Ready, p part, out *Output) {
 	}
 	out.Reads = append(out.Reads, rd.ReadStates...)
 	s.rn.Advance(*rd)
+	if in && !member(&s.conf, s.cfg.ID) {
+		s.removed, out.Removed = true, true
+	}
 }
 
 // part is which of a Ready's messages a send covers: all of them, those that leave with the round's write, or those held for its flush.
@@ -562,7 +567,8 @@ func member(cs *raftpb.ConfState, id uint64) bool {
 }
 
 // reconcile has a leader that applied an entry of its term, with no configuration change in flight
-// and none joint, propose the next change toward its plan. A learner counts as caught up once it
+// and none joint, propose the next change toward its plan; a leader the plan drops hands its
+// leadership to a planned voter instead, since it never removes itself. A learner counts as caught up once it
 // holds every entry committed by mark, the commit index of at most a heartbeat ago: one held to
 // the current commit index never catches up under steady writes over a slower link.
 func (s *Shard) reconcile(now core.Tick) {
@@ -576,17 +582,27 @@ func (s *Shard) reconcile(now core.Tick) {
 	if s.confTerm != 0 || st.RaftState != raft.StateLeader || s.committed != st.Term || len(s.conf.VotersOutgoing) != 0 {
 		return
 	}
+	if !s.planned(s.cfg.ID) {
+		if i := slices.IndexFunc(s.conf.Voters, s.planned); i >= 0 {
+			s.rn.TransferLeader(s.conf.Voters[i])
+		}
+		return
+	}
 	if cc, ok := s.change(s.mark); ok && s.rn.ProposeConfChange(cc) == nil {
 		s.confTerm = st.Term
 	}
 }
 
+func (s *Shard) planned(id uint64) bool {
+	return slices.ContainsFunc(s.plan, func(p Peer) bool { return p.ID == id })
+}
+
 // change is the next configuration change toward the plan: remove a learner the plan dropped; add
 // a planned replica the configuration lacks as a learner; swap a learner holding every entry up
 // to commit for a voter the plan dropped, or promote it if none; remove a voter the plan
-// dropped once every planned replica votes. The leader never removes itself.
+// dropped once every planned replica votes.
 func (s *Shard) change(commit uint64) (raftpb.ConfChangeV2, bool) {
-	planned := func(id uint64) bool { return slices.ContainsFunc(s.plan, func(p Peer) bool { return p.ID == id }) }
+	planned := s.planned
 	one := func(t raftpb.ConfChangeType, id uint64) raftpb.ConfChangeV2 {
 		return raftpb.ConfChangeV2{Changes: []raftpb.ConfChangeSingle{{Type: t, NodeID: id}}}
 	}
@@ -606,7 +622,7 @@ func (s *Shard) change(commit uint64) (raftpb.ConfChangeV2, bool) {
 			return cc, true
 		}
 	}
-	dropped := slices.IndexFunc(s.conf.Voters, func(id uint64) bool { return id != s.cfg.ID && !planned(id) })
+	dropped := slices.IndexFunc(s.conf.Voters, func(id uint64) bool { return !planned(id) })
 	var ready uint64
 	s.rn.WithProgress(func(id uint64, _ raft.ProgressType, pr tracker.Progress) {
 		if ready == 0 && pr.IsLearner && (pr.Match >= commit || s.plant.eager) {

@@ -268,3 +268,27 @@ func TestARemovalNoticeFromALaggingPeerIsIgnored(t *testing.T) {
 		}
 	}
 }
+
+// A leader the plan drops hands its leadership to a planned voter, which then carries out the replacement.
+func TestALeaderThePlanDropsTransfersLeadership(t *testing.T) {
+	n := newReplaceNet(t, plants{})
+	plan := []Peer{{ID: 2, Node: core.NodeID{Node: 1}}, {ID: 3, Node: core.NodeID{Node: 2}}, {ID: 4, Node: core.NodeID{Node: 3}}}
+	for _, r := range n.r {
+		r.s.SetPlan(plan)
+	}
+	n.propose(rA, []byte("a"))
+	n.settleWithout(rD)
+	if st := n.r[rA].s.rn.BasicStatus(); st.RaftState == raft.StateLeader {
+		t.Fatal("A still leads under a plan without it")
+	}
+	n.snapshot(rB)
+	n.snapshot(rC)
+	for range 5 {
+		n.heartbeat(rA)
+	}
+	for _, i := range []int{rB, rC, rD} {
+		if c := n.conf(i); !slices.Equal(sorted(c.Voters), []uint64{2, 3, 4}) || len(c.VotersOutgoing) != 0 {
+			t.Fatalf("replica %d ends in %+v", i, c)
+		}
+	}
+}

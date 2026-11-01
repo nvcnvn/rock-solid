@@ -22,17 +22,18 @@ const (
 )
 
 // replacement is one voter replacement in a simulated run: from cutAt, once one of the first three
-// nodes leads, a follower among them is cut off from every other node, planDelay later the shard map's plan names the fourth
-// node's replica in its place, and a second after a replica applies the configuration without it,
-// it is reconnected and must learn that it was removed.
+// nodes leads, a follower among them is cut off from every other node, planDelay later the shard
+// map's plan names the fourth node's replica in its place, and the cut-off replica is reconnected,
+// in half the runs up to a second after the plan, mid-swap, and otherwise a second after a replica
+// applies the configuration without it; either way it must learn that it was removed.
 type replacement struct {
-	crash, pauseD    bool
-	cutAt, planDelay core.Tick
-	dead             int
-	planAt           core.Tick
-	plan             []Peer
-	swappedAt        core.Tick
-	healed           bool
+	crash, pauseD, early        bool
+	cutAt, planDelay, healDelay core.Tick
+	dead                        int
+	planAt                      core.Tick
+	plan                        []Peer
+	swappedAt                   core.Tick
+	healed                      bool
 	// removed is whether the cut-off replica reported itself removed, sinceSwap the first value
 	// proposed after the swap, and caughtUp whether the fourth replica applied one from then on.
 	removed   bool
@@ -76,7 +77,8 @@ func faults() sim.Settings {
 func newReplaceCluster(seed uint64, p plants, set sim.Settings, crash, pauseD bool) *simCluster {
 	rng := core.NewRand(seed ^ 0x7e91ace)
 	return newCluster(seed, p, set, &replacement{crash: crash, pauseD: pauseD, dead: -1,
-		cutAt: 2_000_000 + core.Tick(rng.Below(2_000_001)), planDelay: core.Tick(rng.Below(2_000_001))})
+		cutAt: 2_000_000 + core.Tick(rng.Below(2_000_001)), planDelay: core.Tick(rng.Below(2_000_001)),
+		early: rng.Chance(1, 2), healDelay: core.Tick(rng.Below(1_000_001))})
 }
 
 // replace moves the replacement on after a step: cut a follower off, hand every replica the plan, reconnect the removed one.
@@ -106,7 +108,7 @@ func (c *simCluster) replace() {
 		if nd := c.s.Node(simNodes); p.pauseD && nd.Up() && !nd.Paused() {
 			c.s.Pause(simNodes, clock.Suspend, 2_000_000, false)
 		}
-	case p.swappedAt != 0 && !p.healed && now >= p.swappedAt+1_000_000:
+	case !p.healed && (p.early && p.plan != nil && now >= p.planAt+p.healDelay || p.swappedAt != 0 && now >= p.swappedAt+1_000_000):
 		p.healed = true
 		for x := range uint32(len(c.reps)) {
 			c.s.Heal(uint32(p.dead), x)
