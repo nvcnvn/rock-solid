@@ -27,6 +27,7 @@ type replica struct {
 	ctx     core.Context
 	flush   uint64
 	applied []raftpb.Entry
+	reads   []raft.ReadState
 	// forts are the fortification messages the replica sent in the last call.
 	forts []fortify
 }
@@ -154,6 +155,7 @@ func (n *testNet) call(i int, f func(ctx *core.Context, out *Output)) []raftpb.M
 	f(&r.ctx, &r.out)
 	if !n.lean {
 		r.applied = append(r.applied, r.out.Committed...)
+		r.reads = append(r.reads, r.out.Reads...)
 	}
 	if r.out.Flush != 0 {
 		if r.flush != 0 {

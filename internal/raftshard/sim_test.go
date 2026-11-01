@@ -74,6 +74,7 @@ func newSimCluster(seed uint64, p plants) *simCluster {
 	set.DropNum, set.DropDen = 1, 100
 	set.DupNum, set.DupDen = 1, 50
 	set.PartitionNum, set.PartitionDen = 1, 3000
+	set.ClockNum, set.ClockDen = 1, 2000
 	set.MsgType = simMsgType
 	c := &simCluster{s: sim.New(seed, set), rng: core.NewRand(seed), plant: p, next: 1, leaders: map[uint64]int{}}
 	c.inv.Register("driver contract", c.s.DriverContract)
@@ -138,8 +139,13 @@ func (c *simCluster) run(t *testing.T, seed uint64) *simCluster {
 // Resumed reports and whose lost heartbeats leave a holder serving on an old lease, an open question.
 var pauseStops = []clock.Stop{clock.Suspend, clock.PauseCounted, clock.Restore, clock.HeldMigration}
 
-// pause stands a running node still, one step in 20,000, for up to 5 s, the messages sent to it queued or lost.
+// pause stands a running node still, one step in 20,000, for up to 5 s, the messages sent to it
+// queued or lost, and one step in 2,000 holds one direction of a link for up to 50 ms more.
 func (c *simCluster) pause() {
+	if c.rng.Chance(1, 2000) {
+		from := uint32(c.rng.Below(simNodes))
+		c.s.Queue(from, (from+1+uint32(c.rng.Below(simNodes-1)))%simNodes, core.Tick(c.rng.Below(50_001)))
+	}
 	if !c.rng.Chance(1, 20000) {
 		return
 	}
