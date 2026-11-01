@@ -154,3 +154,29 @@ func TestADiskOffTheMetadataNodesTakesNoVoter(t *testing.T) {
 		t.Fatalf("voters on nodes %v", voterNodes(&m.Groups[0]))
 	}
 }
+
+// A disk that went down and then reported its log from another node takes its voter there; the
+// voter is placed again under a new ID, so no node ends up with two voters of the group.
+func TestAVoterWhoseDiskMovedNodesIsPlacedAgain(t *testing.T) {
+	r, nodes := cluster(t, 4)
+	m := ShardMap{Groups: []Group{{ID: 0}}}
+	m = PlaceVoters(&m, nodes[:3], r.Disks(), 0)
+	moved := m.Groups[0].Voters[0]
+	r.Down(moved.Disk, 0)
+	if _, err := r.Report(m.Groups[0].Voters[1].Node, 9, r.Disks()[moved.Disk-1].Log); err != nil {
+		t.Fatal(err)
+	}
+	m = PlaceVoters(&m, nodes, r.Disks(), 1)
+	g := m.Groups[0]
+	if g.Voters[0].ID != 4 || g.LastID != 4 {
+		t.Fatalf("voters %+v: want the moved voter placed again as replica 4", g.Voters)
+	}
+	seen := map[uint32]bool{}
+	for _, v := range g.Voters {
+		node := r.Disks()[v.Disk-1].Node
+		if seen[node] {
+			t.Fatalf("two voters on node %d: %+v", node, g.Voters)
+		}
+		seen[node] = true
+	}
+}

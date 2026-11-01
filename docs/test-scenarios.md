@@ -5631,6 +5631,7 @@ a snapshot taken at the leader's applied index in for the point-in-time view the
 | Only three metadata nodes, C's node down for an hour | Nothing replaced; the group runs on A and B |
 | C's disk reports a new log ID, three nodes | C replaced at once, on another disk of its node: the new disk, which holds no voter, or the other disk on a tie |
 | D, planned in place of C, down for 10 minutes before its swap | D replaced by replica ID 5 on a fifth node, the same rule |
+| A voter's disk, down, reports its log from the node of another voter of the group | The voter placed again as replica ID 4; no node holds two voters, counted by where each disk now reports from |
 | A node outside the metadata nodes | Takes no voter |
 | The control-plane group | Placed and replaced by the same function, as one more group of the map |
 

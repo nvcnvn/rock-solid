@@ -30,10 +30,10 @@ type ShardMap struct {
 	Groups []Group
 }
 
-// PlaceVoters returns the shard map after m: a voter whose disk's log is gone, or whose disk has
-// been down for refill_after, replaced, and each group filled to Voters, one voter per node in
-// nodes, each new one under a new replica ID on the up disk with the fewest voters of any group.
-// A voter with nowhere to go stays, so its group runs without it.
+// PlaceVoters returns the shard map after m: a voter whose disk's log is gone, whose disk has
+// been down for refill_after, or whose disk now reports from another node, replaced, and each
+// group filled to Voters, one voter per node in nodes, each new one under a new replica ID on the
+// up disk with the fewest voters of any group. A voter with nowhere to go stays.
 func PlaceVoters(m *ShardMap, nodes []uint32, disks []chunkstore.RecordedDisk, now core.Tick) ShardMap {
 	load := make([]int, len(disks))
 	next := ShardMap{Groups: make([]Group, len(m.Groups))}
@@ -50,7 +50,7 @@ func PlaceVoters(m *ShardMap, nodes []uint32, disks []chunkstore.RecordedDisk, n
 		g := &next.Groups[gi]
 		for i, v := range g.Voters {
 			k := find(disks, v.Disk)
-			if k < 0 || !replaced(&disks[k], now) {
+			if k < 0 || !replaced(&v, &disks[k], now) {
 				continue
 			}
 			if c := best(g, i, nodes, disks, load); c >= 0 {
@@ -69,9 +69,11 @@ func PlaceVoters(m *ShardMap, nodes []uint32, disks []chunkstore.RecordedDisk, n
 	return next
 }
 
-// replaced reports whether a voter on d is replaced at now: d's log is gone, or d has been down for refill_after.
-func replaced(d *chunkstore.RecordedDisk, now core.Tick) bool {
-	return d.Gone || !d.Up && now-min(d.DownSince, now) >= chunkstore.RefillAfter
+// replaced reports whether voter v on disk d is replaced at now: d's log is gone, d has been down
+// for refill_after, or d now reports from another node than v was placed on, which would put two
+// voters of a group on one node.
+func replaced(v *Replica, d *chunkstore.RecordedDisk, now core.Tick) bool {
+	return d.Gone || d.Node != v.Node || !d.Up && now-min(d.DownSince, now) >= chunkstore.RefillAfter
 }
 
 // best is the index in disks of the up disk with the fewest voters, the lower ID on a tie, on a
@@ -80,7 +82,7 @@ func best(g *Group, skip int, nodes []uint32, disks []chunkstore.RecordedDisk, l
 	c := -1
 	for k := range disks {
 		d := &disks[k]
-		if !d.Up || !slices.Contains(nodes, d.Node) || holds(g, skip, d.Node) {
+		if !d.Up || !slices.Contains(nodes, d.Node) || holds(g, skip, d.Node, disks) {
 			continue
 		}
 		if c < 0 || load[k] < load[c] || load[k] == load[c] && d.ID < disks[c].ID {
@@ -90,10 +92,14 @@ func best(g *Group, skip int, nodes []uint32, disks []chunkstore.RecordedDisk, l
 	return c
 }
 
-// holds reports whether a voter of g other than the one at skip is on node.
-func holds(g *Group, skip int, node uint32) bool {
+// holds reports whether a voter of g other than the one at skip is on a disk that reports from node.
+func holds(g *Group, skip int, node uint32, disks []chunkstore.RecordedDisk) bool {
 	for i, v := range g.Voters {
-		if i != skip && v.Node == node {
+		on := v.Node
+		if k := find(disks, v.Disk); k >= 0 {
+			on = disks[k].Node
+		}
+		if i != skip && on == node {
 			return true
 		}
 	}
