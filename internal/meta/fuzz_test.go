@@ -26,7 +26,7 @@ func FuzzDecodeTxn(f *testing.F) {
 			t.Fatalf("decoded %+v encodes to %x, not %x", d, enc, data[:len(data)-len(rest)])
 		}
 		var r Result
-		s.Apply(&d, &r)
+		_ = s.Apply(&d, &r)
 	})
 }
 

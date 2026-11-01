@@ -33,7 +33,7 @@ func BenchmarkApplyCreate(b *testing.B) {
 		if _, err := decodeTxn(entries[i%len(entries)], &d); err != nil {
 			b.Fatal(err)
 		}
-		s.Apply(&d, &r)
+		_ = s.Apply(&d, &r)
 	}
 }
 

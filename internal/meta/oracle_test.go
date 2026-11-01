@@ -6,35 +6,34 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
-// model is the oracle a State is checked against: its keys as a map and its replay records as
-// results, each Txn evaluated as the design states it, with no tree and no encoding.
-type model struct {
-	kv   map[string]string
-	recs map[string]Result
-}
+// model is the oracle a State is checked against: its keys as a map, each Txn evaluated as the
+// design states it, with no tree. Replay records are kept in the map as their encoding, since a
+// client can overwrite one.
+type model map[string]string
 
-func newModel() *model { return &model{kv: map[string]string{}, recs: map[string]Result{}} }
-
-func (m *model) apply(t *Txn) Result {
-	if r, ok := m.recs[string(t.Replay)]; ok && t.Replay != nil {
-		return r
+func (m model) apply(t *Txn) (Result, error) {
+	if v, ok := m[string(t.Replay)]; ok && t.Replay != nil {
+		var r Result
+		if err := decodeRecord([]byte(v), &r); err != nil {
+			return Result{}, ErrMalformed
+		}
+		return r, nil
 	}
 	r, final := Result{FailedCheck: -1}, true
 	for i, op := range t.Ops {
 		if op.Kind != OpCheck && op.Kind != OpCheckEmpty {
 			continue
 		}
-		v, ok := m.kv[string(op.Key)]
+		v, ok := m[string(op.Key)]
 		pass := ok == !op.Absent && (!ok || v == string(op.Value))
 		if op.Kind == OpCheckEmpty {
 			pass, ok = true, false
-			for k := range m.kv {
+			for k := range m {
 				pass = pass && !(k >= string(op.Key) && k < string(op.End))
 			}
 		}
@@ -52,17 +51,13 @@ func (m *model) apply(t *Txn) Result {
 		}
 		switch k := string(op.Key); op.Kind {
 		case OpPut:
-			m.kv[k] = string(op.Value)
+			m[k] = string(op.Value)
 		case OpDelete:
-			delete(m.kv, k)
+			delete(m, k)
 		case OpDeleteRange:
-			for key := range m.kv {
-				if key >= k && key < string(op.End) {
-					delete(m.kv, key)
-				}
-			}
+			m.deleteRange(k, string(op.End))
 		case OpUpdate:
-			v := []byte(m.kv[k])
+			v := []byte(m[k])
 			for len(v) < int(op.Off)+8 {
 				v = append(v, 0)
 			}
@@ -72,34 +67,50 @@ func (m *model) apply(t *Txn) Result {
 				next = cur + op.N
 			case Bump:
 				next = max(op.N, cur+1)
+				if cur == 1<<64-1 {
+					next = cur
+				}
 			}
 			binary.BigEndian.PutUint64(v[op.Off:], next)
-			m.kv[k] = string(v)
+			m[k] = string(v)
 			r.Updated = append(r.Updated, next)
 		}
 	}
 	if t.Replay == nil {
-		return r
+		return r, nil
 	}
 	mount := string(t.Replay[:len(t.Replay)-8])
-	for k := range m.recs {
-		if strings.HasPrefix(k, mount) && len(k) == len(t.Replay) && binary.BigEndian.Uint64([]byte(k[len(mount):])) < t.Oldest {
-			delete(m.recs, k)
-		}
+	if t.Oldest > 0 {
+		m.deleteRange(mount, mount+string(be(t.Oldest)))
 	}
 	if final {
-		m.recs[string(t.Replay)] = Result{FailedCheck: r.FailedCheck, Updated: r.Updated}
+		m[string(t.Replay)] = string(appendRecord(nil, &r))
 	}
-	return r
+	return r, nil
+}
+
+func (m model) deleteRange(start, end string) {
+	for k := range m {
+		if k >= start && k < end {
+			delete(m, k)
+		}
+	}
 }
 
 // gen draws Txns over a few keys and values, so checks pass and fail, ranges cover keys and
 // Updates land on short values and on each other.
 type gen struct {
-	rng *rand.Rand
+	rng     *rand.Rand
+	replays bool
 }
 
-func (g gen) key() []byte   { return []byte{'k', byte('a' + g.rng.IntN(6))} }
+// key is one of six keys, or now and then a replay key, which a client can write too.
+func (g gen) key() []byte {
+	if g.replays && g.rng.IntN(8) == 0 {
+		return replayKey(byte(g.rng.IntN(3)), 1+g.rng.Uint64N(4))
+	}
+	return []byte{'k', byte('a' + g.rng.IntN(6))}
+}
 func (g gen) value() []byte { return []byte([]string{"", "x", "y", "xy", "xyzzyxyzzy"}[g.rng.IntN(5)]) }
 func (g gen) range_() ([]byte, []byte) {
 	a, b := g.key(), g.key()
@@ -144,30 +155,19 @@ func sameResult(got, want *Result, replayed bool) bool {
 	return got.FailedCheck == want.FailedCheck && (actual || replayed && got.Actual == nil) && slices.Equal(got.Updated, want.Updated)
 }
 
-// matches reports how s differs from m, comparing every key and decoding every replay record.
-func matches(s *State, m *model) error {
+// matches reports how s differs from m.
+func matches(s *State, m model) error {
 	var r ScanResult
 	if err := s.Scan(nil, nil, 1<<20, &r); err != nil {
 		return err
 	}
-	kv, recs := 0, 0
 	for _, e := range r.KVs {
-		if e.Key[0] == 'r' {
-			var got Result
-			want, ok := m.recs[string(e.Key)]
-			if err := decodeRecord(e.Value, &got); err != nil || !ok || !sameResult(&got, &want, true) {
-				return fmt.Errorf("record %x holds %+v (%v), the model %+v (%v)", e.Key, got, err, want, ok)
-			}
-			recs++
-			continue
-		}
-		if v, ok := m.kv[string(e.Key)]; !ok || v != string(e.Value) {
+		if v, ok := m[string(e.Key)]; !ok || v != string(e.Value) {
 			return fmt.Errorf("%q = %q, the model %q (%v)", e.Key, e.Value, v, ok)
 		}
-		kv++
 	}
-	if kv != len(m.kv) || recs != len(m.recs) {
-		return fmt.Errorf("%d keys and %d records, the model %d and %d", kv, recs, len(m.kv), len(m.recs))
+	if len(r.KVs) != len(m) {
+		return fmt.Errorf("%d keys, the model %d", len(r.KVs), len(m))
 	}
 	return nil
 }
@@ -175,8 +175,8 @@ func matches(s *State, m *model) error {
 // oracleRun applies random Txns, some under replay keys of a few mounts, to a State and to the
 // model, and compares each result and the whole state after each.
 func oracleRun(tb testing.TB, seed uint64) error {
-	g := gen{rng: rand.New(rand.NewPCG(seed, 0))}
-	s, m := newTestState(tb), newModel()
+	g := gen{rng: rand.New(rand.NewPCG(seed, 0)), replays: true}
+	s, m := newTestState(tb), model{}
 	next := [3]uint64{}
 	for i := range 300 {
 		t := g.txn()
@@ -188,10 +188,10 @@ func oracleRun(tb testing.TB, seed uint64) error {
 			t.Replay = replayKey(byte(mount), next[mount])
 			t.Oldest = next[mount] - g.rng.Uint64N(min(next[mount], 4))
 		}
-		want := m.apply(&t)
-		got := run(tb, s, t)
-		if !sameResult(&got, &want, false) {
-			return fmt.Errorf("txn %d %+v: got %+v, the model %+v", i, t, got, want)
+		want, wantErr := m.apply(&t)
+		got, err := apply(tb, s, t)
+		if err != wantErr || err == nil && !sameResult(&got, &want, false) {
+			return fmt.Errorf("txn %d %+v: got %+v (%v), the model %+v (%v)", i, t, got, err, want, wantErr)
 		}
 		if err := matches(s, m); err != nil {
 			return fmt.Errorf("after txn %d %+v: %w", i, t, err)

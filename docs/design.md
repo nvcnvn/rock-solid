@@ -569,7 +569,8 @@ type Txn struct {
 //   DeleteRange(start, end)              removes every key in [start, end)
 //   Update(key, off, Set|Add|Bump, n)    changes the 8-byte big-endian field at off; an absent key
 //                                        or short value reads as zeros; Add wraps; Bump stores
-//                                        max(n, field + 1), so the field always moves forward
+//                                        max(n, field + 1), so the field always moves forward,
+//                                        saturating at 2^64 - 1
 //   Check(key, value | absent, final)    the key holds exactly value, or is absent
 //   CheckEmpty(start, end, final)        no key in [start, end)
 

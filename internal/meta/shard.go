@@ -214,12 +214,13 @@ func (s *Shard) applyEntry(e *raftpb.Entry) {
 		if b, err = decodeTxn(b, &s.txn); err != nil {
 			break
 		}
-		r := &s.res
-		if mine {
-			r = &s.answer(s.sent[s.head]).Result
-			s.head++
+		if !mine {
+			_ = s.state.Apply(&s.txn, &s.res)
+			continue
 		}
-		s.state.Apply(&s.txn, r)
+		a := s.answer(s.sent[s.head])
+		s.head++
+		a.Err = s.state.Apply(&s.txn, &a.Result)
 	}
 	if mine {
 		s.settle(n, ErrMalformed)

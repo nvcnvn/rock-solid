@@ -19,8 +19,18 @@ func newTestState(t testing.TB) *State {
 	return s
 }
 
-// run checks t, round-trips it through its encoding as a log entry carries it, and applies it.
+// run applies t as apply does, failing on an error.
 func run(tb testing.TB, s *State, t Txn) Result {
+	tb.Helper()
+	r, err := apply(tb, s, t)
+	if err != nil {
+		tb.Fatalf("%+v: %v", t, err)
+	}
+	return r
+}
+
+// apply checks t, round-trips it through its encoding as a log entry carries it, and applies it.
+func apply(tb testing.TB, s *State, t Txn) (Result, error) {
 	tb.Helper()
 	if _, err := t.Check(); err != nil {
 		tb.Fatalf("%+v refused: %v", t, err)
@@ -30,8 +40,8 @@ func run(tb testing.TB, s *State, t Txn) Result {
 		tb.Fatalf("%+v does not decode back: %v, %d bytes left", t, err, len(rest))
 	}
 	var r Result
-	s.Apply(&d, &r)
-	return r
+	err := s.Apply(&d, &r)
+	return r, err
 }
 
 func ops(o ...Op) Txn { return Txn{Ops: o} }
@@ -109,6 +119,10 @@ func TestUpdatesComposeAndMoveForward(t *testing.T) {
 	set(s, "m", string(be(20)))
 	if r := run(t, s, ops(Update(b("m"), 0, Bump, 10))); r.Updated[0] != 21 {
 		t.Fatalf("Bump 10 over 20 stored %d, want 21", r.Updated[0])
+	}
+	set(s, "top", string(be(1<<64-1)))
+	if r := run(t, s, ops(Update(b("top"), 0, Bump, 5))); r.Updated[0] != 1<<64-1 {
+		t.Fatalf("Bump 5 over 2^64-1 stored %d, want it to stay", r.Updated[0])
 	}
 	set(s, "w", string(be(1<<64-1)))
 	if r := run(t, s, ops(Update(b("w"), 0, Add, 1))); r.Updated[0] != 0 {
@@ -405,5 +419,22 @@ func TestReplayRecords(t *testing.T) {
 	run(t, s, ops(DeleteRange(b("r"), PrefixEnd(b("r")))))
 	if r := run(t, s, mkdir); r.FailedCheck != 0 {
 		t.Fatal("a resend after its record was dropped did not run again")
+	}
+}
+
+// A client can write any key, a replay key included; a Txn whose replay key holds no record
+// answers ErrMalformed and changes nothing, where a panic would take down every replica and
+// every replay of the log after it.
+func TestAReplayKeyHoldingNoRecordIsMalformed(t *testing.T) {
+	s := newTestState(t)
+	k := replayKey(1, 9)
+	run(t, s, ops(Put(k, b("\xff\xff"))))
+	tx := Txn{Ops: []Op{Put(b("a"), b("1"))}, Replay: k}
+	var r Result
+	if err := s.Apply(&tx, &r); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a replay key holding no record: %v", err)
+	}
+	if _, ok := get(s, "a"); ok {
+		t.Fatal("a Txn whose record does not decode applied")
 	}
 }

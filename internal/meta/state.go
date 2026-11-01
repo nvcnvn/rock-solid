@@ -47,17 +47,15 @@ func (s *State) Tree() *lsm.Tree { return s.tree }
 // Applied is the index of the last entry applied.
 func (s *State) Applied() uint64 { return s.applied }
 
-// Apply evaluates t, which passed Check: if its replay record exists, r is the stored result and
-// nothing changes; otherwise every check against the state before t, then, if all pass, every
-// write in list order, and the mount's records below Oldest dropped and the result stored under
-// the replay key when it is final. r's slices are reused, and valid until its next use.
-func (s *State) Apply(t *Txn, r *Result) {
+// Apply evaluates t, which passed Check, into r, whose slices it reuses; ErrMalformed when t's replay key holds no record.
+func (s *State) Apply(t *Txn, r *Result) error {
+	// A replay record found answers the request and nothing changes. Otherwise every check runs
+	// against the state before t, then, if all pass, every write in list order; the mount's
+	// records below Oldest are dropped, and the result is stored under the replay key when final.
+	// A client can write any key, so a replay key may hold a value that is no record.
 	if t.Replay != nil && !s.plant.replayIgnored {
 		if v, ok := s.tree.Get(t.Replay); ok {
-			if err := decodeRecord(v, r); err != nil {
-				panic(fmt.Sprintf("meta: replay record %x does not decode: %v", t.Replay, err))
-			}
-			return
+			return decodeRecord(v, r)
 		}
 	}
 	r.FailedCheck, r.Actual, r.Updated = -1, nil, r.Updated[:0]
@@ -74,7 +72,7 @@ func (s *State) Apply(t *Txn, r *Result) {
 		}
 	}
 	if t.Replay == nil {
-		return
+		return nil
 	}
 	if t.Oldest > 0 {
 		end := binary.BigEndian.AppendUint64(append(s.rec[:0], t.Replay[:len(t.Replay)-requestBytes]...), t.Oldest)
@@ -85,6 +83,7 @@ func (s *State) Apply(t *Txn, r *Result) {
 		s.rec = appendRecord(s.rec[:0], r)
 		must(s.tree.Put(t.Replay, s.rec))
 	}
+	return nil
 }
 
 // check evaluates a Check or CheckEmpty, and on a failed Check sets r's Actual to the key's value.
@@ -130,6 +129,9 @@ func (s *State) write(op *Op, r *Result) {
 			next = cur + op.N
 		case Bump:
 			next = max(op.N, cur+1)
+			if cur == 1<<64-1 {
+				next = cur
+			}
 		}
 		binary.BigEndian.PutUint64(field, next)
 		r.Updated = append(r.Updated, next)

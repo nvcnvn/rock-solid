@@ -62,7 +62,7 @@ const (
 // Mode is how an Update changes its field.
 type Mode uint8
 
-// Update modes: Set stores n, Add adds it with wraparound, Bump stores max(n, field + 1).
+// Update modes: Set stores n, Add adds it with wraparound, Bump stores max(n, field + 1), saturating.
 const (
 	Set Mode = iota + 1
 	Add
