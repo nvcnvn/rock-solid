@@ -2859,8 +2859,9 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
   runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
   they take.
-- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 59,400 seeds in 811 s,
-  building the test binaries included. On 4 processes the largest process peaked at 528 MiB
+- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 63,400 seeds in about
+  845 s, building the test binaries included (the two voter-replacement tests timed alone and
+  added). On 4 processes the largest process peaked at 528 MiB
   resident (an `internal/lsm` metamorphic shard), all four at 1.9 GiB:
 
   | Test | Seeds | Time |
@@ -2869,6 +2870,8 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 3 s |
   | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 4 s |
   | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 15 s |
+  | `internal/raftshard` `TestVoterReplacementRunsReplayFromTheirSeed` | 2,000 | 25 s |
+  | `internal/raftshard` `TestAReplacementNeverStallsProposals` | 2,000 | 9 s |
   | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 28 s |
   | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 6 s |
   | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 76 s |
@@ -5584,14 +5587,22 @@ one direction of a link held up to 50 ms. After every step it checks:
   pass ends able to serve a lease read, no other running, unpaused replica could, at its own
   clocks, unless its next pass would first see `Resumed`.
 - [property] "a lease read sees every applied entry": a replica able to serve a lease read has
-  applied every index any replica applied.
+  applied every index any replica applied while it led, which covers every write a client was
+  told of, since only a leader acknowledges an entry, on applying it. A follower's applies do not
+  count: the leader's commit index goes out with its next round's appends, while the leader applies
+  what that round's `Ready` commits only once the round is durable, so a follower can apply an
+  entry first. A leader that serves lease reads before an entry of its term commits breaks it at
+  seeds 5 and 159 (`TestLeaseReadsBeforeAnEntryOfTheTermCommitsBreakTheInvariant`); most new
+  leaders apply in time, so the default 20 seeds miss it.
 
 A shard whose followers vote and campaign while they support a leader breaks the second within 20
 seeds (`TestFollowersVotingWhileSupportingBreakTheLeaseInvariant`), and across the 20 `go test`
 seeds some pass can serve a lease read, so the checks are not vacuous.
 
 The leader transfer and configuration change of the MetaStore faults are covered by the trace tests
-above; the simulator gets them with leader balancing and [Voter replacement](#voter-replacement).
+above; the simulator gets configuration changes from [Voter replacement](#voter-replacement)'s runs,
+which check these three properties through the joint configuration, and transfers with leader
+balancing.
 
 **Simulator faults** (MetaStore), with the invariant "no two replicas of a shard serve lease reads at overlapping times":
 
@@ -5603,30 +5614,86 @@ above; the simulator gets them with leader balancing and [Voter replacement](#vo
 
 ## Voter replacement
 
-Trace tests on one group of three voters A, B and C, with the control-plane leader's shard map as
-input, and simulator seeds for the whole cluster. `refill_after` 10 minutes.
+Placement is a pure function, `meta.PlaceVoters`, over the shard map, the metadata nodes and
+phase 3's `DiskRecord`, tested by table (`internal/meta`, `placement_test.go`); the Control-plane
+group commits its result under `ctl/` and hands each group's leader its entry. The swap is the Raft
+shard's: trace tests (`internal/raftshard`, `replace_test.go`) run voters A, B and C (replica IDs
+1 to 3) and D, a fresh replica with empty storage on a fourth node, on the
+[Raft shard](#raft-shard)'s hand-driven network, hand the leader the plan with `SetPlan`, and stand
+a snapshot taken at the leader's applied index in for the point-in-time view the
+[disk log](#raft-storage-in-the-disk-log) will give on demand. `refill_after` is 10 minutes.
+
+**Placement**
+
+| Disks and plan | Expected |
+| --- | --- |
+| Four new groups on three metadata nodes of two disks each | Each group gets replica IDs 1 to 3, one per node; every disk holds two voters |
+| C's node down for 9 minutes 59 s, a fourth metadata node up | No change |
+| C's node down for 10 minutes | C replaced by replica ID 4 on the fourth node's least-loaded disk; A and B unchanged |
+| Only three metadata nodes, C's node down for an hour | Nothing replaced; the group runs on A and B |
+| C's disk reports a new log ID, three nodes | C replaced at once, on another disk of its node: the new disk, which holds no voter, or the other disk on a tie |
+| D, planned in place of C, down for 10 minutes before its swap | D replaced by replica ID 5 on a fifth node, the same rule |
+| A voter's disk, down, reports its log from the node of another voter of the group | The voter placed again as replica ID 4; no node holds two voters, counted by where each disk now reports from |
+| Twelve groups on four nodes; disk 1, down, reports its log from the fourth node, which holds no voter of some groups | Each of its voters placed again on another disk, never disk 1, though disk 1 ties for the fewest voters there |
+| A node outside the metadata nodes | Takes no voter |
+| The control-plane group | No test of its own: placement and the shard treat it as one more group of the map, with nothing special-cased |
+
+**Swap**
 
 | Events | Expected |
 | --- | --- |
-| C's node down for 9 minutes 59 s | No configuration change; the group commits on A and B |
-| C's node down for 10 minutes, a fourth metadata node D up | The shard map names D in place of C; the leader adds D as a learner. No proposal waits on D while it catches up |
-| D caught up | One `ConfChangeV2`: remove C, promote D. It commits on A and B through the joint configuration and leaves it on its own |
-| D's log compacted past the learner's position | D receives a snapshot from a point-in-time view, then the log |
-| C's disk reports a new log ID | C replaced at once, without waiting for `refill_after` |
-| C returns after the swap | It finds itself removed, deletes its replica's state, and campaigns in no election |
-| B crashes while D is still a learner | The group, on A alone, commits nothing until B or C returns; it never promotes D to make a quorum |
-| Only three metadata nodes, C down for an hour | Nothing replaced; the group runs on A and B |
-| The control-plane group loses a voter for 10 minutes | Its own leader replaces it the same way |
+| The plan names the voters the group has, C cut off | No configuration change; A and B commit |
+| The plan names D in place of C, C and D cut off | A adds D as a learner, its node in the change's context. Five proposals commit on A and B with D hearing nothing, and D stays a learner |
+| Then the plan names A, B and C again | A removes D, the learner the plan dropped |
+| D reconnected | D's first append is refused, its log empty, so A sends a snapshot; D restores it (`Output.Snapshot`), then takes the log. One `ConfChangeV2`, remove 3 and add 4, commits on A and B, and A, B and D end in voters 1, 2, 4 out of the joint configuration |
+| B cut off once D was added, D caught up | Nothing commits on A and D, and D stays a learner, never promoted to make a quorum. Once B returns the swap commits |
+| The plan drops the leader A | A transfers leadership to B, which adds D and swaps it for A |
+| The plan drops A, B down, A holding a node-pair lease from C only | A transfers to C, never to B |
+| The plan drops A, B up, C up and leased to A but five proposals behind | A does not transfer to C |
+| The plan names three new replicas and none of the voters | The leader swaps new replicas in for the other two voters first, then transfers to one; the group ends on the three |
+| A, the leader, cut off while B leads, and the plan swaps D in for A | A still leads its old term; once reconnected, its messages draw the removal notice and A reports `Removed` |
+| A proposal every 10 ms, D's link one step slower than B's | D, trailing the current commit index for good, is swapped in; planted, a learner held to the current commit index never is |
+| A removal notice at any index to D before its addition | Ignored: a notice proves a removal only to a replica its own applied configuration holds |
+| C restarts after the swap | Within a second, inside its restart wait, C asks its peers whether it is a member; their answer at an applied index past its own makes C report `Removed`. It sends no pre-vote or vote, and nothing in 10 s after |
+| A removal notice at an index below the replica's applied index | Ignored: a peer that has not applied the change that added it says nothing of its removal |
+| B has committed D's addition, its commit index at D's applied index, but not applied it; D asks B, or sends B a Raft message | B answers at its applied index, which D ignores; an answer at its commit index would have D delete its state |
+| C started with Peers that lack the leader, as one restored from a snapshot; the leader sends to it | C learns the leader's node from the message, and its reply reaches it |
+| Planted: the learner promoted at once | D swapped in holding nothing (`TestAnEagerLeaderPromotesALearnerThatHoldsNothing`) |
+| Planted: D added as a voter | With C down, nothing commits while D hears nothing (`TestAReplacementAddedAsAVoterStallsProposals`) |
 
-[property] Across seeds, no learner is promoted before it has caught up with the leader's log, and a
-replacement never stalls proposals while two voters of the old configuration are up.
+The membership question and its answer are fortification-sized frames that `FuzzDecode` also feeds.
 
-- Open: what "caught up" means for promotion: the learner's match index equal to the leader's last
-  index, or within one round of it.
-- Open: whether a swap whose dead voter returns while the learner catches up goes on or is
-  dropped, with the learner removed.
-- Open: whether the control-plane leader moves the swap to another node when D fails as a learner,
-  and after how long.
+**Simulator runs.** `TestVoterReplacementRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000
+per commit in `scripts/seeds.sh` (25 s at `JOBS=2`), 10,000 once in 125 s, runs the
+[Raft shard](#raft-shard)'s faults, crash and lease frames on four nodes. From 2 to 4 s in, once
+one of the first three replicas leads, a follower among them, or in half the seeds the leader, is cut off
+from every other node, and up to 2 s later every replica gets the plan naming the fourth node's replica in its place. Every
+replica's storage takes a snapshot at its applied index after each pass and compacts all but 10
+entries below it, so the new replica, and any lagging voter, catches up from snapshots. The
+replaced replica is reconnected up to a second after the plan, mid-swap, in half the seeds, and a
+second after the swap in the rest. A seed passes once the replaced replica reported itself removed
+and the new one applied a value proposed after the swap, and replays to the same trace and
+history. After every step it checks the Raft runs' properties and:
+
+- [property] "no learner is promoted to voter before it has caught up with its leader's log": a
+  leader's round holding a `ConfChangeV2` that promotes a learner leaves only while the learner's
+  storage holds every entry the leader had committed a heartbeat earlier. Promoting at once breaks
+  it within 20 seeds (`TestPromotingALearnerBeforeItCaughtUpBreaksTheInvariant`).
+- "only a replica the group's configuration removed deletes its state": no replica but the
+  replaced one reports `Removed`.
+
+`TestVoterReplacementRegressionSeeds` keeps three seeds that found bugs: 6389, the lease property
+counting a follower's applies (above, under [Leader leases](#leader-leases)); 8218, a leader whose
+configuration change of an earlier term was lost and that proposed none again; and 1005, a dropped
+leader waiting for a follower to reach its own durable index, which steady writes never allow.
+
+[property] "a replacement never stalls proposals while two voters of the old configuration are
+up": `TestAReplacementNeverStallsProposals`, 20 seeds in `go test` and 2,000 per commit (9 s),
+runs the same replacement with no fault but the cut-off voter, and the new replica's node
+suspended for 2 s as the plan names it; between the plan and the swap the two running old voters
+never go 100 ms without a commit (12 ms at most over 20 seeds, a tick and a round). Adding the
+replacement as a voter instead stalls them past 100 ms within 20 seeds
+(`TestAddingTheReplacementAsAVoterStallsProposals`).
 
 ## Raft storage in the disk log
 
@@ -6006,6 +6073,7 @@ Simulator invariants checked after every step, with the faults that must exercis
 | Every write of a fenced lock holder that completes is ordered before every write of the next holder; no fenced session's write is applied; a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval while the leader holds its lease and has measured the client, `dead_wait` instead when it has not, or once an unreachable storage node is marked down | A fence that reaches some primaries late; a storage node partitioned during a fence |
 | On every disk of a pool, (1 + k) times the grants outstanding plus the flushes not yet in fill reports never exceed the disk's gap above the larger of its fill and `write_limit`, and no flush under a grant is refused for space | The pool reaching `write_limit` while daemons buffer and other nodes write through; grant heartbeats lost or delayed, requests and replies; a control-plane failover while daemons stream; a client partitioned from the control-plane leader but not from storage, streaming under its grant; a daemon crash in the middle of a reuse window; a refill moving members onto the fullest disks while grants are out |
 | A replayed request returns its first result and changes nothing | A daemon crash with requests read but unanswered, followed by their resend; an election while requests are in flight |
+| No learner is promoted to voter before it has caught up with its leader's log | Registered by [Voter replacement](#voter-replacement): a voter replaced while another is down, the replaced voter returning mid-swap, compacted logs, drops and partitions on the learner's links |
 | An internal `Txn` repeated after an election changes nothing it did not read | An election while the purger and the control-plane leader have transactions in flight; a truncate merging into a purge entry the purger is consuming |
 
 Each invariant is shown to fire: a planted bug for each must fail at least one seed. Open: the seed count; 20 is the suggestion, as the metamorphic planted bugs use. The bugs:
@@ -6025,6 +6093,7 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
 - a replay record ignored;
 - a check failure that is not final stored as the request's result;
 - a purger's `Delete` without its `Check`;
+- a learner promoted at once (planted by [Voter replacement](#voter-replacement));
 - the [Epoch change model](#epoch-change-model)'s two rows for property 2: no support-epoch bump on
   lapse (`neg-no-epoch-bump`), and a leader transfer that keeps the old leader's lease
   (`neg-transfer-keeps-lease`);

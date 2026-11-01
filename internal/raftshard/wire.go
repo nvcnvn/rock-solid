@@ -27,6 +27,10 @@ const (
 	kindFortify
 	// kindFortified is a follower's answer: the run and support epoch of its node's grant to the leader's node.
 	kindFortified
+	// kindMember is a replica that heard from no leader for an election timeout asking a peer whether it is still in the group.
+	kindMember
+	// kindRemoved answers a replica that its sender's applied configuration does not hold, with the sender's applied index in place of a term.
+	kindRemoved
 )
 
 var le = binary.LittleEndian
@@ -65,6 +69,19 @@ func encode(pool core.BufPool, group uint64, m *raftpb.Message, msg *core.Msg) b
 	return true
 }
 
+// encodeNode is a node's ID as a configuration change's context carries it.
+func encodeNode(n core.NodeID) []byte {
+	return le.AppendUint32(le.AppendUint32(nil, n.Node), n.Loop)
+}
+
+// decodeNode reads the node a configuration change's context names.
+func decodeNode(b []byte) (core.NodeID, bool) {
+	if len(b) != 8 {
+		return core.NodeID{}, false
+	}
+	return core.NodeID{Node: le.Uint32(b), Loop: le.Uint32(b[4:])}, true
+}
+
 func encodeFortify(group uint64, f *fortify, msg *core.Msg) {
 	b := msg.Body[:fortBytes]
 	le.PutUint64(b, group)
@@ -84,7 +101,7 @@ func decode(pool core.BufPool, msg *core.Msg, m *raftpb.Message, f *fortify) (ui
 	group, kind, body := le.Uint64(b), b[groupBytes], b[kindBytes:]
 	switch kind {
 	case kindRaft:
-	case kindFortify, kindFortified:
+	case kindFortify, kindFortified, kindMember, kindRemoved:
 		if msg.Buf != core.NoBuf || len(b) != fortBytes {
 			return 0, 0, errMalformed
 		}
