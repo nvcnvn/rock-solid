@@ -365,7 +365,9 @@ func TestRecoveryWritesPassWriteLimit(t *testing.T) {
 }
 
 // PG 4, led by disk 1 like PGs 9 and 12, misses two members and they one each: recovery's first
-// write is PG 4's, and PG 12, last among the equally degraded, starts only once PG 4's have.
+// write is PG 4's, and PG 12, last among the equally degraded, starts only once PG 4's have. PG 4
+// lacks maxRecoveries chunks, so its recoveries alone fill the first window whatever order their
+// reads complete in.
 func TestTheMostDegradedPGRecoversFirst(t *testing.T) {
 	tbl := rtable(16, 1)
 	pgs := []core.PGID{{Pool: testPool, Index: 4}, {Pool: testPool, Index: 9}, {Pool: testPool, Index: 12}}
@@ -384,8 +386,14 @@ func TestTheMostDegradedPGRecoversFirst(t *testing.T) {
 		mark(t, pgs[1], 3, MarkDown)
 		mark(t, pgs[2], 3, MarkDown)
 	}), true)
+	chunks := func(pg core.PGID) uint32 {
+		if pg == pgs[0] {
+			return maxRecoveries
+		}
+		return 2
+	}
 	for _, pg := range pgs {
-		for n := range uint32(2) {
+		for n := range chunks(pg) {
 			c.writeWhole(pg, chunkIn(pg, 16, n), 0, 1, byte(1+n))
 		}
 	}
@@ -418,7 +426,7 @@ func TestTheMostDegradedPGRecoversFirst(t *testing.T) {
 		t.Fatalf("recovered PGs in the order %v", order)
 	}
 	for _, pg := range pgs {
-		for n := range uint32(2) {
+		for n := range chunks(pg) {
 			if x := c.listed(2, chunkIn(pg, 16, n)); x.ListedIn != 0 {
 				t.Fatalf("disk 3 holds %+v of PG %d", x, pg.Index)
 			}

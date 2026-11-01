@@ -355,7 +355,7 @@ func (g *Grantor) Run() uint64 { return g.run }
 // Resumed takes the run ID the grantor draws after a pause, so no holder's rate bound spans it; grants and waits stand, since a clock that stopped only makes them longer.
 func (g *Grantor) Resumed(run uint64) { g.run = run }
 
-// Waiting reports whether the restart wait runs: either clock shows less than one lease since the start, during which the node grants nothing and joins no peering.
+// Waiting reports whether the restart wait runs: either clock shows less than one lease since the start, during which the node grants nothing, asks for no lease and joins no peering.
 func (g *Grantor) Waiting(t Time) bool {
 	return !g.plant.noRestartWait && (sub(t.Raw, g.start.Raw) < g.cfg.Lease || sub(t.Boot, g.start.Boot) < g.cfg.Lease)
 }

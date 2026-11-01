@@ -86,8 +86,8 @@ func TestASupportingFollowerDropsChallengersButPassesATransfer(t *testing.T) {
 }
 
 // A vote request from the supported leader itself, for a later term, shows that it no longer leads,
-// as after its node restarted in place and renewed the grant: the follower stops supporting it and
-// passes the request.
+// as after it stepped down while its node's grant held: the follower stops supporting it and passes
+// the request.
 func TestTheSupportedLeadersOwnCampaignEndsSupport(t *testing.T) {
 	n := newNet(t, 3, 1)
 	n.leases(0, 1, 2)

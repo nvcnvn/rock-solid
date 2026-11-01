@@ -97,7 +97,7 @@ func (r *Replica) resumed(ctx *core.Context, out *ReplicaOutput) {
 	r.armLease(ctx, out)
 }
 
-// leaseTick asks each grantor due a request and, once a heartbeat is due, heartbeats every holder whose grant runs; a stale firing does nothing.
+// leaseTick asks each grantor due a request, none during the restart wait, and, once a heartbeat is due, heartbeats every holder whose grant runs; a stale firing does nothing.
 func (r *Replica) leaseTick(ctx *core.Context, out *ReplicaOutput) {
 	if r.leaseAt == 0 || ctx.Now < r.leaseAt {
 		return
@@ -105,7 +105,7 @@ func (r *Replica) leaseTick(ctx *core.Context, out *ReplicaOutput) {
 	r.leaseAt = 0
 	t := lease.Now(ctx)
 	for _, g := range r.grantors {
-		if !r.holder.Due(g, t) {
+		if r.grantor.Waiting(t) || !r.holder.Due(g, t) {
 			continue
 		}
 		r.leaseID++
@@ -128,12 +128,16 @@ func (r *Replica) leaseTick(ctx *core.Context, out *ReplicaOutput) {
 	r.armLease(ctx, out)
 }
 
-// armLease arms LeaseTimer for the earliest of the grantors' next asks and the next heartbeat, unless it is armed sooner.
+// armLease arms LeaseTimer for the earliest of the grantors' next asks, no earlier than the end of the restart wait, and the next heartbeat, unless it is armed sooner.
 func (r *Replica) armLease(ctx *core.Context, out *ReplicaOutput) {
 	t := lease.Now(ctx)
 	at := r.beatAt
 	for _, g := range r.grantors {
-		if n := r.holder.Next(g, t); at == 0 || n < at {
+		n := r.holder.Next(g, t)
+		if r.grantor.Waiting(t) {
+			n = max(n, r.grantor.WaitEnd(t))
+		}
+		if at == 0 || n < at {
 			at = n
 		}
 	}

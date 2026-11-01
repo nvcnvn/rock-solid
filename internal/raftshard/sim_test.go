@@ -239,12 +239,12 @@ func (r *simReplica) lease(ctx *core.Context, ev *core.Event) bool {
 	return true
 }
 
-// leaseTick asks every peer due a request and heartbeats every holder whose grant runs once a heartbeat is due.
+// leaseTick asks every peer due a request, none during the restart wait, and heartbeats every holder whose grant runs once a heartbeat is due.
 func (r *simReplica) leaseTick(ctx *core.Context) {
 	t := lease.Now(ctx)
 	for id := range simNodes {
 		g := core.NodeID{Node: uint32(id)}
-		if id == r.id || !r.holder.Due(g, t) {
+		if id == r.id || r.grantor.Waiting(t) || !r.holder.Due(g, t) {
 			continue
 		}
 		r.leaseID++
