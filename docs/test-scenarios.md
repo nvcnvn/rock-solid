@@ -5441,8 +5441,9 @@ test's alone.
 Trace tests (`internal/raftshard`) feed events to three shards by hand, delivering their messages,
 completing their flushes and moving the clock, and assert on each shard's actions. The round's
 durable write is the seam the [disk log](#raft-storage-in-the-disk-log) fills: a call's output
-names the round to flush, the driver reports it with `Durable`, and only then does the shard write
-the round to its `raft.MemoryStorage`, which stands for the durable log until then.
+names the round to flush and carries its contents, the driver reports it with `Durable`, and only
+then does the shard write the round to its `Storage`, which these tests keep across a restart in
+place of replaying the disk log.
 
 **Configuration.** The shard builds its `raft.Config` with:
 
@@ -5709,6 +5710,7 @@ replacement as a voter instead stalls them past 100 ms within 20 seeds
 - **Replay.** After a crash, a shard restores from its manifest's runs and replays the log after its replay LSN. Later records win: an entry at index 5 of term 3 replaces the earlier record's index 5 of term 2, the earlier record's entries 6 and on of term 2 are dropped, and `LastIndex` after replay is 5. The latest hard state in LSN order wins. The crash oracle compares the recovered shard with its state at the last acknowledged LSN.
 - **Torn tail.** A torn record at the log's tail holding chunk writes and Raft entries together drops both (a simulation fault from the on-disk format list). No acknowledgment was sent for them, the leader resends, and no committed entry is lost.
 - **Lagging follower.** A follower behind the compaction index gets a `MsgSnap` built from a point-in-time view of the shard's LSM tree, which never blocks the writer, and catches up from it. A view held open holds back the cleaner (asserted in the LSM tree tests).
+- **Snapshot at the applied index.** A learner whose log is empty gets a snapshot built when the leader needs one, at its applied index, whose configuration holds the learner, and catches up from it. A snapshot kept from the last compaction, before the learner joined, is refused, and the learner never catches up (planted). While a configuration change applies, the snapshot is temporarily unavailable, since the applied index and configuration do not yet hold it. A snapshot sent whole in one message is reported finished a heartbeat later, so a leader whose log compacted past the snapshot probes the follower again rather than wait in `StateSnapshot`, and a follower that refused it gets at most one more a heartbeat.
 - **Asynchronous storage writes stay off** (asserted under Raft shard). The two guards that would allow them get their own scenarios when they are built: drop apply work that a restored snapshot covers, and never compact past the durable commit index ([async snapshot apply study](../studies/etcd-raft-async-snapshot-apply/README.md)).
 
 ## Raft cost per group
