@@ -161,9 +161,9 @@ func (s *Shard) Applied() (uint64, raftpb.ConfState) { return s.applied, s.conf 
 // snapshot is a snapshot at the applied index, whose configuration holds every replica that
 // joined by then: one kept from before a learner joined would not hold it, the learner would
 // refuse it, and the leader would wait in StateSnapshot until the connection failed. While a
-// configuration change applies, etcd-raft already sends to the replicas it adds but the applied
-// index and configuration do not yet hold it, so the snapshot is temporarily unavailable and the
-// leader asks again at the next heartbeat.
+// configuration change applies, etcd-raft probes every replica and sends a snapshot to one behind
+// the compaction, but the applied index and configuration do not yet hold the change, so the
+// snapshot is temporarily unavailable and the leader asks again at its next append.
 func (s *Shard) snapshot() (raftpb.Snapshot, error) {
 	if s.plant.staleSnapshot {
 		return raftpb.Snapshot{Metadata: s.cfg.Storage.Base()}, nil

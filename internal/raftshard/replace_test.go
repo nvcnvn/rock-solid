@@ -6,6 +6,7 @@ import (
 
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
+	"go.etcd.io/raft/v3/tracker"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
@@ -566,5 +567,36 @@ func TestALearnerCatchesUpFromASnapshotBuiltAtTheAppliedIndex(t *testing.T) {
 		if caughtUp := n.r[rD].snaps == 1 && n.committed(rD, "b"); caughtUp == stale {
 			t.Fatalf("snapshots kept from the last compaction %v: D restored %d snapshots and applied b: %v", stale, n.r[rD].snaps, n.committed(rD, "b"))
 		}
+	}
+}
+
+// A snapshot asked for while A applies D's addition is temporarily unavailable, since A's applied
+// index and configuration do not yet hold the change. C, cut off and behind A's compaction, is
+// probed as A applies it, as etcd-raft probes every replica once a configuration changes, and
+// gets a snapshot that holds D at A's next append.
+func TestASnapshotWaitsOutAConfigurationChangeAsItApplies(t *testing.T) {
+	n := newReplaceNet(t, plants{})
+	n.propose(rA, []byte("a"))
+	n.settleWithout(rC, rD)
+	n.snapshot(rA)
+	n.r[rA].s.SetPlan(replacing)
+	n.propose(rA, []byte("b"))
+	toB := func(e envelope) bool { return e.to == rB }
+	n.deliver(toB)
+	n.durable(rA)
+	n.deliver(toB)
+	n.propose(rA, []byte("c"))
+	n.durable(rB)
+	n.durable(rB)
+	n.deliver(func(e envelope) bool { return e.from == rB && e.to == rA })
+	n.event(rA, core.Event{Kind: core.EvPeerLost, Peer: core.NodeID{Node: rC}})
+	n.durable(rA)
+	if c := n.conf(rA); !slices.Equal(c.Learners, []uint64{4}) {
+		t.Fatalf("configuration %+v once A applied the change, want D a learner", c)
+	}
+	add, _ := n.r[rA].s.Applied()
+	n.propose(rA, []byte("d"))
+	if pr := n.r[rA].s.rn.Status().Progress[3]; pr.State != tracker.StateSnapshot || pr.PendingSnapshot < add {
+		t.Fatalf("C is in %v with snapshot %d pending, want one at or past D's addition at %d", pr.State, pr.PendingSnapshot, add)
 	}
 }
