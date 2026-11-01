@@ -112,12 +112,14 @@ func (s *Shard) Start(ctx *core.Context, out *Output) {
 func (s *Shard) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	s.out = out
 	s.raft.OnEvent(ctx, ev, &out.Raft)
+	s.dropIfRemoved()
 }
 
 // ReadIndex asks for a read's commit index, as raftshard.Shard.ReadIndex.
 func (s *Shard) ReadIndex(ctx *core.Context, rctx []byte, out *Output) {
 	s.out = out
 	s.raft.ReadIndex(ctx, rctx, &out.Raft)
+	s.dropIfRemoved()
 }
 
 // Durable reports the round in flight durable, as raftshard.Shard.Durable, after proposing the
@@ -128,6 +130,7 @@ func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
 		s.propose(ctx)
 	}
 	s.raft.Durable(ctx, round, &out.Raft)
+	s.dropIfRemoved()
 }
 
 // Txn takes t, which an Answer under token settles, if this replica leads: proposed at once
@@ -154,7 +157,22 @@ func (s *Shard) Txn(ctx *core.Context, t *Txn, token uint64, out *Output) error 
 	if !s.raft.Flushing() {
 		s.propose(ctx)
 	}
+	s.dropIfRemoved()
 	return nil
+}
+
+// dropIfRemoved answers every Txn waiting or gathered dropped once the replica learns it left its group, as it does nothing more.
+func (s *Shard) dropIfRemoved() {
+	if !s.out.Raft.Removed {
+		return
+	}
+	for len(s.waits) > 0 {
+		s.settle(0, raft.ErrProposalDropped)
+	}
+	for _, token := range s.queued {
+		s.answer(token).Err = raft.ErrProposalDropped
+	}
+	s.batch, s.queued = nil, s.queued[:0]
 }
 
 // Scan reads [start, end) from the replica's applied state, as State.Scan; whether a replica may serve it is its caller's to decide.

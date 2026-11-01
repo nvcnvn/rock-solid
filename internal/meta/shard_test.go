@@ -2,6 +2,7 @@ package meta
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
@@ -539,4 +540,36 @@ func TestWaitingTxnsAreAnsweredDroppedAtASnapshotRestore(t *testing.T) {
 		t.Fatalf("the deposed leader answered its waiting Txn %+v", a)
 	}
 	c.agree()
+}
+
+// A replica told it was removed from its group does nothing more, so it answers every Txn it
+// still waits for or gathered dropped at once.
+func TestARemovedReplicaAnswersItsTxnsDropped(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	c.cut[l] = true
+	c.txn(l, ops(Put(b("a"), b("1"))), 1)
+	c.txn(l, ops(Put(b("b"), b("1"))), 2)
+	// raftshard's answer to a replica its sender's applied configuration does not hold: the
+	// group, kind 4, then from, to, the sender's applied index, and two unused words.
+	body := binary.LittleEndian.AppendUint64(nil, 5)
+	body = append(body, 4)
+	for _, v := range []uint64{uint64((l+1)%3) + 1, uint64(l) + 1, 1 << 40, 0, 0} {
+		body = binary.LittleEndian.AppendUint64(body, v)
+	}
+	var msg core.Msg
+	if err := msg.SetInline(body); err != nil {
+		t.Fatal(err)
+	}
+	c.call(l, func(ctx *core.Context, out *Output) {
+		c.n[l].s.OnEvent(ctx, &core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: uint32((l + 1) % 3)}, Msg: msg}, out)
+		if !out.Raft.Removed {
+			t.Fatal("the replica did not learn it was removed")
+		}
+	})
+	for _, token := range []uint64{1, 2} {
+		if a := c.answer(l, token); !errors.Is(a.Err, raft.ErrProposalDropped) {
+			t.Fatalf("token %d answered %+v", token, a)
+		}
+	}
 }
