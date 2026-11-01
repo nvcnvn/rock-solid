@@ -1,9 +1,13 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"testing"
+
+	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/raftpb"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
@@ -142,5 +146,22 @@ func TestOrphanedWrite(t *testing.T) {
 		if b, ok := c.replies[m]; ok {
 			t.Fatalf("request %d to the old leader was answered: %+v", m, b)
 		}
+	}
+}
+
+func TestAReadWaitsUntilItsIndexApplies(t *testing.T) {
+	n := newNode(false)
+	n.id, n.applied = "n0", 1
+	n.kv["1"] = json.RawMessage("7")
+	n.reads[5] = &read{client: client{src: "c1", msgID: 9, key: json.RawMessage("1")}}
+	n.out.Reads = append(n.out.Reads, raft.ReadState{Index: 2, RequestCtx: binary.LittleEndian.AppendUint64(nil, 5)})
+	n.drain()
+	if len(n.sent) != 0 {
+		t.Fatalf("read served at applied index 1 before its read index 2: %+v", n.sent)
+	}
+	n.out.Committed = append(n.out.Committed, raftpb.Entry{Index: 2})
+	n.drain()
+	if len(n.sent) != 1 || n.sent[0].Body.Type != "read_ok" || n.sent[0].Body.InReplyTo != 9 || string(n.sent[0].Body.Value) != "7" {
+		t.Fatalf("got %+v, want read_ok of 7 to request 9", n.sent)
 	}
 }

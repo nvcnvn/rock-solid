@@ -17,6 +17,7 @@ import (
 
 // Maelstrom error codes.
 const (
+	errNotSupported = 10
 	errUnavailable  = 11
 	errNoKey        = 20
 	errPrecondition = 22
@@ -119,7 +120,7 @@ func (n *node) handle(now core.Tick, m *message) {
 	case "write_ok", "cas_ok", "error":
 		n.relay(m.Body)
 	default:
-		n.fail(c, 10, "unsupported: "+m.Body.Type)
+		n.fail(c, errNotSupported, "unsupported: "+m.Body.Type)
 	}
 	n.drain()
 }
