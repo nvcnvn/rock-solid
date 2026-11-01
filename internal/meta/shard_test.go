@@ -466,3 +466,77 @@ func TestASnapshotHoldsTheEntriesHandedOverInItsCall(t *testing.T) {
 		}
 	}
 }
+
+// A deposed leader's entry that the next leader commits applies at it under the entry's own
+// term, so it answers the Txn with its result, not dropped.
+func TestADeposedLeadersCommittedTxnIsAnsweredWithItsResult(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	g := (l + 1) % 3
+	c.txn(l, ops(Put(b("a"), b("1"))), 1)
+	c.deliver(func(e envelope) bool { return e.to == g })
+	c.durable(g)
+	c.cut[l] = true
+	c.settle()
+	if nl := c.elect(); nl != g {
+		t.Fatalf("replica %d won the election, not %d, which holds the deposed leader's entry", nl, g)
+	}
+	c.cut[l] = false
+	c.heartbeat()
+	if a := c.answer(l, 1); a.Err != nil || a.Result.FailedCheck != -1 {
+		t.Fatalf("the deposed leader answered its committed Txn %+v", a)
+	}
+	c.agree()
+	if v, _ := get(c.n[l].s.State(), "a"); v != "1" {
+		t.Fatalf("a = %q", v)
+	}
+}
+
+// An entry whose Txns stop decoding part way answers each of its Txns from there on ErrMalformed,
+// so no caller waits for good.
+func TestAMalformedEntryAnswersItsTail(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	c.txn(l, ops(Put(b("a"), b("1"))), 1)
+	c.txn(l, ops(Put(b("b"), b("1"))), 2)
+	s := c.n[l].s
+	s.batch, s.queued = append(s.batch, 0xff), append(s.queued, 3)
+	c.txn(l, ops(Put(b("c"), b("1"))), 4)
+	c.settle()
+	for token, want := range map[uint64]error{1: nil, 2: nil, 3: ErrMalformed, 4: ErrMalformed} {
+		if a := c.answer(l, token); !errors.Is(a.Err, want) {
+			t.Fatalf("token %d answered %+v, want %v", token, a, want)
+		}
+	}
+	c.agree()
+	if _, ok := get(s.State(), "c"); ok {
+		t.Fatal("a Txn after the malformed one applied")
+	}
+}
+
+// A deposed leader that catches up by a snapshot answers the Txns it still waits for dropped at
+// the restore: the snapshot may or may not hold them, and nothing after it says which.
+func TestWaitingTxnsAreAnsweredDroppedAtASnapshotRestore(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	c.txn(l, ops(Put(b("a"), b("1"))), 1)
+	c.settle()
+	c.cut[l] = true
+	c.txn(l, ops(Put(b("lost"), b("1"))), 2)
+	c.settle()
+	nl := c.elect()
+	c.txn(nl, ops(Put(b("b"), b("1"))), 3)
+	c.settle()
+	if err := c.n[nl].st.Compact(c.n[nl].s.Raft().Applied()); err != nil {
+		t.Fatal(err)
+	}
+	c.cut[l] = false
+	c.heartbeat()
+	if base := c.n[l].st.Base().Index; base <= 1 {
+		t.Fatalf("the deposed leader's base is %d: it restored no snapshot", base)
+	}
+	if a := c.answer(l, 2); !errors.Is(a.Err, raft.ErrProposalDropped) {
+		t.Fatalf("the deposed leader answered its waiting Txn %+v", a)
+	}
+	c.agree()
+}
