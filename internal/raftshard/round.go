@@ -3,6 +3,7 @@ package raftshard
 import (
 	"errors"
 
+	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -103,13 +104,19 @@ func RoundItems(pool core.BufPool, owner uint32, maxBlob uint64, rec []byte, dst
 // of kind BlobRaftState, arrives, as a later record replaces what an earlier one wrote. A round
 // that does not decode is ErrBadRound and changes nothing.
 func (s *Storage) Replay(kind disklog.BlobKind, payload []byte) error {
+	_, err := s.replay(kind, payload)
+	return err
+}
+
+// replay is Replay, also returning the summary of the round its last blob applied.
+func (s *Storage) replay(kind disklog.BlobKind, payload []byte) (summary, error) {
 	switch kind {
 	case disklog.BlobRaftEntries:
 		s.pending = append(s.pending, payload...)
-		return nil
+		return summary{}, nil
 	case disklog.BlobRaftState:
 	default:
-		return ErrBadRound
+		return summary{}, ErrBadRound
 	}
 	rec := payload
 	if len(s.pending) > 0 {
@@ -120,21 +127,36 @@ func (s *Storage) Replay(kind disklog.BlobKind, payload []byte) error {
 	err := DecodeRound(rec, &r)
 	s.pending = s.pending[:0]
 	if err != nil {
-		return err
+		return summary{}, err
 	}
 	if r.Snapshot.Metadata.Index != 0 && r.Snapshot.Metadata.Index > s.base.Index {
 		s.base, s.ents, s.chunks, s.first = r.Snapshot.Metadata, s.ents[:0], nil, 0
 	}
 	if len(r.Entries) > 0 {
 		if r.Entries[0].Index > s.last()+1 {
-			return ErrBadRound
+			return summary{}, ErrBadRound
 		}
 		s.Append(r.Entries)
 	}
 	if r.HardState != (raftpb.HardState{}) {
 		s.hs = r.HardState
 	}
-	return nil
+	return summarize(&r), nil
+}
+
+// summary is what decides when a round's blobs die: the highest index it holds, an entry's or its
+// snapshot's, and whether it holds a hard state; done marks a whole round.
+type summary struct {
+	last     uint64
+	hs, done bool
+}
+
+func summarize(r *Round) summary {
+	sum := summary{last: r.Snapshot.Metadata.Index, hs: !raft.IsEmptyHardState(r.HardState), done: true}
+	if n := len(r.Entries); n > 0 {
+		sum.last = r.Entries[n-1].Index
+	}
+	return sum
 }
 
 // DecodeRound decodes a round's record into r, whose payloads alias rec.
