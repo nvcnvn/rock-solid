@@ -345,6 +345,21 @@ func TestConfig(t *testing.T) {
 	}
 }
 
+func TestLeaderNamesTheElectedReplica(t *testing.T) {
+	n := newNet(t, 3, 1)
+	for i, r := range n.r {
+		if got := r.s.Leader(); got != 0 {
+			t.Fatalf("replica %d names leader %d before any election", i, got)
+		}
+	}
+	n.elect(1)
+	for i, r := range n.r {
+		if got := r.s.Leader(); got != 2 {
+			t.Fatalf("replica %d names leader %d, want 2", i, got)
+		}
+	}
+}
+
 func TestTicksComeFromTheClock(t *testing.T) {
 	heartbeats := func(sent [][]raftpb.Message) int { return count(sent[0], raftpb.MsgHeartbeat) }
 	t.Run("10 ms is one tick and 100 ms a heartbeat", func(t *testing.T) {

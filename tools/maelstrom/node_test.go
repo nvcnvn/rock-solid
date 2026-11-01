@@ -109,6 +109,7 @@ func (c *cluster) expect(id, req string, want body) {
 
 func TestLinKV(t *testing.T) {
 	c := newCluster(t, 3)
+	c.expect(c.ids[0], `{"type":"write","key":1,"value":1}`, body{Type: "error", Code: errUnavailable})
 	lead := c.leader()
 	follower := c.ids[0]
 	if follower == lead {
@@ -118,8 +119,9 @@ func TestLinKV(t *testing.T) {
 	c.expect(lead, `{"type":"write","key":1,"value":1}`, body{Type: "write_ok"})
 	c.expect(lead, `{"type":"cas","key":1,"from":3,"to":2}`, body{Type: "error", Code: errPrecondition})
 	c.expect(lead, `{"type":"cas","key":1,"from":1,"to":2}`, body{Type: "cas_ok"})
-	c.expect(follower, `{"type":"write","key":1,"value":5}`, body{Type: "error", Code: errUnavailable})
-	c.expect(follower, `{"type":"read","key":1}`, body{Type: "read_ok", Value: json.RawMessage("2")})
+	c.expect(follower, `{"type":"cas","key":1,"from":2,"to":5}`, body{Type: "cas_ok"})
+	c.expect(follower, `{"type":"read","key":1}`, body{Type: "read_ok", Value: json.RawMessage("5")})
+	c.expect(follower, `{"type":"cas","key":1,"from":2,"to":6}`, body{Type: "error", Code: errPrecondition})
 	c.expect(lead, `{"type":"read","key":2}`, body{Type: "error", Code: errNoKey})
 }
 

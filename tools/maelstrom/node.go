@@ -85,6 +85,8 @@ type node struct {
 	nextID  uint64
 	writes  map[uint64]client
 	reads   map[uint64]*read
+	// resent are the client requests this follower resent to its leader, by the ID it resent them under.
+	resent map[uint64]client
 	// stale serves reads from kv at once, the planted bug the checker must catch.
 	stale bool
 	// sent is what the node sends, which its driver writes out after each call.
@@ -92,7 +94,7 @@ type node struct {
 }
 
 func newNode(stale bool) *node {
-	return &node{kv: map[string]json.RawMessage{}, writes: map[uint64]client{}, reads: map[uint64]*read{}, stale: stale}
+	return &node{kv: map[string]json.RawMessage{}, writes: map[uint64]client{}, resent: map[uint64]client{}, reads: map[uint64]*read{}, stale: stale}
 }
 
 // handle takes one message from Maelstrom's network at now.
@@ -114,6 +116,8 @@ func (n *node) handle(now core.Tick, m *message) {
 		n.read(c)
 	case "write", "cas":
 		n.propose(c, &m.Body)
+	case "write_ok", "cas_ok", "error":
+		n.relay(m.Body)
 	default:
 		n.fail(c, 10, "unsupported: "+m.Body.Type)
 	}
@@ -193,19 +197,37 @@ func (n *node) read(c client) {
 	n.shard.ReadIndex(&n.ctx, binary.LittleEndian.AppendUint64(nil, n.nextID), &n.out)
 }
 
-// propose appends a write or cas to the log; only a leader takes it, and a follower's client gets
-// error 11, a definite failure, since it was never proposed.
+// propose appends a write or cas to the log if this node leads. A follower resends it to the
+// leader it names, as a daemon resends a Txn on NotLeader, and relays the answer; a node that
+// neither leads nor knows a leader, or was itself resent the request, answers error 11, a definite
+// failure, since it never proposed it.
 func (n *node) propose(c client, b *body) {
 	n.nextID++
 	data, err := json.Marshal(command{Node: n.id, ID: n.nextID, Op: b.Type, Key: b.Key, Val: b.Value, From: b.From, To: b.To})
 	if err != nil {
 		panic(err)
 	}
-	if err := n.shard.Propose(&n.ctx, data, &n.out); err != nil {
+	if err := n.shard.Propose(&n.ctx, data, &n.out); err == nil {
+		n.writes[n.nextID] = c
+		return
+	}
+	lead := n.shard.Leader()
+	if lead == 0 || n.ids[lead-1] == n.id || slices.Contains(n.ids, c.src) {
 		n.fail(c, errUnavailable, "not the leader")
 		return
 	}
-	n.writes[n.nextID] = c
+	n.resent[n.nextID] = c
+	rb := *b
+	rb.MsgID = n.nextID
+	n.sent = append(n.sent, message{Src: n.id, Dest: n.ids[lead-1], Body: rb})
+}
+
+// relay passes the leader's answer to a resent request on to its client.
+func (n *node) relay(b body) {
+	if c, ok := n.resent[b.InReplyTo]; ok {
+		delete(n.resent, b.InReplyTo)
+		n.reply(c, b)
+	}
 }
 
 // drain carries out the shard's output, reporting each round durable at once: the storage is the
