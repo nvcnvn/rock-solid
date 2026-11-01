@@ -2868,7 +2868,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 9 s |
   | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 3 s |
   | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 4 s |
-  | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 22 s |
+  | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 15 s |
   | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 28 s |
   | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 6 s |
   | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 76 s |
@@ -5465,7 +5465,7 @@ the round to its `raft.MemoryStorage`, which stands for the durable log until th
 | A crash before the durable notice | On restart the follower's log lacks the entry, and the leader resends it. No acknowledgment was sent for it |
 
 **Simulator runs.** `TestRaftRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000 per commit in
-`scripts/seeds.sh` (22 s at `JOBS=2`), 10,000 once in 150 s. One group of three shards on the
+`scripts/seeds.sh` (15 s at `JOBS=2`), 10,000 once in 150 s. One group of three shards on the
 simulated network and on node-pair leases, with 1-in-100 drops, 1-in-50 duplicates, up to 200 µs
 of jitter, partitions cut and healed, and the lease faults of [Leader leases](#leader-leases)
 (pauses of up to 5 s, slewed and drifting clocks, links held); each round flushes as an fsync on its node's simulated
@@ -5527,6 +5527,8 @@ reads it. `TestConfig` (Raft shard) asserts `CheckQuorum` off and `PreVote` on.
 | Node restarted 4.1 s ago on `CLOCK_BOOTTIME`, 3.9 s on `CLOCK_MONOTONIC_RAW` | `MsgPreVote`, `MsgVote` | Dropped |
 | Node restarted, 3.9 s of 10 ms timer events | Its election timer | Stopped: no campaign during the restart wait |
 | The leader's grant from follower F lapsed in support epoch e, and the leader's node renewed it, under e + 1 | Lease read | Refused: the renewal is fresh, under e + 1, and F's fortification under e no longer counts. Once the leader's next fortification request (a heartbeat later) reaches F, F supports it under e + 1 and the leader reads again |
+| The follower's node restarted after fortifying the leader, and its new run granted the leader's node again, support epochs counting from 1 | Lease read | Refused: the fortification names the old run |
+| Voted for a transfer target in term T + 1 | The term-T leader's fortification request | Ignored: no answer and no support |
 
 **Lease end: a quorum of unexpired fortifications per half**
 

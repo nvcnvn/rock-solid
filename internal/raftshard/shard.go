@@ -191,11 +191,6 @@ func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
 	s.ready(ctx, out)
 }
 
-// ApplyConfChange applies a committed configuration change, as the driver does when it applies the change's entry.
-func (s *Shard) ApplyConfChange(cc raftpb.ConfChangeI) {
-	s.conf = *s.rn.ApplyConfChange(cc)
-}
-
 // ReadIndex asks the group for the commit index a read must wait for; once a quorum confirms this replica still led when it asked, an Output's Reads carry rctx and that index.
 func (s *Shard) ReadIndex(ctx *core.Context, rctx []byte, out *Output) {
 	s.rn.ReadIndex(rctx)
@@ -219,7 +214,7 @@ func (s *Shard) quorum(voters []uint64, term uint64, t lease.Time) bool {
 	}
 	n := 0
 	for _, id := range voters {
-		if id == s.cfg.ID || s.fortifies(s.peer(id), term, t) {
+		if i := s.peer(id); id == s.cfg.ID || i >= 0 && s.fortifies(i, term, t) {
 			n++
 		}
 	}
@@ -232,7 +227,7 @@ func (s *Shard) fortifies(i int, term uint64, t lease.Time) bool {
 	return f.term == term && s.cfg.Holder.Supported(s.cfg.Peers[i].Node, f.run, f.support, t)
 }
 
-// fortify has a leader ask, once a heartbeat, every peer whose fortification of its term does not run now; a follower whose grant to its leader's node lapsed stops supporting it and campaigns raft_lapse_campaign later.
+// fortify has a leader ask, once a heartbeat, every peer it holds a node-pair lease from whose fortification of its term does not run now, so a down node is not asked; a follower whose grant to its leader's node lapsed stops supporting it and campaigns raft_lapse_campaign later.
 func (s *Shard) fortify(ctx *core.Context, out *Output) {
 	st := s.rn.BasicStatus()
 	t := lease.Now(ctx)
@@ -242,7 +237,7 @@ func (s *Shard) fortify(ctx *core.Context, out *Output) {
 		}
 		s.fortifyAt = ctx.Now + HeartbeatTick*TickInterval
 		for i, p := range s.cfg.Peers {
-			if p.ID != s.cfg.ID && !s.fortifies(i, st.Term, t) {
+			if p.ID != s.cfg.ID && s.cfg.Holder.Valid(p.Node, t) && !s.fortifies(i, st.Term, t) {
 				s.sendFortify(&fortify{kind: kindFortify, from: s.cfg.ID, to: p.ID, term: st.Term}, p.Node, out)
 			}
 		}

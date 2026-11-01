@@ -392,3 +392,35 @@ func BenchmarkLeaseRead(b *testing.B) {
 		}
 	}
 }
+
+// A restarted follower node counts support epochs from 1 again, so its new run's grant must not
+// match the fortification its earlier run gave.
+func TestARestartedFollowersNewRunDoesNotCount(t *testing.T) {
+	n := newNet(t, 3, 1)
+	n.leases(0, 1)
+	n.elect(0)
+	n.restart(1)
+	n.now += lease.DefaultConfig.Lease + lease.DefaultConfig.RateGap
+	n.inbox = n.inbox[:0]
+	n.leases(0, 1)
+	if n.leaseRead(0) {
+		t.Fatal("counts the restarted follower's new run")
+	}
+}
+
+// A follower that voted in a later term ignores the earlier leader's fortification request.
+func TestAFollowerInALaterTermIgnoresAnOldFortification(t *testing.T) {
+	n := newNet(t, 3, 1)
+	n.leases(0, 1, 2)
+	n.elect(0)
+	term := n.term(0)
+	n.recv(1, 2, n.challenge(raftpb.MsgVote, 2, 1, transferContext))
+	n.durable(1)
+	n.inbox = n.inbox[:0]
+	ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 0}}
+	encodeFortify(testGroup, &fortify{kind: kindFortify, from: 1, to: 2, term: term}, &ev.Msg)
+	n.event(1, ev)
+	if f := n.r[1]; len(f.forts) != 0 || f.s.support.term != 0 {
+		t.Fatalf("answered %v, supports term %d, in term %d", f.forts, f.s.support.term, n.term(1))
+	}
+}
