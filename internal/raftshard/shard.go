@@ -627,7 +627,7 @@ func (s *Shard) reconcile(ctx *core.Context) {
 func (s *Shard) target(t lease.Time) uint64 {
 	var to uint64
 	s.rn.WithProgress(func(id uint64, _ raft.ProgressType, pr tracker.Progress) {
-		if i := s.peer(id); to == 0 && i >= 0 && id != s.cfg.ID && s.planned(id) && !pr.IsLearner &&
+		if i := s.peer(id); to == 0 && i >= 0 && s.planned(id) && !pr.IsLearner &&
 			pr.State == tracker.StateReplicate && pr.Match >= s.mark && s.cfg.Holder.Valid(s.cfg.Peers[i].Node, t) {
 			to = id
 		}

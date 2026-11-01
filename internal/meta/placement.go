@@ -77,12 +77,12 @@ func replaced(v *Replica, d *chunkstore.RecordedDisk, now core.Tick) bool {
 }
 
 // best is the index in disks of the up disk with the fewest voters, the lower ID on a tie, on a
-// node in nodes that holds no voter of g but the one at skip, or -1.
+// node in nodes that holds no voter of g but the one at skip, and not that voter's disk, or -1.
 func best(g *Group, skip int, nodes []uint32, disks []chunkstore.RecordedDisk, load []int) int {
 	c := -1
 	for k := range disks {
 		d := &disks[k]
-		if !d.Up || !slices.Contains(nodes, d.Node) || holds(g, skip, d.Node, disks) {
+		if !d.Up || !slices.Contains(nodes, d.Node) || holds(g, skip, d.Node, disks) || skip >= 0 && d.ID == g.Voters[skip].Disk {
 			continue
 		}
 		if c < 0 || load[k] < load[c] || load[k] == load[c] && d.ID < disks[c].ID {

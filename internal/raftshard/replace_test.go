@@ -445,3 +445,107 @@ func TestARemovalNoticeNeedsTheReplicaInItsOwnConfiguration(t *testing.T) {
 		t.Fatal("a replica outside its own applied configuration took a removal notice")
 	}
 }
+
+// A leader the plan drops does not transfer to a planned voter whose node runs but that lags its log.
+func TestALeaderTransfersOnlyToAPlannedVoterThatHoldsItsLog(t *testing.T) {
+	n := newReplaceNet(t, plants{})
+	n.leases(rA, rC)
+	for k := range 5 {
+		n.propose(rA, []byte{byte(k)})
+		n.heartbeat(rC, rD)
+	}
+	n.r[rA].s.SetPlan([]Peer{{ID: 2, Node: core.NodeID{Node: 1}}, {ID: 3, Node: core.NodeID{Node: 2}}, {ID: 4, Node: core.NodeID{Node: 3}}})
+	n.propose(rA, []byte("x"))
+	if to := n.r[rA].s.rn.Status().LeadTransferee; to == 3 {
+		t.Fatal("A transfers to C, which lags its log")
+	}
+}
+
+func TestALeaderRemovesALearnerThePlanDropped(t *testing.T) {
+	n := newReplaceNet(t, plants{})
+	n.r[rA].s.SetPlan(replacing)
+	n.propose(rA, []byte("a"))
+	n.settleWithout(rC, rD)
+	if c := n.conf(rA); !slices.Equal(c.Learners, []uint64{4}) {
+		t.Fatalf("configuration %+v once the plan names D, want D a learner", c)
+	}
+	n.r[rA].s.SetPlan([]Peer{{ID: 1}, {ID: 2}, {ID: 3}})
+	n.propose(rA, []byte("b"))
+	n.settleWithout(rC, rD)
+	if c := n.conf(rA); len(c.Learners) != 0 || !slices.Equal(c.Voters, []uint64{1, 2, 3}) {
+		t.Fatalf("configuration %+v under a plan of the voters, want D removed", c)
+	}
+}
+
+// A peer answers with its applied index, not its commit index: one that committed D's addition
+// but has not applied it lacks D in its configuration, and its commit index may reach D's applied
+// index, so answering with it would have D delete the state of a replica the group holds.
+func TestARemovalNoticeCarriesTheAnswerersAppliedIndex(t *testing.T) {
+	n := newReplaceNet(t, plants{})
+	n.r[rA].s.SetPlan(replacing)
+	n.propose(rA, []byte("a"))
+	n.settleWithout(rB, rD)
+	n.snapshot(rA)
+	for range 5 {
+		n.heartbeat(rB)
+	}
+	b, d := n.r[rB], n.r[rD]
+	if !member(&d.s.conf, 4) {
+		t.Fatalf("D did not apply its addition: %+v", d.s.conf)
+	}
+	for k := 0; b.flush == 0; k++ {
+		if k == 30 {
+			t.Fatal("B never took a round of the entries it missed")
+		}
+		n.advance(HeartbeatTick*TickInterval, rA, rB, rC, rD)
+		n.deliver(nil)
+		for i, r := range n.r {
+			if r.flush != 0 && i != rB {
+				n.durable(i)
+			}
+		}
+	}
+	if st := b.s.rn.BasicStatus(); st.Commit < d.s.applied || b.s.applied >= d.s.applied || member(&b.s.conf, 4) {
+		t.Fatalf("B commits up to %d and applied %d, D applied %d: want B's commit index alone at D's", st.Commit, b.s.applied, d.s.applied)
+	}
+	ask := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 3}}
+	encodeFortify(testGroup, &fortify{kind: kindMember, from: 4, to: 2}, &ask.Msg)
+	for _, c := range []struct {
+		what string
+		send func()
+	}{
+		{"membership question", func() { n.event(rB, ask) }},
+		{"Raft message", func() {
+			n.recv(rB, rD, raftpb.Message{Type: raftpb.MsgHeartbeatResp, From: 4, To: 2, Term: n.term(rA)})
+		}},
+	} {
+		n.inbox = n.inbox[:0]
+		c.send()
+		n.deliver(func(e envelope) bool { return e.from == rB && e.to == rD })
+		if d.removed {
+			t.Fatalf("D took B's answer to its %s as a removal", c.what)
+		}
+	}
+}
+
+// A replica whose Peers lack a member of its applied configuration, as one restored from a
+// snapshot that a later change was folded into, learns that member's node from its messages.
+func TestAReplicaLearnsTheNodeOfAMemberThatSendsToIt(t *testing.T) {
+	n := newNet(t, 3, 1)
+	n.elect(0)
+	r := n.r[2]
+	cfg := testConfig(3, 2, r.st, n.seed)
+	cfg.Peers = cfg.Peers[2:]
+	cfg.Holder, cfg.Grantor = r.holder, r.grantor
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.s, r.flush = s, 0
+	n.call(2, func(ctx *core.Context, out *Output) { s.Start(ctx, out) })
+	n.advance(HeartbeatTick*TickInterval, 0)
+	n.settle()
+	if i := s.peer(1); i < 0 || s.cfg.Peers[i].Node != (core.NodeID{Node: 0}) || s.Stats().Unsent != 0 {
+		t.Fatalf("peers %+v, stats %+v: want the leader learned at node 0 and the reply sent", s.cfg.Peers, s.Stats())
+	}
+}

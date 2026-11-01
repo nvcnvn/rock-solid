@@ -5634,6 +5634,7 @@ a snapshot taken at the leader's applied index in for the point-in-time view the
 | C's disk reports a new log ID, three nodes | C replaced at once, on another disk of its node: the new disk, which holds no voter, or the other disk on a tie |
 | D, planned in place of C, down for 10 minutes before its swap | D replaced by replica ID 5 on a fifth node, the same rule |
 | A voter's disk, down, reports its log from the node of another voter of the group | The voter placed again as replica ID 4; no node holds two voters, counted by where each disk now reports from |
+| Twelve groups on four nodes; disk 1, down, reports its log from the fourth node, which holds no voter of some groups | Each of its voters placed again on another disk, never disk 1, though disk 1 ties for the fewest voters there |
 | A node outside the metadata nodes | Takes no voter |
 | The control-plane group | No test of its own: placement and the shard treat it as one more group of the map, with nothing special-cased |
 
@@ -5643,16 +5644,20 @@ a snapshot taken at the leader's applied index in for the point-in-time view the
 | --- | --- |
 | The plan names the voters the group has, C cut off | No configuration change; A and B commit |
 | The plan names D in place of C, C and D cut off | A adds D as a learner, its node in the change's context. Five proposals commit on A and B with D hearing nothing, and D stays a learner |
+| Then the plan names A, B and C again | A removes D, the learner the plan dropped |
 | D reconnected | D's first append is refused, its log empty, so A sends a snapshot; D restores it (`Output.Snapshot`), then takes the log. One `ConfChangeV2`, remove 3 and add 4, commits on A and B, and A, B and D end in voters 1, 2, 4 out of the joint configuration |
 | B cut off once D was added, D caught up | Nothing commits on A and D, and D stays a learner, never promoted to make a quorum. Once B returns the swap commits |
 | The plan drops the leader A | A transfers leadership to B, which adds D and swaps it for A |
 | The plan drops A, B down, A holding a node-pair lease from C only | A transfers to C, never to B |
+| The plan drops A, B up, C up and leased to A but five proposals behind | A does not transfer to C |
 | The plan names three new replicas and none of the voters | The leader swaps new replicas in for the other two voters first, then transfers to one; the group ends on the three |
 | A, the leader, cut off while B leads, and the plan swaps D in for A | A still leads its old term; once reconnected, its messages draw the removal notice and A reports `Removed` |
 | A proposal every 10 ms, D's link one step slower than B's | D, trailing the current commit index for good, is swapped in; planted, a learner held to the current commit index never is |
 | A removal notice at any index to D before its addition | Ignored: a notice proves a removal only to a replica its own applied configuration holds |
 | C restarts after the swap | Within a second, inside its restart wait, C asks its peers whether it is a member; their answer at an applied index past its own makes C report `Removed`. It sends no pre-vote or vote, and nothing in 10 s after |
 | A removal notice at an index below the replica's applied index | Ignored: a peer that has not applied the change that added it says nothing of its removal |
+| B has committed D's addition, its commit index at D's applied index, but not applied it; D asks B, or sends B a Raft message | B answers at its applied index, which D ignores; an answer at its commit index would have D delete its state |
+| C started with Peers that lack the leader, as one restored from a snapshot; the leader sends to it | C learns the leader's node from the message, and its reply reaches it |
 | Planted: the learner promoted at once | D swapped in holding nothing (`TestAnEagerLeaderPromotesALearnerThatHoldsNothing`) |
 | Planted: D added as a voter | With C down, nothing commits while D hears nothing (`TestAReplacementAddedAsAVoterStallsProposals`) |
 

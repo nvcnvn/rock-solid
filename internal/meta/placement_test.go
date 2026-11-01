@@ -180,3 +180,26 @@ func TestAVoterWhoseDiskMovedNodesIsPlacedAgain(t *testing.T) {
 		seen[node] = true
 	}
 }
+
+// A voter whose disk moved to a node holding no other voter of its group is placed again on
+// another disk, even when the moved disk is the least loaded one there.
+func TestAVoterWhoseDiskMovedIsNotPlacedAgainOnThatDisk(t *testing.T) {
+	r, nodes := cluster(t, 4)
+	m := ShardMap{}
+	for id := range uint64(12) {
+		m.Groups = append(m.Groups, Group{ID: id + 1})
+	}
+	m = PlaceVoters(&m, nodes, r.Disks(), 0)
+	r.Down(1, 0)
+	if _, err := r.Report(3, 9, r.Disks()[0].Log); err != nil {
+		t.Fatal(err)
+	}
+	next := PlaceVoters(&m, nodes, r.Disks(), 1)
+	for gi, g := range next.Groups {
+		for i, v := range g.Voters {
+			if was := m.Groups[gi].Voters[i]; v.ID != was.ID && v.Disk == was.Disk {
+				t.Fatalf("group %d: voter %d replaced by %d on the same disk %d", g.ID, was.ID, v.ID, v.Disk)
+			}
+		}
+	}
+}

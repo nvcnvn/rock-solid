@@ -22,10 +22,11 @@ const (
 )
 
 // replacement is one voter replacement in a simulated run: from cutAt, once one of the first three
-// nodes leads, a follower among them, or with cutLeader the leader, is cut off from every other node, planDelay later the shard
-// map's plan names the fourth node's replica in its place, and the cut-off replica is reconnected,
-// in half the runs up to a second after the plan, mid-swap, and otherwise a second after a replica
-// applies the configuration without it; either way it must learn that it was removed.
+// nodes leads, a follower among them, or with cutLeader the leader, is cut off from every other
+// node, planDelay later the shard map's plan names the fourth node's replica in its place, and the
+// cut-off replica is reconnected, in half the runs up to a second after the plan, mid-swap, and
+// otherwise a second after a replica applies the configuration without it; either way it must
+// learn that it was removed.
 type replacement struct {
 	crash, pauseD, early, cutLeader bool
 	cutAt, planDelay, healDelay     core.Tick
