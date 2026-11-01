@@ -51,7 +51,7 @@ type simCluster struct {
 	crashedID             int
 	early                 error
 	disagree              error
-	// leaders is each term's leader, maxApplied the highest index any replica applied, and leaseReads the passes that could serve a lease read.
+	// leaders is each term's leader, maxApplied the highest index any replica applied while it led, and leaseReads the passes that could serve a lease read.
 	leaders    map[uint64]int
 	maxApplied uint64
 	leaseReads int
@@ -358,6 +358,10 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 	if r.out.Flush != 0 {
 		acts = append(acts, core.Action{Kind: core.ActDiskFsync, IO: core.IOID(r.out.Flush)})
 	}
+	// Only a leader acknowledges an entry, on applying it. A follower can apply an entry before its
+	// leader does: the leader's commit index goes out with the next round's appends, while the leader
+	// applies what that round's Ready commits only once the round is durable.
+	leading := r.leads || r.s.rn.BasicStatus().RaftState == raft.StateLeader
 	for _, e := range r.out.Committed {
 		c.history = fmt.Appendf(c.history, "%d n%d %d/%d %x\n", ctx.Now, r.id, e.Index, e.Term, e.Data)
 		for uint64(len(c.log)) <= e.Index {
@@ -378,7 +382,9 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 			c.applied(r, e.Index, v)
 		}
 		r.index = e.Index
-		c.maxApplied = max(c.maxApplied, e.Index)
+		if leading {
+			c.maxApplied = max(c.maxApplied, e.Index)
+		}
 	}
 	c.done = c.afterCrash && (c.rep == nil || c.rep.removed && c.rep.caughtUp)
 	st := r.s.rn.BasicStatus()
@@ -397,7 +403,7 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 	if r.leads && r.s.LeaseRead(ctx) {
 		c.leaseReads++
 		if r.index < c.maxApplied && c.stale == nil {
-			c.stale = fmt.Errorf("replica %d may serve a lease read in term %d having applied up to %d, another up to %d", r.id, st.Term, r.index, c.maxApplied)
+			c.stale = fmt.Errorf("replica %d may serve a lease read in term %d having applied up to %d, a leader up to %d", r.id, st.Term, r.index, c.maxApplied)
 		}
 		if o := c.leaseReader(r.id); o >= 0 && c.overlap == nil {
 			c.overlap = fmt.Errorf("replicas %d and %d may both serve lease reads", r.id, o)

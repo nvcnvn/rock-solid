@@ -579,7 +579,7 @@ func (s *Shard) reconcile(now core.Tick) {
 	if now >= s.markAt {
 		s.mark, s.markAt = st.Commit, now+HeartbeatTick*TickInterval
 	}
-	if s.confTerm != 0 || st.RaftState != raft.StateLeader || s.committed != st.Term || len(s.conf.VotersOutgoing) != 0 {
+	if s.confTerm == st.Term || st.RaftState != raft.StateLeader || s.committed != st.Term || len(s.conf.VotersOutgoing) != 0 {
 		return
 	}
 	if !s.planned(s.cfg.ID) {

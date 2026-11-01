@@ -5587,7 +5587,11 @@ one direction of a link held up to 50 ms. After every step it checks:
   pass ends able to serve a lease read, no other running, unpaused replica could, at its own
   clocks, unless its next pass would first see `Resumed`.
 - [property] "a lease read sees every applied entry": a replica able to serve a lease read has
-  applied every index any replica applied.
+  applied every index any replica applied while it led, which covers every write a client was
+  told of, since only a leader acknowledges an entry, on applying it. A follower's applies do not
+  count: the leader's commit index goes out with its next round's appends, while the leader applies
+  what that round's `Ready` commits only once the round is durable, so a follower can apply an
+  entry first.
 
 A shard whose followers vote and campaign while they support a leader breaks the second within 20
 seeds (`TestFollowersVotingWhileSupportingBreakTheLeaseInvariant`), and across the 20 `go test`
@@ -5647,7 +5651,7 @@ a snapshot taken at the leader's applied index in for the point-in-time view the
 The membership question and its answer are fortification-sized frames that `FuzzDecode` also feeds.
 
 **Simulator runs.** `TestVoterReplacementRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000
-per commit in `scripts/seeds.sh` (25 s at `JOBS=2`), 10,000 once in 143 s, runs the
+per commit in `scripts/seeds.sh` (25 s at `JOBS=2`), 10,000 once in 125 s, runs the
 [Raft shard](#raft-shard)'s faults, crash and lease frames on four nodes. From 2 to 4 s in, once
 one of the first three replicas leads, a follower among them is cut off from every other node, and
 up to 2 s later every replica gets the plan naming the fourth node's replica in its place. Every
@@ -5664,6 +5668,10 @@ history. After every step it checks the Raft runs' properties and:
   it within 20 seeds (`TestPromotingALearnerBeforeItCaughtUpBreaksTheInvariant`).
 - "only a replica the group's configuration removed deletes its state": no replica but the
   replaced one reports `Removed`.
+
+`TestVoterReplacementRegressionSeeds` keeps two seeds that found bugs: 6389, the lease property
+counting a follower's applies (above, under [Leader leases](#leader-leases)), and 8218, a leader
+whose configuration change of an earlier term was lost and that proposed none again.
 
 [property] "a replacement never stalls proposals while two voters of the old configuration are
 up": `TestAReplacementNeverStallsProposals`, 20 seeds in `go test` and 2,000 per commit (9 s),

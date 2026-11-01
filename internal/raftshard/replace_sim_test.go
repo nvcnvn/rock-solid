@@ -200,6 +200,17 @@ func planned(plan []Peer) []uint64 {
 // Under the Raft runs' faults, with the first leader crashed, a follower's replacement adds the
 // fourth replica as a learner, catches it up from snapshots of compacted logs, swaps it in through a
 // joint configuration and leaves it; the replaced replica, once reconnected, deletes its state.
+// Seeds that found bugs: 6389, a lease-reading leader behind a follower that applied first, which
+// only a leader's applies now count against; 8218, a leader whose configuration change of an
+// earlier term was lost, and which then proposed none again.
+func TestVoterReplacementRegressionSeeds(t *testing.T) {
+	for _, seed := range []uint64{6389, 8218} {
+		if c := newReplaceCluster(seed, plants{}, faults(), true, false).run(t, seed); !c.done {
+			t.Fatalf("seed %d: swapped at %d, removed %v, the new replica caught up %v", seed, c.rep.swappedAt, c.rep.removed, c.rep.caughtUp)
+		}
+	}
+}
+
 func TestVoterReplacementRunsReplayFromTheirSeed(t *testing.T) {
 	seeds.Run(t, 0, 20, func(seed uint64) {
 		a := newReplaceCluster(seed, plants{}, faults(), true, false).run(t, seed)
