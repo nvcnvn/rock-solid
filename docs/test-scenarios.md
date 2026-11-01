@@ -2868,7 +2868,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 9 s |
   | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 3 s |
   | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 4 s |
-  | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 16 s |
+  | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 22 s |
   | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 28 s |
   | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 6 s |
   | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 76 s |
@@ -5465,7 +5465,7 @@ the round to its `raft.MemoryStorage`, which stands for the durable log until th
 | A crash before the durable notice | On restart the follower's log lacks the entry, and the leader resends it. No acknowledgment was sent for it |
 
 **Simulator runs.** `TestRaftRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000 per commit in
-`scripts/seeds.sh` (16 s at `JOBS=2`), 10,000 once in 150 s. One group of three shards on the
+`scripts/seeds.sh` (22 s at `JOBS=2`), 10,000 once in 150 s. One group of three shards on the
 simulated network and on node-pair leases, with 1-in-100 drops, 1-in-50 duplicates, up to 200 µs
 of jitter, partitions cut and healed, and the lease faults of [Leader leases](#leader-leases)
 (pauses of up to 5 s, slewed and drifting clocks, links held); each round flushes as an fsync on its node's simulated
