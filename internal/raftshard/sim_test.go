@@ -31,8 +31,14 @@ type simCluster struct {
 	rng     *core.Rand
 	plant   plants
 	inv     sim.Invariants
-	storage [simNodes]*raft.MemoryStorage
-	reps    [simNodes]*simReplica
+	storage []*raft.MemoryStorage
+	reps    []*simReplica
+	// rep is the voter replacement the run makes, if any.
+	rep *replacement
+	// crashes is whether the first leader to apply crashAt values crashes; afterCrash whether a value proposed after that crash, if any, applied.
+	crashes    bool
+	afterCrash bool
+	promoted   error
 	// log is every applied entry by index, and history every application in order.
 	log        []raftpb.Entry
 	history    []byte
@@ -52,6 +58,7 @@ type simCluster struct {
 	twoLeaders error
 	overlap    error
 	stale      error
+	removed    error
 }
 
 type simReplica struct {
@@ -83,18 +90,34 @@ func newSimCluster(seed uint64, p plants) *simCluster {
 
 // newSimClusterOn is newSimCluster on the scheduler settings set.
 func newSimClusterOn(seed uint64, p plants, set sim.Settings) *simCluster {
+	return newCluster(seed, p, set, nil)
+}
+
+// newCluster runs a group of three, and with rep a fourth node whose fresh replica, ID 4, replaces one of the three.
+func newCluster(seed uint64, p plants, set sim.Settings, rep *replacement) *simCluster {
 	set.MsgType = simMsgType
-	c := &simCluster{s: sim.New(seed, set), rng: core.NewRand(seed), plant: p, next: 1, leaders: map[uint64]int{}}
+	c := &simCluster{s: sim.New(seed, set), rng: core.NewRand(seed), plant: p, next: 1, leaders: map[uint64]int{}, rep: rep, crashes: rep == nil || rep.crash}
+	c.afterCrash = !c.crashes
 	c.inv.Register("driver contract", c.s.DriverContract)
 	c.inv.Register("acknowledged only once durable", func() error { return c.early })
 	c.inv.Register("applied entries agree", func() error { return c.disagree })
 	c.inv.Register(invOneLeader, func() error { return c.twoLeaders })
 	c.inv.Register(invOneLeaseReader, func() error { return c.overlap })
 	c.inv.Register(invLeaseReadsCurrent, func() error { return c.stale })
+	c.inv.Register(invCaughtUp, func() error { return c.promoted })
+	c.inv.Register(invOnlyRemoved, func() error { return c.removed })
+	nodes := simNodes
+	if rep != nil {
+		nodes++
+	}
+	c.storage, c.reps = make([]*raft.MemoryStorage, nodes), make([]*simReplica, nodes)
 	disk := []sim.DiskSpec{{Blocks: 16, Settings: sim.DefaultDiskSettings()}}
-	for id := range simNodes {
+	for id := range nodes {
 		// The storage outlives crashes: it is what the replica's rounds made durable.
 		c.storage[id] = bootStorage(simNodes)
+		if id == simNodes {
+			c.storage[id] = raft.NewMemoryStorage()
+		}
 		c.s.AddNode(sim.DefaultClock, disk, func(n *sim.Node) { c.boot(n, id) })
 	}
 	return c
@@ -102,7 +125,7 @@ func newSimClusterOn(seed uint64, p plants, set sim.Settings) *simCluster {
 
 func (c *simCluster) boot(n *sim.Node, id int) {
 	rng := n.Fork()
-	cfg := testConfig(simNodes, id, c.storage[id], rng.Uint64())
+	cfg := testConfig(len(c.reps), id, c.storage[id], rng.Uint64())
 	r := &simReplica{c: c, id: id, rng: rng, holder: lease.NewHolder(lease.DefaultConfig)}
 	c.reps[id] = r
 	loop := n.Start(sim.MachineFunc(r.onEvent), n.Disk(0))
@@ -114,6 +137,9 @@ func (c *simCluster) boot(n *sim.Node, id int) {
 			panic(err)
 		}
 		r.s = s
+		if c.rep != nil {
+			s.SetPlan(c.rep.plan)
+		}
 		r.out.Reset()
 		s.Start(ctx, &r.out)
 		return r.finish(ctx, acts)
@@ -127,8 +153,8 @@ func (c *simCluster) run(t *testing.T, seed uint64) *simCluster {
 		c.pause()
 		c.after(t, seed)
 	}
-	for a := range uint32(simNodes) {
-		for b := range uint32(simNodes) {
+	for a := range uint32(len(c.reps)) {
+		for b := range uint32(len(c.reps)) {
 			c.s.Heal(a, b)
 		}
 	}
@@ -150,14 +176,15 @@ var pauseStops = []clock.Stop{clock.Suspend, clock.PauseCounted, clock.Restore, 
 // pause stands a running node still, one step in 20,000, for up to 5 s, the messages sent to it
 // queued or lost, and one step in 2,000 holds one direction of a link for up to 50 ms more.
 func (c *simCluster) pause() {
+	n := uint64(len(c.reps))
 	if c.rng.Chance(1, 2000) {
-		from := uint32(c.rng.Below(simNodes))
-		c.s.Queue(from, (from+1+uint32(c.rng.Below(simNodes-1)))%simNodes, core.Tick(c.rng.Below(50_001)))
+		from := uint32(c.rng.Below(n))
+		c.s.Queue(from, (from+1+uint32(c.rng.Below(n-1)))%uint32(n), core.Tick(c.rng.Below(50_001)))
 	}
 	if !c.rng.Chance(1, 20000) {
 		return
 	}
-	id := uint32(c.rng.Below(simNodes))
+	id := uint32(c.rng.Below(n))
 	if nd := c.s.Node(id); nd.Up() && !nd.Paused() {
 		c.s.Pause(id, pauseStops[c.rng.Below(uint64(len(pauseStops)))], 1+core.Tick(c.rng.Below(5_000_000)), c.rng.Chance(1, 2))
 	}
@@ -168,7 +195,8 @@ func (c *simCluster) after(t *testing.T, seed uint64) {
 	if err := c.inv.Check(); err != nil {
 		t.Fatalf("seed %d step %d: %v", seed, c.s.Steps(), err)
 	}
-	if c.crashed {
+	c.replace()
+	if c.crashed || !c.crashes {
 		return
 	}
 	for id, r := range c.reps {
@@ -267,7 +295,7 @@ func (r *simReplica) lease(ctx *core.Context, ev *core.Event) bool {
 // leaseTick asks every peer due a request, none during the restart wait, and heartbeats every holder whose grant runs once a heartbeat is due.
 func (r *simReplica) leaseTick(ctx *core.Context) {
 	t := lease.Now(ctx)
-	for id := range simNodes {
+	for id := range len(r.c.reps) {
 		g := core.NodeID{Node: uint32(id)}
 		if id == r.id || r.grantor.Waiting(t) || !r.holder.Due(g, t) {
 			continue
@@ -345,13 +373,19 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 		}
 		if e.Type == raftpb.EntryNormal && len(e.Data) > 0 {
 			r.applied++
-			c.done = c.done || c.crashed && binary.LittleEndian.Uint64(e.Data) >= c.sinceCrash
+			v := binary.LittleEndian.Uint64(e.Data)
+			c.afterCrash = c.afterCrash || c.crashed && v >= c.sinceCrash
+			c.applied(r, e.Index, v)
 		}
 		r.index = e.Index
 		c.maxApplied = max(c.maxApplied, e.Index)
 	}
+	c.done = c.afterCrash && (c.rep == nil || c.rep.removed && c.rep.caughtUp)
 	st := r.s.rn.BasicStatus()
 	r.leads = st.RaftState == raft.StateLeader
+	if c.rep != nil {
+		c.replaced(r, &st)
+	}
 	if l, ok := c.leaders[st.Term]; r.leads && ok && l != r.id && c.twoLeaders == nil {
 		c.twoLeaders = fmt.Errorf("replicas %d and %d both led term %d", l, r.id, st.Term)
 	}

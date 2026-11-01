@@ -16,6 +16,8 @@ internal/sim/toy TestTheFixedProtocolKeepsEveryAcknowledgedWrite 10000
 internal/sim TestFaultsKeepTheDriverContractAndTheResumedRule 2000
 internal/lease TestNoLeaseOutlastsItsGrant 10000
 internal/raftshard TestRaftRunsReplayFromTheirSeed 2000
+internal/raftshard TestVoterReplacementRunsReplayFromTheirSeed 2000
+internal/raftshard TestAReplacementNeverStallsProposals 2000
 internal/disklog TestEveryAcceptedItemDecodes 2000
 internal/disklog TestAnythingSubmitAcceptsDecodes 2000
 internal/disklog TestRandomCrashesKeepAcknowledgedRecords 500

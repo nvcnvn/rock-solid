@@ -28,7 +28,7 @@ func FuzzDecode(f *testing.F) {
 		}
 		f.Add(bytes.Clone(msg.Inline()), body, msg.Buf != core.NoBuf)
 	}
-	for _, fo := range []fortify{{kind: kindFortify, from: 1, to: 2, term: 3}, {kind: kindFortified, from: 2, to: 1, term: 3, run: 9, support: 4}} {
+	for _, fo := range []fortify{{kind: kindFortify, from: 1, to: 2, term: 3}, {kind: kindFortified, from: 2, to: 1, term: 3, run: 9, support: 4}, {kind: kindMember, from: 3, to: 1}, {kind: kindRemoved, from: 1, to: 3, term: 40}} {
 		var msg core.Msg
 		encodeFortify(testGroup, &fo, &msg)
 		f.Add(bytes.Clone(msg.Inline()), []byte(nil), false)

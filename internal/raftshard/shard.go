@@ -107,9 +107,11 @@ type Shard struct {
 	lead    core.NodeID
 	leadID  uint64
 	lapseAt core.Tick
-	// plan is the voters the control plane drives the group toward, confTerm the term of a configuration change this leader proposed and has not applied, applied the index of the last entry handed over to apply, heard when this replica last heard from its leader, and removed whether it learned it left the group.
+	// plan is the voters the control plane drives the group toward, confTerm the term of a configuration change this leader proposed and has not applied, mark the commit index at markAt less a heartbeat, applied the index of the last entry handed over to apply, heard when this replica last heard from its leader, and removed whether it learned it left the group.
 	plan     []Peer
 	confTerm uint64
+	mark     uint64
+	markAt   core.Tick
 	applied  uint64
 	heard    core.Tick
 	removed  bool
@@ -129,7 +131,13 @@ type plants struct {
 func New(cfg Config) (*Shard, error) { return newShard(cfg, plants{}) }
 
 func newShard(cfg Config, p plants) (*Shard, error) {
+	// The state machine restarts from the storage's snapshot, which can be newer than its first entry, and its configuration is the snapshot's.
+	snap, err := cfg.Storage.Snapshot()
+	if err != nil {
+		return nil, err
+	}
 	rc := raftConfig(&cfg)
+	rc.Applied = snap.Metadata.Index
 	if p.unseeded {
 		rc.Rand = nil
 	}
@@ -137,16 +145,8 @@ func newShard(cfg Config, p plants) (*Shard, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, conf, err := cfg.Storage.InitialState()
-	if err != nil {
-		return nil, err
-	}
-	first, err := cfg.Storage.FirstIndex()
-	if err != nil {
-		return nil, err
-	}
 	cfg.Peers = slices.Clone(cfg.Peers)
-	return &Shard{cfg: cfg, rn: rn, plant: p, rng: rand.New(rand.NewPCG(cfg.Seed, 1)), conf: conf, applied: first - 1, fort: make([]fortified, len(cfg.Peers))}, nil
+	return &Shard{cfg: cfg, rn: rn, plant: p, rng: rand.New(rand.NewPCG(cfg.Seed, 1)), conf: snap.Metadata.ConfState, applied: snap.Metadata.Index, fort: make([]fortified, len(cfg.Peers))}, nil
 }
 
 func raftConfig(cfg *Config) *raft.Config {
@@ -435,7 +435,7 @@ func (s *Shard) peer(id uint64) int {
 // ready takes Readys until one must be durable, which becomes the round in flight; no Ready is taken while a round is.
 func (s *Shard) ready(ctx *core.Context, out *Output) {
 	if s.round == 0 {
-		s.reconcile()
+		s.reconcile(ctx.Now)
 	}
 	for s.round == 0 && s.rn.HasReady() {
 		rd := s.rn.Ready()
@@ -561,23 +561,29 @@ func member(cs *raftpb.ConfState, id uint64) bool {
 	return slices.Contains(cs.Voters, id) || slices.Contains(cs.VotersOutgoing, id) || slices.Contains(cs.Learners, id) || slices.Contains(cs.LearnersNext, id)
 }
 
-// reconcile has a leader that applied an entry of its term, with no configuration change in flight and none joint, propose the next change toward its plan. It runs only between rounds, so the change and the commit index it was judged at go out in one Ready.
-func (s *Shard) reconcile() {
-	if len(s.plan) == 0 || s.confTerm != 0 {
+// reconcile has a leader that applied an entry of its term, with no configuration change in flight
+// and none joint, propose the next change toward its plan. A learner counts as caught up once it
+// holds every entry committed by mark, the commit index of at most a heartbeat ago: one held to
+// the current commit index never catches up under steady writes over a slower link.
+func (s *Shard) reconcile(now core.Tick) {
+	if len(s.plan) == 0 {
 		return
 	}
 	st := s.rn.BasicStatus()
-	if st.RaftState != raft.StateLeader || s.committed != st.Term || len(s.conf.VotersOutgoing) != 0 {
+	if now >= s.markAt {
+		s.mark, s.markAt = st.Commit, now+HeartbeatTick*TickInterval
+	}
+	if s.confTerm != 0 || st.RaftState != raft.StateLeader || s.committed != st.Term || len(s.conf.VotersOutgoing) != 0 {
 		return
 	}
-	if cc, ok := s.change(st.Commit); ok && s.rn.ProposeConfChange(cc) == nil {
+	if cc, ok := s.change(s.mark); ok && s.rn.ProposeConfChange(cc) == nil {
 		s.confTerm = st.Term
 	}
 }
 
 // change is the next configuration change toward the plan: remove a learner the plan dropped; add
-// a planned replica the configuration lacks as a learner; swap a learner holding every entry
-// committed by commit for a voter the plan dropped, or promote it if none; remove a voter the plan
+// a planned replica the configuration lacks as a learner; swap a learner holding every entry up
+// to commit for a voter the plan dropped, or promote it if none; remove a voter the plan
 // dropped once every planned replica votes. The leader never removes itself.
 func (s *Shard) change(commit uint64) (raftpb.ConfChangeV2, bool) {
 	planned := func(id uint64) bool { return slices.ContainsFunc(s.plan, func(p Peer) bool { return p.ID == id }) }
