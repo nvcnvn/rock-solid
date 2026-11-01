@@ -208,13 +208,15 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Voter.** A replica that counts toward Raft's majority.
 
-**Learner.** A Raft replica that receives the log but does not vote. A new replica joins as a learner and becomes a voter only once it has caught up, so a group never waits on a member with an empty log. See [Replica placement and replacement](design.md#metadata-layer-metastore).
+**Learner.** A Raft replica that receives the log but does not vote. A new replica joins as a learner and becomes a voter only once it has caught up, holding every entry the leader had committed a heartbeat earlier, so a group never waits on a member with an empty log. See [Replica placement and replacement](design.md#metadata-layer-metastore).
 
 **Joint configuration, `ConfChangeV2`.** Raft's safe way to change a group's voters: for a while every decision needs a majority of the old voters and a majority of the new ones, so the two sets can never decide apart. etcd-raft's `ConfChangeV2` enters one and, by default, leaves it on its own.
 
 **Log compaction, Raft snapshot.** A Raft log cannot grow forever. Once entries are applied and the result saved, they are dropped; a replica too far behind to catch up from the log is sent a Raft snapshot, a copy of the applied state, instead.
 
 **Shard, Raft group, multi-Raft.** The metadata key space is cut into ranges, and each range is its own Raft group, called a shard. Running many groups (multi-Raft) spreads leaders, and so load, over every node, instead of sending every metadata write through one leader. A shard that grows too large **splits** in two.
+
+**Shard map.** The control plane's record, under `ctl/`, of which key range each shard holds and where each shard's three voters are meant to live. It is a plan: each group's own Raft log decides who its members are, and the group's leader changes them, one learner and one swap at a time, until they match the map. See [Replica placement and replacement](design.md#metadata-layer-metastore).
 
 **Redirect (not leader).** What a shard replica that is not the leader does with a request: it answers "not leader", naming the leader it knows, and the client resends there, rather than forwarding the request itself. The client then hears its result directly, and the request reaches the replica that keeps the shard's in-memory state. CockroachDB and TiKV redirect the same way. See [Metadata layer](design.md#metadata-layer-metastore).
 
