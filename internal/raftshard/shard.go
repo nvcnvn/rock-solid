@@ -454,7 +454,7 @@ func (s *Shard) peer(id uint64) int {
 // ready takes Readys until one must be durable, which becomes the round in flight; no Ready is taken while a round is.
 func (s *Shard) ready(ctx *core.Context, out *Output) {
 	if s.round == 0 {
-		s.reconcile(ctx.Now)
+		s.reconcile(ctx)
 	}
 	for s.round == 0 && !s.removed && s.rn.HasReady() {
 		rd := s.rn.Ready()
@@ -588,11 +588,13 @@ func member(cs *raftpb.ConfState, id uint64) bool {
 }
 
 // reconcile has a leader that applied an entry of its term, with no configuration change in flight
-// and none joint, propose the next change toward its plan; a leader the plan drops hands its
-// leadership to a planned voter instead, since it never removes itself. A learner counts as caught up once it
+// and none joint, propose the next change toward its plan. A leader never removes itself: one the
+// plan drops hands its leadership to a planned voter once one is ready, and until a planned voter
+// exists it adds and swaps in the planned replicas for the other dropped voters. A learner counts as caught up once it
 // holds every entry committed by mark, the commit index of at most a heartbeat ago: one held to
 // the current commit index never catches up under steady writes over a slower link.
-func (s *Shard) reconcile(now core.Tick) {
+func (s *Shard) reconcile(ctx *core.Context) {
+	now := ctx.Now
 	if len(s.plan) == 0 {
 		return
 	}
@@ -603,15 +605,30 @@ func (s *Shard) reconcile(now core.Tick) {
 	if s.confTerm == st.Term || st.RaftState != raft.StateLeader || s.committed != st.Term || len(s.conf.VotersOutgoing) != 0 {
 		return
 	}
-	if !s.planned(s.cfg.ID) {
-		if i := slices.IndexFunc(s.conf.Voters, s.planned); i >= 0 {
-			s.rn.TransferLeader(s.conf.Voters[i])
+	if !s.planned(s.cfg.ID) && slices.ContainsFunc(s.conf.Voters, s.planned) {
+		if id := s.target(lease.Now(ctx)); id != 0 {
+			s.rn.TransferLeader(id)
 		}
 		return
 	}
 	if cc, ok := s.change(s.mark); ok && s.rn.ProposeConfChange(cc) == nil {
 		s.confTerm = st.Term
 	}
+}
+
+// target is a planned voter to hand leadership to, or 0: one this leader holds a node-pair lease
+// from, so its node runs, being sent appends and caught up as a learner must be. etcd-raft drops
+// proposals while a transfer waits for its target to reach the leader's last index, so a down or
+// lagging target would stall them; a caught-up one makes that wait about a round trip.
+func (s *Shard) target(t lease.Time) uint64 {
+	var to uint64
+	s.rn.WithProgress(func(id uint64, _ raft.ProgressType, pr tracker.Progress) {
+		if i := s.peer(id); to == 0 && i >= 0 && id != s.cfg.ID && s.planned(id) && !pr.IsLearner &&
+			pr.State == tracker.StateReplicate && pr.Match >= s.mark && s.cfg.Holder.Valid(s.cfg.Peers[i].Node, t) {
+			to = id
+		}
+	})
+	return to
 }
 
 func (s *Shard) planned(id uint64) bool {
@@ -643,7 +660,7 @@ func (s *Shard) change(commit uint64) (raftpb.ConfChangeV2, bool) {
 			return cc, true
 		}
 	}
-	dropped := slices.IndexFunc(s.conf.Voters, func(id uint64) bool { return !planned(id) })
+	dropped := slices.IndexFunc(s.conf.Voters, func(id uint64) bool { return id != s.cfg.ID && !planned(id) })
 	var ready uint64
 	s.rn.WithProgress(func(id uint64, _ raft.ProgressType, pr tracker.Progress) {
 		if ready == 0 && pr.IsLearner && (pr.Match >= commit || s.plant.eager) {

@@ -272,6 +272,7 @@ func TestARemovalNoticeFromALaggingPeerIsIgnored(t *testing.T) {
 // A leader the plan drops hands its leadership to a planned voter, which then carries out the replacement.
 func TestALeaderThePlanDropsTransfersLeadership(t *testing.T) {
 	n := newReplaceNet(t, plants{})
+	n.leases(rA, rB, rC)
 	plan := []Peer{{ID: 2, Node: core.NodeID{Node: 1}}, {ID: 3, Node: core.NodeID{Node: 2}}, {ID: 4, Node: core.NodeID{Node: 3}}}
 	for _, r := range n.r {
 		r.s.SetPlan(plan)
@@ -324,5 +325,55 @@ func TestAPartitionedLeaderLearnsItWasRemoved(t *testing.T) {
 			t.Fatal("A never learned it was removed")
 		}
 		n.heartbeat()
+	}
+}
+
+// A leader the plan drops transfers only to a planned voter whose node runs and that holds its
+// log: etcd-raft drops proposals while a transfer waits, so a transfer to a down voter stalls them.
+func TestALeaderTransfersOnlyToAPlannedVoterThatIsUp(t *testing.T) {
+	n := newReplaceNet(t, plants{})
+	n.leases(rA, rC)
+	n.r[rA].s.SetPlan([]Peer{{ID: 2, Node: core.NodeID{Node: 1}}, {ID: 3, Node: core.NodeID{Node: 2}}, {ID: 4, Node: core.NodeID{Node: 3}}})
+	n.propose(rA, []byte("a"))
+	for range 3 {
+		if to := n.r[rA].s.rn.Status().LeadTransferee; to == 2 {
+			t.Fatal("A transfers to B, which is down")
+		}
+		n.heartbeat(rB, rD)
+	}
+	if st := n.r[rC].s.rn.BasicStatus(); st.RaftState != raft.StateLeader {
+		t.Fatalf("C is %v, want leader after A's transfer", st.RaftState)
+	}
+}
+
+// With no planned voter yet, a leader the plan drops swaps the planned replicas in for the other voters first.
+func TestALeaderThePlanDropsWithEveryVoterSwapsTheOthersFirst(t *testing.T) {
+	n := newConfNet(t, 6, 1, func(i int) *raft.MemoryStorage {
+		if i >= 3 {
+			return raft.NewMemoryStorage()
+		}
+		return bootStorage(3)
+	})
+	n.elect(rA)
+	n.leases(rA, 3, 4, 5)
+	for _, r := range n.r {
+		r.s.SetPlan([]Peer{{ID: 4, Node: core.NodeID{Node: 3}}, {ID: 5, Node: core.NodeID{Node: 4}}, {ID: 6, Node: core.NodeID{Node: 5}}})
+	}
+	// The new replicas hear nothing until all three joined, so the first snapshot they get holds them.
+	for range 5 {
+		n.heartbeat(3, 4, 5)
+	}
+	for range 20 {
+		for i := range 6 {
+			if n.r[i].s.rn.BasicStatus().RaftState == raft.StateLeader {
+				n.snapshot(i)
+			}
+		}
+		n.heartbeat()
+	}
+	for i := 3; i < 6; i++ {
+		if c := n.conf(i); !slices.Equal(sorted(c.Voters), []uint64{4, 5, 6}) || len(c.VotersOutgoing) != 0 {
+			t.Fatalf("replica %d ends in %+v", i, c)
+		}
 	}
 }
