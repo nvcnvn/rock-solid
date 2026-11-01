@@ -29,9 +29,7 @@ type Config struct {
 type Answer struct {
 	Token  uint64
 	Result Result
-	// Err is raft.ErrProposalDropped for a Txn that may not have applied, as when this replica
-	// stopped leading or restored a snapshot, or ErrMalformed for one in an entry that did not
-	// decode; a caller resends a client Txn under its replay key and reads again for an internal one.
+	// Err is raft.ErrProposalDropped for a Txn that may or may not have applied, or ErrMalformed.
 	Err error
 }
 
@@ -47,8 +45,7 @@ func (o *Output) Reset() {
 	o.Answers = o.Answers[:0]
 }
 
-// Shard is one replica of a MetaStore shard: a Raft replica whose leader gathers the Txns that
-// arrive during a round into one log entry, and the state machine every replica applies it to.
+// Shard is one replica of a MetaStore shard: its Raft replica and its state machine.
 type Shard struct {
 	raft  *raftshard.Shard
 	state *State
@@ -95,8 +92,7 @@ func NewShard(cfg Config) (*Shard, error) {
 	return s, nil
 }
 
-// Raft is the replica, for the calls that hand no entries over; Start, OnEvent, Durable and
-// ReadIndex go through the shard, which applies what they hand over.
+// Raft is the replica, for calls that hand no entries over: Start, OnEvent, Durable and ReadIndex go through the shard.
 func (s *Shard) Raft() *raftshard.Shard { return s.raft }
 
 // State is the replica's state machine.
@@ -122,10 +118,10 @@ func (s *Shard) ReadIndex(ctx *core.Context, rctx []byte, out *Output) {
 	s.dropIfRemoved()
 }
 
-// Durable reports the round in flight durable, as raftshard.Shard.Durable, after proposing the
-// Txns gathered during it as one entry, which the next round carries.
+// Durable reports the round in flight durable, as raftshard.Shard.Durable, after proposing the Txns gathered during it.
 func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
 	s.out = out
+	// The Txns that arrived during the round go out as one entry, which the next round carries.
 	if len(s.queued) > 0 {
 		s.propose(ctx)
 	}
@@ -133,11 +129,10 @@ func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
 	s.dropIfRemoved()
 }
 
-// Txn takes t, which an Answer under token settles, if this replica leads: proposed at once
-// when no round is in flight, or else gathered with the others arriving during the round into
-// one entry the round's Durable proposes. A Txn outside the limits is refused with Check's
-// error, and one a follower or candidate takes with raft.ErrProposalDropped.
+// Txn proposes t, which an Answer under token settles, or refuses it with Check's error or, off the leader, raft.ErrProposalDropped.
 func (s *Shard) Txn(ctx *core.Context, t *Txn, token uint64, out *Output) error {
+	// A Txn is proposed at once when no round is in flight, or else gathered with the others
+	// arriving during the round into one entry, which the round's Durable proposes.
 	n, err := t.Check()
 	if err != nil {
 		return err

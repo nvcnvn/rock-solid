@@ -159,10 +159,9 @@ type ScanResult struct {
 	buf  []byte
 }
 
-// Scan reads [start, end) as of the last applied entry, at most limit keys and MaxScanBytes of
-// keys and values, into r; a nil end runs to the end of the key space. A caller resumes with
-// start = last key + 0x00, so a bound may be MaxKey + 1 bytes.
+// Scan reads [start, end), a nil end the rest of the key space, into r: at most limit keys and MaxScanBytes of keys and values.
 func (s *State) Scan(start, end []byte, limit int, r *ScanResult) error {
+	// A caller resumes with start = last key + 0x00, so a bound may be MaxKey + 1 bytes.
 	if limit < 1 {
 		return ErrLimit
 	}

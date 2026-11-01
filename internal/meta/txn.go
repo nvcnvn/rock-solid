@@ -19,8 +19,7 @@ const (
 	MaxTxnBytes = 256 << 10
 	// MaxScanBytes is max_scan_bytes, the most keys and values a Scan returns.
 	MaxScanBytes = 256 << 10
-	// MaxReplayUpdates is the most Updates a Txn with a replay key holds, so that its record, a
-	// byte and each Update's 8, fits MaxValue.
+	// MaxReplayUpdates is the most Updates a Txn with a replay key holds, so its record, a byte and 8 per Update, fits MaxValue.
 	MaxReplayUpdates = (MaxValue - 1) / 8
 	// requestBytes is the request ID that ends a replay key, big-endian, after the prefix its mount's records share.
 	requestBytes = 8
@@ -117,8 +116,7 @@ func Update(key []byte, off uint16, mode Mode, n uint64) Op {
 	return Op{Kind: OpUpdate, Key: key, Off: off, Mode: mode, N: n}
 }
 
-// Txn is a shard's transaction: its checks against the state before it, then its writes in list
-// order, all or nothing.
+// Txn is a shard's transaction: its checks against the state before it, then its writes in list order, all or nothing.
 type Txn struct {
 	Ops []Op
 	// Replay is the replay record's key, ending in the request's 8-byte big-endian ID, or nil for an internal Txn.
