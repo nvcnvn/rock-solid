@@ -30,6 +30,9 @@ type replica struct {
 	reads   []raft.ReadState
 	// forts are the fortification messages the replica sent in the last call.
 	forts []fortify
+	// snaps counts the snapshots it restored, and removed whether it learned it left the group.
+	snaps   int
+	removed bool
 }
 
 type envelope struct {
@@ -156,6 +159,10 @@ func (n *testNet) call(i int, f func(ctx *core.Context, out *Output)) []raftpb.M
 	if !n.lean {
 		r.applied = append(r.applied, r.out.Committed...)
 		r.reads = append(r.reads, r.out.Reads...)
+		if !raft.IsEmptySnap(r.out.Snapshot) {
+			r.snaps++
+		}
+		r.removed = r.removed || r.out.Removed
 	}
 	if r.out.Flush != 0 {
 		if r.flush != 0 {
@@ -514,7 +521,7 @@ func TestUndecodableMessagesAreDroppedAndCounted(t *testing.T) {
 		"forwarded proposal":     frame(raftpb.Message{Type: raftpb.MsgProp, To: 2, From: 1, Entries: []raftpb.Entry{{Data: []byte("x")}}}),
 		"buffer length past end": buffered(head(core.BlockSize+1), 10),
 		"buffer header short":    buffered(head(3)[:kindBytes+1], 10),
-		"unknown kind":           fort(kindFortified+1, 40),
+		"unknown kind":           fort(kindRemoved+1, 40),
 		"short fortification":    fort(kindFortify, 39),
 		"long fortification":     fort(kindFortified, 41),
 		"buffered fortification": buffered(append(append(le.AppendUint64(nil, testGroup), kindFortify), make([]byte, 40)...), 10),
