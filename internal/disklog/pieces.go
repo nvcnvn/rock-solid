@@ -47,7 +47,11 @@ func (p *pieceSet) add(ref BlobRef, lo, hi uint32) {
 	if !ok {
 		i = len(p.recs)
 		p.at[ref.LSN] = i
-		p.recs = append(p.recs, pieceRecord{lsn: ref.LSN, segment: ref.Segment})
+		var spans []pieceSpan
+		if i < cap(p.recs) {
+			spans = p.recs[:i+1][i].spans[:0]
+		}
+		p.recs = append(p.recs, pieceRecord{lsn: ref.LSN, segment: ref.Segment, spans: spans})
 	}
 	p.recs[i].spans = append(p.recs[i].spans, pieceSpan{entry: ref.Entry, lo: lo, hi: hi})
 	p.in[ref.Segment]++
@@ -80,7 +84,7 @@ func (p *pieceSet) drop(ref BlobRef) uint32 {
 	}
 	if len(rec.spans) == 0 {
 		last := len(p.recs) - 1
-		p.recs[i] = p.recs[last]
+		p.recs[i], p.recs[last] = p.recs[last], p.recs[i]
 		p.at[p.recs[i].lsn] = i
 		p.recs = p.recs[:last]
 		delete(p.at, ref.LSN)
@@ -165,8 +169,10 @@ func (l *Log) PiecesDead(refs []BlobRef) error {
 	return nil
 }
 
-func (l *Log) dropPiece(ref BlobRef) {
-	if n := l.pieces.drop(ref); n > 0 {
+func (l *Log) dropPiece(ref BlobRef) { l.dropFrom(&l.pieces, ref) }
+
+func (l *Log) dropFrom(set *pieceSet, ref BlobRef) {
+	if n := set.drop(ref); n > 0 {
 		u := &l.usage[ref.Segment]
 		if u.Live < n {
 			panic(fmt.Sprintf("disklog: segment %d counts %d live blocks, fewer than the %d its dead piece %+v held", ref.Segment, u.Live, n, ref))
@@ -174,6 +180,26 @@ func (l *Log) dropPiece(ref BlobRef) {
 		u.Live -= n
 		l.changed[ref.Segment/64] |= 1 << (ref.Segment % 64)
 	}
+}
+
+// RaftBlobsDead reports Raft blobs, of kinds BlobRaftEntries and BlobRaftState, their shard no
+// longer needs: their blocks no other live Raft blob shares leave the usage table's live count at
+// once, since Cleanable keeps a segment holding records past the replay points. ErrMalformed for a
+// blob the log does not hold.
+func (l *Log) RaftBlobsDead(refs []BlobRef) error {
+	for _, ref := range refs {
+		if !l.raft.holds(ref) {
+			return ErrMalformed
+		}
+	}
+	for _, ref := range refs {
+		l.dropFrom(&l.raft, ref)
+	}
+	return nil
+}
+
+func isRaftKind(e *Entry) bool {
+	return e.Kind == EntryBlob && (e.BlobKind == BlobRaftEntries || e.BlobKind == BlobRaftState)
 }
 
 // HoldsPiece reports whether segment holds a run or manifest piece that a manifest recovery may load, a running checkpoint or a running merge still needs; after a rebuild, which reads no run, every metadata segment does until a segment header names a manifest written since.
@@ -187,15 +213,20 @@ func (l *Log) HoldsPiece(segment uint32) bool {
 // registerBlobs adds the run and manifest pieces of a durable round to the live pieces: a run
 // piece until its owner reports it dead, a manifest piece of the running checkpoint until a
 // segment header names a manifest that no longer lists it, and drops at once a manifest piece of
-// a checkpoint that failed meanwhile.
+// a checkpoint that failed meanwhile. Its Raft blobs stay live until their shard reports them dead.
 func (l *Log) registerBlobs(r *round) {
 	for i := range r.entries {
 		e := &r.entries[i]
-		if e.Kind != EntryBlob || !isCheckpointKind(e) {
+		raft := isRaftKind(e)
+		if !raft && !isCheckpointKind(e) {
 			continue
 		}
 		ref := BlobRef{Segment: r.segment, Block: r.block, LSN: r.lsn, Entry: uint16(i)}
 		lo, hi := spanOf(r.block, r.headerBlocks, r.payloads[i], e.Length)
+		if raft {
+			l.raft.add(ref, lo, hi)
+			continue
+		}
 		l.pieces.add(ref, lo, hi)
 		if isManifestKind(e) && (l.cp == nil || r.tickets[i] != l.cp.piece) {
 			l.dropPiece(ref)
@@ -259,14 +290,15 @@ func (l *Log) listsPiece(ref BlobRef) bool {
 
 // Recount sets every used segment's live blocks from what still needs them, as the owner does at
 // open once its index holds every record: a segment of the metadata stream counts the blocks of
-// its live pieces, any other the record counts chunk names for it, nothing past its end. The
-// manifest's live counts are therefore only advice, and steps written but never named, or
-// pieces reported dead before a crash, count nothing.
+// its live pieces, any other the record counts chunk names for it, nothing past its end, and the
+// blocks of its live Raft blobs. The manifest's live counts are therefore only advice, and steps
+// written but never named, or pieces reported dead before a crash, count nothing.
 func (l *Log) Recount(chunk []uint32) { l.recount(chunk, true) }
 
 func (l *Log) recount(chunk []uint32, all bool) {
-	meta := make([]uint32, l.sb.SegmentCount)
+	meta, raft := make([]uint32, l.sb.SegmentCount), make([]uint32, l.sb.SegmentCount)
 	l.pieces.coverage(meta)
+	l.raft.coverage(raft)
 	for s := uint32(1); s < l.sb.SegmentCount; s++ {
 		u := &l.usage[s]
 		if u.State == SegmentFree || u.State == SegmentSlot {
@@ -280,9 +312,9 @@ func (l *Log) recount(chunk []uint32, all bool) {
 			if !all {
 				continue
 			}
-			live = 0
+			live = raft[s]
 			if s < uint32(len(chunk)) {
-				live = chunk[s]
+				live += chunk[s]
 			}
 		}
 		if u.Live != live {

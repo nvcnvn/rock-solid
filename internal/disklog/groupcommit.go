@@ -556,6 +556,7 @@ type Log struct {
 	writes     Writes
 	writtenAt  []uint64
 	pieces     pieceSet
+	raft       pieceSet
 	trims      trimState
 	now        core.Tick
 	dying      []dyingPiece
@@ -642,6 +643,7 @@ func newLog(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID) (*L
 		written:    sb.DiskBlocks(),
 		writtenAt:  make([]uint64, sb.SegmentCount),
 		pieces:     newPieceSet(sb.SegmentCount),
+		raft:       newPieceSet(sb.SegmentCount),
 		lanes:      make([]lane, laneMeta+1+workers),
 		rounds:     make([]round, cfg.CommitDepth),
 	}
