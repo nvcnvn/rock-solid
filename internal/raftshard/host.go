@@ -15,7 +15,8 @@ import (
 // which rounds each Durable event completes, and reports a round's blobs dead once a restart no
 // longer needs them: every index the round holds is compacted, and a later durable round holds a
 // newer hard state, else the shard's term and vote would be lost. A round whose blobs the pool has
-// no buffers for waits until a later Durable event. A log that fails takes its shards with it.
+// no buffers for waits until a later Durable event or the driver's Retry. A log that fails takes
+// its shards with it.
 type Host struct {
 	// Log is the disk's log: set before any Write, and by Recovered after a restart's replay.
 	Log     *disklog.Log
@@ -156,10 +157,11 @@ func (h *Host) Durable(ctx *core.Context, ev *disklog.Event, out *disklog.Output
 		h.flights, h.head = h.flights[:0], 0
 	}
 	h.bury()
-	return dst, h.retry(ctx, out)
+	return dst, h.Retry(ctx, out)
 }
 
-func (h *Host) retry(ctx *core.Context, out *disklog.Output) error {
+// Retry submits the rounds waiting for pool buffers that now fit; the driver calls it on its timer.
+func (h *Host) Retry(ctx *core.Context, out *disklog.Output) error {
 	n := 0
 	for _, owner := range h.waiting {
 		k, ok := h.at[owner]

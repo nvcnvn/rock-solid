@@ -284,6 +284,37 @@ func TestARoundWaitsForPoolBuffers(t *testing.T) {
 	}
 }
 
+// A round waiting for pool buffers with nothing in flight goes out once the driver's timer retries it.
+func TestAWaitingRoundGoesOutOnRetryWithNothingInFlight(t *testing.T) {
+	r := newRig(t)
+	r.host.Add(5, NewStorage())
+	var fill []core.IOBuf
+	for {
+		b, err := r.ctx.Pool.Alloc(4 << 10)
+		if err != nil {
+			break
+		}
+		fill = append(fill, b)
+	}
+	r.write(5, 1, &Round{Entries: entries(1, 1, 1, 100)})
+	r.run()
+	if len(r.host.waiting) != 1 || r.host.Log.InFlight() != 0 {
+		t.Fatalf("%d rounds wait and %d writes are in flight, want 1 and 0", len(r.host.waiting), r.host.Log.InFlight())
+	}
+	for _, b := range fill {
+		r.ctx.Pool.Free(b)
+	}
+	r.run()
+	if err := r.host.Retry(&r.ctx, &r.out); err != nil {
+		t.Fatal(err)
+	}
+	r.absorb()
+	r.run()
+	if d := r.takeDone(); len(d) != 1 || d[0] != (Done{Owner: 5, Round: 1}) {
+		t.Fatalf("done %v, want owner 5's waiting round", d)
+	}
+}
+
 // A chunk write and two shards' rounds submitted together go out in one record, with one write and one flush.
 func TestAChunkWriteAndTwoShardsRoundsShareOneRecord(t *testing.T) {
 	r := newRig(t)
