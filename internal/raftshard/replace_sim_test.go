@@ -79,7 +79,7 @@ func newReplaceCluster(seed uint64, p plants, set sim.Settings, crash, pauseD bo
 	rng := core.NewRand(seed ^ 0x7e91ace)
 	return newCluster(seed, p, set, &replacement{crash: crash, pauseD: pauseD, dead: -1,
 		cutAt: 2_000_000 + core.Tick(rng.Below(2_000_001)), planDelay: core.Tick(rng.Below(2_000_001)),
-		early: rng.Chance(1, 2), healDelay: core.Tick(rng.Below(1_000_001)), cutLeader: crash && rng.Chance(1, 2)})
+		early: rng.Chance(1, 2), healDelay: core.Tick(rng.Below(1_000_001)), cutLeader: crash && rng.Chance(1, 2)}, nil)
 }
 
 // replace moves the replacement on after a step: cut a follower off, hand every replica the plan, reconnect the removed one.

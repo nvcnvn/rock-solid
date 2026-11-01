@@ -154,7 +154,7 @@ func TestReplayLaterRecordsWin(t *testing.T) {
 }
 
 // A round larger than a blob goes out as several, and only its last, of kind BlobRaftState,
-// applies it: a round torn before its last blob changes nothing.
+// applies it: a round torn before its last blob changes nothing, nor does one missing its first.
 func TestARoundSpansBlobsAndATornOneChangesNothing(t *testing.T) {
 	r := &Round{
 		Snapshot:  raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 9, Term: 2, ConfState: raftpb.ConfState{Voters: []uint64{1, 2, 3}, Learners: []uint64{4}}}, Data: []byte("state")},
@@ -173,6 +173,15 @@ func TestARoundSpansBlobsAndATornOneChangesNothing(t *testing.T) {
 	}
 	if last, _ := torn.LastIndex(); last != 0 || torn.HardState() != (raftpb.HardState{}) {
 		t.Fatalf("a torn round left last %d, hard state %+v", last, torn.HardState())
+	}
+	headless := NewStorage()
+	for _, b := range bs[1:] {
+		if err := headless.Replay(b.kind, b.payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if last, _ := headless.LastIndex(); last != 0 || headless.HardState() != (raftpb.HardState{}) {
+		t.Fatalf("a round missing its first blob left last %d, hard state %+v", last, headless.HardState())
 	}
 	st := NewStorage()
 	replay(t, st, &Round{Entries: ents(1, 1, 20, 10)}, 1<<20)
@@ -216,7 +225,7 @@ func FuzzDecodeRound(f *testing.F) {
 			t.Fatalf("decoded record encodes as %x, was %x", again, b)
 		}
 		st := NewStorage()
-		_ = st.Replay(disklog.BlobRaftState, b)
+		_ = st.Replay(disklog.BlobRaftState, append([]byte{1}, b...))
 	})
 }
 

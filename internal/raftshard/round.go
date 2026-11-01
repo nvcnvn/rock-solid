@@ -22,7 +22,9 @@ type Round struct {
 // payload) and the hard state (term, vote, commit), little-endian, in that order: replaying a
 // snapshot drops the entries before it, and a hard state's commit index needs its entries. It goes
 // to the log as blobs of at most a record each, every one but the last of kind BlobRaftEntries
-// and the last of kind BlobRaftState, so a round torn at the log's tail is dropped whole.
+// and the last of kind BlobRaftState, so a round torn at the log's tail is dropped whole. Each
+// blob starts with a byte that is 1 for a round's first blob and 0 for the others: a torn round
+// stays in the log, and a replay after a later crash meets it again just before the next round.
 const (
 	flagSnapshot byte = 1 << iota
 	flagEntries
@@ -76,33 +78,36 @@ func AppendRound(dst []byte, r *Round) []byte {
 	return dst
 }
 
-// RoundItems cuts a round's record into blob items for owner of at most maxBlob bytes each, every
-// one in a pool buffer, and appends them to dst; on an error it frees what it took.
+// RoundItems cuts a round's record into blob items for owner of at most maxBlob bytes each, at
+// least 2, every one in a pool buffer, and appends them to dst; on an error it frees what it took.
 func RoundItems(pool core.BufPool, owner uint32, maxBlob uint64, rec []byte, dst []disklog.Item) ([]disklog.Item, error) {
 	n := len(dst)
-	for len(rec) > 0 {
-		k := min(uint64(len(rec)), maxBlob)
-		buf, err := pool.Alloc(int(k))
+	for first := byte(1); len(rec) > 0; first = 0 {
+		k := min(uint64(len(rec)), maxBlob-1)
+		buf, err := pool.Alloc(int(k + 1))
 		if err != nil {
 			for _, it := range dst[n:] {
 				pool.Free(it.Buf)
 			}
 			return dst[:n], err
 		}
-		copy(pool.Bytes(buf), rec[:k])
+		b := pool.Bytes(buf)
+		b[0] = first
+		copy(b[1:], rec[:k])
 		rec = rec[k:]
 		kind := disklog.BlobRaftEntries
 		if len(rec) == 0 {
 			kind = disklog.BlobRaftState
 		}
-		dst = append(dst, disklog.Item{Entry: disklog.BlobEntry(kind, owner, k), Buf: buf})
+		dst = append(dst, disklog.Item{Entry: disklog.BlobEntry(kind, owner, k+1), Buf: buf})
 	}
 	return dst, nil
 }
 
 // Replay applies a replayed blob of the storage's owner: a round is applied once its last blob,
-// of kind BlobRaftState, arrives, as a later record replaces what an earlier one wrote. A round
-// that does not decode is ErrBadRound and changes nothing.
+// of kind BlobRaftState, arrives, as a later record replaces what an earlier one wrote. A round's
+// first blob drops a round before it still missing its last, and a round whose first blob replay
+// did not see is dropped. A round that does not decode is ErrBadRound and changes nothing.
 func (s *Storage) Replay(kind disklog.BlobKind, payload []byte) error {
 	_, err := s.replay(kind, payload)
 	return err
@@ -110,17 +115,21 @@ func (s *Storage) Replay(kind disklog.BlobKind, payload []byte) error {
 
 // replay is Replay, also returning the summary of the round its last blob applied.
 func (s *Storage) replay(kind disklog.BlobKind, payload []byte) (summary, error) {
-	switch kind {
-	case disklog.BlobRaftEntries:
-		s.pending = append(s.pending, payload...)
-		return summary{}, nil
-	case disklog.BlobRaftState:
-	default:
+	if len(payload) < 2 || payload[0] > 1 || kind != disklog.BlobRaftEntries && kind != disklog.BlobRaftState {
 		return summary{}, ErrBadRound
 	}
-	rec := payload
+	if payload[0] == 1 {
+		s.pending = s.pending[:0]
+	} else if len(s.pending) == 0 {
+		return summary{}, nil
+	}
+	if kind == disklog.BlobRaftEntries {
+		s.pending = append(s.pending, payload[1:]...)
+		return summary{}, nil
+	}
+	rec := payload[1:]
 	if len(s.pending) > 0 {
-		s.pending = append(s.pending, payload...)
+		s.pending = append(s.pending, rec...)
 		rec = s.pending
 	}
 	var r Round

@@ -253,7 +253,8 @@ func (h *Host) Remove(owner uint32) {
 }
 
 // Replayed takes a Replayed event of a restart's recovery, before Recovered: each hosted shard's
-// rounds go to its storage, and the blobs of an owner not hosted are dead.
+// rounds go to its storage, and the blobs of an owner not hosted, or of a round a later one's
+// first blob shows was torn, are dead.
 func (h *Host) Replayed(ev *disklog.Event) error {
 	for i := range ev.Entries {
 		e := &ev.Entries[i]
@@ -267,8 +268,13 @@ func (h *Host) Replayed(ev *disklog.Event) error {
 			continue
 		}
 		hd := &h.shards[k]
+		b := ev.Blob(i)
+		if len(b) > 0 && b[0] == 1 {
+			h.dead = append(h.dead, hd.refs[hd.closed:]...)
+			hd.refs = hd.refs[:hd.closed]
+		}
 		hd.refs = append(hd.refs, ref)
-		sum, err := hd.st.replay(e.BlobKind, ev.Blob(i))
+		sum, err := hd.st.replay(e.BlobKind, b)
 		if err != nil {
 			return err
 		}

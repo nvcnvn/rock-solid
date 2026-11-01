@@ -399,3 +399,26 @@ func BenchmarkHostRound(b *testing.B) {
 		round()
 	}
 }
+
+// Regression (seed 5003 of TestCommittedEntriesSurviveCrashesOnTheDiskLog): a round torn at the
+// log's tail stays in the log, so the replay after a second crash meets its first blob again, and
+// the rounds written after the first restart must not be read as its continuation.
+func TestATornRoundIsDroppedAgainAfterALaterCrash(t *testing.T) {
+	r := newRig(t)
+	r.host.Add(5, NewStorage())
+	r.write(5, 1, &Round{Entries: entries(1, 1, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 5}})
+	r.run()
+	r.durable, r.done = nil, nil
+	r.write(5, 2, &Round{Entries: entries(2, 3, 1, 10<<10)})
+	for len(r.durable) == 0 {
+		r.step()
+	}
+	r.crash(5)
+	hs := raftpb.HardState{Term: 2, Vote: 5, Commit: 1}
+	r.write(5, 1, &Round{Entries: entries(2, 1, 2, 100), HardState: hs})
+	r.run()
+	sts := r.crash(5)
+	if last, _ := sts[5].LastIndex(); last != 2 || sts[5].HardState() != hs {
+		t.Fatalf("after the second crash owner 5 holds up to %d with hard state %+v, want 2 and %+v", last, sts[5].HardState(), hs)
+	}
+}
