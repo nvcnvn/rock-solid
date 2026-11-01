@@ -140,6 +140,7 @@ func (s *Storage) replay(kind disklog.BlobKind, payload []byte) (summary, error)
 	}
 	if r.Snapshot.Metadata.Index != 0 && r.Snapshot.Metadata.Index > s.base.Index {
 		s.base, s.ents, s.chunks, s.first = r.Snapshot.Metadata, s.ents[:0], nil, 0
+		s.data = append([]byte(nil), r.Snapshot.Data...)
 	}
 	if len(r.Entries) > 0 {
 		if r.Entries[0].Index > s.last()+1 {

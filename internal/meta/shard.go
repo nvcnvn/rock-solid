@@ -75,11 +75,17 @@ type proposal struct {
 	buf  []byte
 }
 
-// NewShard starts a replica from its Raft storage, its state empty at the storage's base.
+// NewShard starts a replica from its Raft storage, its state at the storage's base: the restored snapshot's a replay made it, or else empty.
 func NewShard(cfg Config) (*Shard, error) {
-	st, err := NewState(cfg.Tree, cfg.Raft.Storage.Base().Index)
+	base := cfg.Raft.Storage.Base().Index
+	st, err := NewState(cfg.Tree, base)
 	if err != nil {
 		return nil, err
+	}
+	if data := cfg.Raft.Storage.TakeBaseData(); data != nil {
+		if err := st.Restore(base, data); err != nil {
+			return nil, err
+		}
 	}
 	s := &Shard{state: st, id: cfg.Raft.ID}
 	cfg.Raft.SnapshotData, cfg.Raft.Apply, cfg.Raft.CheckSnapshot = st.SnapshotData, s.apply, CheckSnapshot

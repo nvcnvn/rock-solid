@@ -11,6 +11,7 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
@@ -28,6 +29,8 @@ type node struct {
 	flush   uint64
 	answers map[uint64]Answer
 	rounds  []int
+	// recs are the records of the rounds it took, which a restart replays as the disk log would.
+	recs [][]byte
 	// late holds what the replica handed over, for a shard that applies it only once the call returns.
 	late []raftpb.Entry
 }
@@ -55,16 +58,32 @@ func newGroup(t testing.TB, size int, late bool) *group {
 		cs.Voters = append(cs.Voters, uint64(i)+1)
 	}
 	for range size {
-		st := raftshard.NewStorage()
-		if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 1, Term: 1, ConfState: cs}}); err != nil {
-			t.Fatal(err)
-		}
-		c.n = append(c.n, &node{st: st, pool: sim.NewPool(64<<20, 0)})
+		c.n = append(c.n, &node{st: bootStorage(t, cs), pool: sim.NewPool(64<<20, 0)})
 	}
 	for i := range size {
 		c.start(i)
 	}
 	return c
+}
+
+func bootStorage(t testing.TB, cs raftpb.ConfState) *raftshard.Storage {
+	st := raftshard.NewStorage()
+	if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 1, Term: 1, ConfState: cs}}); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// restart crashes replica i and starts it on a storage rebuilt from its boot base and its rounds' records.
+func (c *group) restart(i int) {
+	r := c.n[i]
+	r.st = bootStorage(c.t, raftpb.ConfState{Voters: []uint64{1, 2, 3}})
+	for _, rec := range r.recs {
+		if err := r.st.Replay(disklog.BlobRaftState, append([]byte{1}, rec...)); err != nil {
+			c.t.Fatal(err)
+		}
+	}
+	c.start(i)
 }
 
 // start starts replica i from its storage, as after a crash: its state empty at the storage's base.
@@ -129,6 +148,7 @@ func (c *group) call(i int, f func(ctx *core.Context, out *Output)) {
 			c.t.Fatalf("replica %d took round %d with round %d in flight", i, r.out.Raft.Flush, r.flush)
 		}
 		r.flush = r.out.Raft.Flush
+		r.recs = append(r.recs, raftshard.AppendRound(nil, &r.out.Raft.Round))
 		n := 0
 		for _, e := range r.out.Raft.Round.Entries {
 			if e.Type == raftpb.EntryNormal && len(e.Data) > 0 {
@@ -221,6 +241,13 @@ func (c *group) elect() int {
 	}
 	c.t.Fatal("no leader")
 	return -1
+}
+
+// heartbeat ticks for a heartbeat, so a leader tells every replica its commit index.
+func (c *group) heartbeat() {
+	for range raftshard.HeartbeatTick {
+		c.tick()
+	}
 }
 
 // tick moves the clock 10 ms, hands every replica not cut off a timer event and settles.
@@ -369,9 +396,7 @@ func TestTxnsOutsideTheLeadersLogAreAnsweredDropped(t *testing.T) {
 	nl := c.elect()
 	c.cut[l] = false
 	c.txn(nl, ops(Put(b("c"), b("1"))), 4)
-	for range raftshard.HeartbeatTick {
-		c.tick()
-	}
+	c.heartbeat()
 	for _, token := range []uint64{2, 3} {
 		if a := c.answer(l, token); !errors.Is(a.Err, raft.ErrProposalDropped) {
 			t.Fatalf("token %d of the deposed leader answered %+v", token, a)
@@ -384,8 +409,8 @@ func TestTxnsOutsideTheLeadersLogAreAnsweredDropped(t *testing.T) {
 	if _, ok := get(c.n[l].s.State(), "lost"); ok {
 		t.Fatal("a Txn answered dropped applied")
 	}
-	c.start(f)
-	c.tick()
+	c.restart(3 - l - nl)
+	c.heartbeat()
 	c.agree()
 }
 
@@ -430,6 +455,9 @@ func TestASnapshotHoldsTheEntriesHandedOverInItsCall(t *testing.T) {
 			if c.n[f].st.Base().Index <= 1 {
 				t.Fatal("the cut-off follower restored no snapshot")
 			}
+			c.agree()
+			c.restart(f)
+			c.heartbeat()
 			c.agree()
 			return nil
 		}()
