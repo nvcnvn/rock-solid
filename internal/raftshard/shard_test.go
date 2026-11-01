@@ -9,20 +9,26 @@ import (
 	"go.etcd.io/raft/v3/tracker"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
 const testGroup = 5
 
-// replica is one shard of a testNet with its durable storage, pool, pending flush and what it applied.
+// replica is one shard of a testNet with its durable storage, pool, node-pair leases, pending flush and what it applied; its raw clock runs rawLag behind CLOCK_BOOTTIME.
 type replica struct {
 	s       *Shard
 	st      *raft.MemoryStorage
 	pool    *sim.Pool
+	holder  *lease.Holder
+	grantor *lease.Grantor
+	rawLag  core.Tick
 	out     Output
 	ctx     core.Context
 	flush   uint64
 	applied []raftpb.Entry
+	// forts are the fortification messages the replica sent in the last call.
+	forts []fortify
 }
 
 type envelope struct {
@@ -38,16 +44,21 @@ type testNet struct {
 	r     []*replica
 	inbox []envelope
 	// lean skips decoding sends and recording what replicas apply, for a benchmark.
-	lean bool
+	lean    bool
+	leaseID uint64
 }
 
 func bootStorage(n int) *raft.MemoryStorage {
-	st := raft.NewMemoryStorage()
 	var voters []uint64
 	for i := range n {
 		voters = append(voters, uint64(i)+1)
 	}
-	if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 1, Term: 1, ConfState: raftpb.ConfState{Voters: voters}}}); err != nil {
+	return confStorage(raftpb.ConfState{Voters: voters})
+}
+
+func confStorage(cs raftpb.ConfState) *raft.MemoryStorage {
+	st := raft.NewMemoryStorage()
+	if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 1, Term: 1, ConfState: cs}}); err != nil {
 		panic(err)
 	}
 	return st
@@ -62,20 +73,34 @@ func testConfig(n, i int, st *raft.MemoryStorage, seed uint64) Config {
 }
 
 func newNet(t testing.TB, n int, seed uint64) *testNet {
-	net := &testNet{t: t, now: 1_000_000, seed: seed}
-	for range n {
-		net.r = append(net.r, &replica{st: bootStorage(n), pool: sim.NewPool(4<<20, 0)})
+	return newConfNet(t, n, seed, func(int) *raft.MemoryStorage { return bootStorage(n) })
+}
+
+// newConfNet starts n replicas from the storage boot gives each, past their nodes' restart wait.
+func newConfNet(t testing.TB, n int, seed uint64, boot func(i int) *raft.MemoryStorage) *testNet {
+	net := &testNet{t: t, now: 5_000_000, seed: seed}
+	for i := range n {
+		net.r = append(net.r, &replica{st: boot(i), pool: sim.NewPool(4<<20, 0)})
 	}
 	for i := range n {
-		net.restart(i)
+		net.start(i, lease.Time{})
 	}
 	return net
 }
 
-// restart drops replica i's shard and pending flush, as a crash does, and starts a new one from its storage.
+// restart drops replica i's shard, pending flush and node-pair leases, as a crash does, and starts a new one from its storage, its node in its restart wait.
 func (n *testNet) restart(i int) {
+	ctx := n.ctx(i)
+	n.start(i, lease.Now(&ctx))
+}
+
+func (n *testNet) start(i int, at lease.Time) {
 	r := n.r[i]
-	s, err := New(testConfig(len(n.r), i, r.st, n.seed))
+	r.holder = lease.NewHolder(lease.DefaultConfig)
+	r.grantor = lease.NewGrantor(lease.DefaultConfig, uint64(at.Boot)+uint64(i), at)
+	cfg := testConfig(len(n.r), i, r.st, n.seed)
+	cfg.Holder, cfg.Grantor = r.holder, r.grantor
+	s, err := New(cfg)
 	if err != nil {
 		n.t.Fatal(err)
 	}
@@ -84,7 +109,41 @@ func (n *testNet) restart(i int) {
 }
 
 func (n *testNet) ctx(i int) core.Context {
-	return core.Context{Now: n.now, Raw: n.now, Pool: n.r[i].pool}
+	return core.Context{Now: n.now, Raw: n.now - n.r[i].rawLag, Pool: n.r[i].pool}
+}
+
+func (n *testNet) leaseTime(i int) lease.Time {
+	ctx := n.ctx(i)
+	return lease.Now(&ctx)
+}
+
+// renew has node h ask node g for a lease now and take its answer at once; it reports whether g granted.
+func (n *testNet) renew(h, g int) bool {
+	n.leaseID++
+	id := core.RequestID(n.leaseID)
+	hn, gn := core.NodeID{Node: uint32(h)}, core.NodeID{Node: uint32(g)}
+	n.r[h].holder.Ask(gn, id, n.leaseTime(h))
+	gt := n.leaseTime(g)
+	sup, ok := n.r[g].grantor.Grant(hn, 1, 1, gt)
+	if ok {
+		n.r[h].holder.OnGrant(gn, lease.Grant{ID: id, Run: n.r[g].grantor.Run(), Raw: gt.Raw, Support: sup}, n.leaseTime(h))
+	}
+	return ok
+}
+
+// leases gives node h a lease from each of grantors, two grants rate_gap apart for a rate bound, the second asked now.
+func (n *testNet) leases(h int, grantors ...int) {
+	n.now -= lease.DefaultConfig.RateGap
+	for _, g := range grantors {
+		n.renew(h, g)
+	}
+	n.now += lease.DefaultConfig.RateGap
+	for _, g := range grantors {
+		n.renew(h, g)
+		if !n.r[h].holder.Valid(core.NodeID{Node: uint32(g)}, n.leaseTime(h)) {
+			n.t.Fatalf("node %d holds no lease from node %d after two grants", h, g)
+		}
+	}
 }
 
 // call runs f on replica i and returns the messages it sent, queued for delivery.
@@ -103,16 +162,23 @@ func (n *testNet) call(i int, f func(ctx *core.Context, out *Output)) []raftpb.M
 		r.flush = r.out.Flush
 	}
 	var sent []raftpb.Message
+	r.forts = r.forts[:0]
 	for _, a := range r.out.Actions {
 		if a.Kind != core.ActNetSend {
 			continue
 		}
 		if !n.lean {
 			var m raftpb.Message
-			if _, err := decode(r.pool, &a.Msg, &m); err != nil {
+			var f fortify
+			kind, err := decodeKind(r.pool, &a.Msg, &m, &f)
+			switch {
+			case err != nil:
 				n.t.Fatalf("replica %d sent an undecodable message: %v", i, err)
+			case kind == kindRaft:
+				sent = append(sent, m)
+			default:
+				r.forts = append(r.forts, f)
 			}
-			sent = append(sent, m)
 		}
 		e := envelope{from: i, to: int(a.Peer.Node), msg: a.Msg}
 		if a.Msg.Buf != core.NoBuf {
@@ -228,6 +294,11 @@ func (n *testNet) propose(i int, data []byte) []raftpb.Message {
 	})
 }
 
+func decodeKind(pool core.BufPool, msg *core.Msg, m *raftpb.Message, f *fortify) (byte, error) {
+	_, kind, err := decode(pool, msg, m, f)
+	return kind, err
+}
+
 func count(ms []raftpb.Message, t raftpb.MessageType) int {
 	c := 0
 	for _, m := range ms {
@@ -338,7 +409,7 @@ func TestAMessageOver256BytesTravelsInABuffer(t *testing.T) {
 	for size := range 300 {
 		m := raftpb.Message{Type: raftpb.MsgApp, To: 2, From: 1, Term: 3, Index: 9, LogTerm: 3, Commit: 8,
 			Entries: []raftpb.Entry{{Term: 3, Index: 10, Data: bytes.Repeat([]byte{7}, size)}}}
-		total := groupBytes + m.Size()
+		total := kindBytes + m.Size()
 		if total != 256 && total != 257 {
 			continue
 		}
@@ -350,7 +421,7 @@ func TestAMessageOver256BytesTravelsInABuffer(t *testing.T) {
 			t.Fatalf("a %d-byte message inline: %v", total, inline)
 		}
 		var got raftpb.Message
-		g, err := decode(pool, &msg, &got)
+		g, _, err := decode(pool, &msg, &got, &fortify{})
 		if err != nil || g != testGroup || !bytes.Equal(mustMarshal(&got), mustMarshal(&m)) {
 			t.Fatalf("a %d-byte message decodes to group %d, %v, err %v", total, g, raft.DescribeMessage(got, nil), err)
 		}
@@ -423,19 +494,28 @@ func TestUndecodableMessagesAreDroppedAndCounted(t *testing.T) {
 		return msg
 	}
 	live := f.pool.Live()
-	head := func(n uint32) []byte { return le.AppendUint32(le.AppendUint64(nil, testGroup), n) }
+	head := func(n uint32) []byte { return le.AppendUint32(append(le.AppendUint64(nil, testGroup), kindRaft), n) }
+	fort := func(kind byte, size int) core.Msg {
+		var m core.Msg
+		_ = m.SetInline(append(append(le.AppendUint64(nil, testGroup), kind), make([]byte, size)...))
+		return m
+	}
 	cases := map[string]core.Msg{
 		"truncated header": func() core.Msg { var m core.Msg; _ = m.SetInline([]byte{5, 0, 0}); return m }(),
 		"garbage body": func() core.Msg {
 			var m core.Msg
-			_ = m.SetInline(append(le.AppendUint64(nil, testGroup), 0xff, 0xff, 0xff))
+			_ = m.SetInline(append(le.AppendUint64(nil, testGroup), kindRaft, 0xff, 0xff, 0xff))
 			return m
 		}(),
 		"unknown type":           frame(raftpb.Message{Type: 99, To: 2, From: 1, Term: 1}),
 		"local type":             frame(raftpb.Message{Type: raftpb.MsgHup, To: 2, From: 1}),
 		"forwarded proposal":     frame(raftpb.Message{Type: raftpb.MsgProp, To: 2, From: 1, Entries: []raftpb.Entry{{Data: []byte("x")}}}),
 		"buffer length past end": buffered(head(core.BlockSize+1), 10),
-		"buffer header short":    buffered(head(3)[:10], 10),
+		"buffer header short":    buffered(head(3)[:kindBytes+1], 10),
+		"unknown kind":           fort(kindFortified+1, 40),
+		"short fortification":    fort(kindFortify, 39),
+		"long fortification":     fort(kindFortified, 41),
+		"buffered fortification": buffered(append(append(le.AppendUint64(nil, testGroup), kindFortify), make([]byte, 40)...), 10),
 	}
 	for name, msg := range cases {
 		before := f.s.rn.Status()

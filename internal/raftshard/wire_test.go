@@ -11,7 +11,8 @@ import (
 )
 
 // FuzzDecode feeds arbitrary bytes as a message, inline or with a buffer: decoding never panics,
-// never accepts a type no peer sends, and a message it accepts encodes and decodes back to itself.
+// never accepts a type no peer sends, and a message it accepts, Raft or fortification, encodes and
+// decodes back to itself.
 func FuzzDecode(f *testing.F) {
 	pool := sim.NewPool(1<<20, 0)
 	for _, m := range []raftpb.Message{
@@ -26,6 +27,11 @@ func FuzzDecode(f *testing.F) {
 			pool.Free(msg.Buf)
 		}
 		f.Add(bytes.Clone(msg.Inline()), body, msg.Buf != core.NoBuf)
+	}
+	for _, fo := range []fortify{{kind: kindFortify, from: 1, to: 2, term: 3}, {kind: kindFortified, from: 2, to: 1, term: 3, run: 9, support: 4}} {
+		var msg core.Msg
+		encodeFortify(testGroup, &fo, &msg)
+		f.Add(bytes.Clone(msg.Inline()), []byte(nil), false)
 	}
 	f.Fuzz(func(t *testing.T, inline, body []byte, buffered bool) {
 		var msg core.Msg
@@ -42,20 +48,25 @@ func FuzzDecode(f *testing.F) {
 			defer pool.Free(b)
 		}
 		var m raftpb.Message
-		group, err := decode(pool, &msg, &m)
+		var fo fortify
+		group, kind, err := decode(pool, &msg, &m, &fo)
 		if err != nil {
 			return
 		}
 		var again core.Msg
-		if !encode(pool, group, &m, &again) {
+		if kind != kindRaft {
+			encodeFortify(group, &fo, &again)
+		} else if !encode(pool, group, &m, &again) {
 			t.Fatal("no buffer")
 		}
 		if again.Buf != core.NoBuf {
 			defer pool.Free(again.Buf)
 		}
 		var back raftpb.Message
-		if g, err := decode(pool, &again, &back); err != nil || g != group || !bytes.Equal(mustMarshal(&back), mustMarshal(&m)) {
-			t.Fatalf("%+v re-encodes to group %d, %+v, err %v", m, g, back, err)
+		var fb fortify
+		g, k, err := decode(pool, &again, &back, &fb)
+		if err != nil || g != group || k != kind || fb != fo || !bytes.Equal(mustMarshal(&back), mustMarshal(&m)) {
+			t.Fatalf("%+v %+v re-encodes to group %d kind %d, %+v %+v, err %v", m, fo, g, k, back, fb, err)
 		}
 	})
 }
