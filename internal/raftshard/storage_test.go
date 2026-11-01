@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"runtime"
+	"slices"
 	"testing"
 
 	"go.etcd.io/raft/v3"
@@ -97,17 +98,22 @@ func TestAppendReplacesTheConflictingTail(t *testing.T) {
 	}
 }
 
-// Compaction drops the chunks only compacted entries used, and keeps those the rest still read.
+// Chunks double from the payload's size up to 64 KiB, and compaction drops those only compacted
+// entries used, every one once no payload is left, and keeps those the rest still read.
 func TestCompactionFreesChunks(t *testing.T) {
 	st := storageWith(ents(1, 1, 64, 4<<10))
-	if len(st.chunks) != 4 {
-		t.Fatalf("64 entries of 4 KiB in %d chunks, want 4", len(st.chunks))
+	var caps []int
+	for _, c := range st.chunks {
+		caps = append(caps, cap(c)>>10)
+	}
+	if want := []int{4, 8, 16, 32, 64, 64, 64, 64}; !slices.Equal(caps, want) {
+		t.Fatalf("64 entries of 4 KiB in chunks of %v KiB, want %v", caps, want)
 	}
 	if err := st.Compact(40, raftpb.ConfState{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(st.chunks) != 2 {
-		t.Fatalf("%d chunks after compacting to 40, want 2", len(st.chunks))
+	if len(st.chunks) != 3 {
+		t.Fatalf("%d chunks after compacting to 40, want 3", len(st.chunks))
 	}
 	got, _ := st.Entries(41, 65, 1<<30)
 	for _, e := range got {
@@ -115,7 +121,7 @@ func TestCompactionFreesChunks(t *testing.T) {
 			t.Fatalf("entry %d corrupt after compaction", e.Index)
 		}
 	}
-	if err := st.Compact(64, raftpb.ConfState{}); err != nil || len(st.chunks) != 1 {
+	if err := st.Compact(64, raftpb.ConfState{}); err != nil || len(st.chunks) != 0 {
 		t.Fatalf("compacting everything: %v, %d chunks", err, len(st.chunks))
 	}
 	if err := st.Compact(64, raftpb.ConfState{}); !errors.Is(err, raft.ErrCompacted) {

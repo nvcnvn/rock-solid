@@ -21,12 +21,18 @@ const (
 	costStepProposals           = 60
 	maxAllocsPerMsg             = 3
 	maxIdleGroupBytes           = 4 << 10
+	// costCompaction is how often storages compact to their applied index. A node's state machines
+	// compact once a checkpoint has flushed their memtables, about every 7 s at this load (64 MiB
+	// of max_replay_bytes over some 9 MB/s of entries per node); once a second errs toward more
+	// chunks freed and allocated again.
+	costCompaction core.Tick = 1_000_000
 )
 
 // costNet is costGroups groups of three replicas, replica i of each on node i, where every shard
 // of a node shares the node's buffer pool, node-pair leases and output, as the shards of one loop
 // do. A pass ticks every shard when a tick is due, proposes, then delivers messages and completes
-// flushes until none is left: synchronous rounds with flushes and network that take no time.
+// flushes until none is left: synchronous rounds with flushes and network that take no time. No
+// node-pair lease is granted, so no shard fortifies.
 type costNet struct {
 	now      core.Tick
 	nodes    [costNodes]costNode
@@ -37,6 +43,8 @@ type costNet struct {
 	proposed uint64
 	rng      *rand.Rand
 	data     []byte
+	// heap is the live heap before the groups started.
+	heap uint64
 }
 
 type costNode struct {
@@ -51,9 +59,8 @@ type costRound struct {
 	round       uint64
 }
 
-// newCostNet starts the groups and elects their leaders, spread over the nodes, and returns the
-// heap the groups hold per replica once they idle for a second.
-func newCostNet(t testing.TB) (*costNet, uint64) {
+// newCostNet starts the groups and elects their leaders, spread over the nodes.
+func newCostNet(t testing.TB) *costNet {
 	c := &costNet{now: 5_000_000, shards: make([][costNodes]*Shard, costGroups), rng: rand.New(rand.NewPCG(1, 2)), data: make([]byte, 128)}
 	var holders [costNodes]*lease.Holder
 	var grantors [costNodes]*lease.Grantor
@@ -64,7 +71,7 @@ func newCostNet(t testing.TB) (*costNet, uint64) {
 		grantors[i] = lease.NewGrantor(lease.DefaultConfig, uint64(i), lease.Time{})
 		peers[i] = Peer{ID: uint64(i) + 1, Node: core.NodeID{Node: uint32(i)}}
 	}
-	before := liveHeap()
+	c.heap = liveHeap()
 	for g := range c.shards {
 		for i := range costNodes {
 			s, err := New(Config{Group: uint64(g) + 1, ID: uint64(i) + 1, Peers: peers, Storage: bootStorage(costNodes),
@@ -92,14 +99,17 @@ func newCostNet(t testing.TB) (*costNet, uint64) {
 			t.Fatalf("group %d elected no leader on node %d", g, g%costNodes)
 		}
 	}
+	return c
+}
+
+// idleHeap is the heap the groups hold per replica once they idle for a second.
+func (c *costNet) idleHeap() uint64 {
 	for range 1_000 {
 		c.pass(0)
 	}
-	// The election's burst grew the harness's queues, which no group holds.
+	// Bursts grew the harness's queues, which no group holds.
 	c.inbox, c.flushing = nil, nil
-	idle := (liveHeap() - before) / (costGroups * costNodes)
-	runtime.KeepAlive(c)
-	return c, idle
+	return (liveHeap() - c.heap) / (costGroups * costNodes)
 }
 
 func liveHeap() uint64 {
@@ -169,10 +179,14 @@ func (c *costNet) settle() {
 	}
 }
 
-// pass advances the clock by costStep, ticks every shard if a tick is due, proposes n 128-byte
-// entries to leaders of groups drawn at random, and settles.
+// pass advances the clock by costStep, compacts every storage to its applied index once a
+// second, ticks every shard if a tick is due, proposes n 128-byte entries to leaders of groups
+// drawn at random, and settles.
 func (c *costNet) pass(n int) {
 	c.now += costStep
+	if c.now%costCompaction == 0 {
+		c.compact()
+	}
 	if c.now%TickInterval == 0 {
 		for g := range c.shards {
 			for i := range costNodes {
@@ -193,18 +207,29 @@ func (c *costNet) pass(n int) {
 	c.settle()
 }
 
-// cost is what passes cost: allocations, messages sent, proposals and the collector's share of CPU.
+func (c *costNet) compact() {
+	for g := range c.shards {
+		for _, s := range c.shards[g] {
+			if i, cs := s.Applied(); i > s.cfg.Storage.Base().Index {
+				if err := s.cfg.Storage.Compact(i, cs); err != nil {
+					panic(err)
+				}
+			}
+		}
+	}
+}
+
+// cost is what a run costs: allocations, messages sent, proposals, and the collector's and the program's CPU.
 type cost struct {
 	allocs, msgs, proposals uint64
 	gc, cpu                 float64
 }
 
-// measure is what run costs: allocations, messages sent, proposals, and the collector's and the program's CPU.
 func (c *costNet) measure(run func()) cost {
 	samples := []metrics.Sample{{Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/user:cpu-seconds"}}
 	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
 	metrics.Read(samples)
+	runtime.ReadMemStats(&before)
 	gc, user, sent, proposed := samples[0].Value.Float64(), samples[1].Value.Float64(), c.sent, c.proposed
 	run()
 	runtime.ReadMemStats(&after)
@@ -219,11 +244,12 @@ func (c *costNet) load(passes int) {
 	}
 }
 
-// TestCostPerGroup holds etcd-raft's cost at 1,000 groups per node to the raft rounds spike's
-// budget: at most 3 allocations per message under open load at 60,000 proposals/s, and at most
-// 4 KiB of heap per idle group on each node.
+// TestCostPerGroup holds the Raft shard's cost at 1,000 groups per node to its budget: at most
+// 3 allocations per message under open load at 60,000 proposals/s, and at most 4 KiB of heap per
+// idle group, whether it never wrote or wrote and compacted to its applied index.
 func TestCostPerGroup(t *testing.T) {
-	c, idle := newCostNet(t)
+	c := newCostNet(t)
+	idle := c.idleHeap()
 	if idle > maxIdleGroupBytes {
 		t.Errorf("an idle group holds %d bytes of heap per node, over %d", idle, maxIdleGroupBytes)
 	}
@@ -232,8 +258,13 @@ func TestCostPerGroup(t *testing.T) {
 	if per := float64(m.allocs) / float64(m.msgs); per > maxAllocsPerMsg {
 		t.Errorf("%.2f allocations per message (%d over %d messages), over %d", per, m.allocs, m.msgs, maxAllocsPerMsg)
 	}
-	t.Logf("idle group %d B per node; %.2f allocations per message, %.1f per proposal, %.1f messages per proposal",
-		idle, float64(m.allocs)/float64(m.msgs), float64(m.allocs)/float64(m.proposals), float64(m.msgs)/float64(m.proposals))
+	c.compact()
+	written := c.idleHeap()
+	if written > maxIdleGroupBytes {
+		t.Errorf("an idle group that wrote holds %d bytes of heap per node, over %d", written, maxIdleGroupBytes)
+	}
+	t.Logf("idle group %d B, written %d B per node; %.2f allocations per message, %.1f per proposal, %.1f messages per proposal",
+		idle, written, float64(m.allocs)/float64(m.msgs), float64(m.allocs)/float64(m.proposals), float64(m.msgs)/float64(m.proposals))
 }
 
 // BenchmarkCostPerGroup is one pass of 1 ms at 60,000 proposals/s over 1,000 groups per node, and
@@ -241,7 +272,8 @@ func TestCostPerGroup(t *testing.T) {
 // metrics docs/test-scenarios.md tracks under Raft cost per group.
 func BenchmarkCostPerGroup(b *testing.B) {
 	b.Run("load", func(b *testing.B) {
-		c, idle := newCostNet(b)
+		c := newCostNet(b)
+		idle := c.idleHeap()
 		c.load(100)
 		b.ReportAllocs()
 		m := c.measure(func() {
@@ -257,7 +289,7 @@ func BenchmarkCostPerGroup(b *testing.B) {
 		b.ReportMetric(float64(idle), "B/idle-group")
 	})
 	b.Run("idle", func(b *testing.B) {
-		c, _ := newCostNet(b)
+		c := newCostNet(b)
 		b.ReportAllocs()
 		for b.Loop() {
 			for range TickInterval / costStep {

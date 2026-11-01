@@ -7,8 +7,13 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 )
 
-// chunkBytes is the size of the chunks entry payloads are copied into; a larger payload takes a chunk of its own.
-const chunkBytes = 64 << 10
+// Entry payloads are copied into chunks: the first of minChunkBytes, each next twice the last up
+// to maxChunkBytes, so a group that wrote little holds little, and any chunk at least as large as
+// the payload it starts with.
+const (
+	minChunkBytes = 4 << 10
+	maxChunkBytes = 64 << 10
+)
 
 // slot is a retained entry: its term and type, and where its payload lies among the chunks.
 type slot struct {
@@ -158,7 +163,11 @@ func (s *Storage) copyIn(e *raftpb.Entry) slot {
 	}
 	n := len(s.chunks)
 	if n == 0 || len(s.chunks[n-1])+len(e.Data) > cap(s.chunks[n-1]) {
-		s.chunks = append(s.chunks, make([]byte, 0, max(chunkBytes, len(e.Data))))
+		size := minChunkBytes
+		if n > 0 {
+			size = min(2*cap(s.chunks[n-1]), maxChunkBytes)
+		}
+		s.chunks = append(s.chunks, make([]byte, 0, max(size, len(e.Data))))
 		n++
 	}
 	c := &s.chunks[n-1]
@@ -180,7 +189,11 @@ func (s *Storage) Compact(i uint64, cs raftpb.ConfState) error {
 	k := i - s.base.Index
 	s.base = raftpb.SnapshotMetadata{Index: i, Term: s.ents[k-1].term, ConfState: cs}
 	s.ents = append(s.ents[:0], s.ents[k:]...)
-	drop := uint32(max(len(s.chunks)-1, 0))
+	if len(s.ents) == 0 {
+		// An idle group keeps nothing a burst grew.
+		s.ents = nil
+	}
+	drop := uint32(len(s.chunks))
 	for j := range s.ents {
 		if s.ents[j].n > 0 {
 			drop = s.ents[j].chunk - s.first
