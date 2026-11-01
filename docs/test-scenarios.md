@@ -2868,7 +2868,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 9 s |
   | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 3 s |
   | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 4 s |
-  | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 16 s |
+  | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 15 s |
   | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 28 s |
   | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 6 s |
   | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 76 s |
@@ -3391,7 +3391,7 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | # | Property | Model invariant | Simulator invariant |
 | --- | --- | --- | --- |
 | 1 | No PG serves reads from two primaries at once: while a primary serves a PG's reads, no later interval of that PG has activated under another primary | `OneReader` | "no PG serves reads from two primaries at once"; for the lease clocks, the lease pair run's "the holder holds a lease its grantor no longer keeps" |
-| 2 | No two replicas of a shard serve lease reads at once | `OneLeaseholder` | "no two replicas of a shard serve lease reads at overlapping times", registered by MetaStore invariants (phase 4) |
+| 2 | No two replicas of a shard serve lease reads at once | `OneLeaseholder` | "no two replicas of a shard serve lease reads at overlapping times", registered by [Leader leases](#leader-leases) (phase 4) |
 | 3 | A member that adopted a later interval of a PG logs no write tagged with an earlier one, so the members peering reaches stop the intervals they were live in | `NoLateCompletion` | "no member logs a write tagged with an earlier interval of its PG than its table's" |
 | 4 | No acknowledged version, and no version an activated interval kept, is ever dropped: every later activated decision and every later acknowledged version rests on it. That covers a write tagged with an interval that completes after a later interval activated: a member peering reached may have acknowledged it before adopting the new interval, and one it did not reach may acknowledge it after, so it completes late but only if the new interval kept it | `NothingCommittedDropped` | "no acknowledged version is ever dropped", with the byte checks "a member listing nothing maps the kept writes applied in version order" and "the primary maps exactly the writes and punches it answered OK and those peering kept, in version order, in every chunk it lists nothing of" |
 | 5 | The versions peering drops are a suffix of each chunk's pending versions: every member a decision counts as holding the kept version holds the bytes of every version it was merged on | `DropsAreSuffix` | "no version peering keeps follows a dropped version of its chunk", with "once recovery settles, every member lists nothing and maps the kept writes, but in an unfound chunk" |
@@ -4706,6 +4706,8 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
   clock shows 4 s too.
 - The restart wait also delays a restarted primary's own peering: its own disk answers its peering
   like any member's, so a primary restarting at t = 100 s activates its new interval at about 104 s.
+  It asks for no lease during the wait, so it serves reads about `rate_gap` later, once it holds
+  its members' grants anew (`TestARestartedPrimaryAsksForNoLeaseDuringItsRestartWait`).
   A member restarted 0.5 s before a new interval of its PG is published holds that interval's
   activation back until its wait is over.
 - A fresh grant takes the same table check as a renewal: B holds PG 17 in interval 42, A asks
@@ -4784,12 +4786,17 @@ it on its missing list.
   41.8 acknowledged by A, B and C, C's disk is formatted again and its node reports a new log ID.
   The authority gives it a new disk ID, keeps C's old disk ID down, and peering keeps 41.8 from B.
   The planted variant that keeps C's old disk ID for the new log drops acknowledged versions in the
-  primary-change seeds (below): 97 of 500 seeds fail, the first, seed 0, on "no acknowledged version
+  primary-change seeds (below): 18 of 500 seeds fail, the first, seed 55, on "no acknowledged version
   is ever dropped".
 - A member answers only peering messages that name its own disk. Disk 3, which took 1.1, is
   formatted again and comes back as disk 4 at the same loop while the table still lists disk 3 up
   there; interval 2 moves PG 0's primary to disk 2, and peering waits for disk 3 rather than taking
   disk 4's empty answer and dropping 1.1 (`TestADiskFormattedAgainAnswersNoPeeringForItsOldID`).
+  Recovery reads too: disk 1, down in interval 2, misses 2.1 and leads interval 3 with disk 2
+  down, so disk 3 is its only source; disk 3 is formatted again as disk 4, which answers no
+  recovery read for disk 3, and disk 1 keeps the chunk listed rather than taking disk 4's empty
+  image over 2.1 (`TestADiskFormattedAgainAnswersNoRecoveryReadForItsOldID`; the primary-change
+  run's seed 34 found it).
 - A second device reporting a log ID that is already up (a cloned drive) is refused, and the disk
   that reported it first keeps its ID.
 - Before the primary activates, each member persists its missing list: for each chunk it lacks or
@@ -4839,8 +4846,8 @@ it on its missing list.
 
 | Planted bug | Seeds of 500 failing | First | Invariant |
 | --- | --- | --- | --- |
-| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest; `TestSettleMapsTheKeptVersionsAndDropsTheRest` fails at once) | 4 | 38 | "a member listing nothing maps the kept writes applied in version order" |
-| M8: a partial-block write merges before the primary holds the versions peering kept | 47 | 37 | The same |
+| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest; `TestSettleMapsTheKeptVersionsAndDropsTheRest` fails at once) | 5 | 169 | "a member listing nothing maps the kept writes applied in version order" |
+| M8: a partial-block write merges before the primary holds the versions peering kept | 34 | 15 | The same |
 
 - A restarted primary asks for a new interval of each PG it leads, peers in it, then serves
   (`TestARestartedPrimaryTakesANewIntervalBeforeItServes`); only a store opened at start, not one
@@ -4958,9 +4965,9 @@ own ([Testing strategy](design.md#testing-strategy)).
 
 ## Recovery per PG
 
-- Most degraded first. PG 4, led by disk 1 like PGs 9 and 12, misses two members and they one
-  each: recovery's first write is PG 4's, and PG 12, last among the equally degraded, starts only
-  once PG 4's have (`TestTheMostDegradedPGRecoversFirst`). A member still listing a chunk counts
+- Most degraded first. PG 12, led by disk 1 like PGs 4 and 9, misses two members and they one
+  each: recovery's first write is PG 12's though it is the highest PG, and PG 9, last among the
+  equally degraded, starts only once PG 12's have (`TestTheMostDegradedPGRecoversFirst`). A member still listing a chunk counts
   like one not up, and equals go to the lower PG.
 - Resync copies only what the returning member missed. Disk 3 misses a write to chunk a while down;
   marked up again, it lists a alone, and recovery copies a's blocks to it alone, never touching chunk
@@ -5029,7 +5036,7 @@ own ([Testing strategy](design.md#testing-strategy)).
   nothing and maps the kept writes but in an unfound chunk ("once recovery settles, every member
   lists nothing and maps the kept writes, but in an unfound chunk"), both registered with
   `sim.Invariants` (`TestReplicatedWritesSurviveFaults`). The planted `neg-recovery-covers-at-read`
-  variant breaks the first, the first invariant it breaks, at 183 of the first 500 seeds, seed 4
+  variant breaks the first, the first invariant it breaks, at 180 of the first 500 seeds, seed 4
   among them (`TestPlantedRecoveryBugBreaksTheFaultRun`).
 - Open: two faults that overlap before recovery finishes leave a chunk unfound although a member
   listed by the earlier interval holds its kept image (open question "Recovery sources across
@@ -5221,22 +5228,22 @@ commit, it must pass unplanted and break its invariant planted.
 
 | Counterexample | Planted as | Run | Seeds of 500 | First | Invariant |
 | --- | --- | --- | --- | --- | --- |
-| A member logs a version out of order | Writes sent again newest first after a reconnect | Fault | 24 | 6 | "once recovery settles …" |
-| A new primary merges before it holds a kept version | Sub-block spike M8 | Primary-change | 47 | 37 | "a member listing nothing maps …" |
+| A member logs a version out of order | Writes sent again newest first after a reconnect | Fault | 30 | 0 | "once recovery settles …" |
+| A new primary merges before it holds a kept version | Sub-block spike M8 | Primary-change | 34 | 15 | "a member listing nothing maps …" |
 | Peering stops only the previous interval | | Trace: W acknowledged on disks 2 and 3; interval 2 replaces primary 2 with disk 1, interval 3 puts disk 3 in `maintenance`, both handed to disk 1 alone | | | "no acknowledged version is ever dropped" |
-| Members compare member lists | A member accepts a write tagged with an earlier interval whose disks are its current one's | Primary-change | 303 | 1 | Property 3's: the authority trims a past interval's members once a later activation is recorded, so peering of the next interval already stopped the late write |
-| A disk ID kept across a new log ID | | Primary-change | 211 | 2 | "no disk ID names two log IDs, and no log ID is up under two disk IDs": the node runs its new log under the old disk ID |
-| A restarted primary peers in its old interval | | Primary-change | 32 | 6 | "no two members hold different data under one version" |
-| A restarted primary never asks for a new interval | | Fault (the primary-change run's end asks itself) | 69 | 7 | Property 12's |
-| An older version decided by its own interval's members | | Fault | 17 | 50 | "the primary maps exactly …" |
-| A primary activates before missing lists are durable | | Fault | 92 | 2 | "the primary maps exactly …" |
+| Members compare member lists | A member accepts a write tagged with an earlier interval whose disks are its current one's | Primary-change | 306 | 1 | Property 3's: the authority trims a past interval's members once a later activation is recorded, so peering of the next interval already stopped the late write |
+| A disk ID kept across a new log ID | | Primary-change | 209 | 2 | "no disk ID names two log IDs, and no log ID is up under two disk IDs": the node runs its new log under the old disk ID |
+| A restarted primary peers in its old interval | | Primary-change | 22 | 68 | "no two members hold different data under one version" |
+| A restarted primary never asks for a new interval | | Fault (the primary-change run's end asks itself) | 71 | 7 | Property 12's |
+| An older version decided by its own interval's members | | Fault | 24 | 6 | "the primary maps exactly …" |
+| A primary activates before missing lists are durable | | Fault | 106 | 4 | "the primary maps exactly …" |
 | The leader records an activation only decided | Decide reports it | Primary-change; and a trace: W on its way to disk 3 when interval 2 replaces it with disk 1; disk 2's list to disk 1 lost; interval 3 puts disk 2 in `maintenance`, handed to disk 1 alone | 500 | 0 | "no PG's last activated interval goes down, and every activation a table records happened": the recorded interval is not one a primary activated; on the trace, "no acknowledged version is ever dropped" |
-| Recovery picks its blocks at read | | Fault | 183 | 0 | "no two members hold different data under one version" |
+| Recovery picks its blocks at read | | Fault | 180 | 0 | "no two members hold different data under one version" |
 | A leaving member removed before its replacement recovered | Removed once its PG's interval activates | Primary-change | 123 | 3 | Property 13's |
-| A recovered report for an earlier interval removes the leaving member | | Primary-change | 145 | 3 | Property 13's |
-| Members accept a write only in its send epoch | | Primary-change | 497 | 0 | Property 7's |
-| A later peering clears a missing-list entry | A listed member holding the kept version as its newest left off the list, and a persisted list clearing the PG's earlier listings it leaves out | Fault | 13 | 51 | "once recovery settles …" |
-| Incarnations checked when a write arrives | At the primary, held replays exempt, with the store's fence off | Read | 27 | 29 | Property 11's: a dead incarnation's partial write held on a chunk the primary lacks is released after its successor's |
+| A recovered report for an earlier interval removes the leaving member | | Primary-change | 140 | 3 | Property 13's |
+| Members accept a write only in its send epoch | | Primary-change | 499 | 0 | Property 7's |
+| A later peering clears a missing-list entry | A listed member holding the kept version as its newest left off the list, and a persisted list clearing the PG's earlier listings it leaves out | Fault | 10 | 33 | "once recovery settles …" |
+| Incarnations checked when a write arrives | At the primary, held replays exempt, with the store's fence off | Read | 30 | 24 | Property 11's: a dead incarnation's partial write held on a chunk the primary lacks is released after its successor's |
 | A held write ordered again although another primary led | The lead's term kept across another primary's interval | Trace: P, peering cut off from Q, holds W; interval 3 makes Q primary with P in `maintenance`; the successor's W′ and W2 complete at Q; interval 4 makes P primary again | | | Property 11's |
 | A returning primary keeps its pending versions by number | `Settle` keeps every pending version at or below the kept one (`settleByNumber`); no model row, since the model answers no client at peering | Trace: primary 2, cut off from disk 3, orders W as 1.1; interval 2, handed to disks 1 and 3 alone, makes disk 3 primary without disk 2, and W2 is acknowledged as 2.1; interval 3 makes disk 2 primary again, its peering keeping 2.1 (`TestAReturningPrimaryRefusesAPendingVersionOffTheKeptChain` runs it unplanted, the read run's seed 366 found it) | | | "no acknowledged version is ever dropped", checked against the first interval activated after the version's |
 | A kept primary reads below `min_live` | | Trace: interval 2 marks disk 3 down; disk 3 restarts, and interval 3 makes it primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone | | | Property 1's |
@@ -5256,12 +5263,12 @@ partition after a grant), no new window at a new run ID 12 (6), no end of leases
 step check at `1 + lease_drift / 2` 25 (3) and against a grant that gave no lease 3 (265).
 
 The read run also plants a primary that commits a version once its own log holds it, before its
-members do: a read returns a version the next interval drops at 294 seeds of 500, seed 0 first
+members do: a read returns a version the next interval drops at 297 seeds of 500, seed 0 first
 (`TestPlantedReadBugsBreakTheReadRun`). It is no row of the model's table; it shows the read
 version check firing.
 
 The primary-change run also plants a primary that recovers only its own copies: its members, those
-a drain refilled among them, never reach the copy count, at 434 seeds of 500, seed 1 first.
+a drain refilled among them, never reach the copy count, at 432 seeds of 500, seed 0 first.
 
 The write-limit run's planted bug, a primary ordering a plain write that adds live data past a
 member's limit, fails each of the run's two invariants, checked alone, at all 500 seeds, seed 0
@@ -5363,10 +5370,10 @@ test's alone.
 
   | Planted bug | Run | Seeds failing | First |
   | --- | --- | --- | --- |
-  | A read served from a pending version: the primary commits once its own log holds a version (`commitOnOwnLog`), and the next interval drops it | Read | 77 of 100 | 0 |
-  | An old primary serving reads with no lease check (P1, `noLeaseCheck`): a client that missed the new primary's table reads from the old one after the new one acknowledged a write | Read | 10 of 100 | 12 |
+  | A read served from a pending version: the primary commits once its own log holds a version (`commitOnOwnLog`), and the next interval drops it | Read | 80 of 100 | 0 |
+  | An old primary serving reads with no lease check (P1, `noLeaseCheck`): a client that missed the new primary's table reads from the old one after the new one acknowledged a write | Read | 9 of 100 | 8 |
   | Merging on the committed version (sub-block M2), one client pipelining 4 writes | Sub-block | 100 of 100 | 0 |
-  | Peering dropping a subset of a chunk's pending versions, not a suffix (M7, `settleSubset`) | Primary-change | 4 of 500 | 38 |
+  | Peering dropping a subset of a chunk's pending versions, not a suffix (M7, `settleSubset`) | Primary-change | 5 of 500 | 169 |
 
   The M7 rate is that of the primary-change run's own check of kept bytes, which fails on the same
   seeds. The holder ending its lease on the slower of its clocks (P9's slews) is not planted here:
@@ -5465,9 +5472,10 @@ the round to its `raft.MemoryStorage`, which stands for the durable log until th
 | A crash before the durable notice | On restart the follower's log lacks the entry, and the leader resends it. No acknowledgment was sent for it |
 
 **Simulator runs.** `TestRaftRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000 per commit in
-`scripts/seeds.sh` (16 s at `JOBS=2`), 10,000 once in 68 s. One group of three shards on the
-simulated network, with 1-in-100 drops, 1-in-50 duplicates, up to 200 µs of jitter, partitions cut
-and healed, and nodes paused for up to 5 s; each round flushes as an fsync on its node's simulated
+`scripts/seeds.sh` (15 s at `JOBS=2`), 10,000 once in 150 s. One group of three shards on the
+simulated network and on node-pair leases, with 1-in-100 drops, 1-in-50 duplicates, up to 200 µs
+of jitter, partitions cut and healed, and the lease faults of [Leader leases](#leader-leases)
+(pauses of up to 5 s, slewed and drifting clocks, links held); each round flushes as an fsync on its node's simulated
 disk, so a crash loses the rounds in flight. Leaders propose a numbered value per tick, every third
 over 256 bytes, and the first leader to apply 20 crashes and restarts from its storage. After 30 s
 every partition is healed, and the run must apply a value proposed after the crash within 30 s
@@ -5477,9 +5485,10 @@ more. Every seed checks, after every step:
   storage holds the entry, and no granted `MsgVoteResp` before it holds the term and vote, unless
   storage already holds a later term. One `Ready` can carry a vote together with a later term the
   replica moved to before that `Ready` was taken; once the later term is durable the replica never
-  votes in the older one again. Seed 135 of the first 2,000 is such a case.
+  votes in the older one again.
 - "applied entries agree": no two replicas apply different entries at one index.
 - the simulator's driver contract.
+- the three lease invariants of [Leader leases](#leader-leases).
 
 Across the 20 seeds, traces show buffered messages, pauses, restarts and lost connections. In the
 trace tests, every pool holds no buffer once the group settles. Planted
@@ -5498,56 +5507,91 @@ budget belongs to [Raft cost per group](#raft-cost-per-group).
 
 ## Leader leases
 
-Unit and trace tests for fortification on the per-node-pair leases. Lease time follows the two-clock rule: the holder ends a grant `lease_drift` (40 ms of 4 s) early on its faster clock, counted from when it asked; the grantor waits the whole lease on its slower one.
+Trace tests (`internal/raftshard`, `lease_test.go`) for fortification on the per-node-pair leases,
+on the [Raft shard](#raft-shard)'s hand-driven network. Each replica's node has its own
+`lease.Holder` and `lease.Grantor`, which the test renews by hand: a lease takes two grants
+`rate_gap` apart, so the holder has a rate bound. Lease time follows the two-clock rule: the
+holder ends a grant `lease_drift` (40 ms of 4 s) early on its faster clock, counted from when it
+asked; the grantor waits the whole lease on its slower one. The expiry of one grant on the holder
+(3.96 s after the ask, a widened margin, no lease before a rate bound) is the lease package's, and
+its tests under [Peering and read leases](#peering-and-read-leases) cover it; here the shard only
+reads it. `TestConfig` (Raft shard) asserts `CheckQuorum` off and `PreVote` on.
 
 **Votes and campaigns while supporting a leader**
 
 | Follower state | Message or event | Expected |
 | --- | --- | --- |
-| Supports leader L under its node's grant to L's node, support epoch e, grant held | `MsgPreVote` from challenger C | Dropped before `RawNode`. No response |
+| Supports leader L under its node's grant to L's node, support epoch e, grant held | `MsgPreVote` from challenger C | Dropped before `RawNode`. No response, no round, term unchanged |
 | Same | `MsgVote` from C | Dropped |
-| Same | `MsgVote` with the transfer context, from the target of a planned transfer | Passed to `RawNode`, which votes under Raft's rules |
-| Same | The leader's Raft heartbeats are lost for 2 s while the node-pair grant holds | Its election timer is stopped: no campaign |
-| Grant to L's node lapsed on the grantor's clocks, epoch bumped to e + 1 | `MsgPreVote`, then `MsgVote`, from C | Passed and answered under Raft's rules (the review criterion "votes once its grant lapses") |
-| Same, with no challenger | The lapse | Campaigns, pre-vote first, after a random 150 to 300 ms (`raft_lapse_campaign`), not at its election timeout |
-| Same, and the other follower's grant to L's node still holds on its own clocks | Its own pre-vote | Dropped by that follower; it campaigns again at its election timeout |
-| Supports no leader | `MsgVote` | Passed |
-| Node restarted 2 s ago on both clocks (within `primary_lease`, 4 s) | Any `MsgVote` or `MsgPreVote` | Refused: no vote and no peering for one `primary_lease` after start |
-| Node restarted 4.1 s ago on both clocks | `MsgVote` | Answered under Raft's rules |
-| Node restarted 4.1 s ago on `CLOCK_BOOTTIME`, 3.9 s on `CLOCK_MONOTONIC_RAW` | `MsgVote` | Refused |
-| Holder's renewal naming lapsed support epoch e, after the grantor moved to e + 1 | Renewal | Refused. A new grant comes under e + 1, and every fortification under e has ended |
+| Same | `MsgVote` with the transfer context, from the target of a planned transfer | Passed to `RawNode`, which votes under Raft's rules: the granted vote leaves once its round is durable |
+| Same | The leader's Raft messages lost from its election until the grant lapses, 4 s | Its election timer is stopped: no campaign, though 4 s is past any election timeout |
+| Grant to L's node lapsed on the grantor's clocks | `MsgPreVote`, then `MsgVote`, from C | Passed and granted under Raft's rules (the review criterion "votes once its grant lapses") |
+| Same, with no challenger | The lapse | Campaigns, pre-vote first, 150 to 300 ms (`raft_lapse_campaign`) after the first event that sees the lapse, not at its election timeout; 20 seeds give at least 10 different delays. The lapse comes no earlier than 4 s after the grant |
+| Same, and the other follower's grant to L's node still holds, L unreachable | Its own pre-vote | Dropped by that follower, which sends nothing; it campaigns again at its election timeout, 1.00 to 1.99 s after the lapse |
+| Supports L, and L itself asks for a (pre-)vote in a later term | The request | Support ends and the request is passed: L asks only once it no longer leads: it stepped down while its node's grant held, or its node restarted in place and the old grant was renewed, by its first ask after the wait before a slowed grantor clock let the grant lapse or by an ask of its old run reaching a paused grantor late |
+| Node restarted 2 s ago on both clocks (within `primary_lease`, 4 s) | `MsgPreVote`, `MsgVote` | Dropped: no answer and no round |
+| Node restarted 4.1 s ago on both clocks | `MsgPreVote`, `MsgVote` | Answered under Raft's rules |
+| Node restarted 4.1 s ago on `CLOCK_BOOTTIME`, 3.9 s on `CLOCK_MONOTONIC_RAW` | `MsgPreVote`, `MsgVote` | Dropped |
+| Node restarted, 3.9 s of 10 ms timer events | Its election timer | Stopped: no campaign during the restart wait |
+| The leader's grant from follower F lapsed in support epoch e, and the leader's node renewed it, under e + 1 | Lease read | Refused: the renewal is fresh, under e + 1, and F's fortification under e no longer counts. Once the leader's next fortification request (a heartbeat later) reaches F, F supports it under e + 1 and the leader reads again |
+| The follower's node restarted after fortifying the leader, and its new run granted the leader's node again, support epochs counting from 1 | Lease read | Refused: the fortification names the old run |
+| Voted for a transfer target in term T + 1 | The term-T leader's fortification request | Ignored: no answer and no support |
 
-**Expiry of one grant, on the holder**
+**Lease end: a quorum of unexpired fortifications per half**
 
-| Input | Expected expiry |
-| --- | --- |
-| Grant asked at 0 ms, received at 50 ms | 3.96 s after the ask, on the faster of the holder's clocks, not 4.01 s |
-| The holder's rate bound for this grantor is 1% fast: 0.5% over `lease_drift / 2` | The margin for this grantor widens by the 0.5% excess, to 60 ms: expiry 3.94 s after the ask |
-| No rate bound for this grantor's run yet, as after either node starts or the grantor restarts, reboots or resumes | No expiry from this voter: it does not count toward the quorum, though its support stands |
+The leader counts itself as a fortified voter whose entry never expires: it votes for a
+challenger only after stepping down, and a replica that does not lead serves no lease read. The
+follower nodes' grants are asked at the times given; the test checks a lease read 1 µs before and
+at the end, 3.96 s after the ask named.
 
-**Lease end: the quorum-th latest expiry over the fortified voters**
-
-The leader counts itself as a fortified voter. Open: "itself included" gives the leader's own entry no expiry. The cases treat it as unbounded, so it never sets the lease.
-
-| Voters | Fortified, with expiries | Lease ends |
+| Voters | Fortified, asked at | Lease ends |
 | --- | --- | --- |
-| 3: L, F1, F2 | L, F1 (t1) | t1 (the review criterion: lease to that follower's expiry) |
-| 3 | L, F1 (t1 = 10 s), F2 (t2 = 12 s) | 12 s (2nd latest of ∞, 12, 10) |
+| 3: L, F1, F2 | F1 (0 s) | 3.96 s, F1's expiry (the review criterion: a lease to that follower's expiry) |
+| 3 | F1 (0 s), F2 (2 s) | 5.96 s, the later expiry: the 2nd latest of ∞, 5.96 and 3.96 |
 | 3 | L only | No lease: reads go through ReadIndex |
-| 5 | L, a (10), b (20), c (30) | 20 s (3rd latest) |
-| 5 | L, a (10) | No lease |
-| Joint, old {L, B, C}, new {L, D, E} | B (10), D (12) | min(10, 12) = 10 s: each half gives its own quorum-th expiry |
-| Joint, as above | B (10) only | No lease: the new half has no quorum |
+| 5 | a (0 s), b (1 s), c (2 s) | 4.96 s, the 3rd latest of ∞, 5.96, 4.96 and 3.96 |
+| 5 | a (0 s) | No lease |
+| Joint, new {L, D, E}, old {L, B, C} | B (0 s), D (1 s) | 3.96 s: each half gives its own quorum, and the old half's ends first |
+| Joint, as above | B (0 s), C (1 s) | No lease: the new half has no quorum |
 
 **Reads**
 
 | State | Read | Expected |
 | --- | --- | --- |
-| New leader, fortified, no entry of its term committed yet | Lease read | Served through ReadIndex instead |
-| Fortified, an entry of its term committed, lease unexpired | Lease read | Served from memory, with no round trip |
-| `Ready` carrying `MsgTimeoutNow` to the transfer target has left | Lease read | No lease read from this point on. Served through ReadIndex or refused |
-| Holder receives `Resumed` (a suspend, or a VMClock marker change) | Lease read | Stops serving lease reads at once, asks each grantor again, and restarts its rate window |
-| A grantor's heartbeat shows its `CLOCK_MONOTONIC_RAW` moved further since the last grant than the holder's could have | Lease read | Ends its leases as on `Resumed`. Peer messages in the pass are handled before reads |
+| New leader, fortified, its first entry not yet acknowledged | `LeaseRead` | False. `ReadIndex` gives nothing until the entry commits, then the commit index once a quorum answers the read's heartbeat |
+| Fortified, an entry of its term committed, lease unexpired | `LeaseRead` | True: served from memory, with no round trip. `BenchmarkLeaseRead` allocates nothing |
+| The `Ready` carrying `MsgTimeoutNow` to the transfer target taken | `LeaseRead` | False from that point to the end of the term. The target, whose vote request the supporting follower passes, leads, fortifies and serves lease reads |
+| Holder ends its leases on `Resumed` (a suspend, or a VMClock marker change) | `LeaseRead` | False at once. Once the holder holds its leases again, in the same support epochs, true with no new fortification |
+| A grantor's heartbeat shows its `CLOCK_MONOTONIC_RAW` moved further since the last grant than the margin allows | `LeaseRead` | False at once, as on `Resumed`. Peer messages in a pass are handled before reads (the event loop's rule) |
+
+**Decoder.** `FuzzDecode` (Raft shard) also feeds fortification messages: one of another length,
+in a buffer or of an unknown kind is dropped as undecodable, and one it accepts encodes and decodes
+back to itself.
+
+**Simulator runs.** `TestRaftRunsReplayFromTheirSeed` (Raft shard) runs the group on node-pair
+leases: every node asks every other for a lease when its holder is due, grants as its grantor
+allows, heartbeats the holders it grants once a second and handles `Resumed` on both, through
+frames of its own on the simulated network. Its faults cover the MetaStore faults below that a
+single group without transfers or configuration changes can meet: partitions cut and healed, the
+first leader crashed and restarted in place, pauses of up to 5 s of every kind but a stop in place
+on kvm-clock (`PauseFrozen`, whose lost heartbeats leave a holder serving on an old lease for up
+to a heartbeat, an [open question](design.md#roadmap-and-open-questions)), slews of
+`CLOCK_BOOTTIME` up to ±22.6%, raw clocks within ±4% and a raw rate step after measurement, and
+one direction of a link held up to 50 ms. After every step it checks:
+
+- [property] "at most one leader per shard per term".
+- [property] "no two replicas of a shard serve lease reads at overlapping times": when a replica's
+  pass ends able to serve a lease read, no other running, unpaused replica could, at its own
+  clocks, unless its next pass would first see `Resumed`.
+- [property] "a lease read sees every applied entry": a replica able to serve a lease read has
+  applied every index any replica applied.
+
+A shard whose followers vote and campaign while they support a leader breaks the second within 20
+seeds (`TestFollowersVotingWhileSupportingBreakTheLeaseInvariant`), and across the 20 `go test`
+seeds some pass can serve a lease read, so the checks are not vacuous.
+
+The leader transfer and configuration change of the MetaStore faults are covered by the trace tests
+above; the simulator gets them with leader balancing and [Voter replacement](#voter-replacement).
 
 **Simulator faults** (MetaStore), with the invariant "no two replicas of a shard serve lease reads at overlapping times":
 
@@ -5555,7 +5599,7 @@ The leader counts itself as a fortified voter. Open: "itself included" gives the
 2. **A leader's node suspended past its lease (5 s).** On resume it ends every lease (`Resumed`) before serving. A new leader may have been elected after the grants lapsed on the grantors' clocks. Expected: no overlap.
 3. **A leader transfer while lease reads arrive.** Expected: the old leader serves none after `MsgTimeoutNow` leaves, and the new leader none before it is fortified and has committed an entry of its term.
 4. **A configuration change while a lease is held.** Expected: the lease requires quorums in both halves throughout the joint configuration.
-5. **Lease clocks.** A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±4%, and grants delayed by asymmetric queueing of up to 50 ms. Expected: no overlap. A crash fails over within 5.2 s, the most a 22.6% slew can stretch a grantor's wait, plus `raft_lapse_campaign` and an election.
+5. **Lease clocks.** A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±4%, and grants delayed by asymmetric queueing of up to 50 ms. Expected: no overlap. A crash fails over within 5.2 s, the most a 22.6% slew can stretch a grantor's wait, plus `raft_lapse_campaign` and an election, and so does a leader restarted in place, whose node asks for no lease during its restart wait. In the simulator runs, crash to the first value proposed after it applied: 4.1 s at the median, 5.3 s at the 90th percentile, 7.0 s at the 99th, over 2,000 seeds. With no fault but a crash and restart in place, a follower campaigns within `primary_lease`, a heartbeat and `raft_lapse_campaign` of the crash (`TestALeaderRestartedInPlaceFailsOverOnTheLapse`).
 
 ## Voter replacement
 

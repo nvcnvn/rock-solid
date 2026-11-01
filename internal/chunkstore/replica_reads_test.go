@@ -516,14 +516,14 @@ func TestNoPGServesReadsFromTwoPrimaries(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (22 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's; and a primary that commits a version once its own log holds it (294 of 500), so that a read returns a version the next interval drops.
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (30 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's; and a primary that commits a version once its own log holds it (297 of 500), so that a read returns a version the next interval drops.
 func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 	for _, p := range []struct {
 		name string
 		seed uint64
 		readPlant
 	}{
-		{"incarnation checked on arrival", 27, readPlant{inv: invIncarnation, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
+		{"incarnation checked on arrival", 24, readPlant{inv: invIncarnation, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
 		{"commit on the primary's own log", 0, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.commitOnOwnLog = true }}},
 	} {
 		if err := runReads(t, p.seed, &p.readPlant); err == nil || !strings.Contains(err.Error(), p.inv) {

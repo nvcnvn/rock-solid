@@ -321,6 +321,12 @@ func (h *Holder) Support(g core.NodeID) (uint64, bool) {
 	return p.support, p.gave
 }
 
+// Supported reports whether the holder's lease from g runs now under g's run and support epoch, the pair a Raft follower fortified its leader under.
+func (h *Holder) Supported(g core.NodeID, run, support uint64, t Time) bool {
+	i, ok := slices.BinarySearchFunc(h.peers, g, func(x held, g core.NodeID) int { return compareNode(x.peer, g) })
+	return ok && h.peers[i].run == run && h.peers[i].support == support && h.valid(&h.peers[i], t)
+}
+
 // granted is a grantor's state for one holder: the support epoch of the pair's current run of grants and when the last grant was given on both clocks.
 type granted struct {
 	peer    core.NodeID
@@ -349,7 +355,7 @@ func (g *Grantor) Run() uint64 { return g.run }
 // Resumed takes the run ID the grantor draws after a pause, so no holder's rate bound spans it; grants and waits stand, since a clock that stopped only makes them longer.
 func (g *Grantor) Resumed(run uint64) { g.run = run }
 
-// Waiting reports whether the restart wait runs: either clock shows less than one lease since the start, during which the node grants nothing and joins no peering.
+// Waiting reports whether the restart wait runs: either clock shows less than one lease since the start, during which the node grants nothing, asks for no lease and joins no peering.
 func (g *Grantor) Waiting(t Time) bool {
 	return !g.plant.noRestartWait && (sub(t.Raw, g.start.Raw) < g.cfg.Lease || sub(t.Boot, g.start.Boot) < g.cfg.Lease)
 }
@@ -391,6 +397,15 @@ func (g *Grantor) live(x *granted, t Time) bool {
 		return x.on && sub(t.Raw, x.at.Raw) < g.cfg.Lease && sub(t.Boot, x.at.Boot) < g.cfg.Lease
 	}
 	return x.on && (sub(t.Raw, x.at.Raw) < g.cfg.Lease || sub(t.Boot, x.at.Boot) < g.cfg.Lease)
+}
+
+// Supporting is the support epoch of h's grant while it runs now.
+func (g *Grantor) Supporting(h core.NodeID, t Time) (support uint64, ok bool) {
+	i, found := slices.BinarySearchFunc(g.holders, h, func(x granted, h core.NodeID) int { return compareNode(x.peer, h) })
+	if !found || !g.live(&g.holders[i], t) {
+		return 0, false
+	}
+	return g.holders[i].support, true
 }
 
 // Until is the boot time at which h's grant may end, which a timer on CLOCK_BOOTTIME may reach early: Live then still holds, and the grantor sets another for the remainder.

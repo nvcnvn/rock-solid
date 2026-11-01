@@ -175,6 +175,22 @@ func TestTheFirstGrantOfAWindowGivesNoLease(t *testing.T) {
 	}
 }
 
+// A Raft leader counts a follower's lease only under the run and support epoch it was fortified under.
+func TestSupportedNamesTheRunAndSupportEpoch(t *testing.T) {
+	h := NewHolder(cfg)
+	grants(h, [3]core.Tick{0, 100, 50_000_000}, [3]core.Tick{100_100, 100_200, 50_100_100})
+	now := Time{Boot: 100_200, Raw: 100_200}
+	if !h.Supported(grantor, 1, 1, now) {
+		t.Fatal("not supported under the grant's run and support epoch")
+	}
+	if h.Supported(grantor, 2, 1, now) || h.Supported(grantor, 1, 2, now) || h.Supported(core.NodeID{Node: 9}, 1, 1, now) {
+		t.Fatal("supported under another run, support epoch or grantor")
+	}
+	if h.Supported(grantor, 1, 1, Time{Boot: 100_100 + 3_960_000, Raw: 100_100 + 3_960_000}) {
+		t.Fatal("supported once the lease ended")
+	}
+}
+
 // A window's first grant that arrives over a heartbeat after its request still has the next ask due rate_gap after it arrived, and no sooner, so that a timer set for it does not fire again and again at once.
 func TestALateFirstGrantSetsTheNextAskRateGapLater(t *testing.T) {
 	h := NewHolder(cfg)
@@ -302,6 +318,12 @@ func TestSupportEpochs(t *testing.T) {
 	}
 	if !g.Live(grantor, at(15)) || g.Live(grantor, at(16)) {
 		t.Fatal("the grant does not end once both clocks show the lease")
+	}
+	if sup, ok := g.Supporting(grantor, at(15)); !ok || sup != s2 {
+		t.Fatalf("supporting %d %v while the grant runs, want %d", sup, ok, s2)
+	}
+	if _, ok := g.Supporting(grantor, at(16)); ok {
+		t.Fatal("supporting once the grant ended")
 	}
 	if s3, _ := g.Grant(grantor, 5, 5, at(26)); s3 != s2+1 {
 		t.Fatalf("a grant after a lapse took support epoch %d, want %d", s3, s2+1)

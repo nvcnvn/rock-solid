@@ -307,6 +307,40 @@ func TestOnlyRecoveryRemovesAMissingListEntry(t *testing.T) {
 	}
 }
 
+// Disk 1, down in interval 2, misses 2.1 and lists the chunk as it leads interval 3, where disk 2
+// is down and disk 3 is its only source. Node 3's disk is then formatted again and comes back as
+// disk 4 while the table still lists disk 3 up there; disk 4 answers no recovery read for disk 3,
+// so disk 1 keeps the chunk listed rather than taking disk 4's empty image over 2.1 (the
+// primary-change run's seed 34 found it).
+func TestADiskFormattedAgainAnswersNoRecoveryReadForItsOldID(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 0, 1, 1)
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 2)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 2}, {Disk: 3}, {Disk: 1, Mark: MarkDown}}
+	}), true)
+	c.writeWhole(pg0, ch, 0, 1, 2)
+	c.reps[0].plant.noRecovery = true
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 3)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 1}, {Disk: 3}, {Disk: 2, Mark: MarkDown}}
+	}), true)
+	c.logs[2], c.reformat[2] = 0xf0f0, true
+	c.onFormat = func(int) uint32 { return 4 }
+	c.s.CrashRandom(2)
+	c.s.Restart(2)
+	for !c.s.Node(2).Up() && c.step() {
+	}
+	c.reps[0].plant.noRecovery = false
+	c.runFor(2 * RetryAfter)
+	if x := c.listed(0, ch); x.ListedIn == 0 {
+		t.Fatalf("disk 1 recovered the chunk while the table still lists disk 3, holding block 0 as %#x", c.diskBlock(0, ch, 0)[0])
+	}
+}
+
 // Recovery writes pass write_limit: with disk 3 at 91% under a 90% limit, a client write adding
 // data is refused, while recovery still copies disk 3 what it missed.
 func TestRecoveryWritesPassWriteLimit(t *testing.T) {
@@ -330,11 +364,13 @@ func TestRecoveryWritesPassWriteLimit(t *testing.T) {
 	c.blockIs(2, ch, 1, 3)
 }
 
-// PG 4, led by disk 1 like PGs 9 and 12, misses two members and they one each: recovery's first
-// write is PG 4's, and PG 12, last among the equally degraded, starts only once PG 4's have.
+// PG 12, led by disk 1 like PGs 4 and 9, misses two members and they one each: recovery's first
+// write is PG 12's though it is the highest PG, and PG 9, last among the equally degraded, starts
+// only once PG 12's have. PG 12 lacks maxRecoveries chunks, so its recoveries alone fill the first
+// window whatever order their reads complete in.
 func TestTheMostDegradedPGRecoversFirst(t *testing.T) {
 	tbl := rtable(16, 1)
-	pgs := []core.PGID{{Pool: testPool, Index: 4}, {Pool: testPool, Index: 9}, {Pool: testPool, Index: 12}}
+	pgs := []core.PGID{{Pool: testPool, Index: 12}, {Pool: testPool, Index: 4}, {Pool: testPool, Index: 9}}
 	for _, pg := range pgs {
 		_, e := tbl.entry(pg)
 		e.Members = []Member{{Disk: 1}, {Disk: 2}, {Disk: 3}}
@@ -350,8 +386,14 @@ func TestTheMostDegradedPGRecoversFirst(t *testing.T) {
 		mark(t, pgs[1], 3, MarkDown)
 		mark(t, pgs[2], 3, MarkDown)
 	}), true)
+	chunks := func(pg core.PGID) uint32 {
+		if pg == pgs[0] {
+			return maxRecoveries
+		}
+		return 2
+	}
 	for _, pg := range pgs {
-		for n := range uint32(2) {
+		for n := range chunks(pg) {
 			c.writeWhole(pg, chunkIn(pg, 16, n), 0, 1, byte(1+n))
 		}
 	}
@@ -369,22 +411,22 @@ func TestTheMostDegradedPGRecoversFirst(t *testing.T) {
 	c.runFor(RetryAfter / 2)
 	c.settle()
 	var order []uint32
-	last4, first12 := -1, -1
+	last12, first9 := -1, -1
 	for _, s := range *sends {
 		pg := core.PGIndexOf(s.u.Chunk.Hash(), 16)
 		order = append(order, pg)
-		if pg == 4 {
-			last4 = len(order) - 1
+		if pg == 12 {
+			last12 = len(order) - 1
 		}
-		if pg == 12 && first12 < 0 {
-			first12 = len(order) - 1
+		if pg == 9 && first9 < 0 {
+			first9 = len(order) - 1
 		}
 	}
-	if len(order) == 0 || order[0] != 4 || first12 < last4 {
+	if len(order) == 0 || order[0] != 12 || first9 < last12 {
 		t.Fatalf("recovered PGs in the order %v", order)
 	}
 	for _, pg := range pgs {
-		for n := range uint32(2) {
+		for n := range chunks(pg) {
 			if x := c.listed(2, chunkIn(pg, 16, n)); x.ListedIn != 0 {
 				t.Fatalf("disk 3 holds %+v of PG %d", x, pg.Index)
 			}

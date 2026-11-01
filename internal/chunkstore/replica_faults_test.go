@@ -826,7 +826,7 @@ func TestReplicatedWritesSurviveFaults(t *testing.T) {
 // A recovery write that leaves out the blocks covered when it read its source, not when it was
 // ordered (the epoch change model's neg-recovery-covers-at-read), puts a source's block over a
 // write ordered in between, and two disks then hold different bytes under one version, the first
-// invariant it breaks, checked alone, at 183 of the first 500 seeds.
+// invariant it breaks, checked alone, at 180 of the first 500 seeds.
 func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
 	if runFaults(t, 4, 2, 24, &faultPlant{invOneVersion, func(c *rcluster) { c.replicaPlants.coverAtRead = true }}) == nil {
 		t.Fatalf("seed 4 kept %q", invOneVersion)
@@ -835,14 +835,14 @@ func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
 
 // Each planted peering bug breaks its invariant, checked alone, at a seed of the first 500, as the
 // epoch change model's counterexample for it does: a restarted primary that never asks for a new
-// interval (neg-restart-no-ask) leaves its PG unactivated (69 of 500); a member logging a version
+// interval (neg-restart-no-ask) leaves its PG unactivated (71 of 500); a member logging a version
 // out of order (neg-log-out-of-order), here as writes sent again newest first after a reconnect,
-// leaves a member mapping other bytes once recovery settles (24 of 500); a version decided by its
-// own interval's members after a later interval kept it (neg-decide-by-own-interval, 17 of 500) and
+// leaves a member mapping other bytes once recovery settles (30 of 500); a version decided by its
+// own interval's members after a later interval kept it (neg-decide-by-own-interval, 24 of 500) and
 // a primary activating before every member persisted its missing list
-// (neg-activate-before-durable, 92 of 500) each drop a write the primary answered; and a later
+// (neg-activate-before-durable, 106 of 500) each drop a write the primary answered; and a later
 // peering that clears a missing-list entry recovery has not done (neg-peering-clears-missing)
-// leaves a member mapping other bytes once recovery settles (13 of 500).
+// leaves a member mapping other bytes once recovery settles (10 of 500).
 func TestPlantedPeeringBugsBreakTheFaultRun(t *testing.T) {
 	for _, p := range []struct {
 		name string
@@ -850,10 +850,10 @@ func TestPlantedPeeringBugsBreakTheFaultRun(t *testing.T) {
 		faultPlant
 	}{
 		{"no ask after a restart", 7, faultPlant{invActivates, func(c *rcluster) { c.replicaPlants.neverAsk = true }}},
-		{"logged out of order", 6, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.resendNewestFirst = true }}},
-		{"decided by its own interval", 50, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.ownInterval = true }}},
-		{"activated before lists are durable", 2, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
-		{"missing entry cleared", 51, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.relistNever, c.storePlants.clearListed = true, true }}},
+		{"logged out of order", 0, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.resendNewestFirst = true }}},
+		{"decided by its own interval", 6, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.ownInterval = true }}},
+		{"activated before lists are durable", 4, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
+		{"missing entry cleared", 33, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.relistNever, c.storePlants.clearListed = true, true }}},
 	} {
 		if err := runFaults(t, p.seed, 2, 24, &p.faultPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)
