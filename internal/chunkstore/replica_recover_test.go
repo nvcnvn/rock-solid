@@ -337,7 +337,7 @@ func TestADiskFormattedAgainAnswersNoRecoveryReadForItsOldID(t *testing.T) {
 	c.reps[0].plant.noRecovery = false
 	c.runFor(2 * RetryAfter)
 	if x := c.listed(0, ch); x.ListedIn == 0 {
-		c.blockIs(0, ch, 0, 2)
+		t.Fatalf("disk 1 recovered the chunk while the table still lists disk 3, holding block 0 as %#x", c.diskBlock(0, ch, 0)[0])
 	}
 }
 
@@ -364,13 +364,13 @@ func TestRecoveryWritesPassWriteLimit(t *testing.T) {
 	c.blockIs(2, ch, 1, 3)
 }
 
-// PG 4, led by disk 1 like PGs 9 and 12, misses two members and they one each: recovery's first
-// write is PG 4's, and PG 12, last among the equally degraded, starts only once PG 4's have. PG 4
-// lacks maxRecoveries chunks, so its recoveries alone fill the first window whatever order their
-// reads complete in.
+// PG 12, led by disk 1 like PGs 4 and 9, misses two members and they one each: recovery's first
+// write is PG 12's though it is the highest PG, and PG 9, last among the equally degraded, starts
+// only once PG 12's have. PG 12 lacks maxRecoveries chunks, so its recoveries alone fill the first
+// window whatever order their reads complete in.
 func TestTheMostDegradedPGRecoversFirst(t *testing.T) {
 	tbl := rtable(16, 1)
-	pgs := []core.PGID{{Pool: testPool, Index: 4}, {Pool: testPool, Index: 9}, {Pool: testPool, Index: 12}}
+	pgs := []core.PGID{{Pool: testPool, Index: 12}, {Pool: testPool, Index: 4}, {Pool: testPool, Index: 9}}
 	for _, pg := range pgs {
 		_, e := tbl.entry(pg)
 		e.Members = []Member{{Disk: 1}, {Disk: 2}, {Disk: 3}}
@@ -411,18 +411,18 @@ func TestTheMostDegradedPGRecoversFirst(t *testing.T) {
 	c.runFor(RetryAfter / 2)
 	c.settle()
 	var order []uint32
-	last4, first12 := -1, -1
+	last12, first9 := -1, -1
 	for _, s := range *sends {
 		pg := core.PGIndexOf(s.u.Chunk.Hash(), 16)
 		order = append(order, pg)
-		if pg == 4 {
-			last4 = len(order) - 1
+		if pg == 12 {
+			last12 = len(order) - 1
 		}
-		if pg == 12 && first12 < 0 {
-			first12 = len(order) - 1
+		if pg == 9 && first9 < 0 {
+			first9 = len(order) - 1
 		}
 	}
-	if len(order) == 0 || order[0] != 4 || first12 < last4 {
+	if len(order) == 0 || order[0] != 12 || first9 < last12 {
 		t.Fatalf("recovered PGs in the order %v", order)
 	}
 	for _, pg := range pgs {

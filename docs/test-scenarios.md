@@ -4707,7 +4707,7 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
 - The restart wait also delays a restarted primary's own peering: its own disk answers its peering
   like any member's, so a primary restarting at t = 100 s activates its new interval at about 104 s.
   It asks for no lease during the wait, so it serves reads about `rate_gap` later, once it holds
-  its members' grants anew.
+  its members' grants anew (`TestARestartedPrimaryAsksForNoLeaseDuringItsRestartWait`).
   A member restarted 0.5 s before a new interval of its PG is published holds that interval's
   activation back until its wait is over.
 - A fresh grant takes the same table check as a renewal: B holds PG 17 in interval 42, A asks
@@ -4965,9 +4965,9 @@ own ([Testing strategy](design.md#testing-strategy)).
 
 ## Recovery per PG
 
-- Most degraded first. PG 4, led by disk 1 like PGs 9 and 12, misses two members and they one
-  each: recovery's first write is PG 4's, and PG 12, last among the equally degraded, starts only
-  once PG 4's have (`TestTheMostDegradedPGRecoversFirst`). A member still listing a chunk counts
+- Most degraded first. PG 12, led by disk 1 like PGs 4 and 9, misses two members and they one
+  each: recovery's first write is PG 12's though it is the highest PG, and PG 9, last among the
+  equally degraded, starts only once PG 12's have (`TestTheMostDegradedPGRecoversFirst`). A member still listing a chunk counts
   like one not up, and equals go to the lower PG.
 - Resync copies only what the returning member missed. Disk 3 misses a write to chunk a while down;
   marked up again, it lists a alone, and recovery copies a's blocks to it alone, never touching chunk
@@ -5528,7 +5528,7 @@ reads it. `TestConfig` (Raft shard) asserts `CheckQuorum` off and `PreVote` on.
 | Grant to L's node lapsed on the grantor's clocks | `MsgPreVote`, then `MsgVote`, from C | Passed and granted under Raft's rules (the review criterion "votes once its grant lapses") |
 | Same, with no challenger | The lapse | Campaigns, pre-vote first, 150 to 300 ms (`raft_lapse_campaign`) after the first event that sees the lapse, not at its election timeout; 20 seeds give at least 10 different delays. The lapse comes no earlier than 4 s after the grant |
 | Same, and the other follower's grant to L's node still holds, L unreachable | Its own pre-vote | Dropped by that follower, which sends nothing; it campaigns again at its election timeout, 1.00 to 1.99 s after the lapse |
-| Supports L, and L itself asks for a (pre-)vote in a later term | The request | Support ends and the request is passed: L asks only once it no longer leads: it stepped down while its node's grant held, or its node restarted in place and, its restart wait over before a slowed grantor clock let the old grant lapse, renewed it |
+| Supports L, and L itself asks for a (pre-)vote in a later term | The request | Support ends and the request is passed: L asks only once it no longer leads: it stepped down while its node's grant held, or its node restarted in place and the old grant was renewed, by its first ask after the wait before a slowed grantor clock let the grant lapse or by an ask of its old run reaching a paused grantor late |
 | Node restarted 2 s ago on both clocks (within `primary_lease`, 4 s) | `MsgPreVote`, `MsgVote` | Dropped: no answer and no round |
 | Node restarted 4.1 s ago on both clocks | `MsgPreVote`, `MsgVote` | Answered under Raft's rules |
 | Node restarted 4.1 s ago on `CLOCK_BOOTTIME`, 3.9 s on `CLOCK_MONOTONIC_RAW` | `MsgPreVote`, `MsgVote` | Dropped |
@@ -5599,7 +5599,7 @@ above; the simulator gets them with leader balancing and [Voter replacement](#vo
 2. **A leader's node suspended past its lease (5 s).** On resume it ends every lease (`Resumed`) before serving. A new leader may have been elected after the grants lapsed on the grantors' clocks. Expected: no overlap.
 3. **A leader transfer while lease reads arrive.** Expected: the old leader serves none after `MsgTimeoutNow` leaves, and the new leader none before it is fortified and has committed an entry of its term.
 4. **A configuration change while a lease is held.** Expected: the lease requires quorums in both halves throughout the joint configuration.
-5. **Lease clocks.** A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±4%, and grants delayed by asymmetric queueing of up to 50 ms. Expected: no overlap. A crash fails over within 5.2 s, the most a 22.6% slew can stretch a grantor's wait, plus `raft_lapse_campaign` and an election, and so does a leader restarted in place, whose node asks for no lease during its restart wait. In the simulator runs, crash to the first value proposed after it applied: 4.1 s at the median, 5.3 s at the 90th percentile, 7.0 s at the 99th, over 2,000 seeds.
+5. **Lease clocks.** A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±4%, and grants delayed by asymmetric queueing of up to 50 ms. Expected: no overlap. A crash fails over within 5.2 s, the most a 22.6% slew can stretch a grantor's wait, plus `raft_lapse_campaign` and an election, and so does a leader restarted in place, whose node asks for no lease during its restart wait. In the simulator runs, crash to the first value proposed after it applied: 4.1 s at the median, 5.3 s at the 90th percentile, 7.0 s at the 99th, over 2,000 seeds. With no fault but a crash and restart in place, a follower campaigns within `primary_lease`, a heartbeat and `raft_lapse_campaign` of the crash (`TestALeaderRestartedInPlaceFailsOverOnTheLapse`).
 
 ## Voter replacement
 

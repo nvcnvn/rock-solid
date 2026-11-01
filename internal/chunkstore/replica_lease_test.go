@@ -121,6 +121,35 @@ func TestTheRestartWaitAndResumedStopReads(t *testing.T) {
 	}
 }
 
+// A restarted primary asks for no lease until both its clocks show one lease since it started, so
+// the grants its old run held lapse as after a crash; it asks once its wait is over.
+func TestARestartedPrimaryAsksForNoLeaseDuringItsRestartWait(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	c.s.CrashRandom(0)
+	c.s.Restart(0)
+	var during, after int
+	c.onPass = func(d int, acts []core.Action) {
+		if d != 0 {
+			return
+		}
+		ctx := c.s.Node(0).Context()
+		waiting := c.reps[0].grantor.Waiting(lease.Now(&core.Context{Now: ctx.Now, Raw: ctx.Raw}))
+		for i := range acts {
+			if a := &acts[i]; a.Kind == core.ActNetSend && a.Msg.Len >= headSize && Kind(a.Msg.Body[1]) == KindLeaseRequest {
+				if waiting {
+					during++
+				} else {
+					after++
+				}
+			}
+		}
+	}
+	c.runFor(lease.DefaultConfig.Lease + 500_000)
+	if during != 0 || after == 0 {
+		t.Fatalf("%d lease requests during the restart wait, %d after", during, after)
+	}
+}
+
 // Interval 2 of PG 0 keeps disk 1 as primary, and disk 3's acknowledgments of its missing list are
 // lost, so disk 1 does not activate: it holds a write but goes on serving reads of committed versions,
 // answering a chunk the last peering found unfound as unfound.

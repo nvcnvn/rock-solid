@@ -40,8 +40,11 @@ type simCluster struct {
 	crashed    bool
 	sinceCrash uint64
 	done       bool
-	early      error
-	disagree   error
+	// crashedAt is when the leader crashed, crashedID its replica, and campaignAt when another replica first asked for a pre-vote after it.
+	crashedAt, campaignAt core.Tick
+	crashedID             int
+	early                 error
+	disagree              error
 	// leaders is each term's leader, maxApplied the highest index any replica applied, and leaseReads the passes that could serve a lease read.
 	leaders    map[uint64]int
 	maxApplied uint64
@@ -75,6 +78,11 @@ func newSimCluster(seed uint64, p plants) *simCluster {
 	set.DupNum, set.DupDen = 1, 50
 	set.PartitionNum, set.PartitionDen = 1, 3000
 	set.ClockNum, set.ClockDen = 1, 2000
+	return newSimClusterOn(seed, p, set)
+}
+
+// newSimClusterOn is newSimCluster on the scheduler settings set.
+func newSimClusterOn(seed uint64, p plants, set sim.Settings) *simCluster {
 	set.MsgType = simMsgType
 	c := &simCluster{s: sim.New(seed, set), rng: core.NewRand(seed), plant: p, next: 1, leaders: map[uint64]int{}}
 	c.inv.Register("driver contract", c.s.DriverContract)
@@ -166,10 +174,27 @@ func (c *simCluster) after(t *testing.T, seed uint64) {
 	for id, r := range c.reps {
 		if c.s.Node(uint32(id)).Up() && r.leads && r.applied >= crashAt {
 			c.s.CrashRandom(uint32(id))
-			c.crashed, c.sinceCrash = true, c.next
+			c.crashed, c.sinceCrash, c.crashedAt, c.crashedID = true, c.next, c.s.Time(), id
 			return
 		}
 	}
+}
+
+// With no faults but the crash, the followers of a leader whose node crashes and restarts in place
+// campaign on its grants' lapse: within primary_lease, a heartbeat for the last renewal and
+// raft_lapse_campaign of the crash, and not only once the restarted replica campaigns after its
+// restart wait and election timeout. The run still applies a value proposed after the crash.
+func TestALeaderRestartedInPlaceFailsOverOnTheLapse(t *testing.T) {
+	seeds.Run(t, 0, 20, func(seed uint64) {
+		c := newSimClusterOn(seed, plants{}, sim.DefaultSettings())
+		for !c.done && c.s.Time() < simRunFor && c.s.Step() {
+			c.after(t, seed)
+		}
+		bound := lease.DefaultConfig.Lease + lease.DefaultConfig.Heartbeat + LapseCampaignMax + 2*TickInterval
+		if !c.done || c.campaignAt == 0 || c.campaignAt-c.crashedAt > bound {
+			t.Fatalf("seed %d: crashed at %d, a follower campaigned at %d, past %d, or no later value applied (%v)", seed, c.crashedAt, c.campaignAt, bound, c.done)
+		}
+	})
 }
 
 func simMsgType(m *core.Msg) uint64 {
@@ -294,6 +319,11 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 	for i := range r.out.Actions {
 		if a := &r.out.Actions[i]; a.Kind == core.ActNetSend && c.early == nil {
 			c.early = r.durableFor(ctx, a)
+		}
+	}
+	for i := range r.out.Actions {
+		if a := &r.out.Actions[i]; c.crashed && c.campaignAt == 0 && r.id != c.crashedID && a.Kind == core.ActNetSend && simMsgType(&a.Msg) == uint64(raftpb.MsgPreVote) {
+			c.campaignAt = c.s.Time()
 		}
 	}
 	acts = append(acts, r.out.Actions...)
