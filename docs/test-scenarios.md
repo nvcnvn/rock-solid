@@ -2859,9 +2859,9 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
   runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
   they take.
-- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 63,400 seeds in about
-  845 s, building the test binaries included (the two voter-replacement tests timed alone and
-  added). On 4 processes the largest process peaked at 528 MiB
+- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 65,400 seeds in about
+  888 s, building the test binaries included (the two voter-replacement tests and the disk-log
+  crash run timed alone and added). On 4 processes the largest process peaked at 528 MiB
   resident (an `internal/lsm` metamorphic shard), all four at 1.9 GiB:
 
   | Test | Seeds | Time |
@@ -2872,6 +2872,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 15 s |
   | `internal/raftshard` `TestVoterReplacementRunsReplayFromTheirSeed` | 2,000 | 25 s |
   | `internal/raftshard` `TestAReplacementNeverStallsProposals` | 2,000 | 9 s |
+  | `internal/raftshard` `TestCommittedEntriesSurviveCrashesOnTheDiskLog` | 2,000 | 43 s |
   | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 28 s |
   | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 6 s |
   | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 76 s |
@@ -5441,8 +5442,9 @@ test's alone.
 Trace tests (`internal/raftshard`) feed events to three shards by hand, delivering their messages,
 completing their flushes and moving the clock, and assert on each shard's actions. The round's
 durable write is the seam the [disk log](#raft-storage-in-the-disk-log) fills: a call's output
-names the round to flush, the driver reports it with `Durable`, and only then does the shard write
-the round to its `raft.MemoryStorage`, which stands for the durable log until then.
+names the round to flush and carries its contents, the driver reports it with `Durable`, and only
+then does the shard write the round to its `Storage`, which these tests keep across a restart in
+place of replaying the disk log.
 
 **Configuration.** The shard builds its `raft.Config` with:
 
@@ -5621,7 +5623,7 @@ shard's: trace tests (`internal/raftshard`, `replace_test.go`) run voters A, B a
 1 to 3) and D, a fresh replica with empty storage on a fourth node, on the
 [Raft shard](#raft-shard)'s hand-driven network, hand the leader the plan with `SetPlan`, and stand
 a snapshot taken at the leader's applied index in for the point-in-time view the
-[disk log](#raft-storage-in-the-disk-log) will give on demand. `refill_after` is 10 minutes.
+[Shard state machine](#shard-state-machine) will give. `refill_after` is 10 minutes.
 
 **Placement**
 
@@ -5697,18 +5699,21 @@ replacement as a voter instead stalls them past 100 ms within 20 seeds
 
 ## Raft storage in the disk log
 
-- **Record contents.** A round with chunk writes and two shards' `Ready` writes one record to the hot stream. It holds the chunk blocks, and each shard's entries and hard state as blob payloads, with one write and one flush. The trace shows exactly one `DiskFsync` for the round.
-- **Serving entries.** `raft.Storage.Entries(lo, hi, maxSize)` serves every entry after the last compaction from the loop's off-heap slab, with no disk read and no allocation per entry.
+- **Record contents.** A chunk write and two shards' rounds submitted while another round is in flight go out together in the next record of the hot stream, with one write and one flush: the chunk blocks, then each shard's round as blob payloads. The host reports both rounds done from that record's `Durable` event.
+- **Serving entries.** `raft.Storage.Entries(lo, hi, maxSize)` serves every entry after the last compaction from the payload chunks it keeps in memory, with no disk read and no allocation per entry.
   - It returns `ErrCompacted` for lo at or below the compaction index.
-  - It honours `maxSize`, returning at least one entry.
+  - It honours `maxSize`, returning at least one entry, and allocates for the entries it returns, not the range asked: `Entries(1, 100,001, 1)` over 100,000 entries allocates under 64 KiB, where etcd-raft asks a lagging follower's range up to the last index.
   - `Term(i)` returns `ErrCompacted` below the first index and `ErrUnavailable` past the last, as etcd-raft's `MemoryStorage` does.
   - A hi past last + 1 is a broken invariant of the caller.
   - `FirstIndex` and `LastIndex` are consistent with `Entries`.
-- **Compaction.** Once the memtable that applied entries up to index i has been flushed, the shard compacts its log to i, and the segment usage table counts those entries' blocks dead to the cleaner. Before that flush, they stay live.
-- **Bound.** [property] Retained entries never exceed twice `max_replay_bytes` per disk (128 MiB at the default 64 MiB), over seeds with bursts of proposals and delayed flushes.
-- **Replay.** After a crash, a shard restores from its manifest's runs and replays the log after its replay LSN. Later records win: an entry at index 5 of term 3 replaces the earlier record's index 5 of term 2, the earlier record's entries 6 and on of term 2 are dropped, and `LastIndex` after replay is 5. The latest hard state in LSN order wins. The crash oracle compares the recovered shard with its state at the last acknowledged LSN.
-- **Torn tail.** A torn record at the log's tail holding chunk writes and Raft entries together drops both (a simulation fault from the on-disk format list). No acknowledgment was sent for them, the leader resends, and no committed entry is lost.
-- **Lagging follower.** A follower behind the compaction index gets a `MsgSnap` built from a point-in-time view of the shard's LSM tree, which never blocks the writer, and catches up from it. A view held open holds back the cleaner (asserted in the LSM tree tests).
+- **Round blobs.** A round larger than a log record goes out as several blobs of at most a record each, every one but the last a `BlobRaftEntries` and the last a `BlobRaftState`, and the host reports it done only once its last blob is durable. A round the pool has no buffers for waits, and goes out on the next `Durable` event once buffers are back, after a round submitted meanwhile; with nothing in flight it goes out when the driver's timer retries it. Fuzzed: a round record decodes only when it encodes back to the same bytes, and replays the same in one blob as cut into several.
+- **Compaction.** Once the memtable that applied entries up to index i has been flushed, the state machine compacts the shard to i through the host. A round's blobs leave the usage table's live count once every index it holds is at or below i and a later durable round holds a newer hard state; a round without a hard state needs only the compaction. Until then they stay live, and a block two rounds' blobs share stays live until both are dead. A Raft blob reported dead twice is refused, and an open's recount adds the replayed Raft blobs to the owner's chunk counts.
+- **Removed replica.** Once a replica reports itself removed, every blob of its rounds is dead, those still in flight once they are durable. Hosting its owner again while one of its rounds is in flight panics, since the new shard would take that round as its own.
+- **Replay.** After a crash, each shard's storage is rebuilt by replaying its rounds in LSN order. Later records win: an entry at index 5 of term 3 replaces the earlier record's index 5 of term 2, the earlier record's entries 6 and on of term 2 are dropped, and `LastIndex` after replay is 5. On a recorded base, a later round whose entries all lie at or below the base still drops the entries after it: rounds of 5 to 12 in term 1, then 7 to 8 and 9 to 10 in term 2, replayed on a base of 10, leave `LastIndex` 10. The latest hard state in LSN order wins, and a round restoring a snapshot makes its index, term and configuration the base. The blobs of an owner no shard on the disk claims are dead.
+- **Torn tail.** A torn record at the log's tail drops every item in it, chunk writes and Raft blobs alike (the disk log's torn-record tests); no acknowledgment was sent for the round, the leader resends, and no committed entry is lost (the crash run below). A round missing its last blob changes nothing, nor does one missing its first, and the blobs of a round missing its last are dead once replay ends.
+  - Regression (seed 5003 of the crash run below): the torn round stays in the log, so the replay after a second crash meets its first blob again just before the rounds written since the first restart. The next round's first blob drops it, rather than the next round being read as its continuation.
+- **Crash with rounds in flight.** [property] Three replicas, each on its node's disk log, run under the Raft shard's network faults; a node crashes three times, one at a time, each while its log has a round in flight, landing unflushed writes at random, so a round can be durable with its shard never told, and restarts by replaying its log on the base it booted with. The simulator checks "a committed entry is never lost": the newest applied entry stays held by a majority of the replicas' storages, a crashed replica's as it was until its replay ends, and a restarted replica holds every committed entry it held before its crash; and "a replica keeps its term and vote across a crash": a restarted replica's term is at least its term before the crash, and with the same term it holds the same vote. Each run is done once a value proposed after the last crash is applied, and replays to an identical trace. Over 20 seeds at least one restart replays a round its shard was never told was durable. Planted: a restart that replays nothing breaks the first invariant, and one that forgets its vote the second. `TestCommittedEntriesSurviveCrashesOnTheDiskLog`, 20 seeds in `go test`, 2,000 per commit in the [seed runner](#seed-runner-in-ci); 10,000 seeds passed in 219 s on 2 processes, each under 200 MiB resident.
+- **Snapshot at the applied index.** A learner whose log is empty gets a snapshot built when the leader needs one, at its applied index, whose configuration holds the learner, and catches up from it. A snapshot kept from the last compaction, before the learner joined, is refused, and the learner never catches up (planted). A replica cut off and behind the compaction, probed as the leader applies a learner's addition, gets no snapshot then, since the applied index and configuration do not yet hold the change, and gets one holding the learner at the leader's next append. A snapshot sent whole in one message is reported finished a heartbeat later, so a leader whose log compacted past the snapshot probes the follower again rather than wait in `StateSnapshot`, and a follower that refused it gets at most one more a heartbeat.
 - **Asynchronous storage writes stay off** (asserted under Raft shard). The two guards that would allow them get their own scenarios when they are built: drop apply work that a restored snapshot covers, and never compact past the durable commit index ([async snapshot apply study](../studies/etcd-raft-async-snapshot-apply/README.md)).
 
 ## Raft cost per group
@@ -5785,10 +5790,23 @@ The benchmark calls `b.ReportAllocs`. Quiesced groups (0.07% of a core in the mu
 
 - **One log entry per leader per round.** 100 `Txn`s arriving at a leader during one round become one Raft entry. The trace shows one entry per round.
 - **Reads never wait for writers.** A scan running while 1,000 puts commit returns the view as of its start.
+- **Snapshot data at the handed-over index.** A snapshot the Raft shard builds in the step that hands entries over to apply carries the state machine's contents with every one of them applied, since `Config.SnapshotData` is called with the last index handed over.
 - **Consumed lists.** A purge list consumed in key order has each consumed run removed by one `DeleteRange` op in a `Txn`, so it replicates like every other write and a seek to the queue's head steps over 1 removal, against 10,820 point removals in the LSM deletions study.
 - **Benchmarks** (bars from the KV engines and MetaStore memory spikes): a get from a shard of 10 million files at about 1 µs (0.96 to 1.00 µs from the memtable in the spike), and no slower than redb's 7.2 µs; a 1,000-entry listing at about 3.5 µs from memory (redb 196 µs).
 
-Recovery from manifest and log is under Raft storage in the disk log and MetaStore invariants. Bytes per file are under the LSM tree item.
+Recovery from manifest and log is under Shard indexes in the disk owner's checkpoint and MetaStore invariants. Bytes per file are under the LSM tree item.
+
+## Shard indexes in the disk owner's checkpoint
+
+- **Replay LSN per shard.** A shard's replay LSN is the older of its oldest live round's LSN and its memtable's start, and the disk owner's checkpoint names it beside the chunk index's. An idle shard whose newest hard-state round holds its replay LSN behind gets that hard state written again in a new round at the next checkpoint, after which the old round's blobs die and the replay LSN moves on.
+- **Bound.** [property] Retained entries never exceed twice `max_replay_bytes` per disk (128 MiB at the default 64 MiB), over seeds with bursts of proposals and delayed flushes.
+- **Backpressure.** Retained Raft entries count toward the hold of [Checkpoint backpressure](#checkpoint-backpressure): a seed with a stalled checkpoint holds Raft rounds as it holds chunk writes, and keeps the retained entries under the bound.
+- **Replay floor.** A shard idle while chunk writes make the disk checkpoint many times keeps the log's replay floor at or before its oldest live round, and a crash then replays every round it still needs.
+- **Blob owners.** The checkpoint records each shard's blob owner, and a restart hosts each shard under it. A removed shard's owner goes to no new shard while a round of it is in flight (the host panics) or its blobs can still replay.
+- **Restore.** After a crash, a shard restores from its manifest's runs, its base (the index, term and configuration of its last compaction) with them, and replays the log after its replay LSN. Its host's compaction index restores from that base, so a round compacted before the crash is dead after it and one holding an index past the base is live. The crash oracle compares the recovered shard with its state at the last acknowledged LSN.
+- **Crash with compaction and cleaning.** [property] The [crash run with rounds in flight](#raft-storage-in-the-disk-log), with each shard compacting once its applied entries are flushed, the cleaner freeing segments whose blobs the hosts reported dead, and each restart replaying from its recorded replay LSN on its recorded base, holds the same invariants. Unlike that run, which never compacts or cleans and replays every blob, dead or live, it fails if a blob reported dead was still needed.
+- **Lagging follower.** A follower behind the compaction index gets a `MsgSnap` built from a point-in-time view of the shard's LSM tree, which never blocks the writer, and catches up from it. A view held open holds back the cleaner (asserted in the LSM tree tests).
+- **Index rebuild.** One index rebuilds from its manifest and the log while the disk's other indexes serve, without restarting the log.
 
 ## Key encoding
 
@@ -6067,6 +6085,7 @@ Simulator invariants checked after every step, with the faults that must exercis
 | At most one leader per shard per term | Partitions; leader crashes; a node restarted within `primary_lease` |
 | No two replicas of a shard serve lease reads at overlapping times | A quiescent leader's node partitioned from one follower; a leader's node suspended past its lease; a leader transfer while lease reads arrive; a configuration change while a lease is held; slewed clocks; VM pauses |
 | A committed entry is never lost | Crashes before and after a round's flush; a torn tail record holding chunk writes and Raft entries |
+| A replica keeps its term and vote across a crash | Registered by [Raft storage in the disk log](#raft-storage-in-the-disk-log): crashes with rounds in flight, landing unflushed writes at random |
 | A shard recovered from manifest and log equals its state before the crash | Crashes during memtable flushes, compactions, checkpoints and cleaner passes (crash oracle) |
 | At most one lock holder | Racing flock `Txn`s; owner failover; a session fence |
 | No session is fenced while its client's own lease still runs | Control-plane leader failover while sessions renew; a renewal answered by a deposed leader; a leader stalled past `session_lease`; clients paused past their lease; slewed clocks; a client VM stopped with its clocks frozen |
@@ -6082,6 +6101,7 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
 - lease reads served by a follower;
 - an entry acknowledged before its flush;
 - replay skipping the last record;
+- a restart that forgets its vote (planted by [Raft storage in the disk log](#raft-storage-in-the-disk-log));
 - a flock `Txn` without its compare;
 - a fence committed at the holder's lease end without its margin;
 - grants not capped by the gap;

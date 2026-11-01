@@ -214,6 +214,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Log compaction, Raft snapshot.** A Raft log cannot grow forever. Once entries are applied and the result saved, they are dropped; a replica too far behind to catch up from the log is sent a Raft snapshot, a copy of the applied state, instead.
 
+**Hard state, round.** A Raft replica's hard state is its current term, whom it voted for in that term and how far it knows the log is committed; the term and the vote must survive a crash. A shard's round is what one step of etcd-raft must make durable before the replica tells anyone: new log entries, a changed hard state or a snapshot it restores. It goes to the disk log as blobs in the next record, so every shard on a disk shares one flush. See [Raft shard](design.md#metadata-layer-metastore).
+
 **Shard, Raft group, multi-Raft.** The metadata key space is cut into ranges, and each range is its own Raft group, called a shard. Running many groups (multi-Raft) spreads leaders, and so load, over every node, instead of sending every metadata write through one leader. A shard that grows too large **splits** in two.
 
 **Shard map.** The control plane's record, under `ctl/`, of which key range each shard holds and where each shard's three voters are meant to live. It is a plan: each group's own Raft log decides who its members are, and the group's leader changes them, one learner and one swap at a time, until they match the map. See [Replica placement and replacement](design.md#metadata-layer-metastore).

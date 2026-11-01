@@ -212,6 +212,7 @@ type Recovery struct {
 
 	segs   []segInfo
 	pieces pieceSet
+	raft   pieceSet
 	follow []followSeg
 	fi     int
 	scan   []uint32
@@ -493,7 +494,7 @@ func (r *Recovery) startHeaders(ctx *core.Context, out *Output) {
 	}
 	r.phase = recHeaders
 	r.segs = make([]segInfo, r.sb.SegmentCount)
-	r.pieces = newPieceSet(r.sb.SegmentCount)
+	r.pieces, r.raft = newPieceSet(r.sb.SegmentCount), newPieceSet(r.sb.SegmentCount)
 	r.nextSeg = 1
 	for slot := range r.hdrBufs {
 		r.readHeader(slot, out)
@@ -1281,6 +1282,13 @@ func (r *Recovery) deliver(d *DecodedRecord, seg, block uint32, out *Output) {
 	}
 	out.emitRecord(ev, d)
 	r.replayed += d.Layout.Blocks() * core.BlockSize
+	ev = out.Events[len(out.Events)-1]
+	for i := range ev.Entries {
+		if e := &ev.Entries[i]; isRaftKind(e) {
+			lo, hi := spanOf(block, ev.HeaderBlocks, ev.Payloads[i], e.Length)
+			r.raft.add(BlobRef{Segment: seg, Block: block, LSN: ev.LSN, Entry: uint16(i)}, lo, hi)
+		}
+	}
 }
 
 // count restores what group commit counted for a record as it retired: the replay and hold
@@ -1451,7 +1459,7 @@ func (r *Recovery) Log(ctx *core.Context) (*Log, error) {
 		l.chain, l.state = r.chain, r.manifest.Indexes
 		l.live = []liveChain{{pos: r.manifestPos, entries: r.chain, replay: replayFloor(&r.manifest)}}
 	}
-	l.pieces, l.namedLSN = r.pieces, r.manifestPos.LSN
+	l.pieces, l.raft, l.namedLSN = r.pieces, r.raft, r.manifestPos.LSN
 	for s := uint32(1); s < r.sb.SegmentCount; s++ {
 		info := &r.segs[s]
 		switch info.state {

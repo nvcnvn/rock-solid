@@ -6,6 +6,7 @@ import (
 
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
+	"go.etcd.io/raft/v3/tracker"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
@@ -17,9 +18,9 @@ const (
 
 // newReplaceNet is a group of three voters, IDs 1 to 3, and an empty replica with ID 4, every one knowing every node; A leads.
 func newReplaceNet(t *testing.T, p plants) *testNet {
-	n := newConfNet(t, 4, 1, func(i int) *raft.MemoryStorage {
+	n := newConfNet(t, 4, 1, func(i int) *Storage {
 		if i == rD {
-			return raft.NewMemoryStorage()
+			return NewStorage()
 		}
 		return bootStorage(3)
 	})
@@ -60,11 +61,11 @@ func (n *testNet) settleWithout(cut ...int) {
 	n.t.Fatal("the group did not settle")
 }
 
-// snapshot has replica i's storage take a snapshot at its applied index, as a point-in-time view gives one on demand.
+// snapshot has replica i compact its log to its applied index, as the flush of the memtable that applied it lets it, so a replica behind it needs a snapshot.
 func (n *testNet) snapshot(i int) {
 	r := n.r[i]
-	if snap, _ := r.st.Snapshot(); r.s.applied > snap.Metadata.Index {
-		if _, err := r.st.CreateSnapshot(r.s.applied, &r.s.conf, le.AppendUint64(nil, uint64(len(r.applied)))); err != nil {
+	if r.s.applied > r.st.Base().Index {
+		if err := r.st.Compact(r.s.Applied()); err != nil {
 			n.t.Fatal(err)
 		}
 	}
@@ -348,9 +349,9 @@ func TestALeaderTransfersOnlyToAPlannedVoterThatIsUp(t *testing.T) {
 
 // With no planned voter yet, a leader the plan drops swaps the planned replicas in for the other voters first.
 func TestALeaderThePlanDropsWithEveryVoterSwapsTheOthersFirst(t *testing.T) {
-	n := newConfNet(t, 6, 1, func(i int) *raft.MemoryStorage {
+	n := newConfNet(t, 6, 1, func(i int) *Storage {
 		if i >= 3 {
-			return raft.NewMemoryStorage()
+			return NewStorage()
 		}
 		return bootStorage(3)
 	})
@@ -401,7 +402,6 @@ func swapUnderLoad(t *testing.T, p plants) bool {
 			switch {
 			case e.from == rC || e.to == rC:
 				if e.msg.Buf != core.NoBuf {
-					n.r[e.to].pool.Free(e.msg.Buf)
 				}
 			case e.from == rD || e.to == rD:
 				late = append(late, e)
@@ -547,5 +547,97 @@ func TestAReplicaLearnsTheNodeOfAMemberThatSendsToIt(t *testing.T) {
 	n.settle()
 	if i := s.peer(1); i < 0 || s.cfg.Peers[i].Node != (core.NodeID{Node: 0}) || s.Stats().Unsent != 0 {
 		t.Fatalf("peers %+v, stats %+v: want the leader learned at node 0 and the reply sent", s.cfg.Peers, s.Stats())
+	}
+}
+
+// A snapshot is built at the leader's applied index when a learner needs one, so it holds the
+// learner; one kept from the last compaction, before the learner joined, does not, the learner
+// refuses it and never catches up.
+func TestALearnerCatchesUpFromASnapshotBuiltAtTheAppliedIndex(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		n := newReplaceNet(t, plants{staleSnapshot: stale})
+		n.r[rA].s.SetPlan(replacing)
+		n.propose(rA, []byte("a"))
+		for range 5 {
+			n.heartbeat(rC)
+		}
+		n.propose(rA, []byte("b"))
+		n.heartbeat(rC)
+		if caughtUp := n.r[rD].snaps == 1 && n.committed(rD, "b"); caughtUp == stale {
+			t.Fatalf("snapshots kept from the last compaction %v: D restored %d snapshots and applied b: %v", stale, n.r[rD].snaps, n.committed(rD, "b"))
+		}
+	}
+}
+
+// A snapshot asked for while A applies D's addition is temporarily unavailable, since A's applied
+// index and configuration do not yet hold the change. C, cut off and behind A's compaction, is
+// probed as A applies it, as etcd-raft probes every replica once a configuration changes, and
+// gets a snapshot that holds D at A's next append.
+func TestASnapshotWaitsOutAConfigurationChangeAsItApplies(t *testing.T) {
+	n := newReplaceNet(t, plants{})
+	n.propose(rA, []byte("a"))
+	n.settleWithout(rC, rD)
+	n.snapshot(rA)
+	n.r[rA].s.SetPlan(replacing)
+	n.propose(rA, []byte("b"))
+	toB := func(e envelope) bool { return e.to == rB }
+	n.deliver(toB)
+	n.durable(rA)
+	n.deliver(toB)
+	n.propose(rA, []byte("c"))
+	n.durable(rB)
+	n.durable(rB)
+	n.deliver(func(e envelope) bool { return e.from == rB && e.to == rA })
+	n.event(rA, core.Event{Kind: core.EvPeerLost, Peer: core.NodeID{Node: rC}})
+	n.durable(rA)
+	if c := n.conf(rA); !slices.Equal(c.Learners, []uint64{4}) {
+		t.Fatalf("configuration %+v once A applied the change, want D a learner", c)
+	}
+	add, _ := n.r[rA].s.Applied()
+	n.propose(rA, []byte("d"))
+	if pr := n.r[rA].s.rn.Status().Progress[3]; pr.State != tracker.StateSnapshot || pr.PendingSnapshot < add {
+		t.Fatalf("C is in %v with snapshot %d pending, want one at or past D's addition at %d", pr.State, pr.PendingSnapshot, add)
+	}
+}
+
+// A snapshot to a follower behind the compaction, lost on its way, is reported finished a
+// heartbeat after it left, not sooner, and the follower gets another, at most one a heartbeat.
+func TestALostSnapshotIsReportedFinishedAHeartbeatAfterItLeft(t *testing.T) {
+	n := newNet(t, 3, 1)
+	n.elect(0)
+	n.propose(0, []byte("a"))
+	n.settleWithout(2)
+	n.snapshot(0)
+	snaps, sentAt := 0, -1
+	lose := func(e envelope) bool {
+		var m raftpb.Message
+		var f fortify
+		if kind, err := decodeKind(n.r[e.to].pool, &e.msg, &m, &f); err == nil && kind == kindRaft && m.Type == raftpb.MsgSnap {
+			snaps++
+			return false
+		}
+		return true
+	}
+	const heartbeats = 10
+	for tick := range heartbeats * HeartbeatTick {
+		n.advance(TickInterval)
+		for range 20 {
+			was := snaps
+			n.deliver(lose)
+			if snaps != was {
+				sentAt = tick
+			}
+			for i, r := range n.r {
+				if r.flush != 0 {
+					n.durable(i)
+				}
+			}
+		}
+		if st := n.r[0].s.rn.Status().Progress[3].State; sentAt >= 0 && st != tracker.StateSnapshot && tick-sentAt < HeartbeatTick {
+			t.Fatalf("the snapshot sent at tick %d was reported finished at tick %d, before a heartbeat", sentAt, tick)
+		}
+	}
+	if snaps < 2 || snaps > heartbeats {
+		t.Fatalf("%d snapshots in %d heartbeats, want a second once the first is reported, and at most one a heartbeat", snaps, heartbeats)
 	}
 }

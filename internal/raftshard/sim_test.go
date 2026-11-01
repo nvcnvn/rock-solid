@@ -10,6 +10,7 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/clock"
@@ -31,7 +32,7 @@ type simCluster struct {
 	rng     *core.Rand
 	plant   plants
 	inv     sim.Invariants
-	storage []*raft.MemoryStorage
+	storage []*Storage
 	reps    []*simReplica
 	// rep is the voter replacement the run makes, if any.
 	rep *replacement
@@ -59,6 +60,8 @@ type simCluster struct {
 	overlap    error
 	stale      error
 	removed    error
+	// disk, if set, runs each replica on a disk log, which a restart replays.
+	disk *diskRun
 }
 
 type simReplica struct {
@@ -76,27 +79,40 @@ type simReplica struct {
 	grantor *lease.Grantor
 	leaseID uint64
 	beatAt  core.Tick
+	// cfg is the shard's settings, and the rest its disk log as a disk run's replica: host and lout
+	// the log's host and output, rec its recovery while a restart replays it, dones the rounds done.
+	cfg   Config
+	host  *Host
+	lout  disklog.Output
+	rec   *disklog.Recovery
+	dones []Done
 }
 
 func newSimCluster(seed uint64, p plants) *simCluster {
+	return newSimClusterOn(seed, p, faultSettings())
+}
+
+// faultSettings jitters, drops and duplicates messages, partitions links and steps clocks.
+func faultSettings() sim.Settings {
 	set := sim.DefaultSettings()
 	set.NetJitter = 200
 	set.DropNum, set.DropDen = 1, 100
 	set.DupNum, set.DupDen = 1, 50
 	set.PartitionNum, set.PartitionDen = 1, 3000
 	set.ClockNum, set.ClockDen = 1, 2000
-	return newSimClusterOn(seed, p, set)
+	return set
 }
 
 // newSimClusterOn is newSimCluster on the scheduler settings set.
 func newSimClusterOn(seed uint64, p plants, set sim.Settings) *simCluster {
-	return newCluster(seed, p, set, nil)
+	return newCluster(seed, p, set, nil, nil)
 }
 
-// newCluster runs a group of three, and with rep a fourth node whose fresh replica, ID 4, replaces one of the three.
-func newCluster(seed uint64, p plants, set sim.Settings, rep *replacement) *simCluster {
+// newCluster runs a group of three, with rep a fourth node whose fresh replica, ID 4, replaces
+// one of the three, and with disk each replica on a disk log.
+func newCluster(seed uint64, p plants, set sim.Settings, rep *replacement, disk *diskRun) *simCluster {
 	set.MsgType = simMsgType
-	c := &simCluster{s: sim.New(seed, set), rng: core.NewRand(seed), plant: p, next: 1, leaders: map[uint64]int{}, rep: rep, crashes: rep == nil || rep.crash}
+	c := &simCluster{s: sim.New(seed, set), rng: core.NewRand(seed), plant: p, next: 1, leaders: map[uint64]int{}, rep: rep, crashes: disk == nil && (rep == nil || rep.crash), disk: disk}
 	c.afterCrash = !c.crashes
 	c.inv.Register("driver contract", c.s.DriverContract)
 	c.inv.Register("acknowledged only once durable", func() error { return c.early })
@@ -110,15 +126,20 @@ func newCluster(seed uint64, p plants, set sim.Settings, rep *replacement) *simC
 	if rep != nil {
 		nodes++
 	}
-	c.storage, c.reps = make([]*raft.MemoryStorage, nodes), make([]*simReplica, nodes)
-	disk := []sim.DiskSpec{{Blocks: 16, Settings: sim.DefaultDiskSettings()}}
+	c.storage, c.reps = make([]*Storage, nodes), make([]*simReplica, nodes)
+	disks := []sim.DiskSpec{{Blocks: 16, Settings: sim.DefaultDiskSettings()}}
+	if disk != nil {
+		disks[0].Blocks = simGeometry.DiskBlocks()
+		c.inv.Register(invNeverLost, c.committedHeld)
+		c.inv.Register(invKeepsVote, func() error { return c.disk.forgot })
+	}
 	for id := range nodes {
-		// The storage outlives crashes: it is what the replica's rounds made durable.
+		// Without a disk log the storage outlives crashes: it is what the replica's rounds made durable.
 		c.storage[id] = bootStorage(simNodes)
 		if id == simNodes {
-			c.storage[id] = raft.NewMemoryStorage()
+			c.storage[id] = NewStorage()
 		}
-		c.s.AddNode(sim.DefaultClock, disk, func(n *sim.Node) { c.boot(n, id) })
+		c.s.AddNode(sim.DefaultClock, disks, func(n *sim.Node) { c.boot(n, id) })
 	}
 	return c
 }
@@ -132,24 +153,33 @@ func (c *simCluster) boot(n *sim.Node, id int) {
 	n.Call(loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 		r.grantor = lease.NewGrantor(lease.DefaultConfig, rng.Uint64(), lease.Now(ctx))
 		cfg.Holder, cfg.Grantor = r.holder, r.grantor
-		s, err := newShard(cfg, c.plant)
-		if err != nil {
-			panic(err)
-		}
-		r.s = s
-		if c.rep != nil {
-			s.SetPlan(c.rep.plan)
-		}
+		r.cfg = cfg
 		r.out.Reset()
-		s.Start(ctx, &r.out)
+		if c.disk != nil && r.bootDisk(ctx) {
+			return r.finish(ctx, acts)
+		}
+		r.start(ctx)
 		return r.finish(ctx, acts)
 	})
+}
+
+// start starts the replica's shard on its storage.
+func (r *simReplica) start(ctx *core.Context) {
+	s, err := newShard(r.cfg, r.c.plant)
+	if err != nil {
+		panic(err)
+	}
+	r.s = s
+	if r.c.rep != nil {
+		s.SetPlan(r.c.rep.plan)
+	}
+	s.Start(ctx, &r.out)
 }
 
 // run steps the group under faults for simRunFor, then, if it is not done, heals every partition
 // and runs it with only drops left for simRunFor more, since a partition that never heals stops it.
 func (c *simCluster) run(t *testing.T, seed uint64) *simCluster {
-	for c.s.Time() < simRunFor && c.s.Step() {
+	for c.s.Time() < simRunFor && !(c.disk != nil && c.done) && c.s.Step() {
 		c.pause()
 		c.after(t, seed)
 	}
@@ -196,6 +226,10 @@ func (c *simCluster) after(t *testing.T, seed uint64) {
 		t.Fatalf("seed %d step %d: %v", seed, c.s.Steps(), err)
 	}
 	c.replace()
+	if c.disk != nil {
+		c.crashDisk()
+		return
+	}
 	if c.crashed || !c.crashes {
 		return
 	}
@@ -319,6 +353,9 @@ func (r *simReplica) onEvent(ctx *core.Context, ev *core.Event, acts []core.Acti
 	if r.lease(ctx, ev) {
 		return r.finish(ctx, acts)
 	}
+	if r.c.disk != nil && r.diskEvent(ctx, ev) {
+		return r.finish(ctx, acts)
+	}
 	if ev.Kind == core.EvTimer {
 		r.leaseTick(ctx)
 	}
@@ -344,6 +381,11 @@ func (r *simReplica) onEvent(ctx *core.Context, ev *core.Event, acts []core.Acti
 // finish checks what the pass sent against what its replica holds durable, records what it applied and hands its actions to the scheduler.
 func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action {
 	c := r.c
+	if c.disk != nil {
+		if acts = r.flushDisk(ctx, acts); r.s == nil {
+			return acts
+		}
+	}
 	for i := range r.out.Actions {
 		if a := &r.out.Actions[i]; a.Kind == core.ActNetSend && c.early == nil {
 			c.early = r.durableFor(ctx, a)
@@ -355,7 +397,7 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 		}
 	}
 	acts = append(acts, r.out.Actions...)
-	if r.out.Flush != 0 {
+	if r.out.Flush != 0 && c.disk == nil {
 		acts = append(acts, core.Action{Kind: core.ActDiskFsync, IO: core.IOID(r.out.Flush)})
 	}
 	// Only a leader acknowledges an entry, on applying it. A follower can apply an entry before its
@@ -386,7 +428,7 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 			c.maxApplied = max(c.maxApplied, e.Index)
 		}
 	}
-	c.done = c.afterCrash && (c.rep == nil || c.rep.removed && c.rep.caughtUp)
+	c.done = c.afterCrash && (c.rep == nil || c.rep.removed && c.rep.caughtUp) && (c.disk == nil || c.disk.crashes == diskCrashes)
 	st := r.s.rn.BasicStatus()
 	r.leads = st.RaftState == raft.StateLeader
 	if c.rep != nil {

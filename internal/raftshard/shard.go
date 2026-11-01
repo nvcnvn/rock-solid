@@ -45,8 +45,10 @@ type Config struct {
 	ID    uint64
 	// Peers names the replicas the group sends to; a replica a configuration change adds joins them from the change's context, and one it removes leaves them.
 	Peers []Peer
-	// Storage holds the replica's durable log and hard state; the shard writes a round to it once the round is durable.
-	Storage *raft.MemoryStorage
+	// Storage holds the replica's log and hard state as its durable rounds left them; the shard writes a round to it once the round is durable.
+	Storage *Storage
+	// SnapshotData is the state machine's contents at an applied index, which a snapshot built on demand carries; nil leaves snapshots without data.
+	SnapshotData func(index uint64) []byte
 	// Seed seeds the replica's election timeouts.
 	Seed  uint64
 	Timer core.TimerID
@@ -65,8 +67,9 @@ type Stats struct {
 // Output is what one call into a shard hands its driver: actions, the round to flush, committed entries to apply in order, and confirmed ReadIndex requests.
 type Output struct {
 	Actions []core.Action
-	// Flush, when not zero, is the round the driver makes durable and then reports with Durable.
+	// Flush, when not zero, is the round the driver makes durable, writing Round to the disk log, and then reports with Durable.
 	Flush     uint64
+	Round     Round
 	Committed []raftpb.Entry
 	// Reads are ReadIndex requests a quorum confirmed: each read may be served once every entry up to its index is applied.
 	Reads []raft.ReadState
@@ -79,6 +82,7 @@ type Output struct {
 // Reset empties the output for reuse.
 func (o *Output) Reset() {
 	o.Actions, o.Flush, o.Committed, o.Reads = o.Actions[:0], 0, o.Committed[:0], o.Reads[:0]
+	o.Round = Round{}
 	o.Snapshot, o.Removed = raftpb.Snapshot{}, false
 }
 
@@ -115,6 +119,9 @@ type Shard struct {
 	applied  uint64
 	heard    core.Tick
 	removed  bool
+	// applying is set while etcd-raft applies a configuration change, and snaps are the snapshots sent but not yet reported.
+	applying bool
+	snaps    []sentSnap
 }
 
 // fortified is a fortification: its term, and the run and support epoch of the follower's node's grant to the leader's node.
@@ -122,22 +129,19 @@ type fortified struct {
 	term, run, support uint64
 }
 
-// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, and lease reads before an entry of the leader's term commits.
+// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, and snapshots kept from the last compaction instead of built at the applied index.
 type plants struct {
-	unseeded, early, disloyal, eager, voterFirst, current, uncommitted bool
+	unseeded, early, disloyal, eager, voterFirst, current, uncommitted, staleSnapshot bool
 }
 
 // New starts a replica from its storage.
 func New(cfg Config) (*Shard, error) { return newShard(cfg, plants{}) }
 
 func newShard(cfg Config, p plants) (*Shard, error) {
-	// The state machine restarts from the storage's snapshot, which can be newer than its first entry, and its configuration is the snapshot's.
-	snap, err := cfg.Storage.Snapshot()
-	if err != nil {
-		return nil, err
-	}
+	// The state machine restarts from the storage's base, and its configuration is the base's.
+	base := cfg.Storage.Base()
 	rc := raftConfig(&cfg)
-	rc.Applied = snap.Metadata.Index
+	rc.Applied = base.Index
 	if p.unseeded {
 		rc.Rand = nil
 	}
@@ -146,7 +150,36 @@ func newShard(cfg Config, p plants) (*Shard, error) {
 		return nil, err
 	}
 	cfg.Peers = slices.Clone(cfg.Peers)
-	return &Shard{cfg: cfg, rn: rn, plant: p, rng: rand.New(rand.NewPCG(cfg.Seed, 1)), conf: snap.Metadata.ConfState, applied: snap.Metadata.Index, fort: make([]fortified, len(cfg.Peers))}, nil
+	s := &Shard{cfg: cfg, rn: rn, plant: p, rng: rand.New(rand.NewPCG(cfg.Seed, 1)), conf: base.ConfState, applied: base.Index, fort: make([]fortified, len(cfg.Peers))}
+	cfg.Storage.build = s.snapshot
+	return s, nil
+}
+
+// Applied is the index of the last entry handed over to apply and the configuration at it, which a state machine keeps with a flush of the memtable that applied it and compacts the log to once the flush is durable.
+func (s *Shard) Applied() (uint64, raftpb.ConfState) { return s.applied, s.conf }
+
+// snapshot is a snapshot at the applied index, whose configuration holds every replica that
+// joined by then: one kept from before a learner joined would not hold it, the learner would
+// refuse it, and the leader would wait in StateSnapshot until the connection failed. While a
+// configuration change applies, etcd-raft probes every replica and sends a snapshot to one behind
+// the compaction, but the applied index and configuration do not yet hold the change, so the
+// snapshot is temporarily unavailable and the leader asks again at its next append.
+func (s *Shard) snapshot() (raftpb.Snapshot, error) {
+	if s.plant.staleSnapshot {
+		return raftpb.Snapshot{Metadata: s.cfg.Storage.Base()}, nil
+	}
+	if s.applying {
+		return raftpb.Snapshot{}, raft.ErrSnapshotTemporarilyUnavailable
+	}
+	term, err := s.cfg.Storage.Term(s.applied)
+	if err != nil {
+		panic(fmt.Sprintf("raftshard: no term for applied index %d: %v", s.applied, err))
+	}
+	snap := raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: s.applied, Term: term, ConfState: s.conf}}
+	if s.cfg.SnapshotData != nil {
+		snap.Data = s.cfg.SnapshotData(s.applied)
+	}
+	return snap, nil
 }
 
 func raftConfig(cfg *Config) *raft.Config {
@@ -345,6 +378,7 @@ func (s *Shard) tick(ctx *core.Context, out *Output) {
 	for range min(n, maxTicks) {
 		s.rn.Tick()
 	}
+	s.reportSnapshots(ctx.Now)
 	if s.base+TickInterval != s.armed {
 		s.arm(out)
 	}
@@ -469,6 +503,7 @@ func (s *Shard) ready(ctx *core.Context, out *Output) {
 		if rd.MustSync || !raft.IsEmptySnap(rd.Snapshot) {
 			s.rounds++
 			s.round, s.rd, out.Flush = s.rounds, rd, s.rounds
+			out.Round = Round{HardState: rd.HardState, Entries: rd.Entries, Snapshot: rd.Snapshot}
 			s.send(ctx, rd.Messages, early, out)
 			return
 		}
@@ -491,13 +526,9 @@ func (s *Shard) done(ctx *core.Context, rd *raft.Ready, p part, out *Output) {
 		s.prune(&was)
 	}
 	if !raft.IsEmptyHardState(rd.HardState) {
-		if err := st.SetHardState(rd.HardState); err != nil {
-			panic(err)
-		}
+		st.SetHardState(rd.HardState)
 	}
-	if err := st.Append(rd.Entries); err != nil {
-		panic(err)
-	}
+	st.Append(rd.Entries)
 	s.send(ctx, rd.Messages, p, out)
 	for i := range rd.CommittedEntries {
 		if e := &rd.CommittedEntries[i]; e.Type != raftpb.EntryNormal {
@@ -538,18 +569,46 @@ func (s *Shard) send(ctx *core.Context, msgs []raftpb.Message, p part, out *Outp
 		if p == early && !e || p == held && e {
 			continue
 		}
-		i := s.peer(m.To)
-		if i < 0 {
-			s.stats.Unsent++
-			continue
+		var a core.Action
+		sent := false
+		if i := s.peer(m.To); i >= 0 {
+			a = core.Action{Kind: core.ActNetSend, Peer: s.cfg.Peers[i].Node, Reply: true}
+			sent = encode(ctx.Pool, s.cfg.Group, m, &a.Msg)
 		}
-		a := core.Action{Kind: core.ActNetSend, Peer: s.cfg.Peers[i].Node, Reply: true}
-		if !encode(ctx.Pool, s.cfg.Group, m, &a.Msg) {
+		if sent {
+			out.Actions = append(out.Actions, a)
+		} else {
 			s.stats.Unsent++
-			continue
 		}
-		out.Actions = append(out.Actions, a)
+		if m.Type == raftpb.MsgSnap && sent {
+			s.snaps = append(s.snaps, sentSnap{to: m.To, at: ctx.Now})
+		} else if m.Type == raftpb.MsgSnap {
+			s.rn.ReportSnapshot(m.To, raft.SnapshotFailure)
+		}
 	}
+}
+
+// reportSnapshots reports each snapshot sent a heartbeat ago as finished, as it went whole in one
+// message, so the leader probes the follower again rather than wait in StateSnapshot for an answer
+// that, once its log compacted past the snapshot, never moves it on. A follower that did not
+// restore it refuses the probe and is sent another, at most one a heartbeat.
+func (s *Shard) reportSnapshots(now core.Tick) {
+	k := 0
+	for _, sn := range s.snaps {
+		if now-sn.at < HeartbeatTick*TickInterval {
+			s.snaps[k] = sn
+			k++
+			continue
+		}
+		s.rn.ReportSnapshot(sn.to, raft.SnapshotFinish)
+	}
+	s.snaps = s.snaps[:k]
+}
+
+// sentSnap is a snapshot sent to replica to at a time.
+type sentSnap struct {
+	to uint64
+	at core.Tick
 }
 
 // applyConf applies a committed configuration change: a replica it adds joins Peers at the node its context names, and one it takes out of the configuration leaves them.
@@ -559,7 +618,9 @@ func (s *Shard) applyConf(e *raftpb.Entry) {
 		panic(fmt.Sprintf("raftshard: group %d committed configuration change %d/%d, which no replica proposes", s.cfg.Group, e.Index, e.Term))
 	}
 	was := s.conf
+	s.applying = true
 	s.conf = *s.rn.ApplyConfChange(cc)
+	s.applying = false
 	s.confTerm = 0
 	if node, ok := decodeNode(cc.Context); ok {
 		for _, c := range cc.Changes {
