@@ -256,8 +256,8 @@ func flags(op *Op) byte {
 }
 
 // decodeTxn decodes the Txn at the start of b into t, reusing its ops, whose keys and values
-// alias b, and returns the rest of b. A Txn that does not decode or is outside the limits is
-// ErrMalformed.
+// alias b, and returns the rest of b. A Txn that does not decode, is outside the limits or is
+// not the one encoding appendTxn gives it is ErrMalformed.
 func decodeTxn(b []byte, t *Txn) ([]byte, error) {
 	d := decoder{b: b}
 	t.Replay, t.Oldest = d.bytes(), 0
@@ -331,7 +331,7 @@ func appendRecord(dst []byte, r *Result) []byte {
 // decodeRecord decodes a replay record into r; one that does not decode is ErrMalformed.
 func decodeRecord(b []byte, r *Result) error {
 	f, n := binary.Uvarint(b)
-	if n <= 0 || f > MaxTxnBytes || (len(b)-n)%8 != 0 || f != 0 && len(b) != n {
+	if n <= 0 || n != uvarintLen(f) || f > MaxTxnBytes || (len(b)-n)%8 != 0 || f != 0 && len(b) != n {
 		return ErrMalformed
 	}
 	r.FailedCheck, r.Actual, r.Updated = int(f)-1, nil, r.Updated[:0]
@@ -362,7 +362,7 @@ type decoder struct {
 
 func (d *decoder) uvarint() uint64 {
 	x, n := binary.Uvarint(d.b)
-	if n <= 0 {
+	if n <= 0 || n != uvarintLen(x) {
 		d.bad, d.b = true, nil
 		return 0
 	}
