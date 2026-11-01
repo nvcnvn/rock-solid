@@ -3,6 +3,7 @@ package raftshard
 import (
 	"bytes"
 	"errors"
+	"runtime"
 	"testing"
 
 	"go.etcd.io/raft/v3"
@@ -68,6 +69,21 @@ func TestStorageServesEntriesAfterItsBase(t *testing.T) {
 		}
 	}()
 	_, _ = st.Entries(4, 12, 1<<20)
+}
+
+// Entries sized to one entry allocates for a few, not for the whole range a lagging follower's hi spans.
+func TestEntriesAllocatesForWhatItReturns(t *testing.T) {
+	st := storageWith(ents(1, 1, 100_000, 0))
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got, err := st.Entries(1, 100_001, 1)
+	runtime.ReadMemStats(&after)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("Entries = %d entries, %v", len(got), err)
+	}
+	if n := after.TotalAlloc - before.TotalAlloc; n > 64<<10 {
+		t.Fatalf("Entries allocated %d bytes for one entry", n)
+	}
 }
 
 // A later append replaces the entries from its first index on, as a later record does at replay.

@@ -84,7 +84,7 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]raftpb.Entry, error) {
 	if lo == hi {
 		return nil, nil
 	}
-	out := make([]raftpb.Entry, 0, hi-lo)
+	out := make([]raftpb.Entry, 0, min(hi-lo, 64))
 	var size uint64
 	for i := lo; i < hi; i++ {
 		e := s.entry(i)
