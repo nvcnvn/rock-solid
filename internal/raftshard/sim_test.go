@@ -521,3 +521,20 @@ func TestSendingBeforeTheFlushBreaksTheDurabilityInvariant(t *testing.T) {
 	}
 	t.Fatal("20 seeds sending every message before its round's flush broke no invariant")
 }
+
+// A leader serving lease reads before an entry of its term commits may not have applied what the
+// previous leader applied. The seeds are ones where that shows; most leaders apply in time.
+func TestLeaseReadsBeforeAnEntryOfTheTermCommitsBreakTheInvariant(t *testing.T) {
+	for _, seed := range []uint64{5, 159} {
+		c := newSimCluster(seed, plants{uncommitted: true})
+		c.inv.Only(invLeaseReadsCurrent)
+		for c.s.Time() < simRunFor && c.s.Step() {
+			c.pause()
+			if c.inv.Check() != nil {
+				return
+			}
+			c.after(t, seed)
+		}
+	}
+	t.Fatal("seeds 5 and 159 serving lease reads before an entry of the term commits broke no invariant")
+}

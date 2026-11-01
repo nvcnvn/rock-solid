@@ -2870,8 +2870,8 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 3 s |
   | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 4 s |
   | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 15 s |
-| `internal/raftshard` `TestVoterReplacementRunsReplayFromTheirSeed` | 2,000 | 25 s |
-| `internal/raftshard` `TestAReplacementNeverStallsProposals` | 2,000 | 9 s |
+  | `internal/raftshard` `TestVoterReplacementRunsReplayFromTheirSeed` | 2,000 | 25 s |
+  | `internal/raftshard` `TestAReplacementNeverStallsProposals` | 2,000 | 9 s |
   | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 28 s |
   | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 6 s |
   | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 76 s |
@@ -5591,7 +5591,9 @@ one direction of a link held up to 50 ms. After every step it checks:
   told of, since only a leader acknowledges an entry, on applying it. A follower's applies do not
   count: the leader's commit index goes out with its next round's appends, while the leader applies
   what that round's `Ready` commits only once the round is durable, so a follower can apply an
-  entry first.
+  entry first. A leader that serves lease reads before an entry of its term commits breaks it at
+  seeds 5 and 159 (`TestLeaseReadsBeforeAnEntryOfTheTermCommitsBreakTheInvariant`); most new
+  leaders apply in time, so the default 20 seeds miss it.
 
 A shard whose followers vote and campaign while they support a leader breaks the second within 20
 seeds (`TestFollowersVotingWhileSupportingBreakTheLeaseInvariant`), and across the 20 `go test`
@@ -5633,7 +5635,7 @@ a snapshot taken at the leader's applied index in for the point-in-time view the
 | D, planned in place of C, down for 10 minutes before its swap | D replaced by replica ID 5 on a fifth node, the same rule |
 | A voter's disk, down, reports its log from the node of another voter of the group | The voter placed again as replica ID 4; no node holds two voters, counted by where each disk now reports from |
 | A node outside the metadata nodes | Takes no voter |
-| The control-plane group | Placed and replaced by the same function, as one more group of the map |
+| The control-plane group | No test of its own: placement and the shard treat it as one more group of the map, with nothing special-cased |
 
 **Swap**
 
@@ -5644,6 +5646,11 @@ a snapshot taken at the leader's applied index in for the point-in-time view the
 | D reconnected | D's first append is refused, its log empty, so A sends a snapshot; D restores it (`Output.Snapshot`), then takes the log. One `ConfChangeV2`, remove 3 and add 4, commits on A and B, and A, B and D end in voters 1, 2, 4 out of the joint configuration |
 | B cut off once D was added, D caught up | Nothing commits on A and D, and D stays a learner, never promoted to make a quorum. Once B returns the swap commits |
 | The plan drops the leader A | A transfers leadership to B, which adds D and swaps it for A |
+| The plan drops A, B down, A holding a node-pair lease from C only | A transfers to C, never to B |
+| The plan names three new replicas and none of the voters | The leader swaps new replicas in for the other two voters first, then transfers to one; the group ends on the three |
+| A, the leader, cut off while B leads, and the plan swaps D in for A | A still leads its old term; once reconnected, its messages draw the removal notice and A reports `Removed` |
+| A proposal every 10 ms, D's link one step slower than B's | D, trailing the current commit index for good, is swapped in; planted, a learner held to the current commit index never is |
+| A removal notice at any index to D before its addition | Ignored: a notice proves a removal only to a replica its own applied configuration holds |
 | C restarts after the swap | Within a second, inside its restart wait, C asks its peers whether it is a member; their answer at an applied index past its own makes C report `Removed`. It sends no pre-vote or vote, and nothing in 10 s after |
 | A removal notice at an index below the replica's applied index | Ignored: a peer that has not applied the change that added it says nothing of its removal |
 | Planted: the learner promoted at once | D swapped in holding nothing (`TestAnEagerLeaderPromotesALearnerThatHoldsNothing`) |
@@ -5654,8 +5661,8 @@ The membership question and its answer are fortification-sized frames that `Fuzz
 **Simulator runs.** `TestVoterReplacementRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000
 per commit in `scripts/seeds.sh` (25 s at `JOBS=2`), 10,000 once in 125 s, runs the
 [Raft shard](#raft-shard)'s faults, crash and lease frames on four nodes. From 2 to 4 s in, once
-one of the first three replicas leads, a follower among them is cut off from every other node, and
-up to 2 s later every replica gets the plan naming the fourth node's replica in its place. Every
+one of the first three replicas leads, a follower among them, or in half the seeds the leader, is cut off
+from every other node, and up to 2 s later every replica gets the plan naming the fourth node's replica in its place. Every
 replica's storage takes a snapshot at its applied index after each pass and compacts all but 10
 entries below it, so the new replica, and any lagging voter, catches up from snapshots. The
 replaced replica is reconnected up to a second after the plan, mid-swap, in half the seeds, and a
@@ -5670,9 +5677,10 @@ history. After every step it checks the Raft runs' properties and:
 - "only a replica the group's configuration removed deletes its state": no replica but the
   replaced one reports `Removed`.
 
-`TestVoterReplacementRegressionSeeds` keeps two seeds that found bugs: 6389, the lease property
-counting a follower's applies (above, under [Leader leases](#leader-leases)), and 8218, a leader
-whose configuration change of an earlier term was lost and that proposed none again.
+`TestVoterReplacementRegressionSeeds` keeps three seeds that found bugs: 6389, the lease property
+counting a follower's applies (above, under [Leader leases](#leader-leases)); 8218, a leader whose
+configuration change of an earlier term was lost and that proposed none again; and 1005, a dropped
+leader waiting for a follower to reach its own durable index, which steady writes never allow.
 
 [property] "a replacement never stalls proposals while two voters of the old configuration are
 up": `TestAReplacementNeverStallsProposals`, 20 seeds in `go test` and 2,000 per commit (9 s),

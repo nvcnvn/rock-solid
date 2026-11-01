@@ -122,9 +122,9 @@ type fortified struct {
 	term, run, support uint64
 }
 
-// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, and a learner held to the current commit index.
+// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, and lease reads before an entry of the leader's term commits.
 type plants struct {
-	unseeded, early, disloyal, eager, voterFirst, current bool
+	unseeded, early, disloyal, eager, voterFirst, current, uncommitted bool
 }
 
 // New starts a replica from its storage.
@@ -238,7 +238,7 @@ func (s *Shard) ReadIndex(ctx *core.Context, rctx []byte, out *Output) {
 // LeaseRead reports whether this replica may serve a read now from the entries it handed over to apply, with no round trip: it leads, no MsgTimeoutNow left in its term, an entry of its term has committed, and each half of its configuration has a quorum of voters, itself included, whose fortification of its term runs on the node-pair leases.
 func (s *Shard) LeaseRead(ctx *core.Context) bool {
 	st := s.rn.BasicStatus()
-	if s.removed || st.RaftState != raft.StateLeader || s.transferred == st.Term || s.committed != st.Term {
+	if s.removed || st.RaftState != raft.StateLeader || s.transferred == st.Term || s.committed != st.Term && !s.plant.uncommitted {
 		return false
 	}
 	t := lease.Now(ctx)
