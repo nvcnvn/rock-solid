@@ -5506,9 +5506,9 @@ panics, never accepts a type no peer sends, and a message it accepts encodes and
 itself.
 
 **Benchmarks.** Encoding allocates nothing, inline or into a pool buffer. One 128-byte proposal
-replicated, flushed and committed on three replicas makes 21 allocations, all etcd-raft's own
-(its message and `Ready` slices and decoded entries), against the spike's 22.6 under load; the
-budget belongs to [Raft cost per group](#raft-cost-per-group).
+replicated, flushed and committed on three replicas makes 24 allocations: etcd-raft's message
+and `Ready` slices and decoded entries, and three `Storage.Entries` results, one per replica
+reading the committed entry; the budget belongs to [Raft cost per group](#raft-cost-per-group).
 
 ## Leader leases
 
@@ -5718,18 +5718,26 @@ replacement as a voter instead stalls them past 100 ms within 20 seeds
 
 ## Raft cost per group
 
-A regression benchmark against the [raft rounds spike](design.md#appendix-raft-rounds-spike), run nightly. A 20% regression is a bug. This benchmark is exempt from the zero-allocation rule for "Benchmarks", by the etcd-raft version pin in `docs/tech-debts.md`, whose exit condition is at most 3 allocations per message.
+`internal/raftshard`, `cost_test.go`. Three nodes run 1,000 groups each through `Shard` and
+`Storage`, every shard of a node sharing its buffer pool, node-pair leases and output, as the
+shards of one loop do: 128 B proposals to random groups at 60,000 proposals/s in 1 ms passes, a
+10 ms tick, a 100 ms heartbeat, synchronous `Ready`, and flushes and network that take no time.
+`TestCostPerGroup` fails `go test` past either bar, in about 0.15 s. `BenchmarkCostPerGroup`
+reports every row, `load` a pass and `idle` a tick with no proposals, and runs nightly; a tracked
+figure 20% worse than measured is a bug. The benchmark is exempt from the zero-allocation rule for
+"Benchmarks" by the etcd-raft version pin in `docs/tech-debts.md`, whose exit condition is this
+test's bar of 3 allocations per message.
 
-| Measure | Setup | Bar | Spike figure |
-| --- | --- | --- | --- |
-| Allocations per Raft message | 3 nodes × 1,000 groups per node, 128 B proposals, open load at 60,000 proposals/s, 10 ms tick, 100 ms heartbeat, synchronous `Ready` | ≤ 3 | 2.7 (v3.6.0) |
-| Heap per idle group | 1,000 groups per node, no proposals | ≤ 4 KiB | 2.8 KiB (2.7 MiB per node) |
-| Allocations per proposal | As above | Tracked | 22.6 |
-| CPU per proposal, across its three replicas | As above | Tracked | about 27 µs |
-| Collection's share of CPU | As above | Tracked | 14% |
-| Idle CPU per node, 10 ms tick, not quiesced | 1,000 groups | Tracked | 2 to 8% of a core |
+| Measure | Setup | Bar | Measured (M4 Pro) | Spike figure |
+| --- | --- | --- | --- | --- |
+| Allocations per Raft message | Under load | ≤ 3 | 2.9 | 2.7 |
+| Heap per idle group | One second after the elections, per replica | ≤ 4 KiB | 3.0 KiB (2.9 MiB per node) | 2.8 KiB (2.7 MiB per node) |
+| Allocations per proposal | Under load | Tracked | 25, over 8.7 messages | 22.6, over 8.4 |
+| CPU per proposal, across its three replicas | Under load | Tracked | 4.1 µs | about 27 µs on a shared VM |
+| Collection's share of CPU | Under load, the runtime's estimate | Tracked | 1.2% | 14% |
+| Idle CPU per node, 10 ms tick, not quiesced | 1,000 groups | Tracked | 0.9% of a core | 2 to 8% |
 
-The benchmark calls `b.ReportAllocs`. Quiesced groups (0.07% of a core in the multi-raft spike) are phase 13.
+Quiesced groups (0.07% of a core in the multi-raft spike) are phase 13.
 
 ## Maelstrom harness
 
