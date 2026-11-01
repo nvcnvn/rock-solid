@@ -122,9 +122,9 @@ type fortified struct {
 	term, run, support uint64
 }
 
-// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, and a replacement added as a voter.
+// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, and a learner held to the current commit index.
 type plants struct {
-	unseeded, early, disloyal, eager, voterFirst bool
+	unseeded, early, disloyal, eager, voterFirst, current bool
 }
 
 // New starts a replica from its storage.
@@ -611,7 +611,11 @@ func (s *Shard) reconcile(ctx *core.Context) {
 		}
 		return
 	}
-	if cc, ok := s.change(s.mark); ok && s.rn.ProposeConfChange(cc) == nil {
+	caughtUp := s.mark
+	if s.plant.current {
+		caughtUp = st.Commit
+	}
+	if cc, ok := s.change(caughtUp); ok && s.rn.ProposeConfChange(cc) == nil {
 		s.confTerm = st.Term
 	}
 }

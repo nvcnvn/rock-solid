@@ -377,3 +377,71 @@ func TestALeaderThePlanDropsWithEveryVoterSwapsTheOthersFirst(t *testing.T) {
 		}
 	}
 }
+
+// swapUnderLoad runs the replacement with a proposal every 10 ms and D's link one step slower than
+// the others, for 3 s, and reports whether D was swapped in.
+func swapUnderLoad(t *testing.T, p plants) bool {
+	n := newReplaceNet(t, p)
+	n.r[rA].s.SetPlan(replacing)
+	n.propose(rA, []byte("a"))
+	n.settleWithout(rC, rD)
+	n.snapshot(rA)
+	var late []envelope
+	for step := range 300 {
+		n.now += TickInterval
+		for _, i := range []int{rA, rB, rD} {
+			n.event(i, core.Event{Kind: core.EvTimer, Timer: 1})
+		}
+		if n.r[rA].s.rn.BasicStatus().RaftState == raft.StateLeader {
+			n.call(rA, func(ctx *core.Context, out *Output) { _ = n.r[rA].s.Propose(ctx, []byte{byte(step)}, out) })
+		}
+		now := late
+		late = nil
+		for _, e := range n.inbox {
+			switch {
+			case e.from == rC || e.to == rC:
+				if e.msg.Buf != core.NoBuf {
+					n.r[e.to].pool.Free(e.msg.Buf)
+				}
+			case e.from == rD || e.to == rD:
+				late = append(late, e)
+			default:
+				now = append(now, e)
+			}
+		}
+		n.inbox = n.inbox[:0]
+		for _, e := range now {
+			n.event(e.to, core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: uint32(e.from)}, Msg: e.msg})
+		}
+		for i, r := range n.r {
+			if r.flush != 0 && i != rC {
+				n.durable(i)
+			}
+		}
+	}
+	return slices.Contains(n.conf(rA).Voters, 4)
+}
+
+// Under steady writes a learner behind a slower link trails the current commit index for good: held
+// to the commit index of a heartbeat ago it is swapped in, held to the current one it never is.
+func TestALearnerBehindASlowerLinkIsPromotedUnderSteadyWrites(t *testing.T) {
+	if !swapUnderLoad(t, plants{}) {
+		t.Fatal("D never swapped in under steady writes")
+	}
+	if swapUnderLoad(t, plants{current: true}) {
+		t.Fatal("a learner held to the current commit index was swapped in, so this test would miss that rule")
+	}
+}
+
+// A replica its own applied configuration does not hold yet, as a new one before its addition
+// reaches it, ignores a removal notice at any index: a notice proves a removal only to a member.
+func TestARemovalNoticeNeedsTheReplicaInItsOwnConfiguration(t *testing.T) {
+	n := newReplaceNet(t, plants{})
+	d := n.r[rD]
+	ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 0}}
+	encodeFortify(testGroup, &fortify{kind: kindRemoved, from: 1, to: 4, term: 1 << 40}, &ev.Msg)
+	n.event(rD, ev)
+	if d.removed {
+		t.Fatal("a replica outside its own applied configuration took a removal notice")
+	}
+}
