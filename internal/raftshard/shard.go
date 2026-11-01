@@ -107,8 +107,10 @@ func raftConfig(cfg *Config) *raft.Config {
 		MaxSizePerMsg:   1 << 20,
 		MaxInflightMsgs: 256,
 		PreVote:         true,
-		Logger:          quiet{},
-		Rand:            rand.New(rand.NewPCG(cfg.Seed, 0)),
+		// A Txn goes to the leader, which answers NotLeader elsewhere; a follower never forwards it.
+		DisableProposalForwarding: true,
+		Logger:                    quiet{},
+		Rand:                      rand.New(rand.NewPCG(cfg.Seed, 0)),
 	}
 }
 
@@ -137,7 +139,7 @@ func (s *Shard) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	s.ready(ctx, out)
 }
 
-// Propose appends data to the group's log if this replica leads, or forwards it to the leader.
+// Propose appends data to the group's log if this replica leads, and returns raft.ErrProposalDropped otherwise.
 func (s *Shard) Propose(ctx *core.Context, data []byte, out *Output) error {
 	err := s.rn.Propose(data)
 	s.ready(ctx, out)

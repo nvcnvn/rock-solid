@@ -180,6 +180,11 @@ func (n *testNet) settle() {
 			}
 		}
 		if !flushed && len(n.inbox) == 0 {
+			for i, r := range n.r {
+				if r.pool.Live() != 0 {
+					n.t.Fatalf("replica %d holds %d buffers once the group settled", i, r.pool.Live())
+				}
+			}
 			return
 		}
 	}
@@ -248,6 +253,9 @@ func TestConfig(t *testing.T) {
 	}
 	if rc.CheckQuorum || !rc.PreVote {
 		t.Errorf("CheckQuorum %v, PreVote %v: want off and on", rc.CheckQuorum, rc.PreVote)
+	}
+	if !rc.DisableProposalForwarding {
+		t.Error("followers forward proposals")
 	}
 	if TickInterval != 10_000 || rc.HeartbeatTick != 10 || rc.ElectionTick != 100 {
 		t.Errorf("tick %v, HeartbeatTick %d, ElectionTick %d: want 10 ms, 10 and 100", TickInterval.Duration(), rc.HeartbeatTick, rc.ElectionTick)
@@ -425,6 +433,7 @@ func TestUndecodableMessagesAreDroppedAndCounted(t *testing.T) {
 		}(),
 		"unknown type":           frame(raftpb.Message{Type: 99, To: 2, From: 1, Term: 1}),
 		"local type":             frame(raftpb.Message{Type: raftpb.MsgHup, To: 2, From: 1}),
+		"forwarded proposal":     frame(raftpb.Message{Type: raftpb.MsgProp, To: 2, From: 1, Entries: []raftpb.Entry{{Data: []byte("x")}}}),
 		"buffer length past end": buffered(head(core.BlockSize+1), 10),
 		"buffer header short":    buffered(head(3)[:10], 10),
 	}
@@ -489,6 +498,9 @@ func TestALeadersAppendsLeaveWithItsWrite(t *testing.T) {
 	sent := n.propose(0, []byte("x"))
 	if n.r[0].flush == 0 || count(sent, raftpb.MsgApp) != 2 || len(sent) != 2 {
 		t.Fatalf("a proposal took round %d and sent %v, want a round and an append to each follower", n.r[0].flush, types(sent))
+	}
+	if sent := n.durable(0); count(sent, raftpb.MsgApp) != 0 {
+		t.Fatalf("the round's flush sent %v, the appends again", types(sent))
 	}
 }
 

@@ -20,7 +20,7 @@ const (
 
 var le = binary.LittleEndian
 
-// errMalformed reports a message that does not decode, or names a type no peer sends.
+// errMalformed reports a message that does not decode, or names a type no peer sends: a local one, or a proposal, which no replica forwards.
 var errMalformed = errors.New("raftshard: malformed message")
 
 // encode frames m for group, reporting false when the pool has no buffer for it.
@@ -67,7 +67,7 @@ func decode(pool core.BufPool, msg *core.Msg, m *raftpb.Message) (uint64, error)
 	if err := m.Unmarshal(body); err != nil {
 		return 0, errMalformed
 	}
-	if _, ok := raftpb.MessageType_name[int32(m.Type)]; !ok || raft.IsLocalMsg(m.Type) {
+	if _, ok := raftpb.MessageType_name[int32(m.Type)]; !ok || raft.IsLocalMsg(m.Type) || m.Type == raftpb.MsgProp {
 		return 0, errMalformed
 	}
 	return group, nil

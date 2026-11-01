@@ -191,9 +191,9 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 }
 
 // durableFor reports an acknowledgment of entries, or a granted vote, that a sends before the
-// replica's storage holds them in its term. One Ready can hold a vote or an acknowledgment and a
-// later term the replica moved to before the Ready was taken; once that term is durable the
-// replica never acts in the older one again, so the older message may leave.
+// replica's storage holds them. One Ready can hold a vote and a later term the replica moved to
+// before the Ready was taken; once that term is durable the replica never votes in the older one
+// again, so the vote may leave.
 func (r *simReplica) durableFor(ctx *core.Context, a *core.Action) error {
 	var m raftpb.Message
 	if _, err := decode(ctx.Pool, &a.Msg, &m); err != nil {
@@ -201,15 +201,12 @@ func (r *simReplica) durableFor(ctx *core.Context, a *core.Action) error {
 	}
 	st := r.c.storage[r.id]
 	hs, _, _ := st.InitialState()
-	if hs.Term > m.Term {
-		return nil
-	}
 	switch {
 	case m.Type == raftpb.MsgAppResp && !m.Reject:
-		if last, _ := st.LastIndex(); hs.Term < m.Term || last < m.Index {
+		if last, _ := st.LastIndex(); last < m.Index {
 			return fmt.Errorf("replica %d acknowledged index %d in term %d holding up to %d in term %d", r.id, m.Index, m.Term, last, hs.Term)
 		}
-	case m.Type == raftpb.MsgVoteResp && !m.Reject:
+	case m.Type == raftpb.MsgVoteResp && !m.Reject && hs.Term <= m.Term:
 		if hs.Term < m.Term || hs.Vote != m.To {
 			return fmt.Errorf("replica %d granted %d its vote in term %d holding %+v", r.id, m.To, m.Term, hs)
 		}

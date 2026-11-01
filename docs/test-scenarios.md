@@ -5439,7 +5439,8 @@ the round to its `raft.MemoryStorage`, which stands for the durable log until th
 - synchronous `Ready`/`Advance`, with `AsyncStorageWrites` off;
 - `CheckQuorum` off and `PreVote` on;
 - an election tick of 10 ms, `HeartbeatTick` 10 (100 ms) and `ElectionTick` 100;
-- election timeouts drawn from a source seeded from the replica's own seed.
+- election timeouts drawn from a source seeded from the replica's own seed;
+- `DisableProposalForwarding` on, so a follower drops a proposal ([Routing](design.md#metadata-layer-metastore)), and a forwarded `MsgProp` from a peer is dropped as undecodable.
 
 `TestConfig` asserts each of these from the config. Raft storage in the disk log and Leader leases refer to this test rather than repeating it.
 
@@ -5453,13 +5454,13 @@ the round to its `raft.MemoryStorage`, which stands for the durable log until th
 | A peer message of 256 bytes, framing included | Carried inline |
 | A peer message of 257 bytes or more (an append with entries) | Carried as an `IOBuf` handle, never inline, and decodes to the same message |
 | An append over 256 bytes while the buffer pool is exhausted | The message is dropped as lost and counted (`Unsent`), never a panic or a heap fallback. Once the pool has room, Raft resends it and both followers catch up |
-| A `NetRecv` that fails to decode (truncated framing, garbage body, an unknown type, a type only a node sends itself, a buffer length past the buffer) | Dropped and counted (`Undecodable`), its buffer freed. No panic, no step into `RawNode` |
+| A `NetRecv` that fails to decode (truncated framing, garbage body, an unknown type, a type only a node sends itself, a forwarded proposal, a buffer length past the buffer) | Dropped and counted (`Undecodable`), its buffer freed. No panic, no step into `RawNode` |
 | A message for another group, or for another replica of this one | Dropped and counted (`Misrouted`), not answered: a removed replica learns from its own log |
 | `PeerLost` for a follower's node | The leader calls `ReportUnreachable`, so that follower goes from replicate to probe; the other follower stays in replicate |
-| A leader with proposals in a round | The `MsgApp` to followers goes out in the same pass as the round to flush, not after the flush. Batching into one entry per round is under Shard state machine |
+| A leader with proposals in a round | The `MsgApp` to followers goes out in the same pass as the round to flush, not after the flush, and not again once it is durable. Batching into one entry per round is under Shard state machine |
 | A follower receiving an append | `MsgAppResp` held until the round that holds the entry is durable, then sent; storage holds the entry only from then |
 | A node granting a vote | `MsgVoteResp` held until the round holding the new term and vote is durable |
-| A node answering a pre-vote while a round holding an append is in flight | `MsgPreVoteResp` goes out with the write, since a pre-vote changes no hard state; the append's `MsgAppResp` waits |
+| A node answering a pre-vote while a round holding an append is in flight | `MsgPreVoteResp` waits for that round, as every message stepped mid-round does, then leaves with the next round's write, since a pre-vote changes no hard state; that round's `MsgAppResp` waits for its flush |
 | A `Ready` with committed entries | Applied after persistence, then `Advance`. A message stepped while the round is in flight takes no second `Ready` before `Advance`; it comes out in the next round |
 | A crash before the durable notice | On restart the follower's log lacks the entry, and the leader resends it. No acknowledgment was sent for it |
 
@@ -5474,14 +5475,14 @@ more. Every seed checks, after every step:
 
 - [property] "acknowledged only once durable": no accepting `MsgAppResp` leaves before its replica's
   storage holds the entry, and no granted `MsgVoteResp` before it holds the term and vote, unless
-  storage already holds a later term. One `Ready` can carry a vote or an acknowledgment together
-  with a later term the replica moved to before that `Ready` was taken; once the later term is
-  durable the replica never acts in the older one again. Seed 135 of the first 2,000 is such a
-  case.
+  storage already holds a later term. One `Ready` can carry a vote together with a later term the
+  replica moved to before that `Ready` was taken; once the later term is durable the replica never
+  votes in the older one again. Seed 135 of the first 2,000 is such a case.
 - "applied entries agree": no two replicas apply different entries at one index.
 - the simulator's driver contract.
 
-Across the 20 seeds, traces show buffered messages, pauses, restarts and lost connections. Planted
+Across the 20 seeds, traces show buffered messages, pauses, restarts and lost connections. In the
+trace tests, every pool holds no buffer once the group settles. Planted
 bugs show the checks bite: a shard that sends every message before its round's flush breaks
 "acknowledged only once durable" within 20 seeds, and one drawing election timeouts from
 `crypto/rand` breaks replay (etcd-raft module, above).
