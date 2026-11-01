@@ -268,6 +268,9 @@ func (s *Shard) ReadIndex(ctx *core.Context, rctx []byte, out *Output) {
 	s.ready(ctx, out)
 }
 
+// Leader is the replica this one last heard lead its current term, or 0, which a NotLeader answer names.
+func (s *Shard) Leader() uint64 { return s.rn.BasicStatus().Lead }
+
 // LeaseRead reports whether this replica may serve a read now from the entries it handed over to apply, with no round trip: it leads, no MsgTimeoutNow left in its term, an entry of its term has committed, and each half of its configuration has a quorum of voters, itself included, whose fortification of its term runs on the node-pair leases.
 func (s *Shard) LeaseRead(ctx *core.Context) bool {
 	st := s.rn.BasicStatus()

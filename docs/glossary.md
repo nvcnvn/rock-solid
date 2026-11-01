@@ -406,6 +406,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Jepsen, Elle, Porcupine.** Tools that record what clients saw and check whether any valid order of operations could explain it; one that cannot reveals a consistency bug.
 
+**Maelstrom.** A Jepsen-based workbench that runs each node of a distributed system as a process speaking JSON on stdin and stdout, routes their messages through a simulated network it can partition, drives client workloads against them and checks the history. Its `lin-kv` workload checks that a key-value store is linearizable; the Raft shard runs under it through a small adapter ([Maelstrom harness](test-scenarios.md#maelstrom-harness)).
+
 **Fuzzing.** Feeding a function large numbers of generated inputs to find ones that crash it. Every decoder of on-disk or network bytes is fuzzed, because those bytes can be corrupt.
 
 **Golden file.** A checked-in file of expected bytes that the code must reproduce exactly, so an accidental format change fails a test.

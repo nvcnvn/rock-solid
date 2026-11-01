@@ -1,0 +1,40 @@
+name: maelstrom
+
+on:
+  push:
+    paths: [internal/raftshard/**, internal/lease/**, internal/core/**, third_party/raft/**, tools/maelstrom/**, scripts/maelstrom.sh, go.mod, go.sum, .github/workflows/maelstrom.yml]
+  pull_request:
+    paths: [internal/raftshard/**, internal/lease/**, internal/core/**, third_party/raft/**, tools/maelstrom/**, scripts/maelstrom.sh, go.mod, go.sum, .github/workflows/maelstrom.yml]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lin-kv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - id: maelstrom
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/rock-solid/maelstrom/v0.2.4/maelstrom
+          key: maelstrom-v0.2.4
+      - run: scripts/maelstrom.sh
+      - if: steps.maelstrom.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/rock-solid/maelstrom/v0.2.4/maelstrom
+          key: maelstrom-v0.2.4
