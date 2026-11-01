@@ -5792,6 +5792,7 @@ Every 3- and 5-node run had the workload valid, with no checker invalid.
 | A key of 1,033 bytes, or a value of 1,001 bytes | Refused with an error before proposing, never a panic (`MaxKey` 1,032, `MaxValue` 1,000) |
 | A `DeleteRange` or `CheckEmpty` bound of 1,001 bytes, or a start not below its end | Refused before proposing; a bound of 1,000 bytes commits |
 | A `Txn` with a replay key and 125 `Update`s | Refused before proposing; 124 commit, and their record fits `MaxValue` |
+| An op carrying a field its kind does not encode (a `CheckEmpty` marked absent, a `Put` marked final), or an oldest-outstanding value without a replay key | Refused before proposing: an entry decoded differently from what its leader checked would fail that `Txn` and every later one in the entry on every replica. [property] Every `Txn` that passes the check, its fields drawn at random, decodes from its encoding to itself (`TestCheckedTxnsDecodeToThemselves`) |
 | A `Txn` encoding to more than 256 KiB (`max_txn_bytes`), as an 82 KiB xattr in pieces fits and 1 MiB does not | Refused before proposing with a size error, never split |
 | Empty ops | An error |
 | Two racing `Txn`s, each check a absent, put a=x | Exactly one commits (the design's lock-race example) |

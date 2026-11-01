@@ -152,6 +152,9 @@ func (t *Txn) Check() (int, error) {
 		return 0, ErrNoOps
 	}
 	n := uvarintLen(uint64(len(t.Replay))) + len(t.Replay) + uvarintLen(uint64(len(t.Ops)))
+	if t.Replay == nil && t.Oldest != 0 {
+		return 0, ErrBadReplay
+	}
 	if t.Replay != nil {
 		if len(t.Replay) < requestBytes || len(t.Replay) > MaxBound || t.Oldest > binary.BigEndian.Uint64(t.Replay[len(t.Replay)-requestBytes:]) {
 			return 0, ErrBadReplay
@@ -161,6 +164,9 @@ func (t *Txn) Check() (int, error) {
 	updates := 0
 	for i := range t.Ops {
 		op := &t.Ops[i]
+		if op.Kind < OpPut || op.Kind > OpUpdate || !carries(op) {
+			return 0, ErrBadOp
+		}
 		n += 1 + bytesLen(op.Key)
 		key := MaxKey
 		switch op.Kind {
@@ -207,6 +213,22 @@ func (t *Txn) Check() (int, error) {
 		return 0, ErrTooLarge
 	}
 	return n, nil
+}
+
+// uses is, per op kind, the fields its encoding carries; a field set outside them would not survive the log entry.
+var uses = [...]struct{ end, value, absent, final, update bool }{
+	OpPut:         {value: true},
+	OpDelete:      {},
+	OpDeleteRange: {end: true},
+	OpCheck:       {value: true, absent: true, final: true},
+	OpCheckEmpty:  {end: true, final: true},
+	OpUpdate:      {update: true},
+}
+
+func carries(op *Op) bool {
+	u := uses[op.Kind]
+	return (u.end || op.End == nil) && (u.value || op.Value == nil) && (u.absent || !op.Absent) && (u.final || !op.Final) &&
+		(u.update || op.Off == 0 && op.Mode == 0 && op.N == 0) && !(op.Absent && op.Value != nil)
 }
 
 // appendTxn appends t's encoding to dst; t must have passed Check.
@@ -284,7 +306,7 @@ func decodeTxn(b []byte, t *Txn) ([]byte, error) {
 		case OpCheck, OpCheckEmpty:
 			f := d.byte()
 			op.Absent, op.Final = f&flagAbsent != 0, f&flagFinal != 0
-			if f&^(flagAbsent|flagFinal) != 0 || op.Kind == OpCheckEmpty && op.Absent {
+			if f&^(flagAbsent|flagFinal) != 0 {
 				return nil, ErrMalformed
 			}
 			op.Key = d.bytes()
