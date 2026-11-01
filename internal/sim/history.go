@@ -26,7 +26,7 @@ type History struct {
 	decode func(a *core.Action, data []byte) (op int, out [OpWords]uint64, ok bool)
 }
 
-// Replies completes operations from the client replies any machine sends: decode, given a send marked Reply and the sender's bytes of its buffer, nil for none, names the operation it answers and its result, or reports false for any other.
+// Replies completes operations from the client replies any machine sends: decode, given a send marked Reply and the sender's bytes of its buffer, nil for none, names the operation it answers and its result, or reports false for any other, such as a one-way message between machines.
 func (h *History) Replies(decode func(a *core.Action, data []byte) (op int, out [OpWords]uint64, ok bool)) {
 	h.decode = decode
 	h.s.history = h
