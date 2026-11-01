@@ -5745,14 +5745,28 @@ Quiesced groups (0.07% of a core in the multi-raft spike) are phase 13.
 
 ## Maelstrom harness
 
-- **Adapter.** A small I/O adapter runs the Raft shard as a Maelstrom node: JSON messages on stdin and stdout, Maelstrom's network for peer messages, and the shard unchanged behind `OnEvent`. Open: whether the harness carries its own small map as the state machine, or waits for `internal/meta`'s `Txn`. Maelstrom harness comes before Shard state machine in the checklist.
-- **Pass criterion.** It passes Maelstrom's `lin-kv` workload (`read`, `write`, `cas`) under `--nemesis partition`, checked linearizable by Maelstrom's checker (the [done-when checkpoint](design.md#learning-project)). Open: run parameters. A starting point is 3 and 5 nodes, `--time-limit 60 --rate 100 --concurrency 2n --nemesis-interval 5`.
+`tools/maelstrom` runs one replica of a single Raft group as a [Maelstrom](https://github.com/jepsen-io/maelstrom) node, and `scripts/maelstrom.sh` runs it under Maelstrom's `lin-kv` workload (`read`, `write`, `cas`) with network partitions, checked linearizable by Maelstrom's checker: the [done-when checkpoint](design.md#learning-project). The adapter is test code off the data path, in ordinary Go: a goroutine reads stdin, and one loop hands each message, or the shard's timer firing, to the node and writes what it sends to stdout.
+
+- **Adapter.** Every node boots the same group, with each Maelstrom node a voter whose replica ID is its place in `node_ids` plus one. A Raft message travels as a Maelstrom message carrying the shard's inline bytes and pool buffer, and the shard runs unchanged behind `OnEvent`, `Propose`, `ReadIndex` and `Durable`. The storage is the process's memory, and each round is reported durable as soon as the shard takes it, since `lin-kv` never crashes a node. The state machine is the harness's own map from key to value, applied from committed entries; `Txn` is the [Shard state machine](#shard-state-machine)'s. The group never compacts or reconfigures, so a snapshot or a removal stops the node. No node-pair lease is ever renewed, so no leader is fortified, and each node's grantor holds its restart wait: no vote is granted in a node's first 4 s.
+- **Writes.** A `write` or `cas` is a log entry naming the node that proposed it and its ID there. Every node applies it, and the proposer answers its client once it applies. A follower resends a client's `write` or `cas` to the leader `Shard.Leader` names, as the daemon resends a `Txn` on [`NotLeader`](design.md#metadata-layer-metastore), and relays the answer; the node it resent to proposes it or answers 11, never resending it again. Without the resend, two writes in three fail on 3 nodes, and a 30 s run acknowledged about 40 writes, too few for the planted bug to fail reliably.
 - **Error codes.**
-  - A `cas` on an absent key returns error 20 (key does not exist), and a `cas` whose `from` does not match returns 22 (precondition failed).
-  - Error 11 (temporarily unavailable, a definite error) is returned only for an op that was never proposed.
-  - An op that was proposed and then orphaned by a leader change returns 13 (crash, indefinite), or no reply.
-- **Reads.** Reads go through ReadIndex or a lease read. Open: whether the harness carries the node-pair leases (`internal/lease`). Without them it must use ReadIndex for every read.
-- **Planted bug.** A run where any node serves reads from its applied state must fail the checker.
+  - A `cas` or `read` on an absent key returns error 20 (key does not exist), and a `cas` whose `from` does not match returns 22 (precondition failed).
+  - Error 11 (temporarily unavailable, a definite error) is returned only for an op that was never proposed: by a node that neither leads nor names a leader, or that was resent the op and no longer leads.
+  - An op proposed and then orphaned by a leader change gets no reply, which Maelstrom's client records as indefinite when it times out.
+- **Reads.** Every read goes through ReadIndex, on any node: etcd-raft passes a follower's ReadIndex to its leader, and the node answers once it has applied up to the index a quorum confirmed. A read that is never confirmed, on a node with no leader or a leader cut off from its quorum, gets no reply, which Maelstrom records as a failed read since a read changes nothing. The harness makes no lease reads, as it carries no node-pair lease traffic; the [Leader leases](#leader-leases) tests cover them.
+- **Unit tests.** `TestLinKV` routes messages between three nodes in memory: a write before any leader returns 11; on the leader, a `cas` on an absent key returns 20, a write succeeds, a `cas` from the wrong value returns 22 and one from the right value succeeds; on a follower, a `cas` resent to the leader succeeds, a read returns its value and a `cas` from the old value returns 22; a read of an absent key returns 20. `TestOrphanedWrite` cuts the leader off, sends it a write and a read, elects a new leader that takes a write to the same key, heals the cut, and checks that the old leader serves the new value and never answers either request. `TestLeaderNamesTheElectedReplica` (`internal/raftshard`) checks that no replica names a leader before an election, and every replica names the elected one after it.
+- **Pass criterion.** `scripts/maelstrom.sh` downloads Maelstrom v0.2.4 once into `~/.cache/rock-solid/maelstrom` (`$XDG_CACHE_HOME` when set), checked against its pinned hash ([tech-debts.md](tech-debts.md#version-pin-maelstrom-v024)), builds the adapter, and runs `lin-kv` with `--nemesis partition --nemesis-interval 5 --rate 100 --concurrency 2n --time-limit 30` (`TIME_LIMIT` overrides) and a 2 GB Java heap: on 3 nodes and then on 5, each of which must have the workload valid and no checker invalid. Without gnuplot, Maelstrom's latency graphs fail and its overall verdict is unknown, so the script reads each run's `results.edn` ([tech-debts.md](tech-debts.md#workaround-maelstrom-runs-judged-by-their-resultsedn)). The script takes about 1 minute 45 seconds and needs Java 17 or later. Open: whether CI runs it, as a job of its own with `actions/setup-java` and the download cached, on changes to `internal/raftshard` and `tools/maelstrom`.
+- **Planted bug.** `-stale-reads` serves every read from the node's map at once. The script's third run, on 5 nodes, must have the workload invalid. On 3 nodes a 30 s run caught it in 2 of 4 runs, as it fails only when a partition cuts a follower off from a leader that keeps its quorum and takes writes; on 5 nodes it failed in all of 6.
+
+Three runs of the script on a Mac mini (M4 Pro), each op count those Maelstrom recorded `ok`:
+
+| Run | 3 nodes: writes, `cas`, reads | 5 nodes: writes, `cas`, reads | 5 nodes, `-stale-reads` |
+| --- | --- | --- | --- |
+| 1 | 330, 125, 962 | 281, 103, 979 | Invalid |
+| 2 | 243, 93, 808 | 316, 125, 921 | Invalid |
+| 3 | 322, 119, 849 | 322, 131, 924 | Invalid |
+
+Every 3- and 5-node run had the workload valid, with no checker invalid.
 
 ## Shard state machine
 

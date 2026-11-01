@@ -45,6 +45,16 @@
 - **Why:** a TLC release can change what a configuration explores or how fast, so an unpinned checker would move every model's state counts and `ci` times without a spec change ([Testing strategy](design.md#testing-strategy)). The 1.8 line is a pre-release whose jar is rebuilt in place, so the models use no CommunityModules operator that needs it ([protocol models study](../studies/protocol-models/README.md)).
 - **Remove when:** never removed, only bumped. A bump reruns every `ci` and negative configuration (`scripts/models.sh ci`, which CI runs on the change) and every `deep` one (the next nightly CI run, since the pin is part of each configuration's hash), and records the new state counts in the [model-to-simulator map](test-scenarios.md#model-to-simulator-map).
 
+## Version pin: Maelstrom v0.2.4
+- **Where:** `VERSION` and `SHA256` in `scripts/maelstrom.sh`, which downloads the release into `~/.cache/rock-solid/maelstrom` (`$XDG_CACHE_HOME` when set) and checks it against the checksum
+- **Why:** a Maelstrom release can change the `lin-kv` workload, its nemesis or its checker, so an unpinned one could fail or pass the [Maelstrom harness](test-scenarios.md#maelstrom-harness) without a code change.
+- **Remove when:** never removed, only bumped. A bump runs the script three times and records its results in the harness's section.
+
+## Workaround: Maelstrom runs judged by their `results.edn`
+- **Where:** the verdict checks in `scripts/maelstrom.sh`
+- **Why:** Maelstrom draws its latency graphs with gnuplot, which the script does not install, and without it that checker fails and every run's overall verdict is unknown, so the script requires the workload valid and no checker invalid instead of Maelstrom's exit status.
+- **Remove when:** gnuplot is installed wherever the script runs, or Maelstrom can leave out its graphs; the script then takes Maelstrom's exit status.
+
 ## Workaround: writes larger than one record copied
 - **Where:** `writeItems` in `internal/chunkstore/store.go`
 - **Why:** a write larger than one record goes to the log as several items, each needing a pool buffer of exactly its blocks, and a pool buffer cannot be split, so the store copies such a write into one buffer per item although [chunk blocks are never copied](design.md#on-disk-format) otherwise. A whole chunk on a disk with [chunk slots](design.md#on-disk-format) is one item and is not copied; a larger partial write is, and so is a whole chunk on a disk whose segments are smaller than a chunk.

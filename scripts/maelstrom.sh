@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs the Raft shard as Maelstrom nodes (tools/maelstrom) under the lin-kv workload with network
-# partitions, on 3 and then 5 nodes, each of which must check linearizable, and once more with reads
-# served from the local map, which must not. Maelstrom is downloaded once, checked against its
+# partitions, on 3 and then 5 nodes, each of which must check linearizable, and once more on 5
+# with reads served from the local map, which must not. Maelstrom is downloaded once, checked against its
 # pinned hash, into a cache outside the repository, where its runs leave their store/ too. Needs
 # Java 17 or later. Without gnuplot Maelstrom's latency graphs fail and its overall verdict is
 # unknown, so a run is judged by its results.edn: the workload valid and no checker invalid.
@@ -45,7 +45,7 @@ for n in 3 5; do
 		failed=1
 	fi
 done
-run stale-node 3
+run stale-node 5
 if ! grep -q '^ :workload {:valid? false' "$results"; then
 	echo "the checker missed reads served from the local map; see $dir/store/latest" >&2
 	failed=1

@@ -1256,6 +1256,7 @@ One Go module, `github.com/nvcnvn/rock-solid`, with everything but the binary un
 | `internal/csi` | Kubernetes CSI driver | No |
 | `cmd/rock-solid` | The single binary that wires the drivers and frontends picked by flags | No |
 | `tools/sansio` | The `go vet` analyzer for sans-IO packages, with a narrower rule set for the loop and driver packages | No |
+| `tools/maelstrom` | The Raft shard as a Maelstrom node, for the `lin-kv` workload | No |
 | `models` | TLA+ specifications | |
 
 ## Testing strategy
@@ -1627,7 +1628,7 @@ Each learning track starts with a small throwaway exercise, then lands as a real
 **Done-when checkpoints**
 
 - [x] Simulator replays a failing seed exactly, and finds a bug planted in a toy replication protocol.
-- [ ] Raft passes the Maelstrom linearizable key-value workload under partitions.
+- [x] Raft passes the Maelstrom linearizable key-value workload under partitions.
 - [ ] Same `ChunkStore` test suite passes on the simulated disk, io\_uring and SPDK.
 - [ ] Two pods on two nodes share an RWX PVC, one node is power-cut mid-write, and every file that was closed before the cut verifies after recovery.
 - [ ] Two nodes write one file concurrently under `fsx` with Tier 2 on, and the consistency checker finds no stale read.
