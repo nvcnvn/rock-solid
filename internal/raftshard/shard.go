@@ -47,8 +47,12 @@ type Config struct {
 	Peers []Peer
 	// Storage holds the replica's log and hard state as its durable rounds left them; the shard writes a round to it once the round is durable.
 	Storage *Storage
-	// SnapshotData is the state machine's contents at an applied index, which a snapshot built on demand carries; nil leaves snapshots without data.
+	// SnapshotData is the state machine's contents at the index last handed over to apply, which a snapshot built on demand carries; nil leaves snapshots without data.
 	SnapshotData func(index uint64) []byte
+	// Apply, when set, takes each restored snapshot, empty if none, and the committed entries as the shard hands them over, in place of Output's Snapshot and Committed, so the state machine holds them before the shard can build a snapshot later in the same call.
+	Apply func(snap raftpb.Snapshot, ents []raftpb.Entry)
+	// CheckSnapshot, when set, reports whether a snapshot's data restores; a snapshot message whose data does not is dropped as undecodable.
+	CheckSnapshot func(data []byte) bool
 	// Seed seeds the replica's election timeouts.
 	Seed  uint64
 	Timer core.TimerID
@@ -271,6 +275,12 @@ func (s *Shard) ReadIndex(ctx *core.Context, rctx []byte, out *Output) {
 // Leader is the replica this one last heard lead its current term, or 0, which a NotLeader answer names.
 func (s *Shard) Leader() uint64 { return s.rn.BasicStatus().Lead }
 
+// Term is the replica's current term, which every entry it appends while it leads carries.
+func (s *Shard) Term() uint64 { return s.rn.BasicStatus().Term }
+
+// Flushing reports whether a round is in flight, so the next Ready waits for its Durable.
+func (s *Shard) Flushing() bool { return s.round != 0 }
+
 // LeaseRead reports whether this replica may serve a read now from the entries it handed over to apply, with no round trip: it leads, no MsgTimeoutNow left in its term, an entry of its term has committed, and each half of its configuration has a quorum of voters, itself included, whose fortification of its term runs on the node-pair leases.
 func (s *Shard) LeaseRead(ctx *core.Context) bool {
 	st := s.rn.BasicStatus()
@@ -423,6 +433,8 @@ func (s *Shard) recv(ctx *core.Context, ev *core.Event, out *Output) {
 	case kind == kindFortified:
 		s.fortifyAnswered(&f)
 	case (m.Type == raftpb.MsgVote || m.Type == raftpb.MsgPreVote) && s.refuses(ctx, &m):
+	case m.Type == raftpb.MsgSnap && s.cfg.CheckSnapshot != nil && (m.Snapshot == nil || !s.cfg.CheckSnapshot(m.Snapshot.Data)):
+		s.stats.Undecodable++
 	default:
 		if errors.Is(s.rn.Step(m), raft.ErrStepPeerNotFound) {
 			s.stats.Misrouted++
@@ -525,7 +537,10 @@ func (s *Shard) done(ctx *core.Context, rd *raft.Ready, p part, out *Output) {
 			panic(err)
 		}
 		was := s.conf
-		s.conf, s.applied, out.Snapshot = rd.Snapshot.Metadata.ConfState, rd.Snapshot.Metadata.Index, rd.Snapshot
+		s.conf, s.applied = rd.Snapshot.Metadata.ConfState, rd.Snapshot.Metadata.Index
+		if s.cfg.Apply == nil {
+			out.Snapshot = rd.Snapshot
+		}
 		s.prune(&was)
 	}
 	if !raft.IsEmptyHardState(rd.HardState) {
@@ -538,7 +553,11 @@ func (s *Shard) done(ctx *core.Context, rd *raft.Ready, p part, out *Output) {
 			s.applyConf(e)
 		}
 	}
-	out.Committed = append(out.Committed, rd.CommittedEntries...)
+	if s.cfg.Apply == nil {
+		out.Committed = append(out.Committed, rd.CommittedEntries...)
+	} else if !raft.IsEmptySnap(rd.Snapshot) || len(rd.CommittedEntries) > 0 {
+		s.cfg.Apply(rd.Snapshot, rd.CommittedEntries)
+	}
 	if n := len(rd.CommittedEntries); n > 0 {
 		s.committed = max(s.committed, rd.CommittedEntries[n-1].Term)
 		s.applied = rd.CommittedEntries[n-1].Index
