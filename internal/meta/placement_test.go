@@ -45,7 +45,7 @@ func voterNodes(g *Group) []uint32 {
 func TestEachGroupGetsThreeVotersOnePerNodeOnTheLeastLoadedDisk(t *testing.T) {
 	r, nodes := cluster(t, 3)
 	m := ShardMap{Groups: []Group{{ID: 0}, {ID: 1}, {ID: 2}, {ID: 3}}}
-	m = PlaceVoters(&m, nodes, r.Disks(), 0)
+	m = PlaceVoters(&m, nodes, r.Disks(), nil, 0)
 	load := map[uint32]int{}
 	for _, g := range m.Groups {
 		if !slices.Equal(voterNodes(&g), []uint32{0, 1, 2}) {
@@ -68,14 +68,14 @@ func TestEachGroupGetsThreeVotersOnePerNodeOnTheLeastLoadedDisk(t *testing.T) {
 func TestAVoterDownForRefillAfterIsReplacedOnAFourthNode(t *testing.T) {
 	r, nodes := cluster(t, 4)
 	m := ShardMap{Groups: []Group{{ID: 7}}}
-	m = PlaceVoters(&m, nodes[:3], r.Disks(), 0)
+	m = PlaceVoters(&m, nodes[:3], r.Disks(), nil, 0)
 	before := m.Groups[0]
 	downNode(r, 2, minute)
-	m = PlaceVoters(&m, nodes, r.Disks(), minute+chunkstore.RefillAfter-1)
+	m = PlaceVoters(&m, nodes, r.Disks(), nil, minute+chunkstore.RefillAfter-1)
 	if !slices.Equal(m.Groups[0].Voters, before.Voters) {
 		t.Fatalf("replaced a voter down 9 minutes 59 s: %+v", m.Groups[0].Voters)
 	}
-	m = PlaceVoters(&m, nodes, r.Disks(), minute+chunkstore.RefillAfter)
+	m = PlaceVoters(&m, nodes, r.Disks(), nil, minute+chunkstore.RefillAfter)
 	g := m.Groups[0]
 	want := Replica{ID: 4, Node: 3, Disk: 7}
 	if !slices.Equal(g.Voters[:2], before.Voters[:2]) || g.Voters[2] != want || g.LastID != 4 {
@@ -86,10 +86,10 @@ func TestAVoterDownForRefillAfterIsReplacedOnAFourthNode(t *testing.T) {
 func TestOnThreeNodesAVoterWhoseNodeIsDownStays(t *testing.T) {
 	r, nodes := cluster(t, 3)
 	m := ShardMap{Groups: []Group{{ID: 0}, {ID: 1}}}
-	m = PlaceVoters(&m, nodes, r.Disks(), 0)
+	m = PlaceVoters(&m, nodes, r.Disks(), nil, 0)
 	before := slices.Clone(m.Groups)
 	downNode(r, 2, 0)
-	m = PlaceVoters(&m, nodes, r.Disks(), 60*minute)
+	m = PlaceVoters(&m, nodes, r.Disks(), nil, 60*minute)
 	for i, g := range m.Groups {
 		if !slices.Equal(g.Voters, before[i].Voters) || g.LastID != before[i].LastID {
 			t.Fatalf("group %d changed with only its own voters' nodes left: %+v", g.ID, g)
@@ -102,7 +102,7 @@ func TestOnThreeNodesAVoterWhoseNodeIsDownStays(t *testing.T) {
 func TestAVoterWhoseLogIsGoneMovesAtOnceToAnotherDiskOfItsNode(t *testing.T) {
 	r, nodes := cluster(t, 3)
 	m := ShardMap{Groups: []Group{{ID: 0}, {ID: 1}, {ID: 2}}}
-	m = PlaceVoters(&m, nodes, r.Disks(), 0)
+	m = PlaceVoters(&m, nodes, r.Disks(), nil, 0)
 	var on []int
 	for i, g := range m.Groups {
 		if g.Voters[2].Disk == 5 {
@@ -113,7 +113,7 @@ func TestAVoterWhoseLogIsGoneMovesAtOnceToAnotherDiskOfItsNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m = PlaceVoters(&m, nodes, r.Disks(), 1)
+	m = PlaceVoters(&m, nodes, r.Disks(), nil, 1)
 	if len(on) == 0 {
 		t.Fatal("no group had a voter on disk 5")
 	}
@@ -133,14 +133,14 @@ func TestAVoterWhoseLogIsGoneMovesAtOnceToAnotherDiskOfItsNode(t *testing.T) {
 func TestAPlannedReplacementThatFailsIsReplacedAgain(t *testing.T) {
 	r, nodes := cluster(t, 5)
 	m := ShardMap{Groups: []Group{{ID: 0}}}
-	m = PlaceVoters(&m, nodes[:3], r.Disks(), 0)
+	m = PlaceVoters(&m, nodes[:3], r.Disks(), nil, 0)
 	downNode(r, 2, 0)
-	m = PlaceVoters(&m, nodes[:4], r.Disks(), chunkstore.RefillAfter)
+	m = PlaceVoters(&m, nodes[:4], r.Disks(), nil, chunkstore.RefillAfter)
 	if v := m.Groups[0].Voters[2]; v.Node != 3 || v.ID != 4 {
 		t.Fatalf("first replacement %+v", v)
 	}
 	downNode(r, 3, chunkstore.RefillAfter)
-	m = PlaceVoters(&m, nodes, r.Disks(), 2*chunkstore.RefillAfter)
+	m = PlaceVoters(&m, nodes, r.Disks(), nil, 2*chunkstore.RefillAfter)
 	if v := m.Groups[0].Voters[2]; v.Node != 4 || v.ID != 5 {
 		t.Fatalf("second replacement %+v", v)
 	}
@@ -149,7 +149,7 @@ func TestAPlannedReplacementThatFailsIsReplacedAgain(t *testing.T) {
 func TestADiskOffTheMetadataNodesTakesNoVoter(t *testing.T) {
 	r, nodes := cluster(t, 4)
 	m := ShardMap{Groups: []Group{{ID: 0}}}
-	m = PlaceVoters(&m, nodes[1:], r.Disks(), 0)
+	m = PlaceVoters(&m, nodes[1:], r.Disks(), nil, 0)
 	if !slices.Equal(voterNodes(&m.Groups[0]), []uint32{1, 2, 3}) {
 		t.Fatalf("voters on nodes %v", voterNodes(&m.Groups[0]))
 	}
@@ -160,13 +160,13 @@ func TestADiskOffTheMetadataNodesTakesNoVoter(t *testing.T) {
 func TestAVoterWhoseDiskMovedNodesIsPlacedAgain(t *testing.T) {
 	r, nodes := cluster(t, 4)
 	m := ShardMap{Groups: []Group{{ID: 0}}}
-	m = PlaceVoters(&m, nodes[:3], r.Disks(), 0)
+	m = PlaceVoters(&m, nodes[:3], r.Disks(), nil, 0)
 	moved := m.Groups[0].Voters[0]
 	r.Down(moved.Disk, 0)
 	if _, err := r.Report(m.Groups[0].Voters[1].Node, 9, r.Disks()[moved.Disk-1].Log); err != nil {
 		t.Fatal(err)
 	}
-	m = PlaceVoters(&m, nodes, r.Disks(), 1)
+	m = PlaceVoters(&m, nodes, r.Disks(), nil, 1)
 	g := m.Groups[0]
 	if g.Voters[0].ID != 4 || g.LastID != 4 {
 		t.Fatalf("voters %+v: want the moved voter placed again as replica 4", g.Voters)
@@ -189,17 +189,48 @@ func TestAVoterWhoseDiskMovedIsNotPlacedAgainOnThatDisk(t *testing.T) {
 	for id := range uint64(12) {
 		m.Groups = append(m.Groups, Group{ID: id + 1})
 	}
-	m = PlaceVoters(&m, nodes, r.Disks(), 0)
+	m = PlaceVoters(&m, nodes, r.Disks(), nil, 0)
 	r.Down(1, 0)
 	if _, err := r.Report(3, 9, r.Disks()[0].Log); err != nil {
 		t.Fatal(err)
 	}
-	next := PlaceVoters(&m, nodes, r.Disks(), 1)
+	next := PlaceVoters(&m, nodes, r.Disks(), nil, 1)
 	for gi, g := range next.Groups {
 		for i, v := range g.Voters {
 			if was := m.Groups[gi].Voters[i]; v.ID != was.ID && v.Disk == was.Disk {
 				t.Fatalf("group %d: voter %d replaced by %d on the same disk %d", g.ID, was.ID, v.ID, v.Disk)
 			}
 		}
+	}
+}
+
+// A halted voter is replaced like one whose disk has been down since the halt, after
+// refill_after, and on another node: its own node's release halts there as well.
+func TestAHaltedVoterIsReplacedOnAnotherNodeAfterRefillAfter(t *testing.T) {
+	r, nodes := cluster(t, 4)
+	m := ShardMap{Groups: []Group{{ID: 7}}}
+	m = PlaceVoters(&m, nodes[:3], r.Disks(), nil, 0)
+	before := m.Groups[0]
+	halts := []Halt{{Group: 7, ID: before.Voters[2].ID, Since: minute}}
+	m = PlaceVoters(&m, nodes, r.Disks(), halts, minute+chunkstore.RefillAfter-1)
+	if !slices.Equal(m.Groups[0].Voters, before.Voters) {
+		t.Fatalf("replaced a voter halted 9 minutes 59 s: %+v", m.Groups[0].Voters)
+	}
+	m = PlaceVoters(&m, nodes, r.Disks(), halts, minute+chunkstore.RefillAfter)
+	g := m.Groups[0]
+	if !slices.Equal(g.Voters[:2], before.Voters[:2]) || g.Voters[2].Node != 3 || g.Voters[2].ID != 4 {
+		t.Fatalf("voters %+v: want the halted voter replaced on node 3 as replica 4", g.Voters)
+	}
+}
+
+// On three nodes a halted voter stays: its node's other disk would run the same release.
+func TestOnThreeNodesAHaltedVoterStays(t *testing.T) {
+	r, nodes := cluster(t, 3)
+	m := ShardMap{Groups: []Group{{ID: 7}}}
+	m = PlaceVoters(&m, nodes, r.Disks(), nil, 0)
+	before := m.Groups[0]
+	m = PlaceVoters(&m, nodes, r.Disks(), []Halt{{Group: 7, ID: before.Voters[2].ID}}, 60*minute)
+	if !slices.Equal(m.Groups[0].Voters, before.Voters) {
+		t.Fatalf("voters %+v, want %+v", m.Groups[0].Voters, before.Voters)
 	}
 }

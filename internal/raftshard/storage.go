@@ -39,6 +39,8 @@ type Storage struct {
 	build func() (raftpb.Snapshot, error)
 	// pending holds the blob payloads of a round replay has not yet seen whole.
 	pending []byte
+	// data is the data of the restored snapshot replay made the base, until the state machine takes it.
+	data []byte
 }
 
 // NewStorage is an empty storage whose base is index 0.
@@ -119,6 +121,13 @@ func (s *Storage) Snapshot() (raftpb.Snapshot, error) {
 	return raftpb.Snapshot{Metadata: s.base}, nil
 }
 
+// TakeBaseData returns, once, the data of the restored snapshot a replay made the base, which the state machine restarts from; nil for any other base.
+func (s *Storage) TakeBaseData() []byte {
+	d := s.data
+	s.data = nil
+	return d
+}
+
 // SetHardState replaces the hard state.
 func (s *Storage) SetHardState(hs raftpb.HardState) { s.hs = hs }
 
@@ -127,7 +136,7 @@ func (s *Storage) ApplySnapshot(snap raftpb.Snapshot) error {
 	if snap.Metadata.Index <= s.base.Index {
 		return raft.ErrSnapOutOfDate
 	}
-	s.base = snap.Metadata
+	s.base, s.data = snap.Metadata, nil
 	s.ents, s.chunks, s.first = s.ents[:0], nil, 0
 	return nil
 }
@@ -187,6 +196,7 @@ func (s *Storage) Compact(i uint64, cs raftpb.ConfState) error {
 		panic(fmt.Sprintf("raftshard: compaction to %d past last entry %d", i, s.last()))
 	}
 	k := i - s.base.Index
+	s.data = nil
 	s.base = raftpb.SnapshotMetadata{Index: i, Term: s.ents[k-1].term, ConfState: cs}
 	s.ents = append(s.ents[:0], s.ents[k:]...)
 	if len(s.ents) == 0 {
