@@ -282,7 +282,7 @@ func (s *Shard) Leader() uint64 { return s.rn.BasicStatus().Lead }
 // Term is the replica's current term, which every entry it appends while it leads carries.
 func (s *Shard) Term() uint64 { return s.rn.BasicStatus().Term }
 
-// Halt reports that the state machine stopped applying, at an entry it cannot decode. The replica then acts as a down one, so its log stops growing and the control plane replaces it: it takes no Raft message but a leader's answers, campaigns in no election and fortifies no leader, hands its leadership on while it leads, and still learns of its removal.
+// Halt reports that the state machine stopped applying, at an entry it cannot decode. The replica then acts as a down one, so its log stops growing and the control plane replaces it: it takes no Raft message but, while it leads, its followers' answers, campaigns in no election and fortifies no leader, hands its leadership on while it leads, and still learns of its removal.
 func (s *Shard) Halt() { s.halted = true }
 
 // Flushing reports whether a round is in flight, so the next Ready waits for its Durable.
