@@ -579,6 +579,36 @@ func TestAHaltedLeaderHandsOverItsLeadership(t *testing.T) {
 	}
 }
 
+// spin delivers every message and completes every flush n times, with the clock standing still.
+func (c *group) spin(n int) {
+	for range n {
+		c.deliver(nil)
+		for i, r := range c.n {
+			if r.flush != 0 {
+				c.durable(i)
+			}
+		}
+	}
+}
+
+// When every replica halts at an entry, each hands its leadership on at most once an election
+// timeout, so the term does not climb at the network's speed.
+func TestHaltedReplicasHandOffLeadershipAtMostOnceAnElectionTimeout(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	at := c.proposeNewer(l, ops(Put(b("x"), b("1"))))
+	term := c.n[l].s.Raft().Term()
+	c.spin(200)
+	for i := range c.n {
+		if h := c.n[i].s.Halted(); h != at {
+			t.Fatalf("replica %d halted at %d, want %d", i, h, at)
+		}
+		if got := c.n[i].s.Raft().Term(); got > term+uint64(len(c.n)) {
+			t.Fatalf("replica %d is at term %d, %d after the halt", i, got, got-term)
+		}
+	}
+}
+
 // A deposed leader that catches up by a snapshot answers the Txns it still waits for dropped at
 // the restore: the snapshot may or may not hold them, and nothing after it says which.
 func TestWaitingTxnsAreAnsweredDroppedAtASnapshotRestore(t *testing.T) {

@@ -112,14 +112,14 @@ func (s *Shard) Start(ctx *core.Context, out *Output) {
 func (s *Shard) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	s.out = out
 	s.raft.OnEvent(ctx, ev, &out.Raft)
-	s.after(ctx)
+	s.after()
 }
 
 // ReadIndex asks for a read's commit index, as raftshard.Shard.ReadIndex.
 func (s *Shard) ReadIndex(ctx *core.Context, rctx []byte, out *Output) {
 	s.out = out
 	s.raft.ReadIndex(ctx, rctx, &out.Raft)
-	s.after(ctx)
+	s.after()
 }
 
 // Durable reports the round in flight durable, as raftshard.Shard.Durable, after proposing the Txns gathered during it.
@@ -130,7 +130,7 @@ func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
 		s.propose(ctx)
 	}
 	s.raft.Durable(ctx, round, &out.Raft)
-	s.after(ctx)
+	s.after()
 }
 
 // Txn proposes t, which an Answer under token settles, or refuses it with Check's error or, off the leader, raft.ErrProposalDropped.
@@ -159,13 +159,13 @@ func (s *Shard) Txn(ctx *core.Context, t *Txn, token uint64, out *Output) error 
 	if !s.raft.Flushing() {
 		s.propose(ctx)
 	}
-	s.after(ctx)
+	s.after()
 	return nil
 }
 
 // after answers every Txn waiting or gathered dropped once the replica left its group or halted,
-// as it applies nothing more, and has a halted leader hand its leadership to another voter.
-func (s *Shard) after(ctx *core.Context) {
+// as it applies nothing more.
+func (s *Shard) after() {
 	if !s.out.Raft.Removed && s.halted == 0 {
 		return
 	}
@@ -176,9 +176,6 @@ func (s *Shard) after(ctx *core.Context) {
 		s.answer(token).Err = raft.ErrProposalDropped
 	}
 	s.batch, s.queued = nil, s.queued[:0]
-	if s.halted != 0 {
-		s.raft.StepDown(ctx, &s.out.Raft)
-	}
 }
 
 // Halted is the index of the committed entry the replica could not decode and stopped applying at, or 0.
@@ -256,6 +253,7 @@ func (s *Shard) applyEntry(e *raftpb.Entry) {
 	}
 	if !s.decodes(e.Data) {
 		s.halted = e.Index
+		s.raft.Halt()
 		return
 	}
 	s.state.applied = e.Index

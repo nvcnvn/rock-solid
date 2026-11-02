@@ -126,8 +126,10 @@ type Shard struct {
 	// applying is set while etcd-raft applies a configuration change, and snaps are the snapshots sent but not yet reported.
 	applying bool
 	snaps    []sentSnap
-	// stepDown counts StepDown's transfers, which take the voters in turn.
-	stepDown int
+	// halted is whether the state machine halted; a halted leader next hands its leadership on at handAt, to the voter after handedTo.
+	halted   bool
+	handAt   core.Tick
+	handedTo uint64
 }
 
 // fortified is a fortification: its term, and the run and support epoch of the follower's node's grant to the leader's node.
@@ -280,21 +282,8 @@ func (s *Shard) Leader() uint64 { return s.rn.BasicStatus().Lead }
 // Term is the replica's current term, which every entry it appends while it leads carries.
 func (s *Shard) Term() uint64 { return s.rn.BasicStatus().Term }
 
-// StepDown has a leader with no transfer pending hand its leadership to another voter of its applied configuration, the next in turn each time.
-func (s *Shard) StepDown(ctx *core.Context, out *Output) {
-	st := s.rn.BasicStatus()
-	if s.removed || st.RaftState != raft.StateLeader || st.LeadTransferee != 0 {
-		return
-	}
-	for range s.conf.Voters {
-		s.stepDown++
-		if id := s.conf.Voters[s.stepDown%len(s.conf.Voters)]; id != s.cfg.ID {
-			s.rn.TransferLeader(id)
-			break
-		}
-	}
-	s.ready(ctx, out)
-}
+// Halt reports that the state machine stopped applying, at an entry it cannot decode: while it leads, the replica hands its leadership on.
+func (s *Shard) Halt() { s.halted = true }
 
 // Flushing reports whether a round is in flight, so the next Ready waits for its Durable.
 func (s *Shard) Flushing() bool { return s.round != 0 }
@@ -522,6 +511,7 @@ func (s *Shard) peer(id uint64) int {
 func (s *Shard) ready(ctx *core.Context, out *Output) {
 	if s.round == 0 {
 		s.reconcile(ctx)
+		s.handOff(ctx)
 	}
 	for s.round == 0 && !s.removed && s.rn.HasReady() {
 		rd := s.rn.Ready()
@@ -728,12 +718,48 @@ func (s *Shard) reconcile(ctx *core.Context) {
 func (s *Shard) target(t lease.Time) uint64 {
 	var to uint64
 	s.rn.WithProgress(func(id uint64, _ raft.ProgressType, pr tracker.Progress) {
-		if i := s.peer(id); to == 0 && i >= 0 && s.planned(id) && !pr.IsLearner &&
-			pr.State == tracker.StateReplicate && pr.Match >= s.mark && s.cfg.Holder.Valid(s.cfg.Peers[i].Node, t) {
+		if to == 0 && s.planned(id) && s.replicating(id, &pr) && s.cfg.Holder.Valid(s.cfg.Peers[s.peer(id)].Node, t) {
 			to = id
 		}
 	})
 	return to
+}
+
+// replicating reports whether peer id is a voter this leader sends appends to, holding every entry committed by mark.
+func (s *Shard) replicating(id uint64, pr *tracker.Progress) bool {
+	return id != s.cfg.ID && s.peer(id) >= 0 && !pr.IsLearner && pr.State == tracker.StateReplicate && pr.Match >= s.mark
+}
+
+// handOff has a halted leader with no transfer pending hand its leadership to the next replicating
+// voter in ID order, at most once an election timeout: when every replica halts, each would
+// otherwise hand it on as soon as it wins, a term and a durable hard state per round trip.
+func (s *Shard) handOff(ctx *core.Context) {
+	if !s.halted || s.removed || ctx.Now < s.handAt {
+		return
+	}
+	if st := s.rn.BasicStatus(); st.RaftState != raft.StateLeader || st.LeadTransferee != 0 {
+		return
+	}
+	s.handAt = ctx.Now + ElectionTick*TickInterval
+	var first, next uint64
+	s.rn.WithProgress(func(id uint64, _ raft.ProgressType, pr tracker.Progress) {
+		if !s.replicating(id, &pr) {
+			return
+		}
+		if first == 0 {
+			first = id
+		}
+		if next == 0 && id > s.handedTo {
+			next = id
+		}
+	})
+	if next == 0 {
+		next = first
+	}
+	if next != 0 {
+		s.handedTo = next
+		s.rn.TransferLeader(next)
+	}
 }
 
 // settled reports whether the applied configuration is the plan: its voters, no learner, not joint.
