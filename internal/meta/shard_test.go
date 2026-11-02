@@ -635,6 +635,100 @@ func TestNoReplicaAppliesTheDecodablePrefixOfAnEntry(t *testing.T) {
 	}
 }
 
+// A halted follower acts as a down one: its log stops growing while the other two keep
+// committing, it never campaigns, and it still learns that it was removed.
+func TestAHaltedFollowerTakesNoAppends(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	g, f := (l+1)%3, (l+2)%3
+	c.n[l].s.newest, c.n[g].s.newest = 2, 2
+	c.proposeNewer(l, ops(Put(b("x"), b("1"))))
+	c.settle()
+	last, _ := c.n[f].st.LastIndex()
+	for k := range uint64(5) {
+		c.txn(l, ops(Put(b("k"), be(k))), k+1)
+		c.settle()
+	}
+	c.heartbeat()
+	if a := c.answer(l, 5); a.Err != nil {
+		t.Fatalf("the others stopped committing: %+v", a)
+	}
+	if now, _ := c.n[f].st.LastIndex(); now != last {
+		t.Fatalf("the halted follower's log grew from %d to %d", last, now)
+	}
+	term := c.n[f].s.Raft().Term()
+	c.cut[l] = true
+	for range 3 * raftshard.ElectionTick {
+		c.tick()
+	}
+	if got := c.n[f].s.Raft().Term(); got != term {
+		t.Fatalf("the halted follower moved from term %d to %d", term, got)
+	}
+	c.cut[l] = false
+	c.tellRemoved(f, l)
+}
+
+// peerLost tells replica i that its connection to replica to failed, so its leader probes to again.
+func (c *group) peerLost(i, to int) {
+	c.call(i, func(ctx *core.Context, out *Output) {
+		c.n[i].s.OnEvent(ctx, &core.Event{Kind: core.EvPeerLost, Peer: core.NodeID{Node: uint32(to)}}, out)
+	})
+}
+
+// A halted follower restores no snapshot, as it takes no Raft message: one that did would hold
+// a log past its state, and restart from the snapshot no longer halted.
+func TestAHaltedFollowerRestoresNoSnapshot(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	g, f := (l+1)%3, (l+2)%3
+	c.n[l].s.newest, c.n[g].s.newest = 2, 2
+	c.proposeNewer(l, ops(Put(b("x"), b("1"))))
+	c.settle()
+	c.txn(l, ops(Put(b("a"), b("1"))), 1)
+	c.settle()
+	if err := c.n[l].st.Compact(c.n[l].s.Applied()); err != nil {
+		t.Fatal(err)
+	}
+	base := c.n[f].st.Base().Index
+	c.peerLost(l, f)
+	c.txn(l, ops(Put(b("b"), b("1"))), 2)
+	c.settle()
+	c.heartbeat()
+	if got := c.n[f].st.Base().Index; got != base || c.n[f].s.Halted() == 0 {
+		t.Fatalf("the halted follower's base moved from %d to %d, halted %d", base, got, c.n[f].s.Halted())
+	}
+}
+
+// A halted leader builds no snapshot data, as its state stopped before the index the snapshot
+// is at, so a follower behind its compaction refuses the snapshot rather than restore a state
+// that lacks the entries before that index.
+func TestAHaltedLeaderBuildsNoSnapshotData(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	f := (l + 2) % 3
+	c.n[f].s.newest = 2
+	c.txn(l, ops(Put(b("a"), b("1"))), 1)
+	c.settle()
+	c.cut[f] = true
+	c.txn(l, ops(Put(b("b"), b("1"))), 2)
+	c.settle()
+	if err := c.n[l].st.Compact(c.n[l].s.Applied()); err != nil {
+		t.Fatal(err)
+	}
+	c.proposeNewer(l, ops(Put(b("x"), b("1"))))
+	c.settle()
+	if c.n[l].s.Halted() == 0 {
+		t.Fatal("the leader did not halt")
+	}
+	c.cut[f] = false
+	applied := c.n[f].s.State().Applied()
+	c.peerLost(l, f)
+	c.heartbeat()
+	if c.n[f].st.Base().Index != 1 || c.n[f].s.State().Applied() != applied {
+		t.Fatalf("the follower moved from %d to base %d and %d applied", applied, c.n[f].st.Base().Index, c.n[f].s.State().Applied())
+	}
+}
+
 // A deposed leader that catches up by a snapshot answers the Txns it still waits for dropped at
 // the restore: the snapshot may or may not hold them, and nothing after it says which.
 func TestWaitingTxnsAreAnsweredDroppedAtASnapshotRestore(t *testing.T) {
@@ -670,26 +764,32 @@ func TestARemovedReplicaAnswersItsTxnsDropped(t *testing.T) {
 	c.cut[l] = true
 	c.txn(l, ops(Put(b("a"), b("1"))), 1)
 	c.txn(l, ops(Put(b("b"), b("1"))), 2)
-	// raftshard's answer to a replica its sender's applied configuration does not hold: the
-	// group, kind 4, then from, to, the sender's applied index, and two unused words.
-	body := binary.LittleEndian.AppendUint64(nil, 5)
-	body = append(body, 4)
-	for _, v := range []uint64{uint64((l+1)%3) + 1, uint64(l) + 1, 1 << 40, 0, 0} {
-		body = binary.LittleEndian.AppendUint64(body, v)
-	}
-	var msg core.Msg
-	if err := msg.SetInline(body); err != nil {
-		t.Fatal(err)
-	}
-	c.call(l, func(ctx *core.Context, out *Output) {
-		c.n[l].s.OnEvent(ctx, &core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: uint32((l + 1) % 3)}, Msg: msg}, out)
-		if !out.Raft.Removed {
-			t.Fatal("the replica did not learn it was removed")
-		}
-	})
+	c.tellRemoved(l, (l+1)%3)
 	for _, token := range []uint64{1, 2} {
 		if a := c.answer(l, token); !errors.Is(a.Err, raft.ErrProposalDropped) {
 			t.Fatalf("token %d answered %+v", token, a)
 		}
 	}
+}
+
+// tellRemoved hands replica i from replica from raftshard's answer to a replica its sender's
+// applied configuration does not hold, and fails unless i reports itself removed: the group,
+// kind 4, then from, to, the sender's applied index, and two unused words.
+func (c *group) tellRemoved(i, from int) {
+	c.t.Helper()
+	body := binary.LittleEndian.AppendUint64(nil, 5)
+	body = append(body, 4)
+	for _, v := range []uint64{uint64(from) + 1, uint64(i) + 1, 1 << 40, 0, 0} {
+		body = binary.LittleEndian.AppendUint64(body, v)
+	}
+	var msg core.Msg
+	if err := msg.SetInline(body); err != nil {
+		c.t.Fatal(err)
+	}
+	c.call(i, func(ctx *core.Context, out *Output) {
+		c.n[i].s.OnEvent(ctx, &core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: uint32(from)}, Msg: msg}, out)
+		if !out.Raft.Removed {
+			c.t.Fatal("the replica did not learn it was removed")
+		}
+	})
 }
