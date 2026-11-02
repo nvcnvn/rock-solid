@@ -612,6 +612,29 @@ func TestHaltedReplicasHandOffLeadershipAtMostOnceAnElectionTimeout(t *testing.T
 	}
 }
 
+// An entry holding a Txn that decodes and then one that does not halts every replica before it:
+// none applies the first.
+func TestNoReplicaAppliesTheDecodablePrefixOfAnEntry(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	good := ops(Put(b("x"), b("1")))
+	data := append(appendTxn([]byte{entryFormat}, &good), 0, 1, 9, 1, 'k')
+	c.call(l, func(ctx *core.Context, out *Output) {
+		if err := c.n[l].s.Raft().Propose(ctx, data, &out.Raft); err != nil {
+			t.Fatal(err)
+		}
+	})
+	c.spin(20)
+	for i := range c.n {
+		if c.n[i].s.Halted() == 0 {
+			t.Fatalf("replica %d did not halt", i)
+		}
+		if _, ok := get(c.n[i].s.State(), "x"); ok {
+			t.Fatalf("replica %d applied the Txn before the one that does not decode", i)
+		}
+	}
+}
+
 // A deposed leader that catches up by a snapshot answers the Txns it still waits for dropped at
 // the restore: the snapshot may or may not hold them, and nothing after it says which.
 func TestWaitingTxnsAreAnsweredDroppedAtASnapshotRestore(t *testing.T) {
