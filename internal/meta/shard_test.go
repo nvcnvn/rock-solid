@@ -115,7 +115,7 @@ func newLateShard(cfg Config, r *node) (*Shard, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Shard{state: st, id: cfg.Raft.ID, newest: entryFormat}
+	s := &Shard{state: st, log: cfg.Raft.Storage, id: cfg.Raft.ID, newest: entryFormat}
 	cfg.Raft.SnapshotData, cfg.Raft.CheckSnapshot = st.SnapshotData, CheckSnapshot
 	cfg.Raft.Apply = func(_ raftpb.Snapshot, ents []raftpb.Entry) { r.late = append(r.late, ents...) }
 	s.raft, err = raftshard.New(cfg.Raft)
@@ -430,7 +430,7 @@ func TestASnapshotHoldsTheEntriesHandedOverInItsCall(t *testing.T) {
 			c.cut[f] = true
 			c.txn(l, ops(Put(b("b"), b("1"))), 2)
 			c.settle()
-			if err := c.n[l].st.Compact(c.n[l].s.Raft().Applied()); err != nil {
+			if err := c.n[l].st.Compact(c.n[l].s.Applied()); err != nil {
 				t.Fatal(err)
 			}
 			c.txn(l, ops(Put(b("c"), b("1"))), 3)
@@ -523,6 +523,9 @@ func TestAFollowerHaltsAtAnEntryItCannotDecode(t *testing.T) {
 		t.Helper()
 		if h, applied := c.n[f].s.Halted(), c.n[f].s.State().Applied(); h != at || applied != at-1 {
 			t.Fatalf("the follower halted at %d with %d applied, want %d and %d", h, applied, at, at-1)
+		}
+		if i, _ := c.n[f].s.Applied(); i >= at {
+			t.Fatalf("the follower would compact its log to %d, past its state's %d", i, at-1)
 		}
 	}
 	halted()
@@ -622,7 +625,7 @@ func TestWaitingTxnsAreAnsweredDroppedAtASnapshotRestore(t *testing.T) {
 	nl := c.elect()
 	c.txn(nl, ops(Put(b("b"), b("1"))), 3)
 	c.settle()
-	if err := c.n[nl].st.Compact(c.n[nl].s.Raft().Applied()); err != nil {
+	if err := c.n[nl].st.Compact(c.n[nl].s.Applied()); err != nil {
 		t.Fatal(err)
 	}
 	c.cut[l] = false

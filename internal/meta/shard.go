@@ -48,6 +48,7 @@ func (o *Output) Reset() {
 // Shard is one replica of a MetaStore shard: its Raft replica and its state machine.
 type Shard struct {
 	raft  *raftshard.Shard
+	log   *raftshard.Storage
 	state *State
 	id    uint64
 	// out is the output of the call in progress, which answers go to.
@@ -87,7 +88,7 @@ func NewShard(cfg Config) (*Shard, error) {
 			return nil, err
 		}
 	}
-	s := &Shard{state: st, id: cfg.Raft.ID}
+	s := &Shard{state: st, log: cfg.Raft.Storage, id: cfg.Raft.ID}
 	s.newest = entryFormat
 	cfg.Raft.SnapshotData, cfg.Raft.Apply, cfg.Raft.CheckSnapshot = s.snapshotData, s.apply, CheckSnapshot
 	if s.raft, err = raftshard.New(cfg.Raft); err != nil {
@@ -176,6 +177,17 @@ func (s *Shard) after() {
 		s.answer(token).Err = raft.ErrProposalDropped
 	}
 	s.batch, s.queued = nil, s.queued[:0]
+}
+
+// Applied is the index the state machine applied through and the configuration there, which the
+// log compacts to once a flush of the memtable that applied it is durable. The Raft replica's
+// applied index runs past a halt, so a halted replica's is its log's base: it compacts no further.
+func (s *Shard) Applied() (uint64, raftpb.ConfState) {
+	if s.halted != 0 {
+		b := s.log.Base()
+		return b.Index, b.ConfState
+	}
+	return s.raft.Applied()
 }
 
 // Halted is the index of the committed entry the replica could not decode and stopped applying at, or 0.

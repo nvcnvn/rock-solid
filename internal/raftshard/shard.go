@@ -163,7 +163,7 @@ func newShard(cfg Config, p plants) (*Shard, error) {
 	return s, nil
 }
 
-// Applied is the index of the last entry handed over to apply and the configuration at it, which a state machine keeps with a flush of the memtable that applied it and compacts the log to once the flush is durable.
+// Applied is the index of the last entry handed over to apply and the configuration at it. The log compacts to the state machine's applied index, which is this one unless the state machine halted before it.
 func (s *Shard) Applied() (uint64, raftpb.ConfState) { return s.applied, s.conf }
 
 // snapshot is a snapshot at the applied index, whose configuration holds every replica that
