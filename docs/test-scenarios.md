@@ -3854,6 +3854,29 @@ section.
 - Snapshot cuts and pool moves are modelled in phase 11, and cross-shard commit in phase 13, each
   before its code (design.md Roadmap), so this map has no rows for them yet.
 
+## Model gate
+
+`scripts/model-gate.sh`, run by `scripts/lint.sh`, over the commits since `MODEL_GATE_BASE` (the
+merge base with `origin/main` by default; the commits of a push or pull request in CI).
+`scripts/model-gate-test.sh` plants each row below in a throwaway clone, and CI's lint job runs it.
+
+| Case | Result |
+| --- | --- |
+| A commit changes a protocol file and no file under `models/`, and has no `Model: none, <reason>` line | Fails, naming the commit |
+| The same with a reason, or with a change under `models/` | Passes |
+| The same line with no reason | Fails |
+| A commit changes only tests or docs | Passes |
+| A negative configuration has no row in `scripts/model-rules.tsv`, or a row has none | Fails |
+| A row's plant is in no file of its package, its test does not exist, or its test's file does not name the plant | Fails |
+| A row is open on a checklist item that is ticked, or on a phase the checklist now lists | Fails |
+
+- The test files of a protocol file are not protocol files.
+- That a test fails under its plant is that test's own assertion, as in [Placement faults and
+  invariants](#placement-faults-and-invariants). The gate checks only that the link stands, so a
+  test that shares a file with a plant it does not use passes it.
+- `scripts/model-gate.sh for FILE` lists each rule whose plant FILE holds, with the property it
+  breaks and the lines that hold it.
+
 ## Models in CI
 
 The runs of [TLA+ and TLC](#tla-and-tlc), scheduled by the `models` workflow in

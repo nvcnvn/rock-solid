@@ -1,7 +1,9 @@
 #!/bin/bash
-# Runs every Go check: formatting, vet, the sans-IO analyzer, staticcheck, known vulnerabilities and dependency licenses.
+# Runs the model gate and every Go check: formatting, vet, the sans-IO analyzer, staticcheck, known vulnerabilities and dependency licenses.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+scripts/model-gate.sh
 
 GOTOOLCHAIN=$(sed -n 's/^toolchain //p' go.mod)
 export GOTOOLCHAIN

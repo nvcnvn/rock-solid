@@ -1,0 +1,95 @@
+# Each negative model configuration, one rule removed, and the Go plant and test that remove the same
+# rule from the code. scripts/model-gate.sh checks this table on every lint.
+# Columns, tab separated:
+#   model/neg-config	package.plant[,plant]	Test
+#   model/neg-config	open	"Checklist item" or "phase N"
+# A rule with no code yet is open: its checklist item must be unticked, or its phase not yet listed.
+epoch/neg-accept-old-report	chunkstore.oldReport	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-activate-before-durable	chunkstore.activateEarly	TestPlantedPeeringBugsBreakTheFaultRun
+epoch/neg-check-before-bound	lease.checkBeforeBound	TestPlantedLeaseBugsBreakThePair
+epoch/neg-compare-member-lists	chunkstore.sameMembers	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-compare-table-epochs	chunkstore.sendEpoch	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-decide-by-own-interval	chunkstore.ownInterval	TestPlantedPeeringBugsBreakTheFaultRun
+epoch/neg-fence-on-arrival	chunkstore.fenceOnArrival	TestPlantedReadBugsBreakTheReadRun
+epoch/neg-fresh-grant-no-table-check	chunkstore.freshGrantNoCheck	TestPlantedBugsBreakTheirTraces
+epoch/neg-grantor-faster-clock	lease.fasterClock	TestPlantedLeaseBugsBreakThePair
+epoch/neg-holder-slower-clock	lease.slowerClock	TestPlantedLeaseBugsBreakThePair
+epoch/neg-instant-reboot	sim.RebootInstantly	TestPlantedBugsBreakTheirTraces
+epoch/neg-keep-disk-id	chunkstore.keepID	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-keep-lease-on-new-run	lease.keepOnNewRun	TestALeaseKeptAcrossANewRunBreaksItsTrace
+epoch/neg-lease-before-bound	lease.beforeBound	TestPlantedLeaseBugsBreakThePair
+epoch/neg-lease-before-bound-half-drift	lease.beforeBound,halfStep	TestPlantedLeaseBugsBreakThePair
+epoch/neg-log-out-of-order	chunkstore.resendNewestFirst	TestPlantedPeeringBugsBreakTheFaultRun
+epoch/neg-margin-exact	lease.marginExact	TestPlantedLeaseBugsBreakThePair
+epoch/neg-merge-before-kept	chunkstore.mergeWhileLacking	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-no-end-on-resume	lease.noResumedEnd	TestPlantedLeaseBugsBreakThePair
+epoch/neg-no-epoch-bump	open	MetaStore invariants
+epoch/neg-no-restart-wait	lease.noRestartWait	TestPlantedLeaseBugsBreakThePair
+epoch/neg-no-run-window	lease.noRunWindow	TestPlantedLeaseBugsBreakThePair
+epoch/neg-no-step-check	lease.noStepCheck	TestPlantedLeaseBugsBreakThePair
+epoch/neg-peering-clears-missing	chunkstore.relistNever	TestPlantedPeeringBugsBreakTheFaultRun
+epoch/neg-reach-last-activated-only	chunkstore.lastActivatedOnly	TestPlantedBugsBreakTheirTraces
+epoch/neg-read-below-min-live	chunkstore.readBelowMinLive	TestPlantedBugsBreakTheirTraces
+epoch/neg-reads-before-peer-messages	sim.ReadsFirst	TestPlantedBugsBreakTheirTraces
+epoch/neg-recovery-covers-at-read	chunkstore.coverAtRead	TestPlantedPeeringBugsBreakTheFaultRun
+epoch/neg-remove-before-recovered	chunkstore.removeOnActivation	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-reorder-after-other-primary	chunkstore.reorderAfterOther	TestPlantedBugsBreakTheirTraces
+epoch/neg-report-before-activate	chunkstore.reportDecided	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-restart-no-ask	chunkstore.neverAsk	TestPlantedPeeringBugsBreakTheFaultRun
+epoch/neg-restart-same-interval	chunkstore.peerInOldInterval	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-step-half-drift	lease.halfStep	TestPlantedLeaseBugsBreakThePair
+epoch/neg-step-on-grants-only	lease.stepOnGrantsOnly	TestPlantedLeaseBugsBreakThePair
+epoch/neg-stop-previous-only	chunkstore.stopPreviousOnly	TestPlantedBugsBreakTheirTraces
+epoch/neg-transfer-keeps-lease	open	MetaStore invariants
+epoch/neg-widen-past-two-drift	lease.widenLate	TestPlantedLeaseBugsBreakThePair
+sessions/neg-answer-without-lease	open	MetaStore invariants
+sessions/neg-no-full-lease	open	MetaStore invariants
+sessions/neg-count-on-own-clock	open	MetaStore invariants
+sessions/neg-dead-wait-lease	open	MetaStore invariants
+sessions/neg-evict-at-once	open	MetaStore invariants
+sessions/neg-two-holders	open	MetaStore invariants
+sessions/neg-release-on-commit	open	MetaStore invariants
+sessions/neg-check-on-arrival	open	Session fencing on storage nodes
+sessions/neg-replica-no-check	open	Session fencing on storage nodes
+sessions/neg-up-with-old-table	open	Session fencing on storage nodes
+sessions/neg-peering-skipped	open	Session fencing on storage nodes
+sessions/neg-ack-reachable-only	open	MetaStore invariants
+sessions/neg-ack-waits-down	open	MetaStore invariants
+sessions/neg-count-from-reply	open	phase 6
+sessions/neg-no-drift	open	phase 6
+sessions/neg-ignore-resumed	open	phase 6
+sessions/neg-fixed-step-check	open	phase 6
+sessions/neg-window-per-run	open	phase 6
+purge/neg-daemon-punch	open	phase 6
+purge/neg-extend-over-purge	open	phase 6
+purge/neg-grace-by-time	open	phase 6
+purge/neg-missing-punch-fails	open	phase 6
+purge/neg-no-drain	open	phase 6
+purge/neg-no-incarnation-fence	open	phase 6
+purge/neg-no-rewrite	open	phase 6
+purge/neg-orphan-in-grace	open	phase 6
+purge/neg-overwrite-entry	open	phase 6
+purge/neg-progress-before-punch	open	phase 6
+purge/neg-purger-no-term	open	phase 6
+purge/neg-raise-after-write	open	phase 6
+purge/neg-release-on-commit	open	phase 6
+purge/neg-skip-partial-block	open	phase 6
+purge/neg-tail-in-memory	open	phase 6
+purge/neg-trunc-at-chunk	open	phase 6
+purge/neg-unchecked-removal	open	phase 6
+purge/neg-unlink-open	open	phase 6
+recall/neg-ack-before-size	open	phase 7
+recall/neg-answer-early	open	phase 7
+recall/neg-any-ack	open	phase 7
+recall/neg-attr-past-lease	open	phase 7
+recall/neg-evict-at-once	open	phase 7
+recall/neg-grace-by-time	open	phase 7
+recall/neg-keep-cache	open	phase 7
+recall/neg-leave-ws-early	open	phase 7
+recall/neg-no-drop	open	phase 7
+recall/neg-no-flush	open	phase 7
+recall/neg-no-reval	open	phase 7
+recall/neg-open-in-grace	open	phase 7
+recall/neg-open-skips-holder	open	phase 7
+recall/neg-rereg-no-wrote	open	phase 7
+recall/neg-timeout-answer	open	phase 7
