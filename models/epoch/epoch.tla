@@ -961,10 +961,10 @@ Deliver(m) ==
                       priVars, rm, vers, sends, dmn, refd, leaseVars, clockVars, raftVars>>
 
 \* A member refuses a version of its current interval it has not logged, or
-\* fails to log it. The primary, once it hears, refuses the client of that
-\* version and of the chunk's later ones, whose bytes may rest on it; peering
-\* decides whether they stay. Unless the version was already answered, the
-\* interval it was ordered in ends.
+\* fails to log it. A primary that has yet to answer the version, once it
+\* hears, refuses its client and those of the chunk's later versions, whose
+\* bytes may rest on it, and the interval it was ordered in ends; peering decides
+\* whether they stay. A version already answered changes nothing at the primary.
 MemberFail(m) ==
     LET d == m.to
         r == CHOOSE x \in vers : x.c = m.c /\ x.v = m.v /\ x.n = m.from /\ x.r = m.r
@@ -975,7 +975,9 @@ MemberFail(m) ==
        /\ [c |-> m.c, v |-> m.v] \notin failed[d]
        /\ Fault("mfail")
        /\ failed' = [failed EXCEPT ![d] = @ \cup {[c |-> m.c, v |-> m.v]}]
-       /\ LET out == {x \in pend : x.n = m.from /\ x.c = m.c /\ x.v >= m.v}
+       /\ LET out == IF r \in pend
+                      THEN {x \in pend : x.n = m.from /\ x.r = m.r /\ x.c = m.c /\ x.v >= m.v}
+                      ELSE {}
           IN /\ pend' = pend \ out
              /\ refd' = refd \cup out
        /\ pr' = IF r \in pend /\ pr[m.from][m.p].iv = m.iv
