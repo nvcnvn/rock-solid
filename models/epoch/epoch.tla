@@ -501,7 +501,7 @@ Adopt(n, e) ==
            ELSE [w |-> x.w, hold |-> IF x.hold # 0 THEN x.hold ELSE IvAt(n, ChunkPG[Writes[x.w].c])] :
              x \in {y \in pin[n] : LET p == ChunkPG[Writes[y.w].c]
                                    IN tbl[e][p].iv = IvAt(n, p) \/ AdoptPr(n, p, e).iv # 0}}]
-    /\ pend' = {r \in pend : r.n # n \/ AdoptPr(n, ChunkPG[r.c], e).iv # 0}
+    /\ pend' = {r \in pend : r.n # n \/ AdoptPr(n, ChunkPG[r.c], e).iv # 0 \/ Bug("NoDemote")}
     /\ refd' = {r \in refd : r.n # n \/ AdoptPr(n, ChunkPG[r.c], e).iv # 0}
     /\ failed' = [failed EXCEPT ![ddisk[n]] = {f \in @ : tbl[e][ChunkPG[f.c]].iv = IvOfV(f.v)}]
     /\ UNCHANGED <<ctlVars, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, miss, persIv, mrecv,
@@ -801,6 +801,7 @@ AskNext(n, p) ==
     IN /\ Running(n)
        /\ Leads(n, p)
        /\ pr[n][p].ask
+       /\ ~Bug("NeverAsk")
        /\ reqIv[p] # k
        /\ Quiet(n, p)
        /\ reqIv' = [reqIv EXCEPT ![p] = k]
@@ -975,9 +976,9 @@ MemberFail(m) ==
        /\ [c |-> m.c, v |-> m.v] \notin failed[d]
        /\ Fault("mfail")
        /\ failed' = [failed EXCEPT ![d] = @ \cup {[c |-> m.c, v |-> m.v]}]
-       /\ LET out == IF r \in pend
-                      THEN {x \in pend : x.n = m.from /\ x.r = m.r /\ x.c = m.c /\ x.v >= m.v}
-                      ELSE {}
+       /\ LET out == IF r \notin pend THEN {}
+                      ELSE IF Bug("FailOnlyOne") THEN {r}
+                      ELSE {x \in pend : x.n = m.from /\ x.r = m.r /\ x.c = m.c /\ x.v >= m.v}
           IN /\ pend' = pend \ out
              /\ refd' = refd \cup out
        /\ pr' = IF r \in pend /\ pr[m.from][m.p].iv = m.iv
@@ -1653,8 +1654,9 @@ Next == Protocol \/ Choice \/ LeaseSteps \/ Tick
 
 Spec == Init /\ [][Next]_vars
 
-\* The unbounded liveness property 12 assumes every step that follows from the
-\* state is eventually taken, and grants a restart forgot eventually lapse.
+\* The unbounded liveness properties 12, 15 and 16 assume every step that follows
+\* from the state is eventually taken, and grants a restart forgot eventually
+\* lapse.
 FairSpec == Spec /\ WF_vars(Protocol) /\ WF_vars(\E g, h \in Node : OpenLapse(g, h))
 
 -----------------------------------------------------------------------------
@@ -1787,6 +1789,13 @@ ReadsAcked ==
                 want == Content(c, UNION {Chain(c, v) : v \in AckedV(c)})
                 gone == Dropped(c)
             IN \A b \in 1..Blocks[c] : got[b] >= want[b] /\ got[b] \notin gone
+
+\* 15. A primary whose interval a failed version ended always asks for the next
+\* in the end: nothing of its PG waits for ever.
+IntervalEnds == \A p \in PG : <>[](\A n \in Node : Leads(n, p) /\ pr[n][p].ask => reqIv[p] = IvAt(n, p))
+
+\* 16. Every client gets an answer: no version stays unanswered for ever.
+AllAnswered == <>[](pend = {})
 
 -----------------------------------------------------------------------------
 \* Configurations: the .cfg files substitute these for the constants. PG 1 is
@@ -1929,6 +1938,8 @@ FormatAtRecovery == Plan(<<Repl(2, 2, 1), Repl(2, 3, 4)>>, Session, {"format"})
 MinLiveRaised == [Plan(<<ML(2, 1), Mark(3, "down"), Mark(3, "up"), ML(2, 2), Mark(2, "maint")>>,
                        Session, {}) EXCEPT !.s = 0]
 RotBackPlans == {RotBack}
+\* ci-asks checks the failure plans with no restart or format under fairness.
+AskPlans == {MemberFails, OwnFails, FailMoved, OwnFailMoved}
 FaultPlans == {MemberFails, MemberFails3, FailRestart, OwnFails, FailMoved, OwnFailMoved, RotBack,
                FormatAtPeering, FormatAtRecovery, MinLiveRaised}
 
