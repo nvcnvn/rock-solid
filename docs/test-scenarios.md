@@ -3451,8 +3451,8 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 12 | Peering settles: with every step that is due taken in time, every PG eventually activates its current interval, unless the interval has fewer than `min_live` live members, a live member's disk is gone, or the table bound left a restarted primary without the new interval it asked for | `PeeringSettles` | "once membership stops changing, every PG whose current interval has at least `min_live` live members on running nodes activates it" |
 | 13 | When the leader removes a leaving member, every other member of the PG's current interval holds every acknowledged version and lists nothing: a recovered report counts only for the PG's current interval | `RemovalKeepsCopies` | "no move lowers the members of a PG holding an acknowledged version below its width" |
 | 14 | A primary serving a PG's reads, including one that keeps serving while it re-peers, returns from a chunk it lists nothing of every acknowledged write's bytes and no dropped version's: each block of what its index maps is at the newest acknowledged version that wrote it, or above, and at no version a later activated decision dropped. A read of a listed chunk is refused | `ReadsAcked` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), registered by Invariant checker (phase 1) |
-| 15 | A primary whose interval a failed version ended asks for the next in the end: with every step that is due taken in time, nothing of its PG waits for ever | `IntervalEnds` | None registered: `TestAFailureBelowACommittedVersionStillAsks` covers it as a regression test |
-| 16 | Every client gets an answer: no version stays unanswered for ever | `AllAnswered` | None registered: `TestADemotedPrimaryMapsItsPendingVersionsAsAMember` covers it as a regression test |
+| 15 | A primary whose interval a failed version ended asks for the next in the end: with every step that is due taken in time, nothing of its PG waits for ever | `IntervalEnds` | None registered: `TestAFailureBelowACommittedVersionStillAsks` covers it as a regression test, until [Plants for the epoch model's new rules](build-checklist.md#phase-4-embedded-metastore) registers one |
+| 16 | Every client gets an answer: no version stays unanswered for ever | `AllAnswered` | None registered: `TestADemotedPrimaryMapsItsPendingVersionsAsAMember` covers it as a regression test, until the same item registers one |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
 find a violation of the named property, which is never the property that only restates the removed
@@ -3918,9 +3918,8 @@ section.
 - The epoch change model's counterexamples each also appear as a planted bug that trips the mapped
   invariant: those for property 2 in [MetaStore invariants](#metastore-invariants), the rest in
   [Placement faults and invariants](#placement-faults-and-invariants). The exceptions, with no
-  planted bug yet, are the rows for a member logging past a failed version, a primary ordering on
-  past one, a new disk answering for an old disk ID, a past interval judged by the current
-  `min_live`, and a primary serving after another primary led the PG.
+  planted bug yet, are named by the unticked build checklist item [Plants for the epoch model's new
+  rules](build-checklist.md#phase-4-embedded-metastore).
 - Snapshot cuts and pool moves are modelled in phase 11, and cross-shard commit in phase 13, each
   before its code (design.md Roadmap), so this map has no rows for them yet.
 
