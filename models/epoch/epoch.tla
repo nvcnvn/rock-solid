@@ -1923,6 +1923,13 @@ OwnFails == Plan(<<>>, Partial2, {"ownfail"})
 FailMoved == Plan(<<Rot(2)>>, Partial2, {"mfail"})
 \* A version fails on the primary's own log while the primary moves.
 OwnFailMoved == Plan(<<Rot(2)>>, Partial2, {"ownfail"})
+\* A member fails a version as it is marked down; a primary's own log fails one
+\* as the primary is. A member, or the primary, in maintenance and back around
+\* the failure.
+FailDown == Plan(<<Mark(3, "down")>>, Partial, {"mfail"})
+OwnFailDown == Plan(<<Mark(1, "down")>>, Partial, {"ownfail"})
+FailMaint == Plan(<<Mark(3, "maint"), Mark(3, "up")>>, Partial2, {"mfail"})
+OwnFailMaint == Plan(<<Mark(2, "maint"), Mark(2, "up")>>, Partial2, {"ownfail"})
 \* A primary with a pending version moves away and back, skipping the table
 \* between, and its peering drops the version.
 RotBack == Plan(<<Rot(2), Rot(2)>>, Session, {})
@@ -1940,7 +1947,8 @@ MinLiveRaised == [Plan(<<ML(2, 1), Mark(3, "down"), Mark(3, "up"), ML(2, 2), Mar
 RotBackPlans == {RotBack}
 \* ci-asks checks the failure plans with no restart or format under fairness.
 AskPlans == {MemberFails, OwnFails, FailMoved, OwnFailMoved}
-FaultPlans == {MemberFails, MemberFails3, FailRestart, OwnFails, FailMoved, OwnFailMoved, RotBack,
+FaultPlans == {MemberFails, MemberFails3, FailRestart, OwnFails, FailMoved, OwnFailMoved,
+               FailDown, OwnFailDown, FailMaint, OwnFailMaint, RotBack,
                FormatAtPeering, FormatAtRecovery, MinLiveRaised}
 
 \* ci-leases: PG 2's primary is node 2, whose CLOCK_BOOTTIME runs at its raw

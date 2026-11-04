@@ -3367,7 +3367,8 @@ plans enable.
 - A member's disk formatted again while its node stays up, around peering and around recovery of a
   new primary that reads from it.
 - A member refusing or failing a version with a later one in flight; a version failing on the
-  primary's own log.
+  primary's own log. Each with the primary moved, with a member or the primary marked down, and
+  with one in `maintenance` and back; the member's with a process restart too.
 - A primary that returns over an interval it missed, with a pending version that interval dropped.
 - A primary with a pending version moved away and back, whose peering drops the version.
 - `min_live` lowered, an interval run below the old value, and `min_live` raised before the primary
