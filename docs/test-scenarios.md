@@ -3522,10 +3522,12 @@ under fairness, as `deep-peering` does, on the restart plan alone, and those for
   primary led the PG since, property 11 holds in `ci-peering` and `ci-restarts` with a table of
   incarnations per PG that a primary forgets whenever another primary may have led the PG, and the
   two incarnation rows above each fail.
-- A primary's rule that it asks for the next interval only once nothing of the PG waits has no check:
-  removing it leaves every `ci-faults` property passing, since a version that a request came too
-  soon for is settled by peering like any other; what it saves is refusing clients whose write
-  would have completed, which no property states.
+- Two rules have no check. A primary asks for the next interval only once nothing of the PG waits:
+  removing that leaves every `ci-faults` property passing, since a version a request came too soon
+  for is settled by peering like any other; what the rule saves is refusing clients whose write
+  would have completed, which no property states. A node asks for no node-pair lease during its
+  restart wait: removing that leaves `ci-leases` at the same state count, since a restart makes the
+  node lead nothing until the wait is over in every plan there.
 - Properties 3, 8 and 9 have no row of their own, since the only rules whose removal breaks them are
   the ones they restate; each was seen to fail once, outside the committed variants: 3 with member
   lists compared, 8 with a merge before the kept version, and 9 with an activation recorded at the
@@ -3895,8 +3897,8 @@ section.
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 1,939 s |
 
 - The epoch change model's `deep-leases` and `deep-slow` rows predate its settling, failure, disk
-  identity and read steps and do not check `ReadsAcked`: those plans have no failure and no format,
-  and `ci-leases` found the same number of states with the steps as without them.
+  identity and read steps and do not check `ReadsAcked`. `ci-leases`' unchanged state count says
+  nothing about them: `deep-leases` has six plans `ci-leases` lacks, and `deep-slow` one of its own.
 - Each model names the simulator invariant of each property in its own section's property table,
   so this map holds only the configuration results. The sessions model's invariants are registered
   by [MetaStore invariants](#metastore-invariants) (phase 4), which plants its leader-side
