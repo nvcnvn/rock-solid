@@ -573,7 +573,7 @@ Kept(p, L, J, c) ==
         RS == {d \in J : r[d].decided = LS}
         base == Newest({IF r[d].list # NoMiss THEN r[d].list
                         ELSE IF IvOfV(r[d].whole) < LS THEN r[d].whole ELSE 0 : d \in RS})
-        wholes == {r[d].whole : d \in J}
+        wholes == {r[d].whole : d \in J} \ {0}
         listed == {r[d].list : d \in J} \ {NoMiss, 0}
         keep(v) == \A d \in J \cap UpIn(p, IvOfV(v)) : r[d].whole >= v \/ r[d].list >= v
     IN IF Bug("DecideByOwnInterval")
@@ -1879,7 +1879,8 @@ MoveMaint == Plan(<<AddM(2, 3, 1), Mark(2, "maint"), Mark(2, "up"), RemoveM(2)>>
 MoveRefill == Plan(<<AddM(2, 3, 1), Repl(2, 1, 4), RemoveM(2)>>, Session, {"format"})
 MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveMaint, MoveRefill}
 
-\* ci-faults: the failures and disk identities of a version on its way.
+\* ci-faults: versions that fail, disks formatted around peering and recovery,
+\* and a min_live change.
 \* A member refuses or fails one of two versions in flight, with the versions on
 \* PG 2's two members or PG 1's three.
 MemberFails == Plan(<<>>, Partial2, {"mfail"})
@@ -1902,7 +1903,8 @@ FormatAtRecovery == Plan(<<Repl(2, 2, 1), Repl(2, 3, 4)>>, Session, {"format"})
 \* Writes taken at min_live 1 with a member down; the member returns, min_live
 \* rises to 2, and the primary moves to the returned member, which alone an
 \* interval judged by the new min_live would ask.
-MinLiveRaised == [Plan(<<ML(2, 1), Mark(3, "down"), Mark(3, "up"), ML(2, 2), Mark(2, "maint")>>, Session, {}) EXCEPT !.s = 0]
+MinLiveRaised == [Plan(<<ML(2, 1), Mark(3, "down"), Mark(3, "up"), ML(2, 2), Mark(2, "maint")>>,
+                       Session, {}) EXCEPT !.s = 0]
 FaultPlans == {MemberFails, MemberFails3, FailRestart, OwnFails, FailMoved, OwnFailMoved,
                FormatAtPeering, FormatAtRecovery, MinLiveRaised}
 

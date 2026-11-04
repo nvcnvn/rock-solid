@@ -3244,7 +3244,7 @@ run in `deep-leases`; the variants that need one run on it alone.
 | Writes | A partial write to each block of chunk 1, or of chunk 2. Chunk 2: a daemon's whole-block write W, its successor's reissue W′ once it died, and the successor's next write W2 once W′ is acknowledged. The lease plans: one whole-block write to chunk 1. Each plan takes one family; the free plan one partial write to chunk 1 |
 | Counter limit | 2, so running out is reachable at small depth; the real limit is 2³² − 1 |
 | Clocks per node | The lease plans hand PG 2 over from node 2 to node 3, its only grantor. `CLOCK_MONOTONIC_RAW` runs at 960 or 1,040 per mille of real time on node 3 and exactly elsewhere, and may rise by 0.4% once after measurement; `CLOCK_BOOTTIME` runs at the raw rate (no daemon), 22.6% slow on node 2 or 22.6% fast on node 3. The plans with a rate step, a suspend, a pause, a stop, a restart or the Raft group, and one of the two reboot plans, run node 3 4% fast and the rest exact; the partition, delayed-message and maintenance plans and the other reboot plan run exact clocks. Time runs to 11 s in the reboot plans, 5 s in the pause, suspend-and-partition and Raft-partition plans, 3 s in the Raft transfer plan and 6 s in the rest |
-| Tables | Each plan's changes, plus 1 for a renewal or a fold (2 in the late-report plan), at most 5 and 6 in `ci-faults`; 3 in the free plan, so two changes, renewals and folds among them |
+| Tables | Each plan's changes, plus 1 for a renewal or a fold (2 in the late-report plan, none in the `min_live` plan, whose changes alone take 6 tables), at most 5 and 6 in `ci-faults`; 3 in the free plan, so two changes, renewals and folds among them |
 | Faults per behavior | 1; 2 in the plans that pair a rate step, a pause, a suspend or a reboot with a partition, in the two that stop the holder in place, and in the Raft partition plan. 1 format, 2 process runs per node, 2 Raft terms, 1 send per write |
 
 **State the model holds**
@@ -3445,7 +3445,8 @@ find a violation of the named property, which is never the property that only re
 rule. A variant that passes means the model is too weak. A row whose property is 1, 2 or 10 runs
 with `ci-leases`'s constants, except the row for reads below `min_live`, whose trace needs no
 clocks; the rest run with `ci-peering`'s, on `ci-restarts`' plans where the trace needs a restart
-or a format and on `ci-moves`' where it needs a move. A variant checks only the property it must break; the one for property 12 does so
+or a format, on `ci-moves`' where it needs a move and on `ci-faults`' where it needs a failed
+version, a format around peering or recovery, or a change of `min_live`. A variant checks only the property it must break; the one for property 12 does so
 under fairness, as `deep-peering` does, on the restart plan alone.
 
 | Rule removed or broken | Property broken | Minimal trace |
@@ -3470,7 +3471,7 @@ under fairness, as `deep-peering` does, on the restart plan alone.
 | A returning primary settles its pending versions by number | 4 | PG 2's primary 2 orders W as 1.1 on its own log and is put in `maintenance`; interval 2 under node 3 drops W and acknowledges W′ as 2.1; 2 comes back as primary, skipping interval 2's table, and its peering keeps 2.1, above 1.1 by number but not resting on it, so 1.1 is answered OK |
 | A member logs past a version it failed | 5 | 1.1 fails at member 3 with 1.2 in flight; 3 logs 1.2, so it reports 1.2 whole; the next interval keeps 1.2 and counts 3, which lacks 1.1's block, as holding it |
 | A primary orders on in an interval a failed version ended | 5 | 1.1 fails on the primary's own log after it went out; 1.2 merges on the block without it, the members log both, and the next interval keeps 1.2 and counts a member whose block holds the failed 1.1 as holding it |
-| A new disk answers peering for the disk ID it replaced | 4 | PG 2: W acknowledged on disks 2 and 3; node 3's disk is formatted; interval 2 replaces 2 with node 1; node 3's new, empty disk answers for disk 3, the one member reached of interval 1, and W is dropped |
+| A new disk answers peering for the disk ID it replaced | 4 | PG 2: interval 2 replaces 2 with node 1; W, still tagged 1, is acknowledged on disks 2 and 3; node 3's disk is formatted, and its new, empty disk answers for disk 3, the one member reached of interval 1, so W is dropped |
 | A new disk answers a recovery read for the disk ID it replaced | 4 | As above, but disk 3 answers peering before its format, so interval 2 keeps W, listed on the new primary, node 1; recovery reads node 3's new disk, takes its empty answer for W and clears the listing; interval 3 replaces disk 3 with the new disk, finds W nowhere and drops it |
 | Peering judges a past interval by the current `min_live`, not its own | 4 | PG 2: `min_live` goes to 1, member 3 goes down and W is acknowledged on node 2 alone; 3 returns, `min_live` goes back to 2, and 2 goes into `maintenance`; node 3's peering skips the interval W was written in, which had 1 live member |
 | A primary serves reads in a new interval though another primary led the PG since | 14 | PG 2's primary 2 is put in `maintenance`; node 3 acknowledges W′ as 2.1; 2 comes back as primary and serves before it peers, without 2.1 and listing nothing |
@@ -3859,10 +3860,11 @@ section.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 26 | 593,079 | 55 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 30 | 2,080,827 | 228 s |
-| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 105 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 30 | 654,324 | 68 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 26 | 625,828 | 66 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 30 | 2,103,231 | 258 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 108 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 30 | 705,419 | 78 s |
+| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 28 | 972,863 | 142 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
@@ -3887,7 +3889,10 @@ section.
   phase 7 (Tier 2).
 - The epoch change model's counterexamples each also appear as a planted bug that trips the mapped
   invariant: those for property 2 in [MetaStore invariants](#metastore-invariants), the rest in
-  [Placement faults and invariants](#placement-faults-and-invariants).
+  [Placement faults and invariants](#placement-faults-and-invariants). The exceptions, with no
+  planted bug yet, are the rows for a member logging past a failed version, a primary ordering on
+  past one, a new disk answering for an old disk ID, a past interval judged by the current
+  `min_live`, and a primary serving after another primary led the PG.
 - Snapshot cuts and pool moves are modelled in phase 11, and cross-shard commit in phase 13, each
   before its code (design.md Roadmap), so this map has no rows for them yet.
 
@@ -3903,7 +3908,7 @@ job lists the models and `deep` configurations, and every other job runs once pe
   it.
 - A rule removed from a spec, with no negative configuration changed, fails that model's job: some
   `ci` configuration or negative variant fails and its trace is printed.
-- A configuration past 300 s on the runner fails the job. `ci-restarts` takes 228 s of 300 on the
+- A configuration past 300 s on the runner fails the job. `ci-restarts` takes 258 s of 300 on the
   M4 Pro; on the runner it either fits, or its largest plan moves to a `ci` configuration of its
   own.
 - Nightly, and when started by hand, one job per model runs `scripts/models.sh sim` with
