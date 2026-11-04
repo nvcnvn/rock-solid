@@ -3283,16 +3283,18 @@ run in `deep-leases`; the variants that need one run on it alone.
   leader folds a report, possibly late, into a later table that starts no interval. Plans have one
   table to spare for a renewal or a fold, and one plan two, so a report can be folded after a newer
   one.
-- **Settling.** A primary's pending versions are those whose client it has yet to answer. It settles
-  them as it activates: the newest pending version at or below the kept one in the kept one's
-  interval is the top, those at or below the top are answered OK, and the rest dropped and refused.
-  A node that adopts a table where it no longer leads a PG refuses the PG's pending versions; one
-  that skips such tables and returns as primary still holds them, and a restart loses them.
+- **Settling.** A primary's store keeps two kinds of version gated, unmapped: pending ones, whose
+  client it has yet to answer, and refused ones, whose client a failure already refused. It settles
+  both as it activates: the newest gated version at or below the kept one in the kept one's interval
+  is the top, those at or below the top are mapped and any pending one answered OK, and the rest
+  dropped and any pending one refused. A node that adopts a table where it no longer leads a PG
+  refuses the PG's pending versions and maps both kinds as a member maps what it logs; one that
+  skips such tables and returns as primary still holds them, and a restart loses them.
 - **Failed versions.** A member refuses or fails a version of its current interval it has not
   logged, and notes it in memory until the interval ends or a restart forgets it, logging nothing of
   the chunk at or above it. A version may instead fail on the primary's own log after it went out to
   members. Either refuses the client of that version and of the chunk's later ones and ends the
-  interval: the primary orders nothing more in it.
+  interval: the primary orders nothing more in it. The later versions stay gated until settled.
 - **Restarts and counters.** A restarted primary asks for a new interval and peers only in a later
   one. A chunk whose counter runs out, or a failed version, makes the primary ask for a new interval
   once no version of the PG waits for a member or its own log.
@@ -3315,7 +3317,7 @@ run in `deep-leases`; the variants that need one run on it alone.
 - **Reads.** A primary serves a PG's reads once it activated, or while later intervals keep it as
   primary, only while its interval has at least `min_live` live members, and only with an unexpired
   lease from every other live member, having handled every peer message that waited for it. It
-  serves what it mapped, never a version pending for its client, and refuses a chunk it lists.
+  serves what its index maps, never a version its store keeps gated, and refuses a chunk it lists.
 - **Leases.** Per node pair, counted on two clocks per node. The holder bounds each grantor's rate
   from the window's first grant and the latest of one grantor run, asks again `rate_gap` after a
   window's first grant, asks for none during its restart wait, and takes no lease before it has a bound. Every grant and heartbeat carries
@@ -3366,6 +3368,7 @@ plans enable.
 - A member refusing or failing a version with a later one in flight; a version failing on the
   primary's own log.
 - A primary that returns over an interval it missed, with a pending version that interval dropped.
+- A primary with a pending version moved away and back, whose peering drops the version.
 - `min_live` lowered, an interval run below the old value, and `min_live` raised before the primary
   moves.
 - A node cut off from the control plane that still reaches its peers.
@@ -3438,7 +3441,7 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 11 | Once a dead daemon's reissued write W′ and a later write W2 to the same block are acknowledged, the block never again holds the dead daemon's W | `NoResurrectedWrite` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), under the fault "a dead daemon's chunk write delivered after its successor's reissue and the pod's next write to the same block", registered by Invariant checker (phase 1), and the read run's "no write of an incarnation is acknowledged after a later incarnation's write to its chunk" |
 | 12 | Peering settles: with every step that is due taken in time, every PG eventually activates its current interval, unless the interval has fewer than `min_live` live members, a live member's disk is gone, or the table bound left a restarted primary without the new interval it asked for | `PeeringSettles` | "once membership stops changing, every PG whose current interval has at least `min_live` live members on running nodes activates it" |
 | 13 | When the leader removes a leaving member, every other member of the PG's current interval holds every acknowledged version and lists nothing: a recovered report counts only for the PG's current interval | `RemovalKeepsCopies` | "no move lowers the members of a PG holding an acknowledged version below its width" |
-| 14 | A primary serving a PG's reads, including one that keeps serving while it re-peers, returns from a chunk it lists nothing of every acknowledged write's bytes: each block of what it mapped is at the newest acknowledged version that wrote it, or above. A read of a listed chunk is refused | `ReadsAcked` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), registered by Invariant checker (phase 1) |
+| 14 | A primary serving a PG's reads, including one that keeps serving while it re-peers, returns from a chunk it lists nothing of every acknowledged write's bytes and no dropped version's: each block of what its index maps is at the newest acknowledged version that wrote it, or above, and at no version a later activated decision dropped. A read of a listed chunk is refused | `ReadsAcked` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), registered by Invariant checker (phase 1) |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
 find a violation of the named property, which is never the property that only restates the removed
@@ -3475,6 +3478,7 @@ under fairness, as `deep-peering` does, on the restart plan alone.
 | A new disk answers a recovery read for the disk ID it replaced | 4 | As above, but disk 3 answers peering before its format, so interval 2 keeps W, listed on the new primary, node 1; recovery reads node 3's new disk, takes its empty answer for W and clears the listing; interval 3 replaces disk 3 with the new disk, finds W nowhere and drops it |
 | Peering judges a past interval by the current `min_live`, not its own | 4 | PG 2: `min_live` goes to 1, member 3 goes down and W is acknowledged on node 2 alone; 3 returns, `min_live` goes back to 2, and 2 goes into `maintenance`; node 3's peering skips the interval W was written in, which had 1 live member |
 | A primary serves reads in a new interval though another primary led the PG since | 14 | PG 2's primary 2 is put in `maintenance`; node 3 acknowledges W′ as 2.1; 2 comes back as primary and serves before it peers, without 2.1 and listing nothing |
+| A member holding a version above the kept one is left off the missing list | 14 | PG 2's primary 2 orders 1.1, still pending, moves away and back, skipping the table between; peering reaches node 3, keeps nothing and drops 1.1, and node 2 serves 1.1 listing nothing. No acknowledged write is at stake: only the clause on dropped versions catches it |
 | A kept primary serves reads in an interval below `min_live` | 1 | PG 2's member 3 is marked down: primary 2 reads needing no lease; 3 returns and the primary moves to it while 2, cut off from the control plane, reads on; peering skips the interval below `min_live` |
 | The holder ends its lease on the slower of its clocks | 1 | Holder `CLOCK_BOOTTIME` −22.6%: the lease outlives the grant |
 | The grantor ends its grant on the faster of its clocks | 1 | Grantor `CLOCK_BOOTTIME` +22.6% |

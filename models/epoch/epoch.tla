@@ -112,6 +112,7 @@ VARIABLES
     dmn,      \* 1 while the client daemon's first incarnation runs, 2 after its successor starts
     bad,      \* set of names: completions and keeps the properties forbid, seen when they happen
     pend,     \* subset of vers: versions whose client a primary's process has yet to answer
+    refd,     \* subset of vers: versions a primary refused that its store keeps gated, unmapped
     \* Leases
     gr,       \* [Node -> [Node -> [ep, live, fg, on, tR, tB]]]: grantor side
     hl,       \* [Node -> [Node -> NoWin]]: holder side
@@ -125,7 +126,7 @@ VARIABLES
 ctlVars == <<tbl, ivs, reqIv, reports, recd, plan, step>>
 nodeVars == <<ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, miss, persIv, mrecv, failed>>
 priVars == <<pr, pv, pin, known, dec, act>>
-dataVars == <<rm, vers, ackd, wst, sends, dmn, bad, pend>>
+dataVars == <<rm, vers, ackd, wst, sends, dmn, bad, pend, refd>>
 leaseVars == <<gr, hl, rw>>
 clockVars == <<now, raw, boot, rawR, bootR, slew, runId, frz, suspAt, rstAt,
                rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs, faults>>
@@ -309,6 +310,7 @@ Init ==
     /\ dmn = 1
     /\ bad = {}
     /\ pend = {}
+    /\ refd = {}
     /\ gr = [g \in Node |-> [h \in Node |->
               [ep |-> 1, live |-> InitGrant(g, h), fg |-> FALSE, on |-> FALSE, tR |-> 0, tB |-> 0]]]
     /\ hl = [h \in Node |-> [g \in Node |-> [NoWin EXCEPT !.has = InitGrant(g, h), !.ep = 1]]]
@@ -500,6 +502,7 @@ Adopt(n, e) ==
              x \in {y \in pin[n] : LET p == ChunkPG[Writes[y.w].c]
                                    IN tbl[e][p].iv = IvAt(n, p) \/ AdoptPr(n, p, e).iv # 0}}]
     /\ pend' = {r \in pend : r.n # n \/ AdoptPr(n, ChunkPG[r.c], e).iv # 0}
+    /\ refd' = {r \in refd : r.n # n \/ AdoptPr(n, ChunkPG[r.c], e).iv # 0}
     /\ failed' = [failed EXCEPT ![ddisk[n]] = {f \in @ : tbl[e][ChunkPG[f.c]].iv = IvOfV(f.v)}]
     /\ UNCHANGED <<ctlVars, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, miss, persIv, mrecv,
                    pv, dec, act, rm, vers, ackd, wst, sends, dmn, bad, leaseVars, clockVars, raftVars>>
@@ -584,20 +587,22 @@ Kept(p, L, J, c) ==
 \* newest and lists nothing. Only recovery removes an entry: a member that
 \* still lists a chunk may hold a dropped version's bytes under a newer write.
 Entry(d, c, K) ==
-    IF Newest(dlog[d][c]) = K /\ (miss[d][c] = NoMiss \/ Bug("PeeringClearsMissing"))
+    IF \/ Newest(dlog[d][c]) = K /\ (miss[d][c] = NoMiss \/ Bug("PeeringClearsMissing"))
+       \/ Bug("NoListAbove") /\ Newest(dlog[d][c]) > K /\ miss[d][c] = NoMiss
     THEN NoMiss ELSE K
 
-\* The newest of n's pending versions of c that Store.Settle keeps for the kept
-\* version K: at or below K, in K's interval. One of an earlier interval is kept
-\* only below such a one, since an interval n missed may have dropped it and
-\* built K on an older version.
+\* The newest of the versions n's store keeps gated for c that Store.Settle
+\* keeps for the kept version K: at or below K, in K's interval. One of an
+\* earlier interval is kept only below such a one, since an interval n missed
+\* may have dropped it and built K on an older version.
 SettleTop(n, c, K) ==
     IF Bug("SettleByNumber") THEN K
-    ELSE Newest({r.v : r \in {x \in pend : x.n = n /\ x.c = c /\ x.v <= K /\ IvOfV(x.v) = IvOfV(K)}})
+    ELSE Newest({r.v : r \in {x \in pend \cup refd : x.n = n /\ x.c = c /\ x.v <= K /\ IvOfV(x.v) = IvOfV(K)}})
 
-\* The primary settles its pending versions on the decision K: those at or below
-\* the top are mapped and answered OK, the rest dropped and refused. It
-\* activates and reports it on its next heartbeat.
+\* The primary settles the versions it keeps gated on the decision K: those at
+\* or below the top are mapped, and answered OK unless already refused, the rest
+\* dropped, and refused if not already. It activates and reports it on its next
+\* heartbeat.
 Activated(n, p, k, K) ==
     LET mine == {r \in pend : r.n = n /\ ChunkPG[r.c] = p}
         ok == {r \in mine : r.v <= SettleTop(n, r.c, K[r.c])}
@@ -605,6 +610,7 @@ Activated(n, p, k, K) ==
        /\ act' = act \cup {[p |-> p, k |-> k, r |-> run[n]]}
        /\ reports' = reports \cup {[p |-> p, k |-> k]}
        /\ pend' = pend \ mine
+       /\ refd' = {r \in refd : ~(r.n = n /\ ChunkPG[r.c] = p)}
        /\ ackd' = ackd \cup {[c |-> r.c, v |-> r.v] : r \in ok}
        /\ wst' = [i \in DOMAIN wst |-> IF \E r \in ok : r.w = i THEN 2 ELSE wst[i]]
 
@@ -679,7 +685,7 @@ Peer(n, p) ==
                   THEN /\ PersistAll(P, p, k, lists)
                        /\ reports' = IF Bug("ReportBeforeActivate") THEN reports \cup {[p |-> p, k |-> k]}
                                      ELSE reports
-                       /\ UNCHANGED <<pr, act, mrecv, pend, ackd, wst>>
+                       /\ UNCHANGED <<pr, act, mrecv, pend, refd, ackd, wst>>
                   ELSE /\ PersistAll(P, p, k, lists)
                        /\ Activated(n, p, k, K)
                        /\ UNCHANGED mrecv
@@ -848,7 +854,7 @@ Send(i) ==
           THEN /\ pin' = [pin EXCEPT ![n] = @ \cup {[w |-> i, hold |-> 0]}]
                /\ known' = [known EXCEPT ![n][p] = Max({@, w.inc})]
           ELSE UNCHANGED <<pin, known>>
-       /\ UNCHANGED <<ctlVars, nodeVars, pr, pv, dec, act, rm, vers, ackd, dmn, bad, pend,
+       /\ UNCHANGED <<ctlVars, nodeVars, pr, pv, dec, act, rm, vers, ackd, dmn, bad, pend, refd,
                       leaseVars, clockVars, raftVars>>
 
 \* The first daemon dies; its successor starts.
@@ -856,7 +862,7 @@ Die ==
     /\ "die" \in plan.f
     /\ dmn = 1
     /\ dmn' = 2
-    /\ UNCHANGED <<ctlVars, nodeVars, priVars, rm, vers, ackd, wst, sends, bad, pend,
+    /\ UNCHANGED <<ctlVars, nodeVars, priVars, rm, vers, ackd, wst, sends, bad, pend, refd,
                    leaseVars, clockVars, raftVars>>
 
 \* Whether a held or fenced write must be refused when it is ordered.
@@ -907,7 +913,7 @@ Order(n, x) ==
           THEN Ack(r) /\ UNCHANGED pend
           ELSE pend' = pend \cup {r} /\ UNCHANGED <<ackd, wst>>
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, miss, persIv, mrecv, failed,
-                      pr, known, dec, act, sends, dmn, bad, leaseVars, clockVars, raftVars>>
+                      pr, known, dec, act, sends, dmn, bad, refd, leaseVars, clockVars, raftVars>>
 
 \* The primary refuses a write it may not order; the client retries.
 Refuse(n, x) ==
@@ -952,7 +958,7 @@ Deliver(m) ==
           ELSE UNCHANGED <<ackd, wst, pend>>
        /\ bad' = IF IvAt(dnode[d], m.p) > m.iv THEN bad \cup {"late"} ELSE bad
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, miss, persIv, mrecv, failed,
-                      priVars, rm, vers, sends, dmn, leaseVars, clockVars, raftVars>>
+                      priVars, rm, vers, sends, dmn, refd, leaseVars, clockVars, raftVars>>
 
 \* A member refuses a version of its current interval it has not logged, or
 \* fails to log it. The primary, once it hears, refuses the client of that
@@ -969,7 +975,9 @@ MemberFail(m) ==
        /\ [c |-> m.c, v |-> m.v] \notin failed[d]
        /\ Fault("mfail")
        /\ failed' = [failed EXCEPT ![d] = @ \cup {[c |-> m.c, v |-> m.v]}]
-       /\ pend' = {x \in pend : ~(x.n = m.from /\ x.c = m.c /\ x.v >= m.v)}
+       /\ LET out == {x \in pend : x.n = m.from /\ x.c = m.c /\ x.v >= m.v}
+          IN /\ pend' = pend \ out
+             /\ refd' = refd \cup out
        /\ pr' = IF r \in pend /\ pr[m.from][m.p].iv = m.iv
                 THEN [pr EXCEPT ![m.from][m.p].ask = TRUE] ELSE pr
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, miss, persIv, mrecv,
@@ -996,7 +1004,7 @@ OwnFail(n, r) ==
        /\ pend' = pend \ {r}
        /\ pr' = [pr EXCEPT ![n][p].ask = TRUE]
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, miss, persIv, mrecv, failed,
-                      pv, pin, known, dec, act, rm, vers, ackd, wst, sends, dmn, bad,
+                      pv, pin, known, dec, act, rm, vers, ackd, wst, sends, dmn, bad, refd,
                       leaseVars, now, raw, boot, rawR, bootR, slew, runId, frz, suspAt, rstAt,
                       rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs, raftVars>>
 
@@ -1419,6 +1427,7 @@ RestartState(n) ==
     /\ mrecv' = [mrecv EXCEPT ![ddisk[n]] = {}]
     /\ failed' = [failed EXCEPT ![ddisk[n]] = {}]
     /\ pend' = {r \in pend : r.n # n}
+    /\ refd' = {r \in refd : r.n # n}
     /\ rw' = [rw EXCEPT ![n] = Clocks /\ ~Bug("NoRestartWait")]
     /\ rlead' = [rlead EXCEPT ![n] = FALSE]
     /\ fort' = [fort EXCEPT ![n] = NoFort]
@@ -1756,17 +1765,26 @@ RemovalKeepsCopies ==
             => \A c \in ChunksOf(p) : \A v \in AckedV(c) : \A d \in Range(x.mem) \ {x.lv} :
                  v \in dlog[d][c] /\ miss[d][c] = NoMiss]_vars
 
+\* The versions of c a later activated decision does not rest on.
+Dropped(c) ==
+    {r.v : r \in {y \in vers : y.c = c /\ \E x \in ActDecs :
+                    x.p = ChunkPG[c] /\ x.k > IvOfV(y.v) /\ y.v \notin Chain(c, x.kept[c])}}
+
 \* 14. A primary serving a PG's reads returns, from a chunk it lists nothing of,
-\* every acknowledged write's bytes: each block of what it serves is at the
-\* newest acknowledged version that wrote it, or above. It serves what it mapped,
-\* never a version pending for its client. A read of a listed chunk is refused.
+\* every acknowledged write's bytes and no dropped version's: each block of what
+\* it serves is at the newest acknowledged version that wrote it, or above, and
+\* at no version a later activated decision dropped. It serves what its index
+\* maps, never a version its store keeps gated. A read of a listed chunk is
+\* refused.
 ReadsAcked ==
     \A n \in Node, p \in PG : Reading(n, p) =>
        LET own == PrimDisk(p, IvAt(n, p))
        IN \A c \in ChunksOf(p) : miss[own][c] = NoMiss =>
-            LET served == dlog[own][c] \ {r.v : r \in {x \in pend : x.n = n /\ x.c = c}}
-                acked == UNION {Chain(c, v) : v \in AckedV(c)}
-            IN \A b \in 1..Blocks[c] : Content(c, served)[b] >= Content(c, acked)[b]
+            LET served == dlog[own][c] \ {r.v : r \in {x \in pend \cup refd : x.n = n /\ x.c = c}}
+                got == Content(c, served)
+                want == Content(c, UNION {Chain(c, v) : v \in AckedV(c)})
+                gone == Dropped(c)
+            IN \A b \in 1..Blocks[c] : got[b] >= want[b] /\ got[b] \notin gone
 
 -----------------------------------------------------------------------------
 \* Configurations: the .cfg files substitute these for the constants. PG 1 is
@@ -1894,6 +1912,9 @@ OwnFails == Plan(<<>>, Partial2, {"ownfail"})
 FailMoved == Plan(<<Rot(2)>>, Partial2, {"mfail"})
 \* A version fails on the primary's own log while the primary moves.
 OwnFailMoved == Plan(<<Rot(2)>>, Partial2, {"ownfail"})
+\* A primary with a pending version moves away and back, skipping the table
+\* between, and its peering drops the version.
+RotBack == Plan(<<Rot(2), Rot(2)>>, Session, {})
 \* PG 2's primary replaced while its other member's disk is formatted, so that
 \* a peering message for the old disk ID reaches the node.
 FormatAtPeering == Plan(<<Repl(2, 2, 1)>>, Session, {"format"})
@@ -1905,7 +1926,8 @@ FormatAtRecovery == Plan(<<Repl(2, 2, 1), Repl(2, 3, 4)>>, Session, {"format"})
 \* interval judged by the new min_live would ask.
 MinLiveRaised == [Plan(<<ML(2, 1), Mark(3, "down"), Mark(3, "up"), ML(2, 2), Mark(2, "maint")>>,
                        Session, {}) EXCEPT !.s = 0]
-FaultPlans == {MemberFails, MemberFails3, FailRestart, OwnFails, FailMoved, OwnFailMoved,
+RotBackPlans == {RotBack}
+FaultPlans == {MemberFails, MemberFails3, FailRestart, OwnFails, FailMoved, OwnFailMoved, RotBack,
                FormatAtPeering, FormatAtRecovery, MinLiveRaised}
 
 \* ci-leases: PG 2's primary is node 2, whose CLOCK_BOOTTIME runs at its raw
