@@ -436,9 +436,23 @@ Fold(p, k) ==
     /\ Commit([tbl[Len(tbl)] EXCEPT ![p].la = Max({k, tbl[Len(tbl)][p].la})])
     /\ UNCHANGED <<ivs, reqIv, reports, recd>>
 
+\* An operator's edit orders a PG's members anew, and the table that holds it
+\* carries the marks the disks reached since the last one: one interval, with
+\* each mark changing as MarkDisk's does.
+Edit(p, mem, marks) ==
+    LET x == ivs[p][Cur(p)]
+        to(d) == marks[CHOOSE j \in 1..Len(mem) : mem[j] = d]
+    IN /\ x.lv = 0
+       /\ Len(mem) = Len(x.mem)
+       /\ Range(mem) = Range(x.mem)
+       /\ \A d \in Range(mem) : to(d) = St(p, Cur(p), d) \/ Allowed(p, d, St(p, Cur(p), d), to(d))
+       /\ NewIntervals({p}, [q \in PG |->
+            [x EXCEPT !.mem = mem, !.st = [d \in Disk |-> IF d \in Range(mem) THEN to(d) ELSE @[d]]]])
+       /\ UNCHANGED <<reqIv, reports, recd>>
+
 \* A planned change: [k |-> "mark", d, to], [k |-> "replace", p, old, new],
-\* [k |-> "rotate", p], [k |-> "add", p, old, new], [k |-> "remove", p] or
-\* [k |-> "minlive", p, to].
+\* [k |-> "rotate", p], [k |-> "add", p, old, new], [k |-> "remove", p],
+\* [k |-> "minlive", p, to] or [k |-> "edit", p, mem, marks].
 Planned(m) ==
     \/ m.k = "mark" /\ MarkDisk(m.d, m.to)
     \/ m.k = "replace" /\ Replace(m.p, m.old, m.new)
@@ -446,6 +460,7 @@ Planned(m) ==
     \/ m.k = "add" /\ Add(m.p, m.old, m.new)
     \/ m.k = "remove" /\ Remove(m.p)
     \/ m.k = "minlive" /\ SetMinLive(m.p, m.to)
+    \/ m.k = "edit" /\ Edit(m.p, m.mem, m.marks)
 
 \* A free plan makes any change in Moves at any time; another makes its
 \* changes in order.

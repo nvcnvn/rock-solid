@@ -115,6 +115,18 @@ const (
 	OutPersisted
 	// OutActivate, a primary activating: pg interval.
 	OutActivate
+	// OutRecovered, a disk's copy of a chunk recovered: chunk version.
+	OutRecovered
+	// OutReported, a primary reporting its interval recovered: pg interval.
+	OutReported
+	// OutAsk, a primary asking for a new interval: pg interval.
+	OutAsk
+	// OutFormat, a node starting on a disk formatted again: disk.
+	OutFormat
+	// OutAccepted, a member taking a version into its store: chunk version.
+	OutAccepted
+	// OutMemberFail, a member refusing a version or failing to log it: chunk version.
+	OutMemberFail
 	numNames
 )
 
@@ -205,6 +217,12 @@ var schemas = [numNames]schema{
 	OutKept:           {"Kept", KindOutput, []field{fChunk, {"kept", typeNum}}},
 	OutPersisted:      {"Persisted", KindOutput, []field{fPG, fIv, fDisk}},
 	OutActivate:       {"Activate", KindOutput, []field{fPG, fIv}},
+	OutRecovered:      {"Recovered", KindOutput, []field{fChunk, fVer}},
+	OutReported:       {"Reported", KindOutput, []field{fPG, fIv}},
+	OutAsk:            {"Ask", KindOutput, []field{fPG, fIv}},
+	OutFormat:         {"Format", KindOutput, []field{fDisk}},
+	OutAccepted:       {"Accepted", KindOutput, []field{fChunk, fVer}},
+	OutMemberFail:     {"MemberFail", KindOutput, []field{fChunk, fVer}},
 }
 
 // Kind is the kind of record the name belongs to, or 0 for an unknown name.

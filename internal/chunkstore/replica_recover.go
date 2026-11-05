@@ -4,6 +4,7 @@ import (
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 // maxRecoveries is how many chunks a replica recovers at once across the PGs it leads: recovery's
@@ -289,7 +290,23 @@ func (r *Replica) recoveryWritten(ctx *core.Context, rp Reply, out *ReplicaOutpu
 			}
 		}
 	}
+	if v := r.recoveryOf(rp.ID); rp.Err == nil && v != nil {
+		out.note(trace.OutRecovered, v.Hash(), rp.Version, 0, 0, 0)
+	}
 	r.recoveryDone(ctx, rp.ID, rp.Err == nil, out)
+}
+
+// recoveryOf is the chunk recovery write req is for, or nil.
+func (r *Replica) recoveryOf(req uint64) *core.ChunkID {
+	k := slices.IndexFunc(r.recs, func(rc recovery) bool { return rc.req == req })
+	if k < 0 {
+		return nil
+	}
+	l := r.lead(r.recs[k].pg)
+	if l < 0 || r.recs[k].todo >= len(r.leads[l].todo) {
+		return nil
+	}
+	return &r.leads[l].todo[r.recs[k].todo].chunk
 }
 
 // orderRecovery hands the store recovery k's write of image buf, which the store orders under the
@@ -472,6 +489,9 @@ func (r *Replica) reportRecovered(again bool, out *ReplicaOutput) {
 		l := &r.leads[i]
 		_, e := r.table.entry(l.pg)
 		if (again || !l.reported) && r.recovered(l, e) && !e.Recovered {
+			if !l.reported {
+				out.note(trace.OutReported, pgField(l.pg), uint64(l.interval), 0, 0, 0)
+			}
 			l.reported = true
 			out.Recovered = append(out.Recovered, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
 		}

@@ -21,7 +21,7 @@ TVer(k, n) == k * TBase + n
 TIvOfV(v) == v \div TBase
 TCnt(v) == v % TBase
 
-TPlanSet == {[free |-> FALSE, m |-> TPlan, w |-> TWrites, f |-> {"restart", "format"},
+TPlanSet == {[free |-> FALSE, m |-> TPlan, w |-> TWrites, f |-> {"restart", "format", "ownfail", "mfail"},
               t |-> 0, k |-> 100000, s |-> 100000]}
 TMaint == [p \in TPG |-> FALSE]
 TRates == [n \in TNode |-> {1000}]
@@ -59,9 +59,33 @@ Line(l) ==
        /\ \E x \in {y \in pin[l.n] : y.w = l.w} : Order(l.n, x)
        /\ pv'[l.n][l.c] = l.v
     \/ /\ l.k = "logged"
-       /\ IF l.v \in dlog[l.d][l.c]
+       /\ IF l.v \in dlog[ddisk[l.n]][l.c]
           THEN UNCHANGED vars
-          ELSE \E m \in {x \in rm : x.to = l.d /\ x.c = l.c /\ x.v = l.v} : Deliver(m)
+          ELSE \E m \in {x \in rm : x.to = ddisk[l.n] /\ x.c = l.c /\ x.v = l.v} : Deliver(m)
+    \/ /\ l.k = "maydeliver"
+       /\ \/ UNCHANGED vars
+          \/ \E m \in {x \in rm : x.to = ddisk[l.n] /\ x.c = l.c /\ x.v = l.v} : Deliver(m)
+    \/ /\ l.k = "mfail"
+       /\ \E m \in {x \in rm : x.to = ddisk[l.n] /\ x.c = l.c /\ x.v = l.v} : MemberFail(m)
+    \/ /\ l.k = "mayfail"
+       /\ \/ UNCHANGED vars
+          \/ \E r \in {x \in pend : x.c = l.c /\ x.v = l.v} : OwnFail(l.n, r)
+    \/ /\ l.k = "restart"
+       /\ Restart(l.n)
+    \/ /\ l.k = "format"
+       /\ Format(l.n)
+    \/ /\ l.k = "recovered"
+       /\ IF miss[ddisk[l.n]][l.c] = NoMiss
+          THEN UNCHANGED vars
+          ELSE Recover(l.l, ChunkPG[l.c], l.c, ddisk[l.n])
+    \/ /\ l.k = "reported"
+       /\ IF ivs[l.p][l.iv].lv = 0 \/ [p |-> l.p, k |-> l.iv] \in recd
+          THEN UNCHANGED vars
+          ELSE ReportRecovered(l.n, l.p)
+    \/ /\ l.k = "ask"
+       /\ IF reqIv[l.p] = l.iv
+          THEN UNCHANGED vars
+          ELSE AskNext(l.n, l.p) \/ CounterOut(l.n, l.p)
     \/ /\ l.k = "committed"
        /\ [c |-> l.c, v |-> l.v] \in ackd
        /\ UNCHANGED vars

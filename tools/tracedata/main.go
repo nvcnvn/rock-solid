@@ -54,6 +54,13 @@ type gen struct {
 	lines   []string
 	replies map[[3]uint64]map[uint64]*reply
 	cur     *reply
+	// disks maps a disk ID to the spec's: one formatted again takes the next past the nodes.
+	diskIDs map[uint64]uint64
+	fmts    int
+	// primary is each PG's newest activated node; ownOpen a node's versions it ordered and has not logged, memberOpen those a member has not.
+	primary    map[uint64]int
+	ownOpen    map[int][][2]uint64
+	memberOpen map[int][][2]uint64
 }
 
 func ver(v uint64) string { return strconv.FormatUint((v>>32)*verBase+v&(1<<32-1), 10) }
@@ -77,6 +84,38 @@ func (g *gen) chunk(hash uint64) int {
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "tracedata: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// chunkField is the PG of a chunk, by its trace field.
+func (g *gen) chunkField(hash uint64) uint64 { return g.pgs[g.chunkPG[g.chunk(hash)-1]-1] }
+
+func (g *gen) disk(id uint64) uint64 {
+	if d, ok := g.diskIDs[id]; ok {
+		return d
+	}
+	return id
+}
+
+func dropVersion(l [][2]uint64, c, v uint64) [][2]uint64 {
+	return slices.DeleteFunc(l, func(x [2]uint64) bool { return x[0] == c && x[1] == v })
+}
+
+// landOpen lets the versions node n's store took and has not reported durable land now: the spec logs a version as a member takes it, and a table or a crash may come before the record.
+func (g *gen) landOpen(n int) {
+	for _, x := range g.memberOpen[n] {
+		g.line(`k |-> "maydeliver", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(x[0]), ver(x[1]))
+	}
+}
+
+// crash writes a process crash: a write in flight may have reached the disk, so the lines before the restart let the versions a member had not reported durable land, and those the node's own log had not lose their record.
+func (g *gen) crash(n int) {
+	g.landOpen(n)
+	own := g.ownOpen[n]
+	for j := len(own) - 1; j >= 0; j-- {
+		g.line(`k |-> "mayfail", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(own[j][0]), ver(own[j][1]))
+	}
+	g.memberOpen[n], g.ownOpen[n] = nil, nil
+	g.line(`k |-> "restart", n |-> %d`, n)
 }
 
 func (g *gen) line(format string, args ...any) {
@@ -116,22 +155,36 @@ func (g *gen) classify(epoch uint64, changed []uint64, next map[uint64]*entry) {
 		}
 		rest = append(rest, f)
 	}
-	for _, k := range sortedPairs(marked) {
-		g.planned(fmt.Sprintf(`[k |-> "mark", d |-> %d, to |-> "%s"]`, k[0], marks(k[1])))
-	}
 	for _, f := range rest {
 		old, e := g.entries[f], next[f]
 		p := g.pg(f)
 		a, b := disks(old.members), disks(e.members)
 		switch {
-		case slices.Equal(a, b) && sameMembers(old, e):
+		case slices.Equal(a, b) && sameMembers(old, e) && e.minLive == old.minLive:
 			g.tables++
 			g.line(`k |-> "renew", p |-> %d`, p)
+		case len(b) == len(a)+1 && slices.Equal(a, b[:len(a)]) && leavingOf(e) != 0 && sameMarks(old, &entry{members: e.members[:len(a)]}):
+			g.planned(fmt.Sprintf(`[k |-> "add", p |-> %d, old |-> %d, new |-> %d]`, p, g.disk(leavingOf(e)), g.disk(b[len(a)])))
+		case len(b) == len(a)-1 && leavingOf(old) != 0 && slices.Equal(b, slices.DeleteFunc(slices.Clone(a), func(d uint64) bool { return d == leavingOf(old) })):
+			g.planned(fmt.Sprintf(`[k |-> "remove", p |-> %d]`, p))
+		case len(a) == len(b) && differs(a, b) == 1:
+			j := slices.IndexFunc(a, func(d uint64) bool { return !slices.Contains(b, d) })
+			g.planned(fmt.Sprintf(`[k |-> "replace", p |-> %d, old |-> %d, new |-> %d]`, p, g.disk(a[j]), g.disk(b[j])))
 		case len(a) >= 2 && len(a) == len(b) && a[0] == b[1] && a[1] == b[0] && slices.Equal(a[2:], b[2:]) && sameMarks(old, e):
 			g.planned(fmt.Sprintf(`[k |-> "rotate", p |-> %d]`, p))
+		case len(a) == len(b) && differs(sortedCopy(a), sortedCopy(b)) == 0:
+			var mem, ms []string
+			for _, m := range e.members {
+				mem = append(mem, strconv.FormatUint(g.disk(m.disk), 10))
+				ms = append(ms, `"`+marks(m.mark)+`"`)
+			}
+			g.planned(fmt.Sprintf(`[k |-> "edit", p |-> %d, mem |-> <<%s>>, marks |-> <<%s>>]`, p, strings.Join(mem, ", "), strings.Join(ms, ", ")))
 		default:
 			fatal("table %d changes PG %d from %v to %v: no spec change maps it", epoch, p, old.members, e.members)
 		}
+	}
+	for _, k := range sortedPairs(marked) {
+		g.planned(fmt.Sprintf(`[k |-> "mark", d |-> %d, to |-> "%s"]`, g.disk(k[0]), marks(k[1])))
 	}
 	for _, f := range changed {
 		g.entries[f] = next[f]
@@ -143,6 +196,31 @@ func (g *gen) planned(item string) {
 	g.plan = append(g.plan, item)
 	g.tables++
 	g.line(`k |-> "plan"`)
+}
+
+func leavingOf(e *entry) uint64 {
+	for _, m := range e.members {
+		if m.leaving {
+			return m.disk
+		}
+	}
+	return 0
+}
+
+func sortedCopy(a []uint64) []uint64 {
+	a = slices.Clone(a)
+	slices.Sort(a)
+	return a
+}
+
+func differs(a, b []uint64) int {
+	n := 0
+	for i := range a {
+		if a[i] != b[i] {
+			n++
+		}
+	}
+	return n
 }
 
 func sortedPairs(m map[[2]uint64]bool) [][2]uint64 {
@@ -278,13 +356,32 @@ func (g *gen) run(recs []trace.Record) {
 			g.classify(epoch, changed, next)
 			i = end
 		case trace.OutAdopt:
+			g.landOpen(n)
 			g.line(`k |-> "adopt", n |-> %d, e |-> %d`, n, g.epochs[r.Fields[0]])
 		case trace.OutSend:
 			g.line(`k |-> "send", w |-> %d`, g.wid[r.Fields[0]])
 		case trace.OutOrder:
 			g.line(`k |-> "order", n |-> %d, w |-> %d, c |-> %d, v |-> %s`, n, g.wid[r.Fields[0]], g.chunk(r.Fields[1]), ver(r.Fields[2]))
+			cv := [2]uint64{r.Fields[1], r.Fields[2]}
+			g.ownOpen[n] = append(g.ownOpen[n], cv)
+		case trace.OutAccepted:
+			g.memberOpen[n] = append(g.memberOpen[n], [2]uint64{r.Fields[0], r.Fields[1]})
+		case trace.OutMemberFail:
+			g.line(`k |-> "mfail", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(r.Fields[0]), ver(r.Fields[1]))
 		case trace.OutLogged:
-			g.line(`k |-> "logged", d |-> %d, c |-> %d, v |-> %s`, n, g.chunk(r.Fields[0]), ver(r.Fields[1]))
+			g.ownOpen[n] = dropVersion(g.ownOpen[n], r.Fields[0], r.Fields[1])
+			g.memberOpen[n] = dropVersion(g.memberOpen[n], r.Fields[0], r.Fields[1])
+			g.line(`k |-> "logged", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(r.Fields[0]), ver(r.Fields[1]))
+		case trace.OutRecovered:
+			g.line(`k |-> "recovered", n |-> %d, l |-> %d, c |-> %d`, n, g.primary[g.chunkField(r.Fields[0])], g.chunk(r.Fields[0]))
+		case trace.OutReported:
+			g.line(`k |-> "reported", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
+		case trace.OutAsk:
+			g.line(`k |-> "ask", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
+		case trace.OutFormat:
+			g.fmts++
+			g.diskIDs[r.Fields[0]] = uint64(g.nodes + g.fmts)
+			g.line(`k |-> "format", n |-> %d`, n)
 		case trace.OutCommitted:
 			g.line(`k |-> "committed", c |-> %d, v |-> %s`, g.chunk(r.Fields[0]), ver(r.Fields[1]))
 		case trace.OutReply:
@@ -306,11 +403,12 @@ func (g *gen) run(recs []trace.Record) {
 			}
 			g.decide(n, r, kept)
 		case trace.OutPersisted:
-			g.line(`k |-> "persisted", d |-> %d, p |-> %d, iv |-> %d`, r.Fields[2], g.pg(r.Fields[0]), r.Fields[1])
+			g.line(`k |-> "persisted", d |-> %d, p |-> %d, iv |-> %d`, g.disk(r.Fields[2]), g.pg(r.Fields[0]), r.Fields[1])
 		case trace.OutActivate:
+			g.primary[r.Fields[0]] = n
 			g.line(`k |-> "activate", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
-		case trace.EvCrash, trace.EvRestart, trace.EvDrop, trace.EvPause, trace.EvResume:
-			fatal("line kind %v has no mapping yet", r.Name)
+		case trace.EvCrash:
+			g.crash(n)
 		}
 	}
 }
@@ -324,7 +422,7 @@ func (g *gen) decide(n int, r *trace.Record, kept []string) {
 	slices.Sort(ds)
 	var rep, j []string
 	for _, d := range ds {
-		j = append(j, strconv.FormatUint(d, 10))
+		j = append(j, strconv.FormatUint(g.disk(d), 10))
 		x := got[d]
 		for _, h := range g.chunks {
 			cv, ok := x.chunks[h]
@@ -335,7 +433,7 @@ func (g *gen) decide(n int, r *trace.Record, kept []string) {
 			if cv[2] != 0 {
 				list = ver(cv[2] - 1)
 			}
-			rep = append(rep, fmt.Sprintf("[d |-> %d, c |-> %d, whole |-> %s, list |-> %s, decided |-> %d]", d, g.chunk(h), ver(cv[0]), list, x.decided))
+			rep = append(rep, fmt.Sprintf("[d |-> %d, c |-> %d, whole |-> %s, list |-> %s, decided |-> %d]", g.disk(d), g.chunk(h), ver(cv[0]), list, x.decided))
 		}
 	}
 	g.line(`k |-> "peer", n |-> %d, p |-> %d, iv |-> %d, j |-> {%s}, kept |-> <<%s>>, rep |-> {%s}`,
@@ -394,7 +492,8 @@ func main() {
 	if flag.NArg() != 1 {
 		fatal("usage: tracedata [-module name] run.trace")
 	}
-	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{}}
+	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{},
+		diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{}}
 	recs := g.load(flag.Arg(0))
 	if len(recs) == 0 {
 		fatal("no table in the trace")

@@ -51,6 +51,12 @@ var everyName = []string{
 	"1000255 2 output pass=81 Kept chunk=9 kept=4294967297",
 	"1000255 2 output pass=81 Persisted pg=1 interval=2 disk=2",
 	"1000255 2 output pass=81 Activate pg=1 interval=2",
+	"1000255 2 output pass=81 Recovered chunk=9 version=4294967297",
+	"1000255 2 output pass=81 Reported pg=1 interval=2",
+	"1000255 2 output pass=81 Ask pg=1 interval=2",
+	"1000255 2 output pass=81 Format disk=5",
+	"1000255 2 output pass=81 Accepted chunk=9 version=4294967297",
+	"1000255 2 output pass=81 MemberFail chunk=9 version=4294967297",
 }
 
 const scenarioExample = `1000250 2 syscall pass=81 epoll_wait ready=3

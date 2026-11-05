@@ -204,6 +204,9 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 				}
 				if c.reformat[d] && c.onFormat != nil {
 					c.ids[d] = c.onFormat(d)
+					if c.conforming {
+						n.Output(c.loops[d], trace.Record{Name: trace.OutFormat, Fields: [trace.MaxFields]uint64{uint64(c.ids[d])}})
+					}
 				}
 				c.reformat[d] = false
 				st.plant = c.storePlants
@@ -247,7 +250,7 @@ func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Ac
 	c.asks = append(c.asks, out.Asks...)
 	c.activations = append(c.activations, out.Activations...)
 	c.recovered = append(c.recovered, out.Recovered...)
-	for i := range out.Trace {
+	for i := 0; c.conforming && i < len(out.Trace); i++ {
 		c.s.Node(uint32(d)).Output(c.loops[d], out.Trace[i])
 	}
 	c.passes[d] = append(c.passes[d], slices.Clone(out.Actions))

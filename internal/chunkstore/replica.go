@@ -620,6 +620,7 @@ func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out
 		return ErrUnresolved
 	}
 	r.leads[i].active, r.leads[i].serving, r.leads[i].peer = true, true, nil
+	out.note(trace.OutActivate, pgField(pg), uint64(interval), 0, 0, 0)
 	held := r.leads[i].held
 	r.leads[i].held = nil
 	was := r.replaying
@@ -953,6 +954,7 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	}
 	if refuse {
 		if e != nil && u.PG.Interval == e.Interval {
+			out.note(trace.OutMemberFail, u.Chunk.Hash(), u.Version, 0, 0, 0)
 			r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
 		}
 		freeBuf(ctx, ev.Msg.Buf)
@@ -960,6 +962,9 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		rp.Kind, rp.Fill = KindAck, r.fill(ctx)
 		r.answer(ctx, ev.Peer, u.ID, &rp, core.NoBuf, out)
 		return
+	}
+	if !recover {
+		out.note(trace.OutAccepted, u.Chunk.Hash(), u.Version, 0, 0, 0)
 	}
 	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk, version: u.Version, recover: recover})
 	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, Epoch: u.Snapshot, Version: u.Version}
@@ -1368,8 +1373,11 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		if resp.Status != StatusOK {
 			ref := r.refusal(q.pg)
 			resp.Version, resp.Epoch, resp.Interval = 0, ref.Epoch, ref.Interval
+			out.note(trace.OutMemberFail, q.chunk.Hash(), q.version, 0, 0, 0)
 			r.noteFailed(failedVer{pg: q.pg, chunk: q.chunk, version: q.version})
-		} else if !q.recover {
+		} else if q.recover {
+			out.note(trace.OutRecovered, q.chunk.Hash(), rp.Version, 0, 0, 0)
+		} else {
 			out.note(trace.OutLogged, q.chunk.Hash(), rp.Version, 0, 0, 0)
 		}
 		r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
@@ -1429,6 +1437,7 @@ func (r *Replica) ask(out *ReplicaOutput) {
 			continue
 		}
 		l.asked = true
+		out.note(trace.OutAsk, pgField(l.pg), uint64(l.interval), 0, 0, 0)
 		out.Asks = append(out.Asks, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
 	}
 }

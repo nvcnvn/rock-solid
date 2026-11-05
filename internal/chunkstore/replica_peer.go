@@ -460,7 +460,6 @@ func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 	if i = r.lead(pg); i < 0 || !r.leads[i].active {
 		return
 	}
-	out.note(trace.OutActivate, pgField(pg), uint64(k), 0, 0, 0)
 	out.Activations = append(out.Activations, PGFields{Epoch: r.table.Epoch, PG: pg, Interval: k})
 }
 

@@ -35,7 +35,7 @@ for f in "$@"; do
 		failed=1
 		continue
 	fi
-	total=$(grep -c '^  \[k |->' "$dir/trace_data.tla" || true)
+	total=$(sed -n '/^Trace == <</,$p' "$dir/trace_data.tla" | grep -c '^  \[k |->' || true)
 	start=$SECONDS
 	(cd "$dir" && java -Xmx"${HEAP:-2g}" -XX:+UseSerialGC -cp "$jar" tlc2.TLC -workers 1 -config trace_epoch.cfg trace_epoch.tla) >"$dir/out" 2>&1 || true
 	secs=$((SECONDS - start))
@@ -45,7 +45,7 @@ for f in "$@"; do
 		depth=$(sed -n 's/.*depth of the complete state graph search is \([0-9]*\).*/\1/p' "$dir/out")
 		echo "FAIL $name: no step for line ${depth:-?} of $total, ${secs}s"
 		if [ -n "$depth" ]; then
-			grep '^  \[k |->' "$dir/trace_data.tla" | sed -n "${depth}p"
+			sed -n '/^Trace == <</,$p' "$dir/trace_data.tla" | sed -n "$((depth + 1))p"
 		else
 			tail -20 "$dir/out"
 		fi

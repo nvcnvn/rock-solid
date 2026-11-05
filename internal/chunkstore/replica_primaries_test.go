@@ -586,6 +586,7 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	var empty Table
 	tbl, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	c := newRClusterWith(t, tbl, s, func(cfg *Config) { cfg.Log.MaxRecordBytes = 3 * core.BlockSize })
+	c.conformBegin()
 	r := &primaryRun{c: c, a: a, rng: core.NewRand(seed ^ 0x9e3), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)}, ops: map[core.RequestID]faultOp{},
 		version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, tainted: map[uint32]bool{},
 		sent: map[[2]uint64]Update{}, acked: map[blockVersion][]byte{}, errs: map[string]error{}}
@@ -654,6 +655,7 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	r.check()
 	r.readEach(x)
 	r.ended = true
+	conformWrite(t, fmt.Sprintf("primaries-%d", seed), c)
 	if err := c.inv.Check(); err != nil {
 		return err
 	}

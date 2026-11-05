@@ -3982,6 +3982,68 @@ Not to be confused with the POSIX conformance suites of [Testing strategy](desig
 - The check states the seeds it ran and the time per trace, and which spec actions and rules each
   run covered, so a claim of conformance says what it rests on.
 
+### The epoch model's check
+
+`scripts/conform.sh` runs `TestConform*`, or the test `RUN` names, with `CONFORM_DIR` set, so each
+run keeps its trace, and `tools/tracedata` writes each trace into a data module: the run's constants,
+its membership plan and one line per protocol step. `models/epoch/trace_epoch.tla`, with `epoch.tla`
+unchanged by it, has TLC 1.7.4 on one worker take each line by the action it names, compare what the
+record saw with the state that action leaves, and pass by reaching the end; `KEEP=dir` keeps the
+traces and data. A failure names the line no state could take. Each trace starts at the first
+`Table` record, which is the spec's `Init`, so interval 1's bootstrap peering is out of scope.
+
+| Records | Spec action | Compression |
+| --- | --- | --- |
+| `Table`, `PGEntry`, `Member` | `Membership` or `Reactive` | `tracedata` splits a table's fold from its membership change, and one edit plus marks is one `Edit` |
+| `Adopt` | `Adopt` | A repeat of the table held after a restart is a stutter |
+| `Send` | `Send` | A send the spec has disabled is a stutter, so ordering it later fails |
+| `Order` | `Order` | Logs on the primary and sends to members in one step |
+| `Accepted`, `Logged` | `Deliver` | A store's in-flight version may land before an `Adopt` or crash (`maydeliver`), and `Logged` is then a stutter |
+| `Committed` | `Ack`, inside `Deliver` | A stutter guarded on `ackd` |
+| `PeerReply`, `PeerChunk`, `Decide`, `Kept` | `Peer` | `askPeers`, `peerAsked`, `answerPeers`, `mayPeer`, `peerReplied` and `decide`, with each reply compared to the spec's `Reply` at the decision |
+| `Persisted` | `Peer` or `Activate` | `persistLists`, `persist`, `persisted`, `persistAck`, `persistAcked`: a stutter, refused once the interval activated |
+| `Activate` | `Activate` | `tryActivate` |
+| `Crash` | `Restart` | Own records not reported durable may be lost (`mayfail`, by `OwnFail`) |
+| `Format` | `Format` | |
+| `Recovered`, `Reported`, `Ask`, `MemberFail` | `Recover`, `ReportRecovered`, `AskNext` or `CounterOut`, `MemberFail` | Mapped, not yet proven by a passing trace that reaches them |
+
+The record kinds of the event loop, such as `NetRecv` and `DiskDone`, have no spec action: they are
+the machine's steps below the protocol's, and the records above say what those steps did.
+
+Results at this commit, seeds 0 to 9 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`, the
+sample `seeds.Run` gives that test by default:
+
+| Trace | Lines | Result | Seconds |
+| --- | --- | --- | --- |
+| `scripted-clean` | 12 | passes | 1 |
+| `scripted-primary-change` | 33 | passes | 1 |
+| `primaries-6` | 291 | passes, across a restart | 3 |
+| `primaries-1` | 513 | passes, across a restart | 147 |
+| `primaries-3`, `-4`, `-5`, `-9` | 549 to 789 | stop at `Order`, discrepancy 6 | 1 to 12 |
+| `primaries-2`, `-8` | 499 to 592 | stop at `MemberFail`, discrepancy 7 | 1 |
+| `primaries-0` | 638 | stops at the run's last table, discrepancy 8 | 10 |
+| `primaries-7` | 664 | stops at `Peer`, discrepancy 9 | 1 |
+
+Failed lines take a second or two to reach, and a passing run's time follows how many crash branches
+stay alive, not its length, so a commit could check about 40 traces a minute but for a run like
+`primaries-1`. Not yet run: `TestReplicatedWritesSurviveFaults`, any plant of the rule map (traces can
+fail), and the lease half. Unreached by any passing trace, as no run got that far: `Recover`, `Remove`,
+`Add`, `Replace`, `ReportRecovered`, `MemberFail`, `OwnFail` on a seed that needed it, `Fold` of a move,
+and with leases out of scope `OpenGrant`, `OpenLapse` and every action of `LeaseSteps`; `Tick`, `Die`,
+`Refuse`, `Reboot`, `Persist`, Raft's actions and the fault actions of `Choices` have no mapping.
+
+| # | What | Class | How settled |
+| --- | --- | --- | --- |
+| 1 | The spec's `Init` starts interval 1 activated; the code peers in it | compression | The trace starts after bootstrap |
+| 2 | One table can reorder a PG's members and carry a mark, one interval, which `Rotate` and `MarkDisk` make two | spec | `Edit` added to `epoch.tla`, reachable only by a plan that names it |
+| 3 | `Activate`'s record came after the held writes it released were ordered | logging | The record moved to where the lead goes active |
+| 4 | A member takes a version into its store, then adopts a table, then logs it, while `Deliver` needs the interval | compression | `Accepted` opens the version, `maydeliver` lets it land before `Adopt` |
+| 5 | A crash loses a version from the primary's own log that `Order` had logged | compression | `mayfail` before `Restart`, by `OwnFail`; a version every member logged is not in `pend`, so a run needing that would fail |
+| 6 | A primary that dropped its own version lists the chunk from this peering yet merges on the kept image, as `lacks` allows, where `Order` waits for `miss[own][c] = NoMiss` and merges on `Newest(dlog)`, the dropped version | spec, open | Needs a patch telling a gated, dropped version from a mapped one, with a negative beside `neg-merge-before-kept` |
+| 7 | A member refuses a version of its interval in a case `MemberFail` does not take; the code refuses a version it may hold after a restart, and `MemberFail` needs it unlogged | undiagnosed, open | Next to read |
+| 8 | The test's last table asks a renewal with no primary asking, which `Reactive` needs | logging, open | End the trace before that table, or count it |
+| 9 | One reply or kept version differs from the spec's at seed 7's first `Peer` | undiagnosed, open | Next to read |
+
 ## Models in CI
 
 The runs of [TLA+ and TLC](#tla-and-tlc), scheduled by the `models` workflow in
