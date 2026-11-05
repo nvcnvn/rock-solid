@@ -190,6 +190,24 @@ func TestReplayOnABaseDropsATailReplacedBelowIt(t *testing.T) {
 	}
 }
 
+// A Ready that moves only the commit index reaches no disk, so a replica can apply and compact past
+// the commit index of its last durable round.
+func TestAReplicaRestartsOnABaseAboveItsDurableCommit(t *testing.T) {
+	st := NewStorage()
+	cs := raftpb.ConfState{Voters: []uint64{1, 2, 3}}
+	if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 10, Term: 1, ConfState: cs}}); err != nil {
+		t.Fatal(err)
+	}
+	replay(t, st, &Round{Entries: ents(1, 5, 8, 10), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 8}}, 1<<20)
+	s, err := New(testConfig(3, 0, st, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Applied(); got != 10 {
+		t.Fatalf("applied %d on a base of 10", got)
+	}
+}
+
 // A round larger than a blob goes out as several, and only its last, of kind BlobRaftState,
 // applies it: a round torn before its last blob changes nothing, nor does one missing its first.
 func TestARoundSpansBlobsAndATornOneChangesNothing(t *testing.T) {
