@@ -3995,7 +3995,10 @@ run keeps its trace, and `tools/tracedata` writes each trace into a data module:
 its membership plan and one line per protocol step. `models/epoch/trace_epoch.tla`, with `epoch.tla`
 unchanged by it, has TLC 1.7.4 on one worker take each line by the action it names, compare what the
 record saw with the state that action leaves, and pass by reaching the end with the safety invariants
-intact; `KEEP=dir` keeps the traces and data. A failure names the line no state could take, or the
+intact; `KEEP=dir` keeps the traces and data. Each trace is its own TLC process with its own directory, heap
+and temporary directory, and `JOBS=n` runs that many at once, with no effect on a verdict: the lines print in
+order once all are done. On the M4 Pro use at most 6, so 12 GB of heap, or 4 beside anything busy, and nothing
+heavy beside it. A failure names the line no state could take, or the
 invariant a line broke; a run out of time or heap prints `no verdict`, which is neither. Each trace
 starts at the first `Table` record, which is the spec's `Init`, so interval 1's bootstrap peering is
 out of scope. A trace with no line but tables gives no data, so it cannot pass.
@@ -4088,7 +4091,8 @@ and TLC does not report which branch a line took, so `Recover`, `ReportRecovered
 the primary-change run with every invariant checked. On a seed whose unplanted trace passes it
 compares the planted trace's lines with the baseline's. Fired means only that those lines differ, not
 that the rule was reached: a plant can move timing alone. The same lines are no evidence. Otherwise TLC
-checks the trace. `FIRST` and `COUNT` choose the seeds and `PLANTS` the plants. A run stops at its first
+checks the trace. `FIRST` and `COUNT` choose the seeds, `PLANTS` the plants and `JOBS` the checks at once, the
+seeds' baselines first and then the planted traces of those that pass. A run stops at its first
 broken invariant, keeping the trace up to there and saying which broke in a `.stop` file.
 `CONFORM_RUNON=1` runs on past the break, needed when the invariant sees a step before its record:
 `sameMembers` and `keepID` pass every trace cut at the break. Over all 40 seeds run-on passes Go's

@@ -6,8 +6,9 @@ epoch model's check" and "Traces can fail in the epoch model's check". The check
 Run:
 - `KEEP=/some/dir RUN=TestPeeringKeepsAcknowledgedWritesAcrossPrimaries FIRST=0 COUNT=40 scripts/conform.sh`,
   or kept `.trace` files as arguments. A failure prints the line with no step, or the invariant a line
-  broke. `no verdict` is neither, and is not kept. The 40 seeds now take about 25 minutes.
-- `KEEP=/some/dir FIRST=6 COUNT=1 scripts/conform.sh plants` for traces can fail, one seed at a time;
+  broke. `no verdict` is neither, and is not kept. `JOBS=6` at most, `JOBS=4` beside anything busy, and
+  nothing heavy beside it. The 40 seeds take about 25 minutes on `JOBS=1`.
+- `KEEP=/some/dir FIRST=6 COUNT=1 scripts/conform.sh plants` for traces can fail;
   `PLANTS="a b"` picks plants. `CONFORM_RUNON=1` runs on past a broken invariant: run it one seed at a time.
 - To see why a line fails, add `PrintT(ToString(...))` in a disjunct of `Line`, in a copy of
   `trace_epoch.tla` in the check's directory, and filter TLC's output for it.
