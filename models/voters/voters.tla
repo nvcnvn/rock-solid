@@ -23,7 +23,8 @@
 \*   C3 Restart folds a crash and the restart. A node that stays down is one
 \*      whose events do not happen.
 \*   C4 A heartbeat and its answer are an empty append and its answer, sent
-\*      when the commit index moved, so a run has no idle cycle of them.
+\*      when the commit index moved, and Reprobe when a follower is left behind
+\*      with nothing in flight, so a run has no idle cycle of them.
 \*   C5 Compact folds the memtable flush, Shard.Applied and Host.Compact.
 \*   C6 A conf entry carries the configuration it produces, not the changes:
 \*      the leader proposes one change at a time on the applied configuration,
@@ -32,6 +33,9 @@
 \*      is called inside done.
 \*   C8 A vote refused carries no answer, and a replica told of a later term
 \*      by a vote answer takes it in RecvHigher.
+\*   C9 StateSnapshot ends at the snapshot's answer, not at the heartbeat
+\*      Shard.reportSnapshots waits or EvPeerLost: with no clock, the wait is the
+\*      snapshot arriving, and a lost one is Reprobe.
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
 
@@ -102,7 +106,7 @@ HasConf(log, lo, hi) == \E i \in lo..hi : log[i].k = "c"
 Fresh(log, cm, base, term, run) ==
     [term |-> term, vote |-> 0, role |-> "F", lead |-> 0, log |-> log, commit |-> cm,
      votes |-> {}, next |-> NoIndex, match |-> NoIndex, sent |-> NoIndex, xfer |-> 0, pci |-> 0,
-     psnap |-> NoSnap,
+     psnap |-> NoSnap, paused |-> {},
      rconf |-> base.c, seen |-> cm, pend |-> {}, round |-> NoRound,
      stable |-> [term |-> term, vote |-> 0, log |-> log, commit |-> cm], base |-> base,
      conf |-> base.c, applied |-> base.i, sm |-> base.i, committed |-> 0, confTerm |-> 0, mark |-> 0,
@@ -118,7 +122,7 @@ BootLog == <<Boot, Entry(1, "n", 0, NoConf)>>
 Init ==
     LET voter == [Fresh(BootLog, 2, BootBase, 1, 1) EXCEPT
                     !.vote = 1, !.lead = 1, !.stable.vote = 1, !.applied = 2, !.sm = 2,
-                    !.committed = 1]
+                    !.committed = 1, !.mark = 2]
     IN
     /\ rep = [r \in Replica |->
                 IF r = 1 THEN [voter EXCEPT !.role = "L",
@@ -145,7 +149,7 @@ Init ==
 Adopt(s, t, l) ==
     [s EXCEPT !.term = IF t > @ THEN t ELSE @, !.vote = IF t > s.term THEN 0 ELSE @,
               !.role = "F", !.lead = l, !.votes = {}, !.next = NoIndex, !.match = NoIndex,
-              !.sent = NoIndex, !.xfer = 0]
+              !.sent = NoIndex, !.xfer = 0, !.paused = {}]
 
 \* raft.maybeCommit
 MaybeCommit(s) ==
@@ -157,12 +161,12 @@ MaybeCommit(s) ==
 CanCampaign(s, r) ==
     /\ r \in Voters(s.rconf)
     /\ s.psnap = NoSnap
-    /\ Bug("CampaignUnapplied") \/ ~HasConf(s.log, s.applied + 1, s.commit)
+    /\ ~HasConf(s.log, s.applied + 1, s.commit)
 
 \* raft.campaign
 Campaign1(s, r, x) ==
     [s EXCEPT !.term = @ + 1, !.vote = r, !.role = "C", !.lead = 0, !.votes = {r},
-              !.next = NoIndex, !.match = NoIndex, !.sent = NoIndex, !.xfer = 0,
+              !.next = NoIndex, !.match = NoIndex, !.sent = NoIndex, !.xfer = 0, !.paused = {},
               !.pend = @ \cup {[y |-> "vote", f |-> r, o |-> p, t |-> s.term + 1, x |-> x,
                                 li |-> Len(s.log), lt |-> LastTerm(s.log)] : p \in Voters(s.rconf) \ {r}}]
 
@@ -266,10 +270,11 @@ Caught(s, l, p) == p # l /\ p \in s.conf.v /\ s.next[p] > s.base.i /\ s.match[p]
 \* raft.becomeLeader's and raft.bcastAppend's sends: Shard.ready sends every
 \* peer its append or snapshot in the Ready that needs it. next moves on at once,
 \* as a follower in StateReplicate has it, and an empty append tells a new commit
-\* index (C4). A halted leader's snapshot has no data and a follower refuses it,
-\* so none is sent.
+\* index (C4). A peer sent a snapshot is paused until its answer, which folds the
+\* heartbeat Shard.reportSnapshots waits (C9). A halted leader's snapshot has no
+\* data and a follower refuses it, so none is sent.
 Sends(s, r) ==
-    {p \in IF s.role = "L" THEN Members(s.rconf) \ {r} ELSE {} :
+    {p \in IF s.role = "L" THEN Members(s.rconf) \ ({r} \cup s.paused) ELSE {} :
         IF s.next[p] > s.base.i THEN s.next[p] <= Len(s.log) \/ s.sent[p] < s.commit
         ELSE s.halt = 0}
 
@@ -289,7 +294,8 @@ AfterSends(s, ps) ==
     [s EXCEPT !.next = [p \in Replica |->
                  IF p \notin ps THEN @[p]
                  ELSE IF s.next[p] > s.base.i THEN Len(s.log) + 1 ELSE SnapMeta(s).i + 1],
-              !.sent = [p \in Replica |-> IF p \in ps THEN s.commit ELSE @[p]]]
+              !.sent = [p \in Replica |-> IF p \in ps THEN s.commit ELSE @[p]],
+              !.paused = @ \cup {p \in ps : s.next[p] <= s.base.i}]
 
 MustSync(s) ==
     s.term # s.stable.term \/ s.vote # s.stable.vote \/ s.log # s.stable.log \/ s.psnap # NoSnap
@@ -417,16 +423,20 @@ Propose(l, v) ==
     /\ Emit(l, [s EXCEPT !.log = @ \o <<Entry(s.term, "n", v, NoConf)>>], {}, {}, {})
     /\ UNCHANGED <<grant, hold, elected, cmt, lagged, crashes>>
 
-\* A leader sends again from the follower's match once an append or its answer
-\* was lost: raft.ReportUnreachable and the probe after it.
+\* A heartbeat's answer finds a follower behind, or EvPeerLost a snapshot lost:
+\* raft.ReportUnreachable and stepLeader's sendAppend on MsgHeartbeatResp send
+\* again from its match. With nothing between the two a heartbeat is what is
+\* left (C4), and only then is one needed.
 Reprobe(l, p) ==
     LET s == rep[l] IN
-    /\ On("lose")
+    /\ \/ On("lose")
+       \/ /\ ~\E m \in msgs : (m.f = l /\ m.o = p /\ m.y \in {"app", "snap"}) \/ (m.f = p /\ m.o = l /\ m.y = "appR")
+          /\ rep[p].round = NoRound
     /\ ~s.removed
     /\ s.role = "L"
     /\ p \in Members(s.rconf) \ {l}
-    /\ s.next[p] > s.match[p] + 1
-    /\ Emit(l, [s EXCEPT !.next[p] = s.match[p] + 1, !.sent[p] = 0], {}, {}, {})
+    /\ s.next[p] > s.match[p] + 1 \/ p \in s.paused
+    /\ Emit(l, [s EXCEPT !.next[p] = s.match[p] + 1, !.sent[p] = 0, !.paused = @ \ {p}], {}, {}, {})
     /\ UNCHANGED <<grant, hold, elected, cmt, lagged, crashes>>
 
 \* raft.Step of MsgApp: raft.handleAppendEntries. A replica of a later term
@@ -491,7 +501,8 @@ RecvAppResp(l, m) ==
         lo == IF s.next[p] - 1 < m.i + 1 THEN s.next[p] - 1 ELSE m.i + 1
         n == IF m.ok
              THEN MaybeCommit([s EXCEPT !.match[p] = IF m.i > @ THEN m.i ELSE @,
-                                        !.next[p] = IF m.i + 1 > @ THEN m.i + 1 ELSE @])
+                                        !.next[p] = IF m.i + 1 > @ THEN m.i + 1 ELSE @,
+                                        !.paused = @ \ {p}])
              ELSE [s EXCEPT !.next[p] = IF lo > s.match[p] + 1 THEN lo ELSE s.match[p] + 1]
     IN
     /\ m.y = "appR"
@@ -711,6 +722,7 @@ RecvFortified(l, m) ==
 \* only a leader takes one.
 Grant(g, h) ==
     LET ep == IF grant[g][h].live THEN grant[g][h].ep ELSE grant[g][h].ep + 1 IN
+    /\ On("grant")
     /\ g # h
     /\ rep[h].role = "L"
     /\ ~rep[g].removed /\ ~rep[h].removed
@@ -812,7 +824,7 @@ Protocol ==
     \/ \E r \in Replica :
          \/ Tick(r) \/ Durable(r) \/ Mark(r) \/ Reconcile(r) \/ AutoLeave(r)
          \/ SendTimeoutNow(r) \/ EndWait(r) \/ Fortify(r)
-    \/ \E l, p \in Replica : Transfer(l, p) \/ Grant(p, l)
+    \/ \E l, p \in Replica : Transfer(l, p) \/ Grant(p, l) \/ Reprobe(l, p)
 
 Next ==
     \/ Protocol
@@ -821,7 +833,7 @@ Next ==
          \/ Campaign(r) \/ Restart(r) \/ Compact(r) \/ AbortTransfer(r) \/ AskMember(r)
          \/ \E v \in Values : Propose(r, v)
     \/ \E l, p \in Replica :
-         \/ HandOff(l, p) \/ Expire(l, p) \/ Lapse(l, p) \/ Reprobe(l, p)
+         \/ HandOff(l, p) \/ Expire(l, p) \/ Lapse(l, p)
 
 Spec == Init /\ [][Next]_vars
 
@@ -831,6 +843,29 @@ Bounds ==
     /\ crashes <= MaxCrash
     /\ \A r \in Replica : rep[r].term <= MaxTerm
     /\ \A g, h \in Replica : grant[g][h].ep <= MaxEpoch
+
+\* A negative's search kept on the way to its counterexample. A constraint only
+\* removes behaviours, so what it finds is a run of the spec; no configuration
+\* that must pass uses one.
+
+\* 3 holds nothing past the boot log and 2 holds the joint entry unapplied. 2
+\* waits to campaign until 1 reads in the joint configuration on 4 alone: neither
+\* supports 1, and 1 does no lease work before it is joint and goes no further.
+AimOneHalf ==
+    /\ Len(rep[1].log) <= 4
+    /\ rep[3].term = 1 => Len(rep[3].log) <= 2 /\ \A m \in msgs : m.y = "appR" => m.f # 3
+    /\ rep[2].term = 1 => rep[2].commit <= 3
+    /\ ~hold[2][1].has /\ ~hold[2][3].has
+    /\ rep[2].support.lead # 1 /\ rep[3].support.lead # 1
+    /\ rep[1].conf.o = {} => ~hold[1][4].has /\ \A m \in msgs : m.y # "fort"
+    /\ rep[2].term > 1 => rep[1].conf.o # {} /\ Reads(1)
+
+\* 2 holds nothing past the boot log and only votes. 3 stops at the joint entry,
+\* unapplied, and campaigns once the entry after it committed without them.
+AimOneHalfCommit ==
+    /\ Len(rep[2].log) <= 2
+    /\ Len(rep[3].log) <= 4 /\ rep[3].commit <= 3
+    /\ rep[3].term > 1 => \E c \in cmt : c.i = 5
 
 -----------------------------------------------------------------------------
 \* Properties
@@ -880,24 +915,30 @@ HeldAfterDeletion ==
 \* availability, what keeps the swap from stalling commits on an empty voter.
 PromotedHolds == ~lagged
 
-\* 8. A halted replica applies nothing past its halt, and its log compacts no
-\* further than its state applied.
-HaltStops ==
-    \A r \in Replica : LET s == rep[r] IN
-       s.halt # 0 => s.sm < s.halt /\ s.base.i <= s.sm
+\* 8. A halted replica applies nothing past its halt, and compaction moves its
+\* base no further than its state applied. Only compaction: a snapshot stepped in
+\* the round that halts it is installed after the halt, so the base can pass the
+\* state machine, and a restart then restores that snapshot and runs on.
+HaltStops == \A r \in Replica : rep[r].halt # 0 => rep[r].sm < rep[r].halt
+CompactStops ==
+    [][\A r \in Replica :
+         (rep[r].halt # 0 /\ rep'[r].round = rep[r].round /\ rep'[r].base # rep[r].base)
+            => rep'[r].base.i <= rep[r].sm]_rep
 
 \* 9. A restart's hard state loads.
 Restarts ==
     \A r \in Replica : LET s == rep[r] IN
        ~s.removed => Loads(s.stable.commit, s.base) >= s.base.i
 
-\* 10. A swap completes, and a dropped leader hands off: with no fault, no
-\* campaign and no writes, Protocol has no cycle, so every fair run ends in a
-\* state with no step left, and each such state has a leader on the plan. That
-\* is the time-free assumption, every step eventually taken, without TLC's
-\* fairness, which costs a thousand times the states here.
-SwapCompletes ==
-    \/ ENABLED Protocol
-    \/ \E r \in Replica : rep[r].role = "L" /\ ~rep[r].removed /\ Settled(rep[r])
+\* 10. A swap completes, and a dropped leader hands off. A live configuration
+\* has no fault, no campaign, no write and no CONSTRAINT, so no step is pruned.
+\* Stops says Protocol has no cycle, so a run in which every step is eventually
+\* taken ends; TLC's deadlock check, with Finished the only way to stay put, says
+\* it ends only where SwapDone holds. That is the time-free fairness assumption,
+\* without TLC's ENABLED, which ran at 68 states a minute here.
+SwapDone == \E r \in Replica : rep[r].role = "L" /\ ~rep[r].removed /\ Settled(rep[r])
+Finished == SwapDone /\ UNCHANGED vars
+LiveSpec == Init /\ [][Protocol \/ Finished]_vars
+Stops == <>[][UNCHANGED vars]_vars
 
 =============================================================================

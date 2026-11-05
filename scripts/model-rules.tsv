@@ -110,8 +110,10 @@ voters/neg-boot-at-zero	open	Plants for the voter model's rules
 voters/neg-commit-below-base	open	Plants for the voter model's rules
 voters/neg-compact-past-halt	open	Plants for the voter model's rules
 voters/neg-disloyal	raftshard.disloyal	TestFollowersVotingWhileSupportingBreakTheLeaseInvariant
+voters/neg-double-vote	raftshard.early	TestSendingBeforeTheFlushBreaksTheDurabilityInvariant
 voters/neg-eager	raftshard.eager	TestAnEagerLeaderPromotesALearnerThatHoldsNothing
 voters/neg-early	raftshard.early	TestSendingBeforeTheFlushBreaksTheDurabilityInvariant
+voters/neg-lost-copy	open	Plants for the voter model's rules
 voters/neg-no-first-commit	raftshard.uncommitted	TestLeaseReadsBeforeAnEntryOfTheTermCommitsBreakTheInvariant
 voters/neg-no-guard	open	Plants for the voter model's rules
 voters/neg-no-restart-wait	open	Plants for the voter model's rules
