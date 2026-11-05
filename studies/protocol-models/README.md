@@ -14,6 +14,8 @@ A *TLA+ model* is a short, precise description of a protocol as a state machine:
 
 **Depth and budget.** Each model gets a `ci` configuration that TLC checks exhaustively for safety in under 5 minutes with 4 workers, run whenever `models/` or the TLC pin changes. Each also gets a `deep` configuration with one more node, chunk, crash or term, plus its unbounded liveness properties, checked once per change to it, capped at 4 hours. Each night, TLC's random simulation runs for about an hour per model with a fresh seed. At the throughput measured here (30,000 to 430,000 distinct states a second on 4 workers), 5 minutes covers roughly 10 to 130 million states. That is what MongoDB's two-shard transaction model and CockroachDB's two published models need. A Raft-sized spec needs much more: etcd-raft's, cut down to 3 fixed servers, did not finish in 15 minutes.
 
+**Trace validation.** MongoDB stopped after 10 weeks because of multi-threaded logging, a spec too abstract to match and a low return, not because the technique fails: CCF runs it in CI and it led to bugs other tests missed. rock-solid's sans-IO steps remove the first obstacle but not the second, since `epoch.tla` compresses peering into one action. Pilot it on peering with clocks off ([Trace validation in practice](#trace-validation-in-practice)).
+
 ## What the design says now
 
 - Testing strategy, layer 2: "Design bugs in epoch changes (per-PG intervals, peering, read leases), sessions and fencing, cache-mode recalls, purges, snapshot cuts, cross-shard commit", checked "as etcd-raft checks its own" ([design.md](../../docs/design.md#testing-strategy)). Unlike layers 1, 3, 4, 5 and 7, layer 2 has no paragraph of its own, so the table row is the only place that says what gets modelled.
@@ -43,7 +45,7 @@ What carries over: CockroachDB models two protocols, transaction commit and node
 
 ### etcd-raft: a spec, trace validation, and no CI
 
-`tla/` at v3.6.0 holds `etcdraft.tla` (926 lines), a model-checking wrapper `MCetcdraft.tla` with its configuration, and `Traceetcdraft.tla`, which validates traces logged by the real library (built with `-tags with_tla`) against the spec. The README asks that model checking "run enough time (at least hours, depending on how confident we need) without failure" (`tla/README.md:69`). Its script downloads TLC's nightly build (`validate-model.sh:15`). Its configuration is 3 initial servers out of 4, 2 reconfigurations, terms below 10 and 5 requests (`MCetcdraft.cfg:24-29`). Nothing in `.github/workflows` runs it. PR #113, which added it, reports no bug found ("No. I did not find bug so far") and lists CI integration as future work.
+`tla/` at v3.6.0 holds `etcdraft.tla` (926 lines), a model-checking wrapper `MCetcdraft.tla` with its configuration, and `Traceetcdraft.tla`, which validates traces logged by the real library (built with `-tags with_tla`) against the spec. The README asks that model checking "run enough time (at least hours, depending on how confident we need) without failure" (`tla/README.md:69`). Its script downloads TLC's nightly build (`validate-model.sh:15`). Its configuration is 3 initial servers out of 4, 2 reconfigurations, terms below 10 and 5 requests (`MCetcdraft.cfg:24-29`). Nothing in `.github/workflows` runs it. PR #113, which added it, reports no bug found ("No. I did not find bug so far") and lists CI integration as future work; a maintainer later says in the thread that it reproduced a known etcd issue, #14370. `with_tla` appears only in the two `state_trace` files, and #192, the test that would generate traces with random faults, is an unmerged draft, so the repository holds no test that produces traces.
 
 So etcd-raft is a template for spec style and for trace validation, not for CI practice. rock-solid's "TLA+ and TLC" item already asks for more than the template does: CI runs, stated bounds and negative checks.
 
@@ -68,7 +70,7 @@ Schultz and Demirbas, *Design and Modular Verification of Distributed Transactio
 - "Although we check small models, we still found these to be effective": a detail of prepared-transaction reads missing from an early version of the model gave "a 27-step counterexample leading to a snapshot isolation violation, with just 2 transactions and 2 operations per transaction, in a few minutes".
 - The storage module's state graph (490,360 states) generated 87,143 tests that ran against WiredTiger, and found where the authors' model of the engine was wrong.
 - Their reconfiguration protocol (Schultz et al., OPODIS 2021) took about 8 hours for 345 million distinct states and 19.5 hours for 812 million, on 20 TLC workers. That is the scale of a deep run, not a CI run.
-- Davis et al., *eXtreme Modelling in Practice* (VLDB 2020), checked traces from the MongoDB server against its Raft spec and gave up after 10 weeks of work, while generating tests from a model for Realm Sync worked.
+- Davis et al., *eXtreme Modelling in Practice* (VLDB 2020), tried trace-checking the server against its 345-line `RaftMongo.tla` and stopped after 10 weeks of work, with 6 tests tried and 1 passing, while generating tests from a model for Realm Sync worked ([Trace validation in practice](#trace-validation-in-practice)).
 
 ### Azure Cosmos DB: a model written after the fact
 
@@ -209,6 +211,111 @@ That is a design to write, and the model should be its first precise form, as AW
 
 **Dropping them** from the layer 2 table would leave the two protocols with a coordinator and a commit point unmodelled. That is the class in which every system read here found its subtle bugs: CockroachDB's recovery, MongoDB's prepare, DynamoDB's recovery steps, RBD's interrupted flatten.
 
+## Trace validation in practice
+
+*Trace validation* checks that one recorded run of the code is a behaviour the spec allows. A wrapper spec reads the run's log, enables only the action the current line names, and TLC searches for a path through the spec that matches every line. Failing gives no counterexample: the search stops at the line it cannot match ([CCF](https://arxiv.org/abs/2406.17455), section 6.3). [Unverified](#unverified) lists what was read only in part.
+
+**Verdict.** In CCF, trace validation mostly repaired the spec, and the checker then found the bugs in the repaired spec. MongoDB's failure is real but narrower than "it does not work": a multi-threaded server, a spec written without it in mind, and a TLC that could not take long traces. rock-solid has removed the first, shares the second, and can use the third's fix. So run it as a bounded pilot on the peering half of the epoch model, changed as [below](#what-this-changes-in-the-pilot).
+
+### Who tried it
+
+| | MongoDB server | CCF consensus | CCF consistency | etcd-raft | EWD 998 |
+|---|---|---|---|---|---|
+| Source | [Davis et al.](https://arxiv.org/abs/2006.00915), [Davis's retrospective](https://www.mongodb.com/company/blog/engineering/conformance-checking-at-mongodb-testing-our-code-matches-our-tla-specs) | [Howard et al.](https://arxiv.org/abs/2406.17455) | same | [`tla/`](https://github.com/etcd-io/raft/tree/f35a02212416d045c574e30aa59d4b07c4b8d732/tla), [#113](https://github.com/etcd-io/raft/pull/113) | [Cirstea et al.](https://arxiv.org/abs/2404.16075) |
+| Code | Production C++ server | 63 kLoC C++; custom consensus based on Raft | same | Go library | About 500 lines, written with the spec |
+| Spec | `RaftMongo.tla`, 345 lines, written long after the code | 1,134 lines, 13 variables, reverse engineered | 375 lines, written with the implementation in mind | `etcdraft.tla`, 926 lines | From the TLA+ examples |
+| Mapping | `Trace.tla` generated by 484 lines of Python | 369-line trace spec | 111-line trace spec | `Traceetcdraft.tla`, 478 lines | Not stated |
+| Capture | 570 lines of C++ logging four state variables at each transition | 15 log statements at message and role changes, logging sizes, not contents | None: REST API calls | `state_trace.go`, 339 lines, about 12 call sites, under build tag `with_tla` | Ad hoc |
+| Trace source | 423 JS tests and `rollback_fuzzer`; 120 tests failed with tracing on | 13 scenario tests of a deterministic driver; about 15 traces at first | Functional tests | `example.ndjson`; the random-fault test [#192](https://github.com/etcd-io/raft/pull/192) is an unmerged draft | Not stated |
+| Order | One machine; sleep until the millisecond changes, then log | Driver's single global clock | One client's view | One machine, one file | Not stated |
+| Non-atomic steps | Avoiding the behaviour, changing the spec, or post-processing | Action composition, stuttering, composed `IsFault` for unlogged loss | Action rebuilding other clients' transactions | Hand-written mapping per log line | Log one side; composition, later a new log line |
+| Time per trace | Fine for hundreds of events, "impractically slow" for thousands; no figure | Not stated | Under 1 s with DFS, about an hour with BFS | "A few minutes" for 3,000 lines, then non-linear | Not stated |
+| Effort | 10 weeks, two engineers: 4 tracing, 3 spec, 3 script | About 1 day for logging; about 2 engineer-months over 4 months for the trace spec, TLC work, diagnosis and modelling patterns | About 1 engineer-week, by CCF engineers | Not stated | Not stated |
+| In CI | No | Yes | Not stated separately | No | Not stated |
+| Outcome | Stopped | Kept, called a "turning point" | Kept | Merged; follow-ups stalled | Thousands of traces pass |
+
+Whether MongoDB's 10 weeks are calendar or per-person weeks is not stated; the paper's table adds its tasks to 10.
+
+### What each found
+
+- **MongoDB: no new bug.** Trace-checking reached 5 handwritten tests and 1 randomized one. One handwritten test passed; four failed on two discrepancies. `rollback_fuzzer` failed on a *known* violation, initial-syncing nodes counted in the quorum, 4 steps into 2,683. Cirstea et al. call this "discovering a non-trivial implementation bug", but Davis et al. say it reproduced a known one. Davis's retrospective says the traces "never matched"; the paper's one pass is the exact figure.
+- **The stated reasons MongoDB stopped.** About a month went on logging a consistent snapshot under its locks. Then 252 of the spec's 345 lines changed, and its simplifications were worked around one by one. TLC was slow past hundreds of events. Above all, the utility was low and a second spec looked nearly as costly as the first.
+- **CCF: six bugs of design and implementation, five safety and one liveness, fixed before they affected any end user.** That is narrower than safe: the quorum tally bug was in CCF while operators ran it, and one incorrect fix avoided an incident by chance. By tool (attribution is inference from its section 7):
+  - Quorum tally: 48 hours of model checking on 128 cores, no trace validation.
+  - Commit advance for previous term: found while assessing alignment. The first fix's flaw surfaced in simulation after trace validation forced a spec change.
+  - Commit advance on AE-NACK: trace validation found a divergence from the spec; a one-line spec change then let simulation find a 34-state counterexample.
+  - Truncation from early AE: trace validation on existing tests whose own assertions were too weak to see it. Inaccurate AE-ACK came from the same investigation.
+  - Premature retirement: simulation, after the spec was widened to match the code.
+- **etcd-raft: no implementation bug reported in what was read.** "No. I did not find bug so far" (#113), and "So far I did not find any counter example, which is expected" ([#111](https://github.com/etcd-io/raft/issues/111)). In #113 a commenter points to a repro of etcd [#14370](https://github.com/etcd-io/etcd/issues/14370), already reported: a commit on the author's fork that rewrites `etcdraft.tla`, so model checking of a changed spec, not trace validation of the code. #111 is still open and #192 needs a rebase.
+- **Cirstea et al.: discrepancies in every case, few counted.** EWD 998 gave one implementation error and one flawed ad-hoc fix. The key-value store gave one discrepancy. The two-phase commit bug is a hypothetical in the text ("Assume for example"), and the two Raft implementations have no counts.
+
+### Failures and other approaches
+
+- **Abandonments found:** MongoDB's; CCF's own consensus fuzzer, dropped because it "failed to generate interesting behaviors"; etcd-raft's stalled follow-ups. Nothing else turned up, and published work leans toward success, so the absence shows little.
+- **Model-to-code replay** runs the other way and needs control of the code. [Multi-grained specs](https://arxiv.org/abs/2409.14301) found 6 ZooKeeper bugs, with the extra specs and mapping done within 40 person-hours by one person who knew the code; ZooKeeper's official system spec "cannot finish in ten days" in TLC. Search results give [Mocket](https://gaoyu-cn.github.io/paper/2023-eurosys-mocket.pdf) 7 bugs, 3 new and 4 known, and [SandTable](https://marshtompsxd.github.io/pub/sandtable.pdf) 23 bugs, 18 new, across eight systems.
+- **Another spec language:** AWS's [PObserve](https://cacm.acm.org/practice/systems-correctness-practices-at-amazon-web-services) checks structured logs against P specs, in testing and production.
+- **Agents writing the mapping:** the [Specula](https://arxiv.org/abs/2607.25333) preprint reports automating instrumentation and repairing models that fail validation, with 249 bugs across 48 systems.
+- **Seeded simulator plus TLA+ trace validation:** no published case was found. CCF's deterministic scenario driver is the closest, and it runs hand-written scenarios, not random seeds.
+
+### Does being early differ?
+
+"They were mature and we are early" is the wrong line to draw. Maturity is not what separates the results.
+
+- **Yield followed the custom protocol, not age.** etcd-raft, mature and close to stock Raft, reported no implementation bug. CCF's bugs came from its departures from Raft: reconfiguration and optimizations. So rock-solid's peering is the target and its etcd-raft fork is not. Inference, from two systems.
+- **Early helps the mapping.** Davis writes that with the spec first and tracing in mind "this would all have been much easier". The paper finds it "only practical if the specification is written with MBTC in mind". CCF's consistency spec, written that way, took a week against two months for consensus, though it was also smaller and came second. EWD 998 is the one published early-development case, and it found a real bug, at 500 lines.
+- **Early hurts the yield.** CCF's spec and code "reflected different understandings" because different people wrote them. rock-solid's specs came first and the code followed them, so there is less drift to find. Inference: expect fewer discrepancies per trace than CCF saw.
+- **Churn is the unanswered risk.** No source measures upkeep during early development. CCF's 88 commits to the trace spec against 107 spec changes are alignment, not steady state. Here `epoch.tla` has 28 commits in about 10 days and `replica_peer.go` 8 in about 6.
+
+### Is rock-solid's setup simpler?
+
+Half true. Capture is much simpler; the mapping is harder than CCF's.
+
+Easier:
+
+- **Consistent state.** MongoDB lost about a month to locks and to logging before a change became visible. A sans-IO step is atomic by construction.
+- **Order.** `Scheduler.record` appends every node's records to one stream, so there is no clock merge.
+- **Faults.** Drops, crashes, restarts and pauses are recorded (`EvDrop`, `EvCrash`, `EvRestart`, `EvPause`). CCF composed an `IsFault` step at every line because loss was not logged.
+- **Trace source.** Seeded fault runs exist, where CCF had 13 hand-written scenarios.
+- **Tools.** Action composition and DFS exist now; CCF's two engineer-months included building them. Whether the pinned TLC 1.7.4 has them was not checked: etcd-raft's script takes a nightly build.
+
+Harder:
+
+- **Spec size and purpose.** `epoch.tla` is 1,818 lines, 60% larger than CCF's consensus spec, and was written for model checking, which is the condition that hurt MongoDB most.
+- **`Peer` has the shape of `BecomePrimaryByMagic`.** One `Peer` plus one `Activate` stand for 11 functions on the primary and each member over two round trips: `askPeers`, `peerAsked`, `answerPeers` with `mayPeer`, `peerReplied`, `decide`, `persistLists`, `persist`, `persisted`, `persistAck`, `persistAcked` and `tryActivate`. The spec reads every member's log and list at the decision; the code reads each at that member's answer. The comment above `Peer` argues the persist half is safe, and nothing checks it. A trace can: if a reply differs from the spec's state at the decision, the reasoning or the code is wrong. That is the most useful thing the pilot can test, and the likeliest source of false alarms.
+- **Checker devices inside the action.** `CanStall` gives `Peer` a different shape according to the plan's fault budget, which has no counterpart in code. Inference: a trace configuration with an ample budget keeps `CanStall` true. `Peer` then maps to `decide`, with `P` read ahead from the persist lines since the log is known in full, and `Activate` to `tryActivate`. Member-side functions become stuttering steps, so the action need not be rewritten.
+- **Time.** `Tick` fires only when no protocol step is enabled, in units of 10 ms with per-mille rates. Real runs do work while time passes, so a lease trace will not match as written. No system read here validates clocks: CCF's spec assumes nothing about them. The lease half has no precedent.
+- **Trace content.** A `msg` field holds only the type (`MsgPeering`, `MsgPeeringReply`), with no PG, interval, disk or version. Today's trace is event names without arguments, which Cirstea et al. warn "may even lead to erroneous traces being accepted".
+- **Scope.** A run must fit the spec's constants: its plans, a counter packed into `Ver` as `k * 8 + n`, and a node the code splits into loops and disks. `Recover` takes a read with its write and admits sources the code does not, which makes the check weaker there.
+
+### What this changes in the pilot
+
+Start with `epoch.tla` in the shape of `ci-peering`, where `Clocks = FALSE` and `MaxTerm = 0` already switch off leases and Raft. It is the only model with its code clearly in place: recalls have none, purges one wire mention, and sessions were not checked further. Begin with one PG on a clean run, then a restart. `Traceetcdraft.tla` is the template, not the target, since its fork is the part least likely to yield.
+
+Change the plan in three ways:
+
+- **Do not generate a TLA+ module per trace.** MongoDB did, and that route was the one too slow for thousands of events. CCF and etcd-raft keep one hand-written trace spec that reads a log. The generator should write data only.
+- **Add arguments to the records.** Keep `MaxFields`: one record per chunk, as `ActEntry` is one per log entry, and `KindOutput` for decisions and activations. Log sizes and versions, not contents, as CCF did.
+- **Do not filter the log to pass.** That was MongoDB's option 4, and it feared masking bugs. List what is out of scope and fail the rest.
+
+Measure:
+
+- Days to the first passing clean trace, then to one across a restart.
+- Lines of `epoch.tla` changed, and `ci-peering`'s states and time. MongoDB's changes took 42,034 states to 371,368 and 2 seconds to 14 minutes.
+- Each discrepancy classed as code, spec, atomicity or logging, with its diagnosis time.
+- Which `replicaPlants` and `plants` the validator catches on seeds where the simulator's invariants pass. This is the only direct measure of what it adds.
+- Seconds per trace by event count, DFS against BFS.
+- Trace spec edits per commit to `replica_peer.go` or `epoch.tla`.
+
+Stop, and record why, if any of these holds (thresholds are judgement, not sourced):
+
+- After 10 working days, no trace across a restart passes.
+- Passing needs more than half of `Peer`, `Activate` and `Recover` rewritten, or pushes `ci-peering` past its 300 s budget.
+- Passing needs lines filtered or rewritten beyond the listed scope.
+- More than a third of commits to `replica_peer.go` or `epoch.tla` need a trace spec edit.
+- The validator catches no plant on those seeds and finds no divergence, so it adds nothing to the invariants.
+
+Going further needs a second spec, since that estimate is what ended MongoDB's work. If it costs about what the first did, stop at one. If it costs nearer CCF's week, add a nightly job. A pass says only that those runs fit the spec, not that the code is correct.
+
 ## Proposed answer
 
 1. Keep the four phase 2 models. Keep epoch changes as one spec, with two `ci` configurations, one heavy on leases and one on peering, and a combined `deep` one.
@@ -236,7 +343,7 @@ That is a design to write, and the model should be its first precise form, as AW
 - *Two epoch specs with a refinement check between them.* A lease spec would hold an abstract peering: intervals with member sets, a primary and an activated flag, and the rule that an interval activates only once every earlier one since the last activated has a member that adopted it and holds no live grant to that interval's primary. The peering spec would check that its concrete peering implies that rule. It is sound, but it costs a second spec and a refinement mapping to keep in step for the same coverage that two configurations of one spec give.
 - *No CI runs, models checked by hand, as CockroachDB and etcd-raft do.* Their models went stale against code and against themselves (CockroachDB #54130). rock-solid's map from models to the simulator assumes the models still pass.
 - *Exhaustive `deep` runs every night.* An unchanged spec, configuration and TLC version give the same answer every night; only simulation finds anything new. Running them would also take the homelab machines from the performance runs.
-- *Trace validation, as etcd-raft has.* MongoDB abandoned it after 10 weeks. The model-to-simulator map and the simulator's invariants cover the same gap more cheaply. Reconsider once the trace record format is stable.
+- *Trace validation as a standing check, as CCF runs it.* MongoDB stopped after 10 weeks, on a multi-threaded server and a spec not written for it; CCF spent about two engineer-months on a trace spec that validated most of its traces, and more after a safety bug led to further work on its test driver, so that figure is a lower bound; it led to bugs CCF's other tests missed. The model-to-simulator map and the simulator's invariants do not cover the same gap: they test properties and listed scenarios, not that the code takes only the spec's steps. A bounded pilot decides first ([Trace validation in practice](#trace-validation-in-practice)).
 
 ## What the phase 2 models, the simulator and tests must check
 
@@ -306,6 +413,8 @@ That is a design to write, and the model should be its first precise form, as AW
 ## Unverified
 
 - **CI runner speed.** The throughput figures are from an Apple M4 Pro with 4 TLC workers. A GitHub-hosted 4-CPU runner is likely slower per core, so the 5-minute budget may need constants a step smaller there.
+- **Trace validation on rock-solid** was not run. Every estimate of its mapping reads the code and spec only.
+- **Trace validation sources read in part.** Mocket, SandTable, TraceLink, OmniLink and AWS's CACM article: search results or abstracts only. Specula: its introduction. Kuppe's TLA+ Conference 2024 slides could not be read as text; a search summary says about 15 etcd-raft tests revealed spec bugs in entry batching and that all 7 systems diverged, which is unconfirmed. Not read: Niu et al. on ZooKeeper, Haltermann on production monitoring, and etcd #14370.
 - **Whether one epoch model at full constants fits `ci`** was not measured. The two-configuration split assumes it does not.
 - **etcd-raft as shipped** was stopped by hand at 13.5 minutes with 17.7 million distinct states, still at depth 15; how long an exhaustive run would take was not measured. Its README's "at least hours" suggests it is not meant to finish.
 - **The incarnation argument** and the trace of finding 3 are reasoning from design.md's text, not model runs. They are the model's to confirm.
@@ -340,6 +449,14 @@ That is a design to write, and the model should be its first precise form, as AW
   - W. Schultz et al., [*Design and Analysis of a Logless Dynamic Reconfiguration Protocol*](https://arxiv.org/abs/2102.11960), OPODIS 2021;
   - A. J. J. Davis et al., [*eXtreme Modelling in Practice*](https://arxiv.org/abs/2006.00915), VLDB 2020.
 - AWS: C. Newcombe et al., [*Use of Formal Methods at Amazon Web Services*](https://6826.csail.mit.edu/2019/papers/formal-methods-amazon.pdf) (technical report, 29 September 2014), published as "How Amazon Web Services Uses Formal Methods", CACM 58(4), April 2015.
+- Trace validation:
+  - H. Howard et al., [*Smart Casual Verification of the Confidential Consortium Framework*](https://arxiv.org/abs/2406.17455), NSDI 2025;
+  - H. Cirstea, M. A. Kuppe, B. Loillier, S. Merz, [*Validating Traces of Distributed Programs Against TLA+ Specifications*](https://arxiv.org/abs/2404.16075), 2024;
+  - A. J. J. Davis, [*Conformance Checking at MongoDB*](https://www.mongodb.com/company/blog/engineering/conformance-checking-at-mongodb-testing-our-code-matches-our-tla-specs);
+  - `etcd-io/raft` [#111](https://github.com/etcd-io/raft/issues/111), [#113](https://github.com/etcd-io/raft/pull/113), [#192](https://github.com/etcd-io/raft/pull/192);
+  - [*Multi-Grained Specifications for Distributed System Model Checking and Verification*](https://arxiv.org/abs/2409.14301), EuroSys 2025;
+  - [Specula](https://arxiv.org/abs/2607.25333), preprint;
+  - read in part: [Mocket](https://gaoyu-cn.github.io/paper/2023-eurosys-mocket.pdf), [SandTable](https://marshtompsxd.github.io/pub/sandtable.pdf), [TraceLink](https://www.cs.ubc.ca/~bestchai/papers/oopsla25-trace-link.pdf), [OmniLink](https://arxiv.org/abs/2601.11836), [*Systems Correctness Practices at AWS*](https://cacm.acm.org/practice/systems-correctness-practices-at-amazon-web-services), [Kuppe's slides](https://conf.tlapl.us/2024/MarkusAKuppe-ValidatingSystemExecutionsWithTheTLAPlusTools.pdf).
 - Azure Cosmos DB: A. F. Hackett, J. Rowe, M. A. Kuppe, [*Understanding Inconsistency in Azure Cosmos DB with TLA+*](https://arxiv.org/abs/2210.13661), 2022.
 - GitHub-hosted runner sizes: [GitHub-hosted runners reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 - TLC: [v1.7.4](https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4), [v1.8.0](https://github.com/tlaplus/tlaplus/releases/tag/v1.8.0) (pre-release), [CommunityModules 202505152026](https://github.com/tlaplus/CommunityModules/releases/tag/202505152026).
