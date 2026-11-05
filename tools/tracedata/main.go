@@ -409,7 +409,11 @@ func (g *gen) run(recs []trace.Record) {
 		case trace.OutAccepted:
 			g.memberOpen[n] = append(g.memberOpen[n], [2]uint64{r.Fields[0], r.Fields[1]})
 		case trace.OutMemberFail:
-			g.line(`k |-> "mfail", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(r.Fields[0]), ver(r.Fields[1]))
+			kind := "mfail"
+			if r.Fields[2] != 0 {
+				kind = "gone"
+			}
+			g.line(`k |-> "%s", n |-> %d, c |-> %d, v |-> %s`, kind, n, g.chunk(r.Fields[0]), ver(r.Fields[1]))
 		case trace.OutLogged:
 			g.ownOpen[n] = dropVersion(g.ownOpen[n], r.Fields[0], r.Fields[1])
 			g.memberOpen[n] = dropVersion(g.memberOpen[n], r.Fields[0], r.Fields[1])

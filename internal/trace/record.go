@@ -125,7 +125,7 @@ const (
 	OutFormat
 	// OutAccepted, a member taking a version into its store: chunk version.
 	OutAccepted
-	// OutMemberFail, a member refusing a version or failing to log it: chunk version.
+	// OutMemberFail, a member refusing a version or failing to log it: chunk version gone, gone when the node's disk is no up member of the interval, so a formatted disk's successor.
 	OutMemberFail
 	// OutPast is a past interval of the OutEntry before it: pg interval minlive. Its members follow as OutMember.
 	OutPast
@@ -224,7 +224,7 @@ var schemas = [numNames]schema{
 	OutAsk:            {"Ask", KindOutput, []field{fPG, fIv}},
 	OutFormat:         {"Format", KindOutput, []field{fDisk}},
 	OutAccepted:       {"Accepted", KindOutput, []field{fChunk, fVer}},
-	OutMemberFail:     {"MemberFail", KindOutput, []field{fChunk, fVer}},
+	OutMemberFail:     {"MemberFail", KindOutput, []field{fChunk, fVer, {"gone", typeBool}}},
 	OutPast:           {"PastInterval", KindOutput, []field{fPG, fIv, {"minlive", typeNum}}},
 }
 

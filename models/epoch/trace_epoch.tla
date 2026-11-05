@@ -98,6 +98,9 @@ Line(l) ==
           \/ \E m \in {x \in rm : x.to = ddisk[l.n] /\ x.c = l.c /\ x.v = l.v} : Deliver(m)
     \/ /\ l.k = "mfail"
        /\ \E m \in {x \in rm : x.to = ddisk[l.n] /\ x.c = l.c /\ x.v = l.v} : MemberFail(m)
+    \/ /\ l.k = "gone"
+       /\ \E m \in {x \in rm : dhost[x.to] = l.n /\ x.c = l.c /\ x.v = l.v} :
+            IF [c |-> l.c, v |-> l.v] \in failed[m.to] THEN UNCHANGED vars ELSE GoneRefuses(m)
     \/ /\ l.k = "mayfail"
        /\ \/ UNCHANGED vars
           \/ \E r \in {x \in pend : x.c = l.c /\ x.v = l.v} : OwnFail(l.n, r)

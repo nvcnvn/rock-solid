@@ -935,7 +935,8 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		return
 	}
 	recover := u.Kind == KindRecover
-	refuse := e == nil || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) ||
+	gone := e != nil && !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp })
+	refuse := e == nil || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || gone ||
 		slices.ContainsFunc(r.failed, func(f failedVer) bool {
 			return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version <= u.Version || recover)
 		})
@@ -954,7 +955,11 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	}
 	if refuse {
 		if e != nil && u.PG.Interval == e.Interval {
-			out.note(trace.OutMemberFail, u.Chunk.Hash(), u.Version, 0, 0, 0)
+			var reason uint64
+			if gone {
+				reason = 1
+			}
+			out.note(trace.OutMemberFail, u.Chunk.Hash(), u.Version, reason, 0, 0)
 			r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
 		}
 		freeBuf(ctx, ev.Msg.Buf)

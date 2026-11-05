@@ -1004,20 +1004,15 @@ Deliver(m) ==
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, miss, persIv, mrecv, failed,
                       priVars, rm, vers, sends, dmn, refd, leaseVars, clockVars, raftVars>>
 
-\* A member refuses a version of its current interval it has not logged, or
-\* fails to log it. A primary that has yet to answer the version, once it
-\* hears, refuses its client and those of the chunk's later versions, whose
-\* bytes may rest on it, and the interval it was ordered in ends; peering decides
-\* whether they stay. A version already answered changes nothing at the primary.
-MemberFail(m) ==
+\* A member refuses a version m carries, of its current interval. A primary that
+\* has yet to answer the version, once it hears, refuses its client and those of
+\* the chunk's later versions, whose bytes may rest on it, and the interval it
+\* was ordered in ends; peering decides whether they stay. A version already
+\* answered changes nothing at the primary.
+Refused(m) ==
     LET d == m.to
         r == CHOOSE x \in vers : x.c = m.c /\ x.v = m.v /\ x.n = m.from /\ x.r = m.r
-    IN /\ dnode[d] # 0
-       /\ Running(dnode[d])
-       /\ m.v \notin dlog[d][m.c]
-       /\ IvAt(dnode[d], m.p) = m.iv
-       /\ [c |-> m.c, v |-> m.v] \notin failed[d]
-       /\ Fault("mfail")
+    IN /\ [c |-> m.c, v |-> m.v] \notin failed[d]
        /\ failed' = [failed EXCEPT ![d] = @ \cup {[c |-> m.c, v |-> m.v]}]
        /\ LET out == IF r \notin pend THEN {}
                       ELSE IF Bug("FailOnlyOne") THEN {r}
@@ -1030,6 +1025,27 @@ MemberFail(m) ==
                       pv, pin, known, dec, act, rm, vers, ackd, wst, sends, dmn, bad,
                       leaseVars, now, raw, boot, rawR, bootR, slew, runId, frz, suspAt, rstAt,
                       rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs, raftVars>>
+
+\* A member refuses a version of its current interval it has not logged, or
+\* fails to log it.
+MemberFail(m) ==
+    /\ dnode[m.to] # 0
+    /\ Running(dnode[m.to])
+    /\ m.v \notin dlog[m.to][m.c]
+    /\ IvAt(dnode[m.to], m.p) = m.iv
+    /\ Fault("mfail")
+    /\ Refused(m)
+
+\* The node of a disk formatted again still holds a table with the old disk in
+\* the interval. It is no member of that interval, so it refuses what the
+\* primary sends the old disk, needing no fault of its own.
+GoneRefuses(m) ==
+    /\ dnode[m.to] = 0
+    /\ dhost[m.to] # 0
+    /\ Running(dhost[m.to])
+    /\ IvAt(dhost[m.to], m.p) = m.iv
+    /\ Refused(m)
+    /\ UNCHANGED faults
 
 \* A version fails on the primary's own log after it went out to members, while
 \* the primary is still in its interval: peering answers only once a disk's
@@ -1654,7 +1670,7 @@ Choices ==
     \/ Membership
     \/ Die
     \/ \E n \in Node : Isolate(n)
-    \/ \E m \in rm : MemberFail(m)
+    \/ \E m \in rm : MemberFail(m) \/ GoneRefuses(m)
     \/ \E n \in Node, r \in pend : OwnFail(n, r)
     \/ \E g, h \in Node : OpenGrant(g, h) \/ OpenLapse(g, h)
     \/ \E n \in Node : Target(n) /\
