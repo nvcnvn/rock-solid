@@ -3530,11 +3530,15 @@ under fairness, as `deep-peering` does, on the restart plan alone, and those for
   primary led the PG since, property 11 holds in `ci-peering` and `ci-restarts` with a table of
   incarnations per PG that a primary forgets whenever another primary may have led the PG, and the
   two incarnation rows above each fail.
-- Two rules have no check. A primary asks for the next interval only once nothing of the PG waits:
+- Four rules have no check. A primary asks for the next interval only once nothing of the PG waits:
   removing that leaves every `ci-faults` property passing, since a version a request came too soon
   for is settled by peering like any other; what the rule saves is refusing clients whose write
   would have completed, which no property states. A node asks for no node-pair lease during its
-  restart wait: removing that leaves `ci-leases` at the same state count.
+  restart wait: removing that leaves `ci-leases` at the same state count. A failure of a version
+  the primary already answered changes nothing at the primary: removing that refuses later clients
+  needlessly, which every `ci-faults` property allows. And `ReadsAcked` leaves refused versions out
+  of what a primary serves, which it would pass with them in, as they sit above every acknowledged
+  version and no decision dropped them yet.
 - Properties 3, 8 and 9 have no row of their own, since the only rules whose removal breaks them are
   the ones they restate; each was seen to fail once, outside the committed variants: 3 with member
   lists compared, 8 with a merge before the kept version, and 9 with an activation recorded at the
