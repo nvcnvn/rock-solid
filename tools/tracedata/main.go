@@ -67,6 +67,8 @@ type gen struct {
 	primary    map[uint64]int
 	ownOpen    map[int][][2]uint64
 	memberOpen map[int][][2]uint64
+	// lists holds each [disk, pg, interval] a Persisted record named.
+	lists map[[3]uint64]bool
 }
 
 func ver(v uint64) string { return strconv.FormatUint((v>>32)*verBase+v&(1<<32-1), 10) }
@@ -449,7 +451,9 @@ func (g *gen) run(recs []trace.Record) {
 			}
 			g.decide(n, r, kept)
 		case trace.OutPersisted:
-			g.line(`k |-> "persisted", d |-> %d, p |-> %d, iv |-> %d`, g.disk(r.Fields[2]), g.pg(r.Fields[0]), r.Fields[1])
+			key := [3]uint64{r.Fields[2], r.Fields[0], r.Fields[1]}
+			g.line(`k |-> "persisted", d |-> %d, p |-> %d, iv |-> %d, again |-> %s`, g.disk(r.Fields[2]), g.pg(r.Fields[0]), r.Fields[1], strings.ToUpper(strconv.FormatBool(g.lists[key])))
+			g.lists[key] = true
 		case trace.OutActivate:
 			g.primary[r.Fields[0]] = n
 			g.line(`k |-> "activate", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
@@ -551,7 +555,7 @@ func main() {
 		fatal("usage: tracedata [-module name] run.trace")
 	}
 	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{},
-		diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{}}
+		lists: map[[3]uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{}}
 	recs := g.load(flag.Arg(0))
 	if len(recs) == 0 {
 		fatal("no table in the trace")

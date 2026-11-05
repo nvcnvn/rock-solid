@@ -136,7 +136,7 @@ Line(l) ==
        /\ KeptMatches(l)
     \/ /\ l.k = "persisted"
        /\ \E x \in dec : x.p = l.p /\ x.k = l.iv
-       /\ ~\E a \in act : a.p = l.p /\ a.k = l.iv
+       /\ l.again \/ ~\E a \in act : a.p = l.p /\ a.k = l.iv
        /\ persIv[l.d][l.p] = l.iv
        /\ UNCHANGED vars
     \/ /\ l.k = "activate"
