@@ -4073,49 +4073,50 @@ and TLC does not report which branch a line took, so `Recover`, `ReportRecovered
 `scripts/conform.sh plants` runs `TestPlantsKeepTraces` over `conformPlants`, the plants of the
 `chunkstore.*` rows of the [rule map](#model-gate) and of `TestPlantedPeeringBugsBreakTheOracle`, each in
 the primary-change run with every invariant checked. On a seed whose unplanted trace passes it
-compares the planted trace's lines with the baseline's: the same lines mean the plant did not fire,
-which is no evidence. Otherwise TLC checks the trace. `FIRST` and `COUNT` choose the seeds and
-`PLANTS` the plants. A run stops at its first broken invariant, keeping the trace up to there and saying
-which broke in a `.stop` file. `CONFORM_RUNON=1` runs on past the break, needed when the invariant
-sees a step before its record: `sameMembers`, `sendEpoch` and `keepID` passed every trace cut at the
-break. A rejection counts once the failing line has been read to be the planted behaviour.
+compares the planted trace's lines with the baseline's. Fired means only that those lines differ, not
+that the rule was reached: a plant can move timing alone. The same lines are no evidence. Otherwise TLC
+checks the trace. `FIRST` and `COUNT` choose the seeds and `PLANTS` the plants. A run stops at its first
+broken invariant, keeping the trace up to there and saying which broke in a `.stop` file.
+`CONFORM_RUNON=1` runs on past the break, needed when the invariant sees a step before its record:
+`sameMembers` and `keepID` pass every trace cut at the break. Over all 40 seeds run-on passes Go's
+10-minute test limit, so it runs a seed at a time. A rejection counts once the failing line has been
+read to be the planted behaviour.
 
-Results over seeds 1, 6, 11, 18, 23 and 36, the seeds that pass of 40; each line number is the line TLC
-could not take at that seed:
+Results over seeds 6, 11, 18, 23 and 36, the seeds that pass of 40; each number is the line TLC could
+not take at that seed, and the line a plant first differs from the baseline comes before it:
 
-| Plant | Rule | Fired at | Result | Guard |
-| --- | --- | --- | --- | --- |
-| `activateEarly` | `neg-activate-before-durable` | all 6 | Caught, seeds' invariants holding: 93, 74, 51, 116, 142, 35 | `Persisted`: a member's first persist comes after `Activate` |
-| `mergeWhileLacking` | `neg-merge-before-kept` | 6 | Caught, invariants holding: 82 | `Order`: `miss[own][c] = NoMiss` |
-| `relistNever`, `clearListed` | `neg-peering-clears-missing` | 6 | Caught, invariants holding: 134 | `Recover`: the spec keeps the list the code cleared, so no source is left |
-| `peerInOldInterval` | `neg-restart-same-interval` | 1, 6, 11, 18, 23 | Caught: 59, 55, 101, 87; 23 stops at `Order` with the write lost as `neverAsk`'s is | `peer`: `pr[n][p].iv = iv`, `pr` empty after the restart |
-| `ownInterval` | `neg-decide-by-own-interval` | 1, 18 | Caught: 359, 154 | `KeptMatches` |
-| `reportDecided` | `neg-report-before-activate` | all 6 | Caught: 65, 58, 45, 98, 135, 29 | `Fold`: no report yet |
-| `removeOnActivation` | `neg-remove-before-recovered` | 18 | Caught: 508 | `Remove`: no `recd` for the interval |
-| `oldReport` | `neg-accept-old-report` | all 6 | Caught at 18 and 11: 471, 574. At 1, 6, 23 and 36 it only drops a `reported` line, no removal: passes, rule not reached | `Remove`: no `recd` for the interval |
-| `sameMembers` | `neg-compare-member-lists` | 1, 6, 11, 18, 23 | Caught, running on: 46, 41, 577, 79, 50 | `logged`: `Accepts`, the interval differs. The `Accepted` record is not what catches it |
-| `keepID` | `neg-keep-disk-id` | 11, 23 | Caught, running on: 92, 56 | `plan`: the spec's `Format` gave the disk a new ID, so a table holding the old one has no step |
-| `sendEpoch` | `neg-compare-table-epochs` | all 6 | Caught, running on, at the first refusal: 97, 200, 127, 175 at seeds 36, 23, 18, 11. Seeds 6 and 1 ran out of a 2 GB heap, no verdict | `mfail`: a refusal with no fault budget. Until the budget went, each passed as a disk fault and stopped later at discrepancy 6. The `Accepted` record is not what catches it |
-| `neverAsk` | `neg-restart-no-ask` | 1, 6, 11, 18, 23 | Not caught for its rule: 117, 167, 187 stop at `Order` because `Send` lost a write to a primary with an empty `pr`, which the code holds; 135 at seed 6 is discrepancy 10; seed 23 gave no verdict in 300 s | An `ask` that never comes is no line |
-| `recoverSelfOnly` | none | all 6 | Passes at 6 and 23; 467 and 546 are discrepancy 10, 698 is an unread `Peer` reply | A recovery that never comes is no line |
-| `coverAtRead` | `neg-recovery-covers-at-read` | 1, 11, 18, 23 | Fired, passes | Too loose: `recovered` names a chunk, so `Recover`'s cover is unobserved |
-| `settleSubset` | none | 6 | Fired, passes | Too loose: the diff is one missing `committed` line, and `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record |
-| `lastActivatedOnly` | `neg-reach-last-activated-only` | 11 | Fired, passes; only a `persisted` line moves | The rule is about leases, which no line observes |
-| `freshGrantNoCheck` | `neg-fresh-grant-no-table-check` | 18 | Fired, passes; only `persisted` lines move | The same |
-| `resendNewestFirst` | `neg-log-out-of-order` | none | No evidence: fires at 12 of 40 seeds, all failing their baseline | |
-| `stopPreviousOnly` | `neg-stop-previous-only` | none | No evidence: fires at 2 of 40, both failing | |
-| `fenceOnArrival`, `reorderAfterOther`, `settleByNumber`, `readBelowMinLive` | `neg-fence-on-arrival`, `neg-reorder-after-other-primary`, `neg-settle-by-number`, `neg-read-below-min-live` | none | No evidence: fires at 0 of 40 in this run. Their tests are other workloads, which keep no trace | |
+| Plant | Rule | Fired at seeds | Result | Clean | Guard |
+| --- | --- | --- | --- | --- | --- |
+| `activateEarly` | `neg-activate-before-durable` | all 5 | Caught: 77, 54, 120, 146, 38 | All 5 | `persisted`: a member's first persist comes after `Activate` |
+| `mergeWhileLacking` | `neg-merge-before-kept` | 6 | Caught: 84 | Yes | `Order`: `miss[own][c] = NoMiss` |
+| `relistNever`, `clearListed` | `neg-peering-clears-missing` | 6 | Caught: 140 | Yes | `Recover`: the spec keeps the list the code cleared, so no source is left |
+| `peerInOldInterval` | `neg-restart-same-interval` | 6, 11, 18, 23 | Caught: 56, 108, 88; 23 stops at `Order`, 155, with the write lost as `neverAsk`'s is | At 11 | `peer`: `pr[n][p].iv = iv`, `pr` empty after the restart |
+| `ownInterval` | `neg-decide-by-own-interval` | 18 | Caught: 158 | No | `KeptMatches` |
+| `reportDecided` | `neg-report-before-activate` | all 5 | Caught: 60, 47, 100, 138, 31 | No | `Fold`: no report yet |
+| `removeOnActivation` | `neg-remove-before-recovered` | 18 | Caught: 518 | No | `Remove`: no `recd` for the interval |
+| `oldReport` | `neg-accept-old-report` | 6, 11, 18, 23, 36 | Caught at 11 and 18: 589, 478. At 6, 23 and 36 it passes, rule not reached | No | `Remove`: no `recd` for the interval |
+| `sameMembers` | `neg-compare-member-lists` | 6, 11, 18, 23 | Caught, running on: 43, 590, 81, 52 | No | `logged`: `Accepts`, the interval differs. The `Accepted` record is not what catches it |
+| `keepID` | `neg-keep-disk-id` | 11, 23 | Caught, running on: 100, 53 | No | `plan`, or the `table` line: the spec's `Format` gave the disk a new ID |
+| `sendEpoch` | `neg-compare-table-epochs` | all 5 | Caught at the first refusal: 97, 186, 130, 205, 102. Running on, seed 6 ran out of a 2 GB heap, no verdict | No | `mfail`: a refusal with no fault budget |
+| `neverAsk` | `neg-restart-no-ask` | 6, 11, 18, 23 | Not caught for its rule: 196 and 173 stop at `Order`, `Send` having lost a write to a primary with an empty `pr`, discrepancy 13; 140 at seed 6 is discrepancy 10; 809 at seed 23, a `renew`, is unread | | An `ask` that never comes is no line |
+| `recoverSelfOnly` | none | all 5 | Passes at 6 and 23; 724, 551 and 557 are unread | | A recovery that never comes is no line |
+| `coverAtRead` | `neg-recovery-covers-at-read` | 11, 18, 23 | Fired, passes | | Too loose: `recovered` names a chunk and a version, so `Recover`'s cover is unobserved |
+| `settleSubset` | none | 6 | Fired, passes | | Too loose: `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record |
+| `lastActivatedOnly` | `neg-reach-last-activated-only` | 11 | Fired, passes; 88 lines differ, `peer` lines among them | | A peering reach rule, `peers` in `replica_peer.go` against `NeedIv`. The code's own `J` is now what `Peer` judges, and at this seed it still meets `NeedIv`, so the rule was not reached |
+| `freshGrantNoCheck` | `neg-fresh-grant-no-table-check` | 18 | Fired, passes | | About leases, which no line observes |
+| `resendNewestFirst`, `stopPreviousOnly` | `neg-log-out-of-order`, `neg-stop-previous-only` | none | No evidence: they fire on seeds whose baseline fails | | |
+| `fenceOnArrival`, `reorderAfterOther`, `settleByNumber`, `readBelowMinLive` | `neg-fence-on-arrival`, `neg-reorder-after-other-primary`, `neg-settle-by-number`, `neg-read-below-min-live` | none | No evidence: they fire on none of the 5. Their tests are other workloads, which keep no trace | | |
 
-Traces can fail is shown for eleven of the 21 rules, four of them on a seed whose invariants hold to
-the end of the run: `activateEarly`, `mergeWhileLacking`, `relistNever` and, at seed 11,
-`peerInOldInterval`. Open: `coverAtRead`, which needs a record of the
-blocks a recovery write leaves out; `neverAsk`, an omission no line can name; the two lease rules, with
-the lease half; and the six that never fired on a passing seed. Of the two oracle plants with no rule,
-`settleSubset` needs a record of what `Settle` answered.
-`mayfail` and `maydeliver` let no plant through: every planted step the check missed lies in a variable
-or record no line reads. A version a primary drops right after `OutOrder`, by `r.fail` in `ordered`,
-stays in `ownOpen` and becomes a `mayfail` at a later crash; that path needs a lead that is asking or
-has left the interval, which `Order`'s guards refuse first, so it loosens no passing trace.
+Traces can fail is shown for 11 of the 21 rules, 4 of them clean: `activateEarly`, `mergeWhileLacking`,
+`relistNever` and, at seed 11, `peerInOldInterval`. Open: `coverAtRead`, which needs a record of the
+blocks a recovery write leaves out; `neverAsk`, an omission no line can name; `freshGrantNoCheck`, with
+the lease half; `lastActivatedOnly`, which needs a seed that reaches it; and the six that never fired on
+a passing seed. Of the two oracle plants with no rule, `settleSubset` needs a record of what `Settle`
+answered. `mayfail` and `maydeliver` let none of the plants tried through, which says nothing of a plant
+not tried: every planted step the check missed lies in a variable or record no line reads. A version a
+primary drops right after `OutOrder`, by `r.fail` in `ordered`, stays in `ownOpen` and becomes a `mayfail`
+at a later crash; that path needs a lead that is asking or has left the interval, which `Order`'s guards
+refuse first, so it loosens no passing trace.
 
 ## Models in CI
 
