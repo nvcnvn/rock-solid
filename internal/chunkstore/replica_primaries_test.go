@@ -12,6 +12,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 const (
@@ -657,6 +658,9 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	clear(a.down)
 	_, e := c.table.entry(pg0)
 	a.asks = append(a.asks, PGInterval{pg0, e.Interval})
+	if c.conforming {
+		c.s.Node(c.client.Node).Output(c.client, trace.Record{Name: trace.OutAsk, Fields: [trace.MaxFields]uint64{pgField(pg0), uint64(e.Interval)}})
+	}
 	r.publish()
 	r.settled()
 	if c.found != nil && !r.runOn {

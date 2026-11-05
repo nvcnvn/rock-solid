@@ -69,6 +69,8 @@ type gen struct {
 	memberOpen map[int][][2]uint64
 	// lists holds each [disk, pg, interval] a Persisted record named.
 	lists map[[3]uint64]bool
+	// operatorAsk holds each PG the harness, no primary, asked a new interval of: its next table is an Edit that changes nothing.
+	operatorAsk map[uint64]bool
 }
 
 func ver(v uint64) string { return strconv.FormatUint((v>>32)*verBase+v&(1<<32-1), 10) }
@@ -167,8 +169,10 @@ func (g *gen) classify(epoch uint64, changed []uint64, next map[uint64]*entry) {
 		old, e := g.entries[f], next[f]
 		p := g.pg(f)
 		a, b := disks(old.members), disks(e.members)
+		asked := g.operatorAsk[f]
+		delete(g.operatorAsk, f)
 		switch {
-		case slices.Equal(a, b) && sameMembers(old, e) && e.minLive == old.minLive:
+		case slices.Equal(a, b) && sameMembers(old, e) && e.minLive == old.minLive && !asked:
 			g.tables++
 			g.line(`k |-> "renew", p |-> %d`, p)
 		case len(b) == len(a)+1 && slices.Equal(a, b[:len(a)]) && leavingOf(e) != 0 && sameMarks(old, &entry{members: e.members[:len(a)]}):
@@ -425,6 +429,10 @@ func (g *gen) run(recs []trace.Record) {
 		case trace.OutReported:
 			g.line(`k |-> "reported", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.OutAsk:
+			if n > g.nodes {
+				g.operatorAsk[r.Fields[0]] = true
+				break
+			}
 			g.line(`k |-> "ask", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.OutFormat:
 			g.fmts++
@@ -555,7 +563,7 @@ func main() {
 		fatal("usage: tracedata [-module name] run.trace")
 	}
 	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{},
-		lists: map[[3]uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{}}
+		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{}}
 	recs := g.load(flag.Arg(0))
 	if len(recs) == 0 {
 		fatal("no table in the trace")
