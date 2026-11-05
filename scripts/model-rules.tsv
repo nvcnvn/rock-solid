@@ -93,3 +93,15 @@ recall/neg-open-in-grace	open	phase 7
 recall/neg-open-skips-holder	open	phase 7
 recall/neg-rereg-no-wrote	open	phase 7
 recall/neg-timeout-answer	open	phase 7
+epoch/neg-answer-for-old-disk	open	Plants for the epoch model's new rules
+epoch/neg-current-min-live	open	Plants for the epoch model's new rules
+epoch/neg-fail-only-one	open	Plants for the epoch model's new rules
+epoch/neg-log-past-failed	open	Plants for the epoch model's new rules
+epoch/neg-never-ask	open	Plants for the epoch model's new rules
+epoch/neg-no-demote	open	Plants for the epoch model's new rules
+epoch/neg-no-list-above	open	Plants for the epoch model's new rules
+epoch/neg-order-past-failed	open	Plants for the epoch model's new rules
+epoch/neg-recovery-read-old-disk	open	Plants for the epoch model's new rules
+epoch/neg-serve-after-other-primary	open	Plants for the epoch model's new rules
+epoch/neg-serve-refused	open	Plants for the epoch model's new rules
+epoch/neg-settle-by-number	chunkstore.settleByNumber	TestPlantedBugsBreakTheirTraces
