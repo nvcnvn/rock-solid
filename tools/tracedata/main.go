@@ -1,4 +1,4 @@
-// Command tracedata turns a simulator trace into the data module the epoch model's trace spec reads: the run's constants and one line per protocol step. It holds no protocol logic.
+// Command tracedata turns a simulator trace into the data module the epoch model's trace spec reads: the run's constants and one line per protocol step. It decides no protocol step, and holds the mapping's judgement in two places: classify names the spec's changes for a table, and landOpen and crash name the versions a node may have made durable unrecorded.
 //
 //	tracedata [-module trace_data] run.trace > trace_data.tla
 package main
@@ -23,9 +23,15 @@ type member struct {
 	leaving    bool
 }
 
+type past struct {
+	interval, minLive uint64
+	members           []member
+}
+
 type entry struct {
 	interval, activated, minLive uint64
 	members                      []member
+	past                         []past
 }
 
 type write struct {
@@ -190,6 +196,33 @@ func (g *gen) classify(epoch uint64, changed []uint64, next map[uint64]*entry) {
 		g.entries[f] = next[f]
 	}
 	g.epochs[epoch] = g.tables
+	g.tableLine(changed)
+}
+
+func (g *gen) memberList(ms []member) (mem, ms2 string) {
+	var d, k []string
+	for _, m := range ms {
+		d = append(d, strconv.FormatUint(g.disk(m.disk), 10))
+		k = append(k, `"`+marks(m.mark)+`"`)
+	}
+	return "<<" + strings.Join(d, ", ") + ">>", "<<" + strings.Join(k, ", ") + ">>"
+}
+
+// tableLine has the check compare the entries of the code's table with the spec's after the changes classify named.
+func (g *gen) tableLine(changed []uint64) {
+	var rows []string
+	for _, f := range changed {
+		e := g.entries[f]
+		mem, ms := g.memberList(e.members)
+		var ps []string
+		for _, x := range e.past {
+			pm, pk := g.memberList(x.members)
+			ps = append(ps, fmt.Sprintf("[iv |-> %d, ml |-> %d, mem |-> %s, marks |-> %s]", x.interval, x.minLive, pm, pk))
+		}
+		rows = append(rows, fmt.Sprintf("[p |-> %d, iv |-> %d, la |-> %d, ml |-> %d, lv |-> %d, mem |-> %s, marks |-> %s, past |-> <<%s>>]",
+			g.pg(f), e.interval, e.activated, e.minLive, g.disk(leavingOf(e)), mem, ms, strings.Join(ps, ", ")))
+	}
+	g.line(`k |-> "table", rows |-> <<%s>>`, strings.Join(rows, ", "))
 }
 
 func (g *gen) planned(item string) {
@@ -299,6 +332,7 @@ func (g *gen) tableAt(recs []trace.Record, i int) (epoch uint64, changed []uint6
 	epoch = recs[i].Fields[0]
 	next = map[uint64]*entry{}
 	var cur *entry
+	var members *[]member
 	for i++; i < len(recs); i++ {
 		r := &recs[i]
 		switch r.Name {
@@ -306,8 +340,12 @@ func (g *gen) tableAt(recs []trace.Record, i int) (epoch uint64, changed []uint6
 			cur = &entry{interval: r.Fields[1], activated: r.Fields[2], minLive: r.Fields[3]}
 			next[r.Fields[0]] = cur
 			changed = append(changed, r.Fields[0])
+			members = &cur.members
+		case trace.OutPast:
+			cur.past = append(cur.past, past{interval: r.Fields[1], minLive: r.Fields[2]})
+			members = &cur.past[len(cur.past)-1].members
 		case trace.OutMember:
-			cur.members = append(cur.members, member{r.Fields[1], r.Fields[2], r.Fields[3] != 0})
+			*members = append(*members, member{r.Fields[1], r.Fields[2], r.Fields[3] != 0})
 		default:
 			return epoch, changed, next, i
 		}
@@ -357,7 +395,11 @@ func (g *gen) run(recs []trace.Record) {
 			i = end
 		case trace.OutAdopt:
 			g.landOpen(n)
-			g.line(`k |-> "adopt", n |-> %d, e |-> %d`, n, g.epochs[r.Fields[0]])
+			e, ok := g.epochs[r.Fields[0]]
+			if !ok {
+				fatal("node %d adopts epoch %d, which no table named", n, r.Fields[0])
+			}
+			g.line(`k |-> "adopt", n |-> %d, e |-> %d`, n, e)
 		case trace.OutSend:
 			g.line(`k |-> "send", w |-> %d`, g.wid[r.Fields[0]])
 		case trace.OutOrder:
@@ -373,7 +415,7 @@ func (g *gen) run(recs []trace.Record) {
 			g.memberOpen[n] = dropVersion(g.memberOpen[n], r.Fields[0], r.Fields[1])
 			g.line(`k |-> "logged", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(r.Fields[0]), ver(r.Fields[1]))
 		case trace.OutRecovered:
-			g.line(`k |-> "recovered", n |-> %d, l |-> %d, c |-> %d`, n, g.primary[g.chunkField(r.Fields[0])], g.chunk(r.Fields[0]))
+			g.line(`k |-> "recovered", n |-> %d, l |-> %d, c |-> %d, v |-> %s`, n, g.primary[g.chunkField(r.Fields[0])], g.chunk(r.Fields[0]), ver(r.Fields[1]))
 		case trace.OutReported:
 			g.line(`k |-> "reported", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.OutAsk:
@@ -409,8 +451,20 @@ func (g *gen) run(recs []trace.Record) {
 			g.line(`k |-> "activate", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.EvCrash:
 			g.crash(n)
+		default:
+			if !slices.Contains(belowProtocol, r.Name) {
+				fatal("record %v at node %d has no mapping", r.Name, n)
+			}
 		}
 	}
+}
+
+// belowProtocol are the records with no spec action, the machine's steps below the protocol's and the other records of a run.
+var belowProtocol = []trace.Name{
+	trace.EvNetRecv, trace.EvPeerLost, trace.EvDiskDone, trace.EvTimer, trace.EvResumed, trace.EvRestart, trace.EvDrop, trace.EvPause, trace.EvResume,
+	trace.ActNetSend, trace.ActDiskRead, trace.ActDiskWrite, trace.ActDiskFsync, trace.ActDiskTrim, trace.ActSetTimer, trace.ActEntry,
+	trace.SysEpollWait, trace.SysRead, trace.SysWritev, trace.SysIOUringEnter, trace.SysTimerfdSettime, trace.SysEventfdWrite,
+	trace.OutDurable, trace.OutFailed, trace.OutCheckpointDone,
 }
 
 func (g *gen) decide(n int, r *trace.Record, kept []string) {
@@ -433,7 +487,7 @@ func (g *gen) decide(n int, r *trace.Record, kept []string) {
 			if cv[2] != 0 {
 				list = ver(cv[2] - 1)
 			}
-			rep = append(rep, fmt.Sprintf("[d |-> %d, c |-> %d, whole |-> %s, list |-> %s, decided |-> %d]", g.disk(d), g.chunk(h), ver(cv[0]), list, x.decided))
+			rep = append(rep, fmt.Sprintf("[d |-> %d, c |-> %d, whole |-> %s, logged |-> %s, list |-> %s, decided |-> %d]", g.disk(d), g.chunk(h), ver(cv[0]), ver(cv[1]), list, x.decided))
 		}
 	}
 	g.line(`k |-> "peer", n |-> %d, p |-> %d, iv |-> %d, j |-> {%s}, kept |-> <<%s>>, rep |-> {%s}`,
@@ -499,6 +553,11 @@ func main() {
 		fatal("no table in the trace")
 	}
 	g.run(recs)
+	if !slices.ContainsFunc(g.lines, func(l string) bool {
+		return !strings.HasPrefix(l, `[k |-> "table"`) && !strings.HasPrefix(l, `[k |-> "plan"`) && !strings.HasPrefix(l, `[k |-> "fold"`) && !strings.HasPrefix(l, `[k |-> "renew"`)
+	}) {
+		fatal("the trace has no protocol step")
+	}
 	w := bufio.NewWriter(os.Stdout)
 	defer w.Flush()
 	g.write(w, *module)

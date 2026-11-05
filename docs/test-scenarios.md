@@ -3965,7 +3965,7 @@ Not to be confused with the POSIX conformance suites of [Testing strategy](desig
 | Part | Holds when | Fails when |
 | --- | --- | --- |
 | Traces pass | Every seeded trace checked is a behavior of the spec | A record has no spec action, or a step the spec does not allow |
-| Traces can fail | Each rule the [rule map](#model-gate) gives a plant fails a trace with that plant set, on a seed whose invariants pass, with the spec left as it was | A planted rule removal passes every trace |
+| Traces can fail | Each rule the [rule map](#model-gate) gives a plant is caught with the spec left as it was: the seed's unplanted baseline passes, and the line TLC rejects with the plant set is the planted behaviour, even if an invariant also broke. A catch with every invariant intact is clean, and clean catches are reported beside the total | A planted rule removal passes every trace |
 | Traces cover the spec | Every action of the spec appears in some trace, and each one that cannot, as on a fault no run lands, is listed with why | An action no trace reaches is not listed |
 
 - A spec action with no mapping to a record kind fails, and so does a record kind with no spec
@@ -3973,7 +3973,9 @@ Not to be confused with the POSIX conformance suites of [Testing strategy](desig
 - A compressed spec action, one that stands for several code steps, names those steps in its
   mapping.
 - The trace spec holds no protocol logic of its own: the spec it wraps stays the only statement of
-  the protocol, and the tool in `tools/` writes data alone.
+  the protocol. The tool in `tools/` decides no protocol step, and holds the mapping's judgement in
+  two places: `classify` names the spec's changes for a table, and `landOpen` and `crash` name the
+  versions a node may have made durable with no record.
 - The verdict is the same on every run of a trace, spec and mapping, on TLC's one worker.
 - Each discrepancy is recorded as code, spec, compression or logging, and settled as
   [From spec to code](design.md#testing-strategy) says.
@@ -3988,47 +3990,59 @@ Not to be confused with the POSIX conformance suites of [Testing strategy](desig
 run keeps its trace, and `tools/tracedata` writes each trace into a data module: the run's constants,
 its membership plan and one line per protocol step. `models/epoch/trace_epoch.tla`, with `epoch.tla`
 unchanged by it, has TLC 1.7.4 on one worker take each line by the action it names, compare what the
-record saw with the state that action leaves, and pass by reaching the end; `KEEP=dir` keeps the
-traces and data. A failure names the line no state could take. Each trace starts at the first
-`Table` record, which is the spec's `Init`, so interval 1's bootstrap peering is out of scope.
+record saw with the state that action leaves, and pass by reaching the end with the safety invariants
+intact; `KEEP=dir` keeps the traces and data. A failure names the line no state could take, or the
+invariant a line broke; a run out of time or heap prints `no verdict`, which is neither. Each trace
+starts at the first `Table` record, which is the spec's `Init`, so interval 1's bootstrap peering is
+out of scope. A trace with no line but tables gives no data, so it cannot pass.
+
+`NoLateCompletion`, `DropsAreSuffix`, `VersionsGrow` and `UnchangedIntervalAccepts` hold on every
+state. `NothingCommittedDropped`, `OneWritePerVersion`, `MergesOnKept` and `TablesForward` read sets
+that only grow, so a break stays, and each is checked once, at the last line, since on every state a
+long trace runs at 14 states a second: a trace a line stopped evaluates none of them, and only the
+first branch to reach the end is evaluated. `OneReader`, `ReadsAcked` and `ReadsMapped` are left out,
+since no line moves a lease, and so is `NoResurrectedWrite`, since no traced write is a reissue.
 
 | Records | Spec action | Compression |
 | --- | --- | --- |
-| `Table`, `PGEntry`, `Member` | `Membership` or `Reactive` | `tracedata` splits a table's fold from its membership change. A reorder of a PG, with at most one mark, in one table is one `Edit`, one interval, as the code's `Next` makes it; `ci-edits` checks that action |
-| `Adopt` | `Adopt` | A repeat of the table held after a restart is a stutter |
+| `Table`, `PGEntry`, `Member` | `Membership` or `Reactive` | `tracedata` splits a table's fold from its membership change. A reorder of a PG, with at most one mark, in one table is one `Edit`, one interval, as the code's `Next` makes it; `ci-edits` checks that action. A `table` line then compares each changed entry with the spec's: interval, last activated, members, marks, leaving member, `min_live` and past intervals, so a member changed at an unchanged interval fails. `PastInterval` records carry the past intervals |
+| `Adopt` | `Adopt` | A repeat of the table the spec's node holds, as after a restart, which empties the code's table and leaves `ep`, is a stutter. An epoch no `Table` named stops `tracedata` |
 | `Send` | `Send` | A send the spec has disabled is a stutter, so ordering it later fails |
 | `Order` | `Order` | Logs on the primary and sends to members in one step |
 | `Accepted`, `Logged` | `Deliver` | A store's in-flight version may land before an `Adopt` or crash (`maydeliver`), and `Logged` is then a stutter |
 | `Committed` | `Ack`, inside `Deliver` | A stutter guarded on `ackd` |
-| `PeerReply`, `PeerChunk`, `Decide`, `Kept` | `Peer` | `askPeers`, `peerAsked`, `answerPeers`, `mayPeer`, `peerReplied` and `decide`, with each reply compared to the spec's `Reply` at the decision |
-| `Persisted` | `Peer` or `Activate` | `persistLists`, `persist`, `persisted`, `persistAck`, `persistAcked`: a stutter, refused once the interval activated |
-| `Activate` | `Activate` | `tryActivate` |
+| `PeerReply`, `PeerChunk`, `Decide`, `Kept` | `Peer`, taken as `PeerOn` | `askPeers`, `peerAsked`, `answerPeers`, `mayPeer`, `peerReplied` and `decide`, with each reply compared to the spec's `Reply` at the decision. The line gives the set `J` the code decided on, and the disks that persist are those of the trace's `Persisted` lines for the interval. `logged` must equal `whole`, the one number the spec's reply has |
+| `Persisted` | `PeerOn` | `persistLists`, `persist`, `persisted`, `persistAck`, `persistAcked`: a stutter for a disk that persisted at the decision, refused once the interval activated |
+| `Activate` | `Activate` | `tryActivate`, once every up member's `Persisted` was seen, so `Activate` itself persists no list |
 | `Crash` | `Restart` | Own records not reported durable may be lost (`mayfail`, by `OwnFail`) |
 | `Format` | `Format` | |
-| `Recovered`, `Reported`, `Ask` | `Recover`, `ReportRecovered`, `AskNext` or `CounterOut` | Mapped, not yet proven by a passing trace that reaches them |
+| `Recovered` | `Recover` | The version is the listed one or one the interval ordered. A primary's record of its own copy of a recovery write is a stutter while a member lists the chunk or once one recovered that version; a line for a chunk no disk lists fails |
+| `Reported`, `Ask` | `ReportRecovered`, `AskNext` or `CounterOut` | Mapped, with the action's interval compared to the line's, not yet proven by a passing trace that reaches them |
 | `MemberFail` | `MemberFail` | The run's plan gives it no fault budget, since no traced run injects a disk fault: a refusal of a version of the member's interval has no step |
 
 The record kinds of the event loop, such as `NetRecv` and `DiskDone`, have no spec action: they are
-the machine's steps below the protocol's, and the records above say what those steps did.
+the machine's steps below the protocol's, and the records above say what those steps did. `tracedata`
+lists them in `belowProtocol`, and stops on a record neither mapped nor listed.
 
 Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`:
 
 | Trace | Lines | Result | Seconds |
 | --- | --- | --- | --- |
 | `scripted-clean` | 12 | passes | 1 |
-| `scripted-primary-change` | 34 | passes | 1 |
-| `primaries-6`, `-18`, `-23`, `-36` | 291 to 608 | pass, across a restart | 3 to 7 |
-| `primaries-1`, `-11` | 513, 823 | pass, across a restart | 141, 222 |
-| 19 seeds | | stop at `Order`, discrepancy 6 | 1 to 26 |
-| 8 seeds | | stop at `MemberFail`, discrepancy 7 | 1 to 10 |
-| `primaries-0`, `-26` | 638, 739 | stop at a renewal no primary asked for, discrepancy 8 | 9 |
-| `primaries-7`, `-31` | 664, 666 | stop at `Peer`, discrepancy 9 | 1, 13 |
-| `primaries-27`, `-38` | 763, 462 | stop at `Persisted`, discrepancy 10 | 4, 2 |
-| `primaries-22` | 534 | stops at `Recovered`, discrepancy 11 | 3 |
+| `scripted-primary-change` | 35 | passes | 1 |
+| `primaries-6`, `-18`, `-23`, `-36` | 306 to 619 | pass, across a restart | 3 to 5 |
+| `primaries-11` | 859 | passes, across a restart | 146 |
+| 17 seeds | | stop at `Order`, discrepancy 6 | 1 to 17 |
+| 8 seeds | | stop at `MemberFail`, discrepancy 7 | 1 to 4 |
+| `primaries-0`, `-26` | 661, 753 | stop at a renewal no primary asked for, discrepancy 8 | 2 to 4 |
+| `primaries-7`, `-31` | 680, 692 | stop at `Peer`, discrepancy 9 | 1 to 3 |
+| `primaries-1`, `-5`, `-24` | 531, 743, 791 | stop at `Peer`, discrepancy 12 | 1 to 72 |
+| `primaries-27`, `-38` | 791, 477 | stop at `Persisted`, discrepancy 10 | 2 to 3 |
+| `primaries-22` | 549 | stops at `Recovered`, discrepancy 11 | 3 |
 
-Six seeds of 40 pass: 1, 6, 11, 18, 23 and 36. A trace's time follows how many `maydeliver` and
-`mayfail` branches stay alive, not its length: `primaries-6` has one `mayfail` line and takes 3 s,
-`primaries-1` 62 and 141 s.
+Five seeds of 40 pass: 6, 11, 18, 23 and 36. No unplanted seed broke a safety invariant, though a
+trace a line stopped evaluates only those checked on every state. A trace's time follows how many
+`maydeliver` and `mayfail` branches stay alive, not its length.
 
 Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half. Lines the passing seeds reached:
 `Membership` by `edit`, `mark` and `rotate`, `Fold`, `Renew`, `Adopt`, `Send`, `Order`, `Deliver`,
@@ -4041,7 +4055,7 @@ and TLC does not report which branch a line took, so `Recover`, `ReportRecovered
 | # | What | Class | How settled |
 | --- | --- | --- | --- |
 | 1 | The spec's `Init` starts interval 1 activated; the code peers in it | compression | The trace starts after bootstrap |
-| 2 | One table can reorder a PG's members and carry a mark, one interval, which `Rotate` and `MarkDisk` make two, and no sequence of them gives every order of three members | spec | Settled: `Edit` is in `epoch.tla`, a reorder with at most one mark, what all 77 edits of seeds 0 to 39 need. `ci-edits` reaches it, and `neg-edit-keeps-interval` shows two primaries order in one interval if the table keeps it; that rule's Go plant is owed |
+| 2 | One table can reorder a PG's members and carry a mark, one interval, which `Rotate` and `MarkDisk` make two, and no sequence of them gives every order of three members | spec | Settled: `Edit` is in `epoch.tla`, a reorder with at most one mark, what all 73 edits of seeds 0 to 39 need. `ci-edits` reaches it, and `neg-edit-keeps-interval` shows two primaries order in one interval if the table keeps it; that rule's Go plant is owed |
 | 3 | `Activate`'s record came after the held writes it released were ordered | logging | The record moved to where the lead goes active |
 | 4 | A member takes a version into its store, then adopts a table, then logs it, while `Deliver` needs the interval | compression | `Accepted` opens the version, `maydeliver` lets it land before `Adopt` |
 | 5 | A crash loses a version from the primary's own log that `Order` had logged | compression | `mayfail` before `Restart`, by `OwnFail`; a version every member logged is not in `pend`, so a run needing that would fail |
@@ -4051,6 +4065,8 @@ and TLC does not report which branch a line took, so `Recover`, `ReportRecovered
 | 9 | One reply or kept version differs from the spec's at a seed's `Peer` | undiagnosed, open | Next to read |
 | 10 | A member persists a list twice, the second after the interval activated, which the `Persisted` stutter refuses | compression, open | Read at seed 38. The guard needs to tell a repeat from a first persist |
 | 11 | A `Recovered` record with no source `Recover` allows | undiagnosed, open | Next to read, at seed 22 |
+| 12 | A member reports a version logged above its newest whole one, which `clean` in `keep.go` reads and lists it for, where the spec's `Reply` has one number and `Entry` would leave it off the list | undiagnosed, open | Seeds 1, 5 and 24, 3 of 1,174 replies. `r.logged = r.whole` in `ReplyMatches` stops them, and seed 1 passed only while nothing read `logged` |
+| 13 | `Send` to a primary whose `pr` is empty after a restart loses the write in the spec, and the code holds it | spec, open, low priority | `neverAsk` shows it; no unplanted seed of 40 stops there |
 
 ### Traces can fail in the epoch model's check
 

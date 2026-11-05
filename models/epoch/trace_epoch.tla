@@ -13,7 +13,11 @@
 
 EXTENDS epoch, trace_data
 
-VARIABLE line
+VARIABLES line, healed
+
+\* healed: the [c, v] a recovered line took Recover for. A primary records its
+\* own copy of a recovery write, on a disk that lists nothing, so that line is a
+\* stutter while a member lists the chunk or once one recovered that version.
 
 \* A version in a trace needs more than the 3 bits of epoch.tla's counter.
 TBase == 1048576
@@ -36,6 +40,7 @@ Decided1(x) == Max({x, 1})
 ReplyMatches(l) ==
     \A r \in l.rep :
         /\ Reply(r.d, r.c).whole = r.whole
+        /\ r.logged = r.whole
         /\ Reply(r.d, r.c).list = r.list
         /\ Decided1(Reply(r.d, r.c).decided) = Decided1(r.decided)
 
@@ -44,7 +49,31 @@ KeptMatches(l) ==
         /\ x.p = l.p /\ x.k = l.iv /\ x.n = l.n /\ x.r = run[l.n]
         /\ \A c \in Chunk : x.kept[c] = l.kept[c]
 
+\* The disks whose lists the trace records durable for a peer line's interval:
+\* the spec has them persist at the decision, the code after it.
+PersistsAfter(l) ==
+    {Trace[i].d : i \in {j \in line + 1..Len(Trace) :
+        Trace[j].k = "persisted" /\ Trace[j].p = l.p /\ Trace[j].iv = l.iv}}
+
+\* The code's table against the spec's, after the lines that made its changes.
+RowMatches(r) ==
+    LET x == ivs[r.p][r.iv]
+    IN /\ Cur(r.p) = r.iv
+       /\ tbl[Len(tbl)][r.p].la = Decided1(r.la)
+       /\ x.mem = r.mem
+       /\ \A j \in 1..Len(r.mem) : x.st[r.mem[j]] = r.marks[j]
+       /\ x.lv = r.lv
+       /\ x.ml = r.ml
+       /\ {y.iv : y \in Range(r.past)} = Decided1(r.la)..r.iv - 1
+       /\ \A y \in Range(r.past) :
+            /\ ivs[r.p][y.iv].mem = y.mem
+            /\ ivs[r.p][y.iv].ml = y.ml
+            /\ \A j \in 1..Len(y.mem) : ivs[r.p][y.iv].st[y.mem[j]] = y.marks[j]
+
 Line(l) ==
+    \/ /\ l.k = "table"
+       /\ \A r \in Range(l.rows) : RowMatches(r)
+       /\ UNCHANGED vars
     \/ /\ l.k = "plan"
        /\ Membership
     \/ /\ l.k = "fold"
@@ -54,7 +83,7 @@ Line(l) ==
        /\ Reactive
        /\ Cur(l.p) < tbl'[Len(tbl')][l.p].iv
     \/ /\ l.k = "adopt"
-       /\ IF l.e <= ep[l.n] THEN UNCHANGED vars ELSE Adopt(l.n, l.e)
+       /\ IF l.e = ep[l.n] THEN UNCHANGED vars ELSE Adopt(l.n, l.e)
     \/ /\ l.k = "send"
        /\ IF ENABLED Send(l.w) THEN Send(l.w) ELSE UNCHANGED vars
     \/ /\ l.k = "order"
@@ -78,41 +107,60 @@ Line(l) ==
        /\ Format(l.n)
     \/ /\ l.k = "recovered"
        /\ IF miss[ddisk[l.n]][l.c] = NoMiss
-          THEN UNCHANGED vars
-          ELSE Recover(l.l, ChunkPG[l.c], l.c, ddisk[l.n])
+          THEN /\ \E d \in Disk : miss[d][l.c] # NoMiss \/ [c |-> l.c, v |-> l.v] \in healed
+               /\ UNCHANGED vars
+          ELSE /\ \/ l.v = miss[ddisk[l.n]][l.c]
+                  \/ IvOfV(l.v) = IvAt(l.l, ChunkPG[l.c]) /\ l.v <= pv[l.l][l.c]
+               /\ Recover(l.l, ChunkPG[l.c], l.c, ddisk[l.n])
     \/ /\ l.k = "reported"
        /\ IF ivs[l.p][l.iv].lv = 0 \/ [p |-> l.p, k |-> l.iv] \in recd
           THEN UNCHANGED vars
-          ELSE ReportRecovered(l.n, l.p)
+          ELSE IvAt(l.n, l.p) = l.iv /\ ReportRecovered(l.n, l.p)
     \/ /\ l.k = "ask"
        /\ IF reqIv[l.p] = l.iv
           THEN UNCHANGED vars
-          ELSE AskNext(l.n, l.p) \/ CounterOut(l.n, l.p)
+          ELSE IvAt(l.n, l.p) = l.iv /\ (AskNext(l.n, l.p) \/ CounterOut(l.n, l.p))
     \/ /\ l.k = "committed"
        /\ [c |-> l.c, v |-> l.v] \in ackd
        /\ UNCHANGED vars
     \/ /\ l.k = "peer"
        /\ pr[l.n][l.p].iv = l.iv
-       /\ \A d \in l.j : CanAnswer(d, l.p, l.iv)
        /\ ReplyMatches(l)
-       /\ Peer(l.n, l.p)
+       /\ PeerOpen(l.n, l.p)
+       /\ l.j \subseteq PeerElig(l.n, l.p)
+       /\ PersistsAfter(l) \in PeerPersists(l.n, l.p)
+       /\ PeerOn(l.n, l.p, l.j, PersistsAfter(l))
        /\ KeptMatches(l)
     \/ /\ l.k = "persisted"
        /\ \E x \in dec : x.p = l.p /\ x.k = l.iv
        /\ ~\E a \in act : a.p = l.p /\ a.k = l.iv
+       /\ persIv[l.d][l.p] = l.iv
        /\ UNCHANGED vars
     \/ /\ l.k = "activate"
        /\ pr[l.n][l.p].iv = l.iv
+       /\ \A d \in UpIn(l.p, l.iv) : persIv[d][l.p] = l.iv
        /\ Activate(l.n, l.p)
 
-TraceInit == Init /\ line = 1
+TraceInit == Init /\ line = 1 /\ healed = {}
 
 TraceNext ==
     /\ line <= Len(Trace)
     /\ Line(Trace[line])
     /\ line' = line + 1
+    /\ healed' = IF Trace[line].k = "recovered" /\ miss[ddisk[Trace[line].n]][Trace[line].c] # NoMiss
+                 THEN healed \cup {[c |-> Trace[line].c, v |-> Trace[line].v]}
+                 ELSE healed
 
-TraceSpec == TraceInit /\ [][TraceNext]_<<vars, line>>
+TraceSpec == TraceInit /\ [][TraceNext]_<<vars, line, healed>>
 
 TraceIncomplete == line <= Len(Trace)
+
+\* Vers, ackd, dec and tbl only grow and what these read of them never changes,
+\* so a break stays: each is checked once, at the end of the trace, since on
+\* every state a long trace takes hours. A trace stopped by a line evaluates
+\* none of them.
+AtEndCommitted == line <= Len(Trace) \/ NothingCommittedDropped
+AtEndOneWrite == line <= Len(Trace) \/ OneWritePerVersion
+AtEndMerges == line <= Len(Trace) \/ MergesOnKept
+AtEndTables == line <= Len(Trace) \/ TablesForward
 =============================================================================

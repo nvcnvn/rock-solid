@@ -127,6 +127,8 @@ const (
 	OutAccepted
 	// OutMemberFail, a member refusing a version or failing to log it: chunk version.
 	OutMemberFail
+	// OutPast is a past interval of the OutEntry before it: pg interval minlive. Its members follow as OutMember.
+	OutPast
 	numNames
 )
 
@@ -223,6 +225,7 @@ var schemas = [numNames]schema{
 	OutFormat:         {"Format", KindOutput, []field{fDisk}},
 	OutAccepted:       {"Accepted", KindOutput, []field{fChunk, fVer}},
 	OutMemberFail:     {"MemberFail", KindOutput, []field{fChunk, fVer}},
+	OutPast:           {"PastInterval", KindOutput, []field{fPG, fIv, {"minlive", typeNum}}},
 }
 
 // Kind is the kind of record the name belongs to, or 0 for an unknown name.

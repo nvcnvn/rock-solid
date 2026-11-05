@@ -72,6 +72,12 @@ func TableRecords(dst []trace.Record, prev, next *Table) []trace.Record {
 			}
 			dst = append(dst, trace.Record{Name: trace.OutMember, Fields: [trace.MaxFields]uint64{pgField(x.PG), uint64(m.Disk), uint64(m.Mark), leaving}})
 		}
+		for _, past := range x.Entry.Past {
+			dst = append(dst, trace.Record{Name: trace.OutPast, Fields: [trace.MaxFields]uint64{pgField(x.PG), uint64(past.Interval), uint64(past.MinLive)}})
+			for _, m := range past.Members {
+				dst = append(dst, trace.Record{Name: trace.OutMember, Fields: [trace.MaxFields]uint64{pgField(x.PG), uint64(m.Disk), uint64(m.Mark), 0}})
+			}
+		}
 	}
 	return dst
 }

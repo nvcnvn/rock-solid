@@ -1,7 +1,8 @@
 #!/bin/bash
 # Spec conformance: runs the simulator's conformance traces and has TLC 1.7.4 check each is a behavior
 # of models/epoch/epoch.tla ("Spec conformance" in docs/test-scenarios.md). Not part of lint or CI.
-#   scripts/conform.sh                  every trace of TestConform*
+#   scripts/conform.sh                  every trace of TestConform*, or of the test RUN names, seeded
+#                                       ones over COUNT seeds (default 10) from FIRST (default 0)
 #   scripts/conform.sh file.trace ...   those traces alone
 #   scripts/conform.sh plants           traces can fail: on each of COUNT seeds (default 10) from FIRST
 #                                       (default 0) whose unplanted trace passes, each plant of PLANTS
@@ -35,7 +36,7 @@ data() {
 	fi
 }
 
-# check has TLC take the data module of trace $1, saving its verdict as $dir/verdict: "ok ...", or the line no state could take.
+# check has TLC take the data module of trace $1, saving its verdict as $dir/verdict: "ok ...", the safety invariant a line broke, or the line no state could take. A check with no verdict is not kept, since a longer limit may give one.
 check() {
 	name=$(basename "$1" .trace)
 	dir=$tmp/check/$name
@@ -51,27 +52,35 @@ check() {
 	start=$SECONDS
 	(cd "$dir" && perl -e 'alarm shift; exec @ARGV' "${TLC_SECONDS:-400}" java -Xmx"${HEAP:-2g}" -XX:+UseSerialGC -cp "$jar" tlc2.TLC -workers 1 -config trace_epoch.cfg trace_epoch.tla) >"$dir/out" 2>&1 || true
 	secs=$((SECONDS - start))
-	if grep -q 'Invariant TraceIncomplete is violated' "$dir/out"; then
+	broken=$(sed -n 's/^Error: Invariant \([A-Za-z]*\) is violated.*/\1/p' "$dir/out" | head -1)
+	depth=$(sed -n 's/.*depth of the complete state graph search is \([0-9]*\).*/\1/p' "$dir/out")
+	if [ "$broken" = TraceIncomplete ]; then
 		echo "ok $total lines, ${secs}s" >"$dir/verdict"
+	elif [ -n "$broken" ]; then
+		at=$(($(sed -n 's/^\/\\ line = \([0-9]*\)$/\1/p' "$dir/out" | tail -1) - 1))
+		{
+			echo "invariant $broken broken by line $at of $total, ${secs}s"
+			steps "$dir/trace_data.tla" | sed -n "${at}p"
+		} >"$dir/verdict"
+	elif [ -n "$depth" ]; then
+		{
+			echo "no step for line $depth of $total, ${secs}s"
+			steps "$dir/trace_data.tla" | sed -n "${depth}p"
+		} >"$dir/verdict"
 	else
-		depth=$(sed -n 's/.*depth of the complete state graph search is \([0-9]*\).*/\1/p' "$dir/out")
-		if [ -n "$depth" ]; then
-			{
-				echo "no step for line $depth of $total, ${secs}s"
-				steps "$dir/trace_data.tla" | sed -n "${depth}p"
-			} >"$dir/verdict"
-		else
-			{
-				echo "no verdict after ${secs}s"
-				tail -20 "$dir/out"
-			} >"$dir/verdict"
-		fi
+		{
+			echo "no verdict after ${secs}s"
+			tail -20 "$dir/out"
+		} >"$dir/verdict"
+		rm -f "$dir/key"
+		return 1
 	fi
 	echo "$key" >"$dir/key"
 	grep -q '^ok' "$dir/verdict"
 }
 
 if [ "${1:-}" = plants ]; then
+	rm -f "$tmp"/traces/*
 	CONFORM_DIR=$tmp/traces CONFORM_PLANTS=${PLANTS:-} GOMEMLIMIT=4GiB go test -p 4 ./internal/chunkstore -run '^TestPlantsKeepTraces$' \
 		-seeds.first "${FIRST:-0}" -seeds "${COUNT:-10}"
 	go build -o "$tmp/tracedata" ./tools/tracedata
@@ -104,6 +113,8 @@ if [ "${1:-}" = plants ]; then
 			esac
 			if check "$f"; then
 				echo "$name: PASSED, fired at line $first, $(cat "$tmp/check/$name/verdict"), stop: $stop"
+			elif grep -q '^no verdict' "$tmp/check/$name/verdict"; then
+				echo "$name: NO VERDICT, fired at line $first, $(head -1 "$tmp/check/$name/verdict"), stop: $stop"
 			else
 				echo "$name: rejected, fired at line $first, stop: $stop: $(cat "$tmp/check/$name/verdict" | cut -c1-200 | tr '\n' ' ')"
 			fi
@@ -113,7 +124,9 @@ if [ "${1:-}" = plants ]; then
 fi
 
 if [ $# -eq 0 ]; then
-	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -p 4 -run "${RUN:-TestConform}" ./internal/chunkstore
+	rm -f "$tmp"/traces/*
+	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -p 4 -run "${RUN:-TestConform}" ./internal/chunkstore \
+		-seeds.first "${FIRST:-0}" -seeds "${COUNT:-10}"
 	set -- "$tmp"/traces/*.trace
 fi
 go build -o "$tmp/tracedata" ./tools/tracedata

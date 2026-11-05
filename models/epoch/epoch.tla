@@ -666,51 +666,63 @@ CanStall(n, p, k) ==
 \* the members in P do, and the rest at activation (Activate), which a primary
 \* that restarts or moves on never reaches. Where nothing can stop the
 \* interval, every member persists and the primary activates at the decision.
-Peer(n, p) ==
+PeerElig(n, p) ==
     LET k == IvAt(n, p)
-        L == LaAt(n, p)
-        Elig == {d \in Mem(p, k) \cup UNION {Mem(p, i) : i \in L..k - 1} : CanAnswer(d, p, k)}
+    IN {d \in Mem(p, k) \cup UNION {Mem(p, i) : i \in LaAt(n, p)..k - 1} : CanAnswer(d, p, k)}
+
+PeerOpen(n, p) ==
+    LET k == IvAt(n, p)
     IN /\ Running(n)
        /\ pr[n][p].iv = k
        /\ ~pr[n][p].act
        /\ PrimNode(p, k) = n
        /\ ~Decided(n, p, k)
        /\ LiveCnt(p, k) >= MinLiveOf(p, k)
-       /\ UpIn(p, k) \subseteq Elig
-       /\ \E J \in SUBSET Elig :
-          LET K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c) ELSE 0]
-              \* The members the decision counts as holding the kept version:
-              \* the recovery sources it reached, and the live members it
-              \* leaves off the missing list.
-              src(c) == {d \in J : Newest(dlog[d][c]) = K[c] /\ miss[d][c] = NoMiss}
-                        \cup {d \in UpIn(p, k) : Entry(d, c, K[c]) = NoMiss}
-              torn == \E c \in ChunksOf(p) : K[c] # 0 /\
-                        \E s \in src(c) : Content(c, dlog[s][c]) # Content(c, Chain(c, K[c]))
-              lists == [d \in UpIn(p, k) |-> [c \in ChunksOf(p) |-> Entry(d, c, K[c])]]
-          IN /\ UpIn(p, k) \subseteq J
-             /\ \A i \in NeedIv(p, k, L) : J \cap UpIn(p, i) # {}
-             /\ LapseFor(J, p, k)
-             /\ dec' = dec \cup {[p |-> p, k |-> k, n |-> n, r |-> run[n], kept |-> K,
-                                  own |-> {c \in ChunksOf(p) : miss[PrimDisk(p, k)][c] # NoMiss}]}
-             /\ bad' = IF torn THEN bad \cup {"torn"} ELSE bad
-             /\ pv' = [pv EXCEPT ![n] = [c \in Chunk |-> IF c \in ChunksOf(p) THEN K[c] ELSE pv[n][c]]]
-             /\ \E P \in IF CanStall(n, p, k) THEN SUBSET UpIn(p, k) ELSE {UpIn(p, k)} :
-                  IF Bug("ActivateBeforeDurable")
-                  THEN /\ mrecv' = [d \in Disk |-> IF d \in UpIn(p, k)
-                                       THEN mrecv[d] \cup {[p |-> p, k |-> k, ent |-> lists[d]]}
-                                       ELSE mrecv[d]]
-                       /\ Activated(n, p, k, K)
-                       /\ UNCHANGED <<miss, persIv>>
-                  ELSE IF CanStall(n, p, k)
-                  THEN /\ PersistAll(P, p, k, lists)
-                       /\ reports' = IF Bug("ReportBeforeActivate") THEN reports \cup {[p |-> p, k |-> k]}
-                                     ELSE reports
-                       /\ UNCHANGED <<pr, act, mrecv, pend, refd, ackd, wst>>
-                  ELSE /\ PersistAll(P, p, k, lists)
-                       /\ Activated(n, p, k, K)
-                       /\ UNCHANGED mrecv
+       /\ UpIn(p, k) \subseteq PeerElig(n, p)
+
+PeerPersists(n, p) ==
+    LET k == IvAt(n, p)
+    IN IF CanStall(n, p, k) THEN SUBSET UpIn(p, k) ELSE {UpIn(p, k)}
+
+PeerOn(n, p, J, P) ==
+    LET k == IvAt(n, p)
+        L == LaAt(n, p)
+        K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c) ELSE 0]
+        \* The members the decision counts as holding the kept version:
+        \* the recovery sources it reached, and the live members it
+        \* leaves off the missing list.
+        src(c) == {d \in J : Newest(dlog[d][c]) = K[c] /\ miss[d][c] = NoMiss}
+                  \cup {d \in UpIn(p, k) : Entry(d, c, K[c]) = NoMiss}
+        torn == \E c \in ChunksOf(p) : K[c] # 0 /\
+                  \E s \in src(c) : Content(c, dlog[s][c]) # Content(c, Chain(c, K[c]))
+        lists == [d \in UpIn(p, k) |-> [c \in ChunksOf(p) |-> Entry(d, c, K[c])]]
+    IN /\ UpIn(p, k) \subseteq J
+       /\ \A i \in NeedIv(p, k, L) : J \cap UpIn(p, i) # {}
+       /\ LapseFor(J, p, k)
+       /\ dec' = dec \cup {[p |-> p, k |-> k, n |-> n, r |-> run[n], kept |-> K,
+                            own |-> {c \in ChunksOf(p) : miss[PrimDisk(p, k)][c] # NoMiss}]}
+       /\ bad' = IF torn THEN bad \cup {"torn"} ELSE bad
+       /\ pv' = [pv EXCEPT ![n] = [c \in Chunk |-> IF c \in ChunksOf(p) THEN K[c] ELSE pv[n][c]]]
+       /\ IF Bug("ActivateBeforeDurable")
+          THEN /\ mrecv' = [d \in Disk |-> IF d \in UpIn(p, k)
+                               THEN mrecv[d] \cup {[p |-> p, k |-> k, ent |-> lists[d]]}
+                               ELSE mrecv[d]]
+               /\ Activated(n, p, k, K)
+               /\ UNCHANGED <<miss, persIv>>
+          ELSE IF CanStall(n, p, k)
+          THEN /\ PersistAll(P, p, k, lists)
+               /\ reports' = IF Bug("ReportBeforeActivate") THEN reports \cup {[p |-> p, k |-> k]}
+                             ELSE reports
+               /\ UNCHANGED <<pr, act, mrecv, pend, refd, ackd, wst>>
+          ELSE /\ PersistAll(P, p, k, lists)
+               /\ Activated(n, p, k, K)
+               /\ UNCHANGED mrecv
        /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
                       dlog, failed, pin, known, rm, vers, sends, dmn, rw, clockVars, raftVars>>
+
+Peer(n, p) ==
+    /\ PeerOpen(n, p)
+    /\ \E J \in SUBSET PeerElig(n, p), P \in PeerPersists(n, p) : PeerOn(n, p, J, P)
 
 \* The members still to persist do so, as they could have at the decision:
 \* their logs and lists have not changed since.
