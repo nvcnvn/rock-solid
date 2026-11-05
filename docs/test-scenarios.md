@@ -4005,38 +4005,38 @@ traces and data. A failure names the line no state could take. Each trace starts
 | `Activate` | `Activate` | `tryActivate` |
 | `Crash` | `Restart` | Own records not reported durable may be lost (`mayfail`, by `OwnFail`) |
 | `Format` | `Format` | |
-| `Recovered`, `Reported`, `Ask`, `MemberFail` | `Recover`, `ReportRecovered`, `AskNext` or `CounterOut`, `MemberFail` | Mapped, not yet proven by a passing trace that reaches them |
+| `Recovered`, `Reported`, `Ask` | `Recover`, `ReportRecovered`, `AskNext` or `CounterOut` | Mapped, not yet proven by a passing trace that reaches them |
+| `MemberFail` | `MemberFail` | The run's plan gives it no fault budget, since no traced run injects a disk fault: a refusal of a version of the member's interval has no step |
 
 The record kinds of the event loop, such as `NetRecv` and `DiskDone`, have no spec action: they are
 the machine's steps below the protocol's, and the records above say what those steps did.
 
-Results at this commit, seeds 0 to 9 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`, the
-sample `seeds.Run` gives that test by default:
+Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`:
 
 | Trace | Lines | Result | Seconds |
 | --- | --- | --- | --- |
 | `scripted-clean` | 12 | passes | 1 |
-| `scripted-primary-change` | 33 | passes | 1 |
-| `primaries-6` | 291 | passes, across a restart | 3 |
-| `primaries-1` | 513 | passes, across a restart | 147 |
-| `primaries-3`, `-4`, `-5`, `-9` | 549 to 789 | stop at `Order`, discrepancy 6 | 1 to 12 |
-| `primaries-2`, `-8` | 499 to 592 | stop at `MemberFail`, discrepancy 7 | 1 |
-| `primaries-0` | 638 | stops at the run's last table, discrepancy 8 | 10 |
-| `primaries-7` | 664 | stops at `Peer`, discrepancy 9 | 1 |
+| `scripted-primary-change` | 34 | passes | 1 |
+| `primaries-6`, `-18`, `-23`, `-36` | 291 to 608 | pass, across a restart | 3 to 7 |
+| `primaries-1`, `-11` | 513, 823 | pass, across a restart | 141, 222 |
+| 19 seeds | | stop at `Order`, discrepancy 6 | 1 to 26 |
+| 8 seeds | | stop at `MemberFail`, discrepancy 7 | 1 to 10 |
+| `primaries-0`, `-26` | 638, 739 | stop at a renewal no primary asked for, discrepancy 8 | 9 |
+| `primaries-7`, `-31` | 664, 666 | stop at `Peer`, discrepancy 9 | 1, 13 |
+| `primaries-27`, `-38` | 763, 462 | stop at `Persisted`, discrepancy 10 | 4, 2 |
+| `primaries-22` | 534 | stops at `Recovered`, discrepancy 11 | 3 |
 
-A trace's time follows how many `maydeliver` and `mayfail` branches stay alive, not its length:
-`primaries-6` takes 3 s and `primaries-1`, with 62 `mayfail` lines, 147 s. Two passing seeds are too
-few to say how many seeds a commit can check.
+Six seeds of 40 pass: 1, 6, 11, 18, 23 and 36. A trace's time follows how many `maydeliver` and
+`mayfail` branches stay alive, not its length: `primaries-6` has one `mayfail` line and takes 3 s,
+`primaries-1` 62 and 141 s.
 
-Not yet run: any plant of the rule map, so traces can fail is unknown, along with whether the
-`Persisted` and `Accepted` guards catch what they are meant to; `TestReplicatedWritesSurviveFaults`;
-and the lease half. Lines the two passing seeds reached: `Membership` by `edit`, `mark` and `rotate`,
-`Fold`, `Renew`, `Adopt`, `Send`, `Order`, `Deliver`, `Peer`, `Activate`, `Restart`. `recovered`,
-`reported` and `ask` lines occur, but each can be a stutter and TLC does not report which branch a
-line took, so `Recover`, `ReportRecovered`, `AskNext` and `CounterOut` count as unproven, as does
-`OwnFail` behind `mayfail`. No passing line reached `Format`, `Add`, `Remove`, `Replace` or
-`MemberFail`. `Tick`, `Die`, `Refuse`, `Reboot`, `Persist`, `OpenGrant`, `OpenLapse`, `LeaseSteps`,
-Raft's actions and the other fault actions of `Choices` have no mapping.
+Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half. Lines the passing seeds reached:
+`Membership` by `edit`, `mark` and `rotate`, `Fold`, `Renew`, `Adopt`, `Send`, `Order`, `Deliver`,
+`Peer`, `Activate`, `Restart`. `recovered`, `reported` and `ask` lines occur, but each can be a stutter
+and TLC does not report which branch a line took, so `Recover`, `ReportRecovered`, `AskNext` and
+`CounterOut` count as unproven, as does `OwnFail` behind `mayfail`. No passing line reached `Format`,
+`Add`, `Remove`, `Replace` or `MemberFail`. `Tick`, `Die`, `Refuse`, `Reboot`, `Persist`, `OpenGrant`,
+`OpenLapse`, `LeaseSteps`, Raft's actions and the other fault actions of `Choices` have no mapping.
 
 | # | What | Class | How settled |
 | --- | --- | --- | --- |
@@ -4045,10 +4045,61 @@ Raft's actions and the other fault actions of `Choices` have no mapping.
 | 3 | `Activate`'s record came after the held writes it released were ordered | logging | The record moved to where the lead goes active |
 | 4 | A member takes a version into its store, then adopts a table, then logs it, while `Deliver` needs the interval | compression | `Accepted` opens the version, `maydeliver` lets it land before `Adopt` |
 | 5 | A crash loses a version from the primary's own log that `Order` had logged | compression | `mayfail` before `Restart`, by `OwnFail`; a version every member logged is not in `pend`, so a run needing that would fail |
-| 6 | A primary that dropped its own version lists the chunk from this peering yet merges on the kept image, as `lacks` allows, where `Order` waits for `miss[own][c] = NoMiss` and merges on `Newest(dlog)`, the dropped version | spec, open | Read from seed 9's trace and the code, and not yet confirmed by printing the state; seeds 3, 4 and 5 stop at the same kind of line and were not read. A patch would tell a gated, dropped version from a mapped one, with a negative beside `neg-merge-before-kept` |
-| 7 | A member refuses a version of its interval in a case `MemberFail` does not take; the code refuses a version it may hold after a restart, and `MemberFail` needs it unlogged | undiagnosed, open | Next to read |
-| 8 | The test's last table asks a renewal with no primary asking, which `Reactive` needs | logging, open | Read from the test, not confirmed. End the trace before that table, or count it |
-| 9 | One reply or kept version differs from the spec's at seed 7's first `Peer` | undiagnosed, open | Next to read |
+| 6 | A primary that dropped its own version lists the chunk from this peering yet merges on the kept image, as `lacks` allows, where `Order` waits for `miss[own][c] = NoMiss` and merges on `Newest(dlog)`, the dropped version | spec, open | Printed at all 19 seeds: each is a partial-block write pinned to an active primary with `miss[own][c]` set. A patch would tell a gated, dropped version from a mapped one, with a negative beside `neg-merge-before-kept` |
+| 7 | A member refuses a version of its interval in a run with no disk fault; the code refuses a version it may hold after a restart | undiagnosed, open | Next to read. `MemberFail` has no fault budget in a trace (see below), and a settled case gets its own step |
+| 8 | A table asks a renewal with no primary asking, which `Reactive` needs | logging, open | Read from the test, not confirmed. End the trace before that table, or count it |
+| 9 | One reply or kept version differs from the spec's at a seed's `Peer` | undiagnosed, open | Next to read |
+| 10 | A member persists a list twice, the second after the interval activated, which the `Persisted` stutter refuses | compression, open | Read at seed 38. The guard needs to tell a repeat from a first persist |
+| 11 | A `Recovered` record with no source `Recover` allows | undiagnosed, open | Next to read, at seed 22 |
+
+### Traces can fail in the epoch model's check
+
+`scripts/conform.sh plants` runs `TestPlantsKeepTraces` over `conformPlants`, the plants of the
+`chunkstore.*` rows of the [rule map](#model-gate) and of `TestPlantedPeeringBugsBreakTheOracle`, each in
+the primary-change run with every invariant checked. On a seed whose unplanted trace passes it
+compares the planted trace's lines with the baseline's: the same lines mean the plant did not fire,
+which is no evidence. Otherwise TLC checks the trace. `FIRST` and `COUNT` choose the seeds and
+`PLANTS` the plants. A run stops at its first broken invariant, keeping the trace up to there and saying
+which broke in a `.stop` file. `CONFORM_RUNON=1` runs on past the break, needed when the invariant
+sees a step before its record: `sameMembers`, `sendEpoch` and `keepID` passed every trace cut at the
+break. A rejection counts once the failing line has been read to be the planted behaviour.
+
+Results over seeds 1, 6, 11, 18, 23 and 36, the seeds that pass of 40; each line number is the line TLC
+could not take at that seed:
+
+| Plant | Rule | Fired at | Result | Guard |
+| --- | --- | --- | --- | --- |
+| `activateEarly` | `neg-activate-before-durable` | all 6 | Caught, seeds' invariants holding: 93, 74, 51, 116, 142, 35 | `Persisted`: a member's first persist comes after `Activate` |
+| `mergeWhileLacking` | `neg-merge-before-kept` | 6 | Caught, invariants holding: 82 | `Order`: `miss[own][c] = NoMiss` |
+| `relistNever`, `clearListed` | `neg-peering-clears-missing` | 6 | Caught, invariants holding: 134 | `Recover`: the spec keeps the list the code cleared, so no source is left |
+| `peerInOldInterval` | `neg-restart-same-interval` | 1, 6, 11, 18, 23 | Caught: 59, 55, 101, 87; 23 stops at `Order` with the write lost as `neverAsk`'s is | `peer`: `pr[n][p].iv = iv`, `pr` empty after the restart |
+| `ownInterval` | `neg-decide-by-own-interval` | 1, 18 | Caught: 359, 154 | `KeptMatches` |
+| `reportDecided` | `neg-report-before-activate` | all 6 | Caught: 65, 58, 45, 98, 135, 29 | `Fold`: no report yet |
+| `removeOnActivation` | `neg-remove-before-recovered` | 18 | Caught: 508 | `Remove`: no `recd` for the interval |
+| `oldReport` | `neg-accept-old-report` | all 6 | Caught at 18 and 11: 471, 574. At 1, 6, 23 and 36 it only drops a `reported` line, no removal: passes, rule not reached | `Remove`: no `recd` for the interval |
+| `sameMembers` | `neg-compare-member-lists` | 1, 6, 11, 18, 23 | Caught, running on: 46, 41, 577, 79, 50 | `logged`: `Accepts`, the interval differs. The `Accepted` record is not what catches it |
+| `keepID` | `neg-keep-disk-id` | 11, 23 | Caught, running on: 92, 56 | `plan`: the spec's `Format` gave the disk a new ID, so a table holding the old one has no step |
+| `sendEpoch` | `neg-compare-table-epochs` | all 6 | Caught, running on, at the first refusal: 97, 200, 127, 175 at seeds 36, 23, 18, 11. Seeds 6 and 1 ran out of a 2 GB heap, no verdict | `mfail`: a refusal with no fault budget. Until the budget went, each passed as a disk fault and stopped later at discrepancy 6. The `Accepted` record is not what catches it |
+| `neverAsk` | `neg-restart-no-ask` | 1, 6, 11, 18, 23 | Not caught for its rule: 117, 167, 187 stop at `Order` because `Send` lost a write to a primary with an empty `pr`, which the code holds; 135 at seed 6 is discrepancy 10; seed 23 gave no verdict in 300 s | An `ask` that never comes is no line |
+| `recoverSelfOnly` | none | all 6 | Passes at 6 and 23; 467 and 546 are discrepancy 10, 698 is an unread `Peer` reply | A recovery that never comes is no line |
+| `coverAtRead` | `neg-recovery-covers-at-read` | 1, 11, 18, 23 | Fired, passes | Too loose: `recovered` names a chunk, so `Recover`'s cover is unobserved |
+| `settleSubset` | none | 6 | Fired, passes | Too loose: the diff is one missing `committed` line, and `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record |
+| `lastActivatedOnly` | `neg-reach-last-activated-only` | 11 | Fired, passes; only a `persisted` line moves | The rule is about leases, which no line observes |
+| `freshGrantNoCheck` | `neg-fresh-grant-no-table-check` | 18 | Fired, passes; only `persisted` lines move | The same |
+| `resendNewestFirst` | `neg-log-out-of-order` | none | No evidence: fires at 12 of 40 seeds, all failing their baseline | |
+| `stopPreviousOnly` | `neg-stop-previous-only` | none | No evidence: fires at 2 of 40, both failing | |
+| `fenceOnArrival`, `reorderAfterOther`, `settleByNumber`, `readBelowMinLive` | `neg-fence-on-arrival`, `neg-reorder-after-other-primary`, `neg-settle-by-number`, `neg-read-below-min-live` | none | No evidence: fires at 0 of 40 in this run. Their tests are other workloads, which keep no trace | |
+
+Traces can fail is shown for eleven of the 21 rules, four of them on a seed whose invariants hold to
+the end of the run: `activateEarly`, `mergeWhileLacking`, `relistNever` and, at seed 11,
+`peerInOldInterval`. Open: `coverAtRead`, which needs a record of the
+blocks a recovery write leaves out; `neverAsk`, an omission no line can name; the two lease rules, with
+the lease half; and the six that never fired on a passing seed. Of the two oracle plants with no rule,
+`settleSubset` needs a record of what `Settle` answered.
+`mayfail` and `maydeliver` let no plant through: every planted step the check missed lies in a variable
+or record no line reads. A version a primary drops right after `OutOrder`, by `r.fail` in `ordered`,
+stays in `ownOpen` and becomes a `mayfail` at a later crash; that path needs a lead that is asking or
+has left the interval, which `Order`'s guards refuse first, so it loosens no passing trace.
 
 ## Models in CI
 
