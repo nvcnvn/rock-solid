@@ -4045,11 +4045,10 @@ trace a line stopped evaluates only those checked on every state. A trace's time
 `maydeliver` and `mayfail` branches stay alive, not its length.
 
 Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half. Lines the passing seeds reached:
-`Membership` by `edit`, `mark` and `rotate`, `Fold`, `Renew`, `Adopt`, `Send`, `Order`, `Deliver`,
-`Peer`, `Activate`, `Restart`. `recovered`, `reported` and `ask` lines occur, but each can be a stutter
+`Membership` by `edit`, `mark`, `rotate`, `add`, `remove` and `replace`, `Fold`, `Renew`, `Adopt`, `Send`,
+`Order`, `Deliver`, `Peer`, `Activate`, `Restart`, `Format`. `recovered`, `reported` and `ask` lines occur, but each can be a stutter
 and TLC does not report which branch a line took, so `Recover`, `ReportRecovered`, `AskNext` and
-`CounterOut` count as unproven, as does `OwnFail` behind `mayfail`. No passing line reached `Format`,
-`Add`, `Remove`, `Replace` or `MemberFail`. `Tick`, `Die`, `Refuse`, `Reboot`, `Persist`, `OpenGrant`,
+`CounterOut` count as unproven, as does `OwnFail` behind `mayfail`. No passing line reached `MemberFail`. `Tick`, `Die`, `Refuse`, `Reboot`, `Persist`, `OpenGrant`,
 `OpenLapse`, `LeaseSteps`, Raft's actions and the other fault actions of `Choices` have no mapping.
 
 | # | What | Class | How settled |
