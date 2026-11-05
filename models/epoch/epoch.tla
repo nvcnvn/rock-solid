@@ -1966,6 +1966,9 @@ PeerPlans ==
     {RemovedAndBack, PrimaryBack, MaintKeepsPrimary, PrimaryAway, ReplicaThenPrimary,
      PrimaryThenMaint, BelowMinLive, MaintMerges, LateReport}
 RestartPlans == {Reformatted, ReplicaThenMaint, Restarted, DownBackMoved}
+\* ci-restarts splits them, each under the 300 s budget.
+RestartPlansMoved == {DownBackMoved}
+RestartPlansStill == RestartPlans \ RestartPlansMoved
 \* The liveness variant that breaks renewals runs the restart plan alone.
 RestartedPlans == {Restarted}
 

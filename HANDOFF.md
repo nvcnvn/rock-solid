@@ -12,7 +12,7 @@ Run:
 - To see why a line fails, add `PrintT(ToString(...))` in a disjunct of `Line`, in a copy of
   `trace_epoch.tla` in the check's directory, and filter TLC's output for it.
 - `scripts/models.sh ci epoch` on 4 workers takes about 32 minutes: don't run it beside trace checks.
-  `ci-restarts` took 293 s of its 300 here, so a state more may need its largest plan moved.
+  It passes, 60 of 60. `ci-restarts-moved` takes 259 s of its 300.
 
 State: 30 seeds of 40 pass. No unplanted seed broke a safety invariant.
 

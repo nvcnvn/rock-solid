@@ -3223,6 +3223,7 @@ nodes without finishing.
 | --- | --- | --- |
 | `ci-peering` | 3 | Both chunks; lease expiry left open, except that a grantor that answers peering of an interval holds no live grant to that interval's old primary; the plans with membership changes alone, but the largest |
 | `ci-restarts` | 3 | As `ci-peering`, with the plans that restart a primary or format a disk, under which a decision can stop short of activation, and the largest membership plan, a member down and back and then the primary moved to it, at 1.5 million states alone, kept apart from `ci-peering` so that each fits its 5 minutes |
+| `ci-restarts-moved` | 3 | As `ci-restarts`, with its plan `DownBackMoved`, which would pass that configuration's 300 s |
 | `ci-moves` | 3 | As `ci-peering`, with the move plans: PG 2's replica and then its primary moved to node 1; the replica's move with the leaving member marked down before its replacement recovers, or with a process restart; the replica's move with primary 2 put in `maintenance` and back before the removal; and the replica's move with a refill before the removal, a disk formatted again replacing node 1's. Each sends only the daemon's one write W |
 | `ci-faults` | 3 | As `ci-peering`, with a sixth table and a second fault; the plans that fail a version at a member or on the primary's own log, alone, with the primary moved, with a member or the primary marked down, and with one in `maintenance` and back; a member's failure with a process restart; a primary moved away and back; the plans that format a disk around peering and around recovery; and the one that raises `min_live` past an interval that ran below it |
 | `ci-asks` | 3 | As `ci-peering`, with the failure plans that hold no restart or format, under fairness, for the properties that every interval a failure ended is asked past and every client is answered |
@@ -4128,9 +4129,8 @@ job lists the models and `deep` configurations, and every other job runs once pe
   it.
 - A rule removed from a spec, with no negative configuration changed, fails that model's job: some
   `ci` configuration or negative variant fails and its trace is printed.
-- A configuration past 300 s on the runner fails the job. `ci-restarts` takes 255 s of 300 on the
-  M4 Pro; on the runner it either fits, or its largest plan moves to a `ci` configuration of its
-  own.
+- A configuration past 300 s on the runner fails the job. `ci-restarts` holds three plans and
+  `ci-restarts-moved` the fourth, since together they passed the budget on the M4 Pro.
 - Nightly, and when started by hand, one job per model runs `scripts/models.sh sim` with
   `SIM_SECONDS` 3,600, split evenly among the model's `ci` configurations, and prints every seed; a
   failing seed's printed replay reproduces its trace.
