@@ -1585,7 +1585,7 @@ call, time from `ctx.Now`:
 | 16 and more | 1, idle (no pass starts) | not charged | admitted |
 | 15 | 1 | not charged | admitted |
 | 14 | 2 | not charged | admitted |
-| 9 | 2 | not charged | admitted |
+| 9 | One reply or kept version differs from the spec's at a seed's `Peer` | compression at seed 7, open | Seed 7: disk 3 answered, then its node formatted, then the decision came, which `Peer`, one step, cannot take. Seeds 31 and 34, a member back in an interval after a mark, have no format near and are unread |
 | 8 | The test's last step asks a new interval with no primary asking, so the table is a `Renew` `Reactive` refuses | logging | Settled: the harness records its ask, and `tracedata` maps its table to a planned `Edit` that changes nothing, which `Edit` allows, rather than a `Renew` |
 | 4 | 2 | at 0.75 × | as tokens allow |
 | 1 | 2 | at 0.5625 × | as tokens allow |
@@ -3448,8 +3448,9 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 9 | No node's table epoch or interval number goes backwards; no PG's last activated interval goes down, so a late report for interval 2, folded after 3 was recorded, changes nothing; and a table's last activated interval did activate | `TablesForward`, `Monotonic` | "no node's table epoch or PG interval number goes backwards" and "no PG's last activated interval goes down, and every activation a table records happened" |
 | 10 | A node pair whose raw rates differ by up to 4%, with no pause, reboot, network fault or refusal since first contact, and whose holder ended no leases on a step-check trip from a pair a fault touched, holds a lease within `rate_gap` (plus rounding, at the model's zero round trips) of first contact and keeps it with no step-check trip. The bound is in time, so `ci` checks it as an invariant over the model's clocks | `LeaseForms` | The lease pair run's quiet seeds: "the step check tripped between a pair no fault touched" never shows, and on 1 ms round trips a lease forms within `rate_gap` plus two round trips of the first granted request, give or take the run's 10 ms steps: with real round trips the bound is `rate_gap` plus two of them |
 | 11 | A `Recovered` record with no source `Recover` allows: a chunk no member keeps anything of, kept version 0, needs no source in `startRecovery`, and every up member listed it | spec, part open | Settled for seed 22: `Recover` needs no source when the kept version is 0, which is the code's rule. Seeds 3 and 38 stop at a `Recovered` line again, unread |
-| 12 | Peering settles: with every step that is due taken in time, every PG eventually activates its current interval, unless the interval has fewer than `min_live` live members, a live member's disk is gone, or the table bound left a restarted primary without the new interval it asked for | `PeeringSettles` | "once membership stops changing, every PG whose current interval has at least `min_live` live members on running nodes activates it" |
+| 12 | A crash leaves part of a version's records, so a member reports a version logged above its newest whole one. `keep` lists that member for the kept version, where `Entry`, with one number, leaves it off | needs a decision | The kept version is the same, since both read `whole`; the list differs, and only when `whole` is the kept version. Seen at seeds 1, 5 and 24, 3 of 1,174 replies. `r.logged = r.whole` in `ReplyMatches` stops them. Listing is the safe side, but a spec that allows it needs a torn version in `Entry` or a choice in `Peer`, so it is not patched |
 | 13 | When the leader removes a leaving member, every other member of the PG's current interval holds every acknowledged version and lists nothing: a recovered report counts only for the PG's current interval | `RemovalKeepsCopies` | "no move lowers the members of a PG holding an acknowledged version below its width" |
+| 14 | A member's refusal is recorded when the member refuses, and `Order` of a later version can come before the primary hears, where `MemberFail` and `GoneRefuses` end the interval in one step | compression, open | Seed 25. The primary's `fail` has no record to take the step at |
 | 14 | A primary serving a PG's reads, including one that keeps serving while it re-peers, returns from a chunk it lists nothing of every acknowledged write's bytes and no dropped version's: each block of what its index maps is at the newest acknowledged version that wrote it, or above, at no version a later activated decision dropped, and, in `ci-faults`, at a version acknowledged or kept. A read of a listed chunk is refused | `ReadsAcked`, `ReadsMapped` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), registered by Invariant checker (phase 1) |
 | 15 | A primary whose interval a failed version ended asks for the next in the end: with every step that is due taken in time, nothing of its PG waits for ever | `IntervalEnds` | None registered: `TestAFailureBelowACommittedVersionStillAsks` covers it as a regression test, until [Plants for the epoch model's new rules](build-checklist.md#phase-4-embedded-metastore) registers one |
 | 16 | Every client gets an answer: no version stays unanswered for ever | `AllAnswered` | None registered: `TestADemotedPrimaryMapsItsPendingVersionsAsAMember` covers it as a regression test, until the same item registers one |
@@ -4005,14 +4006,14 @@ since no line moves a lease, and so is `NoResurrectedWrite`, since no traced wri
 
 | Records | Spec action | Compression |
 | --- | --- | --- |
-| `Table`, `PGEntry`, `Member` | `Membership` or `Reactive` | `tracedata` splits a table's fold from its membership change. A reorder of a PG, with at most one mark, in one table is one `Edit`, one interval, as the code's `Next` makes it; `ci-edits` checks that action. A `table` line then compares each changed entry with the spec's: interval, last activated, members, marks, leaving member, `min_live` and past intervals, so a member changed at an unchanged interval fails. `PastInterval` records carry the past intervals |
+| `Table`, `PGEntry`, `Member` | `Membership` or `Reactive` | `tracedata` splits a table's fold from its membership change. The harness's own last ask is an `Edit` that changes nothing. A reorder of a PG, with at most one mark, in one table is one `Edit`, one interval, as the code's `Next` makes it; `ci-edits` checks that action. A `table` line then compares each changed entry with the spec's: interval, last activated, members, marks, leaving member, `min_live` and past intervals, so a member changed at an unchanged interval fails. `PastInterval` records carry the past intervals |
 | `Adopt` | `Adopt` | A repeat of the table the spec's node holds, as after a restart, which empties the code's table and leaves `ep`, is a stutter. An epoch no `Table` named stops `tracedata` |
 | `Send` | `Send` | A send the spec has disabled is a stutter, so ordering it later fails |
 | `Order` | `Order` | Logs on the primary and sends to members in one step |
 | `Accepted`, `Logged` | `Deliver` | A store's in-flight version may land before an `Adopt` or crash (`maydeliver`), and `Logged` is then a stutter |
 | `Committed` | `Ack`, inside `Deliver` | A stutter guarded on `ackd` |
 | `PeerReply`, `PeerChunk`, `Decide`, `Kept` | `Peer`, taken as `PeerOn` | `askPeers`, `peerAsked`, `answerPeers`, `mayPeer`, `peerReplied` and `decide`, with each reply compared to the spec's `Reply` at the decision. The line gives the set `J` the code decided on, and the disks that persist are those of the trace's `Persisted` lines for the interval. `logged` must equal `whole`, the one number the spec's reply has |
-| `Persisted` | `PeerOn` | `persistLists`, `persist`, `persisted`, `persistAck`, `persistAcked`: a stutter for a disk that persisted at the decision, refused once the interval activated |
+| `Persisted` | `PeerOn` | `persistLists`, `persist`, `persisted`, `persistAck`, `persistAcked`: a stutter for a disk that persisted at the decision, refused once the interval activated unless it repeats that disk's list |
 | `Activate` | `Activate` | `tryActivate`, once every up member's `Persisted` was seen, so `Activate` itself persists no list |
 | `Crash` | `Restart` | Own records not reported durable may be lost (`mayfail`, by `OwnFail`) |
 | `Format` | `Format` | |
@@ -4031,19 +4032,16 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | --- | --- | --- | --- |
 | `scripted-clean` | 12 | passes | 1 |
 | `scripted-primary-change` | 35 | passes | 1 |
-| `primaries-6`, `-18`, `-23`, `-36` | 306 to 619 | pass, across a restart | 3 to 5 |
-| `primaries-11` | 859 | passes, across a restart | 146 |
-| 17 seeds | | stop at `Order`, discrepancy 6 | 1 to 17 |
-| 8 seeds | | stop at `MemberFail`, discrepancy 7 | 1 to 4 |
-| `primaries-0`, `-26` | 661, 753 | stop at a renewal no primary asked for, discrepancy 8 | 2 to 4 |
-| `primaries-7`, `-31` | 680, 692 | stop at `Peer`, discrepancy 9 | 1 to 3 |
-| `primaries-1`, `-5`, `-24` | 531, 743, 791 | stop at `Peer`, discrepancy 12 | 1 to 72 |
-| `primaries-27`, `-38` | 791, 477 | stop at `Persisted`, discrepancy 10 | 2 to 3 |
-| `primaries-22` | 549 | stops at `Recovered`, discrepancy 11 | 3 |
+| 27 seeds | 306 to 916 | pass, across restarts and formats | 3 to 40 |
+| `primaries-11`, `-15` | 859, 897 | pass | 159, 194 |
+| `primaries-1`, `-5`, `-24` | 531, 743, 791 | stop at `Peer`, discrepancy 12 | 1 to 74 |
+| `primaries-7`, `-31`, `-34` | 680, 692, 497 | stop at `Peer`, discrepancy 9 | 1 to 5 |
+| `primaries-3`, `-38` | 564, 477 | stop at `Recovered`, discrepancy 11 | 2 to 5 |
+| `primaries-25` | 426 | stops at `Order`, discrepancy 14 | 1 |
+| `primaries-2` | 516 | no verdict in 400 s and 2 GB | 400 |
 
-Five seeds of 40 pass: 6, 11, 18, 23 and 36. No unplanted seed broke a safety invariant, though a
-trace a line stopped evaluates only those checked on every state. A trace's time follows how many
-`maydeliver` and `mayfail` branches stay alive, not its length.
+30 seeds of 40 pass. None broke a safety invariant, and each that passes ran the four invariants checked at
+its end. A trace's time follows how many `maydeliver` and `mayfail` branches stay alive, not its length.
 
 Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half. Lines the passing seeds reached:
 `Membership` by `edit`, `mark`, `rotate`, `add`, `remove` and `replace`, `Fold`, `Renew`, `Adopt`, `Send`,
