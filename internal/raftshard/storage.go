@@ -48,7 +48,11 @@ func NewStorage() *Storage { return &Storage{} }
 
 // InitialState is the hard state and the base's configuration.
 func (s *Storage) InitialState() (raftpb.HardState, raftpb.ConfState, error) {
-	return s.hs, s.base.ConfState, nil
+	hs := s.hs
+	// A Ready that moves only the commit index reaches no disk, so the base can pass the commit
+	// index of the last durable hard state, and etcd-raft refuses to start below its first index.
+	hs.Commit = max(hs.Commit, s.base.Index)
+	return hs, s.base.ConfState, nil
 }
 
 // HardState is the replica's hard state.
