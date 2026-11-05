@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"bytes"
 	"cmp"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -532,7 +533,10 @@ func (r *primaryRun) settled() {
 			break
 		}
 	}
-	c.t.Fatal("the cluster did not settle")
+	if !c.planted {
+		c.t.Fatal("the cluster did not settle")
+	}
+	c.found = cmp.Or(c.found, errors.New("the cluster did not settle"))
 }
 
 // readEach reads PG 0's chunks back, recorded, with each up member its primary in turn, so a member
@@ -565,15 +569,15 @@ func (r *primaryRun) tend() {
 	}
 }
 
-// peerPlant is a bug planted in the primary-change run and the invariant it must break.
+// peerPlant is a bug planted in the primary-change run and the invariant it must break; with none named, every invariant is checked.
 type peerPlant struct {
 	inv string
 	set func(r *primaryRun)
 }
 
 // runPrimaries runs the primary-change workload, failing t on a broken invariant registered with the
-// simulator and returning a broken end check; with a plant, it checks only the plant's invariant and
-// returns its first violation.
+// simulator and returning a broken end check; with a plant, it checks only the plant's invariant, if it
+// names one, and returns its first violation.
 func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	s := sim.New(seed, sim.DefaultSettings())
 	a := &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4},
@@ -620,7 +624,9 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	})
 	if plant != nil {
 		c.planted = true
-		c.inv.Only(plant.inv)
+		if plant.inv != "" {
+			c.inv.Only(plant.inv)
+		}
 	}
 	for range 2 {
 		pc := &primaryClient{r: r, rng: r.rng.Fork(), left: 48, pipe: 8, at: map[core.RequestID]core.Tick{}}
@@ -651,11 +657,16 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	a.asks = append(a.asks, PGInterval{pg0, e.Interval})
 	r.publish()
 	r.settled()
+	if c.found != nil {
+		return c.found
+	}
 	r.recover()
 	r.check()
 	r.readEach(x)
 	r.ended = true
-	conformWrite(t, fmt.Sprintf("primaries-%d", seed), c)
+	if plant == nil {
+		conformWrite(t, fmt.Sprintf("primaries-%d", seed), c)
+	}
 	if err := c.inv.Check(); err != nil {
 		return err
 	}

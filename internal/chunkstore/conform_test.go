@@ -1,12 +1,16 @@
 package chunkstore
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
@@ -104,4 +108,70 @@ func TestConformScriptedPrimaryChange(t *testing.T) {
 	}
 	c.settle()
 	conformWrite(t, "scripted-primary-change", c)
+}
+
+// conformPlants are the plants of the rule map and of the oracle test that scripts/conform.sh runs in the primary-change run.
+var conformPlants = []struct {
+	name string
+	set  func(r *primaryRun)
+}{
+	{"oldReport", func(r *primaryRun) { r.a.plant.oldReport = true }},
+	{"activateEarly", func(r *primaryRun) { r.c.replicaPlants.activateEarly = true }},
+	{"sameMembers", func(r *primaryRun) { r.c.replicaPlants.sameMembers = true }},
+	{"sendEpoch", func(r *primaryRun) { r.c.replicaPlants.sendEpoch = true }},
+	{"ownInterval", func(r *primaryRun) { r.c.replicaPlants.ownInterval = true }},
+	{"fenceOnArrival", func(r *primaryRun) { r.c.replicaPlants.fenceOnArrival = true }},
+	{"freshGrantNoCheck", func(r *primaryRun) { r.c.replicaPlants.freshGrantNoCheck = true }},
+	{"keepID", func(r *primaryRun) { r.a.keepID = true }},
+	{"resendNewestFirst", func(r *primaryRun) { r.c.replicaPlants.resendNewestFirst = true }},
+	{"mergeWhileLacking", func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking = true }},
+	{"relistNever", func(r *primaryRun) { r.c.replicaPlants.relistNever, r.c.storePlants.clearListed = true, true }},
+	{"lastActivatedOnly", func(r *primaryRun) { r.c.replicaPlants.lastActivatedOnly = true }},
+	{"readBelowMinLive", func(r *primaryRun) { r.c.replicaPlants.readBelowMinLive = true }},
+	{"coverAtRead", func(r *primaryRun) { r.c.replicaPlants.coverAtRead = true }},
+	{"removeOnActivation", func(r *primaryRun) { r.a.plant.removeOnActivation = true }},
+	{"reorderAfterOther", func(r *primaryRun) { r.c.replicaPlants.reorderAfterOther = true }},
+	{"reportDecided", func(r *primaryRun) { r.c.replicaPlants.reportDecided = true }},
+	{"neverAsk", func(r *primaryRun) { r.c.replicaPlants.neverAsk = true }},
+	{"peerInOldInterval", func(r *primaryRun) { r.c.replicaPlants.peerInOldInterval = true }},
+	{"stopPreviousOnly", func(r *primaryRun) { r.c.replicaPlants.stopPreviousOnly = true }},
+	{"settleByNumber", func(r *primaryRun) { r.c.storePlants.settleByNumber = true }},
+	{"settleSubset", func(r *primaryRun) { r.c.storePlants.settleSubset = true }},
+	{"recoverSelfOnly", func(r *primaryRun) { r.c.replicaPlants.recoverSelfOnly = true }},
+}
+
+// conformPlant keeps a planted run's trace, however the run stops, and beside it a .stop file saying how.
+func conformPlant(t *testing.T, name string, set func(r *primaryRun), seed uint64) {
+	var run *primaryRun
+	stop := "end"
+	defer func() {
+		if e := recover(); e != nil {
+			stop = fmt.Sprint("panic: ", e)
+		}
+		conformWrite(t, fmt.Sprintf("%s-%d", name, seed), run.c)
+		if err := os.WriteFile(filepath.Join(os.Getenv("CONFORM_DIR"), fmt.Sprintf("%s-%d.stop", name, seed)), []byte(stop), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if err := runPrimaries(t, seed, &peerPlant{set: func(r *primaryRun) { run = r; set(r) }}); err != nil {
+		stop = err.Error()
+	}
+}
+
+// Keeps, for scripts/conform.sh plants, each seed's unplanted trace and its trace under each plant CONFORM_PLANTS names, or every plant.
+func TestConformPlants(t *testing.T) {
+	if os.Getenv("CONFORM_DIR") == "" {
+		t.Skip("CONFORM_DIR not set")
+	}
+	want := strings.Fields(os.Getenv("CONFORM_PLANTS"))
+	seeds.Run(t, 0, 10, func(seed uint64) {
+		if err := runPrimaries(t, seed, nil); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		for _, p := range conformPlants {
+			if len(want) == 0 || slices.Contains(want, p.name) {
+				conformPlant(t, p.name, p.set, seed)
+			}
+		}
+	})
 }

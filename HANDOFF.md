@@ -29,10 +29,6 @@ Next, in order:
    `EvDrop`, `EvPause`, disk faults (`OwnFail`, `MemberFail`).
 8. Coverage report per action, from line kinds, in `conform.sh`.
 
-Check first: `primaries-1` has 84 `order` lines but 73 `logged` and 18 `committed`, with 62 `mayfail`.
-Three restarts and 16 writes in flight at most do not obviously explain 62, so a path may lack its
-`Logged` or `Committed` record, which would also explain the 147 s and would leave `mayfail` too loose.
-
 Left as they are, for a decision on the way:
 - `ReplicaOutput.Trace` holds the records and no loop reads them yet; the harness forwards them only
   while `conforming`, since forwarding them always added one allocation to the zero-allocation test's window, by the
