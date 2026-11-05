@@ -20,7 +20,7 @@ counts per plant. Those 30 use the relaxed paths: `img` in `Order` 19, `img` in 
 K = 0 only seed 22, `GoneRefuses` 8.
 
 To measure a path: copy `epoch.tla` beside the kept `trace_data.tla`, remove the path, run TLC on
-`trace_epoch.tla`. A seed that stops needs it. `plants` over the 30 takes about 3 hours one seed at a time.
+`trace_epoch.tla`. A seed that stops needs it. `plants` over the 30 took 71 minutes, one seed at a time.
 
 Needs a decision:
 - Discrepancy 12, seeds 1, 5, 24: a crash leaves part of a version, and `keep` lists that member where
