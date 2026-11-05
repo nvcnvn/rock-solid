@@ -406,7 +406,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **TLA+, TLC, model checking.** TLA+ is a language for describing a protocol precisely; the TLC model checker explores every reachable state of a small instance and reports any that breaks an invariant, catching design bugs before code exists.
 
-**Trace validation.** Recording what real code did in a run and having TLC check that the recording is a behavior a TLA+ spec allows. A model checks the design and a test checks the code; this ties the two together, since a step the code takes and the spec lacks fails the check with no one reading either. See the [open question](design.md#roadmap-and-open-questions).
+**Spec conformance, trace validation.** Spec conformance is whether code follows its TLA+ spec. TLC shows a protocol is sound; it says nothing about the code. Trace validation is how rock-solid checks the rest: a simulator run's fixed-field records are read back, and TLC checks they are a behavior the spec allows, so a step the code takes and the spec lacks fails with no one reading either. The goal is knowing the code runs the protocol, so a run that finds nothing is a good result. See [From spec to code](design.md#testing-strategy). The POSIX *conformance suites* are unrelated.
 
 **Jepsen, Elle, Porcupine.** Tools that record what clients saw and check whether any valid order of operations could explain it; one that cannot reveals a consistency bug.
 

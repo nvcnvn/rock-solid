@@ -3190,7 +3190,7 @@ are a pattern derived from (chunk, version, block), so any extent can be checked
   | Run | What it checks | Command | Budget |
   | --- | --- | --- | --- |
   | `ci` | Exhaustive: safety properties, and liveness with a time bound written as an invariant over the model's clocks | `scripts/models.sh ci`, with the negative variants, each of which stops at its first counterexample | Under 5 minutes with 4 workers; past 300 s the run fails |
-  | `deep` | Exhaustive, with one more node, chunk, crash or term, plus the unbounded liveness properties | `scripts/models.sh deep`, once per change to its spec, configuration or TLC version | 4 hours, after which the run fails |
+  | `deep` | Exhaustive, with one more node, chunk, crash or term, plus the unbounded liveness properties | `scripts/models.sh deep`, recorded at each milestone; nightly CI runs it once per change to its spec, configuration or TLC version, and no item waits for it | 4 hours, after which the run fails |
   | Simulation | `-simulate`, depth 100, a fresh seed printed for replay | `scripts/models.sh sim`, splitting `SIM_SECONDS` (3,600 by default) per model evenly among its `ci` configurations | About 1 hour per model, nightly |
 
 - An argument `model/config.cfg` runs that one configuration, in a mode it belongs to.
@@ -3955,6 +3955,32 @@ merge base with `origin/main` by default; the commits of a push or pull request 
 - `scripts/model-gate.sh for FILE` lists each rule whose plant FILE holds, with the property it
   breaks, the lines that hold it and the rule in words. It says so when there is none, since that
   does not mean no rule applies, and fails on a file that does not exist.
+
+## Spec conformance
+
+Whether the code follows a spec, the question [From spec to code](design.md#testing-strategy) sets.
+Finding a new bug is no part of what passes or fails here: a run with none is the result wanted.
+Not to be confused with the POSIX conformance suites of [Testing strategy](design.md#testing-strategy).
+
+| Part | Holds when | Fails when |
+| --- | --- | --- |
+| Traces pass | Every seeded trace checked is a behavior of the spec | A record has no spec action, or a step the spec does not allow |
+| Traces can fail | Each rule the [rule map](#model-gate) gives a plant fails a trace with that plant set, on a seed whose invariants pass, with the spec left as it was | A planted rule removal passes every trace |
+| Traces cover the spec | Every action of the spec appears in some trace, and each one that cannot, as on a fault no run lands, is listed with why | An action no trace reaches is not listed |
+
+- A spec action with no mapping to a record kind fails, and so does a record kind with no spec
+  action. No line is filtered out to make a trace pass.
+- A compressed spec action, one that stands for several code steps, names those steps in its
+  mapping.
+- The trace spec holds no protocol logic of its own: the spec it wraps stays the only statement of
+  the protocol, and the tool in `tools/` writes data alone.
+- The verdict is the same on every run of a trace, spec and mapping, on TLC's one worker.
+- Each discrepancy is recorded as code, spec, compression or logging, and settled as
+  [From spec to code](design.md#testing-strategy) says.
+- The spec stays passing: a spec patched for a discrepancy passes `scripts/models.sh ci` on its model
+  before it merges.
+- The check states the seeds it ran and the time per trace, and which spec actions and rules each
+  run covered, so a claim of conformance says what it rests on.
 
 ## Models in CI
 
