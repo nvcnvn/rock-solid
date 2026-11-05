@@ -105,3 +105,20 @@ epoch/neg-recovery-read-old-disk	open	Plants for the epoch model's new rules
 epoch/neg-serve-after-other-primary	open	Plants for the epoch model's new rules
 epoch/neg-serve-refused	open	Plants for the epoch model's new rules
 epoch/neg-settle-by-number	chunkstore.settleByNumber	TestPlantedBugsBreakTheirTraces
+voters/neg-apply-past-halt	open	Plants for the voter model's rules
+voters/neg-boot-at-zero	open	Plants for the voter model's rules
+voters/neg-commit-below-base	open	Plants for the voter model's rules
+voters/neg-compact-past-halt	open	Plants for the voter model's rules
+voters/neg-disloyal	raftshard.disloyal	TestFollowersVotingWhileSupportingBreakTheLeaseInvariant
+voters/neg-eager	raftshard.eager	TestAnEagerLeaderPromotesALearnerThatHoldsNothing
+voters/neg-early	raftshard.early	TestSendingBeforeTheFlushBreaksTheDurabilityInvariant
+voters/neg-no-first-commit	raftshard.uncommitted	TestLeaseReadsBeforeAnEntryOfTheTermCommitsBreakTheInvariant
+voters/neg-no-guard	open	Plants for the voter model's rules
+voters/neg-no-restart-wait	open	Plants for the voter model's rules
+voters/neg-no-transfer	open	Plants for the voter model's rules
+voters/neg-one-half	open	Plants for the voter model's rules
+voters/neg-one-half-commit	open	Plants for the voter model's rules
+voters/neg-stale-answer	open	Plants for the voter model's rules
+voters/neg-stale-snapshot	raftshard.staleSnapshot	TestALearnerCatchesUpFromASnapshotBuiltAtTheAppliedIndex
+voters/neg-transfer-keeps-lease	open	Plants for the voter model's rules
+voters/neg-voter-first	raftshard.voterFirst	TestAReplacementAddedAsAVoterStallsProposals

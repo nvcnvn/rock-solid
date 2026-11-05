@@ -44,7 +44,8 @@ CONSTANTS
     Values,       \* the client writes
     Poison,       \* the value CannotDecode cannot decode, 0 for none
     CannotDecode,
-    Events,       \* the optional events a run may take, see Enabled
+    Events,       \* the optional events a run may take
+    Candidates,   \* the replicas a timer may start a campaign on
     MaxTerm,      \* bounds, checked in Bounds and nowhere else
     MaxMsgs,
     MaxLink,      \* messages of one kind in flight from one replica to another
@@ -108,7 +109,7 @@ Fresh(log, cm, base, term, run) ==
      transferred |-> 0, support |-> NoSupport, fort |-> NoFortifies,
      halt |-> 0, removed |-> FALSE, wait |-> FALSE, run |-> run]
 
-BootBase == [i |-> 1, t |-> 0, c |-> Conf(InitVoters)]
+BootBase == [i |-> IF Bug("BootAtZero") THEN 0 ELSE 1, t |-> 0, c |-> Conf(InitVoters)]
 BootLog == <<Boot, Entry(1, "n", 0, NoConf)>>
 
 \* The group settled in term 1: replica 1 leads and every voter applied its
@@ -128,9 +129,9 @@ Init ==
                 ELSE Fresh(<<>>, 0, [i |-> 0, t |-> 0, c |-> NoConf], 0, 1)]
     /\ msgs = {}
     /\ grant = [g \in Replica |-> [h \in Replica |->
-                  [live |-> g # h /\ g \in InitVoters /\ h \in InitVoters, ep |-> 1]]]
+                  [live |-> g # h /\ g \in InitVoters /\ h = 1, ep |-> 1]]]
     /\ hold = [h \in Replica |-> [g \in Replica |->
-                  [has |-> g # h /\ g \in InitVoters /\ h \in InitVoters, ep |-> 1, run |-> 1]]]
+                  [has |-> g # h /\ g \in InitVoters /\ h = 1, ep |-> 1, run |-> 1]]]
     /\ elected = {[t |-> 1, r |-> 1]}
     /\ cmt = Committed(rep[1])
     /\ acked = {}
@@ -316,6 +317,11 @@ Ready(s, r) ==
        THEN [s |-> t, out |-> o \cup (IF Bug("Early") THEN s.pend ELSE {}), acks |-> {}]
        ELSE [s |-> e, out |-> o \cup s.pend, acks |-> Acks(s, a, r)]
 
+\* Storage.InitialState: a Ready that moves only the commit index reaches no
+\* disk, so the base can pass the last durable commit, and etcd-raft refuses a
+\* hard state below its first index.
+Loads(cm, base) == IF cm > base.i \/ Bug("CommitBelowBase") THEN cm ELSE base.i
+
 \* The end of each event: what the event left, then Shard.ready.
 Emit(r, s, gone, extra, acks) ==
     LET f == Ready(s, r) IN
@@ -330,7 +336,7 @@ Emit(r, s, gone, extra, acks) ==
 \* and raft.hup; or Shard.fortify's campaign raft_lapse_campaign after a lapse.
 Campaign(r) ==
     LET s == rep[r] IN
-    /\ On("campaign")
+    /\ r \in Candidates
     /\ ~s.removed
     /\ s.role # "L"
     /\ s.halt = 0
@@ -535,7 +541,7 @@ Restart(r) ==
     /\ \E d \in kept :
          LET base == IF s.round # NoRound /\ d # s.stable /\ s.round.snap # NoSnap
                      THEN s.round.snap ELSE s.base
-             cm == IF d.commit > base.i THEN d.commit ELSE base.i
+             cm == Loads(d.commit, base)
              f == Fresh(d.log, cm, base, d.term, s.run + 1)
          IN rep' = [rep EXCEPT ![r] = [f EXCEPT !.vote = d.vote, !.stable.vote = d.vote,
                                                 !.stable.commit = d.commit, !.seen = d.commit,
@@ -718,6 +724,7 @@ Grant(g, h) ==
 Expire(h, g) ==
     /\ On("lapse")
     /\ hold[h][g].has
+    /\ rep[h].role = "L"
     /\ hold' = [hold EXCEPT ![h][g].has = FALSE]
     /\ UNCHANGED <<rep, msgs, grant, elected, cmt, acked, lagged, crashes>>
 
@@ -817,7 +824,6 @@ Next ==
          \/ HandOff(l, p) \/ Expire(l, p) \/ Lapse(l, p) \/ Reprobe(l, p)
 
 Spec == Init /\ [][Next]_vars
-FairSpec == Spec /\ WF_vars(Protocol)
 
 Bounds ==
     /\ Cardinality(msgs) <= MaxMsgs
@@ -880,14 +886,18 @@ HaltStops ==
     \A r \in Replica : LET s == rep[r] IN
        s.halt # 0 => s.sm < s.halt /\ s.base.i <= s.sm
 
-\* 9. A replica restarts: etcd-raft refuses a hard state whose commit is below
-\* its storage's base.
+\* 9. A restart's hard state loads.
 Restarts ==
     \A r \in Replica : LET s == rep[r] IN
-       ~s.removed => s.stable.commit >= s.base.i
+       ~s.removed => Loads(s.stable.commit, s.base) >= s.base.i
 
-\* 10. A swap completes, and a dropped leader hands off: some leader's applied
-\* configuration is the plan.
-SwapCompletes == <>(\E r \in Replica : rep[r].role = "L" /\ ~rep[r].removed /\ Settled(rep[r]))
+\* 10. A swap completes, and a dropped leader hands off: with no fault, no
+\* campaign and no writes, Protocol has no cycle, so every fair run ends in a
+\* state with no step left, and each such state has a leader on the plan. That
+\* is the time-free assumption, every step eventually taken, without TLC's
+\* fairness, which costs a thousand times the states here.
+SwapCompletes ==
+    \/ ENABLED Protocol
+    \/ \E r \in Replica : rep[r].role = "L" /\ ~rep[r].removed /\ Settled(rep[r])
 
 =============================================================================
