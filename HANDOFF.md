@@ -1,72 +1,61 @@
 # Handoff: voter replacement model
 
 Brief: /Users/nvcnvn/.claude/projects/-Volumes-T5-Codes-rock-solid/handoff/voter-model-brief.md
-Branch worktree-agent-a5bd88a0fbb4b20fd, on main 05d2472. Stopped at the token limit. Nothing merged or pushed.
+Branch voter-model. Nothing merged or pushed. The checklist item stays UNTICKED.
 
-## State
-- `models/voters/voters.tla`: every action in the brief exists, one call into a shard each (`Emit` ends an
-  action as `Shard.ready` ends a call). Compressions C1 to C8 are in its header; each action's comment names its
-  code function.
-- The item stays UNTICKED: `scripts/models.sh ci voters` has never been run whole and is not expected to pass yet.
-- Real bug fixed, 501bf21: restart panicked when the base passed the durable commit. Test failed first (panic
-  "state.commit 8 is out of range [10, 12]"). The model finds it too: `neg-commit-below-base`, 222 states.
-  `scripts/seeds.sh` passed after it at JOBS=2: 85,400 seeds in 893 s.
+## Done, each from a trace's states
+Every negative below fails for its rule, on the spec before `InitLearners`, which changes no configuration but
+neg-one-half. Those marked * ran before the Init `mark` fix: rerun, and re-read if the depth moves.
 
-## Results so far: rerun all of them
-Each ran on an earlier spec or configuration. Numbers are distinct states. `Candidates` was added after most.
+| Negative | Property | Distinct, depth | Read in the states |
+| --- | --- | --- | --- |
+| neg-no-first-commit* | ReadsAcked | 93,060, 18 | Leader 2 holds index 3 in its log, state machine at 2, reads on 3's lease; 1 acks index 3 |
+| neg-one-half | OneReader | 339,895, 27, 48 s | Both joint: 1 reads on 4 alone, 2 won on the old half and reads on 4 |
+| neg-one-half-commit | CommittedSurvive | 503,074, 31, 60 s | Index 5 commits with match <5,2,4,5>, one of the old half; 3 wins on 3+2 without it |
+| neg-stale-snapshot | `Stops` | 35,139 | Snapshot at the base lacks the learner, refused, probe rejected, sent again: the code's retry, a real livelock |
+| neg-no-transfer | deadlock | 2, 2 | reconcile returns after target(): a dropped leader with no transfer sits, as in the code |
+| neg-double-vote* | OneLeaderPerTerm | 5,709, 10 | Early: 1 votes 2, crash forgets it, votes 3 in term 2 |
+| neg-lost-copy* | HeldAfterDeletion | 525, 8 | NoGuard: 2 and 3 delete on a fresh replica's notice, one copy left |
+| neg-early* | CommittedSurvive | 10,519, 11 | 3 answers a vote with its round in flight, crash forgets, index 3 commits behind leader 2. NOT suspect |
+| neg-disloyal* | OneReader | 123,985, 18 | 2 supports 1 and campaigns: the plant covers stopped as well as refuses (lines 379, 392) |
+| neg-no-restart-wait* | OneReader | 262,037, 18 | 2 supports 1, restarts, campaigns at once, 1 still holds its lease |
+| neg-transfer-keeps-lease* | OneReader | 940,878, 19, 44 s | 1 reads after MsgTimeoutNow; 2 won by the transfer's vote |
+| neg-no-guard* | NoWrongfulDeletion | 118, 6 | Fresh 4 answers at 0, voter at applied 2 believes it |
+| neg-boot-at-zero* | NoWrongfulDeletion | 979, 7 | Restart at applied 0, fresh 4 answers at 0: shard.go:433's case |
+| neg-stale-answer* | NoWrongfulDeletion | 15,782, 14 | 4 answers at commit 3 with applied 0 |
+| neg-commit-below-base*, neg-voter-first*, neg-eager*, neg-apply-past-halt*, neg-compact-past-halt* | | 222; 23; 96; 769; 2,606 | Failed, states NOT read. compact-past-halt now expects CompactStops and has not run since |
 
-| Configuration | Result |
-| --- | --- |
-| ci-swap, no write | PASSED before later edits: 927,705, depth 52, 97 s |
-| neg-commit-below-base | Restarts, 222, on the current spec |
-| neg-voter-first | PromotedHolds, 22 |
-| neg-eager | PromotedHolds, 98, depth 9 |
-| neg-no-guard | NoWrongfulDeletion, 148 |
-| neg-apply-past-halt | HaltStops, 786, depth 14 |
-| neg-boot-at-zero | NoWrongfulDeletion, 1,207 |
-| neg-compact-past-halt | HaltStops, 4,064 |
-| neg-early | CommittedSurvive, 20,513, depth 10 |
-| neg-stale-answer | NoWrongfulDeletion, 25,731, depth 14 |
-| neg-no-restart-wait | OneReader, 607,234, 26 s |
-| neg-transfer-keeps-lease | OneReader, 984,482, 43 s |
-| neg-disloyal | OneReader, 2,206,779, 79 s: narrow it, `Candidates` should help |
-| neg-no-first-commit, neg-one-half, neg-one-half-commit | NO VIOLATION in 110 s, before `Candidates`: unproven |
-| neg-stale-snapshot, neg-no-transfer | NEVER RUN since `SwapCompletes` became a state property |
-| ci-live, ci-live-handoff, ci-eager, ci-lease, ci-joint, ci-transfer | NEVER RUN to an end on this spec |
-| ci-halt, ci-halt-leader, ci-halt-swap | NEVER RUN; the old ci-halt passed 280 s and was split |
-| ci-crash, ci-notice | Passed 280 s before they were shrunk (no `lose`); shrunk versions never run |
-| deep-lease, deep-joint | NEVER RUN |
+Liveness (step 5) is decided: no ENABLED and no CONSTRAINT in a live configuration, so nothing is pruned. `Stops` shows
+Protocol has no cycle, the deadlock check that every end has SwapDone. ci-live passes: 81,102, depth 37, 12 s.
+ci-live-handoff passes: 430,905, depth 50, 71 s. So Protocol has no cycles in both plans. The check found three spec
+errors the ENABLED form hid: no StateSnapshot pause, Reprobe outside Protocol, and Init's `mark` at 0, which made every
+learner caught up from Init on, so PromotedHolds checked nothing there.
 
-Traces: only the action-name sequences of the first group were read, and those print `Recv` for every message.
-Nobody has read their states, which the brief requires. Read each for the right reason, neg-early first.
+The HaltStops race (step 6) can happen. A copy of the spec with a temporary invariant reached it at 1,401,037 states,
+depth 20: a snapshot stepped in the round that carries the poison entry, Durable halts at index 3 with sm 2, the install
+moves the base to 4. The code agrees: done calls ApplySnapshot before meta.Shard.apply returns on halted. Harmless: a
+restart restores that snapshot, whole, and runs on. So HaltStops is now only sm < halt, and CompactStops, an action
+property, covers compaction. Say so in docs/test-scenarios.md.
 
-## Next
-1. One TLC at a time. `pgrep -f tlc2.TLC` matches its own shell: use `tlc2.TL[C]`.
-2. Run every `ci-*`, past 300 s move a constant to `deep`. Budget is about 6M distinct states at 1.2M a minute.
-   Cheap cuts: `Candidates`, `MaxMsgs`, no `lose`, and split plans.
-3. Check `SwapCompletes` works: an `ENABLED` in an invariant is untested here, and a step `Bounds` prunes counts as
-   enabled, so keep the bounds wide there. TLC's own fairness (`WF_vars(Protocol)`) ran at about 1,000 states a
-   minute, which is why it went.
-4. `CampaignUnapplied` has no negative. Add `neg-campaign-unapplied`, or drop the `Bug` if nothing breaks.
-5. No negative covers the removal of a dropped learner or the voter-removal order.
-6. Possible finding: a snapshot stepped while a round in flight halts the replica moves the base past the state
-   machine, so `HaltStops` may fail. Looks harmless, since a restart restores from the snapshot, but unchecked. If
-   it fires, narrow the property to compaction and record why.
-7. Plant `current` has no negative: bounded writes cannot show a learner trailing for good. Say so in the docs.
-8. Insert the section draft below in docs/test-scenarios.md before "## Model-to-simulator map". It fills two
-   placeholders and fixes the dangling `#voter-replacement-model` links already committed. Its claims are NOT all
-   verified: "`ci-notice` passes", "`ci-eager`", "each trace was read". Confirm each first.
-9. Add the results rows to the Model-to-simulator map, tick the item, run `scripts/models.sh ci voters`,
-   `scripts/model-gate.sh`, `scripts/lint.sh`. Delete this file.
+## Not done
+1. Run every `ci` on this spec; nothing below has passed since its last edit. One TLC at a time, and another session
+   runs `trace_epoch` TLC at times: `pgrep -f 'tlc2.TL[C]'`. Do not kill it.
+   - ci-halt (now both 1 and 3 halt), ci-halt-swap (no compaction now), ci-eager (no write, MaxMsgs 5), ci-notice
+     (MaxMsgs 4), ci-crash (no compaction), ci-restart (new, no election): shrunk, not rerun.
+   - ci-transfer: 3,036,956 at depth 24 when stopped, near 200 s: likely over. ci-lease, ci-joint: never run.
+   - Past 300 s, try `InitLearners = {4}`, which removes the learner's catch-up, for what does not need it.
+2. Step 4, shard.go:433: needs ci-notice to pass. `neg-boot-at-zero` still shows what protects it (see table).
+3. Step 7: ci-live and ci-live-handoff carry every safety invariant and no bound on messages, so a pair reorders there.
+   The numbers above predate those invariants: rerun.
+4. deep-live is ci-live on 3+1. With the mark fix it may fit `ci`: try it. Add `deep-joint`, `deep-lease` and it last.
+5. Read the unread traces in the table. Then run `scripts/models.sh ci voters` whole, `scripts/model-gate.sh`.
+6. Docs: insert the draft below. Change it: `Stops` and the deadlock check replace "state property"; HaltStops and
+   CompactStops as above; C9; aims in the configurations; `ci-swap`, `ci-halt-leader` are gone; `neg-double-vote`,
+   `neg-lost-copy`. design.md's Testing strategy says liveness is an invariant over clocks: this one has none.
+7. No negative: the removal of a dropped learner, the voter-removal order, and CanCampaign, whose plant was dropped
+   since nothing ran to show it can fail. Plant `current` has none, as bounded writes cannot leave a learner behind.
 
-## Suspicion, shard.go:433
-Not reachable as the code boots, on this evidence so far: a boot base is index 1 and an asker's configuration must
-hold it, so no asker sits at applied 0, and a fresh replica answers at 0. `neg-boot-at-zero` confirms a base of 0
-would delete wrongly. Needs the shrunk `ci-notice` to pass to close it. No code change made.
-
-## Configurations
-Generated by /private/tmp/claude-501/-Volumes-T5-Codes-rock-solid/a6f370ac-f81a-4c62-a339-d03ffed9911f/scratchpad/gen.py
-with runners t.sh, batch.sh and tr.py beside it. The .cfg files are the source of truth if that directory is gone.
+Runners are in the scratchpad's v2 directory: t.sh cfg secs, batch.sh, tr.py out (per-step state diff), rd.sh, hd.sh.
 
 ## Section draft
 ## Voter replacement model

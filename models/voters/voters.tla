@@ -44,6 +44,7 @@ Range(f) == {f[i] : i \in DOMAIN f}
 CONSTANTS
     Replica,      \* Raft replica IDs, each on a node of its own
     InitVoters,   \* the group's boot configuration, replica 1 leading term 1
+    InitLearners, \* caught-up learners in it, {} but where a negative starts past that
     Plan,         \* the voters of the shard map, {} for none (Shard.SetPlan)
     Values,       \* the client writes
     Poison,       \* the value CannotDecode cannot decode, 0 for none
@@ -113,7 +114,8 @@ Fresh(log, cm, base, term, run) ==
      transferred |-> 0, support |-> NoSupport, fort |-> NoFortifies,
      halt |-> 0, removed |-> FALSE, wait |-> FALSE, run |-> run]
 
-BootBase == [i |-> IF Bug("BootAtZero") THEN 0 ELSE 1, t |-> 0, c |-> Conf(InitVoters)]
+BootBase == [i |-> IF Bug("BootAtZero") THEN 0 ELSE 1, t |-> 0,
+             c |-> [Conf(InitVoters) EXCEPT !.l = InitLearners]]
 BootLog == <<Boot, Entry(1, "n", 0, NoConf)>>
 
 \* The group settled in term 1: replica 1 leads and every voter applied its
@@ -127,9 +129,9 @@ Init ==
     /\ rep = [r \in Replica |->
                 IF r = 1 THEN [voter EXCEPT !.role = "L",
                                  !.next = [p \in Replica |-> 3],
-                                 !.match = [p \in Replica |-> IF p \in InitVoters THEN 2 ELSE 0],
+                                 !.match = [p \in Replica |-> IF p \in InitVoters \cup InitLearners THEN 2 ELSE 0],
                                  !.sent = [p \in Replica |-> 2], !.pci = 2]
-                ELSE IF r \in InitVoters THEN voter
+                ELSE IF r \in InitVoters \cup InitLearners THEN voter
                 ELSE Fresh(<<>>, 0, [i |-> 0, t |-> 0, c |-> NoConf], 0, 1)]
     /\ msgs = {}
     /\ grant = [g \in Replica |-> [h \in Replica |->
@@ -848,17 +850,19 @@ Bounds ==
 \* removes behaviours, so what it finds is a run of the spec; no configuration
 \* that must pass uses one.
 
-\* 3 holds nothing past the boot log and 2 holds the joint entry unapplied. 2
-\* waits to campaign until 1 reads in the joint configuration on 4 alone: neither
-\* supports 1, and 1 does no lease work before it is joint and goes no further.
+\* From 4 a caught-up learner: 3 holds nothing past the boot log and 2 holds the
+\* joint entry unapplied. 2 waits to campaign until 1 reads in the joint
+\* configuration on 4 alone: neither supports 1, and 1 does no lease work before
+\* it is joint and goes no further.
 AimOneHalf ==
-    /\ Len(rep[1].log) <= 4
+    /\ Len(rep[1].log) <= 3
     /\ rep[3].term = 1 => Len(rep[3].log) <= 2 /\ \A m \in msgs : m.y = "appR" => m.f # 3
-    /\ rep[2].term = 1 => rep[2].commit <= 3
+    /\ rep[2].term = 1 => rep[2].commit <= 2
     /\ ~hold[2][1].has /\ ~hold[2][3].has
     /\ rep[2].support.lead # 1 /\ rep[3].support.lead # 1
     /\ rep[1].conf.o = {} => ~hold[1][4].has /\ \A m \in msgs : m.y # "fort"
-    /\ rep[2].term > 1 => rep[1].conf.o # {} /\ Reads(1)
+    /\ rep[2].term > 1 => rep[1].conf.o # {} /\ rep[1].round = NoRound /\ Reads(1)
+    /\ rep[4].term > 1 => rep[2].committed = 2
 
 \* 2 holds nothing past the boot log and only votes. 3 stops at the joint entry,
 \* unapplied, and campaigns once the entry after it committed without them.
