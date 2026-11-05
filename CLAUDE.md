@@ -26,9 +26,12 @@
 - `models/` holds the TLA+ specs; a spec is right until shown wrong, and code follows it. Before
   changing a protocol file, run `scripts/model-gate.sh for <file>` and read the rules it lists,
   rather than the whole spec.
-- `scripts/lint.sh` runs the gate. A commit to a protocol file changes `models/` too, or says why not
-  in a line `Model: none, <reason>`: a new step, message or rule of a protocol needs the model;
-  timers, buffers and accounting do not. A new protocol gets its model before its code.
+- `scripts/lint.sh` runs the gate. A commit to a protocol file changes a spec under `models/` too, or
+  says why not in a body line `Model: none, <reason>`: a new step, message or rule of a protocol
+  needs the model; timers, buffers and accounting do not. A new protocol gets its model before its
+  code, and the code's commits name that commit in their line. The gate reads commits already made,
+  so run lint again after committing.
+- No output from `for` does not mean no rule applies: many rules have no plant yet.
 - A new `neg-*.cfg` gets a row in `scripts/model-rules.tsv`, naming its Go plant and test, or the
   unticked checklist item that owes them.
 

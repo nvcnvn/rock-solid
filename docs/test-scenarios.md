@@ -3932,20 +3932,29 @@ merge base with `origin/main` by default; the commits of a push or pull request 
 
 | Case | Result |
 | --- | --- |
-| A commit changes a protocol file and no file under `models/`, and has no `Model: none, <reason>` line | Fails, naming the commit |
-| The same with a reason, or with a change under `models/` | Passes |
-| The same line with no reason | Fails |
-| A commit changes only tests or docs | Passes |
+| A commit changes a protocol file, no spec or configuration under `models/`, and has no `Model: none, <reason>` line in its body | Fails, naming the commit and the file |
+| The same with a reason, or with a change to a spec or configuration | Passes |
+| The same line with no reason, or in the subject, or a stray file under `models/` | Fails |
+| A merge whose resolution changes a protocol file, the same way | Fails |
+| A clean merge | Passes |
+| A commit changes only tests, docs or an excluded file | Passes |
 | A negative configuration has no row in `scripts/model-rules.tsv`, or a row has none | Fails |
+| A row has the wrong shape, as one with no plant or no test | Fails |
 | A row's plant is in no file of its package, its test does not exist, or its test's file does not name the plant | Fails |
 | A row is open on a checklist item that is ticked, or on a phase the checklist now lists | Fails |
+| No base commit can be found | Warns, and fails in CI |
 
-- The test files of a protocol file are not protocol files.
+- Every `.go` file of a protocol package is a protocol file unless the script excludes it, so a new
+  file starts covered. Test files are excluded, and files that hold no model's rule.
+- A push to `main` checks the commits it adds, and a push to any other branch every commit since the
+  merge base, so a commit on top of a failed one does not hide it. A force push to `main` has no old
+  commit to start from and checks nothing, which branch protection covers.
 - That a test fails under its plant is that test's own assertion, as in [Placement faults and
   invariants](#placement-faults-and-invariants). The gate checks only that the link stands, so a
   test that shares a file with a plant it does not use passes it.
 - `scripts/model-gate.sh for FILE` lists each rule whose plant FILE holds, with the property it
-  breaks and the lines that hold it.
+  breaks, the lines that hold it and the rule in words. It says so when there is none, since that
+  does not mean no rule applies, and fails on a file that does not exist.
 
 ## Models in CI
 

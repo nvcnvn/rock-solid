@@ -3,7 +3,7 @@
 # Columns, tab separated:
 #   model/neg-config	package.plant[,plant]	Test
 #   model/neg-config	open	"Checklist item" or "phase N"
-# A rule with no code yet is open: its checklist item must be unticked, or its phase not yet listed.
+# A rule with no plant yet is open: its checklist item must be unticked, or its phase not yet listed.
 epoch/neg-accept-old-report	chunkstore.oldReport	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-activate-before-durable	chunkstore.activateEarly	TestPlantedPeeringBugsBreakTheFaultRun
 epoch/neg-check-before-bound	lease.checkBeforeBound	TestPlantedLeaseBugsBreakThePair
@@ -27,11 +27,11 @@ epoch/neg-no-epoch-bump	open	MetaStore invariants
 epoch/neg-no-restart-wait	lease.noRestartWait	TestPlantedLeaseBugsBreakThePair
 epoch/neg-no-run-window	lease.noRunWindow	TestPlantedLeaseBugsBreakThePair
 epoch/neg-no-step-check	lease.noStepCheck	TestPlantedLeaseBugsBreakThePair
-epoch/neg-peering-clears-missing	chunkstore.relistNever	TestPlantedPeeringBugsBreakTheFaultRun
+epoch/neg-peering-clears-missing	chunkstore.relistNever,clearListed	TestPlantedPeeringBugsBreakTheFaultRun
 epoch/neg-reach-last-activated-only	chunkstore.lastActivatedOnly	TestPlantedBugsBreakTheirTraces
 epoch/neg-read-below-min-live	chunkstore.readBelowMinLive	TestPlantedBugsBreakTheirTraces
 epoch/neg-reads-before-peer-messages	sim.ReadsFirst	TestPlantedBugsBreakTheirTraces
-epoch/neg-recovery-covers-at-read	chunkstore.coverAtRead	TestPlantedPeeringBugsBreakTheFaultRun
+epoch/neg-recovery-covers-at-read	chunkstore.coverAtRead	TestPlantedRecoveryBugBreaksTheFaultRun
 epoch/neg-remove-before-recovered	chunkstore.removeOnActivation	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-reorder-after-other-primary	chunkstore.reorderAfterOther	TestPlantedBugsBreakTheirTraces
 epoch/neg-report-before-activate	chunkstore.reportDecided	TestPlantedPeeringBugsBreakTheOracle
