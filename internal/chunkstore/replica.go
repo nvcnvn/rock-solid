@@ -366,9 +366,10 @@ func compareSlots(a, b diskSlots) int {
 type replicaPlants struct {
 	// resendNewestFirst sends a member a lost connection's writes again newest first.
 	resendNewestFirst bool
-	// peerInOldInterval has a restarted primary peer in the interval it led before, asking for none; mergeWhileLacking merges a partial-block write on a chunk before the primary holds the version peering kept (sub-block spike M8).
+	// peerInOldInterval has a restarted primary peer in the interval it led before, asking for none; mergeWhileLacking merges a partial-block write on a chunk before the primary holds the version peering kept (sub-block spike M8); mergeOnDropped merges one on a version the primary mapped and peering dropped.
 	peerInOldInterval bool
 	mergeWhileLacking bool
+	mergeOnDropped    bool
 	// noRecovery recovers nothing, as a primary without recovery would; coverAtRead picks the
 	// blocks a recovery write leaves out when it reads the source rather than when it is ordered
 	// (the epoch change model's RecoveryCoversAtRead).

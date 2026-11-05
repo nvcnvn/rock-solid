@@ -449,7 +449,7 @@ func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 	for j := range pr.kept {
 		k := &pr.kept[j]
 		x, _ := r.st.Index().Chunk(r.st.cfg.Pool, k.chunk)
-		k.lacking = x.Version != k.kept || x.Whole != k.kept || slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed })
+		k.lacking = (x.Version != k.kept || x.Whole != k.kept) && !(r.plant.mergeOnDropped && x.Version > k.kept) || slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed })
 	}
 	r.planRecovery(l, pr, e)
 	l.kept, pr.kept = pr.kept, l.kept[:0]
