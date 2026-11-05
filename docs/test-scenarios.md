@@ -4080,13 +4080,13 @@ broken invariant, keeping the trace up to there and saying which broke in a `.st
 10-minute test limit, so it runs a seed at a time. A rejection counts once the failing line has been
 read to be the planted behaviour.
 
-Results over seeds 6, 11, 18, 23 and 36, the seeds that pass of 40; each number is the line TLC could
+Results over seeds 6, 11, 18, 23 and 36, 5 of the seeds that pass; each number is the line TLC could
 not take at that seed, and the line a plant first differs from the baseline comes before it:
 
 | Plant | Rule | Fired at seeds | Result | Clean | Guard |
 | --- | --- | --- | --- | --- | --- |
 | `activateEarly` | `neg-activate-before-durable` | all 5 | Caught: 77, 54, 120, 146, 38 | All 5 | `persisted`: a member's first persist comes after `Activate` |
-| `mergeWhileLacking` | `neg-merge-before-kept` | 6 | Caught: 84 | Yes | `Order`: `miss[own][c] = NoMiss` |
+| `mergeWhileLacking` | `neg-merge-before-kept` | 6 | Caught: 84 | Yes | `Order`: `miss[own][c] = NoMiss` or the decision's `img` |
 | `relistNever`, `clearListed` | `neg-peering-clears-missing` | 6 | Caught: 140 | Yes | `Recover`: the spec keeps the list the code cleared, so no source is left |
 | `peerInOldInterval` | `neg-restart-same-interval` | 6, 11, 18, 23 | Caught: 56, 108, 88; 23 stops at `Order`, 155, with the write lost as `neverAsk`'s is | At 11 | `peer`: `pr[n][p].iv = iv`, `pr` empty after the restart |
 | `ownInterval` | `neg-decide-by-own-interval` | 18 | Caught: 158 | No | `KeptMatches` |
@@ -4096,7 +4096,7 @@ not take at that seed, and the line a plant first differs from the baseline come
 | `sameMembers` | `neg-compare-member-lists` | 6, 11, 18, 23 | Caught, running on: 43, 590, 81, 52 | No | `logged`: `Accepts`, the interval differs. The `Accepted` record is not what catches it |
 | `keepID` | `neg-keep-disk-id` | 11, 23 | Caught, running on: 100, 53 | No | `plan`, or the `table` line: the spec's `Format` gave the disk a new ID |
 | `sendEpoch` | `neg-compare-table-epochs` | all 5 | Caught at the first refusal: 97, 186, 130, 205, 102. Running on, seed 6 ran out of a 2 GB heap, no verdict | No | `mfail`: a refusal with no fault budget |
-| `neverAsk` | `neg-restart-no-ask` | 6, 11, 18, 23 | Not caught for its rule: 196 and 173 stop at `Order`, `Send` having lost a write to a primary with an empty `pr`, discrepancy 13; 140 at seed 6 is discrepancy 10; 809 at seed 23, a `renew`, is unread | | An `ask` that never comes is no line |
+| `neverAsk` | `neg-restart-no-ask` | 6, 11, 18, 23 | Not caught for its rule: 196 and 173 stop at `Order`, `Send` having lost a write to a primary with an empty `pr`, discrepancy 13; 6 and 23 pass | | An `ask` that never comes is no line |
 | `recoverSelfOnly` | none | all 5 | Passes at 6 and 23; 724, 551 and 557 are unread | | A recovery that never comes is no line |
 | `coverAtRead` | `neg-recovery-covers-at-read` | 11, 18, 23 | Fired, passes | | Too loose: `recovered` names a chunk and a version, so `Recover`'s cover is unobserved |
 | `settleSubset` | none | 6 | Fired, passes | | Too loose: `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record |
