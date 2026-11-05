@@ -437,17 +437,22 @@ Fold(p, k) ==
     /\ UNCHANGED <<ivs, reqIv, reports, recd>>
 
 \* An operator's edit orders a PG's members anew, and the table that holds it
-\* carries the marks the disks reached since the last one: one interval, with
-\* each mark changing as MarkDisk's does.
+\* carries at most one mark a disk reached since the last one, changing as
+\* MarkDisk's does: one interval, where Rotate and MarkDisk make two. A move's
+\* members stay as they are. With EditKeepsInterval the table keeps the interval.
 Edit(p, mem, marks) ==
     LET x == ivs[p][Cur(p)]
         to(d) == marks[CHOOSE j \in 1..Len(mem) : mem[j] = d]
+        y == [x EXCEPT !.mem = mem, !.st = [d \in Disk |-> IF d \in Range(mem) THEN to(d) ELSE @[d]]]
     IN /\ x.lv = 0
        /\ Len(mem) = Len(x.mem)
        /\ Range(mem) = Range(x.mem)
        /\ \A d \in Range(mem) : to(d) = St(p, Cur(p), d) \/ Allowed(p, d, St(p, Cur(p), d), to(d))
-       /\ NewIntervals({p}, [q \in PG |->
-            [x EXCEPT !.mem = mem, !.st = [d \in Disk |-> IF d \in Range(mem) THEN to(d) ELSE @[d]]]])
+       /\ Cardinality({d \in Range(mem) : to(d) # St(p, Cur(p), d)}) <= 1
+       /\ IF Bug("EditKeepsInterval")
+          THEN /\ Commit(tbl[Len(tbl)])
+               /\ ivs' = [ivs EXCEPT ![p][Cur(p)] = y]
+          ELSE NewIntervals({p}, [q \in PG |-> y])
        /\ UNCHANGED <<reqIv, reports, recd>>
 
 \* A planned change: [k |-> "mark", d, to], [k |-> "replace", p, old, new],
@@ -496,7 +501,7 @@ Reactive ==
 AdoptPr(n, p, e) ==
     LET old == pr[n][p]
         k == tbl[e][p].iv
-    IN IF k = IvAt(n, p) THEN old
+    IN IF k = IvAt(n, p) /\ ~(Bug("EditKeepsInterval") /\ old.iv = 0 /\ PrimNode(p, k) = n) THEN old
        ELSE IF PrimNode(p, k) = n /\ (k > rsIv[n][p] \/ Bug("RestartSameInterval"))
             THEN IF old.iv # 0 /\ (KeptPrimary(n, p, old.iv, k) \/ Bug("ServeAfterOtherPrimary"))
                  THEN [NoPr EXCEPT !.iv = k, !.srv = old.srv, !.since = old.since]
@@ -1876,6 +1881,7 @@ Rot(p) == [k |-> "rotate", p |-> p]
 AddM(p, old, new) == [k |-> "add", p |-> p, old |-> old, new |-> new]
 RemoveM(p) == [k |-> "remove", p |-> p]
 ML(p, to) == [k |-> "minlive", p |-> p, to |-> to]
+Ed(p, mem, marks) == [k |-> "edit", p |-> p, mem |-> mem, marks |-> marks]
 Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f, t |-> 600, k |-> 1, s |-> Spare]
 
 \* The membership faults of test-scenarios.md "Epoch change model" on 3 nodes,
@@ -1973,6 +1979,14 @@ FormatAtRecovery == Plan(<<Repl(2, 2, 1), Repl(2, 3, 4)>>, Session, {"format"})
 MinLiveRaised == [Plan(<<ML(2, 1), Mark(3, "down"), Mark(3, "up"), ML(2, 2), Mark(2, "maint")>>,
                        Session, {}) EXCEPT !.s = 0]
 RotBackPlans == {RotBack}
+\* ci-edits: an operator's edits of PG 1. The primary moves and is marked down
+\* in one table, then returns first; members reorder with no mark, the last
+\* keeping the primary that moved in the first.
+EditAway == Plan(<<Ed(1, <<2, 3, 1>>, <<"up", "up", "down">>),
+                   Ed(1, <<1, 2, 3>>, <<"up", "up", "up">>)>>, Partial, {})
+EditReorder == Plan(<<Ed(1, <<3, 2, 1>>, <<"up", "up", "up">>),
+                      Ed(1, <<3, 1, 2>>, <<"up", "up", "up">>)>>, Partial, {})
+EditPlans == {EditAway, EditReorder}
 \* ci-asks checks the failure plans with no restart or format under fairness.
 AskPlans == {MemberFails, OwnFails, FailMoved, OwnFailMoved}
 FaultPlans == {MemberFails, MemberFails3, FailRestart, OwnFails, FailMoved, OwnFailMoved,

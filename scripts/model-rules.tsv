@@ -10,6 +10,7 @@ epoch/neg-check-before-bound	lease.checkBeforeBound	TestPlantedLeaseBugsBreakThe
 epoch/neg-compare-member-lists	chunkstore.sameMembers	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-compare-table-epochs	chunkstore.sendEpoch	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-decide-by-own-interval	chunkstore.ownInterval	TestPlantedPeeringBugsBreakTheFaultRun
+epoch/neg-edit-keeps-interval	open	Spec conformance check
 epoch/neg-fence-on-arrival	chunkstore.fenceOnArrival	TestPlantedReadBugsBreakTheReadRun
 epoch/neg-fresh-grant-no-table-check	chunkstore.freshGrantNoCheck	TestPlantedBugsBreakTheirTraces
 epoch/neg-grantor-faster-clock	lease.fasterClock	TestPlantedLeaseBugsBreakThePair

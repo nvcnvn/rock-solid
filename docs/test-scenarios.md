@@ -3994,7 +3994,7 @@ traces and data. A failure names the line no state could take. Each trace starts
 
 | Records | Spec action | Compression |
 | --- | --- | --- |
-| `Table`, `PGEntry`, `Member` | `Membership` or `Reactive` | `tracedata` splits a table's fold from its membership change, and one edit plus marks is one `Edit` |
+| `Table`, `PGEntry`, `Member` | `Membership` or `Reactive` | `tracedata` splits a table's fold from its membership change. A reorder of a PG, with at most one mark, in one table is one `Edit`, one interval, as the code's `Next` makes it; `ci-edits` checks that action |
 | `Adopt` | `Adopt` | A repeat of the table held after a restart is a stutter |
 | `Send` | `Send` | A send the spec has disabled is a stutter, so ordering it later fails |
 | `Order` | `Order` | Logs on the primary and sends to members in one step |
@@ -4041,7 +4041,7 @@ and TLC does not report which branch a line took, so `Recover`, `ReportRecovered
 | # | What | Class | How settled |
 | --- | --- | --- | --- |
 | 1 | The spec's `Init` starts interval 1 activated; the code peers in it | compression | The trace starts after bootstrap |
-| 2 | One table can reorder a PG's members and carry a mark, one interval, which `Rotate` and `MarkDisk` make two | spec | `Edit` added to `epoch.tla`, reachable only by a plan that names it |
+| 2 | One table can reorder a PG's members and carry a mark, one interval, which `Rotate` and `MarkDisk` make two, and no sequence of them gives every order of three members | spec | Settled: `Edit` is in `epoch.tla`, a reorder with at most one mark, what all 77 edits of seeds 0 to 39 need. `ci-edits` reaches it, and `neg-edit-keeps-interval` shows two primaries order in one interval if the table keeps it; that rule's Go plant is owed |
 | 3 | `Activate`'s record came after the held writes it released were ordered | logging | The record moved to where the lead goes active |
 | 4 | A member takes a version into its store, then adopts a table, then logs it, while `Deliver` needs the interval | compression | `Accepted` opens the version, `maydeliver` lets it land before `Adopt` |
 | 5 | A crash loses a version from the primary's own log that `Order` had logged | compression | `mayfail` before `Restart`, by `OwnFail`; a version every member logged is not in `pend`, so a run needing that would fail |
