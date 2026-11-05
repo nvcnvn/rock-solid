@@ -3885,11 +3885,12 @@ section.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 26 | 625,828 | 65 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 30 | 2,103,231 | 260 s |
-| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 116 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 30 | 705,419 | 77 s |
-| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 28 | 972,863 | 136 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 26 | 625,828 | 66 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 30 | 2,103,231 | 255 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 114 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 30 | 705,419 | 81 s |
+| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 28 | 1,300,659 | 172 s |
+| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 21 | 30,732 | 17 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
@@ -3899,13 +3900,10 @@ section.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
-| Epoch change | `deep-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,747 s |
-| Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,021 s |
-| Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 1,939 s |
+| Epoch change | `deep-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
+| Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,577 s |
+| Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |
 
-- The epoch change model's `deep-leases` and `deep-slow` rows predate its settling, failure, disk
-  identity and read steps and do not check `ReadsAcked`. `ci-leases`' unchanged state count says
-  nothing about them: `deep-leases` has six plans `ci-leases` lacks, and `deep-slow` one of its own.
 - Each model names the simulator invariant of each property in its own section's property table,
   so this map holds only the configuration results. The sessions model's invariants are registered
   by [MetaStore invariants](#metastore-invariants) (phase 4), which plants its leader-side
@@ -3935,7 +3933,7 @@ job lists the models and `deep` configurations, and every other job runs once pe
   it.
 - A rule removed from a spec, with no negative configuration changed, fails that model's job: some
   `ci` configuration or negative variant fails and its trace is printed.
-- A configuration past 300 s on the runner fails the job. `ci-restarts` takes 260 s of 300 on the
+- A configuration past 300 s on the runner fails the job. `ci-restarts` takes 255 s of 300 on the
   M4 Pro; on the runner it either fits, or its largest plan moves to a `ci` configuration of its
   own.
 - Nightly, and when started by hand, one job per model runs `scripts/models.sh sim` with
