@@ -4024,13 +4024,19 @@ sample `seeds.Run` gives that test by default:
 | `primaries-0` | 638 | stops at the run's last table, discrepancy 8 | 10 |
 | `primaries-7` | 664 | stops at `Peer`, discrepancy 9 | 1 |
 
-Failed lines take a second or two to reach, and a passing run's time follows how many crash branches
-stay alive, not its length, so a commit could check about 40 traces a minute but for a run like
-`primaries-1`. Not yet run: `TestReplicatedWritesSurviveFaults`, any plant of the rule map (traces can
-fail), and the lease half. Unreached by any passing trace, as no run got that far: `Recover`, `Remove`,
-`Add`, `Replace`, `ReportRecovered`, `MemberFail`, `OwnFail` on a seed that needed it, `Fold` of a move,
-and with leases out of scope `OpenGrant`, `OpenLapse` and every action of `LeaseSteps`; `Tick`, `Die`,
-`Refuse`, `Reboot`, `Persist`, Raft's actions and the fault actions of `Choices` have no mapping.
+A trace's time follows how many `maydeliver` and `mayfail` branches stay alive, not its length:
+`primaries-6` takes 3 s and `primaries-1`, with 62 `mayfail` lines, 147 s. Two passing seeds are too
+few to say how many seeds a commit can check.
+
+Not yet run: any plant of the rule map, so traces can fail is unknown, along with whether the
+`Persisted` and `Accepted` guards catch what they are meant to; `TestReplicatedWritesSurviveFaults`;
+and the lease half. Lines the two passing seeds reached: `Membership` by `edit`, `mark` and `rotate`,
+`Fold`, `Renew`, `Adopt`, `Send`, `Order`, `Deliver`, `Peer`, `Activate`, `Restart`. `recovered`,
+`reported` and `ask` lines occur, but each can be a stutter and TLC does not report which branch a
+line took, so `Recover`, `ReportRecovered`, `AskNext` and `CounterOut` count as unproven, as does
+`OwnFail` behind `mayfail`. No passing line reached `Format`, `Add`, `Remove`, `Replace` or
+`MemberFail`. `Tick`, `Die`, `Refuse`, `Reboot`, `Persist`, `OpenGrant`, `OpenLapse`, `LeaseSteps`,
+Raft's actions and the other fault actions of `Choices` have no mapping.
 
 | # | What | Class | How settled |
 | --- | --- | --- | --- |
@@ -4039,9 +4045,9 @@ and with leases out of scope `OpenGrant`, `OpenLapse` and every action of `Lease
 | 3 | `Activate`'s record came after the held writes it released were ordered | logging | The record moved to where the lead goes active |
 | 4 | A member takes a version into its store, then adopts a table, then logs it, while `Deliver` needs the interval | compression | `Accepted` opens the version, `maydeliver` lets it land before `Adopt` |
 | 5 | A crash loses a version from the primary's own log that `Order` had logged | compression | `mayfail` before `Restart`, by `OwnFail`; a version every member logged is not in `pend`, so a run needing that would fail |
-| 6 | A primary that dropped its own version lists the chunk from this peering yet merges on the kept image, as `lacks` allows, where `Order` waits for `miss[own][c] = NoMiss` and merges on `Newest(dlog)`, the dropped version | spec, open | Needs a patch telling a gated, dropped version from a mapped one, with a negative beside `neg-merge-before-kept` |
+| 6 | A primary that dropped its own version lists the chunk from this peering yet merges on the kept image, as `lacks` allows, where `Order` waits for `miss[own][c] = NoMiss` and merges on `Newest(dlog)`, the dropped version | spec, open | Read from seed 9's trace and the code, and not yet confirmed by printing the state; seeds 3, 4 and 5 stop at the same kind of line and were not read. A patch would tell a gated, dropped version from a mapped one, with a negative beside `neg-merge-before-kept` |
 | 7 | A member refuses a version of its interval in a case `MemberFail` does not take; the code refuses a version it may hold after a restart, and `MemberFail` needs it unlogged | undiagnosed, open | Next to read |
-| 8 | The test's last table asks a renewal with no primary asking, which `Reactive` needs | logging, open | End the trace before that table, or count it |
+| 8 | The test's last table asks a renewal with no primary asking, which `Reactive` needs | logging, open | Read from the test, not confirmed. End the trace before that table, or count it |
 | 9 | One reply or kept version differs from the spec's at seed 7's first `Peer` | undiagnosed, open | Next to read |
 
 ## Models in CI
