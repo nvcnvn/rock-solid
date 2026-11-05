@@ -784,7 +784,8 @@ Persist(d) ==
 \* primary picks the blocks at the read, so the writes ordered between the
 \* read and the write are overwritten. The source lists nothing, or is the
 \* primary, which lists the chunk only from this peering, for dropped
-\* versions of its own, and whose image is the kept version. With
+\* versions of its own, and whose image is the kept version. A chunk no member
+\* keeps anything of needs no source. With
 \* RecoveryReadOldDisk, a read for a source formatted again is answered by its
 \* node's new, empty disk, and taken for the kept version.
 Recover(n, p, c, d) ==
@@ -804,7 +805,8 @@ Recover(n, p, c, d) ==
                 s == IF old THEN ddisk[dhost[m]] ELSE m
             IN /\ dnode[s] # 0
                /\ Running(dnode[s])
-               /\ \/ miss[s][c] = NoMiss
+               /\ \/ K = 0
+                  \/ miss[s][c] = NoMiss
                   \/ s = PrimDisk(p, k) /\ c \in TheDec(n, p, k).img
                /\ K = 0 \/ K \in dlog[s][c] \/ old
                /\ at = Ver(k, 0) \/ Bug("RecoveryCoversAtRead")
