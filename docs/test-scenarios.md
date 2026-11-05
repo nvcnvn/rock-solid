@@ -3211,8 +3211,8 @@ constants are as at the head of [Peering and read leases](#peering-and-read-leas
 on 4 workers, so `ci`'s 5 minutes cover about 2.4 million.
 
 **Configurations.** Property 1 needs peering and leases together, so the spec is not split; its
-`ci` runs are six configurations, one heavy on leases, two on peering, one on moves and two on
-failures. Any membership change at any time does not fit `ci`'s 5 minutes, so each `ci` configuration checks a set of *plans*: a plan is a short
+`ci` runs are eight configurations, one heavy on leases, three on peering, one on an operator's
+edits, one on moves and two on failures. Any membership change at any time does not fit `ci`'s 5 minutes, so each `ci` configuration checks a set of *plans*: a plan is a short
 sequence of membership changes taken from the faults below, with the client writes and the faults
 whose rules it tests, and TLC checks every interleaving of nodes, messages, writes, renewals, folds of
 activation reports and faults around it. `deep-peering` adds a free plan: any two changes at any
@@ -3222,13 +3222,14 @@ nodes without finishing.
 | Configuration | Nodes | What it holds |
 | --- | --- | --- |
 | `ci-peering` | 3 | Both chunks; lease expiry left open, except that a grantor that answers peering of an interval holds no live grant to that interval's old primary; the plans with membership changes alone, but the largest |
-| `ci-restarts` | 3 | As `ci-peering`, with the plans that restart a primary or format a disk, under which a decision can stop short of activation, and the largest membership plan, a member down and back and then the primary moved to it, at 1.5 million states alone, kept apart from `ci-peering` so that each fits its 5 minutes |
-| `ci-restarts-moved` | 3 | As `ci-restarts`, with its plan `DownBackMoved`, which would pass that configuration's 300 s |
+| `ci-restarts` | 3 | As `ci-peering`, with the plans that restart a primary or format a disk, under which a decision can stop short of activation |
+| `ci-restarts-moved` | 3 | As `ci-restarts`, with the largest membership plan alone, a member down and back and then the primary moved to it, at 1.5 million states, kept apart from both so that each fits its 5 minutes |
+| `ci-edits` | 3 | As `ci-peering`, with an operator's edits of PG 1 in one table each: the primary moved and marked down, then back first; and the members reordered twice with no mark, the second keeping the primary the first moved |
 | `ci-moves` | 3 | As `ci-peering`, with the move plans: PG 2's replica and then its primary moved to node 1; the replica's move with the leaving member marked down before its replacement recovers, or with a process restart; the replica's move with primary 2 put in `maintenance` and back before the removal; and the replica's move with a refill before the removal, a disk formatted again replacing node 1's. Each sends only the daemon's one write W |
 | `ci-faults` | 3 | As `ci-peering`, with a sixth table and a second fault; the plans that fail a version at a member or on the primary's own log, alone, with the primary moved, with a member or the primary marked down, and with one in `maintenance` and back; a member's failure with a process restart; a primary moved away and back; the plans that format a disk around peering and around recovery; and the one that raises `min_live` past an interval that ran below it |
 | `ci-asks` | 3 | As `ci-peering`, with the failure plans that hold no restart or format, under fairness, for the properties that every interval a failure ended is asked past and every client is answered |
 | `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the six below |
-| `deep-peering` | 4 | `ci-peering`'s and `ci-restarts`' plans and the free plan, and the unbounded liveness property |
+| `deep-peering` | 4 | `ci-peering`'s, `ci-restarts`' and `ci-restarts-moved`'s plans and the free plan, and the unbounded liveness property |
 | `deep-leases` | 4 | `ci-leases`'s plans and the six it leaves out: four pair a partition with a pause, a suspend or a reboot, and two stop the holder in place while its grantor pauses or restarts |
 | `deep-slow` | 3 | The delayed-message plan alone, with `ci-leases`'s constants and time to 5 s |
 
@@ -3370,7 +3371,9 @@ plans enable.
 - A message duplicated or held for any time.
 - A client write ordered between recovery's read of the authoritative member and its write.
 - A member's disk formatted again while its node stays up, around peering and around recovery of a
-  new primary that reads from it.
+  new primary that reads from it; and a write the primary still sends to the old disk ID, which the
+  node refuses, ending the interval at no cost in faults (`GoneRefuses`): the new disk is no member
+  until a refill makes it one, under a new interval, so nothing it logs counts for the old ID.
 - A member refusing or failing a version with a later one in flight; a version failing on the
   primary's own log. Each with the primary moved, with a member or the primary marked down, and
   with one in `maintenance` and back; the member's with a process restart too.
@@ -3420,12 +3423,10 @@ left the interval, which the model has it hold silently and the code answers; a 
 write, and a recovery write refused at a version the member does not stand at; a version held in
 part, which peering treats as not held; and a record failing below a later one on the primary's
 own log, which the store reports as held whole up to the failure, so that only the newest version
-on that log fails. A member write for a disk ID its node no longer has needs no fault of
-its own: the up-member check refuses it, and the new disk is no member until a refill makes it one,
-under a new interval, so nothing it could log would be counted for the old ID.
+on that log fails.
 
 **Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12, 15 and 16.
-`ci-peering`, `ci-restarts`, `ci-faults` and `deep-peering` check every property but 2 and 10, since
+`ci-peering`, `ci-restarts`, `ci-restarts-moved`, `ci-edits`, `ci-faults` and `deep-peering` check every property but 2 and 10, since
 the Raft group and lease time need clocks, 13, since their plans make no move, and 15 and 16, which
 only `ci-asks` checks; `deep-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
 and 16, on its small plans.
@@ -3470,6 +3471,7 @@ under fairness, as `deep-peering` does, on the restart plan alone, and those for
 | --- | --- | --- |
 | A member logs one version of a chunk out of order (1.2 before 1.1) | 5 | Peering keeps 1.2, which was merged on 1.1, from a member that lacks 1.1's block |
 | A new primary merges before it holds a kept version | 4 | The new primary's partial write merges on its stale block, and the acknowledged result drops the kept version |
+| A new primary merges on a version it mapped that peering dropped | 8 | PG 1: primary 1's 1.1 reaches node 2 alone; node 1 is marked down; node 2 peers, node 3 lacks 1.1, so the decision drops it, and node 2 merges a partial write on it. The clause it breaks nearly restates the rule, since `Content` is per block and shows no merged bytes: the Go plant `mergeOnDropped`, which breaks "a member listing nothing maps the kept writes applied in version order", is what backs the rule |
 | Peering stops only the previous interval | 4 | PG 2: interval 2 replaces the primary, interval 3 puts the other member in `maintenance`; 3 reaches only a member live in 2, and the old primary's write tagged 1, which 3 dropped, completes |
 | Members compare member lists instead of interval numbers | 4 | [1,2,3] → [1,2] → [1,2,3]; members at interval 3 accept the old write tagged 1 that 3's peering dropped |
 | A disk ID kept across a new log ID | 4 | 1.1 acknowledged on all three; node 3's disk is formatted again and keeps its ID; node 1 is marked down; peering finds disk 3, live in 1, lacking 1.1, and drops it |
@@ -3497,6 +3499,7 @@ under fairness, as `deep-peering` does, on the restart plan alone, and those for
 | A primary serves a version a member refused, before peering settles it | 14 | 1.1 is ordered, member 2 refuses it, and primary 1 serves it; `ReadsAcked` passes, as nothing was acknowledged and no decision dropped 1.1, and `ReadsMapped` does not |
 | A node that no longer leads a PG keeps its pending versions unanswered | 16 | The primary moves away with 1.1 pending and the new primary's member adopts the interval before it logs 1.1; the old primary's client waits for ever |
 | A member holding a version above the kept one is left off the missing list | 14 | PG 2's primary 2 orders 1.1, still pending, moves away and back, skipping the table between; peering reaches node 3, keeps nothing and drops 1.1, and node 2 serves 1.1 listing nothing. No acknowledged write is at stake: only the clause on dropped versions catches it |
+| An edit that reorders a PG's members keeps its interval | 6 | PG 1: primary 1 orders 1.1; an edit moves the primary with no new interval; the new primary peers in interval 1 and gives another write 1.1 |
 | A kept primary serves reads in an interval below `min_live` | 1 | PG 2's member 3 is marked down: primary 2 reads needing no lease; 3 returns and the primary moves to it while 2, cut off from the control plane, reads on; peering skips the interval below `min_live` |
 | The holder ends its lease on the slower of its clocks | 1 | Holder `CLOCK_BOOTTIME` −22.6%: the lease outlives the grant |
 | The grantor ends its grant on the faster of its clocks | 1 | Grantor `CLOCK_BOOTTIME` +22.6% |
