@@ -23,9 +23,14 @@
 - Hot-path benchmarks call `b.ReportAllocs` and must report zero allocations per operation.
 
 ## Protocol models
-- `models/` holds the TLA+ specs; a spec is right until shown wrong, and code follows it. Before
-  changing a protocol file, run `scripts/model-gate.sh for <file>` and read the rules it lists,
-  rather than the whole spec.
+- The goal is to know the code runs a protocol TLC checked; a new bug is a bonus, not the measure.
+  [From spec to code](docs/design.md#testing-strategy) is the workflow: model, build under the gate,
+  check conformance, settle each discrepancy in the code or the spec, heavy runs at milestones.
+- `models/` holds the TLA+ specs; a spec is right until shown wrong, and code follows it. A spec
+  may be missing a detail: patching it keeps the protocol, and it passes its `ci` run before it
+  merges. No item waits for a `deep` run.
+- Before changing a protocol file, run `scripts/model-gate.sh for <file>` and read the rules it
+  lists, rather than the whole spec.
 - `scripts/lint.sh` runs the gate. A commit to a protocol file changes a spec under `models/` too, or
   says why not in a body line `Model: none, <reason>`: a new step, message or rule of a protocol
   needs the model; timers, buffers and accounting do not. A new protocol gets its model before its

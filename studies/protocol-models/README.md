@@ -312,7 +312,7 @@ Stop, and record why, if any of these holds (thresholds are judgement, not sourc
 - Passing needs more than half of `Peer`, `Activate` and `Recover` rewritten, or pushes `ci-peering` past its 300 s budget.
 - Passing needs lines filtered or rewritten beyond the listed scope.
 - More than a third of commits to `replica_peer.go` or `epoch.tla` need a trace spec edit.
-- The validator catches no plant on those seeds and finds no divergence, so it adds nothing to the invariants.
+- Removing a rule from the code fails no trace, on seeds whose invariants pass, so the check cannot tell conforming code from code that left the spec. Finding no new bug is no reason to stop: the goal is knowing the code follows the spec ([From spec to code](../../docs/design.md#testing-strategy)).
 
 Going further needs a second spec, since that estimate is what ended MongoDB's work. If it costs about what the first did, stop at one. If it costs nearer CCF's week, add a nightly job. A pass says only that those runs fit the spec, not that the code is correct.
 
