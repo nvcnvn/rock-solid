@@ -101,7 +101,9 @@ VARIABLES
     pv,       \* [Node -> [Chunk -> Nat]]: newest version a primary ordered
     pin,      \* [Node -> SUBSET [w, hold]]: client writes a primary holds unordered
     known,    \* [Node -> [PG -> Nat]]: newest incarnation of the session a primary has seen
-    dec,      \* set of [p, k, n, r, kept, own]: peering decisions; own: chunks the primary listed before
+    dec,      \* set of [p, k, n, r, kept, gone, img]: peering decisions; gone: per chunk the
+              \* gated versions of the primary the decision drops; img: the chunks whose
+              \* image on the primary is the kept version once it settled
     act,      \* set of [p, k, r]: activated intervals
     \* Data path
     rm,       \* set of replicated writes in flight or delivered (kept, so duplicated)
@@ -300,7 +302,8 @@ Init ==
     /\ pv = [n \in Node |-> [c \in Chunk |-> 0]]
     /\ pin = [n \in Node |-> {}]
     /\ known = [n \in Node |-> [p \in PG |-> 0]]
-    /\ dec = {[p |-> p, k |-> 1, n |-> InitMem[p][1], r |-> 1, kept |-> [c \in Chunk |-> 0], own |-> {}] : p \in PG}
+    /\ dec = {[p |-> p, k |-> 1, n |-> InitMem[p][1], r |-> 1, kept |-> [c \in Chunk |-> 0],
+                gone |-> [c \in ChunksOf(p) |-> {}], img |-> ChunksOf(p)] : p \in PG}
     /\ act = {[p |-> p, k |-> 1, r |-> 1] : p \in PG}
     /\ rm = {}
     /\ vers = {}
@@ -696,11 +699,20 @@ PeerOn(n, p, J, P) ==
         torn == \E c \in ChunksOf(p) : K[c] # 0 /\
                   \E s \in src(c) : Content(c, dlog[s][c]) # Content(c, Chain(c, K[c]))
         lists == [d \in UpIn(p, k) |-> [c \in ChunksOf(p) |-> Entry(d, c, K[c])]]
+        own == PrimDisk(p, k)
+        gone == [c \in ChunksOf(p) |->
+                   {r.v : r \in {x \in pend \cup refd : x.n = n /\ x.c = c /\ x.v > SettleTop(n, c, K[c])}}]
+        \* A version above K the primary mapped stays in its image, and a chunk it
+        \* listed may miss a kept block or hold a dropped one below its newest.
+        img == {c \in ChunksOf(p) :
+                  /\ miss[own][c] = NoMiss
+                  /\ \/ Newest(dlog[own][c] \ gone[c]) = K[c]
+                     \/ Bug("MergeOnDropped") /\ K[c] \in dlog[own][c] \cup {0}}
     IN /\ UpIn(p, k) \subseteq J
        /\ \A i \in NeedIv(p, k, L) : J \cap UpIn(p, i) # {}
        /\ LapseFor(J, p, k)
        /\ dec' = dec \cup {[p |-> p, k |-> k, n |-> n, r |-> run[n], kept |-> K,
-                            own |-> {c \in ChunksOf(p) : miss[PrimDisk(p, k)][c] # NoMiss}]}
+                            gone |-> gone, img |-> img]}
        /\ bad' = IF torn THEN bad \cup {"torn"} ELSE bad
        /\ pv' = [pv EXCEPT ![n] = [c \in Chunk |-> IF c \in ChunksOf(p) THEN K[c] ELSE pv[n][c]]]
        /\ IF Bug("ActivateBeforeDurable")
@@ -772,13 +784,9 @@ Persist(d) ==
 \* primary picks the blocks at the read, so the writes ordered between the
 \* read and the write are overwritten. The source lists nothing, or is the
 \* primary, which lists the chunk only from this peering, for dropped
-\* versions of its own, and holds the kept version: the code takes such a
-\* primary when its index maps the kept image. The model reads only the
-\* source's versions up to the kept one and tells no mapped version from a
-\* logged one, so it lets a primary that mapped a dropped version be the
-\* source too, which the code does not. With RecoveryReadOldDisk, a read for a
-\* source formatted again is answered by its node's new, empty disk, and taken
-\* for the kept version.
+\* versions of its own, and whose image is the kept version. With
+\* RecoveryReadOldDisk, a read for a source formatted again is answered by its
+\* node's new, empty disk, and taken for the kept version.
 Recover(n, p, c, d) ==
     LET k == IvAt(n, p)
         K == miss[d][c]
@@ -797,7 +805,7 @@ Recover(n, p, c, d) ==
             IN /\ dnode[s] # 0
                /\ Running(dnode[s])
                /\ \/ miss[s][c] = NoMiss
-                  \/ s = PrimDisk(p, k) /\ c \notin TheDec(n, p, k).own
+                  \/ s = PrimDisk(p, k) /\ c \in TheDec(n, p, k).img
                /\ K = 0 \/ K \in dlog[s][c] \/ old
                /\ at = Ver(k, 0) \/ Bug("RecoveryCoversAtRead")
                /\ dlog' = [dlog EXCEPT ![d][c] =
@@ -914,8 +922,10 @@ Ack(r) ==
     /\ wst' = [wst EXCEPT ![r.w] = 2]
 
 \* The active primary orders a client write: the chunk's next version, merged
-\* on the newest version it holds. A write covering part of a block waits
-\* until the primary holds every version peering kept.
+\* on its image, the newest version it holds that peering did not drop. A write
+\* covering part of a block waits until that image is the version peering kept,
+\* which a primary that dropped only gated versions of its own has at once,
+\* though it lists the chunk and a member may recover from it.
 Order(n, x) ==
     LET w == Writes[x.w]
         c == w.c
@@ -924,7 +934,8 @@ Order(n, x) ==
         own == ddisk[n]
         cur == pv[n][c]
         v == IF IvOfV(cur) = k THEN cur + 1 ELSE Ver(k, 1)
-        on == IF w.whole THEN cur ELSE Newest(dlog[own][c])
+        y == TheDec(n, p, k)
+        on == IF w.whole THEN cur ELSE Newest(dlog[own][c] \ y.gone[c])
         r == [c |-> c, v |-> v, w |-> x.w, on |-> on, blk |-> w.blk, n |-> n, r |-> run[n]]
         logs == [dlog EXCEPT ![own][c] = @ \cup {v}]
     IN /\ Running(n)
@@ -934,7 +945,7 @@ Order(n, x) ==
        /\ ~pr[n][p].ask \/ Bug("OrderPastFailed")
        /\ own = PrimDisk(p, k)
        /\ ~Fenced(n, x)
-       /\ w.whole \/ miss[own][c] = NoMiss \/ Bug("MergeBeforeKept")
+       /\ w.whole \/ miss[own][c] = NoMiss \/ c \in y.img \/ Bug("MergeBeforeKept")
        /\ Cnt(v) <= MaxCounter
        /\ pin' = [pin EXCEPT ![n] = @ \ {x}]
        /\ pv' = [pv EXCEPT ![n][c] = v]
@@ -1736,11 +1747,13 @@ UnchangedIntervalAccepts ==
     \A m \in rm : dnode[m.to] > 0 /\ IvAt(dnode[m.to], m.p) = m.iv => Accepts(m.to, m)
 
 \* 8. A new primary merges into a chunk only once it holds every version
-\* peering kept for it: the version it merges on rests on the kept one.
+\* peering kept for it, and on nothing peering dropped: the version it merges on
+\* is the kept one or one of its own interval, which rests on the kept one.
 MergesOnKept ==
     \A x \in vers : ~Writes[x.w].whole =>
        \A y \in dec : (y.p = ChunkPG[x.c] /\ y.k = IvOfV(x.v) /\ y.n = x.n /\ y.r = x.r)
-                        => y.kept[x.c] = 0 \/ y.kept[x.c] \in Chain(x.c, x.on)
+                        => /\ y.kept[x.c] = 0 \/ y.kept[x.c] \in Chain(x.c, x.on)
+                           /\ x.on = y.kept[x.c] \/ IvOfV(x.on) = y.k
 
 \* 9. Table epochs, interval numbers and last activated intervals never go
 \* backwards (the node half is the action property Monotonic), and a table's

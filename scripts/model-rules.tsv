@@ -23,6 +23,7 @@ epoch/neg-lease-before-bound-half-drift	lease.beforeBound,halfStep	TestPlantedLe
 epoch/neg-log-out-of-order	chunkstore.resendNewestFirst	TestPlantedPeeringBugsBreakTheFaultRun
 epoch/neg-margin-exact	lease.marginExact	TestPlantedLeaseBugsBreakThePair
 epoch/neg-merge-before-kept	chunkstore.mergeWhileLacking	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-merge-on-dropped	open	Spec conformance check
 epoch/neg-no-end-on-resume	lease.noResumedEnd	TestPlantedLeaseBugsBreakThePair
 epoch/neg-no-epoch-bump	open	MetaStore invariants
 epoch/neg-no-restart-wait	lease.noRestartWait	TestPlantedLeaseBugsBreakThePair
