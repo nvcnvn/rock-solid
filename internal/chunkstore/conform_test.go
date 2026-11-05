@@ -140,7 +140,7 @@ var conformPlants = []struct {
 	{"recoverSelfOnly", func(r *primaryRun) { r.c.replicaPlants.recoverSelfOnly = true }},
 }
 
-// conformPlant keeps a planted run's trace, however the run stops, and beside it a .stop file saying how.
+// conformPlant keeps a planted run's trace, however the run stops, and beside it a .stop file saying how; with CONFORM_RUNON set the run goes on past its first broken invariant, for a plant whose break comes before the record of what broke it.
 func conformPlant(t *testing.T, name string, set func(r *primaryRun), seed uint64) {
 	var run *primaryRun
 	stop := "end"
@@ -153,13 +153,16 @@ func conformPlant(t *testing.T, name string, set func(r *primaryRun), seed uint6
 			t.Fatal(err)
 		}
 	}()
-	if err := runPrimaries(t, seed, &peerPlant{set: func(r *primaryRun) { run = r; set(r) }}); err != nil {
+	if err := runPrimaries(t, seed, &peerPlant{set: func(r *primaryRun) {
+		run, r.runOn = r, os.Getenv("CONFORM_RUNON") != ""
+		set(r)
+	}}); err != nil {
 		stop = err.Error()
 	}
 }
 
 // Keeps, for scripts/conform.sh plants, each seed's unplanted trace and its trace under each plant CONFORM_PLANTS names, or every plant.
-func TestConformPlants(t *testing.T) {
+func TestPlantsKeepTraces(t *testing.T) {
 	if os.Getenv("CONFORM_DIR") == "" {
 		t.Skip("CONFORM_DIR not set")
 	}

@@ -5,7 +5,8 @@
 #   scripts/conform.sh file.trace ...   those traces alone
 #   scripts/conform.sh plants           traces can fail: on each of COUNT seeds (default 10) from FIRST
 #                                       (default 0) whose unplanted trace passes, each plant of PLANTS
-#                                       (default all of conformPlants), one row each
+#                                       (default all of conformPlants), one row each; a run stops at its
+#                                       first broken invariant, or goes on with CONFORM_RUNON=1
 # Each trace is one light TLC run, in turn: one worker, HEAP (default 2g), TLC_SECONDS (default 400).
 # KEEP=dir keeps the traces and data, and skips a check whose spec and data have not changed.
 set -euo pipefail
@@ -71,7 +72,7 @@ check() {
 }
 
 if [ "${1:-}" = plants ]; then
-	CONFORM_DIR=$tmp/traces CONFORM_PLANTS=${PLANTS:-} GOMEMLIMIT=4GiB go test -p 4 ./internal/chunkstore -run '^TestConformPlants$' \
+	CONFORM_DIR=$tmp/traces CONFORM_PLANTS=${PLANTS:-} GOMEMLIMIT=4GiB go test -p 4 ./internal/chunkstore -run '^TestPlantsKeepTraces$' \
 		-seeds.first "${FIRST:-0}" -seeds "${COUNT:-10}"
 	go build -o "$tmp/tracedata" ./tools/tracedata
 	for ((seed = ${FIRST:-0}; seed < ${FIRST:-0} + ${COUNT:-10}; seed++)); do
@@ -92,11 +93,15 @@ if [ "${1:-}" = plants ]; then
 				continue
 			fi
 			steps "$tmp/check/$name/data.new" >"$tmp/plant.lines"
-			first=$(cmp "$tmp/base.lines" "$tmp/plant.lines" 2>&1 | sed -n 's/.* line \([0-9]*\).*/\1/p')
-			if [ -z "$first" ]; then
+			same=$(cmp "$tmp/base.lines" "$tmp/plant.lines" 2>&1 || true)
+			case $same in
+			*"EOF on "*base.lines*) first=$(($(wc -l <"$tmp/base.lines") + 1)) ;;
+			*" line "*) first=$(echo "$same" | sed 's/.* line \([0-9]*\).*/\1/') ;;
+			*)
 				echo "$name: not fired, $(wc -l <"$tmp/plant.lines" | tr -d ' ') lines are a prefix of the baseline's, stop: $stop"
 				continue
-			fi
+				;;
+			esac
 			if check "$f"; then
 				echo "$name: PASSED, fired at line $first, $(cat "$tmp/check/$name/verdict"), stop: $stop"
 			else

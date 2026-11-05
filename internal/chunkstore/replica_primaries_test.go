@@ -85,8 +85,10 @@ type primaryRun struct {
 	chunks        [2]core.ChunkID
 	returns       bool
 	duringPeering bool
-	ended         bool
-	ops           map[core.RequestID]faultOp
+	// runOn keeps a planted run going past its first broken invariant.
+	runOn bool
+	ended bool
+	ops   map[core.RequestID]faultOp
 	// version is each write's version once a primary ordered it, kept each activated interval's decision, and tainted the disks that may lack writes.
 	version map[core.RequestID]uint64
 	kept    map[uint32][]keptChunk
@@ -641,7 +643,7 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 		if !busy() && c.quiet() || !c.step() {
 			break
 		}
-		if c.found != nil {
+		if c.found != nil && !r.runOn {
 			return c.found
 		}
 		if busy() && r.rng.Chance(1, 40) && (c.active() || r.duringPeering && r.rng.Chance(1, 10)) && !slices.ContainsFunc(r.members(), func(m Member) bool { return m.Mark == MarkUp && !r.running(m) }) {
@@ -657,7 +659,7 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	a.asks = append(a.asks, PGInterval{pg0, e.Interval})
 	r.publish()
 	r.settled()
-	if c.found != nil {
+	if c.found != nil && !r.runOn {
 		return c.found
 	}
 	r.recover()
