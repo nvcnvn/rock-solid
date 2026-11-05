@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 var (
@@ -54,6 +55,25 @@ func MakeDelta(prev, next *Table) Delta {
 		}
 	}
 	return d
+}
+
+// TableRecords appends the trace records of committing next after prev: its epoch and each entry the delta changes.
+func TableRecords(dst []trace.Record, prev, next *Table) []trace.Record {
+	dst = append(dst, trace.Record{Name: trace.OutTable, Fields: [trace.MaxFields]uint64{next.Epoch}})
+	d := MakeDelta(prev, next)
+	for i := range d.Entries {
+		x := &d.Entries[i]
+		ml := next.pool(x.PG.Pool).MinLive
+		dst = append(dst, trace.Record{Name: trace.OutEntry, Fields: [trace.MaxFields]uint64{pgField(x.PG), uint64(x.Entry.Interval), uint64(x.Entry.Activated), uint64(ml)}})
+		for _, m := range x.Entry.Members {
+			var leaving uint64
+			if m.Leaving {
+				leaving = 1
+			}
+			dst = append(dst, trace.Record{Name: trace.OutMember, Fields: [trace.MaxFields]uint64{pgField(x.PG), uint64(m.Disk), uint64(m.Mark), leaving}})
+		}
+	}
+	return dst
 }
 
 func (t *Table) pool(id core.PoolID) *PoolTable {

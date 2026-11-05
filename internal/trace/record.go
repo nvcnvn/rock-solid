@@ -87,6 +87,34 @@ const (
 	OutFailed
 	// OutCheckpointDone: lsn.
 	OutCheckpointDone
+	// OutTable, the control plane committing a table: epoch. Its changed entries follow.
+	OutTable
+	// OutEntry is a PG entry of the table before it: pg interval activated minlive.
+	OutEntry
+	// OutMember is one member of the entry before it, primary first: pg disk mark leaving.
+	OutMember
+	// OutAdopt, a replica taking a table: epoch.
+	OutAdopt
+	// OutSend, a client sending a write: id chunk pg span incarnation; span packs offset and length as off<<32 | len.
+	OutSend
+	// OutOrder, a primary ordering a client's write: id chunk version.
+	OutOrder
+	// OutLogged, a disk's copy of a version durable: chunk version.
+	OutLogged
+	// OutCommitted, a client answered OK: chunk version.
+	OutCommitted
+	// OutReply, a member's answer to peering reaching its primary: pg interval disk decided. One OutReplyChunk per chunk follows.
+	OutReply
+	// OutReplyChunk is one chunk of the OutReply before it: disk chunk whole logged list; list is the listed version plus 1, or 0 for none.
+	OutReplyChunk
+	// OutDecide, a primary deciding peering: pg interval. One OutKept per chunk follows.
+	OutDecide
+	// OutKept is one chunk of the OutDecide before it: chunk kept.
+	OutKept
+	// OutPersisted, a member's missing list durable: pg interval disk.
+	OutPersisted
+	// OutActivate, a primary activating: pg interval.
+	OutActivate
 	numNames
 )
 
@@ -128,6 +156,12 @@ var (
 	fBytes  = field{"bytes", typeNum}
 	fLSN    = field{"lsn", typeNum}
 	fResult = field{"err", typeResult}
+	fEpoch  = field{"epoch", typeNum}
+	fPG     = field{"pg", typeNum}
+	fIv     = field{"interval", typeNum}
+	fDisk   = field{"disk", typeNum}
+	fChunk  = field{"chunk", typeNum}
+	fVer    = field{"version", typeNum}
 )
 
 var schemas = [numNames]schema{
@@ -157,6 +191,20 @@ var schemas = [numNames]schema{
 	OutDurable:        {"Durable", KindOutput, []field{fRound, fLSN}},
 	OutFailed:         {"Failed", KindOutput, []field{fResult}},
 	OutCheckpointDone: {"CheckpointDone", KindOutput, []field{fLSN}},
+	OutTable:          {"Table", KindOutput, []field{fEpoch}},
+	OutEntry:          {"PGEntry", KindOutput, []field{fPG, fIv, {"activated", typeNum}, {"minlive", typeNum}}},
+	OutMember:         {"Member", KindOutput, []field{fPG, fDisk, {"mark", typeNum}, {"leaving", typeBool}}},
+	OutAdopt:          {"Adopt", KindOutput, []field{fEpoch}},
+	OutSend:           {"Send", KindOutput, []field{{"id", typeNum}, fChunk, fPG, {"span", typeNum}, {"incarnation", typeNum}}},
+	OutOrder:          {"Order", KindOutput, []field{{"id", typeNum}, fChunk, fVer}},
+	OutLogged:         {"Logged", KindOutput, []field{fChunk, fVer}},
+	OutCommitted:      {"Committed", KindOutput, []field{fChunk, fVer}},
+	OutReply:          {"PeerReply", KindOutput, []field{fPG, fIv, fDisk, {"decided", typeNum}}},
+	OutReplyChunk:     {"PeerChunk", KindOutput, []field{fDisk, fChunk, {"whole", typeNum}, {"logged", typeNum}, {"list", typeNum}}},
+	OutDecide:         {"Decide", KindOutput, []field{fPG, fIv}},
+	OutKept:           {"Kept", KindOutput, []field{fChunk, {"kept", typeNum}}},
+	OutPersisted:      {"Persisted", KindOutput, []field{fPG, fIv, fDisk}},
+	OutActivate:       {"Activate", KindOutput, []field{fPG, fIv}},
 }
 
 // Kind is the kind of record the name belongs to, or 0 for an unknown name.

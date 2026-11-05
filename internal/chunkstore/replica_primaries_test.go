@@ -174,6 +174,7 @@ func (r *primaryRun) publish() {
 		return
 	}
 	r.removal(&next)
+	c.noteTable(&next)
 	c.table = next
 	for n := range c.reps {
 		if !c.s.Node(uint32(n)).Up() {

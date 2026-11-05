@@ -11,6 +11,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 // rcluster is replicas on simulated nodes, disk d on node d − 1, a client on the last node, and the test as the control plane: it publishes tables and ends peering.
@@ -34,10 +35,12 @@ type rcluster struct {
 	recovered   []PGFields
 	inv         sim.Invariants
 	// sentVer is the newest version of each chunk a primary sent each member on its current connection, boots counting each node's starts and lost the connections each lost; orderErr is the first send out of order.
-	sentVer  map[sendKey]uint64
-	boots    []int
-	lost     map[[2]core.NodeID]int
-	orderErr error
+	sentVer map[sendKey]uint64
+	boots   []int
+	lost    map[[2]core.NodeID]int
+	// conforming is set once the run records a conformance trace, noted once its first table was recorded.
+	conforming, noted bool
+	orderErr          error
 	// passes is each pass of each replica's loop: the actions it emitted.
 	passes [][][]core.Action
 	// counting adds the heap allocations each replica's OnEvent makes to mallocs.
@@ -156,7 +159,7 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 	}
 	for d := range disks {
 		c.s.AddNode(sim.DefaultClock, []sim.DiskSpec{{Blocks: geo.DiskBlocks(), Settings: sim.DefaultDiskSettings()}}, func(n *sim.Node) {
-			var out ReplicaOutput
+			out := ReplicaOutput{Trace: make([]trace.Record, 0, 256)}
 			m := sim.MachineFunc(func(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
 				out.Reset()
 				if ev.Kind == core.EvPeerLost {
@@ -244,6 +247,9 @@ func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Ac
 	c.asks = append(c.asks, out.Asks...)
 	c.activations = append(c.activations, out.Activations...)
 	c.recovered = append(c.recovered, out.Recovered...)
+	for i := range out.Trace {
+		c.s.Node(uint32(d)).Output(c.loops[d], out.Trace[i])
+	}
 	c.passes[d] = append(c.passes[d], slices.Clone(out.Actions))
 	if c.onPass != nil {
 		c.onPass(d, out.Actions)
@@ -284,6 +290,7 @@ func (c *rcluster) call(d int, f func(ctx *core.Context, r *Replica, out *Replic
 
 // publish hands every replica t and, with activate, runs the cluster until every PG a running replica leads has peered.
 func (c *rcluster) publish(t Table, activate bool) {
+	c.noteTable(&t)
 	c.table = t
 	for d := range c.reps {
 		c.call(d, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetTable(ctx, t, out) })
@@ -430,6 +437,7 @@ func (c *rcluster) update(pgf PGFields, ch core.ChunkID, off uint32, data []byte
 			c.cl.sent[id] = buf
 		}
 		c.hist.invoke(ctx, 0, &a)
+		c.noteSends([]core.Action{a})
 		return append(acts, a)
 	})
 	return id

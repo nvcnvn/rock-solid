@@ -8,6 +8,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 // maxMembers is the widest PG a replica primary fans out to: rep3 with a leaving member.
@@ -42,7 +43,7 @@ type ReplicaConfig struct {
 	Restarted bool
 }
 
-// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations and in Recovered, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers.
+// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations and in Recovered, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers. Trace is the protocol steps the call took, for the loop's trace.
 type ReplicaOutput struct {
 	Actions     []core.Action
 	Fetch       uint64
@@ -50,12 +51,19 @@ type ReplicaOutput struct {
 	Asks        []PGFields
 	Activations []PGFields
 	Recovered   []PGFields
+	Trace       []trace.Record
 }
 
 // Reset empties the output for reuse.
 func (o *ReplicaOutput) Reset() {
-	o.Actions, o.Fetch, o.Whole, o.Asks, o.Activations, o.Recovered = o.Actions[:0], 0, false, o.Asks[:0], o.Activations[:0], o.Recovered[:0]
+	o.Actions, o.Fetch, o.Whole, o.Asks, o.Activations, o.Recovered, o.Trace = o.Actions[:0], 0, false, o.Asks[:0], o.Activations[:0], o.Recovered[:0], o.Trace[:0]
 }
+
+func (o *ReplicaOutput) note(name trace.Name, a, b, c, d, e uint64) {
+	o.Trace = append(o.Trace, trace.Record{Name: name, Fields: [trace.MaxFields]uint64{a, b, c, d, e}})
+}
+
+func pgField(pg core.PGID) uint64 { return uint64(pg.Pool)<<32 | uint64(pg.Index) }
 
 func (o *ReplicaOutput) fetch(epoch uint64, whole bool) {
 	o.Fetch = max(o.Fetch, epoch)
@@ -496,6 +504,7 @@ func comparePG(a, b core.PGID) int {
 
 // adopt takes t as the replica's table. In the first table after a restart, every PG this disk leads asks for a new interval. A PG this disk leads in t keeps its term if no other primary led it in between, as the PG's listed past intervals show, and holds its client writes until it has peered in its new interval; a PG it no longer leads refuses the writes it held.
 func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
+	out.note(trace.OutAdopt, t.Epoch, 0, 0, 0, 0)
 	first := r.table.Epoch == 0
 	r.table = t
 	if t.Epoch >= r.want {
@@ -1119,6 +1128,9 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 	i := r.versionOf(o.ID)
 	v := &r.vers[i]
 	v.u.Version, v.buf, v.ordered = o.Version, o.Buf, true
+	if !v.recover {
+		out.note(trace.OutOrder, uint64(v.msgID), v.u.Chunk.Hash(), o.Version, 0, 0)
+	}
 	l := r.lead(v.u.PG.PG)
 	if l < 0 || r.leads[l].asking || r.leads[l].interval != v.interval {
 		r.fail(ctx, i, Response{}, out)
@@ -1191,6 +1203,9 @@ func (r *Replica) logged(ctx *core.Context, l Reply, out *ReplicaOutput) {
 		return
 	}
 	r.vers[i].logged = true
+	if !r.vers[i].recover {
+		out.note(trace.OutLogged, r.vers[i].u.Chunk.Hash(), r.vers[i].u.Version, 0, 0, 0)
+	}
 	r.tryCommit(ctx, i)
 }
 
@@ -1337,6 +1352,9 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 			ref := r.refusal(q.pg)
 			resp.Epoch, resp.Interval = ref.Epoch, ref.Interval
 		}
+		if resp.Status == StatusOK {
+			out.note(trace.OutCommitted, q.chunk.Hash(), rp.Version, 0, 0, 0)
+		}
 		if i >= 0 {
 			r.vers[i].done = true
 			r.release(ctx, i)
@@ -1351,6 +1369,8 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 			ref := r.refusal(q.pg)
 			resp.Version, resp.Epoch, resp.Interval = 0, ref.Epoch, ref.Interval
 			r.noteFailed(failedVer{pg: q.pg, chunk: q.chunk, version: q.version})
+		} else if !q.recover {
+			out.note(trace.OutLogged, q.chunk.Hash(), rp.Version, 0, 0, 0)
 		}
 		r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
 		for j := 0; j < len(r.dups); {
