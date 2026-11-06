@@ -4129,7 +4129,7 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `lastActivatedOnly` | `neg-reach-last-activated-only` | 1 | 0 | 1 | 0, 0 | The code's own `J` is what `Peer` judges | |
 | `freshGrantNoCheck` | `neg-fresh-grant-no-table-check` | 7 | 0 | 7 | 0, 0 | Passes | About leases, which no line observes |
 | `fenceOnArrival`, `reorderAfterOther`, `settleByNumber`, `readBelowMinLive` | `neg-fence-on-arrival`, `neg-reorder-after-other-primary`, `neg-settle-by-number`, `neg-read-below-min-live` | 0 | 0 | 0 | 0, 0 | No evidence: they fire on none of the 38 | |
-| `unlistTorn` | none | 1 | 0 | 1 | 0, 0 | Open: seed 24 passes, where the `recovered` line stopped it before the source was bound. Neither `mayrecover` nor the settled-write stutter lets it through, each checked by removing it | |
+| `unlistTorn` | none | 1 | 0 | 1 | 0, 0 | Passes, rightly. At seed 24 the only torn pair the plant bites is the primary's own, disk 1, chunk 1, which `k.lacking` puts in recovery's `todo` whatever the list says, and recovery finishes before any reply could show the list. Its interval 3 `recovered` lines are placed before `adopt n=1`, as discrepancy 11 asks. Seed 148, where the Go oracle catches the plant, stops at the next `peer` of PG 1, but its baseline gives no verdict, so it is no clean row | |
 | `recoverSelfOnly` | none | 36 | 12 | 23 | 11, 0 | `reported` 11, the plant's report with a member still listing; `peer` 1. One gives no verdict | `ReportRecovered`: lists empty |
 | `settleSubset` | none | 4 | 0 | 4 | 0, 0 | Too loose: `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record | |
 
@@ -4139,7 +4139,7 @@ Traces can fail is shown on these 38 seeds for 14 of the 26 rules, 9 of them cle
 which needs a record of the blocks a recovery write leaves out; `neverAsk`, an omission no line can name;
 `freshGrantNoCheck`, with the lease half; `resendNewestFirst`, `stopPreviousOnly` and `lastActivatedOnly`,
 which need a seed that reaches them; and the four that never fire. Of the oracle plants with no rule,
-`settleSubset` needs a record of what `Settle` answered, and `unlistTorn` is unread.
+`settleSubset` needs a record of what `Settle` answered, and `unlistTorn` a seed where the list shows, as 148 does once its baseline gives a verdict.
 
 Every relaxed path now has a plant: `img` in `Order` by `mergeOnDropped` and `mergeWhileLacking`, `img` as a
 recovery source by `recoverFromListed`, `Recover` at kept version 0 by `clearNoSource`, and `GoneRefuses` by
