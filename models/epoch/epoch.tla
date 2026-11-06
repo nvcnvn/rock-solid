@@ -416,16 +416,17 @@ Remove(p) ==
             [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # x.lv), !.lv = 0]])
        /\ UNCHANGED <<reqIv, reports, recd>>
 
-\* A leaving member that is up takes the place of another member, ending the
-\* move: the other member goes and the leaving one is an ordinary member. The
-\* model lets it replace any member, as Replace does; the code a missing one.
-\* With StayKeepsInterval the table keeps the interval.
+\* A leaving member that is up takes the place of a missing member, one marked
+\* down or whose disk is gone, ending the move: the missing member goes and the
+\* leaving one is an ordinary member. With StayKeepsInterval the table keeps the
+\* interval.
 Stay(p, out) ==
     LET x == ivs[p][Cur(p)]
         y == [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # out), !.lv = 0]
     IN /\ x.lv # 0
        /\ out \in Mem(p, Cur(p))
        /\ out # x.lv
+       /\ St(p, Cur(p), out) = "down" \/ dnode[out] = 0
        /\ St(p, Cur(p), x.lv) = "up"
        /\ IF Bug("StayKeepsInterval")
           THEN /\ Commit(tbl[Len(tbl)])
@@ -2083,9 +2084,9 @@ StayForNew == Plan(<<AddM(2, 3, 1), Mark(1, "down"), StayM(2, 1)>>, Session, {})
 MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveMaint, MoveRefill}
 \* ci-stays splits the stays off, each config under the 300 s budget.
 StayMovePlans == {StayForPrimary, StayAsPrimary, StayForNew}
-\* neg-stay-keeps-interval: an up primary whose disk left the pool, two versions
-\* in flight.
-StayPlans == {Plan(<<AddM(2, 3, 1), StayM(2, 2)>>, Partial2, {})}
+\* neg-stay-keeps-interval: a primary still marked up once its disk is formatted
+\* away, two versions in flight.
+StayPlans == {Plan(<<AddM(2, 3, 1), StayM(2, 2)>>, Partial2, {"format"})}
 
 \* ci-faults: versions that fail, disks formatted around peering and recovery,
 \* and a min_live change.
