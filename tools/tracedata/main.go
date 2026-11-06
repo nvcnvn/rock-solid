@@ -34,6 +34,11 @@ type entry struct {
 	past                         []past
 }
 
+type refusal struct {
+	line string
+	node int
+}
+
 type write struct {
 	chunk, block, inc int
 	whole             bool
@@ -77,6 +82,8 @@ type gen struct {
 	// left is the line where a [node, pg] stopped being in the PG's activated interval, formatAt the line where a spec disk's node formatted it, and nodeDisk a node's spec disk once formatted.
 	left     map[[2]uint64]int
 	formatAt map[uint64]int
+	// refused holds each member's refusal the primary has not heard, by chunk: its line, and the node that refused.
+	refused map[uint64][]refusal
 	// orderAt is the line of each recovery a primary ordered, by chunk and interval.
 	orderAt  map[[2]uint64]int
 	nodeDisk map[int]uint64
@@ -460,6 +467,24 @@ func (g *gen) scan(recs []trace.Record) {
 	}
 }
 
+// heard writes the refusals held for the primary's fail that match: the spec's refusal ends the version at the primary in one step, so its line waits for the primary to hear it, or for the member to move on or the primary to leave, past which MemberFail or GoneRefuses has no step.
+func (g *gen) heard(match func(chunk uint64, x refusal) bool) {
+	var cs []uint64
+	for c := range g.refused {
+		cs = append(cs, c)
+	}
+	slices.Sort(cs)
+	for _, c := range cs {
+		g.refused[c] = slices.DeleteFunc(g.refused[c], func(x refusal) bool {
+			if !match(c, x) {
+				return false
+			}
+			g.line("%s", x.line)
+			return true
+		})
+	}
+}
+
 func (g *gen) run(recs []trace.Record) {
 	epoch, changed, first, i := g.tableAt(recs, 0)
 	g.pgs = slices.Clone(changed)
@@ -484,6 +509,7 @@ func (g *gen) run(recs []trace.Record) {
 					g.leave(n, f)
 				}
 			}
+			g.heard(func(_ uint64, x refusal) bool { return x.node == n })
 			g.landOpen(n)
 			e, ok := g.epochs[r.Fields[0]]
 			if !ok {
@@ -504,7 +530,9 @@ func (g *gen) run(recs []trace.Record) {
 			if r.Fields[2] != 0 {
 				kind = "gone"
 			}
-			g.line(`k |-> "%s", n |-> %d, c |-> %d, v |-> %s`, kind, n, g.chunk(r.Fields[0]), ver(r.Fields[1]))
+			g.refused[r.Fields[0]] = append(g.refused[r.Fields[0]], refusal{fmt.Sprintf(`k |-> "%s", n |-> %d, c |-> %d, v |-> %s`, kind, n, g.chunk(r.Fields[0]), ver(r.Fields[1])), n})
+		case trace.OutFail:
+			g.heard(func(c uint64, _ refusal) bool { return c == r.Fields[0] })
 		case trace.OutLogged:
 			g.ownOpen[n] = dropVersion(g.ownOpen[n], r.Fields[0], r.Fields[1])
 			g.memberOpen[n] = dropVersion(g.memberOpen[n], r.Fields[0], r.Fields[1])
@@ -583,6 +611,7 @@ func (g *gen) run(recs []trace.Record) {
 					g.leave(n, f)
 				}
 			}
+			g.heard(func(c uint64, x refusal) bool { return x.node == n || g.primary[g.chunkField(c)] == n })
 			g.crash(n)
 		default:
 			if !slices.Contains(belowProtocol, r.Name) {
@@ -590,6 +619,7 @@ func (g *gen) run(recs []trace.Record) {
 			}
 		}
 	}
+	g.heard(func(uint64, refusal) bool { return true })
 }
 
 // belowProtocol are the records with no spec action, the machine's steps below the protocol's and the other records of a run.
@@ -685,7 +715,7 @@ func main() {
 	}
 	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{},
 		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
-		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, nodeDisk: map[int]uint64{}, recovering: map[int][][3]uint64{}, orderAt: map[[2]uint64]int{}}
+		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, nodeDisk: map[int]uint64{}, recovering: map[int][][3]uint64{}, orderAt: map[[2]uint64]int{}, refused: map[uint64][]refusal{}}
 	recs := g.load(flag.Arg(0))
 	if len(recs) == 0 {
 		fatal("no table in the trace")

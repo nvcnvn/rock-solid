@@ -1302,6 +1302,7 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 		return
 	}
 	c, from, pg := v.u.Chunk, v.u.Version, v.u.PG.PG
+	out.note(trace.OutFail, c.Hash(), from, 0, 0, 0)
 	if l := r.lead(pg); l >= 0 && r.leads[l].interval == v.interval {
 		r.leads[l].asking = true
 	}
