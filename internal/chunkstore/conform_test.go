@@ -141,6 +141,9 @@ var conformPlants = []struct {
 	{"settleByNumber", func(r *primaryRun) { r.c.storePlants.settleByNumber = true }},
 	{"settleSubset", func(r *primaryRun) { r.c.storePlants.settleSubset = true }},
 	{"recoverSelfOnly", func(r *primaryRun) { r.c.replicaPlants.recoverSelfOnly = true }},
+	{"recoverFromListed", func(r *primaryRun) { r.c.replicaPlants.recoverFromListed = true }},
+	{"clearNoSource", func(r *primaryRun) { r.c.replicaPlants.clearNoSource = true }},
+	{"goneWhileUp", func(r *primaryRun) { r.c.replicaPlants.goneWhileUp = true }},
 }
 
 // conformPlant keeps a planted run's trace, however the run stops, and beside it a .stop file saying how; with CONFORM_RUNON set the run goes on past its first broken invariant, for a plant whose break comes before the record of what broke it.

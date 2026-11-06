@@ -3448,7 +3448,7 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 4 | No acknowledged version, and no version an activated interval kept, is ever dropped: every later activated decision and every later acknowledged version rests on it. That covers a write tagged with an interval that completes after a later interval activated: a member peering reached may have acknowledged it before adopting the new interval, and one it did not reach may acknowledge it after, so it completes late but only if the new interval kept it | `NothingCommittedDropped` | "no acknowledged version is ever dropped", with the byte checks "a member listing nothing maps the kept writes applied in version order" and "the primary maps exactly the writes and punches it answered OK and those peering kept, in version order, in every chunk it lists nothing of" |
 | 5 | The versions peering drops are a suffix of each chunk's pending versions: every member a decision counts as holding the kept version holds the bytes of every version it was merged on | `DropsAreSuffix` | "no version peering keeps follows a dropped version of its chunk", with "once recovery settles, every member lists nothing and maps the kept writes, but in an unfound chunk" |
 | 6 | No two writes of a chunk get one version, and each version is above the one it was merged on | `OneWritePerVersion`, `VersionsGrow` | "no two writes of a chunk get one version", registered by Invariant checker (phase 1), and across members "no two members hold different data under one version" |
-| 7 | A table that leaves a PG's interval alone never fails that PG's writes: a member accepts a write sent under any table epoch in which the PG's interval is the one its own table holds | `UnchangedIntervalAccepts` | "no write is refused for its interval while its PG's interval has not changed" |
+| 7 | A table that leaves a PG's interval alone never fails that PG's writes: a member accepts a write sent under any table epoch in which the PG's interval is the one its own table holds, and none refuses it unless a member fault failed it | `UnchangedIntervalAccepts` | "no write is refused for its interval while its PG's interval has not changed" |
 | 8 | A new primary merges into a chunk only once it holds every version peering kept for it, and on nothing peering dropped: the version it merges on is the kept one or one of its own interval | `MergesOnKept` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), which a merge on a missing base breaks; the sub-block spike's M8, a new primary merging before it holds the kept versions, is the planted bug that trips it ([Peering and read leases](#peering-and-read-leases)), registered by Invariant checker (phase 1) |
 | 9 | No node's table epoch or interval number goes backwards; no PG's last activated interval goes down, so a late report for interval 2, folded after 3 was recorded, changes nothing; and a table's last activated interval did activate | `TablesForward`, `Monotonic` | "no node's table epoch or PG interval number goes backwards" and "no PG's last activated interval goes down, and every activation a table records happened" |
 | 10 | A node pair whose raw rates differ by up to 4%, with no pause, reboot, network fault or refusal since first contact, and whose holder ended no leases on a step-check trip from a pair a fault touched, holds a lease within `rate_gap` (plus rounding, at the model's zero round trips) of first contact and keeps it with no step-check trip. The bound is in time, so `ci` checks it as an invariant over the model's clocks | `LeaseForms` | The lease pair run's quiet seeds: "the step check tripped between a pair no fault touched" never shows, and on 1 ms round trips a lease forms within `rate_gap` plus two round trips of the first granted request, give or take the run's 10 ms steps: with real round trips the bound is `rate_gap` plus two of them |
@@ -4049,12 +4049,12 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | `primaries-25` | 426 | stops at `Order`, discrepancy 14 | 1 |
 | `primaries-2` | 516 | no verdict in 400 s and 2 GB | 400 |
 
-30 seeds of 40 pass: 0, 4, 6, 8 to 23, 26 to 30, 32, 33, 35, 36, 37 and 39. None broke a safety invariant,
+33 seeds of 40 pass: 0, 1, 4 to 6, 8 to 24, 26 to 30, 32, 33, 35, 36, 37 and 39. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
 and `mayfail` branches stay alive, not its length.
 
 How many passing seeds need the paths the spec gained from these traces, each measured by checking the 30
-again with that path removed:
+that passed before discrepancy 12 again with that path removed:
 
 | Path | Seeds that stop without it | First stop |
 | --- | --- | --- |
@@ -4080,9 +4080,9 @@ and TLC does not report which branch a line took, so `Recover`, `ReportRecovered
 | 6 | A primary that dropped its own gated version is listed for the chunk, yet its image is the kept version, so it merges at once and may be a recovery source | spec | Settled: each decision records in `gone` the gated versions it drops and in `img` the chunks whose image is the kept version once the primary settles. `Order` waits for `img` or an empty entry and merges on the log less `gone`, `Recover` takes such a primary as a source, and `MergesOnKept` now also says the version merged on is the kept one or one of the interval. `neg-merge-on-dropped` counts a mapped version as dropped, and fails it, and the Go plant `mergeOnDropped` breaks the merged bytes at seed 94. `mergeWhileLacking` is still caught at seed 6, line 84, by `Order` |
 | 7 | A node whose disk was formatted again refuses what the primary sends the old disk, as no member of the interval, while `MemberFail` needs the disk | spec | Settled, the 13 seeds with such a refusal: the record says `gone` when the disk is no up member, and `GoneRefuses` takes it, with the effect of `MemberFail` at the primary and no fault budget. `MemberFail` keeps none in a trace, which is what catches `sendEpoch`, whose refusal is not `gone` |
 | 8 | The test's last step asks a new interval with no primary asking, so the table is a `Renew` `Reactive` refuses | logging | Settled: the harness records its ask, and `tracedata` maps its table to a planned `Edit` that changes nothing, which `Edit` allows, rather than a `Renew` |
-| 9 | One reply or kept version differs from the spec's at a seed's `Peer` | compression at seed 7, open | Seed 7: disk 3 answered, then its node formatted, then the decision came, which `Peer`, one step, cannot take. Seeds 31 and 34, a member back in an interval after a mark, have no format near and are unread |
+| 9 | One reply or kept version differs from the spec's at a seed's `Peer` | compression at seed 7, open | Seed 7: disk 3 answered, then its node formatted at line 43, then the decision came at line 61, which `Peer`, one step, cannot take, as `PeerOpen` needs every up member eligible. `decide` could place the `peer` line before a format of a disk that answered first; the line's checks stay strict. Seeds 31 and 34 are unread: a member back in an interval after a mark, with no format near; a run with `PrintT` of `Reply` in `ReplyMatches` shows which field differs |
 | 10 | A member persists a list twice, when its first acknowledgment was slower than `RetryAfter`, the second after the interval activated, which the `Persisted` stutter refuses | compression | Settled: 8 seeds at the last count. `tracedata` marks a repeat of a disk's list for an interval `again`, which the stutter lets past activation. A first persist after `Activate` still fails, which is what catches `activateEarly` |
-| 11 | A `Recovered` record with no source `Recover` allows: a chunk no member keeps anything of, kept version 0, needs no source in `startRecovery`, and every up member listed it | spec, part open | Settled for seed 22: `Recover` needs no source when the kept version is 0, which is the code's rule. Seeds 3 and 38 stop at a `Recovered` line again, unread |
+| 11 | A `Recovered` record with no source `Recover` allows: a chunk no member keeps anything of, kept version 0, needs no source in `startRecovery`, and every up member listed it | spec, part open | Settled for seed 22: `Recover` needs no source when the kept version is 0, which is the code's rule. Seeds 3 and 38, read, are another shape, class compression: a recovery write left a primary that then moved on, by adopting interval 3 at seed 3 and by the crash at line 290 at seed 38, and landed at a member still in the old interval, where `Recover`, taken at the record, needs a primary leading it. Settling it needs `Recover` taken while the primary still led: a line at the send, or `tracedata` moving the line before the primary's leaving step, across lines that keep the interval's versions as `Recover` does |
 | 12 | A crash leaves part of a version's records, so a member reports a version logged above its newest whole one. `keep` lists that member for the kept version, where `Entry`, with one number, leaves it off | spec | Settled: `PeerOn` takes a set `T` of (disk, chunk) pairs it lists at the kept version, which are no recovery source and take a primary's chunk out of `img`, and `Activate` keeps them. `Peer` draws `T` only under `TornLists`, on in `ci-tears` alone, which passes every safety property at 1.2 million states against 149 thousand with it off. The trace passes `T` from its replies, so seeds 1, 5 and 24 pass. This shows extra listing is safe, not that listing is required: the logs hold whole versions, so nothing in the spec is wrong with a torn member left off, and no negative configuration exists. That listing is required rests on Go: `unlistTorn` breaks "a member listing nothing maps the kept writes applied in version order" at seed 148, where replay's durable records of the torn version stay mapped, and `TestTheKeepRule` and `TestAVersionHeldInPartIsNotWhole` state the rule and the store's half |
 | 13 | `Send` to a primary whose `pr` is empty after a restart loses the write in the spec, and the code holds it | spec, open, low priority | `neverAsk` shows it; no unplanted seed of 40 stops there |
 | 14 | A member's refusal is recorded when the member refuses, and `Order` of a later version can come before the primary hears, where `MemberFail` and `GoneRefuses` end the interval in one step | compression, open | Seed 25. The primary's `fail` has no record to take the step at |
@@ -4127,28 +4127,36 @@ on, since a trace cut at the break passes.
 | `resendNewestFirst` | `neg-log-out-of-order` | 8 | 0 | 7 | 0, 0 | Fires at the 8 seeds with a `gone` line; no member logs out of order, so the rule is not reached. Seed 15 gives no verdict | |
 | `stopPreviousOnly` | `neg-stop-previous-only` | 1 | 0 | 1 | 0, 0 | Seed 39: `J` shrinks, and still meets `Peer` | |
 | `unlistTorn` | none | 1 | 1 | 0 | 1, 1 | `recovered` at 24: disk 1 tore at line 50 and, left off, serves as the source of a recovery the spec refuses it for. Seeds 1 and 5 tear and show no difference. Seed 148, the seed that breaks the oracle, has no baseline verdict | `Recover`: the source lists nothing |
+| `recoverFromListed` | `neg-recover-from-listed` | 11 | 6 | 4 | 6, 4 | `recovered` 4, `peer` 2. Passes at 5, 19, 24 and 27: too loose, as `Recovered` names no source and `Recover`'s source is any member, so TLC takes a clean one where the code read the primary. Seed 15 gives no verdict | `Recover`: the source lists nothing, or is a primary with the chunk in `img` |
+| `clearNoSource` | `neg-recover-no-source` | 5 | 5 | 0 | 5, 2 | `recovered`, a chunk with something kept and no source | `Recover`: a source, unless the kept version is 0 |
+| `goneWhileUp` | `neg-gone-while-up` | 32 | 32 | 0 | 32, 0 | `gone`, the planted refusal. Not clean, since the oracle's "no write is refused for its interval" breaks at the same step | `GoneRefuses`: the disk has no node |
 | `lastActivatedOnly` | `neg-reach-last-activated-only` | 1 | 0 | 1 | 0, 0 | Seed 11, as above | The code's own `J` is what `Peer` judges |
 | `freshGrantNoCheck` | `neg-fresh-grant-no-table-check` | 6 | 0 | 6 | 0, 0 | Passes | About leases, which no line observes |
 | `fenceOnArrival`, `reorderAfterOther`, `settleByNumber`, `readBelowMinLive` | `neg-fence-on-arrival`, `neg-reorder-after-other-primary`, `neg-settle-by-number`, `neg-read-below-min-live` | 0 | 0 | 0 | 0, 0 | No evidence: they fire on none of the 30 | |
 | `recoverSelfOnly` | none | 29 | 10 | 18 | 9, 0 | `reported` 9, the plant's report with a member still listing; `peer` at 11, unread. A report with no member leaving is a stutter. Seed 15 gives no verdict | `ReportRecovered`: lists empty |
 | `settleSubset` | none | 4 | 0 | 4 | 0, 0 | Too loose: `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record | |
 
-Traces can fail is shown for 13 of the 23 rules, 7 of them clean: `activateEarly`, `mergeWhileLacking`,
-`mergeOnDropped`, `editKeepsInterval`, `relistNever`, `peerInOldInterval` and `oldReport`. Open: `coverAtRead`,
-which needs a record of the blocks a recovery write leaves out; `neverAsk`, an omission no line can name;
+Traces can fail is shown for 16 of the 26 rules, 9 of them clean: `activateEarly`, `mergeWhileLacking`,
+`mergeOnDropped`, `editKeepsInterval`, `relistNever`, `peerInOldInterval`, `oldReport`, `recoverFromListed` and
+`clearNoSource`. The three recovery and refusal rows are over the 33 seeds that pass with discrepancy 12 settled,
+the rest over the 30 before it. Open: `coverAtRead`,
+which needs a record of the blocks a recovery write leaves out; `recoverFromListed`, caught at 6 seeds and missed
+at 4, which needs `Recovered` to name its source; `neverAsk`, an omission no line can name;
 `freshGrantNoCheck`, with the lease half; `resendNewestFirst`, `stopPreviousOnly` and `lastActivatedOnly`,
 which need a seed that reaches them; and the four that never fire. Of the two oracle plants with no rule,
 `settleSubset` needs a record of what `Settle` answered.
 
-No plant targets `img` as a recovery source, `Recover` at kept version 0 or `GoneRefuses`, so these runs
-neither back nor fault them; `mergeOnDropped` and `mergeWhileLacking` do target `img` in `Order`, which
-rejects every trace they fire in. Of the 46 plant traces that passed to their end, checked again with each
-path removed, 3 stop where their baseline does not: `neverAsk` at 6 and 22 without `img` in `Order`, and
-`freshGrantNoCheck` at 37 without `img` in `Recover`. They are unread. `mayfail` and `maydeliver` let none of
-the plants tried through, which says nothing of a plant not tried: every planted step the check missed lies
-in a variable or record no line reads. A version a primary drops right after `OutOrder`, by `r.fail` in
-`ordered`, stays in `ownOpen` and becomes a `mayfail` at a later crash; that path needs a lead that is asking
-or has left the interval, which `Order`'s guards refuse first, so it loosens no passing trace.
+Every relaxed path now has a plant: `img` in `Order` by `mergeOnDropped` and `mergeWhileLacking`, `img` as a
+recovery source by `recoverFromListed`, `Recover` at kept version 0 by `clearNoSource`, and `GoneRefuses` by
+`goneWhileUp`. Each breaks a seeded invariant in `TestPlantedPeeringBugsBreakTheOracle` and fails its negative
+configuration. Of the 46 plant traces that passed to their end, checked again with each path removed, 3 stop
+where their baseline does not, and all three are schedules legitimately on the path, by a plant that does not
+touch it: at `neverAsk` 6 and 22 and `freshGrantNoCheck` 37 the primary dropped a version it ordered itself, so its
+image is the kept version, and it merges at once or, as `startRecovery` prefers, serves recovery from itself.
+`mayfail` and `maydeliver` let none of the plants tried through, which says nothing of a plant not tried: every
+planted step the check missed lies in a variable or record no line reads. A version a primary drops right after
+`OutOrder`, by `r.fail` in `ordered`, stays in `ownOpen` and becomes a `mayfail` at a later crash; that path needs
+a lead that is asking or has left the interval, which `Order`'s guards refuse first, so it loosens no passing trace.
 
 ## Models in CI
 

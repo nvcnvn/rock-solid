@@ -405,8 +405,14 @@ type replicaPlants struct {
 	admitPastLimit bool
 	// commitOnOwnLog commits a version once the primary's own log holds it, before its members do.
 	commitOnOwnLog bool
-	// recoverSelfOnly has the primary recover only its own copies, never a member's.
-	recoverSelfOnly bool
+	// recoverSelfOnly has the primary recover only its own copies, never a member's;
+	// recoverFromListed has a primary that lacks a chunk serve its recovery; clearNoSource clears a
+	// list with an empty image when no member can serve the chunk; goneWhileUp refuses one version
+	// in 16 at an up member as if its disk had left.
+	recoverSelfOnly   bool
+	recoverFromListed bool
+	clearNoSource     bool
+	goneWhileUp       bool
 	// readBelowMinLive serves reads in an interval with fewer than min_live live members;
 	// freshGrantNoCheck grants a lease afresh to a holder that reported an older table; noLeaseCheck
 	// serves reads with no lease from the other up members.
@@ -938,7 +944,7 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		return
 	}
 	recover := u.Kind == KindRecover
-	gone := e != nil && !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp })
+	gone := e != nil && (!slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) || r.plant.goneWhileUp && u.Version&15 == 7)
 	refuse := e == nil || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || gone ||
 		slices.ContainsFunc(r.failed, func(f failedVer) bool {
 			return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version <= u.Version || recover)

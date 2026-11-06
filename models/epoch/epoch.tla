@@ -803,8 +803,11 @@ Persist(d) ==
 \* read and the write are overwritten. The source lists nothing, or is the
 \* primary, which lists the chunk only from this peering, for dropped
 \* versions of its own, and whose image is the kept version. A chunk no member
-\* keeps anything of needs no source. With
-\* RecoveryReadOldDisk, a read for a source formatted again is answered by its
+\* keeps anything of needs no source. With RecoverFromListed, a primary that
+\* lists a chunk for what it lacks is a source too, and its image holds what it
+\* logged above the kept version; with RecoverNoSource, a chunk
+\* something was kept of needs none, so the write clears the list with no read.
+\* With RecoveryReadOldDisk, a read for a source formatted again is answered by its
 \* node's new, empty disk, and taken for the kept version.
 Recover(n, p, c, d) ==
     LET k == IvAt(n, p)
@@ -825,11 +828,12 @@ Recover(n, p, c, d) ==
                /\ Running(dnode[s])
                /\ \/ K = 0
                   \/ miss[s][c] = NoMiss
-                  \/ s = PrimDisk(p, k) /\ c \in TheDec(n, p, k).img
-               /\ K = 0 \/ K \in dlog[s][c] \/ old
+                  \/ s = PrimDisk(p, k) /\ (c \in TheDec(n, p, k).img \/ Bug("RecoverFromListed"))
+                  \/ Bug("RecoverNoSource")
+               /\ K = 0 \/ K \in dlog[s][c] \/ old \/ Bug("RecoverNoSource")
                /\ at = Ver(k, 0) \/ Bug("RecoveryCoversAtRead")
                /\ dlog' = [dlog EXCEPT ![d][c] =
-                             {v \in dlog[s][c] : v <= K}
+                             {v \in dlog[s][c] : v <= K \/ Bug("RecoverFromListed")}
                              \cup {v \in dlog[d][c] : IvOfV(v) = k /\ (v <= at \/ ~Bug("RecoveryCoversAtRead"))}]
        /\ miss' = [miss EXCEPT ![d][c] = NoMiss]
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, persIv, mrecv, failed,
@@ -1060,7 +1064,7 @@ MemberFail(m) ==
 \* the interval. It is no member of that interval, so it refuses what the
 \* primary sends the old disk, needing no fault of its own.
 GoneRefuses(m) ==
-    /\ dnode[m.to] = 0
+    /\ dnode[m.to] = 0 \/ Bug("GoneWhileUp")
     /\ dhost[m.to] # 0
     /\ Running(dhost[m.to])
     /\ IvAt(dhost[m.to], m.p) = m.iv
@@ -1778,9 +1782,12 @@ VersionsGrow == \A x \in vers : x.on < x.v
 
 \* 7. A table that leaves a PG's interval alone never fails that PG's writes:
 \* a write tagged with table epoch e is accepted by a member holding any table
-\* in which the PG's interval is still the one it had in e.
+\* in which the PG's interval is still the one it had in e, and refused by none
+\* unless a member fault failed it.
 UnchangedIntervalAccepts ==
-    \A m \in rm : dnode[m.to] > 0 /\ IvAt(dnode[m.to], m.p) = m.iv => Accepts(m.to, m)
+    \A m \in rm : dnode[m.to] > 0 /\ IvAt(dnode[m.to], m.p) = m.iv =>
+       /\ Accepts(m.to, m)
+       /\ "mfail" \in plan.f \/ [c |-> m.c, v |-> m.v] \notin failed[m.to]
 
 \* 8. A new primary merges into a chunk only once it holds every version
 \* peering kept for it, and on nothing peering dropped: the version it merges on

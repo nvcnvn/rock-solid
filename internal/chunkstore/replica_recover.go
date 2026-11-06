@@ -157,24 +157,12 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 	t := &l.todo[j]
 	rc := recovery{pg: l.pg, interval: l.interval, todo: j}
 	if t.kept == 0 {
-		buf, err := ctx.Pool.Alloc(core.BlockSize)
-		if err != nil {
-			t.wait, r.waits = true, true
-			return
-		}
-		var m blockMap
-		for w := range m.holes {
-			m.holes[w] = ^uint64(0)
-		}
-		m.put(ctx.Pool.Bytes(buf))
-		t.busy = true
-		r.recs = append(r.recs, rc)
-		r.orderRecovery(ctx, len(r.recs)-1, buf)
+		r.recoverEmpty(ctx, t, rc)
 		return
 	}
 	src, clean := -1, false
 	for s, m := range e.Members {
-		if s >= maxMembers || m.Mark != MarkUp || t.targets&(1<<s) != 0 && (m.Disk != r.cfg.Disk || l.lacks(t.chunk)) {
+		if s >= maxMembers || m.Mark != MarkUp || t.targets&(1<<s) != 0 && (m.Disk != r.cfg.Disk || l.lacks(t.chunk) && !r.plant.recoverFromListed) {
 			continue
 		}
 		clean = true
@@ -186,6 +174,9 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 		}
 	}
 	switch {
+	case src < 0 && r.plant.clearNoSource:
+		r.recoverEmpty(ctx, t, rc)
+		return
 	case !clean:
 		t.targets = 0
 		r.st.Uncover(t.chunk)
@@ -212,6 +203,23 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 		a.Msg.Len = uint16(copy(a.Msg.Body[:], r.frame))
 		out.Actions = append(out.Actions, a)
 	}
+}
+
+// recoverEmpty orders a recovery write of an image with every block a hole, which needs no source.
+func (r *Replica) recoverEmpty(ctx *core.Context, t *recoverChunk, rc recovery) {
+	buf, err := ctx.Pool.Alloc(core.BlockSize)
+	if err != nil {
+		t.wait, r.waits = true, true
+		return
+	}
+	var m blockMap
+	for w := range m.holes {
+		m.holes[w] = ^uint64(0)
+	}
+	m.put(ctx.Pool.Bytes(buf))
+	t.busy = true
+	r.recs = append(r.recs, rc)
+	r.orderRecovery(ctx, len(r.recs)-1, buf)
 }
 
 // recoveryRead takes the image recovery k read, in buf, or its failure: the chunk is tried again

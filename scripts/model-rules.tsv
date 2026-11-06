@@ -13,6 +13,7 @@ epoch/neg-decide-by-own-interval	chunkstore.ownInterval	TestPlantedPeeringBugsBr
 epoch/neg-edit-keeps-interval	chunkstore.editKeepsInterval	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-fence-on-arrival	chunkstore.fenceOnArrival	TestPlantedReadBugsBreakTheReadRun
 epoch/neg-fresh-grant-no-table-check	chunkstore.freshGrantNoCheck	TestPlantedBugsBreakTheirTraces
+epoch/neg-gone-while-up	chunkstore.goneWhileUp	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-grantor-faster-clock	lease.fasterClock	TestPlantedLeaseBugsBreakThePair
 epoch/neg-holder-slower-clock	lease.slowerClock	TestPlantedLeaseBugsBreakThePair
 epoch/neg-instant-reboot	sim.RebootInstantly	TestPlantedBugsBreakTheirTraces
@@ -34,6 +35,8 @@ epoch/neg-reach-last-activated-only	chunkstore.lastActivatedOnly	TestPlantedBugs
 epoch/neg-read-below-min-live	chunkstore.readBelowMinLive	TestPlantedBugsBreakTheirTraces
 epoch/neg-reads-before-peer-messages	sim.ReadsFirst	TestPlantedBugsBreakTheirTraces
 epoch/neg-recovery-covers-at-read	chunkstore.coverAtRead	TestPlantedRecoveryBugBreaksTheFaultRun
+epoch/neg-recover-from-listed	chunkstore.recoverFromListed	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-recover-no-source	chunkstore.clearNoSource	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-remove-before-recovered	chunkstore.removeOnActivation	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-reorder-after-other-primary	chunkstore.reorderAfterOther	TestPlantedBugsBreakTheirTraces
 epoch/neg-report-before-activate	chunkstore.reportDecided	TestPlantedPeeringBugsBreakTheOracle
