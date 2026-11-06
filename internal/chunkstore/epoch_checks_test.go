@@ -188,7 +188,7 @@ func (x *epochChecks) answers(d int) {
 	}
 }
 
-// copies checks that version v of ch, which node d acknowledged, is on min_live disks: those that acknowledged it or whose index holds it, and those in maintenance in its interval or d's. The min_live is the lower of those two intervals', for a version acknowledged late across a change of it.
+// copies checks that version v of ch, which node d acknowledged, is on min_live disks: d's, whose store may have stopped since it logged v, those that acknowledged it or whose index holds it, and those in maintenance in its interval or d's. The min_live is the lower of those two intervals', for a version acknowledged late across a change of it.
 func (x *epochChecks) copies(d int, ch core.ChunkID, v uint64) {
 	r := x.c.reps[d]
 	p, ok := r.pgOf(ch)
@@ -217,7 +217,7 @@ func (x *epochChecks) copies(d int, ch core.ChunkID, v uint64) {
 		if o == nil {
 			continue
 		}
-		holds := x.held[heldAt{ch, v, n}]
+		holds := x.held[heldAt{ch, v, n}] || n == d
 		if o.Store().Serving() {
 			c, _ := o.Store().Index().Chunk(r.st.cfg.Pool, ch)
 			holds = holds || c.Whole >= v
