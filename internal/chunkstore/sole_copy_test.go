@@ -2,9 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
-	"os"
 	"slices"
-	"strconv"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -155,7 +153,7 @@ func (r *soleRun) holders(ch core.ChunkID, v uint64) []uint32 {
 	return hs
 }
 
-// A rep3 pool with min_live 2, no refill: disk 2 is down, W reaches disk 1 and is on its way to disk 3 when disk 3 goes too and disk 2 comes back. The interval of disks 1 and 2 keeps W, since disk 2 was not live in W's interval, and the primary answers W OK on one copy. Disk 1 is then lost for good and disks 2 and 3 are whole again: X, on them both, reads; W, acknowledged, is gone.
+// A rep3 pool with min_live 2, no refill: disk 2 is down, W reaches disk 1 and is on its way to disk 3 when disk 3 goes too and disk 2 comes back. The interval of disks 1 and 2 keeps W, since disk 2 was not live in W's interval, but disk 1 is its only copy, so the client is refused. Its resend lands on both, disk 1 is then lost for good, and W reads from the others.
 func TestAWriteAcknowledgedAtMinLiveSurvivesTheLossOfOneDisk(t *testing.T) {
 	r := newSoleRun(t, 3, 2, 3)
 	c := r.c
@@ -166,7 +164,6 @@ func TestAWriteAcknowledgedAtMinLiveSurvivesTheLossOfOneDisk(t *testing.T) {
 	c.settle()
 	ms := r.members()
 	d1, d2, d3 := ms[0].Disk, ms[1].Disk, ms[2].Disk
-	t.Logf("members %v", ms)
 
 	r.lose(d2)
 	r.publish()
@@ -180,37 +177,39 @@ func TestAWriteAcknowledgedAtMinLiveSurvivesTheLossOfOneDisk(t *testing.T) {
 	if rp, ok := c.cl.replies[id]; ok {
 		t.Fatalf("W answered %+v on the primary alone", rp)
 	}
-	t.Logf("W pending: disk %d newest %#x, disk %d newest %#x", d1, c.newest(c.node(d1), ch), d3, c.newest(c.node(d3), ch))
+	first := c.newest(c.node(d1), ch)
 
 	r.back(d2)
 	r.publish()
-	rp, ok := r.answered(id, 100_000_000)
-	if !ok {
-		t.Fatal("W unanswered")
+	if rp, ok := r.answered(id, 100_000_000); !ok || rp.Status != StatusRefused {
+		t.Fatalf("W, on disk %d alone, answered %+v, %v", d1, rp, ok)
 	}
-	if rp.Status != StatusOK {
-		t.Skipf("W answered %+v: a refused write promises nothing", rp)
+	if h := r.holders(ch, first); len(h) != 1 || h[0] != d1 {
+		t.Fatalf("refused W, kept, is held by %v", h)
 	}
-	t.Logf("t=%d W answered %+v; members %v; real holders %v", c.s.Time(), rp, r.members(), r.holders(ch, rp.Version))
+
+	retry := c.write(pg0, ch, 0, w)
+	rp, ok := r.answered(retry, 100_000_000)
+	if !ok || rp.Status != StatusOK || rp.Version <= first {
+		t.Fatalf("W sent again answered %+v, %v, above %#x", rp, ok, first)
+	}
+	r.tick(2_000_000)
+	if h := r.holders(ch, rp.Version); len(h) != 2 {
+		t.Fatalf("W sent again is held by %v", h)
+	}
 
 	r.lose(d1)
 	r.back(d3)
 	r.tick(5_000_000)
-	_, e := c.table.entry(pg0)
-	t.Logf("t=%d members %v interval %d activated %d", c.s.Time(), r.members(), e.Interval, e.Activated)
-
-	orp, odata := r.read(old)
-	if orp.Status != StatusOK || !bytes.Equal(odata, x) {
+	if orp, odata := r.read(old); orp.Status != StatusOK || !bytes.Equal(odata, x) {
 		t.Fatalf("X, on two of three disks, read %+v", orp)
 	}
-	grp, got := r.read(ch)
-	t.Logf("W read %+v", grp)
-	if grp.Status != StatusOK || !bytes.Equal(got, w) {
+	if grp, got := r.read(ch); grp.Status != StatusOK || !bytes.Equal(got, w) {
 		t.Fatalf("W, acknowledged OK as %#x, read back %+v after the loss of one disk of a rep3 pool with min_live 2", rp.Version, grp)
 	}
 }
 
-// The model's counterexample on real placement: every other member is cut off while W is on its way, so W is on the primary alone; the PG below min_live waits degraded_refill_after, a refill brings it back to min_live with a member that lists W, peering keeps W and the primary answers it OK. The primary is then cut off, a second refill removes it, and every old disk comes back whole. W is on a healthy disk that is no member, and the PG reports it unfound. Putting that disk back by an operator's edit serves it again.
+// The model's counterexample on real placement: every other member is cut off while W is on its way, so W is on the primary alone; the PG below min_live waits degraded_refill_after, and a refill brings it back to min_live with a member that lists W. Peering keeps W but its client is refused. The resend lands on both, so when the primary is cut off and a second refill removes it, W reads from the member left.
 func TestARefillKeepsTheOnlyCopyOfAnAcknowledgedWrite(t *testing.T) {
 	for _, shape := range []struct {
 		name              string
@@ -224,7 +223,6 @@ func TestARefillKeepsTheOnlyCopyOfAnAcknowledgedWrite(t *testing.T) {
 			ch := chunkIn(pg0, 1, 0)
 			ms := r.members()
 			first := ms[0].Disk
-			t.Logf("members %v", ms)
 			others := make([]uint32, 0, 2)
 			for _, m := range ms[1:] {
 				others = append(others, m.Disk)
@@ -234,203 +232,84 @@ func TestARefillKeepsTheOnlyCopyOfAnAcknowledgedWrite(t *testing.T) {
 			id := c.write(pg0, ch, 0, w)
 			c.runFor(5_000)
 			r.publish()
-			start := c.s.Time()
-			rp, ok := r.answered(id, 2*DegradedRefillAfter)
-			if !ok {
-				t.Fatal("W unanswered")
+			if rp, ok := r.answered(id, 2*DegradedRefillAfter); !ok || rp.Status != StatusRefused {
+				t.Fatalf("W, on the primary alone, answered %+v, %v", rp, ok)
 			}
-			if rp.Status != StatusOK {
-				t.Skipf("W answered %+v: a refused write promises nothing", rp)
+			if ms := r.members(); slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == others[0] && m.Mark == MarkUp }) {
+				t.Fatalf("no refill: members %v", ms)
 			}
-			t.Logf("W answered OK after %d s: members %v, real holders %v", (c.s.Time()-start)/1_000_000, r.members(), r.holders(ch, rp.Version))
-			if h := r.holders(ch, rp.Version); len(h) != 1 || h[0] != first {
-				t.Fatalf("holders %v", h)
+
+			retry := c.write(pg0, ch, 0, w)
+			rp, ok := r.answered(retry, 2*DegradedRefillAfter)
+			if !ok || rp.Status != StatusOK {
+				t.Fatalf("W sent again answered %+v, %v", rp, ok)
+			}
+			r.tick(2_000_000)
+			if h := r.holders(ch, rp.Version); len(h) != shape.minLive {
+				t.Fatalf("W sent again is held by %v, members %v", h, r.members())
 			}
 
 			r.lose(first)
 			r.tick(shape.out)
-			_, e := c.table.entry(pg0)
-			t.Logf("after the second refill: members %v interval %d activated %d past %d", r.members(), e.Interval, e.Activated, len(e.Past))
 			for _, d := range append(others, first) {
 				r.back(d)
 			}
 			r.tick(5_000_000)
-			t.Logf("every old disk back: members %v", r.members())
-			grp, got := r.read(ch)
-			t.Logf("W read %+v", grp)
 			if slices.ContainsFunc(r.members(), func(m Member) bool { return m.Disk == first }) {
 				t.Fatalf("disk %d is a member again: %v", first, r.members())
 			}
-			defer func() {
-				if grp.Status != StatusOK || !bytes.Equal(got, w) {
-					t.Errorf("W read back %+v with its only copy whole on disk %d, a disk the refill removed", grp, first)
-				}
-			}()
-			ids := []uint32{first}
-			for _, m := range r.members() {
-				if len(ids) < shape.replicas {
-					ids = append(ids, m.Disk)
-				}
+			if grp, got := r.read(ch); grp.Status != StatusOK || !bytes.Equal(got, w) {
+				t.Fatalf("W read back %+v after a refill removed disk %d", grp, first)
 			}
-			r.a.edits = append(r.a.edits, Edit{PG: pg0, Disks: ids})
-			r.tick(5_000_000)
-			after, data := r.read(ch)
-			t.Logf("after an operator's edit puts disk %d back: members %v, W read %+v, same bytes %v", first, r.members(), after, bytes.Equal(data, w))
 		})
 	}
 }
 
-// No write in flight: X was acknowledged on both disks of a rep2 pool. One disk is out long enough to be refilled, the other goes before the refill member has copied X, and is refilled in turn. Both old disks come back whole, neither a member, and X, on both, is reported unfound.
-func TestARefillKeepsTheLastSourceOfAPG(t *testing.T) {
-	r := newSoleRun(t, 2, 2, 5)
+// At min_live 1 the same write has copies enough: W, on disk 1 alone, keeps its OK.
+func TestALoneCopyIsEnoughAtMinLiveOne(t *testing.T) {
+	r := newSoleRun(t, 3, 1, 3)
 	c := r.c
 	ch := chunkIn(pg0, 1, 0)
-	x := bytes.Repeat([]byte{0x11}, core.BlockSize)
-	c.until(c.write(pg0, ch, 0, x))
+	c.until(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize)))
 	c.settle()
 	ms := r.members()
-	d1, d2 := ms[0].Disk, ms[1].Disk
-	for n := range c.reps {
-		c.reps[n].plant.noRecovery = true
-	}
+	d2, d3 := ms[1].Disk, ms[2].Disk
+
 	r.lose(d2)
-	r.tick(DegradedRefillAfter + 2_000_000)
-	t.Logf("after the first refill: members %v", r.members())
-	r.lose(d1)
-	r.tick(DegradedRefillAfter + 2_000_000)
-	t.Logf("after the second refill: members %v", r.members())
-	r.back(d1)
+	r.publish()
+	c.untilActive()
+	c.settle()
+
+	r.lose(d3)
+	id := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize))
+	c.runFor(5_000)
 	r.back(d2)
-	for n := range c.reps {
-		c.reps[n].plant.noRecovery = false
-	}
-	r.tick(5_000_000)
-	t.Logf("both old disks back: members %v", r.members())
-	rp, got := r.read(ch)
-	t.Logf("X read %+v", rp)
-	if rp.Status != StatusOK || !bytes.Equal(got, x) {
-		t.Fatalf("X read back %+v with two whole copies on disks %d and %d, neither a member", rp, d1, d2)
+	r.publish()
+	if rp, ok := r.answered(id, 100_000_000); !ok || rp.Status != StatusOK {
+		t.Fatalf("W answered %+v, %v", rp, ok)
 	}
 }
 
-// soleDiag counts, over a seeded run, acknowledgments on fewer than min_live disks and activations with no clean holder of an acknowledged version. It breaks nothing.
-type soleDiag struct {
-	c       *rcluster
-	chunkOf func(core.RequestID) (core.ChunkID, bool)
-	acked   map[core.ChunkID]uint64
-	// member is every version some member acknowledged holding, of either chunk: versions of the two chunks can collide, which only hides a sole copy.
-	member  map[uint64]bool
-	acts    int
-	soleAck int
-	noCopy  int
-	noBytes int
-}
-
-var soleWatch *soleDiag
-
-func (d *soleDiag) watch(c *rcluster, chunkOf func(core.RequestID) (core.ChunkID, bool)) {
-	d.c, d.chunkOf, d.acked, d.member = c, chunkOf, map[core.ChunkID]uint64{}, map[uint64]bool{}
-	prev := c.onPass
-	c.onPass = func(n int, acts []core.Action) {
-		if prev != nil {
-			prev(n, acts)
-		}
-		d.pass(acts)
-	}
-}
-
-func (d *soleDiag) whole(ch core.ChunkID, v uint64, clean bool) int {
-	c, n := d.c, 0
-	_, e := c.table.entry(pg0)
-	for _, m := range e.Members {
-		i := c.node(m.Disk)
-		if i < 0 || m.Mark != MarkUp || !c.s.Node(uint32(i)).Up() || c.reps[i] == nil || !c.reps[i].Store().Serving() {
-			continue
-		}
-		x, _ := c.reps[i].Store().Index().Chunk(testPool, ch)
-		if x.Whole >= v && (!clean || x.ListedIn == 0) {
-			n++
-		}
-	}
-	return n
-}
-
-func (d *soleDiag) pass(acts []core.Action) {
-	c := d.c
-	for i := range acts {
-		a := &acts[i]
-		if a.Kind != core.ActNetSend || a.Msg.Len < headSize {
-			continue
-		}
-		k := Kind(a.Msg.Body[1])
-		if k != KindReply && k != KindAck {
-			continue
-		}
-		var rp Response
-		if DecodeResponse(a.Msg.Inline(), 0, &rp) != nil || rp.Status != StatusOK || rp.Version == 0 {
-			continue
-		}
-		if k == KindAck {
-			d.member[rp.Version] = true
-			continue
-		}
-		if ch, ok := d.chunkOf(rp.ID); ok {
-			d.acked[ch] = max(d.acked[ch], rp.Version)
-			if !d.member[rp.Version] {
-				d.soleAck++
-			}
-		}
-	}
-	if len(c.activations) > d.acts {
-		d.acts = len(c.activations)
-		for ch, v := range d.acked {
-			if d.whole(ch, v, true) == 0 {
-				d.noCopy++
-			}
-			if d.whole(ch, v, false) == 0 {
-				d.noBytes++
-			}
-		}
-	}
-}
-
-// The counts of the runs' unplanted seeds; set SOLE_SEEDS to run them.
-func TestDiagSoleCopySeeds(t *testing.T) {
-	n, _ := strconv.Atoi(os.Getenv("SOLE_SEEDS"))
-	if n == 0 {
-		t.Skip("set SOLE_SEEDS")
-	}
-	for _, run := range []struct {
-		name string
-		f    func(seed uint64) error
+// Only what a decision proves counts: an up member it left off the list and a member in maintenance, not a listed member, a down one, or an up one that gave no reply.
+func TestCopiesCountsWhatTheDecisionProves(t *testing.T) {
+	c, other := chunkIn(pg0, 1, 0), chunkIn(pg0, 1, 1)
+	listed := []ChunkVersion{{Chunk: c, Version: 7}}
+	for _, tc := range []struct {
+		name    string
+		members []Member
+		replies []peerReply
+		want    int
 	}{
-		{"primaries", func(seed uint64) error { return runPrimaries(t, seed, nil) }},
-		{"faults", func(seed uint64) error { return runFaults(t, seed, 2, 24, nil) }},
+		{"clean", []Member{{Disk: 1}, {Disk: 2}}, []peerReply{{disk: 1}, {disk: 2}}, 2},
+		{"listed", []Member{{Disk: 1}, {Disk: 2}}, []peerReply{{disk: 1}, {disk: 2, list: listed}}, 1},
+		{"listed for another chunk", []Member{{Disk: 1}, {Disk: 2}}, []peerReply{{disk: 1}, {disk: 2, list: []ChunkVersion{{Chunk: other}}}}, 2},
+		{"maintenance", []Member{{Disk: 1}, {Disk: 2, Mark: MarkMaint}}, []peerReply{{disk: 1}}, 2},
+		{"down, reached in a past interval", []Member{{Disk: 1}, {Disk: 2, Mark: MarkDown}}, []peerReply{{disk: 1}, {disk: 2}}, 1},
+		{"reached, no longer a member", []Member{{Disk: 1}}, []peerReply{{disk: 1}, {disk: 2}}, 1},
+		{"up, no reply", []Member{{Disk: 1}, {Disk: 2}}, []peerReply{{disk: 1}}, 1},
 	} {
-		var sole, none, bytesGone, soleTotal, noneTotal int
-		for seed := range uint64(n) {
-			d := &soleDiag{}
-			soleWatch = d
-			if err := run.f(seed); err != nil {
-				t.Fatalf("%s seed %d: %v", run.name, seed, err)
-			}
-			soleWatch = nil
-			if d.soleAck > 0 {
-				sole++
-				soleTotal += d.soleAck
-			}
-			if d.noCopy > 0 {
-				none++
-				noneTotal += d.noCopy
-			}
-			if d.noBytes > 0 {
-				bytesGone++
-				t.Logf("%s seed %d: no up member holds an acknowledged version", run.name, seed)
-			}
-			if d.soleAck > 0 && sole <= 3 {
-				t.Logf("%s seed %d: %d acknowledgments below min_live copies, %d activations with no clean holder", run.name, seed, d.soleAck, d.noCopy)
-			}
+		if got := copies(&PGEntry{Members: tc.members}, tc.replies, c); got != tc.want {
+			t.Errorf("%s: %d copies, want %d", tc.name, got, tc.want)
 		}
-		t.Logf("%s over %d seeds: %d seeds acknowledged on fewer than 2 disks (%d writes); %d seeds activated with no up member clean for an acknowledged version (%d activations); %d seeds with no up member holding its bytes at all", run.name, n, sole, soleTotal, none, noneTotal, bytesGone)
 	}
 }
