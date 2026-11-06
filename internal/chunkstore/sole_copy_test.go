@@ -368,6 +368,138 @@ func TestAnOKOnAMemberThatListsTheChunkLeavesItUnfoundWithThePrimary(t *testing.
 	}
 }
 
+// W is on disks 1 and 2 when disk 3 goes: the decision proves two copies, and the client hears OK at activation.
+func TestAVersionOnMinLiveCopiesHearsOKAtActivation(t *testing.T) {
+	r := newSoleRun(t, 3, 2, 3)
+	c := r.c
+	ch := chunkIn(pg0, 1, 0)
+	ms := r.members()
+	r.lose(ms[2].Disk)
+	id := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize))
+	c.runFor(5_000)
+	if rp, ok := c.cl.replies[id]; ok {
+		t.Fatalf("W answered %+v before activation", rp)
+	}
+	r.publish()
+	if rp, ok := r.answered(id, 100_000_000); !ok || rp.Status != StatusOK {
+		t.Fatalf("W, on two disks, answered %+v, %v", rp, ok)
+	}
+}
+
+// rep2 with the second member cut off and then in maintenance: W on the primary alone has two copies, as it would on a write in that interval.
+func TestAMemberInMaintenanceCountsTowardAKeptVersionsCopies(t *testing.T) {
+	r := newSoleRun(t, 2, 2, 2)
+	c := r.c
+	ch := chunkIn(pg0, 1, 0)
+	second := r.members()[1].Disk
+	r.lose(second)
+	id := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize))
+	c.runFor(5_000)
+	if rp, ok := c.cl.replies[id]; ok {
+		t.Fatalf("W answered %+v before activation", rp)
+	}
+	c.publish(c.next(func(t *Table) { mark(t, pg0, second, MarkMaint) }), true)
+	c.settle()
+	if rp := c.reply(id); rp.Status != StatusOK {
+		t.Fatalf("W answered %+v", rp)
+	}
+}
+
+// rep1: W has no member to wait for, so it commits on its own log, and an interval that ends under it leaves it its OK.
+func TestAOneDiskPoolsVersionHearsOKAcrossItsInterval(t *testing.T) {
+	r := newSoleRun(t, 1, 1, 1)
+	c := r.c
+	ch := chunkIn(pg0, 1, 0)
+	id := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize))
+	for len(c.reps[0].vers) == 0 && c.step() {
+	}
+	c.publish(c.next(func(t *Table) { _, e := t.entry(pg0); setInterval(t, pg0, e.Interval+1) }), true)
+	c.settle()
+	if rp := c.reply(id); rp.Status != StatusOK {
+		t.Fatalf("W answered %+v", rp)
+	}
+}
+
+// At min_live 1 too, a primary that lists the chunk is no copy: W on it alone counts none, so its client is refused, and the resend is answered.
+func TestAPrimaryThatListsTheChunkIsNoCopyAtMinLiveOne(t *testing.T) {
+	r := newSoleRun(t, 3, 1, 3)
+	c := r.c
+	ch := chunkIn(pg0, 1, 0)
+	c.until(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize)))
+	c.settle()
+	ms := r.members()
+	r.lose(ms[0].Disk)
+	r.publish()
+	c.untilActive()
+	c.settle()
+	c.until(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x33}, core.BlockSize)))
+	c.settle()
+	for n := range c.reps {
+		c.reps[n].plant.noRecovery = true
+	}
+	r.back(ms[0].Disk)
+	r.publish()
+	c.untilActive()
+	c.settle()
+	r.lose(ms[1].Disk)
+	r.lose(ms[2].Disk)
+	w := bytes.Repeat([]byte{0x22}, core.BlockSize)
+	id := c.write(pg0, ch, 0, w)
+	c.runFor(5_000)
+	r.publish()
+	if rp, ok := r.answered(id, 100_000_000); !ok || rp.Status != StatusRefused {
+		t.Fatalf("W answered %+v, %v", rp, ok)
+	}
+	if rp, ok := r.answered(c.write(pg0, ch, 0, w), 100_000_000); !ok || rp.Status != StatusOK {
+		t.Fatalf("W sent again answered %+v, %v", rp, ok)
+	}
+}
+
+// Disk 3 acknowledges 1.2 and then refuses 1.1, so 1.2 commits behind a failed version. The next interval proves one copy, disk 1, below min_live, and 1.2 still hears OK: every member it was sent to took it.
+func TestACommittedVersionBehindAFailedOneKeepsItsOK(t *testing.T) {
+	r := newSoleRun(t, 3, 2, 4)
+	c := r.c
+	ch := chunkIn(pg0, 1, 0)
+	ms := r.members()
+	d1, d2, d3 := ms[0].Disk, ms[1].Disk, ms[2].Disk
+	spare := uint32(1)
+	for slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == spare }) {
+		spare++
+	}
+	n1, n2, n3 := c.node(d1), uint32(c.node(d2)), uint32(c.node(d3))
+	c.s.Partition(n3, uint32(n1), true)
+	w1, w2 := c.write(pg0, ch, 0, []byte{1}), c.write(pg0, ch, 1, []byte{2})
+	c.runFor(5_000)
+	from3 := func(rp Response) {
+		ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: n3}}
+		ev.Msg.Len = uint16(copy(ev.Msg.Body[:], AppendResponse(nil, &rp)))
+		c.s.Node(uint32(n1)).Feed(c.loops[n1], ev)
+	}
+	from3(Response{Kind: KindAck, ID: 2, Version: MakeVersion(1, 2)})
+	if !c.reps[n1].vers[1].commit {
+		t.Fatal("1.2 did not commit")
+	}
+	from3(Response{Kind: KindAck, ID: 1, Status: StatusRefused, Epoch: 1, Interval: 1})
+	c.settle()
+	if _, ok := c.cl.replies[w2]; ok {
+		t.Fatalf("1.2 answered behind 1.1: %+v", c.cl.replies[w2])
+	}
+	c.reps[n1].plant.noRecovery = true
+	c.s.Partition(uint32(n1), n2, false)
+	c.s.Partition(uint32(n1), n3, false)
+	c.publish(c.next(members(Member{Disk: d1}, Member{Disk: spare}, Member{Disk: d3, Mark: MarkDown})), true)
+	c.settle()
+	if h := r.holders(ch, MakeVersion(1, 2)); len(h) != 1 || h[0] != d1 {
+		t.Fatalf("1.2 is held by %v", h)
+	}
+	if rp := c.reply(w1); rp.Status != StatusRefused {
+		t.Fatalf("1.1 answered %+v", rp)
+	}
+	if rp := c.reply(w2); rp.Status != StatusOK {
+		t.Fatalf("1.2 answered %+v", rp)
+	}
+}
+
 // Only what a decision proves counts: an up member it left off the list and a member in maintenance, not a listed member, a down one, or an up one that gave no reply.
 func TestCopiesCountsWhatTheDecisionProves(t *testing.T) {
 	c, other := chunkIn(pg0, 1, 0), chunkIn(pg0, 1, 1)
@@ -380,6 +512,7 @@ func TestCopiesCountsWhatTheDecisionProves(t *testing.T) {
 	}{
 		{"clean", []Member{{Disk: 1}, {Disk: 2}}, []peerReply{{disk: 1}, {disk: 2}}, 2},
 		{"listed", []Member{{Disk: 1}, {Disk: 2}}, []peerReply{{disk: 1}, {disk: 2, list: listed}}, 1},
+		{"the primary lists it, alone", []Member{{Disk: 1}}, []peerReply{{disk: 1, list: listed}}, 0},
 		{"listed for another chunk", []Member{{Disk: 1}, {Disk: 2}}, []peerReply{{disk: 1}, {disk: 2, list: []ChunkVersion{{Chunk: other}}}}, 2},
 		{"maintenance", []Member{{Disk: 1}, {Disk: 2, Mark: MarkMaint}}, []peerReply{{disk: 1}}, 2},
 		{"down, reached in a past interval", []Member{{Disk: 1}, {Disk: 2, Mark: MarkDown}}, []peerReply{{disk: 1}, {disk: 2}}, 1},
