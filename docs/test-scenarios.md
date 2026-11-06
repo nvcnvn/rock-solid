@@ -4911,13 +4911,14 @@ heartbeat every 1 s, `rate_window` 10 s, `rate_gap` 100 ms, `max_margin` 50%, 1 
 
 **A kept version's client at activation**
 
-- `rep3`, `min_live` 2, disks 1, 2, 3 holding X. Disk 2 drops out. Disk 1 logs W and sends it to disk 3, which is cut off before logging. Disk 2 returns as disk 3 is marked down. Disk 1 peers with disk 2: W is kept and listed for disk 2, disk 1 is its one copy, and the client is refused. The resend lands on disks 1 and 2 and is answered OK. Disk 1 is then lost for good: X and W read from the others.
-- The same with a refill in place of the returning disk, on `rep2` and `rep3`: every other member is cut off, the refill brings the PG back to `min_live`, W is refused, its resend reaches both, and a second refill that removes the first disk leaves W readable.
+- `rep3`, `min_live` 2, disks 1, 2, 3 holding X. Disk 2 drops out. Disk 1 logs W and sends it to disk 3, which is cut off before logging. Disk 2 returns as disk 3 is marked down. Disk 1 peers with disk 2: W is kept and listed for disk 2, disk 1 is its one copy, and the client is refused. The resend lands on disks 1 and 2 and is answered OK. Once recovery has made disk 2 clean, disk 1 is lost for good: X and W read from the others.
+- The same with a refill in place of the returning disk, on `rep2` and `rep3`: every other member is cut off, the refill brings the PG back to `min_live`, W is refused, its resend reaches both, recovery makes the refill clean, and a second refill that removes the first disk leaves W readable.
 - `rep3`, `min_live` 2, W on disks 1 and 2 when disk 3 goes down: the client hears OK at activation, with two copies.
 - `rep2`, `min_live` 2, the second member in `maintenance`: the primary's one copy and the member in `maintenance` make two, and the client hears OK, as it would on a write in that interval.
 - A `rep3` pool with `min_live` 1, and `rep1`: one copy is enough, and the client hears OK.
 - A version that committed on every member it was sent to, behind a failed version: it keeps its OK at activation, whatever the count.
 - A refused version whose one holder then dies: the chunk reads unfound until the disk returns. Nothing acknowledged is lost.
+- The limit of an OK on a member that lists the chunk, with no refusal and recovery held back: W1 lands on disks 1 and 2, disk 2 goes down, disk 3 returns listing the chunk, and W2 is answered OK on disks 1 and 3, where disk 1 is its one clean copy. Disk 1 is lost and disk 2 returns: the chunk reads unfound though disk 3 logged W2. W2 reads once disk 1 returns.
 
 **Serving reads**
 

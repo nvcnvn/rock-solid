@@ -153,7 +153,7 @@ func (r *soleRun) holders(ch core.ChunkID, v uint64) []uint32 {
 	return hs
 }
 
-// A rep3 pool with min_live 2, no refill: disk 2 is down, W reaches disk 1 and is on its way to disk 3 when disk 3 goes too and disk 2 comes back. The interval of disks 1 and 2 keeps W, since disk 2 was not live in W's interval, but disk 1 is its only copy, so the client is refused. Its resend lands on both, disk 1 is then lost for good, and W reads from the others.
+// A rep3 pool with min_live 2, no refill: disk 2 is down, W reaches disk 1 and is on its way to disk 3 when disk 3 goes too and disk 2 comes back. The interval of disks 1 and 2 keeps W, since disk 2 was not live in W's interval, but disk 1 is its only copy, so the client is refused. Its resend lands on both, recovery lets disk 2 serve it, disk 1 is then lost for good, and W reads from the others.
 func TestAWriteAcknowledgedAtMinLiveSurvivesTheLossOfOneDisk(t *testing.T) {
 	r := newSoleRun(t, 3, 2, 3)
 	c := r.c
@@ -209,7 +209,7 @@ func TestAWriteAcknowledgedAtMinLiveSurvivesTheLossOfOneDisk(t *testing.T) {
 	}
 }
 
-// The model's counterexample on real placement: every other member is cut off while W is on its way, so W is on the primary alone; the PG below min_live waits degraded_refill_after, and a refill brings it back to min_live with a member that lists W. Peering keeps W but its client is refused. The resend lands on both, so when the primary is cut off and a second refill removes it, W reads from the member left.
+// The model's counterexample on real placement: every other member is cut off while W is on its way, so W is on the primary alone; the PG below min_live waits degraded_refill_after, and a refill brings it back to min_live with a member that lists W. Peering keeps W but its client is refused. The resend lands on both and recovery lets the refill serve it, so when the primary is cut off and a second refill removes it, W reads from the member left.
 func TestARefillKeepsTheOnlyCopyOfAnAcknowledgedWrite(t *testing.T) {
 	for _, shape := range []struct {
 		name              string
@@ -316,6 +316,55 @@ func TestARefusedVersionLeavesItsChunkUnfoundWithItsHolder(t *testing.T) {
 	r.tick(5_000_000)
 	if rp, got := r.read(ch); rp.Status != StatusOK || got[0] != 0x22 {
 		t.Fatalf("chunk read %+v with W's holder back", rp)
+	}
+}
+
+// The limit of counting a listing member toward an OK, with no refusal on the way: W2 is on disk 1 and on disk 3, whose missing list names the chunk, as it does until recovery reaches it. The OK needs both logs and no clean copy but disk 1's, so losing disk 1 leaves W2 unfound though disk 3 holds its bytes, until disk 1 returns. noRecovery stands in for recovery that is slow.
+func TestAnOKOnAMemberThatListsTheChunkLeavesItUnfoundWithThePrimary(t *testing.T) {
+	r := newSoleRun(t, 3, 2, 3)
+	c := r.c
+	ch := chunkIn(pg0, 1, 0)
+	c.until(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize)))
+	c.settle()
+	ms := r.members()
+	d1, d2, d3 := ms[0].Disk, ms[1].Disk, ms[2].Disk
+	r.lose(d3)
+	r.publish()
+	c.untilActive()
+	c.settle()
+	c.until(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x33}, core.BlockSize)))
+	c.settle()
+
+	for n := range c.reps {
+		c.reps[n].plant.noRecovery = true
+	}
+	r.lose(d2)
+	r.back(d3)
+	r.publish()
+	c.untilActive()
+	c.settle()
+	w2 := bytes.Repeat([]byte{0x44}, core.BlockSize)
+	rp, ok := r.answered(c.write(pg0, ch, 0, w2), 100_000_000)
+	if !ok || rp.Status != StatusOK {
+		t.Fatalf("W2 answered %+v, %v", rp, ok)
+	}
+	if h := r.holders(ch, rp.Version); len(h) != 1 || h[0] != d1 {
+		t.Fatalf("W2, OK, has clean copies on %v", h)
+	}
+	if x, _ := c.reps[c.node(d3)].Store().Index().Chunk(testPool, ch); x.Whole != rp.Version || x.ListedIn == 0 {
+		t.Fatalf("disk %d, which logged W2 %#x, holds %+v", d3, rp.Version, x)
+	}
+
+	r.lose(d1)
+	r.back(d2)
+	r.tick(10_000_000)
+	if grp, _ := r.read(ch); grp.Status != StatusUnfound {
+		t.Fatalf("chunk read %+v with W2's clean copy gone", grp)
+	}
+	r.back(d1)
+	r.tick(5_000_000)
+	if grp, got := r.read(ch); grp.Status != StatusOK || !bytes.Equal(got, w2) {
+		t.Fatalf("W2 read back %+v with disk %d back", grp, d1)
 	}
 }
 
