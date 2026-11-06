@@ -4099,49 +4099,47 @@ broken invariant, keeping the trace up to there and saying which broke in a `.st
 10-minute test limit, so it runs a seed at a time. A rejection counts once the failing line has been
 read to be the planted behaviour.
 
-Results over the 30 seeds that pass. Fired counts the seeds whose trace differs from the baseline's;
+Results over the 38 seeds that pass, one run at one commit. Fired counts the seeds whose trace differs from the baseline's;
 passed, a trace TLC took to its end. A plant's rejected line is listed by kind, with the seeds where it held
-every invariant as clean. `sameMembers`, `keepID`, `sendEpoch` and `resendNewestFirst` are the counts running
-on, since a trace cut at the break passes.
+every invariant as clean. This run stops at the first broken invariant, so `sameMembers` and `keepID` pass: run on,
+over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of 21 and 11 of 11.
 
 | Plant | Rule | Fired | Rejected | Passed | Caught, clean | Result | Guard |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `activateEarly` | `neg-activate-before-durable` | 30 | 30 | 0 | 30, 29 | `persisted` 21, `activate` 9 | A first persist after `Activate`, or `Activate` before every `Persisted` |
-| `mergeWhileLacking` | `neg-merge-before-kept` | 10 | 10 | 0 | 10, 9 | `order` | `Order`: `miss[own][c] = NoMiss` or the decision's `img` |
-| `mergeOnDropped` | `neg-merge-on-dropped` | 5 | 5 | 0 | 5, 5 | `order`, at 6, 15, 20, 22, 27. At seed 6 the write the baseline holds is ordered at the first line that differs | `Order`: the chunk is listed and not in `img` |
-| `editKeepsInterval` | `neg-edit-keeps-interval` | 30 | 30 | 0 | 30, 20 | `table`, the line that reorders and keeps the interval | No step changes members and keeps the interval |
-| `relistNever`, `clearListed` | `neg-peering-clears-missing` | 9 | 8 | 1 | 8, 6 | `peer` 4, `recovered` 4. Seed 19 passes: one `recovered` line fewer, with no peering after it | `Peer`: a reply lists nothing the spec keeps listed; `Recover` |
-| `peerInOldInterval` | `neg-restart-same-interval` | 10 | 9 | 1 | 6, 3 | `peer` 6. Not the rule: `order` at 19 and 23, as discrepancy 13; `recovered` at 16, unread. Seed 15 passes: a table moves the PG before it peers | `peer`: `pr[n][p].iv = iv` |
-| `ownInterval` | `neg-decide-by-own-interval` | 5 | 5 | 0 | 5, 0 | `peer` | `KeptMatches` |
-| `reportDecided` | `neg-report-before-activate` | 30 | 30 | 0 | 30, 0 | `fold` | `Fold`: no report yet |
-| `removeOnActivation` | `neg-remove-before-recovered` | 10 | 10 | 0 | 10, 0 | `plan` | `Remove`: no `recd` for the interval |
-| `oldReport` | `neg-accept-old-report` | 30 | 13 | 17 | 13, 2 | `plan`. Passes where the old report removes nothing, read at 6, 23 and 36 | `Remove`: no `recd` for the interval |
-| `sameMembers` | `neg-compare-member-lists` | 21 | 21 | 0 | 21, 0 | `logged` | `Accepts`: the interval differs |
-| `keepID` | `neg-keep-disk-id` | 11 | 11 | 0 | 10, 0 | `logged` 7, where the baseline has `gone`; `table` 2; `plan` 1. `peer` at 35 is not the plant's line: the plan is read from the whole trace, and the plant's has no `replace` | The spec's `Format` gave the disk a new ID |
-| `sendEpoch` | `neg-compare-table-epochs` | 30 | 30 | 0 | 30, 0 | `mfail`; running on, 4 seeds give no verdict | `mfail`: a refusal with no fault budget, and not `gone` |
-| `neverAsk` | `neg-restart-no-ask` | 11 | 4 | 6 | 0, 0 | Not the rule: `order` 3, as discrepancy 13; `peer` at 27, unread. Seed 16 gives no verdict | An `ask` that never comes is no line |
-| `coverAtRead` | `neg-recovery-covers-at-read` | 16 | 1 | 15 | 0, 0 | `recovered` at 12 is not the rule: the line names no blocks, so it is timing, unread | Too loose: `Recover`'s cover is unobserved |
-| `resendNewestFirst` | `neg-log-out-of-order` | 8 | 0 | 7 | 0, 0 | Fires at the 8 seeds with a `gone` line; no member logs out of order, so the rule is not reached. Seed 15 gives no verdict | |
-| `stopPreviousOnly` | `neg-stop-previous-only` | 1 | 0 | 1 | 0, 0 | Seed 39: `J` shrinks, and still meets `Peer` | |
-| `unlistTorn` | none | 1 | 1 | 0 | 1, 1 | `recovered` at 24: disk 1 tore at line 50 and, left off, serves as the source of a recovery the spec refuses it for. Seeds 1 and 5 tear and show no difference. Seed 148, the seed that breaks the oracle, has no baseline verdict | `Recover`: the source lists nothing |
-| `recoverFromListed` | `neg-recover-from-listed` | 11 | 6 | 4 | 6, 4 | `recovered` 4, `peer` 2. Passes at 5, 19, 24 and 27: too loose, as `Recovered` names no source and `Recover`'s source is any member, so TLC takes a clean one where the code read the primary. Seed 15 gives no verdict | `Recover`: the source lists nothing, or is a primary with the chunk in `img` |
-| `clearNoSource` | `neg-recover-no-source` | 5 | 5 | 0 | 5, 2 | `recovered`, a chunk with something kept and no source | `Recover`: a source, unless the kept version is 0 |
-| `goneWhileUp` | `neg-gone-while-up` | 32 | 32 | 0 | 32, 0 | `gone`, the planted refusal. Not clean, since the oracle's "no write is refused for its interval" breaks at the same step | `GoneRefuses`: the disk has no node |
-| `lastActivatedOnly` | `neg-reach-last-activated-only` | 1 | 0 | 1 | 0, 0 | Seed 11, as above | The code's own `J` is what `Peer` judges |
-| `freshGrantNoCheck` | `neg-fresh-grant-no-table-check` | 6 | 0 | 6 | 0, 0 | Passes | About leases, which no line observes |
-| `fenceOnArrival`, `reorderAfterOther`, `settleByNumber`, `readBelowMinLive` | `neg-fence-on-arrival`, `neg-reorder-after-other-primary`, `neg-settle-by-number`, `neg-read-below-min-live` | 0 | 0 | 0 | 0, 0 | No evidence: they fire on none of the 30 | |
-| `recoverSelfOnly` | none | 29 | 10 | 18 | 9, 0 | `reported` 9, the plant's report with a member still listing; `peer` at 11, unread. A report with no member leaving is a stutter. Seed 15 gives no verdict | `ReportRecovered`: lists empty |
+| `activateEarly` | `neg-activate-before-durable` | 38 | 38 | 0 | 38, 37 | `persisted` 26, `activate` 12 | A first persist after `Activate`, or `Activate` before every `Persisted` |
+| `mergeWhileLacking` | `neg-merge-before-kept` | 16 | 16 | 0 | 16, 14 | `order` | `Order`: `miss[own][c] = NoMiss` or the decision's `img` |
+| `mergeOnDropped` | `neg-merge-on-dropped` | 9 | 9 | 0 | 9, 9 | `order` | `Order`: the chunk is listed and not in `img` |
+| `editKeepsInterval` | `neg-edit-keeps-interval` | 38 | 38 | 0 | 38, 26 | `table`, the line that reorders and keeps the interval | No step changes members and keeps the interval |
+| `relistNever`, `clearListed` | `neg-peering-clears-missing` | 12 | 11 | 1 | 11, 8 | `recovered` 6, `peer` 5 | `Peer`: a reply lists nothing the spec keeps listed; `Recover` |
+| `peerInOldInterval` | `neg-restart-same-interval` | 16 | 14 | 2 | 12, 7 | `peer` 12. Not the rule: `order` 2, as discrepancy 13 | `peer`: `pr[n][p].iv = iv` |
+| `ownInterval` | `neg-decide-by-own-interval` | 7 | 7 | 0 | 7, 0 | `peer` | `KeptMatches` |
+| `reportDecided` | `neg-report-before-activate` | 38 | 38 | 0 | 38, 0 | `fold` | `Fold`: no report yet |
+| `removeOnActivation` | `neg-remove-before-recovered` | 13 | 13 | 0 | 13, 0 | `plan` | `Remove`: no `recd` for the interval |
+| `oldReport` | `neg-accept-old-report` | 38 | 18 | 20 | 17, 4 | `plan` 17; `peer` 1, not the rule | `Remove`: no `recd` for the interval |
+| `sameMembers` | `neg-compare-member-lists` | 27 | 0 | 27 | 0, 0 | Cut at the break; see above | `Accepts`: the interval differs |
+| `keepID` | `neg-keep-disk-id` | 15 | 0 | 15 | 0, 0 | Cut at the break; see above | The spec's `Format` gave the disk a new ID |
+| `sendEpoch` | `neg-compare-table-epochs` | 38 | 38 | 0 | 38, 0 | `mfail` | `mfail`: a refusal with no fault budget, and not `gone` |
+| `neverAsk` | `neg-restart-no-ask` | 18 | 8 | 9 | 0, 0 | Not the rule: `order` 7, as discrepancy 13; `peer` 1. One gives no verdict | An `ask` that never comes is no line |
+| `coverAtRead` | `neg-recovery-covers-at-read` | 22 | 0 | 21 | 0, 0 | Too loose: `Recover`'s cover is unobserved. One gives no verdict | |
+| `resendNewestFirst` | `neg-log-out-of-order` | 11 | 0 | 11 | 0, 0 | No member logs out of order, so the rule is not reached | |
+| `stopPreviousOnly` | `neg-stop-previous-only` | 2 | 0 | 2 | 0, 0 | `J` shrinks, and still meets `Peer` | |
+| `recoverFromListed` | `neg-recover-from-listed` | 15 | 15 | 0 | 14, 12 | `recovered` 14, the line naming a primary that lacks the chunk as its source; `peer` 1, its consequence | `Recover`: the source lists nothing, or is a primary with the chunk in `img` |
+| `clearNoSource` | `neg-recover-no-source` | 7 | 7 | 0 | 7, 2 | `recovered`, source 0 at a listed version above 0 | `Recover`: a source, unless the kept version is 0 |
+| `goneWhileUp` | `neg-gone-while-up` | 37 | 37 | 0 | 37, 0 | `gone`, the planted refusal. Not clean, since the oracle's "no write is refused for its interval" breaks at the same step | `GoneRefuses`: the disk has no node |
+| `lastActivatedOnly` | `neg-reach-last-activated-only` | 1 | 0 | 1 | 0, 0 | The code's own `J` is what `Peer` judges | |
+| `freshGrantNoCheck` | `neg-fresh-grant-no-table-check` | 7 | 0 | 7 | 0, 0 | Passes | About leases, which no line observes |
+| `fenceOnArrival`, `reorderAfterOther`, `settleByNumber`, `readBelowMinLive` | `neg-fence-on-arrival`, `neg-reorder-after-other-primary`, `neg-settle-by-number`, `neg-read-below-min-live` | 0 | 0 | 0 | 0, 0 | No evidence: they fire on none of the 38 | |
+| `unlistTorn` | none | 1 | 0 | 1 | 0, 0 | Open: seed 24 passes, where the `recovered` line stopped it before the source was bound. Neither `mayrecover` nor the settled-write stutter lets it through, each checked by removing it | |
+| `recoverSelfOnly` | none | 36 | 12 | 23 | 11, 0 | `reported` 11, the plant's report with a member still listing; `peer` 1. One gives no verdict | `ReportRecovered`: lists empty |
 | `settleSubset` | none | 4 | 0 | 4 | 0, 0 | Too loose: `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record | |
 
-Traces can fail is shown for 16 of the 26 rules, 9 of them clean: `activateEarly`, `mergeWhileLacking`,
+Traces can fail is shown on these 38 seeds for 14 of the 26 rules, 9 of them clean: `activateEarly`, `mergeWhileLacking`,
 `mergeOnDropped`, `editKeepsInterval`, `relistNever`, `peerInOldInterval`, `oldReport`, `recoverFromListed` and
-`clearNoSource`. The three recovery and refusal rows are over the 33 seeds that pass with discrepancy 12 settled,
-the rest over the 30 before it. Open: `coverAtRead`,
-which needs a record of the blocks a recovery write leaves out; `recoverFromListed`, caught at 6 seeds and missed
-at 4, which needs `Recovered` to name its source; `neverAsk`, an omission no line can name;
+`clearNoSource`, and for 2 more, `sameMembers` and `keepID`, running on over 30. Open: `coverAtRead`,
+which needs a record of the blocks a recovery write leaves out; `neverAsk`, an omission no line can name;
 `freshGrantNoCheck`, with the lease half; `resendNewestFirst`, `stopPreviousOnly` and `lastActivatedOnly`,
-which need a seed that reaches them; and the four that never fire. Of the two oracle plants with no rule,
-`settleSubset` needs a record of what `Settle` answered.
+which need a seed that reaches them; and the four that never fire. Of the oracle plants with no rule,
+`settleSubset` needs a record of what `Settle` answered, and `unlistTorn` is unread.
 
 Every relaxed path now has a plant: `img` in `Order` by `mergeOnDropped` and `mergeWhileLacking`, `img` as a
 recovery source by `recoverFromListed`, `Recover` at kept version 0 by `clearNoSource`, and `GoneRefuses` by

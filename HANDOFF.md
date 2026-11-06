@@ -15,3 +15,21 @@ Run:
 - A negative's cfg names its one invariant under `INVARIANTS`: copying one, change that line too.
 
 State: 38 of 40 seeds pass, failing 2 (no verdict) and 25 (discrepancy 14).
+
+NOT confirmed when this was written: `scripts/models.sh ci epoch` on the final spec (head of this branch, which
+puts `Recover`'s guards before its choice of source), and the sweep of seeds 40-339. Both were running from
+/private/tmp/claude-501/-Volumes-T5-Codes-rock-solid/7f074d57-9fac-4a02-a560-0408c534bfcf/scratchpad/chain2.sh, logging to /private/tmp/claude-501/-Volumes-T5-Codes-rock-solid/7f074d57-9fac-4a02-a560-0408c534bfcf/scratchpad/ci3.log and /private/tmp/claude-501/-Volumes-T5-Codes-rock-solid/7f074d57-9fac-4a02-a560-0408c534bfcf/scratchpad/sweep.log, verdict lines only. Read those, or rerun them.
+The ci run before the guard fix failed only by time: `ci-restarts-moved` past 300 s, with the same state counts.
+The run before the split passed all 64 configurations, slowest 275 s.
+
+Next:
+1. Confirm `ci epoch` on the final spec, then fill the results table beside `ci-restarts` in the
+   "Model-to-simulator map" with `ci-edits`, `ci-restarts-moved`, `ci-tears` and its new `ci-restarts` row.
+2. `unlistTorn` at seed 24 passes where the `recovered` line stopped it at 86b32d1. Removing `mayrecover` or the
+   `RecoveryOver` stutter does not stop it. Compare with the trace and line rejected at 86b32d1.
+3. Discrepancy 14, seed 25: add a record at the primary's `fail` and hold the member's refusal line until it.
+4. Seed 2: 26 `mayfail` lines at one crash. Whether a crash loses only a suffix of the log, so the lines form a
+   chain, would cut the branching; read the log's durability order before assuming it.
+5. `JOBS=2 scripts/seeds.sh` passed 85,400 seeds at cdf49bd, the last Go change.
+
+Open from the review: S8, `settleSubset`, discrepancy 13, `TestReplicatedWritesSurviveFaults`, the coverage report.
