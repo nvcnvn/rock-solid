@@ -131,6 +131,8 @@ const (
 	OutRecovering
 	// OutPast is a past interval of the OutEntry before it: pg interval minlive. Its members follow as OutMember.
 	OutPast
+	// OutRecoverOrder, a primary ordering a recovery write, whether or not it is a target: chunk source interval.
+	OutRecoverOrder
 	numNames
 )
 
@@ -229,6 +231,7 @@ var schemas = [numNames]schema{
 	OutMemberFail:     {"MemberFail", KindOutput, []field{fChunk, fVer, {"gone", typeBool}}},
 	OutRecovering:     {"Recovering", KindOutput, []field{fChunk, {"source", typeNum}, fIv}},
 	OutPast:           {"PastInterval", KindOutput, []field{fPG, fIv, {"minlive", typeNum}}},
+	OutRecoverOrder:   {"RecoverOrder", KindOutput, []field{fChunk, {"source", typeNum}, fIv}},
 }
 
 // Kind is the kind of record the name belongs to, or 0 for an unknown name.

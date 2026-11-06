@@ -96,6 +96,12 @@ RecoveryOver(l) ==
          /\ a.p = ChunkPG[l.c] /\ a.k > l.iv
          /\ y.p = a.p /\ y.k = a.k /\ y.r = a.r /\ y.n = l.n
 
+\* The primary ordered this recovery write at an earlier line.
+RecoveryOrdered(l) ==
+    \E i \in 1..line - 1 :
+        /\ Trace[i].k = "recoverorder"
+        /\ Trace[i].c = l.c /\ Trace[i].iv = l.iv /\ Trace[i].s = l.s
+
 RecoverLine(l) ==
     /\ (l.s = 0) = (miss[ddisk[l.n]][l.c] = 0)
     /\ RecoverFrom(l.l, ChunkPG[l.c], l.c, ddisk[l.n], IF l.s = 0 THEN ddisk[l.n] ELSE l.s)
@@ -138,7 +144,14 @@ Line(l) ==
        /\ Restart(l.n)
     \/ /\ l.k = "format"
        /\ Format(l.n)
+    \/ /\ l.k = "recoverorder"
+       /\ Leads(l.n, ChunkPG[l.c])
+       /\ pr[l.n][ChunkPG[l.c]].act
+       /\ IvAt(l.n, ChunkPG[l.c]) = l.iv
+       /\ \E d \in Disk : miss[d][l.c] # NoMiss
+       /\ UNCHANGED vars
     \/ /\ l.k = "recovered"
+       /\ RecoveryOrdered(l)
        /\ IF RecoveryOver(l)
           THEN UNCHANGED vars
           ELSE IF miss[ddisk[l.n]][l.c] = NoMiss
@@ -150,6 +163,7 @@ Line(l) ==
                   \/ IvOfV(l.v) = IvAt(l.l, ChunkPG[l.c]) /\ l.v <= pv[l.l][l.c]
                /\ RecoverLine(l)
     \/ /\ l.k = "mayrecover"
+       /\ RecoveryOrdered(l)
        /\ \/ UNCHANGED vars
           \/ RecoverLine(l)
     \/ /\ l.k = "reported"
