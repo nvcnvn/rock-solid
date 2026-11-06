@@ -840,7 +840,11 @@ RecoverFrom(n, p, c, d, m) ==
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, persIv, mrecv, failed,
                       priVars, dataVars, leaseVars, clockVars, raftVars>>
 
-Recover(n, p, c, d) == \E m \in UpIn(p, IvAt(n, p)) : RecoverFrom(n, p, c, d, m)
+Recover(n, p, c, d) ==
+    /\ Running(n)
+    /\ Leads(n, p)
+    /\ miss[d][c] # NoMiss
+    /\ \E m \in UpIn(p, IvAt(n, p)) : RecoverFrom(n, p, c, d, m)
 
 \* A primary that activated reports, on its next heartbeat, that every member
 \* of its interval but a leaving one is up and lists nothing. The model sends
