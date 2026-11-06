@@ -4127,7 +4127,7 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 
 | Plant | Rule | Fired | Rejected | Passed | Caught, clean | Result | Guard |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ackOnLoneCopy` | `neg-ack-on-lone-copy` | 6 | 6 | 0 | 3, 3 | `committed` 3, the OK `Activated` withholds; `peer` 3, later, not read to the rule. The seeds' refusals are of a chunk one proven copy short, its other copy on a disk that lists it or has left; `scripted-lone-copy` takes the same rule with the write on one disk | `committed`: the version has no `ackd` |
+| `ackOnLoneCopy` | `neg-ack-on-lone-copy` | 6 | 6 | 0 | 3, 3 | `committed` 3, the OK `Activated` withholds; `peer` 3, later, not read to the rule. The seeds' refusals over-refuse: `copies` counts what the decision proves, not the logs, which can be on disks that list the chunk or have left, as on seed 24, where 3.8 was on three logs, disks 1, 2 and 4, and the decision listed 1 and 4, so `copies` was 1. Each refusal sends the write again, and each resend can reorder it against another writer's; `scripted-lone-copy` takes the same rule with the write on one disk | `committed`: the version has no `ackd` |
 | `activateEarly` | `neg-activate-before-durable` | 38 | 38 | 0 | 38, 37 | `persisted` 26, `activate` 12 | A first persist after `Activate`, or `Activate` before every `Persisted` |
 | `mergeWhileLacking` | `neg-merge-before-kept` | 16 | 16 | 0 | 16, 14 | `order` | `Order`: `miss[own][c] = NoMiss` or the decision's `img` |
 | `mergeOnDropped` | `neg-merge-on-dropped` | 9 | 9 | 0 | 9, 9 | `order` | `Order`: the chunk is listed and not in `img` |
@@ -4917,7 +4917,7 @@ heartbeat every 1 s, `rate_window` 10 s, `rate_gap` 100 ms, `max_margin` 50%, 1 
 - `rep2`, `min_live` 2, the second member in `maintenance`: the primary's one copy and the member in `maintenance` make two, and the client hears OK, as it would on a write in that interval.
 - A `rep3` pool with `min_live` 1, and `rep1`: one copy is enough, and the client hears OK.
 - A version that committed on every member it was sent to, behind a failed version: it keeps its OK at activation, whatever the count.
-- A refused version whose one holder then dies: the chunk reads unfound until the disk returns. Nothing acknowledged is lost.
+- A refused version whose one holder then dies: the chunk reads unfound, X below it included, though X was acknowledged and is whole on the other two disks, and reads again only when the disk returns. Were it lost for good, X would stay unfound with no operator path.
 - The limit of an OK on a member that lists the chunk, with no refusal and recovery held back: W1 lands on disks 1 and 2, disk 2 goes down, disk 3 returns listing the chunk, and W2 is answered OK on disks 1 and 3, where disk 1 is its one clean copy. Disk 1 is lost and disk 2 returns: the chunk reads unfound though disk 3 logged W2. W2 reads once disk 1 returns.
 
 **Serving reads**

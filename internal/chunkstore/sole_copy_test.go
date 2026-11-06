@@ -292,7 +292,7 @@ func TestALoneCopyIsEnoughAtMinLiveOne(t *testing.T) {
 	}
 }
 
-// The limit of keeping a refused version: its one holder dies, so its chunk is unfound though X, below it, is on the others. No acknowledged write is lost, and the chunk reads again once the disk returns.
+// The limit of keeping a refused version: its one holder dies, so its chunk is unfound though X, below it, was acknowledged and is on the others. The chunk reads again once the disk returns; were it lost for good, X would stay unfound.
 func TestARefusedVersionLeavesItsChunkUnfoundWithItsHolder(t *testing.T) {
 	r := newSoleRun(t, 3, 2, 3)
 	c := r.c
