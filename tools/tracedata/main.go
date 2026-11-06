@@ -254,6 +254,8 @@ func (g *gen) classify(epoch uint64, changed []uint64, next map[uint64]*entry) {
 		asked := g.operatorAsk[f]
 		delete(g.operatorAsk, f)
 		switch {
+		case slices.Equal(a, b) && leavingOf(old) != 0 && leavingOf(e) != 0 && leavingOf(old) != leavingOf(e) && sameMarks(old, e):
+			g.planned(fmt.Sprintf(`[k |-> "stay", p |-> %d, out |-> %d]`, p, g.disk(leavingOf(e))))
 		case slices.Equal(a, b) && sameMembers(old, e) && e.minLive == old.minLive && !asked:
 			g.tables++
 			g.line(`k |-> "renew", p |-> %d`, p)

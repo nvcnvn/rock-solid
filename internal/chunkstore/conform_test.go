@@ -150,6 +150,20 @@ func TestConformScriptedLoneCopy(t *testing.T) {
 	conformWrite(t, "scripted-lone-copy", c)
 }
 
+// A member merely down is refilled and leaves, the next waits, and both return: the spec takes the whole run.
+func TestConformScriptedRefill(t *testing.T) {
+	if err := lastSourceRun(t, nil, true, "scripted-refill"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A leaving member up takes the place of a member merely down, which leaves in its turn: the spec takes the whole run.
+func TestConformScriptedStay(t *testing.T) {
+	if err := staySourceRun(t, nil, "scripted-stay"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // conformPlants are the plants of the rule map and of the oracle test that scripts/conform.sh runs in the primary-change run.
 var conformPlants = []struct {
 	name string

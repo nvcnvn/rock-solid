@@ -10,18 +10,21 @@ import (
 
 // No write in flight: X was acknowledged on both disks of a rep2 pool. One disk is out long enough to be refilled, the other goes before the refill member has copied X and waits, the PG having a leaving member. Both old disks come back whole, both still members, X reads, and the recovered report ends the wider PG.
 func TestARefillKeepsTheLastSourceOfAPG(t *testing.T) {
-	if err := lastSourceRun(t, nil, true); err != nil {
+	if err := lastSourceRun(t, nil, true, ""); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// lastSourceRun runs that scenario under plant, if any, checking what the rule keeps only if strict, and returns what the simulator's invariants find.
-func lastSourceRun(t *testing.T, plant func(*authority), strict bool) error {
+// lastSourceRun runs that scenario under plant, if any, checking what the rule keeps only if strict, keeping its conformance trace if named, and returns what the simulator's invariants find.
+func lastSourceRun(t *testing.T, plant func(*authority), strict bool, name string) error {
 	r := newSoleRun(t, 2, 2, 5)
 	c := r.c
 	if plant != nil {
 		plant(r.a)
 		c.planted = true
+	}
+	if name != "" {
+		c.conformBegin()
 	}
 	ch := chunkIn(pg0, 1, 0)
 	x := bytes.Repeat([]byte{0x11}, core.BlockSize)
@@ -46,6 +49,7 @@ func lastSourceRun(t *testing.T, plant func(*authority), strict bool) error {
 		t.Fatalf("the second member went with one leaving: members %v", ms)
 	}
 	r.back(d1)
+	r.publish()
 	r.back(d2)
 	for n := range c.reps {
 		c.reps[n].plant.noRecovery = false
@@ -60,23 +64,29 @@ func lastSourceRun(t *testing.T, plant func(*authority), strict bool) error {
 	if ms = r.members(); len(ms) != 2 || slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == d2 }) {
 		t.Fatalf("the recovered report left members %v", ms)
 	}
+	if name != "" {
+		conformWrite(t, name, c)
+	}
 	return nil
 }
 
 // The stale Stay: disk 2 is refilled and returns, lacking Y, acknowledged on disk 1 and on the refill member, which lists the chunk. Disk 1 goes and stays out for refill_after, and the leaving disk 2 takes its place: disk 1 stays, leaving, the only source of Y.
 func TestAStayKeepsTheLastSource(t *testing.T) {
-	if err := staySourceRun(t, nil); err != nil {
+	if err := staySourceRun(t, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// staySourceRun runs that scenario under plant, if any, and returns what the simulator's invariants find.
-func staySourceRun(t *testing.T, plant func(*authority)) error {
+// staySourceRun runs that scenario under plant, if any, keeping its conformance trace if named, and returns what the simulator's invariants find.
+func staySourceRun(t *testing.T, plant func(*authority), name string) error {
 	r := newSoleRun(t, 2, 2, 5)
 	c := r.c
 	if plant != nil {
 		plant(r.a)
 		c.planted = true
+	}
+	if name != "" {
+		c.conformBegin()
 	}
 	ch := chunkIn(pg0, 1, 0)
 	x := bytes.Repeat([]byte{0x11}, core.BlockSize)
@@ -103,6 +113,9 @@ func staySourceRun(t *testing.T, plant func(*authority)) error {
 	}
 	if ms = r.members(); !slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == d1 && m.Leaving }) {
 		t.Fatalf("members %v: disk %d leaving expected", ms, d1)
+	}
+	if name != "" {
+		conformWrite(t, name, c)
 	}
 	return nil
 }

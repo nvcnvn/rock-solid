@@ -732,10 +732,10 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 		}
 	}
 	soleHolder := func(a *authority) { a.plant.refillSoleHolder = true }
-	if err := lastSourceRun(t, soleHolder, false); err == nil || !strings.Contains(err.Error(), invStranded) {
+	if err := lastSourceRun(t, soleHolder, false, ""); err == nil || !strings.Contains(err.Error(), invStranded) {
 		t.Errorf("a refill that deletes a member merely down: %v", err)
 	}
-	if err := staySourceRun(t, soleHolder); err == nil || !strings.Contains(err.Error(), invStranded) {
+	if err := staySourceRun(t, soleHolder, ""); err == nil || !strings.Contains(err.Error(), invStranded) {
 		t.Errorf("a Stay that deletes a member merely down: %v", err)
 	}
 }

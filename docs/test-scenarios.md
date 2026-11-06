@@ -4056,6 +4056,8 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | `scripted-clean` | 12 | passes | 1 |
 | `scripted-primary-change` | 35 | passes | 1 |
 | `scripted-lone-copy` | 41 | passes | 1 |
+| `scripted-refill` | 68 | passes: a member merely down refilled as an `Add`, the next waiting, a recovered report ending it | 1 |
+| `scripted-stay` | 84 | passes: a `Stay` that keeps a member merely down as the leaving one | 1 |
 | 39 seeds | 308 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 3 to 207 |
 | `primaries-2` | 517 | no verdict in 400 s and 2 GB: one crash leaves 26 `mayfail` lines, each a free choice, and `-dfid` reached level 307 of 519 in 280 s at 319,000 states | 400 |
 
@@ -4074,6 +4076,8 @@ that passed before discrepancy 12 again with that path removed:
 | `GoneRefuses` | 8, 12, 13, 15, 16, 19, 33, 35, the seeds with a `gone` line | |
 
 Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half.
+
+`refillSoleHolder` is not in `conformPlants`: the primary-change run is too short for a member merely down to go missing, so a refill or a `Stay` of one appears only in `scripted-refill` and `scripted-stay`, and `TestPlantedPeeringBugsBreakTheOracle` breaks the rule through the simulator's invariant.
 
 Each run ends with what its passing traces covered, and each trace's rows stay in its directory's
 `cover` file. TLC prints the behavior a trace passed by, and `cover` in `scripts/conform.sh` reads it: a
@@ -4153,7 +4157,7 @@ Seeds 40 to 339 at 150 s each: 260 passed at aa05106, and the 40 that did not we
 | Outcome | Seeds | Read |
 | --- | --- | --- |
 | Pass | 272 of 300 | |
-| No verdict at 150 s | 51, 87, 117, 118, 127, 133, 148, 195, 199, 221, 256, 265, 267, 291, 316, 333 | 267 at 300 s |
+| No verdict at 150 s | 51, 87, 117, 118, 127, 133, 148, 195, 199, 221, 256, 265, 267, 291, 316, 333 | 267 at 300 s, and at 400 s stops at line 412, a `peer`, in about 355 s, unread |
 | `peer` | 80, 110, 123, 159, 175, 176, 191, 239 | 110 is discrepancy 17; 191 passes the `order` that stopped it, discrepancy 14; the rest unread |
 | `ask` | 205, 313, 327 | 205 is discrepancy 15; the rest unread |
 | `plan` | 154 | Discrepancy 16 |
