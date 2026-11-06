@@ -199,17 +199,18 @@ func TestReservations(t *testing.T) {
 func TestStuck(t *testing.T) {
 	var c Conditions
 	pgs := []Copying{{PG: 7, Since: 1_000}}
-	if c.Watch(1_000+StuckAfter-1, pgs); len(c.Stuck) != 0 {
+	tbl := &PoolTable{PGs: make([]PGEntry, 8)}
+	if c.Watch(1_000+StuckAfter-1, pgs, tbl); len(c.Stuck) != 0 {
 		t.Fatalf("Stuck %v before stuck_after", c.Stuck)
 	}
-	if c.Watch(1_000+StuckAfter, pgs); !slices.Equal(c.Stuck, []uint32{7}) {
+	if c.Watch(1_000+StuckAfter, pgs, tbl); !slices.Equal(c.Stuck, []uint32{7}) {
 		t.Fatalf("Stuck %v after stuck_after", c.Stuck)
 	}
 	pgs[0].Since = 1_000 + StuckAfter
-	if c.Watch(1_000+StuckAfter+1, pgs); len(c.Stuck) != 0 {
+	if c.Watch(1_000+StuckAfter+1, pgs, tbl); len(c.Stuck) != 0 {
 		t.Fatalf("Stuck %v once the PG copies again", c.Stuck)
 	}
-	if c.Watch(10*StuckAfter, nil); len(c.Stuck) != 0 {
+	if c.Watch(10*StuckAfter, nil, tbl); len(c.Stuck) != 0 {
 		t.Fatalf("Stuck %v once the PG has nothing left to copy", c.Stuck)
 	}
 }

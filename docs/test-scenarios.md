@@ -4427,6 +4427,7 @@ The first refused write landing within 0.3% of available is a fill-based check. 
 | `rep3` on three nodes of 2 × 2 TB, holding 1.7 TB, then 2.0 TB | None, then `CannotReprotect` naming one disk (reprotectable 1.8 TB) |
 | `rep3` on three nodes, one node rebooting | No figure or condition changes: its disks keep their shares at their last fills |
 | A PG with a missing member that copies nothing for 60 s on `ctx.Now` | `Stuck`, naming the PG; it clears when the PG copies again or has nothing left to copy |
+| A PG stuck or with unfound chunks | `Blocked` names the PG, how many chunks its primary's last peering left unfound, and its down members, a leaving one too, none if no disk is left to return; a stopped PG, with no primary to count them, shows 0 chunks (`TestABlockedPGNamesItsDisks`, `TestBlockedNamesDownMembers`) |
 
 **Confirmation.** `rock-solid pool create` and disk changes print, per domain, cᵢ, its load at balance min(cᵢ, a·B) and its stranded room. They ask for confirmation when some domain has 2 × stranded room > cᵢ, and record f as the confirmed fraction.
 

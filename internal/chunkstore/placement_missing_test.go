@@ -152,11 +152,11 @@ func TestRefillWithNoEligibleDisk(t *testing.T) {
 		copying = append(copying, Copying{PG: uint32(i), Since: start})
 	}
 	var c Conditions
-	c.Watch(start+StuckAfter-1, copying)
+	c.Watch(start+StuckAfter-1, copying, l.pools())
 	if len(c.Stuck) != 0 {
 		t.Fatal("Stuck before 60 s")
 	}
-	c.Watch(start+StuckAfter, copying)
+	c.Watch(start+StuckAfter, copying, l.pools())
 	f := l.figures()
 	c.Update(&f, false)
 	if len(c.Stuck) != 128 || c.CannotReprotect {

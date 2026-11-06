@@ -503,6 +503,21 @@ func (l *lead) isUnfound(c core.ChunkID) bool {
 	return ok && k.unfound
 }
 
+// Unfound counts the chunks of pg the last peering of this primary found no member to serve.
+func (r *Replica) Unfound(pg core.PGID) uint32 {
+	n := uint32(0)
+	for i := range r.leads {
+		if r.leads[i].pg == pg {
+			for _, k := range r.leads[i].kept {
+				if k.unfound {
+					n++
+				}
+			}
+		}
+	}
+	return n
+}
+
 // lacks reports whether the primary's copy of chunk c may differ from the version the lead's last peering kept, which a partial-block write waits for.
 func (l *lead) lacks(c core.ChunkID) bool {
 	k, ok := l.decision(c)
