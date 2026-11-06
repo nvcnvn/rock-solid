@@ -75,10 +75,26 @@ RowMatches(r) ==
             /\ ivs[r.p][y.iv].ml = y.ml
             /\ \A j \in 1..Len(y.mem) : ivs[r.p][y.iv].st[y.mem[j]] = y.marks[j]
 
+\* A recovered line a stutter holds, the node's own copy of a recovery write it
+\* ordered as primary of l.iv: the version is that decision's kept one or one of
+\* the interval, and the source an up member of the interval, none only for a
+\* chunk nothing was kept of.
+OwnRecovery(l) ==
+    \E x \in dec :
+        /\ x.p = ChunkPG[l.c] /\ x.k = l.iv /\ x.n = l.n
+        /\ \/ l.v = x.kept[l.c]
+           \/ IvOfV(l.v) = l.iv /\ \E r \in vers : r.c = l.c /\ r.v = l.v
+        /\ IF x.kept[l.c] = 0 THEN l.s = 0 ELSE l.s \in UpIn(x.p, l.iv)
+
 \* A primary's gated recovery write settled by a later interval's peering of the
 \* same primary, which listed the chunk again: its entry stays, and Recover did not
 \* happen for it.
-RecoveryOver(l) == \E a \in act : a.p = ChunkPG[l.c] /\ a.k > l.iv
+RecoveryOver(l) ==
+    /\ OwnRecovery(l)
+    /\ l.l = l.n
+    /\ \E a \in act, y \in dec :
+         /\ a.p = ChunkPG[l.c] /\ a.k > l.iv
+         /\ y.p = a.p /\ y.k = a.k /\ y.r = a.r /\ y.n = l.n
 
 RecoverLine(l) ==
     /\ (l.s = 0) = (miss[ddisk[l.n]][l.c] = 0)
@@ -126,9 +142,11 @@ Line(l) ==
        /\ IF RecoveryOver(l)
           THEN UNCHANGED vars
           ELSE IF miss[ddisk[l.n]][l.c] = NoMiss
-          THEN /\ \E d \in Disk : miss[d][l.c] # NoMiss \/ [c |-> l.c, v |-> l.v] \in healed
+          THEN /\ OwnRecovery(l)
+               /\ \E d \in Disk : miss[d][l.c] # NoMiss \/ [c |-> l.c, v |-> l.v] \in healed
                /\ UNCHANGED vars
-          ELSE /\ \/ l.v = miss[ddisk[l.n]][l.c]
+          ELSE /\ l.iv = IvAt(l.l, ChunkPG[l.c])
+               /\ \/ l.v = miss[ddisk[l.n]][l.c]
                   \/ IvOfV(l.v) = IvAt(l.l, ChunkPG[l.c]) /\ l.v <= pv[l.l][l.c]
                /\ RecoverLine(l)
     \/ /\ l.k = "mayrecover"
