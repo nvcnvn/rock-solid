@@ -32,7 +32,7 @@ data() {
 	dir=$tmp/check/$name
 	mkdir -p "$dir"
 	if ! "$tmp/tracedata" "$1" >"$dir/data.new"; then
-		rm -f "$dir/data.new"
+		rm -f "$dir/data.new" "$dir/verdict"
 		return 1
 	fi
 }

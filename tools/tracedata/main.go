@@ -489,6 +489,7 @@ func (g *gen) run(recs []trace.Record) {
 		case trace.OutAccepted:
 			g.memberOpen[n] = append(g.memberOpen[n], [2]uint64{r.Fields[0], r.Fields[1]})
 		case trace.OutMemberFail:
+			g.recovering[n] = slices.DeleteFunc(g.recovering[n], func(x [3]uint64) bool { return x[0] == r.Fields[0] })
 			kind := "mfail"
 			if r.Fields[2] != 0 {
 				kind = "gone"
