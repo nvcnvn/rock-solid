@@ -168,7 +168,7 @@ func reportDecidedTrace(t *testing.T, plant bool) error {
 	return c.found
 }
 
-// settleChainTrace is the trace of a returning primary settling its pending versions by number: primary 2, cut off from disk 3, orders W as 1.1; interval 2, handed to disks 1 and 3 alone, makes disk 3 primary without disk 2 and drops W, and W2 is acknowledged there as 2.1; interval 3 makes disk 2 primary again, and its peering keeps 2.1, above W's 1.1 by number but not resting on it.
+// settleChainTrace is the trace of a returning primary settling its pending versions by number: primary 2, cut off from disk 3, orders W as 1.1; interval 2, handed to disks 1 and 3 alone, makes disk 3 primary without disk 2 and drops W, and W2 is acknowledged there as 2.1; interval 3 makes disk 2 primary again beside both, and its peering keeps 2.1, on two copies, above W's 1.1 by number but not resting on it.
 func settleChainTrace(t *testing.T, plant bool) error {
 	c := newRCluster(t, pg2Table())
 	c.storePlants.settleByNumber = plant
@@ -189,7 +189,7 @@ func settleChainTrace(t *testing.T, plant bool) error {
 		t.Fatalf("W2 answered %+v", rp)
 	}
 	c.s.Heal(1, 2)
-	c.hand(c.next(members(Member{Disk: 2}, Member{Disk: 3})), 0, 1, 2)
+	c.hand(c.next(members(Member{Disk: 2}, Member{Disk: 3}, Member{Disk: 1})), 0, 1, 2)
 	c.settle()
 	if rp, ok := c.cl.replies[w]; !ok || rp.Status == StatusOK && c.found == nil {
 		t.Fatalf("W answered %+v, %v", rp, ok)

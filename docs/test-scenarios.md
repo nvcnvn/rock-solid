@@ -3432,7 +3432,7 @@ on that log fails.
 `ci-peering`, `ci-restarts`, `ci-restarts-moved`, `ci-edits`, `ci-tears`, `ci-faults` and `deep-peering` check every property but 2 and 10, since
 the Raft group and lease time need clocks, 13, since their plans make no move, and 15 and 16, which
 only `ci-asks` checks; `deep-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
-and 16, on its small plans.
+and 16 and the action property 17, on its small plans.
 `ci-moves` checks the same and property 13, an action property checked at each removal. Its plans
 send only the daemon's one write W, which keeps it well within its 5 minutes: the replica's move
 with the successor's writes and a process restart, run alone, passes property 13 at 2.3 million
@@ -3458,6 +3458,7 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 14 | A primary serving a PG's reads, including one that keeps serving while it re-peers, returns from a chunk it lists nothing of every acknowledged write's bytes and no dropped version's: each block of what its index maps is at the newest acknowledged version that wrote it, or above, at no version a later activated decision dropped, and, in `ci-faults`, at a version acknowledged or kept. A read of a listed chunk is refused | `ReadsAcked`, `ReadsMapped` | "every read returns exactly the bytes of the acknowledged writes and punches applied in version order" (the byte-range oracle), registered by Invariant checker (phase 1) |
 | 15 | A primary whose interval a failed version ended asks for the next in the end: with every step that is due taken in time, nothing of its PG waits for ever | `IntervalEnds` | None registered: `TestAFailureBelowACommittedVersionStillAsks` covers it as a regression test, until [Plants for the epoch model's new rules](build-checklist.md#phase-4-embedded-metastore) registers one |
 | 16 | Every client gets an answer: no version stays unanswered for ever | `AllAnswered` | None registered: `TestADemotedPrimaryMapsItsPendingVersionsAsAMember` covers it as a regression test, until the same item registers one |
+| 17 | A version is acknowledged only on at least `min_live` members of the interval that answers it, its own or the one activating, counted by what their logs hold, a member in `maintenance` counting as it does toward `min_live`. An action property, checked at each acknowledgment | `AckedOnMinLive` | "no write is acknowledged on fewer than min_live disks, a member in maintenance counting as one", registered by `epochChecks` |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
 find a violation of the named property, which is never the property that only restates the removed
@@ -3499,6 +3500,7 @@ under fairness, as `deep-peering` does, on the restart plan alone, and those for
 | A primary serves reads in a new interval though another primary led the PG since | 14 | PG 2's primary 2 is put in `maintenance`; node 3 acknowledges W′ as 2.1; 2 comes back as primary and serves before it peers, without 2.1 and listing nothing |
 | A primary whose interval a failed version ended never asks for the next | 15 | 1.1 fails at a member: the primary orders nothing more and no table starts the next interval, so nothing resolves what failed |
 | A primary refuses only the failed version, not the chunk's later ones | 15 | 1.1 fails at member 3 with 1.2 in flight; 1.2 stays unanswered, as 3 will log nothing above 1.1, so something of the PG waits for ever and the primary never asks. The wait is the model's: in the code 3 answers 1.2 with a refusal, which ends it, and the model's refusal costs a fault |
+| A primary answers a kept version OK at activation however few copies its chunk has | 17 | PG 2's replica goes down and its primary, 2, orders W on its own log; an empty disk replaces the replica, peering keeps W, since the new member was not live in W's interval, and lists W for it, and the primary answers OK on one copy |
 | A primary serves a version a member refused, before peering settles it | 14 | 1.1 is ordered, member 2 refuses it, and primary 1 serves it; `ReadsAcked` passes, as nothing was acknowledged and no decision dropped 1.1, and `ReadsMapped` does not |
 | A node that no longer leads a PG keeps its pending versions unanswered | 16 | The primary moves away with 1.1 pending and the new primary's member adopts the interval before it logs 1.1; the old primary's client waits for ever |
 | A member holding a version above the kept one is left off the missing list | 14 | PG 2's primary 2 orders 1.1, still pending, moves away and back, skipping the table between; peering reaches node 3, keeps nothing and drops 1.1, and node 2 serves 1.1 listing nothing. No acknowledged write is at stake: only the clause on dropped versions catches it |
@@ -4046,6 +4048,7 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | --- | --- | --- | --- |
 | `scripted-clean` | 12 | passes | 1 |
 | `scripted-primary-change` | 35 | passes | 1 |
+| `scripted-lone-copy` | 41 | passes | 1 |
 | 39 seeds | 308 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 3 to 207 |
 | `primaries-2` | 517 | no verdict in 400 s and 2 GB: one crash leaves 26 `mayfail` lines, each a free choice, and `-dfid` reached level 307 of 519 in 280 s at 319,000 states | 400 |
 
@@ -4124,6 +4127,7 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 
 | Plant | Rule | Fired | Rejected | Passed | Caught, clean | Result | Guard |
 | --- | --- | --- | --- | --- | --- | --- | --- |
+| `ackOnLoneCopy` | `neg-ack-on-lone-copy` | 6 | 6 | 0 | 3, 3 | `committed` 3, the OK `Activated` withholds; `peer` 3, later. Seed 24's is read to the rule: the spec accepts `committed` for 3.8 only by delivering it to disk 3 (`maydeliver`, trace line 490), then line 695 reports disk 3 at whole 3.7, which no step allows. The other two are not read. The seeds' refusals over-refuse: `copies` counts what the decision proves, not the logs, which can be on disks that list the chunk or have left, as on seed 24, where 3.8 was on three logs, disks 1, 2 and 4, and the decision listed 1 and 4, so `copies` was 1. Each refusal sends the write again, and each resend can reorder it against another writer's; `scripted-lone-copy` takes the same rule with the write on one disk | `committed`: the version has no `ackd` |
 | `activateEarly` | `neg-activate-before-durable` | 38 | 38 | 0 | 38, 37 | `persisted` 26, `activate` 12 | A first persist after `Activate`, or `Activate` before every `Persisted` |
 | `mergeWhileLacking` | `neg-merge-before-kept` | 16 | 16 | 0 | 16, 14 | `order` | `Order`: `miss[own][c] = NoMiss` or the decision's `img` |
 | `mergeOnDropped` | `neg-merge-on-dropped` | 9 | 9 | 0 | 9, 9 | `order` | `Order`: the chunk is listed and not in `img` |
@@ -4151,7 +4155,7 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `recoverSelfOnly` | none | 37 | 12 | 24 | 11, 0 | `reported` 11, the plant's report with a member still listing; `peer` 1. One gives no verdict | `ReportRecovered`: lists empty |
 | `settleSubset` | none | 4 | 0 | 4 | 0, 0 | Too loose: `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record | |
 
-Traces can fail is shown on these seeds for 14 of the 26 rules, 9 of them clean: `activateEarly`, `mergeWhileLacking`,
+Traces can fail is shown on these seeds for 15 of the 27 rules, 10 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
 `mergeOnDropped`, `editKeepsInterval`, `relistNever`, `peerInOldInterval`, `oldReport`, `recoverFromListed` and
 `clearNoSource`, and for 2 more, `sameMembers` and `keepID`, running on over 30. Open: `coverAtRead`,
 which needs a record of the blocks a recovery write leaves out; `neverAsk`, an omission no line can name;
@@ -4904,6 +4908,18 @@ its acknowledgments and heartbeats.
 `internal/lease` for the leases, `internal/chunkstore` for peering. Constants for every lease case
 below and in the other sections: `primary_lease` 4 s (4,000,000 ticks), `lease_drift` 1%, a
 heartbeat every 1 s, `rate_window` 10 s, `rate_gap` 100 ms, `max_margin` 50%, 1 tick = 1 µs. k.n is version (interval k, counter n).
+
+**A kept version's client at activation**
+
+- `rep3`, `min_live` 2, disks 1, 2, 3 holding X. Disk 2 drops out. Disk 1 logs W and sends it to disk 3, which is cut off before logging. Disk 2 returns as disk 3 is marked down. Disk 1 peers with disk 2: W is kept and listed for disk 2, disk 1 is its one copy, and the client is refused. The resend lands on disks 1 and 2 and is answered OK. Once recovery has made disk 2 clean, disk 1 is lost for good: X and W read from the others.
+- The same with a refill in place of the returning disk, on `rep2` and `rep3`: every other member is cut off, the refill brings the PG back to `min_live`, W is refused, its resend reaches both, recovery makes the refill clean, and a second refill that removes the first disk leaves W readable.
+- `rep3`, `min_live` 2, W on disks 1 and 2 when disk 3 goes down: the client hears OK at activation, with two copies.
+- `rep2`, `min_live` 2, the second member in `maintenance`: the primary's one copy and the member in `maintenance` make two, and the client hears OK, as it would on a write in that interval.
+- A `rep3` pool with `min_live` 1: one copy is enough and the client hears OK, unless the primary lists the chunk: it then counts no copy, so its client is refused and sends the write again.
+- `rep1`: W has no member to wait for, so it commits on its own log, and the client hears OK across an interval that ends under it.
+- A version that committed on every member it was sent to, behind a failed version: it keeps its OK at activation, whatever the count.
+- A refused version whose one holder then dies: the chunk reads unfound, X below it included, though X was acknowledged and is whole on the other two disks, and reads again only when the disk returns. Were it lost for good, X would stay unfound with no operator path.
+- The limit of an OK on a member that lists the chunk, with no refusal and recovery held back: W1 lands on disks 1 and 2, disk 2 goes down, disk 3 returns listing the chunk, and W2 is answered OK on disks 1 and 3, where disk 1 is its one clean copy. Disk 1 is lost and disk 2 returns: the chunk reads unfound though disk 3 logged W2. W2 reads once disk 1 returns.
 
 **Serving reads**
 

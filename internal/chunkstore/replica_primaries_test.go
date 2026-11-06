@@ -695,6 +695,7 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 		seed uint64
 		peerPlant
 	}{
+		{"acknowledged on a lone copy", 291, peerPlant{invAckCopies, func(r *primaryRun) { r.c.replicaPlants.ackOnLoneCopy = true }}},
 		{"M7", 169, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }}},
 		{"M8", 15, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking = true }}},
 		{"a member holding a version in part left off the list", 148, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.unlistTorn = true }}},

@@ -110,11 +110,52 @@ func TestConformScriptedPrimaryChange(t *testing.T) {
 	conformWrite(t, "scripted-primary-change", c)
 }
 
+// loneCopyTrace is the trace of a primary that keeps leading with W on its log alone: disk 2 down, W on its way to disk 3 when disk 3 goes too and disk 2 comes back. It reports W's answer.
+func loneCopyTrace(t *testing.T, plant bool) (*rcluster, Response) {
+	c := newRCluster(t, rtable(1, 2))
+	c.replicaPlants.ackOnLoneCopy = plant
+	for _, r := range c.reps {
+		r.plant = c.replicaPlants
+	}
+	c.conformBegin()
+	ch := chunkIn(pg0, 1, 0)
+	block := make([]byte, core.BlockSize)
+	c.until(c.write(pg0, ch, 0, block))
+	c.settle()
+	c.publish(c.next(members(Member{Disk: 1}, Member{Disk: 2, Mark: MarkDown}, Member{Disk: 3})), true)
+	c.settle()
+	c.s.Partition(0, 2, false)
+	block[0] = 1
+	w := c.write(pg0, ch, 0, block)
+	c.runFor(5_000)
+	c.publish(c.next(members(Member{Disk: 1}, Member{Disk: 2, Mark: MarkDown}, Member{Disk: 3, Mark: MarkDown})), false)
+	c.publish(c.next(members(Member{Disk: 1}, Member{Disk: 2}, Member{Disk: 3, Mark: MarkDown})), false)
+	c.until(w)
+	rp := c.reply(w)
+	c.s.Heal(0, 2)
+	c.settle()
+	return c, rp
+}
+
+// A kept version with too few copies is refused at activation, its client resends, and the spec takes the whole run.
+func TestConformScriptedLoneCopy(t *testing.T) {
+	c, rp := loneCopyTrace(t, false)
+	if rp.Status != StatusRefused {
+		t.Fatalf("W answered %+v", rp)
+	}
+	block := make([]byte, core.BlockSize)
+	block[0] = 1
+	c.until(c.write(pg0, chunkIn(pg0, 1, 0), 0, block))
+	c.settle()
+	conformWrite(t, "scripted-lone-copy", c)
+}
+
 // conformPlants are the plants of the rule map and of the oracle test that scripts/conform.sh runs in the primary-change run.
 var conformPlants = []struct {
 	name string
 	set  func(r *primaryRun)
 }{
+	{"ackOnLoneCopy", func(r *primaryRun) { r.c.replicaPlants.ackOnLoneCopy = true }},
 	{"oldReport", func(r *primaryRun) { r.a.plant.oldReport = true }},
 	{"activateEarly", func(r *primaryRun) { r.c.replicaPlants.activateEarly = true }},
 	{"sameMembers", func(r *primaryRun) { r.c.replicaPlants.sameMembers = true }},

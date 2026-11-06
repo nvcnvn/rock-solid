@@ -406,8 +406,10 @@ type replicaPlants struct {
 	reorderAfterOther bool
 	// admitPastLimit orders a plain write that adds live data past a member's write_limit.
 	admitPastLimit bool
-	// commitOnOwnLog commits a version once the primary's own log holds it, before its members do.
+	// commitOnOwnLog commits a version once the primary's own log holds it, before its members do;
+	// ackOnLoneCopy answers a kept version OK at activation however few copies its chunk has.
 	commitOnOwnLog bool
+	ackOnLoneCopy  bool
 	// recoverSelfOnly has the primary recover only its own copies, never a member's;
 	// recoverFromListed has a primary that lacks a chunk serve its recovery; clearNoSource clears a
 	// list with an empty image when no member can serve the chunk; goneWhileUp refuses one version
@@ -1321,6 +1323,20 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 		r.release(ctx, j)
 	}
 	r.dropWaiting(ctx, out)
+}
+
+// refuseWaiting refuses the clients of chunk c's ordered versions that have not committed; the store keeps them for peering to settle. A version answered or committed by every member it was sent to is left alone, and a recovery write has no client.
+func (r *Replica) refuseWaiting(ctx *core.Context, c core.ChunkID, ref Response, out *ReplicaOutput) {
+	for j := len(r.vers) - 1; j >= 0; j-- {
+		v := &r.vers[j]
+		if v.u.Chunk != c || !v.ordered || v.recover || v.done || v.commit {
+			continue
+		}
+		v.done = true
+		r.takeReq(v.req)
+		r.answerClient(ctx, v, ref, out)
+		r.release(ctx, j)
+	}
 }
 
 // dropWaiting refuses the client writes and punches still waiting in the store, for a base read or behind one, whose PG's interval has ended since they were taken, and has the store drop them, so none is ordered in an interval that ended. One the store has already ordered or answered is left to that answer.
