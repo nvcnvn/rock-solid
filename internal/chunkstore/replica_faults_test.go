@@ -720,6 +720,9 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 	c.detect(f.a)
 	watchEpochs(c, &f.a.rec)
 	c.onPass = f.pass
+	if soleWatch != nil {
+		soleWatch.watch(c, func(id core.RequestID) (core.ChunkID, bool) { op, ok := f.ops[id]; return op.c, ok })
+	}
 	c.cl.lost = func(peer core.NodeID) {
 		for id, to := range f.to {
 			if _, ok := c.cl.replies[id]; !ok && to == int(peer.Node) {

@@ -616,6 +616,9 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 		c.reps[n].plant, c.reps[n].Store().plant = c.replicaPlants, c.storePlants
 	}
 	c.onPass = r.pass
+	if soleWatch != nil {
+		soleWatch.watch(c, func(id core.RequestID) (core.ChunkID, bool) { op, ok := r.ops[id]; return op.c, ok })
+	}
 	c.onFormat = r.formatted
 	watchEpochs(c, &a.rec)
 	x := c.record()
