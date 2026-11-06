@@ -115,6 +115,7 @@ var conformPlants = []struct {
 	name string
 	set  func(r *primaryRun)
 }{
+	{"ackOnLoneCopy", func(r *primaryRun) { r.c.replicaPlants.ackOnLoneCopy = true }},
 	{"oldReport", func(r *primaryRun) { r.a.plant.oldReport = true }},
 	{"activateEarly", func(r *primaryRun) { r.c.replicaPlants.activateEarly = true }},
 	{"sameMembers", func(r *primaryRun) { r.c.replicaPlants.sameMembers = true }},
