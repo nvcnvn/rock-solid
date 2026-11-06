@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -14,6 +15,7 @@ type soleRun struct {
 	c        *rcluster
 	a        *authority
 	isolated map[uint32]bool
+	acked    map[core.ChunkID]uint64
 }
 
 func newSoleRun(t *testing.T, replicas, minLive, disks int) *soleRun {
@@ -27,7 +29,42 @@ func newSoleRun(t *testing.T, replicas, minLive, disks int) *soleRun {
 	var empty Table
 	tbl, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	c := newSoleCluster(t, tbl, disks)
-	return &soleRun{c: c, a: a, isolated: map[uint32]bool{}}
+	r := &soleRun{c: c, a: a, isolated: map[uint32]bool{}, acked: map[core.ChunkID]uint64{}}
+	c.inv.Register(invStranded, func() error {
+		_, e := c.table.entry(pg0)
+		for ch, v := range r.acked {
+			if err := c.stranded(e, ch, v); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return r
+}
+
+// stranded reports a disk that can serve version v of ch, holding it and listing nothing of it, in a PG none of whose members in e can, up or down; a crashed member says nothing.
+func (c *rcluster) stranded(e *PGEntry, ch core.ChunkID, v uint64) error {
+	held := uint32(0)
+	for n := range c.reps {
+		member := slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == c.ids[n] })
+		idx := c.reps[n].Store().Index()
+		if idx == nil {
+			if member {
+				return nil
+			}
+			continue
+		}
+		if x, _ := idx.Chunk(testPool, ch); x.ListedIn == 0 && x.Whole >= v {
+			if member {
+				return nil
+			}
+			held = c.ids[n]
+		}
+	}
+	if held != 0 {
+		return fmt.Errorf("%#x of %v is on disk %d and on no member of %v", v, ch, held, e.Members)
+	}
+	return nil
 }
 
 // newSoleCluster starts a node per disk under tbl, the disks tbl leaves out as sole members of extra PGs below min_live, which the next table drops.
@@ -209,7 +246,7 @@ func TestAWriteAcknowledgedAtMinLiveSurvivesTheLossOfOneDisk(t *testing.T) {
 	}
 }
 
-// The model's counterexample on real placement: every other member is cut off while W is on its way, so W is on the primary alone; the PG below min_live waits degraded_refill_after, and a refill brings it back to min_live with a member that lists W. Peering keeps W but its client is refused. The resend lands on both and recovery lets the refill serve it, so when the primary is cut off and a second refill removes it, W reads from the member left.
+// The model's counterexample on real placement: every other member is cut off while W is on its way, so W is on the primary alone; the PG below min_live waits degraded_refill_after, and a refill brings it back to min_live with a member that lists W. Peering keeps W but its client is refused. The resend lands on both and recovery lets the refill serve it, so when the primary is cut off, W reads from the member left: on rep2 a second refill removes the primary on the recovered report, on rep3 the third member, down, holds that report back and the primary stays a member.
 func TestARefillKeepsTheOnlyCopyOfAnAcknowledgedWrite(t *testing.T) {
 	for _, shape := range []struct {
 		name              string
@@ -255,7 +292,7 @@ func TestARefillKeepsTheOnlyCopyOfAnAcknowledgedWrite(t *testing.T) {
 				r.back(d)
 			}
 			r.tick(5_000_000)
-			if slices.ContainsFunc(r.members(), func(m Member) bool { return m.Disk == first }) {
+			if shape.replicas == 2 && slices.ContainsFunc(r.members(), func(m Member) bool { return m.Disk == first }) {
 				t.Fatalf("disk %d is a member again: %v", first, r.members())
 			}
 			if grp, got := r.read(ch); grp.Status != StatusOK || !bytes.Equal(got, w) {

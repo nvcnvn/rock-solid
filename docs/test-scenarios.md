@@ -4728,6 +4728,29 @@ and `rep3`, split, then a disk added. Once a computation proposes no move and re
 recovered, the next one, every report in, changes no entry. Counting only no move and no leaving
 member settled every run while the split's PGs, not yet reported, could not move.
 
+**A refill keeps a possible last source** (`refill_leaving_test.go`; property 18 of the
+[Epoch change model](#epoch-change-model), `ci-refills`, `neg-refill-sole-holder`,
+`neg-stay-sole-holder`)
+
+- A member merely down, refilled, stays as the PG's leaving member beside its replacement, one
+  member wider, an hour on as at once; the recovered report for the current interval removes it, and
+  so does its disk leaving the pool (`TestARefilledMemberLeaves`).
+- A second member missing while one leaves stays a member and is not replaced, an hour on, its PG
+  below `min_live` here. Once either disk leaves the pool the entry moves on: the leaving one goes
+  and the waiting one leaves beside a new member, or the waiting one is replaced
+  (`TestASecondMissingMemberWaits`).
+- A leaving member that is up takes the place of a member merely down, which leaves in turn
+  (`TestStayKeepsTheMissingMember`).
+- Rep2, X on both disks, no write in flight: one disk out past `degraded_refill_after`, then the
+  other before the refill member copied X. Both come back whole, X reads OK, and the recovered report
+  takes the PG back to its width. Copying stays off for the outage with the `noRecovery` plant, since
+  in the simulator it finishes in under a tick (`TestARefillKeepsTheLastSourceOfAPG`).
+- Rep2: Y acknowledged on one old disk and on the refill member, which lists the chunk; the other old
+  disk returns lacking Y; the disk with Y goes for `refill_after` and the leaving disk takes its
+  place. The disk with Y stays, leaving (`TestAStayKeepsTheLastSource`).
+- Invariant: an acknowledged write a disk can serve, a member can serve. `refillSoleHolder`, which
+  deletes a member merely down, breaks it in both runs (`TestPlantedPeeringBugsBreakTheOracle`).
+
 **Errors**
 
 - Refill that finds no eligible disk never panics, keeps the failure-domain rule, and leaves the

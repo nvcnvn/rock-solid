@@ -38,7 +38,7 @@ epoch/neg-reads-before-peer-messages	sim.ReadsFirst	TestPlantedBugsBreakTheirTra
 epoch/neg-recovery-covers-at-read	chunkstore.coverAtRead	TestPlantedRecoveryBugBreaksTheFaultRun
 epoch/neg-recover-from-listed	chunkstore.recoverFromListed	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-recover-no-source	chunkstore.clearNoSource	TestPlantedPeeringBugsBreakTheOracle
-epoch/neg-refill-sole-holder	open	Spec conformance check
+epoch/neg-refill-sole-holder	chunkstore.refillSoleHolder	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-remove-before-recovered	chunkstore.removeOnActivation	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-reorder-after-other-primary	chunkstore.reorderAfterOther	TestPlantedBugsBreakTheirTraces
 epoch/neg-report-before-activate	chunkstore.reportDecided	TestPlantedPeeringBugsBreakTheOracle
@@ -47,7 +47,7 @@ epoch/neg-restart-same-interval	chunkstore.peerInOldInterval	TestPlantedPeeringB
 epoch/neg-step-half-drift	lease.halfStep	TestPlantedLeaseBugsBreakThePair
 epoch/neg-step-on-grants-only	lease.stepOnGrantsOnly	TestPlantedLeaseBugsBreakThePair
 epoch/neg-stay-keeps-interval	open	Spec conformance check
-epoch/neg-stay-sole-holder	open	Spec conformance check
+epoch/neg-stay-sole-holder	chunkstore.refillSoleHolder	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-stop-previous-only	chunkstore.stopPreviousOnly	TestPlantedBugsBreakTheirTraces
 epoch/neg-transfer-keeps-lease	open	MetaStore invariants
 epoch/neg-widen-past-two-drift	lease.widenLate	TestPlantedLeaseBugsBreakThePair
