@@ -380,12 +380,17 @@ MarkDisk(d, to) ==
                [ivs[p][Cur(p)] EXCEPT !.st[d] = to]])
     /\ UNCHANGED <<reqIv, reports, recd>>
 
-\* A refill replaces a member with another disk in one table. The model lets
-\* it replace any member, up or not, but a leaving one: that stays until a
-\* recovered report removes it, however long it is down.
+\* A refill replaces a member with another disk in one table only once the
+\* disk is gone. A member merely down may hold the last copy of a version, so
+\* its refill is an Add, which keeps it as the leaving member, and a second
+\* member waits while one is leaving. An up member replaced stands for an
+\* operator's edit, which the model lets take any member but a leaving one: that
+\* stays until a recovered report removes it, however long it is down. With
+\* RefillSoleHolder a refill deletes a member merely down.
 Replace(p, old, new) ==
     /\ old \in Mem(p, Cur(p))
     /\ old # ivs[p][Cur(p)].lv
+    /\ St(p, Cur(p), old) # "down" \/ dnode[old] = 0 \/ Bug("RefillSoleHolder")
     /\ new \notin Mem(p, Cur(p))
     /\ dnode[new] # 0
     /\ LET m == ivs[p][Cur(p)].mem
@@ -394,8 +399,8 @@ Replace(p, old, new) ==
             [ivs[p][Cur(p)] EXCEPT !.mem = [m EXCEPT ![j] = new], !.st[new] = "up"]])
     /\ UNCHANGED <<reqIv, reports, recd>>
 
-\* A move adds the new member and marks the old one leaving, so the PG is one
-\* member wider until Remove.
+\* A move, or the refill of a member merely down, adds the new member and marks
+\* the old one leaving, so the PG is one member wider until Remove.
 Add(p, old, new) ==
     /\ ivs[p][Cur(p)].lv = 0
     /\ old \in Mem(p, Cur(p))
@@ -417,12 +422,15 @@ Remove(p) ==
        /\ UNCHANGED <<reqIv, reports, recd>>
 
 \* A leaving member that is up takes the place of a missing member, one marked
-\* down or whose disk is gone, ending the move: the missing member goes and the
-\* leaving one is an ordinary member. With StayKeepsInterval the table keeps the
-\* interval.
+\* down or whose disk is gone, and is an ordinary member from then on. A member
+\* whose disk is gone goes, ending the move; one merely down may hold the last
+\* copy of a version, so it stays as the leaving member, or with
+\* RefillSoleHolder goes too. With StayKeepsInterval the table keeps the interval.
 Stay(p, out) ==
     LET x == ivs[p][Cur(p)]
-        y == [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # out), !.lv = 0]
+        y == IF dnode[out] = 0 \/ Bug("RefillSoleHolder")
+             THEN [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # out), !.lv = 0]
+             ELSE [x EXCEPT !.lv = out]
     IN /\ x.lv # 0
        /\ out \in Mem(p, Cur(p))
        /\ out # x.lv
@@ -1896,6 +1904,25 @@ RemovalKeepsCopies ==
             => \A c \in ChunksOf(p) : \A v \in AckedV(c) : \A d \in Range(x.mem) \ {x.lv} :
                  v \in dlog[d][c] /\ miss[d][c] = NoMiss]_vars
 
+\* 18. An acknowledged write is not stranded: if a disk that is not gone can
+\* serve all of a chunk's acknowledged writes, holding them and listing nothing
+\* of it, so can a member of its PG's current interval, up or down. That such a
+\* disk exists is not claimed: a holder that truly dies leaves none. Nor is a
+\* read that succeeds: a refused version peering keeps can sit above the
+\* acknowledged ones, and with its one holder dead the chunk stays unfound
+\* though a member holds them all.
+CanServe(d, c) ==
+    LET want == Content(c, UNION {Chain(c, v) : v \in AckedV(c)})
+        got == Content(c, dlog[d][c])
+    IN /\ dnode[d] # 0
+       /\ miss[d][c] = NoMiss
+       /\ \A b \in 1..Blocks[c] : got[b] >= want[b]
+
+NoStranded ==
+    \A c \in Chunk :
+       (AckedV(c) # {} /\ \E d \in Disk : CanServe(d, c))
+       => \E d \in Mem(ChunkPG[c], Cur(ChunkPG[c])) : CanServe(d, c)
+
 \* The versions of c a later activated decision does not rest on.
 Dropped(c) ==
     {r.v : r \in {y \in vers : y.c = c /\ \E x \in ActDecs :
@@ -2040,10 +2067,21 @@ MaintMerges == Plan(<<Mark(3, "maint"), Mark(3, "up"), Mark(2, "maint")>>, Parti
 LateReport == [Plan(<<Mark(3, "down"), Mark(3, "up")>>, <<>>, {}) EXCEPT !.s = 2]
 
 \* PG 2's replica down, its primary stopped below min_live, then an empty disk
-\* in its place: a write in flight is kept on the primary alone, and the primary
+\* beside it: a write in flight is kept on the primary alone, and the primary
 \* moves on from it.
-LoneCopy == Plan(<<Mark(3, "down"), Repl(2, 3, 1), Mark(2, "down"), Repl(2, 2, 3)>>, Session, {})
+LoneCopy == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down")>>, Session, {})
 LonePlans == {LoneCopy}
+\* The same with the second member refilled while the first leaves, which the
+\* rule forbids, and two writes, so one is acknowledged on the primary alone
+\* and a member that lists its chunk.
+LoneSwap == Plan(<<Mark(3, "down"), Repl(2, 3, 1), Mark(2, "down"), Repl(2, 2, 3)>>, Partial2, {})
+StrandPlans == {LoneSwap}
+\* ci-refills: a member refilled and removed; the other member down while it
+\* leaves and back; or the leaving member back in that member's place.
+RefillDone == Plan(<<Mark(3, "down"), AddM(2, 3, 1), RemoveM(2)>>, Partial2, {})
+RefillBack == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
+RefillStay == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(3, "up"), StayM(2, 2), RemoveM(2)>>, Partial2, {})
+RefillPlans == {RefillDone, RefillBack, RefillStay}
 
 \* ci-peering checks the plans with membership changes alone, but one;
 \* ci-restarts those with a restart or a format, under which a decision can
@@ -2090,9 +2128,10 @@ MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveMaint,
 StayMovePlans == {StayForPrimary, StayAsPrimary, StayForNew}
 \* A leaving member down and back, then taking the place of a primary that went
 \* down: W, kept at the first of those intervals on the primary alone and
-\* refused, stays kept with no holder among the members, unacknowledged. Over
-\* 7 tables ci-stays-stale needs PG 2 alone and no spare table to fit 5 minutes.
+\* refused, stays kept with its holder down, leaving and a member. Over 7 tables
+\* ci-stays-stale needs PG 2 alone and no spare table to fit 5 minutes.
 StayStalePlans == {StayStale}
+StayStrandPlans == {[StayStale EXCEPT !.w = Partial2]}
 \* neg-stay-keeps-interval: a primary still marked up once its disk is formatted
 \* away, two versions in flight.
 StayPlans == {Plan(<<AddM(2, 3, 1), StayM(2, 2)>>, Partial2, {"format"})}
