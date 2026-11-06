@@ -4066,12 +4066,58 @@ that passed before discrepancy 12 again with that path removed:
 | `Recover` at kept version 0 | 22 | A `recovered` line |
 | `GoneRefuses` | 8, 12, 13, 15, 16, 19, 33, 35, the seeds with a `gone` line | |
 
-Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half. Lines the passing seeds reached:
-`Membership` by `edit`, `mark`, `rotate`, `add`, `remove` and `replace`, `Fold`, `Renew`, `Adopt`, `Send`,
-`Order`, `Deliver`, `Peer`, `Activate`, `Restart`, `Format`. `recovered`, `reported` and `ask` lines occur, but each can be a stutter
-and TLC does not report which branch a line took, so `Recover`, `ReportRecovered`, `AskNext` and
-`CounterOut` count as unproven, as does `OwnFail` behind `mayfail`, though the table above shows `Recover` taken at 5 seeds. No passing line reached `MemberFail`. `Tick`, `Die`, `Refuse`, `Reboot`, `Persist`, `OpenGrant`,
-`OpenLapse`, `LeaseSteps`, Raft's actions and the other fault actions of `Choices` have no mapping.
+Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half.
+
+Each run ends with what its passing traces covered, and each trace's rows stay in its directory's
+`cover` file. TLC prints the behavior a trace passed by, and `cover` in `scripts/conform.sh` reads it: a
+line took its action when a variable of `epoch.tla` moved from the state before it, and stuttered when
+none did. A pass shows one behavior TLC found, so a line counted as a stutter may also have had a real
+step open to it. TLC's own `-coverage` does not fit: it counts how often each expression was evaluated
+over every branch of the search, abandoned ones and `ENABLED` too, so on seed 55 `Remove`'s first guard
+shows 8 against the 2 removals the trace took.
+
+Over the 39 passing seeds of 0 to 39, with `Stay` from the sweep:
+
+| Action | Line | Took it | Stuttered | Seeds |
+| --- | --- | --- | --- | --- |
+| `Deliver` | `logged` | 4,141 | 3,210 | 39 |
+| `Deliver` | `maydeliver` | 368 | 374 | 35 |
+| `Send` | `send` | 3,744 | 0 | 39 |
+| `Order` | `order` | 3,135 | 0 | 39 |
+| `Adopt` | `adopt` | 2,756 | 225 | 39 |
+| `Peer` | `peer` | 454 | 0 | 39 |
+| `Activate` | `activate` | 448 | 0 | 39 |
+| `Fold` | `fold` | 448 | 0 | 39 |
+| `OwnFail` | `mayfail` | 194 | 8 | 16 |
+| `Recover` | `recovered` | 156 | 64 | 34 |
+| `Recover` | `mayrecover` | 1 | 2 | 1 |
+| `GoneRefuses` | `gone` | 154 | 0 | 12 |
+| `MarkDisk` | `plan` | 84 | 0 | 29 |
+| `Edit` | `plan` | 85 | 0 | 37 |
+| `Restart` | `restart` | 73 | 0 | 32 |
+| `Add` | `plan` | 56 | 0 | 18 |
+| `Remove` | `plan` | 54 | 0 | 18 |
+| `ReportRecovered` | `reported` | 54 | 255 | 18 |
+| `Replace` | `plan` | 49 | 0 | 16 |
+| `Renew` | `renew` | 45 | 0 | 16 |
+| `Rotate` | `plan` | 37 | 0 | 37 |
+| `Format` | `format` | 16 | 0 | 16 |
+| `AskNext` | `ask` | 12 | 46 | 12 |
+| `Stay` | `plan` | 7 | 0 | 55, 231, 311, 323 of the sweep, none of 0 to 39 |
+
+`table`, `committed`, `persisted` and `recoverorder` lines check a state and take no action, as their
+mapping says. The actions of `Next` no trace took:
+
+| Action | Why |
+| --- | --- |
+| `Persist` | Compressed: a `peer` line takes it in `PeerOn`, and a `persisted` line only checks it |
+| `CounterOut` | An `ask` line can take it, but it needs a chunk at 1,000,000 versions, which no run writes |
+| `MemberFail` | No traced run injects a disk fault, so the plan gives it no budget |
+| `Refuse` | A fenced client write. No record maps it |
+| `SetMinLive`, `Die`, `Isolate` | No run of the test changes `min_live`, ends a daemon or cuts a node from the control plane |
+| `OpenGrant`, `OpenLapse`, `Ask`, `Grant`, `GrantRefused`, `SendHb`, `RecvGrant`, `RecvHb`, `RoundTrip`, `Beat`, `EndWait` | The lease half, not traced |
+| `Fortify`, `Elect`, `Transfer`, `StepDown` | Raft, not traced: `MaxTerm` is 0 |
+| `Tick`, `Suspend`, `Wake`, `Freeze`, `Thaw`, `RateStep`, `Reboot`, `BootUp`, `NetFault` | Clock and network faults, not traced: `Clocks` is off |
 
 | # | What | Class | How settled |
 | --- | --- | --- | --- |
