@@ -265,28 +265,57 @@ func TestARefillKeepsTheOnlyCopyOfAnAcknowledgedWrite(t *testing.T) {
 	}
 }
 
+// loneWrite leaves W on the first member's log alone and hands the PG to the first two: the second comes back as the third goes.
+func (r *soleRun) loneWrite(ch core.ChunkID) core.RequestID {
+	c := r.c
+	ms := r.members()
+	r.lose(ms[1].Disk)
+	r.publish()
+	c.untilActive()
+	c.settle()
+	r.lose(ms[2].Disk)
+	id := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize))
+	c.runFor(5_000)
+	r.back(ms[1].Disk)
+	r.publish()
+	return id
+}
+
 // At min_live 1 the same write has copies enough: W, on disk 1 alone, keeps its OK.
 func TestALoneCopyIsEnoughAtMinLiveOne(t *testing.T) {
 	r := newSoleRun(t, 3, 1, 3)
+	ch := chunkIn(pg0, 1, 0)
+	r.c.until(r.c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize)))
+	r.c.settle()
+	if rp, ok := r.answered(r.loneWrite(ch), 100_000_000); !ok || rp.Status != StatusOK {
+		t.Fatalf("W answered %+v, %v", rp, ok)
+	}
+}
+
+// The limit of keeping a refused version: its one holder dies, so its chunk is unfound though X, below it, is on the others. No acknowledged write is lost, and the chunk reads again once the disk returns.
+func TestARefusedVersionLeavesItsChunkUnfoundWithItsHolder(t *testing.T) {
+	r := newSoleRun(t, 3, 2, 3)
 	c := r.c
 	ch := chunkIn(pg0, 1, 0)
 	c.until(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize)))
 	c.settle()
 	ms := r.members()
-	d2, d3 := ms[1].Disk, ms[2].Disk
-
-	r.lose(d2)
-	r.publish()
-	c.untilActive()
-	c.settle()
-
-	r.lose(d3)
-	id := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize))
-	c.runFor(5_000)
-	r.back(d2)
-	r.publish()
-	if rp, ok := r.answered(id, 100_000_000); !ok || rp.Status != StatusOK {
+	for n := range c.reps {
+		c.reps[n].plant.noRecovery = true
+	}
+	if rp, ok := r.answered(r.loneWrite(ch), 100_000_000); !ok || rp.Status != StatusRefused {
 		t.Fatalf("W answered %+v, %v", rp, ok)
+	}
+	r.lose(ms[0].Disk)
+	r.back(ms[2].Disk)
+	r.tick(5_000_000)
+	if rp, _ := r.read(ch); rp.Status != StatusUnfound {
+		t.Fatalf("chunk read %+v with W's holder gone", rp)
+	}
+	r.back(ms[0].Disk)
+	r.tick(5_000_000)
+	if rp, got := r.read(ch); rp.Status != StatusOK || got[0] != 0x22 {
+		t.Fatalf("chunk read %+v with W's holder back", rp)
 	}
 }
 
