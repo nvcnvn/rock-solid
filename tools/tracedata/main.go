@@ -559,7 +559,11 @@ func (g *gen) run(recs []trace.Record) {
 			for ; i < len(recs) && recs[i].Name == trace.OutKept && recs[i].Node == r.Node; i++ {
 				kept[g.chunk(recs[i].Fields[0])-1] = ver(recs[i].Fields[1])
 			}
-			g.decide(n, r, kept)
+			var listed []string
+			for ; i < len(recs) && recs[i].Name == trace.OutListed && recs[i].Node == r.Node; i++ {
+				listed = append(listed, fmt.Sprintf("[d |-> %d, c |-> %d, v |-> %s]", g.disk(recs[i].Fields[0]), g.chunk(recs[i].Fields[1]), ver(recs[i].Fields[2])))
+			}
+			g.decide(n, r, kept, listed)
 		case trace.OutPersisted:
 			key := [3]uint64{r.Fields[2], r.Fields[0], r.Fields[1]}
 			g.line(`k |-> "persisted", d |-> %d, p |-> %d, iv |-> %d, again |-> %s`, g.disk(r.Fields[2]), g.pg(r.Fields[0]), r.Fields[1], strings.ToUpper(strconv.FormatBool(g.lists[key])))
@@ -596,7 +600,7 @@ var belowProtocol = []trace.Name{
 	trace.OutDurable, trace.OutFailed, trace.OutCheckpointDone,
 }
 
-func (g *gen) decide(n int, r *trace.Record, kept []string) {
+func (g *gen) decide(n int, r *trace.Record, kept, listed []string) {
 	got := g.replies[[3]uint64{uint64(n), r.Fields[0], r.Fields[1]}]
 	var ds []uint64
 	for d := range got {
@@ -623,8 +627,8 @@ func (g *gen) decide(n int, r *trace.Record, kept []string) {
 			rep = append(rep, fmt.Sprintf("[d |-> %d, c |-> %d, whole |-> %s, logged |-> %s, list |-> %s, decided |-> %d]", g.disk(d), g.chunk(h), ver(cv[0]), ver(cv[1]), list, x.decided))
 		}
 	}
-	g.lineAt(at, `k |-> "peer", n |-> %d, p |-> %d, iv |-> %d, j |-> {%s}, kept |-> <<%s>>, rep |-> {%s}`,
-		n, g.pg(r.Fields[0]), r.Fields[1], strings.Join(j, ", "), strings.Join(kept, ", "), strings.Join(rep, ", "))
+	g.lineAt(at, `k |-> "peer", n |-> %d, p |-> %d, iv |-> %d, j |-> {%s}, kept |-> <<%s>>, listed |-> {%s}, rep |-> {%s}`,
+		n, g.pg(r.Fields[0]), r.Fields[1], strings.Join(j, ", "), strings.Join(kept, ", "), strings.Join(listed, ", "), strings.Join(rep, ", "))
 }
 
 func (g *gen) write(w *bufio.Writer, module string) {

@@ -315,6 +315,13 @@ func (r *Replica) decide(ctx *core.Context, i int, out *ReplicaOutput) {
 	for j := range pr.kept {
 		out.note(trace.OutKept, pr.kept[j].chunk.Hash(), pr.kept[j].kept, 0, 0, 0)
 	}
+	for j := range pr.replies {
+		if rp := &pr.replies[j]; upIn(e, rp.disk, e.Interval) {
+			for _, cv := range rp.list {
+				out.note(trace.OutListed, uint64(rp.disk), cv.Chunk.Hash(), cv.Version, 0, 0)
+			}
+		}
+	}
 	if r.plant.reportDecided {
 		out.Activations = append(out.Activations, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
 	}

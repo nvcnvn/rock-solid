@@ -131,6 +131,8 @@ const (
 	OutRecovering
 	// OutPast is a past interval of the OutEntry before it: pg interval minlive. Its members follow as OutMember.
 	OutPast
+	// OutListed is one chunk of the missing list the OutDecide before it gave an up member: disk chunk version. They follow its OutKept.
+	OutListed
 	// OutRecoverOrder, a primary ordering a recovery write, whether or not it is a target: chunk source interval.
 	OutRecoverOrder
 	numNames
@@ -231,6 +233,7 @@ var schemas = [numNames]schema{
 	OutMemberFail:     {"MemberFail", KindOutput, []field{fChunk, fVer, {"gone", typeBool}}},
 	OutRecovering:     {"Recovering", KindOutput, []field{fChunk, {"source", typeNum}, fIv}},
 	OutPast:           {"PastInterval", KindOutput, []field{fPG, fIv, {"minlive", typeNum}}},
+	OutListed:         {"Listed", KindOutput, []field{fDisk, fChunk, fVer}},
 	OutRecoverOrder:   {"RecoverOrder", KindOutput, []field{fChunk, {"source", typeNum}, fIv}},
 }
 

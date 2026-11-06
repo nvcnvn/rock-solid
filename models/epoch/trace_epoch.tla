@@ -45,9 +45,20 @@ ReplyMatches(l) ==
         /\ Reply(r.d, r.c).list = r.list
         /\ Decided1(Reply(r.d, r.c).decided) = Decided1(r.decided)
 
-\* The members a reply says logged more than they hold whole: Entry leaves such
-\* a member off for the version it holds, and the code lists it (ListOf).
-TornIn(l) == {[d |-> r.d, c |-> r.c] : r \in {x \in l.rep : x.logged > x.whole}}
+\* The members the code listed beyond Entry, the decision's T: such a member logged
+\* more than it holds whole, and Entry leaves it off for the version it holds.
+TornIn(l) ==
+    {[d |-> x.d, c |-> x.c] : x \in {y \in l.listed : Entry(y.d, y.c, l.kept[y.c]) = NoMiss}}
+
+\* The code's lists are the spec's under T, and T is every member a reply shows torn.
+ListsMatch(l) ==
+    LET T == TornIn(l)
+        up == [d : UpIn(l.p, l.iv), c : ChunksOf(l.p)]
+    IN /\ l.listed = {[d |-> x.d, c |-> x.c, v |-> ListOf(x.d, x.c, l.kept[x.c], T)] :
+                         x \in {y \in up : ListOf(y.d, y.c, l.kept[y.c], T) # NoMiss}}
+       /\ \A r \in l.rep :
+            (r.logged > r.whole /\ [d |-> r.d, c |-> r.c] \in up /\ Entry(r.d, r.c, l.kept[r.c]) = NoMiss)
+                => [d |-> r.d, c |-> r.c] \in T
 
 KeptMatches(l) ==
     \E x \in dec' :
@@ -183,6 +194,8 @@ Line(l) ==
        /\ PeerOpen(l.n, l.p)
        /\ l.j \subseteq PeerElig(l.n, l.p)
        /\ PersistsAfter(l) \in PeerPersists(l.n, l.p)
+       /\ TornIn(l) \in TornSets(l.n, l.p)
+       /\ ListsMatch(l)
        /\ PeerOn(l.n, l.p, l.j, PersistsAfter(l), TornIn(l))
        /\ KeptMatches(l)
     \/ /\ l.k = "persisted"
