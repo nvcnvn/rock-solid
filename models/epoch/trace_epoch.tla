@@ -40,9 +40,14 @@ Decided1(x) == Max({x, 1})
 ReplyMatches(l) ==
     \A r \in l.rep :
         /\ Reply(r.d, r.c).whole = r.whole
-        /\ r.logged = r.whole
+        /\ \/ r.logged = r.whole
+           \/ r.logged > r.whole /\ \E x \in vers : x.c = r.c /\ x.v = r.logged
         /\ Reply(r.d, r.c).list = r.list
         /\ Decided1(Reply(r.d, r.c).decided) = Decided1(r.decided)
+
+\* The members a reply says logged more than they hold whole: Entry leaves such
+\* a member off for the version it holds, and the code lists it (ListOf).
+TornIn(l) == {[d |-> r.d, c |-> r.c] : r \in {x \in l.rep : x.logged > x.whole}}
 
 KeptMatches(l) ==
     \E x \in dec' :
@@ -132,7 +137,7 @@ Line(l) ==
        /\ PeerOpen(l.n, l.p)
        /\ l.j \subseteq PeerElig(l.n, l.p)
        /\ PersistsAfter(l) \in PeerPersists(l.n, l.p)
-       /\ PeerOn(l.n, l.p, l.j, PersistsAfter(l))
+       /\ PeerOn(l.n, l.p, l.j, PersistsAfter(l), TornIn(l))
        /\ KeptMatches(l)
     \/ /\ l.k = "persisted"
        /\ \E x \in dec : x.p = l.p /\ x.k = l.iv

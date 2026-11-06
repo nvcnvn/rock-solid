@@ -387,13 +387,15 @@ type replicaPlants struct {
 	// member persisted its list; reportDecided reports an activation once the decision is made;
 	// relistNever leaves off the missing list a member that lists a chunk but holds the kept
 	// version as its newest, which with the store's clearListed has a later peering clear the
-	// entry before recovery did.
+	// entry before recovery did; unlistTorn leaves off a member that holds the kept version as its
+	// newest whole one with part of a later version logged.
 	stopPreviousOnly  bool
 	lastActivatedOnly bool
 	ownInterval       bool
 	activateEarly     bool
 	reportDecided     bool
 	relistNever       bool
+	unlistTorn        bool
 	// fenceOnArrival refuses an older incarnation's write when it reaches the primary, not when the
 	// store orders it; reorderAfterOther keeps a lead's term across intervals another primary led,
 	// so its held writes are ordered again.

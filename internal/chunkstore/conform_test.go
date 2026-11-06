@@ -128,6 +128,7 @@ var conformPlants = []struct {
 	{"mergeOnDropped", func(r *primaryRun) { r.c.replicaPlants.mergeOnDropped = true }},
 	{"editKeepsInterval", func(r *primaryRun) { r.a.plant.editKeepsInterval = true }},
 	{"relistNever", func(r *primaryRun) { r.c.replicaPlants.relistNever, r.c.storePlants.clearListed = true, true }},
+	{"unlistTorn", func(r *primaryRun) { r.c.replicaPlants.unlistTorn = true }},
 	{"lastActivatedOnly", func(r *primaryRun) { r.c.replicaPlants.lastActivatedOnly = true }},
 	{"readBelowMinLive", func(r *primaryRun) { r.c.replicaPlants.readBelowMinLive = true }},
 	{"coverAtRead", func(r *primaryRun) { r.c.replicaPlants.coverAtRead = true }},

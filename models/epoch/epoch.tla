@@ -38,6 +38,7 @@ CONSTANTS
     RawRates,   \* [Node -> SUBSET Nat]: CLOCK_MONOTONIC_RAW's rate, per mille of real time
     Slews,      \* [Node -> SUBSET Int]: CLOCK_BOOTTIME's slew, per mille of the raw rate
     MaxTime,    \* real time bound, in units of 10 ms
+    TornLists,  \* TRUE: Peer may list a member that Entry leaves off (ListOf)
     Bugs
 
 \* Lease constants of design.md "Lease time", in units of 10 ms and per mille.
@@ -101,7 +102,7 @@ VARIABLES
     pv,       \* [Node -> [Chunk -> Nat]]: newest version a primary ordered
     pin,      \* [Node -> SUBSET [w, hold]]: client writes a primary holds unordered
     known,    \* [Node -> [PG -> Nat]]: newest incarnation of the session a primary has seen
-    dec,      \* set of [p, k, n, r, kept, gone, img]: peering decisions; gone: per chunk the
+    dec,      \* set of [p, k, n, r, kept, gone, img, torn]: peering decisions; gone: per chunk the
               \* gated versions of the primary the decision drops; img: the chunks whose
               \* image on the primary is the kept version once it settled
     act,      \* set of [p, k, r]: activated intervals
@@ -303,7 +304,7 @@ Init ==
     /\ pin = [n \in Node |-> {}]
     /\ known = [n \in Node |-> [p \in PG |-> 0]]
     /\ dec = {[p |-> p, k |-> 1, n |-> InitMem[p][1], r |-> 1, kept |-> [c \in Chunk |-> 0],
-                gone |-> [c \in ChunksOf(p) |-> {}], img |-> ChunksOf(p)] : p \in PG}
+                gone |-> [c \in ChunksOf(p) |-> {}], img |-> ChunksOf(p), torn |-> {}] : p \in PG}
     /\ act = {[p |-> p, k |-> 1, r |-> 1] : p \in PG}
     /\ rm = {}
     /\ vers = {}
@@ -614,6 +615,13 @@ Entry(d, c, K) ==
        \/ Bug("NoListAbove") /\ Newest(dlog[d][c]) > K /\ miss[d][c] = NoMiss
     THEN NoMiss ELSE K
 
+\* A crash can leave part of a version above a member's newest whole one. The
+\* logs here hold whole versions, so that member's bytes are not modelled: the
+\* set T names the (disk, chunk) pairs the decision lists at K for such a reason,
+\* where Entry would leave them off. Peer draws them from the members with a
+\* version above their newest ordered.
+ListOf(d, c, K, T) == IF [d |-> d, c |-> c] \in T THEN K ELSE Entry(d, c, K)
+
 \* The newest of the versions n's store keeps gated for c that Store.Settle
 \* keeps for the kept version K: at or below K, in K's interval. One of an
 \* earlier interval is kept only below such a one, since an interval n missed
@@ -687,18 +695,26 @@ PeerPersists(n, p) ==
     LET k == IvAt(n, p)
     IN IF CanStall(n, p, k) THEN SUBSET UpIn(p, k) ELSE {UpIn(p, k)}
 
-PeerOn(n, p, J, P) ==
+TornSets(n, p) ==
+    IF TornLists
+    THEN SUBSET {x \in [d : UpIn(p, IvAt(n, p)), c : ChunksOf(p)] :
+                   /\ miss[x.d][x.c] = NoMiss
+                   /\ \E r \in vers : r.c = x.c /\ r.v > Newest(dlog[x.d][x.c])}
+    ELSE {{}}
+
+PeerOn(n, p, J, P, T) ==
     LET k == IvAt(n, p)
         L == LaAt(n, p)
         K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c) ELSE 0]
         \* The members the decision counts as holding the kept version:
         \* the recovery sources it reached, and the live members it
         \* leaves off the missing list.
-        src(c) == {d \in J : Newest(dlog[d][c]) = K[c] /\ miss[d][c] = NoMiss}
-                  \cup {d \in UpIn(p, k) : Entry(d, c, K[c]) = NoMiss}
+        src(c) == {d \in {y \in J : Newest(dlog[y][c]) = K[c] /\ miss[y][c] = NoMiss}
+                         \cup {y \in UpIn(p, k) : Entry(y, c, K[c]) = NoMiss} :
+                     [d |-> d, c |-> c] \notin T}
         torn == \E c \in ChunksOf(p) : K[c] # 0 /\
                   \E s \in src(c) : Content(c, dlog[s][c]) # Content(c, Chain(c, K[c]))
-        lists == [d \in UpIn(p, k) |-> [c \in ChunksOf(p) |-> Entry(d, c, K[c])]]
+        lists == [d \in UpIn(p, k) |-> [c \in ChunksOf(p) |-> ListOf(d, c, K[c], T)]]
         own == PrimDisk(p, k)
         gone == [c \in ChunksOf(p) |->
                    {r.v : r \in {x \in pend \cup refd : x.n = n /\ x.c = c /\ x.v > SettleTop(n, c, K[c])}}]
@@ -706,13 +722,14 @@ PeerOn(n, p, J, P) ==
         \* listed may miss a kept block or hold a dropped one below its newest.
         img == {c \in ChunksOf(p) :
                   /\ miss[own][c] = NoMiss
+                  /\ [d |-> own, c |-> c] \notin T
                   /\ \/ Newest(dlog[own][c] \ gone[c]) = K[c]
                      \/ Bug("MergeOnDropped") /\ K[c] \in dlog[own][c] \cup {0}}
     IN /\ UpIn(p, k) \subseteq J
        /\ \A i \in NeedIv(p, k, L) : J \cap UpIn(p, i) # {}
        /\ LapseFor(J, p, k)
        /\ dec' = dec \cup {[p |-> p, k |-> k, n |-> n, r |-> run[n], kept |-> K,
-                            gone |-> gone, img |-> img]}
+                            gone |-> gone, img |-> img, torn |-> T]}
        /\ bad' = IF torn THEN bad \cup {"torn"} ELSE bad
        /\ pv' = [pv EXCEPT ![n] = [c \in Chunk |-> IF c \in ChunksOf(p) THEN K[c] ELSE pv[n][c]]]
        /\ IF Bug("ActivateBeforeDurable")
@@ -734,7 +751,8 @@ PeerOn(n, p, J, P) ==
 
 Peer(n, p) ==
     /\ PeerOpen(n, p)
-    /\ \E J \in SUBSET PeerElig(n, p), P \in PeerPersists(n, p) : PeerOn(n, p, J, P)
+    /\ \E J \in SUBSET PeerElig(n, p), P \in PeerPersists(n, p), T \in TornSets(n, p) :
+         PeerOn(n, p, J, P, T)
 
 \* The members still to persist do so, as they could have at the decision:
 \* their logs and lists have not changed since.
@@ -748,7 +766,7 @@ Activate(n, p) ==
        /\ PrimNode(p, k) = n
        /\ Decided(n, p, k)
        /\ \A d \in R : dnode[d] # 0 /\ Running(dnode[d]) /\ IvAt(dnode[d], p) = k
-       /\ PersistAll(R, p, k, [d \in R |-> [c \in ChunksOf(p) |-> Entry(d, c, K[c])]])
+       /\ PersistAll(R, p, k, [d \in R |-> [c \in ChunksOf(p) |-> ListOf(d, c, K[c], TheDec(n, p, k).torn)]])
        /\ Activated(n, p, k, K)
        /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
                       dlog, mrecv, failed, pv, pin, known, dec, rm, vers, sends, dmn, bad, leaseVars,
@@ -1971,6 +1989,11 @@ RestartPlansMoved == {DownBackMoved}
 RestartPlansStill == RestartPlans \ RestartPlansMoved
 \* The liveness variant that breaks renewals runs the restart plan alone.
 RestartedPlans == {Restarted}
+
+\* ci-tears lists any member Entry leaves off, on a plan that peers twice over
+\* a member's list, and whose later table stops some members persisting at the
+\* decision.
+TearPlans == {PrimaryBack}
 
 \* ci-moves: PG 2's replica 3, or its primary 2, moved to node 1 by adding
 \* node 1 and removing the leaving member on a recovered report; the

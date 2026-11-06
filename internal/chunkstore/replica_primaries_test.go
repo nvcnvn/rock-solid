@@ -697,6 +697,7 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	}{
 		{"M7", 169, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }}},
 		{"M8", 15, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking = true }}},
+		{"a member holding a version in part left off the list", 148, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.unlistTorn = true }}},
 		{"merged on a dropped version", 94, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeOnDropped = true }}},
 		{"edit keeps its interval", 0, peerPlant{invOneVersion, func(r *primaryRun) { r.a.plant.editKeepsInterval = true }}},
 		{"restart in the old interval", 68, peerPlant{invOneVersion, func(r *primaryRun) { r.c.replicaPlants.peerInOldInterval = true }}},
