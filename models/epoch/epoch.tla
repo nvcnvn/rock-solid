@@ -416,6 +416,24 @@ Remove(p) ==
             [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # x.lv), !.lv = 0]])
        /\ UNCHANGED <<reqIv, reports, recd>>
 
+\* A leaving member that is up takes the place of a missing member, one marked
+\* down or whose disk is gone, ending the move: the missing member goes and the
+\* leaving one is an ordinary member. With StayKeepsInterval the table keeps the
+\* interval.
+Stay(p, out) ==
+    LET x == ivs[p][Cur(p)]
+        y == [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # out), !.lv = 0]
+    IN /\ x.lv # 0
+       /\ out \in Mem(p, Cur(p))
+       /\ out # x.lv
+       /\ St(p, Cur(p), out) = "down" \/ dnode[out] = 0
+       /\ St(p, Cur(p), x.lv) = "up"
+       /\ IF Bug("StayKeepsInterval")
+          THEN /\ Commit(tbl[Len(tbl)])
+               /\ ivs' = [ivs EXCEPT ![p][Cur(p)] = y]
+          ELSE NewIntervals({p}, [q \in PG |-> y])
+       /\ UNCHANGED <<reqIv, reports, recd>>
+
 \* Moving the primary: the first two members swap.
 Rotate(p) ==
     /\ LET m == ivs[p][Cur(p)].mem
@@ -461,13 +479,14 @@ Edit(p, mem, marks) ==
 
 \* A planned change: [k |-> "mark", d, to], [k |-> "replace", p, old, new],
 \* [k |-> "rotate", p], [k |-> "add", p, old, new], [k |-> "remove", p],
-\* [k |-> "minlive", p, to] or [k |-> "edit", p, mem, marks].
+\* [k |-> "stay", p, out], [k |-> "minlive", p, to] or [k |-> "edit", p, mem, marks].
 Planned(m) ==
     \/ m.k = "mark" /\ MarkDisk(m.d, m.to)
     \/ m.k = "replace" /\ Replace(m.p, m.old, m.new)
     \/ m.k = "rotate" /\ Rotate(m.p)
     \/ m.k = "add" /\ Add(m.p, m.old, m.new)
     \/ m.k = "remove" /\ Remove(m.p)
+    \/ m.k = "stay" /\ Stay(m.p, m.out)
     \/ m.k = "minlive" /\ SetMinLive(m.p, m.to)
     \/ m.k = "edit" /\ Edit(m.p, m.mem, m.marks)
 
@@ -505,7 +524,7 @@ Reactive ==
 AdoptPr(n, p, e) ==
     LET old == pr[n][p]
         k == tbl[e][p].iv
-    IN IF k = IvAt(n, p) /\ ~(Bug("EditKeepsInterval") /\ old.iv = 0 /\ PrimNode(p, k) = n) THEN old
+    IN IF k = IvAt(n, p) /\ ~((Bug("EditKeepsInterval") \/ Bug("StayKeepsInterval")) /\ old.iv = 0 /\ PrimNode(p, k) = n) THEN old
        ELSE IF PrimNode(p, k) = n /\ (k > rsIv[n][p] \/ Bug("RestartSameInterval"))
             THEN IF old.iv # 0 /\ (KeptPrimary(n, p, old.iv, k) \/ Bug("ServeAfterOtherPrimary"))
                  THEN [NoPr EXCEPT !.iv = k, !.srv = old.srv, !.since = old.since]
@@ -1873,7 +1892,7 @@ PeeringSettles == <>[](\A p \in PG : Settled(p))
 RemovalKeepsCopies ==
     [][\A p \in PG :
          LET x == ivs[p][Len(ivs[p])]
-         IN (x.lv # 0 /\ Len(ivs'[p]) > Len(ivs[p]) /\ ivs'[p][Len(ivs'[p])].lv = 0)
+         IN (x.lv # 0 /\ Len(ivs'[p]) > Len(ivs[p]) /\ x.lv \notin Range(ivs'[p][Len(ivs'[p])].mem))
             => \A c \in ChunksOf(p) : \A v \in AckedV(c) : \A d \in Range(x.mem) \ {x.lv} :
                  v \in dlog[d][c] /\ miss[d][c] = NoMiss]_vars
 
@@ -1938,6 +1957,8 @@ AckedOnMinLive == [][\A y \in ackd' \ ackd :
 \* allows maintenance.
 
 PGs == {1, 2}
+OnePG == {2}
+OneChunk == {2}
 MinLive2 == [p \in PGs |-> 2]
 MaintPG2 == [p \in PGs |-> p = 2]
 Mem3 == [p \in PGs |-> IF p = 1 THEN <<1, 2, 3>> ELSE <<2, 3>>]
@@ -1982,6 +2003,7 @@ Repl(p, old, new) == [k |-> "replace", p |-> p, old |-> old, new |-> new]
 Rot(p) == [k |-> "rotate", p |-> p]
 AddM(p, old, new) == [k |-> "add", p |-> p, old |-> old, new |-> new]
 RemoveM(p) == [k |-> "remove", p |-> p]
+StayM(p, out) == [k |-> "stay", p |-> p, out |-> out]
 ML(p, to) == [k |-> "minlive", p |-> p, to |-> to]
 Ed(p, mem, marks) == [k |-> "edit", p |-> p, mem |-> mem, marks |-> marks]
 Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f, t |-> 600, k |-> 1, s |-> Spare]
@@ -2047,16 +2069,33 @@ TearPlans == {PrimaryBack}
 \* replica's move with the leaving member marked down before its replacement
 \* recovers, or with a process restart; the replica's move with its primary
 \* in maintenance and back, so a report from before W was written arrives
-\* late; and the replica's move refilled before the removal: a disk is
-\* formatted again and replaces node 1's old disk. With no "die", each sends
-\* only the daemon's one write W.
+\* late; the replica's move refilled before the removal: a disk is
+\* formatted again and replaces node 1's old disk; and the leaving member
+\* taking the place of a member that went down: the primary, the other member
+\* of a leaving primary, the new member itself, or the primary after the leaving
+\* member was down and back. With no "die", each sends only the daemon's one
+\* write W.
 MoveReplica == Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Session, {})
 MovePrimary == Plan(<<AddM(2, 2, 1), RemoveM(2)>>, Session, {})
 MoveLeavingDown == Plan(<<AddM(2, 3, 1), Mark(3, "down"), RemoveM(2)>>, Session, {})
 MoveRestart == Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Session, {"restart"})
 MoveMaint == Plan(<<AddM(2, 3, 1), Mark(2, "maint"), Mark(2, "up"), RemoveM(2)>>, Session, {})
 MoveRefill == Plan(<<AddM(2, 3, 1), Repl(2, 1, 4), RemoveM(2)>>, Session, {"format"})
+StayForPrimary == Plan(<<AddM(2, 3, 1), Mark(2, "down"), StayM(2, 2)>>, Session, {})
+StayAsPrimary == Plan(<<AddM(2, 2, 1), Mark(3, "down"), StayM(2, 3)>>, Session, {})
+StayForNew == Plan(<<AddM(2, 3, 1), Mark(1, "down"), StayM(2, 1)>>, Session, {})
+StayStale == Plan(<<AddM(2, 3, 1), Mark(3, "down"), Mark(3, "up"), Mark(2, "down"), StayM(2, 2)>>, Session, {})
 MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveMaint, MoveRefill}
+\* ci-stays splits the stays off, each config under the 300 s budget.
+StayMovePlans == {StayForPrimary, StayAsPrimary, StayForNew}
+\* A leaving member down and back, then taking the place of a primary that went
+\* down: W, kept at the first of those intervals on the primary alone and
+\* refused, stays kept with no holder among the members, unacknowledged. Over
+\* 7 tables ci-stays-stale needs PG 2 alone and no spare table to fit 5 minutes.
+StayStalePlans == {StayStale}
+\* neg-stay-keeps-interval: a primary still marked up once its disk is formatted
+\* away, two versions in flight.
+StayPlans == {Plan(<<AddM(2, 3, 1), StayM(2, 2)>>, Partial2, {"format"})}
 
 \* ci-faults: versions that fail, disks formatted around peering and recovery,
 \* and a min_live change.

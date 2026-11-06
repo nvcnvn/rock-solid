@@ -45,6 +45,7 @@ epoch/neg-restart-no-ask	chunkstore.neverAsk	TestPlantedPeeringBugsBreakTheFault
 epoch/neg-restart-same-interval	chunkstore.peerInOldInterval	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-step-half-drift	lease.halfStep	TestPlantedLeaseBugsBreakThePair
 epoch/neg-step-on-grants-only	lease.stepOnGrantsOnly	TestPlantedLeaseBugsBreakThePair
+epoch/neg-stay-keeps-interval	open	Spec conformance check
 epoch/neg-stop-previous-only	chunkstore.stopPreviousOnly	TestPlantedBugsBreakTheirTraces
 epoch/neg-transfer-keeps-lease	open	MetaStore invariants
 epoch/neg-widen-past-two-drift	lease.widenLate	TestPlantedLeaseBugsBreakThePair

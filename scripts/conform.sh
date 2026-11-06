@@ -11,6 +11,8 @@
 # Each trace is one light TLC process with its own directory: one worker, HEAP (default 2g), TLC_SECONDS
 # (default 400). JOBS (default 1) of them run at once, and the lines print in order when all are done.
 # KEEP=dir keeps the traces and data, and skips a check whose spec and data have not changed.
+# A run ends with what its passing traces covered: "cover" rows of each action taken and the actions no
+# trace took, and each trace's rows stay in its directory's cover file.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -83,6 +85,62 @@ check() {
 	grep -q '^ok' "$dir/verdict"
 }
 
+# cover leaves in $dir/cover a row for each spec change a passing trace's lines name: action, line kind, lines that took it, lines that stuttered. The behavior TLC prints for a pass is the one it found: a line stutters when no variable of the spec moves from the state before it.
+cover() {
+	dir=$tmp/check/$(basename "$1" .trace)
+	{
+		sed -n '/^TPlan ==/,/^TWrites ==/p' "$dir/trace_data.tla" | sed -n '/^TWrites/d;s/^[^"]*"\([a-z]*\)".*/P \1/p'
+		steps "$dir/trace_data.tla" | sed 's/^[^"]*"\([a-z]*\)".*/L \1/'
+		cat "$dir/out"
+	} | awk '
+		function step() {
+			if (n > 0) {
+				k = kind[n]
+				if (k == "plan") k = k "." plan[++p]
+				if (cur == prev) stutter[k]++; else took[k]++
+				seen[k] = 1
+			}
+			prev = cur; cur = ""; n++
+		}
+		BEGIN {
+			split("fold Fold renew Renew adopt Adopt send Send order Order logged Deliver maydeliver Deliver mfail MemberFail " \
+				"gone GoneRefuses mayfail OwnFail restart Restart format Format recovered Recover mayrecover Recover " \
+				"reported ReportRecovered ask AskNext peer Peer activate Activate plan.mark MarkDisk plan.replace Replace " \
+				"plan.rotate Rotate plan.add Add plan.remove Remove plan.stay Stay plan.minlive SetMinLive plan.edit Edit", m)
+			for (i = 1; i < 60 && (i in m); i += 2) action[m[i]] = m[i + 1]
+		}
+		!on && $1 == "P" && NF == 2 { plan[++np] = $2; next }
+		!on && $1 == "L" && NF == 2 { kind[++nl] = $2; next }
+		/^State [0-9]+:/ { if (on) step(); on = 1; next }
+		/^[0-9]+ states generated/ { if (on) step(); on = 0; next }
+		!on { next }
+		/^\/\\ (line|healed) / { skip = 1; next }
+		/^\/\\ / { skip = 0 }
+		!skip { cur = cur $0 "\n" }
+		END { for (k in seen) print (k in action ? action[k] : "-"), k, took[k] + 0, stutter[k] + 0 }
+	' | sort >"$dir/cover.new"
+	mv "$dir/cover.new" "$dir/cover"
+}
+
+# coverage prints, summed over the passing traces of the arguments, each action taken with its real steps, and the actions of Next no trace took.
+coverage() {
+	for f in "$@"; do
+		c=$tmp/check/$(basename "$f" .trace)/cover
+		[ ! -f "$c" ] || cat "$c"
+	done | awk '
+		{ took[$1 " " $2] += $3; stutter[$1 " " $2] += $4; if ($3) traces[$1 " " $2]++; if ($3) done[$1] = 1 }
+		END {
+			for (k in took) print "cover", k, took[k], "real,", stutter[k], "stutter,", traces[k] + 0, "traces"
+			n = split("Fold Renew Adopt Peer Activate CounterOut AskNext ReportRecovered Persist Recover Send Order Refuse Deliver " \
+				"Fortify BootUp MarkDisk Replace Rotate Add Remove Stay SetMinLive Edit Die Isolate MemberFail GoneRefuses OwnFail " \
+				"OpenGrant OpenLapse Suspend Wake Freeze Thaw RateStep Restart Reboot Format NetFault Elect Transfer StepDown " \
+				"Ask Grant GrantRefused SendHb RecvGrant RecvHb RoundTrip Beat EndWait Tick", a)
+			for (i = 1; i <= n; i++) if (!(a[i] in done)) never = never " " a[i]
+			print "never taken:" never
+		}
+	' | sort
+}
+
 # plain leaves trace $1's result line in its directory.
 plain() {
 	name=$(basename "$1" .trace)
@@ -91,6 +149,7 @@ plain() {
 	if ! data "$1"; then
 		echo "FAIL $name: no data"
 	elif check "$1"; then
+		cover "$1"
 		echo "ok   $name: $(sed 's/^ok //' "$dir/verdict")"
 	else
 		echo "FAIL $name: $(cat "$dir/verdict")"
@@ -136,7 +195,7 @@ each() {
 	fn=$1
 	shift
 	[ $# -gt 0 ] || return 0
-	export -f steps data check plain planted
+	export -f steps data check cover plain planted
 	export tmp jar
 	printf '%s\0' "$@" | xargs -0 -n 1 -P "${JOBS:-1}" "$BASH" -c 'set -euo pipefail; "$@"' each "$fn"
 }
@@ -192,4 +251,5 @@ for f in "$@"; do
 	cat "$line"
 	grep -q '^ok' "$line" || failed=1
 done
+coverage "$@"
 exit $failed

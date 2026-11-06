@@ -261,6 +261,9 @@ func (g *gen) classify(epoch uint64, changed []uint64, next map[uint64]*entry) {
 			g.planned(fmt.Sprintf(`[k |-> "add", p |-> %d, old |-> %d, new |-> %d]`, p, g.disk(leavingOf(e)), g.disk(b[len(a)])))
 		case len(b) == len(a)-1 && leavingOf(old) != 0 && slices.Equal(b, slices.DeleteFunc(slices.Clone(a), func(d uint64) bool { return d == leavingOf(old) })):
 			g.planned(fmt.Sprintf(`[k |-> "remove", p |-> %d]`, p))
+		case len(b) == len(a)-1 && leavingOf(old) != 0 && leavingOf(e) == 0 && slices.Contains(b, leavingOf(old)) && !slices.ContainsFunc(b, func(d uint64) bool { return !slices.Contains(a, d) }):
+			out := a[slices.IndexFunc(a, func(d uint64) bool { return !slices.Contains(b, d) })]
+			g.planned(fmt.Sprintf(`[k |-> "stay", p |-> %d, out |-> %d]`, p, g.disk(out)))
 		case len(a) == len(b) && differs(a, b) == 1:
 			j := slices.IndexFunc(a, func(d uint64) bool { return !slices.Contains(b, d) })
 			g.planned(fmt.Sprintf(`[k |-> "replace", p |-> %d, old |-> %d, new |-> %d]`, p, g.disk(a[j]), g.disk(b[j])))

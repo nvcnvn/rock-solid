@@ -3227,6 +3227,8 @@ nodes without finishing.
 | `ci-edits` | 3 | As `ci-peering`, with an operator's edits of PG 1 in one table each: the primary moved and marked down, then back first; and the members reordered twice with no mark, the second keeping the primary the first moved |
 | `ci-tears` | 3 | As `ci-peering`, on PG 1's primary down and back, with `TornLists` on: a decision may also list any member Entry leaves off that has a version above its newest ordered, as a crash that left part of a version does in the code |
 | `ci-moves` | 3 | As `ci-peering`, with the move plans: PG 2's replica and then its primary moved to node 1; the replica's move with the leaving member marked down before its replacement recovers, or with a process restart; the replica's move with primary 2 put in `maintenance` and back before the removal; and the replica's move with a refill before the removal, a disk formatted again replacing node 1's. Each sends only the daemon's one write W |
+| `ci-stays` | 3 | As `ci-moves`, with the moves that a leaving member ends by taking the place of a member marked down: the primary, the other member of a leaving primary, or the new member. It is kept apart from `ci-moves` so that each fits its 5 minutes |
+| `ci-stays-stale` | 3 | PG 2 and its chunk alone, with no spare table: the leaving member down and back, then taking the place of the primary, marked down. Its 7 tables need that to fit 5 minutes, so it has no fold of an activation report. It reaches W kept with no member holding it, W refused and nothing acknowledged lost |
 | `ci-faults` | 3 | As `ci-peering`, with a sixth table and a second fault; the plans that fail a version at a member or on the primary's own log, alone, with the primary moved, with a member or the primary marked down, and with one in `maintenance` and back; a member's failure with a process restart; a primary moved away and back; the plans that format a disk around peering and around recovery; and the one that raises `min_live` past an interval that ran below it |
 | `ci-asks` | 3 | As `ci-peering`, with the failure plans that hold no restart or format, under fairness, for the properties that every interval a failure ended is asked past and every client is answered |
 | `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the six below |
@@ -3410,8 +3412,9 @@ plans enable.
 Not modelled: a PG split with writes in flight, whose children take the parent's interval plus one
 like any new interval, and the recovered reports placement ignores in the table that splits a pool;
 both need a PG created mid-run, left to the phase 3 simulator. Nor is a change of `replicas`, so
-neither is the leaving mark that narrows a PG when `replicas` goes down. Of moves, the model leaves
-out a leaving member kept as an ordinary one in place of a missing member (`stay`); a table that
+neither is the leaving mark that narrows a PG when `replicas` goes down, or a leaving member kept
+because a raised `replicas` needs it; a leaving member that takes a missing member's place is
+modelled, as `Stay`. Of moves, the model leaves out a table that
 marks a member and removes the leaving member at once, which the model cannot make since its mark
 change starts an interval, and which placement prevents by ignoring a report in a table that marks
 another member; a removal and a new move of the PG in one table, which placement prevents since a
@@ -3433,8 +3436,8 @@ on that log fails.
 the Raft group and lease time need clocks, 13, since their plans make no move, and 15 and 16, which
 only `ci-asks` checks; `deep-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
 and 16 and the action property 17, on its small plans.
-`ci-moves` checks the same and property 13, an action property checked at each removal. Its plans
-send only the daemon's one write W, which keeps it well within its 5 minutes: the replica's move
+`ci-moves`, `ci-stays` and `ci-stays-stale` check the same and property 13, an action property checked at each removal, which a `Stay` is not: its leaving member stays. Their plans
+send only the daemon's one write W, which keeps each within its 5 minutes: the replica's move
 with the successor's writes and a process restart, run alone, passes property 13 at 2.3 million
 states in 224 s. A
 simulator invariant is registered by [Placement faults and
@@ -3897,14 +3900,16 @@ section.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 27 | 687,958 | 78 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 24 | 369,855 | 41 s |
-| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 31 | 1,867,957 | 260 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 27 | 694,453 | 80 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 24 | 389,831 | 47 s |
+| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 31 | 1,907,361 | 281 s |
 | Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 26 | 343,918 | 40 s |
 | Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 29 | 1,197,647 | 163 s |
 | Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 108 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 767,209 | 89 s |
-| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 28 | 1,349,650 | 198 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 768,383 | 91 s |
+| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 28 | 1,269,726 | 201 s |
+| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 35 | 1,719,170 | 195 s |
+| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 28 | 1,351,424 | 205 s |
 | Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 21 | 32,008 | 19 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
@@ -4066,12 +4071,59 @@ that passed before discrepancy 12 again with that path removed:
 | `Recover` at kept version 0 | 22 | A `recovered` line |
 | `GoneRefuses` | 8, 12, 13, 15, 16, 19, 33, 35, the seeds with a `gone` line | |
 
-Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half. Lines the passing seeds reached:
-`Membership` by `edit`, `mark`, `rotate`, `add`, `remove` and `replace`, `Fold`, `Renew`, `Adopt`, `Send`,
-`Order`, `Deliver`, `Peer`, `Activate`, `Restart`, `Format`. `recovered`, `reported` and `ask` lines occur, but each can be a stutter
-and TLC does not report which branch a line took, so `Recover`, `ReportRecovered`, `AskNext` and
-`CounterOut` count as unproven, as does `OwnFail` behind `mayfail`, though the table above shows `Recover` taken at 5 seeds. No passing line reached `MemberFail`. `Tick`, `Die`, `Refuse`, `Reboot`, `Persist`, `OpenGrant`,
-`OpenLapse`, `LeaseSteps`, Raft's actions and the other fault actions of `Choices` have no mapping.
+Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half.
+
+Each run ends with what its passing traces covered, and each trace's rows stay in its directory's
+`cover` file. TLC prints the behavior a trace passed by, and `cover` in `scripts/conform.sh` reads it: a
+line took its action when a variable of `epoch.tla` moved from the state before it, and stuttered when
+none did. A pass shows one behavior TLC found, so a line counted as a stutter may also have had a real
+step open to it, and on `maydeliver`, `mayfail` and `mayrecover` a line counted as taken may also have had
+a stutter open to it: it shows only what that behavior did. TLC's own `-coverage` does not fit: it counts how often each expression was evaluated
+over every branch of the search, abandoned ones and `ENABLED` too, so on seed 55 `Remove`'s first guard
+shows 8 against the 2 removals the trace took.
+
+Over the 39 passing seeds of 0 to 39, with `Stay` from the sweep:
+
+| Action | Line | Took it | Stuttered | Seeds |
+| --- | --- | --- | --- | --- |
+| `Deliver` | `logged` | 4,141 | 3,210 | 39 |
+| `Deliver` | `maydeliver` | 368 | 372 | 35 |
+| `Send` | `send` | 3,744 | 0 | 39 |
+| `Order` | `order` | 3,135 | 0 | 39 |
+| `Adopt` | `adopt` | 2,756 | 225 | 39 |
+| `Peer` | `peer` | 454 | 0 | 39 |
+| `Activate` | `activate` | 448 | 0 | 39 |
+| `Fold` | `fold` | 448 | 0 | 39 |
+| `OwnFail` | `mayfail` | 194 | 8 | 16 |
+| `Recover` | `recovered` | 156 | 64 | 34 |
+| `Recover` | `mayrecover` | 1 | 2 | 1 |
+| `GoneRefuses` | `gone` | 154 | 0 | 12 |
+| `MarkDisk` | `plan` | 84 | 0 | 29 |
+| `Edit` | `plan` | 85 | 0 | 37 |
+| `Restart` | `restart` | 73 | 0 | 32 |
+| `Add` | `plan` | 56 | 0 | 18 |
+| `Remove` | `plan` | 54 | 0 | 18 |
+| `ReportRecovered` | `reported` | 54 | 255 | 18 |
+| `Replace` | `plan` | 49 | 0 | 16 |
+| `Renew` | `renew` | 45 | 0 | 16 |
+| `Rotate` | `plan` | 37 | 0 | 37 |
+| `Format` | `format` | 16 | 0 | 16 |
+| `AskNext` | `ask` | 12 | 46 | 12 |
+| `Stay` | `plan` | 7 | 0 | 55, 231, 311, 323 of the sweep, none of 0 to 39 |
+
+`table`, `committed`, `persisted` and `recoverorder` lines check a state and take no action, as their
+mapping says. The actions of `Next` no trace took:
+
+| Action | Why |
+| --- | --- |
+| `Persist` | Compressed: a `peer` line takes it in `PeerOn`, and a `persisted` line only checks it |
+| `CounterOut` | An `ask` line can take it, but it needs a chunk at 1,000,000 versions, which no run writes |
+| `MemberFail` | No traced run injects a disk fault, so the plan gives it no budget |
+| `Refuse` | A fenced client write. No record maps it |
+| `SetMinLive`, `Die`, `Isolate` | No run of the test changes `min_live`, ends a daemon or cuts a node from the control plane |
+| `OpenGrant`, `OpenLapse`, `Ask`, `Grant`, `GrantRefused`, `SendHb`, `RecvGrant`, `RecvHb`, `RoundTrip`, `Beat`, `EndWait` | The lease half, not traced |
+| `Fortify`, `Elect`, `Transfer`, `StepDown` | Raft, not traced: `MaxTerm` is 0 |
+| `Tick`, `Suspend`, `Wake`, `Freeze`, `Thaw`, `RateStep`, `Reboot`, `BootUp`, `NetFault` | Clock and network faults, not traced: `Clocks` is off |
 
 | # | What | Class | How settled |
 | --- | --- | --- | --- |
@@ -4092,18 +4144,17 @@ and TLC does not report which branch a line took, so `Recover`, `ReportRecovered
 | 15 | A member crashes, restarts, crashes and restarts, with a new interval published while it was down. The code asks on the first table after a restart (`replica.go:539`), where the spec's `rsIv` lets it peer without asking | spec, open | Seed 205, an `ask` line. An extra interval, conservative: likely a detail the spec lacks |
 | 16 | The harness's final ask maps to an `Edit`, and `Edit` needs `x.lv = 0`, so it has no step on a PG with a leaving member | logging, open | Seed 154, a `plan` line: a new form of discrepancy 8 |
 | 17 | The spec has disk 2, chunk 2 at whole 3145734, the code 3145733 | spec or compression, open | Seed 110, a `peer` line, reasoned not settled: probably a version the primary's peering dropped, which the code's store settled away and the spec's `dlog` keeps |
-| 18 | `refill` calls `stay` (`placement.go`): a leaving member that is up takes the place of a missing member, ending the move, so `tracedata` stops with no spec change for the table | spec, open | Seeds 55, 231, 267, 311, 323. [design.md](design.md) states it, and [the epoch model](#epoch-change-model) lists it as not modelled. A model step would close them |
+| 18 | `refill` calls `stay` (`placement.go`): a leaving member that is up takes the place of a missing member, ending the move, which had no spec change for the table | spec | Settled: `Stay` is in `epoch.tla` as [design.md](design.md) states it, `ci-stays` reaches it, and `classify` maps the table. `neg-stay-keeps-interval` breaks `OneWritePerVersion`. Property 13 fires when the leaving member goes from the members, as it says, so an ended move is no removal to it. Seeds 55, 231, 311 and 323 pass; 267 has no verdict at 300 s |
 
-Seeds 40 to 339 at 150 s each: 260 passed at aa05106, and the 40 that did not were run again at abb8966. None names a safety invariant.
+Seeds 40 to 339 at 150 s each: 260 passed at aa05106, and the 40 that did not were run again at abb8966, seeds 55, 231, 267, 311 and 323 again once `classify` mapped `Stay`. None names a safety invariant.
 
 | Outcome | Seeds | Read |
 | --- | --- | --- |
-| Pass | 268 of 300 | |
-| No verdict at 150 s | 51, 87, 117, 118, 127, 133, 148, 195, 199, 221, 256, 265, 291, 316, 333 | |
+| Pass | 272 of 300 | |
+| No verdict at 150 s | 51, 87, 117, 118, 127, 133, 148, 195, 199, 221, 256, 265, 267, 291, 316, 333 | 267 at 300 s |
 | `peer` | 80, 110, 123, 159, 175, 176, 191, 239 | 110 is discrepancy 17; 191 passes the `order` that stopped it, discrepancy 14; the rest unread |
 | `ask` | 205, 313, 327 | 205 is discrepancy 15; the rest unread |
 | `plan` | 154 | Discrepancy 16 |
-| `tracedata` stops | 55, 231, 267, 311, 323 | Discrepancy 18 |
 
 ### Traces can fail in the epoch model's check
 
