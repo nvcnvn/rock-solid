@@ -3900,15 +3900,16 @@ section.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 27 | 687,958 | 78 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 24 | 369,855 | 41 s |
-| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 31 | 1,867,957 | 260 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 27 | 694,453 | 80 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 24 | 389,831 | 47 s |
+| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 31 | 1,907,361 | 281 s |
 | Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 26 | 343,918 | 40 s |
 | Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 29 | 1,197,647 | 163 s |
 | Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 108 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 767,209 | 89 s |
-| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 28 | 1,267,226 | 201 s |
-| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 28 | 1,349,650 | 198 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 768,383 | 91 s |
+| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 28 | 1,269,726 | 201 s |
+| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 35 | 1,719,170 | 195 s |
+| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 28 | 1,351,424 | 205 s |
 | Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 21 | 32,008 | 19 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
@@ -4086,7 +4087,7 @@ Over the 39 passing seeds of 0 to 39, with `Stay` from the sweep:
 | Action | Line | Took it | Stuttered | Seeds |
 | --- | --- | --- | --- | --- |
 | `Deliver` | `logged` | 4,141 | 3,210 | 39 |
-| `Deliver` | `maydeliver` | 368 | 374 | 35 |
+| `Deliver` | `maydeliver` | 368 | 372 | 35 |
 | `Send` | `send` | 3,744 | 0 | 39 |
 | `Order` | `order` | 3,135 | 0 | 39 |
 | `Adopt` | `adopt` | 2,756 | 225 | 39 |
