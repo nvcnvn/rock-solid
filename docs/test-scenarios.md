@@ -3228,6 +3228,7 @@ nodes without finishing.
 | `ci-tears` | 3 | As `ci-peering`, on PG 1's primary down and back, with `TornLists` on: a decision may also list any member Entry leaves off that has a version above its newest ordered, as a crash that left part of a version does in the code |
 | `ci-moves` | 3 | As `ci-peering`, with the move plans: PG 2's replica and then its primary moved to node 1; the replica's move with the leaving member marked down before its replacement recovers, or with a process restart; the replica's move with primary 2 put in `maintenance` and back before the removal; and the replica's move with a refill before the removal, a disk formatted again replacing node 1's. Each sends only the daemon's one write W |
 | `ci-stays` | 3 | As `ci-moves`, with the moves that a leaving member ends by taking the place of a member marked down: the primary, the other member of a leaving primary, or the new member. It is kept apart from `ci-moves` so that each fits its 5 minutes |
+| `ci-stays-stale` | 3 | PG 2 and its chunk alone, with no spare table: the leaving member down and back, then taking the place of the primary, marked down. Its 7 tables need that to fit 5 minutes, so it has no fold of an activation report. It reaches W kept with no member holding it, W refused and nothing acknowledged lost |
 | `ci-faults` | 3 | As `ci-peering`, with a sixth table and a second fault; the plans that fail a version at a member or on the primary's own log, alone, with the primary moved, with a member or the primary marked down, and with one in `maintenance` and back; a member's failure with a process restart; a primary moved away and back; the plans that format a disk around peering and around recovery; and the one that raises `min_live` past an interval that ran below it |
 | `ci-asks` | 3 | As `ci-peering`, with the failure plans that hold no restart or format, under fairness, for the properties that every interval a failure ended is asked past and every client is answered |
 | `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the six below |
@@ -3435,7 +3436,7 @@ on that log fails.
 the Raft group and lease time need clocks, 13, since their plans make no move, and 15 and 16, which
 only `ci-asks` checks; `deep-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
 and 16 and the action property 17, on its small plans.
-`ci-moves` and `ci-stays` check the same and property 13, an action property checked at each removal, which a `Stay` is not: its leaving member stays. Their plans
+`ci-moves`, `ci-stays` and `ci-stays-stale` check the same and property 13, an action property checked at each removal, which a `Stay` is not: its leaving member stays. Their plans
 send only the daemon's one write W, which keeps each within its 5 minutes: the replica's move
 with the successor's writes and a process restart, run alone, passes property 13 at 2.3 million
 states in 224 s. A

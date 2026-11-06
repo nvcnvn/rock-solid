@@ -1957,6 +1957,8 @@ AckedOnMinLive == [][\A y \in ackd' \ ackd :
 \* allows maintenance.
 
 PGs == {1, 2}
+OnePG == {2}
+OneChunk == {2}
 MinLive2 == [p \in PGs |-> 2]
 MaintPG2 == [p \in PGs |-> p = 2]
 Mem3 == [p \in PGs |-> IF p = 1 THEN <<1, 2, 3>> ELSE <<2, 3>>]
@@ -2070,8 +2072,9 @@ TearPlans == {PrimaryBack}
 \* late; the replica's move refilled before the removal: a disk is
 \* formatted again and replaces node 1's old disk; and the leaving member
 \* taking the place of a member that went down: the primary, the other member
-\* of a leaving primary, or the new member itself. With no "die", each sends
-\* only the daemon's one write W.
+\* of a leaving primary, the new member itself, or the primary after the leaving
+\* member was down and back. With no "die", each sends only the daemon's one
+\* write W.
 MoveReplica == Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Session, {})
 MovePrimary == Plan(<<AddM(2, 2, 1), RemoveM(2)>>, Session, {})
 MoveLeavingDown == Plan(<<AddM(2, 3, 1), Mark(3, "down"), RemoveM(2)>>, Session, {})
@@ -2081,9 +2084,15 @@ MoveRefill == Plan(<<AddM(2, 3, 1), Repl(2, 1, 4), RemoveM(2)>>, Session, {"form
 StayForPrimary == Plan(<<AddM(2, 3, 1), Mark(2, "down"), StayM(2, 2)>>, Session, {})
 StayAsPrimary == Plan(<<AddM(2, 2, 1), Mark(3, "down"), StayM(2, 3)>>, Session, {})
 StayForNew == Plan(<<AddM(2, 3, 1), Mark(1, "down"), StayM(2, 1)>>, Session, {})
+StayStale == Plan(<<AddM(2, 3, 1), Mark(3, "down"), Mark(3, "up"), Mark(2, "down"), StayM(2, 2)>>, Session, {})
 MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveMaint, MoveRefill}
 \* ci-stays splits the stays off, each config under the 300 s budget.
 StayMovePlans == {StayForPrimary, StayAsPrimary, StayForNew}
+\* A leaving member down and back, then taking the place of a primary that went
+\* down: W, kept at the first of those intervals on the primary alone and
+\* refused, stays kept with no holder among the members, unacknowledged. Over
+\* 7 tables ci-stays-stale needs PG 2 alone and no spare table to fit 5 minutes.
+StayStalePlans == {StayStale}
 \* neg-stay-keeps-interval: a primary still marked up once its disk is formatted
 \* away, two versions in flight.
 StayPlans == {Plan(<<AddM(2, 3, 1), StayM(2, 2)>>, Partial2, {"format"})}
