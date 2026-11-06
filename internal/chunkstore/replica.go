@@ -160,9 +160,12 @@ type storeReq struct {
 	pg    core.PGID
 	chunk core.ChunkID
 	// version is the version a member's write or punch was handed, and recover marks a recovery
-	// write, whose version is the chunk's write before it.
-	version uint64
-	recover bool
+	// write, whose version is the chunk's write before it; source is the disk a recovery write's
+	// image came from, and interval the interval it was ordered in.
+	version  uint64
+	recover  bool
+	source   uint32
+	interval uint32
 }
 
 // version is a client write or punch the primary took in interval and fans out once its store orders it: the members that must hold it, those that do, and those whose latest send, numbered in sends, has neither a reply nor a PeerLost yet; done once its client is answered.
@@ -583,7 +586,9 @@ func (r *Replica) demote(ctx *core.Context, out *ReplicaOutput) {
 			continue
 		}
 		v.done = true
-		r.takeReq(v.req)
+		if !v.recover {
+			r.takeReq(v.req)
+		}
 		r.answerClient(ctx, v, r.refusal(v.u.PG.PG), out)
 		r.release(ctx, i)
 	}
@@ -771,7 +776,7 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 		}
 	case KindReadReply:
 		var rp Response
-		if DecodeResponse(frame, data, &rp) == nil && (r.baseReply(ctx, &rp, buf, out) || r.recoverReply(ctx, ev.Peer, &rp, buf)) {
+		if DecodeResponse(frame, data, &rp) == nil && (r.baseReply(ctx, &rp, buf, out) || r.recoverReply(ctx, ev.Peer, &rp, buf, out)) {
 			return
 		}
 	case KindLeaseRequest:
@@ -977,10 +982,12 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		r.answer(ctx, ev.Peer, u.ID, &rp, core.NoBuf, out)
 		return
 	}
-	if !recover {
+	if recover {
+		out.note(trace.OutRecovering, u.Chunk.Hash(), uint64(u.Source), uint64(u.PG.Interval), 0, 0)
+	} else {
 		out.note(trace.OutAccepted, u.Chunk.Hash(), u.Version, 0, 0, 0)
 	}
-	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk, version: u.Version, recover: recover})
+	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk, version: u.Version, recover: recover, source: u.Source, interval: u.PG.Interval})
 	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, Epoch: u.Snapshot, Version: u.Version}
 	if recover {
 		req.Version, req.HasVer, req.Ver, req.Interval, req.Recover = 0, true, u.Version, u.PG.Interval, true
@@ -1350,10 +1357,10 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 	}
 	switch q.kind {
 	case reqRecover:
-		r.recoveryWritten(ctx, rp, out)
+		r.recoveryWritten(ctx, q, rp, out)
 	case reqRecoverRead:
 		if k := slices.IndexFunc(r.recs, func(rc recovery) bool { return rc.read == rp.ID }); k >= 0 {
-			r.recoveryRead(ctx, k, rp.Buf, rp.Err == nil)
+			r.recoveryRead(ctx, k, rp.Buf, rp.Err == nil, out)
 		} else {
 			freeBuf(ctx, rp.Buf)
 		}
@@ -1390,7 +1397,7 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 			out.note(trace.OutMemberFail, q.chunk.Hash(), q.version, 0, 0, 0)
 			r.noteFailed(failedVer{pg: q.pg, chunk: q.chunk, version: q.version})
 		} else if q.recover {
-			out.note(trace.OutRecovered, q.chunk.Hash(), rp.Version, 0, 0, 0)
+			out.note(trace.OutRecovered, q.chunk.Hash(), rp.Version, uint64(q.source), uint64(q.interval), 0)
 		} else {
 			out.note(trace.OutLogged, q.chunk.Hash(), rp.Version, 0, 0, 0)
 		}
@@ -1458,7 +1465,7 @@ func (r *Replica) ask(out *ReplicaOutput) {
 
 // peerLost ends every send to the peer and has the writes it left unacknowledged sent again after ResendAfter, new writes to it waiting behind them; a base asked of it is asked of the next member.
 func (r *Replica) peerLost(ctx *core.Context, peer core.NodeID, out *ReplicaOutput) {
-	r.recoverLost(ctx, peer)
+	r.recoverLost(ctx, peer, out)
 	for i := len(r.bases) - 1; i >= 0; i-- {
 		if r.bases[i].asked == peer {
 			r.askBase(ctx, i, out)

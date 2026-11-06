@@ -71,6 +71,15 @@ type gen struct {
 	lists map[[3]uint64]bool
 	// operatorAsk holds each PG the harness, no primary, asked a new interval of: its next table is an Edit that changes nothing.
 	operatorAsk map[uint64]bool
+	// activated is each PG's newest activated interval, tableIv the interval of each PG at each epoch.
+	activated map[uint64]uint64
+	tableIv   map[uint64]map[uint64]uint64
+	// left is the line where a [node, pg] stopped being in the PG's activated interval, formatAt the line where a spec disk's node formatted it, and nodeDisk a node's spec disk once formatted.
+	left     map[[2]uint64]int
+	formatAt map[uint64]int
+	nodeDisk map[int]uint64
+	// recovering holds each node's recovery writes its store took and has not reported: chunk, spec source, interval.
+	recovering map[int][][3]uint64
 }
 
 func ver(v uint64) string { return strconv.FormatUint((v>>32)*verBase+v&(1<<32-1), 10) }
@@ -106,6 +115,14 @@ func (g *gen) disk(id uint64) uint64 {
 	return id
 }
 
+// source is the spec's disk for a Recovered record's source, 0 for none.
+func (g *gen) source(id uint64) uint64 {
+	if id == 0 {
+		return 0
+	}
+	return g.disk(id)
+}
+
 func dropVersion(l [][2]uint64, c, v uint64) [][2]uint64 {
 	return slices.DeleteFunc(l, func(x [2]uint64) bool { return x[0] == c && x[1] == v })
 }
@@ -120,6 +137,13 @@ func (g *gen) landOpen(n int) {
 // crash writes a process crash: a write in flight may have reached the disk, so the lines before the restart let the versions a member had not reported durable land, and those the node's own log had not lose their record.
 func (g *gen) crash(n int) {
 	g.landOpen(n)
+	for _, x := range g.recovering[n] {
+		f := g.chunkField(x[0])
+		if x[2] == g.activated[f] {
+			g.lineAt(g.recoveredAt(f, n, x[1]), `k |-> "mayrecover", n |-> %d, l |-> %d, c |-> %d, s |-> %d, iv |-> %d`, n, g.primary[f], g.chunk(x[0]), x[1], x[2])
+		}
+	}
+	g.recovering[n] = nil
 	own := g.ownOpen[n]
 	for j := len(own) - 1; j >= 0; j-- {
 		g.line(`k |-> "mayfail", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(own[j][0]), ver(own[j][1]))
@@ -130,6 +154,47 @@ func (g *gen) crash(n int) {
 
 func (g *gen) line(format string, args ...any) {
 	g.lines = append(g.lines, "["+fmt.Sprintf(format, args...)+"]")
+}
+
+// lineAt writes a line at position at, before the lines already there, and keeps the marked positions on the lines they name.
+func (g *gen) lineAt(at int, format string, args ...any) {
+	if at == len(g.lines) {
+		g.line(format, args...)
+		return
+	}
+	g.lines = slices.Insert(g.lines, at, "["+fmt.Sprintf(format, args...)+"]")
+	for k, p := range g.left {
+		if p >= at {
+			g.left[k] = p + 1
+		}
+	}
+	for k, p := range g.formatAt {
+		if p >= at {
+			g.formatAt[k] = p + 1
+		}
+	}
+}
+
+// leave marks that node n leaves PG f's activated interval at the next line.
+func (g *gen) leave(n int, f uint64) {
+	k := [2]uint64{uint64(n), f}
+	if _, ok := g.left[k]; !ok {
+		g.left[k] = len(g.lines)
+	}
+}
+
+// recoveredAt is where a recovery write of PG f to node n read from spec disk s lands: the spec takes its read and its write as one step while its primary leads, so a record from after the primary, the target or the source left the interval goes before the first of those steps, across lines that keep what Recover reads. The store took the write in time, as maydeliver lets an open version land.
+func (g *gen) recoveredAt(f uint64, n int, s uint64) int {
+	at := len(g.lines)
+	for _, x := range []int{g.primary[f], n} {
+		if p, ok := g.left[[2]uint64{uint64(x), f}]; ok {
+			at = min(at, p)
+		}
+	}
+	if p, ok := g.formatAt[s]; ok {
+		at = min(at, p)
+	}
+	return at
 }
 
 func marks(m uint64) string { return [...]string{"up", "down", "maint"}[m] }
@@ -200,6 +265,10 @@ func (g *gen) classify(epoch uint64, changed []uint64, next map[uint64]*entry) {
 	}
 	for _, f := range changed {
 		g.entries[f] = next[f]
+	}
+	g.tableIv[epoch] = map[uint64]uint64{}
+	for f, e := range g.entries {
+		g.tableIv[epoch][f] = e.interval
 	}
 	g.epochs[epoch] = g.tables
 	g.tableLine(changed)
@@ -400,6 +469,11 @@ func (g *gen) run(recs []trace.Record) {
 			g.classify(epoch, changed, next)
 			i = end
 		case trace.OutAdopt:
+			for _, f := range g.pgs {
+				if iv := g.tableIv[r.Fields[0]][f]; iv > g.activated[f] && g.activated[f] != 0 {
+					g.leave(n, f)
+				}
+			}
 			g.landOpen(n)
 			e, ok := g.epochs[r.Fields[0]]
 			if !ok {
@@ -424,8 +498,16 @@ func (g *gen) run(recs []trace.Record) {
 			g.ownOpen[n] = dropVersion(g.ownOpen[n], r.Fields[0], r.Fields[1])
 			g.memberOpen[n] = dropVersion(g.memberOpen[n], r.Fields[0], r.Fields[1])
 			g.line(`k |-> "logged", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(r.Fields[0]), ver(r.Fields[1]))
+		case trace.OutRecovering:
+			g.recovering[n] = append(g.recovering[n], [3]uint64{r.Fields[0], g.source(r.Fields[1]), r.Fields[2]})
 		case trace.OutRecovered:
-			g.line(`k |-> "recovered", n |-> %d, l |-> %d, c |-> %d, v |-> %s`, n, g.primary[g.chunkField(r.Fields[0])], g.chunk(r.Fields[0]), ver(r.Fields[1]))
+			g.recovering[n] = slices.DeleteFunc(g.recovering[n], func(x [3]uint64) bool { return x[0] == r.Fields[0] && x[2] == r.Fields[3] })
+			f, s := g.chunkField(r.Fields[0]), g.source(r.Fields[2])
+			at := len(g.lines)
+			if r.Fields[3] == g.activated[f] {
+				at = g.recoveredAt(f, n, s)
+			}
+			g.lineAt(at, `k |-> "recovered", n |-> %d, l |-> %d, c |-> %d, v |-> %s, s |-> %d, iv |-> %d`, n, g.primary[f], g.chunk(r.Fields[0]), ver(r.Fields[1]), s, r.Fields[3])
 		case trace.OutReported:
 			g.line(`k |-> "reported", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.OutAsk:
@@ -435,8 +517,14 @@ func (g *gen) run(recs []trace.Record) {
 			}
 			g.line(`k |-> "ask", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.OutFormat:
+			old, ok := g.nodeDisk[n]
+			if !ok {
+				old = uint64(n)
+			}
+			g.formatAt[old] = len(g.lines)
 			g.fmts++
 			g.diskIDs[r.Fields[0]] = uint64(g.nodes + g.fmts)
+			g.nodeDisk[n] = g.diskIDs[r.Fields[0]]
 			g.line(`k |-> "format", n |-> %d`, n)
 		case trace.OutCommitted:
 			g.line(`k |-> "committed", c |-> %d, v |-> %s`, g.chunk(r.Fields[0]), ver(r.Fields[1]))
@@ -464,8 +552,19 @@ func (g *gen) run(recs []trace.Record) {
 			g.lists[key] = true
 		case trace.OutActivate:
 			g.primary[r.Fields[0]] = n
+			g.activated[r.Fields[0]] = r.Fields[1]
+			for k := range g.left {
+				if k[1] == r.Fields[0] {
+					delete(g.left, k)
+				}
+			}
 			g.line(`k |-> "activate", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.EvCrash:
+			for _, f := range g.pgs {
+				if g.primary[f] == n {
+					g.leave(n, f)
+				}
+			}
 			g.crash(n)
 		default:
 			if !slices.Contains(belowProtocol, r.Name) {
@@ -491,8 +590,12 @@ func (g *gen) decide(n int, r *trace.Record, kept []string) {
 	}
 	slices.Sort(ds)
 	var rep, j []string
+	at := len(g.lines)
 	for _, d := range ds {
 		j = append(j, strconv.FormatUint(g.disk(d), 10))
+		if p, ok := g.formatAt[g.disk(d)]; ok {
+			at = min(at, p)
+		}
 		x := got[d]
 		for _, h := range g.chunks {
 			cv, ok := x.chunks[h]
@@ -506,7 +609,7 @@ func (g *gen) decide(n int, r *trace.Record, kept []string) {
 			rep = append(rep, fmt.Sprintf("[d |-> %d, c |-> %d, whole |-> %s, logged |-> %s, list |-> %s, decided |-> %d]", g.disk(d), g.chunk(h), ver(cv[0]), ver(cv[1]), list, x.decided))
 		}
 	}
-	g.line(`k |-> "peer", n |-> %d, p |-> %d, iv |-> %d, j |-> {%s}, kept |-> <<%s>>, rep |-> {%s}`,
+	g.lineAt(at, `k |-> "peer", n |-> %d, p |-> %d, iv |-> %d, j |-> {%s}, kept |-> <<%s>>, rep |-> {%s}`,
 		n, g.pg(r.Fields[0]), r.Fields[1], strings.Join(j, ", "), strings.Join(kept, ", "), strings.Join(rep, ", "))
 }
 
@@ -563,7 +666,8 @@ func main() {
 		fatal("usage: tracedata [-module name] run.trace")
 	}
 	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{},
-		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{}}
+		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
+		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, nodeDisk: map[int]uint64{}, recovering: map[int][][3]uint64{}}
 	recs := g.load(flag.Arg(0))
 	if len(recs) == 0 {
 		fatal("no table in the trace")

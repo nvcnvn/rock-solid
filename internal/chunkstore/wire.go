@@ -116,7 +116,7 @@ type Hello struct {
 	Incarnation uint64
 }
 
-// Update is a chunk write or punch, from a client to the primary or, with the version it ordered, from the primary to a member, a member's punch carrying the edge blocks the primary merged; a purger's punch names its shard and Raft term. A recovery write (KindRecover) covers the whole chunk at the version, 0 for an absent chunk, it brings the member to, and carries a recovery buffer, or none when it only ends the chunk's listing.
+// Update is a chunk write or punch, from a client to the primary or, with the version it ordered, from the primary to a member, a member's punch carrying the edge blocks the primary merged; a purger's punch names its shard and Raft term. A recovery write (KindRecover) covers the whole chunk at the version, 0 for an absent chunk, it brings the member to, and carries a recovery buffer, or none when it only ends the chunk's listing; Source is the disk its image was read from, 0 when it needed none.
 type Update struct {
 	Kind        Kind
 	ID          core.RequestID
@@ -134,6 +134,7 @@ type Update struct {
 	Expect      uint64
 	// Granted marks a client's flush of buffered data under a space grant, which write_limit admits.
 	Granted bool
+	Source  uint32
 }
 
 // Read asks for a chunk's committed bytes, or for version At when HasAt; with Recover (KindRecoverRead), a primary asks a member for the whole chunk's live image as a recovery buffer.
@@ -342,7 +343,11 @@ func AppendUpdate(dst []byte, u *Update) []byte {
 	dst = le.AppendUint32(le.AppendUint32(dst, u.Off), u.Len)
 	dst = le.AppendUint64(le.AppendUint64(le.AppendUint64(dst, u.Snapshot), u.Shard), u.Term)
 	dst = le.AppendUint64(dst, u.Version)
-	return le.AppendUint64(append(dst, flagIf(u.HasExpect, expectFlag)|flagIf(u.Granted, grantedFlag)), u.Expect)
+	dst = le.AppendUint64(append(dst, flagIf(u.HasExpect, expectFlag)|flagIf(u.Granted, grantedFlag)), u.Expect)
+	if u.Kind == KindRecover {
+		dst = le.AppendUint32(dst, u.Source)
+	}
+	return dst
 }
 
 // DecodeUpdate decodes a write or punch frame whose data buffer holds data bytes: a write's are the blocks its range touches.
@@ -356,6 +361,10 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 	u.Snapshot, u.Shard, u.Term, u.Version = r.u64(), r.u64(), r.u64(), r.u64()
 	flags := r.u8()
 	u.HasExpect, u.Granted, u.Expect = flags&expectFlag != 0, flags&grantedFlag != 0, r.u64()
+	u.Source = 0
+	if r.kind == KindRecover {
+		u.Source = r.u32()
+	}
 	if flags&^(expectFlag|grantedFlag) != 0 || !validVersion(u.Expect) || !u.HasExpect && u.Expect != 0 || u.Granted && u.Kind != KindWrite {
 		r.bad = true
 	}

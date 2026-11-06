@@ -75,6 +75,15 @@ RowMatches(r) ==
             /\ ivs[r.p][y.iv].ml = y.ml
             /\ \A j \in 1..Len(y.mem) : ivs[r.p][y.iv].st[y.mem[j]] = y.marks[j]
 
+\* A primary's gated recovery write settled by a later interval's peering of the
+\* same primary, which listed the chunk again: its entry stays, and Recover did not
+\* happen for it.
+RecoveryOver(l) == \E a \in act : a.p = ChunkPG[l.c] /\ a.k > l.iv
+
+RecoverLine(l) ==
+    /\ (l.s = 0) = (miss[ddisk[l.n]][l.c] = 0)
+    /\ RecoverFrom(l.l, ChunkPG[l.c], l.c, ddisk[l.n], IF l.s = 0 THEN ddisk[l.n] ELSE l.s)
+
 Line(l) ==
     \/ /\ l.k = "table"
        /\ \A r \in Range(l.rows) : RowMatches(r)
@@ -114,12 +123,17 @@ Line(l) ==
     \/ /\ l.k = "format"
        /\ Format(l.n)
     \/ /\ l.k = "recovered"
-       /\ IF miss[ddisk[l.n]][l.c] = NoMiss
+       /\ IF RecoveryOver(l)
+          THEN UNCHANGED vars
+          ELSE IF miss[ddisk[l.n]][l.c] = NoMiss
           THEN /\ \E d \in Disk : miss[d][l.c] # NoMiss \/ [c |-> l.c, v |-> l.v] \in healed
                /\ UNCHANGED vars
           ELSE /\ \/ l.v = miss[ddisk[l.n]][l.c]
                   \/ IvOfV(l.v) = IvAt(l.l, ChunkPG[l.c]) /\ l.v <= pv[l.l][l.c]
-               /\ Recover(l.l, ChunkPG[l.c], l.c, ddisk[l.n])
+               /\ RecoverLine(l)
+    \/ /\ l.k = "mayrecover"
+       /\ \/ UNCHANGED vars
+          \/ RecoverLine(l)
     \/ /\ l.k = "reported"
        /\ IF ivs[l.p][l.iv].lv = 0 \/ [p |-> l.p, k |-> l.iv] \in recd
           THEN UNCHANGED vars
@@ -156,6 +170,7 @@ TraceNext ==
     /\ Line(Trace[line])
     /\ line' = line + 1
     /\ healed' = IF Trace[line].k = "recovered" /\ miss[ddisk[Trace[line].n]][Trace[line].c] # NoMiss
+                    /\ ~RecoveryOver(Trace[line])
                  THEN healed \cup {[c |-> Trace[line].c, v |-> Trace[line].v]}
                  ELSE healed
 

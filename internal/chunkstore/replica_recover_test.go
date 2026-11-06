@@ -2,12 +2,14 @@ package chunkstore
 
 import (
 	"bytes"
+	"maps"
 	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim/clock"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 // recSend is a recovery write a primary sent a member: its update, and when it carried a buffer,
@@ -589,5 +591,36 @@ func TestRecoveryAllocatesNothing(t *testing.T) {
 	}
 	if c.mallocs != 0 {
 		t.Fatalf("%d heap allocations over a warm round of recovery", c.mallocs)
+	}
+}
+
+// Primary 3 and member 1 both lack the chunk disk 2 holds, so primary 3 reads it from disk 2, and each
+// one's record of its copy names disk 2, the member's by the recovery write.
+func TestARecoveredRecordNamesItsSource(t *testing.T) {
+	tbl := rtable(4, 1)
+	_, e := tbl.entry(pg0)
+	e.Members = []Member{{Disk: 2}, {Disk: 1, Mark: MarkDown}, {Disk: 3, Mark: MarkDown}}
+	c := newRCluster(t, tbl)
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 0, 2, 1)
+	c.conformBegin()
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 2)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 3}, {Disk: 1}, {Disk: 2}}
+	}), true)
+	c.settle()
+	got := map[uint32]uint64{}
+	for line := range bytes.Lines(c.s.Trace()) {
+		r, err := trace.Parse(bytes.TrimSuffix(line, []byte("\n")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Name == trace.OutRecovered {
+			got[r.Node+1] = r.Fields[2]
+		}
+	}
+	if want := (map[uint32]uint64{1: 2, 3: 2}); !maps.Equal(got, want) {
+		t.Fatalf("recovered records by disk name sources %v, want %v", got, want)
 	}
 }

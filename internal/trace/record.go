@@ -115,7 +115,7 @@ const (
 	OutPersisted
 	// OutActivate, a primary activating: pg interval.
 	OutActivate
-	// OutRecovered, a disk's copy of a chunk recovered: chunk version.
+	// OutRecovered, a disk's copy of a chunk recovered: chunk version source interval, source the disk the image was read from, 0 when it needed none, and interval the one the write was ordered in.
 	OutRecovered
 	// OutReported, a primary reporting its interval recovered: pg interval.
 	OutReported
@@ -127,6 +127,8 @@ const (
 	OutAccepted
 	// OutMemberFail, a member refusing a version or failing to log it: chunk version gone, gone when the node's disk is no up member of the interval, so a formatted disk's successor.
 	OutMemberFail
+	// OutRecovering, a disk's store taking a recovery write: chunk source interval. A crash can leave it durable with no OutRecovered.
+	OutRecovering
 	// OutPast is a past interval of the OutEntry before it: pg interval minlive. Its members follow as OutMember.
 	OutPast
 	numNames
@@ -219,12 +221,13 @@ var schemas = [numNames]schema{
 	OutKept:           {"Kept", KindOutput, []field{fChunk, {"kept", typeNum}}},
 	OutPersisted:      {"Persisted", KindOutput, []field{fPG, fIv, fDisk}},
 	OutActivate:       {"Activate", KindOutput, []field{fPG, fIv}},
-	OutRecovered:      {"Recovered", KindOutput, []field{fChunk, fVer}},
+	OutRecovered:      {"Recovered", KindOutput, []field{fChunk, fVer, {"source", typeNum}, fIv}},
 	OutReported:       {"Reported", KindOutput, []field{fPG, fIv}},
 	OutAsk:            {"Ask", KindOutput, []field{fPG, fIv}},
 	OutFormat:         {"Format", KindOutput, []field{fDisk}},
 	OutAccepted:       {"Accepted", KindOutput, []field{fChunk, fVer}},
 	OutMemberFail:     {"MemberFail", KindOutput, []field{fChunk, fVer, {"gone", typeBool}}},
+	OutRecovering:     {"Recovering", KindOutput, []field{fChunk, {"source", typeNum}, fIv}},
 	OutPast:           {"PastInterval", KindOutput, []field{fPG, fIv, {"minlive", typeNum}}},
 }
 

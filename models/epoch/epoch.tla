@@ -809,7 +809,7 @@ Persist(d) ==
 \* something was kept of needs none, so the write clears the list with no read.
 \* With RecoveryReadOldDisk, a read for a source formatted again is answered by its
 \* node's new, empty disk, and taken for the kept version.
-Recover(n, p, c, d) ==
+RecoverFrom(n, p, c, d, m) ==
     LET k == IvAt(n, p)
         K == miss[d][c]
     IN /\ Running(n)
@@ -821,7 +821,8 @@ Recover(n, p, c, d) ==
        /\ Running(dnode[d])
        /\ IvAt(dnode[d], p) = k
        /\ K # NoMiss
-       /\ \E m \in UpIn(p, k), at \in {Ver(k, 0)} \cup {v \in Ver(k, 1)..pv[n][c] : IvOfV(v) = k} :
+       /\ m \in UpIn(p, k)
+       /\ \E at \in {Ver(k, 0)} \cup {v \in Ver(k, 1)..pv[n][c] : IvOfV(v) = k} :
             LET old == Bug("RecoveryReadOldDisk") /\ dnode[m] = 0 /\ dhost[m] # 0
                 s == IF old THEN ddisk[dhost[m]] ELSE m
             IN /\ dnode[s] # 0
@@ -838,6 +839,8 @@ Recover(n, p, c, d) ==
        /\ miss' = [miss EXCEPT ![d][c] = NoMiss]
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, persIv, mrecv, failed,
                       priVars, dataVars, leaseVars, clockVars, raftVars>>
+
+Recover(n, p, c, d) == \E m \in UpIn(p, IvAt(n, p)) : RecoverFrom(n, p, c, d, m)
 
 \* A primary that activated reports, on its next heartbeat, that every member
 \* of its interval but a leaving one is up and lists nothing. The model sends

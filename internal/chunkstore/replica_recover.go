@@ -29,14 +29,16 @@ type recoverChunk struct {
 	failed uint8
 }
 
-// recovery is a chunk being recovered: its image read from a source, by store request read or by
-// network request rid from the loop at source, then its recovery write, store request req, ordered
-// and sent like any write.
+// recovery is a chunk being recovered: its image read from disk from at slot src of the members,
+// by store request read or by network request rid from the loop at source, then its recovery write,
+// store request req, ordered and sent like any write. A from of 0 is a recovery that needs no
+// source.
 type recovery struct {
 	pg       core.PGID
 	interval uint32
 	todo     int
 	src      int
+	from     uint32
 	read     uint64
 	rid      core.RequestID
 	source   core.NodeID
@@ -157,7 +159,7 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 	t := &l.todo[j]
 	rc := recovery{pg: l.pg, interval: l.interval, todo: j}
 	if t.kept == 0 {
-		r.recoverEmpty(ctx, t, rc)
+		r.recoverEmpty(ctx, t, rc, out)
 		return
 	}
 	src, clean := -1, false
@@ -175,7 +177,7 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 	}
 	switch {
 	case src < 0 && r.plant.clearNoSource:
-		r.recoverEmpty(ctx, t, rc)
+		r.recoverEmpty(ctx, t, rc, out)
 		return
 	case !clean:
 		t.targets = 0
@@ -185,17 +187,17 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 		t.wait, r.waits = true, true
 		return
 	}
-	t.busy, rc.src = true, src
+	t.busy, rc.src, rc.from = true, src, e.Members[src].Disk
 	if r.plant.coverAtRead {
 		r.st.freezeCover(t.chunk)
 	}
-	if d := e.Members[src].Disk; d == r.cfg.Disk {
+	if rc.from == r.cfg.Disk {
 		rc.read = r.newReq(storeReq{kind: reqRecoverRead, pg: l.pg, chunk: t.chunk})
 		r.recs = append(r.recs, rc)
 		r.st.Read(ctx, Request{ID: rc.read, Chunk: t.chunk, Len: core.ChunkSize, Recover: true}, &r.sout)
 	} else {
 		r.nextID++
-		rc.rid, rc.source = core.RequestID(r.nextID), r.addr(d)
+		rc.rid, rc.source = core.RequestID(r.nextID), r.addr(rc.from)
 		r.recs = append(r.recs, rc)
 		rd := Read{ID: rc.rid, PG: PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval}, Chunk: t.chunk, Len: core.ChunkSize, Recover: true}
 		r.frame = AppendRead(r.frame[:0], &rd)
@@ -206,7 +208,7 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 }
 
 // recoverEmpty orders a recovery write of an image with every block a hole, which needs no source.
-func (r *Replica) recoverEmpty(ctx *core.Context, t *recoverChunk, rc recovery) {
+func (r *Replica) recoverEmpty(ctx *core.Context, t *recoverChunk, rc recovery, out *ReplicaOutput) {
 	buf, err := ctx.Pool.Alloc(core.BlockSize)
 	if err != nil {
 		t.wait, r.waits = true, true
@@ -219,12 +221,12 @@ func (r *Replica) recoverEmpty(ctx *core.Context, t *recoverChunk, rc recovery) 
 	m.put(ctx.Pool.Bytes(buf))
 	t.busy = true
 	r.recs = append(r.recs, rc)
-	r.orderRecovery(ctx, len(r.recs)-1, buf)
+	r.orderRecovery(ctx, len(r.recs)-1, buf, out)
 }
 
 // recoveryRead takes the image recovery k read, in buf, or its failure: the chunk is tried again
 // at the next retry.
-func (r *Replica) recoveryRead(ctx *core.Context, k int, buf core.IOBuf, ok bool) {
+func (r *Replica) recoveryRead(ctx *core.Context, k int, buf core.IOBuf, ok bool, out *ReplicaOutput) {
 	if !ok {
 		freeBuf(ctx, buf)
 		rc := r.recs[k]
@@ -235,7 +237,7 @@ func (r *Replica) recoveryRead(ctx *core.Context, k int, buf core.IOBuf, ok bool
 		}
 		return
 	}
-	r.orderRecovery(ctx, k, buf)
+	r.orderRecovery(ctx, k, buf, out)
 }
 
 // retryReads lets the chunks whose reads failed be tried again.
@@ -285,7 +287,7 @@ func listedIn(ix *Index, pool core.PoolID, c core.ChunkID) uint32 {
 // recoveryWritten takes the store's answer to a recovery write: mapped, its chunk is recovered;
 // failed, even before the store logged any of it, the interval ends, since the store no longer
 // tracks what the interval covered in the chunk.
-func (r *Replica) recoveryWritten(ctx *core.Context, rp Reply, out *ReplicaOutput) {
+func (r *Replica) recoveryWritten(ctx *core.Context, q storeReq, rp Reply, out *ReplicaOutput) {
 	if i := r.versionOf(rp.ID); i >= 0 {
 		r.vers[i].done = true
 		r.release(ctx, i)
@@ -298,30 +300,17 @@ func (r *Replica) recoveryWritten(ctx *core.Context, rp Reply, out *ReplicaOutpu
 			}
 		}
 	}
-	if v := r.recoveryOf(rp.ID); rp.Err == nil && v != nil {
-		out.note(trace.OutRecovered, v.Hash(), rp.Version, 0, 0, 0)
+	if rp.Err == nil {
+		out.note(trace.OutRecovered, q.chunk.Hash(), rp.Version, uint64(q.source), uint64(q.interval), 0)
 	}
 	r.recoveryDone(ctx, rp.ID, rp.Err == nil, out)
-}
-
-// recoveryOf is the chunk recovery write req is for, or nil.
-func (r *Replica) recoveryOf(req uint64) *core.ChunkID {
-	k := slices.IndexFunc(r.recs, func(rc recovery) bool { return rc.req == req })
-	if k < 0 {
-		return nil
-	}
-	l := r.lead(r.recs[k].pg)
-	if l < 0 || r.recs[k].todo >= len(r.leads[l].todo) {
-		return nil
-	}
-	return &r.leads[l].todo[r.recs[k].todo].chunk
 }
 
 // orderRecovery hands the store recovery k's write of image buf, which the store orders under the
 // version of the interval's last write of the chunk before it, or the kept version, leaving out what
 // those writes cover, and the primary then sends to the members that list the chunk alone. The
 // primary logs the image only if it lacks the chunk itself.
-func (r *Replica) orderRecovery(ctx *core.Context, k int, buf core.IOBuf) {
+func (r *Replica) orderRecovery(ctx *core.Context, k int, buf core.IOBuf, out *ReplicaOutput) {
 	rc := &r.recs[k]
 	i := r.lead(rc.pg)
 	if i < 0 || r.leads[i].interval != rc.interval || !r.leads[i].active || r.leads[i].asking {
@@ -334,9 +323,12 @@ func (r *Replica) orderRecovery(ctx *core.Context, k int, buf core.IOBuf) {
 	t := &l.todo[rc.todo]
 	self := slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk })
 	rc.read, rc.rid = 0, 0
-	rc.req = r.newReq(storeReq{kind: reqRecover, pg: rc.pg, chunk: t.chunk})
-	u := Update{Kind: KindRecover, PG: PGFields{Epoch: r.table.Epoch, PG: rc.pg, Interval: rc.interval}, Chunk: t.chunk, Len: core.ChunkSize}
+	rc.req = r.newReq(storeReq{kind: reqRecover, pg: rc.pg, chunk: t.chunk, source: rc.from, interval: rc.interval})
+	u := Update{Kind: KindRecover, PG: PGFields{Epoch: r.table.Epoch, PG: rc.pg, Interval: rc.interval}, Chunk: t.chunk, Len: core.ChunkSize, Source: rc.from}
 	r.vers = append(r.vers, version{req: rc.req, epoch: r.table.Epoch, interval: rc.interval, u: u, recover: true})
+	if self >= 0 && t.targets&(1<<self) != 0 {
+		out.note(trace.OutRecovering, t.chunk.Hash(), uint64(rc.from), uint64(rc.interval), 0, 0)
+	}
 	r.st.Write(ctx, Request{ID: rc.req, Chunk: t.chunk, Len: core.ChunkSize, Buf: buf, Interval: rc.interval, Gated: true, Recover: true, Ver: t.kept,
 		Relay: self < 0 || t.targets&(1<<self) == 0}, &r.sout)
 }
@@ -437,22 +429,22 @@ func (r *Replica) releaseHeld(ctx *core.Context, i int, c core.ChunkID, out *Rep
 
 // recoverReply takes a member's answer to a recovery read, reporting whether it was one; it takes
 // buf.
-func (r *Replica) recoverReply(ctx *core.Context, peer core.NodeID, rp *Response, buf core.IOBuf) bool {
+func (r *Replica) recoverReply(ctx *core.Context, peer core.NodeID, rp *Response, buf core.IOBuf, out *ReplicaOutput) bool {
 	k := slices.IndexFunc(r.recs, func(rc recovery) bool { return rc.rid != 0 && rc.rid == rp.ID && rc.source == peer })
 	if k < 0 {
 		return false
 	}
 	var m blockMap
 	ok := rp.Status == StatusOK && buf != core.NoBuf && decodeBlockMap(ctx.Pool.Bytes(buf), &m) == nil
-	r.recoveryRead(ctx, k, buf, ok)
+	r.recoveryRead(ctx, k, buf, ok, out)
 	return true
 }
 
 // recoverLost fails the recovery reads asked of a peer whose connection broke.
-func (r *Replica) recoverLost(ctx *core.Context, peer core.NodeID) {
+func (r *Replica) recoverLost(ctx *core.Context, peer core.NodeID, out *ReplicaOutput) {
 	for k := len(r.recs) - 1; k >= 0; k-- {
 		if rc := r.recs[k]; rc.rid != 0 && rc.source == peer {
-			r.recoveryRead(ctx, k, core.NoBuf, false)
+			r.recoveryRead(ctx, k, core.NoBuf, false, out)
 		}
 	}
 }
