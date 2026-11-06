@@ -8,6 +8,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 // maxMembers is the widest PG a replica primary fans out to: rep3 with a leaving member.
@@ -42,7 +43,7 @@ type ReplicaConfig struct {
 	Restarted bool
 }
 
-// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations and in Recovered, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers.
+// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations and in Recovered, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers. Trace is the protocol steps the call took, for the loop's trace.
 type ReplicaOutput struct {
 	Actions     []core.Action
 	Fetch       uint64
@@ -50,12 +51,19 @@ type ReplicaOutput struct {
 	Asks        []PGFields
 	Activations []PGFields
 	Recovered   []PGFields
+	Trace       []trace.Record
 }
 
 // Reset empties the output for reuse.
 func (o *ReplicaOutput) Reset() {
-	o.Actions, o.Fetch, o.Whole, o.Asks, o.Activations, o.Recovered = o.Actions[:0], 0, false, o.Asks[:0], o.Activations[:0], o.Recovered[:0]
+	o.Actions, o.Fetch, o.Whole, o.Asks, o.Activations, o.Recovered, o.Trace = o.Actions[:0], 0, false, o.Asks[:0], o.Activations[:0], o.Recovered[:0], o.Trace[:0]
 }
+
+func (o *ReplicaOutput) note(name trace.Name, a, b, c, d, e uint64) {
+	o.Trace = append(o.Trace, trace.Record{Name: name, Fields: [trace.MaxFields]uint64{a, b, c, d, e}})
+}
+
+func pgField(pg core.PGID) uint64 { return uint64(pg.Pool)<<32 | uint64(pg.Index) }
 
 func (o *ReplicaOutput) fetch(epoch uint64, whole bool) {
 	o.Fetch = max(o.Fetch, epoch)
@@ -152,9 +160,12 @@ type storeReq struct {
 	pg    core.PGID
 	chunk core.ChunkID
 	// version is the version a member's write or punch was handed, and recover marks a recovery
-	// write, whose version is the chunk's write before it.
-	version uint64
-	recover bool
+	// write, whose version is the chunk's write before it; source is the disk a recovery write's
+	// image came from, and interval the interval it was ordered in.
+	version  uint64
+	recover  bool
+	source   uint32
+	interval uint32
 }
 
 // version is a client write or punch the primary took in interval and fans out once its store orders it: the members that must hold it, those that do, and those whose latest send, numbered in sends, has neither a reply nor a PeerLost yet; done once its client is answered.
@@ -358,9 +369,10 @@ func compareSlots(a, b diskSlots) int {
 type replicaPlants struct {
 	// resendNewestFirst sends a member a lost connection's writes again newest first.
 	resendNewestFirst bool
-	// peerInOldInterval has a restarted primary peer in the interval it led before, asking for none; mergeWhileLacking merges a partial-block write on a chunk before the primary holds the version peering kept (sub-block spike M8).
+	// peerInOldInterval has a restarted primary peer in the interval it led before, asking for none; mergeWhileLacking merges a partial-block write on a chunk before the primary holds the version peering kept (sub-block spike M8); mergeOnDropped merges one on a version the primary mapped and peering dropped.
 	peerInOldInterval bool
 	mergeWhileLacking bool
+	mergeOnDropped    bool
 	// noRecovery recovers nothing, as a primary without recovery would; coverAtRead picks the
 	// blocks a recovery write leaves out when it reads the source rather than when it is ordered
 	// (the epoch change model's RecoveryCoversAtRead).
@@ -378,13 +390,15 @@ type replicaPlants struct {
 	// member persisted its list; reportDecided reports an activation once the decision is made;
 	// relistNever leaves off the missing list a member that lists a chunk but holds the kept
 	// version as its newest, which with the store's clearListed has a later peering clear the
-	// entry before recovery did.
+	// entry before recovery did; unlistTorn leaves off a member that holds the kept version as its
+	// newest whole one with part of a later version logged.
 	stopPreviousOnly  bool
 	lastActivatedOnly bool
 	ownInterval       bool
 	activateEarly     bool
 	reportDecided     bool
 	relistNever       bool
+	unlistTorn        bool
 	// fenceOnArrival refuses an older incarnation's write when it reaches the primary, not when the
 	// store orders it; reorderAfterOther keeps a lead's term across intervals another primary led,
 	// so its held writes are ordered again.
@@ -394,8 +408,14 @@ type replicaPlants struct {
 	admitPastLimit bool
 	// commitOnOwnLog commits a version once the primary's own log holds it, before its members do.
 	commitOnOwnLog bool
-	// recoverSelfOnly has the primary recover only its own copies, never a member's.
-	recoverSelfOnly bool
+	// recoverSelfOnly has the primary recover only its own copies, never a member's;
+	// recoverFromListed has a primary that lacks a chunk serve its recovery; clearNoSource clears a
+	// list with an empty image when no member can serve the chunk; goneWhileUp refuses one version
+	// in 16 at an up member as if its disk had left.
+	recoverSelfOnly   bool
+	recoverFromListed bool
+	clearNoSource     bool
+	goneWhileUp       bool
 	// readBelowMinLive serves reads in an interval with fewer than min_live live members;
 	// freshGrantNoCheck grants a lease afresh to a holder that reported an older table; noLeaseCheck
 	// serves reads with no lease from the other up members.
@@ -496,6 +516,7 @@ func comparePG(a, b core.PGID) int {
 
 // adopt takes t as the replica's table. In the first table after a restart, every PG this disk leads asks for a new interval. A PG this disk leads in t keeps its term if no other primary led it in between, as the PG's listed past intervals show, and holds its client writes until it has peered in its new interval; a PG it no longer leads refuses the writes it held.
 func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
+	out.note(trace.OutAdopt, t.Epoch, 0, 0, 0, 0)
 	first := r.table.Epoch == 0
 	r.table = t
 	if t.Epoch >= r.want {
@@ -565,7 +586,9 @@ func (r *Replica) demote(ctx *core.Context, out *ReplicaOutput) {
 			continue
 		}
 		v.done = true
-		r.takeReq(v.req)
+		if !v.recover {
+			r.takeReq(v.req)
+		}
 		r.answerClient(ctx, v, r.refusal(v.u.PG.PG), out)
 		r.release(ctx, i)
 	}
@@ -611,6 +634,7 @@ func (r *Replica) Activate(ctx *core.Context, pg core.PGID, interval uint32, out
 		return ErrUnresolved
 	}
 	r.leads[i].active, r.leads[i].serving, r.leads[i].peer = true, true, nil
+	out.note(trace.OutActivate, pgField(pg), uint64(interval), 0, 0, 0)
 	held := r.leads[i].held
 	r.leads[i].held = nil
 	was := r.replaying
@@ -752,7 +776,7 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 		}
 	case KindReadReply:
 		var rp Response
-		if DecodeResponse(frame, data, &rp) == nil && (r.baseReply(ctx, &rp, buf, out) || r.recoverReply(ctx, ev.Peer, &rp, buf)) {
+		if DecodeResponse(frame, data, &rp) == nil && (r.baseReply(ctx, &rp, buf, out) || r.recoverReply(ctx, ev.Peer, &rp, buf, out)) {
 			return
 		}
 	case KindLeaseRequest:
@@ -925,7 +949,8 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		return
 	}
 	recover := u.Kind == KindRecover
-	refuse := e == nil || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) ||
+	gone := e != nil && (!slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) || r.plant.goneWhileUp && u.Version&15 == 7)
+	refuse := e == nil || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || gone ||
 		slices.ContainsFunc(r.failed, func(f failedVer) bool {
 			return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version <= u.Version || recover)
 		})
@@ -944,6 +969,11 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	}
 	if refuse {
 		if e != nil && u.PG.Interval == e.Interval {
+			var reason uint64
+			if gone {
+				reason = 1
+			}
+			out.note(trace.OutMemberFail, u.Chunk.Hash(), u.Version, reason, 0, 0)
 			r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
 		}
 		freeBuf(ctx, ev.Msg.Buf)
@@ -952,7 +982,12 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		r.answer(ctx, ev.Peer, u.ID, &rp, core.NoBuf, out)
 		return
 	}
-	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk, version: u.Version, recover: recover})
+	if recover {
+		out.note(trace.OutRecovering, u.Chunk.Hash(), uint64(u.Source), uint64(u.PG.Interval), 0, 0)
+	} else {
+		out.note(trace.OutAccepted, u.Chunk.Hash(), u.Version, 0, 0, 0)
+	}
+	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk, version: u.Version, recover: recover, source: u.Source, interval: u.PG.Interval})
 	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, Epoch: u.Snapshot, Version: u.Version}
 	if recover {
 		req.Version, req.HasVer, req.Ver, req.Interval, req.Recover = 0, true, u.Version, u.PG.Interval, true
@@ -1119,6 +1154,9 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 	i := r.versionOf(o.ID)
 	v := &r.vers[i]
 	v.u.Version, v.buf, v.ordered = o.Version, o.Buf, true
+	if !v.recover {
+		out.note(trace.OutOrder, uint64(v.msgID), v.u.Chunk.Hash(), o.Version, 0, 0)
+	}
 	l := r.lead(v.u.PG.PG)
 	if l < 0 || r.leads[l].asking || r.leads[l].interval != v.interval {
 		r.fail(ctx, i, Response{}, out)
@@ -1191,6 +1229,9 @@ func (r *Replica) logged(ctx *core.Context, l Reply, out *ReplicaOutput) {
 		return
 	}
 	r.vers[i].logged = true
+	if !r.vers[i].recover {
+		out.note(trace.OutLogged, r.vers[i].u.Chunk.Hash(), r.vers[i].u.Version, 0, 0, 0)
+	}
 	r.tryCommit(ctx, i)
 }
 
@@ -1261,6 +1302,7 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 		return
 	}
 	c, from, pg := v.u.Chunk, v.u.Version, v.u.PG.PG
+	out.note(trace.OutFail, c.Hash(), from, 0, 0, 0)
 	if l := r.lead(pg); l >= 0 && r.leads[l].interval == v.interval {
 		r.leads[l].asking = true
 	}
@@ -1316,10 +1358,10 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 	}
 	switch q.kind {
 	case reqRecover:
-		r.recoveryWritten(ctx, rp, out)
+		r.recoveryWritten(ctx, q, rp, out)
 	case reqRecoverRead:
 		if k := slices.IndexFunc(r.recs, func(rc recovery) bool { return rc.read == rp.ID }); k >= 0 {
-			r.recoveryRead(ctx, k, rp.Buf, rp.Err == nil)
+			r.recoveryRead(ctx, k, rp.Buf, rp.Err == nil, out)
 		} else {
 			freeBuf(ctx, rp.Buf)
 		}
@@ -1337,6 +1379,9 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 			ref := r.refusal(q.pg)
 			resp.Epoch, resp.Interval = ref.Epoch, ref.Interval
 		}
+		if resp.Status == StatusOK {
+			out.note(trace.OutCommitted, q.chunk.Hash(), rp.Version, 0, 0, 0)
+		}
 		if i >= 0 {
 			r.vers[i].done = true
 			r.release(ctx, i)
@@ -1350,7 +1395,12 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		if resp.Status != StatusOK {
 			ref := r.refusal(q.pg)
 			resp.Version, resp.Epoch, resp.Interval = 0, ref.Epoch, ref.Interval
+			out.note(trace.OutMemberFail, q.chunk.Hash(), q.version, 0, 0, 0)
 			r.noteFailed(failedVer{pg: q.pg, chunk: q.chunk, version: q.version})
+		} else if q.recover {
+			out.note(trace.OutRecovered, q.chunk.Hash(), rp.Version, uint64(q.source), uint64(q.interval), 0)
+		} else {
+			out.note(trace.OutLogged, q.chunk.Hash(), rp.Version, 0, 0, 0)
 		}
 		r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
 		for j := 0; j < len(r.dups); {
@@ -1409,13 +1459,14 @@ func (r *Replica) ask(out *ReplicaOutput) {
 			continue
 		}
 		l.asked = true
+		out.note(trace.OutAsk, pgField(l.pg), uint64(l.interval), 0, 0, 0)
 		out.Asks = append(out.Asks, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
 	}
 }
 
 // peerLost ends every send to the peer and has the writes it left unacknowledged sent again after ResendAfter, new writes to it waiting behind them; a base asked of it is asked of the next member.
 func (r *Replica) peerLost(ctx *core.Context, peer core.NodeID, out *ReplicaOutput) {
-	r.recoverLost(ctx, peer)
+	r.recoverLost(ctx, peer, out)
 	for i := len(r.bases) - 1; i >= 0; i-- {
 		if r.bases[i].asked == peer {
 			r.askBase(ctx, i, out)

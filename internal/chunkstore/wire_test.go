@@ -72,7 +72,7 @@ func wireCases() []wireCase {
 			Missing: []ChunkVersion{{Chunk: wireChunk, Version: v}, {Chunk: core.ChunkID{Volume: 2, Inode: 3, Index: 5}}}}, 0},
 		{"persist_ack", &Peering{Kind: KindPersistAck, ID: 13, PG: wirePG, Disk: 3, Decided: 41}, 0},
 		{"persist_ack_refused", &Peering{Kind: KindPersistAck, ID: 13, PG: PGFields{Epoch: 80, PG: wirePG.PG, Interval: 42}, Disk: 3}, 0},
-		{"recover", &Update{Kind: KindRecover, ID: 14, PG: wirePG, Chunk: wireChunk, Len: core.ChunkSize, Version: v}, 3 * core.BlockSize},
+		{"recover", &Update{Kind: KindRecover, ID: 14, PG: wirePG, Chunk: wireChunk, Len: core.ChunkSize, Version: v, Source: 3}, 3 * core.BlockSize},
 		{"recover_marker", &Update{Kind: KindRecover, ID: 14, PG: wirePG, Chunk: wireChunk, Len: core.ChunkSize, Version: v}, 0},
 		{"recover_read", &Read{ID: 15, PG: wirePG, Chunk: wireChunk, Len: core.ChunkSize, Recover: true}, 0},
 		{"read_reply_recovery", &Response{Kind: KindReadReply, ID: 15, Version: v}, core.BlockSize + core.ChunkSize},

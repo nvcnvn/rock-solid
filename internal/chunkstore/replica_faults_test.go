@@ -390,6 +390,7 @@ func (f *faultRun) block(n int, ch core.ChunkID, b uint16) []byte {
 
 // publish hands every running replica t, marking no PG active.
 func (f *faultRun) publish(t Table) {
+	f.c.noteTable(&t)
 	f.c.table = t
 	for d := range f.c.reps {
 		if f.c.s.Node(uint32(d)).Up() {

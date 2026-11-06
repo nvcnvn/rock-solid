@@ -77,7 +77,7 @@ func keep(e *PGEntry, replies []peerReply, all []replyChunk, dst []keptChunk, pl
 				continue
 			}
 			j := slices.IndexFunc(g, func(c replyChunk) bool { return c.reply == i })
-			if j < 0 && k.kept != 0 || j >= 0 && !clean(&g[j].ChunkPeer, k.kept) && !(plant.relistNever && g[j].Whole == k.kept && g[j].Logged == k.kept) {
+			if j < 0 && k.kept != 0 || j >= 0 && !clean(&g[j].ChunkPeer, k.kept) && !(plant.relistNever && g[j].Whole == k.kept && g[j].Logged == k.kept) && !(plant.unlistTorn && g[j].Whole == k.kept && !g[j].Listed) {
 				r.list = append(r.list, ChunkVersion{Chunk: k.chunk, Version: k.kept})
 			}
 		}

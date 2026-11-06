@@ -87,6 +87,56 @@ const (
 	OutFailed
 	// OutCheckpointDone: lsn.
 	OutCheckpointDone
+	// OutTable, the control plane committing a table: epoch. Its changed entries follow.
+	OutTable
+	// OutEntry is a PG entry of the table before it: pg interval activated minlive.
+	OutEntry
+	// OutMember is one member of the entry before it, primary first: pg disk mark leaving.
+	OutMember
+	// OutAdopt, a replica taking a table: epoch.
+	OutAdopt
+	// OutSend, a client sending a write: id chunk pg span incarnation; span packs offset and length as off<<32 | len.
+	OutSend
+	// OutOrder, a primary ordering a client's write: id chunk version.
+	OutOrder
+	// OutLogged, a disk's copy of a version durable: chunk version.
+	OutLogged
+	// OutCommitted, a client answered OK: chunk version.
+	OutCommitted
+	// OutReply, a member's answer to peering reaching its primary: pg interval disk decided. One OutReplyChunk per chunk follows.
+	OutReply
+	// OutReplyChunk is one chunk of the OutReply before it: disk chunk whole logged list; list is the listed version plus 1, or 0 for none.
+	OutReplyChunk
+	// OutDecide, a primary deciding peering: pg interval. One OutKept per chunk follows.
+	OutDecide
+	// OutKept is one chunk of the OutDecide before it: chunk kept.
+	OutKept
+	// OutPersisted, a member's missing list durable: pg interval disk.
+	OutPersisted
+	// OutActivate, a primary activating: pg interval.
+	OutActivate
+	// OutRecovered, a disk's copy of a chunk recovered: chunk version source interval, source the disk the image was read from, 0 when it needed none, and interval the one the write was ordered in.
+	OutRecovered
+	// OutReported, a primary reporting its interval recovered: pg interval.
+	OutReported
+	// OutAsk, a primary asking for a new interval: pg interval.
+	OutAsk
+	// OutFormat, a node starting on a disk formatted again: disk.
+	OutFormat
+	// OutAccepted, a member taking a version into its store: chunk version.
+	OutAccepted
+	// OutMemberFail, a member refusing a version or failing to log it: chunk version gone, gone when the node's disk is no up member of the interval, so a formatted disk's successor.
+	OutMemberFail
+	// OutRecovering, a disk's store taking a recovery write: chunk source interval. A crash can leave it durable with no OutRecovered.
+	OutRecovering
+	// OutPast is a past interval of the OutEntry before it: pg interval minlive. Its members follow as OutMember.
+	OutPast
+	// OutFail, a primary ending a version that failed and every later one of its chunk: chunk version.
+	OutFail
+	// OutListed is one chunk of the missing list the OutDecide before it gave an up member: disk chunk version. They follow its OutKept.
+	OutListed
+	// OutRecoverOrder, a primary ordering a recovery write, whether or not it is a target: chunk source interval.
+	OutRecoverOrder
 	numNames
 )
 
@@ -128,6 +178,12 @@ var (
 	fBytes  = field{"bytes", typeNum}
 	fLSN    = field{"lsn", typeNum}
 	fResult = field{"err", typeResult}
+	fEpoch  = field{"epoch", typeNum}
+	fPG     = field{"pg", typeNum}
+	fIv     = field{"interval", typeNum}
+	fDisk   = field{"disk", typeNum}
+	fChunk  = field{"chunk", typeNum}
+	fVer    = field{"version", typeNum}
 )
 
 var schemas = [numNames]schema{
@@ -157,6 +213,31 @@ var schemas = [numNames]schema{
 	OutDurable:        {"Durable", KindOutput, []field{fRound, fLSN}},
 	OutFailed:         {"Failed", KindOutput, []field{fResult}},
 	OutCheckpointDone: {"CheckpointDone", KindOutput, []field{fLSN}},
+	OutTable:          {"Table", KindOutput, []field{fEpoch}},
+	OutEntry:          {"PGEntry", KindOutput, []field{fPG, fIv, {"activated", typeNum}, {"minlive", typeNum}}},
+	OutMember:         {"Member", KindOutput, []field{fPG, fDisk, {"mark", typeNum}, {"leaving", typeBool}}},
+	OutAdopt:          {"Adopt", KindOutput, []field{fEpoch}},
+	OutSend:           {"Send", KindOutput, []field{{"id", typeNum}, fChunk, fPG, {"span", typeNum}, {"incarnation", typeNum}}},
+	OutOrder:          {"Order", KindOutput, []field{{"id", typeNum}, fChunk, fVer}},
+	OutLogged:         {"Logged", KindOutput, []field{fChunk, fVer}},
+	OutCommitted:      {"Committed", KindOutput, []field{fChunk, fVer}},
+	OutReply:          {"PeerReply", KindOutput, []field{fPG, fIv, fDisk, {"decided", typeNum}}},
+	OutReplyChunk:     {"PeerChunk", KindOutput, []field{fDisk, fChunk, {"whole", typeNum}, {"logged", typeNum}, {"list", typeNum}}},
+	OutDecide:         {"Decide", KindOutput, []field{fPG, fIv}},
+	OutKept:           {"Kept", KindOutput, []field{fChunk, {"kept", typeNum}}},
+	OutPersisted:      {"Persisted", KindOutput, []field{fPG, fIv, fDisk}},
+	OutActivate:       {"Activate", KindOutput, []field{fPG, fIv}},
+	OutRecovered:      {"Recovered", KindOutput, []field{fChunk, fVer, {"source", typeNum}, fIv}},
+	OutReported:       {"Reported", KindOutput, []field{fPG, fIv}},
+	OutAsk:            {"Ask", KindOutput, []field{fPG, fIv}},
+	OutFormat:         {"Format", KindOutput, []field{fDisk}},
+	OutAccepted:       {"Accepted", KindOutput, []field{fChunk, fVer}},
+	OutMemberFail:     {"MemberFail", KindOutput, []field{fChunk, fVer, {"gone", typeBool}}},
+	OutRecovering:     {"Recovering", KindOutput, []field{fChunk, {"source", typeNum}, fIv}},
+	OutPast:           {"PastInterval", KindOutput, []field{fPG, fIv, {"minlive", typeNum}}},
+	OutFail:           {"Fail", KindOutput, []field{fChunk, fVer}},
+	OutListed:         {"Listed", KindOutput, []field{fDisk, fChunk, fVer}},
+	OutRecoverOrder:   {"RecoverOrder", KindOutput, []field{fChunk, {"source", typeNum}, fIv}},
 }
 
 // Kind is the kind of record the name belongs to, or 0 for an unknown name.

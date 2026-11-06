@@ -82,7 +82,7 @@ func (c *rcluster) addClient(a sim.Actor) {
 		a = recorded{Actor: a, x: x, client: x.clients}
 		x.clients++
 	}
-	c.s.Node(c.client.Node).AddActor(c.client, a)
+	c.s.Node(c.client.Node).AddActor(c.client, conformActor{a, c})
 }
 
 type recorded struct {

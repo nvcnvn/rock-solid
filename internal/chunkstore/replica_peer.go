@@ -5,6 +5,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/lease"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 // PeerTimer is the timer on which a member answers the peering it waited on: the end of its restart wait or of a grant to a primary the interval moves away from.
@@ -263,6 +264,15 @@ func (r *Replica) peerReply(ctx *core.Context, disk uint32, pg core.PGID, interv
 	if pr == nil || pr.decided || pr.id != id || l.interval != interval {
 		return
 	}
+	out.note(trace.OutReply, pgField(pg), uint64(interval), uint64(disk), uint64(decided), 0)
+	for j := range chunks {
+		c := &chunks[j]
+		var list uint64
+		if c.Listed {
+			list = c.Kept + 1
+		}
+		out.note(trace.OutReplyChunk, uint64(disk), c.Chunk.Hash(), c.Whole, c.Logged, list)
+	}
 	rp := peerReply{disk: disk, decided: decided, chunks: slices.Clone(chunks)}
 	if j := slices.IndexFunc(pr.replies, func(p peerReply) bool { return p.disk == disk }); j >= 0 {
 		pr.replies[j] = rp
@@ -301,6 +311,17 @@ func (r *Replica) decide(ctx *core.Context, i int, out *ReplicaOutput) {
 	_, e := r.table.entry(l.pg)
 	pr.all, pr.kept = keep(e, pr.replies, pr.all, pr.kept[:0], r.plant)
 	pr.decided = true
+	out.note(trace.OutDecide, pgField(l.pg), uint64(l.interval), 0, 0, 0)
+	for j := range pr.kept {
+		out.note(trace.OutKept, pr.kept[j].chunk.Hash(), pr.kept[j].kept, 0, 0, 0)
+	}
+	for j := range pr.replies {
+		if rp := &pr.replies[j]; upIn(e, rp.disk, e.Interval) {
+			for _, cv := range rp.list {
+				out.note(trace.OutListed, uint64(rp.disk), cv.Chunk.Hash(), cv.Version, 0, 0)
+			}
+		}
+	}
 	if r.plant.reportDecided {
 		out.Activations = append(out.Activations, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
 	}
@@ -359,6 +380,9 @@ func (r *Replica) persisted(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 	}
 	q := r.persists[j]
 	r.persists = slices.Delete(r.persists, j, j+1)
+	if rp.Err == nil {
+		out.note(trace.OutPersisted, pgField(q.pg), uint64(q.interval), uint64(r.cfg.Disk), 0, 0)
+	}
 	if q.local {
 		if rp.Err == nil {
 			r.persistAcked(q.pg, q.interval, r.cfg.Disk)
@@ -432,7 +456,7 @@ func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 	for j := range pr.kept {
 		k := &pr.kept[j]
 		x, _ := r.st.Index().Chunk(r.st.cfg.Pool, k.chunk)
-		k.lacking = x.Version != k.kept || x.Whole != k.kept || slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed })
+		k.lacking = (x.Version != k.kept || x.Whole != k.kept) && !(r.plant.mergeOnDropped && x.Version > k.kept) || slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed })
 	}
 	r.planRecovery(l, pr, e)
 	l.kept, pr.kept = pr.kept, l.kept[:0]
