@@ -5,6 +5,7 @@
 #   model/neg-config	open	"Checklist item" or "phase N"
 # A rule with no plant yet is open: its checklist item must be unticked, or its phase not yet listed.
 epoch/neg-accept-old-report	chunkstore.oldReport	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-ack-on-lone-copy	chunkstore.ackOnLoneCopy	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-activate-before-durable	chunkstore.activateEarly	TestPlantedPeeringBugsBreakTheFaultRun
 epoch/neg-check-before-bound	lease.checkBeforeBound	TestPlantedLeaseBugsBreakThePair
 epoch/neg-compare-member-lists	chunkstore.sameMembers	TestPlantedPeeringBugsBreakTheOracle

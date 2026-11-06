@@ -648,13 +648,25 @@ SettleTop(n, c, K) ==
     IF Bug("SettleByNumber") THEN K
     ELSE Newest({r.v : r \in {x \in pend \cup refd : x.n = n /\ x.c = c /\ x.v <= K /\ IvOfV(x.v) = IvOfV(K)}})
 
+\* The copies of chunk c interval k of p can count under the lists ls: the up
+\* members ls leaves off, which hold the kept version whole and can be its
+\* recovery source, and the members in maintenance, which count toward min_live
+\* as they do when a write commits. A member that lists the chunk is not counted:
+\* what it reports may rest on a block it lacks.
+Copies(p, k, ls, c) ==
+    {d \in UpIn(p, k) : ls[d][c] = NoMiss} \cup {d \in Mem(p, k) : St(p, k, d) = "maint"}
+
 \* The primary settles the versions it keeps gated on the decision K: those at
 \* or below the top are mapped, and answered OK unless already refused, the rest
-\* dropped, and refused if not already. It activates and reports it on its next
-\* heartbeat.
-Activated(n, p, k, K) ==
+\* dropped, and refused if not already. A kept version still waiting for its
+\* client on a chunk with fewer than min_live copies is mapped but refused: that
+\* the members persisted their lists says nothing of what they hold. It activates
+\* and reports it on its next heartbeat.
+Activated(n, p, k, K, ls) ==
     LET mine == {r \in pend : r.n = n /\ ChunkPG[r.c] = p}
-        ok == {r \in mine : r.v <= SettleTop(n, r.c, K[r.c])}
+        ok == {r \in mine : /\ r.v <= SettleTop(n, r.c, K[r.c])
+                             /\ \/ Cardinality(Copies(p, k, ls, r.c)) >= MinLiveOf(p, k)
+                                \/ Bug("AckOnLoneCopy")}
     IN /\ pr' = [pr EXCEPT ![n][p] = [@ EXCEPT !.act = TRUE, !.srv = TRUE]]
        /\ act' = act \cup {[p |-> p, k |-> k, r |-> run[n]]}
        /\ reports' = reports \cup {[p |-> p, k |-> k]}
@@ -754,7 +766,7 @@ PeerOn(n, p, J, P, T) ==
           THEN /\ mrecv' = [d \in Disk |-> IF d \in UpIn(p, k)
                                THEN mrecv[d] \cup {[p |-> p, k |-> k, ent |-> lists[d]]}
                                ELSE mrecv[d]]
-               /\ Activated(n, p, k, K)
+               /\ Activated(n, p, k, K, lists)
                /\ UNCHANGED <<miss, persIv>>
           ELSE IF CanStall(n, p, k)
           THEN /\ PersistAll(P, p, k, lists)
@@ -762,7 +774,7 @@ PeerOn(n, p, J, P, T) ==
                              ELSE reports
                /\ UNCHANGED <<pr, act, mrecv, pend, refd, ackd, wst>>
           ELSE /\ PersistAll(P, p, k, lists)
-               /\ Activated(n, p, k, K)
+               /\ Activated(n, p, k, K, lists)
                /\ UNCHANGED mrecv
        /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
                       dlog, failed, pin, known, rm, vers, sends, dmn, rw, clockVars, raftVars>>
@@ -778,14 +790,15 @@ Activate(n, p) ==
     LET k == IvAt(n, p)
         R == {d \in UpIn(p, k) : persIv[d][p] # k}
         K == TheDec(n, p, k).kept
+        lists == [d \in UpIn(p, k) |-> [c \in ChunksOf(p) |-> ListOf(d, c, K[c], TheDec(n, p, k).torn)]]
     IN /\ Running(n)
        /\ pr[n][p].iv = k
        /\ ~pr[n][p].act
        /\ PrimNode(p, k) = n
        /\ Decided(n, p, k)
        /\ \A d \in R : dnode[d] # 0 /\ Running(dnode[d]) /\ IvAt(dnode[d], p) = k
-       /\ PersistAll(R, p, k, [d \in R |-> [c \in ChunksOf(p) |-> ListOf(d, c, K[c], TheDec(n, p, k).torn)]])
-       /\ Activated(n, p, k, K)
+       /\ PersistAll(R, p, k, lists)
+       /\ Activated(n, p, k, K, lists)
        /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
                       dlog, mrecv, failed, pv, pin, known, dec, rm, vers, sends, dmn, bad, leaseVars,
                       clockVars, raftVars>>
@@ -1923,6 +1936,20 @@ IntervalEnds == \A p \in PG : <>[](\A n \in Node : Leads(n, p) /\ pr[n][p].ask =
 \* 16. Every client gets an answer: no version stays unanswered for ever.
 AllAnswered == <>[](pend = {})
 
+\* The interval that answers a version acknowledged in this step: the one
+\* activating, or the version's own.
+AckIv(y) ==
+    LET new == {a \in act' \ act : a.p = ChunkPG[y.c]}
+    IN IF new = {} THEN IvOfV(y.v) ELSE (CHOOSE a \in new : TRUE).k
+
+\* 17. A version is acknowledged only on at least min_live members of the
+\* interval that answers it, counted by their logs, those in maintenance
+\* counting as they do toward min_live.
+AckedOnMinLive == [][\A y \in ackd' \ ackd :
+    LET p == ChunkPG[y.c]
+        i == AckIv(y)
+    IN Cardinality({d \in Mem(p, i) : St(p, i, d) = "maint" \/ y.v \in dlog'[d][y.c]}) >= MinLiveOf(p, i)]_vars
+
 -----------------------------------------------------------------------------
 \* Configurations: the .cfg files substitute these for the constants. PG 1 is
 \* in a rep3 pool with min_live 2; PG 2 in a rep2 pool with min_live 2 that
@@ -2008,6 +2035,12 @@ BelowMinLive == Plan(<<Mark(3, "down"), Mark(3, "up"), Mark(2, "maint")>>, Sessi
 MaintMerges == Plan(<<Mark(3, "maint"), Mark(3, "up"), Mark(2, "maint")>>, Partial2, {})
 \* Two activations and two spare tables, so a report can be folded late.
 LateReport == [Plan(<<Mark(3, "down"), Mark(3, "up")>>, <<>>, {}) EXCEPT !.s = 2]
+
+\* PG 2's replica down, its primary stopped below min_live, then an empty disk
+\* in its place: a write in flight is kept on the primary alone, and the primary
+\* moves on from it.
+LoneCopy == Plan(<<Mark(3, "down"), Repl(2, 3, 1), Mark(2, "down"), Repl(2, 2, 3)>>, Session, {})
+LonePlans == {LoneCopy}
 
 \* ci-peering checks the plans with membership changes alone, but one;
 \* ci-restarts those with a restart or a format, under which a decision can

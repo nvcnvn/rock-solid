@@ -426,11 +426,11 @@ func (r *Replica) persistAcked(pg core.PGID, interval uint32, disk uint32) {
 	r.leads[i].peer.acked = append(r.leads[i].peer.acked, disk)
 }
 
-// tryActivate activates the lead once every up member of its interval persisted its list: it hands the store the decision on each chunk with versions pending from earlier intervals, lists the chunks to recover, then activates and reports it.
+// tryActivate activates the lead once every up member of its interval persisted its list: it refuses the clients waiting on a chunk with fewer than min_live copies, since persisted lists say nothing of what the members hold, hands the store the decision on each chunk with versions pending from earlier intervals, lists the chunks to recover, then activates and reports it.
 func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 	l := &r.leads[i]
 	pr := l.peer
-	_, e := r.table.entry(l.pg)
+	p, e := r.table.entry(l.pg)
 	if l.asking {
 		return
 	}
@@ -444,6 +444,9 @@ func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 		var kept uint64
 		if j, ok := slices.BinarySearchFunc(pr.kept, c, func(k keptChunk, c core.ChunkID) int { return compareChunk(k.chunk, c) }); ok {
 			kept = pr.kept[j].kept
+		}
+		if copies(e, pr.replies, c) < int(p.MinLive) && !r.plant.ackOnLoneCopy {
+			r.refuseWaiting(ctx, c, r.refusal(l.pg), out)
 		}
 		if r.settle(ctx, c, kept) != nil {
 			return

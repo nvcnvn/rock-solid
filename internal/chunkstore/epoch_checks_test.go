@@ -16,6 +16,7 @@ const (
 	invDiskIDs       = "no disk ID names two log IDs, and no log ID is up under two disk IDs"
 	invKeptAfterDrop = "no version peering keeps follows a dropped version of its chunk"
 	invActivates     = "once membership stops changing, every PG whose current interval has at least min_live live members on running nodes activates it"
+	invAckCopies     = "no write is acknowledged on fewer than min_live disks, a member in maintenance counting as one"
 )
 
 // inactive is the first PG of c's table with min_live live members whose primary runs but has not activated its current interval.
@@ -39,9 +40,9 @@ func (c *rcluster) inactive() error {
 }
 
 // epochInvariants are the checks epochChecks finds broken as replicas take events.
-var epochInvariants = []string{invLateLog, invSameInterval, invForward, invKeptAfterDrop}
+var epochInvariants = []string{invLateLog, invSameInterval, invForward, invKeptAfterDrop, invAckCopies}
 
-// epochChecks holds a cluster to the epoch change model's properties 3, 5, 7 and 9 and to the disk record's identities, after every step.
+// epochChecks holds a cluster to the epoch change model's properties 3, 5, 7, 9 and 17 and to the disk record's identities, after every step.
 type epochChecks struct {
 	c   *rcluster
 	rec *DiskRecord
@@ -55,11 +56,26 @@ type epochChecks struct {
 	// decisions is each activated interval's kept version of each chunk, by PG.
 	decisions map[core.PGID]map[uint32][]keptChunk
 	errs      map[string]error
+	// writes is the chunk of each client write or punch a primary took, updates of each member update a node took; held the disks that acknowledged each version, which a disk restarting cannot show by its index.
+	writes  map[core.RequestID]core.ChunkID
+	updates map[updateAt]core.ChunkID
+	held    map[heldAt]bool
 }
 
 type nodePG struct {
 	node int
 	pg   core.PGID
+}
+
+type updateAt struct {
+	node int
+	id   core.RequestID
+}
+
+type heldAt struct {
+	chunk   core.ChunkID
+	version uint64
+	node    int
 }
 
 type memberSeen struct {
@@ -77,7 +93,8 @@ type memberSeen struct {
 func watchEpochs(c *rcluster, rec *DiskRecord) *epochChecks {
 	x := &epochChecks{c: c, rec: rec, seen: make([]memberSeen, len(c.reps)), epochs: make([]uint64, len(c.reps)),
 		intervals: map[nodePG]uint32{}, activated: map[core.PGID]uint32{}, logs: map[uint32]uint64{},
-		decisions: map[core.PGID]map[uint32][]keptChunk{}, errs: map[string]error{}}
+		decisions: map[core.PGID]map[uint32][]keptChunk{}, errs: map[string]error{},
+		writes: map[core.RequestID]core.ChunkID{}, updates: map[updateAt]core.ChunkID{}, held: map[heldAt]bool{}}
 	for _, inv := range epochInvariants {
 		c.inv.Register(inv, func() error { return x.errs[inv] })
 	}
@@ -110,7 +127,9 @@ func (x *epochChecks) event(d int, ev *core.Event, done bool) {
 		if ev.Kind != core.EvNetRecv || ev.Msg.Len < headSize {
 			return
 		}
-		if k := Kind(ev.Msg.Body[1]); k != KindReplicaWrite && k != KindReplicaPunch {
+		k := Kind(ev.Msg.Body[1])
+		member := k == KindReplicaWrite || k == KindReplicaPunch
+		if !member && k != KindWrite && k != KindPunch {
 			return
 		}
 		var u Update
@@ -121,6 +140,11 @@ func (x *epochChecks) event(d int, ev *core.Event, done bool) {
 		if DecodeUpdate(ev.Msg.Inline(), data, &u) != nil {
 			return
 		}
+		if !member {
+			x.writes[u.ID] = u.Chunk
+			return
+		}
+		x.updates[updateAt{d, u.ID}] = u.Chunk
 		s := memberSeen{u: u, ok: true, newest: r.st.Newest(u.Chunk), next: r.nextID, logging: logging(r, &u)}
 		if _, e := r.table.entry(u.PG.PG); e != nil {
 			s.interval = e.Interval
@@ -137,6 +161,74 @@ func (x *epochChecks) event(d int, ev *core.Event, done bool) {
 	}
 	x.forward(d)
 	x.decided(r)
+	x.answers(d)
+}
+
+// answers notes the versions node d acknowledged as a member in its last pass, and checks the disks holding each version it acknowledged to a client.
+func (x *epochChecks) answers(d int) {
+	passes := x.c.passes[d]
+	if len(passes) == 0 {
+		return
+	}
+	for _, a := range passes[len(passes)-1] {
+		if a.Kind != core.ActNetSend || a.Msg.Len < headSize {
+			continue
+		}
+		var rp Response
+		k := Kind(a.Msg.Body[1])
+		if k != KindAck && k != KindReply || DecodeResponse(a.Msg.Inline(), 0, &rp) != nil || rp.Status != StatusOK || rp.Version == 0 {
+			continue
+		}
+		if ch, ok := x.updates[updateAt{d, rp.ID}]; ok && k == KindAck {
+			x.held[heldAt{ch, rp.Version, d}] = true
+		}
+		if ch, ok := x.writes[rp.ID]; ok && k == KindReply {
+			x.copies(d, ch, rp.Version)
+		}
+	}
+}
+
+// copies checks that version v of ch, which node d acknowledged, is on min_live disks: d's, whose store may have stopped since it logged v, those that acknowledged it or whose index holds it, and those in maintenance in its interval or d's. The min_live is the lower of those two intervals', for a version acknowledged late across a change of it.
+func (x *epochChecks) copies(d int, ch core.ChunkID, v uint64) {
+	r := x.c.reps[d]
+	p, ok := r.pgOf(ch)
+	if !ok {
+		return
+	}
+	pool, e := r.table.entry(p)
+	if e == nil {
+		return
+	}
+	need := int(pool.MinLive)
+	disks := map[uint32]bool{}
+	maint := func(ms []Member) {
+		for _, m := range ms {
+			if m.Mark == MarkMaint {
+				disks[m.Disk] = true
+			}
+		}
+	}
+	maint(e.Members)
+	if j := slices.IndexFunc(e.Past, func(q PastInterval) bool { return q.Interval == intervalOf(v) }); j >= 0 {
+		need = min(need, int(e.Past[j].MinLive))
+		maint(e.Past[j].Members)
+	}
+	for n, o := range x.c.reps {
+		if o == nil {
+			continue
+		}
+		holds := x.held[heldAt{ch, v, n}] || n == d
+		if o.Store().Serving() {
+			c, _ := o.Store().Index().Chunk(r.st.cfg.Pool, ch)
+			holds = holds || c.Whole >= v
+		}
+		if holds {
+			disks[o.cfg.Disk] = true
+		}
+	}
+	if len(disks) < need {
+		x.fail(invAckCopies, fmt.Errorf("disk %d acknowledged %#x of %v on disks %v, min_live %d", r.cfg.Disk, v, ch, slices.Sorted(maps.Keys(disks)), need))
+	}
 }
 
 // judge checks what replica d did with the member update it took: it logs none tagged with an interval below its table's, and refuses none before its store sees it while its table holds the update's interval, it is up in it and no earlier version of the chunk failed there.

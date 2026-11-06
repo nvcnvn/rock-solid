@@ -89,6 +89,18 @@ func keep(e *PGEntry, replies []peerReply, all []replyChunk, dst []keptChunk, pl
 // clean reports whether a member holds version v as its newest, logged nothing later and lists nothing.
 func clean(c *ChunkPeer, v uint64) bool { return c.Whole == v && c.Logged == v && !c.Listed }
 
+// copies counts the copies of chunk c's kept version e's interval can prove from the lists on replies: its up members a list leaves off, which hold that version as their newest and can be its source, and its members in maintenance, which count toward min_live as they do when a write commits.
+func copies(e *PGEntry, replies []peerReply, c core.ChunkID) int {
+	n := 0
+	for _, m := range e.Members {
+		j := slices.IndexFunc(replies, func(p peerReply) bool { return p.disk == m.Disk })
+		if m.Mark == MarkMaint || m.Mark == MarkUp && j >= 0 && !slices.ContainsFunc(replies[j].list, func(v ChunkVersion) bool { return v.Chunk == c }) {
+			n++
+		}
+	}
+	return n
+}
+
 func keepChunk(e *PGEntry, replies []peerReply, g []replyChunk, ls uint32, own bool) keptChunk {
 	k := keptChunk{chunk: g[0].Chunk}
 	for _, c := range g {
