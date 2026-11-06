@@ -3895,12 +3895,15 @@ section.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 26 | 625,828 | 66 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 30 | 2,103,231 | 255 s |
-| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 114 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 30 | 705,419 | 81 s |
-| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 28 | 1,300,659 | 175 s |
-| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 21 | 30,732 | 17 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 27 | 687,958 | 78 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 24 | 369,855 | 41 s |
+| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 31 | 1,867,957 | 260 s |
+| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 26 | 343,918 | 40 s |
+| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 29 | 1,197,647 | 163 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 108 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 767,209 | 89 s |
+| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 28 | 1,349,650 | 198 s |
+| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 21 | 32,008 | 19 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
@@ -4083,6 +4086,22 @@ and TLC does not report which branch a line took, so `Recover`, `ReportRecovered
 | 12 | A crash leaves part of a version's records, so a member reports a version logged above its newest whole one. `keep` lists that member for the kept version, where `Entry`, with one number, leaves it off | spec | Settled: `PeerOn` takes a set `T` of (disk, chunk) pairs it lists at the kept version, which are no recovery source and take a primary's chunk out of `img`, and `Activate` keeps them. `Peer` draws `T` only under `TornLists`, on in `ci-tears` alone, which passes every safety property at 1.2 million states against 149 thousand with it off. The trace passes `T` from its replies, so seeds 1, 5 and 24 pass. This shows extra listing is safe, not that listing is required: the logs hold whole versions, so nothing in the spec is wrong with a torn member left off, and no negative configuration exists. That listing is required rests on Go: `unlistTorn` breaks "a member listing nothing maps the kept writes applied in version order" at seed 148, where replay's durable records of the torn version stay mapped, and `TestTheKeepRule` and `TestAVersionHeldInPartIsNotWhole` state the rule and the store's half |
 | 13 | `Send` to a primary whose `pr` is empty after a restart loses the write in the spec, and the code holds it | spec, open, low priority | `neverAsk` shows it; no unplanted seed of 40 stops there |
 | 14 | A member's refusal is recorded when the member refuses, and `Order` of a later version can come before the primary hears, where `MemberFail` and `GoneRefuses` end the interval in one step | compression, open | Seed 25: the `gone` of version 1.1 at line 33, then `order` of 1.5 at line 36. The primary's `fail` has no record, so nothing tells `tracedata` where to place the refusal. A record there, holding the member's line until it, or until the primary leaves, settles it |
+| 15 | A member crashes, restarts, crashes and restarts, with a new interval published while it was down. The code asks on the first table after a restart (`replica.go:539`), where the spec's `rsIv` lets it peer without asking | spec, open | Seed 205, an `ask` line. An extra interval, conservative: likely a detail the spec lacks |
+| 16 | The harness's final ask maps to an `Edit`, and `Edit` needs `x.lv = 0`, so it has no step on a PG with a leaving member | logging, open | Seed 154, a `plan` line: a new form of discrepancy 8 |
+| 17 | The spec has disk 2, chunk 2 at whole 3145734, the code 3145733 | spec or compression, open | Seed 110, a `peer` line, reasoned not settled: probably a version the primary's peering dropped, which the code's store settled away and the spec's `dlog` keeps |
+| 18 | `refill` calls `stay` (`placement.go`): a leaving member that is up takes the place of a missing member, ending the move, so `tracedata` stops with no spec change for the table | spec, open | Seeds 55, 231, 267, 311, 323. [design.md](design.md) states it, and [the epoch model](#epoch-change-model) lists it as not modelled. A model step would close them |
+
+Seeds 40 to 339 at 150 s each, one run at aa05106, verdict lines only, none naming a safety invariant:
+
+| Outcome | Seeds | Read |
+| --- | --- | --- |
+| Pass | 260 of 300 | |
+| No verdict at 150 s | 51, 87, 117, 118, 127, 133, 148, 195, 199, 221, 256, 265, 291, 316, 333 | |
+| `order` | 44, 46, 191, 251, 266, 299, 314, 321, 328 | 44 and 191 are discrepancy 14; the rest unread |
+| `peer` | 80, 110, 123, 159, 175, 176, 239 | 110 is discrepancy 17; the rest unread |
+| `ask` | 205, 313, 327 | 205 is discrepancy 15; the rest unread |
+| `plan` | 154 | Discrepancy 16 |
+| `tracedata` stops | 55, 231, 267, 311, 323 | Discrepancy 18 |
 
 ### Traces can fail in the epoch model's check
 
