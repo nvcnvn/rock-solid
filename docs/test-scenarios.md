@@ -4076,7 +4076,8 @@ Each run ends with what its passing traces covered, and each trace's rows stay i
 `cover` file. TLC prints the behavior a trace passed by, and `cover` in `scripts/conform.sh` reads it: a
 line took its action when a variable of `epoch.tla` moved from the state before it, and stuttered when
 none did. A pass shows one behavior TLC found, so a line counted as a stutter may also have had a real
-step open to it. TLC's own `-coverage` does not fit: it counts how often each expression was evaluated
+step open to it, and on `maydeliver`, `mayfail` and `mayrecover` a line counted as taken may also have had
+a stutter open to it: it shows only what that behavior did. TLC's own `-coverage` does not fit: it counts how often each expression was evaluated
 over every branch of the search, abandoned ones and `ENABLED` too, so on seed 55 `Remove`'s first guard
 shows 8 against the 2 removals the trace took.
 
