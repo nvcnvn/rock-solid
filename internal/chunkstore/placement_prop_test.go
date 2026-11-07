@@ -253,7 +253,7 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 			b = old.PGs[i*len(old.PGs)/len(pt.PGs)]
 		}
 		n, surplus := len(e.Members)-leaving, len(b.Members)-leavingIn(b.Members)
-		if leaving > 1 || n < p.width() || n > p.width() && (leaving == 0 || n > surplus) {
+		if leaving > 0 && len(e.Members) > maxMembers || n < p.width() || n > p.width() && (leaving == 0 || n > surplus) {
 			return fmt.Errorf("PG %d at interval %d has members %v for a width of %d", i, e.Interval, e.Members, p.width())
 		}
 		perDomain := map[uint32]int{}

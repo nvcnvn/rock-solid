@@ -10,6 +10,9 @@ import (
 // ErrLogRefused reports a disk whose log ID is already up on another node or device, as a cloned drive's is, or belongs to a disk whose log was replaced.
 var ErrLogRefused = errors.New("chunkstore: log ID refused")
 
+// ErrLostRefused reports a declaration that a disk is lost for a disk the record does not know, or one that is up.
+var ErrLostRefused = errors.New("chunkstore: disk not down")
+
 // RecordedDisk is a disk as the control plane records it: its ID, the log ID it reported, where it was last reported, whether it is up or else since when it is down, and whether its log is gone, a new log having been reported in its place.
 type RecordedDisk struct {
 	ID        uint32
@@ -58,6 +61,15 @@ func (r *DiskRecord) Up(id uint32) {
 	if id >= 1 && int(id) <= len(r.disks) {
 		r.disks[id-1].Up = true
 	}
+}
+
+// Lost takes an operator's declaration that disk id, down, will not return: its log is gone as if replaced, so its members refill at once and a later report of it is refused, and what only it holds stays unfound.
+func (r *DiskRecord) Lost(id uint32) error {
+	if id < 1 || int(id) > len(r.disks) || r.disks[id-1].Up {
+		return ErrLostRefused
+	}
+	r.disks[id-1].Gone = true
+	return nil
 }
 
 // Disks is every disk recorded, by ID; the caller must not change it.

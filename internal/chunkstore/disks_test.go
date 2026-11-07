@@ -41,3 +41,25 @@ func TestDisksAreKnownByTheirLogIDs(t *testing.T) {
 		t.Fatalf("a down disk moved to another device came back as %d", got)
 	}
 }
+
+// A disk down can be declared lost: it is gone and its log is refused. A disk up, or unknown, cannot.
+func TestADiskDownCanBeDeclaredLost(t *testing.T) {
+	var r DiskRecord
+	id, err := r.Report(1, 0, 0xa)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Lost(id); !errors.Is(err, ErrLostRefused) {
+		t.Fatalf("an up disk declared lost: %v", err)
+	}
+	if err := r.Lost(id + 1); !errors.Is(err, ErrLostRefused) {
+		t.Fatalf("an unknown disk declared lost: %v", err)
+	}
+	r.Down(id, 5)
+	if err := r.Lost(id); err != nil || !r.Disks()[id-1].Gone {
+		t.Fatalf("%v, %+v", err, r.Disks()[id-1])
+	}
+	if _, err := r.Report(1, 0, 0xa); !errors.Is(err, ErrLogRefused) {
+		t.Fatalf("a lost disk reported again: %v", err)
+	}
+}

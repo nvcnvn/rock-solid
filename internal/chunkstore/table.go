@@ -279,7 +279,7 @@ func (r *reader) deltaPool() DeltaPool {
 	return p
 }
 
-// entry reads a PG entry: an interval of at least 1, a last activated interval not above it, at most one leaving member and none in a recovered interval, and past intervals rising from the last activated one to below it, each with a min_live of at least 1.
+// entry reads a PG entry: an interval of at least 1, a last activated interval not above it, no leaving member in a recovered interval, and past intervals rising from the last activated one to below it, each with a min_live of at least 1.
 func (r *reader) entry() PGEntry {
 	e := PGEntry{Interval: r.u32(), Activated: r.u32()}
 	flags := r.u8()
@@ -287,7 +287,7 @@ func (r *reader) entry() PGEntry {
 	if e.Interval == 0 || e.Activated > e.Interval || flags&^(pinnedFlag|recoveredFlag) != 0 {
 		r.bad = true
 	}
-	if n := leavingIn(e.Members); n > 1 || n == 1 && e.Recovered {
+	if e.Recovered && leavingIn(e.Members) > 0 {
 		r.bad = true
 	}
 	n := r.uvarint()

@@ -40,7 +40,9 @@ type rcluster struct {
 	lost    map[[2]core.NodeID]int
 	// conforming is set once the run records a conformance trace, noted once its first table was recorded.
 	conforming, noted bool
-	orderErr          error
+	// declared is the disks declared lost, which no longer count as able to serve.
+	declared map[uint32]bool
+	orderErr error
 	// passes is each pass of each replica's loop: the actions it emitted.
 	passes [][][]core.Action
 	// counting adds the heap allocations each replica's OnEvent makes to mallocs.

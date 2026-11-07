@@ -48,6 +48,9 @@ func (c *rcluster) stranded(e *PGEntry, ch core.ChunkID, v uint64) error {
 	for n := range c.reps {
 		member := slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == c.ids[n] })
 		idx := c.reps[n].Store().Index()
+		if c.declared[c.ids[n]] {
+			continue
+		}
 		if idx == nil {
 			if member {
 				return nil
@@ -110,6 +113,7 @@ func (r *soleRun) publish() {
 func (r *soleRun) lose(disk uint32) {
 	r.isolated[disk] = true
 	r.a.down[disk] = r.c.s.Time()
+	r.a.rec.Down(disk, r.c.s.Time())
 	n := uint32(r.c.node(disk))
 	for o := range uint32(len(r.c.reps)) + 1 {
 		if o != n {
@@ -122,6 +126,7 @@ func (r *soleRun) lose(disk uint32) {
 func (r *soleRun) back(disk uint32) {
 	delete(r.isolated, disk)
 	delete(r.a.down, disk)
+	r.a.rec.Up(disk)
 	n := uint32(r.c.node(disk))
 	for o := range uint32(len(r.c.reps)) + 1 {
 		if o != n && !r.isolated[uint32(o)+1] {

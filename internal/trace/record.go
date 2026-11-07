@@ -123,6 +123,8 @@ const (
 	OutAsk
 	// OutFormat, a node starting on a disk formatted again: disk.
 	OutFormat
+	// OutLost, an operator declaring a disk lost: disk.
+	OutLost
 	// OutAccepted, a member taking a version into its store: chunk version.
 	OutAccepted
 	// OutMemberFail, a member refusing a version or failing to log it: chunk version gone, gone when the node's disk is no up member of the interval, so a formatted disk's successor.
@@ -231,6 +233,7 @@ var schemas = [numNames]schema{
 	OutReported:       {"Reported", KindOutput, []field{fPG, fIv}},
 	OutAsk:            {"Ask", KindOutput, []field{fPG, fIv}},
 	OutFormat:         {"Format", KindOutput, []field{fDisk}},
+	OutLost:           {"Lost", KindOutput, []field{fDisk}},
 	OutAccepted:       {"Accepted", KindOutput, []field{fChunk, fVer}},
 	OutMemberFail:     {"MemberFail", KindOutput, []field{fChunk, fVer, {"gone", typeBool}}},
 	OutRecovering:     {"Recovering", KindOutput, []field{fChunk, {"source", typeNum}, fIv}},
