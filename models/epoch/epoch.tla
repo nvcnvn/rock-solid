@@ -1000,10 +1000,12 @@ AskNext(n, p) ==
 
 \* A restarted primary that adopted a table newer than the one it restarted on
 \* asks for the next interval too, before it peers: the code treats the first
-\* table a new process takes as the one it restarted on.
+\* table a new process takes as the one it restarted on. It changes no rule, so
+\* only traces, whose plans set "lateask", take it.
 RestartAsk(n, p) ==
     LET k == IvAt(n, p)
-    IN /\ Running(n)
+    IN /\ "lateask" \in plan.f
+       /\ Running(n)
        /\ Leads(n, p)
        /\ run[n] > 1
        /\ ~pr[n][p].act
@@ -2028,12 +2030,17 @@ NoStranded ==
 \* 19. An activated primary has a source: for a chunk with an acknowledged write,
 \* a member of its interval can serve them all, or its own image is what peering
 \* kept. Two limits. A holder that truly dies leaves none, so it is claimed only
-\* while no disk has gone. And a write a primary that lists the chunk sent to
-\* another member can leave none: peering with a member down cannot tell whether
-\* it landed there, and whichever it decides may drop what a member needed. Until
-\* writes to a degraded chunk are held, that stays open.
-ListerWriteSpread(c) ==
-    \E r \in vers : r.c = c /\ r.ls /\ Cardinality({d \in Disk : r.v \in dlog[d][c]}) > 1
+\* while no disk has gone; ci-tears, where every copy can be torn, does not check
+\* it. And a write of a primary that lists the chunk can leave none, once
+\* acknowledged or on another member: peering with a member down cannot tell
+\* whether it landed there, and whichever it decides may drop what a member needed.
+\* Until writes to a degraded chunk are held, that stays open.
+ListerWrite(c) ==
+    \E r \in vers :
+       /\ r.c = c
+       /\ r.ls
+       /\ \/ r.v \in AckedV(c)
+          \/ Cardinality({d \in Disk : r.v \in dlog[d][c]}) > 1
 
 PrimarySource ==
     \A p \in PG, n \in Node, c \in Chunk :
@@ -2042,7 +2049,7 @@ PrimarySource ==
         /\ Leads(n, p)
         /\ pr[n][p].act
         /\ AckedV(c) # {}
-        /\ ~ListerWriteSpread(c)
+        /\ ~ListerWrite(c)
         /\ Decided(n, p, IvAt(n, p)))
        => \/ \E d \in Mem(p, IvAt(n, p)) : CanServe(d, c)
           \/ c \in TheDec(n, p, IvAt(n, p)).img
@@ -2209,7 +2216,10 @@ StrandPlans == {LoneSwap}
 RefillDone == Plan(<<Mark(3, "down"), AddM(2, 3, 1), RemoveM(2)>>, Partial2, {})
 RefillBack == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
 RefillStay == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(3, "up"), StayM(2, 3, 2), RemoveM(2)>>, Partial2, {})
-RefillPlans == {[x EXCEPT !.f = {"restart", "format"}] : x \in {RefillDone, RefillBack, RefillStay}}
+Refilled(x) == [x EXCEPT !.f = {"restart", "format"}]
+RefillPlans == {Refilled(RefillDone)}
+RefillBackDownPlans == {Refilled(RefillBack)}
+RefillStayPlans == {Refilled(RefillStay)}
 \* ci-refills-back: the primary refilled and back, which it comes behind the others;
 \* the leaving member back in one table with taking the other's place; a member
 \* refilled, then declared lost.
@@ -2217,7 +2227,8 @@ RefillPrimary == Plan(<<Mark(2, "down"), AddM(2, 2, 1), Mark(2, "up"), RemoveM(2
 RefillReturn == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"),
                        Tab(2, <<1, 3, 2>>, <<"up", "up", "down">>, {2}), RemoveM(2)>>, Partial2, {})
 RefillLost == Plan(<<Mark(3, "down"), AddM(2, 3, 1), LostM(3), DropM(2)>>, Partial2, {})
-RefillBackPlans == {RefillPrimary, RefillReturn, RefillLost}
+RefillPrimaryPlans == {RefillPrimary}
+RefillBackPlans == {RefillReturn, RefillLost}
 \* ci-refills-two, on 4 nodes: both members refilled, one after the other or in
 \* one table; and the first declared lost, leaving by the table that refills the
 \* second, which returns.
@@ -2226,7 +2237,8 @@ RefillTogether == Plan(<<Mark(3, "down"), Mark(2, "down"),
                          Tab(2, <<1, 3, 4, 2>>, <<"up", "down", "up", "down">>, {2, 3}), RemoveM(2)>>, Partial2, {})
 RefillLostSecond == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), LostM(3),
                            Tab(2, <<1, 4, 2>>, <<"up", "up", "down">>, {2}), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
-RefillTwoPlans == {RefillSecond, RefillTogether, RefillLostSecond}
+RefillTwoPlans == {RefillSecond}
+RefillTogetherPlans == {RefillTogether, RefillLostSecond}
 \* neg-drop-all-leaving: both members leaving, one lost, and the other holds what
 \* no member can serve.
 DropAllPlans == {Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), AddM(2, 2, 4), LostM(3), DropM(2)>>, Partial2, {})}
@@ -2241,8 +2253,9 @@ LoneListerWrites ==
     <<Partial[1], [Partial[2] EXCEPT !.after = 1],
       [c |-> 1, blk |-> 2, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 1]>>
 ListerOrders == Plan(<<ML(1, 2), Mark(3, "down"), Mark(3, "up")>>, LoneListerWrites, {})
-SourcePlans == {ListerRestarted, ListerOrders}
 MoveSourcePlans == {MoveRestarted}
+MoveAnswer == {[MoveRestarted EXCEPT !.w = <<Partial2[2]>>]}
+ListerAnswer == {[ListerRestarted EXCEPT !.w = <<Partial[2]>>]}
 ListerPlans == {ListerRestarted}
 ListerOrderPlans == {ListerOrders}
 
