@@ -352,10 +352,11 @@ func (x *epochChecks) canSource(m Member, ch core.ChunkID) bool {
 	if m.Mark != MarkUp {
 		return false
 	}
-	o := x.c.reps[x.c.node(m.Disk)]
-	if o == nil || !o.Store().Serving() {
+	n := x.c.node(m.Disk)
+	if n < 0 || x.c.reps[n] == nil || !x.c.reps[n].Store().Serving() {
 		return true
 	}
+	o := x.c.reps[n]
 	c, _ := o.Store().Index().Chunk(o.st.cfg.Pool, ch)
 	return c.ListedIn == 0
 }
