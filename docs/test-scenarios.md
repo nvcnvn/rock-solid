@@ -4073,7 +4073,7 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | `scripted-together` | 65 | passes: `rep3`, two marks in one table, one `Refill`, then two `Add`s | 1 |
 | `scripted-move-restarted` | 47 | passes: a move and a restart, peering keeps what every up member holds over the removed disk | 1 |
 | `scripted-lister-restarted` | 56 | passes: a restart during recovery, peering keeps a version over the member that lists the chunk | 1 |
-| 39 seeds | 273 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 3 to 207 |
+| 39 seeds | 273 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 2 to 211 |
 | `primaries-2` | 517 | no verdict in 400 s and 2 GB: one crash leaves 26 `mayfail` lines, each a free choice, and `-dfid` reached level 307 of 519 in 280 s at 319,000 states | 400 |
 
 39 seeds of 40 pass, all but 2. None broke a safety invariant,
@@ -4103,34 +4103,38 @@ a stutter open to it: it shows only what that behavior did. TLC's own `-coverage
 over every branch of the search, abandoned ones and `ENABLED` too, so on seed 55 `Remove`'s first guard
 shows 8 against the 2 removals the trace took.
 
-Over the 39 passing seeds of 0 to 39, with `Stay` from the sweep:
+Over the 39 passing seeds of 0 to 39 and the 12 scripted traces, which alone take `Refill`, `Lost`, `Drop`, `Stay` and `RestartAsk` as a real step on these seeds, `RestartAsk` in `scripted-move-restarted`; on 50 lines the ask comes after a `Renew` the spec took first:
 
-| Action | Line | Took it | Stuttered | Seeds |
+| Action | Line | Took it | Stuttered | Traces |
 | --- | --- | --- | --- | --- |
-| `Deliver` | `logged` | 4,141 | 3,210 | 39 |
-| `Deliver` | `maydeliver` | 368 | 372 | 35 |
-| `Send` | `send` | 3,744 | 0 | 39 |
-| `Order` | `order` | 3,135 | 0 | 39 |
-| `Adopt` | `adopt` | 2,756 | 225 | 39 |
-| `Peer` | `peer` | 454 | 0 | 39 |
-| `Activate` | `activate` | 448 | 0 | 39 |
-| `Fold` | `fold` | 448 | 0 | 39 |
-| `OwnFail` | `mayfail` | 194 | 8 | 16 |
-| `Recover` | `recovered` | 156 | 64 | 34 |
-| `Recover` | `mayrecover` | 1 | 2 | 1 |
+| `Deliver` | `logged` | 4,212 | 3,255 | 51 |
+| `Deliver` | `maydeliver` | 375 | 397 | 35 |
+| `Send` | `send` | 3,767 | 0 | 51 |
+| `Order` | `order` | 3,175 | 0 | 51 |
+| `Adopt` | `adopt` | 3,050 | 238 | 50 |
+| `Peer` | `peer` | 489 | 0 | 50 |
+| `Activate` | `activate` | 482 | 0 | 50 |
+| `Fold` | `fold` | 480 | 0 | 49 |
+| `OwnFail` | `mayfail` | 195 | 10 | 17 |
+| `Recover` | `recovered` | 188 | 78 | 44 |
+| `Recover` | `mayrecover` | 0 | 2 | 0 |
 | `GoneRefuses` | `gone` | 154 | 0 | 12 |
-| `MarkDisk` | `plan` | 84 | 0 | 29 |
-| `Edit` | `plan` | 85 | 0 | 37 |
-| `Restart` | `restart` | 73 | 0 | 32 |
-| `Add` | `plan` | 56 | 0 | 18 |
-| `Remove` | `plan` | 54 | 0 | 18 |
-| `ReportRecovered` | `reported` | 54 | 255 | 18 |
-| `Replace` | `plan` | 49 | 0 | 16 |
-| `Renew` | `renew` | 45 | 0 | 16 |
-| `Rotate` | `plan` | 37 | 0 | 37 |
-| `Format` | `format` | 16 | 0 | 16 |
-| `AskNext` | `ask` | 12 | 46 | 12 |
-| `Stay` | `plan` | 7 | 0 | 55, 231, 311, 323 of the sweep, none of 0 to 39 |
+| `MarkDisk` | `plan` | 105 | 0 | 37 |
+| `Edit` | `plan` | 88 | 0 | 39 |
+| `Restart` | `restart` | 79 | 0 | 34 |
+| `Add` | `plan` | 66 | 0 | 26 |
+| `Remove` | `plan` | 61 | 0 | 25 |
+| `ReportRecovered` | `reported` | 62 | 277 | 25 |
+| `Replace` | `plan` | 53 | 0 | 17 |
+| `Renew` | `renew` | 50 | 0 | 19 |
+| `Rotate` | `plan` | 40 | 0 | 40 |
+| `Format` | `format` | 17 | 0 | 17 |
+| `AskNext` | `ask` | 12 | 0 | 12 |
+| `Refill` | `plan` | 3 | 0 | 3 |
+| `Lost` | `lost` | 2 | 0 | 2 |
+| `Stay` | `plan` | 1 | 0 | 1 |
+| `Drop` | `plan` | 1 | 0 | 1 |
+| `RestartAsk` | `restartask` | 1 | 50 | 1 |
 
 `table`, `committed`, `persisted` and `recoverorder` lines check a state and take no action, as their
 mapping says. The actions of `Next` no trace took:
@@ -4167,6 +4171,8 @@ mapping says. The actions of `Next` no trace took:
 | 17 | A primary's next reply reports the kept version where the spec's `dlog` has a higher one: activating settles away the gated versions its decision dropped, and they stay in the log unmapped until a restart's replay maps them | spec | Settled, seeds 6 and 37: `Held`, a disk's log less what an activation of its node's current run gave back, is what `Reply`, `Entry`, `PeerOn` and `Order` read. A later write hides the difference, so it shows on a chunk unfound, which takes none |
 | 18 | `refill` calls `stay` (`placement.go`): a leaving member that is up takes the place of a missing member, ending the move, which had no spec change for the table | spec | Settled: `Stay` is in `epoch.tla` as [design.md](design.md) states it, `ci-stays` reaches it, and `classify` maps the table. `neg-stay-keeps-interval` breaks `OneWritePerVersion`. Property 13 fires when the leaving member goes from the members, as it says, so an ended move is no removal to it. Seeds 55, 231, 311 and 323 pass; 267 has no verdict at 300 s |
 | 19 | A crash loses versions from the log of a primary that adopted its next interval and has not decided it, where `OwnFail` needs the primary still in the version's interval | spec | Settled, seed 3: `OwnFail` also runs until the primary decides its next interval, as peering waits for a disk's records to be durable or failed |
+| 20 | A leaving disk's return marks it up and takes a missing member's place in one table, one interval, where the spec's mark and `Stay` start two, and a leaving member goes with its disk, which `Remove` cannot take | spec | Settled: `Refill` is the one table, `Drop` the leaving member going, and `classify` names each. `scripted-leaving-first` and `scripted-drop` take `Refill`, `scripted-lost` takes `Drop` |
+| 21 | Two members marked down in one table reach `Edit`, which allows one mark | logging | Settled: `classify` names a table of several marks `Refill`, which allows them, `scripted-together` |
 
 Seeds 40 to 339 at 150 s each: 260 passed at aa05106, and the 40 that did not were run again at abb8966, seeds 55, 231, 267, 311 and 323 again once `classify` mapped `Stay`. None names a safety invariant.
 
@@ -4226,14 +4232,18 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `fenceOnArrival`, `reorderAfterOther`, `settleByNumber`, `readBelowMinLive` | `neg-fence-on-arrival`, `neg-reorder-after-other-primary`, `neg-settle-by-number`, `neg-read-below-min-live` | 0 | 0 | 0 | 0, 0 | No evidence: they fire on none of the seeds | |
 | `unlistTorn` | none | 2 | 2 | 0 | 2, 2 | `peer` at seeds 5 and 24, the decision leaving off a member its reply shows torn. Seed 148, where the Go oracle catches the plant, gives no baseline verdict | `peer`: every member a reply shows torn is listed |
 | `recoverSelfOnly` | none | 37 | 12 | 24 | 11, 0 | `reported` 11, the plant's report with a member still listing; `peer` 1. One gives no verdict | `ReportRecovered`: lists empty |
+| `listerVetoes` | `neg-lister-vetoes` | 7 | 7 | 0 | 7, 7 | `peer`, the line where the plant first differs | `KeptMatches` |
+| `keepNoSource` | `neg-keep-no-source` | 4 | 4 | 0 | 4, 4 | `peer`, the line where the plant first differs | `KeptMatches` |
+| `writeOnUnfound` | `neg-write-on-unfound` | 5 | 4 | 1 | 4, 4 | `order`, the planted order on an unfound chunk. Seed 35 passes | `Order`: the chunk is not in the decision's `unf` |
+| `keepPastMember` | `neg-keep-past-member` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 39, which never peer with a removed disk reached. Only its scripted test shows the rule (`TestKeepPastMemberLeavesAMoveUnfound`) | |
 | `settleSubset` | none | 4 | 0 | 4 | 0, 0 | Too loose: `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record | |
 
-Traces can fail is shown on these seeds for 15 of the 27 rules, 10 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
-`mergeOnDropped`, `editKeepsInterval`, `relistNever`, `peerInOldInterval`, `oldReport`, `recoverFromListed` and
-`clearNoSource`, and for 2 more, `sameMembers` and `keepID`, running on over 30. Open: `coverAtRead`,
+Traces can fail is shown on these seeds for 18 of the 31 rules, 13 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
+`mergeOnDropped`, `editKeepsInterval`, `relistNever`, `peerInOldInterval`, `oldReport`, `recoverFromListed`,
+`clearNoSource`, `listerVetoes`, `keepNoSource` and `writeOnUnfound`, and for 2 more, `sameMembers` and `keepID`, running on over 30. Open: `coverAtRead`,
 which needs a record of the blocks a recovery write leaves out; `neverAsk`, an omission no line can name;
 `freshGrantNoCheck`, with the lease half; `resendNewestFirst`, `stopPreviousOnly` and `lastActivatedOnly`,
-which need a seed that reaches them; and the four that never fire. Of the oracle plants with no rule,
+which need a seed that reaches them; and the five that never fire. Of the oracle plants with no rule,
 `settleSubset` needs a record of what `Settle` answered.
 
 Every relaxed path now has a plant: `img` in `Order` by `mergeOnDropped` and `mergeWhileLacking`, `img` as a
