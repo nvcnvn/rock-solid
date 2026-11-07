@@ -2227,9 +2227,11 @@ RefillDone == Plan(<<Mark(3, "down"), AddM(2, 3, 1), RemoveM(2)>>, Partial2, {})
 RefillBack == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
 RefillStay == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(3, "up"), StayM(2, 3, 2), RemoveM(2)>>, Partial2, {})
 Refilled(x) == [x EXCEPT !.f = {"restart", "format"}]
+\* ci-refills-stay and -primary fit 5 minutes with one partial write.
+OneWrite(x) == [x EXCEPT !.w = <<Partial2[1]>>]
 RefillPlans == {Refilled(RefillDone)}
 RefillBackDownPlans == {Refilled(RefillBack)}
-RefillStayPlans == {Refilled(RefillStay)}
+RefillStayPlans == {OneWrite(Refilled(RefillStay))}
 \* ci-refills-back: the primary refilled and back, which it comes behind the others;
 \* the leaving member back in one table with taking the other's place; a member
 \* refilled, then declared lost.
@@ -2237,7 +2239,7 @@ RefillPrimary == Plan(<<Mark(2, "down"), AddM(2, 2, 1), Mark(2, "up"), RemoveM(2
 RefillReturn == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"),
                        Tab(2, <<1, 3, 2>>, <<"up", "up", "down">>, {2}), RemoveM(2)>>, Partial2, {})
 RefillLost == Plan(<<Mark(3, "down"), AddM(2, 3, 1), LostM(3), DropM(2)>>, Partial2, {})
-RefillPrimaryPlans == {RefillPrimary}
+RefillPrimaryPlans == {OneWrite(RefillPrimary)}
 RefillBackPlans == {RefillReturn, RefillLost}
 \* ci-refills-two, on 4 nodes: both members refilled, one after the other or in
 \* one table; and the first declared lost, leaving by the table that refills the
@@ -2248,7 +2250,8 @@ RefillTogether == Plan(<<Mark(3, "down"), Mark(2, "down"),
 RefillLostSecond == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), LostM(3),
                            Tab(2, <<1, 4, 2>>, <<"up", "up", "down">>, {2}), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
 RefillTwoPlans == {RefillSecond}
-RefillTogetherPlans == {RefillTogether, RefillLostSecond}
+RefillTogetherPlans == {RefillTogether}
+RefillLostPlans == {RefillLostSecond}
 \* neg-drop-all-leaving: both members leaving, one lost, and the other holds what
 \* no member can serve.
 DropAllPlans == {Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), AddM(2, 2, 4), LostM(3), DropM(2)>>, Partial2, {})}
