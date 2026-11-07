@@ -187,7 +187,7 @@ Line(l) ==
     \/ /\ l.k = "ask"
        /\ IF reqIv[l.p] = l.iv
           THEN UNCHANGED vars
-          ELSE IvAt(l.n, l.p) = l.iv /\ (AskNext(l.n, l.p) \/ CounterOut(l.n, l.p))
+          ELSE IvAt(l.n, l.p) = l.iv /\ (AskNext(l.n, l.p) \/ CounterOut(l.n, l.p) \/ RestartAsk(l.n, l.p))
     \/ /\ l.k = "committed"
        /\ [c |-> l.c, v |-> l.v] \in ackd
        /\ UNCHANGED vars

@@ -158,6 +158,22 @@ func TestConformScriptedRefill(t *testing.T) {
 }
 
 // A leaving member up takes the place of a member merely down, which leaves in its turn: the spec takes the whole run.
+// A move and a restart: peering keeps Y, which every up member holds, over the removed disk that lacks it.
+func TestConformScriptedMoveRestarted(t *testing.T) {
+	r := seededSoleRun(t, 1, 2, 3)
+	r.c.conformBegin()
+	moveOn(t, r, core.BlockSize, noPlant)
+	conformWrite(t, "scripted-move-restarted", r.c)
+}
+
+// A restart during recovery: peering keeps Y over the member that lists the chunk.
+func TestConformScriptedListerRestarted(t *testing.T) {
+	r := seededSoleRun(t, 1, 3, 3)
+	r.c.conformBegin()
+	recoveringLister(t, r, noPlant)
+	conformWrite(t, "scripted-lister-restarted", r.c)
+}
+
 func TestConformScriptedStay(t *testing.T) {
 	if err := staySourceRun(t, nil, "scripted-stay"); err != nil {
 		t.Fatal(err)

@@ -3464,6 +3464,7 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 15 | A primary whose interval a failed version ended asks for the next in the end: with every step that is due taken in time, nothing of its PG waits for ever | `IntervalEnds` | None registered: `TestAFailureBelowACommittedVersionStillAsks` covers it as a regression test, until [Plants for the epoch model's new rules](build-checklist.md#phase-4-embedded-metastore) registers one |
 | 16 | Every client gets an answer: no version stays unanswered for ever | `AllAnswered` | None registered: `TestADemotedPrimaryMapsItsPendingVersionsAsAMember` covers it as a regression test, until the same item registers one |
 | 17 | A version is acknowledged only on at least `min_live` members of the interval that answers it, its own or the one activating, counted by what their logs hold, a member in `maintenance` counting as it does toward `min_live`. An action property, checked at each acknowledgment | `AckedOnMinLive` | "no write is acknowledged on fewer than min_live disks, a member in maintenance counting as one", registered by `epochChecks` |
+| 19 | An activated primary has a source: for a chunk with an acknowledged write, a member of its interval can serve them all, or its own image is what peering kept. Claimed while no disk has gone, as a holder that truly dies leaves none, and not for a chunk where a write of a primary listing it reached another member, which stays open with [Clean copies before a write's OK](build-checklist.md) | `PrimarySource` | `invHasSource` ("an activated primary has a source of each chunk it kept, or calls it unfound"), which holds the code to the decision: it does not read versions |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
 find a violation of the named property, which is never the property that only restates the removed
@@ -3531,6 +3532,10 @@ under fairness, as `deep-peering` does, on the restart plan alone, and those for
 | A fresh grant covers the pair's PGs with no table check | 1 | PG 2's primary is put in `maintenance` while cut off from the control plane; its grantor peers the new interval, then grants it afresh |
 | The support epoch is not bumped on lapse | 2 | Leader 1 is partitioned from both followers; their grants lapse and node 2 is elected with node 3; the partition heals, node 3 renews node 1's grant in the old epoch, and node 1's lease counts it again |
 | Leader transfer without ending the old leader's lease at `MsgTimeoutNow` | 2 | Old and new leader both serve lease reads |
+| A member that lists the chunk vetoes a version (`neg-lister-vetoes`) | 19 | `rep3`: a member back and listing, Y on the other two, the primary restarts, the lister drops Y, all three list |
+| A reached member outside the interval vetoes what every up member holds (`neg-keep-past-member`) | 19 | A move: Y on the primary and the new member, the removal commits, the primary restarts, the removed disk drops Y, both list |
+| The vetoes go even with no clean up holder (`neg-keep-no-source`) | 19 | The one clean copy of X down, a listing primary's write kept, and the copy returns to list it too |
+| A write lands on an unfound chunk (`neg-write-on-unfound`) | 19 | Every up member lists X, a whole-block write is acknowledged, and the disk that held X returns to list it |
 
 - The grant rule `ci-leases` checks: a grantor grants or renews only a holder that reported a table at
   least as new as its own, and a grant carries no table epoch. Property 1 holds with it, and fails

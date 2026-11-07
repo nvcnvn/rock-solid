@@ -56,7 +56,10 @@ func seededSoleRun(t *testing.T, seed uint64, replicas, disks int) *soleRun {
 
 // strandedMove is the model's NoStranded counterexample on real placement, with no disk lost: a rep2 PG drains a member to a third disk, the new member recovers X and the primary reports the interval recovered. Y then reaches the primary and the new member; its send to the leaving member dies with the primary, as the table removing that member commits. The primary comes back, its replay maps Y, and it asks for a new interval, whose peering still reaches the leaving member through a past interval. That member lacks Y, which every up member holds, so peering keeps Y; under plant it vetoes Y instead, and each member lists the chunk.
 func strandedMove(t *testing.T, seed uint64, yOff uint32, plant func(*replicaPlants)) *strandedChunk {
-	r := seededSoleRun(t, seed, 2, 3)
+	return moveOn(t, seededSoleRun(t, seed, 2, 3), yOff, plant)
+}
+
+func moveOn(t *testing.T, r *soleRun, yOff uint32, plant func(*replicaPlants)) *strandedChunk {
 	c := r.c
 	plantAll(c, plant)
 	s := &strandedChunk{soleRun: r, ch: chunkIn(pg0, 1, 0)}
@@ -253,8 +256,7 @@ func TestWriteOnUnfoundEndsTheWayBack(t *testing.T) {
 }
 
 // recoveringLister has a disk come back and list a chunk on a rep3 PG, and before recovery reaches it Y lands on the other two, not on it, and the primary restarts. noRecovery stands in for recovery that has not reached the chunk.
-func recoveringLister(t *testing.T, plant func(*replicaPlants)) (r *soleRun, ch core.ChunkID, x uint64, a, b, d uint32) {
-	r = seededSoleRun(t, 1, 3, 3)
+func recoveringLister(t *testing.T, r *soleRun, plant func(*replicaPlants)) (ch core.ChunkID, x uint64, a, b, d uint32) {
 	c := r.c
 	plantAll(c, plant)
 	ch = chunkIn(pg0, 1, 0)
@@ -287,13 +289,14 @@ func recoveringLister(t *testing.T, plant func(*replicaPlants)) (r *soleRun, ch 
 	c.s.Heal(an, dn)
 	c.s.Restart(an)
 	r.tick(20_000_000)
-	return r, ch, x, a, b, d
+	return ch, x, a, b, d
 }
 
 // The disk that lacks Y lists the chunk, so it is no source and has no veto: the other two hold Y clean, X reads, and recovery brings the third once it runs.
 func TestARestartDuringRecoveryKeepsASource(t *testing.T) {
-	r, ch, x, a, b, d := recoveringLister(t, noPlant)
+	r := seededSoleRun(t, 1, 3, 3)
 	c := r.c
+	ch, x, a, b, d := recoveringLister(t, r, noPlant)
 	for _, m := range []uint32{a, b} {
 		if got := c.listed(c.node(m), ch); got.ListedIn != 0 || got.Whole <= x {
 			t.Fatalf("disk %d holds %+v", m, got)
@@ -311,8 +314,9 @@ func TestARestartDuringRecoveryKeepsASource(t *testing.T) {
 
 // With listerVetoes the disk that lacks Y drops it, which leaves every member listing: unfound with every disk up, and X held under Y by two of them.
 func TestListerVetoesLeavesNoMemberASource(t *testing.T) {
-	r, ch, x, a, b, d := recoveringLister(t, func(p *replicaPlants) { p.listerVetoes = true })
+	r := seededSoleRun(t, 1, 3, 3)
 	c := r.c
+	ch, x, a, b, d := recoveringLister(t, r, func(p *replicaPlants) { p.listerVetoes = true })
 	for _, m := range []uint32{a, b, d} {
 		if got := c.listed(c.node(m), ch); got.Listed != x || got.ListedIn == 0 {
 			t.Fatalf("disk %d holds %+v", m, got)

@@ -998,6 +998,21 @@ AskNext(n, p) ==
        /\ reqIv' = [reqIv EXCEPT ![p] = k]
        /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
 
+\* A restarted primary that adopted a table newer than the one it restarted on
+\* asks for the next interval too, before it peers: the code treats the first
+\* table a new process takes as the one it restarted on.
+RestartAsk(n, p) ==
+    LET k == IvAt(n, p)
+    IN /\ Running(n)
+       /\ Leads(n, p)
+       /\ run[n] > 1
+       /\ ~pr[n][p].act
+       /\ ~Decided(n, p, k)
+       /\ k = Cur(p)
+       /\ reqIv[p] # k
+       /\ reqIv' = [reqIv EXCEPT ![p] = k]
+       /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
+
 \* A primary whose chunk counter ran out lets its pending writes complete,
 \* then asks for a new interval.
 CounterOut(n, p) ==
@@ -1807,7 +1822,7 @@ Transfer(n, t) ==
 Protocol ==
     \/ Reactive
     \/ \E n \in Node \ stale : \E e \in {ep[n] + 1, Len(tbl)} : Adopt(n, e)
-    \/ \E n \in Node, p \in PG : Peer(n, p) \/ Activate(n, p) \/ CounterOut(n, p) \/ AskNext(n, p)
+    \/ \E n \in Node, p \in PG : Peer(n, p) \/ Activate(n, p) \/ CounterOut(n, p) \/ AskNext(n, p) \/ RestartAsk(n, p)
                                  \/ ReportRecovered(n, p)
     \/ \E d \in Disk : Persist(d)
     \/ \E n \in Node, p \in PG, c \in Chunk, d \in Disk : Recover(n, p, c, d)
