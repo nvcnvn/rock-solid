@@ -183,7 +183,7 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 		t.targets = 0
 		r.st.Uncover(t.chunk)
 		if j, ok := slices.BinarySearchFunc(l.kept, t.chunk, func(k keptChunk, c core.ChunkID) int { return compareChunk(k.chunk, c) }); ok {
-			l.kept[j].unfound = true
+			l.kept[j].unfound = !r.plant.neverUnfound
 		}
 		return
 	case src < 0:

@@ -673,12 +673,21 @@ LapseFor(J, p, k) ==
        /\ hl' = [h \in Node |-> [g \in Node |->
                    IF ~Clocks /\ lapse(g, h) THEN [hl[h][g] EXCEPT !.has = FALSE] ELSE hl[h][g]]]
 
+\* The versions of c a disk's map holds: the versions an activation of its node
+\* settled away stay in its log, never mapped, until a restart's replay maps them.
+Held(d, c) ==
+    dlog[d][c] \ UNION {y.gone[c] : y \in {x \in dec :
+        /\ x.n = dnode[d]
+        /\ x.p = ChunkPG[c]
+        /\ x.r = run[x.n]
+        /\ [p |-> x.p, k |-> x.k, r |-> x.r] \in act}}
+
 \* A member's reply to peering, for one chunk: its newest whole version, the
 \* kept version it lists (NoMiss for none) and the newest interval whose
 \* decision it persisted. The keep rule sees nothing else of a member's log.
 Reply(d, c) ==
     LET s == IF OldDiskAnswers(d) THEN ddisk[dhost[d]] ELSE d
-    IN [whole |-> Newest(dlog[s][c]), list |-> miss[s][c], decided |-> persIv[s][ChunkPG[c]]]
+    IN [whole |-> Newest(Held(s, c)), list |-> miss[s][c], decided |-> persIv[s][ChunkPG[c]]]
 
 \* The keep rule over the replies of J. LS is the newest interval whose peering
 \* decision a reached member persisted (at least the table's last activated
@@ -715,8 +724,8 @@ Kept(p, L, J, c, k) ==
 \* newest and lists nothing. Only recovery removes an entry: a member that
 \* still lists a chunk may hold a dropped version's bytes under a newer write.
 Entry(d, c, K) ==
-    IF \/ Newest(dlog[d][c]) = K /\ (miss[d][c] = NoMiss \/ Bug("PeeringClearsMissing"))
-       \/ Bug("NoListAbove") /\ Newest(dlog[d][c]) > K /\ miss[d][c] = NoMiss
+    IF \/ Newest(Held(d, c)) = K /\ (miss[d][c] = NoMiss \/ Bug("PeeringClearsMissing"))
+       \/ Bug("NoListAbove") /\ Newest(Held(d, c)) > K /\ miss[d][c] = NoMiss
     THEN NoMiss ELSE K
 
 \* A crash can leave part of a version above a member's newest whole one. The
@@ -825,7 +834,7 @@ PeerOn(n, p, J, P, T) ==
         \* The members the decision counts as holding the kept version:
         \* the recovery sources it reached, and the live members it
         \* leaves off the missing list.
-        src(c) == {d \in {y \in J : Newest(dlog[y][c]) = K[c] /\ miss[y][c] = NoMiss}
+        src(c) == {d \in {y \in J : Newest(Held(y, c)) = K[c] /\ miss[y][c] = NoMiss}
                          \cup {y \in UpIn(p, k) : Entry(y, c, K[c]) = NoMiss} :
                      [d |-> d, c |-> c] \notin T}
         torn == \E c \in ChunksOf(p) : K[c] # 0 /\
@@ -839,7 +848,7 @@ PeerOn(n, p, J, P, T) ==
         img == {c \in ChunksOf(p) :
                   /\ miss[own][c] = NoMiss
                   /\ [d |-> own, c |-> c] \notin T
-                  /\ \/ Newest(dlog[own][c] \ gone[c]) = K[c]
+                  /\ \/ Newest(Held(own, c) \ gone[c]) = K[c]
                      \/ Bug("MergeOnDropped") /\ K[c] \in dlog[own][c] \cup {0}}
         \* Unfound: nothing kept has no up member to recover from.
         unf == {c \in ChunksOf(p) :
@@ -1001,7 +1010,7 @@ AskNext(n, p) ==
 \* A restarted primary that adopted a table newer than the one it restarted on
 \* asks for the next interval too, before it peers: the code treats the first
 \* table a new process takes as the one it restarted on. It changes no rule, so
-\* only traces, whose plans set "lateask", take it.
+\* only traces and ci-late-ask, whose plans set "lateask", take it.
 RestartAsk(n, p) ==
     LET k == IvAt(n, p)
     IN /\ "lateask" \in plan.f
@@ -1106,7 +1115,7 @@ Order(n, x) ==
         cur == pv[n][c]
         v == IF IvOfV(cur) = k THEN cur + 1 ELSE Ver(k, 1)
         y == TheDec(n, p, k)
-        on == IF w.whole THEN cur ELSE Newest(dlog[own][c] \ y.gone[c])
+        on == IF w.whole THEN cur ELSE Newest(Held(own, c) \ y.gone[c])
         r == [c |-> c, v |-> v, w |-> x.w, on |-> on, blk |-> w.blk, n |-> n, r |-> run[n],
               ls |-> miss[own][c] # NoMiss /\ c \notin y.unf]
         logs == [dlog EXCEPT ![own][c] = @ \cup {v}]
@@ -1220,17 +1229,18 @@ GoneRefuses(m) ==
     /\ UNCHANGED faults
 
 \* A version fails on the primary's own log after it went out to members, while
-\* the primary is still in its interval: peering answers only once a disk's
-\* records are durable or failed. The primary refuses its client and ends the
-\* interval. Only the newest version on its log fails: a record that fails
-\* below a later logged one, reported as held whole up to the failure, is not
-\* modelled.
+\* the primary is still in its interval or has not decided its next one: peering
+\* answers only once a disk's records are durable or failed. The primary refuses
+\* its client and ends the interval. Only the newest version on its log fails: a
+\* record that fails below a later logged one, reported as held whole up to the
+\* failure, is not modelled.
 OwnFail(n, r) ==
     LET p == ChunkPG[r.c]
         own == ddisk[n]
     IN /\ r.n = n
        /\ Running(n)
-       /\ pr[n][p].iv = IvOfV(r.v)
+       /\ \/ pr[n][p].iv = IvOfV(r.v)
+          \/ ~Decided(n, p, pr[n][p].iv)
        /\ Leads(n, p)
        /\ Newest(dlog[own][r.c]) = r.v
        /\ Fault("ownfail")
@@ -2257,6 +2267,7 @@ MoveSourcePlans == {MoveRestarted}
 MoveAnswer == {[MoveRestarted EXCEPT !.w = <<Partial2[2]>>]}
 ListerAnswer == {[ListerRestarted EXCEPT !.w = <<Partial[2]>>]}
 ListerPlans == {ListerRestarted}
+LateAskPlans == {[ListerRestarted EXCEPT !.f = {"restart", "lateask"}]}
 ListerOrderPlans == {ListerOrders}
 
 \* ci-peering checks the plans with membership changes alone, but one;

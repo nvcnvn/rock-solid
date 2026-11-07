@@ -215,6 +215,10 @@ var conformPlants = []struct {
 	{"recoverFromListed", func(r *primaryRun) { r.c.replicaPlants.recoverFromListed = true }},
 	{"clearNoSource", func(r *primaryRun) { r.c.replicaPlants.clearNoSource = true }},
 	{"goneWhileUp", func(r *primaryRun) { r.c.replicaPlants.goneWhileUp = true }},
+	{"listerVetoes", func(r *primaryRun) { r.c.replicaPlants.listerVetoes = true }},
+	{"keepPastMember", func(r *primaryRun) { r.c.replicaPlants.keepPastMember = true }},
+	{"keepNoSource", func(r *primaryRun) { r.c.replicaPlants.keepNoSource = true }},
+	{"writeOnUnfound", func(r *primaryRun) { r.c.replicaPlants.writeOnUnfound = true }},
 }
 
 // conformPlant keeps a planted run's trace, however the run stops, and beside it a .stop file saying how; with CONFORM_RUNON set the run goes on past its first broken invariant, for a plant whose break comes before the record of what broke it.

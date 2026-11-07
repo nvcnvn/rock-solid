@@ -69,7 +69,7 @@ func keep(e *PGEntry, replies []peerReply, all []replyChunk, dst []keptChunk, pl
 		}
 		g := all[lo:hi]
 		k := keepChunk(e, replies, g, ls, plant)
-		k.unfound = k.kept != 0 && !hasSource(e, replies, g, k.kept)
+		k.unfound = k.kept != 0 && !hasSource(e, replies, g, k.kept) && !plant.neverUnfound
 		dst = append(dst, k)
 		for i := range replies {
 			r := &replies[i]

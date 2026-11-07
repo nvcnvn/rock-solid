@@ -402,11 +402,12 @@ type replicaPlants struct {
 	// listerVetoes has a member that lists a chunk veto a version it lacks; keepPastMember has a
 	// reached member outside the interval veto a version every up member holds; keepNoSource lifts
 	// both vetoes with no up member a source of the version; writeOnUnfound orders a write to an
-	// unfound chunk.
+	// unfound chunk; neverUnfound leaves a chunk with no source neither recovering nor unfound.
 	listerVetoes   bool
 	keepPastMember bool
 	keepNoSource   bool
 	writeOnUnfound bool
+	neverUnfound   bool
 	// fenceOnArrival refuses an older incarnation's write when it reaches the primary, not when the
 	// store orders it; reorderAfterOther keeps a lead's term across intervals another primary led,
 	// so its held writes are ordered again.

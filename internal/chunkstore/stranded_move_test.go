@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"bytes"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -160,6 +161,17 @@ func TestKeepPastMemberLeavesAMoveUnfound(t *testing.T) {
 			s.tick(120_000_000)
 			check()
 		}
+	}
+}
+
+// A chunk with no source that nothing calls unfound breaks the source invariant.
+func TestNeverUnfoundBreaksTheSourceInvariant(t *testing.T) {
+	r := seededSoleRun(t, 1, 2, 3)
+	r.c.planted = true
+	watchEpochs(r.c, nil)
+	moveOn(t, r, core.BlockSize, func(p *replicaPlants) { p.keepPastMember, p.neverUnfound = true, true })
+	if r.c.found == nil || !strings.Contains(r.c.found.Error(), invHasSource) {
+		t.Fatalf("found %v", r.c.found)
 	}
 }
 
