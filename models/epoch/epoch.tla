@@ -104,13 +104,15 @@ VARIABLES
     pv,       \* [Node -> [Chunk -> Nat]]: newest version a primary ordered
     pin,      \* [Node -> SUBSET [w, hold]]: client writes a primary holds unordered
     known,    \* [Node -> [PG -> Nat]]: newest incarnation of the session a primary has seen
-    dec,      \* set of [p, k, n, r, kept, gone, img, torn]: peering decisions; gone: per chunk the
-              \* gated versions of the primary the decision drops; img: the chunks whose
-              \* image on the primary is the kept version once it settled
+    dec,      \* set of [p, k, n, r, kept, gone, img, torn, unf]: peering decisions; gone: per chunk
+              \* the gated versions of the primary the decision drops; img: the chunks whose
+              \* image on the primary is the kept version once it settled; unf: the chunks
+              \* left with no source
     act,      \* set of [p, k, r]: activated intervals
     \* Data path
     rm,       \* set of replicated writes in flight or delivered (kept, so duplicated)
-    vers,     \* set of [c, v, w, on, blk, n, r]: every version ordered (on: merged on)
+    vers,     \* set of [c, v, w, on, blk, n, r, ls]: every version ordered (on: merged on; ls:
+              \* its primary listed the chunk, not unfound)
     ackd,     \* set of [c, v]: versions acknowledged to the client
     wst,      \* [1..Len(Writes) -> 0..2]: unsent, sent, acknowledged
     sends,    \* [1..Len(Writes) -> Nat]
@@ -306,7 +308,7 @@ Init ==
     /\ pin = [n \in Node |-> {}]
     /\ known = [n \in Node |-> [p \in PG |-> 0]]
     /\ dec = {[p |-> p, k |-> 1, n |-> InitMem[p][1], r |-> 1, kept |-> [c \in Chunk |-> 0],
-                gone |-> [c \in ChunksOf(p) |-> {}], img |-> ChunksOf(p), torn |-> {}] : p \in PG}
+                gone |-> [c \in ChunksOf(p) |-> {}], img |-> ChunksOf(p), torn |-> {}, unf |-> {}] : p \in PG}
     /\ act = {[p |-> p, k |-> 1, r |-> 1] : p \in PG}
     /\ rm = {}
     /\ vers = {}
@@ -683,8 +685,15 @@ Reply(d, c) ==
 \* interval L). A member that persisted it lists the version it kept or, listing
 \* nothing, holds that version as its newest below LS. A version of LS or later
 \* is kept unless a reached member live in its interval reports neither it nor
-\* a later version; every version a kept one rests on is kept.
-Kept(p, L, J, c) ==
+\* a later version, and every version a kept one rests on is kept. Two cases keep
+\* a version such a member lacks, when an up member of k holds it and lists nothing,
+\* so could be its source: dropping it would leave that member listing the chunk
+\* too. The member lacking it lists the chunk, so is no source of what it holds,
+\* or every up member of k holds the version, so the one lacking it is a disk
+\* recovery cannot read. With no such member the veto stands: it may be the one
+\* holding what is acknowledged. ListerVetoes and KeepPastMember remove the cases,
+\* KeepNoSource the condition.
+Kept(p, L, J, c, k) ==
     LET r == [d \in J |-> Reply(d, c)]
         LS == Max({r[d].decided : d \in J} \cup {L})
         RS == {d \in J : r[d].decided = LS}
@@ -692,7 +701,12 @@ Kept(p, L, J, c) ==
                         ELSE IF IvOfV(r[d].whole) < LS THEN r[d].whole ELSE 0 : d \in RS})
         wholes == {r[d].whole : d \in J} \ {0}
         listed == {r[d].list : d \in J} \ {NoMiss, 0}
-        keep(v) == \A d \in J \cap UpIn(p, IvOfV(v)) : r[d].whole >= v \/ r[d].list >= v
+        holds(d, v) == r[d].whole >= v \/ r[d].list >= v
+        source(v) == Bug("KeepNoSource") \/ \E d \in UpIn(p, k) : r[d].whole = v /\ r[d].list = NoMiss
+        keep(v) == \/ \A d \in J \cap UpIn(p, IvOfV(v)) : holds(d, v)
+                   \/ /\ source(v)
+                      /\ \/ ~Bug("ListerVetoes") /\ \A d \in J \cap UpIn(p, IvOfV(v)) : holds(d, v) \/ r[d].list # NoMiss
+                         \/ ~Bug("KeepPastMember") /\ \A d \in UpIn(p, k) : holds(d, v)
     IN IF Bug("DecideByOwnInterval")
        THEN Newest({v \in wholes \cup listed : keep(v)})
        ELSE Newest({base} \cup {v \in wholes : IvOfV(v) >= LS /\ keep(v)})
@@ -807,7 +821,7 @@ TornSets(n, p) ==
 PeerOn(n, p, J, P, T) ==
     LET k == IvAt(n, p)
         L == LaAt(n, p)
-        K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c) ELSE 0]
+        K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c, k) ELSE 0]
         \* The members the decision counts as holding the kept version:
         \* the recovery sources it reached, and the live members it
         \* leaves off the missing list.
@@ -827,11 +841,14 @@ PeerOn(n, p, J, P, T) ==
                   /\ [d |-> own, c |-> c] \notin T
                   /\ \/ Newest(dlog[own][c] \ gone[c]) = K[c]
                      \/ Bug("MergeOnDropped") /\ K[c] \in dlog[own][c] \cup {0}}
+        \* Unfound: nothing kept has no up member to recover from.
+        unf == {c \in ChunksOf(p) :
+                  K[c] # 0 /\ c \notin img /\ \A d \in UpIn(p, k) : lists[d][c] # NoMiss}
     IN /\ UpIn(p, k) \subseteq J
        /\ \A i \in NeedIv(p, k, L) : J \cap UpIn(p, i) # {}
        /\ LapseFor(J, p, k)
        /\ dec' = dec \cup {[p |-> p, k |-> k, n |-> n, r |-> run[n], kept |-> K,
-                            gone |-> gone, img |-> img, torn |-> T]}
+                            gone |-> gone, img |-> img, torn |-> T, unf |-> unf]}
        /\ bad' = IF torn THEN bad \cup {"torn"} ELSE bad
        /\ pv' = [pv EXCEPT ![n] = [c \in Chunk |-> IF c \in ChunksOf(p) THEN K[c] ELSE pv[n][c]]]
        /\ IF Bug("ActivateBeforeDurable")
@@ -1040,12 +1057,15 @@ Die ==
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, rm, vers, ackd, wst, sends, bad, pend, refd,
                    leaseVars, clockVars, raftVars>>
 
-\* Whether a held or fenced write must be refused when it is ordered.
+\* Whether a held or fenced write must be refused when it is ordered. One on an
+\* unfound chunk is too: its OK would read as missing, and a later peering would
+\* keep it over the version a returning disk could still have healed.
 Fenced(n, x) ==
     LET w == Writes[x.w]
         p == ChunkPG[w.c]
     IN \/ ~Bug("FenceOnArrivalOnly") /\ w.inc # 0 /\ w.inc < known[n][p]
        \/ ~Bug("ReorderAfterOtherPrimary") /\ x.hold # 0 /\ ~KeptPrimary(n, p, x.hold, IvAt(n, p))
+       \/ ~Bug("WriteOnUnfound") /\ w.c \in TheDec(n, p, IvAt(n, p)).unf
 
 \* The primary acknowledges a version to the client once every member live
 \* in its interval logged it.
@@ -1070,7 +1090,8 @@ Order(n, x) ==
         v == IF IvOfV(cur) = k THEN cur + 1 ELSE Ver(k, 1)
         y == TheDec(n, p, k)
         on == IF w.whole THEN cur ELSE Newest(dlog[own][c] \ y.gone[c])
-        r == [c |-> c, v |-> v, w |-> x.w, on |-> on, blk |-> w.blk, n |-> n, r |-> run[n]]
+        r == [c |-> c, v |-> v, w |-> x.w, on |-> on, blk |-> w.blk, n |-> n, r |-> run[n],
+              ls |-> miss[own][c] # NoMiss /\ c \notin y.unf]
         logs == [dlog EXCEPT ![own][c] = @ \cup {v}]
     IN /\ Running(n)
        /\ x \in pin[n]
@@ -1989,6 +2010,28 @@ NoStranded ==
        (AckedV(c) # {} /\ \E d \in Disk : CanServe(d, c))
        => \E d \in Mem(ChunkPG[c], Cur(ChunkPG[c])) : CanServe(d, c)
 
+\* 19. An activated primary has a source: for a chunk with an acknowledged write,
+\* a member of its interval can serve them all, or its own image is what peering
+\* kept. Two limits. A holder that truly dies leaves none, so it is claimed only
+\* while no disk has gone. And a write a primary that lists the chunk sent to
+\* another member can leave none: peering with a member down cannot tell whether
+\* it landed there, and whichever it decides may drop what a member needed. Until
+\* writes to a degraded chunk are held, that stays open.
+ListerWriteSpread(c) ==
+    \E r \in vers : r.c = c /\ r.ls /\ Cardinality({d \in Disk : r.v \in dlog[d][c]}) > 1
+
+PrimarySource ==
+    \A p \in PG, n \in Node, c \in Chunk :
+       (/\ \A d \in Node : dnode[d] # 0
+        /\ ChunkPG[c] = p
+        /\ Leads(n, p)
+        /\ pr[n][p].act
+        /\ AckedV(c) # {}
+        /\ ~ListerWriteSpread(c)
+        /\ Decided(n, p, IvAt(n, p)))
+       => \/ \E d \in Mem(p, IvAt(n, p)) : CanServe(d, c)
+          \/ c \in TheDec(n, p, IvAt(n, p)).img
+
 \* The versions of c a later activated decision does not rest on.
 Dropped(c) ==
     {r.v : r \in {y \in vers : y.c = c /\ \E x \in ActDecs :
@@ -2052,6 +2095,7 @@ AckedOnMinLive == [][\A y \in ackd' \ ackd :
 PGs == {1, 2}
 OnePG == {2}
 OneChunk == {2}
+FirstPG == {1}
 MinLive2 == [p \in PGs |-> 2]
 MaintPG2 == [p \in PGs |-> p = 2]
 Mem3 == [p \in PGs |-> IF p = 1 THEN <<1, 2, 3>> ELSE <<2, 3>>]
@@ -2171,6 +2215,21 @@ RefillTwoPlans == {RefillSecond, RefillTogether, RefillLostSecond}
 \* neg-drop-all-leaving: both members leaving, one lost, and the other holds what
 \* no member can serve.
 DropAllPlans == {Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), AddM(2, 2, 4), LostM(3), DropM(2)>>, Partial2, {})}
+
+\* ci-sources, each with a primary restart: a move whose removed member lacks Y;
+\* a recovering member of rep3 that lacks Y, which both go to every member listing
+\* under a veto. And the second write's primary lists the chunk: X's one source is
+\* marked down, the primary takes a whole block alone, and the source returns.
+MoveRestarted == Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Partial2, {"restart"})
+ListerRestarted == Plan(<<Mark(3, "down"), Mark(3, "up")>>, Partial, {"restart"})
+LoneListerWrites ==
+    <<Partial[1], [Partial[2] EXCEPT !.after = 1],
+      [c |-> 1, blk |-> 2, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 1]>>
+ListerOrders == Plan(<<ML(1, 2), Mark(3, "down"), Mark(3, "up")>>, LoneListerWrites, {})
+SourcePlans == {ListerRestarted, ListerOrders}
+MoveSourcePlans == {MoveRestarted}
+ListerPlans == {ListerRestarted}
+ListerOrderPlans == {ListerOrders}
 
 \* ci-peering checks the plans with membership changes alone, but one;
 \* ci-restarts those with a restart or a format, under which a decision can
