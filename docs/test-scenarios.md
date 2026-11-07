@@ -4064,9 +4064,11 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | `scripted-clean` | 12 | passes | 1 |
 | `scripted-primary-change` | 35 | passes | 1 |
 | `scripted-lone-copy` | 41 | passes | 1 |
-| `scripted-refill` | 68 | passes: a member merely down refilled as an `Add`, the next waiting, a recovered report ending it | 1 |
+| `scripted-refill` | 83 | passes: a member merely down refilled as an `Add`, the next waiting, a recovered report ending it | 1 |
 | `scripted-stay` | 84 | passes: a `Stay` that keeps a member merely down as the leaving one | 1 |
-| 39 seeds | 308 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 3 to 207 |
+| `scripted-move-restarted` | 47 | passes: a move and a restart, peering keeps what every up member holds over the removed disk | 1 |
+| `scripted-lister-restarted` | 56 | passes: a restart during recovery, peering keeps a version over the member that lists the chunk | 1 |
+| 39 seeds | 273 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 3 to 207 |
 | `primaries-2` | 517 | no verdict in 400 s and 2 GB: one crash leaves 26 `mayfail` lines, each a free choice, and `-dfid` reached level 307 of 519 in 280 s at 319,000 states | 400 |
 
 39 seeds of 40 pass, all but 2. None broke a safety invariant,
