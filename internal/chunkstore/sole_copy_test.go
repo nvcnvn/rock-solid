@@ -462,7 +462,7 @@ func TestAOneDiskPoolsVersionHearsOKAcrossItsInterval(t *testing.T) {
 	}
 }
 
-// At min_live 1 too, a primary that lists the chunk is no copy: W on it alone counts none, so its client is refused, and the resend is answered.
+// At min_live 1 too, a primary that lists the chunk is no copy: W on it alone counts none, so its client is refused, and with no up member a source the resend answers unfound.
 func TestAPrimaryThatListsTheChunkIsNoCopyAtMinLiveOne(t *testing.T) {
 	r := newSoleRun(t, 3, 1, 3)
 	c := r.c
@@ -492,7 +492,7 @@ func TestAPrimaryThatListsTheChunkIsNoCopyAtMinLiveOne(t *testing.T) {
 	if rp, ok := r.answered(id, 100_000_000); !ok || rp.Status != StatusRefused {
 		t.Fatalf("W answered %+v, %v", rp, ok)
 	}
-	if rp, ok := r.answered(c.write(pg0, ch, 0, w), 100_000_000); !ok || rp.Status != StatusOK {
+	if rp, ok := r.answered(c.write(pg0, ch, 0, w), 100_000_000); !ok || rp.Status != StatusUnfound {
 		t.Fatalf("W sent again answered %+v, %v", rp, ok)
 	}
 }

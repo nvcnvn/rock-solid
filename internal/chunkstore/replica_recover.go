@@ -151,8 +151,8 @@ func (r *Replica) recoverWork(ctx *core.Context, out *ReplicaOutput) {
 // holds the kept version and lacks nothing of it: the primary itself if it can, even one that lists
 // the chunk only for versions of its own its index never mapped, else the first such member, those
 // a read already failed at last. A chunk no member keeps anything of needs no source, and one no member can be a source of
-// is left listed for this interval; one whose sources the replica cannot reach yet is tried again
-// at the next retry.
+// is unfound, left listed for this interval; one whose sources the replica cannot reach yet is
+// tried again at the next retry.
 func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput) {
 	l := &r.leads[i]
 	_, e := r.table.entry(l.pg)
@@ -182,6 +182,9 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 	case !clean:
 		t.targets = 0
 		r.st.Uncover(t.chunk)
+		if j, ok := slices.BinarySearchFunc(l.kept, t.chunk, func(k keptChunk, c core.ChunkID) int { return compareChunk(k.chunk, c) }); ok {
+			l.kept[j].unfound = true
+		}
 		return
 	case src < 0:
 		t.wait, r.waits = true, true

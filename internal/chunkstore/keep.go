@@ -46,7 +46,7 @@ func upIn(e *PGEntry, disk, i uint32) bool {
 	return slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == disk && m.Mark == MarkUp })
 }
 
-// keep is the keep rule over the replies peering of e's interval reached, appending to dst each chunk a reply names, in chunk order, and setting the list of each reply from an up member of the interval. LS, the newest interval whose decision a reached member persisted and at least e's last activated one, fixes every version below it: a member that persisted LS lists the version LS kept or, listing nothing, holds it as its newest below LS. A version of LS or later is kept unless a reached member up in its interval holds neither it nor a later version nor a listing of one, and every version a kept one rests on is kept. Members report only their newest whole version, which suffices: the newest kept version is the newest whole version of some reached member, since a later interval that took writes activated, so its members persisted it and LS would be at least it. A member is left off the list only if it holds the kept version as its newest, logged nothing later and lists nothing.
+// keep is the keep rule over the replies peering of e's interval reached, appending to dst each chunk a reply names, in chunk order, and setting the list of each reply from an up member of the interval. LS, the newest interval whose decision a reached member persisted and at least e's last activated one, fixes every version below it: a member that persisted LS lists the version LS kept or, listing nothing, holds it as its newest below LS. A version of LS or later is kept unless a reached member up in its interval holds neither it nor a later version nor a listing of one, with the exceptions of keeps, and every version a kept one rests on is kept. Members report only their newest whole version, which suffices: the newest kept version is the newest whole version of some reached member, since a later interval that took writes activated, so its members persisted it and LS would be at least it. A member is left off the list only if it holds the kept version as its newest, logged nothing later and lists nothing.
 func keep(e *PGEntry, replies []peerReply, all []replyChunk, dst []keptChunk, plant replicaPlants) ([]replyChunk, []keptChunk) {
 	ls := e.Activated
 	for _, r := range replies {
@@ -68,8 +68,8 @@ func keep(e *PGEntry, replies []peerReply, all []replyChunk, dst []keptChunk, pl
 			hi++
 		}
 		g := all[lo:hi]
-		k := keepChunk(e, replies, g, ls, plant.ownInterval)
-		k.unfound = k.kept != 0 && !slices.ContainsFunc(g, func(c replyChunk) bool { return clean(&c.ChunkPeer, k.kept) })
+		k := keepChunk(e, replies, g, ls, plant)
+		k.unfound = k.kept != 0 && !hasSource(e, replies, g, k.kept)
 		dst = append(dst, k)
 		for i := range replies {
 			r := &replies[i]
@@ -89,6 +89,13 @@ func keep(e *PGEntry, replies []peerReply, all []replyChunk, dst []keptChunk, pl
 // clean reports whether a member holds version v as its newest, logged nothing later and lists nothing.
 func clean(c *ChunkPeer, v uint64) bool { return c.Whole == v && c.Logged == v && !c.Listed }
 
+// hasSource reports whether an up member of e's interval holds v clean, so recovery can read it. A clean disk outside the interval does not count: peering reaches it, recovery does not.
+func hasSource(e *PGEntry, replies []peerReply, g []replyChunk, v uint64) bool {
+	return slices.ContainsFunc(g, func(c replyChunk) bool {
+		return clean(&c.ChunkPeer, v) && upIn(e, replies[c.reply].disk, e.Interval)
+	})
+}
+
 // copies counts the copies of chunk c's kept version e's interval can prove from the lists on replies: its up members a list leaves off, which hold that version as their newest and can be its source, and its members in maintenance, which count toward min_live as they do when a write commits.
 func copies(e *PGEntry, replies []peerReply, c core.ChunkID) int {
 	n := 0
@@ -101,8 +108,9 @@ func copies(e *PGEntry, replies []peerReply, c core.ChunkID) int {
 	return n
 }
 
-func keepChunk(e *PGEntry, replies []peerReply, g []replyChunk, ls uint32, own bool) keptChunk {
+func keepChunk(e *PGEntry, replies []peerReply, g []replyChunk, ls uint32, plant replicaPlants) keptChunk {
 	k := keptChunk{chunk: g[0].Chunk}
+	own := plant.ownInterval
 	for _, c := range g {
 		switch {
 		case own || replies[c.reply].decided != ls:
@@ -113,31 +121,54 @@ func keepChunk(e *PGEntry, replies []peerReply, g []replyChunk, ls uint32, own b
 		}
 	}
 	for _, c := range g {
-		if v := c.Whole; v > k.kept && (own || intervalOf(v) >= ls) && heldByUp(e, replies, g, v) {
+		if v := c.Whole; v > k.kept && (own || intervalOf(v) >= ls) && keeps(e, replies, g, v, plant) {
 			k.kept = v
 		}
 	}
 	return k
 }
 
-// heldByUp reports whether every reached member up in version v's interval holds v or later, whole or listed.
-func heldByUp(e *PGEntry, replies []peerReply, g []replyChunk, v uint64) bool {
+// keeps reports whether peering keeps v: every reached member up in its interval holds v or later, whole or listed. A member lacking it gives way if an up member of e's interval holds v clean, since dropping v would have that one list the chunk too: when the member lacking it lists the chunk, so is no source of what it holds, or when every up member of e's interval holds v, so it is a disk recovery cannot read. With no such holder the member lacking it stands, as it may hold what is acknowledged.
+func keeps(e *PGEntry, replies []peerReply, g []replyChunk, v uint64, plant replicaPlants) bool {
+	lister, other := false, false
 	for i, r := range replies {
-		if !upIn(e, r.disk, intervalOf(v)) {
-			continue
-		}
-		var h uint64
-		if j := slices.IndexFunc(g, func(c replyChunk) bool { return c.reply == i }); j >= 0 {
-			h = g[j].Whole
-			if g[j].Listed {
-				h = max(h, g[j].Kept)
+		if upIn(e, r.disk, intervalOf(v)) && !holds(g, i, v) {
+			if lists(g, i) {
+				lister = true
+			} else {
+				other = true
 			}
 		}
-		if h < v {
+	}
+	if !lister && !other {
+		return true
+	}
+	if !plant.keepNoSource && !hasSource(e, replies, g, v) {
+		return false
+	}
+	if !other && !plant.listerVetoes {
+		return true
+	}
+	if plant.keepPastMember {
+		return false
+	}
+	for i, r := range replies {
+		if upIn(e, r.disk, e.Interval) && !holds(g, i, v) {
 			return false
 		}
 	}
 	return true
+}
+
+// holds reports whether reply i of the chunk's group holds v or later, whole or listed.
+func holds(g []replyChunk, i int, v uint64) bool {
+	j := slices.IndexFunc(g, func(c replyChunk) bool { return c.reply == i })
+	return j >= 0 && (g[j].Whole >= v || g[j].Listed && g[j].Kept >= v)
+}
+
+// lists reports whether reply i of the chunk's group lists it.
+func lists(g []replyChunk, i int) bool {
+	return slices.ContainsFunc(g, func(c replyChunk) bool { return c.reply == i && c.Listed })
 }
 
 func intervalOf(v uint64) uint32 { return uint32(v >> 32) }

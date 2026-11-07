@@ -19,6 +19,14 @@ type strandedChunk struct {
 	primary, leaving, added uint32
 }
 
+// plantAll sets a plant on every replica and on those a restart builds.
+func plantAll(c *rcluster, set func(*replicaPlants)) {
+	set(&c.replicaPlants)
+	for n := range c.reps {
+		set(&c.reps[n].plant)
+	}
+}
+
 // seededSoleRun is newSoleRun over the scheduler of seed.
 func seededSoleRun(t *testing.T, seed uint64, replicas, disks int) *soleRun {
 	a := &authority{pool: Pool{Replicas: replicas, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 1},
@@ -46,10 +54,11 @@ func seededSoleRun(t *testing.T, seed uint64, replicas, disks int) *soleRun {
 	return &soleRun{c: c, a: a, isolated: map[uint32]bool{}}
 }
 
-// strandedMove is the model's NoStranded counterexample on real placement, with no disk lost: a rep2 PG drains a member to a third disk, the new member recovers X and the primary reports the interval recovered. Y then reaches the primary and the new member; its send to the leaving member dies with the primary, as the table removing that member commits. The primary comes back, its replay maps Y, and it asks for a new interval, whose peering still reaches the leaving member through a past interval. That member lacks Y, so peering keeps X and drops Y, and each member lists the chunk.
-func strandedMove(t *testing.T, seed uint64, yOff uint32) *strandedChunk {
+// strandedMove is the model's NoStranded counterexample on real placement, with no disk lost: a rep2 PG drains a member to a third disk, the new member recovers X and the primary reports the interval recovered. Y then reaches the primary and the new member; its send to the leaving member dies with the primary, as the table removing that member commits. The primary comes back, its replay maps Y, and it asks for a new interval, whose peering still reaches the leaving member through a past interval. That member lacks Y, which every up member holds, so peering keeps Y; under plant it vetoes Y instead, and each member lists the chunk.
+func strandedMove(t *testing.T, seed uint64, yOff uint32, plant func(*replicaPlants)) *strandedChunk {
 	r := seededSoleRun(t, seed, 2, 3)
 	c := r.c
+	plantAll(c, plant)
 	s := &strandedChunk{soleRun: r, ch: chunkIn(pg0, 1, 0)}
 	id := c.write(pg0, s.ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize))
 	c.until(id)
@@ -94,26 +103,40 @@ func (s *strandedChunk) disk(d uint32) Chunk { return s.c.listed(s.c.node(d), s.
 // block is the first byte of block b of the chunk as disk maps it.
 func (s *strandedChunk) block(d uint32, b uint16) byte { return s.c.diskBlock(s.c.node(d), s.ch, b)[0] }
 
-// FAILS ON PURPOSE until the bug it reproduces is fixed; see strandedMove. X was acknowledged, no disk was lost and a whole copy exists, yet no read of X succeeds.
-func TestKnownBugAcknowledgedWriteReadsAfterAMoveAndARestart(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		yOff uint32
-	}{{"Y beside X", core.BlockSize}, {"Y over X", 0}} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := strandedMove(t, 1, tc.yOff)
-			if rp, _ := s.read(s.ch); rp.Status != StatusOK {
-				t.Fatalf("acknowledged X read %+v with no disk lost, whole on disk %d %+v, members %v", rp, s.leaving, s.disk(s.leaving), s.members())
+func noPlant(*replicaPlants) {}
+
+func keepPastMember(p *replicaPlants) { p.keepPastMember = true }
+
+// X was acknowledged, no disk was lost: on every seed the members hold Y clean over it, and X reads. The removed disk's copy is not needed.
+func TestAnAcknowledgedWriteReadsAfterAMoveAndARestart(t *testing.T) {
+	for seed := uint64(1); seed <= strandSeeds; seed++ {
+		for _, yOff := range []uint32{core.BlockSize, 0} {
+			s := strandedMove(t, seed, yOff, noPlant)
+			rp, got := s.read(s.ch)
+			if rp.Status != StatusOK {
+				t.Fatalf("seed %d: acknowledged X read %+v, members %v", seed, rp, s.members())
 			}
-		})
+			want := byte(0x11)
+			if yOff == 0 {
+				want = 0x22
+			}
+			if got[0] != want {
+				t.Fatalf("seed %d: read %#x", seed, got[0])
+			}
+			for _, d := range []uint32{s.primary, s.added} {
+				if x := s.disk(d); x.ListedIn != 0 {
+					t.Fatalf("seed %d: disk %d holds %+v", seed, d, x)
+				}
+			}
+		}
 	}
 }
 
-// What the bug leaves, on every seed tried: both members list the chunk, so a read gets StatusMissing, and the decision does not call it unfound, since the removed disk's reply was clean. The removed disk keeps X, in its index and on its disk, for as long as the run lasts, nothing removes or heals anything, and Y's blocks hide X's on the members wherever they overlap. This pins today's behaviour for the fix to change.
-func TestAStrandedChunkStaysOnTheRemovedDisk(t *testing.T) {
+// With keepPastMember the removed disk's veto leaves both members listing the chunk: the decision calls it unfound, as the disk cannot be a recovery source, and reads answer that for as long as the run lasts.
+func TestKeepPastMemberLeavesAMoveUnfound(t *testing.T) {
 	for seed := uint64(1); seed <= strandSeeds; seed++ {
 		for _, yOff := range []uint32{core.BlockSize, 0} {
-			s := strandedMove(t, seed, yOff)
+			s := strandedMove(t, seed, yOff, keepPastMember)
 			c := s.c
 			check := func() {
 				t.Helper()
@@ -123,35 +146,21 @@ func TestAStrandedChunkStaysOnTheRemovedDisk(t *testing.T) {
 				if x := s.disk(s.leaving); x.Whole != s.x || x.Version != s.x || x.ListedIn != 0 || s.block(s.leaving, 0) != 0x11 {
 					t.Fatalf("seed %d: removed disk holds %+v", seed, x)
 				}
-				if rp, _ := s.read(s.ch); rp.Status != StatusMissing {
+				if rp, _ := s.read(s.ch); rp.Status != StatusUnfound {
 					t.Fatalf("seed %d: read %+v", seed, rp)
 				}
 			}
 			check()
-			want := byte(0x11)
-			if yOff == 0 {
-				want = 0x22
+			if n := c.primary(pg0); c.reps[n].Unfound(pg0) != 1 {
+				t.Fatalf("seed %d: unfound %d", seed, c.reps[n].Unfound(pg0))
 			}
-			for _, d := range []uint32{s.primary, s.added} {
-				if got := s.block(d, 0); got != want {
-					t.Fatalf("seed %d: member %d holds X's block as %#x", seed, d, got)
-				}
-			}
-			n := c.primary(pg0)
-			if l := &c.reps[n].leads[c.reps[n].lead(pg0)]; l.isUnfound(s.ch) {
-				t.Fatalf("seed %d: decision calls the chunk unfound", seed)
-			}
-			before := c.table.Epoch
 			s.tick(120_000_000)
 			check()
-			if c.table.Epoch != before {
-				t.Fatalf("seed %d: the table moved on from %d to %d", seed, before, c.table.Epoch)
-			}
 		}
 	}
 }
 
-// Without the restart the same steps heal: the primary still holds Y gated, peering hears the removed disk and drops Y, and the primary's own image of X is the source for the new member. The new member's replies are held back so that the removed disk's reply comes first, as a restart's wait lets it.
+// Without the restart too: the primary still holds Y gated, peering hears the removed disk, and every up member holding Y keeps it. The new member's replies are held back so that the removed disk's reply comes first, as a restart's wait lets it.
 func TestAPrimaryThatDidNotRestartRecoversTheMove(t *testing.T) {
 	r := seededSoleRun(t, 1, 2, 3)
 	c := r.c
@@ -177,7 +186,7 @@ func TestAPrimaryThatDidNotRestartRecoversTheMove(t *testing.T) {
 	c.s.Queue(n, p, 50_000)
 	r.publish()
 	r.tick(10_000_000)
-	if rp, got := r.read(ch); rp.Status != StatusOK || rp.Version != x || got[0] != 0x11 {
+	if rp, got := r.read(ch); rp.Status != StatusOK || rp.Version <= x || got[0] != 0x11 {
 		t.Fatalf("X read %+v, %#x, members %v", rp, got, r.members())
 	}
 	for _, d := range []uint32{primary, added} {
@@ -187,10 +196,10 @@ func TestAPrimaryThatDidNotRestartRecoversTheMove(t *testing.T) {
 	}
 }
 
-// An operator's edit naming the removed disk heals the chunk if no write landed on it first: the disk is a clean source of X, and Y is gone.
-func TestAnEditNamingTheRemovedDiskHealsAStrandedChunk(t *testing.T) {
+// An operator's edit naming the removed disk heals an unfound chunk: the disk is a clean source of X, and Y is gone.
+func TestAnEditNamingTheRemovedDiskHealsAnUnfoundChunk(t *testing.T) {
 	for _, yOff := range []uint32{core.BlockSize, 0} {
-		s := strandedMove(t, 1, yOff)
+		s := strandedMove(t, 1, yOff, keepPastMember)
 		s.a.edits = append(s.a.edits, Edit{PG: pg0, Disks: []uint32{s.primary, s.leaving}})
 		s.tick(10_000_000)
 		if rp, got := s.read(s.ch); rp.Status != StatusOK || rp.Version != s.x || got[0] != 0x11 {
@@ -199,28 +208,36 @@ func TestAnEditNamingTheRemovedDiskHealsAStrandedChunk(t *testing.T) {
 	}
 }
 
-// Writes on a stranded chunk: a partial block waits for a recovery that gave up, unanswered, while a whole block hears OK and reads StatusMissing. Once one is acknowledged, the next interval keeps it, no disk holds it clean, the chunk turns unfound, and the removed disk, which lacks it, no longer heals it: X is out of reach for good, with its bytes on healthy disks.
-func TestAWriteOnAStrandedChunkEndsTheWayBack(t *testing.T) {
-	s := strandedMove(t, 1, core.BlockSize)
+// No write lands on an unfound chunk, whole-block or partial, so the removed disk still heals it.
+func TestAWriteOnAnUnfoundChunkKeepsTheWayBack(t *testing.T) {
+	s := strandedMove(t, 1, core.BlockSize, keepPastMember)
 	c := s.c
-	if rp, ok := s.answered(c.write(pg0, s.ch, 10, []byte{0x33}), 5_000_000); ok {
-		t.Fatalf("a partial write answered %+v", rp)
+	for _, w := range []core.RequestID{
+		c.write(pg0, s.ch, 10, []byte{0x33}),
+		c.write(pg0, s.ch, 2*core.BlockSize, bytes.Repeat([]byte{0x44}, core.BlockSize)),
+	} {
+		if rp, ok := s.answered(w, 5_000_000); !ok || rp.Status != StatusUnfound {
+			t.Fatalf("write answered %+v, %v", rp, ok)
+		}
 	}
+	s.a.edits = append(s.a.edits, Edit{PG: pg0, Disks: []uint32{s.primary, s.leaving}})
+	s.tick(10_000_000)
+	if rp, got := s.read(s.ch); rp.Status != StatusOK || rp.Version != s.x || got[0] != 0x11 {
+		t.Fatalf("X read %+v, %#x, members %v", rp, got, s.members())
+	}
+}
+
+// With writeOnUnfound a whole-block write hears OK and reads as missing. The next interval keeps it, no disk holds it clean, and the removed disk, which lacks it, no longer heals the chunk: X is out of reach for good, with its bytes on healthy disks.
+func TestWriteOnUnfoundEndsTheWayBack(t *testing.T) {
+	s := strandedMove(t, 1, core.BlockSize, func(p *replicaPlants) { p.keepPastMember, p.writeOnUnfound = true, true })
+	c := s.c
 	z := c.write(pg0, s.ch, 2*core.BlockSize, bytes.Repeat([]byte{0x44}, core.BlockSize))
 	if rp, ok := s.answered(z, 5_000_000); !ok || rp.Status != StatusOK {
 		t.Fatalf("a whole-block write answered %+v, %v", rp, ok)
 	}
-	if rp, _ := s.read(s.ch); rp.Status != StatusMissing {
-		t.Fatalf("read %+v after an OK", rp)
-	}
-
 	_, e := c.table.entry(pg0)
 	s.a.asks = append(s.a.asks, PGInterval{PG: pg0, Interval: e.Interval})
 	s.tick(10_000_000)
-	if rp, _ := s.read(s.ch); rp.Status != StatusUnfound {
-		t.Fatalf("read %+v in the next interval", rp)
-	}
-
 	clear(s.a.drain)
 	s.a.edits = append(s.a.edits, Edit{PG: pg0, Disks: []uint32{s.primary, s.leaving}})
 	s.tick(120_000_000)
@@ -233,31 +250,27 @@ func TestAWriteOnAStrandedChunkEndsTheWayBack(t *testing.T) {
 	if got := s.block(s.leaving, 0); got != 0x11 {
 		t.Fatalf("removed disk holds X's block as %#x", got)
 	}
-	if got := s.block(s.primary, 0); got != 0x11 {
-		t.Fatalf("primary holds X's block as %#x", got)
-	}
 }
 
-// The same hole with no move and no removal: on a rep3 PG a disk comes back and lists the chunk, and before recovery reaches it Y lands on the other two, not on it, and the primary restarts. The disk that lacks Y lists the chunk, so it is no source, yet it alone drops Y, which leaves every member listing it: X is unfound for good with every disk up, and held under Y by two of them. noRecovery stands in for recovery that has not reached the chunk. This pins today's behaviour for the fix to change.
-func TestARestartDuringRecoveryLeavesNoMemberASource(t *testing.T) {
-	r := seededSoleRun(t, 1, 3, 3)
+// recoveringLister has a disk come back and list a chunk on a rep3 PG, and before recovery reaches it Y lands on the other two, not on it, and the primary restarts. noRecovery stands in for recovery that has not reached the chunk.
+func recoveringLister(t *testing.T, plant func(*replicaPlants)) (r *soleRun, ch core.ChunkID, x uint64, a, b, d uint32) {
+	r = seededSoleRun(t, 1, 3, 3)
 	c := r.c
-	ch := chunkIn(pg0, 1, 0)
+	plantAll(c, plant)
+	ch = chunkIn(pg0, 1, 0)
 	c.until(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize)))
 	c.settle()
 	ms := r.members()
-	a, b, d := ms[0].Disk, ms[1].Disk, ms[2].Disk
+	a, b, d = ms[0].Disk, ms[1].Disk, ms[2].Disk
 	r.lose(d)
 	r.publish()
 	c.untilActive()
 	c.settle()
 	id := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x33}, core.BlockSize))
 	c.until(id)
-	x := c.reply(id).Version
+	x = c.reply(id).Version
 	c.settle()
-	for n := range c.reps {
-		c.reps[n].plant.noRecovery = true
-	}
+	plantAll(c, func(p *replicaPlants) { p.noRecovery = true })
 	r.back(d)
 	r.publish()
 	c.untilActive()
@@ -274,18 +287,67 @@ func TestARestartDuringRecoveryLeavesNoMemberASource(t *testing.T) {
 	c.s.Heal(an, dn)
 	c.s.Restart(an)
 	r.tick(20_000_000)
+	return r, ch, x, a, b, d
+}
+
+// The disk that lacks Y lists the chunk, so it is no source and has no veto: the other two hold Y clean, X reads, and recovery brings the third once it runs.
+func TestARestartDuringRecoveryKeepsASource(t *testing.T) {
+	r, ch, x, a, b, d := recoveringLister(t, noPlant)
+	c := r.c
+	for _, m := range []uint32{a, b} {
+		if got := c.listed(c.node(m), ch); got.ListedIn != 0 || got.Whole <= x {
+			t.Fatalf("disk %d holds %+v", m, got)
+		}
+	}
+	if rp, got := r.read(ch); rp.Status != StatusOK || got[0] != 0x33 {
+		t.Fatalf("read %+v, %#x", rp, got[0])
+	}
+	plantAll(c, func(p *replicaPlants) { p.noRecovery = false })
+	r.tick(20_000_000)
+	if got := c.listed(c.node(d), ch); got.ListedIn != 0 {
+		t.Fatalf("disk %d holds %+v", d, got)
+	}
+}
+
+// With listerVetoes the disk that lacks Y drops it, which leaves every member listing: unfound with every disk up, and X held under Y by two of them.
+func TestListerVetoesLeavesNoMemberASource(t *testing.T) {
+	r, ch, x, a, b, d := recoveringLister(t, func(p *replicaPlants) { p.listerVetoes = true })
+	c := r.c
 	for _, m := range []uint32{a, b, d} {
 		if got := c.listed(c.node(m), ch); got.Listed != x || got.ListedIn == 0 {
 			t.Fatalf("disk %d holds %+v", m, got)
 		}
 	}
-	for _, m := range []uint32{a, b} {
-		if got := c.diskBlock(c.node(m), ch, 0)[0]; got != 0x33 {
-			t.Fatalf("disk %d holds X's block as %#x", m, got)
-		}
-	}
 	r.tick(120_000_000)
 	if rp, _ := r.read(ch); rp.Status != StatusUnfound {
 		t.Fatalf("read %+v", rp)
+	}
+}
+
+// A lister's veto stands against a version no up member of the interval holds clean, which only a member listing the chunk reported: with keepNoSource it goes, and the disk holding X clean would list the chunk too.
+func TestKeepHoldsAListerVetoWithNoSource(t *testing.T) {
+	x, z := MakeVersion(1, 1), MakeVersion(2, 1)
+	up := func(ds ...uint32) []Member {
+		ms := make([]Member, len(ds))
+		for i, d := range ds {
+			ms[i] = Member{Disk: d}
+		}
+		return ms
+	}
+	e := &PGEntry{Interval: 3, Members: up(1, 2, 3), Past: []PastInterval{{Interval: 2, Members: up(1, 2)}}}
+	ch := chunkIn(pg0, 1, 0)
+	replies := []peerReply{
+		{disk: 1, chunks: []ChunkPeer{{Chunk: ch, Whole: z, Logged: z, Listed: true, Kept: x}}},
+		{disk: 2, chunks: []ChunkPeer{{Chunk: ch, Whole: x, Logged: x, Listed: true, Kept: x}}},
+		{disk: 3, chunks: []ChunkPeer{{Chunk: ch, Whole: x, Logged: x}}},
+	}
+	for _, tc := range []struct {
+		plant replicaPlants
+		want  uint64
+	}{{replicaPlants{}, x}, {replicaPlants{keepNoSource: true}, z}} {
+		_, kept := keep(e, replies, nil, nil, tc.plant)
+		if len(kept) != 1 || kept[0].kept != tc.want {
+			t.Fatalf("plant %+v: kept %+v", tc.plant, kept)
+		}
 	}
 }

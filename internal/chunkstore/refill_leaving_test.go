@@ -430,8 +430,11 @@ func TestAChunkOnlyLostDisksHeldStaysUnfound(t *testing.T) {
 	if rp, _ := r.read(ch); rp.Status != StatusUnfound {
 		t.Fatalf("X read %+v", rp)
 	}
-	if rp, ok := r.answered(r.c.write(pg0, chunkIn(pg0, 2, 0), 0, bytes.Repeat([]byte{0x22}, core.BlockSize)), 5_000_000); !ok || rp.Status != StatusOK {
+	if rp, ok := r.answered(r.c.write(pg0, chunkIn(pg0, 1, 1), 0, bytes.Repeat([]byte{0x22}, core.BlockSize)), 5_000_000); !ok || rp.Status != StatusOK {
 		t.Fatalf("a new write answered %+v, %v", rp, ok)
+	}
+	if rp, ok := r.answered(r.c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize)), 5_000_000); !ok || rp.Status != StatusUnfound {
+		t.Fatalf("a write of the unfound chunk answered %+v, %v", rp, ok)
 	}
 }
 
