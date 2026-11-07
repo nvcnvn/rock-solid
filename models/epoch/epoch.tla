@@ -2316,7 +2316,8 @@ StayForNew == Plan(<<AddM(2, 3, 1), Mark(1, "down"), StayM(2, 3, 1)>>, Session, 
 StayStale == Plan(<<AddM(2, 3, 1), Mark(3, "down"), Mark(3, "up"), Mark(2, "down"), StayM(2, 3, 2)>>, Session, {})
 MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveMaint, MoveRefill}
 \* ci-stays splits the stays off, each config under the 300 s budget.
-StayMovePlans == {StayForPrimary, StayAsPrimary, StayForNew}
+StayMovePlans == {StayForPrimary, StayAsPrimary}
+StayNewPlans == {StayForNew}
 \* A leaving member down and back, then taking the place of a primary that went
 \* down: W, kept at the first of those intervals on the primary alone and
 \* refused, stays kept with its holder down, leaving and a member. Over 7 tables
