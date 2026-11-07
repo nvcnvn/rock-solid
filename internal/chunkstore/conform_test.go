@@ -180,6 +180,67 @@ func TestConformScriptedStay(t *testing.T) {
 	}
 }
 
+// The leaving disk returns first, on three disks so that no refill took the other member's place: one table marks it up and has it take that place, which is one interval where the spec's mark and Stay make two.
+func TestConformScriptedLeavingFirst(t *testing.T) {
+	r, ch, v := refillRun(t, 2, 2, 3, nil, "scripted-leaving-first")
+	ms := r.members()
+	d1, d2 := ms[0].Disk, ms[1].Disk
+	r.recovery(false)
+	r.lose(d2)
+	r.tick(DegradedRefillAfter + 2_000_000)
+	r.lose(d1)
+	r.tick(RefillAfter + 2_000_000)
+	r.back(d2)
+	r.publish()
+	if ms = r.members(); ms[len(ms)-1].Disk != d1 || !ms[len(ms)-1].Leaving || slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == d2 && m.Leaving }) {
+		t.Fatalf("after disk %d returned: members %v", d2, ms)
+	}
+	r.recovery(true)
+	r.tick(10_000_000)
+	r.repaired(t, 2, ch, v)
+	conformWrite(t, "scripted-leaving-first", r.c)
+}
+
+// A leaving disk declared lost leaves the pool in the table that refills the member gone down after it: the leaving member goes on no report, the other takes the leaving mark and a new disk joins, in one interval.
+func TestConformScriptedDrop(t *testing.T) {
+	r, ch, v := refillRun(t, 2, 2, 5, nil, "scripted-drop")
+	ms := r.members()
+	d1, d2 := ms[0].Disk, ms[1].Disk
+	r.recovery(false)
+	r.lose(d2)
+	r.tick(DegradedRefillAfter + 2_000_000)
+	r.lose(d1)
+	r.c.runFor(DegradedRefillAfter + 2_000_000)
+	r.declare(t, d2)
+	r.publish()
+	if ms = r.members(); slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == d2 }) || !slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == d1 && m.Leaving }) {
+		t.Fatalf("after disk %d was declared lost: members %v", d2, ms)
+	}
+	r.back(d1)
+	r.recovery(true)
+	r.tick(10_000_000)
+	r.repaired(t, 2, ch, v)
+	conformWrite(t, "scripted-drop", r.c)
+}
+
+// Two members refilled and leaving, one declared lost: Drop takes it alone, and the other heals the PG on its return.
+func TestConformScriptedLost(t *testing.T) {
+	if err := lostRun(t, nil, "scripted-lost"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Several leaving members on a PG of three copies: repair ends on the recovered report with neither dead disk back.
+func TestConformScriptedSecondFailure(t *testing.T) {
+	for how, name := range map[string]string{"during the copy": "scripted-second-failure", "together": "scripted-together"} {
+		r, ch, v := refillRun(t, 3, 2, 6, nil, name)
+		secondFailures[how](r)
+		r.tick(RefillAfter + 30_000_000)
+		r.repaired(t, 3, ch, v)
+		conformWrite(t, name, r.c)
+	}
+}
+
 // conformPlants are the plants of the rule map and of the oracle test that scripts/conform.sh runs in the primary-change run.
 var conformPlants = []struct {
 	name string

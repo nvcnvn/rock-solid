@@ -76,6 +76,8 @@ type gen struct {
 	lists map[[3]uint64]bool
 	// operatorAsk holds each PG the harness, no primary, asked a new interval of: its next table is an Edit that changes nothing.
 	operatorAsk map[uint64]bool
+	// restarted holds each [node, pg] whose node restarted and has not activated the PG since.
+	restarted map[[2]uint64]bool
 	// activated is each PG's newest activated interval, tableIv the interval of each PG at each epoch.
 	activated map[uint64]uint64
 	tableIv   map[uint64]map[uint64]uint64
@@ -280,7 +282,7 @@ func (g *gen) classify(epoch uint64, changed []uint64, next map[uint64]*entry) {
 			g.planned(fmt.Sprintf(`[k |-> "replace", p |-> %d, old |-> %d, new |-> %d]`, p, g.disk(a[j]), g.disk(b[j])))
 		case len(a) >= 2 && len(a) == len(b) && a[0] == b[1] && a[1] == b[0] && slices.Equal(a[2:], b[2:]) && kept:
 			g.planned(fmt.Sprintf(`[k |-> "rotate", p |-> %d]`, p))
-		case len(la) == 0 && len(lb) == 0 && len(a) == len(b) && differs(sortedCopy(a), sortedCopy(b)) == 0:
+		case len(la) == 0 && len(lb) == 0 && len(a) == len(b) && differs(sortedCopy(a), sortedCopy(b)) == 0 && marksChanged(old, e) <= 1:
 			mem, ms := g.memberList(e.members)
 			g.planned(fmt.Sprintf(`[k |-> "edit", p |-> %d, mem |-> %s, marks |-> %s]`, p, mem, ms))
 		default:
@@ -399,6 +401,17 @@ func keptMarks(a, b *entry) bool {
 		}
 	}
 	return true
+}
+
+// marksChanged counts the disks of a whose mark differs in b.
+func marksChanged(a, b *entry) int {
+	n := 0
+	for _, m := range a.members {
+		if j := slices.IndexFunc(b.members, func(o member) bool { return o.disk == m.disk }); j >= 0 && b.members[j].mark != m.mark {
+			n++
+		}
+	}
+	return n
 }
 
 // oneMark reports the one disk whose mark alone changes between a and b, no leaving flag changing.
@@ -585,7 +598,11 @@ func (g *gen) run(recs []trace.Record) {
 				g.operatorAsk[r.Fields[0]] = true
 				break
 			}
-			g.line(`k |-> "ask", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
+			kind := "ask"
+			if g.restarted[[2]uint64{uint64(n), r.Fields[0]}] {
+				kind = "restartask"
+			}
+			g.line(`k |-> "%s", n |-> %d, p |-> %d, iv |-> %d`, kind, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.OutFormat:
 			old, ok := g.nodeDisk[n]
 			if !ok {
@@ -631,6 +648,7 @@ func (g *gen) run(recs []trace.Record) {
 		case trace.OutActivate:
 			g.primary[r.Fields[0]] = n
 			g.activated[r.Fields[0]] = r.Fields[1]
+			delete(g.restarted, [2]uint64{uint64(n), r.Fields[0]})
 			for k := range g.left {
 				if k[1] == r.Fields[0] {
 					delete(g.left, k)
@@ -639,6 +657,7 @@ func (g *gen) run(recs []trace.Record) {
 			g.line(`k |-> "activate", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.EvCrash:
 			for _, f := range g.pgs {
+				g.restarted[[2]uint64{uint64(n), f}] = true
 				if g.primary[f] == n {
 					g.leave(n, f)
 				}
@@ -746,7 +765,7 @@ func main() {
 		fatal("usage: tracedata [-module name] run.trace")
 	}
 	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{},
-		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
+		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, restarted: map[[2]uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
 		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][3]uint64{}, orderAt: map[[2]uint64]int{}, refused: map[uint64][]refusal{}}
 	recs := g.load(flag.Arg(0))
 	if len(recs) == 0 {

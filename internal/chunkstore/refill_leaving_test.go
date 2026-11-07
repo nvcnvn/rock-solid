@@ -257,31 +257,33 @@ func (r *soleRun) repaired(t *testing.T, width int, ch core.ChunkID, v uint64) {
 	}
 }
 
+// secondFailures are the ways a second disk goes around a first's refill, on a PG of three copies: during the copy, together, or the refill member itself.
+var secondFailures = map[string]func(r *soleRun){
+	"during the copy": func(r *soleRun) {
+		r.recovery(false)
+		ms := r.members()
+		r.lose(ms[len(ms)-1].Disk)
+		r.tick(RefillAfter + 10_000_000)
+		r.lose(ms[len(ms)-2].Disk)
+		r.recovery(true)
+	},
+	"together": func(r *soleRun) {
+		ms := r.members()
+		r.lose(ms[len(ms)-1].Disk)
+		r.lose(ms[len(ms)-2].Disk)
+	},
+	"the refill member": func(r *soleRun) {
+		r.recovery(false)
+		r.lose(r.members()[len(r.members())-1].Disk)
+		r.tick(RefillAfter + 10_000_000)
+		r.lose(r.members()[len(r.members())-2].Disk)
+		r.recovery(true)
+	},
+}
+
 // A second disk lost while a first is refilled, or the refill member lost, or both lost together: repair finishes, to three copies, with no disk returning.
 func TestASecondFailureFinishesRepair(t *testing.T) {
-	last := func(ms []Member, i int) uint32 { return ms[len(ms)-1-i].Disk }
-	for name, run := range map[string]func(r *soleRun){
-		"during the copy": func(r *soleRun) {
-			r.recovery(false)
-			ms := r.members()
-			r.lose(last(ms, 0))
-			r.tick(RefillAfter + 10_000_000)
-			r.lose(last(ms, 1))
-			r.recovery(true)
-		},
-		"together": func(r *soleRun) {
-			ms := r.members()
-			r.lose(last(ms, 0))
-			r.lose(last(ms, 1))
-		},
-		"the refill member": func(r *soleRun) {
-			r.recovery(false)
-			r.lose(last(r.members(), 0))
-			r.tick(RefillAfter + 10_000_000)
-			r.lose(r.members()[len(r.members())-2].Disk)
-			r.recovery(true)
-		},
-	} {
+	for name, run := range secondFailures {
 		t.Run(name, func(t *testing.T) {
 			r, ch, v := refillRun(t, 3, 2, 6, nil, "")
 			run(r)
