@@ -4103,7 +4103,7 @@ a stutter open to it: it shows only what that behavior did. TLC's own `-coverage
 over every branch of the search, abandoned ones and `ENABLED` too, so on seed 55 `Remove`'s first guard
 shows 8 against the 2 removals the trace took.
 
-Over the 39 passing seeds of 0 to 39 and the 12 scripted traces, which alone take `Refill`, `Lost`, `Drop`, `Stay` and `RestartAsk` as a real step on these seeds, `RestartAsk` in `scripted-move-restarted`; on 50 lines the ask comes after a `Renew` the spec took first:
+Over the 39 passing seeds of 0 to 39 and the 12 scripted traces, which alone take `Refill`, `Lost`, `Drop`, `Stay` and `RestartAsk` as a real step on these seeds, `RestartAsk` in `scripted-move-restarted`; on its 50 other lines the spec already holds the ask:
 
 | Action | Line | Took it | Stuttered | Traces |
 | --- | --- | --- | --- | --- |
@@ -4235,7 +4235,7 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `listerVetoes` | `neg-lister-vetoes` | 7 | 7 | 0 | 7, 7 | `peer`, the line where the plant first differs | `KeptMatches` |
 | `keepNoSource` | `neg-keep-no-source` | 4 | 4 | 0 | 4, 4 | `peer`, the line where the plant first differs | `KeptMatches` |
 | `writeOnUnfound` | `neg-write-on-unfound` | 5 | 4 | 1 | 4, 4 | `order`, the planted order on an unfound chunk. Seed 35 passes | `Order`: the chunk is not in the decision's `unf` |
-| `keepPastMember` | `neg-keep-past-member` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 39, which never peer with a removed disk reached. Only its scripted test shows the rule (`TestKeepPastMemberLeavesAMoveUnfound`) | |
+| `keepPastMember` | `neg-keep-past-member` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 39: each trace is a prefix of its baseline's. Only its scripted test shows the rule (`TestKeepPastMemberLeavesAMoveUnfound`) | |
 | `settleSubset` | none | 4 | 0 | 4 | 0, 0 | Too loose: `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record | |
 
 Traces can fail is shown on these seeds for 18 of the 31 rules, 13 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
