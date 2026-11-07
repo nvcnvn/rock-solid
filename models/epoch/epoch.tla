@@ -679,6 +679,7 @@ Held(d, c) ==
     dlog[d][c] \ UNION {y.gone[c] : y \in {x \in dec :
         /\ x.n = dnode[d]
         /\ x.p = ChunkPG[c]
+        /\ x.gone[c] # {}
         /\ x.r = run[x.n]
         /\ [p |-> x.p, k |-> x.k, r |-> x.r] \in act}}
 
