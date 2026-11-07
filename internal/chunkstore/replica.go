@@ -11,7 +11,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
-// maxMembers is the widest PG a replica primary fans out to: rep3 with a leaving member.
+// maxMembers is the widest PG a replica primary fans out to, leaving members included.
 const maxMembers = 8
 
 // ResendTimer is the timer on which a primary sends its members again, in order, the writes a lost connection left unacknowledged.

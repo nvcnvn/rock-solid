@@ -412,6 +412,28 @@ func TestDropAllLeavingStrandsAWrite(t *testing.T) {
 	}
 }
 
+// Both old disks lost together and declared lost: no interval activated since they went, and peering still needs an answer from the last activated one, so the PG stays stopped with its members refilled.
+func TestTwoDisksLostTogetherStayStopped(t *testing.T) {
+	r, ch, _ := refillRun(t, 2, 2, 5, nil, "")
+	ms := r.members()
+	d1, d2 := ms[0].Disk, ms[1].Disk
+	r.lose(d1)
+	r.lose(d2)
+	r.tick(DegradedRefillAfter + 5_000_000)
+	r.declare(t, d1)
+	r.declare(t, d2)
+	r.tick(120_000_000)
+	if ms = r.members(); len(ms) != 2 || leavingIn(ms) != 0 {
+		t.Fatalf("members %v", ms)
+	}
+	if rp, _ := r.read(ch); rp.Status != StatusRefused {
+		t.Fatalf("X read %+v", rp)
+	}
+	if rp, ok := r.answered(r.c.write(pg0, chunkIn(pg0, 2, 0), 0, bytes.Repeat([]byte{0x22}, core.BlockSize)), 5_000_000); ok {
+		t.Fatalf("a new write answered %+v", rp)
+	}
+}
+
 // Both old disks declared lost: repair ends with the chunk they alone held unfound for good, and the PG serves the rest.
 func TestAChunkOnlyLostDisksHeldStaysUnfound(t *testing.T) {
 	r, ch, _ := refillRun(t, 2, 2, 5, nil, "")
