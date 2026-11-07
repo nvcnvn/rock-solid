@@ -155,8 +155,8 @@ func TestKeepPastMemberLeavesAMoveUnfound(t *testing.T) {
 				}
 			}
 			check()
-			if n := c.primary(pg0); c.reps[n].Unfound(pg0) != 1 {
-				t.Fatalf("seed %d: unfound %d", seed, c.reps[n].Unfound(pg0))
+			if n, stopped := c.reps[c.primary(pg0)].Unfound(pg0); n != 1 || stopped {
+				t.Fatalf("seed %d: unfound %d, stopped %v", seed, n, stopped)
 			}
 			s.tick(120_000_000)
 			check()

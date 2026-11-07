@@ -484,7 +484,7 @@ func TestStayKeepsTheMissingMember(t *testing.T) {
 	}
 }
 
-// The two old disks of a rep2 pool out of reach with the PG still serving, by a min_live of 1: X, whole on both, reads unfound, and the pool names both, the leaving one too, for an operator to bring back. With min_live 2 the PG stops instead and names them once stuck.
+// The two old disks of a rep2 pool out of reach with the PG still serving, by a min_live of 1: X, whole on both, reads unfound, and the pool names both as candidates, the leaving one too, for an operator to bring back. With min_live 2 the PG stops instead, its count unknown, and names them once stuck.
 func TestABlockedPGNamesItsDisks(t *testing.T) {
 	for _, minLive := range []int{1, 2} {
 		r := newSoleRun(t, 2, minLive, 5)
@@ -501,27 +501,28 @@ func TestABlockedPGNamesItsDisks(t *testing.T) {
 		r.tick(RefillAfter + 2_000_000)
 		r.lose(d1)
 		r.tick(10_000_000)
-		want, status := uint32(1), StatusUnfound
+		want, wantStopped, status := uint32(1), false, StatusUnfound
 		if minLive == 2 {
-			want, status = 0, StatusRefused
+			want, wantStopped, status = 0, true, StatusRefused
 		}
 		if rp, _ := r.read(ch); rp.Status != status {
 			t.Fatalf("min_live %d: X read %+v, members %v", minLive, rp, r.members())
 		}
 		var cond Conditions
-		cond.Watch(c.s.Time(), []Copying{{Unfound: c.reps[c.primary(pg0)].Unfound(pg0)}}, &c.table.Pools[0])
-		if len(cond.Blocked) != 1 || cond.Blocked[0].Unfound != want || !slices.Equal(cond.Blocked[0].Disks, []uint32{d1, d2}) {
+		n, stopped := c.reps[c.primary(pg0)].Unfound(pg0)
+		cond.Watch(c.s.Time(), []Copying{{Unfound: n, Stopped: stopped}}, &c.table.Pools[0])
+		if len(cond.Blocked) != 1 || cond.Blocked[0].Unfound != want || cond.Blocked[0].Stopped != wantStopped || !slices.Equal(cond.Blocked[0].Candidates, []uint32{d1, d2}) {
 			t.Fatalf("min_live %d: %+v with %d and %d down, members %v", minLive, cond, d1, d2, r.members())
 		}
 	}
 }
 
-// A PG names only its down members, none where no disk is left to return, and a disk that left the pool is no member to name.
-func TestBlockedNamesDownMembers(t *testing.T) {
+// A PG's candidates are its members down or in maintenance, none where no disk is left to return, and a disk that left the pool is no member to name.
+func TestBlockedNamesItsCandidates(t *testing.T) {
 	var c Conditions
-	tbl := PoolTable{PGs: []PGEntry{{Members: []Member{{Disk: 1, Mark: MarkDown, Leaving: true}, {Disk: 2}, {Disk: 3, Mark: MarkDown}}}, {Members: []Member{{Disk: 2}, {Disk: 4}}}}}
+	tbl := PoolTable{PGs: []PGEntry{{Members: []Member{{Disk: 1, Mark: MarkDown, Leaving: true}, {Disk: 2}, {Disk: 3, Mark: MarkMaint}}}, {Members: []Member{{Disk: 2}, {Disk: 4}}}}}
 	c.Watch(0, []Copying{{PG: 0, Unfound: 2}, {PG: 1, Unfound: 1}}, &tbl)
-	if len(c.Blocked) != 2 || !slices.Equal(c.Blocked[0].Disks, []uint32{1, 3}) || c.Blocked[0].Unfound != 2 || c.Blocked[1].Disks != nil {
+	if len(c.Blocked) != 2 || !slices.Equal(c.Blocked[0].Candidates, []uint32{1, 3}) || c.Blocked[0].Unfound != 2 || c.Blocked[1].Candidates != nil {
 		t.Fatalf("blocked %+v", c.Blocked)
 	}
 	c.Watch(0, nil, &tbl)

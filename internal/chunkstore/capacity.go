@@ -290,18 +290,20 @@ func (p Pool) Reserves(f *Figures, reserved, snapshots, add uint64) bool {
 	return p.Overcommit || reserved+snapshots+add <= f.Balanced*core.BlockSize
 }
 
-// Copying is a PG of the pool with a leaving or missing member or a chunk on a member's missing list, when it last copied or began to need copying, and the chunks its primary's last peering left unfound (Replica.Unfound).
+// Copying is a PG of the pool with a leaving or missing member or a chunk on a member's missing list, when it last copied or began to need copying, and the chunks its primary's last peering left unfound, or Stopped with no active primary to count them (Replica.Unfound).
 type Copying struct {
 	PG      uint32
 	Since   core.Tick
 	Unfound uint32
+	Stopped bool
 }
 
-// BlockedPG is a PG that is stuck or has unfound chunks: how many are unfound, and the disks that may set it going, its down members. No disk means none is left to return.
+// BlockedPG is a PG that is stuck or has unfound chunks: how many are unfound, unknown if Stopped, and its Candidates, the members down or in maintenance, each of which may hold what it lacks and none known to. No candidate means none is left to return.
 type BlockedPG struct {
-	PG      uint32
-	Unfound uint32
-	Disks   []uint32
+	PG         uint32
+	Unfound    uint32
+	Stopped    bool
+	Candidates []uint32
 }
 
 // Conditions are a pool's conditions, raised and cleared by Update, Watch and Confirm.
@@ -359,7 +361,7 @@ func (f *Figures) anyAbove(points uint8) bool {
 	return slices.ContainsFunc(f.Disks, func(d DiskFigures) bool { return d.Used > d.level(points) })
 }
 
-// Watch sets Stuck to the PGs that have copied nothing for StuckAfter by now, and Blocked to those and the PGs with unfound chunks, each naming its down members in t, the pool's table.
+// Watch sets Stuck to the PGs that have copied nothing for StuckAfter by now, and Blocked to those and the PGs with unfound chunks, each naming its candidates in t, the pool's table.
 func (c *Conditions) Watch(now core.Tick, pgs []Copying, t *PoolTable) {
 	c.Stuck, c.Blocked = c.Stuck[:0], c.Blocked[:0]
 	for _, pg := range pgs {
@@ -368,10 +370,10 @@ func (c *Conditions) Watch(now core.Tick, pgs []Copying, t *PoolTable) {
 			c.Stuck = append(c.Stuck, pg.PG)
 		}
 		if stuck || pg.Unfound > 0 {
-			b := BlockedPG{PG: pg.PG, Unfound: pg.Unfound}
+			b := BlockedPG{PG: pg.PG, Unfound: pg.Unfound, Stopped: pg.Stopped}
 			for _, m := range t.PGs[pg.PG].Members {
-				if m.Mark == MarkDown {
-					b.Disks = append(b.Disks, m.Disk)
+				if m.Mark != MarkUp {
+					b.Candidates = append(b.Candidates, m.Disk)
 				}
 			}
 			c.Blocked = append(c.Blocked, b)
