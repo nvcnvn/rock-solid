@@ -60,6 +60,8 @@ Ver(k, n) == k * 8 + n
 IvOfV(v) == v \div 8
 Cnt(v) == v % 8
 
+\* A PG's widest membership, leaving members included: replica.go's maxMembers.
+MaxMembers == 8
 MaxDisk == Cardinality(Node) + MaxFormat
 Disk == 1..MaxDisk
 NoMiss == -1
@@ -75,8 +77,8 @@ Infinity == MaxTime + 1
 VARIABLES
     \* Control plane and tables
     tbl,      \* Seq([PG -> [iv, la]]): every committed table
-    ivs,      \* [PG -> Seq([mem: Seq(Disk), st: [Disk -> mark], lv: Disk \cup {0}, ml: Nat])]:
-              \* each interval's members, leaving member (0 for none) and min_live
+    ivs,      \* [PG -> Seq([mem: Seq(Disk), st: [Disk -> mark], lv: SUBSET Disk, ml: Nat])]:
+              \* each interval's members, leaving members and min_live
     reqIv,    \* [PG -> Nat]: the interval whose primary asked for a new one
     reports,  \* set of [p, k]: activation reports on heartbeats, possibly late or repeated
     recd,     \* set of [p, k]: recovered reports on heartbeats, possibly late or repeated
@@ -273,7 +275,7 @@ PlanRates(n) ==
 InitGrant(g, h) ==
     ~Clocks /\ g # h /\ \E p \in PG : InitMem[p][1] = h /\ \E j \in 1..Len(InitMem[p]) : InitMem[p][j] = g
 
-InitIv(p) ==[mem |-> InitMem[p], st |-> [d \in Disk |-> IF d \in Node THEN "up" ELSE "down"], lv |-> 0,
+InitIv(p) ==[mem |-> InitMem[p], st |-> [d \in Disk |-> IF d \in Node THEN "up" ELSE "down"], lv |-> {},
              ml |-> MinLive[p]]
 
 Init ==
@@ -382,14 +384,14 @@ MarkDisk(d, to) ==
 
 \* A refill replaces a member with another disk in one table only once the
 \* disk is gone. A member merely down may hold the last copy of a version, so
-\* its refill is an Add, which keeps it as the leaving member, and a second
-\* member waits while one is leaving. An up member replaced stands for an
-\* operator's edit, which the model lets take any member but a leaving one: that
-\* stays until a recovered report removes it, however long it is down. With
-\* RefillSoleHolder a refill deletes a member merely down.
+\* its refill is an Add, which keeps it as a leaving member. An up member
+\* replaced stands for an operator's edit, which the model lets take any member
+\* but a leaving one: that stays until a recovered report removes it, however
+\* long it is down, or its disk is gone. With RefillSoleHolder a refill deletes
+\* a member merely down.
 Replace(p, old, new) ==
     /\ old \in Mem(p, Cur(p))
-    /\ old # ivs[p][Cur(p)].lv
+    /\ old \notin ivs[p][Cur(p)].lv
     /\ St(p, Cur(p), old) # "down" \/ dnode[old] = 0 \/ Bug("RefillSoleHolder")
     /\ new \notin Mem(p, Cur(p))
     /\ dnode[new] # 0
@@ -399,47 +401,89 @@ Replace(p, old, new) ==
             [ivs[p][Cur(p)] EXCEPT !.mem = [m EXCEPT ![j] = new], !.st[new] = "up"]])
     /\ UNCHANGED <<reqIv, reports, recd>>
 
-\* A move, or the refill of a member merely down, adds the new member and marks
-\* the old one leaving, so the PG is one member wider until Remove.
-Add(p, old, new) ==
-    /\ ivs[p][Cur(p)].lv = 0
-    /\ old \in Mem(p, Cur(p))
-    /\ new \notin Mem(p, Cur(p))
-    /\ dnode[new] # 0
-    /\ NewIntervals({p}, [q \in PG |->
-         [ivs[p][Cur(p)] EXCEPT !.mem = Append(@, new), !.st[new] = "up", !.lv = old]])
-    /\ UNCHANGED <<reqIv, reports, recd>>
+Without(m, S) == SelectSeq(m, LAMBDA d : d \notin S)
 
-\* The leader removes the leaving member on a recovered report for the PG's
-\* current interval; a late one, for an earlier interval, does nothing.
-Remove(p) ==
+\* A move adds the new member and marks the old one leaving, so the PG is one
+\* member wider until Remove. It needs no member leaving. The refill of a member
+\* merely down is the same change at any time, up to MaxMembers, and takes the
+\* old member behind the others, so that it does not lead on its return while
+\* one of them is up.
+Add(p, old, new) ==
     LET x == ivs[p][Cur(p)]
-    IN /\ x.lv # 0
-       /\ \/ \E r \in recd : r.p = p /\ (r.k = Cur(p) \/ Bug("AcceptOldReport"))
-          \/ Bug("RemoveBeforeRecovered")
+    IN /\ old \in Mem(p, Cur(p)) \ x.lv
+       /\ x.lv = {} \/ St(p, Cur(p), old) = "down"
+       /\ new \notin Mem(p, Cur(p))
+       /\ dnode[new] # 0
+       /\ Len(x.mem) < MaxMembers
        /\ NewIntervals({p}, [q \in PG |->
-            [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # x.lv), !.lv = 0]])
+            [x EXCEPT !.mem = IF St(p, Cur(p), old) = "down"
+                              THEN Without(@, {old}) \o <<new, old>>
+                              ELSE Append(@, new),
+                      !.st[new] = "up", !.lv = @ \cup {old}]])
        /\ UNCHANGED <<reqIv, reports, recd>>
 
-\* A leaving member that is up takes the place of a missing member, one marked
+\* A recovered report for the PG's current interval; a late one, for an earlier
+\* interval, does nothing.
+Reported(p) == \E r \in recd : r.p = p /\ (r.k = Cur(p) \/ Bug("AcceptOldReport"))
+
+\* The leader removes the leaving members on a recovered report.
+Remove(p) ==
+    LET x == ivs[p][Cur(p)]
+    IN /\ x.lv # {}
+       /\ Reported(p) \/ Bug("RemoveBeforeRecovered")
+       /\ NewIntervals({p}, [q \in PG |-> [x EXCEPT !.mem = Without(@, x.lv), !.lv = {}]])
+       /\ UNCHANGED <<reqIv, reports, recd>>
+
+\* A leaving member whose disk left the pool goes with no report, the others
+\* staying: with DropAllLeaving, every leaving member goes with it.
+Drop(p) ==
+    LET x == ivs[p][Cur(p)]
+        out == {d \in x.lv : dnode[d] = 0}
+        R == IF Bug("DropAllLeaving") THEN x.lv ELSE out
+    IN /\ out # {}
+       /\ NewIntervals({p}, [q \in PG |-> [x EXCEPT !.mem = Without(@, R), !.lv = @ \ R]])
+       /\ UNCHANGED <<reqIv, reports, recd>>
+
+\* A leaving member l that is up takes the place of a missing member, one marked
 \* down or whose disk is gone, and is an ordinary member from then on. A member
-\* whose disk is gone goes, ending the move; one merely down may hold the last
-\* copy of a version, so it stays as the leaving member, or with
-\* RefillSoleHolder goes too. With StayKeepsInterval the table keeps the interval.
-Stay(p, out) ==
+\* whose disk is gone goes; one merely down may hold the last copy of a version,
+\* so it stays as a leaving member, or with RefillSoleHolder goes too. With
+\* StayKeepsInterval the table keeps the interval.
+Stay(p, l, out) ==
     LET x == ivs[p][Cur(p)]
         y == IF dnode[out] = 0 \/ Bug("RefillSoleHolder")
-             THEN [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # out), !.lv = 0]
-             ELSE [x EXCEPT !.lv = out]
-    IN /\ x.lv # 0
-       /\ out \in Mem(p, Cur(p))
-       /\ out # x.lv
+             THEN [x EXCEPT !.mem = Without(@, {out}), !.lv = @ \ {l}]
+             ELSE [x EXCEPT !.mem = Without(@, {out}) \o <<out>>, !.lv = (@ \ {l}) \cup {out}]
+    IN /\ l \in x.lv
+       /\ out \in Mem(p, Cur(p)) \ x.lv
        /\ St(p, Cur(p), out) = "down" \/ dnode[out] = 0
-       /\ St(p, Cur(p), x.lv) = "up"
+       /\ St(p, Cur(p), l) = "up"
        /\ IF Bug("StayKeepsInterval")
           THEN /\ Commit(tbl[Len(tbl)])
                /\ ivs' = [ivs EXCEPT ![p][Cur(p)] = y]
           ELSE NewIntervals({p}, [q \in PG |-> y])
+       /\ UNCHANGED <<reqIv, reports, recd>>
+
+\* One table can make several of a PG's changes at once, in one interval: marks
+\* of its members, and those of Replace, Add, Remove, Drop and Stay. A leaving
+\* disk that returns and takes a missing member's place, or two members refilled
+\* together, are one interval, where those actions make two. Each rule of theirs
+\* holds of the table as a whole: a member goes only with its disk gone, or
+\* leaving on a recovered report; a member newly leaving is down, unless none was
+\* leaving; one that stops leaving is up.
+Refill(p, mem, marks, lv) ==
+    LET x == ivs[p][Cur(p)]
+        was == Mem(p, Cur(p))
+        to(d) == marks[CHOOSE j \in 1..Len(mem) : mem[j] = d]
+        y == [x EXCEPT !.mem = mem, !.st = [d \in Disk |-> IF d \in Range(mem) THEN to(d) ELSE @[d]], !.lv = lv]
+    IN /\ Len(mem) <= MaxMembers
+       /\ lv \subseteq Range(mem)
+       /\ \A d \in was \ Range(mem) : dnode[d] = 0 \/ (d \in x.lv /\ Reported(p))
+       /\ \A d \in Range(mem) \ was : dnode[d] # 0 /\ to(d) = "up" /\ d \notin lv
+       /\ \A d \in Range(mem) \cap was : to(d) = St(p, Cur(p), d) \/ Allowed(p, d, St(p, Cur(p), d), to(d))
+       /\ \A d \in lv \ x.lv : x.lv = {} \/ to(d) = "down"
+       /\ \A d \in (x.lv \cap Range(mem)) \ lv : to(d) = "up"
+       /\ NewIntervals({p}, [q \in PG |-> y])
        /\ UNCHANGED <<reqIv, reports, recd>>
 
 \* Moving the primary: the first two members swap.
@@ -474,7 +518,7 @@ Edit(p, mem, marks) ==
     LET x == ivs[p][Cur(p)]
         to(d) == marks[CHOOSE j \in 1..Len(mem) : mem[j] = d]
         y == [x EXCEPT !.mem = mem, !.st = [d \in Disk |-> IF d \in Range(mem) THEN to(d) ELSE @[d]]]
-    IN /\ x.lv = 0
+    IN /\ x.lv = {}
        /\ Len(mem) = Len(x.mem)
        /\ Range(mem) = Range(x.mem)
        /\ \A d \in Range(mem) : to(d) = St(p, Cur(p), d) \/ Allowed(p, d, St(p, Cur(p), d), to(d))
@@ -487,14 +531,17 @@ Edit(p, mem, marks) ==
 
 \* A planned change: [k |-> "mark", d, to], [k |-> "replace", p, old, new],
 \* [k |-> "rotate", p], [k |-> "add", p, old, new], [k |-> "remove", p],
-\* [k |-> "stay", p, out], [k |-> "minlive", p, to] or [k |-> "edit", p, mem, marks].
+\* [k |-> "drop", p], [k |-> "stay", p, l, out], [k |-> "refill", p, mem, marks, lv],
+\* [k |-> "minlive", p, to], [k |-> "edit", p, mem, marks] or [k |-> "lost", d] (LostPlanned).
 Planned(m) ==
     \/ m.k = "mark" /\ MarkDisk(m.d, m.to)
     \/ m.k = "replace" /\ Replace(m.p, m.old, m.new)
     \/ m.k = "rotate" /\ Rotate(m.p)
     \/ m.k = "add" /\ Add(m.p, m.old, m.new)
     \/ m.k = "remove" /\ Remove(m.p)
-    \/ m.k = "stay" /\ Stay(m.p, m.out)
+    \/ m.k = "drop" /\ Drop(m.p)
+    \/ m.k = "stay" /\ Stay(m.p, m.l, m.out)
+    \/ m.k = "refill" /\ Refill(m.p, m.mem, m.marks, m.lv)
     \/ m.k = "minlive" /\ SetMinLive(m.p, m.to)
     \/ m.k = "edit" /\ Edit(m.p, m.mem, m.marks)
 
@@ -511,6 +558,22 @@ Membership ==
           /\ step' = step + 1
           /\ UNCHANGED plan
     /\ UNCHANGED <<nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
+
+\* An operator declares a disk lost for good: it leaves the pool, which needs it
+\* marked down in every PG, and what only it holds stays unfound. It never
+\* returns: its node may run on, refused as Format's old disk is.
+Lost(d) ==
+    /\ dnode[d] # 0
+    /\ \A p \in PG : d \in Mem(p, Cur(p)) => St(p, Cur(p), d) = "down"
+    /\ dnode' = [dnode EXCEPT ![d] = 0]
+    /\ UNCHANGED <<tbl, ivs, reqIv, reports, recd, plan, ep, ddisk, dhost, fmts, stale, run, rsIv, dlog,
+                   miss, persIv, mrecv, failed, priVars, dataVars, leaseVars, clockVars, raftVars>>
+
+LostPlanned ==
+    /\ step <= Len(plan.m)
+    /\ plan.m[step].k = "lost"
+    /\ Lost(plan.m[step].d)
+    /\ step' = step + 1
 
 \* Renewals a primary asks for and folds of activation reports.
 Reactive ==
@@ -895,9 +958,9 @@ ReportRecovered(n, p) ==
     IN /\ Running(n)
        /\ Leads(n, p)
        /\ pr[n][p].act
-       /\ x.lv # 0
+       /\ x.lv # {}
        /\ [p |-> p, k |-> k] \notin recd
-       /\ \A d \in Mem(p, k) \ {x.lv} : St(p, k, d) = "up" /\ \A c \in ChunksOf(p) : miss[d][c] = NoMiss
+       /\ \A d \in Mem(p, k) \ x.lv : St(p, k, d) = "up" /\ \A c \in ChunksOf(p) : miss[d][c] = NoMiss
        /\ recd' = recd \cup {[p |-> p, k |-> k]}
        /\ UNCHANGED <<tbl, ivs, reqIv, reports, plan, step, nodeVars, priVars, dataVars, leaseVars,
                       clockVars, raftVars>>
@@ -1739,6 +1802,7 @@ Protocol ==
 \* turns on is the last renewal before them, which keeps its own timing.
 Choices ==
     \/ Membership
+    \/ LostPlanned
     \/ Die
     \/ \E n \in Node : Isolate(n)
     \/ \E m \in rm : MemberFail(m) \/ GoneRefuses(m)
@@ -1895,13 +1959,15 @@ Settled(p) ==
        \/ reqIv[p] = k
 PeeringSettles == <>[](\A p \in PG : Settled(p))
 
-\* 13. When the leader removes a leaving member, every other member of the
-\* PG's current interval holds every acknowledged version and lists nothing.
+\* 13. When the leader removes a leaving member, every member of the PG's
+\* current interval but the leaving ones holds every acknowledged version and
+\* lists nothing. A leaving member whose disk is gone is no removal: Drop takes
+\* it with the others unrecovered, there being no copy left to lose.
 RemovalKeepsCopies ==
     [][\A p \in PG :
          LET x == ivs[p][Len(ivs[p])]
-         IN (x.lv # 0 /\ Len(ivs'[p]) > Len(ivs[p]) /\ x.lv \notin Range(ivs'[p][Len(ivs'[p])].mem))
-            => \A c \in ChunksOf(p) : \A v \in AckedV(c) : \A d \in Range(x.mem) \ {x.lv} :
+         IN (Len(ivs'[p]) > Len(ivs[p]) /\ \E l \in x.lv \ Range(ivs'[p][Len(ivs'[p])].mem) : dnode[l] # 0)
+            => \A c \in ChunksOf(p) : \A v \in AckedV(c) : \A d \in Range(x.mem) \ x.lv :
                  v \in dlog[d][c] /\ miss[d][c] = NoMiss]_vars
 
 \* 18. An acknowledged write is not stranded: if a disk that is not gone can
@@ -2030,7 +2096,10 @@ Repl(p, old, new) == [k |-> "replace", p |-> p, old |-> old, new |-> new]
 Rot(p) == [k |-> "rotate", p |-> p]
 AddM(p, old, new) == [k |-> "add", p |-> p, old |-> old, new |-> new]
 RemoveM(p) == [k |-> "remove", p |-> p]
-StayM(p, out) == [k |-> "stay", p |-> p, out |-> out]
+StayM(p, l, out) == [k |-> "stay", p |-> p, l |-> l, out |-> out]
+DropM(p) == [k |-> "drop", p |-> p]
+LostM(d) == [k |-> "lost", d |-> d]
+Tab(p, mem, marks, lv) == [k |-> "refill", p |-> p, mem |-> mem, marks |-> marks, lv |-> lv]
 ML(p, to) == [k |-> "minlive", p |-> p, to |-> to]
 Ed(p, mem, marks) == [k |-> "edit", p |-> p, mem |-> mem, marks |-> marks]
 Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f, t |-> 600, k |-> 1, s |-> Spare]
@@ -2080,8 +2149,28 @@ StrandPlans == {LoneSwap}
 \* leaves and back; or the leaving member back in that member's place.
 RefillDone == Plan(<<Mark(3, "down"), AddM(2, 3, 1), RemoveM(2)>>, Partial2, {})
 RefillBack == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
-RefillStay == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(3, "up"), StayM(2, 2), RemoveM(2)>>, Partial2, {})
-RefillPlans == {RefillDone, RefillBack, RefillStay}
+RefillStay == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(3, "up"), StayM(2, 3, 2), RemoveM(2)>>, Partial2, {})
+RefillPlans == {[x EXCEPT !.f = {"restart", "format"}] : x \in {RefillDone, RefillBack, RefillStay}}
+\* ci-refills-back: the primary refilled and back, which it comes behind the others;
+\* the leaving member back in one table with taking the other's place; a member
+\* refilled, then declared lost.
+RefillPrimary == Plan(<<Mark(2, "down"), AddM(2, 2, 1), Mark(2, "up"), RemoveM(2)>>, Partial2, {"restart"})
+RefillReturn == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"),
+                       Tab(2, <<1, 3, 2>>, <<"up", "up", "down">>, {2}), RemoveM(2)>>, Partial2, {})
+RefillLost == Plan(<<Mark(3, "down"), AddM(2, 3, 1), LostM(3), DropM(2)>>, Partial2, {})
+RefillBackPlans == {RefillPrimary, RefillReturn, RefillLost}
+\* ci-refills-two, on 4 nodes: both members refilled, one after the other or in
+\* one table; and the first declared lost, leaving by the table that refills the
+\* second, which returns.
+RefillSecond == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), AddM(2, 2, 4), RemoveM(2)>>, Partial2, {})
+RefillTogether == Plan(<<Mark(3, "down"), Mark(2, "down"),
+                         Tab(2, <<1, 3, 4, 2>>, <<"up", "down", "up", "down">>, {2, 3}), RemoveM(2)>>, Partial2, {})
+RefillLostSecond == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), LostM(3),
+                           Tab(2, <<1, 4, 2>>, <<"up", "up", "down">>, {2}), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
+RefillTwoPlans == {RefillSecond, RefillTogether, RefillLostSecond}
+\* neg-drop-all-leaving: both members leaving, one lost, and the other holds what
+\* no member can serve.
+DropAllPlans == {Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), AddM(2, 2, 4), LostM(3), DropM(2)>>, Partial2, {})}
 
 \* ci-peering checks the plans with membership changes alone, but one;
 \* ci-restarts those with a restart or a format, under which a decision can
@@ -2119,10 +2208,10 @@ MoveLeavingDown == Plan(<<AddM(2, 3, 1), Mark(3, "down"), RemoveM(2)>>, Session,
 MoveRestart == Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Session, {"restart"})
 MoveMaint == Plan(<<AddM(2, 3, 1), Mark(2, "maint"), Mark(2, "up"), RemoveM(2)>>, Session, {})
 MoveRefill == Plan(<<AddM(2, 3, 1), Repl(2, 1, 4), RemoveM(2)>>, Session, {"format"})
-StayForPrimary == Plan(<<AddM(2, 3, 1), Mark(2, "down"), StayM(2, 2)>>, Session, {})
-StayAsPrimary == Plan(<<AddM(2, 2, 1), Mark(3, "down"), StayM(2, 3)>>, Session, {})
-StayForNew == Plan(<<AddM(2, 3, 1), Mark(1, "down"), StayM(2, 1)>>, Session, {})
-StayStale == Plan(<<AddM(2, 3, 1), Mark(3, "down"), Mark(3, "up"), Mark(2, "down"), StayM(2, 2)>>, Session, {})
+StayForPrimary == Plan(<<AddM(2, 3, 1), Mark(2, "down"), StayM(2, 3, 2)>>, Session, {})
+StayAsPrimary == Plan(<<AddM(2, 2, 1), Mark(3, "down"), StayM(2, 2, 3)>>, Session, {})
+StayForNew == Plan(<<AddM(2, 3, 1), Mark(1, "down"), StayM(2, 3, 1)>>, Session, {})
+StayStale == Plan(<<AddM(2, 3, 1), Mark(3, "down"), Mark(3, "up"), Mark(2, "down"), StayM(2, 3, 2)>>, Session, {})
 MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveMaint, MoveRefill}
 \* ci-stays splits the stays off, each config under the 300 s budget.
 StayMovePlans == {StayForPrimary, StayAsPrimary, StayForNew}
@@ -2132,9 +2221,10 @@ StayMovePlans == {StayForPrimary, StayAsPrimary, StayForNew}
 \* ci-stays-stale needs PG 2 alone and no spare table to fit 5 minutes.
 StayStalePlans == {StayStale}
 StayStrandPlans == {[StayStale EXCEPT !.w = Partial2]}
-\* neg-stay-keeps-interval: a primary still marked up once its disk is formatted
-\* away, two versions in flight.
-StayPlans == {Plan(<<AddM(2, 3, 1), StayM(2, 2)>>, Partial2, {"format"})}
+\* ci-stays-gone and neg-stay-keeps-interval: a primary still marked up once its
+\* disk is formatted away, two versions in flight, the member that left going
+\* with the move.
+StayPlans == {Plan(<<AddM(2, 3, 1), StayM(2, 3, 2)>>, Partial2, {"format"})}
 
 \* ci-faults: versions that fail, disks formatted around peering and recovery,
 \* and a min_live change.

@@ -155,6 +155,9 @@ Line(l) ==
        /\ Restart(l.n)
     \/ /\ l.k = "format"
        /\ Format(l.n)
+    \/ /\ l.k = "lost"
+       /\ Lost(l.d)
+       /\ UNCHANGED step
     \/ /\ l.k = "recoverorder"
        /\ Leads(l.n, ChunkPG[l.c])
        /\ pr[l.n][ChunkPG[l.c]].act
@@ -178,7 +181,7 @@ Line(l) ==
        /\ \/ UNCHANGED vars
           \/ RecoverLine(l)
     \/ /\ l.k = "reported"
-       /\ IF ivs[l.p][l.iv].lv = 0 \/ [p |-> l.p, k |-> l.iv] \in recd
+       /\ IF ivs[l.p][l.iv].lv = {} \/ [p |-> l.p, k |-> l.iv] \in recd
           THEN UNCHANGED vars
           ELSE IvAt(l.n, l.p) = l.iv /\ ReportRecovered(l.n, l.p)
     \/ /\ l.k = "ask"
