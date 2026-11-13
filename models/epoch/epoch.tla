@@ -2295,6 +2295,9 @@ ListerAnswer == {[ListerRestarted EXCEPT !.w = <<Partial[2]>>]}
 ListerPlans == {ListerRestarted}
 LateAskPlans == {[ListerRestarted EXCEPT !.f = {"restart", "lateask"}]}
 ListerOrderPlans == {ListerOrders}
+\* neg-write-on-unfound: the same writes, with the source marked down after a
+\* primary restart, which forgets the image, so the chunk is unfound.
+UnfoundPlans == {Plan(<<ML(1, 2), Mark(3, "down")>>, LoneListerWrites, {"restart"})}
 
 \* ci-peering checks the plans with membership changes alone, but one;
 \* ci-restarts those with a restart or a format, under which a decision can
