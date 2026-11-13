@@ -775,6 +775,18 @@ Activated(n, p, k, K, ls) ==
 Decided(n, p, k) == \E x \in dec : x.p = p /\ x.k = k /\ x.n = n /\ x.r = run[n]
 TheDec(n, p, k) == CHOOSE x \in dec : x.p = p /\ x.k = k /\ x.n = n /\ x.r = run[n]
 
+\* The image n's process holds as p's primary, from its last decision of p
+\* while every interval since kept its disk primary, as [c, v] pairs: the
+\* chunks whose image was the version v it kept. A restart forgets it. A later
+\* peering that keeps v finds that image still, though the primary lists the
+\* chunk for versions of its own the decision dropped.
+Image(n, p) ==
+    LET own == PrimDisk(p, IvAt(n, p))
+        xs == {x \in dec : /\ x.n = n /\ x.p = p /\ x.r = run[n]
+                           /\ \A i \in x.k..IvAt(n, p) : PrimDisk(p, i) = own}
+        x == CHOOSE x \in xs : \A y \in xs : y.k <= x.k
+    IN IF xs = {} THEN {} ELSE {[c |-> c, v |-> x.kept[c]] : c \in x.img}
+
 \* The members in P persist, with interval k, their lists from ls.
 PersistAll(P, p, k, ls) ==
     /\ miss' = [d \in Disk |-> IF d \in P
@@ -845,9 +857,11 @@ PeerOn(n, p, J, P, T) ==
         gone == [c \in ChunksOf(p) |->
                    {r.v : r \in {x \in pend \cup refd : x.n = n /\ x.c = c /\ x.v > SettleTop(n, c, K[c])}}]
         \* A version above K the primary mapped stays in its image, and a chunk it
-        \* listed may miss a kept block or hold a dropped one below its newest.
+        \* listed may miss a kept block or hold a dropped one below its newest,
+        \* unless it lists it only for what its image from before settled away.
         img == {c \in ChunksOf(p) :
-                  /\ miss[own][c] = NoMiss
+                  /\ \/ miss[own][c] = NoMiss
+                     \/ ~Bug("ForgetImage") /\ [c |-> c, v |-> K[c]] \in Image(n, p)
                   /\ [d |-> own, c |-> c] \notin T
                   /\ \/ Newest(Held(own, c) \ gone[c]) = K[c]
                      \/ Bug("MergeOnDropped") /\ K[c] \in dlog[own][c] \cup {0}}
@@ -931,14 +945,15 @@ Persist(d) ==
 \* when it read, be any since it activated. With RecoveryCoversAtRead, the
 \* primary picks the blocks at the read, so the writes ordered between the
 \* read and the write are overwritten. The source lists nothing, or is the
-\* primary, which lists the chunk only from this peering, for dropped
-\* versions of its own, and whose image is the kept version. A chunk no member
-\* keeps anything of needs no source. With RecoverFromListed, a primary that
-\* lists a chunk for what it lacks is a source too, and its image holds what it
-\* logged above the kept version; with RecoverNoSource, a chunk
-\* something was kept of needs none, so the write clears the list with no read.
-\* With RecoveryReadOldDisk, a read for a source formatted again is answered by its
-\* node's new, empty disk, and taken for the kept version.
+\* primary, which lists the chunk only for dropped versions of its own, from
+\* this peering or one whose image it carries, and whose image is the kept
+\* version. A chunk no member keeps anything of needs no source. With
+\* RecoverFromListed, a primary that lists a chunk for what it lacks is a
+\* source too, and its image holds what it logged above the kept version; with
+\* RecoverNoSource, a chunk something was kept of needs none, so the write
+\* clears the list with no read. With RecoveryReadOldDisk, a read for a source
+\* formatted again is answered by its node's new, empty disk, and taken for the
+\* kept version.
 RecoverFrom(n, p, c, d, m) ==
     LET k == IvAt(n, p)
         K == miss[d][c]
@@ -2035,8 +2050,10 @@ CanServe(d, c) ==
 
 NoStranded ==
     \A c \in Chunk :
-       (AckedV(c) # {} /\ \E d \in Disk : CanServe(d, c))
-       => \E d \in Mem(ChunkPG[c], Cur(ChunkPG[c])) : CanServe(d, c)
+       LET p == ChunkPG[c]
+       IN (AckedV(c) # {} /\ \E d \in Disk : CanServe(d, c))
+          => \/ \E d \in Mem(p, Cur(p)) : CanServe(d, c)
+             \/ \E n \in Node : Leads(n, p) /\ c \in {y.c : y \in Image(n, p)}
 
 \* 19. An activated primary has a source: for a chunk with an acknowledged write,
 \* a member of its interval can serve them all, or its own image is what peering
@@ -2231,6 +2248,11 @@ Refilled(x) == [x EXCEPT !.f = {"restart", "format"}]
 \* ci-refills-stay and -primary fit 5 minutes with one partial write.
 OneWrite(x) == [x EXCEPT !.w = <<Partial2[1]>>]
 RefillPlans == {Refilled(RefillDone)}
+\* ci-image: Y on the primary alone, dropped while the member is down, so the
+\* primary lists the chunk; the member's disk is formatted and replaced, and
+\* only the removed disk 3 holds X clean.
+ImagePlans == {Plan(<<AddM(2, 3, 1), RemoveM(2), Mark(1, "down"), Mark(1, "up"),
+                   Tab(2, <<2, 4>>, <<"up", "up">>, {})>>, Partial2, {"format"})}
 RefillBackDownPlans == {Refilled(RefillBack)}
 RefillStayPlans == {OneWrite(Refilled(RefillStay))}
 \* ci-refills-back: the primary refilled and back, which it comes behind the others;
