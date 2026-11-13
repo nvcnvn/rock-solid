@@ -2036,11 +2036,16 @@ RemovalKeepsCopies ==
 
 \* 18. An acknowledged write is not stranded: if a disk that is not gone can
 \* serve all of a chunk's acknowledged writes, holding them and listing nothing
-\* of it, so can a member of its PG's current interval, up or down. That such a
-\* disk exists is not claimed: a holder that truly dies leaves none. Nor is a
-\* read that succeeds: a refused version peering keeps can sit above the
-\* acknowledged ones, and with its one holder dead the chunk stays unfound
-\* though a member holds them all.
+\* of it, so can a member of its PG's current interval, up or down, or the
+\* image its primary carries while it leads. That such a disk exists is not
+\* claimed: a holder that truly dies leaves none. Nor is a read that succeeds:
+\* a refused version peering keeps can sit above the acknowledged ones, and
+\* with its one holder dead the chunk stays unfound though a member holds them
+\* all. One limit: a primary restart forgets the image, and if the member that
+\* held the kept version clean then goes, a removed disk can hold it while no
+\* member can serve it. A ci plan faults once, so none reaches a restart and a
+\* format together. Until replay leaves a chunk's newest versions gated until
+\* peering settles them, that stays open.
 CanServe(d, c) ==
     LET want == Content(c, UNION {Chain(c, v) : v \in AckedV(c)})
         got == Content(c, dlog[d][c])
