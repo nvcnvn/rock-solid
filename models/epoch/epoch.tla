@@ -2254,6 +2254,9 @@ RefillPlans == {Refilled(RefillDone)}
 ImagePlans == {Plan(<<AddM(2, 3, 1), RemoveM(2), Mark(1, "down"), Mark(1, "up"),
                    Tab(2, <<2, 4>>, <<"up", "up">>, {})>>, Partial2, {"format"})}
 RefillBackDownPlans == {Refilled(RefillBack)}
+\* ci-refills-down splits deep-refills-down by fault, the restart with one write.
+RefillDownFormatPlans == {[RefillBack EXCEPT !.f = {"format"}]}
+RefillDownRestartPlans == {[OneWrite(RefillBack) EXCEPT !.f = {"restart"}]}
 RefillStayPlans == {OneWrite(Refilled(RefillStay))}
 \* ci-refills-back: the primary refilled and back, which it comes behind the others;
 \* the leaving member back in one table with taking the other's place; a member
