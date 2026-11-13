@@ -310,6 +310,7 @@ func (r *Replica) decide(ctx *core.Context, i int, out *ReplicaOutput) {
 	pr := l.peer
 	_, e := r.table.entry(l.pg)
 	pr.all, pr.kept = keep(e, pr.replies, pr.all, pr.kept[:0], r.plant)
+	r.findImage(l, pr)
 	pr.decided = true
 	out.note(trace.OutDecide, pgField(l.pg), uint64(l.interval), 0, 0, 0)
 	for j := range pr.kept {
@@ -326,6 +327,26 @@ func (r *Replica) decide(ctx *core.Context, i int, out *ReplicaOutput) {
 		out.Activations = append(out.Activations, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
 	}
 	r.persistLists(ctx, i, out)
+}
+
+// findImage marks each chunk the decision keeps whose copy on the primary is its image: its store lists nothing of it, or
+// the lead's last decision found that image at the version this one keeps. The lead keeps the marks for its next decision.
+func (r *Replica) findImage(l *lead, pr *peering) {
+	var own []ChunkPeer
+	if j := slices.IndexFunc(pr.replies, func(p peerReply) bool { return p.disk == r.cfg.Disk }); j >= 0 {
+		own = pr.replies[j].chunks
+	}
+	for j := range pr.kept {
+		k := &pr.kept[j]
+		k.image = !slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed }) ||
+			!r.plant.forgetImage && slices.Contains(l.image, ChunkVersion{Chunk: k.chunk, Version: k.kept})
+	}
+	l.image = l.image[:0]
+	for _, k := range pr.kept {
+		if k.image {
+			l.image = append(l.image, ChunkVersion{Chunk: k.chunk, Version: k.kept})
+		}
+	}
 }
 
 // persistLists sends each up member of the interval that has not persisted its list the list again, persisting this disk's own unless it is in flight.
@@ -452,14 +473,10 @@ func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 			return
 		}
 	}
-	var own []ChunkPeer
-	if j := slices.IndexFunc(pr.replies, func(p peerReply) bool { return p.disk == r.cfg.Disk }); j >= 0 {
-		own = pr.replies[j].chunks
-	}
 	for j := range pr.kept {
 		k := &pr.kept[j]
 		x, _ := r.st.Index().Chunk(r.st.cfg.Pool, k.chunk)
-		k.lacking = (x.Version != k.kept || x.Whole != k.kept) && !(r.plant.mergeOnDropped && x.Version > k.kept) || slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed })
+		k.lacking = (x.Version != k.kept || x.Whole != k.kept) && !(r.plant.mergeOnDropped && x.Version > k.kept) || !k.image
 		k.unfound = k.unfound && k.lacking
 	}
 	r.planRecovery(l, pr, e)

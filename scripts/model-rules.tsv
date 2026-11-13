@@ -119,4 +119,4 @@ epoch/neg-serve-after-other-primary	open	Plants for the epoch model's new rules
 epoch/neg-serve-refused	open	Plants for the epoch model's new rules
 epoch/neg-settle-by-number	chunkstore.settleByNumber	TestPlantedBugsBreakTheirTraces
 epoch/neg-write-on-unfound	chunkstore.writeOnUnfound	TestWriteOnUnfoundEndsTheWayBack
-epoch/neg-forget-image	open	Plants for the epoch model's new rules
+epoch/neg-forget-image	chunkstore.forgetImage	TestForgetImageLeavesTheChunkUnfound

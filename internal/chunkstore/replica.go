@@ -114,7 +114,10 @@ type lead struct {
 	serving bool
 	peer    *peering
 	kept    []keptChunk
-	held    []heldMsg
+	// image is the chunks whose image the lead's last decision found at the version it kept: a later decision that keeps
+	// the same version finds it still, though the store lists the chunk for versions of its own the decision dropped.
+	image []ChunkVersion
+	held  []heldMsg
 	// asking is set once a chunk of the PG spent its counter or a version failed, which ends the interval: the primary orders nothing more in it and asks for the next once none of its versions is pending, setting asked. spent counts the held writes the store refused for a spent counter, which go ahead of those held since.
 	asking bool
 	asked  bool
@@ -402,12 +405,15 @@ type replicaPlants struct {
 	// listerVetoes has a member that lists a chunk veto a version it lacks; keepPastMember has a
 	// reached member outside the interval veto a version every up member holds; keepNoSource lifts
 	// both vetoes with no up member a source of the version; writeOnUnfound orders a write to an
-	// unfound chunk; neverUnfound leaves a chunk with no source neither recovering nor unfound.
+	// unfound chunk; neverUnfound leaves a chunk with no source neither recovering nor unfound;
+	// forgetImage has a decision forget that the lead's last one found the primary's image at the
+	// version both keep.
 	listerVetoes   bool
 	keepPastMember bool
 	keepNoSource   bool
 	writeOnUnfound bool
 	neverUnfound   bool
+	forgetImage    bool
 	// fenceOnArrival refuses an older incarnation's write when it reaches the primary, not when the
 	// store orders it; reorderAfterOther keeps a lead's term across intervals another primary led,
 	// so its held writes are ordered again.
@@ -556,7 +562,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 				case old.interval == e.Interval:
 					l = old
 				case r.keptPrimary(e, old.interval):
-					l.since, l.serving, l.kept = old.since, old.serving, old.kept
+					l.since, l.serving, l.kept, l.image = old.since, old.serving, old.kept, old.image
 				case r.plant.reorderAfterOther:
 					l.since = old.since
 				}

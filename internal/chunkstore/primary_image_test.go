@@ -50,3 +50,9 @@ func TestAPrimaryListingOnlyItsDroppedWriteServesPastADiskLoss(t *testing.T) {
 	}
 }
 
+// With forgetImage the next decision takes the primary's listing for a copy it lacks, and X, whole on the primary, is unfound.
+func TestForgetImageLeavesTheChunkUnfound(t *testing.T) {
+	if rp, _ := imageAfterLoss(t, func(p *replicaPlants) { p.forgetImage = true }); rp.Status != StatusUnfound {
+		t.Fatalf("X read %+v", rp)
+	}
+}

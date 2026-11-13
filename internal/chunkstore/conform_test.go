@@ -280,6 +280,7 @@ var conformPlants = []struct {
 	{"keepPastMember", func(r *primaryRun) { r.c.replicaPlants.keepPastMember = true }},
 	{"keepNoSource", func(r *primaryRun) { r.c.replicaPlants.keepNoSource = true }},
 	{"writeOnUnfound", func(r *primaryRun) { r.c.replicaPlants.writeOnUnfound = true }},
+	{"forgetImage", func(r *primaryRun) { r.c.replicaPlants.forgetImage = true }},
 }
 
 // conformPlant keeps a planted run's trace, however the run stops, and beside it a .stop file saying how; with CONFORM_RUNON set the run goes on past its first broken invariant, for a plant whose break comes before the record of what broke it.
