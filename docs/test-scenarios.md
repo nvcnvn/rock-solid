@@ -3233,7 +3233,7 @@ nodes without finishing.
 | `ci-late-ask` | 3 | PG 1 and its chunk alone, a member down and back, one restart, no spare table, with `lateask`: the restarted primary may ask again in a newer table before it peers. Only here does TLC take `RestartAsk`, which no rule needs |
 | `ci-refills` | 3 | PG 2 and its chunk alone, two partial writes, no spare table, a restart or a format: a member marked down, refilled beside its replacement and removed |
 | `ci-refills-down` | 3 | As `ci-refills`, with the other member down while the refilled one leaves, and back, then the removal; a format. `ci-refills-down-restart` runs the restart with one write, since with both it passed 2.4 million states unfinished |
-| `deep-refills-down` | 3 | `ci-refills-down`'s plan with both writes and either fault. Too large for `ci`, and not yet run |
+| `deep-refills-down` | 3 | `ci-refills-down`'s plan with both writes and either fault. Too large for `ci` |
 | `ci-refills-stay` | 3 | As `ci-refills`, one write: the other member down while the refilled one leaves, the refilled one back and taking its place, then the removal |
 | `ci-refills-primary` | 3 | As `ci-refills`, one write and a restart: the primary marked down, refilled beside its replacement, back, and removed |
 | `ci-refills-back` | 3 | As `ci-refills`, with no fault: the leaving member back in the table that takes the down member's place, which then leaves; or the refilled member declared lost and dropped |
@@ -3963,6 +3963,7 @@ section.
 | Epoch change | `deep-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,577 s |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |
+| Epoch change | `deep-refills-down` | [Epoch change model](#epoch-change-model) | 34 | 3,823,511 | 362 s |
 
 - Each model names the simulator invariant of each property in its own section's property table,
   so this map holds only the configuration results. The sessions model's invariants are registered
