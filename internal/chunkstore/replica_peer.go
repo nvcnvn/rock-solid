@@ -330,7 +330,8 @@ func (r *Replica) decide(ctx *core.Context, i int, out *ReplicaOutput) {
 }
 
 // findImage marks each chunk the decision keeps whose copy on the primary is its image: its store lists nothing of it, or
-// the lead's last decision found that image at the version this one keeps. The lead keeps the marks for its next decision.
+// the lead's last decision found that image at the version this one keeps. The lead keeps, for its next decision, those
+// whose index also holds the kept version; a chunk with versions still to settle is checked once activation settled it.
 func (r *Replica) findImage(l *lead, pr *peering) {
 	var own []ChunkPeer
 	if j := slices.IndexFunc(pr.replies, func(p peerReply) bool { return p.disk == r.cfg.Disk }); j >= 0 {
@@ -341,12 +342,19 @@ func (r *Replica) findImage(l *lead, pr *peering) {
 		k.image = !slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed }) ||
 			!r.plant.forgetImage && slices.Contains(l.image, ChunkVersion{Chunk: k.chunk, Version: k.kept})
 	}
+	unsettled := r.Unsettled(l.pg, nil)
 	l.image = l.image[:0]
 	for _, k := range pr.kept {
-		if k.image {
+		if k.image && (slices.Contains(unsettled, k.chunk) || !r.lacks(k)) {
 			l.image = append(l.image, ChunkVersion{Chunk: k.chunk, Version: k.kept})
 		}
 	}
+}
+
+// lacks reports whether the primary's index may differ from the version k keeps: it maps another, or holds that one only in part.
+func (r *Replica) lacks(k keptChunk) bool {
+	x, _ := r.st.Index().Chunk(r.st.cfg.Pool, k.chunk)
+	return (x.Version != k.kept || x.Whole != k.kept) && !(r.plant.mergeOnDropped && x.Version > k.kept)
 }
 
 // persistLists sends each up member of the interval that has not persisted its list the list again, persisting this disk's own unless it is in flight.
@@ -473,11 +481,14 @@ func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 			return
 		}
 	}
+	l.image = l.image[:0]
 	for j := range pr.kept {
 		k := &pr.kept[j]
-		x, _ := r.st.Index().Chunk(r.st.cfg.Pool, k.chunk)
-		k.lacking = (x.Version != k.kept || x.Whole != k.kept) && !(r.plant.mergeOnDropped && x.Version > k.kept) || !k.image
+		k.lacking = r.lacks(*k) || !k.image
 		k.unfound = k.unfound && k.lacking
+		if !k.lacking {
+			l.image = append(l.image, ChunkVersion{Chunk: k.chunk, Version: k.kept})
+		}
 	}
 	r.planRecovery(l, pr, e)
 	l.kept, pr.kept = pr.kept, l.kept[:0]
