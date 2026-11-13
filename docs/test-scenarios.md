@@ -3923,18 +3923,34 @@ section.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 27 | 694,453 | 79 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 24 | 389,831 | 44 s |
-| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 31 | 1,907,361 | 267 s |
-| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 26 | 343,918 | 40 s |
-| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 29 | 1,197,647 | 162 s |
-| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 104 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 768,383 | 90 s |
-| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 29 | 1,507,924 | 235 s |
-| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 36 | 1,822,496 | 193 s |
-| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 29 | 933,606 | 93 s |
-| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 28 | 1,351,424 | 200 s |
-| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 21 | 32,008 | 19 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 27 | 625,977 | 85 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 24 | 390,543 | 51 s |
+| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 31 | 1,629,577 | 269 s |
+| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 26 | 352,126 | 46 s |
+| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 29 | 1,316,423 | 188 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 108 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 759,391 | 105 s |
+| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 29 | 1,070,752 | 225 s |
+| Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 26 | 363,750 | 72 s |
+| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 36 | 1,683,750 | 222 s |
+| Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 24 | 29,548 | 3 s |
+| Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 23 | 219,715 | 22 s |
+| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 25 | 169,147 | 17 s |
+| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 34 | 1,299,397 | 115 s |
+| Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 27 | 239,726 | 23 s |
+| Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 30 | 2,328,325 | 256 s |
+| Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 29 | 276,923 | 31 s |
+| Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 30 | 596,611 | 64 s |
+| Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 32 | 1,179,375 | 155 s |
+| Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 22 | 24,903 | 5 s |
+| Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 35 | 1,450,920 | 137 s |
+| Epoch change | `ci-sources` | [Epoch change model](#epoch-change-model) | 28 | 1,488,307 | 140 s |
+| Epoch change | `ci-sources-move` | [Epoch change model](#epoch-change-model) | 30 | 704,160 | 77 s |
+| Epoch change | `ci-sources-lister` | [Epoch change model](#epoch-change-model) | 35 | 689,657 | 84 s |
+| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 27 | 1,245,263 | 215 s |
+| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 21 | 32,292 | 47 s |
+| Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 18 | 16,172 | 58 s |
+| Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 26 | 53,985 | 79 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
