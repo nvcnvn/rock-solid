@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -54,5 +55,36 @@ func TestAPrimaryListingOnlyItsDroppedWriteServesPastADiskLoss(t *testing.T) {
 func TestForgetImageLeavesTheChunkUnfound(t *testing.T) {
 	if rp, _ := imageAfterLoss(t, func(p *replicaPlants) { p.forgetImage = true }); rp.Status != StatusUnfound {
 		t.Fatalf("X read %+v", rp)
+	}
+}
+
+// rep2 with min_live 1: X lands on the other member while the primary is down, so when it returns it lists nothing of the
+// chunk yet lacks X. Its decision carries no image of X: its copy is not the version kept.
+func TestAPrimaryLackingTheKeptVersionCarriesNoImage(t *testing.T) {
+	r := newSoleRun(t, 2, 1, 2)
+	c := r.c
+	ch := chunkIn(pg0, 1, 0)
+	ms := r.members()
+	p := ms[0].Disk
+	r.recovery(false)
+	r.lose(p)
+	r.tick(3_000_000)
+	id := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize))
+	rp, ok := r.answered(id, 5_000_000)
+	if !ok || rp.Status != StatusOK {
+		t.Fatalf("X with the primary down: %+v", rp)
+	}
+	r.back(p)
+	r.tick(5_000_000)
+	n := c.node(p)
+	i := c.reps[n].lead(pg0)
+	if i < 0 || !c.reps[n].leads[i].active {
+		t.Fatalf("disk %d does not lead pg0 after it came back: members %v", p, r.members())
+	}
+	if x, _ := c.reps[n].Store().Index().Chunk(testPool, ch); x.Whole == rp.Version {
+		t.Fatalf("primary %+v: the shape needs it lacking X", x)
+	}
+	if img := c.reps[n].leads[i].image; slices.Contains(img, ChunkVersion{Chunk: ch, Version: rp.Version}) {
+		t.Fatalf("the primary lacks %#x of %v but carries it as its image: %v", rp.Version, ch, img)
 	}
 }
