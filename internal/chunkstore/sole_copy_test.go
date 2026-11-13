@@ -42,8 +42,16 @@ func newSoleRun(t *testing.T, replicas, minLive, disks int) *soleRun {
 	return r
 }
 
-// stranded reports a disk that can serve version v of ch, holding it and listing nothing of it, in a PG none of whose members in e can, up or down; a crashed member says nothing.
+// stranded reports a disk that can serve version v of ch, holding it and listing nothing of it, in a PG none of whose members in e can, up or down, nor carries an image of ch as its primary, of any version as NoStranded counts it; a crashed member says nothing.
 func (c *rcluster) stranded(e *PGEntry, ch core.ChunkID, v uint64) error {
+	for n := range c.reps {
+		if slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == c.ids[n] }) &&
+			slices.ContainsFunc(c.reps[n].leads, func(l lead) bool {
+				return slices.ContainsFunc(l.image, func(cv ChunkVersion) bool { return cv.Chunk == ch })
+			}) {
+			return nil
+		}
+	}
 	held := uint32(0)
 	for n := range c.reps {
 		member := slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == c.ids[n] })
