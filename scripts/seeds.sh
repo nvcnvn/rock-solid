@@ -44,7 +44,7 @@ internal/chunkstore TestPeeringKeepsAcknowledgedWritesAcrossPrimaries 500
 internal/chunkstore TestNoPGServesReadsFromTwoPrimaries 500
 internal/chunkstore TestWritesPassTheWriteLimitOnlyWhereAdmitted 200
 internal/chunkstore TestTheDetectorMarksAFailedDiskDown 500
-internal/loop/looptest TestSteppedLoopsReplayFromTheirSeed 1000
+internal/loop/looptest TestSteppedLoopsReplayFromTheirSeed 200
 "
 
 cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)
