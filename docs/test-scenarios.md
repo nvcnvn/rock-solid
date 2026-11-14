@@ -5594,7 +5594,8 @@ own ([Testing strategy](design.md#testing-strategy)).
 - A dropped version is superseded on every member that logged it, the new primary included, by a
   recovery write logged under an existing version
   (`TestRecoverySupersedesADroppedVersionOnEveryMemberThatLoggedIt`):
-  - Chunk epochs spike R3: without recovery, a restart's replay maps the dropped write again.
+  - Chunk epochs spike R3: without recovery, a restart's replay gates the dropped write and drops
+    it again at the dropping peering's decision marker.
   - R3b: with it, replay ends at the recovered block.
 - A recovery write is logged under the version of the interval's last write of the chunk before
   it, or under the kept version, by the members that list the chunk alone. In the store, a member's

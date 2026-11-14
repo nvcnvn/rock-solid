@@ -331,6 +331,9 @@ type Store struct {
 	sentHead   int
 	// persists is the ops persisting missing lists, until their records are durable or failed.
 	persists []int32
+	// held is the replayed writes and punches, in log order, of an interval at or past their PG's
+	// newest decision the disk persisted, which no later marker has settled yet.
+	held []item
 	// issued is every disk read, write and flush not yet done, in the order the store issued them, with when.
 	issued    []issuedIO
 	fetches   []fetch
@@ -425,7 +428,7 @@ func (s *Store) logIO() core.IOID {
 }
 
 func (s *Store) recover(ctx *core.Context, diskBlocks uint64, mode disklog.Mode) error {
-	s.log, s.ix, s.mode, s.replayLSN = nil, nil, mode, 0
+	s.log, s.ix, s.mode, s.replayLSN, s.held = nil, nil, mode, 0, s.held[:0]
 	s.loading, s.pieceOf = map[disklog.BlobRef]*loadingRun{}, map[disklog.BlobRef]disklog.BlobRef{}
 	rec, err := disklog.Recover(ctx, s.cfg.Log, diskBlocks, mode, s.logIO(), &s.lout)
 	if err != nil {
@@ -1853,7 +1856,7 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 			ev.Entries = slices.DeleteFunc(ev.Entries, func(e disklog.Entry) bool { return e.Kind == disklog.EntryPunch })
 		}
 		if ev.LSN > s.replayLSN {
-			if err := s.ix.Apply(ev); err != nil {
+			if err := s.replay(ev); err != nil {
 				s.recoveryFailed(ctx, err)
 			}
 		}
@@ -1867,10 +1870,112 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 			s.recoveryFailed(ctx, err)
 			return
 		}
+		s.gateHeld()
 		s.freeSlots(true)
 	case disklog.RecoveryFailed:
 		s.recoveryFailed(ctx, ev.Err)
 	}
+}
+
+// replay applies a replayed record's entries in order, holding back each write and punch of an
+// interval at or past its PG's newest persisted decision: that decision's peering, or a later
+// one, may drop it, and only the next marker says which. A decision marker settles the held
+// versions of its PG.
+func (s *Store) replay(ev *disklog.Event) error {
+	for i := range ev.Entries {
+		e := &ev.Entries[i]
+		if s.gates(e) {
+			s.held = append(s.held, item{entry: *e, state: itemDurable, lba: ev.LBA, headerBlocks: ev.HeaderBlocks, payload: ev.Payloads[i], lsn: ev.LSN})
+			continue
+		}
+		s.apply = disklog.Event{Kind: ev.Kind, LSN: ev.LSN, LBA: ev.LBA, HeaderBlocks: ev.HeaderBlocks, Entries: ev.Entries[i : i+1], Payloads: ev.Payloads[i : i+1]}
+		if err := s.ix.Apply(&s.apply); err != nil {
+			return err
+		}
+		if e.Kind == disklog.EntryDecision {
+			s.settleHeld(e)
+		}
+	}
+	return nil
+}
+
+// gates reports whether replay holds entry e back: a write or punch of an interval at or past the
+// newest decision the disk persisted for a PG holding its chunk, at any PG count.
+func (s *Store) gates(e *disklog.Entry) bool {
+	if e.Kind != disklog.EntryWrite && e.Kind != disklog.EntryPunch && e.Kind != disklog.EntrySlot {
+		return false
+	}
+	// ponytail: up to 32 index lookups per replayed entry; cache per PG if replay time matters.
+	const finest = 1 << 31
+	d := s.ix.Decided(e.Pool, core.PGIndexOf(e.Chunk.Hash(), finest), finest)
+	return d != 0 && intervalOf(e.Version) >= d
+}
+
+// settleHeld settles the held versions of decision marker d's PG as Settle does, by the version
+// the marker's list keeps if it lists the chunk and by the newest held otherwise: those kept are
+// mapped, the others dropped.
+func (s *Store) settleHeld(d *disklog.Entry) {
+	pgs := uint32(d.Length)
+	in := func(it item) bool {
+		return it.entry.Pool == d.Pool && core.PGIndexOf(it.entry.Chunk.Hash(), pgs) == d.Owner
+	}
+	for len(s.held) > 0 {
+		j := slices.IndexFunc(s.held, in)
+		if j < 0 {
+			return
+		}
+		c := s.held[j].entry.Chunk
+		same := func(it item) bool { return it.entry.Pool == d.Pool && it.entry.Chunk == c }
+		keep := uint64(0)
+		if ch, _ := s.ix.Chunk(d.Pool, c); ch.ListedIn == d.Interval {
+			keep = ch.Listed
+		} else {
+			for _, it := range s.held {
+				if same(it) {
+					keep = max(keep, it.entry.Version)
+				}
+			}
+		}
+		top := keep
+		if !s.plant.settleByNumber {
+			top = 0
+			for _, it := range s.held {
+				if v := it.entry.Version; same(it) && v <= keep && intervalOf(v) == intervalOf(keep) {
+					top = max(top, v)
+				}
+			}
+		}
+		for k := range s.held {
+			if it := &s.held[k]; same(*it) && it.entry.Version <= top {
+				s.mapItem(it)
+			}
+		}
+		s.held = slices.DeleteFunc(s.held, same)
+	}
+}
+
+// gateHeld hands the versions replay still holds to the store as gated writes and punches,
+// whose records are durable and whose clients are gone, for the next decision to settle.
+func (s *Store) gateHeld() {
+	for k := range s.held {
+		it := &s.held[k]
+		ci := s.chunkSlot(it.entry.Chunk)
+		cs := &s.chunks[ci]
+		if n := len(cs.pending); n == 0 || s.ops[cs.pending[n-1]].version != it.entry.Version {
+			kind := opWrite
+			if it.entry.Kind == disklog.EntryPunch {
+				kind = opPunch
+			}
+			oi := s.newOp(kind, Request{Chunk: it.entry.Chunk, Version: it.entry.Version, Gated: true})
+			o := &s.ops[oi]
+			o.chunk, o.version, o.prevVer, o.prevEpoch, o.answered = ci, it.entry.Version, cs.version, cs.epoch, true
+			cs.pending = append(cs.pending, oi)
+			cs.version, cs.ordered = it.entry.Version, it.entry.Version
+		}
+		o := &s.ops[cs.pending[len(cs.pending)-1]]
+		o.items = append(o.items, *it)
+	}
+	s.held = s.held[:0]
 }
 
 func (s *Store) recoveryFailed(ctx *core.Context, err error) {
@@ -2298,8 +2403,8 @@ func (s *Store) drain(ctx *core.Context, out *Output) {
 }
 
 // abandonPending answers in doubt the writes and punches still pending once the log closed for a
-// rebuild, gated ones waiting for a commit and those behind them: replay maps every durable
-// record, as after a restart, so the store can neither map them again nor keep them unmapped.
+// rebuild, gated ones waiting for a commit and those behind them: replay maps or gates every
+// durable record again, as after a restart.
 func (s *Store) abandonPending(ctx *core.Context, out *Output) {
 	for ci := range s.chunks {
 		cs := &s.chunks[ci]

@@ -135,7 +135,7 @@ func TestAReturningMemberGetsOnlyTheChunksItMissed(t *testing.T) {
 // 1.2 lands on disks 1 and 2 while disk 3 is cut off, and interval 2's peering drops it: recovery
 // supersedes it on both, the primary included, so a restart's replay of disk 1's log ends at the
 // recovered block rather than bringing 1.2 back (chunk epochs spike R3b). Without recovery the
-// replay maps 1.2 again (R3).
+// replay gates 1.2 and drops it at interval 2's decision marker, so it does not come back either.
 func TestRecoverySupersedesADroppedVersionOnEveryMemberThatLoggedIt(t *testing.T) {
 	for _, recover := range []bool{true, false} {
 		c := newRCluster(t, rtable(4, 2))
@@ -161,7 +161,7 @@ func TestRecoverySupersedesADroppedVersionOnEveryMemberThatLoggedIt(t *testing.T
 			c.s.CrashRandom(0)
 			c.s.Restart(0)
 			c.settle()
-			c.blockIs(0, ch, 1, 9)
+			c.blockIs(0, ch, 1, 1)
 			continue
 		}
 		for d := range 3 {
