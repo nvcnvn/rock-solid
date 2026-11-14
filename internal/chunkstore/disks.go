@@ -13,12 +13,12 @@ var ErrLogRefused = errors.New("chunkstore: log ID refused")
 // ErrLostRefused reports a declaration that a disk is lost for a disk the record does not know, or one that is up.
 var ErrLostRefused = errors.New("chunkstore: disk not down")
 
-// RecordedDisk is a disk as the control plane records it: its ID, the log ID it reported, where it was last reported, whether it is up or else since when it is down, and whether its log is gone, a new log having been reported in its place.
+// RecordedDisk is a disk as the control plane records it: its ID, the log ID it reported, the node and the device it was last reported on, whether it is up or else since when it is down, and whether its log is gone, a new log having been reported in its place. Device is the drive's stable identity, such as its WWN, never its slot on the node, which a restart may renumber.
 type RecordedDisk struct {
 	ID        uint32
 	Log       uint64
 	Node      uint32
-	Device    uint32
+	Device    uint64
 	Up        bool
 	DownSince core.Tick
 	Gone      bool
@@ -30,7 +30,7 @@ type DiskRecord struct {
 }
 
 // Report takes a node's report that its device opened the log log, returning the disk's ID. A log ID the record knows is the disk it names, marked up, unless it is up elsewhere or its log was replaced, which is refused. A log ID it does not know joins as a new disk under the next disk ID, and a disk last reported on that device stays down with its log gone, so its members refill elsewhere at once.
-func (r *DiskRecord) Report(node, device uint32, log uint64) (uint32, error) {
+func (r *DiskRecord) Report(node uint32, device, log uint64) (uint32, error) {
 	if i := slices.IndexFunc(r.disks, func(d RecordedDisk) bool { return d.Log == log }); i >= 0 {
 		d := &r.disks[i]
 		if d.Gone || d.Up && (d.Node != node || d.Device != device) {
@@ -48,6 +48,9 @@ func (r *DiskRecord) Report(node, device uint32, log uint64) (uint32, error) {
 	r.disks = append(r.disks, RecordedDisk{ID: id, Log: log, Node: node, Device: device, Up: true})
 	return id, nil
 }
+
+// NewDiskRecord is the record of disks, which hold IDs 1 to len(disks) in order, as a record committed them.
+func NewDiskRecord(disks []RecordedDisk) DiskRecord { return DiskRecord{disks: disks} }
 
 // Down marks disk id down since since; it stays known by its log ID.
 func (r *DiskRecord) Down(id uint32, since core.Tick) {

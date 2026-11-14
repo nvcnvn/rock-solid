@@ -2,6 +2,7 @@ package meta
 
 import (
 	"bytes"
+	"encoding/binary"
 	"math/rand/v2"
 	"slices"
 	"testing"
@@ -228,7 +229,8 @@ func fuzzCtlKVs(data []byte) []KV {
 }
 
 // The control plane's ctl/ keys decode without a panic, and a state that decodes holds a table
-// whose CRC32C is its head's and a shard map whose ranges CheckRanges accepts.
+// whose CRC32C is its head's, a shard map whose ranges CheckRanges accepts, and disks only under
+// a record version.
 func FuzzDecodeCtl(f *testing.F) {
 	var seed []byte
 	add := func(k, v []byte) { seed = append(append(append(seed, byte(len(k)-1), byte(len(v))), k[1:]...), v...) }
@@ -251,6 +253,15 @@ func FuzzDecodeCtl(f *testing.F) {
 		h, _ := AppendHead(nil, chunkstore.AppendEntry(nil, &tb.Pools[0].PGs[i]))
 		add(entryKey(core.PGID{Pool: 1, Index: uint32(i)}), h)
 	}
+	add(ctlKey(CtlMembership, nil), bigEndian.AppendUint64(nil, 3))
+	for _, e := range []DiskEntry{
+		{RecordedDisk: chunkstore.RecordedDisk{ID: 1, Log: 0x11, Device: 0xd1, Up: true}},
+		{RecordedDisk: chunkstore.RecordedDisk{ID: 2, Log: 0x12, Device: 0xd2, Node: 1, Gone: true}},
+		{RecordedDisk: chunkstore.RecordedDisk{ID: 3, Log: 0x13, Device: 0xd2, Node: 1}, Age: AgeStep, Drain: true},
+	} {
+		add(diskKey(e.ID), appendDisk(nil, &e))
+	}
+	add(ctlKey(CtlFormat, nil), binary.AppendUvarint(nil, 2))
 	add(ctlKey(CtlShardMap, nil), bigEndian.AppendUint64(nil, 1))
 	for _, g := range []Group{{ID: 1, LastID: 3}, {ID: 2, Start: PrefixEnd([]byte{SpaceCtl}), LastID: 3}} {
 		g.Voters = []Replica{{1, 0, 1}, {2, 1, 2}, {3, 2, 3}}
@@ -266,8 +277,28 @@ func FuzzDecodeCtl(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if s.table.Epoch != 0 && s.table.CRC() != s.crc || len(s.smap.Groups) > 0 && s.smap.CheckRanges() != nil {
+		if s.table.Epoch != 0 && s.table.CRC() != s.crc || len(s.smap.Groups) > 0 && s.smap.CheckRanges() != nil || len(s.disks) > 0 && s.diskV == 0 {
 			t.Fatalf("decoded %+v", s)
+		}
+	})
+}
+
+// A disk entry that decodes is never up and gone, or drained once gone, and encodes back to the same bytes.
+func FuzzDecodeDisk(f *testing.F) {
+	for _, e := range []DiskEntry{
+		{RecordedDisk: chunkstore.RecordedDisk{ID: 1, Log: 0x11, Device: 0xd1, Up: true}},
+		{RecordedDisk: chunkstore.RecordedDisk{ID: 2, Log: 0x12, Device: 0xd2, Node: 300}, Age: 7 * AgeStep, Drain: true},
+		{RecordedDisk: chunkstore.RecordedDisk{ID: 3, Log: 0x13, Device: 0xd2, Node: 1, Gone: true}},
+	} {
+		f.Add(e.ID, appendDisk(nil, &e))
+	}
+	f.Fuzz(func(t *testing.T, id uint32, data []byte) {
+		e, err := decodeDisk(id, data)
+		if err != nil {
+			return
+		}
+		if e.ID != id || e.Up && (e.Gone || e.Age != 0) || e.Gone && e.Drain || !bytes.Equal(appendDisk(nil, &e), data) {
+			t.Fatalf("%x decodes to %+v, which encodes to %x", data, e, appendDisk(nil, &e))
 		}
 	})
 }

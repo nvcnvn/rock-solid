@@ -6475,19 +6475,54 @@ on a node is chunkstore's (`table_test.go`).
 
 ## Control-plane membership
 
+`meta.Control` hosts the failure detector and commits the disk record at the leader of a real
+three-replica group, as in [Control-plane group](#control-plane-group) (`internal/meta`,
+`members_test.go`). Each node 0 to 4 holds one disk, and time moves by heartbeats a second apart.
+The detector's own rules, against a whole simulated cluster, are
+[Failure and fail-slow detection](#failure-and-fail-slow-detection)'s.
+
 | Input | Expected |
 | --- | --- |
-| A node misses heartbeats for `node_down_after` (5 s) | Marked down in one table, which starts a new interval of every PG with a member on it |
-| The node stays down for `refill_after` (10 minutes) | Its PG members refilled ([Placement computation](#placement-computation)) and its shard voters replaced ([Voter replacement](#voter-replacement)) |
-| A node marked down for the 5th time within `flap_window` (10 minutes) | Held down until it has been normal for a whole `flap_window` ([Failure and fail-slow detection](#failure-and-fail-slow-detection)) |
-| A primary reports a member after `member_timeout` (1 s), and the member fails a direct probe (its disk stalled, its log failed, or no answer within 1 s) | Marked down at once |
-| The same report, but the probe answers with no stall | Not marked down |
-| A heartbeat shows a disk stalled, with no report | Marked down at once |
-| A disk's 99th percentile acknowledgment latency above `slow_disk_factor` (10×) its pool's median for `slow_disk_window` (1 min) | Marked down as fail-slow, unless that would drop a PG below `min_live` |
-| A fail-slow disk's latency back to normal for 50 s, then for a whole minute | It rejoins only after the whole `slow_disk_window` |
-| A `role: meta` node | Holds control-plane and shard voters, and no PG member |
+| A disk misses heartbeats for `node_down_after` (5 s) | Marked down in one table, which starts a new interval of every PG with a member on it and of no other (`TestASilentDiskIsMarkedDownThenRefilled`) |
+| The disk stays down for `refill_after` (10 minutes) from its down mark | Its PG members refilled ([Placement computation](#placement-computation)) and its shard voters replaced ([Voter replacement](#voter-replacement)), not a second before (`TestASilentDiskIsMarkedDownThenRefilled`) |
+| A disk marked down for the 5th time within `flap_window` (10 minutes) | Held down until it has been normal for a whole `flap_window` (`TestAFlappingDiskIsHeldDown`) |
+| A primary reports a member after `member_timeout` (1 s), and the member's probe answer shows a stall | Marked down at once (`TestAStallIsMarkedDownAtOnce`) |
+| The same report, but the probe answers with no stall | Not marked down (`TestAStallIsMarkedDownAtOnce`) |
+| A heartbeat shows a disk stalled, with no report | Marked down at once (`TestAStallIsMarkedDownAtOnce`) |
+| A disk's acknowledgment latency above `slow_disk_factor` (10×) its pool's median for `slow_disk_window` (1 min) | Marked down as fail-slow; not while another disk of its PGs is down, which would drop a PG below `min_live` (`TestAFailSlowDiskIsMarkedDownAndRejoinsAfterAWindow`) |
+| A fail-slow disk's latency back to normal for 50 s, then for a whole minute | It rejoins only after the whole `slow_disk_window` (`TestAFailSlowDiskIsMarkedDownAndRejoinsAfterAWindow`) |
+| A `role: meta` node | Holds control-plane and shard voters, and no PG member (`TestAMetaOnlyNodeHoldsVotersAndNoMember`) |
+| A node reports its two disks in swapped slots; then a new log on one device; then a log up on node 7 reported from node 8 | The disks keep their IDs; the new log joins under a new ID and only the disk last on that device has its log gone; the cloned log is refused with `ErrLogRefused` (`TestADiskIsKnownByItsLogOnItsDevice`) |
+| A report naming two disks on one device, as drives with no WWN can be; then a reformat of one, and its old log reported again | Both refused with `ErrLogRefused` and neither retired; the reformat retires the old disk, whose log is refused afterwards (`TestADeviceIdentityTwiceInAReportIsRefused`) |
+| A disk down for 5 minutes, then a failover to a leader whose clock reads 3 hours | The committed age is rewritten each minute and no sooner; the new leader refills the disk `refill_after` after its down mark, within a minute, not `refill_after` after the failover (`TestADownMarkCarriesItsAgeAcrossAFailover`) |
+| The same, to a leader whose clock reads 2 minutes, less than the age | The new leader counts the disk down from its clock's zero and refills it `refill_after` after that, later than its down mark, never earlier (`TestADownMarkCarriesItsAgeAcrossAFailover`) |
+| A disk's log replaced by a new one on its device, then 3 minutes | The old disk commits no age, so no commit rewrites it (`TestAGoneDiskIsNotWrittenAgain`) |
+| After a failover, a down disk heartbeats normally for 2 minutes before its node reports; then its node reports | Not marked up until its node reports, since the leader does not know the node's release; then up (`TestADiskIsNotMarkedUpBeforeItsNodeReports`) |
+| A voter's node reports it halted at an entry it cannot decode, aged just under `refill_after`, then aged `refill_after` | Kept, then replaced on another node, by the node's count of the halt's age (`TestAHaltIsCountedFromTheAgeItsNodeReports`) |
+| A failover, or a commit whose answer is an error | Every committed shard-map entry is handed to its group's leader once more, and the whole table goes once to each node whose heartbeat shows an older epoch, and not to a node up to date (`TestALostAnswerIsHandedOutAgain`) |
+| A restarted node | Its first table is one it fetched after it started, since a replica starts with none; a PG it leads takes a new interval before it serves (`TestARestartedPrimaryTakesANewIntervalBeforeItServes`, `internal/chunkstore`) |
+| An operator drains a disk, then ends the drain; drains a disk the record does not know | Each commits in the disk record and reads back; the unknown one is refused with `ErrUnknownDisk` (`TestADrainCommits`) |
+| A disk's entry, or any set of `ctl/` keys, as bytes | Decodes without a panic; an entry that decodes encodes back to the same bytes and is never up and gone or drained once gone; a state with disks has a record version (`FuzzDecodeDisk`, `FuzzDecodeCtl`) |
+| The `ctl/` keys of the disk record, a disk and the format level | Encode as `testdata/key_golden.txt` freezes them (`TestCtlKeysAreTheGoldenOnes`) |
 
-**Format level.** A `ctl/` key, raised by the operator. A node running a release older than the level that heartbeats after it was raised is not marked up, and a condition names it; Ceph's monitor likewise ignores the boot of an OSD below its minimum release.
+**Format level.** A `ctl/` key, raised by the operator. It is refused unless above the committed
+one, at or below the release of every node heard from within `node_down_after`, so a node silent
+that long no longer holds it back (`TestANodeSilentForNodeDownAfterIsForgotten`), and once every
+node with a disk up has been heard by this leader. A level staged before a node is heard on an older
+release is dropped at the next step with `ErrFormatLevel` (`TestAStagedFormatLevelIsCheckedAgainAtTheStep`).
+A node running a release older than the level that heartbeats after it was
+raised is not marked up, and a condition names it, until it heartbeats on a new enough release;
+Ceph's monitor likewise ignores the boot of an OSD below its minimum release
+(`TestANodeBelowTheFormatLevelIsNotMarkedUp`).
+
+**Seeded run** (`TestTheDiskRecordKeepsItsIdentitiesAcrossFailovers`, in `scripts/seeds.sh`): six
+nodes report their drives in random slot order, drives are reformatted, moved between nodes and
+cloned, disks fail, time passes, the format level rises and the leader fails over. After every step
+the simulator's invariants hold: a disk ID keeps the log ID it was first given and no log ID is
+under two disk IDs; the leader's state holds the disk record and format level last committed; a
+disk's log is gone only once another log was reported on its device of its node after it, leaving
+out logs a cloned drive reported; and, with one node on an older release, a format level commits
+only above no release of a node with a disk committed up.
 
 ## Control-plane sessions
 

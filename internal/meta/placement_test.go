@@ -16,8 +16,8 @@ func cluster(t *testing.T, n int) (*chunkstore.DiskRecord, []uint32) {
 	var nodes []uint32
 	for i := range uint32(n) {
 		nodes = append(nodes, i)
-		for dev := range uint32(2) {
-			if _, err := r.Report(i, dev, uint64(10*i+dev+1)); err != nil {
+		for dev := range uint64(2) {
+			if _, err := r.Report(i, dev, uint64(10*i+1)+dev); err != nil {
 				t.Fatal(err)
 			}
 		}

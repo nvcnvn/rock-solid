@@ -45,6 +45,7 @@ internal/chunkstore TestNoPGServesReadsFromTwoPrimaries 500
 internal/chunkstore TestWritesPassTheWriteLimitOnlyWhereAdmitted 200
 internal/chunkstore TestTheDetectorMarksAFailedDiskDown 500
 internal/loop/looptest TestSteppedLoopsReplayFromTheirSeed 200
+internal/meta TestTheDiskRecordKeepsItsIdentitiesAcrossFailovers 2000
 "
 
 cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)

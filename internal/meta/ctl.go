@@ -24,22 +24,19 @@ type PoolRecord struct {
 }
 
 // ControlInputs are what a table and a shard map are computed from beside what the control plane
-// committed; until membership is committed under ctl/, the disks, their marks and the halts are the caller's.
+// committed and heard: each disk's capacity figures as last reported, a pool taking those of its
+// class, and the operator's edits and balance moves.
 type ControlInputs struct {
-	Now core.Tick
-	// Disks is every disk at its last fill and mark; a pool takes those of its class.
+	Now   core.Tick
 	Disks []chunkstore.Disk
-	// Recorded, MetaNodes and Halts are what PlaceVoters reads.
-	Recorded  []chunkstore.RecordedDisk
-	MetaNodes []uint32
-	Halts     []Halt
-	Edits     []chunkstore.Edit
-	Moves     int
+	Edits []chunkstore.Edit
+	Moves int
 }
 
 // ControlOutput is what one call into a Control hands its driver: a Txn to propose to the
-// control-plane group under Token, and once one commits, its table as a delta for every node and
-// the shard map entries it changed for their groups' leaders.
+// control-plane group under Token; once one commits, its table as a delta for every node and the
+// shard map entries it changed for their groups' leaders; after a failover or an error answer,
+// every committed entry again, and the nodes to send the whole committed table.
 type ControlOutput struct {
 	Propose bool
 	Txn     Txn
@@ -47,31 +44,45 @@ type ControlOutput struct {
 	Push    bool
 	Delta   chunkstore.Delta
 	Plans   []Group
+	Tables  []uint32
 }
 
 // Reset empties the output for reuse.
-func (o *ControlOutput) Reset() { *o = ControlOutput{Plans: o.Plans[:0]} }
+func (o *ControlOutput) Reset() { *o = ControlOutput{Plans: o.Plans[:0], Tables: o.Tables[:0]} }
 
 // ctlState is what the control plane committed.
 type ctlState struct {
-	pools []PoolRecord
-	table chunkstore.Table
-	crc   uint32
-	smap  ShardMap
-	smapV uint64
+	pools  []PoolRecord
+	table  chunkstore.Table
+	crc    uint32
+	smap   ShardMap
+	smapV  uint64
+	disks  []DiskEntry
+	diskV  uint64
+	format uint32
 }
 
 // Control is the control-plane leader's machine beside its group: it commits pools, placement
-// tables and the shard map as the group's Txns, one at a time, and hands out a table or a plan
-// only once it has committed. A new leader starts one from its applied state once it has applied
-// an entry of its term; a commit another leader raced fails its checks, and the machine reads the
-// state again.
+// tables, the shard map, the disk record with the failure detector's marks, and the format level
+// as the group's Txns, one at a time, and hands out a table or a plan only once it has committed.
+// A new leader starts one from its applied state once it has applied an entry of its term; a
+// commit another leader raced fails its checks, and the machine reads the state again.
 type Control struct {
 	ctlState
 	staged          []PoolRecord
 	stagedMap       *ShardMap
-	asks, acts, rec []chunkstore.PGInterval
+	stagedFormat    uint32
+	asks, acts, rcv []chunkstore.PGInterval
 	pending         *commit
+	rec             chunkstore.DiskRecord
+	det             *chunkstore.Detector
+	pin             []chunkstore.PoolInputs
+	drains          []uint32
+	nodes           []nodeState
+	// round counts failovers and error answers; resend is set while every committed shard-map
+	// entry is still to be handed out again.
+	round  uint64
+	resend bool
 }
 
 // commit is the Txn in flight: the state it gives and how much of the staged reports it took.
@@ -86,8 +97,16 @@ type commit struct {
 
 // NewControl reads the control plane's state from st, the control-plane group's applied state.
 func NewControl(st *State) (*Control, error) {
-	c := &Control{}
-	return c, c.load(st)
+	c := &Control{round: 1, resend: true}
+	if err := c.load(st); err != nil {
+		return nil, err
+	}
+	for _, e := range c.disks {
+		if e.Drain {
+			c.drains = append(c.drains, e.ID)
+		}
+	}
+	return c, nil
 }
 
 // Table is the committed placement table, which a node fetches whole after a gap or a CRC mismatch.
@@ -139,7 +158,7 @@ func changePool(old, next chunkstore.Pool) error {
 
 // fits reports ErrTooLarge when a step of pool cp alone may be more than one Txn holds: its
 // refill after losing every third node, the largest step measured, as design.md's "One step is at
-// most max_ctl_txn_bytes" states.
+// most max_ctl_txn_bytes" states, beside a disk-record entry of every disk.
 func fits(cp PoolRecord, disks []chunkstore.Disk) error {
 	t, _ := chunkstore.Next(&chunkstore.Table{}, &chunkstore.Inputs{Pools: []chunkstore.PoolInputs{poolInputs(cp, disks)}})
 	var ops []Op
@@ -151,9 +170,17 @@ func fits(cp PoolRecord, disks []chunkstore.Disk) error {
 		}
 	}
 	n, err := (&Txn{Ops: ops}).Check()
+	if err != nil {
+		return err
+	}
+	dops := []Op{Put(ctlKey(CtlMembership, nil), bigEndian.AppendUint64(nil, 0))}
+	for _, d := range disks {
+		dops = append(dops, Put(diskKey(d.ID), appendDisk(nil, &DiskEntry{RecordedDisk: chunkstore.RecordedDisk{ID: d.ID, Node: d.Node}, Age: ^core.Tick(0)})))
+	}
+	m, err := (&Txn{Ops: dops}).Check()
 	// ponytail: refill = 2.2 × creation, the most measured (rep3 2.175, rep2 up to 2.05); item 5
 	// lifts this limit by committing a step over several tables.
-	if err == nil && n*11/5 > MaxCtlTxnBytes {
+	if err == nil && n*11/5+m > MaxCtlTxnBytes {
 		err = ErrTooLarge
 	}
 	return err
@@ -182,7 +209,7 @@ func (c *Control) SetShardMap(m *ShardMap) error {
 // Report folds a heartbeat's activation and recovered reports into the next table.
 func (c *Control) Report(rp *chunkstore.Report) {
 	c.acts = c.fold(c.acts, rp.Activations)
-	c.rec = c.fold(c.rec, rp.Recovered)
+	c.rcv = c.fold(c.rcv, rp.Recovered)
 }
 
 // Ask takes a primary's ask for a new interval of its PG, as Report takes a report.
@@ -199,23 +226,28 @@ func (c *Control) fold(dst []chunkstore.PGInterval, fs []chunkstore.PGFields) []
 
 // Step computes the next table and shard map and, with no commit in flight, proposes under token
 // whatever they and the staged pools change. A staged pool change the committed pool no longer
-// takes, after a reload, is dropped with its error, as are the staged pool changes of a step that
-// is more than one Txn holds, with ErrTooLarge; the next Step commits the rest.
+// takes, after a reload, is dropped with its error, as is a staged format level SetFormat would now
+// refuse, and as are the staged pool changes of a step that is more than one Txn holds, with
+// ErrTooLarge; the next Step commits the rest.
 func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) error {
+	c.begin(in.Now)
 	if c.pending != nil {
 		return nil
 	}
 	if err := c.recheck(); err != nil {
 		return err
 	}
-	p := &commit{token: token, asks: len(c.asks), acts: len(c.acts), rc: len(c.rec)}
+	p := &commit{token: token, asks: len(c.asks), acts: len(c.acts), rc: len(c.rcv)}
 	n := &p.next
 	n.pools = c.nextPools()
 	pin := make([]chunkstore.PoolInputs, len(n.pools))
+	ds := c.poolDisks(in.Disks)
 	for i, cp := range n.pools {
-		pin[i] = poolInputs(cp, in.Disks)
+		pin[i] = poolInputs(cp, ds)
 	}
-	n.table, _ = chunkstore.Next(&c.table, &chunkstore.Inputs{Now: in.Now, Pools: pin, Asks: c.asks, Activations: c.acts, Recovered: c.rec, Edits: in.Edits, Moves: in.Moves})
+	c.pin = pin
+	c.det.View(&c.table, pin)
+	n.table, _ = chunkstore.Next(&c.table, &chunkstore.Inputs{Now: in.Now, Pools: pin, Asks: c.asks, Activations: c.acts, Recovered: c.rcv, Edits: in.Edits, Moves: in.Moves})
 	p.delta = chunkstore.MakeDelta(&c.table, &n.table)
 	p.table = len(p.delta.Entries) > 0 || !slices.Equal(poolHeads(&c.table, nil), poolHeads(&n.table, nil))
 	if !p.table {
@@ -227,8 +259,10 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	if c.stagedMap != nil {
 		base, p.mapStaged = c.stagedMap, true
 	}
-	n.smap = PlaceVoters(base, in.MetaNodes, in.Recorded, in.Halts, in.Now)
+	live := c.liveRecord()
+	n.smap = PlaceVoters(base, c.metaNodes(), live, c.halts(), in.Now)
 	n.smapV = c.smapV
+	n.disks, n.diskV, n.format = c.diskView(live, in.Now), c.diskV, max(c.format, c.stagedFormat)
 	var ops []Op
 	var err error
 	for _, g := range n.smap.Groups {
@@ -249,8 +283,10 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 		n.smapV++
 		ops = append(ops, Put(ctlKey(CtlShardMap, nil), bigEndian.AppendUint64(nil, n.smapV)))
 	}
+	ops = c.memberOps(ops, n)
 	if !p.table && len(ops) == 0 && len(c.staged) == 0 {
-		c.asks, c.acts, c.rec, c.stagedMap = c.asks[:0], c.acts[:0], c.rec[:0], nil
+		c.asks, c.acts, c.rcv, c.stagedMap = c.asks[:0], c.acts[:0], c.rcv[:0], nil
+		c.resendPlans(out)
 		return nil
 	}
 	if ops, err = c.tableOps(ops, p); err != nil {
@@ -276,12 +312,14 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	return nil
 }
 
-// guards are the checks that the table head, the shard-map version and every pool the next table
+// guards are the checks that the table head, the shard-map and disk-record versions, the format level and every pool the next table
 // is computed from hold what this machine committed, so a Txn computed from a state another leader
 // has since changed commits nothing.
 func (c *Control) guards(pools []PoolRecord) []Op {
 	g := []Op{guard(ctlKey(CtlPlacement, nil), c.table.Epoch != 0, tableHead(c.table.Epoch, c.crc))}
 	g = append(g, guard(ctlKey(CtlShardMap, nil), c.smapV != 0, bigEndian.AppendUint64(nil, c.smapV)))
+	g = append(g, guard(ctlKey(CtlMembership, nil), c.diskV != 0, bigEndian.AppendUint64(nil, c.diskV)))
+	g = append(g, guard(ctlKey(CtlFormat, nil), c.format != 0, binary.AppendUvarint(nil, uint64(c.format))))
 	for _, cp := range pools {
 		i, ok := slices.BinarySearchFunc(c.pools, cp.ID, cmpPool)
 		var old []byte
@@ -294,9 +332,15 @@ func (c *Control) guards(pools []PoolRecord) []Op {
 }
 
 // recheck drops each staged pool change the committed pool does not take, or that changes nothing,
-// and returns the errors of those refused.
+// and a staged format level SetFormat would now refuse, and returns the errors of those refused.
 func (c *Control) recheck() error {
 	var errs []error
+	if c.stagedFormat > c.format {
+		if err := c.checkFormat(c.stagedFormat); err != nil {
+			errs = append(errs, fmt.Errorf("meta: format level %d: %w", c.stagedFormat, err))
+			c.stagedFormat = 0
+		}
+	}
 	c.staged = slices.DeleteFunc(c.staged, func(s PoolRecord) bool {
 		i, ok := slices.BinarySearchFunc(c.pools, s.ID, cmpPool)
 		if !ok {
@@ -353,7 +397,10 @@ func (c *Control) tableOps(ops []Op, p *commit) ([]Op, error) {
 
 // Answer takes the group's answer to the Txn proposed under its token: once it commits, the
 // machine adopts what it holds and hands out the table and the plans; otherwise, a check failed
-// or the Txn may not have applied, it reads the state again from st.
+// or the Txn may not have applied, it reads the state again from st, restarts the failure
+// detector over it at the next event, and hands out every committed plan again, and the whole
+// table to each node a heartbeat then shows behind, since a commit whose answer was lost is never
+// handed out otherwise.
 func (c *Control) Answer(st *State, a *Answer, out *ControlOutput) error {
 	p := c.pending
 	if p == nil || a.Token != p.token {
@@ -361,18 +408,34 @@ func (c *Control) Answer(st *State, a *Answer, out *ControlOutput) error {
 	}
 	c.pending = nil
 	if a.Err != nil || a.Result.FailedCheck >= 0 {
-		return c.load(st)
+		err := c.load(st)
+		c.det, c.round, c.resend = nil, c.round+1, true
+		c.resendPlans(out)
+		return err
 	}
 	c.ctlState = p.next
-	c.asks, c.acts, c.rec = c.asks[p.asks:], c.acts[p.acts:], c.rec[p.rc:]
+	c.asks, c.acts, c.rcv = c.asks[p.asks:], c.acts[p.acts:], c.rcv[p.rc:]
 	if p.mapStaged {
 		c.stagedMap = nil
+	}
+	if c.stagedFormat <= c.format {
+		c.stagedFormat = 0
 	}
 	if p.table {
 		out.Push, out.Delta = true, p.delta
 	}
-	out.Plans = append(out.Plans, p.plans...)
+	if !c.resend {
+		out.Plans = append(out.Plans, p.plans...)
+	}
+	c.resendPlans(out)
 	return nil
+}
+
+// resendPlans hands out every committed shard-map entry once after a failover or an error answer.
+func (c *Control) resendPlans(out *ControlOutput) {
+	if c.resend {
+		out.Plans, c.resend = append(out.Plans, c.smap.Groups...), false
+	}
 }
 
 func (c *Control) nextPools() []PoolRecord {
@@ -543,6 +606,23 @@ func decodeCtl(kvs []KV) (ctlState, error) {
 			default:
 				bad = true
 			}
+		case CtlMembership:
+			switch {
+			case len(name) == 0 && len(v) == 8:
+				s.diskV = bigEndian.Uint64(v)
+				bad = s.diskV == 0
+			case len(name) == 4 && bigEndian.Uint32(name) == uint32(len(s.disks)+1):
+				e, err := decodeDisk(bigEndian.Uint32(name), v)
+				bad = err != nil
+				s.disks = append(s.disks, e)
+			default:
+				bad = true
+			}
+		case CtlFormat:
+			d := decoder{b: v}
+			f := d.uvarint()
+			bad = len(name) != 0 || d.bad || len(d.b) != 0 || f == 0 || f > math.MaxUint32 || !bytes.Equal(binary.AppendUvarint(nil, f), v)
+			s.format = uint32(f)
 		case CtlShardMap:
 			switch {
 			case len(name) == 0 && len(v) == 8:
@@ -573,6 +653,14 @@ func decodeCtl(kvs []KV) (ctlState, error) {
 		return s, ErrMalformed
 	}
 	s.crc = crc
+	logs := make([]uint64, len(s.disks))
+	for i, e := range s.disks {
+		logs[i] = e.Log
+	}
+	slices.Sort(logs)
+	if len(s.disks) > 0 && s.diskV == 0 || len(slices.Compact(logs)) != len(s.disks) {
+		return s, ErrMalformed
+	}
 	slices.SortFunc(s.smap.Groups, func(a, b Group) int { return bytes.Compare(a.Start, b.Start) })
 	if len(s.smap.Groups) > 0 && (s.smapV == 0 || s.smap.CheckRanges() != nil) {
 		return s, ErrMalformed

@@ -19,16 +19,73 @@ type ctlRun struct {
 	l     int
 	ctl   *Control
 	token uint64
+	now   core.Tick
 	// txn is the last Txn proposed, out the output of the last answer.
 	txn Txn
 	out ControlOutput
+	// reports is each node's last report, which run sends again each second.
+	reports map[uint32]NodeReport
 }
 
+// newCtlRun starts the leader's machine with a metadata node each of 0 to 4 heard from and its
+// one disk recorded and committed: node n's disk has ID n+1, device devOf(n) and log logOf(n).
 func newCtlRun(t *testing.T) *ctlRun {
 	c := newGroup(t, 3, false)
-	r := &ctlRun{t: t, c: c, l: c.elect()}
+	r := &ctlRun{t: t, c: c, l: c.elect(), reports: map[uint32]NodeReport{}}
 	r.ctl = r.load(r.l)
+	r.hearAll()
+	r.step(&ControlInputs{})
 	return r
+}
+
+// hearAll is a heartbeat of each of nodes 0 to 4, its report and its disk's, as a new leader hears
+// within a second.
+func (r *ctlRun) hearAll() {
+	for n := range uint32(5) {
+		r.heartbeat(&NodeReport{Node: n, Meta: true, Opened: []OpenedDisk{{Device: devOf(n), Log: logOf(n)}}})
+		r.beat(n, 0, false)
+	}
+}
+
+func devOf(node uint32) uint64 { return 0xd0 + uint64(node) }
+
+func logOf(node uint32) uint64 { return 0x10 + uint64(node) }
+
+func (r *ctlRun) heartbeat(nr *NodeReport) *ControlOutput {
+	r.t.Helper()
+	var out ControlOutput
+	if err := r.ctl.Heartbeat(r.now, nr, &out); err != nil {
+		r.t.Fatal(err)
+	}
+	r.reports[nr.Node] = *nr
+	return &out
+}
+
+// event feeds the machine a message from node, or a timer when frame is nil, and returns its actions.
+func (r *ctlRun) event(node uint32, frame []byte) []core.Action {
+	r.t.Helper()
+	ev := core.Event{Kind: core.EvTimer, Timer: chunkstore.DetectTimer}
+	if frame != nil {
+		ev = core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: node}}
+		if err := chunkstore.Attach(nil, &ev.Msg, frame, core.NoBuf); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+	return r.ctl.OnEvent(&core.Context{Now: r.now}, &ev, nil)
+}
+
+// beat is node's disk heartbeat: its oldest unfinished I/O's age and whether its log failed.
+func (r *ctlRun) beat(node uint32, oldest core.Tick, failed bool) {
+	r.event(node, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 1, Disks: []chunkstore.DiskState{{Log: logOf(node), Oldest: oldest, Failed: failed}}}))
+}
+
+// fail marks disk id, node id-1's, down at once by the node's last report and a heartbeat that
+// shows its log failed.
+func (r *ctlRun) fail(id uint32) {
+	if nr, ok := r.reports[id-1]; ok {
+		r.heartbeat(&nr)
+	}
+	r.beat(id-1, 0, true)
 }
 
 func (r *ctlRun) load(i int) *Control {
@@ -192,7 +249,7 @@ func TestATableCommitsAsItsDelta(t *testing.T) {
 		case 1:
 			in.Disks, in.Moves = append(in.Disks, disks(4)...), 1
 		case 2:
-			in.Disks[0].Mark, in.Disks[0].DownSince = chunkstore.MarkDown, 1
+			r.fail(1)
 		}
 		out := r.step(in)
 		pushed(t, out, prev, r.ctl)
@@ -223,7 +280,7 @@ func TestAnActivationIsRecordedWithoutANewInterval(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.step(in)
-	in.Disks[0].Mark, in.Disks[0].DownSince = chunkstore.MarkDown, 1
+	r.fail(1)
 	r.step(in)
 	pg := slices.IndexFunc(r.ctl.Table().Pools[0].PGs, func(e chunkstore.PGEntry) bool { return len(e.Past) > 0 })
 	if pg < 0 {
@@ -242,17 +299,11 @@ func twoGroups() *ShardMap {
 	return &ShardMap{Groups: []Group{{ID: 1}, {ID: 2, Start: PrefixEnd([]byte{SpaceCtl})}}}
 }
 
-func placeInputs(t *testing.T) *ControlInputs {
-	rec, nodes := cluster(t, 3)
-	return &ControlInputs{Recorded: rec.Disks(), MetaNodes: nodes}
-}
-
 // A new leader and a Raft snapshot of the group read back the pools, the table and the shard map
 // whole, and the new leader's next table follows the last committed one.
 func TestANewLeaderAndASnapshotReadBackTheWholeState(t *testing.T) {
 	r := newCtlRun(t)
-	in := placeInputs(t)
-	in.Disks = disks(0, 1, 2, 3)
+	in := &ControlInputs{Disks: disks(0, 1, 2, 3)}
 	if err := r.ctl.SetPool(1, spec(3, 8), in.Disks); err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +311,7 @@ func TestANewLeaderAndASnapshotReadBackTheWholeState(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.step(in)
-	in.Disks[0].Mark, in.Disks[0].DownSince = chunkstore.MarkDown, 1
+	r.fail(1)
 	r.step(in)
 	same := func(c *Control) {
 		t.Helper()
@@ -284,7 +335,7 @@ func TestANewLeaderAndASnapshotReadBackTheWholeState(t *testing.T) {
 	r.ctl = r.load(r.l)
 	same(r.ctl)
 	prev := *r.ctl.Table()
-	in.Disks[1].Mark, in.Disks[1].DownSince = chunkstore.MarkDown, 1
+	r.fail(2)
 	pushed(t, r.step(in), prev, r.ctl)
 }
 
@@ -293,7 +344,7 @@ func TestANewLeaderAndASnapshotReadBackTheWholeState(t *testing.T) {
 // voters under IDs no group has seen.
 func TestAPlanIsHandedOutOnlyOnceCommitted(t *testing.T) {
 	r := newCtlRun(t)
-	in := placeInputs(t)
+	in := &ControlInputs{}
 	if err := r.ctl.SetShardMap(twoGroups()); err != nil {
 		t.Fatal(err)
 	}
@@ -305,6 +356,7 @@ func TestAPlanIsHandedOutOnlyOnceCommitted(t *testing.T) {
 	r.c.settle()
 	r.l = r.c.elect()
 	r.ctl = r.load(r.l)
+	r.hearAll()
 	if len(r.ctl.ShardMap().Groups) != 0 {
 		t.Fatalf("an uncommitted shard map was read back: %+v", r.ctl.ShardMap())
 	}
@@ -322,8 +374,13 @@ func TestAPlanIsHandedOutOnlyOnceCommitted(t *testing.T) {
 	if err := old.Answer(r.c.n[oldL].s.State(), &a, &oldOut); err != nil {
 		t.Fatal(err)
 	}
-	if a.Err == nil && a.Result.FailedCheck < 0 || len(oldOut.Plans) != 0 {
-		t.Fatalf("the deposed leader's commit answered %+v and handed out %+v", a, oldOut.Plans)
+	if a.Err == nil && a.Result.FailedCheck < 0 {
+		t.Fatalf("the deposed leader's commit answered %+v", a)
+	}
+	for _, g := range oldOut.Plans {
+		if c, ok := r.ctl.group(g.ID); !ok || !bytes.Equal(appendGroup(nil, c), appendGroup(nil, &g)) {
+			t.Fatalf("the deposed leader handed out %+v, not the committed entry", g)
+		}
 	}
 }
 
@@ -431,7 +488,7 @@ func TestAStagedPoolIsCheckedAgainAfterAReload(t *testing.T) {
 	if err := r.ctl.Step(in, 99, &out); err == nil || out.Propose {
 		t.Fatalf("a stale pool change answered %v, proposed %v", err, out.Propose)
 	}
-	in.Disks[0].Mark, in.Disks[0].DownSince = chunkstore.MarkDown, 1
+	r.fail(1)
 	r.step(in)
 	if len(r.ctl.Table().Pools[0].PGs) != 8 {
 		t.Fatalf("pool 1 has %d PGs", len(r.ctl.Table().Pools[0].PGs))
@@ -455,7 +512,7 @@ func TestAPoolTooLargeForAStepIsRefused(t *testing.T) {
 			r.step(in)
 		}
 	}
-	in.Disks[0].Mark, in.Disks[0].DownSince = chunkstore.MarkDown, 1
+	r.fail(1)
 	var out ControlOutput
 	if err := r.ctl.Step(in, 99, &out); !errors.Is(err, ErrTooLarge) || out.Propose {
 		t.Fatalf("a step past the limit answered %v, proposed %v", err, out.Propose)
@@ -492,6 +549,9 @@ func TestCtlKeysAreTheGoldenOnes(t *testing.T) {
 		{ops[1].Key, "ctl/placement/5/9#1"},
 		{groupKey(3), "ctl/shardmap/3"},
 		{gops[1].Key, "ctl/shardmap/3#1"},
+		{ctlKey(CtlMembership, nil), "ctl/membership"},
+		{diskKey(4), "ctl/membership/4"},
+		{ctlKey(CtlFormat, nil), "ctl/format"},
 	} {
 		if !bytes.Equal(c.got, g(c.name)) {
 			t.Errorf("%s is %x, golden %x", c.name, c.got, g(c.name))
@@ -518,7 +578,7 @@ func TestATableIsCheckedAgainstEveryPoolItReads(t *testing.T) {
 		t.Fatal("an overcommit change pushed a table")
 	}
 	r.ctl = other
-	in.Disks[0].Mark, in.Disks[0].DownSince = chunkstore.MarkDown, 1
+	r.fail(1)
 	if !r.propose(in) {
 		t.Fatal("nothing proposed")
 	}

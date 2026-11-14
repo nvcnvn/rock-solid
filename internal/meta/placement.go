@@ -33,10 +33,10 @@ type ShardMap struct {
 	Groups []Group
 }
 
-// Halt is a replica that halted at a committed entry it could not decode, as its node reports: its group, its replica ID, and since when.
+// Halt is a replica that halted at a committed entry it could not decode, as its node reports: its group, its replica ID, the entry's index, and since when.
 type Halt struct {
-	Group, ID uint64
-	Since     core.Tick
+	Group, ID, Index uint64
+	Since            core.Tick
 }
 
 // PlaceVoters returns the shard map after m: a voter whose disk's log is gone, whose disk has

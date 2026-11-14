@@ -43,6 +43,7 @@ var goldenKeys = map[string]Key{
 	"ctl/placement/5/9#1":   {Space: SpaceCtl, Tag: CtlPlacement, Name: []byte{0, 0, 0, 5, 0, 0, 0, 9, 1}},
 	"ctl/shardmap/3":        {Space: SpaceCtl, Tag: CtlShardMap, Name: []byte{0, 0, 0, 0, 0, 0, 0, 3}},
 	"ctl/shardmap/3#1":      {Space: SpaceCtl, Tag: CtlShardMap, Name: []byte{0, 0, 0, 0, 0, 0, 0, 3, 1}},
+	"ctl/membership/4":      {Space: SpaceCtl, Tag: CtlMembership, Name: []byte{0, 0, 0, 4}},
 	"volume/5/attach":       {Space: SpaceVolume, Volume: 5, Tag: VolumeAttach},
 	"volume/5/snap/3":       {Space: SpaceVolume, Volume: 5, Tag: VolumeSnap, ID: 3},
 	"fs/1/0:1/a":            fsKey(1, ino(0, 1), InodeAttr),

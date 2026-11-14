@@ -260,6 +260,10 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Log ID.** A random number drawn when a disk is formatted, written into its superblock and every header, so a block left by an earlier format is never read as this one's. The control plane binds each disk ID to its log ID: a disk formatted again or replaced comes back as a new disk with a new ID, never as the member it was, whose writes it no longer holds. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
 
+**Device identity, World Wide Name (WWN).** A number a drive carries for life, such as the WWN its maker burns in, unlike its slot on a node (`/dev/sdb`, `nvme1n1`), which a restart may renumber. The control plane records each disk's device beside its log ID, so a disk that came back in another slot keeps its disk ID, and a new log replaces only the disk last reported on that device. See [Epoch changes](design.md#epoch-changes-and-failure-detection).
+
+**Format level.** The newest on-disk and log-entry format the cluster may write, a `ctl/` key the operator raises once every node runs a release that reads it. A node on an older release is not marked up after the raise. See [On-disk format](design.md#on-disk-format).
+
 **Record.** One append to the log: header blocks describing what follows (which chunk, which version, checksums) and the data blocks themselves.
 
 **Log sequence number (LSN).** A record's position in the log's order. "Everything after LSN 5000" names exactly which records a recovery must replay.

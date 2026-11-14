@@ -8,7 +8,7 @@ import (
 // Each disk is known by the log ID it reports: a disk back from a restart keeps its ID, a disk formatted again or replaced joins as a new disk under a new ID while the one it replaced stays down with its log gone, and a log ID already up on another device is refused.
 func TestDisksAreKnownByTheirLogIDs(t *testing.T) {
 	var r DiskRecord
-	report := func(node, device uint32, log uint64) uint32 {
+	report := func(node uint32, device, log uint64) uint32 {
 		t.Helper()
 		id, err := r.Report(node, device, log)
 		if err != nil {
