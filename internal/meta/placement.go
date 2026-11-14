@@ -18,14 +18,17 @@ type Replica struct {
 	Disk uint32
 }
 
-// Group is a Raft group's entry in the shard map: its voters, and the last replica ID it handed out, which no later replica reuses.
+// Group is a Raft group's entry in the shard map: the first key of its range, which runs to the
+// next group's Start, its voters, and the last replica ID it handed out, which no later replica reuses.
 type Group struct {
 	ID     uint64
+	Start  []byte
 	Voters []Replica
 	LastID uint64
 }
 
-// ShardMap is the control-plane leader's plan for every group's voters, which each group's leader drives its configuration toward.
+// ShardMap is every Raft group's key range, by which a Txn routes, and the control-plane
+// leader's plan for its voters, which the group's leader drives its configuration toward.
 type ShardMap struct {
 	Groups []Group
 }

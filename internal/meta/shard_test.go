@@ -386,8 +386,10 @@ func TestTxnsOutsideTheLeadersLogAreAnsweredDropped(t *testing.T) {
 	f := (l + 1) % 3
 	tx := ops(Put(b("b"), b("1")))
 	c.call(f, func(ctx *core.Context, out *Output) {
-		if err := c.n[f].s.Txn(ctx, &tx, 9, out); !errors.Is(err, raft.ErrProposalDropped) {
-			t.Fatalf("a follower took a Txn: %v", err)
+		err := c.n[f].s.Txn(ctx, &tx, 9, out)
+		want := NotLeader{Group: 5, Leader: uint64(l) + 1, Node: uint32(l), Term: c.n[l].s.Raft().Term()}
+		if nl, ok := err.(NotLeader); !ok || nl != want {
+			t.Fatalf("a follower answered %v, not %+v", err, want)
 		}
 	})
 	c.cut[l] = true
@@ -535,8 +537,8 @@ func TestAFollowerHaltsAtAnEntryItCannotDecode(t *testing.T) {
 	tx := ops(Put(b("d"), b("1")))
 	var r ScanResult
 	c.call(f, func(ctx *core.Context, out *Output) {
-		if err := c.n[f].s.Txn(ctx, &tx, 9, out); !errors.Is(err, ErrHalted) {
-			t.Fatalf("a halted replica took a Txn: %v", err)
+		if _, ok := c.n[f].s.Txn(ctx, &tx, 9, out).(NotLeader); !ok {
+			t.Fatal("a halted follower did not answer NotLeader")
 		}
 	})
 	if err := c.n[f].s.Scan(nil, nil, 10, &r); !errors.Is(err, ErrHalted) {

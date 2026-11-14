@@ -51,6 +51,7 @@ type Shard struct {
 	log   *raftshard.Storage
 	state *State
 	id    uint64
+	group uint64
 	// out is the output of the call in progress, which answers go to.
 	out *Output
 	// batch holds the Txns gathered for the next entry, and queued their tokens.
@@ -88,7 +89,7 @@ func NewShard(cfg Config) (*Shard, error) {
 			return nil, err
 		}
 	}
-	s := &Shard{state: st, log: cfg.Raft.Storage, id: cfg.Raft.ID}
+	s := &Shard{state: st, log: cfg.Raft.Storage, id: cfg.Raft.ID, group: cfg.Raft.Group}
 	s.newest = entryFormat
 	cfg.Raft.SnapshotData, cfg.Raft.Apply, cfg.Raft.CheckSnapshot = s.snapshotData, s.apply, CheckSnapshot
 	if s.raft, err = raftshard.New(cfg.Raft); err != nil {
@@ -134,7 +135,8 @@ func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
 	s.after()
 }
 
-// Txn proposes t, which an Answer under token settles, or refuses it with Check's error or, off the leader, raft.ErrProposalDropped.
+// Txn proposes t, which an Answer under token settles, or refuses it with Check's error,
+// ErrReplayTagged, a NotLeader off the leader, halted or not, or ErrHalted at a halted leader.
 func (s *Shard) Txn(ctx *core.Context, t *Txn, token uint64, out *Output) error {
 	// A Txn is proposed at once when no round is in flight, or else gathered with the others
 	// arriving during the round into one entry, which the round's Durable proposes.
@@ -142,11 +144,18 @@ func (s *Shard) Txn(ctx *core.Context, t *Txn, token uint64, out *Output) error 
 	if err != nil {
 		return err
 	}
+	if t.Replay != nil && writesReplayTagged(t) {
+		return ErrReplayTagged
+	}
+	if lead := s.raft.Leader(); lead != s.id {
+		nl := NotLeader{Group: s.group, Term: s.raft.Term()}
+		if node, ok := s.raft.Node(lead); ok && lead != 0 {
+			nl.Leader, nl.Node = lead, node.Node
+		}
+		return nl
+	}
 	if s.halted != 0 {
 		return ErrHalted
-	}
-	if s.raft.Leader() != s.id {
-		return raft.ErrProposalDropped
 	}
 	s.out = out
 	if len(s.batch)+n > maxBatchBytes {

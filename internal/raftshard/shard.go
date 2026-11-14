@@ -279,6 +279,14 @@ func (s *Shard) ReadIndex(ctx *core.Context, rctx []byte, out *Output) {
 // Leader is the replica this one last heard lead its current term, or 0, which a NotLeader answer names.
 func (s *Shard) Leader() uint64 { return s.rn.BasicStatus().Lead }
 
+// Node is the node that hosts replica id, and false for a replica not in Peers.
+func (s *Shard) Node(id uint64) (core.NodeID, bool) {
+	if i := s.peer(id); i >= 0 {
+		return s.cfg.Peers[i].Node, true
+	}
+	return core.NodeID{}, false
+}
+
 // Term is the replica's current term, which every entry it appends while it leads carries.
 func (s *Shard) Term() uint64 { return s.rn.BasicStatus().Term }
 

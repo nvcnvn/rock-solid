@@ -4,7 +4,38 @@ import (
 	"encoding/binary"
 	"flag"
 	"testing"
+
+	"github.com/nvcnvn/rock-solid/internal/core"
 )
+
+// BenchmarkRouteCreate routes a create through the shard map and the route cache to its leader
+// and takes its answer.
+func BenchmarkRouteCreate(b *testing.B) {
+	m := oneShard(0)
+	r, err := NewRouter(&m, 1)
+	if err != nil {
+		b.Fatal(err)
+	}
+	var ctx core.Context
+	var out RouterOutput
+	t := Txn{Ops: []Op{CheckAbsent(attr(1, 2, 3), true), Put(attr(1, 2, 3), be(1)), Update(attr(1, 2, 1), 0, Bump, 1)}, Replay: replayKey(1, 1)}
+	a := Answer{Result: Result{FailedCheck: -1}}
+	if err := r.Txn(&ctx, &t, 0, &out); err != nil {
+		b.Fatal(err)
+	}
+	r.Answer(&ctx, &Answer{Err: NotLeader{Group: dataGroup, Leader: 2, Node: 1, Term: 2}}, &out)
+	r.Answer(&ctx, &a, &out)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		out.Reset()
+		a.Token = uint64(i) + 1
+		if err := r.Txn(&ctx, &t, a.Token, &out); err != nil || out.Sends[0].Node != 1 {
+			b.Fatal(err)
+		}
+		r.Answer(&ctx, &a, &out)
+	}
+}
 
 var (
 	benchFiles = flag.Int("meta.files", 1_000_000, "files in the shard BenchmarkPointRead reads from")
