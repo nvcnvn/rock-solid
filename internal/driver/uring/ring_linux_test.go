@@ -42,6 +42,8 @@ type driver struct{ d *Disk }
 func (driver) Read(loop.ConnID, []byte) {}
 func (driver) Closed(loop.ConnID)       {}
 func (d driver) Execute(a *core.Action) { d.d.Execute(a) }
+func (driver) Accept(loop.ConnID)       {}
+func (driver) Flush() bool              { return false }
 
 type rig struct {
 	r     *Ring

@@ -31,15 +31,15 @@ func (w *Wire) Connect(c loop.ConnID, peer core.NodeID) {
 		w.peers = make(map[core.NodeID]loop.ConnID)
 	}
 	w.peers[peer] = c
-	for len(w.conns) <= int(c) {
+	for len(w.conns) <= c.Slot() {
 		w.conns = append(w.conns, wireConn{})
 	}
-	w.conns[c] = wireConn{peer: peer}
+	w.conns[c.Slot()] = wireConn{peer: peer}
 }
 
 // Read decodes whole frames into NetRecv events, carrying a partial frame to the next read.
 func (w *Wire) Read(c loop.ConnID, in []byte) {
-	wc := &w.conns[c]
+	wc := &w.conns[c.Slot()]
 	for len(in) > 0 {
 		if wc.n < 2 {
 			k := copy(wc.carry[wc.n:2], in)
@@ -65,6 +65,14 @@ func (w *Wire) Read(c loop.ConnID, in []byte) {
 
 // Closed counts the connection lost.
 func (w *Wire) Closed(loop.ConnID) { w.Lost++ }
+
+// Accept panics: the wire's tests hand loops connected sockets.
+func (w *Wire) Accept(c loop.ConnID) {
+	panic(fmt.Sprintf("looptest: the wire accepts nothing, listener %d", c))
+}
+
+// Flush defers nothing.
+func (w *Wire) Flush() bool { return false }
 
 // Execute frames a NetSend into a pool buffer and queues it.
 func (w *Wire) Execute(a *core.Action) {

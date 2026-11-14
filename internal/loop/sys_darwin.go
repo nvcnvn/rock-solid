@@ -17,5 +17,15 @@ func rawRead(fd int, p []byte) (int, unix.Errno) {
 func rawWritev(fd int, iov []unix.Iovec) (int, unix.Errno) {
 	//lint:ignore SA1019 unix.Writev allocates its iovecs, which the stepped allocation check would count
 	n, _, e := unix.RawSyscall(unix.SYS_WRITEV, uintptr(fd), uintptr(unsafe.Pointer(&iov[0])), uintptr(len(iov)))
+	if e == unix.ENOTCONN {
+		// A TCP connect still in progress fails a write with ENOTCONN here, where Linux says EAGAIN.
+		e = unix.EAGAIN
+	}
+	return int(n), e
+}
+
+func rawReadv(fd int, iov []unix.Iovec) (int, unix.Errno) {
+	//lint:ignore SA1019 unix.Readv allocates its iovecs, which the stepped allocation check would count
+	n, _, e := unix.RawSyscall(unix.SYS_READV, uintptr(fd), uintptr(unsafe.Pointer(&iov[0])), uintptr(len(iov)))
 	return int(n), e
 }

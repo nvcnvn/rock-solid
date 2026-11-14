@@ -7217,54 +7217,85 @@ profile refuses `io_uring_setup` with `EPERM`, so container runs use
 
 ## TCP network driver
 
-- One connection per pair of event loops, opened on demand and chosen by the owner map: a chunk
-  write from loop A on node 1 to a disk loop B owns on node 2 travels A → B and its reply B → A, with
-  no inbox hop on either side (trace: no inbox message for that request).
+Tests in `internal/driver/tcp` and `internal/meta/wire_test.go`; the socket tests run on the Mac
+under the stepped kernel and on Linux in Docker, plain and with `-race`.
+
+- One connection per pair of event loops, opened by the first send or accepted, both ways over it
+  (`TestMessagesCrossOneConnectionBothWays`); two loops that dial each other at once keep one
+  connection (`TestLoopsDialingEachOtherAtOnceKeepOneConnection`).
 - A request that reaches the wrong loop, after a shard moved, is forwarded through the inbox and its
   reply names the new owner; the sender's next request goes to the new owner directly. The owner map
-  is a hint: with a stale map every request still completes.
+  is a hint: with a stale map every request still completes. Not yet tested: no dispatch forwards
+  through the inbox yet.
 - A 10-node cluster of 8-loop nodes holds at most 576 sockets per node.
-- Framing: hand-written encodings with a version; every frame decoder has a native fuzz test.
-  Messages up to 256 bytes travel inline; bulk data travels in pool buffers. Open: whether frames
-  carry a checksum, and whether a frame that fails to decode is a `PeerLost` or a corrupt message
-  delivered as data. The recommendation, decided here in phase 5: a CRC32C over frame and data in
-  the connection's framing, as Ceph's msgr2 does in its crc mode, a mismatch becoming a `PeerLost`;
-  the chunk store's frames stay as they are ([Wire messages](design.md#wire-messages)).
-- A received chunk write's blocks are read straight into a 4 KiB-aligned pool buffer, the
-  message's data buffer ([Wire messages](design.md#wire-messages)): no copy and no allocation per
-  message (`b.ReportAllocs` 0).
+- Framing: a 12-byte header with a version, both lengths and a CRC32C over header, inline bytes and
+  data ([Runtime in Go](design.md#runtime-in-go)); frames decode from any split of the stream
+  (`TestFramesDecodeFromAnyPieces`); a bad version, kind, length or checksum is refused
+  (`TestBadFramesAreRefused`) and ends the connection as a `PeerLost`; the decoder is fuzzed (`FuzzDecoder`). Messages up to
+  256 bytes travel inline; bulk data travels in pool buffers. A message before the hello ends the
+  connection, on a dial too (`TestAMessageBeforeTheHelloOnADialIsRefused`), and a send to the loop
+  itself panics without dialing (`TestASendToTheLoopItselfPanics`).
+- A received frame's data is read straight into a 4 KiB-aligned pool buffer, the message's data
+  buffer (`TestDataIsReadStraightIntoItsAlignedBuffer`), with no allocation per message on either
+  path (`TestSendingAndReceivingAllocateNothing`, `BenchmarkSend`, `BenchmarkReceive`: 0 allocs).
+  Small frames arrive in batches, 300 in one read (`TestManySmallFramesArriveInOneRead`), and in a
+  stream of large frames each copies at most 4 KiB out of the read-ahead
+  (`TestALargeFrameCopiesAtMostCopyMaxOutOfTheReadAhead`).
 - Messages are batched per connection: everything ready for one connection in a pass goes in one
   `writev` (as under Event loop).
-- MetaStore requests ([Sharded API](#sharded-api-one-shard)): `meta.Router`'s sends reach the loop
-  hosting that node's replica of the group, (node, group) mapped to a loop, and every error
-  `meta.Shard.Txn` returns (`NotLeader`, `ErrReplayTagged`, `ErrHalted`, a `Check` error) comes
-  back as an `Answer` under the request's token, in a hand-written encoding of `Txn`, `Answer` and
-  `NotLeader` whose decoder has a fuzz test. A send to an unreachable node ends in that peer's
-  `PeerLost`, since the router has no timeout of its own; tokens are unique for the router's life,
-  since an answer is matched by token alone; and the router's shard map is fed from `ctl/`'s.
+- MetaStore requests ([Sharded API](#sharded-api-one-shard)): a `Txn` and an `Answer` cross the
+  wire whole, inline or in a pool buffer, every error code included
+  (`TestTxnsAndAnswersCrossTheWireWhole`), with fuzzed decoders (`FuzzDecodeTxnMsg`,
+  `FuzzDecodeAnswerMsg`); a `Txn` sent to a follower is answered `NotLeader`, resent to the loop
+  hosting the leader's replica and answered under the client's token
+  (`TestATxnCrossesTheWireToTheLeader`); every `Txn` a server hears is answered, a node with no
+  replica with `NotLeader`, a bad body with `ErrMalformed` (`TestEveryTxnTheServerHearsIsAnswered`);
+  a send to a lost peer ends in a dropped answer (`TestAClientTxnToALostPeerIsDropped`); an answer
+  that promises nothing (an error with no code, an applied `Txn`'s answer the server's pool had no
+  buffer for, an answer that does not decode, a lost peer) is never resent
+  (`TestAnAnswerOfUnknownOutcomeIsNeverResent`); a restarted client's tokens differ from its
+  earlier start's, so an answer to an earlier start's `Txn` settles nothing
+  (`TestARestartedClientIgnoresItsEarlierStartsAnswers`); only a
+  server proposes under a token with bit 63 set (`TestOnlyAServerProposesUnderAServerToken`); and
+  the router's shard map is fed from `ctl/`'s (`TestTheClientRoutesByTheShardMapUnderCtl`).
 - Dial and listen are functions the driver is given, so stepped tests hand it AF_UNIX socketpairs
   and skip the TCP-only socket options; the TCP-specific cases below use real loopback.
-- Any transport error (reset, EOF, a write error, a peer that stops reading past the driver's limit)
-  becomes exactly one `PeerLost` for that peer; every outstanding request on the connection fails;
-  the driver reconnects, and requests after the reconnect succeed. Each error is made on loopback: a
-  reset by closing the peer with `SO_LINGER` 0, an EOF by `shutdown`, a peer that stops reading with
-  a small receive buffer.
+- Any transport error becomes exactly one `PeerLost` for that peer and the driver reconnects, made
+  on loopback: a reset by closing the peer with `SO_LINGER` 0 (`TestAResetIsOnePeerLostThenReconnects`),
+  an EOF by `shutdown` (`TestAnEOFIsOnePeerLostThenReconnects`), a peer that stops reading
+  (`TestAPeerThatStopsReadingIsOnePeerLost`), and a dropped socketpair
+  (`TestADroppedConnectionIsOnePeerLostThenReconnects`). A partial frame at a reset is never
+  delivered (`TestAPartialFrameAtAResetIsNeverDelivered`). Every send to a loop that cannot be
+  reached ends in its `PeerLost`, during the backoff too (`TestEverySendToAnUnreachableLoopEndsInPeerLost`),
+  and by the next pass without the loop blocking when a failed write's `PeerLost` handler made the
+  send (`TestAPeerLostFromAWriteFailureIsDeliveredWithoutBlocking`).
+- A connection ID kept past its connection names nothing: frames read ahead on a connection a
+  handler closed are never delivered as from the connection dialed into its slot
+  (`TestReadAheadIsNeverDeliveredAsTheNextConnectionsPeer`), and two write failures in one pass are
+  each their own peer's `PeerLost`, though the first one's handler dials two new peers
+  (`TestTwoWriteFailuresInAPassAreEachTheirOwnPeerLost`).
+- A send finding 32 MiB queued on its connection ends it as a `PeerLost`
+  (`TestAConnectionQueuesAtMost32MiBAndOneFrame`); an accept error that lasts (`EMFILE`) pauses the
+  listener for a backoff rather than waking the loop every pass, and connections are accepted after
+  it (`TestAnAcceptErrorThatLastsPausesTheListener`).
 - Buffers (driver contract): a `NetSend`'s buffer is released before the peer's reply is delivered,
   and all of a peer's buffers are released before its `PeerLost` is emitted; a `NetSend` marked
-  `Reply` (a read reply's blocks, a long peering reply) has its buffer freed by the driver once
-  sent, or before that peer's `PeerLost`; a timeout releases nothing; one buffer sent to several peers is freed once every one is done. A test checks the slab's
-  live count is zero after a fan-out to three peers where one is lost.
+  `Reply` has its buffer freed by the driver once sent, or before that peer's `PeerLost`; one buffer
+  sent to several peers is freed once every one is done: the pool's live count is zero after a
+  fan-out to three peers where one is lost (`TestAReplyBufferSentToThreePeersIsFreedOnceWhenOneIsLost`).
 - A peer answers every request that carries data, even to reject it.
-- The core keeps its own deadlines: the driver sets no transport timeout that fails a request on its
-  own. Open: whether the driver uses keepalive or `TCP_USER_TIMEOUT`.
-- Open: a message that finds the receiving loop's pool full. The simulator breaks its connection, a
-  simplification; the driver may apply backpressure instead, reading no more from that connection
-  until buffers are freed.
+- The core keeps its own deadlines: the driver sets no transport timeout, keepalive or
+  `TCP_USER_TIMEOUT` that fails a request on its own.
+- A frame the receiving loop's pool has no buffer for ends its connection, as the simulator breaks
+  one.
 - The read budget per connection per pass and the replication queue cap apply as under Event loop.
 - Under the open-loop latency spike's load generator (16 connections, writes timed from their
   scheduled send), a replicated-write server on the event loop and this driver drops no request up to
   100,000 writes/s, the rate the spike's bounded harness served (the generator's own limit), and its
-  output buffers stay under 20 MB. Run with `spikes/open-loop-latency/run.py point <server> 100`.
+  output buffers stay under 20 MB (`TestTheLoadGeneratorDropsNothing`, which runs when `RS_LOADGEN`
+  names the built generator): in Docker capped at 4 CPUs, 9,910 to 115,115 writes/s offered with
+  none dropped, p99 1.45 to 3.91 ms, 12.3 µs of server CPU per write at the top rate, and the
+  primary's queued output at most 7.8 MiB ([Runtime in Go](design.md#runtime-in-go)).
 - TCP first: RDMA upgrades the same connection's peers in phase 9; nodes without rdma-core stay on TCP
   with no error.
 

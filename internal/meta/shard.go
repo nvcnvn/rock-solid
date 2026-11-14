@@ -135,9 +135,17 @@ func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
 	s.after()
 }
 
-// Txn proposes t, which an Answer under token settles, or refuses it with Check's error,
-// ErrReplayTagged, a NotLeader off the leader, halted or not, or ErrHalted at a halted leader.
+// Txn proposes t, which an Answer under token settles, or refuses it with ErrServerToken for a
+// token with ServerToken set, Check's error, ErrReplayTagged, a NotLeader off the leader, halted
+// or not, or ErrHalted at a halted leader.
 func (s *Shard) Txn(ctx *core.Context, t *Txn, token uint64, out *Output) error {
+	if token&ServerToken != 0 {
+		return ErrServerToken
+	}
+	return s.submit(ctx, t, token, out)
+}
+
+func (s *Shard) submit(ctx *core.Context, t *Txn, token uint64, out *Output) error {
 	// A Txn is proposed at once when no round is in flight, or else gathered with the others
 	// arriving during the round into one entry, which the round's Durable proposes.
 	n, err := t.Check()
