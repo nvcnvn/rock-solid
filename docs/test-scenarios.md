@@ -4001,7 +4001,11 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 `heavy` run as `scripts/models.sh deep` printed it, with 4 workers and a 4 GB heap on a Mac mini (M4 Pro). The
 epoch change model's runs and the sessions model's `ci` runs ran alone; the rest ran beside two
 other 4-worker TLC jobs. Constants are in each configuration's first line and in its model's
-section.
+section. The epoch change model's `ci` rows ran with `CI_LIMIT` 900: `ci-bounce`, `ci-tears`,
+`ci-stays`, `ci-image` and `ci-refills-two` are over the 300 s budget since the primary's own
+record became a step of its own (`OwnLogged`), and are owed a cut. Its `deep` and `heavy` rows
+ran on the spec before that step and before the keep rule left out members torn above a version;
+they are stale until the next milestone's run.
 
 | Model | Configuration | Constants | Depth | Distinct states | Wall time |
 | --- | --- | --- | --- | --- | --- |
@@ -4018,37 +4022,37 @@ section.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 26 | 593,928 | 87 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 24 | 400,627 | 65 s |
-| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 27 | 164,490 | 40 s |
-| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 26 | 329,174 | 46 s |
-| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 28 | 1,018,011 | 166 s |
-| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,226,848 | 112 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 31 | 735,087 | 118 s |
-| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 29 | 1,079,100 | 247 s |
-| Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 26 | 372,450 | 83 s |
-| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 29 | 308,977 | 42 s |
-| Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 24 | 29,548 | 4 s |
-| Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 23 | 244,315 | 29 s |
-| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 25 | 179,267 | 20 s |
-| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 34 | 1,265,785 | 119 s |
-| Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 29 | 240,466 | 26 s |
-| Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 30 | 1,246,412 | 150 s |
-| Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 29 | 285,385 | 32 s |
-| Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 30 | 597,867 | 72 s |
-| Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 32 | 1,179,375 | 176 s |
-| Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 22 | 24,903 | 5 s |
-| Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 35 | 1,462,380 | 155 s |
-| Epoch change | `ci-image-restart` | [Epoch change model](#epoch-change-model) | 28 | 776,872 | 82 s |
-| Epoch change | `ci-bounce` | [Epoch change model](#epoch-change-model) | 35 | 1,998,614 | 226 s |
-| Epoch change | `ci-sources` | [Epoch change model](#epoch-change-model) | 28 | 1,723,867 | 180 s |
-| Epoch change | `ci-sources-move` | [Epoch change model](#epoch-change-model) | 30 | 800,032 | 111 s |
-| Epoch change | `ci-sources-lister` | [Epoch change model](#epoch-change-model) | 35 | 709,306 | 98 s |
-| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 24 | 450,505 | 60 s |
-| Epoch change | `ci-faults-more` | [Epoch change model](#epoch-change-model) | 24 | 149,087 | 19 s |
-| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 21 | 32,292 | 63 s |
-| Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 18 | 16,998 | 112 s |
-| Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 26 | 56,721 | 155 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 30 | 1,366,661 | 198 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 25 | 570,512 | 83 s |
+| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 29 | 378,754 | 76 s |
+| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 28 | 874,888 | 122 s |
+| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 30 | 2,686,247 | 461 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 83 | 1,264,468 | 117 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 1,248,221 | 212 s |
+| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 30 | 1,777,456 | 424 s |
+| Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 27 | 592,740 | 139 s |
+| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 30 | 495,145 | 65 s |
+| Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 26 | 66,372 | 7 s |
+| Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 25 | 365,083 | 44 s |
+| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 27 | 341,219 | 39 s |
+| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 36 | 2,775,413 | 266 s |
+| Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 30 | 315,652 | 35 s |
+| Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 31 | 1,424,640 | 177 s |
+| Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 30 | 400,569 | 48 s |
+| Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 32 | 1,365,759 | 158 s |
+| Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 34 | 2,346,475 | 353 s |
+| Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 24 | 47,511 | 8 s |
+| Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 38 | 3,509,328 | 389 s |
+| Epoch change | `ci-image-restart` | [Epoch change model](#epoch-change-model) | 30 | 1,501,576 | 163 s |
+| Epoch change | `ci-bounce` | [Epoch change model](#epoch-change-model) | 38 | 4,828,010 | 537 s |
+| Epoch change | `ci-sources` | [Epoch change model](#epoch-change-model) | 30 | 2,638,595 | 283 s |
+| Epoch change | `ci-sources-move` | [Epoch change model](#epoch-change-model) | 32 | 1,574,328 | 216 s |
+| Epoch change | `ci-sources-lister` | [Epoch change model](#epoch-change-model) | 38 | 1,774,878 | 246 s |
+| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 25 | 904,739 | 119 s |
+| Epoch change | `ci-faults-more` | [Epoch change model](#epoch-change-model) | 25 | 222,306 | 29 s |
+| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 22 | 61,896 | 137 s |
+| Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 19 | 21,641 | 165 s |
+| Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 27 | 81,483 | 242 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
@@ -4323,7 +4327,7 @@ mapping says. The actions of `Next` no trace took:
 | 9 | One reply or kept version differs from the spec's at a seed's `Peer` | compression and logging | Settled. Seed 7, compression: disk 3 answered, then its node formatted, then the decision came, where `Peer`, one step, needs every up member eligible. `decide` places the line before that format, and the line's checks stay strict. Seeds 31 and 34, logging: a `PrintT` of `Reply` showed a member's list cleared with no record. A primary dropped its request for a gated recovery write as it left the lead (seed 31), or as a failed write of the chunk ended the interval (seed 15, its listing on the primary's own disk gone at the next interval's reply), so the store's answer made no `Recovered`, and a crash left one durable for replay to map (seed 34). Requests for recovery writes now stay until answered, and `Recovering` gives the crash its line |
 | 10 | A member persists a list twice, when its first acknowledgment was slower than `RetryAfter`, the second after the interval activated, which the `Persisted` stutter refuses | compression | Settled: 8 seeds at the last count. `tracedata` marks a repeat of a disk's list for an interval `again`, which the stutter lets past activation. A first persist after `Activate` still fails, which is what catches `activateEarly` |
 | 11 | A `Recovered` record `Recover` cannot take at its place | spec, compression | Settled. Seed 22, spec: a chunk no member keeps anything of, kept version 0, needs no source in `startRecovery`, and every up member listed it, so `Recover` needs none when the kept version is 0. Seeds 3 and 38, compression: a recovery write left a primary that then moved on, by adopting interval 3 at seed 3 and by a crash at seed 38, and landed later, where `Recover` needs a primary leading it. `tracedata` places the line before the first leaving step, across lines that keep what `Recover` reads. A record of an older interval's gated write settled by a later activation changes no list, as `Index.recovered` compares the intervals, so the record carries its interval and the line is a stutter |
-| 12 | A crash leaves part of a version's records, so a member reports a version logged above its newest whole one. `keep` lists that member for the kept version, where `Entry`, with one number, leaves it off | spec | Settled: `PeerOn` takes a set `T` of (disk, chunk) pairs it lists at the kept version, which are no recovery source, and `Activate` keeps them; a primary in `T` keeps its `img` (discrepancy 22). `Peer` draws `T` only under `TornLists`, on in `ci-tears` alone, which passes every safety property at 1.0 million states against 132 thousand with it off. The trace takes `T` from the code's lists, so seeds 1, 5 and 24 pass. This shows extra listing is safe, not that listing is required: the logs hold whole versions, so nothing in the spec is wrong with a torn member left off, and no negative configuration exists. That listing is required rests on Go: `unlistTorn` breaks "a member listing nothing maps the kept writes applied in version order" at seed 148, where replay's durable records of the torn version stay mapped, and `TestTheKeepRule` and `TestAVersionHeldInPartIsNotWhole` state the rule and the store's half |
+| 12 | A crash leaves part of a version's records, so a member reports a version logged above its newest whole one. `keep` lists that member for the kept version, where `Entry`, with one number, leaves it off | spec | Settled: `PeerOn` takes a set `U` of (disk, chunk) pairs that logged above their newest whole version and list nothing, which the keep rule counts as no source (discrepancy 24), and lists at the kept version, as `T`, those of `U` that `Entry` leaves off, which are no recovery source, and `Activate` keeps them; a primary in `T` keeps its `img` (discrepancy 22). `Peer` draws `U` only under `TornLists`, on in `ci-tears` alone, which passes every safety property at 1.0 million states against 132 thousand with it off. The trace takes `U` from the replies, so seeds 1, 5 and 24 pass. This shows extra listing is safe, not that listing is required: the logs hold whole versions, so nothing in the spec is wrong with a torn member left off, and no negative configuration exists. That listing is required rests on Go: `unlistTorn` breaks "a member listing nothing maps the kept writes applied in version order" at seed 148, where replay's durable records of the torn version stay mapped, and `TestTheKeepRule` and `TestAVersionHeldInPartIsNotWhole` state the rule and the store's half |
 | 13 | `Send` to a primary whose `pr` is empty after a restart loses the write in the spec, and the code holds it | spec, open, low priority | `neverAsk` shows it; no unplanted seed of 40 stops there |
 | 14 | A member's refusal is recorded when the member refuses, and `Order` of a later version can come before the primary hears, where `MemberFail` and `GoneRefuses` end the interval in one step | compression | Settled, all 10 seeds of 0 to 339 it stopped: the primary's `Fail` record says when it heard, and `tracedata` holds the member's line until it, or until that member adopts a table or crashes or the primary crashes, since past those the spec's refusal has no step |
 | 15 | A restarted primary asks a new interval on the first table it takes, even one newer than the table it restarted on, where the spec's `Restart` asks once and `rsIv` lets it peer without asking again | spec | Settled, seed 205: `RestartAsk` is that ask, an extra interval no rule needs, taken only by plans with `lateask`: every trace, and `ci-late-ask`, where TLC checks the safety properties around it |
@@ -4335,7 +4339,7 @@ mapping says. The actions of `Next` no trace took:
 | 21 | Two members marked down in one table reach `Edit`, which allows one mark | logging | Settled: `classify` names a table of several marks `Refill`, which allows them, `scripted-together` |
 | 22 | A restarted primary torn above the kept version is listed in `T` and orders a partial-block write at once, where `img` left out every primary in `T` | spec | Settled, seeds 5 and 24: replay leaves the torn part gated and the decision drops it, so the primary's index holds the kept version whole and its image stands, as [Recovery](design.md#epoch-changes-and-failure-detection) states. `img` no longer excludes a primary in `T`. Every `ci` configuration passes with it and every negative still fails; `ci-tears`, the one with `TornLists` on, reaches 1,018,011 states where it reached 938,423 |
 | 23 | The primary's record of its own copy of a recovery write lands after it took its own disk's reply for a later interval, which still lists the chunk, and the code's `Index.recovered` clears the entry where the spec's `Recover` would clear it before that reply | compression | Settled: `tracedata` names such a record `recoveredlate` while the primary has not decided that interval, a stutter. The decision reads the reply and lists the chunk on the primary's disk again, in all 6 such lines of the 28 nightly seeds, so the spec's state after it is the code's. Once the interval is decided the record stays `recovered`, where `RecoveryOver` holds it. Nightly seeds 385547, 385560, 385740, 385864 and 385963 pass |
-| 24 | The keep rule keeps a version whose one holder listing nothing logged part of a later version above it, where the code's keep needs a clean source | open | Nightly seed 385795, a `peer` that fails `KeptMatches`: of chunk 2, disk 5, up in interval 4, lists the chunk and holds 4.15, and disk 1 holds 4.16 whole with 4.17 logged above. `Kept`'s `source` takes disk 1, so the spec keeps 4.16; `hasSource` in `keep.go` needs `Whole` and `Logged` both 4.16, so disk 5's veto stands and the code keeps 4.15. The spec then lists disk 1 in `T`, no recovery source, so its 4.16 would have none: likely a missing spec detail, `source` leaving out what `T` holds, not settled |
+| 24 | The keep rule kept a version whose one holder listing nothing logged part of a later version above it, where the code's keep needs a clean source | spec | Settled. Nightly seed 385795: of chunk 2, disk 5, up in interval 4, lists the chunk and holds 4.15, and disk 1 holds 4.16 whole with 4.17 logged above. The spec's `source` saw only whole versions and lists, so it took disk 1 and kept 4.16 over disk 5's veto; `hasSource` in `keep.go` needs `Whole` and `Logged` both 4.16, as [Which versions survive](design.md#epoch-changes-and-failure-detection) needs a clean holder, so the veto stood and the code kept 4.15. A member that logged above the version lists the chunk whatever is kept, so dropping the version costs it nothing, and recovery cannot read the version from it. `Kept` now leaves out `U`, the members that logged above their newest whole version, and 385795 passes |
 | 28 | A recovery's source answers the read, then crashes and is formatted again, and the answer reaches the primary after, so its `recoverorder` and `recovered` lines follow the source's `format`, where `Recover` needs the source running | compression, open | Seed 34, line 242, a form of discrepancy 11: `tracedata` could place the recovery before the source's crash, or the record could carry when the source read |
 
 Seeds 40 to 339 at 150 s each: 260 passed at aa05106, and the 40 that did not were run again at abb8966, seeds 55, 231, 267, 311 and 323 again once `classify` mapped `Stay`. None names a safety invariant.
