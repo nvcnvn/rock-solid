@@ -401,7 +401,7 @@ func (r *Replica) persistAsked(ctx *core.Context, ev *core.Event, p *Peering, ou
 	return false
 }
 
-// persisted takes the store's answer to a missing list it persisted: acknowledged to the primary that sent it, or counted toward this disk's own lead's activation.
+// persisted takes the store's answer to a missing list it persisted: acknowledged to the primary that sent it, or counted toward this disk's own lead's activation. A member maps the gated versions of the PG the store kept, which a restart's replay or a lost lead left it.
 func (r *Replica) persisted(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 	j := slices.IndexFunc(r.persists, func(q persistReq) bool { return q.id == rp.ID })
 	if j < 0 {
@@ -421,6 +421,11 @@ func (r *Replica) persisted(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 	var done uint32
 	if rp.Err == nil {
 		done = q.interval
+		r.unsettled = r.Unsettled(q.pg, r.unsettled[:0])
+		for _, c := range r.unsettled {
+			// PeerState answered only once the PG's records were resolved, so nothing is unresolved here.
+			_, _ = r.st.Settle(ctx, c, r.st.Newest(c), &r.sout)
+		}
 	}
 	r.persistAnswer(ctx, q.peer, q.msgID, q.pg, done, out)
 }

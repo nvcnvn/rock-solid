@@ -106,7 +106,6 @@ func TestARestartedPrimaryKeepsItsDropsAcrossItsNextDecision(t *testing.T) {
 }
 
 func TestABouncedPrimaryWithItsWritePendingRollsItBack(t *testing.T) {
-	t.Skip("fails until Replay rollback has demotion without Ungate")
 	r := newRollbackRun(t, 1)
 	r.lose(r.p)
 	r.tick(3_000_000)

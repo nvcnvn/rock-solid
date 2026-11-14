@@ -676,7 +676,7 @@ func (r *Replica) sessionWaits() int {
 	return n
 }
 
-// demote refuses the clients of the versions this disk ordered as the primary of a PG it no longer leads, since peering decides whether those versions stay, and has the store map them as a member maps what it logs, so the PG's new primary finds the disk a member like any other.
+// demote refuses the clients of the versions this disk ordered as the primary of a PG it no longer leads, since peering decides whether those versions stay. The store keeps them gated: the next decision this disk persists for the PG settles them.
 func (r *Replica) demote(ctx *core.Context, out *ReplicaOutput) {
 	for i := len(r.vers) - 1; i >= 0; i-- {
 		v := &r.vers[i]
@@ -689,12 +689,6 @@ func (r *Replica) demote(ctx *core.Context, out *ReplicaOutput) {
 		}
 		r.answerClient(ctx, v, r.refusal(v.u.PG.PG), out)
 		r.release(ctx, i)
-	}
-	r.unsettled = r.st.Unsettled(r.unsettled[:0])
-	for _, c := range r.unsettled {
-		if pg, ok := r.pgOf(c); !ok || r.lead(pg) < 0 {
-			r.st.Ungate(ctx, c, &r.sout)
-		}
 	}
 }
 

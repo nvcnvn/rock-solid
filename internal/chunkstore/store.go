@@ -189,6 +189,9 @@ type op struct {
 	dropped   bool
 	// mapped is set once the mapOnCommit plant has mapped a gated op out of turn.
 	mapped bool
+	// torn marks a version replay gated without its last entry, which the crash lost: the disk
+	// holds it in part.
+	torn bool
 	// remote counts the blocks of its base the op waits for from another member.
 	remote int
 }
@@ -1394,7 +1397,7 @@ func (s *Store) peerGated(dst []ChunkPeer, from int, cs *chunkState) []ChunkPeer
 		if o.dropped {
 			continue
 		}
-		whole = whole && o.err == nil
+		whole = whole && o.err == nil && !o.torn
 		if whole {
 			c.Whole = o.version
 		}
@@ -1888,6 +1891,9 @@ func (s *Store) replay(ev *disklog.Event) error {
 			s.held = append(s.held, item{entry: *e, state: itemDurable, lba: ev.LBA, headerBlocks: ev.HeaderBlocks, payload: ev.Payloads[i], lsn: ev.LSN})
 			continue
 		}
+		if e.Kind == disklog.EntryRecovered {
+			s.recoveredHeld(e)
+		}
 		s.apply = disklog.Event{Kind: ev.Kind, LSN: ev.LSN, LBA: ev.LBA, HeaderBlocks: ev.HeaderBlocks, Entries: ev.Entries[i : i+1], Payloads: ev.Payloads[i : i+1]}
 		if err := s.ix.Apply(&s.apply); err != nil {
 			return err
@@ -1909,6 +1915,17 @@ func (s *Store) gates(e *disklog.Entry) bool {
 	const finest = 1 << 31
 	d := s.ix.Decided(e.Pool, core.PGIndexOf(e.Chunk.Hash(), finest), finest)
 	return d != 0 && intervalOf(e.Version) >= d
+}
+
+// recoveredHeld marks the last held entry of recovery e's write as its version's last: a recovery
+// write's entries carry no such mark, its recovered entry, logged after them, saying it is whole.
+func (s *Store) recoveredHeld(e *disklog.Entry) {
+	for j := len(s.held) - 1; j >= 0; j-- {
+		if h := &s.held[j].entry; h.Pool == e.Pool && h.Chunk == e.Chunk && h.Version == e.Version {
+			h.Last = true
+			return
+		}
+	}
 }
 
 // settleHeld settles the held versions of decision marker d's PG as Settle does, by the version
@@ -1968,12 +1985,15 @@ func (s *Store) gateHeld() {
 			}
 			oi := s.newOp(kind, Request{Chunk: it.entry.Chunk, Version: it.entry.Version, Gated: true})
 			o := &s.ops[oi]
-			o.chunk, o.version, o.prevVer, o.prevEpoch, o.answered = ci, it.entry.Version, cs.version, cs.epoch, true
+			o.chunk, o.version, o.prevVer, o.prevEpoch, o.answered, o.torn = ci, it.entry.Version, cs.version, cs.epoch, true, true
 			cs.pending = append(cs.pending, oi)
 			cs.version, cs.ordered = it.entry.Version, it.entry.Version
 		}
 		o := &s.ops[cs.pending[len(cs.pending)-1]]
 		o.items = append(o.items, *it)
+		if it.entry.Last {
+			o.torn = false
+		}
 	}
 	s.held = s.held[:0]
 }

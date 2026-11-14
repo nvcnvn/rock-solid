@@ -857,7 +857,7 @@ func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
 // leaves a member mapping other bytes once recovery settles (23 of 500); a version decided by its
 // own interval's members after a later interval kept it (neg-decide-by-own-interval, 9 of 500) and
 // a primary activating before every member persisted its missing list
-// (neg-activate-before-durable, 84 of 500) each drop a write the primary answered; and a later
+// (neg-activate-before-durable, 65 of 500) each drop a write the primary answered; and a later
 // peering that clears a missing-list entry recovery has not done (neg-peering-clears-missing)
 // leaves a member mapping other bytes once recovery settles (about 18 of 500).
 func TestPlantedPeeringBugsBreakTheFaultRun(t *testing.T) {
@@ -868,9 +868,9 @@ func TestPlantedPeeringBugsBreakTheFaultRun(t *testing.T) {
 	}{
 		{"no ask after a restart", 7, faultPlant{invActivates, func(c *rcluster) { c.replicaPlants.neverAsk = true }}},
 		{"logged out of order", 0, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.resendNewestFirst = true }}},
-		{"decided by its own interval", 50, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.ownInterval = true }}},
-		{"activated before lists are durable", 12, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
-		{"missing entry cleared", 7, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.relistNever, c.storePlants.clearListed = true, true }}},
+		{"decided by its own interval", 6, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.ownInterval = true }}},
+		{"activated before lists are durable", 5, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
+		{"missing entry cleared", 33, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.relistNever, c.storePlants.clearListed = true, true }}},
 	} {
 		if err := runFaults(t, p.seed, 2, 24, &p.faultPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)

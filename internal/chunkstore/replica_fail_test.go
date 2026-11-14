@@ -459,8 +459,8 @@ func TestAnIndexRebuildEndsTheIntervalsItsDiskLeads(t *testing.T) {
 	}
 }
 
-// Disk 1 orders 1.1 while disk 3 is cut off, and interval 2 makes disk 2 the primary with disk 1 an up member. Disk 1 refuses 1.1's client and maps 1.1 as a member maps what it logs, so the new primary's write of interval 2 is answered once the cut heals, and disk 1 frees 1.1's buffer.
-func TestADemotedPrimaryMapsItsPendingVersionsAsAMember(t *testing.T) {
+// Disk 1 orders 1.1 while disk 3 is cut off, and interval 2 makes disk 2 the primary with disk 1 an up member. Disk 1 refuses 1.1's client and keeps 1.1 gated until it persists interval 2's list, which keeps 1.1, so the new primary's write of interval 2 is answered once the cut heals, and disk 1 frees 1.1's buffer.
+func TestADemotedPrimaryKeepsItsPendingVersionsGatedUntilItsNextDecision(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	ch := chunkIn(pg0, 4, 0)
 	c.s.Partition(0, 2, false)
