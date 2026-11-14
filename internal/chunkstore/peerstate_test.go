@@ -22,7 +22,7 @@ func inPG(pg, pgs uint32, n int) []core.ChunkID {
 
 func (h *harness) persist(pg, pgs, interval uint32, missing []ChunkVersion) uint64 {
 	id := h.id()
-	h.s.Persist(&h.ctx, id, pg, pgs, interval, missing, &h.out)
+	h.s.Persist(&h.ctx, id, pg, pgs, interval, missing, nil, &h.out)
 	h.take()
 	return id
 }
@@ -254,7 +254,7 @@ func TestAPrimaryAnswersAListedChunkAsMissing(t *testing.T) {
 	c.until(c.write(pg0, listed, 0, []byte("a")))
 	c.until(c.write(pg0, other, 0, []byte("b")))
 	c.call(c.primary(pg0), func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
-		r.Store().Persist(ctx, 1<<40, pg0.Index, 4, 2, []ChunkVersion{{Chunk: listed, Version: MakeVersion(1, 1)}}, &r.sout)
+		r.Store().Persist(ctx, 1<<40, pg0.Index, 4, 2, []ChunkVersion{{Chunk: listed, Version: MakeVersion(1, 1)}}, nil, &r.sout)
 		r.drain(ctx, out)
 	})
 	c.settle()

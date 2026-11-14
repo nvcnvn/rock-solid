@@ -372,17 +372,17 @@ func (r *Replica) persistLists(ctx *core.Context, i int, out *ReplicaOutput) {
 			continue
 		}
 		if !slices.ContainsFunc(r.persists, func(q persistReq) bool { return q.local && q.pg == l.pg && q.interval == l.interval }) {
-			r.persist(ctx, persistReq{pg: l.pg, interval: l.interval, local: true}, uint32(len(p.PGs)), rp.list)
+			r.persist(ctx, persistReq{pg: l.pg, interval: l.interval, local: true}, uint32(len(p.PGs)), rp.list, l.image)
 		}
 	}
 }
 
-// persist has the store persist a missing list for q.
-func (r *Replica) persist(ctx *core.Context, q persistReq, pgs uint32, list []ChunkVersion) {
+// persist has the store persist a missing list for q, flagging the entries of image.
+func (r *Replica) persist(ctx *core.Context, q persistReq, pgs uint32, list, image []ChunkVersion) {
 	r.peerID++
 	q.id = persistBit | r.peerID
 	r.persists = append(r.persists, q)
-	r.st.Persist(ctx, q.id, q.pg.Index, pgs, q.interval, list, &r.sout)
+	r.st.Persist(ctx, q.id, q.pg.Index, pgs, q.interval, list, image, &r.sout)
 }
 
 // persistAsked takes a primary's missing list for the PG's current interval, persisting it; one for another disk is ignored, one for a newer interval waits for that table, and one for an older interval is refused.
@@ -396,7 +396,7 @@ func (r *Replica) persistAsked(ctx *core.Context, ev *core.Event, p *Peering, ou
 	case e == nil || p.PG.Interval != e.Interval:
 		r.persistAnswer(ctx, ev.Peer, p.ID, p.PG.PG, 0, out)
 	default:
-		r.persist(ctx, persistReq{peer: ev.Peer, msgID: p.ID, pg: p.PG.PG, interval: p.PG.Interval}, uint32(len(pt.PGs)), p.Missing)
+		r.persist(ctx, persistReq{peer: ev.Peer, msgID: p.ID, pg: p.PG.PG, interval: p.PG.Interval}, uint32(len(pt.PGs)), p.Missing, nil)
 	}
 	return false
 }

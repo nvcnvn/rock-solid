@@ -32,7 +32,7 @@ const (
 	KeySize        = frozenKeySize + 2
 	recordSize     = 4 + 8
 	extentSize     = 8 + 8 + 2 + 8
-	chunkValueSize = 8 + 8 + 8 + 8 + 4
+	chunkValueSize = 8 + 8 + 8 + 8 + 4 + 1
 	decisionSize   = 4 + 4 + 1 + 4
 	// RecordPool is the pool ID the index keeps record counts under; no chunk may use it.
 	RecordPool core.PoolID = math.MaxUint32
@@ -142,13 +142,15 @@ func reserved(pool core.PoolID) bool { return pool == RecordPool || pool == Deci
 // Chunk is a chunk's entry: its current version, the snapshot epoch of its last freeze, the newest
 // version whose last entry the index applied, which the disk holds whole, and the kept version
 // the peering of interval ListedIn put the chunk on the missing list for, ListedIn 0 when it is
-// not listed.
+// not listed, and whether that listing carries the image flag: the disk, as the PG's primary,
+// holds Listed as its image and lists the chunk only for versions of its own the peering dropped.
 type Chunk struct {
 	Version  uint64
 	Epoch    uint64
 	Whole    uint64
 	Listed   uint64
 	ListedIn uint32
+	Image    bool
 }
 
 // Index is one disk's chunk index in an LSM tree: per chunk its entry, live map and frozen maps, and per record its live blocks.
@@ -276,7 +278,7 @@ func (x *Index) Apply(ev *disklog.Event) error {
 			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, Header: ev.LBA}, e.Last)
 		case disklog.EntryFreeze:
 			x.freeze(e.Pool, e.Chunk, e.Version, e.Epoch)
-		case disklog.EntryMissing:
+		case disklog.EntryMissing, disklog.EntryImage:
 			x.unmarked = append(x.unmarked, *e)
 		case disklog.EntryDecision:
 			x.decide(e)
@@ -296,7 +298,7 @@ func (x *Index) decide(e *disklog.Entry) {
 			return false
 		}
 		ch, _ := x.Chunk(m.Pool, m.Chunk)
-		ch.Listed, ch.ListedIn = m.Version, m.Interval
+		ch.Listed, ch.ListedIn, ch.Image = m.Version, m.Interval, m.Kind == disklog.EntryImage
 		x.putChunk(m.Pool, m.Chunk, ch)
 		return true
 	})
@@ -315,7 +317,7 @@ func (x *Index) recovered(e *disklog.Entry) {
 	ch, _ := x.Chunk(e.Pool, e.Chunk)
 	ch.Version, ch.Whole = e.Version, e.Version
 	if ch.ListedIn <= e.Interval {
-		ch.Listed, ch.ListedIn = 0, 0
+		ch.Listed, ch.ListedIn, ch.Image = 0, 0, false
 	}
 	x.putChunk(e.Pool, e.Chunk, ch)
 }
@@ -537,12 +539,16 @@ func appendChunk(dst []byte, ch Chunk) []byte {
 	dst = binary.LittleEndian.AppendUint64(dst, ch.Epoch)
 	dst = binary.LittleEndian.AppendUint64(dst, ch.Whole)
 	dst = binary.LittleEndian.AppendUint64(dst, ch.Listed)
-	return binary.LittleEndian.AppendUint32(dst, ch.ListedIn)
+	dst = binary.LittleEndian.AppendUint32(dst, ch.ListedIn)
+	if ch.Image {
+		return append(dst, 1)
+	}
+	return append(dst, 0)
 }
 
 func decodeChunk(v []byte) Chunk {
 	return Chunk{Version: binary.LittleEndian.Uint64(v), Epoch: binary.LittleEndian.Uint64(v[8:]), Whole: binary.LittleEndian.Uint64(v[16:]),
-		Listed: binary.LittleEndian.Uint64(v[24:]), ListedIn: binary.LittleEndian.Uint32(v[32:])}
+		Listed: binary.LittleEndian.Uint64(v[24:]), ListedIn: binary.LittleEndian.Uint32(v[32:]), Image: v[36] != 0}
 }
 
 func (x *Index) recordKey(header core.LBA) []byte {

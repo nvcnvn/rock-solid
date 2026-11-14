@@ -1246,11 +1246,11 @@ func (s *Store) Unsettled(dst []core.ChunkID) []core.ChunkID {
 }
 
 // Persist logs the missing list the peering of interval decided for PG pg of the pool's pgs PGs,
-// each chunk's kept version, and after it the PG's decision marker, and answers id once all are
+// each chunk's kept version, with the image flag on the entries image holds, and after it the PG's decision marker, and answers id once all are
 // durable, as the index takes them together: replay after a crash takes a list only with its
 // marker, so a disk persists a decision whole or not at all. A PG count that is not a power of two,
 // a PG or interval that does not exist or a chunk outside the PG is refused with ErrRange.
-func (s *Store) Persist(ctx *core.Context, id uint64, pg, pgs, interval uint32, missing []ChunkVersion, out *Output) {
+func (s *Store) Persist(ctx *core.Context, id uint64, pg, pgs, interval uint32, missing, image []ChunkVersion, out *Output) {
 	err := s.unavailable()
 	if err == nil && (core.CheckPGCount(pgs) != nil || pg >= pgs || interval == 0 ||
 		slices.ContainsFunc(missing, func(m ChunkVersion) bool { return core.PGIndexOf(m.Chunk.Hash(), pgs) != pg })) {
@@ -1263,7 +1263,11 @@ func (s *Store) Persist(ctx *core.Context, id uint64, pg, pgs, interval uint32, 
 	oi := s.newOp(opPersist, Request{ID: id})
 	o := &s.ops[oi]
 	for _, m := range missing {
-		o.items = append(o.items, item{entry: disklog.MissingEntry(s.cfg.Pool, m.Chunk, m.Version, interval)})
+		e := disklog.MissingEntry(s.cfg.Pool, m.Chunk, m.Version, interval)
+		if slices.Contains(image, m) {
+			e = disklog.ImageEntry(s.cfg.Pool, m.Chunk, m.Version, interval)
+		}
+		o.items = append(o.items, item{entry: e})
 	}
 	o.items = append(o.items, item{entry: disklog.DecisionEntry(s.cfg.Pool, pg, pgs, interval)})
 	o.left = len(o.items)
@@ -1313,7 +1317,7 @@ func (s *Store) persisted(oi int32, err error, out *Output) {
 func (s *Store) clearListed(d disklog.Entry) {
 	for _, c := range s.ix.PGChunks(nil, d.Pool, d.Owner, uint32(d.Length)) {
 		if ch, _ := s.ix.Chunk(d.Pool, c.Chunk); ch.ListedIn != 0 && ch.ListedIn < d.Interval {
-			ch.Listed, ch.ListedIn = 0, 0
+			ch.Listed, ch.ListedIn, ch.Image = 0, 0, false
 			s.ix.putChunk(d.Pool, c.Chunk, ch)
 		}
 	}

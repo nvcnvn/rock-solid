@@ -147,3 +147,17 @@ func TestADecisionPersistedAndNotActivatedKeepsItsDrops(t *testing.T) {
 	}
 	r.loseMemberAndRead(t)
 }
+
+// The primary's own entry for the chunk it lists only for its dropped Y carries the image flag, and a restart replays it.
+func TestThePrimarysEntryForItsDroppedWriteCarriesTheImageFlag(t *testing.T) {
+	r := newRollbackRun(t, 1)
+	r.dropY(t)
+	if l := r.c.listed(r.c.node(r.p), r.ch); !l.Image {
+		t.Fatalf("primary %+v: no image flag", l)
+	}
+	r.restart()
+	r.c.runFor(1_000_000)
+	if l := r.c.listed(r.c.node(r.p), r.ch); !l.Image {
+		t.Fatalf("primary after a restart %+v: no image flag", l)
+	}
+}

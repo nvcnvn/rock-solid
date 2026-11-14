@@ -53,11 +53,11 @@ func FuzzDecodeExtent(f *testing.F) {
 }
 
 // FuzzDecodeChunk feeds arbitrary bytes as a chunk's entry: a value of the entry's size decodes
-// and encodes back to the same bytes.
+// and encodes back to the same bytes, its image flag byte 0 or 1.
 func FuzzDecodeChunk(f *testing.F) {
-	f.Add(appendChunk(nil, Chunk{Version: 1<<32 | 2, Epoch: 3, Whole: 1<<32 | 1, Listed: 2<<32 | 5, ListedIn: 4}))
+	f.Add(appendChunk(nil, Chunk{Version: 1<<32 | 2, Epoch: 3, Whole: 1<<32 | 1, Listed: 2<<32 | 5, ListedIn: 4, Image: true}))
 	f.Fuzz(func(t *testing.T, v []byte) {
-		if len(v) != chunkValueSize {
+		if len(v) != chunkValueSize || v[chunkValueSize-1] > 1 {
 			return
 		}
 		if got := appendChunk(nil, decodeChunk(v)); !bytes.Equal(got, v) {
