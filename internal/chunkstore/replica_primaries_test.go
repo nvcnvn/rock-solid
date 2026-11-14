@@ -20,6 +20,7 @@ const (
 	invOneVersion  = "no two members hold different data under one version"
 	invKeptWritten = "a member listing nothing maps the kept writes applied in version order"
 	invRemoval     = "no move lowers the members of a PG holding an acknowledged version below its width"
+	invStranded    = "an acknowledged write a disk can serve, a member can serve"
 )
 
 // authority stands in for the control plane: it knows each disk by the log ID it reports, computes every table with Next from the disks' marks and drains and operators' edits, and records the activations and asks the replicas report; with moves it makes a balance move per table and hands Next every recovered report again each time, as reports delivered late or twice.
@@ -51,9 +52,9 @@ func (a *authority) inputs(c *rcluster) *Inputs {
 	a.acts, a.seen = len(c.activations), len(c.asks)
 	if a.moves {
 		in.Moves = 1
-		for _, x := range c.recovered {
-			in.Recovered = append(in.Recovered, PGInterval{x.PG, x.Interval})
-		}
+	}
+	for _, x := range c.recovered {
+		in.Recovered = append(in.Recovered, PGInterval{x.PG, x.Interval})
 	}
 	in.plant = a.plant
 	return in
@@ -178,6 +179,7 @@ func (r *primaryRun) publish() {
 		return
 	}
 	r.removal(&next)
+	r.stranded(&next)
 	c.noteTable(&next)
 	c.table = next
 	for n := range c.reps {
@@ -217,6 +219,18 @@ func (r *primaryRun) removal(next *Table) {
 			if x, _ := c.reps[max(n, 0)].Store().Index().Chunk(testPool, ch); n < 0 || x.ListedIn != 0 || x.Version < rp.Version {
 				r.fail(invRemoval, fmt.Errorf("interval %d removes disk %d while disk %d lacks write %d's %#x of %v", e.Interval, ms[j].Disk, m.Disk, id, rp.Version, ch))
 				return
+			}
+		}
+	}
+}
+
+// stranded checks every acknowledged write against the table next.
+func (r *primaryRun) stranded(next *Table) {
+	_, e := next.entry(pg0)
+	for id, op := range r.ops {
+		if rp, ok := r.c.cl.replies[id]; ok && rp.Status == StatusOK {
+			if err := r.c.stranded(e, op.c, rp.Version); err != nil {
+				r.fail(invStranded, err)
 			}
 		}
 	}
@@ -700,7 +714,7 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 		{"M8", 15, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking = true }}},
 		{"a member holding a version in part left off the list", 148, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.unlistTorn = true }}},
 		{"recovered from a primary that lacks the chunk", 0, peerPlant{invOneVersion, func(r *primaryRun) { r.c.replicaPlants.recoverFromListed = true }}},
-		{"a list cleared with no source", 2, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.clearNoSource = true }}},
+		{"a list cleared with no source", 6, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.clearNoSource = true }}},
 		{"refused as gone while up", 0, peerPlant{invSameInterval, func(r *primaryRun) { r.c.replicaPlants.goneWhileUp = true }}},
 		{"merged on a dropped version", 94, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeOnDropped = true }}},
 		{"edit keeps its interval", 0, peerPlant{invOneVersion, func(r *primaryRun) { r.a.plant.editKeepsInterval = true }}},
@@ -716,5 +730,12 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 		if err := runPrimaries(t, p.seed, &p.peerPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)
 		}
+	}
+	soleHolder := func(a *authority) { a.plant.refillSoleHolder = true }
+	if err := lastSourceRun(t, soleHolder, false, ""); err == nil || !strings.Contains(err.Error(), invStranded) {
+		t.Errorf("a refill that deletes a member merely down: %v", err)
+	}
+	if err := staySourceRun(t, soleHolder, ""); err == nil || !strings.Contains(err.Error(), invStranded) {
+		t.Errorf("a Stay that deletes a member merely down: %v", err)
 	}
 }

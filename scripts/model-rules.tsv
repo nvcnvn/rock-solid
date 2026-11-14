@@ -11,6 +11,7 @@ epoch/neg-check-before-bound	lease.checkBeforeBound	TestPlantedLeaseBugsBreakThe
 epoch/neg-compare-member-lists	chunkstore.sameMembers	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-compare-table-epochs	chunkstore.sendEpoch	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-decide-by-own-interval	chunkstore.ownInterval	TestPlantedPeeringBugsBreakTheFaultRun
+epoch/neg-drop-all-leaving	chunkstore.dropAllLeaving	TestDropAllLeavingStrandsAWrite
 epoch/neg-edit-keeps-interval	chunkstore.editKeepsInterval	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-fence-on-arrival	chunkstore.fenceOnArrival	TestPlantedReadBugsBreakTheReadRun
 epoch/neg-fresh-grant-no-table-check	chunkstore.freshGrantNoCheck	TestPlantedBugsBreakTheirTraces
@@ -20,8 +21,11 @@ epoch/neg-holder-slower-clock	lease.slowerClock	TestPlantedLeaseBugsBreakThePair
 epoch/neg-instant-reboot	sim.RebootInstantly	TestPlantedBugsBreakTheirTraces
 epoch/neg-keep-disk-id	chunkstore.keepID	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-keep-lease-on-new-run	lease.keepOnNewRun	TestALeaseKeptAcrossANewRunBreaksItsTrace
+epoch/neg-keep-no-source	chunkstore.keepNoSource	TestKeepHoldsAListerVetoWithNoSource
+epoch/neg-keep-past-member	chunkstore.keepPastMember	TestKeepPastMemberLeavesAMoveUnfound
 epoch/neg-lease-before-bound	lease.beforeBound	TestPlantedLeaseBugsBreakThePair
 epoch/neg-lease-before-bound-half-drift	lease.beforeBound,halfStep	TestPlantedLeaseBugsBreakThePair
+epoch/neg-lister-vetoes	chunkstore.listerVetoes	TestListerVetoesLeavesNoMemberASource
 epoch/neg-log-out-of-order	chunkstore.resendNewestFirst	TestPlantedPeeringBugsBreakTheFaultRun
 epoch/neg-margin-exact	lease.marginExact	TestPlantedLeaseBugsBreakThePair
 epoch/neg-merge-before-kept	chunkstore.mergeWhileLacking	TestPlantedPeeringBugsBreakTheOracle
@@ -38,6 +42,7 @@ epoch/neg-reads-before-peer-messages	sim.ReadsFirst	TestPlantedBugsBreakTheirTra
 epoch/neg-recovery-covers-at-read	chunkstore.coverAtRead	TestPlantedRecoveryBugBreaksTheFaultRun
 epoch/neg-recover-from-listed	chunkstore.recoverFromListed	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-recover-no-source	chunkstore.clearNoSource	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-refill-sole-holder	chunkstore.refillSoleHolder	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-remove-before-recovered	chunkstore.removeOnActivation	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-reorder-after-other-primary	chunkstore.reorderAfterOther	TestPlantedBugsBreakTheirTraces
 epoch/neg-report-before-activate	chunkstore.reportDecided	TestPlantedPeeringBugsBreakTheOracle
@@ -46,6 +51,7 @@ epoch/neg-restart-same-interval	chunkstore.peerInOldInterval	TestPlantedPeeringB
 epoch/neg-step-half-drift	lease.halfStep	TestPlantedLeaseBugsBreakThePair
 epoch/neg-step-on-grants-only	lease.stepOnGrantsOnly	TestPlantedLeaseBugsBreakThePair
 epoch/neg-stay-keeps-interval	open	Spec conformance check
+epoch/neg-stay-sole-holder	chunkstore.refillSoleHolder	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-stop-previous-only	chunkstore.stopPreviousOnly	TestPlantedBugsBreakTheirTraces
 epoch/neg-transfer-keeps-lease	open	MetaStore invariants
 epoch/neg-widen-past-two-drift	lease.widenLate	TestPlantedLeaseBugsBreakThePair
@@ -112,3 +118,5 @@ epoch/neg-recovery-read-old-disk	open	Plants for the epoch model's new rules
 epoch/neg-serve-after-other-primary	open	Plants for the epoch model's new rules
 epoch/neg-serve-refused	open	Plants for the epoch model's new rules
 epoch/neg-settle-by-number	chunkstore.settleByNumber	TestPlantedBugsBreakTheirTraces
+epoch/neg-write-on-unfound	chunkstore.writeOnUnfound	TestWriteOnUnfoundEndsTheWayBack
+epoch/neg-forget-image	chunkstore.forgetImage	TestForgetImageLeavesTheChunkUnfound

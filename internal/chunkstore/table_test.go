@@ -110,7 +110,6 @@ func TestMalformedDeltas(t *testing.T) {
 		t.Fatalf("an interval going backwards: %v", err)
 	}
 	for name, leave := range map[string]func(e *PGEntry){
-		"two leaving members":                      func(e *PGEntry) { e.Members[0].Leaving, e.Members[1].Leaving = true, true },
 		"a leaving member in a recovered interval": func(e *PGEntry) { e.Members[0].Leaving, e.Recovered = true, true },
 		"a disk listed twice":                      func(e *PGEntry) { e.Members[1].Disk = e.Members[0].Disk },
 	} {

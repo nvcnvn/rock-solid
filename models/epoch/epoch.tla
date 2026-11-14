@@ -60,6 +60,8 @@ Ver(k, n) == k * 8 + n
 IvOfV(v) == v \div 8
 Cnt(v) == v % 8
 
+\* A PG's widest membership, leaving members included: replica.go's maxMembers.
+MaxMembers == 8
 MaxDisk == Cardinality(Node) + MaxFormat
 Disk == 1..MaxDisk
 NoMiss == -1
@@ -75,8 +77,8 @@ Infinity == MaxTime + 1
 VARIABLES
     \* Control plane and tables
     tbl,      \* Seq([PG -> [iv, la]]): every committed table
-    ivs,      \* [PG -> Seq([mem: Seq(Disk), st: [Disk -> mark], lv: Disk \cup {0}, ml: Nat])]:
-              \* each interval's members, leaving member (0 for none) and min_live
+    ivs,      \* [PG -> Seq([mem: Seq(Disk), st: [Disk -> mark], lv: SUBSET Disk, ml: Nat])]:
+              \* each interval's members, leaving members and min_live
     reqIv,    \* [PG -> Nat]: the interval whose primary asked for a new one
     reports,  \* set of [p, k]: activation reports on heartbeats, possibly late or repeated
     recd,     \* set of [p, k]: recovered reports on heartbeats, possibly late or repeated
@@ -102,13 +104,15 @@ VARIABLES
     pv,       \* [Node -> [Chunk -> Nat]]: newest version a primary ordered
     pin,      \* [Node -> SUBSET [w, hold]]: client writes a primary holds unordered
     known,    \* [Node -> [PG -> Nat]]: newest incarnation of the session a primary has seen
-    dec,      \* set of [p, k, n, r, kept, gone, img, torn]: peering decisions; gone: per chunk the
-              \* gated versions of the primary the decision drops; img: the chunks whose
-              \* image on the primary is the kept version once it settled
+    dec,      \* set of [p, k, n, r, kept, gone, img, torn, unf]: peering decisions; gone: per chunk
+              \* the gated versions of the primary the decision drops; img: the chunks whose
+              \* image on the primary is the kept version once it settled; unf: the chunks
+              \* left with no source
     act,      \* set of [p, k, r]: activated intervals
     \* Data path
     rm,       \* set of replicated writes in flight or delivered (kept, so duplicated)
-    vers,     \* set of [c, v, w, on, blk, n, r]: every version ordered (on: merged on)
+    vers,     \* set of [c, v, w, on, blk, n, r, ls]: every version ordered (on: merged on; ls:
+              \* its primary listed the chunk, not unfound)
     ackd,     \* set of [c, v]: versions acknowledged to the client
     wst,      \* [1..Len(Writes) -> 0..2]: unsent, sent, acknowledged
     sends,    \* [1..Len(Writes) -> Nat]
@@ -273,7 +277,7 @@ PlanRates(n) ==
 InitGrant(g, h) ==
     ~Clocks /\ g # h /\ \E p \in PG : InitMem[p][1] = h /\ \E j \in 1..Len(InitMem[p]) : InitMem[p][j] = g
 
-InitIv(p) ==[mem |-> InitMem[p], st |-> [d \in Disk |-> IF d \in Node THEN "up" ELSE "down"], lv |-> 0,
+InitIv(p) ==[mem |-> InitMem[p], st |-> [d \in Disk |-> IF d \in Node THEN "up" ELSE "down"], lv |-> {},
              ml |-> MinLive[p]]
 
 Init ==
@@ -304,7 +308,7 @@ Init ==
     /\ pin = [n \in Node |-> {}]
     /\ known = [n \in Node |-> [p \in PG |-> 0]]
     /\ dec = {[p |-> p, k |-> 1, n |-> InitMem[p][1], r |-> 1, kept |-> [c \in Chunk |-> 0],
-                gone |-> [c \in ChunksOf(p) |-> {}], img |-> ChunksOf(p), torn |-> {}] : p \in PG}
+                gone |-> [c \in ChunksOf(p) |-> {}], img |-> ChunksOf(p), torn |-> {}, unf |-> {}] : p \in PG}
     /\ act = {[p |-> p, k |-> 1, r |-> 1] : p \in PG}
     /\ rm = {}
     /\ vers = {}
@@ -380,12 +384,17 @@ MarkDisk(d, to) ==
                [ivs[p][Cur(p)] EXCEPT !.st[d] = to]])
     /\ UNCHANGED <<reqIv, reports, recd>>
 
-\* A refill replaces a member with another disk in one table. The model lets
-\* it replace any member, up or not, but a leaving one: that stays until a
-\* recovered report removes it, however long it is down.
+\* A refill replaces a member with another disk in one table only once the
+\* disk is gone. A member merely down may hold the last copy of a version, so
+\* its refill is an Add, which keeps it as a leaving member. An up member
+\* replaced stands for an operator's edit, which the model lets take any member
+\* but a leaving one: that stays until a recovered report removes it, however
+\* long it is down, or its disk is gone. With RefillSoleHolder a refill deletes
+\* a member merely down.
 Replace(p, old, new) ==
     /\ old \in Mem(p, Cur(p))
-    /\ old # ivs[p][Cur(p)].lv
+    /\ old \notin ivs[p][Cur(p)].lv
+    /\ St(p, Cur(p), old) # "down" \/ dnode[old] = 0 \/ Bug("RefillSoleHolder")
     /\ new \notin Mem(p, Cur(p))
     /\ dnode[new] # 0
     /\ LET m == ivs[p][Cur(p)].mem
@@ -394,44 +403,89 @@ Replace(p, old, new) ==
             [ivs[p][Cur(p)] EXCEPT !.mem = [m EXCEPT ![j] = new], !.st[new] = "up"]])
     /\ UNCHANGED <<reqIv, reports, recd>>
 
-\* A move adds the new member and marks the old one leaving, so the PG is one
-\* member wider until Remove.
-Add(p, old, new) ==
-    /\ ivs[p][Cur(p)].lv = 0
-    /\ old \in Mem(p, Cur(p))
-    /\ new \notin Mem(p, Cur(p))
-    /\ dnode[new] # 0
-    /\ NewIntervals({p}, [q \in PG |->
-         [ivs[p][Cur(p)] EXCEPT !.mem = Append(@, new), !.st[new] = "up", !.lv = old]])
-    /\ UNCHANGED <<reqIv, reports, recd>>
+Without(m, S) == SelectSeq(m, LAMBDA d : d \notin S)
 
-\* The leader removes the leaving member on a recovered report for the PG's
-\* current interval; a late one, for an earlier interval, does nothing.
-Remove(p) ==
+\* A move adds the new member and marks the old one leaving, so the PG is one
+\* member wider until Remove. It needs no member leaving. The refill of a member
+\* merely down is the same change at any time, up to MaxMembers, and takes the
+\* old member behind the others, so that it does not lead on its return while
+\* one of them is up.
+Add(p, old, new) ==
     LET x == ivs[p][Cur(p)]
-    IN /\ x.lv # 0
-       /\ \/ \E r \in recd : r.p = p /\ (r.k = Cur(p) \/ Bug("AcceptOldReport"))
-          \/ Bug("RemoveBeforeRecovered")
+    IN /\ old \in Mem(p, Cur(p)) \ x.lv
+       /\ x.lv = {} \/ St(p, Cur(p), old) = "down"
+       /\ new \notin Mem(p, Cur(p))
+       /\ dnode[new] # 0
+       /\ Len(x.mem) < MaxMembers
        /\ NewIntervals({p}, [q \in PG |->
-            [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # x.lv), !.lv = 0]])
+            [x EXCEPT !.mem = IF St(p, Cur(p), old) = "down"
+                              THEN Without(@, {old}) \o <<new, old>>
+                              ELSE Append(@, new),
+                      !.st[new] = "up", !.lv = @ \cup {old}]])
        /\ UNCHANGED <<reqIv, reports, recd>>
 
-\* A leaving member that is up takes the place of a missing member, one marked
-\* down or whose disk is gone, ending the move: the missing member goes and the
-\* leaving one is an ordinary member. With StayKeepsInterval the table keeps the
-\* interval.
-Stay(p, out) ==
+\* A recovered report for the PG's current interval; a late one, for an earlier
+\* interval, does nothing.
+Reported(p) == \E r \in recd : r.p = p /\ (r.k = Cur(p) \/ Bug("AcceptOldReport"))
+
+\* The leader removes the leaving members on a recovered report.
+Remove(p) ==
     LET x == ivs[p][Cur(p)]
-        y == [x EXCEPT !.mem = SelectSeq(@, LAMBDA d : d # out), !.lv = 0]
-    IN /\ x.lv # 0
-       /\ out \in Mem(p, Cur(p))
-       /\ out # x.lv
+    IN /\ x.lv # {}
+       /\ Reported(p) \/ Bug("RemoveBeforeRecovered")
+       /\ NewIntervals({p}, [q \in PG |-> [x EXCEPT !.mem = Without(@, x.lv), !.lv = {}]])
+       /\ UNCHANGED <<reqIv, reports, recd>>
+
+\* A leaving member whose disk left the pool goes with no report, the others
+\* staying: with DropAllLeaving, every leaving member goes with it.
+Drop(p) ==
+    LET x == ivs[p][Cur(p)]
+        out == {d \in x.lv : dnode[d] = 0}
+        R == IF Bug("DropAllLeaving") THEN x.lv ELSE out
+    IN /\ out # {}
+       /\ NewIntervals({p}, [q \in PG |-> [x EXCEPT !.mem = Without(@, R), !.lv = @ \ R]])
+       /\ UNCHANGED <<reqIv, reports, recd>>
+
+\* A leaving member l that is up takes the place of a missing member, one marked
+\* down or whose disk is gone, and is an ordinary member from then on. A member
+\* whose disk is gone goes; one merely down may hold the last copy of a version,
+\* so it stays as a leaving member, or with RefillSoleHolder goes too. With
+\* StayKeepsInterval the table keeps the interval.
+Stay(p, l, out) ==
+    LET x == ivs[p][Cur(p)]
+        y == IF dnode[out] = 0 \/ Bug("RefillSoleHolder")
+             THEN [x EXCEPT !.mem = Without(@, {out}), !.lv = @ \ {l}]
+             ELSE [x EXCEPT !.mem = Without(@, {out}) \o <<out>>, !.lv = (@ \ {l}) \cup {out}]
+    IN /\ l \in x.lv
+       /\ out \in Mem(p, Cur(p)) \ x.lv
        /\ St(p, Cur(p), out) = "down" \/ dnode[out] = 0
-       /\ St(p, Cur(p), x.lv) = "up"
+       /\ St(p, Cur(p), l) = "up"
        /\ IF Bug("StayKeepsInterval")
           THEN /\ Commit(tbl[Len(tbl)])
                /\ ivs' = [ivs EXCEPT ![p][Cur(p)] = y]
           ELSE NewIntervals({p}, [q \in PG |-> y])
+       /\ UNCHANGED <<reqIv, reports, recd>>
+
+\* One table can make several of a PG's changes at once, in one interval: marks
+\* of its members, and those of Replace, Add, Remove, Drop and Stay. A leaving
+\* disk that returns and takes a missing member's place, or two members refilled
+\* together, are one interval, where those actions make two. Each rule of theirs
+\* holds of the table as a whole: a member goes only with its disk gone, or
+\* leaving on a recovered report; a member newly leaving is down, unless none was
+\* leaving; one that stops leaving is up.
+Refill(p, mem, marks, lv) ==
+    LET x == ivs[p][Cur(p)]
+        was == Mem(p, Cur(p))
+        to(d) == marks[CHOOSE j \in 1..Len(mem) : mem[j] = d]
+        y == [x EXCEPT !.mem = mem, !.st = [d \in Disk |-> IF d \in Range(mem) THEN to(d) ELSE @[d]], !.lv = lv]
+    IN /\ Len(mem) <= MaxMembers
+       /\ lv \subseteq Range(mem)
+       /\ \A d \in was \ Range(mem) : dnode[d] = 0 \/ (d \in x.lv /\ Reported(p))
+       /\ \A d \in Range(mem) \ was : dnode[d] # 0 /\ to(d) = "up" /\ d \notin lv
+       /\ \A d \in Range(mem) \cap was : to(d) = St(p, Cur(p), d) \/ Allowed(p, d, St(p, Cur(p), d), to(d))
+       /\ \A d \in lv \ x.lv : x.lv = {} \/ to(d) = "down"
+       /\ \A d \in (x.lv \cap Range(mem)) \ lv : to(d) = "up"
+       /\ NewIntervals({p}, [q \in PG |-> y])
        /\ UNCHANGED <<reqIv, reports, recd>>
 
 \* Moving the primary: the first two members swap.
@@ -466,7 +520,7 @@ Edit(p, mem, marks) ==
     LET x == ivs[p][Cur(p)]
         to(d) == marks[CHOOSE j \in 1..Len(mem) : mem[j] = d]
         y == [x EXCEPT !.mem = mem, !.st = [d \in Disk |-> IF d \in Range(mem) THEN to(d) ELSE @[d]]]
-    IN /\ x.lv = 0
+    IN /\ x.lv = {}
        /\ Len(mem) = Len(x.mem)
        /\ Range(mem) = Range(x.mem)
        /\ \A d \in Range(mem) : to(d) = St(p, Cur(p), d) \/ Allowed(p, d, St(p, Cur(p), d), to(d))
@@ -479,14 +533,17 @@ Edit(p, mem, marks) ==
 
 \* A planned change: [k |-> "mark", d, to], [k |-> "replace", p, old, new],
 \* [k |-> "rotate", p], [k |-> "add", p, old, new], [k |-> "remove", p],
-\* [k |-> "stay", p, out], [k |-> "minlive", p, to] or [k |-> "edit", p, mem, marks].
+\* [k |-> "drop", p], [k |-> "stay", p, l, out], [k |-> "refill", p, mem, marks, lv],
+\* [k |-> "minlive", p, to], [k |-> "edit", p, mem, marks] or [k |-> "lost", d] (LostPlanned).
 Planned(m) ==
     \/ m.k = "mark" /\ MarkDisk(m.d, m.to)
     \/ m.k = "replace" /\ Replace(m.p, m.old, m.new)
     \/ m.k = "rotate" /\ Rotate(m.p)
     \/ m.k = "add" /\ Add(m.p, m.old, m.new)
     \/ m.k = "remove" /\ Remove(m.p)
-    \/ m.k = "stay" /\ Stay(m.p, m.out)
+    \/ m.k = "drop" /\ Drop(m.p)
+    \/ m.k = "stay" /\ Stay(m.p, m.l, m.out)
+    \/ m.k = "refill" /\ Refill(m.p, m.mem, m.marks, m.lv)
     \/ m.k = "minlive" /\ SetMinLive(m.p, m.to)
     \/ m.k = "edit" /\ Edit(m.p, m.mem, m.marks)
 
@@ -503,6 +560,22 @@ Membership ==
           /\ step' = step + 1
           /\ UNCHANGED plan
     /\ UNCHANGED <<nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
+
+\* An operator declares a disk lost for good: it leaves the pool, which needs it
+\* marked down in every PG, and what only it holds stays unfound. It never
+\* returns: its node may run on, refused as Format's old disk is.
+Lost(d) ==
+    /\ dnode[d] # 0
+    /\ \A p \in PG : d \in Mem(p, Cur(p)) => St(p, Cur(p), d) = "down"
+    /\ dnode' = [dnode EXCEPT ![d] = 0]
+    /\ UNCHANGED <<tbl, ivs, reqIv, reports, recd, plan, ep, ddisk, dhost, fmts, stale, run, rsIv, dlog,
+                   miss, persIv, mrecv, failed, priVars, dataVars, leaseVars, clockVars, raftVars>>
+
+LostPlanned ==
+    /\ step <= Len(plan.m)
+    /\ plan.m[step].k = "lost"
+    /\ Lost(plan.m[step].d)
+    /\ step' = step + 1
 
 \* Renewals a primary asks for and folds of activation reports.
 Reactive ==
@@ -600,20 +673,37 @@ LapseFor(J, p, k) ==
        /\ hl' = [h \in Node |-> [g \in Node |->
                    IF ~Clocks /\ lapse(g, h) THEN [hl[h][g] EXCEPT !.has = FALSE] ELSE hl[h][g]]]
 
+\* The versions of c a disk's map holds: the versions an activation of its node
+\* settled away stay in its log, never mapped, until a restart's replay maps them.
+Held(d, c) ==
+    dlog[d][c] \ UNION {y.gone[c] : y \in {x \in dec :
+        /\ x.n = dnode[d]
+        /\ x.p = ChunkPG[c]
+        /\ x.gone[c] # {}
+        /\ x.r = run[x.n]
+        /\ [p |-> x.p, k |-> x.k, r |-> x.r] \in act}}
+
 \* A member's reply to peering, for one chunk: its newest whole version, the
 \* kept version it lists (NoMiss for none) and the newest interval whose
 \* decision it persisted. The keep rule sees nothing else of a member's log.
 Reply(d, c) ==
     LET s == IF OldDiskAnswers(d) THEN ddisk[dhost[d]] ELSE d
-    IN [whole |-> Newest(dlog[s][c]), list |-> miss[s][c], decided |-> persIv[s][ChunkPG[c]]]
+    IN [whole |-> Newest(Held(s, c)), list |-> miss[s][c], decided |-> persIv[s][ChunkPG[c]]]
 
 \* The keep rule over the replies of J. LS is the newest interval whose peering
 \* decision a reached member persisted (at least the table's last activated
 \* interval L). A member that persisted it lists the version it kept or, listing
 \* nothing, holds that version as its newest below LS. A version of LS or later
 \* is kept unless a reached member live in its interval reports neither it nor
-\* a later version; every version a kept one rests on is kept.
-Kept(p, L, J, c) ==
+\* a later version, and every version a kept one rests on is kept. Two cases keep
+\* a version such a member lacks, when an up member of k holds it and lists nothing,
+\* so could be its source: dropping it would leave that member listing the chunk
+\* too. The member lacking it lists the chunk, so is no source of what it holds,
+\* or every up member of k holds the version, so the one lacking it is a disk
+\* recovery cannot read. With no such member the veto stands: it may be the one
+\* holding what is acknowledged. ListerVetoes and KeepPastMember remove the cases,
+\* KeepNoSource the condition.
+Kept(p, L, J, c, k) ==
     LET r == [d \in J |-> Reply(d, c)]
         LS == Max({r[d].decided : d \in J} \cup {L})
         RS == {d \in J : r[d].decided = LS}
@@ -621,7 +711,12 @@ Kept(p, L, J, c) ==
                         ELSE IF IvOfV(r[d].whole) < LS THEN r[d].whole ELSE 0 : d \in RS})
         wholes == {r[d].whole : d \in J} \ {0}
         listed == {r[d].list : d \in J} \ {NoMiss, 0}
-        keep(v) == \A d \in J \cap UpIn(p, IvOfV(v)) : r[d].whole >= v \/ r[d].list >= v
+        holds(d, v) == r[d].whole >= v \/ r[d].list >= v
+        source(v) == Bug("KeepNoSource") \/ \E d \in UpIn(p, k) : r[d].whole = v /\ r[d].list = NoMiss
+        keep(v) == \/ \A d \in J \cap UpIn(p, IvOfV(v)) : holds(d, v)
+                   \/ /\ source(v)
+                      /\ \/ ~Bug("ListerVetoes") /\ \A d \in J \cap UpIn(p, IvOfV(v)) : holds(d, v) \/ r[d].list # NoMiss
+                         \/ ~Bug("KeepPastMember") /\ \A d \in UpIn(p, k) : holds(d, v)
     IN IF Bug("DecideByOwnInterval")
        THEN Newest({v \in wholes \cup listed : keep(v)})
        ELSE Newest({base} \cup {v \in wholes : IvOfV(v) >= LS /\ keep(v)})
@@ -630,8 +725,8 @@ Kept(p, L, J, c) ==
 \* newest and lists nothing. Only recovery removes an entry: a member that
 \* still lists a chunk may hold a dropped version's bytes under a newer write.
 Entry(d, c, K) ==
-    IF \/ Newest(dlog[d][c]) = K /\ (miss[d][c] = NoMiss \/ Bug("PeeringClearsMissing"))
-       \/ Bug("NoListAbove") /\ Newest(dlog[d][c]) > K /\ miss[d][c] = NoMiss
+    IF \/ Newest(Held(d, c)) = K /\ (miss[d][c] = NoMiss \/ Bug("PeeringClearsMissing"))
+       \/ Bug("NoListAbove") /\ Newest(Held(d, c)) > K /\ miss[d][c] = NoMiss
     THEN NoMiss ELSE K
 
 \* A crash can leave part of a version above a member's newest whole one. The
@@ -679,6 +774,19 @@ Activated(n, p, k, K, ls) ==
 \* A decision of the primary's current run for interval k of p.
 Decided(n, p, k) == \E x \in dec : x.p = p /\ x.k = k /\ x.n = n /\ x.r = run[n]
 TheDec(n, p, k) == CHOOSE x \in dec : x.p = p /\ x.k = k /\ x.n = n /\ x.r = run[n]
+
+\* The image n's process holds as p's primary, from its last decision of p
+\* while every interval since kept its disk primary, as [c, v] pairs: the
+\* chunks whose image was the version v it kept. A restart or a lost lead
+\* forgets it. A later
+\* peering that keeps v finds that image still, though the primary lists the
+\* chunk for versions of its own the decision dropped.
+Image(n, p) ==
+    LET own == PrimDisk(p, IvAt(n, p))
+        xs == {x \in dec : /\ x.n = n /\ x.p = p /\ x.r = run[n]
+                           /\ \A i \in x.k..IvAt(n, p) : PrimDisk(p, i) = own}
+        x == CHOOSE x \in xs : \A y \in xs : y.k <= x.k
+    IN IF xs = {} THEN {} ELSE {[c |-> c, v |-> x.kept[c]] : c \in x.img}
 
 \* The members in P persist, with interval k, their lists from ls.
 PersistAll(P, p, k, ls) ==
@@ -736,11 +844,11 @@ TornSets(n, p) ==
 PeerOn(n, p, J, P, T) ==
     LET k == IvAt(n, p)
         L == LaAt(n, p)
-        K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c) ELSE 0]
+        K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c, k) ELSE 0]
         \* The members the decision counts as holding the kept version:
         \* the recovery sources it reached, and the live members it
         \* leaves off the missing list.
-        src(c) == {d \in {y \in J : Newest(dlog[y][c]) = K[c] /\ miss[y][c] = NoMiss}
+        src(c) == {d \in {y \in J : Newest(Held(y, c)) = K[c] /\ miss[y][c] = NoMiss}
                          \cup {y \in UpIn(p, k) : Entry(y, c, K[c]) = NoMiss} :
                      [d |-> d, c |-> c] \notin T}
         torn == \E c \in ChunksOf(p) : K[c] # 0 /\
@@ -750,17 +858,22 @@ PeerOn(n, p, J, P, T) ==
         gone == [c \in ChunksOf(p) |->
                    {r.v : r \in {x \in pend \cup refd : x.n = n /\ x.c = c /\ x.v > SettleTop(n, c, K[c])}}]
         \* A version above K the primary mapped stays in its image, and a chunk it
-        \* listed may miss a kept block or hold a dropped one below its newest.
+        \* listed may miss a kept block or hold a dropped one below its newest,
+        \* unless it lists it only for what its image from before settled away.
         img == {c \in ChunksOf(p) :
-                  /\ miss[own][c] = NoMiss
+                  /\ \/ miss[own][c] = NoMiss
+                     \/ ~Bug("ForgetImage") /\ [c |-> c, v |-> K[c]] \in Image(n, p)
                   /\ [d |-> own, c |-> c] \notin T
-                  /\ \/ Newest(dlog[own][c] \ gone[c]) = K[c]
+                  /\ \/ Newest(Held(own, c) \ gone[c]) = K[c]
                      \/ Bug("MergeOnDropped") /\ K[c] \in dlog[own][c] \cup {0}}
+        \* Unfound: nothing kept has no up member to recover from.
+        unf == {c \in ChunksOf(p) :
+                  K[c] # 0 /\ c \notin img /\ \A d \in UpIn(p, k) : lists[d][c] # NoMiss}
     IN /\ UpIn(p, k) \subseteq J
        /\ \A i \in NeedIv(p, k, L) : J \cap UpIn(p, i) # {}
        /\ LapseFor(J, p, k)
        /\ dec' = dec \cup {[p |-> p, k |-> k, n |-> n, r |-> run[n], kept |-> K,
-                            gone |-> gone, img |-> img, torn |-> T]}
+                            gone |-> gone, img |-> img, torn |-> T, unf |-> unf]}
        /\ bad' = IF torn THEN bad \cup {"torn"} ELSE bad
        /\ pv' = [pv EXCEPT ![n] = [c \in Chunk |-> IF c \in ChunksOf(p) THEN K[c] ELSE pv[n][c]]]
        /\ IF Bug("ActivateBeforeDurable")
@@ -833,14 +946,15 @@ Persist(d) ==
 \* when it read, be any since it activated. With RecoveryCoversAtRead, the
 \* primary picks the blocks at the read, so the writes ordered between the
 \* read and the write are overwritten. The source lists nothing, or is the
-\* primary, which lists the chunk only from this peering, for dropped
-\* versions of its own, and whose image is the kept version. A chunk no member
-\* keeps anything of needs no source. With RecoverFromListed, a primary that
-\* lists a chunk for what it lacks is a source too, and its image holds what it
-\* logged above the kept version; with RecoverNoSource, a chunk
-\* something was kept of needs none, so the write clears the list with no read.
-\* With RecoveryReadOldDisk, a read for a source formatted again is answered by its
-\* node's new, empty disk, and taken for the kept version.
+\* primary, which lists the chunk only for dropped versions of its own, from
+\* this peering or one whose image it carries, and whose image is the kept
+\* version. A chunk no member keeps anything of needs no source. With
+\* RecoverFromListed, a primary that lists a chunk for what it lacks is a
+\* source too, and its image holds what it logged above the kept version; with
+\* RecoverNoSource, a chunk something was kept of needs none, so the write
+\* clears the list with no read. With RecoveryReadOldDisk, a read for a source
+\* formatted again is answered by its node's new, empty disk, and taken for the
+\* kept version.
 RecoverFrom(n, p, c, d, m) ==
     LET k == IvAt(n, p)
         K == miss[d][c]
@@ -887,9 +1001,9 @@ ReportRecovered(n, p) ==
     IN /\ Running(n)
        /\ Leads(n, p)
        /\ pr[n][p].act
-       /\ x.lv # 0
+       /\ x.lv # {}
        /\ [p |-> p, k |-> k] \notin recd
-       /\ \A d \in Mem(p, k) \ {x.lv} : St(p, k, d) = "up" /\ \A c \in ChunksOf(p) : miss[d][c] = NoMiss
+       /\ \A d \in Mem(p, k) \ x.lv : St(p, k, d) = "up" /\ \A c \in ChunksOf(p) : miss[d][c] = NoMiss
        /\ recd' = recd \cup {[p |-> p, k |-> k]}
        /\ UNCHANGED <<tbl, ivs, reqIv, reports, plan, step, nodeVars, priVars, dataVars, leaseVars,
                       clockVars, raftVars>>
@@ -907,6 +1021,23 @@ AskNext(n, p) ==
        /\ ~Bug("NeverAsk")
        /\ reqIv[p] # k
        /\ Quiet(n, p)
+       /\ reqIv' = [reqIv EXCEPT ![p] = k]
+       /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
+
+\* A restarted primary that adopted a table newer than the one it restarted on
+\* asks for the next interval too, before it peers: the code treats the first
+\* table a new process takes as the one it restarted on. It changes no rule, so
+\* only traces and ci-late-ask, whose plans set "lateask", take it.
+RestartAsk(n, p) ==
+    LET k == IvAt(n, p)
+    IN /\ "lateask" \in plan.f
+       /\ Running(n)
+       /\ Leads(n, p)
+       /\ run[n] > 1
+       /\ ~pr[n][p].act
+       /\ ~Decided(n, p, k)
+       /\ k = Cur(p)
+       /\ reqIv[p] # k
        /\ reqIv' = [reqIv EXCEPT ![p] = k]
        /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
 
@@ -969,12 +1100,15 @@ Die ==
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, rm, vers, ackd, wst, sends, bad, pend, refd,
                    leaseVars, clockVars, raftVars>>
 
-\* Whether a held or fenced write must be refused when it is ordered.
+\* Whether a held or fenced write must be refused when it is ordered. One on an
+\* unfound chunk is too: its OK would read as missing, and a later peering would
+\* keep it over the version a returning disk could still have healed.
 Fenced(n, x) ==
     LET w == Writes[x.w]
         p == ChunkPG[w.c]
     IN \/ ~Bug("FenceOnArrivalOnly") /\ w.inc # 0 /\ w.inc < known[n][p]
        \/ ~Bug("ReorderAfterOtherPrimary") /\ x.hold # 0 /\ ~KeptPrimary(n, p, x.hold, IvAt(n, p))
+       \/ ~Bug("WriteOnUnfound") /\ w.c \in TheDec(n, p, IvAt(n, p)).unf
 
 \* The primary acknowledges a version to the client once every member live
 \* in its interval logged it.
@@ -998,8 +1132,9 @@ Order(n, x) ==
         cur == pv[n][c]
         v == IF IvOfV(cur) = k THEN cur + 1 ELSE Ver(k, 1)
         y == TheDec(n, p, k)
-        on == IF w.whole THEN cur ELSE Newest(dlog[own][c] \ y.gone[c])
-        r == [c |-> c, v |-> v, w |-> x.w, on |-> on, blk |-> w.blk, n |-> n, r |-> run[n]]
+        on == IF w.whole THEN cur ELSE Newest(Held(own, c) \ y.gone[c])
+        r == [c |-> c, v |-> v, w |-> x.w, on |-> on, blk |-> w.blk, n |-> n, r |-> run[n],
+              ls |-> miss[own][c] # NoMiss /\ c \notin y.unf]
         logs == [dlog EXCEPT ![own][c] = @ \cup {v}]
     IN /\ Running(n)
        /\ x \in pin[n]
@@ -1111,17 +1246,18 @@ GoneRefuses(m) ==
     /\ UNCHANGED faults
 
 \* A version fails on the primary's own log after it went out to members, while
-\* the primary is still in its interval: peering answers only once a disk's
-\* records are durable or failed. The primary refuses its client and ends the
-\* interval. Only the newest version on its log fails: a record that fails
-\* below a later logged one, reported as held whole up to the failure, is not
-\* modelled.
+\* the primary is still in its interval or has not decided its next one: peering
+\* answers only once a disk's records are durable or failed. The primary refuses
+\* its client and ends the interval. Only the newest version on its log fails: a
+\* record that fails below a later logged one, reported as held whole up to the
+\* failure, is not modelled.
 OwnFail(n, r) ==
     LET p == ChunkPG[r.c]
         own == ddisk[n]
     IN /\ r.n = n
        /\ Running(n)
-       /\ pr[n][p].iv = IvOfV(r.v)
+       /\ \/ pr[n][p].iv = IvOfV(r.v)
+          \/ ~Decided(n, p, pr[n][p].iv)
        /\ Leads(n, p)
        /\ Newest(dlog[own][r.c]) = r.v
        /\ Fault("ownfail")
@@ -1715,7 +1851,7 @@ Transfer(n, t) ==
 Protocol ==
     \/ Reactive
     \/ \E n \in Node \ stale : \E e \in {ep[n] + 1, Len(tbl)} : Adopt(n, e)
-    \/ \E n \in Node, p \in PG : Peer(n, p) \/ Activate(n, p) \/ CounterOut(n, p) \/ AskNext(n, p)
+    \/ \E n \in Node, p \in PG : Peer(n, p) \/ Activate(n, p) \/ CounterOut(n, p) \/ AskNext(n, p) \/ RestartAsk(n, p)
                                  \/ ReportRecovered(n, p)
     \/ \E d \in Disk : Persist(d)
     \/ \E n \in Node, p \in PG, c \in Chunk, d \in Disk : Recover(n, p, c, d)
@@ -1731,6 +1867,7 @@ Protocol ==
 \* turns on is the last renewal before them, which keeps its own timing.
 Choices ==
     \/ Membership
+    \/ LostPlanned
     \/ Die
     \/ \E n \in Node : Isolate(n)
     \/ \E m \in rm : MemberFail(m) \/ GoneRefuses(m)
@@ -1887,14 +2024,69 @@ Settled(p) ==
        \/ reqIv[p] = k
 PeeringSettles == <>[](\A p \in PG : Settled(p))
 
-\* 13. When the leader removes a leaving member, every other member of the
-\* PG's current interval holds every acknowledged version and lists nothing.
+\* 13. When the leader removes a leaving member, every member of the PG's
+\* current interval but the leaving ones holds every acknowledged version and
+\* lists nothing. A leaving member whose disk is gone is no removal: Drop takes
+\* it with the others unrecovered, there being no copy left to lose.
 RemovalKeepsCopies ==
     [][\A p \in PG :
          LET x == ivs[p][Len(ivs[p])]
-         IN (x.lv # 0 /\ Len(ivs'[p]) > Len(ivs[p]) /\ x.lv \notin Range(ivs'[p][Len(ivs'[p])].mem))
-            => \A c \in ChunksOf(p) : \A v \in AckedV(c) : \A d \in Range(x.mem) \ {x.lv} :
+         IN (Len(ivs'[p]) > Len(ivs[p]) /\ \E l \in x.lv \ Range(ivs'[p][Len(ivs'[p])].mem) : dnode[l] # 0)
+            => \A c \in ChunksOf(p) : \A v \in AckedV(c) : \A d \in Range(x.mem) \ x.lv :
                  v \in dlog[d][c] /\ miss[d][c] = NoMiss]_vars
+
+\* 18. An acknowledged write is not stranded: if a disk that is not gone can
+\* serve all of a chunk's acknowledged writes, holding them and listing nothing
+\* of it, so can a member of its PG's current interval, up or down, or the
+\* image its primary carries while it leads. That such a disk exists is not
+\* claimed: a holder that truly dies leaves none. Nor is a read that succeeds:
+\* a refused version peering keeps can sit above the acknowledged ones, and
+\* with its one holder dead the chunk stays unfound though a member holds them
+\* all. One limit: a primary restart, or its disk marked down and up again,
+\* forgets the image, and if the member that held the kept version clean then
+\* goes, a disk can hold it while no member can serve it. A ci plan faults
+\* once and has no bounce, so none reaches it. Until replay and demotion leave
+\* a chunk's newest versions gated until peering settles them, that stays open.
+CanServe(d, c) ==
+    LET want == Content(c, UNION {Chain(c, v) : v \in AckedV(c)})
+        got == Content(c, dlog[d][c])
+    IN /\ dnode[d] # 0
+       /\ miss[d][c] = NoMiss
+       /\ \A b \in 1..Blocks[c] : got[b] >= want[b]
+
+NoStranded ==
+    \A c \in Chunk :
+       LET p == ChunkPG[c]
+       IN (AckedV(c) # {} /\ \E d \in Disk : CanServe(d, c))
+          => \/ \E d \in Mem(p, Cur(p)) : CanServe(d, c)
+             \/ \E n \in Node : Leads(n, p) /\ c \in {y.c : y \in Image(n, p)}
+
+\* 19. An activated primary has a source: for a chunk with an acknowledged write,
+\* a member of its interval can serve them all, or its own image is what peering
+\* kept. Two limits. A holder that truly dies leaves none, so it is claimed only
+\* while no disk has gone; ci-tears, where every copy can be torn, does not check
+\* it. And a write of a primary that lists the chunk can leave none, once
+\* acknowledged or on another member: peering with a member down cannot tell
+\* whether it landed there, and whichever it decides may drop what a member needed.
+\* Until writes to a degraded chunk are held, that stays open.
+ListerWrite(c) ==
+    \E r \in vers :
+       /\ r.c = c
+       /\ r.ls
+       /\ \/ r.v \in AckedV(c)
+          \/ Cardinality({d \in Disk : r.v \in dlog[d][c]}) > 1
+
+PrimarySource ==
+    \A p \in PG, n \in Node, c \in Chunk :
+       (/\ \A d \in Node : dnode[d] # 0
+        /\ ChunkPG[c] = p
+        /\ Leads(n, p)
+        /\ pr[n][p].act
+        /\ AckedV(c) # {}
+        /\ ~ListerWrite(c)
+        /\ Decided(n, p, IvAt(n, p)))
+       => \/ \E d \in Mem(p, IvAt(n, p)) : CanServe(d, c)
+          \/ c \in TheDec(n, p, IvAt(n, p)).img
 
 \* The versions of c a later activated decision does not rest on.
 Dropped(c) ==
@@ -1959,6 +2151,7 @@ AckedOnMinLive == [][\A y \in ackd' \ ackd :
 PGs == {1, 2}
 OnePG == {2}
 OneChunk == {2}
+FirstPG == {1}
 MinLive2 == [p \in PGs |-> 2]
 MaintPG2 == [p \in PGs |-> p = 2]
 Mem3 == [p \in PGs |-> IF p = 1 THEN <<1, 2, 3>> ELSE <<2, 3>>]
@@ -2003,7 +2196,10 @@ Repl(p, old, new) == [k |-> "replace", p |-> p, old |-> old, new |-> new]
 Rot(p) == [k |-> "rotate", p |-> p]
 AddM(p, old, new) == [k |-> "add", p |-> p, old |-> old, new |-> new]
 RemoveM(p) == [k |-> "remove", p |-> p]
-StayM(p, out) == [k |-> "stay", p |-> p, out |-> out]
+StayM(p, l, out) == [k |-> "stay", p |-> p, l |-> l, out |-> out]
+DropM(p) == [k |-> "drop", p |-> p]
+LostM(d) == [k |-> "lost", d |-> d]
+Tab(p, mem, marks, lv) == [k |-> "refill", p |-> p, mem |-> mem, marks |-> marks, lv |-> lv]
 ML(p, to) == [k |-> "minlive", p |-> p, to |-> to]
 Ed(p, mem, marks) == [k |-> "edit", p |-> p, mem |-> mem, marks |-> marks]
 Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f, t |-> 600, k |-> 1, s |-> Spare]
@@ -2040,10 +2236,77 @@ MaintMerges == Plan(<<Mark(3, "maint"), Mark(3, "up"), Mark(2, "maint")>>, Parti
 LateReport == [Plan(<<Mark(3, "down"), Mark(3, "up")>>, <<>>, {}) EXCEPT !.s = 2]
 
 \* PG 2's replica down, its primary stopped below min_live, then an empty disk
-\* in its place: a write in flight is kept on the primary alone, and the primary
+\* beside it: a write in flight is kept on the primary alone, and the primary
 \* moves on from it.
-LoneCopy == Plan(<<Mark(3, "down"), Repl(2, 3, 1), Mark(2, "down"), Repl(2, 2, 3)>>, Session, {})
+LoneCopy == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down")>>, Session, {})
 LonePlans == {LoneCopy}
+\* The same with the second member refilled while the first leaves, which the
+\* rule forbids, and two writes, so one is acknowledged on the primary alone
+\* and a member that lists its chunk.
+LoneSwap == Plan(<<Mark(3, "down"), Repl(2, 3, 1), Mark(2, "down"), Repl(2, 2, 3)>>, Partial2, {})
+StrandPlans == {LoneSwap}
+\* ci-refills: a member refilled and removed; the other member down while it
+\* leaves and back; or the leaving member back in that member's place.
+RefillDone == Plan(<<Mark(3, "down"), AddM(2, 3, 1), RemoveM(2)>>, Partial2, {})
+RefillBack == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
+RefillStay == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(3, "up"), StayM(2, 3, 2), RemoveM(2)>>, Partial2, {})
+Refilled(x) == [x EXCEPT !.f = {"restart", "format"}]
+\* ci-refills-stay and -primary fit 5 minutes with one partial write.
+OneWrite(x) == [x EXCEPT !.w = <<Partial2[1]>>]
+RefillPlans == {Refilled(RefillDone)}
+\* ci-image: Y on the primary alone, dropped while the member is down, so the
+\* primary lists the chunk; the member's disk is formatted and replaced, and
+\* only the removed disk 3 holds X clean.
+ImagePlans == {Plan(<<AddM(2, 3, 1), RemoveM(2), Mark(1, "down"), Mark(1, "up"),
+                   Tab(2, <<2, 4>>, <<"up", "up">>, {})>>, Partial2, {"format"})}
+RefillBackDownPlans == {Refilled(RefillBack)}
+\* ci-refills-down splits deep-refills-down by fault, the restart with one write.
+RefillDownFormatPlans == {[RefillBack EXCEPT !.f = {"format"}]}
+RefillDownRestartPlans == {[OneWrite(RefillBack) EXCEPT !.f = {"restart"}]}
+RefillStayPlans == {OneWrite(Refilled(RefillStay))}
+\* ci-refills-back: the primary refilled and back, which it comes behind the others;
+\* the leaving member back in one table with taking the other's place; a member
+\* refilled, then declared lost.
+RefillPrimary == Plan(<<Mark(2, "down"), AddM(2, 2, 1), Mark(2, "up"), RemoveM(2)>>, Partial2, {"restart"})
+RefillReturn == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"),
+                       Tab(2, <<1, 3, 2>>, <<"up", "up", "down">>, {2}), RemoveM(2)>>, Partial2, {})
+RefillLost == Plan(<<Mark(3, "down"), AddM(2, 3, 1), LostM(3), DropM(2)>>, Partial2, {})
+RefillPrimaryPlans == {OneWrite(RefillPrimary)}
+RefillBackPlans == {RefillReturn, RefillLost}
+\* ci-refills-two, on 4 nodes: both members refilled, one after the other or in
+\* one table; and the first declared lost, leaving by the table that refills the
+\* second, which returns.
+RefillSecond == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), AddM(2, 2, 4), RemoveM(2)>>, Partial2, {})
+RefillTogether == Plan(<<Mark(3, "down"), Mark(2, "down"),
+                         Tab(2, <<1, 3, 4, 2>>, <<"up", "down", "up", "down">>, {2, 3}), RemoveM(2)>>, Partial2, {})
+RefillLostSecond == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), LostM(3),
+                           Tab(2, <<1, 4, 2>>, <<"up", "up", "down">>, {2}), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
+RefillTwoPlans == {RefillSecond}
+RefillTogetherPlans == {RefillTogether}
+RefillLostPlans == {RefillLostSecond}
+\* neg-drop-all-leaving: both members leaving, one lost, and the other holds what
+\* no member can serve.
+DropAllPlans == {Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), AddM(2, 2, 4), LostM(3), DropM(2)>>, Partial2, {})}
+
+\* ci-sources, each with a primary restart: a move whose removed member lacks Y;
+\* a recovering member of rep3 that lacks Y, which both go to every member listing
+\* under a veto. And the second write's primary lists the chunk: X's one source is
+\* marked down, the primary takes a whole block alone, and the source returns.
+MoveRestarted == Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Partial2, {"restart"})
+ListerRestarted == Plan(<<Mark(3, "down"), Mark(3, "up")>>, Partial, {"restart"})
+LoneListerWrites ==
+    <<Partial[1], [Partial[2] EXCEPT !.after = 1],
+      [c |-> 1, blk |-> 2, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 1]>>
+ListerOrders == Plan(<<ML(1, 2), Mark(3, "down"), Mark(3, "up")>>, LoneListerWrites, {})
+MoveSourcePlans == {MoveRestarted}
+MoveAnswer == {[MoveRestarted EXCEPT !.w = <<Partial2[2]>>]}
+ListerAnswer == {[ListerRestarted EXCEPT !.w = <<Partial[2]>>]}
+ListerPlans == {ListerRestarted}
+LateAskPlans == {[ListerRestarted EXCEPT !.f = {"restart", "lateask"}]}
+ListerOrderPlans == {ListerOrders}
+\* neg-write-on-unfound: the same writes, with the source marked down after a
+\* primary restart, which forgets the image, so the chunk is unfound.
+UnfoundPlans == {Plan(<<ML(1, 2), Mark(3, "down")>>, LoneListerWrites, {"restart"})}
 
 \* ci-peering checks the plans with membership changes alone, but one;
 \* ci-restarts those with a restart or a format, under which a decision can
@@ -2081,21 +2344,24 @@ MoveLeavingDown == Plan(<<AddM(2, 3, 1), Mark(3, "down"), RemoveM(2)>>, Session,
 MoveRestart == Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Session, {"restart"})
 MoveMaint == Plan(<<AddM(2, 3, 1), Mark(2, "maint"), Mark(2, "up"), RemoveM(2)>>, Session, {})
 MoveRefill == Plan(<<AddM(2, 3, 1), Repl(2, 1, 4), RemoveM(2)>>, Session, {"format"})
-StayForPrimary == Plan(<<AddM(2, 3, 1), Mark(2, "down"), StayM(2, 2)>>, Session, {})
-StayAsPrimary == Plan(<<AddM(2, 2, 1), Mark(3, "down"), StayM(2, 3)>>, Session, {})
-StayForNew == Plan(<<AddM(2, 3, 1), Mark(1, "down"), StayM(2, 1)>>, Session, {})
-StayStale == Plan(<<AddM(2, 3, 1), Mark(3, "down"), Mark(3, "up"), Mark(2, "down"), StayM(2, 2)>>, Session, {})
+StayForPrimary == Plan(<<AddM(2, 3, 1), Mark(2, "down"), StayM(2, 3, 2)>>, Session, {})
+StayAsPrimary == Plan(<<AddM(2, 2, 1), Mark(3, "down"), StayM(2, 2, 3)>>, Session, {})
+StayForNew == Plan(<<AddM(2, 3, 1), Mark(1, "down"), StayM(2, 3, 1)>>, Session, {})
+StayStale == Plan(<<AddM(2, 3, 1), Mark(3, "down"), Mark(3, "up"), Mark(2, "down"), StayM(2, 3, 2)>>, Session, {})
 MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveMaint, MoveRefill}
 \* ci-stays splits the stays off, each config under the 300 s budget.
-StayMovePlans == {StayForPrimary, StayAsPrimary, StayForNew}
+StayMovePlans == {StayForPrimary, StayAsPrimary}
+StayNewPlans == {StayForNew}
 \* A leaving member down and back, then taking the place of a primary that went
 \* down: W, kept at the first of those intervals on the primary alone and
-\* refused, stays kept with no holder among the members, unacknowledged. Over
-\* 7 tables ci-stays-stale needs PG 2 alone and no spare table to fit 5 minutes.
+\* refused, stays kept with its holder down, leaving and a member. Over 7 tables
+\* ci-stays-stale needs PG 2 alone and no spare table to fit 5 minutes.
 StayStalePlans == {StayStale}
-\* neg-stay-keeps-interval: a primary still marked up once its disk is formatted
-\* away, two versions in flight.
-StayPlans == {Plan(<<AddM(2, 3, 1), StayM(2, 2)>>, Partial2, {"format"})}
+StayStrandPlans == {[StayStale EXCEPT !.w = Partial2]}
+\* ci-stays-gone and neg-stay-keeps-interval: a primary still marked up once its
+\* disk is formatted away, two versions in flight, the member that left going
+\* with the move.
+StayPlans == {Plan(<<AddM(2, 3, 1), StayM(2, 3, 2)>>, Partial2, {"format"})}
 
 \* ci-faults: versions that fail, disks formatted around peering and recovery,
 \* and a min_live change.

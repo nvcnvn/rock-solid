@@ -76,12 +76,16 @@ type gen struct {
 	lists map[[3]uint64]bool
 	// operatorAsk holds each PG the harness, no primary, asked a new interval of: its next table is an Edit that changes nothing.
 	operatorAsk map[uint64]bool
+	// restarted holds each [node, pg] whose node restarted and has not activated the PG since.
+	restarted map[[2]uint64]bool
 	// activated is each PG's newest activated interval, tableIv the interval of each PG at each epoch.
 	activated map[uint64]uint64
 	tableIv   map[uint64]map[uint64]uint64
 	// left is the line where a [node, pg] stopped being in the PG's activated interval, formatAt the line where a spec disk's node formatted it, and nodeDisk a node's spec disk once formatted.
 	left     map[[2]uint64]int
 	formatAt map[uint64]int
+	// outOfPool is the spec disks formatted or declared lost.
+	outOfPool map[uint64]bool
 	// refused holds each member's refusal the primary has not heard, by chunk: its line, and the node that refused.
 	refused map[uint64][]refusal
 	// orderAt is the line of each recovery a primary ordered, by chunk and interval.
@@ -253,31 +257,37 @@ func (g *gen) classify(epoch uint64, changed []uint64, next map[uint64]*entry) {
 		a, b := disks(old.members), disks(e.members)
 		asked := g.operatorAsk[f]
 		delete(g.operatorAsk, f)
+		la, lb := leavingOf(old), leavingOf(e)
+		added, removed, newly, ended := minus(b, a), minus(a, b), minus(lb, la), minus(la, lb)
+		kept := keptMarks(old, e)
 		switch {
+		case kept && len(added) == 0 && len(ended) == 1 && len(newly) == 1 && slices.Equal(b, append(minus(a, newly), newly...)):
+			g.planned(fmt.Sprintf(`[k |-> "stay", p |-> %d, l |-> %d, out |-> %d]`, p, g.disk(ended[0]), g.disk(newly[0])))
+		case kept && len(added) == 0 && len(ended) == 1 && len(newly) == 0 && len(removed) == 1 && slices.Contains(b, ended[0]) && slices.Equal(b, minus(a, removed)):
+			g.planned(fmt.Sprintf(`[k |-> "stay", p |-> %d, l |-> %d, out |-> %d]`, p, g.disk(ended[0]), g.disk(removed[0])))
 		case slices.Equal(a, b) && sameMembers(old, e) && e.minLive == old.minLive && !asked:
 			g.tables++
 			g.line(`k |-> "renew", p |-> %d`, p)
-		case len(b) == len(a)+1 && slices.Equal(a, b[:len(a)]) && leavingOf(e) != 0 && sameMarks(old, &entry{members: e.members[:len(a)]}):
-			g.planned(fmt.Sprintf(`[k |-> "add", p |-> %d, old |-> %d, new |-> %d]`, p, g.disk(leavingOf(e)), g.disk(b[len(a)])))
-		case len(b) == len(a)-1 && leavingOf(old) != 0 && slices.Equal(b, slices.DeleteFunc(slices.Clone(a), func(d uint64) bool { return d == leavingOf(old) })):
-			g.planned(fmt.Sprintf(`[k |-> "remove", p |-> %d]`, p))
-		case len(b) == len(a)-1 && leavingOf(old) != 0 && leavingOf(e) == 0 && slices.Contains(b, leavingOf(old)) && !slices.ContainsFunc(b, func(d uint64) bool { return !slices.Contains(a, d) }):
-			out := a[slices.IndexFunc(a, func(d uint64) bool { return !slices.Contains(b, d) })]
-			g.planned(fmt.Sprintf(`[k |-> "stay", p |-> %d, out |-> %d]`, p, g.disk(out)))
-		case len(a) == len(b) && differs(a, b) == 1:
+		case kept && len(added) == 1 && len(removed) == 0 && len(ended) == 0 && len(newly) == 1 &&
+			(slices.Equal(b, append(slices.Clone(a), added...)) || slices.Equal(b, append(append(minus(a, newly), added...), newly...))):
+			g.planned(fmt.Sprintf(`[k |-> "add", p |-> %d, old |-> %d, new |-> %d]`, p, g.disk(newly[0]), g.disk(added[0])))
+		case kept && len(added) == 0 && len(newly) == 0 && len(removed) > 0 && slices.Equal(removed, ended) && slices.Equal(b, minus(a, removed)):
+			if slices.ContainsFunc(removed, func(d uint64) bool { return !g.outOfPool[g.disk(d)] }) {
+				g.planned(fmt.Sprintf(`[k |-> "remove", p |-> %d]`, p))
+			} else {
+				g.planned(fmt.Sprintf(`[k |-> "drop", p |-> %d]`, p))
+			}
+		case slices.Equal(la, lb) && len(a) == len(b) && differs(a, b) == 1:
 			j := slices.IndexFunc(a, func(d uint64) bool { return !slices.Contains(b, d) })
 			g.planned(fmt.Sprintf(`[k |-> "replace", p |-> %d, old |-> %d, new |-> %d]`, p, g.disk(a[j]), g.disk(b[j])))
-		case len(a) >= 2 && len(a) == len(b) && a[0] == b[1] && a[1] == b[0] && slices.Equal(a[2:], b[2:]) && sameMarks(old, e):
+		case len(a) >= 2 && len(a) == len(b) && a[0] == b[1] && a[1] == b[0] && slices.Equal(a[2:], b[2:]) && kept:
 			g.planned(fmt.Sprintf(`[k |-> "rotate", p |-> %d]`, p))
-		case len(a) == len(b) && differs(sortedCopy(a), sortedCopy(b)) == 0:
-			var mem, ms []string
-			for _, m := range e.members {
-				mem = append(mem, strconv.FormatUint(g.disk(m.disk), 10))
-				ms = append(ms, `"`+marks(m.mark)+`"`)
-			}
-			g.planned(fmt.Sprintf(`[k |-> "edit", p |-> %d, mem |-> <<%s>>, marks |-> <<%s>>]`, p, strings.Join(mem, ", "), strings.Join(ms, ", ")))
+		case len(la) == 0 && len(lb) == 0 && len(a) == len(b) && differs(sortedCopy(a), sortedCopy(b)) == 0 && marksChanged(old, e) <= 1:
+			mem, ms := g.memberList(e.members)
+			g.planned(fmt.Sprintf(`[k |-> "edit", p |-> %d, mem |-> %s, marks |-> %s]`, p, mem, ms))
 		default:
-			fatal("table %d changes PG %d from %v to %v: no spec change maps it", epoch, p, old.members, e.members)
+			mem, ms := g.memberList(e.members)
+			g.planned(fmt.Sprintf(`[k |-> "refill", p |-> %d, mem |-> %s, marks |-> %s, lv |-> %s]`, p, mem, ms, g.diskSet(lb)))
 		}
 	}
 	for _, k := range sortedPairs(marked) {
@@ -314,8 +324,8 @@ func (g *gen) tableLine(changed []uint64) {
 			pm, pk := g.memberList(x.members)
 			ps = append(ps, fmt.Sprintf("[iv |-> %d, ml |-> %d, mem |-> %s, marks |-> %s]", x.interval, x.minLive, pm, pk))
 		}
-		rows = append(rows, fmt.Sprintf("[p |-> %d, iv |-> %d, la |-> %d, ml |-> %d, lv |-> %d, mem |-> %s, marks |-> %s, past |-> <<%s>>]",
-			g.pg(f), e.interval, e.activated, e.minLive, g.disk(leavingOf(e)), mem, ms, strings.Join(ps, ", ")))
+		rows = append(rows, fmt.Sprintf("[p |-> %d, iv |-> %d, la |-> %d, ml |-> %d, lv |-> %s, mem |-> %s, marks |-> %s, past |-> <<%s>>]",
+			g.pg(f), e.interval, e.activated, e.minLive, g.diskSet(leavingOf(e)), mem, ms, strings.Join(ps, ", ")))
 	}
 	g.line(`k |-> "table", rows |-> <<%s>>`, strings.Join(rows, ", "))
 }
@@ -326,13 +336,28 @@ func (g *gen) planned(item string) {
 	g.line(`k |-> "plan"`)
 }
 
-func leavingOf(e *entry) uint64 {
+func leavingOf(e *entry) []uint64 {
+	var ds []uint64
 	for _, m := range e.members {
 		if m.leaving {
-			return m.disk
+			ds = append(ds, m.disk)
 		}
 	}
-	return 0
+	return ds
+}
+
+// diskSet writes disks as a spec set.
+func (g *gen) diskSet(ds []uint64) string {
+	var d []string
+	for _, x := range ds {
+		d = append(d, strconv.FormatUint(g.disk(x), 10))
+	}
+	return "{" + strings.Join(d, ", ") + "}"
+}
+
+// minus is a's disks that are not in b.
+func minus(a, b []uint64) []uint64 {
+	return slices.DeleteFunc(slices.Clone(a), func(d uint64) bool { return slices.Contains(b, d) })
 }
 
 func sortedCopy(a []uint64) []uint64 {
@@ -367,25 +392,38 @@ func sortedPairs(m map[[2]uint64]bool) [][2]uint64 {
 
 func sameMembers(a, b *entry) bool { return slices.Equal(a.members, b.members) }
 
-func sameMarks(a, b *entry) bool {
-	mark := func(e *entry, d uint64) uint64 {
-		return e.members[slices.IndexFunc(e.members, func(m member) bool { return m.disk == d })].mark
-	}
-	for _, m := range a.members {
-		if mark(b, m.disk) != m.mark {
+// keptMarks reports whether every disk in both a and b has one mark, and b's others are up.
+func keptMarks(a, b *entry) bool {
+	for _, m := range b.members {
+		j := slices.IndexFunc(a.members, func(o member) bool { return o.disk == m.disk })
+		if j >= 0 && a.members[j].mark != m.mark || j < 0 && m.mark != 0 {
 			return false
 		}
 	}
 	return true
 }
 
-// oneMark reports the one disk whose mark alone changes between a and b.
+// marksChanged counts the disks of a whose mark differs in b.
+func marksChanged(a, b *entry) int {
+	n := 0
+	for _, m := range a.members {
+		if j := slices.IndexFunc(b.members, func(o member) bool { return o.disk == m.disk }); j >= 0 && b.members[j].mark != m.mark {
+			n++
+		}
+	}
+	return n
+}
+
+// oneMark reports the one disk whose mark alone changes between a and b, no leaving flag changing.
 func oneMark(a, b *entry) (disk, to uint64, ok bool) {
 	if !slices.Equal(disks(a.members), disks(b.members)) {
 		return 0, 0, false
 	}
 	n := 0
 	for i := range a.members {
+		if a.members[i].leaving != b.members[i].leaving {
+			return 0, 0, false
+		}
 		if a.members[i].mark != b.members[i].mark {
 			disk, to = a.members[i].disk, b.members[i].mark
 			n++
@@ -560,17 +598,25 @@ func (g *gen) run(recs []trace.Record) {
 				g.operatorAsk[r.Fields[0]] = true
 				break
 			}
-			g.line(`k |-> "ask", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
+			kind := "ask"
+			if g.restarted[[2]uint64{uint64(n), r.Fields[0]}] {
+				kind = "restartask"
+			}
+			g.line(`k |-> "%s", n |-> %d, p |-> %d, iv |-> %d`, kind, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.OutFormat:
 			old, ok := g.nodeDisk[n]
 			if !ok {
 				old = uint64(n)
 			}
 			g.formatAt[old] = len(g.lines)
+			g.outOfPool[old] = true
 			g.fmts++
 			g.diskIDs[r.Fields[0]] = uint64(g.nodes + g.fmts)
 			g.nodeDisk[n] = g.diskIDs[r.Fields[0]]
 			g.line(`k |-> "format", n |-> %d`, n)
+		case trace.OutLost:
+			g.outOfPool[g.disk(r.Fields[0])] = true
+			g.line(`k |-> "lost", d |-> %d`, g.disk(r.Fields[0]))
 		case trace.OutCommitted:
 			g.line(`k |-> "committed", c |-> %d, v |-> %s`, g.chunk(r.Fields[0]), ver(r.Fields[1]))
 		case trace.OutReply:
@@ -602,6 +648,7 @@ func (g *gen) run(recs []trace.Record) {
 		case trace.OutActivate:
 			g.primary[r.Fields[0]] = n
 			g.activated[r.Fields[0]] = r.Fields[1]
+			delete(g.restarted, [2]uint64{uint64(n), r.Fields[0]})
 			for k := range g.left {
 				if k[1] == r.Fields[0] {
 					delete(g.left, k)
@@ -610,6 +657,7 @@ func (g *gen) run(recs []trace.Record) {
 			g.line(`k |-> "activate", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.EvCrash:
 			for _, f := range g.pgs {
+				g.restarted[[2]uint64{uint64(n), f}] = true
 				if g.primary[f] == n {
 					g.leave(n, f)
 				}
@@ -717,8 +765,8 @@ func main() {
 		fatal("usage: tracedata [-module name] run.trace")
 	}
 	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{},
-		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
-		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, nodeDisk: map[int]uint64{}, recovering: map[int][][3]uint64{}, orderAt: map[[2]uint64]int{}, refused: map[uint64][]refusal{}}
+		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, restarted: map[[2]uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
+		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][3]uint64{}, orderAt: map[[2]uint64]int{}, refused: map[uint64][]refusal{}}
 	recs := g.load(flag.Arg(0))
 	if len(recs) == 0 {
 		fatal("no table in the trace")

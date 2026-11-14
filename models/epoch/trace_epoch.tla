@@ -27,7 +27,7 @@ TCnt(v) == v % TBase
 
 \* No traced run injects a disk fault, so MemberFail has no budget and a member's
 \* refusal of a version of its interval has no step.
-TPlanSet == {[free |-> FALSE, m |-> TPlan, w |-> TWrites, f |-> {"restart", "format", "ownfail"},
+TPlanSet == {[free |-> FALSE, m |-> TPlan, w |-> TWrites, f |-> {"restart", "format", "ownfail", "lateask"},
               t |-> 0, k |-> 100000, s |-> 100000]}
 TMaint == [p \in TPG |-> FALSE]
 TRates == [n \in TNode |-> {1000}]
@@ -155,6 +155,9 @@ Line(l) ==
        /\ Restart(l.n)
     \/ /\ l.k = "format"
        /\ Format(l.n)
+    \/ /\ l.k = "lost"
+       /\ Lost(l.d)
+       /\ UNCHANGED step
     \/ /\ l.k = "recoverorder"
        /\ Leads(l.n, ChunkPG[l.c])
        /\ pr[l.n][ChunkPG[l.c]].act
@@ -178,13 +181,17 @@ Line(l) ==
        /\ \/ UNCHANGED vars
           \/ RecoverLine(l)
     \/ /\ l.k = "reported"
-       /\ IF ivs[l.p][l.iv].lv = 0 \/ [p |-> l.p, k |-> l.iv] \in recd
+       /\ IF ivs[l.p][l.iv].lv = {} \/ [p |-> l.p, k |-> l.iv] \in recd
           THEN UNCHANGED vars
           ELSE IvAt(l.n, l.p) = l.iv /\ ReportRecovered(l.n, l.p)
     \/ /\ l.k = "ask"
        /\ IF reqIv[l.p] = l.iv
           THEN UNCHANGED vars
           ELSE IvAt(l.n, l.p) = l.iv /\ (AskNext(l.n, l.p) \/ CounterOut(l.n, l.p))
+    \/ /\ l.k = "restartask"
+       /\ IF reqIv[l.p] = l.iv
+          THEN UNCHANGED vars
+          ELSE IvAt(l.n, l.p) = l.iv /\ RestartAsk(l.n, l.p)
     \/ /\ l.k = "committed"
        /\ [c |-> l.c, v |-> l.v] \in ackd
        /\ UNCHANGED vars

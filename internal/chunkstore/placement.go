@@ -25,7 +25,7 @@ const (
 	MarkMaint
 )
 
-// Member is one member of a PG: its disk, its live mark, and whether a move is taking it out once its replacement has recovered.
+// Member is one member of a PG: its disk, its live mark, and whether a move or a refill is taking it out once the others have recovered.
 type Member struct {
 	Disk    uint32
 	Mark    Mark
@@ -98,10 +98,14 @@ type Inputs struct {
 type placementPlants struct {
 	// removeOnActivation removes a leaving member once its PG's interval activates, before its
 	// replacement recovered; oldReport removes it on a recovered report for any interval of its PG;
-	// editKeepsInterval starts no interval for a table that keeps a PG's disks, in any order.
+	// editKeepsInterval starts no interval for a table that keeps a PG's disks, in any order;
+	// refillSoleHolder has refill and narrow delete a member merely down; dropAllLeaving has refill
+	// delete every leaving member once one's disk left the pool.
 	removeOnActivation bool
 	oldReport          bool
 	editKeepsInterval  bool
+	refillSoleHolder   bool
+	dropAllLeaving     bool
 }
 
 // Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members removed on a recovered report for their PG's current interval while its other members stay up, reports ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves. It reports the moves it made.
@@ -127,6 +131,7 @@ type placer struct {
 	pool    Pool
 	ran     uint8
 	now     core.Tick
+	plant   placementPlants
 	disks   []Disk
 	target  []float64
 	load    []int
@@ -157,7 +162,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 	if old != nil {
 		ran = old.MinLive
 	}
-	pl := &placer{pool: p, ran: ran, now: all.Now, disks: slices.Clone(in.Disks), base: base, entries: make([]PGEntry, n)}
+	pl := &placer{pool: p, ran: ran, now: all.Now, plant: all.plant, disks: slices.Clone(in.Disks), base: base, entries: make([]PGEntry, n)}
 	slices.SortFunc(pl.disks, func(a, b Disk) int { return cmp.Compare(a.ID, b.ID) })
 	pl.target = p.targets(pl.disks, all.Now)
 	pl.load = make([]int, len(pl.disks))
@@ -265,11 +270,11 @@ func (pl *placer) accepts(ed *Edit) bool {
 	return true
 }
 
-// narrow brings e's members but a leaving one down to the width after replicas went down: it deletes a member refill would replace anyway, and marks the one it would otherwise drop, its last down member or else its last, leaving, so that it goes once the others have recovered; a PG with a leaving member keeps the rest until its removal.
+// narrow brings e's members but the leaving ones down to the width after replicas went down: it deletes a member whose disk left the pool, and marks the one it would otherwise drop, its last down member or else its last, leaving, so that it goes once the others have recovered; a PG with a leaving member keeps the rest until its removal.
 func (pl *placer) narrow(e, base *PGEntry) {
 	for len(e.Members)-leavingIn(e.Members) > pl.pool.width() {
 		j := len(e.Members) - 1
-		for j >= 0 && (e.Members[j].Leaving || !pl.missing(e, base, j)) {
+		for j >= 0 && (e.Members[j].Leaving || !pl.gone(e, base, j)) {
 			j--
 		}
 		if j >= 0 {
@@ -293,7 +298,7 @@ func (pl *placer) narrow(e, base *PGEntry) {
 	}
 }
 
-// recovers reports whether every member but a leaving one is up, as a recovered report needs: a table that marks one otherwise ignores the report.
+// recovers reports whether every member but the leaving ones is up, as a recovered report needs: a table that marks one otherwise ignores the report.
 func recovers(ms []Member) bool {
 	return !slices.ContainsFunc(ms, func(m Member) bool { return !m.Leaving && m.Mark != MarkUp })
 }
@@ -369,32 +374,48 @@ func (pl *placer) find(id uint32) int {
 	return k
 }
 
-// refill drops a leaving member whose disk left the pool, narrows e, keeps the other leaving member in place of a missing member or where the width needs it, replaces every other missing member of e, and adds members until all but a leaving one fill the width, each on the eligible disk furthest below its target; a member with no eligible disk stays.
+// refill drops the leaving members whose disks left the pool, narrows e, keeps a leaving member in place of a missing member or where the width needs it, replaces a member whose disk left the pool, marks another missing member leaving beside its replacement while e is under maxMembers, and adds members until all but the leaving ones fill the width, each on the eligible disk furthest below its target; a member with no eligible disk stays.
 func (pl *placer) refill(e *PGEntry, base *PGEntry) {
-	// A leaving member merely down stays however long: the member that replaces it is no copy
-	// until the recovered report, and may never become one if the leaving member holds the only
-	// copy, while activations with the new member live drop the past intervals that would have
-	// made peering wait for it.
-	if j := e.leaving(); j >= 0 && pl.find(e.Members[j].Disk) < 0 {
-		e.dropLeaving()
+	// A member merely down stays however long, leaving: the member that replaces it is no copy
+	// until the recovered report, and may never become one if the old member holds the only copy,
+	// while activations with the new member live drop the past intervals that would have made
+	// peering wait for it.
+	if slices.ContainsFunc(e.Members, func(m Member) bool { return m.Leaving && pl.find(m.Disk) < 0 }) {
+		e.Members = slices.DeleteFunc(e.Members, func(m Member) bool { return m.Leaving && (pl.plant.dropAllLeaving || pl.find(m.Disk) < 0) })
 	}
 	pl.narrow(e, base)
 	for j := 0; j < len(e.Members); j++ {
 		if e.Members[j].Leaving || !pl.missing(e, base, j) {
 			continue
 		}
-		if e.leaving() >= 0 && pl.stay(e, j) {
-			if o := pl.find(e.Members[j].Disk); o >= 0 {
+		gone := pl.gone(e, base, j)
+		o := pl.find(e.Members[j].Disk)
+		switch {
+		case pl.stay(e, j):
+			if o >= 0 {
 				pl.load[o]--
 			}
-			e.Members = slices.Delete(e.Members, j, j+1)
+			if gone {
+				e.Members = slices.Delete(e.Members, j, j+1)
+			} else {
+				e.park(j)
+			}
 			j--
-		} else if k := pl.pick(e, j); k >= 0 {
-			pl.swap(e, j, k)
+		case gone:
+			if k := pl.pick(e, j); k >= 0 {
+				pl.swap(e, j, k)
+			}
+		case len(e.Members) < maxMembers:
+			if k := pl.pick(e, j); k >= 0 {
+				e.Members = append(e.Members, Member{Disk: pl.disks[k].ID})
+				e.park(j)
+				pl.load[o]--
+				pl.load[k]++
+				j--
+			}
 		}
 	}
-	if e.leaving() >= 0 && len(e.Members) <= pl.pool.width() {
-		pl.stay(e, -1)
+	for len(e.Members)-leavingIn(e.Members) < pl.pool.width() && pl.stay(e, -1) {
 	}
 	for len(e.Members)-leavingIn(e.Members) < pl.pool.width() {
 		k := pl.pick(e, -1)
@@ -406,16 +427,29 @@ func (pl *placer) refill(e *PGEntry, base *PGEntry) {
 	}
 }
 
-// stay makes e's leaving member an ordinary member in place of member out (-1 for none) if its disk is up and not draining and its domain has room, and reports whether it did.
+// park marks e's member j leaving and takes it behind the others, so that on its return it does not lead while one of them is up.
+func (e *PGEntry) park(j int) {
+	m := e.Members[j]
+	m.Leaving = true
+	e.Members = append(slices.Delete(e.Members, j, j+1), m)
+}
+
+// stay makes e's first leaving member whose disk is up and not draining and whose domain has room an ordinary member in place of member out (-1 for none), and reports whether there was one.
 func (pl *placer) stay(e *PGEntry, out int) bool {
-	j := e.leaving()
-	k := pl.find(e.Members[j].Disk)
-	if k < 0 || pl.disks[k].Mark != MarkUp || pl.disks[k].Drain || !pl.room(e, k, out) {
-		return false
+	for j := range e.Members {
+		k := pl.find(e.Members[j].Disk)
+		if e.Members[j].Leaving && k >= 0 && pl.disks[k].Mark == MarkUp && !pl.disks[k].Drain && pl.room(e, k, out) {
+			e.Members[j].Leaving = false
+			pl.load[k]++
+			return true
+		}
 	}
-	e.Members[j].Leaving = false
-	pl.load[k]++
-	return true
+	return false
+}
+
+// gone reports whether refill deletes e's member j, nothing being left to lose: its disk left the pool.
+func (pl *placer) gone(e, base *PGEntry, j int) bool {
+	return pl.find(e.Members[j].Disk) < 0 || pl.plant.refillSoleHolder && pl.missing(e, base, j)
 }
 
 // missing reports whether e's member j is refilled: its disk left the pool, or it has been down for refill_after, or for degraded_refill_after with e below min_live, and peering does not wait for it anyway.
@@ -473,7 +507,7 @@ func (pl *placer) pick(e *PGEntry, out int) int {
 
 func (pl *placer) after(k int) float64 { return float64(pl.load[k]+1) / pl.target[k] }
 
-// refills reports whether peering waits for e's member j, in a table whose pool runs under minLive, and otherwise whether placement would refill the member once it is down long enough, some disk of in being eligible to take it at now.
+// refills reports whether peering waits for e's member j, in a table whose pool runs under minLive, and otherwise whether placement would refill the member once it is down long enough, e being under maxMembers and some disk of in being eligible to take it at now.
 func refills(in *PoolInputs, minLive uint8, e *PGEntry, j int, now core.Tick) (waits, refilled bool) {
 	pl := &placer{pool: in.Pool, ran: minLive, now: now, disks: slices.Clone(in.Disks)}
 	slices.SortFunc(pl.disks, func(a, b Disk) int { return cmp.Compare(a.ID, b.ID) })
@@ -482,10 +516,10 @@ func refills(in *PoolInputs, minLive uint8, e *PGEntry, j int, now core.Tick) (w
 	if pl.waits(e.Members[j].Disk, e, e) {
 		return true, false
 	}
-	return false, pl.pick(e, j) >= 0
+	return false, len(e.Members) < maxMembers && pl.pick(e, j) >= 0
 }
 
-// eligible reports whether disk k may take a member of e in place of member out: it is up with a target, not in e, and its domain holds fewer than perDomain of e's other members but a leaving one.
+// eligible reports whether disk k may take a member of e in place of member out: it is up with a target, not in e, and its domain holds fewer than perDomain of e's other members but the leaving ones.
 func (pl *placer) eligible(e *PGEntry, k, out int) bool {
 	d := &pl.disks[k]
 	if d.Mark != MarkUp || pl.target[k] == 0 || slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == d.ID }) {
@@ -494,7 +528,7 @@ func (pl *placer) eligible(e *PGEntry, k, out int) bool {
 	return pl.room(e, k, out)
 }
 
-// room reports whether disk k's domain holds fewer than perDomain of e's members but member out and a leaving one.
+// room reports whether disk k's domain holds fewer than perDomain of e's members but member out and the leaving ones.
 func (pl *placer) room(e *PGEntry, k, out int) bool {
 	domain, same := pl.pool.domainOf(&pl.disks[k]), 0
 	for j, m := range e.Members {

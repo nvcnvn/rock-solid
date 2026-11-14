@@ -17,6 +17,7 @@ const (
 	invKeptAfterDrop = "no version peering keeps follows a dropped version of its chunk"
 	invActivates     = "once membership stops changing, every PG whose current interval has at least min_live live members on running nodes activates it"
 	invAckCopies     = "no write is acknowledged on fewer than min_live disks, a member in maintenance counting as one"
+	invHasSource     = "an activated primary has a source of each chunk it kept, or calls it unfound"
 )
 
 // inactive is the first PG of c's table with min_live live members whose primary runs but has not activated its current interval.
@@ -99,6 +100,7 @@ func watchEpochs(c *rcluster, rec *DiskRecord) *epochChecks {
 		c.inv.Register(inv, func() error { return x.errs[inv] })
 	}
 	c.inv.Register(invActivations, x.activations)
+	c.inv.Register(invHasSource, x.sources)
 	if rec != nil {
 		c.inv.Register(invDiskIDs, x.identities)
 	}
@@ -322,6 +324,41 @@ func (x *epochChecks) activations() error {
 		}
 	}
 	return nil
+}
+
+// sources checks each activated lead of its table's interval: a chunk it kept that it lacks, and does not call unfound, has an up member listing nothing, or one not running to say.
+func (x *epochChecks) sources() error {
+	for _, r := range x.c.reps {
+		if r == nil {
+			continue
+		}
+		for i := range r.leads {
+			l := &r.leads[i]
+			_, e := r.table.entry(l.pg)
+			if !l.active || e == nil || e.Interval != l.interval {
+				continue
+			}
+			for _, k := range l.kept {
+				if k.kept != 0 && k.lacking && !k.unfound && !slices.ContainsFunc(e.Members, func(m Member) bool { return x.canSource(m, k.chunk) }) {
+					return fmt.Errorf("%s: disk %d keeps %#x of %v, every up member lists it", invHasSource, r.cfg.Disk, k.kept, k.chunk)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (x *epochChecks) canSource(m Member, ch core.ChunkID) bool {
+	if m.Mark != MarkUp {
+		return false
+	}
+	n := x.c.node(m.Disk)
+	if n < 0 || x.c.reps[n] == nil || !x.c.reps[n].Store().Serving() {
+		return true
+	}
+	o := x.c.reps[n]
+	c, _ := o.Store().Index().Chunk(o.st.cfg.Pool, ch)
+	return c.ListedIn == 0
 }
 
 // identities checks the disk record and the disks the nodes run: each disk ID keeps the log ID it was first given, and no log ID is up under two disk IDs.

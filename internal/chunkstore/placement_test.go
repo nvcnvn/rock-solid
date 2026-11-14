@@ -239,7 +239,7 @@ func (l *layout) raised(t *testing.T, in *Inputs) []int {
 func (l *layout) holding(disks ...uint32) []int {
 	var pgs []int
 	for i, e := range l.pools().PGs {
-		if slices.ContainsFunc(e.Members, func(m Member) bool { return slices.Contains(disks, m.Disk) }) {
+		if slices.ContainsFunc(e.Members, func(m Member) bool { return !m.Leaving && slices.Contains(disks, m.Disk) }) {
 			pgs = append(pgs, i)
 		}
 	}

@@ -11,7 +11,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
-// maxMembers is the widest PG a replica primary fans out to: rep3 with a leaving member.
+// maxMembers is the widest PG a replica primary fans out to, leaving members included.
 const maxMembers = 8
 
 // ResendTimer is the timer on which a primary sends its members again, in order, the writes a lost connection left unacknowledged.
@@ -114,7 +114,10 @@ type lead struct {
 	serving bool
 	peer    *peering
 	kept    []keptChunk
-	held    []heldMsg
+	// image is the chunks whose image the lead's last decision found at the version it kept: a later decision that keeps
+	// the same version finds it still, though the store lists the chunk for versions of its own the decision dropped.
+	image []ChunkVersion
+	held  []heldMsg
 	// asking is set once a chunk of the PG spent its counter or a version failed, which ends the interval: the primary orders nothing more in it and asks for the next once none of its versions is pending, setting asked. spent counts the held writes the store refused for a spent counter, which go ahead of those held since.
 	asking bool
 	asked  bool
@@ -399,6 +402,18 @@ type replicaPlants struct {
 	reportDecided     bool
 	relistNever       bool
 	unlistTorn        bool
+	// listerVetoes has a member that lists a chunk veto a version it lacks; keepPastMember has a
+	// reached member outside the interval veto a version every up member holds; keepNoSource lifts
+	// both vetoes with no up member a source of the version; writeOnUnfound orders a write to an
+	// unfound chunk; neverUnfound leaves a chunk with no source neither recovering nor unfound;
+	// forgetImage has a decision forget that the lead's last one found the primary's image at the
+	// version both keep.
+	listerVetoes   bool
+	keepPastMember bool
+	keepNoSource   bool
+	writeOnUnfound bool
+	neverUnfound   bool
+	forgetImage    bool
 	// fenceOnArrival refuses an older incarnation's write when it reaches the primary, not when the
 	// store orders it; reorderAfterOther keeps a lead's term across intervals another primary led,
 	// so its held writes are ordered again.
@@ -547,7 +562,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 				case old.interval == e.Interval:
 					l = old
 				case r.keptPrimary(e, old.interval):
-					l.since, l.serving, l.kept = old.since, old.serving, old.kept
+					l.since, l.serving, l.kept, l.image = old.since, old.serving, old.kept, old.image
 				case r.plant.reorderAfterOther:
 					l.since = old.since
 				}
@@ -880,7 +895,7 @@ func (r *Replica) park(ev *core.Event, epoch uint64, out *ReplicaOutput) {
 	r.fetch(epoch, false, out)
 }
 
-// clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered. A partial-block write to a chunk whose kept version the primary lacks is held until recovery brings it, up to maxHeld writes held, and answered unfound when no member can be its source.
+// clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered. A partial-block write to a chunk whose kept version the primary lacks is held until recovery brings it, up to maxHeld writes held, and any write is answered unfound when no member can be the chunk's source: an OK there would read as missing, and the next peering would keep it over what a returning disk still holds.
 func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) {
 	if r.plant.fenceOnArrival && !r.replaying && u.Session != 0 && u.Incarnation < r.st.sessions[u.Session] {
 		freeBuf(ctx, ev.Msg.Buf)
@@ -900,9 +915,9 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 			r.park(ev, u.PG.Epoch, out)
 			return
 		}
-	case !r.leads[i].active || r.leads[i].asking || edgeBytes(u.Off, u.Len) > 0 && r.leads[i].lacks(u.Chunk) && !r.plant.mergeWhileLacking:
+	case !r.leads[i].active || r.leads[i].asking || edgeBytes(u.Off, u.Len) > 0 && r.leads[i].lacks(u.Chunk) && !r.plant.mergeWhileLacking || r.leads[i].isUnfound(u.Chunk) && !r.plant.writeOnUnfound:
 		l := &r.leads[i]
-		if l.active && !l.asking && l.isUnfound(u.Chunk) {
+		if l.active && !l.asking && l.isUnfound(u.Chunk) && !r.plant.writeOnUnfound {
 			freeBuf(ctx, ev.Msg.Buf)
 			r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusUnfound}, out)
 			return

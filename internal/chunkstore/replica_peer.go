@@ -310,6 +310,7 @@ func (r *Replica) decide(ctx *core.Context, i int, out *ReplicaOutput) {
 	pr := l.peer
 	_, e := r.table.entry(l.pg)
 	pr.all, pr.kept = keep(e, pr.replies, pr.all, pr.kept[:0], r.plant)
+	r.findImage(l, pr)
 	pr.decided = true
 	out.note(trace.OutDecide, pgField(l.pg), uint64(l.interval), 0, 0, 0)
 	for j := range pr.kept {
@@ -326,6 +327,34 @@ func (r *Replica) decide(ctx *core.Context, i int, out *ReplicaOutput) {
 		out.Activations = append(out.Activations, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
 	}
 	r.persistLists(ctx, i, out)
+}
+
+// findImage marks each chunk the decision keeps whose copy on the primary is its image: its store lists nothing of it, or
+// the lead's last decision found that image at the version this one keeps. The lead keeps, for its next decision, those
+// whose index also holds the kept version; a chunk with versions still to settle is checked once activation settled it.
+func (r *Replica) findImage(l *lead, pr *peering) {
+	var own []ChunkPeer
+	if j := slices.IndexFunc(pr.replies, func(p peerReply) bool { return p.disk == r.cfg.Disk }); j >= 0 {
+		own = pr.replies[j].chunks
+	}
+	for j := range pr.kept {
+		k := &pr.kept[j]
+		k.image = !slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed }) ||
+			!r.plant.forgetImage && slices.Contains(l.image, ChunkVersion{Chunk: k.chunk, Version: k.kept})
+	}
+	unsettled := r.Unsettled(l.pg, nil)
+	l.image = l.image[:0]
+	for _, k := range pr.kept {
+		if k.image && (slices.Contains(unsettled, k.chunk) || !r.lacks(k)) {
+			l.image = append(l.image, ChunkVersion{Chunk: k.chunk, Version: k.kept})
+		}
+	}
+}
+
+// lacks reports whether the primary's index may differ from the version k keeps: it maps another, or holds that one only in part.
+func (r *Replica) lacks(k keptChunk) bool {
+	x, _ := r.st.Index().Chunk(r.st.cfg.Pool, k.chunk)
+	return (x.Version != k.kept || x.Whole != k.kept) && !(r.plant.mergeOnDropped && x.Version > k.kept)
 }
 
 // persistLists sends each up member of the interval that has not persisted its list the list again, persisting this disk's own unless it is in flight.
@@ -452,14 +481,14 @@ func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 			return
 		}
 	}
-	var own []ChunkPeer
-	if j := slices.IndexFunc(pr.replies, func(p peerReply) bool { return p.disk == r.cfg.Disk }); j >= 0 {
-		own = pr.replies[j].chunks
-	}
+	l.image = l.image[:0]
 	for j := range pr.kept {
 		k := &pr.kept[j]
-		x, _ := r.st.Index().Chunk(r.st.cfg.Pool, k.chunk)
-		k.lacking = (x.Version != k.kept || x.Whole != k.kept) && !(r.plant.mergeOnDropped && x.Version > k.kept) || slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed })
+		k.lacking = r.lacks(*k) || !k.image
+		k.unfound = k.unfound && k.lacking
+		if !k.lacking {
+			l.image = append(l.image, ChunkVersion{Chunk: k.chunk, Version: k.kept})
+		}
 	}
 	r.planRecovery(l, pr, e)
 	l.kept, pr.kept = pr.kept, l.kept[:0]
@@ -501,6 +530,20 @@ func (r *Replica) peering() bool {
 func (l *lead) isUnfound(c core.ChunkID) bool {
 	k, ok := l.decision(c)
 	return ok && k.unfound
+}
+
+// Unfound counts the chunks of pg the last peering of this primary found no member to serve; stopped says it is no active primary of pg, so the count is unknown.
+func (r *Replica) Unfound(pg core.PGID) (n uint32, stopped bool) {
+	i := r.lead(pg)
+	if i < 0 || !r.leads[i].active {
+		return 0, true
+	}
+	for _, k := range r.leads[i].kept {
+		if k.unfound {
+			n++
+		}
+	}
+	return n, false
 }
 
 // lacks reports whether the primary's copy of chunk c may differ from the version the lead's last peering kept, which a partial-block write waits for.

@@ -3211,8 +3211,7 @@ constants are as at the head of [Peering and read leases](#peering-and-read-leas
 on 4 workers, so `ci`'s 5 minutes cover about 2.4 million.
 
 **Configurations.** Property 1 needs peering and leases together, so the spec is not split; its
-`ci` runs are eight configurations, one heavy on leases, three on peering, one on an operator's
-edits, one on moves and two on failures. Any membership change at any time does not fit `ci`'s 5 minutes, so each `ci` configuration checks a set of *plans*: a plan is a short
+`ci` runs are the configurations below, each small enough for 5 minutes. Any membership change at any time does not fit `ci`'s 5 minutes, so each `ci` configuration checks a set of *plans*: a plan is a short
 sequence of membership changes taken from the faults below, with the client writes and the faults
 whose rules it tests, and TLC checks every interleaving of nodes, messages, writes, renewals, folds of
 activation reports and faults around it. `deep-peering` adds a free plan: any two changes at any
@@ -3228,7 +3227,26 @@ nodes without finishing.
 | `ci-tears` | 3 | As `ci-peering`, on PG 1's primary down and back, with `TornLists` on: a decision may also list any member Entry leaves off that has a version above its newest ordered, as a crash that left part of a version does in the code |
 | `ci-moves` | 3 | As `ci-peering`, with the move plans: PG 2's replica and then its primary moved to node 1; the replica's move with the leaving member marked down before its replacement recovers, or with a process restart; the replica's move with primary 2 put in `maintenance` and back before the removal; and the replica's move with a refill before the removal, a disk formatted again replacing node 1's. Each sends only the daemon's one write W |
 | `ci-stays` | 3 | As `ci-moves`, with the moves that a leaving member ends by taking the place of a member marked down: the primary, the other member of a leaving primary, or the new member. It is kept apart from `ci-moves` so that each fits its 5 minutes |
-| `ci-stays-stale` | 3 | PG 2 and its chunk alone, with no spare table: the leaving member down and back, then taking the place of the primary, marked down. Its 7 tables need that to fit 5 minutes, so it has no fold of an activation report. It reaches W kept with no member holding it, W refused and nothing acknowledged lost |
+| `ci-stays-new` | 3 | `ci-stays`' move that ends with the new member, kept apart so that each fits its 5 minutes |
+| `ci-stays-stale` | 3 | PG 2 and its chunk alone, with no spare table: the leaving member down and back, then taking the place of the primary, marked down. Its 7 tables need that to fit 5 minutes, so it has no fold of an activation report. It reaches W kept with no holder up, W refused and nothing acknowledged lost, its holder staying a member |
+| `deep-stays-stale` | 3 | `ci-stays-stale` with both partial writes and a spare table, so a `Fold` or a `Renew` lands between its changes. Too large for `ci`, and not yet run |
+| `ci-late-ask` | 3 | PG 1 and its chunk alone, a member down and back, one restart, no spare table, with `lateask`: the restarted primary may ask again in a newer table before it peers. Only here does TLC take `RestartAsk`, which no rule needs |
+| `ci-refills` | 3 | PG 2 and its chunk alone, two partial writes, no spare table, a restart or a format: a member marked down, refilled beside its replacement and removed |
+| `ci-refills-down` | 3 | As `ci-refills`, with the other member down while the refilled one leaves, and back, then the removal; a format. `ci-refills-down-restart` runs the restart with one write, since with both it passed 2.4 million states unfinished |
+| `deep-refills-down` | 3 | `ci-refills-down`'s plan with both writes and either fault. Too large for `ci` |
+| `ci-refills-stay` | 3 | As `ci-refills`, one write: the other member down while the refilled one leaves, the refilled one back and taking its place, then the removal |
+| `ci-refills-primary` | 3 | As `ci-refills`, one write and a restart: the primary marked down, refilled beside its replacement, back, and removed |
+| `ci-refills-back` | 3 | As `ci-refills`, with no fault: the leaving member back in the table that takes the down member's place, which then leaves; or the refilled member declared lost and dropped |
+| `ci-refills-two` | 4 | PG 2 and its chunk alone, two partial writes, no fault: both members refilled, one after the other |
+| `ci-refills-together` | 4 | As `ci-refills-two`, both members refilled in one table |
+| `deep-refills-lost` | 4 | `ci-refills-together`'s PG with the first member declared lost, leaving by the table that refills the second, which returns. Too large for `ci`, and not yet run |
+| `ci-image` | 3 | PG 2 and its chunk alone, two partial writes, a format: a move that removes disk 3, Y on the primary alone while the other member is down, so the primary lists the chunk, then that member's disk formatted and a table after it. Only the removed disk and the primary's carried image hold X, so property 18 holds only with the image carried; `neg-forget-image` fails it |
+| `ci-stays-gone` | 3 | PG 2 and its chunk alone, two partial writes, a format: a leaving member taking the place of a member whose disk is gone |
+| `ci-sources` | 3 | PG 1 and its chunk alone, a restart: two partial writes, a member of `rep3` down and back, recovering and lacking Y. It checks properties 4, 5, 8, 14, 17, 18 and 19 only |
+| `ci-sources-move` | 3 | As `ci-sources`, on PG 2's move whose removed member lacks Y |
+| `ci-sources-lister` | 3 | As `ci-sources`, with no fault: X's one clean source marked down, a primary that lists the chunk taking a whole-block write alone, and the source back |
+| `ci-answers` | 3 | `ci-sources`' plan with one write, under fairness, for properties 15, 16 and 17 only |
+| `ci-answers-move` | 3 | `ci-sources-move`'s plan with one write, under fairness, for properties 15, 16 and 17 only |
 | `ci-faults` | 3 | As `ci-peering`, with a sixth table and a second fault; the plans that fail a version at a member or on the primary's own log, alone, with the primary moved, with a member or the primary marked down, and with one in `maintenance` and back; a member's failure with a process restart; a primary moved away and back; the plans that format a disk around peering and around recovery; and the one that raises `min_live` past an interval that ran below it |
 | `ci-asks` | 3 | As `ci-peering`, with the failure plans that hold no restart or format, under fairness, for the properties that every interval a failure ended is asked past and every client is answered |
 | `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the six below |
@@ -3414,12 +3432,10 @@ like any new interval, and the recovered reports placement ignores in the table 
 both need a PG created mid-run, left to the phase 3 simulator. Nor is a change of `replicas`, so
 neither is the leaving mark that narrows a PG when `replicas` goes down, or a leaving member kept
 because a raised `replicas` needs it; a leaving member that takes a missing member's place is
-modelled, as `Stay`. Of moves, the model leaves out a table that
-marks a member and removes the leaving member at once, which the model cannot make since its mark
-change starts an interval, and which placement prevents by ignoring a report in a table that marks
-another member; a removal and a new move of the PG in one table, which placement prevents since a
-move needs the PG's members unchanged from the table before; and a leaving member dropped once
-its disk leaves the pool. Nor is the rule that a move starts only from an interval reported
+modelled, as `Stay`. Of moves, no plan makes a table that
+marks a member and removes a leaving member at once, which placement prevents by ignoring a report
+in a table that marks another member, nor a removal and a new move of the PG in one table, which
+placement prevents since a move needs the PG's members unchanged from the table before. Nor is the rule that a move starts only from an interval reported
 recovered: the model's refills are planned, not chosen by whether peering waits for a member, so
 the loss that rule prevents cannot arise there. It checks only that moves keep copies, never that a
 move completes; the placement tests that settle every move check that. Of failures, the model
@@ -3436,7 +3452,7 @@ on that log fails.
 the Raft group and lease time need clocks, 13, since their plans make no move, and 15 and 16, which
 only `ci-asks` checks; `deep-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
 and 16 and the action property 17, on its small plans.
-`ci-moves`, `ci-stays` and `ci-stays-stale` check the same and property 13, an action property checked at each removal, which a `Stay` is not: its leaving member stays. Their plans
+`ci-moves`, `ci-stays`, `ci-stays-stale`, `ci-stays-new`, `ci-stays-gone`, `ci-image` and the `ci-refills` configurations check the same, property 13, an action property checked at each removal, which a `Stay` is not, and property 18, that no acknowledged write is stranded on a disk that is no member; `ci-sources`, `ci-sources-move`, `ci-sources-lister` and `ci-late-ask` check 18 and 19 among a few. The plans of the peering configurations replace up members, which stands for an operator's edit, so they leave 18 out. The first three
 send only the daemon's one write W, which keeps each within its 5 minutes: the replica's move
 with the successor's writes and a process restart, run alone, passes property 13 at 2.3 million
 states in 224 s. A
@@ -3462,6 +3478,8 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 15 | A primary whose interval a failed version ended asks for the next in the end: with every step that is due taken in time, nothing of its PG waits for ever | `IntervalEnds` | None registered: `TestAFailureBelowACommittedVersionStillAsks` covers it as a regression test, until [Plants for the epoch model's new rules](build-checklist.md#phase-4-embedded-metastore) registers one |
 | 16 | Every client gets an answer: no version stays unanswered for ever | `AllAnswered` | None registered: `TestADemotedPrimaryMapsItsPendingVersionsAsAMember` covers it as a regression test, until the same item registers one |
 | 17 | A version is acknowledged only on at least `min_live` members of the interval that answers it, its own or the one activating, counted by what their logs hold, a member in `maintenance` counting as it does toward `min_live`. An action property, checked at each acknowledgment | `AckedOnMinLive` | "no write is acknowledged on fewer than min_live disks, a member in maintenance counting as one", registered by `epochChecks` |
+| 18 | An acknowledged write is not stranded: if a disk that is not gone can serve all of a chunk's acknowledged writes, holding them and listing nothing of it, so can a member of its PG's current interval, up or down, or the image its primary carries while it leads. That such a disk exists is not claimed, as a holder that truly dies leaves none. Not claimed past a primary restart, or its disk marked down and up again, followed by the loss of the member that held the kept version clean, which no `ci` plan reaches, since each faults once and none bounces the primary, and which stays open with [Replay rollback](build-checklist.md#phase-4-embedded-metastore) | `NoStranded` | "an acknowledged write a disk can serve, a member can serve" (`invStranded`), checked on every table of the seeded primary-change run and of the `soleRun` tests; like `NoStranded` it counts a chunk that a member leading the PG carries in its image, at any version. `TestAPrimaryListingOnlyItsDroppedWriteServesPastADiskLoss` and the stranded-move tests (`stranded_move_test.go`) cover it as regression tests |
+| 19 | An activated primary has a source: for a chunk with an acknowledged write, a member of its interval can serve them all, or its own image is what peering kept. Claimed while no disk has gone, as a holder that truly dies leaves none, and not for a chunk where a write of a primary listing it reached another member, which stays open with [Clean copies before a write's OK](build-checklist.md) | `PrimarySource` | `invHasSource` ("an activated primary has a source of each chunk it kept, or calls it unfound"), which holds the code to the decision: it does not read versions |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
 find a violation of the named property, which is never the property that only restates the removed
@@ -3503,7 +3521,7 @@ under fairness, as `deep-peering` does, on the restart plan alone, and those for
 | A primary serves reads in a new interval though another primary led the PG since | 14 | PG 2's primary 2 is put in `maintenance`; node 3 acknowledges W′ as 2.1; 2 comes back as primary and serves before it peers, without 2.1 and listing nothing |
 | A primary whose interval a failed version ended never asks for the next | 15 | 1.1 fails at a member: the primary orders nothing more and no table starts the next interval, so nothing resolves what failed |
 | A primary refuses only the failed version, not the chunk's later ones | 15 | 1.1 fails at member 3 with 1.2 in flight; 1.2 stays unanswered, as 3 will log nothing above 1.1, so something of the PG waits for ever and the primary never asks. The wait is the model's: in the code 3 answers 1.2 with a refusal, which ends it, and the model's refusal costs a fault |
-| A primary answers a kept version OK at activation however few copies its chunk has | 17 | PG 2's replica goes down and its primary, 2, orders W on its own log; an empty disk replaces the replica, peering keeps W, since the new member was not live in W's interval, and lists W for it, and the primary answers OK on one copy |
+| A primary answers a kept version OK at activation however few copies its chunk has | 17 | PG 2's replica goes down and its primary, 2, orders W on its own log; an empty disk joins beside the replica, peering keeps W, since the new member was not live in W's interval, and lists W for it, and the primary answers OK on one copy |
 | A primary serves a version a member refused, before peering settles it | 14 | 1.1 is ordered, member 2 refuses it, and primary 1 serves it; `ReadsAcked` passes, as nothing was acknowledged and no decision dropped 1.1, and `ReadsMapped` does not |
 | A node that no longer leads a PG keeps its pending versions unanswered | 16 | The primary moves away with 1.1 pending and the new primary's member adopts the interval before it logs 1.1; the old primary's client waits for ever |
 | A member holding a version above the kept one is left off the missing list | 14 | PG 2's primary 2 orders 1.1, still pending, moves away and back, skipping the table between; peering reaches node 3, keeps nothing and drops 1.1, and node 2 serves 1.1 listing nothing. No acknowledged write is at stake: only the clause on dropped versions catches it |
@@ -3529,6 +3547,11 @@ under fairness, as `deep-peering` does, on the restart plan alone, and those for
 | A fresh grant covers the pair's PGs with no table check | 1 | PG 2's primary is put in `maintenance` while cut off from the control plane; its grantor peers the new interval, then grants it afresh |
 | The support epoch is not bumped on lapse | 2 | Leader 1 is partitioned from both followers; their grants lapse and node 2 is elected with node 3; the partition heals, node 3 renews node 1's grant in the old epoch, and node 1's lease counts it again |
 | Leader transfer without ending the old leader's lease at `MsgTimeoutNow` | 2 | Old and new leader both serve lease reads |
+| A member that lists the chunk vetoes a version (`neg-lister-vetoes`) | 19 | `rep3`: a member back and listing, Y on the other two, the primary restarts, the lister drops Y, all three list |
+| A reached member outside the interval vetoes what every up member holds (`neg-keep-past-member`) | 19 | A move: Y on the primary and the new member, the removal commits, the primary restarts, the removed disk drops Y, both list |
+| The vetoes go even with no clean up holder (`neg-keep-no-source`) | 19 | The one clean copy of X down, a listing primary's write kept, and the copy returns to list it too |
+| A write lands on an unfound chunk (`neg-write-on-unfound`) | 19 | `rep3`: Y on the primary and one member, peering drops it, the primary restarts and forgets its image, the third member, X's one clean copy, goes down, and a whole-block write is acknowledged on the two that list X |
+| A primary forgets its image between peerings (`neg-forget-image`) | 18 | `ci-image`'s plan: Y on the primary alone and dropped, so it lists the chunk; the other member's disk is formatted, and the next peering calls X unfound though the primary holds it and only the removed disk is clean |
 
 - The grant rule `ci-leases` checks: a grantor grants or renews only a holder that reported a table at
   least as new as its own, and a grant carries no table epoch. Property 1 holds with it, and fails
@@ -3900,17 +3923,34 @@ section.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 27 | 694,453 | 80 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 24 | 389,831 | 47 s |
-| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 31 | 1,907,361 | 281 s |
-| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 26 | 343,918 | 40 s |
-| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 29 | 1,197,647 | 163 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 27 | 625,977 | 85 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 24 | 390,543 | 51 s |
+| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 31 | 1,629,577 | 269 s |
+| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 26 | 352,126 | 46 s |
+| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 29 | 1,316,423 | 188 s |
 | Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 82 | 1,215,647 | 108 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 768,383 | 91 s |
-| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 28 | 1,269,726 | 201 s |
-| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 35 | 1,719,170 | 195 s |
-| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 28 | 1,351,424 | 205 s |
-| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 21 | 32,008 | 19 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 759,391 | 105 s |
+| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 29 | 1,070,752 | 225 s |
+| Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 26 | 363,750 | 72 s |
+| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 36 | 1,683,750 | 222 s |
+| Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 24 | 29,548 | 3 s |
+| Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 23 | 219,715 | 22 s |
+| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 25 | 169,147 | 17 s |
+| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 34 | 1,299,397 | 115 s |
+| Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 27 | 239,726 | 23 s |
+| Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 30 | 2,328,325 | 256 s |
+| Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 29 | 276,923 | 31 s |
+| Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 30 | 596,611 | 64 s |
+| Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 32 | 1,179,375 | 155 s |
+| Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 22 | 24,903 | 5 s |
+| Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 35 | 1,450,920 | 137 s |
+| Epoch change | `ci-sources` | [Epoch change model](#epoch-change-model) | 28 | 1,488,307 | 140 s |
+| Epoch change | `ci-sources-move` | [Epoch change model](#epoch-change-model) | 30 | 704,160 | 77 s |
+| Epoch change | `ci-sources-lister` | [Epoch change model](#epoch-change-model) | 35 | 689,657 | 84 s |
+| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 27 | 1,245,263 | 215 s |
+| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 21 | 32,292 | 47 s |
+| Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 18 | 16,172 | 58 s |
+| Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 26 | 53,985 | 79 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
@@ -3923,6 +3963,7 @@ section.
 | Epoch change | `deep-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,577 s |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |
+| Epoch change | `deep-refills-down` | [Epoch change model](#epoch-change-model) | 34 | 3,823,511 | 362 s |
 
 - Each model names the simulator invariant of each property in its own section's property table,
   so this map holds only the configuration results. The sessions model's invariants are registered
@@ -4025,7 +4066,7 @@ since no line moves a lease, and so is `NoResurrectedWrite`, since no traced wri
 
 | Records | Spec action | Compression |
 | --- | --- | --- |
-| `Table`, `PGEntry`, `Member` | `Membership` or `Reactive` | `tracedata` splits a table's fold from its membership change. The harness's own last ask is an `Edit` that changes nothing. A reorder of a PG, with at most one mark, in one table is one `Edit`, one interval, as the code's `Next` makes it; `ci-edits` checks that action. A `table` line then compares each changed entry with the spec's: interval, last activated, members, marks, leaving member, `min_live` and past intervals, so a member changed at an unchanged interval fails. `PastInterval` records carry the past intervals |
+| `Table`, `PGEntry`, `Member` | `Membership` or `Reactive` | `tracedata` splits a table's fold from its membership change. The harness's own last ask is an `Edit` that changes nothing. A reorder of a PG, with at most one mark, in one table is one `Edit`, one interval, as the code's `Next` makes it; `ci-edits` checks that action. Any other table of several of a PG's changes is one `Refill`. A `table` line then compares each changed entry with the spec's: interval, last activated, members, marks, leaving member, `min_live` and past intervals, so a member changed at an unchanged interval fails. `PastInterval` records carry the past intervals |
 | `Adopt` | `Adopt` | A repeat of the table the spec's node holds, as after a restart, which empties the code's table and leaves `ep`, is a stutter. An epoch no `Table` named stops `tracedata` |
 | `Send` | `Send` | A send the spec has disabled is a stutter, so ordering it later fails |
 | `Order` | `Order` | Logs on the primary and sends to members in one step |
@@ -4039,7 +4080,8 @@ since no line moves a lease, and so is `NoResurrectedWrite`, since no traced wri
 | `Recovered` | `Recover`, taken as `RecoverFrom` | The line binds the source the record names, which a member has from the recovery write, and 0 for no source must meet a listed version of 0. The version is the listed one or one the interval ordered. `tracedata` places a record from after the primary, the target or the source left the interval before the first of those steps, if the primary ordered the write before it, and leaves any other where the line fails. A primary's record of its own copy of a recovery write is a stutter while a member lists the chunk or once one recovered that version, and so is the record of a gated write settled by a later activation of the PG by the same primary, whose entry stays. Either stutter needs the line's node to have decided the record's interval, its version to be that decision's kept one or one of the interval, and its source an up member of the interval, none only at kept version 0. A line for a chunk no disk lists fails |
 | `RecoverOrder` | A stutter | The primary ordering a recovery write, target or not: it must lead the interval, activated, with some disk listing the chunk, and every `recovered` or `mayrecover` line needs its order earlier. A primary ordering after it left, or after a source formatted, stays at its record and fails |
 | `Recovering` | `Recover` or a stutter | A store taking a recovery write. A crash before its `Recovered` lets it land (`mayrecover`), as replay maps it |
-| `Reported`, `Ask` | `ReportRecovered`, `AskNext` or `CounterOut` | Mapped, with the action's interval compared to the line's, not yet proven by a passing trace that reaches them |
+| `Reported`, `Ask` | `ReportRecovered`, `AskNext`, `CounterOut` or `RestartAsk` | The action's interval is compared to the line's. `tracedata` names an ask `restartask` if its node restarted and has not activated the PG since, which only `RestartAsk` takes |
+| `Lost` | `Lost` | The operator's declaration, recorded by the harness |
 | `MemberFail`, `Fail` | `MemberFail` | The run's plan gives it no fault budget, since no traced run injects a disk fault: a refusal of a version of the member's interval has no step. `tracedata` holds the line until the primary's `Fail` of the chunk, the step that ends the version there, or until the member moves on or the primary crashes |
 | `MemberFail` with `gone` | `GoneRefuses` | A node whose disk was formatted again, refusing what the primary sends the old disk. A repeat is a stutter |
 
@@ -4054,7 +4096,16 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | `scripted-clean` | 12 | passes | 1 |
 | `scripted-primary-change` | 35 | passes | 1 |
 | `scripted-lone-copy` | 41 | passes | 1 |
-| 39 seeds | 308 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 3 to 207 |
+| `scripted-refill` | 83 | passes: two members merely down refilled as `Add`s, both leaving, a recovered report ending it | 1 |
+| `scripted-stay` | 84 | passes: a `Stay` that keeps a member merely down as the leaving one | 1 |
+| `scripted-leaving-first` | 51 | passes: on 3 disks, the leaving disk's return marks it up and has it take a member's place in one table, one `Refill` | 1 |
+| `scripted-drop` | 72 | passes: a leaving disk declared lost goes in the table that refills the member down after it, one `Refill` | 1 |
+| `scripted-lost` | 100 | passes: two leaving, one declared lost, `Drop` takes it alone, the other returns and heals the PG | 2 |
+| `scripted-second-failure` | 97 | passes: `rep3`, the second disk down during the copy, two `Add`s, a recovered report removing both | 2 |
+| `scripted-together` | 65 | passes: `rep3`, two marks in one table, one `Refill`, then two `Add`s | 1 |
+| `scripted-move-restarted` | 47 | passes: a move and a restart, peering keeps what every up member holds over the removed disk | 1 |
+| `scripted-lister-restarted` | 56 | passes: a restart during recovery, peering keeps a version over the member that lists the chunk | 1 |
+| 39 seeds | 273 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 2 to 211 |
 | `primaries-2` | 517 | no verdict in 400 s and 2 GB: one crash leaves 26 `mayfail` lines, each a free choice, and `-dfid` reached level 307 of 519 in 280 s at 319,000 states | 400 |
 
 39 seeds of 40 pass, all but 2. None broke a safety invariant,
@@ -4073,6 +4124,8 @@ that passed before discrepancy 12 again with that path removed:
 
 Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half.
 
+`refillSoleHolder` is not in `conformPlants`: the primary-change run is too short for a member merely down to go missing, so a refill or a `Stay` of one appears only in `scripted-refill` and `scripted-stay`, and `TestPlantedPeeringBugsBreakTheOracle` breaks the rule through the simulator's invariant.
+
 Each run ends with what its passing traces covered, and each trace's rows stay in its directory's
 `cover` file. TLC prints the behavior a trace passed by, and `cover` in `scripts/conform.sh` reads it: a
 line took its action when a variable of `epoch.tla` moved from the state before it, and stuttered when
@@ -4082,34 +4135,38 @@ a stutter open to it: it shows only what that behavior did. TLC's own `-coverage
 over every branch of the search, abandoned ones and `ENABLED` too, so on seed 55 `Remove`'s first guard
 shows 8 against the 2 removals the trace took.
 
-Over the 39 passing seeds of 0 to 39, with `Stay` from the sweep:
+Over the 39 passing seeds of 0 to 39 and the 12 scripted traces, which alone take `Refill`, `Lost`, `Drop`, `Stay` and `RestartAsk` as a real step on these seeds, `RestartAsk` in `scripted-move-restarted`; on its 50 other lines the spec already holds the ask:
 
-| Action | Line | Took it | Stuttered | Seeds |
+| Action | Line | Took it | Stuttered | Traces |
 | --- | --- | --- | --- | --- |
-| `Deliver` | `logged` | 4,141 | 3,210 | 39 |
-| `Deliver` | `maydeliver` | 368 | 372 | 35 |
-| `Send` | `send` | 3,744 | 0 | 39 |
-| `Order` | `order` | 3,135 | 0 | 39 |
-| `Adopt` | `adopt` | 2,756 | 225 | 39 |
-| `Peer` | `peer` | 454 | 0 | 39 |
-| `Activate` | `activate` | 448 | 0 | 39 |
-| `Fold` | `fold` | 448 | 0 | 39 |
-| `OwnFail` | `mayfail` | 194 | 8 | 16 |
-| `Recover` | `recovered` | 156 | 64 | 34 |
-| `Recover` | `mayrecover` | 1 | 2 | 1 |
+| `Deliver` | `logged` | 4,212 | 3,255 | 51 |
+| `Deliver` | `maydeliver` | 375 | 397 | 35 |
+| `Send` | `send` | 3,767 | 0 | 51 |
+| `Order` | `order` | 3,175 | 0 | 51 |
+| `Adopt` | `adopt` | 3,050 | 238 | 50 |
+| `Peer` | `peer` | 489 | 0 | 50 |
+| `Activate` | `activate` | 482 | 0 | 50 |
+| `Fold` | `fold` | 480 | 0 | 49 |
+| `OwnFail` | `mayfail` | 195 | 10 | 17 |
+| `Recover` | `recovered` | 188 | 78 | 44 |
+| `Recover` | `mayrecover` | 0 | 2 | 0 |
 | `GoneRefuses` | `gone` | 154 | 0 | 12 |
-| `MarkDisk` | `plan` | 84 | 0 | 29 |
-| `Edit` | `plan` | 85 | 0 | 37 |
-| `Restart` | `restart` | 73 | 0 | 32 |
-| `Add` | `plan` | 56 | 0 | 18 |
-| `Remove` | `plan` | 54 | 0 | 18 |
-| `ReportRecovered` | `reported` | 54 | 255 | 18 |
-| `Replace` | `plan` | 49 | 0 | 16 |
-| `Renew` | `renew` | 45 | 0 | 16 |
-| `Rotate` | `plan` | 37 | 0 | 37 |
-| `Format` | `format` | 16 | 0 | 16 |
-| `AskNext` | `ask` | 12 | 46 | 12 |
-| `Stay` | `plan` | 7 | 0 | 55, 231, 311, 323 of the sweep, none of 0 to 39 |
+| `MarkDisk` | `plan` | 105 | 0 | 37 |
+| `Edit` | `plan` | 88 | 0 | 39 |
+| `Restart` | `restart` | 79 | 0 | 34 |
+| `Add` | `plan` | 66 | 0 | 26 |
+| `Remove` | `plan` | 61 | 0 | 25 |
+| `ReportRecovered` | `reported` | 62 | 277 | 25 |
+| `Replace` | `plan` | 53 | 0 | 17 |
+| `Renew` | `renew` | 50 | 0 | 19 |
+| `Rotate` | `plan` | 40 | 0 | 40 |
+| `Format` | `format` | 17 | 0 | 17 |
+| `AskNext` | `ask` | 12 | 0 | 12 |
+| `Refill` | `plan` | 3 | 0 | 3 |
+| `Lost` | `lost` | 2 | 0 | 2 |
+| `Stay` | `plan` | 1 | 0 | 1 |
+| `Drop` | `plan` | 1 | 0 | 1 |
+| `RestartAsk` | `restartask` | 1 | 50 | 1 |
 
 `table`, `committed`, `persisted` and `recoverorder` lines check a state and take no action, as their
 mapping says. The actions of `Next` no trace took:
@@ -4141,19 +4198,22 @@ mapping says. The actions of `Next` no trace took:
 | 12 | A crash leaves part of a version's records, so a member reports a version logged above its newest whole one. `keep` lists that member for the kept version, where `Entry`, with one number, leaves it off | spec | Settled: `PeerOn` takes a set `T` of (disk, chunk) pairs it lists at the kept version, which are no recovery source and take a primary's chunk out of `img`, and `Activate` keeps them. `Peer` draws `T` only under `TornLists`, on in `ci-tears` alone, which passes every safety property at 1.2 million states against 149 thousand with it off. The trace takes `T` from the code's lists, so seeds 1, 5 and 24 pass. This shows extra listing is safe, not that listing is required: the logs hold whole versions, so nothing in the spec is wrong with a torn member left off, and no negative configuration exists. That listing is required rests on Go: `unlistTorn` breaks "a member listing nothing maps the kept writes applied in version order" at seed 148, where replay's durable records of the torn version stay mapped, and `TestTheKeepRule` and `TestAVersionHeldInPartIsNotWhole` state the rule and the store's half |
 | 13 | `Send` to a primary whose `pr` is empty after a restart loses the write in the spec, and the code holds it | spec, open, low priority | `neverAsk` shows it; no unplanted seed of 40 stops there |
 | 14 | A member's refusal is recorded when the member refuses, and `Order` of a later version can come before the primary hears, where `MemberFail` and `GoneRefuses` end the interval in one step | compression | Settled, all 10 seeds of 0 to 339 it stopped: the primary's `Fail` record says when it heard, and `tracedata` holds the member's line until it, or until that member adopts a table or crashes or the primary crashes, since past those the spec's refusal has no step |
-| 15 | A member crashes, restarts, crashes and restarts, with a new interval published while it was down. The code asks on the first table after a restart (`replica.go:539`), where the spec's `rsIv` lets it peer without asking | spec, open | Seed 205, an `ask` line. An extra interval, conservative: likely a detail the spec lacks |
+| 15 | A restarted primary asks a new interval on the first table it takes, even one newer than the table it restarted on, where the spec's `Restart` asks once and `rsIv` lets it peer without asking again | spec | Settled, seed 205: `RestartAsk` is that ask, an extra interval no rule needs, taken only by plans with `lateask`: every trace, and `ci-late-ask`, where TLC checks the safety properties around it |
 | 16 | The harness's final ask maps to an `Edit`, and `Edit` needs `x.lv = 0`, so it has no step on a PG with a leaving member | logging, open | Seed 154, a `plan` line: a new form of discrepancy 8 |
-| 17 | The spec has disk 2, chunk 2 at whole 3145734, the code 3145733 | spec or compression, open | Seed 110, a `peer` line, reasoned not settled: probably a version the primary's peering dropped, which the code's store settled away and the spec's `dlog` keeps |
+| 17 | A primary's next reply reports the kept version where the spec's `dlog` has a higher one: activating settles away the gated versions its decision dropped, and they stay in the log unmapped until a restart's replay maps them | spec | Settled, seeds 6 and 37: `Held`, a disk's log less what an activation of its node's current run gave back, is what `Reply`, `Entry`, `PeerOn` and `Order` read. A later write hides the difference, so it shows on a chunk unfound, which takes none |
 | 18 | `refill` calls `stay` (`placement.go`): a leaving member that is up takes the place of a missing member, ending the move, which had no spec change for the table | spec | Settled: `Stay` is in `epoch.tla` as [design.md](design.md) states it, `ci-stays` reaches it, and `classify` maps the table. `neg-stay-keeps-interval` breaks `OneWritePerVersion`. Property 13 fires when the leaving member goes from the members, as it says, so an ended move is no removal to it. Seeds 55, 231, 311 and 323 pass; 267 has no verdict at 300 s |
+| 19 | A crash loses versions from the log of a primary that adopted its next interval and has not decided it, where `OwnFail` needs the primary still in the version's interval | spec | Settled, seed 3: `OwnFail` also runs until the primary decides its next interval, as peering waits for a disk's records to be durable or failed |
+| 20 | A leaving disk's return marks it up and takes a missing member's place in one table, one interval, where the spec's mark and `Stay` start two, and a leaving member goes with its disk, which `Remove` cannot take | spec | Settled: `Refill` is the one table, `Drop` the leaving member going, and `classify` names each. `scripted-leaving-first` and `scripted-drop` take `Refill`, `scripted-lost` takes `Drop` |
+| 21 | Two members marked down in one table reach `Edit`, which allows one mark | logging | Settled: `classify` names a table of several marks `Refill`, which allows them, `scripted-together` |
 
 Seeds 40 to 339 at 150 s each: 260 passed at aa05106, and the 40 that did not were run again at abb8966, seeds 55, 231, 267, 311 and 323 again once `classify` mapped `Stay`. None names a safety invariant.
 
 | Outcome | Seeds | Read |
 | --- | --- | --- |
 | Pass | 272 of 300 | |
-| No verdict at 150 s | 51, 87, 117, 118, 127, 133, 148, 195, 199, 221, 256, 265, 267, 291, 316, 333 | 267 at 300 s |
-| `peer` | 80, 110, 123, 159, 175, 176, 191, 239 | 110 is discrepancy 17; 191 passes the `order` that stopped it, discrepancy 14; the rest unread |
-| `ask` | 205, 313, 327 | 205 is discrepancy 15; the rest unread |
+| No verdict at 150 s | 51, 87, 117, 118, 127, 133, 148, 195, 199, 221, 256, 265, 267, 291, 316, 333 | 267 at 300 s, and at 400 s stops at line 412, a `peer`, in about 355 s, unread |
+| `peer` | 80, 110, 123, 159, 175, 176, 191, 239 | 110, discrepancy 17, passes; 191 passes the `order` that stopped it, discrepancy 14; the rest unread |
+| `ask` | 205, 313, 327 | 205, discrepancy 15, passes; the rest unread |
 | `plan` | 154 | Discrepancy 16 |
 
 ### Traces can fail in the epoch model's check
@@ -4204,14 +4264,19 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `fenceOnArrival`, `reorderAfterOther`, `settleByNumber`, `readBelowMinLive` | `neg-fence-on-arrival`, `neg-reorder-after-other-primary`, `neg-settle-by-number`, `neg-read-below-min-live` | 0 | 0 | 0 | 0, 0 | No evidence: they fire on none of the seeds | |
 | `unlistTorn` | none | 2 | 2 | 0 | 2, 2 | `peer` at seeds 5 and 24, the decision leaving off a member its reply shows torn. Seed 148, where the Go oracle catches the plant, gives no baseline verdict | `peer`: every member a reply shows torn is listed |
 | `recoverSelfOnly` | none | 37 | 12 | 24 | 11, 0 | `reported` 11, the plant's report with a member still listing; `peer` 1. One gives no verdict | `ReportRecovered`: lists empty |
+| `listerVetoes` | `neg-lister-vetoes` | 7 | 7 | 0 | 7, 7 | `peer`, the line where the plant first differs | `KeptMatches` |
+| `keepNoSource` | `neg-keep-no-source` | 4 | 4 | 0 | 4, 4 | `peer`, the line where the plant first differs | `KeptMatches` |
+| `writeOnUnfound` | `neg-write-on-unfound` | 5 | 4 | 1 | 4, 4 | `order`, the planted order on an unfound chunk. Seed 35 passes | `Order`: the chunk is not in the decision's `unf` |
+| `keepPastMember` | `neg-keep-past-member` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 39: each trace is a prefix of its baseline's. Only its scripted test shows the rule (`TestKeepPastMemberLeavesAMoveUnfound`) | |
+| `forgetImage` | `neg-forget-image` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 9: each trace is a prefix of its baseline's; seed 2's baseline gives no verdict in 400 s. Only its scripted test shows the rule (`TestForgetImageLeavesTheChunkUnfound`) | |
 | `settleSubset` | none | 4 | 0 | 4 | 0, 0 | Too loose: `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record | |
 
-Traces can fail is shown on these seeds for 15 of the 27 rules, 10 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
-`mergeOnDropped`, `editKeepsInterval`, `relistNever`, `peerInOldInterval`, `oldReport`, `recoverFromListed` and
-`clearNoSource`, and for 2 more, `sameMembers` and `keepID`, running on over 30. Open: `coverAtRead`,
+Traces can fail is shown on these seeds for 18 of the 32 rules, 13 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
+`mergeOnDropped`, `editKeepsInterval`, `relistNever`, `peerInOldInterval`, `oldReport`, `recoverFromListed`,
+`clearNoSource`, `listerVetoes`, `keepNoSource` and `writeOnUnfound`, and for 2 more, `sameMembers` and `keepID`, running on over 30. Open: `coverAtRead`,
 which needs a record of the blocks a recovery write leaves out; `neverAsk`, an omission no line can name;
 `freshGrantNoCheck`, with the lease half; `resendNewestFirst`, `stopPreviousOnly` and `lastActivatedOnly`,
-which need a seed that reaches them; and the four that never fire. Of the oracle plants with no rule,
+which need a seed that reaches them; and the six that never fire. Of the oracle plants with no rule,
 `settleSubset` needs a record of what `Settle` answered.
 
 Every relaxed path now has a plant: `img` in `Order` by `mergeOnDropped` and `mergeWhileLacking`, `img` as a
@@ -4425,6 +4490,7 @@ The first refused write landing within 0.3% of available is a fill-based check. 
 | `rep3` on three nodes of 2 × 2 TB, holding 1.7 TB, then 2.0 TB | None, then `CannotReprotect` naming one disk (reprotectable 1.8 TB) |
 | `rep3` on three nodes, one node rebooting | No figure or condition changes: its disks keep their shares at their last fills |
 | A PG with a missing member that copies nothing for 60 s on `ctx.Now` | `Stuck`, naming the PG; it clears when the PG copies again or has nothing left to copy |
+| A PG stuck or with unfound chunks | `Blocked` names the PG, how many chunks its primary's last peering left unfound, and its candidates, the members down or in `maintenance`, a leaving one too, none if no disk is left to return; a stopped PG, with no active primary to count them, is marked `Stopped`, its count unknown (`TestABlockedPGNamesItsDisks`, `TestBlockedNamesItsCandidates`) |
 
 **Confirmation.** `rock-solid pool create` and disk changes print, per domain, cᵢ, its load at balance min(cᵢ, a·B) and its stranded room. They ask for confirmation when some domain has 2 × stranded room > cᵢ, and record f as the confirmed fraction.
 
@@ -4527,7 +4593,8 @@ row says otherwise).
   table's.
 - A move starts two intervals of its PG, one when it adds the new member and marks the old one
   leaving, one when it removes the leaving member, as the epoch change model's `Add` and `Remove`
-  do; a refill starts one, as its `Replace` does.
+  do. So does the refill of a member merely down; the refill of a member whose disk left the pool
+  starts one, as `Replace` does, and so does a table of several such changes, as `Refill` does.
 - Pinning a PG without changing its members starts no interval.
 
 **Which members are missing.** `refill_after` 10 minutes, `degraded_refill_after` 1 minute; a `rep3` pool on 4 nodes unless stated (`TestMissingMembers` and the tests named in the rows).
@@ -4641,7 +4708,7 @@ spike](../spikes/capacity-model/README.md)). Here they check only placement
 | 2,048 `rep3` PGs, each 3 × (4-byte disk ID + mark byte) + 11 bytes of intervals, flags and counts | 52 KiB (53,270 bytes) |
 | 4,096 PGs × 18 members, `ec16-2` | About 404 KiB (413,718 bytes) |
 
-Past intervals' member lists and, for a PG with a leaving member, its extra member come on top of
+Past intervals' member lists and, a PG's leaving members come on top of
 these sizes; both are usually absent (`TestTableSize`).
 
 - A delta holds the changed PG entries and the CRC32C of the resulting table. Applied to the
@@ -4653,7 +4720,7 @@ these sizes; both are usually absent (`TestTableSize`).
   interval numbers goes backwards (`TestDeltaBases`).
 - [fuzz] Delta and whole-table decoders (`FuzzDecodeTable`, `FuzzDecodeDelta`): what they accept
   encodes back to the same bytes. A truncated delta, an entry for a PG past `pg_count`, a
-  decreasing interval number, two leaving members, a leaving member in a recovered interval or an
+  decreasing interval number, a leaving member in a recovered interval or an
   unknown entry flag is Malformed (`TestMalformedDeltas`), as is a new or resized pool
   without exactly `pg_count` entries, refused before the table is allocated: a 50-byte delta naming
   2³¹ PGs costs nothing (`TestDeltaCarriesEveryNewPG`).
@@ -4672,9 +4739,9 @@ pinned, each table allowed 0, 1, 5 or every balance move.
 
 After every table:
 
-- Every PG keeps its pool's width beside at most one leaving member, or more, never more than the
-  table before, beside a leaving member after `replicas` went down, with at most
-  `max_per_domain` per domain but the leaving member and no disk twice.
+- Every PG keeps its pool's width and at most `maxMembers` members once any leaves, or more,
+  never more than the table before, beside its leaving members after `replicas` went down, with at
+  most `max_per_domain` per domain but the leaving members and no disk twice.
 - No table raises an interval it need not, and every table raises one it must, by exactly 1, by
   the table above; no last activated interval goes down.
 - A member removed and added back gets a new interval.
@@ -4725,6 +4792,44 @@ draws them: 200 random layouts each for `rep2` and `rep3`, 3 to 6 nodes of 1 or 
 and `rep3`, split, then a disk added. Once a computation proposes no move and records every PG
 recovered, the next one, every report in, changes no entry. Counting only no move and no leaving
 member settled every run while the split's PGs, not yet reported, could not move.
+
+**A refill keeps a possible last source** (`refill_leaving_test.go`; property 18 of the
+[Epoch change model](#epoch-change-model), `ci-refills`, `neg-refill-sole-holder`,
+`neg-stay-sole-holder`)
+
+- A member merely down, refilled, stays as the PG's leaving member beside its replacement, one
+  member wider, an hour on as at once; the recovered report for the current interval removes it, and
+  so does its disk leaving the pool (`TestARefilledMemberLeaves`).
+- A second member missing while one leaves is refilled the same way, so a PG holds as many leaving
+  members as went missing. Each goes when its own disk leaves the pool, the other staying a source
+  (`TestASecondMissingMemberLeavesToo`); `dropAllLeaving`, which takes them all, strands a write
+  (`neg-drop-all-leaving`, `TestDropAllLeavingStrandsAWrite`). A member missing at `maxMembers`
+  stays an ordinary member (`TestRefillStopsAtMaxMembers`), and a leaving member with no room lets
+  a refill pass (`TestALeavingMemberWithNoRoomLetsARefillPass`).
+- Rep3 on 6 disks, a second disk lost during the copy, together with the first, or the refill
+  member itself: repair ends on three copies with no disk returning
+  (`TestASecondFailureFinishesRepair`). A drain finishes past a dead disk
+  (`TestADrainFinishesPastAFailure`).
+- Rep2 on 5 disks, the two old disks lost one after the other: a new write is answered within two
+  minutes, X reads unfound, and a returning disk heals it (`TestRep2ServesPastTwoFailures`).
+- A disk declared lost goes with its leaving member, and the other leaving member stays the source
+  it is (`TestADiskDeclaredLostLeavesThePool`). Both old disks declared lost: the PG ends at its
+  width and serves, what they alone held unfound for good (`TestAChunkOnlyLostDisksHeldStaysUnfound`).
+  Both lost together and declared lost: peering still needs the last activated interval, so the PG
+  stays stopped, reads and writes refused (`TestTwoDisksLostTogetherStayStopped`).
+- A refilled primary returns behind the others, and does not lead while one of them is up
+  (`TestARefilledPrimaryReturnsBehindTheOthers`).
+- A leaving member that is up takes the place of a member merely down, which leaves in turn
+  (`TestStayKeepsTheMissingMember`).
+- Rep2, X on both disks, no write in flight: one disk out past `degraded_refill_after`, then the
+  other before the refill member copied X. Both come back whole, X reads OK, and the recovered report
+  takes the PG back to its width. Copying stays off for the outage with the `noRecovery` plant, since
+  in the simulator it finishes in under a tick (`TestARefillKeepsTheLastSourceOfAPG`).
+- Rep2: Y acknowledged on one old disk and on the refill member, which lists the chunk; the other old
+  disk returns lacking Y; the disk with Y goes for `refill_after` and the leaving disk takes its
+  place. The disk with Y stays, leaving (`TestAStayKeepsTheLastSource`).
+- Invariant: an acknowledged write a disk can serve, a member can serve. `refillSoleHolder`, which
+  deletes a member merely down, breaks it in both runs (`TestPlantedPeeringBugsBreakTheOracle`).
 
 **Errors**
 
@@ -5142,7 +5247,7 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
 | 42 (never activated), now 43 | One live in 42 and one live in 41 (`TestPeeringStopsEveryIntervalSinceTheLastActivated`) |
 | 42 had fewer than the `min_live` it ran under | 42 skipped |
 | 42 was short of `min_live` only by members in `maintenance` | 42 stopped and read like any interval that accepted writes |
-| No member of an interval to stop is reachable | The PG waits (down) until one returns or an operator declares its disks lost; it accepts no writes, and this is not an error |
+| No member of an interval to stop is reachable | The PG waits (down) until one returns; it accepts no writes, this is not an error, and declaring its disks lost does not end the wait (`TestTwoDisksLostTogetherStayStopped`) |
 
 - A past interval is judged by the `min_live` it ran under, which the table keeps with its members:
   interval 2 runs under `min_live` 1 with only disk 1 live and takes 2.1; interval 3 raises
@@ -5434,9 +5539,12 @@ own ([Testing strategy](design.md#testing-strategy)).
   source failed a read on rotted bits: rot on the only clean copy beside divergent members is a
   second fault, and the chunk stays listed as an unfound one does.
 - Losses beyond what the pool survives, for example both members of `rep2` PG 4:
-  - Before an operator declares the disks lost, the PG is down and writes wait. Open: whether reads
-    wait or return an error.
-  - After the declaration, reads return an error, never wrong data or zeros, and the PG is reported.
+  - One after the other, with an interval activated between: the PG serves, the lost chunks read
+    unfound, never wrong data or zeros, and it is reported, naming the disks until they are declared
+    lost (`TestRep2ServesPastTwoFailures`, `TestAChunkOnlyLostDisksHeldStaysUnfound`).
+  - Together: the PG is down, and refuses reads and writes, whether or not the disks are declared
+    lost (`TestTwoDisksLostTogetherStayStopped`; open question "A PG whose last activated interval
+    has no member left").
 - Open: how an empty refilled member is filled. The design says only that a PG is one key range of
   the chunk index; a scan of `(pool, h)` over that range would fit.
 
@@ -6407,6 +6515,25 @@ The invariant, checked after every simulator step: for every disk d of the pool,
 - a refill after a disk failure that moves members onto the fullest disks while grants are out.
 
 A write that crosses from a granted chunk into a refused one is a daemon case, covered with phase 6's file frontend.
+
+## Operator's disk exits
+
+- A dead node's disks declared lost from the CLI: their members refill at once, their leaving members
+  go with no report, and a later report of those log IDs is refused.
+- A declaration for an up disk or one the record does not know is refused, and changes nothing.
+- A drained disk that holds no member is removed; one that holds a member, a leaving one included, is
+  not.
+- A PG whose last activated interval has no member left behaves as the [open
+  question](design.md#roadmap-and-open-questions) settles.
+
+## Blocked and unfound reports
+
+- A chunk unfound on a seeded run: its primary's heartbeat carries the count, and the pool's resource
+  shows `Blocked` with the PG, the count and the candidates, clearing once the chunk heals.
+- A PG stopped below `min_live`: once `Stuck`, `Blocked` shows its count as unknown, not 0, and its
+  candidates.
+- A PG with no active primary reports nothing, and the leader marks it stopped from its own record.
+- A report for a PG the table no longer has, after a split or a stale table, is ignored, not a panic.
 
 ## Session fencing on storage nodes
 

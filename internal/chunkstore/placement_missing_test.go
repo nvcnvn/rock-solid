@@ -67,7 +67,7 @@ func TestMissingMembers(t *testing.T) {
 			}
 			for _, i := range pgs {
 				e := &l.pools().PGs[i]
-				if len(e.Members) != r.pool.Replicas || live(e.Members) < r.pool.MinLive && r.name != "down 59 s in rep2 with min_live 2" {
+				if len(e.Members)-leavingIn(e.Members) != r.pool.Replicas || live(e.Members) < r.pool.MinLive && r.name != "down 59 s in rep2 with min_live 2" {
 					t.Fatalf("PG %d: %v", i, e.Members)
 				}
 			}
@@ -106,7 +106,7 @@ func TestRefillMemberCountsAtOnce(t *testing.T) {
 	l.now += DegradedRefillAfter
 	l.step(t, l.inputs(0))
 	for _, i := range pgs {
-		if e := l.pools().PGs[i]; slices.ContainsFunc(e.Members, func(x Member) bool { return x.Mark != MarkUp }) {
+		if e := l.pools().PGs[i]; slices.ContainsFunc(e.Members, func(x Member) bool { return !x.Leaving && x.Mark != MarkUp }) {
 			t.Fatalf("PG %d after its refill: %v", i, e.Members)
 		}
 	}
@@ -128,9 +128,9 @@ func TestAwaitedMemberStays(t *testing.T) {
 		l.step(t, l.inputs(0))
 		l.now += DegradedRefillAfter
 		l.step(t, l.inputs(0))
-		got := disksOf(&l.pools().PGs[0])
-		if slices.Contains(got, a) || !slices.Contains(got, m) {
-			t.Fatalf("min_live raised %v: PG 0 went from %v to %v: A refilled and M kept expected", raise, e.Members, got)
+		got := l.pools().PGs[0].Members
+		if !slices.Contains(got, Member{Disk: a, Mark: MarkDown, Leaving: true}) || !slices.Contains(got, Member{Disk: m, Mark: MarkDown}) {
+			t.Fatalf("min_live raised %v: PG 0 went from %v to %v: A leaving and M kept expected", raise, e.Members, got)
 		}
 	}
 }
@@ -152,11 +152,11 @@ func TestRefillWithNoEligibleDisk(t *testing.T) {
 		copying = append(copying, Copying{PG: uint32(i), Since: start})
 	}
 	var c Conditions
-	c.Watch(start+StuckAfter-1, copying)
+	c.Watch(start+StuckAfter-1, copying, l.pools())
 	if len(c.Stuck) != 0 {
 		t.Fatal("Stuck before 60 s")
 	}
-	c.Watch(start+StuckAfter, copying)
+	c.Watch(start+StuckAfter, copying, l.pools())
 	f := l.figures()
 	c.Update(&f, false)
 	if len(c.Stuck) != 128 || c.CannotReprotect {

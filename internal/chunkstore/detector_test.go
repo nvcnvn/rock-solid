@@ -376,7 +376,7 @@ func TestAFlappingDiskIsHeldDown(t *testing.T) {
 		on := func() []int {
 			var pgs []int
 			for i, e := range h.table.Pools[0].PGs {
-				if slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == 4 }) {
+				if slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == 4 && !m.Leaving }) {
 					pgs = append(pgs, i)
 				}
 			}

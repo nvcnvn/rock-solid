@@ -253,7 +253,7 @@ func (h *history) check(prev *Table, l *layout, in *Inputs) error {
 			b = old.PGs[i*len(old.PGs)/len(pt.PGs)]
 		}
 		n, surplus := len(e.Members)-leaving, len(b.Members)-leavingIn(b.Members)
-		if leaving > 1 || n < p.width() || n > p.width() && (leaving == 0 || n > surplus) {
+		if leaving > 0 && len(e.Members) > maxMembers || n < p.width() || n > p.width() && (leaving == 0 || n > surplus) {
 			return fmt.Errorf("PG %d at interval %d has members %v for a width of %d", i, e.Interval, e.Members, p.width())
 		}
 		perDomain := map[uint32]int{}
@@ -371,7 +371,7 @@ func (h *history) checkCopies(i int, old *PoolTable, b, e *PGEntry, l *layout, i
 	if j := e.leaving(); j >= 0 && slices.ContainsFunc(e.Members, func(m Member) bool {
 		return !slices.ContainsFunc(b.Members, func(o Member) bool { return o.Disk == m.Disk })
 	}) &&
-		b.leaving() < 0 && !b.Recovered && !reported {
+		b.leaving() < 0 && !b.Recovered && !reported && e.Members[j].Mark != MarkDown {
 		return fmt.Errorf("PG %d moved %v to %v from an interval with no recovered report", i, b.Members, e.Members)
 	}
 	if j := b.leaving(); due && j >= 0 && slices.Contains(e.Members, b.Members[j]) {
