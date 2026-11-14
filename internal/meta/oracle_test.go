@@ -230,8 +230,8 @@ func replayRun(tb testing.TB, seed uint64, p statePlants) error {
 			next[mount]++
 			oldest := next[mount]
 			for _, r := range out {
-				if r.txn.Replay[1] == byte(mount) {
-					oldest = min(oldest, binary.BigEndian.Uint64(r.txn.Replay[2:]))
+				if m, req := replayOf(r.txn.Replay); m == uint32(mount) {
+					oldest = min(oldest, req)
 				}
 			}
 			r := &request{txn: g.txn(), resend: g.rng.IntN(4)}

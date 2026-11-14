@@ -6365,51 +6365,56 @@ Recovery from manifest and log is under Shard indexes in the disk owner's checkp
 - session IDs and request IDs, 64 bits; mount IDs, 32 bits;
 - table epochs and snapshot epochs, 64 bits; a lock mode, 8 bits.
 
-Only the last component (a file name, an xattr name or an S3 key) has variable length, with no escaping and no terminator.
+Only the last component (a file name, an xattr name, an S3 key, or what follows a `ctl/` tag other than a session's) has variable length, with no escaping and no terminator.
 
 - The run filters' inode prefix `T(fs) volume inode` has a fixed length, so every key under an inode has the same prefix and a shorter key has none, as `lsm.Config.Prefix` requires; a prefix taken up to a delimiter would not be (`fs/2/` starts `fs/23/a`).
 
-**Tags**, from the [key layout](design.md#metadata-layer-metastore), frozen by the golden file as disk format: first byte `0x01` ctl, `0x02` volume, `0x03` fs, `0x04` s3; under `ctl/` `0x01` pool, `0x02` placement table, `0x03` membership, `0x04` session, `0x05` format level, `0x06` shard map; under `volume/{id}/` `0x01` attach, `0x02` snap; an inode's keys `0x01` a, `0x02` x, `0x03` t, `0x04` l, `0x05` d, `0x06` c, `0x07` P; a slot's keys `0x10` n, `0x11` u, `0x12` o, `0x13` p, `0x14` r, `0x15` f; a piece key is its value's tag with the high bit set (`0x82`, `0x83`), then a 1-byte piece number. The vectors below write some tags symbolically, as `T(fs)`, `T(a)` and so on, standing for these bytes.
+**Tags**, from the [key layout](design.md#metadata-layer-metastore): first byte `0x01` ctl, `0x02` volume, `0x03` fs, `0x04` s3; under `ctl/` `0x01` pool, `0x02` placement table, `0x03` membership, `0x04` session, `0x05` format level, `0x06` shard map; under `volume/{id}/` `0x01` attach, `0x02` snap; an inode's keys `0x01` a, `0x02` x, `0x03` t, `0x04` l, `0x05` d, `0x06` c, `0x07` P; a slot's keys `0x10` n, `0x11` u, `0x12` o, `0x13` p, `0x14` r, `0x15` f; a piece key is its value's tag with the high bit set (`0x82`, `0x83`), then a 1-byte piece number from 1; lock modes `0x01` s, `0x02` x.
 
-**Golden vectors**, checked into `internal/meta/testdata/` and never edited once frozen:
+**Golden vectors.** `internal/meta/testdata/key_golden.txt` holds one key of every tag and lock mode, frozen as disk format: the test encodes each key to its line's bytes and decodes the bytes back, and never writes the file. Among them:
 
 | Key | Bytes |
 | --- | --- |
-| `fs/5/2:1/a` | `T(fs) 00000005 0000020000000001 T(a)` |
-| `fs/5/2:1/d/beach.jpg` | `T(fs) 00000005 0000020000000001 T(d) 62 65 61 63 68 2e 6a 70 67` |
-| `fs/5/2:0/n` (slot counters of slot 2) | `T(fs) 00000005 0000020000000000 T(n)` |
-| `fs/5/2:0/p/{2:9}` | `T(fs) 00000005 0000020000000000 T(p) 0000020000000009` |
-| Root directory's attributes in volume 1 | `T(fs) 00000001 0000000000000001 T(a)` |
-| `volume/5/snap/{epoch 3}` | `T(volume) 00000005 T(snap) <epoch 3, fixed width>` |
-| `ctl/session/{id}` | `T(ctl) T(session) <id, fixed width>` |
-| `fs/5/2:1/a`, literally | `03 00000005 0000020000000001 01` |
+| `fs/5/2:1/a` | `03 00000005 0000020000000001 01` |
+| `fs/5/2:1/d/beach.jpg` | `03 00000005 0000020000000001 05 62656163682e6a7067` |
+| `fs/5/2:0/n` (slot counters of slot 2) | `03 00000005 0000020000000000 10` |
+| `fs/5/2:0/p/{2:9}` | `03 00000005 0000020000000000 13 0000020000000009` |
+| Root directory's attributes in volume 1 | `03 00000001 0000000000000001 01` |
+| `volume/5/snap/{epoch 3}` | `02 00000005 02 0000000000000003` |
+| `ctl/session/{7}` | `01 04 0000000000000007` |
 | Replay key, volume 5, slot 2, session 7, mount 1, request 42 | `03 00000005 0000020000000000 14 0000000000000007 00000001 000000000000002a`, 34 bytes |
-| `fs/5/2:3/l/x/{session 7}` | `T(fs) 00000005 0000020000000003 T(l) <mode x, 1 byte> 0000000000000007` |
-| Piece 2 of xattr `user.big` on 2:3 | `T(fs) 00000005 0000020000000003 82 02 75 73 65 72 2e 62 69 67` |
+| `fs/5/2:3/l/x/{session 7}` | `03 00000005 0000020000000003 04 02 0000000000000007` |
+| Piece 2 of xattr `user.big` on 2:3 | `03 00000005 0000020000000003 82 02 757365722e626967` |
+| The largest volume and inode | `03 ffffffff ffffffffffffffff 01` |
 
 **Order.**
 
-- [property] For random pairs of logical keys, byte order equals logical order: components compared left to right, integers numerically, the last component bytewise.
-- Fixed order, under the tags above: `fs/5/2:0/n` < `fs/5/2:1/a` < `fs/5/2:1/d/beach.jpg` < `fs/5/2:1/d/cat.jpg` < `fs/5/2:2/a` < `fs/5/3:0/n` < `fs/6/1:0/n`. Every key of slot 2 sorts before every key of slot 3, so a shard can split between slots.
-- Volume 255 < volume 256: the 32-bit big-endian encoding keeps numeric order where a decimal string would not.
-- A prefix scan of `fs/5/2:1/d/` returns directory entries only, never `fs/5/2:1/x/...`.
-- A scan from `fs/5/2:3/a` through the end of `fs/5/2:3/x/` returns the attributes and the xattrs, and no other key kind.
-- File names with 0x01 or 0xFF bytes, and S3 keys with 0x00, are still the last component and sort bytewise.
+- [property] `TestKeyByteOrderIsLogicalOrder`, 10,000 seeds of 200 pairs: for random pairs of keys of every kind, with fields at their bounds and names of 0x00, 0x01, 0x7f, 0x80 and 0xff bytes, byte order equals logical order (components compared left to right, integers numerically, the last component bytewise), and each key decodes back to itself.
+- Fixed order: volume 255 < volume 256, where a decimal string would not keep it; `fs/5/2:0/n` < `fs/5/2:1/a` < `fs/5/2:1/d/\x01` < `fs/5/2:1/d/beach.jpg` < `fs/5/2:1/d/cat.jpg` < `fs/5/2:1/d/cat.jpg\xff` < `fs/5/2:2/a` < `fs/5/3:0/n` < `fs/6/1:0/n`, so every key of slot 2 sorts before every key of slot 3 and a shard can split between slots; S3 keys `a` < `a\x00` < `a/`.
+- On a shard holding an inode's keys of every kind and its neighbours' keys, a prefix scan of `fs/5/2:3/d/` returns its directory entries only, and a scan from `fs/5/2:3/a` through the end of `fs/5/2:3/x/` its attributes and xattrs only, no piece key.
 
-**Errors.** The encoder refuses a slot ≥ 2^24 or a sequence ≥ 2^40. The decoder refuses each of these, as an error, never a panic, and a fuzz test covers it:
+**Errors.** `MakeInode` refuses a slot ≥ 2^24 or a sequence ≥ 2^40. `DecodeKey` refuses each of these as `ErrBadKey`, never a panic, and `AppendKey` refuses a `Key` that would encode to one, leaving its buffer as it was:
 
-- a truncated key;
-- an unknown tag;
+- an empty or truncated key, or one over `MaxKey`;
+- an unknown space, tag or lock mode, and a piece tag of a value other than x and t;
 - a missing fixed-width field;
 - trailing bytes after a fixed-width last component;
-- a slot tag at a sequence other than 0.
+- a slot tag at a sequence other than 0, and an inode or piece tag at sequence 0;
+- piece number 0, and a piece tag with no number;
+- a directory entry, folded name, xattr or S3 key with an empty name.
+
+[fuzz] `FuzzDecodeKey`: bytes that decode encode back to the same bytes.
+
+**Replay keys.** A `Txn` whose replay key is not a key under the replay tag, a purge entry's key or one with no tags, is refused with `ErrBadReplay` before proposing, so the range its apply removes below `Oldest` holds only that mount's records. The refusal of client writes to replay-tagged keys is a [Sharded API](#sharded-api-one-shard) scenario.
 
 **Limits and pieces.**
 
-- An S3 key of 1,024 bytes gives an index key of 1,029 bytes, within `MaxKey` (1,032); a 1,025-byte S3 key is refused at the frontend.
-- A 64 KiB xattr is stored as its first piece and piece count under `x/{name}` and about 65 more pieces, in one `Txn` of about 82 KiB, and reads back whole with 1 + m lookups; a 4,095-byte symlink target is 5 values.
+- An S3 key of 1,024 bytes gives an index key of 1,029 bytes, within `MaxKey` (1,032); an S3 index key over `MaxKey` is refused. A 1,025-byte S3 key is refused at the frontend.
+- A value is a head of its piece count and its first 999 bytes, then pieces of 1,000 bytes but the last: 999 bytes are 1 value, 1,000 are 2, 2,000 are 3, a 4,095-byte symlink target 5 and a 64 KiB xattr 66, in one `Txn` of about 82 KiB; each splits and joins back whole with 1 + m lookups. A value over 64 KiB is refused.
 - Names over 255 bytes, xattr names over 255, symlink targets over 4,095 and xattr values over 64 KiB are refused at the frontend, before any `Txn`.
-- [fuzz] The piece decoder refuses a missing piece, a piece count past 66, and a piece past the count, as errors.
+- [fuzz] `FuzzPieces`: the reader refuses a missing piece, a short head or inner piece, a long or empty last piece, a last piece that takes the value past 64 KiB (65 full pieces after a full head), a piece count past 65 and a piece past the count, as errors; a head and pieces it joins are the split of the value they join to.
+
+**Allocation.** Encoding and decoding a key, and checking a `Txn`'s replay key, allocate nothing (`testing.AllocsPerRun`).
 
 ## Sharded API, one shard
 
@@ -6418,6 +6423,7 @@ Only the last component (a file name, an xattr name or an S3 key) has variable l
 - **At a follower.** A `Txn` sent to a follower or a candidate is never forwarded: it is answered `NotLeader{shard, leader node, term}` and proposes nothing. The daemon updates its route cache and resends to that node, and the trace shows one `Propose`, at the leader. With no known leader the reply names none, and the daemon retries after the election.
 - **During an election.** A client request arriving during an election fails retryably and is never applied twice: its resend carries the same replay key and returns the first final result (see Filesystem schema).
 - **Internal `Txn`s across a leader change.** The purger's `Check(p/i = v)` with `Delete(p/i)` applies, its reply is lost, a new leader is elected, a truncate merges a new range into `p/i`, and the purger resends: the check fails and nothing is deleted. The same with a blind `Delete(p/i)` (planted bug) loses the merged range, and the purge invariant fires. A control-plane table version `Check(e)`, `Put(e + 1)` repeated after an election fails its check.
+- **Replay-tagged keys.** A client `Txn` with a `Put`, `Delete` or `Update` of a replay-tagged key, or a `DeleteRange` over one, is refused before proposing, so a resend under that key never meets a value that is no record and is never answered `ErrMalformed`; the leader's internal `Txn` that drops a departed session's records is not. Replay-tagged means an `fs/` key at sequence 0 whose byte 13, the tag, is `0x14`, whether or not the rest decodes: a raw 35-byte key starting with a mount's record prefix and a request below its oldest outstanding one is refused too, since the drop below `Oldest` would remove it. Refusing every client key `DecodeKey` rejects does the same.
 - **`ctl/` keys.** They go through the same `Txn` and `Scan`, and the shard map pins `[ctl/, PrefixEnd(ctl/))` to the control-plane group, which never splits: a split proposed inside it is refused.
 
 ## Control-plane group

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -205,15 +206,17 @@ func TestLimitsAreCheckedBeforeProposing(t *testing.T) {
 		{"oldest without a replay key", Txn{Ops: []Op{Delete(b("a"))}, Oldest: 1}, ErrBadReplay},
 		{"82 KiB xattr in pieces", pieces(82 << 10), nil},
 		{"1 MiB in pieces", pieces(1 << 20), ErrTooLarge},
-		{"replay key short of a request ID", Txn{Ops: []Op{Delete(b("a"))}, Replay: b("r/1")}, ErrBadReplay},
-		{"oldest above its own request", Txn{Ops: []Op{Delete(b("a"))}, Replay: append(b("r/"), be(5)...), Oldest: 6}, ErrBadReplay},
-		{"oldest at its own request", Txn{Ops: []Op{Delete(b("a"))}, Replay: append(b("r/"), be(5)...), Oldest: 5}, nil},
+		{"replay key short of a request ID", Txn{Ops: []Op{Delete(b("a"))}, Replay: replayKey(1, 5)[:33]}, ErrBadReplay},
+		{"replay key under the purge tag", Txn{Ops: []Op{Delete(b("a"))}, Replay: mustKey(&Key{Space: SpaceFS, Volume: 1, Inode: 2 << SeqBits, Tag: SlotPurge, ID: 5})}, ErrBadReplay},
+		{"replay key with no tag", Txn{Ops: []Op{Delete(b("a"))}, Replay: append(b("r/"), be(5)...)}, ErrBadReplay},
+		{"oldest above its own request", Txn{Ops: []Op{Delete(b("a"))}, Replay: replayKey(1, 5), Oldest: 6}, ErrBadReplay},
+		{"oldest at its own request", Txn{Ops: []Op{Delete(b("a"))}, Replay: replayKey(1, 5), Oldest: 5}, nil},
 	} {
 		if _, err := c.txn.Check(); !errors.Is(err, c.err) {
 			t.Errorf("%s: %v, want %v", c.name, err, c.err)
 		}
 	}
-	updates := Txn{Replay: append(b("r/"), be(1)...)}
+	updates := Txn{Replay: replayKey(1, 1)}
 	for range MaxReplayUpdates {
 		updates.Ops = append(updates.Ops, Update(b("a"), 0, Add, 1))
 	}
@@ -374,8 +377,27 @@ func TestAConsumedRunIsRemovedByOneDeleteRange(t *testing.T) {
 	}
 }
 
+func mustKey(k *Key) []byte {
+	b, err := AppendKey(nil, k)
+	if err != nil {
+		panic(fmt.Sprintf("%+v: %v", k, err))
+	}
+	return b
+}
+
+// replayKey is a replay key of session 7 in slot 2 of volume 1, and replays the prefix every such key shares.
 func replayKey(mount byte, request uint64) []byte {
-	return append([]byte{'r', mount}, be(request)...)
+	return mustKey(&Key{Space: SpaceFS, Volume: 1, Inode: 2 << SeqBits, Tag: SlotReplay, Session: 7, Mount: uint32(mount), ID: request})
+}
+
+var replays = replayKey(0, 0)[:22]
+
+func replayOf(k []byte) (mount uint32, request uint64) {
+	var d Key
+	if err := DecodeKey(k, &d); err != nil {
+		panic(err)
+	}
+	return d.Mount, d.ID
 }
 
 func TestReplayRecords(t *testing.T) {
@@ -414,13 +436,13 @@ func TestReplayRecords(t *testing.T) {
 	oldest := Txn{Ops: []Op{Put(b("g"), nil)}, Replay: replayKey(1, 60), Oldest: 50}
 	set(s, string(replayKey(1, 49)), "\x00", string(replayKey(1, 50)), "\x00", string(replayKey(0, 10)), "\x00")
 	run(t, s, oldest)
-	got, _ := scanKeys(t, s, b("r"), PrefixEnd(b("r")), 100)
+	got, _ := scanKeys(t, s, replays, PrefixEnd(replays), 100)
 	want := []string{string(replayKey(0, 10)), string(replayKey(1, 50)), string(replayKey(1, 60)), string(replayKey(2, 42))}
 	if !slices.Equal(got, want) {
 		t.Fatalf("records after oldest 50 from mount 1: %q, want %q", got, want)
 	}
 	// The session leaves the session table: its leader removes its records with an internal Txn.
-	run(t, s, ops(DeleteRange(b("r"), PrefixEnd(b("r")))))
+	run(t, s, ops(DeleteRange(replays, PrefixEnd(replays))))
 	if r := run(t, s, mkdir); r.FailedCheck != 0 {
 		t.Fatal("a resend after its record was dropped did not run again")
 	}

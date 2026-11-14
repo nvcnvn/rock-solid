@@ -100,6 +100,53 @@ func TestCheckedTxnsDecodeToThemselves(t *testing.T) {
 	})
 }
 
+// Bytes that decode as a key encode back to the same bytes, and anything else is refused without a panic.
+func FuzzDecodeKey(f *testing.F) {
+	for _, k := range goldenKeys {
+		f.Add(mustKey(&k))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var k Key
+		if DecodeKey(data, &k) != nil {
+			return
+		}
+		if enc, err := AppendKey(nil, &k); err != nil || !bytes.Equal(enc, data) {
+			t.Fatalf("%x decodes to %+v, which encodes to %x (%v)", data, k, enc, err)
+		}
+	})
+}
+
+// A head and pieces that join are the split of the value they join to, and a value splits and
+// joins back to itself.
+func FuzzPieces(f *testing.F) {
+	f.Add([]byte{0}, []byte{}, uint16(0))
+	f.Add(append([]byte{2}, make([]byte, MaxValue-1)...), make([]byte, MaxValue), uint16(7))
+	f.Add(append([]byte{maxPieces}, make([]byte, MaxValue-1)...), make([]byte, MaxValue), uint16(MaxValue-1))
+	f.Fuzz(func(t *testing.T, head, piece []byte, last uint16) {
+		vals := [][]byte{head}
+		if m, _, err := DecodeHead(head); err == nil && m > 0 {
+			for i := 1; i <= m; i++ {
+				vals = append(vals, piece)
+			}
+			vals[m] = piece[:min(len(piece), int(last)+1)]
+		}
+		if v, err := join(vals); err == nil {
+			for i, p := range split(t, v) {
+				if !bytes.Equal(p, vals[i]) {
+					t.Fatalf("value %d of a %d-byte split is %x, joined from %x", i, len(v), p, vals[i])
+				}
+			}
+		}
+		if (len(head)+len(piece))*(1+int(last)) > MaxSplit {
+			return
+		}
+		v := bytes.Repeat(append(head, piece...), 1+int(last))
+		if got, err := join(split(t, v)); err != nil || !bytes.Equal(got, v) {
+			t.Fatalf("a %d-byte value joins to %d bytes (%v)", len(v), len(got), err)
+		}
+	})
+}
+
 func sameTxn(a, b *Txn) bool {
 	if !bytes.Equal(a.Replay, b.Replay) || a.Oldest != b.Oldest || len(a.Ops) != len(b.Ops) {
 		return false

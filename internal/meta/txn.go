@@ -36,7 +36,7 @@ var (
 	ErrEmptyRange = errors.New("meta: empty range")
 	// ErrBadOp reports an op of an unknown kind or Update mode.
 	ErrBadOp = errors.New("meta: bad op")
-	// ErrBadReplay reports a replay key too short to end in a request ID, an oldest outstanding request above its own, or too many Updates for its record.
+	// ErrBadReplay reports a replay key that is no replay-tagged key, an oldest outstanding request above its own, or too many Updates for its record.
 	ErrBadReplay = errors.New("meta: bad replay key")
 	// ErrMalformed reports a log entry whose Txns do not decode; none of them applies.
 	ErrMalformed = errors.New("meta: malformed entry")
@@ -121,7 +121,7 @@ func Update(key []byte, off uint16, mode Mode, n uint64) Op {
 // Txn is a shard's transaction: its checks against the state before it, then its writes in list order, all or nothing.
 type Txn struct {
 	Ops []Op
-	// Replay is the replay record's key, ending in the request's 8-byte big-endian ID, or nil for an internal Txn.
+	// Replay is the replay record's key, fs/{volume}/{slot · 0}/r/{session}/{mount}/{request}, or nil for an internal Txn.
 	Replay []byte
 	// Oldest is the mount's oldest outstanding request; its records below it are dropped.
 	Oldest uint64
@@ -156,7 +156,8 @@ func (t *Txn) Check() (int, error) {
 		return 0, ErrBadReplay
 	}
 	if t.Replay != nil {
-		if len(t.Replay) < requestBytes || len(t.Replay) > MaxBound || t.Oldest > binary.BigEndian.Uint64(t.Replay[len(t.Replay)-requestBytes:]) {
+		var k Key
+		if DecodeKey(t.Replay, &k) != nil || k.Space != SpaceFS || k.Tag != SlotReplay || t.Oldest > k.ID {
 			return 0, ErrBadReplay
 		}
 		n += uvarintLen(t.Oldest)
