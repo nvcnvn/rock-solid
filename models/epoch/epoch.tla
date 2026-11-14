@@ -713,14 +713,15 @@ Reply(d, c) ==
 \* nothing, holds that version as its newest below LS. A version of LS or later
 \* is kept unless a reached member live in its interval reports neither it nor
 \* a later version, and every version a kept one rests on is kept. Two cases keep
-\* a version such a member lacks, when an up member of k holds it and lists nothing,
-\* so could be its source: dropping it would leave that member listing the chunk
-\* too. The member lacking it lists the chunk, so is no source of what it holds,
-\* or every up member of k holds the version, so the one lacking it is a disk
+\* a version such a member lacks, when an up member of k holds it, lists nothing
+\* and logged nothing above it (is not in U), so could be its source: dropping it
+\* would leave that member listing the chunk too, where one in U lists it anyway.
+\* The member lacking it lists the chunk, so is no source of what it holds, or
+\* every up member of k holds the version, so the one lacking it is a disk
 \* recovery cannot read. With no such member the veto stands: it may be the one
 \* holding what is acknowledged. ListerVetoes and KeepPastMember remove the cases,
 \* KeepNoSource the condition.
-Kept(p, L, J, c, k) ==
+Kept(p, L, J, c, k, U) ==
     LET r == [d \in J |-> Reply(d, c)]
         LS == Max({r[d].decided : d \in J} \cup {L})
         RS == {d \in J : r[d].decided = LS}
@@ -730,6 +731,7 @@ Kept(p, L, J, c, k) ==
         listed == {r[d].list : d \in J} \ {NoMiss, 0}
         holds(d, v) == r[d].whole >= v \/ r[d].list >= v
         source(v) == Bug("KeepNoSource") \/ \E d \in UpIn(p, k) : r[d].whole = v /\ r[d].list = NoMiss
+                                                                    /\ [d |-> d, c |-> c] \notin U
         keep(v) == \/ \A d \in J \cap UpIn(p, IvOfV(v)) : holds(d, v)
                    \/ /\ source(v)
                       /\ \/ ~Bug("ListerVetoes") /\ \A d \in J \cap UpIn(p, IvOfV(v)) : holds(d, v) \/ r[d].list # NoMiss
@@ -748,9 +750,10 @@ Entry(d, c, K) ==
 
 \* A crash can leave part of a version above a member's newest whole one. The
 \* logs here hold whole versions, so that member's bytes are not modelled: the
-\* set T names the (disk, chunk) pairs the decision lists at K for such a reason,
-\* where Entry would leave them off. Peer draws them from the members with a
-\* version above their newest ordered.
+\* set U names the (disk, chunk) pairs that logged part of a later version and
+\* list nothing, and T those of U the decision lists at K for that reason, where
+\* Entry would leave them off. Peer draws U from the members with a version above
+\* their newest ordered.
 ListOf(d, c, K, T) == IF [d |-> d, c |-> c] \in T THEN K ELSE Entry(d, c, K)
 
 \* The versions of c n's store keeps gated: those its process ordered and has
@@ -891,10 +894,11 @@ TornSets(n, p) ==
                    /\ \E r \in vers : r.c = x.c /\ r.v > Newest(dlog[x.d][x.c])}
     ELSE {{}}
 
-PeerOn(n, p, J, P, T) ==
+PeerOn(n, p, J, P, U) ==
     LET k == IvAt(n, p)
         L == LaAt(n, p)
-        K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c, k) ELSE 0]
+        K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c, k, U) ELSE 0]
+        T == {x \in U : Entry(x.d, x.c, K[x.c]) = NoMiss}
         \* The members the decision counts as holding the kept version:
         \* the recovery sources it reached, and the live members it
         \* leaves off the missing list.
@@ -946,8 +950,8 @@ PeerOn(n, p, J, P, T) ==
 
 Peer(n, p) ==
     /\ PeerOpen(n, p)
-    /\ \E J \in SUBSET PeerElig(n, p), P \in PeerPersists(n, p), T \in TornSets(n, p) :
-         PeerOn(n, p, J, P, T)
+    /\ \E J \in SUBSET PeerElig(n, p), P \in PeerPersists(n, p), U \in TornSets(n, p) :
+         PeerOn(n, p, J, P, U)
 
 \* The members still to persist do so, as they could have at the decision:
 \* their logs and lists have not changed since.

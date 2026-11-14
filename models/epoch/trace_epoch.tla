@@ -45,20 +45,18 @@ ReplyMatches(l) ==
         /\ Reply(r.d, r.c).list = r.list
         /\ Decided1(Reply(r.d, r.c).decided) = Decided1(r.decided)
 
-\* The members the code listed beyond Entry, the decision's T: such a member logged
-\* more than it holds whole, and Entry leaves it off for the version it holds.
+\* The decision's U: the up members whose reply shows a version logged above the
+\* newest whole one, listing nothing.
 TornIn(l) ==
-    {[d |-> x.d, c |-> x.c] : x \in {y \in l.listed : Entry(y.d, y.c, l.kept[y.c]) = NoMiss}}
+    {[d |-> r.d, c |-> r.c] :
+       r \in {y \in l.rep : y.logged > y.whole /\ y.list = NoMiss /\ y.d \in UpIn(l.p, l.iv)}}
 
-\* The code's lists are the spec's under T, and T is every member a reply shows torn.
+\* The code's lists are the spec's under T, the members of U Entry leaves off.
 ListsMatch(l) ==
-    LET T == TornIn(l)
+    LET T == {x \in TornIn(l) : Entry(x.d, x.c, l.kept[x.c]) = NoMiss}
         up == [d : UpIn(l.p, l.iv), c : ChunksOf(l.p)]
-    IN /\ l.listed = {[d |-> x.d, c |-> x.c, v |-> ListOf(x.d, x.c, l.kept[x.c], T)] :
-                         x \in {y \in up : ListOf(y.d, y.c, l.kept[y.c], T) # NoMiss}}
-       /\ \A r \in l.rep :
-            (r.logged > r.whole /\ [d |-> r.d, c |-> r.c] \in up /\ Entry(r.d, r.c, l.kept[r.c]) = NoMiss)
-                => [d |-> r.d, c |-> r.c] \in T
+    IN l.listed = {[d |-> x.d, c |-> x.c, v |-> ListOf(x.d, x.c, l.kept[x.c], T)] :
+                     x \in {y \in up : ListOf(y.d, y.c, l.kept[y.c], T) # NoMiss}}
 
 KeptMatches(l) ==
     \E x \in dec' :
