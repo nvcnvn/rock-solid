@@ -719,7 +719,6 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 		{"acknowledged on a lone copy", 291, peerPlant{invAckCopies, func(r *primaryRun) { r.c.replicaPlants.ackOnLoneCopy = true }}},
 		{"M7", 169, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }}},
 		{"M8", 38, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking = true }}},
-		{"a member holding a version in part left off the list", 387, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.unlistTorn = true }}},
 		{"recovered from a primary that lacks the chunk", 16, peerPlant{invOneVersion, func(r *primaryRun) { r.c.replicaPlants.recoverFromListed = true }}},
 		{"a list cleared with no source", 6, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.clearNoSource = true }}},
 		{"refused as gone while up", 0, peerPlant{invSameInterval, func(r *primaryRun) { r.c.replicaPlants.goneWhileUp = true }}},

@@ -157,20 +157,37 @@ func TestConformScriptedRefill(t *testing.T) {
 	}
 }
 
-// A move and a restart: peering keeps Y, which every up member holds, over the removed disk that lacks it.
+// A move and a restart: the restarted primary's replay gates Y until its next decision.
 func TestConformScriptedMoveRestarted(t *testing.T) {
 	r := seededSoleRun(t, 1, 2, 3)
 	r.c.conformBegin()
-	moveOn(t, r, core.BlockSize, noPlant)
+	yPastTheLeaving(t, r, core.BlockSize, noPlant)
+	restartPastTheMove(t, r)
 	conformWrite(t, "scripted-move-restarted", r.c)
 }
 
-// A restart during recovery: peering keeps Y over the member that lists the chunk.
+// A move and a new primary that holds Y: peering keeps Y, which every up member holds, over the removed disk that lacks it.
+func TestConformScriptedMovePrimary(t *testing.T) {
+	r := seededSoleRun(t, 1, 2, 3)
+	r.c.conformBegin()
+	movedPrimary(t, r, core.BlockSize, noPlant)
+	conformWrite(t, "scripted-move-primary", r.c)
+}
+
+// A restart during recovery: the restarted primary's replay gates Y until its next decision.
 func TestConformScriptedListerRestarted(t *testing.T) {
 	r := seededSoleRun(t, 1, 3, 3)
 	r.c.conformBegin()
 	recoveringLister(t, r, noPlant)
 	conformWrite(t, "scripted-lister-restarted", r.c)
+}
+
+// A rotation during recovery: the new primary holds Y logged, and peering keeps it over the member that lists the chunk.
+func TestConformScriptedListerRotated(t *testing.T) {
+	r := seededSoleRun(t, 1, 3, 3)
+	r.c.conformBegin()
+	rotatedLister(t, r, noPlant)
+	conformWrite(t, "scripted-lister-rotated", r.c)
 }
 
 // A leaving member up takes the place of a member merely down, which leaves in its turn: the spec takes the whole run.

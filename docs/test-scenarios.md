@@ -3325,7 +3325,7 @@ run in `deep-leases`; the variants that need one run on it alone.
   `ci`, 4 in `heavy-peering`, and a counter limit of 2. The logs hold whole versions: no version is
   held in part in the model. `ci-tears` lets a decision list such a member all the same, by `ListOf`,
   which shows extra listing is safe, and not that it is needed; that a torn member must be listed rests
-  on the Go plant `unlistTorn`, at seed 5 of the primary-change run.
+  on the Go plant `unlistTorn` (`TestUnlistTornMapsADroppedVersion`).
 - **Missing lists.** Members persist them, with the interval, before the primary activates; only
   recovery removes an entry. Nothing reads a member's list until the next peering, which it answers
   only once it has left the interval, so a member that persists its list while still in the
