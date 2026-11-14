@@ -65,6 +65,8 @@ type gen struct {
 	lines   []string
 	replies map[[3]uint64]map[uint64]*reply
 	cur     *reply
+	// decisions holds each [node, pg, interval] an OutDecide named.
+	decisions map[[3]uint64]bool
 	// disks maps a disk ID to the spec's: one formatted again takes the next past the nodes.
 	diskIDs map[uint64]uint64
 	fmts    int
@@ -163,6 +165,25 @@ func (g *gen) crash(n int) {
 	}
 	g.memberOpen[n], g.ownOpen[n] = nil, nil
 	g.line(`k |-> "restart", n |-> %d`, n)
+}
+
+// repliedLater reports whether node n, as PG f's primary, took its own disk's peering reply for an interval after iv and has not decided it: a recovery write of iv that lands now changes no list that decision reads.
+func (g *gen) repliedLater(n int, f, iv uint64) bool {
+	own, ok := g.nodeDisk[n]
+	if !ok {
+		own = uint64(n)
+	}
+	for k, got := range g.replies {
+		if k[0] != uint64(n) || k[1] != f || k[2] <= iv || g.decisions[k] {
+			continue
+		}
+		for d := range got {
+			if g.disk(d) == own {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (g *gen) line(format string, args ...any) {
@@ -575,9 +596,13 @@ func (g *gen) run(recs []trace.Record) {
 		case trace.OutFail:
 			g.heard(func(c uint64, _ refusal) bool { return c == r.Fields[0] })
 		case trace.OutLogged:
+			kind := "logged"
+			if slices.Contains(g.ownOpen[n], [2]uint64{r.Fields[0], r.Fields[1]}) {
+				kind = "ownlogged"
+			}
 			g.ownOpen[n] = dropVersion(g.ownOpen[n], r.Fields[0], r.Fields[1])
 			g.memberOpen[n] = dropVersion(g.memberOpen[n], r.Fields[0], r.Fields[1])
-			g.line(`k |-> "logged", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(r.Fields[0]), ver(r.Fields[1]))
+			g.line(`k |-> "%s", n |-> %d, c |-> %d, v |-> %s`, kind, n, g.chunk(r.Fields[0]), ver(r.Fields[1]))
 		case trace.OutRecoverOrder:
 			g.orderAt[[2]uint64{r.Fields[0], r.Fields[2]}] = len(g.lines)
 			g.line(`k |-> "recoverorder", n |-> %d, c |-> %d, s |-> %d, iv |-> %d`, n, g.chunk(r.Fields[0]), g.source(r.Fields[1]), r.Fields[2])
@@ -586,11 +611,13 @@ func (g *gen) run(recs []trace.Record) {
 		case trace.OutRecovered:
 			g.recovering[n] = slices.DeleteFunc(g.recovering[n], func(x [3]uint64) bool { return x[0] == r.Fields[0] && x[2] == r.Fields[3] })
 			f, s := g.chunkField(r.Fields[0]), g.source(r.Fields[2])
-			at := len(g.lines)
-			if r.Fields[3] == g.activated[f] {
+			at, kind := len(g.lines), "recovered"
+			if n == g.primary[f] && g.repliedLater(n, f, r.Fields[3]) {
+				kind = "recoveredlate"
+			} else if r.Fields[3] == g.activated[f] {
 				at = g.recoveredAt(f, r.Fields[0], r.Fields[3], n, s)
 			}
-			g.lineAt(at, `k |-> "recovered", n |-> %d, l |-> %d, c |-> %d, v |-> %s, s |-> %d, iv |-> %d`, n, g.primary[f], g.chunk(r.Fields[0]), ver(r.Fields[1]), s, r.Fields[3])
+			g.lineAt(at, `k |-> "%s", n |-> %d, l |-> %d, c |-> %d, v |-> %s, s |-> %d, iv |-> %d`, kind, n, g.primary[f], g.chunk(r.Fields[0]), ver(r.Fields[1]), s, r.Fields[3])
 		case trace.OutReported:
 			g.line(`k |-> "reported", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.OutAsk:
@@ -682,7 +709,9 @@ var belowProtocol = []trace.Name{
 }
 
 func (g *gen) decide(n int, r *trace.Record, kept, listed []string) {
-	got := g.replies[[3]uint64{uint64(n), r.Fields[0], r.Fields[1]}]
+	key := [3]uint64{uint64(n), r.Fields[0], r.Fields[1]}
+	g.decisions[key] = true
+	got := g.replies[key]
 	var ds []uint64
 	for d := range got {
 		ds = append(ds, d)
@@ -764,7 +793,7 @@ func main() {
 	if flag.NArg() != 1 {
 		fatal("usage: tracedata [-module name] run.trace")
 	}
-	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{},
+	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{}, decisions: map[[3]uint64]bool{},
 		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, restarted: map[[2]uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
 		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][3]uint64{}, orderAt: map[[2]uint64]int{}, refused: map[uint64][]refusal{}}
 	recs := g.load(flag.Arg(0))
