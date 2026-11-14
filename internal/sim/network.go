@@ -277,7 +277,7 @@ func (s *Scheduler) lose(it *item) {
 		return
 	}
 	to := core.NodeID{Node: it.node, Loop: it.loop}
-	s.record(n, it.from.Loop, n.Context().Now, trace.Record{Name: trace.EvDrop, Fields: [trace.MaxFields]uint64{trace.Peer(to), msgType(&it.act.Msg, s.set.MsgType)}})
+	s.record(n, it.from.Loop, n.Context().Now, trace.Record{Name: trace.EvDrop, Fields: [trace.MaxFields]uint64{trace.Peer(to), trace.MsgType(&it.act.Msg, s.set.MsgType)}})
 	s.release(it)
 }
 

@@ -16,19 +16,32 @@ import (
 	_ "golang.org/x/sys/unix"
 )
 
-func allowed(in chan int, m map[string]int) {
-	_ = time.Now()
-	time.Sleep(time.Millisecond)
+func allowed(m map[string]int, keys []string) {
 	_ = rand.Uint64()
-	ch := make(chan int, 1)
-	go func() { ch <- 1 }()
-	<-ch
-	select {
-	case v := <-in:
+	go func() {}()
+	var d time.Duration
+	_ = d
+	for _, k := range keys {
+		_ = m[k]
+	}
+}
+
+func waits(in chan int, m map[string]int) { // want `loop package uses a channel: a loop waits only in the kernel seam's Wait; hand work over through an inbox`
+	_ = time.Now()               // want `loop package calls time.Now: read the clocks through the kernel seam`
+	_ = time.Since(time.Time{})  // want `loop package calls time.Since: read the clocks through the kernel seam`
+	time.Sleep(time.Millisecond) // want `loop package calls time.Sleep: block only in the kernel seam's Wait`
+	var t *time.Timer            // want `loop package uses time.Timer: arm a timer in the loop's heap`
+	_ = t
+	time.AfterFunc(0, func() {}) // want `loop package calls time.AfterFunc: arm a timer in the loop's heap`
+	ch := make(chan int, 1)      // want `loop package uses a channel: a loop waits only in the kernel seam's Wait; hand work over through an inbox`
+	ch <- 1                      // want `loop package sends on a channel: a loop waits only in the kernel seam's Wait; hand work over through an inbox`
+	<-ch                         // want `loop package receives from a channel: a loop waits only in the kernel seam's Wait; hand work over through an inbox`
+	select {                     // want `loop package uses a select statement: a loop waits only in the kernel seam's Wait; hand work over through an inbox`
+	case v := <-in: // want `loop package receives from a channel: a loop waits only in the kernel seam's Wait; hand work over through an inbox`
 		_ = v
 	default:
 	}
-	for k := range m {
+	for k := range m { // want `loop package ranges over a map: iteration order is random; iterate sorted keys`
 		_ = k
 	}
 }

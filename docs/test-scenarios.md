@@ -6803,21 +6803,51 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
 
 ## Event loop
 
-Pass order, the read budget, `writev`, the inbox burst and the block decision run stepped, on
-`looptest` (design.md, Testing strategy, Driver tests); 1,000 connections, goroutines, allocations, cgroup
-sizing (in `docker run --cpus=2.5`) and the open-loop load run on the real kernel.
+Pass order, the read budget, `writev`, backpressure, the queue cap and the block decision run
+stepped, on `looptest` (`internal/loop/looptest`); 1,000 connections, every syscall in the trace, a
+slow reader, a loop asleep at the queue cap, goroutines, allocations, the inbox under `-race`, timers
+that really sleep and cgroup sizing run on the real kernel (`internal/loop`, Linux only, in `docker run` on a Mac). The loops' own tests frame messages
+with `looptest.Wire`, a 2-byte length and the message; the open-loop load run needs a TCP server and
+belongs to the TCP network driver.
 
 Review criteria, each a test:
 
-- Stepped, seed 1-50: a run of 8 loops over socketpairs, run twice, gives the same results and the
-  same event order per loop, and so does a run of 1 loop. Traces name connections by the IDs the
-  loop assigns, not by descriptor number; once the loop and driver packages pass the loop rule set,
-  the two runs' traces are `cmp`-equal.
+- Stepped, seeds 1-50 (1,000 in `scripts/seeds.sh`): a run of 8 loops over socketpairs, run twice,
+  gives the same results and the same event order per loop, and so does a run of 1 loop; the two
+  runs' traces are `cmp`-equal, and every pass of both holds one `epoll_wait`, at most one `writev`
+  per connection and no more than the read budget per connection
+  (`TestSteppedLoopsReplayFromTheirSeed`). Its backpressure run sends bursts of 24 frames of 251
+  bytes to one loop over sockets with 2 KiB buffers, so writes stop with `EAGAIN` and mid-frame,
+  connections wait for `EPOLLOUT`, and reads fill the 512-byte budget; every message still arrives. Traces name connections by the IDs the loop assigns, not
+  by descriptor number (`TestSteppedTraceNamesConnectionsNotDescriptors`).
 - Stepped: a loop that calls `Wait` with `block` set while `Pending` reports work (a queued inbox
-  item, a deferred submission, unspent read budget) fails the test at once.
-- Real kernel: under 1,000 connections, the recorded trace of every pass shows one `epoll_wait`, at most one
-  `writev` per ready descriptor, and no more than the read budget (256 KiB in the spike) read per
-  descriptor. Example of a passing pass:
+  item, a due timer, a connection that filled its read budget) fails the run at once
+  (`TestSteppedRunFailsALoopThatBlocksWithWorkPending`, on a planted loop).
+- Stepped: a pass reads peer connections before clients, whatever order the kernel reports them in
+  (`TestSteppedPassReadsPeersBeforeClients`), so a lease holder that lost time ends its leases before
+  it serves a read that waited behind the grantor's messages (VM pause spike).
+- Stepped: while the bytes queued for writing are at or over `QueueCap` (16 MiB by default), a pass
+  reads peers but no client, and the next pass under the cap reads the client
+  (`TestSteppedLoopStopsReadingClientsAtTheQueueCap`). Open: the cap's value.
+- Real kernel: at the cap the loop modifies its clients to no read interest, so it sleeps rather than
+  spinning on a readable client it will not read: with 4 MiB queued behind a peer that does not
+  read and a client frame waiting, it makes at most 10 passes in 100 ms, and as many again after the
+  muted client hangs up, which closes it (`TestALoopAtTheQueueCapSleeps`).
+- Real kernel: a client that reads its replies slowly, then keeps up, gets all 3,000 echoes in
+  order; meanwhile the loop's writes block and stop mid-frame and it mutes and unmutes the client
+  at a cap of 40 frames (`TestASlowReaderGetsEveryFrameInOrder`).
+- Stepped: a frame the driver queues when a write fails and closes a connection (a `PeerLost` the
+  machine answers by sending elsewhere) is written in the next pass
+  (`TestSteppedFrameQueuedWhileFlushingIsWritten`).
+- Stepped: a timer a handler arms again at `Now` fires once per pass, not again within it
+  (`TestSteppedTimerArmedAgainAtNowFiresInTheNextPass`).
+- `Queue` refuses a frame of no bytes or longer than its buffer
+  (`TestQueueRefusesAnEmptyOrOversizedFrame`), `AddConn` a blocking descriptor
+  (`TestAddConnRefusesABlockingDescriptor`), and a read that finds nothing leaves the connection
+  open (`TestAReadThatFindsNothingKeepsTheConnection`).
+- Real kernel: under 1,000 connections, the recorded trace of every pass shows one `epoll_wait`, at
+  most one `writev` per ready descriptor, and no more than the read budget read per descriptor, and
+  some pass finds all 1,000 ready (`TestAPassUnder1000Connections`). Example of a passing pass:
 
   ```text
   2000000 1 syscall pass=40 epoll_wait ready=2
@@ -6829,29 +6859,37 @@ Review criteria, each a test:
   2000011 1 syscall pass=41 epoll_wait ready=0
   ```
 
-  A pass reading fd 40 past 256 KiB, or writing it twice, fails.
-- `runtime.NumGoroutine` is the same with 1 and with 1,000 connections.
-- Under a 2.5-CPU cgroup the daemon runs 2 loops with `GOMAXPROCS` 3, and `cpu.stat` shows no
-  throttled periods at idle.
-- `testing.AllocsPerRun` of a pass is 0, on the real kernel and on the stepped kernel.
-- With the open-loop latency spike's load generator (16 connections, writes timed from their
-  scheduled send), no request is dropped up to 100,000 writes/s, the rate the spike's bounded harness
-  served (the generator's own limit), and output buffers stay under 20 MB.
+  A pass reading connection 40 past 256 KiB, or writing it twice, fails.
+- Real kernel: no syscall a pass makes is missing from the trace
+  (`TestNoSyscallOfAPassIsMissingFromTheTrace`). The test counts the seam's `epoll_ctl`,
+  `epoll_wait`, `timerfd_settime` and close calls, and takes the thread's `read` and `writev` counts
+  from `/proc/thread-self/io` around each pass; both match the trace's records, the reads `Wait`
+  makes to drain the eventfd and the timerfd falling under its `epoll_wait`.
+- `runtime.NumGoroutine` is the same with 1 and with 1,000 connections
+  (`TestGoroutinesDoNotGrowWithConnections`).
+- Under a 2.5-CPU cgroup the daemon's sizing gives 2 loops with `GOMAXPROCS` 3, and `cpu.stat` shows
+  no throttled periods in 3 s of idle loops (`TestCgroupSizing`, run under
+  `docker run --cpus 2.5 -e RS_WANT_LOOPS=2 -e RS_WANT_PROCS=3`, both in the container's own cgroup
+  namespace and with `--cgroupns=host`).
+- `testing.AllocsPerRun` of a pass is 0, on the real kernel (`TestARealPassAllocatesNothing`) and
+  on the stepped kernel (`TestASteppedPassAllocatesNothing`).
 
-Sizing from the cgroup (Go's default `GOMAXPROCS` is `min(CPUs, max(2, ceil(limit)))`):
+Sizing from Go's default `GOMAXPROCS`, which is `min(CPUs, max(2, ceil(limit)))` under a cgroup
+limit (`TestSizeFollowsTheCPULimit`):
 
-| CPUs | Limit | Loops | `GOMAXPROCS` |
-| --- | --- | --- | --- |
-| 4 | none | 4 | 5, set by the daemon |
-| 4 | 2.5 | 2 | 3, left to the runtime |
-| 4 | 2 | 1 | 2, left to the runtime |
-| 4 | 3 | 2 | 3, left to the runtime |
-| 4 | 2.5, cgroup v1 `cpu.cfs_quota_us` 250000 over 100000 | 2 | 3 |
-| 4 | 4 (equal to the CPU count) | 3 | 4, left to the runtime |
-| 2 | 3 | 1 | 2, left to the runtime |
+| CPUs | Limit | Go's default | Loops | `GOMAXPROCS` |
+| --- | --- | --- | --- | --- |
+| 4 | none | 4 | 4 | 5, set by the daemon |
+| 4 | 2.5 | 3 | 2 | 3, left to the runtime |
+| 4 | 2 | 2 | 1 | 2, left to the runtime |
+| 4 | 3 | 3 | 2 | 3, left to the runtime |
+| 4 | 4 (equal to the CPU count) | 4 | 4 | 5, set by the daemon: the limit is missed |
+| 2 | 3 | 2 | 2 | 3, set by the daemon: the limit allows every CPU |
+| 1 | none | 1 | 1 | 2, set by the daemon |
 
-- The limit is read from `cpu.max` (cgroup v2) or `cpu.cfs_quota_us` (v1), never inferred from
-  `runtime.GOMAXPROCS(0)` against `runtime.NumCPU()`, which misses a limit equal to the CPU count.
+- The limit is taken from Go's default `GOMAXPROCS` falling below `runtime.NumCPU()`; the runtime
+  reads cgroup v1 and v2 up the process's hierarchy, inside a cgroup namespace or not. A limit equal
+  to the CPU count looks like none, and the daemon then sets one P more than the quota pays for.
 - A limit lowered while the daemon runs leaves it with no spare P, and it reports that until it
   restarts. Open: what it does when the limit is raised.
 - The chart asks for an integer limit of at least 3 CPUs or none; a 2-CPU limit runs one loop, and a
@@ -6860,23 +6898,24 @@ Sizing from the cgroup (Go's default `GOMAXPROCS` is `min(CPUs, max(2, ceil(limi
 Inbox, timers and syscalls:
 
 - Other loops and worker goroutines hand work through a lock-free multi-producer queue and write its
-  eventfd only when the queue was empty: a burst of 64 items from one producer costs one eventfd write
-  and one wakeup (trace: one `write fd=<eventfd>`). Real kernel, under `-race`: producer goroutines
-  post to a consumer loop that really blocks in `epoll_wait`, and every item is handled within a
-  bound. Targets from the log per core spike: an inbox hop
-  of one item about 13.6 µs of CPU, 8 items 0.73 µs and 64 items 0.07 µs per item. Open: tolerance.
+  eventfd only when the inbox holds no wake already: a burst of 64 items from one producer costs one
+  eventfd write and one pass (`TestAnInboxBurstWakesTheLoopOnce`, counted by `Inbox.Wakes`; the write
+  is the poster's, on any goroutine, so the loop's trace does not hold it). Real kernel, under
+  `-race`: 4 producer goroutines post 80,000 items to a consumer loop that really blocks in
+  `epoll_wait`, and every item is handled within 10 s (`TestProducersPostToALoopThatBlocks`). Targets
+  from the log per core spike: an inbox hop of one item about 13.6 µs of CPU, 8 items 0.73 µs and
+  64 items 0.07 µs per item. Open: tolerance.
+- A loop with only a timer left blocks until it is due: a 50 ms timer fires no earlier than its
+  deadline, within 4 passes, and the trace holds the `timerfd_settime` that armed it
+  (`TestALoopSleepsUntilItsTimer`).
 - Timers live in a heap per loop with one timerfd armed for the earliest deadline: after any sequence
   of `SetTimer` actions, the timerfd holds the earliest deadline in the heap, armed with at most one
   `timerfd_settime` per pass and none when the earliest deadline did not change (Clock and timers).
-- Non-blocking reads, writes and sends use `unix.RawSyscall`; `epoll_wait` uses `unix.Syscall`
-  (checked by the recording layer, which tags each call). No `io_uring_enter` waits for completions.
+- Non-blocking reads and writes use `unix.RawSyscall`; `epoll_wait` uses `unix.Syscall`. Open: a test
+  for it; the trace records do not say which entry point a call took.
 - Loops are not locked to OS threads, except a loop driving a C library that requires its own thread.
-- Every syscall the loop makes goes through the recording layer and appears in the trace; a test with
-  the recording layer counting calls finds no syscall missing from the trace.
-- Output buffers are rings or compacted in place, never grown by `append`; the bytes queued for
-  replication are capped, and over the cap the loop stops reading clients. Open: the cap's value.
-- A pass handles peer messages before client reads, so a lease holder that lost time ends its leases
-  before it serves a read that waited behind the grantor's messages (VM pause spike).
+- Output buffers are rings or compacted in place, never grown by `append`: a connection queues at
+  most 64 frames in a ring, and `Queue` refuses the 65th.
 - `tools/sansio`'s rule set for `internal/loop` and `internal/driver/…` finds no `time.Now`,
   `time.Since`, `time.Sleep`, `time.Timer`, `time.AfterFunc`, channel operation, `select` or `range`
   over a map; only the real kernel behind the seam reads a clock. A planted `time.Now` in a driver
@@ -7077,6 +7116,10 @@ Timers:
   simplification; the driver may apply backpressure instead, reading no more from that connection
   until buffers are freed.
 - The read budget per connection per pass and the replication queue cap apply as under Event loop.
+- Under the open-loop latency spike's load generator (16 connections, writes timed from their
+  scheduled send), a replicated-write server on the event loop and this driver drops no request up to
+  100,000 writes/s, the rate the spike's bounded harness served (the generator's own limit), and its
+  output buffers stay under 20 MB. Run with `spikes/open-loop-latency/run.py point <server> 100`.
 - TCP first: RDMA upgrades the same connection's peers in phase 9; nodes without rdma-core stay on TCP
   with no error.
 

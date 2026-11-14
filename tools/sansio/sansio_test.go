@@ -7,6 +7,7 @@ import (
 )
 
 func TestAnalyzer(t *testing.T) {
+	t.Setenv("GOOS", "linux")
 	analysistest.Run(t, analysistest.TestData(), Analyzer,
 		"github.com/nvcnvn/rock-solid/internal/core",
 		"github.com/nvcnvn/rock-solid/internal/core/sub",
@@ -22,9 +23,10 @@ func TestClassify(t *testing.T) {
 		"github.com/nvcnvn/rock-solid/internal/core":                                                   sansIO,
 		"github.com/nvcnvn/rock-solid/internal/core [github.com/nvcnvn/rock-solid/internal/core.test]": sansIO,
 		"github.com/nvcnvn/rock-solid/internal/sim/disk":                                               sansIO,
-		"github.com/nvcnvn/rock-solid/internal/loop":                                                   dataPath,
+		"github.com/nvcnvn/rock-solid/internal/loop":                                                   loopRules,
+		"github.com/nvcnvn/rock-solid/internal/loop/looptest":                                          loopRules,
 		"github.com/nvcnvn/rock-solid/internal/loopback":                                               sansIO,
-		"github.com/nvcnvn/rock-solid/internal/driver/uring":                                           dataPath,
+		"github.com/nvcnvn/rock-solid/internal/driver/uring":                                           loopRules,
 		"github.com/nvcnvn/rock-solid/internal/frontend/fuse":                                          dataPath,
 		"github.com/nvcnvn/rock-solid/internal/core.test":                                              unchecked,
 		"github.com/nvcnvn/rock-solid/internal/csi":                                                    unchecked,

@@ -37,6 +37,11 @@ type Actor interface {
 	Next(ctx *core.Context, out []core.Action) []core.Action
 }
 
+// Sleeper is an Actor that becomes ready by itself at a time on its node's CLOCK_BOOTTIME, as an event loop does at its earliest timer, so the scheduler moves time there when nothing else is due.
+type Sleeper interface {
+	Wake() (core.Tick, bool)
+}
+
 // Boot starts a node's machines and actors, at its first start and at every restart.
 type Boot func(n *Node)
 
@@ -349,6 +354,12 @@ func (s *Scheduler) collect(cs []Choice) ([]Choice, core.Tick) {
 			for i, a := range n.actors {
 				if a.a.Ready() {
 					cs = append(cs, Choice{Kind: ChooseActor, Node: n.id, Loop: a.loop, ref: i})
+				} else if sl, ok := a.a.(Sleeper); ok {
+					if at, ok := sl.Wake(); ok {
+						if t, ok := n.clock.When(s.now, at); ok {
+							later(t)
+						}
+					}
 				}
 			}
 		}
@@ -749,19 +760,19 @@ func (n *Node) pass(l uint32, ev *core.Event, f func(ctx *core.Context, out []co
 	cur := n.clock.Read(s.now)
 	if core.Resumed(lp.last, cur, clock.Threshold) {
 		resumed := core.Event{Kind: core.EvResumed}
-		s.record(n, l, ctx.Now, eventRecord(&resumed, s.set.MsgType))
+		s.record(n, l, ctx.Now, trace.EventRecord(&resumed, s.set.MsgType))
 		s.out = lp.m.OnEvent(&ctx, &resumed, s.out)
 	}
 	lp.last = cur
 	if ev != nil {
-		s.record(n, l, ctx.Now, eventRecord(ev, s.set.MsgType))
+		s.record(n, l, ctx.Now, trace.EventRecord(ev, s.set.MsgType))
 		s.out = lp.m.OnEvent(&ctx, ev, s.out)
 	} else {
 		s.out = f(&ctx, s.out)
 	}
 	rounder, _ := lp.m.(Rounder)
 	for i := range s.out {
-		r := actionRecord(&s.out[i], s.set.MsgType)
+		r := trace.ActionRecord(&s.out[i], s.set.MsgType)
 		if rounder != nil && (r.Name == trace.ActDiskWrite || r.Name == trace.ActDiskFsync) {
 			r.Fields[0] = rounder.Round(&s.out[i])
 		}
@@ -828,69 +839,6 @@ func (s *Scheduler) record(n *Node, l uint32, now core.Tick, r trace.Record) {
 	r.Sim = true
 	s.trace = r.Append(s.trace)
 	s.trace = append(s.trace, '\n')
-}
-
-func msgType(m *core.Msg, f func(*core.Msg) uint64) uint64 {
-	if f != nil {
-		return f(m)
-	}
-	if m.Len == 0 {
-		return 0
-	}
-	return uint64(m.Body[0])
-}
-
-func eventRecord(ev *core.Event, mt func(*core.Msg) uint64) trace.Record {
-	var r trace.Record
-	switch ev.Kind {
-	case core.EvNetRecv:
-		r.Name = trace.EvNetRecv
-		r.Fields = [trace.MaxFields]uint64{trace.Peer(ev.Peer), msgType(&ev.Msg, mt)}
-	case core.EvPeerLost:
-		r.Name = trace.EvPeerLost
-		r.Fields[0] = trace.Peer(ev.Peer)
-	case core.EvDiskDone:
-		r.Name = trace.EvDiskDone
-		r.Fields = [trace.MaxFields]uint64{uint64(ev.IO), uint64(ev.Err)}
-	case core.EvTimer:
-		r.Name = trace.EvTimer
-		r.Fields[0] = uint64(ev.Timer)
-	case core.EvResumed:
-		r.Name = trace.EvResumed
-	default:
-		panic(fmt.Sprintf("sim: event %+v", *ev))
-	}
-	return r
-}
-
-func actionRecord(a *core.Action, mt func(*core.Msg) uint64) trace.Record {
-	var r trace.Record
-	switch a.Kind {
-	case core.ActNetSend:
-		r.Name = trace.ActNetSend
-		r.Fields = [trace.MaxFields]uint64{trace.Peer(a.Peer), msgType(&a.Msg, mt)}
-	case core.ActDiskRead:
-		r.Name = trace.ActDiskRead
-		r.Fields = [trace.MaxFields]uint64{uint64(a.IO), uint64(a.LBA), a.Len}
-	case core.ActDiskWrite:
-		r.Name = trace.ActDiskWrite
-		r.Fields = [trace.MaxFields]uint64{0, uint64(a.IO), uint64(a.LBA), a.Len, uint64(max(len(a.Vec), 1))}
-	case core.ActDiskFsync:
-		r.Name = trace.ActDiskFsync
-		r.Fields = [trace.MaxFields]uint64{0, uint64(a.IO), 0}
-		if a.Linked {
-			r.Fields[2] = 1
-		}
-	case core.ActDiskTrim:
-		r.Name = trace.ActDiskTrim
-		r.Fields = [trace.MaxFields]uint64{uint64(a.IO), uint64(a.LBA), a.Len}
-	case core.ActSetTimer:
-		r.Name = trace.ActSetTimer
-		r.Fields = [trace.MaxFields]uint64{uint64(a.Timer), uint64(a.At)}
-	default:
-		panic(fmt.Sprintf("sim: action %+v", *a))
-	}
-	return r
 }
 
 // TraceDiffError names the first line where two traces differ, numbered from 1.

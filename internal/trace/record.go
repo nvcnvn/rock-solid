@@ -81,6 +81,10 @@ const (
 	SysTimerfdSettime
 	// SysEventfdWrite: fd.
 	SysEventfdWrite
+	// SysEpollCtl: fd in out, adding fd to the loop's set or changing whether it waits for fd to be readable and writable.
+	SysEpollCtl
+	// SysClose: fd.
+	SysClose
 	// OutDurable: round lsn.
 	OutDurable
 	// OutFailed: err.
@@ -212,6 +216,8 @@ var schemas = [numNames]schema{
 	SysIOUringEnter:   {"io_uring_enter", KindSyscall, []field{{"submit", typeNum}, {"wait", typeNum}}},
 	SysTimerfdSettime: {"timerfd_settime", KindSyscall, []field{fAt}},
 	SysEventfdWrite:   {"eventfd_write", KindSyscall, []field{fFD}},
+	SysEpollCtl:       {"epoll_ctl", KindSyscall, []field{fFD, {"in", typeBool}, {"out", typeBool}}},
+	SysClose:          {"close", KindSyscall, []field{fFD}},
 	OutDurable:        {"Durable", KindOutput, []field{fRound, fLSN}},
 	OutFailed:         {"Failed", KindOutput, []field{fResult}},
 	OutCheckpointDone: {"CheckpointDone", KindOutput, []field{fLSN}},
