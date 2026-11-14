@@ -2673,6 +2673,13 @@ for a version frozen twice.
 - Crash during recovery, then recovery again: every other recovery of the property is crashed
   before its final flush, with its erasures landing at random. The oracle's window is unchanged
   by it, and the recovery run again reports the LSN the crashed one had found.
+- The model gates as replay does: a write, punch or slot of an interval at or past its PG's newest
+  persisted decision is held, and each decision entry settles the PG's held chunks by the store's
+  rule, mapping the kept versions and dropping the rest. The byte-range oracle keeps the held
+  versions from its rebase and applies those a later settle keeps (`h.settleChunk`). With the
+  model's gating off, `TestARecoveryWriteReplacesAMembersChunk` and
+  `TestReplayGatedVersionsKeepTheirSegmentsAndTheReplayPoint` break "acknowledged writes are
+  readable"; with the oracle's settle off, they break the reads.
 - Planted bug: replay that leaves out the first record past the replay LSN that maps blocks, as a
   replay LSN one record too new would (RocksDB #11148, the Store's `replayLate` plant), trips the
   oracle on at least one seed of 8 (`TestCrashOracleCatchesLateReplay`; seed 0 names a block that
@@ -2709,8 +2716,8 @@ planted by hand.
 | Invariant (phase 1) | How the harness checks it | Planted violation and what it trips |
 | --- | --- | --- |
 | No two writes of a chunk get one version | Each acknowledged write or punch carries a version above the chunk's last acknowledged one, or, after a recovery, the crash oracle's model's | A chunk taken up again at version 0 instead of its newest (`forgetVersion`): the second write of a chunk (`TestPlantedBugsBreakTheirInvariants`) |
-| A rebuilt chunk index equals the one recovered from its manifest | A rebuild started on a settled store, as a failed run check starts one, and a recovery replaying every record header after a crash of a settled store, each finish with the index the store held | A rebuild that skips freeze entries (`rebuildSkipsFreezes`): a write after a cut, then a rebuild (`TestPlantedBugsBreakTheirInvariants`) |
-| Replay rebuilds the index the store held, every map and record count, so it maps every copy entry exactly where the owner applied its move | A recovery after a crash of a settled store, nothing queued, finishes with the index the store held | Replay applying a copy entry as a plain write (`replayCopyAsWrite`): seed 2 of 50 of the cleaner workload crashed once settled (`TestReplayingCopiesAsWritesBreaksReplay`); replay dropping punch entries (`replayDropsPunches`): a write and a punch, then a crash (`TestPlantedBugsBreakTheirInvariants`) |
+| A rebuilt chunk index equals the one recovered from its manifest | A rebuild started on a settled store, as a failed run check starts one, and a recovery replaying every record header after a crash of a settled store, each finish with the index the store held, but on chunks the disk lists or replay left gated and on the record counts their extents name | A rebuild that skips freeze entries (`rebuildSkipsFreezes`): a write after a cut, then a rebuild (`TestPlantedBugsBreakTheirInvariants`) |
+| Replay rebuilds the index the store held, every map and record count, so it maps every copy entry exactly where the owner applied its move | A recovery after a crash of a settled store, nothing queued, finishes with the index the store held, with the same exceptions | Replay applying a copy entry as a plain write (`replayCopyAsWrite`): seed 2 of 50 of the cleaner workload crashed once settled (`TestReplayingCopiesAsWritesBreaksReplay`); replay dropping punch entries (`replayDropsPunches`): a write and a punch, then a crash (`TestPlantedBugsBreakTheirInvariants`) |
 | A chunk's live map never holds two entries for one block, and the record counts hold | `chunkstore.(*Index).Check` on the serving store's index | Planted by hand: a record count not lowered on trim trips `TestSubBlockWrites` at seed 0's fourth action and `TestRecoveryAndRebuildEqualLiveIndex` at its first settle |
 | After every recovery the log opens its next segment past every open sequence a segment header of this log on disk holds, so open sequences stay unique and increasing | When a recovery finishes, every segment header of the log on disk is read; the harness also takes each segment's open sequence from it, a header write the crash lost taking the records noted under it along | A header of the log at the next open sequence put on a free segment after a recovery, as recovery resuming at the newest header's sequence leaves one (`TestAHeaderAtTheNextOpenSequenceBreaksOpenSeqs`). Planted by hand: that recovery itself trips `TestCleanerSurvivesCrashes` at seed 0, `TestCrashAtEveryActionWithCleaning` at its first case and `TestRecoveryAndRebuildEqualLiveIndex`, each at its first recovery. The log's own `NextSeq` tests plant `NextSeq` taken when the checkpoint begins (`TakeNextSeqAtBegin`) |
 | Each chunk segment's live count in the usage table equals the blocks the index's records there refer to, and a free or metadata segment holds none | Every segment's count against the index's per-segment sums, and the index's slot-held counts against its slots' | A victim's live count dropped before its copies (`freeLive`), so the log frees it with its blocks live: the settle of that pass (`TestPlantedCleanerBugsBreakTheirInvariants`) |
@@ -3505,7 +3512,7 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 15 | A primary whose interval a failed version ended asks for the next in the end: with every step that is due taken in time, nothing of its PG waits for ever | `IntervalEnds` | None registered: `TestAFailureBelowACommittedVersionStillAsks` covers it as a regression test, until [Plants for the epoch model's new rules](build-checklist.md#phase-4-embedded-metastore) registers one |
 | 16 | Every client gets an answer: no version stays unanswered for ever | `AllAnswered` | None registered: `TestADemotedPrimaryKeepsItsPendingVersionsGatedUntilItsNextDecision` covers it as a regression test, until the same item registers one |
 | 17 | A version is acknowledged only on at least `min_live` members of the interval that answers it, its own or the one activating, counted by what their logs hold, a member in `maintenance` counting as it does toward `min_live`. An action property, checked at each acknowledgment | `AckedOnMinLive` | "no write is acknowledged on fewer than min_live disks, a member in maintenance counting as one", registered by `epochChecks` |
-| 18 | An acknowledged write is not stranded: if a disk that is not gone can serve all of a chunk's acknowledged writes, holding them and listing nothing of it, so can a member of its PG's current interval, up or down, or an image of a version that covers them, which a node carries across a restart and a lost lead too, while that node's disk is such a member and runs on it. That such a disk exists is not claimed, as a holder that truly dies leaves none | `NoStranded` | "an acknowledged write a disk can serve, a member can serve" (`invStranded`), checked on every table of the seeded primary-change run and of the `soleRun` tests; unlike `NoStranded`, it counts only the image of a member leading the PG, until Replay rollback. `TestAPrimaryListingOnlyItsDroppedWriteServesPastADiskLoss` and the stranded-move tests (`stranded_move_test.go`) cover it as regression tests |
+| 18 | An acknowledged write is not stranded: if a disk that is not gone can serve all of a chunk's acknowledged writes, holding them and listing nothing of it, so can a member of its PG's current interval, up or down, or an image of a version that covers them, which a node carries across a restart and a lost lead too, while that node's disk is such a member and runs on it. That such a disk exists is not claimed, as a holder that truly dies leaves none | `NoStranded` | "an acknowledged write a disk can serve, a member can serve" (`invStranded`), checked on every table of the seeded primary-change run and of the `soleRun` tests. `TestAPrimaryListingOnlyItsDroppedWriteServesPastADiskLoss` and the stranded-move tests (`stranded_move_test.go`) cover it as regression tests |
 | 19 | An activated primary has a source: for a chunk with an acknowledged write, a member of its interval can serve them all, or its own image is what peering kept. Claimed while no disk has gone, as a holder that truly dies leaves none, and not for a chunk where a write of a primary listing it reached another member, which stays open with [Clean copies before a write's OK](build-checklist.md) | `PrimarySource` | `invHasSource` ("an activated primary has a source of each chunk it kept, or calls it unfound"), which holds the code to the decision: it does not read versions |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
@@ -4215,10 +4222,12 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | `scripted-lost` | 100 | passes: two leaving, one declared lost, `Drop` takes it alone, the other returns and heals the PG | 2 |
 | `scripted-second-failure` | 97 | passes: `rep3`, the second disk down during the copy, two `Add`s, a recovered report removing both | 2 |
 | `scripted-together` | 65 | passes: `rep3`, two marks in one table, one `Refill`, then two `Add`s | 1 |
-| `scripted-move-restarted` | 47 | passes: a move and a restart, peering keeps what every up member holds over the removed disk | 1 |
-| `scripted-lister-restarted` | 56 | passes: a restart during recovery, peering keeps a version over the member that lists the chunk | 1 |
-| 39 seeds | 445 to 915 | pass, across restarts and formats | 3 to 203 |
-| `primaries-34` | 515 | stops at line 242, a `recovered`: discrepancy 28 | 2 |
+| `scripted-move-restarted` | 47 | passes: a move and a restart, the restarted primary's replay gating Y until its next decision | 1 |
+| `scripted-move-primary` | 39 | passes: a move to a new primary that holds Y, peering keeping Y, which every up member holds, over the removed disk | 2 |
+| `scripted-lister-restarted` | 56 | passes: a restart during recovery, the restarted primary's replay gating Y until its next decision | 2 |
+| `scripted-lister-rotated` | 51 | passes: a rotation during recovery, the new primary holding Y logged and peering keeping it over the member that lists the chunk | 2 |
+| 39 seeds | 273 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 2 to 211 |
+| `primaries-2` | 517 | no verdict in 400 s and 2 GB: one crash leaves 26 `mayfail` lines, each a free choice, and `-dfid` reached level 307 of 519 in 280 s at 319,000 states | 400 |
 
 39 seeds of 40 pass, all but 34. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
@@ -5598,6 +5607,40 @@ own ([Testing strategy](design.md#testing-strategy)).
   - Chunk epochs spike R3: without recovery, a restart's replay gates the dropped write and drops
     it again at the dropping peering's decision marker.
   - R3b: with it, replay ends at the recovered block.
+- Replay rollback: a primary's versions outlast a restart or a lost lead gated, and its image with
+  them. The shape is `rep2` with X acknowledged on both members and Y, never acknowledged, on the
+  primary alone; each test then has the other member's disk die and be declared lost, and reads X
+  back from the primary:
+  - The primary restarts with Y pending, and replay leaves Y gated for the next peering to drop
+    (`TestARestartedPrimaryRollsBackItsPendingWrite`, seeds 1 to 3); it restarts after the peering
+    that dropped Y, and its flagged entry gives back its image
+    (`TestAPrimaryRestartedAfterItsDropServesFromItsFlag`, seeds 1 to 3), also across a decision
+    of its own after the restart (`TestARestartedPrimaryKeepsItsDropsAcrossItsNextDecision`).
+  - The primary's disk is marked down and up, a bounce, with Y pending
+    (`TestABouncedPrimaryWithItsWritePendingRollsItBack`) and after Y was dropped
+    (`TestABouncedPrimaryKeepsTheImageOfItsDroppedWrite`).
+  - A decision persisted and not activated before the next peering drops Y at the persist
+    (`TestADecisionPersistedAndNotActivatedKeepsItsDrops`), and the primary's entry for its
+    dropped Y carries the image flag, before and after a restart
+    (`TestThePrimarysEntryForItsDroppedWriteCarriesTheImageFlag`, the entry kind's round trip in
+    `TestImageEntryRoundTrips`). A demoted primary keeps its pending versions gated until its next
+    decision (`TestADemotedPrimaryKeepsItsPendingVersionsGatedUntilItsNextDecision`).
+  - Planted: `mapOnReplay`, `replayForgetsDrops`, `ignoreImageFlag`, `mapOnDemote` and
+    `forgetImageDown` each lose X on the shape that needs its rule
+    (`TestReplayRollbackPlantsLoseX`).
+  - After a restart the versions replay holds gated, a whole one and one a crash tore, keep the
+    replay point before their records and their segments from the cleaner until a decision
+    settles them (`TestReplayGatedVersionsKeepTheirSegmentsAndTheReplayPoint`).
+  - The stranded-move shapes move the primary instead of restarting it, as the epoch change model's
+    negatives do: an operator edit that removes the leaving disk and puts the new member first
+    (`TestKeepPastMemberLeavesAMoveUnfound`, `TestNeverUnfoundBreaksTheSourceInvariant`,
+    `TestWriteOnUnfoundEndsTheWayBack`, `TestAnEditNamingTheRemovedDiskHealsAnUnfoundChunk`), and
+    for the lister a swap of the first two members (`TestListerVetoesLeavesNoMemberASource`). Their
+    guards take both shapes, a restart and a move (`TestAnAcknowledgedWriteReadsAfterAMove`,
+    `TestALeadChangeDuringRecoveryKeepsASource`).
+  - A torn member, holding the kept version whole and part of a later one, is listed, and recovery
+    rewrites it (`TestAMemberHoldingAVersionInPartIsListed`); with `unlistTorn` it is left off the
+    list and maps the part of Y it holds, on all 20 seeds (`TestUnlistTornMapsADroppedVersion`).
 - A recovery write is logged under the version of the interval's last write of the chunk before
   it, or under the kept version, by the members that list the chunk alone. In the store, a member's
   recovery write replaces its chunk with the image past the dropped versions and alone removes the
