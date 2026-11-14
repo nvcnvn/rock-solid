@@ -3,8 +3,11 @@ package meta
 import (
 	"bytes"
 	"math/rand/v2"
+	"slices"
 	"testing"
 
+	"github.com/nvcnvn/rock-solid/internal/chunkstore"
+	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
@@ -161,4 +164,110 @@ func sameTxn(a, b *Txn) bool {
 		}
 	}
 	return true
+}
+
+// A pool's settings decode without a panic, and those that decode pass the pool rules and encode
+// back to the same bytes.
+func FuzzDecodePool(f *testing.F) {
+	for _, s := range []chunkstore.PoolSpec{spec(3, 8), spec(1, 1024), {DiskClass: "ssd", FailureDomain: chunkstore.DomainDisk}} {
+		p, err := chunkstore.NewPool(s, 12)
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(appendPool(nil, &p))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		p, err := decodePool(data)
+		if err != nil {
+			return
+		}
+		if p.Check() != nil || !bytes.Equal(appendPool(nil, &p), data) {
+			t.Fatalf("%x decodes to %+v, which fails the rules or encodes to %x", data, p, appendPool(nil, &p))
+		}
+	})
+}
+
+// A shard-map group decodes without a panic, and one that decodes has distinct voter IDs no
+// higher than its last, and encodes back to the same bytes.
+func FuzzDecodeGroup(f *testing.F) {
+	f.Add(uint64(1), appendGroup(nil, &Group{ID: 1}))
+	f.Add(uint64(2), appendGroup(nil, &Group{ID: 2, Start: b("m"), LastID: 4, Voters: []Replica{{2, 0, 1}, {3, 1, 7}, {4, 2, 300}}}))
+	f.Fuzz(func(t *testing.T, id uint64, data []byte) {
+		g, err := decodeGroup(id, data)
+		if err != nil {
+			return
+		}
+		seen := map[uint64]bool{}
+		for _, v := range g.Voters {
+			if v.ID == 0 || v.ID > g.LastID || seen[v.ID] {
+				t.Fatalf("%x decodes to %+v, a voter ID out of place", data, g)
+			}
+			seen[v.ID] = true
+		}
+		if g.ID != id || len(g.Start) > MaxKey || !bytes.Equal(appendGroup(nil, &g), data) {
+			t.Fatalf("%x decodes to %+v, which encodes to %x", data, g, appendGroup(nil, &g))
+		}
+	})
+}
+
+// fuzzCtlKVs reads data as ctl/ keys and values, each a key length mod 16, a value length, the
+// key after its ctl/ byte and the value, and returns them in key order, each key once.
+func fuzzCtlKVs(data []byte) []KV {
+	var kvs []KV
+	for len(data) >= 2 {
+		kl, vl := int(data[0])%16, int(data[1])
+		data = data[2:]
+		if kl+vl > len(data) {
+			break
+		}
+		kvs = append(kvs, KV{append([]byte{SpaceCtl}, data[:kl]...), data[kl : kl+vl]})
+		data = data[kl+vl:]
+	}
+	slices.SortStableFunc(kvs, func(a, b KV) int { return bytes.Compare(a.Key, b.Key) })
+	return slices.CompactFunc(kvs, func(a, b KV) bool { return bytes.Equal(a.Key, b.Key) })
+}
+
+// The control plane's ctl/ keys decode without a panic, and a state that decodes holds a table
+// whose CRC32C is its head's and a shard map whose ranges CheckRanges accepts.
+func FuzzDecodeCtl(f *testing.F) {
+	var seed []byte
+	add := func(k, v []byte) { seed = append(append(append(seed, byte(len(k)-1), byte(len(v))), k[1:]...), v...) }
+	p, err := chunkstore.NewPool(spec(3, 2), 4)
+	if err != nil {
+		f.Fatal(err)
+	}
+	m := func(d ...uint32) []chunkstore.Member {
+		var ms []chunkstore.Member
+		for _, x := range d {
+			ms = append(ms, chunkstore.Member{Disk: x})
+		}
+		return ms
+	}
+	tb := chunkstore.Table{Epoch: 1, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 3, MinLive: 2, PGs: []chunkstore.PGEntry{{Interval: 1, Members: m(1, 2, 3)}, {Interval: 1, Members: m(2, 3, 4)}}}}}
+	add(poolKey(1), appendPool(nil, &p))
+	add(ctlKey(CtlPlacement, nil), tableHead(1, tb.CRC()))
+	add(placementKey(1), poolHead(&tb.Pools[0]))
+	for i := range tb.Pools[0].PGs {
+		h, _ := AppendHead(nil, chunkstore.AppendEntry(nil, &tb.Pools[0].PGs[i]))
+		add(entryKey(core.PGID{Pool: 1, Index: uint32(i)}), h)
+	}
+	add(ctlKey(CtlShardMap, nil), bigEndian.AppendUint64(nil, 1))
+	for _, g := range []Group{{ID: 1, LastID: 3}, {ID: 2, Start: PrefixEnd([]byte{SpaceCtl}), LastID: 3}} {
+		g.Voters = []Replica{{1, 0, 1}, {2, 1, 2}, {3, 2, 3}}
+		h, _ := AppendHead(nil, appendGroup(nil, &g))
+		add(groupKey(g.ID), h)
+	}
+	if _, err := decodeCtl(fuzzCtlKVs(seed)); err != nil {
+		f.Fatalf("the seed state: %v", err)
+	}
+	f.Add(seed)
+	f.Fuzz(func(t *testing.T, data []byte) {
+		s, err := decodeCtl(fuzzCtlKVs(data))
+		if err != nil {
+			return
+		}
+		if s.table.Epoch != 0 && s.table.CRC() != s.crc || len(s.smap.Groups) > 0 && s.smap.CheckRanges() != nil {
+			t.Fatalf("decoded %+v", s)
+		}
+	})
 }

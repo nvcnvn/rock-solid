@@ -5800,7 +5800,7 @@ strategy](design.md#testing-strategy) names what is left and the item that will 
 | P4 | A disk marked down `flap_count` (5) times within `flap_window`; a 5 s hiccup in `rep2`, `min_live` 2 | The flapping disk stays down until its heartbeats are normal for a whole `flap_window` and is not refilled before `refill_after`, in `rep3` or `rep2`. The hiccup raises one interval at the down mark and one at the return, and moves no member (F1) | `TestAFlappingDiskIsHeldDown`, `TestHiccupMovesNoMember` |
 | P5 | Primary A of PG 0 restarts with a replicated write it sent still on its way to a member | A asks for a new interval and serves nothing until it has peered there. The member refuses the old interval's write once it holds the new one, and refuses a version sent again after its copy is done; no two contents share one version | `TestARestartedPrimaryTakesANewIntervalBeforeItServes`, `TestAMemberAcceptsOnlyThePGsCurrentInterval`, `TestAVersionSentAgainAfterItsCopyIsDoneIsRefused`; the primary-change run's primary crashes, whose stale writes trip "no member logs a write tagged with an earlier interval" under `neg-compare-member-lists` |
 | P6 | The counter case under [Replica primary](#replica-primary) | As stated there; other PGs see no refusal | `TestASpentCounterAsksForTheNextInterval` |
-| P7 | `pg_count` 1,024 → 2,048 with writes in flight to PG 567 | Open: PGs 1,134 and 1,135 start one interval above 567, and every chunk's versions keep growing. The replica path splits no PG yet; the row runs in [Control-plane placement faults](#control-plane-placement-faults), under the split report rule of [Control-plane group](#control-plane-group) | Placement's split cases only |
+| P7 | `pg_count` 1,024 → 2,048 with writes in flight to PG 567 | Open: PGs 1,134 and 1,135 start one interval above 567, and every chunk's versions keep growing. The replica path splits no PG yet; the row runs in [Control-plane placement faults](#control-plane-placement-faults), under its split report rule | Placement's split cases only |
 | P8 | A disk's acknowledgment latency above `slow_disk_factor` times its pool's median for a whole `slow_disk_window`, then normal; a second disk slow at once | Marked down after the window and back after a whole normal window; two slow figures a window apart with none between leave it up; the second slow disk stays up where marking both would leave a PG below `min_live`. A cluster run with one disk 100× slow waits on the simulator's one clock ([tech debt](tech-debts.md#workaround-fail-slow-judged-on-reported-latencies-not-in-a-simulated-cluster)) | `TestAFailSlowDiskIsMarkedDown`, `TestFailSlowNeedsAWholeSlowWindow`, `TestTwoSlowDisksKeepMinLive`; the simulated disk's latency in `TestDiskLatencyAndFailSlow` |
 | P9 | Holder `BOOTTIME` −22.6%, grantor `BOOTTIME` +22.6%; or holder clocks −100 ppm, grantor +100 ppm | No overlap: the holder ends by 3.96 s, the grantor at 4.0 s or later | `TestLeaseTime` "opposite slews", "oscillators" |
 | P9b | Per seed: `BOOTTIME` slewed up to ±22.6% with raw within 100 ppm, or raw within 4% with `BOOTTIME` slewed or at the raw rate; cuts, VM stops, reboots, suspends | No lease outlasts its grant from the first lease, over 10,000 seeds | `TestNoLeaseOutlastsItsGrant` |
@@ -6303,7 +6303,7 @@ Every 3- and 5-node run had the workload valid, with no checker invalid.
 | A `DeleteRange` or `CheckEmpty` bound of 1,001 bytes, or a start not below its end | Refused before proposing; a bound of 1,000 bytes commits |
 | A `Txn` with a replay key and 125 `Update`s | Refused before proposing; 124 commit, and their record fits `MaxValue` |
 | An op carrying a field its kind does not encode (a `CheckEmpty` marked absent, a `Put` marked final), or an oldest-outstanding value without a replay key | Refused before proposing: an entry decoded differently from what its leader checked would fail that `Txn` and every later one in the entry on every replica. [property] Every `Txn` that passes the check, its fields drawn at random, decodes from its encoding to itself (`TestCheckedTxnsDecodeToThemselves`) |
-| A `Txn` encoding to more than 256 KiB (`max_txn_bytes`), as an 82 KiB xattr in pieces fits and 1 MiB does not | Refused before proposing with a size error, never split |
+| A `Txn` encoding to more than 256 KiB (`max_txn_bytes`), as an 82 KiB xattr in pieces fits and 1 MiB does not; one of only `ctl/` keys to more than 896 KiB (`max_ctl_txn_bytes`), as 800 KiB fits unless it names one other key | Refused before proposing with a size error, never split |
 | Empty ops | An error |
 | Two racing `Txn`s, each check a absent, put a=x | Exactly one commits (the design's lock-race example) |
 | 64 concurrent `create`s in one directory, distinct names, inodes from each daemon's reservation | All commit in one round with distinct inodes; no check fails, since the parent's times move by `Update` |
@@ -6432,33 +6432,46 @@ Only the last component (a file name, an xattr name, an S3 key, or what follows 
 
 ## Control-plane group
 
+`meta.Control` runs at the leader of a real three-replica group on the hand-driven network
+(`internal/meta`, `ctl_test.go`), each commit read back from the group's state. Applying a delta
+on a node is chunkstore's (`table_test.go`).
+
 **Pools**
 
 | Input | Expected |
 | --- | --- |
-| A `Pool` create or update | Checked against the [Pools](#pools) creation rules, then committed under `ctl/pool/`. A refused one commits nothing |
-| `replicas` changed | The next table starts a new interval of every PG of the pool |
+| A `Pool` create or update | Checked against the [Pools](#pools) creation rules, then committed under `ctl/pool/`. A refused one commits nothing (`TestPoolsAreCheckedThenCommittedUnderCtl`) |
+| `replicas` changed | The next table starts a new interval of every PG of the pool (`TestRaisingReplicasStartsAnIntervalOfEveryPG`) |
+| `pg_count` changed on an existing pool | Refused until [Control-plane placement faults](#control-plane-placement-faults) builds splits (`TestAPoolChangeIsCheckedAgainstTheCommittedPool`) |
+| Two changes of a pool staged before a step; a pool set to the settings it has | The step commits the last; the second commits nothing (`TestAPoolChangeIsCheckedAgainstTheCommittedPool`) |
+| A pool change staged by a machine whose commit then lost a race | Checked again against the pool it reads back; refused there, it is dropped with an error and the next step commits the rest (`TestAStagedPoolIsCheckedAgainAfterAReload`) |
+| A `rep3` pool of 16,384 PGs, whose refill after a rack loss may be more than `max_ctl_txn_bytes`; one of 8,192; a third of 8,192 beside a down mark of two | The first is refused with `ErrTooLarge`, the second accepted; the third is dropped with `ErrTooLarge`, and the next step commits the down marks, in a `Txn` over 256 KiB (`TestAPoolTooLargeForAStepIsRefused`) |
 
 **Placement table**
 
 | Input | Expected |
 | --- | --- |
-| A node holding table epoch e receives the delta for e + 1 | It applies the delta. The CRC32C of its resulting table equals the CRC in the entry |
-| A delta whose resulting CRC does not match | The node fetches the whole table |
-| A node at e receives e + 3 (a gap) | It fetches the whole table. It loses nothing, since each PG entry carries its interval number |
-| A Raft snapshot of the group | Holds the whole table |
-| A primary reports activation of interval k on its heartbeat | A later table records k as the PG's last activated interval and drops the member lists of the intervals before it. That table starts no interval |
-| A disk added | Each table of the change raises the table epoch. Only PGs whose members change start a new interval |
-| A heartbeat reports an activation or a recovered report under a table epoch older than its pool's last split | Dropped: it names its PG in the numbering before the split |
-| The control-plane leader fails over | The new leader reads the pools, the table and the shard map back from the group's state, and its next table follows the last committed one |
+| A node holding table epoch e receives the delta for e + 1 | It applies the delta. The CRC32C of its resulting table equals the CRC in the entry (`TestATableCommitsAsItsDelta`) |
+| A delta whose resulting CRC does not match | The node fetches the whole table (`TestDeltaBases`) |
+| A node at e receives e + 3 (a gap) | It fetches the whole table. It loses nothing, since each PG entry carries its interval number (`TestDeltaBases`) |
+| A Raft snapshot of the group | Holds the whole table (`TestANewLeaderAndASnapshotReadBackTheWholeState`) |
+| A primary reports activation of interval k on its heartbeat | A later table records k as the PG's last activated interval and drops the member lists of the intervals before it. That table starts no interval (`TestAnActivationIsRecordedWithoutANewInterval`) |
+| A disk added, a recovered report, a down mark | Each table raises the table epoch and commits only the entries it changes. Only PGs whose members change start a new interval (`TestATableCommitsAsItsDelta`) |
+| The control-plane leader fails over | The new leader reads the pools, the table and the shard map back from the group's state, and its next table follows the last committed one (`TestANewLeaderAndASnapshotReadBackTheWholeState`) |
+| Two machines each think they lead | The second's commit fails its checks against what the first committed; it reads the state again and its next commit lands on top (`TestARacingCommitFailsItsChecks`) |
+| A table computed from pool settings another machine has since changed, with no table of its own | The commit fails its checks (`TestATableIsCheckedAgainstEveryPoolItReads`) |
+| A PG entry or a group over 999 bytes | Stored as a head and pieces; a shorter one written over it drops the pieces it no longer has (`TestALongValueIsStoredInPieces`) |
+| The `ctl/` keys of a pool, its table header, a PG entry, a group and their pieces | Encode as `testdata/key_golden.txt` freezes them (`TestCtlKeysAreTheGoldenOnes`) |
+| A pool's settings or a group's entry as bytes | Decodes without a panic, and one that decodes encodes back to the same bytes (`FuzzDecodePool`, `FuzzDecodeGroup`) |
+| Any set of `ctl/` keys and values | Decodes without a panic; a state that decodes has the CRC32C its head names and a shard map `CheckRanges` accepts (`FuzzDecodeCtl`) |
 
 **Shard map**
 
 | Input | Expected |
 | --- | --- |
-| `PlaceVoters` gives a group new voters | The group's entry is committed under `ctl/` before its leader is handed the plan |
-| The leader fails over with a shard map change proposed and not committed | No group was handed it, and the new leader hands out no replica ID it already handed out |
-| A Raft snapshot of the group | Holds the whole shard map |
+| `PlaceVoters` gives a group new voters | The group's entry is committed under `ctl/` before its leader is handed the plan (`TestAPlanIsHandedOutOnlyOnceCommitted`) |
+| The leader fails over with a shard map change proposed and not committed | No group was handed it, and the new leader hands out no replica ID it already handed out (`TestAPlanIsHandedOutOnlyOnceCommitted`) |
+| A Raft snapshot of the group | Holds the whole shard map (`TestANewLeaderAndASnapshotReadBackTheWholeState`) |
 
 ## Control-plane membership
 
@@ -6560,7 +6573,10 @@ A write that crosses from a granted chunk into a refused one is a daemon case, c
 
 Phase 3's placement seeds run unchanged against the real group in place of the stand-in, and pass the same invariants. With them, the [placement faults](#placement-faults-and-invariants) phase 3 leaves open:
 
-- P7 under the split report rule of [Control-plane group](#control-plane-group);
+- the split report rule: a heartbeat that reports an activation or a recovered report under a table
+  epoch older than its pool's last split is dropped, since it names its PG in the numbering before
+  the split, by this leader and by the next; one sent under the split's table is recorded;
+- P7 under that rule;
 - P20 while [Space grants](#space-grants) are out and a refill after a disk failure moves members onto the fullest disks;
 - P23 end to end, from the leader's record of when each PG last copied;
 - a seeded run that clones a disk onto a second device, the one fault that reaches "no log ID is up under two disk IDs".

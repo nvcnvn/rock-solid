@@ -175,6 +175,16 @@ func appendDeltaPool(dst []byte, p DeltaPool) []byte {
 	return le.AppendUint32(append(le.AppendUint32(dst, uint32(p.ID)), p.Replicas, p.MinLive), p.PGCount)
 }
 
+// AppendEntry appends e's encoding, as a table or a delta holds it.
+func AppendEntry(dst []byte, e *PGEntry) []byte { return appendEntry(dst, e) }
+
+// DecodeEntry decodes one PG entry; anything AppendEntry would not write is ErrMalformed.
+func DecodeEntry(b []byte) (PGEntry, error) {
+	r := reader{b: b, n: len(b)}
+	e := r.entry()
+	return e, r.end()
+}
+
 func appendEntry(dst []byte, e *PGEntry) []byte {
 	dst = le.AppendUint32(le.AppendUint32(dst, e.Interval), e.Activated)
 	dst = append(dst, flagIf(e.Pinned, pinnedFlag)|flagIf(e.Recovered, recoveredFlag))

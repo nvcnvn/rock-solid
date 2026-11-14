@@ -17,6 +17,8 @@ const (
 	MaxBound = lsm.MaxBound
 	// MaxTxnBytes is max_txn_bytes, the most a Txn encodes to.
 	MaxTxnBytes = 256 << 10
+	// MaxCtlTxnBytes is max_ctl_txn_bytes, the most a Txn with only ctl/ keys encodes to.
+	MaxCtlTxnBytes = 896 << 10
 	// MaxScanBytes is max_scan_bytes, the most keys and values a Scan returns.
 	MaxScanBytes = 256 << 10
 	// MaxReplayUpdates is the most Updates a Txn with a replay key holds, so its record, a byte and 8 per Update, fits MaxValue.
@@ -162,9 +164,12 @@ func (t *Txn) Check() (int, error) {
 		}
 		n += uvarintLen(t.Oldest)
 	}
-	updates := 0
+	updates, limit := 0, MaxCtlTxnBytes
 	for i := range t.Ops {
 		op := &t.Ops[i]
+		if len(op.Key) == 0 || op.Key[0] != SpaceCtl {
+			limit = MaxTxnBytes
+		}
 		if op.Kind < OpPut || op.Kind > OpUpdate || !carries(op) {
 			return 0, ErrBadOp
 		}
@@ -210,7 +215,7 @@ func (t *Txn) Check() (int, error) {
 	if t.Replay != nil && updates > MaxReplayUpdates {
 		return 0, ErrBadReplay
 	}
-	if n > MaxTxnBytes {
+	if n > limit {
 		return 0, ErrTooLarge
 	}
 	return n, nil
@@ -354,7 +359,7 @@ func appendRecord(dst []byte, r *Result) []byte {
 // decodeRecord decodes a replay record into r; one that does not decode is ErrMalformed.
 func decodeRecord(b []byte, r *Result) error {
 	f, n := binary.Uvarint(b)
-	if n <= 0 || n != uvarintLen(f) || f > MaxTxnBytes || (len(b)-n)%8 != 0 || f != 0 && len(b) != n {
+	if n <= 0 || n != uvarintLen(f) || f > MaxCtlTxnBytes || (len(b)-n)%8 != 0 || f != 0 && len(b) != n {
 		return ErrMalformed
 	}
 	r.FailedCheck, r.Actual, r.Updated = int(f)-1, nil, r.Updated[:0]

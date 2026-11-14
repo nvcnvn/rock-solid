@@ -170,15 +170,17 @@ func TestRangesAreHalfOpen(t *testing.T) {
 
 func TestLimitsAreCheckedBeforeProposing(t *testing.T) {
 	long := func(n int) []byte { return bytes.Repeat([]byte("k"), n) }
-	pieces := func(total int) Txn {
+	piecesUnder := func(prefix []byte, total int) Txn {
 		var t Txn
 		for i := 0; total > 0; i++ {
 			n := min(total, MaxValue)
-			t.Ops = append(t.Ops, Put(append(long(40), byte(i), byte(i>>8)), long(n)))
+			t.Ops = append(t.Ops, Put(append(append(slices.Clip(prefix), long(40)...), byte(i), byte(i>>8)), long(n)))
 			total -= n
 		}
 		return t
 	}
+	pieces := func(total int) Txn { return piecesUnder(nil, total) }
+	ctl := []byte{SpaceCtl, CtlPlacement}
 	for _, c := range []struct {
 		name string
 		txn  Txn
@@ -206,6 +208,9 @@ func TestLimitsAreCheckedBeforeProposing(t *testing.T) {
 		{"oldest without a replay key", Txn{Ops: []Op{Delete(b("a"))}, Oldest: 1}, ErrBadReplay},
 		{"82 KiB xattr in pieces", pieces(82 << 10), nil},
 		{"1 MiB in pieces", pieces(1 << 20), ErrTooLarge},
+		{"800 KiB under ctl/", piecesUnder(ctl, 800<<10), nil},
+		{"800 KiB under ctl/ and one other key", Txn{Ops: append(piecesUnder(ctl, 800<<10).Ops, Delete(b("a")))}, ErrTooLarge},
+		{"900 KiB under ctl/", piecesUnder(ctl, 900<<10), ErrTooLarge},
 		{"replay key short of a request ID", Txn{Ops: []Op{Delete(b("a"))}, Replay: replayKey(1, 5)[:33]}, ErrBadReplay},
 		{"replay key under the purge tag", Txn{Ops: []Op{Delete(b("a"))}, Replay: mustKey(&Key{Space: SpaceFS, Volume: 1, Inode: 2 << SeqBits, Tag: SlotPurge, ID: 5})}, ErrBadReplay},
 		{"replay key with no tag", Txn{Ops: []Op{Delete(b("a"))}, Replay: append(b("r/"), be(5)...)}, ErrBadReplay},
