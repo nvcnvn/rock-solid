@@ -262,6 +262,10 @@ type plants struct {
 	settleSubset bool
 	// settleByNumber has Settle keep every gated version up to the kept one by number, whatever interval it was ordered in.
 	settleByNumber bool
+	// mapOnReplay has replay map every write and punch, holding none back for a decision; replayForgetsDrops has a
+	// decision marker map the versions replay held back that its decision dropped.
+	mapOnReplay        bool
+	replayForgetsDrops bool
 	// replayCopyAsWrite replays a copy entry as a write of its blocks, mapping them whether or not a map still stores them at the source.
 	replayCopyAsWrite bool
 	mergeCommitted    bool
@@ -1908,7 +1912,7 @@ func (s *Store) replay(ev *disklog.Event) error {
 // gates reports whether replay holds entry e back: a write or punch of an interval at or past the
 // newest decision the disk persisted for a PG holding its chunk, at any PG count.
 func (s *Store) gates(e *disklog.Entry) bool {
-	if e.Kind != disklog.EntryWrite && e.Kind != disklog.EntryPunch && e.Kind != disklog.EntrySlot {
+	if e.Kind != disklog.EntryWrite && e.Kind != disklog.EntryPunch && e.Kind != disklog.EntrySlot || s.plant.mapOnReplay {
 		return false
 	}
 	// ponytail: up to 32 index lookups per replayed entry; cache per PG if replay time matters.
@@ -1963,7 +1967,7 @@ func (s *Store) settleHeld(d *disklog.Entry) {
 			}
 		}
 		for k := range s.held {
-			if it := &s.held[k]; same(*it) && it.entry.Version <= top {
+			if it := &s.held[k]; same(*it) && (it.entry.Version <= top || s.plant.replayForgetsDrops) {
 				s.mapItem(it)
 			}
 		}

@@ -422,13 +422,18 @@ type replicaPlants struct {
 	// both vetoes with no up member a source of the version; writeOnUnfound orders a write to an
 	// unfound chunk; neverUnfound leaves a chunk with no source neither recovering nor unfound;
 	// forgetImage has a decision forget that the lead's last one found the primary's image at the
-	// version both keep.
-	listerVetoes   bool
-	keepPastMember bool
-	keepNoSource   bool
-	writeOnUnfound bool
-	neverUnfound   bool
-	forgetImage    bool
+	// version both keep; forgetImageDown drops the image once an interval has the disk a member
+	// not up; ignoreImageFlag has a restarted disk carry no image until it decides again; mapOnDemote
+	// maps a demoted primary's gated versions as a member's.
+	listerVetoes    bool
+	keepPastMember  bool
+	keepNoSource    bool
+	writeOnUnfound  bool
+	neverUnfound    bool
+	forgetImage     bool
+	forgetImageDown bool
+	ignoreImageFlag bool
+	mapOnDemote     bool
 	// fenceOnArrival refuses an older incarnation's or fenced session's write when it reaches the
 	// primary, not when the store orders it; reorderAfterOther keeps a lead's term across intervals
 	// another primary led, so its held writes are ordered again; memberNoFence has a member take a
@@ -705,7 +710,7 @@ func (r *Replica) imaged(pg core.PGID, c core.ChunkID) (uint64, bool) {
 		return r.images[i].chunks[j].Version, true
 	}
 	p := r.table.pool(pg.Pool)
-	if p == nil {
+	if p == nil || r.plant.ignoreImageFlag {
 		return 0, false
 	}
 	x, _ := r.st.Index().Chunk(pg.Pool, c)
@@ -744,7 +749,7 @@ func (r *Replica) carries(e *PGEntry, k uint32) bool {
 	if d, ok := (&PGEntry{Members: ms}).primary(); ok && d == r.cfg.Disk {
 		return true
 	}
-	return slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark != MarkUp })
+	return slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark != MarkUp && !r.plant.forgetImageDown })
 }
 
 // demote refuses the clients of the versions this disk ordered as the primary of a PG it no longer leads, since peering decides whether those versions stay. The store keeps them gated: the next decision this disk persists for the PG settles them.
@@ -760,6 +765,14 @@ func (r *Replica) demote(ctx *core.Context, out *ReplicaOutput) {
 		}
 		r.answerClient(ctx, v, r.refusal(v.u.PG.PG), out)
 		r.release(ctx, i)
+	}
+	if r.plant.mapOnDemote {
+		r.unsettled = r.st.Unsettled(r.unsettled[:0])
+		for _, c := range r.unsettled {
+			if pg, ok := r.pgOf(c); !ok || r.lead(pg) < 0 {
+				r.st.Ungate(ctx, c, &r.sout)
+			}
+		}
 	}
 }
 

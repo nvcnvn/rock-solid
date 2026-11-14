@@ -60,24 +60,67 @@ func (r *rollbackRun) dropY(t *testing.T) {
 // loseMemberAndRead has the other member's disk die and be declared lost, lets recovery run and reads X back.
 func (r *rollbackRun) loseMemberAndRead(t *testing.T) {
 	t.Helper()
+	if rp, data := r.xAfterLoss(t); !readsX(rp, data) {
+		t.Fatalf("X read %+v %x; primary %+v; members %v", rp, data[:min(1, len(data))], r.c.listed(r.c.node(r.p), r.ch), r.members())
+	}
+}
+
+func (r *rollbackRun) xAfterLoss(t *testing.T) (Response, []byte) {
+	t.Helper()
 	r.lose(r.m)
 	r.tick(DegradedRefillAfter + 2_000_000)
 	r.declare(t, r.m)
 	r.tick(5_000_000)
 	plantAll(r.c, func(p *replicaPlants) { p.noRecovery = false })
 	r.tick(60_000_000)
-	rp, data := r.read(r.ch)
-	if rp.Status != StatusOK || len(data) == 0 || data[0] != 0x11 {
-		t.Fatalf("X read %+v %x; primary %+v; members %v", rp, data[:min(1, len(data))], r.c.listed(r.c.node(r.p), r.ch), r.members())
-	}
+	return r.read(r.ch)
+}
+
+func readsX(rp Response, data []byte) bool {
+	return rp.Status == StatusOK && len(data) > 0 && data[0] == 0x11
+}
+
+// The rollback shapes, each up to the other member's loss.
+func restartPending(_ *testing.T, r *rollbackRun) {
+	r.restart()
+	r.heal()
+	r.tick(10_000_000)
+}
+
+func restartAfterDrop(t *testing.T, r *rollbackRun) {
+	r.dropY(t)
+	r.restart()
+	r.tick(10_000_000)
+}
+
+func decideAfterRestart(t *testing.T, r *rollbackRun) {
+	restartAfterDrop(t, r)
+	_, e := r.c.table.entry(pg0)
+	r.a.asks = []PGInterval{{pg0, e.Interval}}
+	r.publish()
+	r.tick(5_000_000)
+}
+
+func bouncePending(_ *testing.T, r *rollbackRun) {
+	r.lose(r.p)
+	r.tick(3_000_000)
+	r.back(r.p)
+	r.heal()
+	r.tick(5_000_000)
+}
+
+func bounceAfterDrop(t *testing.T, r *rollbackRun) {
+	r.dropY(t)
+	r.lose(r.p)
+	r.tick(3_000_000)
+	r.back(r.p)
+	r.tick(5_000_000)
 }
 
 func TestARestartedPrimaryRollsBackItsPendingWrite(t *testing.T) {
 	for seed := uint64(1); seed <= 3; seed++ {
 		r := newRollbackRun(t, seed)
-		r.restart()
-		r.heal()
-		r.tick(10_000_000)
+		restartPending(t, r)
 		r.loseMemberAndRead(t)
 	}
 }
@@ -85,9 +128,7 @@ func TestARestartedPrimaryRollsBackItsPendingWrite(t *testing.T) {
 func TestAPrimaryRestartedAfterItsDropServesFromItsFlag(t *testing.T) {
 	for seed := uint64(1); seed <= 3; seed++ {
 		r := newRollbackRun(t, seed)
-		r.dropY(t)
-		r.restart()
-		r.tick(10_000_000)
+		restartAfterDrop(t, r)
 		r.loseMemberAndRead(t)
 	}
 }
@@ -95,34 +136,46 @@ func TestAPrimaryRestartedAfterItsDropServesFromItsFlag(t *testing.T) {
 // A restarted primary decides again with the other member up, then that member's disk goes before recovery.
 func TestARestartedPrimaryKeepsItsDropsAcrossItsNextDecision(t *testing.T) {
 	r := newRollbackRun(t, 1)
-	r.dropY(t)
-	r.restart()
-	r.tick(10_000_000)
-	_, e := r.c.table.entry(pg0)
-	r.a.asks = []PGInterval{{pg0, e.Interval}}
-	r.publish()
-	r.tick(5_000_000)
+	decideAfterRestart(t, r)
 	r.loseMemberAndRead(t)
 }
 
 func TestABouncedPrimaryWithItsWritePendingRollsItBack(t *testing.T) {
 	r := newRollbackRun(t, 1)
-	r.lose(r.p)
-	r.tick(3_000_000)
-	r.back(r.p)
-	r.heal()
-	r.tick(5_000_000)
+	bouncePending(t, r)
 	r.loseMemberAndRead(t)
 }
 
 func TestABouncedPrimaryKeepsTheImageOfItsDroppedWrite(t *testing.T) {
 	r := newRollbackRun(t, 1)
-	r.dropY(t)
-	r.lose(r.p)
-	r.tick(3_000_000)
-	r.back(r.p)
-	r.tick(5_000_000)
+	bounceAfterDrop(t, r)
 	r.loseMemberAndRead(t)
+}
+
+// Each replay rollback plant loses X on the shape that needs its rule.
+func TestReplayRollbackPlantsLoseX(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		set   func(*replicaPlants, *plants)
+		shape func(*testing.T, *rollbackRun)
+	}{
+		{"mapOnReplay", func(_ *replicaPlants, s *plants) { s.mapOnReplay = true }, restartPending},
+		{"replayForgetsDrops", func(_ *replicaPlants, s *plants) { s.replayForgetsDrops = true }, restartAfterDrop},
+		{"ignoreImageFlag", func(p *replicaPlants, _ *plants) { p.ignoreImageFlag = true }, restartAfterDrop},
+		{"mapOnDemote", func(p *replicaPlants, _ *plants) { p.mapOnDemote = true }, bouncePending},
+		{"forgetImageDown", func(p *replicaPlants, _ *plants) { p.forgetImageDown = true }, bounceAfterDrop},
+	} {
+		r := newRollbackRun(t, 1)
+		c := r.c
+		tc.set(&c.replicaPlants, &c.storePlants)
+		for n := range c.reps {
+			tc.set(&c.reps[n].plant, &c.reps[n].Store().plant)
+		}
+		tc.shape(t, r)
+		if rp, data := r.xAfterLoss(t); readsX(rp, data) {
+			t.Errorf("%s: X still reads", tc.name)
+		}
+	}
 }
 
 // The primary persists the decision that drops Y, which drops it there and then, and the other member's acknowledgement
