@@ -80,6 +80,9 @@ finding is a `// want` line with its message, and a package with none must repor
 - Requests round up to whole blocks: in a 3-block pool, 4,097 bytes take 2 blocks; a 2-block request
   is then refused with PoolExhausted(requested 8,192, available 4,096), and a 1-byte request gets the
   last block (slot 2).
+- A quarantined buffer, one a failed device may still write into, stays the owner's until freed,
+  and once freed its blocks are never handed out again and its handle is stale; other buffers free
+  and reuse as before. `TestPoolIsFirstFit` quarantines one buffer in 40 against its first-fit model.
 - Freeing a buffer returns its bytes; the next allocation reuses the same slot with a new generation
   (slot 0 generation 1, then slot 0 generation 2), so the old handle and the new one differ. Used and
   live-buffer counts return to 0 after all frees.
@@ -7105,38 +7108,94 @@ Timers:
 
 ## io_uring disk driver
 
-- The driver maps its own ring per loop and drives it with raw syscalls (no liburing); the ring's
-  completion eventfd sits in the loop's epoll set, and the driver runs in event mode only: it never
-  waits inside `io_uring_enter` (trace: no `io_uring_enter` with `min_complete` above 0), drains a
-  full completion queue within the pass and defers what a full submission queue cannot take.
-- The ring is tested on the real kernel with a file-backed disk, natively or in a container whose
-  seccomp profile allows `io_uring_*`: Docker's default profile fails `io_uring_setup` with
-  `EPERM`, so those runs use `--security-opt seccomp=unconfined` or a profile that allows it.
-- File or raw device, opened `O_DIRECT`; every read and write is block-aligned in offset, length and
-  buffer address.
-- Vectored writes: a `DiskWrite` with a `Vec` of pool buffers writes them in order as one contiguous
-  write; with `Vec` empty it writes `Buf`. A vector whose lengths do not sum to `Len` is refused.
-- A round's write and its `IORING_FSYNC_DATASYNC` emitted together are submitted linked
-  (`IOSQE_IO_LINK`) in one `io_uring_enter`, with no wakeup between them (trace: one `io_uring_enter`
-  submitting 2). A flush emitted later, unlinked, covers only writes that completed before it.
-- `durability: fua` as a per-disk setting: writes carry FUA and no flush is issued; default `flush`.
-  On the measured consumer drive FUA cost 2.2 ms per 4 KiB write against 0.95 ms for write plus
-  flush, so `flush` stays the default.
-- File-backed disks: segments are written in full when the file is created, so later writes are
-  overwrites: 1,000 durable 4 KiB writes into the file have a p50 near 0.95 ms on the NVMe flush
-  spike's drive, not the 2.5 ms of writes into never-written `fallocate`d extents, and the ext4
-  journal's commit count does not rise across them.
-- Discard for freed segments, three cases: on Linux 6.12 and later a `DiskTrim` is one
-  `BLOCK_URING_CMD_DISCARD` ring command; on older kernels it is `BLKDISCARD` on a worker goroutine,
-  whose completion reaches the loop through the inbox; on a file-backed disk the `DiskTrim` completes
-  with no discard, no hole is punched, and the file stays written in full.
-- Fixed buffers: the loop's slab is registered once (`IORING_REGISTER_BUFFERS`) in regions of at most
-  1 GiB, at most 16,384 buffers per ring, and reads and writes use `READ_FIXED`/`WRITE_FIXED`; a slab
-  that grows registers its new region in a sparse table without re-registering the old. The disk
-  descriptors are registered as fixed files.
-- Fallback: without `CAP_IPC_LOCK` and with the default 8 MiB memory-lock limit, registering 64 MiB
-  fails with `ENOMEM`; the driver then issues plain `READ`/`WRITE` on the same buffers, every scenario
-  of this section still passes, and the driver's status reports the fallback.
+The ring's tests (`internal/driver/uring/ring_linux_test.go`) run on the real kernel with a
+file-backed disk, under `go test` and `-race`, natively or in a container: Docker's default seccomp
+profile refuses `io_uring_setup` with `EPERM`, so container runs use
+`--security-opt seccomp=unconfined`. The pure tests (`sqe_test.go`) run everywhere.
+
+- Event mode: the ring's completion eventfd sits in the loop's epoll set, and the driver never waits
+  inside `io_uring_enter` (trace: every `io_uring_enter` records the `min_complete` it was passed,
+  0, and took every entry it was asked to); a pass with nothing to do blocks in `epoll_wait` until
+  the eventfd wakes it, and the loop's read of the eventfd is traced. An `io_uring_enter` that fails
+  is traced with the entries it took, 0, and its errno. `TestAWriteAndItsLinkedFlushGoInOneEnter`,
+  `TestAFailedEnterIsTraced`.
+- A write and its `IORING_FSYNC_DATASYNC` emitted together go linked (`IOSQE_IO_LINK`) in one
+  `io_uring_enter` (trace: one `io_uring_enter` submitting 2), and the bytes read back are the bytes
+  written. `TestAWriteAndItsLinkedFlushGoInOneEnter`. A linked flush joins only a write on its own
+  disk: behind another disk's write it goes on its own, and on a `fua` disk it completes at once
+  rather than with the other disk's write. `TestALinkedFlushJoinsOnlyAWriteOnItsDisk`.
+- A chain the kernel cuts never lets a flush run before its write: the test asks `io_uring_enter` to
+  submit 1 of a chain of 2, which leaves the kernel where a failed request allocation does (the
+  head taken and run alone, the rest in the submission queue). The driver takes the rest back and
+  submits nothing until the head completes; then the flush goes alone, or completes with `DiskIO`
+  unsubmitted when its write failed, and a trim's header write goes after its failed discard and
+  still zeroes the header alone. `TestAFlushCutFromItsWriteWaitsForIt`,
+  `TestAFlushCutFromAFailedWriteFails`, `TestAHeaderWriteCutFromItsDiscardStillRuns`.
+- Vectored writes: a `DiskWrite` with a `Vec` of pool buffers writes them in order as one `WRITEV`;
+  with `Vec` empty, or a `Vec` of one, it writes `Buf` with `WRITE_FIXED`. A vector whose lengths do
+  not sum to `Len`, an element not in whole blocks or past its buffer, or more than 1,024 elements is
+  refused with `DiskInvalidRange`, as is any range off the disk or not in whole blocks.
+  `TestPrepareBuildsEachSubmission`, `FuzzPrepare`.
+- A failed write fails its linked flush: both complete with `DiskIO`, the write first.
+  `TestAFailedWriteCancelsItsLinkedFlush`. A write refused before submission fails its linked flush
+  with `DiskIO` at once, and nothing is submitted. `TestARefusedWriteFailsItsLinkedFlushAtOnce`.
+- A short count is an error: a read or write that moves fewer bytes than asked completes with
+  `DiskIO`, and so does every negative result and a flush or trim with any result but 0.
+  `TestAShortReadIsAnError`, `TestCompleteDecodesEachResult`, `FuzzComplete`.
+- `durability: fua` as a per-disk setting: writes carry `RWF_DSYNC` and no flush is submitted; an
+  unlinked flush completes at once, a linked one with its write. On the measured consumer drive FUA
+  cost 2.2 ms per 4 KiB write against 0.95 ms for write plus flush, so `flush` stays the default.
+  `TestAFUADiskSubmitsNoFlush`; `FuzzPrepare` fuzzes the setting.
+- A full ring defers, never drops: 64 reads into a ring of 4 entries all complete once, no
+  `io_uring_enter` submits more than 4, and nothing is left in flight. A link chain goes into the
+  submission queue whole or waits whole for the next pass, and entries in flight never exceed the
+  completion queue, so it never overflows. `TestAFullRingDefersSubmissions`.
+- File-backed disks are written in full when created, every block allocated, so later writes are
+  overwrites that commit no file system journal; a trim never changes the file's allocation.
+  `TestAFileIsWrittenInFullAndATrimZeroesOnlyTheHeader`.
+- A trim zeroes the segment header: on a file it is a write of 4 KiB of zeros over the trim's first
+  block alone; on a device a `BLOCK_URING_CMD_DISCARD` with that write hard-linked behind it, the
+  trim completing with the write's result whatever the discard's. A trim's blocks after the first
+  read back unchanged on a file. `TestAFileIsWrittenInFullAndATrimZeroesOnlyTheHeader`,
+  `TestADeviceTrimIsADiscardThenAHeaderWrite`; `TestAFailedDiscardStillZeroesTheHeader` sends the
+  discard to a file, where the kernel fails it, and the header still reads back as zeros.
+- Fixed buffers and files: the loop's pool is registered once (`IORING_REGISTER_BUFFERS`) in regions
+  of at most 1 GiB, reads and writes of one buffer use `READ_FIXED`/`WRITE_FIXED`, and the disk
+  descriptors go into a table of 16 fixed files; the status reports both.
+  `TestAWriteAndItsLinkedFlushGoInOneEnter`.
+- Fallback: with an 8 MiB memory-lock limit and no `CAP_IPC_LOCK`, registering a 64 MiB pool fails
+  with `ENOMEM`; the status reports it, and a write, its flush and the read back still pass on plain
+  `READ`/`WRITE`. `TestTheRegistrationFallback`, run under `--ulimit memlock=8388608` and with the
+  test lowering its own soft limit.
+- A failed ring is a failed disk: an `io_uring_enter` error other than `EINTR`, `EAGAIN` or `EBUSY`
+  (the test puts `/dev/null` behind the ring's descriptor of a ring of two entries) completes every
+  operation in flight, queued or executed later with `DiskIO`, each once, sets `Status.Failed`, and
+  the completion queue is never read again. Once the log frees every buffer, the pool hands out
+  every block again but those of the read the kernel held and the write copied into the submission
+  queue; the read left queued in the driver and the one executed after the failure get theirs back.
+  `TestAFailedRingCompletesEveryOperationWithDiskIO`. `Close` quarantines the buffers of the
+  operations the kernel holds the same way, and the buffers of those still queued go back to the
+  pool. `TestCloseQuarantinesWhatTheKernelHolds`.
+- A disk file whose size is not whole blocks is refused at `Open` with `ErrNotBlocks`.
+  `TestOpenRefusesAFileNotInWholeBlocks`.
+- Nothing allocates per operation: a vectored write with its linked flush and a single write, with
+  the GC off. `TestARoundTripAllocatesNothing`; `BenchmarkAWriteAndItsFlush` reports 0 allocs/op.
+
+## Format discards every segment
+
+- Formatting a raw device trims every segment, and the driver zeroes each header behind its discard.
+  Test: a device prefilled with random bytes and with another log's valid segment headers is
+  formatted; the next recovery's trace reads only segment headers and block 1 of each, and reads no
+  segment in full, at that start and every later one.
+
+## io_uring on a raw device and NVMe
+
+- A raw device is opened `O_DIRECT` and `O_EXCL`, sized with `BLKGETSIZE64`, and a trim of it is a
+  `BLOCK_URING_CMD_DISCARD` that discards the range, with the header write behind it; on a loop
+  device under `--privileged` or a spare drive.
+- File-backed disks: 1,000 durable 4 KiB writes into the file have a p50 near 0.95 ms on the NVMe
+  flush spike's drive, not the 2.5 ms of writes into never-written `fallocate`d extents, and the
+  ext4 journal's commit count does not rise across them.
 - Benchmarks, 4 KiB `O_DIRECT` on the NVMe flush spike's drive (registered buffers spike):
 
   | Case | Target |
@@ -7147,25 +7206,8 @@ Timers:
   | Registration | 17 to 70 ms per GiB already touched, once |
 
   Open: tolerance. Open: polled completions (`IORING_SETUP_IOPOLL`) are an open question, not built.
-- Building submission entries from actions and decoding completions into `DiskDone` are pure
-  functions, table-tested and fuzzed:
-  - a completion with an error result becomes a `DiskDone` with that error, and the log fails;
-  - a flush linked behind a failed write completes with `-ECANCELED`, and the log fails on the
-    write's error, not the flush's;
-  - a short count (fewer bytes than asked) is decoded as such. Open: how it is reported to the
-    core; the design does not say.
-- A flush error reported late, for a round a later flush already made durable, still reaches the
-  log as an error.
-- The driver contract: a buffer named in a `DiskRead` or `DiskWrite` stays with the driver until its
-  `DiskDone`; a test frees nothing early and the slab's generation check finds no reuse in flight.
 - Many reads in flight: recovery's segment-header reads (4,096 to 262,144 per disk) go out at the read
-  depth recovery asks for, and the ring never holds more than its submission queue; a full queue
-  defers submissions to the next pass, never drops them. Open: ring depth.
-- Formatting a raw device discards every segment, or zeroes each segment header where a discard does
-  not read back as zeros. A freed segment's discard does the same. Test: a device prefilled with random bytes and with another log's valid
-  segment headers is formatted; the next recovery's trace reads only segment headers and block 1 of
-  each, and reads no segment in full, at that start and every later one. Open: how the driver learns
-  whether a discard reads back as zeros.
+  depth recovery asks for and the ring defers what does not fit, never drops it. Open: ring depth.
 
 ## TCP network driver
 

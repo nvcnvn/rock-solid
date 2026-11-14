@@ -75,7 +75,7 @@ const (
 	SysRead
 	// SysWritev: fd iov bytes.
 	SysWritev
-	// SysIOUringEnter: submit wait.
+	// SysIOUringEnter: submit wait took errno, the entries and min_complete passed, the entries taken and the error returned.
 	SysIOUringEnter
 	// SysTimerfdSettime: at.
 	SysTimerfdSettime
@@ -213,7 +213,7 @@ var schemas = [numNames]schema{
 	SysEpollWait:      {"epoll_wait", KindSyscall, []field{{"ready", typeNum}}},
 	SysRead:           {"read", KindSyscall, []field{fFD, fBytes}},
 	SysWritev:         {"writev", KindSyscall, []field{fFD, {"iov", typeNum}, fBytes}},
-	SysIOUringEnter:   {"io_uring_enter", KindSyscall, []field{{"submit", typeNum}, {"wait", typeNum}}},
+	SysIOUringEnter:   {"io_uring_enter", KindSyscall, []field{{"submit", typeNum}, {"wait", typeNum}, {"took", typeNum}, {"errno", typeNum}}},
 	SysTimerfdSettime: {"timerfd_settime", KindSyscall, []field{fAt}},
 	SysEventfdWrite:   {"eventfd_write", KindSyscall, []field{fFD}},
 	SysEpollCtl:       {"epoll_ctl", KindSyscall, []field{fFD, {"in", typeBool}, {"out", typeBool}}},

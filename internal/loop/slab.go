@@ -101,6 +101,9 @@ func newPool(capacityBytes, maxLive, region int) (*Pool, error) {
 	return &Pool{Pool: core.NewPool(s.regions, maxLive), slab: s}, nil
 }
 
+// Regions are the slab's mapped regions, in the order the pool numbers its slots.
+func (p *Pool) Regions() [][]byte { return p.slab.regions }
+
 // Close unmaps the pool's slab and empties the pool in place, so any later use of a handle, live or
 // not, through the pool or a kept *core.Pool, panics as past the pool's end; a slice taken from
 // Bytes must not be kept past its handle.

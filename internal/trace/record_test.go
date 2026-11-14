@@ -26,7 +26,7 @@ var everyName = []string{
 	"1000250 2 syscall pass=81 epoll_wait ready=3",
 	"1000251 2 syscall pass=81 read fd=17 bytes=4096",
 	"1000254 2 syscall pass=81 writev fd=21 iov=3 bytes=12416",
-	"1000254 2 syscall pass=81 io_uring_enter submit=2 wait=0",
+	"1000254 2 syscall pass=81 io_uring_enter submit=2 wait=0 took=1 errno=0",
 	"1000254 2 syscall pass=81 timerfd_settime at=2000000",
 	"1000254 2 syscall pass=81 eventfd_write fd=9",
 	"1000254 2 syscall pass=81 epoll_ctl fd=7 in=1 out=1",

@@ -8,7 +8,8 @@ import (
 )
 
 // TestPoolIsFirstFit checks the pool's slots against a plain first-fit scan over the same
-// allocations and frees, with buffers that never cross a region.
+// allocations and frees, with buffers that never cross a region and quarantined buffers whose
+// blocks stay taken once freed.
 func TestPoolIsFirstFit(t *testing.T) {
 	seeds.Run(t, 1, 50, func(seed uint64) {
 		r := NewRand(seed)
@@ -25,10 +26,17 @@ func TestPoolIsFirstFit(t *testing.T) {
 			if len(live) > 0 && r.Chance(1, 2) {
 				i := int(r.Below(uint64(len(live))))
 				b := live[i]
-				for j := range p.blocks[b.Slot].run {
-					taken[b.Slot+j] = false
+				if r.Chance(1, 40) {
+					p.Quarantine(b)
+				} else {
+					for j := range p.blocks[b.Slot].run {
+						taken[b.Slot+j] = false
+					}
 				}
 				p.Free(b)
+				if p.Valid(b) {
+					t.Fatalf("step %d: slot %d still valid once freed", step, b.Slot)
+				}
 				live = append(live[:i], live[i+1:]...)
 				continue
 			}

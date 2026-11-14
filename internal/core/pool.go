@@ -1,6 +1,9 @@
 package core
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // Pool is a BufPool over memory its caller supplies, in regions that a buffer never crosses,
 // panicking on any freed or stale handle before it touches a byte.
@@ -12,6 +15,7 @@ type Pool struct {
 	maxLive   int
 	used      int
 	live      int
+	held      []IOBuf
 }
 
 type poolBlock struct {
@@ -113,14 +117,26 @@ func (p *Pool) Bytes(b IOBuf) []byte {
 	return p.regions[r][off : off+int(s.run)*BlockSize]
 }
 
-// Free returns the buffer to the pool.
+// Free returns the buffer to the pool, unless it is quarantined.
 func (p *Pool) Free(b IOBuf) {
 	s := p.slot(b)
+	p.live--
+	if slices.Contains(p.held, b) {
+		s.gen++
+		return
+	}
 	run := int(s.run)
 	s.run = 0
 	p.low = min(p.low, int(b.Slot))
 	p.used -= run * BlockSize
-	p.live--
+}
+
+// Quarantine keeps b's blocks, still counted as used, from being handed out again once b is freed.
+func (p *Pool) Quarantine(b IOBuf) {
+	p.slot(b)
+	if !slices.Contains(p.held, b) {
+		p.held = append(p.held, b)
+	}
 }
 
 func (p *Pool) slot(b IOBuf) *poolBlock {

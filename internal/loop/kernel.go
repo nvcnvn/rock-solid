@@ -31,8 +31,9 @@ type Ready struct {
 	Hup   bool
 }
 
-// Tokens Wait reports for the kernel's own descriptors; a loop's connections use tokens below them.
+// Tokens Wait reports for the kernel's own descriptors and the disk ring's; a loop's connections use tokens below them.
 const (
 	TokenWake  = ^uint32(0)
 	TokenTimer = ^uint32(0) - 1
+	TokenDisk  = ^uint32(0) - 2
 )

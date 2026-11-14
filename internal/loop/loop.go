@@ -26,6 +26,28 @@ type Driver interface {
 	Execute(a *core.Action)
 }
 
+// Disk is a ring of disk I/O a loop drives: the loop watches Fd, collects completions every pass
+// and submits once at the end of a pass.
+type Disk interface {
+	// Fd turns readable when completions arrive.
+	Fd() int
+	// Reap appends every completion waiting to evs.
+	Reap(evs []core.Event) []core.Event
+	// Submit hands the kernel what Execute queued since the last Submit, in one io_uring_enter
+	// that never waits, and returns that call, Submit 0 when it made none.
+	Submit() Enter
+	// Waiting reports a completion to reap, or a queued submission the ring can take now,
+	// either of which the loop must not block on.
+	Waiting() bool
+}
+
+// Enter is one io_uring_enter: the entries and min_complete passed, the entries the kernel took
+// and the error it returned.
+type Enter struct {
+	Submit, Wait, Took uint32
+	Errno              unix.Errno
+}
+
 // ConnID is the number a loop gives a connection, the one its trace records name it by.
 type ConnID uint32
 
@@ -73,6 +95,9 @@ type Loop struct {
 	fire    []core.TimerID
 	armed   core.Tick
 	inbox   *Inbox
+	disk    Disk
+	evs     []core.Event
+	drain   [8]byte
 	ev      core.Event
 	out     []core.Action
 	iov     [maxIOV]unix.Iovec
@@ -155,7 +180,7 @@ func (l *Loop) AddConn(fd int, peer bool) (ConnID, error) {
 			break
 		}
 	}
-	if id >= int(TokenTimer) {
+	if id >= int(TokenDisk) {
 		return 0, errors.New("loop: out of connection IDs")
 	}
 	if id == len(l.conns) {
@@ -175,6 +200,20 @@ func (l *Loop) AddConn(fd int, peer bool) (ConnID, error) {
 		l.interest(ConnID(id))
 	}
 	return ConnID(id), nil
+}
+
+// AttachDisk makes d the loop's disk ring, watched under TokenDisk; a loop has at most one.
+func (l *Loop) AttachDisk(d Disk) error {
+	if l.disk != nil {
+		return errors.New("loop: a disk ring is attached already")
+	}
+	l.syscall(trace.SysEpollCtl, uint64(TokenDisk), 1, 0)
+	if err := l.k.Watch(d.Fd(), TokenDisk); err != nil {
+		return err
+	}
+	l.disk = d
+	l.evs = make([]core.Event, 0, 256)
+	return nil
 }
 
 // Queue queues the first n bytes of b to be written to c in this pass's writev, freeing b once
@@ -214,14 +253,14 @@ func (l *Loop) Pending() Pending {
 		p.Deadline = at
 		p.Work = at <= l.ctx.Now
 	}
-	p.Work = p.Work || l.hot > 0 || len(l.dirty) > 0 || l.inbox.ready()
+	p.Work = p.Work || l.hot > 0 || len(l.dirty) > 0 || l.inbox.ready() || l.disk != nil && l.disk.Waiting()
 	return p
 }
 
 // Pass is one turn of the loop: wait, read the clocks, deliver Resumed if the node stood still
-// since the last pass, fire the timers due, handle the inbox, then peer connections before
-// clients, write each connection once, stop or resume reading clients at the queue cap and arm
-// the timer. Now and Raw never go back: a reading below the last one leaves them where they were,
+// since the last pass, fire the timers due, deliver disk completions, handle the inbox, then peer
+// connections before clients, write each connection once, stop or resume reading clients at the
+// queue cap, submit disk I/O and arm the timer. Now and Raw never go back: a reading below the last one leaves them where they were,
 // and delivers Resumed.
 func (l *Loop) Pass() {
 	block := l.cfg.PlantBlock || !l.Pending().Work
@@ -257,8 +296,18 @@ func (l *Loop) Pass() {
 		l.armed = 0
 	}
 	for _, r := range l.ready {
-		if r.Token == TokenWake {
+		switch r.Token {
+		case TokenWake:
 			l.inbox.notified.Store(false)
+		case TokenDisk:
+			n, _ := rawRead(l.disk.Fd(), l.drain[:])
+			l.syscall(trace.SysRead, uint64(TokenDisk), uint64(max(n, 0)), 0)
+		}
+	}
+	if l.disk != nil {
+		l.evs = l.disk.Reap(l.evs[:0])
+		for i := range l.evs {
+			l.Deliver(&l.evs[i])
 		}
 	}
 	for range l.cfg.InboxBudget {
@@ -271,6 +320,11 @@ func (l *Loop) Pass() {
 	l.handle(false)
 	l.flush()
 	l.applyCap()
+	if l.disk != nil {
+		if e := l.disk.Submit(); e.Submit > 0 {
+			l.record(trace.Record{Name: trace.SysIOUringEnter, Fields: [trace.MaxFields]uint64{uint64(e.Submit), uint64(e.Wait), uint64(e.Took), uint64(e.Errno)}})
+		}
+	}
 	if at, ok := l.timers.Earliest(); ok && at != l.armed {
 		l.armed = at
 		l.syscall(trace.SysTimerfdSettime, uint64(at), 0, 0)
@@ -308,7 +362,7 @@ func (l *Loop) Deliver(ev *core.Event) {
 
 func (l *Loop) handle(peer bool) {
 	for _, r := range l.ready {
-		if r.Token >= TokenTimer {
+		if r.Token >= TokenDisk {
 			continue
 		}
 		cn := &l.conns[r.Token]

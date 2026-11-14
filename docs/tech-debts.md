@@ -119,3 +119,13 @@
 - **Where:** `nanotime` in `internal/loop/epoll_linux.go`, the `CLOCK_MONOTONIC` reads that bracket each pass's clock read
 - **Why:** the bracket reads `CLOCK_MONOTONIC` twice per pass and should cost no syscall; `x/sys/unix.ClockGettime` is a syscall, and `time.Since`, the runtime's suggested replacement, is banned in the loop by `tools/sansio` ([Runtime in Go](design.md#runtime-in-go)). `runtime.nanotime` is not an API, but `runtime/time_nofake.go` promises to keep it linkable with its signature (go.dev/issue/67401).
 - **Remove when:** Go or `x/sys/unix` offers a vDSO `CLOCK_MONOTONIC` read; read it there. If a toolchain refuses the link first, read it with a raw syscall instead, at a syscall's cost per read (about 140 ns in the VM pause spike's guests).
+
+## Workaround: no discard before Linux 6.12
+- **Where:** `prepare` in `internal/driver/uring/sqe.go`, a device's `DiskTrim`
+- **Why:** the driver discards only with the `BLOCK_URING_CMD_DISCARD` ring command, which Linux 6.12 added. On an older kernel the command fails, the header write hard-linked behind it still zeroes the segment header, and the device is never told the segment is free; a `BLKDISCARD` ioctl on a worker goroutine, its completion through the inbox, would discard there at the cost of a second completion path ([Runtime in Go](design.md#runtime-in-go)).
+- **Remove when:** the oldest supported kernel is 6.12 or later; the entry then goes with nothing to remove. If an older kernel must discard first, build the worker path.
+
+## Workaround: vectored writes pin their pages
+- **Where:** `vector` in `internal/driver/uring/sqe.go`
+- **Why:** a `DiskWrite` of several buffers is a plain `WRITEV`, which pins and unpins each page as a non-registered `O_DIRECT` write does, about 0.1 µs per 4 KiB page; `IORING_OP_WRITEV_FIXED` needs Linux 6.15 and every iovec inside one registered buffer ([Runtime in Go](design.md#runtime-in-go)).
+- **Remove when:** the oldest supported kernel is 6.15 or later; then issue `WRITEV_FIXED` for a vector whose buffers lie in one pool region.
