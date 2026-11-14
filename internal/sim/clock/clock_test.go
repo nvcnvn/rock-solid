@@ -68,12 +68,12 @@ func TestASuspendStopsRawAndMonotonicAndBoottimeGainsWholeSeconds(t *testing.T) 
 	if got != want {
 		t.Fatalf("after a 2.7 s suspend: %+v, want %+v", got, want)
 	}
-	if !core.Resumed(before, got, Threshold) {
+	if !core.Resumed(before, got, core.ResumeThreshold) {
 		t.Fatal("no Resumed after a 2 s gain")
 	}
 	m.Stop(4_000_000, Suspend)
 	m.Resume(4_900_000)
-	if prev, cur := got, m.Read(4_900_000); core.Resumed(prev, cur, Threshold) {
+	if prev, cur := got, m.Read(4_900_000); core.Resumed(prev, cur, core.ResumeThreshold) {
 		t.Fatalf("a 0.9 s suspend, rounded to 0, gave Resumed: %+v then %+v", prev, cur)
 	}
 }
@@ -99,7 +99,7 @@ func TestEachStopMovesTheClocksAndMarkerAsMeasured(t *testing.T) {
 		if after.Boot-before.Boot != c.gain || after.Raw-before.Raw != c.gain || after.Mono-before.Mono != c.gain || after.Marker-before.Marker != c.marker {
 			t.Errorf("stop %d: %+v then %+v, want every clock to gain %d and the marker %d", c.stop, before, after, c.gain, c.marker)
 		}
-		if core.Resumed(before, after, Threshold) != c.resumed {
+		if core.Resumed(before, after, core.ResumeThreshold) != c.resumed {
 			t.Errorf("stop %d: Resumed %v", c.stop, !c.resumed)
 		}
 		if d := m.Read(2_000_000+pause).Raw - after.Raw; d != 1_000_000 {

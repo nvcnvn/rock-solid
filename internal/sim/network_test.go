@@ -729,7 +729,7 @@ func resumedRule(tr []byte) error {
 			case clock.Restore, clock.HeldMigration:
 				owed[k] = true
 			case clock.Suspend:
-				owed[k] = owed[k] || r.Tick-p.Tick >= clock.Threshold
+				owed[k] = owed[k] || r.Tick-p.Tick >= core.ResumeThreshold
 			}
 		case trace.EvResumed:
 			if !owed[k] {

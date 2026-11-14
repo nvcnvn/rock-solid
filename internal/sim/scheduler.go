@@ -758,7 +758,7 @@ func (n *Node) pass(l uint32, ev *core.Event, f func(ctx *core.Context, out []co
 	lp := &n.loops[l]
 	s.out = s.out[:0]
 	cur := n.clock.Read(s.now)
-	if core.Resumed(lp.last, cur, clock.Threshold) {
+	if core.Resumed(lp.last, cur, core.ResumeThreshold) {
 		resumed := core.Event{Kind: core.EvResumed}
 		s.record(n, l, ctx.Now, trace.EventRecord(&resumed, s.set.MsgType))
 		s.out = lp.m.OnEvent(&ctx, &resumed, s.out)

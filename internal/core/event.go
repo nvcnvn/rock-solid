@@ -196,8 +196,11 @@ type Clocks struct {
 	Marker uint64
 }
 
-// Resumed reports whether the node stood still between two readings of one boot: CLOCK_BOOTTIME gained at least threshold on CLOCK_MONOTONIC, which only a suspend makes it do, or the disruption marker changed.
+// ResumeThreshold is the gain of CLOCK_BOOTTIME over CLOCK_MONOTONIC that loops and the simulator count as a suspend.
+const ResumeThreshold Tick = 1_000_000
+
+// Resumed reports whether the node stood still between two readings of one boot: CLOCK_BOOTTIME gained at least threshold on CLOCK_MONOTONIC, which only a suspend makes it do, or the disruption marker changed. A lease clock that went back counts too, since a holder would otherwise end its leases late.
 func Resumed(prev, cur Clocks, threshold Tick) bool {
 	d := (cur.Boot - cur.Mono) - (prev.Boot - prev.Mono)
-	return cur.Marker != prev.Marker || int64(d) >= int64(threshold)
+	return cur.Marker != prev.Marker || int64(d) >= int64(threshold) || cur.Boot < prev.Boot || cur.Raw < prev.Raw
 }

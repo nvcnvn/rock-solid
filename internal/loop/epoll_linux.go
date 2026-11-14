@@ -1,28 +1,51 @@
 package loop
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"math"
+	"unsafe"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"golang.org/x/sys/unix"
 )
 
-// Epoll is the real kernel behind the seam: an epoll set, an eventfd for wakes and a timerfd on CLOCK_BOOTTIME.
+// Epoll is the real kernel behind the seam: an epoll set, an eventfd for wakes, a timerfd on
+// CLOCK_BOOTTIME and, where the hypervisor offers one, the VMClock device.
 type Epoll struct {
-	ep     int
-	wake   int
-	timer  int
-	events [1024]unix.EpollEvent
-	drain  [8]byte
+	ep      int
+	wake    int
+	timer   int
+	vm      *VMClock
+	vmErr   error
+	events  [1024]unix.EpollEvent
+	drain   [8]byte
+	ts      unix.Timespec
+	retries uint64
+	widest  int64
 }
+
+const (
+	// bracket is ε, the most two CLOCK_MONOTONIC readings around one clock read may lie apart, in ns.
+	bracket = 1_000_000
+	// bracketTries bounds the reads of one Clocks call; past it the narrowest is taken.
+	bracketTries = 8
+)
 
 var wakeOne = [8]byte{1}
 
-// NewEpoll makes an epoll set with its wake eventfd and its timerfd in it.
-func NewEpoll() (*Epoll, error) {
-	e := &Epoll{ep: -1, wake: -1, timer: -1}
-	var err error
+// NewEpoll makes an epoll set with its wake eventfd and its timerfd in it, and maps the VMClock
+// device at vmclock, VMClockPath outside tests. Where no device exists the marker reads 0; a device
+// that exists but cannot be mapped, or is not a VMClock, fails NewEpoll.
+func NewEpoll(vmclock string) (*Epoll, error) {
+	vm, err := OpenVMClock(vmclock)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	e := &Epoll{ep: -1, wake: -1, timer: -1, vm: vm, vmErr: err}
 	if e.ep, err = unix.EpollCreate1(unix.EPOLL_CLOEXEC); err != nil {
+		e.Close()
 		return nil, fmt.Errorf("loop: epoll_create1: %w", err)
 	}
 	if e.wake, err = unix.Eventfd(0, unix.EFD_NONBLOCK|unix.EFD_CLOEXEC); err != nil {
@@ -45,13 +68,21 @@ func NewEpoll() (*Epoll, error) {
 	return e, nil
 }
 
-// Close closes the set, the eventfd and the timerfd.
+// VMClock is nil when the clocks read include the VMClock marker, or else why they do not.
+func (e *Epoll) VMClock() error { return e.vmErr }
+
+// Bracket reports how many clock reads Clocks found wider than ε, their two CLOCK_MONOTONIC
+// readings lying further apart, and the widest such gap in ns.
+func (e *Epoll) Bracket() (retries uint64, widest int64) { return e.retries, e.widest }
+
+// Close closes the set, the eventfd and the timerfd, and unmaps the VMClock device.
 func (e *Epoll) Close() {
 	for _, fd := range []int{e.ep, e.wake, e.timer} {
 		if fd >= 0 {
 			_ = unix.Close(fd)
 		}
 	}
+	_ = e.vm.Close()
 }
 
 func (e *Epoll) ctl(op, fd int, token uint32, events uint32) error {
@@ -122,16 +153,40 @@ func (e *Epoll) Wake() {
 	_, _ = unix.Write(e.wake, wakeOne[:])
 }
 
-// Clocks reads the clocks one after another; the bracketed read and the VMClock marker belong to the clock item.
+// Clocks reads CLOCK_BOOTTIME and CLOCK_MONOTONIC_RAW between two CLOCK_MONOTONIC readings, again
+// until those lie within ε, at most bracketTries times, keeping the narrowest: a stall between the
+// reads would otherwise look like a suspend.
 func (e *Epoll) Clocks() core.Clocks {
-	return core.Clocks{Boot: clock(unix.CLOCK_BOOTTIME), Raw: clock(unix.CLOCK_MONOTONIC_RAW), Mono: clock(unix.CLOCK_MONOTONIC)}
+	var best core.Clocks
+	narrowest := int64(math.MaxInt64)
+	for range bracketTries {
+		mono := nanotime()
+		boot := e.clock(unix.CLOCK_BOOTTIME)
+		raw := e.clock(unix.CLOCK_MONOTONIC_RAW)
+		gap := nanotime() - mono
+		if gap < narrowest {
+			narrowest = gap
+			best = core.Clocks{Boot: boot, Raw: raw, Mono: core.Tick(mono / 1000)}
+		}
+		if gap <= bracket {
+			break
+		}
+		e.retries++
+		e.widest = max(e.widest, gap)
+	}
+	best.Marker = e.vm.Marker()
+	return best
 }
 
-func clock(id int32) core.Tick {
-	var ts unix.Timespec
-	_ = unix.ClockGettime(id, &ts)
-	return core.Tick(ts.Nano() / 1000)
+func (e *Epoll) clock(id uintptr) core.Tick {
+	_, _, _ = unix.RawSyscall(unix.SYS_CLOCK_GETTIME, id, uintptr(unsafe.Pointer(&e.ts)), 0)
+	return core.Tick(e.ts.Nano() / 1000)
 }
+
+// nanotime is CLOCK_MONOTONIC through the vDSO.
+//
+//go:linkname nanotime runtime.nanotime
+func nanotime() int64
 
 // Arm sets the timerfd to deadline, absolute on CLOCK_BOOTTIME.
 func (e *Epoll) Arm(deadline core.Tick) {

@@ -107,7 +107,7 @@ type realLoop struct {
 
 func newRealLoop(t *testing.T, conns int) *realLoop {
 	t.Helper()
-	k, err := loop.NewEpoll()
+	k, err := loop.NewEpoll(loop.VMClockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +512,7 @@ func TestAReadThatFindsNothingKeepsTheConnection(t *testing.T) {
 // whose test ends are returned.
 func capped(t *testing.T, queueCap int, sndbuf int) (*loop.Loop, *looptest.Wire, *echo, *trace.Ring, []int) {
 	t.Helper()
-	k, err := loop.NewEpoll()
+	k, err := loop.NewEpoll(loop.VMClockPath)
 	if err != nil {
 		t.Fatal(err)
 	}

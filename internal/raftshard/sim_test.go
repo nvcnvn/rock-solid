@@ -461,7 +461,7 @@ func (c *simCluster) leaseReader(skip int) int {
 		if id == skip || r == nil || r.s == nil || !nd.Up() || nd.Paused() {
 			continue
 		}
-		if core.Resumed(r.clocks, nd.Clock().Read(c.s.Time()), clock.Threshold) {
+		if core.Resumed(r.clocks, nd.Clock().Read(c.s.Time()), core.ResumeThreshold) {
 			continue
 		}
 		if ctx := nd.Context(); r.s.LeaseRead(&ctx) {

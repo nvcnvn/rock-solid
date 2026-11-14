@@ -3,6 +3,8 @@ package chunkstore
 import (
 	"bytes"
 	"maps"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"testing"
 
@@ -578,6 +580,12 @@ func TestRecoveryAllocatesNothing(t *testing.T) {
 		c.reps[0].plant.noRecovery = true
 		c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkUp) }), true)
 		c.settle()
+		if round == 3 {
+			runtime.GC()
+			runtime.GC()
+			gc := debug.SetGCPercent(-1)
+			t.Cleanup(func() { debug.SetGCPercent(gc) })
+		}
 		c.mallocs, c.counting = 0, round == 3
 		c.reps[0].plant.noRecovery = false
 		c.runFor(RetryAfter / 2)

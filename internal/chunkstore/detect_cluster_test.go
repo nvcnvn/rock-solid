@@ -2,6 +2,8 @@ package chunkstore
 
 import (
 	"fmt"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"testing"
 
@@ -285,6 +287,9 @@ func TestReportingAllocatesNothingPerWrite(t *testing.T) {
 	for i := range 200 {
 		write(i)
 	}
+	runtime.GC()
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	d.counting = true
 	for i := range 100 {
 		write(i)

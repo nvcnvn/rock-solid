@@ -6962,52 +6962,84 @@ Inbox, timers and syscalls:
 
 Each case runs in one tier (design.md, Testing strategy, Driver tests):
 
-- **Stepped**, on `looptest`'s scripted clocks with the jump scripted inside a chosen pass's `Wait`:
-  the slew, `Resumed`, VMClock-marker (each row of the table below as a scripted reading),
-  never-decreasing and timer cases.
-- **Real kernel**: read cost and allocations, the wake-up `Now`, no false `Resumed` under
-  throttling, and the timerfd's clock and `timerfd_settime` record.
+- **Stepped**, in `internal/loop/looptest/clock_test.go`, on the simulator's clock model through the
+  kernel seam, with each stop scripted between two passes: the slew, `Resumed`, VMClock-marker
+  (each row of the table below as a scripted stop), never-decreasing and timer cases.
+- **Real kernel**, in `internal/loop/clock_linux_test.go` and run in CI: read cost and allocations,
+  the wake-up `Now`, a stop inside the clock read and no false `Resumed` under throttling, the
+  timerfd's clock and `timerfd_settime` record, and the VMClock reader on a crafted device file.
 - **VM, nightly** (`spikes/vm-pause`'s QEMU and Firecracker drivers): the hypervisor rows of the
-  table with the real marker, and the `date -s` step.
+  table with the real marker, and the `date -s` step. Not run yet: the harness is not a nightly
+  ([VM pause rows nightly](build-checklist.md#phase-5-default-drivers)).
 
 Reading the clocks:
 
 - Each pass reads its clocks after its wait returns, together: `CLOCK_BOOTTIME` into `ctx.Now` and
-  `CLOCK_MONOTONIC_RAW` into `ctx.Raw`, in ticks of 1 µs (nanoseconds ÷ 1,000), with the loop's own
-  raw syscalls, between two `CLOCK_MONOTONIC` reads (Go's monotonic clock is `CLOCK_MONOTONIC`,
-  neither of the lease clocks). Benchmark on the real kernel: each raw read costs about 140 ns and
-  the clock read allocates nothing.
-- The real `Clocks` reads `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME`, `CLOCK_MONOTONIC_RAW`,
-  `CLOCK_MONOTONIC`, and reads again when the two `CLOCK_MONOTONIC` readings lie more than ε apart.
-  Real kernel: a million passes under `docker run --cpus=0.5` beside a CPU hog deliver no
-  `Resumed`. Open: ε (design.md, open questions).
-- Real kernel: a loop blocked 200 ms in `epoll_wait` and woken by a socket write hands that
-  `NetRecv` a `Now` at least 200 ms after the previous pass's.
-- Trace records carry the pass's clock reading as their tick; no record has a tick of its own.
-- `ctx.Now` and `ctx.Raw` handed to machines never decrease within a run of the loop, even when the
-  script feeds a reading below the last one. Open: what the loop does then (design.md, open
-  questions). A wall-clock step of 1 s or 2 s (`date -s`, VM nightly) moves neither.
-- A time daemon slewing `CLOCK_BOOTTIME` (tick 9000, −10%) moves `Now` against `Raw` while `Raw` keeps
-  its rate; a 1 s timer then fires after 1.111 s of `Raw`, as the clock slew spike measured, and
-  machines see both values.
+  `CLOCK_MONOTONIC_RAW` into `ctx.Raw`, in ticks of 1 µs (nanoseconds ÷ 1,000). Real kernel: a loop
+  blocked 200 ms in `epoll_wait` and woken by a socket write reads both clocks after the wait, and
+  hands that `NetRecv` a `Now` at least 200 ms after the previous pass's
+  (`TestAPassReadsBothClocksAfterItsWait`).
+- The real `Clocks` reads `CLOCK_MONOTONIC` through the vDSO, `CLOCK_BOOTTIME` and
+  `CLOCK_MONOTONIC_RAW` with raw syscalls, `CLOCK_MONOTONIC` again, and reads again while the two
+  `CLOCK_MONOTONIC` readings lie more than ε = 1 ms apart, at most 8 times, keeping the narrowest
+  read. `Epoll.Bracket` counts the reads wider than ε and the widest gap. The whole bracketed read
+  costs 365 ns and allocates nothing (`BenchmarkClocks`, arm64 Docker VM); a real pass allocates
+  nothing (`TestARealPassAllocatesNothing`).
+- Real kernel, a stop inside the clock read (`TestAStopInsideTheClockReadIsBracketedOut`): a child
+  process reads its clocks in a loop while the test stops it with `SIGSTOP` for 20 ms, 200 times. A
+  stop between the `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` reads would move
+  `CLOCK_BOOTTIME − CLOCK_MONOTONIC` by 20 ms, as a suspend does. In Docker, 172 of the 200 stops
+  landed inside a read and were retried, and no reading moved more than 243 µs; with the retry
+  planted out, a reading moved 22.7 ms and the test fails. A real stop must last the 1 s threshold
+  to deliver a false `Resumed`, so the test checks the readings, not `Resumed`.
+- No false `Resumed` under throttling (`TestNoResumedUnderThrottling`): 100,000 passes beside a
+  spinning goroutine per CPU in CI; with `RS_WANT_THROTTLE=1` under `docker run --cpus 0.5`, a
+  million passes in 14.5 s through 145 throttled periods. A throttled period stalls about 100 ms, a
+  tenth of the threshold, so this run passes with or without the bracket and does not bound ε
+  (design.md, open questions).
+- Trace records carry the pass's clock reading as their tick; no record has a tick of its own:
+  every record of a pass has the same tick (`TestSteppedResumedComesOncePerStop`).
+- `ctx.Now` and `ctx.Raw` handed to machines never decrease within a run of the loop: a reading
+  below the last one leaves them at their last value and delivers one `Resumed`, and the first
+  reading above it moves them again with no second one
+  (`TestSteppedClocksThatGoBackHoldAndDeliverResumed`). A wall-clock step of 1 s or 2 s (`date -s`,
+  VM nightly) moves neither.
+- A time daemon slewing `CLOCK_BOOTTIME` by −10% moves `Now` against `Raw` while `Raw` keeps its
+  rate; a 1 s timer then fires after 1.111 s of `Raw`, as the clock slew spike measured, and
+  machines see both values (`TestSteppedSlewMovesNowAgainstRaw`).
 
 `Resumed`:
 
 - `core.Resumed(prev, cur, threshold)` reports a suspend when `CLOCK_BOOTTIME − CLOCK_MONOTONIC`
   grew by at least the threshold between two readings, which the kernel does only when it adds sleep
-  time, and reports a marker change. The threshold lies above ε and at most 2 s. Open: its value
-  within those bounds.
-- **[property]** Over the clock model: every seeded slew of up to ±22.6% and drift of up to ±4%
-  gives no `Resumed`; every suspend whose gain reaches the threshold gives exactly one; every marker
-  change gives exactly one; a suspend the kernel rounded below the threshold gives none, in the loop
-  and in the simulator alike.
-- A 2 s suspend scripted inside a pass's `Wait` delivers one `Resumed` in that same pass, after its
-  clock read and before any other event, its `NetRecv`s and its client reads included; every timer
-  that fell due during the suspend fires in that pass, in deadline order.
+  time, and reports a marker change and a `CLOCK_BOOTTIME` or `CLOCK_MONOTONIC_RAW` reading below
+  the last (`TestResumedSeesASuspendAMarkerChangeOrAStepBack`). The loop and the simulator share
+  one threshold, `core.ResumeThreshold`, 1 s: above ε and at most 2 s, and provisional with ε. Both
+  take their first reading when the loop is made, so a stop before the first pass delivers
+  `Resumed` in that pass in each.
+- **[property]** Over the clock model, 2,000 seeds per commit (`TestSteppedResumedComesOncePerStop`):
+  slews of up to ±22.6% and raw rates up to 4% off give no `Resumed`; every suspend whose gain
+  reaches the threshold gives exactly one; every marker change gives exactly one; a suspend the
+  kernel rounded below the threshold gives none; the loop and the simulator count the same.
+- A 2.3 s suspend, which `CLOCK_BOOTTIME` counts as 2 s, delivers one `Resumed` in the first pass
+  after it, after its clock read and before any other event, its `NetRecv`s included; every timer
+  that fell due during the suspend fires in that pass, in deadline order, before the `NetRecv`s
+  (`TestSteppedPausesDeliverResumedAsTheVMPauseTableSays`, "suspend to RAM").
 - VMClock: where `/dev/vmclock0` exists the loop maps it and reads the marker each pass (0.8 ns in a
-  guest, 2.8 ns from Go natively); where it does not (bare metal, or a host whose kernel lacks the
-  driver), the marker reads 0 and the loop runs without it and reports so, never fails. Cases from
-  the VM pause spike, with the expected loop behaviour:
+  guest, 2.8 ns from Go natively, VM pause spike). The reader maps the device's first 24 bytes
+  read-only, refuses a file without its magic, and reads the marker under the device's sequence
+  count (`TestTheVMClockMarkerIsReadFromTheMappedPage`,
+  `TestAMissingOrForeignVMClockIsRefusedAndReadsZero`, on crafted files). A read that finds the
+  count odd waits for the host to finish its update; a count still odd after 65,536 reads gives a
+  marker no device holds, so the loop delivers one `Resumed` rather than hang
+  (`TestATornVMClockReadIsRetriedAndAStuckOneReadsAsChanged`). Real kernel: a change of the crafted
+  file's marker delivers one `Resumed` (`TestAVMClockMarkerChangeDeliversResumed`); where the
+  device does not exist (bare metal, or a host whose kernel lacks the driver), the marker reads 0,
+  the loop runs, and `Epoll.VMClock` reports why (`TestALoopWithoutAVMClockRuns`); a device that
+  exists but cannot be mapped, or is not a VMClock, fails `NewEpoll`
+  (`TestAVMClockThatCannotBeMappedFailsNewEpoll`). Cases
+  from the VM pause spike, with the expected loop behaviour; each runs stepped as a subtest of
+  `TestSteppedPausesDeliverResumedAsTheVMPauseTableSays`, and on real hypervisors only nightly:
 
   | Event | Marker | Expected |
   | --- | --- | --- |
@@ -7025,21 +7057,24 @@ Timers:
 
 - `SetTimer` arms the loop's timer heap, a pure function in `internal/core`; the timerfd is on
   `CLOCK_BOOTTIME`, so a timer that came due during a suspend fires after resume, and every overdue
-  timer fires in deadline order. Open: tie-break between equal deadlines.
+  timer fires in deadline order, equal deadlines by `TimerID` (`TestTimersFireInDeadlineOrderAndReplace`).
 - `SetTimer` on an armed `TimerID` replaces its deadline; there is no cancel; a `Timer` event for a
   replaced deadline may still arrive and the loop does not filter it (machines check their own
   deadline).
 - Timers fire from the heap, not from the timerfd's readiness: a pass whose `Wait` reported no
-  timerfd still fires every timer due by `Now`, and `Wait` drains the timerfd's expiration count.
+  timerfd still fires every timer due by `Now` (`TestSteppedTimersFireFromTheHeapNotTheTimerfd`),
+  and `Wait` drains the timerfd's expiration count.
 - A client read and a lease-expiry timer that become ready in the same `Wait` are handled after the
-  expiry.
-- `Arm` only when the earliest deadline changes: at most one `timerfd_settime` per pass, and none in
-  a pass whose earliest deadline did not change.
-- Real kernel: the timerfd is created on `CLOCK_BOOTTIME`, and each `timerfd_settime` record has
-  `TFD_TIMER_ABSTIME` and an `it_value` equal to the heap's minimum. `timerfd_gettime` returns only
-  the time remaining (`fs/timerfd.c`), so it is used as a bound: remaining ≤ deadline − a
-  `CLOCK_BOOTTIME` reading taken just before. A real 10 ms timer wakes a blocked loop no earlier
-  than its deadline.
+  expiry (`TestSteppedPausesDeliverResumedAsTheVMPauseTableSays`: timers before `NetRecv`s).
+- `Arm` only when the earliest deadline changes: at most one `timerfd_settime` per pass, none in a
+  pass whose earliest deadline did not change, and the timerfd always holds the heap's earliest,
+  over passes that fire timers and passes that fire none (`TestSteppedResumedComesOncePerStop`).
+- Real kernel (`TestTheTimerfdIsAnAbsoluteBoottimeTimer`): `/proc/self/fdinfo` shows the timerfd on
+  `CLOCK_BOOTTIME` with `TFD_TIMER_ABSTIME`, and the one `timerfd_settime` record has an `it_value`
+  equal to the heap's minimum. `timerfd_gettime` returns only the time remaining (`fs/timerfd.c`),
+  so it is used as a bound: remaining ≤ deadline − a `CLOCK_BOOTTIME` reading taken just before. A
+  real 10 ms timer wakes a blocked loop no earlier than its deadline, within 4 passes, and leaves the
+  timerfd drained.
 
 ## io_uring disk driver
 

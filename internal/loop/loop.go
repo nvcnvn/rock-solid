@@ -59,6 +59,7 @@ type Loop struct {
 	m       Machine
 	d       Driver
 	ctx     core.Context
+	clocks  core.Clocks
 	pass    uint64
 	ready   []Ready
 	rbuf    []byte
@@ -98,7 +99,8 @@ type frame struct {
 	free bool
 }
 
-// New makes a loop over k running m, whose connections' bytes go to d.
+// New makes a loop over k running m, whose connections' bytes go to d, and reads k's clocks: the
+// first pass delivers Resumed if the node stood still since.
 func New(cfg Config, k Kernel, m Machine, d Driver) *Loop {
 	if cfg.ReadBudget == 0 {
 		cfg.ReadBudget = 256 << 10
@@ -113,16 +115,17 @@ func New(cfg Config, k Kernel, m Machine, d Driver) *Loop {
 		cfg.QueueCap = 16 << 20
 	}
 	return &Loop{
-		cfg:   cfg,
-		k:     k,
-		m:     m,
-		d:     d,
-		ctx:   core.Context{Pool: cfg.Pool},
-		ready: make([]Ready, 0, 1024),
-		rbuf:  make([]byte, cfg.ReadBudget),
-		inbox: newInbox(cfg.InboxSize, k),
-		out:   make([]core.Action, 0, 64),
-		fire:  make([]core.TimerID, 0, 64),
+		cfg:    cfg,
+		k:      k,
+		m:      m,
+		d:      d,
+		ctx:    core.Context{Pool: cfg.Pool},
+		clocks: k.Clocks(),
+		ready:  make([]Ready, 0, 1024),
+		rbuf:   make([]byte, cfg.ReadBudget),
+		inbox:  newInbox(cfg.InboxSize, k),
+		out:    make([]core.Action, 0, 64),
+		fire:   make([]core.TimerID, 0, 64),
 	}
 }
 
@@ -215,17 +218,25 @@ func (l *Loop) Pending() Pending {
 	return p
 }
 
-// Pass is one turn of the loop: wait, read the clocks, fire the timers due, handle the inbox, then
-// peer connections before clients, write each connection once, stop or resume reading clients at
-// the queue cap and arm the timer.
+// Pass is one turn of the loop: wait, read the clocks, deliver Resumed if the node stood still
+// since the last pass, fire the timers due, handle the inbox, then peer connections before
+// clients, write each connection once, stop or resume reading clients at the queue cap and arm
+// the timer. Now and Raw never go back: a reading below the last one leaves them where they were,
+// and delivers Resumed.
 func (l *Loop) Pass() {
 	block := l.cfg.PlantBlock || !l.Pending().Work
 	l.ready = l.k.Wait(l.ready[:0], block)
 	c := l.k.Clocks()
-	l.ctx.Now, l.ctx.Raw = c.Boot, c.Raw
+	resumed := core.Resumed(l.clocks, c, core.ResumeThreshold)
+	l.clocks = c
+	l.ctx.Now, l.ctx.Raw = max(l.ctx.Now, c.Boot), max(l.ctx.Raw, c.Raw)
 	l.pass++
 	l.hot = 0
 	l.syscall(trace.SysEpollWait, uint64(len(l.ready)), 0, 0)
+	if resumed {
+		l.ev = core.Event{Kind: core.EvResumed}
+		l.Deliver(&l.ev)
+	}
 	l.fire = l.fire[:0]
 	for {
 		id, ok := l.timers.PopDue(l.ctx.Now)

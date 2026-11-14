@@ -2,6 +2,8 @@ package chunkstore
 
 import (
 	"bytes"
+	"runtime"
+	"runtime/debug"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -134,6 +136,9 @@ func TestReplicatedWritesAllocateNothing(t *testing.T) {
 	for i := range 200 {
 		write(i)
 	}
+	runtime.GC()
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 	c.counting = true
 	for i := range 100 {
 		write(i)

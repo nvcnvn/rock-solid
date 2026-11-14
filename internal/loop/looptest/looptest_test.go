@@ -308,22 +308,27 @@ func TestASteppedPassAllocatesNothing(t *testing.T) {
 // the test may close and set to -1.
 func clientAndPeer(t *testing.T, queueCap int, m loop.Machine, d func(*Wire) loop.Driver) (*loop.Loop, *trace.Ring, []int) {
 	t.Helper()
+	s := sim.New(1, sim.Settings{PoolBytes: 1 << 20, ClockNum: 1, ClockDen: 20})
+	k := NewKernel(s, s.AddNode(sim.DefaultClock, nil, func(*sim.Node) {}).ID())
+	return clientAndPeerOver(t, k, k, queueCap, m, d)
+}
+
+// clientAndPeerOver is clientAndPeer on k's node, the loop reaching k through seam.
+func clientAndPeerOver(t *testing.T, k *Kernel, seam loop.Kernel, queueCap int, m loop.Machine, d func(*Wire) loop.Driver) (*loop.Loop, *trace.Ring, []int) {
+	t.Helper()
 	if m == nil {
 		m = &gossip{}
 	}
-	s := sim.New(1, sim.Settings{PoolBytes: 1 << 20, ClockNum: 1, ClockDen: 20})
-	node := s.AddNode(sim.DefaultClock, nil, func(*sim.Node) {})
 	ring, err := trace.NewRing(make([]byte, 1<<10*trace.RecordSize))
 	if err != nil {
 		t.Fatal(err)
 	}
-	k := NewKernel(s, node.ID())
 	w := &Wire{}
 	var drv loop.Driver = w
 	if d != nil {
 		drv = d(w)
 	}
-	l := loop.New(loop.Config{Node: node.ID(), Pool: sim.NewPool(1<<20, 0), ReadBudget: budget, QueueCap: queueCap, Trace: ring}, k, m, drv)
+	l := loop.New(loop.Config{Node: k.node, Pool: sim.NewPool(1<<20, 0), ReadBudget: budget, QueueCap: queueCap, Trace: ring}, seam, m, drv)
 	w.L = l
 	k.Attach(l)
 	ends := []int{-1, -1}

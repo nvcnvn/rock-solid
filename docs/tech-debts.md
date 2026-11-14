@@ -114,3 +114,8 @@
 - **Where:** `FuzzDecodeRecord` in `internal/disklog/fuzz_test.go` and `FuzzDecodeMessage` in `internal/chunkstore/wire_test.go`, run by hand as `go test -fuzz … -fuzzminimizetime 1x`
 - **Why:** Go's fuzzer minimizes each new interesting input byte by byte, for up to 60 s by default, before it fuzzes on, and these fuzzers' inputs are whole log records of several 4 KiB blocks, or 256-byte frames: a 30 s run at the default made 1,952 and 268,447 executions, against 5.3 and 3.2 million with minimization capped. A record's data blocks carry checksums, so the short zero-padded head `FuzzDecodeBlockMap` fuzzes cannot stand for one.
 - **Remove when:** the fuzzers take inputs short enough to minimize quickly, or a Go release minimizes large inputs without stalling the run; a 30 s run at the default then makes about as many executions as one with `-fuzzminimizetime 1x`.
+
+## Workaround: `runtime.nanotime` linked by name
+- **Where:** `nanotime` in `internal/loop/epoll_linux.go`, the `CLOCK_MONOTONIC` reads that bracket each pass's clock read
+- **Why:** the bracket reads `CLOCK_MONOTONIC` twice per pass and should cost no syscall; `x/sys/unix.ClockGettime` is a syscall, and `time.Since`, the runtime's suggested replacement, is banned in the loop by `tools/sansio` ([Runtime in Go](design.md#runtime-in-go)). `runtime.nanotime` is not an API, but `runtime/time_nofake.go` promises to keep it linkable with its signature (go.dev/issue/67401).
+- **Remove when:** Go or `x/sys/unix` offers a vDSO `CLOCK_MONOTONIC` read; read it there. If a toolchain refuses the link first, read it with a raw syscall instead, at a syscall's cost per read (about 140 ns in the VM pause spike's guests).

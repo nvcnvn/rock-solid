@@ -10,9 +10,6 @@ import (
 // Unit is the rate of a clock that keeps real time, in parts per billion.
 const Unit = 1_000_000_000
 
-// Threshold is the gain of CLOCK_BOOTTIME over CLOCK_MONOTONIC that the simulator counts as a suspend.
-const Threshold core.Tick = 1_000_000
-
 const second core.Tick = 1_000_000
 
 // Stop is how a node's clocks behave while it stands still.
