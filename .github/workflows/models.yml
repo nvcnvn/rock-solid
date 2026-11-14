@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       models: ${{ steps.list.outputs.models }}
+      configs: ${{ steps.list.outputs.configs }}
       deep: ${{ steps.list.outputs.deep }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,15 +33,18 @@ jobs:
         working-directory: models
         run: |
           echo "models=$(ls | jq -Rnc '[inputs]')" >>"$GITHUB_OUTPUT"
+          echo "configs=$(ls -- */ci*.cfg */neg-*.cfg | jq -Rnc '[inputs]')" >>"$GITHUB_OUTPUT"
           echo "deep=$(ls -- */deep*.cfg | jq -Rnc '[inputs]')" >>"$GITHUB_OUTPUT"
 
+  # One job per configuration: the runner checks about 3 times slower than the M4 Pro the 300 s
+  # budget is set on, and the configurations run serially take hours.
   ci:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     needs: plan
     strategy:
       fail-fast: false
       matrix:
-        model: ${{ fromJSON(needs.plan.outputs.models) }}
+        config: ${{ fromJSON(needs.plan.outputs.configs) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,9 +52,10 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - run: scripts/models.sh ci "$MODEL"
+      - run: scripts/models.sh ci "$CONFIG"
         env:
-          MODEL: ${{ matrix.model }}
+          CONFIG: ${{ matrix.config }}
+          CI_LIMIT: 1000
 
   sim:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -71,8 +76,8 @@ jobs:
           MODEL: ${{ matrix.model }}
           SIM_SECONDS: 3600
 
-  # One job per deep configuration, since one may take 4 hours and a job at most 6. A pass is a
-  # cache entry keyed on the spec, the configuration and the TLC pin, holding the result line.
+  # One job per deep configuration, since one may take 5.5 hours here and a job at most 6. A pass is
+  # a cache entry keyed on the spec, the configuration and the TLC pin, holding the result line.
   deep:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: plan
@@ -83,6 +88,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CONFIG: ${{ matrix.config }}
+      DEEP_LIMIT: 19800
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: hash

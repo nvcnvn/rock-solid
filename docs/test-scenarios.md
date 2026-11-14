@@ -3189,13 +3189,19 @@ are a pattern derived from (chunk, version, block), so any extent can be checked
 
   | Run | What it checks | Command | Budget |
   | --- | --- | --- | --- |
-  | `ci` | Exhaustive: safety properties, and liveness with a time bound written as an invariant over the model's clocks | `scripts/models.sh ci`, with the negative variants, each of which stops at its first counterexample | Under 5 minutes with 4 workers; past 300 s the run fails |
-  | `deep` | Exhaustive, with one more node, chunk, crash or term, plus the unbounded liveness properties | `scripts/models.sh deep`, recorded at each milestone; nightly CI runs it once per change to its spec, configuration or TLC version, and no item waits for it | 4 hours, after which the run fails |
-  | Simulation | `-simulate`, depth 100, a fresh seed printed for replay | `scripts/models.sh sim`, splitting `SIM_SECONDS` (3,600 by default) per model evenly among its `ci` configurations | About 1 hour per model, nightly |
+  | `ci` | Exhaustive: safety properties, and liveness with a time bound written as an invariant over the model's clocks | `scripts/models.sh ci`, with the negative variants, each of which stops at its first counterexample | Under 5 minutes with 4 workers on the M4 Pro; past `CI_LIMIT` (300 s by default, 1,000 s in CI) the run fails |
+  | `deep` | Exhaustive, with one more node, chunk, crash or term, plus the unbounded liveness properties | `scripts/models.sh deep`, recorded at each milestone; nightly CI runs it once per change to its spec, configuration or TLC version, and no item waits for it | 2 hours 15 minutes on the M4 Pro; past `DEEP_LIMIT` (8,100 s by default, 19,800 s in CI) the run fails |
+  | `heavy` | As `deep`, for a configuration past `deep`'s budget | `scripts/models.sh heavy` on the M4 Pro at milestones; never in CI | 12 hours, after which the run fails |
+  | Simulation | `-simulate`, depth 100, a fresh seed printed for replay | `scripts/models.sh sim`, splitting `SIM_SECONDS` (3,600 by default) per model evenly among its `ci` configurations but those under `FairSpec` | About 1 hour per model, nightly |
 
 - An argument `model/config.cfg` runs that one configuration, in a mode it belongs to.
 - A `ci` run that passes its budget fails, and the fix is to move its largest constant to `deep`,
-  not to raise the budget.
+  not to raise the budget; a `deep` configuration past its budget becomes `heavy`.
+- A negative variant cut at its budget is reported as over its budget, not as one that did not
+  violate its property.
+- Simulation leaves out the `FairSpec` configurations: TLC 1.7.4's `-simulate` reports their
+  liveness properties violated wherever a trace ends at a state with no step enabled, even one at
+  which they hold ([tech debts](tech-debts.md)). Their exhaustive `ci` runs check those properties.
 - A spec checked in with no `ci` or no `deep` configuration fails.
 
 ## Epoch change model
@@ -3214,7 +3220,7 @@ on 4 workers, so `ci`'s 5 minutes cover about 2.4 million.
 `ci` runs are the configurations below, each small enough for 5 minutes. Any membership change at any time does not fit `ci`'s 5 minutes, so each `ci` configuration checks a set of *plans*: a plan is a short
 sequence of membership changes taken from the faults below, with the client writes and the faults
 whose rules it tests, and TLC checks every interleaving of nodes, messages, writes, renewals, folds of
-activation reports and faults around it. `deep-peering` adds a free plan: any two changes at any
+activation reports and faults around it. `heavy-peering` adds a free plan: any two changes at any
 time, with one partial write and no fault, since with a restart it passed 20 million states at 4
 nodes without finishing.
 
@@ -3250,13 +3256,13 @@ nodes without finishing.
 | `ci-faults` | 3 | As `ci-peering`, with a sixth table and a second fault; the plans that fail a version at a member or on the primary's own log, alone, with the primary moved, with a member or the primary marked down, and with one in `maintenance` and back; a member's failure with a process restart; a primary moved away and back; the plans that format a disk around peering and around recovery; and the one that raises `min_live` past an interval that ran below it |
 | `ci-asks` | 3 | As `ci-peering`, with the failure plans that hold no restart or format, under fairness, for the properties that every interval a failure ended is asked past and every client is answered |
 | `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the six below |
-| `deep-peering` | 4 | `ci-peering`'s, `ci-restarts`' and `ci-restarts-moved`'s plans and the free plan, and the unbounded liveness property |
+| `heavy-peering` | 4 | `ci-peering`'s, `ci-restarts`' and `ci-restarts-moved`'s plans and the free plan, and the unbounded liveness property |
 | `deep-leases` | 4 | `ci-leases`'s plans and the six it leaves out: four pair a partition with a pause, a suspend or a reboot, and two stop the holder in place while its grantor pauses or restarts |
 | `deep-slow` | 3 | The delayed-message plan alone, with `ci-leases`'s constants and time to 5 s |
 
-`deep` is three configurations because whether nodes have clocks is a constant of the spec, and the
-delayed-message plan, over 3 million states at 3 nodes, passed 108 million at 4 nodes with the
-other lease plans without finishing in 4 hours, so it runs alone at 3. The plans that pair a
+`heavy-peering` runs apart from the lease plans because whether nodes have clocks is a constant of
+the spec; at 8,923 s it is past `deep`'s budget. The delayed-message plan, over 3 million states at
+3 nodes, passed 108 million at 4 nodes with the other lease plans without finishing in 4 hours, so `deep-slow` runs it alone at 3. The plans that pair a
 partition with a pause, a suspend or a reboot are 1.6 to 7.6 million states each at 3 nodes, and the
 two that stop the holder in place while its grantor pauses or restarts 5.4 and 1.2 million, so they
 run in `deep-leases`; the variants that need one run on it alone.
@@ -3295,7 +3301,7 @@ run in `deep-leases`; the variants that need one run on it alone.
   persisted missing lists, versions of that interval or later kept unless a reached member live in
   their interval neither holds nor lists them, every version a kept one rests on kept. A pass shows
   that the newest whole version suffices for the keep rule at the model's bounds: 3 nodes in
-  `ci`, 4 in `deep-peering`, and a counter limit of 2. The logs hold whole versions: no version is
+  `ci`, 4 in `heavy-peering`, and a counter limit of 2. The logs hold whole versions: no version is
   held in part in the model. `ci-tears` lets a decision list such a member all the same, by `ListOf`,
   which shows extra listing is safe, and not that it is needed; that a torn member must be listed rests
   on the Go plant `unlistTorn`, at seed 148 of the primary-change run.
@@ -3448,9 +3454,9 @@ own log, which the store reports as held whole up to the failure, so that only t
 on that log fails.
 
 **Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12, 15 and 16.
-`ci-peering`, `ci-restarts`, `ci-restarts-moved`, `ci-edits`, `ci-tears`, `ci-faults` and `deep-peering` check every property but 2 and 10, since
+`ci-peering`, `ci-restarts`, `ci-restarts-moved`, `ci-edits`, `ci-tears`, `ci-faults` and `heavy-peering` check every property but 2 and 10, since
 the Raft group and lease time need clocks, 13, since their plans make no move, and 15 and 16, which
-only `ci-asks` checks; `deep-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
+only `ci-asks` checks; `heavy-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
 and 16 and the action property 17, on its small plans.
 `ci-moves`, `ci-stays`, `ci-stays-stale`, `ci-stays-new`, `ci-stays-gone`, `ci-image` and the `ci-refills` configurations check the same, property 13, an action property checked at each removal, which a `Stay` is not, and property 18, that no acknowledged write is stranded on a disk that is no member; `ci-sources`, `ci-sources-move`, `ci-sources-lister` and `ci-late-ask` check 18 and 19 among a few. The plans of the peering configurations replace up members, which stands for an operator's edit, so they leave 18 out. The first three
 send only the daemon's one write W, which keeps each within its 5 minutes: the replica's move
@@ -3489,7 +3495,7 @@ clocks; the rest run with `ci-peering`'s, on `ci-restarts`' plans where the trac
 or a format, on `ci-edits`' for an edit, on `ci-moves`' where it needs a move and on `ci-faults`', with its sixth table, where
 it needs a failed version, a format around peering or recovery, a change of `min_live` or a primary
 moved away and back. A variant checks only the property it must break; the one for property 12 does so
-under fairness, as `deep-peering` does, on the restart plan alone, and those for 15 and 16 on
+under fairness, as `heavy-peering` does, on the restart plan alone, and those for 15 and 16 on
 `ci-asks`' plans, as it does.
 
 | Rule removed or broken | Property broken | Minimal trace |
@@ -3902,8 +3908,8 @@ Snapshots taken while a purge runs (punches carrying the snapshot epoch) are lef
   that registers it; once that invariant exists, the row quotes its registered name. A property with
   none is listed as such and fails review unless the map says why.
 
-**Configuration results.** Each `ci` run as `scripts/models.sh ci` printed it, and each `deep` run as
-`scripts/models.sh deep` printed it, with 4 workers and a 4 GB heap on a Mac mini (M4 Pro). The
+**Configuration results.** Each `ci` run as `scripts/models.sh ci` printed it, and each `deep` and
+`heavy` run as `scripts/models.sh deep` printed it, with 4 workers and a 4 GB heap on a Mac mini (M4 Pro). The
 epoch change model's runs and the sessions model's `ci` runs ran alone; the rest ran beside two
 other 4-worker TLC jobs. Constants are in each configuration's first line and in its model's
 section.
@@ -3960,7 +3966,7 @@ section.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
-| Epoch change | `deep-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
+| Epoch change | `heavy-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,577 s |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |
 | Epoch change | `deep-refills-down` | [Epoch change model](#epoch-change-model) | 34 | 3,823,511 | 362 s |
@@ -4300,26 +4306,31 @@ a lead that is asking or has left the interval, which `Order`'s guards refuse fi
 
 The runs of [TLA+ and TLC](#tla-and-tlc), scheduled by the `models` workflow in
 `.github/workflows/models.yml` on GitHub's hosted runners ([Continuous integration](design.md#testing-strategy)). A first
-job lists the models and `deep` configurations, and every other job runs once per item of that list
-(a matrix), each on its own runner.
+job lists the models, their `ci` and negative configurations and their `deep` configurations, and
+every other job runs once per item of one of those lists (a matrix), each on its own runner. The
+runner checks a `ci` configuration 2.7 to 3.2 times slower than the M4 Pro the budgets are measured
+on, and a `deep` one 2.0 to 2.4 times slower, so the workflow sets its own limits.
 
 - On every push or pull request that changes `models/`, `scripts/models.sh`, which holds the TLC
-  pin, or the workflow, and on no other change, one job per model runs `scripts/models.sh ci` on
-  it.
-- A rule removed from a spec, with no negative configuration changed, fails that model's job: some
-  `ci` configuration or negative variant fails and its trace is printed.
-- A configuration past 300 s on the runner fails the job. `ci-restarts` holds three plans and
-  `ci-restarts-moved` the fourth, since together they passed the budget on the M4 Pro.
+  pin, or the workflow, and on no other change, one job per `ci` or negative configuration runs
+  `scripts/models.sh ci` on it with `CI_LIMIT` 1,000. The configurations run side by side: run one
+  after another, they take hours.
+- A rule removed from a spec, with no negative configuration changed, fails some configuration's
+  job: a `ci` configuration or a negative variant fails and its trace is printed.
+- A configuration past 1,000 s on the runner fails its job. `ci-restarts` holds three plans and
+  `ci-restarts-moved` the fourth, since together they passed the 300 s budget on the M4 Pro.
 - Nightly, and when started by hand, one job per model runs `scripts/models.sh sim` with
-  `SIM_SECONDS` 3,600, split evenly among the model's `ci` configurations, and prints every seed; a
-  failing seed's printed replay reproduces its trace.
+  `SIM_SECONDS` 3,600, split evenly among the model's `ci` configurations but those under
+  `FairSpec`, and prints every seed; a failing seed's printed replay reproduces its trace.
 - Nightly, and when started by hand, one job per `deep` configuration hashes the model's spec, the
   configuration and the TLC version and checksum lines of `scripts/models.sh`. If the job cache
   holds a pass under that hash, the job prints the pass's result line and stops; otherwise it runs
-  `scripts/models.sh deep` on the configuration and, if it passes, stores its result line in the
-  cache under the hash and in the run's summary, from which it goes into the
-  [Model-to-simulator map](#model-to-simulator-map)'s results table. A TLC bump therefore reruns
-  every `deep` configuration, and a spec change every one of its model's.
+  `scripts/models.sh deep` on the configuration with `DEEP_LIMIT` 19,800, 5.5 of the job's 6
+  hours, and, if it passes, stores its result line in the cache under the hash and in the run's
+  summary, from which it goes into the [Model-to-simulator map](#model-to-simulator-map)'s results
+  table. A TLC bump therefore reruns every `deep` configuration, and a spec change every one of its
+  model's. A failed run stores nothing and runs again the next night.
+- No job runs a `heavy` configuration.
 - GitHub evicts a cache entry unused for 7 days. Each nightly run reads every pass, so a pass is
   lost only when the nightly runs stop for a week, and its configuration then runs again.
 

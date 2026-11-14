@@ -1,15 +1,18 @@
 #!/bin/bash
 # Checks the TLA+ models under models/ with TLC 1.7.4. Each models/<name>/ holds the spec <name>.tla
-# and its configurations: ci*.cfg and deep*.cfg must pass, neg-*.cfg must fail, and a negative
+# and its configurations: ci*.cfg, deep*.cfg and heavy*.cfg must pass, neg-*.cfg must fail, and a negative
 # configuration's first line, "\* expect: <name>", names the invariant or property it must violate;
 # TLC does not name a liveness property it finds violated, so a negative that expects one checks it
 # alone.
-#   scripts/models.sh [ci|deep|sim] [model | model/config.cfg ...]
-# ci (the default) runs the ci and negative configurations, each failing past 5 minutes; deep runs
-# the deep ones, each failing past 4 hours; sim runs TLC's random simulation of each model's ci
+#   scripts/models.sh [ci|deep|heavy|sim] [model | model/config.cfg ...]
+# ci (the default) runs the ci and negative configurations, each failing past CI_LIMIT seconds
+# (default 300); deep runs the deep ones, each failing past DEEP_LIMIT (default 8100); heavy runs
+# the heavy ones, each failing past 12 hours; sim runs TLC's random simulation of each model's ci
 # configurations at depth 100, splitting SIM_SECONDS (default 3600) per model evenly among them,
-# each with a fresh seed, printed for replay. A model/config.cfg argument runs that configuration
-# alone. TLC uses WORKERS (default 4) workers and a heap of HEAP (default 4g).
+# each with a fresh seed, printed for replay. sim skips FairSpec configurations: TLC 1.7.4's
+# -simulate reports a liveness violation wherever a trace reaches a terminal state. A
+# model/config.cfg argument runs that configuration alone. TLC uses WORKERS (default 4) workers and
+# a heap of HEAP (default 4g).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -26,10 +29,11 @@ fi
 mode=${1:-ci}
 shift || true
 case $mode in
-ci) limit=300 ;;
-deep) limit=14400 ;;
+ci) limit=${CI_LIMIT:-300} ;;
+deep) limit=${DEEP_LIMIT:-8100} ;;
+heavy) limit=43200 ;;
 sim) ;;
-*) echo "usage: $0 [ci|deep|sim] [model | model/config.cfg ...]" >&2; exit 2 ;;
+*) echo "usage: $0 [ci|deep|heavy|sim] [model | model/config.cfg ...]" >&2; exit 2 ;;
 esac
 models=${*:-$(ls models)}
 tmp=$(mktemp -d)
@@ -73,8 +77,8 @@ for arg in $models; do
 		fi
 	done
 	case $mode in
-	ci | deep) cfgs=$(cd "models/$model" && ls "$mode"*.cfg 2>/dev/null || true) ;;
-	sim) cfgs=$(cd "models/$model" && ls ci*.cfg 2>/dev/null || true) ;;
+	ci | deep | heavy) cfgs=$(cd "models/$model" && ls "$mode"*.cfg 2>/dev/null || true) ;;
+	sim) cfgs=$(cd "models/$model" && grep -L '^SPECIFICATION FairSpec' ci*.cfg 2>/dev/null || true) ;;
 	esac
 	negs=$(cd "models/$model" && ls neg-*.cfg 2>/dev/null || true)
 	if [ "$arg" != "$model" ]; then
@@ -100,8 +104,11 @@ for arg in $models; do
 			echo "ok   $model/$cfg: $(summary)"
 			continue
 		elif [ $status = 142 ]; then
-			fix="move its largest constant to deep"
-			[ "$mode" = deep ] && fix="shrink it"
+			case $mode in
+			ci) fix="move its largest constant to deep" ;;
+			deep) fix="move it to heavy" ;;
+			heavy) fix="shrink it" ;;
+			esac
 			echo "FAIL $model/$cfg: over its ${limit}s budget; $fix"
 		else
 			echo "FAIL $model/$cfg: $(summary)"
@@ -122,6 +129,10 @@ for arg in $models; do
 			{ grep -q "Temporal properties were violated" "$tmp/out" &&
 				[ "$(checked "models/$model/$cfg")" = "$want" ]; }; then
 			echo "ok   $model/$cfg: violates $want, ${secs}s"
+		elif [ $status = 142 ]; then
+			echo "FAIL $model/$cfg: over its ${limit}s budget before violating $want"
+			cat "$tmp/out"
+			failed=1
 		else
 			echo "FAIL $model/$cfg: did not violate $want"
 			cat "$tmp/out"

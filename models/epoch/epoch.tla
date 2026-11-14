@@ -2483,7 +2483,7 @@ AllLeasePlans == LeasePlans \cup RebootPlans \cup PausePlans \cup StopPlans
                  \cup {HandoverSuspendCut, HandoverRebootFast, HandoverStopPause}
 SlowPlans == {HandoverSlow}
 
-\* deep-peering: every peering plan, and any two changes at any time with one
+\* heavy-peering: every peering plan, and any two changes at any time with one
 \* partial write to chunk 1 and no fault: with a restart, which the plans
 \* check, the free plan passed 20 million states without finishing. Node 4
 \* starts outside both PGs, a spare a change can move a member to.
