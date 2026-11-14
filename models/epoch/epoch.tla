@@ -907,10 +907,12 @@ PeerOn(n, p, J, P, T) ==
         \* A version above K the primary mapped stays in its image, and a chunk it
         \* listed may miss a kept block or hold a dropped one below its newest,
         \* unless it lists it only for what its image from before settled away.
+        \* A primary in T holds part of a version above its log's newest only
+        \* after a crash, whose replay leaves that part gated for the decision to
+        \* drop, so T does not bar its image.
         img == {c \in ChunksOf(p) :
                   /\ \/ miss[own][c] = NoMiss
                      \/ ~Bug("ForgetImage") /\ [c |-> c, v |-> K[c]] \in Image(n, p)
-                  /\ [d |-> own, c |-> c] \notin T
                   /\ \/ Newest(Held(own, c) \ gone[c]) = K[c]
                      \/ Bug("MergeOnDropped") /\ K[c] \in dlog[own][c] \cup {0}}
         \* Unfound: nothing kept has no up member to recover from.
