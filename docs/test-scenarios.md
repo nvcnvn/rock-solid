@@ -4226,8 +4226,8 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | `scripted-move-primary` | 39 | passes: a move to a new primary that holds Y, peering keeping Y, which every up member holds, over the removed disk | 2 |
 | `scripted-lister-restarted` | 56 | passes: a restart during recovery, the restarted primary's replay gating Y until its next decision | 2 |
 | `scripted-lister-rotated` | 51 | passes: a rotation during recovery, the new primary holding Y logged and peering keeping it over the member that lists the chunk | 2 |
-| 39 seeds | 273 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 2 to 211 |
-| `primaries-2` | 517 | no verdict in 400 s and 2 GB: one crash leaves 26 `mayfail` lines, each a free choice, and `-dfid` reached level 307 of 519 in 280 s at 319,000 states | 400 |
+| 39 seeds | 302 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 2 to 235 |
+| `primaries-2` | 658 | no verdict in 400 s and 2 GB: one crash leaves 26 `mayfail` lines, each a free choice, and TLC had found 2.2 million states at 360 s | 400 |
 
 39 seeds of 40 pass, all but 34. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
@@ -4261,38 +4261,38 @@ a stutter open to it: it shows only what that behavior did. TLC's own `-coverage
 over every branch of the search, abandoned ones and `ENABLED` too, so on seed 55 `Remove`'s first guard
 shows 8 against the 2 removals the trace took.
 
-Over the 39 passing seeds of 0 to 39 and the 12 scripted traces, which alone take `Refill`, `Lost`, `Drop`, `Stay` and `RestartAsk` as a real step on these seeds, `RestartAsk` in `scripted-move-restarted`; on its 29 other lines the spec already holds the ask:
+Over the 39 passing seeds of 0 to 39 and the 14 scripted traces, which alone take `Refill`, `Lost`, `Drop`, `Stay` and `RestartAsk` as a real step on these seeds, `RestartAsk` in `scripted-move-restarted`; on its 49 other lines the spec already holds the ask:
 
 | Action | Line | Took it | Stuttered | Traces |
 | --- | --- | --- | --- | --- |
-| `Deliver` | `logged` | 4,432 | 3,423 | 51 |
-| `Deliver` | `maydeliver` | 353 | 353 | 33 |
-| `Send` | `send` | 3,767 | 0 | 51 |
-| `Order` | `order` | 3,335 | 0 | 51 |
-| `Adopt` | `adopt` | 2,862 | 215 | 50 |
-| `Peer` | `peer` | 467 | 0 | 50 |
-| `Activate` | `activate` | 463 | 0 | 50 |
-| `Fold` | `fold` | 461 | 0 | 49 |
-| `OwnFail` | `mayfail` | 211 | 3 | 17 |
-| `Recover` | `recovered` | 193 | 76 | 44 |
-| `Recover` | `mayrecover` | 2 | 1 | 2 |
-| `MarkDisk` | `plan` | 90 | 0 | 35 |
-| `Edit` | `plan` | 83 | 0 | 38 |
-| `Add` | `plan` | 66 | 0 | 26 |
-| `ReportRecovered` | `reported` | 62 | 273 | 25 |
-| `Remove` | `plan` | 60 | 0 | 25 |
-| `Restart` | `restart` | 60 | 0 | 34 |
-| `GoneRefuses` | `gone` | 54 | 0 | 10 |
-| `Replace` | `plan` | 44 | 0 | 14 |
-| `Rotate` | `plan` | 39 | 0 | 39 |
-| `Renew` | `renew` | 30 | 0 | 19 |
-| `Format` | `format` | 14 | 0 | 14 |
-| `AskNext` | `ask` | 10 | 0 | 10 |
-| `Refill` | `plan` | 3 | 0 | 3 |
+| `Deliver` | `logged` | 4,243 | 3,285 | 53 |
+| `Send` | `send` | 3,772 | 0 | 53 |
+| `Order` | `order` | 3,234 | 0 | 53 |
+| `Adopt` | `adopt` | 3,071 | 237 | 52 |
+| `Peer` | `peer` | 494 | 0 | 52 |
+| `Activate` | `activate` | 488 | 0 | 52 |
+| `Fold` | `fold` | 486 | 0 | 51 |
+| `Deliver` | `maydeliver` | 355 | 350 | 35 |
+| `OwnFail` | `mayfail` | 188 | 10 | 17 |
+| `Recover` | `recovered` | 186 | 77 | 44 |
+| `GoneRefuses` | `gone` | 131 | 0 | 11 |
+| `MarkDisk` | `plan` | 109 | 0 | 39 |
+| `Edit` | `plan` | 88 | 0 | 39 |
+| `Restart` | `restart` | 77 | 0 | 34 |
+| `Add` | `plan` | 67 | 0 | 27 |
+| `ReportRecovered` | `reported` | 63 | 276 | 26 |
+| `Remove` | `plan` | 61 | 0 | 25 |
+| `Replace` | `plan` | 49 | 0 | 16 |
+| `Renew` | `renew` | 49 | 0 | 19 |
+| `Rotate` | `plan` | 41 | 0 | 41 |
+| `Format` | `format` | 16 | 0 | 16 |
+| `AskNext` | `ask` | 11 | 0 | 11 |
+| `Refill` | `plan` | 4 | 0 | 4 |
 | `Lost` | `lost` | 2 | 0 | 2 |
 | `Stay` | `plan` | 1 | 0 | 1 |
+| `RestartAsk` | `restartask` | 1 | 49 | 1 |
 | `Drop` | `plan` | 1 | 0 | 1 |
-| `RestartAsk` | `restartask` | 1 | 29 | 1 |
+| `Recover` | `mayrecover` | 0 | 2 | 0 |
 
 `table`, `committed`, `persisted` and `recoverorder` lines check a state and take no action, as their
 mapping says. The actions of `Next` no trace took:
