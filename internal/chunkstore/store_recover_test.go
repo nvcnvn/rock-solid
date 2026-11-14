@@ -115,9 +115,6 @@ func TestARecoveryReadIsTheChunksLiveImage(t *testing.T) {
 // restart. Replay holds the writes of interval 4 gated, as the member's next decision settles them.
 func TestARecoveryWriteReplacesAMembersChunk(t *testing.T) {
 	h := newRecoveryHarness(t)
-	// The store model maps every durable record at a recovery; replay holds the interval's writes back.
-	h.inv.Off(invAcked)
-	h.inv.Off(invReads)
 	c2 := core.ChunkID{Volume: 1, Inode: 7, Index: 9}
 	kept := MakeVersion(3, 1)
 	for _, c := range []core.ChunkID{chunkC, c2} {

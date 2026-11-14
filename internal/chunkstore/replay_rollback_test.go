@@ -221,9 +221,6 @@ func TestThePrimarysEntryForItsDroppedWriteCarriesTheImageFlag(t *testing.T) {
 func TestReplayGatedVersionsKeepTheirSegmentsAndTheReplayPoint(t *testing.T) {
 	h := newHarness(t, cleanConfig())
 	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
-	// The store model maps every durable record at a recovery; replay holds these back.
-	h.inv.Off(invAcked)
-	h.inv.Off(invReads)
 	whole, torn := chunk(2), chunk(3)
 	h.persist(0, 1, 2, nil)
 	h.gated(whole, 0, fill(4*core.BlockSize, 0x7e), 2)

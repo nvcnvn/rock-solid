@@ -24,32 +24,42 @@ type frozenBlocks struct {
 // storeModel is the crash oracle's plain model of a disk's chunks: each chunk's entry and each
 // written block's bytes, live and as each cut's snapshot reads them, applying records' entries in
 // LSN order. A freeze at cut e keeps the chunk as it then stands for the snapshot of e, and of
-// every earlier cut no earlier freeze kept, whatever version it names.
+// every earlier cut no earlier freeze kept, whatever version it names. A write or punch of an
+// interval at or past its PG's newest decision is held, durable and not visible, until the next
+// decision marker of the PG maps or drops it.
 type storeModel struct {
 	chunks map[core.ChunkID]Chunk
 	live   map[blockKey][]byte
 	frozen map[core.ChunkID][]frozenBlocks
 	// unmarked is the missing-list entries no decision marker of theirs has followed yet.
 	unmarked []disklog.Entry
+	decided  map[pgKey]uint32
+	held     []heldEntry
+}
+
+type pgKey struct {
+	pool       core.PoolID
+	owner, pgs uint32
+}
+
+type heldEntry struct {
+	entry   disklog.Entry
+	payload []byte
 }
 
 func newStoreModel() *storeModel {
-	return &storeModel{chunks: map[core.ChunkID]Chunk{}, live: map[blockKey][]byte{}, frozen: map[core.ChunkID][]frozenBlocks{}}
+	return &storeModel{chunks: map[core.ChunkID]Chunk{}, live: map[blockKey][]byte{}, frozen: map[core.ChunkID][]frozenBlocks{}, decided: map[pgKey]uint32{}}
 }
 
 func (m *storeModel) Apply(r writtenRecord) {
 	for i, e := range r.entries {
 		switch e.Kind {
-		case disklog.EntryWrite, disklog.EntrySlot:
-			m.version(e)
-			for k := range e.Count {
-				m.live[blockKey{e.Chunk, e.First + k}] = r.payloads[i][int(k)*core.BlockSize:][:core.BlockSize]
+		case disklog.EntryWrite, disklog.EntrySlot, disklog.EntryPunch:
+			if d := m.decidedFor(e.Pool, e.Chunk); d != 0 && intervalOf(e.Version) >= d {
+				m.held = append(m.held, heldEntry{entry: e, payload: r.payloads[i]})
+				continue
 			}
-		case disklog.EntryPunch:
-			m.version(e)
-			for k := range e.Count {
-				delete(m.live, blockKey{e.Chunk, e.First + k})
-			}
+			m.mapEntry(e, r.payloads[i])
 		case disklog.EntryFreeze:
 			ch, ok := m.chunks[e.Chunk]
 			if !ok {
@@ -76,7 +86,16 @@ func (m *storeModel) Apply(r writtenRecord) {
 				m.chunks[u.Chunk] = ch
 				return true
 			})
+			k := pgKey{e.Pool, e.Owner, uint32(e.Length)}
+			m.decided[k] = max(m.decided[k], e.Interval)
+			m.settleHeld(e)
 		case disklog.EntryRecovered:
+			for j := len(m.held) - 1; j >= 0; j-- {
+				if h := &m.held[j].entry; h.Chunk == e.Chunk && h.Version == e.Version {
+					h.Last = true
+					break
+				}
+			}
 			ch := m.chunks[e.Chunk]
 			ch.Version, ch.Whole = e.Version, e.Version
 			if ch.ListedIn <= e.Interval {
@@ -84,6 +103,69 @@ func (m *storeModel) Apply(r writtenRecord) {
 			}
 			m.chunks[e.Chunk] = ch
 		}
+	}
+}
+
+func (m *storeModel) mapEntry(e disklog.Entry, payload []byte) {
+	m.version(e)
+	for k := range e.Count {
+		if e.Kind == disklog.EntryPunch {
+			delete(m.live, blockKey{e.Chunk, e.First + k})
+		} else {
+			m.live[blockKey{e.Chunk, e.First + k}] = payload[int(k)*core.BlockSize:][:core.BlockSize]
+		}
+	}
+}
+
+// decidedFor is the newest decision interval of a PG holding chunk c, at any PG count.
+func (m *storeModel) decidedFor(pool core.PoolID, c core.ChunkID) uint32 {
+	var d uint32
+	for k, iv := range m.decided {
+		if k.pool == pool && core.PGIndexOf(c.Hash(), k.pgs) == k.owner {
+			d = max(d, iv)
+		}
+	}
+	return d
+}
+
+// settleHeld settles each chunk of decision d's PG that holds versions back by the version d's
+// list keeps if it lists the chunk, else its newest held: the held versions up to the newest held
+// one of that version's interval at or below it are mapped, the rest dropped.
+func (m *storeModel) settleHeld(d disklog.Entry) {
+	for {
+		j := slices.IndexFunc(m.held, func(h heldEntry) bool {
+			return h.entry.Pool == d.Pool && core.PGIndexOf(h.entry.Chunk.Hash(), uint32(d.Length)) == d.Owner
+		})
+		if j < 0 {
+			return
+		}
+		c := m.held[j].entry.Chunk
+		same := func(h heldEntry) bool { return h.entry.Pool == d.Pool && h.entry.Chunk == c }
+		vers := make([]uint64, 0, len(m.held))
+		for _, h := range m.held {
+			if same(h) {
+				vers = append(vers, h.entry.Version)
+			}
+		}
+		keep := slices.Max(vers)
+		if ch := m.chunks[c]; ch.ListedIn == d.Interval {
+			keep = ch.Listed
+		}
+		top := uint64(0)
+		for _, v := range vers {
+			if v <= keep && intervalOf(v) == intervalOf(keep) {
+				top = max(top, v)
+			}
+		}
+		m.held = slices.DeleteFunc(m.held, func(h heldEntry) bool {
+			if !same(h) {
+				return false
+			}
+			if h.entry.Version <= top {
+				m.mapEntry(h.entry, h.payload)
+			}
+			return true
+		})
 	}
 }
 
@@ -107,7 +189,8 @@ func (m *storeModel) isFrozen(c core.ChunkID, v uint64) bool {
 }
 
 func (m *storeModel) Clone() *storeModel {
-	c := &storeModel{chunks: maps.Clone(m.chunks), live: maps.Clone(m.live), frozen: map[core.ChunkID][]frozenBlocks{}, unmarked: slices.Clone(m.unmarked)}
+	c := &storeModel{chunks: maps.Clone(m.chunks), live: maps.Clone(m.live), frozen: map[core.ChunkID][]frozenBlocks{}, unmarked: slices.Clone(m.unmarked),
+		decided: maps.Clone(m.decided), held: slices.Clone(m.held)}
 	for k, fs := range m.frozen {
 		c.frozen[k] = append([]frozenBlocks(nil), fs...)
 	}

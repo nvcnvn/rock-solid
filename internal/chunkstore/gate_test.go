@@ -135,6 +135,10 @@ func (h *harness) settleChunk(c core.ChunkID, keep uint64) {
 	if _, err := h.s.Settle(&h.ctx, c, keep, &h.out); err != nil {
 		h.t.Fatal(err)
 	}
+	h.changed = true
+	if h.bytes != nil {
+		h.bytes.settle(c, keep)
+	}
 	h.take()
 	h.settle()
 }

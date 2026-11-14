@@ -866,9 +866,11 @@ func (h *harness) ackChange(ch change, version uint64) {
 
 // byteOracle is each chunk's bytes as the acknowledged writes and punches, applied in version
 // order, left them: live, and for each snapshot epoch as the last change before its cut left
-// them. Blocks are kept whole and never changed in place, so a snapshot shares them.
+// them. Blocks are kept whole and never changed in place, so a snapshot shares them. held is the
+// versions a recovery's replay held back, for the decision that settles them.
 type byteOracle struct {
 	chunks map[core.ChunkID]*oracleChunk
+	held   []heldEntry
 }
 
 type oracleChunk struct {
@@ -950,6 +952,7 @@ func (ch *oracleChunk) at(epoch uint64) map[uint16][]byte {
 // acknowledged change and those in flight that the recovery kept.
 func (o *byteOracle) rebase(m *storeModel) {
 	clear(o.chunks)
+	o.held = slices.Clone(m.held)
 	for c, e := range m.chunks {
 		ch := o.chunk(c)
 		ch.version, ch.epoch = e.Version, e.Epoch
@@ -974,6 +977,31 @@ func (o *byteOracle) rebase(m *storeModel) {
 			}
 		}
 	}
+}
+
+// settle applies the held versions of chunk c that a decision keeping version keep maps, as the
+// crash oracle's model settles them at a marker, and forgets the rest.
+func (o *byteOracle) settle(c core.ChunkID, keep uint64) {
+	top := uint64(0)
+	for _, h := range o.held {
+		if v := h.entry.Version; h.entry.Chunk == c && v <= keep && intervalOf(v) == intervalOf(keep) {
+			top = max(top, v)
+		}
+	}
+	o.held = slices.DeleteFunc(o.held, func(h heldEntry) bool {
+		e := &h.entry
+		if e.Chunk != c {
+			return false
+		}
+		if e.Version <= top {
+			ch := change{c: c, off: uint32(e.First) * core.BlockSize, n: uint32(e.Count) * core.BlockSize}
+			if e.Kind != disklog.EntryPunch {
+				ch.data = h.payload
+			}
+			o.chunk(c).apply(ch, e.Version)
+		}
+		return true
+	})
 }
 
 // A bug planted in the store breaks the invariant it violates, which the registry names.
