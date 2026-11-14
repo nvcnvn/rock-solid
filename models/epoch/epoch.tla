@@ -777,7 +777,8 @@ TheDec(n, p, k) == CHOOSE x \in dec : x.p = p /\ x.k = k /\ x.n = n /\ x.r = run
 
 \* The image n's process holds as p's primary, from its last decision of p
 \* while every interval since kept its disk primary, as [c, v] pairs: the
-\* chunks whose image was the version v it kept. A restart forgets it. A later
+\* chunks whose image was the version v it kept. A restart or a lost lead
+\* forgets it. A later
 \* peering that keeps v finds that image still, though the primary lists the
 \* chunk for versions of its own the decision dropped.
 Image(n, p) ==
@@ -2041,11 +2042,11 @@ RemovalKeepsCopies ==
 \* claimed: a holder that truly dies leaves none. Nor is a read that succeeds:
 \* a refused version peering keeps can sit above the acknowledged ones, and
 \* with its one holder dead the chunk stays unfound though a member holds them
-\* all. One limit: a primary restart forgets the image, and if the member that
-\* held the kept version clean then goes, a removed disk can hold it while no
-\* member can serve it. A ci plan faults once, so none reaches a restart and a
-\* format together. Until replay leaves a chunk's newest versions gated until
-\* peering settles them, that stays open.
+\* all. One limit: a primary restart, or its disk marked down and up again,
+\* forgets the image, and if the member that held the kept version clean then
+\* goes, a disk can hold it while no member can serve it. A ci plan faults
+\* once and has no bounce, so none reaches it. Until replay and demotion leave
+\* a chunk's newest versions gated until peering settles them, that stays open.
 CanServe(d, c) ==
     LET want == Content(c, UNION {Chain(c, v) : v \in AckedV(c)})
         got == Content(c, dlog[d][c])
