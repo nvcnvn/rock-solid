@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -127,8 +128,8 @@ func TestABouncedPrimaryKeepsTheImageOfItsDroppedWrite(t *testing.T) {
 	r.loseMemberAndRead(t)
 }
 
-// The primary persists the decision that drops Y, and the other member's acknowledgement of its own list never comes, so
-// the lead does not activate before the next peering.
+// The primary persists the decision that drops Y, which drops it there and then, and the other member's acknowledgement
+// of its own list never comes, so the lead does not activate before the next peering.
 func TestADecisionPersistedAndNotActivatedKeepsItsDrops(t *testing.T) {
 	r := newRollbackRun(t, 1)
 	_, e := r.c.table.entry(pg0)
@@ -144,6 +145,9 @@ func TestADecisionPersistedAndNotActivatedKeepsItsDrops(t *testing.T) {
 	r.c.s.Partition(r.node(r.p), r.node(r.m), true)
 	if i := r.c.reps[r.c.node(r.p)].lead(pg0); i < 0 || r.c.reps[r.c.node(r.p)].leads[i].active {
 		t.Fatal("the shape needs the lead not yet active")
+	}
+	if slices.Contains(r.c.reps[r.c.node(r.p)].Store().Unsettled(nil), r.ch) {
+		t.Fatal("the persisted decision left Y gated")
 	}
 	r.loseMemberAndRead(t)
 }

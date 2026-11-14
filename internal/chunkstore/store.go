@@ -1187,6 +1187,11 @@ func (s *Store) Commit(ctx *core.Context, c core.ChunkID, id uint64, out *Output
 
 // Settle is peering's decision on chunk c's gated writes and punches not mapped yet, given as the version keep it kept: those on keep's chain, at keep or below it in keep's interval, and every one before such a one, are mapped in version order, and the others dropped, never mapped, even if committed, the chunk's version and snapshot epoch given back to what the first dropped one found. One ordered in an earlier interval than keep's with none of keep's interval after it is dropped even if keep is above it by number, since an interval this disk missed may have dropped it and built keep on an older version. It returns the newest version it keeps, 0 for none. Dropped records stay in the log until recovery supersedes their blocks, and the caller numbers the chunk's next versions from a later interval, since members may have logged the dropped ones. It returns ErrUnresolved, settling nothing, while a write or punch of the chunk waits to be ordered or has records neither durable nor failed.
 func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Output) (uint64, error) {
+	return s.settle(ctx, c, keep, true, out)
+}
+
+// settle is Settle, which with commit false only drops, leaving the versions it keeps gated.
+func (s *Store) settle(ctx *core.Context, c core.ChunkID, keep uint64, commit bool, out *Output) (uint64, error) {
 	ci, ok := s.chunkOf[c]
 	if !ok {
 		return 0, nil
@@ -1211,7 +1216,7 @@ func (s *Store) Settle(ctx *core.Context, c core.ChunkID, keep uint64, out *Outp
 		case subset && o.version < top:
 			o.dropped, subset = true, false
 		case o.version <= top:
-			o.committed = true
+			o.committed = o.committed || commit
 		default:
 			o.dropped = true
 			cs.version, cs.epoch = min(cs.version, o.prevVer), min(cs.epoch, o.prevEpoch)
@@ -1249,7 +1254,9 @@ func (s *Store) Unsettled(dst []core.ChunkID) []core.ChunkID {
 // each chunk's kept version, with the image flag on the entries image holds, and after it the PG's decision marker, and answers id once all are
 // durable, as the index takes them together: replay after a crash takes a list only with its
 // marker, so a disk persists a decision whole or not at all. A PG count that is not a power of two,
-// a PG or interval that does not exist or a chunk outside the PG is refused with ErrRange.
+// a PG or interval that does not exist or a chunk outside the PG is refused with ErrRange. Once
+// the list is durable, each listed chunk's gated versions that its kept version does not keep are
+// dropped, as replay drops them at the marker; those it keeps wait for Settle.
 func (s *Store) Persist(ctx *core.Context, id uint64, pg, pgs, interval uint32, missing, image []ChunkVersion, out *Output) {
 	err := s.unavailable()
 	if err == nil && (core.CheckPGCount(pgs) != nil || pg >= pgs || interval == 0 ||
@@ -1276,7 +1283,7 @@ func (s *Store) Persist(ctx *core.Context, id uint64, pg, pgs, interval uint32, 
 		t, err := s.log.Submit(ctx, disklog.Hot, disklog.Item{Entry: s.ops[oi].items[j].entry}, &s.lout)
 		if err != nil {
 			s.ops[oi].items[j].state = itemFailed
-			s.persisted(oi, err, out)
+			s.persisted(ctx, oi, err, out)
 			continue
 		}
 		s.ops[oi].items[j].ticket = t
@@ -1287,7 +1294,7 @@ func (s *Store) Persist(ctx *core.Context, id uint64, pg, pgs, interval uint32, 
 
 // persisted counts an item of persist oi resolved, with err if it failed; once all are, a persist
 // whose items are all durable hands the index its list and marker, and its caller is answered.
-func (s *Store) persisted(oi int32, err error, out *Output) {
+func (s *Store) persisted(ctx *core.Context, oi int32, err error, out *Output) {
 	o := &s.ops[oi]
 	if o.err == nil {
 		o.err = err
@@ -1306,6 +1313,12 @@ func (s *Store) persisted(oi int32, err error, out *Output) {
 		}
 		if s.plant.clearListed {
 			s.clearListed(o.items[len(o.items)-1].entry)
+		}
+		for j := range o.items[:len(o.items)-1] {
+			e := &o.items[j].entry
+			// No chunk is unresolved here: PeerState answered only once the PG's were, and nothing of
+			// the PG is ordered again before activation.
+			_, _ = s.settle(ctx, e.Chunk, e.Version, false, out)
 		}
 	}
 	out.Replies = append(out.Replies, Reply{ID: o.req.ID, Err: o.err})
@@ -1796,7 +1809,7 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 				}
 				if s.ops[si.op].kind == opPersist {
 					s.ops[si.op].items[si.item].state = itemFailed
-					s.persisted(si.op, err, out)
+					s.persisted(ctx, si.op, err, out)
 					continue
 				}
 				if s.itemFailed(ctx, si.op, si.item, err, out) {
@@ -1909,7 +1922,7 @@ func (s *Store) durable(ctx *core.Context, ev *disklog.Event, out *Output) {
 		it := &s.ops[si.op].items[si.item]
 		it.entry, it.state, it.lba, it.headerBlocks, it.payload, it.lsn = ev.Entries[i], itemDurable, ev.LBA, ev.HeaderBlocks, ev.Payloads[i], ev.LSN
 		if s.ops[si.op].kind == opPersist {
-			s.persisted(si.op, nil, out)
+			s.persisted(ctx, si.op, nil, out)
 			continue
 		}
 		if s.ops[si.op].req.Gated {
