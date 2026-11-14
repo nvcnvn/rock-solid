@@ -122,15 +122,48 @@ func (h *harness) expectIndex(name string) {
 	h.indexBefore, h.indexFor = dumpIndex(h.s.Index()), name
 }
 
-// recoveredIndex compares the index a recovery finished with the one expectIndex kept.
+// recoveredIndex compares the index a recovery finished with the one expectIndex kept. It leaves out the chunks either
+// index lists and those replay left gated, with the counts of the records their extents name: replay holds back every
+// version of an interval at or past its PG's newest decision, so it may drop or gate what the store had mapped.
 func (h *harness) recoveredIndex() {
 	if h.indexBefore == nil {
 		return
 	}
-	if got := dumpIndex(h.s.Index()); !slices.Equal(got, h.indexBefore) {
-		h.violate(h.indexFor, fmt.Errorf("the index holds %d entries, %s", len(got), indexDiff(got, h.indexBefore)))
+	got := dumpIndex(h.s.Index())
+	both := slices.Concat(h.indexBefore, got)
+	skip := map[core.ChunkID]bool{}
+	for _, c := range h.s.Unsettled(nil) {
+		skip[c] = true
+	}
+	for _, kv := range both {
+		if c, ok := chunkOfKey(kv[0]); ok && len(kv[0]) == chunkKeySize && decodeChunk([]byte(kv[1])).ListedIn != 0 {
+			skip[c] = true
+		}
+	}
+	out := map[string]bool{}
+	for _, kv := range both {
+		if c, ok := chunkOfKey(kv[0]); ok && skip[c] {
+			out[kv[0]] = true
+			if e, ok := decodeExtent([]byte(kv[0]), []byte(kv[1])); ok {
+				out[string(binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint32(nil, uint32(RecordPool)), uint64(e.Header)))] = true
+			}
+		}
+	}
+	left := func(d [][2]string) [][2]string {
+		return slices.DeleteFunc(slices.Clone(d), func(kv [2]string) bool { return out[kv[0]] })
+	}
+	if got, want := left(got), left(h.indexBefore); !slices.Equal(got, want) {
+		h.violate(h.indexFor, fmt.Errorf("the index holds %d entries, %s", len(got), indexDiff(got, want)))
 	}
 	h.indexBefore = nil
+}
+
+// chunkOfKey is the chunk an index key belongs to, if any.
+func chunkOfKey(k string) (core.ChunkID, bool) {
+	if len(k) < chunkKeySize || reserved(core.PoolID(binary.BigEndian.Uint32([]byte(k)))) {
+		return core.ChunkID{}, false
+	}
+	return core.ChunkIDFromBytes([core.ChunkIDSize]byte([]byte(k)[12:chunkKeySize])), true
 }
 
 // violate keeps err, unless nil, as the first violation of invariant name an event found.

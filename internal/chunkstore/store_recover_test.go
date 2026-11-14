@@ -112,10 +112,12 @@ func TestARecoveryReadIsTheChunksLiveImage(t *testing.T) {
 // version above: one that only kept versions preceded in the interval brings the member back down
 // to the kept version past the dropped ones. It holds that version whole, and alone removes the
 // chunk's missing-list entry: a later peering's entry stays, and so does every entry across a
-// restart.
+// restart. Replay holds the writes of interval 4 gated, as the member's next decision settles them.
 func TestARecoveryWriteReplacesAMembersChunk(t *testing.T) {
-	t.Skip("fails until Replay rollback steps 5 and 8: replay gates the member's writes of interval 4 until its next decision commits them, and the restart-equality check must leave them out")
 	h := newRecoveryHarness(t)
+	// The store model maps every durable record at a recovery; replay holds the interval's writes back.
+	h.inv.Off(invAcked)
+	h.inv.Off(invReads)
 	c2 := core.ChunkID{Volume: 1, Inode: 7, Index: 9}
 	kept := MakeVersion(3, 1)
 	for _, c := range []core.ChunkID{chunkC, c2} {
@@ -132,6 +134,10 @@ func TestARecoveryWriteReplacesAMembersChunk(t *testing.T) {
 	h.sync(h.recoverWrite(Request{Chunk: chunkC, HasVer: true, Ver: MakeVersion(4, 1), Interval: 4, Buf: recoveryBuf(h, img, 3)}))
 	h.sync(h.recoverWrite(Request{Chunk: c2, HasVer: true, Ver: kept, Interval: 4, Buf: recoveryBuf(h, map[uint16]byte{0: 1, 1: 1, 2: 1, 3: 1})}))
 	restart(h)
+	h.sync(h.persist(0, 1, 5, nil))
+	for _, c := range h.s.Unsettled(nil) {
+		h.settleChunk(c, h.s.Newest(c))
+	}
 	for c, v := range map[core.ChunkID]uint64{chunkC: MakeVersion(4, 1), c2: kept} {
 		if ch, _ := h.s.Index().Chunk(testPool, c); ch.ListedIn != 0 || ch.Version != v || ch.Whole != v {
 			t.Fatalf("after recovery %v holds %+v", c, ch)
