@@ -91,7 +91,7 @@ func (r *ctlRun) fail(id uint32) {
 }
 
 func (r *ctlRun) load(i int) *Control {
-	ctl, err := NewControl(r.c.n[i].s.State())
+	ctl, err := NewControl(r.c.n[i].s.State(), r.c.n[i].s.Raft().Term())
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestANewLeaderAndASnapshotReadBackTheWholeState(t *testing.T) {
 	if err := snap.Restore(st.Applied(), st.SnapshotData(st.Applied())); err != nil {
 		t.Fatal(err)
 	}
-	c, err := NewControl(snap)
+	c, err := NewControl(snap, r.c.n[r.l].s.Raft().Term())
 	if err != nil {
 		t.Fatal(err)
 	}

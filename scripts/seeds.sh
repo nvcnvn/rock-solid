@@ -48,6 +48,7 @@ internal/loop/looptest TestSteppedLoopsReplayFromTheirSeed 200
 internal/meta TestTheDiskRecordKeepsItsIdentitiesAcrossFailovers 2000
 internal/loop/looptest TestSteppedResumedComesOncePerStop 2000
 internal/meta TestNoSessionIsFencedWhileItsClientsLeaseRuns 2000
+internal/meta TestNoGrantedFlushIsRefusedForSpace 1000
 "
 
 cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)

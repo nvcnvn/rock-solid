@@ -33,7 +33,8 @@ type sessClient struct {
 	arrived           core.Tick
 }
 
-// startSessions starts n sessions, of daemons on nodes 0 to 4 in turn, and commits them.
+// startSessions starts n sessions, of daemons on nodes 0 to 4 in turn, commits them, and steps
+// again, so the leader has stepped past the commit and answers heartbeats.
 func (r *ctlRun) startSessions(n int) []*sessClient {
 	r.t.Helper()
 	for i := range n {
@@ -46,6 +47,7 @@ func (r *ctlRun) startSessions(n int) []*sessClient {
 	if len(cs) != n {
 		r.t.Fatalf("started %d sessions of %d", len(cs), n)
 	}
+	r.sessStep()
 	return cs
 }
 

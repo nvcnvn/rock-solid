@@ -104,6 +104,19 @@ type Control struct {
 	leased    bool
 	tableTurn bool
 	plant     sessionPlants
+	// Space grants: this leader lease, each session's grants, the sessions heard from or started under it,
+	// each pool's room, each disk's fill, when this leader first stepped, and a scratch report.
+	issuer     Issuer
+	grants     []grantEntry
+	heard      []uint64
+	pgrants    []poolGrants
+	fills      []diskFill
+	grantsFrom struct {
+		set bool
+		at  core.Tick
+	}
+	rep    chunkstore.Report
+	gplant grantPlants
 }
 
 // commit is the Txn in flight: the state it gives and how much of the staged reports it took.
@@ -118,9 +131,10 @@ type commit struct {
 	started          []SessionStart
 }
 
-// NewControl reads the control plane's state from st, the control-plane group's applied state.
-func NewControl(st *State) (*Control, error) {
-	c := &Control{round: 1, resend: true}
+// NewControl reads the control plane's state from st, the control-plane group's applied state, for
+// its leader in term.
+func NewControl(st *State, term uint64) (*Control, error) {
+	c := &Control{round: 1, resend: true, issuer: Issuer{Term: term}}
 	if err := c.load(st); err != nil {
 		return nil, err
 	}
@@ -282,6 +296,11 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	c.det.View(&c.table, pin)
 	n.table, _ = chunkstore.Next(&c.table, &chunkstore.Inputs{Now: in.Now, Pools: pin, Asks: c.asks, Activations: c.acts, Recovered: c.rcv, Edits: in.Edits, Moves: in.Moves})
 	p.delta = chunkstore.MakeDelta(&c.table, &n.table)
+	var moved []core.PoolID
+	for _, de := range p.delta.Entries {
+		moved = append(moved, de.PG.Pool)
+	}
+	c.grantStep(in.Now, in.Leased, ds, moved)
 	p.table = len(p.delta.Entries) > 0 || !slices.Equal(poolHeads(&c.table, nil), poolHeads(&n.table, nil))
 	if !p.table {
 		n.table, n.crc = c.table, c.crc
@@ -462,6 +481,9 @@ func (c *Control) Answer(st *State, a *Answer, out *ControlOutput) error {
 		out.Push, out.Delta = true, p.delta
 	}
 	c.starts = c.starts[len(p.started):]
+	for _, s := range p.started {
+		c.hear(s.ID)
+	}
 	out.Started, out.SessionPush = append(out.Started, p.started...), p.fenced
 	if !c.resend {
 		out.Plans = append(out.Plans, p.plans...)

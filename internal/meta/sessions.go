@@ -46,20 +46,26 @@ const (
 
 // SessionBeat is a client daemon's session heartbeat: its session, this heartbeat's request ID,
 // above every earlier send of the session's, and its CLOCK_MONOTONIC_RAW when it sent this heartbeat;
-// with the request ID of the last answer it got and that answer's arrival on the same clock.
+// with the request ID of the last answer it got and that answer's arrival on the same clock, the
+// issuer of the grants it holds, and what it says of each pool.
 type SessionBeat struct {
 	Session, Request uint64
 	Sent             core.Tick
 	Answered         uint64
 	Arrived          core.Tick
+	Issuer           Issuer
+	Pools            []PoolBeat
 }
 
 // SessionAnswer is the leader's answer to the heartbeat Request: its CLOCK_MONOTONIC_RAW when it
-// processed it, and its status.
+// processed it, its status, the leader lease that answered, and a grant for each pool the
+// heartbeat named.
 type SessionAnswer struct {
 	Request uint64
 	Raw     core.Tick
 	Status  SessionStatus
+	Issuer  Issuer
+	Grants  []PoolGrant
 }
 
 // SessionEntry is a session as the table commits it: its node, its newest incarnation, and the
@@ -105,17 +111,21 @@ func (c *Control) StartSession(node uint32, request uint64) {
 	c.starts = append(c.starts, SessionStart{Node: node, Request: request})
 }
 
-// Renew answers a session heartbeat at t into a, unless this leader does not hold its leader lease,
-// and renews a live session not being evicted. It measures the leader's raw rate over the client's
+// Renew answers a session heartbeat at t into a, unless this leader does not hold its leader lease
+// or has not yet stepped under it, and renews a live session not being evicted, granting it space
+// in each pool it names. Before that step the leader knows no pool's room, and an answer granting 0
+// would replace the grant whose window the daemon's next heartbeat must count. It measures the leader's raw rate over the client's
 // from the heartbeat and the answer it names, when that is this leader's first answer to the highest
 // request of the session: a later answer to the same request would measure the rate too low.
 func (c *Control) Renew(t lease.Time, leased bool, b *SessionBeat, a *SessionAnswer) bool {
 	c.sessClock(t, leased)
-	if !leased {
+	if !leased || !c.grantsFrom.set {
 		return false
 	}
-	*a = SessionAnswer{Request: b.Request, Raw: t.Raw, Status: SessionFenced}
+	*a = SessionAnswer{Request: b.Request, Raw: t.Raw, Status: SessionFenced, Issuer: c.issuer, Grants: a.Grants[:0]}
 	if !c.live(b.Session) {
+		_, inTable := slices.BinarySearchFunc(c.sess.Sessions, b.Session, cmpSession)
+		c.grant(t.Boot, b, inTable, false, a)
 		return true
 	}
 	tm := c.timer(b.Session, t)
@@ -130,6 +140,7 @@ func (c *Control) Renew(t lease.Time, leased bool, b *SessionBeat, a *SessionAns
 	if !tm.evict {
 		tm.at, tm.wait, a.Status = t, wait, SessionRenewed
 	}
+	c.grant(t.Boot, b, true, !tm.evict, a)
 	return true
 }
 
@@ -176,11 +187,15 @@ func (c *Control) timer(id uint64, t lease.Time) *sessTimer {
 
 // sessClock restarts every count at t after a stall, and at the start of a leader lease: a new
 // leader's first, since renewals lived only in the old leader's memory, or one regained, since no
-// session could renew in between.
+// session could renew in between. Grants start over at a lease lost or regained, under a new issuer.
 func (c *Control) sessClock(t lease.Time, leased bool) {
 	c.stall(t)
+	if leased != c.leased {
+		c.resetGrants()
+	}
 	if leased && !c.leased {
 		c.restart(t)
+		c.issuer.Start = max(t.Raw, c.issuer.Start+1)
 	}
 	c.leased = leased
 }

@@ -6578,15 +6578,15 @@ each every time, the first with C dying at once and the second after it measured
 
 ## Space grants
 
-Grants are computed on each heartbeat, per node and pool ([Client design](design.md#client-design)). The inputs:
+Grants are computed on each heartbeat, per node and pool ([Client design](design.md#client-design)), in blocks. The inputs:
 
 - A: the pool's available figure before grants;
-- F: the bytes nodes reported flushed, from their cumulative counts, since the fills the leader holds were reported;
-- askᵢ: min(`writeback_buffer`, what node i holds buffered + what it flushed since its last heartbeat);
+- F: the bytes nodes reported flushed, from their cumulative counts, until the leader holds a fill of every member disk received at least 1 s after the heartbeat that reported them;
+- askᵢ: min(`writeback_buffer`, what node i holds buffered + one second of its writes);
 - bufferedᵢ, heldᵢ: what node i holds buffered, and the grant its heartbeat says it holds;
-- Σ: the sum over nodes of max(heldᵢ, grantᵢ) until a heartbeat echoes grantᵢ, then grantᵢ;
+- Σ: the sum over nodes of max(heldᵢ, grantᵢ) until a heartbeat echoes grantᵢ, then the larger of grantᵢ and bufferedᵢ;
 - k = 2: the reuse budget, in grants, between answered heartbeats;
-- g_d: for each disk d of the pool, its size less its log reserve less the larger of its fill and `write_limit`.
+- g_d: for each up disk d holding a member of the pool, its size less its log reserve less the larger of its fill and `write_limit`.
 
 The rules:
 
@@ -6595,44 +6595,50 @@ The rules:
 - (1 + k) × Σ + F ≤ g_d for every disk d;
 - a binding cap is divided by water-filling: grantᵢ = min(askᵢ, max(bufferedᵢ, L)), L the level that fills it, and a node above L buffers nothing new until its buffered bytes fall below L.
 
+The leader's side is in `internal/meta/grants_test.go`. The daemon's side (its asks, reuse budget, early heartbeats, writing through and handoff memfd) comes with phase 6's file frontend; rows marked *daemon* are its cases, and the seeded run models that daemon.
+
 | Case | Inputs | Expected |
 | --- | --- | --- |
-| G1: room everywhere | 4 nodes ask 256 MiB each; A = 2.679 TB (C2); disks at 50% fill | Each node granted 256 MiB; Σ = 1 GiB |
-| G2: a node asks for more than its buffer | One node holds 300 MiB buffered and flushed 1 GiB since its last heartbeat | Asks and is granted at most 256 MiB |
-| G2b: an idle node | A node with nothing buffered and nothing flushed | Asks 0, and its grant returns to the pool within a heartbeat |
-| G3: half-available cap | A = 1 GiB; 4 nodes ask 256 MiB each, nothing buffered | 128 MiB each; Σ = 512 MiB |
-| G3b: unequal asks | Cap 512 MiB; asks 256, 256, 64 and 16 MiB | 216, 216, 64 and 16 MiB; the same when the first node holds 200 MiB buffered |
-| G3c: a floor above the level | As G3b, the first node holding 250 MiB buffered | 250, 182, 64 and 16 MiB; the first node buffers nothing new until its buffered bytes fall below the level |
-| G3d: floors above the cap | Cap 512 MiB; asks 256 each; buffered 200, 200, 200 and 0 MiB | Grants 200, 200, 200 and 0: every grant is its floor, nothing new is buffered, and the excess drains as the nodes flush |
-| G4: gap cap on a large disk | A 100 GB disk at 90% fill: gap 9.87 GB after its 8-segment reserve (16 MiB segments); 10 nodes ask 256 MiB | Σ ≤ 9.87 ÷ 3 = 3.29 GB, so 2.68 GB of full grants fit |
-| G5: gap cap on a small, fast disk | A 32 GB NVMe disk at 90%: gap 3.17 GB (4 MiB segments); 10 nodes ask 256 MiB | Σ ≤ 1.06 GB, about 101 MiB each by water-filling; no disk write rate enters |
-| G6: no gap | g_d ≤ F | Σ = 0, and every daemon writes through |
-| G7: available 0 | A = 0 | Σ = 0 |
-| G8: flushes not yet in reported fills | A = 1 GiB; 100 MiB flushed and not yet reported | Σ ≤ 462 MiB until the next fill report. After it, the fills include the flush, A reflects it, and F is 0 again |
-| G8b: a lost heartbeat request, then a fill report | A node's heartbeat with cumulative count c + 100 MiB is lost; the next carries c + 150 MiB | F counts all 150 MiB from the second heartbeat until a fill report covers it; nothing is lost with the first |
-| G9: leader failover | 10 live sessions, 2 pools | The new leader counts each session at (1 + k) × 256 MiB per pool until it renews, and grants new ones only out of what is left; meanwhile a daemon past its budget writes through |
-| G10: a node stops renewing | Its grant g was carried by a renewal at t | (1 + k) × g counts until its fence version is acknowledged, `session_lease` plus one fence round after t, then drops out of Σ |
-| G11: heartbeat replies lost | One reply lost | Nothing changes: the daemon's early heartbeat at half its budget gets the next reply. With that reply lost too, it writes through once it has used k grants, until a reply comes. No flush is ever refused for space |
-| G11b: a shrink whose reply is lost | 3 nodes shrunk from 256 to 50 MiB, the replies lost | The leader counts each at (1 + k) × 256 MiB until a heartbeat echoes 50 MiB; counting 50 at once would let them land 2.42 GB while it counted 0.47 GB |
-| G12: grants reused | A node's 256 MiB flush completes | The daemon reuses its grant at once; once it has flushed 256 MiB of its 512 MiB budget it sends its heartbeat early, and the reply resets the window |
-| G12b: a streaming node with no faults | A node writing at 25 GbE under a 256 MiB grant | It stays buffered throughout, sending about 11 extra heartbeats per second |
-| G12c: a floor grant on a full disk | L = 0; a node holding 200 MiB buffered streams at 1.1 GB/s | Its grant stays at what it has buffered and it buffers nothing new: new writes go through, and its buffered bytes only drain |
-| G12d: a daemon crash in the middle of a window | The successor reads the cumulative count from the handoff memfd | It continues the count. A successor that cannot read it buffers nothing until its first heartbeat is answered, and the leader counts the old (1 + k) × grant until fill reports after that heartbeat arrive |
-| G13: a disk past `write_limit` | A disk at 92% after a refill moved members onto it | g_d is measured from its fill: 8% of the disk less its reserve |
+| G1: room everywhere | 4 nodes ask 256 MiB each; a 1 TB disk at 50% fill | Each node granted 256 MiB; Σ = 1 GiB (`TestGrantsMeetEveryAskWithRoom`) |
+| G2: a node asks for more than its buffer | One node holds 300 MiB buffered and wrote 1 GiB in the last second | Asks and is granted at most 256 MiB (same test) |
+| G2b: an idle node | A node with nothing buffered and nothing written | Asks 0, and its grant returns to the pool once a heartbeat echoes it (same test) |
+| G3: half-available cap | A = 1 GiB; 4 nodes ask 256 MiB each, nothing buffered | 128 MiB each; Σ = 512 MiB (`TestGrantsAreWaterFilledUnderHalfOfAvailable`) |
+| G3b: unequal asks | Cap 512 MiB; asks 256, 256, 64 and 16 MiB | 216, 216, 64 and 16 MiB; the same when the first node holds 200 MiB buffered (same test) |
+| G3c: a floor above the level | As G3b, the first node holding 250 MiB buffered | 250, 182, 64 and 16 MiB (same test) |
+| G3d: floors above the cap | 4 nodes hold 256 MiB grants at A = 2 GiB; the fill rises to A = 1 GiB, cap 512 MiB; asks 256 each, buffered 200, 200, 200 and 0 MiB | Grants 112, 112, 112 and 0: no reply carries more than the room the others leave under the cap, and the leader counts the three at the 200 MiB they hold buffered (same test; seed 102 of the tight run, `TestAReplyNeverGrantsPastTheCap`, where a reply carrying the floor let the daemons land past g_d); *daemon:* a node granted less than it holds buffered buffers nothing new, and the excess drains as the nodes flush |
+| G4: gap cap on a large disk | A 100 GB disk at 80% fill under a 90% `write_limit`: A = 10 GB, gap 9.87 GB after its 8-segment reserve (16 MiB segments); 10 nodes ask 256 MiB | The cap is g_d ÷ 3 = 3.29 GB, below A ÷ 2 = 5 GB, so all 2.68 GB of full grants fit (`TestTheGapCapsGrants`) |
+| G5: gap cap on a small, fast disk | A 32 GB NVMe disk at 80% under a 90% `write_limit`: A = 3.2 GB, gap 3.17 GB (4 MiB segments); 10 nodes ask 256 MiB | Σ ≤ g_d ÷ 3 = 1.06 GB, below A ÷ 2, about 101 MiB each by water-filling; no disk write rate enters (same test) |
+| G6: no gap | g_d ≤ F | Σ grows by nothing; a node holding 200 MiB buffered is granted 0 and counted at 200 MiB (`TestNoRoomGrantsOnlyWhatIsBuffered`) |
+| G7: available 0 | A pool placed at 50% whose disk then fills to its 90% `write_limit` | A = 0 and the pool is `Full`: Σ = 0 (same test) |
+| G8: flushes not yet in reported fills | A = 1 GiB; 100 MiB flushed and reported | Σ ≤ 462 MiB until a fill received at least 1 s after that report; one received sooner does not cover it. After it, F is 0 again (`TestFlushesCountUntilAFillCoversThem`) |
+| G8b: a lost heartbeat request, then a fill report | A node's heartbeat with cumulative count c + 100 MiB is lost; the next carries c + 150 MiB | F counts all 150 MiB from the second heartbeat until a fill covers it; nothing is lost with the first (same test) |
+| G9: leader failover | 10 live sessions | The new leader counts each session at 256 MiB per pool until it echoes a grant of the new leader's, one round trip after it first hears it, and grants new ones only out of what is left (`TestANewLeaderCountsEverySessionAtAFullBuffer`); *daemon:* meanwhile one past its budget writes through |
+| G9c: a late reply of the old leader | The old leader's reply granting 80 MiB reaches the daemon after its first heartbeat to the new leader, whose reply is lost; two other nodes ask | The new leader counts the session at 256 MiB until it echoes the new leader's grant, so what the three can land fits g_d (`TestALateReplyOfAnEarlierLeaderIsCounted`); *daemon:* it takes no answer whose issuer is older than the one it holds |
+| G9d: a regained lease | The leader loses its lease and regains it | It starts its grants over as a new leader: nothing granted until fills received 1 s after its first step under the regained lease, every session counted at 256 MiB until it echoes that lease's grant (`TestARegainedLeaseStartsGrantsOver`) |
+| G9b: a heartbeat before the new leader's first step | A session heartbeats a new leader before its first step under its leader lease | Unanswered, and the session counted at 256 MiB (`TestAHeartbeatBeforeTheFirstStepIsUnanswered`, seed 30 of the seeded run). With 80 MiB of the old leader's grant buffered, flushed onto a disk 10 MiB below its `write_limit` after the fill that readies the pool was summed, its next heartbeat adds 3 × 80 MiB to F, so two other nodes asking are granted only what the disk can take; an answer of 0 let them land 70 MiB past its top (`TestAFlushAfterAnUnansweredHeartbeatCountsInF`) |
+| G9e: a leader rebuilt in its term | A second `meta.Control` built for the same term | Its answers carry a newer issuer than the first's (`TestAControlRebuiltInItsTermIssuesANewerIssuer`) |
+| G10: a node stops renewing | Its grant g was carried by a renewal at t | g counts until its fence version is acknowledged, `session_lease` plus one fence round after t, then drops out of Σ (`TestANewLeaderCountsEverySessionAtAFullBuffer`) |
+| G11: heartbeat replies lost | *daemon:* one reply lost | Nothing changes: the daemon's early heartbeat at half its budget gets the next reply. With that reply lost too, it writes through once it has used k grants, until a reply comes. No flush is ever refused for space (the seeded run) |
+| G11b: a shrink whose reply is lost | 3 nodes shrunk from 256 to 50 MiB, the replies lost | The leader counts each at 256 MiB until a heartbeat echoes 50 MiB; counting 50 at once would let them land 2.42 GB while it counted 0.47 GB (`TestAShrinkCountsUntilEchoed`) |
+| G11c: an echoed shrink with more buffered | A node granted 80 MiB buffers 80 MiB before the reply shrinking it to 0 arrives; another node's flush report tightens the cap; the heartbeat echoing 0 reports 80 MiB buffered | The leader counts the node at 80 MiB, not at the 20 MiB the cap leaves (`TestAnEchoedShrinkCountsWhatIsBuffered`) |
+| G12: grants reused | *daemon:* a node's 256 MiB flush completes | The daemon reuses its grant at once; once it has flushed 256 MiB of its 512 MiB budget it sends its heartbeat early, and the reply resets the window |
+| G12b: a streaming node with no faults | *daemon:* a node writing at 25 GbE under a 256 MiB grant | It stays buffered throughout, sending about 11 extra heartbeats per second |
+| G12c: buffered bytes on a full disk | L = 0; a node holding 200 MiB buffered | Its grant is 0 and the leader counts it at 200 MiB (`TestNoRoomGrantsOnlyWhatIsBuffered`); *daemon:* streaming at 1.1 GB/s, it buffers nothing new: new writes go through, and its buffered bytes only drain |
+| G12d: a daemon crash in the middle of a window | The successor's cumulative count is lower than the last one heard | The leader keeps the old (1 + k) × grant in F until a fill received 1 s after that heartbeat covers it (`TestARestartedCountKeepsTheOldBudgetInF`); *daemon:* the successor continues the count from the handoff memfd, and one that cannot read it buffers nothing until its first heartbeat is answered |
+| G13: a disk past `write_limit` | A pool placed at 50% whose disk a refill pushes to 92% | A = 0, so the pool is `Full` and nothing is granted; g_d, for grants already counted, is measured from its fill: 8% of the disk less its reserve (`TestNoRoomGrantsOnlyWhatIsBuffered`) |
 
-The invariant, checked after every simulator step: for every disk d of the pool, (1 + k) × Σ + F ≤ g_d, and no flush under a grant is refused for space.
+**[property]** The invariants, checked after every 10 ms step of `TestNoGrantedFlushIsRefusedForSpace` (1,000 seeds per commit, each run twice): no flush under a grant is refused for space; what the daemons in the session table can still land under their grants fits every member disk above the larger of its fill and `write_limit`; and every nonzero reply keeps (1 + k) × (the others' count + grant) + F ≤ g_d and 2 × (the others' count + grant) + F ≤ A. Each run has 6 to 10 daemons on pool 1 over 1 to 3 disks of 8 to 256 GiB at 60 to 88% fill, buffering within their grants and reuse budgets, writing through at `write_limit` and flushing mostly to one hot disk, with a cleaner freeing space; the tight run gives every daemon 3 MiB more of writes per 10 ms, every disk 8 GiB and ten times the deaths, so the daemons' own invariant, not only the leader's view, sees an overrun. `TestPlantedGrantBugsOverrun` plants each counting bug and sees it fail: a session counted after a failover at no more than it says it holds (seed 4 of the tight run, on what the daemons can land), and a lapsed session's grant dropped before its fence is acknowledged, in a session lapsing with a full grant while two others ask on a disk whose gap is three times the cap; the run's disks leave too much slack for that one to show.
 
-**Capacity figures.** From the fills that heartbeats report (about 8 bytes per disk) and the per-pool data on each disk, the leader computes per pool the available, balanced, stranded-fraction and reprotectable figures and the conditions, `Stuck` from each PG's copying progress, with the [Pools](#pools) cases as inputs, and per node for `locality: node` pools.
+**Capacity figures.** From the fills the disk heartbeats report (about 8 bytes per disk), each disk's size and log reserve from its node's report, and the per-pool data on each disk, the leader computes per pool the available, balanced, stranded-fraction and reprotectable figures and the conditions, with the [Pools](#pools) cases as inputs (`Control.Capacity`, checked in G7 and G13). The per-pool data per disk and the disk class still come from the leader's caller until the disk heartbeat carries them, and `Stuck` comes with [Blocked and unfound reports](build-checklist.md).
 
-**Simulator faults:**
+**Simulator faults** (the seeded run):
 
 - the pool reaching `write_limit` while daemons buffer and other nodes write through;
-- a heartbeat carrying a space grant lost or delayed, its request or its reply;
-- a control-plane failover while daemons stream under their grants;
-- a client partitioned from the control-plane leader but not from storage, streaming under its grant;
-- a daemon crash in the middle of a reuse window.
+- a heartbeat carrying a space grant lost or delayed, its request or its reply, and disk fills lost or delayed up to 300 ms;
+- a control-plane failover while daemons stream under their grants, the old leader answering for up to 3 s;
+- up to two clients partitioned from the control-plane leader but not from storage, half streaming under their grants and half idle, until their fences are acknowledged.
 
-A write that crosses from a granted chunk into a refused one is a daemon case, covered with phase 6's file frontend.
+A daemon crash in the middle of a reuse window, and a write that crosses from a granted chunk into a refused one, are daemon cases, covered with phase 6's file frontend.
 
 ## Control-plane placement faults
 

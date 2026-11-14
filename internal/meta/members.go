@@ -25,9 +25,11 @@ var ErrFormatLevel = errors.New("meta: format level refused")
 // ErrUnknownDisk reports an operator's drain of a disk the record does not know or whose log is gone.
 var ErrUnknownDisk = errors.New("meta: unknown disk")
 
-// OpenedDisk is a disk a node opened: the drive's stable identity and the log ID its superblock holds.
+// OpenedDisk is a disk a node opened: the drive's stable identity, the log ID its superblock
+// holds, and its size and its log's reserve in blocks.
 type OpenedDisk struct {
-	Device, Log uint64
+	Device, Log     uint64
+	Blocks, Reserve uint64
 }
 
 // HaltReport is a replica halted at a committed entry it could not decode: its group, its replica
@@ -114,6 +116,12 @@ func (c *Control) Heartbeat(now core.Tick, nr *NodeReport, out *ControlOutput) e
 			errs = append(errs, fmt.Errorf("meta: log %#x on node %d: %w", o.Log, nr.Node, err))
 		}
 	}
+	for _, o := range nr.Opened {
+		if id := c.diskOfLog(o.Log); id != 0 && o.Blocks != 0 {
+			f := c.diskFill(id)
+			f.blocks, f.reserve = o.Blocks, o.Reserve
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -128,13 +136,18 @@ func (c *Control) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) 
 		c.resume(t)
 	}
 	c.stall(t)
-	if ev.Kind == core.EvNetRecv && !slices.ContainsFunc(c.nodes, func(n nodeState) bool { return n.id == ev.Peer.Node && n.release >= c.format }) {
-		frame, _ := chunkstore.Frame(ctx.Pool, &ev.Msg)
+	if ev.Kind == core.EvNetRecv {
+		frame, data := chunkstore.Frame(ctx.Pool, &ev.Msg)
 		if k, err := chunkstore.Peek(frame); err == nil && k == chunkstore.KindReport {
-			if ev.Msg.Buf != core.NoBuf {
-				ctx.Pool.Free(ev.Msg.Buf)
+			if !slices.ContainsFunc(c.nodes, func(n nodeState) bool { return n.id == ev.Peer.Node && n.release >= c.format }) {
+				if ev.Msg.Buf != core.NoBuf {
+					ctx.Pool.Free(ev.Msg.Buf)
+				}
+				return out
 			}
-			return out
+			if chunkstore.DecodeReport(frame, data, &c.rep) == nil {
+				c.fill(ctx.Now, &c.rep)
+			}
 		}
 	}
 	return c.det.OnEvent(ctx, ev, out)
