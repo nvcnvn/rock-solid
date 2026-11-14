@@ -85,6 +85,11 @@
 - **Why:** a primary's write stays unmapped until it commits and may be dropped by peering; a dropped write in a chunk slot would leave the slot held by the log while no map refers to it, and `CheckSlots` requires the two to match. So a primary logs a whole chunk as ordinary items, as many records as `max_group_commit_bytes` takes, while its members, which map as they log, still write it to a slot.
 - **Remove when:** the store frees the slot of a dropped write, as it frees a slot a later write replaces; then gated whole-chunk writes take a slot like any other.
 
+## Version pin: `case_index` folds by Go's Unicode tables
+- **Where:** `foldRune` in `internal/meta/fsops.go`, which `unicode.SimpleFold` drives; `TestCaseFoldIsPinned` in `internal/meta/fs_test.go` holds a fingerprint of the fold of every rune
+- **Why:** a stored `c/` key is a name's fold. A Go release that adds a case pair changes the fold of names already stored, so an unlink's `Delete(c/…)` misses the old key, which then blocks that name for good ([Key layout](design.md#metadata-layer-metastore)).
+- **Remove when:** the fold is a table the repository owns, or an upgrade that changes the fingerprint rebuilds every volume's `c/` keys. Until then a toolchain bump that fails the test is held back.
+
 ## Workaround: a store keeps every client session's newest incarnation
 - **Where:** `sessions` and `SeeIncarnation` in `internal/chunkstore/store.go`
 - **Why:** a store fences an older incarnation of a client session by the newest it has seen of that session, and phase 3 has no record of when a session ends, so the map keeps one entry for every session that ever wrote to the disk and grows without bound.

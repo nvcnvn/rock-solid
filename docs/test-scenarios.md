@@ -6697,30 +6697,41 @@ simulator seeds against the real primaries and replicas.
 
 Transaction shapes, from the design's [transaction table](design.md#metadata-layer-metastore). Each is a single-shard `Txn` with one shard, asserted on the keys and ops it touches. "The parent's times" is `Update(parent a.mtime, Bump, t)` and `Update(parent a.ctime, Bump, t)`.
 
+The tests are in `internal/meta/fs_test.go`, each building its operations with `meta.FS` and applying them to a real `State`: `TestReservations` (the reservation, root and slot rows), `TestShardWithoutFreeKeyHandsOutNoSlot`, `TestCreateMkdirLinkSymlink`, `TestUnlink`, `TestRename`, `TestRenameAcrossDirectories`, `TestNothingLandsOnARemovedInode`, `TestRenameOntoItselfChangesNothing`, `TestSymlinksLeaveTheByteCounter`, `TestAttributes` (truncate, `alloc_end`, `close`, `mtime` and the byte counter), `TestMtimeNeverGoesBackwards`, `TestLocks`, `TestXattrsAndCaseIndex`, `TestCaseFoldingMatchesEqualFold`, `TestCaseFoldIsPinned` and `TestReplayedMkdir`; `TestResentFSOpsReturnTheirFirstFinalResult` and `TestResentFSOpsAreSent` resend random operations. `FuzzDecodeFSValues` feeds any bytes to the attribute, entry, parent and purge decoders; `TestFSBuildsAllocateNothing` and `BenchmarkBuildCreate` hold every build to zero allocations.
+
 | Operation | Ops in one `Txn` | Expected, including errors |
 | --- | --- | --- |
 | Inode reservation, first create of a node in slot 2 | Its own `Txn`: `Update(fs/5/2:0/n, Add, 64)` | `Updated` gives the batch's end; the daemon hands out the 64 numbers from memory and reserves the next batch in the background when 6 are left. A repeat after an election only skips numbers |
-| Slot reservation | Its own `Txn`: `Update` of the shard's `f` key, `Add`, 16 | 16 slots for the daemon's `mkdir`s, prefetched the same way |
-| `create` of `beach.jpg` in /photos (slot 2), inode 2:k from the reservation | `Check(fs/5/2:1/d/beach.jpg absent, final)`; put the entry → 2:k, type file; put `fs/5/2:k/a`; the parent's times | A second `create` of the name fails with `EEXIST` |
+| Slot reservation | Its own `Txn`: `Update` of the shard's `f` key, `Add`, 16, once a read of `f` before the daemon's first reservation on the shard found it | 16 slots for the daemon's `mkdir`s, the next batch reserved when 2 are left |
+| Slot reservation on a shard from slot 100 whose `f` no split wrote, by one daemon after another | The read of `f` finds it absent; no `Txn` | Nothing handed out and `f` stays absent; the shard counts as used up, so `mkdir` shares its parent's slot |
+| The root of volume 5 | `Check(fs/5/0:0/n absent, final)`, `Put(fs/5/1/a)`, `n` = 2 and `f` = 1 at slot 0 | Created once; a second try fails. Seq 0 and slot 0 are never handed out |
+| `create` of `beach.jpg` in /photos (slot 2), inode 2:k from the reservation | `Check(fs/5/2:1/d/beach.jpg absent, final)`; `Check(fs/5/2:1/P = /)`; put the entry → 2:k, type file; put `fs/5/2:k/a`; the parent's times | A second `create` of the name fails with `EEXIST` |
 | Two racing `create`s in slot 2 from two nodes, different names | Each with an inode from its own reservation | Both commit in one round, with distinct inodes; neither retries |
-| `mkdir` with a free slot from the daemon's reservation | As `create`, plus `Update(parent a.nlink, Add, 1)`; `Put(fs/5/s:1/a)`, `Put(fs/5/s:1/P → 2:1)`, `Put(fs/5/s:0/n = 66)` | Single shard. The directory is s:1, and the creating daemon owns s:2 … s:65 |
+| `mkdir` with a free slot from the daemon's reservation | As `create`, plus `Update(parent a.nlink, Add, 1)`; `Put(fs/5/s:1/a)`, `Put(fs/5/s:1/P → 2:1)`, `Check(fs/5/s:0/n absent)`, `Put(fs/5/s:0/n = 66)` | Single shard. The directory is s:1, and the creating daemon owns s:2 … s:65 |
+| `mkdir` in a slot whose `n` exists, a slot handed out twice | The `Check(n absent)` fails, not final | The daemon takes another slot; the first directory's `n` stays |
 | `mkdir`, then `create` in it from the same daemon | The create takes s:2 | No reservation round between them |
-| `mkdir` with no free slot left | The new directory shares its parent's slot | Single shard |
+| `mkdir` with no free slot left | The new directory shares its parent's slot, and still gets `P` | Single shard |
 | `n` = 2^40 − 1 in slot 2 | The next two `create`s | The first takes 2:(2^40 − 1), the last ID. The second goes to a fresh slot |
 | `link` of 2:3 as `b` in /photos | `Check(d/b absent, final)`, `Put(d/b → 2:3)`, `Check(2:3 a)` and `Put(2:3 a)` with `nlink` + 1 and `ctime`, the parent's times | A second `link` to the name fails with `EEXIST` |
 | `symlink` with a 4,095-byte target | As `create`, plus the target under `t` in 5 values | `readlink` returns the 4,095 bytes (`pjdfstest` `symlink/03.t`) |
-| `unlink` of a file's last link, no open handles | `Check(d/name = inode, final)`; delete the entry; `DeleteRange` over the inode's keys; merge `fs/5/2:0/p/{inode}` with `0 .. alloc_end`; `Update(u, Add, −size)`; the parent's times | One transaction; no attribute, xattr, lock or target key of the inode remains |
+| `unlink` of a file's last link, no open handles | `Check(d/name = inode, final)`; delete the entry; `Check(a = what was read)`; `DeleteRange` over the inode's keys; merge `fs/5/2:0/p/{inode}` with `0 .. alloc_end`; `Update(u, Add, −size)`; the parent's times | One transaction; no attribute, xattr, lock or target key of the inode remains |
+| A `link` racing a last `unlink` | The `link` commits first | The unlink's `Check(a)` fails, not final; the daemon reads again and drops one link, so no entry names a removed inode |
 | `unlink` of a file with a second link | Delete only the entry; `nlink` − 1 by `Check(a)` and `Put(a)` | No purge entry |
 | `unlink` of a file still open | Delete the entry; put `fs/5/2:0/o/{inode}`; `nlink` − 1 | At last close, and after any grace period, the orphan moves to `p/` |
 | `rmdir` of an empty directory | `Check(d/name = inode, final)`, `CheckEmpty(child's d/, final)`, delete the entry, `DeleteRange` over its keys, `Update(parent a.nlink, Add, −1)`, the parent's times | Committed |
 | `rmdir` of a directory with one entry | Same | `ENOTEMPTY`, stored as the request's final result |
-| `rename` within one directory | `Check(src, final)`, `Check(dst absent)`, delete src, put dst | `rename` moves the entry exactly once |
+| `rename` within one directory | `Check(src, final)`, `Check(dst absent)`, delete src, put dst, the parent's times | `rename` moves the entry exactly once |
 | Rename over a non-empty directory | As above, with `CheckEmpty(dst's d/, final)` | `ENOTEMPTY`; nothing changes |
 | Rename-over of a file someone has open | Move the entry; the replaced inode goes to `o/` | As for unlink of an open file |
-| Rename-over of a file no one has open | Move the entry; remove the replaced inode's keys; merge its purge entry `0 .. alloc_end` | One transaction |
+| Rename-over of a file no one has open | Move the entry; `Check` the replaced inode's attributes as read and remove its keys; merge its purge entry `0 .. alloc_end` | One transaction |
 | Cross-directory rename of directory /a/b into /c, with /c's ancestors /c and / | Both parents' times; `Update(nlink, Add, −1)` on /a and `+1` on /c; `Put(b's P → /c)`; `Check(P = what was read)` on /c | Committed; a create in /c meanwhile does not fail it, since `P` is its own key |
 | Cross-directory rename of /a into /a/b/c | The loop check reads c's ancestors up to /a | Refused with `EINVAL`: a directory never moves under itself |
 | The same, while another node moves /a/b elsewhere | The moved directory's `Check(P)` fails | The rename retries from a fresh read; no loop forms |
+| A `create`, `symlink`, `mkdir` (in a fresh slot or not), `link`, file renamed in, `chmod` or xattr set on /d, each built before an `rmdir` of /d that commits first | Its `Check(/d P = /)` fails, not final | The daemon reads again and answers `ENOENT`; no key of /d, and no fresh slot's `n`, comes back |
+| xattr set or removed on a file whose last `unlink` commits first | Its `Check(a)` fails, not final | `ENOENT` on the retry; no `x/` key is left |
+| `rename` of `x` onto itself, or onto `y`, a second link of the same inode | `Check(src, final)` and `Check(dst = what was read)` only | Succeeds and changes nothing (POSIX) |
+| `case_index` on, `rename` of `readme.txt` to `README.txt` | `Check(c/README.TXT = readme.txt, final)` in place of the absent-check | Committed; `c/README.TXT` now holds `README.txt` |
+| A symlink with a 5-byte target, created, then unlinked | Neither touches `u` | The slot's byte counter stays 0: it counts regular files only |
 | `chmod` of a directory while 64 creates land in it | `Update(mode, Set, v)`, `Update(a.ctime, Bump, now)` | Commits in the same round as the creates; no `Check` on the directory's attributes |
 | Truncate from 10,000 bytes to 5,000 | `Check(a)`, size 5,000, `alloc_end` 1, `Update(u, Add, −5,000)`, and a purge range from byte 5,000 to the old `alloc_end` merged into `p/` | The range starts at the byte offset, not at a chunk boundary |
 | Truncate, then unlink before the purger runs | A 16 MiB file (`alloc_end` 4) truncated to 5,000, then unlinked | `p/{inode}` holds the union, `0 .. 4`, not the unlink's `0 .. 1` alone: no chunk leaks |
@@ -6737,8 +6748,11 @@ Transaction shapes, from the design's [transaction table](design.md#metadata-lay
 | A lock key added inside a gap after the scan | The `CheckEmpty` over that gap fails | The request reads again; at most one exclusive holder |
 | Size change, slot byte counter | Size from 0 to 3 bytes | `Update(fs/5/2:0/u, Add, 3)` in the same transaction, never compare-and-set, and `statfs` used is the sum of the slot counters |
 | xattr `user.DOSATTRIB` on 2:3 | Put `fs/5/2:3/x/user.DOSATTRIB` | One scan returns it with the attributes |
-| xattr of 64 KiB on 2:3 | The first piece and count under `x/{name}`, 65 pieces under the piece tag | One `Txn` of about 82 KiB; `getxattr` returns the 64 KiB |
-| `case_index` on, `create` of `Photo.JPG` | Also put `fs/5/2:1/c/{folded}` → name | One extra key per create |
+| xattr of 64 KiB on 2:3 | The first piece and count under `x/{name}`, 65 pieces under the piece tag, `Check(a)` | One `Txn` of about 82 KiB; `getxattr` returns the 64 KiB |
+| xattr set over a longer value | The new value's pieces, and `Delete` of the old pieces past the new count | No piece of the old value is left |
+| flock `LOCK_SH` by a session holding `l/x/{s}`, and `LOCK_EX` by one holding `l/s/{s}` | `Check` and `Delete` its own key, `Put` the other mode's | One `Txn` converts the lock |
+| `case_index` on, `create` of `Photo.JPG` | Also `Check(fs/5/2:1/c/PHOTO.JPG absent, final)` and put it → `Photo.JPG` | One extra key per create; a `create` of `PHOTO.jpg` fails with `EEXIST`; `unlink` deletes the `c/` key |
+| `case_index` on, the Kelvin sign `\u212Aelvin`, long s `\u017Fun`, final sigma `οΣ` | Then `kelvin`, `SUN`, `ος` | Each second name fails with `EEXIST`, as `strings.EqualFold` matches them; `ß` and `ss` are two names |
 
 **Replay records**
 
@@ -6747,21 +6761,17 @@ Transaction shapes, from the design's [transaction table](design.md#metadata-lay
 | `mkdir` with (session 7, mount 1, request 42) applied, then resent with the same IDs | The second returns the stored result (success), not `EEXIST`, and changes nothing |
 | A `mkdir` that failed with `EEXIST`, resent | Returns `EEXIST`: a final failure is stored |
 | A `rename` that failed with `ENOENT`, resent after the source appears | Returns `ENOENT`, and nothing moves |
+| An `unlink` that committed, resent when a new lookup no longer finds the name | The daemon sends the `Txn` it built first, and its record returns success, not `ENOENT` |
 | A resent `Txn` with an `Update` | Returns its first `Result`, including the `Update`'s value |
 | Two mounts of volume 5 by session 7, each sending request 42 | Two records, `r/7/1/42` and `r/7/2/42`; neither answers the other |
 | A request carrying "oldest outstanding" 50 | The shard removes that session and mount's records below 50 in that slot, with one range removal |
 | Session 7 leaves the session table | Each shard's leader removes `r/7/` in every slot, in the background |
 | A resend after its record was dropped | It runs again and returns whatever the state now gives. An honest oldest-outstanding value rules it out |
-| [property] Every mutating op, resent 0 to 3 times at random | Each returns its first final result, and the final state equals the state without resends |
+| [property] Every mutating op, resent 0 to 3 times at random (`TestResentFSOpsReturnTheirFirstFinalResult`) | Each resend returns its request's first final result and changes nothing, and a request whose result was not final leaves no record |
 
 Replay records are kept as `fs/{volume}/{slot · 0}/r/{session}/{mount}/{request}`, in the slot the request changed.
 
-**Invariants:**
-
-- An inode ID is never reused; a counter reset is caught.
-- No file's `mtime` goes backwards, except by `utimensat`.
-- A file's keys and its directory's entry are in one slot, unless a cross-directory rename moved the entry, or the parent's slot had run out of IDs when the file was created.
-- No directory is its own ancestor.
+**Invariants** need a running filesystem workload, so they are checked under [MetaStore invariants](#metastore-invariants).
 
 ## MetaStore invariants
 
@@ -6778,6 +6788,7 @@ Simulator invariants checked after every step, with the faults that must exercis
 | No session is fenced while its client's own lease still runs | Control-plane leader failover while sessions renew; a renewal answered by a deposed leader; a leader stalled past `session_lease`; clients paused past their lease; slewed clocks; a client VM stopped with its clocks frozen |
 | Every write of a fenced lock holder that completes is ordered before every write of the next holder; no fenced session's write is applied; a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval while the leader holds its lease and has measured the client, `dead_wait` instead when it has not, or once an unreachable storage node is marked down | A fence that reaches some primaries late; a storage node partitioned during a fence |
 | On every disk of a pool, (1 + k) times the grants outstanding plus the flushes not yet in fill reports never exceed the disk's gap above the larger of its fill and `write_limit`, and no flush under a grant is refused for space | The pool reaching `write_limit` while daemons buffer and other nodes write through; grant heartbeats lost or delayed, requests and replies; a control-plane failover while daemons stream; a client partitioned from the control-plane leader but not from storage, streaming under its grant; a daemon crash in the middle of a reuse window; a refill moving members onto the fullest disks while grants are out |
+| An inode ID is never reused; no file's `mtime` goes backwards except by `utimensat`; a file's keys and its directory's entry are in one slot, unless a cross-directory rename moved the entry or the parent's slot had run out of IDs; no directory is its own ancestor ([Filesystem schema](#filesystem-schema)) | A filesystem workload of every operation from several daemons, with racing renames of directories, a daemon crash after a slot or inode reservation, and elections while reservations are in flight; a counter reset is caught |
 | A replayed request returns its first result and changes nothing | A daemon crash with requests read but unanswered, followed by their resend; an election while requests are in flight |
 | No learner is promoted to voter before it has caught up with its leader's log | Registered by [Voter replacement](#voter-replacement): a voter replaced while another is down, the replaced voter returning mid-swap, compacted logs, drops and partitions on the learner's links |
 | An internal `Txn` repeated after an election changes nothing it did not read | An election while the purger and the control-plane leader have transactions in flight; a truncate merging into a purge entry the purger is consuming |

@@ -226,6 +226,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Slot.** A range of inode numbers that always stays in one shard. A directory and its files share a slot, so creating a file touches one shard only. See [Inode IDs](design.md#metadata-layer-metastore).
 
+**Case folding, `case_index`.** Mapping each letter to one form shared by all its upper- and lower-case variants, so `Photo.JPG` and `PHOTO.jpg` compare equal, as Windows and macOS clients expect over SMB. It is not lower-casing: the Kelvin sign K and the long s ſ fold to K and S, as k and s do, though lower-casing leaves them as they are. A volume with `case_index` on keeps each entry's folded name too, so a second name that folds alike is refused. See [Key layout](design.md#metadata-layer-metastore).
+
 **Range sharding and hash sharding.** Range sharding gives each shard a contiguous span of keys, so a prefix scan reads one or a few shards. Hash sharding spreads keys randomly, which balances load but makes every scan touch every shard.
 
 **Transaction, atomic.** A group of changes that happen all together or not at all. A **single-shard** transaction commits in one Raft round. A **cross-shard** transaction needs more, because no single Raft log covers it.

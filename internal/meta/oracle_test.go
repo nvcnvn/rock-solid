@@ -208,56 +208,71 @@ func TestTxnsMatchTheOracle(t *testing.T) {
 	})
 }
 
-// replayRun sends requests from a few mounts, each resent 0 to 3 times at random later points
-// with honest oldest-outstanding values, and reports the first resend that does not return its
-// request's first final result, that changes the state, or a request whose result was not final
-// that left a record.
+// replayRun resends Txns of random ops, each built once, as resendRun does.
 func replayRun(tb testing.TB, seed uint64, p statePlants) error {
 	g := gen{rng: rand.New(rand.NewPCG(seed, 1))}
 	s := newTestState(tb)
 	s.plant = p
+	return resendRun(tb, s, g.rng, 400, func(mount uint32, id, oldest uint64) func() (Txn, bool) {
+		t := g.txn()
+		t.Replay, t.Oldest = replayKey(byte(mount), id), oldest
+		return func() (Txn, bool) { return t, true }
+	})
+}
+
+// resendRun sends requests from three mounts, each resent 0 to 3 times at random later points
+// with honest oldest-outstanding values, each send applying the Txn its request's builder from
+// newRequest gives, if it gives one, and reports the first resend that does not return its request's first final
+// result, that changes the state, or a request whose result was not final that left a record.
+func resendRun(tb testing.TB, s *State, rng *rand.Rand, steps int, newRequest func(mount uint32, id, oldest uint64) func() (Txn, bool)) error {
 	type request struct {
-		txn    Txn
+		mount  uint32
+		id     uint64
+		build  func() (Txn, bool)
 		resend int
 		first  *Result
 	}
 	var out []*request
 	next := [3]uint64{}
 	var before, after ScanResult
-	for step := 0; step < 400; step++ {
-		if len(out) == 0 || g.rng.IntN(3) == 0 {
-			mount := g.rng.IntN(3)
+	for step := 0; step < steps; step++ {
+		if len(out) == 0 || rng.IntN(3) == 0 {
+			mount := uint32(rng.IntN(3))
 			next[mount]++
 			oldest := next[mount]
 			for _, r := range out {
-				if m, req := replayOf(r.txn.Replay); m == uint32(mount) {
-					oldest = min(oldest, req)
+				if r.mount == mount {
+					oldest = min(oldest, r.id)
 				}
 			}
-			r := &request{txn: g.txn(), resend: g.rng.IntN(4)}
-			r.txn.Replay, r.txn.Oldest = replayKey(byte(mount), next[mount]), oldest
+			r := &request{mount: mount, id: next[mount], build: newRequest(mount, next[mount], oldest)}
+			r.resend = rng.IntN(4)
 			out = append(out, r)
 		}
-		i := g.rng.IntN(len(out))
+		i := rng.IntN(len(out))
 		r := out[i]
 		if err := s.Scan(nil, nil, 1<<20, &before); err != nil {
 			return err
 		}
-		res := run(tb, s, r.txn)
+		t, sent := r.build()
+		if !sent {
+			continue
+		}
+		res := run(tb, s, t)
 		if err := s.Scan(nil, nil, 1<<20, &after); err != nil {
 			return err
 		}
-		final := res.FailedCheck < 0 || r.txn.Ops[res.FailedCheck].Final
+		final := res.FailedCheck < 0 || t.Ops[res.FailedCheck].Final
 		switch {
 		case r.first != nil && !sameResult(&res, r.first, true):
-			return fmt.Errorf("step %d: resent %x returned %+v, its first final result %+v", step, r.txn.Replay, res, *r.first)
+			return fmt.Errorf("step %d: resent %x returned %+v, its first final result %+v", step, t.Replay, res, *r.first)
 		case r.first != nil && !slices.EqualFunc(before.KVs, after.KVs, func(a, b KV) bool { return bytes.Equal(a.Key, b.Key) && bytes.Equal(a.Value, b.Value) }):
-			return fmt.Errorf("step %d: resent %x changed the state", step, r.txn.Replay)
+			return fmt.Errorf("step %d: resent %x changed the state", step, t.Replay)
 		case r.first == nil && final:
 			r.first = &Result{FailedCheck: res.FailedCheck, Updated: slices.Clone(res.Updated)}
 		case r.first == nil:
-			if _, ok := s.tree.Get(r.txn.Replay); ok {
-				return fmt.Errorf("step %d: %x failed check %d, not final, and left a record", step, r.txn.Replay, res.FailedCheck)
+			if _, ok := s.tree.Get(t.Replay); ok {
+				return fmt.Errorf("step %d: %x failed check %d, not final, and left a record", step, t.Replay, res.FailedCheck)
 			}
 		}
 		if r.resend--; r.resend < 0 {

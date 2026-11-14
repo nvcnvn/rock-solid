@@ -22,6 +22,7 @@ internal/raftshard TestAReplacementNeverStallsProposals 2000
 internal/raftshard TestCommittedEntriesSurviveCrashesOnTheDiskLog 2000
 internal/meta TestTxnsMatchTheOracle 10000
 internal/meta TestReplayedRequestsReturnTheirFirstFinalResult 10000
+internal/meta TestResentFSOpsReturnTheirFirstFinalResult 5000
 internal/meta TestKeyByteOrderIsLogicalOrder 10000
 internal/meta TestReplayInMatchesItsDefinition 10000
 internal/disklog TestEveryAcceptedItemDecodes 2000

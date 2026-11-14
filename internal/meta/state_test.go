@@ -397,14 +397,6 @@ func replayKey(mount byte, request uint64) []byte {
 
 var replays = replayKey(0, 0)[:22]
 
-func replayOf(k []byte) (mount uint32, request uint64) {
-	var d Key
-	if err := DecodeKey(k, &d); err != nil {
-		panic(err)
-	}
-	return d.Mount, d.ID
-}
-
 func TestReplayRecords(t *testing.T) {
 	s := newTestState(t)
 	mkdir := Txn{Ops: []Op{CheckAbsent(b("d/x"), true), Put(b("d/x"), b("1")), Update(b("a"), 0, Add, 1)}, Replay: replayKey(1, 42)}
