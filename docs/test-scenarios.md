@@ -3604,7 +3604,7 @@ A TLA+ specification, `models/sessions/sessions.tla`, checked with TLC. It cover
 - Actors: client daemons, each with one session; a control plane whose leader changes with terms, on two nodes; storage nodes acting as primaries and replicas of one placement group (PG); and an inode owner holding one lock.
 - Clocks. Time advances in ticks, and each node's raw clock runs at a whole number of units per tick, fixed per boot; a node can reboot at another rate, and its rate can rise once within the margin's headroom of `lease_drift / 2`, as a clocksource switch or a migration does. A client's virtual machine can stop with every clock frozen. The model carries this one clock per node, the rate bound the design's two clocks give a lease; the epoch change model checks the two-clock rule itself.
   - The holder (the client) counts from the send of its last answered renewal and ends `lease_drift` plus its bound's excess over `1 + lease_drift / 2` early.
-  - The grantor (the leader) counts from when it processed the renewal, or from the start of its own lease after a failover, the whole `session_lease` stretched by its own raw rate over the client's, which it measures from two renewals it processed; until it has, it counts `dead_wait`.
+  - The grantor (the leader) counts from when it processed the renewal, or from the start of its own lease after a failover, the whole `session_lease` stretched by its own raw rate over the client's, which it measures from two renewals it processed, up to `dead_wait`; until it has, it counts `dead_wait`.
   - The holder ends its lease on `Resumed`, and when a grantor's clock moved more than `1/(1 − m)` times its own since the last grant, `m` the lease's margin.
   - The holder keeps its rate bound per leader node and run, from two grants at least a tick apart, and takes no lease from a leader before it has one: a leader failover starts a new window while the client keeps its old lease. Its margin covers only that leader, and a rebooted node, whose reboot draws a new run ID, may lead at once. The model's only new run is a reboot; a leader's daemon restart or pause would be another, with the same effect on the client's window.
 - Leader leases: only a leader holding its leader lease answers renewals, and a deposed leader's lease ends before its successor's starts. A new leader gives every live session a full lease from its start, and a leader whose loop stalled restarts every session's timer.
@@ -3918,7 +3918,7 @@ section.
 | --- | --- | --- | --- | --- | --- |
 | Sessions and fencing | `ci-lease` | 1 client, 2 leader nodes, 2 terms, rates 16 or 20, `lease_drift` 1/8, 80-unit lease, `dead_wait` 100, a VM stop | 46 | 16,494,694 | 73 s |
 | Sessions and fencing | `ci-evict` | `ci-lease` with an eviction instead of the stop | 42 | 4,355,364 | 20 s |
-| Sessions and fencing | `ci-rates` | 1 leader node, 2 terms, a reboot, a rate rise, a lost message, 81-unit lease | 49 | 17,276,860 | 88 s |
+| Sessions and fencing | `ci-rates` | 1 leader node, 2 terms, a reboot, a rate rise, a lost message, 81-unit lease | 49 | 17,962,226 | 89 s |
 | Sessions and fencing | `ci-fence` | 2 clients, a lock, 2 storage nodes, 3-tick lease, 2 writes, a partition | 43 | 12,988,660 | 134 s |
 | Sessions and fencing | `ci-faults` | `ci-fence` without the partition, 1 write in flight per client, a stop, a stall, an eviction, a crash | 37 | 4,453,074 | 35 s |
 | Cache-mode recall | `ci` | 3 nodes, 1 handle each, 2 writes | 46 | 2,541,598 | 33 s |
@@ -3980,6 +3980,10 @@ section.
   `neg-fixed-step-check`, `neg-window-per-run`) wait for the phase 6 client daemon, the purge
   model's invariants are registered with the phase 6 file frontend, and the recall model's with
   phase 7 (Tier 2).
+- The sessions model's leader measures its rate over a client's exactly once two renewals reached
+  it (`Measured`), so pairing an answer with the heartbeat that names it, lost and repeated
+  requests, and a leader's own stop are checked only by the Go tests of
+  [Control-plane sessions](#control-plane-sessions); `ci-rates` passing does not cover them.
 - The epoch change model's counterexamples each also appear as a planted bug that trips the mapped
   invariant: those for property 2 in [MetaStore invariants](#metastore-invariants), the rest in
   [Placement faults and invariants](#placement-faults-and-invariants). The exceptions, with no
@@ -6526,25 +6530,48 @@ only above no release of a node with a disk committed up.
 
 ## Control-plane sessions
 
-The [Sessions and fencing model](#sessions-and-fencing-model)'s scenarios run as simulator seeds against the real group. In addition:
+`meta.Control` renews and fences sessions at the leader of a real three-replica group, as in
+[Control-plane membership](#control-plane-membership) (`internal/meta`, `sessions_test.go`), with
+the leader's two clocks moved by the test. The [Sessions and fencing model](#sessions-and-fencing-model)'s
+leader-side rules are its invariants; the storage side is
+[Session fencing on storage nodes](#session-fencing-on-storage-nodes)'s.
 
 | Input | Expected |
 | --- | --- |
-| A daemon starts | One commit of `ctl/session/{id}`, with an ID from a counter. IDs are never reused, even after a fence |
-| 100 heartbeats renewing 10 sessions | No Raft entry: renewals change only the leader's memory |
-| A session falls due | One commit fencing every session due at that moment, as one new session-table version |
-| Every storage node acknowledges version v, or is marked down in a committed table | v is committed as acknowledged, and the fenced sessions leave the table |
-| A follower of the control-plane group, or a new leader before its leader lease starts, receives a heartbeat | It answers no renewal |
-| A new leader's leader lease starts | Every live session gets a full `session_lease` from that start |
-| The control-plane leader crashes 1 s after its last renewal of client C, whose `CLOCK_BOOTTIME` runs 22.6% fast; a new leader answers 8 s after the crash | C's lease ends about 8.1 s after that renewal, 7.1 s after the crash, and C holds its writes from then until the new leader answers; no session is fenced. With a new leader at 5 s, C never holds |
-| The leader's loop falls behind by more than a heartbeat interval | Every session's timer restarts from now |
-| An owner reports a recall unanswered for `recall_timeout` | The leader stops renewing the session and answers its heartbeats without renewing it; the session is fenced once its lease runs out on the leader's clock, like any expiry, never at once |
-| An operator evicts a session | The same |
+| Daemons start 10 sessions | One commit of a `ctl/session/{id}` key each, with IDs from a counter. IDs are never reused, even after a fence (`TestASessionStartsRenewsInMemoryAndIsFencedThenAcknowledged`) |
+| 100 heartbeats renewing those sessions | No Raft entry: renewals change only the leader's memory (same test) |
+| The sessions fall due | One commit fencing every session due at that moment, as one new session-table version (same test) |
+| Every storage node acknowledges version v, or is marked down in a committed table | v is committed as acknowledged, and the fenced sessions leave the table; while a node with its disk up is behind, it is not (same test, `TestANodeMarkedDownCountsAsAcknowledging`) |
+| A new leader receives a heartbeat before its leader lease starts | It answers none and commits nothing; a follower runs no `meta.Control` (`TestANewLeaderGivesEverySessionAFullLease`) |
+| A new leader's leader lease starts | Every live session gets a full count from that start: `dead_wait` for one it has not measured, a session that sent it a single heartbeat included, and `session_lease` times its bound once two heartbeats measured it (same test) |
+| The control-plane leader crashes 1 s after its last renewal of C, and a new leader whose `CLOCK_BOOTTIME` runs 22.6% fast answers 8 s, or 5 s, after the crash | C renews with it and is never fenced; D, whose daemon died with the old leader, is fenced once `dead_wait` has passed on the new leader's raw clock as well, not sooner on its fast boot clock (`TestAFastBootClockFencesNoSessionEarly`). C's side, ending its lease about 7.1 s after the crash when its own boot clock runs that fast and holding its writes until a leader answers, is the client daemon's |
+| A failover, right after a renewal of C, to a leader whose clocks run 10% fast over C's and the old leader's, with its lease starting at once; C dies then, or after two heartbeats to it, or after two heartbeats between which the new leader stands still for 200 ms with its clocks frozen and then gets `Resumed` | C's lease from the old leader runs 9.9 s more, and C is fenced no sooner: `dead_wait` after the new lease's start, or `session_lease` × 1.1 on the new leader's clocks after the second heartbeat, or, after the stop, `dead_wait` after the second heartbeat, since `Resumed` dropped the answer it names (`TestAFastNewLeaderFencesNoSessionEarly`) |
+| A leader whose raw clock runs 5% fast over its clients' | It measures the rate from two heartbeats and fences 10.5 s after the last renewal; a heartbeat naming an answer older than its last, as after a lost answer, leaves the session unmeasured, fenced only after `dead_wait` (`TestAFenceStretchesByTheMeasuredRate`) |
+| A leader whose raw clock runs 5% fast processes C's heartbeat twice, 500 ms apart, or an older heartbeat of C's arrives 500 ms after a newer one; C's next heartbeat names the first answer | The leader pairs it with its first answer to the highest request and fences 10.5 s after the last renewal, where the later answer would bound its rate at 0.525 and fence after 10 s (`TestARepeatedHeartbeatIsMeasuredFromItsFirstAnswer`) |
+| A measured bound of 0.5, 1.05, 30, or 2⁶² | The wait is `session_lease`, 10.5 s, then `dead_wait` for both of the last: no stretch passes it (`TestAStretchLiesBetweenTheLeaseAndDeadWait`) |
+| The leader's loop falls behind by more than a heartbeat interval, or it resumes from a pause | Every session's timer restarts from now (`TestAStallOrAResumeRestartsEveryCount`) |
+| An owner reports a recall unanswered for `recall_timeout`, or an operator evicts a session | The leader stops renewing the session and answers its heartbeats without renewing it; the session is fenced once its lease runs out on the leader's clock, like any expiry, never at once; evicting a session not live is refused with `ErrUnknownSession` (`TestAnEvictionOnlyStopsRenewals`) |
+| A session's entry, or `ctl/` keys holding a session table, as bytes | Decodes without a panic; an entry that decodes encodes back to the same bytes; a table's acknowledged version is at most its version, and its sessions lie below its next ID, fenced at most at its version (`FuzzDecodeSession`, `FuzzDecodeCtl`) |
 
-**Simulator faults:**
+**Seeded run** (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`, 20 seeds in `go test`, 2,000 in
+`scripts/seeds.sh`). Four clients each hold a `lease.Holder` on their own clocks; each node's raw
+clock runs within 10% of real time, and a quarter of them have their boot clock slewed up to 22.6%
+apart from it. Slewing every node would hide the leader-side bugs: a holder ends its lease on its
+faster clock and a grantor waits for its slower one, so random slews cover most rate errors.
+Faults: failovers, half of them crashes and half a deposed leader still answering for up to 3 s;
+clients learning the new leader up to 15 s late; leader stalls of 2.5 to 5 s; 5% of heartbeats and
+answers lost and each delayed up to 30 ms; evictions; two daemons that die; fenced clients starting
+new sessions; storage nodes that each take the newest session-table version on a third of their
+heartbeats, so acknowledgements wait. Checked every 10 ms: no session is fenced while its client's
+lease from any leader runs; after every commit, a new leader reads the table back as committed; no
+ID is given twice; no version is acknowledged before every node with a disk up holds it. At the
+end, every dead client's session has left the table and the version is acknowledged.
 
-- a control-plane leader failover while sessions renew;
-- a renewal answered by a deposed leader.
+**Planted bugs** (`TestPlantedSessionBugsFenceEarly`): the model's `neg-dead-wait-lease`, an
+unmeasured session waiting only `session_lease`, and `neg-count-on-own-clock`, every session
+waiting `session_lease` on the leader's own clock, each fence a session whose lease runs. The seeded
+run catches each on about 2% of seeds, seed 38 among them; the fast new leader's scenario catches
+each every time, the first with C dying at once and the second after it measured C.
 
 ## Space grants
 

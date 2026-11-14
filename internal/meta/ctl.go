@@ -11,6 +11,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/lease"
 )
 
 // The ctl/ keys and the commit rule are design.md's "`ctl/` keys and commits".
@@ -23,32 +24,42 @@ type PoolRecord struct {
 	Pool chunkstore.Pool
 }
 
-// ControlInputs are what a table and a shard map are computed from beside what the control plane
-// committed and heard: each disk's capacity figures as last reported, a pool taking those of its
-// class, and the operator's edits and balance moves.
+// ControlInputs are what a step is computed from beside what the control plane committed and
+// heard: the leader's two clocks and whether it holds its leader lease, each disk's capacity
+// figures as last reported, a pool taking those of its class, and the operator's edits and
+// balance moves.
 type ControlInputs struct {
-	Now   core.Tick
-	Disks []chunkstore.Disk
-	Edits []chunkstore.Edit
-	Moves int
+	Now    core.Tick
+	Raw    core.Tick
+	Leased bool
+	Disks  []chunkstore.Disk
+	Edits  []chunkstore.Edit
+	Moves  int
 }
 
 // ControlOutput is what one call into a Control hands its driver: a Txn to propose to the
 // control-plane group under Token; once one commits, its table as a delta for every node and the
 // shard map entries it changed for their groups' leaders; after a failover or an error answer,
-// every committed entry again, and the nodes to send the whole committed table.
+// every committed entry again, and the nodes to send the whole committed table. Of sessions: the
+// starts committed, whether a fence committed so every node gets the session table, and the nodes
+// a heartbeat shows behind on it.
 type ControlOutput struct {
-	Propose bool
-	Txn     Txn
-	Token   uint64
-	Push    bool
-	Delta   chunkstore.Delta
-	Plans   []Group
-	Tables  []uint32
+	Propose       bool
+	Txn           Txn
+	Token         uint64
+	Push          bool
+	Delta         chunkstore.Delta
+	Plans         []Group
+	Tables        []uint32
+	Started       []SessionStart
+	SessionPush   bool
+	SessionTables []uint32
 }
 
 // Reset empties the output for reuse.
-func (o *ControlOutput) Reset() { *o = ControlOutput{Plans: o.Plans[:0], Tables: o.Tables[:0]} }
+func (o *ControlOutput) Reset() {
+	*o = ControlOutput{Plans: o.Plans[:0], Tables: o.Tables[:0], Started: o.Started[:0], SessionTables: o.SessionTables[:0]}
+}
 
 // ctlState is what the control plane committed.
 type ctlState struct {
@@ -60,11 +71,13 @@ type ctlState struct {
 	disks  []DiskEntry
 	diskV  uint64
 	format uint32
+	sess   SessionTable
 }
 
 // Control is the control-plane leader's machine beside its group: it commits pools, placement
-// tables, the shard map, the disk record with the failure detector's marks, and the format level
-// as the group's Txns, one at a time, and hands out a table or a plan only once it has committed.
+// tables, the shard map, the disk record with the failure detector's marks, the format level and
+// the session table as the group's Txns, one at a time, and hands out a table or a plan only once
+// it has committed. It renews sessions in its memory.
 // A new leader starts one from its applied state once it has applied an entry of its term; a
 // commit another leader raced fails its checks, and the machine reads the state again.
 type Control struct {
@@ -83,6 +96,14 @@ type Control struct {
 	// entry is still to be handed out again.
 	round  uint64
 	resend bool
+	starts []SessionStart
+	timers []sessTimer
+	// seen is the time of the last input, leased whether the leader held its lease then, and
+	// tableTurn whether a session commit went last, so the table's step goes next.
+	seen      lease.Time
+	leased    bool
+	tableTurn bool
+	plant     sessionPlants
 }
 
 // commit is the Txn in flight: the state it gives and how much of the staged reports it took.
@@ -93,6 +114,8 @@ type commit struct {
 	delta            chunkstore.Delta
 	plans            []Group
 	asks, acts, rc   int
+	fenced           bool
+	started          []SessionStart
 }
 
 // NewControl reads the control plane's state from st, the control-plane group's applied state.
@@ -225,14 +248,24 @@ func (c *Control) fold(dst []chunkstore.PGInterval, fs []chunkstore.PGFields) []
 }
 
 // Step computes the next table and shard map and, with no commit in flight, proposes under token
-// whatever they and the staged pools change. A staged pool change the committed pool no longer
-// takes, after a reload, is dropped with its error, as is a staged format level SetFormat would now
-// refuse, and as are the staged pool changes of a step that is more than one Txn holds, with
-// ErrTooLarge; the next Step commits the rest.
+// whatever they and the staged pools change, or what the session table owes, the two taking turns.
+// A staged pool change the committed pool no longer takes, after a reload, is dropped with its
+// error, as is a staged format level SetFormat would now refuse, and as are the staged pool changes
+// of a step that is more than one Txn holds, with ErrTooLarge; the next Step commits the rest.
 func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) error {
 	c.begin(in.Now)
+	lt := lease.Time{Boot: in.Now, Raw: in.Raw}
+	c.sessClock(lt, in.Leased)
 	if c.pending != nil {
 		return nil
+	}
+	turn := c.tableTurn
+	c.tableTurn = false
+	if !turn {
+		if ok, err := c.sessionStep(lt, token, out); ok || err != nil {
+			c.tableTurn = ok
+			return err
+		}
 	}
 	if err := c.recheck(); err != nil {
 		return err
@@ -262,7 +295,7 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	live := c.liveRecord()
 	n.smap = PlaceVoters(base, c.metaNodes(), live, c.halts(), in.Now)
 	n.smapV = c.smapV
-	n.disks, n.diskV, n.format = c.diskView(live, in.Now), c.diskV, max(c.format, c.stagedFormat)
+	n.disks, n.diskV, n.format, n.sess = c.diskView(live, in.Now), c.diskV, max(c.format, c.stagedFormat), c.sess
 	var ops []Op
 	var err error
 	for _, g := range n.smap.Groups {
@@ -287,6 +320,10 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	if !p.table && len(ops) == 0 && len(c.staged) == 0 {
 		c.asks, c.acts, c.rcv, c.stagedMap = c.asks[:0], c.acts[:0], c.rcv[:0], nil
 		c.resendPlans(out)
+		if turn {
+			_, err := c.sessionStep(lt, token, out)
+			return err
+		}
 		return nil
 	}
 	if ops, err = c.tableOps(ops, p); err != nil {
@@ -424,6 +461,8 @@ func (c *Control) Answer(st *State, a *Answer, out *ControlOutput) error {
 	if p.table {
 		out.Push, out.Delta = true, p.delta
 	}
+	c.starts = c.starts[len(p.started):]
+	out.Started, out.SessionPush = append(out.Started, p.started...), p.fenced
 	if !c.resend {
 		out.Plans = append(out.Plans, p.plans...)
 	}
@@ -617,6 +656,21 @@ func decodeCtl(kvs []KV) (ctlState, error) {
 				s.disks = append(s.disks, e)
 			default:
 				bad = true
+			}
+		case CtlSession:
+			if len(name) != 8 {
+				return s, ErrMalformed
+			}
+			if id := bigEndian.Uint64(name); id == 0 {
+				bad = len(v) != 24
+				if !bad {
+					s.sess.Next, s.sess.Version, s.sess.Acked = bigEndian.Uint64(v), bigEndian.Uint64(v[8:]), bigEndian.Uint64(v[16:])
+					bad = s.sess.Next < 2 || s.sess.Acked > s.sess.Version
+				}
+			} else {
+				e, err := decodeSession(id, v)
+				bad = err != nil || id >= s.sess.Next || e.Fenced > s.sess.Version
+				s.sess.Sessions = append(s.sess.Sessions, e)
 			}
 		case CtlFormat:
 			d := decoder{b: v}

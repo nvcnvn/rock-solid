@@ -57,8 +57,8 @@ epoch/neg-transfer-keeps-lease	open	MetaStore invariants
 epoch/neg-widen-past-two-drift	lease.widenLate	TestPlantedLeaseBugsBreakThePair
 sessions/neg-answer-without-lease	open	MetaStore invariants
 sessions/neg-no-full-lease	open	MetaStore invariants
-sessions/neg-count-on-own-clock	open	MetaStore invariants
-sessions/neg-dead-wait-lease	open	MetaStore invariants
+sessions/neg-count-on-own-clock	meta.countOnOwnClock	TestPlantedSessionBugsFenceEarly
+sessions/neg-dead-wait-lease	meta.deadWaitLease	TestPlantedSessionBugsFenceEarly
 sessions/neg-evict-at-once	open	MetaStore invariants
 sessions/neg-two-holders	open	MetaStore invariants
 sessions/neg-release-on-commit	open	MetaStore invariants

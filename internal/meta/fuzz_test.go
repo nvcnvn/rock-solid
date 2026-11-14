@@ -229,8 +229,9 @@ func fuzzCtlKVs(data []byte) []KV {
 }
 
 // The control plane's ctl/ keys decode without a panic, and a state that decodes holds a table
-// whose CRC32C is its head's, a shard map whose ranges CheckRanges accepts, and disks only under
-// a record version.
+// whose CRC32C is its head's, a shard map whose ranges CheckRanges accepts, disks only under a
+// record version, and sessions only under the session table's head, below its next ID and fenced
+// at most at its version, which its acknowledged version does not pass.
 func FuzzDecodeCtl(f *testing.F) {
 	var seed []byte
 	add := func(k, v []byte) { seed = append(append(append(seed, byte(len(k)-1), byte(len(v))), k[1:]...), v...) }
@@ -262,6 +263,10 @@ func FuzzDecodeCtl(f *testing.F) {
 		add(diskKey(e.ID), appendDisk(nil, &e))
 	}
 	add(ctlKey(CtlFormat, nil), binary.AppendUvarint(nil, 2))
+	add(sessionKey(0), appendSessionHead(nil, &SessionTable{Next: 3, Version: 1}))
+	for _, e := range []SessionEntry{{ID: 1, Node: 4, Incarnation: 1, Fenced: 1}, {ID: 2, Node: 300, Incarnation: 1}} {
+		add(sessionKey(e.ID), appendSession(nil, &e))
+	}
 	add(ctlKey(CtlShardMap, nil), bigEndian.AppendUint64(nil, 1))
 	for _, g := range []Group{{ID: 1, LastID: 3}, {ID: 2, Start: PrefixEnd([]byte{SpaceCtl}), LastID: 3}} {
 		g.Voters = []Replica{{1, 0, 1}, {2, 1, 2}, {3, 2, 3}}
@@ -279,6 +284,10 @@ func FuzzDecodeCtl(f *testing.F) {
 		}
 		if s.table.Epoch != 0 && s.table.CRC() != s.crc || len(s.smap.Groups) > 0 && s.smap.CheckRanges() != nil || len(s.disks) > 0 && s.diskV == 0 {
 			t.Fatalf("decoded %+v", s)
+		}
+		ss := &s.sess
+		if ss.Acked > ss.Version || slices.ContainsFunc(ss.Sessions, func(e SessionEntry) bool { return e.ID == 0 || e.ID >= ss.Next || e.Fenced > ss.Version }) {
+			t.Fatalf("decoded the session table %+v", ss)
 		}
 	})
 }
@@ -299,6 +308,22 @@ func FuzzDecodeDisk(f *testing.F) {
 		}
 		if e.ID != id || e.Up && (e.Gone || e.Age != 0) || e.Gone && e.Drain || !bytes.Equal(appendDisk(nil, &e), data) {
 			t.Fatalf("%x decodes to %+v, which encodes to %x", data, e, appendDisk(nil, &e))
+		}
+	})
+}
+
+// A session entry that decodes has an incarnation and encodes back to the same bytes.
+func FuzzDecodeSession(f *testing.F) {
+	for _, e := range []SessionEntry{{ID: 1, Node: 4, Incarnation: 1}, {ID: 2, Node: 300, Incarnation: 7, Fenced: 9}} {
+		f.Add(e.ID, appendSession(nil, &e))
+	}
+	f.Fuzz(func(t *testing.T, id uint64, data []byte) {
+		e, err := decodeSession(id, data)
+		if err != nil {
+			return
+		}
+		if e.ID != id || e.Incarnation == 0 || !bytes.Equal(appendSession(nil, &e), data) {
+			t.Fatalf("%x decodes to %+v, which encodes to %x", data, e, appendSession(nil, &e))
 		}
 	})
 }

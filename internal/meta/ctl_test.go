@@ -20,6 +20,8 @@ type ctlRun struct {
 	ctl   *Control
 	token uint64
 	now   core.Tick
+	// raw is the leader's CLOCK_MONOTONIC_RAW, which only session tests move.
+	raw core.Tick
 	// txn is the last Txn proposed, out the output of the last answer.
 	txn Txn
 	out ControlOutput
@@ -71,7 +73,7 @@ func (r *ctlRun) event(node uint32, frame []byte) []core.Action {
 			r.t.Fatal(err)
 		}
 	}
-	return r.ctl.OnEvent(&core.Context{Now: r.now}, &ev, nil)
+	return r.ctl.OnEvent(&core.Context{Now: r.now, Raw: r.raw}, &ev, nil)
 }
 
 // beat is node's disk heartbeat: its oldest unfinished I/O's age and whether its log failed.

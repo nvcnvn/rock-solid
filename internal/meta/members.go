@@ -10,6 +10,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/lease"
 )
 
 // AgeStep is how finely a down disk's committed age is kept: the age is written again each time
@@ -38,13 +39,15 @@ type HaltReport struct {
 
 // NodeReport is what a node's heartbeat tells the control-plane leader beside its disks' own
 // heartbeats: the format level its release writes, whether it holds metadata and, with role
-// meta, nothing else, the table epoch it holds, the disks it opened and its halted replicas.
+// meta, nothing else, the table epoch and session-table version it holds, the disks it opened and
+// its halted replicas.
 type NodeReport struct {
 	Node     uint32
 	Release  uint32
 	Meta     bool
 	MetaOnly bool
 	Epoch    uint64
+	Sessions uint64
 	Opened   []OpenedDisk
 	Halts    []HaltReport
 }
@@ -58,6 +61,7 @@ type nodeState struct {
 	meta    bool
 	only    bool
 	sent    uint64
+	sessV   uint64
 	halts   []Halt
 }
 
@@ -83,6 +87,10 @@ func (c *Control) Heartbeat(now core.Tick, nr *NodeReport, out *ControlOutput) e
 	n.heard, n.release, n.meta, n.only, n.halts = now, nr.Release, nr.Meta, nr.MetaOnly, n.halts[:0]
 	for _, h := range nr.Halts {
 		n.halts = append(n.halts, Halt{Group: h.Group, ID: h.ID, Index: h.Index, Since: now - min(h.Age, now)})
+	}
+	n.sessV = nr.Sessions
+	if nr.Sessions < c.sess.Version {
+		out.SessionTables = append(out.SessionTables, nr.Node)
 	}
 	if nr.Release < c.format {
 		return nil
@@ -115,6 +123,11 @@ func (c *Control) Heartbeat(now core.Tick, nr *NodeReport, out *ControlOutput) e
 // level, is dropped, so the disk is never marked up.
 func (c *Control) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
 	c.begin(ctx.Now)
+	t := lease.Time{Boot: ctx.Now, Raw: ctx.Raw}
+	if ev.Kind == core.EvResumed {
+		c.resume(t)
+	}
+	c.stall(t)
 	if ev.Kind == core.EvNetRecv && !slices.ContainsFunc(c.nodes, func(n nodeState) bool { return n.id == ev.Peer.Node && n.release >= c.format }) {
 		frame, _ := chunkstore.Frame(ctx.Pool, &ev.Msg)
 		if k, err := chunkstore.Peek(frame); err == nil && k == chunkstore.KindReport {

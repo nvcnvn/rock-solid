@@ -49,8 +49,9 @@ CONSTANTS
     PeeringStops,           \* a new interval activates only once its earlier ones are stopped
     AckNeedsEveryNode,      \* the acknowledged version waits for every node not marked down
     DownCountsAsAck,        \* a node marked down counts as acknowledged
-    CountOnHolder           \* a leader stretches a session's lease by its measured rate over
-                            \* the client's, and waits DeadWait for one it has not measured
+    CountOnHolder,          \* a leader stretches a session's lease by its measured rate over
+                            \* the client's (FALSE: it counts every lease on its own clock)
+    UnmeasuredWaitsDeadWait \* a leader waits DeadWait for a session it has not measured
 
 Max(a, b) == IF a >= b THEN a ELSE b
 Min(a, b) == IF a <= b THEN a ELSE b
@@ -111,11 +112,16 @@ ClientRate == SetMin(Rates)
 CapT == Cap \div ClientRate + 1
 \* The leader's count after which a session is due, in its units: the lease, stretched by
 \* the leader's rate over the client's once it has measured it from two renewals, and
-\* DeadWait before that. The leader's timer saturates there.
+\* DeadWait before that. The leader's timer saturates there. A stretch past DeadWait counts
+\* as DeadWait: DeadWait is safe only while no leader's rate over a client's exceeds
+\* DeadWait / SessionLease by more than the client's margin covers, so the configurations
+\* that must pass set DeadWait to SessionLease times the fastest rate over the slowest.
 Threshold(c) ==
     IF ~CountOnHolder THEN SessionLease
-    ELSE IF meas[c] > 0 THEN Max(SessionLease, (SessionLease * meas[c] + ClientRate - 1) \div ClientRate)
-    ELSE DeadWait
+    ELSE IF meas[c] > 0
+         THEN Max(SessionLease, Min(DeadWait, (SessionLease * meas[c] + ClientRate - 1) \div ClientRate))
+    ELSE IF UnmeasuredWaitsDeadWait THEN DeadWait
+    ELSE SessionLease
 TCap == IF CountOnHolder THEN Max(SessionLease, DeadWait) ELSE SessionLease
 \* The leader's measurement after it processes a renewal from the client.
 Measured(c, n) == IF meas[c] < 0 THEN 0 ELSE rate[n]

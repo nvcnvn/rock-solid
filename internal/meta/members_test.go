@@ -32,16 +32,28 @@ func (r *ctlRun) run(d core.Tick, skip ...uint32) {
 	}
 }
 
-// settle commits whatever the machine proposes, if anything.
-func (r *ctlRun) settle(in *ControlInputs) {
+// settle commits whatever the machine proposes, if anything, and reports whether it did.
+func (r *ctlRun) settle(in *ControlInputs) bool {
 	r.t.Helper()
 	in.Now = r.now
-	if r.propose(in) {
-		if a := r.answer(); a.Err != nil || a.Result.FailedCheck >= 0 {
-			r.t.Fatalf("the commit answered %+v", a)
-		}
-		r.c.agree()
+	if !r.propose(in) {
+		return false
 	}
+	if a := r.answer(); a.Err != nil || a.Result.FailedCheck >= 0 {
+		r.t.Fatalf("the commit answered %+v", a)
+	}
+	r.c.agree()
+	return true
+}
+
+// failover moves the group's leadership to another replica and starts a new machine there.
+func (r *ctlRun) failover() {
+	old := r.l
+	r.c.cut[old] = true
+	r.l = r.c.elect()
+	r.c.cut[old] = false
+	r.c.heartbeat()
+	r.ctl = r.load(r.l)
 }
 
 // disk is disk id as last committed.
@@ -687,12 +699,7 @@ func recordRun(t *testing.T, seed uint64) {
 		case 9:
 			r.settle(in)
 			committed = r.ctl.Disks()
-			old := r.l
-			r.c.cut[old] = true
-			r.l = r.c.elect()
-			r.c.cut[old] = false
-			r.c.heartbeat()
-			r.ctl = r.load(r.l)
+			r.failover()
 		}
 		if err := inv.Check(); err != nil {
 			t.Fatal(err)
