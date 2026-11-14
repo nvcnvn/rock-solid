@@ -120,10 +120,7 @@ type lead struct {
 	serving bool
 	peer    *peering
 	kept    []keptChunk
-	// image is the chunks whose image the lead's last decision found at the version it kept: a later decision that keeps
-	// the same version finds it still, though the store lists the chunk for versions of its own the decision dropped.
-	image []ChunkVersion
-	held  []heldMsg
+	held    []heldMsg
 	// asking is set once a chunk of the PG spent its counter or a version failed, which ends the interval: the primary orders nothing more in it and asks for the next once none of its versions is pending, setting asked. spent counts the held writes the store refused for a spent counter, which go ahead of those held since.
 	asking bool
 	asked  bool
@@ -219,6 +216,7 @@ type Replica struct {
 	known  []bool
 	sout   Output
 	leads  []lead
+	images []pgImage
 	reqs   []storeReq
 	vers   []version
 	parked []parkedMsg
@@ -559,6 +557,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 		r.want, r.wantWhole = 0, false
 	}
 	r.countSlots()
+	r.keepImages()
 	r.failed = slices.DeleteFunc(r.failed, func(f failedVer) bool {
 		_, e := r.table.entry(f.pg)
 		return e == nil || e.Interval != uint32(f.version>>32)
@@ -581,7 +580,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 				case old.interval == e.Interval:
 					l = old
 				case r.keptPrimary(e, old.interval):
-					l.since, l.serving, l.kept, l.image = old.since, old.serving, old.kept, old.image
+					l.since, l.serving, l.kept = old.since, old.serving, old.kept
 				case r.plant.reorderAfterOther:
 					l.since = old.since
 				}
@@ -674,6 +673,78 @@ func (r *Replica) sessionWaits() int {
 		}
 	}
 	return n
+}
+
+// pgImage is the image of PG pg that this process's last decision of it found: the chunks whose copy on this disk is the
+// version it kept. A later decision that keeps the same version finds it still, though the store lists the chunk for
+// versions of its own the decision dropped. It holds while every interval of the PG since, up to checked, had this disk
+// as primary or as a member not up, so a lost lead keeps it, and is emptied once one did not.
+type pgImage struct {
+	pg      core.PGID
+	checked uint32
+	chunks  []ChunkVersion
+}
+
+// image is pg's entry in the images, created empty and checked up to interval k if this process has not decided pg.
+func (r *Replica) image(pg core.PGID, k uint32) *pgImage {
+	i, ok := slices.BinarySearchFunc(r.images, pg, func(m pgImage, pg core.PGID) int { return comparePG(m.pg, pg) })
+	if !ok {
+		r.images = slices.Insert(r.images, i, pgImage{pg: pg, checked: k})
+	}
+	return &r.images[i]
+}
+
+// imaged reports the version of chunk c in the image this disk carries for pg: its last decision's or, until this process
+// decides pg, the version its store lists c for under the image flag in the PG's newest persisted decision.
+func (r *Replica) imaged(pg core.PGID, c core.ChunkID) (uint64, bool) {
+	if i, ok := slices.BinarySearchFunc(r.images, pg, func(m pgImage, pg core.PGID) int { return comparePG(m.pg, pg) }); ok {
+		j := slices.IndexFunc(r.images[i].chunks, func(cv ChunkVersion) bool { return cv.Chunk == c })
+		if j < 0 {
+			return 0, false
+		}
+		return r.images[i].chunks[j].Version, true
+	}
+	p := r.table.pool(pg.Pool)
+	if p == nil {
+		return 0, false
+	}
+	x, _ := r.st.Index().Chunk(pg.Pool, c)
+	return x.Listed, x.Image && x.Listed != 0 && x.ListedIn == r.st.Index().Decided(pg.Pool, pg.Index, uint32(len(p.PGs)))
+}
+
+// keepImages empties each image whose PG, in an interval the table brings, has this disk neither as primary nor as a
+// member not up, or no longer shows that interval.
+func (r *Replica) keepImages() {
+	for i := range r.images {
+		m := &r.images[i]
+		_, e := r.table.entry(m.pg)
+		if e == nil {
+			m.chunks = m.chunks[:0]
+			continue
+		}
+		for k := m.checked + 1; k <= e.Interval && len(m.chunks) > 0; k++ {
+			if !r.carries(e, k) {
+				m.chunks = m.chunks[:0]
+			}
+		}
+		m.checked = max(m.checked, e.Interval)
+	}
+}
+
+// carries reports whether interval k of e had this disk as primary or as a member not up.
+func (r *Replica) carries(e *PGEntry, k uint32) bool {
+	ms := e.Members
+	if k != e.Interval {
+		j := slices.IndexFunc(e.Past, func(p PastInterval) bool { return p.Interval == k })
+		if j < 0 {
+			return false
+		}
+		ms = e.Past[j].Members
+	}
+	if d, ok := (&PGEntry{Members: ms}).primary(); ok && d == r.cfg.Disk {
+		return true
+	}
+	return slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark != MarkUp })
 }
 
 // demote refuses the clients of the versions this disk ordered as the primary of a PG it no longer leads, since peering decides whether those versions stay. The store keeps them gated: the next decision this disk persists for the PG settles them.

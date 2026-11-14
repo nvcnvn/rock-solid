@@ -2,7 +2,6 @@ package chunkstore
 
 import (
 	"bytes"
-	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -84,7 +83,7 @@ func TestAPrimaryLackingTheKeptVersionCarriesNoImage(t *testing.T) {
 	if x, _ := c.reps[n].Store().Index().Chunk(testPool, ch); x.Whole == rp.Version {
 		t.Fatalf("primary %+v: the shape needs it lacking X", x)
 	}
-	if img := c.reps[n].leads[i].image; slices.Contains(img, ChunkVersion{Chunk: ch, Version: rp.Version}) {
-		t.Fatalf("the primary lacks %#x of %v but carries it as its image: %v", rp.Version, ch, img)
+	if v, ok := c.reps[n].imaged(pg0, ch); ok && v == rp.Version {
+		t.Fatalf("the primary lacks %#x of %v but carries it as its image", rp.Version, ch)
 	}
 }

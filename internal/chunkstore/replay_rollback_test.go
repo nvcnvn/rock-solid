@@ -81,7 +81,6 @@ func TestARestartedPrimaryRollsBackItsPendingWrite(t *testing.T) {
 }
 
 func TestAPrimaryRestartedAfterItsDropServesFromItsFlag(t *testing.T) {
-	t.Skip("fails until Replay rollback has the image flag after a restart")
 	for seed := uint64(1); seed <= 3; seed++ {
 		r := newRollbackRun(t, seed)
 		r.dropY(t)
@@ -93,7 +92,6 @@ func TestAPrimaryRestartedAfterItsDropServesFromItsFlag(t *testing.T) {
 
 // A restarted primary decides again with the other member up, then that member's disk goes before recovery.
 func TestARestartedPrimaryKeepsItsDropsAcrossItsNextDecision(t *testing.T) {
-	t.Skip("fails until Replay rollback has the image flag after a restart")
 	r := newRollbackRun(t, 1)
 	r.dropY(t)
 	r.restart()
@@ -116,7 +114,6 @@ func TestABouncedPrimaryWithItsWritePendingRollsItBack(t *testing.T) {
 }
 
 func TestABouncedPrimaryKeepsTheImageOfItsDroppedWrite(t *testing.T) {
-	t.Skip("fails until Replay rollback has the image outside the lead")
 	r := newRollbackRun(t, 1)
 	r.dropY(t)
 	r.lose(r.p)

@@ -330,7 +330,7 @@ func (r *Replica) decide(ctx *core.Context, i int, out *ReplicaOutput) {
 }
 
 // findImage marks each chunk the decision keeps whose copy on the primary is its image: its store lists nothing of it, or
-// the lead's last decision found that image at the version this one keeps. The lead keeps, for its next decision, those
+// the image this disk carries has it at the version this one keeps. The disk carries, for its next decision, those
 // whose index also holds the kept version; a chunk with versions still to settle is checked once activation settled it.
 func (r *Replica) findImage(l *lead, pr *peering) {
 	var own []ChunkPeer
@@ -339,14 +339,16 @@ func (r *Replica) findImage(l *lead, pr *peering) {
 	}
 	for j := range pr.kept {
 		k := &pr.kept[j]
+		v, ok := r.imaged(l.pg, k.chunk)
 		k.image = !slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed }) ||
-			!r.plant.forgetImage && slices.Contains(l.image, ChunkVersion{Chunk: k.chunk, Version: k.kept})
+			!r.plant.forgetImage && ok && v == k.kept
 	}
 	unsettled := r.Unsettled(l.pg, nil)
-	l.image = l.image[:0]
+	m := r.image(l.pg, l.interval)
+	m.chunks = m.chunks[:0]
 	for _, k := range pr.kept {
 		if k.image && (slices.Contains(unsettled, k.chunk) || !r.lacks(k)) {
-			l.image = append(l.image, ChunkVersion{Chunk: k.chunk, Version: k.kept})
+			m.chunks = append(m.chunks, ChunkVersion{Chunk: k.chunk, Version: k.kept})
 		}
 	}
 }
@@ -372,7 +374,7 @@ func (r *Replica) persistLists(ctx *core.Context, i int, out *ReplicaOutput) {
 			continue
 		}
 		if !slices.ContainsFunc(r.persists, func(q persistReq) bool { return q.local && q.pg == l.pg && q.interval == l.interval }) {
-			r.persist(ctx, persistReq{pg: l.pg, interval: l.interval, local: true}, uint32(len(p.PGs)), rp.list, l.image)
+			r.persist(ctx, persistReq{pg: l.pg, interval: l.interval, local: true}, uint32(len(p.PGs)), rp.list, r.image(l.pg, l.interval).chunks)
 		}
 	}
 }
@@ -486,13 +488,14 @@ func (r *Replica) tryActivate(ctx *core.Context, i int, out *ReplicaOutput) {
 			return
 		}
 	}
-	l.image = l.image[:0]
+	m := r.image(l.pg, l.interval)
+	m.chunks = m.chunks[:0]
 	for j := range pr.kept {
 		k := &pr.kept[j]
 		k.lacking = r.lacks(*k) || !k.image
 		k.unfound = k.unfound && k.lacking
 		if !k.lacking {
-			l.image = append(l.image, ChunkVersion{Chunk: k.chunk, Version: k.kept})
+			m.chunks = append(m.chunks, ChunkVersion{Chunk: k.chunk, Version: k.kept})
 		}
 	}
 	r.planRecovery(l, pr, e)
