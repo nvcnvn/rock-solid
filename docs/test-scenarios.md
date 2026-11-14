@@ -6702,34 +6702,61 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
 
 ## Off-heap slabs
 
-- Slabs are mapped with `unix.Mmap`, outside the Go heap, and every slot's address is 4 KiB-aligned
-  (`O_DIRECT` and io_uring need it). A page is viewed as `*[4096]byte` by slice conversion, with no
-  `unsafe`.
-- Handles are a `uint32` slot plus a generation, as the simulator pool's. The Buffer pool section's
-  scenarios (explicit capacity, PoolExhausted with requested and available, a reused slot with a new
-  generation, the live-buffer limit, exhaustion as an ordinary outcome) pass on the slab pool too.
-  `AllocZeroed` returns zeros; poison on `Alloc` is the simulator pool's only.
+- Slabs are mapped with `unix.Mmap`, outside the Go heap, and every buffer's and every carve's
+  address is 4 KiB-aligned (`O_DIRECT` and io_uring need it). A page is viewed as `*[4096]byte` by
+  slice conversion, with no `unsafe`.
+- The Buffer pool section's scenarios run on the slab pool and the simulator pool alike, from one
+  shared suite (`internal/core/pooltest`): explicit capacity, PoolExhausted with requested and
+  available, rounding to whole blocks, a reused slot with a new generation, `AllocZeroed` returning
+  zeros, the live-buffer limit, freed and stale handles, and exhaustion as an ordinary outcome.
+  Poison on `Alloc` is the simulator pool's only.
+- Seeded, seeds 1-50 (10,000 in `scripts/seeds.sh`): over 400 random allocations of 1 to 4 blocks
+  and frees, in a pool of three regions of 8, 8 and 5 blocks, every allocation lands where a plain
+  first-fit scan puts it, and no buffer crosses a region, as both pools share one allocator. A pool
+  refuses, by panic, a region under a block, a last region larger than the first, and a short
+  region before the last, since its slot arithmetic could not address them.
 - Review criterion: a stale handle is caught. A freed handle, and a handle whose slot was reallocated
-  (generation mismatch), are refused before any byte is read or written. Open: whether the slab pool
-  panics, as the simulator pool does, or returns an error in release builds.
-- Review criterion: the Go heap stays flat while slabs fill. Fill slabs to 1 GiB of buffers and
-  memtable pages: `runtime/metrics` heap object bytes rise by no more than the handle tables, and a
-  forced collection takes no longer than with empty slabs. Open: tolerance.
-- The memtable's page store on slabs: every LSM tree and chunk index scenario passes with it. A full
-  collection with 20 million entries in slabs takes under 1 ms (as in the LSM tree section), and
-  collection takes 0.0% of CPU under request garbage (Go memtable spike).
-- With slabs in place the tech debt "LSM pages and runs on the Go heap" meets its exit condition: the
-  page store takes its slabs from them, runs are released when the last view holding them closes, and
-  the entry is deleted in the same change.
-- Slabs never hold a Go pointer: the types stored in them are byte arrays and integers (checked by a
-  test over the slab's element types, or by review). Open: no tool enforces it.
-- Growth: a slab that grows adds regions of at most 1 GiB to a sparse table, so an io_uring
-  registration made earlier stays valid; a handle into an old region still reads the same bytes after
-  growth.
+  (generation mismatch), panic before any byte is read or written, in every build, as the
+  simulator pool does: a machine holding one has broken its own state.
+- Review criterion: the Go heap stays flat while slabs fill. With 512 MiB of 4 KiB buffers and
+  512 MiB of 1 MiB page slabs, every byte written, `runtime/metrics` heap object bytes rise by no
+  more than the pool's handle table (8 bytes a block) plus 64 KiB, and the fastest of five forced
+  collections is within 1 ms of the fastest of five with empty slabs. Measured: 1.06 MB against
+  1.11 MB allowed; 172 against 206 µs.
+- A pool over regions: 5 blocks in regions of 2 put a 2-block buffer after a 1-block one at slot 2,
+  not across the boundary at slot 1, and the next 1-block buffers at slots 1 and 4; each buffer
+  reads back what was written to it.
+- Growth: a slab of 3-block regions carving 2 blocks then 2 more maps a second region; the first
+  carve's address and bytes are unchanged. Carving more than a region panics.
+- Closing a pool unmaps it and empties it in place: a handle live at `Close` panics as past the
+  pool's end (0 blocks), through the pool and through a `*core.Pool` kept from before, and the
+  closed pool allocates nothing. A slice taken from `Bytes` must not outlive its handle.
+- The memtable's page store on slabs: a tree whose `Config.Pages` is a loop slab carves its page
+  slabs from it and reads back 20,000 entries written in shuffled order. Every LSM tree test runs
+  with its trees' pages on a loop slab (the package's `TestMain`), except under the seed flags of
+  `scripts/seeds.sh`, where they run on the Go heap, since a slab never gets a dropped tree's pages
+  back ([Slabs for every tree](#slabs-for-every-tree)). A full collection with 20 million entries in
+  slabs, half in runs, takes 0.4 ms (`BenchmarkCollection -lsm.entries 20000000`, under the 1 ms of
+  the LSM tree section).
+- Slabs never hold a Go pointer: a slab and the pool hand out only `[]byte`, and the sans-IO
+  analyzer refuses `unsafe`, so no other type can be stored in one.
+- Hot-path allocation and free allocate nothing: `testing.AllocsPerRun` of 64 frees and
+  allocations is 0, and `BenchmarkAllocFree` reports 0 allocations (10 ns per pair).
+
+## Slabs for every tree
+
+- `Tree.Close` gives the tree's page slabs back: a tree that `meta.State.Restore` replaces, and any
+  other dropped tree, leaves the slab's mapped bytes where they were once its replacement holds as
+  many pages. A plain `go test ./internal/lsm` and the seeded LSM tests then run every tree on
+  slabs, each test unmapping its own at its end, instead of mapping 16 GiB over the run.
+- The chunk index's trees take their pages from slabs: every chunk index scenario passes with it.
+- Collection takes 0.0% of CPU under request garbage with the memtable in slabs (Go memtable spike).
 - `GOMEMLIMIT` is set to the daemon's memory budget minus its mapped slabs, with `GOGC` at its
-  default: a daemon with a 4 GiB budget and 3 GiB of slabs runs with a 1 GiB limit.
-- Hot-path allocation and free allocate nothing (`b.ReportAllocs` 0).
-- Open: what unmapping a slab with a live handle does; the design does not say.
+  default: a daemon with a 4 GiB budget and 3 GiB of slabs runs with a 1 GiB limit. The daemon's
+  start sets it from `Slab.Mapped`.
+- With these in place, and runs and retained Raft entries in slabs, the tech debt "LSM pages, runs
+  and retained Raft entries on the Go heap" meets its exit condition and is deleted in the same
+  change.
 
 ## Event loop
 

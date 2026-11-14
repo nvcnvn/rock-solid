@@ -151,17 +151,20 @@ func (p *page) entries(dst [][]byte) [][]byte {
 	return dst
 }
 
-// pages is a store of pages in pointer-free slabs, addressed by page number; searches counts
-// the descents from a root its trees' reads made.
+// pages is a store of pages in slabs of slabPages pages from carve, addressed by page number;
+// searches counts the descents from a root its trees' reads made.
 type pages struct {
-	slabs    [][]page
+	carve    func(n int) []byte
+	slabs    [][]byte
 	next     uint32
 	freeList []uint32
 	inUse    int
 	searches int
 }
 
-func (s *pages) get(id uint32) *page { return &s.slabs[id/slabPages][id%slabPages] }
+func (s *pages) get(id uint32) *page {
+	return (*page)(s.slabs[id/slabPages][id%slabPages*pageSize:])
+}
 
 func (s *pages) alloc(kind byte, gen uint32) uint32 {
 	var id uint32
@@ -170,7 +173,7 @@ func (s *pages) alloc(kind byte, gen uint32) uint32 {
 		s.freeList = s.freeList[:n-1]
 	} else {
 		if int(s.next/slabPages) == len(s.slabs) {
-			s.slabs = append(s.slabs, make([]page, slabPages))
+			s.slabs = append(s.slabs, s.carve(slabPages*pageSize))
 		}
 		id = s.next
 		s.next++

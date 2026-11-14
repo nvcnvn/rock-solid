@@ -392,7 +392,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Garbage collector (GC), heap, off-heap.** Go frees unused memory automatically by scanning the heap for pointers. Memory mapped outside the Go heap is never scanned, so large pointer-free structures there cost the collector nothing; rock-solid keeps its bulk data there.
 
-**Buffer pool, slab, handle.** A fixed area of memory, carved into equal slots (a slab), from which I/O buffers are taken and returned. Code passes a small handle (slot number plus generation) instead of a pointer, so a stale handle can be detected.
+**Buffer pool, slab, handle.** A slab is memory the daemon maps itself, outside the Go heap, so the garbage collector never scans or counts it; a buffer pool carves a slab into 4 KiB blocks from which I/O buffers are taken and returned. Code passes a small handle (slot number plus generation) instead of a pointer, so a stale handle can be detected ([Runtime in Go](design.md#runtime-in-go)).
 
 **Kernel bypass.** Talking to hardware from user space without going through the kernel, to save its overhead. **SPDK** does it for NVMe drives, **DPDK** for network cards, and **RDMA** (Remote Direct Memory Access) lets one machine's network card read and write another machine's memory directly. **Soft-RoCE** is a software RDMA that runs on any network card, for testing. These need **hugepages** (large memory pages) or **registered memory** the hardware may access by **DMA** (direct memory access), and often **polling**: spinning on a core instead of sleeping until an interrupt. io_uring registers memory too (*fixed buffers*), so the kernel pins it once instead of on every request ([Runtime in Go](design.md#runtime-in-go)).
 
