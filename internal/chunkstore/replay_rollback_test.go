@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
 // rollbackRun is rep2 with X acknowledged on both members and Y, never acknowledged, on the primary alone, the two cut
@@ -159,4 +161,67 @@ func TestThePrimarysEntryForItsDroppedWriteCarriesTheImageFlag(t *testing.T) {
 	if l := r.c.listed(r.c.node(r.p), r.ch); !l.Image {
 		t.Fatalf("primary after a restart %+v: no image flag", l)
 	}
+}
+
+// After a restart, the versions replay holds gated keep the replay point before their records and their segments from the
+// cleaner, until a decision settles them, a whole one and one a crash tore alike; mapped, they count live where they lie.
+func TestReplayGatedVersionsKeepTheirSegmentsAndTheReplayPoint(t *testing.T) {
+	h := newHarness(t, cleanConfig())
+	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
+	// The store model maps every durable record at a recovery; replay holds these back.
+	h.inv.Off(invAcked)
+	h.inv.Off(invReads)
+	whole, torn := chunk(2), chunk(3)
+	h.persist(0, 1, 2, nil)
+	h.gated(whole, 0, fill(4*core.BlockSize, 0x7e), 2)
+	h.settle()
+	rec := len(h.records)
+	h.gated(torn, 0, pattern(9, core.ChunkSize), 2)
+	for first := uint64(0); ; h.step() {
+		if first == 0 && len(h.records) > rec {
+			first = h.records[rec].lsn
+		}
+		if first != 0 && h.s.Log().DurableLSN() >= first+2 {
+			break
+		}
+	}
+	restart(h)
+	if got := h.s.Unsettled(nil); !slices.Contains(got, whole) || !slices.Contains(got, torn) {
+		t.Fatalf("replay left %v gated", got)
+	}
+	var segs []uint32
+	oldest := uint64(0)
+	for _, r := range h.records {
+		if r.lost || !slices.ContainsFunc(r.entries, func(e disklog.Entry) bool { return e.Chunk == whole || e.Chunk == torn }) {
+			continue
+		}
+		segs = append(segs, r.segment)
+		if oldest == 0 {
+			oldest = r.lsn
+		}
+	}
+	for i := range 300 {
+		id := h.write(chunk(1), 0, fill(64*core.BlockSize, byte(i)), 0)
+		h.settle()
+		h.ok(id)
+	}
+	h.clean(1000)
+	if got := h.s.replayPoint(); got >= oldest {
+		t.Fatalf("replay point %d past the gated record at LSN %d", got, oldest)
+	}
+	for _, s := range segs {
+		if u, _ := h.s.Log().Usage(s); u.State != disklog.SegmentUsed || h.s.Log().Cleanable(s) {
+			t.Fatalf("segment %d holding a gated record is %+v, cleanable %v", s, u, h.s.Log().Cleanable(s))
+		}
+	}
+	h.persist(0, 1, 3, nil)
+	h.settleChunk(whole, h.s.Newest(whole))
+	h.settleChunk(torn, h.s.Newest(torn))
+	if got := h.s.Unsettled(nil); len(got) != 0 {
+		t.Fatalf("the decision left %v gated", got)
+	}
+	if got := h.readNow(whole, 0, 4*core.BlockSize); !bytes.Equal(got, fill(4*core.BlockSize, 0x7e)) {
+		t.Fatalf("the whole version reads %x", got[:8])
+	}
+	h.holds()
 }
