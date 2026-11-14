@@ -5800,7 +5800,7 @@ strategy](design.md#testing-strategy) names what is left and the item that will 
 | P4 | A disk marked down `flap_count` (5) times within `flap_window`; a 5 s hiccup in `rep2`, `min_live` 2 | The flapping disk stays down until its heartbeats are normal for a whole `flap_window` and is not refilled before `refill_after`, in `rep3` or `rep2`. The hiccup raises one interval at the down mark and one at the return, and moves no member (F1) | `TestAFlappingDiskIsHeldDown`, `TestHiccupMovesNoMember` |
 | P5 | Primary A of PG 0 restarts with a replicated write it sent still on its way to a member | A asks for a new interval and serves nothing until it has peered there. The member refuses the old interval's write once it holds the new one, and refuses a version sent again after its copy is done; no two contents share one version | `TestARestartedPrimaryTakesANewIntervalBeforeItServes`, `TestAMemberAcceptsOnlyThePGsCurrentInterval`, `TestAVersionSentAgainAfterItsCopyIsDoneIsRefused`; the primary-change run's primary crashes, whose stale writes trip "no member logs a write tagged with an earlier interval" under `neg-compare-member-lists` |
 | P6 | The counter case under [Replica primary](#replica-primary) | As stated there; other PGs see no refusal | `TestASpentCounterAsksForTheNextInterval` |
-| P7 | `pg_count` 1,024 → 2,048 with writes in flight to PG 567 | Open: PGs 1,134 and 1,135 start one interval above 567, and every chunk's versions keep growing. The replica path splits no PG yet; the row runs with the split report rule of [Control-plane group](#control-plane-group) | Placement's split cases only |
+| P7 | `pg_count` 1,024 → 2,048 with writes in flight to PG 567 | Open: PGs 1,134 and 1,135 start one interval above 567, and every chunk's versions keep growing. The replica path splits no PG yet; the row runs in [Control-plane placement faults](#control-plane-placement-faults), under the split report rule of [Control-plane group](#control-plane-group) | Placement's split cases only |
 | P8 | A disk's acknowledgment latency above `slow_disk_factor` times its pool's median for a whole `slow_disk_window`, then normal; a second disk slow at once | Marked down after the window and back after a whole normal window; two slow figures a window apart with none between leave it up; the second slow disk stays up where marking both would leave a PG below `min_live`. A cluster run with one disk 100× slow waits on the simulator's one clock ([tech debt](tech-debts.md#workaround-fail-slow-judged-on-reported-latencies-not-in-a-simulated-cluster)) | `TestAFailSlowDiskIsMarkedDown`, `TestFailSlowNeedsAWholeSlowWindow`, `TestTwoSlowDisksKeepMinLive`; the simulated disk's latency in `TestDiskLatencyAndFailSlow` |
 | P9 | Holder `BOOTTIME` −22.6%, grantor `BOOTTIME` +22.6%; or holder clocks −100 ppm, grantor +100 ppm | No overlap: the holder ends by 3.96 s, the grantor at 4.0 s or later | `TestLeaseTime` "opposite slews", "oscillators" |
 | P9b | Per seed: `BOOTTIME` slewed up to ±22.6% with raw within 100 ppm, or raw within 4% with `BOOTTIME` slewed or at the raw rate; cuts, VM stops, reboots, suspends | No lease outlasts its grant from the first lease, over 10,000 seeds | `TestNoLeaseOutlastsItsGrant` |
@@ -5816,10 +5816,10 @@ strategy](design.md#testing-strategy) names what is left and the item that will 
 | P17 | B restarts shortly after granting A a lease | B joins no peering until both its clocks show one lease; A's reads stop at A's own end of B's grant | `TestTheRestartWait`, `TestARestartedMemberJoinsNoPeeringDuringItsWait`, `TestTheRestartWaitAndResumedStopReads` |
 | P18 | Partial-block writes from two clients, pipelined, with a primary change while a base read is in flight | The byte oracle holds; a write waiting for its base when its interval ends is refused and never ordered | `TestAWriteWaitingWhenItsIntervalEndsIsRefused`; M6 in `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`, M1 and M9 in `TestSubBlockWritesMatchTheByteOracle` |
 | P19 | A merge's base block fails its checksum on the primary's disk | The base is fetched from another member; the oracle holds and no rotten byte reaches a new version | `TestARottenBaseIsFetchedFromAnotherMember`, `TestTwoRottenEdgeBlocksAreBothFetched`, `TestABaseIsAskedOfTheNextMemberWhenOneIsLost` |
-| P20 | Every disk of a pool a few hundred blocks under `write_limit`; new blocks, overwrites, punches, member reboots and delays | Writes adding data are refused with `NoSpace`; overwrites, punches and recovery pass; no disk passes the limit by any other path. Open: the same while grants are out and a refill moves members onto the fullest disks, with [Control-plane group](#control-plane-group)'s grants | `TestWritesPassTheWriteLimitOnlyWhereAdmitted`, `TestWriteLimitAdmission`, `TestRecoveryWritesPassWriteLimit` |
+| P20 | Every disk of a pool a few hundred blocks under `write_limit`; new blocks, overwrites, punches, member reboots and delays | Writes adding data are refused with `NoSpace`; overwrites, punches and recovery pass; no disk passes the limit by any other path. Open: the same while grants are out and a refill moves members onto the fullest disks, in [Control-plane placement faults](#control-plane-placement-faults) | `TestWritesPassTheWriteLimitOnlyWhereAdmitted`, `TestWriteLimitAdmission`, `TestRecoveryWritesPassWriteLimit` |
 | P21 | Capacity layouts C1 to C6 filled with uniformly hashed chunks | The first refusal comes within 1% of the reported available figure | `TestUniformFillsReachAvailable` |
 | P22 | `rep3`, `min_live` 2, two members cut off with writes in flight | No write is acknowledged on the one copy left; every write sent then is refused, the last once a member returns; the next is acknowledged on two copies at least | `TestWritesWaitForMinLiveAfterTwoMembersGoDown`, `TestAPrimaryBelowMinLiveServesNoReads` |
-| P23 | `rep3` on 3 nodes of one disk; a disk fails and its refill finds no eligible disk | Its PGs raise `Stuck` after 60 s of copying nothing, never `CannotReprotect`; a PG clears it once it copies again or has nothing left to copy. Open: a disk filled to its log reserve stopping the copy, and a disk added clearing it, run once [Control-plane group](#control-plane-group) reports each PG's copying | `TestRefillWithNoEligibleDisk`, `TestStuck` |
+| P23 | `rep3` on 3 nodes of one disk; a disk fails and its refill finds no eligible disk | Its PGs raise `Stuck` after 60 s of copying nothing, never `CannotReprotect`; a PG clears it once it copies again or has nothing left to copy. Open: a disk filled to its log reserve stopping the copy, and a disk added clearing it, run in [Control-plane placement faults](#control-plane-placement-faults) | `TestRefillWithNoEligibleDisk`, `TestStuck` |
 | P24 | A node reboots, its disks down for less than `refill_after` | No capacity figure or pool condition changes: its disks keep their shares at their last reported fills | `TestRebootChangesNoFigure`, `TestHiccupMovesNoMember` |
 
 The read run cuts a disk off and its detector marks it down after `node_down_after` (5 s), when every
@@ -6439,7 +6439,28 @@ Only the last component (a file name, an xattr name, an S3 key, or what follows 
 | A `Pool` create or update | Checked against the [Pools](#pools) creation rules, then committed under `ctl/pool/`. A refused one commits nothing |
 | `replicas` changed | The next table starts a new interval of every PG of the pool |
 
-**Membership**
+**Placement table**
+
+| Input | Expected |
+| --- | --- |
+| A node holding table epoch e receives the delta for e + 1 | It applies the delta. The CRC32C of its resulting table equals the CRC in the entry |
+| A delta whose resulting CRC does not match | The node fetches the whole table |
+| A node at e receives e + 3 (a gap) | It fetches the whole table. It loses nothing, since each PG entry carries its interval number |
+| A Raft snapshot of the group | Holds the whole table |
+| A primary reports activation of interval k on its heartbeat | A later table records k as the PG's last activated interval and drops the member lists of the intervals before it. That table starts no interval |
+| A disk added | Each table of the change raises the table epoch. Only PGs whose members change start a new interval |
+| A heartbeat reports an activation or a recovered report under a table epoch older than its pool's last split | Dropped: it names its PG in the numbering before the split |
+| The control-plane leader fails over | The new leader reads the pools, the table and the shard map back from the group's state, and its next table follows the last committed one |
+
+**Shard map**
+
+| Input | Expected |
+| --- | --- |
+| `PlaceVoters` gives a group new voters | The group's entry is committed under `ctl/` before its leader is handed the plan |
+| The leader fails over with a shard map change proposed and not committed | No group was handed it, and the new leader hands out no replica ID it already handed out |
+| A Raft snapshot of the group | Holds the whole shard map |
+
+## Control-plane membership
 
 | Input | Expected |
 | --- | --- |
@@ -6453,18 +6474,11 @@ Only the last component (a file name, an xattr name, an S3 key, or what follows 
 | A fail-slow disk's latency back to normal for 50 s, then for a whole minute | It rejoins only after the whole `slow_disk_window` |
 | A `role: meta` node | Holds control-plane and shard voters, and no PG member |
 
-**Placement table**
+**Format level.** A `ctl/` key, raised by the operator. A node running a release older than the level that heartbeats after it was raised is not marked up, and a condition names it; Ceph's monitor likewise ignores the boot of an OSD below its minimum release.
 
-| Input | Expected |
-| --- | --- |
-| A node holding table epoch e receives the delta for e + 1 | It applies the delta. The CRC32C of its resulting table equals the CRC in the entry |
-| A delta whose resulting CRC does not match | The node fetches the whole table |
-| A node at e receives e + 3 (a gap) | It fetches the whole table. It loses nothing, since each PG entry carries its interval number |
-| A Raft snapshot of the group | Holds the whole table |
-| A primary reports activation of interval k on its heartbeat | A later table records k as the PG's last activated interval and drops the member lists of the intervals before it. That table starts no interval |
-| A disk added | Each table of the change raises the table epoch. Only PGs whose members change start a new interval |
+## Control-plane sessions
 
-**Sessions.** The [Sessions and fencing model](#sessions-and-fencing-model)'s scenarios run as simulator seeds against the real group. In addition:
+The [Sessions and fencing model](#sessions-and-fencing-model)'s scenarios run as simulator seeds against the real group. In addition:
 
 | Input | Expected |
 | --- | --- |
@@ -6479,7 +6493,14 @@ Only the last component (a file name, an xattr name, an S3 key, or what follows 
 | An owner reports a recall unanswered for `recall_timeout` | The leader stops renewing the session and answers its heartbeats without renewing it; the session is fenced once its lease runs out on the leader's clock, like any expiry, never at once |
 | An operator evicts a session | The same |
 
-**Space grants.** They are computed on each heartbeat, per node and pool ([Client design](design.md#client-design)). The inputs:
+**Simulator faults:**
+
+- a control-plane leader failover while sessions renew;
+- a renewal answered by a deposed leader.
+
+## Space grants
+
+Grants are computed on each heartbeat, per node and pool ([Client design](design.md#client-design)). The inputs:
 
 - A: the pool's available figure before grants;
 - F: the bytes nodes reported flushed, from their cumulative counts, since the fills the leader holds were reported;
@@ -6525,22 +6546,24 @@ The invariant, checked after every simulator step: for every disk d of the pool,
 
 **Capacity figures.** From the fills that heartbeats report (about 8 bytes per disk) and the per-pool data on each disk, the leader computes per pool the available, balanced, stranded-fraction and reprotectable figures and the conditions, `Stuck` from each PG's copying progress, with the [Pools](#pools) cases as inputs, and per node for `locality: node` pools.
 
-**Format level.** A `ctl/` key, raised by the operator. A node running a release older than the level that heartbeats after it was raised is not marked up, and a condition names it; Ceph's monitor likewise ignores the boot of an OSD below its minimum release.
-
-**Replacing the phase 3 stand-in.** The phase 3 placement seeds run unchanged against the real group and pass the same invariants.
-
 **Simulator faults:**
 
-- a control-plane leader failover while sessions renew;
-- a renewal answered by a deposed leader;
 - the pool reaching `write_limit` while daemons buffer and other nodes write through;
 - a heartbeat carrying a space grant lost or delayed, its request or its reply;
 - a control-plane failover while daemons stream under their grants;
 - a client partitioned from the control-plane leader but not from storage, streaming under its grant;
-- a daemon crash in the middle of a reuse window;
-- a refill after a disk failure that moves members onto the fullest disks while grants are out.
+- a daemon crash in the middle of a reuse window.
 
 A write that crosses from a granted chunk into a refused one is a daemon case, covered with phase 6's file frontend.
+
+## Control-plane placement faults
+
+Phase 3's placement seeds run unchanged against the real group in place of the stand-in, and pass the same invariants. With them, the [placement faults](#placement-faults-and-invariants) phase 3 leaves open:
+
+- P7 under the split report rule of [Control-plane group](#control-plane-group);
+- P20 while [Space grants](#space-grants) are out and a refill after a disk failure moves members onto the fullest disks;
+- P23 end to end, from the leader's record of when each PG last copied;
+- a seeded run that clones a disk onto a second device, the one fault that reaches "no log ID is up under two disk IDs".
 
 ## Operator's disk exits
 
@@ -6563,7 +6586,7 @@ A write that crosses from a granted chunk into a refused one is a daemon case, c
 
 ## Session fencing on storage nodes
 
-`internal/chunkstore`, against the [Control-plane group](#control-plane-group)'s session table. The
+`internal/chunkstore`, against the [Control-plane sessions](#control-plane-sessions)' session table. The
 [Sessions and fencing model](#sessions-and-fencing-model)'s scripted scenarios 3, 5 and 9 run as
 simulator seeds against the real primaries and replicas.
 
