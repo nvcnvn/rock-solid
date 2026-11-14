@@ -113,6 +113,15 @@ RecoveryOrdered(l) ==
         /\ Trace[i].k = "recoverorder"
         /\ Trace[i].c = l.c /\ Trace[i].iv = l.iv /\ Trace[i].s = l.s
 
+\* A primary's record of its own copy of a recovery write that landed after it
+\* took its own reply for a later interval and before it decided that interval:
+\* the decision reads the reply and lists the chunk again, so the line is a
+\* stutter once the primary left the interval.
+RecoveredLate(l) ==
+    /\ RecoveryOrdered(l)
+    /\ OwnRecovery(l)
+    /\ IvAt(l.n, ChunkPG[l.c]) > l.iv
+
 RecoverLine(l) ==
     /\ (l.s = 0) = (miss[ddisk[l.n]][l.c] = 0)
     /\ RecoverFrom(l.l, ChunkPG[l.c], l.c, ddisk[l.n], IF l.s = 0 THEN ddisk[l.n] ELSE l.s)
@@ -140,6 +149,8 @@ Line(l) ==
        /\ IF l.v \in dlog[ddisk[l.n]][l.c]
           THEN UNCHANGED vars
           ELSE \E m \in {x \in rm : x.to = ddisk[l.n] /\ x.c = l.c /\ x.v = l.v} : Deliver(m)
+    \/ /\ l.k = "ownlogged"
+       /\ \E r \in {x \in ownw : x.n = l.n /\ x.c = l.c /\ x.v = l.v} : OwnLogged(r)
     \/ /\ l.k = "maydeliver"
        /\ \/ UNCHANGED vars
           \/ \E m \in {x \in rm : x.to = ddisk[l.n] /\ x.c = l.c /\ x.v = l.v} : Deliver(m)
@@ -176,6 +187,9 @@ Line(l) ==
                /\ \/ l.v = miss[ddisk[l.n]][l.c]
                   \/ IvOfV(l.v) = IvAt(l.l, ChunkPG[l.c]) /\ l.v <= pv[l.l][l.c]
                /\ RecoverLine(l)
+    \/ /\ l.k = "recoveredlate"
+       /\ RecoveredLate(l)
+       /\ UNCHANGED vars
     \/ /\ l.k = "mayrecover"
        /\ RecoveryOrdered(l)
        /\ \/ UNCHANGED vars
@@ -193,8 +207,9 @@ Line(l) ==
           THEN UNCHANGED vars
           ELSE IvAt(l.n, l.p) = l.iv /\ RestartAsk(l.n, l.p)
     \/ /\ l.k = "committed"
-       /\ [c |-> l.c, v |-> l.v] \in ackd
-       /\ UNCHANGED vars
+       /\ IF [c |-> l.c, v |-> l.v] \in ackd
+          THEN UNCHANGED vars
+          ELSE \E r \in {x \in pend : x.c = l.c /\ x.v = l.v} : Answer(r)
     \/ /\ l.k = "peer"
        /\ pr[l.n][l.p].iv = l.iv
        /\ ReplyMatches(l)
