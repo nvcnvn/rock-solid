@@ -4124,6 +4124,11 @@ that passed before discrepancy 12 again with that path removed:
 
 Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half.
 
+The `conform` workflow runs this check nightly on a window of 500 seeds that moves each day, from seed
+40 up, with 20 minutes per trace where a local run gives 400 s, and the plants over the window's first 40.
+A failure names its seed, and `RUN=TestPeeringKeepsAcknowledgedWritesAcrossPrimaries FIRST=<seed> COUNT=1
+scripts/conform.sh` replays it. It never blocks a merge.
+
 `refillSoleHolder` is not in `conformPlants`: the primary-change run is too short for a member merely down to go missing, so a refill or a `Stay` of one appears only in `scripted-refill` and `scripted-stay`, and `TestPlantedPeeringBugsBreakTheOracle` breaks the rule through the simulator's invariant.
 
 Each run ends with what its passing traces covered, and each trace's rows stay in its directory's

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Spec conformance: runs the simulator's conformance traces and has TLC 1.7.4 check each is a behavior
-# of models/epoch/epoch.tla ("Spec conformance" in docs/test-scenarios.md). Not part of lint or CI.
+# of models/epoch/epoch.tla ("Spec conformance" in docs/test-scenarios.md). Not part of lint; the conform workflow
+# runs it nightly.
 #   scripts/conform.sh                  every trace of TestConform*, or of the test RUN names, seeded
 #                                       ones over COUNT seeds (default 10) from FIRST (default 0)
 #   scripts/conform.sh file.trace ...   those traces alone

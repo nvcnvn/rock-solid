@@ -1,0 +1,69 @@
+name: conform
+
+on:
+  schedule:
+    - cron: "47 3 * * *"
+  workflow_dispatch:
+    inputs:
+      first:
+        description: First seed (default rotates daily)
+        required: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUN: TestPeeringKeepsAcknowledgedWritesAcrossPrimaries
+  COUNT: "500"
+  PLANT_COUNT: "40"
+  # A slow lane: a trace that gives no verdict in 400 s locally gets 20 minutes here.
+  TLC_SECONDS: "1200"
+  JOBS: "3"
+
+jobs:
+  traces:
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [sweep, plants]
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - id: seeds
+        env:
+          INPUT_FIRST: ${{ inputs.first }}
+        run: |
+          first=$INPUT_FIRST
+          echo "first=${first:-$(( $(date -u +%s) / 86400 % 2000 * COUNT + 40 ))}" >>"$GITHUB_OUTPUT"
+      - name: sweep
+        if: matrix.mode == 'sweep'
+        env:
+          FIRST: ${{ steps.seeds.outputs.first }}
+        run: |
+          echo "Seeds $FIRST to $((FIRST + COUNT - 1)); replay one: RUN=$RUN FIRST=<seed> COUNT=1 scripts/conform.sh" | tee -a "$GITHUB_STEP_SUMMARY"
+          status=0
+          scripts/conform.sh >conform.log 2>&1 || status=$?
+          cat conform.log
+          grep -v '^ok' conform.log >>"$GITHUB_STEP_SUMMARY" || true
+          exit $status
+      - name: plants
+        if: matrix.mode == 'plants'
+        env:
+          FIRST: ${{ steps.seeds.outputs.first }}
+          COUNT: ${{ env.PLANT_COUNT }}
+        run: |
+          echo "Plants on seeds $FIRST to $((FIRST + COUNT - 1))" | tee -a "$GITHUB_STEP_SUMMARY"
+          scripts/conform.sh plants 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
