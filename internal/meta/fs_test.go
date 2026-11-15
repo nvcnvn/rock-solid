@@ -1029,10 +1029,11 @@ func (w *fsWork) build(o *fsOp) error {
 		r := Rename{SrcDir: e.dir, DstDir: o.dir, Src: b(e.name), Dst: o.name, Child: e.inode, ChildMode: e.mode}
 		if v, ok := w.h.s.tree.Get(w.h.key(o.dir, InodeEntry, string(o.name))); ok {
 			over, mode, _ := DecodeEntry(v)
-			if over == e.inode || (mode == ModeDir) != (e.mode == ModeDir) {
+			oa := w.attr(over)
+			if over == e.inode || (mode == ModeDir) != (e.mode == ModeDir) || oa == nil {
 				return errNoOp
 			}
-			r.Over, r.OverAttr, r.OverOpen, r.OverPending = over, w.attr(over), rng.IntN(4) == 0, w.h.purge(over)
+			r.Over, r.OverAttr, r.OverOpen, r.OverPending = over, oa, rng.IntN(4) == 0, w.h.purge(over)
 		}
 		for d := o.dir; d != RootInode; {
 			v, ok := w.h.s.tree.Get(w.h.key(d, InodeParent, ""))

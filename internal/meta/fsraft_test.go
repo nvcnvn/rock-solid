@@ -418,7 +418,7 @@ func TestFilesystemPlantsAreCaughtAcrossElections(t *testing.T) {
 		seeds     uint64
 	}{
 		{statePlants{replayIgnored: true}, false, invReplay, 5},
-		{statePlants{nonFinalStored: true}, false, invReplay, 13},
+		{statePlants{nonFinalStored: true}, false, invReplay, 5},
 		{statePlants{}, true, invInodeNew, 5},
 	} {
 		caught := false
