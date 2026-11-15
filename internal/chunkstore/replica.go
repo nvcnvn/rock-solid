@@ -419,11 +419,13 @@ type replicaPlants struct {
 	writeOnUnfound bool
 	neverUnfound   bool
 	forgetImage    bool
-	// fenceOnArrival refuses an older incarnation's write when it reaches the primary, not when the
-	// store orders it; reorderAfterOther keeps a lead's term across intervals another primary led,
-	// so its held writes are ordered again.
+	// fenceOnArrival refuses an older incarnation's or fenced session's write when it reaches the
+	// primary, not when the store orders it; reorderAfterOther keeps a lead's term across intervals
+	// another primary led, so its held writes are ordered again; memberNoFence has a member take a
+	// replicated write without checking its session.
 	fenceOnArrival    bool
 	reorderAfterOther bool
+	memberNoFence     bool
 	// admitPastLimit orders a plain write that adds live data past a member's write_limit.
 	admitPastLimit bool
 	// commitOnOwnLog commits a version once the primary's own log holds it, before its members do;
@@ -927,7 +929,7 @@ func (r *Replica) park(ev *core.Event, epoch uint64, out *ReplicaOutput) {
 func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) {
 	if r.plant.fenceOnArrival && !r.replaying && u.Session != 0 && u.Incarnation < r.st.sessions[u.Session] {
 		freeBuf(ctx, ev.Msg.Buf)
-		r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusRefused}, out)
+		r.reply(ctx, ev.Peer, u.ID, r.refusal(u.PG.PG), out)
 		return
 	}
 	if f := r.st.Sessions(); f.Newer(u.Session) {
@@ -1007,7 +1009,7 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	}
 	recover := u.Kind == KindRecover
 	gone := e != nil && (!slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) || r.plant.goneWhileUp && u.Version&15 == 7)
-	refuse := e == nil || r.st.Sessions().Fenced(u.Session) || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || gone ||
+	refuse := e == nil || r.st.Sessions().Fenced(u.Session) && !r.plant.memberNoFence || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || gone ||
 		slices.ContainsFunc(r.failed, func(f failedVer) bool {
 			return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version <= u.Version || recover)
 		})
@@ -1046,6 +1048,9 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	}
 	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk, version: u.Version, recover: recover, source: u.Source, interval: u.PG.Interval})
 	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, Epoch: u.Snapshot, Version: u.Version, Session: u.Session}
+	if r.plant.memberNoFence {
+		req.Session = 0
+	}
 	if recover {
 		req.Version, req.HasVer, req.Ver, req.Interval, req.Recover = 0, true, u.Version, u.PG.Interval, true
 	}

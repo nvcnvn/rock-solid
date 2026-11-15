@@ -64,7 +64,7 @@ sessions/neg-two-holders	meta.evictAtOnce	TestPlantedLockBugsBreakTheLockInvaria
 sessions/neg-release-on-commit	meta.releaseOnCommit	TestPlantedLockBugsBreakTheLockInvariants
 sessions/neg-check-on-arrival	open	Session fencing on storage nodes
 sessions/neg-replica-no-check	open	Session fencing on storage nodes
-sessions/neg-up-with-old-table	open	Session fencing on storage nodes
+sessions/neg-up-with-old-table	meta.upWithOldTable	TestPlantedLockBugsBreakTheLockInvariants
 sessions/neg-peering-skipped	open	Session fencing on storage nodes
 sessions/neg-ack-reachable-only	meta.ackReachableOnly	TestPlantedLockBugsBreakTheLockInvariants
 sessions/neg-ack-waits-down	meta.ackWaitsDown	TestPlantedLockBugsBreakTheLockInvariants

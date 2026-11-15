@@ -231,10 +231,11 @@ func (c *Control) resume(t lease.Time) {
 // an eviction fenced at once, a leader lease that starts no count over, so a new leader counts
 // from its first step, which can come before the old leader's last renewal, a fenced session's
 // locks released at its fence's commit, and an acknowledged version that counts only the nodes
-// this leader heard from or waits for nodes whose disks are marked down.
+// this leader heard from or waits for nodes whose disks are marked down, and a disk marked up
+// while its node holds an older table.
 type sessionPlants struct {
 	deadWaitLease, countOnOwnClock, answerWithoutLease, evictAtOnce, noFullLease bool
-	releaseOnCommit, ackReachableOnly, ackWaitsDown                              bool
+	releaseOnCommit, ackReachableOnly, ackWaitsDown, upWithOldTable              bool
 	// noHeadCheck is not the model's: a session Txn without its check of the table's head.
 	noHeadCheck bool
 }

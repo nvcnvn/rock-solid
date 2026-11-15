@@ -228,7 +228,7 @@ func (c *Control) OldReleases() []uint32 {
 // said which it holds: a disk of it marked up would order a fenced session's write it held.
 func (c *Control) lagsTable(node uint32) bool {
 	i := slices.IndexFunc(c.nodes, func(n nodeState) bool { return n.id == node })
-	return i < 0 || c.nodes[i].sessV < c.sess.Version
+	return !c.plant.upWithOldTable && (i < 0 || c.nodes[i].sessV < c.sess.Version)
 }
 
 // Disks is the disk record as last committed.

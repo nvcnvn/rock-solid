@@ -540,7 +540,8 @@ func TestPlantedSessionBugsFenceEarly(t *testing.T) {
 // seeds of the seeded run: a lock freed when its holder's fence commits, or acknowledged by the
 // nodes this leader heard from alone, reaches its next holder before a node with a disk up holds the fence; an
 // eviction fenced at once lets two clients act on one lock; an acknowledgement that waits for
-// every disk marked down to come back keeps a dead client's locks past their bound.
+// every disk marked down to come back keeps a dead client's locks past their bound; a disk marked
+// up while its node holds an older table (36 of 500) leaves a version acknowledged without it.
 func TestPlantedLockBugsBreakTheLockInvariants(t *testing.T) {
 	for _, p := range []struct {
 		name string
@@ -552,6 +553,7 @@ func TestPlantedLockBugsBreakTheLockInvariants(t *testing.T) {
 		{"a lock freed when its fence commits", 10, sessionPlants{releaseOnCommit: true}, invLockOrder},
 		{"a fence acknowledged by the nodes heard from", 72, sessionPlants{ackReachableOnly: true}, invLockOrder},
 		{"an acknowledgement waiting for down disks", 10, sessionPlants{ackWaitsDown: true}, invLocksFree},
+		{"a disk marked up with an older table", 70, sessionPlants{upWithOldTable: true}, invSessionAcks},
 	} {
 		if !breaksWithin(t, p.n, p.pl, p.inv) {
 			t.Errorf("%s: %d seeds broke no %q", p.name, p.n, p.inv)
