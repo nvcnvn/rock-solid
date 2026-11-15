@@ -867,8 +867,8 @@ type fsWork struct {
 	// child, when set, gives a new inode's ID in place of w's own numbering: a new file's in
 	// dir's slot, a directory's too unless it takes a fresh slot, and false while none is reserved.
 	child func(dir uint64, mkdir bool) (uint64, bool)
-	// moved, when set, collects every inode a link or a cross-directory rename was built for.
-	moved map[uint64]bool
+	// moving is the entry the last link or cross-directory rename built puts its inode at.
+	moving fsEntry
 }
 
 func (w *fsWork) scan(inode uint64, tags ...byte) []KV {
@@ -883,9 +883,11 @@ func (w *fsWork) scan(inode uint64, tags ...byte) []KV {
 	return r.KVs
 }
 
-// walk is every directory and every entry reachable from the root.
+// walk is every directory and every entry reachable from the root; it fails the test on a
+// directory reached twice, which a loop would otherwise make endless.
 func (w *fsWork) walk() (dirs []uint64, entries []fsEntry) {
 	dirs = []uint64{RootInode}
+	seen := map[uint64]bool{RootInode: true}
 	for i := 0; i < len(dirs); i++ {
 		for _, kv := range w.scan(dirs[i], InodeEntry) {
 			var k Key
@@ -895,6 +897,10 @@ func (w *fsWork) walk() (dirs []uint64, entries []fsEntry) {
 			}
 			entries = append(entries, fsEntry{dirs[i], string(k.Name), inode, mode})
 			if mode == ModeDir {
+				if seen[inode] {
+					w.h.t.Fatalf("directory %x is reached twice", inode)
+				}
+				seen[inode] = true
 				dirs = append(dirs, inode)
 			}
 		}
@@ -952,6 +958,11 @@ func (w *fsWork) request(rng *rand.Rand, req Request) func() (Txn, bool) {
 			return func() (Txn, bool) { return Txn{}, false }
 		}
 	}
+	return w.sender(o, req)
+}
+
+// sender returns the builder of each send of o under req, as request does.
+func (w *fsWork) sender(o fsOp, req Request) func() (Txn, bool) {
 	var first *Txn
 	return func() (Txn, bool) {
 		w.now += second
@@ -970,11 +981,18 @@ func (w *fsWork) request(rng *rand.Rand, req Request) func() (Txn, bool) {
 	}
 }
 
+// stamped is a with its mtime and ctime at now.
+func stamped(a Attr, now int64) *Attr {
+	a.Mtime, a.Ctime = now, now
+	return &a
+}
+
 var errNoOp = errors.New("the daemon answers with an errno")
 
 func (w *fsWork) build(o *fsOp) error {
 	f, now, rng := &w.h.f, w.now, rand.New(rand.NewPCG(o.seed, 2))
 	e, a := o.e, (*Attr)(nil)
+	w.moving = fsEntry{}
 	if e.inode != 0 {
 		byName := o.kind == 3 || o.kind == 4 || o.kind == 5
 		if v, ok := w.h.s.tree.Get(w.h.key(e.dir, InodeEntry, e.name)); ok && byName {
@@ -990,17 +1008,17 @@ func (w *fsWork) build(o *fsOp) error {
 	if e.mode == ModeDir && (o.kind == 2 || o.kind == 3 || o.kind == 6) || e.mode != ModeDir && o.kind == 4 {
 		return errNoOp
 	}
-	if w.moved != nil && (o.kind == 2 || o.kind == 5 && e.dir != o.dir) {
-		w.moved[e.inode] = true
+	if o.kind == 2 || o.kind == 5 && e.dir != o.dir {
+		w.moving = fsEntry{dir: o.dir, name: string(o.name), inode: e.inode}
 	}
 	switch o.kind {
 	case 0:
 		if rng.IntN(3) == 0 {
-			return f.Create(o.dir, w.h.up(o.dir), o.name, o.child, &symlinkA, bytes.Repeat([]byte("t"), 1+rng.IntN(2500)), now)
+			return f.Create(o.dir, w.h.up(o.dir), o.name, o.child, stamped(symlinkA, now), bytes.Repeat([]byte("t"), 1+rng.IntN(2500)), now)
 		}
-		return f.Create(o.dir, w.h.up(o.dir), o.name, o.child, &plain, nil, now)
+		return f.Create(o.dir, w.h.up(o.dir), o.name, o.child, stamped(plain, now), nil, now)
 	case 1:
-		return f.Mkdir(o.dir, w.h.up(o.dir), o.name, o.child, &rootDir, o.child&seqMask == 1, now)
+		return f.Mkdir(o.dir, w.h.up(o.dir), o.name, o.child, stamped(rootDir, now), o.child&seqMask == 1, now)
 	case 2:
 		return f.Link(o.dir, w.h.up(o.dir), o.name, e.inode, a, now)
 	case 3:

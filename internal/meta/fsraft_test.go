@@ -3,6 +3,7 @@ package meta
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"testing"
@@ -31,11 +32,13 @@ type fsDaemon struct {
 
 // fsRaftRun drives the filesystem workload of three daemons through a three-replica shard, the
 // volume's root and every inode ID and slot proposed through it, with leaders cut off while a
-// Txn is in flight, replicas restarted, replies lost, daemons crashed with their reservations and
-// requests outstanding and the root's creation resent, and checks the filesystem and replay
-// invariants on the leader's state after every Txn; only, when set, keeps one invariant.
+// Txn is in flight, replicas restarted, replies lost, daemons reconnected without their
+// reservations, daemons crashed and restarted under a new session with their requests never
+// resent, and the root's creation resent, and checks the filesystem and replay invariants on the
+// leader's state after every Txn; only, when set, keeps one invariant.
 func fsRaftRun(t testing.TB, seed uint64, sp statePlants, resetRoot bool, only string) error {
 	rng := rand.New(rand.NewPCG(seed, 1))
+	tw := rand.New(rand.NewPCG(seed, 3))
 	c := newGroup(t, 3, false)
 	c.elect()
 	plant := func() {
@@ -103,11 +106,12 @@ func fsRaftRun(t testing.TB, seed uint64, sp statePlants, resetRoot bool, only s
 	}
 
 	var ds [3]fsDaemon
-	ids := map[uint64]bool{}
+	ids := map[uint64]bool{RootInode: true}
 	var cur int
 	var fresh uint32
 	var idErr, replayErr error
-	w := &fsWork{h: h, moved: map[uint64]bool{}}
+	w := &fsWork{h: h, now: rootDir.Mtime}
+	moved := map[uint64]bool{}
 	w.child = func(dir uint64, mkdir bool) (uint64, bool) {
 		d := &ds[cur]
 		id, ok := uint64(0), false
@@ -191,11 +195,16 @@ func fsRaftRun(t testing.TB, seed uint64, sp statePlants, resetRoot bool, only s
 	inv.Register(invSlot, func() error {
 		h.s = lead()
 		_, entries := w.walk()
+		away := map[uint64]bool{}
 		for _, e := range entries {
-			if e.mode != ModeDir && slotOf(e.inode) != slotOf(e.dir) && !w.moved[e.inode] {
-				return fmt.Errorf("file %x has its entry %q in directory %x", e.inode, e.name, e.dir)
+			if e.mode != ModeDir && slotOf(e.inode) != slotOf(e.dir) {
+				if !moved[e.inode] {
+					return fmt.Errorf("file %x has its entry %q in directory %x", e.inode, e.name, e.dir)
+				}
+				away[e.inode] = true
 			}
 		}
+		maps.DeleteFunc(moved, func(inode uint64, _ bool) bool { return !away[inode] })
 		return nil
 	})
 	inv.Register(invAncestor, func() error {
@@ -236,12 +245,59 @@ func fsRaftRun(t testing.TB, seed uint64, sp statePlants, resetRoot bool, only s
 		first  *Result
 		fresh  uint32
 		unsure bool
+		// moves is the entry a link or cross-directory rename puts its inode at.
+		moves fsEntry
 	}
 	var out []*fsReq
 	var next [3]uint64
+	sess := [3]uint64{7, 7, 7}
+	reqOf := func(mount uint32) Request {
+		next[mount]++
+		oldest := next[mount]
+		for _, r := range out {
+			if r.mount == mount {
+				oldest = min(oldest, r.id)
+			}
+		}
+		return Request{Session: sess[mount], Mount: mount, ID: next[mount], Oldest: oldest}
+	}
+	// twins are two requests of one mount built from one read: two sibling directories renamed
+	// into each other, or two SetAttrs of one file.
+	twins := func() []*fsReq {
+		h.s = lead()
+		_, entries := w.walk()
+		dirs := slices.DeleteFunc(slices.Clone(entries), func(e fsEntry) bool { return e.mode != ModeDir })
+		files := slices.DeleteFunc(entries, func(e fsEntry) bool { return e.mode == ModeDir })
+		var os []fsOp
+		if len(dirs) > 0 && tw.IntN(2) == 0 {
+			x := dirs[tw.IntN(len(dirs))]
+			sibs := slices.DeleteFunc(dirs, func(e fsEntry) bool { return e.dir != x.dir || e.inode == x.inode })
+			if len(sibs) > 0 {
+				y := sibs[tw.IntN(len(sibs))]
+				os = []fsOp{{kind: 5, e: x, dir: y.inode, name: b(x.name), seed: tw.Uint64()}, {kind: 5, e: y, dir: x.inode, name: b(y.name), seed: tw.Uint64()}}
+			}
+		}
+		if os == nil && len(files) > 0 {
+			f := files[tw.IntN(len(files))]
+			os = []fsOp{{kind: 6, e: f, dir: f.dir, seed: tw.Uint64()}, {kind: 6, e: f, dir: f.dir, seed: tw.Uint64()}}
+		}
+		mount := uint32(tw.IntN(3))
+		var rs []*fsReq
+		for _, o := range os {
+			req := reqOf(mount)
+			r := &fsReq{mount: mount, id: req.ID, build: w.sender(o, req), resend: tw.IntN(4)}
+			out, rs = append(out, r), append(rs, r)
+		}
+		return rs
+	}
 	for step := 0; step < 600; step++ {
 		if rng.IntN(60) == 0 {
 			ds[rng.IntN(3)] = fsDaemon{}
+		}
+		if tw.IntN(120) == 0 {
+			m := uint32(tw.IntN(3))
+			ds[m], sess[m], next[m] = fsDaemon{}, sess[m]+1, 0
+			out = slices.DeleteFunc(out, func(r *fsReq) bool { return r.mount == m })
 		}
 		if rng.IntN(40) == 0 {
 			send(root)
@@ -249,37 +305,59 @@ func fsRaftRun(t testing.TB, seed uint64, sp statePlants, resetRoot bool, only s
 		for i := range ds {
 			reserve(&ds[i])
 		}
-		if len(out) == 0 || rng.IntN(2) == 0 {
-			mount := uint32(rng.IntN(3))
-			next[mount]++
-			oldest := next[mount]
-			for _, r := range out {
-				if r.mount == mount {
-					oldest = min(oldest, r.id)
-				}
-			}
-			cur, fresh = int(mount), 0
-			h.s = lead()
-			build := w.request(rng, Request{Session: 7, Mount: mount, ID: next[mount], Oldest: oldest})
-			out = append(out, &fsReq{mount: mount, id: next[mount], build: build, resend: rng.IntN(4), fresh: fresh})
+		var pick []*fsReq
+		twin := tw.IntN(6) == 0
+		if twin {
+			pick = twins()
 		}
-		n := 1
-		if len(out) > 1 && rng.IntN(3) == 0 {
-			n = 2
+		if pick == nil {
+			if len(out) == 0 || rng.IntN(2) == 0 {
+				mount := uint32(rng.IntN(3))
+				req := reqOf(mount)
+				cur, fresh = int(mount), 0
+				h.s = lead()
+				build := w.request(rng, req)
+				out = append(out, &fsReq{mount: mount, id: req.ID, build: build, resend: rng.IntN(4), fresh: fresh})
+			}
+			n := 1
+			if len(out) > 1 && rng.IntN(3) == 0 {
+				n = 2
+			}
+			for _, i := range rng.Perm(len(out))[:n] {
+				pick = append(pick, out[i])
+			}
 		}
 		var rs []*fsReq
 		var txs []Txn
 		h.s = lead()
-		for _, i := range rng.Perm(len(out))[:n] {
-			if tx, sent := out[i].build(); sent {
-				rs, txs = append(rs, out[i]), append(txs, h.copyOf(&tx))
+		for _, r := range pick {
+			if tx, sent := r.build(); sent {
+				rs, txs = append(rs, r), append(txs, h.copyOf(&tx))
+				if w.moving.inode != 0 {
+					r.moves = w.moving
+				}
 			} else {
-				out[i].resend = -1
+				r.resend = -1
 			}
+		}
+		// Half the twins apply in reverse build order, so a SetAttr built later applies first.
+		if twin && len(pick) == 2 && tw.IntN(2) == 0 {
+			slices.Reverse(rs)
+			slices.Reverse(txs)
 		}
 		before := scan()
 		results, answered := sendAll(txs)
 		after := scan()
+		for _, r := range rs {
+			if r.moves.inode == 0 {
+				continue
+			}
+			if v, ok := lead().tree.Get(h.key(r.moves.dir, InodeEntry, r.moves.name)); ok {
+				if inode, _, _ := DecodeEntry(v); inode == r.moves.inode {
+					moved[inode] = true
+				}
+			}
+		}
 		for k, r := range rs {
 			tx, res, known := txs[k], results[k], answered[k]
 			// After a send whose answer was lost, a result may be an earlier Txn's, read from its record.
@@ -319,7 +397,8 @@ func fsRaftRun(t testing.TB, seed uint64, sp statePlants, resetRoot bool, only s
 // no directory is its own ancestor and a resent request returns its first final result and
 // changes nothing, under three daemons' filesystem workload through a Raft shard whose leaders
 // are cut off with Txns in flight, whose replicas restart, whose replies are lost and whose
-// daemons crash with reservations and requests outstanding.
+// daemons reconnect without their reservations or crash with requests outstanding, with sibling
+// directories renamed into each other and a file's two SetAttrs applied in either order.
 func TestTheFilesystemWorkloadKeepsItsInvariantsAcrossElections(t *testing.T) {
 	seeds.Run(t, 1, 20, func(seed uint64) {
 		if err := fsRaftRun(t, seed, statePlants{}, false, ""); err != nil {
