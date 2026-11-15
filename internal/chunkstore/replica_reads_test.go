@@ -21,7 +21,7 @@ const (
 	invLockOrder   = "every write of a fenced lock holder that completes is ordered before every write of the next holder"
 )
 
-// readRun is a detector cluster on noisy clocks whose disk nodes are, one at a time, cut off from every other node, the authority's included, so that they miss tables, and in half the cuts from the client too, paused, rebooted or slowed on a path, while a client reads every PG at every node, tagged with one of the last few tables, and two incarnations of one client session write: the first dies partway, and its successor says hello to every node, reissues the writes left unanswered and writes on.
+// readRun is a detector cluster on noisy clocks whose disk nodes are, one at a time, cut off from every other node, the authority's included, so that they miss tables, and in half the cuts from the client too (with fence, half the cuts take a second node, which still reaches the first), paused, rebooted or slowed on a path, while a client reads every PG at every node, tagged with one of the last few tables, and two incarnations of one client session write: the first dies partway, and its successor says hello to every node, reissues the writes left unanswered and writes on.
 type readRun struct {
 	d       *dcluster
 	rng     *core.Rand
@@ -39,9 +39,11 @@ type readRun struct {
 	acked  map[chunkVersion]bool
 	verErr error
 	ended  bool
-	// returns has a node cut off lead its PGs once marked up again; back is the node cut off that gets no tables until then, or until backBy.
+	// returns has a node cut off lead its PGs once marked up again; cut is the nodes the fault cuts
+	// off, and back those whose cut healed that get no tables until then, or until backBy.
 	returns bool
-	back    int
+	cut     []int
+	back    []int
 	backBy  core.Tick
 	// fence has the writers be sessions 1 and 2: the first, cut off from the control plane, writes
 	// on for up to 2 s after its fence, which reaches node n at due[n], and the second starts only
@@ -311,7 +313,8 @@ func (c *rcluster) incarnations(writes map[core.RequestID]incWrite, inv string) 
 	return nil
 }
 
-// inject draws a fault on a running disk node that stands still.
+// inject draws a fault on a running disk node that stands still; with fence, half its cuts take a
+// second such node with it, the two still reaching each other, as a rack cut off would.
 func (r *readRun) inject() {
 	c, now := r.d.rcluster, r.d.s.Time()
 	n := int(r.rng.Below(uint64(len(c.reps))))
@@ -322,12 +325,20 @@ func (r *readRun) inject() {
 	r.until = now + 500_000 + core.Tick(r.rng.Below(5_500_000))
 	switch r.kind {
 	case 0:
-		for k := range uint32(len(c.reps) + 2) {
-			if k != uint32(n) && (k != c.client.Node || r.rng.Chance(1, 2)) {
-				c.s.Partition(uint32(n), k, false)
+		r.cut = append(r.cut[:0], n)
+		if r.fence && r.rng.Chance(1, 2) {
+			if m := (n + 1 + int(r.rng.Below(uint64(len(c.reps)-1)))) % len(c.reps); c.s.Node(uint32(m)).Up() && !c.s.Node(uint32(m)).Paused() {
+				r.cut = append(r.cut, m)
 			}
 		}
-		r.d.cut[n] = true
+		for _, x := range r.cut {
+			for k := range uint32(len(c.reps) + 2) {
+				if !slices.Contains(r.cut, int(k)) && (k != c.client.Node || r.rng.Chance(1, 2)) {
+					c.s.Partition(uint32(x), k, false)
+				}
+			}
+			r.d.cut[x] = true
+		}
 	case 1:
 		stops := []clock.Stop{clock.Suspend, clock.PauseCounted, clock.Restore, clock.HeldMigration}
 		c.s.Pause(uint32(n), stops[r.rng.Below(uint64(len(stops)))], r.until-now, r.rng.Chance(1, 2))
@@ -345,10 +356,12 @@ func (r *readRun) heal() {
 	c, n := r.d.rcluster, r.faulted
 	switch r.kind {
 	case 0:
-		for k := range uint32(len(c.reps) + 2) {
-			c.s.Heal(uint32(n), k)
+		for _, x := range r.cut {
+			for k := range uint32(len(c.reps) + 2) {
+				c.s.Heal(uint32(x), k)
+			}
 		}
-		r.back, r.backBy = n, c.s.Time()+3_000_000
+		r.back, r.backBy = slices.Clone(r.cut), c.s.Time()+3_000_000
 	case 3:
 		c.s.Queue(uint32(n), r.other, 0)
 	}
@@ -356,12 +369,12 @@ func (r *readRun) heal() {
 	r.next = c.s.Time() + 500_000 + core.Tick(r.rng.Below(2_500_000))
 }
 
-// rejoin hands the node cut off the newest table, as its next fetch would, once the detector marks its disk up again or 3 s after the cut healed; with returns, the table that marks it up has it lead every PG it is a member of.
-func (r *readRun) rejoin() {
-	c, n := r.d.rcluster, r.back
+// rejoined hands node n, cut off, the newest table, as its next fetch would, once the detector marks its disk up again or 3 s after the cut healed, and reports whether it did; with returns, the table that marks it up has it lead every PG it is a member of.
+func (r *readRun) rejoined(n int) bool {
+	c := r.d.rcluster
 	up, _ := r.d.det.Mark(c.ids[n])
 	if up != MarkUp && c.s.Time() < r.backBy {
-		return
+		return false
 	}
 	if r.returns && up == MarkUp {
 		for pi := range c.table.Pools {
@@ -381,13 +394,13 @@ func (r *readRun) rejoin() {
 			}
 		}
 	}
-	r.back = -1
 	delete(r.d.cut, n)
 	r.d.tend()
 	if c.s.Node(uint32(n)).Up() {
 		t := c.table
 		c.call(n, func(ctx *core.Context, rep *Replica, out *ReplicaOutput) { rep.SetTable(ctx, t, out) })
 	}
+	return true
 }
 
 // tendSessions fences session 1 at die and hands the table to each running node not cut off once
@@ -531,7 +544,7 @@ func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 // node with a disk up holds the session table that fences the first.
 func runReadsWith(t *testing.T, seed uint64, fence bool, plant *readPlant) error {
 	set := noisy()
-	r := &readRun{rng: core.NewRand(seed ^ 0x4ead), reads: map[core.RequestID]readVersion{}, writes: map[core.RequestID]incWrite{}, acked: map[chunkVersion]bool{}, faulted: -1, back: -1,
+	r := &readRun{rng: core.NewRand(seed ^ 0x4ead), reads: map[core.RequestID]readVersion{}, writes: map[core.RequestID]incWrite{}, acked: map[chunkVersion]bool{}, faulted: -1,
 		fence: fence, applied: map[*Store]map[uint64]bool{}, reqSession: map[opKey]uint64{}, verSession: map[chunkVersion]uint64{}}
 	r.returns = r.rng.Chance(1, 2)
 	d := newDCluster(t, seed, set)
@@ -616,13 +629,11 @@ func runReadsWith(t *testing.T, seed uint64, fence bool, plant *readPlant) error
 				}
 			}
 		}
-		if r.back >= 0 {
-			r.rejoin()
-		}
+		r.back = slices.DeleteFunc(r.back, r.rejoined)
 		switch now := c.s.Time(); {
 		case r.faulted >= 0 && now >= r.until:
 			r.heal()
-		case r.faulted < 0 && r.back < 0 && now >= r.next && now < end:
+		case r.faulted < 0 && len(r.back) == 0 && now >= r.next && now < end:
 			r.inject()
 		}
 		if !c.step() {
@@ -667,9 +678,9 @@ func TestNoFencedSessionsWriteIsApplied(t *testing.T) {
 }
 
 // Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (30 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's; and a primary that commits a version once its own log holds it (297 of 500), so that a read returns a version the next interval drops.
-// With the writers as two sessions, the sessions model's neg-check-on-arrival (2 of 500), the same
+// With the writers as two sessions, the sessions model's neg-check-on-arrival (3 of 500), the same
 // primary, orders a fenced session's write that waited in its store as the fence came; and its
-// neg-replica-no-check (139 of 500), a member that takes a replicated write without checking its
+// neg-replica-no-check (131 of 500), a member that takes a replicated write without checking its
 // session, logs one its primary ordered before the fence reached it.
 func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 	for _, p := range []struct {
@@ -681,7 +692,7 @@ func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 		{"incarnation checked on arrival", 24, false, readPlant{inv: invIncarnation, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
 		{"commit on the primary's own log", 0, false, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.commitOnOwnLog = true }}},
 		{"session checked on arrival", 32, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
-		{"member takes a fenced session's write", 0, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.memberNoFence = true }}},
+		{"member takes a fenced session's write", 5, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.memberNoFence = true }}},
 	} {
 		if err := runReadsWith(t, p.seed, p.fence, &p.readPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)

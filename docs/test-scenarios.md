@@ -6751,8 +6751,9 @@ skips) and `gate_test.go` (`TestAWriteOfAFencedSessionOrNoIncarnationIsRefusedWh
 rejoin row is [Control-plane sessions](#control-plane-sessions)'.
 
 **[property]** `TestNoFencedSessionsWriteIsApplied` (500 seeds per commit) is the
-[read run](#placement-faults-and-invariants) with its two writers as two sessions. The first is
-fenced when it dies, but, cut off from the control plane and alive, writes on for up to 2 s; the table reaches
+[read run](#placement-faults-and-invariants) with its two writers as two sessions, and half its cuts
+taking a second disk node with the first, the two still reaching each other, as when a rack is cut
+off. The first session is fenced when it dies, but, cut off from the control plane and alive, writes on for up to 2 s; the table reaches
 each running node not cut off after its own delay of up to a heartbeat (1 s), so some nodes order
 the fenced session's writes before their table holds the fence and others after; the second
 session starts once every node with a disk up holds the fence. Checked after every step: no store
@@ -6763,19 +6764,23 @@ that completes is ordered, in its chunk, before every write of the second.
 
 | Planted bug | Invariant | Seeds of 500 | First |
 | --- | --- | --- | --- |
-| `neg-check-on-arrival`: a primary checks the session only as a write arrives (`fenceOnArrival`), so a write that waited in its store as the fence came is ordered | No fenced write applied | 2 | 32 |
-| `neg-replica-no-check`: a member takes a replicated write without checking its session (`memberNoFence`), logging one its primary ordered before the fence reached it | No fenced write applied | 139 | 0 |
+| `neg-check-on-arrival`: a primary checks the session only as a write arrives (`fenceOnArrival`), so a write that waited in its store as the fence came is ordered | No fenced write applied | 3 | 32 |
+| `neg-replica-no-check`: a member takes a replicated write without checking its session (`memberNoFence`), logging one its primary ordered before the fence reached it | No fenced write applied | 131 | 5 |
 
 `neg-up-with-old-table` is planted in the leader, under [Control-plane sessions](#control-plane-sessions).
 `neg-peering-skipped` removes the rule that a new interval activates only once its earlier ones
 stopped, which the epoch model's `neg-stop-previous-only` and `neg-reach-last-activated-only` also
-remove: their plants (`stopPreviousOnly`, `lastActivatedOnly`) fail their traces. In this run they,
-and a plant that has peering reach no earlier interval, break the lock order in none of 500 seeds:
-the run cuts one node at a time off from every other, so a primary left in an older interval has no
-member that both lacks the fence and still acknowledges it once the second session writes; the
-model's counterexample needs a member alone in its interval with the old primary, both cut off from
-the control plane. Neither of the two planted bugs above breaks the lock order in 500 seeds
-either, since the second session starts only once every node with a disk up holds the fence.
+remove: their plants (`stopPreviousOnly`, `lastActivatedOnly`) fail their traces. In this run they
+break the lock order in none of 500 seeds, paired cuts included, and cannot: the model's
+counterexample needs two intervals whose live members do not overlap, an old primary completing
+the fenced session's writes on the members of its own interval while the new primary, whose peering
+never reached them, completes the next holder's. Every PG here has all 3 disks with `min_live` 2,
+so the detector marks at most one disk down and any two intervals share a live member, which either
+adopted the newer interval and refuses the older one's writes without being peered, or, cut off,
+did not, and then the newer interval completes nothing. Disjoint live sets need members replaced,
+as in the traces' two-member PGs. Neither of the two planted bugs above breaks the lock order in
+500 seeds either, since the second session starts only once every node with a disk up holds the
+fence.
 
 ## Filesystem schema
 
