@@ -96,6 +96,22 @@ func TestOneWriteAndOneFlushPerRound(t *testing.T) {
 	}
 }
 
+func TestHeldItemsShareOneRound(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	h.log.Hold()
+	a := h.submit(disklog.Hot, h.write(0, 1, 1))
+	b := h.submit(disklog.Hot, h.blob(disklog.BlobRaftEntries, 7, 100, 2))
+	h.wantTrace()
+	h.log.Release(&h.ctx, &h.out)
+	h.absorb()
+	h.wantTrace("write 64+4 io104", "fsync io105")
+	h.run()
+	durable := h.eventsOf(disklog.Durable)
+	if len(durable) != 1 || !slices.Equal(durable[0].Tickets, []disklog.Ticket{a, b}) {
+		t.Fatalf("events %+v", h.events)
+	}
+}
+
 func TestNoBlockIsCopied(t *testing.T) {
 	h := formatted(t, gib, testConfig(0))
 	first := h.write(0, 1, 1)

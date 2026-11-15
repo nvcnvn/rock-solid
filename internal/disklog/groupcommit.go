@@ -559,6 +559,7 @@ type Log struct {
 	raft       pieceSet
 	trims      trimState
 	now        core.Tick
+	held       bool
 	dying      []dyingPiece
 	namedLSN   uint64
 	pinnedLSN  uint64
@@ -791,6 +792,9 @@ func (l *Log) ReplayBytes() uint64 { return l.replayBytes }
 // InFlight is the number of rounds written but not yet durable.
 func (l *Log) InFlight() int { return l.count }
 
+// CommitDepth is commit_depth, the most rounds in flight at once.
+func (l *Log) CommitDepth() int { return len(l.rounds) }
+
 // Queued is the number of items submitted and not yet in a round.
 func (l *Log) Queued() int {
 	n := 0
@@ -798,6 +802,18 @@ func (l *Log) Queued() int {
 		n += l.lanes[i].q.len()
 	}
 	return n
+}
+
+// Unstarted is the first ticket of the hot stream not yet in a round: every hot item submitted
+// with a lower ticket is in a round or resolved.
+func (l *Log) Unstarted() Ticket {
+	t := l.nextTicket
+	for _, i := range [...]int{laneHot, laneSlot} {
+		if q := &l.lanes[i].q; q.len() > 0 {
+			t = min(t, q.at(0).ticket)
+		}
+	}
+	return t
 }
 
 // Stalled reports items waiting for room: ordinary items with only the reserve free or held behind a checkpoint that failed for want of space, or the checkpoint's or a merge's items with no segment free.
@@ -1594,8 +1610,18 @@ func (l *Log) firstFree() (uint32, bool) {
 	return 0, false
 }
 
+// Hold keeps the log from starting rounds until Release, so that the items an owner submits
+// within a pass share one round.
+func (l *Log) Hold() { l.held = true }
+
+// Release lets the log start rounds again and starts those it can.
+func (l *Log) Release(ctx *core.Context, out *Output) {
+	l.held = false
+	l.startRounds(ctx, out)
+}
+
 func (l *Log) startRounds(ctx *core.Context, out *Output) {
-	for l.err == nil && l.phase == formatDone && l.count < len(l.rounds) {
+	for !l.held && l.err == nil && l.phase == formatDone && l.count < len(l.rounds) {
 		t, ok := l.target()
 		if !ok {
 			return
@@ -1877,3 +1903,6 @@ func (l *Log) check(ctx *core.Context, t target, rec Record, r *round, items []q
 		}
 	}
 }
+
+// MaxRecordBytes is max_group_commit_bytes, the most a round writes.
+func (l *Log) MaxRecordBytes() uint64 { return l.cfg.MaxRecordBytes }

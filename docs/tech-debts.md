@@ -134,3 +134,8 @@
 - **Where:** `vector` in `internal/driver/uring/sqe.go`
 - **Why:** a `DiskWrite` of several buffers is a plain `WRITEV`, which pins and unpins each page as a non-registered `O_DIRECT` write does, about 0.1 µs per 4 KiB page; `IORING_OP_WRITEV_FIXED` needs Linux 6.15 and every iovec inside one registered buffer ([Runtime in Go](design.md#runtime-in-go)).
 - **Remove when:** the oldest supported kernel is 6.15 or later; then issue `WRITEV_FIXED` for a vector whose buffers lie in one pool region.
+
+## Workaround: a spinning clock goroutine in the real-loop latency run
+- **Where:** `realRounds` in `internal/loop/looptest/round_linux_test.go`
+- **Why:** Docker Desktop's kernel (6.12 linuxkit) is built without `CONFIG_HIGH_RES_TIMERS`, so a timerfd fires on the next 1 ms tick: a 20 µs timer was 980 µs late at p50, which put the loops' proposal timers and the simulated disk's 0.95 ms completions a tick apart and measured the tick, not the rounds. A goroutine spinning on its own thread posts the proposals and writes the disk's eventfd instead, at a core's CPU, which the run subtracts.
+- **Remove when:** the run moves to a Linux host or VM whose kernel has `CONFIG_HIGH_RES_TIMERS`; then the proposals come from each loop's own timer and the disk's completions from a timerfd.

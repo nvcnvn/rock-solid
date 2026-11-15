@@ -133,6 +133,12 @@ const (
 	EvDiskDone
 	EvTimer
 	EvResumed
+	// EvHandoff hands a disk's owner loop a loop's records for it; the loop handles it and never delivers it.
+	EvHandoff
+	// EvNotice tells a loop that the records it handed a disk's owner are durable or in a round; the loop handles it and never delivers it.
+	EvNotice
+	// EvMail tells a disk's owner loop that a loop's shards reported Raft blobs dead; the loop handles it and never delivers it.
+	EvMail
 )
 
 // Event is one input to a state machine. Which fields are set depends on Kind.

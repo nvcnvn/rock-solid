@@ -7373,54 +7373,95 @@ under the stepped kernel and on Linux in Docker, plain and with `-race`.
 
 ## Round driver
 
-Review criteria, as stepped trace checks on `looptest`, each run with 1, 2, 4 and 8 producer loops;
-the latency measurement below runs on real loop goroutines:
+Review criteria, as stepped trace checks in `internal/loop/looptest/round_test.go`: producer loops
+with stand-in shards (`stub`, one blob of 128 B proposals a round, one round in flight, as a Raft
+shard keeps), an owner loop on a simulated disk with a 0.95 ms flush, one pool per loop. The trace
+check (`checkRounds`) reads the owner's ring, the one order both directions share. The latency
+measurement below runs on real loop goroutines.
 
-- At most one inbox message per producer loop per disk per round in each direction: once per pass a
-  loop hands each disk's owner one message with its shards' `Ready` records and its chunk writes for
-  that disk, and the owner hands back one durable notice per round. Example for producer loop 0 and
-  owner loop 3:
+Hand-off, with 1, 2, 4 and 8 producer loops (`TestRoundsHandOffOncePerRoundAndFlushOncePerRound`):
 
-  ```text
-  3000100 0 inbox pass=210 send to=3 disk=1 records=12 chunk_writes=3
-  3000100 0 syscall pass=210 write fd=<eventfd of loop 3>
-  3000105 3 action pass=88 DiskWrite round=51 io=88 lba=4160 len=49152
-  3000105 3 action pass=88 DiskFsync round=51 io=89 linked=1
-  3000990 3 event pass=89 DiskDone io=88 err=ok
-  3001060 3 event pass=90 DiskDone io=89 err=ok
-  3001061 3 inbox pass=90 send to=0 disk=1 durable_lsn=812
-  ```
-
-  A second `inbox send to=3 disk=1` from loop 0 in the same round fails.
-- One `DiskFsync` per round per disk, whatever the number of producer loops (1, 2, 4, 8).
-- Records from 8 producer loops land in one record (the log per core spike wrote 39 items per flush
-  with 8 producers, 8 with a log per loop). Chunk writes from producer loops ride the same inbox
-  message as their loop's `Ready` records and land in the same round's record.
-- A shard's replayed entries reach the shard's loop after recovery, which runs on the owner; the
-  cleaner's moves for a shard's runs reach the shard's loop; a checkpoint asks each index's loop for
-  its runs.
-- A shard on the disk's own loop skips both inbox hops.
+- Between two round writes the owner takes at most one batch from each producer loop and wakes it at
+  most once; durable notices to a loop strictly increase in LSN and in batches counted; every batch
+  sent is counted durable, in order; no two blobs are told the same place. With 8 loops some batch
+  is taken after its loop's pass ended, and that loop is woken for it.
+- One `DiskFsync` per `DiskWrite`, whatever the number of producer loops.
+- One round holds a batch from every producer loop (the log per core spike wrote 39 items per flush
+  with 8 producers, 8 with a log per loop), and commit latency's p99 with 8 loops is within one round
+  of one loop's.
+- A shard on the disk's own loop skips both inbox hops: the owner's inbox wakes only for the
+  proposer's first timer (`TestRoundOnOwnerSkipsTheInbox`).
+- With room in the owner's pool for two batches' copies, batches wait for it and none fails, every
+  proposal becomes durable, and the trace holds a `PoolWait` for the batches that waited and none
+  with room (`TestRoundFullOwnerPoolDelaysBatches`). With 16 shards on the owner beside a producer
+  loop's 16 and room for 20 blocks, a waiting batch is retried every pass, not only when another
+  batch arrives, and every proposal on both loops becomes durable
+  (`TestRoundWaitingBatchesShareTheOwnerPool`).
+- Mail and dead blobs cross loops: a replayed blob, with its bytes, and a cleaner's rewrite request
+  reach the shard; the blobs it reports dead leave the owner's log and the rest stay
+  (`TestRoundMailAndDeadBlobsCrossLoops`). Mail sent on the owner loop, from its machine's event or
+  from a shard's `Durable`, reaches the shard after the sender's own actions run, and those actions
+  are kept, and the shard still hears of its next record
+  (`TestRoundSendOnOwnerKeepsTheCallersActions`). Hanging recovery's replay and the
+  cleaner's moves for a shard's runs on this is the work of the items that wire them.
+- The owner's machine keeps its own disk completions and, as a `LogMachine`, the events of its own
+  log records; an owner machine that is not one panics on a log event the driver did not submit
+  (`TestRoundOwnerMachineKeepsItsDiskAndLogEvents`). Two logs on one loop, fed from it and another
+  loop, each get only their own completions and every proposal becomes durable; overlapping IO ranges
+  are refused (`TestRoundSeveralLogsOnOneLoop`).
+- A marked shard whose `Ready` adds nothing is not told anything durable
+  (`TestRoundShardWithNothingReadyIsToldNothing`). A `Keep` buffer bound for another loop's disk
+  panics, and one whose submit fails is not freed (`TestRoundKeptBuffers`).
+- A failed write or flush, the sixth, with 2 producer loops: every batch resolves, some with the
+  error, and every pool is back where it started (`TestRoundFailedDiskResolvesEveryBatch`).
+- Over seeds of shape (0 to 8 producer loops, 1 to 32 shards each, the proposal gap, the round cap, at
+  times a nearly full owner pool): the driver contract and "durable only once the log is" at every
+  step, which fails a durable notice naming other than one place for a shard's one record, an LSN
+  not above the shard's last (as a notice sent at take, with LSN 0, would be) or one past the log's
+  durable LSN; then the checks above, every proposal durable and every buffer back in its pool
+  (`TestRoundsKeepTheirRules`, 400 seeds in `scripts/seeds.sh`).
 
 Collection:
 
-- A round with 1,000 idle shards and one active shard calls `HasReady` on one shard; a pass's CPU
-  with 1,000 idle shards does not depend on the shard count (compare 10, 100 and 1,000 idle shards).
-  Scanning every shard cost 54% of loop CPU at 0.1 ms flushes in the raft rounds spike.
-- One entry per shard per round, holding every proposal queued for it.
-- A round is bounded by `max_group_commit_bytes` (1 MiB) only, with no time bound: a round that
-  reaches it leaves the rest for the next round in submit order, and every shard is collected within
-  two rounds. Under open load rounds stay far below the cap (at most 574 KiB at 130,000 proposals/s on
-  one loop).
+- A round with 1,001 shards and one marked calls `HasReady` once (`TestRoundAsksOnlyMarkedShards`);
+  a round's CPU with 10, 100 and 1,000 idle shards is flat, about 18 µs, and allocates nothing
+  (`BenchmarkRoundIdleShards`, `TestRoundAllocatesNothing`). Scanning every shard cost 54% of loop CPU
+  at 0.1 ms flushes in the raft rounds spike.
+- A round is bounded by `max_group_commit_bytes` only: with one producer loop, 48 shards of 2 KiB
+  against a 64 KiB cap are collected in marked order over two rounds, and no batch the loop hands
+  over holds more than the cap and one shard's records (`TestRoundCapLeavesTheRestInOrder`). With L loops each sending cap-sized batches a loop's batch is
+  taken after about L rounds ([On-disk format](design.md#on-disk-format)); no test bounds that.
 
-Latency, against the raft rounds spike (3 nodes × 1,000 groups, 128 B proposals, 4 loops per node):
+Latency, against the raft rounds spike (3 nodes × 1,000 groups, 128 B proposals, 4 loops per node),
+with a simulated 0.95 ms flush and 1 and 8 producer loops of 16 shards, each proposing every 20 µs.
+On real goroutines (`TestRoundLatencyOnRealLoops`, which runs when `RS_ROUND_LATENCY` gives its
+length, here 10 to 20 s in Docker capped at 4 CPUs) each loop has its own epoll set and pool, and
+`GOMAXPROCS` leaves a spare P, as a node does. Docker Desktop's kernel is built without
+`CONFIG_HIGH_RES_TIMERS`, so a timerfd fires on the next 1 ms tick (a 20 µs timer was 980 µs late
+at p50): a goroutine spinning on its own thread posts the proposals to each loop's inbox, eight to
+an event, and signals the disk's completions on an eventfd instead. Latency runs from the pass that
+handles a proposal's timer event to the pass that handles its `Durable`, which is commit latency as
+the targets define it; it leaves out the time the event waits in the inbox after the posting
+goroutine posts it. "CPU a round" is the process's CPU less the posting goroutine's thread, so it
+includes the simulated disk, which runs on the owner loop, and the Go runtime's threads, and the CPU
+per proposal below overstates the driver's a little. Each stand-in shard checks every durable
+notice it gets as the stepped runs do, and the run fails if one was wrong.
 
-| Flush | Spike p50 | Spike p99 | Checklist target |
-| --- | --- | --- | --- |
-| 0.95 ms | 2.9 to 3.6 ms | 4.6 to 5.8 ms | 3 ms / 5 ms |
-| 0.1 ms | 0.5 to 0.7 ms | 0.9 to 3.6 ms | (not stated) |
+| Run | p50 | p99 | CPU a round, all loops | Target |
+| --- | --- | --- | --- | --- |
+| Raft rounds spike | 2.9 to 3.6 ms | 4.6 to 5.8 ms | | 3 ms / 5 ms |
+| Stepped, 1 loop (simulated time) | 2.8 ms | 3.8 ms | | |
+| Stepped, 8 loops (simulated time) | 3.1 ms | 4.7 ms | | |
+| Real goroutines, 1 loop | 2.9 ms | 4.4 ms | 77 µs | 3 ms / 5 ms |
+| Real goroutines, 8 loops | 3.3 ms | 5.0 ms | 480 to 500 µs | 3 ms / 5 ms |
 
-Open: tolerance; the offered load (the spike ran 30,000 to 130,000 proposals/s); and whether the
-measurement needs the Raft shard of phase 4 or a stand-in shard.
+With 8 loops a round held 407 proposals, about 1.2 µs of loop CPU each, and the loops used 0.45
+cores. Posted one to an event, the 400,000 proposals a second cost a wakeup each: the posting
+goroutine spent its core writing eventfds and offered 250,000, the producers' inboxes refused
+56,000 posts in 10 s, and p99 rose to 43 ms. The profile was 83% syscalls (`epoll_wait`, eventfd
+reads and writes, clock reads), the round driver's own code under 2%, so the bound is the cost of a
+wakeup per proposal, which a node avoids since a connection's read hands a loop many messages at
+once.
 
 ## Shared ChunkStore suite
 

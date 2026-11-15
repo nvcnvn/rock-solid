@@ -143,6 +143,14 @@ const (
 	OutListed
 	// OutRecoverOrder, a primary ordering a recovery write, whether or not it is a target: chunk source interval.
 	OutRecoverOrder
+	// OutHandoff, a loop handing a disk's owner its records: to disk records batch; to is the owner loop, batch counts the loop's batches for the disk.
+	OutHandoff
+	// OutNotice, a disk's owner telling a loop that its batches are durable or that its last is in a round: to disk lsn batches; to is the loop told, lsn the newest durable record, 0 when no batch is newly durable, batches the loop's durable batches for the disk.
+	OutNotice
+	// EvTake, a disk's owner taking a loop's records for a round: from disk records batch; from is the loop.
+	EvTake
+	// EvPoolWait, a disk's owner first finding its pool too full to copy a loop's batch: from disk records batch; from is the loop.
+	EvPoolWait
 	numNames
 )
 
@@ -190,6 +198,7 @@ var (
 	fDisk   = field{"disk", typeNum}
 	fChunk  = field{"chunk", typeNum}
 	fVer    = field{"version", typeNum}
+	fTo     = field{"to", typeNum}
 )
 
 var schemas = [numNames]schema{
@@ -247,6 +256,10 @@ var schemas = [numNames]schema{
 	OutFail:           {"Fail", KindOutput, []field{fChunk, fVer}},
 	OutListed:         {"Listed", KindOutput, []field{fDisk, fChunk, fVer}},
 	OutRecoverOrder:   {"RecoverOrder", KindOutput, []field{fChunk, {"source", typeNum}, fIv}},
+	OutHandoff:        {"Handoff", KindOutput, []field{fTo, fDisk, {"records", typeNum}, {"batch", typeNum}}},
+	OutNotice:         {"Notice", KindOutput, []field{fTo, fDisk, fLSN, {"batches", typeNum}}},
+	EvTake:            {"Take", KindEvent, []field{{"from", typeNum}, fDisk, {"records", typeNum}, {"batch", typeNum}}},
+	EvPoolWait:        {"PoolWait", KindEvent, []field{{"from", typeNum}, fDisk, {"records", typeNum}, {"batch", typeNum}}},
 }
 
 // Kind is the kind of record the name belongs to, or 0 for an unknown name.

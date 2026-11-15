@@ -65,6 +65,10 @@ var everyName = []string{
 	"1000255 2 output pass=81 Fail chunk=9 version=4294967297",
 	"1000255 2 output pass=81 Listed disk=2 chunk=9 version=4294967297",
 	"1000255 2 output pass=81 RecoverOrder chunk=9 source=3 interval=2",
+	"3000100 0 output pass=210 Handoff to=3 disk=1 records=12 batch=7",
+	"3000105 3 event pass=88 Take from=0 disk=1 records=12 batch=7",
+	"3001061 3 output pass=90 Notice to=0 disk=1 lsn=812 batches=7",
+	"3000107 3 event pass=89 PoolWait from=0 disk=1 records=12 batch=7",
 }
 
 const scenarioExample = `1000250 2 syscall pass=81 epoll_wait ready=3

@@ -126,10 +126,11 @@ func (k *Kernel) Clocks() core.Clocks { return k.s.Node(k.node).Clock().Read(k.s
 func (k *Kernel) Arm(deadline core.Tick) { k.armed = deadline }
 
 // Actor steps a loop as one of the scheduler's actors: ready when its kernel has something to
-// report or it has work, a pass per step, and a wake at its earliest timer.
+// report or it has work, a pass per step, and a wake at its earliest timer or disk completion.
 type Actor struct {
-	K *Kernel
-	L *loop.Loop
+	K    *Kernel
+	L    *loop.Loop
+	Disk *Disk
 }
 
 // Ready reports whether a pass would find something to do.
@@ -147,16 +148,24 @@ func (a *Actor) Next(_ *core.Context, out []core.Action) []core.Action {
 	return out
 }
 
-// Wake is the loop's earliest timer.
+// Wake is the loop's earliest timer or disk completion.
 func (a *Actor) Wake() (core.Tick, bool) {
 	d := a.L.Pending().Deadline
+	if a.Disk != nil {
+		if at, ok := a.Disk.Next(); ok && (d == 0 || at < d) {
+			d = at
+		}
+	}
 	return d, d != 0 && a.K.err == nil
 }
 
 var idle = sim.MachineFunc(func(_ *core.Context, _ *core.Event, out []core.Action) []core.Action { return out })
 
 // Add runs the loop behind k on node n as its next loop, stepped by the scheduler.
-func Add(n *sim.Node, k *Kernel, l *loop.Loop) {
+func Add(n *sim.Node, k *Kernel, l *loop.Loop) { AddWithDisk(n, k, l, nil) }
+
+// AddWithDisk runs the loop behind k on node n with its disk ring d, which may be nil.
+func AddWithDisk(n *sim.Node, k *Kernel, l *loop.Loop, d *Disk) {
 	k.Attach(l)
-	n.AddActor(n.Start(idle, nil), &Actor{K: k, L: l})
+	n.AddActor(n.Start(idle, nil), &Actor{K: k, L: l, Disk: d})
 }

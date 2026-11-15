@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/trace"
 	"golang.org/x/sys/unix"
 )
@@ -116,6 +117,12 @@ type Loop struct {
 	out     []core.Action
 	iov     [maxIOV]unix.Iovec
 	stopped atomic.Bool
+	// shards, handoffs and logs are the round driver's: the shards on this loop, their hand-offs
+	// to each disk's owner, and the logs this loop owns.
+	shards   []shard
+	handoffs []*handoff
+	logs     []*Log
+	unposted int
 }
 
 type conn struct {
@@ -421,7 +428,7 @@ func (l *Loop) Pending() Pending {
 		p.Deadline = at
 		p.Work = at <= l.ctx.Now
 	}
-	p.Work = p.Work || l.hot > 0 || l.later || len(l.dirty) > 0 || l.inbox.ready() || l.disk != nil && l.disk.Waiting()
+	p.Work = p.Work || l.hot > 0 || l.later || l.unposted > 0 || l.sendable() || len(l.dirty) > 0 || l.inbox.ready() || l.disk != nil && l.disk.Waiting()
 	return p
 }
 
@@ -459,6 +466,13 @@ func (l *Loop) Pass() {
 			continue
 		}
 		l.ev = core.Event{Kind: core.EvTimer, Timer: id}
+		if id == disklog.TrimTimer && len(l.logs) > 0 {
+			l.record(trace.EventRecord(&l.ev, l.cfg.MsgType))
+			for _, lg := range l.logs {
+				lg.onDisk(&l.ev)
+			}
+			continue
+		}
 		l.Deliver(&l.ev)
 	}
 	if l.armed <= l.ctx.Now {
@@ -477,17 +491,28 @@ func (l *Loop) Pass() {
 	if l.disk != nil {
 		l.evs = l.disk.Reap(l.evs[:0])
 		for i := range l.evs {
-			l.Deliver(&l.evs[i])
+			ev := &l.evs[i]
+			if lg := l.logOf(ev.IO); lg != nil {
+				l.record(trace.EventRecord(ev, l.cfg.MsgType))
+				lg.onDisk(ev)
+				continue
+			}
+			l.Deliver(ev)
 		}
 	}
 	for range l.cfg.InboxBudget {
 		if !l.inbox.pop(&l.ev) {
 			break
 		}
+		if l.ev.Kind == core.EvHandoff || l.ev.Kind == core.EvNotice || l.ev.Kind == core.EvMail {
+			l.handoff(&l.ev)
+			continue
+		}
 		l.Deliver(&l.ev)
 	}
 	l.handle(true)
 	l.handle(false)
+	l.endRounds()
 	l.later = l.d.Flush()
 	l.flush()
 	l.applyCap()
@@ -520,6 +545,11 @@ func (l *Loop) Stop() {
 func (l *Loop) Deliver(ev *core.Event) {
 	l.record(trace.EventRecord(ev, l.cfg.MsgType))
 	l.out = l.m.OnEvent(&l.ctx, ev, l.out[:0])
+	l.execute()
+}
+
+// execute records and executes the actions in l.out.
+func (l *Loop) execute() {
 	for i := range l.out {
 		a := &l.out[i]
 		l.record(trace.ActionRecord(a, l.cfg.MsgType))
