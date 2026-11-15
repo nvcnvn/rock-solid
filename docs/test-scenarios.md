@@ -4365,6 +4365,16 @@ Seeds 40 to 339 at 150 s each: 260 passed at aa05106, and the 40 that did not we
 | `ask` | 205, 313, 327 | 205, discrepancy 15, passes; the rest unread |
 | `plan` | 154 | Discrepancy 16 |
 
+The ten nightly traces that gave no verdict at 400 s, run again at 1,200 s each, one at a time on the M4 Pro:
+
+| Outcome | Seeds |
+| --- | --- |
+| Pass | 385835 (802 lines, 775 s), 385840 (524 lines, 649 s), 386009 (679 lines, 465 s) |
+| No verdict at 1,200 s | 385679, 385765, 385776, 385810, 385851, 385873, 385983 |
+
+Three times the budget gave the seven no verdict, neither a pass nor a failing line, so a longer one will not settle
+them.
+
 ### Traces can fail in the epoch model's check
 
 `scripts/conform.sh plants` runs `TestPlantsKeepTraces` over `conformPlants`, the plants of the
