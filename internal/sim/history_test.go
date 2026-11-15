@@ -1,6 +1,7 @@
 package sim_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -78,4 +79,61 @@ func TestRepliesAMachineSendsCompleteTheHistory(t *testing.T) {
 	if ops[a].Done || !ops[b].Done || ops[b].Output[0] != 11 {
 		t.Fatalf("%+v", ops)
 	}
+}
+
+// Events from several clients, interleaved in the file as their processes wrote them, read back as
+// the operations they record, ordered by invocation; one with no completion never completed.
+func TestAHistoryFileReadsBackAsItsOperations(t *testing.T) {
+	var file []byte
+	put := func(complete bool, client uint32, op uint64, at core.Tick, w uint64) {
+		var e [sim.EventBytes]byte
+		sim.PutEvent(&e, complete, client, op, at, [sim.OpWords]uint64{w, 0, 0, w + 1})
+		file = append(file, e[:]...)
+	}
+	put(false, 2, 1, 30, 5)
+	put(false, 1, 1, 10, 7)
+	put(true, 2, 1, 40, 6)
+	put(false, 1, 2, 50, 8)
+	h, err := sim.ReadHistory(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []sim.Op{
+		{Client: 1, Invoke: 10, Input: [sim.OpWords]uint64{7, 0, 0, 8}},
+		{Client: 2, Invoke: 30, Complete: 40, Done: true, Input: [sim.OpWords]uint64{5, 0, 0, 6}, Output: [sim.OpWords]uint64{6, 0, 0, 7}},
+		{Client: 1, Invoke: 50, Input: [sim.OpWords]uint64{8, 0, 0, 9}},
+	}
+	if !slices.Equal(h.Ops(), want) {
+		t.Fatalf("%+v", h.Ops())
+	}
+	for _, bad := range [][]byte{file[:len(file)-1], append(slices.Clone(file), file[:sim.EventBytes]...), file[2*sim.EventBytes : 3*sim.EventBytes]} {
+		if _, err := sim.ReadHistory(bad); err == nil {
+			t.Errorf("read %d bytes without an error", len(bad))
+		}
+	}
+}
+
+func FuzzReadHistory(f *testing.F) {
+	var e [sim.EventBytes]byte
+	sim.PutEvent(&e, false, 1, 1, 10, [sim.OpWords]uint64{1})
+	f.Add(e[:])
+	f.Fuzz(func(t *testing.T, b []byte) {
+		h, err := sim.ReadHistory(b)
+		if err != nil {
+			return
+		}
+		var file []byte
+		for i, op := range h.Ops() {
+			sim.PutEvent(&e, false, op.Client, uint64(i), op.Invoke, op.Input)
+			file = append(file, e[:]...)
+			if op.Done {
+				sim.PutEvent(&e, true, op.Client, uint64(i), op.Complete, op.Output)
+				file = append(file, e[:]...)
+			}
+		}
+		again, err := sim.ReadHistory(file)
+		if err != nil || !slices.Equal(again.Ops(), h.Ops()) {
+			t.Fatalf("%+v read back as %+v, %v", h.Ops(), again, err)
+		}
+	})
 }

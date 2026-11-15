@@ -1,7 +1,10 @@
 package sim
 
 import (
+	"cmp"
+	"encoding/binary"
 	"fmt"
+	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
@@ -67,3 +70,63 @@ func (h *History) Complete(i int, out [OpWords]uint64) {
 
 // Ops lists the operations in the order they were invoked; the list is valid until the next Invoke.
 func (h *History) Ops() []Op { return h.ops }
+
+// EventBytes is the size of one event in a history file: little-endian words of the completion flag
+// and client, the operation's number within its client, the time, and the operation's input or output.
+const EventBytes = 8 * (3 + OpWords)
+
+// PutEvent encodes into b the invocation of client's operation op at t with input words, or with
+// complete its completion with output words.
+func PutEvent(b *[EventBytes]byte, complete bool, client uint32, op uint64, t core.Tick, words [OpWords]uint64) {
+	head := uint64(client)
+	if complete {
+		head |= 1 << 32
+	}
+	binary.LittleEndian.PutUint64(b[0:], head)
+	binary.LittleEndian.PutUint64(b[8:], op)
+	binary.LittleEndian.PutUint64(b[16:], uint64(t))
+	for i, w := range words {
+		binary.LittleEndian.PutUint64(b[24+8*i:], w)
+	}
+}
+
+// ReadHistory decodes a history file's events, written by any number of clients in any order, into
+// a history of its operations, one with no completion never completed; it records nothing more.
+func ReadHistory(b []byte) (*History, error) {
+	if len(b)%EventBytes != 0 {
+		return nil, fmt.Errorf("sim: a history of %d bytes ends inside an event", len(b))
+	}
+	type key struct {
+		client uint32
+		op     uint64
+	}
+	h := &History{ops: make([]Op, 0, len(b)/EventBytes)}
+	at := map[key]int{}
+	for ; len(b) > 0; b = b[EventBytes:] {
+		head := binary.LittleEndian.Uint64(b)
+		if head>>33 != 0 {
+			return nil, fmt.Errorf("sim: a history event's head %#x has unknown bits", head)
+		}
+		k := key{uint32(head), binary.LittleEndian.Uint64(b[8:])}
+		t := core.Tick(binary.LittleEndian.Uint64(b[16:]))
+		var words [OpWords]uint64
+		for i := range words {
+			words[i] = binary.LittleEndian.Uint64(b[24+8*i:])
+		}
+		i, seen := at[k]
+		if head>>32 == 0 {
+			if seen {
+				return nil, fmt.Errorf("sim: client %d invokes operation %d twice", k.client, k.op)
+			}
+			at[k] = len(h.ops)
+			h.ops = append(h.ops, Op{Client: k.client, Invoke: t, Input: words})
+			continue
+		}
+		if !seen || h.ops[i].Done || t < h.ops[i].Invoke {
+			return nil, fmt.Errorf("sim: client %d completes operation %d not invoked, again or before its invocation", k.client, k.op)
+		}
+		h.ops[i].Complete, h.ops[i].Done, h.ops[i].Output = t, true, words
+	}
+	slices.SortStableFunc(h.ops, func(a, b Op) int { return cmp.Compare(a.Invoke, b.Invoke) })
+	return h, nil
+}
