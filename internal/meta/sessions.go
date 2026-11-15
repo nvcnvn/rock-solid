@@ -119,7 +119,7 @@ func (c *Control) StartSession(node uint32, request uint64) {
 // request of the session: a later answer to the same request would measure the rate too low.
 func (c *Control) Renew(t lease.Time, leased bool, b *SessionBeat, a *SessionAnswer) bool {
 	c.sessClock(t, leased)
-	if !leased || !c.grantsFrom.set {
+	if !c.plant.answerWithoutLease && (!leased || !c.grantsFrom.set) {
 		return false
 	}
 	*a = SessionAnswer{Request: b.Request, Raw: t.Raw, Status: SessionFenced, Issuer: c.issuer, Grants: a.Grants[:0]}
@@ -194,7 +194,9 @@ func (c *Control) sessClock(t lease.Time, leased bool) {
 		c.resetGrants()
 	}
 	if leased && !c.leased {
-		c.restart(t)
+		if !c.plant.noFullLease {
+			c.restart(t)
+		}
 		c.issuer.Start = max(t.Raw, c.issuer.Start+1)
 	}
 	c.leased = leased
@@ -224,16 +226,20 @@ func (c *Control) resume(t lease.Time) {
 }
 
 // sessionPlants are bugs a test plants, each the sessions model's counterexample of the same name:
-// a session not measured waiting only session_lease, and every session waiting session_lease on the
-// leader's own clock.
+// a session not measured waiting only session_lease, every session waiting session_lease on the
+// leader's own clock, renewals answered without the leader lease or the grants step only it starts,
+// an eviction fenced at once, and a leader lease that starts no count over, so a new leader counts
+// from its first step, which can come before the old leader's last renewal.
 type sessionPlants struct {
-	deadWaitLease, countOnOwnClock bool
+	deadWaitLease, countOnOwnClock, answerWithoutLease, evictAtOnce, noFullLease bool
 }
 
 // due reports whether the session's wait has passed on both of the leader's clocks at t.
 func (c *Control) due(tm *sessTimer, t lease.Time) bool {
 	w := tm.wait
 	switch {
+	case c.plant.evictAtOnce && tm.evict:
+		return true
 	case c.plant.countOnOwnClock:
 		w = SessionLease
 	case w == 0 && c.plant.deadWaitLease:

@@ -440,53 +440,77 @@ func TestNoSessionIsFencedWhileItsClientsLeaseRuns(t *testing.T) {
 // A leader whose clocks run 10% fast over its clients' takes over the moment the old leader
 // renewed C: C's lease from the old leader still runs 9.9 s, and the new leader fences C no sooner,
 // whether C dies at once, unmeasured, or after two heartbeats that measure it, or after two
-// heartbeats between which the new leader stood still for 200 ms with its clocks frozen.
+// heartbeats between which the new leader stood still for 200 ms with its clocks frozen, or after
+// two that measure it and a third sent to the deposed leader, which refuses it, or at once when the
+// new leader stepped for 10 s before its lease started.
 func TestAFastNewLeaderFencesNoSessionEarly(t *testing.T) {
 	for _, c := range []struct {
-		measured bool
-		stop     core.Tick
-	}{{false, 0}, {true, 0}, {true, 200_000}} {
-		if err := fastLeaderRun(t, c.measured, c.stop, sessionPlants{}); err != nil {
-			t.Errorf("measured %v, stop %v: %v", c.measured, c.stop, err)
+		measured, deposed bool
+		stop, before      core.Tick
+	}{{false, false, 0, 0}, {true, false, 0, 0}, {true, false, 200_000, 0}, {true, true, 0, 0}, {false, false, 0, 10 * sec}} {
+		if err := fastLeaderRun(t, c.measured, c.deposed, c.stop, c.before, sessionPlants{}); err != nil {
+			t.Errorf("measured %v, deposed %v, stop %v, before %v: %v", c.measured, c.deposed, c.stop, c.before, err)
 		}
 	}
 }
 
 // Each planted leader-side bug of the sessions model fences a session whose client's lease runs:
-// on seed 38 of the seeded run, and every time in the fast new leader's scenario that exposes it.
+// in one of the first n seeds of the seeded run, and every time in the fast new leader's scenario
+// that exposes it. A leader lease that starts no count over shows in the scenario when the new
+// leader steps 10 s before its lease starts, so its count of C started before C's last renewal.
 func TestPlantedSessionBugsFenceEarly(t *testing.T) {
 	for _, p := range []struct {
 		name string
-		seed uint64
+		n    uint64
 		pl   sessionPlants
 	}{
-		{"session_lease for an unmeasured session", 38, sessionPlants{deadWaitLease: true}},
-		{"session_lease on the leader's own clock", 38, sessionPlants{countOnOwnClock: true}},
+		{"session_lease for an unmeasured session", 120, sessionPlants{deadWaitLease: true}},
+		{"session_lease on the leader's own clock", 120, sessionPlants{countOnOwnClock: true}},
+		{"an eviction fenced at once", 10, sessionPlants{evictAtOnce: true}},
+		{"no full lease after a failover", 1250, sessionPlants{noFullLease: true}},
+		{"renewals answered without the leader lease", 140, sessionPlants{answerWithoutLease: true}},
 	} {
-		if err := sessionRun(t, p.seed, p.pl); err == nil || !strings.Contains(err.Error(), invSessionLease) {
-			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)
+		if !fencesEarlyWithin(t, p.n, p.pl) {
+			t.Errorf("%s: %d seeds fenced no session early", p.name, p.n)
 		}
 	}
 	for _, p := range []struct {
-		name     string
-		measured bool
-		pl       sessionPlants
+		name              string
+		measured, deposed bool
+		before            core.Tick
+		pl                sessionPlants
 	}{
-		{"session_lease for an unmeasured session", false, sessionPlants{deadWaitLease: true}},
-		{"session_lease on the leader's own clock", true, sessionPlants{countOnOwnClock: true}},
+		{"session_lease for an unmeasured session", false, false, 0, sessionPlants{deadWaitLease: true}},
+		{"session_lease on the leader's own clock", true, false, 0, sessionPlants{countOnOwnClock: true}},
+		{"renewals answered without the leader lease", true, true, 0, sessionPlants{answerWithoutLease: true}},
+		{"no full lease after a failover", false, false, 10 * sec, sessionPlants{noFullLease: true}},
 	} {
-		if err := fastLeaderRun(t, p.measured, 0, p.pl); err == nil || !strings.Contains(err.Error(), invSessionLease) {
+		if err := fastLeaderRun(t, p.measured, p.deposed, 0, p.before, p.pl); err == nil || !strings.Contains(err.Error(), invSessionLease) {
 			t.Errorf("%s, fast new leader: %v", p.name, err)
 		}
 	}
 }
 
+// fencesEarlyWithin reports whether the seeded run with pl fences a session whose client's lease
+// runs in one of the first n seeds. A test's n is about 5 / the plant's rate over 500 seeds, so a
+// change that re-rolls the draws fails it less than 1% of the time.
+func fencesEarlyWithin(t *testing.T, n uint64, pl sessionPlants) bool {
+	for seed := range n {
+		if err := sessionRun(t, seed, pl); err != nil && strings.Contains(err.Error(), invSessionLease) {
+			return true
+		}
+	}
+	return false
+}
+
 // fastLeaderRun renews client C's session with a leader on clocks at C's rate for 5 s, then fails
-// over, right after a renewal, to a leader whose clocks run 10% fast and whose leader lease starts
-// at once. C dies then, or after two heartbeats to the new leader, the second measuring it, with
-// the new leader standing still for stop between them and then getting Resumed; the run fails if
-// C is fenced while a lease it holds runs, or is not fenced within 25 s.
-func fastLeaderRun(t *testing.T, measured bool, stop core.Tick, pl sessionPlants) error {
+// over to a leader whose clocks run 10% fast, whose leader lease starts right after the old leader
+// renewed C. The new leader steps from then on, or from before earlier while the old leader goes on
+// renewing C. C dies then, or after two heartbeats to the new leader, the second measuring it, with
+// the new leader standing still for stop between them and then getting Resumed; if deposed, C's
+// next heartbeat goes to the deposed leader before C dies. The run fails if C is fenced while a
+// lease it holds runs, or is not fenced within 25 s.
+func fastLeaderRun(t *testing.T, measured, deposed bool, stop, before core.Tick, pl sessionPlants) error {
 	const step = core.Tick(10_000)
 	cfg := lease.Config{Lease: SessionLease, Heartbeat: sec, RateGap: 100_000, Window: 10 * sec, Drift: lease.DefaultConfig.Drift, MaxMargin: lease.DefaultConfig.MaxMargin}
 	r := newCtlRun(t)
@@ -497,15 +521,14 @@ func fastLeaderRun(t *testing.T, measured bool, stop core.Tick, pl sessionPlants
 	oldG := gid()
 	var now core.Tick
 	ct := func() lease.Time { return lease.Time{Boot: sec + now, Raw: sec + now} }
-	ask := func() bool {
-		g := gid()
+	ask := func(ctl *Control, at lease.Time, g core.NodeID, leased bool) bool {
 		if !h.Due(g, ct()) {
 			return false
 		}
 		c.req++
 		h.Ask(g, core.RequestID(c.req), ct())
 		var a SessionAnswer
-		if r.ctl.Renew(r.at(), true, &SessionBeat{Session: c.id, Request: c.req, Sent: ct().Raw, Answered: c.answered, Arrived: c.arrived}, &a) {
+		if ctl.Renew(at, leased, &SessionBeat{Session: c.id, Request: c.req, Sent: ct().Raw, Answered: c.answered, Arrived: c.arrived}, &a) {
 			c.answered, c.arrived = a.Request, ct().Raw
 			if a.Status == SessionRenewed {
 				h.OnGrant(g, lease.Grant{ID: core.RequestID(a.Request), Run: 1, Raw: a.Raw}, ct())
@@ -513,14 +536,22 @@ func fastLeaderRun(t *testing.T, measured bool, stop core.Tick, pl sessionPlants
 		}
 		return true
 	}
-	for now = step; !ask() || now < 5*sec; now += step {
+	for now = step; !ask(r.ctl, r.at(), gid(), true) || now < 5*sec; now += step {
 		r.tick(step)
 		if now%(sec/10) == 0 {
 			r.sessStep()
 		}
 	}
+	old, oldAt, failed := r.ctl, r.at(), now
+	oldT := func() lease.Time { return lease.Time{Boot: oldAt.Boot + now - failed, Raw: oldAt.Raw + now - failed} }
 	r.failover()
 	r.ctl.plant = pl
+	for ; before > 0 && (now < failed+before || !ask(old, oldT(), oldG, true)); now += step {
+		if now == failed || now%(sec/10) == 0 {
+			r.settle(&ControlInputs{Raw: r.raw})
+		}
+		r.now, r.raw = r.now+step*11/10, r.raw+step*11/10
+	}
 	r.sessStep()
 	asks := 0
 	if measured {
@@ -538,8 +569,10 @@ func fastLeaderRun(t *testing.T, measured bool, stop core.Tick, pl sessionPlants
 		if now%(sec/10) == 0 {
 			r.sessStep()
 		}
-		if asks > 0 && ask() {
+		if asks > 0 && ask(r.ctl, r.at(), gid(), true) {
 			asks--
+		} else if asks == 0 && deposed && h.Due(gid(), ct()) && ask(old, oldT(), oldG, false) {
+			deposed = false
 		}
 		if r.fenced(c.id) && (h.Valid(oldG, ct()) || h.Valid(gid(), ct())) {
 			return fmt.Errorf("%s: session %d fenced at %v", invSessionLease, c.id, now)
@@ -666,7 +699,7 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants) error {
 	var msgs, due []sessMsg
 	for now = step; now < end; now += step {
 		faults := now < faultsEnd
-		if old != nil && now >= oldTo {
+		if old != nil && now >= oldTo+25*sec {
 			old, oldNode = nil, -1
 		}
 		if faults && now >= nextFail && old == nil && now >= leaseFrom && now >= stallTo {
@@ -723,7 +756,7 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants) error {
 			case r.l:
 				ok = r.ctl.Renew(setNow(), now >= leaseFrom, &m.beat, &a)
 			case oldNode:
-				ok = old.Renew(nodes[oldNode].at(now), true, &m.beat, &a)
+				ok = old.Renew(nodes[oldNode].at(now), now < oldTo, &m.beat, &a)
 			}
 			if ok && rng.IntN(20) != 0 {
 				msgs = append(msgs, sessMsg{at: now + ticks(3), client: m.client, node: m.node, run: runs[m.node], reply: true, ans: a})

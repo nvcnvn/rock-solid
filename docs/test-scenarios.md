@@ -6560,7 +6560,7 @@ leader-side rules are its invariants; the storage side is
 | A new leader receives a heartbeat before its leader lease starts | It answers none and commits nothing; a follower runs no `meta.Control` (`TestANewLeaderGivesEverySessionAFullLease`) |
 | A new leader's leader lease starts | Every live session gets a full count from that start: `dead_wait` for one it has not measured, a session that sent it a single heartbeat included, and `session_lease` times its bound once two heartbeats measured it (same test) |
 | The control-plane leader crashes 1 s after its last renewal of C, and a new leader whose `CLOCK_BOOTTIME` runs 22.6% fast answers 8 s, or 5 s, after the crash | C renews with it and is never fenced; D, whose daemon died with the old leader, is fenced once `dead_wait` has passed on the new leader's raw clock as well, not sooner on its fast boot clock (`TestAFastBootClockFencesNoSessionEarly`). C's side, ending its lease about 7.1 s after the crash when its own boot clock runs that fast and holding its writes until a leader answers, is the client daemon's |
-| A failover, right after a renewal of C, to a leader whose clocks run 10% fast over C's and the old leader's, with its lease starting at once; C dies then, or after two heartbeats to it, or after two heartbeats between which the new leader stands still for 200 ms with its clocks frozen and then gets `Resumed` | C's lease from the old leader runs 9.9 s more, and C is fenced no sooner: `dead_wait` after the new lease's start, or `session_lease` × 1.1 on the new leader's clocks after the second heartbeat, or, after the stop, `dead_wait` after the second heartbeat, since `Resumed` dropped the answer it names (`TestAFastNewLeaderFencesNoSessionEarly`) |
+| A failover to a leader whose clocks run 10% fast over C's and the old leader's, with its lease starting right after a renewal of C, at once or after the new leader stepped for 10 s while the old one renewed C; C dies then, or after two heartbeats to it, or after two heartbeats between which the new leader stands still for 200 ms with its clocks frozen and then gets `Resumed`, or after two heartbeats to it and a third to the deposed leader | C's lease from the old leader runs 9.9 s more, and C is fenced no sooner: `dead_wait` after the new lease's start, or `session_lease` × 1.1 on the new leader's clocks after the second heartbeat, or, after the stop, `dead_wait` after the second heartbeat, since `Resumed` dropped the answer it names. The deposed leader answers no heartbeat, so C's third gets it no lease (`TestAFastNewLeaderFencesNoSessionEarly`) |
 | A leader whose raw clock runs 5% fast over its clients' | It measures the rate from two heartbeats and fences 10.5 s after the last renewal; a heartbeat naming an answer older than its last, as after a lost answer, leaves the session unmeasured, fenced only after `dead_wait` (`TestAFenceStretchesByTheMeasuredRate`) |
 | A leader whose raw clock runs 5% fast processes C's heartbeat twice, 500 ms apart, or an older heartbeat of C's arrives 500 ms after a newer one; C's next heartbeat names the first answer | The leader pairs it with its first answer to the highest request and fences 10.5 s after the last renewal, where the later answer would bound its rate at 0.525 and fence after 10 s (`TestARepeatedHeartbeatIsMeasuredFromItsFirstAnswer`) |
 | A measured bound of 0.5, 1.05, 30, or 2⁶² | The wait is `session_lease`, 10.5 s, then `dead_wait` for both of the last: no stretch passes it (`TestAStretchLiesBetweenTheLeaseAndDeadWait`) |
@@ -6573,20 +6573,40 @@ leader-side rules are its invariants; the storage side is
 clock runs within 10% of real time, and a quarter of them have their boot clock slewed up to 22.6%
 apart from it. Slewing every node would hide the leader-side bugs: a holder ends its lease on its
 faster clock and a grantor waits for its slower one, so random slews cover most rate errors.
-Faults: failovers, half of them crashes and half a deposed leader still answering for up to 3 s;
-clients learning the new leader up to 15 s late; leader stalls of 2.5 to 5 s; 5% of heartbeats and
-answers lost and each delayed up to 30 ms; evictions; two daemons that die; fenced clients starting
-new sessions; storage nodes that each take the newest session-table version on a third of their
-heartbeats, so acknowledgements wait. Checked every 10 ms: no session is fenced while its client's
+Faults: failovers, half of them crashes and half a deposed leader still answering for up to 3 s
+while its lease runs, then refusing for 25 s more, past a new leader's `dead_wait`; clients learning the new leader up to 15 s late;
+leader stalls of 2.5 to 5 s; 5% of heartbeats and answers lost and each delayed up to 30 ms;
+evictions; two daemons that die; fenced clients starting new sessions; storage nodes that each
+take the newest session-table version on a third of their heartbeats, so acknowledgements wait. Checked every 10 ms: no session is fenced while its client's
 lease from any leader runs; after every commit, a new leader reads the table back as committed; no
 ID is given twice; no version is acknowledged before every node with a disk up holds it. At the
 end, every dead client's session has left the table and the version is acknowledged.
 
-**Planted bugs** (`TestPlantedSessionBugsFenceEarly`): the model's `neg-dead-wait-lease`, an
-unmeasured session waiting only `session_lease`, and `neg-count-on-own-clock`, every session
-waiting `session_lease` on the leader's own clock, each fence a session whose lease runs. The seeded
-run catches each on about 2% of seeds, seed 38 among them; the fast new leader's scenario catches
-each every time, the first with C dying at once and the second after it measured C.
+**Planted bugs** (`TestPlantedSessionBugsFenceEarly`). Each of the model's leader-side negatives
+below fences a session whose lease runs, in the seeded run within the seeds named, or every time in
+the fast new leader's scenario:
+
+| Planted bug | Seeds of 500 | First | Caught by |
+| --- | --- | --- | --- |
+| `neg-dead-wait-lease`: an unmeasured session waits only `session_lease` | 22 | 0 | Seeded run, 120 seeds; the scenario with C dying at once |
+| `neg-count-on-own-clock`: every session waits `session_lease` on the leader's own clock | 23 | 0 | Seeded run, 120 seeds; the scenario after the new leader measured C |
+| `neg-evict-at-once`: an eviction fences the session at once | 391 | 0 | Seeded run, 10 seeds |
+| `neg-no-full-lease`: a new leader's lease starts no count over, so it counts from its first step | 2 | 74 | Seeded run, 1,250 seeds; the scenario with the new leader stepping 10 s before its lease starts |
+| `neg-answer-without-lease`: a leader answers renewals without its leader lease, and so without the grants step only its lease starts | 18 | 38 | Seeded run, 140 seeds; the scenario with C's third heartbeat to the deposed leader |
+
+In the model, `neg-no-full-lease` counts from the last renewal any leader processed. Go keeps the
+counts only in the leader's memory, so the plant counts from the new leader's first step, which
+breaks the invariant when that step comes before the old leader's last renewal: with clocks 10% fast,
+the new leader has to step about 9 s before its lease starts for its `dead_wait` to end inside C's
+lease. The seeded run's new leader steps at most 4 s before, so it rarely does.
+
+The `neg-answer-without-lease` scenario is a history the model allows, not the model's shortest
+trace. In that trace the new leader has not measured C, and the deposed leader renews C while the new
+leader's `dead_wait` runs, which ends inside C's new lease. The model's `dead_wait` is 1.25 ×
+`session_lease`, which makes that path the short one; Go's is 2×, which makes the measured path the
+short one, so the scenario has C measured by the new leader, then renewed by the deposed one, then
+dead. The seeded run reaches the bug as well, since its deposed leader refuses for longer than
+`dead_wait`.
 
 ## Space grants
 
@@ -6830,9 +6850,10 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
 - the [Sessions and fencing model](#sessions-and-fencing-model)'s leader-side rows: renewals
   answered without the leader lease (`neg-answer-without-lease`), no full lease after a failover
   (`neg-no-full-lease`), counting on the leader's own clock (`neg-count-on-own-clock`), only
-  `session_lease` for an unmeasured session (`neg-dead-wait-lease`), an eviction fenced at once
-  (`neg-evict-at-once`, and `neg-two-holders` with two clients), a lock released at the fence's
-  commit, while the old holder's session is still listed (`neg-release-on-commit`), and an
+  `session_lease` for an unmeasured session (`neg-dead-wait-lease`) and an eviction fenced at once
+  (`neg-evict-at-once`), planted under [Control-plane sessions](#control-plane-sessions); and two
+  holders of a lock after an eviction fenced at once (`neg-two-holders`), a lock released at the
+  fence's commit, while the old holder's session is still listed (`neg-release-on-commit`), and an
   acknowledged version that counts only reachable nodes (`neg-ack-reachable-only`) or waits for
   nodes marked down (`neg-ack-waits-down`). Its storage-side rows are planted under [Session
   fencing on storage nodes](#session-fencing-on-storage-nodes).
