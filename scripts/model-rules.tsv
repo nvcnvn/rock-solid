@@ -62,10 +62,10 @@ sessions/neg-dead-wait-lease	meta.deadWaitLease	TestPlantedSessionBugsFenceEarly
 sessions/neg-evict-at-once	meta.evictAtOnce	TestPlantedSessionBugsFenceEarly
 sessions/neg-two-holders	meta.evictAtOnce	TestPlantedLockBugsBreakTheLockInvariants
 sessions/neg-release-on-commit	meta.releaseOnCommit	TestPlantedLockBugsBreakTheLockInvariants
-sessions/neg-check-on-arrival	open	Session fencing on storage nodes
-sessions/neg-replica-no-check	open	Session fencing on storage nodes
+sessions/neg-check-on-arrival	chunkstore.fenceOnArrival	TestPlantedReadBugsBreakTheReadRun
+sessions/neg-replica-no-check	chunkstore.memberNoFence	TestPlantedReadBugsBreakTheReadRun
 sessions/neg-up-with-old-table	meta.upWithOldTable	TestPlantedLockBugsBreakTheLockInvariants
-sessions/neg-peering-skipped	open	Session fencing on storage nodes
+sessions/neg-peering-skipped	chunkstore.stopPreviousOnly,lastActivatedOnly	TestPlantedBugsBreakTheirTraces
 sessions/neg-ack-reachable-only	meta.ackReachableOnly	TestPlantedLockBugsBreakTheLockInvariants
 sessions/neg-ack-waits-down	meta.ackWaitsDown	TestPlantedLockBugsBreakTheLockInvariants
 sessions/neg-count-from-reply	open	phase 6
