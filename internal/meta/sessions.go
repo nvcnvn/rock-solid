@@ -235,6 +235,8 @@ func (c *Control) resume(t lease.Time) {
 type sessionPlants struct {
 	deadWaitLease, countOnOwnClock, answerWithoutLease, evictAtOnce, noFullLease bool
 	releaseOnCommit, ackReachableOnly, ackWaitsDown                              bool
+	// noHeadCheck is not the model's: a session Txn without its check of the table's head.
+	noHeadCheck bool
 }
 
 // due reports whether the session's wait has passed on both of the leader's clocks at t.
@@ -343,6 +345,9 @@ func (c *Control) sessionStep(t lease.Time, token uint64, out *ControlOutput) (b
 		guard(ctlKey(CtlMembership, nil), c.diskV != 0, bigEndian.AppendUint64(nil, c.diskV)),
 		Put(sessionKey(0), appendSessionHead(nil, n)),
 	}, ops...)}
+	if c.plant.noHeadCheck {
+		tx.Ops = tx.Ops[1:]
+	}
 	if _, err := tx.Check(); err != nil {
 		return false, err
 	}

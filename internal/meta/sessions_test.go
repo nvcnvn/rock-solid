@@ -522,6 +522,15 @@ func TestPlantedLockBugsBreakTheLockInvariants(t *testing.T) {
 	}
 }
 
+// A session Txn without its check of the table's head, built by a new leader's machine that read
+// the table before the old leader's last start applied, gives a session ID twice in one of the
+// first 6 seeds of the seeded run; 475 of 500 seeds do.
+func TestASessionTxnWithoutItsHeadCheckGivesAnIDTwice(t *testing.T) {
+	if !breaksWithin(t, 6, sessionPlants{noHeadCheck: true}, invSessionIDs) {
+		t.Error("6 seeds gave no session ID twice")
+	}
+}
+
 // breaksWithin reports whether the seeded run with pl, checking inv alone, breaks inv in one of the
 // first n seeds. A test's n is about 5 / the plant's rate over 500 seeds, so a change that re-rolls
 // the draws fails it less than 1% of the time.
@@ -622,6 +631,7 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error 
 	lag := rand.New(rand.NewPCG(seed, 8))
 	part := rand.New(rand.NewPCG(seed, 9))
 	lk := rand.New(rand.NewPCG(seed, 10))
+	fly := rand.New(rand.NewPCG(seed, 11))
 	ticks := func(n int) core.Tick { return core.Tick(rng.IntN(n+1)) * step }
 	clock := func() sessClock {
 		c := sessClock{off: ticks(100), rawPPM: 900_000 + rng.Uint64N(200_001)}
@@ -658,9 +668,15 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error 
 	var dup uint64
 	dirty := false
 	commit := func(in *ControlInputs) {
-		if !r.settle(in) {
+		in.Now = r.now
+		if !r.propose(in) {
 			return
 		}
+		a := r.answer()
+		if a.Err != nil {
+			t.Fatalf("the commit answered %+v", a)
+		}
+		r.c.agree()
 		dirty = true
 		for _, s := range r.out.Started {
 			if given[s.ID] {
@@ -705,7 +721,11 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error 
 			return nil
 		}
 		dirty = false
-		got, want := r.load(r.l).SessionTable(), r.ctl.SessionTable()
+		rd, err := NewControl(r.c.n[r.l].s.State(), 0)
+		if err != nil {
+			return fmt.Errorf("read back: %w", err)
+		}
+		got, want := rd.SessionTable(), r.ctl.SessionTable()
 		if got.Version != want.Version || got.Acked != want.Acked || got.Next != want.Next || !slices.Equal(got.Sessions, want.Sessions) {
 			return fmt.Errorf("read back %+v, committed %+v", got, want)
 		}
@@ -822,8 +842,26 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error 
 			} else {
 				old, oldNode, oldTo = r.ctl, r.l, now+ticks(300)
 			}
+			// Half the time the old leader's last Txn, a session start for a client that then
+			// dies, applies after the new leader's machine read the table, and the new machine's
+			// first step, before it answers anything, starts a session too: its Txn must fail its
+			// check of the table's head, not give the same ID twice.
+			var stale *Control
+			if fly.IntN(2) == 0 {
+				stale = r.load(r.l)
+				stale.plant = pl
+				r.ctl.StartSession(uint32(len(clients)), 1<<40|uint64(now))
+				commit(&ControlInputs{Raw: r.raw, Leased: now >= leaseFrom})
+			}
 			r.failover()
 			r.ctl.plant = pl
+			if stale != nil {
+				stale.issuer.Term = r.c.n[r.l].s.Raft().Term()
+				r.ctl = stale
+				r.ctl.StartSession(uint32(len(clients)), 1<<41|uint64(now))
+				setNow()
+				commit(&ControlInputs{Raw: r.raw, Leased: true})
+			}
 			leaseFrom = oldTo + ticks(100)
 			for _, c := range clients {
 				c.learn, c.start = now+ticks(1500), 0
