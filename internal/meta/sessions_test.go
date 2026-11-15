@@ -531,6 +531,19 @@ func TestASessionTxnWithoutItsHeadCheckGivesAnIDTwice(t *testing.T) {
 	}
 }
 
+// A new leader's machine can read its table before the old leader's last start applies there, as
+// a Raft leader's applied state can lag what the old leader committed. Until its first Txn fails
+// and reloads, its Holding must count the session it has not seen as holding its locks: the
+// session's daemon already has its ID and may have locked.
+func TestAMachineThatHasNotSeenASessionStartCountsItHolding(t *testing.T) {
+	r := newCtlRun(t)
+	stale := r.load(r.l)
+	cs := r.startSessions(1)
+	if !stale.Holding(cs[0].id) {
+		t.Errorf("a machine whose table lags frees session %d's locks", cs[0].id)
+	}
+}
+
 // breaksWithin reports whether the seeded run with pl, checking inv alone, breaks inv in one of the
 // first n seeds. A test's n is about 5 / the plant's rate over 500 seeds, so a change that re-rolls
 // the draws fails it less than 1% of the time.
