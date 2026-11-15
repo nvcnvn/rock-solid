@@ -914,8 +914,8 @@ func TestPlantedGrantBugsOverrun(t *testing.T) {
 	if err := grantsRun(t, 4, true, grantPlants{unheardZero: true}); err == nil || !strings.Contains(err.Error(), invGrantRoom) {
 		t.Errorf("no failover count at seed 4 of the tight run: %v", err)
 	}
-	if !grantRoomBreaksWithin(t, 96, grantPlants{noGapCap: true}) {
-		t.Error("grants capped by half of available only broke nothing in 96 seeds of the tight run")
+	if !grantRoomBreaksWithin(t, 6, grantPlants{noGapCap: true}) {
+		t.Error("grants capped by half of available only broke nothing in 6 seeds of the tight run")
 	}
 	if g := shrinkRun(t, grantPlants{shrinkAtOnce: true}).Granted(); g != mib(150) {
 		t.Errorf("a shrink counted at once counted %v MiB, want the three shrunk grants' 150", inMiB([]uint64{g}))
