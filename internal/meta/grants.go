@@ -176,14 +176,18 @@ func (pg *poolGrants) flush(at core.Tick, blocks uint64) {
 	pg.flushes = append(pg.flushes, flushAt{at, blocks})
 }
 
-// limit is the most the pool's grants may total, in blocks: half its available figure before
-// grants and, so (1 + k) × Σ + F fits every disk's gap, its smallest gap over 1 + k, each less F.
-func (pg *poolGrants) limit() uint64 {
+// limit is the most pg's grants may total, in blocks: half its available figure before grants
+// and, so (1 + k) × Σ + F fits every disk's gap, its smallest gap over 1 + k, each less F.
+func (c *Control) limit(pg *poolGrants) uint64 {
 	if !pg.ready {
 		return 0
 	}
 	f := pg.flushed()
-	return min((pg.room-min(f, pg.room))/2, (pg.gap-min(f, pg.gap))/(1+ReuseBudget))
+	half := (pg.room - min(f, pg.room)) / 2
+	if c.gplant.noGapCap {
+		return half
+	}
+	return min(half, (pg.gap-min(f, pg.gap))/(1+ReuseBudget))
 }
 
 // grant answers b's pools into a at t: each flush reported since the last heartbeat counts in F
@@ -237,15 +241,13 @@ func (c *Control) grantPool(t core.Tick, session uint64, issuer Issuer, pb *Pool
 	e.count = max(e.count, e.buffered)
 	g := uint64(0)
 	if renewed {
-		lim := pg.limit()
-		if c.gplant.noGapCap && pg.ready {
-			lim = (pg.room - min(pg.flushed(), pg.room)) / 2
-		}
+		lim := c.limit(pg)
 		others := c.counted(pb.Pool, session)
 		g = min(e.ask, max(e.buffered, pg.level), lim-min(lim, others))
 	}
+	prev := e.grant
 	e.grant, e.count = g, max(e.count, g)
-	if c.gplant.shrinkAtOnce {
+	if c.gplant.shrinkAtOnce && g < prev {
 		e.count = max(g, e.buffered)
 	}
 	return g
@@ -396,7 +398,7 @@ func (c *Control) grantStep(now core.Tick, leased bool, ds []chunkstore.Disk, mo
 			pg.flushes = slices.DeleteFunc(pg.flushes, func(x flushAt) bool { return cover >= x.at+FillCover })
 		}
 		pg.cond.Update(&pg.figures, !slices.Contains(moved, cp.ID) && pt.Recovered())
-		lim := pg.limit()
+		lim := c.limit(&pg)
 		pg.level = c.level(cp.ID, lim-min(lim, c.fixed(cp.ID)))
 		next = append(next, pg)
 	}

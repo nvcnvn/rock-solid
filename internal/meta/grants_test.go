@@ -211,7 +211,7 @@ func TestTheGapCapsGrants(t *testing.T) {
 	r := newGrantRun(t, gb(100), 8*mib(16), 90, 10, gb(80))
 	gs := r.rounds(3, asks, make([]uint64, 10))
 	equal(t, "G4", gs, asks)
-	if lim, gap := r.ctl.poolGrant(1).limit(), gb(100)-gb(100)*90/100-8*mib(16); lim != gap/3 {
+	if lim, gap := r.ctl.limit(r.ctl.poolGrant(1)), gb(100)-gb(100)*90/100-8*mib(16); lim != gap/3 {
 		t.Fatalf("G4: the pool's cap is %d blocks, want g_d ÷ 3 = %d", lim, gap/3)
 	}
 	r = newGrantRun(t, gb(32), 8*mib(4), 90, 10, gb(25.6))
@@ -917,8 +917,8 @@ func TestPlantedGrantBugsOverrun(t *testing.T) {
 	if !grantRoomBreaksWithin(t, 96, grantPlants{noGapCap: true}) {
 		t.Error("grants capped by half of available only broke nothing in 96 seeds of the tight run")
 	}
-	if g := shrinkRun(t, grantPlants{shrinkAtOnce: true}).Granted(); g == mib(768) {
-		t.Error("a shrink counted at once still counted 768 MiB unechoed")
+	if g := shrinkRun(t, grantPlants{shrinkAtOnce: true}).Granted(); g != mib(150) {
+		t.Errorf("a shrink counted at once counted %v MiB, want the three shrunk grants' 150", inMiB([]uint64{g}))
 	}
 }
 
