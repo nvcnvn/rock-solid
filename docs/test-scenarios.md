@@ -6779,11 +6779,13 @@ remove: their plants (`stopPreviousOnly`, `lastActivatedOnly`) fail their traces
 break the lock order in none of 500 seeds, paired cuts included, and cannot: the model's
 counterexample needs two intervals whose live members do not overlap, an old primary completing
 the fenced session's writes on the members of its own interval while the new primary, whose peering
-never reached them, completes the next holder's. Every PG here has all 3 disks with `min_live` 2,
-so the detector marks at most one disk down and any two intervals share a live member, which either
-adopted the newer interval and refuses the older one's writes without being peered, or, cut off,
-did not, and then the newer interval completes nothing. Disjoint live sets need members replaced,
-as in the traces' two-member PGs. Neither of the two planted bugs above breaks the lock order in
+never reached them, completes the next holder's. Every PG here has 3 disks with `min_live` 2 and
+the run never replaces a member, so an interval completes writes only with 2 of its PG's 3 disks
+live, even when a paired cut takes two of them down together, and any two intervals that complete
+writes share a live member. That member takes the older interval's writes only until it adopts the
+newer one, without being peered, and the newer one's only after, so every write of the older
+interval that completes is ordered before every write of the newer one. Disjoint live sets need members
+replaced, as in the traces' two-member PGs. Neither of the two planted bugs above breaks the lock order in
 500 seeds either, since the second session starts only once every node with a disk up holds the
 fence.
 
