@@ -1084,15 +1084,15 @@ AskNext(n, p) ==
        /\ reqIv' = [reqIv EXCEPT ![p] = k]
        /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
 
-\* A restarted primary that adopted a table newer than the one it restarted on
-\* asks for the next interval too, before it peers: the code treats the first
-\* table a new process takes as the one it restarted on. It changes no rule, so
-\* only traces and ci-late-ask, whose plans set "lateask", take it.
+\* A restarted node that adopted a table newer than the one it restarted on
+\* asks for the next interval too, a primary before it peers: the code treats
+\* the first table a new process takes as the one it restarted on. It changes
+\* no rule, so only traces and ci-late-ask, whose plans set "lateask", take it.
 RestartAsk(n, p) ==
     LET k == IvAt(n, p)
     IN /\ "lateask" \in plan.f
        /\ Running(n)
-       /\ Leads(n, p)
+       /\ Leads(n, p) \/ (ddisk[n] \in Mem(p, k) /\ PrimNode(p, k) # n)
        /\ run[n] > 1
        /\ ~pr[n][p].act
        /\ ~Decided(n, p, k)
@@ -1746,9 +1746,10 @@ NetFault(h, g, to) ==
                    slew, runId, frz, suspAt, rstAt, lastAsk, lastHb, arrived, hs, raftVars>>
 
 \* A process restart forgets everything but the disk, the table and the Raft
-\* term, and draws a new run ID. A restarted primary asks for a new interval
-\* of each PG it led. With "stop2", only node 3 restarts; with "aimed", only
-\* node 2.
+\* term, and draws a new run ID. A restarted node asks for a new interval of
+\* each PG it is a member of, so that a decision settles the versions its
+\* replay gated even where the PG would stay in its interval. With "stop2",
+\* only node 3 restarts; with "aimed", only node 2.
 RestartState(n) ==
     /\ run' = [run EXCEPT ![n] = @ + 1]
     /\ pr' = [pr EXCEPT ![n] = [p \in PG |->
@@ -1758,8 +1759,10 @@ RestartState(n) ==
     /\ rsIv' = [rsIv EXCEPT ![n] = [p \in PG |->
                  IF PrimNode(p, IvAt(n, p)) = n THEN IvAt(n, p) ELSE rsIv[n][p]]]
     /\ reqIv' = [p \in PG |->
-                  IF /\ PrimNode(p, IvAt(n, p)) = n /\ IvAt(n, p) = Cur(p)
-                     /\ ~Bug("RestartSameInterval") /\ ~Bug("RestartNoAsk")
+                  IF /\ ddisk[n] \in Mem(p, IvAt(n, p)) /\ IvAt(n, p) = Cur(p)
+                     /\ IF PrimNode(p, IvAt(n, p)) = n
+                        THEN ~Bug("RestartSameInterval") /\ ~Bug("RestartNoAsk")
+                        ELSE ~Bug("MemberNoAsk")
                   THEN Cur(p) ELSE reqIv[p]]
     /\ pin' = [pin EXCEPT ![n] = {}]
     /\ known' = [known EXCEPT ![n] = [p \in PG |-> 0]]
@@ -2222,6 +2225,15 @@ IntervalEnds == \A p \in PG : <>[](\A n \in Node : Leads(n, p) /\ pr[n][p].ask =
 
 \* 16. Every client gets an answer: no version stays unanswered for ever.
 AllAnswered == <>[](pend = {})
+
+\* 20. A store's gated versions settle: once a PG's current interval activated,
+\* no up member whose node runs keeps a version of the PG gated, unless the
+\* table bound left the new interval asked for unmade.
+GatesSettle ==
+    <>[](\A p \in PG :
+           (\E x \in act : x.p = p /\ x.k = Cur(p)) /\ reqIv[p] # Cur(p) =>
+             \A d \in UpIn(p, Cur(p)) : dnode[d] # 0 /\ Running(dnode[d]) =>
+               \A g \in gat[d] : ChunkPG[g.c] # p \/ g.v \notin dlog[d][g.c])
 
 \* The interval that answers a version acknowledged in this step: the one
 \* activating, or the version's own.
