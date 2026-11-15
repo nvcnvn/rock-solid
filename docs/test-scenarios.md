@@ -4253,10 +4253,11 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | `scripted-move-primary` | 39 | passes: a move to a new primary that holds Y, peering keeping Y, which every up member holds, over the removed disk | 2 |
 | `scripted-lister-restarted` | 56 | passes: a restart during recovery, the restarted primary's replay gating Y until its next decision | 2 |
 | `scripted-lister-rotated` | 51 | passes: a rotation during recovery, the new primary holding Y logged and peering keeping it over the member that lists the chunk | 2 |
-| 39 seeds | 302 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 3 to 218 |
-| `primaries-2` | 775 | no verdict in 400 s and 2 GB: one crash leaves 26 `mayfail` lines, each a free choice, and TLC had found 2.2 million states at 360 s | 400 |
+| 37 seeds | 462 to 949 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 3 to 214 |
+| `primaries-2` | 677 | no verdict in 400 s and 2 GB: one crash leaves 26 `mayfail` lines, each a free choice | 400 |
+| `primaries-18`, `primaries-35` | 729, 753 | no verdict in 1,200 s and 2 GB: 18 has 25 `mayfail` and 45 `maydeliver` lines, 35 has 6 and 53. TLC ran each at about 300,000 states a minute for two minutes, to depth 491 and 439, then at 1,250 a minute with about 58,000 states queued, its 2 GB heap full | 1,200 |
 
-39 seeds of 40 pass, all but 34. None broke a safety invariant,
+37 seeds of 40 pass; 2, 18 and 35 give no verdict. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
 and `mayfail` branches stay alive, not its length.
 
@@ -4401,7 +4402,7 @@ broken invariant, keeping the trace up to there and saying which broke in a `.st
 10-minute test limit, so it runs a seed at a time. A rejection counts once the failing line has been
 read to be the planted behaviour.
 
-Results over the 39 seeds that pass, all but 2, in one run at one commit. Fired counts the seeds whose trace differs from the baseline's;
+Results over the 39 seeds that passed, all but 2, in one run at one commit, and for `memberNoAsk` over the 37 that pass now. Fired counts the seeds whose trace differs from the baseline's;
 passed, a trace TLC took to its end. A plant's rejected line is listed by kind, with the seeds where it held
 every invariant as clean. This run stops at the first broken invariant, so `sameMembers` and `keepID` pass: run on,
 over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of 21 and 11 of 11.
@@ -4423,6 +4424,7 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `keepID` | `neg-keep-disk-id` | 16 | 0 | 16 | 0, 0 | Cut at the break; see above | The spec's `Format` gave the disk a new ID |
 | `sendEpoch` | `neg-compare-table-epochs` | 39 | 39 | 0 | 39, 0 | `mfail` | `mfail`: a refusal with no fault budget, and not `gone` |
 | `neverAsk` | `neg-restart-no-ask` | 19 | 7 | 11 | 0, 0 | Not the rule: `order` 7, as discrepancy 13. One gives no verdict | An `ask` that never comes is no line |
+| `memberNoAsk` | `neg-member-no-ask` | 27 | 0 | 27 | 0, 0 | Passes | An `ask` that never comes is no line |
 | `coverAtRead` | `neg-recovery-covers-at-read` | 22 | 0 | 22 | 0, 0 | Too loose: `Recover`'s cover is unobserved | |
 | `resendNewestFirst` | `neg-log-out-of-order` | 10 | 0 | 10 | 0, 0 | No member logs out of order, so the rule is not reached | |
 | `stopPreviousOnly` | `neg-stop-previous-only` | 2 | 0 | 2 | 0, 0 | `J` shrinks, and still meets `Peer` | |
@@ -4445,11 +4447,11 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `mapOnDemote` | `neg-map-on-demote` | 2 | 0 | 2 | 0, 0 | Passes at seeds 25 and 38. Only its scripted test shows the rule (`TestReplayRollbackPlantsLoseX`) | |
 | `forgetImageDown`, `ignoreImageFlag`, `replayForgetsDrops` | `neg-forget-image-down`, `neg-ignore-image-flag`, `neg-replay-forgets-drops` | 0 | 0 | 0 | 0, 0 | Fire on none of the seeds. Only their scripted test shows the rules (`TestReplayRollbackPlantsLoseX`) | |
 
-Traces can fail is shown on these seeds for 18 of the 37 rules, 12 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
+Traces can fail is shown on these seeds for 18 of the 38 rules, 12 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
 `mergeOnDropped`, `editKeepsInterval`, `relistNever`, `peerInOldInterval`, `oldReport`, `recoverFromListed`,
 `listerVetoes`, `keepNoSource` and `writeOnUnfound`, and for 2 more, `sameMembers` and `keepID`, running on over 30.
 `settleByNumber` and `mapOnReplay` are rejected at lines not yet read to their rules. Open: `coverAtRead`,
-which needs a record of the blocks a recovery write leaves out; `neverAsk`, an omission no line can name;
+which needs a record of the blocks a recovery write leaves out; `neverAsk` and `memberNoAsk`, omissions no line can name;
 `freshGrantNoCheck`, with the lease half; `resendNewestFirst`, `stopPreviousOnly`, `lastActivatedOnly`, `forgetImage`
 and `mapOnDemote`, which need a seed that reaches them; and the seven that never fire. Of the oracle plants with no rule,
 `settleSubset` needs a record of what `Settle` answered.
