@@ -111,15 +111,15 @@ func (c *Control) StartSession(node uint32, request uint64) {
 	c.starts = append(c.starts, SessionStart{Node: node, Request: request})
 }
 
-// Renew answers a session heartbeat at t into a, unless this leader does not hold its leader lease
-// or has not yet stepped under it, and renews a live session not being evicted, granting it space
+// Renew answers a session heartbeat at t into a, unless this leader does not hold its leader lease,
+// has not yet stepped under it, or has not seen the session start (its table lags), and renews a live session not being evicted, granting it space
 // in each pool it names. Before that step the leader knows no pool's room, and an answer granting 0
 // would replace the grant whose window the daemon's next heartbeat must count. It measures the leader's raw rate over the client's
 // from the heartbeat and the answer it names, when that is this leader's first answer to the highest
 // request of the session: a later answer to the same request would measure the rate too low.
 func (c *Control) Renew(t lease.Time, leased bool, b *SessionBeat, a *SessionAnswer) bool {
 	c.sessClock(t, leased)
-	if !c.plant.answerWithoutLease && (!leased || !c.grantsFrom.set) {
+	if !c.plant.answerWithoutLease && (!leased || !c.grantsFrom.set) || b.Session >= c.sess.Next {
 		return false
 	}
 	*a = SessionAnswer{Request: b.Request, Raw: t.Raw, Status: SessionFenced, Issuer: c.issuer, Grants: a.Grants[:0]}
