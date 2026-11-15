@@ -7513,20 +7513,53 @@ once.
 
 ## Shared network suite
 
-- One suite, run on the simulated network and on TCP, structured so that RDMA joins it in phase 9
+- One suite in `internal/loop/nettest`, written against its `Net` interface (start and stop a
+  node's process, its pool, a pass on its loop, hold its reader, run until a condition holds, its
+  redial backoff) and run on the simulated network (`TestSuiteOnTheSimulatedNetwork`, seeded in
+  `scripts/seeds.sh`) and on loopback TCP (`internal/driver/tcp`, on macOS and on Linux in
+  Docker). Nothing in `Net` is particular to one transport, so RDMA joins by implementing it
   (done-when: RDMA and TCP pass the same suite, and a mixed 3-node cluster negotiates per pair).
-- Cases, the driver contract's network rules: a request and its reply between two loops on two
-  nodes; a fan-out of one buffer to three peers, freed once all are done; a peer lost mid-request
-  produces one `PeerLost`, fails every outstanding request to it, and releases every buffer before
-  the `PeerLost`; reconnect, then success; a timeout keeps the buffer until the reply or `PeerLost`;
-  a 256-byte message inline and a 257-byte payload in a pool buffer; a request to the wrong loop
-  forwarded and answered with the new owner.
-- On TCP the suite runs stepped on `looptest`, with unsent bytes (`SIOCOUTQ` above 0) counted as in
-  flight so no deadline fires while a segment crosses loopback. It compares results with the model
-  and checks counts, not whole traces.
-- Open: whether the suite may assume per-connection order. The simulated network reorders, and the
-  checklist's Replica primary item sends "a chunk's writes … to every member in version order and
-  again in that order after a reconnect", which relies on per-connection order.
+- On TCP each node is a stepped loop on `looptest` with its own listener on a port the kernel
+  assigns, all on one simulated clock; a run passes the loops round robin until nothing moves.
+- Every case ends in one check against a model of every message sent: each message arrives at most
+  once, whole (its inline bytes and its buffer, which travels as whole 4 KiB blocks), naming its
+  sender, and in the order sent; between two `PeerLost`s a process is handed for a peer, what it
+  gets from that peer has no hole (no message missing between two that arrive) and none of it
+  comes from the peer's next start; every message a live process sent that never arrived is
+  followed by a `PeerLost` for its peer, and every buffer it sent to that peer alone is freed before
+  that `PeerLost`; every live process's pool is empty. Both drivers keep order per connection
+  (the simulated network with duplicates off), so a replica primary may rely on it.
+- Cases, the driver contract's network rules:
+  - messages of a 256-byte inline payload, and of 1 byte, 257 bytes, a block and 1 MiB in pool
+    buffers, between three nodes, arrive whole, in order, naming their sender, with no
+    `PeerLost` (each lower node opens its connections first, since two TCP loops that dial each
+    other at once keep the lower's dial, and the other's first sends end in `PeerLost`);
+  - one buffer sent to three peers and a fourth that is stopped reaches the three, ends in
+    `PeerLost` for the fourth, and is freed once the driver is done with it for all four;
+  - a `meta.Client` `Txn` sent to a follower is answered `NotLeader` naming the leader, resent there
+    and settled under the client's token;
+  - a peer stopped with three `Txn`s waiting hands the client one `PeerLost`, after every buffer sent
+    to it was freed, and the client settles all three as dropped; a `Txn` to the peer's next start
+    is answered;
+  - a peer restarted at once, twice, with 64 messages of 16 KiB from each start, is a new
+    connection each time: each start's messages arrive after the `PeerLost` for the start before
+    and before the one for its own end. The first restart comes while the other end reads; the
+    second while it holds its reader, so on TCP, with a 64 KiB read budget per pass, the new
+    connection arrives with the old one still open and unread and replaces it;
+  - three nodes that each send to both others before any connection is up, so each pair dials each
+    other at once: whichever dial a driver keeps, every send arrives or ends in `PeerLost`;
+  - a send to a stopped peer, or to one never started, ends in `PeerLost` with its buffer freed,
+    and reaches the peer once it is up and the sender's backoff, which the driver states, is over;
+  - a reader that stops while 40 messages of 1 MiB are sent to it: what arrives is in order and the
+    rest ends in one `PeerLost` at the sender, whatever the driver's queue bound gives (on TCP the
+    32 MiB bound fails the connection and those already in the socket buffers arrive, 4; the
+    simulated network has no bound and delivers all 40); a send after reaches the reader.
+- Simulated network only, listed as skipped on TCP: a partition fails the connection at both ends
+  and nothing crosses it, and a send after the heal arrives; with one message in ten dropped, every
+  dropped message ends in `PeerLost` at its sender.
+- Not covered here: a timeout keeping its buffer until the reply or `PeerLost`, which is the core's
+  request tracking, not the driver's (the [driver contract](#simulated-network) checks it in the
+  simulator); `SIOCOUTQ` and deadlines, since the suite waits on conditions and arms no timer.
 
 ## Durable write benchmark
 

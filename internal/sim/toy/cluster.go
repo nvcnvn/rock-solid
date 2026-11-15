@@ -23,7 +23,7 @@ type Cluster struct {
 	checked []bool
 }
 
-// client is the address the primary acknowledges to, outside the cluster, so the network loses what it sends there once the history has taken it.
+// client is the address the primary acknowledges to, outside the cluster, so the network loses what it sends there once the history has taken it, and hands the primary a PeerLost for it, as a refused dial does.
 var clientAddr = core.NodeID{Node: Nodes}
 
 // NewCluster makes a cluster on a scheduler seeded with seed and set, with bug planted in every node.

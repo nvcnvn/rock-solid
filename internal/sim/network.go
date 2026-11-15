@@ -74,21 +74,16 @@ func (s *Scheduler) send(n *Node, l uint32, a *core.Action) {
 	}
 	from := core.NodeID{Node: n.id, Loop: l}
 	it := item{kind: ChooseDeliver, node: a.Peer.Node, loop: a.Peer.Loop, act: *a, from: from, fromGen: n.gen}
-	if int(a.Peer.Node) >= len(s.nodes) {
-		s.lose(&it)
-		return
-	}
-	to := s.nodes[a.Peer.Node]
 	c := s.connect(from, a.Peer)
 	it.conn = c.id
 	switch {
 	case c.broken:
 		s.lose(&it)
-	case !to.reachable() || int(a.Peer.Loop) >= len(to.loops) || s.cut(n.id, to.id) || s.chance(s.set.DropNum, s.set.DropDen):
+	case !s.takes(a.Peer) || s.cut(n.id, a.Peer.Node) || s.chance(s.set.DropNum, s.set.DropDen):
 		s.lose(&it)
 		s.breakConn(c)
 	default:
-		it.at = s.now + s.set.NetDelay + core.Tick(s.rand.Below(uint64(s.set.NetJitter)+1)) + s.queued(n.id, to.id)
+		it.at = s.now + s.set.NetDelay + core.Tick(s.rand.Below(uint64(s.set.NetJitter)+1)) + s.queued(n.id, a.Peer.Node)
 		s.items = append(s.items, it)
 		if s.chance(s.set.DupNum, s.set.DupDen) {
 			if a.Msg.Buf != core.NoBuf {
@@ -115,12 +110,18 @@ func (s *Scheduler) connect(from, to core.NodeID) *conn {
 		}
 	}
 	s.connID++
-	s.conns = append(s.conns, conn{id: s.connID, ends: [2]core.NodeID{from, to}, done: [2]bool{false, !s.nodes[to.Node].reachable()}})
+	s.conns = append(s.conns, conn{id: s.connID, ends: [2]core.NodeID{from, to}, done: [2]bool{false, !s.takes(to)}})
 	return &s.conns[len(s.conns)-1]
 }
 
 // reachable reports whether the node takes messages: it runs, and no pause that loses them stands it still.
 func (n *Node) reachable() bool { return n.up && !(n.paused && n.lossy) }
+
+// takes reports whether loop id exists and its node takes messages; a send to any other loop
+// fails its connection, as a dial to a node with no such process or address does.
+func (s *Scheduler) takes(id core.NodeID) bool {
+	return int(id.Node) < len(s.nodes) && s.nodes[id.Node].reachable() && int(id.Loop) < len(s.nodes[id.Node].loops)
+}
 
 func (s *Scheduler) connIndex(id uint64) int {
 	return slices.IndexFunc(s.conns, func(c conn) bool { return c.id == id })
