@@ -285,6 +285,7 @@ var conformPlants = []struct {
 	{"reorderAfterOther", func(r *primaryRun) { r.c.replicaPlants.reorderAfterOther = true }},
 	{"reportDecided", func(r *primaryRun) { r.c.replicaPlants.reportDecided = true }},
 	{"neverAsk", func(r *primaryRun) { r.c.replicaPlants.neverAsk = true }},
+	{"memberNoAsk", func(r *primaryRun) { r.c.replicaPlants.memberNoAsk = true }},
 	{"peerInOldInterval", func(r *primaryRun) { r.c.replicaPlants.peerInOldInterval = true }},
 	{"stopPreviousOnly", func(r *primaryRun) { r.c.replicaPlants.stopPreviousOnly = true }},
 	{"settleByNumber", func(r *primaryRun) { r.c.storePlants.settleByNumber = true }},

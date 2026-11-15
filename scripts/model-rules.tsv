@@ -47,6 +47,7 @@ epoch/neg-remove-before-recovered	chunkstore.removeOnActivation	TestPlantedPeeri
 epoch/neg-reorder-after-other-primary	chunkstore.reorderAfterOther	TestPlantedBugsBreakTheirTraces
 epoch/neg-report-before-activate	chunkstore.reportDecided	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-restart-no-ask	chunkstore.neverAsk	TestPlantedPeeringBugsBreakTheFaultRun
+epoch/neg-member-no-ask	chunkstore.memberNoAsk	TestAMemberThatNeverAsksKeepsItsReplayedWritesGated
 epoch/neg-restart-same-interval	chunkstore.peerInOldInterval	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-step-half-drift	lease.halfStep	TestPlantedLeaseBugsBreakThePair
 epoch/neg-step-on-grants-only	lease.stepOnGrantsOnly	TestPlantedLeaseBugsBreakThePair

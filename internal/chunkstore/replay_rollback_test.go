@@ -275,3 +275,37 @@ func TestReplayGatedVersionsKeepTheirSegmentsAndTheReplayPoint(t *testing.T) {
 	}
 	h.holds()
 }
+
+// restartMember writes X to rep2's PG, restarts its member's node and lets 10 s pass with the PG in its interval, its
+// store's index then mapping X, or not, and the chunks it keeps gated.
+func restartMember(t *testing.T, seed uint64, plant func(*replicaPlants)) (mapped bool, gated []core.ChunkID) {
+	r := seededSoleRun(t, seed, 2, 3)
+	c := r.c
+	plantAll(c, plant)
+	ch := chunkIn(pg0, 1, 0)
+	id := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize))
+	c.until(id)
+	c.settle()
+	m := c.node(r.members()[1].Disk)
+	c.s.CrashRandom(uint32(m))
+	c.s.Restart(uint32(m))
+	r.tick(10_000_000)
+	x, _ := c.reps[m].Store().Index().Chunk(testPool, ch)
+	return x.Whole != 0, c.reps[m].Store().Unsettled(nil)
+}
+
+// A member restarts while its PG stays in its interval, so no decision of it comes on its own: the versions replay
+// gated there settle once the member asks for a new interval (seed 410 of TestReplicatedWritesSurviveFaults).
+func TestARestartedMemberSettlesItsReplayedWrites(t *testing.T) {
+	for seed := uint64(1); seed <= 3; seed++ {
+		if mapped, gated := restartMember(t, seed, func(*replicaPlants) {}); !mapped || len(gated) != 0 {
+			t.Fatalf("seed %d: the restarted member maps X %v, keeps %v gated", seed, mapped, gated)
+		}
+	}
+}
+
+func TestAMemberThatNeverAsksKeepsItsReplayedWritesGated(t *testing.T) {
+	if mapped, gated := restartMember(t, 1, func(p *replicaPlants) { p.memberNoAsk = true }); mapped || len(gated) == 0 {
+		t.Fatalf("memberNoAsk: the restarted member maps X %v, keeps %v gated", mapped, gated)
+	}
+}

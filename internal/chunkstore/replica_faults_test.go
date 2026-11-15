@@ -852,7 +852,8 @@ func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
 
 // Each planted peering bug breaks its invariant, checked alone, at a seed of the first 500, as the
 // epoch change model's counterexample for it does: a restarted primary that never asks for a new
-// interval (neg-restart-no-ask) leaves its PG unactivated (67 of 500); a member logging a version
+// interval (neg-restart-no-ask) leaves its PG unactivated (71 of 500), and a restarted member that never
+// asks (neg-member-no-ask) keeps its replayed writes gated, unmapped, once recovery settles; a member logging a version
 // out of order (neg-log-out-of-order), here as writes sent again newest first after a reconnect,
 // leaves a member mapping other bytes once recovery settles (23 of 500); a version decided by its
 // own interval's members after a later interval kept it (neg-decide-by-own-interval, 9 of 500) and
@@ -867,6 +868,7 @@ func TestPlantedPeeringBugsBreakTheFaultRun(t *testing.T) {
 		faultPlant
 	}{
 		{"no ask after a restart", 7, faultPlant{invActivates, func(c *rcluster) { c.replicaPlants.neverAsk = true }}},
+		{"no ask after a member's restart", 410, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.memberNoAsk = true }}},
 		{"logged out of order", 0, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.resendNewestFirst = true }}},
 		{"decided by its own interval", 6, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.ownInterval = true }}},
 		{"activated before lists are durable", 5, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},

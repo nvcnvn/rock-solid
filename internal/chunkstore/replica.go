@@ -39,7 +39,7 @@ type ReplicaConfig struct {
 	Lease lease.Config
 	// Log is the log ID of the disk's store, which its heartbeats and probe answers carry.
 	Log uint64
-	// Restarted is set when the store was opened rather than formatted: an earlier run may have writes in flight, so the replica asks for a new interval of each PG it leads in its first table and peers in it before it serves.
+	// Restarted is set when the store was opened rather than formatted: an earlier run may have writes in flight, so the replica asks for a new interval of each PG it is a member of in its first table, and as primary peers in it before it serves.
 	Restarted bool
 }
 
@@ -99,11 +99,14 @@ func (r *Replica) retry(ctx *core.Context, out *ReplicaOutput) {
 			out.Asks = append(out.Asks, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
 		}
 	}
+	for _, a := range r.asks {
+		out.Asks = append(out.Asks, PGFields{Epoch: r.table.Epoch, PG: a.PG, Interval: a.Interval})
+	}
 }
 
 // armRetry arms RetryTimer while a table or an interval is asked for.
 func (r *Replica) armRetry(ctx *core.Context, out *ReplicaOutput) {
-	if r.retryAt != 0 || r.want == 0 && !r.wantSessions && !slices.ContainsFunc(r.leads, func(l lead) bool { return l.asked }) && !r.peering() && !r.unrecorded() && !r.waits {
+	if r.retryAt != 0 || r.want == 0 && !r.wantSessions && len(r.asks) == 0 && !slices.ContainsFunc(r.leads, func(l lead) bool { return l.asked }) && !r.peering() && !r.unrecorded() && !r.waits {
 		return
 	}
 	r.retryAt = ctx.Now + RetryAfter
@@ -230,6 +233,8 @@ type Replica struct {
 	frame     []byte
 	armed     bool
 	// want is the newest table epoch asked for and not yet held, whole if wantWhole; retryAt is when RetryTimer is armed for, 0 when it is not.
+	// asks is the new intervals this disk asked for, as a restarted member, of PGs no table has moved on since.
+	asks      []PGFields
 	want      uint64
 	wantWhole bool
 	retryAt   core.Tick
@@ -396,10 +401,11 @@ type replicaPlants struct {
 	// (the epoch change model's RecoveryCoversAtRead).
 	noRecovery  bool
 	coverAtRead bool
-	// neverAsk has a restarted primary ask for no new interval; sendEpoch has a member accept a
+	// neverAsk has a restarted primary ask for no new interval, memberNoAsk a restarted member; sendEpoch has a member accept a
 	// write only under the table epoch it was sent in; sameMembers has a member accept a write
 	// tagged with an earlier interval whose members' disks are those of its current one.
 	neverAsk    bool
+	memberNoAsk bool
 	sendEpoch   bool
 	sameMembers bool
 	// stopPreviousOnly has peering reach only the interval just before its own, and lastActivatedOnly
@@ -553,7 +559,7 @@ func comparePG(a, b core.PGID) int {
 	return cmp.Or(cmp.Compare(a.Pool, b.Pool), cmp.Compare(a.Index, b.Index))
 }
 
-// adopt takes t as the replica's table. In the first table after a restart, every PG this disk leads asks for a new interval. A PG this disk leads in t keeps its term if no other primary led it in between, as the PG's listed past intervals show, and holds its client writes until it has peered in its new interval; a PG it no longer leads refuses the writes it held.
+// adopt takes t as the replica's table. In the first table after a restart, this disk asks for a new interval of every PG it is a member of, so that a decision settles the versions its replay gated. A PG this disk leads in t keeps its term if no other primary led it in between, as the PG's listed past intervals show, and holds its client writes until it has peered in its new interval; a PG it no longer leads refuses the writes it held.
 func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 	out.note(trace.OutAdopt, t.Epoch, 0, 0, 0, 0)
 	first := r.table.Epoch == 0
@@ -567,15 +573,25 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 		_, e := r.table.entry(f.pg)
 		return e == nil || e.Interval != uint32(f.version>>32)
 	})
+	r.asks = slices.DeleteFunc(r.asks, func(a PGFields) bool {
+		_, e := t.entry(a.PG)
+		return e == nil || e.Interval != a.Interval
+	})
 	kept := r.leads[:0:0]
 	for pi := range t.Pools {
 		p := &t.Pools[pi]
 		for i := range p.PGs {
 			e := &p.PGs[i]
+			pg := core.PGID{Pool: p.ID, Index: uint32(i)}
 			if d, ok := e.primary(); !ok || d != r.cfg.Disk {
+				if first && r.cfg.Restarted && !r.plant.memberNoAsk && slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk }) {
+					a := PGFields{Epoch: t.Epoch, PG: pg, Interval: e.Interval}
+					r.asks = append(r.asks, a)
+					out.note(trace.OutAsk, pgField(pg), uint64(e.Interval), 0, 0, 0)
+					out.Asks = append(out.Asks, a)
+				}
 				continue
 			}
-			pg := core.PGID{Pool: p.ID, Index: uint32(i)}
 			l := lead{pg: pg, interval: e.Interval, since: e.Interval, asking: first && r.cfg.Restarted && !r.plant.peerInOldInterval}
 			if j := r.lead(pg); j >= 0 {
 				old := r.leads[j]
