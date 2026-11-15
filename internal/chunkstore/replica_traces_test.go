@@ -67,7 +67,7 @@ func reorderTrace(t *testing.T, plant bool) error {
 	}
 	writes := map[core.RequestID]incWrite{}
 	c.planted = true
-	c.inv.Register(invIncarnation, func() error { return c.incarnations(writes) })
+	c.inv.Register(invIncarnation, func() error { return c.incarnations(writes, invIncarnation) })
 	ch := chunkIn(pg0, 1, 0)
 	p, q, client := 1, 2, c.client.Node
 	c.s.Partition(uint32(p), uint32(q), false)

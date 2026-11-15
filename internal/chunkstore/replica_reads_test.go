@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -16,6 +17,8 @@ const (
 	invOneReader   = "no PG serves reads from two primaries at once"
 	invIncarnation = "no write of an incarnation is acknowledged after a later incarnation's write to its chunk"
 	invReadVersion = "no read returns a version before it commits, or one later lost"
+	invFencedWrite = "no fenced session's write is applied"
+	invLockOrder   = "every write of a fenced lock holder that completes is ordered before every write of the next holder"
 )
 
 // readRun is a detector cluster on noisy clocks whose disk nodes are, one at a time, cut off from every other node, the authority's included, so that they miss tables, and in half the cuts from the client too, paused, rebooted or slowed on a path, while a client reads every PG at every node, tagged with one of the last few tables, and two incarnations of one client session write: the first dies partway, and its successor says hello to every node, reissues the writes left unanswered and writes on.
@@ -40,6 +43,12 @@ type readRun struct {
 	returns bool
 	back    int
 	backBy  core.Tick
+	// fence has the writers be sessions 1 and 2, the second starting only once every node with a
+	// disk marked up holds the table that fences the first; applied is, for each store as it took
+	// that table, the session 1 writes it had ordered, and fenceErr the first it ordered after.
+	fence    bool
+	applied  map[*Store]map[uint64]bool
+	fenceErr error
 }
 
 // readVersion is a read's PG and chunk and, once answered OK, the version it returned.
@@ -55,6 +64,7 @@ type chunkVersion struct {
 	ver   uint64
 }
 
+// incWrite is a write of the first writer (inc 1) or of its successor (inc 2).
 type incWrite struct {
 	inc   uint64
 	chunk core.ChunkID
@@ -140,6 +150,9 @@ func (c *rcluster) readArrives(d int, ev *core.Event) error {
 // pass notes the versions node d answers the client with: a write's acknowledgment, and a read's, which must return a version acknowledged or kept by a later activated interval.
 func (r *readRun) pass(d int, acts []core.Action) {
 	c := r.d.rcluster
+	if r.fence && r.fenceErr == nil {
+		r.fenceErr = r.fencedApplied(d)
+	}
 	for i := range acts {
 		a := &acts[i]
 		if a.Kind != core.ActNetSend || a.Peer != c.client || a.Msg.Len < headSize {
@@ -197,7 +210,52 @@ func (r *readRun) lost() error {
 }
 
 // incarnations checks that no acknowledged write of the session's first incarnation has a later version of its chunk than an acknowledged write of the second.
-func (c *rcluster) incarnations(writes map[core.RequestID]incWrite) error {
+// fencedApplied reports a write of session 1 that node d's store ordered once it held the table
+// that fences it.
+func (r *readRun) fencedApplied(d int) error {
+	st := r.d.reps[d].Store()
+	if st.Sessions().Version == 0 {
+		return nil
+	}
+	for i := range st.ops {
+		if o := &st.ops[i]; o.kind != 0 && o.kind != opRead && o.req.Session == 1 && o.version != 0 && o.err == nil && !r.applied[st][o.req.ID] {
+			return fmt.Errorf("%s: node %d ordered session 1's write of %v as %#x after it held the fence", invFencedWrite, d, o.req.Chunk, o.version)
+		}
+	}
+	return nil
+}
+
+// fenceNode hands node n's replica the newest session table, noting the session 1 writes its store
+// has ordered.
+func (r *readRun) fenceNode(n int) {
+	c := r.d.rcluster
+	t := c.sessions
+	c.call(n, func(ctx *core.Context, rep *Replica, out *ReplicaOutput) {
+		st, seen := rep.Store(), map[uint64]bool{}
+		for i := range st.ops {
+			if o := &st.ops[i]; o.kind != 0 && o.req.Session == 1 && o.version != 0 {
+				seen[o.req.ID] = true
+			}
+		}
+		if st.Sessions().Version < t.Version {
+			r.applied[st] = seen
+		}
+		rep.SetSessions(ctx, t, out)
+	})
+}
+
+// fenced reports whether every node with a disk the detector marks up holds the newest session table.
+func (r *readRun) fenced() bool {
+	c := r.d.rcluster
+	for _, x := range r.d.a.rec.Disks() {
+		if m, _ := r.d.det.Mark(x.ID); m == MarkUp && c.reps[x.Node].Store().Sessions().Version < c.sessions.Version {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *rcluster) incarnations(writes map[core.RequestID]incWrite, inv string) error {
 	first, second := map[core.ChunkID]core.RequestID{}, map[core.ChunkID]core.RequestID{}
 	for _, id := range slices.Sorted(maps.Keys(writes)) {
 		w := writes[id]
@@ -216,7 +274,7 @@ func (c *rcluster) incarnations(writes map[core.RequestID]incWrite) error {
 	for _, ch := range slices.SortedFunc(maps.Keys(first), compareChunk) {
 		a := first[ch]
 		if b, ok := second[ch]; ok && c.cl.replies[a].Version > c.cl.replies[b].Version {
-			return fmt.Errorf("%s: write %d of incarnation 1 acknowledged as %#x of %v, write %d of incarnation 2 as %#x", invIncarnation, a, c.cl.replies[a].Version, ch, b, c.cl.replies[b].Version)
+			return fmt.Errorf("%s: write %d of writer 1 acknowledged as %#x of %v, write %d of writer 2 as %#x", inv, a, c.cl.replies[a].Version, ch, b, c.cl.replies[b].Version)
 		}
 	}
 	return nil
@@ -301,10 +359,31 @@ func (r *readRun) rejoin() {
 	}
 }
 
-// incWriter is one incarnation of client session 1, writing blocks and parts of blocks of two chunks of every PG with up to 6 writes unanswered: the first stops at stop, the second starts at start with a hello to every node and the first's unanswered writes.
+// tendSessions fences session 1 at die, hands the table to every running node not cut off, and
+// starts the second writer once every node with a disk up holds it.
+func (r *readRun) tendSessions(die core.Tick, second *incWriter) {
+	c, now := r.d.rcluster, r.d.s.Time()
+	if now < die {
+		return
+	}
+	if c.sessions.Version == 0 {
+		c.sessions = SessionTable{Version: 1, Next: 3, Live: []uint64{2}}
+	}
+	for n := range c.reps {
+		if c.s.Node(uint32(n)).Up() && !r.d.cut[n] && c.reps[n].Store().Sessions().Version < c.sessions.Version {
+			r.fenceNode(n)
+		}
+	}
+	if second.start == math.MaxInt64 && r.fenced() {
+		second.start = now
+	}
+}
+
+// incWriter is one incarnation of a client session, writing blocks and parts of blocks of two chunks of every PG with up to 6 writes unanswered: the first stops at stop, the second starts at start with a hello to every node and the first's unanswered writes.
 type incWriter struct {
 	r       *readRun
 	rng     *core.Rand
+	session uint64
 	inc     uint64
 	start   core.Tick
 	stop    core.Tick
@@ -338,7 +417,7 @@ func (w *incWriter) Next(ctx *core.Context, acts []core.Action) []core.Action {
 		for n := range c.reps {
 			c.nextID++
 			a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(n)}}
-			a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendHello(nil, &Hello{ID: c.nextID, Session: 1, Incarnation: w.inc})))
+			a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendHello(nil, &Hello{ID: c.nextID, Session: w.session, Incarnation: w.inc})))
 			acts = append(acts, a)
 		}
 	}
@@ -366,7 +445,7 @@ func (w *incWriter) Next(ctx *core.Context, acts []core.Action) []core.Action {
 	id := c.nextID
 	w.at[id], w.ops[id] = c.s.Time(), op
 	w.r.writes[id] = incWrite{inc: w.inc, chunk: op.c}
-	u := Update{Kind: KindWrite, ID: id, PG: c.pgFields(pg), Session: 1, Incarnation: w.inc, Chunk: op.c, Off: op.off, Len: op.n}
+	u := Update{Kind: KindWrite, ID: id, PG: c.pgFields(pg), Session: w.session, Incarnation: w.inc, Chunk: op.c, Off: op.off, Len: op.n}
 	a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(c.node(lead))}}
 	a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))
 	buf, err := ctx.Pool.AllocZeroed(dataBytes(op.off, op.n))
@@ -410,8 +489,15 @@ func (rd *pgReader) Next(ctx *core.Context, acts []core.Action) []core.Action {
 
 // runReads runs the read workload for 30 s of faults and 10 s after, failing t on a broken invariant registered with the simulator; with a plant, it checks only the plant's invariant and returns its first violation.
 func runReads(t *testing.T, seed uint64, plant *readPlant) error {
+	return runReadsWith(t, seed, false, plant)
+}
+
+// runReadsWith is runReads, with fence the second writer a new session, which writes once every
+// node with a disk up holds the session table that fences the first.
+func runReadsWith(t *testing.T, seed uint64, fence bool, plant *readPlant) error {
 	set := noisy()
-	r := &readRun{rng: core.NewRand(seed ^ 0x4ead), reads: map[core.RequestID]readVersion{}, writes: map[core.RequestID]incWrite{}, acked: map[chunkVersion]bool{}, faulted: -1, back: -1}
+	r := &readRun{rng: core.NewRand(seed ^ 0x4ead), reads: map[core.RequestID]readVersion{}, writes: map[core.RequestID]incWrite{}, acked: map[chunkVersion]bool{}, faulted: -1, back: -1,
+		fence: fence, applied: map[*Store]map[uint64]bool{}}
 	r.returns = r.rng.Chance(1, 2)
 	d := newDCluster(t, seed, set)
 	r.d, d.cut = d, map[int]bool{}
@@ -428,11 +514,21 @@ func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 	c.inv.Register(invOneReader, r.oneReader)
 	r.epochs = watchEpochs(c, &d.a.rec)
 	c.inv.Register(invReadVersion, func() error { return r.verErr })
-	c.inv.Register(invIncarnation, func() error {
+	order := invIncarnation
+	if fence {
+		order = invLockOrder
+		c.sessions = SessionTable{Next: 3, Live: []uint64{1, 2}}
+		for n := range c.reps {
+			c.reps[n].Store().SetSessions(c.sessions)
+		}
+		d.det.Lags = func(node uint32) bool { return c.reps[node].Store().Sessions().Version < c.sessions.Version }
+		c.inv.Register(invFencedWrite, func() error { return r.fenceErr })
+	}
+	c.inv.Register(order, func() error {
 		if !r.ended {
 			return nil
 		}
-		return c.incarnations(r.writes)
+		return c.incarnations(r.writes, order)
 	})
 	x := c.record()
 	c.inv.Register(invLinearizable, func() error {
@@ -458,8 +554,11 @@ func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 	r.tables = append(r.tables, c.table)
 	now := c.s.Time()
 	die := now + 4_000_000 + core.Tick(r.rng.Below(8_000_000))
-	first := &incWriter{r: r, rng: r.rng.Fork(), inc: 1, start: now, stop: die, at: map[core.RequestID]core.Tick{}, ops: map[core.RequestID]faultOp{}, hello: true}
-	second := &incWriter{r: r, rng: r.rng.Fork(), inc: 2, start: die + core.Tick(r.rng.Below(1_000_000)), stop: now + 25_000_000, at: map[core.RequestID]core.Tick{}, ops: map[core.RequestID]faultOp{}}
+	first := &incWriter{r: r, rng: r.rng.Fork(), session: 1, inc: 1, start: now, stop: die, at: map[core.RequestID]core.Tick{}, ops: map[core.RequestID]faultOp{}, hello: true}
+	second := &incWriter{r: r, rng: r.rng.Fork(), session: 1, inc: 2, start: die + core.Tick(r.rng.Below(1_000_000)), stop: now + 25_000_000, at: map[core.RequestID]core.Tick{}, ops: map[core.RequestID]faultOp{}}
+	if fence {
+		second.session, second.start = 2, math.MaxInt64
+	}
 	c.addClient(first)
 	c.addClient(second)
 	c.addClient(&pgReader{r: r, rng: r.rng.Fork()})
@@ -469,6 +568,9 @@ func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 		d.tend()
 		if t := c.table; t.Epoch != r.tables[len(r.tables)-1].Epoch {
 			r.tables = append(r.tables, t)
+		}
+		if fence {
+			r.tendSessions(die, second)
 		}
 		if second.reissue == nil && c.s.Time() >= second.start {
 			second.reissue = []faultOp{}
@@ -517,6 +619,18 @@ func TestNoPGServesReadsFromTwoPrimaries(t *testing.T) {
 }
 
 // Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (30 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's; and a primary that commits a version once its own log holds it (297 of 500), so that a read returns a version the next interval drops.
+// The read run's writers as two sessions: the first is fenced when it dies, and the second, its
+// locks' next holder, writes once every node with a disk up holds the fence. No store orders a
+// write of the fenced session once it holds the fence, and every write of the first that completes
+// is ordered, in its chunk, before every write of the second.
+func TestNoFencedSessionsWriteIsApplied(t *testing.T) {
+	seeds.Run(t, 0, 10, func(seed uint64) {
+		if err := runReadsWith(t, seed, true, nil); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+	})
+}
+
 func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 	for _, p := range []struct {
 		name string

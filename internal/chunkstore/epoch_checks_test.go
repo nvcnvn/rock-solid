@@ -233,13 +233,13 @@ func (x *epochChecks) copies(d int, ch core.ChunkID, v uint64) {
 	}
 }
 
-// judge checks what replica d did with the member update it took: it logs none tagged with an interval below its table's, and refuses none before its store sees it while its table holds the update's interval, it is up in it and no earlier version of the chunk failed there.
+// judge checks what replica d did with the member update it took: it logs none tagged with an interval below its table's, and refuses none before its store sees it while its table holds the update's interval, it is up in it, no earlier version of the chunk failed there and its session is not fenced.
 func (x *epochChecks) judge(d int, s *memberSeen) {
 	r, u := x.c.reps[d], &s.u
 	if !s.logging && logging(r, u) && u.PG.Interval < s.interval {
 		x.fail(invLateLog, fmt.Errorf("disk %d logs %#x of %v tagged with interval %d, its table at %d", r.cfg.Disk, u.Version, u.Chunk, u.PG.Interval, s.interval))
 	}
-	if u.PG.Interval != s.interval || !s.up || s.failed || u.Version <= s.newest || r.nextID != s.next {
+	if u.PG.Interval != s.interval || !s.up || s.failed || u.Version <= s.newest || r.nextID != s.next || r.st.Sessions().Fenced(u.Session) {
 		return
 	}
 	passes := x.c.passes[d]
