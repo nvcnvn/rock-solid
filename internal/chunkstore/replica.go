@@ -175,7 +175,7 @@ type storeReq struct {
 	pg    core.PGID
 	chunk core.ChunkID
 	// version is the version a member's write or punch was handed, and recover marks a recovery
-	// write, whose version is the chunk's write before it; source is the disk a recovery write's
+	// write, whose version is the chunk's write before it, or a recovery read; source is the disk a recovery write's
 	// image came from, and interval the interval it was ordered in.
 	version  uint64
 	recover  bool
@@ -1583,7 +1583,7 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		r.recoveryWritten(ctx, q, rp, out)
 	case reqRecoverRead:
 		if k := slices.IndexFunc(r.recs, func(rc recovery) bool { return rc.read == rp.ID }); k >= 0 {
-			r.recoveryRead(ctx, k, rp.Buf, rp.Err == nil, out)
+			r.recoveryRead(ctx, k, rp.Buf, rp.Err == nil, errors.Is(rp.Err, disklog.ErrBadChecksum), out)
 		} else {
 			freeBuf(ctx, rp.Buf)
 		}
@@ -1638,6 +1638,8 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		switch {
 		case errors.Is(rp.Err, ErrMissing):
 			resp.Status, resp.Version = StatusMissing, 0
+		case q.recover && errors.Is(rp.Err, disklog.ErrBadChecksum):
+			resp.Status, resp.Version = StatusUnfound, 0
 		case rp.Err != nil:
 			ref := r.refusal(q.pg)
 			resp.Status, resp.Version, resp.Epoch, resp.Interval = StatusRefused, 0, ref.Epoch, ref.Interval

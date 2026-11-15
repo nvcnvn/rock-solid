@@ -28,9 +28,11 @@ type recoverChunk struct {
 	targets uint8
 	busy    bool
 	// wait is set once a read of the chunk failed, until the next retry; failed is the members,
-	// by place, a read failed at, which are tried last.
+	// by place, a read failed at, which are tried last, and rotten those whose image failed its
+	// checksum, which are no source in this interval.
 	wait   bool
 	failed uint8
+	rotten uint8
 }
 
 // recovery is a chunk being recovered: its image read from disk from at slot src of the members,
@@ -168,7 +170,7 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 	}
 	src, clean := -1, false
 	for s, m := range e.Members {
-		if s >= maxMembers || m.Mark != MarkUp || t.targets&(1<<s) != 0 && (m.Disk != r.cfg.Disk || l.lacks(t.chunk) && !r.plant.recoverFromListed) {
+		if s >= maxMembers || m.Mark != MarkUp || t.rotten&(1<<s) != 0 || t.targets&(1<<s) != 0 && (m.Disk != r.cfg.Disk || l.lacks(t.chunk) && !r.plant.recoverFromListed) {
 			continue
 		}
 		clean = true
@@ -189,6 +191,7 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 		if j, ok := slices.BinarySearchFunc(l.kept, t.chunk, func(k keptChunk, c core.ChunkID) int { return compareChunk(k.chunk, c) }); ok {
 			l.kept[j].unfound = !r.plant.neverUnfound
 		}
+		r.releaseHeld(ctx, i, t.chunk, out)
 		return
 	case src < 0:
 		t.wait, r.waits = true, true
@@ -232,8 +235,8 @@ func (r *Replica) recoverEmpty(ctx *core.Context, t *recoverChunk, rc recovery, 
 }
 
 // recoveryRead takes the image recovery k read, in buf, or its failure: the chunk is tried again
-// at the next retry.
-func (r *Replica) recoveryRead(ctx *core.Context, k int, buf core.IOBuf, ok bool, out *ReplicaOutput) {
+// at the next retry, without the source if its image failed its checksum (rotten).
+func (r *Replica) recoveryRead(ctx *core.Context, k int, buf core.IOBuf, ok, rotten bool, out *ReplicaOutput) {
 	if !ok {
 		freeBuf(ctx, buf)
 		rc := r.recs[k]
@@ -241,6 +244,9 @@ func (r *Replica) recoveryRead(ctx *core.Context, k int, buf core.IOBuf, ok bool
 		if i := r.lead(rc.pg); i >= 0 && r.leads[i].interval == rc.interval {
 			t := &r.leads[i].todo[rc.todo]
 			t.wait, t.failed, r.waits = true, t.failed|1<<rc.src, true
+			if rotten {
+				t.rotten |= 1 << rc.src
+			}
 		}
 		return
 	}
@@ -261,8 +267,8 @@ func (r *Replica) retryReads() {
 }
 
 // recoveryAsked serves a recovery read from the PG's primary in the PG's current interval, if this
-// disk is a member of it: the chunk's live image as a recovery buffer, or StatusMissing while the
-// chunk is on this disk's missing list. A disk formatted again at a member's loop answers no read
+// disk is a member of it: the chunk's live image as a recovery buffer, StatusMissing while the
+// chunk is on this disk's missing list, or StatusUnfound if the image fails its checksum. A disk formatted again at a member's loop answers no read
 // for the member's old disk ID.
 func (r *Replica) recoveryAsked(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) {
 	_, e := r.table.entry(rd.PG.PG)
@@ -282,7 +288,7 @@ func (r *Replica) recoveryAsked(ctx *core.Context, ev *core.Event, rd *Read, out
 		r.answer(ctx, ev.Peer, rd.ID, &rp, core.NoBuf, out)
 		return
 	}
-	id := r.newReq(storeReq{kind: reqRead, peer: ev.Peer, msgID: rd.ID, pg: rd.PG.PG, chunk: rd.Chunk})
+	id := r.newReq(storeReq{kind: reqRead, peer: ev.Peer, msgID: rd.ID, pg: rd.PG.PG, chunk: rd.Chunk, recover: true})
 	r.st.Read(ctx, Request{ID: id, Chunk: rd.Chunk, Len: core.ChunkSize, Recover: true}, &r.sout)
 }
 
@@ -444,7 +450,7 @@ func (r *Replica) recoverReply(ctx *core.Context, peer core.NodeID, rp *Response
 	}
 	var m blockMap
 	ok := rp.Status == StatusOK && buf != core.NoBuf && decodeBlockMap(ctx.Pool.Bytes(buf), &m) == nil
-	r.recoveryRead(ctx, k, buf, ok, out)
+	r.recoveryRead(ctx, k, buf, ok, rp.Status == StatusUnfound, out)
 	return true
 }
 
@@ -452,7 +458,7 @@ func (r *Replica) recoverReply(ctx *core.Context, peer core.NodeID, rp *Response
 func (r *Replica) recoverLost(ctx *core.Context, peer core.NodeID, out *ReplicaOutput) {
 	for k := len(r.recs) - 1; k >= 0; k-- {
 		if rc := r.recs[k]; rc.rid != 0 && rc.source == peer {
-			r.recoveryRead(ctx, k, core.NoBuf, false, out)
+			r.recoveryRead(ctx, k, core.NoBuf, false, false, out)
 		}
 	}
 }

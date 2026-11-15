@@ -568,6 +568,37 @@ func TestAPartialWriteToAnUnfoundChunkIsAnsweredUnfound(t *testing.T) {
 	}
 }
 
+// Disk 3, the new primary, lacks the chunk and holds a partial write to it; disk 2, its only
+// source, holds the kept version with a rotted block, so its recovery read fails the checksum.
+// The chunk is unfound and the held write answered so, rather than held while the read is retried
+// for good (the replica fault run's seed 759).
+func TestARottedLastSourceLeavesTheChunkUnfound(t *testing.T) {
+	tbl := rtable(4, 2)
+	_, e := tbl.entry(pg0)
+	e.Members[2].Mark = MarkDown
+	c := newRCluster(t, tbl)
+	ch := chunkIn(pg0, 4, 0)
+	c.until(c.write(pg0, ch, 0, []byte{1}))
+	x, ok := c.reps[1].Store().Index().Lookup(testPool, ch, 0)
+	if !ok || x.LBA == 0 {
+		t.Fatal("disk 2 maps no block 0")
+	}
+	c.s.Node(1).Disk(0).FlipBit(x.BlockLBA(0), 4000, 1)
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 2)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 3}, {Disk: 1, Mark: MarkDown}, {Disk: 2}}
+	}), true)
+	w := c.write(pg0, ch, 1, []byte{2})
+	c.runFor(10 * RetryAfter)
+	if rp, ok := c.cl.replies[w]; !ok || rp.Status != StatusUnfound {
+		t.Fatalf("the held write answered %+v, %v", rp, ok)
+	}
+	if n, _ := c.reps[2].Unfound(pg0); n != 1 {
+		t.Fatalf("%d chunks unfound", n)
+	}
+}
+
 // Recovery allocates nothing once warm: rounds of disk 3 missing writes to 6 chunks and recovering
 // them, the last round's events making no heap allocation.
 func TestRecoveryAllocatesNothing(t *testing.T) {
