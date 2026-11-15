@@ -71,6 +71,8 @@ type Detector struct {
 	changes  uint64
 	slowKept []uint32
 	rep      Report
+	// Lags, when set, reports a node whose down disks stay down however they heartbeat.
+	Lags func(node uint32) bool
 }
 
 // NewDetector watches the disks of rec from start, the beginning of this leader's lease: a disk not heard from by start plus node_down_after is marked down then, and a disk rec has down stays down from when rec says, as if it had failed.
@@ -295,7 +297,7 @@ func (d *Detector) markDown(id uint32, w *watched, now core.Tick, cause downCaus
 
 // rejoin marks a down disk up once it has been normal for its cause's wait, or for flap_window if damped. A PG it belongs to that cannot serve without it lifts the wait, and the damping too when placement would not refill the disk's member there.
 func (d *Detector) rejoin(id uint32, w *watched, now core.Tick) {
-	if !w.down || !w.normal {
+	if !w.down || !w.normal || d.Lags != nil && d.Lags(d.rec.Disks()[id-1].Node) {
 		return
 	}
 	stopped, unrefilled := d.held(id, now)

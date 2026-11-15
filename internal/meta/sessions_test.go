@@ -153,6 +153,43 @@ func TestANodeMarkedDownCountsAsAcknowledging(t *testing.T) {
 	}
 }
 
+// A disk marked down is marked up again only once its node's heartbeat reports the current
+// session-table version: a node holding an older one would order a fenced session's write it held.
+func TestADownDiskIsMarkedUpOnlyOnceItsNodeHoldsTheCurrentTable(t *testing.T) {
+	r := newCtlRun(t)
+	r.startSessions(1)
+	for r.ctl.SessionTable().Version == 0 {
+		r.tick(sec)
+		r.hearAll()
+		r.sessStep()
+	}
+	r.fail(5)
+	for i := 0; r.ctl.SessionTable().Acked == 0; i++ {
+		if i == 4 {
+			t.Fatalf("not acknowledged with disk 5 %+v", r.disk(5))
+		}
+		for n := range uint32(4) {
+			nr := r.reports[n]
+			nr.Sessions = 1
+			r.heartbeat(&nr)
+		}
+		r.sessStep()
+	}
+	r.run(2 * chunkstore.SlowDiskWindow)
+	r.sessStep()
+	if r.disk(5).Up {
+		t.Fatalf("disk 5 marked up while its node holds version %d of %d", r.reports[4].Sessions, r.ctl.SessionTable().Version)
+	}
+	nr := r.reports[4]
+	nr.Sessions = 1
+	r.heartbeat(&nr)
+	r.run(2 * sec)
+	r.sessStep()
+	if !r.disk(5).Up {
+		t.Fatal("disk 5 stayed down once its node held the current table")
+	}
+}
+
 // A new leader answers no heartbeat before its leader lease starts, and from that start gives every
 // live session a full count: dead_wait for one it has not measured, which includes one that sent it
 // a single heartbeat, and session_lease times its bound once two heartbeats measured it.
@@ -766,13 +803,7 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error 
 	})
 	var held [5]uint64
 	disks := r.ctl.Disks()
-	// A node whose disk was marked down and is up again holding an older table is not up for the
-	// invariants until it catches up. This hides a live bug of today's code, the model's
-	// neg-up-with-old-table: the leader marks the disk up on its disk beat while the node holds an
-	// older table, so a version can be acknowledged, and a lock passed on, without it. Marking it up
-	// only once its heartbeat reports the current version is owed by Session fencing on storage nodes.
-	var rejoining [5]bool
-	behind := func(d DiskEntry, v uint64) bool { return d.Up && !rejoining[d.Node] && held[d.Node] < v }
+	behind := func(d DiskEntry, v uint64) bool { return d.Up && held[d.Node] < v }
 	inv.Register(invSessionAcks, func() error {
 		acked := r.ctl.SessionTable().Acked
 		for _, d := range disks {
@@ -1000,7 +1031,6 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error 
 					if !faults || lag.IntN(3) == 0 {
 						held[n] = r.ctl.SessionTable().Version
 					}
-					rejoining[n] = rejoining[n] && held[n] < r.ctl.SessionTable().Version
 					r.heartbeat(&NodeReport{Node: n, Meta: true, Opened: []OpenedDisk{{Device: devOf(n), Log: logOf(n)}}, Sessions: held[n]})
 					r.beat(n, 0, false)
 				}
@@ -1024,7 +1054,6 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error 
 		countable := now >= leaseFrom && !stalled
 		silent := nodes[r.l].at(now).Boot-nodes[r.l].at(max(cutAt, leaseFrom, stallTo)).Boot < chunkstore.NodeDownAfter+3*sec
 		for _, d := range disks {
-			rejoining[d.Node] = rejoining[d.Node] || !d.Up
 			if int(d.Node) == cut {
 				countable = countable && !(d.Up && silent)
 			} else {

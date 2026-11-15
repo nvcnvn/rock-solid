@@ -170,6 +170,7 @@ func (c *Control) begin(now core.Tick) {
 	}
 	c.rec = chunkstore.NewDiskRecord(ds)
 	c.det = chunkstore.NewDetector(&c.rec, now)
+	c.det.Lags = c.lagsTable
 	c.det.View(&c.table, c.pin)
 }
 
@@ -221,6 +222,13 @@ func (c *Control) OldReleases() []uint32 {
 		}
 	}
 	return ns
+}
+
+// lagsTable reports whether node holds an older session table than the committed one, or has not
+// said which it holds: a disk of it marked up would order a fenced session's write it held.
+func (c *Control) lagsTable(node uint32) bool {
+	i := slices.IndexFunc(c.nodes, func(n nodeState) bool { return n.id == node })
+	return i < 0 || c.nodes[i].sessV < c.sess.Version
 }
 
 // Disks is the disk record as last committed.
