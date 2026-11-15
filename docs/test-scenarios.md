@@ -5566,8 +5566,8 @@ own ([Testing strategy](design.md#testing-strategy)).
     unfound, never wrong data or zeros, and it is reported, naming the disks until they are declared
     lost (`TestRep2ServesPastTwoFailures`, `TestAChunkOnlyLostDisksHeldStaysUnfound`).
   - Together: the PG is down, and refuses reads and writes, whether or not the disks are declared
-    lost (`TestTwoDisksLostTogetherStayStopped`; open question "A PG whose last activated interval
-    has no member left").
+    lost, until an operator gives up what the last activated interval held
+    (`TestTwoDisksLostTogetherStayStopped`; [A disk is its log](design.md#epoch-changes-and-failure-detection)).
 - Open: how an empty refilled member is filled. The design says only that a PG is one key range of
   the chunk index; a scan of `(pool, h)` over that range would fit.
 
@@ -6536,11 +6536,12 @@ Ceph's monitor likewise ignores the boot of an OSD below its minimum release
 
 **Seeded run** (`TestTheDiskRecordKeepsItsIdentitiesAcrossFailovers`, in `scripts/seeds.sh`): six
 nodes report their drives in random slot order, drives are reformatted, moved between nodes and
-cloned, disks fail, time passes, the format level rises and the leader fails over. After every step
-the simulator's invariants hold: a disk ID keeps the log ID it was first given and no log ID is
-under two disk IDs; the leader's state holds the disk record and format level last committed; a
-disk's log is gone only once another log was reported on its device of its node after it, leaving
-out logs a cloned drive reported; and, with one node on an older release, a format level commits
+cloned, disks fail and are declared lost, time passes, the format level rises and the leader fails
+over. After every step the simulator's invariants hold: a disk ID keeps the log ID it was first given
+and no log ID is under two disk IDs; the leader's state holds the disk record and format level last
+committed; a disk's log is gone only once another log was reported on its device of its node after
+it, leaving out logs a cloned drive reported, or once an operator declared it lost; a disk committed
+gone stays gone; and, with one node on an older release, a format level commits
 only above no release of a node with a disk committed up.
 
 ## Control-plane sessions
@@ -6711,13 +6712,28 @@ Phase 3's placement seeds run unchanged against the real group in place of the s
 
 ## Operator's disk exits
 
-- A dead node's disks declared lost from the CLI: their members refill at once, their leaving members
-  go with no report, and a later report of those log IDs is refused.
-- A declaration for an up disk or one the record does not know is refused, and changes nothing.
-- A drained disk that holds no member is removed; one that holds a member, a leaving one included, is
-  not.
-- A PG whose last activated interval has no member left behaves as the [open
-  question](design.md#roadmap-and-open-questions) settles.
+`meta.Control.Lost` and `meta.Control.Remove` at the leader of a real three-replica group, as in
+[Control-plane membership](#control-plane-membership) (`internal/meta`, `exits_test.go`). The
+command line that sends them is the "Operator CLI" item's.
+
+- A dead node's two disks, refilled after `refill_after` and kept as leaving members, are declared
+  lost through the leader: the leaving members go with no report, no PG names either disk, a
+  repeated declaration is accepted, and a later report of their log IDs is refused
+  (`TestADeadNodesDisksDeclaredLostEndTheirLeavingMembers`).
+- A declaration for an up disk, or one the record does not know, is refused and proposes nothing
+  (same test).
+- A declaration staged on a leader whose commit loses a race to another commit is applied again over
+  the state read back, and commits with the next step (`TestADeclarationOutlivesAFailedCommit`).
+- A removal is refused for a disk not drained, one the record does not know, and a drained disk
+  while any PG names it, as a member, leaving or not, or in a past interval; once none does, it is
+  removed with no new table, and a later report of its log ID is refused
+  (`TestADrainedDiskIsRemovedOnceNoPGNamesIt`).
+- The [disk record's seeded run](#control-plane-membership) declares random disks lost, and holds
+  that a disk committed gone stays gone.
+- A PG whose last activated interval has no member left stays stopped after its disks are declared
+  lost (`TestTwoDisksLostTogetherStayStopped`); only an operator's give-up of those intervals frees it
+  ([A disk is its log](design.md#epoch-changes-and-failure-detection)), which the "Operator gives up
+  an unfound chunk" item covers.
 
 ## Blocked and unfound reports
 
