@@ -272,7 +272,7 @@ func (r *readRun) fenceNode(n int) {
 		if st.Sessions().Version < t.Version {
 			r.applied[st] = seen
 		}
-		rep.SetSessions(ctx, t, out)
+		rep.SetSessions(ctx, t, c.sessionAsks[n], out)
 	})
 }
 

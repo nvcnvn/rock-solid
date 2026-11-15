@@ -30,8 +30,8 @@ type rcluster struct {
 	fetch   []uint64
 	whole   []bool
 	fetches []int
-	// sessionAsks counts each replica's passes that asked for the session table.
-	sessionAsks []int
+	// sessionAsks is the newest FetchSessions each replica sent.
+	sessionAsks []uint64
 	asks        []PGFields
 	// activations is every activation a primary reported, which next records in its table, and
 	// recovered every recovered interval.
@@ -159,7 +159,7 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 	}
 	c.reps, c.loops, c.fetch, c.whole, c.passes = make([]*Replica, disks), make([]core.NodeID, disks), make([]uint64, disks), make([]bool, disks), make([][][]core.Action, disks)
 	c.fetches = make([]int, disks)
-	c.sessionAsks = make([]int, disks)
+	c.sessionAsks = make([]uint64, disks)
 	c.ids, c.logs, c.reformat, c.boots = make([]uint32, disks), make([]uint64, disks), make([]bool, disks), make([]int, disks)
 	for d := range disks {
 		c.ids[d], c.logs[d] = uint32(d+1), 0x5eed+uint64(d)
@@ -220,6 +220,7 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 				st.SetSessions(c.sessions)
 				c.reps[d] = NewReplica(ReplicaConfig{Disk: c.ids[d], Seed: seed, Start: lease.Now(ctx), Log: c.logs[d], Restarted: !fresh}, st)
 				c.reps[d].plant = c.replicaPlants
+				c.sessionAsks[d] = 0
 				for k := range disks {
 					c.reps[d].SetAddr(c.ids[k], core.NodeID{Node: uint32(k)})
 				}
@@ -255,9 +256,7 @@ func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Ac
 	if out.Fetch != 0 {
 		c.fetches[d]++
 	}
-	if out.FetchSessions {
-		c.sessionAsks[d]++
-	}
+	c.sessionAsks[d] = max(c.sessionAsks[d], out.FetchSessions)
 	c.asks = append(c.asks, out.Asks...)
 	c.activations = append(c.activations, out.Activations...)
 	c.recovered = append(c.recovered, out.Recovered...)

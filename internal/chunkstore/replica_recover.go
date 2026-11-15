@@ -15,6 +15,10 @@ const maxRecoveries = 4
 // whose kept version it lacks, which waits for that chunk's recovery.
 const maxHeld = 64
 
+// maxSessionWaits is how many writes wait for a session table newer than the store's before the
+// replica refuses more.
+const maxSessionWaits = 64
+
 // recoverChunk is a chunk the lead's peering left some up member of its interval lacking: its kept
 // version, the members to recover it to by their place in the interval's members, and whether a
 // recovery of it is under way.

@@ -257,6 +257,26 @@ func TestAWriteOfAFencedSessionOrNoIncarnationIsRefusedWhenOrdered(t *testing.T)
 	}
 }
 
+func TestAnEmptySessionTableKnowsNoSession(t *testing.T) {
+	h := newHarness(t, testConfig())
+	if f := h.s.Sessions(); !f.Newer(1) || f.Fenced(1) {
+		t.Fatalf("a store's first table judges session 1: newer %v, fenced %v", f.Newer(1), f.Fenced(1))
+	}
+}
+
+func TestAStoreKeepsItsNewerSessionTable(t *testing.T) {
+	h := newHarness(t, testConfig())
+	h.s.SetSessions(SessionTable{Version: 2, Next: 4})
+	h.s.SetSessions(SessionTable{Version: 1, Next: 4, Live: []uint64{3}})
+	id := h.change(chunkC)
+	h.s.Write(&h.ctx, Request{ID: id, Chunk: chunkC, Len: 1, Buf: h.writeBuf(0, []byte{1}), Session: 3, Incarnation: 1}, &h.out)
+	h.take()
+	h.settle()
+	if r := h.reply(id); !errors.Is(r.Err, ErrFenced) {
+		t.Fatalf("a write of session 3, which version 2 fenced, after version 1 came: %+v", r)
+	}
+}
+
 func TestAMemberServesOnlyFrozenVersions(t *testing.T) {
 	h := newHarness(t, testConfig())
 	v := h.sync(h.write(chunkC, 0, []byte{1}, 0))

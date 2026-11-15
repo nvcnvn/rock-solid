@@ -6741,14 +6741,19 @@ simulator seeds against the real primaries and replicas.
 | A write from that session arrived before the primary applied v and is still queued | Checked again when the primary orders it, and rejected |
 | A primary that has not applied v replicates the session's write to a replica that has | The replica rejects it, so the write is never acknowledged |
 | A write from a session newer than the node's table | The node fetches the session table before it judges the write, then accepts it |
+| A write from a session the table the node fetched after it arrived does not know either | Refused: that session was never handed out. A table sent unasked leaves it waiting |
+| More than 64 writes wait for a newer session table | The ones past 64 are refused |
+| A member's primary sends a waiting write again | The member keeps only the newest copy, and answers it once its table knows the session |
+| A client write or punch that carries no session | Malformed, as one carrying a version is, so it skips neither check |
 | A node marked down heartbeats again with a version older than the current one | Not marked up until a heartbeat reports the current version |
 
 The rows are unit tests in `replica_paths_test.go` (`TestAWriteFromASessionNewerThanTheTableWaitsForIt`,
-`TestAFencedSessionsWriteIsRefused`, `TestAMemberRefusesAFencedSessionsReplicatedWrite`,
+`TestAWriteFromASessionNoFetchedTableKnowsIsRefused`, `TestWritesWaitingForASessionTableAreCapped`,
+`TestAMemberKeepsOneCopyOfAResentWriteWaitingForASessionTable`, `TestAFencedSessionsWriteIsRefused`, `TestAMemberRefusesAFencedSessionsReplicatedWrite`,
 `TestAWriteOfAnOlderIncarnationIsRefused`, which also sends a client write carrying a version: the
 decoder drops it, so no client write skips the incarnation check that a member's replicated write
-skips) and `gate_test.go` (`TestAWriteOfAFencedSessionOrNoIncarnationIsRefusedWhenOrdered`); the
-rejoin row is [Control-plane sessions](#control-plane-sessions)'.
+skips), `wire_test.go` (`TestWireRejectsAClientWriteOrPunchWithoutASession`) and `gate_test.go`
+(`TestAWriteOfAFencedSessionOrNoIncarnationIsRefusedWhenOrdered`); the rejoin row is [Control-plane sessions](#control-plane-sessions)'.
 
 **[property]** `TestNoFencedSessionsWriteIsApplied` (500 seeds per commit) is the
 [read run](#placement-faults-and-invariants) with its two writers as two sessions, and half its cuts

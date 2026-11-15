@@ -48,8 +48,9 @@ type ReplicaOutput struct {
 	Actions []core.Action
 	Fetch   uint64
 	Whole   bool
-	// FetchSessions asks for the newest session table, which SetSessions hands the replica.
-	FetchSessions bool
+	// FetchSessions, when not 0, asks for the newest session table, which SetSessions hands the
+	// replica naming this number.
+	FetchSessions uint64
 	Asks          []PGFields
 	Activations   []PGFields
 	Recovered     []PGFields
@@ -58,7 +59,7 @@ type ReplicaOutput struct {
 
 // Reset empties the output for reuse.
 func (o *ReplicaOutput) Reset() {
-	o.Actions, o.Fetch, o.Whole, o.FetchSessions, o.Asks, o.Activations, o.Recovered, o.Trace = o.Actions[:0], 0, false, false, o.Asks[:0], o.Activations[:0], o.Recovered[:0], o.Trace[:0]
+	o.Actions, o.Fetch, o.Whole, o.FetchSessions, o.Asks, o.Activations, o.Recovered, o.Trace = o.Actions[:0], 0, false, 0, o.Asks[:0], o.Activations[:0], o.Recovered[:0], o.Trace[:0]
 }
 
 func (o *ReplicaOutput) note(name trace.Name, a, b, c, d, e uint64) {
@@ -87,7 +88,9 @@ func (r *Replica) retry(ctx *core.Context, out *ReplicaOutput) {
 	if r.want != 0 {
 		out.fetch(r.want, r.wantWhole)
 	}
-	out.FetchSessions = out.FetchSessions || r.wantSessions
+	if r.wantSessions {
+		out.FetchSessions = r.sessionAsk
+	}
 	r.peerRetry(ctx, out)
 	r.reportRecovered(true, out)
 	r.retryReads()
@@ -141,10 +144,16 @@ type heldMsg struct {
 	hold uint32
 }
 
+// parkedMsg is a message waiting for a table: epoch is the placement table's it waits for, or ask
+// the FetchSessions it first waited on for a session table; chunk and version name a member's
+// write, whose resend replaces its copy.
 type parkedMsg struct {
-	epoch uint64
-	peer  core.NodeID
-	msg   core.Msg
+	epoch   uint64
+	ask     uint64
+	chunk   core.ChunkID
+	version uint64
+	peer    core.NodeID
+	msg     core.Msg
 }
 
 type reqKind uint8
@@ -226,8 +235,11 @@ type Replica struct {
 	want      uint64
 	wantWhole bool
 	retryAt   core.Tick
-	// wantSessions is set while a write waits for a session table newer than the store's.
-	wantSessions bool
+	// wantSessions is set while a write waits for a session table newer than the store's; sessionAsk
+	// numbers the FetchSessions, answered is the newest a SetSessions answered, and unparked is the
+	// ask of the parked write being taken again.
+	wantSessions                   bool
+	sessionAsk, answered, unparked uint64
 	// holder is the leases this disk holds as a primary, from the loops in grantors; grantor the grants it gives; leaseAt when LeaseTimer is armed for, 0 when it is not; beatAt when the next heartbeat to its holders is due.
 	holder   *lease.Holder
 	grantor  *lease.Grantor
@@ -604,14 +616,19 @@ func (r *Replica) unpark(ctx *core.Context, out *ReplicaOutput) {
 			continue
 		}
 		ev := core.Event{Kind: core.EvNetRecv, Peer: p.peer, Msg: p.msg}
+		r.unparked = p.ask
 		r.recv(ctx, &ev, out)
 	}
+	r.unparked = 0
 }
 
 // SetSessions hands the replica session table t, which its store applies if newer, and takes again
-// the writes that waited for it.
-func (r *Replica) SetSessions(ctx *core.Context, t SessionTable, out *ReplicaOutput) {
+// the writes that waited for it. answers is the FetchSessions t was read after, 0 for a table sent
+// unasked: a write that waited since that ask or before is refused if its session is still newer than
+// the store's table, since it was never handed out.
+func (r *Replica) SetSessions(ctx *core.Context, t SessionTable, answers uint64, out *ReplicaOutput) {
 	r.st.SetSessions(t)
+	r.answered = max(r.answered, answers)
 	r.wantSessions = false
 	r.unpark(ctx, out)
 	r.armRetry(ctx, out)
@@ -619,10 +636,44 @@ func (r *Replica) SetSessions(ctx *core.Context, t SessionTable, out *ReplicaOut
 }
 
 // parkSessions keeps a write from a session newer than the store's session table until the replica
-// holds a table that knows it.
-func (r *Replica) parkSessions(ev *core.Event, out *ReplicaOutput) {
-	r.parked = append(r.parked, parkedMsg{peer: ev.Peer, msg: ev.Msg})
-	r.wantSessions, out.FetchSessions = true, true
+// holds a table that knows it, a member's resent write replacing its copy. It reports false, for the
+// caller to refuse the write, once a table read since the write first waited has answered, or when
+// maxSessionWaits writes already wait.
+func (r *Replica) parkSessions(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) bool {
+	if r.unparked != 0 && r.unparked <= r.answered {
+		return false
+	}
+	i := -1
+	if u.Version != 0 {
+		i = slices.IndexFunc(r.parked, func(p parkedMsg) bool { return p.ask != 0 && p.chunk == u.Chunk && p.version == u.Version })
+	}
+	p := parkedMsg{ask: r.unparked, chunk: u.Chunk, version: u.Version, peer: ev.Peer, msg: ev.Msg}
+	switch {
+	case i >= 0:
+		p.ask = r.parked[i].ask
+		freeBuf(ctx, r.parked[i].msg.Buf)
+		r.parked[i] = p
+	case r.sessionWaits() >= maxSessionWaits:
+		return false
+	default:
+		if p.ask == 0 {
+			r.sessionAsk++
+			p.ask = r.sessionAsk
+		}
+		r.parked = append(r.parked, p)
+	}
+	r.wantSessions, out.FetchSessions = true, r.sessionAsk
+	return true
+}
+
+func (r *Replica) sessionWaits() int {
+	n := 0
+	for _, p := range r.parked {
+		if p.ask != 0 {
+			n++
+		}
+	}
+	return n
 }
 
 // demote refuses the clients of the versions this disk ordered as the primary of a PG it no longer leads, since peering decides whether those versions stay, and has the store map them as a member maps what it logs, so the PG's new primary finds the disk a member like any other.
@@ -932,10 +983,9 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		r.reply(ctx, ev.Peer, u.ID, r.refusal(u.PG.PG), out)
 		return
 	}
-	if f := r.st.Sessions(); f.Newer(u.Session) {
-		r.parkSessions(ev, out)
+	if f := r.st.Sessions(); f.Newer(u.Session) && r.parkSessions(ctx, ev, u, out) {
 		return
-	} else if f.Fenced(u.Session) {
+	} else if f.Newer(u.Session) || f.Fenced(u.Session) {
 		freeBuf(ctx, ev.Msg.Buf)
 		r.reply(ctx, ev.Peer, u.ID, r.refusal(u.PG.PG), out)
 		return
@@ -1003,13 +1053,13 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		r.park(ev, u.PG.Epoch, out)
 		return
 	}
-	if r.st.Sessions().Newer(u.Session) {
-		r.parkSessions(ev, out)
+	newer := r.st.Sessions().Newer(u.Session)
+	if newer && r.parkSessions(ctx, ev, u, out) {
 		return
 	}
 	recover := u.Kind == KindRecover
 	gone := e != nil && (!slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) || r.plant.goneWhileUp && u.Version&15 == 7)
-	refuse := e == nil || r.st.Sessions().Fenced(u.Session) && !r.plant.memberNoFence || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || gone ||
+	refuse := e == nil || newer || r.st.Sessions().Fenced(u.Session) && !r.plant.memberNoFence || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || gone ||
 		slices.ContainsFunc(r.failed, func(f failedVer) bool {
 			return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version <= u.Version || recover)
 		})

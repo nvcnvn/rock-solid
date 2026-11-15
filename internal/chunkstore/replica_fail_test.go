@@ -12,10 +12,13 @@ import (
 )
 
 // replicaWrite sends disk node+1 a primary's whole-block write of block 0 of ch at version v, as if from its primary.
-func (c *rcluster) replicaWrite(node int, ch core.ChunkID, v uint64) core.RequestID {
+func (c *rcluster) replicaWrite(node int, ch core.ChunkID, v uint64, edit ...func(*Update)) core.RequestID {
 	c.nextID++
 	id := c.nextID
 	u := Update{Kind: KindReplicaWrite, ID: id, PG: c.pgFields(pg0), Chunk: ch, Len: core.BlockSize, Version: v}
+	for _, f := range edit {
+		f(&u)
+	}
 	c.s.Node(c.client.Node).Call(c.client, func(ctx *core.Context, acts []core.Action) []core.Action {
 		a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(node)}}
 		a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))

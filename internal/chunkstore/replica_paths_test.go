@@ -261,7 +261,7 @@ func TestAWriteOfAnOlderIncarnationIsRefused(t *testing.T) {
 func (c *rcluster) setSessions(t SessionTable, disks ...int) {
 	c.sessions = t
 	for _, d := range disks {
-		c.call(d, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetSessions(ctx, t, out) })
+		c.call(d, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetSessions(ctx, t, c.sessionAsks[d], out) })
 	}
 }
 
@@ -280,6 +280,55 @@ func TestAWriteFromASessionNewerThanTheTableWaitsForIt(t *testing.T) {
 	}
 }
 
+func TestAWriteFromASessionNoFetchedTableKnowsIsRefused(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	w := c.update(c.pgFields(pg0), ch, 0, []byte{1}, 0, func(u *Update) { u.Session = 5 })
+	c.settle()
+	t3 := SessionTable{Version: 1, Next: 3, Live: []uint64{1, 2}}
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetSessions(ctx, t3, 0, out) })
+	c.settle()
+	if _, ok := c.cl.replies[w]; ok {
+		t.Fatal("a write of session 5 answered on a table sent unasked")
+	}
+	c.setSessions(t3, 0)
+	c.settle()
+	if rp := c.reply(w); rp.Status != StatusRefused {
+		t.Fatalf("session 5, which a table read since it waited does not know: %+v", rp)
+	}
+}
+
+func TestWritesWaitingForASessionTableAreCapped(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	var ws []core.RequestID
+	for range maxSessionWaits + 1 {
+		ws = append(ws, c.update(c.pgFields(pg0), ch, 0, []byte{1}, 0, func(u *Update) { u.Session = 5 }))
+	}
+	c.settle()
+	for i, w := range ws {
+		if rp, ok := c.cl.replies[w]; ok != (i == maxSessionWaits) || ok && rp.Status != StatusRefused {
+			t.Fatalf("write %d of session 5 before the table knew it: answered %v %+v", i, ok, rp)
+		}
+	}
+}
+
+func TestAMemberKeepsOneCopyOfAResentWriteWaitingForASessionTable(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	session2 := func(u *Update) { u.Session = 2 }
+	first, again := c.replicaWrite(1, ch, MakeVersion(1, 1), session2), c.replicaWrite(1, ch, MakeVersion(1, 1), session2)
+	c.settle()
+	if n := c.reps[1].sessionWaits(); n != 1 {
+		t.Fatalf("the member keeps %d copies of a write sent it twice", n)
+	}
+	c.setSessions(SessionTable{Version: 1, Next: 3, Live: []uint64{1, 2}}, 1)
+	c.settle()
+	if rp, ok := c.cl.replies[first]; ok || c.reply(again).Status != StatusOK {
+		t.Fatalf("the first copy answered %v %+v, the second %+v", ok, rp, c.reply(again))
+	}
+}
+
 func TestAFencedSessionsWriteIsRefused(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	ch := chunkIn(pg0, 4, 0)
@@ -288,6 +337,20 @@ func TestAFencedSessionsWriteIsRefused(t *testing.T) {
 	c.settle()
 	if rp := c.reply(w); rp.Status != StatusRefused {
 		t.Fatalf("a fenced session's write: %+v", rp)
+	}
+}
+
+func TestAFencedSessionsWriteIsRefusedBeforeItsStoreReadsABase(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.write(pg0, ch, 0, make([]byte, core.BlockSize))
+	c.settle()
+	c.setSessions(SessionTable{Version: 1, Next: 3, Live: []uint64{2}}, 0)
+	c.s.Node(0).Disk(0).Hang(true)
+	w := c.write(pg0, ch, 6, []byte{1})
+	c.runFor(ResendAfter)
+	if rp := c.reply(w); rp.Status != StatusRefused {
+		t.Fatalf("a fenced session's partial write with the primary's disk hung: %+v", rp)
 	}
 }
 
