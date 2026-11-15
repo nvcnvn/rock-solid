@@ -64,9 +64,12 @@ func (h *fsT) fails(err error, final bool) {
 }
 
 // built is a copy of the last build, which the next one overwrites.
-func (h *fsT) built() Txn {
+func (h *fsT) built() Txn { return h.copyOf(&h.f.Txn) }
+
+// copyOf is a copy of t that no build overwrites.
+func (h *fsT) copyOf(t *Txn) Txn {
 	var d Txn
-	if _, err := decodeTxn(appendTxn(nil, &h.f.Txn), &d); err != nil {
+	if _, err := decodeTxn(appendTxn(nil, t), &d); err != nil {
 		h.t.Fatal(err)
 	}
 	return d
@@ -861,6 +864,11 @@ type fsWork struct {
 	ino  uint64
 	slot uint32
 	now  int64
+	// child, when set, gives a new inode's ID in place of w's own numbering: a new file's in
+	// dir's slot, a directory's too unless it takes a fresh slot, and false while none is reserved.
+	child func(dir uint64, mkdir bool) (uint64, bool)
+	// moved, when set, collects every inode a link or a cross-directory rename was built for.
+	moved map[uint64]bool
 }
 
 func (w *fsWork) scan(inode uint64, tags ...byte) []KV {
@@ -930,11 +938,19 @@ func (w *fsWork) request(rng *rand.Rand, req Request) func() (Txn, bool) {
 	} else if o.kind != 1 && o.kind != 7 {
 		o.kind = 0
 	}
-	o.child = ino(0, 2+w.ino)
-	w.ino++
-	if o.kind == 1 && rng.IntN(4) == 0 {
-		w.slot++
-		o.child = ino(w.slot, 1)
+	switch {
+	case w.child == nil:
+		o.child = ino(0, 2+w.ino)
+		w.ino++
+		if o.kind == 1 && rng.IntN(4) == 0 {
+			w.slot++
+			o.child = ino(w.slot, 1)
+		}
+	case o.kind <= 1:
+		var ok bool
+		if o.child, ok = w.child(o.dir, o.kind == 1); !ok {
+			return func() (Txn, bool) { return Txn{}, false }
+		}
 	}
 	var first *Txn
 	return func() (Txn, bool) {
@@ -973,6 +989,9 @@ func (w *fsWork) build(o *fsOp) error {
 	}
 	if e.mode == ModeDir && (o.kind == 2 || o.kind == 3 || o.kind == 6) || e.mode != ModeDir && o.kind == 4 {
 		return errNoOp
+	}
+	if w.moved != nil && (o.kind == 2 || o.kind == 5 && e.dir != o.dir) {
+		w.moved[e.inode] = true
 	}
 	switch o.kind {
 	case 0:

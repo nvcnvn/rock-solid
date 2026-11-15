@@ -49,6 +49,8 @@ type FS struct {
 	buf  []byte
 	fold []byte
 	err  error
+	// resetRoot is a bug a test plants: Root without its check, so a resent root creation resets the volume's counters.
+	resetRoot bool
 }
 
 // Rename is a rename's inputs, as the daemon read them.
@@ -272,7 +274,9 @@ func (f *FS) unlink(inode uint64, a *Attr, open bool, pending *Purge, now int64)
 func (f *FS) Root(a *Attr) error {
 	f.begin(0)
 	n := f.slotKey(0, SlotNext, 0)
-	f.op(CheckAbsent(n, true))
+	if !f.resetRoot {
+		f.op(CheckAbsent(n, true))
+	}
 	f.op(Put(f.key(RootInode, InodeAttr, nil), f.attr(a)))
 	f.op(Put(n, f.u64(2)))
 	f.op(Put(f.slotKey(0, SlotFree, 0), f.u64(1)))
