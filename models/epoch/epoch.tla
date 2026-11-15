@@ -1766,7 +1766,7 @@ NetFault(h, g, to) ==
 \* term, and draws a new run ID. A restarted node asks for a new interval of
 \* each PG it is a member of, so that a decision settles the versions its
 \* replay gated even where the PG would stay in its interval. With "stop2",
-\* only node 3 restarts; with "aimed", only node 2.
+\* only node 3 restarts; with "aimed", only node 2; with "aimed1", only node 1.
 RestartState(n) ==
     /\ run' = [run EXCEPT ![n] = @ + 1]
     /\ pr' = [pr EXCEPT ![n] = [p \in PG |->
@@ -1807,6 +1807,7 @@ Restart(n) ==
     /\ Running(n)
     /\ "stop2" \in plan.f => n = 3
     /\ "aimed" \in plan.f => n = 2
+    /\ "aimed1" \in plan.f => n = 1
     /\ run[n] < MaxRestart
     /\ RestartState(n)
     /\ LET waited == ~Clocks /\ ~Bug("NoRestartWait") IN
@@ -2448,6 +2449,8 @@ ListerOrders == Plan(<<ML(1, 2), Mark(3, "down"), Mark(3, "up")>>, LoneListerWri
 MoveSourcePlans == {MoveRestarted}
 MoveAnswer == {[MoveRestarted EXCEPT !.w = <<Partial2[2]>>]}
 ListerAnswer == {[ListerRestarted EXCEPT !.w = <<Partial[2]>>]}
+\* ci-answers: the restart aimed at PG 1's primary.
+ListerAnswerCut == {[ListerRestarted EXCEPT !.w = <<Partial[2]>>, !.f = {"restart", "aimed1"}]}
 ListerPlans == {ListerRestarted}
 LateAskPlans == {[ListerRestarted EXCEPT !.f = {"restart", "lateask"}]}
 ListerOrderPlans == {ListerOrders}
