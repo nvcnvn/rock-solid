@@ -15,8 +15,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anishathalye/porcupine"
+	"golang.org/x/sys/unix"
+
+	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/chunkstore/storetest"
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/lincheck"
 )
 
 // The crash test runs a store on a file-backed disk in a child process (this test binary, with
@@ -30,17 +36,44 @@ import (
 //	kill <cycle>                                   the child was killed
 //	kept <chunk> <seq>                             the restart recovered the chunk's changes up to seq (0: none since the last kept)
 //	torn <chunk> <seq> <blocks>                    and the first blocks of the next change, seq, unacknowledged
+//
+// Beside the driver, histClients client processes per child (this test binary, with
+// RS_HIST_CLIENT set) write and read 8-byte slots, one block each, in chunks of their own, one
+// operation at a time. The driver and the clients record every operation they send in the run's
+// history file, and the run ends with a Porcupine check of the slots' reads and writes. Commands
+// share one pipe into the child, each written whole as pipes keep writes of at most PIPE_BUF:
+// kind, sender (0 the driver, else the client's reply pipe), seq, chunk, offset, length and the
+// data seed or, for a slot, the value.
 const (
 	crashChunks = 4
 	crashWindow = 8
-	cmdBytes    = 21
+	cmdBytes    = 30
 	crashSpan   = 4
+	histClients = 2
+	slotChunks  = 2
+	// slotGroup is how many slots a cycle's clients add; they use those and the previous cycle's,
+	// so each slot's history spans a kill and stays short.
+	slotGroup      = 8
+	blocksPerChunk = core.ChunkSize / core.BlockSize
 )
+
+func putCmd(b *[cmdBytes]byte, kind, sender byte, seq uint64, chunk int, off, n uint32, ds uint64) {
+	b[0], b[1] = kind, sender
+	binary.LittleEndian.PutUint64(b[2:], seq)
+	binary.LittleEndian.PutUint32(b[10:], uint32(chunk))
+	binary.LittleEndian.PutUint32(b[14:], off)
+	binary.LittleEndian.PutUint32(b[18:], n)
+	binary.LittleEndian.PutUint64(b[22:], ds)
+}
 
 func TestCrashChild(t *testing.T) {
 	path := os.Getenv("RS_CRASH_CHILD")
 	if path == "" {
 		t.Skip("the crash test's child process")
+	}
+	replies := make([]*os.File, envUint(t, "RS_CRASH_CLIENTS", 0))
+	for i := range replies {
+		replies[i] = os.NewFile(uintptr(5+i), "replies")
 	}
 	sd := &suiteDisk{t: t, path: path}
 	sd.start()
@@ -62,27 +95,37 @@ func TestCrashChild(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	type sent struct{ id, seq uint64 }
+	type sent struct {
+		id, seq uint64
+		sender  byte
+		read    bool
+		off     uint32
+	}
 	var out []sent
 	var hdr [cmdBytes]byte
 	var ack [8]byte
+	var reply [16]byte
 	for {
 		for len(out) < crashWindow {
 			if _, err := io.ReadFull(cmds, hdr[:]); err != nil {
 				t.Fatal(err)
 			}
-			seq := binary.LittleEndian.Uint64(hdr[1:])
-			c := crashChunk(int(binary.LittleEndian.Uint32(hdr[9:])))
-			off, n := binary.LittleEndian.Uint32(hdr[13:]), binary.LittleEndian.Uint32(hdr[17:])
-			if hdr[0] == 'p' {
-				out = append(out, sent{r.Punch(c, off, n, 0), seq})
-				continue
+			s := sent{seq: binary.LittleEndian.Uint64(hdr[2:]), sender: hdr[1], off: binary.LittleEndian.Uint32(hdr[14:])}
+			c := crashChunk(int(binary.LittleEndian.Uint32(hdr[10:])))
+			n, ds := binary.LittleEndian.Uint32(hdr[18:]), binary.LittleEndian.Uint64(hdr[22:])
+			switch hdr[0] {
+			case 'p':
+				s.id = r.Punch(c, s.off, n, 0)
+			case 'w':
+				s.id = r.Write(c, s.off, writeData(ds, n), 0)
+			case 's':
+				s.id = r.Write(c, s.off, binary.LittleEndian.AppendUint64(nil, ds), 0)
+			case 'r':
+				s.id, s.read = r.Read(chunkstore.Request{Chunk: c, Off: s.off, Len: 8}), true
+			default:
+				t.Fatalf("command %q", hdr[0])
 			}
-			data := make([]byte, n)
-			if _, err := io.ReadFull(cmds, data); err != nil {
-				t.Fatal(err)
-			}
-			out = append(out, sent{r.Write(c, off, data, 0), seq})
+			out = append(out, s)
 		}
 		if !r.Step() {
 			t.Fatalf("%d changes unanswered with nothing in flight", len(out))
@@ -95,10 +138,22 @@ func TestCrashChild(t *testing.T) {
 				continue
 			}
 			if p.Err != nil {
-				t.Fatalf("change %d: %v", s.seq, p.Err)
+				t.Fatalf("sender %d's command %d: %v", s.sender, s.seq, p.Err)
 			}
-			binary.LittleEndian.PutUint64(ack[:], s.seq)
-			if _, err := acks.Write(ack[:]); err != nil {
+			if s.sender == 0 {
+				binary.LittleEndian.PutUint64(ack[:], s.seq)
+				if _, err := acks.Write(ack[:]); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			binary.LittleEndian.PutUint64(reply[:], s.seq)
+			clear(reply[8:])
+			if s.read {
+				copy(reply[8:], r.Pool().Bytes(p.Buf)[s.off%core.BlockSize:])
+				r.Pool().Free(p.Buf)
+			}
+			if _, err := replies[s.sender-1].Write(reply[:]); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -108,8 +163,130 @@ func TestCrashChild(t *testing.T) {
 
 func crashChunk(i int) core.ChunkID { return storetest.Chunk(1 + uint32(i)) }
 
+// TestHistClient is a history client of the crash test: fd 3 the child's command pipe, fd 4 its
+// replies. It stops, its operation in flight never completed, when the child is killed.
+func TestHistClient(t *testing.T) {
+	path := os.Getenv("RS_HIST_CLIENT")
+	if path == "" {
+		t.Skip("the crash test's history clients")
+	}
+	id, cycle := envUint(t, "RS_HIST_ID", 0), envUint(t, "RS_HIST_CYCLE", 0)
+	h, err := openHist(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmds, replies := os.NewFile(3, "commands"), os.NewFile(4, "replies")
+	rnd := core.NewRand(envUint(t, "RS_CRASH_SEED", 1) + id<<40)
+	var cmd [cmdBytes]byte
+	var reply [16]byte
+	for seq := uint64(1); ; seq++ {
+		b := ((cycle+rnd.Below(2))*slotGroup + rnd.Below(slotGroup)) % (slotChunks * blocksPerChunk)
+		kind, v := byte('r'), uint64(0)
+		if rnd.Chance(1, 2) {
+			kind, v = 's', id<<32|seq
+		}
+		putCmd(&cmd, kind, byte(1+(id-1)%histClients), seq, crashChunks+int(b/blocksPerChunk), uint32(b%blocksPerChunk*core.BlockSize), 8, v)
+		if err := h.invoke(uint32(id), seq, [sim.OpWords]uint64{uint64(kind), b, v}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cmds.Write(cmd[:]); err != nil {
+			return
+		}
+		if _, err := io.ReadFull(replies, reply[:]); err != nil {
+			return
+		}
+		if got := binary.LittleEndian.Uint64(reply[:]); got != seq {
+			t.Fatalf("reply to %d, waiting for %d", got, seq)
+		}
+		if err := h.complete(uint32(id), seq, [sim.OpWords]uint64{binary.LittleEndian.Uint64(reply[8:])}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// histFile appends one process's events to a run's history file, each in one write: O_APPEND
+// writes to a regular file land whole, so several processes' events interleave without tearing.
+type histFile struct {
+	f  *os.File
+	ts unix.Timespec
+	e  [sim.EventBytes]byte
+}
+
+func openHist(path string) (*histFile, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+	return &histFile{f: f}, err
+}
+
+// nanos reads CLOCK_MONOTONIC_RAW, one clock for every process on the host ("Consistency
+// checking" in docs/design.md says why this one).
+func (h *histFile) nanos() int64 {
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC_RAW, &h.ts); err != nil {
+		panic(err)
+	}
+	return h.ts.Nano()
+}
+
+// invoke stamps the operation's start rounded down and complete its end rounded up, so its
+// interval covers what the clock saw.
+func (h *histFile) invoke(client uint32, op uint64, in [sim.OpWords]uint64) error {
+	sim.PutEvent(&h.e, false, client, op, core.Tick(h.nanos()/1000), in)
+	_, err := h.f.Write(h.e[:])
+	return err
+}
+
+func (h *histFile) complete(client uint32, op uint64, out [sim.OpWords]uint64) error {
+	sim.PutEvent(&h.e, true, client, op, core.Tick((h.nanos()+999)/1000), out)
+	_, err := h.f.Write(h.e[:])
+	return err
+}
+
+func BenchmarkHistFile(b *testing.B) {
+	b.ReportAllocs()
+	h, err := openHist(filepath.Join(b.TempDir(), "history"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = h.f.Close() }()
+	in := [sim.OpWords]uint64{'s', 3, 7}
+	for i := range uint64(b.N) {
+		if err := h.invoke(1, i, in); err != nil {
+			b.Fatal(err)
+		}
+		if err := h.complete(1, i, in); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// slots is a register per slot, starting at 0: a slot write's input {'s', slot, value}, a read's
+// {'r', slot} with output {value}. The driver's changes are checked by the oracle, not here.
+var slots = porcupine.Model{
+	Partition: func(h []porcupine.Operation) [][]porcupine.Operation {
+		bySlot := map[uint64][]porcupine.Operation{}
+		for _, o := range h {
+			if in := o.Input.([sim.OpWords]uint64); in[0] == 's' || in[0] == 'r' {
+				bySlot[in[1]] = append(bySlot[in[1]], o)
+			}
+		}
+		var parts [][]porcupine.Operation
+		for _, p := range bySlot {
+			parts = append(parts, p)
+		}
+		return parts
+	},
+	Init: func() any { return uint64(0) },
+	Step: func(state, input, output any) (bool, any) {
+		in, out, v := input.([sim.OpWords]uint64), output.(lincheck.Result), state.(uint64)
+		if in[0] == 's' {
+			return true, in[2]
+		}
+		return !out.Done || out.Output[0] == v, v
+	},
+}
+
 // TestCrashOnARealDisk kills the store's process RS_CRASH_CYCLES times (default 150) on seed
-// RS_CRASH_SEED (default 1), keeping the disk file and the oracle in RS_CRASH_DIR if it is set.
+// RS_CRASH_SEED (default 1), keeping the disk file, the oracle and the history in RS_CRASH_DIR if
+// it is set.
 func TestCrashOnARealDisk(t *testing.T) {
 	newRing(t, 1<<20, 8)
 	seed, cycles := envUint(t, "RS_CRASH_SEED", 1), envUint(t, "RS_CRASH_CYCLES", 150)
@@ -117,10 +294,17 @@ func TestCrashOnARealDisk(t *testing.T) {
 	if dir == "" {
 		dir = t.TempDir()
 	}
-	ct := &crashTest{t: t, seed: seed, rnd: core.NewRand(seed), changes: core.NewRand(seed + 1<<32), pace: core.NewRand(seed + 2<<32), disk: filepath.Join(dir, "disk"), oracle: filepath.Join(dir, "oracle")}
+	ct := &crashTest{t: t, seed: seed, rnd: core.NewRand(seed), changes: core.NewRand(seed + 1<<32), pace: core.NewRand(seed + 2<<32),
+		disk: filepath.Join(dir, "disk"), oracle: filepath.Join(dir, "oracle"), history: filepath.Join(dir, "history")}
 	if err := CreateFile(ct.disk, storetest.DiskBytes); err != nil {
 		t.Fatal(err)
 	}
+	_ = os.Remove(ct.history)
+	var err error
+	if ct.hist, err = openHist(ct.history); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ct.hist.f.Close() }()
 	f, err := os.Create(ct.oracle)
 	if err != nil {
 		t.Fatal(err)
@@ -138,11 +322,49 @@ func TestCrashOnARealDisk(t *testing.T) {
 	for cycle := range cycles {
 		ct.cycle(cycle)
 	}
-	ct.start(false)
+	ct.start(false, cycles)
 	ct.check()
 	ct.kill()
 	t.Logf("seed %d: %d cycles, %d changes sent, %d acknowledged; restarts that kept a change never acknowledged: %d, lost one: %d, kept the first rounds of one: %d",
 		seed, cycles, ct.seq, ct.acked, ct.keptCycles, ct.lostCycles, ct.tornCycles)
+	ct.checkHistory()
+}
+
+// checkHistory runs the Porcupine check over the slots' reads and writes the history file holds.
+func (ct *crashTest) checkHistory() {
+	b, err := os.ReadFile(ct.history)
+	if err != nil {
+		ct.t.Fatal(err)
+	}
+	h, err := sim.ReadHistory(b)
+	if err != nil {
+		ct.t.Fatal(err)
+	}
+	var reads, writes, open int
+	for _, op := range h.Ops() {
+		switch {
+		case op.Input[0] == 'r':
+			reads++
+		case op.Input[0] == 's':
+			writes++
+		default:
+			continue
+		}
+		if !op.Done {
+			open++
+		}
+	}
+	i, res := lincheck.Illegal(slots, h, 5*time.Minute)
+	switch res {
+	case porcupine.Ok:
+		ct.t.Logf("history: %d slot reads and %d slot writes from %d client processes, %d never completed, linearizable", reads, writes, ct.clientRuns, open)
+	case porcupine.Illegal:
+		op, t0 := h.Ops()[i], h.Ops()[0].Invoke
+		ct.t.Fatalf("seed %d: the slots' history has no linearizable order; it leaves out client %d's %c of slot %d (written %#x, read %#x, done %v), invoked %dµs into the run and completed at %dµs\nhistory: %s",
+			ct.seed, op.Client, op.Input[0], op.Input[1], op.Input[2], op.Output[0], op.Done, op.Invoke-t0, int64(op.Complete)-int64(t0), ct.history)
+	default:
+		ct.t.Fatalf("seed %d: the check of the slots' history ran out of time; history: %s", ct.seed, ct.history)
+	}
 }
 
 type crashTest struct {
@@ -166,12 +388,19 @@ type crashTest struct {
 	acks    *bufio.Reader
 	stderr  bytes.Buffer
 
+	history    string
+	hist       *histFile
+	clients    []*exec.Cmd
+	clientOut  []bytes.Buffer
+	clientErr  string
+	clientRuns int
+
 	seq, acked                         uint64
 	keptCycles, lostCycles, tornCycles int
 }
 
 func (ct *crashTest) cycle(cycle uint64) {
-	ct.start(cycle == 0)
+	ct.start(cycle == 0, cycle)
 	ct.check()
 	killAt := ct.acked + ct.rnd.Range(1, 400)
 	for range crashWindow {
@@ -181,10 +410,10 @@ func (ct *crashTest) cycle(cycle uint64) {
 	for ct.acked < killAt {
 		ct.read8(ack[:])
 		n := 1
-		ct.record("ack %d", binary.LittleEndian.Uint64(ack[:]))
+		ct.ack(ack[:])
 		for ct.acks.Buffered() >= 8 {
 			ct.read8(ack[:])
-			ct.record("ack %d", binary.LittleEndian.Uint64(ack[:]))
+			ct.ack(ack[:])
 			n++
 		}
 		ct.sync()
@@ -201,6 +430,17 @@ func (ct *crashTest) cycle(cycle uint64) {
 	ct.drain()
 	ct.record("kill %d", cycle)
 	ct.sync()
+	if ct.clientErr != "" {
+		ct.t.Fatalf("seed %d: %s", ct.seed, ct.clientErr)
+	}
+}
+
+func (ct *crashTest) ack(b []byte) {
+	seq := binary.LittleEndian.Uint64(b)
+	ct.record("ack %d", seq)
+	if err := ct.hist.complete(0, seq, [sim.OpWords]uint64{}); err != nil {
+		ct.t.Fatal(err)
+	}
 }
 
 func (ct *crashTest) send() {
@@ -208,25 +448,22 @@ func (ct *crashTest) send() {
 	c := int(ct.changes.Below(crashChunks))
 	off := uint32(ct.changes.Below(core.ChunkSize - 1))
 	n := uint32(min(ct.changes.Range(1, 3*core.BlockSize), core.ChunkSize-uint64(off)))
-	var hdr [cmdBytes]byte
-	binary.LittleEndian.PutUint64(hdr[1:], ct.seq)
-	binary.LittleEndian.PutUint32(hdr[9:], uint32(c))
-	binary.LittleEndian.PutUint32(hdr[13:], off)
-	binary.LittleEndian.PutUint32(hdr[17:], n)
-	msg := hdr[:]
+	kind, ds := byte('p'), uint64(0)
 	if ct.changes.Chance(1, 6) {
-		hdr[0] = 'p'
 		ct.record("punch %d %d %d %d", ct.seq, c, off, n)
 	} else {
-		hdr[0] = 'w'
-		ds := ct.changes.Uint64()
+		kind, ds = 'w', ct.changes.Uint64()
 		ct.record("write %d %d %d %d %d", ct.seq, c, off, n, ds)
-		msg = append(msg, writeData(ds, n)...)
 	}
 	if err := ct.w.Flush(); err != nil {
 		ct.t.Fatal(err)
 	}
-	if _, err := ct.cmds.Write(msg); err != nil {
+	var cmd [cmdBytes]byte
+	putCmd(&cmd, kind, 0, ct.seq, c, off, n, ds)
+	if err := ct.hist.invoke(0, ct.seq, [sim.OpWords]uint64{uint64(kind), uint64(c), uint64(off)<<32 | uint64(n), ds}); err != nil {
+		ct.t.Fatal(err)
+	}
+	if _, err := ct.cmds.Write(cmd[:]); err != nil {
 		ct.fail("sending change %d: %v", ct.seq, err)
 	}
 }
@@ -237,35 +474,63 @@ func writeData(seed uint64, n uint32) []byte {
 	return b
 }
 
-func (ct *crashTest) start(format bool) {
-	cmdR, cmdW, err := os.Pipe()
-	if err != nil {
-		ct.t.Fatal(err)
-	}
-	ackR, ackW, err := os.Pipe()
-	if err != nil {
-		ct.t.Fatal(err)
+func (ct *crashTest) start(format bool, cycle uint64) {
+	cmdR, cmdW := ct.pipe()
+	ackR, ackW := ct.pipe()
+	var replyR, replyW [histClients]*os.File
+	for i := range replyR {
+		replyR[i], replyW[i] = ct.pipe()
 	}
 	ct.stderr.Reset()
 	ct.child = exec.Command(os.Args[0], "-test.run=^TestCrashChild$", "-test.count=1", "-test.timeout=0")
-	ct.child.Env = append(os.Environ(), "RS_CRASH_CHILD="+ct.disk)
+	ct.child.Env = append(os.Environ(), "RS_CRASH_CHILD="+ct.disk, fmt.Sprint("RS_CRASH_CLIENTS=", histClients))
 	if format {
 		ct.child.Env = append(ct.child.Env, "RS_CRASH_FORMAT=1")
 	}
-	ct.child.ExtraFiles = []*os.File{cmdR, ackW}
+	ct.child.ExtraFiles = append([]*os.File{cmdR, ackW}, replyW[:]...)
 	ct.child.Stdout, ct.child.Stderr = &ct.stderr, &ct.stderr
 	if err := ct.child.Start(); err != nil {
 		ct.t.Fatal(err)
 	}
-	_ = cmdR.Close()
-	_ = ackW.Close()
+	for _, f := range ct.child.ExtraFiles {
+		_ = f.Close()
+	}
+	ct.clientOut = make([]bytes.Buffer, histClients)
+	for i := range histClients {
+		ct.clientRuns++
+		c := exec.Command(os.Args[0], "-test.run=^TestHistClient$", "-test.count=1", "-test.timeout=0")
+		c.Env = append(os.Environ(), "RS_HIST_CLIENT="+ct.history, fmt.Sprint("RS_HIST_ID=", 1+cycle*histClients+uint64(i)),
+			fmt.Sprint("RS_HIST_CYCLE=", cycle), fmt.Sprint("RS_CRASH_SEED=", ct.seed))
+		c.ExtraFiles = []*os.File{cmdW, replyR[i]}
+		c.Stdout, c.Stderr = &ct.clientOut[i], &ct.clientOut[i]
+		if err := c.Start(); err != nil {
+			ct.t.Fatal(err)
+		}
+		_ = replyR[i].Close()
+		ct.clients = append(ct.clients, c)
+	}
 	ct.cmds, ct.ackPipe, ct.acks = cmdW, ackR, bufio.NewReaderSize(ackR, 1<<20)
 }
 
+func (ct *crashTest) pipe() (r, w *os.File) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		ct.t.Fatal(err)
+	}
+	return r, w
+}
+
+// kill kills the child and waits for its clients, which stop on losing it.
 func (ct *crashTest) kill() {
 	_ = ct.child.Process.Signal(syscall.SIGKILL)
 	_ = ct.child.Wait()
 	_ = ct.cmds.Close()
+	for i, c := range ct.clients {
+		if err := c.Wait(); err != nil && ct.clientErr == "" {
+			ct.clientErr = fmt.Sprintf("history client %d: %v\n%s", i, err, ct.clientOut[i].String())
+		}
+	}
+	ct.clients = nil
 }
 
 // drain counts the acknowledgments the killed child sent that the driver had not read yet: a
@@ -280,7 +545,7 @@ func (ct *crashTest) drain() {
 		if err != nil {
 			ct.fail("draining acknowledgments: %v", err)
 		}
-		ct.record("ack %d", binary.LittleEndian.Uint64(ack[:]))
+		ct.ack(ack[:])
 		ct.acked++
 	}
 	_ = ct.ackPipe.Close()
@@ -474,8 +739,8 @@ func apply(b []byte, ch oracleChange) {
 func (ct *crashTest) fail(format string, args ...any) {
 	ct.t.Helper()
 	ct.kill()
-	ct.t.Fatalf("seed %d: %s\nreplay: RS_CRASH_SEED=%d go test -run TestCrashOnARealDisk ./internal/driver/uring/\noracle: %s\nchild output:\n%s",
-		ct.seed, fmt.Sprintf(format, args...), ct.seed, ct.oracle, ct.stderr.String())
+	ct.t.Fatalf("seed %d: %s\nreplay: RS_CRASH_SEED=%d go test -run TestCrashOnARealDisk ./internal/driver/uring/\noracle: %s\nchild output:\n%s%s",
+		ct.seed, fmt.Sprintf(format, args...), ct.seed, ct.oracle, ct.stderr.String(), ct.clientErr)
 }
 
 func envUint(t *testing.T, name string, def uint64) uint64 {

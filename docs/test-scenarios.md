@@ -7636,7 +7636,10 @@ yet, so the test binary is both: the test is the driver, and it runs itself agai
 (`TestCrashChild`, with `RS_CRASH_CHILD` naming the disk file), a chunk store over a 256 MiB
 file-backed disk through io_uring, `O_DIRECT` writes and their linked fsync, the shared suite's
 store configuration with `max_replay_bytes` at 256 KiB so cycles recover from checkpoints and
-replay. Commands go to the child on fd 3 and acknowledgments come back on fd 4.
+replay. Commands go to the child on fd 3, a pipe the driver shares with the
+[history clients](#real-cluster-histories), each a fixed 30 bytes written whole (a write carries its
+data seed, not its data); the driver's acknowledgments come back on fd 4, each client's replies on
+its own pipe.
 
 - `kill -9` mid-round: the driver keeps 8 changes in flight over chunks 1 to 4 (writes of 1 byte
   to 3 blocks at random offsets, one in six a punch), and after a number of acknowledgments drawn
@@ -7692,8 +7695,30 @@ replay. Commands go to the child on fd 3 and acknowledgments come back on fd 4.
 
 ## Real-cluster histories
 
-- Clients on several nodes record every operation in the [history recorder](#history-recorder)'s
-  format, and the recorded history passes the same Porcupine check as a simulated one.
-- Recording allocates nothing per operation on the data path.
-- Open: the time base, one test driver process on one host or each node's clock widened by its error
-  bound, and where a run's history is written ([open question](design.md#roadmap-and-open-questions)).
+The [crash test](#crash-tests-on-real-disks) records its run in the
+[history recorder](#history-recorder)'s words, as the [design](design.md#testing-strategy) sets
+out: each process stamps its own operations on `CLOCK_MONOTONIC_RAW`, invocation rounded down and
+completion up, and appends them to the run's history file, `history` beside the oracle.
+
+- Several client processes: beside the driver, two history clients per child (`TestHistClient`,
+  the test binary again with `RS_HIST_CLIENT` naming the history file), started with it and stopped
+  by its kill, each one operation at a time: a write of a new 8-byte value, or a read, of a slot,
+  the first 8 bytes of one block in chunks 5 and 6. A cycle's clients use 8 new slots and the
+  previous cycle's 8, so every slot's history spans a kill and stays short enough to check.
+- Every operation is recorded: the driver's changes too, invoked before the command is sent and
+  completed when its acknowledgment is read, including those drained after the kill; a client's
+  operation in flight at the kill, or sent into a dead pipe, stays with no completion.
+- The run ends with `lincheck.Illegal` over the file, read by `sim.ReadHistory`, with a register
+  per slot; the driver's changes are left to the oracle. Seed 1, 150 cycles: 6857 slot reads and
+  7062 slot writes from 302 client processes, 302 never completed, linearizable.
+- Planted in a scratch copy of the child, the check names the operation at fault on 10 cycles:
+  a stale read (every 20th read answered 0) as "client 6's r of slot 21 (written 0x0, read 0x0)",
+  and a lost acknowledgment (every 20th slot write acknowledged and not applied) as the later read
+  that still saw the value before it, "client 6's r of slot 28 (read 0x60000000a)".
+- The history file reads back as the operations written to it, from several clients interleaved,
+  and refuses a torn event, an invocation twice and a completion with no invocation
+  (`TestAHistoryFileReadsBackAsItsOperations`, `FuzzReadHistory`).
+- **Benchmarks:** `BenchmarkHistFile`, one invocation and completion appended to the file, zero
+  allocations per operation (876 ns, two clock reads and two writes, in Docker on arm64).
+- Clients on several hosts, with their stamps mapped by a measured offset, come with the file tests
+  of phase 6; the crash test runs on one host.
