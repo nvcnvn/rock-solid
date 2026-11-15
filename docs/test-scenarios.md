@@ -3251,34 +3251,44 @@ nodes without finishing.
 | `ci-restarts-moved` | 3 | As `ci-restarts`, with the largest membership plan alone, a member down and back and then the primary moved to it, and no spare table, kept apart from both so that each fits its 5 minutes |
 | `deep-restarts-moved` | 3 | `ci-restarts-moved` with a spare table, so a `Fold` or a `Renew` lands between its changes. Too large for `ci` |
 | `ci-edits` | 3 | As `ci-peering`, with an operator's edits of PG 1 in one table each: the primary moved and marked down, then back first; and the members reordered twice with no mark, the second keeping the primary the first moved |
-| `ci-tears` | 3 | As `ci-peering`, on PG 1's primary down and back, with `TornLists` on: a decision may also list any member Entry leaves off that has a version above its newest ordered, as a crash that left part of a version does in the code |
+| `ci-tears` | 3 | As `ci-peering`, on PG 1's primary down and back, with `TornLists` on: a decision may also list any member Entry leaves off that has a version above its newest ordered, as a crash that left part of a version does in the code. No spare table, to fit 5 minutes |
+| `deep-tears` | 3 | `ci-tears` with a spare table. Too large for `ci`, and not yet run |
 | `ci-moves` | 3 | As `ci-peering`, with the move plans: PG 2's replica and then its primary moved to node 1; the replica's move with the leaving member marked down before its replacement recovers, or with a process restart; the replica's move with primary 2 put in `maintenance` and back before the removal; and the replica's move with a refill before the removal, a disk formatted again replacing node 1's. Each sends only the daemon's one write W |
-| `ci-stays` | 3 | As `ci-moves`, with the moves that a leaving member ends by taking the place of a member marked down: the primary, the other member of a leaving primary, or the new member. It is kept apart from `ci-moves` so that each fits its 5 minutes |
-| `ci-stays-new` | 3 | `ci-stays`' move that ends with the new member, kept apart so that each fits its 5 minutes |
+| `ci-stays` | 3 | As `ci-moves`, with the move that a leaving member ends by taking the place of the primary, marked down, and no spare table. The other two moves that end so, in the place of the other member of a leaving primary and of the new member, are `ci-stays-as-primary` and `ci-stays-new`; the three are kept apart from `ci-moves` and from each other so that each fits its 5 minutes |
+| `deep-stays` | 3 | `ci-stays` with a spare table. Too large for `ci`, and not yet run |
+| `ci-stays-as-primary` | 3 | `ci-stays`' move that ends with the other member of a leaving primary, with a spare table |
+| `ci-stays-new` | 3 | `ci-stays`' move that ends with the new member, with a spare table |
 | `ci-stays-stale` | 3 | PG 2 and its chunk alone, with no spare table: the leaving member down and back, then taking the place of the primary, marked down. To fit 5 minutes it has no fold of an activation report, and one table both moves the PG and marks the leaving member down. It reaches W kept with no holder up, W refused and nothing acknowledged lost, its holder staying a member |
 | `deep-stays-stale` | 3 | `ci-stays-stale` with the move and the mark down in two tables, and a spare table, so a `Fold` or a `Renew` lands between its changes; with W, and with both partial writes. Too large for `ci`, and not yet run |
 | `ci-late-ask` | 3 | PG 1 and its chunk alone, a member down and back, one restart, no spare table, with `lateask`: the restarted primary may ask again in a newer table before it peers. Only here does TLC take `RestartAsk`, which no rule needs |
 | `ci-refills` | 3 | PG 2 and its chunk alone, two partial writes, no spare table, a restart or a format: a member marked down, refilled beside its replacement and removed |
-| `ci-refills-down` | 3 | As `ci-refills`, with the other member down while the refilled one leaves, and back, then the removal; a format. `ci-refills-down-restart` runs the restart with one write, since with both it passed 2.4 million states unfinished |
+| `ci-refills-down` | 3 | As `ci-refills`, one write, with the other member down while the refilled one leaves, and back, then the removal; a format |
+| `ci-refills-down-restart` | 3 | `ci-refills-down` with a restart instead of the format |
 | `deep-refills-down` | 3 | `ci-refills-down`'s plan with both writes and either fault. Too large for `ci` |
 | `ci-refills-stay` | 3 | As `ci-refills`, one write: the other member down while the refilled one leaves, the refilled one back and taking its place, then the removal; only node 2, the first primary, restarts |
 | `deep-refills-stay` | 3 | `ci-refills-stay` with a restart of any node. Over `ci`'s 5 minutes on a loaded run |
 | `ci-refills-primary` | 3 | As `ci-refills`, one write and a restart: the primary marked down, refilled beside its replacement, back, and removed |
 | `ci-refills-back` | 3 | As `ci-refills`, with no fault: the leaving member back in the table that takes the down member's place, which then leaves; or the refilled member declared lost and dropped |
-| `ci-refills-two` | 4 | PG 2 and its chunk alone, two partial writes, no fault: both members refilled, one after the other |
-| `ci-refills-together` | 4 | As `ci-refills-two`, both members refilled in one table |
+| `ci-refills-two` | 4 | PG 2 and its chunk alone, one partial write, no fault: both members refilled, one after the other |
+| `deep-refills-two` | 4 | `ci-refills-two` with both partial writes. Too large for `ci`, and not yet run |
+| `ci-refills-together` | 4 | As `ci-refills-two` with both partial writes, both members refilled in one table |
 | `deep-refills-lost` | 4 | `ci-refills-together`'s PG with the first member declared lost, leaving by the table that refills the second, which returns. Too large for `ci`, and not yet run |
-| `ci-image` | 3 | PG 2 and its chunk alone, two partial writes, a format: a move that removes disk 3, Y on the primary alone while the other member is down, so the primary lists the chunk, then that member's disk formatted and a table after it. Only the removed disk and the primary's carried image hold X, so property 18 holds only with the image carried; `neg-forget-image` fails it |
+| `ci-image` | 3 | PG 2 and its chunk alone, two partial writes, a format: a move that removes disk 3, Y on the primary alone while the other member is down, so the primary lists the chunk, then that member's disk formatted, with no table after it to fit 5 minutes. Only the removed disk and the primary's carried image hold X, so property 18 holds only with the image carried; `neg-forget-image` fails it |
+| `deep-image` | 3 | `ci-image` with the table after the format. Too large for `ci`, and not yet run |
 | `ci-image-restart` | 3 | `ci-image`'s move alone, then two faults, a restart of any node and a format. A restart before the peering that drops Y needs replay to leave Y gated (`neg-map-on-replay`); one after it needs the entry's image flag (`neg-ignore-image-flag`), and replay to settle Y away at the decision's entry once the primary decides again (`neg-replay-forgets-drops`, which needs a spare table). With `Spare` 0 and no table after the move, this plan cannot reach that shape, so only `deep-image-restart`, whose plan has tables after it, checks the correct rule there |
 | `deep-image-restart` | 3 | `ci-image`'s whole plan with two faults, a restart of the primary's node and the format of the other member's, and a seventh table. Too large for `ci` |
-| `ci-bounce` | 3 | PG 2 and its chunk alone, two partial writes, a format: a move that removes disk 3, then the primary's disk marked down and up with Y pending, so the other member is primary for an interval, then the other member's disk formatted. The bounced primary is X's source only if it left Y gated (`neg-map-on-demote`) |
+| `ci-bounce` | 3 | PG 2 and its chunk alone, two partial writes, a format: a move that removes disk 3, then the primary's disk marked down and up with Y pending, so the other member is primary for an interval, then the other member's disk formatted, with no table after it and a chunk counter of 1 to fit 5 minutes. The bounced primary is X's source only if it left Y gated (`neg-map-on-demote`) |
+| `deep-bounce-tables` | 3 | `ci-bounce` with the table after the format and a counter of 2. Too large for `ci`, and not yet run |
 | `deep-bounce` | 3 | `ci-image`'s drop, then the primary bounced as in `ci-bounce`, with an eighth table: the primary carries its image across the interval its disk was down (`neg-forget-image-down`). Too large for `ci` |
 | `ci-stays-gone` | 3 | PG 2 and its chunk alone, two partial writes, a format: a leaving member taking the place of a member whose disk is gone |
-| `ci-sources` | 3 | PG 1 and its chunk alone, a restart: two partial writes, a member of `rep3` down and back, recovering and lacking Y. It checks properties 4, 5, 8, 14, 17, 18 and 19 only |
-| `ci-sources-move` | 3 | As `ci-sources`, on PG 2's move whose removed member lacks Y |
+| `ci-sources` | 3 | PG 1 and its chunk alone, a restart, no spare table: two partial writes, a member of `rep3` down and back, recovering and lacking Y. It checks properties 4, 5, 8, 14, 17, 18 and 19 only |
+| `deep-sources` | 3 | `ci-sources` with a spare table. Too large for `ci`, and not yet run |
+| `ci-sources-move` | 3 | As `ci-sources`, with a spare table, on PG 2's move whose removed member lacks Y |
 | `ci-sources-lister` | 3 | As `ci-sources`, with no fault: X's one clean source marked down, a primary that lists the chunk taking a whole-block write alone, and the source back |
+| `deep-sources-lister` | 3 | `ci-sources-lister` with a spare table. Too large for `ci`, and not yet run |
 | `ci-answers` | 3 | `ci-sources`' plan with one write, under fairness, for properties 15, 16 and 17 only |
-| `ci-answers-move` | 3 | `ci-sources-move`'s plan with one write, under fairness, for properties 15, 16 and 17 only |
+| `ci-answers-move` | 3 | `ci-sources-move`'s plan with one write and no spare table, under fairness, for properties 15, 16 and 17 only |
+| `deep-answers-move` | 3 | `ci-answers-move` with a spare table. Too large for `ci`, and not yet run |
 | `ci-faults` | 3 | As `ci-peering`, with a sixth table and a second fault; the plans that fail a version at a member or on the primary's own log, alone and with the primary moved; a member's failure with a member marked down, and with a process restart; a failure on the primary's own log with the primary marked down; a failure with a member or the primary in `maintenance` and back; a primary moved away and back; and the plans that format a disk around peering and around recovery |
 | `ci-faults-more` | 3 | As `ci-faults`, with PG 2 and its chunk alone, on the plan that raises `min_live` past an interval that ran below it, which fits its 5 minutes only without PG 1 |
 | `deep-faults-more` | 3 | `ci-faults-more` with both PGs, so its marks change PG 1's intervals too. Too large for `ci` |
@@ -4001,11 +4011,12 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 `heavy` run as `scripts/models.sh deep` printed it, with 4 workers and a 4 GB heap on a Mac mini (M4 Pro). The
 epoch change model's runs and the sessions model's `ci` runs ran alone; the rest ran beside two
 other 4-worker TLC jobs. Constants are in each configuration's first line and in its model's
-section. The epoch change model's `ci` rows ran with `CI_LIMIT` 900: `ci-bounce`, `ci-tears`,
-`ci-stays`, `ci-image` and `ci-refills-two` are over the 300 s budget since the primary's own
-record became a step of its own (`OwnLogged`), and are owed a cut. Its `deep` and `heavy` rows
-ran on the spec before that step and before the keep rule left out members torn above a version;
-they are stale until the next milestone's run.
+section. The acknowledgement became a step of its own (`Answer`), which grew every epoch change
+configuration's state space; the nine it put over the 300 s budget were cut to fit, each keeping
+its full size in a `deep` twin, as the configuration table says, and the model's `ci` rows are one
+run at the normal budget after the cuts. Its `deep` and `heavy` rows ran on the spec before `Answer`
+and before the keep rule left out members torn above a version; they are stale until the next
+milestone's run, which is also the twins' first.
 
 | Model | Configuration | Constants | Depth | Distinct states | Wall time |
 | --- | --- | --- | --- | --- | --- |
@@ -4022,37 +4033,38 @@ they are stale until the next milestone's run.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 30 | 1,366,661 | 198 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 25 | 570,512 | 83 s |
-| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 29 | 378,754 | 76 s |
-| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 28 | 874,888 | 122 s |
-| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 30 | 2,686,247 | 461 s |
-| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 83 | 1,264,468 | 117 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 1,248,221 | 212 s |
-| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 30 | 1,777,456 | 424 s |
-| Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 27 | 592,740 | 139 s |
-| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 30 | 495,145 | 65 s |
-| Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 26 | 66,372 | 7 s |
-| Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 25 | 365,083 | 44 s |
-| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 27 | 341,219 | 39 s |
-| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 36 | 2,775,413 | 266 s |
-| Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 30 | 315,652 | 35 s |
-| Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 31 | 1,424,640 | 177 s |
-| Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 30 | 400,569 | 48 s |
-| Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 32 | 1,365,759 | 158 s |
-| Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 34 | 2,346,475 | 353 s |
-| Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 24 | 47,511 | 8 s |
-| Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 38 | 3,509,328 | 389 s |
-| Epoch change | `ci-image-restart` | [Epoch change model](#epoch-change-model) | 30 | 1,501,576 | 163 s |
-| Epoch change | `ci-bounce` | [Epoch change model](#epoch-change-model) | 38 | 4,828,010 | 537 s |
-| Epoch change | `ci-sources` | [Epoch change model](#epoch-change-model) | 30 | 2,638,595 | 283 s |
-| Epoch change | `ci-sources-move` | [Epoch change model](#epoch-change-model) | 32 | 1,574,328 | 216 s |
-| Epoch change | `ci-sources-lister` | [Epoch change model](#epoch-change-model) | 38 | 1,774,878 | 246 s |
-| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 25 | 904,739 | 119 s |
-| Epoch change | `ci-faults-more` | [Epoch change model](#epoch-change-model) | 25 | 222,306 | 29 s |
-| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 22 | 61,896 | 137 s |
-| Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 19 | 21,641 | 165 s |
-| Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 27 | 81,483 | 242 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 32 | 1,738,102 | 240 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 28 | 611,477 | 86 s |
+| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 29 | 474,914 | 96 s |
+| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 29 | 1,063,344 | 154 s |
+| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 27 | 304,508 | 61 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 84 | 1,345,114 | 120 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 1,309,434 | 211 s |
+| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 27 | 130,443 | 34 s |
+| Epoch change | `ci-stays-as-primary` | [Epoch change model](#epoch-change-model) | 27 | 485,640 | 121 s |
+| Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 27 | 632,048 | 160 s |
+| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 31 | 509,694 | 67 s |
+| Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 28 | 85,436 | 9 s |
+| Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 27 | 443,297 | 53 s |
+| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 29 | 432,437 | 49 s |
+| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 32 | 156,352 | 16 s |
+| Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 30 | 330,682 | 37 s |
+| Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 32 | 1,459,497 | 183 s |
+| Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 31 | 420,075 | 52 s |
+| Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 34 | 1,708,357 | 200 s |
+| Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 30 | 172,492 | 24 s |
+| Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 26 | 60,947 | 10 s |
+| Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 35 | 2,760,666 | 291 s |
+| Epoch change | `ci-image-restart` | [Epoch change model](#epoch-change-model) | 31 | 1,915,880 | 213 s |
+| Epoch change | `ci-bounce` | [Epoch change model](#epoch-change-model) | 35 | 2,218,172 | 226 s |
+| Epoch change | `ci-sources` | [Epoch change model](#epoch-change-model) | 26 | 356,243 | 45 s |
+| Epoch change | `ci-sources-move` | [Epoch change model](#epoch-change-model) | 34 | 2,069,820 | 291 s |
+| Epoch change | `ci-sources-lister` | [Epoch change model](#epoch-change-model) | 34 | 248,407 | 36 s |
+| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 26 | 1,053,863 | 135 s |
+| Epoch change | `ci-faults-more` | [Epoch change model](#epoch-change-model) | 26 | 233,882 | 29 s |
+| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 23 | 71,492 | 167 s |
+| Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 20 | 22,820 | 194 s |
+| Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 22 | 7,891 | 70 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
@@ -4231,7 +4243,7 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | `scripted-move-primary` | 39 | passes: a move to a new primary that holds Y, peering keeping Y, which every up member holds, over the removed disk | 2 |
 | `scripted-lister-restarted` | 56 | passes: a restart during recovery, the restarted primary's replay gating Y until its next decision | 2 |
 | `scripted-lister-rotated` | 51 | passes: a rotation during recovery, the new primary holding Y logged and peering keeping it over the member that lists the chunk | 2 |
-| 39 seeds | 302 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 3 to 227 |
+| 39 seeds | 302 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 3 to 218 |
 | `primaries-2` | 775 | no verdict in 400 s and 2 GB: one crash leaves 26 `mayfail` lines, each a free choice, and TLC had found 2.2 million states at 360 s | 400 |
 
 39 seeds of 40 pass, all but 34. None broke a safety invariant,
@@ -4405,8 +4417,8 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `keepNoSource` | `neg-keep-no-source` | 4 | 4 | 0 | 4, 4 | `peer`, the line where the plant first differs | `KeptMatches` |
 | `writeOnUnfound` | `neg-write-on-unfound` | 5 | 4 | 1 | 4, 4 | `order`, the planted order on an unfound chunk. Seed 35 passes | `Order`: the chunk is not in the decision's `unf` |
 | `keepPastMember` | `neg-keep-past-member` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 39: each trace is a prefix of its baseline's. Only its scripted test shows the rule (`TestKeepPastMemberLeavesAMoveUnfound`) | |
-| `forgetImage` | `neg-forget-image` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 9: each trace is a prefix of its baseline's. Only its scripted test shows the rule (`TestForgetImageLeavesTheChunkUnfound`) | |
-| `settleSubset` | none | 4 | 0 | 4 | 0, 0 | Too loose: `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record | |
+| `forgetImage` | `neg-forget-image` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 9: each trace is a prefix of its baseline's; seed 2's baseline gives no verdict in 400 s. Only its scripted test shows the rule (`TestForgetImageLeavesTheChunkUnfound`) | |
+| `settleSubset` | none | 4 | 0 | 4 | 0, 0 | Too loose: a `committed` line is the `Answer` step, which needs the version pending on its primary, logged by every member live in its interval, its own record durable and no earlier version of the chunk pending there, or a stutter once the decision's activation acknowledged it. Nothing checks the other way, that a version activation acknowledges was answered, and the planted drop is such a version | |
 
 Traces can fail is shown on these seeds for 18 of the 32 rules, 13 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
 `mergeOnDropped`, `editKeepsInterval`, `relistNever`, `peerInOldInterval`, `oldReport`, `recoverFromListed`,
