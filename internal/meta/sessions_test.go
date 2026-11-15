@@ -544,6 +544,20 @@ func TestAMachineThatHasNotSeenASessionStartCountsItHolding(t *testing.T) {
 	}
 }
 
+func TestAMachineThatHasNotSeenASessionStartDoesNotFenceIt(t *testing.T) {
+	r := newCtlRun(t)
+	stale := r.load(r.l)
+	cs := r.startSessions(1)
+	var out ControlOutput
+	if err := stale.Step(&ControlInputs{Raw: r.raw, Leased: true}, 1, &out); err != nil {
+		t.Fatal(err)
+	}
+	var a SessionAnswer
+	if stale.Renew(r.at(), true, &SessionBeat{Session: cs[0].id, Request: 1, Sent: r.raw}, &a) {
+		t.Errorf("a machine whose table lags answers session %d with %v", cs[0].id, a.Status)
+	}
+}
+
 // breaksWithin reports whether the seeded run with pl, checking inv alone, breaks inv in one of the
 // first n seeds. A test's n is about 5 / the plant's rate over 500 seeds, so a change that re-rolls
 // the draws fails it less than 1% of the time.
