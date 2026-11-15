@@ -677,8 +677,8 @@ func TestNoFencedSessionsWriteIsApplied(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (26 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's; and a primary that commits a version once its own log holds it (295 of 500), so that a read returns a version the next interval drops.
-// With the writers as two sessions, the sessions model's neg-check-on-arrival (about 3 of 500), the same
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (21 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's; and a primary that commits a version once its own log holds it (368 of 500), so that a read returns a version the next interval drops.
+// With the writers as two sessions, the sessions model's neg-check-on-arrival (3 of 500), the same
 // primary, orders a fenced session's write that waited in its store as the fence came; and its
 // neg-replica-no-check (132 of 500), a member that takes a replicated write without checking its
 // session, logs one its primary ordered before the fence reached it.
