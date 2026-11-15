@@ -91,6 +91,7 @@ type Control struct {
 	det             *chunkstore.Detector
 	pin             []chunkstore.PoolInputs
 	drains          []uint32
+	exits           []diskExit
 	nodes           []nodeState
 	// round counts failovers and error answers; resend is set while every committed shard-map
 	// entry is still to be handed out again.
@@ -264,8 +265,9 @@ func (c *Control) fold(dst []chunkstore.PGInterval, fs []chunkstore.PGFields) []
 // Step computes the next table and shard map and, with no commit in flight, proposes under token
 // whatever they and the staged pools change, or what the session table owes, the two taking turns.
 // A staged pool change the committed pool no longer takes, after a reload, is dropped with its
-// error, as is a staged format level SetFormat would now refuse, and as are the staged pool changes
-// of a step that is more than one Txn holds, with ErrTooLarge; the next Step commits the rest.
+// error, as are a staged format level SetFormat would now refuse and a staged declaration or
+// removal the committed state now refuses, and as are the staged pool changes of a step that is
+// more than one Txn holds, with ErrTooLarge; the next Step commits the rest.
 func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) error {
 	c.begin(in.Now)
 	lt := lease.Time{Boot: in.Now, Raw: in.Raw}
@@ -282,6 +284,9 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 		}
 	}
 	if err := c.recheck(); err != nil {
+		return err
+	}
+	if err := c.reapply(); err != nil {
 		return err
 	}
 	p := &commit{token: token, asks: len(c.asks), acts: len(c.acts), rc: len(c.rcv)}
@@ -470,6 +475,7 @@ func (c *Control) Answer(st *State, a *Answer, out *ControlOutput) error {
 		return err
 	}
 	c.ctlState = p.next
+	c.exits = slices.DeleteFunc(c.exits, func(x diskExit) bool { return c.disks[x.id-1].Gone })
 	c.asks, c.acts, c.rcv = c.asks[p.asks:], c.acts[p.acts:], c.rcv[p.rc:]
 	if p.mapStaged {
 		c.stagedMap = nil

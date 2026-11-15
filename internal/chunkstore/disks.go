@@ -75,5 +75,14 @@ func (r *DiskRecord) Lost(id uint32) error {
 	return nil
 }
 
+// Remove takes disk id, up or down, out of the pool for good, as Lost does a down one: a later report of its log is refused. ErrLostRefused for a disk the record does not know.
+func (r *DiskRecord) Remove(id uint32) error {
+	if id < 1 || int(id) > len(r.disks) {
+		return ErrLostRefused
+	}
+	r.disks[id-1].Up, r.disks[id-1].Gone = false, true
+	return nil
+}
+
 // Disks is every disk recorded, by ID; the caller must not change it.
 func (r *DiskRecord) Disks() []RecordedDisk { return r.disks }

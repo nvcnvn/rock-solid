@@ -561,7 +561,8 @@ func TestADrainCommits(t *testing.T) {
 const (
 	invRecordIDs   = "a disk ID keeps the log ID it was first given, and no log ID is under two disk IDs"
 	invRecordReads = "the leader's state holds the disk record and format level last committed"
-	invRecordGone  = "a disk's log is gone only once another log was reported on its device of its node after it"
+	invRecordGone  = "a disk's log is gone only once another log was reported on its device of its node after it, or an operator declared it lost"
+	invGoneStays   = "a disk committed gone stays gone"
 	invFormatLevel = "a format level commits only above no release of a node with a disk committed up"
 )
 
@@ -583,8 +584,8 @@ func releaseOf(n uint32) uint32 {
 }
 
 // The disk record keeps its identities through restarts that renumber a node's disks, reformats,
-// drives moved or cloned to other nodes, failed disks and failovers, and every new leader reads it
-// back as last committed.
+// drives moved or cloned to other nodes, failed disks, operators' declarations and failovers, and
+// every new leader reads it back as last committed.
 func TestTheDiskRecordKeepsItsIdentitiesAcrossFailovers(t *testing.T) {
 	seeds.Run(t, 0, 20, func(seed uint64) { recordRun(t, seed) })
 }
@@ -600,6 +601,8 @@ func recordRun(t *testing.T, seed uint64) {
 	committed, format := r.ctl.Disks(), r.ctl.Format()
 	var reported []drive
 	var raisedOver []DiskEntry
+	var declared []uint32
+	gone := map[uint32]bool{}
 	logs := map[uint32]uint64{}
 	var inv sim.Invariants
 	inv.Register(invRecordIDs, func() error {
@@ -629,7 +632,7 @@ func recordRun(t *testing.T, seed uint64) {
 	inv.Register(invRecordGone, func() error {
 		for _, d := range r.ctl.Disks() {
 			// A cloned drive's log is reported again after it is gone, and refused.
-			if !d.Gone || slices.ContainsFunc(reported, func(x drive) bool { return x.log == d.Log && x.dev == clone }) {
+			if !d.Gone || slices.Contains(declared, d.ID) || slices.ContainsFunc(reported, func(x drive) bool { return x.log == d.Log && x.dev == clone }) {
 				continue
 			}
 			at := func(x drive) bool { return x.node == d.Node && x.dev == d.Device }
@@ -642,6 +645,15 @@ func recordRun(t *testing.T, seed uint64) {
 			if !slices.ContainsFunc(reported[last+1:], func(x drive) bool { return x.log != d.Log && at(x) }) {
 				return fmt.Errorf("disk %d is gone with no other log reported on device %#x of node %d after its own", d.ID, d.Device, d.Node)
 			}
+		}
+		return nil
+	})
+	inv.Register(invGoneStays, func() error {
+		for _, d := range committed {
+			if gone[d.ID] && !d.Gone {
+				return fmt.Errorf("disk %d committed gone came back as %+v", d.ID, d)
+			}
+			gone[d.ID] = d.Gone
 		}
 		return nil
 	})
@@ -667,7 +679,7 @@ func recordRun(t *testing.T, seed uint64) {
 	in := &ControlInputs{}
 	for range 150 {
 		d := &drives[rng.IntN(len(drives))]
-		switch rng.IntN(10) {
+		switch rng.IntN(11) {
 		case 0, 1:
 			n := uint32(rng.IntN(6))
 			var opened []OpenedDisk
@@ -700,6 +712,16 @@ func recordRun(t *testing.T, seed uint64) {
 			r.settle(in)
 			committed = r.ctl.Disks()
 			r.failover()
+		case 10:
+			id := uint32(rng.IntN(len(r.ctl.Disks()) + 2))
+			switch err := r.ctl.Lost(r.now, id); {
+			case err == nil:
+				declared = append(declared, id)
+				r.settle(in)
+				committed = r.ctl.Disks()
+			case !errors.Is(err, ErrUnknownDisk) && !errors.Is(err, chunkstore.ErrLostRefused):
+				t.Fatal(err)
+			}
 		}
 		if err := inv.Check(); err != nil {
 			t.Fatal(err)

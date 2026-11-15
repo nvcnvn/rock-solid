@@ -22,8 +22,12 @@ const AgeStep = core.Tick(60_000_000)
 // from runs a release below, or raised before every node with a disk up has been heard from.
 var ErrFormatLevel = errors.New("meta: format level refused")
 
-// ErrUnknownDisk reports an operator's drain of a disk the record does not know or whose log is gone.
+// ErrUnknownDisk reports an operator's drain of a disk the record does not know or whose log is
+// gone, or a declaration or removal of one it has not committed.
 var ErrUnknownDisk = errors.New("meta: unknown disk")
+
+// ErrNotDrained reports an operator's removal of a disk whose drain has not committed or that a PG still names.
+var ErrNotDrained = errors.New("meta: disk not drained")
 
 // OpenedDisk is a disk a node opened: the drive's stable identity, the log ID its superblock
 // holds, and its size and its log's reserve in blocks.
@@ -184,6 +188,90 @@ func (c *Control) Drain(id uint32, on bool) error {
 		c.drains = append(c.drains, id)
 	}
 	return nil
+}
+
+// Lost takes an operator's declaration at now that disk id, down, will not return, which the next
+// Step commits: its log is gone, so its members refill at once, its leaving members go with no
+// report, and a later report of its log is refused. ErrUnknownDisk for a disk the record has not
+// committed; chunkstore.ErrLostRefused for one the record has up, or that a PG's current members
+// hold not marked down. It has committed once Disks shows the disk gone.
+func (c *Control) Lost(now core.Tick, id uint32) error { return c.stageExit(now, diskExit{id, false}) }
+
+// Remove takes an operator's removal at now of disk id, drained, which the next Step commits as
+// Lost does a declaration. ErrUnknownDisk for a disk the record has not committed; ErrNotDrained
+// unless its drain has committed and no PG of the committed table names it, in its members, leaving
+// ones included, or in an interval since its last activated one.
+func (c *Control) Remove(now core.Tick, id uint32) error { return c.stageExit(now, diskExit{id, true}) }
+
+// diskExit is a declaration or a removal staged until it commits.
+type diskExit struct {
+	id     uint32
+	remove bool
+}
+
+func (c *Control) stageExit(now core.Tick, x diskExit) error {
+	c.begin(now)
+	if err := c.exit(x); err != nil {
+		return err
+	}
+	if !c.disks[x.id-1].Gone && !slices.Contains(c.exits, x) {
+		c.exits = append(c.exits, x)
+	}
+	return nil
+}
+
+// exit checks x against the committed state and applies it to the record; a disk already gone
+// passes, so an operator may repeat a command whose answer was lost.
+func (c *Control) exit(x diskExit) error {
+	if x.id == 0 || int(x.id) > len(c.disks) {
+		return ErrUnknownDisk
+	}
+	if c.disks[x.id-1].Gone {
+		return nil
+	}
+	if x.remove {
+		if !c.disks[x.id-1].Drain || c.names(x.id, true) {
+			return ErrNotDrained
+		}
+		return c.rec.Remove(x.id)
+	}
+	if c.names(x.id, false) {
+		return chunkstore.ErrLostRefused
+	}
+	return c.rec.Lost(x.id)
+}
+
+// names reports whether a PG of the committed table names disk id: with past, as a member or in
+// an interval since its last activated one; without, as a member of its current interval not marked
+// down, which the epoch model's Lost needs.
+func (c *Control) names(id uint32, past bool) bool {
+	for _, pt := range c.table.Pools {
+		for _, e := range pt.PGs {
+			if slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Disk == id && (past || m.Mark != chunkstore.MarkDown) }) {
+				return true
+			}
+			if past && slices.ContainsFunc(e.Past, func(p chunkstore.PastInterval) bool {
+				return slices.ContainsFunc(p.Members, func(m chunkstore.Member) bool { return m.Disk == id })
+			}) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// reapply applies again each staged declaration and removal, which a reload of the record drops,
+// and drops those the committed state now refuses, returning their errors.
+func (c *Control) reapply() error {
+	var errs []error
+	c.exits = slices.DeleteFunc(c.exits, func(x diskExit) bool {
+		err := c.exit(x)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("meta: disk %d: %w", x.id, err))
+		}
+		return err != nil
+	})
+	return errors.Join(errs...)
 }
 
 // SetFormat stages level as the cluster's format level for the next Step; it must be above the
