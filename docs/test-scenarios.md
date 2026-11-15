@@ -7270,7 +7270,8 @@ profile refuses `io_uring_setup` with `EPERM`, so container runs use
 
 - A raw device is opened `O_DIRECT` and `O_EXCL`, sized with `BLKGETSIZE64`, and a trim of it is a
   `BLOCK_URING_CMD_DISCARD` that discards the range, with the header write behind it; on a loop
-  device under `--privileged` or a spare drive.
+  device under `--privileged` or a spare drive. The
+  [Shared ChunkStore suite](#shared-chunkstore-suite) runs on the loop device too.
 - File-backed disks: 1,000 durable 4 KiB writes into the file have a p50 near 0.95 ms on the NVMe
   flush spike's drive, not the 2.5 ms of writes into never-written `fallocate`d extents, and the
   ext4 journal's commit count does not rise across them.
@@ -7465,25 +7466,45 @@ once.
 
 ## Shared ChunkStore suite
 
-- One suite, run unchanged on the simulated disk and on io_uring (a file-backed disk always; a raw
-  device where available); the driver is the suite's only parameter. Done-when checkpoint: the same
-  suite later passes on SPDK (phase 9).
-- Its cases are the Single-node ChunkStore item's behaviours, checked against a byte-range model:
-  `Write`, `Punch`, `Read`, `Flush` with versions; `expectVer` compare-and-set that succeeds at the
-  current version and fails at a stale one; `atVer` reads of an older version; tombstones after a
-  whole-chunk punch; unaligned writes of 1 byte to 3 blocks, pipelined to one block, merged at the
-  newest ordered version; a whole 4 MiB chunk write split into several items of one version and
-  acknowledged once all are durable; a snapshot cut, then reads at that epoch; a chunk's first write
-  after a cut with its absent freeze.
-- Restart: a clean close and reopen recovers every acknowledged write, on both drivers; a checkpoint
-  then replay gives the same reads as before.
-- The suite runs stepped on `looptest`. On io_uring the results equal the model and the counts per
-  pass stay within their bounds, but whole traces are not compared: pass boundaries differ, so
-  interleavings may.
-- Fault injection (crash landing sets, injected errors, bit flips) runs only on the simulated disk;
-  the suite marks those cases simulator-only rather than skipping them silently.
-- Open: the design names the suite but not its case list; the list above is the Single-node
-  ChunkStore item's.
+- One suite, `internal/chunkstore/storetest`, written once against its `Disk` interface (queue an
+  action, wait for completions, restart the process over the same disk) and run unchanged on the
+  simulated disk (`storetest`'s own tests) and on io_uring over a 256 MiB file-backed disk
+  (`internal/driver/uring`, Linux, in Docker with `--security-opt seccomp=unconfined`); the driver
+  is the suite's only parameter. Done-when checkpoint: the same suite later passes on SPDK (phase 9).
+- The suite drives the store directly, queueing its actions as a loop's pass does and handing it
+  every completion, with merges and cleaner jobs run inline; it does not step a loop on `looptest`,
+  since the store is not a loop machine yet and the loop's disk path has its own tests (the io_uring
+  driver's rig, the round driver's stepped runs). io_uring submits the queue in one batch; the
+  simulated disk runs one queued action per completion, so a crash can fall between a round's write
+  and its fsync. Results are checked against a byte-range model of the acknowledged changes and the
+  order of the replies, never against traces.
+- The store runs the single-node configuration, every check on and no merged-block cache: the cache
+  (`MergeCache`) is a replica primary's, and the replica tests cover it.
+- Cases, the Single-node ChunkStore item's behaviours: writes of 1 byte, across a block edge and of
+  3 blocks with merged edges, and a punch with merged edges, at rising versions, read back whole and
+  unaligned; 8 two-byte writes pipelined to one block, each overlapping the next by a byte, answered
+  in order and leaving each byte as the last write over it; `expectVer` that succeeds at the current
+  version and fails with `ErrVersion` at a stale one; a flush answered only after its chunks'
+  writes; a whole-chunk punch leaving a tombstone, which a restart keeps; a whole 4 MiB chunk write
+  mapped as several extents of one version, answered once; a snapshot cut, then a read at the frozen
+  version, before and after a restart, and a chunk first written after the cut reading zeros at
+  version 0 (its absent freeze).
+- Restart, on both drivers: a clean close and reopen (on io_uring the ring and pool closed and
+  opened again over the same file) recovers every acknowledged change and each chunk's newest
+  version, and a write after it goes above that version; with `max_replay_bytes` at 256 KiB, 400
+  changes write checkpoints, and a restart replays to the same reads.
+- Fault cases run only on the simulated disk, seeded (`TestFaultsOnTheSimulatedDisk` in
+  `scripts/seeds.sh`): a power cut after random changes and a random number of disk actions, with
+  each unflushed block or sector landing at random, recovers every acknowledged write, and a write
+  not acknowledged, or answered with an error, to a new chunk recovers whole or not at all; the test
+  fails if no crash over its own seeds held an unflushed block. A failed disk write answers its
+  write with an error, and a restart keeps every acknowledged change; a flipped bit fails the read
+  with `ErrBadChecksum`. The io_uring run lists them as skipped, simulator-only, by name.
+- Not covered here: a raw device (the suite runs on a loop device in the **io_uring on a raw device
+  and NVMe** item); durability on io_uring, where a restart closes and reopens the file and no power
+  is cut, so a flush there checks only that it waits for its writes (**Crash tests on real disks**
+  owns it); counts per loop pass (no loop runs); and allocations, which the store's benchmarks
+  measure on the simulated disk.
 
 ## Shared network suite
 
