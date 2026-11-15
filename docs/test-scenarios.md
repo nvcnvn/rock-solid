@@ -7709,8 +7709,9 @@ completion up, and appends them to the run's history file, `history` beside the 
   completed when its acknowledgment is read, including those drained after the kill; a client's
   operation in flight at the kill, or sent into a dead pipe, stays with no completion.
 - The run ends with `lincheck.Illegal` over the file, read by `sim.ReadHistory`, with a register
-  per slot; the driver's changes are left to the oracle. Seed 1, 150 cycles: 6857 slot reads and
-  7062 slot writes from 302 client processes, 302 never completed, linearizable.
+  per slot; the driver's changes are left to the oracle. Seed 1, 150 cycles: about 6,800 slot
+  reads and 7,000 slot writes, varying with timing, from 302 client processes, 302 never completed,
+  linearizable.
 - Planted in a scratch copy of the child, the check names the operation at fault on 10 cycles:
   a stale read (every 20th read answered 0) as "client 6's r of slot 21 (written 0x0, read 0x0)",
   and a lost acknowledgment (every 20th slot write acknowledged and not applied) as the later read
@@ -7720,5 +7721,5 @@ completion up, and appends them to the run's history file, `history` beside the 
   (`TestAHistoryFileReadsBackAsItsOperations`, `FuzzReadHistory`).
 - **Benchmarks:** `BenchmarkHistFile`, one invocation and completion appended to the file, zero
   allocations per operation (876 ns, two clock reads and two writes, in Docker on arm64).
-- Clients on several hosts, with their stamps mapped by a measured offset, come with the file tests
-  of phase 6; the crash test runs on one host.
+- Clients on several hosts, with their stamps mapped by a measured offset and a history file per
+  host, come with the file tests of phase 6; the crash test runs on one host.

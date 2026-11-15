@@ -204,8 +204,9 @@ func TestHistClient(t *testing.T) {
 	}
 }
 
-// histFile appends one process's events to a run's history file, each in one write: O_APPEND
-// writes to a regular file land whole, so several processes' events interleave without tearing.
+// histFile appends one process's events to a run's history file, each in one write: on a local Linux
+// filesystem an O_APPEND write to a regular file lands whole, so several processes' events
+// interleave without tearing, and a torn one makes sim.ReadHistory refuse the file.
 type histFile struct {
 	f  *os.File
 	ts unix.Timespec
@@ -325,6 +326,9 @@ func TestCrashOnARealDisk(t *testing.T) {
 	ct.start(false, cycles)
 	ct.check()
 	ct.kill()
+	if ct.clientErr != "" {
+		t.Fatalf("seed %d: %s", seed, ct.clientErr)
+	}
 	t.Logf("seed %d: %d cycles, %d changes sent, %d acknowledged; restarts that kept a change never acknowledged: %d, lost one: %d, kept the first rounds of one: %d",
 		seed, cycles, ct.seq, ct.acked, ct.keptCycles, ct.lostCycles, ct.tornCycles)
 	ct.checkHistory()

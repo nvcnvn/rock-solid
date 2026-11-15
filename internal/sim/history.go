@@ -22,7 +22,8 @@ type Op struct {
 	Output   [OpWords]uint64
 }
 
-// History records client operations on the scheduler's time, not a node's clock, which drifts and slews.
+// History records client operations on the scheduler's time, not a node's clock, which drifts and
+// slews, or, read from a file by ReadHistory, on the clock its recorders stamped.
 type History struct {
 	s      *Scheduler
 	ops    []Op
