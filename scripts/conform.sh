@@ -104,7 +104,7 @@ cover() {
 			prev = cur; cur = ""; n++
 		}
 		BEGIN {
-			split("fold Fold renew Renew adopt Adopt send Send order Order logged Deliver ownlogged OwnLogged maydeliver Deliver mfail MemberFail " \
+			split("fold Fold renew Renew adopt Adopt send Send order Order logged Deliver ownlogged OwnLogged committed Answer maydeliver Deliver mfail MemberFail " \
 				"gone GoneRefuses mayfail OwnFail restart Restart format Format recovered Recover recoveredlate Recover mayrecover Recover " \
 				"reported ReportRecovered ask AskNext restartask RestartAsk peer Peer activate Activate plan.mark MarkDisk " \
 				"plan.replace Replace plan.rotate Rotate plan.add Add plan.remove Remove plan.stay Stay plan.drop Drop plan.refill Refill " \
@@ -133,7 +133,7 @@ coverage() {
 		{ took[$1 " " $2] += $3; stutter[$1 " " $2] += $4; if ($3) traces[$1 " " $2]++; if ($3) done[$1] = 1 }
 		END {
 			for (k in took) print "cover", k, took[k], "real,", stutter[k], "stutter,", traces[k] + 0, "traces"
-			n = split("Fold Renew Adopt Peer Activate CounterOut AskNext RestartAsk ReportRecovered Persist Recover Send Order Refuse Deliver " \
+			n = split("Fold Renew Adopt Peer Activate CounterOut AskNext RestartAsk ReportRecovered Persist Recover Send Order Refuse Deliver OwnLogged Answer " \
 				"Fortify BootUp MarkDisk Replace Rotate Add Remove Drop Stay Refill Lost SetMinLive Edit Die Isolate MemberFail GoneRefuses OwnFail " \
 				"OpenGrant OpenLapse Suspend Wake Freeze Thaw RateStep Restart Reboot Format NetFault Elect Transfer StepDown " \
 				"Ask Grant GrantRefused SendHb RecvGrant RecvHb RoundTrip Beat EndWait Tick", a)

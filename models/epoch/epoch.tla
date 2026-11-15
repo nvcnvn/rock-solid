@@ -2345,7 +2345,7 @@ RefillDone == Plan(<<Mark(3, "down"), AddM(2, 3, 1), RemoveM(2)>>, Partial2, {})
 RefillBack == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
 RefillStay == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(3, "up"), StayM(2, 3, 2), RemoveM(2)>>, Partial2, {})
 Refilled(x) == [x EXCEPT !.f = {"restart", "format"}]
-\* ci-refills-stay and -primary fit 5 minutes with one partial write.
+\* ci-refills-stay, -primary, -down and -two fit 5 minutes with one partial write.
 OneWrite(x) == [x EXCEPT !.w = <<Partial2[1]>>]
 RefillPlans == {Refilled(RefillDone)}
 \* ci-image: Y on the primary alone, dropped while the member is down, so the
@@ -2373,8 +2373,8 @@ ImageRestartCutPlans == {[Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Partial2, {"restar
 ReplayDropsPlans == {[Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Partial2, {"restart", "aimed", "format"})
                       EXCEPT !.k = 2]}
 RefillBackDownPlans == {Refilled(RefillBack)}
-\* ci-refills-down splits deep-refills-down by fault, the restart with one write.
-RefillDownFormatPlans == {[RefillBack EXCEPT !.f = {"format"}]}
+\* ci-refills-down splits deep-refills-down by fault, each with one write.
+RefillDownFormatPlans == {[OneWrite(RefillBack) EXCEPT !.f = {"format"}]}
 RefillDownRestartPlans == {[OneWrite(RefillBack) EXCEPT !.f = {"restart"}]}
 \* deep-refills-stay restarts any node; ci-refills-stay only node 2, the first primary.
 RefillStayPlans == {OneWrite(Refilled(RefillStay))}
@@ -2396,7 +2396,8 @@ RefillTogether == Plan(<<Mark(3, "down"), Mark(2, "down"),
                          Tab(2, <<1, 3, 4, 2>>, <<"up", "down", "up", "down">>, {2, 3}), RemoveM(2)>>, Partial2, {})
 RefillLostSecond == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), LostM(3),
                            Tab(2, <<1, 4, 2>>, <<"up", "up", "down">>, {2}), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
-RefillTwoPlans == {RefillSecond}
+RefillTwoPlans == {OneWrite(RefillSecond)}
+RefillSecondPlans == {RefillSecond}
 RefillTogetherPlans == {RefillTogether}
 RefillLostPlans == {RefillLostSecond}
 \* neg-drop-all-leaving: both members leaving, one lost, and the other holds what
@@ -2472,7 +2473,8 @@ StayForNew == Plan(<<AddM(2, 3, 1), Mark(1, "down"), StayM(2, 3, 1)>>, Session, 
 StayStale == Plan(<<AddM(2, 3, 1), Mark(3, "down"), Mark(3, "up"), Mark(2, "down"), StayM(2, 3, 2)>>, Session, {})
 MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveMaint, MoveRefill}
 \* ci-stays splits the stays off, each config under the 300 s budget.
-StayMovePlans == {StayForPrimary, StayAsPrimary}
+StayForPrimaryPlans == {StayForPrimary}
+StayAsPrimaryPlans == {StayAsPrimary}
 StayNewPlans == {StayForNew}
 \* A leaving member down and back, then taking the place of a primary that went
 \* down: W, kept at the first of those intervals on the primary alone and
