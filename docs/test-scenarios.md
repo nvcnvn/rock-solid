@@ -6597,13 +6597,9 @@ cut-off node's disk is not yet due its down mark: `node_down_after` + 3 s on the
 clock from the last of the cut's start, the lease start or a stall's end, so a leader that never
 marks a silent disk down fails it. A dead client's session is fenced within `dead_wait` + 250 ms
 on the leader's clocks from the last of its death, its start, the leader's lease start or a
-stall's end. A node whose disk was marked down and is up again holding an older table counts as
-down for the checks until it catches up. This hides a live bug of today's code, the model's
-`neg-up-with-old-table`: the leader marks a disk up on its disk beat while its node holds an older
-table, so a version is acknowledged, and a lock passed on, without it (33 seeds of 500 break the
-acknowledgement check without the exclusion). Marking it up only once its heartbeat reports the
-current version is owed by [Session fencing on storage nodes](#session-fencing-on-storage-nodes).
-At the end, every dead client's session has left the table and the version is acknowledged.
+stall's end. The checks cover nodes that rejoin: the leader marks a disk that was down up again
+only once its node's heartbeat reports the current version
+(`TestADownDiskIsMarkedUpOnlyOnceItsNodeHoldsTheCurrentTable`). At the end, every dead client's session has left the table and the version is acknowledged.
 
 **Planted bugs** (`TestPlantedSessionBugsFenceEarly`, `TestPlantedLockBugsBreakTheLockInvariants`).
 Each of the model's leader-side negatives below breaks the invariant named, in the seeded run
@@ -6621,6 +6617,7 @@ scenario:
 | `neg-release-on-commit`: a fenced session's locks are freed once its fence commits, while it is still in the table | Lock order | 292 | 2 | Seeded run, 10 seeds |
 | `neg-ack-reachable-only`: a version counts as acknowledged when every node the leader heard from holds it, skipping a node with a disk up it has no heartbeat from | Lock order | 35 | 12 | Seeded run, 72 seeds |
 | `neg-ack-waits-down`: acknowledgement also waits for nodes whose disks are marked down | Locks free in time | 263 | 0 | Seeded run, 10 seeds |
+| `neg-up-with-old-table`: a disk marked down is marked up on its disk beat while its node holds an older table | Acknowledgement | 36 | 4 | Seeded run, 70 seeds |
 
 In the model, `neg-no-full-lease` counts from the last renewal any leader processed. Go keeps the
 counts only in the leader's memory, so the plant counts from the new leader's first step, which
@@ -6746,12 +6743,39 @@ simulator seeds against the real primaries and replicas.
 | A write from a session newer than the node's table | The node fetches the session table before it judges the write, then accepts it |
 | A node marked down heartbeats again with a version older than the current one | Not marked up until a heartbeat reports the current version |
 
-- Planted bugs, each a variant of the code that must fail its invariant within the seeds every
-  commit runs: checking the session only on arrival (`neg-check-on-arrival`) and no check on
-  replicated writes (`neg-replica-no-check`) fail "no fenced session's write is applied"; marking a
-  node up with an older table (`neg-up-with-old-table`) and a new interval activated without a
-  member of every earlier interval adopting it (`neg-peering-skipped`) fail "every write of a fenced
-  lock holder that completes is ordered before every write of the next holder".
+The rows are unit tests in `replica_paths_test.go` (`TestAWriteFromASessionNewerThanTheTableWaitsForIt`,
+`TestAFencedSessionsWriteIsRefused`, `TestAMemberRefusesAFencedSessionsReplicatedWrite`,
+`TestAWriteOfAnOlderIncarnationIsRefused`, which also sends a client write carrying a version: the
+decoder drops it, so no client write skips the incarnation check that a member's replicated write
+skips) and `gate_test.go` (`TestAWriteOfAFencedSessionOrNoIncarnationIsRefusedWhenOrdered`); the
+rejoin row is [Control-plane sessions](#control-plane-sessions)'.
+
+**[property]** `TestNoFencedSessionsWriteIsApplied` (500 seeds per commit) is the
+[read run](#placement-faults-and-invariants) with its two writers as two sessions. The first is
+fenced when it dies, but, cut off from the control plane and alive, writes on for up to 2 s; the table reaches
+each running node not cut off after its own delay of up to a heartbeat (1 s), so some nodes order
+the fenced session's writes before their table holds the fence and others after; the second
+session starts once every node with a disk up holds the fence. Checked after every step: no store
+orders a write of the fenced session once it holds the fence, and every write of the first session
+that completes is ordered, in its chunk, before every write of the second.
+
+**Planted bugs** (`TestPlantedReadBugsBreakTheReadRun`), each checked alone:
+
+| Planted bug | Invariant | Seeds of 500 | First |
+| --- | --- | --- | --- |
+| `neg-check-on-arrival`: a primary checks the session only as a write arrives (`fenceOnArrival`), so a write that waited in its store as the fence came is ordered | No fenced write applied | 2 | 32 |
+| `neg-replica-no-check`: a member takes a replicated write without checking its session (`memberNoFence`), logging one its primary ordered before the fence reached it | No fenced write applied | 139 | 0 |
+
+`neg-up-with-old-table` is planted in the leader, under [Control-plane sessions](#control-plane-sessions).
+`neg-peering-skipped` removes the rule that a new interval activates only once its earlier ones
+stopped, which the epoch model's `neg-stop-previous-only` and `neg-reach-last-activated-only` also
+remove: their plants (`stopPreviousOnly`, `lastActivatedOnly`) fail their traces. In this run they,
+and a plant that has peering reach no earlier interval, break the lock order in none of 500 seeds:
+the run cuts one node at a time off from every other, so a primary left in an older interval has no
+member that both lacks the fence and still acknowledges it once the second session writes; the
+model's counterexample needs a member alone in its interval with the old primary, both cut off from
+the control plane. Neither of the two planted bugs above breaks the lock order in 500 seeds
+either, since the second session starts only once every node with a disk up holds the fence.
 
 ## Filesystem schema
 
@@ -6846,7 +6870,7 @@ Simulator invariants checked after every step, with the faults that must exercis
 | A shard recovered from manifest and log equals its state before the crash | Owed by [Shard indexes in the disk owner's checkpoint](#shard-indexes-in-the-disk-owners-checkpoint), which restores a shard from its manifest: crashes during memtable flushes, compactions, checkpoints and cleaner passes (crash oracle) |
 | At most one lock holder | Registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`): clients racing for one inode's lock in shared and exclusive modes, holders evicted, fenced and dead, and control-plane failovers. Owner failover is not in it: the owner's shard does not fail over |
 | No session is fenced while its client's own lease still runs | Registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`, `TestAFastNewLeaderFencesNoSessionEarly`, `TestAFastBootClockFencesNoSessionEarly`): control-plane leader failover while sessions renew; a renewal answered by a deposed leader; a leader stalled past `session_lease`; clients paused past their lease; slewed clocks; a client VM stopped with its clocks frozen |
-| Every write of a fenced lock holder that completes is ordered before every write of the next holder; no fenced session's write is applied; a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval while the leader holds its lease and has measured the client, `dead_wait` instead when it has not, or once an unreachable storage node is marked down | Leader side registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`): a lock reaches its next holder only once every node with a disk up holds its old holder's fence, and a dead client's locks are free within `dead_wait` (the measured bound is `TestAFenceStretchesByTheMeasuredRate`'s), under acknowledgements that lag, storage nodes cut off for 2 to 27 s, some of them marked down, and failovers. The write ordering, "no fenced session's write is applied" and the rejoin gate (a disk marked up only once its heartbeat reports the current version) are owed by [Session fencing on storage nodes](#session-fencing-on-storage-nodes): a fence that reaches some primaries late; a storage node partitioned during a fence |
+| Every write of a fenced lock holder that completes is ordered before every write of the next holder; no fenced session's write is applied; a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval while the leader holds its lease and has measured the client, `dead_wait` instead when it has not, or once an unreachable storage node is marked down | Leader side registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`): a lock reaches its next holder only once every node with a disk up holds its old holder's fence, and a dead client's locks are free within `dead_wait` (the measured bound is `TestAFenceStretchesByTheMeasuredRate`'s), under acknowledgements that lag, storage nodes cut off for 2 to 27 s, some of them marked down, and failovers. Storage side registered by [Session fencing on storage nodes](#session-fencing-on-storage-nodes) (`TestNoFencedSessionsWriteIsApplied`): a fenced client that writes on for up to 2 s while the fence reaches each node after its own delay, storage nodes cut off, paused and rebooted, and the rejoin gate in the session run |
 | On every disk of a pool, (1 + k) times the grants outstanding plus the flushes not yet in fill reports never exceed the disk's gap above the larger of its fill and `write_limit`, and no flush under a grant is refused for space | Registered by [Space grants](#space-grants) (`TestNoGrantedFlushIsRefusedForSpace`) on the leader's counts, with the run's own daemons standing in for phase 6's file frontend: the pool reaching `write_limit` while daemons buffer and other nodes write through; grant heartbeats lost or delayed, requests and replies; a control-plane failover while daemons stream; a client partitioned from the control-plane leader but not from storage, streaming under its grant; daemon deaths. A daemon crash in the middle of a reuse window is scripted (`TestARestartedCountKeepsTheOldBudgetInF`); a refill moving members onto the fullest disks while grants are out is not in the run |
 | An inode ID is never reused; no file's `mtime` goes backwards except by `utimensat`; a file's keys and its directory's entry are in one slot, unless a link or a cross-directory rename put the entry there; no directory is its own ancestor ([Filesystem schema](#filesystem-schema)) | Registered by `TestTheFilesystemWorkloadKeepsItsInvariantsAcrossElections` (`internal/meta`), on the leader's state after every `Txn`: three daemons run every filesystem operation through a three-replica shard, one or two requests proposed in one round, and in 1 step of 6 one daemon's two requests built from one read: two sibling directories renamed into each other, or two `SetAttr`s of one file, applied in either order; the volume's root, inode and slot reservations go through the shard too, and the shard's slots end at 20, so later directories share their parent's slot. Faults: per send, the leader cut off and a new one elected (1 in 10), a replica restarted before or after the round settles (1 in 10), each answer lost (1 in 10); a daemon reconnected without its reservations, its requests resent (1 in 60 steps); a daemon crashed and restarted under a new session, its requests never resent (1 in 120 steps); and the root's creation resent (1 in 40). "Never reused" is read at allocation: no inode ID, the root's included, is handed out twice. The workload has no `utimensat`, so no `mtime` may go backwards. A file's entry outside its slot passes only once a link or cross-directory rename that put it there has committed; directories are not held to their parent's slot. Each invariant fires within the run's 100 per-commit seeds when the code is broken: `Rename` without its ancestors' live checks (36 of the first 120 seeds), `SetAttr` without its check of the attributes it read (74), an inode reservation overlapping the root (92), and inode IDs placed in the wrong slot (120) |
 | A replayed request returns its first result and changes nothing | Registered by `TestTheFilesystemWorkloadKeepsItsInvariantsAcrossElections`, under the faults of the row above: a request is resent up to three times, across leader cut-offs, elections, replica restarts, lost answers and its daemon's crash. A resend's result equals the request's first final one; a round holding only the resend leaves the state unchanged; a check failure that is not final leaves no record. `TestReplayedRequestsReturnTheirFirstFinalResult` and `TestResentFSOpsReturnTheirFirstFinalResult` resend at random later points against one state |
