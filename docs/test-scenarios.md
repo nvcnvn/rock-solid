@@ -3261,6 +3261,7 @@ nodes without finishing.
 | `ci-stays-stale` | 3 | PG 2 and its chunk alone, with no spare table: the leaving member down and back, then taking the place of the primary, marked down. To fit 5 minutes it has no fold of an activation report, and one table both moves the PG and marks the leaving member down. It reaches W kept with no holder up, W refused and nothing acknowledged lost, its holder staying a member |
 | `deep-stays-stale` | 3 | `ci-stays-stale` with the move and the mark down in two tables, and a spare table, so a `Fold` or a `Renew` lands between its changes; with W, and with both partial writes. Too large for `ci`, and not yet run |
 | `ci-late-ask` | 3 | PG 1 and its chunk alone, a member down and back, one restart, no spare table, with `lateask`: the restarted primary may ask again in a newer table before it peers. Only here does TLC take `RestartAsk`, which no rule needs |
+| `ci-gates` | 3 | The restart plan alone, with a spare table for the restarted node's ask, under fairness, for properties 12 and 20 only: a restarted member's replayed versions settle at the decision of the interval it asks for |
 | `ci-refills` | 3 | PG 2 and its chunk alone, two partial writes, no spare table, a restart or a format: a member marked down, refilled beside its replacement and removed |
 | `ci-refills-down` | 3 | As `ci-refills`, one write, with the other member down while the refilled one leaves, and back, then the removal; a format |
 | `ci-refills-down-restart` | 3 | `ci-refills-down` with a restart instead of the format |
@@ -3491,11 +3492,12 @@ part, which peering treats as not held; and a record failing below a later one o
 own log, which the store reports as held whole up to the failure, so that only the newest version
 on that log fails.
 
-**Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12, 15 and 16.
+**Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12, 15, 16 and 20.
 `ci-peering`, `ci-restarts`, `ci-restarts-moved`, `ci-edits`, `ci-tears`, `ci-faults`, `ci-faults-more`, `deep-faults-more` and `heavy-peering` check every property but 2 and 10, since
-the Raft group and lease time need clocks, 13, since their plans make no move, and 15 and 16, which
-only `ci-asks` checks; `heavy-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
-and 16 and the action property 17, on its small plans.
+the Raft group and lease time need clocks, 13, since their plans make no move, 15 and 16, which
+only `ci-asks` checks, and 20, which only `ci-gates` checks; `heavy-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
+and 16 and the action property 17, on its small plans. `ci-gates` checks only the liveness properties 12 and 20, on the restart plan with
+a spare table: without one no table starts the interval a restarted member asks for, and 20 holds only through its exception.
 `ci-moves`, `ci-stays`, `ci-stays-stale`, `ci-stays-new`, `ci-stays-gone`, `ci-image`, `ci-image-restart`, `ci-bounce` and the `ci-refills` configurations check the same, property 13, an action property checked at each removal, which a `Stay` is not, and property 18, that no acknowledged write is stranded on a disk that is no member; `ci-sources`, `ci-sources-move`, `ci-sources-lister` and `ci-late-ask` check 18 and 19 among a few. The plans of the peering configurations replace up members, which stands for an operator's edit, so they leave 18 out. The first three
 send only the daemon's one write W, which keeps each within its 5 minutes: the replica's move
 with the successor's writes and a process restart, run alone, passes property 13 at 2.3 million
@@ -3524,6 +3526,7 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 17 | A version is acknowledged only on at least `min_live` members of the interval that answers it, its own or the one activating, counted by what their logs hold, a member in `maintenance` counting as it does toward `min_live`. An action property, checked at each acknowledgment | `AckedOnMinLive` | "no write is acknowledged on fewer than min_live disks, a member in maintenance counting as one", registered by `epochChecks` |
 | 18 | An acknowledged write is not stranded: if a disk that is not gone can serve all of a chunk's acknowledged writes, holding them and listing nothing of it, so can a member of its PG's current interval, up or down, or an image of a version that covers them, which a node carries across a restart and a lost lead too, while that node's disk is such a member and runs on it. That such a disk exists is not claimed, as a holder that truly dies leaves none | `NoStranded` | "an acknowledged write a disk can serve, a member can serve" (`invStranded`), checked on every table of the seeded primary-change run and of the `soleRun` tests. `TestAPrimaryListingOnlyItsDroppedWriteServesPastADiskLoss` and the stranded-move tests (`stranded_move_test.go`) cover it as regression tests |
 | 19 | An activated primary has a source: for a chunk with an acknowledged write, a member of its interval can serve them all, or its own image is what peering kept. Claimed while no disk has gone, as a holder that truly dies leaves none, and not for a chunk where a write of a primary listing it reached another member, which stays open with [Clean copies before a write's OK](build-checklist.md) | `PrimarySource` | `invHasSource` ("an activated primary has a source of each chunk it kept, or calls it unfound"), which holds the code to the decision: it does not read versions |
+| 20 | A restarted member's replayed writes settle: with every step that is due taken in time, once a PG's current interval has activated and no later one is asked for, no up member on a running node keeps gated a version of the PG that its log holds | `GatesSettle` | `invRecovered` ("once recovery settles, every member lists nothing and maps the kept writes, but in an unfound chunk"), which a member that keeps replayed writes gated breaks, as it does not map them |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
 find a violation of the named property, which is never the property that only restates the removed
@@ -3532,7 +3535,7 @@ with `ci-leases`'s constants, except the row for reads below `min_live`, whose t
 clocks; the rest run with `ci-peering`'s, on `ci-restarts`' plans where the trace needs a restart
 or a format, on `ci-edits`' for an edit, on `ci-moves`' where it needs a move and on `ci-faults`', with its sixth table, where
 it needs a failed version, a format around peering or recovery, a change of `min_live` or a primary
-moved away and back. A variant checks only the property it must break; the one for property 12 does so
+moved away and back. A variant checks only the property it must break; those for properties 12 and 20 do so
 under fairness, as `heavy-peering` does, on the restart plan alone, and those for 15 and 16 on
 `ci-asks`' plans, as it does.
 
@@ -3546,6 +3549,7 @@ under fairness, as `heavy-peering` does, on the restart plan alone, and those fo
 | A disk ID kept across a new log ID | 4 | 1.1 acknowledged on all three; node 3's disk is formatted again and keeps its ID; node 1 is marked down; peering finds disk 3, live in 1, lacking 1.1, and drops it |
 | A restarted primary peers in its old interval | 6 | A write from its previous run is still in a member's socket; the new run's peering drops it and gives its version to the reissue |
 | A restarted primary never asks for a new interval | 12 | PG 2's primary restarts; no table starts a later interval, so it never peers again and the PG never activates |
+| A restarted member never asks for a new interval (`neg-member-no-ask`) | 20 | The restart plan: a member restarts with a version of its PG's current interval in its log; replay leaves it gated, the primary stays, no table starts a later interval, and the version stays gated in the activated interval |
 | An older version is decided by its own interval's members after a later interval kept it | 4 | Interval 2 keeps a version recovering onto node 1; interval 3 reaches node 1 and a member live in 1 that lacks the version, and 1's rule drops what 2 kept |
 | A primary activates before missing lists are durable | 4 | A member crashes after activation, forgets that it lacks the kept version, and the next peering, reaching it, drops the version |
 | The leader records an activation the primary has only decided | 4 | PG 2: interval 2 replaces member 3 with node 1; primary 2 decides to keep W, still in flight to 3, and the leader records 2 before any member persisted the decision; W completes in interval 1; interval 3 puts 2 in `maintenance`, and node 1, peering from interval 2, finds no member that persisted its decision and drops W |
