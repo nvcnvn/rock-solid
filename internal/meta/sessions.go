@@ -273,8 +273,12 @@ func (c *Control) acknowledged(v uint64) bool {
 }
 
 // Holding reports whether session id still holds its locks, which is until it leaves the table, once
-// every storage node holds its fence; an owner frees a lock key whose session does not.
+// every storage node holds its fence; an owner frees a lock key whose session does not. An ID the
+// table has not handed out yet holds: a new leader's table can lag a start the old leader committed.
 func (c *Control) Holding(id uint64) bool {
+	if id >= c.sess.Next {
+		return true
+	}
 	i, ok := slices.BinarySearchFunc(c.sess.Sessions, id, cmpSession)
 	return ok && (c.sess.Sessions[i].Fenced == 0 || !c.plant.releaseOnCommit)
 }
