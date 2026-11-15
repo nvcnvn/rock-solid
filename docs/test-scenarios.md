@@ -2872,7 +2872,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 9 s |
   | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 3 s |
   | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 4 s |
-  | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 15 s |
+  | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 17 s |
   | `internal/raftshard` `TestVoterReplacementRunsReplayFromTheirSeed` | 2,000 | 25 s |
   | `internal/raftshard` `TestAReplacementNeverStallsProposals` | 2,000 | 9 s |
   | `internal/raftshard` `TestCommittedEntriesSurviveCrashesOnTheDiskLog` | 2,000 | 43 s |
