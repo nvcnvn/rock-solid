@@ -77,10 +77,11 @@ type diskFill struct {
 }
 
 // grantPlants are bugs a test plants: a new leader counting a session it has not heard from at
-// nothing and one it has at the grant it says it holds, and a lapsed session's grant dropped once
-// it is fenced.
+// nothing and one it has at the grant it says it holds, a lapsed session's grant dropped once
+// it is fenced, grants capped by half of available only and not by the smallest gap, and a
+// shrunk grant counted at its new value before a heartbeat echoes it.
 type grantPlants struct {
-	unheardZero, dropLapsed bool
+	unheardZero, dropLapsed, noGapCap, shrinkAtOnce bool
 }
 
 // Granted is the total of grants the leader counts outstanding on pool id, which every heartbeat
@@ -237,10 +238,16 @@ func (c *Control) grantPool(t core.Tick, session uint64, issuer Issuer, pb *Pool
 	g := uint64(0)
 	if renewed {
 		lim := pg.limit()
+		if c.gplant.noGapCap && pg.ready {
+			lim = (pg.room - min(pg.flushed(), pg.room)) / 2
+		}
 		others := c.counted(pb.Pool, session)
 		g = min(e.ask, max(e.buffered, pg.level), lim-min(lim, others))
 	}
 	e.grant, e.count = g, max(e.count, g)
+	if c.gplant.shrinkAtOnce {
+		e.count = max(g, e.buffered)
+	}
 	return g
 }
 

@@ -290,7 +290,23 @@ func TestFlushesCountUntilAFillCoversThem(t *testing.T) {
 
 // G11b: a shrink whose reply is lost counts at the old grant until a heartbeat echoes the new one.
 func TestAShrinkCountsUntilEchoed(t *testing.T) {
+	r := shrinkRun(t, grantPlants{})
+	if g := r.Granted(); g != mib(768) {
+		t.Fatalf("G11b: Σ %v MiB with the shrinks unechoed, want 768", inMiB([]uint64{g}))
+	}
+	for i := range 3 {
+		r.beat(i, PoolBeat{Ask: mib(50), Held: mib(50)})
+	}
+	if g := r.Granted(); g != mib(150) {
+		t.Fatalf("G11b: Σ %v MiB once echoed, want 150", inMiB([]uint64{g}))
+	}
+}
+
+// shrinkRun shrinks three nodes' grants from 256 to 50 MiB, each reply lost, and heartbeats each
+// once more still holding 256 MiB.
+func shrinkRun(t *testing.T, pl grantPlants) *grantRun {
 	r := roomy(t, 3)
+	r.ctl.gplant = pl
 	asks := []uint64{mib(256), mib(256), mib(256)}
 	r.rounds(2, asks, make([]uint64, 3))
 	for i := range 3 {
@@ -301,15 +317,7 @@ func TestAShrinkCountsUntilEchoed(t *testing.T) {
 	for i := range 3 {
 		r.beat(i, PoolBeat{Ask: mib(50), Held: mib(256)})
 	}
-	if g := r.Granted(); g != mib(768) {
-		t.Fatalf("G11b: Σ %v MiB with the shrinks unechoed, want 768", inMiB([]uint64{g}))
-	}
-	for i := range 3 {
-		r.beat(i, PoolBeat{Ask: mib(50), Held: mib(50)})
-	}
-	if g := r.Granted(); g != mib(150) {
-		t.Fatalf("G11b: Σ %v MiB once echoed, want 150", inMiB([]uint64{g}))
-	}
+	return r
 }
 
 // A daemon buffers under its old grant until a reply shrinks it, so the heartbeat that echoes the
@@ -614,7 +622,7 @@ const (
 // small disks for 60 s, tight with heavier writers, 8 GiB disks and more deaths, through leader failovers with the old leader answering a while, lost and
 // delayed heartbeats and fills, daemons cut off from the leader that stream under their grants
 // until fenced, and space freed, checking the invariants after every 10 ms step.
-func grantsRun(t *testing.T, seed uint64, tight bool, pl grantPlants) error {
+func grantsRun(t *testing.T, seed uint64, tight bool, pl grantPlants, only ...string) error {
 	const step = core.Tick(10_000)
 	const faultsEnd, end = 40 * sec, 60 * sec
 	rng := rand.New(rand.NewPCG(seed, 9))
@@ -698,6 +706,9 @@ func grantsRun(t *testing.T, seed uint64, tight bool, pl grantPlants) error {
 		return nil
 	})
 	inv.Register(invGrantCap, func() error { return capErr })
+	for _, name := range only {
+		inv.Only(name)
+	}
 
 	var msgs, due []grantMsg
 	nextFail := 5*sec + ticks(500)
@@ -903,4 +914,21 @@ func TestPlantedGrantBugsOverrun(t *testing.T) {
 	if err := grantsRun(t, 4, true, grantPlants{unheardZero: true}); err == nil || !strings.Contains(err.Error(), invGrantRoom) {
 		t.Errorf("no failover count at seed 4 of the tight run: %v", err)
 	}
+	if !grantRoomBreaksWithin(t, 96, grantPlants{noGapCap: true}) {
+		t.Error("grants capped by half of available only broke nothing in 96 seeds of the tight run")
+	}
+	if g := shrinkRun(t, grantPlants{shrinkAtOnce: true}).Granted(); g == mib(768) {
+		t.Error("a shrink counted at once still counted 768 MiB unechoed")
+	}
+}
+
+// grantRoomBreaksWithin reports whether the tight grant run with pl breaks invGrantRoom in one of
+// the first n seeds, n about 5 / the plant's rate over 500 seeds.
+func grantRoomBreaksWithin(t *testing.T, n uint64, pl grantPlants) bool {
+	for seed := range n {
+		if err := grantsRun(t, seed, true, pl, invGrantRoom); err != nil && strings.Contains(err.Error(), invGrantRoom) {
+			return true
+		}
+	}
+	return false
 }
