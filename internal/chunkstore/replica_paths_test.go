@@ -246,6 +246,11 @@ func TestAWriteOfAnOlderIncarnationIsRefused(t *testing.T) {
 	if rp := c.reply(w); rp.Status != StatusRefused {
 		t.Fatalf("incarnation 1 after 2's hello: %+v", rp)
 	}
+	w = c.update(c.pgFields(pg0), ch, 0, []byte{1}, 0, func(u *Update) { u.Version = 1<<32 | 5 })
+	c.settle()
+	if rp, ok := c.cl.replies[w]; ok || c.reps[0].st.Newest(ch) != 0 {
+		t.Fatalf("incarnation 1 carrying a version, after 2's hello: answered %v %+v, newest %#x", ok, rp, c.reps[0].st.Newest(ch))
+	}
 	w = c.update(c.pgFields(pg0), ch, 0, []byte{1}, 0, func(u *Update) { u.Incarnation = 2 })
 	c.settle()
 	if rp := c.reply(w); rp.Status != StatusOK {
