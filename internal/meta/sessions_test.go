@@ -803,14 +803,14 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error 
 		}
 		return nil
 	})
-	var held [5]uint64
+	var held [5]chunkstore.SessionTable
 	disks := r.ctl.Disks()
-	behind := func(d DiskEntry, v uint64) bool { return d.Up && held[d.Node] < v }
+	behind := func(d DiskEntry, v uint64) bool { return d.Up && held[d.Node].Version < v }
 	inv.Register(invSessionAcks, func() error {
 		acked := r.ctl.SessionTable().Acked
 		for _, d := range disks {
 			if behind(d, acked) {
-				return fmt.Errorf("version %d acknowledged while node %d holds %d", acked, d.Node, held[d.Node])
+				return fmt.Errorf("version %d acknowledged while node %d holds %d", acked, d.Node, held[d.Node].Version)
 			}
 		}
 		return nil
@@ -874,8 +874,8 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error 
 				continue
 			}
 			for _, d := range disks {
-				if behind(d, fences[k.Session]) && misordered == nil {
-					misordered = fmt.Errorf("session %d's lock went to session %d while node %d holds version %d of its fence %d, table %+v, at %v", k.Session, c.id, d.Node, held[d.Node], fences[k.Session], r.ctl.SessionTable(), now)
+				if d.Up && !held[d.Node].Fenced(k.Session) && misordered == nil {
+					misordered = fmt.Errorf("session %d's lock went to session %d while node %d holds version %d of its fence %d, table %+v, at %v", k.Session, c.id, d.Node, held[d.Node].Version, fences[k.Session], r.ctl.SessionTable(), now)
 				}
 			}
 		}
@@ -1031,9 +1031,9 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error 
 						continue
 					}
 					if !faults || lag.IntN(3) == 0 {
-						held[n] = r.ctl.SessionTable().Version
+						held[n] = r.ctl.SessionTable().Storage()
 					}
-					r.heartbeat(&NodeReport{Node: n, Meta: true, Opened: []OpenedDisk{{Device: devOf(n), Log: logOf(n)}}, Sessions: held[n]})
+					r.heartbeat(&NodeReport{Node: n, Meta: true, Opened: []OpenedDisk{{Device: devOf(n), Log: logOf(n)}}, Sessions: held[n].Version})
 					r.beat(n, 0, false)
 				}
 				r.event(0, nil)
@@ -1059,7 +1059,7 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error 
 			if int(d.Node) == cut {
 				countable = countable && !(d.Up && silent)
 			} else {
-				countable = countable && !(d.Up && held[d.Node] < tbl.Version)
+				countable = countable && !(d.Up && held[d.Node].Version < tbl.Version)
 			}
 		}
 		for _, e := range tbl.Sessions {

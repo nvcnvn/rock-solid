@@ -9,6 +9,7 @@ import (
 	"math/bits"
 	"slices"
 
+	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/lease"
 )
@@ -83,6 +84,17 @@ type SessionEntry struct {
 type SessionTable struct {
 	Version, Acked, Next uint64
 	Sessions             []SessionEntry
+}
+
+// Storage is t as a storage node holds it: its version, next session ID and live sessions.
+func (t *SessionTable) Storage() chunkstore.SessionTable {
+	s := chunkstore.SessionTable{Version: t.Version, Next: t.Next}
+	for _, e := range t.Sessions {
+		if e.Fenced == 0 {
+			s.Live = append(s.Live, e.ID)
+		}
+	}
+	return s
 }
 
 // SessionStart is a daemon's request to start a session on Node, and the ID it got once committed.
