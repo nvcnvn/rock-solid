@@ -45,18 +45,20 @@ type ReplicaConfig struct {
 
 // ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations and in Recovered, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers. Trace is the protocol steps the call took, for the loop's trace.
 type ReplicaOutput struct {
-	Actions     []core.Action
-	Fetch       uint64
-	Whole       bool
-	Asks        []PGFields
-	Activations []PGFields
-	Recovered   []PGFields
-	Trace       []trace.Record
+	Actions []core.Action
+	Fetch   uint64
+	Whole   bool
+	// FetchSessions asks for the newest session table, which SetSessions hands the replica.
+	FetchSessions bool
+	Asks          []PGFields
+	Activations   []PGFields
+	Recovered     []PGFields
+	Trace         []trace.Record
 }
 
 // Reset empties the output for reuse.
 func (o *ReplicaOutput) Reset() {
-	o.Actions, o.Fetch, o.Whole, o.Asks, o.Activations, o.Recovered, o.Trace = o.Actions[:0], 0, false, o.Asks[:0], o.Activations[:0], o.Recovered[:0], o.Trace[:0]
+	o.Actions, o.Fetch, o.Whole, o.FetchSessions, o.Asks, o.Activations, o.Recovered, o.Trace = o.Actions[:0], 0, false, false, o.Asks[:0], o.Activations[:0], o.Recovered[:0], o.Trace[:0]
 }
 
 func (o *ReplicaOutput) note(name trace.Name, a, b, c, d, e uint64) {
@@ -85,6 +87,7 @@ func (r *Replica) retry(ctx *core.Context, out *ReplicaOutput) {
 	if r.want != 0 {
 		out.fetch(r.want, r.wantWhole)
 	}
+	out.FetchSessions = out.FetchSessions || r.wantSessions
 	r.peerRetry(ctx, out)
 	r.reportRecovered(true, out)
 	r.retryReads()
@@ -97,7 +100,7 @@ func (r *Replica) retry(ctx *core.Context, out *ReplicaOutput) {
 
 // armRetry arms RetryTimer while a table or an interval is asked for.
 func (r *Replica) armRetry(ctx *core.Context, out *ReplicaOutput) {
-	if r.retryAt != 0 || r.want == 0 && !slices.ContainsFunc(r.leads, func(l lead) bool { return l.asked }) && !r.peering() && !r.unrecorded() && !r.waits {
+	if r.retryAt != 0 || r.want == 0 && !r.wantSessions && !slices.ContainsFunc(r.leads, func(l lead) bool { return l.asked }) && !r.peering() && !r.unrecorded() && !r.waits {
 		return
 	}
 	r.retryAt = ctx.Now + RetryAfter
@@ -223,6 +226,8 @@ type Replica struct {
 	want      uint64
 	wantWhole bool
 	retryAt   core.Tick
+	// wantSessions is set while a write waits for a session table newer than the store's.
+	wantSessions bool
 	// holder is the leases this disk holds as a primary, from the loops in grantors; grantor the grants it gives; leaseAt when LeaseTimer is armed for, 0 when it is not; beatAt when the next heartbeat to its holders is due.
 	holder   *lease.Holder
 	grantor  *lease.Grantor
@@ -582,17 +587,40 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 	r.armLease(ctx, out)
 	r.dropWaiting(ctx, out)
 	r.demote(ctx, out)
+	r.unpark(ctx, out)
+	r.drain(ctx, out)
+}
+
+// unpark takes again each parked message the replica's tables are now new enough for; one that
+// waited on the session table and still does parks again.
+func (r *Replica) unpark(ctx *core.Context, out *ReplicaOutput) {
 	parked := r.parked
 	r.parked = nil
 	for _, p := range parked {
-		if p.epoch > t.Epoch {
+		if p.epoch > r.table.Epoch {
 			r.parked = append(r.parked, p)
 			continue
 		}
 		ev := core.Event{Kind: core.EvNetRecv, Peer: p.peer, Msg: p.msg}
 		r.recv(ctx, &ev, out)
 	}
+}
+
+// SetSessions hands the replica session table t, which its store applies if newer, and takes again
+// the writes that waited for it.
+func (r *Replica) SetSessions(ctx *core.Context, t SessionTable, out *ReplicaOutput) {
+	r.st.SetSessions(t)
+	r.wantSessions = false
+	r.unpark(ctx, out)
+	r.armRetry(ctx, out)
 	r.drain(ctx, out)
+}
+
+// parkSessions keeps a write from a session newer than the store's session table until the replica
+// holds a table that knows it.
+func (r *Replica) parkSessions(ev *core.Event, out *ReplicaOutput) {
+	r.parked = append(r.parked, parkedMsg{peer: ev.Peer, msg: ev.Msg})
+	r.wantSessions, out.FetchSessions = true, true
 }
 
 // demote refuses the clients of the versions this disk ordered as the primary of a PG it no longer leads, since peering decides whether those versions stay, and has the store map them as a member maps what it logs, so the PG's new primary finds the disk a member like any other.
@@ -902,6 +930,14 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusRefused}, out)
 		return
 	}
+	if f := r.st.Sessions(); f.Newer(u.Session) {
+		r.parkSessions(ev, out)
+		return
+	} else if f.Fenced(u.Session) {
+		freeBuf(ctx, ev.Msg.Buf)
+		r.reply(ctx, ev.Peer, u.ID, r.refusal(u.PG.PG), out)
+		return
+	}
 	r.st.SeeIncarnation(u.Session, u.Incarnation)
 	p, e := r.table.entry(u.PG.PG)
 	i := r.lead(u.PG.PG)
@@ -965,9 +1001,13 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		r.park(ev, u.PG.Epoch, out)
 		return
 	}
+	if r.st.Sessions().Newer(u.Session) {
+		r.parkSessions(ev, out)
+		return
+	}
 	recover := u.Kind == KindRecover
 	gone := e != nil && (!slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) || r.plant.goneWhileUp && u.Version&15 == 7)
-	refuse := e == nil || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || gone ||
+	refuse := e == nil || r.st.Sessions().Fenced(u.Session) || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || gone ||
 		slices.ContainsFunc(r.failed, func(f failedVer) bool {
 			return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version <= u.Version || recover)
 		})
@@ -1005,7 +1045,7 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		out.note(trace.OutAccepted, u.Chunk.Hash(), u.Version, 0, 0, 0)
 	}
 	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk, version: u.Version, recover: recover, source: u.Source, interval: u.PG.Interval})
-	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, Epoch: u.Snapshot, Version: u.Version}
+	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, Epoch: u.Snapshot, Version: u.Version, Session: u.Session}
 	if recover {
 		req.Version, req.HasVer, req.Ver, req.Interval, req.Recover = 0, true, u.Version, u.PG.Interval, true
 	}

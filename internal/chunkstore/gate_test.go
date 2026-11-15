@@ -237,6 +237,26 @@ func TestAWriteOfAnOlderIncarnationIsFencedWhenOrdered(t *testing.T) {
 	}
 }
 
+func TestAWriteOfAFencedSessionOrNoIncarnationIsRefusedWhenOrdered(t *testing.T) {
+	h := newHarness(t, testConfig())
+	h.sync(h.write(chunkC, 0, []byte{1}, 0))
+	h.s.SeeIncarnation(9, 1)
+	zero := h.change(chunkC)
+	h.s.Write(&h.ctx, Request{ID: zero, Chunk: chunkC, Off: core.BlockSize, Len: core.BlockSize, Buf: h.writeBuf(0, make([]byte, core.BlockSize)), Session: 9}, &h.out)
+	h.take()
+	held := h.change(chunkC)
+	h.s.Write(&h.ctx, Request{ID: held, Chunk: chunkC, Off: 6, Len: 1, Buf: h.writeBuf(6, []byte{3}), Session: 9, Incarnation: 1}, &h.out)
+	h.take()
+	h.s.SetSessions(SessionTable{Version: 1, Next: 10})
+	h.settle()
+	if r := h.reply(zero); !errors.Is(r.Err, ErrFenced) {
+		t.Fatalf("a write of incarnation 0 after incarnation 1 answered %+v", r)
+	}
+	if r := h.reply(held); !errors.Is(r.Err, ErrFenced) {
+		t.Fatalf("a write queued when its session was fenced answered %+v", r)
+	}
+}
+
 func TestAMemberServesOnlyFrozenVersions(t *testing.T) {
 	h := newHarness(t, testConfig())
 	v := h.sync(h.write(chunkC, 0, []byte{1}, 0))

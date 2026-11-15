@@ -16,19 +16,23 @@ import (
 
 // rcluster is replicas on simulated nodes, disk d on node d − 1, a client on the last node, and the test as the control plane: it publishes tables and ends peering.
 type rcluster struct {
-	t      *testing.T
-	s      *sim.Scheduler
-	reps   []*Replica
-	loops  []core.NodeID
-	table  Table
-	client core.NodeID
-	cl     *rclient
-	nextID core.RequestID
+	t     *testing.T
+	s     *sim.Scheduler
+	reps  []*Replica
+	loops []core.NodeID
+	table Table
+	// sessions is the newest session table, which a replica's store holds from its start.
+	sessions SessionTable
+	client   core.NodeID
+	cl       *rclient
+	nextID   core.RequestID
 	// fetch is the newest table epoch each replica asked for, and whole whether it asked for the whole table.
 	fetch   []uint64
 	whole   []bool
 	fetches []int
-	asks    []PGFields
+	// sessionAsks counts each replica's passes that asked for the session table.
+	sessionAsks []int
+	asks        []PGFields
 	// activations is every activation a primary reported, which next records in its table, and
 	// recovered every recovered interval.
 	activations []PGFields
@@ -143,7 +147,7 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 		t.Fatal(err)
 	}
 	c := &rcluster{t: t, s: s, table: tbl, cl: &rclient{replies: map[core.RequestID]Response{}, data: map[core.RequestID][]byte{}, sent: map[core.RequestID]core.IOBuf{}},
-		sentVer: map[sendKey]uint64{}, lost: map[[2]core.NodeID]int{}}
+		sentVer: map[sendKey]uint64{}, lost: map[[2]core.NodeID]int{}, sessions: SessionTable{Next: 2, Live: []uint64{1}}}
 	c.inv.Register(invSendOrder, func() error { return c.orderErr })
 	disks := 0
 	for _, p := range tbl.Pools {
@@ -155,6 +159,7 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 	}
 	c.reps, c.loops, c.fetch, c.whole, c.passes = make([]*Replica, disks), make([]core.NodeID, disks), make([]uint64, disks), make([]bool, disks), make([][][]core.Action, disks)
 	c.fetches = make([]int, disks)
+	c.sessionAsks = make([]int, disks)
 	c.ids, c.logs, c.reformat, c.boots = make([]uint32, disks), make([]uint64, disks), make([]bool, disks), make([]int, disks)
 	for d := range disks {
 		c.ids[d], c.logs[d] = uint32(d+1), 0x5eed+uint64(d)
@@ -212,6 +217,7 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 				}
 				c.reformat[d] = false
 				st.plant = c.storePlants
+				st.SetSessions(c.sessions)
 				c.reps[d] = NewReplica(ReplicaConfig{Disk: c.ids[d], Seed: seed, Start: lease.Now(ctx), Log: c.logs[d], Restarted: !fresh}, st)
 				c.reps[d].plant = c.replicaPlants
 				for k := range disks {
@@ -248,6 +254,9 @@ func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Ac
 	c.whole[d] = c.whole[d] || out.Whole
 	if out.Fetch != 0 {
 		c.fetches[d]++
+	}
+	if out.FetchSessions {
+		c.sessionAsks[d]++
 	}
 	c.asks = append(c.asks, out.Asks...)
 	c.activations = append(c.activations, out.Activations...)

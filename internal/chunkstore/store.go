@@ -27,8 +27,8 @@ var (
 	ErrSeal = errors.New("chunkstore: seal not supported")
 	// ErrCounter reports a write or punch whose chunk has spent its version counter in the request's interval, or whose newest version is from a later one.
 	ErrCounter = errors.New("chunkstore: chunk's version counter spent in this interval")
-	// ErrFenced reports a write or punch of a client incarnation older than the newest the store has seen of its session.
-	ErrFenced = errors.New("chunkstore: write from an older incarnation of its session")
+	// ErrFenced reports a write or punch of a session the session table fenced, or of a client incarnation older than the newest the store has seen of its session.
+	ErrFenced = errors.New("chunkstore: write from a fenced session or an older incarnation of its session")
 	// ErrDropped reports a gated write or punch that Settle dropped, or one Cancel dropped before it was ordered.
 	ErrDropped = errors.New("chunkstore: write dropped")
 	// ErrUnresolved reports a Settle of a chunk with a write or punch still waiting to be ordered or with records not yet durable or failed, or a PeerState of a PG with such a chunk or a missing list still being persisted.
@@ -82,7 +82,8 @@ type Request struct {
 	FrozenOnly bool
 	// Base makes a read serve its blocks of the live map only while they are at version Ver, as a primary fetches a base whose own copy failed its checksum.
 	Base bool
-	// Session and Incarnation name the client process a write or punch came from.
+	// Session and Incarnation name the client process a write or punch came from; a member's
+	// replicated write, at the Version its primary ordered, is checked against the session table alone.
 	Session     uint64
 	Incarnation uint64
 	// Recover makes a Write a recovery write of the whole chunk in PG interval Interval, whose Buf is
@@ -359,6 +360,7 @@ type Store struct {
 	adm admission
 	// sessions is the newest incarnation seen of each client session.
 	sessions map[uint64]uint64
+	fence    SessionTable
 	// covers is, for each chunk a recovery write waits on at this primary, the blocks the writes of
 	// its interval ordered so far cover; rexts the extents a recovery read reads.
 	covers map[core.ChunkID]cover
@@ -622,7 +624,7 @@ func (s *Store) orderWaiting(ctx *core.Context, ci int32, out *Output) {
 		if o.err == nil && o.kind == opWrite && !s.admitWrite(ctx, ci, o) {
 			return
 		}
-		if o.err == nil && o.req.Session != 0 && o.req.Incarnation < s.sessions[o.req.Session] {
+		if o.err == nil && o.req.Session != 0 && (o.req.Version == 0 && o.req.Incarnation < s.sessions[o.req.Session] || s.fence.Fenced(o.req.Session)) {
 			o.err = ErrFenced
 		}
 		cs.waiting = cs.waiting[:copy(cs.waiting, cs.waiting[1:])]
@@ -1442,6 +1444,39 @@ func (s *Store) Overwrites(c core.ChunkID, off, n uint32, epoch uint64) bool {
 	}
 	return true
 }
+
+// SessionTable is the control plane's session table as a storage node checks writes against it:
+// its version, the next session ID it hands out, and its live sessions in order.
+type SessionTable struct {
+	Version, Next uint64
+	Live          []uint64
+}
+
+// Fenced reports whether session id was handed out and is no longer live.
+func (t *SessionTable) Fenced(id uint64) bool {
+	_, live := slices.BinarySearch(t.Live, id)
+	return id != 0 && id < t.Next && !live
+}
+
+// Newer reports whether session id started after the table: its writes wait for a newer one.
+func (t *SessionTable) Newer(id uint64) bool { return id != 0 && id >= t.Next }
+
+// newer reports whether t is newer than u: a later version, or the same with later starts.
+func (t *SessionTable) newer(u *SessionTable) bool {
+	return t.Version > u.Version || t.Version == u.Version && t.Next > u.Next
+}
+
+// SetSessions applies t if it is newer than the table the store holds: from then on the store
+// refuses, with ErrFenced when it orders them, the writes and punches of the sessions t fenced,
+// those already queued included.
+func (s *Store) SetSessions(t SessionTable) {
+	if t.newer(&s.fence) {
+		s.fence = t
+	}
+}
+
+// Sessions is the session table the store holds, whose version its node's heartbeat reports.
+func (s *Store) Sessions() *SessionTable { return &s.fence }
 
 // SeeIncarnation records incarnation inc of a client session; the store refuses the older incarnations' writes and punches with ErrFenced when it orders them.
 func (s *Store) SeeIncarnation(session, inc uint64) {
