@@ -354,6 +354,9 @@ func TestAFencedSessionsWriteIsRefusedBeforeItsStoreReadsABase(t *testing.T) {
 	}
 }
 
+// The member's own check on arrival is not observable here: a replicated write carries whole
+// blocks, so its store reads no base and judges the session before any disk I/O. Only a store whose
+// admission holds the write, with its log nearly full and the cleaner running, judges it later.
 func TestAMemberRefusesAFencedSessionsReplicatedWrite(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	ch := chunkIn(pg0, 4, 0)
