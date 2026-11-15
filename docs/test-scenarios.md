@@ -4380,52 +4380,57 @@ broken invariant, keeping the trace up to there and saying which broke in a `.st
 10-minute test limit, so it runs a seed at a time. A rejection counts once the failing line has been
 read to be the planted behaviour.
 
-Results over the seeds that pass, one run at one commit for each row: the 39 for the plants below that rest on a `peer`, `recovered`, `reported`, `gone` or `mfail` line, and 38 for the rest, which no later change reaches. Fired counts the seeds whose trace differs from the baseline's;
+Results over the 39 seeds that pass, all but 2, in one run at one commit. Fired counts the seeds whose trace differs from the baseline's;
 passed, a trace TLC took to its end. A plant's rejected line is listed by kind, with the seeds where it held
 every invariant as clean. This run stops at the first broken invariant, so `sameMembers` and `keepID` pass: run on,
 over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of 21 and 11 of 11.
 
 | Plant | Rule | Fired | Rejected | Passed | Caught, clean | Result | Guard |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ackOnLoneCopy` | `neg-ack-on-lone-copy` | 6 | 6 | 0 | 3, 3 | `committed` 3, the OK `Activated` withholds; `peer` 3, later. Seed 24's is read to the rule: the spec accepts `committed` for 3.8 only by delivering it to disk 3 (`maydeliver`, trace line 490), then line 695 reports disk 3 at whole 3.7, which no step allows. The other two are not read. The seeds' refusals over-refuse: `copies` counts what the decision proves, not the logs, which can be on disks that list the chunk or have left, as on seed 24, where 3.8 was on three logs, disks 1, 2 and 4, and the decision listed 1 and 4, so `copies` was 1. Each refusal sends the write again, and each resend can reorder it against another writer's; `scripted-lone-copy` takes the same rule with the write on one disk | `committed`: the version has no `ackd` |
-| `activateEarly` | `neg-activate-before-durable` | 38 | 38 | 0 | 38, 37 | `persisted` 26, `activate` 12 | A first persist after `Activate`, or `Activate` before every `Persisted` |
-| `mergeWhileLacking` | `neg-merge-before-kept` | 16 | 16 | 0 | 16, 14 | `order` | `Order`: `miss[own][c] = NoMiss` or the decision's `img` |
-| `mergeOnDropped` | `neg-merge-on-dropped` | 9 | 9 | 0 | 9, 9 | `order` | `Order`: the chunk is listed and not in `img` |
-| `editKeepsInterval` | `neg-edit-keeps-interval` | 38 | 38 | 0 | 38, 26 | `table`, the line that reorders and keeps the interval | No step changes members and keeps the interval |
-| `relistNever`, `clearListed` | `neg-peering-clears-missing` | 13 | 13 | 0 | 13, 10 | `peer`, the decision's list | `Peer`: the code's lists are `ListOf`'s, and a reply lists nothing the spec keeps listed |
-| `peerInOldInterval` | `neg-restart-same-interval` | 16 | 14 | 2 | 12, 7 | `peer` 12. Not the rule: `order` 2, as discrepancy 13 | `peer`: `pr[n][p].iv = iv` |
-| `ownInterval` | `neg-decide-by-own-interval` | 8 | 8 | 0 | 8, 0 | `peer` | `KeptMatches` |
-| `reportDecided` | `neg-report-before-activate` | 38 | 38 | 0 | 38, 0 | `fold` | `Fold`: no report yet |
+| `ackOnLoneCopy` | `neg-ack-on-lone-copy` | 6 | 6 | 0 | 6, 6 | `committed`, the OK `Activated` withholds, which `Answer` refuses until every member live in the interval logged the version. The seeds' refusals over-refuse: `copies` counts what the decision proves, not the logs, which can be on disks that list the chunk or have left, as on seed 24, where 3.8 was on three logs, disks 1, 2 and 4, and the decision listed 1 and 4, so `copies` was 1. Each refusal sends the write again, and each resend can reorder it against another writer's; `scripted-lone-copy` takes the same rule with the write on one disk | `Answer`: `LoggedByAll` |
+| `activateEarly` | `neg-activate-before-durable` | 39 | 39 | 0 | 39, 38 | `persisted` 27, `activate` 12 | A first persist after `Activate`, or `Activate` before every `Persisted` |
+| `mergeWhileLacking` | `neg-merge-before-kept` | 10 | 10 | 0 | 10, 9 | `order` | `Order`: `miss[own][c] = NoMiss` or the decision's `img` |
+| `mergeOnDropped` | `neg-merge-on-dropped` | 2 | 2 | 0 | 2, 2 | `order` | `Order`: the chunk is listed and not in `img` |
+| `editKeepsInterval` | `neg-edit-keeps-interval` | 39 | 39 | 0 | 39, 29 | `table`, the line that reorders and keeps the interval | No step changes members and keeps the interval |
+| `relistNever`, `clearListed` | `neg-peering-clears-missing` | 10 | 10 | 0 | 10, 8 | `peer`, the decision's list | `Peer`: the code's lists are `ListOf`'s, and a reply lists nothing the spec keeps listed |
+| `peerInOldInterval` | `neg-restart-same-interval` | 17 | 14 | 3 | 12, 4 | `peer` 12. Not the rule: `order` 2, as discrepancy 13 | `peer`: `pr[n][p].iv = iv` |
+| `ownInterval` | `neg-decide-by-own-interval` | 5 | 5 | 0 | 5, 0 | `peer` | `KeptMatches` |
+| `reportDecided` | `neg-report-before-activate` | 39 | 39 | 0 | 39, 0 | `fold` | `Fold`: no report yet |
 | `removeOnActivation` | `neg-remove-before-recovered` | 13 | 13 | 0 | 13, 0 | `plan` | `Remove`: no `recd` for the interval |
-| `oldReport` | `neg-accept-old-report` | 39 | 18 | 21 | 17, 4 | `plan` 17; `peer` 1, not the rule | `Remove`: no `recd` for the interval |
+| `oldReport` | `neg-accept-old-report` | 39 | 18 | 21 | 18, 4 | `plan` | `Remove`: no `recd` for the interval |
 | `sameMembers` | `neg-compare-member-lists` | 27 | 0 | 27 | 0, 0 | Cut at the break; see above | `Accepts`: the interval differs |
-| `keepID` | `neg-keep-disk-id` | 15 | 0 | 15 | 0, 0 | Cut at the break; see above | The spec's `Format` gave the disk a new ID |
+| `keepID` | `neg-keep-disk-id` | 16 | 0 | 16 | 0, 0 | Cut at the break; see above | The spec's `Format` gave the disk a new ID |
 | `sendEpoch` | `neg-compare-table-epochs` | 39 | 39 | 0 | 39, 0 | `mfail` | `mfail`: a refusal with no fault budget, and not `gone` |
-| `neverAsk` | `neg-restart-no-ask` | 18 | 8 | 9 | 0, 0 | Not the rule: `order` 7, as discrepancy 13; `peer` 1. One gives no verdict | An `ask` that never comes is no line |
-| `coverAtRead` | `neg-recovery-covers-at-read` | 22 | 0 | 21 | 0, 0 | Too loose: `Recover`'s cover is unobserved. One gives no verdict | |
-| `resendNewestFirst` | `neg-log-out-of-order` | 11 | 0 | 11 | 0, 0 | No member logs out of order, so the rule is not reached | |
+| `neverAsk` | `neg-restart-no-ask` | 19 | 7 | 11 | 0, 0 | Not the rule: `order` 7, as discrepancy 13. One gives no verdict | An `ask` that never comes is no line |
+| `coverAtRead` | `neg-recovery-covers-at-read` | 22 | 0 | 22 | 0, 0 | Too loose: `Recover`'s cover is unobserved | |
+| `resendNewestFirst` | `neg-log-out-of-order` | 10 | 0 | 10 | 0, 0 | No member logs out of order, so the rule is not reached | |
 | `stopPreviousOnly` | `neg-stop-previous-only` | 2 | 0 | 2 | 0, 0 | `J` shrinks, and still meets `Peer` | |
-| `recoverFromListed` | `neg-recover-from-listed` | 16 | 16 | 0 | 15, 12 | `recovered` 15, the line naming a primary that lacks the chunk as its source; `peer` 1, its consequence | `Recover`: the source lists nothing, or is a primary with the chunk in `img` |
-| `clearNoSource` | `neg-recover-no-source` | 8 | 8 | 0 | 8, 2 | `recovered`, source 0 at a listed version above 0 | `Recover`: a source, unless the kept version is 0 |
+| `recoverFromListed` | `neg-recover-from-listed` | 14 | 14 | 0 | 13, 10 | `recovered` 13, the line naming a primary that lacks the chunk as its source; `peer` 1, its consequence | `Recover`: the source lists nothing, or is a primary with the chunk in `img` |
+| `clearNoSource` | `neg-recover-no-source` | 6 | 6 | 0 | 6, 0 | `recovered`, source 0 at a listed version above 0 | `Recover`: a source, unless the kept version is 0 |
 | `goneWhileUp` | `neg-gone-while-up` | 38 | 38 | 0 | 38, 0 | `gone`, the planted refusal. Not clean, since the oracle's "no write is refused for its interval" breaks at the same step | `GoneRefuses`: the disk has no node |
 | `lastActivatedOnly` | `neg-reach-last-activated-only` | 1 | 0 | 1 | 0, 0 | The code's own `J` is what `Peer` judges | |
 | `freshGrantNoCheck` | `neg-fresh-grant-no-table-check` | 7 | 0 | 7 | 0, 0 | Passes | About leases, which no line observes |
-| `fenceOnArrival`, `reorderAfterOther`, `settleByNumber`, `readBelowMinLive` | `neg-fence-on-arrival`, `neg-reorder-after-other-primary`, `neg-settle-by-number`, `neg-read-below-min-live` | 0 | 0 | 0 | 0, 0 | No evidence: they fire on none of the seeds | |
+| `settleByNumber` | `neg-settle-by-number` | 1 | 1 | 0 | 1, 1 | `recovered` at seed 38, a record the baseline lacks, of a recovery write to a version the plant kept by number; the line is not read further | |
+| `fenceOnArrival`, `reorderAfterOther`, `readBelowMinLive` | `neg-fence-on-arrival`, `neg-reorder-after-other-primary`, `neg-read-below-min-live` | 0 | 0 | 0 | 0, 0 | No evidence: they fire on none of the seeds | |
 | `unlistTorn` | none | 2 | 2 | 0 | 2, 2 | `peer` at seeds 5 and 24, the decision leaving off a member its reply shows torn. Seed 148, where the Go oracle catches the plant, gives no baseline verdict | `peer`: every member a reply shows torn is listed |
-| `recoverSelfOnly` | none | 37 | 12 | 24 | 11, 0 | `reported` 11, the plant's report with a member still listing; `peer` 1. One gives no verdict | `ReportRecovered`: lists empty |
-| `listerVetoes` | `neg-lister-vetoes` | 7 | 7 | 0 | 7, 7 | `peer`, the line where the plant first differs | `KeptMatches` |
+| `recoverSelfOnly` | none | 37 | 13 | 23 | 11, 0 | `reported` 11, the plant's report with a member still listing; `peer` 2. One gives no verdict | `ReportRecovered`: lists empty |
+| `listerVetoes` | `neg-lister-vetoes` | 8 | 8 | 0 | 8, 8 | `peer`, the line where the plant first differs | `KeptMatches` |
 | `keepNoSource` | `neg-keep-no-source` | 4 | 4 | 0 | 4, 4 | `peer`, the line where the plant first differs | `KeptMatches` |
-| `writeOnUnfound` | `neg-write-on-unfound` | 5 | 4 | 1 | 4, 4 | `order`, the planted order on an unfound chunk. Seed 35 passes | `Order`: the chunk is not in the decision's `unf` |
+| `writeOnUnfound` | `neg-write-on-unfound` | 6 | 5 | 1 | 5, 5 | `order`, the planted order on an unfound chunk. Seed 35 passes | `Order`: the chunk is not in the decision's `unf` |
 | `keepPastMember` | `neg-keep-past-member` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 39: each trace is a prefix of its baseline's. Only its scripted test shows the rule (`TestKeepPastMemberLeavesAMoveUnfound`) | |
-| `forgetImage` | `neg-forget-image` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 9: each trace is a prefix of its baseline's; seed 2's baseline gives no verdict in 400 s. Only its scripted test shows the rule (`TestForgetImageLeavesTheChunkUnfound`) | |
-| `settleSubset` | none | 4 | 0 | 4 | 0, 0 | Too loose: a `committed` line is the `Answer` step, which needs the version pending on its primary, logged by every member live in its interval, its own record durable and no earlier version of the chunk pending there, or a stutter once the decision's activation acknowledged it. Nothing checks the other way, that a version activation acknowledges was answered, and the planted drop is such a version | |
+| `forgetImage` | `neg-forget-image` | 2 | 0 | 2 | 0, 0 | Seeds 3 and 37 fire and pass. Only its scripted test shows the rule (`TestForgetImageLeavesTheChunkUnfound`) | |
+| `settleSubset` | none | 9 | 0 | 9 | 0, 0 | Too loose: a `committed` line is the `Answer` step, which needs the version pending on its primary, logged by every member live in its interval, its own record durable and no earlier version of the chunk pending there, or a stutter once the decision's activation acknowledged it. Nothing checks the other way, that a version activation acknowledges was answered, and the planted drop is such a version | |
+| `mapOnReplay` | `neg-map-on-replay` | 8 | 2 | 6 | 2, 2 | `peer` at seeds 3 and 31, not read | |
+| `mapOnDemote` | `neg-map-on-demote` | 2 | 0 | 2 | 0, 0 | Passes at seeds 25 and 38. Only its scripted test shows the rule (`TestReplayRollbackPlantsLoseX`) | |
+| `forgetImageDown`, `ignoreImageFlag`, `replayForgetsDrops` | `neg-forget-image-down`, `neg-ignore-image-flag`, `neg-replay-forgets-drops` | 0 | 0 | 0 | 0, 0 | Fire on none of the seeds. Only their scripted test shows the rules (`TestReplayRollbackPlantsLoseX`) | |
 
-Traces can fail is shown on these seeds for 18 of the 32 rules, 13 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
+Traces can fail is shown on these seeds for 18 of the 37 rules, 12 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
 `mergeOnDropped`, `editKeepsInterval`, `relistNever`, `peerInOldInterval`, `oldReport`, `recoverFromListed`,
-`clearNoSource`, `listerVetoes`, `keepNoSource` and `writeOnUnfound`, and for 2 more, `sameMembers` and `keepID`, running on over 30. Open: `coverAtRead`,
+`listerVetoes`, `keepNoSource` and `writeOnUnfound`, and for 2 more, `sameMembers` and `keepID`, running on over 30.
+`settleByNumber` and `mapOnReplay` are rejected at lines not yet read to their rules. Open: `coverAtRead`,
 which needs a record of the blocks a recovery write leaves out; `neverAsk`, an omission no line can name;
-`freshGrantNoCheck`, with the lease half; `resendNewestFirst`, `stopPreviousOnly` and `lastActivatedOnly`,
-which need a seed that reaches them; and the six that never fire. Of the oracle plants with no rule,
+`freshGrantNoCheck`, with the lease half; `resendNewestFirst`, `stopPreviousOnly`, `lastActivatedOnly`, `forgetImage`
+and `mapOnDemote`, which need a seed that reaches them; and the seven that never fire. Of the oracle plants with no rule,
 `settleSubset` needs a record of what `Settle` answered.
 
 Every relaxed path now has a plant: `img` in `Order` by `mergeOnDropped` and `mergeWhileLacking`, `img` as a
