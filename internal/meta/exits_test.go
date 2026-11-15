@@ -9,13 +9,16 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
 
-// heal reports every PG's current interval activated and recovered, as its primary would once it
-// peered and copied.
-func (r *ctlRun) heal() {
+// heal reports every PG's current interval activated and, with recovered, recovered, as its
+// primary would once it peered and, with recovered, copied.
+func (r *ctlRun) heal(recovered bool) {
 	var rp chunkstore.Report
 	for i, e := range r.ctl.Table().Pools[0].PGs {
 		f := chunkstore.PGFields{Epoch: r.ctl.Table().Epoch, PG: core.PGID{Pool: 1, Index: uint32(i)}, Interval: e.Interval}
-		rp.Activations, rp.Recovered = append(rp.Activations, f), append(rp.Recovered, f)
+		rp.Activations = append(rp.Activations, f)
+		if recovered {
+			rp.Recovered = append(rp.Recovered, f)
+		}
 	}
 	r.ctl.Report(&rp)
 }
@@ -100,9 +103,9 @@ func TestADeadNodesDisksDeclaredLostEndTheirLeavingMembers(t *testing.T) {
 	}
 }
 
-// A declaration staged on a leader whose commit fails, another commit having raced it, is applied
-// again over the state read back, and commits with the next Step.
-func TestADeclarationOutlivesAFailedCommit(t *testing.T) {
+// A declaration that disk 1, down, is lost, at the leader of a pool run whose commit of it fails,
+// another commit having raced it.
+func failedDeclaration(t *testing.T) (*ctlRun, *ControlInputs) {
 	r, in := poolRun(t)
 	delete(r.reports, 0)
 	r.run(chunkstore.NodeDownAfter, 0)
@@ -123,14 +126,67 @@ func TestADeclarationOutlivesAFailedCommit(t *testing.T) {
 	if a := r.answer(); a.Result.FailedCheck < 0 {
 		t.Fatalf("a raced commit answered %+v", a)
 	}
+	return r, in
+}
+
+// A declaration staged on a leader whose commit fails, another commit having raced it, is applied
+// again over the state read back, and commits with the next Step.
+func TestADeclarationOutlivesAFailedCommit(t *testing.T) {
+	r, in := failedDeclaration(t)
 	r.settle(in)
 	if !r.disk(1).Gone || named(r.ctl.Table(), 1, false) != 0 {
 		t.Fatalf("disk 1 %+v named by %d PGs after the retried commit", r.disk(1), named(r.ctl.Table(), 1, false))
 	}
 }
 
-// A drained disk is removed only once its drain has committed and no PG names it, a leaving
-// member included; up, it then leaves the pool, and its log is refused.
+// A declaration whose commit failed is dropped, with an error from the next Step, once its disk is
+// up again in the state read back; the disk is not committed gone then, nor when next it goes down.
+func TestADeclarationTheStateReadBackRefusesIsDropped(t *testing.T) {
+	r, in := failedDeclaration(t)
+	r.heartbeat(&NodeReport{Node: 0, Meta: true, Opened: []OpenedDisk{{Device: devOf(0), Log: logOf(0)}}})
+	r.run(chunkstore.SlowDiskWindow + sec)
+	in.Now = r.now
+	var out ControlOutput
+	if err := r.ctl.Step(in, r.token+1, &out); !errors.Is(err, chunkstore.ErrLostRefused) {
+		t.Fatalf("a Step over a declaration of a disk up again answered %v", err)
+	}
+	r.settle(in)
+	if d := r.disk(1); d.Gone || !d.Up {
+		t.Fatalf("disk 1 up again is %+v", d)
+	}
+	delete(r.reports, 0)
+	r.run(chunkstore.NodeDownAfter, 0)
+	r.settle(in)
+	r.run(sec, 0)
+	r.settle(in)
+	if d := r.disk(1); d.Gone || d.Up {
+		t.Fatalf("disk 1 down again is %+v", d)
+	}
+}
+
+// A declaration while the committed table still has the disk up, the detector having just marked it
+// down, is refused; once the down mark commits, it is taken.
+func TestADeclarationWaitsForTheDownMarkToCommit(t *testing.T) {
+	r, in := poolRun(t)
+	r.fail(1)
+	if err := r.ctl.Lost(r.now, 1); !errors.Is(err, chunkstore.ErrLostRefused) {
+		t.Fatalf("a declaration before the down mark committed answered %v", err)
+	}
+	r.settle(in)
+	if d := r.disk(1); d.Gone || d.Up {
+		t.Fatalf("disk 1 marked down is %+v", d)
+	}
+	if err := r.ctl.Lost(r.now, 1); err != nil {
+		t.Fatal(err)
+	}
+	r.settle(in)
+	if !r.disk(1).Gone {
+		t.Fatalf("disk 1 declared lost is %+v", r.disk(1))
+	}
+}
+
+// A disk is removed only once its drain has committed and no PG names it, a leaving member
+// included; up, it then leaves the pool, and its log is refused.
 func TestADrainedDiskIsRemovedOnceNoPGNamesIt(t *testing.T) {
 	r, in := poolRun(t)
 	if err := r.ctl.Remove(r.now, 5); !errors.Is(err, ErrNotDrained) {
@@ -139,13 +195,23 @@ func TestADrainedDiskIsRemovedOnceNoPGNamesIt(t *testing.T) {
 	if err := r.ctl.Remove(r.now, 9); !errors.Is(err, ErrUnknownDisk) {
 		t.Fatalf("removing an unknown disk answered %v", err)
 	}
+	second := OpenedDisk{Device: 0x100, Log: 0x1000}
+	r.heartbeat(&NodeReport{Node: 0, Meta: true, Opened: []OpenedDisk{{Device: devOf(0), Log: logOf(0)}, second}})
+	r.event(0, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 1, Disks: []chunkstore.DiskState{{Log: second.Log}}}))
+	r.settle(in)
+	if len(r.ctl.Disks()) != 6 || named(r.ctl.Table(), 6, true) != 0 {
+		t.Fatalf("disk 6 is %+v, named by %d PGs", r.ctl.Disks(), named(r.ctl.Table(), 6, true))
+	}
+	if err := r.ctl.Remove(r.now, 6); !errors.Is(err, ErrNotDrained) {
+		t.Fatalf("removing an undrained disk no PG names answered %v", err)
+	}
 	if err := r.ctl.Drain(5, true); err != nil {
 		t.Fatal(err)
 	}
 	in.Moves = 16
-	refused := false
+	refused, leaving := false, false
 	for range 20 {
-		r.heal()
+		r.heal(true)
 		r.run(sec)
 		r.settle(in)
 		if named(r.ctl.Table(), 5, true) == 0 {
@@ -155,9 +221,18 @@ func TestADrainedDiskIsRemovedOnceNoPGNamesIt(t *testing.T) {
 			t.Fatalf("removing a disk %d PGs name answered %v", named(r.ctl.Table(), 5, true), err)
 		}
 		refused = true
+		r.heal(false)
+		r.settle(in)
+		pgs := r.ctl.Table().Pools[0].PGs
+		if members(r.ctl.Table(), 5) == 0 && named(r.ctl.Table(), 5, false) > 0 && !slices.ContainsFunc(pgs, func(e chunkstore.PGEntry) bool { return len(e.Past) > 0 }) {
+			if err := r.ctl.Remove(r.now, 5); !errors.Is(err, ErrNotDrained) {
+				t.Fatalf("removing a disk %d PGs keep as a leaving member answered %v", named(r.ctl.Table(), 5, false), err)
+			}
+			leaving = true
+		}
 	}
-	if !refused || named(r.ctl.Table(), 5, true) != 0 {
-		t.Fatalf("the drain ended with %d PGs naming disk 5, a removal refused %v", named(r.ctl.Table(), 5, true), refused)
+	if !refused || !leaving || named(r.ctl.Table(), 5, true) != 0 {
+		t.Fatalf("the drain ended with %d PGs naming disk 5, a removal refused %v, refused as a leaving member %v", named(r.ctl.Table(), 5, true), refused, leaving)
 	}
 	prev := *r.ctl.Table()
 	if err := r.ctl.Remove(r.now, 5); err != nil {

@@ -6722,11 +6722,17 @@ command line that sends them is the "Operator CLI" item's.
   (`TestADeadNodesDisksDeclaredLostEndTheirLeavingMembers`).
 - A declaration for an up disk, or one the record does not know, is refused and proposes nothing
   (same test).
+- A declaration made after the detector marks a disk down but before the table marking it down
+  commits is refused; after that commit it is taken (`TestADeclarationWaitsForTheDownMarkToCommit`).
 - A declaration staged on a leader whose commit loses a race to another commit is applied again over
   the state read back, and commits with the next step (`TestADeclarationOutlivesAFailedCommit`).
-- A removal is refused for a disk not drained, one the record does not know, and a drained disk
-  while any PG names it, as a member, leaving or not, or in a past interval; once none does, it is
-  removed with no new table, and a later report of its log ID is refused
+- The same declaration, its disk up again before the next step, is dropped with an error from that
+  step: the disk is not committed gone, nor when it next goes down
+  (`TestADeclarationTheStateReadBackRefusesIsDropped`).
+- A removal is refused for a disk the record does not know, one never drained that no PG names,
+  one not drained that PGs name, and a drained disk while any PG names it, as a member, in a past
+  interval, or only as a leaving member, its intervals activated and no recovered report yet; once
+  none does, it is removed with no new table, and a later report of its log ID is refused
   (`TestADrainedDiskIsRemovedOnceNoPGNamesIt`).
 - The [disk record's seeded run](#control-plane-membership) declares random disks lost, and holds
   that a disk committed gone stays gone.
