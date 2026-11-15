@@ -96,13 +96,26 @@ func NewRig(t testing.TB, d Disk, cfg chunkstore.Config) *Rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &Rig{T: t, D: d, Cfg: cfg, replies: map[uint64]chunkstore.Reply{}, model: map[core.ChunkID][]byte{}, sent: map[uint64]change{}}
-	r.ctx = core.Context{Now: 1, Raw: 2, Pool: d.Pool()}
+	r := newRig(t, d, cfg)
 	if r.S, err = chunkstore.Format(&r.ctx, cfg, disklog.Superblock{LogID: 0x5eed, Geometry: geo}, &r.out); err != nil {
 		t.Fatal(err)
 	}
 	r.take()
 	r.Settle()
+	return r
+}
+
+// OpenRig recovers a store of configuration cfg from d, a disk a store was formatted on.
+func OpenRig(t testing.TB, d Disk, cfg chunkstore.Config) *Rig {
+	t.Helper()
+	r := newRig(t, d, cfg)
+	r.Reopen()
+	return r
+}
+
+func newRig(t testing.TB, d Disk, cfg chunkstore.Config) *Rig {
+	r := &Rig{T: t, D: d, Cfg: cfg, replies: map[uint64]chunkstore.Reply{}, model: map[core.ChunkID][]byte{}, sent: map[uint64]change{}}
+	r.ctx = core.Context{Now: 1, Raw: 2, Pool: d.Pool()}
 	return r
 }
 

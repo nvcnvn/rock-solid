@@ -52,3 +52,7 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - run: scripts/seeds.sh
+      - run: |
+          for seed in 2 3; do
+            RS_CRASH_SEED=$seed go test -count=1 -run '^TestCrashOnARealDisk$' ./internal/driver/uring/
+          done

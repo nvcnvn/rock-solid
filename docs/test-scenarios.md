@@ -7328,6 +7328,12 @@ profile refuses `io_uring_setup` with `EPERM`, so container runs use
   Open: tolerance. Open: polled completions (`IORING_SETUP_IOPOLL`) are an open question, not built.
 - Many reads in flight: recovery's segment-header reads (4,096 to 262,144 per disk) go out at the read
   depth recovery asks for and the ring defers what does not fit, never drops it. Open: ring depth.
+- The [crash test](#crash-tests-on-real-disks) on device-mapper targets, which need
+  `CAP_SYS_ADMIN` (in Docker, `--privileged`); no non-root way exists. An error target failing
+  writes or flushes at a chosen point (the log fails, no later acknowledgment, recovery is a
+  prefix), a target dropping writes not yet flushed, as a power cut does (an acknowledgment sent
+  before its flush loses a write), and a delay target slowing the device (nothing fails, latency
+  grows). Open: which targets (`dm-flakey` with `drop_writes`, `dm-error`, `dm-delay`) and settings.
 
 ## TCP network driver
 
@@ -7625,21 +7631,64 @@ once.
 
 ## Crash tests on real disks
 
-- `kill -9` of the daemon mid-round: the test driver, a separate process, sends writes and records
-  in its own file each acknowledgment and every write in flight (the crash oracle, as RocksDB's crash
-  test keeps its expected state and trace outside the process it kills), then kills the daemon at a
-  random point while a round is in flight, restarts it and checks the recovery against the file.
-- Every restart recovers a prefix of what was submitted that holds every acknowledged write; the
-  checks are the Crash oracle's.
-- A `kill -9` leaves the drive's write cache intact, so it tests in-flight rounds, not lost cached
-  writes; device-mapper targets cover the rest, where root is available: an error target failing
-  writes or flushes at a chosen point (the log fails, no later acknowledgment, recovery is a prefix),
-  and a delay target slowing the device (nothing fails, latency grows). Open: which targets
-  (`dm-flakey` with `drop_writes`, `dm-error`, `dm-delay`) and settings the test uses.
-- Runs on a file-backed disk without root in CI; device-mapper cases only where root is available.
-- Repeated: many kill cycles per run, each with a new kill point drawn from a seed the test prints,
-  so a failing cycle is repeated with the same kill point (the kill's timing still varies).
-- Power cuts are not this item: they come with the nightly real-cluster tests of phase 6.
+`TestCrashOnARealDisk` in `internal/driver/uring` (Linux, in Docker on a Mac). There is no daemon
+yet, so the test binary is both: the test is the driver, and it runs itself again as the child
+(`TestCrashChild`, with `RS_CRASH_CHILD` naming the disk file), a chunk store over a 256 MiB
+file-backed disk through io_uring, `O_DIRECT` writes and their linked fsync, the shared suite's
+store configuration with `max_replay_bytes` at 256 KiB so cycles recover from checkpoints and
+replay. Commands go to the child on fd 3 and acknowledgments come back on fd 4.
+
+- `kill -9` mid-round: the driver keeps 8 changes in flight over chunks 1 to 4 (writes of 1 byte
+  to 3 blocks at random offsets, one in six a punch), and after a number of acknowledgments drawn
+  from the seed (1 to 400 per cycle) sends SIGKILL, with the changes it just sent and the rounds
+  before them unanswered. Once the child is dead, the driver reads the acknowledgment pipe to its
+  end and counts what it finds as acknowledged: the child sent them, so a client would have seen
+  them. It restarts the child over the same file, and the child sends back the four chunks it
+  recovered.
+- The crash oracle is a file the driver writes, outside the child (as RocksDB's crash test keeps its
+  expected state and trace): a line per change before it is sent, and per acknowledgment, flushed
+  and fsynced before the driver counts the acknowledgment. Each check reads the file's lines since
+  the last check, not the driver's memory.
+- Every restart recovers, in each chunk, its changes in the order sent up to one at or past the last
+  acknowledged one, and none after it: no acknowledged change is lost and no change appears that was
+  never sent. The prefix is per chunk because the store orders changes only within a chunk: a
+  chunk's changes wait for one another, two chunks' do not, so their log order need not be their
+  send order. The next change after the prefix, never acknowledged, may also be kept in part, as
+  the [design](design.md#alternatives-considered) accepts for a write of several records, but only
+  cut where the store cut it into log items and the kill fell between their rounds: an unaligned
+  punch of several blocks logs its head edge block, its middle and its tail edge block as separate
+  items, so it may come back with its head edge alone, or all but its tail edge. A write here spans
+  at most 4 blocks, one record (the child refuses to start if the store's largest write item is
+  smaller), and like an aligned punch it comes back whole or not at all. The first 100-cycle runs
+  found a cut punch on seed 1: blocks 591 to 594 recovered with the middle punched and the tail
+  block not.
+- Repeated: `RS_CRASH_CYCLES` kills (150 by default, about 35 s in Docker, in which 3 to 8 restarts keep a cut punch) on
+  `RS_CRASH_SEED` (1 by default), which draws, in streams of their own, the changes and their data,
+  each cycle's kill point (a count of acknowledgments, then a pause under 0.5 ms) and the pauses
+  between sends, so a run's timing does not shift what the seed draws; the timing of the kill against the child still varies. A failure
+  prints the replay command and the oracle file's path, and saves the recovered chunk beside it;
+  both stay when `RS_CRASH_DIR` names the directory. The test logs how many restarts kept a change
+  never acknowledged, lost one, and kept the first rounds of one (the kill fell with a change's
+  later round in flight, the only count that proves a round was cut). CI's test job runs seed 1 and
+  its seeds job seeds 2 and 3.
+- The oracle file, one record per line, numbers in decimal:
+
+  ```text
+  write <seq> <chunk> <off> <len> <data seed>   sent; the bytes are core.NewRand(data seed).Fill of len
+  punch <seq> <chunk> <off> <len>                sent
+  ack <seq>                                      acknowledged, fsynced before counted
+  kill <cycle>                                   the child was killed
+  kept <chunk> <seq>                             the restart kept the chunk's changes up to seq (0: none since the last kept)
+  torn <chunk> <seq> <blocks>                    and the first blocks of the next change, seq
+  ```
+
+- What a `kill -9` does not test: the process dies but the kernel lives, so the page cache and the
+  drive's write cache keep everything written; even with `O_DIRECT` and fsync on the path, it tests
+  rounds in flight, not writes lost to a power cut. So a store that acknowledges a round once its
+  write completes but before its flush passes here; the simulator's
+  [crash oracle](#crash-oracle) (`TestRecoveriesMatchTheCrashOracle`) catches it, and the
+  device-mapper targets of [io_uring on a raw device and NVMe](#io_uring-on-a-raw-device-and-nvme)
+  will. Power cuts come with the nightly real-cluster tests of phase 6.
 
 ## Real-cluster histories
 
