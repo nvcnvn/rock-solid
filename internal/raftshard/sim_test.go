@@ -62,11 +62,17 @@ type simCluster struct {
 	removed    error
 	// disk, if set, runs each replica on a disk log, which a restart replays.
 	disk *diskRun
+	// cutOff is the leader's node cut off from every other node until healAt, if healAt is set;
+	// cuts counts the cut-offs, and timeoutNows the MsgTimeoutNow sent.
+	cutOff            uint32
+	healAt            core.Tick
+	cuts, timeoutNows int
 }
 
 type simReplica struct {
 	c       *simCluster
 	id      int
+	loop    core.NodeID
 	s       *Shard
 	out     Output
 	applied int
@@ -149,8 +155,8 @@ func (c *simCluster) boot(n *sim.Node, id int) {
 	cfg := testConfig(len(c.reps), id, c.storage[id], rng.Uint64())
 	r := &simReplica{c: c, id: id, rng: rng, holder: lease.NewHolder(lease.DefaultConfig)}
 	c.reps[id] = r
-	loop := n.Start(sim.MachineFunc(r.onEvent), n.Disk(0))
-	n.Call(loop, func(ctx *core.Context, acts []core.Action) []core.Action {
+	r.loop = n.Start(sim.MachineFunc(r.onEvent), n.Disk(0))
+	n.Call(r.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 		r.grantor = lease.NewGrantor(lease.DefaultConfig, rng.Uint64(), lease.Now(ctx))
 		cfg.Holder, cfg.Grantor = r.holder, r.grantor
 		r.cfg = cfg
@@ -204,9 +210,18 @@ func (c *simCluster) run(t *testing.T, seed uint64) *simCluster {
 var pauseStops = []clock.Stop{clock.Suspend, clock.PauseCounted, clock.Restore, clock.HeldMigration}
 
 // pause stands a running node still, one step in 20,000, for up to 5 s, the messages sent to it
-// queued or lost, and one step in 2,000 holds one direction of a link for up to 50 ms more.
+// queued or lost, and one step in 2,000 holds one direction of a link for up to 50 ms more. Without
+// a replacement, which cuts and heals its own links, one step in 20,000 has a running leader hand
+// its leadership to another replica, and one in 20,000 cuts a running leader off from every other
+// node for 4 to 8 s, past its followers' grants, so they elect another before it hears of it.
 func (c *simCluster) pause() {
 	n := uint64(len(c.reps))
+	if c.rep == nil {
+		c.isolate()
+		if l := c.leader(); l >= 0 && c.rng.Chance(1, 20000) {
+			c.transfer(l, uint64(l+1+int(c.rng.Below(n-1)))%n+1)
+		}
+	}
 	if c.rng.Chance(1, 2000) {
 		from := uint32(c.rng.Below(n))
 		c.s.Queue(from, (from+1+uint32(c.rng.Below(n-1)))%uint32(n), core.Tick(c.rng.Below(50_001)))
@@ -218,6 +233,47 @@ func (c *simCluster) pause() {
 	if nd := c.s.Node(id); nd.Up() && !nd.Paused() {
 		c.s.Pause(id, pauseStops[c.rng.Below(uint64(len(pauseStops)))], 1+core.Tick(c.rng.Below(5_000_000)), c.rng.Chance(1, 2))
 	}
+}
+
+// leader is a replica that leads on a running node, or -1.
+func (c *simCluster) leader() int {
+	for id, r := range c.reps {
+		if nd := c.s.Node(uint32(id)); r != nil && r.s != nil && r.leads && nd.Up() && !nd.Paused() {
+			return id
+		}
+	}
+	return -1
+}
+
+// isolate heals the cut-off leader's links once healAt passes, and cuts a leader off.
+func (c *simCluster) isolate() {
+	n := uint32(len(c.reps))
+	if c.healAt != 0 && c.s.Time() >= c.healAt {
+		for o := range n {
+			c.s.Heal(c.cutOff, o)
+		}
+		c.healAt = 0
+	}
+	if l := c.leader(); c.healAt == 0 && l >= 0 && c.rng.Chance(1, 20000) {
+		c.cutOff, c.healAt = uint32(l), c.s.Time()+4_000_000+core.Tick(c.rng.Below(4_000_001))
+		c.cuts++
+		for o := range n {
+			if o != c.cutOff {
+				c.s.Partition(c.cutOff, o, false)
+			}
+		}
+	}
+}
+
+// transfer has leader id hand its leadership to replica to.
+func (c *simCluster) transfer(id int, to uint64) {
+	r := c.reps[id]
+	c.s.Node(uint32(id)).Call(r.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
+		r.out.Reset()
+		r.s.rn.TransferLeader(to)
+		r.s.ready(ctx, &r.out)
+		return r.finish(ctx, acts)
+	})
 }
 
 // after checks the invariants and crashes the first leader to apply crashAt values.
@@ -395,6 +451,9 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 		if a := &r.out.Actions[i]; c.crashed && c.campaignAt == 0 && r.id != c.crashedID && a.Kind == core.ActNetSend && simMsgType(&a.Msg) == uint64(raftpb.MsgPreVote) {
 			c.campaignAt = c.s.Time()
 		}
+		if a := &r.out.Actions[i]; a.Kind == core.ActNetSend && simMsgType(&a.Msg) == uint64(raftpb.MsgTimeoutNow) {
+			c.timeoutNows++
+		}
 	}
 	acts = append(acts, r.out.Actions...)
 	if r.out.Flush != 0 && c.disk == nil {
@@ -505,6 +564,8 @@ func TestRaftRunsReplayFromTheirSeed(t *testing.T) {
 		for _, name := range []string{"msg=256", " Pause ", " Restart", " PeerLost "} {
 			seen[name] += bytes.Count(a.s.Trace(), []byte(name))
 		}
+		seen["cut-off"] += a.cuts
+		seen["MsgTimeoutNow"] += a.timeoutNows
 		leaseReads += a.leaseReads
 		if !a.done {
 			t.Fatalf("seed %d: crashed %v, no value proposed after the crash applied", seed, a.crashed)
@@ -522,7 +583,7 @@ func TestRaftRunsReplayFromTheirSeed(t *testing.T) {
 	}
 	for name, n := range seen {
 		if n == 0 {
-			t.Errorf("no %q in 20 seeds' traces", name)
+			t.Errorf("no %q in 20 seeds' runs", name)
 		}
 	}
 	if leaseReads == 0 {
@@ -565,18 +626,53 @@ func TestSendingBeforeTheFlushBreaksTheDurabilityInvariant(t *testing.T) {
 }
 
 // A leader serving lease reads before an entry of its term commits may not have applied what the
-// previous leader applied. The seeds are ones where that shows; most leaders apply in time.
+// previous leader applied. Most leaders apply in time: 4 of the first 500 seeds show it.
 func TestLeaseReadsBeforeAnEntryOfTheTermCommitsBreakTheInvariant(t *testing.T) {
-	for _, seed := range []uint64{5, 159} {
-		c := newSimCluster(seed, plants{uncommitted: true})
-		c.inv.Only(invLeaseReadsCurrent)
+	if !breaksWithin(t, 630, plants{uncommitted: true}, invLeaseReadsCurrent) {
+		t.Fatal("630 seeds serving lease reads before an entry of the term commits broke no invariant")
+	}
+}
+
+// The epoch change model's two counterexamples for property 2, each planted, break the lease
+// reader invariant, 11 of the first 500 seeds each: a leader that counts a fortification under
+// whatever support epoch its lease from the peer now runs, as it would if a lapsed grant were renewed
+// in its old epoch (neg-no-epoch-bump), once it is cut off past its followers' grants and they
+// elect another; and a leader that keeps serving after MsgTimeoutNow left (neg-transfer-keeps-lease).
+// A follower that serves lease reads while it supports its leader breaks it in every seed.
+func TestPlantedLeaseBugsBreakTheLeaseReaderInvariant(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		n    uint64
+		p    plants
+	}{{"neg-no-epoch-bump", 230, plants{noEpochBump: true}}, {"neg-transfer-keeps-lease", 230, plants{transferKeepsLease: true}}, {"follower lease reads", 10, plants{followerReads: true}}} {
+		if !breaksWithin(t, tc.n, tc.p, invOneLeaseReader) {
+			t.Errorf("%s: %d seeds broke no lease reader invariant", tc.name, tc.n)
+		}
+	}
+}
+
+// A replica that grants every vote it is asked for, so two candidates of one term can both win,
+// breaks the one-leader-per-term invariant in 8 of the first 500 seeds, the first at seed 59.
+func TestVotingForEveryCandidateBreaksTheOneLeaderInvariant(t *testing.T) {
+	if !breaksWithin(t, 320, plants{voteEveryone: true}, invOneLeader) {
+		t.Fatal("320 seeds voting for every candidate broke no one-leader invariant")
+	}
+}
+
+// breaksWithin reports whether a fault run with p breaks invariant inv alone in one of the first n
+// seeds. A test's n is about 5 / the plant's rate over 500 seeds, so a change that re-rolls the
+// draws fails it less than 1% of the time.
+func breaksWithin(t *testing.T, n uint64, p plants, inv string) bool {
+	for seed := range n {
+		c := newSimCluster(seed, p)
+		c.inv.Only(inv)
 		for c.s.Time() < simRunFor && c.s.Step() {
 			c.pause()
 			if c.inv.Check() != nil {
-				return
+				return true
 			}
 			c.after(t, seed)
 		}
 	}
-	t.Fatal("seeds 5 and 159 serving lease reads before an entry of the term commits broke no invariant")
+	return false
 }

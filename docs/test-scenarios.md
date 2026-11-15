@@ -5996,8 +5996,8 @@ place of replaying the disk log.
 **Simulator runs.** `TestRaftRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000 per commit in
 `scripts/seeds.sh` (15 s at `JOBS=2`), 10,000 once in 150 s. One group of three shards on the
 simulated network and on node-pair leases, with 1-in-100 drops, 1-in-50 duplicates, up to 200 µs
-of jitter, partitions cut and healed, and the lease faults of [Leader leases](#leader-leases)
-(pauses of up to 5 s, slewed and drifting clocks, links held); each round flushes as an fsync on its node's simulated
+of jitter, partitions cut and healed, and the faults of [Leader leases](#leader-leases)
+(the leader cut off past its followers' grants, leadership transfers, pauses of up to 5 s, slewed and drifting clocks, links held); each round flushes as an fsync on its node's simulated
 disk, so a crash loses the rounds in flight. Leaders propose a numbered value per tick, every third
 over 256 bytes, and the first leader to apply 20 crashes and restarts from its storage. After 30 s
 every partition is healed, and the run must apply a value proposed after the crash within 30 s
@@ -6094,12 +6094,14 @@ back to itself.
 leases: every node asks every other for a lease when its holder is due, grants as its grantor
 allows, heartbeats the holders it grants once a second and handles `Resumed` on both, through
 frames of its own on the simulated network. Its faults cover the MetaStore faults below that a
-single group without transfers or configuration changes can meet: partitions cut and healed, the
-first leader crashed and restarted in place, pauses of up to 5 s of every kind but a stop in place
-on kvm-clock (`PauseFrozen`, whose lost heartbeats leave a holder serving on an old lease for up
-to a heartbeat, an [open question](design.md#roadmap-and-open-questions)), slews of
-`CLOCK_BOOTTIME` up to ±22.6%, raw clocks within ±4% and a raw rate step after measurement, and
-one direction of a link held up to 50 ms. After every step it checks:
+single group without configuration changes can meet: partitions cut and healed, the first leader
+crashed and restarted in place, the leader cut off from both followers for 4 to 8 s, past their
+grants, so they elect another before it hears of it, leadership handed to another replica at
+random, pauses of up to 5 s of every kind but a stop in place on kvm-clock (`PauseFrozen`, whose
+lost heartbeats leave a holder serving on an old lease for up to a heartbeat, an [open
+question](design.md#roadmap-and-open-questions)), slews of `CLOCK_BOOTTIME` up to ±22.6%, raw
+clocks within ±4% and a raw rate step after measurement, and one direction of a link held up to
+50 ms. After every step it checks:
 
 - [property] "at most one leader per shard per term".
 - [property] "no two replicas of a shard serve lease reads at overlapping times": when a replica's
@@ -6110,18 +6112,28 @@ one direction of a link held up to 50 ms. After every step it checks:
   told of, since only a leader acknowledges an entry, on applying it. A follower's applies do not
   count: the leader's commit index goes out with its next round's appends, while the leader applies
   what that round's `Ready` commits only once the round is durable, so a follower can apply an
-  entry first. A leader that serves lease reads before an entry of its term commits breaks it at
-  seeds 5 and 159 (`TestLeaseReadsBeforeAnEntryOfTheTermCommitsBreakTheInvariant`); most new
-  leaders apply in time, so the default 20 seeds miss it.
+  entry first.
 
-A shard whose followers vote and campaign while they support a leader breaks the second within 20
-seeds (`TestFollowersVotingWhileSupportingBreakTheLeaseInvariant`), and across the 20 `go test`
-seeds some pass can serve a lease read, so the checks are not vacuous.
+**Planted bugs.** Each must break its invariant within the seeds named, checking it alone:
 
-The leader transfer and configuration change of the MetaStore faults are covered by the trace tests
-above; the simulator gets configuration changes from [Voter replacement](#voter-replacement)'s runs,
-which check these three properties through the joint configuration, and transfers with leader
-balancing.
+| Planted bug | Invariant | Seeds of 500 | First | Test |
+| --- | --- | --- | --- | --- |
+| Followers vote and campaign while they support a leader | Lease reads | 231 | 1 | `TestFollowersVotingWhileSupportingBreakTheLeaseInvariant`, 20 seeds |
+| Lease reads before an entry of the leader's term commits; most new leaders apply in time | Lease reads see every applied entry | 4 | 159 | `TestLeaseReadsBeforeAnEntryOfTheTermCommitsBreakTheInvariant`, 630 seeds |
+| The [epoch change model](#epoch-change-model)'s `neg-no-epoch-bump`: the leader counts a fortification under whatever support epoch its lease from the follower now runs, as if a lapsed grant were renewed in its old epoch. It needs the leader cut off past its followers' grants, then healed | Lease reads | 11 | 19 | `TestPlantedLeaseBugsBreakTheLeaseReaderInvariant`, 230 seeds |
+| The epoch change model's `neg-transfer-keeps-lease`: the leader serves lease reads after `MsgTimeoutNow` left | Lease reads | 11 | 13 | `TestPlantedLeaseBugsBreakTheLeaseReaderInvariant`, 230 seeds |
+| A follower serves lease reads while it supports its leader | Lease reads | 500 | 0 | `TestPlantedLeaseBugsBreakTheLeaseReaderInvariant`, 10 seeds |
+| A replica grants every vote it is asked for, so two candidates of one term can both win | One leader per term | 8 | 59 | `TestVotingForEveryCandidateBreaksTheOneLeaderInvariant`, 320 seeds |
+
+`neg-no-epoch-bump` is planted at the leader's check rather than in `lease.Grantor`: the grantor's
+plants are reachable only from `internal/lease`'s own tests, and a leader that ignores the epoch
+counts exactly the fortifications a grantor that never bumps would let through. Across the 20 `go
+test` seeds some pass can serve a lease read, and leaders are cut off and transfer their
+leadership (9 and 10 times), which the test asserts, so the checks are not vacuous. The simulator
+gets configuration changes from [Voter replacement](#voter-replacement)'s runs, which check these
+three properties through the joint configuration; those runs make no random transfers or cut-offs,
+since the replacement cuts and heals its own links. The [disk-log](#raft-storage-in-the-disk-log)
+crash runs make both.
 
 **Simulator faults** (MetaStore), with the invariant "no two replicas of a shard serve lease reads at overlapping times":
 
@@ -6232,7 +6244,7 @@ replacement as a voter instead stalls them past 100 ms within 20 seeds
 - **Replay.** After a crash, each shard's storage is rebuilt by replaying its rounds in LSN order. Later records win: an entry at index 5 of term 3 replaces the earlier record's index 5 of term 2, the earlier record's entries 6 and on of term 2 are dropped, and `LastIndex` after replay is 5. On a recorded base, a later round whose entries all lie at or below the base still drops the entries after it: rounds of 5 to 12 in term 1, then 7 to 8 and 9 to 10 in term 2, replayed on a base of 10, leave `LastIndex` 10. The latest hard state in LSN order wins, and a round restoring a snapshot makes its index, term and configuration the base. The blobs of an owner no shard on the disk claims are dead.
 - **Torn tail.** A torn record at the log's tail drops every item in it, chunk writes and Raft blobs alike (the disk log's torn-record tests); no acknowledgment was sent for the round, the leader resends, and no committed entry is lost (the crash run below). A round missing its last blob changes nothing, nor does one missing its first, and the blobs of a round missing its last are dead once replay ends.
   - Regression (seed 5003 of the crash run below): the torn round stays in the log, so the replay after a second crash meets its first blob again just before the rounds written since the first restart. The next round's first blob drops it, rather than the next round being read as its continuation.
-- **Crash with rounds in flight.** [property] Three replicas, each on its node's disk log, run under the Raft shard's network faults; a node crashes three times, one at a time, each while its log has a round in flight, landing unflushed writes at random, so a round can be durable with its shard never told, and restarts by replaying its log on the base it booted with. The simulator checks "a committed entry is never lost": the newest applied entry stays held by a majority of the replicas' storages, a crashed replica's as it was until its replay ends, and a restarted replica holds every committed entry it held before its crash; and "a replica keeps its term and vote across a crash": a restarted replica's term is at least its term before the crash, and with the same term it holds the same vote. Each run is done once a value proposed after the last crash is applied, and replays to an identical trace. Over 20 seeds at least one restart replays a round its shard was never told was durable. Planted: a restart that replays nothing breaks the first invariant, and one that forgets its vote the second. `TestCommittedEntriesSurviveCrashesOnTheDiskLog`, 20 seeds in `go test`, 2,000 per commit in the [seed runner](#seed-runner-in-ci); 10,000 seeds passed in 219 s on 2 processes, each under 200 MiB resident.
+- **Crash with rounds in flight.** [property] Three replicas, each on its node's disk log, run under the Raft shard's network faults, cut-off leaders and leadership transfers; a node crashes three times, one at a time, each while its log has a round in flight, landing unflushed writes at random, so a round can be durable with its shard never told, and restarts by replaying its log on the base it booted with. The simulator checks "a committed entry is never lost": the newest applied entry stays held by a majority of the replicas' storages, a crashed replica's as it was until its replay ends, and a restarted replica holds every committed entry it held before its crash; and "a replica keeps its term and vote across a crash": a restarted replica's term is at least its term before the crash, and with the same term it holds the same vote. Each run is done once a value proposed after the last crash is applied, and replays to an identical trace. Over 20 seeds at least one restart replays a round its shard was never told was durable. Planted: a restart that replays nothing breaks the first invariant, and one that forgets its vote the second. `TestCommittedEntriesSurviveCrashesOnTheDiskLog`, 20 seeds in `go test`, 2,000 per commit in the [seed runner](#seed-runner-in-ci); 10,000 seeds passed in 219 s on 2 processes, each under 200 MiB resident.
 - **Snapshot at the applied index.** A learner whose log is empty gets a snapshot built when the leader needs one, at its applied index, whose configuration holds the learner, and catches up from it. A snapshot kept from the last compaction, before the learner joined, is refused, and the learner never catches up (planted). A replica cut off and behind the compaction, probed as the leader applies a learner's addition, gets no snapshot then, since the applied index and configuration do not yet hold the change, and gets one holding the learner at the leader's next append. A snapshot sent whole in one message is reported finished a heartbeat later, so a leader whose log compacted past the snapshot probes the follower again rather than wait in `StateSnapshot`, and a follower that refused it gets at most one more a heartbeat.
 - **Asynchronous storage writes stay off** (asserted under Raft shard). The two guards that would allow them get their own scenarios when they are built: drop apply work that a restored snapshot covers, and never compact past the durable commit index ([async snapshot apply study](../studies/etcd-raft-async-snapshot-apply/README.md)).
 
@@ -6779,11 +6791,11 @@ Simulator invariants checked after every step, with the faults that must exercis
 
 | Invariant | Faults that exercise it |
 | --- | --- |
-| At most one leader per shard per term | Partitions; leader crashes; a node restarted within `primary_lease` |
-| No two replicas of a shard serve lease reads at overlapping times | A quiescent leader's node partitioned from one follower; a leader's node suspended past its lease; a leader transfer while lease reads arrive; a configuration change while a lease is held; slewed clocks; VM pauses |
-| A committed entry is never lost | Crashes before and after a round's flush; a torn tail record holding chunk writes and Raft entries |
+| At most one leader per shard per term | Registered by [Leader leases](#leader-leases) (`TestRaftRunsReplayFromTheirSeed`) and [Voter replacement](#voter-replacement): partitions; leader crashes; a node restarted within `primary_lease` |
+| No two replicas of a shard serve lease reads at overlapping times | Registered by [Leader leases](#leader-leases) (`TestRaftRunsReplayFromTheirSeed`) and [Voter replacement](#voter-replacement): a leader's node cut off past its followers' grants; a leader's node suspended past its lease; a leader transfer while lease reads arrive; a configuration change while a lease is held; slewed clocks; VM pauses |
+| A committed entry is never lost | Registered by [Raft storage in the disk log](#raft-storage-in-the-disk-log) (`TestCommittedEntriesSurviveCrashesOnTheDiskLog`): crashes before and after a round's flush; a torn tail record holding chunk writes and Raft entries |
 | A replica keeps its term and vote across a crash | Registered by [Raft storage in the disk log](#raft-storage-in-the-disk-log): crashes with rounds in flight, landing unflushed writes at random |
-| A shard recovered from manifest and log equals its state before the crash | Crashes during memtable flushes, compactions, checkpoints and cleaner passes (crash oracle) |
+| A shard recovered from manifest and log equals its state before the crash | Owed by [Shard indexes in the disk owner's checkpoint](#shard-indexes-in-the-disk-owners-checkpoint), which restores a shard from its manifest: crashes during memtable flushes, compactions, checkpoints and cleaner passes (crash oracle) |
 | At most one lock holder | Racing flock `Txn`s; owner failover; a session fence |
 | No session is fenced while its client's own lease still runs | Control-plane leader failover while sessions renew; a renewal answered by a deposed leader; a leader stalled past `session_lease`; clients paused past their lease; slewed clocks; a client VM stopped with its clocks frozen |
 | Every write of a fenced lock holder that completes is ordered before every write of the next holder; no fenced session's write is applied; a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval while the leader holds its lease and has measured the client, `dead_wait` instead when it has not, or once an unreachable storage node is marked down | A fence that reaches some primaries late; a storage node partitioned during a fence |
@@ -6793,10 +6805,10 @@ Simulator invariants checked after every step, with the faults that must exercis
 | No learner is promoted to voter before it has caught up with its leader's log | Registered by [Voter replacement](#voter-replacement): a voter replaced while another is down, the replaced voter returning mid-swap, compacted logs, drops and partitions on the learner's links |
 | An internal `Txn` repeated after an election changes nothing it did not read | An election while the purger and the control-plane leader have transactions in flight; a truncate merging into a purge entry the purger is consuming |
 
-Each invariant is shown to fire: a planted bug for each must fail at least one seed. Open: the seed count; 20 is the suggestion, as the metamorphic planted bugs use. The bugs:
+Each invariant is shown to fire: a planted bug for each must fail at least one seed of a scan of about 5 / (its rate over 500 seeds), so a change that re-rolls the draws fails the scan less than 1% of the time, or every time in a scripted scenario. The bugs:
 
-- two leaders allowed in one term;
-- lease reads served by a follower;
+- two leaders allowed in one term, by a vote granted to every candidate, and lease reads served by
+  a follower while it supports its leader, both planted under [Leader leases](#leader-leases);
 - an entry acknowledged before its flush;
 - replay skipping the last record;
 - a restart that forgets its vote (planted by [Raft storage in the disk log](#raft-storage-in-the-disk-log));
@@ -6814,7 +6826,7 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
 - a learner promoted at once (planted by [Voter replacement](#voter-replacement));
 - the [Epoch change model](#epoch-change-model)'s two rows for property 2: no support-epoch bump on
   lapse (`neg-no-epoch-bump`), and a leader transfer that keeps the old leader's lease
-  (`neg-transfer-keeps-lease`);
+  (`neg-transfer-keeps-lease`), planted under [Leader leases](#leader-leases);
 - the [Sessions and fencing model](#sessions-and-fencing-model)'s leader-side rows: renewals
   answered without the leader lease (`neg-answer-without-lease`), no full lease after a failover
   (`neg-no-full-lease`), counting on the leader's own clock (`neg-count-on-own-clock`), only

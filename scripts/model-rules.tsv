@@ -31,7 +31,7 @@ epoch/neg-margin-exact	lease.marginExact	TestPlantedLeaseBugsBreakThePair
 epoch/neg-merge-before-kept	chunkstore.mergeWhileLacking	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-merge-on-dropped	chunkstore.mergeOnDropped	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-no-end-on-resume	lease.noResumedEnd	TestPlantedLeaseBugsBreakThePair
-epoch/neg-no-epoch-bump	open	MetaStore invariants
+epoch/neg-no-epoch-bump	raftshard.noEpochBump	TestPlantedLeaseBugsBreakTheLeaseReaderInvariant
 epoch/neg-no-restart-wait	lease.noRestartWait	TestPlantedLeaseBugsBreakThePair
 epoch/neg-no-run-window	lease.noRunWindow	TestPlantedLeaseBugsBreakThePair
 epoch/neg-no-step-check	lease.noStepCheck	TestPlantedLeaseBugsBreakThePair
@@ -53,7 +53,7 @@ epoch/neg-step-on-grants-only	lease.stepOnGrantsOnly	TestPlantedLeaseBugsBreakTh
 epoch/neg-stay-keeps-interval	open	Spec conformance check
 epoch/neg-stay-sole-holder	chunkstore.refillSoleHolder	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-stop-previous-only	chunkstore.stopPreviousOnly	TestPlantedBugsBreakTheirTraces
-epoch/neg-transfer-keeps-lease	open	MetaStore invariants
+epoch/neg-transfer-keeps-lease	raftshard.transferKeepsLease	TestPlantedLeaseBugsBreakTheLeaseReaderInvariant
 epoch/neg-widen-past-two-drift	lease.widenLate	TestPlantedLeaseBugsBreakThePair
 sessions/neg-answer-without-lease	open	MetaStore invariants
 sessions/neg-no-full-lease	open	MetaStore invariants

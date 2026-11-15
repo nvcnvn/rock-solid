@@ -137,9 +137,10 @@ type fortified struct {
 	term, run, support uint64
 }
 
-// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, and snapshots kept from the last compaction instead of built at the applied index.
+// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, and a follower serving lease reads while it supports its leader.
 type plants struct {
 	unseeded, early, disloyal, eager, voterFirst, current, uncommitted, staleSnapshot bool
+	noEpochBump, transferKeepsLease, voteEveryone, followerReads                      bool
 }
 
 // New starts a replica from its storage.
@@ -299,6 +300,9 @@ func (s *Shard) Flushing() bool { return s.round != 0 }
 // LeaseRead reports whether this replica may serve a read now from the entries it handed over to apply, with no round trip: it leads, no MsgTimeoutNow left in its term, an entry of its term has committed, and each half of its configuration has a quorum of voters, itself included, whose fortification of its term runs on the node-pair leases.
 func (s *Shard) LeaseRead(ctx *core.Context) bool {
 	st := s.rn.BasicStatus()
+	if s.plant.followerReads && st.RaftState == raft.StateFollower && !s.removed {
+		return s.supports(&st, lease.Now(ctx))
+	}
 	if s.removed || st.RaftState != raft.StateLeader || s.transferred == st.Term || s.committed != st.Term && !s.plant.uncommitted {
 		return false
 	}
@@ -323,6 +327,9 @@ func (s *Shard) quorum(voters []uint64, term uint64, t lease.Time) bool {
 // fortifies reports whether peer i's fortification of term runs now: the holder's lease from its node runs under the run and support epoch it fortified under.
 func (s *Shard) fortifies(i int, term uint64, t lease.Time) bool {
 	f := s.fort[i]
+	if s.plant.noEpochBump {
+		f.support, _ = s.cfg.Holder.Support(s.cfg.Peers[i].Node)
+	}
 	return f.term == term && s.cfg.Holder.Supported(s.cfg.Peers[i].Node, f.run, f.support, t)
 }
 
@@ -531,7 +538,7 @@ func (s *Shard) ready(ctx *core.Context, out *Output) {
 			s.fortifyAt = 0
 		}
 		for i := range rd.Messages {
-			if rd.Messages[i].Type == raftpb.MsgTimeoutNow {
+			if rd.Messages[i].Type == raftpb.MsgTimeoutNow && !s.plant.transferKeepsLease {
 				s.transferred = rd.Messages[i].Term
 			}
 		}
@@ -607,6 +614,9 @@ func leavesEarly(t raftpb.MessageType) bool {
 func (s *Shard) send(ctx *core.Context, msgs []raftpb.Message, p part, out *Output) {
 	for i := range msgs {
 		m := &msgs[i]
+		if s.plant.voteEveryone && m.Type == raftpb.MsgVoteResp {
+			m.Reject = false
+		}
 		e := s.plant.early || leavesEarly(m.Type)
 		if p == early && !e || p == held && e {
 			continue
