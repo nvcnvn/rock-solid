@@ -321,7 +321,7 @@ func TestWireRejectsDataLength(t *testing.T) {
 			t.Fatalf("member punch %d+%d with %d bytes of edges: %v", c.off, c.n, edges, err)
 		}
 		mustMalformed(t, "member punch without its edges", p, 0)
-		mustMalformed(t, "client punch with data", AppendUpdate(nil, &Update{Kind: KindPunch, PG: wirePG, Off: c.off, Len: c.n}), edges)
+		mustMalformed(t, "client punch with data", AppendUpdate(nil, &Update{Kind: KindPunch, PG: wirePG, Session: 1, Off: c.off, Len: c.n}), edges)
 	}
 	if edgeBytes(100, 2*core.BlockSize) != 2*core.BlockSize || edgeBytes(100, 1) != core.BlockSize {
 		t.Fatal("edge count")
@@ -338,7 +338,7 @@ func TestWireCarriesAGrantedFlushOnClientWritesOnly(t *testing.T) {
 		t.Fatalf("%+v, %v", m, err)
 	}
 	for _, k := range []Kind{KindReplicaWrite, KindPunch, KindReplicaPunch} {
-		u := &Update{Kind: k, PG: wirePG, Len: core.BlockSize, Granted: true}
+		u := &Update{Kind: k, PG: wirePG, Session: 1, Len: core.BlockSize, Granted: true}
 		data := 0
 		if k != KindPunch {
 			u.Version = 1<<32 | 1
@@ -348,7 +348,7 @@ func TestWireCarriesAGrantedFlushOnClientWritesOnly(t *testing.T) {
 		}
 		mustMalformed(t, "granted member write or punch", AppendUpdate(nil, u), data)
 	}
-	b := AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1})
+	b := AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Session: 1, Len: 1})
 	b[len(b)-9] = 4
 	mustMalformed(t, "unknown update flag", b, core.BlockSize)
 }
@@ -356,7 +356,7 @@ func TestWireCarriesAGrantedFlushOnClientWritesOnly(t *testing.T) {
 func TestWireRejectsVersions(t *testing.T) {
 	for _, v := range []uint64{MakeVersion(0, 5), MakeVersion(5, 0)} {
 		mustMalformed(t, "replica write version", AppendUpdate(nil, &Update{Kind: KindReplicaWrite, PG: wirePG, Len: 1, Version: v}), core.BlockSize)
-		mustMalformed(t, "expect_ver", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1, HasExpect: true, Expect: v}), core.BlockSize)
+		mustMalformed(t, "expect_ver", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Session: 1, Len: 1, HasExpect: true, Expect: v}), core.BlockSize)
 		mustMalformed(t, "at_ver", AppendRead(nil, &Read{PG: wirePG, Len: 1, HasAt: true, At: v}), 0)
 		mustMalformed(t, "reply version", AppendResponse(nil, &Response{Kind: KindAck, Version: v}), 0)
 		mustMalformed(t, "missing-list entry", AppendPeering(nil, &Peering{Kind: KindPersist, PG: wirePG, Disk: 3, Missing: []ChunkVersion{{Version: v}}}), 0)
@@ -365,15 +365,20 @@ func TestWireRejectsVersions(t *testing.T) {
 		}
 	}
 	mustMalformed(t, "replica punch at version 0", AppendUpdate(nil, &Update{Kind: KindReplicaPunch, PG: wirePG, Len: 1}), 0)
-	mustMalformed(t, "client write with a version", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1, Version: 1<<32 | 1}), core.BlockSize)
-	mustMalformed(t, "absent expect_ver not zero", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1, Expect: 1<<32 | 1}), core.BlockSize)
+	mustMalformed(t, "client write with a version", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Session: 1, Len: 1, Version: 1<<32 | 1}), core.BlockSize)
+	mustMalformed(t, "absent expect_ver not zero", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Session: 1, Len: 1, Expect: 1<<32 | 1}), core.BlockSize)
+}
+
+func TestWireRejectsAClientWriteOrPunchWithoutASession(t *testing.T) {
+	mustMalformed(t, "client write without a session", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Incarnation: 1, Len: 1}), core.BlockSize)
+	mustMalformed(t, "client punch without a session", AppendUpdate(nil, &Update{Kind: KindPunch, PG: wirePG, Incarnation: 1, Len: 1}), 0)
 }
 
 func TestWireRejectsIntervalZero(t *testing.T) {
 	pg := wirePG
 	pg.Interval = 0
 	for what, b := range map[string][]byte{
-		"update":         AppendUpdate(nil, &Update{Kind: KindPunch, PG: pg, Len: 1}),
+		"update":         AppendUpdate(nil, &Update{Kind: KindPunch, PG: pg, Session: 1, Len: 1}),
 		"read":           AppendRead(nil, &Read{PG: pg, Len: 1}),
 		"member timeout": AppendMemberTimeout(nil, &MemberTimeout{PG: pg}),
 		"peering":        AppendPeering(nil, &Peering{Kind: KindPeer, PG: pg, Disk: 3}),
@@ -393,7 +398,7 @@ func TestWireRejectsBadFields(t *testing.T) {
 		mustMalformed(t, "a status its reply kind does not take", AppendResponse(nil, &Response{Kind: c.k, Status: c.st, Interval: 1}), 0)
 	}
 	mustMalformed(t, "an expected version on a recovery write", AppendUpdate(nil, &Update{Kind: KindRecover, PG: wirePG, Len: core.ChunkSize, Version: MakeVersion(1, 1), HasExpect: true, Expect: MakeVersion(1, 1)}), 0)
-	mustMalformed(t, "a purger's shard on a write", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Len: 1, Shard: 1}), core.BlockSize)
+	mustMalformed(t, "a purger's shard on a write", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Session: 1, Len: 1, Shard: 1}), core.BlockSize)
 	mustMalformed(t, "a purger's term on a member write", AppendUpdate(nil, &Update{Kind: KindReplicaWrite, PG: wirePG, Len: 1, Version: 1<<32 | 1, Term: 1}), core.BlockSize)
 	mustMalformed(t, "a grant neither granted nor refused", AppendGrant(nil, &Grant{Status: StatusNoSpace}), 0)
 	rec := Update{Kind: KindRecover, PG: wirePG, Len: core.ChunkSize, Version: 1<<32 | 1}
@@ -433,7 +438,7 @@ func TestWireRejectsBadFields(t *testing.T) {
 	b := AppendProbeReply(nil, &ProbeReply{})
 	b[len(b)-1] = 2
 	mustMalformed(t, "a flag of 2", b, 0)
-	b = AppendUpdate(nil, &Update{Kind: KindPunch, PG: wirePG, Len: 1})
+	b = AppendUpdate(nil, &Update{Kind: KindPunch, PG: wirePG, Session: 1, Len: 1})
 	b[len(b)-9] = 2
 	mustMalformed(t, "an optional's flag of 2", b, 0)
 	b = AppendReport(nil, &Report{})

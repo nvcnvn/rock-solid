@@ -384,7 +384,7 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 		}
 	}
 	if !validRange(u.Off, u.Len) || data != want || !validVersion(u.Version) || replica != (u.Version != 0) && u.Kind != KindRecover ||
-		write && (u.Shard != 0 || u.Term != 0) {
+		!replica && u.Session == 0 || write && (u.Shard != 0 || u.Term != 0) {
 		r.bad = true
 	}
 	return r.done(err)
