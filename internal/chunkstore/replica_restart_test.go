@@ -7,7 +7,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
 
-// A primary whose store was opened again asks for a new interval of each PG it leads in its first table, holds writes and serves no reads in its old interval, even if told it activated there, and serves once it has peered in the new one; a replica on a freshly formatted disk asks nothing.
+// A primary whose store was opened again asks for a new interval of each PG it is a member of in its first table, holds writes and serves no reads in its old interval, even if told it activated there, and serves once it has peered in the new one; a replica on a freshly formatted disk asks nothing.
 func TestARestartedPrimaryTakesANewIntervalBeforeItServes(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	if len(c.asks) != 0 {
@@ -20,12 +20,12 @@ func TestARestartedPrimaryTakesANewIntervalBeforeItServes(t *testing.T) {
 	c.s.Restart(0)
 	c.settle()
 	pg3 := core.PGID{Pool: testPool, Index: 3}
-	for _, pg := range []core.PGID{pg0, pg3} {
-		if !slices.Contains(c.asks, PGFields{Epoch: 1, PG: pg, Interval: 1}) {
+	for i := range uint32(4) {
+		if pg := (core.PGID{Pool: testPool, Index: i}); !slices.Contains(c.asks, PGFields{Epoch: 1, PG: pg, Interval: 1}) {
 			t.Fatalf("no ask for %v: %+v", pg, c.asks)
 		}
 	}
-	if len(c.asks) != 2 {
+	if len(c.asks) != 4 {
 		t.Fatalf("asks %+v", c.asks)
 	}
 	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.Activate(ctx, pg0, 1, out) })

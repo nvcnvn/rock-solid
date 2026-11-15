@@ -239,9 +239,10 @@ func (r *readRun) fencedApplied(d int) error {
 }
 
 // ordered1 reports whether o is a write or punch of session 1 that st ordered, by the session of
-// its primary's write, since a plant may clear the store's.
+// its primary's write, since a plant may clear the store's. A version replay gated, an op of no
+// request, was ordered before the crash, where this check saw it.
 func (r *readRun) ordered1(st *Store, o *op) bool {
-	if o.kind == 0 || o.kind == opRead || o.req.Recover || o.version == 0 {
+	if o.kind == 0 || o.kind == opRead || o.req.Recover || o.version == 0 || o.req.Gated && o.req.ID == 0 {
 		return false
 	}
 	s, ok := r.reqSession[opKey{st, o.req.ID}]
@@ -678,9 +679,9 @@ func TestNoFencedSessionsWriteIsApplied(t *testing.T) {
 }
 
 // Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (21 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's; and a primary that commits a version once its own log holds it (368 of 500), so that a read returns a version the next interval drops.
-// With the writers as two sessions, the sessions model's neg-check-on-arrival (3 of 500), the same
+// With the writers as two sessions, the sessions model's neg-check-on-arrival (2 of 500), the same
 // primary, orders a fenced session's write that waited in its store as the fence came; and its
-// neg-replica-no-check (132 of 500), a member that takes a replicated write without checking its
+// neg-replica-no-check (122 of 500), a member that takes a replicated write without checking its
 // session, logs one its primary ordered before the fence reached it.
 func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 	for _, p := range []struct {
