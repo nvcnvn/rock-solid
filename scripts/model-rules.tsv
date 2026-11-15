@@ -60,14 +60,14 @@ sessions/neg-no-full-lease	meta.noFullLease	TestPlantedSessionBugsFenceEarly
 sessions/neg-count-on-own-clock	meta.countOnOwnClock	TestPlantedSessionBugsFenceEarly
 sessions/neg-dead-wait-lease	meta.deadWaitLease	TestPlantedSessionBugsFenceEarly
 sessions/neg-evict-at-once	meta.evictAtOnce	TestPlantedSessionBugsFenceEarly
-sessions/neg-two-holders	open	MetaStore invariants
-sessions/neg-release-on-commit	open	MetaStore invariants
+sessions/neg-two-holders	meta.evictAtOnce	TestPlantedLockBugsBreakTheLockInvariants
+sessions/neg-release-on-commit	meta.releaseOnCommit	TestPlantedLockBugsBreakTheLockInvariants
 sessions/neg-check-on-arrival	open	Session fencing on storage nodes
 sessions/neg-replica-no-check	open	Session fencing on storage nodes
 sessions/neg-up-with-old-table	open	Session fencing on storage nodes
 sessions/neg-peering-skipped	open	Session fencing on storage nodes
-sessions/neg-ack-reachable-only	open	MetaStore invariants
-sessions/neg-ack-waits-down	open	MetaStore invariants
+sessions/neg-ack-reachable-only	meta.ackReachableOnly	TestPlantedLockBugsBreakTheLockInvariants
+sessions/neg-ack-waits-down	meta.ackWaitsDown	TestPlantedLockBugsBreakTheLockInvariants
 sessions/neg-count-from-reply	open	phase 6
 sessions/neg-no-drift	open	phase 6
 sessions/neg-ignore-resumed	open	phase 6

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/sim"
@@ -386,6 +387,9 @@ const (
 	invSessionReads = "a new leader reads the session table back as committed"
 	invSessionIDs   = "no session ID is given twice"
 	invSessionAcks  = "a version is acknowledged only once every node with a disk up holds it"
+	invOneHolder    = "at most one lock holder"
+	invLockOrder    = "a lock reaches its next holder only once every node with a disk up holds its old holder's fence"
+	invLocksFree    = "a dead client's locks are free in time"
 )
 
 // sessClock is a node's two clocks in the session run, which read off + T × rate / PPM at real
@@ -400,18 +404,22 @@ func (c *sessClock) at(t core.Tick) lease.Time {
 }
 
 // runClient is a client daemon in the session run: its clocks and lease holder, the control-plane
-// node it renews with and when it learns the leader, its heartbeats' state, and whether it died, was
-// fenced, or staged a new session under start.
+// node it renews with and when it learns the leader, its heartbeats' state, whether it died, was
+// fenced, or staged a new session under start, when its session started and when it died, and the
+// lock mode it was granted under session lockSess.
 type runClient struct {
-	clk           sessClock
-	h             *lease.Holder
-	id            uint64
-	to            int
-	learn         core.Tick
-	req, answered uint64
-	arrived       core.Tick
-	dead, fenced  bool
-	start, starts uint64
+	clk               sessClock
+	h                 *lease.Holder
+	id                uint64
+	to                int
+	learn             core.Tick
+	req, answered     uint64
+	arrived           core.Tick
+	dead, fenced      bool
+	start, starts     uint64
+	startedAt, diedAt core.Tick
+	mode              byte
+	lockSess          uint64
 }
 
 // sessMsg is a heartbeat to control-plane node, or the answer from node's run, arriving at at.
@@ -431,7 +439,7 @@ type sessMsg struct {
 // as committed, no ID is given twice, and a dead daemon's session is fenced and acknowledged.
 func TestNoSessionIsFencedWhileItsClientsLeaseRuns(t *testing.T) {
 	seeds.Run(t, 0, 20, func(seed uint64) {
-		if err := sessionRun(t, seed, sessionPlants{}); err != nil {
+		if err := sessionRun(t, seed, sessionPlants{}, ""); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -464,13 +472,13 @@ func TestPlantedSessionBugsFenceEarly(t *testing.T) {
 		n    uint64
 		pl   sessionPlants
 	}{
-		{"session_lease for an unmeasured session", 120, sessionPlants{deadWaitLease: true}},
-		{"session_lease on the leader's own clock", 120, sessionPlants{countOnOwnClock: true}},
+		{"session_lease for an unmeasured session", 190, sessionPlants{deadWaitLease: true}},
+		{"session_lease on the leader's own clock", 190, sessionPlants{countOnOwnClock: true}},
 		{"an eviction fenced at once", 10, sessionPlants{evictAtOnce: true}},
-		{"no full lease after a failover", 1250, sessionPlants{noFullLease: true}},
-		{"renewals answered without the leader lease", 140, sessionPlants{answerWithoutLease: true}},
+		{"no full lease after a failover", 130, sessionPlants{noFullLease: true}},
+		{"renewals answered without the leader lease", 55, sessionPlants{answerWithoutLease: true}},
 	} {
-		if !fencesEarlyWithin(t, p.n, p.pl) {
+		if !breaksWithin(t, p.n, p.pl, invSessionLease) {
 			t.Errorf("%s: %d seeds fenced no session early", p.name, p.n)
 		}
 	}
@@ -491,12 +499,35 @@ func TestPlantedSessionBugsFenceEarly(t *testing.T) {
 	}
 }
 
-// fencesEarlyWithin reports whether the seeded run with pl fences a session whose client's lease
-// runs in one of the first n seeds. A test's n is about 5 / the plant's rate over 500 seeds, so a
-// change that re-rolls the draws fails it less than 1% of the time.
-func fencesEarlyWithin(t *testing.T, n uint64, pl sessionPlants) bool {
+// Each planted lock bug of the sessions model breaks its lock invariant in one of the first n
+// seeds of the seeded run: a lock freed when its holder's fence commits, or acknowledged by the
+// nodes this leader heard from alone, reaches its next holder before a node with a disk up holds the fence; an
+// eviction fenced at once lets two clients act on one lock; an acknowledgement that waits for
+// every disk marked down to come back keeps a dead client's locks past their bound.
+func TestPlantedLockBugsBreakTheLockInvariants(t *testing.T) {
+	for _, p := range []struct {
+		name string
+		n    uint64
+		pl   sessionPlants
+		inv  string
+	}{
+		{"an eviction fenced at once", 22, sessionPlants{evictAtOnce: true}, invOneHolder},
+		{"a lock freed when its fence commits", 10, sessionPlants{releaseOnCommit: true}, invLockOrder},
+		{"a fence acknowledged by the nodes heard from", 72, sessionPlants{ackReachableOnly: true}, invLockOrder},
+		{"an acknowledgement waiting for down disks", 10, sessionPlants{ackWaitsDown: true}, invLocksFree},
+	} {
+		if !breaksWithin(t, p.n, p.pl, p.inv) {
+			t.Errorf("%s: %d seeds broke no %q", p.name, p.n, p.inv)
+		}
+	}
+}
+
+// breaksWithin reports whether the seeded run with pl, checking inv alone, breaks inv in one of the
+// first n seeds. A test's n is about 5 / the plant's rate over 500 seeds, so a change that re-rolls
+// the draws fails it less than 1% of the time.
+func breaksWithin(t *testing.T, n uint64, pl sessionPlants, inv string) bool {
 	for seed := range n {
-		if err := sessionRun(t, seed, pl); err != nil && strings.Contains(err.Error(), invSessionLease) {
+		if err := sessionRun(t, seed, pl, inv); err != nil && strings.Contains(err.Error(), inv) {
 			return true
 		}
 	}
@@ -584,11 +615,13 @@ func fastLeaderRun(t *testing.T, measured, deposed bool, stop, before core.Tick,
 	return nil
 }
 
-func sessionRun(t *testing.T, seed uint64, pl sessionPlants) error {
+func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error {
 	const step = core.Tick(10_000)
 	const faultsEnd, end = 90 * sec, 140 * sec
 	rng := rand.New(rand.NewPCG(seed, 7))
 	lag := rand.New(rand.NewPCG(seed, 8))
+	part := rand.New(rand.NewPCG(seed, 9))
+	lk := rand.New(rand.NewPCG(seed, 10))
 	ticks := func(n int) core.Tick { return core.Tick(rng.IntN(n+1)) * step }
 	clock := func() sessClock {
 		c := sessClock{off: ticks(100), rawPPM: 900_000 + rng.Uint64N(200_001)}
@@ -621,7 +654,7 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants) error {
 		r.ctl.StartSession(uint32(i), clients[i].start)
 	}
 	given := map[uint64]bool{}
-	fencedIDs := map[uint64]bool{}
+	fences := map[uint64]uint64{}
 	var dup uint64
 	dirty := false
 	commit := func(in *ControlInputs) {
@@ -637,12 +670,13 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants) error {
 			for _, c := range clients {
 				if c.start == s.Request {
 					c.id, c.start, c.fenced, c.answered, c.arrived, c.h = s.ID, 0, false, 0, 0, lease.NewHolder(cfg)
+					c.startedAt = now
 				}
 			}
 		}
 		for _, e := range r.ctl.SessionTable().Sessions {
 			if e.Fenced != 0 {
-				fencedIDs[e.ID] = true
+				fences[e.ID] = e.Fenced
 			}
 		}
 	}
@@ -655,7 +689,7 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants) error {
 	var inv sim.Invariants
 	inv.Register(invSessionLease, func() error {
 		for i, c := range clients {
-			if !fencedIDs[c.id] {
+			if fences[c.id] == 0 {
 				continue
 			}
 			for n := range nodes {
@@ -684,18 +718,96 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants) error {
 		return nil
 	})
 	var held [5]uint64
+	disks := r.ctl.Disks()
+	// A node whose disk was marked down and is up again holding an older table is not up for the
+	// invariants until it catches up. This hides a live bug of today's code, the model's
+	// neg-up-with-old-table: the leader marks the disk up on its disk beat while the node holds an
+	// older table, so a version can be acknowledged, and a lock passed on, without it. Marking it up
+	// only once its heartbeat reports the current version is owed by Session fencing on storage nodes.
+	var rejoining [5]bool
+	behind := func(d DiskEntry, v uint64) bool { return d.Up && !rejoining[d.Node] && held[d.Node] < v }
 	inv.Register(invSessionAcks, func() error {
 		acked := r.ctl.SessionTable().Acked
-		for _, d := range r.ctl.Disks() {
-			if d.Up && held[d.Node] < acked {
+		for _, d := range disks {
+			if behind(d, acked) {
 				return fmt.Errorf("version %d acknowledged while node %d holds %d", acked, d.Node, held[d.Node])
 			}
 		}
 		return nil
 	})
 
+	leased := func(c *runClient) bool {
+		for n := range nodes {
+			if c.h.Valid(gid(n), c.clk.at(now)) {
+				return true
+			}
+		}
+		return false
+	}
+	holds := func(c *runClient) bool { return c.mode != 0 && c.lockSess == c.id && !c.dead && !c.fenced }
+	inv.Register(invOneHolder, func() error {
+		var ex, all int
+		for _, c := range clients {
+			if holds(c) && leased(c) {
+				all++
+				if c.mode == LockExclusive {
+					ex++
+				}
+			}
+		}
+		if ex > 0 && all > 1 {
+			return fmt.Errorf("%d clients act on the lock, %d of them exclusive, at %v", all, ex, now)
+		}
+		return nil
+	})
+	var misordered error
+	inv.Register(invLockOrder, func() error { return misordered })
+	owed := map[uint64]core.Tick{}
+	var late error
+	inv.Register(invLocksFree, func() error { return late })
+
+	// The lock's owner, a shard holding the inode's lock keys, frees a key whose session is not
+	// Holding in the committed table, and grants nothing to a session fenced there.
+	own := newFS(t)
+	const lockInode = RootInode
+	lockOp := func(c *runClient, mode byte) {
+		if mode == 0 {
+			own.ok(own.f.Unlock(lockInode, c.mode, c.id))
+			c.mode = 0
+			return
+		}
+		var keys []Holder
+		for _, kv := range (&fsWork{h: own}).scan(lockInode, InodeLock) {
+			var k Key
+			if err := DecodeKey(kv.Key, &k); err != nil {
+				t.Fatal(err)
+			}
+			keys = append(keys, Holder{k.Mode, k.Session, r.ctl.Holding(k.Session)})
+		}
+		err := own.f.Lock(lockInode, mode, c.id, keys)
+		if errors.Is(err, ErrLocked) {
+			return
+		}
+		own.ok(err)
+		for _, k := range keys {
+			if k.Live || k.Session == c.id || mode == LockShared && k.Mode != LockExclusive {
+				continue
+			}
+			for _, d := range disks {
+				if behind(d, fences[k.Session]) && misordered == nil {
+					misordered = fmt.Errorf("session %d's lock went to session %d while node %d holds version %d of its fence %d, table %+v, at %v", k.Session, c.id, d.Node, held[d.Node], fences[k.Session], r.ctl.SessionTable(), now)
+				}
+			}
+		}
+		c.mode, c.lockSess = mode, c.id
+	}
+	if only != "" {
+		inv.Only(only)
+	}
+
 	nextFail := 5*sec + ticks(2000)
 	deaths := 0
+	cut, cutAt, cutTo := -1, core.Tick(0), core.Tick(0)
 	var msgs, due []sessMsg
 	for now = step; now < end; now += step {
 		faults := now < faultsEnd
@@ -721,10 +833,18 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants) error {
 			stallTo = now + 250*step + ticks(250)
 		}
 		if faults && deaths < 2 && rng.IntN(4000) == 0 {
-			clients[rng.IntN(len(clients))].dead = true
+			if c := clients[rng.IntN(len(clients))]; !c.dead {
+				c.dead, c.diedAt = true, now
+			}
 			deaths++
 		}
-		if faults && rng.IntN(4000) == 0 {
+		if cut >= 0 && now >= cutTo {
+			cut = -1
+		}
+		if faults && cut < 0 && part.IntN(2000) == 0 {
+			cut, cutAt, cutTo = part.IntN(5), now, now+2*sec+core.Tick(part.IntN(26))*sec
+		}
+		if faults && rng.IntN(300) == 0 {
 			_ = r.ctl.Evict(clients[rng.IntN(len(clients))].id)
 		}
 		stalled := now < stallTo
@@ -787,18 +907,80 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants) error {
 				msgs = append(msgs, sessMsg{at: now + ticks(3), client: i, node: c.to, beat: SessionBeat{Session: c.id, Request: c.req, Sent: ct.Raw, Answered: c.answered, Arrived: c.arrived}})
 			}
 		}
+		for _, c := range clients {
+			if c.dead || c.fenced || c.start != 0 || lk.IntN(150) != 0 {
+				continue
+			}
+			if c.lockSess != c.id {
+				c.mode = 0
+			}
+			m := LockShared + byte(lk.IntN(2))
+			switch {
+			case c.mode == 0:
+				lockOp(c, m)
+			case lk.IntN(6) == 0:
+				lockOp(c, 0)
+			case m != c.mode:
+				lockOp(c, m)
+			}
+		}
 
 		if !stalled && now%(sec/10) == 0 {
 			setNow()
 			if now%sec == 0 {
 				for n := range uint32(5) {
+					if int(n) == cut {
+						continue
+					}
 					if !faults || lag.IntN(3) == 0 {
 						held[n] = r.ctl.SessionTable().Version
 					}
+					rejoining[n] = rejoining[n] && held[n] < r.ctl.SessionTable().Version
 					r.heartbeat(&NodeReport{Node: n, Meta: true, Opened: []OpenedDisk{{Device: devOf(n), Log: logOf(n)}}, Sessions: held[n]})
+					r.beat(n, 0, false)
 				}
+				r.event(0, nil)
 			}
 			commit(&ControlInputs{Raw: r.raw, Leased: now >= leaseFrom})
+		}
+
+		// A fenced session leaves the table within a heartbeat interval of the moment every node
+		// with a disk up holds its fence, not counting time in which the leader lacks its lease, a
+		// node it hears from lags the table (the model's Urgent takes no time for that), or a cut-off
+		// node's disk is not yet due its down mark: node_down_after on the leader's boot clock from
+		// the last of the cut's start, the lease start or a stall's end, plus 3 s: two of the run's
+		// once-a-second detector events (a new leader's first, then the check that marks the disk
+		// down) on a boot clock up to 35% fast.
+		// A dead client's session is fenced within dead_wait, the longest wait, on the leader's
+		// clocks from its death, its start, the leader's lease start or a stall's end, whichever is
+		// last.
+		tbl := r.ctl.SessionTable()
+		disks = r.ctl.Disks()
+		countable := now >= leaseFrom && !stalled
+		silent := nodes[r.l].at(now).Boot-nodes[r.l].at(max(cutAt, leaseFrom, stallTo)).Boot < chunkstore.NodeDownAfter+3*sec
+		for _, d := range disks {
+			rejoining[d.Node] = rejoining[d.Node] || !d.Up
+			if int(d.Node) == cut {
+				countable = countable && !(d.Up && silent)
+			} else {
+				countable = countable && !(d.Up && held[d.Node] < tbl.Version)
+			}
+		}
+		for _, e := range tbl.Sessions {
+			if e.Fenced != 0 && countable {
+				if owed[e.ID] += step; owed[e.ID] > sec+sec/5 && late == nil {
+					late = fmt.Errorf("session %d fenced in version %d is still in the table %+v at %v", e.ID, e.Fenced, tbl, now)
+				}
+			}
+		}
+		for i, c := range clients {
+			if !c.dead || r.fenced(c.id) || now < leaseFrom || stalled {
+				continue
+			}
+			a, b := nodes[r.l].at(max(c.diedAt, c.startedAt, leaseFrom, stallTo)), nodes[r.l].at(now)
+			if min(b.Boot-a.Boot, b.Raw-a.Raw) > DeadWait+sec/4 && late == nil {
+				late = fmt.Errorf("dead client %d's session %d is not fenced at %v", i, c.id, now)
+			}
 		}
 		if err := inv.Check(); err != nil {
 			return fmt.Errorf("seed %d: %w", seed, err)

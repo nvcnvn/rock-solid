@@ -228,10 +228,13 @@ func (c *Control) resume(t lease.Time) {
 // sessionPlants are bugs a test plants, each the sessions model's counterexample of the same name:
 // a session not measured waiting only session_lease, every session waiting session_lease on the
 // leader's own clock, renewals answered without the leader lease or the grants step only it starts,
-// an eviction fenced at once, and a leader lease that starts no count over, so a new leader counts
-// from its first step, which can come before the old leader's last renewal.
+// an eviction fenced at once, a leader lease that starts no count over, so a new leader counts
+// from its first step, which can come before the old leader's last renewal, a fenced session's
+// locks released at its fence's commit, and an acknowledged version that counts only the nodes
+// this leader heard from or waits for nodes whose disks are marked down.
 type sessionPlants struct {
 	deadWaitLease, countOnOwnClock, answerWithoutLease, evictAtOnce, noFullLease bool
+	releaseOnCommit, ackReachableOnly, ackWaitsDown                              bool
 }
 
 // due reports whether the session's wait has passed on both of the leader's clocks at t.
@@ -253,11 +256,25 @@ func (c *Control) due(tm *sessTimer, t lease.Time) bool {
 // acknowledged reports whether every node with a disk committed up holds session-table version v.
 func (c *Control) acknowledged(v uint64) bool {
 	for _, e := range c.disks {
-		if e.Up && !slices.ContainsFunc(c.nodes, func(n nodeState) bool { return n.id == e.Node && n.sessV >= v }) {
+		if !e.Up && (!c.plant.ackWaitsDown || e.Gone) {
+			continue
+		}
+		i := slices.IndexFunc(c.nodes, func(n nodeState) bool { return n.id == e.Node })
+		if i < 0 && c.plant.ackReachableOnly {
+			continue
+		}
+		if i < 0 || c.nodes[i].sessV < v {
 			return false
 		}
 	}
 	return true
+}
+
+// Holding reports whether session id still holds its locks, which is until it leaves the table, once
+// every storage node holds its fence; an owner frees a lock key whose session does not.
+func (c *Control) Holding(id uint64) bool {
+	i, ok := slices.BinarySearchFunc(c.sess.Sessions, id, cmpSession)
+	return ok && (c.sess.Sessions[i].Fenced == 0 || !c.plant.releaseOnCommit)
 }
 
 // sessionStep proposes under token, while this leader holds its lease, one Txn of the session

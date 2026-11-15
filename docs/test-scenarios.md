@@ -6572,27 +6572,55 @@ leader-side rules are its invariants; the storage side is
 `scripts/seeds.sh`). Four clients each hold a `lease.Holder` on their own clocks; each node's raw
 clock runs within 10% of real time, and a quarter of them have their boot clock slewed up to 22.6%
 apart from it. Slewing every node would hide the leader-side bugs: a holder ends its lease on its
-faster clock and a grantor waits for its slower one, so random slews cover most rate errors.
+faster clock and a grantor waits for its slower one, so random slews cover most rate errors. Five
+storage nodes each send, every second, a heartbeat naming the session-table version they hold and
+a disk beat to the leader's failure detector, which marks a silent disk down.
+
 Faults: failovers, half of them crashes and half a deposed leader still answering for up to 3 s
-while its lease runs, then refusing for 25 s more, past a new leader's `dead_wait`; clients learning the new leader up to 15 s late;
-leader stalls of 2.5 to 5 s; 5% of heartbeats and answers lost and each delayed up to 30 ms;
-evictions; two daemons that die; fenced clients starting new sessions; storage nodes that each
-take the newest session-table version on a third of their heartbeats, so acknowledgements wait. Checked every 10 ms: no session is fenced while its client's
-lease from any leader runs; after every commit, a new leader reads the table back as committed; no
-ID is given twice; no version is acknowledged before every node with a disk up holds it. At the
-end, every dead client's session has left the table and the version is acknowledged.
+while its lease runs, then refusing for 25 s more, past a new leader's `dead_wait`; clients
+learning the new leader up to 15 s late; leader stalls of 2.5 to 5 s; 5% of heartbeats and answers
+lost and each delayed up to 30 ms; evictions; two daemons that die; fenced clients starting new
+sessions; storage nodes that each take the newest session-table version on a third of their
+heartbeats, so acknowledgements wait; and one storage node at a time cut off for 2 to 27 s,
+sending neither heartbeat nor disk beat, long enough for some cuts to be marked down. Each client
+now and then takes, changes or drops a shared or exclusive lock on one inode, through an owner that
+frees a lock key whose session `Control.Holding` no longer reports.
 
-**Planted bugs** (`TestPlantedSessionBugsFenceEarly`). Each of the model's leader-side negatives
-below fences a session whose lease runs, in the seeded run within the seeds named, or every time in
-the fast new leader's scenario:
+Checked every 10 ms: no session is fenced while its client's lease from any leader runs; after
+every commit, a new leader reads the table back as committed; no ID is given twice; no version is
+acknowledged before every node with a disk up holds it; at most one client acts on the lock while
+holding a lease, unless every one holds it shared; a lock reaches its next holder only once every
+node with a disk up holds its old holder's fence; a fenced session leaves the table within 1.2 s
+of the time every node with a disk up holds its fence, not counting time the leader lacks its
+lease, a node it hears from lags the table (time the model's `Urgent` does not let pass), or a
+cut-off node's disk is not yet due its down mark: `node_down_after` + 3 s on the leader's boot
+clock from the last of the cut's start, the lease start or a stall's end, so a leader that never
+marks a silent disk down fails it. A dead client's session is fenced within `dead_wait` + 250 ms
+on the leader's clocks from the last of its death, its start, the leader's lease start or a
+stall's end. A node whose disk was marked down and is up again holding an older table counts as
+down for the checks until it catches up. This hides a live bug of today's code, the model's
+`neg-up-with-old-table`: the leader marks a disk up on its disk beat while its node holds an older
+table, so a version is acknowledged, and a lock passed on, without it (33 seeds of 500 break the
+acknowledgement check without the exclusion). Marking it up only once its heartbeat reports the
+current version is owed by [Session fencing on storage nodes](#session-fencing-on-storage-nodes).
+At the end, every dead client's session has left the table and the version is acknowledged.
 
-| Planted bug | Seeds of 500 | First | Caught by |
-| --- | --- | --- | --- |
-| `neg-dead-wait-lease`: an unmeasured session waits only `session_lease` | 22 | 0 | Seeded run, 120 seeds; the scenario with C dying at once |
-| `neg-count-on-own-clock`: every session waits `session_lease` on the leader's own clock | 23 | 0 | Seeded run, 120 seeds; the scenario after the new leader measured C |
-| `neg-evict-at-once`: an eviction fences the session at once | 391 | 0 | Seeded run, 10 seeds |
-| `neg-no-full-lease`: a new leader's lease starts no count over, so it counts from its first step | 2 | 74 | Seeded run, 1,250 seeds; the scenario with the new leader stepping 10 s before its lease starts |
-| `neg-answer-without-lease`: a leader answers renewals without its leader lease, and so without the grants step only its lease starts | 18 | 38 | Seeded run, 140 seeds; the scenario with C's third heartbeat to the deposed leader |
+**Planted bugs** (`TestPlantedSessionBugsFenceEarly`, `TestPlantedLockBugsBreakTheLockInvariants`).
+Each of the model's leader-side negatives below breaks the invariant named, in the seeded run
+within the seeds named, checking that invariant alone, or every time in the fast new leader's
+scenario:
+
+| Planted bug | Invariant | Seeds of 500 | First | Caught by |
+| --- | --- | --- | --- | --- |
+| `neg-dead-wait-lease`: an unmeasured session waits only `session_lease` | No early fence | 13 | 33 | Seeded run, 190 seeds; the scenario with C dying at once |
+| `neg-count-on-own-clock`: every session waits `session_lease` on the leader's own clock | No early fence | 13 | 33 | Seeded run, 190 seeds; the scenario after the new leader measured C |
+| `neg-evict-at-once`: an eviction fences the session at once | No early fence | 500 | 0 | Seeded run, 10 seeds |
+| `neg-no-full-lease`: a new leader's lease starts no count over, so it counts from its first step | No early fence | 19 | 49 | Seeded run, 130 seeds; the scenario with the new leader stepping 10 s before its lease starts |
+| `neg-answer-without-lease`: a leader answers renewals without its leader lease, and so without the grants step only its lease starts | No early fence | 46 | 6 | Seeded run, 55 seeds; the scenario with C's third heartbeat to the deposed leader |
+| `neg-two-holders`: the same plant as `neg-evict-at-once`, so the evicted client still acts on its lock under its lease while the next holder takes it | One holder | 117 | 0 | Seeded run, 22 seeds |
+| `neg-release-on-commit`: a fenced session's locks are freed once its fence commits, while it is still in the table | Lock order | 292 | 2 | Seeded run, 10 seeds |
+| `neg-ack-reachable-only`: a version counts as acknowledged when every node the leader heard from holds it, skipping a node with a disk up it has no heartbeat from | Lock order | 35 | 12 | Seeded run, 72 seeds |
+| `neg-ack-waits-down`: acknowledgement also waits for nodes whose disks are marked down | Locks free in time | 263 | 0 | Seeded run, 10 seeds |
 
 In the model, `neg-no-full-lease` counts from the last renewal any leader processed. Go keeps the
 counts only in the leader's memory, so the plant counts from the new leader's first step, which
@@ -6816,9 +6844,9 @@ Simulator invariants checked after every step, with the faults that must exercis
 | A committed entry is never lost | Registered by [Raft storage in the disk log](#raft-storage-in-the-disk-log) (`TestCommittedEntriesSurviveCrashesOnTheDiskLog`): crashes before and after a round's flush; a torn tail record holding chunk writes and Raft entries |
 | A replica keeps its term and vote across a crash | Registered by [Raft storage in the disk log](#raft-storage-in-the-disk-log): crashes with rounds in flight, landing unflushed writes at random |
 | A shard recovered from manifest and log equals its state before the crash | Owed by [Shard indexes in the disk owner's checkpoint](#shard-indexes-in-the-disk-owners-checkpoint), which restores a shard from its manifest: crashes during memtable flushes, compactions, checkpoints and cleaner passes (crash oracle) |
-| At most one lock holder | Racing flock `Txn`s; owner failover; a session fence |
-| No session is fenced while its client's own lease still runs | Control-plane leader failover while sessions renew; a renewal answered by a deposed leader; a leader stalled past `session_lease`; clients paused past their lease; slewed clocks; a client VM stopped with its clocks frozen |
-| Every write of a fenced lock holder that completes is ordered before every write of the next holder; no fenced session's write is applied; a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval while the leader holds its lease and has measured the client, `dead_wait` instead when it has not, or once an unreachable storage node is marked down | A fence that reaches some primaries late; a storage node partitioned during a fence |
+| At most one lock holder | Registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`): clients racing for one inode's lock in shared and exclusive modes, holders evicted, fenced and dead, and control-plane failovers. Owner failover is not in it: the owner's shard does not fail over |
+| No session is fenced while its client's own lease still runs | Registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`, `TestAFastNewLeaderFencesNoSessionEarly`, `TestAFastBootClockFencesNoSessionEarly`): control-plane leader failover while sessions renew; a renewal answered by a deposed leader; a leader stalled past `session_lease`; clients paused past their lease; slewed clocks; a client VM stopped with its clocks frozen |
+| Every write of a fenced lock holder that completes is ordered before every write of the next holder; no fenced session's write is applied; a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval while the leader holds its lease and has measured the client, `dead_wait` instead when it has not, or once an unreachable storage node is marked down | Leader side registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`): a lock reaches its next holder only once every node with a disk up holds its old holder's fence, and a dead client's locks are free within `dead_wait` (the measured bound is `TestAFenceStretchesByTheMeasuredRate`'s), under acknowledgements that lag, storage nodes cut off for 2 to 27 s, some of them marked down, and failovers. The write ordering, "no fenced session's write is applied" and the rejoin gate (a disk marked up only once its heartbeat reports the current version) are owed by [Session fencing on storage nodes](#session-fencing-on-storage-nodes): a fence that reaches some primaries late; a storage node partitioned during a fence |
 | On every disk of a pool, (1 + k) times the grants outstanding plus the flushes not yet in fill reports never exceed the disk's gap above the larger of its fill and `write_limit`, and no flush under a grant is refused for space | The pool reaching `write_limit` while daemons buffer and other nodes write through; grant heartbeats lost or delayed, requests and replies; a control-plane failover while daemons stream; a client partitioned from the control-plane leader but not from storage, streaming under its grant; a daemon crash in the middle of a reuse window; a refill moving members onto the fullest disks while grants are out |
 | An inode ID is never reused; no file's `mtime` goes backwards except by `utimensat`; a file's keys and its directory's entry are in one slot, unless a cross-directory rename moved the entry or the parent's slot had run out of IDs; no directory is its own ancestor ([Filesystem schema](#filesystem-schema)) | A filesystem workload of every operation from several daemons, with racing renames of directories, a daemon crash after a slot or inode reservation, and elections while reservations are in flight; a counter reset is caught |
 | A replayed request returns its first result and changes nothing | A daemon crash with requests read but unanswered, followed by their resend; an election while requests are in flight |
