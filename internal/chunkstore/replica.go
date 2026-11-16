@@ -33,7 +33,7 @@ const LeaseTimer core.TimerID = 0x6c736574
 type ReplicaConfig struct {
 	// Disk is the disk whose store the replica runs, by its ID in the placement table.
 	Disk uint32
-	// Seed seeds the source the replica draws its run IDs from; Start is when its loop started, from which the restart wait counts; Lease is the lease settings, lease.DefaultConfig when zero.
+	// Seed seeds the source the replica draws its run IDs from; Start is when its loop started, from which the restart wait counts; Lease is the lease settings, lease.DefaultConfig when zero, and never with a Resume below its.
 	Seed  uint64
 	Start lease.Time
 	Lease lease.Config
@@ -480,6 +480,7 @@ func NewReplica(cfg ReplicaConfig, st *Store) *Replica {
 	if lc == (lease.Config{}) {
 		lc = lease.DefaultConfig
 	}
+	lc.Resume = max(lc.Resume, lease.DefaultConfig.Resume)
 	rng := core.NewRand(cfg.Seed)
 	return &Replica{cfg: cfg, st: st, lcfg: lc, rng: rng, holder: lease.NewHolder(lc), grantor: lease.NewGrantor(lc, rng.Uint64(), cfg.Start)}
 }

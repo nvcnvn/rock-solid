@@ -22,7 +22,7 @@ type Config struct {
 	// Drift is lease_drift and MaxMargin max_margin, in parts per million of the lease.
 	Drift     uint64
 	MaxMargin uint64
-	// Resume is how much sooner than its margin alone a holder ends each lease, for a suspend too short to deliver Resumed.
+	// Resume is how much sooner than its margin alone a holder ends each lease, for a suspend too short to deliver Resumed; a production holder takes core.ResumeThreshold, and only a test that draws no such suspend may leave it 0.
 	Resume core.Tick
 }
 
