@@ -4058,6 +4058,13 @@ section.
   it (`Measured`), so pairing an answer with the heartbeat that names it, lost and repeated
   requests, and a leader's own stop are checked only by the Go tests of
   [Control-plane sessions](#control-plane-sessions); `ci-rates` passing does not cover them.
+- The sessions model has no session start, fetch or answer: each storage node is one table version
+  that `ApplyTable` sets, so "a live session's write is never refused" is in no model. Fencing
+  safety does not rest on the fetch, since any table applied fences. The property is checked only
+  by the Go tests of [Storage node session wiring](#storage-node-session-wiring) and
+  [Control-plane sessions](#control-plane-sessions). A model with starts and fetches would have
+  found a new leader whose applied table lagged a start answering a fetch under its lease alone,
+  which the node took as refusing that live session.
 - The epoch change model's counterexamples each also appear as a planted bug that trips the mapped
   invariant: those for property 2 in [MetaStore invariants](#metastore-invariants), the rest in
   [Placement faults and invariants](#placement-faults-and-invariants). The exceptions, with no
