@@ -2,7 +2,11 @@ package meta
 
 import (
 	"cmp"
+	"errors"
+	"fmt"
 	"slices"
+
+	"go.etcd.io/raft/v3/raftpb"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -41,11 +45,13 @@ func (o *CtlHostOutput) Reset() {
 // disk is; a restart replays the log before the replica starts. A disk that fails stops it.
 type CtlHost struct {
 	shard *Shard
-	// cfg is the replica's settings until a restart's replay ends and the replica starts.
-	cfg  Config
-	disk *raftshard.Host
-	rec  *disklog.Recovery
-	lout disklog.Output
+	// cfg is the replica's settings until the replica starts.
+	cfg Config
+	// voters is the configuration a restart was given, which its replay must match.
+	voters raftpb.ConfState
+	disk   *raftshard.Host
+	rec    *disklog.Recovery
+	lout   disklog.Output
 	// seen counts lout's events taken.
 	seen  int
 	dones []raftshard.Done
@@ -71,13 +77,17 @@ type CtlHost struct {
 // ctlOwner is the owner the group's blobs carry on the host's disk log.
 const ctlOwner = 1
 
+// ErrVoters reports a host restarted with voters other than those its disk was formatted with.
+var ErrVoters = errors.New("meta: the voters given are not those the control-plane log was formatted with")
+
 type heardNode struct {
 	at    core.NodeID
 	heard core.Tick
 }
 
-// FormatCtlHost starts a host on a new disk, which it formats with sb, its replica on cfg's
-// storage, the group's boot state.
+// FormatCtlHost starts a host on a new disk, which it formats with sb. Its first round is the
+// group's boot state on cfg's storage, the voters' configuration, and the replica starts on that
+// storage once the round is durable.
 func FormatCtlHost(ctx *core.Context, cfg Config, lc disklog.Config, sb disklog.Superblock, out *CtlHostOutput) (*CtlHost, error) {
 	h := newCtlHost(cfg)
 	log, err := disklog.Format(ctx, lc, sb, 1, &h.lout)
@@ -85,7 +95,8 @@ func FormatCtlHost(ctx *core.Context, cfg Config, lc disklog.Config, sb disklog.
 		return nil, err
 	}
 	h.disk.Log = log
-	if err := h.start(ctx, out); err != nil {
+	boot := raftshard.Round{Snapshot: raftpb.Snapshot{Metadata: cfg.Raft.Storage.Base()}}
+	if err := h.disk.Write(ctx, ctlOwner, 1, &boot, &h.lout); err != nil {
 		return nil, err
 	}
 	h.after(ctx, out)
@@ -93,10 +104,14 @@ func FormatCtlHost(ctx *core.Context, cfg Config, lc disklog.Config, sb disklog.
 }
 
 // OpenCtlHost starts recovering a host from its disk of diskBlocks blocks: the log's rounds
-// replay onto cfg's storage, the group's boot state as FormatCtlHost was given it, and the replica
-// starts once the replay ends.
+// replay onto an empty storage, from the boot state FormatCtlHost wrote first, and the replica
+// starts once the replay ends. A replay whose voters are not those of cfg's storage stops the host
+// with ErrVoters.
 func OpenCtlHost(ctx *core.Context, cfg Config, lc disklog.Config, diskBlocks uint64, out *CtlHostOutput) (*CtlHost, error) {
+	voters := cfg.Raft.Storage.Base().ConfState
+	cfg.Raft.Storage = raftshard.NewStorage()
 	h := newCtlHost(cfg)
+	h.voters = voters
 	rec, err := disklog.Recover(ctx, lc, diskBlocks, disklog.ModeOpen, 1, &h.lout)
 	if err != nil {
 		return nil, err
@@ -359,7 +374,11 @@ func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
 		case disklog.Durable:
 			h.dones, err = h.disk.Durable(ctx, &ev, &h.lout, h.dones[:0])
 			for _, d := range h.dones {
-				h.shard.Durable(ctx, d.Round, &h.sout)
+				if h.shard == nil {
+					err = h.start(ctx, out)
+				} else {
+					h.shard.Durable(ctx, d.Round, &h.sout)
+				}
 			}
 		case disklog.ManifestLoaded:
 			err = h.rec.Replay(ctx, &h.lout)
@@ -370,7 +389,11 @@ func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
 			if log, err = h.rec.Log(ctx); err == nil {
 				h.disk.Recovered(log)
 				h.rec = nil
-				err = h.start(ctx, out)
+				if e := h.cfg.Raft.Storage.Base().ConfState.Equivalent(h.voters); e != nil {
+					err = fmt.Errorf("%w: %v", ErrVoters, e)
+				} else {
+					err = h.start(ctx, out)
+				}
 			}
 		case disklog.Failed, disklog.InDoubt, disklog.RecoveryFailed:
 			err = ev.Err

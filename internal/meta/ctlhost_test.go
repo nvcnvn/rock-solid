@@ -2,6 +2,7 @@ package meta
 
 import (
 	"encoding/binary"
+	"errors"
 	"slices"
 	"testing"
 
@@ -91,12 +92,15 @@ func (r *hostRun) config(i int) Config {
 }
 
 // restart crashes host i, losing what its disk did not flush, and recovers it from its disk.
-func (r *hostRun) restart(i int) {
+func (r *hostRun) restart(i int) { r.restartWith(i, r.config(i)) }
+
+// restartWith is restart, the host recovering on cfg.
+func (r *hostRun) restartWith(i int, cfg Config) {
 	r.t.Helper()
 	r.disks[i].Crash(func(int, core.LBA) bool { return false })
 	r.work = slices.DeleteFunc(r.work, func(w hostWork) bool { return w.at == i || w.from == i })
 	r.do(i, func(ctx *core.Context, out *CtlHostOutput) {
-		h, err := OpenCtlHost(ctx, r.config(i), ctlLogConfig(), ctlGeometry.DiskBlocks(), out)
+		h, err := OpenCtlHost(ctx, cfg, ctlLogConfig(), ctlGeometry.DiskBlocks(), out)
 		if err != nil {
 			r.t.Fatal(err)
 		}
@@ -434,6 +438,69 @@ func TestSeveralVotersOnDiskLogsElectAndCommit(t *testing.T) {
 			t.Errorf("voter %d applied through %d, the leader through %d", i+1, got, want)
 		}
 	}
+}
+
+// A voter restarted with voters other than those its disk was formatted with stops: alone, it
+// would elect itself and acknowledge commits that no quorum of the group holds.
+func TestAVoterRestartedWithOtherVotersStops(t *testing.T) {
+	r := newHostGroup(t, 3)
+	l := r.leader()
+	if a := r.txnAt(l, 9, "x"); a == nil || a.Err != nil {
+		t.Fatalf("first Txn answered %+v", a)
+	}
+	alone := r.config(l)
+	alone.Raft.Storage = bootStorage(t, raftpb.ConfState{Voters: []uint64{uint64(l) + 1}})
+	alone.Raft.Peers = alone.Raft.Peers[l : l+1]
+	r.failing = true
+	r.restartWith(l, alone)
+	if !errors.Is(r.hs[l].Err(), ErrVoters) || r.hs[l].Shard() != nil {
+		t.Fatalf("restarted alone, the voter has error %v and replica %v", r.hs[l].Err(), r.hs[l].Shard())
+	}
+	r.run(raftshard.TickInterval * 300)
+	if a := r.txnAt(l, 10, "y"); a != nil {
+		t.Fatalf("the stopped voter answered %+v", a)
+	}
+	o := r.leader()
+	if o == l {
+		t.Fatalf("the stopped voter leads")
+	}
+	if a := r.txnAt(o, 11, "z"); a == nil || a.Err != nil {
+		t.Fatalf("the other two voters answered %+v", a)
+	}
+}
+
+// leader runs the group until a voter leads, and returns it.
+func (r *hostRun) leader() int {
+	r.t.Helper()
+	for range 500 {
+		r.run(raftshard.TickInterval)
+		for i, h := range r.hs {
+			if h.Err() == nil && h.Shard() != nil && h.Shard().Raft().Leader() == uint64(i)+1 {
+				return i
+			}
+		}
+	}
+	r.t.Fatal("no voter leads")
+	return -1
+}
+
+// txnAt hands voter i a Txn from a storage node and returns its answer, or nil.
+func (r *hostRun) txnAt(i int, token uint64, v string) *Answer {
+	r.t.Helper()
+	var m core.Msg
+	tx := Txn{Ops: []Op{Put(attr(1, 2, 1), b(v))}}
+	if err := EncodeTxn(r.pool, hostGroup, token, &tx, &m); err != nil {
+		r.t.Fatal(err)
+	}
+	r.sent = r.sent[:0]
+	r.recvAt(i, hostNode, m)
+	for _, a := range r.sent {
+		var ans Answer
+		if DecodeAnswer(r.pool, &a.Msg, &ans) == nil && ans.Token == token {
+			return &ans
+		}
+	}
+	return nil
 }
 
 // A disk that fails stops the host: it reports the error, drops its Control and takes nothing more.

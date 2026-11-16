@@ -176,24 +176,21 @@ func (m *ctlMachine) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Acti
 	return append(acts, m.out.Actions...)
 }
 
-// boot formats the disk or recovers it, the replica's boot state the configuration of the voters.
+// boot formats the disk or recovers it, the replica's boot state the configuration of the voters,
+// each under its node ID as its Raft ID.
 func (m *ctlMachine) boot(ctx *core.Context) (*meta.CtlHost, error) {
 	cfg := m.p.cfg
 	cs := raftpb.ConfState{}
 	var peers []raftshard.Peer
-	var id uint64
-	for i, v := range cfg.Voters {
-		cs.Voters = append(cs.Voters, uint64(i)+1)
-		peers = append(peers, raftshard.Peer{ID: uint64(i) + 1, Node: core.NodeID{Node: v.Node}})
-		if v.Node == cfg.Node {
-			id = uint64(i) + 1
-		}
+	for _, v := range cfg.Voters {
+		cs.Voters = append(cs.Voters, uint64(v.Node))
+		peers = append(peers, raftshard.Peer{ID: uint64(v.Node), Node: core.NodeID{Node: v.Node}})
 	}
 	st := raftshard.NewStorage()
 	if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 1, Term: 1, ConfState: cs}}); err != nil {
 		return nil, err
 	}
-	mc := meta.Config{Raft: raftshard.Config{Group: cfg.Group, ID: id, Peers: peers, Storage: st, Seed: rand.Uint64(), Timer: raftTimer,
+	mc := meta.Config{Raft: raftshard.Config{Group: cfg.Group, ID: uint64(cfg.Node), Peers: peers, Storage: st, Seed: rand.Uint64(), Timer: raftTimer,
 		Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, rand.Uint64(), lease.Now(ctx))},
 		Tree: lsm.Config{MaxPiece: 64 << 10}}
 	lc := disklog.DefaultConfig()

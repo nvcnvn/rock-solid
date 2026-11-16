@@ -19,7 +19,7 @@ import (
 type ctlConfig struct {
 	// Node is this voter's node ID, one of Voters.
 	Node uint32
-	// Voters are the group's voters, by node ID, each at its address; the order gives their Raft IDs.
+	// Voters are the group's voters, by node ID, each at its address.
 	Voters []voter
 	Group  uint64
 	// Listen is the address this voter takes connections on.
@@ -64,7 +64,7 @@ func parseCtl(args []string) (ctlConfig, error) {
 	var cfg ctlConfig
 	fs := flag.NewFlagSet("ctl", flag.ContinueOnError)
 	node := fs.Uint("node", 0, "this voter's node ID, one of -voters")
-	voters := fs.String("voters", "", "the group's voters as node=host:port, comma-separated, the same list and order on every voter")
+	voters := fs.String("voters", "", "the group's voters as node=host:port, comma-separated, the same voters on every voter and at every start")
 	fs.Uint64Var(&cfg.Group, "group", 1, "the control-plane group's ID")
 	listen := fs.String("listen", "", "the address to take connections on (default: this voter's address in -voters)")
 	fs.StringVar(&cfg.Disk, "disk", "", "the file the group's log lives in")
@@ -77,8 +77,8 @@ func parseCtl(args []string) (ctlConfig, error) {
 	for _, v := range strings.Split(*voters, ",") {
 		id, addr, ok := strings.Cut(v, "=")
 		n, err := strconv.ParseUint(id, 10, 32)
-		if !ok || err != nil {
-			return cfg, fmt.Errorf("-voters: %q is not node=host:port", v)
+		if !ok || err != nil || n == 0 {
+			return cfg, fmt.Errorf("-voters: %q is not node=host:port with a node above 0", v)
 		}
 		ap, err := netip.ParseAddrPort(addr)
 		if err != nil {
