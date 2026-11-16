@@ -312,14 +312,17 @@ func TestANodeMovesToTheLeaderItsVoterNames(t *testing.T) {
 	if !r.out.Moved || r.n.Ctl() != other {
 		t.Fatalf("talks to %v after its voter named %v", r.n.Ctl(), other)
 	}
+	r.ctx.Now += Interval
 	r.from(other, leader(core.NodeID{}, false))
 	if !r.out.Moved || r.n.Ctl() != (core.NodeID{Node: 7}) {
 		t.Fatalf("talks to %v after its voter knew no leader", r.n.Ctl())
 	}
+	r.ctx.Now += Interval
 	r.from(core.NodeID{Node: 7}, leader(core.NodeID{Node: 5}, true))
 	if r.n.Ctl() != ctl {
 		t.Fatalf("talks to %v after its voter named a node that is no voter", r.n.Ctl())
 	}
+	r.ctx.Now += Interval
 	r.event(core.Event{Kind: core.EvPeerLost, Peer: ctl})
 	if !r.out.Moved || r.n.Ctl() != other {
 		t.Fatalf("talks to %v after losing %v", r.n.Ctl(), ctl)
@@ -370,5 +373,49 @@ func TestATableFetchGoesOutOnceAnIntervalUntilATableArrives(t *testing.T) {
 	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, m) })
 	if fetches() != 1 {
 		t.Fatal("no fetch at once after a table arrived")
+	}
+}
+
+// With one voter the address never moves: a move re-points every replica, each sending a report
+// at once, and while the driver backs off each send fails with another loss.
+func TestALostSoleVoterMovesNothing(t *testing.T) {
+	r := newRun(t, 1, 1)
+	for range 5 {
+		r.event(core.Event{Kind: core.EvPeerLost, Peer: ctl})
+		if r.out.Moved {
+			t.Fatal("a loss of the only voter moved the node")
+		}
+	}
+	r.from(ctl, leader(core.NodeID{}, false))
+	if r.out.Moved {
+		t.Fatal("the only voter knowing no leader moved the node")
+	}
+}
+
+func TestANodeMovesAtMostOnceAnInterval(t *testing.T) {
+	r := three(t)
+	moves := 0
+	for range 9 {
+		r.event(core.Event{Kind: core.EvPeerLost, Peer: r.n.Ctl()})
+		if r.out.Moved {
+			moves++
+		}
+		r.from(r.n.Ctl(), leader(core.NodeID{}, false))
+		if r.out.Moved {
+			moves++
+		}
+	}
+	if moves != 1 || r.n.Ctl() != other {
+		t.Fatalf("losses and redirects in one interval moved %d times, to %v", moves, r.n.Ctl())
+	}
+	r.ctx.Now += Interval
+	r.event(core.Event{Kind: core.EvPeerLost, Peer: other})
+	if !r.out.Moved || r.n.Ctl() != (core.NodeID{Node: 7}) {
+		t.Fatalf("talks to %v an interval later", r.n.Ctl())
+	}
+	r.ctx.Now += Interval
+	r.from(r.n.Ctl(), leader(r.n.Ctl(), true))
+	if r.out.Moved {
+		t.Fatal("a voter naming itself moved the node")
 	}
 }

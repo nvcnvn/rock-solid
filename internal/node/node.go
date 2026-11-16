@@ -79,9 +79,11 @@ type Node struct {
 	fetchSeq uint64
 	fetchAt  core.Tick
 	report   meta.NodeReport
-	// ctl is the voter the node talks to, tableAt when it may fetch the placement table again,
-	// and placed and delta the last placement table and delta it received.
+	// ctl is the voter the node talks to, moveAt when it may move to another, tableAt when it may
+	// fetch the placement table again, and placed and delta the last placement table and delta it
+	// received.
 	ctl     int
+	moveAt  core.Tick
 	tableAt core.Tick
 	placed  chunkstore.Table
 	delta   chunkstore.Delta
@@ -90,13 +92,18 @@ type Node struct {
 // Ctl is the control-plane voter the node talks to.
 func (n *Node) Ctl() core.NodeID { return n.cfg.Ctls[n.ctl] }
 
-// move talks to the next voter, or to the one at, if it is one.
-func (n *Node) move(at core.NodeID, known bool, out *Output) {
-	if i := slices.Index(n.cfg.Ctls, at); known && i >= 0 {
-		n.ctl = i
-	} else {
-		n.ctl = (n.ctl + 1) % len(n.cfg.Ctls)
+// move talks to the one at, if it is a voter, or else to the next, at most once an Interval: a
+// move re-points every replica, each sending at once, and while the driver backs off each send
+// fails with another loss.
+func (n *Node) move(ctx *core.Context, at core.NodeID, known bool, out *Output) {
+	i := slices.Index(n.cfg.Ctls, at)
+	if !known || i < 0 {
+		i = (n.ctl + 1) % len(n.cfg.Ctls)
 	}
+	if i == n.ctl || ctx.Now < n.moveAt {
+		return
+	}
+	n.ctl, n.moveAt = i, ctx.Now+Interval
 	out.Moved = true
 }
 
@@ -179,7 +186,7 @@ func (n *Node) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	switch ev.Kind {
 	case core.EvPeerLost:
 		if ev.Peer == n.Ctl() {
-			n.move(core.NodeID{}, false, out)
+			n.move(ctx, core.NodeID{}, false, out)
 		}
 	case core.EvNetRecv:
 		n.recv(ctx, ev, out)
@@ -204,7 +211,7 @@ func (n *Node) recv(ctx *core.Context, ev *core.Event, out *Output) {
 	switch kind {
 	case meta.KindLeader:
 		if at, known, err := meta.DecodeLeader(ctx.Pool, &ev.Msg); err == nil && ev.Peer == n.Ctl() {
-			n.move(at, known, out)
+			n.move(ctx, at, known, out)
 		}
 		return
 	case meta.KindTable:

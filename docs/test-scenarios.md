@@ -7720,6 +7720,8 @@ The rows without a test named are unit tests in `internal/meta/ctlhost_test.go`.
 | --- | --- |
 | A leader message from the voter the node talks to, naming another voter; naming none; naming a node that is no voter; one from a voter it does not talk to | Moves to the voter named; to the next voter; to the next voter; stays. Each move is in the output, so replicas report to the new voter |
 | The connection to the voter it talks to is lost | Moves to the next voter; the next heartbeat goes there |
+| Five losses of the only voter, and that voter naming no leader | No move, so no replica is re-pointed |
+| Nine losses and nine redirects naming no leader within one `Interval` at a three-voter node; a loss an `Interval` later; a voter naming itself | One move; one more; none |
 | A placement table or delta from a voter, and one from a node that is no voter | Handed on for every replica; dropped |
 | Two replicas ask for the table in one pass, then again an interval later, then after a table arrived | One fetch, one more, then one at once |
 
