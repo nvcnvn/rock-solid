@@ -7723,10 +7723,9 @@ once.
   child process of the test binary (`TestStartChild`): the same two cases with `kill -9` in place
   of the power cut. `TestAStartKilledTwiceMidFormatComesBackWholeOrNew` kills the child after k
   rounds of format's completions, for k from 1 to 8, half of a format's rounds and the last 9, the
-  start's own format after as many, then starts it unkilled, with the same checks; in two runs in a
-  row a format took 183 and 232 rounds, 2 starts found the old log and 16 a new one.
-  The run is made with trims and with `NoTrim`; with no trims a format's first write is the new
-  block 0, which a kill after a round has let land, so only that run may find no old log.
+  start's own format after as many, then starts it unkilled, with the same checks. It runs with
+  trims, where both outcomes must be reached, and with `NoTrim`, where only a new log must be: with
+  no trims a format's first write is the new block 0, which a kill after a round has let land.
   `TestAStartLeavesADeviceWithNoValidSuperblockAsItWas` checks the file's SHA-256 after a start
   reports the device failed.
 - The report (`TestAFailedDeviceIsShownAndNeverRecorded`, `internal/meta`): failed devices
