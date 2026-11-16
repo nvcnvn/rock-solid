@@ -3589,7 +3589,7 @@ under fairness, as `heavy-peering` does, on the restart plan alone, and those fo
 | The holder ends its lease on the slower of its clocks | 1 | Holder `CLOCK_BOOTTIME` −22.6%: the lease outlives the grant |
 | The grantor ends its grant on the faster of its clocks | 1 | Grantor `CLOCK_BOOTTIME` +22.6% |
 | A lease before the first bound, on `lease_drift` alone | 1 | Grantor raw clock 4% fast: the first grant's lease outlives the grant |
-| That, with the step check at `1 + lease_drift / 2` restarting the window on each trip (the one variant that plants two bugs, as the rule it breaks is a combination) | 1 | As above; the pair never gets a bound |
+| That, with the step check at `1 + lease_drift / 2` restarting the window on each trip (two bugs, as the rule it breaks is a combination) | 1 | As above; the pair never gets a bound |
 | Widening only past `1 + 2 lease_drift` | 1 | Grantor 4% fast: the margin stays 3% where 3.85% is needed, and a partition follows a grant |
 | The margin `max(lease_drift, 1 − 1/B)` | 1 | Pair measured at +4%, then the grantor's raw rate rises 0.4% and a partition follows a grant |
 | No new window at a grantor's new run ID | 1 | Grantor 4% fast is paused with a marker change just after a window's first grant; the bound across the pause comes out below 1, the lease on `lease_drift` alone outlasts the grant, and a partition follows. A reboot gives the same through a new boot that runs 2% fast |
@@ -3617,6 +3617,12 @@ under fairness, as `heavy-peering` does, on the restart plan alone, and those fo
 | Replay ignores the entry's image flag (`neg-ignore-image-flag`) | 18 | `ci-image-restart`'s plan: the primary restarts after the decision that dropped Y and forgets its image, and the other member's disk goes |
 | Replay maps what a decision entry dropped (`neg-replay-forgets-drops`) | 18 | `ci-image-restart`'s move with the restart aimed at the primary and the format at the other member, and a spare table: the primary restarts after the decision that dropped Y and maps Y, so the decision of its next interval keeps no image, and the other member's disk goes before recovery |
 
+- The holder's slower and the grantor's faster clock, both leases before a bound, the two widening
+  rows, no new window at a new run ID and a reboot that takes no time each also drop the second a
+  holder leaves for a suspend that delivers no `Resumed` (`NoResumeMargin`): that second covers
+  each of their errors, and the rule each breaks must hold without it. No variant drops that
+  second alone: with it gone, neither `ci-hide`'s plan nor that plan with a partition shows an
+  overrun within the `ci` budget, though seed 120 of the Raft runs and the lease pair run do.
 - The grant rule `ci-leases` checks: a grantor grants or renews only a holder that reported a table at
   least as new as its own, and a grant carries no table epoch. Property 1 holds with it, and fails
   with fresh grants exempt from the check (the row above), so the Grant row under [Wire
@@ -4055,6 +4061,7 @@ next milestone's run, which is also the twins' first.
 | Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 29 | 1,063,344 | 166 s |
 | Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 27 | 304,508 | 67 s |
 | Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 84 | 1,408,661 | 131 s |
+| Epoch change | `ci-hide` | [Epoch change model](#epoch-change-model) | 74 | 173,375 | 18 s |
 | Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 1,583,822 | 291 s |
 | Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 27 | 130,443 | 38 s |
 | Epoch change | `ci-stays-as-primary` | [Epoch change model](#epoch-change-model) | 27 | 485,640 | 132 s |
@@ -5984,7 +5991,7 @@ commit, it must pass unplanted and break its invariant planted.
 | A held write ordered again although another primary led | The lead's term kept across another primary's interval | Trace: P, peering cut off from Q, holds W; interval 3 makes Q primary with P in `maintenance`; the successor's W′ and W2 complete at Q; interval 4 makes P primary again | | | Property 11's |
 | A returning primary keeps its pending versions by number | `Settle` keeps every pending version at or below the kept one (`settleByNumber`); no model row, since the model answers no client at peering | Trace: primary 2, cut off from disk 3, orders W as 1.1; interval 2, handed to disks 1 and 3 alone, makes disk 3 primary without disk 2, and W2 is acknowledged as 2.1; interval 3 makes disk 2 primary again, its peering keeping 2.1 (`TestAReturningPrimaryRefusesAPendingVersionOffTheKeptChain` runs it unplanted, the read run's seed 366 found it) | | | "no acknowledged version is ever dropped", checked against the first interval activated after the version's |
 | A kept primary reads below `min_live` | | Trace: interval 2 marks disk 3 down; disk 3 restarts, and interval 3 makes it primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone | | | Property 1's |
-| The 14 lease clock rows from the holder's slower clock to step check on grants only, no restart wait and no margin for a suspend that delivers no `Resumed` | `internal/lease` plants on `Holder` and `Grantor` | Lease pair | Below | | "the holder holds a lease its grantor no longer keeps", or for property 10 "tripped" |
+| The 13 lease clock rows from the holder's slower clock to step check on grants only, and no restart wait | `internal/lease` plants on `Holder` and `Grantor` | Lease pair | Below | | "the holder holds a lease its grantor no longer keeps", or for property 10 "tripped" |
 | A lease kept across a grantor's new run ID | The holder keeps its lease and window at a heartbeat from a new run | Trace in `internal/lease` (`TestALeaseKeptAcrossANewRunBreaksItsTrace`): the holder stops in place at 1 s, about 0.9 s after its lease formed, the grantor's heartbeats lost; the grantor resumes with a new run ID, heartbeats once and lets its grant end; the holder continues at 5 s. The pair run stops one side at a time and never reaches it (0 of 5,000) | | | "the holder holds a lease its grantor no longer keeps" |
 | A reboot that takes no time | The simulated reboot | Trace: grantor 3 reboots the instant after a grant, cut off from primary 2, its new boot 2% fast, and comes back primary with disk 2 in `maintenance`, while primary 2 sleeps 0.99 s with no `Resumed`, spending the margin left for such a suspend | | | Property 1's |
 | Peer messages handled after reads in a pass | The simulated loop's first pass after a pause delivers client reads first | Trace: primary 2 stops in place with its clocks frozen for 10 s; interval 2 makes disk 3 primary with disk 2 in `maintenance`, handed to disks 1 and 3; a read tagged with interval 1 reaches disk 2 at 9 s, behind disk 3's heartbeats | | | Property 1's, as the read arrives |
@@ -5992,7 +5999,7 @@ commit, it must pass unplanted and break its invariant planted.
 | A fresh grant with no table check | | Trace: interval 2 makes disk 3 primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone; disk 2 asks afresh once its lease lapses | | | Property 1's |
 
 The lease pair run's plants, seeds of 500 failing and the first. No margin for a suspend that
-delivers no `Resumed` 2 (28). The 1 s of that margin covers the errors of most other plants, so
+delivers no `Resumed` (`Config.Resume` 0, which no model variant has: see `ci-hide`) 2 (28). The 1 s of that margin covers the errors of most other plants, so
 these plant it away too, and the run then draws no such suspend: the holder ending on its slower
 clock 68 (6), the grantor on its faster 96 (8), a lease before the first bound 1 (21), that with the
 step check at `1 + lease_drift / 2` 14 (6), widening only past `1 + 2 lease_drift` 20 (9), the

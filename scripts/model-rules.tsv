@@ -33,7 +33,6 @@ epoch/neg-merge-on-dropped	chunkstore.mergeOnDropped	TestPlantedPeeringBugsBreak
 epoch/neg-no-end-on-resume	lease.noResumedEnd	TestPlantedLeaseBugsBreakThePair
 epoch/neg-no-epoch-bump	raftshard.noEpochBump	TestPlantedLeaseBugsBreakTheLeaseReaderInvariant
 epoch/neg-no-restart-wait	lease.noRestartWait	TestPlantedLeaseBugsBreakThePair
-epoch/neg-no-resume-margin	lease.Resume	TestPlantedLeaseBugsBreakThePair
 epoch/neg-no-run-window	lease.noRunWindow	TestPlantedLeaseBugsBreakThePair
 epoch/neg-no-step-check	lease.noStepCheck	TestPlantedLeaseBugsBreakThePair
 epoch/neg-peering-clears-missing	chunkstore.relistNever,clearListed	TestPlantedPeeringBugsBreakTheFaultRun

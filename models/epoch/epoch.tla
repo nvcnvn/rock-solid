@@ -2636,6 +2636,7 @@ HandoverStep == [Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "step", "cut", 
 HandoverSuspend == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "susp", "pause", "fast"})
 \* a suspend under 1 s that delivers no Resumed, with exact clocks;
 HandoverHide == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "susp", "hide", "exact"})
+
 \* a kvm-clock guest stopped in place, with no partition (design.md, open
 \* question on kvm-clock stops);
 HandoverStop == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "stop", "fast"})
@@ -2678,7 +2679,9 @@ RaftPartition == [Plan(<<>>, <<>>, {"raft", "cut", "heal", "fast"}) EXCEPT !.t =
 \* deep-slow at 3 nodes, since with the others at 4 nodes it passed 108 million
 \* states in 4 hours. ci-hide checks the hidden suspend apart, so that a
 \* negative variant of LeasePlans that also drops the margin for one fails
-\* on its own rule.
+\* on its own rule. No variant drops the margin alone: with it gone, neither
+\* ci-hide's plan nor the same plan with a partition shows an overrun within
+\* ci's budget.
 LeasePlans == {Steady, Handover, HandoverStep, HandoverSuspend, HandoverStop,
                HandoverRestart, HandoverCut, Maintenance, RaftTransfer, RaftPartition}
 RebootPlans == {HandoverReboot}
