@@ -235,8 +235,8 @@ func planned(plan []Peer) []uint64 {
 // Under the Raft runs' faults, with the first leader crashed, a follower's replacement adds the
 // fourth replica as a learner, catches it up from snapshots of compacted logs, swaps it in through a
 // joint configuration and leaves it; the replaced replica, once reconnected, deletes its state.
-// Seeds that found bugs: 6389, a lease-reading leader behind a follower that applied first, which
-// only a leader's applies now count against; 8218, a leader whose configuration change of an
+// Seeds that found bugs: 6389, a lease-reading leader behind a follower that applied first (the run
+// has since changed and no longer reaches it), and only a leader's applies count against it; 8218, a leader whose configuration change of an
 // earlier term was lost, and which then proposed none again; 1005, a leader the plan dropped
 // that waited for a follower to reach its own durable index, which steady writes never allowed.
 func TestVoterReplacementRegressionSeeds(t *testing.T) {

@@ -6444,8 +6444,9 @@ keeps serving lease reads (`neg-removed-keeps-lease`) breaks "no two replicas of
 lease reads at overlapping times" (`TestARemovedLeaderThatKeepsReadingBreaksTheLeaseInvariant`;
 7 of the first 20 seeds).
 
-`TestVoterReplacementRegressionSeeds` keeps three seeds that found bugs: 6389, the lease property
-counting a follower's applies (above, under [Leader leases](#leader-leases)); 8218, a leader whose
+`TestVoterReplacementRegressionSeeds` keeps three seeds that found bugs: 6389, which found a
+lease-reading leader behind a follower that applied first (the run has since changed and no longer
+reaches it); only a leader's applies count against it (above, under [Leader leases](#leader-leases)); 8218, a leader whose
 configuration change of an earlier term was lost and that proposed none again; and 1005, a dropped
 leader waiting for a follower to reach its own durable index, which steady writes never allow.
 
