@@ -7700,6 +7700,9 @@ once.
   a store that serves is opened; `ErrNotFormatted`, wrapped, is formatted, under a log ID no earlier
   of 100 starts drew; `ErrUnrecognized`, `CopyOnly`, a disk read error and `ErrCorrupt` are each
   failed.
+- A format that fails (`TestADeviceWhoseFormatFailsIsReportedFailed`, `storetest`): a blank
+  device too small for any geometry, and a blank device whose writes fail, are formatted, and
+  `StartDevice` given how the format ended reports each failed.
 - Formats crashed twice on the simulated disk
   (`TestADeviceCrashedTwiceMidFormatComesBackWholeOrNew`, `storetest`): a store holding a 3-block
   write to chunk 1 under log `0x5eed` is formatted again under a new log ID and power-cut after k of

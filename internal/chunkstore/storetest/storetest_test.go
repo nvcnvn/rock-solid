@@ -121,6 +121,32 @@ func formatSteps(t *testing.T) int {
 	return n
 }
 
+// A blank device too small for any geometry, and one whose format fails a write, are formatted and
+// then reported failed: the node hands StartDevice how the format ended.
+func TestADeviceWhoseFormatFailsIsReportedFailed(t *testing.T) {
+	rng := core.NewRand(1)
+	small := storetest.NewSimDiskOf(1, 8*core.BlockSize)
+	r, act, _ := storetest.StartRig(t, small, storetest.Config(), rng)
+	if act != chunkstore.StartFormat {
+		t.Fatalf("a blank device too small for a geometry: %v, %v", act, r.S.Err())
+	}
+	_, err := disklog.GeometryFor(small.Blocks() * core.BlockSize)
+	if act, _ := chunkstore.StartDevice(rng, err); act != chunkstore.StartFailed {
+		t.Fatalf("a format with no geometry, %v: %v", err, act)
+	}
+	d := storetest.NewSimDisk(1)
+	r, act, log := storetest.StartRig(t, d, storetest.Config(), rng)
+	if act != chunkstore.StartFormat {
+		t.Fatalf("a blank device: %v, %v", act, r.S.Err())
+	}
+	d.D.Inject(sim.Fault{Effect: sim.FailIO, When: func(op sim.DiskOp, _ *core.Rand) bool { return op.Kind == core.ActDiskWrite }})
+	r.Format(log)
+	r.Settle()
+	if act, _ := chunkstore.StartDevice(rng, r.S.Err()); act != chunkstore.StartFailed {
+		t.Fatalf("a format whose write failed, %v: %v", r.S.Err(), act)
+	}
+}
+
 // A device whose superblock and copy both fail their checksums is left to the operator, byte for
 // byte as it was.
 func TestADeviceWithNoValidSuperblockIsLeftAsItWas(t *testing.T) {

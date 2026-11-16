@@ -26,7 +26,7 @@ const (
 	StartFailed
 )
 
-// StartDevice is what a node does with a device whose store's recovery ended with err, nil once it serves, and for StartFormat the log ID to format it under; rng must be seeded from the operating system at each process start, never from a fixed or configured seed, or a format cut short draws the same log ID again.
+// StartDevice is what a node does with a device whose store's recovery, or the format StartFormat began, ended with err, nil once it serves, and for StartFormat the log ID to format it under; rng must be seeded from the operating system at each process start, never from a fixed or configured seed, or a format cut short draws the same log ID again.
 func StartDevice(rng *core.Rand, err error) (DeviceStart, uint64) {
 	switch {
 	case err == nil:
