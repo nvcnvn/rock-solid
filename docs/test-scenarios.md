@@ -4025,10 +4025,11 @@ section.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
-| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 28 | 1,427,384 | 708 s, 1 worker |
+| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 29 | 1,427,384 | 197 s |
 | Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 20 | 2,623 | 7 s, 1 worker |
 | Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 22 | 73,752 | 210 s, 1 worker |
 | Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 21 | 256,774 | 103 s, 1 worker |
+| Voter replacement | `deep-live` | [Voter replacement model](#voter-replacement-model) | 27 | 57,229 | 161 s, 1 worker |
 | Epoch change | `heavy-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,577 s |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |
