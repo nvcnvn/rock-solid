@@ -4245,7 +4245,7 @@ The record kinds of the event loop, such as `NetRecv` and `DiskDone`, have no sp
 the machine's steps below the protocol's, and the records above say what those steps did. `tracedata`
 lists them in `belowProtocol`, and stops on a record neither mapped nor listed.
 
-Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`:
+Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`: the scripted traces and seeds 15 and 34 at this commit, the other seeds before replay rollback took the format branch's changes, not rerun since:
 
 | Trace | Lines | Result | Seconds |
 | --- | --- | --- | --- |
@@ -4263,11 +4263,13 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | `scripted-move-primary` | 39 | passes: a move to a new primary that holds Y, peering keeping Y, which every up member holds, over the removed disk | 2 |
 | `scripted-lister-restarted` | 56 | passes: a restart during recovery, the restarted primary's replay gating Y until its next decision | 2 |
 | `scripted-lister-rotated` | 51 | passes: a rotation during recovery, the new primary holding Y logged and peering keeping it over the member that lists the chunk | 2 |
-| 37 seeds | 463 to 952 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, with own records released before their `Logged` reply at 8, 12, 23, 25 and 33 | 3 to 219 |
+| 35 seeds | 463 to 952 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31 and 38, with own records released before their `Logged` reply at 8, 12, 23, 25 and 33 | 3 to 219 |
+| `primaries-15` | 618 | stops at line 520, a `recoveredlate`: discrepancy 29 | 20 |
+| `primaries-34` | 559 | stops at line 250, a `recovered`: discrepancy 28 | 6 |
 | `primaries-2` | 677 | no verdict in 400 s and 2 GB, not rerun at this commit: one crash leaves 26 `mayfail` lines, each a free choice | 400 |
 | `primaries-18`, `primaries-35` | 729, 753 | no verdict in 1,200 s and 2 GB, not rerun at this commit: 18 has 25 `mayfail` and 45 `maydeliver` lines, 35 has 6 and 53. TLC ran each at about 300,000 states a minute for two minutes, to depth 491 and 439, then at 1,250 a minute with about 58,000 states queued, its 2 GB heap full | 1,200 |
 
-37 seeds of 40 pass, and 2, 18 and 35 give no verdict. None broke a safety invariant,
+35 seeds of 40 pass, 15 and 34 stop on a recovery line, and 2, 18 and 35 give no verdict. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
 and `mayfail` branches stay alive, not its length.
 
@@ -4377,7 +4379,8 @@ mapping says. The actions of `Next` no trace took:
 | 25 | After a restart, a member reports a listed chunk's newest whole version below the spec's: replay holds every version of an interval at or past the PG's persisted decision and settles them at the next decision marker, so it drops what that marker's list does not keep, where the running store kept them mapped and `Persist` dropped only gated versions | spec | Settled, seed 1: at each persist, `ReplayDrops` records in `rdrp` the versions logged since the disk's previous marker that the listed version does not keep, and a restart moves them into `drp`. The chunk stays listed until recovery, so the decision lists it either way. The patched spec passes every `ci` configuration |
 | 26 | The primary's own record of a version it released before its store's `Logged` reply left no `ownlogged` line: a member's refusal (`fail`), a demotion or a lone copy (`refuseWaiting`) deletes the version from `r.vers`, and `logged` found none, so the activation that follows had no step, `Activated` waiting on `ownw` | logging | Settled: `release` keeps the store request and chunk of an ordered own version not yet logged, `logged` notes `ownlogged` from them, and a failed store forgets them. Not a code bug: `Replica.Activate` waits on `Unsettled`, which keeps an op pending while its records are neither durable nor failed, so every version an activation acknowledges has its own record durable. Seeds 8, 12, 23, 25 and 33 pass, with 1 and 19 |
 | 27 | Replay gated nothing on a disk whose persisted decision was interval 1, read as no marker, where the pool's first peering writes interval-1 decision markers and replay gates from them | spec | Settled, seed 6: replay gating in `RestartState` and `ReplayDrops` reads `persIv > 0`, a formatted disk's 0 alone standing for no marker. Seeds 5, 6, 22, 31 and 38 pass, and seed 1 of discrepancy 25 under the new `ReplayDrops` |
-| 28 | A recovery's source answers the read, then crashes and is formatted again, and the answer reaches the primary after, so its `recoverorder` and `recovered` lines follow the source's `format`, where `Recover` needs the source running | compression, open | Seed 34, line 242, a form of discrepancy 11: `tracedata` could place the recovery before the source's crash, or the record could carry when the source read |
+| 28 | A recovery's source answers the read, then crashes and is formatted again, and the answer reaches the primary after, so its `recoverorder` and `recovered` lines follow the source's `format`, where `Recover` needs the source running | compression, open | Seed 34, line 250, a form of discrepancy 11: `tracedata` could place the recovery before the source's crash, or the record could carry when the source read |
+| 29 | The primary's `Recovered` record of a recovery write of interval 4 comes after it took its own disk's reply for interval 16, which does not list the chunk, where `RecoveredLate` needs the disk still listed | compression, open | Seed 15, line 520, likely the recovery write a failed write ended, whose request `Replica.fail` leaves to its answer and which demotion leaves gated until a later decision lands it. `Index.recovered` changes no listing on a chunk the disk does not list, so the line could be a stutter there |
 
 Seeds 40 to 339 at 150 s each: 260 passed at aa05106, and the 40 that did not were run again at abb8966, seeds 55, 231, 267, 311 and 323 again once `classify` mapped `Stay`. None names a safety invariant.
 
