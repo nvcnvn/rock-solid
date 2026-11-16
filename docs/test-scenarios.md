@@ -5679,7 +5679,9 @@ own ([Testing strategy](design.md#testing-strategy)).
     of its own after the restart (`TestARestartedPrimaryKeepsItsDropsAcrossItsNextDecision`).
   - The primary's disk is marked down and up, a bounce, with Y pending
     (`TestABouncedPrimaryWithItsWritePendingRollsItBack`) and after Y was dropped
-    (`TestABouncedPrimaryKeepsTheImageOfItsDroppedWrite`).
+    (`TestABouncedPrimaryKeepsTheImageOfItsDroppedWrite`). An operator edit that puts the other
+    member first leaves the old primary's disk an up member, and its image goes
+    (`TestAnUpMemberUnderAnotherPrimaryCarriesNoImage`).
   - A decision persisted and not activated before the next peering drops Y at the persist
     (`TestADecisionPersistedAndNotActivatedKeepsItsDrops`), and the primary's entry for its
     dropped Y carries the image flag, before and after a restart

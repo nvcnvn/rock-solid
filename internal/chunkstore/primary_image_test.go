@@ -87,3 +87,31 @@ func TestAPrimaryLackingTheKeptVersionCarriesNoImage(t *testing.T) {
 		t.Fatalf("the primary lacks %#x of %v but carries it as its image", rp.Version, ch)
 	}
 }
+
+// A primary's image goes once an interval names another primary while its disk is an up member: it took that primary's
+// writes, so its last decision is no longer what it holds.
+func TestAnUpMemberUnderAnotherPrimaryCarriesNoImage(t *testing.T) {
+	r := newSoleRun(t, 2, 2, 3)
+	c := r.c
+	ch := chunkIn(pg0, 1, 0)
+	id := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize))
+	c.until(id)
+	c.settle()
+	_, e := c.table.entry(pg0)
+	r.a.asks = []PGInterval{{pg0, e.Interval}}
+	r.tick(5_000_000)
+	ms := r.members()
+	p, m := ms[0].Disk, ms[1].Disk
+	n := c.node(p)
+	if _, ok := c.reps[n].imaged(pg0, ch); !ok {
+		t.Fatalf("the shape needs disk %d carrying an image of %v", p, ch)
+	}
+	r.a.edits = []Edit{{PG: pg0, Disks: []uint32{m, p}}}
+	r.tick(5_000_000)
+	if ms := r.members(); ms[0].Disk != m || ms[1].Disk != p || ms[1].Mark != MarkUp {
+		t.Fatalf("members %v: the shape needs disk %d primary and disk %d an up member", ms, m, p)
+	}
+	if v, ok := c.reps[n].imaged(pg0, ch); ok {
+		t.Fatalf("disk %d, an up member under disk %d, carries an image of %v at %#x", p, m, ch, v)
+	}
+}
