@@ -119,6 +119,7 @@ RecoveredLate(l) ==
     /\ RecoveryOrdered(l)
     /\ OwnRecovery(l)
     /\ IvAt(l.n, ChunkPG[l.c]) > l.iv
+    /\ miss[ddisk[l.n]][l.c] # NoMiss
 
 RecoverLine(l) ==
     /\ (l.s = 0) = (miss[ddisk[l.n]][l.c] = 0)
