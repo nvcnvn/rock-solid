@@ -509,7 +509,7 @@ func (s *Shard) sender(id uint64, node core.NodeID, out *Output) {
 // answerGone answers, once this replica applied its removal, an ask that names it.
 func (s *Shard) answerGone(ev *core.Event, out *Output) {
 	b := ev.Msg.Inline()
-	if len(b) != fortBytes || le.Uint64(b) != s.cfg.Group || le.Uint64(b[kindBytes+8:]) != s.cfg.ID {
+	if len(b) != fortBytes || le.Uint64(b[1:]) != s.cfg.Group || le.Uint64(b[kindBytes+8:]) != s.cfg.ID {
 		return
 	}
 	var a core.Action

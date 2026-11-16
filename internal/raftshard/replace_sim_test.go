@@ -208,7 +208,7 @@ func (c *simCluster) replaced(r *simReplica, st *raft.BasicStatus) {
 // lost reports whether a, sent by the cut-off replica, is lost to the outgoing fault: a raft
 // message carrying the commit of the leave of the joint configuration.
 func (p *replacement) lost(ctx *core.Context, a *core.Action) bool {
-	if !p.outgoing || a.Kind != core.ActNetSend || a.Msg.Buf == core.NoBuf && le.Uint64(a.Msg.Body[:]) == leaseGroup {
+	if !p.outgoing || a.Kind != core.ActNetSend || a.Msg.Buf == core.NoBuf && le.Uint64(a.Msg.Body[1:]) == leaseGroup {
 		return false
 	}
 	var m raftpb.Message
