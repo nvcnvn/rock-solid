@@ -761,6 +761,9 @@ func TestANodeAnswersGoneOnlyForTheReplicaItNoLongerHolds(t *testing.T) {
 	if len(n.r[rC].forts) != 1 || n.r[rC].forts[0] != (fortify{kind: kindGone, from: 3, to: 2}) {
 		t.Fatalf("C, removed, answered %+v to an ask about it", n.r[rC].forts)
 	}
+	if n.event(rC, ask(kindAsk, 4)); len(n.r[rC].forts) != 0 {
+		t.Fatalf("C, removed, answered %+v to an ask about 4, which lives", n.r[rC].forts)
+	}
 	misrouted := n.r[rD].s.Stats().Misrouted
 	for _, about := range []uint64{4, 3} {
 		if n.event(rD, ask(kindAsk, about)); len(n.r[rD].forts) != 0 {
