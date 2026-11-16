@@ -3280,6 +3280,7 @@ nodes without finishing.
 | `ci-image-restart` | 3 | `ci-image`'s move alone, then two faults, a restart of any node and a format, with a chunk counter of 1 to fit 5 minutes. A restart before the peering that drops Y needs replay to leave Y gated (`neg-map-on-replay`); one after it needs the entry's image flag (`neg-ignore-image-flag`), and replay to settle Y away at the decision's entry once the primary decides again (`neg-replay-forgets-drops`, which needs a spare table). With `Spare` 0 and no table after the move, this plan cannot reach that shape, so only `deep-image-restart`, whose plan has tables after it, checks the correct rule there |
 | `deep-image-restart-move` | 3 | `ci-image-restart` with a counter of 2. Too large for `ci`, and not yet run |
 | `deep-image-restart` | 3 | `ci-image`'s whole plan with two faults, a restart of the primary's node and the format of the other member's, and a seventh table. Too large for `ci` |
+| `deep-replay-drops` | 3 | `neg-replay-forgets-drops`' plan and constants with folds: the move, the primary's restart after the decision that dropped Y, its next interval in a spare table, then the other member's format. Too large for `ci`, and not yet run |
 | `ci-bounce` | 3 | PG 2 and its chunk alone, two partial writes, a format: a move that removes disk 3, then the primary's disk marked down and up with Y pending, so the other member is primary for an interval, then the other member's disk formatted, with no table after it and a chunk counter of 1 to fit 5 minutes. The bounced primary is X's source only if it left Y gated (`neg-map-on-demote`) |
 | `deep-bounce-tables` | 3 | `ci-bounce` with the table after the format and a counter of 2. Too large for `ci`, and not yet run |
 | `deep-bounce` | 3 | `ci-image`'s drop, then the primary bounced as in `ci-bounce`, with an eighth table: the primary carries its image across the interval its disk was down (`neg-forget-image-down`). Too large for `ci` |
@@ -3290,7 +3291,8 @@ nodes without finishing.
 | `deep-sources-move` | 3 | `ci-sources-move` with a spare table. Too large for `ci`, and not yet run |
 | `ci-sources-lister` | 3 | As `ci-sources`, with no fault: X's one clean source marked down, a primary that lists the chunk taking a whole-block write alone, and the source back |
 | `deep-sources-lister` | 3 | `ci-sources-lister` with a spare table. Too large for `ci`, and not yet run |
-| `ci-answers` | 3 | `ci-sources`' plan with one write, under fairness, for properties 15, 16 and 17 only. Only the primary restarts, to fit 5 minutes |
+| `ci-answers` | 3 | `ci-sources`' plan with one write, under fairness, for properties 15, 16 and 17 only, with a restart of node 1, the primary |
+| `ci-answers-node2`, `ci-answers-node3` | 3 | `ci-answers` with a restart of node 2 or of node 3 instead: the three together restart any node, one fault each, as `deep-answers` does, each within 5 minutes |
 | `deep-answers` | 3 | `ci-answers` with a restart of any node. Too large for `ci`, and not yet run |
 | `ci-answers-move` | 3 | `ci-sources-move`'s plan with one write and no spare table, under fairness, for properties 15, 16 and 17 only |
 | `deep-answers-move` | 3 | `ci-answers-move` with a spare table. Too large for `ci`, and not yet run |
@@ -4074,6 +4076,8 @@ next milestone's run, which is also the twins' first.
 | Epoch change | `ci-faults-more` | [Epoch change model](#epoch-change-model) | 26 | 233,882 | 33 s |
 | Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 23 | 71,492 | 204 s |
 | Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 20 | 12,984 | 138 s |
+| Epoch change | `ci-answers-node2` | [Epoch change model](#epoch-change-model) | 20 | 11,394 | 122 s |
+| Epoch change | `ci-answers-node3` | [Epoch change model](#epoch-change-model) | 20 | 10,092 | 103 s |
 | Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 22 | 11,687 | 140 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |

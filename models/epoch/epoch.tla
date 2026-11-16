@@ -806,13 +806,15 @@ Copies(p, k, ls, c) ==
 \* dropped, and refused if not already. A kept version still waiting for its
 \* client on a chunk with fewer than min_live copies is mapped but refused: that
 \* the members persisted their lists says nothing of what they hold. It activates
-\* and reports it on its next heartbeat.
+\* and reports it on its next heartbeat. It activates only once its own records
+\* of p are durable, so an OK it sends rests on one.
 Activated(n, p, k, K, ls) ==
     LET mine == {r \in pend : r.n = n /\ ChunkPG[r.c] = p}
         ok == {r \in mine : /\ r.v <= SettleTop(Gated(n, r.c), K[r.c])
                              /\ \/ Cardinality(Copies(p, k, ls, r.c)) >= MinLiveOf(p, k)
                                 \/ Bug("AckOnLoneCopy")}
-    IN /\ pr' = [pr EXCEPT ![n][p] = [@ EXCEPT !.act = TRUE, !.srv = TRUE]]
+    IN /\ ~\E r \in ownw : r.n = n /\ ChunkPG[r.c] = p
+       /\ pr' = [pr EXCEPT ![n][p] = [@ EXCEPT !.act = TRUE, !.srv = TRUE]]
        /\ act' = act \cup {[p |-> p, k |-> k, r |-> run[n]]}
        /\ reports' = reports \cup {[p |-> p, k |-> k]}
        /\ pend' = pend \ mine
@@ -844,9 +846,11 @@ Image(n, p) ==
        ELSE {}
 
 \* The members in P persist, with interval k, their lists from ls, the
-\* primary's disk flagging the chunks of img it lists, and their stores settle
-\* by them the versions of p they kept gated. Clients hear at activation.
-PersistAll(P, p, k, ls, img) ==
+\* primary's disk flagging the chunks of img it lists, and their stores drop by
+\* them the versions of p they do not keep. A member maps the kept ones as it
+\* persists, the primary only as it activates, which this step does if a.
+\* Clients hear at activation.
+PersistAll(P, p, k, ls, img, a) ==
     /\ miss' = [d \in Disk |-> IF d \in P
                    THEN [c \in Chunk |-> IF c \in ChunksOf(p) THEN ls[d][c] ELSE miss[d][c]]
                    ELSE miss[d]]
@@ -861,7 +865,11 @@ PersistAll(P, p, k, ls, img) ==
                   THEN {c \in imf[d] : c \notin ChunksOf(p)}
                        \cup {c \in img : d = PrimDisk(p, k) /\ ls[d][c] # NoMiss}
                   ELSE imf[d]]
-    /\ gat' = [d \in Disk |-> IF d \in P THEN {g \in gat[d] : ChunkPG[g.c] # p} ELSE gat[d]]
+    /\ gat' = [d \in Disk |->
+                 IF d = PrimDisk(p, k) /\ a THEN {g \in gat[d] : ChunkPG[g.c] # p}
+                 ELSE IF d = PrimDisk(p, k) /\ d \in P THEN gat[d] \ Drops(d, p, ls[d])
+                 ELSE IF d \in P THEN {g \in gat[d] : ChunkPG[g.c] # p}
+                 ELSE gat[d]]
 
 \* Whether something can stop interval k of p from activating once its
 \* primary n decided: a later interval its members or primary may adopt
@@ -953,11 +961,11 @@ PeerOn(n, p, J, P, U) ==
                /\ Activated(n, p, k, K, lists)
                /\ UNCHANGED <<miss, persIv, drp, rdrp, imf, gat>>
           ELSE IF CanStall(n, p, k)
-          THEN /\ PersistAll(P, p, k, lists, img)
+          THEN /\ PersistAll(P, p, k, lists, img, FALSE)
                /\ reports' = IF Bug("ReportBeforeActivate") THEN reports \cup {[p |-> p, k |-> k]}
                              ELSE reports
                /\ UNCHANGED <<pr, act, mrecv, pend, refd, ackd, wst>>
-          ELSE /\ PersistAll(P, p, k, lists, img)
+          ELSE /\ PersistAll(P, p, k, lists, img, TRUE)
                /\ Activated(n, p, k, K, lists)
                /\ UNCHANGED mrecv
        /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
@@ -981,7 +989,7 @@ Activate(n, p) ==
        /\ PrimNode(p, k) = n
        /\ Decided(n, p, k)
        /\ \A d \in R : dnode[d] # 0 /\ Running(dnode[d]) /\ IvAt(dnode[d], p) = k
-       /\ PersistAll(R, p, k, lists, TheDec(n, p, k).img)
+       /\ PersistAll(R, p, k, lists, TheDec(n, p, k).img, TRUE)
        /\ Activated(n, p, k, K, lists)
        /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
                       dlog, mrecv, failed, pv, pin, known, dec, rm, vers, sends, dmn, bad, ownw, leaseVars,
@@ -1765,7 +1773,9 @@ NetFault(h, g, to) ==
 \* A process restart forgets everything but the disk, the table and the Raft
 \* term, and draws a new run ID. A restarted node asks for a new interval of
 \* each PG it is a member of, so that a decision settles the versions its
-\* replay gated even where the PG would stay in its interval. With "stop2",
+\* replay gated even where the PG would stay in its interval. Replay gates the
+\* versions of an interval at or past the PG's persisted decision, and none
+\* where the disk persisted no decision (Init's interval 1). With "stop2",
 \* only node 3 restarts; with "aimed", only node 2; with "aimed1", only node 1.
 RestartState(n) ==
     /\ run' = [run EXCEPT ![n] = @ + 1]
@@ -1787,6 +1797,7 @@ RestartState(n) ==
     /\ gat' = [gat EXCEPT ![ddisk[n]] =
                  @ \cup {g \in [c : Chunk, v : UNION {dlog[ddisk[n]][c] : c \in Chunk}] :
                            /\ g.v \in dlog[ddisk[n]][g.c]
+                           /\ persIv[ddisk[n]][ChunkPG[g.c]] > 1
                            /\ IvOfV(g.v) >= persIv[ddisk[n]][ChunkPG[g.c]]
                            /\ ~Bug("MapOnReplay")}]
     /\ drp' = [drp EXCEPT ![ddisk[n]] = IF Bug("ReplayForgetsDrops") THEN {} ELSE @ \cup rdrp[ddisk[n]]]
@@ -2408,9 +2419,10 @@ RefillBackDownPlans == {Refilled(RefillBack)}
 \* ci-refills-down splits deep-refills-down by fault, each with one write.
 RefillDownFormatPlans == {[OneWrite(RefillBack) EXCEPT !.f = {"format"}]}
 RefillDownRestartPlans == {[OneWrite(RefillBack) EXCEPT !.f = {"restart"}]}
-\* deep-refills-stay restarts any node; ci-refills-stay only node 2, the first primary.
+\* deep-refills-stay restarts any node; ci-refills-stay node 2, the first primary,
+\* with the plan's faults otherwise kept.
 RefillStayPlans == {OneWrite(Refilled(RefillStay))}
-RefillStayAimedPlans == {[OneWrite(RefillStay) EXCEPT !.f = {"restart", "aimed"}]}
+RefillStay2 == {[OneWrite(Refilled(RefillStay)) EXCEPT !.f = @ \cup {"aimed"}]}
 \* ci-refills-back: the primary refilled and back, which it comes behind the others;
 \* the leaving member back in one table with taking the other's place; a member
 \* refilled, then declared lost.
@@ -2449,8 +2461,12 @@ ListerOrders == Plan(<<ML(1, 2), Mark(3, "down"), Mark(3, "up")>>, LoneListerWri
 MoveSourcePlans == {MoveRestarted}
 MoveAnswer == {[MoveRestarted EXCEPT !.w = <<Partial2[2]>>]}
 ListerAnswer == {[ListerRestarted EXCEPT !.w = <<Partial[2]>>]}
-\* ci-answers: the restart aimed at PG 1's primary.
-ListerAnswerCut == {[ListerRestarted EXCEPT !.w = <<Partial[2]>>, !.f = {"restart", "aimed1"}]}
+\* ci-answers, ci-answers-node2 and ci-answers-node3 split deep-answers by the
+\* node restarted.
+ListerAnswerAt(x) == {[ListerRestarted EXCEPT !.w = <<Partial[2]>>, !.f = {"restart", x}]}
+ListerAnswer1 == ListerAnswerAt("aimed1")
+ListerAnswer2 == ListerAnswerAt("aimed")
+ListerAnswer3 == ListerAnswerAt("stop2")
 ListerPlans == {ListerRestarted}
 LateAskPlans == {[ListerRestarted EXCEPT !.f = {"restart", "lateask"}]}
 ListerOrderPlans == {ListerOrders}
