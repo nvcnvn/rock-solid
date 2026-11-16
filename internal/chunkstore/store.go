@@ -1937,41 +1937,45 @@ func (s *Store) recoveredHeld(e *disklog.Entry) {
 // mapped, the others dropped.
 func (s *Store) settleHeld(d *disklog.Entry) {
 	pgs := uint32(d.Length)
-	in := func(it item) bool {
-		return it.entry.Pool == d.Pool && core.PGIndexOf(it.entry.Chunk.Hash(), pgs) == d.Owner
-	}
-	for len(s.held) > 0 {
-		j := slices.IndexFunc(s.held, in)
-		if j < 0 {
-			return
+	var pg []item
+	s.held = slices.DeleteFunc(s.held, func(it item) bool {
+		if it.entry.Pool != d.Pool || core.PGIndexOf(it.entry.Chunk.Hash(), pgs) != d.Owner {
+			return false
 		}
-		c := s.held[j].entry.Chunk
-		same := func(it item) bool { return it.entry.Pool == d.Pool && it.entry.Chunk == c }
+		pg = append(pg, it)
+		return true
+	})
+	slices.SortStableFunc(pg, func(a, b item) int { return compareChunk(a.entry.Chunk, b.entry.Chunk) })
+	for len(pg) > 0 {
+		c := pg[0].entry.Chunk
+		n := 1 + slices.IndexFunc(pg[1:], func(it item) bool { return it.entry.Chunk != c })
+		if n == 0 {
+			n = len(pg)
+		}
+		run := pg[:n]
+		pg = pg[n:]
 		keep := uint64(0)
 		if ch, _ := s.ix.Chunk(d.Pool, c); ch.ListedIn == d.Interval {
 			keep = ch.Listed
 		} else {
-			for _, it := range s.held {
-				if same(it) {
-					keep = max(keep, it.entry.Version)
-				}
+			for _, it := range run {
+				keep = max(keep, it.entry.Version)
 			}
 		}
 		top := keep
 		if !s.plant.settleByNumber {
 			top = 0
-			for _, it := range s.held {
-				if v := it.entry.Version; same(it) && v <= keep && intervalOf(v) == intervalOf(keep) {
+			for _, it := range run {
+				if v := it.entry.Version; v <= keep && intervalOf(v) == intervalOf(keep) {
 					top = max(top, v)
 				}
 			}
 		}
-		for k := range s.held {
-			if it := &s.held[k]; same(*it) && (it.entry.Version <= top || s.plant.replayForgetsDrops) {
-				s.mapItem(it)
+		for k := range run {
+			if run[k].entry.Version <= top || s.plant.replayForgetsDrops {
+				s.mapItem(&run[k])
 			}
 		}
-		s.held = slices.DeleteFunc(s.held, same)
 	}
 }
 

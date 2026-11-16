@@ -362,3 +362,29 @@ func TestReplayPastPendingWrites(t *testing.T) {
 		t.Fatal("the workload missed a case")
 	}
 }
+
+// A decision marker replayed over 1,024 chunks of its PG, each with 4 held writes, among as many
+// held writes of another PG.
+func BenchmarkSettleHeld(b *testing.B) {
+	const chunks, writes = 1024, 4
+	var held []item
+	for w := range writes {
+		for c := range chunks {
+			for pool := core.PoolID(1); pool <= 2; pool++ {
+				e := disklog.WriteEntry(pool, chunk(uint32(c)), 1<<32|uint64(w+1), uint16(w), 1)
+				e.Last = true
+				held = append(held, item{entry: e, state: itemDurable, lba: core.LBA(100 + 2*len(held)), headerBlocks: 1})
+			}
+		}
+	}
+	d := disklog.Entry{Kind: disklog.EntryDecision, Pool: 1, Owner: 0, Length: 1, Interval: 1}
+	s := &Store{ix: newIndex(b)}
+	b.ReportAllocs()
+	for b.Loop() {
+		s.held = append(s.held[:0], held...)
+		s.settleHeld(&d)
+		if len(s.held) != chunks*writes {
+			b.Fatalf("%d held after the marker", len(s.held))
+		}
+	}
+}
