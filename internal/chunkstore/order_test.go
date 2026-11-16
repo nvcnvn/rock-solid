@@ -107,16 +107,10 @@ func TestBaseReadHoldsChunk(t *testing.T) {
 	}
 }
 
-// committed puts a committed whole-block write of version v at block 0 of c into the index, in a
-// record past the disk that no segment counts, so the pools' count no longer matches the log's.
+// committed puts a committed whole-block write of version v at block 0 of c into the index.
 func committed(t *testing.T, h *harness, c core.ChunkID, v uint64) {
 	t.Helper()
-	h.inv.Off(invPools)
-	ev := disklog.Event{Kind: disklog.Durable, LSN: 1, LBA: 1 << 20, HeaderBlocks: 1,
-		Entries: []disklog.Entry{disklog.WriteEntry(testPool, c, v, 0, 1)}, Payloads: []uint64{0}}
-	if err := h.s.Index().Apply(&ev); err != nil {
-		t.Fatal(err)
-	}
+	h.sync(h.memberWrite(c, 0, 1, v, 0))
 }
 
 // Versions are a 32-bit interval over a 32-bit counter per chunk: the newest ordered version plus
