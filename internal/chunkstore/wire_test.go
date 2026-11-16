@@ -59,7 +59,7 @@ func wireCases() []wireCase {
 		{"heartbeat", &Heartbeat{ID: 8, Epoch: 77, Run: 0x0123456789abcdef, Raw: 51_020_500}, 0},
 		{"report_empty", &Report{ID: 9}, 0},
 		{"report", &Report{ID: 9, Activations: []PGFields{wirePG}, Recovered: []PGFields{wirePG}, Latencies: []Latency{{Disk: 3, Latency: 250}},
-			Disks: []DiskState{{Log: 0x0123456789abcdef, Fill: 1000, Oldest: 40}, {Log: 2, Fill: 5, Oldest: 1_500_000, Failed: true}},
+			Disks: []DiskState{{Log: 0x0123456789abcdef, Fill: 1000, Oldest: 40, Pools: []PoolLive{{Pool: 1, Live: 600}, {Pool: 7, Live: 400}}}, {Log: 2, Fill: 5, Oldest: 1_500_000, Failed: true}},
 			Leads: []LeadState{{PG: wirePG.PG, Interval: 41, Active: true, Unfound: 2, Lacking: 7}, {PG: core.PGID{Pool: 1, Index: 18}, Interval: 3}}}, 0},
 		{"member_timeout", &MemberTimeout{ID: 10, PG: wirePG, Disk: 3}, 0},
 		{"probe", &Probe{ID: 11, Disk: 3}, 0},
@@ -402,6 +402,20 @@ func TestWireRejectsBadFields(t *testing.T) {
 	mustMalformed(t, "a purger's shard on a write", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Session: 1, Len: 1, Shard: 1}), core.BlockSize)
 	mustMalformed(t, "a purger's term on a member write", AppendUpdate(nil, &Update{Kind: KindReplicaWrite, PG: wirePG, Len: 1, Version: 1<<32 | 1, Term: 1}), core.BlockSize)
 	mustMalformed(t, "a grant neither granted nor refused", AppendGrant(nil, &Grant{Status: StatusNoSpace}), 0)
+	many := make([]PoolLive, MaxDiskPools+1)
+	for i := range many {
+		many[i] = PoolLive{Pool: core.PoolID(i + 1), Live: 1}
+	}
+	for what, pools := range map[string][]PoolLive{
+		"more pools than a heartbeat carries":     many,
+		"pools out of order":                      {{Pool: 7, Live: 1}, {Pool: 1, Live: 1}},
+		"a pool twice":                            {{Pool: 1, Live: 1}, {Pool: 1, Live: 1}},
+		"a pool with no live blocks":              {{Pool: 1}},
+		"a reserved pool":                         {{Pool: RecordPool, Live: 1}},
+		"pools holding more than the disk's fill": {{Pool: 1, Live: 600}, {Pool: 7, Live: 1000}},
+	} {
+		mustMalformed(t, what, padded(AppendReport(nil, &Report{Disks: []DiskState{{Log: 1, Fill: 1000, Pools: pools}}})), 0)
+	}
 	rec := Update{Kind: KindRecover, PG: wirePG, Len: core.ChunkSize, Version: 1<<32 | 1}
 	for what, c := range map[string]struct {
 		edit func(u *Update)
@@ -553,6 +567,11 @@ func FuzzDecodeMessage(f *testing.F) {
 		f.Add(encodeMsg(c.msg), c.data)
 	}
 	f.Add(padded(encodeMsg(&Report{Disks: make([]DiskState, 20)})), 0)
+	pools := make([]PoolLive, MaxDiskPools)
+	for i := range pools {
+		pools[i] = PoolLive{Pool: core.PoolID(i + 1), Live: 1}
+	}
+	f.Add(padded(encodeMsg(&Report{Disks: []DiskState{{Log: 1, Fill: MaxDiskPools, Pools: pools}}})), 0)
 	f.Fuzz(func(t *testing.T, b []byte, data int) {
 		msg, err := decodeMsg(b, data)
 		if err != nil {

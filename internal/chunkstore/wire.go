@@ -190,13 +190,17 @@ type Latency struct {
 	Latency core.Tick
 }
 
-// DiskState is what a node reports of one of its disks.
+// DiskState is what a node reports of one of its disks; Pools holds at most MaxDiskPools pools, by pool, each with live blocks, which sum to at most Fill.
 type DiskState struct {
 	Log    uint64
 	Fill   uint64
 	Oldest core.Tick
 	Failed bool
+	Pools  []PoolLive
 }
+
+// MaxDiskPools is the most pools a disk heartbeat reports live blocks of.
+const MaxDiskPools = 256
 
 // LeadState is what a primary reports of a PG it leads: its interval, whether it leads it active and, when active, the chunks its last peering left unfound and the copies its members still lack, which recovery counts down.
 type LeadState struct {
@@ -499,7 +503,8 @@ func DecodeHeartbeat(b []byte, data int, h *Heartbeat) error {
 const (
 	pgFieldsSize  = 20
 	latencySize   = 12
-	diskStateSize = 25
+	diskStateSize = 29
+	poolLiveSize  = 12
 	leadStateSize = 21
 	chunkVerSize  = core.ChunkIDSize + 8
 	chunkPeerSize = core.ChunkIDSize + 8 + 8 + 1 + 8
@@ -522,7 +527,10 @@ func AppendReport(dst []byte, rp *Report) []byte {
 	dst = le.AppendUint32(dst, uint32(len(rp.Disks)))
 	for _, d := range rp.Disks {
 		dst = le.AppendUint64(le.AppendUint64(le.AppendUint64(dst, d.Log), d.Fill), uint64(d.Oldest))
-		dst = appendBool(dst, d.Failed)
+		dst = le.AppendUint32(appendBool(dst, d.Failed), uint32(len(d.Pools)))
+		for _, p := range d.Pools {
+			dst = le.AppendUint64(le.AppendUint32(dst, uint32(p.Pool)), p.Live)
+		}
 	}
 	dst = le.AppendUint32(dst, uint32(len(rp.Leads)))
 	for _, l := range rp.Leads {
@@ -550,7 +558,13 @@ func DecodeReport(b []byte, data int, rp *Report) error {
 	}
 	rp.Disks = rp.Disks[:0]
 	for n := r.count(diskStateSize); n > 0; n-- {
-		rp.Disks = append(rp.Disks, DiskState{Log: r.u64(), Fill: r.u64(), Oldest: core.Tick(r.u64()), Failed: r.bool()})
+		var pools []PoolLive
+		if len(rp.Disks) < cap(rp.Disks) {
+			pools = rp.Disks[:len(rp.Disks)+1][len(rp.Disks)].Pools[:0]
+		}
+		d := DiskState{Log: r.u64(), Fill: r.u64(), Oldest: core.Tick(r.u64()), Failed: r.bool()}
+		d.Pools = r.pools(pools, d.Fill)
+		rp.Disks = append(rp.Disks, d)
 	}
 	rp.Leads = rp.Leads[:0]
 	for n := r.count(leadStateSize); n > 0; n-- {
@@ -698,6 +712,26 @@ func (r *reader) take(n int) []byte {
 func (r *reader) u8() uint8   { return r.take(1)[0] }
 func (r *reader) u32() uint32 { return le.Uint32(r.take(4)) }
 func (r *reader) u64() uint64 { return le.Uint64(r.take(8)) }
+
+// pools reads a disk's live blocks by pool into dst: at most MaxDiskPools, ascending, none reserved or empty, summing to at most fill.
+func (r *reader) pools(dst []PoolLive, fill uint64) []PoolLive {
+	n := r.count(poolLiveSize)
+	if n > MaxDiskPools {
+		r.bad = true
+		return dst
+	}
+	var sum uint64
+	for ; n > 0; n-- {
+		p := PoolLive{Pool: core.PoolID(r.u32()), Live: r.u64()}
+		if reserved(p.Pool) || p.Live == 0 || len(dst) > 0 && p.Pool <= dst[len(dst)-1].Pool || p.Live > fill-sum {
+			r.bad = true
+			return dst
+		}
+		sum += p.Live
+		dst = append(dst, p)
+	}
+	return dst
+}
 
 func (r *reader) bool() bool {
 	v := r.u8()

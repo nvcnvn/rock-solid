@@ -25,6 +25,7 @@ const (
 	invIndex    = "the index passes its own check"
 	invOpenSeqs = "a recovered log opens its next segment past every open sequence on disk"
 	invUsage    = "each chunk segment counts the blocks the index refers to"
+	invPools    = "each pool's live blocks are its maps', sum to the chunk segments' count, and with the metadata's to the fill"
 	invReuse    = "no segment is reused while it holds a record the index needs"
 	invNamed    = "no segment is reused or trimmed while the named manifest needs it"
 	invGain     = "every chunk victim frees more than its copies fill"
@@ -54,6 +55,7 @@ func (h *harness) register() {
 	})
 	found(invOpenSeqs)
 	h.inv.Register(invUsage, h.usageErr)
+	h.inv.Register(invPools, h.poolsErr)
 	h.inv.Register(invReuse, h.recordsInPlace)
 	found(invNamed)
 	h.inv.Register(invGain, h.victimsGain)
@@ -1075,11 +1077,11 @@ func TestPlantedCleanerBugsBreakTheirInvariants(t *testing.T) {
 		want  string
 		plant plants
 		log   disklog.Plants
-		off   string
+		off   []string
 		run   func(h *harness)
 	}{
-		{invGain, plants{noGainGuard: true}, disklog.Plants{}, "", newBlocks},
-		{invMove, plants{moveOverWrites: true}, disklog.Plants{}, "", func(h *harness) {
+		{invGain, plants{noGainGuard: true}, disklog.Plants{}, nil, newBlocks},
+		{invMove, plants{moveOverWrites: true}, disklog.Plants{}, nil, func(h *harness) {
 			h.hold = true
 			h.s.cfg.CleanFree = 100
 			h.readNow(chunk(1), 0, 1)
@@ -1095,11 +1097,11 @@ func TestPlantedCleanerBugsBreakTheirInvariants(t *testing.T) {
 			h.hold = false
 			h.settle()
 		}},
-		{invReuse, plants{freeLive: true}, disklog.Plants{}, invUsage, overwrites},
-		{invUsage, plants{freeLive: true}, disklog.Plants{}, "", overwrites},
-		{invNamed, plants{}, disklog.Plants{PiecesDeadAtOnce: true}, "", atReserve},
-		{invNamed, plants{}, disklog.Plants{CleanableIgnoresReplay: true}, "", atReserve},
-		{invNoSpace, plants{noSpaceWithVictim: true}, disklog.Plants{}, "", func(h *harness) {
+		{invReuse, plants{freeLive: true}, disklog.Plants{}, []string{invUsage, invPools}, overwrites},
+		{invUsage, plants{freeLive: true}, disklog.Plants{}, nil, overwrites},
+		{invNamed, plants{}, disklog.Plants{PiecesDeadAtOnce: true}, nil, atReserve},
+		{invNamed, plants{}, disklog.Plants{CleanableIgnoresReplay: true}, nil, atReserve},
+		{invNoSpace, plants{noSpaceWithVictim: true}, disklog.Plants{}, nil, func(h *harness) {
 			r := core.NewRand(1)
 			for range 2200 {
 				overwrite(h, r, []core.ChunkID{chunk(1), chunk(2), chunk(3), chunk(4)}, 64)
@@ -1117,8 +1119,8 @@ func TestPlantedCleanerBugsBreakTheirInvariants(t *testing.T) {
 				h.merging = true
 			}
 			h.s.plant, h.catch = c.plant, true
-			if c.off != "" {
-				h.inv.Off(c.off)
+			for _, off := range c.off {
+				h.inv.Off(off)
 			}
 			err := violated(func() { c.run(h) })
 			if violationOf(err) != c.want {

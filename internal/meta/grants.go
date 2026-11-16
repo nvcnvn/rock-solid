@@ -68,12 +68,22 @@ type flushAt struct {
 	blocks uint64
 }
 
-// diskFill is what the leader heard of a disk: its live blocks and when, and its size and log
-// reserve in blocks from its node's report.
+// diskFill is what the leader heard of a disk: its live blocks, in all and by pool, and when, and
+// its size and log reserve in blocks from its node's report.
 type diskFill struct {
 	live, blocks, reserve uint64
+	pools                 []chunkstore.PoolLive
 	at                    core.Tick
 	heard                 bool
+}
+
+// own is pool id's live blocks on the disk, never above its size.
+func (f *diskFill) own(id core.PoolID, blocks uint64) uint64 {
+	i, ok := slices.BinarySearchFunc(f.pools, id, func(p chunkstore.PoolLive, id core.PoolID) int { return cmp.Compare(p.Pool, id) })
+	if !ok {
+		return 0
+	}
+	return min(f.pools[i].Live, blocks)
 }
 
 // grantPlants are bugs a test plants: a new leader counting a session it has not heard from at
@@ -309,7 +319,7 @@ func (c *Control) fill(now core.Tick, rp *chunkstore.Report) {
 	for _, s := range rp.Disks {
 		if id := c.diskOfLog(s.Log); id != 0 {
 			f := c.diskFill(id)
-			f.live, f.at, f.heard = s.Fill, now, true
+			f.live, f.pools, f.at, f.heard = s.Fill, append(f.pools[:0], s.Pools...), now, true
 		}
 	}
 }
@@ -384,11 +394,11 @@ func (c *Control) grantStep(now core.Tick, leased bool, ds []chunkstore.Disk, mo
 		for k := range disks {
 			d := &disks[k]
 			f := c.diskFill(d.ID)
-			if f.heard {
-				d.Live = f.live
-			}
 			if f.blocks != 0 {
 				d.Blocks = f.blocks
+			}
+			if f.heard {
+				d.Live, d.Own = f.live, f.own(cp.ID, d.Blocks)
 			}
 			if d.Slots == 0 || d.Mark != chunkstore.MarkUp {
 				continue

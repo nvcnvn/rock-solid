@@ -774,11 +774,14 @@ func (l *Log) writeFormat(buf core.IOBuf, lba core.LBA, out *Output) {
 // Superblock is the log's identity and geometry.
 func (l *Log) Superblock() Superblock { return l.sb }
 
-// LiveBlocks is the live blocks the usage table counts over every segment: the disk's fill.
+// LiveBlocks is the live blocks the usage table counts over every segment: the disk's fill. A
+// slot segment's row is a bitmap of its slots, whose blocks the segments of their records count.
 func (l *Log) LiveBlocks() uint64 {
 	var n uint64
 	for i := range l.usage {
-		n += uint64(l.usage[i].Live)
+		if l.usage[i].State != SegmentSlot {
+			n += uint64(l.usage[i].Live)
+		}
 	}
 	return n
 }

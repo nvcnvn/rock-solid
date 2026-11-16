@@ -272,12 +272,14 @@ type Replica struct {
 	waits     bool
 	plant     replicaPlants
 	// disks is each disk's size and the live blocks it last reported, by disk ID; pools the pools'
-	// settings and outstanding grants; slots each pool's member slots on each disk in the table.
-	disks  []diskInfo
-	pools  []poolInfo
-	slots  []diskSlots
-	live   uint64
-	liveAt core.Tick
+	// settings and outstanding grants; slots each pool's member slots on each disk in the table;
+	// live and poolLive this disk's live blocks, in all and by pool, as summed at liveAt.
+	disks    []diskInfo
+	pools    []poolInfo
+	slots    []diskSlots
+	live     uint64
+	poolLive []PoolLive
+	liveAt   core.Tick
 	// auth is the control plane's address once reporting is set; rep the heartbeat reused, and waitAt when WaitTimer is armed for, 0 when it is not.
 	auth      core.NodeID
 	reporting bool
@@ -338,10 +340,11 @@ func (r *Replica) SetPool(id core.PoolID, p Pool) { r.pool(id).pool = p }
 // SetGrants records the space grants outstanding on a pool, in blocks, as the leader's heartbeat reply carries them.
 func (r *Replica) SetGrants(id core.PoolID, blocks uint64) { r.pool(id).grants = blocks }
 
-// fill is this disk's live blocks, summed again once fillEvery has passed while the store serves.
+// fill is this disk's live blocks, summed again, with each pool's, once fillEvery has passed while the store serves.
 func (r *Replica) fill(ctx *core.Context) uint64 {
 	if r.st.Serving() && (r.liveAt == 0 || ctx.Now-r.liveAt >= fillEvery) {
 		r.live, r.liveAt = r.st.Log().LiveBlocks(), max(ctx.Now, 1)
+		r.poolLive = r.st.Index().PoolsLive(r.poolLive[:0])
 	}
 	return r.live
 }

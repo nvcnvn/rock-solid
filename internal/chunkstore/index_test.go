@@ -380,6 +380,66 @@ func TestIndexMatchesModel(t *testing.T) {
 	}
 }
 
+// [property] Random writes, punches, freezes, releases and cleaner moves over two pools keep each
+// pool's live blocks equal to what its maps refer to, counted again from them, and summing to the
+// records' counts, from a count taken off the maps when tracking starts.
+func TestPoolsLiveMatchMaps(t *testing.T) {
+	r := rand.New(rand.NewPCG(23, 0))
+	for trial := range 20 {
+		x := newIndex(t)
+		lba, epoch := core.LBA(100), uint64(0)
+		for step := range 300 {
+			if step == 50 {
+				x.TrackLive(true)
+			}
+			pool, c := core.PoolID(1+r.IntN(2)), chunk(uint32(r.IntN(3)))
+			first := uint16(r.IntN(64))
+			count := uint16(1 + r.IntN(8))
+			ch, _ := x.Chunk(pool, c)
+			switch r.IntN(8) {
+			case 0:
+				if ch.Version != 0 {
+					epoch++
+					apply(t, x, record(lba, disklog.FreezeEntry(pool, c, ch.Version, epoch)))
+				}
+			case 1:
+				if vs := x.frozen(nil, pool, c); len(vs) > 0 {
+					x.Release(pool, c, vs[0])
+				}
+			case 2:
+				if e, ok := x.Lookup(pool, c, first); ok && e.LBA != 0 {
+					x.Move(pool, c, first, 1, e.BlockLBA(first), lba+1, lba)
+				}
+			case 3:
+				apply(t, x, record(lba, disklog.PunchEntry(pool, c, ch.Version+1, first, count)))
+			default:
+				apply(t, x, record(lba, disklog.WriteEntry(pool, c, ch.Version+1, first, count)))
+			}
+			lba += core.LBA(1 + int(count))
+			if step < 50 {
+				continue
+			}
+			kept := x.PoolsLive(nil)
+			if counted := x.CountPools(nil); !slices.Equal(kept, counted) {
+				t.Fatalf("trial %d step %d: the index keeps %v, its maps refer to %v", trial, step, kept, counted)
+			}
+			var pools, records uint64
+			for _, p := range kept {
+				pools += p.Live
+			}
+			for _, rl := range x.Records(nil, 0, ^core.LBA(0)) {
+				records += uint64(rl.Live)
+			}
+			if pools != records {
+				t.Fatalf("trial %d step %d: the pools hold %d live blocks, the records %d", trial, step, pools, records)
+			}
+		}
+		if len(x.PoolsLive(nil)) != 2 {
+			t.Fatalf("trial %d: blocks live in pools %v, want both", trial, x.PoolsLive(nil))
+		}
+	}
+}
+
 func BenchmarkLookup(b *testing.B) {
 	x := newIndex(b)
 	r := rand.New(rand.NewPCG(1, 1))

@@ -529,6 +529,39 @@ func (h *harness) usageErr() error {
 	return nil
 }
 
+// poolsErr checks that the live blocks the index keeps by pool are those its maps refer to, and
+// sum to what the segments outside the metadata stream count, and that the disk's fill counts
+// those and the metadata segments', a slot segment's blocks only in its records' segments.
+func (h *harness) poolsErr() error {
+	if !h.s.Serving() {
+		return nil
+	}
+	kept, counted := h.s.Index().PoolsLive(nil), h.s.Index().CountPools(nil)
+	if !slices.Equal(kept, counted) {
+		return fmt.Errorf("the index keeps pools' live blocks %v, its maps refer to %v", kept, counted)
+	}
+	var pools, segments, meta uint64
+	for _, p := range kept {
+		pools += p.Live
+	}
+	for s := uint32(1); s < h.s.sb.SegmentCount; s++ {
+		switch u, stream := h.s.Log().Usage(s); {
+		case u.State == disklog.SegmentSlot:
+		case stream == disklog.Meta:
+			meta += uint64(u.Live)
+		default:
+			segments += uint64(u.Live)
+		}
+	}
+	if pools != segments {
+		return fmt.Errorf("the pools hold %d live blocks, the chunk segments count %d", pools, segments)
+	}
+	if fill := h.s.Log().LiveBlocks(); fill != segments+meta {
+		return fmt.Errorf("the disk's fill is %d live blocks, its chunk and metadata segments count %d", fill, segments+meta)
+	}
+	return nil
+}
+
 func (h *harness) noteDurable() {
 	if h.oracle == nil || h.s.Log() == nil || h.s.Log().DurableLSN() <= h.acked {
 		return

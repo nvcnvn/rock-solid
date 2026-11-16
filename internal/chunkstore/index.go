@@ -173,6 +173,8 @@ type Index struct {
 	pointRemovals bool
 	track         bool
 	changes       []LiveChange
+	// pools is, by pool, the blocks the pool's maps refer to, kept while track is on.
+	pools []PoolLive
 	// unmarked is the missing-list entries applied since the last decision marker, which take effect
 	// only with their PG's marker: a member persists a peering's whole list or none of it.
 	unmarked []disklog.Entry
@@ -183,6 +185,12 @@ type Index struct {
 type LiveChange struct {
 	Header core.LBA
 	Delta  int32
+}
+
+// PoolLive is a pool's live blocks on the disk: the blocks its maps refer to, a block a live and a frozen map share counting twice.
+type PoolLive struct {
+	Pool core.PoolID
+	Live uint64
 }
 
 // Prefix is the length of an index key's prefix for run filters: its chunk's, or a record count's whole key.
@@ -209,10 +217,59 @@ func NewIndex(tree *lsm.Tree, segmentBlocks, segments uint32) *Index {
 	return &Index{tree: tree, segmentBlocks: segmentBlocks, slotHeld: make([]uint32, segments)}
 }
 
-// TrackLive makes the index keep a LiveChange for every change to a record's count but a write's own blocks, until TakeChanges.
+// TrackLive makes the index keep a LiveChange for every change to a record's count but a write's own blocks, until TakeChanges, and each pool's live blocks, counted from its maps when tracking starts.
 func (x *Index) TrackLive(on bool) {
 	x.track = on
 	x.changes = x.changes[:0]
+	x.pools = x.CountPools(x.pools[:0])
+}
+
+// CountPools appends each pool's live blocks, counted over its maps, by pool.
+func (x *Index) CountPools(dst []PoolLive) []PoolLive {
+	start := len(dst)
+	x.tree.Iter(&x.it)
+	for ok := x.it.SeekGE(nil); ok; ok = x.it.Next() {
+		k := x.it.Key()
+		e, ok := decodeExtent(k, x.it.Value())
+		if !ok || e.LBA == 0 {
+			continue
+		}
+		pool := core.PoolID(binary.BigEndian.Uint32(k))
+		if reserved(pool) {
+			continue
+		}
+		i, found := slices.BinarySearchFunc(dst[start:], pool, cmpPool)
+		if !found {
+			dst = slices.Insert(dst, start+i, PoolLive{Pool: pool})
+		}
+		dst[start+i].Live += uint64(e.Count)
+	}
+	return dst
+}
+
+// PoolsLive appends each pool's live blocks the index keeps, by pool, leaving out pools with none.
+func (x *Index) PoolsLive(dst []PoolLive) []PoolLive {
+	for _, p := range x.pools {
+		if p.Live != 0 {
+			dst = append(dst, p)
+		}
+	}
+	return dst
+}
+
+func cmpPool(p PoolLive, id core.PoolID) int { return cmp.Compare(p.Pool, id) }
+
+// addPool changes pool's live blocks by n.
+func (x *Index) addPool(pool core.PoolID, n int) {
+	i, found := slices.BinarySearchFunc(x.pools, pool, cmpPool)
+	if !found {
+		x.pools = slices.Insert(x.pools, i, PoolLive{Pool: pool})
+	}
+	live := int64(x.pools[i].Live) + int64(n)
+	if live < 0 {
+		panic(fmt.Sprintf("chunkstore: pool %d's maps refer to %d blocks", pool, live))
+	}
+	x.pools[i].Live = uint64(live)
 }
 
 // TakeChanges appends the LiveChanges kept since the last call to dst.
@@ -403,7 +460,7 @@ func (x *Index) insert(pool core.PoolID, c core.ChunkID, ext Extent, last bool) 
 	}
 	for _, o := range x.exts {
 		lo, hi := max(int(o.First), int(ext.First)), min(o.end(), ext.end())
-		x.refer(o, -(hi - lo), false)
+		x.refer(pool, o, -(hi - lo), false)
 		switch {
 		case o.First < ext.First:
 			left := o
@@ -417,7 +474,7 @@ func (x *Index) insert(pool core.PoolID, c core.ChunkID, ext Extent, last bool) 
 		}
 	}
 	x.put(x.extentKey(pool, c, 0, ext.First), ext)
-	x.refer(ext, int(ext.Count), true)
+	x.refer(pool, ext, int(ext.Count), true)
 	ch, _ := x.Chunk(pool, c)
 	ch.Version = ext.Version
 	if last {
@@ -443,7 +500,7 @@ func (x *Index) punchWhole(pool core.PoolID, c core.ChunkID, version uint64, las
 // the live map's extents for version 0, a frozen version's epoch and extents otherwise.
 func (x *Index) removeMap(pool core.PoolID, c core.ChunkID, version uint64, exts []Extent) {
 	for _, e := range exts {
-		x.refer(e, -int(e.Count), false)
+		x.refer(pool, e, -int(e.Count), false)
 	}
 	if x.pointRemovals {
 		if version != 0 {
@@ -514,7 +571,7 @@ func (x *Index) freeze(pool core.PoolID, c core.ChunkID, version, epoch uint64) 
 		x.exts = x.overlapping(x.exts[:0], pool, c, 0, 0, core.BlocksPerChunk)
 		for _, e := range x.exts {
 			x.put(x.extentKey(pool, c, version, e.First), e)
-			x.refer(e, int(e.Count), false)
+			x.refer(pool, e, int(e.Count), false)
 		}
 	}
 	x.key = binary.BigEndian.AppendUint64(appendChunkPrefix(x.key[:0], pool, c), version)
@@ -577,9 +634,12 @@ func (x *Index) note(header core.LBA, delta int) {
 // slot write's blocks against its record's segment too, but not own, the blocks the record wrote,
 // which the log counted when it became durable; a slot's count never reaches the table, whose
 // slot segments the log keeps by slot.
-func (x *Index) refer(e Extent, n int, own bool) {
+func (x *Index) refer(pool core.PoolID, e Extent, n int, own bool) {
 	if e.LBA == 0 {
 		return
+	}
+	if x.track {
+		x.addPool(pool, n)
 	}
 	if own {
 		x.count(e.Header, n)

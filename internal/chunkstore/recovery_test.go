@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -122,7 +123,8 @@ func written(h *harness) (pieces, manifests int, newest uint64) {
 }
 
 // [property] Recovering the index from the manifest's runs plus replay, and rebuilding it again
-// from them, both give the live index exactly, across restarts (invReplay and invRebuild). Each of the test's own seeds
+// from them, both give the live index exactly, across restarts (invReplay and invRebuild), and
+// each pool's live blocks the store kept. Each of the test's own seeds
 // must load runs and replay records at every recovery, and write multi-piece runs, carry runs,
 // merge and cut.
 func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
@@ -132,13 +134,20 @@ func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
 		carried, unloaded := 0, 0
 		for range 3 {
 			w.run(h, 150)
+			pools := h.s.Index().PoolsLive(nil)
 			restart(h)
+			if got := h.s.Index().PoolsLive(nil); !slices.Equal(got, pools) {
+				t.Fatalf("seed %d: recovered pools' live blocks %v, the store kept %v", seed, got, pools)
+			}
 			runs := h.s.Index().Tree().Runs()
 			if runs == 0 || h.recoveredLSN <= h.loaded.LSN {
 				unloaded++
 			}
 			carried = max(carried, runs-1)
 			h.rebuild()
+			if got := h.s.Index().PoolsLive(nil); !slices.Equal(got, pools) {
+				t.Fatalf("seed %d: rebuilt pools' live blocks %v, the store kept %v", seed, got, pools)
+			}
 		}
 		pieces, manifests, _ := written(h)
 		t.Logf("seed %d: %d manifests of %d run pieces, %d runs carried, %d merges, %d cuts, %d recoveries without runs or replay", seed, manifests, pieces, carried, len(h.merges), w.epoch, unloaded)

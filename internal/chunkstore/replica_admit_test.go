@@ -408,3 +408,19 @@ func TestPlantedLimitBugBreaksTheLimitRun(t *testing.T) {
 		}
 	}
 }
+
+// Each disk's heartbeat carries its pools' live blocks, as its index keeps them, with its fill.
+func TestTheDiskHeartbeatCarriesEachPoolsLiveBlocks(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	c.write(pg0, chunkIn(pg0, 4, 0), 0, make([]byte, 3*core.BlockSize))
+	c.settle()
+	c.runFor(fillEvery)
+	for d := range 3 {
+		c.call(d, func(ctx *core.Context, r *Replica, _ *ReplicaOutput) {
+			ds := r.diskState(ctx)
+			if want := []PoolLive{{Pool: testPool, Live: 3}}; !slices.Equal(ds.Pools, want) || ds.Fill < 3 {
+				t.Fatalf("disk %d reports pools %v of fill %d, want %v", d+1, ds.Pools, ds.Fill, want)
+			}
+		})
+	}
+}

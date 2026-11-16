@@ -60,7 +60,10 @@ func (r *Replica) SetAuthority(ctx *core.Context, addr core.NodeID, out *Replica
 
 // diskState is what the owner loop holds in memory of its disk.
 func (r *Replica) diskState(ctx *core.Context) DiskState {
-	return DiskState{Log: r.cfg.Log, Fill: r.fill(ctx), Oldest: r.st.Oldest(ctx.Now), Failed: r.st.Err() != nil}
+	fill := r.fill(ctx)
+	// ponytail: a disk holding more than MaxDiskPools pools' data reports the lowest-numbered ones; the leader counts the rest as other pools' data.
+	pools := r.poolLive[:min(len(r.poolLive), MaxDiskPools)]
+	return DiskState{Log: r.cfg.Log, Fill: fill, Oldest: r.st.Oldest(ctx.Now), Failed: r.st.Err() != nil, Pools: pools}
 }
 
 // leadStates appends what the replica reports of each PG it leads.

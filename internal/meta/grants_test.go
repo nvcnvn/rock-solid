@@ -222,6 +222,35 @@ func TestTheGapCapsGrants(t *testing.T) {
 	}
 }
 
+// The leader takes each pool's data on a disk from the disk's heartbeat, its own pool's as held and
+// the others' out of its capacity, and never counts a pool's data above the disk's size.
+func TestCapacityTakesEachPoolsDataFromTheHeartbeat(t *testing.T) {
+	r := newGrantRun(t, gb(40), 8*mib(16), 90, 1, gb(20))
+	for _, c := range []struct {
+		name             string
+		fill, own, other uint64
+		held, capacity   uint64
+	}{
+		{"pool 1's data and pool 2's", gb(20), gb(12), gb(5), gb(12), gb(40)*90/100 - (gb(20) - gb(12))},
+		{"a count above the disk's size", 2 * gb(40), 2 * gb(40), 0, gb(40), 0},
+	} {
+		pools := []chunkstore.PoolLive{{Pool: 1, Live: c.own}}
+		if c.other != 0 {
+			pools = append(pools, chunkstore.PoolLive{Pool: 2, Live: c.other})
+		}
+		r.event(0, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 1, Disks: []chunkstore.DiskState{{Log: logOf(0), Fill: c.fill, Pools: pools}}}))
+		for r.settle(r.inputs()) {
+		}
+		f, _, ok := r.ctl.Capacity(1)
+		if !ok {
+			t.Fatalf("%s: pool not ready", c.name)
+		}
+		if f.Held != c.held || f.Disks[0].Capacity != c.capacity {
+			t.Fatalf("%s: held %d and capacity %d blocks, want %d and %d", c.name, f.Held, f.Disks[0].Capacity, c.held, c.capacity)
+		}
+	}
+}
+
 // G6, G7, G13: no gap, available 0 or a disk past write_limit leave nothing to grant; a node's
 // buffered bytes stay counted (G12c).
 func TestNoRoomGrantsOnlyWhatIsBuffered(t *testing.T) {
