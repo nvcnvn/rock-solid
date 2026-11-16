@@ -28,14 +28,18 @@ var ctlNode = core.NodeID{Node: 1}
 const probeTimer core.TimerID = 1
 
 // probe is a storage node's loop as far as the review needs: every 100 ms it sends the voter its
-// report and a session fetch under a new token, and keeps the session tables answered.
+// report, a session fetch and a Txn adding 1 to a counter, each under a new token, and keeps the
+// session tables and counts answered.
 type probe struct {
 	t       *testing.T
 	l       *loop.Loop
 	token   uint64
 	answers map[uint64]chunkstore.SessionTable
+	counts  map[uint64]uint64
 	other   int
 }
+
+var probeTxn = meta.Txn{Ops: []meta.Op{meta.Update([]byte("probe"), 0, meta.Add, 1)}}
 
 func (p *probe) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
 	switch ev.Kind {
@@ -49,12 +53,23 @@ func (p *probe) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []
 		if err := meta.EncodeSessionFetch(ctx.Pool, ctlGroup, p.token, &f.Msg); err != nil {
 			p.t.Error(err)
 		}
-		out = append(out, r, f, core.Action{Kind: core.ActSetTimer, Timer: probeTimer, At: ctx.Now + 100_000})
+		c := core.Action{Kind: core.ActNetSend, Peer: ctlNode}
+		if err := meta.EncodeTxn(ctx.Pool, ctlGroup, p.token, &probeTxn, &c.Msg); err != nil {
+			p.t.Error(err)
+		}
+		out = append(out, r, f, c, core.Action{Kind: core.ActSetTimer, Timer: probeTimer, At: ctx.Now + 100_000})
 	case core.EvNetRecv:
 		group, kind, token, ok := meta.Peek(&ev.Msg)
 		var st chunkstore.SessionTable
 		if ok && group == ctlGroup && kind == meta.KindSessions && meta.DecodeSessions(ctx.Pool, &ev.Msg, &st) == nil {
 			p.answers[token] = st
+			return out
+		}
+		var a meta.Answer
+		if ok && group == ctlGroup && kind == meta.KindAnswer && meta.DecodeAnswer(ctx.Pool, &ev.Msg, &a) == nil {
+			if a.Err == nil && len(a.Result.Updated) == 1 {
+				p.counts[token] = a.Result.Updated[0]
+			}
 			return out
 		}
 		p.other++
@@ -76,7 +91,7 @@ func newProbe(t *testing.T, port int) *probe {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pool.Close() })
-	p := &probe{t: t, answers: map[uint64]chunkstore.SessionTable{}}
+	p := &probe{t: t, answers: map[uint64]chunkstore.SessionTable{}, counts: map[uint64]uint64{}}
 	td := tcp.New(tcp.Config{Self: core.NodeID{Node: 2}, Seed: 2, Dial: func(core.NodeID) (int, error) {
 		return tcp.DialTCP(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(port)))
 	}})
@@ -86,18 +101,30 @@ func newProbe(t *testing.T, port int) *probe {
 	return p
 }
 
-// answered runs the probe until a fetch made from now on is answered.
-func (p *probe) answered(within time.Duration) bool {
+// answered runs the probe until a fetch and a Txn made from now on are answered, and returns the
+// lowest and the highest count answered to the Txns made from now on.
+func (p *probe) answered(within time.Duration) (lo, hi uint64, ok bool) {
 	from := p.token
 	for end := time.Now().Add(within); time.Now().Before(end); {
 		p.l.Pass()
+		fetched := false
 		for tok := range p.answers {
+			fetched = fetched || tok > from
+		}
+		lo, hi = 0, 0
+		for tok, n := range p.counts {
+			if tok > from && (lo == 0 || n < lo) {
+				lo = n
+			}
 			if tok > from {
-				return true
+				hi = max(hi, n)
 			}
 		}
+		if fetched && hi != 0 {
+			return lo, hi, true
+		}
 	}
-	return false
+	return 0, 0, false
 }
 
 // TestCtlProcess is the ctl process the review starts and kills: the test binary run again with
@@ -139,7 +166,8 @@ func startCtl(t *testing.T, args string, out *bytes.Buffer) *exec.Cmd {
 // A single-voter control plane of group 257, a process over TCP, elects itself, leases, commits a
 // session table of its own and answers a node's fetch under its token, so a group-257 frame is
 // never taken for a chunkstore one. Killed and started again on its disk file, it recovers its
-// log and answers again.
+// log and answers again, its counter past every count it answered before, where a control plane
+// started over would count from 1 again.
 func TestASingleVoterControlPlaneAnswersOverTCPAndSurvivesAKill(t *testing.T) {
 	dir := os.Getenv("RS_URING_DIR")
 	if dir == "" {
@@ -156,7 +184,8 @@ func TestASingleVoterControlPlaneAnswersOverTCPAndSurvivesAKill(t *testing.T) {
 	var out bytes.Buffer
 	cmd := startCtl(t, flags+" -format", &out)
 	pr := newProbe(t, port)
-	if !pr.answered(60 * time.Second) {
+	_, before, ok := pr.answered(60 * time.Second)
+	if !ok {
 		t.Fatalf("no fetch answered; %d other messages; the process said:\n%s", pr.other, out.String())
 	}
 	if err := cmd.Process.Kill(); err != nil {
@@ -165,7 +194,11 @@ func TestASingleVoterControlPlaneAnswersOverTCPAndSurvivesAKill(t *testing.T) {
 	_ = cmd.Wait()
 	out.Reset()
 	startCtl(t, flags, &out)
-	if !pr.answered(60 * time.Second) {
+	after, _, ok := pr.answered(60 * time.Second)
+	if !ok {
 		t.Fatalf("no fetch answered after a kill and a restart; %d other messages; the process said:\n%s", pr.other, out.String())
+	}
+	if after <= before {
+		t.Fatalf("after a kill and a restart the counter answered %d, before it %d", after, before)
 	}
 }
