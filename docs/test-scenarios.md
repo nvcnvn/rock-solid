@@ -7698,7 +7698,7 @@ The node's machine, `internal/node`, fed events with no network, and its message
 | --- | --- |
 | A table pushed unasked | Handed to every replica with `answers` 0; the same or an older table hands nothing; a replica opened later gets the newest the node has |
 | A session table from a peer other than the control plane, with a huge version | Dropped: nothing handed, and the control plane's next table still counts as newer |
-| A heartbeat after a table reached the node | Reports the oldest version its replicas' stores hold, not the one received; a node with no replica reports the one received |
+| A heartbeat after a table reached the node | Reports the oldest version its replicas' stores hold, not the one received; a node with no replica reports the one received, safe while a store's fence table starts empty in memory |
 | A replica asks while a fetch is in flight | No second fetch; the answer hands each replica the ask its fetch covered, and the node fetches again for the asks made after it went out |
 | A fetch is unanswered after `Interval` | Fetched again under a new token; the old token's late answer is a table sent unasked |
 | The control plane's connection is lost 100 times while a fetch is in flight | No fetch until `FetchTimer` fires after `Interval`, so a driver in backoff cannot spin the loop |

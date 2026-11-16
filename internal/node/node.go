@@ -201,6 +201,8 @@ func (n *Node) token() uint64 { return n.start | n.fetchSeq&0xffffffff }
 // heartbeat sends the control plane the node's report and arms the next.
 func (n *Node) heartbeat(ctx *core.Context, out *Output) {
 	nr := &n.report
+	// With no replica this reports the version only received, safe while a store's fence table
+	// starts empty in memory: a replica opened later is handed n.table before any write.
 	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed}
 	for _, r := range n.reps {
 		nr.Sessions = min(nr.Sessions, r.held)
