@@ -421,6 +421,17 @@ func TestAReportIsAnsweredWithTheCommittedDisks(t *testing.T) {
 	if got := disksSent(); len(got) != 0 {
 		t.Fatalf("a report without the disk got %+v", got)
 	}
+	replaced := NodeReport{Node: hostNode.Node, Opened: []OpenedDisk{{Device: 1, Log: 0x66, Blocks: 1 << 20, Loop: 4}}}
+	r.report(&replaced)
+	r.run(StepInterval * 3)
+	disksSent()
+	replaced.Opened = append(replaced.Opened, OpenedDisk{Device: 2, Log: 0x55, Blocks: 1 << 20, Loop: 5})
+	r.failing = true
+	r.report(&replaced)
+	want = []DiskAddr{{Disk: 2, Log: 0x66, At: core.NodeID{Node: hostNode.Node, Loop: 4}}}
+	if got := disksSent(); !slices.Equal(got, want) {
+		t.Fatalf("a gone disk's log reported again got %+v, want %+v", got, want)
+	}
 }
 
 func TestAReportFromAnotherNodeIsDropped(t *testing.T) {
