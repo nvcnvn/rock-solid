@@ -495,6 +495,69 @@ func TestACrashMidRoundKeepsEveryAnsweredTxn(t *testing.T) {
 	}
 }
 
+// A crash cuts format short after each of its disk actions. A restart finds no superblock, which
+// -format formats again, or opens the log; a log holding no round at all, as a crash after the
+// superblocks and before the boot round leaves it, gets the boot round from the voters given, as
+// format writes it, and the host leads and answers.
+func TestARestartAfterAFormatCutShortWritesTheBootRound(t *testing.T) {
+	empty := 0
+	for _, keep := range []bool{false, true} {
+		for steps := 0; ; steps++ {
+			r := &hostRun{t: t, lc: ctlLogConfig(), hs: make([]*CtlHost, 1), pool: sim.NewPool(16<<20, 0), now: 5_000_000}
+			r.disks = append(r.disks, sim.NewDisk(ctlGeometry.DiskBlocks()))
+			r.do(0, func(ctx *core.Context, out *CtlHostOutput) {
+				h, err := FormatCtlHost(ctx, r.config(0), r.lc, disklog.Superblock{LogID: 1, Geometry: ctlGeometry}, out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.hs[0] = h
+			})
+			for range steps {
+				if len(r.work) == 0 {
+					break
+				}
+				w := r.work[0]
+				r.work = r.work[1:]
+				ev := r.disks[0].Execute(r.pool, &w.a)
+				r.do(0, func(ctx *core.Context, out *CtlHostOutput) { r.hs[0].OnEvent(ctx, &ev, out) })
+			}
+			settled := r.hs[0].Shard() != nil
+			r.disks[0].Crash(func(int, core.LBA) bool { return keep })
+			r.work = r.work[:0]
+			r.failing = true
+			r.do(0, func(ctx *core.Context, out *CtlHostOutput) {
+				h, err := OpenCtlHost(ctx, r.config(0), r.lc, ctlGeometry.DiskBlocks(), out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.hs[0] = h
+			})
+			r.h = r.hs[0]
+			r.drain()
+			if errors.Is(r.h.Err(), disklog.ErrNotFormatted) {
+				continue
+			}
+			if r.h.Err() != nil {
+				t.Fatalf("keep %v, %d disk actions: the restart stopped with %v", keep, steps, r.h.Err())
+			}
+			if !keep && !settled {
+				empty++
+			}
+			r.failing = false
+			r.lead()
+			if a := r.txnAt(0, 9, "v"); a == nil || a.Err != nil {
+				t.Fatalf("keep %v, %d disk actions: after the restart a Txn got %+v", keep, steps, a)
+			}
+			if settled {
+				break
+			}
+		}
+	}
+	if empty == 0 {
+		t.Fatal("no crash left a log holding no round")
+	}
+}
+
 // A voter restarted with voters other than those its disk was formatted with stops: alone, it
 // would elect itself and acknowledge commits that no quorum of the group holds.
 func TestAVoterRestartedWithOtherVotersStops(t *testing.T) {

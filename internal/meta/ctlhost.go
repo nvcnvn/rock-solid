@@ -47,11 +47,12 @@ type CtlHost struct {
 	shard *Shard
 	// cfg is the replica's settings until the replica starts.
 	cfg Config
-	// voters is the configuration a restart was given, which its replay must match.
-	voters raftpb.ConfState
-	disk   *raftshard.Host
-	rec    *disklog.Recovery
-	lout   disklog.Output
+	// boot is the boot state a restart was given: its replay must match its voters, and a log
+	// holding no round gets it as its first round.
+	boot raftpb.SnapshotMetadata
+	disk *raftshard.Host
+	rec  *disklog.Recovery
+	lout disklog.Output
 	// seen counts lout's events taken.
 	seen  int
 	dones []raftshard.Done
@@ -98,23 +99,30 @@ func FormatCtlHost(ctx *core.Context, cfg Config, lc disklog.Config, sb disklog.
 		return nil, err
 	}
 	h.disk.Log = log
-	boot := raftshard.Round{Snapshot: raftpb.Snapshot{Metadata: cfg.Raft.Storage.Base()}}
-	if err := h.disk.Write(ctx, ctlOwner, 1, &boot, &h.lout); err != nil {
+	if err := h.writeBoot(ctx, cfg.Raft.Storage.Base()); err != nil {
 		return nil, err
 	}
 	h.after(ctx, out)
 	return h, nil
 }
 
+// writeBoot writes the group's boot state as the log's first round.
+func (h *CtlHost) writeBoot(ctx *core.Context, md raftpb.SnapshotMetadata) error {
+	boot := raftshard.Round{Snapshot: raftpb.Snapshot{Metadata: md}}
+	return h.disk.Write(ctx, ctlOwner, 1, &boot, &h.lout)
+}
+
 // OpenCtlHost starts recovering a host from its disk of diskBlocks blocks: the log's rounds
 // replay onto an empty storage, from the boot state FormatCtlHost wrote first, and the replica
 // starts once the replay ends. A replay whose voters are not those of cfg's storage stops the host
-// with ErrVoters.
+// with ErrVoters. A log holding no round, as a crash after format's superblocks and before its
+// boot round leaves it, gets cfg's boot state written as format writes it, and the replica starts
+// once that round is durable.
 func OpenCtlHost(ctx *core.Context, cfg Config, lc disklog.Config, diskBlocks uint64, out *CtlHostOutput) (*CtlHost, error) {
-	voters := cfg.Raft.Storage.Base().ConfState
+	boot := cfg.Raft.Storage.Base()
 	cfg.Raft.Storage = raftshard.NewStorage()
 	h := newCtlHost(cfg)
-	h.voters = voters
+	h.boot = boot
 	rec, err := disklog.Recover(ctx, lc, diskBlocks, disklog.ModeOpen, 1, &h.lout)
 	if err != nil {
 		return nil, err
@@ -395,7 +403,12 @@ func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
 			if log, err = h.rec.Log(ctx); err == nil {
 				h.disk.Recovered(log)
 				h.rec = nil
-				if e := h.cfg.Raft.Storage.Base().ConfState.Equivalent(h.voters); e != nil {
+				st := h.cfg.Raft.Storage
+				if st.Base().Index == 0 {
+					if err = st.ApplySnapshot(raftpb.Snapshot{Metadata: h.boot}); err == nil {
+						err = h.writeBoot(ctx, h.boot)
+					}
+				} else if e := st.Base().ConfState.Equivalent(h.boot.ConfState); e != nil {
 					err = fmt.Errorf("%w: %v", ErrVoters, e)
 				} else {
 					err = h.start(ctx, out)

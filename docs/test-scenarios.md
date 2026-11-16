@@ -7848,6 +7848,7 @@ The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 25
 | Three voters on disks of their own | They elect a leader, which answers a `Txn`; every voter applies it |
 | A disk write that fails under the leader's `Txn` | The host reports the error, drops its Control and takes nothing more: no action for a `Txn`, a fetch, a Raft tick or a step timer |
 | A `Txn`, then 0 to 3 of its round's disk actions, then a crash that keeps all or none of the unflushed writes | A `Txn` answered before the crash is applied after it; the restarted host leads and answers |
+| Format cut short by a crash after each of its disk actions, keeping all or none of the unflushed writes, then a restart | A log with no superblock stays `ErrNotFormatted`, for `-format` to make again; a log holding no round gets the boot round from the voters given, and the host leads and answers a `Txn` (`TestARestartAfterAFormatCutShortWritesTheBootRound`) |
 | A voter of three restarted with a configuration of itself alone | It stops with `ErrVoters` and answers nothing; the other two elect a leader that answers |
 | `Txn`s on a log whose `max_replay_bytes` is 64 KiB, then a restart | The host stops with `ErrLogFull` once the log reaches the bound, and again after the restart |
 | A pool committed, then a node's table fetch, then heartbeats from a node behind the table and one current | The delta goes to every node that reported, the whole table to the node that fetched, and to the node behind alone, as the leader resends after a failover |
