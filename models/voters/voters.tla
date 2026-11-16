@@ -128,14 +128,14 @@ Init ==
     /\ support = [r \in Replicas |-> {}]
     /\ fort = [r \in Replicas |-> {}]
 
-\* The group as the first leader, a voter the plan keeps, leaves it once every replica
-\* applied the swap's joint configuration (ci liveness configurations start here).
+\* The group led by l at term 1, every replica having applied the swap's joint
+\* configuration: l is a voter the plan keeps (JointInit), or the one it drops, which then
+\* commits its own removal with no crash first (OutgoingInit).
 JointLog ==
     <<[t |-> 1, cfg |-> NoConf], [t |-> 1, cfg |-> Conf(BaseVoters, {}, Plan \ BaseVoters)],
       [t |-> 1, cfg |-> Conf(Plan, BaseVoters, {})]>>
 
-JointInit ==
-    LET l == CHOOSE x \in BaseVoters \cap Plan : TRUE IN
+JointLed(l) ==
     /\ term = [r \in Replicas |-> 1]
     /\ leader = [r \in Replicas |-> r = l]
     /\ log = [r \in Replicas |-> JointLog]
@@ -151,6 +151,9 @@ JointInit ==
     /\ early = {}
     /\ support = [r \in Replicas |-> {}]
     /\ fort = [r \in Replicas |-> {}]
+
+JointInit == JointLed(CHOOSE x \in BaseVoters \cap Plan : TRUE)
+OutgoingInit == JointLed(CHOOSE x \in BaseVoters \ Plan : TRUE)
 
 \* A voter of its own applied configuration wins the votes of a quorum of it, each voter's
 \* log no newer than its own, in a term past every one of theirs. A replica votes whatever
@@ -405,6 +408,10 @@ FairSpec ==
     /\ \A r \in Replicas : WF_vars(\E l \in Replicas : AskLeader(r, l))
     /\ \A i, p \in Replicas : WF_vars(AddLearner(i, p))
     /\ \A i \in Replicas : WF_vars(\E l, d \in Replicas : Swap(i, l, d))
+
+\* No leader asks for support (a state constraint): support only narrows whom a voter
+\* votes for, so every election and commit stays reachable, and lease reads go unchecked.
+Unfortified == \A r \in Replicas : fort[r] = {}
 
 \* The voters the plan keeps are interchangeable (safety configurations only).
 Symmetry == Permutations(BaseVoters \cap Plan)

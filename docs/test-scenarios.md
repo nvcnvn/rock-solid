@@ -3941,17 +3941,19 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 | `neg-delete-on-plan` | A replica the plan drops deletes its state at once | c deletes before any change commits | `DeletesOnlyRemoved` |
 | `neg-notice-any-index` | A notice counts from a peer behind the asker | d, which applied its addition, asks b, which has not, and b's answer of index 0 counts | Same |
 | `neg-notice-non-member` | A notice counts while the asker's own configuration lacks it | d, before applying its own addition, asks a, which is ahead of d but has not applied it either | Same |
-| `neg-no-support-ask` | A follower never asks the node of the leader it supports | a crashes after proposing the leave; c wins term 2 on b and d, which then support it, commits the leave with its own entry and applies its removal before either learns the commit; a, restarted, lacks c's entry, so neither b nor d votes for it, and both support c for good | `NewLeader` |
-| `neg-removed-keeps-lease` | A leader that applied its own removal still serves lease reads | c wins term 2 after a crashes, commits the leave and applies its removal; b asks c's node, stops supporting c, wins term 3 on a and b and fortifies it, while c still counts b's and d's support | `OneLeaseReader` |
+| `neg-no-support-ask` | A follower never asks the node of the leader it supports | c, leading, commits the leave and applies its removal; a and d apply it too, yet a, b and d support c for good, so none campaigns | `NewLeader` |
+| `neg-removed-keeps-lease` | A leader that applied its own removal still serves lease reads | c, leading and fortified by a, b and d, commits the leave and applies its removal; a and b ask c's node and stop supporting c, a wins term 2 on a and b and fortifies b, while c still counts a's, b's and d's support | `OneLeaseReader` |
 
 **Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc); results in the [Model-to-simulator map](#model-to-simulator-map)). Voters a, b and c, the plan swapping d in for c:
 
-- `ci-swap`: up to term 2, no crash, safety, with a and b symmetric.
+- `ci-swap`: up to term 2, no crash, safety, with a and b symmetric, and no leader fortified (the constraint `Unfortified`): support only narrows the votes a candidate wins, so every election and commit stays reachable, and `OneLeaseReader` is left to `ci-live-moved`, `ci-lease` and `deep-swap`.
 - `ci-live`: c down for good, up to term 2, `SwapCommits` under weak fairness.
-- `ci-live-moved`: from the joint configuration that a, leading term 1, has every replica apply, with c up: one leader crash and restart, up to term 3, `NewLeader` under weak fairness and the safety invariants. The negatives `neg-no-support-ask` and `neg-removed-keeps-lease` are this configuration with one rule off.
+- `ci-live-moved`: from the joint configuration, every replica having applied it, with c leading term 1 and every replica up, no crash, up to term 2: c commits and applies its own removal, and `NewLeader` holds under weak fairness, with the safety invariants. The negatives `neg-no-support-ask` and `neg-removed-keeps-lease` are this configuration with one rule off.
 - `ci-lease`: `ci-live-moved`'s start and bounds under any interleaving, grant lapses included, safety only: the removed leader's lease reads against the next leader's.
 - `deep-swap`: `ci-swap` with one crash and restart of any replica.
-- `deep-live-moved`: `ci-live-moved` from the empty log, up to term 4, so the leader that is crashed while joint can be one that took over by transfer.
+- `deep-live-moved`: `ci-live-moved` with a leading term 1, one crash and restart, up to term 3, so c wins after a crashes and its commit of the leave can reach no follower.
+- `deep-lease`: `ci-lease` with `deep-live-moved`'s start and bounds.
+- `heavy-live-moved`: `deep-live-moved` from the empty log, up to term 4, so the leader that is crashed while joint can be one that took over by transfer.
 
 ## Model-to-simulator map
 
@@ -4020,8 +4022,10 @@ section.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
-| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 29 | 1,143,522 | 357 s, 1 worker |
-| Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 24 | 23,493 | 97 s, 1 worker |
+| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 29 | 1,149,408 | 526 s, 1 worker |
+| Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 20 | 2,623 | 7 s, 1 worker |
+| Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 20 | 10,581 | 25 s, 1 worker |
+| Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 21 | 231,972 | 89 s, 1 worker |
 | Epoch change | `heavy-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,577 s |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |
