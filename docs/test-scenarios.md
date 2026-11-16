@@ -7690,6 +7690,36 @@ once.
   owns it); counts per loop pass (no loop runs); and allocations, which the store's benchmarks
   measure on the simulated disk.
 
+## Storage node disk startup
+
+- The decision (`TestADeviceIsFormattedOnlyWhenBothSuperblocksAreZeros`, `internal/chunkstore`):
+  a store that serves is opened; `ErrNotFormatted`, wrapped, is formatted, under a log ID no earlier
+  of 100 starts drew; `ErrUnrecognized`, `CopyOnly`, a disk read error and `ErrCorrupt` are each
+  failed.
+- Formats crashed twice on the simulated disk
+  (`TestADeviceCrashedTwiceMidFormatComesBackWholeOrNew`, `storetest`): a store holding a 3-block
+  write to chunk 1 under log `0x5eed` is formatted again under a new log ID and power-cut after k of
+  format's 4,104 disk completions, for k from 1 to 8, half of them and the last 9; a start that
+  formats is cut after k completions too, and a third start runs to the end. Each start that opens
+  shows the old log with chunk 1 whole under its old disk ID in the disk record, or a log ID no
+  format of the run drew before under a new disk ID with chunk 1 reading zeros; no start formats
+  under a log ID drawn before or leaves the device failed, and the run reaches both outcomes.
+- Both superblocks damaged (`TestADeviceWithNoValidSuperblockIsLeftAsItWas`, `storetest`): bit 16
+  flipped in block 0 and in the copy of a written store; the start is failed with
+  `ErrUnrecognized`, and the disk's SHA-256 is the same before and after it.
+- On io_uring over a file-backed disk (`internal/driver/uring`, Linux, in Docker), with each start a
+  child process of the test binary (`TestStartChild`): the same two cases with `kill -9` in place
+  of the power cut. `TestAStartKilledTwiceMidFormatComesBackWholeOrNew` kills the child after k
+  rounds of format's completions, for k from 1 to 8, half of a format's rounds and the last 9, the
+  start's own format after as many, then starts it unkilled, with the same checks; in two runs in a
+  row a format took 183 and 232 rounds, 2 starts found the old log and 16 a new one.
+  `TestAStartLeavesADeviceWithNoValidSuperblockAsItWas` checks the file's SHA-256 after a start
+  reports the device failed.
+- The report (`TestAFailedDeviceIsShownAndNeverRecorded`, `internal/meta`): failed devices
+  reported by two nodes, one of them with no disk open, are shown by `Control.FailedDevices` by
+  node and device, a proposal after them leaves the disk record unchanged, and a node's next report
+  without its failed device drops it from the list.
+
 ## Shared network suite
 
 - One suite in `internal/loop/nettest`, written against its `Net` interface (start and stop a
