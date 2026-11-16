@@ -314,12 +314,12 @@ func (c *Control) fill(now core.Tick, rp *chunkstore.Report) {
 	}
 }
 
-// AppendDisks appends to dst every recorded disk whose node reported its size, with that size and
-// the fill last heard, as Step takes its disks.
+// AppendDisks appends to dst every recorded disk not gone, as Step takes its disks: at the size and
+// fill its node last reported, or at size 0 until it reports.
 func (c *Control) AppendDisks(dst []chunkstore.Disk) []chunkstore.Disk {
 	for _, d := range c.rec.Disks() {
-		if int(d.ID) <= len(c.fills) && c.fills[d.ID-1].blocks != 0 && !d.Gone {
-			f := &c.fills[d.ID-1]
+		if !d.Gone {
+			f := c.diskFill(d.ID)
 			dst = append(dst, chunkstore.Disk{ID: d.ID, Blocks: f.blocks, Live: f.live})
 		}
 	}

@@ -633,6 +633,48 @@ func TestAPoolOverReportedDisksPlacesItsPGs(t *testing.T) {
 	}
 }
 
+// After a restart, a disk whose node has not reported yet keeps its PGs and takes no new one:
+// placement reads it at size 0, not as having left its pools.
+func TestARestartKeepsThePGsOfADiskNotReportedYet(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	rep2 := &NodeReport{Node: 2, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20}}}
+	rep3 := &NodeReport{Node: 3, Opened: []OpenedDisk{{Device: 1, Log: 0x88, Blocks: 1 << 20}}}
+	r.report(rep2)
+	r.report(rep3)
+	r.run(StepInterval * 3)
+	both := []chunkstore.Disk{{ID: 1, Node: 2, Blocks: 1 << 20}, {ID: 2, Node: 3, Blocks: 1 << 20}}
+	if err := r.h.Control().SetPool(1, spec(1, 8), both); err != nil {
+		t.Fatal(err)
+	}
+	r.run(StepInterval * 3)
+	before := r.h.Control().Table()
+	r.restart(0)
+	r.lead()
+	r.report(rep2)
+	if err := r.h.Control().SetPool(2, spec(1, 8), both); err != nil {
+		t.Fatal(err)
+	}
+	r.run(StepInterval * 3)
+	mid := r.h.Control().Table()
+	if len(mid.Pools) != 2 {
+		t.Fatalf("pool 2 not placed: %+v", mid.Pools)
+	}
+	for i, pg := range mid.Pools[1].PGs {
+		if slices.ContainsFunc(pg.Members, func(m chunkstore.Member) bool { return m.Disk == 2 }) {
+			t.Errorf("pool 2's PG %d placed on disk 2, not reported since the restart: %+v", i, pg.Members)
+		}
+	}
+	r.report(rep3)
+	r.run(StepInterval * 3)
+	after := r.h.Control().Table()
+	for i := range after.Pools[0].PGs {
+		if !slices.Equal(after.Pools[0].PGs[i].Members, before.Pools[0].PGs[i].Members) {
+			t.Errorf("PG %d moved from %+v to %+v", i, before.Pools[0].PGs[i].Members, after.Pools[0].PGs[i].Members)
+		}
+	}
+}
+
 // A node's message for another group is dropped, its node not recorded.
 func TestAMessageOfAnotherGroupIsDropped(t *testing.T) {
 	r := newHostRun(t)
