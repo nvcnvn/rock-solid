@@ -5315,6 +5315,10 @@ holder's end of 3.96 s, since that second belongs to the suspend.
   `node_down_after`.
 - A grantor's wait is a timer on `ctx.Now`. If it fires while `ctx.Raw` shows less than the lease,
   the grantor sets another timer for the remainder and joins no peering before it.
+- A holder cut off from a grantor whose clocks run 0.5% fast, spending the margin's headroom,
+  suspends 0.999 s 1 s after its lease formed, `CLOCK_BOOTTIME` gaining nothing and no `Resumed`
+  coming: its lease ends before the grant, and with a second 30 ms shorter it would not
+  (`TestTheResumeMarginCoversAHiddenSuspend`; it passes from 0.979 s).
 - [property] 10,000 seeds with random rates per node (`BOOTTIME` ±22.6%, raw ±100 ppm) and random
   renewal timing: no holder's lease ever ends after its grantor's. With raw ±4%, and `BOOTTIME`
   slewed or at the raw rate (no daemon), the same holds from the first lease.
@@ -6342,7 +6346,7 @@ clocks within ±4% and a raw rate step after measurement, and one direction of a
 `TestRaftRunsRegressionSeeds` keeps seed 120, which found a leader cut off from both followers and
 then suspended 0.92 s: `CLOCK_BOOTTIME` gained nothing, as the kernel counts a sleep in whole seconds,
 so no `Resumed` came, and its holder kept a follower's lease 0.92 s past the grant while that
-follower, elected, served lease reads. A holder now ends each lease `core.ResumeThreshold` early.
+follower, elected, served lease reads. The seed passes as a holder ends each lease `core.ResumeThreshold` early.
 
 **Planted bugs.** Each must break its invariant within the seeds named, checking it alone:
 

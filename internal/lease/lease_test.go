@@ -610,6 +610,35 @@ func keptAcrossRunTrace(pl plants) error {
 	return nil
 }
 
+// hiddenSuspendTrace is a holder cut off from its grantor, whose clocks run 0.5% fast and so spend the margin's headroom, suspended 0.999 s with CLOCK_BOOTTIME gaining nothing and no Resumed, 1 s after its lease formed, the holder ending each lease resume early for such a suspend.
+func hiddenSuspendTrace(resume core.Tick) error {
+	c := cfg
+	c.Resume = resume
+	hc, gc := clocks{bootRate: rate(0), rawRate: rate(0)}, clocks{boot: 10_000_000, raw: 10_000_000, bootRate: rate(5_000_000), rawRate: rate(5_000_000)}
+	h, g := NewHolder(c), NewGrantor(c, 1, Time{})
+	round(h, g, hc, gc, 0, 10, 1)
+	round(h, g, hc, gc, c.RateGap+20, 10, 2)
+	if !h.Valid(grantor, hc.at(c.RateGap+40)) {
+		return fmt.Errorf("no lease")
+	}
+	hc.freeze(1_000_000, 0, 999_000)
+	end := lastReal(2_000_000, 10_000_000, func(r core.Tick) bool { return h.Valid(grantor, hc.at(r)) })
+	if !g.Live(core.NodeID{Node: 1}, gc.at(end)) {
+		return fmt.Errorf("at real %d µs the holder holds a lease its grantor no longer keeps", end)
+	}
+	return nil
+}
+
+// core.ResumeThreshold covers a suspend just under 1 s that delivers no Resumed, its grantor fast enough to spend the margin's headroom, and a margin 30 ms shorter does not.
+func TestTheResumeMarginCoversAHiddenSuspend(t *testing.T) {
+	if err := hiddenSuspendTrace(core.ResumeThreshold); err != nil {
+		t.Fatalf("core.ResumeThreshold: %v", err)
+	}
+	if err := hiddenSuspendTrace(core.ResumeThreshold - 30_000); err == nil || !strings.Contains(err.Error(), "no longer keeps") {
+		t.Fatalf("30 ms short: %v", err)
+	}
+}
+
 // A lease kept across a grantor's new run ID outlasts its grant on its trace, which the correct holder passes.
 func TestALeaseKeptAcrossANewRunBreaksItsTrace(t *testing.T) {
 	if err := keptAcrossRunTrace(plants{}); err != nil {
