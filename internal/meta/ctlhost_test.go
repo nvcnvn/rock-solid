@@ -446,6 +446,55 @@ func TestSeveralVotersOnDiskLogsElectAndCommit(t *testing.T) {
 	}
 }
 
+// A crash between a round's write and its Durable keeps the round or drops it whole: a Txn
+// answered before the crash is applied after it, and the restarted host leads and answers.
+func TestACrashMidRoundKeepsEveryAnsweredTxn(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		for steps := range 4 {
+			r := newHostRun(t)
+			r.lead()
+			var m core.Msg
+			tx := Txn{Ops: []Op{Put(attr(1, 2, 1), b("v"))}}
+			if err := EncodeTxn(r.pool, hostGroup, 9, &tx, &m); err != nil {
+				t.Fatal(err)
+			}
+			r.sent = r.sent[:0]
+			r.do(0, func(ctx *core.Context, out *CtlHostOutput) {
+				r.h.OnEvent(ctx, &core.Event{Kind: core.EvNetRecv, Peer: hostNode, Msg: m}, out)
+			})
+			for range steps {
+				if len(r.work) == 0 {
+					break
+				}
+				w := r.work[0]
+				r.work = r.work[1:]
+				ev := r.disks[w.at].Execute(r.pool, &w.a)
+				r.do(w.at, func(ctx *core.Context, out *CtlHostOutput) { r.hs[w.at].OnEvent(ctx, &ev, out) })
+			}
+			answered := len(r.sent) > 0
+			r.disks[0].Crash(func(int, core.LBA) bool { return keep })
+			r.work = r.work[:0]
+			r.do(0, func(ctx *core.Context, out *CtlHostOutput) {
+				h, err := OpenCtlHost(ctx, r.config(0), r.lc, ctlGeometry.DiskBlocks(), out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.hs[0] = h
+			})
+			r.h = r.hs[0]
+			r.drain()
+			r.lead()
+			a := r.ask(0, 10, &Txn{Ops: []Op{Check(attr(1, 2, 1), b("v"), false)}})
+			if a == nil || a.Err != nil {
+				t.Fatalf("keep %v, %d disk actions: after the crash a Txn got %+v", keep, steps, a)
+			}
+			if answered && a.Result.FailedCheck != -1 {
+				t.Fatalf("keep %v, %d disk actions: a Txn answered before the crash is lost", keep, steps)
+			}
+		}
+	}
+}
+
 // A voter restarted with voters other than those its disk was formatted with stops: alone, it
 // would elect itself and acknowledge commits that no quorum of the group holds.
 func TestAVoterRestartedWithOtherVotersStops(t *testing.T) {
@@ -514,12 +563,16 @@ func (r *hostRun) leader() int {
 	return -1
 }
 
-// txnAt hands voter i a Txn from a storage node and returns its answer, or nil.
+// txnAt hands voter i a Txn from a storage node putting v, and returns its answer, or nil.
 func (r *hostRun) txnAt(i int, token uint64, v string) *Answer {
+	return r.ask(i, token, &Txn{Ops: []Op{Put(attr(1, 2, 1), b(v))}})
+}
+
+// ask hands voter i tx from a storage node, and returns its answer, or nil.
+func (r *hostRun) ask(i int, token uint64, tx *Txn) *Answer {
 	r.t.Helper()
 	var m core.Msg
-	tx := Txn{Ops: []Op{Put(attr(1, 2, 1), b(v))}}
-	if err := EncodeTxn(r.pool, hostGroup, token, &tx, &m); err != nil {
+	if err := EncodeTxn(r.pool, hostGroup, token, tx, &m); err != nil {
 		r.t.Fatal(err)
 	}
 	r.sent = r.sent[:0]
@@ -533,7 +586,8 @@ func (r *hostRun) txnAt(i int, token uint64, v string) *Answer {
 	return nil
 }
 
-// A disk that fails stops the host: it reports the error, drops its Control and takes nothing more.
+// A disk that fails stops the host: it reports the error, drops its Control and takes nothing more,
+// not a Txn, a fetch or a timer.
 func TestAHostWhoseDiskFailsStops(t *testing.T) {
 	r := newHostRun(t)
 	r.lead()
@@ -552,9 +606,22 @@ func TestAHostWhoseDiskFailsStops(t *testing.T) {
 	if err := EncodeTxn(r.pool, hostGroup, 10, &tx, &m); err != nil {
 		t.Fatal(err)
 	}
-	r.recv(hostNode, m)
-	if len(r.sent) != 0 {
-		t.Fatalf("a stopped host sent %+v", r.sent)
+	var fetch core.Msg
+	if err := EncodeSessionFetch(r.pool, hostGroup, 11, &fetch); err != nil {
+		t.Fatal(err)
+	}
+	r.now += StepInterval
+	for _, ev := range []core.Event{
+		{Kind: core.EvNetRecv, Peer: hostNode, Msg: m},
+		{Kind: core.EvNetRecv, Peer: hostNode, Msg: fetch},
+		{Kind: core.EvTimer, Timer: 1},
+		{Kind: core.EvTimer, Timer: StepTimer},
+	} {
+		var out CtlHostOutput
+		r.h.OnEvent(&core.Context{Now: r.now, Raw: r.now, Pool: r.pool}, &ev, &out)
+		if len(out.Actions) != 0 || len(out.Errs) != 0 {
+			t.Fatalf("a stopped host took event %d, timer %d, and handed out %d actions, errors %v", ev.Kind, ev.Timer, len(out.Actions), out.Errs)
+		}
 	}
 }
 
