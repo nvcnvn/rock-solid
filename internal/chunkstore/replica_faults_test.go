@@ -43,7 +43,7 @@ type faultRun struct {
 	rng    *core.Rand
 	chunks [2]core.ChunkID
 	ops    map[core.RequestID]faultOp
-	// ok is the writes and punches a primary answered OK, in version order, and replied each it answered; refused is those it refused, version each one's version once a primary sent it, and kept the decision of the peering of each interval of PG 0.
+	// ok is the writes and punches a primary answered OK, in version order, and replied each it answered; refused is those it refused, version each one's version once a primary ordered it, and kept the decision of the peering of each interval of PG 0.
 	ok      []answered
 	replied map[core.RequestID]int
 	refused []core.RequestID
@@ -196,6 +196,11 @@ func (f *faultRun) pass(d int, acts []core.Action) {
 			}
 		}
 	}
+	for _, v := range f.c.reps[d].vers {
+		if v.ordered && !v.recover {
+			f.version[v.msgID] = v.u.Version
+		}
+	}
 	for i := range acts {
 		a := &acts[i]
 		if a.Kind != core.ActNetSend || a.Msg.Len < headSize {
@@ -210,10 +215,6 @@ func (f *faultRun) pass(d int, acts []core.Action) {
 			}
 			if DecodeUpdate(a.Msg.Inline(), data, &u) == nil {
 				f.sent[[2]uint64{uint64(d), uint64(u.ID)}] = u
-				r := f.c.reps[d]
-				if j := r.versionOf(uint64(u.ID & (1<<sendShift - 1))); j >= 0 && !r.vers[j].recover {
-					f.version[r.vers[j].msgID] = u.Version
-				}
 			}
 		case k == KindReply:
 			var rp Response
