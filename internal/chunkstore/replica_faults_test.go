@@ -778,7 +778,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 	for range 2_000_000 {
 		if c.quiet() && !f.peering && !down() || !c.step() {
 			calm := len(f.heals) == 0 && f.crashes == [3]core.Tick{} && !f.peering && len(c.asks) == f.asked && !down()
-			if calm && f.marked() && (!busy() && f.recovered() || idle >= 60) {
+			if calm && f.marked() && (!busy() && f.recovered() && c.inactive() == nil || idle >= 60) {
 				break
 			}
 			f.tend(true)
