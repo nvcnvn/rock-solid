@@ -307,6 +307,20 @@ func TestAnActivationIsRecordedWithoutANewInterval(t *testing.T) {
 	}
 }
 
+// Members resend their asks every RetryAfter while a commit is pending; the control plane keeps one ask per interval.
+func TestResentAsksKeepOneAskPerInterval(t *testing.T) {
+	r := newCtlRun(t)
+	pg := core.PGID{Pool: 1, Index: 3}
+	for range 5 {
+		r.ctl.Ask(chunkstore.PGFields{Epoch: 2, PG: pg, Interval: 4})
+		r.ctl.Ask(chunkstore.PGFields{Epoch: 3, PG: pg, Interval: 5})
+	}
+	want := []chunkstore.PGInterval{{PG: pg, Interval: 4}, {PG: pg, Interval: 5}}
+	if !slices.Equal(r.ctl.asks, want) {
+		t.Fatalf("asks %v, want %v", r.ctl.asks, want)
+	}
+}
+
 func twoGroups() *ShardMap {
 	return &ShardMap{Groups: []Group{{ID: 1}, {ID: 2, Start: PrefixEnd([]byte{SpaceCtl})}}}
 }

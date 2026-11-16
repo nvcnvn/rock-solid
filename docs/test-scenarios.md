@@ -6684,6 +6684,7 @@ on a node is chunkstore's (`table_test.go`).
 | A node at e receives e + 3 (a gap) | It fetches the whole table. It loses nothing, since each PG entry carries its interval number (`TestDeltaBases`) |
 | A Raft snapshot of the group | Holds the whole table (`TestANewLeaderAndASnapshotReadBackTheWholeState`) |
 | A primary reports activation of interval k on its heartbeat | A later table records k as the PG's last activated interval and drops the member lists of the intervals before it. That table starts no interval (`TestAnActivationIsRecordedWithoutANewInterval`) |
+| The primary and members of a PG resend their ask for a new interval every second while a commit is pending | The control plane keeps one ask per PG and interval (`TestResentAsksKeepOneAskPerInterval`) |
 | A disk added, a recovered report, a down mark | Each table raises the table epoch and commits only the entries it changes. Only PGs whose members change start a new interval (`TestATableCommitsAsItsDelta`) |
 | The control-plane leader fails over | The new leader reads the pools, the table and the shard map back from the group's state, and its next table follows the last committed one (`TestANewLeaderAndASnapshotReadBackTheWholeState`) |
 | Two machines each think they lead | The second's commit fails its checks against what the first committed; it reads the state again and its next commit lands on top (`TestARacingCommitFailsItsChecks`) |

@@ -260,9 +260,11 @@ func (c *Control) Report(rp *chunkstore.Report) {
 	c.rcv = c.fold(c.rcv, rp.Recovered)
 }
 
-// Ask takes a primary's ask for a new interval of its PG, as Report takes a report.
+// Ask takes a primary's or member's ask for a new interval of its PG, keeping one of each until a commit takes it.
 func (c *Control) Ask(f chunkstore.PGFields) {
-	c.asks = c.fold(c.asks, []chunkstore.PGFields{f})
+	if a := (chunkstore.PGInterval{PG: f.PG, Interval: f.Interval}); !slices.Contains(c.asks, a) {
+		c.asks = append(c.asks, a)
+	}
 }
 
 func (c *Control) fold(dst []chunkstore.PGInterval, fs []chunkstore.PGFields) []chunkstore.PGInterval {
