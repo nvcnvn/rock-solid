@@ -4358,7 +4358,7 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `keepNoSource` | `neg-keep-no-source` | 4 | 4 | 0 | 4, 4 | `peer`, the line where the plant first differs | `KeptMatches` |
 | `writeOnUnfound` | `neg-write-on-unfound` | 5 | 4 | 1 | 4, 4 | `order`, the planted order on an unfound chunk. Seed 35 passes | `Order`: the chunk is not in the decision's `unf` |
 | `keepPastMember` | `neg-keep-past-member` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 39: each trace is a prefix of its baseline's. Only its scripted test shows the rule (`TestKeepPastMemberLeavesAMoveUnfound`) | |
-| `forgetImage` | `neg-forget-image` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 9: each trace is a prefix of its baseline's; seed 2's baseline gives no verdict in 400 s. Only its scripted test shows the rule (`TestForgetImageLeavesTheChunkUnfound`) | |
+| `forgetImage` | `neg-forget-image` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 9: each trace is a prefix of its baseline's. Only its scripted test shows the rule (`TestForgetImageLeavesTheChunkUnfound`) | |
 | `settleSubset` | none | 4 | 0 | 4 | 0, 0 | Too loose: `committed` is checked one way, that a record has `ackd`, never that a version in `ackd` has a record | |
 
 Traces can fail is shown on these seeds for 18 of the 32 rules, 13 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
