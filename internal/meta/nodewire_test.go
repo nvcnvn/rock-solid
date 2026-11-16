@@ -306,3 +306,39 @@ func FuzzDecodeDisks(f *testing.F) {
 		},
 		func(pool core.BufPool, m *core.Msg) ([]DiskAddr, error) { return DecodeDisks(pool, m, nil) })
 }
+
+func TestAsksCrossTheWireWhole(t *testing.T) {
+	pool := sim.NewPool(1<<20, 0)
+	var m core.Msg
+	var fs []chunkstore.PGFields
+	for i := range 200 {
+		fs = append(fs, chunkstore.PGFields{Epoch: uint64(i) << 40, PG: core.PGID{Pool: core.PoolID(i), Index: 1 << 31}, Interval: uint32(i) + 1})
+	}
+	for _, sent := range [][]chunkstore.PGFields{nil, fs[:1], fs} {
+		if err := EncodeAsks(pool, 1, sent, &m); err != nil {
+			t.Fatal(err)
+		}
+		got, err := DecodeAsks(pool, &m, fs[:1:1])
+		if err != nil || !slices.Equal(got, sent) && len(sent) > 0 || len(got) != len(sent) {
+			t.Fatalf("decoded %v: %d asks, sent %d", err, len(got), len(sent))
+		}
+		free(&core.Context{Pool: pool}, &m)
+	}
+	if err := encodeBody(pool, 1, KindAsks, 0, []byte{1, 0, 0x80, 0x80, 0x80, 0x80, 0x10, 0, 1}, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeAsks(pool, &m, nil); err != ErrMalformed {
+		t.Fatalf("a pool over 32 bits decodes: %v", err)
+	}
+	if pool.Live() != 0 {
+		t.Fatalf("%d buffers left", pool.Live())
+	}
+}
+
+func FuzzDecodeAsks(f *testing.F) {
+	fuzzRecode(f, []chunkstore.PGFields{{Epoch: 3, PG: core.PGID{Pool: 1, Index: 2}, Interval: 4}, {Epoch: 3, PG: core.PGID{Pool: 1}, Interval: 9}},
+		func(pool core.BufPool, g uint64, fs *[]chunkstore.PGFields, m *core.Msg) error {
+			return EncodeAsks(pool, g, *fs, m)
+		},
+		func(pool core.BufPool, m *core.Msg) ([]chunkstore.PGFields, error) { return DecodeAsks(pool, m, nil) })
+}

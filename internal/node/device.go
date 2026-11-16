@@ -11,9 +11,9 @@ import (
 )
 
 // DeviceConfig is one device of a node: its stable identity, its size in blocks, its class, the
-// loop that owns it, its store's settings, and the seed of its source, which the daemon takes from
+// loop that owns it, its store's settings, the seed of its source, which the daemon takes from
 // the operating system at each start, so a format a crash cut short is formatted again under
-// another log ID.
+// another log ID, and the control-plane group's ID.
 type DeviceConfig struct {
 	Device uint64
 	Blocks uint64
@@ -21,6 +21,7 @@ type DeviceConfig struct {
 	Loop   uint32
 	Store  chunkstore.Config
 	Seed   uint64
+	Group  uint64
 }
 
 // DeviceOutput is what a call into a Device asks of its loop and of the node's machine: actions;
@@ -71,6 +72,8 @@ type Device struct {
 	hasAuth   bool
 	sout      chunkstore.Output
 	rout      chunkstore.ReplicaOutput
+	rp        chunkstore.Report
+	frame     []byte
 }
 
 // NewDevice starts recovering the device's store.
@@ -94,7 +97,7 @@ func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 	switch {
 	case d.rep != nil:
 		d.rep.OnEvent(ctx, ev, &d.rout)
-		d.take(out)
+		d.take(ctx, out)
 		return
 	case ev.Kind == core.EvNetRecv:
 		free(ctx, &ev.Msg)
@@ -173,7 +176,7 @@ func (d *Device) Disks(ctx *core.Context, ds []meta.DiskAddr, out *DeviceOutput)
 	} else {
 		d.addrs(ds)
 	}
-	d.take(out)
+	d.take(ctx, out)
 }
 
 func (d *Device) addrs(ds []meta.DiskAddr) {
@@ -189,7 +192,7 @@ func (d *Device) Hand(ctx *core.Context, h *Hand, out *DeviceOutput) {
 	}
 	if d.rep != nil {
 		d.rep.SetSessions(ctx, h.Table, h.Answers, &d.rout)
-		d.take(out)
+		d.take(ctx, out)
 	}
 }
 
@@ -200,7 +203,7 @@ func (d *Device) Table(ctx *core.Context, t *chunkstore.Table, out *DeviceOutput
 	}
 	if d.rep != nil {
 		d.rep.SetTable(ctx, *t, &d.rout)
-		d.take(out)
+		d.take(ctx, out)
 	}
 }
 
@@ -209,7 +212,7 @@ func (d *Device) Table(ctx *core.Context, t *chunkstore.Table, out *DeviceOutput
 func (d *Device) Delta(ctx *core.Context, dl *chunkstore.Delta, out *DeviceOutput) {
 	if d.rep != nil {
 		d.rep.ApplyDelta(ctx, dl, &d.rout)
-		d.take(out)
+		d.take(ctx, out)
 	}
 }
 
@@ -218,13 +221,31 @@ func (d *Device) Authority(ctx *core.Context, at core.NodeID, out *DeviceOutput)
 	d.auth, d.hasAuth = at, true
 	if d.rep != nil {
 		d.rep.SetAuthority(ctx, at, &d.rout)
-		d.take(out)
+		d.take(ctx, out)
 	}
 }
 
-// take gathers the replica's output and the versions it holds.
-func (d *Device) take(out *DeviceOutput) {
+// take gathers the replica's output and the versions it holds, and sends the authority the
+// replica's asks for new intervals, and its activations and recovered intervals in a report; one
+// lost, or made before the device has an authority, is made again every RetryAfter until a table
+// answers it.
+func (d *Device) take(ctx *core.Context, out *DeviceOutput) {
 	out.Actions = append(out.Actions, d.rout.Actions...)
+	if d.hasAuth && len(d.rout.Asks) != 0 {
+		a := core.Action{Kind: core.ActNetSend, Peer: d.auth}
+		if meta.EncodeAsks(ctx.Pool, d.cfg.Group, d.rout.Asks, &a.Msg) == nil {
+			out.Actions = append(out.Actions, a)
+		}
+	}
+	if d.hasAuth && len(d.rout.Activations)+len(d.rout.Recovered) != 0 {
+		d.rp.ID++
+		d.rp.Activations, d.rp.Recovered = d.rout.Activations, d.rout.Recovered
+		d.frame = chunkstore.AppendReport(d.frame[:0], &d.rp)
+		a := core.Action{Kind: core.ActNetSend, Peer: d.auth}
+		if chunkstore.Attach(ctx.Pool, &a.Msg, d.frame, core.NoBuf) == nil {
+			out.Actions = append(out.Actions, a)
+		}
+	}
 	out.Ask = max(out.Ask, d.rout.FetchSessions)
 	out.Fetch = out.Fetch || d.rout.Fetch != 0 || d.rout.Whole
 	out.Held, out.Epoch = d.st.Sessions().Version, d.rep.Table().Epoch

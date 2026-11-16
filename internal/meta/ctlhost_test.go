@@ -932,6 +932,57 @@ func TestAPoolOverReportedDisksPlacesItsPGs(t *testing.T) {
 	}
 }
 
+// A replica's ask over the host reaches Control.Ask, from a node heard from alone: the PG moves to
+// a new interval, whose delta goes to the node; its activation, in a replica's report, reaches
+// Control.Report, which a later table folds in.
+func TestAReplicasAskAndActivationReachTheControl(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.report(&NodeReport{Node: 2, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20, Loop: 3}}})
+	r.run(StepInterval * 3)
+	if err := r.h.Control().SetPool(1, spec(1, 1), []chunkstore.Disk{{ID: 1, Node: 2, Blocks: 1 << 20}}); err != nil {
+		t.Fatal(err)
+	}
+	r.run(StepInterval * 3)
+	tb := r.h.Control().Table()
+	pg := tb.Pools[0].PGs[0]
+	ask := []chunkstore.PGFields{{Epoch: tb.Epoch, PG: core.PGID{Pool: 1}, Interval: pg.Interval}}
+	replica := core.NodeID{Node: 2, Loop: 3}
+	send := func(from core.NodeID, encode func(m *core.Msg) error) (delta bool) {
+		t.Helper()
+		var m core.Msg
+		if err := encode(&m); err != nil {
+			t.Fatal(err)
+		}
+		r.recv(from, m)
+		r.run(StepInterval * 3)
+		r.dropDisks()
+		for _, a := range r.sent {
+			_, k, _, _ := Peek(&a.Msg)
+			delta = delta || k == KindDelta && a.Peer == core.NodeID{Node: 2, Loop: 1}
+			free(&core.Context{Pool: r.pool}, &a.Msg)
+		}
+		r.sent = r.sent[:0]
+		return delta
+	}
+	send(core.NodeID{Node: 5, Loop: 3}, func(m *core.Msg) error { return EncodeAsks(r.pool, hostGroup, ask, m) })
+	if got := r.h.Control().Table().Pools[0].PGs[0]; got.Interval != pg.Interval {
+		t.Fatalf("an ask from a node not heard from moved the PG to interval %d", got.Interval)
+	}
+	delta := send(replica, func(m *core.Msg) error { return EncodeAsks(r.pool, hostGroup, ask, m) })
+	next := r.h.Control().Table().Pools[0].PGs[0]
+	if next.Interval <= pg.Interval || !delta {
+		t.Fatalf("the ask left the PG at interval %d, a delta sent to the node: %v", next.Interval, delta)
+	}
+	act := chunkstore.Report{ID: 1, Activations: []chunkstore.PGFields{{Epoch: r.h.Control().Table().Epoch, PG: core.PGID{Pool: 1}, Interval: next.Interval}}}
+	send(replica, func(m *core.Msg) error {
+		return chunkstore.Attach(r.pool, m, chunkstore.AppendReport(nil, &act), core.NoBuf)
+	})
+	if got := r.h.Control().Table().Pools[0].PGs[0]; got.Activated != next.Interval {
+		t.Fatalf("the activation of interval %d left the PG at %+v", next.Interval, got)
+	}
+}
+
 // After a restart, a disk whose node has not reported yet keeps its PGs and takes no new one:
 // placement reads it at size 0, not as having left its pools.
 func TestARestartKeepsThePGsOfADiskNotReportedYet(t *testing.T) {

@@ -36,8 +36,8 @@ func (o *CtlHostOutput) Reset() {
 
 // CtlHost is one replica of the control-plane group and, while it leads with an entry of its term
 // applied, the Control beside it. It takes the group's messages, the sharded API's Txns to the
-// group, each storage node's report, session fetch and table fetch, and the chunkstore frames of
-// replicas (reports, member timeouts, probe replies); it steps its Control every StepInterval and
+// group, each storage node's report, session fetch and table fetch, its replicas' asks for new
+// intervals, and the chunkstore frames of replicas (reports, member timeouts, probe replies); it steps its Control every StepInterval and
 // after each answer, proposing what the Control asks, and sends the nodes that reported the
 // placement tables and session tables the Control hands out, a session table pushed with token 0.
 // Without a Control it answers a node's report or fetch with the leader it knows. It keeps its
@@ -75,6 +75,7 @@ type CtlHost struct {
 	cout     ControlOutput
 	answers  []Answer
 	nr       NodeReport
+	asks     []chunkstore.PGFields
 	disks    []chunkstore.Disk
 	stepAt   core.Tick
 }
@@ -229,6 +230,11 @@ func (h *CtlHost) recvGroup(ctx *core.Context, ev *core.Event, out *CtlHostOutpu
 		return
 	case kind == KindNodeReport:
 		h.report(ctx, ev, out)
+	case kind == KindAsks:
+		var err error
+		if h.asks, err = DecodeAsks(ctx.Pool, &ev.Msg, h.asks); err == nil && h.ctl != nil {
+			h.ctl.Asked(ev.Peer.Node, h.asks)
+		}
 	case kind != KindSessionFetch && kind != KindTableFetch && kind != KindSessionStart:
 	case h.ctl == nil:
 		h.redirect(ctx, ev.Peer, out)

@@ -20,6 +20,8 @@ import (
 // request and it has no body; its answer, once the start commits, carries the request as its token
 // and the session's ID as its body. The disk membership, the leader's answer to a report, is a
 // count and, in rising disk ID order, each disk's ID, log, and the node and loop that own it.
+// A replica's asks for new intervals are a count and each ask's epoch, pool, PG index and interval,
+// with no token.
 const (
 	KindNodeReport   byte = 0x42
 	KindSessionFetch byte = 0x43
@@ -31,6 +33,7 @@ const (
 	KindSessionStart byte = 0x49
 	KindStarted      byte = 0x4a
 	KindDisks        byte = 0x4b
+	KindAsks         byte = 0x4c
 )
 
 // DiskAddr is a disk of the committed membership record: its ID, its log, and the loop that owns it.
@@ -306,6 +309,38 @@ func DecodeDisks(pool core.BufPool, msg *core.Msg, dst []DiskAddr) ([]DiskAddr, 
 		}
 		last = id
 		dst = append(dst, DiskAddr{Disk: uint32(id), Log: log, At: core.NodeID{Node: uint32(node), Loop: uint32(loop)}})
+	}
+	if d.bad || len(d.b) != 0 {
+		return dst[:0], ErrMalformed
+	}
+	return dst, nil
+}
+
+// EncodeAsks writes a replica's asks for new intervals into msg, or returns the pool's error.
+func EncodeAsks(pool core.BufPool, group uint64, fs []chunkstore.PGFields, msg *core.Msg) error {
+	body := binary.AppendUvarint(nil, uint64(len(fs)))
+	for _, f := range fs {
+		body = binary.AppendUvarint(binary.AppendUvarint(body, f.Epoch), uint64(f.PG.Pool))
+		body = binary.AppendUvarint(binary.AppendUvarint(body, uint64(f.PG.Index)), uint64(f.Interval))
+	}
+	return encodeBody(pool, group, KindAsks, 0, body, msg)
+}
+
+// DecodeAsks decodes a replica's asks into dst; one that does not decode, has a token, or has a
+// pool, index or interval over 32 bits, is ErrMalformed.
+func DecodeAsks(pool core.BufPool, msg *core.Msg, dst []chunkstore.PGFields) ([]chunkstore.PGFields, error) {
+	dst = dst[:0]
+	b, err := untokened(pool, KindAsks, msg)
+	if err != nil {
+		return dst, err
+	}
+	d := decoder{b: b}
+	for n := d.count(); n > 0; n-- {
+		epoch, p, index, iv := d.uvarint(), d.uvarint(), d.uvarint(), d.uvarint()
+		if p > 0xffffffff || index > 0xffffffff || iv > 0xffffffff {
+			return dst[:0], ErrMalformed
+		}
+		dst = append(dst, chunkstore.PGFields{Epoch: epoch, PG: core.PGID{Pool: core.PoolID(p), Index: uint32(index)}, Interval: uint32(iv)})
 	}
 	if d.bad || len(d.b) != 0 {
 		return dst[:0], ErrMalformed

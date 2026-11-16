@@ -160,7 +160,7 @@ func (c *Control) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) 
 	if ev.Kind == core.EvNetRecv {
 		frame, data := chunkstore.Frame(ctx.Pool, &ev.Msg)
 		if k, err := chunkstore.Peek(frame); err == nil && k == chunkstore.KindReport {
-			if !slices.ContainsFunc(c.nodes, func(n nodeState) bool { return n.id == ev.Peer.Node && n.release >= c.format }) {
+			if !c.reporting(ev.Peer.Node) {
 				if ev.Msg.Buf != core.NoBuf {
 					ctx.Pool.Free(ev.Msg.Buf)
 				}
@@ -169,10 +169,25 @@ func (c *Control) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) 
 			if chunkstore.DecodeReport(frame, data, &c.rep) == nil {
 				c.fill(ctx.Now, &c.rep)
 				c.watch.Hear(c.rep.Leads)
+				c.Report(&c.rep)
 			}
 		}
 	}
 	return c.det.OnEvent(ctx, ev, out)
+}
+
+// reporting is whether node was heard from within node_down_after at a release at the format level.
+func (c *Control) reporting(node uint32) bool {
+	return slices.ContainsFunc(c.nodes, func(n nodeState) bool { return n.id == node && n.release >= c.format })
+}
+
+// Asked takes a replica's asks for new intervals from node, dropped unless node was heard from at the format level.
+func (c *Control) Asked(node uint32, fs []chunkstore.PGFields) {
+	if c.reporting(node) {
+		for _, f := range fs {
+			c.Ask(f)
+		}
+	}
 }
 
 // begin forgets the nodes not heard from within node_down_after of now and, once after a failover

@@ -39,7 +39,7 @@ func (r *devRun) start(seed uint64) {
 	r.out.Reset()
 	cfg := storetest.Config()
 	cfg.Log.NoReserve = false
-	r.d = NewDevice(&r.ctx, DeviceConfig{Device: 7, Blocks: devBlocks, Class: "ssd", Loop: 3, Store: cfg, Seed: seed}, &r.out)
+	r.d = NewDevice(&r.ctx, DeviceConfig{Device: 7, Blocks: devBlocks, Class: "ssd", Loop: 3, Store: cfg, Seed: seed, Group: group}, &r.out)
 	r.take()
 }
 
@@ -210,5 +210,38 @@ func TestAnUnnamedDeviceDoesNotPinTheReport(t *testing.T) {
 	}
 	if nr := r.report(); nr.Sessions != 5 {
 		t.Fatalf("the running replica holds 5, the report says %d", nr.Sessions)
+	}
+}
+
+// A replica restarted over its store asks for a new interval of its PG in its first table, and the
+// device sends the ask to its authority.
+func TestARestartedReplicasAskGoesToItsAuthority(t *testing.T) {
+	disk := sim.NewDisk(devBlocks)
+	first := newDevRun(t, disk)
+	first.start(1)
+	first.settle()
+	r := newDevRun(t, disk)
+	r.start(2)
+	r.settle()
+	if r.opened == nil || r.opened.Log != first.opened.Log {
+		t.Fatalf("the restart opened %+v", r.opened)
+	}
+	r.out.Reset()
+	r.d.Authority(&r.ctx, ctl, &r.out)
+	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 5, Log: r.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}}, &r.out)
+	pg := chunkstore.PGEntry{Members: []chunkstore.Member{{Disk: 5}}, Interval: 2, Activated: 2}
+	r.d.Table(&r.ctx, &chunkstore.Table{Epoch: 3, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 1, MinLive: 1, PGs: []chunkstore.PGEntry{pg}}}}, &r.out)
+	var asks []chunkstore.PGFields
+	for _, a := range r.out.Actions {
+		if _, k, _, _ := meta.Peek(&a.Msg); a.Kind == core.ActNetSend && k == meta.KindAsks && a.Peer == ctl {
+			got, err := meta.DecodeAsks(r.ctx.Pool, &a.Msg, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			asks = append(asks, got...)
+		}
+	}
+	if want := (chunkstore.PGFields{Epoch: 3, PG: core.PGID{Pool: 1}, Interval: 2}); !slices.Contains(asks, want) {
+		t.Fatalf("asked %+v, want %+v", asks, want)
 	}
 }
