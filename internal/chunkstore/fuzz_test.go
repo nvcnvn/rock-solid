@@ -52,16 +52,19 @@ func FuzzDecodeExtent(f *testing.F) {
 	})
 }
 
-// FuzzDecodeChunk feeds arbitrary bytes as a chunk's entry: a value of the entry's size decodes
-// and encodes back to the same bytes, its image flag byte 0 or 1.
+// FuzzDecodeChunk feeds arbitrary bytes as a chunk's entry: only a value of the entry's size whose
+// image flag byte is 0 or 1 decodes, and it encodes back to the same bytes.
 func FuzzDecodeChunk(f *testing.F) {
-	f.Add(appendChunk(nil, Chunk{Version: 1<<32 | 2, Epoch: 3, Whole: 1<<32 | 1, Listed: 2<<32 | 5, ListedIn: 4, Image: true}))
+	v := appendChunk(nil, Chunk{Version: 1<<32 | 2, Epoch: 3, Whole: 1<<32 | 1, Listed: 2<<32 | 5, ListedIn: 4, Image: true})
+	f.Add(v)
+	f.Add(v[:chunkValueSize-1])
 	f.Fuzz(func(t *testing.T, v []byte) {
-		if len(v) != chunkValueSize || v[chunkValueSize-1] > 1 {
-			return
+		ch, ok := decodeChunk(v)
+		if want := len(v) == chunkValueSize && v[chunkValueSize-1] <= 1; ok != want {
+			t.Fatalf("a %d-byte entry %x decodes %v", len(v), v, ok)
 		}
-		if got := appendChunk(nil, decodeChunk(v)); !bytes.Equal(got, v) {
-			t.Fatalf("entry %x decodes to %+v, which encodes to %x", v, decodeChunk(v), got)
+		if got := appendChunk(nil, ch); ok && !bytes.Equal(got, v) {
+			t.Fatalf("entry %x decodes to %+v, which encodes to %x", v, ch, got)
 		}
 	})
 }

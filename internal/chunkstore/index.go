@@ -360,8 +360,8 @@ func (x *Index) PGChunks(dst []ChunkPeer, pool core.PoolID, pg, pgs uint32) []Ch
 		if len(k) < chunkKeySize || core.PoolID(binary.BigEndian.Uint32(k)) != pool || binary.BigEndian.Uint64(k[4:])>>shift != uint64(pg) {
 			break
 		}
-		if v := x.it.Value(); len(k) == chunkKeySize && len(v) == chunkValueSize {
-			if ch := decodeChunk(v); ch.Version != 0 || ch.ListedIn != 0 {
+		if ch, ok := decodeChunk(x.it.Value()); len(k) == chunkKeySize && ok {
+			if ch.Version != 0 || ch.ListedIn != 0 {
 				dst = append(dst, ChunkPeer{Chunk: core.ChunkIDFromBytes([core.ChunkIDSize]byte(k[12:])), Whole: ch.Whole, Logged: ch.Version,
 					Listed: ch.ListedIn != 0, Kept: ch.Listed})
 			}
@@ -546,9 +546,12 @@ func appendChunk(dst []byte, ch Chunk) []byte {
 	return append(dst, 0)
 }
 
-func decodeChunk(v []byte) Chunk {
+func decodeChunk(v []byte) (Chunk, bool) {
+	if len(v) != chunkValueSize || v[36] > 1 {
+		return Chunk{}, false
+	}
 	return Chunk{Version: binary.LittleEndian.Uint64(v), Epoch: binary.LittleEndian.Uint64(v[8:]), Whole: binary.LittleEndian.Uint64(v[16:]),
-		Listed: binary.LittleEndian.Uint64(v[24:]), ListedIn: binary.LittleEndian.Uint32(v[32:]), Image: v[36] != 0}
+		Listed: binary.LittleEndian.Uint64(v[24:]), ListedIn: binary.LittleEndian.Uint32(v[32:]), Image: v[36] == 1}, true
 }
 
 func (x *Index) recordKey(header core.LBA) []byte {
@@ -755,7 +758,11 @@ func (x *Index) Chunk(pool core.PoolID, c core.ChunkID) (Chunk, bool) {
 	if !ok {
 		return Chunk{}, false
 	}
-	return decodeChunk(v), true
+	ch, ok := decodeChunk(v)
+	if !ok {
+		x.must(fmt.Errorf("chunk %v: entry %x", c, v))
+	}
+	return ch, true
 }
 
 // Lookup returns the live extent holding block b of the chunk, a one-block extent of zeros at version 0 when the chunk has an entry and no extent holds b, or false when the chunk has no entry or only the absent version.
@@ -997,7 +1004,7 @@ func (x *Index) Check() error {
 			}
 			prefix = prefix[:0]
 		case len(k) == chunkKeySize:
-			if len(v) != chunkValueSize {
+			if _, ok := decodeChunk(v); !ok {
 				return fmt.Errorf("chunk %x: entry %x", k, v)
 			}
 			prefix = append(prefix[:0], k...)

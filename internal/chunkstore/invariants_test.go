@@ -136,8 +136,10 @@ func (h *harness) recoveredIndex() {
 		skip[c] = true
 	}
 	for _, kv := range both {
-		if c, ok := chunkOfKey(kv[0]); ok && len(kv[0]) == chunkKeySize && decodeChunk([]byte(kv[1])).ListedIn != 0 {
-			skip[c] = true
+		if c, ok := chunkOfKey(kv[0]); ok && len(kv[0]) == chunkKeySize {
+			if ch, _ := decodeChunk([]byte(kv[1])); ch.ListedIn != 0 {
+				skip[c] = true
+			}
 		}
 	}
 	out := map[string]bool{}
