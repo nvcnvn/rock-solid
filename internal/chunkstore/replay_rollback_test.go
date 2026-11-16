@@ -57,11 +57,16 @@ func (r *rollbackRun) dropY(t *testing.T) {
 	}
 }
 
-// loseMemberAndRead has the other member's disk die and be declared lost, lets recovery run and reads X back.
+// loseMemberAndRead has the other member's disk die and be declared lost, lets recovery run and reads X back, and
+// the dropped Y's block as zero.
 func (r *rollbackRun) loseMemberAndRead(t *testing.T) {
 	t.Helper()
-	if rp, data := r.xAfterLoss(t); !readsX(rp, data) {
+	rp, data := r.xAfterLoss(t)
+	if !readsX(rp, data) {
 		t.Fatalf("X read %+v %x; primary %+v; members %v", rp, data[:min(1, len(data))], r.c.listed(r.c.node(r.p), r.ch), r.members())
+	}
+	if len(data) != 2*core.BlockSize || !bytes.Equal(data[core.BlockSize:], make([]byte, core.BlockSize)) {
+		t.Fatalf("the dropped Y reads back: %d bytes, block 1 starts %x", len(data), data[min(core.BlockSize, len(data)-1):][:1])
 	}
 }
 
@@ -73,7 +78,7 @@ func (r *rollbackRun) xAfterLoss(t *testing.T) (Response, []byte) {
 	r.tick(5_000_000)
 	plantAll(r.c, func(p *replicaPlants) { p.noRecovery = false })
 	r.tick(60_000_000)
-	return r.read(r.ch)
+	return r.readLen(r.ch, 2*core.BlockSize)
 }
 
 func readsX(rp Response, data []byte) bool {

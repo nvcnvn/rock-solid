@@ -5671,7 +5671,7 @@ own ([Testing strategy](design.md#testing-strategy)).
 - Replay rollback: a primary's versions outlast a restart or a lost lead gated, and its image with
   them. The shape is `rep2` with X acknowledged on both members and Y, never acknowledged, on the
   primary alone; each test then has the other member's disk die and be declared lost, and reads X
-  back from the primary:
+  back from the primary and Y's block as zero:
   - The primary restarts with Y pending, and replay leaves Y gated for the next peering to drop
     (`TestARestartedPrimaryRollsBackItsPendingWrite`, seeds 1 to 3); it restarts after the peering
     that dropped Y, and its flagged entry gives back its image

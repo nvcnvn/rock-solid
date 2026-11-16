@@ -207,10 +207,12 @@ func (r *soleRun) answered(id core.RequestID, d core.Tick) (Response, bool) {
 }
 
 // read is one read of ch at the PG's primary, asked again while it is refused, for up to 5 s.
-func (r *soleRun) read(ch core.ChunkID) (Response, []byte) {
+func (r *soleRun) read(ch core.ChunkID) (Response, []byte) { return r.readLen(ch, 1) }
+
+func (r *soleRun) readLen(ch core.ChunkID, n uint32) (Response, []byte) {
 	c := r.c
 	for range 50 {
-		id := c.read(pg0, ch, 0, 1, c.primary(pg0))
+		id := c.read(pg0, ch, 0, n, c.primary(pg0))
 		if rp, ok := r.answered(id, 100_000); ok && rp.Status != StatusRefused {
 			return rp, c.cl.data[id]
 		}
