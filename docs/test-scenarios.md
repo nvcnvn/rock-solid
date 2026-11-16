@@ -7710,7 +7710,8 @@ once.
   formats is cut after k completions too, and a third start runs to the end. Each start that opens
   shows the old log with chunk 1 whole under its old disk ID in the disk record, or a log ID no
   format of the run drew before under a new disk ID with chunk 1 reading zeros; no start formats
-  under a log ID drawn before or leaves the device failed, and the run reaches both outcomes.
+  under a log ID drawn before or leaves the device failed, and the run reaches both outcomes. It
+  runs with trims and again with `NoTrim`, the format of a disk that is a file.
 - Both superblocks damaged (`TestADeviceWithNoValidSuperblockIsLeftAsItWas`, `storetest`): bit 16
   flipped in block 0 and in the copy of a written store; the start is failed with
   `ErrUnrecognized`, and the disk's SHA-256 is the same before and after it.
@@ -7723,6 +7724,8 @@ once.
   rounds of format's completions, for k from 1 to 8, half of a format's rounds and the last 9, the
   start's own format after as many, then starts it unkilled, with the same checks; in two runs in a
   row a format took 183 and 232 rounds, 2 starts found the old log and 16 a new one.
+  The run is made with trims and with `NoTrim`; with no trims a format's first write is the new
+  block 0, which a kill after a round has let land, so only that run may find no old log.
   `TestAStartLeavesADeviceWithNoValidSuperblockAsItWas` checks the file's SHA-256 after a start
   reports the device failed.
 - The report (`TestAFailedDeviceIsShownAndNeverRecorded`, `internal/meta`): failed devices

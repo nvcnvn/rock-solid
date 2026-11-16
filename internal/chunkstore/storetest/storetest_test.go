@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -45,14 +46,28 @@ func TestFaultsOnTheSimulatedDisk(t *testing.T) {
 
 // A device formatted again over its log and crashed after one of format's steps, then started and
 // crashed after as many steps of the format that start runs, comes back at each start with its old
-// log whole, or formatted under a log ID no format drew before, which the record takes as a new disk.
+// log whole, or formatted under a log ID no format drew before, which the record takes as a new disk;
+// with trims, and with none, as on a disk that is a file.
 func TestADeviceCrashedTwiceMidFormatComesBackWholeOrNew(t *testing.T) {
-	cfg, data := storetest.Config(), storetest.Fill(3*core.BlockSize, 7)
-	total := formatSteps(t)
+	for _, noTrim := range []bool{false, true} {
+		t.Run(fmt.Sprint("NoTrim=", noTrim), func(t *testing.T) {
+			cfg := storetest.Config()
+			cfg.Log.NoTrim = noTrim
+			crashFormatsTwice(t, cfg)
+		})
+	}
+}
+
+func crashFormatsTwice(t *testing.T, cfg chunkstore.Config) {
+	data := storetest.Fill(3*core.BlockSize, 7)
+	total := formatSteps(t, cfg)
 	ks := []int{1, 2, 3, 4, 5, 6, 7, 8, total / 2}
 	for k := total - 8; k <= total; k++ {
 		ks = append(ks, k)
 	}
+	ks = slices.DeleteFunc(ks, func(k int) bool { return k < 1 || k > total })
+	slices.Sort(ks)
+	ks = slices.Compact(ks)
 	var old, fresh int
 	for _, k := range ks {
 		d, rnd := storetest.NewSimDisk(uint64(k)), core.NewRand(uint64(k))
@@ -108,8 +123,8 @@ func TestADeviceCrashedTwiceMidFormatComesBackWholeOrNew(t *testing.T) {
 }
 
 // formatSteps counts the disk completions of a format on the simulated disk.
-func formatSteps(t *testing.T) int {
-	r, act, log := storetest.StartRig(t, storetest.NewSimDisk(0), storetest.Config(), core.NewRand(0))
+func formatSteps(t *testing.T, cfg chunkstore.Config) int {
+	r, act, log := storetest.StartRig(t, storetest.NewSimDisk(0), cfg, core.NewRand(0))
 	if act != chunkstore.StartFormat {
 		t.Fatalf("a blank device: %v, %v", act, r.S.Err())
 	}
