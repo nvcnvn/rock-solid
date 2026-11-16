@@ -621,6 +621,27 @@ func TestAMachineThatHasNotSeenASessionStartDoesNotFenceIt(t *testing.T) {
 	}
 }
 
+// A new leader's machine whose table lags a start answers no fetch until a Txn of its own commits,
+// since the node would refuse the live session's writes; its first session turn proposes one, so
+// an idle leader answers too.
+func TestAMachineThatHasNotSeenASessionStartAnswersNoFetch(t *testing.T) {
+	r := newCtlRun(t)
+	stale := r.load(r.l)
+	cs := r.startSessions(1)
+	var out ControlOutput
+	if err := stale.Step(&ControlInputs{Raw: r.raw, Leased: true}, 1, &out); err != nil {
+		t.Fatal(err)
+	}
+	if st, ok := stale.FetchAnswer(r.at(), true); ok {
+		t.Fatalf("a machine whose table lags answers a fetch with %+v, session %d live", st, cs[0].id)
+	}
+	r.ctl = r.load(r.l)
+	r.sessStep()
+	if st, ok := r.ctl.FetchAnswer(r.at(), true); !ok || st.Next != cs[0].id+1 {
+		t.Fatalf("an idle leader's machine answers %v with %+v", ok, st)
+	}
+}
+
 // breaksWithin reports whether the seeded run with pl, checking inv alone, breaks inv in one of the
 // first n seeds. A test's n is about 5 / the plant's rate over 500 seeds, so a change that re-rolls
 // the draws fails it less than 1% of the time.

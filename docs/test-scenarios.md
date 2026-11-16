@@ -7703,6 +7703,7 @@ The node's machine, `internal/node`, fed events with no network, and its message
 | Two starts of a node | Fetch under different tokens, so one start's answer never stands for the other's fetch; an unformatted device formats under different log IDs |
 | A start with devices opened, failed by recovery and failed by format | The first report lists the opened disks and both failed devices |
 | A fetch reaches the control-plane leader before it steps under its lease, after it lost its lease, or after it regained it but before stepping | Unanswered; once stepped under its lease, answered with the live sessions and next ID (`TestAFetchIsAnsweredOnlyUnderTheLeaderLease`, `internal/meta`) |
+| A fetch reaches a new leader whose applied table lags a start the old leader committed | Unanswered until a session-table Txn of its own commits; a leader with nothing to commit commits the head's check alone, then answers (`TestAMachineThatHasNotSeenASessionStartAnswersNoFetch`, `internal/meta`) |
 | A report or session table across the wire | Decodes to what was sent; live IDs that do not rise, a zero ID or one at or above the next ID are malformed; fuzzed (`FuzzDecodeNodeReport`, `FuzzDecodeSessions`) |
 
 The rows are unit tests in `internal/node/node_test.go` and `internal/meta/nodewire_test.go`.

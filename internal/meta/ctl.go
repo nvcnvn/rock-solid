@@ -99,11 +99,14 @@ type Control struct {
 	resend bool
 	starts []SessionStart
 	timers []sessTimer
-	// seen is the time of the last input, leased whether the leader held its lease then, and
-	// tableTurn whether a session commit went last, so the table's step goes next.
+	// seen is the time of the last input, leased whether the leader held its lease then,
+	// tableTurn whether a session commit went last, so the table's step goes next, and current
+	// whether a session Txn of this machine committed since it last read the state, its head check
+	// proving the session table current.
 	seen      lease.Time
 	leased    bool
 	tableTurn bool
+	current   bool
 	plant     sessionPlants
 	// Space grants: this leader lease, each session's grants, the sessions heard from or started under it,
 	// each pool's room, each disk's fill, when this leader first stepped, and a scratch report.
@@ -129,7 +132,7 @@ type commit struct {
 	delta            chunkstore.Delta
 	plans            []Group
 	asks, acts, rc   int
-	fenced           bool
+	fenced, session  bool
 	started          []SessionStart
 }
 
@@ -285,7 +288,7 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	turn := c.tableTurn
 	c.tableTurn = false
 	if !turn {
-		if ok, err := c.sessionStep(lt, token, out); ok || err != nil {
+		if ok, err := c.sessionStep(lt, token, false, out); ok || err != nil {
 			c.tableTurn = ok
 			return err
 		}
@@ -351,8 +354,8 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	if !p.table && len(ops) == 0 && len(c.staged) == 0 {
 		c.asks, c.acts, c.rcv, c.stagedMap = c.asks[:0], c.acts[:0], c.rcv[:0], nil
 		c.resendPlans(out)
-		if turn {
-			_, err := c.sessionStep(lt, token, out)
+		if turn || !c.current {
+			_, err := c.sessionStep(lt, token, true, out)
 			return err
 		}
 		return nil
@@ -476,12 +479,13 @@ func (c *Control) Answer(st *State, a *Answer, out *ControlOutput) error {
 	}
 	c.pending = nil
 	if a.Err != nil || a.Result.FailedCheck >= 0 {
+		c.current = false
 		err := c.load(st)
 		c.det, c.round, c.resend = nil, c.round+1, true
 		c.resendPlans(out)
 		return err
 	}
-	c.ctlState = p.next
+	c.ctlState, c.current = p.next, c.current || p.session
 	c.exits = slices.DeleteFunc(c.exits, func(x diskExit) bool { return c.disks[x.id-1].Gone })
 	c.asks, c.acts, c.rcv = c.asks[p.asks:], c.acts[p.acts:], c.rcv[p.rc:]
 	if p.mapStaged {

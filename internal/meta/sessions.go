@@ -124,11 +124,12 @@ func (c *Control) StartSession(node uint32, request uint64) {
 }
 
 // FetchAnswer is the session table at t as storage nodes hold it, for a node's fetch, or false
-// while this leader does not hold its leader lease or has not yet stepped under it: a deposed
-// leader's table can lag a start, and the node would refuse a live session's writes.
+// while this leader does not hold its leader lease, has not yet stepped under it, or has not had a
+// session Txn of its own commit: a new leader's applied table can lag a start the old leader
+// committed, and the node would refuse a live session's writes.
 func (c *Control) FetchAnswer(t lease.Time, leased bool) (chunkstore.SessionTable, bool) {
 	c.sessClock(t, leased)
-	if !leased || !c.grantsFrom.set {
+	if !leased || !c.grantsFrom.set || !c.current {
 		return chunkstore.SessionTable{}, false
 	}
 	return c.sess.Storage(), true
@@ -309,8 +310,9 @@ func (c *Control) Holding(id uint64) bool {
 
 // sessionStep proposes under token, while this leader holds its lease, one Txn of the session
 // table: every session due at t fenced as one new version, the version every storage node holds
-// committed as acknowledged with the sessions it fenced removed, and the staged starts.
-func (c *Control) sessionStep(t lease.Time, token uint64, out *ControlOutput) (bool, error) {
+// committed as acknowledged with the sessions it fenced removed, and the staged starts; or, with
+// head and until one of this machine's has committed, a Txn of the head's checks alone.
+func (c *Control) sessionStep(t lease.Time, token uint64, head bool, out *ControlOutput) (bool, error) {
 	timers := make([]sessTimer, 0, len(c.timers))
 	j := 0
 	for _, e := range c.sess.Sessions {
@@ -330,7 +332,7 @@ func (c *Control) sessionStep(t lease.Time, token uint64, out *ControlOutput) (b
 	if !c.leased {
 		return false, nil
 	}
-	p := &commit{token: token, next: c.ctlState}
+	p := &commit{token: token, next: c.ctlState, session: true}
 	n := &p.next.sess
 	n.Sessions = slices.Clone(c.sess.Sessions)
 	var ops []Op
@@ -365,14 +367,16 @@ func (c *Control) sessionStep(t lease.Time, token uint64, out *ControlOutput) (b
 		p.started = append(p.started, s)
 		ops = append(ops, Put(sessionKey(s.ID), appendSession(nil, &e)))
 	}
-	if len(ops) == 0 && n.Acked == c.sess.Acked {
+	if len(ops) == 0 && n.Acked == c.sess.Acked && (c.current || !head) {
 		return false, nil
 	}
 	tx := Txn{Ops: append([]Op{
 		guard(sessionKey(0), c.sess.Next != 0, appendSessionHead(nil, &c.sess)),
 		guard(ctlKey(CtlMembership, nil), c.diskV != 0, bigEndian.AppendUint64(nil, c.diskV)),
-		Put(sessionKey(0), appendSessionHead(nil, n)),
 	}, ops...)}
+	if n.Next != 0 {
+		tx.Ops = slices.Insert(tx.Ops, 2, Put(sessionKey(0), appendSessionHead(nil, n)))
+	}
 	if c.plant.noHeadCheck {
 		tx.Ops = tx.Ops[1:]
 	}
