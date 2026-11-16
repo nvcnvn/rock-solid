@@ -543,7 +543,7 @@ func TestUndecodableMessagesAreDroppedAndCounted(t *testing.T) {
 		"forwarded proposal":             frame(raftpb.Message{Type: raftpb.MsgProp, To: 2, From: 1, Entries: []raftpb.Entry{{Data: []byte("x")}}}),
 		"buffer length past end":         buffered(head(core.BlockSize+1), 10),
 		"buffer header short":            buffered(head(3)[:kindBytes+1], 10),
-		"unknown kind":                   fort(kindRemoved+1, 40),
+		"unknown kind":                   fort(kindGone+1, 40),
 		"short fortification":            fort(kindFortify, 39),
 		"long fortification":             fort(kindFortified, 41),
 		"buffered fortification":         buffered(append(append(le.AppendUint64([]byte{core.ProtoGroup}, testGroup), kindFortify), make([]byte, 40)...), 10),

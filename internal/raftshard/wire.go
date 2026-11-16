@@ -32,6 +32,10 @@ const (
 	kindMember
 	// kindRemoved answers a replica that its sender's applied configuration does not hold, with the sender's applied index in place of a term.
 	kindRemoved
+	// kindAsk is a follower that heard nothing from the leader it supports for an election timeout asking the leader's node whether it still holds the leader's replica, named by to.
+	kindAsk
+	// kindGone answers an ask that the node no longer holds the replica, named by from.
+	kindGone
 )
 
 var le = binary.LittleEndian
@@ -106,7 +110,7 @@ func decode(pool core.BufPool, msg *core.Msg, m *raftpb.Message, f *fortify) (ui
 	group, kind, body := le.Uint64(b[1:]), b[groupBytes], b[kindBytes:]
 	switch kind {
 	case kindRaft:
-	case kindFortify, kindFortified, kindMember, kindRemoved:
+	case kindFortify, kindFortified, kindMember, kindRemoved, kindAsk, kindGone:
 		if msg.Buf != core.NoBuf || len(b) != fortBytes {
 			return 0, 0, errMalformed
 		}

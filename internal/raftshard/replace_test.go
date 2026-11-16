@@ -641,3 +641,156 @@ func TestALostSnapshotIsReportedFinishedAHeartbeatAfterItLeft(t *testing.T) {
 		t.Fatalf("%d snapshots in %d heartbeats, want a second once the first is reported, and at most one a heartbeat", snaps, heartbeats)
 	}
 }
+
+// outgoingNet is the voter model's counterexample to a follower that never asks: four replicas in
+// the joint configuration that swaps C for D, leaving it on its own, every node holding a lease
+// from every other. C, in the outgoing half alone, wins an election and applies its own removal
+// as etcd-raft leaves the joint configuration, and every message it sends from then on is lost, so
+// no follower learns that the removal committed.
+func outgoingNet(t *testing.T) *testNet {
+	n := newConfNet(t, 4, 1, func(int) *Storage {
+		return confStorage(raftpb.ConfState{Voters: []uint64{1, 2, 4}, VotersOutgoing: []uint64{1, 2, 3}, AutoLeave: true})
+	})
+	n.renewAll()
+	n.call(rC, func(ctx *core.Context, out *Output) {
+		if err := n.r[rC].s.rn.Campaign(); err != nil {
+			t.Fatal(err)
+		}
+		n.r[rC].s.ready(ctx, out)
+	})
+	lost := func(e envelope) bool { return e.from != rC || !n.r[rC].removed }
+	for k := 0; ; k++ {
+		if k == 1000 {
+			t.Fatal("C never applied its own removal")
+		}
+		n.deliver(lost)
+		for i, r := range n.r {
+			if r.flush != 0 {
+				n.durable(i)
+			}
+		}
+		if n.r[rC].removed && len(n.inbox) == 0 {
+			break
+		}
+	}
+	for _, i := range []int{rA, rB, rD} {
+		if len(n.conf(i).VotersOutgoing) == 0 || n.r[i].s.support.term != n.term(rC) {
+			t.Fatalf("replica %d is in %+v supporting term %d, want still joint supporting C's term %d", i, n.conf(i), n.r[i].s.support.term, n.term(rC))
+		}
+	}
+	return n
+}
+
+// renewAll has every node renew its lease from every other, twice rate_gap apart the first time.
+func (n *testNet) renewAll() {
+	first := n.leaseID == 0
+	for h := range n.r {
+		var gs []int
+		for g := range n.r {
+			if g != h {
+				gs = append(gs, g)
+			}
+		}
+		if first {
+			n.leases(h, gs...)
+			continue
+		}
+		for _, g := range gs {
+			n.renew(h, g)
+		}
+	}
+}
+
+// The followers of a leader that applied its own removal, whose node runs and renews their grants,
+// ask that node about the leader within an election timeout, and on its answer that the replica is
+// gone campaign after raft_lapse_campaign; a leader of the plan's configuration follows, and no two
+// replicas could serve a lease read at once.
+func TestFollowersOfALeaderThatAppliedItsOwnRemovalCampaign(t *testing.T) {
+	n := outgoingNet(t)
+	start := n.now
+	bound := ElectionTick*TickInterval + HeartbeatTick*TickInterval + LapseCampaignMax + 3*HeartbeatTick*TickInterval
+	for {
+		if n.now-start > bound {
+			t.Fatalf("no follower led within %v of C's removal", bound.Duration())
+		}
+		n.renewAll()
+		n.advance(HeartbeatTick * TickInterval)
+		n.settle()
+		readers := 0
+		for i := range n.r {
+			if n.leaseRead(i) {
+				readers++
+			}
+		}
+		if readers > 1 {
+			t.Fatalf("%d replicas may serve a lease read", readers)
+		}
+		if n.r[rC].s.Stats().Misrouted != 0 {
+			t.Fatalf("C counted asks about itself misrouted: %+v", n.r[rC].s.Stats())
+		}
+		if l := n.leaderOf(rA, rB, rD); l >= 0 {
+			if c := n.conf(l); !slices.Equal(sorted(c.Voters), []uint64{1, 2, 4}) {
+				t.Fatalf("replica %d leads in %+v", l, c)
+			}
+			return
+		}
+	}
+}
+
+// leaderOf is the one of who that leads, or -1.
+func (n *testNet) leaderOf(who ...int) int {
+	for _, i := range who {
+		if n.r[i].s.rn.BasicStatus().RaftState == raft.StateLeader {
+			return i
+		}
+	}
+	return -1
+}
+
+// Only a replica that applied its removal, or one its node no longer holds, is answered gone: the
+// ask names the replica, so a live replica, or a new replica of the group on the same node, does
+// not answer for it; and a follower drops its support only on an answer about its leader.
+func TestANodeAnswersGoneOnlyForTheReplicaItNoLongerHolds(t *testing.T) {
+	n := outgoingNet(t)
+	ask := func(kind byte, to uint64) core.Event {
+		ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 1}}
+		encodeFortify(testGroup, &fortify{kind: kind, from: 2, to: to}, &ev.Msg)
+		return ev
+	}
+	n.event(rC, ask(kindAsk, 3))
+	if len(n.r[rC].forts) != 1 || n.r[rC].forts[0] != (fortify{kind: kindGone, from: 3, to: 2}) {
+		t.Fatalf("C, removed, answered %+v to an ask about it", n.r[rC].forts)
+	}
+	misrouted := n.r[rD].s.Stats().Misrouted
+	for _, about := range []uint64{4, 3} {
+		if n.event(rD, ask(kindAsk, about)); len(n.r[rD].forts) != 0 {
+			t.Fatalf("D, live, answered %+v to an ask about %d", n.r[rD].forts, about)
+		}
+	}
+	if n.r[rD].s.Stats().Misrouted != misrouted+1 {
+		t.Fatalf("D did not count an ask about another replica misrouted: %+v", n.r[rD].s.Stats())
+	}
+	var a core.Action
+	ev := ask(kindAsk, 3)
+	if !Gone(&ev.Msg, ev.Peer, &a) || a.Peer != ev.Peer {
+		t.Fatal("a node holding no replica 3 did not answer that it is gone")
+	}
+	var f fortify
+	if _, kind, err := decode(nil, &a.Msg, nil, &f); err != nil || kind != kindGone || f.from != 3 || f.to != 2 {
+		t.Fatalf("the node answered %d %+v: %v", kind, f, err)
+	}
+	if ev := ask(kindMember, 3); Gone(&ev.Msg, ev.Peer, &a) {
+		t.Fatal("a node answered gone to a message that is not an ask")
+	}
+	for _, c := range []struct {
+		from uint64
+		drop bool
+	}{{4, false}, {3, true}} {
+		ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 2}}
+		encodeFortify(testGroup, &fortify{kind: kindGone, from: c.from, to: 2}, &ev.Msg)
+		n.event(rB, ev)
+		if dropped := n.r[rB].s.support.term == 0; dropped != c.drop {
+			t.Fatalf("an answer that %d is gone: B dropped its support %v", c.from, dropped)
+		}
+	}
+}

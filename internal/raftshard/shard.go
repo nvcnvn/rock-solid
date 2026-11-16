@@ -137,10 +137,11 @@ type fortified struct {
 	term, run, support uint64
 }
 
-// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, and a follower serving lease reads while it supports its leader.
+// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, and a leader serving lease reads after it applied its own removal.
 type plants struct {
 	unseeded, early, disloyal, eager, voterFirst, current, uncommitted, staleSnapshot bool
 	noEpochBump, transferKeepsLease, voteEveryone, followerReads                      bool
+	noSupportAsk, removedKeepsLease                                                   bool
 }
 
 // New starts a replica from its storage.
@@ -222,8 +223,11 @@ func (s *Shard) Stats() Stats { return s.stats }
 // OnEvent ticks the replica up to ctx.Now, then handles ev: a peer's message, or a lost connection to a peer.
 func (s *Shard) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	if s.removed {
-		if ev.Kind == core.EvNetRecv && ev.Msg.Buf != core.NoBuf {
-			ctx.Pool.Free(ev.Msg.Buf)
+		if ev.Kind == core.EvNetRecv {
+			s.answerGone(ev, out)
+			if ev.Msg.Buf != core.NoBuf {
+				ctx.Pool.Free(ev.Msg.Buf)
+			}
 		}
 		return
 	}
@@ -303,7 +307,7 @@ func (s *Shard) LeaseRead(ctx *core.Context) bool {
 	if s.plant.followerReads && st.RaftState == raft.StateFollower && !s.removed {
 		return s.supports(&st, lease.Now(ctx))
 	}
-	if s.removed || st.RaftState != raft.StateLeader || s.transferred == st.Term || s.committed != st.Term && !s.plant.uncommitted {
+	if s.removed && !s.plant.removedKeepsLease || st.RaftState != raft.StateLeader || s.transferred == st.Term || s.committed != st.Term && !s.plant.uncommitted {
 		return false
 	}
 	t := lease.Now(ctx)
@@ -333,7 +337,7 @@ func (s *Shard) fortifies(i int, term uint64, t lease.Time) bool {
 	return f.term == term && s.cfg.Holder.Supported(s.cfg.Peers[i].Node, f.run, f.support, t)
 }
 
-// fortify has a leader ask, once a heartbeat, every peer it holds a node-pair lease from whose fortification of its term does not run now, so a down node is not asked; a follower whose grant to its leader's node lapsed stops supporting it and campaigns raft_lapse_campaign later.
+// fortify has a leader ask, once a heartbeat, every peer it holds a node-pair lease from whose fortification of its term does not run now, so a down node is not asked; a follower whose grant to its leader's node lapsed stops supporting it and campaigns raft_lapse_campaign later, and one that heard nothing from the leader it supports for an election timeout asks the leader's node whether it still holds the leader.
 func (s *Shard) fortify(ctx *core.Context, out *Output) {
 	st := s.rn.BasicStatus()
 	t := lease.Now(ctx)
@@ -349,17 +353,20 @@ func (s *Shard) fortify(ctx *core.Context, out *Output) {
 		}
 		return
 	}
-	if ctx.Now-s.heard >= ElectionTick*TickInterval && member(&s.conf, s.cfg.ID) {
+	if ctx.Now-s.heard >= ElectionTick*TickInterval {
 		s.heard = ctx.Now
+		if s.supports(&st, t) && !s.plant.noSupportAsk {
+			s.sendFortify(&fortify{kind: kindAsk, from: s.cfg.ID, to: s.leadID}, s.lead, out)
+		}
 		for _, p := range s.cfg.Peers {
-			if p.ID != s.cfg.ID {
+			if p.ID != s.cfg.ID && member(&s.conf, s.cfg.ID) {
 				s.sendFortify(&fortify{kind: kindMember, from: s.cfg.ID, to: p.ID}, p.Node, out)
 			}
 		}
 	}
 	if s.support.term != 0 && !s.supports(&st, t) {
 		if s.support.term == st.Term {
-			s.lapseAt = ctx.Now + LapseCampaignMin + core.Tick(s.rng.Uint64N(uint64(LapseCampaignMax-LapseCampaignMin)+1))
+			s.lapse(ctx)
 		}
 		s.support = fortified{}
 	}
@@ -370,6 +377,11 @@ func (s *Shard) fortify(ctx *core.Context, out *Output) {
 			s.ready(ctx, out)
 		}
 	}
+}
+
+// lapse has this follower campaign raft_lapse_campaign from now, unless it supports a leader again by then.
+func (s *Shard) lapse(ctx *core.Context) {
+	s.lapseAt = ctx.Now + LapseCampaignMin + core.Tick(s.rng.Uint64N(uint64(LapseCampaignMax-LapseCampaignMin)+1))
 }
 
 // supports reports whether this follower supports a leader of its term: its node's grant to the leader's node runs in the support epoch it fortified the leader under.
@@ -451,6 +463,12 @@ func (s *Shard) recv(ctx *core.Context, ev *core.Event, out *Output) {
 	case kind == kindRemoved:
 		s.removed = f.term >= s.applied && member(&s.conf, s.cfg.ID)
 		out.Removed = s.removed
+	case kind == kindAsk:
+	case kind == kindGone:
+		if s.support.term != 0 && f.from == s.leadID {
+			s.support = fortified{}
+			s.lapse(ctx)
+		}
 	case s.halted && !(kind == kindRaft && (m.Type == raftpb.MsgAppResp || m.Type == raftpb.MsgHeartbeatResp) && s.rn.BasicStatus().RaftState == raft.StateLeader):
 	case kind != kindRaft && s.peer(from) < 0:
 		s.stats.Misrouted++
@@ -486,6 +504,32 @@ func (s *Shard) sender(id uint64, node core.NodeID, out *Output) {
 	case member(&s.conf, s.cfg.ID):
 		s.sendFortify(&fortify{kind: kindRemoved, from: s.cfg.ID, to: id, term: s.applied}, node, out)
 	}
+}
+
+// answerGone answers, once this replica applied its removal, an ask that names it.
+func (s *Shard) answerGone(ev *core.Event, out *Output) {
+	b := ev.Msg.Inline()
+	if len(b) != fortBytes || le.Uint64(b) != s.cfg.Group || le.Uint64(b[kindBytes+8:]) != s.cfg.ID {
+		return
+	}
+	var a core.Action
+	if Gone(&ev.Msg, ev.Peer, &a) {
+		out.Actions = append(out.Actions, a)
+	}
+}
+
+// Gone is a node's answer to an ask about a replica it no longer holds, one that applied its removal or whose state the node deleted, sent back to node from; it reports false for any other message. A node hands Gone only an ask naming a replica it does not hold, never one for another replica of the group.
+func Gone(msg *core.Msg, from core.NodeID, a *core.Action) bool {
+	if b := msg.Inline(); msg.Buf != core.NoBuf || len(b) != fortBytes || b[groupBytes] != kindAsk {
+		return false
+	}
+	var f fortify
+	if group, _, err := decode(nil, msg, nil, &f); err == nil {
+		*a = core.Action{Kind: core.ActNetSend, Peer: from, Reply: true}
+		encodeFortify(group, &fortify{kind: kindGone, from: f.to, to: f.from}, &a.Msg)
+		return true
+	}
+	return false
 }
 
 // fortifyAsked supports the leader of this follower's term if its node's grant to the leader's node runs, and answers with that grant's run and support epoch.
