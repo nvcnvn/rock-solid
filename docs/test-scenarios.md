@@ -7850,6 +7850,7 @@ The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 25
 | A heartbeat of a later term from another replica at the leading voter, then a fetch | The Control is dropped; the fetch is answered with the leader the replica knows |
 | A fetch at a leader whose lease does not run (a three-voter group with no grants) | No Control is read |
 | A node's report naming a disk, then that node's replica report of the disk's fill | The disk joins the record; the fill reaches the Control |
+| A node's report opening a disk of 2^20 blocks, then a pool of 4 PGs at one replica | Every PG placed with that disk as its primary |
 | A node's report for another group | Dropped: the node is not recorded |
 | Node 2 reports, then node 3 `node_down_after` later, then a pool commits | The delta goes to node 3 alone |
 | A chunkstore frame in a pool buffer and a fetch before the group has a leader | The frame's buffer freed, the fetch answered with no leader known |

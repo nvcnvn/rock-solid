@@ -612,6 +612,27 @@ func TestAReplicaReportReachesTheControl(t *testing.T) {
 	}
 }
 
+// A pool over the disks nodes reported opened places every PG with a primary on them.
+func TestAPoolOverReportedDisksPlacesItsPGs(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.report(&NodeReport{Node: 2, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20}}})
+	r.run(StepInterval * 3)
+	if err := r.h.Control().SetPool(1, spec(1, 4), []chunkstore.Disk{{ID: 1, Node: 2, Blocks: 1 << 20}}); err != nil {
+		t.Fatal(err)
+	}
+	r.run(StepInterval * 3)
+	tb := r.h.Control().Table()
+	if len(tb.Pools) != 1 || len(tb.Pools[0].PGs) != 4 {
+		t.Fatalf("table %+v", tb)
+	}
+	for i, pg := range tb.Pools[0].PGs {
+		if len(pg.Members) != 1 || pg.Members[0].Disk != 1 {
+			t.Fatalf("PG %d placed on %+v, want disk 1", i, pg.Members)
+		}
+	}
+}
+
 // A node's message for another group is dropped, its node not recorded.
 func TestAMessageOfAnotherGroupIsDropped(t *testing.T) {
 	r := newHostRun(t)

@@ -64,6 +64,7 @@ type CtlHost struct {
 	cout    ControlOutput
 	answers []Answer
 	nr      NodeReport
+	disks   []chunkstore.Disk
 	stepAt  core.Tick
 }
 
@@ -244,7 +245,8 @@ func (h *CtlHost) step(ctx *core.Context, out *CtlHostOutput) {
 	}
 	h.token++
 	h.cout.Reset()
-	if err := h.ctl.Step(&ControlInputs{Now: ctx.Now, Raw: ctx.Raw, Leased: h.leased(ctx)}, h.token, &h.cout); err != nil {
+	h.disks = h.ctl.AppendDisks(h.disks[:0])
+	if err := h.ctl.Step(&ControlInputs{Now: ctx.Now, Raw: ctx.Raw, Leased: h.leased(ctx), Disks: h.disks}, h.token, &h.cout); err != nil {
 		out.Errs = append(out.Errs, err)
 	}
 	h.handOut(ctx, out)
