@@ -162,7 +162,7 @@ func (l *Log) takeSlot(e *Entry) bool {
 		l.reuseTrim(s)
 	}
 	l.slots.setTaken(s, l.slots.taken[s]|1<<slot)
-	*e = SlotEntry(e.Pool, e.Chunk, e.Version, s, slot)
+	e.Segment, e.Slot = s, slot
 	l.checkSlots()
 	return true
 }

@@ -338,3 +338,24 @@ func TestAReplayHeldSlotWriteCountsOnceMapped(t *testing.T) {
 	h.sync(h.memberWrite(c, 0, 4, MakeVersion(3, 1), 0xbb))
 	h.holds()
 }
+
+// A whole chunk written to a slot flags its version's last entry: the chunk is whole at that version once it maps, and a
+// member whose replay holds it and a write after it reports the later one whole to peering, which keeps both. Seed 6 of
+// TestReplicatedWritesSurviveFaults's slot seeds dropped every version a member acknowledged after a slot write.
+func TestASlotWriteIsWhole(t *testing.T) {
+	h := newHarnessOn(t, testConfig(), slotGeometry)
+	c := chunk(2)
+	h.sync(h.persist(0, 1, 2, nil))
+	v, w := MakeVersion(2, 1), MakeVersion(2, 2)
+	h.sync(h.memberWrite(c, 0, core.BlocksPerChunk, v, 0xaa))
+	if ch, _ := h.s.Index().Chunk(testPool, c); ch.Whole != v {
+		t.Fatalf("the slot write left the chunk %+v, not whole at %#x", ch, v)
+	}
+	h.sync(h.memberWrite(c, 0, 1, w, 0xbb))
+	h.inv.Off(invReplay)
+	restart(h)
+	got, _ := h.peerState(0, 1)
+	if i := slices.IndexFunc(got, func(p ChunkPeer) bool { return p.Chunk == c }); i < 0 || got[i].Whole != w {
+		t.Fatalf("the restarted member reports %+v, not %v whole at %#x", got, c, w)
+	}
+}
