@@ -81,11 +81,12 @@ type Holder struct {
 // lease before the first bound, on lease_drift alone; widening only past 1 + 2 lease_drift; the
 // margin max(lease_drift, 1 − 1/B); no new window at a grantor's new run ID; a lease kept across a
 // grantor's new run ID; no end of leases on Resumed; no step check, or one on grants only, at 1 + lease_drift / 2, or against a grant that
-// gave no lease; the grantor ending its grant on the faster of its clocks; no restart wait.
+// gave no lease; no margin for a suspend too short to deliver Resumed; the grantor ending its grant
+// on the faster of its clocks; no restart wait.
 type plants struct {
 	slowerClock, beforeBound, widenLate, marginExact, noRunWindow, keepOnNewRun bool
 	noResumedEnd, noStepCheck, stepOnGrantsOnly, halfStep, checkBeforeBound     bool
-	fasterClock, noRestartWait                                                  bool
+	noResumeMargin, fasterClock, noRestartWait                                  bool
 }
 
 // NewHolder holds no lease.
@@ -276,7 +277,7 @@ func (h *Holder) EndAll() {
 	}
 }
 
-// Valid reports whether the holder's lease from g runs now: neither clock shows the lease less its margin since the ask that won it.
+// Valid reports whether the holder's lease from g runs now: neither clock shows the lease less its margin and core.ResumeThreshold since the ask that won it.
 func (h *Holder) Valid(g core.NodeID, t Time) bool {
 	i, ok := slices.BinarySearchFunc(h.peers, g, func(x held, g core.NodeID) int { return compareNode(x.peer, g) })
 	return ok && h.valid(&h.peers[i], t)
@@ -293,11 +294,14 @@ func (h *Holder) valid(p *held, t Time) bool {
 	return sub(t.Raw, p.as) < left && sub(t.Boot, p.asB) < left
 }
 
-// left is the lease less the margin, rounded down.
+// left is the lease less the margin, rounded down, and less core.ResumeThreshold, the longest suspend that may end with no Resumed.
 func (h *Holder) left(p *held) core.Tick {
 	hi, lo := bits.Mul64(uint64(h.cfg.Lease), PPM-p.am)
 	q, _ := bits.Div64(hi, lo, PPM)
-	return core.Tick(q)
+	if h.plant.noResumeMargin {
+		return core.Tick(q)
+	}
+	return sub(core.Tick(q), core.ResumeThreshold)
 }
 
 // end is the boot time at which the lease from p ends, the earlier of the two clocks' ends read as boot ticks.

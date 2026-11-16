@@ -47,6 +47,7 @@ Drift == 10           \* lease_drift, 1%
 RateGap == 10         \* rate_gap, 100 ms
 HB == 100             \* heartbeat period, 1 s
 MaxMargin == 500      \* max_margin, 50%
+ResumeMargin == HB * 1000 \* core.ResumeThreshold, 1 s, in clock readings
 L1000 == Lease * 1000 \* a lease in clock readings (rate per mille times units)
 
 Bug(b) == b \in Bugs
@@ -185,10 +186,11 @@ RateBoot(n) == IF frz[n] \in {"run", "susp"} THEN bootR[n] ELSE 0
 \* The first time at which a clock running at rate rt gains need more.
 Until(need, rt) == IF need <= 0 THEN now ELSE IF rt = 0 THEN Infinity ELSE now + Ceil(need, rt)
 
-\* The holder ends a lease when either clock shows the lease less its margin.
+\* The holder ends a lease when either clock shows the lease less its margin,
+\* and less the longest suspend that may end with no Resumed.
 HolderEnd(h, g) ==
     LET x == hl[h][g]
-        left == Lease * (1000 - x.am)
+        left == Lease * (1000 - x.am) - IF Bug("NoResumeMargin") THEN 0 ELSE ResumeMargin
         tr == Until(left - (raw[h] - x.as), RateRaw(h))
         tb == Until(left - (boot[h] - x.asB), RateBoot(h))
     IN IF Bug("HolderSlowerClock") THEN Max({tr, tb}) ELSE Min({tr, tb})
@@ -1702,16 +1704,21 @@ Suspend(n) ==
 
 \* On resume CLOCK_BOOTTIME has gained the sleep, possibly up to 1 s short,
 \* and the loop delivers Resumed, which ends every lease the node holds and
-\* draws a new run ID.
+\* draws a new run ID. With "hide", a sleep under 1 s may gain nothing and
+\* deliver no Resumed, as when the kernel counts it in whole seconds.
 Wake(n) ==
     /\ Clocks
     /\ frz[n] = "susp"
     /\ boot[n] - suspAt[n] > 1
-    /\ \E cut \in {0, Min({boot[n] - suspAt[n] - 1, HB * 1000})} :
-         boot' = [boot EXCEPT ![n] = @ - cut]
+    /\ \/ /\ \E cut \in {0, Min({boot[n] - suspAt[n] - 1, HB * 1000})} :
+               boot' = [boot EXCEPT ![n] = @ - cut]
+          /\ hl' = IF Bug("NoEndOnResume") THEN hl ELSE EndAll(n)
+          /\ runId' = [runId EXCEPT ![n] = @ + 1]
+       \/ /\ "hide" \in plan.f
+          /\ boot[n] - suspAt[n] < HB * bootR[n]
+          /\ boot' = [boot EXCEPT ![n] = suspAt[n]]
+          /\ UNCHANGED <<hl, runId>>
     /\ frz' = [frz EXCEPT ![n] = "run"]
-    /\ hl' = IF Bug("NoEndOnResume") THEN hl ELSE EndAll(n)
-    /\ runId' = [runId EXCEPT ![n] = @ + 1]
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, dataVars, gr, rw, now, raw, rawR, bootR, slew,
                    suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs,
                    faults, raftVars>>
@@ -2627,6 +2634,8 @@ Handover == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2"})
 HandoverStep == [Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "step", "cut", "fast"}) EXCEPT !.k = 2]
 \* a suspend, or a VM pause that changes the VMClock marker;
 HandoverSuspend == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "susp", "pause", "fast"})
+\* a suspend under 1 s that delivers no Resumed, with exact clocks;
+HandoverHide == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "susp", "hide", "exact"})
 \* a kvm-clock guest stopped in place, with no partition (design.md, open
 \* question on kvm-clock stops);
 HandoverStop == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "stop", "fast"})
@@ -2667,13 +2676,16 @@ RaftPartition == [Plan(<<>>, <<>>, {"raft", "cut", "heal", "fast"}) EXCEPT !.t =
 \* pauses or restarts; the negative variants that need one run it alone. The
 \* plan with delayed messages, at over 3 million states, runs alone in
 \* deep-slow at 3 nodes, since with the others at 4 nodes it passed 108 million
-\* states in 4 hours.
+\* states in 4 hours. ci-hide checks the hidden suspend apart, so that a
+\* negative variant of LeasePlans that also drops the margin for one fails
+\* on its own rule.
 LeasePlans == {Steady, Handover, HandoverStep, HandoverSuspend, HandoverStop,
                HandoverRestart, HandoverCut, Maintenance, RaftTransfer, RaftPartition}
 RebootPlans == {HandoverReboot}
 PausePlans == {HandoverPause}
 StopPlans == {HandoverStopRestart}
-AllLeasePlans == LeasePlans \cup RebootPlans \cup PausePlans \cup StopPlans
+HidePlans == {HandoverHide}
+AllLeasePlans == LeasePlans \cup RebootPlans \cup PausePlans \cup StopPlans \cup HidePlans
                  \cup {HandoverSuspendCut, HandoverRebootFast, HandoverStopPause}
 SlowPlans == {HandoverSlow}
 

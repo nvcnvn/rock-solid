@@ -62,7 +62,7 @@ func lastReal(from, to core.Tick, ok func(core.Tick) bool) core.Tick {
 	return from
 }
 
-// Each side counts the lease on both clocks, the holder ending it lease_drift early on the faster and the grantor keeping it until the slower shows the whole lease, so a slew or a bad calibration only shortens the holder's lease or lengthens the grantor's wait.
+// Each side counts the lease on both clocks, the holder ending it lease_drift and core.ResumeThreshold early on the faster and the grantor keeping it until the slower shows the whole lease, so a slew or a bad calibration only shortens the holder's lease or lengthens the grantor's wait.
 func TestLeaseTime(t *testing.T) {
 	const slew, chrony, osc = 226_000_000, 83_333_333, 100_000
 	for _, tc := range []struct {
@@ -70,16 +70,16 @@ func TestLeaseTime(t *testing.T) {
 		hBoot, hRaw, gBoot, gRaw int64
 		holderEnd, grantorEnd    core.Tick
 	}{
-		{"exact", 0, 0, 0, 0, 3_960_000, 4_000_500},
-		{"holder boot fast", slew, 0, 0, 0, 3_230_000, 4_000_500},
-		{"holder boot slow", -slew, 0, 0, 0, 3_960_000, 4_000_500},
-		{"grantor boot fast", 0, 0, slew, 0, 3_960_000, 4_000_500},
-		{"grantor boot slow", 0, 0, -slew, 0, 3_960_000, 5_168_000},
-		{"opposite slews", -slew, 0, slew, 0, 3_960_000, 4_000_500},
-		{"chrony", -chrony, 0, chrony, 0, 3_960_000, 4_000_500},
-		{"raw 1% apart, margin widened to 2.52%", 0, -10_000_000, 0, 10_000_000, 3_899_000, 4_000_500},
-		{"oscillators", -osc, -osc, osc, osc, 3_960_000, 4_000_000},
-		{"no daemon, raw 1% apart, full window", -10_000_000, -10_000_000, 10_000_000, 10_000_000, 3_938_000, 3_961_000},
+		{"exact", 0, 0, 0, 0, 2_960_000, 4_000_500},
+		{"holder boot fast", slew, 0, 0, 0, 2_414_000, 4_000_500},
+		{"holder boot slow", -slew, 0, 0, 0, 2_960_000, 4_000_500},
+		{"grantor boot fast", 0, 0, slew, 0, 2_960_000, 4_000_500},
+		{"grantor boot slow", 0, 0, -slew, 0, 2_960_000, 5_168_000},
+		{"opposite slews", -slew, 0, slew, 0, 2_960_000, 4_000_500},
+		{"chrony", -chrony, 0, chrony, 0, 2_960_000, 4_000_500},
+		{"raw 1% apart, margin widened to 2.52%", 0, -10_000_000, 0, 10_000_000, 2_899_000, 4_000_500},
+		{"oscillators", -osc, -osc, osc, osc, 2_960_000, 4_000_000},
+		{"no daemon, raw 1% apart, full window", -10_000_000, -10_000_000, 10_000_000, 10_000_000, 2_928_000, 3_961_000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hc := clocks{boot: 5e9, raw: 7e9, bootRate: rate(tc.hBoot), rawRate: rate(tc.hRaw)}
@@ -186,7 +186,7 @@ func TestSupportedNamesTheRunAndSupportEpoch(t *testing.T) {
 	if h.Supported(grantor, 2, 1, now) || h.Supported(grantor, 1, 2, now) || h.Supported(core.NodeID{Node: 9}, 1, 1, now) {
 		t.Fatal("supported under another run, support epoch or grantor")
 	}
-	if h.Supported(grantor, 1, 1, Time{Boot: 100_100 + 3_960_000, Raw: 100_100 + 3_960_000}) {
+	if h.Supported(grantor, 1, 1, Time{Boot: 100_100 + 2_960_000, Raw: 100_100 + 2_960_000}) {
 		t.Fatal("supported once the lease ended")
 	}
 }
@@ -382,8 +382,10 @@ var firstLease = cfg.RateGap*100/96 + 2*2_000 + 3*10_000
 // runPair runs a holder and a grantor for 60 s of real time with random clock rates, renewals and
 // heartbeats; in three seeds of four, requests and heartbeats lost for up to 8 s at a time, at
 // times from just after a grant, the grantor's VM stopped, the grantor rebooted, its raw rate
-// rising 0.4%, the holder suspended with CLOCK_BOOTTIME up to 1 s short, and the holder's VM
-// stopped in place for over a heartbeat while its grant has two heartbeats to run, nothing lost
+// rising 0.4%, the holder suspended with CLOCK_BOOTTIME up to 1 s short and no Resumed after a
+// suspend under core.ResumeThreshold (unless another plant joins the one that drops the margin for
+// it), and the holder's VM stopped in place for over a heartbeat while its grant has two
+// heartbeats to run, nothing lost
 // from then until a lease after it ends (the design leaves out a stop no queued grantor message
 // shows, and lost heartbeats after one). It returns the first time the holder holds a lease while
 // its grantor neither keeps the grant nor, having rebooted while it ran, waits; or, in a quiet
@@ -421,7 +423,8 @@ func runPair(seed uint64, pl plants) error {
 	id := core.RequestID(0)
 	var cutUntil, gDownUntil, hDownUntil, beatAt core.Tick
 	var msgs []pairMsg
-	covered, gStopped, hStopped, raised := false, false, false, false
+	covered, gStopped, hStopped, hHidden, raised := false, false, false, false, false
+	hide := !pl.noResumeMargin || pl == plants{noResumeMargin: true}
 	var keepUntil, firstAsk core.Tick
 	leased := false
 	lost := func() bool { return !quiet && real >= keepUntil && (real < cutUntil || rng.Chance(1, 20)) }
@@ -452,7 +455,12 @@ func runPair(seed uint64, pl plants) error {
 				gc.setRaw(real, gc.rawRate+gc.rawRate*4/1000)
 			case rng.Chance(1, 20_000):
 				p := core.Tick(100_000 + rng.Below(6_000_000))
-				hc.freeze(real, p-min(p, core.Tick(rng.Below(1_000_000))), p)
+				short := core.Tick(rng.Below(1_000_000))
+				hHidden = p < core.ResumeThreshold && hide
+				if !hHidden {
+					short = min(short, sub(p, core.ResumeThreshold))
+				}
+				hc.freeze(real, p-min(p, short), p)
 				hDownUntil = real + p
 			case real >= cutUntil && g.Live(holder, gc.at(real+2*cfg.Heartbeat)) && rng.Chance(1, 20_000):
 				p := cfg.Heartbeat + core.Tick(100_000+rng.Below(5_000_000))
@@ -469,10 +477,10 @@ func runPair(seed uint64, pl plants) error {
 			}
 		}
 		if hUp && hDownUntil != 0 {
-			if !hStopped {
+			if !hStopped && !hHidden {
 				h.Resumed()
 			}
-			hDownUntil, hStopped = 0, false
+			hDownUntil, hStopped, hHidden = 0, false, false
 		}
 		for hUp && len(msgs) > 0 && msgs[0].at <= real {
 			m := msgs[0]
@@ -537,12 +545,14 @@ func TestNoLeaseOutlastsItsGrant(t *testing.T) {
 
 // Each planted bug, the epoch change model's counterexample of the same name, breaks the pair run
 // at a seed of the first 500 (of 5,000 for the exact margin, which needs a rate rise after the
-// bound and a partition after a grant): a lease outlasts its grant with the holder ending it on the
-// slower of its clocks (68 of 500), the grantor ending it on the faster (96), a lease before the
-// first bound (1), that with the step check at 1 + lease_drift / 2 (14), widening only past
-// 1 + 2 lease_drift (20), the margin max(lease_drift, 1 − 1/B) (3 of 5,000), no new window at a new
-// run ID (12), no end of leases on Resumed (8), no step check (55), one on grants only (56) and no
-// restart wait (96); the step check trips between a pair no fault touched at 1 + lease_drift / 2
+// bound and a partition after a grant). A lease outlasts its grant with no margin for a suspend too
+// short to deliver Resumed (2 of 500); with that margin also planted away, which the other
+// errors fit inside and which leaves the run no such suspend, with the holder ending it on the slower
+// of its clocks (68 of 500), the grantor ending it on the faster (96), a lease before the first bound
+// (1), that with the step check at 1 + lease_drift / 2 (14), widening only past 1 + 2 lease_drift
+// (20), the margin max(lease_drift, 1 − 1/B) (3 of 5,000) and no end of leases on Resumed (7); with
+// the margin, with no new window at a new run ID (9), no step check (52), one on grants only (53) and
+// no restart wait (56). The step check trips between a pair no fault touched at 1 + lease_drift / 2
 // (25) and against a grant that gave no lease (3).
 func TestPlantedLeaseBugsBreakThePair(t *testing.T) {
 	const outlasts, trips = "no longer keeps", "tripped"
@@ -552,17 +562,18 @@ func TestPlantedLeaseBugsBreakThePair(t *testing.T) {
 		want string
 		pl   plants
 	}{
-		{"holder on the slower clock", 6, outlasts, plants{slowerClock: true}},
-		{"grantor on the faster clock", 8, outlasts, plants{fasterClock: true}},
-		{"lease before the bound", 21, outlasts, plants{beforeBound: true}},
-		{"lease before the bound, half-drift step check", 6, outlasts, plants{beforeBound: true, halfStep: true}},
-		{"widened only past twice the drift", 9, outlasts, plants{widenLate: true}},
-		{"exact margin", 1056, outlasts, plants{marginExact: true}},
+		{"no resume margin", 28, outlasts, plants{noResumeMargin: true}},
+		{"holder on the slower clock", 6, outlasts, plants{slowerClock: true, noResumeMargin: true}},
+		{"grantor on the faster clock", 8, outlasts, plants{fasterClock: true, noResumeMargin: true}},
+		{"lease before the bound", 21, outlasts, plants{beforeBound: true, noResumeMargin: true}},
+		{"lease before the bound, half-drift step check", 6, outlasts, plants{beforeBound: true, halfStep: true, noResumeMargin: true}},
+		{"widened only past twice the drift", 9, outlasts, plants{widenLate: true, noResumeMargin: true}},
+		{"exact margin", 1056, outlasts, plants{marginExact: true, noResumeMargin: true}},
 		{"no window per run", 6, outlasts, plants{noRunWindow: true}},
-		{"no end on Resumed", 28, outlasts, plants{noResumedEnd: true}},
+		{"no end on Resumed", 31, outlasts, plants{noResumedEnd: true, noResumeMargin: true}},
 		{"no step check", 1, outlasts, plants{noStepCheck: true}},
 		{"step check on grants only", 1, outlasts, plants{stepOnGrantsOnly: true}},
-		{"no restart wait", 0, outlasts, plants{noRestartWait: true}},
+		{"no restart wait", 2, outlasts, plants{noRestartWait: true}},
 		{"half-drift step check", 3, trips, plants{halfStep: true}},
 		{"step check before the bound", 265, trips, plants{checkBeforeBound: true}},
 	} {
