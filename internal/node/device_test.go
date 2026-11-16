@@ -141,8 +141,9 @@ func TestADeviceWithNoValidSuperblockFailsUntouched(t *testing.T) {
 }
 
 // The replica starts only once the membership names the device's log, as that disk, with the
-// session table, placement table and authority handed to the device before it ran; a message
-// before then is dropped.
+// session table, placement table and authority handed to the device before it ran, and the loop of
+// every disk the membership names: as the primary of a PG with a member on disk 4 it peers with
+// disk 4's loop. A message before then is dropped.
 func TestTheReplicaStartsAsTheDiskTheMembershipNames(t *testing.T) {
 	r := newDevRun(t, sim.NewDisk(devBlocks))
 	r.start(1)
@@ -152,7 +153,8 @@ func TestTheReplicaStartsAsTheDiskTheMembershipNames(t *testing.T) {
 	}
 	r.out.Reset()
 	r.d.Hand(&r.ctx, &Hand{Device: 7, Table: chunkstore.SessionTable{Version: 3, Next: 4}}, &r.out)
-	r.d.Table(&r.ctx, &chunkstore.Table{Epoch: 2}, &r.out)
+	pg := chunkstore.PGEntry{Members: []chunkstore.Member{{Disk: 5}, {Disk: 4}}, Interval: 1}
+	r.d.Table(&r.ctx, &chunkstore.Table{Epoch: 2, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 2, MinLive: 1, PGs: []chunkstore.PGEntry{pg}}}}, &r.out)
 	r.d.Authority(&r.ctx, ctl, &r.out)
 	ev := core.Event{Kind: core.EvNetRecv, Peer: ctl}
 	if err := meta.EncodeTableFetch(r.ctx.Pool, group, &ev.Msg); err != nil {
@@ -163,16 +165,18 @@ func TestTheReplicaStartsAsTheDiskTheMembershipNames(t *testing.T) {
 	if r.d.Replica() != nil || len(r.out.Actions) != 0 || r.out.Held != 0 {
 		t.Fatalf("a replica ran before the membership named its log: %+v", r.out)
 	}
-	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 4, Log: r.opened.Log + 1}, {Disk: 5, Log: r.opened.Log, At: core.NodeID{Node: 4, Loop: 2}}}, &r.out)
+	member := core.NodeID{Node: 6, Loop: 2}
+	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 4, Log: r.opened.Log + 1, At: member}, {Disk: 5, Log: r.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}}, &r.out)
 	if r.d.Replica() == nil || r.out.Held != 3 || r.out.Epoch != 2 {
 		t.Fatalf("the replica started holding sessions %d, epoch %d", r.out.Held, r.out.Epoch)
 	}
-	reported := false
+	reported, peered := false, false
 	for _, a := range r.out.Actions {
 		reported = reported || a.Kind == core.ActNetSend && a.Peer == ctl
+		peered = peered || a.Kind == core.ActNetSend && a.Peer == member
 	}
-	if !reported {
-		t.Fatal("the replica never reported to its authority")
+	if !reported || !peered {
+		t.Fatalf("the replica reported to its authority: %v; peered with disk 4's loop: %v", reported, peered)
 	}
 }
 
