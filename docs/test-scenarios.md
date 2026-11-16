@@ -7715,9 +7715,10 @@ The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 25
 | A fetch at a leader whose lease does not run (a three-voter group with no grants) | No Control is read |
 | A node's report naming a disk, then that node's replica report of the disk's fill | The disk joins the record; the fill reaches the Control |
 | A node's report for another group | Dropped: the node is not recorded |
+| Node 2 reports, then node 3 `node_down_after` later, then a pool commits | The delta goes to node 3 alone |
 | A chunkstore frame in a pool buffer and a fetch before the group has a leader | The frame's buffer freed, the fetch answered with no leader known |
 | A report, a session fetch and a table fetch at a follower of a three-voter group | Each answered with the leader's node |
-| Placement and leader messages across the wire | Decode to what was sent; fuzzed (`FuzzDecodeTableMsg`, `FuzzDecodeDeltaMsg`, `FuzzDecodeLeader`) |
+| Placement and leader messages across the wire | Decode to what was sent; fuzzed (`FuzzDecodeTableMsg`, `FuzzDecodeDeltaMsg`, `FuzzDecodeLeader`), the table and delta from a seed of a pool with two PGs, one with a past interval |
 
 The rows without a test named are unit tests in `internal/meta/ctlhost_test.go`. The node's side, in `internal/node/node_test.go`:
 
@@ -7727,6 +7728,7 @@ The rows without a test named are unit tests in `internal/meta/ctlhost_test.go`.
 | The connection to the voter it talks to is lost | Moves to the next voter; the next heartbeat goes there |
 | Five losses of the only voter, and that voter naming no leader | No move, so no replica is re-pointed |
 | Nine losses and nine redirects naming no leader within one `Interval` at a three-voter node; a loss an `Interval` later; a voter naming itself | One move; one more; none |
+| A session fetch in flight when the node's voter names another | The fetch goes to the new voter at once, under a new token |
 | A placement table or delta from a voter, and one from a node that is no voter | Handed on for every replica; dropped |
 | A heartbeat after a table reached the node, then with replicas holding epochs 5 and 4, then both 5; a node with no replica after a delta of epoch 6 | Reports epoch 0, 4, 5 and 6: the oldest its replicas hold, so a leader after a failover resends the whole table only to a node behind it |
 | Two replicas ask for the table in one pass, then again an interval later, then after a table arrived | One fetch, one more, then one at once |

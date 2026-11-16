@@ -209,12 +209,23 @@ func fuzzRecode[T any](f *testing.F, seed T, enc func(core.BufPool, uint64, *T, 
 	})
 }
 
+// seedTable is a table with a pool of two PGs, one with a past interval, so a fuzzer's seed reaches
+// the body decoder.
+func seedTable() chunkstore.Table {
+	ms := []chunkstore.Member{{Disk: 1}, {Disk: 2, Leaving: true}}
+	return chunkstore.Table{Epoch: 3, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 2, MinLive: 1, PGs: []chunkstore.PGEntry{
+		{Members: ms, Interval: 3, Activated: 1, Past: []chunkstore.PastInterval{{Interval: 2, MinLive: 1, Members: ms[:1]}}},
+		{Members: ms[:1], Interval: 1, Activated: 1, Pinned: true, Recovered: true},
+	}}}}
+}
+
 func FuzzDecodeTableMsg(f *testing.F) {
-	fuzzRecode(f, chunkstore.Table{Epoch: 3}, EncodeTable, DecodeTable)
+	fuzzRecode(f, seedTable(), EncodeTable, DecodeTable)
 }
 
 func FuzzDecodeDeltaMsg(f *testing.F) {
-	fuzzRecode(f, chunkstore.Delta{Epoch: 3}, EncodeDelta, DecodeDelta)
+	t := seedTable()
+	fuzzRecode(f, chunkstore.MakeDelta(&chunkstore.Table{Epoch: 2}, &t), EncodeDelta, DecodeDelta)
 }
 
 type leaderMsg struct {

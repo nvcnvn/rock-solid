@@ -35,8 +35,8 @@ func (o *CtlHostOutput) Reset() {
 // replicas (reports, member timeouts, probe replies); it steps its Control every StepInterval and
 // after each answer, proposing what the Control asks, and sends the nodes that reported the
 // placement tables and session tables the Control hands out, a session table pushed with token 0.
-// Without a Control it answers a node's report or fetch with the leader it knows. A round of its group is durable as soon as it
-// is taken: its log lives in memory only.
+// Without a Control it answers a node's report or fetch with the leader it knows. A round of its
+// group is durable as soon as it is taken: its log lives in memory only.
 type CtlHost struct {
 	shard *Shard
 	sv    *Server
@@ -46,8 +46,9 @@ type CtlHost struct {
 	// term is the term ctl was read for, or the term whose read failed.
 	term  uint64
 	token uint64
-	// nodes are the nodes heard from, by ID, each at the loop it last reported from.
-	nodes   []core.NodeID
+	// nodes are the nodes heard from within NodeDownAfter, by ID, each at the loop it last
+	// reported from.
+	nodes   []heardNode
 	sout    Output
 	cout    ControlOutput
 	answers []Answer
@@ -58,6 +59,11 @@ type CtlHost struct {
 // ErrInMemoryVoters refuses a control-plane group of more than one voter while its log lives in
 // memory: a voter restarted empty could vote twice in a term and elect a second leader.
 var ErrInMemoryVoters = errors.New("meta: a control-plane group with its log in memory has more than one voter")
+
+type heardNode struct {
+	at    core.NodeID
+	heard core.Tick
+}
 
 // NewCtlHost starts a host on the replica cfg sets up, refusing a group of more than one voter.
 func NewCtlHost(cfg Config) (*CtlHost, error) {
@@ -162,11 +168,11 @@ func (h *CtlHost) report(ctx *core.Context, ev *core.Event, out *CtlHostOutput) 
 	if DecodeNodeReport(ctx.Pool, &ev.Msg, &h.nr) != nil || h.nr.Node != ev.Peer.Node {
 		return
 	}
-	i, ok := slices.BinarySearchFunc(h.nodes, ev.Peer.Node, func(n core.NodeID, id uint32) int { return cmp.Compare(n.Node, id) })
+	i, ok := slices.BinarySearchFunc(h.nodes, ev.Peer.Node, func(n heardNode, id uint32) int { return cmp.Compare(n.at.Node, id) })
 	if !ok {
-		h.nodes = slices.Insert(h.nodes, i, ev.Peer)
+		h.nodes = slices.Insert(h.nodes, i, heardNode{})
 	}
-	h.nodes[i] = ev.Peer
+	h.nodes[i] = heardNode{at: ev.Peer, heard: ctx.Now}
 	if h.ctl == nil {
 		h.redirect(ctx, ev.Peer, out)
 		return
@@ -208,16 +214,17 @@ func (h *CtlHost) answer(ctx *core.Context, a *Answer, out *CtlHostOutput) {
 }
 
 // handOut turns the Control's output into the host's: the sessions started; a committed table's
-// delta sent to every node heard from, and the whole table to each node named that is; and the
-// session table pushed to every node heard from, or to each node named that is.
+// delta sent to every node heard from within NodeDownAfter, and the whole table to each node named
+// that is; and the session table pushed to every such node, or to each node named that is.
 func (h *CtlHost) handOut(ctx *core.Context, out *CtlHostOutput) {
 	out.Started = append(out.Started, h.cout.Started...)
+	h.nodes = slices.DeleteFunc(h.nodes, func(n heardNode) bool { return ctx.Now-min(n.heard, ctx.Now) >= chunkstore.NodeDownAfter })
 	for _, n := range h.nodes {
 		if h.cout.Push {
-			h.send(ctx, n, KindDelta, out)
+			h.send(ctx, n.at, KindDelta, out)
 		}
-		if slices.Contains(h.cout.Tables, n.Node) {
-			h.send(ctx, n, KindTable, out)
+		if slices.Contains(h.cout.Tables, n.at.Node) {
+			h.send(ctx, n.at, KindTable, out)
 		}
 	}
 	if !h.cout.SessionPush && len(h.cout.SessionTables) == 0 {
@@ -225,8 +232,8 @@ func (h *CtlHost) handOut(ctx *core.Context, out *CtlHostOutput) {
 	}
 	t := h.ctl.SessionTable().Storage()
 	for _, n := range h.nodes {
-		if h.cout.SessionPush || slices.Contains(h.cout.SessionTables, n.Node) {
-			h.push(ctx, n, 0, &t, out)
+		if h.cout.SessionPush || slices.Contains(h.cout.SessionTables, n.at.Node) {
+			h.push(ctx, n.at, 0, &t, out)
 		}
 	}
 }

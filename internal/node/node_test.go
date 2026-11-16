@@ -447,3 +447,23 @@ func TestTheHeartbeatReportsTheEpochEveryReplicaHolds(t *testing.T) {
 		t.Fatalf("a node with no replica reports epoch %d", nr.Epoch)
 	}
 }
+
+// A fetch in flight when the node moves goes to the new voter at once under a new token, rather
+// than waiting out FetchTimer; moves come at most once an Interval, so this sends at most that often.
+func TestAMoveSendsTheFetchInFlightToTheNewVoter(t *testing.T) {
+	r := three(t)
+	first := r.ask(1, 1)
+	r.from(ctl, leader(other, true))
+	var fetches []core.Action
+	for _, a := range r.out.Actions {
+		if _, k, _, _ := meta.Peek(&a.Msg); a.Kind == core.ActNetSend && k == meta.KindSessionFetch {
+			fetches = append(fetches, a)
+		}
+	}
+	if len(fetches) != 1 || fetches[0].Peer != other {
+		t.Fatalf("a move sent fetches %+v", fetches)
+	}
+	if _, _, tok, _ := meta.Peek(&fetches[0].Msg); tok == first {
+		t.Fatalf("the fetch went again under its old token %#x", tok)
+	}
+}

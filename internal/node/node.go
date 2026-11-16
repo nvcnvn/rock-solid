@@ -94,9 +94,9 @@ type Node struct {
 // Ctl is the control-plane voter the node talks to.
 func (n *Node) Ctl() core.NodeID { return n.cfg.Ctls[n.ctl] }
 
-// move talks to the one at, if it is a voter, or else to the next, at most once an Interval: a
-// move re-points every replica, each sending at once, and while the driver backs off each send
-// fails with another loss.
+// move talks to the one at, if it is a voter, or else to the next, and sends it the fetch in
+// flight. It moves at most once an Interval: a move re-points every replica, each sending at once,
+// and while the driver backs off each send fails with another loss.
 func (n *Node) move(ctx *core.Context, at core.NodeID, known bool, out *Output) {
 	i := slices.Index(n.cfg.Ctls, at)
 	if !known || i < 0 {
@@ -107,6 +107,10 @@ func (n *Node) move(ctx *core.Context, at core.NodeID, known bool, out *Output) 
 	}
 	n.ctl, n.moveAt = i, ctx.Now+Interval
 	out.Moved = true
+	if n.fetching {
+		n.fetching = false
+		n.fetch(ctx, out)
+	}
 }
 
 // FetchTable takes a replica's ReplicaOutput.Fetch or Whole and fetches the whole placement table,
@@ -190,8 +194,8 @@ func (n *Node) Ask(ctx *core.Context, device, ask uint64, out *Output) {
 
 // OnEvent takes a session or placement table from a control-plane voter, dropping one from any
 // other peer, the leader the voter it talks to names, or a timer. A lost connection to that voter
-// moves the node to the next and leaves the fetch to FetchTimer: while the driver backs off, each
-// send fails at once with another loss, and a resend on each would spin the loop.
+// moves the node to the next; a fetch goes again only on a move or FetchTimer, both at most once an
+// Interval, since while the driver backs off each send fails at once with another loss.
 func (n *Node) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	switch ev.Kind {
 	case core.EvPeerLost:

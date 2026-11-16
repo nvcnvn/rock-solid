@@ -160,7 +160,12 @@ func TestAFencePushesTheSessionTableToEveryNodeHeardFrom(t *testing.T) {
 	r.run(StepInterval * 3)
 	r.tables()
 	pushed := map[core.NodeID][]uint64{}
-	for range 300 {
+	for i := range 300 {
+		if i%10 == 0 {
+			for n := range uint32(3) {
+				r.report(&NodeReport{Node: n + 2, Sessions: r.h.Control().SessionTable().Version})
+			}
+		}
 		r.run(StepInterval)
 		for p, v := range r.tables() {
 			pushed[p] = append(pushed[p], v...)
@@ -406,5 +411,33 @@ func TestAMessageOfAnotherGroupIsDropped(t *testing.T) {
 	r.recv(hostNode, m)
 	if len(r.h.nodes) != 0 {
 		t.Fatalf("a report for another group was taken: %v", r.h.nodes)
+	}
+}
+
+// A node not heard from for NodeDownAfter gets no more deltas or pushes, so one gone for good
+// costs the host no dial.
+func TestANodeSilentForNodeDownAfterIsSentNothing(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.report(&NodeReport{Node: 2})
+	r.run(chunkstore.NodeDownAfter)
+	r.report(&NodeReport{Node: 3})
+	for _, a := range r.sent {
+		free(&core.Context{Pool: r.pool}, &a.Msg)
+	}
+	r.sent = r.sent[:0]
+	if err := r.h.Control().SetPool(1, spec(1, 16), disks(2)); err != nil {
+		t.Fatal(err)
+	}
+	r.run(StepInterval * 3)
+	var to []core.NodeID
+	for _, a := range r.sent {
+		if _, err := DecodeDelta(r.pool, &a.Msg); err == nil {
+			to = append(to, a.Peer)
+		}
+		free(&core.Context{Pool: r.pool}, &a.Msg)
+	}
+	if want := []core.NodeID{{Node: 3, Loop: 1}}; !slices.Equal(to, want) {
+		t.Fatalf("delta sent to %v, want %v", to, want)
 	}
 }
