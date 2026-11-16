@@ -2388,8 +2388,10 @@ RefillDone == Plan(<<Mark(3, "down"), AddM(2, 3, 1), RemoveM(2)>>, Partial2, {})
 RefillBack == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
 RefillStay == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), Mark(3, "up"), StayM(2, 3, 2), RemoveM(2)>>, Partial2, {})
 Refilled(x) == [x EXCEPT !.f = {"restart", "format"}]
-\* ci-refills-stay, -primary, -down and -two fit 5 minutes with one partial write.
+\* ci-refills-stay, -primary, -down-restart and -two fit 5 minutes with one partial
+\* write; the -second configurations of the last two have the other.
 OneWrite(x) == [x EXCEPT !.w = <<Partial2[1]>>]
+SecondWrite(x) == [x EXCEPT !.w = <<Partial2[2]>>]
 RefillPlans == {Refilled(RefillDone)}
 \* ci-image: Y on the primary alone, dropped while the member is down, so the
 \* primary lists the chunk; the member's disk is formatted and replaced, and
@@ -2416,13 +2418,18 @@ ImageRestartCutPlans == {[Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Partial2, {"restar
 ReplayDropsPlans == {[Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Partial2, {"restart", "aimed", "format"})
                       EXCEPT !.k = 2]}
 RefillBackDownPlans == {Refilled(RefillBack)}
-\* ci-refills-down splits deep-refills-down by fault, each with one write.
-RefillDownFormatPlans == {[OneWrite(RefillBack) EXCEPT !.f = {"format"}]}
+\* ci-refills-down splits deep-refills-down by fault, and the restart by write.
+RefillDownFormatPlans == {[RefillBack EXCEPT !.f = {"format"}]}
 RefillDownRestartPlans == {[OneWrite(RefillBack) EXCEPT !.f = {"restart"}]}
+RefillDownRestartSecond == {[SecondWrite(RefillBack) EXCEPT !.f = {"restart"}]}
 \* deep-refills-stay restarts any node; ci-refills-stay node 2, the first primary,
-\* with the plan's faults otherwise kept.
+\* and ci-refills-stay-node1 node 1, with the plan's faults otherwise kept. Node 3's
+\* restart does not fit 5 minutes, with or without folds or with a chunk counter
+\* of 1, and is left to deep-refills-stay.
 RefillStayPlans == {OneWrite(Refilled(RefillStay))}
-RefillStay2 == {[OneWrite(Refilled(RefillStay)) EXCEPT !.f = @ \cup {"aimed"}]}
+RefillStayAt(x) == {[OneWrite(Refilled(RefillStay)) EXCEPT !.f = @ \cup {x}]}
+RefillStay1 == RefillStayAt("aimed1")
+RefillStay2 == RefillStayAt("aimed")
 \* ci-refills-back: the primary refilled and back, which it comes behind the others;
 \* the leaving member back in one table with taking the other's place; a member
 \* refilled, then declared lost.
@@ -2441,6 +2448,7 @@ RefillTogether == Plan(<<Mark(3, "down"), Mark(2, "down"),
 RefillLostSecond == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), LostM(3),
                            Tab(2, <<1, 4, 2>>, <<"up", "up", "down">>, {2}), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
 RefillTwoPlans == {OneWrite(RefillSecond)}
+RefillTwoSecond == {SecondWrite(RefillSecond)}
 RefillSecondPlans == {RefillSecond}
 RefillTogetherPlans == {RefillTogether}
 RefillLostPlans == {RefillLostSecond}
@@ -2530,7 +2538,9 @@ StayNewPlans == {StayForNew}
 \* down: W, kept at the first of those intervals on the primary alone and
 \* refused, stays kept with its holder down, leaving and a member. To fit 5
 \* minutes ci-stays-stale needs PG 2 alone, no spare table, and the move and the
-\* leaving member's mark down in one table; deep-stays-stale has them apart.
+\* leaving member's mark down in one table; deep-stays-stale has them apart, and
+\* the plan with two partial writes instead of W. With them apart, neither no
+\* fold nor a chunk counter of 1 fits.
 StayStalePlans == {Plan(<<Tab(2, <<2, 3, 1>>, <<"up", "down", "up">>, {3}),
                           Mark(3, "up"), Mark(2, "down"), StayM(2, 3, 2)>>, Session, {})}
 StayStrandPlans == {[StayStale EXCEPT !.w = Partial2]}

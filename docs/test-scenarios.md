@@ -3258,20 +3258,23 @@ nodes without finishing.
 | `deep-stays` | 3 | `ci-stays` with a spare table. Too large for `ci`, and not yet run |
 | `ci-stays-as-primary` | 3 | `ci-stays`' move that ends with the other member of a leaving primary, with a spare table |
 | `ci-stays-new` | 3 | `ci-stays`' move that ends with the new member, with a spare table |
-| `ci-stays-stale` | 3 | PG 2 and its chunk alone, with no spare table: the leaving member down and back, then taking the place of the primary, marked down. To fit 5 minutes it has no fold of an activation report, and one table both moves the PG and marks the leaving member down. It reaches W kept with no holder up, W refused and nothing acknowledged lost, its holder staying a member |
+| `ci-stays-stale` | 3 | PG 2 and its chunk alone, with no spare table: the leaving member down and back, then taking the place of the primary, marked down. To fit 5 minutes one table both moves the PG and marks the leaving member down, so no `Fold` or `Renew` lands between them, and the plan with two partial writes is left to `deep-stays-stale`; with the two in separate tables it fits neither with no folds nor with a chunk counter of 1. It reaches W kept with no holder up, W refused and nothing acknowledged lost, its holder staying a member |
 | `deep-stays-stale` | 3 | `ci-stays-stale` with the move and the mark down in two tables, and a spare table, so a `Fold` or a `Renew` lands between its changes; with W, and with both partial writes. Too large for `ci`, and not yet run |
 | `ci-late-ask` | 3 | PG 1 and its chunk alone, a member down and back, one restart, no spare table, with `lateask`: the restarted primary may ask again in a newer table before it peers. Only here does TLC take `RestartAsk`, which no rule needs |
 | `ci-gates` | 3 | The restart plan alone on PG 2 and its chunk, with a spare table for the restarted node's ask, under fairness, for properties 12 and 20 only: a restarted member's replayed versions settle at the decision of the interval it asks for. PG 1, which takes no write, is left out to fit 5 minutes; `neg-restart-no-ask` has the same constants |
 | `deep-gates` | 3 | `ci-gates` with both PGs and chunks. Too large for `ci`, and not yet run |
 | `ci-refills` | 3 | PG 2 and its chunk alone, two partial writes, no spare table, a restart or a format: a member marked down, refilled beside its replacement and removed |
-| `ci-refills-down` | 3 | As `ci-refills`, one write, with the other member down while the refilled one leaves, and back, then the removal; a format |
-| `ci-refills-down-restart` | 3 | `ci-refills-down` with a restart instead of the format |
-| `deep-refills-down` | 3 | `ci-refills-down`'s plan with both writes and either fault. Too large for `ci` |
+| `ci-refills-down` | 3 | As `ci-refills`, with the other member down while the refilled one leaves, and back, then the removal; a format. A chunk counter of 1, to fit 5 minutes, so the two writes take an interval each |
+| `ci-refills-down-restart` | 3 | `ci-refills-down`'s plan with the first write alone, a chunk counter of 2 and a restart instead of the format |
+| `ci-refills-down-restart-second` | 3 | `ci-refills-down-restart` with the second write instead of the first |
+| `deep-refills-down` | 3 | `ci-refills-down`'s plan with both writes, a chunk counter of 2 and either fault. Too large for `ci` |
 | `ci-refills-stay` | 3 | As `ci-refills`, one write: the other member down while the refilled one leaves, the refilled one back and taking its place, then the removal; only node 2, the first primary, restarts |
-| `deep-refills-stay` | 3 | `ci-refills-stay` with a restart of any node. Over `ci`'s 5 minutes on a loaded run |
+| `ci-refills-stay-node1` | 3 | `ci-refills-stay` with node 1's restart instead |
+| `deep-refills-stay` | 3 | `ci-refills-stay` with a restart of any node. Node 3's restart alone is over `ci`'s 5 minutes, with or without folds or with a chunk counter of 1, so only this configuration has it |
 | `ci-refills-primary` | 3 | As `ci-refills`, one write and a restart: the primary marked down, refilled beside its replacement, back, and removed |
 | `ci-refills-back` | 3 | As `ci-refills`, with no fault: the leaving member back in the table that takes the down member's place, which then leaves; or the refilled member declared lost and dropped |
-| `ci-refills-two` | 4 | PG 2 and its chunk alone, one partial write, no fault: both members refilled, one after the other |
+| `ci-refills-two` | 4 | PG 2 and its chunk alone, the first partial write, no fault: both members refilled, one after the other |
+| `ci-refills-two-second` | 4 | `ci-refills-two` with the second partial write instead of the first |
 | `deep-refills-two` | 4 | `ci-refills-two` with both partial writes. Too large for `ci`, and not yet run |
 | `ci-refills-together` | 4 | As `ci-refills-two` with both partial writes, both members refilled in one table |
 | `deep-refills-lost` | 4 | `ci-refills-together`'s PG with the first member declared lost, leaving by the table that refills the second, which returns. Too large for `ci`, and not yet run |
@@ -4059,12 +4062,15 @@ next milestone's run, which is also the twins' first.
 | Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 27 | 755,769 | 110 s |
 | Epoch change | `ci-gates` | [Epoch change model](#epoch-change-model) | 26 | 6,124 | 162 s |
 | Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 29 | 572,663 | 73 s |
-| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 32 | 156,352 | 16 s |
+| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 38 | 1,731,715 | 223 s |
 | Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 30 | 507,757 | 65 s |
+| Epoch change | `ci-refills-down-restart-second` | [Epoch change model](#epoch-change-model) | 29 | 435,509 | 66 s |
 | Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 32 | 1,696,563 | 222 s |
+| Epoch change | `ci-refills-stay-node1` | [Epoch change model](#epoch-change-model) | 31 | 1,456,397 | 252 s |
 | Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 31 | 692,371 | 93 s |
 | Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 34 | 1,708,357 | 209 s |
 | Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 30 | 172,492 | 24 s |
+| Epoch change | `ci-refills-two-second` | [Epoch change model](#epoch-change-model) | 30 | 157,194 | 28 s |
 | Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 26 | 60,947 | 10 s |
 | Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 35 | 2,760,666 | 292 s |
 | Epoch change | `ci-image-restart` | [Epoch change model](#epoch-change-model) | 31 | 1,686,390 | 222 s |
