@@ -264,6 +264,39 @@ func TestMergeCheckRebuilds(t *testing.T) {
 	}
 }
 
+// A checkpoint holding a chunk entry one byte short, the size before the image flag, fails the
+// open that loads it as a malformed run does, before replay reads the entry.
+func TestAShortChunkEntryInACheckpointFailsTheOpen(t *testing.T) {
+	cfg := testConfig()
+	cfg.Log.MaxReplayBytes = 16 * core.BlockSize
+	h := newHarness(t, cfg)
+	h.inv.Off(invIndex)
+	other := core.ChunkID{Volume: 1, Inode: 8, Index: 1}
+	h.sync(h.write(other, 0, fill(7, 1), 0))
+	key := appendChunkPrefix(nil, testPool, other)
+	v, ok := h.s.Index().Tree().Get(key)
+	if !ok {
+		t.Fatal("the chunk has no entry")
+	}
+	if err := h.s.Index().Tree().Put(key, slices.Clone(v[:chunkValueSize-1])); err != nil {
+		t.Fatal(err)
+	}
+	h.s.beginCheckpoint(&h.ctx, true, &h.out)
+	h.s.pump(&h.ctx, &h.out)
+	h.take()
+	h.settle()
+	flushed := h.s.Log().Manifest()
+	for i := 0; h.s.Log().Manifest().Segment == flushed.Segment; i++ {
+		if i == 500 {
+			t.Fatalf("no manifest past segment %d after %d writes", flushed.Segment, i)
+		}
+		h.sync(h.write(chunkC, uint32(i%16)*core.BlockSize, fill(7, byte(i)), 0))
+	}
+	if h.reopen(disklog.ModeOpen) || !errors.Is(h.s.Err(), lsm.ErrMalformed) {
+		t.Fatalf("serving %v, %v", h.s.Serving(), h.s.Err())
+	}
+}
+
 // A run check that fails again after a rebuild, before any checkpoint completes, stops the store
 // with the check's error instead of rebuilding without end.
 func TestARunCheckFailingAfterARebuildStopsTheStore(t *testing.T) {

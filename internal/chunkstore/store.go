@@ -2572,6 +2572,10 @@ func (s *Store) replayIfLoaded(ctx *core.Context) {
 	if len(s.loading) > 0 || s.phase != recovering {
 		return
 	}
+	if err := s.ix.CheckChunks(); err != nil {
+		s.recoveryFailed(ctx, err)
+		return
+	}
 	if err := s.rec.Replay(ctx, &s.lout); err != nil {
 		s.recoveryFailed(ctx, err)
 	}

@@ -751,6 +751,18 @@ func (x *Index) SegmentLive(segmentBlocks uint32, live []uint32) {
 	}
 }
 
+// CheckChunks reports, as lsm.ErrMalformed, the first chunk entry that does not decode.
+func (x *Index) CheckChunks() error {
+	x.tree.Iter(&x.it)
+	for ok := x.it.SeekGE(nil); ok; ok = x.it.Next() {
+		k, v := x.it.Key(), x.it.Value()
+		if _, ok := decodeChunk(v); len(k) == chunkKeySize && !ok {
+			return fmt.Errorf("%w: chunk %x: entry %x", lsm.ErrMalformed, k, v)
+		}
+	}
+	return nil
+}
+
 // Chunk returns the chunk's entry.
 func (x *Index) Chunk(pool core.PoolID, c core.ChunkID) (Chunk, bool) {
 	x.key = appendChunkPrefix(x.key[:0], pool, c)
