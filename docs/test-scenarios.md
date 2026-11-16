@@ -3983,7 +3983,7 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 | No two replicas of a shard serve lease reads at overlapping times | `OneLeaseReader` | "no two replicas of a shard serve lease reads at overlapping times" |
 | A lease read sees every committed entry | `LeaseReadsCurrent` | "a lease read sees every applied entry" |
 | With a voter down for good, the swap commits on the survivors | `SwapCommits` | None: [Voter replacement](#voter-replacement)'s tests time the swap |
-| After the swap, the group has a leader in the new configuration, even when the dropped voter led the leave | `NewLeader` | None: the tests of "Voter replacement: drop support for a removed leader" time the failover |
+| After the swap, the group has a leader in the new configuration, even when the dropped voter led the leave | `NewLeader` | None: [Voter replacement](#voter-replacement)'s runs must finish, which needs a leader of the new configuration, also after the dropped voter led the leave |
 
 **A rule removed, and the counterexample the model finds** (rows in the [rule map](#model-gate))
 
@@ -3997,8 +3997,8 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 | `neg-delete-on-plan` | A replica the plan drops deletes its state at once | c deletes before any change commits | `DeletesOnlyRemoved` |
 | `neg-notice-any-index` | A notice counts from a peer behind the asker | d, which applied its addition, asks b, which has not, and b's answer of index 0 counts | Same |
 | `neg-notice-non-member` | A notice counts while the asker's own configuration lacks it | d, before applying its own addition, asks a, which is ahead of d but has not applied it either | Same |
-| `neg-no-support-ask` | A follower never asks the node of the leader it supports | c, leading, leaves the joint configuration and applies its removal, its commit reaching no follower, yet a, b and d support c for good, so none campaigns | `NewLeader` |
-| `neg-removed-keeps-lease` | A leader that applied its own removal still serves lease reads | c, leading and fortified by a, b and d, leaves the joint configuration, commits the leave on a and b and applies its removal; a and b ask c's node and stop supporting c, a wins term 3 on a and b and fortifies b, while c still counts a's, b's and d's support | `OneLeaseReader` |
+| `neg-no-support-ask` | A follower never asks the node of the leader it supports | c, leading, leaves the joint configuration and applies its removal, its commit reaching no follower, yet a, b and d support c for good, so none campaigns. In the code the same plant leaves the replacement run without a leader in the new configuration | `NewLeader` |
+| `neg-removed-keeps-lease` | A leader that applied its own removal still serves lease reads | c, leading and fortified by a, b and d, leaves the joint configuration, commits the leave on a and b and applies its removal; a and b ask c's node and stop supporting c, a wins term 3 on a and b and fortifies b, while c still counts a's, b's and d's support. In the code the same plant breaks the lease reader property in the replacement run | `OneLeaseReader` |
 
 **Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc); results in the [Model-to-simulator map](#model-to-simulator-map)). Voters a, b and c, the plan swapping d in for c:
 
@@ -6404,10 +6404,13 @@ a snapshot taken at the leader's applied index in for the point-in-time view the
 | A removal notice at an index below the replica's applied index | Ignored: a peer that has not applied the change that added it says nothing of its removal |
 | B has committed D's addition, its commit index at D's applied index, but not applied it; D asks B, or sends B a Raft message | B answers at its applied index, which D ignores; an answer at its commit index would have D delete its state |
 | C started with Peers that lack the leader, as one restored from a snapshot; the leader sends to it | C learns the leader's node from the message, and its reply reaches it |
+| A, B, C and D in the joint configuration that swaps C for D, every node holding a lease from every other; C, in the outgoing half alone, wins an election, leaves the joint configuration and applies its own removal, and every message it sends from then on is lost, so no follower learns that the leave committed. C's node keeps renewing their grants | Within an election timeout each follower asks C's node about replica ID 3, which answers that it is gone; the followers stop supporting C and campaign after `raft_lapse_campaign`, and one leads voters 1, 2 and 4 within an election timeout, a heartbeat, `raft_lapse_campaign` and three heartbeats. No two replicas could serve a lease read at once (`TestFollowersOfALeaderThatAppliedItsOwnRemovalCampaign`) |
+| Then an ask about replica 3 to C, and asks about 4 and about 3 to D | C, removed, answers that 3 is gone; D, live, answers neither and counts the ask about another replica misrouted: the ask names the replica ID, never the group alone, so a new replica of the group on a node is not taken for the old one. `Gone`, the node's answer for a replica it no longer holds, answers the ask and nothing else |
+| B, supporting C, gets an answer that 4 is gone, then that 3 is | B keeps its support, then drops it (`TestANodeAnswersGoneOnlyForTheReplicaItNoLongerHolds`) |
 | Planted: the learner promoted at once | D swapped in holding nothing (`TestAnEagerLeaderPromotesALearnerThatHoldsNothing`) |
 | Planted: D added as a voter | With C down, nothing commits while D hears nothing (`TestAReplacementAddedAsAVoterStallsProposals`) |
 
-The membership question and its answer are fortification-sized frames that `FuzzDecode` also feeds.
+The membership question, the ask about a leader and their answers are fortification-sized frames that `FuzzDecode` also feeds.
 
 **Simulator runs.** `TestVoterReplacementRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000
 per commit in `scripts/seeds.sh` (25 s at `JOBS=2`), 10,000 once in 125 s, runs the
@@ -6417,8 +6420,13 @@ from every other node, and up to 2 s later every replica gets the plan naming th
 replica's storage takes a snapshot at its applied index after each pass and compacts all but 10
 entries below it, so the new replica, and any lagging voter, catches up from snapshots. The
 replaced replica is reconnected up to a second after the plan, mid-swap, in half the seeds, and a
-second after the swap in the rest. A seed passes once the replaced replica reported itself removed
-and the new one applied a value proposed after the swap, and replays to the same trace and
+second after the swap in the rest. In half the seeds (`outgoing`), the leader that proposes the
+swap, once the replaced replica is reconnected, hands it its leadership, and every Raft message the
+replaced replica sends carrying the commit of the leave of the joint configuration is lost; when it
+then leads the leave, it applies its own removal with no follower learning of it, as in the
+[Voter replacement model](#voter-replacement-model)'s `ci-live-moved`. Every node renews its
+node-pair leases while it runs, whatever its replicas do, as a node does in production. A seed
+passes once the replaced replica reported itself removed and the new one applied a value proposed after the swap, and replays to the same trace and
 history. After every step it checks the Raft runs' properties and:
 
 - [property] "no learner is promoted to voter before it has caught up with its leader's log": a
@@ -6427,6 +6435,14 @@ history. After every step it checks the Raft runs' properties and:
   it within 20 seeds (`TestPromotingALearnerBeforeItCaughtUpBreaksTheInvariant`).
 - "only a replica the group's configuration removed deletes its state": no replica but the
   replaced one reports `Removed`.
+
+Planted, on runs that always draw `outgoing`, each of the voter model's two rules about a removed
+leader fails within 20 seeds: followers that never ask (`neg-no-support-ask`) leave the run without
+a leader of the new configuration, so it never finishes, while the same seed finishes unplanted
+(`TestFollowersThatNeverAskKeepARemovedLeader`; 8 of the first 20 seeds); a removed leader that
+keeps serving lease reads (`neg-removed-keeps-lease`) breaks "no two replicas of a shard serve
+lease reads at overlapping times" (`TestARemovedLeaderThatKeepsReadingBreaksTheLeaseInvariant`;
+15 of the first 60 seeds).
 
 `TestVoterReplacementRegressionSeeds` keeps three seeds that found bugs: 6389, the lease property
 counting a follower's applies (above, under [Leader leases](#leader-leases)); 8218, a leader whose
