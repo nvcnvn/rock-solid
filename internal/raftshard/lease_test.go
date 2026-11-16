@@ -425,3 +425,22 @@ func TestAFollowerInALaterTermIgnoresAnOldFortification(t *testing.T) {
 		t.Fatalf("answered %v, supports term %d, in term %d", f.forts, f.s.support.term, n.term(1))
 	}
 }
+
+func TestASingleVoterElectsItselfAndLeases(t *testing.T) {
+	n := newNet(t, 1, 1)
+	for i := 0; i < 2*ElectionTick && n.r[0].s.rn.BasicStatus().RaftState != raft.StateLeader; i++ {
+		n.advance(TickInterval)
+		n.settle()
+	}
+	if st := n.r[0].s.rn.BasicStatus(); st.RaftState != raft.StateLeader {
+		t.Fatalf("the lone voter is %v after two election timeouts", st.RaftState)
+	}
+	n.propose(0, []byte("x"))
+	n.settle()
+	if a := n.r[0].applied; len(a) == 0 || string(a[len(a)-1].Data) != "x" {
+		t.Fatalf("applied %v", a)
+	}
+	if !n.leaseRead(0) {
+		t.Fatal("the lone voter does not lease once an entry of its term committed")
+	}
+}
