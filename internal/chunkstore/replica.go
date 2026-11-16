@@ -229,9 +229,11 @@ type Replica struct {
 	// lost is the peers a PeerLost left with writes to send again, which new writes to them wait behind.
 	lost      []core.NodeID
 	unsettled []core.ChunkID
-	nextID    uint64
-	frame     []byte
-	armed     bool
+	// unlogged is the store request and chunk of each own version released before its records were durable, kept only to trace when they become so.
+	unlogged [][2]uint64
+	nextID   uint64
+	frame    []byte
+	armed    bool
 	// want is the newest table epoch asked for and not yet held, whole if wantWhole; retryAt is when RetryTimer is armed for, 0 when it is not.
 	// asks is the new intervals this disk asked for, as a restarted member, of PGs no table has moved on since.
 	asks      []PGFields
@@ -874,6 +876,7 @@ func (r *Replica) storeFailed(ctx *core.Context, out *ReplicaOutput) {
 			r.release(ctx, i)
 		}
 	}
+	r.unlogged = r.unlogged[:0]
 }
 
 func (r *Replica) refuseHeld(ctx *core.Context, h heldMsg, out *ReplicaOutput) {
@@ -1425,6 +1428,15 @@ func (r *Replica) addr(disk uint32) core.NodeID {
 func (r *Replica) logged(ctx *core.Context, l Reply, out *ReplicaOutput) {
 	i := r.versionOf(l.ID)
 	if i < 0 {
+		for j, u := range r.unlogged {
+			if u[0] == l.ID {
+				if l.Err == nil {
+					out.note(trace.OutLogged, u[1], l.Version, 0, 0, 0)
+				}
+				r.unlogged = slices.Delete(r.unlogged, j, j+1)
+				break
+			}
+		}
 		return
 	}
 	if !r.vers[i].ordered {
@@ -1651,6 +1663,9 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 // release drops a finished version once no member's send of its buffer is outstanding.
 func (r *Replica) release(ctx *core.Context, i int) {
 	if v := &r.vers[i]; v.done && v.out == 0 {
+		if v.ordered && !v.recover && !v.logged {
+			r.unlogged = append(r.unlogged, [2]uint64{v.req, v.u.Chunk.Hash()})
+		}
 		freeBuf(ctx, v.buf)
 		r.vers = slices.Delete(r.vers, i, i+1)
 	}
