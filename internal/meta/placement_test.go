@@ -17,7 +17,7 @@ func cluster(t *testing.T, n int) (*chunkstore.DiskRecord, []uint32) {
 	for i := range uint32(n) {
 		nodes = append(nodes, i)
 		for dev := range uint64(2) {
-			if _, err := r.Report(i, dev, uint64(10*i+1)+dev); err != nil {
+			if _, err := r.Report(i, dev, uint64(10*i+1)+dev, ""); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -109,7 +109,7 @@ func TestAVoterWhoseLogIsGoneMovesAtOnceToAnotherDiskOfItsNode(t *testing.T) {
 			on = append(on, i)
 		}
 	}
-	fresh, err := r.Report(2, 0, 99)
+	fresh, err := r.Report(2, 0, 99, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestAVoterWhoseDiskMovedNodesIsPlacedAgain(t *testing.T) {
 	m = PlaceVoters(&m, nodes[:3], r.Disks(), nil, 0)
 	moved := m.Groups[0].Voters[0]
 	r.Down(moved.Disk, 0)
-	if _, err := r.Report(m.Groups[0].Voters[1].Node, 9, r.Disks()[moved.Disk-1].Log); err != nil {
+	if _, err := r.Report(m.Groups[0].Voters[1].Node, 9, r.Disks()[moved.Disk-1].Log, ""); err != nil {
 		t.Fatal(err)
 	}
 	m = PlaceVoters(&m, nodes, r.Disks(), nil, 1)
@@ -191,7 +191,7 @@ func TestAVoterWhoseDiskMovedIsNotPlacedAgainOnThatDisk(t *testing.T) {
 	}
 	m = PlaceVoters(&m, nodes, r.Disks(), nil, 0)
 	r.Down(1, 0)
-	if _, err := r.Report(3, 9, r.Disks()[0].Log); err != nil {
+	if _, err := r.Report(3, 9, r.Disks()[0].Log, ""); err != nil {
 		t.Fatal(err)
 	}
 	next := PlaceVoters(&m, nodes, r.Disks(), nil, 1)

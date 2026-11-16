@@ -30,10 +30,12 @@ var ErrUnknownDisk = errors.New("meta: unknown disk")
 var ErrNotDrained = errors.New("meta: disk not drained")
 
 // OpenedDisk is a disk a node opened: the drive's stable identity, the log ID its superblock
-// holds, and its size and its log's reserve in blocks.
+// holds, its size and its log's reserve in blocks, and its class, which the record takes only when
+// the disk joins.
 type OpenedDisk struct {
 	Device, Log     uint64
 	Blocks, Reserve uint64
+	Class           string
 }
 
 // HaltReport is a replica halted at a committed entry it could not decode: its group, its replica
@@ -116,7 +118,7 @@ func (c *Control) Heartbeat(now core.Tick, nr *NodeReport, out *ControlOutput) e
 		if j := slices.IndexFunc(ds, func(d chunkstore.RecordedDisk) bool { return d.Log == o.Log }); j >= 0 && ds[j].Node == nr.Node && ds[j].Device == o.Device && !ds[j].Gone {
 			continue
 		}
-		if _, err := c.rec.Report(nr.Node, o.Device, o.Log); err != nil {
+		if _, err := c.rec.Report(nr.Node, o.Device, o.Log, o.Class); err != nil {
 			errs = append(errs, fmt.Errorf("meta: log %#x on node %d: %w", o.Log, nr.Node, err))
 		}
 	}
@@ -349,9 +351,7 @@ func (c *Control) diskView(live []chunkstore.RecordedDisk, now core.Tick) []Disk
 }
 
 // poolDisks is each disk of in, with its capacity figures, that the record knows, whose log is
-// not gone and whose node is not role meta, at the node, mark and drain the record gives it. A disk
-// with no class takes the first class it reported; a later report never changes it, so a heartbeat
-// moves no data.
+// not gone and whose node is not role meta, at the node, class, mark and drain the record gives it.
 func (c *Control) poolDisks(in []chunkstore.Disk) []chunkstore.Disk {
 	ds := c.rec.Disks()
 	var out []chunkstore.Disk
@@ -359,10 +359,7 @@ func (c *Control) poolDisks(in []chunkstore.Disk) []chunkstore.Disk {
 		if d.ID == 0 || int(d.ID) > len(ds) || ds[d.ID-1].Gone || slices.ContainsFunc(c.nodes, func(n nodeState) bool { return n.id == ds[d.ID-1].Node && n.only }) {
 			continue
 		}
-		d.Node, d.Drain = ds[d.ID-1].Node, slices.Contains(c.drains, d.ID)
-		if d.Class == "" && int(d.ID) <= len(c.fills) {
-			d.Class = c.fills[d.ID-1].class
-		}
+		d.Node, d.Class, d.Drain = ds[d.ID-1].Node, ds[d.ID-1].Class, slices.Contains(c.drains, d.ID)
 		d.Mark, d.DownSince = c.det.Mark(d.ID)
 		out = append(out, d)
 	}
@@ -416,7 +413,7 @@ const (
 )
 
 // A disk's entry: its log ID and device, 8 bytes each, its node as a uvarint, a flags byte of up,
-// gone and drain, and its age while down in ticks as a uvarint.
+// gone and drain, its age while down in ticks as a uvarint, and its class as length and bytes.
 func appendDisk(dst []byte, e *DiskEntry) []byte {
 	dst = bigEndian.AppendUint64(bigEndian.AppendUint64(dst, e.Log), e.Device)
 	dst = binary.AppendUvarint(dst, uint64(e.Node))
@@ -426,7 +423,7 @@ func appendDisk(dst []byte, e *DiskEntry) []byte {
 			f |= 1 << i
 		}
 	}
-	return binary.AppendUvarint(append(dst, f), uint64(e.Age))
+	return appendBytes(binary.AppendUvarint(append(dst, f), uint64(e.Age)), []byte(e.Class))
 }
 
 // decodeDisk decodes disk id's entry; ErrMalformed for a disk up and gone, drained once gone, an
@@ -439,7 +436,7 @@ func decodeDisk(id uint32, b []byte) (DiskEntry, error) {
 	node := d.uvarint()
 	f := d.byte()
 	e := DiskEntry{RecordedDisk: chunkstore.RecordedDisk{ID: id, Log: bigEndian.Uint64(b), Device: bigEndian.Uint64(b[8:]), Node: uint32(node), Up: f&diskUp != 0, Gone: f&diskGone != 0}, Drain: f&diskDrain != 0}
-	e.Age = core.Tick(d.uvarint())
+	e.Age, e.Class = core.Tick(d.uvarint()), string(d.bytes())
 	if d.bad || len(d.b) != 0 || node > 1<<32-1 || f >= 1<<3 || e.Up && (e.Gone || e.Age != 0) || e.Gone && e.Drain || !bytes.Equal(appendDisk(nil, &e), b) {
 		return DiskEntry{}, ErrMalformed
 	}

@@ -33,7 +33,7 @@ func seededSoleRun(t *testing.T, seed uint64, replicas, disks int) *soleRun {
 	a := &authority{pool: Pool{Replicas: replicas, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 1},
 		down: map[uint32]core.Tick{}, drain: map[uint32]bool{}}
 	for n := range disks {
-		if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n)); err != nil {
+		if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n), ""); err != nil {
 			t.Fatal(err)
 		}
 	}

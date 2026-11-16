@@ -190,17 +190,13 @@ type Latency struct {
 	Latency core.Tick
 }
 
-// DiskState is what a node reports of one of its disks; Class is at most MaxClassLen bytes.
+// DiskState is what a node reports of one of its disks.
 type DiskState struct {
 	Log    uint64
 	Fill   uint64
 	Oldest core.Tick
 	Failed bool
-	Class  string
 }
-
-// MaxClassLen is the longest disk class a heartbeat carries.
-const MaxClassLen = 255
 
 // LeadState is what a primary reports of a PG it leads: its interval, whether it leads it active and, when active, the chunks its last peering left unfound and the copies its members still lack, which recovery counts down.
 type LeadState struct {
@@ -503,7 +499,7 @@ func DecodeHeartbeat(b []byte, data int, h *Heartbeat) error {
 const (
 	pgFieldsSize  = 20
 	latencySize   = 12
-	diskStateSize = 26
+	diskStateSize = 25
 	leadStateSize = 21
 	chunkVerSize  = core.ChunkIDSize + 8
 	chunkPeerSize = core.ChunkIDSize + 8 + 8 + 1 + 8
@@ -526,8 +522,7 @@ func AppendReport(dst []byte, rp *Report) []byte {
 	dst = le.AppendUint32(dst, uint32(len(rp.Disks)))
 	for _, d := range rp.Disks {
 		dst = le.AppendUint64(le.AppendUint64(le.AppendUint64(dst, d.Log), d.Fill), uint64(d.Oldest))
-		dst = append(appendBool(dst, d.Failed), byte(len(d.Class)))
-		dst = append(dst, d.Class...)
+		dst = appendBool(dst, d.Failed)
 	}
 	dst = le.AppendUint32(dst, uint32(len(rp.Leads)))
 	for _, l := range rp.Leads {
@@ -555,13 +550,7 @@ func DecodeReport(b []byte, data int, rp *Report) error {
 	}
 	rp.Disks = rp.Disks[:0]
 	for n := r.count(diskStateSize); n > 0; n-- {
-		d := DiskState{Log: r.u64(), Fill: r.u64(), Oldest: core.Tick(r.u64()), Failed: r.bool()}
-		var was string
-		if len(rp.Disks) < cap(rp.Disks) {
-			was = rp.Disks[:len(rp.Disks)+1][len(rp.Disks)].Class
-		}
-		d.Class = r.str(was)
-		rp.Disks = append(rp.Disks, d)
+		rp.Disks = append(rp.Disks, DiskState{Log: r.u64(), Fill: r.u64(), Oldest: core.Tick(r.u64()), Failed: r.bool()})
 	}
 	rp.Leads = rp.Leads[:0]
 	for n := r.count(leadStateSize); n > 0; n-- {
@@ -709,20 +698,6 @@ func (r *reader) take(n int) []byte {
 func (r *reader) u8() uint8   { return r.take(1)[0] }
 func (r *reader) u32() uint32 { return le.Uint32(r.take(4)) }
 func (r *reader) u64() uint64 { return le.Uint64(r.take(8)) }
-
-// str is a string of up to MaxClassLen bytes, was itself when it reads the same, so a decode into a reused value allocates nothing.
-func (r *reader) str(was string) string {
-	n := int(r.u8())
-	if r.bad || n > len(r.b) {
-		r.bad = true
-		return ""
-	}
-	b := r.take(n)
-	if string(b) == was {
-		return was
-	}
-	return string(b)
-}
 
 func (r *reader) bool() bool {
 	v := r.u8()

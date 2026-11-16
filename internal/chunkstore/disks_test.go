@@ -10,7 +10,7 @@ func TestDisksAreKnownByTheirLogIDs(t *testing.T) {
 	var r DiskRecord
 	report := func(node uint32, device, log uint64) uint32 {
 		t.Helper()
-		id, err := r.Report(node, device, log)
+		id, err := r.Report(node, device, log, "")
 		if err != nil {
 			t.Fatalf("report of log %#x on %d/%d: %v", log, node, device, err)
 		}
@@ -27,10 +27,10 @@ func TestDisksAreKnownByTheirLogIDs(t *testing.T) {
 	if got := report(2, 0, 0xc2); got != 4 || r.Disks()[c-1].Up || !r.Disks()[c-1].Gone {
 		t.Fatalf("a formatted disk joined as %d, its old ID %+v", got, r.Disks()[c-1])
 	}
-	if _, err := r.Report(2, 1, 0xc); !errors.Is(err, ErrLogRefused) {
+	if _, err := r.Report(2, 1, 0xc, ""); !errors.Is(err, ErrLogRefused) {
 		t.Fatalf("the replaced log came back: %v", err)
 	}
-	if _, err := r.Report(1, 1, 0xa); !errors.Is(err, ErrLogRefused) {
+	if _, err := r.Report(1, 1, 0xa, ""); !errors.Is(err, ErrLogRefused) {
 		t.Fatalf("a cloned drive's log ID, already up: %v", err)
 	}
 	if d := r.Disks()[a-1]; d.Node != 0 || d.Device != 0 || !d.Up {
@@ -45,7 +45,7 @@ func TestDisksAreKnownByTheirLogIDs(t *testing.T) {
 // A disk down can be declared lost: it is gone and its log is refused. A disk up, or unknown, cannot.
 func TestADiskDownCanBeDeclaredLost(t *testing.T) {
 	var r DiskRecord
-	id, err := r.Report(1, 0, 0xa)
+	id, err := r.Report(1, 0, 0xa, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestADiskDownCanBeDeclaredLost(t *testing.T) {
 	if err := r.Lost(id); err != nil || !r.Disks()[id-1].Gone {
 		t.Fatalf("%v, %+v", err, r.Disks()[id-1])
 	}
-	if _, err := r.Report(1, 0, 0xa); !errors.Is(err, ErrLogRefused) {
+	if _, err := r.Report(1, 0, 0xa, ""); !errors.Is(err, ErrLogRefused) {
 		t.Fatalf("a lost disk reported again: %v", err)
 	}
 }

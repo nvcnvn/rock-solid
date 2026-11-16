@@ -713,7 +713,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 		lost: map[core.RequestID]bool{}, heals: map[[2]uint32]core.Tick{}, images: map[[2]uint64][]byte{}}
 	f.a = &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4}}
 	for n := range 3 {
-		if _, err := f.a.rec.Report(uint32(n), 0, c.logs[n]); err != nil {
+		if _, err := f.a.rec.Report(uint32(n), 0, c.logs[n], ""); err != nil {
 			t.Fatal(err)
 		}
 	}

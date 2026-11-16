@@ -13,7 +13,7 @@ var ErrLogRefused = errors.New("chunkstore: log ID refused")
 // ErrLostRefused reports a declaration that a disk is lost for a disk the record does not know, or one that is up.
 var ErrLostRefused = errors.New("chunkstore: disk not down")
 
-// RecordedDisk is a disk as the control plane records it: its ID, the log ID it reported, the node and the device it was last reported on, whether it is up or else since when it is down, and whether its log is gone, a new log having been reported in its place. Device is the drive's stable identity, such as its WWN, never its slot on the node, which a restart may renumber.
+// RecordedDisk is a disk as the control plane records it: its ID, the log ID it reported, the node and the device it was last reported on, whether it is up or else since when it is down, and whether its log is gone, a new log having been reported in its place, and its class, set when it joins. Device is the drive's stable identity, such as its WWN, never its slot on the node, which a restart may renumber.
 type RecordedDisk struct {
 	ID        uint32
 	Log       uint64
@@ -22,6 +22,7 @@ type RecordedDisk struct {
 	Up        bool
 	DownSince core.Tick
 	Gone      bool
+	Class     string
 }
 
 // DiskRecord is the control plane's record of disks, each known by the log ID it reports: a disk ID never names another log, and is never reused.
@@ -29,8 +30,8 @@ type DiskRecord struct {
 	disks []RecordedDisk
 }
 
-// Report takes a node's report that its device opened the log log, returning the disk's ID. A log ID the record knows is the disk it names, marked up, unless it is up elsewhere or its log was replaced, which is refused. A log ID it does not know joins as a new disk under the next disk ID, and a disk last reported on that device stays down with its log gone, so its members refill elsewhere at once.
-func (r *DiskRecord) Report(node uint32, device, log uint64) (uint32, error) {
+// Report takes a node's report that its device opened the log log, of class class, returning the disk's ID. A log ID the record knows is the disk it names, marked up, its class unchanged, unless it is up elsewhere or its log was replaced, which is refused. A log ID it does not know joins as a new disk of that class under the next disk ID, and a disk last reported on that device stays down with its log gone, so its members refill elsewhere at once.
+func (r *DiskRecord) Report(node uint32, device, log uint64, class string) (uint32, error) {
 	if i := slices.IndexFunc(r.disks, func(d RecordedDisk) bool { return d.Log == log }); i >= 0 {
 		d := &r.disks[i]
 		if d.Gone || d.Up && (d.Node != node || d.Device != device) {
@@ -45,7 +46,7 @@ func (r *DiskRecord) Report(node uint32, device, log uint64) (uint32, error) {
 		}
 	}
 	id := uint32(len(r.disks) + 1)
-	r.disks = append(r.disks, RecordedDisk{ID: id, Log: log, Node: node, Device: device, Up: true})
+	r.disks = append(r.disks, RecordedDisk{ID: id, Log: log, Node: node, Device: device, Up: true, Class: class})
 	return id, nil
 }
 

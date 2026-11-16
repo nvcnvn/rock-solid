@@ -26,7 +26,7 @@ type dharness struct {
 func newDetector(t *testing.T, disks int, pool Pool, start core.Tick) *dharness {
 	h := &dharness{t: t, pool: pool, ctx: core.Context{Now: start, Raw: start, Pool: sim.NewPool(1<<20, 64)}}
 	for n := range disks {
-		if _, err := h.rec.Report(uint32(n), 0, logOf(uint32(n+1))); err != nil {
+		if _, err := h.rec.Report(uint32(n), 0, logOf(uint32(n+1)), ""); err != nil {
 			t.Fatal(err)
 		}
 	}

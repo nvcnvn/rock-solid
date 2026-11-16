@@ -60,7 +60,7 @@ func newGrantRun(t *testing.T, blocks, reserve uint64, limit uint8, n int, live 
 func (r *grantRun) opened() {
 	for i := range r.live {
 		n := uint32(i)
-		r.heartbeat(&NodeReport{Node: n, Meta: true, Opened: []OpenedDisk{{Device: devOf(n), Log: logOf(n), Blocks: r.blocks, Reserve: r.reserve}}})
+		r.heartbeat(&NodeReport{Node: n, Meta: true, Opened: []OpenedDisk{{Device: devOf(n), Log: logOf(n), Blocks: r.blocks, Reserve: r.reserve, Class: r.classOf(n)}}})
 	}
 }
 

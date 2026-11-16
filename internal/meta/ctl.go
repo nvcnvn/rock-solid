@@ -159,13 +159,19 @@ func (c *Control) ShardMap() *ShardMap { return &c.smap }
 
 // SetPool checks a pool's create or update against the pool rules and the committed pool, and
 // stages it for the next commit in place of any change of the pool staged before; disks are the
-// cluster's, for an unset pg_count and the layout check. A refused one stages nothing, and one that
+// cluster's, each at the class the record gives it, for an unset pg_count and the layout check. A refused one stages nothing, and one that
 // changes nothing unstages the pool. A new pool whose worst step may be more than one Txn holds is
 // ErrTooLarge.
 func (c *Control) SetPool(id core.PoolID, spec chunkstore.PoolSpec, disks []chunkstore.Disk) error {
 	i, ok := slices.BinarySearchFunc(c.pools, id, cmpPool)
 	if ok && spec.PGCount == nil {
 		spec.PGCount = &c.pools[i].Pool.PGCount
+	}
+	disks = slices.Clone(disks)
+	for i, d := range disks {
+		if rec := c.rec.Disks(); d.ID >= 1 && int(d.ID) <= len(rec) {
+			disks[i].Class = rec[d.ID-1].Class
+		}
 	}
 	p, err := chunkstore.NewPool(spec, len(disks))
 	if err == nil && ok {

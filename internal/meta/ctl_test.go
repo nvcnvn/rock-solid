@@ -27,13 +27,16 @@ type ctlRun struct {
 	out ControlOutput
 	// reports is each node's last report, which run sends again each second.
 	reports map[uint32]NodeReport
+	// classes is the class node n's disk reports, if n is in range.
+	classes []string
 }
 
 // newCtlRun starts the leader's machine with a metadata node each of 0 to 4 heard from and its
-// one disk recorded and committed: node n's disk has ID n+1, device devOf(n) and log logOf(n).
-func newCtlRun(t *testing.T) *ctlRun {
+// one disk recorded and committed: node n's disk has ID n+1, device devOf(n), log logOf(n) and
+// class classes[n], if given.
+func newCtlRun(t *testing.T, classes ...string) *ctlRun {
 	c := newGroup(t, 3, false)
-	r := &ctlRun{t: t, c: c, l: c.elect(), reports: map[uint32]NodeReport{}}
+	r := &ctlRun{t: t, c: c, l: c.elect(), reports: map[uint32]NodeReport{}, classes: classes}
 	r.ctl = r.load(r.l)
 	r.hearAll()
 	r.step(&ControlInputs{})
@@ -44,9 +47,16 @@ func newCtlRun(t *testing.T) *ctlRun {
 // within a second.
 func (r *ctlRun) hearAll() {
 	for n := range uint32(5) {
-		r.heartbeat(&NodeReport{Node: n, Meta: true, Opened: []OpenedDisk{{Device: devOf(n), Log: logOf(n)}}})
+		r.heartbeat(&NodeReport{Node: n, Meta: true, Opened: []OpenedDisk{{Device: devOf(n), Log: logOf(n), Class: r.classOf(n)}}})
 		r.beat(n, 0, false)
 	}
+}
+
+func (r *ctlRun) classOf(node uint32) string {
+	if int(node) < len(r.classes) {
+		return r.classes[node]
+	}
+	return ""
 }
 
 func devOf(node uint32) uint64 { return 0xd0 + uint64(node) }

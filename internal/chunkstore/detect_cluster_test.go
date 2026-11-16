@@ -32,7 +32,7 @@ func newDCluster(t *testing.T, seed uint64, set sim.Settings) *dcluster {
 	s := sim.New(seed, set)
 	a := &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4}, down: map[uint32]core.Tick{}}
 	for n := range 3 {
-		if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n)); err != nil {
+		if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n), ""); err != nil {
 			t.Fatal(err)
 		}
 	}

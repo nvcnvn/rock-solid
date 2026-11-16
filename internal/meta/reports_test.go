@@ -10,14 +10,14 @@ import (
 )
 
 // reportRun is a grantRun with no sessions whose pool 1, one copy of 8 PGs of disk class pool, is on
-// one disk per class given, each of class classes[i] as its caller gives it, and is ready and
+// one disk per class given, each joining the record with class classes[i], and is ready and
 // recovered; each step makes up to 8 balance moves.
 func reportRun(t *testing.T, pool string, classes ...string) *grantRun {
-	r := &grantRun{ctlRun: newCtlRun(t), blocks: gb(1000), reserve: 8 * mib(64)}
+	r := &grantRun{ctlRun: newCtlRun(t, classes...), blocks: gb(1000), reserve: 8 * mib(64)}
 	r.in.Moves = 8
-	for i, c := range classes {
+	for i := range classes {
 		r.live = append(r.live, gb(1))
-		r.in.Disks = append(r.in.Disks, chunkstore.Disk{ID: uint32(i + 1), Node: uint32(i), Blocks: r.blocks, Live: gb(1), Class: c})
+		r.in.Disks = append(r.in.Disks, chunkstore.Disk{ID: uint32(i + 1), Node: uint32(i), Blocks: r.blocks, Live: gb(1)})
 	}
 	sp := spec(1, 8)
 	sp.MinLive, sp.DiskClass = new(1), pool
@@ -61,6 +61,7 @@ func (r *grantRun) conditions() *chunkstore.Conditions {
 // the copies lacking fall.
 func TestALeavingMemberGoesStuckAndClearsWhenItCopies(t *testing.T) {
 	r := reportRun(t, "", "", "", "")
+	r.run(2 * chunkstore.StuckAfter)
 	if err := r.ctl.Drain(1, true); err != nil {
 		t.Fatal(err)
 	}
@@ -115,26 +116,20 @@ func TestAReportOfUnfoundChunksBlocksItsPG(t *testing.T) {
 	}
 }
 
-// A disk the caller gives no class takes the class it reports, for placement and figures; a later
-// report naming another class, of that disk or of one the caller classed, moves no PG and changes
-// no figure.
-func TestAReportedClassIsSetOnce(t *testing.T) {
-	r := reportRun(t, "ssd", "ssd", "ssd", "")
-	if members(r.ctl.Table(), 3) != 0 {
-		t.Fatal("an unclassed disk holds a PG")
-	}
-	class := func(node uint32, c string) {
-		r.event(node, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 1, Disks: []chunkstore.DiskState{{Log: logOf(node), Fill: gb(1), Class: c}}}))
-	}
-	class(2, "ssd")
-	r.recover()
+// A disk's class is the one it joined the record with, for placement and figures; a restarted node
+// opening a disk under another class moves no PG and changes no figure.
+func TestADiskClassIsSetWhenItJoins(t *testing.T) {
+	r := reportRun(t, "ssd", "ssd", "ssd", "hdd")
 	f, _, _ := r.ctl.Capacity(1)
-	if members(r.ctl.Table(), 3) == 0 || !slices.ContainsFunc(f.Disks, func(d chunkstore.DiskFigures) bool { return d.ID == 3 }) {
-		t.Fatalf("disk 3, reported ssd, not used: figures %+v", f.Disks)
+	if members(r.ctl.Table(), 3) != 0 || slices.ContainsFunc(f.Disks, func(d chunkstore.DiskFigures) bool { return d.ID == 3 }) {
+		t.Fatalf("disk 3, of class hdd, used by an ssd pool: figures %+v", f.Disks)
+	}
+	if members(r.ctl.Table(), 1) == 0 || r.disk(1).Class != "ssd" {
+		t.Fatalf("disk 1 holds no PG, or its committed entry %+v has no class", r.disk(1))
 	}
 	table, figures := fmt.Sprint(r.ctl.Table().Pools[0].PGs), fmt.Sprint(*f)
-	class(2, "hdd")
-	class(0, "hdd")
+	r.classes = []string{"hdd", "ssd", "ssd"}
+	r.opened()
 	r.conditions()
 	f, _, _ = r.ctl.Capacity(1)
 	if got := fmt.Sprint(r.ctl.Table().Pools[0].PGs); got != table {
@@ -142,5 +137,25 @@ func TestAReportedClassIsSetOnce(t *testing.T) {
 	}
 	if got := fmt.Sprint(*f); got != figures {
 		t.Fatalf("a class flip changed the figures:\n%s\nwas\n%s", got, figures)
+	}
+}
+
+// A new leader steps before every disk of a classed pool has sent a heartbeat; the classes it
+// loaded with the record keep every PG where it was.
+func TestAFailoverKeepsAClassedPoolsPGs(t *testing.T) {
+	for _, heard := range []int{0, 1} {
+		r := reportRun(t, "ssd", "ssd", "ssd", "ssd")
+		table := fmt.Sprint(r.ctl.Table().Pools[0].PGs)
+		r.failover()
+		r.hearAll()
+		for n := range heard {
+			r.event(uint32(n), chunkstore.AppendReport(nil, &chunkstore.Report{ID: 1, Disks: []chunkstore.DiskState{{Log: logOf(uint32(n)), Fill: r.live[n]}}}))
+		}
+		r.opened()
+		for r.settle(r.inputs()) {
+		}
+		if got := fmt.Sprint(r.ctl.Table().Pools[0].PGs); got != table {
+			t.Fatalf("%d disks heard: a failover moved PGs:\n%s\nwas\n%s", heard, got, table)
+		}
 	}
 }

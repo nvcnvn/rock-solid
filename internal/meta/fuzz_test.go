@@ -256,7 +256,7 @@ func FuzzDecodeCtl(f *testing.F) {
 	}
 	add(ctlKey(CtlMembership, nil), bigEndian.AppendUint64(nil, 3))
 	for _, e := range []DiskEntry{
-		{RecordedDisk: chunkstore.RecordedDisk{ID: 1, Log: 0x11, Device: 0xd1, Up: true}},
+		{RecordedDisk: chunkstore.RecordedDisk{ID: 1, Log: 0x11, Device: 0xd1, Up: true, Class: "ssd"}},
 		{RecordedDisk: chunkstore.RecordedDisk{ID: 2, Log: 0x12, Device: 0xd2, Node: 1, Gone: true}},
 		{RecordedDisk: chunkstore.RecordedDisk{ID: 3, Log: 0x13, Device: 0xd2, Node: 1}, Age: AgeStep, Drain: true},
 	} {
@@ -295,7 +295,7 @@ func FuzzDecodeCtl(f *testing.F) {
 // A disk entry that decodes is never up and gone, or drained once gone, and encodes back to the same bytes.
 func FuzzDecodeDisk(f *testing.F) {
 	for _, e := range []DiskEntry{
-		{RecordedDisk: chunkstore.RecordedDisk{ID: 1, Log: 0x11, Device: 0xd1, Up: true}},
+		{RecordedDisk: chunkstore.RecordedDisk{ID: 1, Log: 0x11, Device: 0xd1, Up: true, Class: "ssd"}},
 		{RecordedDisk: chunkstore.RecordedDisk{ID: 2, Log: 0x12, Device: 0xd2, Node: 300}, Age: 7 * AgeStep, Drain: true},
 		{RecordedDisk: chunkstore.RecordedDisk{ID: 3, Log: 0x13, Device: 0xd2, Node: 1, Gone: true}},
 	} {

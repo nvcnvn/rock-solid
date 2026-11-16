@@ -49,7 +49,7 @@ func newSoleRun(t *testing.T, replicas, minLive, disks int) *soleRun {
 	a := &authority{pool: Pool{Replicas: replicas, MinLive: minLive, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 1},
 		down: map[uint32]core.Tick{}, drain: map[uint32]bool{}}
 	for n := range disks {
-		if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n)); err != nil {
+		if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n), ""); err != nil {
 			t.Fatal(err)
 		}
 	}
