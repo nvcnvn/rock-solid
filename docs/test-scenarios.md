@@ -6421,9 +6421,9 @@ replica's storage takes a snapshot at its applied index after each pass and comp
 entries below it, so the new replica, and any lagging voter, catches up from snapshots. The
 replaced replica is reconnected up to a second after the plan, mid-swap, in half the seeds, and a
 second after the swap in the rest. In half the seeds (`outgoing`), the leader that proposes the
-swap, once the replaced replica is reconnected, hands it its leadership, and every Raft message the
-replaced replica sends carrying the commit of the leave of the joint configuration is lost; when it
-then leads the leave, it applies its own removal with no follower learning of it, as in the
+swap, once the replaced replica is reconnected mid-swap, hands it its leadership, and every Raft
+message the replaced replica sends carrying the commit of the leave of the joint configuration is
+lost; when it then leads the leave, it applies its own removal with no follower learning of it, as in the
 [Voter replacement model](#voter-replacement-model)'s `ci-live-moved`. Every node renews its
 node-pair leases while it runs, whatever its replicas do, as a node does in production. A seed
 passes once the replaced replica reported itself removed and the new one applied a value proposed after the swap, and replays to the same trace and
@@ -6437,12 +6437,12 @@ history. After every step it checks the Raft runs' properties and:
   replaced one reports `Removed`.
 
 Planted, on runs that always draw `outgoing`, each of the voter model's two rules about a removed
-leader fails within 20 seeds: followers that never ask (`neg-no-support-ask`) leave the run without
+leader fails within 20 seeds, on those that reconnect the replaced replica mid-swap: followers that never ask (`neg-no-support-ask`) leave the run without
 a leader of the new configuration, so it never finishes, while the same seed finishes unplanted
 (`TestFollowersThatNeverAskKeepARemovedLeader`; 8 of the first 20 seeds); a removed leader that
 keeps serving lease reads (`neg-removed-keeps-lease`) breaks "no two replicas of a shard serve
 lease reads at overlapping times" (`TestARemovedLeaderThatKeepsReadingBreaksTheLeaseInvariant`;
-15 of the first 60 seeds).
+7 of the first 20 seeds).
 
 `TestVoterReplacementRegressionSeeds` keeps three seeds that found bugs: 6389, the lease property
 counting a follower's applies (above, under [Leader leases](#leader-leases)); 8218, a leader whose
