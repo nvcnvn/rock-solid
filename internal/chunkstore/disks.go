@@ -26,15 +26,14 @@ const (
 	StartFailed
 )
 
-// StartDevice is what a node does with a device whose store's recovery ended with err, nil once it serves, and for StartFormat the log ID to format it under.
+// StartDevice is what a node does with a device whose store's recovery ended with err, nil once it serves, and for StartFormat the log ID to format it under; rng must be seeded from the operating system at each process start, never from a fixed or configured seed, or a format cut short draws the same log ID again.
 func StartDevice(rng *core.Rand, err error) (DeviceStart, uint64) {
 	switch {
 	case err == nil:
 		return StartOpened, 0
 	case errors.Is(err, disklog.ErrNotFormatted):
 		// A format cut short leaves both superblocks zeros, so a new log ID per start keeps a
-		// crash from bringing one back. The node seeds rng from the OS at each start; two formats
-		// share an ID with odds about n²/2⁶⁵.
+		// crash from bringing one back; two formats share an ID with odds about n²/2⁶⁵.
 		return StartFormat, rng.Uint64()
 	}
 	return StartFailed, 0
