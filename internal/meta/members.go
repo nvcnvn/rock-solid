@@ -47,8 +47,8 @@ type HaltReport struct {
 
 // NodeReport is what a node's heartbeat tells the control-plane leader beside its disks' own
 // heartbeats: the format level its release writes, whether it holds metadata and, with role
-// meta, nothing else, the table epoch and session-table version it holds, the disks it opened and
-// its halted replicas.
+// meta, nothing else, the table epoch and session-table version it holds, the disks it opened, the
+// devices it left to the operator (chunkstore.StartFailed) and its halted replicas.
 type NodeReport struct {
 	Node     uint32
 	Release  uint32
@@ -57,7 +57,14 @@ type NodeReport struct {
 	Epoch    uint64
 	Sessions uint64
 	Opened   []OpenedDisk
+	Failed   []uint64
 	Halts    []HaltReport
+}
+
+// FailedDevice is a device a node reports failed, by its stable identity, for the operator.
+type FailedDevice struct {
+	Node   uint32
+	Device uint64
 }
 
 // nodeState is what the leader last heard from a node and when, and the resend round it last sent
@@ -71,6 +78,7 @@ type nodeState struct {
 	sent    uint64
 	sessV   uint64
 	halts   []Halt
+	failed  []uint64
 }
 
 // DiskEntry is a disk as the record commits it: Up and Gone as the record has them, DownSince unset, its age while down and not gone in whole AgeSteps, and its drain.
@@ -96,7 +104,7 @@ func (c *Control) Heartbeat(now core.Tick, nr *NodeReport, out *ControlOutput) e
 	for _, h := range nr.Halts {
 		n.halts = append(n.halts, Halt{Group: h.Group, ID: h.ID, Index: h.Index, Since: now - min(h.Age, now)})
 	}
-	n.sessV = nr.Sessions
+	n.sessV, n.failed = nr.Sessions, append(n.failed[:0], nr.Failed...)
 	if nr.Sessions < c.sess.Version {
 		out.SessionTables = append(out.SessionTables, nr.Node)
 	}
@@ -375,6 +383,17 @@ func (c *Control) metaNodes() []uint32 {
 		}
 	}
 	return ns
+}
+
+// FailedDevices is every device the nodes heard from report failed, by node.
+func (c *Control) FailedDevices() []FailedDevice {
+	var fs []FailedDevice
+	for _, n := range c.nodes {
+		for _, d := range n.failed {
+			fs = append(fs, FailedDevice{Node: n.id, Device: d})
+		}
+	}
+	return fs
 }
 
 func (c *Control) halts() []Halt {

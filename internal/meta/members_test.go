@@ -462,6 +462,26 @@ func TestADiskIsNotMarkedUpBeforeItsNodeReports(t *testing.T) {
 	}
 }
 
+// A device a node reports failed, with no log ID, is shown to the operator for as long as the node
+// reports it, and never joins the record.
+func TestAFailedDeviceIsShownAndNeverRecorded(t *testing.T) {
+	r := newCtlRun(t)
+	disks := r.ctl.Disks()
+	r.heartbeat(&NodeReport{Node: 2, Meta: true, Opened: []OpenedDisk{{Device: devOf(2), Log: logOf(2)}}, Failed: []uint64{0xbad}})
+	r.heartbeat(&NodeReport{Node: 9, Failed: []uint64{0xbad, 0xbad + 1}})
+	want := []FailedDevice{{Node: 2, Device: 0xbad}, {Node: 9, Device: 0xbad}, {Node: 9, Device: 0xbad + 1}}
+	if got := r.ctl.FailedDevices(); !slices.Equal(got, want) {
+		t.Fatalf("failed devices %+v, want %+v", got, want)
+	}
+	if r.propose(&ControlInputs{}) || !slices.Equal(r.ctl.Disks(), disks) {
+		t.Fatalf("a failed device changed the record: %+v", r.ctl.Disks())
+	}
+	r.heartbeat(&NodeReport{Node: 2, Meta: true, Opened: []OpenedDisk{{Device: devOf(2), Log: logOf(2)}}})
+	if got := r.ctl.FailedDevices(); !slices.Equal(got, want[1:]) {
+		t.Fatalf("after node 2 stopped reporting its failed device: %+v", got)
+	}
+}
+
 // A node not heard from for node_down_after is forgotten: the older release it ran no longer
 // holds back the format level.
 func TestANodeSilentForNodeDownAfterIsForgotten(t *testing.T) {
