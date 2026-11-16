@@ -93,7 +93,7 @@ type DiskEntry struct {
 // as silent, and a disk it opened joins the record. A behind node whose table the leader has not
 // resent since a failover or an error answer is added to out.Tables. A log the record refuses,
 // such as a cloned drive's or a replaced one's, or one of two disks reported on one device, is
-// the error.
+// the error, and its device is listed failed with those the node reports.
 func (c *Control) Heartbeat(now core.Tick, nr *NodeReport, out *ControlOutput) error {
 	c.begin(now)
 	i, ok := slices.BinarySearchFunc(c.nodes, nr.Node, func(n nodeState, id uint32) int { return cmp.Compare(n.id, id) })
@@ -117,10 +117,16 @@ func (c *Control) Heartbeat(now core.Tick, nr *NodeReport, out *ControlOutput) e
 		out.Tables = append(out.Tables, nr.Node)
 	}
 	var errs []error
+	refuse := func(device uint64, err error) {
+		errs = append(errs, err)
+		if !slices.Contains(n.failed, device) {
+			n.failed = append(n.failed, device)
+		}
+	}
 	for k, o := range nr.Opened {
 		onDevice := func(x OpenedDisk) bool { return x.Device == o.Device }
 		if slices.IndexFunc(nr.Opened, onDevice) != k || slices.ContainsFunc(nr.Opened[k+1:], onDevice) {
-			errs = append(errs, fmt.Errorf("meta: log %#x on node %d shares device %#x: %w", o.Log, nr.Node, o.Device, chunkstore.ErrLogRefused))
+			refuse(o.Device, fmt.Errorf("meta: log %#x on node %d shares device %#x: %w", o.Log, nr.Node, o.Device, chunkstore.ErrLogRefused))
 			continue
 		}
 		ds := c.rec.Disks()
@@ -128,7 +134,7 @@ func (c *Control) Heartbeat(now core.Tick, nr *NodeReport, out *ControlOutput) e
 			continue
 		}
 		if _, err := c.rec.Report(nr.Node, o.Device, o.Log, o.Class); err != nil {
-			errs = append(errs, fmt.Errorf("meta: log %#x on node %d: %w", o.Log, nr.Node, err))
+			refuse(o.Device, fmt.Errorf("meta: log %#x on node %d: %w", o.Log, nr.Node, err))
 		}
 	}
 	for _, o := range nr.Opened {
@@ -386,7 +392,8 @@ func (c *Control) metaNodes() []uint32 {
 	return ns
 }
 
-// FailedDevices is every device the nodes heard from report failed, by node.
+// FailedDevices is every device the nodes heard from report failed, or report opened under a log
+// the record refuses, by node.
 func (c *Control) FailedDevices() []FailedDevice {
 	var fs []FailedDevice
 	for _, n := range c.nodes {

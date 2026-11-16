@@ -24,8 +24,13 @@ type run struct {
 
 func newRun(t *testing.T, seed uint64, devices ...uint64) *run {
 	r := &run{t: t, n: New(Config{Node: 4, Release: 1, Ctls: []core.NodeID{ctl}, Group: group, Seed: seed}), ctx: core.Context{Now: 1, Pool: sim.NewPool(1<<20, 0)}}
-	for _, d := range devices {
+	var ds []meta.DiskAddr
+	for i, d := range devices {
 		r.n.Opened(meta.OpenedDisk{Device: d, Log: d << 8}, &r.out)
+		ds = append(ds, meta.DiskAddr{Disk: uint32(i + 1), Log: d << 8})
+	}
+	if len(ds) != 0 {
+		r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
 	}
 	return r
 }
@@ -492,8 +497,13 @@ func TestARemovedReplicaGetsNoTableAndLeavesTheReport(t *testing.T) {
 	}
 	r.out.Reset()
 	r.n.Opened(meta.OpenedDisk{Device: 11, Log: 0x99}, &r.out)
-	if nr := r.report(); len(nr.Opened) != 2 || nr.Opened[1].Log != 0x99 || nr.Sessions != 0 {
-		t.Fatalf("the device opened again reported %+v", nr)
+	if nr := r.report(); len(nr.Opened) != 2 || nr.Opened[1].Log != 0x99 || nr.Sessions != 2 {
+		t.Fatalf("the device opened again, its log not yet named, reported %+v", nr)
+	}
+	ds := []meta.DiskAddr{{Disk: 1, Log: 10 << 8}, {Disk: 3, Log: 0x99}}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	if nr := r.report(); nr.Sessions != 0 {
+		t.Fatalf("the device opened again, its log named, reported %+v", nr)
 	}
 }
 

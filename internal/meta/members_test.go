@@ -325,6 +325,9 @@ func TestADiskIsKnownByItsLogOnItsDevice(t *testing.T) {
 	if err := r.ctl.Heartbeat(r.now, &NodeReport{Node: 8, Opened: []OpenedDisk{{Device: 0xc, Log: a.Log}}}, &out); !errors.Is(err, chunkstore.ErrLogRefused) {
 		t.Fatalf("a cloned drive's log answered %v", err)
 	}
+	if got := r.ctl.FailedDevices(); !slices.Equal(got, []FailedDevice{{Node: 8, Device: 0xc}}) {
+		t.Fatalf("a refused log's device shown as %+v", got)
+	}
 }
 
 // A down mark commits as an age, rewritten each AgeStep: a new leader whose clock reads nothing

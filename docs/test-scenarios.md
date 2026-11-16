@@ -7893,7 +7893,8 @@ The node's machine, `internal/node`, fed events with no network, and its message
 | --- | --- |
 | A table pushed unasked | Handed to every replica with `answers` 0; the same or an older table hands nothing; a replica opened later gets the newest the node has |
 | A session table from a peer other than the control plane, with a huge version | Dropped: nothing handed, and the control plane's next table still counts as newer |
-| A heartbeat after a table reached the node | Reports the oldest version its replicas' stores hold, not the one received; a node with no replica reports the one received, safe while a store's fence table starts empty in memory |
+| A heartbeat after a table reached the node | Reports the oldest version its running replicas' stores hold, not the one received; a node with no replica running reports the one received, safe while a store's fence table starts empty in memory |
+| Two opened devices, a membership naming only the first's log, and a table at version 5 | The second runs no replica and the report says 5, the version the first holds: a device whose log the control plane refuses never pins the report (`TestAnUnnamedDeviceDoesNotPinTheReport`) |
 | A replica asks while a fetch is in flight | No second fetch; the answer hands each replica the ask its fetch covered, and the node fetches again for the asks made after it went out |
 | A fetch is unanswered after `Interval` | Fetched again under a new token; the old token's late answer is a table sent unasked |
 | The control plane's connection is lost 100 times while a fetch is in flight | No fetch until `FetchTimer` fires after `Interval`, so a driver in backoff cannot spin the loop |
@@ -7903,7 +7904,7 @@ The node's machine, `internal/node`, fed events with no network, and its message
 | A fetch reaches a new leader whose applied table lags a start the old leader committed | Unanswered until a session-table Txn of its own commits; a leader with nothing to commit commits the head's check alone, then answers (`TestAMachineThatHasNotSeenASessionStartAnswersNoFetch`, `internal/meta`) |
 | A report or session table across the wire | Decodes to what was sent; live IDs that do not rise, a zero ID or one at or above the next ID are malformed; fuzzed (`FuzzDecodeNodeReport`, `FuzzDecodeSessions`) |
 | A session start, its answer and a disk membership of 300 disks across the wire | Decode to what was sent; a membership whose disk IDs are zero or do not rise is malformed; fuzzed (`FuzzDecodeStarted`, `FuzzDecodeDisks`) |
-| Two replicas, one removed; then the device opened again under another log | After the removal a table goes to the other alone, the removed one's held version no longer pins the report, and the report names its device once, with the new log; before the removal it got every table and its version counted (`TestARemovedReplicaGetsNoTableAndLeavesTheReport`) |
+| Two replicas, one removed; then the device opened again under another log, then a membership naming it | After the removal a table goes to the other alone, the removed one's held version no longer pins the report, and the report names its device once, with the new log, its replica counted only once the membership names it; before the removal it got every table and its version counted (`TestARemovedReplicaGetsNoTableAndLeavesTheReport`) |
 | A disk membership from a voter, and one from a node that is no voter | The voter's handed on whole; the other dropped (`TestTheDiskMembershipIsHandedOn`) |
 | A blank device's format cut by a crash after each of its disk actions, then a start with another seed | The second start formats under a log ID of its own source, or opens the first's log once its format landed; the device is reported opened, with its device, log, size, reserve and class, only once a format settles (`TestTwoStartsOverAFormatCutShortDrawDifferentLogIDs`) |
 | A device whose block 0 and superblock copy hold junk | Reported failed, both blocks left as they were, and no replica runs whatever the membership says (`TestADeviceWithNoValidSuperblockFailsUntouched`) |
@@ -7951,7 +7952,8 @@ The rows are unit tests in `internal/node/node_test.go`, `internal/node/device_t
 - The report (`TestAFailedDeviceIsShownAndNeverRecorded`, `internal/meta`): failed devices
   reported by two nodes, one of them with no disk open, are shown by `Control.FailedDevices` by
   node and device, a proposal after them leaves the disk record unchanged, and a node's next report
-  without its failed device drops it from the list.
+  without its failed device drops it from the list. A device whose log the record refuses, a cloned
+  drive's, is listed too (`TestADiskIsKnownByItsLogOnItsDevice`).
 
 ## Shared network suite
 

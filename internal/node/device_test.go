@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
@@ -172,5 +173,42 @@ func TestTheReplicaStartsAsTheDiskTheMembershipNames(t *testing.T) {
 	}
 	if !reported {
 		t.Fatal("the replica never reported to its authority")
+	}
+}
+
+// A device whose log the membership never names, as a lost disk's log reported again is not,
+// runs no replica and leaves the node's report: the version the running replica holds is reported.
+func TestAnUnnamedDeviceDoesNotPinTheReport(t *testing.T) {
+	a := newDevRun(t, sim.NewDisk(devBlocks))
+	a.start(1)
+	a.settle()
+	b := newDevRun(t, sim.NewDisk(devBlocks))
+	b.start(2)
+	b.settle()
+	r := newRun(t, 1)
+	r.n.Opened(meta.OpenedDisk{Device: 1, Log: a.opened.Log}, &r.out)
+	r.n.Opened(meta.OpenedDisk{Device: 2, Log: b.opened.Log}, &r.out)
+	ds := []meta.DiskAddr{{Disk: 1, Log: a.opened.Log}}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	named := slices.Clone(r.out.Disks)
+	hs := r.table(0, chunkstore.SessionTable{Version: 5, Next: 9})
+	for dev, h := range hs {
+		run := a
+		if dev == 2 {
+			run = b
+		}
+		run.out.Reset()
+		run.d.Hand(&run.ctx, &h, &run.out)
+		run.d.Disks(&run.ctx, named, &run.out)
+		if run.d.Replica() != nil {
+			r.n.Held(dev, run.out.Held)
+			r.n.HeldEpoch(dev, run.out.Epoch)
+		}
+	}
+	if b.d.Replica() != nil {
+		t.Fatal("an unnamed device runs a replica")
+	}
+	if nr := r.report(); nr.Sessions != 5 {
+		t.Fatalf("the running replica holds 5, the report says %d", nr.Sessions)
 	}
 }

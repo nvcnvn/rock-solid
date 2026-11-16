@@ -56,18 +56,20 @@ func (o *Output) Reset() {
 	*o = Output{Actions: o.Actions[:0], Hands: o.Hands[:0]}
 }
 
-// replica is a device whose replica runs: the session version its store holds, the placement
-// epoch it holds, the newest ask it made, the ask the fetch in flight covers and the newest ask
-// answered.
+// replica is a device opened: its log, whether its replica runs, as it may once the node has
+// handed it a membership naming its log, the session version its store holds, the placement epoch
+// it holds, the newest ask it made, the ask the fetch in flight covers and the newest ask answered.
 type replica struct {
-	device                   uint64
+	device, log              uint64
+	runs                     bool
 	held, epoch              uint64
 	asked, covered, answered uint64
 }
 
-// Node is a storage node's machine. Its heartbeat reports the session version every replica's
-// store holds, which the control plane takes as their acknowledgement, and the placement epoch
-// every replica holds; a table only received does not count. A replica's ask for the session table is one fetch from the control plane at a time,
+// Node is a storage node's machine. Its heartbeat reports the session version every running
+// replica's store holds, which the control plane takes as their acknowledgement, and the placement
+// epoch every running replica holds; a table only received does not count. A device whose log no
+// membership names, as one the control plane refused, runs no replica and never pins the report. A replica's ask for the session table is one fetch from the control plane at a time,
 // and an answer stands for the asks made before its fetch went out, which it hands back by number.
 type Node struct {
 	cfg      Config
@@ -152,11 +154,11 @@ func (n *Node) Failed(device uint64) {
 	}
 }
 
-// Opened reports disk opened from then on, its replica running, and hands the replica the newest
-// session table the node has.
+// Opened reports disk opened from then on and hands its device the newest session table the node
+// has; its replica counts in the report once a membership names its log.
 func (n *Node) Opened(d meta.OpenedDisk, out *Output) {
 	n.opened = append(n.opened, d)
-	n.reps = append(n.reps, replica{device: d.Device})
+	n.reps = append(n.reps, replica{device: d.Device, log: d.Log})
 	if n.table.Version != 0 || n.table.Next != 0 {
 		out.Hands = append(out.Hands, Hand{Device: d.Device, Table: n.table})
 	}
@@ -252,6 +254,10 @@ func (n *Node) recv(ctx *core.Context, ev *core.Event, out *Output) {
 	case meta.KindDisks:
 		if n.disks, err = meta.DecodeDisks(ctx.Pool, &ev.Msg, n.disks); err == nil {
 			out.Disks = n.disks
+			for i := range n.reps {
+				r := &n.reps[i]
+				r.runs = r.runs || slices.ContainsFunc(n.disks, func(a meta.DiskAddr) bool { return a.Log == r.log })
+			}
 		}
 		return
 	}
@@ -304,11 +310,13 @@ func (n *Node) token() uint64 { return n.start | n.fetchSeq&0xffffffff }
 // heartbeat sends the control plane the node's report and arms the next.
 func (n *Node) heartbeat(ctx *core.Context, out *Output) {
 	nr := &n.report
-	// With no replica this reports the version only received, safe while a store's fence table
-	// starts empty in memory: a replica opened later is handed n.table before any write.
+	// With no replica running this reports the version only received, safe while a store's fence
+	// table starts empty in memory: a replica that starts later is handed n.table before any write.
 	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Epoch: n.epoch, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed}
 	for _, r := range n.reps {
-		nr.Sessions, nr.Epoch = min(nr.Sessions, r.held), min(nr.Epoch, r.epoch)
+		if r.runs {
+			nr.Sessions, nr.Epoch = min(nr.Sessions, r.held), min(nr.Epoch, r.epoch)
+		}
 	}
 	a := core.Action{Kind: core.ActNetSend, Peer: n.Ctl(), Reply: true}
 	if meta.EncodeNodeReport(ctx.Pool, n.cfg.Group, nr, &a.Msg) == nil {
