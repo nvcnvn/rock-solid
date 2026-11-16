@@ -6687,7 +6687,7 @@ The leader's side is in `internal/meta/grants_test.go`. The daemon's side (its a
 
 **[property]** The invariants, checked after every 10 ms step of `TestNoGrantedFlushIsRefusedForSpace` (1,000 seeds per commit, each run twice): no flush under a grant is refused for space; what the daemons in the session table can still land under their grants fits every member disk above the larger of its fill and `write_limit`; and every nonzero reply keeps (1 + k) × (the others' count + grant) + F ≤ g_d and 2 × (the others' count + grant) + F ≤ A. Each run has 6 to 10 daemons on pool 1 over 1 to 3 disks of 8 to 256 GiB at 60 to 88% fill, buffering within their grants and reuse budgets, writing through at `write_limit` and flushing mostly to one hot disk, with a cleaner freeing space; the tight run gives every daemon 3 MiB more of writes per 10 ms, every disk 8 GiB and ten times the deaths, so the daemons' own invariant, not only the leader's view, sees an overrun. `TestPlantedGrantBugsOverrun` plants each counting bug and sees it fail: a session counted after a failover at no more than it says it holds (seed 4 of the tight run, on what the daemons can land), and a lapsed session's grant dropped before its fence is acknowledged, in a session lapsing with a full grant while two others ask on a disk whose gap is three times the cap; the run's disks leave too much slack for that one to show. It plants two capping bugs too: grants capped by half of available only, not by the smallest gap (the tight run breaks what the daemons can land within 6 seeds; 415 of 500 seeds break it), and a shrink counted at its new value before a heartbeat echoes it, scripted as G11b (`shrinkRun`), since the seeded run's daemons never land past a gap under it in 500 seeds.
 
-**Capacity figures.** From the fills the disk heartbeats report (about 8 bytes per disk), each disk's size and log reserve from its node's report, and the per-pool data on each disk, the leader computes per pool the available, balanced, stranded-fraction and reprotectable figures and the conditions, with the [Pools](#pools) cases as inputs (`Control.Capacity`, checked in G7 and G13). A disk's class is the caller's, or else the first its heartbeat reports ([Blocked and unfound reports](#blocked-and-unfound-reports)); the per-pool data per disk still comes from the leader's caller until [Live blocks per pool](build-checklist.md#phase-4-embedded-metastore) puts it on the heartbeat.
+**Capacity figures.** From the fills the disk heartbeats report (about 8 bytes per disk), each disk's size and log reserve from its node's report, and the per-pool data on each disk, the leader computes per pool the available, balanced, stranded-fraction and reprotectable figures and the conditions, with the [Pools](#pools) cases as inputs (`Control.Capacity`, checked in G7 and G13). A disk's class is the one committed in its record entry when it joined ([Blocked and unfound reports](#blocked-and-unfound-reports)); the per-pool data per disk still comes from the leader's caller until [Live blocks per pool](build-checklist.md#phase-4-embedded-metastore) puts it on the heartbeat.
 
 **Simulator faults** (the seeded run):
 
@@ -6755,16 +6755,26 @@ a `Watcher` on an authority node of their own.
 - A PG stopped below `min_live`: once `Stuck`, `Blocked` shows its count as unknown, not 0, and its
   candidates (`TestABlockedPGNamesItsDisks`, `min_live` 2); with no member left to return, no
   candidate (`TestTwoDisksLostTogetherStayStopped`).
-- On the leader: a drained disk's PG with no active report for its interval goes `Stuck` and
-  `Blocked`, stopped, after `stuck_after`; its primary's report of copies lacking makes it no longer
-  stopped, and a fall in them clears `Stuck` (`TestALeavingMemberGoesStuckAndClearsWhenItCopies`).
-  A report of 2 unfound gives `Blocked` with 2, cleared by a report of none
-  (`TestAReportOfUnfoundChunksBlocksItsPG`).
-- A report for a PG or pool the table does not have, after a split or from a stale table, is dropped,
-  not a panic, and the leader forgets it (same test, `TestStuck`).
-- A disk the caller gives no class takes the first class it reports; a later report naming another
-  class, of that disk or of one the caller classed, moves no PG and changes no capacity figure
-  (`TestAReportedClassIsSetOnce`).
+- A member back from a short outage with recovery held: its primary reports the 3 writes it missed
+  as copies lacking and the PG goes `Stuck`; once recovery copies them the count falls to 0 and
+  `Stuck` clears (`TestCopiesLackingFallAndClearStuck`).
+- On the leader, its clock well past `stuck_after`: a drained disk's PG is not `Stuck` at once; with
+  no active report for its interval it goes `Stuck` and `Blocked`, stopped, after `stuck_after`; its
+  primary's report of copies lacking makes it no longer stopped, and a fall in them clears `Stuck`
+  (`TestALeavingMemberGoesStuckAndClearsWhenItCopies`). A report of 2 unfound gives `Blocked` with
+  2, cleared by a report of none (`TestAReportOfUnfoundChunksBlocksItsPG`).
+- A report from the primary of an older interval, heard after the newer one's, is dropped, and an
+  active report of an interval the table has moved past counts as no active primary
+  (`TestStaleIntervalReports`).
+- A member down makes its PG `Stuck` after `stuck_after`; a member in `maintenance` does not, though
+  its PG reports copies lacking (`TestMaintenanceIsNotStuckButDownIs`).
+- A report for a PG or pool the table does not have, after a split or from a stale table, or heard
+  before the first step, is dropped, not a panic; the watcher forgets the PGs a shrunk table no
+  longer has (`TestAReportOfUnfoundChunksBlocksItsPG`, `TestStuck`).
+- A disk's class is the one it joined the record with, committed in its entry: a restarted node
+  opening it under another class moves no PG and changes no capacity figure
+  (`TestADiskClassIsSetWhenItJoins`), and a new leader stepping before any disk, or only one, has
+  sent a heartbeat keeps every PG of a classed pool where it was (`TestAFailoverKeepsAClassedPoolsPGs`).
 
 ## Session fencing on storage nodes
 

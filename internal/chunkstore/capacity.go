@@ -400,37 +400,42 @@ type pgWatch struct {
 	lacking  uint32
 }
 
-func (w *Watcher) pg(pg core.PGID) *pgWatch {
-	i, ok := slices.BinarySearchFunc(w.pgs, pg, func(x pgWatch, pg core.PGID) int {
+func (w *Watcher) find(pg core.PGID) (int, bool) {
+	return slices.BinarySearchFunc(w.pgs, pg, func(x pgWatch, pg core.PGID) int {
 		return cmp.Or(cmp.Compare(x.pg.Pool, pg.Pool), cmp.Compare(x.pg.Index, pg.Index))
 	})
-	if !ok {
-		w.pgs = slices.Insert(w.pgs, i, pgWatch{pg: pg})
-	}
-	return &w.pgs[i]
 }
 
-// Hear keeps each PG's latest report from the primary of its newest interval.
+// Hear keeps each PG's latest report from the primary of its newest interval, of the PGs Watch has
+// seen; a report of any other is dropped, and the next heartbeat repeats it.
 func (w *Watcher) Hear(ls []LeadState) {
 	for _, l := range ls {
-		if x := w.pg(l.PG); !x.heard || l.Interval >= x.lead.Interval {
-			x.lead, x.heard = l, true
+		if i, ok := w.find(l.PG); ok {
+			if x := &w.pgs[i]; !x.heard || l.Interval >= x.lead.Interval {
+				x.lead, x.heard = l, true
+			}
 		}
 	}
 }
 
-// Watch feeds cond's Watch at now from pt, the pool's committed table, and the reports heard. A PG needs copying while it has a leaving member or one not up, its table records no recovered report for its current interval, or its primary reports copies lacking; it copied when the copies lacking fall within one interval. A PG whose current interval no active primary reports is stopped, its count unknown.
+// Watch feeds cond's Watch at now from pt, the pool's committed table, and the reports heard. A PG needs copying while it has a leaving or down member or, with no member in maintenance, its table records no recovered report for its current interval or its primary reports copies lacking; it copied when the copies lacking fall within one interval. A PG whose current interval no active primary reports is stopped, its count unknown.
 func (w *Watcher) Watch(now core.Tick, pt *PoolTable, cond *Conditions) {
 	w.copying = w.copying[:0]
 	for j := range pt.PGs {
 		e := &pt.PGs[j]
-		x := w.pg(core.PGID{Pool: pt.ID, Index: uint32(j)})
+		id := core.PGID{Pool: pt.ID, Index: uint32(j)}
+		i, ok := w.find(id)
+		if !ok {
+			w.pgs = slices.Insert(w.pgs, i, pgWatch{pg: id})
+		}
+		x := &w.pgs[i]
 		active := x.heard && x.lead.Active && x.lead.Interval == e.Interval
 		var lacking, unfound uint32
 		if active {
 			lacking, unfound = x.lead.Lacking, x.lead.Unfound
 		}
-		needs := !e.Recovered || lacking > 0 || slices.ContainsFunc(e.Members, func(m Member) bool { return m.Leaving || m.Mark != MarkUp })
+		maint := slices.ContainsFunc(e.Members, func(m Member) bool { return m.Mark == MarkMaint })
+		needs := slices.ContainsFunc(e.Members, func(m Member) bool { return m.Leaving || m.Mark == MarkDown }) || !maint && (!e.Recovered || lacking > 0)
 		if needs && !x.needs {
 			x.since = now
 		}
@@ -452,7 +457,7 @@ func (w *Watcher) Watch(now core.Tick, pt *PoolTable, cond *Conditions) {
 	cond.Watch(now, w.copying, pt)
 }
 
-// Forget drops the PGs t does not have, which a report may name after a split or from a stale table.
+// Forget drops the PGs t does not have.
 func (w *Watcher) Forget(t *Table) {
 	w.pgs = slices.DeleteFunc(w.pgs, func(x pgWatch) bool {
 		p := t.pool(x.pg.Pool)

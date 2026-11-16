@@ -517,6 +517,31 @@ func TestStayKeepsTheMissingMember(t *testing.T) {
 	}
 }
 
+// A member back from a short outage lacks the writes it missed: with recovery held, its primary
+// reports them as copies lacking and the PG goes Stuck; once recovery copies them the count falls
+// and Stuck clears.
+func TestCopiesLackingFallAndClearStuck(t *testing.T) {
+	r, _, _ := refillRun(t, 2, 1, 5, nil, "")
+	r.watch()
+	d2 := r.members()[1].Disk
+	r.recovery(false)
+	r.lose(d2)
+	r.tick(2_000_000)
+	for i := range uint32(3) {
+		r.c.until(r.c.write(pg0, chunkIn(pg0, 2+i, 0), 0, bytes.Repeat([]byte{0x22}, core.BlockSize)))
+	}
+	r.back(d2)
+	r.tick(StuckAfter + 2_000_000)
+	if l := r.w.pgs[0].lead; !l.Active || l.Lacking != 3 || !slices.Equal(r.cond.Stuck, []uint32{0}) {
+		t.Fatalf("with recovery held: report %+v, Stuck %v, want 3 copies lacking and PG 0 Stuck", l, r.cond.Stuck)
+	}
+	r.recovery(true)
+	r.tick(10_000_000)
+	if l := r.w.pgs[0].lead; l.Lacking != 0 || len(r.cond.Stuck) != 0 {
+		t.Fatalf("once recovery copied: report %+v, Stuck %v", l, r.cond.Stuck)
+	}
+}
+
 // The two old disks of a rep2 pool out of reach with the PG still serving, by a min_live of 1: X, whole on both, reads unfound, and the pool names both as candidates, the leaving one too, for an operator to bring back. With min_live 2 the PG stops instead, its count unknown, and names them once stuck.
 func TestABlockedPGNamesItsDisks(t *testing.T) {
 	for _, minLive := range []int{1, 2} {
