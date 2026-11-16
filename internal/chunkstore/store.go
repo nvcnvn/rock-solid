@@ -2251,14 +2251,10 @@ func (s *Store) mapItem(it *item) {
 
 // unmappedLive takes a gated item's blocks out of its segment's live count while the index does not map it (sign -1), or puts them back as it does (+1): the log counts a record's blocks live once durable.
 func (s *Store) unmappedLive(it *item, sign int) {
-	n := 0
-	if it.entry.Kind == disklog.EntryWrite {
-		n = int(it.entry.Count)
-	}
-	if n == 0 {
+	if it.entry.Kind != disklog.EntryWrite && it.entry.Kind != disklog.EntrySlot || it.entry.Count == 0 {
 		return
 	}
-	if err := s.log.AddLive(uint32(uint64(it.lba)/uint64(s.sb.SegmentBlocks)), sign*n); err != nil {
+	if err := s.log.AddLive(uint32(uint64(it.lba)/uint64(s.sb.SegmentBlocks)), sign*int(it.entry.Count)); err != nil {
 		panic("chunkstore: the usage table refused a gated item's count: " + err.Error())
 	}
 }

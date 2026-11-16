@@ -314,3 +314,27 @@ func TestAMemberThatNeverAsksKeepsItsReplayedWritesGated(t *testing.T) {
 		t.Fatalf("memberNoAsk: the restarted member maps X %v, keeps %v gated", mapped, gated)
 	}
 }
+
+// A whole chunk a member wrote to a slot, which replay then holds, counts live in its record's segment once a decision
+// maps it, so a later overwrite takes its blocks back out.
+func TestAReplayHeldSlotWriteCountsOnceMapped(t *testing.T) {
+	h := newHarnessOn(t, testConfig(), slotGeometry)
+	c := chunk(2)
+	h.sync(h.persist(0, 1, 2, nil))
+	v := MakeVersion(2, 1)
+	h.sync(h.memberWrite(c, 0, core.BlocksPerChunk, v, 0xaa))
+	if got := h.s.Log().SlotsInUse(nil); len(got) != 1 {
+		t.Fatalf("the whole chunk took slots %v", got)
+	}
+	h.inv.Off(invReplay)
+	restart(h)
+	if got := h.s.Unsettled(nil); !slices.Contains(got, c) {
+		t.Fatalf("replay left %v gated", got)
+	}
+	h.sync(h.persist(0, 1, 3, nil))
+	h.settleChunk(c, v)
+	h.settle()
+	h.holds()
+	h.sync(h.memberWrite(c, 0, 4, MakeVersion(3, 1), 0xbb))
+	h.holds()
+}
