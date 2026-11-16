@@ -419,3 +419,31 @@ func TestANodeMovesAtMostOnceAnInterval(t *testing.T) {
 		t.Fatal("a voter naming itself moved the node")
 	}
 }
+
+// The heartbeat reports the oldest placement epoch the replicas hold, so after a failover the
+// leader resends the whole table only to a node behind it (Control.Heartbeat).
+func TestTheHeartbeatReportsTheEpochEveryReplicaHolds(t *testing.T) {
+	r := newRun(t, 1, 10, 11)
+	tbl := chunkstore.Table{Epoch: 5}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, m) })
+	if nr := r.report(); nr.Epoch != 0 {
+		t.Fatalf("a table no replica holds yet reported as epoch %d", nr.Epoch)
+	}
+	r.n.HeldEpoch(10, 5)
+	r.n.HeldEpoch(11, 4)
+	if nr := r.report(); nr.Epoch != 4 {
+		t.Fatalf("epochs 5 and 4 held reported as %d", nr.Epoch)
+	}
+	r.n.HeldEpoch(11, 5)
+	r.n.HeldEpoch(11, 3)
+	if nr := r.report(); nr.Epoch != 5 {
+		t.Fatalf("epoch 5 held by every replica reported as %d", nr.Epoch)
+	}
+
+	bare := newRun(t, 1)
+	d := chunkstore.Delta{Epoch: 6}
+	bare.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDelta(pool, group, &d, m) })
+	if nr := bare.report(); nr.Epoch != 6 {
+		t.Fatalf("a node with no replica reports epoch %d", nr.Epoch)
+	}
+}

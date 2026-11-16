@@ -55,17 +55,18 @@ func (o *Output) Reset() {
 	*o = Output{Actions: o.Actions[:0], Hands: o.Hands[:0]}
 }
 
-// replica is a device whose replica runs: the session version its store holds, the newest ask it
-// made, the ask the fetch in flight covers and the newest ask answered.
+// replica is a device whose replica runs: the session version its store holds, the placement
+// epoch it holds, the newest ask it made, the ask the fetch in flight covers and the newest ask
+// answered.
 type replica struct {
 	device                   uint64
-	held                     uint64
+	held, epoch              uint64
 	asked, covered, answered uint64
 }
 
 // Node is a storage node's machine. Its heartbeat reports the session version every replica's
-// store holds, which the control plane takes as their acknowledgement; a table only received does
-// not count. A replica's ask for the session table is one fetch from the control plane at a time,
+// store holds, which the control plane takes as their acknowledgement, and the placement epoch
+// every replica holds; a table only received does not count. A replica's ask for the session table is one fetch from the control plane at a time,
 // and an answer stands for the asks made before its fetch went out, which it hands back by number.
 type Node struct {
 	cfg      Config
@@ -81,12 +82,13 @@ type Node struct {
 	report   meta.NodeReport
 	// ctl is the voter the node talks to, moveAt when it may move to another, tableAt when it may
 	// fetch the placement table again, and placed and delta the last placement table and delta it
-	// received.
+	// received, and epoch the newest epoch received.
 	ctl     int
 	moveAt  core.Tick
 	tableAt core.Tick
 	placed  chunkstore.Table
 	delta   chunkstore.Delta
+	epoch   uint64
 }
 
 // Ctl is the control-plane voter the node talks to.
@@ -165,6 +167,14 @@ func (n *Node) Held(device, v uint64) {
 	}
 }
 
+// HeldEpoch records that the replica on device holds placement epoch e, as its SetTable or
+// ApplyDelta left it.
+func (n *Node) HeldEpoch(device, e uint64) {
+	if r := n.replica(device); r != nil {
+		r.epoch = max(r.epoch, e)
+	}
+}
+
 // Ask takes a replica's FetchSessions, ask, and fetches the table unless a fetch is in flight;
 // that one's answer leaves ask unanswered, and the node fetches again.
 func (n *Node) Ask(ctx *core.Context, device, ask uint64, out *Output) {
@@ -216,12 +226,12 @@ func (n *Node) recv(ctx *core.Context, ev *core.Event, out *Output) {
 		return
 	case meta.KindTable:
 		if n.placed, err = meta.DecodeTable(ctx.Pool, &ev.Msg); err == nil {
-			out.Table, n.tableAt = &n.placed, 0
+			out.Table, n.tableAt, n.epoch = &n.placed, 0, max(n.epoch, n.placed.Epoch)
 		}
 		return
 	case meta.KindDelta:
 		if n.delta, err = meta.DecodeDelta(ctx.Pool, &ev.Msg); err == nil {
-			out.Delta, n.tableAt = &n.delta, 0
+			out.Delta, n.tableAt, n.epoch = &n.delta, 0, max(n.epoch, n.delta.Epoch)
 		}
 		return
 	}
@@ -276,9 +286,9 @@ func (n *Node) heartbeat(ctx *core.Context, out *Output) {
 	nr := &n.report
 	// With no replica this reports the version only received, safe while a store's fence table
 	// starts empty in memory: a replica opened later is handed n.table before any write.
-	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed}
+	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Epoch: n.epoch, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed}
 	for _, r := range n.reps {
-		nr.Sessions = min(nr.Sessions, r.held)
+		nr.Sessions, nr.Epoch = min(nr.Sessions, r.held), min(nr.Epoch, r.epoch)
 	}
 	a := core.Action{Kind: core.ActNetSend, Peer: n.Ctl(), Reply: true}
 	if meta.EncodeNodeReport(ctx.Pool, n.cfg.Group, nr, &a.Msg) == nil {

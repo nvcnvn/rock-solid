@@ -7724,6 +7724,7 @@ The rows without a test named are unit tests in `internal/meta/ctlhost_test.go`.
 | Five losses of the only voter, and that voter naming no leader | No move, so no replica is re-pointed |
 | Nine losses and nine redirects naming no leader within one `Interval` at a three-voter node; a loss an `Interval` later; a voter naming itself | One move; one more; none |
 | A placement table or delta from a voter, and one from a node that is no voter | Handed on for every replica; dropped |
+| A heartbeat after a table reached the node, then with replicas holding epochs 5 and 4, then both 5; a node with no replica after a delta of epoch 6 | Reports epoch 0, 4, 5 and 6: the oldest its replicas hold, so a leader after a failover resends the whole table only to a node behind it |
 | Two replicas ask for the table in one pass, then again an interval later, then after a table arrived | One fetch, one more, then one at once |
 
 ## Storage node session wiring
