@@ -1705,7 +1705,8 @@ Suspend(n) ==
 \* On resume CLOCK_BOOTTIME has gained the sleep, possibly up to 1 s short,
 \* and the loop delivers Resumed, which ends every lease the node holds and
 \* draws a new run ID. With "hide", a sleep under 1 s may gain nothing and
-\* deliver no Resumed, as when the kernel counts it in whole seconds.
+\* deliver no Resumed, as when the kernel counts it in whole seconds; as every
+\* suspend here lasts whole seconds, one of exactly 1 s stands for it.
 Wake(n) ==
     /\ Clocks
     /\ frz[n] = "susp"
@@ -1715,7 +1716,7 @@ Wake(n) ==
           /\ hl' = IF Bug("NoEndOnResume") THEN hl ELSE EndAll(n)
           /\ runId' = [runId EXCEPT ![n] = @ + 1]
        \/ /\ "hide" \in plan.f
-          /\ boot[n] - suspAt[n] < HB * bootR[n]
+          /\ boot[n] - suspAt[n] <= HB * bootR[n]
           /\ boot' = [boot EXCEPT ![n] = suspAt[n]]
           /\ UNCHANGED <<hl, runId>>
     /\ frz' = [frz EXCEPT ![n] = "run"]
@@ -2679,9 +2680,7 @@ RaftPartition == [Plan(<<>>, <<>>, {"raft", "cut", "heal", "fast"}) EXCEPT !.t =
 \* deep-slow at 3 nodes, since with the others at 4 nodes it passed 108 million
 \* states in 4 hours. ci-hide checks the hidden suspend apart, so that a
 \* negative variant of LeasePlans that also drops the margin for one fails
-\* on its own rule. No variant drops the margin alone: with it gone, neither
-\* ci-hide's plan nor the same plan with a partition shows an overrun within
-\* ci's budget.
+\* on its own rule; neg-no-resume-margin drops the margin on ci-hide's plan.
 LeasePlans == {Steady, Handover, HandoverStep, HandoverSuspend, HandoverStop,
                HandoverRestart, HandoverCut, Maintenance, RaftTransfer, RaftPartition}
 RebootPlans == {HandoverReboot}
