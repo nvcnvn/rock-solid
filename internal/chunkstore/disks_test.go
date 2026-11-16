@@ -2,7 +2,11 @@ package chunkstore
 
 import (
 	"errors"
+	"fmt"
 	"testing"
+
+	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
 // Each disk is known by the log ID it reports: a disk back from a restart keeps its ID, a disk formatted again or replaced joins as a new disk under a new ID while the one it replaced stays down with its log gone, and a log ID already up on another device is refused.
@@ -61,5 +65,27 @@ func TestADiskDownCanBeDeclaredLost(t *testing.T) {
 	}
 	if _, err := r.Report(1, 0, 0xa, ""); !errors.Is(err, ErrLogRefused) {
 		t.Fatalf("a lost disk reported again: %v", err)
+	}
+}
+
+// A device whose block 0 and copy both read as zeros is formatted under a new log ID, drawn again
+// at each start; one that opened is reported; anything else is reported failed and never written.
+func TestADeviceIsFormattedOnlyWhenBothSuperblocksAreZeros(t *testing.T) {
+	rng := core.NewRand(1)
+	if act, _ := StartDevice(rng, nil); act != StartOpened {
+		t.Fatalf("an opened device: %v", act)
+	}
+	seen := map[uint64]bool{}
+	for start := range 100 {
+		act, log := StartDevice(rng, fmt.Errorf("open: %w", disklog.ErrNotFormatted))
+		if act != StartFormat || seen[log] {
+			t.Fatalf("start %d of a blank device: %v under log %#x, drawn before: %v", start, act, log, seen[log])
+		}
+		seen[log] = true
+	}
+	for _, err := range []error{disklog.ErrUnrecognized, &disklog.CopyOnlyError{Block0: disklog.ErrUnrecognized}, core.DiskIO, disklog.ErrCorrupt} {
+		if act, _ := StartDevice(rng, err); act != StartFailed {
+			t.Fatalf("a device that failed with %v: %v", err, act)
+		}
 	}
 }

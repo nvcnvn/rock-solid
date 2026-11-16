@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
 // ErrLogRefused reports a disk whose log ID is already up on another node or device, as a cloned drive's is, or belongs to a disk whose log was replaced.
@@ -12,6 +13,32 @@ var ErrLogRefused = errors.New("chunkstore: log ID refused")
 
 // ErrLostRefused reports a declaration that a disk is lost for a disk the record does not know, or one that is up.
 var ErrLostRefused = errors.New("chunkstore: disk not down")
+
+// DeviceStart is what a storage node does at start with one of its devices.
+type DeviceStart uint8
+
+const (
+	// StartOpened reports the device's log opened.
+	StartOpened DeviceStart = iota
+	// StartFormat formats the device under a new log ID, then reports it opened.
+	StartFormat
+	// StartFailed reports the device failed and leaves it to the operator, never formatting or writing it.
+	StartFailed
+)
+
+// StartDevice is what a node does with a device whose store's recovery ended with err, nil once it serves, and for StartFormat the log ID to format it under.
+func StartDevice(rng *core.Rand, err error) (DeviceStart, uint64) {
+	switch {
+	case err == nil:
+		return StartOpened, 0
+	case errors.Is(err, disklog.ErrNotFormatted):
+		// A format cut short leaves both superblocks zeros, so a new log ID per start keeps a
+		// crash from bringing one back. The node seeds rng from the OS at each start; two formats
+		// share an ID with odds about n²/2⁶⁵.
+		return StartFormat, rng.Uint64()
+	}
+	return StartFailed, 0
+}
 
 // RecordedDisk is a disk as the control plane records it: its ID, the log ID it reported, the node and the device it was last reported on, whether it is up or else since when it is down, and whether its log is gone, a new log having been reported in its place, and its class, set when it joins. Device is the drive's stable identity, such as its WWN, never its slot on the node, which a restart may renumber.
 type RecordedDisk struct {
