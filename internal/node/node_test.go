@@ -130,6 +130,24 @@ func TestAPushedTableGoesToEveryReplicaUnasked(t *testing.T) {
 	}
 }
 
+// A session table from any peer but the control plane is dropped: one with a huge version would
+// otherwise pin the node's table and every store's, since no real table would count as newer.
+func TestATableFromAnotherPeerIsDropped(t *testing.T) {
+	r := newRun(t, 1, 10)
+	tok := r.ask(10, 1)
+	ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 3}}
+	if err := meta.EncodeSessions(r.ctx.Pool, group, tok, &chunkstore.SessionTable{Version: 1 << 60, Next: 1 << 60}, &ev.Msg); err != nil {
+		t.Fatal(err)
+	}
+	r.event(ev)
+	if len(r.out.Hands) != 0 {
+		t.Fatalf("another peer's table handed %+v", r.out.Hands)
+	}
+	if hs := r.table(tok, chunkstore.SessionTable{Version: 2, Next: 5}); hs[10].Answers != 1 || hs[10].Table.Version != 2 {
+		t.Fatalf("the control plane's answer handed %+v", hs)
+	}
+}
+
 func TestTheHeartbeatReportsTheVersionEveryReplicaHolds(t *testing.T) {
 	r := newRun(t, 1, 10, 11)
 	r.table(0, chunkstore.SessionTable{Version: 2, Next: 5})

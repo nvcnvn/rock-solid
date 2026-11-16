@@ -131,9 +131,9 @@ func (n *Node) Ask(ctx *core.Context, device, ask uint64, out *Output) {
 	}
 }
 
-// OnEvent takes a session table from the control plane or a timer. A lost connection to the
-// control plane leaves the fetch to FetchTimer: while the driver backs off, each send fails at once
-// with another loss, and a resend on each would spin the loop.
+// OnEvent takes a session table from the control plane, dropping one from any other peer, or a
+// timer. A lost connection to the control plane leaves the fetch to FetchTimer: while the driver
+// backs off, each send fails at once with another loss, and a resend on each would spin the loop.
 func (n *Node) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	switch ev.Kind {
 	case core.EvNetRecv:
@@ -153,7 +153,7 @@ func (n *Node) recv(ctx *core.Context, ev *core.Event, out *Output) {
 	defer free(ctx, &ev.Msg)
 	group, kind, token, ok := meta.Peek(&ev.Msg)
 	var t chunkstore.SessionTable
-	if !ok || group != n.cfg.Group || kind != meta.KindSessions || meta.DecodeSessions(ctx.Pool, &ev.Msg, &t) != nil {
+	if !ok || ev.Peer != n.cfg.Ctl || group != n.cfg.Group || kind != meta.KindSessions || meta.DecodeSessions(ctx.Pool, &ev.Msg, &t) != nil {
 		return
 	}
 	newer := t.Version > n.table.Version || t.Version == n.table.Version && t.Next > n.table.Next
