@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"encoding/binary"
 	"errors"
 	"slices"
 	"testing"
@@ -309,5 +310,101 @@ func TestACommittedTableReachesEveryNode(t *testing.T) {
 	got, err := DecodeTable(r.pool, &r.sent[0].Msg)
 	if err != nil || got.Epoch != r.h.Control().Table().Epoch || len(got.Pools) != 1 {
 		t.Fatalf("a table fetch got %+v, %v", got, err)
+	}
+	free(&core.Context{Pool: r.pool}, &r.sent[0].Msg)
+	r.sent = r.sent[:0]
+	r.report(&NodeReport{Node: 2})
+	r.report(&NodeReport{Node: 3, Epoch: got.Epoch})
+	if len(r.sent) != 1 || r.sent[0].Peer != (core.NodeID{Node: 2, Loop: 1}) {
+		t.Fatalf("heartbeats behind and current after a failover got %+v; only the one behind gets the table", r.sent)
+	}
+	if got, err := DecodeTable(r.pool, &r.sent[0].Msg); err != nil || got.Epoch != r.h.Control().Table().Epoch {
+		t.Fatalf("the node behind got %+v, %v", got, err)
+	}
+}
+
+// groupMsg frames a Raft message for group as raftshard's wire does.
+func groupMsg(t *testing.T, group uint64, m raftpb.Message) core.Msg {
+	var msg core.Msg
+	msg.Body[0] = core.ProtoGroup
+	binary.LittleEndian.PutUint64(msg.Body[1:], group)
+	n, err := m.MarshalTo(msg.Body[10:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg.Len, msg.Buf = uint16(10+n), core.NoBuf
+	return msg
+}
+
+// A replica that stops leading drops its Control: a heartbeat of a later term deposes the lone
+// voter, and a fetch then gets the leader it knows instead of an answer.
+func TestADeposedLeaderDropsItsControl(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.recv(core.NodeID{Node: 7}, groupMsg(t, hostGroup, raftpb.Message{Type: raftpb.MsgHeartbeat, From: 2, To: 1, Term: r.h.shard.Raft().Term() + 1}))
+	if r.h.Control() != nil {
+		t.Fatal("a deposed leader kept its Control")
+	}
+	r.sent = r.sent[:0]
+	var m core.Msg
+	if err := EncodeSessionFetch(r.pool, hostGroup, 1, &m); err != nil {
+		t.Fatal(err)
+	}
+	r.recv(hostNode, m)
+	if len(r.sent) != 1 || r.sent[0].Peer != hostNode {
+		t.Fatalf("a fetch at a deposed leader answered %+v", r.sent)
+	}
+	if _, _, err := DecodeLeader(r.pool, &r.sent[0].Msg); err != nil {
+		t.Fatalf("a fetch at a deposed leader got no leader: %v", err)
+	}
+}
+
+// A leader whose lease does not run gets no Control: the helper's group leads without leases.
+func TestALeaderWithoutItsLeaseHasNoControl(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	c.heartbeat()
+	h := &CtlHost{shard: c.n[l].s, sv: NewServer(), id: uint64(l) + 1, group: 5}
+	ctx := c.ctx(l)
+	if h.shard.Raft().Leader() != h.id || h.shard.Raft().LeaseRead(&ctx) {
+		t.Fatal("replica does not lead, or has a lease")
+	}
+	var m core.Msg
+	_ = EncodeSessionFetch(c.n[l].pool, 5, 1, &m)
+	var out CtlHostOutput
+	h.OnEvent(&ctx, &core.Event{Kind: core.EvNetRecv, Peer: hostNode, Msg: m}, &out)
+	if h.Control() != nil {
+		t.Fatal("a leader without its lease read a Control")
+	}
+}
+
+// A replica's report reaches the Control: its disk's fill is taken.
+func TestAReplicaReportReachesTheControl(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.report(&NodeReport{Node: hostNode.Node, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20}}})
+	r.run(StepInterval * 3)
+	var m core.Msg
+	if err := chunkstore.Attach(r.pool, &m, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 1, Disks: []chunkstore.DiskState{{Log: 0x77, Fill: 1234}}}), core.NoBuf); err != nil {
+		t.Fatal(err)
+	}
+	r.recv(hostNode, m)
+	c := r.h.Control()
+	if id := c.diskOfLog(0x77); id == 0 || c.diskFill(id).live != 1234 {
+		t.Fatalf("the report's fill was not taken: disk %d", id)
+	}
+}
+
+// A node's message for another group is dropped, its node not recorded.
+func TestAMessageOfAnotherGroupIsDropped(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	var m core.Msg
+	if err := EncodeNodeReport(r.pool, hostGroup+1, &NodeReport{Node: hostNode.Node}, &m); err != nil {
+		t.Fatal(err)
+	}
+	r.recv(hostNode, m)
+	if len(r.h.nodes) != 0 {
+		t.Fatalf("a report for another group was taken: %v", r.h.nodes)
 	}
 }
