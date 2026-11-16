@@ -698,9 +698,9 @@ func TestALeadThatLeftStillRecordsItsRecovery(t *testing.T) {
 }
 
 // Primary 3's recovery write of the chunk it lacks waits on its member and then fails, as when a
-// write of the chunk ordered before it fails, and a table moves the primary: the store still lands
-// the write, clearing the chunk's listing, so its answer still makes the record (the primary-change
-// run's seed 15 found it).
+// write of the chunk ordered before it fails, and a table moves the primary: demotion leaves the
+// write gated, and the next interval's decision, which lists the chunk on disk 3 again, keeps and
+// lands it, so its answer still makes the record (the primary-change run's seed 15 found it).
 func TestARecoveryEndedByAFailedWriteStillRecordsItsLanding(t *testing.T) {
 	tbl := rtable(4, 1)
 	_, e := tbl.entry(pg0)
@@ -732,7 +732,7 @@ func TestARecoveryEndedByAFailedWriteStillRecordsItsLanding(t *testing.T) {
 		e.Members = []Member{{Disk: 2}, {Disk: 1}, {Disk: 3}}
 	}), false)
 	c.settle()
-	if x := c.listed(2, ch); x.ListedIn != 0 {
+	if x := c.listed(2, ch); x.ListedIn != 3 || x.Whole != x.Listed {
 		t.Fatalf("disk 3 holds %+v", x)
 	}
 	if n := recoveredRecords(t, c, 2); n != 1 {
