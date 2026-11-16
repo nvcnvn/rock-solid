@@ -796,8 +796,23 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 		}
 		f.tend(false)
 	}
+	heldID := func(id core.RequestID, op faultOp) bool {
+		r := c.reps[f.p()]
+		i := r.lead(pg0)
+		if i < 0 || !f.unreadable(i, op.c) {
+			return false
+		}
+		for _, h := range r.leads[i].held {
+			frame, data := Frame(c.s.Node(uint32(f.p())).Pool(), &h.msg)
+			var u Update
+			if DecodeUpdate(frame, data, &u) == nil && u.ID == id {
+				return true
+			}
+		}
+		return false
+	}
 	for id := core.RequestID(1); id <= c.nextID; id++ {
-		if _, ok := f.ops[id]; ok && f.replied[id] != 1 && !(f.replied[id] == 0 && f.lost[id]) && plant == nil {
+		if op, ok := f.ops[id]; ok && f.replied[id] != 1 && !(f.replied[id] == 0 && (f.lost[id] || heldID(id, op))) && plant == nil {
 			t.Fatalf("request %d answered %d times", id, f.replied[id])
 		}
 	}
@@ -816,7 +831,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 	return c.found
 }
 
-// Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail, the stand-in authority's failure detector marking them down and up, and they refuse, the primary's bases rot, the PG's interval changes and the primary crashes, rebuilds its index and moves, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once unless a crash of its primary lost it, the primary maps exactly the writes it answered OK in every chunk it lists nothing of, and once recovery settles every member lists nothing and maps them.
+// Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail, the stand-in authority's failure detector marking them down and up, and they refuse, the primary's bases rot, the PG's interval changes and the primary crashes, rebuilds its index and moves, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once unless a crash of its primary lost it or it is held on a chunk whose every source rotted, the primary maps exactly the writes it answered OK in every chunk it lists nothing of, and once recovery settles every member lists nothing and maps them.
 func TestReplicatedWritesSurviveFaults(t *testing.T) {
 	seeds.Run(t, 0, 20, func(seed uint64) {
 		if err := runFaults(t, seed, 2, 24, nil); err != nil {

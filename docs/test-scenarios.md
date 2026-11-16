@@ -5632,7 +5632,8 @@ own ([Testing strategy](design.md#testing-strategy)).
   listed by the earlier interval holds its kept image (open question "Recovery sources across
   overlapping faults"). The fault run tolerates the same at its end in a chunk whose every recovery
   source failed a read on rotted bits: rot on the only clean copy beside divergent members is a
-  second fault, and the chunk stays listed as an unfound one does.
+  second fault, and the chunk stays listed as an unfound one does; a write held on it for recovery
+  is never answered.
 - Losses beyond what the pool survives, for example both members of `rep2` PG 4:
   - One after the other, with an interval activated between: the PG serves, the lost chunks read
     unfound, never wrong data or zeros, and it is reported, naming the disks until they are declared
