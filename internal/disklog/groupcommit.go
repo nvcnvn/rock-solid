@@ -525,7 +525,6 @@ const (
 	formatZeroCopy formatPhase = iota + 1
 	formatZero0
 	formatTrim
-	formatFlush
 	formatBlock0
 	formatCopy
 	formatDone
@@ -1332,15 +1331,16 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 // log whole, no superblock or the new one, never the old log over headers the trims zeroed; the copy
 // goes first, as zeros in block 0 beside a valid copy read as CopyOnly. A failed trim costs only its
 // discard: recovery checks whatever header it left, as it does a header a TRIM lost at a crash left.
-// The flush behind the trims keeps the superblock from landing before the zeroed headers do.
+// Block 0 needs no flush of the trims before it: a trim a crash reverts leaves a header the new log
+// judges free, as another log's or as damage holding none of its records.
 func (l *Log) formatDone(ctx *core.Context, io core.IOID, derr core.DiskError, out *Output) {
 	if l.phase == formatTrim && io-l.formatIO < core.IOID(l.formatNext-1) {
 		if l.formatNext < l.sb.SegmentCount {
 			l.trimNextSegment(out)
 		}
 		if l.formatLeft--; l.formatLeft == 0 {
-			l.phase, l.formatSync = formatFlush, l.io()
-			out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskFsync, IO: l.formatSync})
+			l.phase = formatBlock0
+			l.writeFormat(l.rounds[0].head, l.sb.SuperblockLBA(), out)
 		}
 		return
 	}
@@ -1362,10 +1362,6 @@ func (l *Log) formatDone(ctx *core.Context, io core.IOID, derr core.DiskError, o
 		for range min(formatTrims, l.sb.SegmentCount-1) {
 			l.trimNextSegment(out)
 		}
-		return
-	case formatFlush:
-		l.phase = formatBlock0
-		l.writeFormat(l.rounds[0].head, l.sb.SuperblockLBA(), out)
 		return
 	case formatBlock0:
 		l.phase = formatCopy

@@ -186,14 +186,14 @@ func blankHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Con
 	return h
 }
 
-// formatIO is the first IO of a Format whose superblock zeros, trims and their flush end just
+// formatIO is the first IO of a Format whose superblock zeros and trims end just
 // below firstIO, so the log's IO IDs after format are the same with TRIM on or off. It wraps below
 // zero.
 func (h *harness) formatIO() core.IOID {
 	if h.cfg.NoTrim {
 		return firstIO
 	}
-	return firstIO - core.IOID(h.geo.SegmentCount) - 4
+	return firstIO - core.IOID(h.geo.SegmentCount) - 3
 }
 
 func testConfig(maxRecordBlocks uint64) disklog.Config {
@@ -253,8 +253,6 @@ func (h *harness) absorb() {
 		case core.ActDiskFsync:
 			p := pendingIO{act: a}
 			switch {
-			case a.IO == firstIO-1:
-				// Format's flush behind its trims, which the counts of rounds' flushes leave out.
 			case a.Linked:
 				if i == 0 || h.out.Actions[i-1].Kind != core.ActDiskWrite {
 					h.t.Fatalf("linked flush io%d does not follow a write", a.IO)

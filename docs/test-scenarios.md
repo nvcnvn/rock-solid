@@ -2551,7 +2551,7 @@ every acknowledged record, and Corrupt never occurs (Pebble `TestErrors`, `TestD
   format of a 32-block disk of 4-block segments with a reserve of two, five 2-block writes that
   fill every segment outside the reserve, a sixth submitted with the fifth and held for room, and
   the node's checkpoint, which the fifth makes due and which goes into the reserve while the sixth
-  waits. N is 26, format's seven trims and their flush among them; the same crashes and failures
+  waits. N is 25, format's seven trims among them; the same crashes and failures
   at every k, checked the same way, and the held write is never acknowledged. `disklog.StopEarly`
   fails this sweep too.
 - [property] Chunk store (`TestCrashAtEveryActionWithCleaning`, `internal/chunkstore`): the
@@ -7424,9 +7424,10 @@ profile refuses `io_uring_setup` with `EPERM`, so container runs use
 ## Format discards every segment
 
 - Format writes zeros over the superblock's copy then the superblock, each flushed, trims every
-  segment but segment 0, 64 trims in flight at a time, flushes, and only then writes the superblock
-  and its copy, each flushed; the driver zeroes each header behind its discard. A disk that is a
-  file is not trimmed and gets no zeros first. `TestFormatZeroesTrimsThenWritesBothSuperblocks`.
+  segment but segment 0, 64 trims in flight at a time, and once they complete writes the superblock
+  and its copy, each flushed, with no flush between the trims and the superblock; the driver
+  zeroes each header behind its discard. A disk that is a file is not trimmed and gets no zeros
+  first. `TestFormatZeroesTrimsThenWritesBothSuperblocks`.
 - A used disk formatted again and crashed after each of format's first eight and last six actions,
   every unflushed write landing or none, starts as the old log whole, as no log or as the new one,
   never as the old superblock over headers the trims zeroed (`log corrupt at LSN 1` before the
@@ -7706,7 +7707,7 @@ once.
 - Formats crashed twice on the simulated disk
   (`TestADeviceCrashedTwiceMidFormatComesBackWholeOrNew`, `storetest`): a store holding a 3-block
   write to chunk 1 under log `0x5eed` is formatted again under a new log ID and power-cut after k of
-  format's 4,104 disk completions, for k from 1 to 8, half of them and the last 9; a start that
+  format's disk completions, for k from 1 to 8, half of them and the last 9; a start that
   formats is cut after k completions too, and a third start runs to the end. Each start that opens
   shows the old log with chunk 1 whole under its old disk ID in the disk record, or a log ID no
   format of the run drew before under a new disk ID with chunk 1 reading zeros; no start formats
