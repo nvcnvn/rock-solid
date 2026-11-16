@@ -3307,6 +3307,7 @@ nodes without finishing.
 | `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the six below |
 | `heavy-peering` | 4 | `ci-peering`'s, `ci-restarts`' and `ci-restarts-moved`'s plans and the free plan, and the unbounded liveness property |
 | `ci-hide` | 3 | `ci-leases`'s constants with one plan: PG 2's handover with exact clocks, the holder suspended 1 s with `CLOCK_BOOTTIME` gaining nothing and no `Resumed`, standing for a suspend just under 1 s; apart from `ci-leases` so that a lease variant that also drops the margin for such a suspend fails on its own rule |
+| `ci-hide-clocks` | 3 | `ci-hide`'s plan with `ci-leases`'s rates and slews in place of exact clocks, on which the holder's slower and the grantor's faster clock break property 1 with the margin kept |
 | `deep-leases` | 4 | `ci-leases`'s and `ci-hide`'s plans and the six `ci-leases` leaves out: four pair a partition with a pause, a suspend or a reboot, and two stop the holder in place while its grantor pauses or restarts |
 | `deep-slow` | 3 | The delayed-message plan alone, with `ci-leases`'s constants and time to 5 s |
 
@@ -3586,8 +3587,8 @@ under fairness, as `heavy-peering` does, on the restart plan alone, and those fo
 | A member holding a version above the kept one is left off the missing list | 14 | PG 2's primary 2 orders 1.1, still pending, moves away and back, skipping the table between; peering reaches node 3, keeps nothing and drops 1.1, and node 2 serves 1.1 listing nothing. No acknowledged write is at stake: only the clause on dropped versions catches it |
 | An edit that reorders a PG's members keeps its interval | 6 | PG 1: primary 1 orders 1.1; an edit moves the primary with no new interval; the new primary peers in interval 1 and gives another write 1.1 |
 | A kept primary serves reads in an interval below `min_live` | 1 | PG 2's member 3 is marked down: primary 2 reads needing no lease; 3 returns and the primary moves to it while 2, cut off from the control plane, reads on; peering skips the interval below `min_live` |
-| The holder ends its lease on the slower of its clocks | 1 | Holder `CLOCK_BOOTTIME` −22.6%: the lease outlives the grant |
-| The grantor ends its grant on the faster of its clocks | 1 | Grantor `CLOCK_BOOTTIME` +22.6% |
+| The holder ends its lease on the slower of its clocks | 1 | `ci-hide-clocks`'s plan: holder `CLOCK_BOOTTIME` −22.6%, grantor raw 4% fast, and a 1 s holder suspend that delivers no `Resumed`: the lease outlives the grant |
+| The grantor ends its grant on the faster of its clocks | 1 | `ci-hide-clocks`'s plan: grantor raw 4% slow with `CLOCK_BOOTTIME` +22.6%, holder `CLOCK_BOOTTIME` −22.6%, and a 1 s holder suspend that delivers no `Resumed` |
 | A lease before the first bound, on `lease_drift` alone | 1 | Grantor raw clock 4% fast: the first grant's lease outlives the grant |
 | That, with the step check at `1 + lease_drift / 2` restarting the window on each trip (two bugs, as the rule it breaks is a combination) | 1 | As above; the pair never gets a bound |
 | Widening only past `1 + 2 lease_drift` | 1 | Grantor 4% fast: the margin stays 3% where 3.85% is needed, and a partition follows a grant |
@@ -3618,11 +3619,15 @@ under fairness, as `heavy-peering` does, on the restart plan alone, and those fo
 | Replay ignores the entry's image flag (`neg-ignore-image-flag`) | 18 | `ci-image-restart`'s plan: the primary restarts after the decision that dropped Y and forgets its image, and the other member's disk goes |
 | Replay maps what a decision entry dropped (`neg-replay-forgets-drops`) | 18 | `ci-image-restart`'s move with the restart aimed at the primary and the format at the other member, and a spare table: the primary restarts after the decision that dropped Y and maps Y, so the decision of its next interval keeps no image, and the other member's disk goes before recovery |
 
-- The holder's slower and the grantor's faster clock, both leases before a bound, the two widening
-  rows, no new window at a new run ID and a reboot that takes no time each also drop the second a
-  holder leaves for a suspend that delivers no `Resumed` (`NoResumeMargin`): that second covers
-  each of their errors, and the rule each breaks must hold without it. `neg-no-resume-margin`
-  drops that second alone, on `ci-hide`'s plan.
+- The holder's slower and the grantor's faster clock run on `ci-hide-clocks`'s plan and break
+  property 1 with the second a holder leaves for a suspend that delivers no `Resumed` kept: the
+  suspend spends that second, and the clock rule must hold on its own. Both leases before a bound,
+  the two widening rows, no new window at a new run ID and a reboot that takes no time also drop
+  that second (`NoResumeMargin`): each rule holds without it, and in every plan that fits the `ci`
+  budget its error is smaller than the second, which would absorb it. The reboot and pause plans
+  with a hidden suspend added pass 3.7 million states in 300 s with no violation, and the widening
+  and exact-margin rules have none on `ci-hide-clocks`'s plan. `neg-no-resume-margin` drops that
+  second alone, on `ci-hide`'s plan.
 - The grant rule `ci-leases` checks: a grantor grants or renews only a holder that reported a table at
   least as new as its own, and a grant carries no table epoch. Property 1 holds with it, and fails
   with fresh grants exempt from the check (the row above), so the Grant row under [Wire
@@ -4062,6 +4067,7 @@ next milestone's run, which is also the twins' first.
 | Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 27 | 304,508 | 67 s |
 | Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 84 | 1,408,661 | 131 s |
 | Epoch change | `ci-hide` | [Epoch change model](#epoch-change-model) | 74 | 193,176 | 24 s |
+| Epoch change | `ci-hide-clocks` | [Epoch change model](#epoch-change-model) | 81 | 1,415,894 | 137 s |
 | Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 1,583,822 | 291 s |
 | Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 27 | 130,443 | 38 s |
 | Epoch change | `ci-stays-as-primary` | [Epoch change model](#epoch-change-model) | 27 | 485,640 | 132 s |

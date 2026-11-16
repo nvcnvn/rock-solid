@@ -2637,6 +2637,8 @@ HandoverStep == [Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "step", "cut", 
 HandoverSuspend == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "susp", "pause", "fast"})
 \* a suspend under 1 s that delivers no Resumed, with exact clocks;
 HandoverHide == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "susp", "hide", "exact"})
+\* that suspend, with the lease rates and slews;
+HandoverHideClocks == Plan(<<Mark(2, "maint")>>, OneWhole, {"stale2", "susp", "hide"})
 
 \* a kvm-clock guest stopped in place, with no partition (design.md, open
 \* question on kvm-clock stops);
@@ -2678,15 +2680,19 @@ RaftPartition == [Plan(<<>>, <<>>, {"raft", "cut", "heal", "fast"}) EXCEPT !.t =
 \* pauses or restarts; the negative variants that need one run it alone. The
 \* plan with delayed messages, at over 3 million states, runs alone in
 \* deep-slow at 3 nodes, since with the others at 4 nodes it passed 108 million
-\* states in 4 hours. ci-hide checks the hidden suspend apart, so that a
-\* negative variant of LeasePlans that also drops the margin for one fails
-\* on its own rule; neg-no-resume-margin drops the margin on ci-hide's plan.
+\* states in 4 hours. ci-hide checks the hidden suspend apart with exact
+\* clocks, and ci-hide-clocks with the lease rates and slews, on which the
+\* holder's slower and the grantor's faster clock break OneReader with the
+\* margin kept. Six other lease variants, whose error is smaller than the
+\* margin in every plan that fits ci's budget, drop the margin too, and
+\* neg-no-resume-margin drops it alone on ci-hide's plan.
 LeasePlans == {Steady, Handover, HandoverStep, HandoverSuspend, HandoverStop,
                HandoverRestart, HandoverCut, Maintenance, RaftTransfer, RaftPartition}
 RebootPlans == {HandoverReboot}
 PausePlans == {HandoverPause}
 StopPlans == {HandoverStopRestart}
 HidePlans == {HandoverHide}
+HideClockPlans == {HandoverHideClocks}
 AllLeasePlans == LeasePlans \cup RebootPlans \cup PausePlans \cup StopPlans \cup HidePlans
                  \cup {HandoverSuspendCut, HandoverRebootFast, HandoverStopPause}
 SlowPlans == {HandoverSlow}
