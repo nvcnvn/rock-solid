@@ -1,6 +1,7 @@
 package node
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
@@ -465,5 +466,49 @@ func TestAMoveSendsTheFetchInFlightToTheNewVoter(t *testing.T) {
 	}
 	if _, _, tok, _ := meta.Peek(&fetches[0].Msg); tok == first {
 		t.Fatalf("the fetch went again under its old token %#x", tok)
+	}
+}
+
+// A replica removed, as a device opened again in the same process, gets no more tables and leaves
+// the report, and the device opened again is reported once; a replica not yet removed, whatever
+// its store, keeps getting tables and its version pins the report.
+func TestARemovedReplicaGetsNoTableAndLeavesTheReport(t *testing.T) {
+	r := newRun(t, 1, 10, 11)
+	r.table(0, chunkstore.SessionTable{Version: 2, Next: 5})
+	r.n.Held(10, 2)
+	if hs := r.table(0, chunkstore.SessionTable{Version: 3, Next: 5}); len(hs) != 2 {
+		t.Fatalf("a table before the removal handed %+v", hs)
+	}
+	if nr := r.report(); nr.Sessions != 0 || len(nr.Opened) != 2 {
+		t.Fatalf("a replica holding nothing yet reported as %+v", nr)
+	}
+	r.n.Remove(11)
+	if hs := r.table(0, chunkstore.SessionTable{Version: 4, Next: 5}); len(hs) != 1 || hs[10].Table.Version != 4 {
+		t.Fatalf("a table after the removal handed %+v", hs)
+	}
+	r.n.Held(11, 4)
+	if nr := r.report(); nr.Sessions != 2 || len(nr.Opened) != 1 || nr.Opened[0].Device != 10 {
+		t.Fatalf("after the removal reported %+v", nr)
+	}
+	r.out.Reset()
+	r.n.Opened(meta.OpenedDisk{Device: 11, Log: 0x99}, &r.out)
+	if nr := r.report(); len(nr.Opened) != 2 || nr.Opened[1].Log != 0x99 || nr.Sessions != 0 {
+		t.Fatalf("the device opened again reported %+v", nr)
+	}
+}
+
+func TestTheDiskMembershipIsHandedOn(t *testing.T) {
+	r := newRun(t, 1, 10)
+	ds := []meta.DiskAddr{{Disk: 1, Log: 10 << 8, At: core.NodeID{Node: 4, Loop: 2}}, {Disk: 2, Log: 7, At: core.NodeID{Node: 5}}}
+	r.from(core.NodeID{Node: 5}, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	if r.out.Disks != nil {
+		t.Fatal("took a membership from a node that is no voter")
+	}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	if !slices.Equal(r.out.Disks, ds) {
+		t.Fatalf("handed %+v", r.out.Disks)
+	}
+	if r.ctx.Pool.(*sim.Pool).Live() != 0 {
+		t.Fatal("a buffer left")
 	}
 }

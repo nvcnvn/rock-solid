@@ -39,14 +39,15 @@ type Hand struct {
 }
 
 // Output is what a call into the node asks of its loop: actions; session tables to hand
-// replicas; a placement table or delta to hand every replica, with SetTable or ApplyDelta; and
-// whether the node moved to another control-plane voter, which every replica then reports to
-// with SetAuthority at Ctl.
+// replicas; a placement table or delta to hand every replica, with SetTable or ApplyDelta; the
+// committed disk membership to hand every device; and whether the node moved to another
+// control-plane voter, which every replica then reports to with SetAuthority at Ctl.
 type Output struct {
 	Actions []core.Action
 	Hands   []Hand
 	Table   *chunkstore.Table
 	Delta   *chunkstore.Delta
+	Disks   []meta.DiskAddr
 	Moved   bool
 }
 
@@ -89,6 +90,7 @@ type Node struct {
 	placed  chunkstore.Table
 	delta   chunkstore.Delta
 	epoch   uint64
+	disks   []meta.DiskAddr
 }
 
 // Ctl is the control-plane voter the node talks to.
@@ -158,6 +160,15 @@ func (n *Node) Opened(d meta.OpenedDisk, out *Output) {
 	if n.table.Version != 0 || n.table.Next != 0 {
 		out.Hands = append(out.Hands, Hand{Device: d.Device, Table: n.table})
 	}
+}
+
+// Remove takes device's replica away, as a device opened again in the same process or a failed
+// store's replica stopped leaves it: the node hands it nothing more and its report names it no
+// longer, so its version never pins the report. Until then a failed store's replica is handed
+// every table and counts in the report like any other.
+func (n *Node) Remove(device uint64) {
+	n.reps = slices.DeleteFunc(n.reps, func(r replica) bool { return r.device == device })
+	n.opened = slices.DeleteFunc(n.opened, func(d meta.OpenedDisk) bool { return d.Device == device })
 }
 
 // Start sends the first heartbeat and arms the next.
@@ -236,6 +247,11 @@ func (n *Node) recv(ctx *core.Context, ev *core.Event, out *Output) {
 	case meta.KindDelta:
 		if n.delta, err = meta.DecodeDelta(ctx.Pool, &ev.Msg); err == nil {
 			out.Delta, n.tableAt, n.epoch = &n.delta, 0, max(n.epoch, n.delta.Epoch)
+		}
+		return
+	case meta.KindDisks:
+		if n.disks, err = meta.DecodeDisks(ctx.Pool, &ev.Msg, n.disks); err == nil {
+			out.Disks = n.disks
 		}
 		return
 	}

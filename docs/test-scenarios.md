@@ -7902,8 +7902,14 @@ The node's machine, `internal/node`, fed events with no network, and its message
 | A fetch reaches the control-plane leader before it steps under its lease, after it lost its lease, or after it regained it but before stepping | Unanswered; once stepped under its lease, answered with the live sessions and next ID (`TestAFetchIsAnsweredOnlyUnderTheLeaderLease`, `internal/meta`) |
 | A fetch reaches a new leader whose applied table lags a start the old leader committed | Unanswered until a session-table Txn of its own commits; a leader with nothing to commit commits the head's check alone, then answers (`TestAMachineThatHasNotSeenASessionStartAnswersNoFetch`, `internal/meta`) |
 | A report or session table across the wire | Decodes to what was sent; live IDs that do not rise, a zero ID or one at or above the next ID are malformed; fuzzed (`FuzzDecodeNodeReport`, `FuzzDecodeSessions`) |
+| A session start, its answer and a disk membership of 300 disks across the wire | Decode to what was sent; a membership whose disk IDs are zero or do not rise is malformed; fuzzed (`FuzzDecodeStarted`, `FuzzDecodeDisks`) |
+| Two replicas, one removed; then the device opened again under another log | After the removal a table goes to the other alone, the removed one's held version no longer pins the report, and the report names its device once, with the new log; before the removal it got every table and its version counted (`TestARemovedReplicaGetsNoTableAndLeavesTheReport`) |
+| A disk membership from a voter, and one from a node that is no voter | The voter's handed on whole; the other dropped (`TestTheDiskMembershipIsHandedOn`) |
+| A blank device's format cut by a crash after each of its disk actions, then a start with another seed | The second start formats under a log ID of its own source, or opens the first's log once its format landed; the device is reported opened, with its device, log, size, reserve and class, only once a format settles (`TestTwoStartsOverAFormatCutShortDrawDifferentLogIDs`) |
+| A device whose block 0 and superblock copy hold junk | Reported failed, both blocks left as they were, and no replica runs whatever the membership says (`TestADeviceWithNoValidSuperblockFailsUntouched`) |
+| A session table, a placement table at epoch 2 and the authority handed to an opened device, then a message, then a membership without its log, then one with it | Nothing runs and the message is dropped until the membership names the device's log; then the replica runs as that disk, holding session version 3 and epoch 2, and reports to the authority (`TestTheReplicaStartsAsTheDiskTheMembershipNames`) |
 
-The rows are unit tests in `internal/node/node_test.go` and `internal/meta/nodewire_test.go`.
+The rows are unit tests in `internal/node/node_test.go`, `internal/node/device_test.go` and `internal/meta/nodewire_test.go`.
 
 ## Storage node disk startup
 
