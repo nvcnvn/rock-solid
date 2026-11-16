@@ -786,11 +786,12 @@ Drops(d, p, e) ==
 \* What a replay drops of p at the marker of the entries e, though the running
 \* store keeps it mapped: replay holds every version of an interval at or past
 \* the PG's persisted decision, so it settles at this marker, by the listed
-\* version, all that the disk logged since its previous one. Init's interval 1
-\* stands for no marker, where replay holds nothing.
+\* version, all that the disk logged since its previous one. A disk that
+\* persisted no decision (0, a format's) has no marker, and replay holds nothing;
+\* Init's interval 1 is the marker of the pool's first peering.
 ReplayDrops(d, p, e) ==
     UNION {{[c |-> c, v |-> v] :
-              v \in Unkept({u \in dlog[d][c] : persIv[d][p] > 1 /\ IvOfV(u) >= persIv[d][p]}, e[c])} :
+              v \in Unkept({u \in dlog[d][c] : persIv[d][p] > 0 /\ IvOfV(u) >= persIv[d][p]}, e[c])} :
            c \in {x \in ChunksOf(p) : e[x] # NoMiss}}
 
 \* The copies of chunk c interval k of p can count under the lists ls: the up
@@ -807,13 +808,14 @@ Copies(p, k, ls, c) ==
 \* client on a chunk with fewer than min_live copies is mapped but refused: that
 \* the members persisted their lists says nothing of what they hold. It activates
 \* and reports it on its next heartbeat. It activates only once its own records
-\* of p are durable, so an OK it sends rests on one.
+\* of p's kept versions are durable, so an OK it sends rests on one; the
+\* decision drops the rest, which no OK names.
 Activated(n, p, k, K, ls) ==
     LET mine == {r \in pend : r.n = n /\ ChunkPG[r.c] = p}
         ok == {r \in mine : /\ r.v <= SettleTop(Gated(n, r.c), K[r.c])
                              /\ \/ Cardinality(Copies(p, k, ls, r.c)) >= MinLiveOf(p, k)
                                 \/ Bug("AckOnLoneCopy")}
-    IN /\ ~\E r \in ownw : r.n = n /\ ChunkPG[r.c] = p
+    IN /\ ~\E r \in ownw' : r.n = n /\ ChunkPG[r.c] = p
        /\ pr' = [pr EXCEPT ![n][p] = [@ EXCEPT !.act = TRUE, !.srv = TRUE]]
        /\ act' = act \cup {[p |-> p, k |-> k, r |-> run[n]]}
        /\ reports' = reports \cup {[p |-> p, k |-> k]}
@@ -954,6 +956,7 @@ PeerOn(n, p, J, P, U) ==
                             gone |-> gone, img |-> img, torn |-> T, unf |-> unf]}
        /\ bad' = IF torn THEN bad \cup {"torn"} ELSE bad
        /\ pv' = [pv EXCEPT ![n] = [c \in Chunk |-> IF c \in ChunksOf(p) THEN K[c] ELSE pv[n][c]]]
+       /\ ownw' = {r \in ownw : ~(r.n = n /\ ChunkPG[r.c] = p /\ r.v \in gone[r.c])}
        /\ IF Bug("ActivateBeforeDurable")
           THEN /\ mrecv' = [d \in Disk |-> IF d \in UpIn(p, k)
                                THEN mrecv[d] \cup {[p |-> p, k |-> k, ent |-> lists[d], img |-> img]}
@@ -969,7 +972,7 @@ PeerOn(n, p, J, P, U) ==
                /\ Activated(n, p, k, K, lists)
                /\ UNCHANGED mrecv
        /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
-                      dlog, failed, pin, known, rm, vers, sends, dmn, ownw, rw, clockVars, raftVars>>
+                      dlog, failed, pin, known, rm, vers, sends, dmn, rw, clockVars, raftVars>>
 
 Peer(n, p) ==
     /\ PeerOpen(n, p)
@@ -990,9 +993,10 @@ Activate(n, p) ==
        /\ Decided(n, p, k)
        /\ \A d \in R : dnode[d] # 0 /\ Running(dnode[d]) /\ IvAt(dnode[d], p) = k
        /\ PersistAll(R, p, k, lists, TheDec(n, p, k).img, TRUE)
+       /\ UNCHANGED ownw
        /\ Activated(n, p, k, K, lists)
        /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
-                      dlog, mrecv, failed, pv, pin, known, dec, rm, vers, sends, dmn, bad, ownw, leaseVars,
+                      dlog, mrecv, failed, pv, pin, known, dec, rm, vers, sends, dmn, bad, leaseVars,
                       clockVars, raftVars>>
 
 \* With ActivateBeforeDurable, a member persists its list after activation,
@@ -1775,7 +1779,7 @@ NetFault(h, g, to) ==
 \* each PG it is a member of, so that a decision settles the versions its
 \* replay gated even where the PG would stay in its interval. Replay gates the
 \* versions of an interval at or past the PG's persisted decision, and none
-\* where the disk persisted no decision (Init's interval 1). With "stop2",
+\* where the disk persisted no decision (a format's 0). With "stop2",
 \* only node 3 restarts; with "aimed", only node 2; with "aimed1", only node 1.
 RestartState(n) ==
     /\ run' = [run EXCEPT ![n] = @ + 1]
@@ -1797,7 +1801,7 @@ RestartState(n) ==
     /\ gat' = [gat EXCEPT ![ddisk[n]] =
                  @ \cup {g \in [c : Chunk, v : UNION {dlog[ddisk[n]][c] : c \in Chunk}] :
                            /\ g.v \in dlog[ddisk[n]][g.c]
-                           /\ persIv[ddisk[n]][ChunkPG[g.c]] > 1
+                           /\ persIv[ddisk[n]][ChunkPG[g.c]] > 0
                            /\ IvOfV(g.v) >= persIv[ddisk[n]][ChunkPG[g.c]]
                            /\ ~Bug("MapOnReplay")}]
     /\ drp' = [drp EXCEPT ![ddisk[n]] = IF Bug("ReplayForgetsDrops") THEN {} ELSE @ \cup rdrp[ddisk[n]]]
