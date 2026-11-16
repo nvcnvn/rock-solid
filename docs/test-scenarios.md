@@ -7692,6 +7692,10 @@ once.
 
 ## Storage node disk startup
 
+- The model: `StartDevice`'s new log ID for an unformatted device is the code of `epoch.tla`'s
+  `Format` step, which gives a disk formatted again a new disk ID. Its negative, `neg-keep-disk-id`,
+  has its plant in the replica harness (`keepID`, with `formatUnformatted` standing in for the
+  node), not in `StartDevice`.
 - The decision (`TestADeviceIsFormattedOnlyWhenBothSuperblocksAreZeros`, `internal/chunkstore`):
   a store that serves is opened; `ErrNotFormatted`, wrapped, is formatted, under a log ID no earlier
   of 100 starts drew; `ErrUnrecognized`, `CopyOnly`, a disk read error and `ErrCorrupt` are each
