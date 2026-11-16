@@ -15,8 +15,11 @@ import (
 // token is the fetch it answers, 0 when pushed unasked, and its body is its version, next ID, a
 // count and each live ID as its gap above the one before. A placement table's body is
 // chunkstore.AppendTable's encoding and a delta's AppendDelta's, both with token 0; a table fetch
-// has no body. A voter that does not lead answers a report or a fetch with the leader it knows:
-// a presence byte, then its node and loop.
+// has no body. A voter that does not lead answers a report, a fetch or a session start with the
+// leader it knows: a presence byte, then its node and loop. A session start's token is its
+// request and it has no body; its answer, once the start commits, carries the request as its token
+// and the session's ID as its body. The disk membership, the leader's answer to a report, is a
+// count and, in rising disk ID order, each disk's ID, log, and the node and loop that own it.
 const (
 	KindNodeReport   byte = 0x42
 	KindSessionFetch byte = 0x43
@@ -25,7 +28,17 @@ const (
 	KindDelta        byte = 0x46
 	KindTableFetch   byte = 0x47
 	KindLeader       byte = 0x48
+	KindSessionStart byte = 0x49
+	KindStarted      byte = 0x4a
+	KindDisks        byte = 0x4b
 )
+
+// DiskAddr is a disk of the committed membership record: its ID, its log, and the loop that owns it.
+type DiskAddr struct {
+	Disk uint32
+	Log  uint64
+	At   core.NodeID
+}
 
 // encodeBody frames body as a message of kind into msg, or returns the pool's error.
 func encodeBody(pool core.BufPool, group uint64, kind byte, token uint64, body []byte, msg *core.Msg) error {
@@ -233,4 +246,64 @@ func DecodeLeader(pool core.BufPool, msg *core.Msg) (core.NodeID, bool, error) {
 		return core.NodeID{}, false, ErrMalformed
 	}
 	return core.NodeID{Node: uint32(n), Loop: uint32(l)}, known == 1, nil
+}
+
+// EncodeSessionStart writes a client's ask to start a session, its request numbered request, into msg.
+func EncodeSessionStart(pool core.BufPool, group, request uint64, msg *core.Msg) error {
+	return encodeBody(pool, group, KindSessionStart, request, nil, msg)
+}
+
+// EncodeStarted writes the answer to the start request: the session id it committed.
+func EncodeStarted(pool core.BufPool, group, request, id uint64, msg *core.Msg) error {
+	return encodeBody(pool, group, KindStarted, request, binary.AppendUvarint(nil, id), msg)
+}
+
+// DecodeStarted decodes a started message: the session's ID, never 0; one that does not decode is
+// ErrMalformed. Peek gives the request it answers.
+func DecodeStarted(pool core.BufPool, msg *core.Msg) (uint64, error) {
+	b, err := msgBody(pool, KindStarted, msg)
+	if err != nil {
+		return 0, err
+	}
+	d := decoder{b: b}
+	id := d.uvarint()
+	if d.bad || len(d.b) != 0 || id == 0 {
+		return 0, ErrMalformed
+	}
+	return id, nil
+}
+
+// EncodeDisks writes the disk membership ds, in rising disk ID order, into msg, or returns the
+// pool's error.
+func EncodeDisks(pool core.BufPool, group uint64, ds []DiskAddr, msg *core.Msg) error {
+	body := binary.AppendUvarint(nil, uint64(len(ds)))
+	for _, d := range ds {
+		body = binary.AppendUvarint(binary.AppendUvarint(body, uint64(d.Disk)), d.Log)
+		body = binary.AppendUvarint(binary.AppendUvarint(body, uint64(d.At.Node)), uint64(d.At.Loop))
+	}
+	return encodeBody(pool, group, KindDisks, 0, body, msg)
+}
+
+// DecodeDisks decodes a disk membership message into dst; one that does not decode, has a token,
+// or whose disk IDs are not nonzero and rising, is ErrMalformed.
+func DecodeDisks(pool core.BufPool, msg *core.Msg, dst []DiskAddr) ([]DiskAddr, error) {
+	dst = dst[:0]
+	b, err := untokened(pool, KindDisks, msg)
+	if err != nil {
+		return dst, err
+	}
+	d := decoder{b: b}
+	last := uint64(0)
+	for n := d.count(); n > 0; n-- {
+		id, log, node, loop := d.uvarint(), d.uvarint(), d.uvarint(), d.uvarint()
+		if id <= last || id > 0xffffffff || node > 0xffffffff || loop > 0xffffffff {
+			return dst[:0], ErrMalformed
+		}
+		last = id
+		dst = append(dst, DiskAddr{Disk: uint32(id), Log: log, At: core.NodeID{Node: uint32(node), Loop: uint32(loop)}})
+	}
+	if d.bad || len(d.b) != 0 {
+		return dst[:0], ErrMalformed
+	}
+	return dst, nil
 }

@@ -243,3 +243,66 @@ func FuzzDecodeLeader(f *testing.F) {
 			return leaderMsg{at, known}, err
 		})
 }
+
+func TestSessionStartAndDiskMessagesCrossTheWireWhole(t *testing.T) {
+	pool := sim.NewPool(1<<20, 0)
+	var m core.Msg
+	if err := EncodeSessionStart(pool, 1, 77, &m); err != nil {
+		t.Fatal(err)
+	}
+	if g, k, tok, _ := Peek(&m); g != 1 || k != KindSessionStart || tok != 77 {
+		t.Fatalf("start framed as group %d kind %#x token %d", g, k, tok)
+	}
+	if err := EncodeStarted(pool, 1, 77, 1<<40, &m); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := DecodeStarted(pool, &m); err != nil || id != 1<<40 {
+		t.Fatalf("started decoded %v: %d", err, id)
+	}
+	var ds []DiskAddr
+	for i := range 300 {
+		ds = append(ds, DiskAddr{Disk: uint32(i)*7 + 1, Log: uint64(i) << 40, At: core.NodeID{Node: uint32(i), Loop: 1 << 31}})
+	}
+	for _, sent := range [][]DiskAddr{nil, ds[:1], ds} {
+		if err := EncodeDisks(pool, 1, sent, &m); err != nil {
+			t.Fatal(err)
+		}
+		got, err := DecodeDisks(pool, &m, []DiskAddr{{Disk: 9}})
+		if err != nil || len(got) != len(sent) || len(sent) > 0 && !slices.Equal(got, sent) {
+			t.Fatalf("decoded %v: %d disks, sent %d", err, len(got), len(sent))
+		}
+		free(&core.Context{Pool: pool}, &m)
+	}
+	for _, bad := range [][]DiskAddr{{{Disk: 0}}, {{Disk: 3}, {Disk: 3}}, {{Disk: 4}, {Disk: 2}}} {
+		_ = EncodeDisks(pool, 1, bad, &m)
+		if _, err := DecodeDisks(pool, &m, nil); err != ErrMalformed {
+			t.Errorf("disks %v decode: %v", bad, err)
+		}
+	}
+	if pool.Live() != 0 {
+		t.Fatalf("%d buffers left", pool.Live())
+	}
+}
+
+func FuzzDecodeStarted(f *testing.F) {
+	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) { _ = EncodeStarted(pool, 1, 4, 9, m) }, func(pool core.BufPool, m *core.Msg) (core.Msg, bool) {
+		var again core.Msg
+		g, _, tok, _ := Peek(m)
+		id, err := DecodeStarted(pool, m)
+		if err != nil {
+			return again, false
+		}
+		if err := EncodeStarted(pool, g, tok, id, &again); err != nil {
+			panic(err)
+		}
+		return again, true
+	})
+}
+
+func FuzzDecodeDisks(f *testing.F) {
+	fuzzRecode(f, []DiskAddr{{Disk: 1, Log: 5, At: core.NodeID{Node: 2, Loop: 1}}, {Disk: 4, Log: 6, At: core.NodeID{Node: 3}}},
+		func(pool core.BufPool, g uint64, ds *[]DiskAddr, m *core.Msg) error {
+			return EncodeDisks(pool, g, *ds, m)
+		},
+		func(pool core.BufPool, m *core.Msg) ([]DiskAddr, error) { return DecodeDisks(pool, m, nil) })
+}

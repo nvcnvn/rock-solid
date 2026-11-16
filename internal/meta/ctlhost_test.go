@@ -208,10 +208,23 @@ func (r *hostRun) report(nr *NodeReport) {
 	r.recv(core.NodeID{Node: nr.Node, Loop: 1}, m)
 }
 
-// tables decodes the session tables the host sent since the last call, by peer and token.
+// dropDisks frees the disk memberships sent and drops them from sent.
+func (r *hostRun) dropDisks() {
+	r.sent = slices.DeleteFunc(r.sent, func(a core.Action) bool {
+		if _, k, _, _ := Peek(&a.Msg); k == KindDisks {
+			free(&core.Context{Pool: r.pool}, &a.Msg)
+			return true
+		}
+		return false
+	})
+}
+
+// tables decodes the session tables the host sent since the last call, by peer and token, and
+// frees the disk memberships.
 func (r *hostRun) tables() map[core.NodeID][]uint64 {
 	r.t.Helper()
 	got := map[core.NodeID][]uint64{}
+	r.dropDisks()
 	for _, a := range r.sent {
 		var st chunkstore.SessionTable
 		if err := DecodeSessions(r.pool, &a.Msg, &st); err != nil {
@@ -225,20 +238,39 @@ func (r *hostRun) tables() map[core.NodeID][]uint64 {
 	return got
 }
 
+// A client's session start, sent twice before it commits, starts one session, whose ID the client
+// hears under its request; a node's fetch then gets a table with the session live.
 func TestASingleVoterHostLeadsAndAnswersAFetchUnderItsToken(t *testing.T) {
 	r := newHostRun(t)
 	r.lead()
 	r.report(&NodeReport{Node: hostNode.Node})
-	r.h.Control().StartSession(hostNode.Node, 1)
+	r.tables()
+	client := core.NodeID{Node: 9, Loop: 2}
+	for range 2 {
+		var m core.Msg
+		if err := EncodeSessionStart(r.pool, hostGroup, 5, &m); err != nil {
+			t.Fatal(err)
+		}
+		r.recv(client, m)
+	}
 	var started []SessionStart
 	for range 10 {
 		r.run(StepInterval)
 		started = append(started, r.out.Started...)
 	}
-	if len(started) != 1 || started[0].ID == 0 {
+	if len(started) != 1 || started[0].ID == 0 || started[0].Node != client.Node {
 		t.Fatalf("started %+v", started)
 	}
-	r.tables()
+	if len(r.sent) != 1 || r.sent[0].Peer != client {
+		t.Fatalf("the start answered %+v", r.sent)
+	}
+	if id, err := DecodeStarted(r.pool, &r.sent[0].Msg); err != nil || id != started[0].ID {
+		t.Fatalf("the client heard session %d, %v; started %d", id, err, started[0].ID)
+	}
+	if _, _, token, _ := Peek(&r.sent[0].Msg); token != 5 {
+		t.Fatalf("the start answered under token %d", token)
+	}
+	r.sent = r.sent[:0]
 	var m core.Msg
 	if err := EncodeSessionFetch(r.pool, hostGroup, 77, &m); err != nil {
 		t.Fatal(err)
@@ -289,6 +321,39 @@ func TestAFencePushesTheSessionTableToEveryNodeHeardFrom(t *testing.T) {
 	r.report(&NodeReport{Node: 3, Sessions: 1})
 	if got := r.tables(); len(got) != 1 || len(got[core.NodeID{Node: 2, Loop: 1}]) != 2 {
 		t.Fatalf("a heartbeat behind and one current got %v; only the one behind gets the table", got)
+	}
+}
+
+// A node's report is answered with the committed membership: a disk it reports is named, with its
+// log and the loop the report came from, only once the record holding it commits.
+func TestAReportIsAnsweredWithTheCommittedDisks(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	nr := NodeReport{Node: hostNode.Node, Opened: []OpenedDisk{{Device: 1, Log: 0x55, Blocks: 1 << 20}}}
+	disksSent := func() []DiskAddr {
+		var got []DiskAddr
+		for _, a := range r.sent {
+			if _, k, _, _ := Peek(&a.Msg); k == KindDisks && a.Peer == hostNode {
+				ds, err := DecodeDisks(r.pool, &a.Msg, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = ds
+			}
+			free(&core.Context{Pool: r.pool}, &a.Msg)
+		}
+		r.sent = r.sent[:0]
+		return got
+	}
+	r.report(&nr)
+	if got := disksSent(); len(got) != 0 {
+		t.Fatalf("before the record commits the report got %+v", got)
+	}
+	r.run(StepInterval * 3)
+	r.report(&nr)
+	want := []DiskAddr{{Disk: 1, Log: 0x55, At: hostNode}}
+	if got := disksSent(); !slices.Equal(got, want) {
+		t.Fatalf("after the record commits the report got %+v, want %+v", got, want)
 	}
 }
 
@@ -688,17 +753,18 @@ func TestAHostWhoseDiskFailsStops(t *testing.T) {
 	}
 }
 
-// A follower of a three-voter group answers a node's report, session fetch and table fetch with
-// the leader's node.
+// A follower of a three-voter group answers a node's report, session fetch, table fetch and
+// session start with the leader's node.
 func TestAFollowerRedirectsANodeToTheLeader(t *testing.T) {
 	c := newGroup(t, 3, false)
 	l := c.elect()
 	f := (l + 1) % 3
 	h := &CtlHost{shard: c.n[f].s, sv: NewServer(), id: uint64(f) + 1, group: 5}
-	var msgs [3]core.Msg
+	var msgs [4]core.Msg
 	_ = EncodeNodeReport(c.n[f].pool, 5, &NodeReport{Node: hostNode.Node}, &msgs[0])
 	_ = EncodeSessionFetch(c.n[f].pool, 5, 1, &msgs[1])
 	_ = EncodeTableFetch(c.n[f].pool, 5, &msgs[2])
+	_ = EncodeSessionStart(c.n[f].pool, 5, 1, &msgs[3])
 	for i := range msgs {
 		var out CtlHostOutput
 		ctx := c.ctx(f)
@@ -759,6 +825,7 @@ func TestACommittedTableReachesEveryNode(t *testing.T) {
 	r.sent = r.sent[:0]
 	r.report(&NodeReport{Node: 2})
 	r.report(&NodeReport{Node: 3, Epoch: got.Epoch})
+	r.dropDisks()
 	if len(r.sent) != 1 || r.sent[0].Peer != (core.NodeID{Node: 2, Loop: 1}) {
 		t.Fatalf("heartbeats behind and current after a failover got %+v; only the one behind gets the table", r.sent)
 	}

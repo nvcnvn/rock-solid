@@ -66,13 +66,17 @@ type CtlHost struct {
 	token uint64
 	// nodes are the nodes heard from within NodeDownAfter, by ID, each at the loop it last
 	// reported from.
-	nodes   []heardNode
-	sout    Output
-	cout    ControlOutput
-	answers []Answer
-	nr      NodeReport
-	disks   []chunkstore.Disk
-	stepAt  core.Tick
+	nodes []heardNode
+	// starting are the session starts handed to the Control and not yet answered, each with the
+	// loop that asked.
+	starting []starter
+	addrs    []DiskAddr
+	sout     Output
+	cout     ControlOutput
+	answers  []Answer
+	nr       NodeReport
+	disks    []chunkstore.Disk
+	stepAt   core.Tick
 }
 
 // ctlOwner is the owner the group's blobs carry on the host's disk log.
@@ -87,6 +91,11 @@ var ErrVoters = errors.New("meta: the voters given are not those the control-pla
 type heardNode struct {
 	at    core.NodeID
 	heard core.Tick
+}
+
+type starter struct {
+	at      core.NodeID
+	request uint64
 }
 
 // FormatCtlHost starts a host on a new disk, which it formats with sb. Its first round is the
@@ -212,11 +221,13 @@ func (h *CtlHost) recvGroup(ctx *core.Context, ev *core.Event, out *CtlHostOutpu
 		return
 	case kind == KindNodeReport:
 		h.report(ctx, ev, out)
-	case kind != KindSessionFetch && kind != KindTableFetch:
+	case kind != KindSessionFetch && kind != KindTableFetch && kind != KindSessionStart:
 	case h.ctl == nil:
 		h.redirect(ctx, ev.Peer, out)
 	case kind == KindTableFetch:
 		h.send(ctx, ev.Peer, KindTable, out)
+	case kind == KindSessionStart:
+		h.startSession(ctx, ev.Peer, token)
 	default:
 		if t, ok := h.ctl.FetchAnswer(lease.Now(ctx), h.leased(ctx)); ok {
 			h.push(ctx, ev.Peer, token, &t, out)
@@ -260,6 +271,35 @@ func (h *CtlHost) report(ctx *core.Context, ev *core.Event, out *CtlHostOutput) 
 		out.Errs = append(out.Errs, err)
 	}
 	h.handOut(ctx, out)
+	h.sendDisks(ctx, ev.Peer, out)
+}
+
+// sendDisks answers a node's report with the committed membership: each disk not gone whose node
+// was heard from, at the loop it reported from, so the node learns its own disks' IDs and its
+// replicas the loops of their members.
+func (h *CtlHost) sendDisks(ctx *core.Context, to core.NodeID, out *CtlHostOutput) {
+	h.addrs = h.addrs[:0]
+	for _, d := range h.ctl.disks {
+		i, ok := slices.BinarySearchFunc(h.nodes, d.Node, func(n heardNode, id uint32) int { return cmp.Compare(n.at.Node, id) })
+		if ok && !d.Gone {
+			h.addrs = append(h.addrs, DiskAddr{Disk: d.ID, Log: d.Log, At: h.nodes[i].at})
+		}
+	}
+	a := core.Action{Kind: core.ActNetSend, Peer: to, Reply: true}
+	if EncodeDisks(ctx.Pool, h.group, h.addrs, &a.Msg) == nil {
+		out.Actions = append(out.Actions, a)
+	}
+}
+
+// startSession hands the Control a client's session start while it serves, once per request the client
+// is still waiting on; the client asks again for one it never hears of.
+func (h *CtlHost) startSession(ctx *core.Context, at core.NodeID, request uint64) {
+	s := starter{at: at, request: request}
+	if slices.Contains(h.starting, s) || !h.ctl.Serves(lease.Now(ctx), h.leased(ctx)) {
+		return
+	}
+	h.starting = append(h.starting, s)
+	h.ctl.StartSession(at.Node, request)
 }
 
 func (h *CtlHost) leased(ctx *core.Context) bool { return h.shard.Raft().LeaseRead(ctx) }
@@ -297,6 +337,17 @@ func (h *CtlHost) answer(ctx *core.Context, a *Answer, out *CtlHostOutput) {
 // that is; and the session table pushed to every such node, or to each node named that is.
 func (h *CtlHost) handOut(ctx *core.Context, out *CtlHostOutput) {
 	out.Started = append(out.Started, h.cout.Started...)
+	for _, s := range h.cout.Started {
+		i := slices.IndexFunc(h.starting, func(w starter) bool { return w.at.Node == s.Node && w.request == s.Request })
+		if i < 0 {
+			continue
+		}
+		a := core.Action{Kind: core.ActNetSend, Peer: h.starting[i].at, Reply: true}
+		if EncodeStarted(ctx.Pool, h.group, s.Request, s.ID, &a.Msg) == nil {
+			out.Actions = append(out.Actions, a)
+		}
+		h.starting = slices.Delete(h.starting, i, i+1)
+	}
 	h.nodes = slices.DeleteFunc(h.nodes, func(n heardNode) bool { return ctx.Now-min(n.heard, ctx.Now) >= chunkstore.NodeDownAfter })
 	for _, n := range h.nodes {
 		if h.cout.Push {
@@ -434,7 +485,7 @@ func (h *CtlHost) fail(err error, out *CtlHostOutput) {
 func (h *CtlHost) lead(ctx *core.Context, out *CtlHostOutput) {
 	r := h.shard.Raft()
 	if h.ctl != nil && (r.Leader() != h.id || r.Term() != h.term) {
-		h.ctl = nil
+		h.ctl, h.starting = nil, h.starting[:0]
 	}
 	if h.ctl != nil || h.term == r.Term() || !r.LeaseRead(ctx) {
 		return
