@@ -77,6 +77,9 @@ type CtlHost struct {
 // ctlOwner is the owner the group's blobs carry on the host's disk log.
 const ctlOwner = 1
 
+// ErrLogFull reports a host whose log reached max_replay_bytes, which nothing checkpoints yet.
+var ErrLogFull = errors.New("meta: the control-plane log reached max_replay_bytes and is never checkpointed")
+
 // ErrVoters reports a host restarted with voters other than those its disk was formatted with.
 var ErrVoters = errors.New("meta: the voters given are not those the control-plane log was formatted with")
 
@@ -339,6 +342,9 @@ func (h *CtlHost) after(ctx *core.Context, out *CtlHostOutput) {
 		if r := h.sout.Raft.Flush; r != 0 && h.err == nil {
 			h.sout.Raft.Flush = 0
 			h.fail(h.disk.Write(ctx, ctlOwner, r, &h.sout.Raft.Round, &h.lout), out)
+			if h.disk.Log.CheckpointDue() {
+				h.fail(ErrLogFull, out)
+			}
 		}
 		if h.shard == nil || h.err != nil {
 			break

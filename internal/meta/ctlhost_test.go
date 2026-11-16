@@ -39,6 +39,7 @@ func ctlLogConfig() disklog.Config {
 // 0 is h, and the storage nodes' messages go to it.
 type hostRun struct {
 	t     *testing.T
+	lc    disklog.Config
 	h     *CtlHost
 	hs    []*CtlHost
 	disks []*sim.Disk
@@ -62,12 +63,17 @@ type hostWork struct {
 func newHostRun(t *testing.T) *hostRun { return newHostGroup(t, 1) }
 
 func newHostGroup(t *testing.T, voters int) *hostRun {
-	r := &hostRun{t: t, hs: make([]*CtlHost, voters), pool: sim.NewPool(16<<20, 0), now: 5_000_000}
+	return newHostGroupOn(t, voters, ctlLogConfig())
+}
+
+// newHostGroupOn is newHostGroup, each host's disk log on lc.
+func newHostGroupOn(t *testing.T, voters int, lc disklog.Config) *hostRun {
+	r := &hostRun{t: t, lc: lc, hs: make([]*CtlHost, voters), pool: sim.NewPool(16<<20, 0), now: 5_000_000}
 	for i := range voters {
 		r.disks = append(r.disks, sim.NewDisk(ctlGeometry.DiskBlocks()))
 		sb := disklog.Superblock{LogID: uint64(i) + 1, Geometry: ctlGeometry}
 		r.do(i, func(ctx *core.Context, out *CtlHostOutput) {
-			h, err := FormatCtlHost(ctx, r.config(i), ctlLogConfig(), sb, out)
+			h, err := FormatCtlHost(ctx, r.config(i), r.lc, sb, out)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -100,7 +106,7 @@ func (r *hostRun) restartWith(i int, cfg Config) {
 	r.disks[i].Crash(func(int, core.LBA) bool { return false })
 	r.work = slices.DeleteFunc(r.work, func(w hostWork) bool { return w.at == i || w.from == i })
 	r.do(i, func(ctx *core.Context, out *CtlHostOutput) {
-		h, err := OpenCtlHost(ctx, cfg, ctlLogConfig(), ctlGeometry.DiskBlocks(), out)
+		h, err := OpenCtlHost(ctx, cfg, r.lc, ctlGeometry.DiskBlocks(), out)
 		if err != nil {
 			r.t.Fatal(err)
 		}
@@ -466,6 +472,30 @@ func TestAVoterRestartedWithOtherVotersStops(t *testing.T) {
 	}
 	if a := r.txnAt(o, 11, "z"); a == nil || a.Err != nil {
 		t.Fatalf("the other two voters answered %+v", a)
+	}
+}
+
+// A log that reaches max_replay_bytes, which nothing checkpoints yet, stops the host with
+// ErrLogFull, so its process exits rather than keep a Control that never commits again, and
+// stops again once restarted.
+func TestAHostWhoseLogFillsStops(t *testing.T) {
+	lc := ctlLogConfig()
+	lc.MaxReplayBytes = 64 << 10
+	r := newHostGroupOn(t, 1, lc)
+	r.lead()
+	r.failing = true
+	for k := range 200 {
+		if a := r.txnAt(0, uint64(100+k), "v"); a == nil {
+			break
+		}
+	}
+	if !errors.Is(r.h.Err(), ErrLogFull) || r.h.Control() != nil {
+		t.Fatalf("a full log left the host with error %v and Control %v", r.h.Err(), r.h.Control())
+	}
+	r.restart(0)
+	r.run(raftshard.TickInterval * 400)
+	if !errors.Is(r.h.Err(), ErrLogFull) {
+		t.Fatalf("restarted on a full log, the host has error %v", r.h.Err())
 	}
 }
 
