@@ -209,8 +209,8 @@ func TestATxnToTheGroupIsAnswered(t *testing.T) {
 }
 
 // Before it leads, the host has no Control: a chunkstore frame is dropped and its buffer freed,
-// and a fetch goes unanswered.
-func TestAHostThatDoesNotLeadAnswersNoFetchAndFreesFrames(t *testing.T) {
+// and a fetch is answered with no leader known, so the node moves to its next address.
+func TestAHostWithNoLeaderFreesFramesAndRedirectsAFetch(t *testing.T) {
 	r := newHostRun(t)
 	var m core.Msg
 	if err := chunkstore.Attach(r.pool, &m, make([]byte, core.MaxInlineMsg+1), core.NoBuf); err != nil {
@@ -221,7 +221,79 @@ func TestAHostThatDoesNotLeadAnswersNoFetchAndFreesFrames(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.recv(hostNode, m)
-	if r.h.Control() != nil || len(r.sent) != 0 || r.pool.Live() != 0 {
+	if r.h.Control() != nil || len(r.sent) != 1 || r.pool.Live() != 0 {
 		t.Fatalf("sent %v, %d buffers live", r.sent, r.pool.Live())
+	}
+	if _, known, err := DecodeLeader(r.pool, &r.sent[0].Msg); err != nil || known {
+		t.Fatalf("answered a leader known %v: %v", known, err)
+	}
+}
+
+// A follower of a three-voter group answers a node's report, session fetch and table fetch with
+// the leader's node.
+func TestAFollowerRedirectsANodeToTheLeader(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	f := (l + 1) % 3
+	h := &CtlHost{shard: c.n[f].s, sv: NewServer(), id: uint64(f) + 1, group: 5}
+	var msgs [3]core.Msg
+	_ = EncodeNodeReport(c.n[f].pool, 5, &NodeReport{Node: hostNode.Node}, &msgs[0])
+	_ = EncodeSessionFetch(c.n[f].pool, 5, 1, &msgs[1])
+	_ = EncodeTableFetch(c.n[f].pool, 5, &msgs[2])
+	for i := range msgs {
+		var out CtlHostOutput
+		ctx := c.ctx(f)
+		h.OnEvent(&ctx, &core.Event{Kind: core.EvNetRecv, Peer: hostNode, Msg: msgs[i]}, &out)
+		var sent []core.Action
+		for _, a := range out.Actions {
+			if a.Kind == core.ActNetSend && a.Peer == hostNode {
+				sent = append(sent, a)
+			}
+		}
+		if len(sent) != 1 {
+			t.Fatalf("message %d answered %+v", i, sent)
+		}
+		at, known, err := DecodeLeader(c.n[f].pool, &sent[0].Msg)
+		if err != nil || !known || at != (core.NodeID{Node: uint32(l)}) {
+			t.Fatalf("message %d answered leader %v known %v, %v; leader is %d", i, at, known, err, l)
+		}
+	}
+}
+
+// A committed table change sends its delta to every node that reported, and a node's table fetch
+// gets the whole table.
+func TestACommittedTableReachesEveryNode(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	for n := range uint32(2) {
+		r.report(&NodeReport{Node: n + 2})
+	}
+	r.tables()
+	if err := r.h.Control().SetPool(1, spec(1, 16), disks(2)); err != nil {
+		t.Fatal(err)
+	}
+	r.run(StepInterval * 3)
+	var to []core.NodeID
+	for _, a := range r.sent {
+		if d, err := DecodeDelta(r.pool, &a.Msg); err == nil && d.Epoch == r.h.Control().Table().Epoch {
+			to = append(to, a.Peer)
+		}
+		free(&core.Context{Pool: r.pool}, &a.Msg)
+	}
+	r.sent = r.sent[:0]
+	if want := []core.NodeID{{Node: 2, Loop: 1}, {Node: 3, Loop: 1}}; !slices.Equal(to, want) {
+		t.Fatalf("delta sent to %v, want %v", to, want)
+	}
+	var m core.Msg
+	if err := EncodeTableFetch(r.pool, hostGroup, &m); err != nil {
+		t.Fatal(err)
+	}
+	r.recv(hostNode, m)
+	if len(r.sent) != 1 || r.sent[0].Peer != hostNode {
+		t.Fatalf("a table fetch answered %+v", r.sent)
+	}
+	got, err := DecodeTable(r.pool, &r.sent[0].Msg)
+	if err != nil || got.Epoch != r.h.Control().Table().Epoch || len(got.Pools) != 1 {
+		t.Fatalf("a table fetch got %+v, %v", got, err)
 	}
 }

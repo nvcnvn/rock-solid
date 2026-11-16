@@ -30,10 +30,11 @@ func (o *CtlHostOutput) Reset() {
 
 // CtlHost is one replica of the control-plane group and, while it leads with an entry of its term
 // applied, the Control beside it. It takes the group's messages, the sharded API's Txns to the
-// group, each storage node's report and session fetch, and the chunkstore frames of replicas
-// (reports, member timeouts, probe replies); it steps its Control every StepInterval and after
-// each answer, proposing what the Control asks, and turns the Control's session tables into
-// pushes with token 0 to the nodes that reported. A round of its group is durable as soon as it
+// group, each storage node's report, session fetch and table fetch, and the chunkstore frames of
+// replicas (reports, member timeouts, probe replies); it steps its Control every StepInterval and
+// after each answer, proposing what the Control asks, and sends the nodes that reported the
+// placement tables and session tables the Control hands out, a session table pushed with token 0.
+// Without a Control it answers a node's report or fetch with the leader it knows. A round of its group is durable as soon as it
 // is taken: its log lives in memory only.
 type CtlHost struct {
 	shard *Shard
@@ -117,12 +118,33 @@ func (h *CtlHost) recvGroup(ctx *core.Context, ev *core.Event, out *CtlHostOutpu
 		return
 	case kind == KindNodeReport:
 		h.report(ctx, ev, out)
-	case kind == KindSessionFetch && h.ctl != nil:
+	case kind != KindSessionFetch && kind != KindTableFetch:
+	case h.ctl == nil:
+		h.redirect(ctx, ev.Peer, out)
+	case kind == KindTableFetch:
+		h.send(ctx, ev.Peer, KindTable, out)
+	default:
 		if t, ok := h.ctl.FetchAnswer(lease.Now(ctx), h.leased(ctx)); ok {
 			h.push(ctx, ev.Peer, token, &t, out)
 		}
 	}
 	free(ctx, &ev.Msg)
+}
+
+// redirect answers a node's report or fetch with the leader this replica knows, or none, so the
+// node moves to it or to its next address; a replica that leads but has no Control yet answers
+// nothing, and the node asks again.
+func (h *CtlHost) redirect(ctx *core.Context, to core.NodeID, out *CtlHostOutput) {
+	r := h.shard.Raft()
+	id := r.Leader()
+	if id == h.id {
+		return
+	}
+	at, known := r.Node(id)
+	a := core.Action{Kind: core.ActNetSend, Peer: to, Reply: true}
+	if EncodeLeader(ctx.Pool, h.group, at, known, &a.Msg) == nil {
+		out.Actions = append(out.Actions, a)
+	}
 }
 
 // report takes a node's report from the loop it names, which pushes then go to.
@@ -136,6 +158,7 @@ func (h *CtlHost) report(ctx *core.Context, ev *core.Event, out *CtlHostOutput) 
 	}
 	h.nodes[i] = ev.Peer
 	if h.ctl == nil {
+		h.redirect(ctx, ev.Peer, out)
 		return
 	}
 	h.cout.Reset()
@@ -174,10 +197,19 @@ func (h *CtlHost) answer(ctx *core.Context, a *Answer, out *CtlHostOutput) {
 	h.handOut(ctx, out)
 }
 
-// handOut turns the Control's output into the host's: the sessions started and the session table
-// pushed to every node heard from, or to each node named that is.
+// handOut turns the Control's output into the host's: the sessions started; a committed table's
+// delta sent to every node heard from, and the whole table to each node named that is; and the
+// session table pushed to every node heard from, or to each node named that is.
 func (h *CtlHost) handOut(ctx *core.Context, out *CtlHostOutput) {
 	out.Started = append(out.Started, h.cout.Started...)
+	for _, n := range h.nodes {
+		if h.cout.Push {
+			h.send(ctx, n, KindDelta, out)
+		}
+		if slices.Contains(h.cout.Tables, n.Node) {
+			h.send(ctx, n, KindTable, out)
+		}
+	}
 	if !h.cout.SessionPush && len(h.cout.SessionTables) == 0 {
 		return
 	}
@@ -186,6 +218,21 @@ func (h *CtlHost) handOut(ctx *core.Context, out *CtlHostOutput) {
 		if h.cout.SessionPush || slices.Contains(h.cout.SessionTables, n.Node) {
 			h.push(ctx, n, 0, &t, out)
 		}
+	}
+}
+
+// send sends a node the committed placement table whole, or the delta just committed. One the
+// pool has no buffer for is not sent: the node's replicas find the gap and fetch the table.
+func (h *CtlHost) send(ctx *core.Context, to core.NodeID, kind byte, out *CtlHostOutput) {
+	a := core.Action{Kind: core.ActNetSend, Peer: to, Reply: true}
+	var err error
+	if kind == KindDelta {
+		err = EncodeDelta(ctx.Pool, h.group, &h.cout.Delta, &a.Msg)
+	} else {
+		err = EncodeTable(ctx.Pool, h.group, h.ctl.Table(), &a.Msg)
+	}
+	if err == nil {
+		out.Actions = append(out.Actions, a)
 	}
 }
 

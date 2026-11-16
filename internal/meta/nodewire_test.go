@@ -155,3 +155,80 @@ func FuzzDecodeSessions(f *testing.F) {
 		return again, true
 	})
 }
+
+func TestPlacementAndLeaderMessagesCrossTheWireWhole(t *testing.T) {
+	r, _ := poolRun(t)
+	tbl := r.ctl.Table()
+	pool := sim.NewPool(1<<20, 0)
+	var m core.Msg
+	if err := EncodeTable(pool, 1, tbl, &m); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeTable(pool, &m)
+	if err != nil || !bytes.Equal(chunkstore.AppendTable(nil, &got), chunkstore.AppendTable(nil, tbl)) || len(tbl.Pools) == 0 {
+		t.Fatalf("decoded %v: %+v, sent %+v", err, got, tbl)
+	}
+	free(&core.Context{Pool: pool}, &m)
+	d := chunkstore.MakeDelta(&chunkstore.Table{}, tbl)
+	if err := EncodeDelta(pool, 1, &d, &m); err != nil {
+		t.Fatal(err)
+	}
+	gd, err := DecodeDelta(pool, &m)
+	if err != nil || !bytes.Equal(chunkstore.AppendDelta(nil, &gd), chunkstore.AppendDelta(nil, &d)) {
+		t.Fatalf("decoded %v: %+v, sent %+v", err, gd, d)
+	}
+	free(&core.Context{Pool: pool}, &m)
+	for _, known := range []bool{false, true} {
+		if err := EncodeLeader(pool, 1, core.NodeID{Node: 1 << 31, Loop: 7}, known, &m); err != nil {
+			t.Fatal(err)
+		}
+		l, k, err := DecodeLeader(pool, &m)
+		if err != nil || k != known || known && l != (core.NodeID{Node: 1 << 31, Loop: 7}) {
+			t.Fatalf("decoded %v: %v %v", err, l, k)
+		}
+	}
+	if pool.Live() != 0 {
+		t.Fatalf("%d buffers left", pool.Live())
+	}
+}
+
+// fuzzRecode fuzzes a decoder of a message with no token through fuzzNodeWire: decode, then
+// encode again into the same group.
+func fuzzRecode[T any](f *testing.F, seed T, enc func(core.BufPool, uint64, *T, *core.Msg) error, dec func(core.BufPool, *core.Msg) (T, error)) {
+	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) { _ = enc(pool, 1, &seed, m) }, func(pool core.BufPool, m *core.Msg) (core.Msg, bool) {
+		var again core.Msg
+		g, _, _, _ := Peek(m)
+		v, err := dec(pool, m)
+		if err != nil {
+			return again, false
+		}
+		if err := enc(pool, g, &v, &again); err != nil {
+			panic(err)
+		}
+		return again, true
+	})
+}
+
+func FuzzDecodeTableMsg(f *testing.F) {
+	fuzzRecode(f, chunkstore.Table{Epoch: 3}, EncodeTable, DecodeTable)
+}
+
+func FuzzDecodeDeltaMsg(f *testing.F) {
+	fuzzRecode(f, chunkstore.Delta{Epoch: 3}, EncodeDelta, DecodeDelta)
+}
+
+type leaderMsg struct {
+	at    core.NodeID
+	known bool
+}
+
+func FuzzDecodeLeader(f *testing.F) {
+	fuzzRecode(f, leaderMsg{core.NodeID{Node: 2, Loop: 3}, true},
+		func(pool core.BufPool, g uint64, l *leaderMsg, m *core.Msg) error {
+			return EncodeLeader(pool, g, l.at, l.known, m)
+		},
+		func(pool core.BufPool, m *core.Msg) (leaderMsg, error) {
+			at, known, err := DecodeLeader(pool, m)
+			return leaderMsg{at, known}, err
+		})
+}

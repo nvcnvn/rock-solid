@@ -13,11 +13,18 @@ import (
 // log, blocks, reserve and class, a count and each failed device, a count and each halt's group,
 // ID, index and age. A session fetch has no body; its token is the node's. A session table's
 // token is the fetch it answers, 0 when pushed unasked, and its body is its version, next ID, a
-// count and each live ID as its gap above the one before.
+// count and each live ID as its gap above the one before. A placement table's body is
+// chunkstore.AppendTable's encoding and a delta's AppendDelta's, both with token 0; a table fetch
+// has no body. A voter that does not lead answers a report or a fetch with the leader it knows:
+// a presence byte, then its node and loop.
 const (
 	KindNodeReport   byte = 0x42
 	KindSessionFetch byte = 0x43
 	KindSessions     byte = 0x44
+	KindTable        byte = 0x45
+	KindDelta        byte = 0x46
+	KindTableFetch   byte = 0x47
+	KindLeader       byte = 0x48
 )
 
 // encodeBody frames body as a message of kind into msg, or returns the pool's error.
@@ -148,4 +155,82 @@ func DecodeSessions(pool core.BufPool, msg *core.Msg, t *chunkstore.SessionTable
 		return ErrMalformed
 	}
 	return nil
+}
+
+// EncodeTable writes placement table t into msg, or returns the pool's error.
+func EncodeTable(pool core.BufPool, group uint64, t *chunkstore.Table, msg *core.Msg) error {
+	return encodeBody(pool, group, KindTable, 0, chunkstore.AppendTable(nil, t), msg)
+}
+
+// untokened is the body of a message of kind that carries no token, or ErrMalformed.
+func untokened(pool core.BufPool, kind byte, msg *core.Msg) ([]byte, error) {
+	if _, _, token, _ := Peek(msg); token != 0 {
+		return nil, ErrMalformed
+	}
+	return msgBody(pool, kind, msg)
+}
+
+// DecodeTable decodes a placement table message; one that does not decode, or has a token, is
+// ErrMalformed.
+func DecodeTable(pool core.BufPool, msg *core.Msg) (chunkstore.Table, error) {
+	b, err := untokened(pool, KindTable, msg)
+	if err != nil {
+		return chunkstore.Table{}, err
+	}
+	t, err := chunkstore.DecodeTable(b)
+	if err != nil {
+		return chunkstore.Table{}, ErrMalformed
+	}
+	return t, nil
+}
+
+// EncodeDelta writes placement table delta d into msg, or returns the pool's error.
+func EncodeDelta(pool core.BufPool, group uint64, d *chunkstore.Delta, msg *core.Msg) error {
+	return encodeBody(pool, group, KindDelta, 0, chunkstore.AppendDelta(nil, d), msg)
+}
+
+// DecodeDelta decodes a delta message; one that does not decode, or has a token, is ErrMalformed.
+func DecodeDelta(pool core.BufPool, msg *core.Msg) (chunkstore.Delta, error) {
+	b, err := untokened(pool, KindDelta, msg)
+	if err != nil {
+		return chunkstore.Delta{}, err
+	}
+	d, err := chunkstore.DecodeDelta(b)
+	if err != nil {
+		return chunkstore.Delta{}, ErrMalformed
+	}
+	return d, nil
+}
+
+// EncodeTableFetch writes a node's ask for the whole placement table into msg.
+func EncodeTableFetch(pool core.BufPool, group uint64, msg *core.Msg) error {
+	return encodeBody(pool, group, KindTableFetch, 0, nil, msg)
+}
+
+// EncodeLeader writes the leader a voter knows, at leader if known, into msg.
+func EncodeLeader(pool core.BufPool, group uint64, leader core.NodeID, known bool, msg *core.Msg) error {
+	body := []byte{0}
+	if known {
+		body = binary.AppendUvarint(binary.AppendUvarint([]byte{1}, uint64(leader.Node)), uint64(leader.Loop))
+	}
+	return encodeBody(pool, group, KindLeader, 0, body, msg)
+}
+
+// DecodeLeader decodes a leader message: the leader and whether the voter knows one; one that
+// does not decode, or has a token, is ErrMalformed.
+func DecodeLeader(pool core.BufPool, msg *core.Msg) (core.NodeID, bool, error) {
+	b, err := untokened(pool, KindLeader, msg)
+	if err != nil {
+		return core.NodeID{}, false, err
+	}
+	d := decoder{b: b}
+	known := d.byte()
+	var n, l uint64
+	if known == 1 {
+		n, l = d.uvarint(), d.uvarint()
+	}
+	if d.bad || len(d.b) != 0 || known > 1 || n > 0xffffffff || l > 0xffffffff {
+		return core.NodeID{}, false, ErrMalformed
+	}
+	return core.NodeID{Node: uint32(n), Loop: uint32(l)}, known == 1, nil
 }
