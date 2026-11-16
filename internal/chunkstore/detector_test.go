@@ -633,3 +633,13 @@ func TestLatencyBuckets(t *testing.T) {
 		t.Fatalf("p99 of 1001 with 11 slow: %d", got)
 	}
 }
+
+// A heartbeat whose pools count more than its disk's fill, as a counting bug would leave them, still keeps the disk up.
+func TestAHeartbeatWithPoolsPastItsFillKeepsItsDiskUp(t *testing.T) {
+	h := newDetector(t, 3, rep3Pool, sec)
+	for at := sec; at <= 10*sec; at += sec {
+		h.beats(at, at, 1)
+		h.send(AppendReport(nil, &Report{ID: 1, Disks: []DiskState{{Log: logOf(1), Fill: 1, Pools: []PoolLive{{Pool: 1, Live: core.BlocksPerChunk}}}}}), 0)
+	}
+	h.wantUp(1)
+}

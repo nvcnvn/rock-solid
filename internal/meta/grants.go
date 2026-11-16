@@ -77,13 +77,13 @@ type diskFill struct {
 	heard                 bool
 }
 
-// own is pool id's live blocks on the disk, never above its size.
+// own is pool id's live blocks on the disk, never above its live blocks or its size.
 func (f *diskFill) own(id core.PoolID, blocks uint64) uint64 {
 	i, ok := slices.BinarySearchFunc(f.pools, id, func(p chunkstore.PoolLive, id core.PoolID) int { return cmp.Compare(p.Pool, id) })
 	if !ok {
 		return 0
 	}
-	return min(f.pools[i].Live, blocks)
+	return min(f.pools[i].Live, f.live, blocks)
 }
 
 // grantPlants are bugs a test plants: a new leader counting a session it has not heard from at

@@ -407,12 +407,11 @@ func TestWireRejectsBadFields(t *testing.T) {
 		many[i] = PoolLive{Pool: core.PoolID(i + 1), Live: 1}
 	}
 	for what, pools := range map[string][]PoolLive{
-		"more pools than a heartbeat carries":     many,
-		"pools out of order":                      {{Pool: 7, Live: 1}, {Pool: 1, Live: 1}},
-		"a pool twice":                            {{Pool: 1, Live: 1}, {Pool: 1, Live: 1}},
-		"a pool with no live blocks":              {{Pool: 1}},
-		"a reserved pool":                         {{Pool: RecordPool, Live: 1}},
-		"pools holding more than the disk's fill": {{Pool: 1, Live: 600}, {Pool: 7, Live: 1000}},
+		"more pools than a heartbeat carries": many,
+		"pools out of order":                  {{Pool: 7, Live: 1}, {Pool: 1, Live: 1}},
+		"a pool twice":                        {{Pool: 1, Live: 1}, {Pool: 1, Live: 1}},
+		"a pool with no live blocks":          {{Pool: 1}},
+		"a reserved pool":                     {{Pool: RecordPool, Live: 1}},
 	} {
 		mustMalformed(t, what, padded(AppendReport(nil, &Report{Disks: []DiskState{{Log: 1, Fill: 1000, Pools: pools}}})), 0)
 	}

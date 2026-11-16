@@ -190,7 +190,7 @@ type Latency struct {
 	Latency core.Tick
 }
 
-// DiskState is what a node reports of one of its disks; Pools holds at most MaxDiskPools pools, by pool, each with live blocks, which sum to at most Fill.
+// DiskState is what a node reports of one of its disks; Pools holds at most MaxDiskPools pools, by pool, each with live blocks.
 type DiskState struct {
 	Log    uint64
 	Fill   uint64
@@ -563,7 +563,7 @@ func DecodeReport(b []byte, data int, rp *Report) error {
 			pools = rp.Disks[:len(rp.Disks)+1][len(rp.Disks)].Pools[:0]
 		}
 		d := DiskState{Log: r.u64(), Fill: r.u64(), Oldest: core.Tick(r.u64()), Failed: r.bool()}
-		d.Pools = r.pools(pools, d.Fill)
+		d.Pools = r.pools(pools)
 		rp.Disks = append(rp.Disks, d)
 	}
 	rp.Leads = rp.Leads[:0]
@@ -713,21 +713,19 @@ func (r *reader) u8() uint8   { return r.take(1)[0] }
 func (r *reader) u32() uint32 { return le.Uint32(r.take(4)) }
 func (r *reader) u64() uint64 { return le.Uint64(r.take(8)) }
 
-// pools reads a disk's live blocks by pool into dst: at most MaxDiskPools, ascending, none reserved or empty, summing to at most fill.
-func (r *reader) pools(dst []PoolLive, fill uint64) []PoolLive {
+// pools reads a disk's live blocks by pool into dst: at most MaxDiskPools, ascending, none reserved or empty.
+func (r *reader) pools(dst []PoolLive) []PoolLive {
 	n := r.count(poolLiveSize)
 	if n > MaxDiskPools {
 		r.bad = true
 		return dst
 	}
-	var sum uint64
 	for ; n > 0; n-- {
 		p := PoolLive{Pool: core.PoolID(r.u32()), Live: r.u64()}
-		if reserved(p.Pool) || p.Live == 0 || len(dst) > 0 && p.Pool <= dst[len(dst)-1].Pool || p.Live > fill-sum {
+		if reserved(p.Pool) || p.Live == 0 || len(dst) > 0 && p.Pool <= dst[len(dst)-1].Pool {
 			r.bad = true
 			return dst
 		}
-		sum += p.Live
 		dst = append(dst, p)
 	}
 	return dst

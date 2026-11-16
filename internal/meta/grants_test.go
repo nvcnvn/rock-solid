@@ -233,6 +233,7 @@ func TestCapacityTakesEachPoolsDataFromTheHeartbeat(t *testing.T) {
 	}{
 		{"pool 1's data and pool 2's", gb(20), gb(12), gb(5), gb(12), gb(40)*90/100 - (gb(20) - gb(12))},
 		{"a count above the disk's size", 2 * gb(40), 2 * gb(40), 0, gb(40), 0},
+		{"pools counting past the fill", gb(10), gb(12), gb(5), gb(10), gb(40) * 90 / 100},
 	} {
 		pools := []chunkstore.PoolLive{{Pool: 1, Live: c.own}}
 		if c.other != 0 {
