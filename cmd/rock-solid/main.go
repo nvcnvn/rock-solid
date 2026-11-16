@@ -68,7 +68,7 @@ func parseCtl(args []string) (ctlConfig, error) {
 	fs.Uint64Var(&cfg.Group, "group", 1, "the control-plane group's ID")
 	listen := fs.String("listen", "", "the address to take connections on (default: this voter's address in -voters)")
 	fs.StringVar(&cfg.Disk, "disk", "", "the file the group's log lives in")
-	fs.BoolVar(&cfg.Format, "format", false, "create the disk file and format it, as at a voter's first start")
+	fs.BoolVar(&cfg.Format, "format", false, "create the disk file and format it, as at a voter's first start; a file already there is made again only if its superblocks were never written")
 	fs.Int64Var(&cfg.DiskBytes, "disk-bytes", 1<<30, "the size of the disk file -format creates")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err

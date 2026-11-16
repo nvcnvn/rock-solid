@@ -3,12 +3,16 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand/v2"
 	"net/netip"
+	"os"
+	"slices"
 	"sync"
 
 	"go.etcd.io/raft/v3/raftpb"
+	"golang.org/x/sys/unix"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
@@ -67,7 +71,7 @@ func (d ctlDriver) Execute(a *core.Action) {
 
 func newCtl(cfg ctlConfig) (p *ctl, err error) {
 	if cfg.Format {
-		if err := uring.CreateFile(cfg.Disk, cfg.DiskBytes); err != nil {
+		if err := createDisk(cfg.Disk, cfg.DiskBytes); err != nil {
 			return nil, err
 		}
 	}
@@ -119,6 +123,57 @@ func newCtl(cfg ctlConfig) (p *ctl, err error) {
 		return nil, errors.New("ctl: the loop's inbox is full at start")
 	}
 	return p, nil
+}
+
+// createDisk makes the file -format formats, of size bytes. A file already there is made again
+// only if both its superblock blocks read as zeros, as a format cut short leaves them and as a
+// device's start formats one (chunkstore.StartDevice); any other file is refused, so -format
+// never overwrites a log.
+func createDisk(path string, size int64) error {
+	err := uring.CreateFile(path, size)
+	if !errors.Is(err, unix.EEXIST) {
+		return err
+	}
+	blank, berr := neverWritten(path)
+	switch {
+	case berr != nil:
+		return berr
+	case !blank:
+		return fmt.Errorf("ctl: -format: %s holds a superblock or other data, so it is never formatted over: %w", path, err)
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return uring.CreateFile(path, size)
+}
+
+// neverWritten reports whether block 0 of the file and the superblock copy its size places read
+// as zeros, or lie past its end.
+func neverWritten(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	at := []int64{0}
+	if g, err := disklog.GeometryFor(uint64(st.Size())); err == nil {
+		at = append(at, int64(g.SuperblockCopyLBA())*core.BlockSize)
+	}
+	b := make([]byte, core.BlockSize)
+	for _, off := range at {
+		n, err := f.ReadAt(b, off)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return false, err
+		}
+		if slices.ContainsFunc(b[:n], func(c byte) bool { return c != 0 }) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // Run runs the loop until Stop or the host stops for good, which it returns.

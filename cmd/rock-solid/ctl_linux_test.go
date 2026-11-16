@@ -15,6 +15,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/driver/tcp"
 	"github.com/nvcnvn/rock-solid/internal/loop"
 	"github.com/nvcnvn/rock-solid/internal/meta"
@@ -200,5 +201,73 @@ func TestASingleVoterControlPlaneAnswersOverTCPAndSurvivesAKill(t *testing.T) {
 	}
 	if after <= before {
 		t.Fatalf("after a kill and a restart the counter answered %d, before it %d", after, before)
+	}
+}
+
+// -format makes a file that is not there, and makes again one whose superblock blocks both read
+// as zeros, as a format cut short leaves it; a file with a byte in either block is refused and
+// left as it was.
+func TestFormatMakesAFileNeverWrittenAndRefusesAnyOther(t *testing.T) {
+	dir := os.Getenv("RS_URING_DIR")
+	if dir == "" {
+		dir = t.TempDir()
+	}
+	const size = 8 << 20
+	g, err := disklog.GeometryFor(size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyAt := int64(g.SuperblockCopyLBA()) * core.BlockSize
+	for _, c := range []struct {
+		name  string
+		bytes int64
+		at    int64
+		ok    bool
+	}{
+		{"absent", -1, 0, true},
+		{"zeros", size, -1, true},
+		{"short zeros", size / 4, -1, true},
+		{"superblock", size, 0, false},
+		{"copy", size, copyAt, false},
+	} {
+		path := filepath.Join(dir, "ctl-format-"+strings.ReplaceAll(c.name, " ", "-"))
+		t.Cleanup(func() { _ = os.Remove(path) })
+		if c.bytes >= 0 {
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Truncate(path, c.bytes); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if c.at >= 0 && c.bytes >= 0 {
+			f, err := os.OpenFile(path, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteAt([]byte{1}, c.at+7); err != nil {
+				t.Fatal(err)
+			}
+			_ = f.Close()
+		}
+		err := createDisk(path, size)
+		st, serr := os.Stat(path)
+		switch {
+		case serr != nil:
+			t.Fatalf("%s: %v", c.name, serr)
+		case c.ok && (err != nil || st.Size() != size):
+			t.Fatalf("%s: -format gave %v and a file of %d bytes", c.name, err, st.Size())
+		case !c.ok && (err == nil || st.Size() != c.bytes):
+			t.Fatalf("%s: -format gave %v and left a file of %d bytes", c.name, err, st.Size())
+		}
+		if !c.ok {
+			b := make([]byte, 1)
+			f, _ := os.Open(path)
+			_, _ = f.ReadAt(b, c.at+7)
+			_ = f.Close()
+			if b[0] != 1 {
+				t.Fatalf("%s: a refused -format changed the file", c.name)
+			}
+		}
 	}
 }
