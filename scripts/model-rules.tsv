@@ -127,4 +127,5 @@ voters/neg-joint-one-half	open	Plants for the voter replacement model
 voters/neg-delete-on-plan	open	Plants for the voter replacement model
 voters/neg-notice-any-index	open	Plants for the voter replacement model
 voters/neg-notice-non-member	open	Plants for the voter replacement model
-voters/neg-outgoing-leader-leaves	open	Plants for the voter replacement model
+voters/neg-no-support-ask	open	Voter replacement: drop support for a removed leader
+voters/neg-removed-keeps-lease	open	Voter replacement: drop support for a removed leader
