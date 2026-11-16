@@ -3306,7 +3306,8 @@ nodes without finishing.
 | `ci-asks` | 3 | As `ci-peering`, with the failure plans that hold no restart or format, under fairness, for the properties that every interval a failure ended is asked past and every client is answered |
 | `ci-leases` | 3 | Chunk 1 alone, with 1 block and whole-block writes; both clocks per node in full; every interval's members and activation; the Raft group; the lease plans but the six below |
 | `heavy-peering` | 4 | `ci-peering`'s, `ci-restarts`' and `ci-restarts-moved`'s plans and the free plan, and the unbounded liveness property |
-| `deep-leases` | 4 | `ci-leases`'s plans and the six it leaves out: four pair a partition with a pause, a suspend or a reboot, and two stop the holder in place while its grantor pauses or restarts |
+| `ci-hide` | 3 | `ci-leases`'s constants with one plan: PG 2's handover with exact clocks, the holder suspended under 1 s with no `Resumed`; apart from `ci-leases` so that a lease variant that also drops the margin for such a suspend fails on its own rule |
+| `deep-leases` | 4 | `ci-leases`'s and `ci-hide`'s plans and the six `ci-leases` leaves out: four pair a partition with a pause, a suspend or a reboot, and two stop the holder in place while its grantor pauses or restarts |
 | `deep-slow` | 3 | The delayed-message plan alone, with `ci-leases`'s constants and time to 5 s |
 
 `heavy-peering` runs apart from the lease plans because whether nodes have clocks is a constant of
@@ -5281,25 +5282,27 @@ heartbeat every 1 s, `rate_window` 10 s, `rate_gap` 100 ms, `max_margin` 50%, 1 
 - C is marked down in a new interval. Once the primary has re-peered, C's grant is no longer needed.
 - A grant that lapses during a pass: the read in that pass is refused.
 
-**Lease time.** The holder counts from when it asked and ends the lease when either clock shows 3.96
-s. The grantor counts from when it granted and keeps the grant until both clocks show 4 s. The
-request is sent at real time 0 and granted at 0.5 ms. Rates are relative to real time. The
-single-clock column is what counting on `CLOCK_BOOTTIME` alone would give (clock slew spike).
+**Lease time.** The holder counts from when it asked and ends the lease when either clock shows 2.96
+s: 4 s less `lease_drift` and less `core.ResumeThreshold`, 1 s, left for a suspend that delivers no
+`Resumed`. The grantor counts from when it granted and keeps the grant until both clocks show 4 s.
+The request is sent at real time 0 and granted at 0.5 ms. Rates are relative to real time. The
+single-clock column is what counting on `CLOCK_BOOTTIME` alone would give (clock slew spike), from a
+holder's end of 3.96 s, since that second belongs to the suspend.
 
 | Holder `BOOTTIME`, raw | Grantor `BOOTTIME`, raw | Holder ends (real s) | Grantor ends (real s) | Single-clock |
 | --- | --- | --- | --- | --- |
-| exact, exact | exact, exact | 3.960 | 4.0005 | Same |
-| +22.6%, exact | exact, exact | 3.230 | 4.0005 | Same |
-| −22.6%, exact | exact, exact | 3.960 | 4.0005 | Holder 5.116: 1.12 s overlap |
-| exact, exact | +22.6%, exact | 3.960 | 4.0005 | Grantor 3.263: 0.70 s overlap |
-| exact, exact | −22.6%, exact | 3.960 | 5.168 | Same |
-| −22.6%, exact | +22.6%, exact | 3.960 | 4.0005 | 1.85 s overlap |
-| −8.33% (chrony), exact | +8.33%, exact | 3.960 | 4.0005 | 0.63 s overlap |
-| exact, −1% | exact, +1% | 3.899 (margin 2.52%: the bound sees the raw clocks 2% apart) | 4.0005 | |
-| −100 ppm, −100 ppm (no daemon) | +100 ppm, +100 ppm | 3.9604 | 4.0001 | |
+| exact, exact | exact, exact | 2.960 | 4.0005 | Same |
+| +22.6%, exact | exact, exact | 2.414 | 4.0005 | Same |
+| −22.6%, exact | exact, exact | 2.960 | 4.0005 | Holder 5.116: 1.12 s overlap |
+| exact, exact | +22.6%, exact | 2.960 | 4.0005 | Grantor 3.263: 0.70 s overlap |
+| exact, exact | −22.6%, exact | 2.960 | 5.168 | Same |
+| −22.6%, exact | +22.6%, exact | 2.960 | 4.0005 | 1.85 s overlap |
+| −8.33% (chrony), exact | +8.33%, exact | 2.960 | 4.0005 | 0.63 s overlap |
+| exact, −1% | exact, +1% | 2.899 (margin 2.52%: the bound sees the raw clocks 2% apart) | 4.0005 | |
+| −100 ppm, −100 ppm (no daemon) | +100 ppm, +100 ppm | 2.9603 | 4.0001 | |
 | −1%, −1% (no daemon), before the first bound | +1%, +1% | No lease taken | | |
-| −1%, −1%, first lease, from grants `rate_gap` apart, 100 µs round trips | +1%, +1% | By 3.931 (margin up to 2.72%) | 3.961 | |
-| −1%, −1%, after a full window | +1%, +1% | 3.939 (margin 2.52%) | 3.961 | |
+| −1%, −1%, first lease, from grants `rate_gap` apart, 100 µs round trips | +1%, +1% | By 2.921 (margin up to 2.72%) | 3.961 | |
+| −1%, −1%, after a full window | +1%, +1% | 2.928 (margin 2.52%) | 3.961 | |
 
 - With a grantor's `CLOCK_BOOTTIME` 22.6% slow, a crash waits up to 5.2 s for the lease, past
   `node_down_after`.
@@ -5336,7 +5339,7 @@ and reports the pair; a margin of `max_margin` or more gives no lease. Times are
 | The pair started 6 s ago: thirds of the 6 s span, 100 µs, worst ends | 0, 100, G0 | 4,000,000, 4,000,100, G0 + 4,000,100 | 1.000051 | 1% |
 | First grant of a window | 0, 100, G0 | | none | No lease from this grantor; a request is sent at r_a + 100,000 |
 | Second grant, sent `rate_gap` after the first arrived, 100 µs, worst ends | 0, 100, G0 | 100,100, 100,200, G0 + 100,200 | 1.002000 | 1% |
-| The same with 1 ms round trips | 0, 1,000, G0 | 101,000, 102,000, G0 + 102,000 | 1.020000 | 2.5%: the first lease ends 3.90 s after the ask |
+| The same with 1 ms round trips | 0, 1,000, G0 | 101,000, 102,000, G0 + 102,000 | 1.020000 | 2.5%: the first lease ends 2.90 s after the ask |
 | A grant with a new run ID after a reboot, g = 1,200 | | | none | A new window starts and the old run's lease ends; no lease until its second grant |
 | Grantor raw about 50% fast | | g_b − g_a = 1.505 × (s_b − r_a) | 1.505 | 51%, past `max_margin`: no lease, reported |
 
@@ -5382,7 +5385,7 @@ g − g_a > (r − s_a) / (1 − m). The rows use m = 1% unless they say otherwi
 
 - A is primary of PG 17 and holds B's grant under support epoch 7.
   - A partition lasts 10 s.
-  - A stops serving at 3.96 s on its own clocks.
+  - A stops serving at 2.96 s on its own clocks.
   - B's grant lapses on both of B's clocks. B moves to support epoch 8 and helps peer interval 42,
     which moves PG 17 to C.
   - The partition heals before A sees that table.
@@ -5981,20 +5984,22 @@ commit, it must pass unplanted and break its invariant planted.
 | A held write ordered again although another primary led | The lead's term kept across another primary's interval | Trace: P, peering cut off from Q, holds W; interval 3 makes Q primary with P in `maintenance`; the successor's W′ and W2 complete at Q; interval 4 makes P primary again | | | Property 11's |
 | A returning primary keeps its pending versions by number | `Settle` keeps every pending version at or below the kept one (`settleByNumber`); no model row, since the model answers no client at peering | Trace: primary 2, cut off from disk 3, orders W as 1.1; interval 2, handed to disks 1 and 3 alone, makes disk 3 primary without disk 2, and W2 is acknowledged as 2.1; interval 3 makes disk 2 primary again, its peering keeping 2.1 (`TestAReturningPrimaryRefusesAPendingVersionOffTheKeptChain` runs it unplanted, the read run's seed 366 found it) | | | "no acknowledged version is ever dropped", checked against the first interval activated after the version's |
 | A kept primary reads below `min_live` | | Trace: interval 2 marks disk 3 down; disk 3 restarts, and interval 3 makes it primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone | | | Property 1's |
-| The 13 lease clock rows from the holder's slower clock to step check on grants only, and no restart wait | `internal/lease` plants on `Holder` and `Grantor` | Lease pair | Below | | "the holder holds a lease its grantor no longer keeps", or for property 10 "tripped" |
+| The 14 lease clock rows from the holder's slower clock to step check on grants only, no restart wait and no margin for a suspend that delivers no `Resumed` | `internal/lease` plants on `Holder` and `Grantor` | Lease pair | Below | | "the holder holds a lease its grantor no longer keeps", or for property 10 "tripped" |
 | A lease kept across a grantor's new run ID | The holder keeps its lease and window at a heartbeat from a new run | Trace in `internal/lease` (`TestALeaseKeptAcrossANewRunBreaksItsTrace`): the holder stops in place at 1 s, about 0.9 s after its lease formed, the grantor's heartbeats lost; the grantor resumes with a new run ID, heartbeats once and lets its grant end; the holder continues at 5 s. The pair run stops one side at a time and never reaches it (0 of 5,000) | | | "the holder holds a lease its grantor no longer keeps" |
-| A reboot that takes no time | The simulated reboot | Trace: grantor 3 reboots the instant after a grant, cut off from primary 2, its new boot 2% fast, and comes back primary with disk 2 in `maintenance` | | | Property 1's |
+| A reboot that takes no time | The simulated reboot | Trace: grantor 3 reboots the instant after a grant, cut off from primary 2, its new boot 2% fast, and comes back primary with disk 2 in `maintenance`, while primary 2 sleeps 0.99 s with no `Resumed`, spending the margin left for such a suspend | | | Property 1's |
 | Peer messages handled after reads in a pass | The simulated loop's first pass after a pause delivers client reads first | Trace: primary 2 stops in place with its clocks frozen for 10 s; interval 2 makes disk 3 primary with disk 2 in `maintenance`, handed to disks 1 and 3; a read tagged with interval 1 reaches disk 2 at 9 s, behind disk 3's heartbeats | | | Property 1's, as the read arrives |
 | Peering reaches only the last activated interval and the current one | | Trace: intervals 2 (disk 1 replaces disk 3) and 3 (disk 1 in `maintenance`) activate under primary 2 but the leader records neither; disk 2, cut off from disks 1 and 3, reads on in 3 with no lease while interval 4 makes disk 3 primary with disk 2 in `maintenance` | | | Property 1's |
 | A fresh grant with no table check | | Trace: interval 2 makes disk 3 primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone; disk 2 asks afresh once its lease lapses | | | Property 1's |
 
-The lease pair run's plants, seeds of 500 failing and the first: the holder ending on its slower
+The lease pair run's plants, seeds of 500 failing and the first. No margin for a suspend that
+delivers no `Resumed` 2 (28). The 1 s of that margin covers the errors of most other plants, so
+these plant it away too, and the run then draws no such suspend: the holder ending on its slower
 clock 68 (6), the grantor on its faster 96 (8), a lease before the first bound 1 (21), that with the
 step check at `1 + lease_drift / 2` 14 (6), widening only past `1 + 2 lease_drift` 20 (9), the
 margin `max(lease_drift, 1 − 1/B)` 3 of 5,000 (1,056: it needs a rate rise after the bound and a
-partition after a grant), no new window at a new run ID 12 (6), no end of leases on `Resumed` 8
-(28), no step check 55 (1), one on grants only 56 (1), no restart wait 96 (0); for property 10, the
-step check at `1 + lease_drift / 2` 25 (3) and against a grant that gave no lease 3 (265).
+partition after a grant), no end of leases on `Resumed` 7 (31). With the margin: no new window at a
+new run ID 9 (6), no step check 52 (1), one on grants only 53 (1), no restart wait 56 (2); for
+property 10, the step check at `1 + lease_drift / 2` 25 (3) and against a grant that gave no lease 3 (265).
 
 The read run also plants a primary that commits a version once its own log holds it, before its
 members do: a read returns a version the next interval drops at 295 seeds of 500, seed 0 first
@@ -6022,9 +6027,9 @@ strategy](design.md#testing-strategy) names what is left and the item that will 
 | P6 | The counter case under [Replica primary](#replica-primary) | As stated there; other PGs see no refusal | `TestASpentCounterAsksForTheNextInterval` |
 | P7 | `pg_count` 1,024 → 2,048 with writes in flight to PG 567 | Open: PGs 1,134 and 1,135 start one interval above 567, and every chunk's versions keep growing. The replica path splits no PG yet; the row runs in [Control-plane placement faults](#control-plane-placement-faults), under its split report rule | Placement's split cases only |
 | P8 | A disk's acknowledgment latency above `slow_disk_factor` times its pool's median for a whole `slow_disk_window`, then normal; a second disk slow at once | Marked down after the window and back after a whole normal window; two slow figures a window apart with none between leave it up; the second slow disk stays up where marking both would leave a PG below `min_live`. A cluster run with one disk 100× slow waits on the simulator's one clock ([tech debt](tech-debts.md#workaround-fail-slow-judged-on-reported-latencies-not-in-a-simulated-cluster)) | `TestAFailSlowDiskIsMarkedDown`, `TestFailSlowNeedsAWholeSlowWindow`, `TestTwoSlowDisksKeepMinLive`; the simulated disk's latency in `TestDiskLatencyAndFailSlow` |
-| P9 | Holder `BOOTTIME` −22.6%, grantor `BOOTTIME` +22.6%; or holder clocks −100 ppm, grantor +100 ppm | No overlap: the holder ends by 3.96 s, the grantor at 4.0 s or later | `TestLeaseTime` "opposite slews", "oscillators" |
+| P9 | Holder `BOOTTIME` −22.6%, grantor `BOOTTIME` +22.6%; or holder clocks −100 ppm, grantor +100 ppm | No overlap: the holder ends by 2.96 s, the grantor at 4.0 s or later | `TestLeaseTime` "opposite slews", "oscillators" |
 | P9b | Per seed: `BOOTTIME` slewed up to ±22.6% with raw within 100 ppm, or raw within 4% with `BOOTTIME` slewed or at the raw rate; cuts, VM stops, reboots, suspends | No lease outlasts its grant from the first lease, over 10,000 seeds | `TestNoLeaseOutlastsItsGrant` |
-| P10 | No daemon: holder's clocks both −1%, grantor's both +1%, after the first bound, once the window is full | Margin 2.52% plus the bound's overshoot; the holder ends by 3.939 s, the grantor at 3.961 s | `TestLeaseTime` "no daemon, raw 1% apart, full window" |
+| P10 | No daemon: holder's clocks both −1%, grantor's both +1%, after the first bound, once the window is full | Margin 2.52% plus the bound's overshoot; the holder ends by 2.928 s, the grantor at 3.961 s | `TestLeaseTime` "no daemon, raw 1% apart, full window" |
 | P10b | As P10, from the start, a partition right after the first grant | No lease before the second grant, `rate_gap` later; no overlap | `TestTheFirstGrantOfAWindowGivesNoLease`, `TestNoLeaseOutlastsItsGrant` |
 | P11 | A first-third grant with a 50 ms round trip | The bound, and the margin with it, widens only toward safety; one slow grant beside a fast one in the same third changes nothing | `TestRateBound` "slow first third", "one slow grant in the first third" |
 | P12 | Holder suspended: `BOOTTIME` gains, raw and `MONOTONIC` gain 0 | One `Resumed`; it ends every lease the primary holds, so its next read is refused, and it reads again about `rate_gap` later once its grantors renew. A grantor holding a newer table renews the holder only once the holder reports that table | `TestASuspendGivesOneResumedOnceItsGainReachesTheThreshold`, `TestTheRestartWaitAndResumedStopReads`, `TestResumed`, `TestAPrimaryReadsOnlyWithALeaseFromEveryUpMember`; the read run's suspends |
@@ -6246,9 +6251,9 @@ Trace tests (`internal/raftshard`, `lease_test.go`) for fortification on the per
 on the [Raft shard](#raft-shard)'s hand-driven network. Each replica's node has its own
 `lease.Holder` and `lease.Grantor`, which the test renews by hand: a lease takes two grants
 `rate_gap` apart, so the holder has a rate bound. Lease time follows the two-clock rule: the
-holder ends a grant `lease_drift` (40 ms of 4 s) early on its faster clock, counted from when it
-asked; the grantor waits the whole lease on its slower one. The expiry of one grant on the holder
-(3.96 s after the ask, a widened margin, no lease before a rate bound) is the lease package's, and
+holder ends a grant `lease_drift` (40 ms of 4 s) and `core.ResumeThreshold` (1 s) early on its
+faster clock, counted from when it asked; the grantor waits the whole lease on its slower one. The expiry of one grant on the holder
+(2.96 s after the ask, a widened margin, no lease before a rate bound) is the lease package's, and
 its tests under [Peering and read leases](#peering-and-read-leases) cover it; here the shard only
 reads it. `TestConfig` (Raft shard) asserts `CheckQuorum` off and `PreVote` on.
 
@@ -6277,16 +6282,16 @@ reads it. `TestConfig` (Raft shard) asserts `CheckQuorum` off and `PreVote` on.
 The leader counts itself as a fortified voter whose entry never expires: it votes for a
 challenger only after stepping down, and a replica that does not lead serves no lease read. The
 follower nodes' grants are asked at the times given; the test checks a lease read 1 µs before and
-at the end, 3.96 s after the ask named.
+at the end, 2.96 s after the ask named.
 
 | Voters | Fortified, asked at | Lease ends |
 | --- | --- | --- |
-| 3: L, F1, F2 | F1 (0 s) | 3.96 s, F1's expiry (the review criterion: a lease to that follower's expiry) |
-| 3 | F1 (0 s), F2 (2 s) | 5.96 s, the later expiry: the 2nd latest of ∞, 5.96 and 3.96 |
+| 3: L, F1, F2 | F1 (0 s) | 2.96 s, F1's expiry (the review criterion: a lease to that follower's expiry) |
+| 3 | F1 (0 s), F2 (2 s) | 4.96 s, the later expiry: the 2nd latest of ∞, 4.96 and 2.96 |
 | 3 | L only | No lease: reads go through ReadIndex |
-| 5 | a (0 s), b (1 s), c (2 s) | 4.96 s, the 3rd latest of ∞, 5.96, 4.96 and 3.96 |
+| 5 | a (0 s), b (1 s), c (2 s) | 3.96 s, the 3rd latest of ∞, 4.96, 3.96 and 2.96 |
 | 5 | a (0 s) | No lease |
-| Joint, new {L, D, E}, old {L, B, C} | B (0 s), D (1 s) | 3.96 s: each half gives its own quorum, and the old half's ends first |
+| Joint, new {L, D, E}, old {L, B, C} | B (0 s), D (1 s) | 2.96 s: each half gives its own quorum, and the old half's ends first |
 | Joint, as above | B (0 s), C (1 s) | No lease: the new half has no quorum |
 
 **Reads**
@@ -6326,6 +6331,11 @@ clocks within ±4% and a raw rate step after measurement, and one direction of a
   count: the leader's commit index goes out with its next round's appends, while the leader applies
   what that round's `Ready` commits only once the round is durable, so a follower can apply an
   entry first.
+
+`TestRaftRunsRegressionSeeds` keeps seed 120, which found a leader cut off from both followers and
+then suspended 0.92 s: `CLOCK_BOOTTIME` gained nothing, as the kernel counts a sleep in whole seconds,
+so no `Resumed` came, and its holder kept a follower's lease 0.92 s past the grant while that
+follower, elected, served lease reads. A holder now ends each lease `core.ResumeThreshold` early.
 
 **Planted bugs.** Each must break its invariant within the seeds named, checking it alone:
 
@@ -6804,7 +6814,9 @@ leader-side rules are its invariants; the storage side is
 `scripts/seeds.sh`). Four clients each hold a `lease.Holder` on their own clocks; each node's raw
 clock runs within 10% of real time, and a quarter of them have their boot clock slewed up to 22.6%
 apart from it. Slewing every node would hide the leader-side bugs: a holder ends its lease on its
-faster clock and a grantor waits for its slower one, so random slews cover most rate errors. Five
+faster clock and a grantor waits for its slower one, so random slews cover most rate errors. For
+the same reason the clients keep no `Resume`, the second a holder leaves for a suspend that
+delivers no `Resumed`: the run draws none, and that second would cover every leader-side bug. Five
 storage nodes each send, every second, a heartbeat naming the session-table version they hold and
 a disk beat to the leader's failure detector, which marks a silent disk down.
 
@@ -7442,7 +7454,8 @@ Reading the clocks:
   grew by at least the threshold between two readings, which the kernel does only when it adds sleep
   time, and reports a marker change and a `CLOCK_BOOTTIME` or `CLOCK_MONOTONIC_RAW` reading below
   the last (`TestResumedSeesASuspendAMarkerChangeOrAStepBack`). The loop and the simulator share
-  one threshold, `core.ResumeThreshold`, 1 s: above ε and at most 2 s, and provisional with ε. Both
+  one threshold, `core.ResumeThreshold`, 1 s: above ε and at most 1 s, the margin by which a holder
+  ends each lease early for a suspend it may miss, and provisional with ε. Both
   take their first reading when the loop is made, so a stop before the first pass delivers
   `Resumed` in that pass in each.
 - **[property]** Over the clock model, 2,000 seeds per commit (`TestSteppedResumedComesOncePerStop`):
