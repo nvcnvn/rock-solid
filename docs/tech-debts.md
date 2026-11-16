@@ -149,3 +149,8 @@
 - **Where:** `internal/meta/nodewire.go`: `NodeReport` and the other kinds a storage node and the control plane exchange
 - **Why:** before the first release no two releases run together, so the encoding changes in place: `OpenedDisk.Loop` sits inside each opened disk, not at the end of the body. Across releases, an old node's report fails to decode at a new leader, which drops it, so the node looks dead and its disks are marked down, and a new node's report read by an old leader takes the new field as the next one. `NodeReport.Release` cannot help, since the decode fails as a whole. The [upgrade rule](design.md#on-disk-format) covers disk formats only.
 - **Remove when:** before the first release, the design's upgrade rule covers the node wire, as it covers disk formats: a version on each message, or fields only ever appended and ignored when unknown, with a test that the previous release's messages decode.
+
+## Workaround: a device's identity is its path
+- **Where:** `deviceID` in `cmd/rock-solid/node_linux.go`
+- **Why:** the control plane keys a disk's device by the drive's stable identity ([A disk is its log](design.md#epoch-changes-and-failure-detection)), and nothing reads a drive's World Wide Name (WWN) or serial yet, so the process hashes the path the operator gives in `-device` and relies on it naming the same drive at every start, as a `/dev/disk/by-id` link does. A path like `/dev/sdb` can name another drive after a reboot, and a drive with no unique identity is not refused.
+- **Remove when:** the node reads each block device's WWN or serial, refuses a drive with none or one shared with another device, and reports that as `OpenedDisk.Device`.

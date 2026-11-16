@@ -41,7 +41,7 @@ type Hand struct {
 // Output is what a call into the node asks of its loop: actions; session tables to hand
 // replicas; a placement table or delta to hand every replica, with SetTable or ApplyDelta; the
 // committed disk membership to hand every device; and whether the node moved to another
-// control-plane voter, which every replica then reports to with SetAuthority at Ctl.
+// control-plane voter, Ctl, which every replica then reports to with SetAuthority.
 type Output struct {
 	Actions []core.Action
 	Hands   []Hand
@@ -49,11 +49,37 @@ type Output struct {
 	Delta   *chunkstore.Delta
 	Disks   []meta.DiskAddr
 	Moved   bool
+	Ctl     core.NodeID
 }
 
 // Reset empties the output for reuse.
 func (o *Output) Reset() {
 	*o = Output{Actions: o.Actions[:0], Hands: o.Hands[:0]}
+}
+
+// Clone is o without its actions, copied whole, since its table, delta and membership alias the
+// node's buffers, which the next message overwrites; false when it holds nothing for a device.
+func (o *Output) Clone() (Output, bool) {
+	c := Output{Disks: slices.Clone(o.Disks), Moved: o.Moved, Ctl: o.Ctl}
+	for _, h := range o.Hands {
+		h.Table.Live = slices.Clone(h.Table.Live)
+		c.Hands = append(c.Hands, h)
+	}
+	if o.Table != nil {
+		t, err := chunkstore.DecodeTable(chunkstore.AppendTable(nil, o.Table))
+		if err != nil {
+			panic(err)
+		}
+		c.Table = &t
+	}
+	if o.Delta != nil {
+		d, err := chunkstore.DecodeDelta(chunkstore.AppendDelta(nil, o.Delta))
+		if err != nil {
+			panic(err)
+		}
+		c.Delta = &d
+	}
+	return c, c.Hands != nil || c.Table != nil || c.Delta != nil || c.Disks != nil || c.Moved
 }
 
 // replica is a device opened: its log, whether its replica runs, as it may once the node has
@@ -110,7 +136,7 @@ func (n *Node) move(ctx *core.Context, at core.NodeID, known bool, out *Output) 
 		return
 	}
 	n.ctl, n.moveAt = i, ctx.Now+Interval
-	out.Moved = true
+	out.Moved, out.Ctl = true, n.Ctl()
 	if n.fetching {
 		n.fetching = false
 		n.fetch(ctx, out)
@@ -306,6 +332,24 @@ func (n *Node) fetch(ctx *core.Context, out *Output) {
 // token names the fetch in flight, its high bits the start's, so no earlier start's answer can
 // stand for it.
 func (n *Node) token() uint64 { return n.start | n.fetchSeq&0xffffffff }
+
+// Take hands the node what device's machine output, o, asks of it.
+func (n *Node) Take(ctx *core.Context, device uint64, o *DeviceOutput, out *Output) {
+	switch {
+	case o.Opened != nil:
+		n.Opened(*o.Opened, out)
+	case o.Failed:
+		n.Failed(device)
+	}
+	if o.Ask != 0 {
+		n.Ask(ctx, device, o.Ask, out)
+	}
+	if o.Fetch {
+		n.FetchTable(ctx, out)
+	}
+	n.Held(device, o.Held)
+	n.HeldEpoch(device, o.Epoch)
+}
 
 // heartbeat sends the control plane the node's report and arms the next.
 func (n *Node) heartbeat(ctx *core.Context, out *Output) {

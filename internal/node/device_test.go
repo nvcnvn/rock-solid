@@ -249,3 +249,57 @@ func TestARestartedReplicasAskGoesToItsAuthority(t *testing.T) {
 		t.Fatalf("asked %+v, want %+v", asks, want)
 	}
 }
+
+// The node's output reaches a device: the voter moved to, the membership naming its log, the
+// session table for this device and not another's, and a placement table; a Raft group's message,
+// which is the node loop's, is dropped.
+func TestTheNodesOutputFeedsADevice(t *testing.T) {
+	r := newDevRun(t, sim.NewDisk(devBlocks))
+	r.start(1)
+	r.settle()
+	pg := chunkstore.PGEntry{Members: []chunkstore.Member{{Disk: 5}}, Interval: 1}
+	o := Output{
+		Moved: true, Ctl: ctl,
+		Disks: []meta.DiskAddr{{Disk: 5, Log: r.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}},
+		Hands: []Hand{{Device: 8, Table: chunkstore.SessionTable{Version: 6, Next: 7}}, {Device: 7, Table: chunkstore.SessionTable{Version: 3, Next: 4}}},
+		Table: &chunkstore.Table{Epoch: 2, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 1, MinLive: 1, PGs: []chunkstore.PGEntry{pg}}}},
+	}
+	r.out.Reset()
+	r.d.Take(&r.ctx, &o, &r.out)
+	if r.d.Replica() == nil || r.out.Held != 3 || r.out.Epoch != 2 {
+		t.Fatalf("the replica holds sessions %d, epoch %d", r.out.Held, r.out.Epoch)
+	}
+	if !slices.ContainsFunc(r.out.Actions, func(a core.Action) bool { return a.Kind == core.ActNetSend && a.Peer == ctl }) {
+		t.Fatal("the replica reported to no authority")
+	}
+	r.out.Reset()
+	r.d.Take(&r.ctx, &Output{Table: o.Table}, &r.out)
+	if r.out.Held != 0 || r.out.Epoch != 0 {
+		t.Fatalf("an unchanged replica output sessions %d, epoch %d", r.out.Held, r.out.Epoch)
+	}
+	live := r.ctx.Pool.(*sim.Pool).Live()
+	ev := core.Event{Kind: core.EvNetRecv, Peer: ctl}
+	if err := meta.EncodeTable(r.ctx.Pool, group, o.Table, &ev.Msg); err != nil {
+		t.Fatal(err)
+	}
+	r.out.Reset()
+	r.d.OnEvent(&r.ctx, &ev, &r.out)
+	if len(r.out.Actions) != 0 || r.ctx.Pool.(*sim.Pool).Live() != live {
+		t.Fatalf("a group message gave %d actions", len(r.out.Actions))
+	}
+}
+
+// A device started with a voter reports to it before any move.
+func TestADeviceReportsToTheVoterItStartsWith(t *testing.T) {
+	r := newDevRun(t, sim.NewDisk(devBlocks))
+	cfg := storetest.Config()
+	cfg.Log.NoReserve = false
+	r.d = NewDevice(&r.ctx, DeviceConfig{Device: 7, Blocks: devBlocks, Class: "ssd", Loop: 3, Store: cfg, Seed: 1, Group: group, Ctl: ctl}, &r.out)
+	r.take()
+	r.settle()
+	r.out.Reset()
+	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 5, Log: r.opened.Log}}, &r.out)
+	if !slices.ContainsFunc(r.out.Actions, func(a core.Action) bool { return a.Kind == core.ActNetSend && a.Peer == ctl }) {
+		t.Fatal("the replica reported to no authority")
+	}
+}

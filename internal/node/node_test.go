@@ -522,3 +522,68 @@ func TestTheDiskMembershipIsHandedOn(t *testing.T) {
 		t.Fatal("a buffer left")
 	}
 }
+
+// A clone of the node's output keeps its membership and placement table once the next messages
+// overwrite the node's buffers, as the node's loop hands it to the device loops.
+func TestACloneOutlivesTheNodesBuffers(t *testing.T) {
+	r := newRun(t, 1, 10)
+	ds := []meta.DiskAddr{{Disk: 1, Log: 10 << 8, At: core.NodeID{Node: 4, Loop: 2}}}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	disks, ok := r.out.Clone()
+	pg := chunkstore.PGEntry{Members: []chunkstore.Member{{Disk: 1}}, Interval: 1}
+	tbl := chunkstore.Table{Epoch: 4, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 1, MinLive: 1, PGs: []chunkstore.PGEntry{pg}}}}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, m) })
+	placed, _ := r.out.Clone()
+	ds2 := []meta.DiskAddr{{Disk: 2, Log: 7}}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds2, m) })
+	tbl.Epoch, tbl.Pools[0].PGs[0].Members[0].Disk = 5, 2
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, m) })
+	if !ok || !slices.Equal(disks.Disks, []meta.DiskAddr{{Disk: 1, Log: 10 << 8, At: core.NodeID{Node: 4, Loop: 2}}}) {
+		t.Fatalf("the membership's clone reads %+v", disks.Disks)
+	}
+	if placed.Table == nil || placed.Table.Epoch != 4 || placed.Table.Pools[0].PGs[0].Members[0].Disk != 1 {
+		t.Fatalf("the table's clone reads %+v", placed.Table)
+	}
+	r.out.Reset()
+	if _, ok := r.out.Clone(); ok {
+		t.Fatal("an empty output's clone holds something for a device")
+	}
+}
+
+// What a device's machine outputs reaches the node: its opened disk joins the report, its ask
+// fetches the session table, its table fetch fetches the placement table, and the version it
+// holds is what the report acknowledges.
+func TestADevicesOutputFeedsTheNode(t *testing.T) {
+	r := newRun(t, 1)
+	r.table(0, chunkstore.SessionTable{Version: 3, Next: 5})
+	r.out.Reset()
+	r.n.Take(&r.ctx, 10, &DeviceOutput{Opened: &meta.OpenedDisk{Device: 10, Log: 10 << 8}}, &r.out)
+	if len(r.out.Hands) != 1 || r.out.Hands[0].Device != 10 || r.out.Hands[0].Table.Version != 3 {
+		t.Fatalf("the device opened was handed %+v", r.out.Hands)
+	}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+		return meta.EncodeDisks(pool, group, []meta.DiskAddr{{Disk: 1, Log: 10 << 8}}, m)
+	})
+	r.out.Reset()
+	r.n.Take(&r.ctx, 10, &DeviceOutput{Ask: 1, Fetch: true, Held: 3, Epoch: 2}, &r.out)
+	if r.fetch() == 0 {
+		t.Fatal("the device's ask fetched no session table")
+	}
+	r.out.Reset()
+	r.n.Take(&r.ctx, 10, &DeviceOutput{Fetch: true}, &r.out)
+	if len(r.sends(meta.KindTableFetch)) != 0 {
+		t.Fatal("a table fetch went out twice in an interval")
+	}
+	r.ctx.Now += Interval
+	r.out.Reset()
+	r.n.Take(&r.ctx, 10, &DeviceOutput{Fetch: true}, &r.out)
+	if len(r.sends(meta.KindTableFetch)) != 1 {
+		t.Fatal("the device's table fetch went out other than once")
+	}
+	r.out.Reset()
+	r.n.Take(&r.ctx, 11, &DeviceOutput{Failed: true}, &r.out)
+	nr := r.report()
+	if nr.Sessions != 3 || nr.Epoch != 0 || len(nr.Opened) != 1 || !slices.Equal(nr.Failed, []uint64{11}) {
+		t.Fatalf("reported %+v", nr)
+	}
+}

@@ -13,7 +13,8 @@ import (
 // DeviceConfig is one device of a node: its stable identity, its size in blocks, its class, the
 // loop that owns it, its store's settings, the seed of its source, which the daemon takes from
 // the operating system at each start, so a format a crash cut short is formatted again under
-// another log ID, and the control-plane group's ID.
+// another log ID, the control-plane group's ID and the voter its replica reports to until
+// Authority names another.
 type DeviceConfig struct {
 	Device uint64
 	Blocks uint64
@@ -22,12 +23,13 @@ type DeviceConfig struct {
 	Store  chunkstore.Config
 	Seed   uint64
 	Group  uint64
+	Ctl    core.NodeID
 }
 
 // DeviceOutput is what a call into a Device asks of its loop and of the node's machine: actions;
 // once its start ends, the disk Opened for Node.Opened, or Failed for Node.Failed; and from its
 // replica, a session ask for Node.Ask, a table fetch for Node.FetchTable, and the session version
-// and placement epoch it holds, for Node.Held and Node.HeldEpoch.
+// and placement epoch it holds when they changed, for Node.Held and Node.HeldEpoch.
 type DeviceOutput struct {
 	Actions []core.Action
 	Opened  *meta.OpenedDisk
@@ -40,6 +42,17 @@ type DeviceOutput struct {
 
 // Reset empties the output for reuse.
 func (o *DeviceOutput) Reset() { *o = DeviceOutput{Actions: o.Actions[:0]} }
+
+// Clone is o without its actions, for the node's loop; false when it holds nothing for the node.
+func (o *DeviceOutput) Clone() (DeviceOutput, bool) {
+	c := *o
+	c.Actions = nil
+	if o.Opened != nil {
+		d := *o.Opened
+		c.Opened = &d
+	}
+	return c, c.Opened != nil || c.Failed || c.Ask != 0 || c.Fetch || c.Held != 0 || c.Epoch != 0
+}
 
 type devicePhase uint8
 
@@ -65,20 +78,22 @@ type Device struct {
 	log   uint64
 	// restarted is set when the store was opened rather than formatted.
 	restarted bool
-	opened    meta.OpenedDisk
-	sess      chunkstore.SessionTable
-	table     chunkstore.Table
-	auth      core.NodeID
-	hasAuth   bool
-	sout      chunkstore.Output
-	rout      chunkstore.ReplicaOutput
-	rp        chunkstore.Report
-	frame     []byte
+	// held and epoch are the session version and placement epoch last output.
+	held, epoch uint64
+	opened      meta.OpenedDisk
+	sess        chunkstore.SessionTable
+	table       chunkstore.Table
+	auth        core.NodeID
+	hasAuth     bool
+	sout        chunkstore.Output
+	rout        chunkstore.ReplicaOutput
+	rp          chunkstore.Report
+	frame       []byte
 }
 
 // NewDevice starts recovering the device's store.
 func NewDevice(ctx *core.Context, cfg DeviceConfig, out *DeviceOutput) *Device {
-	d := &Device{cfg: cfg, rng: core.NewRand(cfg.Seed), start: lease.Now(ctx)}
+	d := &Device{cfg: cfg, rng: core.NewRand(cfg.Seed), start: lease.Now(ctx), auth: cfg.Ctl, hasAuth: cfg.Ctl != core.NodeID{}}
 	st, err := chunkstore.Open(ctx, cfg.Store, cfg.Blocks, &d.sout)
 	d.st = st
 	d.settle(ctx, err, out)
@@ -92,7 +107,7 @@ func (d *Device) Replica() *chunkstore.Replica { return d.rep }
 func (d *Device) Store() *chunkstore.Store { return d.st }
 
 // OnEvent takes a disk completion, a timer, a message or a lost peer for the device's store or
-// replica; a message before the replica runs is dropped.
+// replica; a message before the replica runs is dropped, and the replica drops a Raft group's.
 func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 	switch {
 	case d.rep != nil:
@@ -216,6 +231,28 @@ func (d *Device) Delta(ctx *core.Context, dl *chunkstore.Delta, out *DeviceOutpu
 	}
 }
 
+// Take hands the device what the node's machine output, o, holds for it: the voter it moved to,
+// the membership, the session tables for this device, and a placement table or delta.
+func (d *Device) Take(ctx *core.Context, o *Output, out *DeviceOutput) {
+	if o.Moved {
+		d.Authority(ctx, o.Ctl, out)
+	}
+	if o.Disks != nil {
+		d.Disks(ctx, o.Disks, out)
+	}
+	for i := range o.Hands {
+		if o.Hands[i].Device == d.cfg.Device {
+			d.Hand(ctx, &o.Hands[i], out)
+		}
+	}
+	if o.Table != nil {
+		d.Table(ctx, o.Table, out)
+	}
+	if o.Delta != nil {
+		d.Delta(ctx, o.Delta, out)
+	}
+}
+
 // Authority points the replica's reports at the control-plane voter at.
 func (d *Device) Authority(ctx *core.Context, at core.NodeID, out *DeviceOutput) {
 	d.auth, d.hasAuth = at, true
@@ -248,6 +285,11 @@ func (d *Device) take(ctx *core.Context, out *DeviceOutput) {
 	}
 	out.Ask = max(out.Ask, d.rout.FetchSessions)
 	out.Fetch = out.Fetch || d.rout.Fetch != 0 || d.rout.Whole
-	out.Held, out.Epoch = d.st.Sessions().Version, d.rep.Table().Epoch
+	if v := d.st.Sessions().Version; v != d.held {
+		out.Held, d.held = v, v
+	}
+	if e := d.rep.Table().Epoch; e != d.epoch {
+		out.Epoch, d.epoch = e, e
+	}
 	d.rout.Reset()
 }

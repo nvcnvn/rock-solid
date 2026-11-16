@@ -25,13 +25,8 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
 )
 
-const (
-	ctlPoolBytes = 64 << 20
-	ringEntries  = 256
-	// raftTimer is the timer of the voter's replica; bootTimer the event that starts the host.
-	raftTimer core.TimerID = 0x6374726674
-	bootTimer core.TimerID = 0x6374626f6f74
-)
+// raftTimer is the timer of the voter's replica.
+const raftTimer core.TimerID = 0x6374726674
 
 // ctl is a control-plane voter: one loop running its CtlHost over the TCP driver and an io_uring
 // ring on its disk file.
@@ -41,6 +36,8 @@ type ctl struct {
 	pool *loop.Pool
 	ring *uring.Ring
 	k    *loop.Epoll
+	m    *ctlMachine
+	mail mail
 	// Port is the port the voter listens on.
 	Port int
 	mu   sync.Mutex
@@ -55,20 +52,6 @@ type ctlMachine struct {
 	out  meta.CtlHostOutput
 }
 
-// ctlDriver sends over TCP and runs disk actions on the ring.
-type ctlDriver struct {
-	*tcp.Driver
-	disk *uring.Disk
-}
-
-func (d ctlDriver) Execute(a *core.Action) {
-	if a.Kind == core.ActNetSend {
-		d.Driver.Execute(a)
-		return
-	}
-	d.disk.Execute(a)
-}
-
 func newCtl(cfg ctlConfig) (p *ctl, err error) {
 	if cfg.Format {
 		if err := createDisk(cfg.Disk, cfg.DiskBytes); err != nil {
@@ -81,7 +64,7 @@ func newCtl(cfg ctlConfig) (p *ctl, err error) {
 			p.close()
 		}
 	}()
-	if p.pool, err = loop.NewPool(ctlPoolBytes, 0); err != nil {
+	if p.pool, err = loop.NewPool(poolBytes, 0); err != nil {
 		return nil, err
 	}
 	if p.k, err = loop.NewEpoll(loop.VMClockPath); err != nil {
@@ -105,9 +88,9 @@ func newCtl(cfg ctlConfig) (p *ctl, err error) {
 		}
 		return tcp.DialTCP(ap)
 	}})
-	m := &ctlMachine{p: p, disk: disk}
-	p.l = loop.New(loop.Config{Node: cfg.Node, Pool: p.pool}, p.k, m, ctlDriver{td, disk})
-	td.L = p.l
+	p.m = &ctlMachine{p: p, disk: disk}
+	p.l = loop.New(loop.Config{Node: cfg.Node, Pool: p.pool}, p.k, p.m, loopDriver{td, disk})
+	td.L, p.mail.in = p.l, p.l.Inbox()
 	if err := p.l.AttachDisk(p.ring); err != nil {
 		return nil, err
 	}
@@ -188,6 +171,11 @@ func (p *ctl) Run() error {
 // Stop ends Run.
 func (p *ctl) Stop() { p.l.Stop() }
 
+// call runs f on the voter's loop at its next event, once its host has started.
+func (p *ctl) call(f func(ctx *core.Context, h *meta.CtlHost)) {
+	p.mail.post(func(ctx *core.Context) { f(ctx, p.m.h) })
+}
+
 func (p *ctl) fail(err error) {
 	p.mu.Lock()
 	if p.err == nil {
@@ -219,7 +207,8 @@ func (m *ctlMachine) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Acti
 		}
 		m.h = h
 	}
-	if ev.Kind != core.EvTimer || ev.Timer != bootTimer {
+	m.p.mail.run(ctx)
+	if !wake(ev) {
 		m.h.OnEvent(ctx, ev, &m.out)
 	}
 	for _, err := range m.out.Errs {
