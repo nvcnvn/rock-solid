@@ -25,8 +25,9 @@ const (
 
 // simCluster is one Raft group of three shards on the simulator, each flushing its rounds as an
 // fsync on its node's disk and reading its node's node-pair leases, which the test's lease frames
-// renew. Leaders propose a numbered value per tick, the first leader to apply crashAt values
-// crashes, and the run is done once a value proposed after the crash is applied.
+// renew while the node runs, as a node does whatever its shards do. Leaders propose a numbered
+// value per tick, the first leader to apply crashAt values crashes, and the run is done once a
+// value proposed after the crash is applied.
 type simCluster struct {
 	s       *sim.Scheduler
 	rng     *core.Rand
@@ -414,6 +415,9 @@ func (r *simReplica) onEvent(ctx *core.Context, ev *core.Event, acts []core.Acti
 	}
 	if ev.Kind == core.EvTimer {
 		r.leaseTick(ctx)
+		if r.s.removed {
+			r.out.Actions = append(r.out.Actions, core.Action{Kind: core.ActSetTimer, Timer: r.cfg.Timer, At: ctx.Now + TickInterval})
+		}
 	}
 	if ev.Kind == core.EvDiskDone {
 		if ev.Err != core.DiskOK {
