@@ -1332,7 +1332,9 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 // log whole, no superblock or the new one, never the old log over headers the trims zeroed; the copy
 // goes first, as zeros in block 0 beside a valid copy read as CopyOnly. A failed trim costs only its
 // discard: recovery checks whatever header it left, as it does a header a TRIM lost at a crash left.
-// The flush behind the trims keeps the superblock from landing before the zeroed headers do.
+// The flush behind the trims keeps the superblock from landing before the zeroed headers do. Not for
+// correctness, as a header a reverted trim leaves is free to the new log, but so that no later start
+// reads such a segment in full.
 func (l *Log) formatDone(ctx *core.Context, io core.IOID, derr core.DiskError, out *Output) {
 	if l.phase == formatTrim && io-l.formatIO < core.IOID(l.formatNext-1) {
 		if l.formatNext < l.sb.SegmentCount {
