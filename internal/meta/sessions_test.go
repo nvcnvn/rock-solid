@@ -121,6 +121,30 @@ func TestASessionStartsRenewsInMemoryAndIsFencedThenAcknowledged(t *testing.T) {
 	}
 }
 
+// A storage node's fetch is answered with the table as storage nodes hold it, the sessions started
+// before it included, and only while the leader holds its lease and has stepped under it.
+func TestAFetchIsAnsweredOnlyUnderTheLeaderLease(t *testing.T) {
+	r := newCtlRun(t)
+	if _, ok := r.ctl.FetchAnswer(r.at(), true); ok {
+		t.Fatal("answered before stepping under its lease")
+	}
+	cs := r.startSessions(2)
+	st, ok := r.ctl.FetchAnswer(r.at(), true)
+	if !ok || st.Next != 3 || !slices.Equal(st.Live, []uint64{cs[0].id, cs[1].id}) {
+		t.Fatalf("answered %v with %+v", ok, st)
+	}
+	if _, ok := r.ctl.FetchAnswer(r.at(), false); ok {
+		t.Fatal("answered without its lease")
+	}
+	if _, ok := r.ctl.FetchAnswer(r.at(), true); ok {
+		t.Fatal("answered with its lease regained before stepping under it")
+	}
+	r.sessStep()
+	if _, ok := r.ctl.FetchAnswer(r.at(), true); !ok {
+		t.Fatal("no answer after stepping under the regained lease")
+	}
+}
+
 // A version waits for every node with a disk committed up; a node whose disk is committed down
 // counts as holding it, with no heartbeat of its own.
 func TestANodeMarkedDownCountsAsAcknowledging(t *testing.T) {

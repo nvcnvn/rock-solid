@@ -123,6 +123,17 @@ func (c *Control) StartSession(node uint32, request uint64) {
 	c.starts = append(c.starts, SessionStart{Node: node, Request: request})
 }
 
+// FetchAnswer is the session table at t as storage nodes hold it, for a node's fetch, or false
+// while this leader does not hold its leader lease or has not yet stepped under it: a deposed
+// leader's table can lag a start, and the node would refuse a live session's writes.
+func (c *Control) FetchAnswer(t lease.Time, leased bool) (chunkstore.SessionTable, bool) {
+	c.sessClock(t, leased)
+	if !leased || !c.grantsFrom.set {
+		return chunkstore.SessionTable{}, false
+	}
+	return c.sess.Storage(), true
+}
+
 // Renew answers a session heartbeat at t into a, unless this leader does not hold its leader lease,
 // has not yet stepped under it, or has not seen the session start (its table lags), and renews a live session not being evicted, granting it space
 // in each pool it names. Before that step the leader knows no pool's room, and an answer granting 0
