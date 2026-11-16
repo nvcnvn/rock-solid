@@ -127,32 +127,42 @@ Init ==
     /\ support = [r \in Replicas |-> {}]
     /\ fort = [r \in Replicas |-> {}]
 
-\* The group led by l at term 1, every replica having applied the swap's joint
-\* configuration: l is a voter the plan keeps (JointInit), or the one it drops, which then
-\* commits its own removal with no crash first (OutgoingInit).
+\* Two states Spec reaches with no crash, every replica having applied the swap's joint
+\* configuration. In JointInit a voter the plan keeps leads term 1, having proposed the
+\* learner and the swap and committed each on every replica. OutgoingInit follows it by one
+\* step: the voter the plan drops wins term 2 on every replica, so it leads the joint
+\* configuration and goes on to leave it.
 JointLog ==
     <<[t |-> 1, cfg |-> NoConf], [t |-> 1, cfg |-> Conf(BaseVoters, {}, Plan \ BaseVoters)],
       [t |-> 1, cfg |-> Conf(Plan, BaseVoters, {})]>>
+Kept == CHOOSE x \in BaseVoters \cap Plan : TRUE
+Dropped == CHOOSE x \in BaseVoters \ Plan : TRUE
 
-JointLed(l) ==
-    /\ term = [r \in Replicas |-> 1]
+\* l leads term t: Kept term 1, which knows every log matches its own and last advanced its
+\* commit from 2, or Dropped term 2, which appended its empty entry and knows nothing yet.
+JointState(l, t) ==
+    /\ term = [r \in Replicas |-> t]
     /\ leader = [r \in Replicas |-> r = l]
-    /\ log = [r \in Replicas |-> JointLog]
+    /\ log = [r \in Replicas |->
+                IF r = l /\ t = 2 THEN Append(JointLog, [t |-> 2, cfg |-> NoConf]) ELSE JointLog]
     /\ commit = [r \in Replicas |-> 3]
     /\ applied = [r \in Replicas |-> 3]
-    /\ match = [r \in Replicas |-> IF r = l THEN [k \in Replicas |-> 3] ELSE NoMatch]
-    /\ hbCommit = [r \in Replicas |-> IF r = l THEN 3 ELSE 0]
+    /\ match = [r \in Replicas |->
+                  IF r # l THEN NoMatch
+                  ELSE IF t = 1 THEN [k \in Replicas |-> 3]
+                  ELSE [k \in Replicas |-> IF k = l THEN 4 ELSE 0]]
+    /\ hbCommit = [r \in Replicas |-> IF r # l THEN 0 ELSE IF t = 1 THEN 2 ELSE 3]
     /\ up = [r \in Replicas |-> r \notin Stopped]
     /\ gone = [r \in Replicas |-> FALSE]
     /\ crashes = 0
-    /\ elected = {<<1, l>>}
+    /\ elected = {<<1, Kept>>, <<t, l>>}
     /\ chosen = [k \in 1 .. 3 |-> [e |-> JointLog[k], t |-> 1]]
     /\ early = {}
     /\ support = [r \in Replicas |-> {}]
     /\ fort = [r \in Replicas |-> {}]
 
-JointInit == JointLed(CHOOSE x \in BaseVoters \cap Plan : TRUE)
-OutgoingInit == JointLed(CHOOSE x \in BaseVoters \ Plan : TRUE)
+JointInit == JointState(Kept, 1)
+OutgoingInit == JointState(Dropped, 2)
 
 \* A voter of its own applied configuration wins the votes of a quorum of it, each voter's
 \* log no newer than its own, in a term past every one of theirs. A replica votes whatever
@@ -276,11 +286,15 @@ Apply(r) ==
                    support, fort>>
 
 \* etcd-raft refuses a change while an earlier one is unapplied, and a new leader counts
-\* every entry it holds as such, so it proposes one only once it applied an entry of its term.
-CanChange(i) ==
+\* every entry before its empty one, those of earlier terms, as such (raft.go,
+\* pendingConfIndex in becomeLeader).
+EtcdMayChange(i) ==
     /\ Leads(i)
-    /\ applied[i] > 0 /\ log[i][applied[i]].t = term[i]
+    /\ \A k \in 1 .. Len(log[i]) : log[i][k].t < term[i] => applied[i] >= k
     /\ OneAtATime => ConfIndex(log[i]) <= applied[i]
+
+\* The code proposes a change only once it applied an entry of its term, too.
+CanChange(i) == EtcdMayChange(i) /\ applied[i] > 0 /\ log[i][applied[i]].t = term[i]
 
 Propose(i, c, promoted) ==
     /\ log' = [log EXCEPT ![i] = Append(@, [t |-> term[i], cfg |-> c])]
@@ -307,11 +321,12 @@ Swap(i, l, d) ==
     /\ CatchUpFirst => match[i][l] >= hbCommit[i]
     /\ Propose(i, Conf((c.in \ {d}) \cup {l}, c.in, c.lrn \ {l}), {l})
 
-\* etcd-raft leaves a joint configuration on its own once the leader applied it, even a
-\* leader elected while joint from the outgoing half, which then removes itself.
+\* etcd-raft leaves a joint configuration on its own once the leader applied it (appliedTo),
+\* with no entry of the leader's term yet committed, and even a leader elected while joint from
+\* the outgoing half, which then removes itself.
 Leave(i) ==
     LET c == LastConf(i) IN
-    /\ CanChange(i) /\ c.out # {}
+    /\ EtcdMayChange(i) /\ c.out # {}
     /\ Propose(i, Conf(c.in, {}, c.lrn), {})
 
 \* A replica asks a peer whether it is still a member, or sends it a Raft message, and a
@@ -452,6 +467,9 @@ LeaseRead(i) ==
 
 \* No two replicas serve lease reads at overlapping times.
 OneLeaseReader == \A i, j \in Replicas : LeaseRead(i) /\ LeaseRead(j) => i = j
+
+\* A lease read sees every committed entry.
+LeaseReadsCurrent == \A i \in Replicas : LeaseRead(i) => Len(chosen) <= commit[i]
 
 \* With a voter down for good, the swap commits on the survivors.
 SwapCommits == <>(ChosenConf = Conf(Plan, {}, {}))

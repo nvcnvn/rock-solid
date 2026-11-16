@@ -3910,7 +3910,7 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 
 - Messages are not modelled: an election, an append and a membership question each act in one step on the replicas they involve, since etcd-raft's own TLA+ spec checks the message level beneath. A failed election changes nothing, as pre-vote gives.
 - A configuration takes effect on a replica when it applies the entry, as in etcd-raft, and an entry holds the whole configuration it results in, which equals etcd-raft's delta while one change is pending at a time. A joint configuration needs a quorum of each half, for elections, commits and leases.
-- A replica campaigns only once it applied every configuration change it knows committed (etcd-raft's `hasUnappliedConfChanges`). A leader proposes a change only once it applied the change before, and an entry of its term, as etcd-raft enforces; the second rule has no negative, since leaving it out breaks no property at `ci-swap`'s size.
+- A replica campaigns only once it applied every configuration change it knows committed (etcd-raft's `hasUnappliedConfChanges`). A leader proposes a change only once it applied the change before and every entry ahead of its first of its term, as etcd-raft enforces (`pendingConfIndex`), and leaves a joint configuration at that point, as etcd-raft's auto-leave does, even before an entry of its term commits. The learner and the swap, which the code proposes, also wait for an applied entry of the leader's term (`reconcile`); that rule has no negative, since leaving it out breaks no property at `ci-swap`'s size.
 - The leader adds a planned replica as a learner, promotes it once it holds what the leader had committed a heartbeat earlier, in one joint change that also removes a voter the plan drops, never the leader itself, and leaves the joint configuration once applied, as etcd-raft's auto-leave does. A leader the plan drops, outside a joint configuration, transfers its leadership to a planned voter.
 - Fortification as two sides of one grant: a follower's support, which keeps it from campaigning and from voting for anyone but its leader or a transfer target, and the leader's count of it. A lapse ends the count first, then the support; a crash lapses every grant to and from the node. A leader serves a lease read while it has committed an entry of its term and counts the support of a quorum of each half, itself included.
 - A leader elected from the outgoing half applies its own removal and deletes its state, in the Ready that sends the commit, so every follower may miss the commit and keep supporting it while its node renews their grants. A follower that hears nothing from the leader it supports asks the leader's node, which answers once the leader deleted its state, and the follower then stops supporting it.
@@ -3924,9 +3924,10 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 | At most one leader per term | `AtMostOneLeader` | `invOneLeader`, "at most one leader per shard per term" |
 | A leader of a later term holds every committed entry | `CommittedNeverLost` | `invNeverLost`, "a committed entry is never lost" |
 | Every replica's committed entries are the group's | `CommittedAgree` | `invNeverLost` |
-| No replica becomes a voter before it holds what the leader had committed a heartbeat earlier | `VotersCaughtUp` | `invCaughtUp` |
+| No replica becomes a voter before it holds what the leader had committed a heartbeat earlier. The leader promotes on its match index, so this checks that a match index never claims entries the learner lacks | `VotersCaughtUp` | `invCaughtUp` |
 | A replica deletes its state only once a committed configuration lacks it | `DeletesOnlyRemoved` | `invOnlyRemoved` |
 | No two replicas of a shard serve lease reads at overlapping times | `OneLeaseReader` | "no two replicas of a shard serve lease reads at overlapping times" |
+| A lease read sees every committed entry | `LeaseReadsCurrent` | "a lease read sees every applied entry" |
 | With a voter down for good, the swap commits on the survivors | `SwapCommits` | None: [Voter replacement](#voter-replacement)'s tests time the swap |
 | After the swap, the group has a leader in the new configuration, even when the dropped voter led the leave | `NewLeader` | None: the tests of "Voter replacement: drop support for a removed leader" time the failover |
 
@@ -3934,7 +3935,7 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 
 | Configuration | Rule removed | Counterexample the model finds | Property violated |
 | --- | --- | --- | --- |
-| `neg-campaign-unapplied` | A replica campaigns with a committed configuration change unapplied | b, which knows the joint and leave entries committed but has not applied them, wins term 2 on b and c under the old configuration, while a wins term 2 on a and d under the new one | `AtMostOneLeader` |
+| `neg-campaign-unapplied` | A replica campaigns with a committed configuration change unapplied | b, which knows the learner and joint entries committed but has applied neither, wins term 2 on b and c under the old configuration, while a wins term 2 on a and d under the new one | `AtMostOneLeader` |
 | `neg-voter-first` | The planned replica joins as a voter | d becomes a voter holding none of the log. In the code the same plant stalls commits while a voter is down | `VotersCaughtUp` |
 | `neg-eager` | A learner is promoted at once | d is swapped in before it holds the leader's committed entries | Same |
 | `neg-joint-one-half` | A joint configuration counts the incoming half alone | a, which applied the joint configuration, wins term 2 on a and d, a quorum of the incoming half alone; b, which has not applied it, wins term 2 on b and c under the old configuration | `AtMostOneLeader` |
@@ -3942,18 +3943,19 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 | `neg-delete-on-plan` | A replica the plan drops deletes its state at once | c deletes before any change commits | `DeletesOnlyRemoved` |
 | `neg-notice-any-index` | A notice counts from a peer behind the asker | d, which applied its addition, asks b, which has not, and b's answer of index 0 counts | Same |
 | `neg-notice-non-member` | A notice counts while the asker's own configuration lacks it | d, before applying its own addition, asks a, which is ahead of d but has not applied it either | Same |
-| `neg-no-support-ask` | A follower never asks the node of the leader it supports | c, leading, commits the leave and applies its removal; a and d apply it too, yet a, b and d support c for good, so none campaigns | `NewLeader` |
-| `neg-removed-keeps-lease` | A leader that applied its own removal still serves lease reads | c, leading and fortified by a, b and d, commits the leave and applies its removal; a and b ask c's node and stop supporting c, a wins term 2 on a and b and fortifies b, while c still counts a's, b's and d's support | `OneLeaseReader` |
+| `neg-no-support-ask` | A follower never asks the node of the leader it supports | c, leading, leaves the joint configuration and applies its removal, its commit reaching no follower, yet a, b and d support c for good, so none campaigns | `NewLeader` |
+| `neg-removed-keeps-lease` | A leader that applied its own removal still serves lease reads | c, leading and fortified by a, b and d, leaves the joint configuration, commits the leave on a and b and applies its removal; a and b ask c's node and stop supporting c, a wins term 3 on a and b and fortifies b, while c still counts a's, b's and d's support | `OneLeaseReader` |
 
 **Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc); results in the [Model-to-simulator map](#model-to-simulator-map)). Voters a, b and c, the plan swapping d in for c:
 
-- `ci-swap`: up to term 2, no crash, safety, with a and b symmetric, and no leader fortified (the constraint `Unfortified`): support only narrows the votes a candidate wins, so every election and commit stays reachable, and `OneLeaseReader` is left to `ci-live-moved`, `ci-lease` and `deep-swap`.
+- `ci-swap`: up to term 2, no crash, safety, with a and b symmetric, and no leader fortified (the constraint `Unfortified`): support only narrows the votes a candidate wins, so every election and commit stays reachable, and the lease invariants are left to `ci-live-moved`, `ci-lease` and `deep-swap`.
 - `ci-live`: c down for good, up to term 2, `SwapCommits` under weak fairness.
-- `ci-live-moved`: from the joint configuration, every replica having applied it, with c leading term 1 and every replica up, no crash, up to term 2: c commits and applies its own removal, and `NewLeader` holds under weak fairness, with the safety invariants. The negatives `neg-no-support-ask` and `neg-removed-keeps-lease` are this configuration with one rule off.
-- `ci-lease`: `ci-live-moved`'s start and bounds under any interleaving, grant lapses included, safety only: the removed leader's lease reads against the next leader's.
+- `ci-lease`: from `JointInit`, a leading term 1 with every replica having applied the joint configuration, a state the spec reaches from its start with no crash; up to term 2, no crash, under any interleaving, grant lapses included, safety only: c wins term 2 while a leads, and lease reads across that election. The next leader after a removed one needs a third term, so `ci-live-moved` checks its reads against the removed leader's.
+- `ci-live-moved`: from `OutgoingInit`, `JointInit` after c won term 2 on every replica, one step of the spec; every replica up, no crash, up to term 3: c leaves the joint configuration and applies its own removal, and `NewLeader` holds under weak fairness, with the safety invariants. That fairness lets nobody campaign while a replica leads, an assumption about the steps after the start, not about how the group reached it. The negatives `neg-no-support-ask` and `neg-removed-keeps-lease` are this configuration with one rule off.
 - `deep-swap`: `ci-swap` with one crash and restart of any replica.
-- `deep-live-moved`: `ci-live-moved` with a leading term 1, one crash and restart, up to term 3, so c wins after a crashes and its commit of the leave can reach no follower.
-- `deep-lease`: `ci-lease` with `deep-live-moved`'s start and bounds.
+- `deep-live`: `ci-live` with one crash and restart of a leader, up to term 3.
+- `deep-live-moved`: from `JointInit`, one crash and restart, up to term 3, so c wins after a crashes and its commit of the leave can reach no follower.
+- `deep-lease`: `ci-lease` with one crash and restart, up to term 3.
 - `heavy-live-moved`: `deep-live-moved` from the empty log, up to term 4, so the leader that is crashed while joint can be one that took over by transfer.
 
 ## Model-to-simulator map
@@ -4023,10 +4025,10 @@ section.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
-| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 29 | 1,149,408 | 526 s, 1 worker |
+| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 28 | 1,427,384 | 708 s, 1 worker |
 | Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 20 | 2,623 | 7 s, 1 worker |
-| Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 20 | 10,581 | 25 s, 1 worker |
-| Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 21 | 231,972 | 89 s, 1 worker |
+| Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 22 | 73,752 | 210 s, 1 worker |
+| Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 21 | 256,774 | 103 s, 1 worker |
 | Epoch change | `heavy-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,577 s |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |
