@@ -335,8 +335,6 @@ func TestPeeringEntryErrors(t *testing.T) {
 	wantErr(t, "flagged copy", err, ErrMalformed)
 }
 
-// Recovery's end round-trips and names its interval, which is not 0 nor before its version's;
-// its version may be 0, a chunk recovery leaves absent.
 // An image entry decodes as itself, distinct from a plain missing-list entry, and needs an interval.
 func TestImageEntryRoundTrips(t *testing.T) {
 	img := ImageEntry(1, testChunk, 0x200000003, 4)
@@ -348,6 +346,8 @@ func TestImageEntryRoundTrips(t *testing.T) {
 	wantErr(t, "layout", err, ErrMalformed)
 }
 
+// Recovery's end round-trips and names its interval, which is not 0 nor before its version's;
+// its version may be 0, a chunk recovery leaves absent.
 func TestRecoveredEntryErrors(t *testing.T) {
 	tr := recoveryRecord(t)
 	d := decodeExact(t, tr)
