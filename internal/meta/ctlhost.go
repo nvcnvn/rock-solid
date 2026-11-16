@@ -52,7 +52,9 @@ type CtlHost struct {
 	boot raftpb.SnapshotMetadata
 	disk *raftshard.Host
 	rec  *disklog.Recovery
-	lout disklog.Output
+	// replayed is set once a restart's replay gave a record.
+	replayed bool
+	lout     disklog.Output
 	// seen counts lout's events taken.
 	seen  int
 	dones []raftshard.Done
@@ -469,6 +471,7 @@ func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
 		case disklog.ManifestLoaded:
 			err = h.rec.Replay(ctx, &h.lout)
 		case disklog.Replayed:
+			h.replayed = true
 			err = h.disk.Replayed(&ev)
 		case disklog.Recovered:
 			var log *disklog.Log
@@ -476,7 +479,7 @@ func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
 				h.disk.Recovered(log)
 				h.rec = nil
 				st := h.cfg.Raft.Storage
-				if st.Base().Index == 0 {
+				if !h.replayed {
 					if err = st.ApplySnapshot(raftpb.Snapshot{Metadata: h.boot}); err == nil {
 						err = h.writeBoot(ctx, h.boot)
 					}

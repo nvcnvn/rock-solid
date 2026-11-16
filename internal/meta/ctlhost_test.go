@@ -618,6 +618,14 @@ func TestARestartAfterAFormatCutShortWritesTheBootRound(t *testing.T) {
 			if a := r.txnAt(0, 9, "v"); a == nil || a.Err != nil {
 				t.Fatalf("keep %v, %d disk actions: after the restart a Txn got %+v", keep, steps, a)
 			}
+			r.restart(0)
+			if r.h.Err() != nil {
+				t.Fatalf("keep %v, %d disk actions: the second restart stopped with %v", keep, steps, r.h.Err())
+			}
+			r.lead()
+			if a := r.txnAt(0, 10, "w"); a == nil || a.Err != nil {
+				t.Fatalf("keep %v, %d disk actions: after the second restart a Txn got %+v", keep, steps, a)
+			}
 			if settled {
 				break
 			}
