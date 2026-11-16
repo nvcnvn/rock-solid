@@ -607,6 +607,17 @@ func TestRaftRunsReplayFromTheirSeed(t *testing.T) {
 	}
 }
 
+// Seeds that found bugs: 120, a leader cut off and then suspended for 0.92 s, which the kernel's
+// whole-second count of a sleep hides, so it kept a follower's lease past the grant while that
+// follower, elected, served lease reads.
+func TestRaftRunsRegressionSeeds(t *testing.T) {
+	for _, seed := range []uint64{120} {
+		if c := newSimCluster(seed, plants{}).run(t, seed); !c.done {
+			t.Fatalf("seed %d: crashed %v, no value proposed after the crash applied", seed, c.crashed)
+		}
+	}
+}
+
 func TestFollowersVotingWhileSupportingBreakTheLeaseInvariant(t *testing.T) {
 	for seed := range uint64(20) {
 		c := newSimCluster(seed, plants{disloyal: true})
