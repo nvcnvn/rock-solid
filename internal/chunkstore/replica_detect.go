@@ -61,7 +61,9 @@ func (r *Replica) SetAuthority(ctx *core.Context, addr core.NodeID, out *Replica
 // diskState is what the owner loop holds in memory of its disk.
 func (r *Replica) diskState(ctx *core.Context) DiskState {
 	fill := r.fill(ctx)
-	// ponytail: a disk holding more than MaxDiskPools pools' data reports the lowest-numbered ones; the leader counts the rest as other pools' data.
+	// ponytail: a disk holding more than MaxDiskPools pools' data reports the lowest-numbered ones, and the leader counts the
+	// rest as other pools' data: their capacity and balanced figures come out low, as does their held data, so CannotReprotect
+	// may stay clear when it should be raised and Unbalanced be raised falsely. Carry more pools if a disk ever holds that many.
 	pools := r.poolLive[:min(len(r.poolLive), MaxDiskPools)]
 	return DiskState{Log: r.cfg.Log, Fill: fill, Oldest: r.st.Oldest(ctx.Now), Failed: r.st.Err() != nil, Pools: pools}
 }
