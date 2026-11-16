@@ -94,17 +94,33 @@ type change struct {
 // NewRig formats a store of configuration cfg on d.
 func NewRig(t testing.TB, d Disk, cfg chunkstore.Config) *Rig {
 	t.Helper()
-	geo, err := disklog.GeometryFor(d.Blocks() * core.BlockSize)
-	if err != nil {
-		t.Fatal(err)
-	}
 	r := newRig(t, d, cfg)
-	if r.S, err = chunkstore.Format(&r.ctx, cfg, disklog.Superblock{LogID: 0x5eed, Geometry: geo}, &r.out); err != nil {
-		t.Fatal(err)
-	}
-	r.take()
+	r.Format(0x5eed)
 	r.Settle()
 	return r
+}
+
+// StartRig recovers a store of configuration cfg from d, as a storage node starts a device, and
+// returns what the node does with it and, for chunkstore.StartFormat, the log ID to Format it under.
+func StartRig(t testing.TB, d Disk, cfg chunkstore.Config, rng *core.Rand) (*Rig, chunkstore.DeviceStart, uint64) {
+	t.Helper()
+	r := newRig(t, d, cfg)
+	r.open()
+	act, log := chunkstore.StartDevice(rng, r.S.Err())
+	return r, act, log
+}
+
+// Format starts formatting the disk under log; Settle finishes it.
+func (r *Rig) Format(log uint64) {
+	r.T.Helper()
+	geo, err := disklog.GeometryFor(r.D.Blocks() * core.BlockSize)
+	if err != nil {
+		r.T.Fatal(err)
+	}
+	if r.S, err = chunkstore.Format(&r.ctx, r.Cfg, disklog.Superblock{LogID: log, Geometry: geo}, &r.out); err != nil {
+		r.T.Fatal(err)
+	}
+	r.take()
 }
 
 // OpenRig recovers a store of configuration cfg from d, a disk a store was formatted on.
@@ -204,6 +220,14 @@ func (r *Rig) Restart() {
 // Reopen recovers a store from the disk, dropping the old one and the replies it gave.
 func (r *Rig) Reopen() {
 	r.T.Helper()
+	r.open()
+	if !r.S.Serving() {
+		r.T.Fatalf("recovery ended without serving: %v", r.S.Err())
+	}
+}
+
+func (r *Rig) open() {
+	r.T.Helper()
 	r.ctx.Pool, r.inflight = r.D.Pool(), 0
 	clear(r.replies)
 	clear(r.sent)
@@ -214,9 +238,6 @@ func (r *Rig) Reopen() {
 	}
 	r.take()
 	r.Settle()
-	if !r.S.Serving() {
-		r.T.Fatalf("recovery ended without serving: %v", r.S.Err())
-	}
 }
 
 func (r *Rig) id() uint64 {
