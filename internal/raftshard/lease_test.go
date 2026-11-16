@@ -10,8 +10,8 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/lease"
 )
 
-// leaseLeft is primary_lease less lease_drift: how long after its ask a holder's lease runs at a rate bound of 1.
-var leaseLeft = lease.DefaultConfig.Lease * core.Tick(lease.PPM-lease.DefaultConfig.Drift) / lease.PPM
+// leaseLeft is primary_lease less lease_drift and core.ResumeThreshold: how long after its ask a holder's lease runs at a rate bound of 1.
+var leaseLeft = lease.DefaultConfig.Lease*core.Tick(lease.PPM-lease.DefaultConfig.Drift)/lease.PPM - core.ResumeThreshold
 
 func (n *testNet) leaseRead(i int) bool {
 	ctx := n.ctx(i)

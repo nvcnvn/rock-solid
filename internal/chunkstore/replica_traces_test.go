@@ -204,7 +204,7 @@ func TestAReturningPrimaryRefusesAPendingVersionOffTheKeptChain(t *testing.T) {
 	}
 }
 
-// instantTrace is neg-instant-reboot's trace: grantor 3 reboots the instant after it renewed primary 2's lease, cut off from it, and its new boot runs 2% fast; it comes back primary with disk 2 in maintenance, which disk 2, cut off from the control plane, never learns.
+// instantTrace is neg-instant-reboot's trace: grantor 3 reboots the instant after it renewed primary 2's lease, cut off from it, and its new boot runs 2% fast, while primary 2 sleeps 0.99 s, a suspend that delivers no Resumed and so spends the margin left for one; grantor 3 comes back primary with disk 2 in maintenance, which disk 2, cut off from the control plane, never learns.
 func instantTrace(t *testing.T, plant bool) error {
 	set := sim.DefaultSettings()
 	set.RebootInstantly = plant
@@ -222,6 +222,7 @@ func instantTrace(t *testing.T, plant bool) error {
 	c.onEvent = nil
 	c.s.Reboot(2)
 	c.s.Partition(1, 2, false)
+	c.s.Pause(1, clock.Suspend, 990_000, false)
 	c.hand(c.next(members(Member{Disk: 3}, Member{Disk: 2, Mark: MarkMaint})))
 	for !c.s.Node(2).Up() && c.step() {
 	}
