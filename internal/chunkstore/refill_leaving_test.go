@@ -528,7 +528,7 @@ func TestCopiesLackingFallAndClearStuck(t *testing.T) {
 	r.lose(d2)
 	r.tick(2_000_000)
 	for i := range uint32(3) {
-		r.c.until(r.c.write(pg0, chunkIn(pg0, 2+i, 0), 0, bytes.Repeat([]byte{0x22}, core.BlockSize)))
+		r.c.until(r.c.write(pg0, chunkIn(pg0, 1, 1+i), 0, bytes.Repeat([]byte{0x22}, core.BlockSize)))
 	}
 	r.back(d2)
 	r.tick(StuckAfter + 2_000_000)
