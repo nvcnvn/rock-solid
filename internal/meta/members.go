@@ -151,6 +151,7 @@ func (c *Control) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) 
 			}
 			if chunkstore.DecodeReport(frame, data, &c.rep) == nil {
 				c.fill(ctx.Now, &c.rep)
+				c.watch.Hear(c.rep.Leads)
 			}
 		}
 	}
@@ -348,7 +349,9 @@ func (c *Control) diskView(live []chunkstore.RecordedDisk, now core.Tick) []Disk
 }
 
 // poolDisks is each disk of in, with its capacity figures, that the record knows, whose log is
-// not gone and whose node is not role meta, at the node, mark and drain the record gives it.
+// not gone and whose node is not role meta, at the node, mark and drain the record gives it. A disk
+// with no class takes the first class it reported; a later report never changes it, so a heartbeat
+// moves no data.
 func (c *Control) poolDisks(in []chunkstore.Disk) []chunkstore.Disk {
 	ds := c.rec.Disks()
 	var out []chunkstore.Disk
@@ -357,6 +360,9 @@ func (c *Control) poolDisks(in []chunkstore.Disk) []chunkstore.Disk {
 			continue
 		}
 		d.Node, d.Drain = ds[d.ID-1].Node, slices.Contains(c.drains, d.ID)
+		if d.Class == "" && int(d.ID) <= len(c.fills) {
+			d.Class = c.fills[d.ID-1].class
+		}
 		d.Mark, d.DownSince = c.det.Mark(d.ID)
 		out = append(out, d)
 	}

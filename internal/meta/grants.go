@@ -68,10 +68,11 @@ type flushAt struct {
 	blocks uint64
 }
 
-// diskFill is what the leader heard of a disk: its live blocks and when, and its size and log
-// reserve in blocks from its node's report.
+// diskFill is what the leader heard of a disk: its live blocks and when, the first class it
+// reported, and its size and log reserve in blocks from its node's report.
 type diskFill struct {
 	live, blocks, reserve uint64
+	class                 string
 	at                    core.Tick
 	heard                 bool
 }
@@ -310,6 +311,9 @@ func (c *Control) fill(now core.Tick, rp *chunkstore.Report) {
 		if id := c.diskOfLog(s.Log); id != 0 {
 			f := c.diskFill(id)
 			f.live, f.at, f.heard = s.Fill, now, true
+			if f.class == "" {
+				f.class = s.Class
+			}
 		}
 	}
 }
@@ -398,9 +402,11 @@ func (c *Control) grantStep(now core.Tick, leased bool, ds []chunkstore.Disk, mo
 			pg.flushes = slices.DeleteFunc(pg.flushes, func(x flushAt) bool { return cover >= x.at+FillCover })
 		}
 		pg.cond.Update(&pg.figures, !slices.Contains(moved, cp.ID) && pt.Recovered())
+		c.watch.Watch(now, pt, &pg.cond)
 		lim := c.limit(&pg)
 		pg.level = c.level(cp.ID, lim-min(lim, c.fixed(cp.ID)))
 		next = append(next, pg)
 	}
 	c.pgrants = next
+	c.watch.Forget(&c.table)
 }

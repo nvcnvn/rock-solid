@@ -16,6 +16,33 @@ type soleRun struct {
 	a        *authority
 	isolated map[uint32]bool
 	acked    map[core.ChunkID]uint64
+	// w, once watch starts it, is what the replicas' reports say of the PG, and cond the pool's conditions it gives each second.
+	w    *Watcher
+	cond Conditions
+}
+
+// watch starts an authority on a node of its own that every replica heartbeats from each start and that hears their reports in w.
+func (r *soleRun) watch() {
+	c := r.c
+	r.w = &Watcher{}
+	var rp Report
+	c.s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) {
+		c.auth = n.Start(sim.MachineFunc(func(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
+			if ev.Kind != core.EvNetRecv {
+				return out
+			}
+			frame, data := Frame(ctx.Pool, &ev.Msg)
+			defer freeBuf(ctx, ev.Msg.Buf)
+			if k, err := Peek(frame); err == nil && k == KindReport && DecodeReport(frame, data, &rp) == nil {
+				r.w.Hear(rp.Leads)
+			}
+			return out
+		}), nil)
+	})
+	c.reporting = true
+	for k := range c.reps {
+		c.call(k, func(ctx *core.Context, rep *Replica, out *ReplicaOutput) { rep.SetAuthority(ctx, c.auth, out) })
+	}
 }
 
 func newSoleRun(t *testing.T, replicas, minLive, disks int) *soleRun {
@@ -117,13 +144,13 @@ func (r *soleRun) publish() {
 	}
 }
 
-// lose cuts disk off from every node, as a power cut would, and marks it down; its disk stays as it was.
+// lose cuts disk off from every node, the client's and a watch's authority's included, as a power cut would, and marks it down; its disk stays as it was.
 func (r *soleRun) lose(disk uint32) {
 	r.isolated[disk] = true
 	r.a.down[disk] = r.c.s.Time()
 	r.a.rec.Down(disk, r.c.s.Time())
 	n := uint32(r.c.node(disk))
-	for o := range uint32(len(r.c.reps)) + 1 {
+	for o := range uint32(len(r.c.reps)) + 2 {
 		if o != n {
 			r.c.s.Partition(n, o, false)
 		}
@@ -136,7 +163,7 @@ func (r *soleRun) back(disk uint32) {
 	delete(r.a.down, disk)
 	r.a.rec.Up(disk)
 	n := uint32(r.c.node(disk))
-	for o := range uint32(len(r.c.reps)) + 1 {
+	for o := range uint32(len(r.c.reps)) + 2 {
 		if o != n && !r.isolated[uint32(o)+1] {
 			r.c.s.Heal(n, o)
 		}
@@ -150,6 +177,9 @@ func (r *soleRun) tick(d core.Tick) {
 	for end := r.c.s.Time() + d; r.c.s.Time() < end; {
 		r.c.runFor(1_000_000)
 		r.publish()
+		if r.w != nil {
+			r.w.Watch(r.c.s.Time(), &r.c.table.Pools[0], &r.cond)
+		}
 	}
 }
 

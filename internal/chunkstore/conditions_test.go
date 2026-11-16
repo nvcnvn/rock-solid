@@ -213,6 +213,15 @@ func TestStuck(t *testing.T) {
 	if c.Watch(10*StuckAfter, nil, tbl); len(c.Stuck) != 0 {
 		t.Fatalf("Stuck %v once the PG has nothing left to copy", c.Stuck)
 	}
+	if c.Watch(10*StuckAfter, []Copying{{PG: 8, Unfound: 1}}, tbl); len(c.Stuck) != 0 || len(c.Blocked) != 0 {
+		t.Fatalf("a PG past the table gave Stuck %v, Blocked %v", c.Stuck, c.Blocked)
+	}
+	var w Watcher
+	w.Hear([]LeadState{{PG: core.PGID{Index: 8}, Active: true, Unfound: 1}, {PG: core.PGID{Pool: 7}, Active: true, Unfound: 1}})
+	w.Watch(10*StuckAfter, tbl, &c)
+	if w.Forget(&Table{Pools: []PoolTable{*tbl}}); len(w.pgs) != len(tbl.PGs) {
+		t.Fatalf("the watcher kept %d PGs of a table of %d", len(w.pgs), len(tbl.PGs))
+	}
 }
 
 // A rebooting node's disks keep their shares at their last reported fills, so no figure or condition changes.

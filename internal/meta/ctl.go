@@ -118,6 +118,7 @@ type Control struct {
 	}
 	rep    chunkstore.Report
 	gplant grantPlants
+	watch  chunkstore.Watcher
 }
 
 // commit is the Txn in flight: the state it gives and how much of the staged reports it took.

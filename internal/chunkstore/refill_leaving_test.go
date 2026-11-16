@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -412,9 +413,10 @@ func TestDropAllLeavingStrandsAWrite(t *testing.T) {
 	}
 }
 
-// Both old disks lost together and declared lost: no interval activated since they went, and peering still needs an answer from the last activated one, so the PG stays stopped with its members refilled.
+// Both old disks lost together and declared lost: no interval activated since they went, and peering still needs an answer from the last activated one, so the PG stays stopped with its members refilled, and the pool reports it Stuck and Blocked, its count unknown and no candidate left to return.
 func TestTwoDisksLostTogetherStayStopped(t *testing.T) {
 	r, ch, _ := refillRun(t, 2, 2, 5, nil, "")
+	r.watch()
 	ms := r.members()
 	d1, d2 := ms[0].Disk, ms[1].Disk
 	r.lose(d1)
@@ -426,6 +428,9 @@ func TestTwoDisksLostTogetherStayStopped(t *testing.T) {
 	if ms = r.members(); len(ms) != 2 || leavingIn(ms) != 0 {
 		t.Fatalf("members %v", ms)
 	}
+	if want := []BlockedPG{{Stopped: true}}; !slices.Equal(r.cond.Stuck, []uint32{0}) || !reflect.DeepEqual(r.cond.Blocked, want) {
+		t.Fatalf("Stuck %v, Blocked %+v, want PG 0 stopped with no candidate", r.cond.Stuck, r.cond.Blocked)
+	}
 	if rp, _ := r.read(ch); rp.Status != StatusRefused {
 		t.Fatalf("X read %+v", rp)
 	}
@@ -434,9 +439,10 @@ func TestTwoDisksLostTogetherStayStopped(t *testing.T) {
 	}
 }
 
-// Both old disks declared lost: repair ends with the chunk they alone held unfound for good, and the PG serves the rest.
+// Both old disks declared lost: repair ends with the chunk they alone held unfound for good, which keeps the PG from recovering, so the pool reports it Stuck and Blocked with the count and no candidate left to return, and the PG serves the rest.
 func TestAChunkOnlyLostDisksHeldStaysUnfound(t *testing.T) {
 	r, ch, _ := refillRun(t, 2, 2, 5, nil, "")
+	r.watch()
 	r.recovery(false)
 	ms := r.members()
 	d1, d2 := ms[0].Disk, ms[1].Disk
@@ -450,6 +456,9 @@ func TestAChunkOnlyLostDisksHeldStaysUnfound(t *testing.T) {
 	r.tick(10_000_000)
 	if ms = r.members(); len(ms) != 2 || leavingIn(ms) != 0 {
 		t.Fatalf("members %v", ms)
+	}
+	if b := r.cond.Blocked; !slices.Equal(r.cond.Stuck, []uint32{0}) || len(b) != 1 || b[0].PG != 0 || b[0].Unfound != 1 || b[0].Stopped || len(b[0].Candidates) != 0 {
+		t.Fatalf("Stuck %v, Blocked %+v, want PG 0 stuck with 1 unfound and no candidate", r.cond.Stuck, r.cond.Blocked)
 	}
 	if rp, _ := r.read(ch); rp.Status != StatusUnfound {
 		t.Fatalf("X read %+v", rp)
@@ -512,6 +521,7 @@ func TestStayKeepsTheMissingMember(t *testing.T) {
 func TestABlockedPGNamesItsDisks(t *testing.T) {
 	for _, minLive := range []int{1, 2} {
 		r := newSoleRun(t, 2, minLive, 5)
+		r.watch()
 		c := r.c
 		ch := chunkIn(pg0, 1, 0)
 		c.until(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize)))
@@ -532,10 +542,7 @@ func TestABlockedPGNamesItsDisks(t *testing.T) {
 		if rp, _ := r.read(ch); rp.Status != status {
 			t.Fatalf("min_live %d: X read %+v, members %v", minLive, rp, r.members())
 		}
-		var cond Conditions
-		n, stopped := c.reps[c.primary(pg0)].Unfound(pg0)
-		cond.Watch(c.s.Time(), []Copying{{Unfound: n, Stopped: stopped}}, &c.table.Pools[0])
-		if len(cond.Blocked) != 1 || cond.Blocked[0].Unfound != want || cond.Blocked[0].Stopped != wantStopped || !slices.Equal(cond.Blocked[0].Candidates, []uint32{d1, d2}) {
+		if cond := r.cond; len(cond.Blocked) != 1 || cond.Blocked[0].Unfound != want || cond.Blocked[0].Stopped != wantStopped || !slices.Equal(cond.Blocked[0].Candidates, []uint32{d1, d2}) {
 			t.Fatalf("min_live %d: %+v with %d and %d down, members %v", minLive, cond, d1, d2, r.members())
 		}
 	}

@@ -361,10 +361,13 @@ func (f *Figures) anyAbove(points uint8) bool {
 	return slices.ContainsFunc(f.Disks, func(d DiskFigures) bool { return d.Used > d.level(points) })
 }
 
-// Watch sets Stuck to the PGs that have copied nothing for StuckAfter by now, and Blocked to those and the PGs with unfound chunks, each naming its candidates in t, the pool's table.
+// Watch sets Stuck to the PGs that have copied nothing for StuckAfter by now, and Blocked to those and the PGs with unfound chunks, each naming its candidates in t, the pool's table. A PG t does not have, as a report from before a split or from a stale table may name, is dropped.
 func (c *Conditions) Watch(now core.Tick, pgs []Copying, t *PoolTable) {
 	c.Stuck, c.Blocked = c.Stuck[:0], c.Blocked[:0]
 	for _, pg := range pgs {
+		if int(pg.PG) >= len(t.PGs) {
+			continue
+		}
 		stuck := now >= pg.Since && now-pg.Since >= StuckAfter
 		if stuck {
 			c.Stuck = append(c.Stuck, pg.PG)
@@ -379,6 +382,82 @@ func (c *Conditions) Watch(now core.Tick, pgs []Copying, t *PoolTable) {
 			c.Blocked = append(c.Blocked, b)
 		}
 	}
+}
+
+// Watcher is what an authority holds of each PG for its pool's Stuck and Blocked: its primary's latest report, whether it needs copying and since when it last copied or began to, and the interval and copies lacking it last measured progress against.
+type Watcher struct {
+	pgs     []pgWatch
+	copying []Copying
+}
+
+type pgWatch struct {
+	pg       core.PGID
+	lead     LeadState
+	heard    bool
+	needs    bool
+	since    core.Tick
+	interval uint32
+	lacking  uint32
+}
+
+func (w *Watcher) pg(pg core.PGID) *pgWatch {
+	i, ok := slices.BinarySearchFunc(w.pgs, pg, func(x pgWatch, pg core.PGID) int {
+		return cmp.Or(cmp.Compare(x.pg.Pool, pg.Pool), cmp.Compare(x.pg.Index, pg.Index))
+	})
+	if !ok {
+		w.pgs = slices.Insert(w.pgs, i, pgWatch{pg: pg})
+	}
+	return &w.pgs[i]
+}
+
+// Hear keeps each PG's latest report from the primary of its newest interval.
+func (w *Watcher) Hear(ls []LeadState) {
+	for _, l := range ls {
+		if x := w.pg(l.PG); !x.heard || l.Interval >= x.lead.Interval {
+			x.lead, x.heard = l, true
+		}
+	}
+}
+
+// Watch feeds cond's Watch at now from pt, the pool's committed table, and the reports heard. A PG needs copying while it has a leaving member or one not up, its table records no recovered report for its current interval, or its primary reports copies lacking; it copied when the copies lacking fall within one interval. A PG whose current interval no active primary reports is stopped, its count unknown.
+func (w *Watcher) Watch(now core.Tick, pt *PoolTable, cond *Conditions) {
+	w.copying = w.copying[:0]
+	for j := range pt.PGs {
+		e := &pt.PGs[j]
+		x := w.pg(core.PGID{Pool: pt.ID, Index: uint32(j)})
+		active := x.heard && x.lead.Active && x.lead.Interval == e.Interval
+		var lacking, unfound uint32
+		if active {
+			lacking, unfound = x.lead.Lacking, x.lead.Unfound
+		}
+		needs := !e.Recovered || lacking > 0 || slices.ContainsFunc(e.Members, func(m Member) bool { return m.Leaving || m.Mark != MarkUp })
+		if needs && !x.needs {
+			x.since = now
+		}
+		if active {
+			if x.needs && x.interval == e.Interval && lacking < x.lacking {
+				x.since = now
+			}
+			x.interval, x.lacking = e.Interval, lacking
+		}
+		x.needs = needs
+		since := now
+		if needs {
+			since = x.since
+		}
+		if needs || unfound > 0 {
+			w.copying = append(w.copying, Copying{PG: uint32(j), Since: since, Unfound: unfound, Stopped: !active})
+		}
+	}
+	cond.Watch(now, w.copying, pt)
+}
+
+// Forget drops the PGs t does not have, which a report may name after a split or from a stale table.
+func (w *Watcher) Forget(t *Table) {
+	w.pgs = slices.DeleteFunc(w.pgs, func(x pgWatch) bool {
+		p := t.pool(x.pg.Pool)
+		return p == nil || int(x.pg.Index) >= len(p.PGs)
+	})
 }
 
 // Confirm records f's stranded fraction as the confirmed fraction, as rock-solid pool create, disk changes and pool confirm do.
