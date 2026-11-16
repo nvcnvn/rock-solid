@@ -59,7 +59,8 @@ func wireCases() []wireCase {
 		{"heartbeat", &Heartbeat{ID: 8, Epoch: 77, Run: 0x0123456789abcdef, Raw: 51_020_500}, 0},
 		{"report_empty", &Report{ID: 9}, 0},
 		{"report", &Report{ID: 9, Activations: []PGFields{wirePG}, Recovered: []PGFields{wirePG}, Latencies: []Latency{{Disk: 3, Latency: 250}},
-			Disks: []DiskState{{Log: 0x0123456789abcdef, Fill: 1000, Oldest: 40}, {Log: 2, Fill: 5, Oldest: 1_500_000, Failed: true}}}, 0},
+			Disks: []DiskState{{Log: 0x0123456789abcdef, Fill: 1000, Oldest: 40, Class: "ssd"}, {Log: 2, Fill: 5, Oldest: 1_500_000, Failed: true}},
+			Leads: []LeadState{{PG: wirePG.PG, Interval: 41, Active: true, Unfound: 2, Lacking: 7}, {PG: core.PGID{Pool: 1, Index: 18}, Interval: 3}}}, 0},
 		{"member_timeout", &MemberTimeout{ID: 10, PG: wirePG, Disk: 3}, 0},
 		{"probe", &Probe{ID: 11, Disk: 3}, 0},
 		{"probe_reply", &ProbeReply{ID: 11, Log: 0x0123456789abcdef, Oldest: 1_500_000, Failed: true}, 0},
@@ -496,7 +497,7 @@ func TestWireLongFrameTravelsInABuffer(t *testing.T) {
 	for _, c := range []struct {
 		r      *Report
 		inline bool
-	}{{report(2, 1, 10, 2), true}, {report(2, 1, 8, 3), false}, {report(0, 0, 0, 200), false}} {
+	}{{report(2, 1, 9, 2), true}, {report(2, 1, 8, 3), false}, {report(0, 0, 0, 200), false}} {
 		frame := AppendReport(nil, c.r)
 		var m core.Msg
 		if err := Attach(pool, &m, frame, core.NoBuf); err != nil {
@@ -601,6 +602,25 @@ func TestWireAllocs(t *testing.T) {
 		}); a != 0 {
 			t.Errorf("%s: %v allocations per encode and decode", name, a)
 		}
+	}
+}
+
+func TestWireReportLeadsAndClass(t *testing.T) {
+	mustMalformed(t, "a lead at interval 0", AppendReport(nil, &Report{Leads: []LeadState{{PG: wirePG.PG}}}), 0)
+	mustMalformed(t, "an inactive lead with a count", AppendReport(nil, &Report{Leads: []LeadState{{PG: wirePG.PG, Interval: 1, Unfound: 1}}}), 0)
+	b := AppendReport(nil, &Report{Disks: []DiskState{{Class: "ssd"}}})
+	b[len(b)-8] = 9
+	mustMalformed(t, "a class past the frame", b[:len(b)-4], 0)
+
+	rp := Report{Disks: []DiskState{{Class: "nvme"}}, Leads: []LeadState{{PG: wirePG.PG, Interval: 41, Active: true, Unfound: 3, Lacking: 9}}}
+	frame := AppendReport(nil, &rp)
+	var got Report
+	if a := testing.AllocsPerRun(100, func() {
+		if err := DecodeReport(frame, 0, &got); err != nil {
+			t.Fatal(err)
+		}
+	}); a != 0 {
+		t.Errorf("%v allocations decoding a report into a reused one", a)
 	}
 }
 

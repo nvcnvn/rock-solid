@@ -41,6 +41,8 @@ type ReplicaConfig struct {
 	Log uint64
 	// Restarted is set when the store was opened rather than formatted: an earlier run may have writes in flight, so the replica asks for a new interval of each PG it leads in its first table and peers in it before it serves.
 	Restarted bool
+	// Class is the disk's class, at most MaxClassLen bytes, which its heartbeats carry.
+	Class string
 }
 
 // ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations and in Recovered, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers. Trace is the protocol steps the call took, for the loop's trace.
@@ -462,6 +464,9 @@ type replicaPlants struct {
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.
 func NewReplica(cfg ReplicaConfig, st *Store) *Replica {
+	if len(cfg.Class) > MaxClassLen {
+		panic("chunkstore: a disk class longer than MaxClassLen")
+	}
 	lc := cfg.Lease
 	if lc == (lease.Config{}) {
 		lc = lease.DefaultConfig

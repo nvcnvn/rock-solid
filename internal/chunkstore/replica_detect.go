@@ -60,7 +60,24 @@ func (r *Replica) SetAuthority(ctx *core.Context, addr core.NodeID, out *Replica
 
 // diskState is what the owner loop holds in memory of its disk.
 func (r *Replica) diskState(ctx *core.Context) DiskState {
-	return DiskState{Log: r.cfg.Log, Fill: r.fill(ctx), Oldest: r.st.Oldest(ctx.Now), Failed: r.st.Err() != nil}
+	return DiskState{Log: r.cfg.Log, Fill: r.fill(ctx), Oldest: r.st.Oldest(ctx.Now), Failed: r.st.Err() != nil, Class: r.cfg.Class}
+}
+
+// leadStates appends what the replica reports of each PG it leads.
+func (r *Replica) leadStates(dst []LeadState) []LeadState {
+	for i := range r.leads {
+		l := &r.leads[i]
+		s := LeadState{PG: l.pg, Interval: l.interval, Active: l.active}
+		if l.active {
+			// ponytail: counts the lead's decisions on every heartbeat; count once per decision if it shows in a profile.
+			s.Unfound, _ = r.Unfound(l.pg)
+			for _, n := range l.listed {
+				s.Lacking += uint32(n)
+			}
+		}
+		dst = append(dst, s)
+	}
+	return dst
 }
 
 // report sends the authority a heartbeat and arms the next.
@@ -68,6 +85,7 @@ func (r *Replica) report(ctx *core.Context, out *ReplicaOutput) {
 	rp := &r.rep
 	r.reportID++
 	rp.ID, rp.Disks, rp.Latencies = core.RequestID(r.reportID), append(rp.Disks[:0], r.diskState(ctx)), rp.Latencies[:0]
+	rp.Leads = r.leadStates(rp.Leads[:0])
 	for id := range r.disks {
 		if m := &r.disks[id].lat; m.n > 0 {
 			rp.Latencies = append(rp.Latencies, Latency{Disk: uint32(id), Latency: m.p99()})
