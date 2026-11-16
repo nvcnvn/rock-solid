@@ -787,13 +787,14 @@ func TestANodeAnswersGoneOnlyForTheReplicaItNoLongerHolds(t *testing.T) {
 	}
 	for _, c := range []struct {
 		from uint64
+		node uint32
 		drop bool
-	}{{4, false}, {3, true}} {
-		ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 2}}
+	}{{4, rC, false}, {3, rD, false}, {3, rC, true}} {
+		ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: c.node}}
 		encodeFortify(testGroup, &fortify{kind: kindGone, from: c.from, to: 2}, &ev.Msg)
 		n.event(rB, ev)
 		if dropped := n.r[rB].s.support.term == 0; dropped != c.drop {
-			t.Fatalf("an answer that %d is gone: B dropped its support %v", c.from, dropped)
+			t.Fatalf("an answer from node %d that %d is gone: B dropped its support %v", c.node, c.from, dropped)
 		}
 	}
 }

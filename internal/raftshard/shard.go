@@ -465,7 +465,7 @@ func (s *Shard) recv(ctx *core.Context, ev *core.Event, out *Output) {
 		out.Removed = s.removed
 	case kind == kindAsk:
 	case kind == kindGone:
-		if s.support.term != 0 && f.from == s.leadID {
+		if s.support.term != 0 && f.from == s.leadID && ev.Peer == s.lead {
 			s.support = fortified{}
 			s.lapse(ctx)
 		}
