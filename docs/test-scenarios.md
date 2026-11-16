@@ -7857,7 +7857,14 @@ The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 25
 | A report, a session fetch and a table fetch at a follower of a three-voter group | Each answered with the leader's node |
 | Placement and leader messages across the wire | Decode to what was sent; fuzzed (`FuzzDecodeTableMsg`, `FuzzDecodeDeltaMsg`, `FuzzDecodeLeader`), the table and delta from a seed of a pool with two PGs, one with a past interval |
 
-The rows without a test named are unit tests in `internal/meta/ctlhost_test.go`. The node's side, in `internal/node/node_test.go`:
+The rows without a test named are unit tests in `internal/meta/ctlhost_test.go`. The process, `rock-solid ctl` in `cmd/rock-solid`, over TCP and io_uring on Linux:
+
+| Input | Expected |
+| --- | --- |
+| A single voter of group 257 formatting its disk file, and a node sending its report and a session fetch every 100 ms | A fetch answered under its token: the voter elected itself, leased and committed its session table (`TestASingleVoterControlPlaneAnswersOverTCPAndSurvivesAKill`) |
+| That process killed with `SIGKILL` and started again on its file without `-format` | It recovers its log and answers the node's fetches again |
+
+The node's side, in `internal/node/node_test.go`:
 
 | Input | Expected |
 | --- | --- |
