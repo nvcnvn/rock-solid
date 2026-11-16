@@ -652,19 +652,7 @@ func TestALeadThatLeftStillRecordsItsRecovery(t *testing.T) {
 		e.Members = []Member{{Disk: 3}, {Disk: 1}, {Disk: 2}}
 	}), true)
 	c.settle()
-	records := func() (n int) {
-		for line := range bytes.Lines(c.s.Trace()) {
-			r, err := trace.Parse(bytes.TrimSuffix(line, []byte("\n")))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if r.Name == trace.OutRecovered && r.Node == 2 {
-				n++
-			}
-		}
-		return n
-	}
-	if n := records(); n != 0 {
+	if n := recoveredRecords(t, c, 2); n != 0 {
 		t.Fatalf("primary 3 recorded %d recoveries with no member's answer", n)
 	}
 	c.publish(c.next(func(t *Table) {
@@ -673,7 +661,63 @@ func TestALeadThatLeftStillRecordsItsRecovery(t *testing.T) {
 		e.Members = []Member{{Disk: 2}, {Disk: 1}, {Disk: 3}}
 	}), false)
 	c.settle()
-	if n := records(); n != 1 {
+	if n := recoveredRecords(t, c, 2); n != 1 {
 		t.Fatalf("primary 3 recorded %d recoveries after it left the lead, want 1", n)
 	}
+}
+
+// Primary 3's recovery write of the chunk it lacks waits on its member and then fails, as when a
+// write of the chunk ordered before it fails, and a table moves the primary: the store still lands
+// the write, clearing the chunk's listing, so its answer still makes the record (the primary-change
+// run's seed 15 found it).
+func TestARecoveryEndedByAFailedWriteStillRecordsItsLanding(t *testing.T) {
+	tbl := rtable(4, 1)
+	_, e := tbl.entry(pg0)
+	e.Members = []Member{{Disk: 2}, {Disk: 1, Mark: MarkDown}, {Disk: 3, Mark: MarkDown}}
+	c := newRCluster(t, tbl)
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 0, 2, 1)
+	c.conformBegin()
+	c.drop = func(d int, a *core.Action) bool {
+		return a.Kind == core.ActNetSend && a.Msg.Len >= headSize && Kind(a.Msg.Body[1]) == KindRecover
+	}
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 2)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 3}, {Disk: 1}, {Disk: 2}}
+	}), true)
+	c.settle()
+	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		i := slices.IndexFunc(r.vers, func(v version) bool { return v.recover })
+		if i < 0 {
+			t.Fatal("primary 3 ordered no recovery write")
+		}
+		r.fail(ctx, i, Response{Status: StatusRefused}, out)
+		r.drain(ctx, out)
+	})
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 3)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 2}, {Disk: 1}, {Disk: 3}}
+	}), false)
+	c.settle()
+	if x := c.listed(2, ch); x.ListedIn != 0 {
+		t.Fatalf("disk 3 holds %+v", x)
+	}
+	if n := recoveredRecords(t, c, 2); n != 1 {
+		t.Fatalf("primary 3 recorded %d recoveries for the write its store landed, want 1", n)
+	}
+}
+
+func recoveredRecords(t *testing.T, c *rcluster, node uint32) (n int) {
+	for line := range bytes.Lines(c.s.Trace()) {
+		r, err := trace.Parse(bytes.TrimSuffix(line, []byte("\n")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Name == trace.OutRecovered && r.Node == node {
+			n++
+		}
+	}
+	return n
 }

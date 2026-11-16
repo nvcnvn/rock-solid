@@ -1428,7 +1428,9 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 			continue
 		}
 		w.done = true
-		r.takeReq(w.req)
+		if !w.recover {
+			r.takeReq(w.req)
+		}
 		r.answerClient(ctx, w, ref, out)
 		r.release(ctx, j)
 	}
