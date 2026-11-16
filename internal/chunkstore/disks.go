@@ -22,7 +22,7 @@ const (
 	StartOpened DeviceStart = iota
 	// StartFormat formats the device under a new log ID, then reports it opened.
 	StartFormat
-	// StartFailed reports the device failed and leaves it to the operator, never formatting or writing it.
+	// StartFailed reports the device failed and leaves it to the operator, never formatting it; recovery's own repairs are the only writes it has had.
 	StartFailed
 )
 

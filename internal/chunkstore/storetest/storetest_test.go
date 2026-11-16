@@ -1,6 +1,7 @@
 package storetest_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/chunkstore/storetest"
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
@@ -128,20 +130,48 @@ func TestADeviceWithNoValidSuperblockIsLeftAsItWas(t *testing.T) {
 	geo := r.S.Log().Superblock().Geometry
 	d.D.FlipBit(geo.SuperblockLBA(), 16, 1)
 	d.D.FlipBit(geo.SuperblockCopyLBA(), 16, 1)
-	before := diskSum(d)
+	before := diskSum(d, 0)
 	d.Restart()
 	r, act, _ := storetest.StartRig(t, d, storetest.Config(), core.NewRand(1))
 	if act != chunkstore.StartFailed || !errors.Is(r.S.Err(), disklog.ErrUnrecognized) {
 		t.Fatalf("a device with no valid superblock: %v, %v", act, r.S.Err())
 	}
-	if diskSum(d) != before {
+	if diskSum(d, 0) != before {
 		t.Fatal("starting a device with no valid superblock changed it")
 	}
 }
 
-func diskSum(d *storetest.SimDisk) [sha256.Size]byte {
+// A device reported failed after recovery repaired block 0 from its valid copy, then failed a read,
+// differs from what it was only in block 0, now the copy's superblock.
+func TestAFailedDeviceIsWrittenOnlyByItsSuperblockRepair(t *testing.T) {
+	d := storetest.NewSimDisk(1)
+	r := storetest.NewRig(t, d, storetest.Config())
+	r.OK(r.Write(storetest.Chunk(1), 0, storetest.Fill(core.BlockSize, 7), 0))
+	geo := r.S.Log().Superblock().Geometry
+	if geo.SuperblockLBA() != 0 {
+		t.Fatalf("block 0 at LBA %d", geo.SuperblockLBA())
+	}
+	d.D.FlipBit(0, 16, 1)
+	b0, rest := d.D.Read(0, 1), diskSum(d, 1)
+	d.Restart()
+	d.D.Inject(sim.Fault{Effect: sim.FailIO, When: func(op sim.DiskOp, _ *core.Rand) bool {
+		return op.Kind == core.ActDiskRead && op.LBA > geo.SuperblockCopyLBA()
+	}})
+	r, act, _ := storetest.StartRig(t, d, storetest.Config(), core.NewRand(1))
+	if act != chunkstore.StartFailed {
+		t.Fatalf("a device whose reads fail past its copy: %v, %v", act, r.S.Err())
+	}
+	if diskSum(d, 1) != rest {
+		t.Fatal("starting the device changed a block other than block 0")
+	}
+	if after := d.D.Read(0, 1); bytes.Equal(after, b0) || !bytes.Equal(after, d.D.Read(geo.SuperblockCopyLBA(), 1)) {
+		t.Fatal("block 0 is not the copy's superblock")
+	}
+}
+
+func diskSum(d *storetest.SimDisk, from uint64) [sha256.Size]byte {
 	h := sha256.New()
-	for lba := uint64(0); lba < d.Blocks(); lba += 1024 {
+	for lba := from; lba < d.Blocks(); lba += 1024 {
 		h.Write(d.D.Read(core.LBA(lba), min(1024, d.Blocks()-lba)))
 	}
 	return [sha256.Size]byte(h.Sum(nil))

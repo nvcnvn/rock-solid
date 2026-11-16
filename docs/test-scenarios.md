@@ -7707,6 +7707,9 @@ once.
 - Both superblocks damaged (`TestADeviceWithNoValidSuperblockIsLeftAsItWas`, `storetest`): bit 16
   flipped in block 0 and in the copy of a written store; the start is failed with
   `ErrUnrecognized`, and the disk's SHA-256 is the same before and after it.
+- Failed after a repair (`TestAFailedDeviceIsWrittenOnlyByItsSuperblockRepair`, `storetest`): bit 16
+  flipped in block 0 of a written store, its copy valid, and every read past the copy failing; the
+  start is failed, block 0 now equals the copy, and every other block is as it was.
 - On io_uring over a file-backed disk (`internal/driver/uring`, Linux, in Docker), with each start a
   child process of the test binary (`TestStartChild`): the same two cases with `kill -9` in place
   of the power cut. `TestAStartKilledTwiceMidFormatComesBackWholeOrNew` kills the child after k
