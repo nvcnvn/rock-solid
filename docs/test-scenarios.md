@@ -4259,17 +4259,17 @@ Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`: t
 | `scripted-lost` | 100 | passes: two leaving, one declared lost, `Drop` takes it alone, the other returns and heals the PG | 2 |
 | `scripted-second-failure` | 97 | passes: `rep3`, the second disk down during the copy, two `Add`s, a recovered report removing both | 2 |
 | `scripted-together` | 65 | passes: `rep3`, two marks in one table, one `Refill`, then two `Add`s | 1 |
-| `scripted-move-restarted` | 47 | passes: a move and a restart, the restarted primary's replay gating Y until its next decision | 1 |
+| `scripted-move-restarted` | 46 | passes: a move and a restart, the restarted primary's replay gating Y until its next decision | 1 |
 | `scripted-move-primary` | 39 | passes: a move to a new primary that holds Y, peering keeping Y, which every up member holds, over the removed disk | 2 |
-| `scripted-lister-restarted` | 56 | passes: a restart during recovery, the restarted primary's replay gating Y until its next decision | 2 |
+| `scripted-lister-restarted` | 54 | passes: a restart during recovery, the restarted primary's replay gating Y until its next decision | 2 |
 | `scripted-lister-rotated` | 51 | passes: a rotation during recovery, the new primary holding Y logged and peering keeping it over the member that lists the chunk | 2 |
 | 35 seeds | 463 to 952 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31 and 38, with own records released before their `Logged` reply at 8, 12, 23, 25 and 33 | 3 to 219 |
-| `primaries-15` | 618 | stops at line 520, a `recoveredlate`: discrepancy 29 | 20 |
-| `primaries-34` | 559 | stops at line 250, a `recovered`: discrepancy 28 | 6 |
+| `primaries-15` | 618 | passes: a primary's gated recovery write landing at its next activation, discrepancy 29 | 22 |
+| `primaries-34` | 559 | passes: a recovery read from a source formatted before the write, discrepancy 28 | 30 |
 | `primaries-2` | 677 | no verdict in 400 s and 2 GB, not rerun at this commit: one crash leaves 26 `mayfail` lines, each a free choice | 400 |
 | `primaries-18`, `primaries-35` | 729, 753 | no verdict in 1,200 s and 2 GB, not rerun at this commit: 18 has 25 `mayfail` and 45 `maydeliver` lines, 35 has 6 and 53. TLC ran each at about 300,000 states a minute for two minutes, to depth 491 and 439, then at 1,250 a minute with about 58,000 states queued, its 2 GB heap full | 1,200 |
 
-35 seeds of 40 pass, 15 and 34 stop on a recovery line, and 2, 18 and 35 give no verdict. None broke a safety invariant,
+37 seeds of 40 pass, and 2, 18 and 35 give no verdict. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
 and `mayfail` branches stay alive, not its length.
 
