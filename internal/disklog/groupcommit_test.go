@@ -40,13 +40,15 @@ func TestFormatZeroesTrimsThenWritesBothSuperblocks(t *testing.T) {
 	}
 	h.wantTrace(trims...)
 	h.step(0)
-	h.wantTrace(append(trims, "write 0+1 io100", "fsync io101")...)
+	h.wantTrace(append(trims, "fsync io99")...)
 	h.step(0)
-	h.wantTrace(append(trims, "write 0+1 io100", "fsync io101")...)
+	h.wantTrace(append(trims, "fsync io99", "write 0+1 io100", "fsync io101")...)
 	h.step(0)
-	h.wantTrace(append(trims, "write 0+1 io100", "fsync io101", "write 63+1 io102", "fsync io103")...)
+	h.wantTrace(append(trims, "fsync io99", "write 0+1 io100", "fsync io101")...)
+	h.step(0)
+	h.wantTrace(append(trims, "fsync io99", "write 0+1 io100", "fsync io101", "write 63+1 io102", "fsync io103")...)
 	h.run()
-	if len(h.trace) != len(trims)+4 || len(h.events) != 0 {
+	if len(h.trace) != len(trims)+5 || len(h.events) != 0 {
 		t.Fatalf("not idle after format: %q %+v", h.trace, h.events)
 	}
 	h.wantLive(0)

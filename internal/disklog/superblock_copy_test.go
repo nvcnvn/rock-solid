@@ -152,10 +152,10 @@ func TestSuperblockCopyAfterAReformatThatCrashed(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.absorb()
-	for range h.geo.SegmentCount + 3 {
+	for range h.geo.SegmentCount + 4 {
 		h.step(0)
 	}
-	h.trace = h.trace[h.geo.SegmentCount+3:]
+	h.trace = h.trace[h.geo.SegmentCount+4:]
 	h.round()
 	h.wantTrace("write 0+1 io100", "fsync io101", "write 63+1 io102", "fsync io103")
 	h.crashLanding()
