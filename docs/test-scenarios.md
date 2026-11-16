@@ -619,10 +619,12 @@ no buffer allocated.
 - Block 0 of zeros, or of another format ("EFI PART" repeated), or with a bit flipped in its magic or
   version, next to a valid copy is CopyOnly(BadMagic or BadVersion, copy). The disk may have been
   reused, so recovery reads nothing more, writes nothing and leaves restoring to the operator.
-- Both copies damaged is NotFormatted.
+- No valid superblock on a written disk is Unrecognized, never NotFormatted, and recovery only reads:
+  both copies damaged, block 0 damaged or another format's ("EFI PART") next to a copy of zeros, or
+  block 0 of zeros next to a copy of another format's. Only both of zeros is NotFormatted.
 - A superblock whose geometry claims more blocks than the disk holds counts as damaged, and a copy
   that is not where its own geometry puts its copy is not used: next to a damaged block 0 either is
-  NotFormatted ([superblock repair](design.md#superblock-repair)).
+  Unrecognized ([superblock repair](design.md#superblock-repair)).
 - A reformat that crashes after the new block 0 is flushed but before the copy is written: block 0
   (new log) wins, the stale copy (old log) is rewritten to match, and every segment is free.
 
@@ -2241,9 +2243,13 @@ Invariants (simulator) and faults:
   block (which holds chunk data that may look like anything, a valid segment header of this log
   included, whether or not the manifest lists the segment as slot). The resumed log appends no
   record there.
-- The segment is TRIMmed with its last slot, then its first block written with zeros, and freed
-  once both complete; a TRIM that fails, or does not read back as zeros, still leaves a first block
-  of zeros. Its TRIM joins the cleaner's paced queue at `trim_rate`: two 16 MiB slot segments freed
+- The segment is TRIMmed with its last slot and freed once the TRIM completes, failed or not, its
+  first block then reading as zeros, which the trim writes on either disk (the shared suite's
+  `freed slot segment reads as zeros`); with TRIM off its first block is written with zeros
+  instead. A TRIM that fails can leave the chunk data: while a replayed record names one of its
+  slots recovery reads it as that slot segment and recovers every record; once none does, it reads
+  the segment in full, as it would any segment with an undecodable first block, until it is
+  reused. Its TRIM joins the cleaner's paced queue at `trim_rate`: two 16 MiB slot segments freed
   together are trimmed 125 ms apart at 128 MiB/s. Allocation fills the fullest slot segment first
   (two segments with 3 and 9 free slots: the next chunk goes to the one with 3), and never opens a
   segment of the reserve for one.
@@ -2498,10 +2504,12 @@ Torn writes, bit flips, fail-slow, hangs and discards:
   1,000 µs (a consumer drive's durable-write floor, from the NVMe flush spike), trim 20 µs.
 - Hang: an action issued to a hung disk, before or after it hung, does not complete and is no step
   the scheduler can take, while the node's loops run; once released it completes.
-- `DiskTrim` executes, since the cleaner's paced TRIM issues it. A trimmed block reads back as zeros
-  or as its old contents, chosen per trim from the seed, as devices differ, and a trim is volatile
-  until a flush like a write: a crash may undo it. A machine that relies on trimmed blocks reading
-  as zeros fails under some seed. A failed trim leaves its blocks undecided, as a failed write does.
+- `DiskTrim` executes, since format and the cleaner's paced TRIM issue it. The trimmed range's
+  first block, a segment's header, reads back as zeros, as the io_uring driver writes it behind
+  every discard; the rest reads back as zeros or as its old contents, chosen per trim from the
+  seed, as devices differ, and a trim is volatile until a flush like a write: a crash may undo it.
+  A machine that relies on trimmed blocks past the first reading as zeros fails under some seed. A
+  failed trim leaves its blocks undecided, as a failed write does.
 - Blocks a failed write or flush left undecided stay so until a later flush, which lands each from
   the seed; latency is one base time per action kind, whatever its size.
 
@@ -2519,15 +2527,15 @@ every acknowledged record, and Corrupt never occurs (Pebble `TestErrors`, `TestD
   recovery tests' node checkpointing whenever one is due, at least twice, its second checkpoint
   carrying a merge step's run on merge worker 1's lane. Actions run one at a time, writes before
   flushes, so two rounds' writes are unflushed together and a seeded half can leave a gap. N is
-  156, and k runs over format's actions too, the superblock copy among them; a recovery crashed
-  before format finished may find no log, and none other may fail.
+  416, and k runs over format's actions too, the zeros over both superblocks, its 255 trims, their
+  flush and the superblock copy among them; a recovery crashed before format finished may find no log, and none other may fail.
   - For every k in 0..N, the three crashes at k; for every k below N, action k fails with Io, the
     workload runs on to its end and the disk crashes the three ways. Each recovery, in open mode and
     then in rebuild mode, matches the oracle, reads back every mapped block and loads, if any, the
     manifest the node's checkpoint wrote there, with the merge step's run; the two give the same
     LSN and index.
   - After a failed action the log acknowledges nothing, issues no write or flush, and reports its
-    error.
+    error; a failed trim costs only its discard, and the log runs on.
   - Crash during recovery: for every k, the half-landing crash's recovery is crashed again before
     each of its writes and flushes in turn, landing a second seeded half, and the recovery after it
     gives the LSN and index the uncrashed one gave. A crash before a read leaves the disk as one
@@ -2538,13 +2546,14 @@ every acknowledged record, and Corrupt never occurs (Pebble `TestErrors`, `TestD
     early (`disklog.StopEarly`) and recovery that replays past a gap (`disklog.ReplayPastGaps`) each
     fail the sweep. So, when planted by hand, does recovery that drops the merge step's run from
     the manifest it loads.
-  - The whole test, with its recovery pass, runs in about 9 s and 420 MB.
+  - The whole test, with its recovery pass, runs in about 12 s and 360 MB.
 - [property] Disk log in its reserve (`TestCrashAtEveryActionInTheReserve`, `internal/disklog`):
   format of a 32-block disk of 4-block segments with a reserve of two, five 2-block writes that
   fill every segment outside the reserve, a sixth submitted with the fifth and held for room, and
   the node's checkpoint, which the fifth makes due and which goes into the reserve while the sixth
-  waits. N is 18; the same crashes and failures at every k, checked the same way, and the held
-  write is never acknowledged. `disklog.StopEarly` fails this sweep too.
+  waits. N is 26, format's seven trims and their flush among them; the same crashes and failures
+  at every k, checked the same way, and the held write is never acknowledged. `disklog.StopEarly`
+  fails this sweep too.
 - [property] Chunk store (`TestCrashAtEveryActionWithCleaning`, `internal/chunkstore`): the
   single-node ChunkStore on the cleaner tests' small disk (64 segments of 16 blocks, with
   `max_replay_bytes` of 12 blocks) with merges running as the daemon runs them, from a formatted
@@ -3126,15 +3135,16 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | 4 MiB, 256 KiB (for 16 MiB) | 89.35% | 85%: 8.15, 0.94, 5.96; 4.4 min, 0.61 GB | 90% (above) |
   | 8 MiB, 192 KiB (for 32 and 64 MiB) | 92.6% | 90%: 17.99, 2.41, 14.13; 20 min, 1.33 GB | |
 - The log's write counters (`disklog.(*Log).Writes`: the data blocks of ordinary items, a whole
-  chunk's slot write included, and every block the log asked the disk to write, slot writes and
-  the zeroing of a freed slot segment's header included) equal what the run acknowledged and
+  chunk's slot write included, and every block the log asked the disk to write, slot writes and,
+  with TRIM off, the zeroing of a freed slot segment's first block included, while the header a
+  TRIM zeroes is the driver's write) equal what the run acknowledged and
   what the simulated disk executed. The 80, 85 and 90% runs check that over the capacity they
   measure; on every test run `TestWriteAmplificationMetricEqualsTheMeasuredFigure` checks it on
   128 segments of 1 MiB at 40% full, with the invariant checker on, where the cleaner copies and
   the index writes runs, and `TestWriteAmplificationMetricCountsChunkSlots` on a disk of chunk
   slots, with whole chunks written again and deleted among 4 KiB overwrites, freed slot segments
-  zeroed after a TRIM and, with TRIM off, without. Dropping the count of a slot write, or of
-  either zeroing write, fails it. Each disk exports these counters, so the drive wear figures in
+  trimmed and, with TRIM off, zeroed. Dropping the count of a slot write, or of the zeroing
+  write, fails it. Each disk exports these counters, so the drive wear figures in
   design.md read the number an operator does.
 - Not held: the cleaner's CPU per user write against the spike's 2.8 / 7.5 / 20 µs; the simulation's time per write is mostly
   the in-memory index's lookups and the simulator, not a figure for hardware.
@@ -3307,7 +3317,7 @@ run in `deep-leases`; the variants that need one run on it alone.
   `ci`, 4 in `heavy-peering`, and a counter limit of 2. The logs hold whole versions: no version is
   held in part in the model. `ci-tears` lets a decision list such a member all the same, by `ListOf`,
   which shows extra listing is safe, and not that it is needed; that a torn member must be listed rests
-  on the Go plant `unlistTorn`, at seed 148 of the primary-change run.
+  on the Go plant `unlistTorn`, at seed 5 of the primary-change run.
 - **Missing lists.** Members persist them, with the interval, before the primary activates; only
   recovery removes an entry. Nothing reads a member's list until the next peering, which it answers
   only once it has left the interval, so a member that persists its list while still in the
@@ -4179,10 +4189,10 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | `scripted-together` | 65 | passes: `rep3`, two marks in one table, one `Refill`, then two `Add`s | 1 |
 | `scripted-move-restarted` | 47 | passes: a move and a restart, peering keeps what every up member holds over the removed disk | 1 |
 | `scripted-lister-restarted` | 56 | passes: a restart during recovery, peering keeps a version over the member that lists the chunk | 1 |
-| 39 seeds | 273 to 918 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, by a held refusal at 25 | 2 to 211 |
-| `primaries-2` | 517 | no verdict in 400 s and 2 GB: one crash leaves 26 `mayfail` lines, each a free choice, and `-dfid` reached level 307 of 519 in 280 s at 319,000 states | 400 |
+| 39 seeds | 445 to 915 | pass, across restarts and formats | 3 to 203 |
+| `primaries-34` | 515 | stops at line 242, a `recovered`: discrepancy 22 | 2 |
 
-39 seeds of 40 pass, all but 2. None broke a safety invariant,
+39 seeds of 40 pass, all but 34. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
 and `mayfail` branches stay alive, not its length.
 
@@ -4214,38 +4224,38 @@ a stutter open to it: it shows only what that behavior did. TLC's own `-coverage
 over every branch of the search, abandoned ones and `ENABLED` too, so on seed 55 `Remove`'s first guard
 shows 8 against the 2 removals the trace took.
 
-Over the 39 passing seeds of 0 to 39 and the 12 scripted traces, which alone take `Refill`, `Lost`, `Drop`, `Stay` and `RestartAsk` as a real step on these seeds, `RestartAsk` in `scripted-move-restarted`; on its 50 other lines the spec already holds the ask:
+Over the 39 passing seeds of 0 to 39 and the 12 scripted traces, which alone take `Refill`, `Lost`, `Drop`, `Stay` and `RestartAsk` as a real step on these seeds, `RestartAsk` in `scripted-move-restarted`; on its 29 other lines the spec already holds the ask:
 
 | Action | Line | Took it | Stuttered | Traces |
 | --- | --- | --- | --- | --- |
-| `Deliver` | `logged` | 4,212 | 3,255 | 51 |
-| `Deliver` | `maydeliver` | 375 | 397 | 35 |
+| `Deliver` | `logged` | 4,432 | 3,423 | 51 |
+| `Deliver` | `maydeliver` | 353 | 353 | 33 |
 | `Send` | `send` | 3,767 | 0 | 51 |
-| `Order` | `order` | 3,175 | 0 | 51 |
-| `Adopt` | `adopt` | 3,050 | 238 | 50 |
-| `Peer` | `peer` | 489 | 0 | 50 |
-| `Activate` | `activate` | 482 | 0 | 50 |
-| `Fold` | `fold` | 480 | 0 | 49 |
-| `OwnFail` | `mayfail` | 195 | 10 | 17 |
-| `Recover` | `recovered` | 188 | 78 | 44 |
-| `Recover` | `mayrecover` | 0 | 2 | 0 |
-| `GoneRefuses` | `gone` | 154 | 0 | 12 |
-| `MarkDisk` | `plan` | 105 | 0 | 37 |
-| `Edit` | `plan` | 88 | 0 | 39 |
-| `Restart` | `restart` | 79 | 0 | 34 |
+| `Order` | `order` | 3,335 | 0 | 51 |
+| `Adopt` | `adopt` | 2,862 | 215 | 50 |
+| `Peer` | `peer` | 467 | 0 | 50 |
+| `Activate` | `activate` | 463 | 0 | 50 |
+| `Fold` | `fold` | 461 | 0 | 49 |
+| `OwnFail` | `mayfail` | 211 | 3 | 17 |
+| `Recover` | `recovered` | 193 | 76 | 44 |
+| `Recover` | `mayrecover` | 2 | 1 | 2 |
+| `MarkDisk` | `plan` | 90 | 0 | 35 |
+| `Edit` | `plan` | 83 | 0 | 38 |
 | `Add` | `plan` | 66 | 0 | 26 |
-| `Remove` | `plan` | 61 | 0 | 25 |
-| `ReportRecovered` | `reported` | 62 | 277 | 25 |
-| `Replace` | `plan` | 53 | 0 | 17 |
-| `Renew` | `renew` | 50 | 0 | 19 |
-| `Rotate` | `plan` | 40 | 0 | 40 |
-| `Format` | `format` | 17 | 0 | 17 |
-| `AskNext` | `ask` | 12 | 0 | 12 |
+| `ReportRecovered` | `reported` | 62 | 273 | 25 |
+| `Remove` | `plan` | 60 | 0 | 25 |
+| `Restart` | `restart` | 60 | 0 | 34 |
+| `GoneRefuses` | `gone` | 54 | 0 | 10 |
+| `Replace` | `plan` | 44 | 0 | 14 |
+| `Rotate` | `plan` | 39 | 0 | 39 |
+| `Renew` | `renew` | 30 | 0 | 19 |
+| `Format` | `format` | 14 | 0 | 14 |
+| `AskNext` | `ask` | 10 | 0 | 10 |
 | `Refill` | `plan` | 3 | 0 | 3 |
 | `Lost` | `lost` | 2 | 0 | 2 |
 | `Stay` | `plan` | 1 | 0 | 1 |
 | `Drop` | `plan` | 1 | 0 | 1 |
-| `RestartAsk` | `restartask` | 1 | 50 | 1 |
+| `RestartAsk` | `restartask` | 1 | 29 | 1 |
 
 `table`, `committed`, `persisted` and `recoverorder` lines check a state and take no action, as their
 mapping says. The actions of `Next` no trace took:
@@ -4274,7 +4284,7 @@ mapping says. The actions of `Next` no trace took:
 | 9 | One reply or kept version differs from the spec's at a seed's `Peer` | compression and logging | Settled. Seed 7, compression: disk 3 answered, then its node formatted, then the decision came, where `Peer`, one step, needs every up member eligible. `decide` places the line before that format, and the line's checks stay strict. Seeds 31 and 34, logging: a `PrintT` of `Reply` showed a member's list cleared with no record. A primary that left the lead dropped its request for a gated recovery write, so the store's answer made no `Recovered` (seed 31), and a crash left one durable for replay to map (seed 34). Requests for recovery writes now stay until answered, and `Recovering` gives the crash its line |
 | 10 | A member persists a list twice, when its first acknowledgment was slower than `RetryAfter`, the second after the interval activated, which the `Persisted` stutter refuses | compression | Settled: 8 seeds at the last count. `tracedata` marks a repeat of a disk's list for an interval `again`, which the stutter lets past activation. A first persist after `Activate` still fails, which is what catches `activateEarly` |
 | 11 | A `Recovered` record `Recover` cannot take at its place | spec, compression | Settled. Seed 22, spec: a chunk no member keeps anything of, kept version 0, needs no source in `startRecovery`, and every up member listed it, so `Recover` needs none when the kept version is 0. Seeds 3 and 38, compression: a recovery write left a primary that then moved on, by adopting interval 3 at seed 3 and by a crash at seed 38, and landed later, where `Recover` needs a primary leading it. `tracedata` places the line before the first leaving step, across lines that keep what `Recover` reads. A record of an older interval's gated write settled by a later activation changes no list, as `Index.recovered` compares the intervals, so the record carries its interval and the line is a stutter |
-| 12 | A crash leaves part of a version's records, so a member reports a version logged above its newest whole one. `keep` lists that member for the kept version, where `Entry`, with one number, leaves it off | spec | Settled: `PeerOn` takes a set `T` of (disk, chunk) pairs it lists at the kept version, which are no recovery source and take a primary's chunk out of `img`, and `Activate` keeps them. `Peer` draws `T` only under `TornLists`, on in `ci-tears` alone, which passes every safety property at 1.2 million states against 149 thousand with it off. The trace takes `T` from the code's lists, so seeds 1, 5 and 24 pass. This shows extra listing is safe, not that listing is required: the logs hold whole versions, so nothing in the spec is wrong with a torn member left off, and no negative configuration exists. That listing is required rests on Go: `unlistTorn` breaks "a member listing nothing maps the kept writes applied in version order" at seed 148, where replay's durable records of the torn version stay mapped, and `TestTheKeepRule` and `TestAVersionHeldInPartIsNotWhole` state the rule and the store's half |
+| 12 | A crash leaves part of a version's records, so a member reports a version logged above its newest whole one. `keep` lists that member for the kept version, where `Entry`, with one number, leaves it off | spec | Settled: `PeerOn` takes a set `T` of (disk, chunk) pairs it lists at the kept version, which are no recovery source and take a primary's chunk out of `img`, and `Activate` keeps them. `Peer` draws `T` only under `TornLists`, on in `ci-tears` alone, which passes every safety property at 1.2 million states against 149 thousand with it off. The trace takes `T` from the code's lists, so seeds 1, 5 and 24 pass. This shows extra listing is safe, not that listing is required: the logs hold whole versions, so nothing in the spec is wrong with a torn member left off, and no negative configuration exists. That listing is required rests on Go: `unlistTorn` breaks "a member listing nothing maps the kept writes applied in version order" at seed 44, where replay's durable records of the torn version stay mapped, and `TestTheKeepRule` and `TestAVersionHeldInPartIsNotWhole` state the rule and the store's half |
 | 13 | `Send` to a primary whose `pr` is empty after a restart loses the write in the spec, and the code holds it | spec, open, low priority | `neverAsk` shows it; no unplanted seed of 40 stops there |
 | 14 | A member's refusal is recorded when the member refuses, and `Order` of a later version can come before the primary hears, where `MemberFail` and `GoneRefuses` end the interval in one step | compression | Settled, all 10 seeds of 0 to 339 it stopped: the primary's `Fail` record says when it heard, and `tracedata` holds the member's line until it, or until that member adopts a table or crashes or the primary crashes, since past those the spec's refusal has no step |
 | 15 | A restarted primary asks a new interval on the first table it takes, even one newer than the table it restarted on, where the spec's `Restart` asks once and `rsIv` lets it peer without asking again | spec | Settled, seed 205: `RestartAsk` is that ask, an extra interval no rule needs, taken only by plans with `lateask`: every trace, and `ci-late-ask`, where TLC checks the safety properties around it |
@@ -4284,6 +4294,7 @@ mapping says. The actions of `Next` no trace took:
 | 19 | A crash loses versions from the log of a primary that adopted its next interval and has not decided it, where `OwnFail` needs the primary still in the version's interval | spec | Settled, seed 3: `OwnFail` also runs until the primary decides its next interval, as peering waits for a disk's records to be durable or failed |
 | 20 | A leaving disk's return marks it up and takes a missing member's place in one table, one interval, where the spec's mark and `Stay` start two, and a leaving member goes with its disk, which `Remove` cannot take | spec | Settled: `Refill` is the one table, `Drop` the leaving member going, and `classify` names each. `scripted-leaving-first` and `scripted-drop` take `Refill`, `scripted-lost` takes `Drop` |
 | 21 | Two members marked down in one table reach `Edit`, which allows one mark | logging | Settled: `classify` names a table of several marks `Refill`, which allows them, `scripted-together` |
+| 22 | A recovery's source answers the read, then crashes and is formatted again, and the answer reaches the primary after, so its `recoverorder` and `recovered` lines follow the source's `format`, where `Recover` needs the source running | compression, open | Seed 34, line 242, a form of discrepancy 11: `tracedata` could place the recovery before the source's crash, or the record could carry when the source read |
 
 Seeds 40 to 339 at 150 s each: 260 passed at aa05106, and the 40 that did not were run again at abb8966, seeds 55, 231, 267, 311 and 323 again once `classify` mapped `Stay`. None names a safety invariant.
 
@@ -5365,7 +5376,7 @@ it on its missing list.
   41.8 acknowledged by A, B and C, C's disk is formatted again and its node reports a new log ID.
   The authority gives it a new disk ID, keeps C's old disk ID down, and peering keeps 41.8 from B.
   The planted variant that keeps C's old disk ID for the new log drops acknowledged versions in the
-  primary-change seeds (below): 18 of 500 seeds fail, the first, seed 55, on "no acknowledged version
+  primary-change seeds (below): 20 of 500 seeds fail, the first, seed 15, on "no acknowledged version
   is ever dropped".
 - A member answers only peering messages that name its own disk. Disk 3, which took 1.1, is
   formatted again and comes back as disk 4 at the same loop while the table still lists disk 3 up
@@ -5425,8 +5436,8 @@ it on its missing list.
 
 | Planted bug | Seeds of 500 failing | First | Invariant |
 | --- | --- | --- | --- |
-| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest; `TestSettleMapsTheKeptVersionsAndDropsTheRest` fails at once) | 5 | 169 | "a member listing nothing maps the kept writes applied in version order" |
-| M8: a partial-block write merges before the primary holds the versions peering kept | 34 | 15 | The same |
+| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest; `TestSettleMapsTheKeptVersionsAndDropsTheRest` fails at once) | about 9 | 18 | "a member listing nothing maps the kept writes applied in version order" |
+| M8: a partial-block write merges before the primary holds the versions peering kept | about 58 | 16 | The same |
 
 - A restarted primary asks for a new interval of each PG it leads, peers in it, then serves
   (`TestARestartedPrimaryTakesANewIntervalBeforeItServes`); only a store opened at start, not one
@@ -5810,22 +5821,22 @@ commit, it must pass unplanted and break its invariant planted.
 
 | Counterexample | Planted as | Run | Seeds of 500 | First | Invariant |
 | --- | --- | --- | --- | --- | --- |
-| A member logs a version out of order | Writes sent again newest first after a reconnect | Fault | 30 | 0 | "once recovery settles …" |
-| A new primary merges before it holds a kept version | Sub-block spike M8 | Primary-change | 34 | 15 | "a member listing nothing maps …" |
+| A member logs a version out of order | Writes sent again newest first after a reconnect | Fault | 23 | 0 | "once recovery settles …" |
+| A new primary merges before it holds a kept version | Sub-block spike M8 | Primary-change | about 58 | 16 | "a member listing nothing maps …" |
 | Peering stops only the previous interval | | Trace: W acknowledged on disks 2 and 3; interval 2 replaces primary 2 with disk 1, interval 3 puts disk 3 in `maintenance`, both handed to disk 1 alone | | | "no acknowledged version is ever dropped" |
-| Members compare member lists | A member accepts a write tagged with an earlier interval whose disks are its current one's | Primary-change | 306 | 1 | Property 3's: the authority trims a past interval's members once a later activation is recorded, so peering of the next interval already stopped the late write |
+| Members compare member lists | A member accepts a write tagged with an earlier interval whose disks are its current one's | Primary-change | 307 | 1 | Property 3's: the authority trims a past interval's members once a later activation is recorded, so peering of the next interval already stopped the late write |
 | A disk ID kept across a new log ID | | Primary-change | 209 | 2 | "no disk ID names two log IDs, and no log ID is up under two disk IDs": the node runs its new log under the old disk ID |
-| A restarted primary peers in its old interval | | Primary-change | 22 | 68 | "no two members hold different data under one version" |
-| A restarted primary never asks for a new interval | | Fault (the primary-change run's end asks itself) | 71 | 7 | Property 12's |
-| An older version decided by its own interval's members | | Fault | 24 | 6 | "the primary maps exactly …" |
-| A primary activates before missing lists are durable | | Fault | 106 | 4 | "the primary maps exactly …" |
+| A restarted primary peers in its old interval | | Primary-change | about 20 | 33 | "no two members hold different data under one version" |
+| A restarted primary never asks for a new interval | | Fault (the primary-change run's end asks itself) | 67 | 7 | Property 12's |
+| An older version decided by its own interval's members | | Fault | 9 | 50 | "the primary maps exactly …" |
+| A primary activates before missing lists are durable | | Fault | 84 | 12 | "the primary maps exactly …" |
 | The leader records an activation only decided | Decide reports it | Primary-change; and a trace: W on its way to disk 3 when interval 2 replaces it with disk 1; disk 2's list to disk 1 lost; interval 3 puts disk 2 in `maintenance`, handed to disk 1 alone | 500 | 0 | "no PG's last activated interval goes down, and every activation a table records happened": the recorded interval is not one a primary activated; on the trace, "no acknowledged version is ever dropped" |
-| Recovery picks its blocks at read | | Fault | 180 | 0 | "no two members hold different data under one version" |
-| A leaving member removed before its replacement recovered | Removed once its PG's interval activates | Primary-change | 123 | 3 | Property 13's |
-| A recovered report for an earlier interval removes the leaving member | | Primary-change | 140 | 3 | Property 13's |
+| Recovery picks its blocks at read | | Fault | 219 | 4 | "no two members hold different data under one version" |
+| A leaving member removed before its replacement recovered | Removed once its PG's interval activates | Primary-change | 109 | 3 | Property 13's |
+| A recovered report for an earlier interval removes the leaving member | | Primary-change | 128 | 3 | Property 13's |
 | Members accept a write only in its send epoch | | Primary-change | 499 | 0 | Property 7's |
-| A later peering clears a missing-list entry | A listed member holding the kept version as its newest left off the list, and a persisted list clearing the PG's earlier listings it leaves out | Fault | 10 | 33 | "once recovery settles …" |
-| Incarnations checked when a write arrives | At the primary, held replays exempt, with the store's fence off | Read | 30 | 24 | Property 11's: a dead incarnation's partial write held on a chunk the primary lacks is released after its successor's |
+| A later peering clears a missing-list entry | A listed member holding the kept version as its newest left off the list, and a persisted list clearing the PG's earlier listings it leaves out | Fault | about 18 | 7 | "once recovery settles …" |
+| Incarnations checked when a write arrives | At the primary, held replays exempt, with the store's fence off | Read | 26 | 29 | Property 11's: a dead incarnation's partial write held on a chunk the primary lacks is released after its successor's |
 | A held write ordered again although another primary led | The lead's term kept across another primary's interval | Trace: P, peering cut off from Q, holds W; interval 3 makes Q primary with P in `maintenance`; the successor's W′ and W2 complete at Q; interval 4 makes P primary again | | | Property 11's |
 | A returning primary keeps its pending versions by number | `Settle` keeps every pending version at or below the kept one (`settleByNumber`); no model row, since the model answers no client at peering | Trace: primary 2, cut off from disk 3, orders W as 1.1; interval 2, handed to disks 1 and 3 alone, makes disk 3 primary without disk 2, and W2 is acknowledged as 2.1; interval 3 makes disk 2 primary again, its peering keeping 2.1 (`TestAReturningPrimaryRefusesAPendingVersionOffTheKeptChain` runs it unplanted, the read run's seed 366 found it) | | | "no acknowledged version is ever dropped", checked against the first interval activated after the version's |
 | A kept primary reads below `min_live` | | Trace: interval 2 marks disk 3 down; disk 3 restarts, and interval 3 makes it primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone | | | Property 1's |
@@ -5845,12 +5856,12 @@ partition after a grant), no new window at a new run ID 12 (6), no end of leases
 step check at `1 + lease_drift / 2` 25 (3) and against a grant that gave no lease 3 (265).
 
 The read run also plants a primary that commits a version once its own log holds it, before its
-members do: a read returns a version the next interval drops at 297 seeds of 500, seed 0 first
+members do: a read returns a version the next interval drops at 295 seeds of 500, seed 0 first
 (`TestPlantedReadBugsBreakTheReadRun`). It is no row of the model's table; it shows the read
 version check firing.
 
 The primary-change run also plants a primary that recovers only its own copies: its members, those
-a drain refilled among them, never reach the copy count, at 432 seeds of 500, seed 0 first.
+a drain refilled among them, never reach the copy count, at 450 seeds of 500, seed 0 first.
 
 The write-limit run's planted bug, a primary ordering a plain write that adds live data past a
 member's limit, fails each of the run's two invariants, checked alone, at all 500 seeds, seed 0
@@ -5952,10 +5963,10 @@ test's alone.
 
   | Planted bug | Run | Seeds failing | First |
   | --- | --- | --- | --- |
-  | A read served from a pending version: the primary commits once its own log holds a version (`commitOnOwnLog`), and the next interval drops it | Read | 80 of 100 | 0 |
-  | An old primary serving reads with no lease check (P1, `noLeaseCheck`): a client that missed the new primary's table reads from the old one after the new one acknowledged a write | Read | 9 of 100 | 8 |
+  | A read served from a pending version: the primary commits once its own log holds a version (`commitOnOwnLog`), and the next interval drops it | Read | 78 of 100 | 0 |
+  | An old primary serving reads with no lease check (P1, `noLeaseCheck`): a client that missed the new primary's table reads from the old one after the new one acknowledged a write | Read | 11 of 100 | 12 |
   | Merging on the committed version (sub-block M2), one client pipelining 4 writes | Sub-block | 100 of 100 | 0 |
-  | Peering dropping a subset of a chunk's pending versions, not a suffix (M7, `settleSubset`) | Primary-change | 5 of 500 | 169 |
+  | Peering dropping a subset of a chunk's pending versions, not a suffix (M7, `settleSubset`) | Primary-change | about 9 of 500 | 18 |
 
   The M7 rate is that of the primary-change run's own check of kept bytes, which fails on the same
   seeds. The holder ending its lease on the slower of its clocks (P9's slews) is not planted here:
@@ -6878,8 +6889,8 @@ that completes is ordered, in its chunk, before every write of the second.
 
 | Planted bug | Invariant | Seeds of 500 | First |
 | --- | --- | --- | --- |
-| `neg-check-on-arrival`: a primary checks the session only as a write arrives (`fenceOnArrival`), so a write that waited in its store as the fence came is ordered | No fenced write applied | 3 | 32 |
-| `neg-replica-no-check`: a member takes a replicated write without checking its session (`memberNoFence`), logging one its primary ordered before the fence reached it | No fenced write applied | 131 | 5 |
+| `neg-check-on-arrival`: a primary checks the session only as a write arrives (`fenceOnArrival`), so a write that waited in its store as the fence came is ordered | No fenced write applied | about 3 | 52 |
+| `neg-replica-no-check`: a member takes a replicated write without checking its session (`memberNoFence`), logging one its primary ordered before the fence reached it | No fenced write applied | 132 | 5 |
 
 `neg-up-with-old-table` is planted in the leader, under [Control-plane sessions](#control-plane-sessions).
 `neg-peering-skipped` removes the rule that a new interval activates only once its earlier ones
@@ -7411,10 +7422,26 @@ profile refuses `io_uring_setup` with `EPERM`, so container runs use
 
 ## Format discards every segment
 
-- Formatting a raw device trims every segment, and the driver zeroes each header behind its discard.
-  Test: a device prefilled with random bytes and with another log's valid segment headers is
-  formatted; the next recovery's trace reads only segment headers and block 1 of each, and reads no
-  segment in full, at that start and every later one.
+- Format writes zeros over the superblock's copy then the superblock, each flushed, trims every
+  segment but segment 0, 64 trims in flight at a time, flushes, and only then writes the superblock
+  and its copy, each flushed; the driver zeroes each header behind its discard. A disk that is a
+  file is not trimmed and gets no zeros first. `TestFormatZeroesTrimsThenWritesBothSuperblocks`.
+- A used disk formatted again and crashed after each of format's first eight and last six actions,
+  every unflushed write landing or none, starts as the old log whole, as no log or as the new one,
+  never as the old superblock over headers the trims zeroed (`log corrupt at LSN 1` before the
+  zeros). `TestAUsedDiskCrashedMidFormat`. In a cluster, a disk formatted again that crashes
+  mid-trims opens unformatted, and its node formats it again under a new log ID: it comes back as a
+  new disk (seed 47 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` before the zeros).
+  `TestADiskCrashedMidFormatComesBackUnformatted`.
+- A disk whose segments' first blocks hold another log's valid segment headers or random bytes is
+  formatted, and no start, the first or a later one, reads any segment in full.
+  `TestFormatLeavesNoSegmentReadInFull`.
+- A trim of format's that fails costs only its discard: format finishes, and every start reads that
+  segment, whose first block still holds what the earlier use left, in full and recovers the new
+  log's records. `TestAFailedFormatTrimCostsOnlyAReadInFull`.
+- The disk log's crash sweep (`TestCrashAtEveryAction`) crashes before and fails each of format's
+  zero writes, trims and flushes: a crash leaves a disk with no log, a failed trim a log that runs
+  on, and a failed zero write a failed format.
 
 ## io_uring on a raw device and NVMe
 

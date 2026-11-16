@@ -9,6 +9,9 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
 
+// FormatTrims is how many of format's trims are in flight at once.
+const FormatTrims = formatTrims
+
 // BreakEncoding makes every round corrupt its header image with f before it is checked
 // and written, as a deliberately broken encoder would.
 func BreakEncoding(l *Log, f func(head []byte)) {
@@ -191,7 +194,7 @@ func StopEarly(r *Recovery) { r.stopEarly = true }
 // ReplayPastGaps plants the bug of delivering a record past a missing LSN instead of ending the log there.
 func ReplayPastGaps(r *Recovery) { r.pastGaps = true }
 
-// ZeroesASegment reports whether io is the write of zeros over a freed slot segment's first block.
+// ZeroesASegment reports whether io, a write, is the write of zeros over a freed slot segment's first block.
 func ZeroesASegment(l *Log, io core.IOID) bool {
-	return slices.ContainsFunc(l.slots.trims, func(t trimIO) bool { return t.zeroing && t.io == io })
+	return slices.ContainsFunc(l.slots.trims, func(t trimIO) bool { return t.io == io })
 }

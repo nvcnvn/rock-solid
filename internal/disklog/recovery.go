@@ -22,8 +22,10 @@ const (
 )
 
 var (
-	// ErrNotFormatted reports a disk with no valid superblock of this format.
-	ErrNotFormatted = errors.New("disk holds no superblock of this format")
+	// ErrNotFormatted reports a disk whose block 0 and superblock copy both read as zeros, as never written.
+	ErrNotFormatted = errors.New("disk holds no superblock and was never written")
+	// ErrUnrecognized reports a disk with no valid superblock whose block 0 or copy holds something, which only an operator may format.
+	ErrUnrecognized = errors.New("disk holds no valid superblock but is not blank")
 	// ErrCopyOnly matches any CopyOnlyError with errors.Is.
 	ErrCopyOnly = errors.New("only the superblock copy is valid")
 	// ErrCorrupt matches any CorruptError with errors.Is.
@@ -200,6 +202,7 @@ type Recovery struct {
 	sb      Superblock
 	b0      Superblock
 	b0Err   error
+	b0Blank bool
 	copyLBA core.LBA
 
 	maxHeader uint32
@@ -416,11 +419,11 @@ func (r *Recovery) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 }
 
 func (r *Recovery) onBlock0(ctx *core.Context, derr core.DiskError, out *Output) {
-	r.b0Err = nil
+	r.b0Err, r.b0Blank = nil, false
 	if derr != core.DiskOK {
 		r.b0Err = derr
 	} else if sb, err := DecodeSuperblock(ctx.Pool.Bytes(r.hdrBufs[0])); err != nil {
-		r.b0Err = err
+		r.b0Err, r.b0Blank = err, isZero(ctx.Pool.Bytes(r.hdrBufs[0])[:core.BlockSize])
 	} else if sb.DiskBlocks() > r.diskBlocks {
 		r.b0Err = ErrMalformed
 	} else {
@@ -431,7 +434,7 @@ func (r *Recovery) onBlock0(ctx *core.Context, derr core.DiskError, out *Output)
 	} else {
 		geo, err := GeometryFor(r.diskBlocks * core.BlockSize)
 		if err != nil {
-			r.failSuperblock(ctx, ErrNotFormatted, out)
+			r.failNoSuperblock(ctx, true, nil, out)
 			return
 		}
 		r.copyLBA = geo.SuperblockCopyLBA()
@@ -439,18 +442,23 @@ func (r *Recovery) onBlock0(ctx *core.Context, derr core.DiskError, out *Output)
 	r.issue(ioCopy, 0, core.Action{Kind: core.ActDiskRead, LBA: r.copyLBA, Buf: r.win[0].buf, Len: core.BlockSize}, out)
 }
 
-func (r *Recovery) failSuperblock(ctx *core.Context, err error, out *Output) {
+func (r *Recovery) failNoSuperblock(ctx *core.Context, copyBlank bool, copyErr error, out *Output) {
 	var derr core.DiskError
-	if errors.As(r.b0Err, &derr) {
-		err = derr
+	switch {
+	case r.b0Blank && copyBlank:
+		r.fail(ctx, ErrNotFormatted, out)
+	case errors.As(r.b0Err, &derr) || errors.As(copyErr, &derr):
+		r.fail(ctx, derr, out)
+	default:
+		r.fail(ctx, ErrUnrecognized, out)
 	}
-	r.fail(ctx, err, out)
 }
 
 // onCopy applies the table of "Superblock repair" in docs/design.md.
 func (r *Recovery) onCopy(ctx *core.Context, derr core.DiskError, out *Output) {
-	cp, cerr := Superblock{}, error(derr)
+	cp, cerr, blank := Superblock{}, error(derr), false
 	if derr == core.DiskOK {
+		blank = isZero(ctx.Pool.Bytes(r.win[0].buf)[:core.BlockSize])
 		cp, cerr = DecodeSuperblock(ctx.Pool.Bytes(r.win[0].buf))
 		if cerr == nil && (cp.SuperblockCopyLBA() != r.copyLBA || cp.DiskBlocks() > r.diskBlocks) {
 			cerr = ErrMalformed
@@ -467,7 +475,7 @@ func (r *Recovery) onCopy(ctx *core.Context, derr core.DiskError, out *Output) {
 		r.startHeaders(ctx, out)
 	case errors.As(r.b0Err, &derr0) || errors.Is(r.b0Err, ErrBadChecksum) || errors.Is(r.b0Err, ErrMalformed):
 		if cerr != nil {
-			r.failSuperblock(ctx, ErrNotFormatted, out)
+			r.failNoSuperblock(ctx, false, cerr, out)
 			return
 		}
 		r.sb = cp
@@ -475,7 +483,7 @@ func (r *Recovery) onCopy(ctx *core.Context, derr core.DiskError, out *Output) {
 	case cerr == nil:
 		r.fail(ctx, &CopyOnlyError{Block0: r.b0Err, Copy: cp}, out)
 	default:
-		r.fail(ctx, ErrNotFormatted, out)
+		r.failNoSuperblock(ctx, blank, cerr, out)
 	}
 }
 

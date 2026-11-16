@@ -389,14 +389,14 @@ func formattedOn(t *testing.T, diskBytes uint64, set sim.DiskSettings, cfg diskl
 	h := blankHarness(t, diskBytes, 64<<20, cfg)
 	h.disk = sim.NewDiskWith(diskBytes/core.BlockSize, set)
 	var err error
-	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, firstIO, &h.out)
+	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, h.formatIO(), &h.out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.own = h.pool.Live()
 	h.absorb()
 	h.run()
-	h.trace = nil
+	h.trace, h.trims, h.trimAt = nil, nil, nil
 	return h
 }
 

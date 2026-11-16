@@ -582,7 +582,8 @@ func TestARoundersWritesAndFlushesCarryTheirRound(t *testing.T) {
 	n.Output(loop, trace.Record{Name: trace.ActDiskWrite})
 }
 
-// trimReader writes a block, flushes it, trims it and reads it back, assuming a trimmed block reads as zeros.
+// trimReader writes a block, flushes it, trims it with the block before and reads it back,
+// assuming a trimmed block past the range's first reads as zeros.
 type trimReader struct {
 	buf    core.IOBuf
 	zeros  bool
@@ -592,9 +593,9 @@ type trimReader struct {
 func (m *trimReader) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
 	switch ev.IO {
 	case 2:
-		return append(out, core.Action{Kind: core.ActDiskTrim, IO: 3, LBA: 1, Len: core.BlockSize})
+		return append(out, core.Action{Kind: core.ActDiskTrim, IO: 3, LBA: 1, Len: 2 * core.BlockSize})
 	case 3:
-		return append(out, core.Action{Kind: core.ActDiskRead, IO: 4, LBA: 1, Buf: m.buf, Len: core.BlockSize})
+		return append(out, core.Action{Kind: core.ActDiskRead, IO: 4, LBA: 2, Buf: m.buf, Len: core.BlockSize})
 	case 4:
 		m.reread = true
 		m.zeros = !slices.ContainsFunc(ctx.Pool.Bytes(m.buf), func(b byte) bool { return b != 0 })
@@ -616,7 +617,7 @@ func TestAMachineRelyingOnTrimmedBlocksReadingZerosFailsUnderSomeSeed(t *testing
 			n.Pool().Bytes(m.buf)[i] = 1
 		}
 		n.Call(loop, func(_ *core.Context, out []core.Action) []core.Action {
-			return append(out, write(1, 1, m.buf), core.Action{Kind: core.ActDiskFsync, IO: 2, Linked: true})
+			return append(out, write(1, 2, m.buf), core.Action{Kind: core.ActDiskFsync, IO: 2, Linked: true})
 		})
 		s.Run(100)
 		if !m.reread {

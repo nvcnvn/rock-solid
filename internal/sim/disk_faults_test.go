@@ -362,13 +362,16 @@ func TestDiskTrim(t *testing.T) {
 			t.Fatalf("trim: %+v", ev)
 		}
 		got := d.Read(1, 2)
-		if !bytes.Equal(got, filled(got[0], 2)) || got[0] != 0 && got[0] != 1 {
+		if !bytes.Equal(got[:core.BlockSize], filled(0, 1)) {
+			t.Fatalf("seed %d: a trimmed range's first block did not read as zeros", seed)
+		}
+		if rest := got[core.BlockSize:]; !bytes.Equal(rest, filled(rest[0], 1)) || rest[0] != 0 && rest[0] != 1 {
 			t.Fatalf("seed %d: trimmed blocks read neither all zeros nor their old contents", seed)
 		}
 		if !bytes.Equal(d.Read(0, 1), filled(1, 1)) || !bytes.Equal(d.Read(3, 1), filled(1, 1)) {
 			t.Fatalf("seed %d: a trim reached past its range", seed)
 		}
-		outcomes[got[0]] = true
+		outcomes[got[core.BlockSize]] = true
 		d.Crash(func(int, core.LBA) bool { return false })
 		if !bytes.Equal(d.Read(1, 2), filled(1, 2)) {
 			t.Fatalf("seed %d: a trim survived a crash without a flush", seed)

@@ -102,31 +102,66 @@ func TestSuperblockCopyNeverOverwritesAReusedBlock0(t *testing.T) {
 	}
 }
 
-func TestSuperblockCopyBothDamagedIsNotFormatted(t *testing.T) {
-	h := formatted(t, gib, testConfig(0))
-	h.disk.FlipBit(0, 17, 1)
-	h.disk.FlipBit(63, 17, 1)
-	if res := h.recover(disklog.ModeOpen); !errors.Is(res.err, disklog.ErrNotFormatted) {
-		t.Fatalf("both superblocks damaged: %v", res.err)
+func TestNoValidSuperblockOnAWrittenDiskIsUnrecognized(t *testing.T) {
+	foreign := bytes.Repeat([]byte("EFI PART"), core.BlockSize/8)
+	zeros := make([]byte, core.BlockSize)
+	cases := []struct {
+		name   string
+		damage func(h *harness)
+	}{
+		{"both superblocks damaged", func(h *harness) {
+			h.disk.FlipBit(0, 17, 1)
+			h.disk.FlipBit(63, 17, 1)
+		}},
+		{"block 0 another format's and the copy zeros", func(h *harness) {
+			h.disk.Put(0, foreign)
+			h.disk.Put(63, zeros)
+		}},
+		{"block 0 zeros and the copy another format's", func(h *harness) {
+			h.disk.Put(0, zeros)
+			h.disk.Put(63, foreign)
+		}},
+		{"block 0 damaged and the copy zeros", func(h *harness) {
+			h.disk.FlipBit(0, 17, 1)
+			h.disk.Put(63, zeros)
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := formatted(t, gib, testConfig(0))
+			c.damage(h)
+			res := h.recover(disklog.ModeOpen)
+			if !errors.Is(res.err, disklog.ErrUnrecognized) {
+				t.Fatalf("recovery: %v, want Unrecognized", res.err)
+			}
+			if i := slices.IndexFunc(res.trace, func(s string) bool { return !strings.HasPrefix(s, "read ") }); i >= 0 {
+				t.Fatalf("recovery sent %q", res.trace[i])
+			}
+		})
 	}
 }
 
 func TestSuperblockCopyAfterAReformatThatCrashed(t *testing.T) {
 	h := formatted(t, gib, testConfig(0))
 	h.twoBlockWrites(3)
-	old := h.log.Superblock()
 	h.resetIO()
 	h.logID = 4
 	newSB := disklog.Superblock{LogID: 4, Geometry: h.geo}
 	var err error
-	if h.log, err = disklog.Format(&h.ctx, h.cfg, newSB, firstIO, &h.out); err != nil {
+	if h.log, err = disklog.Format(&h.ctx, h.cfg, newSB, h.formatIO(), &h.out); err != nil {
 		t.Fatal(err)
 	}
 	h.absorb()
+	for range h.geo.SegmentCount + 4 {
+		h.step(0)
+	}
+	h.trace = h.trace[h.geo.SegmentCount+4:]
 	h.round()
 	h.wantTrace("write 0+1 io100", "fsync io101", "write 63+1 io102", "fsync io103")
 	h.crashLanding()
-	h.wantSuperblockAt(63, old)
+	if !bytes.Equal(h.read(63, 1), make([]byte, core.BlockSize)) {
+		t.Fatal("the copy is not the zeros format wrote over it")
+	}
 	res := h.reopen()
 	h.wantLSNs(res, nil)
 	if res.durable != 0 || h.log.Superblock() != newSB {
@@ -184,8 +219,8 @@ func TestSuperblockCopyWithAnImpossibleGeometryIsNotUsed(t *testing.T) {
 			h.twoBlockWrites(2)
 			c.damage(h)
 			res := h.recover(disklog.ModeOpen)
-			if !errors.Is(res.err, disklog.ErrNotFormatted) {
-				t.Fatalf("recovery: %v, want NotFormatted", res.err)
+			if !errors.Is(res.err, disklog.ErrUnrecognized) {
+				t.Fatalf("recovery: %v, want Unrecognized", res.err)
 			}
 			if i := slices.IndexFunc(res.trace, func(s string) bool { return !strings.HasPrefix(s, "read ") }); i >= 0 {
 				t.Fatalf("recovery sent %q", res.trace[i])

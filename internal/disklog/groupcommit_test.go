@@ -3,6 +3,7 @@ package disklog_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -11,15 +12,43 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
-func TestFormatWritesBothSuperblocks(t *testing.T) {
+func TestFormatZeroesTrimsThenWritesBothSuperblocks(t *testing.T) {
 	h := newHarness(t, gib, 1<<20, testConfig(0))
-	h.wantTrace("write 0+1 io100", "fsync io101")
+	f := h.formatIO()
+	zeros := []string{fmt.Sprintf("write 63+1 io%d", f), fmt.Sprintf("fsync io%d", f+1), fmt.Sprintf("write 0+1 io%d", f+2), fmt.Sprintf("fsync io%d", f+3)}
+	h.wantTrace(zeros[:2]...)
 	h.step(0)
-	h.wantTrace("write 0+1 io100", "fsync io101")
 	h.step(0)
-	h.wantTrace("write 0+1 io100", "fsync io101", "write 63+1 io102", "fsync io103")
+	h.wantTrace(zeros...)
+	h.step(0)
+	h.step(0)
+	for _, lba := range []core.LBA{0, 63} {
+		if !bytes.Equal(h.read(lba, 1), make([]byte, core.BlockSize)) {
+			t.Fatalf("LBA %d holds no zeros before format's trims", lba)
+		}
+	}
+	h.trace = h.trace[len(zeros):]
+	var trims []string
+	for s := uint32(1); s < h.geo.SegmentCount; s++ {
+		trims = append(trims, fmt.Sprintf("trim %d+%d io%d", h.geo.LBA(s, 0), h.geo.SegmentBlocks, f+3+core.IOID(s)))
+	}
+	h.wantTrace(trims[:disklog.FormatTrims]...)
+	h.step(0)
+	h.wantTrace(trims[:disklog.FormatTrims+1]...)
+	for range trims[2:] {
+		h.step(0)
+	}
+	h.wantTrace(trims...)
+	h.step(0)
+	h.wantTrace(append(trims, "fsync io99")...)
+	h.step(0)
+	h.wantTrace(append(trims, "fsync io99", "write 0+1 io100", "fsync io101")...)
+	h.step(0)
+	h.wantTrace(append(trims, "fsync io99", "write 0+1 io100", "fsync io101")...)
+	h.step(0)
+	h.wantTrace(append(trims, "fsync io99", "write 0+1 io100", "fsync io101", "write 63+1 io102", "fsync io103")...)
 	h.run()
-	if len(h.trace) != 4 || len(h.events) != 0 {
+	if len(h.trace) != len(trims)+5 || len(h.events) != 0 {
 		t.Fatalf("not idle after format: %q %+v", h.trace, h.events)
 	}
 	h.wantLive(0)
@@ -28,6 +57,33 @@ func TestFormatWritesBothSuperblocks(t *testing.T) {
 		sb, err := disklog.DecodeSuperblock(h.read(lba, 1))
 		if err != nil || sb != want {
 			t.Fatalf("superblock at LBA %d: %+v, %v", lba, sb, err)
+		}
+	}
+	h.close()
+}
+
+func TestFormatCountsOnlyItsTrimsCompletions(t *testing.T) {
+	h := newHarness(t, gib, 1<<20, testConfig(0))
+	f := h.formatIO()
+	for range 4 + h.geo.SegmentCount - 2 {
+		h.step(0)
+	}
+	if len(h.pending) != 1 || h.pending[0].act.Kind != core.ActDiskTrim {
+		t.Fatalf("not one trim pending before the last: %q", h.trace[len(h.trace)-2:])
+	}
+	trimsEnd := f + 3 + core.IOID(h.geo.SegmentCount)
+	for _, io := range []core.IOID{f + 1, f + 3, trimsEnd, trimsEnd + 1} {
+		h.feed(core.Event{Kind: core.EvDiskDone, IO: io})
+	}
+	if len(h.pending) != 1 || h.pending[0].act.Kind != core.ActDiskTrim {
+		t.Fatalf("not only the last trim pending after unrelated completions: %q", h.trace[len(h.trace)-2:])
+	}
+	h.failIO[h.pending[0].act.IO] = core.DiskIO
+	h.run()
+	want := disklog.Superblock{LogID: testLogID, Geometry: h.geo}
+	for _, lba := range []core.LBA{0, 63} {
+		if sb, err := disklog.DecodeSuperblock(h.read(lba, 1)); err != nil || sb != want {
+			t.Fatalf("superblock at LBA %d after a failed last trim: %+v, %v", lba, sb, err)
 		}
 	}
 	h.close()

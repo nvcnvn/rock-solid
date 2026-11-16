@@ -45,14 +45,14 @@ func (h *harness) reformat(logID uint64) {
 	h.crashed = crashedRounds{}
 	h.logID = logID
 	var err error
-	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: logID, Geometry: h.geo}, firstIO, &h.out)
+	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: logID, Geometry: h.geo}, h.formatIO(), &h.out)
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	h.own = h.pool.Live()
 	h.absorb()
 	h.run()
-	h.trace = nil
+	h.trace, h.trims, h.trimAt = nil, nil, nil
 }
 
 // twoBlockWrites writes n 2-block records, each one round, to chunks 0.. with versions 1...

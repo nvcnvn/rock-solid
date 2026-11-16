@@ -432,13 +432,17 @@ func (d *Disk) fsync(op DiskOp) core.DiskError {
 	return core.DiskOK
 }
 
+// trim zeroes the range's first block, the segment header the io_uring driver writes behind every
+// discard, and the rest of it or none by the seed, as devices differ in what a discarded block
+// reads back as.
 func (d *Disk) trim(a *core.Action, op DiskOp) core.DiskError {
 	if !d.validRange(a) {
 		return core.DiskInvalidRange
 	}
 	failed := d.fault(op) != nil
-	if d.rand.Chance(1, 2) {
-		for i := range op.Blocks {
+	rest := d.rand.Chance(1, 2)
+	for i := range op.Blocks {
+		if i == 0 || rest {
 			d.stage(a.LBA+core.LBA(i), nil, failed)
 		}
 	}

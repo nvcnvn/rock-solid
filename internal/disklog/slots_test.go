@@ -20,14 +20,14 @@ func slotHarness(t testing.TB, segBlocks, segments uint32, cfg disklog.Config) *
 	h.geo = disklog.Geometry{SegmentBlocks: segBlocks, SegmentCount: segments}
 	h.disk = sim.NewDisk(h.geo.DiskBlocks())
 	var err error
-	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, firstIO, &h.out)
+	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, h.formatIO(), &h.out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.own = h.pool.Live()
 	h.absorb()
 	h.run()
-	h.trace = nil
+	h.trace, h.trims, h.trimAt = nil, nil, nil
 	return h
 }
 

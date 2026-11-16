@@ -1,6 +1,7 @@
 package disklog_test
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -131,5 +132,116 @@ func TestAFileNeverTrims(t *testing.T) {
 	h.drive(n, func() bool { return h.log.DurableLSN() > from+60 })
 	if len(h.trims) != 0 {
 		t.Fatalf("trimmed %v with NoTrim", h.trimmedSegments())
+	}
+}
+
+// Regression (Format discards every segment): a disk whose segments' first blocks hold what an
+// earlier use left, another log's segment headers or random bytes as a slot segment's chunk data
+// or another system leaves, is formatted, and no start reads any segment in full.
+func TestFormatLeavesNoSegmentReadInFull(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	h.twoBlockWrites(40)
+	junk := make([]byte, core.BlockSize)
+	core.NewRand(1).Fill(junk)
+	headers := 0
+	for s := uint32(1); s < h.geo.SegmentCount; s++ {
+		if h.disk.Durable(h.geo.LBA(s, 0)) == nil {
+			h.disk.Put(h.geo.LBA(s, 0), junk)
+		} else {
+			headers++
+		}
+	}
+	if headers == 0 {
+		t.Fatal("the earlier log left no segment header")
+	}
+	h.reformat(testLogID + 1)
+	for start := range 2 {
+		res := h.reopen()
+		var full []uint32
+		for s := uint32(1); s < h.geo.SegmentCount; s++ {
+			if h.readsInside(res.trace, s) {
+				full = append(full, s)
+			}
+		}
+		if len(full) > 0 {
+			t.Fatalf("start %d read %d of %d segments in full: %v", start, len(full), h.geo.SegmentCount-1, full)
+		}
+	}
+}
+
+// A format whose TRIM of one segment fails still finishes; every start reads that segment, whose
+// first block still holds what an earlier use left, in full, and recovers the new log's records.
+func TestAFailedFormatTrimCostsOnlyAReadInFull(t *testing.T) {
+	h := blankHarness(t, gib, 64<<20, testConfig(0))
+	junk := make([]byte, core.BlockSize)
+	core.NewRand(1).Fill(junk)
+	for s := uint32(1); s < h.geo.SegmentCount; s++ {
+		h.disk.Put(h.geo.LBA(s, 0), junk)
+	}
+	bad := h.geo.SegmentCount - 1
+	h.failIO[h.formatIO()+3+core.IOID(bad)] = core.DiskIO
+	h.reformat(testLogID)
+	if h.log.Err() != nil || len(h.events) != 0 {
+		t.Fatalf("format with a failed TRIM: %v, events %+v", h.log.Err(), h.events)
+	}
+	fullReads := func(res *recovered) []uint32 {
+		var full []uint32
+		for s := uint32(1); s < h.geo.SegmentCount; s++ {
+			if h.readsInside(res.trace, s) {
+				full = append(full, s)
+			}
+		}
+		return full
+	}
+	if full := fullReads(h.reopen()); !slices.Equal(full, []uint32{bad}) {
+		t.Fatalf("the start after format read segments %v in full, want only %d", full, bad)
+	}
+	h.twoBlockWrites(10)
+	if res := h.reopen(); !slices.Contains(fullReads(res), bad) || res.durable != 10 {
+		t.Fatalf("the start after 10 writes read segments %v in full and recovered LSN %d", fullReads(res), res.durable)
+	}
+}
+
+// Regression (seed 47 of TestPeeringKeepsAcknowledgedWritesAcrossPrimaries): a used disk formatted
+// again and crashed after any of format's first and last actions, with every unflushed write landing
+// or none, starts as the old log whole, as no log, or as the new one; never as the old superblock
+// over segment headers format's trims zeroed.
+func TestAUsedDiskCrashedMidFormat(t *testing.T) {
+	var old, none, fresh int
+	for k := 0; ; k++ {
+		h := formatted(t, gib, testConfig(0))
+		h.twoBlockWrites(40)
+		total := int(h.geo.SegmentCount) + 8
+		if k == 8 {
+			k = total - 6
+		}
+		var err error
+		if h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID + 1, Geometry: h.geo}, h.formatIO(), &h.out); err != nil {
+			t.Fatal(err)
+		}
+		h.own = h.pool.Live()
+		h.absorb()
+		for i := 0; i < k && len(h.pending) > 0; i++ {
+			h.step(0)
+		}
+		done := len(h.pending) == 0
+		h.disk.Crash(func(int, core.LBA) bool { return k%2 == 0 })
+		res := h.recover(disklog.ModeOpen)
+		switch {
+		case errors.Is(res.err, disklog.ErrNotFormatted):
+			none++
+		case res.err == nil && h.log.Superblock().LogID == testLogID && res.durable == 40:
+			old++
+		case res.err == nil && h.log.Superblock().LogID == testLogID+1 && res.durable == 0:
+			fresh++
+		default:
+			t.Fatalf("crash after %d of format's %d actions: %v, recovered LSN %d", k, total, res.err, res.durable)
+		}
+		if done {
+			break
+		}
+	}
+	if old == 0 || none == 0 || fresh == 0 {
+		t.Fatalf("old log %d, no log %d, new log %d", old, none, fresh)
 	}
 }

@@ -149,15 +149,15 @@ func (l *Log) pumpTrims(out *Output) {
 }
 
 // trimSlotSegment queues the TRIM of a slot segment freed with its last slot, which stays out of
-// the free segments until the write of zeros that follows the TRIM completes; a disk that is a
-// file skips the TRIM and writes the zeros at once.
+// the free segments until the TRIM completes; a disk that is a file skips the TRIM and writes
+// zeros over the segment's first block instead.
 func (l *Log) trimSlotSegment(segment uint32, out *Output) {
 	if !l.cfg.NoTrim {
 		l.trims.pacer.push(segment, l.now, true)
 		return
 	}
 	io := l.io()
-	l.slots.trims = append(l.slots.trims, trimIO{io: io, segment: segment, zeroing: true})
+	l.slots.trims = append(l.slots.trims, trimIO{io: io, segment: segment})
 	l.writes.Disk++
 	out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskWrite, IO: io, LBA: l.sb.LBA(segment, 0), Buf: l.slots.zero, Len: core.BlockSize})
 }

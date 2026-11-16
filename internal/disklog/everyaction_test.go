@@ -29,6 +29,8 @@ type sweep struct {
 	// failedEvents and failedTrace are the events and trace lines there were when the failed
 	// action ran, or -1.
 	failedEvents, failedTrace int
+	// trimFailed is whether the failed action was a TRIM, which costs only its discard.
+	trimFailed bool
 	// formatted is the actions format took, or -1 until they ran.
 	formatted int
 }
@@ -84,7 +86,9 @@ func (s *sweep) exec() bool {
 	}
 	if s.executed == s.failAt {
 		h.disk.Inject(sim.Fault{Effect: sim.FailIO, When: sim.Once(onIO(h.pending[i].act.IO))})
-		s.failedEvents, s.failedTrace = len(h.events), len(h.trace)
+		if s.trimFailed = h.pending[i].act.Kind == core.ActDiskTrim; !s.trimFailed {
+			s.failedEvents, s.failedTrace = len(h.events), len(h.trace)
+		}
 	}
 	s.executed++
 	h.step(i)
@@ -175,7 +179,7 @@ func (s *sweep) crash(landing string, seed uint64) {
 func (s *sweep) recoverChecked(mode disklog.Mode, crash func(core.Action) bool) (*recovered, error) {
 	res := s.h.recoverCrashing(mode, crash)
 	switch {
-	case errors.Is(res.err, disklog.ErrNotFormatted) && (s.formatted < 0 || s.failAt >= 0 && s.failAt < s.formatted):
+	case errors.Is(res.err, disklog.ErrNotFormatted) && (s.formatted < 0 || s.failAt >= 0 && s.failAt < s.formatted && !s.trimFailed):
 		return nil, nil
 	case res.err != nil:
 		return nil, fmt.Errorf("recovery in mode %d: %w", mode, res.err)
@@ -192,12 +196,16 @@ func (s *sweep) recoverChecked(mode disklog.Mode, crash func(core.Action) bool) 
 	return res, nil
 }
 
-// failureFinal reports an acknowledgment, write or flush from the open log after its failed action.
+// failureFinal reports an acknowledgment, write or flush from the open log after its failed
+// action, or a log that a failed TRIM failed.
 func (s *sweep) failureFinal() error {
+	h := s.h
+	if s.trimFailed && h.log.Err() != nil {
+		return fmt.Errorf("the log failed after its TRIM, action %d, failed: %w", s.failAt, h.log.Err())
+	}
 	if s.failedEvents < 0 {
 		return nil
 	}
-	h := s.h
 	for _, ev := range h.events[s.failedEvents:] {
 		if ev.Kind == disklog.Durable {
 			return fmt.Errorf("LSN %d acknowledged after action %d failed", ev.LSN, s.failAt)

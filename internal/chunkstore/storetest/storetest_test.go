@@ -12,6 +12,10 @@ func TestSuiteOnTheSimulatedDisk(t *testing.T) {
 	storetest.Run(t, func(*testing.T) storetest.Disk { return storetest.NewSimDisk(1) })
 }
 
+func TestFreedSlotReadsAsZerosOnTheSimulatedDisk(t *testing.T) {
+	storetest.FreedSlotReadsAsZeros(t, storetest.NewSimDiskOf(1, storetest.SlotDiskBytes))
+}
+
 func TestFaultsOnTheSimulatedDisk(t *testing.T) {
 	n := 20
 	if testing.Short() {

@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"runtime"
 	"slices"
@@ -368,6 +369,7 @@ func (c *rcluster) quiet() bool {
 func (c *rcluster) step() bool {
 	c.t.Helper()
 	more := c.s.Step()
+	c.formatUnformatted()
 	if err := c.inv.Check(); err != nil {
 		if !c.planted {
 			c.t.Fatal(err)
@@ -380,6 +382,17 @@ func (c *rcluster) step() bool {
 		c.t.Fatal(err)
 	}
 	return more
+}
+
+// formatUnformatted restarts each node whose disk opened with no superblock, a crash having cut its
+// format short, to format it again under a new log ID, as a node does with an unformatted disk.
+func (c *rcluster) formatUnformatted() {
+	for d, r := range c.reps {
+		if r != nil && !c.reformat[d] && c.s.Node(uint32(d)).Up() && errors.Is(r.Store().Err(), disklog.ErrNotFormatted) {
+			c.logs[d], c.reformat[d] = c.logs[d]+0x10000, true
+			c.s.CrashRandom(uint32(d))
+		}
+	}
 }
 
 // runFor steps the cluster until simulated time d has passed or nothing is pending.

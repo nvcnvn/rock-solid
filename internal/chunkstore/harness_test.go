@@ -233,7 +233,7 @@ func newHarnessOn(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
 	h.s.metaVictim = h.noteMetaVictim
 	h.take()
 	h.settle()
-	h.executed, h.own = 0, h.pool.Live()
+	h.executed, h.own, h.trims = 0, h.pool.Live(), nil
 	return h
 }
 

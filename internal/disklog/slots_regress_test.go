@@ -2,7 +2,9 @@ package disklog_test
 
 import (
 	"bytes"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -118,11 +120,10 @@ func TestADamagedHeaderOfASlotSegmentOpenedForRecordsIsCorruption(t *testing.T) 
 	}
 }
 
-// Regression (second review of Chunk slots): a slot segment freed with its last slot has its first
-// block zeroed after its TRIM, which here fails and leaves the chunk data, as a disk that is a
-// file or a discard that does not read back as zeros does: a segment no manifest lists is free
-// to recovery when its first block reads as zeros, and read in full at every start otherwise.
-func TestAFreedSlotSegmentReadsAsFreeWhateverItsTRIMLeft(t *testing.T) {
+// freeSlotSegment frees segment 2, a slot segment, with its only slot, and runs the log past its
+// TRIM, failing it if fail is set, as a disk that refuses the discard and the header write behind
+// it does.
+func freeSlotSegment(t *testing.T, fail bool) *harness {
 	h := slotHarness(t, 4096, 8, testConfig(0))
 	h.submit(disklog.Hot, h.write(1, 1, 1))
 	h.submit(disklog.Hot, h.whole(2, 1, chunkData(2, 1)))
@@ -131,22 +132,57 @@ func TestAFreedSlotSegmentReadsAsFreeWhateverItsTRIMLeft(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.absorb()
-	h.failWhen = func(a core.Action) core.DiskError {
-		if a.Kind == core.ActDiskTrim {
-			return core.DiskIO
+	if fail {
+		h.failWhen = func(a core.Action) core.DiskError {
+			if a.Kind == core.ActDiskTrim {
+				return core.DiskIO
+			}
+			return core.DiskOK
 		}
-		return core.DiskOK
 	}
+	h.trims = nil
 	h.submit(disklog.Hot, h.write(3, 1, 3))
 	h.run()
 	h.failWhen = nil
-	if !slices.Contains(h.trace, "write 8192+1 io112") || disklog.FreeSegments(h.log) != 5 {
-		t.Fatalf("no write of zeros over the freed segment's first block: %q, %d free", h.trace, disklog.FreeSegments(h.log))
+	if len(h.trims) != 1 || h.trims[0].LBA != h.geo.LBA(2, 0) || disklog.FreeSegments(h.log) != 5 {
+		t.Fatalf("trims %+v, %d free; want segment 2 trimmed and free", h.trims, disklog.FreeSegments(h.log))
 	}
 	h.submit(disklog.Hot, h.write(4, 1, 4))
 	h.run()
+	return h
+}
+
+// Regression (second review of Chunk slots): a slot segment freed with its last slot is free to
+// recovery only by a first block of zeros, which its TRIM leaves, since the trim zeroes the header
+// as the driver's does; otherwise every start would read the segment in full.
+func TestAFreedSlotSegmentReadsAsFreeAfterItsTRIM(t *testing.T) {
+	h := freeSlotSegment(t, false)
+	trimmed := slices.IndexFunc(h.trace, func(line string) bool { return strings.HasPrefix(line, "trim ") })
+	for _, w := range h.trace[trimmed:] {
+		var lba core.LBA
+		if _, err := fmt.Sscanf(w, "write %d+", &lba); err == nil && lba == h.geo.LBA(2, 0) {
+			t.Fatalf("the log wrote over the trimmed segment's first block: %q", h.trace)
+		}
+	}
 	if b := h.disk.Durable(h.geo.LBA(2, 0)); b == nil || !bytes.Equal(b, make([]byte, core.BlockSize)) {
 		t.Fatal("the freed slot segment's first block is not durably zero")
+	}
+	durable := h.log.DurableLSN()
+	if res := h.reopen(); h.readsInside(res.trace, 2) || res.durable != durable {
+		t.Fatalf("read in full %v, durable %d; want segment 2 unread and LSN %d", h.readsInside(res.trace, 2), res.durable, durable)
+	}
+}
+
+// A slot segment whose TRIM failed keeps its chunk data at its first block; the log frees it all
+// the same, and recovery, which replays the record whose slot it held, recovers every record.
+func TestAFreedSlotSegmentWhoseTRIMFailedRecovers(t *testing.T) {
+	h := freeSlotSegment(t, true)
+	if b := h.disk.Durable(h.geo.LBA(2, 0)); bytes.Equal(b, make([]byte, core.BlockSize)) {
+		t.Fatal("a failed TRIM zeroed the segment's first block")
+	}
+	durable := h.log.DurableLSN()
+	if res := h.reopen(); res.durable != durable {
+		t.Fatalf("recovered LSN %d, want %d", res.durable, durable)
 	}
 }
 

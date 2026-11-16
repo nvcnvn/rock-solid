@@ -522,7 +522,11 @@ type liveChain struct {
 type formatPhase uint8
 
 const (
-	formatBlock0 formatPhase = iota + 1
+	formatZeroCopy formatPhase = iota + 1
+	formatZero0
+	formatTrim
+	formatFlush
+	formatBlock0
 	formatCopy
 	formatDone
 )
@@ -540,6 +544,8 @@ type Log struct {
 	phase      formatPhase
 	formatIO   core.IOID
 	formatSync core.IOID
+	formatLeft uint32
+	formatNext uint32
 
 	nextIO     core.IOID
 	nextTicket Ticket
@@ -593,7 +599,7 @@ type Log struct {
 	seqAtBegin     bool
 }
 
-// Format starts a log on an empty disk, writing and flushing the superblock then its copy, with IO IDs counting up from firstIO, a range no other machine on the disk uses.
+// Format starts a log on a disk, writing zeros over the superblock's copy then the superblock, each flushed, trimming every segment but the superblock's and flushing, then writing and flushing the superblock then its copy, with IO IDs counting up from firstIO, a range no other machine on the disk uses; NoTrim skips the zeros and the trims.
 func Format(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID, out *Output) (*Log, error) {
 	if err := sb.check(); err != nil {
 		return nil, err
@@ -609,9 +615,24 @@ func Format(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID, out
 	for s := uint32(1); s < sb.SegmentCount; s++ {
 		l.free[s/64] |= 1 << (s % 64)
 	}
-	l.phase = formatBlock0
-	l.writeFormat(sb.SuperblockLBA(), out)
+	if cfg.NoTrim {
+		l.phase = formatBlock0
+		l.writeFormat(l.rounds[0].head, sb.SuperblockLBA(), out)
+		return l, nil
+	}
+	r := &l.rounds[0]
+	clear(ctx.Pool.Bytes(r.tail)[:core.BlockSize])
+	l.phase = formatZeroCopy
+	l.writeFormat(r.tail, sb.SuperblockCopyLBA(), out)
 	return l, nil
+}
+
+// formatTrims is how many of format's trims are in flight at once.
+const formatTrims = 64
+
+func (l *Log) trimNextSegment(out *Output) {
+	out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskTrim, IO: l.io(), LBA: l.sb.LBA(l.formatNext, 0), Len: uint64(l.sb.SegmentBlocks) * core.BlockSize})
+	l.formatNext++
 }
 
 // newLog sizes the log and takes each round slot's header and blob buffers from the pool
@@ -741,10 +762,10 @@ func (l *Log) io() core.IOID {
 	return io
 }
 
-func (l *Log) writeFormat(lba core.LBA, out *Output) {
+func (l *Log) writeFormat(buf core.IOBuf, lba core.LBA, out *Output) {
 	l.formatIO, l.formatSync = l.io(), l.io()
 	r := &l.rounds[0]
-	r.vec = append(r.vec[:0], core.IOVec{Buf: r.head, Len: core.BlockSize})
+	r.vec = append(r.vec[:0], core.IOVec{Buf: buf, Len: core.BlockSize})
 	out.Actions = append(out.Actions,
 		core.Action{Kind: core.ActDiskWrite, IO: l.formatIO, LBA: lba, Vec: r.vec, Len: core.BlockSize},
 		core.Action{Kind: core.ActDiskFsync, IO: l.formatSync, Linked: true})
@@ -1237,11 +1258,11 @@ func (l *Log) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 }
 
 func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out *Output) {
-	if l.phase != formatDone && (io == l.formatIO || io == l.formatSync) {
+	if l.phase != formatDone {
 		l.formatDone(ctx, io, derr, out)
 		return
 	}
-	if l.slotTrimDone(io, out) {
+	if l.slotTrimDone(io) {
 		return
 	}
 	for i := range l.count {
@@ -1306,18 +1327,49 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 	}
 }
 
+// formatDone takes the completions of format's actions, the only ones it issues before it is done.
+// Both superblocks are zeros and flushed before the first trim, so a crash mid-format leaves the old
+// log whole, no superblock or the new one, never the old log over headers the trims zeroed; the copy
+// goes first, as zeros in block 0 beside a valid copy read as CopyOnly. A failed trim costs only its
+// discard: recovery checks whatever header it left, as it does a header a TRIM lost at a crash left.
+// The flush behind the trims keeps the superblock from landing before the zeroed headers do.
 func (l *Log) formatDone(ctx *core.Context, io core.IOID, derr core.DiskError, out *Output) {
+	if l.phase == formatTrim && io-l.formatIO < core.IOID(l.formatNext-1) {
+		if l.formatNext < l.sb.SegmentCount {
+			l.trimNextSegment(out)
+		}
+		if l.formatLeft--; l.formatLeft == 0 {
+			l.phase, l.formatSync = formatFlush, l.io()
+			out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskFsync, IO: l.formatSync})
+		}
+		return
+	}
 	if derr != core.DiskOK {
 		l.phase = formatDone
 		l.fail(ctx, derr, out)
 		return
 	}
-	if io != l.formatSync {
+	if io != l.formatSync || l.phase == formatTrim {
 		return
 	}
-	if l.phase == formatBlock0 {
+	switch l.phase {
+	case formatZeroCopy:
+		l.phase = formatZero0
+		l.writeFormat(l.rounds[0].tail, l.sb.SuperblockLBA(), out)
+		return
+	case formatZero0:
+		l.phase, l.formatIO, l.formatLeft, l.formatNext = formatTrim, l.nextIO, l.sb.SegmentCount-1, 1
+		for range min(formatTrims, l.sb.SegmentCount-1) {
+			l.trimNextSegment(out)
+		}
+		return
+	case formatFlush:
+		l.phase = formatBlock0
+		l.writeFormat(l.rounds[0].head, l.sb.SuperblockLBA(), out)
+		return
+	case formatBlock0:
 		l.phase = formatCopy
-		l.writeFormat(l.sb.SuperblockCopyLBA(), out)
+		l.writeFormat(l.rounds[0].head, l.sb.SuperblockCopyLBA(), out)
 		return
 	}
 	l.phase = formatDone

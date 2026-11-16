@@ -80,6 +80,8 @@ type Rig struct {
 	model  map[core.ChunkID][]byte
 	chunks []core.ChunkID
 	sent   map[uint64]change
+	// trimmed is the first block of every range the store trimmed.
+	trimmed []core.LBA
 }
 
 type change struct {
@@ -129,6 +131,9 @@ func (r *Rig) take() {
 		switch a.Kind {
 		case core.ActSetTimer:
 		case core.ActDiskRead, core.ActDiskWrite, core.ActDiskFsync, core.ActDiskTrim:
+			if a.Kind == core.ActDiskTrim {
+				r.trimmed = append(r.trimmed, a.LBA)
+			}
 			r.D.Execute(a)
 			r.inflight++
 		default:
@@ -403,10 +408,13 @@ type SimDisk struct {
 }
 
 // NewSimDisk makes a simulated disk of DiskBytes, tearing sectors on a crash.
-func NewSimDisk(seed uint64) *SimDisk {
+func NewSimDisk(seed uint64) *SimDisk { return NewSimDiskOf(seed, DiskBytes) }
+
+// NewSimDiskOf is NewSimDisk on a disk of the given size.
+func NewSimDiskOf(seed, bytes uint64) *SimDisk {
 	s := sim.DefaultDiskSettings()
 	s.Seed, s.TearSectors = seed, true
-	return &SimDisk{D: sim.NewDiskWith(DiskBytes/core.BlockSize, s), pool: sim.NewPool(PoolBytes, 0)}
+	return &SimDisk{D: sim.NewDiskWith(bytes/core.BlockSize, s), pool: sim.NewPool(PoolBytes, 0)}
 }
 
 // Pool is the process's buffer pool.
@@ -436,4 +444,36 @@ func (d *SimDisk) Crash(r *core.Rand) {
 	d.Unflushed += d.D.Unflushed()
 	d.D.CrashRandom(r)
 	d.Restart()
+}
+
+// SlotDiskBytes is the size of the disk FreedSlotReadsAsZeros runs on, the smallest whose segments
+// hold a chunk slot.
+const SlotDiskBytes = 16 << 30
+
+// FreedSlotReadsAsZeros writes chunk 1 whole twice on d, a disk of SlotDiskBytes, so the first
+// write's slot segment frees with its only slot, and reads that segment's first block back from d
+// once its TRIM ran: zeros, which recovery takes for a free segment, since the trim zeroes it.
+func FreedSlotReadsAsZeros(t *testing.T, d Disk) {
+	r := NewRig(t, d, Config())
+	r.OK(r.Write(Chunk(1), 0, Fill(core.ChunkSize, 1), 0))
+	r.trimmed = nil
+	r.OK(r.Write(Chunk(1), 0, Fill(core.ChunkSize, 2), 0))
+	r.OK(r.Write(Chunk(2), 0, Fill(core.BlockSize, 3), 0))
+	if len(r.trimmed) != 1 {
+		t.Fatalf("trimmed %v, want the first slot's segment", r.trimmed)
+	}
+	buf, err := r.ctx.Pool.Alloc(core.BlockSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.D.Execute(&core.Action{Kind: core.ActDiskRead, IO: 1 << 62, LBA: r.trimmed[0], Buf: buf, Len: core.BlockSize})
+	if evs := r.D.Complete(nil); len(evs) != 1 || evs[0].Err != core.DiskOK {
+		t.Fatalf("read of the trimmed segment's first block: %+v", evs)
+	}
+	if !bytes.Equal(r.ctx.Pool.Bytes(buf)[:core.BlockSize], make([]byte, core.BlockSize)) {
+		t.Fatal("the freed slot segment's first block does not read as zeros")
+	}
+	r.ctx.Pool.Free(buf)
+	r.Restart()
+	r.Check()
 }

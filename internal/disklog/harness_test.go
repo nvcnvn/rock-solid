@@ -99,7 +99,7 @@ func newHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Confi
 	t.Helper()
 	h := blankHarness(t, diskBytes, poolBytes, cfg)
 	var err error
-	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, firstIO, &h.out)
+	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, h.formatIO(), &h.out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func schedHarness(t testing.TB, seed, diskBytes uint64, poolBytes int, cfg diskl
 	h.disk.Inject(sim.Fault{Effect: sim.FailIO, When: func(op sim.DiskOp, _ *core.Rand) bool { return h.failIO[op.IO] != core.DiskOK }})
 	h.roundOf = map[core.IOID]uint64{}
 	var err error
-	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, firstIO, &h.out)
+	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, h.formatIO(), &h.out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,6 +186,16 @@ func blankHarness(t testing.TB, diskBytes uint64, poolBytes int, cfg disklog.Con
 	return h
 }
 
+// formatIO is the first IO of a Format whose superblock zeros, trims and their flush end just
+// below firstIO, so the log's IO IDs after format are the same with TRIM on or off. It wraps below
+// zero.
+func (h *harness) formatIO() core.IOID {
+	if h.cfg.NoTrim {
+		return firstIO
+	}
+	return firstIO - core.IOID(h.geo.SegmentCount) - 4
+}
+
 func testConfig(maxRecordBlocks uint64) disklog.Config {
 	cfg := disklog.DefaultConfig()
 	cfg.NoReserve = true
@@ -200,7 +210,7 @@ func formatted(t testing.TB, diskBytes uint64, cfg disklog.Config) *harness {
 	t.Helper()
 	h := newHarness(t, diskBytes, 64<<20, cfg)
 	h.run()
-	h.trace = nil
+	h.trace, h.trims, h.trimAt = nil, nil, nil
 	return h
 }
 
@@ -242,17 +252,21 @@ func (h *harness) absorb() {
 			h.timerAt = a.At
 		case core.ActDiskFsync:
 			p := pendingIO{act: a}
-			if a.Linked {
+			switch {
+			case a.IO == firstIO-1:
+				// Format's flush behind its trims, which the counts of rounds' flushes leave out.
+			case a.Linked:
 				if i == 0 || h.out.Actions[i-1].Kind != core.ActDiskWrite {
 					h.t.Fatalf("linked flush io%d does not follow a write", a.IO)
 				}
 				p.linked, p.link = true, h.out.Actions[i-1].IO
-			} else {
+				h.fsyncs++
+			default:
 				h.unlinked++
+				h.fsyncs++
 			}
 			h.pending = append(h.pending, p)
 			h.trace = append(h.trace, fmt.Sprintf("fsync io%d", a.IO))
-			h.fsyncs++
 		default:
 			h.t.Fatalf("unexpected action %+v", a)
 		}

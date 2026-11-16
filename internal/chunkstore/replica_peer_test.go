@@ -212,6 +212,35 @@ func TestADiskFormattedAgainAnswersNoPeeringForItsOldID(t *testing.T) {
 	}
 }
 
+// Regression (seed 47 of TestPeeringKeepsAcknowledgedWritesAcrossPrimaries): node 3's disk 3,
+// formatted again as disk 4, crashes while format trims its segments. It opens with no superblock,
+// not as its old log over zeroed segment headers, so the node formats it again under a new log ID
+// and it comes back as disk 5.
+func TestADiskCrashedMidFormatComesBackUnformatted(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	c.until(c.write(pg0, chunkIn(pg0, 4, 0), 0, []byte{1}))
+	c.logs[2], c.reformat[2] = 0xf0f0, true
+	next := uint32(4)
+	c.onFormat = func(int) uint32 { next++; return next - 1 }
+	done := 0
+	c.onEvent = func(d int, ev *core.Event, after bool) {
+		if d == 2 && after && ev.Kind == core.EvDiskDone {
+			done++
+		}
+	}
+	c.s.CrashRandom(2)
+	c.s.Restart(2)
+	for done < 10 && c.step() {
+	}
+	c.onEvent = nil
+	c.s.CrashRandom(2)
+	c.settle()
+	st := c.reps[2].Store()
+	if st.Err() != nil || c.ids[2] != 5 || c.logs[2] == 0xf0f0 || st.Log().Superblock().LogID != c.logs[2] {
+		t.Fatalf("node 3's disk: %v, disk ID %d, log ID %#x, formatted as %#x", st.Err(), c.ids[2], st.Log().Superblock().LogID, c.logs[2])
+	}
+}
+
 // Interval 2 of PG 0 runs under min_live 1 with only disk 1 live and takes a write; interval 3
 // raises min_live to 2 and moves the primary to disk 2. Peering judges interval 2 by the min_live it
 // ran under, so it waits for disk 1, crashed and then in its restart wait, and keeps 2.1 once disk 1

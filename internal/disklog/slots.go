@@ -35,7 +35,6 @@ type heldSlot struct {
 type trimIO struct {
 	io      core.IOID
 	segment uint32
-	zeroing bool
 }
 
 func newSlotTable(g Geometry) slotTable {
@@ -227,26 +226,18 @@ func (l *Log) releaseHeld(out *Output) {
 	l.checkSlots()
 }
 
-// slotTrimDone follows a freed slot segment's TRIM, failed or not, with a write of zeros over its
-// first block, and frees the segment once that write completes, failed or not. A slot segment has
-// no header, so recovery tells it free only by a first block of zeros, which a disk that is a
-// file, a discard that does not read back as zeros or a TRIM lost at a crash would not leave;
-// otherwise every start would read the segment in full. A failed write costs only that read, and
-// neither is in flight any more to erase what the segment holds next.
-func (l *Log) slotTrimDone(io core.IOID, out *Output) bool {
+// slotTrimDone frees a freed slot segment once its TRIM, or with TRIM off its write of zeros,
+// completes, failed or not, so neither is in flight any more to erase what the segment holds next.
+// A slot segment has no header, so recovery tells it free only by a first block of zeros, which
+// the driver writes behind every discard; one a failed TRIM left costs a read in full at every
+// start until the segment is reused.
+func (l *Log) slotTrimDone(io core.IOID) bool {
 	t := &l.slots
 	j := slices.IndexFunc(t.trims, func(t trimIO) bool { return t.io == io })
 	if j < 0 {
 		return false
 	}
-	tr := &t.trims[j]
-	if !tr.zeroing {
-		tr.io, tr.zeroing = l.io(), true
-		l.writes.Disk++
-		out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskWrite, IO: tr.io, LBA: l.sb.LBA(tr.segment, 0), Buf: t.zero, Len: core.BlockSize})
-		return true
-	}
-	s := tr.segment
+	s := t.trims[j].segment
 	t.trims = slices.Delete(t.trims, j, j+1)
 	l.free[s/64] |= 1 << (s % 64)
 	return true

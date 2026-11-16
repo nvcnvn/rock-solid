@@ -16,7 +16,7 @@ func clockRun(t *testing.T, raw func(core.Tick) core.Tick) []string {
 	h.raw = raw
 	h.ctx.Raw = raw(h.ctx.Now)
 	var err error
-	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, firstIO, &h.out)
+	h.log, err = disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, h.formatIO(), &h.out)
 	if err != nil {
 		t.Fatal(err)
 	}

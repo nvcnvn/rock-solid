@@ -18,7 +18,7 @@ func TestCopyCostRoundsHeadersUpPerRecord(t *testing.T) {
 	if h.geo.SegmentBlocks != 16384 {
 		t.Fatalf("%d-block segments", h.geo.SegmentBlocks)
 	}
-	log, err := disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, firstIO, &h.out)
+	log, err := disklog.Format(&h.ctx, h.cfg, disklog.Superblock{LogID: testLogID, Geometry: h.geo}, h.formatIO(), &h.out)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,10 +19,18 @@ type suiteDisk struct {
 	d    *Disk
 }
 
-func newSuiteDisk(t *testing.T) storetest.Disk {
-	sd := &suiteDisk{t: t, path: diskFile(t, storetest.DiskBytes/bs)}
+func newSuiteDisk(t *testing.T) storetest.Disk { return newSuiteDiskOf(t, storetest.DiskBytes) }
+
+func newSuiteDiskOf(t *testing.T, bytes int) storetest.Disk {
+	sd := &suiteDisk{t: t, path: diskFile(t, bytes/bs)}
 	sd.start()
 	return sd
+}
+
+// A file's trim is the write of zeros over the segment header alone, with no discard; what a raw
+// device adds, the discard before it, is left to the raw-device tests.
+func TestAFreedSlotSegmentReadsAsZerosOnAFile(t *testing.T) {
+	storetest.FreedSlotReadsAsZeros(t, newSuiteDiskOf(t, storetest.SlotDiskBytes))
 }
 
 func (sd *suiteDisk) start() {
