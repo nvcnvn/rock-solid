@@ -383,14 +383,14 @@ var firstLease = cfg.RateGap*100/96 + 2*2_000 + 3*10_000
 // heartbeats; in three seeds of four, requests and heartbeats lost for up to 8 s at a time, at
 // times from just after a grant, the grantor's VM stopped, the grantor rebooted, its raw rate
 // rising 0.4%, the holder suspended with CLOCK_BOOTTIME up to 1 s short and no Resumed after a
-// suspend under core.ResumeThreshold (unless another plant joins the one that drops the margin for
+// suspend under core.ResumeThreshold (unless the holder keeps no Resume for one and a plant joins
 // it), and the holder's VM stopped in place for over a heartbeat while its grant has two
 // heartbeats to run, nothing lost
 // from then until a lease after it ends (the design leaves out a stop no queued grantor message
 // shows, and lost heartbeats after one). It returns the first time the holder holds a lease while
 // its grantor neither keeps the grant nor, having rebooted while it ran, waits; or, in a quiet
 // seed with raw rates within 4%, a step check that tripped.
-func runPair(seed uint64, pl plants) error {
+func runPair(seed uint64, pl plants, c Config) error {
 	rng := core.NewRand(seed)
 	pick := func(lim int64) int64 { return int64(rng.Below(uint64(2*lim+1))) - lim }
 	rawLim := int64(100_000)
@@ -416,7 +416,7 @@ func runPair(seed uint64, pl plants) error {
 		return c
 	}
 	hc, gc := node(), node()
-	h, g := NewHolder(cfg), NewGrantor(cfg, rng.Uint64(), gc.at(0))
+	h, g := NewHolder(c), NewGrantor(cfg, rng.Uint64(), gc.at(0))
 	h.plant, g.plant = pl, pl
 	holder := core.NodeID{Node: 1}
 	real := core.Tick(5_000_000)
@@ -424,7 +424,7 @@ func runPair(seed uint64, pl plants) error {
 	var cutUntil, gDownUntil, hDownUntil, beatAt core.Tick
 	var msgs []pairMsg
 	covered, gStopped, hStopped, hHidden, raised := false, false, false, false, false
-	hide := !pl.noResumeMargin || pl == plants{noResumeMargin: true}
+	hide := c.Resume != 0 || pl == plants{}
 	var keepUntil, firstAsk core.Tick
 	leased := false
 	lost := func() bool { return !quiet && real >= keepUntil && (real < cutUntil || rng.Chance(1, 20)) }
@@ -537,7 +537,7 @@ func runPair(seed uint64, pl plants) error {
 // Random clock rates per node, random renewal timing and heartbeats, requests and heartbeats lost for up to 8 s at a time, VM stops, reboots and suspends: no holder's lease ever ends after its grantor's count or the restart wait that covers it, with BOOTTIME slewed up to 22.6% and raw rates within 100 ppm, or raw within 4% and BOOTTIME slewed or at the raw rate, from the first lease; and no step check trips between a pair no fault touched.
 func TestNoLeaseOutlastsItsGrant(t *testing.T) {
 	seeds.Run(t, 0, 100, func(seed uint64) {
-		if err := runPair(seed, plants{}); err != nil {
+		if err := runPair(seed, plants{}, cfg); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
 	})
@@ -557,27 +557,32 @@ func TestNoLeaseOutlastsItsGrant(t *testing.T) {
 func TestPlantedLeaseBugsBreakThePair(t *testing.T) {
 	const outlasts, trips = "no longer keeps", "tripped"
 	for _, p := range []struct {
-		name string
-		seed uint64
-		want string
-		pl   plants
+		name     string
+		seed     uint64
+		want     string
+		pl       plants
+		noResume bool
 	}{
-		{"no resume margin", 28, outlasts, plants{noResumeMargin: true}},
-		{"holder on the slower clock", 6, outlasts, plants{slowerClock: true, noResumeMargin: true}},
-		{"grantor on the faster clock", 8, outlasts, plants{fasterClock: true, noResumeMargin: true}},
-		{"lease before the bound", 21, outlasts, plants{beforeBound: true, noResumeMargin: true}},
-		{"lease before the bound, half-drift step check", 6, outlasts, plants{beforeBound: true, halfStep: true, noResumeMargin: true}},
-		{"widened only past twice the drift", 9, outlasts, plants{widenLate: true, noResumeMargin: true}},
-		{"exact margin", 1056, outlasts, plants{marginExact: true, noResumeMargin: true}},
-		{"no window per run", 6, outlasts, plants{noRunWindow: true}},
-		{"no end on Resumed", 31, outlasts, plants{noResumedEnd: true, noResumeMargin: true}},
-		{"no step check", 1, outlasts, plants{noStepCheck: true}},
-		{"step check on grants only", 1, outlasts, plants{stepOnGrantsOnly: true}},
-		{"no restart wait", 2, outlasts, plants{noRestartWait: true}},
-		{"half-drift step check", 3, trips, plants{halfStep: true}},
-		{"step check before the bound", 265, trips, plants{checkBeforeBound: true}},
+		{"no resume margin", 28, outlasts, plants{}, true},
+		{"holder on the slower clock", 6, outlasts, plants{slowerClock: true}, true},
+		{"grantor on the faster clock", 8, outlasts, plants{fasterClock: true}, true},
+		{"lease before the bound", 21, outlasts, plants{beforeBound: true}, true},
+		{"lease before the bound, half-drift step check", 6, outlasts, plants{beforeBound: true, halfStep: true}, true},
+		{"widened only past twice the drift", 9, outlasts, plants{widenLate: true}, true},
+		{"exact margin", 1056, outlasts, plants{marginExact: true}, true},
+		{"no window per run", 6, outlasts, plants{noRunWindow: true}, false},
+		{"no end on Resumed", 31, outlasts, plants{noResumedEnd: true}, true},
+		{"no step check", 1, outlasts, plants{noStepCheck: true}, false},
+		{"step check on grants only", 1, outlasts, plants{stepOnGrantsOnly: true}, false},
+		{"no restart wait", 2, outlasts, plants{noRestartWait: true}, false},
+		{"half-drift step check", 3, trips, plants{halfStep: true}, false},
+		{"step check before the bound", 265, trips, plants{checkBeforeBound: true}, false},
 	} {
-		if err := runPair(p.seed, p.pl); err == nil || !strings.Contains(err.Error(), p.want) {
+		c := cfg
+		if p.noResume {
+			c.Resume = 0
+		}
+		if err := runPair(p.seed, p.pl, c); err == nil || !strings.Contains(err.Error(), p.want) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)
 		}
 	}

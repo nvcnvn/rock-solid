@@ -464,6 +464,10 @@ func (c *sessClock) at(t core.Tick) lease.Time {
 	return lease.Time{Boot: c.off + core.Tick(uint64(t)*c.bootPPM/lease.PPM), Raw: c.off + core.Tick(uint64(t)*c.rawPPM/lease.PPM)}
 }
 
+// clientLease is a client's lease settings with no Resume: the run draws no suspend that delivers
+// no Resumed, and the leader's rules must hold without the second a client leaves for one.
+var clientLease = lease.Config{Lease: SessionLease, Heartbeat: sec, RateGap: 100_000, Window: 10 * sec, Drift: lease.DefaultConfig.Drift, MaxMargin: lease.DefaultConfig.MaxMargin}
+
 // runClient is a client daemon in the session run: its clocks and lease holder, the control-plane
 // node it renews with and when it learns the leader, its heartbeats' state, whether it died, was
 // fenced, or staged a new session under start, when its session started and when it died, and the
@@ -663,7 +667,7 @@ func breaksWithin(t *testing.T, n uint64, pl sessionPlants, inv string) bool {
 // lease it holds runs, or is not fenced within 25 s.
 func fastLeaderRun(t *testing.T, measured, deposed bool, stop, before core.Tick, pl sessionPlants) error {
 	const step = core.Tick(10_000)
-	cfg := lease.Config{Lease: SessionLease, Heartbeat: sec, RateGap: 100_000, Window: 10 * sec, Drift: lease.DefaultConfig.Drift, MaxMargin: lease.DefaultConfig.MaxMargin}
+	cfg := clientLease
 	r := newCtlRun(t)
 	r.ctl.plant = pl
 	c := r.startSessions(1)[0]
@@ -752,7 +756,7 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, only string) error 
 		}
 		return c
 	}
-	cfg := lease.Config{Lease: SessionLease, Heartbeat: sec, RateGap: 100_000, Window: 10 * sec, Drift: lease.DefaultConfig.Drift, MaxMargin: lease.DefaultConfig.MaxMargin}
+	cfg := clientLease
 	gid := func(n int) core.NodeID { return core.NodeID{Node: 100 + uint32(n)} }
 
 	r := newCtlRun(t)
