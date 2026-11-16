@@ -7699,7 +7699,8 @@ The node's machine, `internal/node`, fed events with no network, and its message
 | A table pushed unasked | Handed to every replica with `answers` 0; the same or an older table hands nothing; a replica opened later gets the newest the node has |
 | A heartbeat after a table reached the node | Reports the oldest version its replicas' stores hold, not the one received; a node with no replica reports the one received |
 | A replica asks while a fetch is in flight | No second fetch; the answer hands each replica the ask its fetch covered, and the node fetches again for the asks made after it went out |
-| The control plane's connection is lost, or a fetch is unanswered after `Interval` | Fetched again under a new token; the old token's late answer is a table sent unasked |
+| A fetch is unanswered after `Interval` | Fetched again under a new token; the old token's late answer is a table sent unasked |
+| The control plane's connection is lost 100 times while a fetch is in flight | No fetch until `FetchTimer` fires after `Interval`, so a driver in backoff cannot spin the loop |
 | Two starts of a node | Fetch under different tokens, so one start's answer never stands for the other's fetch; an unformatted device formats under different log IDs |
 | A start with devices opened, failed by recovery and failed by format | The first report lists the opened disks and both failed devices |
 | A fetch reaches the control-plane leader before it steps under its lease, after it lost its lease, or after it regained it but before stepping | Unanswered; once stepped under its lease, answered with the live sessions and next ID (`TestAFetchIsAnsweredOnlyUnderTheLeaderLease`, `internal/meta`) |

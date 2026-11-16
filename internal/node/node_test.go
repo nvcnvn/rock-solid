@@ -190,20 +190,17 @@ func TestAnAnswerStandsOnlyForTheAsksMadeBeforeItsFetch(t *testing.T) {
 	}
 }
 
-func TestALostOrUnansweredFetchIsSentAgain(t *testing.T) {
+// A fetch unanswered after Interval goes again under a new token. A lost connection sends nothing:
+// while the driver holds the control plane in backoff, every send fails at once with another loss,
+// and a resend on each would spin the loop.
+func TestAnUnansweredFetchIsSentAgainOnlyByItsTimer(t *testing.T) {
 	r := newRun(t, 1, 10)
 	first := r.ask(10, 1)
-	r.event(core.Event{Kind: core.EvPeerLost, Peer: core.NodeID{Node: 3}})
-	if r.fetch() != 0 {
-		t.Fatal("another peer's loss fetched again")
-	}
-	r.event(core.Event{Kind: core.EvPeerLost, Peer: ctl})
-	second := r.fetch()
-	if second == 0 || second == first {
-		t.Fatalf("a lost fetch fetched again under %#x", second)
-	}
-	if hs := r.table(first, chunkstore.SessionTable{Version: 1, Next: 3}); hs[10].Answers != 0 {
-		t.Fatalf("the lost fetch's late answer handed %+v", hs)
+	for range 100 {
+		r.event(core.Event{Kind: core.EvPeerLost, Peer: ctl})
+		if r.fetch() != 0 {
+			t.Fatal("a lost connection fetched again")
+		}
 	}
 	r.ctx.Now += Interval - 1
 	r.event(core.Event{Kind: core.EvTimer, Timer: FetchTimer})
@@ -212,11 +209,14 @@ func TestALostOrUnansweredFetchIsSentAgain(t *testing.T) {
 	}
 	r.ctx.Now++
 	r.event(core.Event{Kind: core.EvTimer, Timer: FetchTimer})
-	third := r.fetch()
-	if third == 0 || third == second {
-		t.Fatalf("an unanswered fetch fetched again under %#x", third)
+	second := r.fetch()
+	if second == 0 || second == first {
+		t.Fatalf("an unanswered fetch fetched again under %#x", second)
 	}
-	if hs := r.table(third, chunkstore.SessionTable{Version: 1, Next: 3}); hs[10].Answers != 1 {
+	if hs := r.table(first, chunkstore.SessionTable{Version: 1, Next: 3}); hs[10].Answers != 0 {
+		t.Fatalf("the earlier fetch's late answer handed %+v", hs)
+	}
+	if hs := r.table(second, chunkstore.SessionTable{Version: 1, Next: 3}); hs[10].Answers != 1 {
 		t.Fatalf("the answer handed %+v", hs)
 	}
 }

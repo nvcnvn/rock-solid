@@ -131,16 +131,13 @@ func (n *Node) Ask(ctx *core.Context, device, ask uint64, out *Output) {
 	}
 }
 
-// OnEvent takes a session table from the control plane, the loss of the control plane, or a timer.
+// OnEvent takes a session table from the control plane or a timer. A lost connection to the
+// control plane leaves the fetch to FetchTimer: while the driver backs off, each send fails at once
+// with another loss, and a resend on each would spin the loop.
 func (n *Node) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	switch ev.Kind {
 	case core.EvNetRecv:
 		n.recv(ctx, ev, out)
-	case core.EvPeerLost:
-		if ev.Peer == n.cfg.Ctl && n.fetching {
-			n.fetching = false
-			n.fetch(ctx, out)
-		}
 	case core.EvTimer:
 		switch {
 		case ev.Timer == HeartbeatTimer:
