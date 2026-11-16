@@ -288,6 +288,67 @@ func TestASingleVoterHostLeadsAndAnswersAFetchUnderItsToken(t *testing.T) {
 	}
 }
 
+// start sends the host a client's session start under request and runs a second, returning the
+// sessions started meanwhile.
+func (r *hostRun) start(client core.NodeID, request uint64) []SessionStart {
+	r.t.Helper()
+	var m core.Msg
+	if err := EncodeSessionStart(r.pool, hostGroup, request, &m); err != nil {
+		r.t.Fatal(err)
+	}
+	r.recv(client, m)
+	var started []SessionStart
+	for range 10 {
+		r.run(StepInterval)
+		started = append(started, r.out.Started...)
+	}
+	r.dropDisks()
+	for _, a := range r.sent {
+		free(&core.Context{Pool: r.pool}, &a.Msg)
+	}
+	r.sent = r.sent[:0]
+	return started
+}
+
+// A start that reaches a leader whose Control does not serve yet is never handed to it; the
+// client's start sent again once it serves is.
+func TestAStartBeforeTheControlServesIsNotTaken(t *testing.T) {
+	r := newHostRun(t)
+	for range 400 {
+		if r.run(raftshard.TickInterval); r.h.Control() != nil {
+			break
+		}
+	}
+	if _, ok := r.h.Control().FetchAnswer(lease.Time{Boot: r.now, Raw: r.now}, true); ok {
+		t.Fatal("the Control served as soon as it was read")
+	}
+	client := core.NodeID{Node: 9, Loop: 2}
+	if started := r.start(client, 5); len(started) != 0 {
+		t.Fatalf("a start before the Control served started %+v", started)
+	}
+	if started := r.start(client, 5); len(started) != 1 || started[0].Request != 5 {
+		t.Fatalf("the start sent again started %+v", started)
+	}
+}
+
+// A start waiting when the Control drops, as on a term change, is forgotten with it: the client's
+// start sent again to the next Control is taken and answered.
+func TestAStartWaitingWhenTheControlDropsIsTakenAgain(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	client := core.NodeID{Node: 9, Loop: 2}
+	var m core.Msg
+	if err := EncodeSessionStart(r.pool, hostGroup, 5, &m); err != nil {
+		t.Fatal(err)
+	}
+	r.recv(client, m)
+	r.h.term++
+	r.lead()
+	if started := r.start(client, 5); len(started) != 1 || started[0].Request != 5 {
+		t.Fatalf("the start sent again after the Control dropped started %+v", started)
+	}
+}
+
 func TestAFencePushesTheSessionTableToEveryNodeHeardFrom(t *testing.T) {
 	r := newHostRun(t)
 	r.lead()
