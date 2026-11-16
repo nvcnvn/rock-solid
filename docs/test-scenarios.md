@@ -7845,12 +7845,16 @@ The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 25
 | A `Txn` whose round's disk writes have not run, then run | No answer until the disk holds the round; then answered |
 | A session started and a pool committed, then a crash and a restart from the disk | The replay rebuilds the state: the table at the same epoch, a new session's ID past the old one's, the next pool's epoch past the last |
 | Three voters on disks of their own | They elect a leader, which answers a `Txn`; every voter applies it |
-| A disk write that fails under the leader's `Txn` | The host reports the error, drops its Control and answers nothing more |
+| A disk write that fails under the leader's `Txn` | The host reports the error, drops its Control and takes nothing more: no action for a `Txn`, a fetch, a Raft tick or a step timer |
+| A `Txn`, then 0 to 3 of its round's disk actions, then a crash that keeps all or none of the unflushed writes | A `Txn` answered before the crash is applied after it; the restarted host leads and answers |
+| A voter of three restarted with a configuration of itself alone | It stops with `ErrVoters` and answers nothing; the other two elect a leader that answers |
+| `Txn`s on a log whose `max_replay_bytes` is 64 KiB, then a restart | The host stops with `ErrLogFull` once the log reaches the bound, and again after the restart |
 | A pool committed, then a node's table fetch, then heartbeats from a node behind the table and one current | The delta goes to every node that reported, the whole table to the node that fetched, and to the node behind alone, as the leader resends after a failover |
 | A heartbeat of a later term from another replica at the leading voter, then a fetch | The Control is dropped; the fetch is answered with the leader the replica knows |
 | A fetch at a leader whose lease does not run (a three-voter group with no grants) | No Control is read |
 | A node's report naming a disk, then that node's replica report of the disk's fill | The disk joins the record; the fill reaches the Control |
 | A node's report opening a disk of 2^20 blocks, then a pool of 4 PGs at one replica | Every PG placed with that disk as its primary |
+| Two nodes' disks under a pool of 8 PGs, a restart, then one node's report and a second pool before the other node reports | No PG of the first pool moves, and the second places none on the disk not reported yet, which the step gets at size 0 |
 | A node's report for another group | Dropped: the node is not recorded |
 | Node 2 reports, then node 3 `node_down_after` later, then a pool commits | The delta goes to node 3 alone |
 | A chunkstore frame in a pool buffer and a fetch before the group has a leader | The frame's buffer freed, the fetch answered with no leader known |
@@ -7861,8 +7865,9 @@ The rows without a test named are unit tests in `internal/meta/ctlhost_test.go`.
 
 | Input | Expected |
 | --- | --- |
-| A single voter of group 257 formatting its disk file, and a node sending its report and a session fetch every 100 ms | A fetch answered under its token: the voter elected itself, leased and committed its session table (`TestASingleVoterControlPlaneAnswersOverTCPAndSurvivesAKill`) |
-| That process killed with `SIGKILL` and started again on its file without `-format` | It recovers its log and answers the node's fetches again |
+| A single voter of group 257 formatting its disk file, and a node sending its report, a session fetch and a `Txn` adding 1 to a counter every 100 ms | A fetch answered under its token: the voter elected itself, leased and committed its session table; the `Txn`s answered with their counts (`TestASingleVoterControlPlaneAnswersOverTCPAndSurvivesAKill`) |
+| That process killed with `SIGKILL` and started again on its file without `-format` | It recovers its log and answers the node's fetches again, and its counter past every count it answered before; a voter that formats at every start fails this |
+| `-format` over a file not there, one of zeros, a short one of zeros, one with a byte in block 0 and one with a byte in the superblock copy | The first three made at full size; the last two refused and left as they were (`TestFormatMakesAFileNeverWrittenAndRefusesAnyOther`) |
 
 The node's side, in `internal/node/node_test.go`:
 
