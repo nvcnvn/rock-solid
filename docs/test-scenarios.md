@@ -7697,6 +7697,22 @@ once.
   owns it); counts per loop pass (no loop runs); and allocations, which the store's benchmarks
   measure on the simulated disk.
 
+## Control-plane host
+
+The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 257, fed events with no network.
+
+| Input | Expected |
+| --- | --- |
+| A single-voter Raft shard's timer | It elects itself within two election timeouts, commits a proposal and serves lease reads (`TestASingleVoterElectsItselfAndLeases`, `internal/raftshard`) |
+| A message of group 257 (`Txn`, report, session table) read as a chunkstore frame, and a chunkstore frame read as a group message | Each refused by the other's decoder; a Raft message whose first byte is chunkstore's is undecodable (`TestAGroupMessageIsNeverAChunkstoreFrame`, `TestUndecodableMessagesAreDroppedAndCounted`) |
+| A node's report, then a session started on the leader's `Control`, then a fetch under token 77 | The host leads, the start commits, and the fetch is answered under token 77 with the session live |
+| Reports from three nodes, then a session that never renews | Once it is fenced, every node that reported gets the table pushed with token 0; a heartbeat behind the version gets it again, one current does not |
+| A report naming node 4 from node 3's connection | Dropped: no push ever goes to node 4 at node 3's address |
+| A `Txn` to the group | Answered under its token |
+| A chunkstore frame in a pool buffer and a fetch before the host leads | The frame's buffer freed, the fetch unanswered |
+
+The rows without a test named are unit tests in `internal/meta/ctlhost_test.go`.
+
 ## Storage node session wiring
 
 The node's machine, `internal/node`, fed events with no network, and its messages in `internal/meta`.

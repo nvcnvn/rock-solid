@@ -139,3 +139,8 @@
 - **Where:** `realRounds` in `internal/loop/looptest/round_linux_test.go`
 - **Why:** Docker Desktop's kernel (6.12 linuxkit) is built without `CONFIG_HIGH_RES_TIMERS`, so a timerfd fires on the next 1 ms tick: a 20 µs timer was 980 µs late at p50, which put the loops' proposal timers and the simulated disk's 0.95 ms completions a tick apart and measured the tick, not the rounds. A goroutine spinning on its own thread posts the proposals and writes the disk's eventfd instead, at a core's CPU, which the run subtracts.
 - **Remove when:** the run moves to a Linux host or VM whose kernel has `CONFIG_HIGH_RES_TIMERS`; then the proposals come from each loop's own timer and the disk's completions from a timerfd.
+
+## Workaround: the control-plane group's log in memory
+- **Where:** `CtlHost.after` in `internal/meta/ctlhost.go`, over `raftshard.NewStorage`
+- **Why:** no daemon hosts a Raft group on a disk log yet, so the control-plane host keeps its group's log and hard state in memory and calls each round durable as soon as it is taken. A voter that restarts comes back empty, and a single-voter control plane loses every pool, table, disk record and session it committed ([The control-plane host](design.md#metadata-layer-metastore)).
+- **Remove when:** the embedded MetaStore daemon writes the group's rounds to a disk log through the round driver and replays them at start; then `CtlHost` reports a round durable only on its `DiskDone`.
