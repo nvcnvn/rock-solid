@@ -3902,6 +3902,52 @@ Snapshots taken while a purge runs (punches carrying the snapshot epoch) are lef
 - `ci-orphan`: 1 inode of 3 bytes open on 2 nodes, up to 2 writes at byte 5 (past `alloc_end`), 1 unlink, 1 fence, 1 owner failover and 1 crash.
 - `deep-list`: `ci-list` with 2 crashes, safety only, since its liveness check does not finish in 4 hours; `deep-write` and `deep-orphan` add a crash to theirs, and to `deep-orphan` a write, and check `PurgeSettles` under a fair purger, with chunk writes arriving, since a drain waits for them.
 
+## Voter replacement model
+
+A TLA+ specification of a metadata group's voter replacement ([Replica placement and replacement](design.md#metadata-layer-metastore)), `models/voters/voters.tla`: one Raft group's log, terms and elections, its configurations as etcd-raft applies them, the replacement that joins as a learner and is swapped in for a dropped voter by one joint change, and the removal notice. It takes as given what the Control-plane group keeps: the plan is committed before any replica sees it and never changes, and a replica ID is never handed out twice.
+
+**What the model contains**
+
+- Messages are not modelled: an election, an append and a membership question each act in one step on the replicas they involve, since etcd-raft's own TLA+ spec checks the message level beneath. A failed election changes nothing, as pre-vote gives.
+- A configuration takes effect on a replica when it applies the entry, as in etcd-raft, and an entry holds the whole configuration it results in, which equals etcd-raft's delta while one change is pending at a time. A joint configuration needs a quorum of each half, for elections and commits.
+- A replica campaigns only once it applied every configuration change it knows committed (etcd-raft's `hasUnappliedConfChanges`). A leader proposes a change only once it applied an entry of its term and the change before, as etcd-raft enforces.
+- The leader adds a planned replica as a learner, promotes it once it holds what the leader had committed a heartbeat earlier, in one joint change that also removes a voter the plan drops, never the leader itself, and leaves the joint configuration once applied, as etcd-raft's auto-leave does.
+- A replica deletes its state when it applies its own removal, or on a peer's notice: the peer's applied configuration lacks it, the peer's applied index is at least its own, and its own applied configuration holds it.
+- Faults: crashes and restarts that keep the replica's log and indexes, and a voter down for good. Fortified leases, lease reads, the transfer target rule, a halted replica and a restart from a base are not modelled yet.
+
+**Properties**
+
+| Property | Model invariant | Simulator invariant |
+| --- | --- | --- |
+| At most one leader per term | `AtMostOneLeader` | `invOneLeader`, "at most one leader per shard per term" |
+| A leader of a later term holds every committed entry | `CommittedNeverLost` | `invNeverLost`, "a committed entry is never lost" |
+| Every replica's committed entries are the group's | `CommittedAgree` | `invNeverLost` |
+| No replica becomes a voter before it holds what the leader had committed a heartbeat earlier | `VotersCaughtUp` | `invCaughtUp` |
+| A replica deletes its state only once a committed configuration lacks it | `DeletesOnlyRemoved` | `invOnlyRemoved` |
+| With a voter down for good, the swap commits on the survivors | `SwapCommits` | None: [Voter replacement](#voter-replacement)'s tests time the swap |
+| A leader never applies its own removal | `LeadersStay`, checked only by `neg-outgoing-leader-leaves` | None yet |
+
+**A rule removed, and the counterexample the model finds** (rows in the [rule map](#model-gate))
+
+| Configuration | Rule removed | Counterexample the model finds | Property violated |
+| --- | --- | --- | --- |
+| `neg-campaign-unapplied` | A replica campaigns with a committed configuration change unapplied | b, which knows the joint and leave entries committed but has not applied them, wins term 2 on b and c under the old configuration, while a wins term 2 on a and d under the new one | `AtMostOneLeader` |
+| `neg-voter-first` | The planned replica joins as a voter | d becomes a voter holding none of the log. In the code the same plant stalls commits while a voter is down | `VotersCaughtUp` |
+| `neg-eager` | A learner is promoted at once | d is swapped in before it holds the leader's committed entries | Same |
+| `neg-joint-one-half` | A joint configuration counts the incoming half alone | a, which applied the joint configuration, wins term 2 on a and d, a quorum of the incoming half alone; b, which has not applied it, wins term 2 on b and c under the old configuration | `AtMostOneLeader` |
+| `neg-delete-on-plan` | A replica the plan drops deletes its state at once | c deletes before any change commits | `DeletesOnlyRemoved` |
+| `neg-notice-any-index` | A notice counts from a peer behind the asker | d, which applied its addition, asks b, which has not, and b's answer of index 0 counts | Same |
+| `neg-notice-non-member` | A notice counts while the asker's own configuration lacks it | d, before applying its own addition, asks a, which is ahead of d but has not applied it either | Same |
+| `neg-outgoing-leader-leaves` | None: every rule holds | a proposes the leave and replicates it to c before it commits; c, a voter of the outgoing half, wins term 2 on a, b and c under the joint configuration, commits the leave and applies its own removal as leader | `LeadersStay` |
+
+`neg-outgoing-leader-leaves` shows a gap, not a rule: proposing no swap of itself keeps a leader from removing itself only when it proposed the leave. The group then has no leader until its followers stop supporting the removed leader's term, which this model, with no leases, does not check.
+
+**Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc); results in the [Model-to-simulator map](#model-to-simulator-map)). Voters a, b and c, the plan swapping d in for c:
+
+- `ci-swap`: up to term 2, no crash, safety, with a and b symmetric.
+- `ci-live`: c down for good, up to term 2, `SwapCommits` under weak fairness.
+- `deep-swap`: `ci-swap` with one crash and restart of any replica.
+
 ## Model-to-simulator map
 
 - Each configuration states its constants, the depth TLC reached, its distinct states and its wall
@@ -3969,6 +4015,8 @@ section.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
+| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 29 | 1,143,522 | 357 s, 1 worker |
+| Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 24 | 23,493 | 97 s, 1 worker |
 | Epoch change | `heavy-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,577 s |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |

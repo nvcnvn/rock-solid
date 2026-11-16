@@ -120,3 +120,11 @@ epoch/neg-serve-refused	open	Plants for the epoch model's new rules
 epoch/neg-settle-by-number	chunkstore.settleByNumber	TestPlantedBugsBreakTheirTraces
 epoch/neg-write-on-unfound	chunkstore.writeOnUnfound	TestWriteOnUnfoundEndsTheWayBack
 epoch/neg-forget-image	chunkstore.forgetImage	TestForgetImageLeavesTheChunkUnfound
+voters/neg-campaign-unapplied	open	Plants for the voter replacement model
+voters/neg-voter-first	raftshard.voterFirst	TestAddingTheReplacementAsAVoterStallsProposals
+voters/neg-eager	raftshard.eager	TestPromotingALearnerBeforeItCaughtUpBreaksTheInvariant
+voters/neg-joint-one-half	open	Plants for the voter replacement model
+voters/neg-delete-on-plan	open	Plants for the voter replacement model
+voters/neg-notice-any-index	open	Plants for the voter replacement model
+voters/neg-notice-non-member	open	Plants for the voter replacement model
+voters/neg-outgoing-leader-leaves	open	Plants for the voter replacement model
