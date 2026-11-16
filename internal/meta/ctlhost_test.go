@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"errors"
 	"slices"
 	"testing"
 
@@ -226,6 +227,19 @@ func TestAHostWithNoLeaderFreesFramesAndRedirectsAFetch(t *testing.T) {
 	}
 	if _, known, err := DecodeLeader(r.pool, &r.sent[0].Msg); err != nil || known {
 		t.Fatalf("answered a leader known %v: %v", known, err)
+	}
+}
+
+// A replica whose log lives in memory comes back empty from a restart and could vote twice in a
+// term, so a host refuses a group of more than one voter.
+func TestAHostRefusesMoreThanOneVoter(t *testing.T) {
+	for _, cs := range []raftpb.ConfState{{Voters: []uint64{1, 2}}, {Voters: []uint64{1}, VotersOutgoing: []uint64{1, 2}}} {
+		cfg := Config{Raft: raftshard.Config{Group: hostGroup, ID: 1, Storage: bootStorage(t, cs), Timer: 1,
+			Peers: []raftshard.Peer{{ID: 1}, {ID: 2}}, Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, 1, lease.Time{})},
+			Tree: lsm.Config{MaxPiece: 64 << 10, Check: true}}
+		if _, err := NewCtlHost(cfg); !errors.Is(err, ErrInMemoryVoters) {
+			t.Fatalf("voters %v: %v", cs, err)
+		}
 	}
 }
 

@@ -7709,6 +7709,7 @@ The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 25
 | Reports from three nodes, then a session that never renews | Once it is fenced, every node that reported gets the table pushed with token 0; a heartbeat behind the version gets it again, one current does not |
 | A report naming node 4 from node 3's connection | Dropped: no push ever goes to node 4 at node 3's address |
 | A `Txn` to the group | Answered under its token |
+| A host on a group of two voters, or a joint configuration with two outgoing voters | Refused at construction (`ErrInMemoryVoters`): a voter whose log is in memory restarts empty and could vote twice in a term |
 | A pool committed, then a node's table fetch | The delta goes to every node that reported, the whole table to the node that fetched |
 | A chunkstore frame in a pool buffer and a fetch before the group has a leader | The frame's buffer freed, the fetch answered with no leader known |
 | A report, a session fetch and a table fetch at a follower of a three-voter group | Each answered with the leader's node |

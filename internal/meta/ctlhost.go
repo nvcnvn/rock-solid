@@ -2,6 +2,7 @@ package meta
 
 import (
 	"cmp"
+	"errors"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
@@ -54,8 +55,17 @@ type CtlHost struct {
 	stepAt  core.Tick
 }
 
-// NewCtlHost starts a host on the replica cfg sets up.
+// ErrInMemoryVoters refuses a control-plane group of more than one voter while its log lives in
+// memory: a voter restarted empty could vote twice in a term and elect a second leader.
+var ErrInMemoryVoters = errors.New("meta: a control-plane group with its log in memory has more than one voter")
+
+// NewCtlHost starts a host on the replica cfg sets up, refusing a group of more than one voter.
 func NewCtlHost(cfg Config) (*CtlHost, error) {
+	if _, cs, err := cfg.Raft.Storage.InitialState(); err != nil {
+		return nil, err
+	} else if len(cs.Voters) > 1 || len(cs.VotersOutgoing) > 1 {
+		return nil, ErrInMemoryVoters
+	}
 	s, err := NewShard(cfg)
 	if err != nil {
 		return nil, err
