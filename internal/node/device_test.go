@@ -38,7 +38,7 @@ func (r *devRun) start(seed uint64) {
 	r.out.Reset()
 	cfg := storetest.Config()
 	cfg.Log.NoReserve = false
-	r.d = NewDevice(&r.ctx, DeviceConfig{Device: 7, Blocks: devBlocks, Class: "ssd", Store: cfg, Seed: seed}, &r.out)
+	r.d = NewDevice(&r.ctx, DeviceConfig{Device: 7, Blocks: devBlocks, Class: "ssd", Loop: 3, Store: cfg, Seed: seed}, &r.out)
 	r.take()
 }
 
@@ -92,7 +92,7 @@ func TestTwoStartsOverAFormatCutShortDrawDifferentLogIDs(t *testing.T) {
 		for i := 0; i < k && r.step(); i++ {
 		}
 		if r.opened != nil {
-			if r.opened.Log != first || r.opened.Device != 7 || r.opened.Blocks != devBlocks || r.opened.Class != "ssd" || r.opened.Reserve == 0 {
+			if r.opened.Log != first || r.opened.Device != 7 || r.opened.Blocks != devBlocks || r.opened.Class != "ssd" || r.opened.Loop != 3 || r.opened.Reserve == 0 {
 				t.Fatalf("opened %+v, log %#x drawn", r.opened, first)
 			}
 			break

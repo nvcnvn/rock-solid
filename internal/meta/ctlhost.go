@@ -88,9 +88,17 @@ var ErrLogFull = errors.New("meta: the control-plane log reached max_replay_byte
 // ErrVoters reports a host restarted with voters other than those its disk was formatted with.
 var ErrVoters = errors.New("meta: the voters given are not those the control-plane log was formatted with")
 
+// heardNode is a node heard from: the loop it reported from, when, and the loop of each disk its
+// last report opened.
 type heardNode struct {
 	at    core.NodeID
 	heard core.Tick
+	loops []diskLoop
+}
+
+type diskLoop struct {
+	log  uint64
+	loop uint32
 }
 
 type starter struct {
@@ -261,7 +269,11 @@ func (h *CtlHost) report(ctx *core.Context, ev *core.Event, out *CtlHostOutput) 
 	if !ok {
 		h.nodes = slices.Insert(h.nodes, i, heardNode{})
 	}
-	h.nodes[i] = heardNode{at: ev.Peer, heard: ctx.Now}
+	n := &h.nodes[i]
+	n.at, n.heard, n.loops = ev.Peer, ctx.Now, n.loops[:0]
+	for _, o := range h.nr.Opened {
+		n.loops = append(n.loops, diskLoop{log: o.Log, loop: o.Loop})
+	}
 	if h.ctl == nil {
 		h.redirect(ctx, ev.Peer, out)
 		return
@@ -274,15 +286,18 @@ func (h *CtlHost) report(ctx *core.Context, ev *core.Event, out *CtlHostOutput) 
 	h.sendDisks(ctx, ev.Peer, out)
 }
 
-// sendDisks answers a node's report with the committed membership: each disk not gone whose node
-// was heard from, at the loop it reported from, so the node learns its own disks' IDs and its
-// replicas the loops of their members.
+// sendDisks answers a node's report with the committed membership: each disk not gone that its
+// node's last report opened, at the loop that report names for it, so the node learns its own
+// disks' IDs and its replicas the loops of their members.
 func (h *CtlHost) sendDisks(ctx *core.Context, to core.NodeID, out *CtlHostOutput) {
 	h.addrs = h.addrs[:0]
 	for _, d := range h.ctl.disks {
 		i, ok := slices.BinarySearchFunc(h.nodes, d.Node, func(n heardNode, id uint32) int { return cmp.Compare(n.at.Node, id) })
-		if ok && !d.Gone {
-			h.addrs = append(h.addrs, DiskAddr{Disk: d.ID, Log: d.Log, At: h.nodes[i].at})
+		if !ok || d.Gone {
+			continue
+		}
+		if j := slices.IndexFunc(h.nodes[i].loops, func(l diskLoop) bool { return l.log == d.Log }); j >= 0 {
+			h.addrs = append(h.addrs, DiskAddr{Disk: d.ID, Log: d.Log, At: core.NodeID{Node: d.Node, Loop: h.nodes[i].loops[j].loop}})
 		}
 	}
 	a := core.Action{Kind: core.ActNetSend, Peer: to, Reply: true}

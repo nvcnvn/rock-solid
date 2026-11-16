@@ -19,7 +19,7 @@ func TestNodeMessagesCrossTheWireWhole(t *testing.T) {
 	for _, nr := range []NodeReport{
 		{Node: 3},
 		{Node: 1 << 31, Release: 2, Meta: true, MetaOnly: true, Epoch: 9, Sessions: 4,
-			Opened: []OpenedDisk{{Device: 0xdead, Log: 1 << 63, Blocks: 1 << 30, Reserve: 64, Class: "nvme"}, {Device: 2, Log: 3}},
+			Opened: []OpenedDisk{{Device: 0xdead, Log: 1 << 63, Blocks: 1 << 30, Reserve: 64, Class: "nvme", Loop: 1 << 31}, {Device: 2, Log: 3}},
 			Failed: many,
 			Halts:  []HaltReport{{Group: 1, ID: 2, Index: 3, Age: 4}}},
 	} {
@@ -122,7 +122,7 @@ func fuzzNodeWire(f *testing.F, seed func(pool core.BufPool, m *core.Msg), decod
 
 func FuzzDecodeNodeReport(f *testing.F) {
 	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) {
-		nr := NodeReport{Node: 2, Release: 1, Meta: true, Sessions: 3, Opened: []OpenedDisk{{Device: 5, Log: 6, Blocks: 7, Class: "ssd"}},
+		nr := NodeReport{Node: 2, Release: 1, Meta: true, Sessions: 3, Opened: []OpenedDisk{{Device: 5, Log: 6, Blocks: 7, Class: "ssd", Loop: 2}},
 			Failed: []uint64{9}, Halts: []HaltReport{{Group: 1, ID: 1, Index: 4, Age: 5}}}
 		_ = EncodeNodeReport(pool, 1, &nr, m)
 	}, func(pool core.BufPool, m *core.Msg) (core.Msg, bool) {

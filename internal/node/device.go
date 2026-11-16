@@ -10,13 +10,15 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/meta"
 )
 
-// DeviceConfig is one device of a node: its stable identity, its size in blocks, its class, its
-// store's settings, and the seed of its source, which the daemon takes from the operating system
-// at each start, so a format a crash cut short is formatted again under another log ID.
+// DeviceConfig is one device of a node: its stable identity, its size in blocks, its class, the
+// loop that owns it, its store's settings, and the seed of its source, which the daemon takes from
+// the operating system at each start, so a format a crash cut short is formatted again under
+// another log ID.
 type DeviceConfig struct {
 	Device uint64
 	Blocks uint64
 	Class  string
+	Loop   uint32
 	Store  chunkstore.Config
 	Seed   uint64
 }
@@ -127,7 +129,7 @@ func (d *Device) settle(ctx *core.Context, err error, out *DeviceOutput) {
 		sb := d.st.Log().Superblock()
 		d.log = sb.LogID
 		d.opened = meta.OpenedDisk{Device: d.cfg.Device, Log: d.log, Blocks: d.cfg.Blocks,
-			Reserve: uint64(d.st.Log().Reserve()) * uint64(sb.SegmentBlocks), Class: d.cfg.Class}
+			Reserve: uint64(d.st.Log().Reserve()) * uint64(sb.SegmentBlocks), Class: d.cfg.Class, Loop: d.cfg.Loop}
 		out.Opened = &d.opened
 		d.restarted = d.phase == recovering
 		d.phase = opened

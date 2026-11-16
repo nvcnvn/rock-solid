@@ -7840,7 +7840,7 @@ The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 25
 | A single-voter Raft shard's timer | It elects itself within two election timeouts, commits a proposal and serves lease reads (`TestASingleVoterElectsItselfAndLeases`, `internal/raftshard`) |
 | A message of group 257 (`Txn`, report, session table) read as a chunkstore frame, and a chunkstore frame read as a group message | Each refused by the other's decoder; a Raft message whose first byte is chunkstore's is undecodable (`TestAGroupMessageIsNeverAChunkstoreFrame`, `TestUndecodableMessagesAreDroppedAndCounted`) |
 | A node's report, then a client's session start under request 5, sent twice before it commits, then a fetch under token 77 | The host leads and starts one session, whose ID the client hears under request 5; the fetch is answered under token 77 with the session live |
-| A node's report naming a disk, then steps, then the report again | The first answer names no disk; once the record commits, the answer names the disk with its log and the loop the report came from |
+| A node's report naming a disk on loop 4, then steps, then the report again, then a report without it | The first answer names no disk; once the record commits, the answer names the disk with its log at loop 4 of the node; the last names none |
 | Reports from three nodes, then a session that never renews | Once it is fenced, every node that reported gets the table pushed with token 0; a heartbeat behind the version gets it again, one current does not |
 | A report naming node 4 from node 3's connection | Dropped: no push ever goes to node 4 at node 3's address |
 | A `Txn` to the group | Answered under its token |

@@ -30,12 +30,13 @@ var ErrUnknownDisk = errors.New("meta: unknown disk")
 var ErrNotDrained = errors.New("meta: disk not drained")
 
 // OpenedDisk is a disk a node opened: the drive's stable identity, the log ID its superblock
-// holds, its size and its log's reserve in blocks, and its class, which the record takes only when
-// the disk joins.
+// holds, its size and its log's reserve in blocks, its class, which the record takes only when
+// the disk joins, and the loop of the node that owns it, where its replica runs.
 type OpenedDisk struct {
 	Device, Log     uint64
 	Blocks, Reserve uint64
 	Class           string
+	Loop            uint32
 }
 
 // HaltReport is a replica halted at a committed entry it could not decode: its group, its replica

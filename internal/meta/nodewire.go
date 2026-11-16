@@ -10,7 +10,7 @@ import (
 // A storage node and the control plane talk in the sharded API's framing, addressed to the
 // control-plane group, every number a uvarint. A NodeReport's body is its node, release, a flags
 // byte (1 Meta, 2 MetaOnly), epoch and session version, then a count and each opened disk's device,
-// log, blocks, reserve and class, a count and each failed device, a count and each halt's group,
+// log, blocks, reserve, class and loop, a count and each failed device, a count and each halt's group,
 // ID, index and age. A session fetch has no body; its token is the node's. A session table's
 // token is the fetch it answers, 0 when pushed unasked, and its body is its version, next ID, a
 // count and each live ID as its gap above the one before. A placement table's body is
@@ -69,7 +69,7 @@ func appendNodeReport(dst []byte, nr *NodeReport) []byte {
 	for _, o := range nr.Opened {
 		dst = binary.AppendUvarint(binary.AppendUvarint(dst, o.Device), o.Log)
 		dst = binary.AppendUvarint(binary.AppendUvarint(dst, o.Blocks), o.Reserve)
-		dst = appendBytes(dst, []byte(o.Class))
+		dst = binary.AppendUvarint(appendBytes(dst, []byte(o.Class)), uint64(o.Loop))
 	}
 	dst = binary.AppendUvarint(dst, uint64(len(nr.Failed)))
 	for _, f := range nr.Failed {
@@ -104,6 +104,11 @@ func DecodeNodeReport(pool core.BufPool, msg *core.Msg, nr *NodeReport) error {
 	for n := d.count(); n > 0; n-- {
 		o := OpenedDisk{Device: d.uvarint(), Log: d.uvarint(), Blocks: d.uvarint(), Reserve: d.uvarint()}
 		o.Class = string(d.bytes())
+		loop := d.uvarint()
+		if loop > 0xffffffff {
+			return ErrMalformed
+		}
+		o.Loop = uint32(loop)
 		nr.Opened = append(nr.Opened, o)
 	}
 	for n := d.count(); n > 0; n-- {

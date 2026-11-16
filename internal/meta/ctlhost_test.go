@@ -325,11 +325,12 @@ func TestAFencePushesTheSessionTableToEveryNodeHeardFrom(t *testing.T) {
 }
 
 // A node's report is answered with the committed membership: a disk it reports is named, with its
-// log and the loop the report came from, only once the record holding it commits.
+// log and the loop the report names for it, only once the record holding it commits, and no
+// longer once a report leaves it out.
 func TestAReportIsAnsweredWithTheCommittedDisks(t *testing.T) {
 	r := newHostRun(t)
 	r.lead()
-	nr := NodeReport{Node: hostNode.Node, Opened: []OpenedDisk{{Device: 1, Log: 0x55, Blocks: 1 << 20}}}
+	nr := NodeReport{Node: hostNode.Node, Opened: []OpenedDisk{{Device: 1, Log: 0x55, Blocks: 1 << 20, Loop: 4}}}
 	disksSent := func() []DiskAddr {
 		var got []DiskAddr
 		for _, a := range r.sent {
@@ -351,9 +352,13 @@ func TestAReportIsAnsweredWithTheCommittedDisks(t *testing.T) {
 	}
 	r.run(StepInterval * 3)
 	r.report(&nr)
-	want := []DiskAddr{{Disk: 1, Log: 0x55, At: hostNode}}
+	want := []DiskAddr{{Disk: 1, Log: 0x55, At: core.NodeID{Node: hostNode.Node, Loop: 4}}}
 	if got := disksSent(); !slices.Equal(got, want) {
 		t.Fatalf("after the record commits the report got %+v, want %+v", got, want)
+	}
+	r.report(&NodeReport{Node: hostNode.Node})
+	if got := disksSent(); len(got) != 0 {
+		t.Fatalf("a report without the disk got %+v", got)
 	}
 }
 
