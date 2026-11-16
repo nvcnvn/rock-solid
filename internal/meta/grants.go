@@ -398,8 +398,9 @@ func (c *Control) grantStep(now core.Tick, leased bool, ds []chunkstore.Disk, mo
 				d.Blocks = f.blocks
 			}
 			if f.heard {
-				d.Live, d.Own = f.live, f.own(cp.ID, d.Blocks)
+				d.Live = f.live
 			}
+			d.Own = f.own(cp.ID, d.Blocks)
 			if d.Slots == 0 || d.Mark != chunkstore.MarkUp {
 				continue
 			}
