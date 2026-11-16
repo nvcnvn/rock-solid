@@ -7709,9 +7709,19 @@ The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 25
 | Reports from three nodes, then a session that never renews | Once it is fenced, every node that reported gets the table pushed with token 0; a heartbeat behind the version gets it again, one current does not |
 | A report naming node 4 from node 3's connection | Dropped: no push ever goes to node 4 at node 3's address |
 | A `Txn` to the group | Answered under its token |
-| A chunkstore frame in a pool buffer and a fetch before the host leads | The frame's buffer freed, the fetch unanswered |
+| A pool committed, then a node's table fetch | The delta goes to every node that reported, the whole table to the node that fetched |
+| A chunkstore frame in a pool buffer and a fetch before the group has a leader | The frame's buffer freed, the fetch answered with no leader known |
+| A report, a session fetch and a table fetch at a follower of a three-voter group | Each answered with the leader's node |
+| Placement and leader messages across the wire | Decode to what was sent; fuzzed (`FuzzDecodeTableMsg`, `FuzzDecodeDeltaMsg`, `FuzzDecodeLeader`) |
 
-The rows without a test named are unit tests in `internal/meta/ctlhost_test.go`.
+The rows without a test named are unit tests in `internal/meta/ctlhost_test.go`. The node's side, in `internal/node/node_test.go`:
+
+| Input | Expected |
+| --- | --- |
+| A leader message from the voter the node talks to, naming another voter; naming none; naming a node that is no voter; one from a voter it does not talk to | Moves to the voter named; to the next voter; to the next voter; stays. Each move is in the output, so replicas report to the new voter |
+| The connection to the voter it talks to is lost | Moves to the next voter; the next heartbeat goes there |
+| A placement table or delta from a voter, and one from a node that is no voter | Handed on for every replica; dropped |
+| Two replicas ask for the table in one pass, then again an interval later, then after a table arrived | One fetch, one more, then one at once |
 
 ## Storage node session wiring
 
