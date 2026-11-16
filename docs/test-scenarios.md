@@ -6103,7 +6103,7 @@ test's alone.
   | A read served from a pending version: the primary commits once its own log holds a version (`commitOnOwnLog`), and the next interval drops it | Read | 78 of 100 | 0 |
   | An old primary serving reads with no lease check (P1, `noLeaseCheck`): a client that missed the new primary's table reads from the old one after the new one acknowledged a write | Read | 11 of 100 | 12 |
   | Merging on the committed version (sub-block M2), one client pipelining 4 writes | Sub-block | 100 of 100 | 0 |
-  | Peering dropping a subset of a chunk's pending versions, not a suffix (M7, `settleSubset`) | Primary-change | about 9 of 500 | 18 |
+  | Peering dropping a subset of a chunk's pending versions, not a suffix (M7, `settleSubset`) | Primary-change | 21 of 500 | 57 |
 
   The M7 rate is that of the primary-change run's own check of kept bytes, which fails on the same
   seeds. The holder ending its lease on the slower of its clocks (P9's slews) is not planted here:
