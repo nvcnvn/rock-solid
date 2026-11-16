@@ -20,13 +20,13 @@ const (
 	FetchTimer     core.TimerID = 0x6e666574
 )
 
-// Config is a node's place in the cluster: its ID, the release its format level is, where the
-// control-plane group is and its group ID, and the seed of the source its start draws from, which
-// the daemon takes from the operating system at each start.
+// Config is a node's place in the cluster: its ID, the release its format level is, the loops of
+// the control-plane group's voters and its group ID, and the seed of the source its start draws
+// from, which the daemon takes from the operating system at each start.
 type Config struct {
 	Node    uint32
 	Release uint32
-	Ctl     core.NodeID
+	Ctls    []core.NodeID
 	Group   uint64
 	Seed    uint64
 }
@@ -38,14 +38,22 @@ type Hand struct {
 	Answers uint64
 }
 
-// Output is what a call into the node asks of its loop: actions, and tables to hand replicas.
+// Output is what a call into the node asks of its loop: actions; session tables to hand
+// replicas; a placement table or delta to hand every replica, with SetTable or ApplyDelta; and
+// whether the node moved to another control-plane voter, which every replica then reports to
+// with SetAuthority at Ctl.
 type Output struct {
 	Actions []core.Action
 	Hands   []Hand
+	Table   *chunkstore.Table
+	Delta   *chunkstore.Delta
+	Moved   bool
 }
 
 // Reset empties the output for reuse.
-func (o *Output) Reset() { o.Actions, o.Hands = o.Actions[:0], o.Hands[:0] }
+func (o *Output) Reset() {
+	*o = Output{Actions: o.Actions[:0], Hands: o.Hands[:0]}
+}
 
 // replica is a device whose replica runs: the session version its store holds, the newest ask it
 // made, the ask the fetch in flight covers and the newest ask answered.
@@ -71,9 +79,41 @@ type Node struct {
 	fetchSeq uint64
 	fetchAt  core.Tick
 	report   meta.NodeReport
+	// ctl is the voter the node talks to, tableAt when it may fetch the placement table again,
+	// and placed and delta the last placement table and delta it received.
+	ctl     int
+	tableAt core.Tick
+	placed  chunkstore.Table
+	delta   chunkstore.Delta
 }
 
-// New is a node at its start.
+// Ctl is the control-plane voter the node talks to.
+func (n *Node) Ctl() core.NodeID { return n.cfg.Ctls[n.ctl] }
+
+// move talks to the next voter, or to the one at, if it is one.
+func (n *Node) move(at core.NodeID, known bool, out *Output) {
+	if i := slices.Index(n.cfg.Ctls, at); known && i >= 0 {
+		n.ctl = i
+	} else {
+		n.ctl = (n.ctl + 1) % len(n.cfg.Ctls)
+	}
+	out.Moved = true
+}
+
+// FetchTable takes a replica's ReplicaOutput.Fetch or Whole and fetches the whole placement table,
+// at most once an Interval until a table or delta arrives.
+func (n *Node) FetchTable(ctx *core.Context, out *Output) {
+	if ctx.Now < n.tableAt {
+		return
+	}
+	a := core.Action{Kind: core.ActNetSend, Peer: n.Ctl()}
+	if meta.EncodeTableFetch(ctx.Pool, n.cfg.Group, &a.Msg) == nil {
+		n.tableAt = ctx.Now + Interval
+		out.Actions = append(out.Actions, a)
+	}
+}
+
+// New is a node at its start, which talks to its first voter.
 func New(cfg Config) *Node {
 	n := &Node{cfg: cfg, rng: core.NewRand(cfg.Seed)}
 	n.start = uint64(n.rng.Uint32()) << 32
@@ -131,11 +171,16 @@ func (n *Node) Ask(ctx *core.Context, device, ask uint64, out *Output) {
 	}
 }
 
-// OnEvent takes a session table from the control plane, dropping one from any other peer, or a
-// timer. A lost connection to the control plane leaves the fetch to FetchTimer: while the driver
-// backs off, each send fails at once with another loss, and a resend on each would spin the loop.
+// OnEvent takes a session or placement table from a control-plane voter, dropping one from any
+// other peer, the leader the voter it talks to names, or a timer. A lost connection to that voter
+// moves the node to the next and leaves the fetch to FetchTimer: while the driver backs off, each
+// send fails at once with another loss, and a resend on each would spin the loop.
 func (n *Node) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	switch ev.Kind {
+	case core.EvPeerLost:
+		if ev.Peer == n.Ctl() {
+			n.move(core.NodeID{}, false, out)
+		}
 	case core.EvNetRecv:
 		n.recv(ctx, ev, out)
 	case core.EvTimer:
@@ -152,8 +197,29 @@ func (n *Node) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 func (n *Node) recv(ctx *core.Context, ev *core.Event, out *Output) {
 	defer free(ctx, &ev.Msg)
 	group, kind, token, ok := meta.Peek(&ev.Msg)
+	if !ok || !slices.Contains(n.cfg.Ctls, ev.Peer) || group != n.cfg.Group {
+		return
+	}
+	var err error
+	switch kind {
+	case meta.KindLeader:
+		if at, known, err := meta.DecodeLeader(ctx.Pool, &ev.Msg); err == nil && ev.Peer == n.Ctl() {
+			n.move(at, known, out)
+		}
+		return
+	case meta.KindTable:
+		if n.placed, err = meta.DecodeTable(ctx.Pool, &ev.Msg); err == nil {
+			out.Table, n.tableAt = &n.placed, 0
+		}
+		return
+	case meta.KindDelta:
+		if n.delta, err = meta.DecodeDelta(ctx.Pool, &ev.Msg); err == nil {
+			out.Delta, n.tableAt = &n.delta, 0
+		}
+		return
+	}
 	var t chunkstore.SessionTable
-	if !ok || ev.Peer != n.cfg.Ctl || group != n.cfg.Group || kind != meta.KindSessions || meta.DecodeSessions(ctx.Pool, &ev.Msg, &t) != nil {
+	if kind != meta.KindSessions || meta.DecodeSessions(ctx.Pool, &ev.Msg, &t) != nil {
 		return
 	}
 	newer := t.Version > n.table.Version || t.Version == n.table.Version && t.Next > n.table.Next
@@ -183,7 +249,7 @@ func (n *Node) fetch(ctx *core.Context, out *Output) {
 		return
 	}
 	n.fetchSeq++
-	a := core.Action{Kind: core.ActNetSend, Peer: n.cfg.Ctl}
+	a := core.Action{Kind: core.ActNetSend, Peer: n.Ctl()}
 	if meta.EncodeSessionFetch(ctx.Pool, n.cfg.Group, n.token(), &a.Msg) != nil {
 		return
 	}
@@ -207,7 +273,7 @@ func (n *Node) heartbeat(ctx *core.Context, out *Output) {
 	for _, r := range n.reps {
 		nr.Sessions = min(nr.Sessions, r.held)
 	}
-	a := core.Action{Kind: core.ActNetSend, Peer: n.cfg.Ctl, Reply: true}
+	a := core.Action{Kind: core.ActNetSend, Peer: n.Ctl(), Reply: true}
 	if meta.EncodeNodeReport(ctx.Pool, n.cfg.Group, nr, &a.Msg) == nil {
 		out.Actions = append(out.Actions, a)
 	}

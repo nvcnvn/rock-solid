@@ -22,7 +22,7 @@ type run struct {
 }
 
 func newRun(t *testing.T, seed uint64, devices ...uint64) *run {
-	r := &run{t: t, n: New(Config{Node: 4, Release: 1, Ctl: ctl, Group: group, Seed: seed}), ctx: core.Context{Now: 1, Pool: sim.NewPool(1<<20, 0)}}
+	r := &run{t: t, n: New(Config{Node: 4, Release: 1, Ctls: []core.NodeID{ctl}, Group: group, Seed: seed}), ctx: core.Context{Now: 1, Pool: sim.NewPool(1<<20, 0)}}
 	for _, d := range devices {
 		r.n.Opened(meta.OpenedDisk{Device: d, Log: d << 8}, &r.out)
 	}
@@ -277,5 +277,98 @@ func TestTheStartReportsTheDevicesOpenedAndFailed(t *testing.T) {
 	}
 	if len(nr.Opened) != 2 || nr.Opened[1].Log != log || len(nr.Failed) != 2 || nr.Failed[0] != 3 || nr.Failed[1] != 4 {
 		t.Fatalf("the start reported %+v", nr)
+	}
+}
+
+var other = core.NodeID{Node: 8, Loop: 2}
+
+// three is a node configured with three voters, ctl first.
+func three(t *testing.T) *run {
+	r := newRun(t, 1, 1)
+	r.n.cfg.Ctls = []core.NodeID{ctl, other, {Node: 7}}
+	return r
+}
+
+func (r *run) from(peer core.NodeID, encode func(pool core.BufPool, m *core.Msg) error) {
+	r.t.Helper()
+	ev := core.Event{Kind: core.EvNetRecv, Peer: peer}
+	if err := encode(r.ctx.Pool, &ev.Msg); err != nil {
+		r.t.Fatal(err)
+	}
+	r.event(ev)
+}
+
+func leader(at core.NodeID, known bool) func(pool core.BufPool, m *core.Msg) error {
+	return func(pool core.BufPool, m *core.Msg) error { return meta.EncodeLeader(pool, group, at, known, m) }
+}
+
+func TestANodeMovesToTheLeaderItsVoterNames(t *testing.T) {
+	r := three(t)
+	r.from(other, leader(core.NodeID{Node: 7}, true))
+	if r.out.Moved || r.n.Ctl() != ctl {
+		t.Fatal("moved on a leader named by a voter the node does not talk to")
+	}
+	r.from(ctl, leader(other, true))
+	if !r.out.Moved || r.n.Ctl() != other {
+		t.Fatalf("talks to %v after its voter named %v", r.n.Ctl(), other)
+	}
+	r.from(other, leader(core.NodeID{}, false))
+	if !r.out.Moved || r.n.Ctl() != (core.NodeID{Node: 7}) {
+		t.Fatalf("talks to %v after its voter knew no leader", r.n.Ctl())
+	}
+	r.from(core.NodeID{Node: 7}, leader(core.NodeID{Node: 5}, true))
+	if r.n.Ctl() != ctl {
+		t.Fatalf("talks to %v after its voter named a node that is no voter", r.n.Ctl())
+	}
+	r.event(core.Event{Kind: core.EvPeerLost, Peer: ctl})
+	if !r.out.Moved || r.n.Ctl() != other {
+		t.Fatalf("talks to %v after losing %v", r.n.Ctl(), ctl)
+	}
+	r.event(core.Event{Kind: core.EvTimer, Timer: HeartbeatTimer})
+	if len(r.out.Actions) == 0 || r.out.Actions[0].Peer != other {
+		t.Fatalf("heartbeat went to %+v", r.out.Actions)
+	}
+	free(&r.ctx, &r.out.Actions[0].Msg)
+}
+
+func TestAPlacementTableFromAVoterIsHandedOn(t *testing.T) {
+	r := three(t)
+	tbl := chunkstore.Table{Epoch: 4}
+	r.from(core.NodeID{Node: 5}, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, m) })
+	if r.out.Table != nil {
+		t.Fatal("took a table from a node that is no voter")
+	}
+	r.from(other, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, m) })
+	if r.out.Table == nil || r.out.Table.Epoch != 4 {
+		t.Fatalf("handed %+v", r.out.Table)
+	}
+	d := chunkstore.Delta{Epoch: 5}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDelta(pool, group, &d, m) })
+	if r.out.Delta == nil || r.out.Delta.Epoch != 5 || r.out.Table != nil {
+		t.Fatalf("handed %+v %+v", r.out.Delta, r.out.Table)
+	}
+	if r.ctx.Pool.(*sim.Pool).Live() != 0 {
+		t.Fatal("a buffer left")
+	}
+}
+
+func TestATableFetchGoesOutOnceAnIntervalUntilATableArrives(t *testing.T) {
+	r := newRun(t, 1, 1)
+	fetches := func() int {
+		r.out.Reset()
+		r.n.FetchTable(&r.ctx, &r.out)
+		return len(r.sends(meta.KindTableFetch))
+	}
+	if n := fetches() + fetches(); n != 1 {
+		t.Fatalf("two asks in a pass sent %d fetches", n)
+	}
+	r.ctx.Now += Interval
+	if fetches() != 1 {
+		t.Fatal("no fetch an interval later")
+	}
+	tbl := chunkstore.Table{Epoch: 4}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, m) })
+	if fetches() != 1 {
+		t.Fatal("no fetch at once after a table arrived")
 	}
 }
