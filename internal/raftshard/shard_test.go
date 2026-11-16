@@ -518,17 +518,24 @@ func TestUndecodableMessagesAreDroppedAndCounted(t *testing.T) {
 		return msg
 	}
 	live := f.pool.Live()
-	head := func(n uint32) []byte { return le.AppendUint32(append(le.AppendUint64(nil, testGroup), kindRaft), n) }
+	head := func(n uint32) []byte {
+		return le.AppendUint32(append(le.AppendUint64([]byte{core.ProtoGroup}, testGroup), kindRaft), n)
+	}
 	fort := func(kind byte, size int) core.Msg {
 		var m core.Msg
-		_ = m.SetInline(append(append(le.AppendUint64(nil, testGroup), kind), make([]byte, size)...))
+		_ = m.SetInline(append(append(le.AppendUint64([]byte{core.ProtoGroup}, testGroup), kind), make([]byte, size)...))
 		return m
 	}
 	cases := map[string]core.Msg{
 		"truncated header": func() core.Msg { var m core.Msg; _ = m.SetInline([]byte{5, 0, 0}); return m }(),
 		"garbage body": func() core.Msg {
 			var m core.Msg
-			_ = m.SetInline(append(le.AppendUint64(nil, testGroup), kindRaft, 0xff, 0xff, 0xff))
+			_ = m.SetInline(append(le.AppendUint64([]byte{core.ProtoGroup}, testGroup), kindRaft, 0xff, 0xff, 0xff))
+			return m
+		}(),
+		"another protocol": func() core.Msg {
+			m := frame(good)
+			m.Body[0] = core.ProtoChunk
 			return m
 		}(),
 		"unknown type":                   frame(raftpb.Message{Type: 99, To: 2, From: 1, Term: 1}),
@@ -539,7 +546,7 @@ func TestUndecodableMessagesAreDroppedAndCounted(t *testing.T) {
 		"unknown kind":                   fort(kindRemoved+1, 40),
 		"short fortification":            fort(kindFortify, 39),
 		"long fortification":             fort(kindFortified, 41),
-		"buffered fortification":         buffered(append(append(le.AppendUint64(nil, testGroup), kindFortify), make([]byte, 40)...), 10),
+		"buffered fortification":         buffered(append(append(le.AppendUint64([]byte{core.ProtoGroup}, testGroup), kindFortify), make([]byte, 40)...), 10),
 		"snapshot that does not restore": frame(raftpb.Message{Type: raftpb.MsgSnap, To: 2, From: 1, Term: good.Term, Snapshot: &raftpb.Snapshot{Data: []byte("bad"), Metadata: raftpb.SnapshotMetadata{Index: 100, Term: good.Term, ConfState: raftpb.ConfState{Voters: []uint64{1, 2, 3}}}}}),
 	}
 	f.s.cfg.CheckSnapshot = func(data []byte) bool { return string(data) == "ok" }

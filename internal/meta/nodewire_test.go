@@ -71,6 +71,29 @@ func TestASessionTableWhoseLiveIDsDoNotRiseBelowNextIsMalformed(t *testing.T) {
 	}
 }
 
+// Group 257's ID begins with the bytes 1, 1, which a chunkstore frame of version 1 and kind 1
+// would also begin with, before the protocol byte.
+func TestAGroupMessageIsNeverAChunkstoreFrame(t *testing.T) {
+	pool := sim.NewPool(1<<16, 0)
+	var msgs [3]core.Msg
+	_ = EncodeTxn(pool, 257, 1, &Txn{Ops: []Op{Put(attr(1, 2, 1), b("v"))}}, &msgs[0])
+	_ = EncodeNodeReport(pool, 257, &NodeReport{Node: 1}, &msgs[1])
+	_ = EncodeSessions(pool, 257, 0, &chunkstore.SessionTable{Version: 1, Next: 1}, &msgs[2])
+	for i := range msgs {
+		frame, _ := chunkstore.Frame(pool, &msgs[i])
+		if _, err := chunkstore.Peek(frame); err != chunkstore.ErrWireVersion || !msgs[i].Group() {
+			t.Errorf("message %d of group 257 peeks as a chunkstore frame: %v, group %v", i, err, msgs[i].Group())
+		}
+	}
+	var m core.Msg
+	if err := chunkstore.Attach(pool, &m, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 1}), core.NoBuf); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok := Peek(&m); ok || m.Group() {
+		t.Error("a chunkstore frame peeks as a group message")
+	}
+}
+
 func fuzzNodeWire(f *testing.F, seed func(pool core.BufPool, m *core.Msg), decode func(pool core.BufPool, m *core.Msg) (core.Msg, bool)) {
 	pool := sim.NewPool(1<<20, 0)
 	var m core.Msg

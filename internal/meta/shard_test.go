@@ -775,11 +775,11 @@ func TestARemovedReplicaAnswersItsTxnsDropped(t *testing.T) {
 }
 
 // tellRemoved hands replica i from replica from raftshard's answer to a replica its sender's
-// applied configuration does not hold, and fails unless i reports itself removed: the group,
-// kind 4, then from, to, the sender's applied index, and two unused words.
+// applied configuration does not hold, and fails unless i reports itself removed: its protocol
+// byte, the group, kind 4, then from, to, the sender's applied index, and two unused words.
 func (c *group) tellRemoved(i, from int) {
 	c.t.Helper()
-	body := binary.LittleEndian.AppendUint64(nil, 5)
+	body := binary.LittleEndian.AppendUint64([]byte{core.ProtoGroup}, 5)
 	body = append(body, 4)
 	for _, v := range []uint64{uint64(from) + 1, uint64(i) + 1, 1 << 40, 0, 0} {
 		body = binary.LittleEndian.AppendUint64(body, v)

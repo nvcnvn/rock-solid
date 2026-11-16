@@ -10,7 +10,8 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
 
-// A sharded API message is its group's ID, its kind and its token, little-endian, then its body:
+// A sharded API message is core.ProtoGroup, its group's ID, its kind and its token, little-endian,
+// then its body:
 // inline when all of it fits in core.MaxInlineMsg bytes, or else the body's length inline and the
 // body in a pool buffer. A Txn's body is its entry encoding. An Answer's is its error's code, a
 // NotLeader's group, leader, node and term, FailedCheck+1 as a uvarint, Actual as a presence byte
@@ -19,7 +20,8 @@ const (
 	// KindTxn and KindAnswer follow a message's group ID as raftshard's kinds do, above all of them.
 	KindTxn      byte = 0x40
 	KindAnswer   byte = 0x41
-	msgHead           = 8 + 1 + 8
+	kindAt            = 1 + 8
+	msgHead           = kindAt + 1 + 8
 	notLeaderLen      = 8 + 8 + 4 + 8
 )
 
@@ -51,9 +53,10 @@ func errCode(err error) byte {
 // with room for n: msg's inline bytes, or a pool buffer msg then holds.
 func frameMsg(pool core.BufPool, group uint64, kind byte, token uint64, n int, msg *core.Msg) ([]byte, error) {
 	b := msg.Body[:]
-	le.PutUint64(b, group)
-	b[8] = kind
-	le.PutUint64(b[9:], token)
+	b[0] = core.ProtoGroup
+	le.PutUint64(b[1:], group)
+	b[kindAt] = kind
+	le.PutUint64(b[kindAt+1:], token)
 	if msgHead+n <= core.MaxInlineMsg {
 		msg.Len, msg.Buf = uint16(msgHead+n), core.NoBuf
 		return b[msgHead:msgHead:core.MaxInlineMsg], nil
@@ -67,13 +70,14 @@ func frameMsg(pool core.BufPool, group uint64, kind byte, token uint64, n int, m
 	return pool.Bytes(buf)[:0:n], nil
 }
 
-// Peek is a message's group, kind and token, or false for one too short to hold them.
+// Peek is a message's group, kind and token, or false for one too short to hold them or of
+// another protocol.
 func Peek(msg *core.Msg) (group uint64, kind byte, token uint64, ok bool) {
 	in := msg.Inline()
-	if len(in) < msgHead {
+	if len(in) < msgHead || in[0] != core.ProtoGroup {
 		return 0, 0, 0, false
 	}
-	return le.Uint64(in), in[8], le.Uint64(in[9:]), true
+	return le.Uint64(in[1:]), in[kindAt], le.Uint64(in[kindAt+1:]), true
 }
 
 // msgBody is the body of a message of kind, aliasing msg or its pool buffer, or ErrMalformed.

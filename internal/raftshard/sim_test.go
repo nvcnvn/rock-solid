@@ -344,7 +344,7 @@ const (
 
 func (r *simReplica) sendLease(kind byte, to core.NodeID, id, run uint64, raw core.Tick, support uint64) {
 	a := core.Action{Kind: core.ActNetSend, Peer: to}
-	b := le.AppendUint64(nil, leaseGroup)
+	b := le.AppendUint64([]byte{core.ProtoGroup}, leaseGroup)
 	b = append(b, kind)
 	for _, v := range [...]uint64{id, run, uint64(raw), support} {
 		b = le.AppendUint64(b, v)
@@ -361,7 +361,7 @@ func (r *simReplica) lease(ctx *core.Context, ev *core.Event) bool {
 		r.holder.Resumed()
 		r.grantor.Resumed(r.rng.Uint64())
 		return false
-	case ev.Kind != core.EvNetRecv || ev.Msg.Buf != core.NoBuf || ev.Msg.Len != leaseFrameBytes || le.Uint64(ev.Msg.Body[:]) != leaseGroup:
+	case ev.Kind != core.EvNetRecv || ev.Msg.Buf != core.NoBuf || ev.Msg.Len != leaseFrameBytes || le.Uint64(ev.Msg.Body[1:]) != leaseGroup:
 		return false
 	}
 	b := ev.Msg.Body[kindBytes:]
@@ -536,7 +536,7 @@ func (c *simCluster) leaseReader(skip int) int {
 // again, so the vote may leave.
 func (r *simReplica) durableFor(ctx *core.Context, a *core.Action) error {
 	var m raftpb.Message
-	if a.Msg.Buf == core.NoBuf && le.Uint64(a.Msg.Body[:]) == leaseGroup {
+	if a.Msg.Buf == core.NoBuf && le.Uint64(a.Msg.Body[1:]) == leaseGroup {
 		return nil
 	}
 	if _, _, err := decode(ctx.Pool, &a.Msg, &m, &fortify{}); err != nil {

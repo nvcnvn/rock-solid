@@ -10,11 +10,12 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
 
-// A message is its group's ID and a kind byte, then for a Raft message the encoded
-// raftpb.Message inline when all of it fits in core.MaxInlineMsg bytes, or else the encoding's
-// length inline and the encoding in a pool buffer; a fortification message is fortBytes inline.
+// A message is core.ProtoGroup, its group's ID and a kind byte, then for a Raft message the
+// encoded raftpb.Message inline when all of it fits in core.MaxInlineMsg bytes, or else the
+// encoding's length inline and the encoding in a pool buffer; a fortification message is
+// fortBytes inline.
 const (
-	groupBytes = 8
+	groupBytes = 1 + 8
 	kindBytes  = groupBytes + 1
 	headBytes  = kindBytes + 4
 	fortBytes  = kindBytes + 5*8
@@ -48,8 +49,7 @@ type fortify struct {
 // encode frames m for group, reporting false when the pool has no buffer for it.
 func encode(pool core.BufPool, group uint64, m *raftpb.Message, msg *core.Msg) bool {
 	n := m.Size()
-	le.PutUint64(msg.Body[:], group)
-	msg.Body[groupBytes] = kindRaft
+	putHead(msg.Body[:], group, kindRaft)
 	if kindBytes+n <= core.MaxInlineMsg {
 		if _, err := m.MarshalTo(msg.Body[kindBytes : kindBytes+n]); err != nil {
 			panic(err)
@@ -69,6 +69,12 @@ func encode(pool core.BufPool, group uint64, m *raftpb.Message, msg *core.Msg) b
 	return true
 }
 
+func putHead(b []byte, group uint64, kind byte) {
+	b[0] = core.ProtoGroup
+	le.PutUint64(b[1:], group)
+	b[groupBytes] = kind
+}
+
 // encodeNode is a node's ID as a configuration change's context carries it.
 func encodeNode(n core.NodeID) []byte {
 	return le.AppendUint32(le.AppendUint32(nil, n.Node), n.Loop)
@@ -84,8 +90,7 @@ func decodeNode(b []byte) (core.NodeID, bool) {
 
 func encodeFortify(group uint64, f *fortify, msg *core.Msg) {
 	b := msg.Body[:fortBytes]
-	le.PutUint64(b, group)
-	b[groupBytes] = f.kind
+	putHead(b, group, f.kind)
 	for i, v := range [...]uint64{f.from, f.to, f.term, f.run, f.support} {
 		le.PutUint64(b[kindBytes+8*i:], v)
 	}
@@ -95,10 +100,10 @@ func encodeFortify(group uint64, f *fortify, msg *core.Msg) {
 // decode reads a message into m, or a fortification message into f, and returns its group and kind; it leaves msg's buffer with the caller.
 func decode(pool core.BufPool, msg *core.Msg, m *raftpb.Message, f *fortify) (uint64, byte, error) {
 	b := msg.Inline()
-	if len(b) < kindBytes {
+	if len(b) < kindBytes || b[0] != core.ProtoGroup {
 		return 0, 0, errMalformed
 	}
-	group, kind, body := le.Uint64(b), b[groupBytes], b[kindBytes:]
+	group, kind, body := le.Uint64(b[1:]), b[groupBytes], b[kindBytes:]
 	switch kind {
 	case kindRaft:
 	case kindFortify, kindFortified, kindMember, kindRemoved:

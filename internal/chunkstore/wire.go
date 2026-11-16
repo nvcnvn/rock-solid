@@ -7,8 +7,8 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
 
-// WireVersion is the first byte of every message.
-const WireVersion = 1
+// WireVersion is the first byte of every message, its protocol byte.
+const WireVersion = core.ProtoChunk
 
 var (
 	// ErrMalformed reports a message that does not decode.

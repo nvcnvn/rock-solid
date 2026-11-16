@@ -165,7 +165,7 @@ func (c *costNet) settle() {
 	for len(c.inbox)+len(c.flushing) > 0 {
 		for k := 0; k < len(c.inbox); k++ {
 			e := c.inbox[k]
-			g := int(le.Uint64(e.msg.Inline())) - 1
+			g := int(le.Uint64(e.msg.Inline()[1:])) - 1
 			c.event(g, e.to, core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: uint32(e.from)}, Msg: e.msg})
 		}
 		c.inbox = c.inbox[:0]

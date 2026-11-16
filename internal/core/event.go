@@ -99,6 +99,18 @@ func (m *Msg) SetInline(b []byte) error {
 // Inline returns the inline bytes.
 func (m *Msg) Inline() []byte { return m.Body[:m.Len] }
 
+// A message's first byte names its protocol, so one connection carries every protocol and each
+// decoder refuses another's message: a chunkstore frame begins with ProtoChunk, inline or, when it
+// has no inline bytes, in its buffer, and a Raft group's message, raftshard's or the sharded
+// API's, begins its inline bytes with ProtoGroup.
+const (
+	ProtoChunk byte = 1
+	ProtoGroup byte = 2
+)
+
+// Group reports whether m is a Raft group's message.
+func (m *Msg) Group() bool { return m.Len > 0 && m.Body[0] == ProtoGroup }
+
 // DiskError is the result of a disk action.
 type DiskError uint8
 
