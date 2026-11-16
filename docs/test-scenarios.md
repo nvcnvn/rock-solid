@@ -4263,7 +4263,7 @@ Results at this commit, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcro
 | `scripted-move-primary` | 39 | passes: a move to a new primary that holds Y, peering keeping Y, which every up member holds, over the removed disk | 2 |
 | `scripted-lister-restarted` | 56 | passes: a restart during recovery, the restarted primary's replay gating Y until its next decision | 2 |
 | `scripted-lister-rotated` | 51 | passes: a rotation during recovery, the new primary holding Y logged and peering keeping it over the member that lists the chunk | 2 |
-| 37 seeds | 463 to 952 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, own records released before their `Logged` reply at 8, 12, 23, 25 and 33 | 3 to 219 |
+| 37 seeds | 463 to 952 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31, 34 and 38, with own records released before their `Logged` reply at 8, 12, 23, 25 and 33 | 3 to 219 |
 | `primaries-2` | 677 | no verdict in 400 s and 2 GB, not rerun at this commit: one crash leaves 26 `mayfail` lines, each a free choice | 400 |
 | `primaries-18`, `primaries-35` | 729, 753 | no verdict in 1,200 s and 2 GB, not rerun at this commit: 18 has 25 `mayfail` and 45 `maydeliver` lines, 35 has 6 and 53. TLC ran each at about 300,000 states a minute for two minutes, to depth 491 and 439, then at 1,250 a minute with about 58,000 states queued, its 2 GB heap full | 1,200 |
 
