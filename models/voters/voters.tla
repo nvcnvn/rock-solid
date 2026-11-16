@@ -41,7 +41,6 @@ CONSTANTS
     LearnerFirst,       \* a planned replica joins as a learner (FALSE: as a voter)
     CatchUpFirst,       \* a learner is promoted only once it holds what the leader had
                         \* committed a heartbeat earlier (FALSE: at once)
-    OwnTermFirst,       \* a leader proposes a change only once it applied an entry of its term
     OneAtATime,         \* a leader proposes a change only once it applied the previous one
     JointQuorum,        \* a joint configuration needs a quorum of each half (FALSE: the incoming)
     CampaignApplied,    \* a replica campaigns only once it applied every configuration change
@@ -280,7 +279,7 @@ Apply(r) ==
 \* every entry it holds as such, so it proposes one only once it applied an entry of its term.
 CanChange(i) ==
     /\ Leads(i)
-    /\ OwnTermFirst => applied[i] > 0 /\ log[i][applied[i]].t = term[i]
+    /\ applied[i] > 0 /\ log[i][applied[i]].t = term[i]
     /\ OneAtATime => ConfIndex(log[i]) <= applied[i]
 
 Propose(i, c, promoted) ==
