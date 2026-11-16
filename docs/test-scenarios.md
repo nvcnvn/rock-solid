@@ -7832,7 +7832,7 @@ once.
 
 ## Control-plane host
 
-The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 257, fed events with no network.
+The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 257 unless a row says otherwise, each voter's log on a simulated disk whose actions run before a call returns, fed events with no network.
 
 | Input | Expected |
 | --- | --- |
@@ -7842,7 +7842,10 @@ The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 25
 | Reports from three nodes, then a session that never renews | Once it is fenced, every node that reported gets the table pushed with token 0; a heartbeat behind the version gets it again, one current does not |
 | A report naming node 4 from node 3's connection | Dropped: no push ever goes to node 4 at node 3's address |
 | A `Txn` to the group | Answered under its token |
-| A host on a group of two voters, or a joint configuration with two outgoing voters | Refused at construction (`ErrInMemoryVoters`): a voter whose log is in memory restarts empty and could vote twice in a term |
+| A `Txn` whose round's disk writes have not run, then run | No answer until the disk holds the round; then answered |
+| A session started and a pool committed, then a crash and a restart from the disk | The replay rebuilds the state: the table at the same epoch, a new session's ID past the old one's, the next pool's epoch past the last |
+| Three voters on disks of their own | They elect a leader, which answers a `Txn`; every voter applies it |
+| A disk write that fails under the leader's `Txn` | The host reports the error, drops its Control and answers nothing more |
 | A pool committed, then a node's table fetch, then heartbeats from a node behind the table and one current | The delta goes to every node that reported, the whole table to the node that fetched, and to the node behind alone, as the leader resends after a failover |
 | A heartbeat of a later term from another replica at the leading voter, then a fetch | The Control is dropped; the fetch is answered with the leader the replica knows |
 | A fetch at a leader whose lease does not run (a three-voter group with no grants) | No Control is read |

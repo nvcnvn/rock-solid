@@ -2,12 +2,13 @@ package meta
 
 import (
 	"cmp"
-	"errors"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
+	"github.com/nvcnvn/rock-solid/internal/raftshard"
 )
 
 // StepTimer is the timer a CtlHost steps its Control on, every StepInterval.
@@ -35,10 +36,20 @@ func (o *CtlHostOutput) Reset() {
 // replicas (reports, member timeouts, probe replies); it steps its Control every StepInterval and
 // after each answer, proposing what the Control asks, and sends the nodes that reported the
 // placement tables and session tables the Control hands out, a session table pushed with token 0.
-// Without a Control it answers a node's report or fetch with the leader it knows. A round of its
-// group is durable as soon as it is taken: its log lives in memory only.
+// Without a Control it answers a node's report or fetch with the leader it knows. It keeps its
+// group's log on a disk log of its own and tells the replica a round is durable only once the
+// disk is; a restart replays the log before the replica starts. A disk that fails stops it.
 type CtlHost struct {
 	shard *Shard
+	// cfg is the replica's settings until a restart's replay ends and the replica starts.
+	cfg  Config
+	disk *raftshard.Host
+	rec  *disklog.Recovery
+	lout disklog.Output
+	// seen counts lout's events taken.
+	seen  int
+	dones []raftshard.Done
+	err   error
 	sv    *Server
 	id    uint64
 	group uint64
@@ -56,46 +67,85 @@ type CtlHost struct {
 	stepAt  core.Tick
 }
 
-// ErrInMemoryVoters refuses a control-plane group of more than one voter while its log lives in
-// memory: a voter restarted empty could vote twice in a term and elect a second leader.
-var ErrInMemoryVoters = errors.New("meta: a control-plane group with its log in memory has more than one voter")
+// ctlOwner is the owner the group's blobs carry on the host's disk log.
+const ctlOwner = 1
 
 type heardNode struct {
 	at    core.NodeID
 	heard core.Tick
 }
 
-// NewCtlHost starts a host on the replica cfg sets up, refusing a group of more than one voter.
-func NewCtlHost(cfg Config) (*CtlHost, error) {
-	if _, cs, err := cfg.Raft.Storage.InitialState(); err != nil {
-		return nil, err
-	} else if len(cs.Voters) > 1 || len(cs.VotersOutgoing) > 1 {
-		return nil, ErrInMemoryVoters
-	}
-	s, err := NewShard(cfg)
+// FormatCtlHost starts a host on a new disk, which it formats with sb, its replica on cfg's
+// storage, the group's boot state.
+func FormatCtlHost(ctx *core.Context, cfg Config, lc disklog.Config, sb disklog.Superblock, out *CtlHostOutput) (*CtlHost, error) {
+	h := newCtlHost(cfg)
+	log, err := disklog.Format(ctx, lc, sb, 1, &h.lout)
 	if err != nil {
 		return nil, err
 	}
-	return &CtlHost{shard: s, sv: NewServer(), id: cfg.Raft.ID, group: cfg.Raft.Group}, nil
+	h.disk.Log = log
+	if err := h.start(ctx, out); err != nil {
+		return nil, err
+	}
+	h.after(ctx, out)
+	return h, nil
 }
 
-// Shard is the host's replica of the control-plane group.
+// OpenCtlHost starts recovering a host from its disk of diskBlocks blocks: the log's rounds
+// replay onto cfg's storage, the group's boot state as FormatCtlHost was given it, and the replica
+// starts once the replay ends.
+func OpenCtlHost(ctx *core.Context, cfg Config, lc disklog.Config, diskBlocks uint64, out *CtlHostOutput) (*CtlHost, error) {
+	h := newCtlHost(cfg)
+	rec, err := disklog.Recover(ctx, lc, diskBlocks, disklog.ModeOpen, 1, &h.lout)
+	if err != nil {
+		return nil, err
+	}
+	h.rec = rec
+	h.after(ctx, out)
+	return h, nil
+}
+
+func newCtlHost(cfg Config) *CtlHost {
+	h := &CtlHost{cfg: cfg, disk: raftshard.NewHost(nil), sv: NewServer(), id: cfg.Raft.ID, group: cfg.Raft.Group}
+	h.disk.Add(ctlOwner, cfg.Raft.Storage)
+	return h
+}
+
+// start starts the replica on what the log replayed, its clock and the step timer.
+func (h *CtlHost) start(ctx *core.Context, out *CtlHostOutput) error {
+	s, err := NewShard(h.cfg)
+	if err != nil {
+		return err
+	}
+	h.shard, h.cfg = s, Config{}
+	h.shard.Start(ctx, &h.sout)
+	h.arm(ctx, out)
+	return nil
+}
+
+// Err is why the host stopped for good, or nil.
+func (h *CtlHost) Err() error { return h.err }
+
+// Shard is the host's replica of the control-plane group, nil while a restart replays its log.
 func (h *CtlHost) Shard() *Shard { return h.shard }
 
 // Control is the leader's Control, or nil while the host does not lead with an entry of its term
 // applied.
 func (h *CtlHost) Control() *Control { return h.ctl }
 
-// Start starts the replica's clock and the step timer.
-func (h *CtlHost) Start(ctx *core.Context, out *CtlHostOutput) {
-	h.shard.Start(ctx, &h.sout)
-	h.arm(ctx, out)
-	h.after(ctx, out)
-}
-
-// OnEvent takes a message, a timer, a lost peer or a resume.
+// OnEvent takes a message, a timer, a disk completion, a lost peer or a resume. A host that
+// stopped, or replays its log, drops every message.
 func (h *CtlHost) OnEvent(ctx *core.Context, ev *core.Event, out *CtlHostOutput) {
 	switch {
+	case h.err != nil || h.shard == nil && ev.Kind != core.EvDiskDone:
+		if ev.Kind == core.EvNetRecv {
+			free(ctx, &ev.Msg)
+		}
+		return
+	case ev.Kind == core.EvDiskDone && h.rec != nil:
+		h.rec.OnEvent(ctx, ev, &h.lout)
+	case ev.Kind == core.EvDiskDone || ev.Kind == core.EvTimer && ev.Timer == disklog.TrimTimer:
+		h.disk.Log.OnEvent(ctx, ev, &h.lout)
 	case ev.Kind == core.EvNetRecv && ev.Msg.Group():
 		h.recvGroup(ctx, ev, out)
 	case ev.Kind == core.EvNetRecv && h.ctl != nil:
@@ -105,6 +155,7 @@ func (h *CtlHost) OnEvent(ctx *core.Context, ev *core.Event, out *CtlHostOutput)
 	case ev.Kind == core.EvTimer && ev.Timer == StepTimer:
 		if ctx.Now >= h.stepAt {
 			h.arm(ctx, out)
+			h.fail(h.disk.Retry(ctx, &h.lout), out)
 			h.step(ctx, out)
 		}
 	default:
@@ -262,14 +313,18 @@ func (h *CtlHost) push(ctx *core.Context, to core.NodeID, token uint64, t *chunk
 	}
 }
 
-// after makes each round durable at once, follows the replica's leadership, hands each answer to
-// the Txn's proposer, the Server or the Control, which steps again, and gathers the replica's
-// actions.
+// after takes the log's events, writes the replica's round to the log, follows the replica's
+// leadership, hands each answer to the Txn's proposer, the Server or the Control, which steps
+// again, and gathers the replica's and the log's actions.
 func (h *CtlHost) after(ctx *core.Context, out *CtlHostOutput) {
 	for {
-		for r := h.sout.Raft.Flush; r != 0; r = h.sout.Raft.Flush {
+		h.logEvents(ctx, out)
+		if r := h.sout.Raft.Flush; r != 0 && h.err == nil {
 			h.sout.Raft.Flush = 0
-			h.shard.Durable(ctx, r, &h.sout)
+			h.fail(h.disk.Write(ctx, ctlOwner, r, &h.sout.Raft.Round, &h.lout), out)
+		}
+		if h.shard == nil || h.err != nil {
+			break
 		}
 		h.lead(ctx, out)
 		if len(h.sout.Answers) == 0 {
@@ -286,7 +341,48 @@ func (h *CtlHost) after(ctx *core.Context, out *CtlHostOutput) {
 		}
 	}
 	out.Actions = append(out.Actions, h.sout.Raft.Actions...)
+	out.Actions = append(out.Actions, h.lout.Actions...)
 	h.sout.Reset()
+	h.lout.Reset()
+	h.seen = 0
+}
+
+// logEvents takes the log's events: a durable round goes to the replica, a restart's replay to
+// its storage, and the replica starts once the replay ends.
+func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
+	for ; h.seen < len(h.lout.Events) && h.err == nil; h.seen++ {
+		ev := h.lout.Events[h.seen]
+		var err error
+		switch ev.Kind {
+		case disklog.Durable:
+			h.dones, err = h.disk.Durable(ctx, &ev, &h.lout, h.dones[:0])
+			for _, d := range h.dones {
+				h.shard.Durable(ctx, d.Round, &h.sout)
+			}
+		case disklog.ManifestLoaded:
+			err = h.rec.Replay(ctx, &h.lout)
+		case disklog.Replayed:
+			err = h.disk.Replayed(&ev)
+		case disklog.Recovered:
+			var log *disklog.Log
+			if log, err = h.rec.Log(ctx); err == nil {
+				h.disk.Recovered(log)
+				h.rec = nil
+				err = h.start(ctx, out)
+			}
+		case disklog.Failed, disklog.InDoubt, disklog.RecoveryFailed:
+			err = ev.Err
+		}
+		h.fail(err, out)
+	}
+}
+
+// fail stops the host for good on err, a failed disk or a log that does not replay.
+func (h *CtlHost) fail(err error, out *CtlHostOutput) {
+	if err != nil && h.err == nil {
+		h.err, h.ctl = err, nil
+		out.Errs = append(out.Errs, err)
+	}
 }
 
 // lead drops the Control of a replica no longer leading its term, and reads one for a leader

@@ -2,7 +2,6 @@ package meta
 
 import (
 	"encoding/binary"
-	"errors"
 	"slices"
 	"testing"
 
@@ -10,6 +9,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
@@ -21,60 +21,156 @@ const hostGroup = 257
 
 var hostNode = core.NodeID{Node: 3, Loop: 1}
 
-// hostRun drives a single-voter control-plane host as its loop would, on node 0.
-type hostRun struct {
-	t    *testing.T
-	h    *CtlHost
-	pool *sim.Pool
-	now  core.Tick
-	out  CtlHostOutput
-	// sent is every message the host sent, by peer, decoded later.
-	sent []core.Action
+// voterNode is the node of the voter whose ID is id, well past the storage nodes the tests name.
+func voterNode(id uint64) core.NodeID { return core.NodeID{Node: 100 + uint32(id)} }
+
+// ctlGeometry is a disk of 64 segments of 1 MiB.
+var ctlGeometry = disklog.Geometry{SegmentBlocks: 256, SegmentCount: 64}
+
+func ctlLogConfig() disklog.Config {
+	cfg := disklog.DefaultConfig()
+	cfg.MaxRecordBytes, cfg.ReadDepth, cfg.NoReserve, cfg.NoTrim, cfg.Check = 64<<10, 4, true, true, true
+	return cfg
 }
 
-func newHostRun(t *testing.T) *hostRun {
-	cfg := Config{Raft: raftshard.Config{Group: hostGroup, ID: 1, Storage: bootStorage(t, raftpb.ConfState{Voters: []uint64{1}}), Timer: 1,
-		Peers: []raftshard.Peer{{ID: 1}}, Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, 1, lease.Time{})},
-		Tree: lsm.Config{MaxPiece: 64 << 10, Check: true}}
-	h, err := NewCtlHost(cfg)
-	if err != nil {
-		t.Fatal(err)
+// hostRun drives a control-plane group of hosts, each on a disk of its own, as their loops would:
+// a call into a host runs every disk action and voter message it causes before it returns. Host
+// 0 is h, and the storage nodes' messages go to it.
+type hostRun struct {
+	t     *testing.T
+	h     *CtlHost
+	hs    []*CtlHost
+	disks []*sim.Disk
+	pool  *sim.Pool
+	now   core.Tick
+	// out gathers what the hosts handed out during the last call; its actions are in sent and work.
+	out CtlHostOutput
+	// sent is every message a host sent outside the group, decoded later.
+	sent []core.Action
+	work []hostWork
+	// failing lets a host hand out errors, which out gathers, without failing the test.
+	failing bool
+}
+
+// hostWork is a disk action of host at, or a message from host from to host at.
+type hostWork struct {
+	from, at int
+	a        core.Action
+}
+
+func newHostRun(t *testing.T) *hostRun { return newHostGroup(t, 1) }
+
+func newHostGroup(t *testing.T, voters int) *hostRun {
+	r := &hostRun{t: t, hs: make([]*CtlHost, voters), pool: sim.NewPool(16<<20, 0), now: 5_000_000}
+	for i := range voters {
+		r.disks = append(r.disks, sim.NewDisk(ctlGeometry.DiskBlocks()))
+		sb := disklog.Superblock{LogID: uint64(i) + 1, Geometry: ctlGeometry}
+		r.do(i, func(ctx *core.Context, out *CtlHostOutput) {
+			h, err := FormatCtlHost(ctx, r.config(i), ctlLogConfig(), sb, out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.hs[i] = h
+		})
 	}
-	r := &hostRun{t: t, h: h, pool: sim.NewPool(1<<20, 0), now: 5_000_000}
-	r.call(func(ctx *core.Context, out *CtlHostOutput) { h.Start(ctx, out) })
+	r.h = r.hs[0]
+	r.drain()
 	return r
 }
 
-func (r *hostRun) call(f func(ctx *core.Context, out *CtlHostOutput)) *CtlHostOutput {
+func (r *hostRun) config(i int) Config {
+	cs := raftpb.ConfState{}
+	var peers []raftshard.Peer
+	for id := range uint64(len(r.hs)) {
+		cs.Voters = append(cs.Voters, id+1)
+		peers = append(peers, raftshard.Peer{ID: id + 1, Node: voterNode(id + 1)})
+	}
+	return Config{Raft: raftshard.Config{Group: hostGroup, ID: uint64(i) + 1, Storage: bootStorage(r.t, cs), Seed: uint64(i), Timer: 1, Peers: peers,
+		Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, uint64(i)+1, lease.Time{})},
+		Tree: lsm.Config{MaxPiece: 64 << 10, Check: true}}
+}
+
+// restart crashes host i, losing what its disk did not flush, and recovers it from its disk.
+func (r *hostRun) restart(i int) {
+	r.t.Helper()
+	r.disks[i].Crash(func(int, core.LBA) bool { return false })
+	r.work = slices.DeleteFunc(r.work, func(w hostWork) bool { return w.at == i || w.from == i })
+	r.do(i, func(ctx *core.Context, out *CtlHostOutput) {
+		h, err := OpenCtlHost(ctx, r.config(i), ctlLogConfig(), ctlGeometry.DiskBlocks(), out)
+		if err != nil {
+			r.t.Fatal(err)
+		}
+		r.hs[i] = h
+	})
+	r.h = r.hs[0]
+	r.drain()
+}
+
+// do calls into host i and sorts what it hands out.
+func (r *hostRun) do(i int, f func(ctx *core.Context, out *CtlHostOutput)) {
 	r.t.Helper()
 	ctx := core.Context{Now: r.now, Raw: r.now, Pool: r.pool}
-	r.out.Reset()
-	f(&ctx, &r.out)
-	for _, err := range r.out.Errs {
-		r.t.Fatal(err)
-	}
-	for _, a := range r.out.Actions {
-		if a.Kind == core.ActNetSend {
-			r.sent = append(r.sent, a)
+	var o CtlHostOutput
+	f(&ctx, &o)
+	for _, err := range o.Errs {
+		if !r.failing {
+			r.t.Fatal(err)
 		}
 	}
+	r.out.Errs = append(r.out.Errs, o.Errs...)
+	r.out.Started = append(r.out.Started, o.Started...)
+	for _, a := range o.Actions {
+		switch {
+		case a.Kind == core.ActNetSend && a.Peer.Node >= voterNode(1).Node:
+			r.work = append(r.work, hostWork{from: i, at: int(a.Peer.Node - voterNode(1).Node), a: a})
+		case a.Kind == core.ActNetSend:
+			r.sent = append(r.sent, a)
+		case a.Kind != core.ActSetTimer:
+			r.work = append(r.work, hostWork{from: i, at: i, a: a})
+		}
+	}
+}
+
+// drain runs the disk actions and delivers the voters' messages, oldest first, until none is left.
+func (r *hostRun) drain() {
+	r.t.Helper()
+	for len(r.work) > 0 {
+		w := r.work[0]
+		r.work = r.work[1:]
+		ev := core.Event{Kind: core.EvNetRecv, Peer: voterNode(uint64(w.from) + 1), Msg: w.a.Msg}
+		if w.a.Kind != core.ActNetSend {
+			ev = r.disks[w.at].Execute(r.pool, &w.a)
+		}
+		r.do(w.at, func(ctx *core.Context, out *CtlHostOutput) { r.hs[w.at].OnEvent(ctx, &ev, out) })
+	}
+}
+
+func (r *hostRun) recv(from core.NodeID, msg core.Msg) *CtlHostOutput { return r.recvAt(0, from, msg) }
+
+// recvAt hands host i a message from a storage node.
+func (r *hostRun) recvAt(i int, from core.NodeID, msg core.Msg) *CtlHostOutput {
+	r.t.Helper()
+	r.out.Reset()
+	r.do(i, func(ctx *core.Context, out *CtlHostOutput) {
+		r.hs[i].OnEvent(ctx, &core.Event{Kind: core.EvNetRecv, Peer: from, Msg: msg}, out)
+	})
+	r.drain()
 	return &r.out
 }
 
-func (r *hostRun) event(ev core.Event) *CtlHostOutput {
-	return r.call(func(ctx *core.Context, out *CtlHostOutput) { r.h.OnEvent(ctx, &ev, out) })
-}
-
-func (r *hostRun) recv(from core.NodeID, msg core.Msg) *CtlHostOutput {
-	return r.event(core.Event{Kind: core.EvNetRecv, Peer: from, Msg: msg})
-}
-
-// run moves the clock on by d, 10 ms at a time, firing the group's timer and the step timer.
+// run moves the clock on by d, 10 ms at a time, firing every host's group timer and step timer.
 func (r *hostRun) run(d core.Tick) {
+	r.out.Reset()
 	for end := r.now + d; r.now < end; {
 		r.now += raftshard.TickInterval
-		r.event(core.Event{Kind: core.EvTimer, Timer: 1})
-		r.event(core.Event{Kind: core.EvTimer, Timer: StepTimer})
+		for i, h := range r.hs {
+			for _, timer := range []core.TimerID{1, StepTimer} {
+				r.do(i, func(ctx *core.Context, out *CtlHostOutput) {
+					h.OnEvent(ctx, &core.Event{Kind: core.EvTimer, Timer: timer}, out)
+				})
+				r.drain()
+			}
+		}
 	}
 }
 
@@ -219,6 +315,7 @@ func TestATxnToTheGroupIsAnswered(t *testing.T) {
 // and a fetch is answered with no leader known, so the node moves to its next address.
 func TestAHostWithNoLeaderFreesFramesAndRedirectsAFetch(t *testing.T) {
 	r := newHostRun(t)
+	live := r.pool.Live()
 	var m core.Msg
 	if err := chunkstore.Attach(r.pool, &m, make([]byte, core.MaxInlineMsg+1), core.NoBuf); err != nil {
 		t.Fatal(err)
@@ -228,24 +325,139 @@ func TestAHostWithNoLeaderFreesFramesAndRedirectsAFetch(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.recv(hostNode, m)
-	if r.h.Control() != nil || len(r.sent) != 1 || r.pool.Live() != 0 {
-		t.Fatalf("sent %v, %d buffers live", r.sent, r.pool.Live())
+	if r.h.Control() != nil || len(r.sent) != 1 || r.pool.Live() != live {
+		t.Fatalf("sent %v, %d buffers live, %d before", r.sent, r.pool.Live(), live)
 	}
 	if _, known, err := DecodeLeader(r.pool, &r.sent[0].Msg); err != nil || known {
 		t.Fatalf("answered a leader known %v: %v", known, err)
 	}
 }
 
-// A replica whose log lives in memory comes back empty from a restart and could vote twice in a
-// term, so a host refuses a group of more than one voter.
-func TestAHostRefusesMoreThanOneVoter(t *testing.T) {
-	for _, cs := range []raftpb.ConfState{{Voters: []uint64{1, 2}}, {Voters: []uint64{1}, VotersOutgoing: []uint64{1, 2}}} {
-		cfg := Config{Raft: raftshard.Config{Group: hostGroup, ID: 1, Storage: bootStorage(t, cs), Timer: 1,
-			Peers: []raftshard.Peer{{ID: 1}, {ID: 2}}, Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, 1, lease.Time{})},
-			Tree: lsm.Config{MaxPiece: 64 << 10, Check: true}}
-		if _, err := NewCtlHost(cfg); !errors.Is(err, ErrInMemoryVoters) {
-			t.Fatalf("voters %v: %v", cs, err)
+// A restart of the lone voter replays its group's log from its disk: the placement table it
+// committed is there, a new session gets a later ID than any handed out before, and the next
+// placement epoch follows the last.
+func TestARestartedHostKeepsEveryCommittedTxn(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.report(&NodeReport{Node: hostNode.Node})
+	r.h.Control().StartSession(hostNode.Node, 1)
+	if err := r.h.Control().SetPool(1, spec(1, 16), disks(2)); err != nil {
+		t.Fatal(err)
+	}
+	var started []SessionStart
+	for range 10 {
+		r.run(StepInterval)
+		started = append(started, r.out.Started...)
+	}
+	epoch := r.h.Control().Table().Epoch
+	if len(started) != 1 || epoch == 0 {
+		t.Fatalf("started %+v, epoch %d", started, epoch)
+	}
+	r.restart(0)
+	r.lead()
+	c := r.h.Control()
+	if got := c.Table(); got.Epoch != epoch || len(got.Pools) != 1 {
+		t.Fatalf("after a restart the table is at epoch %d with %d pools, was %d with 1", got.Epoch, len(got.Pools), epoch)
+	}
+	r.report(&NodeReport{Node: hostNode.Node})
+	c.StartSession(hostNode.Node, 2)
+	if err := c.SetPool(2, spec(1, 16), disks(2)); err != nil {
+		t.Fatal(err)
+	}
+	var again []SessionStart
+	for range 10 {
+		r.run(StepInterval)
+		again = append(again, r.out.Started...)
+	}
+	if len(again) != 1 || again[0].ID <= started[0].ID {
+		t.Fatalf("after a restart started %+v; before, %+v", again, started)
+	}
+	if c.Table().Epoch <= epoch {
+		t.Fatalf("after a restart a pool committed at epoch %d, not past %d", c.Table().Epoch, epoch)
+	}
+}
+
+// A Txn is answered only once the disk holds its round.
+func TestATxnIsAnsweredOnlyOnceItsRoundIsOnDisk(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.sent = r.sent[:0]
+	var m core.Msg
+	tx := Txn{Ops: []Op{Put(attr(1, 2, 1), b("v"))}}
+	if err := EncodeTxn(r.pool, hostGroup, 9, &tx, &m); err != nil {
+		t.Fatal(err)
+	}
+	r.do(0, func(ctx *core.Context, out *CtlHostOutput) {
+		r.h.OnEvent(ctx, &core.Event{Kind: core.EvNetRecv, Peer: hostNode, Msg: m}, out)
+	})
+	if len(r.sent) != 0 || len(r.work) == 0 {
+		t.Fatalf("before its disk writes ran the Txn got %+v, with %d disk actions waiting", r.sent, len(r.work))
+	}
+	r.drain()
+	if len(r.sent) != 1 {
+		t.Fatalf("once its round is on disk the Txn got %+v", r.sent)
+	}
+}
+
+// Three voters, each on its own disk log, elect a leader and commit a Txn on every replica.
+func TestSeveralVotersOnDiskLogsElectAndCommit(t *testing.T) {
+	r := newHostGroup(t, 3)
+	leader := -1
+	for range 500 {
+		r.run(raftshard.TickInterval)
+		for i, h := range r.hs {
+			if h.Shard().Raft().Leader() == uint64(i)+1 {
+				leader = i
+			}
 		}
+		if leader >= 0 {
+			break
+		}
+	}
+	if leader < 0 {
+		t.Fatal("three voters elected no leader")
+	}
+	var m core.Msg
+	tx := Txn{Ops: []Op{Put(attr(1, 2, 1), b("v"))}}
+	if err := EncodeTxn(r.pool, hostGroup, 9, &tx, &m); err != nil {
+		t.Fatal(err)
+	}
+	r.recvAt(leader, hostNode, m)
+	var a Answer
+	if len(r.sent) != 1 || DecodeAnswer(r.pool, &r.sent[0].Msg, &a) != nil || a.Token != 9 || a.Err != nil {
+		t.Fatalf("answered %+v: %+v", r.sent, a)
+	}
+	r.run(raftshard.TickInterval * 20)
+	want := r.hs[leader].Shard().State().Applied()
+	for i, h := range r.hs {
+		if got := h.Shard().State().Applied(); got != want {
+			t.Errorf("voter %d applied through %d, the leader through %d", i+1, got, want)
+		}
+	}
+}
+
+// A disk that fails stops the host: it reports the error, drops its Control and takes nothing more.
+func TestAHostWhoseDiskFailsStops(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.disks[0].Inject(sim.Fault{Effect: sim.FailIO, When: sim.OnKind(core.ActDiskWrite)})
+	r.failing = true
+	var m core.Msg
+	tx := Txn{Ops: []Op{Put(attr(1, 2, 1), b("v"))}}
+	if err := EncodeTxn(r.pool, hostGroup, 9, &tx, &m); err != nil {
+		t.Fatal(err)
+	}
+	r.sent = r.sent[:0]
+	out := r.recv(hostNode, m)
+	if len(out.Errs) == 0 || r.h.Err() == nil || r.h.Control() != nil {
+		t.Fatalf("a failed write gave errors %v, host error %v", out.Errs, r.h.Err())
+	}
+	if err := EncodeTxn(r.pool, hostGroup, 10, &tx, &m); err != nil {
+		t.Fatal(err)
+	}
+	r.recv(hostNode, m)
+	if len(r.sent) != 0 {
+		t.Fatalf("a stopped host sent %+v", r.sent)
 	}
 }
 
