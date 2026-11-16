@@ -167,14 +167,20 @@ func (g *gen) crash(n int) {
 	g.line(`k |-> "restart", n |-> %d`, n)
 }
 
-// repliedLater reports whether node n, as PG f's primary, took its own disk's peering reply for an interval after iv and has not decided it: a recovery write of iv that lands now changes no list that decision reads.
+// repliedLater reports whether node n, as PG f's primary, took its own disk's peering reply for an interval after iv and after every interval it decided, and has not decided it: a recovery write of iv that lands now changes no list that decision reads. A reply of an interval a later decision passed over is no longer read.
 func (g *gen) repliedLater(n int, f, iv uint64) bool {
 	own, ok := g.nodeDisk[n]
 	if !ok {
 		own = uint64(n)
 	}
+	after := iv
+	for k := range g.decisions {
+		if k[0] == uint64(n) && k[1] == f {
+			after = max(after, k[2])
+		}
+	}
 	for k, got := range g.replies {
-		if k[0] != uint64(n) || k[1] != f || k[2] <= iv || g.decisions[k] {
+		if k[0] != uint64(n) || k[1] != f || k[2] <= after {
 			continue
 		}
 		for d := range got {
@@ -604,8 +610,13 @@ func (g *gen) run(recs []trace.Record) {
 			g.memberOpen[n] = dropVersion(g.memberOpen[n], r.Fields[0], r.Fields[1])
 			g.line(`k |-> "%s", n |-> %d, c |-> %d, v |-> %s`, kind, n, g.chunk(r.Fields[0]), ver(r.Fields[1]))
 		case trace.OutRecoverOrder:
-			g.orderAt[[2]uint64{r.Fields[0], r.Fields[2]}] = len(g.lines)
-			g.line(`k |-> "recoverorder", n |-> %d, c |-> %d, s |-> %d, iv |-> %d`, n, g.chunk(r.Fields[0]), g.source(r.Fields[1]), r.Fields[2])
+			s, at := g.source(r.Fields[1]), len(g.lines)
+			// A source formatted since answered the read before, and the spec's Recover takes the read with the write.
+			if p, ok := g.formatAt[s]; ok {
+				at = p
+			}
+			g.lineAt(at, `k |-> "recoverorder", n |-> %d, c |-> %d, s |-> %d, iv |-> %d`, n, g.chunk(r.Fields[0]), s, r.Fields[2])
+			g.orderAt[[2]uint64{r.Fields[0], r.Fields[2]}] = at
 		case trace.OutRecovering:
 			g.recovering[n] = append(g.recovering[n], [3]uint64{r.Fields[0], g.source(r.Fields[1]), r.Fields[2]})
 		case trace.OutRecovered:
