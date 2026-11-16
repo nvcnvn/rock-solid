@@ -26,15 +26,18 @@ const (
 // node, planDelay later the shard map's plan names the fourth node's replica in its place, and the
 // cut-off replica is reconnected, in half the runs up to a second after the plan, mid-swap, and
 // otherwise a second after a replica applies the configuration without it; either way it must
-// learn that it was removed.
+// learn that it was removed. With outgoing, the leader that proposes the swap, once the cut-off
+// replica is reconnected, hands that replica its leadership, and every raft message the cut-off
+// replica sends that carries the commit of the leave of the joint configuration is lost, so no
+// follower learns from it that its removal committed.
 type replacement struct {
-	crash, pauseD, early, cutLeader bool
-	cutAt, planDelay, healDelay     core.Tick
-	dead                            int
-	planAt                          core.Tick
-	plan                            []Peer
-	swappedAt                       core.Tick
-	healed                          bool
+	crash, pauseD, early, cutLeader, outgoing bool
+	cutAt, planDelay, healDelay               core.Tick
+	dead                                      int
+	planAt                                    core.Tick
+	plan                                      []Peer
+	swappedAt                                 core.Tick
+	healed                                    bool
 	// removed is whether the cut-off replica reported itself removed, sinceSwap the first value
 	// proposed after the swap, and caughtUp whether the fourth replica applied one from then on.
 	removed   bool
@@ -45,6 +48,13 @@ type replacement struct {
 	last, gap core.Tick
 	// commits is, per replica, its commit index after each pass of the last two heartbeats.
 	commits [simNodes + 1][]commitAt
+	// swapBy is the leader that proposed the swap, or -1, handed whether it handed its leadership
+	// on, leave the index of the leave the cut-off replica sent, and leadRemoved whether the cut-off
+	// replica applied its removal leading.
+	swapBy      int
+	handed      bool
+	leave       uint64
+	leadRemoved bool
 }
 
 type commitAt struct {
@@ -77,9 +87,9 @@ func faults() sim.Settings {
 // newReplaceCluster runs a replacement cut 2 to 4 s in and planned up to 2 s later; with crash the first leader to apply crashAt values also crashes, and with pauseD the fourth node is suspended for 2 s once the plan names it.
 func newReplaceCluster(seed uint64, p plants, set sim.Settings, crash, pauseD bool) *simCluster {
 	rng := core.NewRand(seed ^ 0x7e91ace)
-	return newCluster(seed, p, set, &replacement{crash: crash, pauseD: pauseD, dead: -1,
+	return newCluster(seed, p, set, &replacement{crash: crash, pauseD: pauseD, dead: -1, swapBy: -1,
 		cutAt: 2_000_000 + core.Tick(rng.Below(2_000_001)), planDelay: core.Tick(rng.Below(2_000_001)),
-		early: rng.Chance(1, 2), healDelay: core.Tick(rng.Below(1_000_001)), cutLeader: crash && rng.Chance(1, 2)}, nil)
+		early: rng.Chance(1, 2), healDelay: core.Tick(rng.Below(1_000_001)), cutLeader: crash && rng.Chance(1, 2), outgoing: rng.Chance(1, 2)}, nil)
 }
 
 // replace moves the replacement on after a step: cut a follower off, hand every replica the plan, reconnect the removed one.
@@ -113,6 +123,12 @@ func (c *simCluster) replace() {
 		p.healed = true
 		for x := range uint32(len(c.reps)) {
 			c.s.Heal(uint32(p.dead), x)
+		}
+	}
+	if p.swapBy >= 0 && p.healed && !p.handed {
+		p.handed = true
+		if nd := c.s.Node(uint32(p.swapBy)); c.reps[p.swapBy].leads && nd.Up() && !nd.Paused() {
+			c.transfer(p.swapBy, uint64(p.dead)+1)
 		}
 	}
 	if p.dead >= 0 && !p.healed {
@@ -157,6 +173,9 @@ func (c *simCluster) replaced(r *simReplica, st *raft.BasicStatus) {
 			if e.Type != raftpb.EntryConfChangeV2 || cc.Unmarshal(e.Data) != nil {
 				continue
 			}
+			if p.outgoing && p.swapBy < 0 && len(cc.Changes) == 2 {
+				p.swapBy = r.id
+			}
 			for _, ch := range cc.Changes {
 				if ch.Type != raftpb.ConfChangeAddNode || !slices.Contains(r.s.conf.Learners, ch.NodeID) {
 					continue
@@ -172,6 +191,7 @@ func (c *simCluster) replaced(r *simReplica, st *raft.BasicStatus) {
 			c.removed = fmt.Errorf("replica %d, never removed, reported itself removed", r.id)
 		}
 		p.removed = p.removed || r.id == p.dead
+		p.leadRemoved = p.leadRemoved || r.id == p.dead && st.RaftState == raft.StateLeader
 	}
 	if p.plan != nil && p.swappedAt == 0 && len(r.s.conf.VotersOutgoing) == 0 && slices.Equal(sorted(r.s.conf.Voters), planned(p.plan)) {
 		p.swappedAt, p.sinceSwap = now, c.next
@@ -183,6 +203,25 @@ func (c *simCluster) replaced(r *simReplica, st *raft.BasicStatus) {
 			panic(err)
 		}
 	}
+}
+
+// lost reports whether a, sent by the cut-off replica, is lost to the outgoing fault: a raft
+// message carrying the commit of the leave of the joint configuration.
+func (p *replacement) lost(ctx *core.Context, a *core.Action) bool {
+	if !p.outgoing || a.Kind != core.ActNetSend || a.Msg.Buf == core.NoBuf && le.Uint64(a.Msg.Body[:]) == leaseGroup {
+		return false
+	}
+	var m raftpb.Message
+	if _, kind, err := decode(ctx.Pool, &a.Msg, &m, &fortify{}); err != nil || kind != kindRaft {
+		return false
+	}
+	for _, e := range m.Entries {
+		var cc raftpb.ConfChangeV2
+		if p.leave == 0 && e.Type == raftpb.EntryConfChangeV2 && cc.Unmarshal(e.Data) == nil && len(cc.Changes) == 0 {
+			p.leave = e.Index
+		}
+	}
+	return p.leave != 0 && m.Commit >= p.leave
 }
 
 func planned(plan []Peer) []uint64 {
@@ -268,4 +307,46 @@ func TestPromotingALearnerBeforeItCaughtUpBreaksTheInvariant(t *testing.T) {
 		}
 	}
 	t.Fatal("20 seeds promoting learners at once broke no invariant")
+}
+
+// outgoingCluster is seed's replacement run with the outgoing fault.
+func outgoingCluster(seed uint64, p plants) *simCluster {
+	c := newReplaceCluster(seed, p, faults(), true, false)
+	c.rep.outgoing = true
+	return c
+}
+
+// The voter model's neg-no-support-ask: followers that never ask the node of the leader they
+// support whether its replica still exists keep supporting it once it applied its own removal
+// leading and its commit of the leave was lost, so no follower ever leads again; the same seed
+// finishes when they ask.
+func TestFollowersThatNeverAskKeepARemovedLeader(t *testing.T) {
+	for seed := range uint64(20) {
+		c := outgoingCluster(seed, plants{noSupportAsk: true}).run(t, seed)
+		if p := c.rep; c.done || p.leave == 0 || !p.leadRemoved {
+			continue
+		}
+		if !outgoingCluster(seed, plants{}).run(t, seed).done {
+			t.Fatalf("seed %d: the run does not finish when followers ask", seed)
+		}
+		return
+	}
+	t.Fatal("20 seeds whose followers never ask all elected a leader after a leader applied its own removal")
+}
+
+// The voter model's neg-removed-keeps-lease: a leader that keeps serving lease reads after it
+// applied its own removal overlaps the leader its old followers elect.
+func TestARemovedLeaderThatKeepsReadingBreaksTheLeaseInvariant(t *testing.T) {
+	for seed := range uint64(20) {
+		c := outgoingCluster(seed, plants{removedKeepsLease: true})
+		c.inv.Only(invOneLeaseReader)
+		for c.s.Time() < simRunFor && c.s.Step() {
+			c.pause()
+			if c.inv.Check() != nil {
+				return
+			}
+			c.after(t, seed)
+		}
+	}
+	t.Fatal("20 seeds whose removed leader keeps serving lease reads broke no lease reader invariant")
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"testing"
 
 	"go.etcd.io/raft/v3"
@@ -458,6 +459,17 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 		if a := &r.out.Actions[i]; a.Kind == core.ActNetSend && simMsgType(&a.Msg) == uint64(raftpb.MsgTimeoutNow) {
 			c.timeoutNows++
 		}
+	}
+	if p := c.rep; p != nil && r.id == p.dead {
+		r.out.Actions = slices.DeleteFunc(r.out.Actions, func(a core.Action) bool {
+			if !p.lost(ctx, &a) {
+				return false
+			}
+			if a.Msg.Buf != core.NoBuf {
+				ctx.Pool.Free(a.Msg.Buf)
+			}
+			return true
+		})
 	}
 	acts = append(acts, r.out.Actions...)
 	if r.out.Flush != 0 && c.disk == nil {
