@@ -163,7 +163,8 @@ func (l *Loop) logOf(io core.IOID) *Log {
 	return nil
 }
 
-// AddShard puts s on l, its records going to lg; it runs before l and lg's owner start.
+// AddShard puts s on l, its records going to lg. When s is l's first shard on lg it makes their
+// handoff, so it runs before l and lg's owner start; otherwise it runs on l.
 func (l *Loop) AddShard(s Shard, lg *Log) ShardID {
 	h := lg.handoffs[l.cfg.ID]
 	if h == nil {
