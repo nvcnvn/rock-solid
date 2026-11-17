@@ -2930,9 +2930,10 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
   runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
   they take.
-- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 85,400 seeds in about
-  899 s, building the test binaries included (the two voter-replacement tests, the disk-log
-  crash run and the two shard state machine tests timed alone and added). On 4 processes the largest process peaked at 528 MiB
+- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 85,408 seeds in about
+  1,158 s, building the test binaries included (the two voter-replacement tests, the disk-log
+  crash run, the two shard state machine tests and the write admission run timed alone and
+  added). On 4 processes the largest process peaked at 528 MiB
   resident (an `internal/lsm` metamorphic shard), all four at 1.9 GiB:
 
   | Test | Seeds | Time |
@@ -2966,6 +2967,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/chunkstore` `TestNoPGServesReadsFromTwoPrimaries` | 500 | 35 s |
   | `internal/chunkstore` `TestWritesPassTheWriteLimitOnlyWhereAdmitted` | 200 | 94 s |
   | `internal/chunkstore` `TestTheDetectorMarksAFailedDiskDown` | 500 | 45 s |
+  | `internal/chunkstore` `TestWriteAdmissionHoldsAt90And95PercentFull` | 8 | 259 s |
 
 - A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
   under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
