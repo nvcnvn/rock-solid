@@ -4203,7 +4203,10 @@ next milestone's run, which is also the twins' first.
 | Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 20 | 2,623 | 7 s, 1 worker |
 | Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 22 | 73,752 | 210 s, 1 worker |
 | Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 21 | 256,774 | 103 s, 1 worker |
+| Voter replacement | `ci-halt` | [Voter replacement model](#voter-replacement-model) | 21 | 849,426 | 117 s |
+| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 20 | 960,236 | 202 s |
 | Voter replacement | `deep-live` | [Voter replacement model](#voter-replacement-model) | 27 | 57,229 | 161 s, 1 worker |
+| Voter replacement | `deep-restart` | [Voter replacement model](#voter-replacement-model) | 20 | 2,973,820 | 473 s |
 | Epoch change | `heavy-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,577 s |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |
