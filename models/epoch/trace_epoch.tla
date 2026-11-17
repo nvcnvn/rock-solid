@@ -121,6 +121,14 @@ RecoveredLate(l) ==
     /\ IvAt(l.n, ChunkPG[l.c]) > l.iv
     /\ miss[ddisk[l.n]][l.c] # NoMiss
 
+\* A crash loses a suffix of a disk's log in LSN order, and a primary submits its
+\* own records in the order it orders them, so the mayfail lines, newest first,
+\* lose a prefix of themselves: a line loses its version only if the one before
+\* lost its own.
+LostAbove(l) ==
+    LET p == Trace[line - 1]
+    IN line = 1 \/ p.k # "mayfail" \/ p.n # l.n \/ p.v \notin dlog[ddisk[l.n]][p.c]
+
 RecoverLine(l) ==
     /\ (l.s = 0) = (miss[ddisk[l.n]][l.c] = 0)
     /\ RecoverFrom(l.l, ChunkPG[l.c], l.c, ddisk[l.n], IF l.s = 0 THEN ddisk[l.n] ELSE l.s)
@@ -160,7 +168,8 @@ Line(l) ==
             IF [c |-> l.c, v |-> l.v] \in failed[m.to] THEN UNCHANGED vars ELSE GoneRefuses(m)
     \/ /\ l.k = "mayfail"
        /\ \/ UNCHANGED vars
-          \/ \E r \in {x \in pend : x.c = l.c /\ x.v = l.v} : OwnFail(l.n, r)
+          \/ /\ LostAbove(l)
+             /\ \E r \in {x \in pend : x.c = l.c /\ x.v = l.v} : OwnFail(l.n, r)
     \/ /\ l.k = "restart"
        /\ Restart(l.n)
     \/ /\ l.k = "format"

@@ -367,3 +367,77 @@ func crashEveryAction(t *testing.T, cfg Config, geo *disklog.Geometry, workload 
 		}
 	}
 }
+
+// [property] A primary's own records survive a crash as a prefix of the order its store ordered
+// them in, across chunks: gated writes of two chunks, three rounds in flight, crashed at every action
+// with no unflushed block landing, each of four seeded halves, and all of them, keep no version
+// ordered after one that was lost. The epoch model's trace mapping rests on it: a crash's mayfail
+// lines lose only a prefix of themselves, newest first.
+func TestACrashKeepsAPrefixOfTheOrderedVersions(t *testing.T) {
+	const writes = 12
+	cfg := crashConfig()
+	cfg.Log.CommitDepth = 3
+	var ids []uint64
+	workload := func(h *harness) {
+		for i := range writes {
+			if id := h.gated(crashChunks[i%2], 0, fill(core.BlockSize, byte(i+1)), 4); len(ids) < writes {
+				ids = append(ids, id)
+			}
+			if i%3 == 2 {
+				h.step()
+			}
+		}
+		h.settle()
+	}
+	full := newHarness(t, cfg)
+	workload(full)
+	if len(full.orderedIDs) != writes {
+		t.Fatalf("%d of %d writes ordered", len(full.orderedIDs), writes)
+	}
+	var split int
+	for k := 0; k <= full.executed; k++ {
+		for landing := range 6 {
+			h := newHarness(t, cfg)
+			h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
+			h.crashAt = k
+			func() {
+				defer func() {
+					if r := recover(); r != nil && r != errCrash {
+						panic(r)
+					}
+				}()
+				workload(h)
+			}()
+			switch landing {
+			case 0:
+				h.disk.Crash(func(int, core.LBA) bool { return false })
+			case 5:
+				h.disk.Crash(func(int, core.LBA) bool { return true })
+			default:
+				h.disk.CrashRandom(core.NewRand(uint64(k*8 + landing)))
+			}
+			h.crashAt = -1
+			ordered := h.orderedIDs
+			h.recoverStore(disklog.ModeOpen)
+			newest := [2]byte{h.readNow(crashChunks[0], 0, 1)[0], h.readNow(crashChunks[1], 0, 1)[0]}
+			kept, lost := 0, 0
+			for j, id := range ordered {
+				i := slices.Index(ids, id)
+				if byte(i+1) > newest[i%2] {
+					lost++
+					continue
+				}
+				if lost > 0 {
+					t.Fatalf("crash at action %d, landing %d: write %d, ordered %d of %v, survived after one ordered before it was lost", k, landing, i, j, ordered)
+				}
+				kept++
+			}
+			if kept > 0 && lost > 0 {
+				split++
+			}
+		}
+	}
+	if split == 0 {
+		t.Fatal("no crash kept some ordered writes and lost others")
+	}
+}
