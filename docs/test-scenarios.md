@@ -4394,9 +4394,9 @@ Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` an
 | `scripted-lister-rotated` | 51 | passes: a rotation during recovery, the new primary holding Y logged and peering keeping it over the member that lists the chunk | 2 |
 | 38 seeds | 559 to 912 | pass, across restarts and formats | 4 to 109 |
 | `primaries-0` | 702 | passes: a demoted primary's gated recovery write landing at its disk's persist of a later primary's decision, discrepancy 30 | 300 |
-| `primaries-33` | 757 | no verdict in 400 s and 2 GB: node 1's one crash leaves 26 `mayfail` lines, 17 of chunk 1 and 9 of chunk 2. `OwnFail` takes only a chunk's newest version, so each chunk's lines are a chain, 18 by 10 branches, and TLC holds 3,600 states at depth 267 and takes about 1,100 a minute there. Not a mismatch: TLC refused no line up to there | 400 |
+| `primaries-33` | 754 | passes: node 1's one crash leaves 26 `mayfail` lines, 17 of chunk 1 and 9 of chunk 2, which lose only a prefix of themselves, 27 branches where each chunk's chain alone gave 18 by 10, which had no verdict at 400 s | 173 |
 
-39 seeds of 40 pass, and 33 gives no verdict. None broke a safety invariant,
+All 40 seeds pass, 33 at fc11724 and the rest before it; the 40 together have not been run again since. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
 and `mayfail` branches stay alive, not its length.
 
