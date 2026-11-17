@@ -55,8 +55,9 @@ type hostRun struct {
 	sent []core.Action
 	work []hostWork
 	// failing lets a host hand out errors, which out gathers, without failing the test.
-	failing bool
-	geo     disklog.Geometry
+	failing   bool
+	geo       disklog.Geometry
+	stepBytes int
 	// keep lands a crash's unflushed writes, which a restart otherwise loses.
 	keep bool
 	// states is, per host, its state's data at each index it applied, which its state at that
@@ -81,12 +82,13 @@ func newHostGroup(t *testing.T, voters int) *hostRun {
 
 // newHostGroupOn is newHostGroup, each host's disk log on lc.
 func newHostGroupOn(t *testing.T, voters int, lc disklog.Config) *hostRun {
-	return newHostGroupOnDisks(t, voters, lc, ctlGeometry)
+	return newHostGroupOnDisks(t, voters, lc, ctlGeometry, 0)
 }
 
-// newHostGroupOnDisks is newHostGroupOn, each host's disk of geometry geo.
-func newHostGroupOnDisks(t *testing.T, voters int, lc disklog.Config, geo disklog.Geometry) *hostRun {
-	r := &hostRun{t: t, lc: lc, geo: geo, hs: make([]*CtlHost, voters), pool: sim.NewPool(16<<20, 0), now: 5_000_000}
+// newHostGroupOnDisks is newHostGroupOn, each host's disk of geometry geo and its tree merging in
+// steps of stepBytes.
+func newHostGroupOnDisks(t *testing.T, voters int, lc disklog.Config, geo disklog.Geometry, stepBytes int) *hostRun {
+	r := &hostRun{t: t, lc: lc, geo: geo, stepBytes: stepBytes, hs: make([]*CtlHost, voters), pool: sim.NewPool(16<<20, 0), now: 5_000_000}
 	for i := range voters {
 		r.disks = append(r.disks, sim.NewDisk(geo.DiskBlocks()))
 		sb := disklog.Superblock{LogID: uint64(i) + 1, Geometry: geo}
@@ -112,7 +114,7 @@ func (r *hostRun) config(i int) Config {
 	}
 	return Config{Raft: raftshard.Config{Group: hostGroup, ID: uint64(i) + 1, Storage: bootStorage(r.t, cs), Seed: uint64(i), Timer: 1, Peers: peers,
 		Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, uint64(i)+1, lease.Time{})},
-		Tree: lsm.Config{MaxPiece: 32 << 10, Check: true, Pages: r.pagesOf(i)}}
+		Tree: lsm.Config{MaxPiece: 32 << 10, StepBytes: r.stepBytes, Check: true, Pages: r.pagesOf(i)}}
 }
 
 // pagesOf is host i's page slabs.

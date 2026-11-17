@@ -13,11 +13,9 @@ import (
 
 // ctlCheckpoint is the host's checkpoint of the group's tree: the one running, its next piece in
 // flight or waiting for a pool buffer, the index and configuration it compacts the log to once
-// its manifest is durable, the base LSN of the last manifest it wrote, and the tree's merge, one
-// at a time, run on the loop when a checkpoint begins and written by it. A restart loads the runs
+// its manifest is durable and the base LSN of the last manifest it wrote. A restart loads the runs
 // of the manifest recovery found, each root with its pieces, before the replay.
 type ctlCheckpoint struct {
-	merge     *lsm.Compaction
 	running   bool
 	inPiece   bool
 	pieceWait bool
@@ -58,12 +56,10 @@ func (h *CtlHost) checkpoint(ctx *core.Context) error {
 	cp.compact, cp.conf = h.shard.Applied()
 	st.Mark(h.shard.log.Base())
 	tree := st.Tree()
-	if cp.merge == nil || cp.merge.Finished() {
-		if cp.merge = tree.PickCompaction(); cp.merge != nil {
-			cp.merge.Run()
-			if err := tree.Install(cp.merge); err != nil {
-				return err
-			}
+	if c := tree.PickCompaction(); c != nil {
+		c.Run()
+		if err := tree.Install(c); err != nil {
+			return err
 		}
 	}
 	if _, err := tree.BeginFlush(); err != nil {
