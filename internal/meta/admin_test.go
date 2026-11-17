@@ -194,6 +194,105 @@ func TestACommandWaitingWhenTheControlDropsIsNotAnswered(t *testing.T) {
 	}
 }
 
+// write commits ops to the group as another leader's Txn would, outside the Control.
+func (r *hostRun) write(ops ...Op) {
+	r.t.Helper()
+	var m core.Msg
+	if err := EncodeTxn(r.pool, hostGroup, 1, &Txn{Ops: ops}, &m); err != nil {
+		r.t.Fatal(err)
+	}
+	r.recv(hostNode, m)
+}
+
+// A pool change whose Txn fails its check, since another leader committed the pool at another
+// pg_count, is dropped after the reload and answered with a refusal, not as set.
+func TestAPoolChangeDroppedBeforeItCommitsIsRefused(t *testing.T) {
+	r := newHostRun(t)
+	r.failing = true
+	r.lead()
+	r.report(&NodeReport{Node: 2, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20}, {Device: 2, Log: 0x78, Blocks: 1 << 20}}})
+	r.run(StepInterval * 3)
+	r.admin(1, Admin{Op: AdminPool, Pool: 1, Spec: spec(1, 8)})
+	r.run(StepInterval * 5)
+	r.answers()
+	r.admin(2, Admin{Op: AdminPool, Pool: 1, Spec: chunkstore.PoolSpec{WriteLimit: new(uint8(50))}})
+	other := r.h.Control().Pools()[0].Pool
+	other.PGCount = 16
+	r.write(Put(poolKey(1), appendPool(nil, &other)))
+	r.answers()
+	r.run(StepInterval * 5)
+	if got := r.answers(); len(got[2]) != 1 || !strings.Contains(got[2][0].Refused, "dropped") {
+		t.Fatalf("answered %+v", got)
+	}
+	if p := r.h.Control().Pools()[0].Pool; p.WriteLimit == 50 {
+		t.Fatalf("the dropped change committed: %+v", p)
+	}
+}
+
+// A declaration whose Txn fails its check, since another leader committed the disk up, is
+// dropped after the reload and answered with the refusal, not as declared lost.
+func TestADeclarationDroppedBeforeItCommitsIsRefused(t *testing.T) {
+	r := newHostRun(t)
+	r.failing = true
+	r.lead()
+	r.report(&NodeReport{Node: 2, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20}}})
+	r.report(&NodeReport{Node: 3, Opened: []OpenedDisk{{Device: 1, Log: 0x88, Blocks: 1 << 20}}})
+	r.run(StepInterval * 3)
+	r.admin(1, Admin{Op: AdminPool, Pool: 1, Spec: chunkstore.PoolSpec{Replicas: new(2), MinLive: new(1), PGCount: new(uint32(8))}})
+	r.run(StepInterval * 5)
+	r.answers()
+	var up ScanResult
+	if err := r.h.Shard().State().Scan(ctlKey(CtlMembership, nil), PrefixEnd(ctlKey(CtlMembership, nil)), 1<<16, &up); err != nil {
+		t.Fatal(err)
+	}
+	var ops []Op
+	for _, kv := range up.KVs {
+		ops = append(ops, Put(slices.Clone(kv.Key), slices.Clone(kv.Value)))
+	}
+	for range 2 * chunkstore.NodeDownAfter / StepInterval {
+		r.report(&NodeReport{Node: 2, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20}}})
+		r.run(StepInterval)
+	}
+	r.answers()
+	r.admin(2, Admin{Op: AdminLost, Disk: 2})
+	r.write(ops...)
+	if got := r.answers(); len(got) != 0 {
+		t.Fatalf("answered before the declaration's Txn: %+v", got)
+	}
+	r.run(StepInterval * 5)
+	if got := r.answers(); len(got[2]) != 1 || !strings.Contains(got[2][0].Refused, "refused") {
+		t.Fatalf("answered %+v", got)
+	}
+	if r.h.Control().Disks()[1].Gone {
+		t.Fatal("disk 2 is gone")
+	}
+}
+
+// A command at a leader whose lease does not run is neither answered nor taken, the failed list
+// included: the command line sends it again. The helper's group leads without leases.
+func TestACommandAtALeaderWithoutItsLeaseIsDropped(t *testing.T) {
+	c := newGroup(t, 3, false)
+	l := c.elect()
+	c.heartbeat()
+	h := &CtlHost{shard: c.n[l].s, sv: NewServer(), id: uint64(l) + 1, group: 5, term: c.n[l].s.Raft().Term()}
+	var err error
+	if h.ctl, err = NewControl(h.shard.State(), h.term); err != nil {
+		t.Fatal(err)
+	}
+	ctx := c.ctx(l)
+	for _, a := range []Admin{{Op: AdminFailed}, {Op: AdminPool, Pool: 1, Spec: spec(1, 8)}} {
+		var m core.Msg
+		if err := EncodeAdmin(c.n[l].pool, 5, 1, &a, &m); err != nil {
+			t.Fatal(err)
+		}
+		var out CtlHostOutput
+		h.OnEvent(&ctx, &core.Event{Kind: core.EvNetRecv, Peer: operator, Msg: m}, &out)
+		if h.Control() == nil || len(out.Actions) != 0 || len(h.admins) != 0 || len(h.ctl.staged) != 0 {
+			t.Fatalf("%+v without the lease: Control %v, sent %+v, waits %+v", a, h.Control() != nil, out.Actions, h.admins)
+		}
+	}
+}
+
 func TestAdminCrossesTheWireWhole(t *testing.T) {
 	pool := sim.NewPool(1<<20, 0)
 	full := chunkstore.PoolSpec{Replicas: new(3), MinLive: new(2), Data: new(4), Parity: new(2), EncodeOnWrite: new(true), MaxPerDomain: new(1),
