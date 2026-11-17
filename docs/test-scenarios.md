@@ -8054,6 +8054,29 @@ Two steps of the item are checked sans-IO rather than over TCP, where they canno
   without its failed device drops it from the list. A device whose log the record refuses, a cloned
   drive's, is listed too (`TestADiskIsKnownByItsLogOnItsDevice`).
 
+## Operator CLI
+
+The leader's side is `meta.CtlHost` on the single-voter group of [Control-plane host](#control-plane-host), fed an operator's commands from a node it never heard from (`internal/meta`, `admin_test.go`); the command line is `cmd/rock-solid`.
+
+| Input | Expected |
+| --- | --- |
+| A pool command sent twice under one request, over two reported disks; then the same command again under another | No answer until the pool commits, then one answer with no refusal and the pool's 8 PGs on the two disks; the repeat, which changes nothing, is answered at once (`TestAPoolCommandIsAnsweredOnceItCommits`) |
+| A declaration for an up disk and for an unknown one, a removal of a disk not drained, a pool with `data` set, and a command that does not decode | Each answered at once with its refusal, naming `chunkstore.ErrLostRefused`, `ErrUnknownDisk`, `ErrNotDrained` and the `data` setting; no pool and no disk gone (`TestARefusedCommandIsAnsweredWithItsReason`) |
+| A declaration that a disk of a node silent for twice `node_down_after` is lost; then the same declaration again | No answer until it commits, then one with no refusal and the disk gone; the repeat is answered at once (`TestALostDiskIsAnsweredOnceGone`) |
+| The failed devices command after a node reports device `0xbad` failed | Answered with node 2, device `0xbad` (`TestTheFailedDevicesCommandListsThem`) |
+| A pool command waiting when the leader drops its `Control` | Dropped unanswered, for the command line to send again (`TestACommandWaitingWhenTheControlDropsIsNotAnswered`) |
+| An operator's command at a follower of a three-voter group | Answered with the leader's node, as a node's report is (`TestAFollowerRedirectsANodeToTheLeader`) |
+| Each command, a pool spec with every setting, and answers with no text, 300 bytes of refusal and 100 failed devices, across the wire | Decode to what was sent; fuzzed (`TestAdminCrossesTheWireWhole`, `FuzzDecodeAdmin`, `FuzzDecodeAdminAnswer`) |
+| `disk lost`, `disk remove`, `disk failed` and `pool` with flags before and after their arguments; a disk of 0, a missing `-ctl`, pool settings on a disk command, an unknown preset, a `write_limit` past a byte | The commands parse to what was given; the rest are refused (`TestParseAdminTakesEachCommand`) |
+| A blocking connection, as the command line's, to a loop's TCP driver: a message with inline bytes and data, then the loop's answer | The loop receives it from the node the hello named, and the connection the answer (`TestAConnTradesMessagesWithALoop`, `internal/driver/tcp`) |
+
+Over TCP and io_uring on files, in Docker, `TestTheOperatorsCommandLineOverTCP` runs the voter in the test process and two storage nodes as children of the test binary, node 2 with two blank devices and one with junk in block 0, node 3 with two blank devices, and the command line in the test process:
+
+- `rock-solid pool 1 -replicas 2 -min-live 2 -failure-domain disk -pg-count 16` prints that pool 1 is set, and the committed table places all 16 PGs on two of the four disks the nodes reported.
+- `rock-solid disk lost` for an up disk of node 2 exits 1 printing the leader's refusal, `chunkstore: disk not down`.
+- `rock-solid disk failed` prints node 2's junk device, by its device ID.
+- Node 3 is killed; once refill keeps one of its disks as a leaving member of a PG, after `degraded_refill_after`, `rock-solid disk lost` of each of its two disks prints that the disk is declared lost, and no PG names either disk afterwards, leaving members included.
+
 ## Shared network suite
 
 - One suite in `internal/loop/nettest`, written against its `Net` interface (start and stop a
