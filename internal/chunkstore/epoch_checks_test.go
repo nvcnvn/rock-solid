@@ -18,7 +18,24 @@ const (
 	invActivates     = "once membership stops changing, every PG whose current interval has at least min_live live members on running nodes activates it"
 	invAckCopies     = "no write is acknowledged on fewer than min_live disks, a member in maintenance counting as one"
 	invHasSource     = "an activated primary has a source of each chunk it kept, or calls it unfound"
+	invLeftGated     = "no running disk keeps a write gated of a PG its table names it in no interval of since the last activated"
 )
+
+// leftGated is the first running disk whose store keeps gated a write of a PG its replica's table names it in no interval
+// of, but one whose writes there are still unresolved.
+func (c *rcluster) leftGated() error {
+	for n, rep := range c.reps {
+		if rep == nil || rep.leftDue || !c.s.Node(uint32(n)).Up() || !rep.st.Serving() {
+			continue
+		}
+		for _, ch := range rep.st.Unsettled(nil) {
+			if pg, ok := rep.pgOf(ch); ok && !rep.names(pg) {
+				return fmt.Errorf("%s: disk %d keeps %v of PG %d gated", invLeftGated, c.ids[n], ch, pg.Index)
+			}
+		}
+	}
+	return nil
+}
 
 // inactive is the first PG of c's table with min_live live members whose primary runs but has not activated its current interval.
 func (c *rcluster) inactive() error {

@@ -101,6 +101,10 @@ type primaryRun struct {
 	errs       map[string]error
 	reformated bool
 	clients    []*primaryClient
+	// crashLeaving crashes a leaving member of PG 0 as the table removing it is published; leftDrops counts the chunks
+	// whose versions a restart's replay gated and that the disk dropped once no interval of their PG named it.
+	crashLeaving bool
+	leftDrops    int
 }
 
 type blockVersion struct {
@@ -180,6 +184,14 @@ func (r *primaryRun) publish() {
 	}
 	r.removal(&next)
 	r.stranded(&next)
+	if r.crashLeaving {
+		_, e := next.entry(pg0)
+		for _, m := range r.members() {
+			if n := c.node(m.Disk); m.Leaving && n >= 0 && c.s.Node(uint32(n)).Up() && !slices.ContainsFunc(e.Members, func(x Member) bool { return x.Disk == m.Disk }) {
+				c.s.CrashRandom(uint32(n))
+			}
+		}
+	}
 	c.noteTable(&next)
 	c.table = next
 	for n := range c.reps {
@@ -239,6 +251,10 @@ func (r *primaryRun) stranded(next *Table) {
 // pass follows each replica's loop: the versions a primary orders and sends, the decision of each interval it activates, and each member's acknowledgments, checked against the member's index and the bytes other members acknowledged under the same version.
 func (r *primaryRun) pass(d int, acts []core.Action) {
 	c, rep := r.c, r.c.reps[d]
+	if rep.cfg.Restarted {
+		r.leftDrops += rep.leftDropped
+	}
+	rep.leftDropped = 0
 	for _, v := range rep.vers {
 		if _, ok := r.ops[v.msgID]; ok && v.u.Version != 0 && r.version[v.msgID] == 0 {
 			r.version[v.msgID] = v.u.Version
@@ -596,6 +612,13 @@ type peerPlant struct {
 // simulator and returning a broken end check; with a plant, it checks only the plant's invariant, if it
 // names one, and returns its first violation.
 func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
+	_, err := runPrimaryRun(t, seed, plant, false)
+	return err
+}
+
+// runPrimaryRun is runPrimaries, returning the run too; with crashLeaving, each leaving member of PG 0 crashes as the
+// table removing it is published.
+func runPrimaryRun(t *testing.T, seed uint64, plant *peerPlant, crashLeaving bool) (*primaryRun, error) {
 	s := sim.New(seed, sim.DefaultSettings())
 	a := &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4},
 		down: map[uint32]core.Tick{}, drain: map[uint32]bool{}, moves: true}
@@ -611,7 +634,7 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	r := &primaryRun{c: c, a: a, rng: core.NewRand(seed ^ 0x9e3), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)}, ops: map[core.RequestID]faultOp{},
 		version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, tainted: map[uint32]bool{},
 		sent: map[[2]uint64]Update{}, acked: map[blockVersion][]byte{}, errs: map[string]error{}}
-	r.returns = r.rng.Chance(1, 2)
+	r.returns, r.crashLeaving = r.rng.Chance(1, 2), crashLeaving
 	for _, inv := range []string{invAckedWhole, invOneVersion, invRemoval, invAckedKept, invKeptWritten, invRecovered} {
 		c.inv.Register(inv, func() error { return r.errs[inv] })
 	}
@@ -621,6 +644,7 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 		}
 		return c.inactive()
 	})
+	c.inv.Register(invLeftGated, c.leftGated)
 	// Drawn from the seed so other draws keep their order.
 	r.duringPeering = seed%4 == 3
 	if plant != nil {
@@ -659,7 +683,7 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 			break
 		}
 		if c.found != nil && !r.runOn {
-			return c.found
+			return r, c.found
 		}
 		if busy() && r.rng.Chance(1, 40) && (c.active() || r.duringPeering && r.rng.Chance(1, 10)) && !slices.ContainsFunc(r.members(), func(m Member) bool { return m.Mark == MarkUp && !r.running(m) }) {
 			r.inject()
@@ -678,19 +702,23 @@ func runPrimaries(t *testing.T, seed uint64, plant *peerPlant) error {
 	r.publish()
 	r.settled()
 	if c.found != nil && !r.runOn {
-		return c.found
+		return r, c.found
 	}
 	r.recover()
 	r.check()
 	r.readEach(x)
 	r.ended = true
 	if plant == nil {
-		conformWrite(t, fmt.Sprintf("primaries-%d", seed), c)
+		name := "primaries"
+		if crashLeaving {
+			name = "leftdown"
+		}
+		conformWrite(t, fmt.Sprintf("%s-%d", name, seed), c)
 	}
 	if err := c.inv.Check(); err != nil {
-		return err
+		return r, err
 	}
-	return c.found
+	return r, c.found
 }
 
 // Sub-block spike M6 on replicas: two clients pipeline 8 writes each to two chunks while the authority moves the PG's primary, to members that stayed live throughout or, in half the seeds, to members marked up again that missed writes, marks replicas down and up, restarts the primary, formats a member again and drains a disk of four and ends the drain, moving members. Every acknowledged version is kept, members hold the same bytes under a version, every member that lists nothing maps the kept writes applied in version order, and no move removes a leaving member while another member lacks an acknowledged version.
@@ -700,6 +728,35 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
 	})
+}
+
+// The same run with each leaving member crashed as the table removing it is published: restarted, its replay gates
+// the writes it logged in the move's interval, which it drops once a table names it in no interval of the PG. The run
+// fails if its seeds, more than one, never reach that.
+func TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites(t *testing.T) {
+	run, left := 0, 0
+	seeds.Run(t, 0, 10, func(seed uint64) {
+		r, err := runPrimaryRun(t, seed, nil, true)
+		if err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		run++
+		if r.leftDrops > 0 {
+			left++
+		}
+	})
+	t.Logf("%d seeds, %d with a restarted disk dropping the gated writes of a PG no interval names it in", run, left)
+	if run > 1 && left == 0 {
+		t.Fatalf("none of %d seeds dropped a left PG's gated writes", run)
+	}
+}
+
+// A disk that never drops the gated writes of a PG it left keeps them past the table naming it in no interval of the PG
+// (seed 3, the first of TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites to drop any).
+func TestALeftPGNeverSettledBreaksItsInvariant(t *testing.T) {
+	if _, err := runPrimaryRun(t, 3, &peerPlant{invLeftGated, func(r *primaryRun) { r.c.replicaPlants.leftNeverSettles = true }}, true); err == nil || !strings.Contains(err.Error(), invLeftGated) {
+		t.Fatalf("leftNeverSettles at seed 3: %v", err)
+	}
 }
 
 // Seed 67 formats node 1's disk again, crashes cut that format and the next short, and the disk comes back as disk 7 while the table still names gone disk 6 a down member no node serves: the run must not mark it up.

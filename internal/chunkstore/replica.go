@@ -229,6 +229,10 @@ type Replica struct {
 	// lost is the peers a PeerLost left with writes to send again, which new writes to them wait behind.
 	lost      []core.NodeID
 	unsettled []core.ChunkID
+	// leftDue is set while the store may keep gated a version of a PG the table names this disk in no interval of;
+	// leftDropped counts the chunks whose gated versions dropLeft dropped, which the seeded runs report.
+	leftDue     bool
+	leftDropped int
 	// unlogged is the store request and chunk of each own version released before its records were durable, kept only to trace when they become so.
 	unlogged [][2]uint64
 	nextID   uint64
@@ -408,11 +412,15 @@ type replicaPlants struct {
 	coverAtRead bool
 	// neverAsk has a restarted primary ask for no new interval, memberNoAsk a restarted member; sendEpoch has a member accept a
 	// write only under the table epoch it was sent in; sameMembers has a member accept a write
-	// tagged with an earlier interval whose members' disks are those of its current one.
-	neverAsk    bool
-	memberNoAsk bool
-	sendEpoch   bool
-	sameMembers bool
+	// tagged with an earlier interval whose members' disks are those of its current one;
+	// leftNeverSettles keeps the gated versions of a PG the table names this disk in no interval
+	// of, and settleLeftEarly drops them once the current interval leaves it out.
+	neverAsk         bool
+	memberNoAsk      bool
+	leftNeverSettles bool
+	settleLeftEarly  bool
+	sendEpoch        bool
+	sameMembers      bool
 	// stopPreviousOnly has peering reach only the interval just before its own, and lastActivatedOnly
 	// only the last activated one; ownInterval decides
 	// each version by the members of its own interval alone; activateEarly activates before every
@@ -627,6 +635,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 	r.armLease(ctx, out)
 	r.dropWaiting(ctx, out)
 	r.demote(ctx, out)
+	r.leftDue = true
 	r.unpark(ctx, out)
 	r.drain(ctx, out)
 }
@@ -772,6 +781,38 @@ func (r *Replica) carries(e *PGEntry, k uint32) bool {
 		return true
 	}
 	return slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark != MarkUp && !r.plant.forgetImageDown })
+}
+
+// dropLeft drops the store's gated versions of each PG the table names this disk in no interval of since the last activated one, as a decision keeping none of them would: peering reaches only those intervals' members and recovery reads only the current one's, so no decision of the PG comes here again, and gated they would hold the replay point and their segments for good. A chunk whose records are not yet resolved, or a store still replaying, waits for a later drain.
+func (r *Replica) dropLeft(ctx *core.Context) {
+	r.leftDue = !r.st.Serving()
+	if r.leftDue || r.plant.leftNeverSettles {
+		return
+	}
+	r.unsettled = r.st.Unsettled(r.unsettled[:0])
+	for _, c := range r.unsettled {
+		if pg, ok := r.pgOf(c); !ok || r.names(pg) {
+			continue
+		}
+		if _, err := r.st.Settle(ctx, c, 0, &r.sout); err != nil {
+			r.leftDue = true
+		} else {
+			r.leftDropped++
+		}
+	}
+}
+
+// names reports whether the table names this disk in PG pg's current interval or in one since its last activated; a PG it lacks counts as naming it.
+func (r *Replica) names(pg core.PGID) bool {
+	_, e := r.table.entry(pg)
+	if e == nil {
+		return true
+	}
+	in := func(ms []Member) bool { return slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == r.cfg.Disk }) }
+	if in(e.Members) {
+		return true
+	}
+	return !r.plant.settleLeftEarly && slices.ContainsFunc(e.Past, func(p PastInterval) bool { return p.Interval >= e.Activated && in(p.Members) })
 }
 
 // demote refuses the clients of the versions this disk ordered as the primary of a PG it no longer leads, since peering decides whether those versions stay. The store keeps them gated: the next decision this disk persists for the PG settles them.
@@ -1311,6 +1352,9 @@ func (r *Replica) versionOf(req uint64) int {
 
 // drain handles what the store answered until it has nothing more to say: the versions it ordered, those durable on its disk and the requests it finished. A rebuild of the store's index ends the interval of every PG this disk leads, as a restart would: the rebuilt index maps what the log holds, versions peering has yet to decide included.
 func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
+	if r.leftDue {
+		r.dropLeft(ctx)
+	}
 	r.drainStore(ctx, out)
 	r.peerWork(ctx, out)
 	r.recoverWork(ctx, out)

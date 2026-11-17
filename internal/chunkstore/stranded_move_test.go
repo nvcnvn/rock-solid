@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -30,6 +31,15 @@ func plantAll(c *rcluster, set func(*replicaPlants)) {
 
 // seededSoleRun is newSoleRun over the scheduler of seed.
 func seededSoleRun(t *testing.T, seed uint64, replicas, disks int) *soleRun {
+	geo, err := disklog.GeometryFor(diskBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return seededSoleRunOn(t, seed, replicas, disks, sim.DefaultSettings(), geo)
+}
+
+// seededSoleRunOn is seededSoleRun under set, on disks cut as geo.
+func seededSoleRunOn(t *testing.T, seed uint64, replicas, disks int, set sim.Settings, geo disklog.Geometry) *soleRun {
 	a := &authority{pool: Pool{Replicas: replicas, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 1},
 		down: map[uint32]core.Tick{}, drain: map[uint32]bool{}}
 	for n := range disks {
@@ -46,7 +56,7 @@ func seededSoleRun(t *testing.T, seed uint64, replicas, disks int) *soleRun {
 			sized.Pools[0].PGs = append(sized.Pools[0].PGs, PGEntry{Members: []Member{{Disk: d}}, Interval: 1})
 		}
 	}
-	c := newRClusterWith(t, sized, sim.New(seed, sim.DefaultSettings()), nil)
+	c := newRClusterOnDisks(t, sized, sim.New(seed, set), nil, geo)
 	if len(sized.Pools[0].PGs) > 1 {
 		next := cloneTable(tbl)
 		next.Epoch = sized.Epoch + 1
