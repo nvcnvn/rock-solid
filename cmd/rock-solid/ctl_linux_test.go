@@ -8,10 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
-
-	"golang.org/x/sys/unix"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -154,6 +153,7 @@ func startCtl(t *testing.T, args string, out *bytes.Buffer) *exec.Cmd {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestCtlProcess$", "-test.v")
 	cmd.Env = append(os.Environ(), "RS_CTL_ARGS="+args)
 	cmd.Stdout, cmd.Stderr = out, out
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -176,11 +176,7 @@ func TestASingleVoterControlPlaneAnswersOverTCPAndSurvivesAKill(t *testing.T) {
 	}
 	disk := filepath.Join(dir, "ctl-disk")
 	t.Cleanup(func() { _ = os.Remove(disk) })
-	fd, port, err := tcp.ListenTCP(netip.MustParseAddrPort("127.0.0.1:0"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = unix.Close(fd)
+	port := freeBase(t, 1)
 	flags := fmt.Sprintf("-node 1 -voters 1=127.0.0.1:%d -group %d -disk %s -disk-bytes %d", port, ctlGroup, disk, 512<<20)
 	var out bytes.Buffer
 	cmd := startCtl(t, flags+" -format", &out)

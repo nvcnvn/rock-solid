@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"math/rand/v2"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -86,6 +88,7 @@ func startNode(t *testing.T, args string, out *output) *exec.Cmd {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestNodeProcess$", "-test.v")
 	cmd.Env = append(os.Environ(), "RS_NODE_ARGS="+args)
 	cmd.Stdout, cmd.Stderr = out, out
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -148,21 +151,46 @@ func within(d time.Duration, cond func() bool) bool {
 	return false
 }
 
-// freeBase is a port the node's loops can take from, n ports in all, as far as listening once on
-// the first tells.
+// freeBase is the first of n ports, each free when probed, below the kernel's ephemeral range, from
+// which outbound connections draw their ports, so a process started again finds its ports free.
 func freeBase(t *testing.T, n int) int {
-	for range 20 {
-		fd, port, err := tcp.ListenTCP(netip.MustParseAddrPort("127.0.0.1:0"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = unix.Close(fd)
-		if port+n <= 65535 {
-			return port
+	ephemeral := 32768
+	if b, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range"); err == nil {
+		if f := strings.Fields(string(b)); len(f) == 2 {
+			if lo, err := strconv.Atoi(f[0]); err == nil {
+				ephemeral = lo
+			}
 		}
 	}
-	t.Fatal("no port leaves room for the node's loops")
+	const low = 10000
+	if ephemeral-n <= low {
+		t.Fatalf("no room for %d ports below the ephemeral range at %d", n, ephemeral)
+	}
+	for range 100 {
+		if base := low + rand.IntN(ephemeral-n-low); free(base, n) {
+			return base
+		}
+	}
+	t.Fatalf("no %d ports free below %d", n, ephemeral)
 	return 0
+}
+
+// free reports whether ports base to base+n-1 can each be listened on.
+func free(base, n int) bool {
+	var fds []int
+	defer func() {
+		for _, fd := range fds {
+			_ = unix.Close(fd)
+		}
+	}()
+	for port := base; port < base+n; port++ {
+		fd, _, err := tcp.ListenTCP(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(port)))
+		if err != nil {
+			return false
+		}
+		fds = append(fds, fd)
+	}
+	return true
 }
 
 // device makes a device file of 1 GiB at path, its block 0 junk if junk is set.
