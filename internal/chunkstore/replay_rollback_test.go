@@ -340,8 +340,9 @@ func TestAReplayHeldSlotWriteCountsOnceMapped(t *testing.T) {
 }
 
 // A whole chunk written to a slot flags its version's last entry: the chunk is whole at that version once it maps, and a
-// member whose replay holds it and a write after it reports the later one whole to peering, which keeps both. Seed 6 of
-// TestReplicatedWritesSurviveFaults's slot seeds dropped every version a member acknowledged after a slot write.
+// member whose replay holds it and a write after it reports the later one whole to peering, which keeps both. Without
+// the mark, peering drops the versions a member acknowledged after a slot write, and slot seeds 130, 354, 402, 418 and
+// 930 of TestReplicatedWritesSurviveFaults find a primary missing writes it answered OK.
 func TestASlotWriteIsWhole(t *testing.T) {
 	h := newHarnessOn(t, testConfig(), slotGeometry)
 	c := chunk(2)
@@ -361,9 +362,9 @@ func TestASlotWriteIsWhole(t *testing.T) {
 }
 
 // A slot that a write replay holds overwrote, freed and taken again by another chunk's write replay also holds, stays in
-// use until the second chunk lets it go and is then freed once. Seeds 30 and 62 of TestReplicatedWritesSurviveFaults's
-// slot seeds panicked on the second free; in seeds 22, 70, 78 and 94 the log gave the slot to a third write while the
-// second was held, and the members' copies of the second's version differed.
+// use until the second chunk lets it go and is then freed once. Freed while the second is held, the log can give the
+// slot to a third write and free it twice: slot seed 322 of TestReplicatedWritesSurviveFaults then maps a slot the log
+// holds free, and 594, 626, 898 and 914 panic on the second free.
 func TestAReusedSlotOfTwoHeldWritesIsFreedOnce(t *testing.T) {
 	h := newHarnessOn(t, testConfig(), slotGeometry)
 	a, b := chunk(2), chunk(3)
