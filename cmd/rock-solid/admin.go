@@ -169,7 +169,7 @@ func poolFlags(fs *flag.FlagSet) *poolSettings {
 }
 
 // spec is the pool spec of the settings given, over the preset's if one is: a setting not given
-// stays unset, so the leader keeps the committed pool's or takes its default.
+// stays unset, so the leader keeps the pool's or, for a new pool, takes its default.
 func (p *poolSettings) spec(fs *flag.FlagSet) (chunkstore.PoolSpec, error) {
 	var s chunkstore.PoolSpec
 	if *p.preset != "" {

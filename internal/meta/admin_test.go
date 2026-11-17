@@ -144,6 +144,28 @@ func TestALostDiskIsAnsweredOnceGone(t *testing.T) {
 	}
 }
 
+// A pool change keeps every setting it leaves out as the pool has it, not at its default.
+func TestAPoolChangeKeepsTheSettingsItLeavesOut(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	for n := uint32(2); n <= 4; n++ {
+		r.report(&NodeReport{Node: n, Opened: []OpenedDisk{{Device: 1, Log: 0x70 + uint64(n), Blocks: 1 << 20}}})
+	}
+	r.run(StepInterval * 3)
+	r.admin(1, Admin{Op: AdminPool, Pool: 1, Spec: chunkstore.PoolSpec{Replicas: new(2), MinLive: new(1), Overcommit: new(false), PGCount: new(uint32(8)), FailureDomain: chunkstore.DomainDisk}})
+	r.run(StepInterval * 5)
+	r.answers()
+	r.admin(2, Admin{Op: AdminPool, Pool: 1, Spec: chunkstore.PoolSpec{WriteLimit: new(uint8(50))}})
+	r.run(StepInterval * 5)
+	if got := r.answers(); len(got[2]) != 1 || got[2][0].Refused != "" {
+		t.Fatalf("answered %+v", got)
+	}
+	want := chunkstore.Pool{Replicas: 2, MinLive: 1, FailureDomain: chunkstore.DomainDisk, MaxPerDomain: 1, Locality: chunkstore.LocalitySpread, WriteLimit: 50, PGCount: 8}
+	if p := r.h.Control().Pools()[0].Pool; p != want {
+		t.Fatalf("a write_limit change left the pool %+v, want %+v", p, want)
+	}
+}
+
 // The failed devices command lists every device the nodes heard from left failed.
 func TestTheFailedDevicesCommandListsThem(t *testing.T) {
 	r := newHostRun(t)

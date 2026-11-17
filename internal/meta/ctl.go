@@ -161,14 +161,15 @@ func (c *Control) Pools() []PoolRecord { return c.pools }
 func (c *Control) ShardMap() *ShardMap { return &c.smap }
 
 // SetPool checks a pool's create or update against the pool rules and the committed pool, and
-// stages it for the next commit in place of any change of the pool staged before; disks are the
-// cluster's, each at the class the record gives it, for an unset pg_count and the layout check. A refused one stages nothing, and one that
-// changes nothing unstages the pool. A new pool whose worst step may be more than one Txn holds is
-// ErrTooLarge.
+// stages it for the next commit in place of any change of the pool staged before; an update keeps
+// each setting spec leaves out as the next commit gives it. disks are the cluster's, each at the
+// class the record gives it, for an unset pg_count and the layout check. A refused one stages
+// nothing, and one that changes nothing unstages the pool. A new pool whose worst step may be more
+// than one Txn holds is ErrTooLarge.
 func (c *Control) SetPool(id core.PoolID, spec chunkstore.PoolSpec, disks []chunkstore.Disk) error {
 	i, ok := slices.BinarySearchFunc(c.pools, id, cmpPool)
-	if ok && spec.PGCount == nil {
-		spec.PGCount = &c.pools[i].Pool.PGCount
+	if ok {
+		spec = keep(spec, c.nextPool(id))
 	}
 	disks = slices.Clone(disks)
 	for i, d := range disks {
@@ -194,6 +195,23 @@ func (c *Control) SetPool(id core.PoolID, spec chunkstore.PoolSpec, disks []chun
 		c.staged = append(c.staged, PoolRecord{id, p})
 	}
 	return nil
+}
+
+// keep fills each setting spec leaves out from p. An empty string is left out, so it cannot clear
+// p's disk_class.
+func keep(spec chunkstore.PoolSpec, p chunkstore.Pool) chunkstore.PoolSpec {
+	spec.Replicas = cmp.Or(spec.Replicas, &p.Replicas)
+	spec.MinLive = cmp.Or(spec.MinLive, &p.MinLive)
+	spec.MaxPerDomain = cmp.Or(spec.MaxPerDomain, &p.MaxPerDomain)
+	spec.Overcommit = cmp.Or(spec.Overcommit, &p.Overcommit)
+	spec.PGCount = cmp.Or(spec.PGCount, &p.PGCount)
+	if p.WriteLimit != 0 {
+		spec.WriteLimit = cmp.Or(spec.WriteLimit, &p.WriteLimit)
+	}
+	spec.FailureDomain = cmp.Or(spec.FailureDomain, p.FailureDomain)
+	spec.Locality = cmp.Or(spec.Locality, p.Locality)
+	spec.DiskClass = cmp.Or(spec.DiskClass, p.DiskClass)
+	return spec
 }
 
 // changePool checks next as the settings that replace committed ones.

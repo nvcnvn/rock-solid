@@ -476,7 +476,9 @@ func TestAPoolChangeIsCheckedAgainstTheCommittedPool(t *testing.T) {
 		t.Fatal("a pg_count doubling was accepted")
 	}
 	for _, n := range []int{3, 1} {
-		if err := r.ctl.SetPool(1, spec(n, 8), in.Disks); err != nil {
+		s := spec(n, 8)
+		s.MinLive = new(1)
+		if err := r.ctl.SetPool(1, s, in.Disks); err != nil {
 			t.Fatal(err)
 		}
 	}
