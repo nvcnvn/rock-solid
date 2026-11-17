@@ -36,9 +36,13 @@
 \* applying configuration changes, but the replica acts as a down one: it takes no append,
 \* votes and campaigns in no election and fortifies no leader. While it leads it still takes
 \* its followers' answers, commits, counts the support it had, and its node renews the
-\* grants, so its followers neither campaign nor learn from its node that it is gone. Its
-\* base stays below the entry, so after a restart it halts again on reaching it. A replica
-\* that dies is down for good from then on.
+\* grants, so its followers neither campaign nor learn from its node that it is gone. It
+\* hands its leadership on, and when that election fails, the target's term rises, since a
+\* transfer's campaign skips pre-vote; the leader hears the later term in the target's answer
+\* and steps down. It never campaigns again, and its node, renewing its followers' grants
+\* still, tells a follower that asks about it that it is gone. Its base stays below the
+\* entry, so after a restart it halts again on reaching it. A replica that dies is down for
+\* good from then on.
 \*
 \* A replica learns its removal by applying it or from a notice. It never applies it to its
 \* configuration, but stays a voter of the joint one, campaigning, voting, leading, taking
@@ -89,6 +93,8 @@ CONSTANTS
                         \* configuration holds it
     AskLeaderNode,      \* a follower that hears nothing from the leader it supports asks the
                         \* leader's node, and stops supporting it once it deleted its state
+    HaltedGone,         \* the node of a halted replica that no longer leads answers an ask about
+                        \* it as gone (FALSE: only once the replica learned its removal)
     RemovedStopsLease,  \* a leader serves no lease read once it applied its own removal
     HaltHandsOff,       \* a halted leader hands its leadership to a voter it replicates to
     DurableCommit,      \* a restart takes the commit index its hard state was written with
@@ -336,6 +342,24 @@ Transfer(l, i, Q) ==
        \/ HaltHandsOff /\ Halted(l) /\ i \in Voters(AppliedConf(l))
     /\ Run(i, Q, {l})
 
+\* A halted leader's hand-off whose election fails: the target campaigns in a term past both
+\* of theirs, wins no quorum, and answers the leader's next heartbeat with that term, on which
+\* the leader steps down.
+HandOffFails(l, i) ==
+    LET nt == 1 + Max({term[l], term[i]}) IN
+    /\ HaltHandsOff /\ Leads(l) /\ Halted(l) /\ i # l /\ match[l][i] > 0
+    /\ i \in Voters(AppliedConf(l)) /\ Live(i) /\ ~Halted(i)
+    /\ nt <= MaxTerm
+    /\ term' = [term EXCEPT ![l] = nt, ![i] = nt]
+    /\ leader' = [leader EXCEPT ![l] = FALSE]
+    /\ match' = [match EXCEPT ![l] = NoMatch]
+    /\ hbCommit' = [hbCommit EXCEPT ![l] = 0]
+    /\ support' = [support EXCEPT ![i] = {}]
+    /\ fort' = [fort EXCEPT ![l] = {}]
+    /\ Persist({l, i}, commit)
+    /\ UNCHANGED <<log, commit, applied, up, gone, crashes, elected, chosen, early, haltAt, out,
+                   dead, reported>>
+
 \* A leader asks the voters of its term for support, and each gives it: a grant to the
 \* leader's node that holds is taken as given, and Lapse ends one, so any subset of them
 \* supporting the leader is reached. A halted replica drops the ask and its answer.
@@ -511,9 +535,11 @@ Notice(r, p) ==
 \* A follower that heard nothing from the leader it supports for an election timeout asks
 \* the leader's node, as a replica asks its peers whether it is still a member. Once the
 \* leader's replica learned its removal, which it does only once the removal committed, the
-\* node answers that the replica left the group, and the follower stops supporting it.
+\* node answers that the replica left the group, as it does for a halted replica that no
+\* longer leads, and the follower stops supporting it.
 AskLeader(r, l) ==
-    /\ AskLeaderNode /\ Live(r) /\ support[r] = {l} /\ up[l] /\ out[l]
+    /\ AskLeaderNode /\ Live(r) /\ support[r] = {l} /\ up[l]
+    /\ out[l] \/ (HaltedGone /\ Halted(l) /\ ~leader[l])
     /\ support' = [support EXCEPT ![r] = {}]
     /\ UNCHANGED <<term, leader, log, commit, applied, match, hbCommit, up, gone, crashes,
                    elected, chosen, early, fort, hsCommit, haltAt, out, dead, reported>>
@@ -593,6 +619,7 @@ Next ==
     \/ \E r, p \in Replicas : Notice(r, p)
     \/ \E i \in Replicas, Q \in SUBSET Replicas : Elect(i, Q)
     \/ \E l, i \in Replicas, Q \in SUBSET Replicas : Transfer(l, i, Q)
+    \/ \E l, i \in Replicas : HandOffFails(l, i)
     \/ \E i, j \in Replicas : Lapse(i, j)
 
 Spec == Init /\ [][Next]_vars
@@ -601,8 +628,8 @@ Spec == Init /\ [][Next]_vars
 \* nobody campaigns while a replica leads, since its followers hear from it well within
 \* an election timeout, and a candidate wins every vote it can. Only a leader crashes,
 \* and it restarts, only a leader halts, and any replica may die. No replica learns its
-\* removal but by applying it. Every step but crashes, halts, deaths, fortification
-\* and deletions is weakly fair, and elections stop at MaxTerm.
+\* removal but by applying it. Every step but crashes, halts, deaths, failed hand-offs,
+\* fortification and deletions is weakly fair, and elections stop at MaxTerm.
 Leaderless == \A r \in Replicas : ~Leads(r)
 Votes(i, from) ==
     {j \in Voters(AppliedConf(i)) :
@@ -615,7 +642,8 @@ FairHalt(r) == Leads(r) /\ Halt(r)
 FairSpec ==
     /\ Init
     /\ [][LiveSteps \/ LiveElect \/
-          \E r \in Replicas : LiveTransfer(r) \/ FairCrash(r) \/ FairHalt(r) \/ Die(r)]_vars
+          \E r \in Replicas : LiveTransfer(r) \/ FairCrash(r) \/ FairHalt(r) \/ Die(r) \/
+          \E l, i \in Replicas : HandOffFails(l, i)]_vars
     /\ WF_vars(LiveElect)
     /\ \A l \in Replicas : WF_vars(LiveTransfer(l))
     /\ \A i, j \in Replicas : WF_vars(Replicate(i, j))
