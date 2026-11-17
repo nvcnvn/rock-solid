@@ -9,6 +9,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 // leftRun is a rep2 PG that drained a member to a third disk with Z written once the move's interval recovered, so the
@@ -130,13 +131,6 @@ func TestALeftMemberThatNeverSettlesKeepsItsGatedWrites(t *testing.T) {
 	}
 }
 
-func TestALeftMemberSettledEarlyDropsWhatAPastIntervalNames(t *testing.T) {
-	l := newLeftRun(t, 1, func(p *replicaPlants) { p.settleLeftEarly = true })
-	if st, _, _ := l.gated(); slices.Contains(st.Unsettled(nil), l.ch) {
-		t.Fatalf("settleLeftEarly: the first table left Z gated")
-	}
-}
-
 // The store's half of a left PG's drop: a version Z of the interval the disk last decided, replayed gated, holds the
 // replay point short of its record and that record's segment from the cleaner. Settled to nothing, as a replica drops a
 // left PG's gated writes, Z holds neither: once later writes roll its segment closed and a checkpoint names a replay
@@ -222,4 +216,55 @@ func TestALeftMemberDropsItsGatedWritesOnceTheirChunkIsResolved(t *testing.T) {
 	if st, at, _ := l.gated(); at != 0 {
 		t.Fatalf("the left member keeps Z gated: %v", st.Unsettled(nil))
 	}
+}
+
+// settleLeftEarlyTrace is neg-settle-left-early's trace over the scheduler of seed: W is acknowledged on disks 2 and 3
+// in interval 1, which activates; disk 3 crashes, interval 2 replaces it with disk 1, and disk 3 restarts on that table,
+// its replay gating W. Interval 2's peering reaches disk 3 through interval 1, the last activated, before disk 1, whose
+// messages to disk 2 are held up. With set's plant, disk 3 has dropped W by then, and its reply without W vetoes W,
+// which only disk 2 holds of the up members.
+func settleLeftEarlyTrace(t *testing.T, seed uint64, set func(p *replicaPlants)) error {
+	c := newRClusterOn(t, pg2Table(), sim.New(seed, sim.DefaultSettings()))
+	set(&c.replicaPlants)
+	for _, r := range c.reps {
+		r.plant = c.replicaPlants
+	}
+	c.planted = true
+	ch := chunkIn(pg0, 1, 0)
+	w := c.incWrite(map[core.RequestID]incWrite{}, ch, 1, 1)
+	c.until(w)
+	c.inv.Register(invAckedKept, c.keepsAcked(ch, w))
+	c.settle()
+	c.s.CrashRandom(2)
+	c.s.Restart(2)
+	c.runFor(10_000_000)
+	next := c.next(members(Member{Disk: 2}, Member{Disk: 1}))
+	if _, e := next.entry(pg0); e.Activated != 1 {
+		t.Fatalf("seed %d: interval 1 is not the last activated: %+v", seed, e)
+	}
+	c.s.Queue(0, 1, 1_000_000)
+	c.hand(next, 0, 1, 2)
+	c.untilActive()
+	c.s.Queue(0, 1, 0)
+	c.settle()
+	if c.found == nil {
+		if rp := c.reply(w); rp.Status != StatusOK {
+			t.Fatalf("seed %d: W answered %+v", seed, rp)
+		}
+	}
+	return c.found
+}
+
+// A left member that drops its gated writes once the current interval leaves it out loses an acknowledged write on
+// settleLeftEarlyTrace, which the correct rule keeps.
+func TestALeftMemberSettledEarlyLosesAnAcknowledgedWrite(t *testing.T) {
+	seeds.Run(t, 0, 20, func(seed uint64) {
+		if err := settleLeftEarlyTrace(t, seed, noPlant); err != nil {
+			t.Fatalf("seed %d unplanted: %v", seed, err)
+		}
+		err := settleLeftEarlyTrace(t, seed, func(p *replicaPlants) { p.settleLeftEarly = true })
+		if v, ok := err.(*sim.Violation); !ok || v.Name != invAckedKept {
+			t.Fatalf("seed %d planted: %v", seed, err)
+		}
+	})
 }

@@ -5834,16 +5834,25 @@ own ([Testing strategy](design.md#testing-strategy)).
     Replay gates Z, pinning its slot and holding the replay point short of its record; once the interval without
     the member activates and a table names it in no interval, it drops Z: nothing gated, no slot pinned or in use,
     and the replay point past Z's record and its segment's newest (`TestALeftMemberDropsItsGatedWritesOnceNoIntervalNamesIt`,
-    seeds 1 to 3). With `leftNeverSettles` Z stays gated
-    (`TestALeftMemberThatNeverSettlesKeepsItsGatedWrites`); with `settleLeftEarly` the first table drops it while a
-    past interval names the disk (`TestALeftMemberSettledEarlyDropsWhatAPastIntervalNames`). In the store, a
-    version replayed gated and settled to nothing frees its record's segment to the cleaner once later writes roll
-    it closed and a checkpoint passes it, and without the drop it stays (`TestADroppedGatedWriteLeavesItsSegmentToTheCleaner`).
-    A slot write's record lies in the slot lane's open segment, which closes only after a segment's worth of
-    whole-chunk writes, 1,023 on the slot geometry, like any slot record's.
+    seeds 1 to 3). The drop is in memory: an index rebuild after it gates Z again, and the replica drops it again
+    under the same table (`TestALeftMemberDropsItsGatedWritesAgainAfterARebuild`). A table that arrives while a
+    write of Z's chunk has records in flight leaves Z gated until they are durable, then the replica drops it
+    (`TestALeftMemberDropsItsGatedWritesOnceTheirChunkIsResolved`). With `leftNeverSettles` Z stays gated
+    (`TestALeftMemberThatNeverSettlesKeepsItsGatedWrites`).
+    In the store, a version replayed gated and settled to nothing frees its record's segment to the cleaner once later
+    writes roll it closed and a checkpoint passes it (`TestADroppedGatedWriteLeavesItsSegmentToTheCleaner`). A slot write's record lies in the slot lane's open
+    segment, which closes only after a segment's worth of whole-chunk writes, 1,023 on the slot geometry, like any
+    slot record's.
+  - `neg-settle-left-early`'s trace on `rep2` disks 2 and 3, seeded: W is acknowledged in interval 1, which
+    activates; disk 3 restarts, its replay gating W, and interval 2 replaces it with disk 1, whose messages to the
+    primary are held up, so interval 2's peering hears disk 3 through interval 1, the last activated. Under the
+    correct rule disk 3 keeps W gated and the decision keeps W; with `settleLeftEarly`, or with the past intervals
+    counted only above the last activated, disk 3's reply without W vetoes it and `invAckedKept` fails
+    (`TestALeftMemberSettledEarlyLosesAnAcknowledgedWrite`, seeds 0-19, 200 in `scripts/seeds.sh` in 70 s).
   - Seeded: the primary-change run with each leaving member crashed as the table removing it is published
     (`TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites`, seeds 0-9, 200 in `scripts/seeds.sh` in 18 s) keeps every
-    acknowledged write and breaks no invariant, `invLeftGated` included; it logs how many seeds had a restarted
+    acknowledged write and breaks no invariant, `invLeftGated` included, which judges naming from the cluster's
+    table, not the replica's; it logs how many seeds had a restarted
     disk drop a left PG's gated writes, 4 of seeds 0-9, and fails if none did. `leftNeverSettles` breaks
     `invLeftGated` at seed 3 (`TestALeftPGNeverSettledBreaksItsInvariant`).
   - The stranded-move shapes move the primary instead of restarting it, as the epoch change model's
