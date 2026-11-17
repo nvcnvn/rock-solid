@@ -373,7 +373,7 @@ func TestAMemberNeverLogsAVersionAfterOneThatFailed(t *testing.T) {
 		}
 		hog = append(hog, b)
 	}
-	h.s.adm.heldHead = 1
+	h.s.adm.heldHead, h.s.chunks[oi].held = 1, false
 	h.s.OnEvent(&h.ctx, &core.Event{Kind: core.EvTimer, Timer: AdmitTimer}, &h.out)
 	h.take()
 	for _, b := range hog {

@@ -33,6 +33,7 @@ const (
 	invRewrite  = "every metadata victim frees more than its rewrites write"
 	invHeld     = "the bytes held beyond the manifests stay within the reserve"
 	invNoSpace  = "no ordinary write fails with NoSpace while the cleaner has a victim"
+	invAdmit    = "every chunk write admission holds has its write waiting first, and no other chunk is marked held"
 	invAcked    = "acknowledged writes are readable"
 	invPunched  = "punched ranges read zeros"
 	invMove     = "a cleaner move never replaces a write that landed during cleaning"
@@ -64,6 +65,7 @@ func (h *harness) register() {
 	h.inv.Register(invRewrite, h.rewritesGain)
 	found(invHeld)
 	found(invNoSpace)
+	h.inv.Register(invAdmit, func() error { return heldErr(h.s) })
 	h.inv.Register(invAcked, h.ackedReadable)
 	h.inv.Register(invPunched, h.punchesReadZeros)
 	h.inv.Register(invMove, h.movesKeepWrites)
@@ -117,6 +119,31 @@ func slotsErr(st *Store) error {
 		if !slices.Contains(referred, u) && !slices.Contains(st.freed, u) && !slices.Contains(st.ix.freed, u) && pinned[u] == 0 && !named[u] {
 			return fmt.Errorf("slot %d is in use, but no map refers to it, no pending write names it and none frees it (mapped %v)", u, referred)
 		}
+	}
+	return nil
+}
+
+// heldErr checks store st's held queue: each chunk in it once, live, marked held, with a chunk
+// write first among its waiting operations, and no chunk outside it marked held.
+func heldErr(st *Store) error {
+	queue := st.adm.held[st.adm.heldHead:]
+	for k, ci := range queue {
+		cs := &st.chunks[ci]
+		if slices.Contains(queue[:k], ci) || !cs.live || !cs.held || len(cs.waiting) == 0 {
+			return fmt.Errorf("chunk %v is held in %v: live %v, marked %v, %d waiting", cs.id, queue, cs.live, cs.held, len(cs.waiting))
+		}
+		if o := &st.ops[cs.waiting[0]]; o.kind != opWrite || o.err != nil {
+			return fmt.Errorf("chunk %v is held with request %d first, kind %d, err %v", cs.id, o.req.ID, o.kind, o.err)
+		}
+	}
+	marked := 0
+	for ci := range st.chunks {
+		if st.chunks[ci].held {
+			marked++
+		}
+	}
+	if marked != len(queue) {
+		return fmt.Errorf("%d chunks are marked held, the queue holds %v", marked, queue)
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"errors"
 	"slices"
 	"testing"
 
@@ -203,6 +204,52 @@ func TestAHeldWriteWaitsOnlyWhileTheCleanerCanFree(t *testing.T) {
 	h.s.cl.tried, h.s.cl.triedAt = true, h.s.Log().DurableLSN()
 	h.advance(second)
 	h.ok(a)
+}
+
+// A held write that leaves without being admitted, cancelled as its PG's interval ends or refused
+// once an earlier version of its chunk failed, takes its chunk off the held queue while the chunk
+// still has a pending punch: the store takes chunk writes again, and with admission off another
+// chunk's write is not held behind it.
+func TestAHeldWriteThatLeavesUnadmittedFreesTheQueue(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		leave func(h *harness, c core.ChunkID, w uint64)
+		err   error
+	}{
+		{"cancelled", func(h *harness, c core.ChunkID, w uint64) {
+			if !h.s.Cancel(&h.ctx, c, w, &h.out) {
+				t.Fatal("the cancel found no write")
+			}
+		}, ErrDropped},
+		{"earlier version failed", func(h *harness, c core.ChunkID, _ uint64) {
+			h.s.memberFailed(&op{chunk: h.s.chunkOf[c], req: Request{Version: h.s.chunks[h.s.chunkOf[c]].version + 1}})
+			h.s.admitHeld(&h.ctx, &h.out)
+		}, ErrVersion},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := slowedStore(t)
+			h.punch(chunk(1), 0, core.BlockSize, 0)
+			ci := h.s.chunkOf[chunk(1)]
+			w := h.memberWrite(chunk(1), 0, 1, h.s.chunks[ci].version+2, 'a')
+			if h.s.Admitting() || len(h.s.chunks[ci].pending) == 0 {
+				t.Fatalf("setup: admitting %v with %d pending", h.s.Admitting(), len(h.s.chunks[ci].pending))
+			}
+			c.leave(h, chunk(1), w)
+			h.take()
+			if err := h.reply(w).Err; !errors.Is(err, c.err) {
+				t.Fatalf("the held write ended with %v, want %v", err, c.err)
+			}
+			if err := heldErr(h.s); err != nil || !h.s.Admitting() {
+				t.Fatalf("the write left, but the held queue still holds %v: %v", h.s.adm.held[h.s.adm.heldHead:], err)
+			}
+			h.s.plant.noAdmission = true
+			h.write(chunk(4), 0, fill(core.BlockSize, 'b'), 0)
+			if !h.s.Admitting() {
+				t.Fatalf("with admission off, a write is held behind %v", h.s.adm.held[h.s.adm.heldHead:])
+			}
+			h.settle()
+		})
+	}
 }
 
 // BenchmarkBucketTick measures the bucket's refill and window close that every chunk write runs

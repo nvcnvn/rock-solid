@@ -617,12 +617,6 @@ func (s *Store) releaseChunk(i int32) {
 	if !cs.live || len(cs.pending) > 0 || len(cs.waiting) > 0 {
 		return
 	}
-	if cs.held {
-		cs.held = false
-		a := &s.adm
-		a.held = slices.DeleteFunc(a.held[a.heldHead:], func(ci int32) bool { return ci == i })
-		a.heldHead = 0
-	}
 	cs.live = false
 	delete(s.chunkOf, cs.id)
 	s.freeChunks = append(s.freeChunks, i)
@@ -656,6 +650,9 @@ func (s *Store) orderWaiting(ctx *core.Context, ci int32, out *Output) {
 			o.err = ErrFenced
 		}
 		cs.waiting = cs.waiting[:copy(cs.waiting, cs.waiting[1:])]
+		if cs.held {
+			s.unhold(ci)
+		}
 		if o.err != nil {
 			s.finishUnordered(ctx, oi, out)
 			continue

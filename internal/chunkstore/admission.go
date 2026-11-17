@@ -1,6 +1,10 @@
 package chunkstore
 
-import "github.com/nvcnvn/rock-solid/internal/core"
+import (
+	"slices"
+
+	"github.com/nvcnvn/rock-solid/internal/core"
+)
 
 const (
 	// AdmitTimer is the timer the store arms for when its token bucket next admits a chunk write it
@@ -102,6 +106,13 @@ func (a *admission) firstHeld() int32 {
 		return -1
 	}
 	return a.held[a.heldHead]
+}
+
+func (s *Store) unhold(ci int32) {
+	s.chunks[ci].held = false
+	a := &s.adm
+	a.held = slices.DeleteFunc(a.held[a.heldHead:], func(c int32) bool { return c == ci })
+	a.heldHead = 0
 }
 
 func (s *Store) dropHeld() {
