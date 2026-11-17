@@ -209,10 +209,10 @@ func upDisks(c *meta.Control, node uint32) []uint32 {
 }
 
 // A storage node process over TCP: its two blank devices are formatted, reported and join the
-// record, each replica's heartbeat marking its disk up once the membership the control plane
-// sends names its log; a device with no valid superblock and one that cannot be opened reach the
-// leader's FailedDevices; and a pool created at the leader gives a placement table that reaches
-// the replica of every device.
+// record up; a device with no valid superblock and one that cannot be opened reach the leader's
+// FailedDevices; and a pool created at the leader gives a placement table that reaches the
+// replica of every device, and the leader has each replica's fill from its heartbeats, which
+// start once the membership the control plane sends names the replica's log.
 func TestANodeStartsItsDevicesAndTakesItsDisksAndTablesOverTCP(t *testing.T) {
 	dir := testDir(t)
 	p := runCtl(t, dir)
@@ -249,6 +249,17 @@ func TestANodeStartsItsDevicesAndTakesItsDisksAndTablesOverTCP(t *testing.T) {
 		return epoch != 0
 	}) {
 		t.Fatal("the pool never committed")
+	}
+	if !within(30*time.Second, func() bool {
+		return onCtl(t, p, func(_ *core.Context, c *meta.Control) bool {
+			if c == nil {
+				return false
+			}
+			_, _, ok := c.Capacity(1)
+			return ok
+		})
+	}) {
+		t.Fatalf("the leader never had a fill from each replica's heartbeat; the node said:\n%s", out.String())
 	}
 	if !within(30*time.Second, func() bool {
 		es := epochs(out.String())
