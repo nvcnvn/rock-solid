@@ -469,11 +469,13 @@ type replicaPlants struct {
 	// recoverSelfOnly has the primary recover only its own copies, never a member's;
 	// recoverFromListed has a primary that lacks a chunk serve its recovery; clearNoSource clears a
 	// list with an empty image when no member can serve the chunk; goneWhileUp refuses one version
-	// in 16 at an up member as if its disk had left.
+	// in 16 at an up member as if its disk had left; readOldDisk has a disk formatted again answer a
+	// recovery read for its node's old disk ID from its own, empty image.
 	recoverSelfOnly   bool
 	recoverFromListed bool
 	clearNoSource     bool
 	goneWhileUp       bool
+	readOldDisk       bool
 	// readBelowMinLive serves reads in an interval with fewer than min_live live members;
 	// freshGrantNoCheck grants a lease afresh to a holder that reported an older table; noLeaseCheck
 	// serves reads with no lease from the other up members.

@@ -151,6 +151,8 @@ const (
 	EvTake
 	// EvPoolWait, a disk's owner first finding its pool too full to copy a loop's batch: from disk records batch; from is the loop.
 	EvPoolWait
+	// OutRecoverRead, a member reading a chunk's image for its primary's recovery read: chunk interval.
+	OutRecoverRead
 	numNames
 )
 
@@ -260,6 +262,7 @@ var schemas = [numNames]schema{
 	OutNotice:         {"Notice", KindOutput, []field{fTo, fDisk, fLSN, {"batches", typeNum}}},
 	EvTake:            {"Take", KindEvent, []field{{"from", typeNum}, fDisk, {"records", typeNum}, {"batch", typeNum}}},
 	EvPoolWait:        {"PoolWait", KindEvent, []field{{"from", typeNum}, fDisk, {"records", typeNum}, {"batch", typeNum}}},
+	OutRecoverRead:    {"RecoverRead", KindOutput, []field{fChunk, fIv}},
 }
 
 // Kind is the kind of record the name belongs to, or 0 for an unknown name.

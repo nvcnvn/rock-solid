@@ -120,7 +120,7 @@ epoch/neg-never-ask	open	Plants for the epoch model's new rules
 epoch/neg-no-demote	open	Plants for the epoch model's new rules
 epoch/neg-no-list-above	open	Plants for the epoch model's new rules
 epoch/neg-order-past-failed	open	Plants for the epoch model's new rules
-epoch/neg-recovery-read-old-disk	open	Plants for the epoch model's new rules
+epoch/neg-recovery-read-old-disk	chunkstore.readOldDisk	TestADiskFormattedAgainAnswersNoRecoveryReadForItsOldID
 epoch/neg-serve-after-other-primary	open	Plants for the epoch model's new rules
 epoch/neg-serve-refused	open	Plants for the epoch model's new rules
 epoch/neg-settle-by-number	chunkstore.settleByNumber	TestPlantedBugsBreakTheirTraces

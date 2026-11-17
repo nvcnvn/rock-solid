@@ -272,7 +272,7 @@ func (r *Replica) retryReads() {
 // for the member's old disk ID.
 func (r *Replica) recoveryAsked(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) {
 	_, e := r.table.entry(rd.PG.PG)
-	ok := e != nil && r.lead(rd.PG.PG) < 0 && rd.PG.Interval == e.Interval && slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk })
+	ok := e != nil && r.lead(rd.PG.PG) < 0 && rd.PG.Interval == e.Interval && (r.plant.readOldDisk || slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk }))
 	if ok {
 		d, has := e.primary()
 		ok = has && r.addr(d) == ev.Peer
@@ -288,6 +288,7 @@ func (r *Replica) recoveryAsked(ctx *core.Context, ev *core.Event, rd *Read, out
 		r.answer(ctx, ev.Peer, rd.ID, &rp, core.NoBuf, out)
 		return
 	}
+	out.note(trace.OutRecoverRead, rd.Chunk.Hash(), uint64(rd.PG.Interval), 0, 0, 0)
 	id := r.newReq(storeReq{kind: reqRead, peer: ev.Peer, msgID: rd.ID, pg: rd.PG.PG, chunk: rd.Chunk, recover: true})
 	r.st.Read(ctx, Request{ID: id, Chunk: rd.Chunk, Len: core.ChunkSize, Recover: true}, &r.sout)
 }

@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"fmt"
 	"maps"
 	"runtime"
 	"runtime/debug"
@@ -315,9 +316,22 @@ func TestOnlyRecoveryRemovesAMissingListEntry(t *testing.T) {
 // is down and disk 3 is its only source. Node 3's disk is then formatted again and comes back as
 // disk 4 while the table still lists disk 3 up there; disk 4 answers no recovery read for disk 3,
 // so disk 1 keeps the chunk listed rather than taking disk 4's empty image over 2.1 (the
-// primary-change run's seed 34 found it).
+// primary-change run's seed 34 found it). With readOldDisk, the epoch change model's
+// neg-recovery-read-old-disk, disk 1 recovers the chunk from that empty image.
 func TestADiskFormattedAgainAnswersNoRecoveryReadForItsOldID(t *testing.T) {
+	if err := formattedSourceRun(t, false, "scripted-format-source"); err != nil {
+		t.Fatal(err)
+	}
+	if err := formattedSourceRun(t, true, "planted-format-source"); err == nil {
+		t.Fatal("with readOldDisk, disk 1 still keeps the chunk listed")
+	}
+}
+
+// formattedSourceRun runs the formatted source's scenario, keeping its conformance trace as name.
+func formattedSourceRun(t *testing.T, readOldDisk bool, name string) error {
 	c := newRCluster(t, rtable(4, 2))
+	c.conformBegin()
+	c.replicaPlants.readOldDisk = readOldDisk
 	ch := chunkIn(pg0, 4, 0)
 	c.writeWhole(pg0, ch, 0, 1, 1)
 	c.publish(c.next(func(t *Table) {
@@ -340,9 +354,11 @@ func TestADiskFormattedAgainAnswersNoRecoveryReadForItsOldID(t *testing.T) {
 	}
 	c.reps[0].plant.noRecovery = false
 	c.runFor(2 * RetryAfter)
+	conformWrite(t, name, c)
 	if x := c.listed(0, ch); x.ListedIn == 0 {
-		t.Fatalf("disk 1 recovered the chunk while the table still lists disk 3, holding block 0 as %#x", c.diskBlock(0, ch, 0)[0])
+		return fmt.Errorf("disk 1 recovered the chunk while the table still lists disk 3, holding block 0 as %#x", c.diskBlock(0, ch, 0)[0])
 	}
+	return nil
 }
 
 // Recovery writes pass write_limit: with disk 3 at 91% under a 90% limit, a client write adding

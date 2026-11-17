@@ -294,6 +294,7 @@ var conformPlants = []struct {
 	{"recoverFromListed", func(r *primaryRun) { r.c.replicaPlants.recoverFromListed = true }},
 	{"clearNoSource", func(r *primaryRun) { r.c.replicaPlants.clearNoSource = true }},
 	{"goneWhileUp", func(r *primaryRun) { r.c.replicaPlants.goneWhileUp = true }},
+	{"readOldDisk", func(r *primaryRun) { r.c.replicaPlants.readOldDisk = true }},
 	{"listerVetoes", func(r *primaryRun) { r.c.replicaPlants.listerVetoes = true }},
 	{"keepPastMember", func(r *primaryRun) { r.c.replicaPlants.keepPastMember = true }},
 	{"keepNoSource", func(r *primaryRun) { r.c.replicaPlants.keepNoSource = true }},
