@@ -531,6 +531,17 @@ func (c *Control) nextPools() []PoolRecord {
 	return ps
 }
 
+// nextPool is pool id's settings as the next commit gives them: staged, or else committed.
+func (c *Control) nextPool(id core.PoolID) chunkstore.Pool {
+	if i := slices.IndexFunc(c.staged, func(s PoolRecord) bool { return s.ID == id }); i >= 0 {
+		return c.staged[i].Pool
+	}
+	if i, ok := slices.BinarySearchFunc(c.pools, id, cmpPool); ok {
+		return c.pools[i].Pool
+	}
+	return chunkstore.Pool{}
+}
+
 func cmpPool(p PoolRecord, id core.PoolID) int { return cmp.Compare(p.ID, id) }
 
 func (s *ctlState) tablePool(id core.PoolID) (int, bool) {

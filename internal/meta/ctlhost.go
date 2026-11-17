@@ -72,14 +72,16 @@ type CtlHost struct {
 	// starting are the session starts handed to the Control and not yet answered, each with the
 	// loop that asked.
 	starting []starter
-	addrs    []DiskAddr
-	sout     Output
-	cout     ControlOutput
-	answers  []Answer
-	nr       NodeReport
-	asks     []chunkstore.PGFields
-	disks    []chunkstore.Disk
-	stepAt   core.Tick
+	// admins are the operator's commands the Control took and the host has not yet answered.
+	admins  []adminWait
+	addrs   []DiskAddr
+	sout    Output
+	cout    ControlOutput
+	answers []Answer
+	nr      NodeReport
+	asks    []chunkstore.PGFields
+	disks   []chunkstore.Disk
+	stepAt  core.Tick
 }
 
 // ctlOwner is the owner the group's blobs carry on the host's disk log.
@@ -107,6 +109,14 @@ type diskLoop struct {
 type starter struct {
 	at      core.NodeID
 	request uint64
+}
+
+// adminWait is an operator's command the Control took: who sent it under which request, the
+// command, and for a pool, the settings it waits to see committed.
+type adminWait struct {
+	starter
+	a    Admin
+	want chunkstore.Pool
 }
 
 // FormatCtlHost starts a host on a new disk, which it formats with sb. Its first round is the
@@ -237,11 +247,13 @@ func (h *CtlHost) recvGroup(ctx *core.Context, ev *core.Event, out *CtlHostOutpu
 		if h.asks, err = DecodeAsks(ctx.Pool, &ev.Msg, h.asks); err == nil && h.ctl != nil {
 			h.ctl.Asked(ev.Peer.Node, h.asks)
 		}
-	case kind != KindSessionFetch && kind != KindTableFetch && kind != KindSessionStart:
+	case kind != KindSessionFetch && kind != KindTableFetch && kind != KindSessionStart && kind != KindAdmin:
 	case h.ctl == nil:
 		h.redirect(ctx, ev.Peer, out)
 	case kind == KindTableFetch:
 		h.send(ctx, ev.Peer, KindTable, out)
+	case kind == KindAdmin:
+		h.admin(ctx, ev, token, out)
 	case kind == KindSessionStart:
 		h.startSession(ctx, ev.Peer, token)
 	default:
@@ -323,6 +335,80 @@ func (h *CtlHost) startSession(ctx *core.Context, at core.NodeID, request uint64
 	}
 	h.starting = append(h.starting, s)
 	h.ctl.StartSession(at.Node, request)
+}
+
+// admin hands the Control an operator's command while the leader holds its lease, once per request
+// the command line still waits on. A refusal is answered at once; a command taken is answered once
+// nothing of it is staged, by settle.
+func (h *CtlHost) admin(ctx *core.Context, ev *core.Event, request uint64, out *CtlHostOutput) {
+	w := adminWait{starter: starter{at: ev.Peer, request: request}}
+	if !h.leased(ctx) || slices.ContainsFunc(h.admins, func(o adminWait) bool { return o.starter == w.starter }) {
+		return
+	}
+	c := h.ctl
+	var err error
+	switch w.a, err = DecodeAdmin(ctx.Pool, &ev.Msg); {
+	case err != nil:
+	case w.a.Op == AdminFailed:
+		h.answerAdmin(ctx, &w, &AdminAnswer{Failed: c.FailedDevices()}, out)
+		return
+	case w.a.Op == AdminPool:
+		c.begin(ctx.Now)
+		if err = c.SetPool(w.a.Pool, w.a.Spec, c.poolDisks(c.AppendDisks(h.disks[:0]))); err == nil {
+			w.want = c.nextPool(w.a.Pool)
+		}
+		err = wrap(err, "pool %d", w.a.Pool)
+	case w.a.Op == AdminLost:
+		err = wrap(c.Lost(ctx.Now, w.a.Disk), "disk %d", w.a.Disk)
+	default:
+		err = wrap(c.Remove(ctx.Now, w.a.Disk), "disk %d", w.a.Disk)
+	}
+	if err != nil {
+		h.answerAdmin(ctx, &w, &AdminAnswer{Refused: err.Error()}, out)
+		return
+	}
+	h.admins = append(h.admins, w)
+}
+
+func wrap(err error, format string, arg any) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf(format+": %w", arg, err)
+}
+
+// settle answers each operator's command the Control no longer stages: one that took effect, a
+// pool committed with its settings or a disk gone, with no refusal; one the Control dropped, as a
+// change the committed state refused after a reload, with that.
+func (h *CtlHost) settle(ctx *core.Context, out *CtlHostOutput) {
+	c := h.ctl
+	h.admins = slices.DeleteFunc(h.admins, func(w adminWait) bool {
+		var refused string
+		if w.a.Op == AdminPool {
+			if slices.ContainsFunc(c.staged, func(s PoolRecord) bool { return s.ID == w.a.Pool }) {
+				return false
+			}
+			if i, ok := slices.BinarySearchFunc(c.pools, w.a.Pool, cmpPool); !ok || c.pools[i].Pool != w.want {
+				refused = fmt.Sprintf("pool %d: the change was dropped before it committed", w.a.Pool)
+			}
+		} else {
+			if slices.Contains(c.exits, diskExit{w.a.Disk, w.a.Op == AdminRemove}) {
+				return false
+			}
+			if !c.disks[w.a.Disk-1].Gone {
+				refused = fmt.Sprintf("disk %d: the committed state refused it before it committed", w.a.Disk)
+			}
+		}
+		h.answerAdmin(ctx, &w, &AdminAnswer{Refused: refused}, out)
+		return true
+	})
+}
+
+func (h *CtlHost) answerAdmin(ctx *core.Context, w *adminWait, an *AdminAnswer, out *CtlHostOutput) {
+	a := core.Action{Kind: core.ActNetSend, Peer: w.at, Reply: true}
+	if EncodeAdminAnswer(ctx.Pool, h.group, w.request, an, &a.Msg) == nil {
+		out.Actions = append(out.Actions, a)
+	}
 }
 
 func (h *CtlHost) leased(ctx *core.Context) bool { return h.shard.Raft().LeaseRead(ctx) }
@@ -445,6 +531,9 @@ func (h *CtlHost) after(ctx *core.Context, out *CtlHostOutput) {
 			}
 		}
 	}
+	if h.ctl != nil {
+		h.settle(ctx, out)
+	}
 	out.Actions = append(out.Actions, h.sout.Raft.Actions...)
 	out.Actions = append(out.Actions, h.lout.Actions...)
 	h.sout.Reset()
@@ -499,7 +588,7 @@ func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
 // fail stops the host for good on err, a failed disk or a log that does not replay.
 func (h *CtlHost) fail(err error, out *CtlHostOutput) {
 	if err != nil && h.err == nil {
-		h.err, h.ctl = err, nil
+		h.err, h.ctl, h.admins = err, nil, nil
 		out.Errs = append(out.Errs, err)
 	}
 }
@@ -509,7 +598,7 @@ func (h *CtlHost) fail(err error, out *CtlHostOutput) {
 func (h *CtlHost) lead(ctx *core.Context, out *CtlHostOutput) {
 	r := h.shard.Raft()
 	if h.ctl != nil && (r.Leader() != h.id || r.Term() != h.term) {
-		h.ctl, h.starting = nil, h.starting[:0]
+		h.ctl, h.starting, h.admins = nil, h.starting[:0], h.admins[:0]
 	}
 	if h.ctl != nil || h.term == r.Term() || !r.LeaseRead(ctx) {
 		return

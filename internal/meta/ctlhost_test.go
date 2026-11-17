@@ -839,17 +839,18 @@ func TestAHostWhoseDiskFailsStops(t *testing.T) {
 }
 
 // A follower of a three-voter group answers a node's report, session fetch, table fetch and
-// session start with the leader's node.
+// session start and an operator's command with the leader's node.
 func TestAFollowerRedirectsANodeToTheLeader(t *testing.T) {
 	c := newGroup(t, 3, false)
 	l := c.elect()
 	f := (l + 1) % 3
 	h := &CtlHost{shard: c.n[f].s, sv: NewServer(), id: uint64(f) + 1, group: 5}
-	var msgs [4]core.Msg
+	var msgs [5]core.Msg
 	_ = EncodeNodeReport(c.n[f].pool, 5, &NodeReport{Node: hostNode.Node}, &msgs[0])
 	_ = EncodeSessionFetch(c.n[f].pool, 5, 1, &msgs[1])
 	_ = EncodeTableFetch(c.n[f].pool, 5, &msgs[2])
 	_ = EncodeSessionStart(c.n[f].pool, 5, 1, &msgs[3])
+	_ = EncodeAdmin(c.n[f].pool, 5, 1, &Admin{Op: AdminFailed}, &msgs[4])
 	for i := range msgs {
 		var out CtlHostOutput
 		ctx := c.ctx(f)
