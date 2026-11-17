@@ -102,3 +102,71 @@ func TestAPeerThatDialedInIsForgottenOnceItCloses(t *testing.T) {
 		t.Fatalf("the dialed peer got %q after %d dials", got.Msg.Inline(), a.dials)
 	}
 }
+
+// A send that ends a dialed-in peer's connection, as one too large does, queues its PeerLost for
+// the pass's end, and the peer is forgotten with it.
+func TestAPeerThatDialedInIsForgottenWhenASendToItFails(t *testing.T) {
+	r := newRigOn(t, 1, 32<<20, true)
+	a := r.nodes[0]
+	x := core.NodeID{Node: 9}
+	c, err := Dial(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(a.port)), x, a.pool, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	var m core.Msg
+	if err := m.SetInline([]byte("ask")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Send(&m); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100 && len(a.m.recvs) == 0; i++ {
+		r.step(1)
+		time.Sleep(time.Millisecond)
+	}
+	if len(a.d.peers) != 1 {
+		t.Fatalf("peers %+v", a.d.peers)
+	}
+	a.send(x, "big", make([]byte, MaxData+1), true)
+	a.fire()
+	r.step(3)
+	if len(a.m.lost) != 1 || a.m.lost[0] != x || len(a.d.peers) != 0 || len(a.d.index) != 0 {
+		t.Fatalf("after the failed send: lost %v, peers %+v", a.m.lost, a.d.peers)
+	}
+}
+
+// A dialed-in peer whose hello the loop cannot answer, its pool full, is refused and not kept.
+func TestAPeerWhoseHelloCannotBeAnsweredIsNotKept(t *testing.T) {
+	r := newRigOn(t, 1, 1<<20, true)
+	a := r.nodes[0]
+	var held []core.IOBuf
+	for {
+		b, err := a.pool.Alloc(core.BlockSize)
+		if err != nil {
+			break
+		}
+		held = append(held, b)
+	}
+	defer func() {
+		for _, b := range held {
+			a.pool.Free(b)
+		}
+	}()
+	c, err := Dial(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(a.port)), core.NodeID{Node: 9}, a.pool, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	for i := 0; i < 100 && a.links() == 0; i++ {
+		r.step(1)
+		time.Sleep(time.Millisecond)
+	}
+	for i := 0; i < 100 && a.links() != 0; i++ {
+		r.step(1)
+		time.Sleep(time.Millisecond)
+	}
+	if a.links() != 0 || len(a.d.peers) != 0 || len(a.d.index) != 0 || len(a.m.lost) != 0 {
+		t.Fatalf("links %d, peers %+v, lost %v", a.links(), a.d.peers, a.m.lost)
+	}
+}

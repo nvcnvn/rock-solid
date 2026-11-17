@@ -252,6 +252,7 @@ func (d *Driver) named(c loop.ConnID) {
 	}
 	cs.peer = i
 	if !d.send(c, kindHello, putHello(d.hello[:], d.cfg.Self, d.inc), nil) {
+		d.forgetIdle(i)
 		return
 	}
 	p = &d.peers[i]
@@ -281,8 +282,8 @@ func (d *Driver) fail(c loop.ConnID) {
 // closed forgets c, discarding a partial frame, and, when c was its peer's connection, delivers
 // the peer's PeerLost now, or when deliver is false by the next pass. A dial that ends before
 // its peer's hello starts or lengthens the peer's backoff. A peer that dialed in, which this side
-// never dialed since, is forgotten with its PeerLost delivered now, so peers that connect once
-// under fresh IDs, as the operator's command line does, leave nothing behind.
+// never dialed since, is forgotten with its PeerLost, now or by the next pass, so peers that
+// connect once under fresh IDs, as the operator's command line does, leave nothing behind.
 func (d *Driver) closed(c loop.ConnID, deliver bool) {
 	cs := d.conn(c)
 	if cs == nil {
@@ -304,13 +305,19 @@ func (d *Driver) closed(c loop.ConnID, deliver bool) {
 	}
 	if deliver {
 		d.ev = core.Event{Kind: core.EvPeerLost, Peer: p.id}
-		if !p.dialed && !p.lost {
-			d.forget(i)
-		}
+		d.forgetIdle(i)
 		d.deliver(&d.ev)
 		return
 	}
 	d.lose(i)
+}
+
+// forgetIdle forgets peer i if it dialed in and this side never dialed it, and it has no
+// connection and no PeerLost waiting.
+func (d *Driver) forgetIdle(i int) {
+	if p := &d.peers[i]; !p.up && !p.dialed && !p.lost {
+		d.forget(i)
+	}
 }
 
 // forget drops peer i, which no connection names and no PeerLost waits on, moving the last peer
@@ -407,6 +414,7 @@ func (d *Driver) dial(i int) bool {
 	if d.L.Context().Now < p.retryAt {
 		return false
 	}
+	p.dialed = true
 	fd, err := d.cfg.Dial(p.id)
 	if err != nil {
 		d.backoff(p)
@@ -462,9 +470,12 @@ func (d *Driver) send(c loop.ConnID, kind byte, inline, data []byte) bool {
 func (d *Driver) Flush() bool {
 	d.free()
 	n := len(d.lost)
-	for _, i := range d.lost[:n] {
-		d.peers[i].lost = false
-		d.ev = core.Event{Kind: core.EvPeerLost, Peer: d.peers[i].id}
+	for k := range n {
+		i := d.lost[k]
+		p := &d.peers[i]
+		p.lost = false
+		d.ev = core.Event{Kind: core.EvPeerLost, Peer: p.id}
+		d.forgetIdle(i)
 		d.deliver(&d.ev)
 	}
 	d.lost = d.lost[:copy(d.lost, d.lost[n:])]
