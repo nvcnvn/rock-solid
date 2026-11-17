@@ -16,6 +16,9 @@ func TestParseNodeRefusesABadConfiguration(t *testing.T) {
 	}
 	for _, args := range []string{
 		"-node 4294967298 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a",
+		"-node 2147483648 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a",
+		"-node 2 -ctl 2147483648=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a",
+		"-node 2 -ctl 1=127.0.0.1:7000 -peers 2147483648=127.0.0.1:7200 -listen 127.0.0.1:7100 -device /dev/a",
 		"-node 2 -pool 4294967297 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a",
 		"-node 1 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a",
 		"-node 2 -ctl 1=127.0.0.1:7000 -peers 1=127.0.0.1:7200 -listen 127.0.0.1:7100 -device /dev/a",
@@ -33,9 +36,20 @@ func TestParseNodeRefusesABadConfiguration(t *testing.T) {
 	}
 }
 
-func TestParseCtlRefusesANodePast32Bits(t *testing.T) {
-	if _, err := parseCtl(strings.Fields("-node 4294967297 -voters 1=127.0.0.1:7000 -disk d")); err == nil {
-		t.Fatal("-node 4294967297 taken as node 1")
+// A voter's node ID past 32 bits, or in the upper half the command line draws its own from, is
+// refused.
+func TestParseCtlRefusesANodeOutOfRange(t *testing.T) {
+	if _, err := parseCtl(strings.Fields("-node 1 -voters 1=127.0.0.1:7000 -disk d")); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range []string{
+		"-node 4294967297 -voters 1=127.0.0.1:7000 -disk d",
+		"-node 2147483648 -voters 2147483648=127.0.0.1:7000 -disk d",
+		"-node 1 -voters 1=127.0.0.1:7000,2147483649=127.0.0.1:7001 -disk d",
+	} {
+		if _, err := parseCtl(strings.Fields(args)); err == nil {
+			t.Errorf("%q taken", args)
+		}
 	}
 }
 

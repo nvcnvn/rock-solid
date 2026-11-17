@@ -107,8 +107,8 @@ func parseCtl(args []string) (ctlConfig, error) {
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
-	if *node > math.MaxUint32 {
-		return cfg, fmt.Errorf("-node %d is past 32 bits", *node)
+	if *node >= daemonNodes {
+		return cfg, fmt.Errorf("-node %d is not below %d, where a daemon's node lies", *node, daemonNodes)
 	}
 	cfg.Node = uint32(*node)
 	var err error
@@ -133,14 +133,19 @@ func parseCtl(args []string) (ctlConfig, error) {
 	return cfg, nil
 }
 
-// parseAddrs parses s, node=host:port pairs separated by commas, each node above 0 and named once.
+// daemonNodes bounds every daemon's node ID; the command line draws its own above it, so it never
+// takes a daemon's.
+const daemonNodes = 1 << 31
+
+// parseAddrs parses s, node=host:port pairs separated by commas, each node above 0, below
+// daemonNodes and named once.
 func parseAddrs(name, s string) ([]voter, error) {
 	var vs []voter
 	for _, v := range strings.Split(s, ",") {
 		id, addr, ok := strings.Cut(v, "=")
 		n, err := strconv.ParseUint(id, 10, 32)
-		if !ok || err != nil || n == 0 {
-			return nil, fmt.Errorf("%s: %q is not node=host:port with a node above 0", name, v)
+		if !ok || err != nil || n == 0 || n >= daemonNodes {
+			return nil, fmt.Errorf("%s: %q is not node=host:port with a node above 0 and below %d", name, v, uint64(daemonNodes))
 		}
 		ap, err := netip.ParseAddrPort(addr)
 		if err != nil {
@@ -174,8 +179,8 @@ func parseNode(args []string) (nodeConfig, error) {
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
-	if *node > math.MaxUint32 || *pool > math.MaxUint32 {
-		return cfg, fmt.Errorf("-node %d or -pool %d is past 32 bits", *node, *pool)
+	if *node >= daemonNodes || *pool > math.MaxUint32 {
+		return cfg, fmt.Errorf("-node %d is not below %d, where a daemon's node lies, or -pool %d is past 32 bits", *node, daemonNodes, *pool)
 	}
 	cfg.Node, cfg.Pool = uint32(*node), uint32(*pool)
 	var err error
