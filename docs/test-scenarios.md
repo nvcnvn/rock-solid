@@ -3349,6 +3349,7 @@ nodes without finishing.
 | `ci-gates` | 3 | The restart plan alone on PG 2 and its chunk, with a spare table for the restarted node's ask, under fairness, for properties 12 and 20 only: a restarted member's replayed versions settle at the decision of the interval it asks for. PG 1, which takes no write, is left out to fit 5 minutes; `neg-restart-no-ask` has the same constants |
 | `deep-gates` | 3 | `ci-gates` with both PGs and chunks. Too large for `ci`, and not yet run |
 | `ci-gates-left` | 3 | PG 2 and its chunk alone, under fairness, on one plan: a table that moves PG 2's replica off node 3 with node 3 marked down, then the removal, one partial write, and a restart of node 3 or a stop of node 2. Node 3 replays the write gated and is named in no interval of PG 2 once the removal's interval activates. Checks property 21 and 20, with 4, 14 and 18 as invariants; `neg-left-never-settles` has the same constants |
+| `deep-gates-left` | 3 | `ci-gates-left`'s plan with a third table that puts node 3 back into PG 2, two restarts of node 3, `MaxRestart` 3, `MaxTable` 5, safety only. The drop is in memory, so a restart after it gates the write again, unless a checkpoint passed its record, and with node 3 named again its reply carries it. Checks 4, 5, 11, 14, 18 and 19. Too large for `ci` |
 | `ci-refills` | 3 | PG 2 and its chunk alone, two partial writes, no spare table, a restart or a format: a member marked down, refilled beside its replacement and removed |
 | `ci-refills-down` | 3 | As `ci-refills`, with the other member down while the refilled one leaves, and back, then the removal; a format. A chunk counter of 1, to fit 5 minutes, so the two writes take an interval each |
 | `ci-refills-down-restart` | 3 | `ci-refills-down`'s plan with the first write alone, a chunk counter of 2 and a restart instead of the format |
@@ -3594,7 +3595,7 @@ on that log fails.
 the Raft group and lease time need clocks, 13, since their plans make no move, 15 and 16, which
 only `ci-asks` checks, 20, which only `ci-gates` and `ci-gates-left` check, and 21, which only `ci-gates-left` checks; `heavy-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
 and 16 and the action property 17, on its small plans. `ci-gates` checks only the liveness properties 12 and 20, on the restart plan with
-a spare table: without one no table starts the interval a restarted member asks for, and 20 holds only through its exception. `ci-gates-left` checks 20 and 21, with 4, 14 and 18, on a leaving member down when its move completes and then restarted.
+a spare table: without one no table starts the interval a restarted member asks for, and 20 holds only through its exception. `ci-gates-left` checks 20 and 21, with 4, 14 and 18, on a leaving member down when its move completes and then restarted. `deep-gates-left` checks 4, 5, 11, 14, 18 and 19 on the same with the disk put back into the PG after its drop.
 `ci-moves`, `ci-stays`, `ci-stays-stale`, `ci-stays-new`, `ci-stays-gone`, `ci-image`, `ci-image-restart`, `ci-bounce` and the `ci-refills` configurations check the same, property 13, an action property checked at each removal, which a `Stay` is not, and property 18, that no acknowledged write is stranded on a disk that is no member; `ci-sources`, `ci-sources-move`, `ci-sources-lister` and `ci-late-ask` check 18 and 19 among a few. The plans of the peering configurations replace up members, which stands for an operator's edit, so they leave 18 out. The first three
 send only the daemon's one write W, which keeps each within its 5 minutes: the replica's move
 with the successor's writes and a process restart, run alone, passes property 13 at 2.3 million
@@ -4234,6 +4235,7 @@ next milestone's run, which is also the twins' first.
 | Epoch change | `deep-bounce` | [Epoch change model](#epoch-change-model) | 42 | 20,818,780 | 2,119 s |
 | Epoch change | `deep-restarts-moved` | [Epoch change model](#epoch-change-model) | 31 | 1,947,316 | 348 s |
 | Epoch change | `deep-faults-more` | [Epoch change model](#epoch-change-model) | 28 | 1,341,528 | 302 s |
+| Epoch change | `deep-gates-left` | [Epoch change model](#epoch-change-model) | 36 | 1,477,816 | 412 s, 2 workers |
 
 - Each model names the simulator invariant of each property in its own section's property table,
   so this map holds only the configuration results. The sessions model's invariants are registered
