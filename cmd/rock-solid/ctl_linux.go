@@ -249,7 +249,7 @@ func (m *ctlMachine) boot(ctx *core.Context) (*meta.CtlHost, error) {
 		Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, rand.Uint64(), lease.Now(ctx))},
 		Tree: lsm.Config{MaxPiece: 64 << 10, Pages: m.p.pages}}
 	lc := disklog.DefaultConfig()
-	lc.NoTrim = true
+	lc.NoTrim, lc.MaxReplayBytes = true, cfg.MaxReplayBytes
 	if !cfg.Format {
 		return meta.OpenCtlHost(ctx, mc, lc, m.disk.Blocks(), &m.out)
 	}

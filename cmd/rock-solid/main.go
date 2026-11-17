@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
 // minHeap is the least GOMEMLIMIT a budget sets: at 0 the collector would run back to back.
@@ -81,6 +83,8 @@ type ctlConfig struct {
 	DiskBytes int64
 	// Memory is the daemon's memory budget in MiB, 0 for none.
 	Memory int64
+	// MaxReplayBytes is the log's max_replay_bytes.
+	MaxReplayBytes uint64
 }
 
 type voter struct {
@@ -157,6 +161,7 @@ func parseCtl(args []string) (ctlConfig, error) {
 	fs.BoolVar(&cfg.Format, "format", false, "create the disk file and format it, as at a voter's first start; a file already there is made again only if its superblocks were never written")
 	fs.Int64Var(&cfg.DiskBytes, "disk-bytes", 1<<30, "the size of the disk file -format creates")
 	fs.Int64Var(&cfg.Memory, "memory", 0, "the daemon's memory budget in MiB, which GOMEMLIMIT is held at less the slabs mapped outside the Go heap; 0 leaves GOMEMLIMIT alone")
+	fs.Uint64Var(&cfg.MaxReplayBytes, "max-replay-bytes", disklog.DefaultConfig().MaxReplayBytes, "the bytes of log records after the last checkpoint that begin the next; a restart replays at most twice this")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
