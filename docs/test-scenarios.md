@@ -2949,44 +2949,56 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   `SEEDS=10000 scripts/seeds.sh TestX` and records the result in the change. Open: the overnight
   runs of millions of seeds, where they live, how their `SEEDS_FIRST` advances and the `TIMEOUT`
   they take.
-- The list on 2 processes (`JOBS=2`) of a 14-core Apple M4 Pro Mac mini: 85,408 seeds in about
-  1,158 s, building the test binaries included (the two voter-replacement tests, the disk-log
-  crash run, the two shard state machine tests and the write admission run timed alone and
-  added). On 4 processes the largest process peaked at 528 MiB
-  resident (an `internal/lsm` metamorphic shard), all four at 1.9 GiB:
+- The list on 4 processes, the default on a 14-core Apple M4 Pro Mac mini: 130,704 seeds in 1,393 s,
+  building each package's test binary included. The largest process peaked at 1.2 GB resident, as
+  one seed of the write admission run does:
 
   | Test | Seeds | Time |
   | --- | --- | --- |
-  | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 9 s |
-  | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 3 s |
-  | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 4 s |
-  | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 17 s |
-  | `internal/raftshard` `TestVoterReplacementRunsReplayFromTheirSeed` | 2,000 | 25 s |
-  | `internal/raftshard` `TestAReplacementNeverStallsProposals` | 2,000 | 9 s |
-  | `internal/raftshard` `TestCommittedEntriesSurviveCrashesOnTheDiskLog` | 2,000 | 43 s |
-  | `internal/meta` `TestTxnsMatchTheOracle` | 10,000 | 5 s |
-  | `internal/meta` `TestReplayedRequestsReturnTheirFirstFinalResult` | 10,000 | 6 s |
-  | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 28 s |
-  | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 6 s |
-  | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 76 s |
-  | `internal/disklog` `TestOracleCatchesReplayPastATornRound` | 1,000 | 9 s |
-  | `internal/disklog` `TestQuarantinedSegmentsAreNeverReused` | 500 | 11 s |
-  | `internal/disklog` `TestSlotRoundsKeepTheTraceRules` | 300 | 17 s |
-  | `internal/chunkstore` `TestReplayPastPendingWrites` | 2,000 | 15 s |
-  | `internal/lsm` `TestMetamorphic` | 1,000 | 129 s |
-  | `internal/chunkstore` `TestMetamorphic` | 1,000 | 138 s |
-  | `internal/chunkstore` `TestCleanerSurvivesCrashes` | 500 | 18 s |
-  | `internal/chunkstore` `TestRecoveryAndRebuildEqualLiveIndex` | 200 | 69 s |
-  | `internal/chunkstore` `TestRecoveriesMatchTheCrashOracle` | 200 | 42 s |
+  | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 7 s |
+  | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 2 s |
+  | `internal/core` `TestPoolIsFirstFit` | 10,000 | about 1 s |
+  | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 2 s |
+  | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 10 s |
+  | `internal/raftshard` `TestVoterReplacementRunsReplayFromTheirSeed` | 2,000 | 18 s |
+  | `internal/raftshard` `TestAReplacementNeverStallsProposals` | 2,000 | 6 s |
+  | `internal/raftshard` `TestCommittedEntriesSurviveCrashesOnTheDiskLog` | 2,000 | 29 s |
+  | `internal/meta` `TestTxnsMatchTheOracle` | 10,000 | 4 s |
+  | `internal/meta` `TestReplayedRequestsReturnTheirFirstFinalResult` | 10,000 | 4 s |
+  | `internal/meta` `TestResentFSOpsReturnTheirFirstFinalResult` | 5,000 | 4 s |
+  | `internal/meta` `TestKeyByteOrderIsLogicalOrder` | 10,000 | under 1 s |
+  | `internal/meta` `TestReplayInMatchesItsDefinition` | 10,000 | under 1 s |
+  | `internal/disklog` `TestEveryAcceptedItemDecodes` | 2,000 | 75 s |
+  | `internal/disklog` `TestAnythingSubmitAcceptsDecodes` | 2,000 | 33 s |
+  | `internal/disklog` `TestRandomCrashesKeepAcknowledgedRecords` | 500 | 55 s |
+  | `internal/disklog` `TestOracleCatchesReplayPastATornRound` | 1,000 | 35 s |
+  | `internal/disklog` `TestQuarantinedSegmentsAreNeverReused` | 500 | 7 s |
+  | `internal/disklog` `TestSlotRoundsKeepTheTraceRules` | 300 | 87 s |
+  | `internal/chunkstore` `TestReplayPastPendingWrites` | 2,000 | 11 s |
+  | `internal/lsm` `TestMetamorphic` | 1,000 | 123 s |
+  | `internal/chunkstore` `TestMetamorphic` | 1,000 | 139 s |
+  | `internal/chunkstore` `TestCleanerSurvivesCrashes` | 500 | 20 s |
+  | `internal/chunkstore` `TestRecoveryAndRebuildEqualLiveIndex` | 200 | 73 s |
+  | `internal/chunkstore` `TestRecoveriesMatchTheCrashOracle` | 200 | 40 s |
   | `internal/chunkstore` `TestPoolFiguresHoldTheirBounds` | 20,000 | about 1 s |
-  | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 24 s |
-  | `internal/chunkstore` `TestSubBlockWritesMatchTheByteOracle` | 500 | 2 s |
-  | `internal/chunkstore` `TestReplicatedWritesSurviveFaults` | 1,000 | 16 s |
-  | `internal/chunkstore` `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` | 500 | 7 s |
-  | `internal/chunkstore` `TestNoPGServesReadsFromTwoPrimaries` | 500 | 35 s |
-  | `internal/chunkstore` `TestWritesPassTheWriteLimitOnlyWhereAdmitted` | 200 | 94 s |
-  | `internal/chunkstore` `TestTheDetectorMarksAFailedDiskDown` | 500 | 45 s |
-  | `internal/chunkstore` `TestWriteAdmissionHoldsAt90And95PercentFull` | 8 | 259 s |
+  | `internal/chunkstore/storetest` `TestFaultsOnTheSimulatedDisk` | 2,000 | 29 s |
+  | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 20 s |
+  | `internal/chunkstore` `TestSubBlockWritesMatchTheByteOracle` | 500 | 50 s |
+  | `internal/chunkstore` `TestReplicatedWritesSurviveFaults` | 1,000 | 106 s |
+  | `internal/chunkstore` `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` | 500 | 45 s |
+  | `internal/chunkstore` `TestNoPGServesReadsFromTwoPrimaries` | 500 | 44 s |
+  | `internal/chunkstore` `TestNoFencedSessionsWriteIsApplied` | 500 | 41 s |
+  | `internal/chunkstore` `TestWritesPassTheWriteLimitOnlyWhereAdmitted` | 200 | 63 s |
+  | `internal/chunkstore` `TestTheDetectorMarksAFailedDiskDown` | 500 | 52 s |
+  | `internal/chunkstore` `TestWriteAdmissionHoldsAt90And95PercentFull` | 4 | 74 s |
+  | `internal/loop/looptest` `TestSteppedLoopsReplayFromTheirSeed` | 200 | 56 s |
+  | `internal/meta` `TestTheDiskRecordKeepsItsIdentitiesAcrossFailovers` | 2,000 | 2 s |
+  | `internal/loop/looptest` `TestSteppedResumedComesOncePerStop` | 2,000 | about 1 s |
+  | `internal/loop/looptest` `TestRoundsKeepTheirRules` | 400 | 2 s |
+  | `internal/meta` `TestNoSessionIsFencedWhileItsClientsLeaseRuns` | 2,000 | 7 s |
+  | `internal/meta` `TestNoGrantedFlushIsRefusedForSpace` | 1,000 | 4 s |
+  | `internal/meta` `TestTheFilesystemWorkloadKeepsItsInvariantsAcrossElections` | 100 | 2 s |
+  | `internal/loop/nettest` `TestSuiteOnTheSimulatedNetwork` | 100 | 5 s |
 
 - A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
   under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
