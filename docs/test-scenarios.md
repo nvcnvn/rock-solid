@@ -4106,7 +4106,7 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 
 **Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc); results in the [Model-to-simulator map](#model-to-simulator-map)). Voters a, b and c, the plan swapping d in for c:
 
-- `ci-swap`: up to term 2, no crash, safety, with a and b symmetric, and no leader fortified (the constraint `Unfortified`): support only narrows the votes a candidate wins, so every election and commit stays reachable, and the lease invariants are left to `ci-live-moved`, `ci-lease` and `deep-swap`.
+- `ci-swap`: up to term 2 and four committed entries, as many as the swap needs (the constraint `FourChosen`), no crash, safety, with a and b symmetric, and no leader fortified (the constraint `Unfortified`): support only narrows the votes a candidate wins, so every election and commit stays reachable, and the lease invariants are left to `ci-live-moved`, `ci-lease` and `deep-swap`.
 - `ci-live`: c down for good, up to term 2, `SwapCommits` under weak fairness.
 - `ci-lease`: from `JointInit`, a leading term 1 with every replica having applied the joint configuration, a state the spec reaches from its start with no crash; up to term 2, no crash, under any interleaving, grant lapses included, safety only: c wins term 2 while a leads, and lease reads across that election. The next leader after a removed one needs a third term, so `ci-live-moved` checks its reads against the removed leader's.
 - `ci-live-moved`: from `OutgoingInit`, `JointInit` after c won term 2 on every replica, one step of the spec; every replica up, no crash, up to term 3: c leaves the joint configuration, commits its own removal and hands its leadership on, and `NewLeader` holds under weak fairness, with the safety invariants. That fairness lets nobody campaign while a replica leads, an assumption about the steps after the start, not about how the group reached it. `neg-no-support-ask` is this configuration with one rule off, and `neg-removed-keeps-lease` its start and constants under any interleaving with one rule off.
@@ -4118,7 +4118,7 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 - `deep-leave`: `ci-leave` up to term 4, no leader fortified, so c can win term 4 in the joint configuration after another voter won term 3.
 - `ci-restart`: from `JointInit`, up to term 2, no leader fortified, as in `ci-swap`: b, which both configurations keep, crashes once and restarts from any base at or below what it applied, so its configuration can rewind past both changes; the other replicas' restarts are `deep-restart`'s, and lease reads across a restart `deep-lease`'s. `neg-restart-commit-at-base` and `neg-conf-commit-not-durable` are this configuration with one rule off.
 - `deep-restart`: `ci-restart` with a crash of any replica.
-- `deep-swap`: `ci-swap` with one crash and restart of any replica. Every `deep` and `heavy` restart is from a base.
+- `deep-swap`: `ci-swap` with one crash and restart of any replica, and no bound on the committed entries. Every `deep` and `heavy` restart is from a base.
 - `deep-live`: `ci-live` with one crash and restart of a leader, up to term 3.
 - `deep-live-moved`: from `JointInit`, one crash and restart, up to term 3, so c wins after a crashes and its commit of the leave can reach no follower.
 - `deep-lease`: `ci-lease` with one crash and restart, up to term 3.
@@ -4210,17 +4210,16 @@ next milestone's run, which is also the twins' first.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
-| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 29 | 1,470,462 | 277 s, load average near 7 |
-| Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 20 | 2,623 | 2 s |
-| Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 24 | 45,904 | 47 s |
-| Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 21 | 335,232 | 50 s |
-| Voter replacement | `ci-halt` | [Voter replacement model](#voter-replacement-model) | 22 | 1,101,637 | 177 s |
-| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 21 | 1,415,091 | 239 s, load average near 7 |
+| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 25 | 533,097 | 578 s at 1 worker beside other runs, load average near 15 |
+| Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 21 | 2,623 | 3 s |
+| Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 25 | 45,904 | 48 s |
+| Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 21 | 330,009 | 52 s |
+| Voter replacement | `ci-halt` | [Voter replacement model](#voter-replacement-model) | 22 | 1,090,739 | 181 s, load average near 15 |
+| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 20 | 841,852 | 174 s, load average near 15 |
 | Voter replacement | `ci-halt-live` | [Voter replacement model](#voter-replacement-model) | 18 | 1,473 | 2 s |
-| Voter replacement | `ci-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 12,260 | 10 s |
-| Voter replacement | `ci-leave-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 36,118 | 27 s |
-| Voter replacement | `deep-live` | [Voter replacement model](#voter-replacement-model) | 28 | 163,831 | 124 s |
-| Voter replacement | `deep-restart` | [Voter replacement model](#voter-replacement-model) | 21 | 4,069,968 | 755 s, load average near 10 |
+| Voter replacement | `ci-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 11,980 | 11 s |
+| Voter replacement | `ci-leave-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 30,999 | 22 s |
+| Voter replacement | `ci-leave` | [Voter replacement model](#voter-replacement-model) | 18 | 146,007 | 29 s |
 | Epoch change | `heavy-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,577 s |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |

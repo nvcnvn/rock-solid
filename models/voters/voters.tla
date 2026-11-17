@@ -626,6 +626,10 @@ Unfortified == \A r \in Replicas : fort[r] = {}
 \* constraint): its restart from a base can rewind it past both changes.
 KeptFollowerCrashes == \A r \in Replicas : ~up[r] => r \in (BaseVoters \cap Plan) \ {Kept}
 
+\* No more than four entries commit (a state constraint), as many as the swap from the empty
+\* log needs: ci-swap stops there, and deep-swap goes on.
+FourChosen == Len(chosen) <= 4
+
 \* From LeaveInit, only the dropped voter and the voter that took the leave with it go down
 \* (a state constraint): the faults on the voters that hold the leave and the outgoing half's
 \* newest entries; a death of a or d is ci-leave-die-live's.
