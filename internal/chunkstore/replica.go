@@ -467,10 +467,11 @@ type replicaPlants struct {
 	// commitOnOwnLog commits a version once the primary's own log holds it, before its members do;
 	// ackOnLoneCopy answers a kept version OK at activation however few copies its chunk has;
 	// noDegradedHold orders a client write to a chunk with fewer than min_live members that lack
-	// nothing of it.
+	// nothing of it; listerOrders orders one while the primary's own copy lacks something of it.
 	commitOnOwnLog bool
 	ackOnLoneCopy  bool
 	noDegradedHold bool
+	listerOrders   bool
 	// recoverSelfOnly has the primary recover only its own copies, never a member's;
 	// recoverFromListed has a primary that lacks a chunk serve its recovery; clearNoSource clears a
 	// list with an empty image when no member can serve the chunk; goneWhileUp refuses one version
@@ -1127,7 +1128,7 @@ func (r *Replica) park(ev *core.Event, epoch uint64, out *ReplicaOutput) {
 	r.fetch(epoch, false, out)
 }
 
-// clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered. A partial-block write to a chunk whose kept version the primary lacks is held until recovery brings it, and any write to a chunk with fewer than min_live members that lack nothing of it until recovery clears enough, since its OK would otherwise rest on members that cannot serve the chunk, up to maxHeld writes held; recovery takes a chunk a write waits on first. Any write is answered unfound when no member can be the chunk's source: an OK there would read as missing, and the next peering would keep it over what a returning disk still holds.
+// clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered. Any write to a chunk the primary's own copy lacks something of is held until recovery clears it, since the one copy a write surely lands on is the primary's: one logged by members that list the chunk alone, its clean copies cut off, would be kept with no clean copy. A partial-block write to a chunk whose kept version the primary lacks waits the same. Any write to a chunk with fewer than min_live members that lack nothing of it is held until recovery clears enough, since its OK would otherwise rest on members that cannot serve the chunk, up to maxHeld writes held; recovery takes a chunk a write waits on first. Any write is answered unfound when no member can be the chunk's source: the primary lists such a chunk, so the write would wait for ever for a recovery with nothing to copy.
 func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) {
 	if r.plant.fenceOnArrival && !r.replaying && u.Session != 0 && u.Incarnation < r.st.sessions[u.Session] {
 		freeBuf(ctx, ev.Msg.Buf)
@@ -1155,7 +1156,7 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 			return
 		}
 	case !r.leads[i].active || r.leads[i].asking || edgeBytes(u.Off, u.Len) > 0 && r.leads[i].lacks(u.Chunk) && !r.plant.mergeWhileLacking || r.leads[i].isUnfound(u.Chunk) && !r.plant.writeOnUnfound ||
-		r.leads[i].short(e, int(p.MinLive), u.Chunk) && !r.plant.noDegradedHold:
+		r.leads[i].short(e, int(p.MinLive), u.Chunk) && !r.plant.noDegradedHold || r.leads[i].listsOwn(e, r.cfg.Disk, u.Chunk) && !r.plant.listerOrders:
 		l := &r.leads[i]
 		if l.active && !l.asking && l.isUnfound(u.Chunk) && !r.plant.writeOnUnfound {
 			freeBuf(ctx, ev.Msg.Buf)

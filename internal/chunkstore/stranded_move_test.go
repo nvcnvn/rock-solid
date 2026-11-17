@@ -284,28 +284,16 @@ func TestAWriteOnAnUnfoundChunkKeepsTheWayBack(t *testing.T) {
 	}
 }
 
-// With writeOnUnfound a whole-block write hears OK and reads as missing. The next interval keeps it, no disk holds it clean, and the removed disk, which lacks it, no longer heals the chunk: X is out of reach for good, with its bytes on healthy disks.
-func TestWriteOnUnfoundEndsTheWayBack(t *testing.T) {
+// With writeOnUnfound a whole-block write to the unfound chunk is not answered unfound: the primary lists the chunk, so the write waits for recovery, which has no source, and its client never hears.
+func TestWriteOnUnfoundHoldsAWriteForEver(t *testing.T) {
 	s := movedPrimary(t, seededSoleRun(t, 1, 2, 3), core.BlockSize, func(p *replicaPlants) { p.keepPastMember, p.writeOnUnfound = true, true })
 	c := s.c
 	z := c.write(pg0, s.ch, 2*core.BlockSize, bytes.Repeat([]byte{0x44}, core.BlockSize))
-	if rp, ok := s.answered(z, 5_000_000); !ok || rp.Status != StatusOK {
-		t.Fatalf("a whole-block write answered %+v, %v", rp, ok)
+	if rp, ok := s.answered(z, 60_000_000); ok {
+		t.Fatalf("a whole-block write answered %+v", rp)
 	}
-	_, e := c.table.entry(pg0)
-	s.a.asks = append(s.a.asks, PGInterval{PG: pg0, Interval: e.Interval})
-	s.tick(10_000_000)
-	clear(s.a.drain)
-	s.a.edits = append(s.a.edits, Edit{PG: pg0, Disks: []uint32{s.primary, s.leaving}})
-	s.tick(120_000_000)
-	if !slices.ContainsFunc(s.members(), func(m Member) bool { return m.Disk == s.leaving }) {
-		t.Fatalf("members %v", s.members())
-	}
-	if rp, _ := s.read(s.ch); rp.Status != StatusUnfound {
-		t.Fatalf("read %+v with the removed disk back", rp)
-	}
-	if got := s.block(s.leaving, 0); got != 0x11 {
-		t.Fatalf("removed disk holds X's block as %#x", got)
+	if l := &c.reps[c.node(s.added)].leads[0]; !l.isUnfound(s.ch) || len(l.held) != 1 {
+		t.Fatalf("lead %+v", l)
 	}
 }
 

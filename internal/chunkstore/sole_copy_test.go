@@ -490,6 +490,85 @@ func TestNoDegradedHoldLeavesAnOKUnfoundWithItsOneCleanCopy(t *testing.T) {
 	}
 }
 
+// listerPrimary has the primary of a rep3 PG at min_live 1 list chunk ch beside one clean member: Y lands on the primary and the second member, not on the third, and peering drops it, so the two that logged it list the chunk and the third holds X clean, which noRecovery keeps. It leaves the third cut off from the primary and returns what the second holds.
+func listerPrimary(t *testing.T, set func(*replicaPlants)) (r *soleRun, ch core.ChunkID, a, b, d uint32, held Chunk) {
+	r = newSoleRun(t, 3, 1, 3)
+	c := r.c
+	plantAll(c, set)
+	ch = chunkIn(pg0, 1, 0)
+	c.until(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize)))
+	c.settle()
+	ms := r.members()
+	a, b, d = ms[0].Disk, ms[1].Disk, ms[2].Disk
+	plantAll(c, func(p *replicaPlants) { p.noRecovery = true })
+	an, dn := uint32(c.node(a)), uint32(c.node(d))
+	c.s.Partition(an, dn, true)
+	y := c.write(pg0, ch, core.BlockSize, bytes.Repeat([]byte{0x22}, core.BlockSize))
+	c.runFor(5_000)
+	_, e := c.table.entry(pg0)
+	r.a.asks = append(r.a.asks, PGInterval{PG: pg0, Interval: e.Interval})
+	r.publish()
+	c.s.Heal(an, dn)
+	if rp, ok := r.answered(y, 20_000_000); !ok || rp.Status == StatusOK {
+		t.Fatalf("Y answered %+v, %v", rp, ok)
+	}
+	r.tick(5_000_000)
+	for _, m := range []uint32{a, b, d} {
+		if got := c.listed(c.node(m), ch); (got.ListedIn != 0) != (m != d) {
+			t.Fatalf("disk %d holds %+v", m, got)
+		}
+	}
+	c.s.Partition(an, dn, true)
+	return r, ch, a, b, d, c.listed(c.node(b), ch)
+}
+
+// W, a whole block, waits while the primary lists the chunk, though the third member is a clean copy and min_live is 1: the one copy W surely lands on is the primary's. Once recovery clears the primary's list, W is ordered and its OK rests on a clean primary.
+func TestAWriteWaitsWhileThePrimaryListsTheChunk(t *testing.T) {
+	r, ch, a, b, d, held := listerPrimary(t, noPlant)
+	c := r.c
+	w := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x44}, core.BlockSize))
+	if rp, ok := r.answered(w, 20_000_000); ok {
+		t.Fatalf("W answered %+v with the primary listing the chunk", rp)
+	}
+	if got := c.listed(c.node(b), ch); got.Whole != held.Whole {
+		t.Fatalf("W ordered with the primary listing the chunk: disk %d holds %+v, held %+v", b, got, held)
+	}
+	c.s.Heal(uint32(c.node(a)), uint32(c.node(d)))
+	plantAll(c, func(p *replicaPlants) { p.noRecovery = false })
+	rp, ok := r.answered(w, 100_000_000)
+	if !ok || rp.Status != StatusOK {
+		t.Fatalf("W answered %+v, %v", rp, ok)
+	}
+	if h := r.holders(ch, rp.Version); !slices.Contains(h, a) {
+		t.Fatalf("W, OK, has clean copies on %v", h)
+	}
+}
+
+// With listerOrders, W lands on the primary and the second member, which both list the chunk, and not on the third, its one clean copy. The third goes down, the interval of the other two keeps W, and once the third is back it lacks W and lists the chunk too: every disk is up and X, acknowledged, reads unfound.
+func TestListerOrdersLeavesAChunkUnfoundWithEveryDiskUp(t *testing.T) {
+	r, ch, _, b, d, held := listerPrimary(t, func(p *replicaPlants) { p.listerOrders = true })
+	c := r.c
+	c.write(pg0, ch, 0, bytes.Repeat([]byte{0x44}, core.BlockSize))
+	c.runFor(5_000)
+	if got := c.listed(c.node(b), ch); got.Whole == held.Whole {
+		t.Fatalf("W not ordered: disk %d holds %+v", b, got)
+	}
+	r.lose(d)
+	r.publish()
+	c.untilActive()
+	r.back(d)
+	r.publish()
+	r.tick(10_000_000)
+	for _, m := range r.members() {
+		if m.Mark != MarkUp || c.listed(c.node(m.Disk), ch).ListedIn == 0 {
+			t.Fatalf("members %v, disk %d holds %+v", r.members(), m.Disk, c.listed(c.node(m.Disk), ch))
+		}
+	}
+	if rp, _ := r.read(ch); rp.Status != StatusUnfound {
+		t.Fatalf("chunk read %+v with every disk up", rp)
+	}
+}
+
 // W is on disks 1 and 2 when disk 3 goes: the decision proves two copies, and the client hears OK at activation.
 func TestAVersionOnMinLiveCopiesHearsOKAtActivation(t *testing.T) {
 	r := newSoleRun(t, 3, 2, 3)
@@ -542,9 +621,20 @@ func TestAOneDiskPoolsVersionHearsOKAcrossItsInterval(t *testing.T) {
 	}
 }
 
-// At min_live 1 too, a primary that lists the chunk is no copy: W on it alone counts none, so its client is refused, and with no up member a source the resend answers unfound.
+// At min_live 1 too, a primary that lists the chunk is no copy: W, sent as the other two go, waits while the primary lists the chunk, and with no up member a source the next interval answers it unfound. With listerOrders, W is ordered on the primary alone, which counts none at activation, so its client is refused, and the resend answers unfound.
 func TestAPrimaryThatListsTheChunkIsNoCopyAtMinLiveOne(t *testing.T) {
-	r := newSoleRun(t, 3, 1, 3)
+	for _, plant := range []bool{false, true} {
+		r := newSoleRun(t, 3, 1, 3)
+		plantAll(r.c, func(p *replicaPlants) { p.listerOrders = plant })
+		first := StatusUnfound
+		if plant {
+			first = StatusRefused
+		}
+		primaryListsAtMinLiveOne(t, r, first)
+	}
+}
+
+func primaryListsAtMinLiveOne(t *testing.T, r *soleRun, first Status) {
 	c := r.c
 	ch := chunkIn(pg0, 1, 0)
 	c.until(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize)))
@@ -569,7 +659,7 @@ func TestAPrimaryThatListsTheChunkIsNoCopyAtMinLiveOne(t *testing.T) {
 	id := c.write(pg0, ch, 0, w)
 	c.runFor(5_000)
 	r.publish()
-	if rp, ok := r.answered(id, 100_000_000); !ok || rp.Status != StatusRefused {
+	if rp, ok := r.answered(id, 100_000_000); !ok || rp.Status != first {
 		t.Fatalf("W answered %+v, %v", rp, ok)
 	}
 	if rp, ok := r.answered(c.write(pg0, ch, 0, w), 100_000_000); !ok || rp.Status != StatusUnfound {

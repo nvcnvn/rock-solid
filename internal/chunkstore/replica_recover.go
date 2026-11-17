@@ -166,6 +166,17 @@ func (l *lead) short(e *PGEntry, minLive int, c core.ChunkID) bool {
 	return n < minLive
 }
 
+// listsOwn reports whether the lead's own copy of chunk c, on disk, still lacks something of it, so
+// a client write to it waits: recovery left it to do, or found no source and called it unfound.
+func (l *lead) listsOwn(e *PGEntry, disk uint32, c core.ChunkID) bool {
+	j := l.pending(c)
+	if j < 0 {
+		return l.isUnfound(c)
+	}
+	s := slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == disk })
+	return s >= 0 && s < maxMembers && l.todo[j].targets&(1<<s) != 0
+}
+
 // urge has recovery take chunk c, which a client write waits on, before the lead's other chunks.
 func (l *lead) urge(c core.ChunkID) {
 	if j := l.pending(c); j >= 0 && !l.todo[j].urgent {

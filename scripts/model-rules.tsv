@@ -28,9 +28,10 @@ epoch/neg-keep-past-member	chunkstore.keepPastMember	TestKeepPastMemberLeavesAMo
 epoch/neg-lease-before-bound	lease.beforeBound	TestPlantedLeaseBugsBreakThePair
 epoch/neg-lease-before-bound-half-drift	lease.beforeBound,halfStep	TestPlantedLeaseBugsBreakThePair
 epoch/neg-lister-vetoes	chunkstore.listerVetoes	TestListerVetoesLeavesNoMemberASource
+epoch/neg-lister-orders	chunkstore.listerOrders	TestListerOrdersLeavesAChunkUnfoundWithEveryDiskUp
 epoch/neg-log-out-of-order	chunkstore.resendNewestFirst	TestPlantedPeeringBugsBreakTheFaultRun
 epoch/neg-margin-exact	lease.marginExact	TestPlantedLeaseBugsBreakThePair
-epoch/neg-merge-before-kept	chunkstore.mergeWhileLacking	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-merge-before-kept	chunkstore.mergeWhileLacking,listerOrders	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-merge-on-dropped	chunkstore.mergeOnDropped	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-no-degraded-hold	chunkstore.noDegradedHold	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-no-end-on-resume	lease.noResumedEnd	TestPlantedLeaseBugsBreakThePair
@@ -125,7 +126,7 @@ epoch/neg-recovery-read-old-disk	chunkstore.readOldDisk	TestADiskFormattedAgainA
 epoch/neg-serve-after-other-primary	open	Plants for the epoch model's new rules
 epoch/neg-serve-refused	open	Plants for the epoch model's new rules
 epoch/neg-settle-by-number	chunkstore.settleByNumber	TestPlantedBugsBreakTheirTraces
-epoch/neg-write-on-unfound	chunkstore.writeOnUnfound	TestWriteOnUnfoundEndsTheWayBack
+epoch/neg-write-on-unfound	chunkstore.writeOnUnfound	TestWriteOnUnfoundHoldsAWriteForEver
 epoch/neg-forget-image	chunkstore.forgetImage	TestForgetImageLeavesTheChunkUnfound
 epoch/neg-map-on-replay	chunkstore.mapOnReplay	TestReplayRollbackPlantsLoseX
 epoch/neg-map-on-demote	chunkstore.mapOnDemote	TestReplayRollbackPlantsLoseX

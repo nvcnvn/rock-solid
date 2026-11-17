@@ -129,7 +129,7 @@ func TestPlantedBugsBreakChunkHistories(t *testing.T) {
 		{"M2", 0, func(seed uint64) error {
 			return replicatedSubBlocks{clients: 1, pipeline: 4, writes: 8, maxLen: 300, span: core.BlockSize, mergeCommitted: true}.run(t, seed)
 		}},
-		{"M7", 3, func(seed uint64) error {
+		{"M7", 70, func(seed uint64) error {
 			return runPrimaries(t, seed, &peerPlant{invLinearizable, func(r *primaryRun) { r.c.storePlants.settleSubset = true }})
 		}},
 	} {

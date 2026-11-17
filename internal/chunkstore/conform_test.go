@@ -265,6 +265,7 @@ var conformPlants = []struct {
 }{
 	{"ackOnLoneCopy", func(r *primaryRun) { r.c.replicaPlants.ackOnLoneCopy = true }},
 	{"noDegradedHold", func(r *primaryRun) { r.c.replicaPlants.noDegradedHold = true }},
+	{"listerOrders", func(r *primaryRun) { r.c.replicaPlants.listerOrders = true }},
 	{"oldReport", func(r *primaryRun) { r.a.plant.oldReport = true }},
 	{"activateEarly", func(r *primaryRun) { r.c.replicaPlants.activateEarly = true }},
 	{"sameMembers", func(r *primaryRun) { r.c.replicaPlants.sameMembers = true }},
@@ -274,7 +275,7 @@ var conformPlants = []struct {
 	{"freshGrantNoCheck", func(r *primaryRun) { r.c.replicaPlants.freshGrantNoCheck = true }},
 	{"keepID", func(r *primaryRun) { r.a.keepID = true }},
 	{"resendNewestFirst", func(r *primaryRun) { r.c.replicaPlants.resendNewestFirst = true }},
-	{"mergeWhileLacking", func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking = true }},
+	{"mergeWhileLacking", func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking, r.c.replicaPlants.listerOrders = true, true }},
 	{"mergeOnDropped", func(r *primaryRun) { r.c.replicaPlants.mergeOnDropped = true }},
 	{"editKeepsInterval", func(r *primaryRun) { r.a.plant.editKeepsInterval = true }},
 	{"relistNever", func(r *primaryRun) { r.c.replicaPlants.relistNever, r.c.storePlants.clearListed = true, true }},

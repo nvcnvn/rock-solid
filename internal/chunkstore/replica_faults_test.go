@@ -895,10 +895,10 @@ func TestReplicatedWritesSurviveFaults(t *testing.T) {
 // A recovery write that leaves out the blocks covered when it read its source, not when it was
 // ordered (the epoch change model's neg-recovery-covers-at-read), puts a source's block over a
 // write ordered in between, and two disks then hold different bytes under one version, the first
-// invariant it breaks, checked alone, at 47 of the first 500 seeds.
+// invariant it breaks, checked alone, at 13 of the first 500 seeds.
 func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
-	if runFaults(t, 11, 2, 24, &faultPlant{invOneVersion, func(c *rcluster) { c.replicaPlants.coverAtRead = true }}) == nil {
-		t.Fatalf("seed 11 kept %q", invOneVersion)
+	if runFaults(t, 15, 2, 24, &faultPlant{invOneVersion, func(c *rcluster) { c.replicaPlants.coverAtRead = true }}) == nil {
+		t.Fatalf("seed 15 kept %q", invOneVersion)
 	}
 }
 
@@ -924,7 +924,7 @@ func TestPlantedPeeringBugsBreakTheFaultRun(t *testing.T) {
 		{"logged out of order", 13, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.resendNewestFirst = true }}},
 		{"decided by its own interval", 73, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.ownInterval = true }}},
 		{"activated before lists are durable", 7, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
-		{"missing entry cleared", 0, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.relistNever, c.storePlants.clearListed = true, true }}},
+		{"missing entry cleared", 7, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.relistNever, c.storePlants.clearListed = true, true }}},
 	} {
 		if err := runFaults(t, p.seed, 2, 24, &p.faultPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)
