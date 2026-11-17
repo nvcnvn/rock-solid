@@ -374,7 +374,7 @@ func cleanedHarness(t *testing.T) *harness {
 		if i == 20 {
 			t.Fatal("the cleaner freed no segment")
 		}
-		cleanerWorkload(h, r, 100)
+		cleanerWorkload(h, r, 100, nil)
 	}
 	return h
 }

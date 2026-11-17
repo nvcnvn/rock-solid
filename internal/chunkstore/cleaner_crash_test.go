@@ -13,21 +13,29 @@ var cleanChunks = []core.ChunkID{chunk(1), chunk(2), chunk(3)}
 
 // cleanerWorkload overwrites and punches blocks of three chunks, now and then a whole chunk or
 // under a new snapshot epoch, with operations pipelined behind a few disk actions at a time, so writes land
-// while the cleaner copies, and merges run as the daemon would run them.
-func cleanerWorkload(h *harness, r *core.Rand, ops int) {
+// while the cleaner copies, and merges run as the daemon would run them. With slot set, for a disk
+// of chunk-sized segments, it writes 8 blocks where it would write one and a whole chunk one
+// operation in 40, and sets *slot once the cleaner frees a segment while a chunk slot is in use.
+func cleanerWorkload(h *harness, r *core.Rand, ops int, slot *bool) {
 	var epoch uint64
 	for range ops {
 		c := cleanChunks[r.Below(uint64(len(cleanChunks)))]
 		b := uint32(r.Below(48))
-		switch r.Below(40) {
-		case 0, 1, 2:
+		freed := h.s.CleanStats().Freed
+		switch k := r.Below(40); {
+		case k < 3:
 			h.punch(c, b*core.BlockSize, core.BlockSize, epoch)
-		case 3:
+		case k == 3:
 			epoch++
-		case 4:
+		case k == 4:
 			h.punch(c, 0, core.ChunkSize, epoch)
+		case k == 5 && slot != nil:
+			h.write(c, 0, pattern(r.Uint64(), core.ChunkSize), epoch)
 		default:
 			data := make([]byte, core.BlockSize)
+			if slot != nil {
+				data = make([]byte, 8*core.BlockSize)
+			}
 			r.Fill(data)
 			h.write(c, b*core.BlockSize, data, epoch)
 		}
@@ -36,6 +44,9 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) {
 		}
 		if r.Chance(1, 8) {
 			h.settle()
+		}
+		if slot != nil && h.s.CleanStats().Freed > freed && len(h.s.Log().SlotsInUse(nil)) > 0 {
+			*slot = true
 		}
 	}
 	h.settle()
@@ -48,16 +59,22 @@ func cleanerWorkload(h *harness, r *core.Rand, ops int) {
 // after other events. plant is planted throughout. It returns the blocks the cleaner freed before
 // the crash and the first violation.
 func cleanerCrash(t *testing.T, seed uint64, plant plants) (int, error) {
-	_, freed, err := cleanerCrashLog(t, seed, plant, disklog.Plants{})
+	_, freed, err := cleanerCrashLog(t, seed, plant, disklog.Plants{}, nil)
 	return freed, err
 }
 
-// cleanerCrashLog is cleanerCrash with the log's planted bugs logPlant too, returning its harness.
-func cleanerCrashLog(t *testing.T, seed uint64, plant plants, logPlant disklog.Plants) (*harness, int, error) {
+// cleanerCrashLog is cleanerCrash with the log's planted bugs logPlant too, returning its harness;
+// with slot set, on a small disk with chunk slots, the workload writing whole chunks and setting
+// *slot as cleanerWorkload does.
+func cleanerCrashLog(t *testing.T, seed uint64, plant plants, logPlant disklog.Plants, slot *bool) (*harness, int, error) {
 	r := core.NewRand(seed)
 	cfg := cleanConfig()
 	cfg.Log.Plants = logPlant
-	h := newHarnessOn(t, cfg, cleanGeo)
+	geo := cleanGeo
+	if slot != nil {
+		geo = cleanSlotGeo
+	}
+	h := newHarnessOn(t, cfg, geo)
 	h.merging, h.catch = true, true
 	h.s.plant, h.plant = plant, plant
 	if seed%4 == 3 {
@@ -67,7 +84,7 @@ func cleanerCrashLog(t *testing.T, seed uint64, plant plants, logPlant disklog.P
 	h.crashAt = int(r.Range(200, 4000))
 	if err := violated(func() {
 		crashes(func() {
-			cleanerWorkload(h, r, 700)
+			cleanerWorkload(h, r, 700, slot)
 			panic(errCrash)
 		})
 	}); err != nil {
@@ -91,13 +108,24 @@ func cleanerCrashLog(t *testing.T, seed uint64, plant plants, logPlant disklog.P
 // owner's check, freed and reused segments come back as the table and NextSeq say, and after
 // every recovery the usage table equals the index's counts and the log opens its next segment
 // past every open sequence on disk. A rebuild of the index after the recovery equals it. Every
-// run a freed metadata victim held is rewritten, none taken by an ordinary merge instead.
+// run a freed metadata victim held is rewritten, none taken by an ordinary merge instead. One seed
+// in 16 (seeds 2 and 18 of its own) runs on a disk of chunk-sized segments and writes whole chunks
+// to chunk slots, and the run fails if its slot seeds, more than one, wrote none.
 func TestCleanerSurvivesCrashes(t *testing.T) {
 	cleaned, metaFreed := 0, 0
+	var slots slotStats
 	seeds.Run(t, 0, 20, func(seed uint64) {
-		h, freed, err := cleanerCrashLog(t, seed, plants{}, disklog.Plants{})
+		var cleanedSlot bool
+		var slot *bool
+		if slotSeed(seed, 16) {
+			slot = &cleanedSlot
+		}
+		h, freed, err := cleanerCrashLog(t, seed, plants{}, disklog.Plants{}, slot)
 		if err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
+		}
+		if slot != nil {
+			slots.add(len(h.slotData) > 0, h.slotReplayed(), cleanedSlot)
 		}
 		if h.unrewritten > 0 {
 			t.Fatalf("seed %d: %d runs of freed metadata victims were merged by ordinary merges rather than rewritten", seed, h.unrewritten)
@@ -108,6 +136,7 @@ func TestCleanerSurvivesCrashes(t *testing.T) {
 		metaFreed += h.metaFreed
 	})
 	t.Logf("%d metadata victims freed and charged their rewrites", metaFreed)
+	slots.check(t)
 	if seeds.Default() && cleaned < 10 {
 		t.Fatalf("the cleaner freed a segment before the crash in only %d of 20 seeds", cleaned)
 	}
@@ -171,7 +200,7 @@ func TestPlantedLogBugsBreakNamed(t *testing.T) {
 		{"RecoveryForgetsNewest", disklog.Plants{RecoveryForgetsNewest: true}, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			_, _, err := cleanerCrashLog(t, c.seed, plants{}, c.plant)
+			_, _, err := cleanerCrashLog(t, c.seed, plants{}, c.plant, nil)
 			if violationOf(err) != invNamed {
 				t.Fatalf("broke %v", err)
 			}
@@ -199,7 +228,7 @@ func TestReplayingCopiesAsWritesBreaksReplay(t *testing.T) {
 	for seed := range uint64(50) {
 		h := newHarnessOn(t, cleanConfig(), cleanGeo)
 		h.merging, h.catch = true, true
-		cleanerWorkload(h, core.NewRand(seed), 700)
+		cleanerWorkload(h, core.NewRand(seed), 700, nil)
 		if h.s.CleanStats().Freed == 0 {
 			continue
 		}

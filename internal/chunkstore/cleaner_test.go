@@ -17,6 +17,9 @@ import (
 // cleanGeo is a disk of 64 segments of 16 blocks, small enough to fill many times over.
 var cleanGeo = disklog.Geometry{SegmentBlocks: 16, SegmentCount: 64}
 
+// cleanSlotGeo is the small disk with chunk slots: 32 segments of a chunk each.
+var cleanSlotGeo = disklog.Geometry{SegmentBlocks: core.BlocksPerChunk, SegmentCount: 32}
+
 func cleanConfig() Config {
 	cfg := testConfig()
 	cfg.Log.MaxReplayBytes = 32 * core.BlockSize

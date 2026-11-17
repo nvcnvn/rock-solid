@@ -219,6 +219,51 @@ func newHarness(t testing.TB, cfg Config) *harness {
 // slotGeometry is a disk of 40 segments of 16 MiB, each holding 4 chunk slots.
 var slotGeometry = disklog.Geometry{SegmentBlocks: 4096, SegmentCount: 40}
 
+// slotSeedGeometry is a slot seed's disk: 512 segments of a chunk each, a slot segment holding one
+// slot, as on the smallest disks with slots.
+var slotSeedGeometry = disklog.Geometry{SegmentBlocks: core.BlocksPerChunk, SegmentCount: 512}
+
+// slotSeed reports whether a seeded store run that gives one seed in every a disk with chunk slots
+// and whole-chunk writes gives seed one.
+func slotSeed(seed, every uint64) bool { return seed%every == 2 }
+
+// slotStats counts a seeded run's slot seeds: those run, those that wrote a chunk slot, those in
+// which replay applied or held a slot write, and those whose cleaner freed a segment while a slot
+// was in use.
+type slotStats struct{ seeds, wrote, replayed, cleaned int }
+
+// add counts a slot seed by what it reached.
+func (s *slotStats) add(wrote, replayed, cleaned bool) {
+	s.seeds++
+	if wrote {
+		s.wrote++
+	}
+	if replayed {
+		s.replayed++
+	}
+	if cleaned {
+		s.cleaned++
+	}
+}
+
+// check logs the counts and fails t if the run's slot seeds, more than one, wrote no slot: one seed
+// replayed alone may write none.
+func (s *slotStats) check(t *testing.T) {
+	t.Helper()
+	t.Logf("slot seeds: %d run, %d wrote a slot, %d replayed or held one, %d cleaned with one in use", s.seeds, s.wrote, s.replayed, s.cleaned)
+	if s.seeds > 1 && s.wrote == 0 {
+		t.Fatalf("none of %d slot seeds wrote a chunk slot", s.seeds)
+	}
+}
+
+// slotReplayed reports whether the last recovery replayed a slot write's record, one past the
+// manifest it loaded.
+func (h *harness) slotReplayed() bool {
+	return slices.ContainsFunc(h.records, func(r writtenRecord) bool {
+		return !r.lost && r.lsn > h.loaded.LSN && r.lsn <= h.recoveredLSN && slices.ContainsFunc(r.entries, func(e disklog.Entry) bool { return e.Kind == disklog.EntrySlot })
+	})
+}
+
 // newHarnessOn is newHarness on a disk cut as geo.
 func newHarnessOn(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
 	h := &harness{t: t, pool: sim.NewPool(32<<20, 0), disk: sim.NewDisk(geo.DiskBlocks()), cfg: cfg,
@@ -259,8 +304,12 @@ func (h *harness) take() {
 		}
 		if ch, ok := h.sent[r.ID]; ok {
 			delete(h.sent, r.ID)
-			if r.Err == nil && h.bytes != nil {
+			switch {
+			case h.bytes == nil:
+			case r.Err == nil:
 				h.ackChange(ch, r.Version)
+			case r.Version != 0 && !errors.Is(r.Err, ErrDropped):
+				h.ackTorn(ch, r.Version)
 			}
 		}
 	}
@@ -516,7 +565,8 @@ func (h *harness) usageErr() error {
 	h.s.Index().SegmentSlotHeld(held)
 	for s := uint32(1); s < geo.SegmentCount; s++ {
 		u, stream := h.s.Log().Usage(s)
-		if (stream == disklog.Meta || u.State == disklog.SegmentFree) && want[s] != 0 {
+		// A slot segment keeps the stream of its last use as a log segment; it has none of its own.
+		if (stream == disklog.Meta && u.State != disklog.SegmentSlot || u.State == disklog.SegmentFree) && want[s] != 0 {
 			return fmt.Errorf("segment %d is free or metadata, and the index's records in it refer to %d blocks", s, want[s])
 		}
 		if stream != disklog.Meta && u.State == disklog.SegmentUsed && u.Live != want[s] {

@@ -147,6 +147,11 @@ func newRClusterWith(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Confi
 	if err != nil {
 		t.Fatal(err)
 	}
+	return newRClusterOnDisks(t, tbl, s, edit, geo)
+}
+
+// newRClusterOnDisks is newRClusterWith on disks cut as geo.
+func newRClusterOnDisks(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Config), geo disklog.Geometry) *rcluster {
 	c := &rcluster{t: t, s: s, table: tbl, cl: &rclient{replies: map[core.RequestID]Response{}, data: map[core.RequestID][]byte{}, sent: map[core.RequestID]core.IOBuf{}},
 		sentVer: map[sendKey]uint64{}, lost: map[[2]core.NodeID]int{}, sessions: SessionTable{Next: 2, Live: []uint64{1}}}
 	c.inv.Register(invSendOrder, func() error { return c.orderErr })

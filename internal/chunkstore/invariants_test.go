@@ -868,6 +868,29 @@ func (h *harness) ackChange(ch change, version uint64) {
 	o.apply(ch, version)
 }
 
+// ackTorn applies to the byte-range oracle the blocks of write ch that its records written at
+// version hold, which the store answered with an error: a write cut into several records fails
+// durable in part when a later record fails.
+func (h *harness) ackTorn(ch change, version uint64) {
+	first := true
+	for _, r := range h.records {
+		for _, e := range r.entries {
+			if r.lost || e.Kind != disklog.EntryWrite && e.Kind != disklog.EntrySlot || e.Pool != testPool || e.Chunk != ch.c || e.Version != version || ch.data == nil {
+				continue
+			}
+			lo := max(ch.off, uint32(e.First)*core.BlockSize)
+			hi := min(ch.off+ch.n, (uint32(e.First)+uint32(e.Count))*core.BlockSize)
+			part := change{c: ch.c, off: lo, n: hi - lo, data: ch.data[lo-ch.off : hi-ch.off], epoch: ch.epoch}
+			if first {
+				h.ackChange(part, version)
+				first = false
+				continue
+			}
+			h.bytes.chunk(ch.c).apply(part, version)
+		}
+	}
+}
+
 // byteOracle is each chunk's bytes as the acknowledged writes and punches, applied in version
 // order, left them: live, and for each snapshot epoch as the last change before its cut left
 // them. Blocks are kept whole and never changed in place, so a snapshot shares them. held is the

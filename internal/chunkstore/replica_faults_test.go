@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
@@ -81,6 +82,31 @@ type faultRun struct {
 	// serves again; one at a time, and none once a disk is gone, so no more than one disk is ever
 	// lost.
 	failing [3]bool
+	// slots, set on a disk with chunk slots, has the clients write whole chunks and counts what the
+	// stores did with them.
+	slots *slotsSeen
+}
+
+// slotsSeen is whether a store of the run wrote a chunk slot, and whether one held a slot write
+// replay kept back for a decision.
+type slotsSeen struct {
+	wrote, held bool
+	inUse       []core.LBA
+}
+
+// see notes what store st holds of chunk slots.
+func (s *slotsSeen) see(st *Store) {
+	if !st.Serving() {
+		return
+	}
+	s.inUse = st.Log().SlotsInUse(s.inUse[:0])
+	s.wrote = s.wrote || len(s.inUse) > 0
+	for ci := range st.chunks {
+		for _, oi := range st.chunks[ci].pending {
+			o := &st.ops[oi]
+			s.held = s.held || o.req.Gated && slices.ContainsFunc(o.items, func(it item) bool { return it.entry.Kind == disklog.EntrySlot })
+		}
+	}
 }
 
 // sound reports whether a disk fault may be injected: none is pending and no disk is gone.
@@ -107,6 +133,9 @@ type flipAt struct {
 type flip struct {
 	off  int
 	mask byte
+	// header is the record header of the extent the block was mapped by when it rotted: a later
+	// write to the block's address, such as a whole chunk to its slot reused, overwrites the rot.
+	header core.LBA
 }
 
 type faultClient struct {
@@ -134,15 +163,19 @@ func (fc *faultClient) Next(ctx *core.Context, acts []core.Action) []core.Action
 	fc.left--
 	f, c := fc.f, fc.f.c
 	op := faultOp{c: f.chunks[fc.rng.Below(2)], off: uint32(fc.rng.Below(faultSpan))}
-	limit := uint32(300)
-	if fc.rng.Chance(1, 2) {
-		limit = faultSpan
-	}
-	op.n = min(1+uint32(fc.rng.Below(uint64(limit))), core.ChunkSize-op.off)
-	if !fc.rng.Chance(1, 8) {
-		op.data = make([]byte, op.n)
-		for i := range op.data {
-			op.data[i] = byte(fc.rng.Below(255) + 1)
+	if f.slots != nil && fc.rng.Chance(1, 8) {
+		op.off, op.n, op.data = 0, core.ChunkSize, pattern(fc.rng.Uint64(), core.ChunkSize)
+	} else {
+		limit := uint32(300)
+		if fc.rng.Chance(1, 2) {
+			limit = faultSpan
+		}
+		op.n = min(1+uint32(fc.rng.Below(uint64(limit))), core.ChunkSize-op.off)
+		if !fc.rng.Chance(1, 8) {
+			op.data = make([]byte, op.n)
+			for i := range op.data {
+				op.data[i] = byte(fc.rng.Below(255) + 1)
+			}
 		}
 	}
 	c.nextID++
@@ -183,6 +216,9 @@ func (f *faultRun) p() int {
 
 // pass follows what each replica's loop sends: a primary's client replies and member updates, and each member's acknowledgments, which it checks against the member's index as it sends them.
 func (f *faultRun) pass(d int, acts []core.Action) {
+	if f.slots != nil {
+		f.slots.see(f.c.reps[d].Store())
+	}
 	if r := f.c.reps[d]; d == f.p() {
 		if i := r.lead(pg0); i >= 0 && r.leads[i].active && f.kept[r.leads[i].interval] == nil {
 			f.kept[r.leads[i].interval] = append([]keptChunk{}, r.leads[i].kept...)
@@ -375,7 +411,7 @@ func (f *faultRun) sameImage(n int, ch core.ChunkID, v uint64) {
 	}
 }
 
-// block is block b of ch as node n maps it, the bits rotted on its disk put back.
+// block is block b of ch as node n maps it, the bits rotted on its disk under the record that maps it put back.
 func (f *faultRun) block(n int, ch core.ChunkID, b uint16) []byte {
 	e, ok := f.c.reps[n].Store().Index().Lookup(testPool, ch, b)
 	if !ok || e.LBA == 0 {
@@ -384,7 +420,9 @@ func (f *faultRun) block(n int, ch core.ChunkID, b uint16) []byte {
 	lba := e.BlockLBA(b)
 	got := f.c.s.Node(uint32(n)).Disk(0).Read(lba, 1)
 	for _, fl := range f.flips[flipAt{n, lba}] {
-		got[fl.off] ^= fl.mask
+		if fl.header == e.Header {
+			got[fl.off] ^= fl.mask
+		}
 	}
 	return got
 }
@@ -504,7 +542,7 @@ func (f *faultRun) inject() {
 			return
 		}
 		if e, ok := c.reps[p].Store().Index().Lookup(testPool, ch, b); ok && e.LBA != 0 {
-			fl := flip{off: int(f.rng.Below(core.BlockSize)), mask: 1 << f.rng.Below(8)}
+			fl := flip{off: int(f.rng.Below(core.BlockSize)), mask: 1 << f.rng.Below(8), header: e.Header}
 			c.s.Node(uint32(p)).Disk(0).FlipBit(e.BlockLBA(b), fl.off, fl.mask)
 			k := flipAt{p, e.BlockLBA(b)}
 			f.flips[k] = append(f.flips[k], fl)
@@ -706,12 +744,28 @@ type faultPlant struct {
 // runFaults runs the fault workload, failing t on a broken invariant; with a plant, it checks only
 // the plant's invariant and returns its first violation instead.
 func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant) error {
-	s := sim.New(seed, sim.DefaultSettings())
-	c := newRClusterWith(t, rtable(4, 2), s, func(cfg *Config) { cfg.Log.MaxRecordBytes = 3 * core.BlockSize })
+	_, err := runFaultsOn(t, seed, clients, writes, plant, false)
+	return err
+}
+
+// runFaultsOn is runFaults, with slots on disks with chunk slots, the clients writing a whole
+// chunk one write in 8, returning what the stores did with slots.
+func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPlant, slots bool) (*slotsSeen, error) {
+	set := sim.DefaultSettings()
+	geo, err := disklog.GeometryFor(diskBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen *slotsSeen
+	if slots {
+		set.PoolBytes, geo, seen = 64<<20, slotSeedGeometry, &slotsSeen{}
+	}
+	s := sim.New(seed, set)
+	c := newRClusterOnDisks(t, rtable(4, 2), s, func(cfg *Config) { cfg.Log.MaxRecordBytes = 3 * core.BlockSize }, geo)
 	f := &faultRun{t: t, c: c, rng: core.NewRand(seed ^ 0xfa17), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)},
 		ops: map[core.RequestID]faultOp{}, replied: map[core.RequestID]int{}, sent: map[[2]uint64]Update{}, flips: map[flipAt][]flip{},
 		errs: map[string]error{}, version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, to: map[core.RequestID]int{},
-		lost: map[core.RequestID]bool{}, heals: map[[2]uint32]core.Tick{}, images: map[[2]uint64][]byte{}}
+		lost: map[core.RequestID]bool{}, heals: map[[2]uint32]core.Tick{}, images: map[[2]uint64][]byte{}, slots: seen}
 	f.a = &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4}}
 	for n := range 3 {
 		if _, err := f.a.rec.Report(uint32(n), 0, c.logs[n], ""); err != nil {
@@ -789,7 +843,7 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 		}
 		idle = 0
 		if c.found != nil {
-			return c.found
+			return seen, c.found
 		}
 		if busy() && f.rng.Chance(1, 200) {
 			f.inject()
@@ -811,18 +865,24 @@ func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant
 		if plant == nil {
 			t.Fatal(err)
 		}
-		return err
+		return seen, err
 	}
-	return c.found
+	return seen, c.found
 }
 
-// Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail, the stand-in authority's failure detector marking them down and up, and they refuse, the primary's bases rot, the PG's interval changes and the primary crashes, rebuilds its index and moves, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once unless a crash of its primary lost it, the primary maps exactly the writes it answered OK in every chunk it lists nothing of, and once recovery settles every member lists nothing and maps them.
+// Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail, the stand-in authority's failure detector marking them down and up, and they refuse, the primary's bases rot, the PG's interval changes and the primary crashes, rebuilds its index and moves, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once unless a crash of its primary lost it, the primary maps exactly the writes it answered OK in every chunk it lists nothing of, and once recovery settles every member lists nothing and maps them. One seed in 16 (seeds 2 and 18 of its own) runs on disks with chunk slots, its clients writing a whole chunk one write in 8, and the run fails if its slot seeds, more than one, wrote none.
 func TestReplicatedWritesSurviveFaults(t *testing.T) {
+	var slots slotStats
 	seeds.Run(t, 0, 20, func(seed uint64) {
-		if err := runFaults(t, seed, 2, 24, nil); err != nil {
+		seen, err := runFaultsOn(t, seed, 2, 24, nil, slotSeed(seed, 16))
+		if err != nil {
 			t.Fatal(err)
 		}
+		if seen != nil {
+			slots.add(seen.wrote, seen.held, false)
+		}
 	})
+	slots.check(t)
 }
 
 // A recovery write that leaves out the blocks covered when it read its source, not when it was

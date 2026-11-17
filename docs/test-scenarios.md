@@ -2266,6 +2266,37 @@ Invariants (simulator) and faults:
   flight that opened it again, leaves none of its slots in use.
 - With no slot free and only the reserve, a whole chunk goes to the log as several items, and the
   hot lane's other items go on.
+- A slot write keeps its last mark when the log gives it a slot, so it makes its chunk whole
+  (`TestASlotWriteIsWhole`); without it a restarted member's held slot write left every later held
+  version torn, and peering dropped acknowledged versions (the replicated fault run's slot seeds
+  6 and 42).
+- Slots under writes replay holds (`TestAReusedSlotOfTwoHeldWritesIsFreedOnce`): chunk a's whole
+  write at v1.1 takes slot S, a's v2.1 rewrites it whole and S goes back, and chunk b's v2.1 takes
+  S. After a restart replay holds both v2 writes; settling a first lets go of the index's last
+  reference to S, but S stays in use while b's held write names it: a third chunk's whole write
+  takes another slot, and once b settles and is overwritten S is freed once. Freeing it while b
+  held it panicked on the second free (seeds 30 and 62), or gave it to a third write, and the
+  members' copies of b's version differed (seeds 22, 70 and 94) or a read back was never answered
+  (seed 78).
+- A held slot write the decision drops gives its slot back, whether the store drops it after
+  replay or replay drops it at the decision's marker, and a chunk that held an older slot keeps
+  that one: no map ever refers to the dropped write's slot, so the index alone would never free it
+  (`TestADroppedHeldSlotWriteFreesItsSlot`).
+- Seeded runs over slots, every invariant on: one seed in four of
+  `TestRecoveryAndRebuildEqualLiveIndex` and `TestRecoveriesMatchTheCrashOracle` (whole chunks one
+  request in 32), and one in 16 of `TestCleanerSurvivesCrashes` (32 chunk-sized segments, 8-block
+  writes, a whole chunk one op in 40) and of `TestReplicatedWritesSurviveFaults` (512 chunk-sized
+  segments, a whole chunk one write in 8), run on disks with chunk slots. Each logs how many of
+  its slot seeds wrote a slot, replayed or held one, and had the cleaner free a segment while one
+  was in use, and fails if its slot seeds, more than one, wrote none. Over 400 seeds at one in
+  four, the replicated run's 100 slot seeds wrote a slot in 99 and held one in 74; 200 cleaner
+  seeds at one in four wrote one in 49 of 50, replayed one in 20 and cleaned with one in use in
+  23. The cleaner never moves slot data or headers, so no seed counts a moved slot. Two harness
+  fixes came with them: a slot segment keeps the stale stream of its last use and is not read as
+  metadata, and a write answered with an error but durable in part (a multi-record whole chunk
+  hitting `NoSpace`) is applied to the byte oracle by the records written. The replicated run
+  also puts a rotted bit back only under the record it rotted, since a slot reused by another
+  chunk overwrites it.
 - A round carries one slot write before its record's under its one flush, which follows both
   writes: the trace rules hold over seeds of whole chunks, small writes and freed slots at
   `commit_depth` 1 to 3 (`TestSlotRoundsKeepTheTraceRules`), and the crash property holds at

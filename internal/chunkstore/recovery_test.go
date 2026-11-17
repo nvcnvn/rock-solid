@@ -28,20 +28,43 @@ var recoveryChunks = func() []core.ChunkID {
 // newRecoveryHarness is a store on the default disk under the crash oracle, with 16-block records,
 // a checkpoint due every 96 blocks of records, and merges running as the daemon runs them.
 func newRecoveryHarness(t *testing.T) *harness {
+	geo, err := disklog.GeometryFor(diskBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newRecoveryHarnessOn(t, geo)
+}
+
+// newRecoveryHarnessOn is newRecoveryHarness on a disk cut as geo.
+func newRecoveryHarnessOn(t *testing.T, geo disklog.Geometry) *harness {
 	cfg := testConfig()
 	cfg.Log.MaxRecordBytes = 16 * core.BlockSize
 	cfg.Log.MaxReplayBytes = 96 * core.BlockSize
-	h := newHarness(t, cfg)
+	h := newHarnessOn(t, cfg, geo)
 	h.merging = true
 	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
 	return h
 }
 
-// workload sends random writes and punches over the recovery chunks, now and then after a cut.
+// seededRecovery is a recovery harness and a workload on random stream stream of seed: one seed in
+// four has a disk with chunk slots and a workload that writes whole chunks.
+func seededRecovery(t *testing.T, seed, stream uint64) (*harness, *workload) {
+	w := &workload{r: rand.New(rand.NewPCG(seed, stream))}
+	if !slotSeed(seed, 4) {
+		return newRecoveryHarness(t), w
+	}
+	w.slots = true
+	return newRecoveryHarnessOn(t, slotSeedGeometry), w
+}
+
+// workload sends random writes and punches over the recovery chunks, now and then after a cut,
+// and with slots a whole chunk of the first two one request in 32, since the invariants read a
+// chunk's every block after each change to it.
 type workload struct {
 	r     *rand.Rand
 	epoch uint64
 	ops   int
+	slots bool
 }
 
 // run sends 1 to 4 requests and settles, rounds times.
@@ -65,6 +88,11 @@ func (w *workload) request(h *harness) {
 	c := recoveryChunks[w.r.IntN(len(recoveryChunks)-2)]
 	if w.epoch > 0 {
 		c = recoveryChunks[w.r.IntN(len(recoveryChunks))]
+	}
+	if w.slots && w.r.IntN(32) == 0 {
+		c = recoveryChunks[w.r.IntN(2)]
+		h.write(c, 0, fill(core.ChunkSize, byte(1+w.ops%255)), w.epoch)
+		return
 	}
 	off := uint32(w.r.IntN(58)) * core.BlockSize
 	n := uint32(1+w.r.IntN(6)) * core.BlockSize
@@ -126,16 +154,18 @@ func written(h *harness) (pieces, manifests int, newest uint64) {
 // from them, both give the live index exactly, across restarts (invReplay and invRebuild), and
 // each pool's live blocks the store kept. Each of the test's own seeds
 // must load runs and replay records at every recovery, and write multi-piece runs, carry runs,
-// merge and cut.
+// merge and cut. One seed in four (seed 2 of its own) writes whole chunks to chunk slots, and the
+// run fails if its slot seeds, more than one, wrote none.
 func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
+	var slots slotStats
 	seeds.Run(t, 0, 4, func(seed uint64) {
-		h := newRecoveryHarness(t)
-		w := &workload{r: rand.New(rand.NewPCG(seed, 7))}
-		carried, unloaded := 0, 0
+		h, w := seededRecovery(t, seed, 7)
+		carried, unloaded, replayed := 0, 0, false
 		for range 3 {
 			w.run(h, 150)
 			pools := h.s.Index().PoolsLive(nil)
 			restart(h)
+			replayed = replayed || h.slotReplayed()
 			if got := h.s.Index().PoolsLive(nil); !slices.Equal(got, pools) {
 				t.Fatalf("seed %d: recovered pools' live blocks %v, the store kept %v", seed, got, pools)
 			}
@@ -149,12 +179,16 @@ func TestRecoveryAndRebuildEqualLiveIndex(t *testing.T) {
 				t.Fatalf("seed %d: rebuilt pools' live blocks %v, the store kept %v", seed, got, pools)
 			}
 		}
+		if w.slots {
+			slots.add(len(h.slotData) > 0, replayed, false)
+		}
 		pieces, manifests, _ := written(h)
 		t.Logf("seed %d: %d manifests of %d run pieces, %d runs carried, %d merges, %d cuts, %d recoveries without runs or replay", seed, manifests, pieces, carried, len(h.merges), w.epoch, unloaded)
 		if seeds.Default() && (unloaded > 0 || pieces <= manifests || carried == 0 || len(h.merges) == 0 || w.epoch == 0) {
 			t.Fatalf("seed %d: the workload missed a case", seed)
 		}
 	})
+	slots.check(t)
 }
 
 // A crash once a checkpoint's manifest record is durable but before any segment header names it,
@@ -260,6 +294,7 @@ type oracleStats struct {
 	// absent counts recoveries with a chunk frozen absent, writtenAfterAbsent those with one
 	// written after it.
 	absent, writtenAfterAbsent int
+	slots                      slotStats
 }
 
 // crashCycles runs the workload on a store crashed at random actions six times, each unflushed
@@ -268,15 +303,20 @@ type oracleStats struct {
 // invariants.
 func crashCycles(t *testing.T, seed uint64, plant plants, st *oracleStats) error {
 	t.Helper()
-	h := newRecoveryHarness(t)
+	h, w := seededRecovery(t, seed, 9)
 	h.plant, h.catch = plant, true
-	w := &workload{r: rand.New(rand.NewPCG(seed, 9))}
 	r := core.NewRand(seed)
-	return violated(func() { crashCycle(t, h, w, r, seed, st) })
+	replayed := false
+	err := violated(func() { replayed = crashCycle(t, h, w, r, seed, st) })
+	if w.slots {
+		st.slots.add(len(h.slotData) > 0, replayed, false)
+	}
+	return err
 }
 
-// crashCycle runs crashCycles' six crashes and recoveries on h.
-func crashCycle(t *testing.T, h *harness, w *workload, r *core.Rand, seed uint64, st *oracleStats) {
+// crashCycle runs crashCycles' six crashes and recoveries on h, and reports whether one replayed a
+// slot write's record.
+func crashCycle(t *testing.T, h *harness, w *workload, r *core.Rand, seed uint64, st *oracleStats) (replayed bool) {
 	for cycle := range 6 {
 		h.crashIf = func(a *core.Action) bool { return a.Kind != core.ActDiskRead && r.Chance(1, 300) }
 		crashes(func() { w.run(h, 120) })
@@ -312,6 +352,7 @@ func crashCycle(t *testing.T, h *harness, w *workload, r *core.Rand, seed uint64
 			h.recoverStore(disklog.ModeOpen)
 		}
 		m := h.recovered
+		replayed = replayed || h.slotReplayed()
 		st.recoveries++
 		if h.recoveredLSN > acked {
 			st.kept++
@@ -336,13 +377,15 @@ func crashCycle(t *testing.T, h *harness, w *workload, r *core.Rand, seed uint64
 			st.writtenAfterAbsent++
 		}
 	}
+	return replayed
 }
 
 // [property] Seeds 0-7, six crashes each at random actions, each unflushed block landing at
 // random: every recovery reports an LSN in the crash oracle's window and recovers a store that
 // reads, chunk entries and blocks live and at every snapshot epoch, as the oracle's model at that
 // LSN. A recovery crashed at its final flush leaves the window as it was, and the recovery run
-// again reports the LSN it had found.
+// again reports the LSN it had found. One seed in four (seeds 2 and 6 of its own) writes whole
+// chunks to chunk slots, and the run fails if its slot seeds, more than one, wrote none.
 func TestRecoveriesMatchTheCrashOracle(t *testing.T) {
 	var st oracleStats
 	seeds.Run(t, 0, 8, func(seed uint64) {
@@ -351,6 +394,7 @@ func TestRecoveriesMatchTheCrashOracle(t *testing.T) {
 		}
 	})
 	t.Logf("%+v", st)
+	st.slots.check(t)
 	if !seeds.Default() {
 		return
 	}
