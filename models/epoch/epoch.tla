@@ -596,6 +596,19 @@ Reactive ==
     /\ UNCHANGED <<plan, step, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
 
 -----------------------------------------------------------------------------
+\* Whether table e names disk d in an interval of p since the last activated
+\* one. Peering reaches only those intervals' members and recovery reads only
+\* the current one's, and a table's last activated interval never goes back, so
+\* once e names d in none, nothing reads d's versions of p again: d's store
+\* drops its gated versions of p, as a decision keeping none of them would.
+\* With SettleLeftEarly it drops them once e's current interval leaves d out;
+\* with LeftNeverSettles, never.
+Named(e, p, d) == \E i \in tbl[e][p].la..tbl[e][p].iv : d \in Mem(p, i)
+LeftGated(G, e, d) ==
+    {g \in G : LET p == ChunkPG[g.c] IN
+                 IF Bug("SettleLeftEarly") THEN d \notin Mem(p, tbl[e][p].iv)
+                 ELSE ~Bug("LeftNeverSettles") /\ ~Named(e, p, d)}
+
 \* A node adopts a newer table, possibly skipping some. Where a PG's interval
 \* changed under its primary, the primary holds its unordered client writes
 \* and re-peers; if the new interval kept it as primary since the one it
@@ -604,7 +617,8 @@ Reactive ==
 \* that adopts a table where it no longer leads a PG refuses the clients of the
 \* PG's versions it ordered; one that skips such tables and returns as primary
 \* still holds them for peering to settle. A member forgets the versions it
-\* failed in an interval once that interval is over.
+\* failed in an interval once that interval is over. Its store drops the gated
+\* versions of each PG the table names its disk in no interval of (LeftGated).
 
 AdoptPr(n, p, e) ==
     LET old == pr[n][p]
@@ -631,11 +645,13 @@ Adopt(n, e) ==
                                    IN tbl[e][p].iv = IvAt(n, p) \/ AdoptPr(n, p, e).iv # 0}}]
     /\ pend' = {r \in pend : r.n # n \/ AdoptPr(n, ChunkPG[r.c], e).iv # 0 \/ Bug("NoDemote")}
     /\ refd' = {r \in refd : r.n # n \/ AdoptPr(n, ChunkPG[r.c], e).iv # 0}
-    /\ gat' = [gat EXCEPT ![ddisk[n]] = @ \cup
-                 {[c |-> r.c, v |-> r.v] : r \in {x \in (pend \ pend') \cup (refd \ refd') :
-                                                   ~Bug("MapOnDemote")}}]
+    /\ LET d == ddisk[n]
+           G == gat[d] \cup {[c |-> r.c, v |-> r.v] : r \in {x \in (pend \ pend') \cup (refd \ refd') :
+                                                              ~Bug("MapOnDemote")}}
+       IN /\ gat' = [gat EXCEPT ![d] = G \ LeftGated(G, e, d)]
+          /\ drp' = [drp EXCEPT ![d] = @ \cup LeftGated(G, e, d)]
     /\ failed' = [failed EXCEPT ![ddisk[n]] = {f \in @ : tbl[e][ChunkPG[f.c]].iv = IvOfV(f.v)}]
-    /\ UNCHANGED <<ctlVars, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, miss, persIv, drp, rdrp, imf, mrecv,
+    /\ UNCHANGED <<ctlVars, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, miss, persIv, rdrp, imf, mrecv,
                    pv, dec, act, rm, vers, ackd, wst, sends, dmn, bad, ownw, leaseVars, clockVars, raftVars>>
 
 -----------------------------------------------------------------------------
@@ -1787,7 +1803,8 @@ NetFault(h, g, to) ==
 \* each PG it is a member of, so that a decision settles the versions its
 \* replay gated even where the PG would stay in its interval. Replay gates the
 \* versions of an interval at or past the PG's persisted decision, and none
-\* where the disk persisted no decision (a format's 0). With "stop2",
+\* where the disk persisted no decision (a format's 0), and drops at once those
+\* of a PG its table names the disk in no interval of. With "stop2",
 \* only node 3 restarts; with "aimed", only node 2; with "aimed1", only node 1.
 RestartState(n) ==
     /\ run' = [run EXCEPT ![n] = @ + 1]
@@ -1806,13 +1823,15 @@ RestartState(n) ==
     /\ pin' = [pin EXCEPT ![n] = {}]
     /\ known' = [known EXCEPT ![n] = [p \in PG |-> 0]]
     /\ mrecv' = [mrecv EXCEPT ![ddisk[n]] = {}]
-    /\ gat' = [gat EXCEPT ![ddisk[n]] =
-                 @ \cup {g \in [c : Chunk, v : UNION {dlog[ddisk[n]][c] : c \in Chunk}] :
-                           /\ g.v \in dlog[ddisk[n]][g.c]
-                           /\ persIv[ddisk[n]][ChunkPG[g.c]] > 0
-                           /\ IvOfV(g.v) >= persIv[ddisk[n]][ChunkPG[g.c]]
-                           /\ ~Bug("MapOnReplay")}]
-    /\ drp' = [drp EXCEPT ![ddisk[n]] = IF Bug("ReplayForgetsDrops") THEN {} ELSE @ \cup rdrp[ddisk[n]]]
+    /\ LET d == ddisk[n]
+           G == gat[d] \cup {g \in [c : Chunk, v : UNION {dlog[d][c] : c \in Chunk}] :
+                               /\ g.v \in dlog[d][g.c]
+                               /\ persIv[d][ChunkPG[g.c]] > 0
+                               /\ IvOfV(g.v) >= persIv[d][ChunkPG[g.c]]
+                               /\ ~Bug("MapOnReplay")}
+       IN /\ gat' = [gat EXCEPT ![d] = G \ LeftGated(G, ep[n], d)]
+          /\ drp' = [drp EXCEPT ![d] = (IF Bug("ReplayForgetsDrops") THEN {} ELSE @ \cup rdrp[d])
+                                         \cup LeftGated(G, ep[n], d)]
     /\ rdrp' = [rdrp EXCEPT ![ddisk[n]] = {}]
     /\ failed' = [failed EXCEPT ![ddisk[n]] = {}]
     /\ pend' = {r \in pend : r.n # n}
@@ -2278,6 +2297,15 @@ GatesSettle ==
              \A d \in UpIn(p, Cur(p)) : dnode[d] # 0 /\ Running(dnode[d]) =>
                \A g \in gat[d] : ChunkPG[g.c] # p \/ g.v \notin dlog[d][g.c])
 
+\* 21. A store's gated versions of a PG that left its disk settle: once the
+\* newest table names a disk in no interval of a PG since the last activated
+\* one, the running node on it, unless cut off from the control plane, keeps no
+\* version of the PG gated, which would hold its log past the version for good.
+LeftGatesSettle ==
+    <>[](\A n \in Node, p \in PG :
+           Running(n) /\ n \notin stale /\ dnode[ddisk[n]] = n /\ ~Named(Len(tbl), p, ddisk[n]) =>
+             \A g \in gat[ddisk[n]] : ChunkPG[g.c] # p \/ g.v \notin dlog[ddisk[n]][g.c])
+
 \* The interval that answers a version acknowledged in this step: the one
 \* activating, or the version's own.
 AckIv(y) ==
@@ -2514,6 +2542,13 @@ RestartPlansMoved == {DownBackMoved}
 RestartPlansStill == RestartPlans \ RestartPlansMoved
 \* The liveness variant that breaks renewals runs the restart plan alone.
 RestartedPlans == {Restarted}
+\* ci-gates-left: PG 2's replica 3 moved to node 1 and marked down in one table,
+\* then removed; node 3 restarts, so its replay gates the write it logged, and
+\* no decision of PG 2 reaches it again.
+LeftDownPlans == {Plan(<<Tab(2, <<2, 3, 1>>, <<"up", "down", "up">>, {3}), RemoveM(2)>>, <<Partial2[1]>>, {"restart", "stop2"})}
+\* neg-settle-left-early: a replica restarted and replaced, then the primary in
+\* maintenance, so the replaced replica answers peering of the next interval.
+ReplicaThenMaintPlans == {ReplicaThenMaint}
 
 \* ci-tears lists any member Entry leaves off, on a plan that peers twice over
 \* a member's list, and whose later table stops some members persisting at the
