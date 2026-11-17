@@ -3,6 +3,7 @@ package meta
 import (
 	"encoding/binary"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -36,9 +37,10 @@ func (r *hostRun) count() uint64 {
 }
 
 // crashRound asks n Txns next makes, calling answered after each one answered, then hands one
-// more and crashes once its disk actions have run steps at a time while a checkpoint runs, or
-// mid-round. It returns the blocks the log wrote.
-func (r *hostRun) crashRound(n, steps int, midCheckpoint bool, token *uint64, next func() *Txn, answered func()) uint64 {
+// more and crashes host 0 after some of its disk actions, where crash picks: mid-round, or while a
+// checkpoint runs, after 0 to 8 of the next disk actions, or once every piece of the checkpoint is
+// durable and its manifest in flight, after 0 or 1 more. It returns the blocks the log wrote.
+func (r *hostRun) crashRound(n, crash int, token *uint64, next func() *Txn, answered func()) uint64 {
 	r.t.Helper()
 	for range n {
 		*token++
@@ -55,21 +57,57 @@ func (r *hostRun) crashRound(n, steps int, midCheckpoint bool, token *uint64, ne
 		r.do(0, func(ctx *core.Context, out *CtlHostOutput) {
 			r.h.OnEvent(ctx, &core.Event{Kind: core.EvNetRecv, Peer: hostNode, Msg: m}, out)
 		})
-		if !midCheckpoint || r.h.cp.running {
+		if crash%3 == 0 || r.h.cp.running {
 			break
 		}
 		r.drain()
 	}
-	for range steps {
-		if len(r.work) == 0 {
-			break
+	steps := crash % 9
+	if crash%5 == 4 {
+		for cp := &r.h.cp; cp.running && (cp.inPiece || cp.pieceWait) && r.step(); {
 		}
-		w := r.work[0]
-		r.work = r.work[1:]
-		ev := r.disks[w.at].Execute(r.pool, &w.a)
-		r.do(w.at, func(ctx *core.Context, out *CtlHostOutput) { r.hs[w.at].OnEvent(ctx, &ev, out) })
+		steps = crash % 2
+	}
+	for range steps {
+		r.step()
 	}
 	return r.h.disk.Log.Writes().Disk
+}
+
+// step runs the oldest disk action or voter message, and reports whether there was one.
+func (r *hostRun) step() bool {
+	if len(r.work) == 0 {
+		return false
+	}
+	w := r.work[0]
+	r.work = r.work[1:]
+	ev := r.disks[w.at].Execute(r.pool, &w.a)
+	r.do(w.at, func(ctx *core.Context, out *CtlHostOutput) { r.hs[w.at].OnEvent(ctx, &ev, out) })
+	return true
+}
+
+// crashWindows counts the crashes of host 0 by where its checkpoint stands: none running, a
+// piece in flight or waiting for a buffer, or every piece durable and the manifest in flight.
+type crashWindows [3]int
+
+func (w *crashWindows) add(h *CtlHost) {
+	switch cp := &h.cp; {
+	case !cp.running:
+		w[0]++
+	case cp.inPiece || cp.pieceWait:
+		w[1]++
+	default:
+		w[2]++
+	}
+}
+
+// check fails the run unless its crashes landed in every window.
+func (w *crashWindows) check(t *testing.T) {
+	t.Helper()
+	t.Logf("crashes with no checkpoint running %d, with a piece in flight %d, with the manifest in flight %d", w[0], w[1], w[2])
+	if slices.Contains(w[:], 0) {
+		t.Fatal("a window had no crash")
+	}
 }
 
 // addOne is the Txn that adds one to the counter.
@@ -86,8 +124,10 @@ func TestAHostCompactsAndRestartsFromItsManifest(t *testing.T) {
 	r := compactingRun(t, 0)
 	var token, want, written uint64
 	compacted := false
+	var windows crashWindows
 	for crash := range 16 {
-		written += r.crashRound(40, crash%5, crash%3 != 0, &token, addOne, func() { want++ })
+		written += r.crashRound(40, crash, &token, addOne, func() { want++ })
+		windows.add(r.h)
 		compacted = compacted || r.h.Shard().log.Base().Index > 1
 		r.keep = crash%2 == 1
 		r.restart(0)
@@ -101,6 +141,7 @@ func TestAHostCompactsAndRestartsFromItsManifest(t *testing.T) {
 	if !compacted || written < 2*smallDisk.DiskBlocks() {
 		t.Fatalf("the log compacted %v and wrote %d blocks on a disk of %d", compacted, written, smallDisk.DiskBlocks())
 	}
+	windows.check(t)
 }
 
 // Planted: a restore from runs that takes the base they carry for the index applied hands the
@@ -110,7 +151,7 @@ func TestARestoreThatReappliesEntriesBreaksTheStateCheck(t *testing.T) {
 	r.plant = func(h *CtlHost) { h.cp.plantAppliedIsBase = true }
 	var token uint64
 	for range 4 {
-		r.crashRound(40, 0, false, &token, addOne, func() {})
+		r.crashRound(40, 0, &token, addOne, func() {})
 		r.restart(0)
 		r.lead()
 		if r.diverged > 0 {
@@ -142,19 +183,32 @@ func bigTreeRun(t *testing.T, stepBytes int) {
 			gone[seq-200] = true
 		}
 	}
+	var windows crashWindows
+	nonRoot := 0
 	for crash := range 24 {
-		r.crashRound(40, crash%9, crash%3 != 0, &token, next, answered)
+		r.crashRound(40, crash, &token, next, answered)
+		windows.add(r.h)
 		r.keep = crash%2 == 1
 		r.restart(0)
-		r.lead()
 		tree := r.h.Shard().State().Tree()
+		nonRoot += max(0, len(tree.Pieces(nil))-tree.Runs())
+		r.lead()
+		tree = r.h.Shard().State().Tree()
 		for k := range seq {
 			if _, ok := tree.Get(attr(1, 2, k+1)); ok && gone[k+1] {
 				t.Fatalf("crash %d: key %d, deleted by an answered Txn, came back", crash, k+1)
 			}
 		}
 	}
+	windows.check(t)
+	t.Logf("restarts loaded %d pieces besides their runs' roots", nonRoot)
+	if nonRoot == 0 {
+		t.Fatal("no restart loaded a run of more than its root")
+	}
 }
+
+// The big-tree run with whole merges, whose restarts load runs of several pieces.
+func TestAHostRestartsFromRunsOfManyPieces(t *testing.T) { bigTreeRun(t, 0) }
 
 // A tree whose merges take several steps of 8 KiB takes each step at a checkpoint until the merge
 // ends, so its runs stay few and the log keeps room across crashes.
