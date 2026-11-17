@@ -264,10 +264,15 @@ func poolInputs(cp PoolRecord, disks []chunkstore.Disk) chunkstore.PoolInputs {
 	return pin
 }
 
-// SetShardMap stages m, whose ranges CheckRanges accepts, in place of the shard map.
+// SetShardMap stages m, whose ranges CheckRanges accepts and whose replica IDs are fresh, in place of the shard map.
 func (c *Control) SetShardMap(m *ShardMap) error {
 	if err := m.CheckRanges(); err != nil {
 		return err
+	}
+	for i := range m.Groups {
+		if old, ok := c.group(m.Groups[i].ID); !m.Groups[i].freshAfter(old, ok) {
+			return ErrReplicaIDs
+		}
 	}
 	m2 := ShardMap{Groups: slices.Clone(m.Groups)}
 	c.stagedMap = &m2
@@ -838,6 +843,27 @@ func appendGroup(dst []byte, g *Group) []byte {
 		dst = binary.AppendUvarint(binary.AppendUvarint(binary.AppendUvarint(dst, v.ID), uint64(v.Node)), uint64(v.Disk))
 	}
 	return dst
+}
+
+// freshAfter reports whether g's voters are distinct, none above g's last ID, and, when g follows
+// old (ok), its last ID is no lower and each voter old's plan lacks is above old's last ID, and a
+// plan that differs from old's names one: a plan of voters some earlier configuration had would let
+// a stale report of that configuration complete it.
+func (g *Group) freshAfter(old *Group, ok bool) bool {
+	fresh := false
+	for i, v := range g.Voters {
+		if v.ID == 0 || v.ID > g.LastID || slices.ContainsFunc(g.Voters[:i], func(o Replica) bool { return o.ID == v.ID }) {
+			return false
+		}
+		if !ok || slices.ContainsFunc(old.Voters, func(o Replica) bool { return o.ID == v.ID }) {
+			continue
+		}
+		if v.ID <= old.LastID {
+			return false
+		}
+		fresh = true
+	}
+	return !ok || g.LastID >= old.LastID && (fresh || len(g.Voters) == len(old.Voters))
 }
 
 // decodeGroup decodes group id's entry; ErrMalformed for a start over MaxKey, a voter ID above the

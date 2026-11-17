@@ -614,3 +614,42 @@ func TestATableIsCheckedAgainstEveryPoolItReads(t *testing.T) {
 		t.Fatalf("a table from stale pool settings answered %+v", a)
 	}
 }
+
+// A staged shard map keeps each group's replica IDs fresh, which the completion of a plan rests
+// on: refused are a group whose last ID falls, a voter above its group's last ID or not new to
+// the group but above the last ID it had, and a plan that drops voters but adds none.
+func TestAShardMapThatReusesAReplicaIDIsRefused(t *testing.T) {
+	voters := func(ids ...uint64) []Replica {
+		var vs []Replica
+		for _, id := range ids {
+			vs = append(vs, Replica{ID: id, Node: uint32(id), Disk: uint32(id)})
+		}
+		return vs
+	}
+	smap := func(g Group) *ShardMap {
+		return &ShardMap{Groups: []Group{g, {ID: 2, Start: PrefixEnd([]byte{SpaceCtl}), Voters: voters(1, 2, 3), LastID: 3}}}
+	}
+	c := &Control{ctlState: ctlState{smap: *smap(Group{ID: 1, Voters: voters(1, 2, 3), LastID: 4})}}
+	for _, g := range []Group{
+		{ID: 1, Voters: voters(1, 2, 3), LastID: 3},
+		{ID: 1, Voters: voters(1, 2, 4), LastID: 4},
+		{ID: 1, Voters: voters(1, 2, 4), LastID: 5},
+		{ID: 1, Voters: voters(1, 2, 6), LastID: 5},
+		{ID: 1, Voters: voters(1, 2), LastID: 4},
+		{ID: 1, Voters: voters(1, 2, 5, 5), LastID: 5},
+	} {
+		if err := c.SetShardMap(smap(g)); !errors.Is(err, ErrReplicaIDs) || c.stagedMap != nil {
+			t.Fatalf("a shard map planning %+v is staged: %v", g, err)
+		}
+	}
+	for _, g := range []Group{
+		{ID: 1, Voters: voters(1, 2, 3), LastID: 4},
+		{ID: 1, Voters: voters(1, 2, 5), LastID: 5},
+		{ID: 1, Voters: voters(1, 2, 3, 6), LastID: 6},
+		{ID: 3, Voters: voters(1, 2, 3), LastID: 3},
+	} {
+		if err := c.SetShardMap(smap(g)); err != nil {
+			t.Fatalf("a shard map planning %+v is refused: %v", g, err)
+		}
+	}
+}

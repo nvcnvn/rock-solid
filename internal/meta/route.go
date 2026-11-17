@@ -20,6 +20,8 @@ var (
 	ErrReplayTagged = errors.New("meta: client txn writes a replay-tagged key")
 	// ErrRanges reports a shard map whose ranges a router cannot route by.
 	ErrRanges = errors.New("meta: bad shard map ranges")
+	// ErrReplicaIDs reports a shard map that reuses a replica ID or plans voters without a fresh one.
+	ErrReplicaIDs = errors.New("meta: shard map reuses a replica ID")
 	// ErrTokenInFlight reports a Txn handed a router under the token of one still in flight.
 	ErrTokenInFlight = errors.New("meta: token in flight")
 	// ErrGroupGone reports a Txn held for an election whose group left the shard map; it was never proposed, so it may be routed again.
