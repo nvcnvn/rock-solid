@@ -1,5 +1,6 @@
 // Command rock-solid runs a rock-solid daemon: `rock-solid ctl` a voter of the control-plane group,
-// `rock-solid node` a storage node.
+// `rock-solid node` a storage node; and the operator's commands, `rock-solid disk` and
+// `rock-solid pool`, which the control-plane leader answers.
 package main
 
 import (
@@ -73,8 +74,10 @@ func main() {
 		if cfg, err = parseNode(os.Args[2:]); err == nil {
 			p, err = newNode(cfg)
 		}
+	case len(os.Args) >= 2 && (os.Args[1] == "disk" || os.Args[1] == "pool"):
+		os.Exit(runAdmin(os.Args[1:], os.Stdout, os.Stderr))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: rock-solid ctl|node [flags]")
+		fmt.Fprintln(os.Stderr, "usage: rock-solid ctl|node|disk|pool [flags]")
 		os.Exit(2)
 	}
 	if err != nil {

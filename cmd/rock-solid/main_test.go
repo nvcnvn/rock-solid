@@ -1,8 +1,12 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/nvcnvn/rock-solid/internal/chunkstore"
+	"github.com/nvcnvn/rock-solid/internal/meta"
 )
 
 func TestParseNodeRefusesABadConfiguration(t *testing.T) {
@@ -32,5 +36,37 @@ func TestParseNodeRefusesABadConfiguration(t *testing.T) {
 func TestParseCtlRefusesANodePast32Bits(t *testing.T) {
 	if _, err := parseCtl(strings.Fields("-node 4294967297 -voters 1=127.0.0.1:7000 -disk d")); err == nil {
 		t.Fatal("-node 4294967297 taken as node 1")
+	}
+}
+
+func TestParseAdminTakesEachCommand(t *testing.T) {
+	for args, want := range map[string]meta.Admin{
+		"disk lost 5 -ctl 1=127.0.0.1:7000":                      {Op: meta.AdminLost, Disk: 5},
+		"-ctl 1=127.0.0.1:7000 disk remove 6":                    {Op: meta.AdminRemove, Disk: 6},
+		"disk failed -ctl 1=127.0.0.1:7000,2=127.0.0.1:7001":     {Op: meta.AdminFailed},
+		"pool 2 -ctl 1=127.0.0.1:7000 -preset rep2 -pg-count 64": {Op: meta.AdminPool, Pool: 2, Spec: chunkstore.PoolSpec{Replicas: new(2), PGCount: new(uint32(64))}},
+		"pool 3 -ctl 1=127.0.0.1:7000 -overcommit=false -failure-domain disk": {Op: meta.AdminPool, Pool: 3,
+			Spec: chunkstore.PoolSpec{Overcommit: new(false), FailureDomain: "disk"}},
+	} {
+		a, cfg, err := parseAdmin(strings.Fields(args))
+		if err != nil || a.Op != want.Op || a.Disk != want.Disk || a.Pool != want.Pool || !reflect.DeepEqual(a.Spec, want.Spec) || cfg.Group != 1 || len(cfg.Ctls) == 0 {
+			t.Errorf("%q parsed as %+v, %+v, %v", args, a, cfg, err)
+		}
+	}
+	for _, args := range []string{
+		"disk lost -ctl 1=127.0.0.1:7000",
+		"disk lost 0 -ctl 1=127.0.0.1:7000",
+		"disk lost 5",
+		"disk lost 5 -ctl 1=127.0.0.1:7000 -replicas 2",
+		"disk drop 5 -ctl 1=127.0.0.1:7000",
+		"pool -ctl 1=127.0.0.1:7000",
+		"pool 4294967296 -ctl 1=127.0.0.1:7000",
+		"pool 1 -ctl 1=127.0.0.1:7000 -preset rep9",
+		"pool 1 -ctl 1=127.0.0.1:7000 -write-limit 300",
+		"pool 1 -ctl 1=127.0.0.1:7000 -replicas -1",
+	} {
+		if _, _, err := parseAdmin(strings.Fields(args)); err == nil {
+			t.Errorf("%q taken", args)
+		}
 	}
 }
