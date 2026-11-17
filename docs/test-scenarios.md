@@ -3348,6 +3348,7 @@ nodes without finishing.
 | `ci-late-ask` | 3 | PG 1 and its chunk alone, a member down and back, one restart, no spare table, with `lateask`: the restarted primary may ask again in a newer table before it peers. Only here does TLC take `RestartAsk`, which no rule needs |
 | `ci-gates` | 3 | The restart plan alone on PG 2 and its chunk, with a spare table for the restarted node's ask, under fairness, for properties 12 and 20 only: a restarted member's replayed versions settle at the decision of the interval it asks for. PG 1, which takes no write, is left out to fit 5 minutes; `neg-restart-no-ask` has the same constants |
 | `deep-gates` | 3 | `ci-gates` with both PGs and chunks. Too large for `ci`, and not yet run |
+| `ci-gates-left` | 3 | PG 2 and its chunk alone, under fairness, on one plan: a table that moves PG 2's replica off node 3 with node 3 marked down, then the removal, one partial write, and a restart of node 3 or a stop of node 2. Node 3 replays the write gated and is named in no interval of PG 2 once the removal's interval activates. Checks property 21 and 20, with 4, 14 and 18 as invariants; `neg-left-never-settles` has the same constants |
 | `ci-refills` | 3 | PG 2 and its chunk alone, two partial writes, no spare table, a restart or a format: a member marked down, refilled beside its replacement and removed |
 | `ci-refills-down` | 3 | As `ci-refills`, with the other member down while the refilled one leaves, and back, then the removal; a format. A chunk counter of 1, to fit 5 minutes, so the two writes take an interval each |
 | `ci-refills-down-restart` | 3 | `ci-refills-down`'s plan with the first write alone, a chunk counter of 2 and a restart instead of the format |
@@ -3588,12 +3589,12 @@ part, which peering treats as not held; and a record failing below a later one o
 own log, which the store reports as held whole up to the failure, so that only the newest version
 on that log fails.
 
-**Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12, 15, 16 and 20.
+**Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12, 15, 16, 20 and 21.
 `ci-peering`, `ci-restarts`, `ci-restarts-moved`, `ci-edits`, `ci-tears`, `ci-faults`, `ci-faults-more`, `deep-faults-more` and `heavy-peering` check every property but 2 and 10, since
 the Raft group and lease time need clocks, 13, since their plans make no move, 15 and 16, which
-only `ci-asks` checks, and 20, which only `ci-gates` checks; `heavy-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
+only `ci-asks` checks, 20, which only `ci-gates` and `ci-gates-left` check, and 21, which only `ci-gates-left` checks; `heavy-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
 and 16 and the action property 17, on its small plans. `ci-gates` checks only the liveness properties 12 and 20, on the restart plan with
-a spare table: without one no table starts the interval a restarted member asks for, and 20 holds only through its exception.
+a spare table: without one no table starts the interval a restarted member asks for, and 20 holds only through its exception. `ci-gates-left` checks 20 and 21, with 4, 14 and 18, on a leaving member down when its move completes and then restarted.
 `ci-moves`, `ci-stays`, `ci-stays-stale`, `ci-stays-new`, `ci-stays-gone`, `ci-image`, `ci-image-restart`, `ci-bounce` and the `ci-refills` configurations check the same, property 13, an action property checked at each removal, which a `Stay` is not, and property 18, that no acknowledged write is stranded on a disk that is no member; `ci-sources`, `ci-sources-move`, `ci-sources-lister` and `ci-late-ask` check 18 and 19 among a few. The plans of the peering configurations replace up members, which stands for an operator's edit, so they leave 18 out. The first three
 send only the daemon's one write W, which keeps each within its 5 minutes: the replica's move
 with the successor's writes and a process restart, run alone, passes property 13 at 2.3 million
@@ -3623,6 +3624,7 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 18 | An acknowledged write is not stranded: if a disk that is not gone can serve all of a chunk's acknowledged writes, holding them and listing nothing of it, so can a member of its PG's current interval, up or down, or an image of a version that covers them, which a node carries across a restart and a lost lead too, while that node's disk is such a member and runs on it. That such a disk exists is not claimed, as a holder that truly dies leaves none | `NoStranded` | "an acknowledged write a disk can serve, a member can serve" (`invStranded`), checked on every table of the seeded primary-change run and of the `soleRun` tests. `TestAPrimaryListingOnlyItsDroppedWriteServesPastADiskLoss` and the stranded-move tests (`stranded_move_test.go`) cover it as regression tests |
 | 19 | An activated primary has a source: for a chunk with an acknowledged write, a member of its interval can serve them all, or its own image is what peering kept. Claimed while no disk has gone, as a holder that truly dies leaves none, and not for a chunk where a write of a primary listing it reached another member, which stays open with [Clean copies before a write's OK](build-checklist.md) | `PrimarySource` | `invHasSource` ("an activated primary has a source of each chunk it kept, or calls it unfound"), which holds the code to the decision: it does not read versions |
 | 20 | A restarted member's replayed writes settle: with every step that is due taken in time, once a PG's current interval has activated and no later one is asked for, no up member on a running node keeps gated a version of the PG that its log holds | `GatesSettle` | `invRecovered` ("once recovery settles, every member lists nothing and maps the kept writes, but in an unfound chunk"), which a member that keeps replayed writes gated breaks, as it does not map them |
+| 21 | A left PG's gated versions settle: with every step that is due taken in time, once the newest table names a disk in no interval of a PG since the last activated one, the running node on it, unless cut off from the control plane, keeps no version of the PG gated, which would hold its log's replay point short of the version for good | `LeftGatesSettle` | "no running disk keeps a write gated of a PG its table names it in no interval of since the last activated" (`invLeftGated`), registered in every run of the primary-change seeds and of `TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites` by [Gated versions of a PG the disk left](build-checklist.md#phase-4-embedded-metastore) |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
 find a violation of the named property, which is never the property that only restates the removed
@@ -3646,6 +3648,8 @@ under fairness, as `heavy-peering` does, on the restart plan alone, and those fo
 | A restarted primary peers in its old interval | 6 | A write from its previous run is still in a member's socket; the new run's peering drops it and gives its version to the reissue |
 | A restarted primary never asks for a new interval | 12 | PG 2's primary restarts; no table starts a later interval, so it never peers again and the PG never activates |
 | A restarted member never asks for a new interval (`neg-member-no-ask`) | 20 | The restart plan: a member restarts with a version of its PG's current interval in its log; replay leaves it gated, the primary stays, no table starts a later interval, and the version stays gated in the activated interval |
+| A store drops a PG's gated versions once the current interval leaves its disk out (`neg-settle-left-early`, `ci-gates-left`'s constants on the plan that moves PG 2's replica and then puts primary 2 in `maintenance`, without fairness) | 4 | Replica 3 restarts with W gated and is replaced; it drops W while the past interval still names it, and its reply at the next peering vetoes W, which the other member holds. Found in 11 s on 1 worker |
+| A store never drops a left PG's gated versions (`neg-left-never-settles`, `ci-gates-left`'s constants) | 21 | Node 3, down when its replica's move completes, restarts with the partial write gated; the removal's interval activates and no table names node 3, and the write stays gated. Found in 494 s on 1 worker, once TLC has the whole state space |
 | An older version is decided by its own interval's members after a later interval kept it | 4 | Interval 2 keeps a version recovering onto node 1; interval 3 reaches node 1 and a member live in 1 that lacks the version, and 1's rule drops what 2 kept |
 | A primary activates before missing lists are durable | 4 | A member crashes after activation, forgets that it lacks the kept version, and the next peering, reaching it, drops the version |
 | The leader records an activation the primary has only decided | 4 | PG 2: interval 2 replaces member 3 with node 1; primary 2 decides to keep W, still in flight to 3, and the leader records 2 before any member persisted the decision; W completes in interval 1; interval 3 puts 2 in `maintenance`, and node 1, peering from interval 2, finds no member that persisted its decision and drops W |
@@ -4177,6 +4181,7 @@ next milestone's run, which is also the twins' first.
 | Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 28 | 67,676 | 11 s |
 | Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 27 | 591,047 | 140 s |
 | Epoch change | `ci-gates` | [Epoch change model](#epoch-change-model) | 26 | 5,596 | 166 s |
+| Epoch change | `ci-gates-left` | [Epoch change model](#epoch-change-model) | 25 | 46,551 | 163 s |
 | Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 29 | 419,843 | 60 s |
 | Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 38 | 1,674,947 | 187 s |
 | Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 30 | 446,361 | 56 s |
@@ -5823,6 +5828,24 @@ own ([Testing strategy](design.md#testing-strategy)).
   - After a restart the versions replay holds gated, a whole one and one a crash tore, keep the
     replay point before their records and their segments from the cleaner until a decision
     settles them (`TestReplayGatedVersionsKeepTheirSegmentsAndTheReplayPoint`).
+  - A leaving member down when its move completes and then restarted: `rep2` on the slot geometry drains a
+    member to a third disk, writes a whole chunk Z once the move's interval recovered, crashes the leaving member
+    as the table removing it is published and restarts it, its first table naming it only in a past interval.
+    Replay gates Z, pinning its slot and holding the replay point short of its record; once the interval without
+    the member activates and a table names it in no interval, it drops Z: nothing gated, no slot pinned or in use,
+    and the replay point past Z's record and its segment's newest (`TestALeftMemberDropsItsGatedWritesOnceNoIntervalNamesIt`,
+    seeds 1 to 3). With `leftNeverSettles` Z stays gated
+    (`TestALeftMemberThatNeverSettlesKeepsItsGatedWrites`); with `settleLeftEarly` the first table drops it while a
+    past interval names the disk (`TestALeftMemberSettledEarlyDropsWhatAPastIntervalNames`). In the store, a
+    version replayed gated and settled to nothing frees its record's segment to the cleaner once later writes roll
+    it closed and a checkpoint passes it, and without the drop it stays (`TestADroppedGatedWriteLeavesItsSegmentToTheCleaner`).
+    A slot write's record lies in the slot lane's open segment, which closes only after a segment's worth of
+    whole-chunk writes, 1,023 on the slot geometry, like any slot record's.
+  - Seeded: the primary-change run with each leaving member crashed as the table removing it is published
+    (`TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites`, seeds 0-9, 200 in `scripts/seeds.sh` in 18 s) keeps every
+    acknowledged write and breaks no invariant, `invLeftGated` included; it logs how many seeds had a restarted
+    disk drop a left PG's gated writes, 4 of seeds 0-9, and fails if none did. `leftNeverSettles` breaks
+    `invLeftGated` at seed 3 (`TestALeftPGNeverSettledBreaksItsInvariant`).
   - The stranded-move shapes move the primary instead of restarting it, as the epoch change model's
     negatives do: an operator edit that removes the leaving disk and puts the new member first
     (`TestKeepPastMemberLeavesAMoveUnfound`, `TestNeverUnfoundBreaksTheSourceInvariant`,
