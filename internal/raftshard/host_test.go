@@ -33,6 +33,9 @@ type rig struct {
 	fsyncs int
 	// durable is each Durable event's tickets and BlobRefs, in order.
 	durable [][]disklog.Ticket
+	// written is every blob a Durable event placed, cleaned those a crash's replay skips.
+	written []disklog.BlobRef
+	cleaned map[disklog.BlobRef]bool
 }
 
 func newRig(t testing.TB) *rig {
@@ -58,6 +61,9 @@ func (r *rig) absorb() {
 		switch ev.Kind {
 		case disklog.Durable:
 			r.durable = append(r.durable, append([]disklog.Ticket(nil), ev.Tickets...))
+			for i := range ev.Tickets {
+				r.written = append(r.written, disklog.BlobRef{Segment: ev.Segment, Block: ev.Block, LSN: ev.LSN, Entry: uint16(i)})
+			}
 			var more disklog.Output
 			r.done, err = r.host.Durable(&r.ctx, ev, &more, r.done)
 			r.queue = append(r.queue, more.Actions...)
@@ -66,6 +72,11 @@ func (r *rig) absorb() {
 			err = r.rec.Replay(&r.ctx, &more)
 			defer func() { r.out = more; r.absorb() }()
 		case disklog.Replayed:
+			for i := range ev.Entries {
+				if r.cleaned[disklog.BlobRef{Segment: ev.Segment, Block: ev.Block, LSN: ev.LSN, Entry: uint16(i)}] {
+					ev.Entries[i].Kind = 0
+				}
+			}
 			err = r.host.Replayed(ev)
 		case disklog.Recovered:
 			var log *disklog.Log
@@ -151,6 +162,21 @@ func (r *rig) crash(owners ...uint32) map[uint32]*Storage {
 	return sts
 }
 
+// crashCleaned crashes as crash does after a cleaner has reclaimed every blob the host reported dead.
+func (r *rig) crashCleaned(owners ...uint32) map[uint32]*Storage {
+	r.t.Helper()
+	r.cleaned = map[disklog.BlobRef]bool{}
+	for _, ref := range r.written {
+		r.cleaned[ref] = true
+	}
+	for _, hd := range r.host.shards {
+		for _, ref := range hd.refs {
+			delete(r.cleaned, ref)
+		}
+	}
+	return r.crash(owners...)
+}
+
 // live is the live blocks the usage table counts over every segment.
 func (r *rig) live() uint32 {
 	var n uint32
@@ -225,6 +251,28 @@ func TestARoundsBlobsDieOnceCompactedAndItsHardStateIsReplaced(t *testing.T) {
 	r.host.Remove(5)
 	if r.live() != 0 {
 		t.Fatalf("a removed shard's blobs count %d live blocks", r.live())
+	}
+}
+
+// A removed replica's round without a hard state frees no round: the round before it holding the
+// newest hard state stays live, and a restart after the cleaner reclaims every dead blob has it.
+func TestARemovedReplicasRoundWithoutAHardStateKeepsTheNewest(t *testing.T) {
+	r := newRig(t)
+	st := NewStorage()
+	r.host.Add(5, st)
+	write := func(flush uint64, rd Round) {
+		r.write(5, flush, &rd)
+		r.run()
+		st.Append(rd.Entries)
+		r.takeDone()
+	}
+	write(1, Round{Entries: entries(1, 2, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 1}})
+	hs := raftpb.HardState{Term: 2, Vote: 3, Commit: 2}
+	write(2, Round{HardState: hs, Removed: true})
+	write(3, Round{Entries: entries(3, 1, 2, 100), Removed: true})
+	sts := r.crashCleaned(5)
+	if got := sts[5].HardState(); got != hs || !sts[5].Removed() {
+		t.Fatalf("replayed hard state %+v, removed %v; want %+v, removed", got, sts[5].Removed(), hs)
 	}
 }
 
