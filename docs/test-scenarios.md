@@ -7818,6 +7818,10 @@ Hand-off, with 1, 2, 4 and 8 producer loops (`TestRoundsHandOffOncePerRoundAndFl
   panics, and one whose submit fails is not freed (`TestRoundKeptBuffers`).
 - A failed write or flush, the sixth, with 2 producer loops: every batch resolves, some with the
   error, and every pool is back where it started (`TestRoundFailedDiskResolvesEveryBatch`).
+- A shard removed, on a producer loop and on the owner, while its batch is in flight and mail waits
+  for it: the batch is written and its Raft blob leaves the log's live blocks, the shard gets no
+  `Durable` call and no mail, a shard added after it gets a new ID and only its own mail, and every
+  pool is back where it started (`TestRoundRemovedShardIsToldNothing`).
 - Over seeds of shape (0 to 8 producer loops, 1 to 32 shards each, the proposal gap, the round cap, at
   times a nearly full owner pool): the driver contract and "durable only once the log is" at every
   step, which fails a durable notice naming other than one place for a shard's one record, an LSN

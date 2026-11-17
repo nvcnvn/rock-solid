@@ -198,7 +198,8 @@ func (l *Log) RaftBlobsDead(refs []BlobRef) error {
 	return nil
 }
 
-func isRaftKind(e *Entry) bool {
+// IsRaft reports whether e is a Raft blob, of kind BlobRaftEntries or BlobRaftState.
+func (e *Entry) IsRaft() bool {
 	return e.Kind == EntryBlob && (e.BlobKind == BlobRaftEntries || e.BlobKind == BlobRaftState)
 }
 
@@ -217,7 +218,7 @@ func (l *Log) HoldsPiece(segment uint32) bool {
 func (l *Log) registerBlobs(r *round) {
 	for i := range r.entries {
 		e := &r.entries[i]
-		raft := isRaftKind(e)
+		raft := e.IsRaft()
 		if !raft && !isCheckpointKind(e) {
 			continue
 		}

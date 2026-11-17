@@ -1292,7 +1292,7 @@ func (r *Recovery) deliver(d *DecodedRecord, seg, block uint32, out *Output) {
 	r.replayed += d.Layout.Blocks() * core.BlockSize
 	ev = out.Events[len(out.Events)-1]
 	for i := range ev.Entries {
-		if e := &ev.Entries[i]; isRaftKind(e) {
+		if e := &ev.Entries[i]; e.IsRaft() {
 			lo, hi := spanOf(block, ev.HeaderBlocks, ev.Payloads[i], e.Length)
 			r.raft.add(BlobRef{Segment: seg, Block: block, LSN: ev.LSN, Entry: uint16(i)}, lo, hi)
 		}

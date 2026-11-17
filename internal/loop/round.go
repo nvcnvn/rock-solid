@@ -111,12 +111,13 @@ type handoff struct {
 }
 
 // A slot is a batch in flight: its shards, where each one's records end, and the producer's
-// buffers the owner copied; and the outcome and the records' places, which the owner writes
+// buffers the owner copied, and which records are Raft blobs; and the outcome and the records' places, which the owner writes
 // before it counts the batch durable.
 type slot struct {
 	shards []ShardID
 	ends   []int
 	bufs   []core.IOBuf
+	raft   []bool
 	err    error
 	refs   []disklog.BlobRef
 }
@@ -174,6 +175,11 @@ func (l *Loop) AddShard(s Shard, lg *Log) ShardID {
 	return ShardID(len(l.shards) - 1)
 }
 
+// RemoveShard takes shard id off l for good, its ID never given again: mail for it is dropped,
+// and its batches in flight are written with no Durable call, their Raft blobs reported dead. It
+// runs on l.
+func (l *Loop) RemoveShard(id ShardID) { l.shards[id].s = nil }
+
 // Mark asks the next round to collect shard id; a round visits only the shards marked since the last.
 func (l *Loop) Mark(id ShardID) {
 	sh := &l.shards[id]
@@ -203,7 +209,7 @@ func (l *Loop) collect(h *handoff, s *slot) {
 		n++
 		sh := &l.shards[id]
 		sh.marked = false
-		if !sh.s.HasReady() {
+		if sh.s == nil || !sh.s.HasReady() {
 			continue
 		}
 		from := len(h.items)
@@ -214,6 +220,7 @@ func (l *Loop) collect(h *handoff, s *slot) {
 		for i := from; i < len(h.items); i++ {
 			it := &h.items[i]
 			bytes += itemBytes(&it.Entry)
+			s.raft = append(s.raft, it.Entry.IsRaft())
 			if h.lg.owner == l || it.Buf == core.NoBuf {
 				continue
 			}
@@ -562,14 +569,19 @@ func (l *Loop) noticed(h *handoff) {
 			if s.err == nil {
 				refs = s.refs[from:s.ends[k]]
 			}
+			raft := s.raft[from:s.ends[k]]
 			from = s.ends[k]
+			if l.shards[id].s == nil {
+				l.buryRemoved(id, refs, raft)
+				continue
+			}
 			l.out = l.shards[id].s.Durable(&l.ctx, s.err, refs, l.out[:0])
 			l.execute()
 		}
 		for _, b := range s.bufs {
 			l.ctx.Pool.Free(b)
 		}
-		s.shards, s.ends, s.bufs = s.shards[:0], s.ends[:0], s.bufs[:0]
+		s.shards, s.ends, s.bufs, s.raft = s.shards[:0], s.ends[:0], s.bufs[:0], s.raft[:0]
 	}
 	if !h.hasMail.Swap(false) {
 		return
@@ -579,10 +591,29 @@ func (l *Loop) noticed(h *handoff) {
 	h.mu.Unlock()
 	for i := range h.got {
 		m := &h.got[i]
-		l.out = l.shards[m.Shard].s.Mail(&l.ctx, m, l.out[:0])
+		sh := l.shards[m.Shard].s
+		if sh == nil {
+			continue
+		}
+		l.out = sh.Mail(&l.ctx, m, l.out[:0])
 		l.execute()
 	}
 	clear(h.got)
+}
+
+// buryRemoved reports dead the Raft blobs among refs, a removed shard's durable records, which it
+// can no longer report itself.
+func (l *Loop) buryRemoved(id ShardID, refs []disklog.BlobRef, raft []bool) {
+	n := 0
+	for i, ref := range refs {
+		if raft[i] {
+			refs[n] = ref
+			n++
+		}
+	}
+	if n > 0 {
+		l.Dead(id, refs[:n])
+	}
 }
 
 // sendable reports whether one of l's hand-offs may send a batch now.

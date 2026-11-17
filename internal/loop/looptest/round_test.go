@@ -1028,3 +1028,60 @@ func TestRoundWaitingBatchesShareTheOwnerPool(t *testing.T) {
 		}
 	}
 }
+
+// TestRoundRemovedShardIsToldNothing removes a shard, on a producer loop and on the owner, while
+// its batch is in flight and mail waits for it: the batch is written and its Raft blob reported
+// dead, the shard gets neither a Durable call nor the mail, a shard added after it gets a new ID
+// and none of its mail, and every buffer is back in its pool.
+func TestRoundRemovedShardIsToldNothing(t *testing.T) {
+	for _, n := range []int{0, 1} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			r := newRoundRig(t, 1, n, 2, 0, 2000, 0)
+			defer r.close()
+			l := r.loops[0]
+			before := make([]int, len(r.pools))
+			for i, p := range r.pools {
+				before[i] = p.(*sim.Pool).Available()
+			}
+			gone, other := r.shards[0][0], r.shards[0][1]
+			gone.propose(0)
+			other.propose(0)
+			l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
+			for gone.flight == 0 {
+				if !r.s.Step() {
+					t.Fatal("the shard's records were never collected")
+				}
+			}
+			r.lg.Send(0, loop.Mail{Shard: gone.id, Kind: loop.MailRewrite})
+			l.RemoveShard(gone.id)
+			fresh := &stub{l: l, pool: r.pools[0]}
+			fresh.id = l.AddShard(fresh, r.lg)
+			if fresh.id == gone.id {
+				t.Fatalf("a new shard took the removed shard's ID %d", gone.id)
+			}
+			r.lg.Send(0, loop.Mail{Shard: gone.id, Kind: loop.MailRewrite})
+			r.lg.Send(0, loop.Mail{Shard: fresh.id, Kind: loop.MailReplayed})
+			r.run(t)
+			if gone.told != 0 || len(gone.mail) != 0 {
+				t.Fatalf("the removed shard was told durable %d times and got mail %+v", gone.told, gone.mail)
+			}
+			if len(fresh.mail) != 1 || fresh.mail[0].Kind != loop.MailReplayed {
+				t.Fatalf("the new shard got mail %+v", fresh.mail)
+			}
+			if other.told != 1 || len(other.refs) != 1 {
+				t.Fatalf("the other shard was told %d times, refs %v", other.told, other.refs)
+			}
+			l.Dead(other.id, other.refs)
+			r.loops[len(r.loops)-1].Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
+			r.run(t)
+			if live := r.log.LiveBlocks(); live != 0 {
+				t.Fatalf("the log holds %d live blocks once every Raft blob is dead", live)
+			}
+			for i, p := range r.pools {
+				if got := p.(*sim.Pool).Available(); got != before[i] {
+					t.Fatalf("loop %d's pool has %d bytes free, %d before the run", i, got, before[i])
+				}
+			}
+		})
+	}
+}
