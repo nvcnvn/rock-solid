@@ -205,6 +205,8 @@ func TestLimitsAreCheckedBeforeProposing(t *testing.T) {
 		{"CheckEmpty marked absent", ops(Op{Kind: OpCheckEmpty, Key: b("a"), End: b("b"), Absent: true}), ErrBadOp},
 		{"Put marked final", ops(Op{Kind: OpPut, Key: b("a"), Final: true}), ErrBadOp},
 		{"absent Check with a value", ops(Op{Kind: OpCheck, Key: b("a"), Value: b("1"), Absent: true}), ErrBadOp},
+		{"key in space 0", ops(Put([]byte{0, 1}, nil)), ErrBadOp},
+		{"range from space 0", ops(DeleteRange([]byte{0}, b("a"))), ErrBadOp},
 		{"oldest without a replay key", Txn{Ops: []Op{Delete(b("a"))}, Oldest: 1}, ErrBadReplay},
 		{"82 KiB xattr in pieces", pieces(82 << 10), nil},
 		{"1 MiB in pieces", pieces(1 << 20), ErrTooLarge},
