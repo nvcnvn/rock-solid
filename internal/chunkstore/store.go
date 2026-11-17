@@ -1974,6 +1974,8 @@ func (s *Store) settleHeld(d *disklog.Entry) {
 		for k := range run {
 			if run[k].entry.Version <= top || s.plant.replayForgetsDrops {
 				s.mapItem(&run[k])
+			} else {
+				s.dropSlot(&run[k])
 			}
 		}
 	}
@@ -2144,6 +2146,9 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 				}
 				s.mapItem(it)
 			}
+			if o.dropped && !o.mapped {
+				s.dropSlot(it)
+			}
 			if it.buf != core.NoBuf {
 				ctx.Pool.Free(it.buf)
 				it.buf = core.NoBuf
@@ -2184,7 +2189,7 @@ func (s *Store) freeSlots(recovered bool) {
 	for _, lba := range s.freed {
 		switch {
 		case s.ix.Live(lba) != 0:
-		case s.reading(lba):
+		case s.reading(lba) || s.heldIn(lba):
 			waiting = append(waiting, lba)
 		default:
 			if err := s.log.FreeSlot(lba, &s.lout); err != nil && !recovered {
@@ -2196,6 +2201,35 @@ func (s *Store) freeSlots(recovered bool) {
 		}
 	}
 	s.freed = waiting
+}
+
+// dropSlot queues for freeSlots the chunk slot of a durable slot write it dropped: no map ever
+// refers to it, so the index never frees it.
+func (s *Store) dropSlot(it *item) {
+	if it.entry.Kind != disklog.EntrySlot || it.state != itemDurable {
+		return
+	}
+	if lba := s.ix.slotLBA(&it.entry); !slices.Contains(s.freed, lba) {
+		s.freed = append(s.freed, lba)
+	}
+}
+
+// heldIn reports whether a durable slot write the index does not map yet, such as one replay held,
+// writes the chunk slot starting at slot. The live store frees a slot once a version overwrites it
+// and may give it to another chunk's write; replay can hold both, and settling the first lets the
+// slot go before the second maps.
+func (s *Store) heldIn(slot core.LBA) bool {
+	for ci := range s.chunks {
+		for _, oi := range s.chunks[ci].pending {
+			for j := range s.ops[oi].items {
+				it := &s.ops[oi].items[j]
+				if it.entry.Kind == disklog.EntrySlot && it.state == itemDurable && s.ix.slotLBA(&it.entry) == slot {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // reading reports whether a read in flight reads from the chunk slot starting at slot.

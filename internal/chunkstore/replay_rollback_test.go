@@ -359,3 +359,65 @@ func TestASlotWriteIsWhole(t *testing.T) {
 		t.Fatalf("the restarted member reports %+v, not %v whole at %#x", got, c, w)
 	}
 }
+
+// A slot that a write replay holds overwrote, freed and taken again by another chunk's write replay also holds, stays in
+// use until the second chunk lets it go and is then freed once. Seeds 30 and 62 of TestReplicatedWritesSurviveFaults's
+// slot seeds panicked on the second free; in seeds 22, 70, 78 and 94 the log gave the slot to a third write while the
+// second was held, and the members' copies of the second's version differed.
+func TestAReusedSlotOfTwoHeldWritesIsFreedOnce(t *testing.T) {
+	h := newHarnessOn(t, testConfig(), slotGeometry)
+	a, b := chunk(2), chunk(3)
+	h.sync(h.persist(0, 1, 1, nil))
+	h.sync(h.memberWrite(a, 0, core.BlocksPerChunk, MakeVersion(1, 1), 0xaa))
+	first := h.slotsInUse()
+	h.sync(h.persist(0, 1, 2, nil))
+	h.sync(h.memberWrite(a, 0, core.BlocksPerChunk, MakeVersion(2, 1), 0xbb))
+	h.sync(h.memberWrite(a, 0, 1, MakeVersion(2, 2), 0xbc))
+	h.sync(h.memberWrite(b, 0, core.BlocksPerChunk, MakeVersion(2, 1), 0xcc))
+	if e, _ := h.s.Index().Lookup(testPool, b, 0); e.LBA != first[0] {
+		t.Fatalf("b took the slot at %d, not a's first at %v", e.LBA, first)
+	}
+	h.sync(h.memberWrite(b, 0, core.BlocksPerChunk, MakeVersion(2, 2), 0xdd))
+	h.inv.Off(invReplay)
+	restart(h)
+	h.sync(h.persist(0, 1, 3, nil))
+	h.settleChunk(a, MakeVersion(2, 2))
+	c := chunk(4)
+	h.sync(h.memberWrite(c, 0, core.BlocksPerChunk, MakeVersion(3, 1), 0xee))
+	if e, _ := h.s.Index().Lookup(testPool, c, 0); e.LBA == first[0] {
+		t.Fatalf("c took the slot at %d that b's held write names", e.LBA)
+	}
+	h.settleChunk(b, MakeVersion(2, 2))
+	h.settle()
+	h.holds()
+	h.checkSlots()
+}
+
+// A slot write replay holds that the decision then drops gives its slot back to the log, whether the store drops it
+// once replay ended or replay drops it at the decision's marker: no map ever refers to the slot, so the index never
+// frees it. A chunk that held an older slot keeps that one.
+func TestADroppedHeldSlotWriteFreesItsSlot(t *testing.T) {
+	for _, older := range []bool{false, true} {
+		h := newHarnessOn(t, testConfig(), slotGeometry)
+		a := chunk(2)
+		h.sync(h.persist(0, 1, 1, nil))
+		keep := uint64(0)
+		if older {
+			keep = MakeVersion(1, 1)
+			h.sync(h.memberWrite(a, 0, core.BlocksPerChunk, keep, 0xaa))
+		}
+		h.sync(h.persist(0, 1, 2, nil))
+		h.sync(h.memberWrite(a, 0, core.BlocksPerChunk, MakeVersion(2, 1), 0xbb))
+		h.inv.Off(invReplay)
+		restart(h)
+		h.sync(h.persist(0, 1, 3, []ChunkVersion{{Chunk: a, Version: keep}}))
+		h.settleChunk(a, keep)
+		h.settle()
+		h.checkSlots()
+		restart(h)
+		h.checkSlots()
+		if got := h.slotsInUse(); older != (len(got) == 1) {
+			t.Fatalf("older %v: slots in use %v", older, got)
+		}
+	}
+}

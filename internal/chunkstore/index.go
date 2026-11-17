@@ -325,8 +325,7 @@ func (x *Index) Apply(ev *disklog.Event) error {
 			x.move(e.Pool, e.Chunk, e.First, e.Count, e.Source, lba, ev.LBA)
 			x.note(ev.LBA, -int(e.Count))
 		case disklog.EntrySlot:
-			lba := core.LBA(e.Segment)*core.LBA(x.segmentBlocks) + core.LBA(e.Slot)*core.BlocksPerChunk
-			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, LBA: lba, Header: ev.LBA}, e.Last)
+			x.insert(e.Pool, e.Chunk, Extent{First: e.First, Count: e.Count, Version: e.Version, LBA: x.slotLBA(e), Header: ev.LBA}, e.Last)
 		case disklog.EntryPunch:
 			if e.First == 0 && e.Count == core.BlocksPerChunk {
 				x.punchWhole(e.Pool, e.Chunk, e.Version, e.Last)
@@ -705,6 +704,11 @@ func (x *Index) slotOf(e Extent) (core.LBA, bool) {
 	}
 	seg := core.LBA(x.segmentBlocks)
 	return e.LBA - core.LBA(e.First), e.LBA/seg != e.Header/seg
+}
+
+// slotLBA is the first LBA of the chunk slot slot write e writes.
+func (x *Index) slotLBA(e *disklog.Entry) core.LBA {
+	return core.LBA(e.Segment)*core.LBA(x.segmentBlocks) + core.LBA(e.Slot)*core.BlocksPerChunk
 }
 
 // TakeFreed appends the chunk slots no map refers to any more and forgets them; a slot freed and
