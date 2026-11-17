@@ -34,12 +34,14 @@
 \* base stays below the entry, so after a restart it halts again on reaching it. A replica
 \* that dies is down for good from then on.
 \*
-\* A replica that learns its removal, by applying it or from a notice, campaigns no more,
-\* leads no more and serves no lease read, but keeps its state, takes appends, votes and
-\* fortifies: a voter that holds the leave but applied only the joint configuration can
-\* still win an election and needs the outgoing half's quorum to commit. Each voter of the
-\* plan reports once it applied the leave, and the plan is complete once all have; only
-\* then does the node of a replica that learned its removal delete it. The authority that
+\* A replica learns its removal by applying it or from a notice. It never applies it to its
+\* configuration, but stays a voter of the joint one, campaigning, voting, leading, taking
+\* appends and fortifying, and serves no lease read; while it leads it hands its leadership
+\* to a planned voter. A voter that holds the leave but applied only the joint
+\* configuration can still win an election and needs the outgoing half's quorum to commit,
+\* and the dropped voter can hold that half's newest entry. Each voter of the plan reports
+\* once it applied the leave, and the plan is complete once all have; only then does the
+\* node of a replica that learned its removal delete it. The authority that
 \* collects the reports is whichever leader runs the control plane, the group's own for the
 \* Control-plane group, and a leader that applied only the joint configuration never
 \* commits an entry of its term, so never runs it.
@@ -87,10 +89,13 @@ CONSTANTS
                         \* (FALSE: the base's alone)
     RemovedWaitsForPlan,\* a removed replica keeps its state until the plan is complete
                         \* (FALSE: it deletes it once it learns its removal)
-    DurableConfCommit   \* a Ready that commits a configuration change writes the hard state,
+    DurableConfCommit,  \* a Ready that commits a configuration change writes the hard state,
                         \* and is durable before the change applies or the commit leaves, so no
                         \* restart takes a replica back across a change it knew committed
                         \* (FALSE: a Ready that only moves the commit index writes nothing)
+    RemovedStaysVoter   \* a replica never applies its own removal to its configuration: it
+                        \* stays a voter of the joint one, campaigning and leading, until its
+                        \* node deletes it (FALSE: it applies it and campaigns no more)
 
 ASSUME BaseVoters \subseteq Replicas /\ Plan \subseteq Replicas /\ Stopped \subseteq Replicas
 
@@ -110,8 +115,15 @@ Quorum(c, Q) == Majority(c.in, Q) /\ (JointQuorum /\ c.out # {} => Majority(c.ou
 \* A log entry carries its term and, for a configuration change, the configuration it
 \* results in (NoConf for the leader's empty entry).
 IsConf(e) == e.cfg.in # {}
-ConfIndex(s) == LET ks == {k \in 1 .. Len(s) : IsConf(s[k])} IN IF ks = {} THEN 0 ELSE Max(ks)
-ConfOf(s) == IF ConfIndex(s) = 0 THEN Base ELSE s[ConfIndex(s)].cfg
+\* The index of the last configuration entry among the first n of s naming a member of R
+\* (Replicas: any), or 0; ConfAt(s, n) is the configuration they give.
+RECURSIVE ConfIndexIn(_, _, _)
+ConfIndexIn(s, n, R) ==
+    IF n = 0 THEN 0
+    ELSE IF IsConf(s[n]) /\ Members(s[n].cfg) \cap R # {} THEN n ELSE ConfIndexIn(s, n - 1, R)
+ConfIndex(s) == ConfIndexIn(s, Len(s), Replicas)
+ConfAt(s, n) == LET k == ConfIndexIn(s, n, Replicas) IN IF k = 0 THEN Base ELSE s[k].cfg
+ConfOf(s) == ConfAt(s, Len(s))
 LastTerm(s) == IF s = <<>> THEN 0 ELSE s[Len(s)].t
 IsPrefix(s, t) == Len(s) <= Len(t) /\ SubSeq(t, 1, Len(s)) = s
 
@@ -144,10 +156,15 @@ vars == <<term, leader, log, commit, applied, match, hbCommit, up, gone, crashes
 
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 
-AppliedConf(r) == ConfOf(SubSeq(log[r], 1, applied[r]))
+\* With RemovedStaysVoter, a replica past its own removal keeps the last configuration it
+\* applied that names it.
+AppliedConf(r) ==
+    LET raw == ConfAt(log[r], applied[r])
+        k == ConfIndexIn(log[r], applied[r], {r})
+    IN IF RemovedStaysVoter /\ r \notin Members(raw) /\ k # 0 THEN log[r][k].cfg ELSE raw
 LastConf(r) == ConfOf(log[r])
 Live(r) == up[r] /\ ~gone[r]
-Leads(r) == Live(r) /\ leader[r] /\ ~out[r]
+Leads(r) == Live(r) /\ leader[r] /\ (RemovedStaysVoter \/ ~out[r])
 Halted(r) == haltAt[r] # 0 /\ applied[r] >= haltAt[r]
 
 \* A Ready that appends or changes the term or vote of the replicas in S writes their hard
@@ -231,25 +248,54 @@ JointState(l, t) ==
 JointInit == JointState(Kept, 1)
 OutgoingInit == JointState(Dropped, 2)
 
+\* LeaveInit follows OutgoingInit by three steps: the dropped voter proposes the leave, sends
+\* it with its empty entry to the voters other than Kept, which lags, and commits both.
+LeaveLog == JointLog \o <<[t |-> 2, cfg |-> NoConf], [t |-> 2, cfg |-> Conf(Plan, {}, {})]>>
+
+LeaveInit ==
+    /\ term = [r \in Replicas |-> 2]
+    /\ leader = [r \in Replicas |-> r = Dropped]
+    /\ log = [r \in Replicas |-> IF r = Kept THEN JointLog ELSE LeaveLog]
+    /\ commit = [r \in Replicas |-> IF r = Dropped THEN 5 ELSE 3]
+    /\ applied = [r \in Replicas |-> 3]
+    /\ match = [r \in Replicas |->
+                  IF r # Dropped THEN NoMatch ELSE [k \in Replicas |-> IF k = Kept THEN 0 ELSE 5]]
+    /\ hbCommit = [r \in Replicas |-> IF r = Dropped THEN 3 ELSE 0]
+    /\ up = [r \in Replicas |-> r \notin Stopped]
+    /\ gone = [r \in Replicas |-> FALSE]
+    /\ crashes = 0
+    /\ elected = {<<1, Kept>>, <<2, Dropped>>}
+    /\ chosen = [k \in 1 .. 5 |-> [e |-> LeaveLog[k], t |-> IF k <= 3 THEN 1 ELSE 2]]
+    /\ early = {}
+    /\ support = [r \in Replicas |-> {}]
+    /\ fort = [r \in Replicas |-> {}]
+    /\ hsCommit = [r \in Replicas |-> IF r = Dropped /\ DurableConfCommit THEN 5 ELSE 3]
+    /\ haltAt = [r \in Replicas |-> 0]
+    /\ out = [r \in Replicas |-> FALSE]
+    /\ dead = {}
+    /\ reported = {}
+
 \* A voter of its own applied configuration wins the votes of a quorum of it, each voter's
 \* log no newer than its own, in a term past every one of theirs. A replica votes whatever
 \* its own configuration, as an etcd-raft learner does when a candidate counts it, so
 \* the voters are drawn from the candidate's configuration. A voter that supports a leader
 \* votes only for that leader itself, which asks only once it no longer leads, or, on a
 \* transfer, for the target of the leader in from, which steps down. A halted replica votes
-\* and campaigns in none; a removed one votes but campaigns in none.
+\* and campaigns in none.
 UpToDate(i, j) ==
     \/ LastTerm(log[i]) > LastTerm(log[j])
     \/ LastTerm(log[i]) = LastTerm(log[j]) /\ Len(log[i]) >= Len(log[j])
 
 Run(i, Q, from) ==
-    LET nt == 1 + Max({term[j] : j \in Q}) IN
-    /\ Live(i) /\ ~out[i] /\ i \in Q
+    LET nt == 1 + Max({term[j] : j \in Q})
+        ac == AppliedConf(i)
+    IN
+    /\ Live(i) /\ (RemovedStaysVoter \/ ~out[i]) /\ i \in Q
     /\ \A j \in Q : support[j] \subseteq {i} \cup from /\ ~Halted(j)
-    /\ CampaignApplied => ConfIndex(SubSeq(log[i], 1, commit[i])) <= applied[i]
-    /\ Q \subseteq Voters(AppliedConf(i))
+    /\ CampaignApplied => ConfIndexIn(log[i], commit[i], Replicas) <= applied[i]
+    /\ Q \subseteq Voters(ac)
     /\ \A j \in Q : Live(j)
-    /\ Quorum(AppliedConf(i), Q)
+    /\ Quorum(ac, Q)
     /\ nt <= MaxTerm
     /\ \A j \in Q : UpToDate(i, j)
     /\ term' = [j \in Replicas |-> IF j \in Q THEN nt ELSE term[j]]
@@ -268,12 +314,12 @@ Run(i, Q, from) ==
 
 Elect(i, Q) == Run(i, Q, {})
 
-\* A leader the plan drops, out of any joint configuration, hands its leadership to a
-\* planned voter, and a halted leader to any voter it replicates to (handOff), joint or
-\* not; either serves no lease read from then on.
+\* A leader the plan drops, out of any joint configuration or past its own removal, hands
+\* its leadership to a planned voter, and a halted leader to any voter it replicates to
+\* (handOff), joint or not; either serves no lease read from then on.
 Transfer(l, i, Q) ==
     /\ Leads(l) /\ i # l
-    /\ \/ l \notin Plan /\ i \in Plan /\ AppliedConf(l).out = {}
+    /\ \/ l \notin Plan /\ i \in Plan /\ (AppliedConf(l).out = {} \/ (RemovedStaysVoter /\ out[l]))
        \/ HaltHandsOff /\ Halted(l) /\ i \in Voters(AppliedConf(l))
     /\ Run(i, Q, {l})
 
@@ -300,7 +346,8 @@ Lapse(j, i) ==
 \* The highest index a leader may commit given what each replica is known to hold: an entry
 \* of its term that a quorum of its applied configuration holds.
 Committable(i, m) ==
-    LET ok(n) == log[i][n].t = term[i] /\ Quorum(AppliedConf(i), {j \in Replicas : m[j] >= n})
+    LET ac == AppliedConf(i)
+        ok(n) == log[i][n].t = term[i] /\ Quorum(ac, {j \in Replicas : m[j] >= n})
     IN Max({commit[i]} \cup {n \in commit[i] + 1 .. Len(log[i]) : ok(n)})
 
 \* A leader that commits up to n keeps its commit before the advance as hbCommit; CommitTo
@@ -347,12 +394,14 @@ Commit(i) ==
     /\ UNCHANGED <<term, leader, applied, match, up, gone, crashes, elected, early, support, fort,
                    haltAt, out, dead, reported>>
 
-\* A replica applies every entry it knows committed. One that applies its own removal knows
-\* from its log that the removal committed; a leader that does keeps its flag and its count
-\* of support, which RemovedStopsLease alone keeps from a lease read. etcd-raft leaves a
-\* joint configuration on its own, so a leader elected from the outgoing half applies its
-\* own removal, in the Ready that sends the commit: every follower may miss that commit, and
-\* none hears from the leader again. A halted replica applies them too.
+\* A replica applies every entry it knows committed. One that applies its own removal learns
+\* from its log that the removal committed, and with RemovedStaysVoter keeps the joint
+\* configuration (AppliedConf). Without it, the replica leaves that configuration, and a
+\* leader that does keeps its flag and its count of support, which RemovedStopsLease alone
+\* keeps from a lease read: etcd-raft leaves a joint configuration on its own, so a leader
+\* elected from the outgoing half applies its own removal, in the Ready that sends the
+\* commit, every follower may miss that commit, and none hears from the leader again. A
+\* halted replica applies them too.
 \*
 \* A voter of the plan that applies the configuration leaving the joint one reports it, at
 \* once here, the earliest a deletion can follow; with DurableConfCommit its hard state
@@ -360,7 +409,7 @@ Commit(i) ==
 Left(c) == c.in = Plan /\ c.out = {}
 
 ApplyEntries(r) ==
-    LET c == ConfOf(SubSeq(log[r], 1, commit[r]))
+    LET c == ConfAt(log[r], commit[r])
         removal == r \in Members(AppliedConf(r)) /\ r \notin Members(c)
     IN
     /\ Live(r) /\ applied[r] < commit[r]
@@ -418,7 +467,8 @@ Swap(i, l, d) ==
 
 \* etcd-raft leaves a joint configuration on its own once the leader applied it (appliedTo),
 \* with no entry of the leader's term yet committed, and even a leader elected while joint from
-\* the outgoing half, which then removes itself.
+\* the outgoing half, which then removes itself. A leader past its own removal, still joint,
+\* proposes the leave again; that entry changes nothing, so it is left out here.
 Leave(i) ==
     LET c == LastConf(i) IN
     /\ EtcdMayChange(i) /\ c.out # {}
@@ -594,6 +644,10 @@ CommittedAgree ==
 \* No replica becomes a voter before it holds what the leader had committed a heartbeat earlier.
 VotersCaughtUp == early = {}
 
+\* A voter's report that it applied the leave holds across a restart: its commit index
+\* never falls back below the leave.
+ReportsHold == \A r \in reported : Left(ConfAt(log[r], commit[r]))
+
 \* A replica deletes its state only once a committed configuration lacks it.
 ChosenConf == ConfOf([k \in 1 .. Len(chosen) |-> chosen[k].e])
 DeletesOnlyRemoved == \A r \in Replicas : gone[r] => r \notin Members(ChosenConf)
@@ -618,6 +672,10 @@ SwapCommits == <>(ChosenConf = Conf(Plan, {}, {}))
 
 \* After the swap, the group has a leader in the new configuration that has not halted, even
 \* when the leader that commits the leave is the dropped voter or halts.
-NewLeader ==
-    <>[](\E r \in Plan : Leads(r) /\ ~Halted(r) /\ AppliedConf(r) = Conf(Plan, {}, {}))
+HasNewLeader == \E r \in Plan : Leads(r) /\ ~Halted(r) /\ AppliedConf(r) = Conf(Plan, {}, {})
+NewLeader == <>[]HasNewLeader
+
+\* NewLeader, unless every term up to MaxTerm has been used: with the dropped voter leading
+\* between them, a crash and a death can cost two elections each, more terms than a run reaches.
+NewLeaderOrTermsSpent == <>[](HasNewLeader \/ \E r \in Replicas : term[r] = MaxTerm)
 =============================================================================
