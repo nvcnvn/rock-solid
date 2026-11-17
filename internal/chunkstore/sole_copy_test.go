@@ -403,15 +403,18 @@ func TestARefusedVersionLeavesItsChunkUnfoundWithItsHolder(t *testing.T) {
 	}
 }
 
-// The limit of counting a listing member toward an OK, with no refusal on the way: W2 is on disk 1 and on disk 3, whose missing list names the chunk, as it does until recovery reaches it. The OK needs both logs and no clean copy but disk 1's, so losing disk 1 leaves W2 unfound though disk 3 holds its bytes, until disk 1 returns. noRecovery stands in for recovery that is slow.
-func TestAnOKOnAMemberThatListsTheChunkLeavesItUnfoundWithThePrimary(t *testing.T) {
-	r := newSoleRun(t, 3, 2, 3)
+// oneCleanCopy leaves chunk ch with one clean copy, on disk 1: W1 is on disks 1 and 2, disk 3 returns listing the chunk and disk 2 goes down. noRecovery, standing in for recovery that is slow, keeps disk 3 listing it.
+func oneCleanCopy(t *testing.T, set func(*replicaPlants)) (r *soleRun, ch core.ChunkID, d1, d2, d3 uint32) {
+	r = newSoleRun(t, 3, 2, 3)
 	c := r.c
-	ch := chunkIn(pg0, 1, 0)
+	for n := range c.reps {
+		set(&c.reps[n].plant)
+	}
+	ch = chunkIn(pg0, 1, 0)
 	c.until(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, core.BlockSize)))
 	c.settle()
 	ms := r.members()
-	d1, d2, d3 := ms[0].Disk, ms[1].Disk, ms[2].Disk
+	d1, d2, d3 = ms[0].Disk, ms[1].Disk, ms[2].Disk
 	r.lose(d3)
 	r.publish()
 	c.untilActive()
@@ -427,6 +430,41 @@ func TestAnOKOnAMemberThatListsTheChunkLeavesItUnfoundWithThePrimary(t *testing.
 	r.publish()
 	c.untilActive()
 	c.settle()
+	return r, ch, d1, d2, d3
+}
+
+// W2 to a chunk whose one clean copy is disk 1 waits until recovery reaches disk 3, so its OK rests on two clean copies and losing disk 1 leaves the chunk readable.
+func TestAWriteToAChunkWithOneCleanCopyWaitsForRecovery(t *testing.T) {
+	r, ch, d1, d2, d3 := oneCleanCopy(t, func(*replicaPlants) {})
+	c := r.c
+	w2 := bytes.Repeat([]byte{0x44}, core.BlockSize)
+	id := c.write(pg0, ch, 0, w2)
+	if rp, ok := r.answered(id, 20_000_000); ok {
+		t.Fatalf("W2 answered %+v with one clean copy", rp)
+	}
+	for n := range c.reps {
+		c.reps[n].plant.noRecovery = false
+	}
+	rp, ok := r.answered(id, 100_000_000)
+	if !ok || rp.Status != StatusOK {
+		t.Fatalf("W2 answered %+v, %v", rp, ok)
+	}
+	if h := r.holders(ch, rp.Version); !slices.Contains(h, d1) || !slices.Contains(h, d3) {
+		t.Fatalf("W2, OK, has clean copies on %v", h)
+	}
+
+	r.lose(d1)
+	r.back(d2)
+	r.tick(10_000_000)
+	if grp, got := r.read(ch); grp.Status != StatusOK || !bytes.Equal(got, w2) {
+		t.Fatalf("W2 read back %+v with disk %d gone", grp, d1)
+	}
+}
+
+// With noDegradedHold, W2 is answered OK on disk 1 and on disk 3, whose missing list names the chunk: no clean copy but disk 1's, so losing disk 1 leaves W2 unfound though disk 3 holds its bytes, until disk 1 returns.
+func TestNoDegradedHoldLeavesAnOKUnfoundWithItsOneCleanCopy(t *testing.T) {
+	r, ch, d1, d2, d3 := oneCleanCopy(t, func(p *replicaPlants) { p.noDegradedHold = true })
+	c := r.c
 	w2 := bytes.Repeat([]byte{0x44}, core.BlockSize)
 	rp, ok := r.answered(c.write(pg0, ch, 0, w2), 100_000_000)
 	if !ok || rp.Status != StatusOK {

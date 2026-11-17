@@ -16,7 +16,7 @@ const (
 	invDiskIDs       = "no disk ID names two log IDs, and no log ID is up under two disk IDs"
 	invKeptAfterDrop = "no version peering keeps follows a dropped version of its chunk"
 	invActivates     = "once membership stops changing, every PG whose current interval has at least min_live live members on running nodes activates it"
-	invAckCopies     = "no write is acknowledged on fewer than min_live disks, a member in maintenance counting as one"
+	invAckCopies     = "no write is acknowledged on fewer than min_live disks that list nothing of its chunk, a member in maintenance counting as one"
 	invHasSource     = "an activated primary has a source of each chunk it kept, or calls it unfound"
 	invLeftGated     = "no running disk keeps a write gated of a PG its table names it in no interval of since the last activated"
 )
@@ -228,7 +228,7 @@ func (x *epochChecks) answers(d int) {
 	}
 }
 
-// copies checks that version v of ch, which node d acknowledged, is on min_live disks: d's, whose store may have stopped since it logged v, those that acknowledged it or whose index holds it, and those in maintenance in its interval or d's. The min_live is the lower of those two intervals', for a version acknowledged late across a change of it.
+// copies checks that version v of ch, which node d acknowledged, is on min_live disks: d's, whose store may have stopped since it logged v, those that acknowledged it or whose index holds it, each only while its index lists the chunk for no interval up to d's, and those in maintenance in its interval or d's. The min_live is the lower of those two intervals', for a version acknowledged late across a change of it.
 func (x *epochChecks) copies(d int, ch core.ChunkID, v uint64) {
 	r := x.c.reps[d]
 	p, ok := r.pgOf(ch)
@@ -260,7 +260,7 @@ func (x *epochChecks) copies(d int, ch core.ChunkID, v uint64) {
 		holds := x.held[heldAt{ch, v, n}] || n == d
 		if o.Store().Serving() {
 			c, _ := o.Store().Index().Chunk(r.st.cfg.Pool, ch)
-			holds = holds || c.Whole >= v
+			holds = (holds || c.Whole >= v) && (c.ListedIn == 0 || c.ListedIn > e.Interval)
 		}
 		if holds {
 			disks[o.cfg.Disk] = true

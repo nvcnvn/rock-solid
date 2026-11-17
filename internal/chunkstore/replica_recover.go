@@ -33,6 +33,7 @@ type recoverChunk struct {
 	wait   bool
 	failed uint8
 	rotten uint8
+	urgent bool
 }
 
 // recovery is a chunk being recovered: its image read from disk from at slot src of the members,
@@ -55,7 +56,7 @@ type recovery struct {
 // the missing lists it had the members persist and its own copy, which lacks the kept version where
 // a merge on it waits, and starts tracking the blocks the interval's writes cover in each.
 func (r *Replica) planRecovery(l *lead, pr *peering, e *PGEntry) {
-	l.todo, l.cursor, l.listed, l.reported = l.todo[:0], 0, [maxMembers]int{}, false
+	l.todo, l.cursor, l.listed, l.reported, l.urgent = l.todo[:0], 0, [maxMembers]int{}, false, l.urgent[:0]
 	slot := func(disk uint32) int {
 		return slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == disk })
 	}
@@ -109,9 +110,21 @@ func (r *Replica) degraded(l *lead, e *PGEntry) int {
 	return n
 }
 
-// next is the lead's first chunk to recover, from where the pass of recoverWork stands, that no
-// recovery has under way, or -1.
-func (l *lead) next() int {
+// next is the lead's first chunk to recover that no recovery has under way, or -1: one a client
+// write waits on (urgent), else the first from where the pass of recoverWork stands.
+func (l *lead) next() (j int, urgent bool) {
+	for k := 0; k < len(l.urgent); {
+		t := &l.todo[l.urgent[k]]
+		switch {
+		case t.targets == 0:
+			t.urgent = false
+			l.urgent = slices.Delete(l.urgent, k, k+1)
+			continue
+		case !t.busy && !t.wait:
+			return l.urgent[k], true
+		}
+		k++
+	}
 	for j := max(l.cursor, l.scan); j < len(l.todo); j++ {
 		switch t := &l.todo[j]; {
 		case t.targets == 0:
@@ -119,36 +132,75 @@ func (l *lead) next() int {
 				l.cursor++
 			}
 		case !t.busy && !t.wait:
-			return j
+			return j, false
 		}
 	}
-	return -1
+	return -1, false
+}
+
+// pending is the place in todo of chunk c while a member still lacks it, or -1.
+func (l *lead) pending(c core.ChunkID) int {
+	if l.cursor >= len(l.todo) {
+		return -1
+	}
+	j, ok := slices.BinarySearchFunc(l.todo[l.cursor:], c, func(t recoverChunk, c core.ChunkID) int { return compareChunk(t.chunk, c) })
+	if !ok || l.todo[l.cursor+j].targets == 0 {
+		return -1
+	}
+	return l.cursor + j
+}
+
+// short reports whether chunk c has fewer than minLive members of the lead's interval that can
+// serve it, up and lacking nothing of it or in maintenance, so a client write to it waits.
+func (l *lead) short(e *PGEntry, minLive int, c core.ChunkID) bool {
+	j := l.pending(c)
+	if j < 0 {
+		return false
+	}
+	n := 0
+	for s, m := range e.Members {
+		if m.Mark == MarkMaint || m.Mark == MarkUp && (s >= maxMembers || l.todo[j].targets&(1<<s) == 0) {
+			n++
+		}
+	}
+	return n < minLive
+}
+
+// urge has recovery take chunk c, which a client write waits on, before the lead's other chunks.
+func (l *lead) urge(c core.ChunkID) {
+	if j := l.pending(c); j >= 0 && !l.todo[j].urgent {
+		l.todo[j].urgent = true
+		l.urgent = append(l.urgent, j)
+	}
 }
 
 // recoverWork starts recoveries while fewer than maxRecoveries run: each time the next chunk of
-// the active lead whose PG is most degraded, the lower PG first among equals.
+// the active lead whose PG is most degraded, the lower PG first among equals, a chunk a client
+// write waits on before any other.
 func (r *Replica) recoverWork(ctx *core.Context, out *ReplicaOutput) {
 	for i := range r.leads {
 		r.leads[i].scan = 0
 	}
 	for len(r.recs) < maxRecoveries && !r.plant.noRecovery {
-		best, bestN, bestJ := -1, 0, -1
+		best, bestN, bestJ, bestU := -1, 0, -1, false
 		for i := range r.leads {
 			l := &r.leads[i]
 			_, e := r.table.entry(l.pg)
 			if !l.active || l.asking || e == nil || e.Interval != l.interval {
 				continue
 			}
-			if j := l.next(); j >= 0 {
-				if n := r.degraded(l, e); best < 0 || n > bestN {
-					best, bestN, bestJ = i, n, j
+			if j, u := l.next(); j >= 0 {
+				if n := r.degraded(l, e); best < 0 || u && !bestU || u == bestU && n > bestN {
+					best, bestN, bestJ, bestU = i, n, j, u
 				}
 			}
 		}
 		if best < 0 {
 			return
 		}
-		r.leads[best].scan = bestJ + 1
+		if !bestU {
+			r.leads[best].scan = bestJ + 1
+		}
 		r.startRecovery(ctx, best, bestJ, out)
 	}
 }

@@ -73,14 +73,14 @@ func lastSourceRun(t *testing.T, plant func(*authority), strict bool, name strin
 	return nil
 }
 
-// The stale Stay: disk 2 is refilled and returns, lacking Y, acknowledged on disk 1 and on the refill member, which lists the chunk. Disk 1 goes and stays out for refill_after, and the leaving disk 2 takes its place: disk 1 stays, leaving, the only source of Y.
+// The stale Stay: disk 2 is refilled and returns, lacking Y, acknowledged on disk 1 and on the refill member, which lists the chunk (loneWriteOK). Disk 1 goes and stays out for refill_after, and the leaving disk 2 takes its place: disk 1 stays, leaving, the only source of Y.
 func TestAStayKeepsTheLastSource(t *testing.T) {
 	if err := staySourceRun(t, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// staySourceRun runs that scenario under plant, if any, keeping its conformance trace if named, and returns what the simulator's invariants find.
+// staySourceRun runs that scenario under plant, if any, keeping its conformance trace if named, and returns what the simulator's invariants find. Named, it lets recovery bring the refill member Y's chunk, which Y's OK waits for, so the trace holds no planted step and the refill member holds Y too.
 func staySourceRun(t *testing.T, plant func(*authority), name string) error {
 	r := newSoleRun(t, 2, 2, 5)
 	c := r.c
@@ -102,7 +102,16 @@ func staySourceRun(t *testing.T, plant func(*authority), name string) error {
 	}
 	r.lose(d2)
 	r.tick(DegradedRefillAfter + 2_000_000)
-	rp, ok := r.answered(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize)), 5_000_000)
+	id := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize))
+	var rp Response
+	var ok bool
+	if name == "" {
+		rp, ok = r.loneWriteOK(id, 5_000_000)
+	} else {
+		r.recovery(true)
+		rp, ok = r.answered(id, 5_000_000)
+		r.recovery(false)
+	}
 	if !ok || rp.Status != StatusOK {
 		t.Fatalf("Y answered %+v, %v, members %v", rp, ok, r.members())
 	}
@@ -234,6 +243,20 @@ func (r *soleRun) recovery(on bool) {
 	}
 }
 
+// loneWriteOK answers write id OK on one clean copy, as a member in maintenance also lets a pool answer it, though the primary
+// holds a write to a chunk with fewer than min_live members that can serve it: noDegradedHold, set for the write alone.
+func (r *soleRun) loneWriteOK(id core.RequestID, d core.Tick) (Response, bool) {
+	for n := range r.c.reps {
+		r.c.reps[n].plant.noDegradedHold = true
+	}
+	defer func() {
+		for n := range r.c.reps {
+			r.c.reps[n].plant.noDegradedHold = false
+		}
+	}()
+	return r.answered(id, d)
+}
+
 // declare has an operator declare disk lost, as the record takes it.
 func (r *soleRun) declare(t *testing.T, disk uint32) {
 	t.Helper()
@@ -363,20 +386,20 @@ func TestRep2ServesPastTwoFailures(t *testing.T) {
 	r.repaired(t, 2, ch, v)
 }
 
-// lostRun has both old disks of a rep2 pool refilled, recovery off, with Y acknowledged after the first went, so that the second holds it alone, and declares the first lost. Under plant, if any, it keeps its conformance trace if named, and returns what the simulator's invariants find.
+// lostRun has both old disks of a rep2 pool refilled, recovery off, with Y acknowledged on both before the second goes, and declares the second lost, so that the first holds Y alone. Under plant, if any, it keeps its conformance trace if named, and returns what the simulator's invariants find.
 func lostRun(t *testing.T, plant func(*authority), name string) error {
 	r, ch, _ := refillRun(t, 2, 2, 5, plant, name)
 	c := r.c
 	ms := r.members()
 	d1, d2 := ms[0].Disk, ms[1].Disk
 	r.recovery(false)
-	r.lose(d2)
-	r.tick(DegradedRefillAfter + 2_000_000)
 	rp, ok := r.answered(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize)), 5_000_000)
 	if !ok || rp.Status != StatusOK {
 		t.Fatalf("Y answered %+v, %v, members %v", rp, ok, r.members())
 	}
 	r.acked[ch] = rp.Version
+	r.lose(d2)
+	r.tick(DegradedRefillAfter + 2_000_000)
 	r.lose(d1)
 	r.tick(DegradedRefillAfter + 2_000_000)
 	r.declare(t, d2)

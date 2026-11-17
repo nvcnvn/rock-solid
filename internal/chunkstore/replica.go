@@ -130,12 +130,14 @@ type lead struct {
 	spent  int
 	// todo is the chunks the decision left a member lacking, in chunk order, done before cursor, and
 	// scan where a pass of recoverWork goes on looking; listed counts, by place in the interval's
-	// members, the chunks each still lacks; reported is set once the interval was reported recovered.
+	// members, the chunks each still lacks; reported is set once the interval was reported recovered;
+	// urgent holds the places in todo of the chunks client writes wait on, which recovery takes first.
 	todo     []recoverChunk
 	cursor   int
 	scan     int
 	listed   [maxMembers]int
 	reported bool
+	urgent   []int
 }
 
 type heldMsg struct {
@@ -463,9 +465,12 @@ type replicaPlants struct {
 	// admitPastLimit orders a plain write that adds live data past a member's write_limit.
 	admitPastLimit bool
 	// commitOnOwnLog commits a version once the primary's own log holds it, before its members do;
-	// ackOnLoneCopy answers a kept version OK at activation however few copies its chunk has.
+	// ackOnLoneCopy answers a kept version OK at activation however few copies its chunk has;
+	// noDegradedHold orders a client write to a chunk with fewer than min_live members that lack
+	// nothing of it.
 	commitOnOwnLog bool
 	ackOnLoneCopy  bool
+	noDegradedHold bool
 	// recoverSelfOnly has the primary recover only its own copies, never a member's;
 	// recoverFromListed has a primary that lacks a chunk serve its recovery; clearNoSource clears a
 	// list with an empty image when no member can serve the chunk; goneWhileUp refuses one version
@@ -1122,7 +1127,7 @@ func (r *Replica) park(ev *core.Event, epoch uint64, out *ReplicaOutput) {
 	r.fetch(epoch, false, out)
 }
 
-// clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered. A partial-block write to a chunk whose kept version the primary lacks is held until recovery brings it, up to maxHeld writes held, and any write is answered unfound when no member can be the chunk's source: an OK there would read as missing, and the next peering would keep it over what a returning disk still holds.
+// clientUpdate takes a client's write or punch at the PG's primary: it is refused unless this disk leads the PG with at least min_live members live and the client's interval falls within the primary's term, held while the PG peers, and otherwise ordered. A partial-block write to a chunk whose kept version the primary lacks is held until recovery brings it, and any write to a chunk with fewer than min_live members that lack nothing of it until recovery clears enough, since its OK would otherwise rest on members that cannot serve the chunk, up to maxHeld writes held; recovery takes a chunk a write waits on first. Any write is answered unfound when no member can be the chunk's source: an OK there would read as missing, and the next peering would keep it over what a returning disk still holds.
 func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) {
 	if r.plant.fenceOnArrival && !r.replaying && u.Session != 0 && u.Incarnation < r.st.sessions[u.Session] {
 		freeBuf(ctx, ev.Msg.Buf)
@@ -1149,7 +1154,8 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 			r.park(ev, u.PG.Epoch, out)
 			return
 		}
-	case !r.leads[i].active || r.leads[i].asking || edgeBytes(u.Off, u.Len) > 0 && r.leads[i].lacks(u.Chunk) && !r.plant.mergeWhileLacking || r.leads[i].isUnfound(u.Chunk) && !r.plant.writeOnUnfound:
+	case !r.leads[i].active || r.leads[i].asking || edgeBytes(u.Off, u.Len) > 0 && r.leads[i].lacks(u.Chunk) && !r.plant.mergeWhileLacking || r.leads[i].isUnfound(u.Chunk) && !r.plant.writeOnUnfound ||
+		r.leads[i].short(e, int(p.MinLive), u.Chunk) && !r.plant.noDegradedHold:
 		l := &r.leads[i]
 		if l.active && !l.asking && l.isUnfound(u.Chunk) && !r.plant.writeOnUnfound {
 			freeBuf(ctx, ev.Msg.Buf)
@@ -1158,6 +1164,9 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		}
 		if l.active && !l.asking && len(l.held) >= maxHeld {
 			break
+		}
+		if l.active && !l.asking {
+			l.urge(u.Chunk)
 		}
 		l.held = append(l.held, heldMsg{peer: ev.Peer, msg: ev.Msg, hold: l.interval})
 		return

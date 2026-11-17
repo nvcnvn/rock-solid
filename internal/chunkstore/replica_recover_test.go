@@ -277,12 +277,12 @@ func TestRecoveryCutShortByTheNextIntervalLeavesTheListsInPlace(t *testing.T) {
 	c.blockIs(2, ch, 0, 2)
 }
 
-// Disk 2 holds dropped 1.2, which wrote block 1, and lists 1.1; 2.1, writing block 2, lands on it
+// Under min_live 1, which disk 3's clean copy meets, disk 2 holds dropped 1.2, which wrote block 1, and lists 1.1; 2.1, writing block 2, lands on it
 // before recovery reaches it. The next peering keeps 2.1, whose newest copy disk 2 holds, and raises
 // disk 2's entry to 2.1 rather than clearing it; recovery then brings disk 2 block 1 of 1.1's
 // history.
 func TestOnlyRecoveryRemovesAMissingListEntry(t *testing.T) {
-	c := newRCluster(t, rtable(4, 2))
+	c := newRCluster(t, rtable(4, 1))
 	ch := chunkIn(pg0, 4, 0)
 	c.writeWhole(pg0, ch, 0, 3, 1)
 	c.s.Partition(0, 2, false)

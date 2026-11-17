@@ -76,12 +76,12 @@ func TestAnActivationIsReportedUntilATableRecordsIt(t *testing.T) {
 	}
 }
 
-// Disk 3, down in interval 1, becomes PG 0's primary in interval 2 and lacks 1.1, which peering
+// Under min_live 1, disk 3, down in interval 1, becomes PG 0's primary in interval 2 and lacks 1.1, which peering
 // keeps from disk 2: disk 3 lists it, and while recovery has not brought it 1.1 a partial-block
-// write to the chunk waits, while a whole-block write to it and a partial write to another chunk go
-// ahead. Recovery then lets the held write go, merged on 1.1's byte.
+// write to the chunk waits, while a whole-block write to it, for which disk 2's clean copy is
+// enough, and a partial write to another chunk go ahead. Recovery then lets the held write go, merged on 1.1's byte.
 func TestAPartialWriteWaitsForTheKeptVersion(t *testing.T) {
-	tbl := rtable(4, 2)
+	tbl := rtable(4, 1)
 	_, e := tbl.entry(pg0)
 	e.Members[2].Mark = MarkDown
 	c := newRCluster(t, tbl)
