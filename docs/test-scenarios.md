@@ -4099,8 +4099,8 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 | `neg-no-support-ask` | A follower never asks the node of the leader it supports | c, leading and fortified by a, b and d, commits the leave on all three, which apply it and report, so the plan completes and c's node deletes c while it still leads; a, b and d support c for good, so none campaigns. In the code the same plant leaves the replacement run without a leader in the new configuration | `NewLeader` |
 | `neg-removed-keeps-lease` | A leader that learned its own removal still serves lease reads | c, leading and fortified by a, b and d, commits the leave on a and b and applies it; a and b ask c's node and stop supporting c, a wins term 3 on a and b and fortifies b, while c still counts a's, b's and d's support. In the code the same plant breaks the lease reader property in the replacement run | `OneLeaseReader` |
 | `neg-restart-commit-at-base` | A restart takes its base's commit index alone, not its hard state's | a leaves the joint configuration, commits the leave on a and b and applies it; b crashes and restarts from base 0 with commit index 0, so it holds the learner, joint and leave entries but knows none committed; a wins term 2 on a and d under the new configuration, and b wins term 2 on b and c under the first | `AtMostOneLeader` |
-| `neg-conf-commit-not-durable` | A `Ready` that commits a configuration change writes the hard state | a commits the leave on a and b; b applies it and reports, its hard state still holding the commit index the leave came with, crashes and restarts from a base before the leave with that index, back in the joint configuration | `ReportsHold` |
-| `neg-removed-deletes-at-once` | A removed replica keeps its state until every voter of the plan reported the leave | a commits the leave with b, tells c and halts, handing its leadership to b, which holds the leave but applied only the joint configuration; c applies its removal and deletes its state, so b's outgoing half, a halted and c gone, never commits. With a death in place of the halt (`ci-die-live`) the same rule off fails the same way | `NewLeader` |
+| `neg-conf-commit-not-durable` | A `Ready` that commits a configuration change writes the hard state | a commits the leave on a and b; b learns the commit, applies the leave and reports, its hard state still holding commit index 3, then crashes and restarts from base 0 with commit index 3, below the leave | `ReportsHold` |
+| `neg-removed-deletes-at-once` | A removed replica keeps its state until every voter of the plan reported the leave | a commits the leave on a, b and c and halts, handing its leadership to d, which holds the leave but applied only the joint configuration; c applies its removal and deletes its state, so of the outgoing half only b takes d's entries, a halted and c gone, and d never commits. With a death in place of the halt (`ci-die-live`) the same rule off fails the same way | `NewLeader` |
 | `neg-removed-applies-removal` | A removed replica never applies its removal to its configuration, but stays a voter of the joint one | c, leading term 2 from `LeaveInit`, applies its removal and campaigns no more; b, which holds the leave but has not applied it, wins term 3 in the joint configuration, sends its empty entry to c alone and dies; a and d, which applied only the joint configuration, need c's vote for the outgoing half, which their older logs never win | `NewLeader` |
 | `neg-halted-keeps-leading` | A halted leader hands its leadership on | a halts at the leave and keeps leading, its node renewing its followers' grants, so none of them campaigns | `NewLeader` |
 
@@ -4208,14 +4208,15 @@ next milestone's run, which is also the twins' first.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
-| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 28 | 1,445,709 | 260 s, load average near 14 |
-| Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 20 | 2,623 | 3 s |
-| Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 23 | 143,948 | 180 s |
-| Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 21 | 277,314 | 37 s |
-| Voter replacement | `ci-halt` | [Voter replacement model](#voter-replacement-model) | 21 | 944,070 | 121 s |
-| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 20 | 1,261,686 | 219 s |
+| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 29 | 1,470,462 | 277 s, load average near 7 |
+| Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 20 | 2,623 | 2 s |
+| Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 24 | 45,904 | 47 s |
+| Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 21 | 335,232 | 50 s |
+| Voter replacement | `ci-halt` | [Voter replacement model](#voter-replacement-model) | 22 | 1,101,637 | 177 s |
+| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 21 | 1,415,091 | 239 s, load average near 7 |
 | Voter replacement | `ci-halt-live` | [Voter replacement model](#voter-replacement-model) | 18 | 1,473 | 2 s |
-| Voter replacement | `ci-die-live` | [Voter replacement model](#voter-replacement-model) | 23 | 10,898 | 10 s |
+| Voter replacement | `ci-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 12,260 | 10 s |
+| Voter replacement | `ci-leave-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 36,118 | 27 s |
 | Voter replacement | `deep-live` | [Voter replacement model](#voter-replacement-model) | 27 | 57,229 | 161 s, 1 worker |
 | Voter replacement | `deep-restart` | [Voter replacement model](#voter-replacement-model) | 20 | 2,973,820 | 473 s |
 | Epoch change | `heavy-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
