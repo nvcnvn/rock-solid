@@ -2356,6 +2356,7 @@ OnePG == {2}
 OneChunk == {2}
 FirstPG == {1}
 MinLive2 == [p \in PGs |-> 2]
+MinLive1 == [p \in PGs |-> 1]
 MaintPG2 == [p \in PGs |-> p = 2]
 Mem3 == [p \in PGs |-> IF p = 1 THEN <<1, 2, 3>> ELSE <<2, 3>>]
 Mem4 == [p \in PGs |-> IF p = 1 THEN <<1, 2, 3>> ELSE <<2, 4>>]
