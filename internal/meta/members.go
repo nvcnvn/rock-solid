@@ -345,16 +345,6 @@ func (c *Control) OldReleases() []uint32 {
 	return ns
 }
 
-// NodeSessions is the session table version node's last heartbeat reported, and whether the
-// leader has heard one.
-func (c *Control) NodeSessions(node uint32) (uint64, bool) {
-	i := slices.IndexFunc(c.nodes, func(n nodeState) bool { return n.id == node })
-	if i < 0 {
-		return 0, false
-	}
-	return c.nodes[i].sessV, true
-}
-
 // lagsTable reports whether node holds an older session table than the committed one, or has not
 // said which it holds: a disk of it marked up would order a fenced session's write it held.
 func (c *Control) lagsTable(node uint32) bool {

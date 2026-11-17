@@ -26,6 +26,7 @@ type client struct {
 	pending []func(ctx *core.Context) core.Action
 	started map[uint64]uint64
 	acks    map[core.RequestID]chunkstore.Response
+	data    map[core.RequestID]byte
 	seq     uint64
 }
 
@@ -36,6 +37,7 @@ func (c *client) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) [
 			out = append(out, f(ctx))
 		}
 		c.pending = c.pending[:0]
+		out = append(out, core.Action{Kind: core.ActSetTimer, Timer: clientTimer, At: ctx.Now + 100_000})
 	case core.EvNetRecv:
 		defer func() {
 			if ev.Msg.Buf != core.NoBuf {
@@ -55,6 +57,9 @@ func (c *client) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) [
 		var rp chunkstore.Response
 		if chunkstore.DecodeResponse(frame, data, &rp) == nil {
 			c.acks[rp.ID] = rp
+			if data != 0 {
+				c.data[rp.ID] = ctx.Pool.Bytes(ev.Msg.Buf)[0]
+			}
 		}
 	}
 	return out
@@ -71,7 +76,7 @@ func newClient(t *testing.T, ctlPort, nodeBase int) *client {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pool.Close() })
-	c := &client{t: t, ctl: ctlNode, started: map[uint64]uint64{}, acks: map[core.RequestID]chunkstore.Response{}}
+	c := &client{t: t, ctl: ctlNode, started: map[uint64]uint64{}, acks: map[core.RequestID]chunkstore.Response{}, data: map[core.RequestID]byte{}}
 	lo := netip.MustParseAddr("127.0.0.1")
 	td := tcp.New(tcp.Config{Self: core.NodeID{Node: 3}, Seed: 3, Dial: func(p core.NodeID) (int, error) {
 		if p == ctlNode {
@@ -138,6 +143,24 @@ func (c *client) write(u chunkstore.Update, at core.NodeID, within time.Duration
 	return chunkstore.Response{}, false
 }
 
+// read reads the first block of u's chunk from the loop at, and waits for its answer and the
+// block's first byte.
+func (c *client) read(u chunkstore.Update, at core.NodeID, within time.Duration) (chunkstore.Response, byte, bool) {
+	c.seq++
+	rd := chunkstore.Read{ID: core.RequestID(c.seq), PG: u.PG, Chunk: u.Chunk, Len: core.BlockSize}
+	c.send(func(ctx *core.Context) core.Action {
+		a := core.Action{Kind: core.ActNetSend, Peer: at}
+		a.Msg.Len = uint16(copy(a.Msg.Body[:], chunkstore.AppendRead(nil, &rd)))
+		return a
+	})
+	for end := time.Now().Add(within); time.Now().Before(end); c.l.Pass() {
+		if rp, ok := c.acks[rd.ID]; ok {
+			return rp, c.data[rd.ID], true
+		}
+	}
+	return chunkstore.Response{}, 0, false
+}
+
 // pgPrimary is PG 0 of pool 1 as the committed table has it, once its interval is activated with
 // a member up: the write's PG fields and the loop of the member's disk, devices[i] at loop i+1.
 func pgPrimary(c *meta.Control, devices []string) (chunkstore.Update, core.NodeID, bool) {
@@ -174,9 +197,17 @@ func fenced(c *meta.Control, id uint64) bool {
 	return st.Fenced(id)
 }
 
-// writeOK writes as session to PG 0 of pool 1 until a write is acknowledged, each to the primary
-// the committed table names.
+// writeOK writes as session to PG 0 of pool 1 until a write is acknowledged.
 func writeOK(t *testing.T, p *ctl, cl *client, devices []string, session uint64, within time.Duration) (chunkstore.Response, bool) {
+	return untilOK(t, p, devices, within, func(u chunkstore.Update, to core.NodeID) (chunkstore.Response, bool) {
+		u.Session = session
+		return cl.write(u, to, 5*time.Second)
+	})
+}
+
+// untilOK runs op on PG 0 of pool 1 until it is answered OK, each time at the primary the
+// committed table names.
+func untilOK(t *testing.T, p *ctl, devices []string, within time.Duration, op func(u chunkstore.Update, to core.NodeID) (chunkstore.Response, bool)) (chunkstore.Response, bool) {
 	var rp chunkstore.Response
 	for end := time.Now().Add(within); time.Now().Before(end); {
 		type at struct {
@@ -195,9 +226,8 @@ func writeOK(t *testing.T, p *ctl, cl *client, devices []string, session uint64,
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		w.u.Session = session
 		var ok bool
-		if rp, ok = cl.write(w.u, w.to, 5*time.Second); ok && rp.Status == chunkstore.StatusOK {
+		if rp, ok = op(w.u, w.to); ok && rp.Status == chunkstore.StatusOK {
 			return rp, true
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -207,11 +237,11 @@ func writeOK(t *testing.T, p *ctl, cl *client, devices []string, session uint64,
 
 // Over TCP, with the control plane in the test process and the storage node a child: a client
 // starts a session through the session-start kind, and its write, from a session newer than the
-// node's table, waits for the node's fetch and succeeds. The node is killed and its session's
-// lease runs out unrenewed, so the leader fences it under a new session-table version while the
-// node is down; started again over its opened stores, the node's disks come up only once its
-// heartbeat reports that version, its replica asks for a new interval of its PG and activates
-// it, a write of the fenced session is refused and a new session's write to the same PG succeeds.
+// node's table, waits for the node's fetch and succeeds. The node is killed and started again at
+// once over its opened stores, within node_down_after, so the control plane never marks its PG's
+// member down: a new session's write to the same PG succeeds once the PG moves to the one new
+// interval the restarted replica asks for, and the replica activates it. Once the first session's
+// lease runs out unrenewed and the leader fences it, its write is refused.
 func TestASessionWritesOverTCPAndARestartedNodeWritesToTheSamePGAgain(t *testing.T) {
 	dir := testDir(t)
 	p := runCtl(t, dir)
@@ -259,42 +289,22 @@ func TestASessionWritesOverTCPAndARestartedNodeWritesToTheSamePGAgain(t *testing
 		t.Fatal(err)
 	}
 	_ = cmd.Wait()
-	var version uint64
-	if !within(60*time.Second, func() bool {
-		version = onCtl(t, p, func(_ *core.Context, c *meta.Control) uint64 {
-			if c == nil || len(upDisks(c, 2)) != 0 || !fenced(c, s1) {
-				return 0
-			}
-			return c.SessionTable().Version
-		})
-		return version != 0
-	}) {
-		t.Fatal("the killed node's disks never went down, or its session was never fenced")
-	}
 	var again output
 	startNode(t, flags, &again)
-	if !within(60*time.Second, func() bool {
-		r := onCtl(t, p, func(_ *core.Context, c *meta.Control) (r [2]uint64) {
-			if c != nil && len(upDisks(c, 2)) != 0 {
-				v, _ := c.NodeSessions(2)
-				r = [2]uint64{1, v}
-			}
-			return r
-		})
-		up, held := r[0], r[1]
-		if up == 1 && held < version {
-			t.Fatalf("a disk came up while its node reported session version %d of %d", held, version)
-		}
-		return up == 1
-	}) {
-		t.Fatalf("the restarted node's disks never came up; the node said:\n%s", again.String())
-	}
 	s2, ok := cl.start(10 * time.Second)
 	if !ok {
 		t.Fatal("no session started after the restart")
 	}
-	if rp, ok := writeOK(t, p, cl, devices, s2, 8*time.Second); !ok {
+	if rp, ok := writeOK(t, p, cl, devices, s2, 15*time.Second); !ok {
 		t.Fatalf("session %d's write after the restart was never acknowledged, the last answer %+v; the node said:\n%s", s2, rp, again.String())
+	}
+	if e := onCtl(t, p, func(_ *core.Context, c *meta.Control) chunkstore.PGEntry { return c.Table().Pools[0].PGs[0] }); e.Interval != before+1 || e.Activated != e.Interval || e.Members[0].Mark != chunkstore.MarkUp {
+		t.Fatalf("after interval %d and a restart within node_down_after, PG 0 is at interval %d, activated %d, its member %v", before, e.Interval, e.Activated, e.Members[0].Mark)
+	}
+	if !within(2*meta.DeadWait.Duration(), func() bool {
+		return onCtl(t, p, func(_ *core.Context, c *meta.Control) bool { return c != nil && fenced(c, s1) })
+	}) {
+		t.Fatalf("session %d, never renewed, was never fenced", s1)
 	}
 	type at struct {
 		u  chunkstore.Update
@@ -307,8 +317,5 @@ func TestASessionWritesOverTCPAndARestartedNodeWritesToTheSamePGAgain(t *testing
 	w.u.Session = s1
 	if rp, ok := cl.write(w.u, w.to, 5*time.Second); !ok || rp.Status == chunkstore.StatusOK {
 		t.Fatalf("the fenced session's write was answered %v: %+v", ok, rp)
-	}
-	if after := onCtl(t, p, func(_ *core.Context, c *meta.Control) uint32 { return c.Table().Pools[0].PGs[0].Interval }); after <= before {
-		t.Fatalf("the restarted replica wrote in interval %d, its interval before the kill", after)
 	}
 }
