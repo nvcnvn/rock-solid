@@ -70,7 +70,7 @@ func newCtl(cfg ctlConfig) (_ *ctl, err error) {
 	}
 	limit := newHeapLimit(cfg.Memory)
 	limit.add(p.pool.Mapped())
-	if err := limit.check(); err != nil {
+	if err := limit.check(pageRegion); err != nil {
 		return nil, err
 	}
 	p.pages = loop.NewSlab(pageRegion)

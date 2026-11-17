@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"log"
 	"reflect"
 	"strings"
 	"testing"
@@ -88,26 +90,44 @@ func TestParseAdminTakesEachCommand(t *testing.T) {
 // GOMEMLIMIT follows the budget less every slab mapped, at start and as page slabs grow; a budget
 // the start's slabs fill is refused, and none leaves GOMEMLIMIT alone.
 func TestTheHeapLimitIsTheBudgetLessTheMappedSlabs(t *testing.T) {
+	var logged bytes.Buffer
+	defer log.SetOutput(log.Writer())
+	log.SetOutput(&logged)
 	var limits []int64
 	h := newHeapLimit(256)
 	h.set = func(n int64) int64 { limits = append(limits, n); return 0 }
 	h.add(64 << 20)
-	if err := h.check(); err != nil {
+	if err := h.check(64 << 20); err != nil {
 		t.Fatal(err)
 	}
 	h.add(64 << 20)
-	if want := []int64{192 << 20, 128 << 20}; !reflect.DeepEqual(limits, want) {
+	h.add(64 << 20)
+	if logged.Len() != 0 {
+		t.Fatalf("logged %q with the heap at its minimum", logged.String())
+	}
+	h.add(64 << 20)
+	h.add(64 << 20)
+	if want := []int64{192 << 20, 128 << 20, 64 << 20, 64 << 20, 64 << 20}; !reflect.DeepEqual(limits, want) {
 		t.Fatalf("limits %v, want %v", limits, want)
 	}
-	full := newHeapLimit(64)
-	full.set = func(int64) int64 { return 0 }
-	if full.add(64 << 20); full.check() == nil {
-		t.Fatal("a budget the start's slabs fill was taken")
+	if n := strings.Count(logged.String(), "\n"); n != 1 {
+		t.Fatalf("logged %d lines, want 1, as the slabs passed the minimum heap: %q", n, logged.String())
+	}
+	for _, c := range []struct {
+		budget, pages int64
+		ok            bool
+	}{{192, 64 << 20, true}, {191, 64 << 20, false}, {192, 128 << 20, false}} {
+		b := newHeapLimit(c.budget)
+		b.set = func(int64) int64 { return 0 }
+		b.add(64 << 20)
+		if err := b.check(c.pages); (err == nil) != c.ok {
+			t.Fatalf("-memory %d MiB with a 64 MiB pool and %d MiB of page slabs: %v", c.budget, c.pages>>20, err)
+		}
 	}
 	none := newHeapLimit(0)
 	none.set = func(int64) int64 { t.Fatal("no budget set a limit"); return 0 }
 	none.add(1 << 30)
-	if none.check() != nil {
+	if none.check(1<<30) != nil {
 		t.Fatal("no budget was refused")
 	}
 	if _, err := parseNode(strings.Fields("-node 2 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a -memory -1")); err == nil {

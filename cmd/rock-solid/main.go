@@ -20,12 +20,16 @@ import (
 	"syscall"
 )
 
+// minHeap is the least GOMEMLIMIT a budget sets: at 0 the collector would run back to back.
+const minHeap = 64 << 20
+
 // heapLimit holds the Go heap's limit, GOMEMLIMIT, at the daemon's memory budget less the slabs it
-// has mapped, as each maps; a budget of 0 leaves the limit alone.
+// has mapped, as each maps, and never below minHeap; a budget of 0 leaves the limit alone.
 type heapLimit struct {
-	budget int64
-	mu     sync.Mutex
-	mapped int64
+	budget  int64
+	mu      sync.Mutex
+	mapped  int64
+	floored bool
 	// set is debug.SetMemoryLimit, which tests replace.
 	set func(int64) int64
 }
@@ -42,15 +46,22 @@ func (h *heapLimit) add(n int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.mapped += int64(n)
-	h.set(max(h.budget-h.mapped, 0))
+	if h.budget-h.mapped < minHeap && !h.floored {
+		h.floored = true
+		log.Printf("memory: %d MiB of slabs leave less than %d MiB of the -memory %d MiB for the Go heap; GOMEMLIMIT stays at %d MiB",
+			h.mapped>>20, minHeap>>20, h.budget>>20, minHeap>>20)
+	}
+	h.set(max(h.budget-h.mapped, minHeap))
 }
 
-// check reports a budget the slabs mapped at start already fill.
-func (h *heapLimit) check() error {
+// check reports a budget that cannot hold the slabs mapped at start, pages more bytes of page slabs
+// the start will map, and minHeap.
+func (h *heapLimit) check(pages int64) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.budget != 0 && h.mapped >= h.budget {
-		return fmt.Errorf("-memory %d MiB leaves no Go heap beside the %d MiB of slabs mapped at start", h.budget>>20, h.mapped>>20)
+	if h.budget != 0 && h.budget < h.mapped+pages+minHeap {
+		return fmt.Errorf("-memory %d MiB is under the %d MiB of slabs at start plus a %d MiB Go heap",
+			h.budget>>20, (h.mapped+pages)>>20, minHeap>>20)
 	}
 	return nil
 }

@@ -68,7 +68,7 @@ func newNode(cfg nodeConfig) (_ *storageNode, err error) {
 			return nil, err
 		}
 	}
-	if err := p.limit.check(); err != nil {
+	if err := p.limit.check(int64(len(cfg.Devices)) * pageRegion); err != nil {
 		return nil, err
 	}
 	return p, nil

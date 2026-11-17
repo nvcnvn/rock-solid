@@ -7343,10 +7343,11 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
   cycle and on the goal. At `-cpu 4 -benchtime 4s -lsm.entries 2000000`: one entry 0.26 ms a cycle,
   goal 19 MiB; 2 million on slabs 0.36 ms, 19 MiB; the same with pages on the Go heap 0.41 ms but a
   188 MiB goal, the cost slabs remove; the pointerful control 97 ms a cycle and 476 MiB.
-- The daemons hold `GOMEMLIMIT` at `-memory` less the slabs mapped: with a 256 MiB budget, a
-  64 MiB pool at start sets 192 MiB and a page slab's 64 MiB region 128 MiB; a budget the start's
-  pools fill is refused, and with no budget no limit is set
-  (`TestTheHeapLimitIsTheBudgetLessTheMappedSlabs`).
+- The daemons hold `GOMEMLIMIT` at `-memory` less the slabs mapped, never below 64 MiB: with a
+  256 MiB budget, a 64 MiB pool at start sets 192 MiB and each 64 MiB page slab region then 128 and
+  64 MiB, and two more regions keep it at 64 MiB with one log line; a 192 MiB budget takes a 64 MiB
+  pool and one page slab to come, while 191 MiB, or two page slabs, is refused; with no budget no
+  limit is set (`TestTheHeapLimitIsTheBudgetLessTheMappedSlabs`).
 - A removed shard leaves the round driver told nothing more ([Round driver](#round-driver),
   `TestRoundRemovedShardIsToldNothing`), and an ask about a replica its node does not hold is
   answered by `raftshard.Gone` ([Voter replacement](#voter-replacement), `TestAReplicaItIsNotIsAnsweredGone`).
