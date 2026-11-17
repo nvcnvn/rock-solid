@@ -2960,7 +2960,8 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/core` `TestPoolIsFirstFit` | 10,000 | about 1 s |
   | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 2 s |
   | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 10 s |
-  | `internal/raftshard` `TestVoterReplacementRunsReplayFromTheirSeed` | 2,000 | 18 s |
+  | `internal/raftshard` `TestVoterReplacementRunsReplayFromTheirSeed` | 2,000 | 16 s |
+  | `internal/raftshard` `TestAVoterRestartedMidSwapKeepsTheConfigurationItKnewCommitted` | 2,000 | 13 s |
   | `internal/raftshard` `TestAReplacementNeverStallsProposals` | 2,000 | 6 s |
   | `internal/raftshard` `TestCommittedEntriesSurviveCrashesOnTheDiskLog` | 2,000 | 29 s |
   | `internal/meta` `TestTxnsMatchTheOracle` | 10,000 | 4 s |
@@ -6617,7 +6618,7 @@ a snapshot taken at the leader's applied index in for the point-in-time view the
 The membership question, the ask about a leader and their answers are fortification-sized frames that `FuzzDecode` also feeds.
 
 **Simulator runs.** `TestVoterReplacementRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000
-per commit in `scripts/seeds.sh` (25 s at `JOBS=2`), 10,000 once in 125 s, runs the
+per commit in `scripts/seeds.sh` (16 s on its default 4 processes), runs the
 [Raft shard](#raft-shard)'s faults, crash and lease frames on four nodes. From 2 to 4 s in, once
 one of the first three replicas leads, a follower among them, or in half the seeds the leader, is cut off
 from every other node, and up to 2 s later every replica gets the plan naming the fourth node's replica in its place. Every
