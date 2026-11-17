@@ -4260,7 +4260,7 @@ The record kinds of the event loop, such as `NetRecv` and `DiskDone`, have no sp
 the machine's steps below the protocol's, and the records above say what those steps did. `tracedata`
 lists them in `belowProtocol`, and stops on a record neither mapped nor listed.
 
-Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`: the scripted traces and seeds 15 and 34 at this commit, the other seeds before replay rollback took the format branch's changes, not rerun since:
+Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` and the scripted traces, at this commit. The format change that trims every segment (`add7c9f`) shifts the simulator's choices, so every seed took a new path from it on:
 
 | Trace | Lines | Result | Seconds |
 | --- | --- | --- | --- |
@@ -4278,13 +4278,11 @@ Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`: t
 | `scripted-move-primary` | 39 | passes: a move to a new primary that holds Y, peering keeping Y, which every up member holds, over the removed disk | 2 |
 | `scripted-lister-restarted` | 54 | passes: a restart during recovery, the restarted primary's replay gating Y until its next decision | 2 |
 | `scripted-lister-rotated` | 51 | passes: a rotation during recovery, the new primary holding Y logged and peering keeping it over the member that lists the chunk | 2 |
-| 35 seeds | 463 to 952 | pass, across restarts and formats, by `T` at 1, 5 and 24, by placed lines at 3, 7, 31 and 38, with own records released before their `Logged` reply at 8, 12, 23, 25 and 33 | 3 to 219 |
-| `primaries-15` | 618 | passes: a primary's gated recovery write landing at its next activation, discrepancy 29 | 22 |
-| `primaries-34` | 559 | passes: a recovery read from a source formatted before the write, discrepancy 28 | 30 |
-| `primaries-2` | 677 | no verdict in 400 s and 2 GB, not rerun at this commit: one crash leaves 26 `mayfail` lines, each a free choice | 400 |
-| `primaries-18`, `primaries-35` | 729, 753 | no verdict in 1,200 s and 2 GB, not rerun at this commit: 18 has 25 `mayfail` and 45 `maydeliver` lines, 35 has 6 and 53. TLC ran each at about 300,000 states a minute for two minutes, to depth 491 and 439, then at 1,250 a minute with about 58,000 states queued, its 2 GB heap full | 1,200 |
+| 38 seeds | 559 to 912 | pass, across restarts and formats | 4 to 109 |
+| `primaries-0` | 702 | passes: a demoted primary's gated recovery write landing at its disk's persist of a later primary's decision, discrepancy 30 | 300 |
+| `primaries-33` | 757 | no verdict in 400 s and 2 GB: node 1's one crash leaves 26 `mayfail` lines, 17 of chunk 1 and 9 of chunk 2. `OwnFail` takes only a chunk's newest version, so each chunk's lines are a chain, 18 by 10 branches, and TLC holds 3,600 states at depth 267 and takes about 1,100 a minute there. Not a mismatch: TLC refused no line up to there | 400 |
 
-37 seeds of 40 pass, and 2, 18 and 35 give no verdict. None broke a safety invariant,
+39 seeds of 40 pass, and 33 gives no verdict. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
 and `mayfail` branches stay alive, not its length.
 
