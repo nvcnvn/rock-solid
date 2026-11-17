@@ -94,14 +94,18 @@ func (p *storageNode) add(dm *deviceMachine, path string) error {
 	var m loop.Machine = p.nm
 	var d loop.Driver = td
 	if dm != nil {
+		m = dm
 		if nl.ring, err = uring.New(nl.pool, ringEntries); err != nil {
 			return err
 		}
-		disk, err := nl.ring.Open(path, false)
-		if err != nil {
-			return err
+		if disk, err := nl.ring.Open(path, false); err != nil {
+			log.Printf("device %s: %v", path, err)
+			dm.cfg.Err = err
+			nl.ring.Close()
+			nl.ring = nil
+		} else {
+			dm.cfg.Blocks, d = disk.Blocks(), loopDriver{td, disk}
 		}
-		dm.cfg.Blocks, m, d = disk.Blocks(), dm, loopDriver{td, disk}
 	}
 	nl.l = loop.New(loop.Config{Node: p.cfg.Node, ID: uint16(id), Pool: nl.pool}, nl.k, m, d)
 	td.L, nl.mail.in = nl.l, nl.l.Inbox()

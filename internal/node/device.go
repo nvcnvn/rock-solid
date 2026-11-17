@@ -13,8 +13,8 @@ import (
 // DeviceConfig is one device of a node: its stable identity, its size in blocks, its class, the
 // loop that owns it, its store's settings, the seed of its source, which the daemon takes from
 // the operating system at each start, so a format a crash cut short is formatted again under
-// another log ID, the control-plane group's ID and the voter its replica reports to until
-// Authority names another.
+// another log ID, the control-plane group's ID, the voter its replica reports to until
+// Authority names another, and the error opening the device, if any, which leaves it failed.
 type DeviceConfig struct {
 	Device uint64
 	Blocks uint64
@@ -24,6 +24,7 @@ type DeviceConfig struct {
 	Seed   uint64
 	Group  uint64
 	Ctl    core.NodeID
+	Err    error
 }
 
 // DeviceOutput is what a call into a Device asks of its loop and of the node's machine: actions;
@@ -91,11 +92,13 @@ type Device struct {
 	frame       []byte
 }
 
-// NewDevice starts recovering the device's store.
+// NewDevice starts recovering the device's store, or fails it at once on cfg.Err.
 func NewDevice(ctx *core.Context, cfg DeviceConfig, out *DeviceOutput) *Device {
 	d := &Device{cfg: cfg, rng: core.NewRand(cfg.Seed), start: lease.Now(ctx), auth: cfg.Ctl, hasAuth: cfg.Ctl != core.NodeID{}}
-	st, err := chunkstore.Open(ctx, cfg.Store, cfg.Blocks, &d.sout)
-	d.st = st
+	err := cfg.Err
+	if err == nil {
+		d.st, err = chunkstore.Open(ctx, cfg.Store, cfg.Blocks, &d.sout)
+	}
 	d.settle(ctx, err, out)
 	return d
 }

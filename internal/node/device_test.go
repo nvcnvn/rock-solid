@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"errors"
 	"slices"
 	"testing"
 
@@ -137,6 +138,23 @@ func TestADeviceWithNoValidSuperblockFailsUntouched(t *testing.T) {
 	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 1, Log: 0}}, &r.out)
 	if r.d.Replica() != nil {
 		t.Fatal("a failed device runs a replica")
+	}
+}
+
+// A device the process could not open, as a drive gone from the bus, is reported failed and the
+// node reports it beside the device that opened, so the others still serve.
+func TestADeviceThatCannotBeOpenedIsReportedFailed(t *testing.T) {
+	r := newDevRun(t, nil)
+	r.d = NewDevice(&r.ctx, DeviceConfig{Device: 7, Class: "ssd", Loop: 3, Store: storetest.Config(), Seed: 1, Group: group, Ctl: ctl, Err: errors.New("no such device")}, &r.out)
+	r.take()
+	if !r.failed || r.opened != nil || r.d.Store() != nil || len(r.work) != 0 {
+		t.Fatalf("failed %v, opened %+v, %d disk actions", r.failed, r.opened, len(r.work))
+	}
+	n := newRun(t, 1, 10)
+	n.out.Reset()
+	n.n.Take(&n.ctx, 7, &r.out, &n.out)
+	if nr := n.report(); !slices.Equal(nr.Failed, []uint64{7}) || len(nr.Opened) != 1 || nr.Opened[0].Device != 10 {
+		t.Fatalf("the node reported opened %+v, failed %v", nr.Opened, nr.Failed)
 	}
 }
 

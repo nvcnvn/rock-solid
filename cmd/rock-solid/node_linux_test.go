@@ -210,26 +210,27 @@ func upDisks(c *meta.Control, node uint32) []uint32 {
 
 // A storage node process over TCP: its two blank devices are formatted, reported and join the
 // record, each replica's heartbeat marking its disk up once the membership the control plane
-// sends names its log; a device with no valid superblock reaches the leader's FailedDevices; and
-// a pool created at the leader gives a placement table that reaches the replica of every device.
+// sends names its log; a device with no valid superblock and one that cannot be opened reach the
+// leader's FailedDevices; and a pool created at the leader gives a placement table that reaches
+// the replica of every device.
 func TestANodeStartsItsDevicesAndTakesItsDisksAndTablesOverTCP(t *testing.T) {
 	dir := testDir(t)
 	p := runCtl(t, dir)
-	a, b, bad := filepath.Join(dir, "node-dev-a"), filepath.Join(dir, "node-dev-b"), filepath.Join(dir, "node-dev-bad")
+	a, b, bad, missing := filepath.Join(dir, "node-dev-a"), filepath.Join(dir, "node-dev-b"), filepath.Join(dir, "node-dev-bad"), filepath.Join(dir, "node-dev-missing")
 	device(t, a, false)
 	device(t, b, false)
 	device(t, bad, true)
-	base := freeBase(t, 3)
+	base := freeBase(t, 4)
 	var out output
-	startNode(t, fmt.Sprintf("-node 2 -ctl 1=127.0.0.1:%d -group %d -listen 127.0.0.1:%d -device %s -device %s -device %s",
-		p.Port, ctlGroup, base, a, b, bad), &out)
-	failed := meta.FailedDevice{Node: 2, Device: deviceID(bad)}
+	startNode(t, fmt.Sprintf("-node 2 -ctl 1=127.0.0.1:%d -group %d -listen 127.0.0.1:%d -device %s -device %s -device %s -device %s",
+		p.Port, ctlGroup, base, a, b, bad, missing), &out)
+	failed := []meta.FailedDevice{{Node: 2, Device: deviceID(bad)}, {Node: 2, Device: deviceID(missing)}}
 	if !within(60*time.Second, func() bool {
 		return onCtl(t, p, func(_ *core.Context, c *meta.Control) bool {
-			return c != nil && len(upDisks(c, 2)) == 2 && slices.Contains(c.FailedDevices(), failed)
+			return c != nil && len(upDisks(c, 2)) == 2 && slices.Contains(c.FailedDevices(), failed[0]) && slices.Contains(c.FailedDevices(), failed[1])
 		})
 	}) {
-		t.Fatalf("the node's disks never came up, or its bad device was never reported failed; the node said:\n%s", out.String())
+		t.Fatalf("the node's disks never came up, or its bad or missing device was never reported failed; the node said:\n%s", out.String())
 	}
 	replicas, pgs := 1, uint32(16)
 	if err := onCtl(t, p, func(_ *core.Context, c *meta.Control) error {
