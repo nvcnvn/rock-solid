@@ -1,6 +1,16 @@
 name: conform
 
 on:
+  pull_request:
+    paths:
+      - models/epoch/epoch.tla
+      - models/epoch/trace_epoch.*
+      - internal/chunkstore/**
+      - internal/lease/**
+      - internal/trace/**
+      - tools/tracedata/**
+      - scripts/conform.sh
+      - .github/workflows/conform.yml
   schedule:
     - cron: "47 3 * * *"
   workflow_dispatch:
@@ -8,6 +18,10 @@ on:
       first:
         description: First seed (default rotates daily)
         required: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -45,13 +59,21 @@ jobs:
       - id: seeds
         env:
           INPUT_FIRST: ${{ inputs.first }}
+        # A pull request runs the 40 seeds of a local run, scripted traces too; a nightly run sweeps new ones.
         run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            printf 'first=0\ncount=40\nrun=TestConform|^%s$\n' "$RUN" >>"$GITHUB_OUTPUT"
+            exit
+          fi
           first=$INPUT_FIRST
           echo "first=${first:-$(( $(date -u +%s) / 86400 % 2000 * COUNT + 40 ))}" >>"$GITHUB_OUTPUT"
+          printf 'count=%s\nrun=%s\n' "$COUNT" "$RUN" >>"$GITHUB_OUTPUT"
       - name: sweep
         if: matrix.mode == 'sweep'
         env:
           FIRST: ${{ steps.seeds.outputs.first }}
+          COUNT: ${{ steps.seeds.outputs.count }}
+          RUN: ${{ steps.seeds.outputs.run }}
         run: |
           echo "Seeds $FIRST to $((FIRST + COUNT - 1)); replay one: RUN=$RUN FIRST=<seed> COUNT=1 scripts/conform.sh" | tee -a "$GITHUB_STEP_SUMMARY"
           status=0

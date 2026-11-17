@@ -4422,7 +4422,10 @@ Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half.
 The `conform` workflow runs this check nightly on a window of 500 seeds that moves each day, from seed
 40 up, with 20 minutes per trace where a local run gives 400 s, and the plants over the window's first 40.
 A failure names its seed, and `RUN=TestPeeringKeepsAcknowledgedWritesAcrossPrimaries FIRST=<seed> COUNT=1
-scripts/conform.sh` replays it. It never blocks a merge.
+scripts/conform.sh` replays it. On a pull request that changes the epoch model, its trace spec,
+`internal/chunkstore`, `internal/lease`, `internal/trace`, `tools/tracedata` or the script, it runs the 40 seeds of a
+local run with the scripted traces, and the plants over them, and a failure there is a discrepancy to settle
+before the change merges.
 
 `refillSoleHolder` is not in `conformPlants`: the primary-change run is too short for a member merely down to go missing, so a refill or a `Stay` of one appears only in `scripted-refill` and `scripted-stay`, and `TestPlantedPeeringBugsBreakTheOracle` breaks the rule through the simulator's invariant.
 
