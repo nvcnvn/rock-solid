@@ -249,10 +249,14 @@ func (res admitResult) checkHeld(t *testing.T, run string) {
 
 // [property] With data at 90 and 95% of the disk and overwrites in its first 30%, closed-loop
 // writers outrun a cleaner whose worker takes 20 ms a victim, so free segments outside the reserve
-// fall into the slow-down band, where admission holds as checkHeld checks. With ROCKSOLID_LONG_SIM
-// set, the default seed also runs without admission, where no segment is free for a tenth of the
-// time or more.
+// fall into the slow-down band, where admission holds as checkHeld checks. The runs take about a
+// minute and 1.5 GB, so a plain go test runs them only with ROCKSOLID_LONG_SIM set, which also
+// runs the default seed without admission, where no segment is free for a tenth of the time or
+// more.
 func TestWriteAdmissionHoldsAt90And95PercentFull(t *testing.T) {
+	if seeds.Default() && os.Getenv(longSimEnv) == "" {
+		t.Skip("set " + longSimEnv + " or a seed flag to run")
+	}
 	fills := []float64{0.9, 0.95}
 	sum := make([]admitResult, len(fills))
 	seeds.Run(t, 0, 1, func(seed uint64) {
@@ -274,9 +278,6 @@ func TestWriteAdmissionHoldsAt90And95PercentFull(t *testing.T) {
 		s := sum[i]
 		t.Logf("%.0f%% full: %.1f s measured, %.1f%% of it in the slow-down band, as few as %d free; no free segment %.2f%%; writes waited %.1f ms at the 99th percentile, %.1f ms at the most",
 			100*fill, float64(s.total)/1e6, 100*float64(s.slowed)/float64(s.total), s.fewest, 100*float64(s.zero)/float64(s.total), float64(p99(s.waits))/1e3, float64(s.slowest)/1e3)
-		if os.Getenv(longSimEnv) == "" {
-			continue
-		}
 		r := fullRun(fill)
 		r.noAdmit = true
 		without := r.run(t, 0)

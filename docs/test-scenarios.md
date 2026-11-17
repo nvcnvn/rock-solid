@@ -1658,7 +1658,8 @@ call, time from `ctx.Now`:
   99th percentile and 91.5 ms at the most. The run takes 10 minutes on one core of the Mac mini and
   peaks at 2.3 GB resident.
 - Review with data at 90 and 95% full and a hot 30% (`TestWriteAdmissionHoldsAt90And95PercentFull`,
-  seeded, in `scripts/seeds.sh`): data at 90 and 95% of a 16 GiB disk of 1,024 segments of 16 MiB, filled
+  seeded, in `scripts/seeds.sh` over 4 seeds; a plain `go test` runs it only with
+  `ROCKSOLID_LONG_SIM` set): data at 90 and 95% of a 16 GiB disk of 1,024 segments of 16 MiB, filled
   in 64-block writes whose 264 KiB records pack a segment whole, then overwritten in 16 KiB writes
   within the first 30% of the data, as block volumes overwrite a hot share, for a tenth of a disk
   capacity. The cold 70% packs whole segments the cleaner never takes, so the hot data works in
