@@ -783,6 +783,28 @@ func TestTheNextRoundWritesACommitIndexMovedWithoutOne(t *testing.T) {
 	}
 }
 
+// A leader's Ready that hands over only the first page of what its commit index covers is a round
+// of its own: its appends carry that commit index, past a configuration change a later page may
+// hold, so they leave only once it is durable.
+func TestALeaderSendsACommitIndexPastItsPageOnlyOnceDurable(t *testing.T) {
+	n := newNet(t, 3, 1)
+	n.elect(0)
+	a := n.r[0]
+	for range 6 {
+		n.propose(0, make([]byte, 200<<10))
+	}
+	n.settleKeeping(func(envelope) bool { return false })
+	last, _ := a.st.LastIndex()
+	sent := n.recv(0, 1, raftpb.Message{Type: raftpb.MsgAppResp, From: 2, To: 1, Term: n.term(0), Index: last})
+	if a.flush == 0 || len(sent) != 0 {
+		t.Fatalf("committing past the first page took round %d and sent %v before its flush", a.flush, types(sent))
+	}
+	sent = n.durable(0)
+	if count(sent, raftpb.MsgApp) == 0 || a.st.HardState().Commit != last {
+		t.Fatalf("once durable the leader sent %v and holds commit %d of %d", types(sent), a.st.HardState().Commit, last)
+	}
+}
+
 func TestACrashBeforeTheFlushLosesTheEntryAndTheLeaderResendsIt(t *testing.T) {
 	n := newNet(t, 3, 1)
 	n.elect(0)

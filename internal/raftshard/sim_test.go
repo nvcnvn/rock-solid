@@ -59,6 +59,7 @@ type simCluster struct {
 	maxApplied uint64
 	leaseReads int
 	twoLeaders error
+	forgot     error
 	overlap    error
 	stale      error
 	removed    error
@@ -79,8 +80,15 @@ type simReplica struct {
 	out     Output
 	applied int
 	leads   bool
-	// index is the last index it applied, clocks its clocks at its last pass, and the rest its node-pair leases.
-	index   uint64
+	// index is the last index it applied, confAt the last configuration change's, flight the round in
+	// flight or 0, taken the index it had applied when it took that round, and kept the same for its
+	// last durable round.
+	index  uint64
+	confAt uint64
+	flight uint64
+	taken  uint64
+	kept   uint64
+	// clocks is its clocks at its last pass, and the rest its node-pair leases.
 	clocks  core.Clocks
 	rng     *core.Rand
 	holder  *lease.Holder
@@ -126,6 +134,7 @@ func newCluster(seed uint64, p plants, set sim.Settings, rep *replacement, disk 
 	c.inv.Register("acknowledged only once durable", func() error { return c.early })
 	c.inv.Register("applied entries agree", func() error { return c.disagree })
 	c.inv.Register(invOneLeader, func() error { return c.twoLeaders })
+	c.inv.Register(invDurableCommit, func() error { return c.forgot })
 	c.inv.Register(invOneLeaseReader, func() error { return c.overlap })
 	c.inv.Register(invLeaseReadsCurrent, func() error { return c.stale })
 	c.inv.Register(invCaughtUp, func() error { return c.promoted })
@@ -340,6 +349,7 @@ const (
 	leaseBeat            byte = 'h'
 	leaseFrameBytes           = kindBytes + 4*8
 	invOneLeader              = "at most one leader per shard per term"
+	invDurableCommit          = "a replica's storage holds the commit index of each configuration change it applied, and of each entry it applied before its last durable round"
 	invOneLeaseReader         = "no two replicas of a shard serve lease reads at overlapping times"
 	invLeaseReadsCurrent      = "a lease read sees every applied entry"
 )
@@ -499,9 +509,21 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 			c.applied(r, e.Index, v)
 		}
 		r.index = e.Index
+		if e.Type != raftpb.EntryNormal {
+			r.confAt = e.Index
+		}
 		if leading {
 			c.maxApplied = max(c.maxApplied, e.Index)
 		}
+	}
+	if round := r.s.round; round != r.flight {
+		if r.flight != 0 {
+			r.kept = r.taken
+		}
+		r.flight, r.taken = round, r.s.applied
+	}
+	if hs, _, _ := r.s.cfg.Storage.InitialState(); hs.Commit < max(r.confAt, r.kept) && c.forgot == nil {
+		c.forgot = fmt.Errorf("replica %d would restart at commit index %d, having applied a configuration change at %d and up to %d before its last durable round", r.id, hs.Commit, r.confAt, r.kept)
 	}
 	c.done = c.afterCrash && (c.rep == nil || c.rep.removed && c.rep.caughtUp) && (c.disk == nil || c.disk.crashes == diskCrashes)
 	st := r.s.rn.BasicStatus()

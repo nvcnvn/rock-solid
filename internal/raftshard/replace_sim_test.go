@@ -423,12 +423,12 @@ func TestAVoterRestartedMidSwapKeepsTheConfigurationItKnewCommitted(t *testing.T
 	})
 }
 
-// The voter model's neg-conf-commit-not-durable: with rounds that write only their own Ready's hard
-// state, and none for a Ready that commits a configuration change, the regressed voter restarts in
-// the configuration before the swap and wins the term the fourth replica won.
+// The voter model's neg-hard-state-old: with rounds that write only their own Ready's hard state,
+// and none for a Ready that commits a configuration change, the regressed voter restarts in the
+// configuration before the swap and wins the term the fourth replica won.
 func TestRoundsThatLeaveTheCommitOfASwapBehindElectTwoLeaders(t *testing.T) {
 	for seed := range uint64(5) {
-		c := regressCluster(seed, plants{confCommitNotDurable: true})
+		c := regressCluster(seed, plants{oldHardState: true})
 		c.inv.Only(invOneLeader)
 		for c.s.Time() < simRunFor && c.s.Step() {
 			if c.inv.Check() != nil {
@@ -438,4 +438,21 @@ func TestRoundsThatLeaveTheCommitOfASwapBehindElectTwoLeaders(t *testing.T) {
 		}
 	}
 	t.Fatal("5 seeds whose rounds leave the commit of a swap behind broke no one-leader invariant")
+}
+
+// The voter model's neg-conf-commit-not-durable: a replica that applies a configuration change
+// before its commit index is durable would restart in the configuration before it.
+func TestAConfigurationChangeAppliedBeforeItsCommitIsDurableIsForgotten(t *testing.T) {
+	for seed := range uint64(5) {
+		c := newReplaceCluster(seed, plants{noConfRound: true}, faults(), false, false)
+		c.inv.Only(invDurableCommit)
+		for c.s.Time() < simRunFor && c.s.Step() {
+			c.pause()
+			if c.inv.Check() != nil {
+				return
+			}
+			c.after(t, seed)
+		}
+	}
+	t.Fatal("5 seeds whose replicas apply configuration changes before their commit is durable broke no durable-commit invariant")
 }

@@ -104,10 +104,11 @@ type Shard struct {
 	plant  plants
 	rng    *rand.Rand
 	conf   raftpb.ConfState
-	// hold is which of the round's messages its flush sends, hs the newest hard state etcd-raft handed out, which it hands out only once, and timeoutNow a transfer's MsgTimeoutNow that came while a round was in flight, or none.
-	hold       part
-	hs         raftpb.HardState
-	timeoutNow raftpb.Message
+	// hold is which of the round's messages its flush sends, hs the newest hard state etcd-raft handed out, which it hands out only once, and timeoutTerm and timeoutFrom the term and sender of a transfer's MsgTimeoutNow that came while a round was in flight, or 0.
+	hold        part
+	hs          raftpb.HardState
+	timeoutTerm uint64
+	timeoutFrom uint64
 	// fort is, per peer, the term, run and support epoch it fortified this replica under as leader.
 	fort []fortified
 	// fortifyAt is when a leader next asks its unfortified peers; transferred the last term in which MsgTimeoutNow left; committed the newest term of an entry handed over to apply.
@@ -141,11 +142,11 @@ type fortified struct {
 	term, run, support uint64
 }
 
-// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, a leader serving lease reads after it applied its own removal, and rounds that write only their own Ready's hard state, none for a Ready that commits a configuration change and moves only the commit index.
+// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, a leader serving lease reads after it applied its own removal, rounds that write only their own Ready's hard state and none for a Ready that commits a configuration change and moves only the commit index, and a configuration change applied, and its commit sent, before that commit index is durable.
 type plants struct {
 	unseeded, early, disloyal, eager, voterFirst, current, uncommitted, staleSnapshot bool
 	noEpochBump, transferKeepsLease, voteEveryone, followerReads                      bool
-	noSupportAsk, removedKeepsLease, confCommitNotDurable                             bool
+	noSupportAsk, removedKeepsLease, oldHardState, noConfRound                        bool
 }
 
 // New starts a replica from its storage.
@@ -274,9 +275,9 @@ func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
 	s.round, s.rd = 0, raft.Ready{}
 	s.done(ctx, &rd, s.hold, out)
 	s.ready(ctx, out)
-	if s.round == 0 && s.timeoutNow.Type == raftpb.MsgTimeoutNow {
-		m := s.timeoutNow
-		s.timeoutNow = raftpb.Message{}
+	if s.round == 0 && s.timeoutTerm != 0 {
+		m := raftpb.Message{Type: raftpb.MsgTimeoutNow, From: s.timeoutFrom, To: s.cfg.ID, Term: s.timeoutTerm}
+		s.timeoutTerm, s.timeoutFrom = 0, 0
 		_ = s.rn.Step(m)
 		s.ready(ctx, out)
 	}
@@ -306,7 +307,7 @@ func (s *Shard) Node(id uint64) (core.NodeID, bool) {
 func (s *Shard) Term() uint64 { return s.rn.BasicStatus().Term }
 
 // Halt reports that the state machine stopped applying, at an entry it cannot decode. The replica then acts as a down one, so its log stops growing and the control plane replaces it: it takes no Raft message but, while it leads, its followers' answers, campaigns in no election and fortifies no leader, hands its leadership on while it leads, and still learns of its removal.
-func (s *Shard) Halt() { s.halted = true }
+func (s *Shard) Halt() { s.halted, s.timeoutTerm, s.timeoutFrom = true, 0, 0 }
 
 // Flushing reports whether a round is in flight, so the next Ready waits for its Durable.
 func (s *Shard) Flushing() bool { return s.round != 0 }
@@ -491,7 +492,7 @@ func (s *Shard) recv(ctx *core.Context, ev *core.Event, out *Output) {
 	// as one is while the round that commits it is in flight, so the transfer would wait out its
 	// election timeout with proposals dropped; it is stepped once no round is.
 	case m.Type == raftpb.MsgTimeoutNow && s.round != 0:
-		s.timeoutNow = m
+		s.timeoutTerm, s.timeoutFrom = m.Term, m.From
 	case m.Type == raftpb.MsgSnap && s.cfg.CheckSnapshot != nil && (m.Snapshot == nil || !s.cfg.CheckSnapshot(m.Snapshot.Data)):
 		s.stats.Undecodable++
 	default:
@@ -597,10 +598,10 @@ func (s *Shard) peer(id uint64) int {
 // ready takes Readys until one must be durable, which becomes the round in flight; no Ready is
 // taken while a round is. A round writes the newest hard state when the storage lacks it: etcd-raft
 // hands a hard state out once, so a commit index moved by a Ready that is not a round reaches the
-// disk with the next round. A Ready that commits a configuration change is a round of its own
-// while that commit index is not durable, and sends nothing before its flush: a replica that
-// applied the change, or whose commit of it reached a peer, never restarts in the configuration
-// before it.
+// disk with the next round. A Ready that commits a configuration change, or whose messages carry
+// a commit index past the entries it hands over, is a round of its own while that commit index is
+// not durable, and sends nothing before its flush: a replica that applied the change, or whose
+// commit of it reached a peer, never restarts in the configuration before it.
 func (s *Shard) ready(ctx *core.Context, out *Output) {
 	if s.round == 0 {
 		s.reconcile(ctx)
@@ -619,8 +620,8 @@ func (s *Shard) ready(ctx *core.Context, out *Output) {
 		if !raft.IsEmptyHardState(rd.HardState) {
 			s.hs = rd.HardState
 		}
-		lags := s.hs != s.cfg.Storage.HardState() && !s.plant.confCommitNotDurable
-		conf := lags && commitsConf(rd.CommittedEntries)
+		lags := s.hs != s.cfg.Storage.HardState() && !s.plant.oldHardState
+		conf := lags && !s.plant.noConfRound && s.passesConf(rd.CommittedEntries)
 		if rd.MustSync || !raft.IsEmptySnap(rd.Snapshot) || conf {
 			if lags {
 				rd.HardState = s.hs
@@ -640,8 +641,13 @@ func (s *Shard) ready(ctx *core.Context, out *Output) {
 	}
 }
 
-// commitsConf reports whether ents hold a configuration change.
-func commitsConf(ents []raftpb.Entry) bool {
+// passesConf reports whether the committed entries ents hold a configuration change, or stop
+// short of the newest commit index, which the Ready's messages carry past entries a later Ready
+// hands over.
+func (s *Shard) passesConf(ents []raftpb.Entry) bool {
+	if n := len(ents); n > 0 && ents[n-1].Index < s.hs.Commit {
+		return true
+	}
 	for i := range ents {
 		if ents[i].Type != raftpb.EntryNormal {
 			return true

@@ -881,12 +881,9 @@ func swapNet(t *testing.T) (*testNet, uint64) {
 	return n, ents[len(ents)-1].Index
 }
 
-// A Ready that commits a configuration change while its commit index is not durable is a round
-// that sends nothing before its flush: B, holding the joint entry, hears its commit from an append
-// that carries no entry, and applies it and acknowledges once that commit index is durable. A
-// transfer's MsgTimeoutNow that comes meanwhile, which etcd-raft would drop with the change
-// unapplied, has B campaign once the round is durable.
-func TestACommittedConfigurationChangeIsDurableBeforeItApplies(t *testing.T) {
+// confRound has B, holding the joint entry, hear its commit from an append that carries no entry,
+// and then a transfer's MsgTimeoutNow, which etcd-raft would drop with the change unapplied.
+func confRound(t *testing.T) (*testNet, uint64, uint64) {
 	n, joint := swapNet(t)
 	n.settleKeeping(func(e envelope) bool {
 		if e.from == rC || e.to == rC {
@@ -902,11 +899,53 @@ func TestACommittedConfigurationChangeIsDurableBeforeItApplies(t *testing.T) {
 		t.Fatalf("the commit of the joint entry took round %d, sent %v and left B in %+v before its flush", b.flush, types(sent), n.conf(rB))
 	}
 	n.recv(rB, rA, raftpb.Message{Type: raftpb.MsgTimeoutNow, From: 1, To: 2, Term: term})
-	sent = n.durable(rB)
+	return n, joint, term
+}
+
+// A Ready that commits a configuration change while its commit index is not durable is a round
+// that sends nothing before its flush: B applies the change and acknowledges once that commit
+// index is durable, and campaigns on the MsgTimeoutNow that came meanwhile.
+func TestACommittedConfigurationChangeIsDurableBeforeItApplies(t *testing.T) {
+	n, joint, term := confRound(t)
+	b := n.r[rB]
+	sent := n.durable(rB)
 	if count(sent, raftpb.MsgAppResp) != 1 || b.st.HardState().Commit != joint || len(n.conf(rB).VotersOutgoing) == 0 {
 		t.Fatalf("once durable B sent %v, holds commit %d of %d and is in %+v", types(sent), b.st.HardState().Commit, joint, n.conf(rB))
 	}
 	if st := b.s.rn.BasicStatus(); st.RaftState != raft.StateCandidate || st.Term != term+1 {
 		t.Fatalf("B is %v in term %d once the round is durable, want a candidate of term %d", st.RaftState, st.Term, term+1)
+	}
+}
+
+// A replica that halts while a transfer's MsgTimeoutNow waits for its round campaigns on it no more.
+func TestAReplicaThatHaltsDropsTheTransferItDeferred(t *testing.T) {
+	n, _, term := confRound(t)
+	b := n.r[rB]
+	b.s.Halt()
+	n.durable(rB)
+	if st := b.s.rn.BasicStatus(); st.RaftState != raft.StateFollower || st.Term != term {
+		t.Fatalf("halted B is %v in term %d once the round is durable, want a follower of term %d", st.RaftState, st.Term, term)
+	}
+}
+
+// A leader whose Ready commits a configuration change while its commit index is not durable
+// sends that commit to no follower before its flush.
+func TestALeaderSendsTheCommitOfAConfigurationChangeOnlyOnceDurable(t *testing.T) {
+	n, joint := swapNet(t)
+	n.settleKeeping(func(e envelope) bool {
+		if e.from == rC || e.to == rC {
+			return false
+		}
+		m, raft := n.message(e)
+		return !raft || e.to != rA || m.Type != raftpb.MsgAppResp || m.Index < joint
+	})
+	a := n.r[rA]
+	sent := n.recv(rA, rB, raftpb.Message{Type: raftpb.MsgAppResp, From: 2, To: 1, Term: n.term(rA), Index: joint})
+	if a.flush == 0 || len(sent) != 0 || len(n.conf(rA).VotersOutgoing) != 0 {
+		t.Fatalf("the commit of the joint entry took round %d, sent %v and left A in %+v before its flush", a.flush, types(sent), n.conf(rA))
+	}
+	sent = n.durable(rA)
+	if count(sent, raftpb.MsgApp) == 0 || a.st.HardState().Commit < joint || len(n.conf(rA).VotersOutgoing) == 0 {
+		t.Fatalf("once durable A sent %v, holds commit %d of %d and is in %+v", types(sent), a.st.HardState().Commit, joint, n.conf(rA))
 	}
 }
