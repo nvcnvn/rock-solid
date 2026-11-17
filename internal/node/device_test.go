@@ -307,6 +307,99 @@ func TestTheNodesOutputFeedsADevice(t *testing.T) {
 	}
 }
 
+var client = core.NodeID{Node: 3}
+
+// toDevice hands the device the node's last output, cloned as the process mails it between loops,
+// and runs the disk actions that follow.
+func toDevice(n *run, d *devRun) {
+	o, ok := n.out.Clone()
+	if !ok {
+		return
+	}
+	d.out.Reset()
+	d.d.Take(&d.ctx, &o, &d.out)
+	d.take()
+	d.settle()
+}
+
+// replies are the client's answers among what the device sent.
+func (r *devRun) replies() []chunkstore.Response {
+	var rps []chunkstore.Response
+	for _, a := range r.sent {
+		frame, data := chunkstore.Frame(r.ctx.Pool, &a.Msg)
+		var rp chunkstore.Response
+		if a.Peer == client && chunkstore.DecodeResponse(frame, data, &rp) == nil {
+			rps = append(rps, rp)
+		}
+	}
+	return rps
+}
+
+// A node and a device wired as the process wires them: the node's output cloned into Device.Take,
+// the device's into Node.Take. A write of a session newer than the device's table waits and the
+// node fetches the table; a table pushed meanwhile that does not know the session leaves the write
+// waiting; the fetch's answer acknowledges it when it knows the session, and refuses it when not.
+func TestOnlyTheAnswerToItsFetchSettlesAWaitingWrite(t *testing.T) {
+	for _, knows := range []bool{true, false} {
+		d := newDevRun(t, sim.NewDisk(devBlocks))
+		d.start(1)
+		d.settle()
+		n := newRun(t, 1)
+		n.out.Reset()
+		n.n.Take(&n.ctx, 7, &DeviceOutput{Opened: d.opened}, &n.out)
+		ds := []meta.DiskAddr{{Disk: 5, Log: d.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}}
+		n.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+		toDevice(n, d)
+		tbl := chunkstore.Table{Epoch: 2, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 1, MinLive: 1,
+			PGs: []chunkstore.PGEntry{{Members: []chunkstore.Member{{Disk: 5}}, Interval: 1, Activated: 1}}}}}
+		n.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, m) })
+		toDevice(n, d)
+		// The replica peers, and so activates PG 0, only once its start's lease wait is over.
+		d.ctx.Now, d.ctx.Raw = d.ctx.Now+60_000_000, d.ctx.Raw+60_000_000
+		d.out.Reset()
+		d.d.OnEvent(&d.ctx, &core.Event{Kind: core.EvTimer, Timer: chunkstore.PeerTimer}, &d.out)
+		d.take()
+		d.settle()
+
+		u := chunkstore.Update{Kind: chunkstore.KindWrite, ID: 1, PG: chunkstore.PGFields{Epoch: 2, PG: core.PGID{Pool: 1}, Interval: 1},
+			Session: 5, Incarnation: 1, Chunk: core.ChunkID{Volume: 1, Inode: 7}, Len: core.BlockSize}
+		ev := core.Event{Kind: core.EvNetRecv, Peer: client}
+		ev.Msg.Len = uint16(copy(ev.Msg.Body[:], chunkstore.AppendUpdate(nil, &u)))
+		buf, err := d.ctx.Pool.AllocZeroed(core.BlockSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev.Msg.Buf = buf
+		d.out.Reset()
+		d.d.OnEvent(&d.ctx, &ev, &d.out)
+		d.take()
+		o, _ := d.out.Clone()
+		n.out.Reset()
+		n.n.Take(&n.ctx, 7, &o, &n.out)
+		token := n.fetch()
+		d.settle()
+		if rps := d.replies(); len(rps) != 0 || token == 0 {
+			t.Fatalf("a write of session 5 before any table knew it: answered %+v, fetch %d", rps, token)
+		}
+
+		n.table(0, chunkstore.SessionTable{Version: 1, Next: 2, Live: []uint64{1}})
+		toDevice(n, d)
+		if rps := d.replies(); len(rps) != 0 {
+			t.Fatalf("a pushed table answered the waiting write: %+v", rps)
+		}
+
+		answer, want := chunkstore.SessionTable{Version: 2, Next: 6, Live: []uint64{1, 5}}, chunkstore.StatusOK
+		if !knows {
+			answer, want = chunkstore.SessionTable{Version: 2, Next: 3, Live: []uint64{1, 2}}, chunkstore.StatusRefused
+		}
+		n.table(token, answer)
+		toDevice(n, d)
+		if rps := d.replies(); len(rps) != 1 || rps[0].ID != u.ID || rps[0].Status != want {
+			t.Fatalf("the fetch's answer %+v gave %+v", answer, rps)
+		}
+	}
+}
+
 // A device started with a voter reports to it before any move.
 func TestADeviceReportsToTheVoterItStartsWith(t *testing.T) {
 	r := newDevRun(t, sim.NewDisk(devBlocks))
