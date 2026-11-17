@@ -21,8 +21,12 @@
 \* A crash keeps the replica's log and term. It restarts from its base, the index of its last
 \* compaction, at or below what its state machine applied: its applied index and
 \* configuration are the base's, and its commit index is the one its hard state was last
-\* written with, which a Ready that only moves the commit index never writes unless it
-\* commits a configuration change, or the base's if higher. The log is kept whole, since no
+\* written with, or the base's if higher. etcd-raft hands out a hard state only when it
+\* changed, and a Ready that only moves the commit index writes it only when it commits a
+\* configuration change, so a Ready that appends writes it only when it changes the term or
+\* vote or moves the commit index too: the commit index an earlier commit-only Ready carried
+\* may be missing from the write. The code writes the newest hard state on each durable round,
+\* at least as often, and needs no more than this. The log is kept whole, since no
 \* step reads an entry at or below the base except as the base's configuration and last
 \* term, both kept.
 \*
@@ -167,8 +171,7 @@ Live(r) == up[r] /\ ~gone[r]
 Leads(r) == Live(r) /\ leader[r] /\ (RemovedStaysVoter \/ ~out[r])
 Halted(r) == haltAt[r] # 0 /\ applied[r] >= haltAt[r]
 
-\* A Ready that appends or changes the term or vote of the replicas in S writes their hard
-\* state with commit index c. Once no crash is left nothing reads hsCommit, so it stays.
+\* The Ready of each replica in S writes its hard state with commit index c. Once no crash is left nothing reads hsCommit, so it stays.
 \* PassesConf(S, c) adds the replicas whose commit index c passes a configuration change.
 PassesConf(S, c) ==
     S \cup {r \in Replicas : DurableConfCommit /\ \E k \in commit[r] + 1 .. c[r] : IsConf(log'[r][k])}
@@ -217,8 +220,9 @@ Dropped == CHOOSE x \in BaseVoters \ Plan : TRUE
 
 \* l leads term t: Kept term 1, which knows every log matches its own and last advanced its
 \* commit from 2, or Dropped term 2, which appended its empty entry and knows nothing yet.
-\* Each hard state was last written with the commit index entry 3 came with, 2, or, in term
-\* 2, with the vote, 3.
+\* Each hard state was last written with the commit index entry 3 came with, 2, unless the
+\* Ready that committed entry 3, a configuration change, wrote it (DurableConfCommit), or, in
+\* term 2, with the vote, 3.
 JointState(l, t) ==
     /\ term = [r \in Replicas |-> t]
     /\ leader = [r \in Replicas |-> r = l]
@@ -239,7 +243,7 @@ JointState(l, t) ==
     /\ early = {}
     /\ support = [r \in Replicas |-> {}]
     /\ fort = [r \in Replicas |-> {}]
-    /\ hsCommit = [r \in Replicas |-> IF t = 1 THEN 2 ELSE 3]
+    /\ hsCommit = [r \in Replicas |-> IF t = 1 /\ ~DurableConfCommit THEN 2 ELSE 3]
     /\ haltAt = [r \in Replicas |-> 0]
     /\ out = [r \in Replicas |-> FALSE]
     /\ dead = {}
@@ -316,10 +320,14 @@ Elect(i, Q) == Run(i, Q, {})
 
 \* A leader the plan drops, out of any joint configuration or past its own removal, hands
 \* its leadership to a planned voter, and a halted leader to any voter it replicates to
-\* (handOff), joint or not; either serves no lease read from then on.
+\* (handOff), joint or not; either serves no lease read from then on. The target is a voter
+\* that took an append of the leader's term, which the code's bar, a voter replicating at or
+\* past the mark, implies; the dropped leader hands off only once it committed an entry of
+\* its term (reconcile).
 Transfer(l, i, Q) ==
-    /\ Leads(l) /\ i # l
+    /\ Leads(l) /\ i # l /\ match[l][i] > 0
     /\ \/ l \notin Plan /\ i \in Plan /\ (AppliedConf(l).out = {} \/ (RemovedStaysVoter /\ out[l]))
+          /\ commit[l] > 0 /\ log[l][commit[l]].t = term[l]
        \/ HaltHandsOff /\ Halted(l) /\ i \in Voters(AppliedConf(l))
     /\ Run(i, Q, {l})
 
@@ -361,7 +369,8 @@ CommitTo(i, n) ==
 
 \* The leader sends its log to a member of its applied configuration, learners included;
 \* the replica keeps a longer log that agrees with it, and takes the leader's otherwise; a
-\* halted replica drops it. The replica writes its hard state when its log or term changes.
+\* halted replica drops it. The replica writes its hard state when its term changes, or when
+\* it appends and its commit index moves in the same Ready.
 Replicate(i, j) ==
     /\ Leads(i) /\ Live(j) /\ j # i /\ ~Halted(j)
     /\ j \in Members(AppliedConf(i))
@@ -378,7 +387,7 @@ Replicate(i, j) ==
           /\ CommitTo(i, n)
     /\ support' = [support EXCEPT ![j] = IF term[j] < term[i] THEN {} ELSE @]
     /\ fort' = [fort EXCEPT ![j] = {}]
-    /\ Persist(PassesConf(IF log'[j] # log[j] \/ term[j] < term[i] THEN {j} ELSE {}, commit'), commit')
+    /\ Persist(PassesConf(IF term[j] < term[i] \/ (log'[j] # log[j] /\ commit'[j] # commit[j]) THEN {j} ELSE {}, commit'), commit')
     /\ UNCHANGED <<applied, up, gone, crashes, elected, early, haltAt, out, dead, reported>>
 
 \* The leader commits on an answer, and again when it applies a configuration that a
@@ -443,7 +452,7 @@ Propose(i, c, promoted) ==
     /\ log' = [log EXCEPT ![i] = Append(@, [t |-> term[i], cfg |-> c])]
     /\ match' = [match EXCEPT ![i][i] = Len(log[i]) + 1]
     /\ early' = early \cup {p \in promoted : ~CaughtUp(i, p)}
-    /\ Persist({i}, commit)
+    /\ Persist({}, commit)
     /\ UNCHANGED <<term, leader, commit, applied, hbCommit, up, gone, crashes, elected, chosen,
                    support, fort, haltAt, out, dead, reported>>
 
@@ -478,7 +487,8 @@ Leave(i) ==
 \* peer whose applied configuration lacks it answers with its applied index. An answer at
 \* or past the asker's applied index, while the asker's own applied configuration holds
 \* it, shows the removal committed after the asker's last applied entry; a peer behind
-\* the asker may not have applied its addition yet.
+\* the asker may not have applied its addition yet. With RemovedStaysVoter a leader that
+\* learns its removal so goes on leading, as one that applies it does, and hands off.
 Notice(r, p) ==
     /\ Live(r) /\ Live(p) /\ r # p /\ ~out[r]
     /\ r \notin Members(AppliedConf(p))
@@ -486,8 +496,8 @@ Notice(r, p) ==
     /\ NoticeMember => r \in Members(AppliedConf(r))
     /\ out' = [out EXCEPT ![r] = TRUE]
     /\ gone' = [gone EXCEPT ![r] = ~RemovedWaitsForPlan]
-    /\ leader' = [leader EXCEPT ![r] = FALSE]
-    /\ fort' = [fort EXCEPT ![r] = {}]
+    /\ leader' = [leader EXCEPT ![r] = @ /\ RemovedStaysVoter]
+    /\ fort' = [fort EXCEPT ![r] = IF RemovedStaysVoter THEN @ ELSE {}]
     /\ UNCHANGED <<term, log, commit, applied, match, hbCommit, up, crashes, elected, chosen, early, support,
                    hsCommit, haltAt, dead, reported>>
 
@@ -616,6 +626,11 @@ Unfortified == \A r \in Replicas : fort[r] = {}
 \* constraint): its restart from a base can rewind it past both changes.
 KeptFollowerCrashes == \A r \in Replicas : ~up[r] => r \in (BaseVoters \cap Plan) \ {Kept}
 
+\* From LeaveInit, only the dropped voter and the voter that took the leave with it go down
+\* (a state constraint): the faults on the voters that hold the leave and the outgoing half's
+\* newest entries; a death of a or d is ci-leave-die-live's.
+LeaveHoldersDown == \A r \in Replicas : ~up[r] => r \in {Dropped} \cup ((BaseVoters \cap Plan) \ {Kept})
+
 \* The voters the plan keeps are interchangeable (safety configurations only).
 Symmetry == Permutations(BaseVoters \cap Plan)
 
@@ -674,8 +689,4 @@ SwapCommits == <>(ChosenConf = Conf(Plan, {}, {}))
 \* when the leader that commits the leave is the dropped voter or halts.
 HasNewLeader == \E r \in Plan : Leads(r) /\ ~Halted(r) /\ AppliedConf(r) = Conf(Plan, {}, {})
 NewLeader == <>[]HasNewLeader
-
-\* NewLeader, unless every term up to MaxTerm has been used: with the dropped voter leading
-\* between them, a crash and a death can cost two elections each, more terms than a run reaches.
-NewLeaderOrTermsSpent == <>[](HasNewLeader \/ \E r \in Replicas : term[r] = MaxTerm)
 =============================================================================
