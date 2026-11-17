@@ -280,7 +280,9 @@ func (d *Driver) fail(c loop.ConnID) {
 
 // closed forgets c, discarding a partial frame, and, when c was its peer's connection, delivers
 // the peer's PeerLost now, or when deliver is false by the next pass. A dial that ends before
-// its peer's hello starts or lengthens the peer's backoff.
+// its peer's hello starts or lengthens the peer's backoff. A peer that dialed in, which this side
+// never dialed since, is forgotten with its PeerLost delivered now, so peers that connect once
+// under fresh IDs, as the operator's command line does, leave nothing behind.
 func (d *Driver) closed(c loop.ConnID, deliver bool) {
 	cs := d.conn(c)
 	if cs == nil {
@@ -302,10 +304,35 @@ func (d *Driver) closed(c loop.ConnID, deliver bool) {
 	}
 	if deliver {
 		d.ev = core.Event{Kind: core.EvPeerLost, Peer: p.id}
+		if !p.dialed && !p.lost {
+			d.forget(i)
+		}
 		d.deliver(&d.ev)
 		return
 	}
 	d.lose(i)
+}
+
+// forget drops peer i, which no connection names and no PeerLost waits on, moving the last peer
+// into its place.
+func (d *Driver) forget(i int) {
+	last := len(d.peers) - 1
+	delete(d.index, d.peers[i].id)
+	if i != last {
+		d.peers[i] = d.peers[last]
+		d.index[d.peers[i].id] = i
+		for k := range d.conns {
+			if d.conns[k].peer == last {
+				d.conns[k].peer = i
+			}
+		}
+		for k, j := range d.lost {
+			if j == last {
+				d.lost[k] = i
+			}
+		}
+	}
+	d.peers = d.peers[:last]
 }
 
 func (d *Driver) backoff(p *peer) { p.retryAt = d.wait(&p.fails) }

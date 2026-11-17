@@ -50,3 +50,55 @@ func TestAConnTradesMessagesWithALoop(t *testing.T) {
 	}
 	a.pool.Free(m.Buf)
 }
+
+// A loop forgets a peer that dialed in once its connection closes, if the loop never dialed it:
+// each run of the operator's command line connects under a fresh node ID. A peer the loop dialed
+// is kept, and its connection still names it after it moves into the forgotten peer's place.
+func TestAPeerThatDialedInIsForgottenOnceItCloses(t *testing.T) {
+	r := newRigOn(t, 2, 1<<20, true)
+	a, b := r.nodes[0], r.nodes[1]
+	x := core.NodeID{Node: 9}
+	c, err := Dial(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(a.port)), x, a.pool, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m core.Msg
+	if err := m.SetInline([]byte("ask")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Send(&m); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100 && len(a.m.recvs) == 0; i++ {
+		r.step(1)
+		time.Sleep(time.Millisecond)
+	}
+	a.send(b.id, "one", nil, true)
+	a.fire()
+	r.step(20)
+	if len(a.d.peers) != 2 || a.d.peers[0].id != x {
+		t.Fatalf("peers %+v", a.d.peers)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100 && len(a.m.lost) == 0; i++ {
+		r.step(1)
+		time.Sleep(time.Millisecond)
+	}
+	if len(a.d.peers) != 1 || len(a.d.index) != 1 || len(a.m.lost) != 1 || a.m.lost[0] != x {
+		t.Fatalf("after %v closed: peers %+v, lost %v", x, a.d.peers, a.m.lost)
+	}
+	b.send(a.id, "back", nil, true)
+	b.fire()
+	r.step(20)
+	if got := a.m.recvs[len(a.m.recvs)-1]; got.Peer != b.id || string(got.Msg.Inline()) != "back" {
+		t.Fatalf("the loop got %q from %v", got.Msg.Inline(), got.Peer)
+	}
+	a.send(b.id, "two", nil, true)
+	a.fire()
+	r.step(20)
+	if got := b.m.recvs[len(b.m.recvs)-1]; string(got.Msg.Inline()) != "two" || a.dials != 1 {
+		t.Fatalf("the dialed peer got %q after %d dials", got.Msg.Inline(), a.dials)
+	}
+}
