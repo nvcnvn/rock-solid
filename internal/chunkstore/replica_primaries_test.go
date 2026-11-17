@@ -789,7 +789,7 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 		{"M7", 169, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }}},
 		{"M8", 16, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking, r.c.replicaPlants.listerOrders = true, true }}},
 		{"recovered from a primary that lacks the chunk", 11, peerPlant{invOneVersion, func(r *primaryRun) { r.c.replicaPlants.recoverFromListed = true }}},
-		{"a list cleared with no source", 260, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.clearNoSource = true }}},
+		{"a list cleared with no source", 387, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.clearNoSource = true }}},
 		{"refused as gone while up", 0, peerPlant{invSameInterval, func(r *primaryRun) { r.c.replicaPlants.goneWhileUp = true }}},
 		{"merged on a dropped version", 94, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeOnDropped = true }}},
 		{"edit keeps its interval", 160, peerPlant{invOneVersion, func(r *primaryRun) { r.a.plant.editKeepsInterval = true }}},
