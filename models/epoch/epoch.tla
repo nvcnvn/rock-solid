@@ -117,8 +117,7 @@ VARIABLES
     act,      \* set of [p, k, r]: activated intervals
     \* Data path
     rm,       \* set of replicated writes in flight or delivered (kept, so duplicated)
-    vers,     \* set of [c, v, w, on, blk, n, r, ls]: every version ordered (on: merged on; ls:
-              \* its primary listed the chunk, not unfound)
+    vers,     \* set of [c, v, w, on, blk, n, r]: every version ordered (on: merged on)
     ackd,     \* set of [c, v]: versions acknowledged to the client
     wst,      \* [1..Len(Writes) -> 0..2]: unsent, sent, acknowledged
     sends,    \* [1..Len(Writes) -> Nat]
@@ -822,6 +821,10 @@ ReplayDrops(d, p, e) ==
 Copies(p, k, ls, c) ==
     {d \in UpIn(p, k) : ls[d][c] = NoMiss} \cup {d \in Mem(p, k) : St(p, k, d) = "maint"}
 
+\* Chunk c of p has fewer than min_live copies in interval k under the
+\* members' persisted lists, so a client write to it waits for recovery.
+Degraded(p, k, c) == Cardinality(Copies(p, k, miss, c)) < MinLiveOf(p, k)
+
 \* The primary settles the versions it keeps gated on the decision K: those at
 \* or below the top are mapped, and answered OK unless already refused, the rest
 \* dropped, and refused if not already. A kept version still waiting for its
@@ -1244,7 +1247,10 @@ Answer(r) ==
 \* on its image, the newest version it holds that peering did not drop. A write
 \* covering part of a block waits until that image is the version peering kept,
 \* which a primary that dropped only gated versions of its own has at once,
-\* though it lists the chunk and a member may recover from it.
+\* though it lists the chunk and a member may recover from it. Any write waits
+\* while the chunk has fewer than min_live copies, as Copies counts them, until
+\* recovery clears enough members' lists (Degraded): an OK resting on members
+\* that list the chunk leaves it unfound when its one clean copy is lost.
 Order(n, x) ==
     LET w == Writes[x.w]
         c == w.c
@@ -1255,8 +1261,7 @@ Order(n, x) ==
         v == IF IvOfV(cur) = k THEN cur + 1 ELSE Ver(k, 1)
         y == TheDec(n, p, k)
         on == IF w.whole THEN cur ELSE Newest(Held(own, c) \ y.gone[c])
-        r == [c |-> c, v |-> v, w |-> x.w, on |-> on, blk |-> w.blk, n |-> n, r |-> run[n],
-              ls |-> miss[own][c] # NoMiss /\ c \notin y.unf]
+        r == [c |-> c, v |-> v, w |-> x.w, on |-> on, blk |-> w.blk, n |-> n, r |-> run[n]]
         logs == [dlog EXCEPT ![own][c] = @ \cup {v}]
     IN /\ Running(n)
        /\ x \in pin[n]
@@ -1266,6 +1271,7 @@ Order(n, x) ==
        /\ own = PrimDisk(p, k)
        /\ ~Fenced(n, x)
        /\ w.whole \/ miss[own][c] = NoMiss \/ c \in y.img \/ Bug("MergeBeforeKept")
+       /\ ~Degraded(p, k, c) \/ Bug("NoDegradedHold")
        /\ Cnt(v) <= MaxCounter
        /\ pin' = [pin EXCEPT ![n] = @ \ {x}]
        /\ pv' = [pv EXCEPT ![n][c] = v]
@@ -2232,19 +2238,11 @@ NoStranded ==
 
 \* 19. An activated primary has a source: for a chunk with an acknowledged write,
 \* a member of its interval can serve them all, or its own image is what peering
-\* kept. Two limits. A holder that truly dies leaves none, so it is claimed only
-\* while no disk has gone; ci-tears, where every copy can be torn, does not check
-\* it. And a write of a primary that lists the chunk can leave none, once
-\* acknowledged or on another member: peering with a member down cannot tell
-\* whether it landed there, and whichever it decides may drop what a member needed.
-\* Until writes to a degraded chunk are held, that stays open.
-ListerWrite(c) ==
-    \E r \in vers :
-       /\ r.c = c
-       /\ r.ls
-       /\ \/ r.v \in AckedV(c)
-          \/ Cardinality({d \in Disk : r.v \in dlog[d][c]}) > 1
-
+\* kept. A holder that truly dies leaves none, so it is claimed only while no
+\* disk has gone; ci-tears, where every copy can be torn, does not check it. A
+\* write of a primary that lists the chunk would leave none, peering with a
+\* member down unable to tell whether it landed there, but for the Degraded hold:
+\* such a write waits until min_live members that list nothing hold the chunk.
 PrimarySource ==
     \A p \in PG, n \in Node, c \in Chunk :
        (/\ \A d \in Node : dnode[d] # 0
@@ -2252,7 +2250,6 @@ PrimarySource ==
         /\ Leads(n, p)
         /\ pr[n][p].act
         /\ AckedV(c) # {}
-        /\ ~ListerWrite(c)
         /\ Decided(n, p, IvAt(n, p)))
        => \/ \E d \in Mem(p, IvAt(n, p)) : CanServe(d, c)
           \/ c \in TheDec(n, p, IvAt(n, p)).img
@@ -2322,14 +2319,33 @@ AckIv(y) ==
     LET new == {a \in act' \ act : a.p = ChunkPG[y.c]}
     IN IF new = {} THEN IvOfV(y.v) ELSE (CHOOSE a \in new : TRUE).k
 
-\* 17. A version is acknowledged only on at least min_live members of the
-\* interval that answers it, counted by their logs, those in maintenance
-\* counting as they do toward min_live.
+\* 17. A version is acknowledged only on at least min_live clean copies in the
+\* interval that answers it: members that logged it and list nothing of its
+\* chunk, so losing any one disk that lists the chunk, or any one disk at all
+\* with min_live 2, leaves a member that can serve it. Those in maintenance count
+\* as they do toward min_live. A member that persisted a later interval's list
+\* since counts by its log alone.
 AckedOnMinLive == [][\A y \in ackd' \ ackd :
     LET p == ChunkPG[y.c]
         i == AckIv(y)
-    IN Cardinality({d \in Mem(p, i) : St(p, i, d) = "maint" \/ y.v \in dlog'[d][y.c]}) >= MinLiveOf(p, i)]_vars
+        clean(d) == miss'[d][y.c] = NoMiss \/ persIv'[d][p] > i
+    IN Cardinality({d \in Mem(p, i) : St(p, i, d) = "maint" \/ (y.v \in dlog'[d][y.c] /\ clean(d))})
+         >= MinLiveOf(p, i)]_vars
 
+\* 22. A write held for its chunk's copies does not wait for ever: recovery
+\* reaches the chunk, so in the end no active primary holds a write it would
+\* order but for Degraded.
+HeldForCopies(n, x) ==
+    LET c == Writes[x.w].c
+        p == ChunkPG[c]
+    IN /\ Running(n)
+       /\ Leads(n, p)
+       /\ pr[n][p].act
+       /\ ~pr[n][p].ask
+       /\ ~Fenced(n, x)
+       /\ Degraded(p, IvAt(n, p), c)
+
+HeldWritesOrdered == <>[](\A n \in Node : \A x \in pin[n] : ~HeldForCopies(n, x))
 -----------------------------------------------------------------------------
 \* Configurations: the .cfg files substitute these for the constants. PG 1 is
 \* in a rep3 pool with min_live 2; PG 2 in a rep2 pool with min_live 2 that
@@ -2528,6 +2544,14 @@ ListerAnswer3 == ListerAnswerAt("stop2")
 ListerPlans == {ListerRestarted}
 LateAskPlans == {[ListerRestarted EXCEPT !.f = {"restart", "lateask"}]}
 ListerOrderPlans == {ListerOrders}
+\* ci-held and neg-no-degraded-hold: disk 3 returns listing chunk 1, then disk 2
+\* goes down, leaving disk 1 the chunk's one clean copy, so a write waits for
+\* recovery to reach disk 3.
+HeldPlans == {Plan(<<Mark(3, "down"), Mark(3, "up"), Mark(2, "down")>>, Partial, {})}
+\* ci-held-live, under fairness: PG 2's member 3 in maintenance, so W1 lands on
+\* disk 2 alone, then back listing the chunk, which leaves disk 2 its one clean
+\* copy, so W2, sent once W1 is acknowledged, waits for recovery.
+HeldLivePlans == {Plan(<<Mark(3, "maint"), Mark(3, "up")>>, <<Partial2[1], [Partial2[2] EXCEPT !.after = 1]>>, {})}
 \* neg-write-on-unfound: the same writes, with the source marked down and the
 \* primary moved to the other member that lists the chunk, which carries no
 \* image, so the chunk is unfound.

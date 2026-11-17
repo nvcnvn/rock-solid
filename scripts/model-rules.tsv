@@ -32,6 +32,7 @@ epoch/neg-log-out-of-order	chunkstore.resendNewestFirst	TestPlantedPeeringBugsBr
 epoch/neg-margin-exact	lease.marginExact	TestPlantedLeaseBugsBreakThePair
 epoch/neg-merge-before-kept	chunkstore.mergeWhileLacking	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-merge-on-dropped	chunkstore.mergeOnDropped	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-no-degraded-hold	open	Clean copies before a write's OK
 epoch/neg-no-end-on-resume	lease.noResumedEnd	TestPlantedLeaseBugsBreakThePair
 epoch/neg-no-epoch-bump	raftshard.noEpochBump	TestPlantedLeaseBugsBreakTheLeaseReaderInvariant
 epoch/neg-no-restart-wait	lease.noRestartWait	TestPlantedLeaseBugsBreakThePair
