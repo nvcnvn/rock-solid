@@ -4409,6 +4409,13 @@ that passed before discrepancy 12 again with that path removed:
 | `Recover` at kept version 0 | 22 | A `recovered` line |
 | `GoneRefuses` | 8, 12, 13, 15, 16, 19, 33, 35, the seeds with a `gone` line | |
 
+`TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites`, seeds 0 to 9 (`leftdown`): all 10 pass, 586 to 856
+lines in 4 to 241 s, with no discrepancy. The code drops a left PG's gated versions in the drain after it adopts
+a table, or on a later retry, where the spec drops them inside `Adopt` or `RestartState`; the drop is no line, and
+a reply still carrying a dropped version would fail its `peer` line. In seeds 3, 4, 5 and 8 the spec's `ldrp`
+fills at an `adopt` line, shown by checking their traces again with `ldrp` held empty as an invariant; the
+other six pass with it empty, as the Go run counts a drop in 4 of these 10 seeds.
+
 Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half.
 
 The `conform` workflow runs this check nightly on a window of 500 seeds that moves each day, from seed
