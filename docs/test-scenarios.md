@@ -7327,14 +7327,22 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
 - The chunk index's trees take their pages from slabs: every chunk index scenario passes with
   them. Under the seed flags the chunk store's and MetaStore's trees count their pages on the Go
   heap instead, since a seed's last stores are dropped unclosed at its end.
-- Collection takes 0.0% of CPU under request garbage, read as the tree's share: a goroutine makes
-  256 MB/s of short-lived garbage beside lookups into a memtable on slabs, `GOMEMLIMIT` 512 MiB
-  above the live heap, and runtime/metrics gives collection's share of the process's CPU
-  (`BenchmarkCollectionUnderGarbage -benchtime 10s -cpu 4,14 -lsm.entries 4000000`, on a 14-core
-  Mac). A one-entry tree takes 0.35% and 0.37% at 4 and 14 Ps over 350 cycles, a 4-million-entry
-  tree on slabs 0.11% and 0.08% over 83: the tree adds nothing, and what remains is the garbage's
-  own cost per cycle, whose stop-the-world phases scale with the Ps (the spike's 4-vCPU VM showed
-  0.0%).
+- Collection takes 0.0% of CPU under request garbage, read as: a tree on slabs adds no collection
+  work per cycle and no heap goal over a one-entry tree, within noise, where the same entries as Go
+  objects multiply both. `TestATreeOnSlabsCostsCollectionNothing` holds it with ten forced
+  collections each: a tree of 500,000 entries on slabs must cost at most twice the one-entry tree's
+  CPU per collection plus 1 ms, and raise the heap goal by at most 8 MiB, while a pointerful map of
+  the same entries (`map[uint64]*struct{k, v []byte}`) must cost more than that bound, or the
+  measure could not fail. Measured on an M4 Pro: 0.24 to 0.41 ms on slabs against 0.28 to 0.48 ms
+  for one entry and 34 to 39 ms for the map, heap goal 4 MiB for both trees. Planted: the same tree
+  with its pages on the Go heap raises the goal to 42 MiB and fails.
+- `BenchmarkCollectionUnderGarbage` shows the same under load: a goroutine makes 256 MB/s of
+  short-lived garbage beside lookups, `GOMEMLIMIT` 512 MiB above the live heap, and runtime/metrics
+  gives collection's share of CPU, its cycles, its CPU per cycle and the heap goal at the end. Cycle
+  counts differ between runs, since a bigger live heap collects less often, so the bar is read per
+  cycle and on the goal. At `-cpu 4 -benchtime 4s -lsm.entries 2000000`: one entry 0.26 ms a cycle,
+  goal 19 MiB; 2 million on slabs 0.36 ms, 19 MiB; the same with pages on the Go heap 0.41 ms but a
+  188 MiB goal, the cost slabs remove; the pointerful control 97 ms a cycle and 476 MiB.
 - The daemons hold `GOMEMLIMIT` at `-memory` less the slabs mapped: with a 256 MiB budget, a
   64 MiB pool at start sets 192 MiB and a page slab's 64 MiB region 128 MiB; a budget the start's
   pools fill is refused, and with no budget no limit is set

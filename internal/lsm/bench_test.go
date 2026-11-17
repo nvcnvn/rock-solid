@@ -234,28 +234,112 @@ func BenchmarkCollection(b *testing.B) {
 	runtime.KeepAlive(tr)
 }
 
-// BenchmarkCollectionUnderGarbage looks up keys in a memtable on the off-heap slab, beside a
-// goroutine making 256 MB/s of short-lived request garbage, with GOMEMLIMIT 512 MiB above the live
-// heap, as the daemon sets it: in a tree of one entry, then of -lsm.entries. From runtime/metrics
-// over each run, gc-cpu-% is collection's share of the process's CPU, as the Go memtable spike
-// counted it, and gc-cycles the collections. The bar is 0.0% for the tree: the full tree's share
-// above the one-entry tree's, which is the garbage's own.
-func BenchmarkCollectionUnderGarbage(b *testing.B) {
-	b.Run("entries=1", func(b *testing.B) { collectUnderGarbage(b, 1) })
-	b.Run(fmt.Sprintf("entries=%d", *benchEntries), func(b *testing.B) { collectUnderGarbage(b, *benchEntries) })
+// spread makes the i-th key of a spread tree i×spread, so a lookup needs no slice of keys on the heap.
+const spread = 0x9E3779B97F4A7C15
+
+// spreadTree is a tree of n entries on pages whose i-th key is i×spread, big-endian.
+func spreadTree(t testing.TB, n int, pages Pages) *Tree {
+	t.Helper()
+	tr, err := New(Config{MaxPiece: 1 << 20, Check: true, Pages: pages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(tr.Close)
+	k := make([]byte, 8)
+	for i := range uint64(n) {
+		binary.BigEndian.PutUint64(k, i*spread)
+		put(t, tr, nil, string(k), "value-of-some-length")
+	}
+	return tr
 }
 
-func collectUnderGarbage(b *testing.B, entries int) {
-	tr := newTree(b, 1<<20)
-	r := rand.New(rand.NewPCG(5, 5))
-	keys := make([]byte, 8*entries)
-	for i := 0; i < len(keys); i += 8 {
-		binary.BigEndian.PutUint64(keys[i:], r.Uint64())
-		put(b, tr, nil, string(keys[i:i+8]), "value-of-some-length")
+func (tr *Tree) has(i uint64) bool {
+	var k [8]byte
+	binary.BigEndian.PutUint64(k[:], i*spread)
+	_, ok := tr.Get(k[:])
+	return ok
+}
+
+// heapEntry is an entry of the pointerful control: what a memtable of Go objects keeps per key.
+type heapEntry struct{ k, v []byte }
+
+type pointerful map[uint64]*heapEntry
+
+func newPointerful(n int) pointerful {
+	m := make(pointerful, n)
+	for i := range uint64(n) {
+		m[i] = &heapEntry{binary.BigEndian.AppendUint64(nil, i), []byte("value-of-some-length")}
 	}
+	return m
+}
+
+func (m pointerful) has(i uint64) bool { return m[i] != nil }
+
+// collectionCost forces ten collections and returns the CPU each took on average, by the runtime's
+// estimate, and the heap goal after them.
+func collectionCost() (cpu time.Duration, goal uint64) {
+	m := []metrics.Sample{{Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/gc/cycles/total:gc-cycles"},
+		{Name: "/gc/heap/goal:bytes"}}
+	runtime.GC()
+	metrics.Read(m)
+	gc0, cycles0 := m[0].Value.Float64(), m[1].Value.Uint64()
+	for range 10 {
+		runtime.GC()
+	}
+	metrics.Read(m)
+	perCycle := (m[0].Value.Float64() - gc0) / float64(m[1].Value.Uint64()-cycles0)
+	return time.Duration(perCycle * float64(time.Second)), m[2].Value.Uint64()
+}
+
+// A tree on slabs adds nothing to a collection's work or to the heap goal, which the same entries
+// as Go objects multiply: the bar collectUnderGarbage reads under load, held here without load.
+func TestATreeOnSlabsCostsCollectionNothing(t *testing.T) {
+	const n = 500_000
+	one := spreadTree(t, 1, nil)
+	oneCPU, oneGoal := collectionCost()
+	one.Close()
+	tr := spreadTree(t, n, nil)
+	cpu, goal := collectionCost()
+	tr.Close()
+	m := newPointerful(n)
+	controlCPU, _ := collectionCost()
+	runtime.KeepAlive(m)
+	bound := 2*oneCPU + time.Millisecond
+	t.Logf("CPU per collection: one entry %v, %d on slabs %v, pointerful %v; heap goal %d and %d MiB",
+		oneCPU, n, cpu, controlCPU, oneGoal>>20, goal>>20)
+	if cpu > bound || goal > oneGoal+8<<20 {
+		t.Fatalf("a tree of %d entries on slabs costs %v a collection and a %d MiB heap goal; one entry, %v and %d MiB",
+			n, cpu, goal>>20, oneCPU, oneGoal>>20)
+	}
+	if controlCPU <= bound {
+		t.Fatalf("the pointerful control costs %v a collection, within the %v bound: the measure cannot tell", controlCPU, bound)
+	}
+}
+
+// BenchmarkCollectionUnderGarbage looks up keys beside a goroutine making 256 MB/s of short-lived
+// request garbage, with GOMEMLIMIT 512 MiB above the live heap, as the daemon sets it: in a tree on
+// slabs of one entry and of -lsm.entries, in a tree of -lsm.entries with its pages on the Go heap,
+// and, as the control that shows what a failure looks like, in a pointerful map of -lsm.entries.
+// From runtime/metrics over each run, gc-cpu-% is collection's share of the process's CPU, as the
+// Go memtable spike counted it, gc-cycles the collections, gc-cpu-ms/cycle the CPU each took, and
+// heap-goal-MiB the heap goal at the end, which pages on the Go heap raise and slabs do not. The bar
+// is gc-cpu-ms/cycle and heap-goal-MiB on slabs no more than the one-entry tree's, within noise.
+func BenchmarkCollectionUnderGarbage(b *testing.B) {
+	n := *benchEntries
+	b.Run("entries=1", func(b *testing.B) { collectUnderGarbage(b, 1, spreadTree(b, 1, nil).has) })
+	b.Run(fmt.Sprintf("entries=%d", n), func(b *testing.B) { collectUnderGarbage(b, n, spreadTree(b, n, nil).has) })
+	b.Run(fmt.Sprintf("entries=%d/pages=heap", n), func(b *testing.B) {
+		collectUnderGarbage(b, n, spreadTree(b, n, goHeap{}).has)
+	})
+	b.Run(fmt.Sprintf("entries=%d/control=pointerful", n), func(b *testing.B) {
+		collectUnderGarbage(b, n, newPointerful(n).has)
+	})
+}
+
+func collectUnderGarbage(b *testing.B, entries int, has func(uint64) bool) {
 	runtime.GC()
 	m := []metrics.Sample{{Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/total:cpu-seconds"},
-		{Name: "/gc/cycles/total:gc-cycles"}, {Name: "/memory/classes/heap/objects:bytes"}}
+		{Name: "/gc/cycles/total:gc-cycles"}, {Name: "/memory/classes/heap/objects:bytes"}, {Name: "/gc/heap/goal:bytes"}}
 	metrics.Read(m)
 	defer debug.SetMemoryLimit(debug.SetMemoryLimit(int64(m[3].Value.Uint64()) + 512<<20))
 	gc0, total0, cycles0 := m[0].Value.Float64(), m[1].Value.Float64(), m[2].Value.Uint64()
@@ -274,10 +358,9 @@ func collectUnderGarbage(b *testing.B, entries int) {
 			}
 		}
 	})
-	i := 0
+	var i uint64
 	for b.Loop() {
-		k := i % entries * 8
-		if _, ok := tr.Get(keys[k : k+8]); !ok {
+		if !has(i % uint64(entries)) {
 			b.Fatal("missing key")
 		}
 		i += 7919
@@ -285,7 +368,9 @@ func collectUnderGarbage(b *testing.B, entries int) {
 	stop.Store(true)
 	wg.Wait()
 	metrics.Read(m)
-	b.ReportMetric(100*(m[0].Value.Float64()-gc0)/(m[1].Value.Float64()-total0), "gc-cpu-%")
-	b.ReportMetric(float64(m[2].Value.Uint64()-cycles0), "gc-cycles")
-	runtime.KeepAlive(tr)
+	gc, cycles := m[0].Value.Float64()-gc0, float64(m[2].Value.Uint64()-cycles0)
+	b.ReportMetric(100*gc/(m[1].Value.Float64()-total0), "gc-cpu-%")
+	b.ReportMetric(cycles, "gc-cycles")
+	b.ReportMetric(1000*gc/cycles, "gc-cpu-ms/cycle")
+	b.ReportMetric(float64(m[4].Value.Uint64())/(1<<20), "heap-goal-MiB")
 }
