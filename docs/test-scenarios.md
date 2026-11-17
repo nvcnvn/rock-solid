@@ -4221,7 +4221,7 @@ next milestone's run, which is also the twins' first.
 | Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 25 | 45,904 | 48 s |
 | Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 21 | 330,009 | 52 s |
 | Voter replacement | `ci-halt` | [Voter replacement model](#voter-replacement-model) | 22 | 1,090,739 | 181 s, load average near 15 |
-| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 20 | 841,852 | 174 s, load average near 15 |
+| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 20 | 801,361 | 153 s |
 | Voter replacement | `ci-halt-live` | [Voter replacement model](#voter-replacement-model) | 18 | 1,473 | 2 s |
 | Voter replacement | `ci-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 11,980 | 11 s |
 | Voter replacement | `ci-leave-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 30,999 | 22 s |

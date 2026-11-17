@@ -22,11 +22,13 @@
 \* compaction, at or below what its state machine applied: its applied index and
 \* configuration are the base's, and its commit index is the one its hard state was last
 \* written with, or the base's if higher. etcd-raft hands out a hard state only when it
-\* changed, and a Ready that only moves the commit index writes it only when it commits a
-\* configuration change, so a Ready that appends writes it only when it changes the term or
-\* vote or moves the commit index too: the commit index an earlier commit-only Ready carried
-\* may be missing from the write. The code writes the newest hard state on each durable round,
-\* at least as often, and needs no more than this. The log is kept whole, since no
+\* changed, and a Ready that only moves the commit index is no durable round, so its commit
+\* index reaches the disk only with a later round: one that appends, which writes the newest
+\* hard state (NewestHardState), or one that commits a configuration change
+\* (DurableConfCommit). Each is a rule of its own: with DurableConfCommit the checks hold
+\* without NewestHardState, but a replica that took the leave restarts back across it without
+\* DurableConfCommit, and a replica that knew the joint entry committed back across both
+\* changes with neither. The log is kept whole, since no
 \* step reads an entry at or below the base except as the base's configuration and last
 \* term, both kept.
 \*
@@ -93,6 +95,9 @@ CONSTANTS
                         \* (FALSE: the base's alone)
     RemovedWaitsForPlan,\* a removed replica keeps its state until the plan is complete
                         \* (FALSE: it deletes it once it learns its removal)
+    NewestHardState,    \* a replica's Ready that appends, a leader's own included, writes the
+                        \* newest hard state etcd-raft handed out, commit index included
+                        \* (FALSE: only when the Ready's own hard state changed)
     DurableConfCommit,  \* a Ready that commits a configuration change writes the hard state,
                         \* and is durable before the change applies or the commit leaves, so no
                         \* restart takes a replica back across a change it knew committed
@@ -370,7 +375,8 @@ CommitTo(i, n) ==
 \* The leader sends its log to a member of its applied configuration, learners included;
 \* the replica keeps a longer log that agrees with it, and takes the leader's otherwise; a
 \* halted replica drops it. The replica writes its hard state when its term changes, or when
-\* it appends and its commit index moves in the same Ready.
+\* it appends, the newest one, or without NewestHardState only if its commit index moves in the
+\* same Ready.
 Replicate(i, j) ==
     /\ Leads(i) /\ Live(j) /\ j # i /\ ~Halted(j)
     /\ j \in Members(AppliedConf(i))
@@ -387,7 +393,8 @@ Replicate(i, j) ==
           /\ CommitTo(i, n)
     /\ support' = [support EXCEPT ![j] = IF term[j] < term[i] THEN {} ELSE @]
     /\ fort' = [fort EXCEPT ![j] = {}]
-    /\ Persist(PassesConf(IF term[j] < term[i] \/ (log'[j] # log[j] /\ commit'[j] # commit[j]) THEN {j} ELSE {}, commit'), commit')
+    /\ Persist(PassesConf(IF term[j] < term[i] \/ (log'[j] # log[j] /\ (NewestHardState \/ commit'[j] # commit[j]))
+                          THEN {j} ELSE {}, commit'), commit')
     /\ UNCHANGED <<applied, up, gone, crashes, elected, early, haltAt, out, dead, reported>>
 
 \* The leader commits on an answer, and again when it applies a configuration that a
@@ -452,7 +459,7 @@ Propose(i, c, promoted) ==
     /\ log' = [log EXCEPT ![i] = Append(@, [t |-> term[i], cfg |-> c])]
     /\ match' = [match EXCEPT ![i][i] = Len(log[i]) + 1]
     /\ early' = early \cup {p \in promoted : ~CaughtUp(i, p)}
-    /\ Persist({}, commit)
+    /\ Persist(IF NewestHardState THEN {i} ELSE {}, commit)
     /\ UNCHANGED <<term, leader, commit, applied, hbCommit, up, gone, crashes, elected, chosen,
                    support, fort, haltAt, out, dead, reported>>
 
