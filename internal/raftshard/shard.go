@@ -332,13 +332,13 @@ func (s *Shard) Halt() { s.halted, s.timeoutTerm, s.timeoutFrom = true, 0, 0 }
 // Flushing reports whether a round is in flight, so the next Ready waits for its Durable.
 func (s *Shard) Flushing() bool { return s.round != 0 }
 
-// LeaseRead reports whether this replica may serve a read now from the entries it handed over to apply, with no round trip: it leads, no MsgTimeoutNow left in its term, an entry of its term has committed, and each half of its configuration has a quorum of voters, itself included, whose fortification of its term runs on the node-pair leases.
+// LeaseRead reports whether this replica may serve a read now from the entries it handed over to apply, with no round trip: it leads, has not halted, no MsgTimeoutNow left in its term, an entry of its term has committed, and each half of its configuration has a quorum of voters, itself included, whose fortification of its term runs on the node-pair leases.
 func (s *Shard) LeaseRead(ctx *core.Context) bool {
 	st := s.rn.BasicStatus()
 	if s.plant.followerReads && st.RaftState == raft.StateFollower && !s.removed {
 		return s.supports(&st, lease.Now(ctx))
 	}
-	if s.removed && !s.plant.removedKeepsLease || st.RaftState != raft.StateLeader || s.transferred == st.Term || s.committed != st.Term && !s.plant.uncommitted {
+	if s.removed && !s.plant.removedKeepsLease || s.halted || st.RaftState != raft.StateLeader || s.transferred == st.Term || s.committed != st.Term && !s.plant.uncommitted {
 		return false
 	}
 	t := lease.Now(ctx)

@@ -6672,6 +6672,10 @@ Each breaks "a replica leads having applied the plan's configuration", and the s
 unplanted. A halted wedge leader's heartbeats tell the others the leave committed once the faults
 stop, so only a dead one wedges the planted runs.
 
+A halted leader that still leads serves no lease read, and its replica answers no ask about it
+as gone, so its followers keep their support until it steps down
+(`TestAHaltedLeaderReadsNothingAndIsNotGoneWhileItLeads`).
+
 With the regress fault (`TestAVoterRestartedMidSwapKeepsTheConfigurationItKnewCommitted`, 20 seeds
 in `go test` and 2,000 per commit in `scripts/seeds.sh`, with no other fault but the pauses), the first old voter that follows, applied the joint
 configuration and holds the leave past its commit index crashes; until 10 s on it reaches only the

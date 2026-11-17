@@ -306,6 +306,29 @@ func TestALapsedEpochsRenewalIsRefused(t *testing.T) {
 	}
 }
 
+// A halted leader serves no lease read, and while it still leads its node does not answer that it
+// is gone, so its followers keep its support until it steps down.
+func TestAHaltedLeaderReadsNothingAndIsNotGoneWhileItLeads(t *testing.T) {
+	n := newNet(t, 3, 1)
+	for i := range 3 {
+		n.leases(i, (i+1)%3, (i+2)%3)
+	}
+	n.elect(0)
+	if !n.leaseRead(0) {
+		t.Fatal("no lease read once fortified")
+	}
+	n.r[0].s.Halt()
+	if n.leaseRead(0) {
+		t.Fatal("a halted leader serves lease reads")
+	}
+	ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 1}}
+	encodeFortify(testGroup, &fortify{kind: kindAsk, from: 2, to: 1}, &ev.Msg)
+	n.event(0, ev)
+	if st := n.r[0].s.rn.BasicStatus(); st.RaftState != raft.StateLeader || len(n.r[0].forts) != 0 {
+		t.Fatalf("halted A, %v, answered %+v to an ask about it", st.RaftState, n.r[0].forts)
+	}
+}
+
 func TestATransferEndsTheLeaseWhenMsgTimeoutNowLeaves(t *testing.T) {
 	n := newNet(t, 3, 1)
 	for i := range 3 {
