@@ -629,7 +629,13 @@ func runPrimaryRun(t *testing.T, seed uint64, plant *peerPlant, crashLeaving boo
 	}
 	var empty Table
 	tbl, _ := Next(&empty, &Inputs{Pools: a.pools()})
-	c := newRClusterWith(t, tbl, s, func(cfg *Config) { cfg.Log.MaxRecordBytes = 3 * core.BlockSize })
+	c := newRClusterWith(t, tbl, s, func(cfg *Config) {
+		cfg.Log.MaxRecordBytes = 3 * core.BlockSize
+		// A quarter of the seeds keep two rounds in flight, so a crash can leave a gap in the log and a traced run reaches the gap half of the spec's LostAbove.
+		if seed%4 == 1 {
+			cfg.Log.CommitDepth = 2
+		}
+	})
 	c.conformBegin()
 	r := &primaryRun{c: c, a: a, rng: core.NewRand(seed ^ 0x9e3), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)}, ops: map[core.RequestID]faultOp{},
 		version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, tainted: map[uint32]bool{},
