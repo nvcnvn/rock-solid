@@ -8,6 +8,8 @@ import (
 	"slices"
 	"testing"
 
+	"go.etcd.io/raft/v3/raftpb"
+
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 )
 
@@ -257,6 +259,7 @@ func scanKeys(t *testing.T, s *State, start, end []byte, limit int) ([]string, b
 func TestScan(t *testing.T) {
 	s := newTestState(t)
 	set(s, "a", "", "aa", "", "ab", "", "abc", "", "b", "")
+	s.Mark(raftpb.SnapshotMetadata{Index: 1, Term: 1})
 	a, ab := b("a"), b("ab")
 	for _, c := range []struct {
 		start, end []byte
@@ -273,6 +276,8 @@ func TestScan(t *testing.T) {
 		{b("c"), PrefixEnd(b("c")), 10, nil, false},
 		{b("ab"), b("ab\x00"), 1, []string{"ab"}, false},
 		{nil, nil, 10, []string{"a", "aa", "ab", "abc", "b"}, false},
+		{nil, nil, 1, []string{"a"}, true},
+		{markKey, nil, 1, []string{"a"}, true},
 	} {
 		if got, more := scanKeys(t, s, c.start, c.end, c.limit); !slices.Equal(got, c.want) || more != c.more {
 			t.Errorf("Scan(%q, %q, %d) = %q, more %v; want %q, more %v", c.start, c.end, c.limit, got, more, c.want, c.more)

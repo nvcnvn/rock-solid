@@ -6891,7 +6891,7 @@ Recovery from manifest and log is under Shard indexes in the disk owner's checkp
 
 Only the last component (a file name, an xattr name, an S3 key, or what follows a `ctl/` tag other than a session's) has variable length, with no escaping and no terminator.
 
-- Key space 0 is the state's own: a `Txn` with a key or range start there is refused with `ErrBadOp` (`TestLimitsAreCheckedBeforeProposing`).
+- Key space 0 is the state's own: a `Txn` with a key or range start there is refused with `ErrBadOp` (`TestLimitsAreCheckedBeforeProposing`), and a `Scan` from nil or from the mark's key after a `Mark` starts at the first client key (`TestScan`).
 
 - The run filters' inode prefix `T(fs) volume inode` has a fixed length, so every key under an inode has the same prefix and a shorter key has none, as `lsm.Config.Prefix` requires; a prefix taken up to a delimiter would not be (`fs/2/` starts `fs/23/a`).
 
