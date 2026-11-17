@@ -221,7 +221,8 @@ func (h *CtlHost) blobRead(ctx *core.Context, ev *disklog.Event) error {
 }
 
 // restoreIfLoaded, once every run is loaded, makes the base their mark records the storage's
-// base, hands the host the manifest and starts the replay.
+// base, hands the host the manifest, takes its base LSN for the last manifest's and starts the
+// replay.
 func (h *CtlHost) restoreIfLoaded(ctx *core.Context) error {
 	cp := &h.cp
 	if cp.loading > 0 {
@@ -236,6 +237,7 @@ func (h *CtlHost) restoreIfLoaded(ctx *core.Context) error {
 	}
 	h.disk.Loaded(&cp.manifest)
 	h.replayed = true
+	cp.lastBase = cp.manifest.BaseLSN
 	cp.manifest, cp.loads, cp.pieceOf = disklog.Manifest{}, nil, nil
 	return h.rec.Replay(ctx, &h.lout)
 }

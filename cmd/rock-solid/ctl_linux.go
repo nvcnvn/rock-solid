@@ -245,11 +245,11 @@ func (m *ctlMachine) boot(ctx *core.Context) (*meta.CtlHost, error) {
 	if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 1, Term: 1, ConfState: cs}}); err != nil {
 		return nil, err
 	}
-	mc := meta.Config{Raft: raftshard.Config{Group: cfg.Group, ID: uint64(cfg.Node), Peers: peers, Storage: st, Seed: rand.Uint64(), Timer: raftTimer,
-		Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, rand.Uint64(), lease.Now(ctx))},
-		Tree: lsm.Config{MaxPiece: 64 << 10, Pages: m.p.pages}}
 	lc := disklog.DefaultConfig()
 	lc.NoTrim, lc.MaxReplayBytes = true, cfg.MaxReplayBytes
+	mc := meta.Config{Raft: raftshard.Config{Group: cfg.Group, ID: uint64(cfg.Node), Peers: peers, Storage: st, Seed: rand.Uint64(), Timer: raftTimer,
+		Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, rand.Uint64(), lease.Now(ctx))},
+		Tree: lsm.Config{MaxPiece: 64 << 10, StepBytes: int(lc.CompactionStepBytes), Pages: m.p.pages}}
 	if !cfg.Format {
 		return meta.OpenCtlHost(ctx, mc, lc, m.disk.Blocks(), &m.out)
 	}
