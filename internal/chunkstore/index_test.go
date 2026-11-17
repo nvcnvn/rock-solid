@@ -15,11 +15,7 @@ import (
 
 func newIndex(t testing.TB) *Index {
 	t.Helper()
-	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: 1 << 20, Check: true}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return NewIndex(tree, 0, 0)
+	return NewIndex(slabTree(t, lsm.Config{MaxPiece: 1 << 20, Check: true}), 0, 0)
 }
 
 // record is a durable record of entries at LBA lba with one header block.

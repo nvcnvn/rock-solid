@@ -102,10 +102,7 @@ func FuzzCheck(f *testing.F) {
 	f.Add(seed)
 	f.Add(past)
 	f.Fuzz(func(t *testing.T, b []byte) {
-		tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: 1 << 20, Check: true}))
-		if err != nil {
-			t.Fatal(err)
-		}
+		tree := slabTree(t, lsm.Config{MaxPiece: 1 << 20, Check: true})
 		for len(b) > 0 {
 			k, rest, ok := field(b)
 			if !ok {

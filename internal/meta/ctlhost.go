@@ -180,6 +180,14 @@ func (h *CtlHost) start(ctx *core.Context, out *CtlHostOutput) error {
 	return nil
 }
 
+// Close gives the replica's page slabs back; the host may not be used after.
+func (h *CtlHost) Close() {
+	if h.shard != nil {
+		h.shard.Close()
+		h.shard = nil
+	}
+}
+
 // Err is why the host stopped for good, or nil.
 func (h *CtlHost) Err() error { return h.err }
 

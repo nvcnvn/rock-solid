@@ -86,6 +86,7 @@ func NewShard(cfg Config) (*Shard, error) {
 	}
 	if data := cfg.Raft.Storage.TakeBaseData(); data != nil {
 		if err := st.Restore(base, data); err != nil {
+			st.Close()
 			return nil, err
 		}
 	}
@@ -93,10 +94,14 @@ func NewShard(cfg Config) (*Shard, error) {
 	s.newest = entryFormat
 	cfg.Raft.SnapshotData, cfg.Raft.Apply, cfg.Raft.CheckSnapshot = s.snapshotData, s.apply, CheckSnapshot
 	if s.raft, err = raftshard.New(cfg.Raft); err != nil {
+		st.Close()
 		return nil, err
 	}
 	return s, nil
 }
+
+// Close gives the state's page slabs back; the shard may not be used after.
+func (s *Shard) Close() { s.state.Close() }
 
 // Raft is the replica, for calls that hand no entries over: Start, OnEvent, Durable and ReadIndex go through the shard.
 func (s *Shard) Raft() *raftshard.Shard { return s.raft }

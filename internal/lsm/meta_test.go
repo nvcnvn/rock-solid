@@ -283,6 +283,7 @@ type metaStats struct {
 // log's records: a restart loads the newest manifest's runs and replays the writes after the
 // manifest's replay point, the freeze of the memtable it wrote.
 type metaTree struct {
+	pages   countedPages
 	set     metaSet
 	check   bool
 	plant   plants
@@ -302,7 +303,7 @@ func newMetaTree(s metaSet, check bool, plant plants) *metaTree {
 }
 
 func (m *metaTree) newTree() *Tree {
-	tr, err := New(Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, StepBytes: m.set.step, Check: m.check, Probe: m.set.probe})
+	tr, err := New(Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, StepBytes: m.set.step, Check: m.check, Probe: m.set.probe, Pages: &m.pages})
 	if err != nil {
 		panic(err)
 	}
@@ -497,6 +498,7 @@ func (m *metaTree) Restart() error {
 		}
 	}
 	m.countSearches()
+	m.tr.Close()
 	m.tr = tr
 	m.st.restarts++
 	return nil
@@ -527,6 +529,13 @@ func metaRun(ops []metamorphic.Op, sets []metaSet, check bool, plant plants) (*m
 		e := newMetaTree(s, check, plant)
 		got := metamorphic.Run(ops, s.run, e)
 		e.countSearches()
+		for _, v := range e.views {
+			v.Close()
+		}
+		e.tr.Close()
+		if e.pages.out != 0 {
+			panic(fmt.Sprintf("set %s: %d bytes of page slabs out once every tree closed", s.name, e.pages.out))
+		}
 		stats[i] = e.st
 		stats[i].flushes, stats[i].failed = e.log.Flushes, e.log.Failed
 		if i == 0 {

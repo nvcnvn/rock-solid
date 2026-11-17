@@ -62,13 +62,27 @@ type Config struct {
 	StepBytes int
 	// Probe is how lookups use run filters.
 	Probe FilterProbe
-	// Pages returns n bytes for memtable pages that hold no Go pointer, from slabs outside the Go
-	// heap; nil takes them from the Go heap.
-	Pages func(n int) []byte
+	// Pages is where the tree's memtables take their page slabs, outside the Go heap; nil takes
+	// them from the Go heap.
+	Pages Pages
 }
 
+// Pages hands out the slabs a tree's memtable pages live in, which hold no Go pointer, and takes
+// them back when the tree closes.
+type Pages interface {
+	// Carve returns n bytes.
+	Carve(n int) []byte
+	// Return takes back b, which Carve returned; nothing may use b after.
+	Return(b []byte)
+}
+
+type goHeap struct{}
+
+func (goHeap) Carve(n int) []byte { return make([]byte, n) }
+func (goHeap) Return([]byte)      {}
+
 // heapPages is where a tree takes its pages when its Config names no slabs.
-var heapPages = func(n int) []byte { return make([]byte, n) }
+var heapPages Pages = goHeap{}
 
 // Tree is an LSM tree. Only its owner calls it; a compaction's Run alone may run elsewhere.
 type Tree struct {
@@ -170,9 +184,9 @@ func New(cfg Config) (*Tree, error) {
 	t := &Tree{cfg: cfg, nextSeq: 1, limitBuffer: autoLimitBuffer}
 	for t.maxFrag = MaxBound; t.maxFrag > 0 && !t.fits(t.maxFrag, t.maxFrag); t.maxFrag-- {
 	}
-	t.pg.carve = cfg.Pages
-	if t.pg.carve == nil {
-		t.pg.carve = heapPages
+	t.pg.src = cfg.Pages
+	if t.pg.src == nil {
+		t.pg.src = heapPages
 	}
 	t.mem = newMemtable(&t.pg)
 	return t, nil
@@ -287,6 +301,13 @@ type View struct {
 	frozenGen uint32
 	it        iterState
 	closed    bool
+}
+
+// Close gives the tree's page slabs back to Config.Pages. Neither the tree nor a view of it may be
+// used after, nor may a flush or merge of it still run.
+func (t *Tree) Close() {
+	t.pg.close()
+	t.mem, t.frozen = nil, nil
 }
 
 // View opens a view of the tree as it is now.

@@ -143,6 +143,7 @@ func (d *Device) settle(ctx *core.Context, err error, out *DeviceOutput) {
 		d.phase = formatting
 		g, gerr := disklog.GeometryFor(d.cfg.Blocks * core.BlockSize)
 		if gerr == nil {
+			d.closeStore()
 			d.st, gerr = chunkstore.Format(ctx, d.cfg.Store, disklog.Superblock{LogID: log, Geometry: g}, &d.sout)
 		}
 		if gerr != nil {
@@ -163,7 +164,16 @@ func (d *Device) settle(ctx *core.Context, err error, out *DeviceOutput) {
 }
 
 func (d *Device) fail(out *DeviceOutput) {
-	d.phase, d.st, out.Failed = failed, nil, true
+	d.closeStore()
+	d.phase, out.Failed = failed, true
+}
+
+// closeStore gives the store's page slabs back and drops it.
+func (d *Device) closeStore() {
+	if d.st != nil {
+		d.st.Close()
+		d.st = nil
+	}
 }
 
 func (d *Device) flush(out *DeviceOutput) {

@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"runtime"
+	"runtime/debug"
+	"runtime/metrics"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -227,5 +231,61 @@ func BenchmarkCollection(b *testing.B) {
 		worst = max(worst, time.Since(start))
 	}
 	b.ReportMetric(float64(worst.Microseconds())/1000, "worst-ms")
+	runtime.KeepAlive(tr)
+}
+
+// BenchmarkCollectionUnderGarbage looks up keys in a memtable on the off-heap slab, beside a
+// goroutine making 256 MB/s of short-lived request garbage, with GOMEMLIMIT 512 MiB above the live
+// heap, as the daemon sets it: in a tree of one entry, then of -lsm.entries. From runtime/metrics
+// over each run, gc-cpu-% is collection's share of the process's CPU, as the Go memtable spike
+// counted it, and gc-cycles the collections. The bar is 0.0% for the tree: the full tree's share
+// above the one-entry tree's, which is the garbage's own.
+func BenchmarkCollectionUnderGarbage(b *testing.B) {
+	b.Run("entries=1", func(b *testing.B) { collectUnderGarbage(b, 1) })
+	b.Run(fmt.Sprintf("entries=%d", *benchEntries), func(b *testing.B) { collectUnderGarbage(b, *benchEntries) })
+}
+
+func collectUnderGarbage(b *testing.B, entries int) {
+	tr := newTree(b, 1<<20)
+	r := rand.New(rand.NewPCG(5, 5))
+	keys := make([]byte, 8*entries)
+	for i := 0; i < len(keys); i += 8 {
+		binary.BigEndian.PutUint64(keys[i:], r.Uint64())
+		put(b, tr, nil, string(keys[i:i+8]), "value-of-some-length")
+	}
+	runtime.GC()
+	m := []metrics.Sample{{Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/total:cpu-seconds"},
+		{Name: "/gc/cycles/total:gc-cycles"}, {Name: "/memory/classes/heap/objects:bytes"}}
+	metrics.Read(m)
+	defer debug.SetMemoryLimit(debug.SetMemoryLimit(int64(m[3].Value.Uint64()) + 512<<20))
+	gc0, total0, cycles0 := m[0].Value.Float64(), m[1].Value.Float64(), m[2].Value.Uint64()
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		g := rand.New(rand.NewPCG(6, 6))
+		ring := make([][]byte, 4096)
+		tick := time.NewTicker(time.Millisecond)
+		defer tick.Stop()
+		for i := 0; !stop.Load(); {
+			<-tick.C
+			for n := 0; n < 256<<10; i++ {
+				ring[i%len(ring)] = make([]byte, 256+g.IntN(3841))
+				n += len(ring[i%len(ring)])
+			}
+		}
+	})
+	i := 0
+	for b.Loop() {
+		k := i % entries * 8
+		if _, ok := tr.Get(keys[k : k+8]); !ok {
+			b.Fatal("missing key")
+		}
+		i += 7919
+	}
+	stop.Store(true)
+	wg.Wait()
+	metrics.Read(m)
+	b.ReportMetric(100*(m[0].Value.Float64()-gc0)/(m[1].Value.Float64()-total0), "gc-cpu-%")
+	b.ReportMetric(float64(m[2].Value.Uint64()-cycles0), "gc-cycles")
 	runtime.KeepAlive(tr)
 }

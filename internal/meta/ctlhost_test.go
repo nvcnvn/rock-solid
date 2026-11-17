@@ -12,6 +12,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
+	"github.com/nvcnvn/rock-solid/internal/loop/looptest"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
 	"github.com/nvcnvn/rock-solid/internal/sim"
@@ -38,7 +39,9 @@ func ctlLogConfig() disklog.Config {
 // a call into a host runs every disk action and voter message it causes before it returns. Host
 // 0 is h, and the storage nodes' messages go to it.
 type hostRun struct {
-	t     *testing.T
+	t *testing.T
+	// pages are each host's page slabs; a host that restarts closes the last, which must give every one back.
+	pages []*looptest.Pages
 	lc    disklog.Config
 	h     *CtlHost
 	hs    []*CtlHost
@@ -94,7 +97,15 @@ func (r *hostRun) config(i int) Config {
 	}
 	return Config{Raft: raftshard.Config{Group: hostGroup, ID: uint64(i) + 1, Storage: bootStorage(r.t, cs), Seed: uint64(i), Timer: 1, Peers: peers,
 		Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, uint64(i)+1, lease.Time{})},
-		Tree: lsm.Config{MaxPiece: 64 << 10, Check: true}}
+		Tree: lsm.Config{MaxPiece: 64 << 10, Check: true, Pages: r.pagesOf(i)}}
+}
+
+// pagesOf is host i's page slabs.
+func (r *hostRun) pagesOf(i int) *looptest.Pages {
+	for len(r.pages) <= i {
+		r.pages = append(r.pages, &looptest.Pages{})
+	}
+	return r.pages[i]
 }
 
 // restart crashes host i, losing what its disk did not flush, and recovers it from its disk.
@@ -105,6 +116,12 @@ func (r *hostRun) restartWith(i int, cfg Config) {
 	r.t.Helper()
 	r.disks[i].Crash(func(int, core.LBA) bool { return false })
 	r.work = slices.DeleteFunc(r.work, func(w hostWork) bool { return w.at == i || w.from == i })
+	if r.hs[i] != nil {
+		r.hs[i].Close()
+	}
+	if out := r.pagesOf(i).Out; out != 0 {
+		r.t.Fatalf("host %d kept %d bytes of page slabs once closed", i, out)
+	}
 	r.do(i, func(ctx *core.Context, out *CtlHostOutput) {
 		h, err := OpenCtlHost(ctx, cfg, r.lc, ctlGeometry.DiskBlocks(), out)
 		if err != nil {
@@ -616,6 +633,7 @@ func TestACrashMidRoundKeepsEveryAnsweredTxn(t *testing.T) {
 			answered := len(r.sent) > 0
 			r.disks[0].Crash(func(int, core.LBA) bool { return keep })
 			r.work = r.work[:0]
+			r.hs[0].Close()
 			r.do(0, func(ctx *core.Context, out *CtlHostOutput) {
 				h, err := OpenCtlHost(ctx, r.config(0), r.lc, ctlGeometry.DiskBlocks(), out)
 				if err != nil {
@@ -667,6 +685,7 @@ func TestARestartAfterAFormatCutShortWritesTheBootRound(t *testing.T) {
 			r.disks[0].Crash(func(int, core.LBA) bool { return keep })
 			r.work = r.work[:0]
 			r.failing = true
+			r.hs[0].Close()
 			r.do(0, func(ctx *core.Context, out *CtlHostOutput) {
 				h, err := OpenCtlHost(ctx, r.config(0), r.lc, ctlGeometry.DiskBlocks(), out)
 				if err != nil {

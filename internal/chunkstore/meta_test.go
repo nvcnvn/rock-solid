@@ -14,6 +14,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/loop/looptest"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim/metamorphic"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
@@ -419,7 +420,7 @@ func newMetaIndex(s metaSet) *metaIndex {
 }
 
 func (m *metaIndex) newTree() *lsm.Tree {
-	tr, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, Check: true, Probe: m.set.probe}))
+	tr, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: m.set.piece, RunLimit: m.set.runLimit, Check: true, Probe: m.set.probe, Pages: &looptest.Pages{}}))
 	if err != nil {
 		panic(err)
 	}

@@ -31,13 +31,14 @@ const raftTimer core.TimerID = 0x6374726674
 // ctl is a control-plane voter: one loop running its CtlHost over the TCP driver and an io_uring
 // ring on its disk file.
 type ctl struct {
-	cfg  ctlConfig
-	l    *loop.Loop
-	pool *loop.Pool
-	ring *uring.Ring
-	k    *loop.Epoll
-	m    *ctlMachine
-	mail mail
+	cfg   ctlConfig
+	l     *loop.Loop
+	pool  *loop.Pool
+	pages *loop.Slab
+	ring  *uring.Ring
+	k     *loop.Epoll
+	m     *ctlMachine
+	mail  mail
 	// Port is the port the voter listens on.
 	Port int
 	mu   sync.Mutex
@@ -67,6 +68,13 @@ func newCtl(cfg ctlConfig) (_ *ctl, err error) {
 	if p.pool, err = loop.NewPool(poolBytes, 0); err != nil {
 		return nil, err
 	}
+	limit := newHeapLimit(cfg.Memory)
+	limit.add(p.pool.Mapped())
+	if err := limit.check(); err != nil {
+		return nil, err
+	}
+	p.pages = loop.NewSlab(pageRegion)
+	p.pages.OnMap = limit.add
 	if p.k, err = loop.NewEpoll(loop.VMClockPath); err != nil {
 		return nil, err
 	}
@@ -195,6 +203,9 @@ func (p *ctl) close() {
 	if p.pool != nil {
 		_ = p.pool.Close()
 	}
+	if p.pages != nil {
+		_ = p.pages.Close()
+	}
 }
 
 func (m *ctlMachine) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
@@ -236,7 +247,7 @@ func (m *ctlMachine) boot(ctx *core.Context) (*meta.CtlHost, error) {
 	}
 	mc := meta.Config{Raft: raftshard.Config{Group: cfg.Group, ID: uint64(cfg.Node), Peers: peers, Storage: st, Seed: rand.Uint64(), Timer: raftTimer,
 		Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, rand.Uint64(), lease.Now(ctx))},
-		Tree: lsm.Config{MaxPiece: 64 << 10}}
+		Tree: lsm.Config{MaxPiece: 64 << 10, Pages: m.p.pages}}
 	lc := disklog.DefaultConfig()
 	lc.NoTrim = true
 	if !cfg.Format {

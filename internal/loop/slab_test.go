@@ -125,6 +125,32 @@ func TestSlabGrowsWithoutMovingRegions(t *testing.T) {
 	}
 }
 
+func TestASlabCarvesAgainWhatItWasGivenBack(t *testing.T) {
+	s := NewSlab(4 * core.BlockSize)
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	var mapped int
+	s.OnMap = func(n int) { mapped += n }
+	a, b := s.Carve(2*core.BlockSize), s.Carve(core.BlockSize)
+	if s.Out() != 3*core.BlockSize || mapped != 4*core.BlockSize {
+		t.Fatalf("out %d, mapped %d", s.Out(), mapped)
+	}
+	s.Return(a)
+	s.Return(b)
+	if s.Out() != 0 {
+		t.Fatalf("out %d after both came back", s.Out())
+	}
+	if c := s.Carve(2 * core.BlockSize); address(c) != address(a) {
+		t.Fatal("a carve of a returned piece's size did not reuse it")
+	}
+	if c := s.Carve(core.BlockSize); address(c) != address(b) || s.Mapped() != 4*core.BlockSize || mapped != s.Mapped() {
+		t.Fatalf("mapped %d, heard %d: a carve mapped while a piece of its size was free", s.Mapped(), mapped)
+	}
+}
+
 func heapObjectBytes() uint64 {
 	runtime.GC()
 	s := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}

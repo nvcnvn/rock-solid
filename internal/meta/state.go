@@ -44,6 +44,9 @@ func NewState(cfg lsm.Config, applied uint64) (*State, error) {
 // Tree is the state's LSM tree.
 func (s *State) Tree() *lsm.Tree { return s.tree }
 
+// Close gives the tree's page slabs back; the state may not be used after.
+func (s *State) Close() { s.tree.Close() }
+
 // Applied is the index of the last entry applied.
 func (s *State) Applied() uint64 { return s.applied }
 
@@ -230,8 +233,10 @@ func (s *State) Restore(index uint64, data []byte) error {
 		return err
 	}
 	if err := walkSnapshot(data, tree); err != nil {
+		tree.Close()
 		return err
 	}
+	s.tree.Close()
 	s.tree, s.applied = tree, index
 	return nil
 }

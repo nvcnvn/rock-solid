@@ -26,22 +26,24 @@ const release = 1
 // The machines' outputs for one another go between the loops as mail.
 type storageNode struct {
 	cfg   nodeConfig
+	limit *heapLimit
 	addrs map[uint32]netip.AddrPort
 	loops []*nodeLoop
 	nm    *nodeMachine
 }
 
 type nodeLoop struct {
-	l    *loop.Loop
-	k    *loop.Epoll
-	pool *loop.Pool
-	ring *uring.Ring
-	dm   *deviceMachine
-	mail mail
+	l     *loop.Loop
+	k     *loop.Epoll
+	pool  *loop.Pool
+	pages *loop.Slab
+	ring  *uring.Ring
+	dm    *deviceMachine
+	mail  mail
 }
 
 func newNode(cfg nodeConfig) (_ *storageNode, err error) {
-	p := &storageNode{cfg: cfg, addrs: map[uint32]netip.AddrPort{cfg.Node: cfg.Listen}}
+	p := &storageNode{cfg: cfg, addrs: map[uint32]netip.AddrPort{cfg.Node: cfg.Listen}, limit: newHeapLimit(cfg.Memory)}
 	defer func() {
 		if err != nil {
 			p.close()
@@ -66,6 +68,9 @@ func newNode(cfg nodeConfig) (_ *storageNode, err error) {
 			return nil, err
 		}
 	}
+	if err := p.limit.check(); err != nil {
+		return nil, err
+	}
 	return p, nil
 }
 
@@ -87,6 +92,7 @@ func (p *storageNode) add(dm *deviceMachine, path string) error {
 	if nl.pool, err = loop.NewPool(poolBytes, 0); err != nil {
 		return err
 	}
+	p.limit.add(nl.pool.Mapped())
 	if nl.k, err = loop.NewEpoll(loop.VMClockPath); err != nil {
 		return err
 	}
@@ -95,6 +101,9 @@ func (p *storageNode) add(dm *deviceMachine, path string) error {
 	var d loop.Driver = td
 	if dm != nil {
 		m = dm
+		nl.pages = loop.NewSlab(pageRegion)
+		nl.pages.OnMap = p.limit.add
+		dm.cfg.Store.Pages = nl.pages
 		if nl.ring, err = uring.New(nl.pool, ringEntries); err != nil {
 			return err
 		}
@@ -165,6 +174,9 @@ func (p *storageNode) close() {
 		}
 		if nl.pool != nil {
 			_ = nl.pool.Close()
+		}
+		if nl.pages != nil {
+			_ = nl.pages.Close()
 		}
 	}
 }

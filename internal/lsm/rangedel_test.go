@@ -217,10 +217,18 @@ func prefix3(k []byte) int {
 // view opened now and then, and returns the first read that differs from the map.
 func rangeModel(t *testing.T, cfg Config, seed uint64, plant plants) string {
 	t.Helper()
+	pages := &countedPages{}
+	cfg.Pages = pages
 	tr, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		tr.Close()
+		if pages.out != 0 {
+			t.Fatalf("seed %d: %d bytes of page slabs out once the tree closed", seed, pages.out)
+		}
+	}()
 	tr.plant = plant
 	r := rand.New(rand.NewPCG(seed, 7))
 	m := model{}

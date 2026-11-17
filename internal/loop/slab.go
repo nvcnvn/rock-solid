@@ -12,11 +12,16 @@ import (
 const MaxRegion = 1 << 30
 
 // Slab is memory mapped outside the Go heap as regions in a table that only grows, so a region
-// never moves once mapped. It hands out bytes only, so it never holds a Go pointer.
+// never moves once mapped. It hands out bytes only, so it never holds a Go pointer, and takes
+// back what it handed out for its next Carve of the same size.
 type Slab struct {
 	regions [][]byte
 	size    int
 	left    int
+	free    [][]byte
+	out     int
+	// OnMap, if set, hears of each region the slab maps, by its size.
+	OnMap func(n int)
 }
 
 // NewSlab makes a slab that maps regions of size bytes, rounded up to whole blocks; size is at most MaxRegion.
@@ -35,15 +40,28 @@ func (s *Slab) grow(size int) ([]byte, error) {
 		return nil, fmt.Errorf("loop: mapping a %d-byte slab region: %w", size, err)
 	}
 	s.regions = append(s.regions, r)
+	if s.OnMap != nil {
+		s.OnMap(size)
+	}
 	return r, nil
 }
 
-// Carve returns n bytes, rounded up to whole blocks, from the last region, mapping a new region
-// when it has fewer left. It panics when the mapping fails, as the Go heap does when out of memory.
+// Carve returns n bytes, rounded up to whole blocks: the last piece of that size given back, or
+// else from the last region, mapping a new region when it has fewer left. It panics when the
+// mapping fails, as the Go heap does when out of memory.
 func (s *Slab) Carve(n int) []byte {
 	n = roundBlocks(n)
 	if n <= 0 || n > s.size {
 		panic(fmt.Sprintf("loop: carving %d bytes from %d-byte regions", n, s.size))
+	}
+	s.out += n
+	// ponytail: a linear search from the end, O(1) while every piece is one size, as a tree's
+	// page slabs are; keep a list per size if pieces of many sizes come back.
+	for i := len(s.free) - 1; i >= 0; i-- {
+		if b := s.free[i]; len(b) == n {
+			s.free = append(s.free[:i], s.free[i+1:]...)
+			return b
+		}
 	}
 	if n > s.left {
 		if _, err := s.grow(s.size); err != nil {
@@ -56,6 +74,15 @@ func (s *Slab) Carve(n int) []byte {
 	s.left -= n
 	return r[off : off+n : off+n]
 }
+
+// Return takes back b, which Carve returned; nothing may use b after.
+func (s *Slab) Return(b []byte) {
+	s.out -= len(b)
+	s.free = append(s.free, b)
+}
+
+// Out is the bytes carved and not given back.
+func (s *Slab) Out() int { return s.out }
 
 // Mapped is the bytes the slab has mapped.
 func (s *Slab) Mapped() int {
@@ -74,7 +101,7 @@ func (s *Slab) Close() error {
 			first = err
 		}
 	}
-	s.regions, s.left = nil, 0
+	s.regions, s.left, s.free, s.out = nil, 0, nil, 0
 	return first
 }
 
@@ -100,6 +127,9 @@ func newPool(capacityBytes, maxLive, region int) (*Pool, error) {
 	}
 	return &Pool{Pool: core.NewPool(s.regions, maxLive), slab: s}, nil
 }
+
+// Mapped is the bytes the pool's slab maps.
+func (p *Pool) Mapped() int { return p.slab.Mapped() }
 
 // Regions are the slab's mapped regions, in the order the pool numbers its slots.
 func (p *Pool) Regions() [][]byte { return p.slab.regions }

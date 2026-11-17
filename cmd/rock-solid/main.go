@@ -12,11 +12,48 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
+
+// heapLimit holds the Go heap's limit, GOMEMLIMIT, at the daemon's memory budget less the slabs it
+// has mapped, as each maps; a budget of 0 leaves the limit alone.
+type heapLimit struct {
+	budget int64
+	mu     sync.Mutex
+	mapped int64
+	// set is debug.SetMemoryLimit, which tests replace.
+	set func(int64) int64
+}
+
+func newHeapLimit(budgetMiB int64) *heapLimit {
+	return &heapLimit{budget: budgetMiB << 20, set: debug.SetMemoryLimit}
+}
+
+// add counts n more bytes mapped.
+func (h *heapLimit) add(n int) {
+	if h.budget == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.mapped += int64(n)
+	h.set(max(h.budget-h.mapped, 0))
+}
+
+// check reports a budget the slabs mapped at start already fill.
+func (h *heapLimit) check() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.budget != 0 && h.mapped >= h.budget {
+		return fmt.Errorf("-memory %d MiB leaves no Go heap beside the %d MiB of slabs mapped at start", h.budget>>20, h.mapped>>20)
+	}
+	return nil
+}
 
 // ctlConfig is a control-plane voter's settings.
 type ctlConfig struct {
@@ -31,6 +68,8 @@ type ctlConfig struct {
 	Disk      string
 	Format    bool
 	DiskBytes int64
+	// Memory is the daemon's memory budget in MiB, 0 for none.
+	Memory int64
 }
 
 type voter struct {
@@ -52,6 +91,8 @@ type nodeConfig struct {
 	Devices []string
 	Class   string
 	Pool    uint32
+	// Memory is the daemon's memory budget in MiB, 0 for none.
+	Memory int64
 }
 
 // daemon is a process's loops, run until Stop.
@@ -104,11 +145,15 @@ func parseCtl(args []string) (ctlConfig, error) {
 	fs.StringVar(&cfg.Disk, "disk", "", "the file the group's log lives in")
 	fs.BoolVar(&cfg.Format, "format", false, "create the disk file and format it, as at a voter's first start; a file already there is made again only if its superblocks were never written")
 	fs.Int64Var(&cfg.DiskBytes, "disk-bytes", 1<<30, "the size of the disk file -format creates")
+	fs.Int64Var(&cfg.Memory, "memory", 0, "the daemon's memory budget in MiB, which GOMEMLIMIT is held at less the slabs mapped outside the Go heap; 0 leaves GOMEMLIMIT alone")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
 	if *node >= daemonNodes {
 		return cfg, fmt.Errorf("-node %d is not below %d, where a daemon's node lies", *node, daemonNodes)
+	}
+	if cfg.Memory < 0 || cfg.Memory >= 1<<43 {
+		return cfg, fmt.Errorf("-memory %d MiB is not 0 or a budget", cfg.Memory)
 	}
 	cfg.Node = uint32(*node)
 	var err error
@@ -176,11 +221,15 @@ func parseNode(args []string) (nodeConfig, error) {
 	fs.Var((*devices)(&cfg.Devices), "device", "a device of the node, by a path that names the drive at every start, such as its /dev/disk/by-id link; given once per device")
 	fs.StringVar(&cfg.Class, "class", "ssd", "the class of the node's devices")
 	pool := fs.Uint("pool", 1, "the pool the node's stores serve")
+	fs.Int64Var(&cfg.Memory, "memory", 0, "the daemon's memory budget in MiB, which GOMEMLIMIT is held at less the slabs mapped outside the Go heap; 0 leaves GOMEMLIMIT alone")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
 	if *node >= daemonNodes || *pool > math.MaxUint32 {
 		return cfg, fmt.Errorf("-node %d is not below %d, where a daemon's node lies, or -pool %d is past 32 bits", *node, daemonNodes, *pool)
+	}
+	if cfg.Memory < 0 || cfg.Memory >= 1<<43 {
+		return cfg, fmt.Errorf("-memory %d MiB is not 0 or a budget", cfg.Memory)
 	}
 	cfg.Node, cfg.Pool = uint32(*node), uint32(*pool)
 	var err error

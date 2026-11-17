@@ -14,6 +14,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
+	"github.com/nvcnvn/rock-solid/internal/loop/looptest"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
 	"github.com/nvcnvn/rock-solid/internal/sim"
@@ -22,7 +23,9 @@ import (
 // node is one replica of a group: its shard, durable Raft storage, pool, the round in flight,
 // the answers it gave by token and, per round it took, how many Txn entries the round held.
 type node struct {
-	s       *Shard
+	s *Shard
+	// pages are the replica's page slabs; a restart closes the last shard, which must give every one back.
+	pages   looptest.Pages
 	st      *raftshard.Storage
 	pool    *sim.Pool
 	out     Output
@@ -90,7 +93,13 @@ func (c *group) restart(i int) {
 // start starts replica i from its storage, as after a crash: its state empty at the storage's base.
 func (c *group) start(i int) {
 	r := c.n[i]
-	cfg := Config{Raft: raftshard.Config{Group: 5, ID: uint64(i) + 1, Storage: r.st, Seed: uint64(i), Timer: 1}, Tree: lsm.Config{MaxPiece: 64 << 10, Check: true}}
+	if r.s != nil {
+		r.s.Close()
+		if r.pages.Out != 0 {
+			c.t.Fatalf("replica %d kept %d bytes of page slabs once closed", i, r.pages.Out)
+		}
+	}
+	cfg := Config{Raft: raftshard.Config{Group: 5, ID: uint64(i) + 1, Storage: r.st, Seed: uint64(i), Timer: 1}, Tree: lsm.Config{MaxPiece: 64 << 10, Check: true, Pages: &r.pages}}
 	for j := range c.n {
 		cfg.Raft.Peers = append(cfg.Raft.Peers, raftshard.Peer{ID: uint64(j) + 1, Node: core.NodeID{Node: uint32(j)}})
 	}

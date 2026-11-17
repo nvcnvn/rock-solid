@@ -11,7 +11,9 @@ import (
 )
 
 const (
-	poolBytes   = 64 << 20
+	poolBytes = 64 << 20
+	// pageRegion is the regions a loop's page slab maps, for its trees' memtable pages.
+	pageRegion  = 64 << 20
 	ringEntries = 256
 	// bootTimer is the event that starts a loop's machine, mailTimer the one that wakes it for its mail.
 	bootTimer core.TimerID = 0x6374626f6f74

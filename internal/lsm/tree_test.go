@@ -83,6 +83,7 @@ func TestMemtableMatchesModel(t *testing.T) {
 	seeds.Run(t, 0, 12, func(seed uint64) {
 		r := rand.New(rand.NewPCG(uint64(seed), 1))
 		tr := newTree(t, 1<<20)
+		defer tr.Close()
 		m := model{}
 		maxKey, maxValue, alphabet := 12, 40, 6
 		if seed%3 == 2 {
@@ -107,6 +108,7 @@ func TestViewsCopyOnWrite(t *testing.T) {
 	seeds.Run(t, 0, 6, func(seed uint64) {
 		r := rand.New(rand.NewPCG(uint64(seed), 3))
 		tr := newTree(t, 1<<20)
+		defer tr.Close()
 		m := model{}
 		type open struct {
 			v *View

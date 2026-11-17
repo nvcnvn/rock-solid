@@ -11,15 +11,18 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
+	"github.com/nvcnvn/rock-solid/internal/loop/looptest"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 // rcluster is replicas on simulated nodes, disk d on node d − 1, a client on the last node, and the test as the control plane: it publishes tables and ends peering.
 type rcluster struct {
-	t     *testing.T
-	s     *sim.Scheduler
-	reps  []*Replica
+	t    *testing.T
+	s    *sim.Scheduler
+	reps []*Replica
+	// pages are each disk's store's page slabs; a store that restarts closes the last, which must give every one back.
+	pages []*looptest.Pages
 	loops []core.NodeID
 	table Table
 	// sessions is the newest session table, which a replica's store holds from its start.
@@ -166,6 +169,10 @@ func newRClusterOnDisks(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Co
 	c.reps, c.loops, c.fetch, c.whole, c.passes = make([]*Replica, disks), make([]core.NodeID, disks), make([]uint64, disks), make([]bool, disks), make([][][]core.Action, disks)
 	c.fetches = make([]int, disks)
 	c.sessionAsks = make([]uint64, disks)
+	c.pages = make([]*looptest.Pages, disks)
+	for d := range c.pages {
+		c.pages[d] = &looptest.Pages{}
+	}
 	c.ids, c.logs, c.reformat, c.boots = make([]uint32, disks), make([]uint64, disks), make([]bool, disks), make([]int, disks)
 	for d := range disks {
 		c.ids[d], c.logs[d] = uint32(d+1), 0x5eed+uint64(d)
@@ -202,8 +209,12 @@ func newRClusterOnDisks(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Co
 				if edit != nil {
 					edit(&cfg)
 				}
+				cfg.Pages = c.pages[d]
 				c.boots[d]++
 				first := c.reps[d] == nil
+				if !first {
+					closeStore(t, c.reps[d].Store(), c.pages[d])
+				}
 				fresh := first || c.reformat[d]
 				var st *Store
 				var err error

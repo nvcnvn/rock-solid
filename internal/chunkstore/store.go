@@ -54,6 +54,8 @@ type Config struct {
 	CleanFree int
 	// MergeCache is how many recently merged blocks the store keeps to merge on without a read; 0 keeps none.
 	MergeCache int
+	// Pages is where the index's tree takes its page slabs; nil takes them from the Go heap.
+	Pages lsm.Pages
 }
 
 // DefaultMergeCache is the merged-block cache of a replica primary's store: 64 blocks, 256 KiB per disk.
@@ -438,7 +440,8 @@ func (s *Store) logIO() core.IOID {
 }
 
 func (s *Store) recover(ctx *core.Context, diskBlocks uint64, mode disklog.Mode) error {
-	s.log, s.ix, s.mode, s.replayLSN, s.held = nil, nil, mode, 0, s.held[:0]
+	s.closeIndex()
+	s.log, s.mode, s.replayLSN, s.held = nil, mode, 0, s.held[:0]
 	s.loading, s.pieceOf = map[disklog.BlobRef]*loadingRun{}, map[disklog.BlobRef]disklog.BlobRef{}
 	rec, err := disklog.Recover(ctx, s.cfg.Log, diskBlocks, mode, s.logIO(), &s.lout)
 	if err != nil {
@@ -473,8 +476,9 @@ func (s *Store) resume(log *disklog.Log) error {
 // newIndex starts an empty index and the merge scheduler over it, which hands out the merge
 // workers the log keeps a lane for.
 func (s *Store) newIndex(maxPiece uint64, geo disklog.Geometry) error {
+	s.closeIndex()
 	step := cmp.Or(s.cfg.Log.CompactionStepBytes, disklog.DefaultConfig().CompactionStepBytes)
-	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: int(maxPiece), StepBytes: int(step), Check: s.cfg.Check}))
+	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: int(maxPiece), StepBytes: int(step), Check: s.cfg.Check, Pages: s.cfg.Pages}))
 	if err != nil {
 		return err
 	}
@@ -486,6 +490,17 @@ func (s *Store) newIndex(maxPiece uint64, geo disklog.Geometry) error {
 	s.ix, s.sched = NewIndex(tree, geo.SegmentBlocks, geo.SegmentCount), sched
 	return nil
 }
+
+// closeIndex gives the index's page slabs back and drops it.
+func (s *Store) closeIndex() {
+	if s.ix != nil {
+		s.ix.Tree().Close()
+		s.ix = nil
+	}
+}
+
+// Close gives the index's page slabs back to Config.Pages; the store may not be used after.
+func (s *Store) Close() { s.closeIndex() }
 
 // Seal exists in the API only.
 func (s *Store) Seal(core.ChunkID) error { return ErrSeal }

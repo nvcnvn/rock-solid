@@ -9,17 +9,51 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/loop/looptest"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 const testPool core.PoolID = 1
+
+// slabTree is a tree of cfg on the package's slab, which t closes at its end, failing if any page
+// slab is still out after; under the seed flags t keeps no tree to its end.
+func slabTree(t testing.TB, cfg lsm.Config) *lsm.Tree {
+	t.Helper()
+	pages := &looptest.Pages{}
+	cfg.Pages = pages
+	tree, err := lsm.New(TreeConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !seeds.Default() {
+		return tree
+	}
+	t.Cleanup(func() {
+		tree.Close()
+		if pages.Out != 0 {
+			t.Errorf("%d bytes of page slabs out after the tree closed", pages.Out)
+		}
+	})
+	return tree
+}
+
+// closeStore closes s, which pages served, and fails t if a page slab is still out.
+func closeStore(t testing.TB, s *Store, pages *looptest.Pages) {
+	t.Helper()
+	s.Close()
+	if pages.Out != 0 {
+		t.Fatalf("%d bytes of page slabs out after the store closed", pages.Out)
+	}
+}
 
 // harness runs a store over a simulated disk. Actions queue in the order the store emits them and
 // run one at a time, oldest first, so operations pipeline behind the rounds in flight; replies
 // are kept by request ID.
 type harness struct {
 	t       testing.TB
+	pages   *looptest.Pages
 	pool    *sim.Pool
 	ctx     core.Context
 	disk    *sim.Disk
@@ -266,7 +300,9 @@ func (h *harness) slotReplayed() bool {
 
 // newHarnessOn is newHarness on a disk cut as geo.
 func newHarnessOn(t testing.TB, cfg Config, geo disklog.Geometry) *harness {
-	h := &harness{t: t, pool: sim.NewPool(32<<20, 0), disk: sim.NewDisk(geo.DiskBlocks()), cfg: cfg,
+	pages := &looptest.Pages{}
+	cfg.Pages = pages
+	h := &harness{pages: pages, t: t, pool: sim.NewPool(32<<20, 0), disk: sim.NewDisk(geo.DiskBlocks()), cfg: cfg,
 		replies: map[uint64]Reply{}, seqOf: map[uint32]uint64{}, steps: map[*lsm.Compaction]int{}, laneOf: map[uint32]uint8{}, stepHeld: map[uint8]uint64{}, slotData: map[core.LBA][]byte{}, crashAt: -1,
 		bytes: newByteOracle(), sent: map[uint64]change{}, found: map[string]error{}, recSeq: map[core.LBA]uint64{}, cleanSeg: map[uint32]bool{}, recAt: map[uint64]int{}, newestIn: map[uint32]uint64{}, filled: map[uint32]float64{}, dirty: map[core.ChunkID]bool{}, seen: map[core.ChunkID]*storeView{}, views: map[core.ChunkID]*storeView{}}
 	h.register()

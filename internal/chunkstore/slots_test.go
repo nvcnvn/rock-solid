@@ -275,11 +275,7 @@ const (
 // slotIndex is an index of a disk of 16 MiB segments, 4 chunk slots each.
 func slotIndex(t testing.TB) *Index {
 	t.Helper()
-	tree, err := lsm.New(TreeConfig(lsm.Config{MaxPiece: 1 << 20, Check: true}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return NewIndex(tree, slotSegmentBlocks, slotSegments)
+	return NewIndex(slabTree(t, lsm.Config{MaxPiece: 1 << 20, Check: true}), slotSegmentBlocks, slotSegments)
 }
 
 // The index counts the blocks its maps refer to in each chunk slot, beside its record's, and

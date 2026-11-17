@@ -84,3 +84,33 @@ func TestParseAdminTakesEachCommand(t *testing.T) {
 		}
 	}
 }
+
+// GOMEMLIMIT follows the budget less every slab mapped, at start and as page slabs grow; a budget
+// the start's slabs fill is refused, and none leaves GOMEMLIMIT alone.
+func TestTheHeapLimitIsTheBudgetLessTheMappedSlabs(t *testing.T) {
+	var limits []int64
+	h := newHeapLimit(256)
+	h.set = func(n int64) int64 { limits = append(limits, n); return 0 }
+	h.add(64 << 20)
+	if err := h.check(); err != nil {
+		t.Fatal(err)
+	}
+	h.add(64 << 20)
+	if want := []int64{192 << 20, 128 << 20}; !reflect.DeepEqual(limits, want) {
+		t.Fatalf("limits %v, want %v", limits, want)
+	}
+	full := newHeapLimit(64)
+	full.set = func(int64) int64 { return 0 }
+	if full.add(64 << 20); full.check() == nil {
+		t.Fatal("a budget the start's slabs fill was taken")
+	}
+	none := newHeapLimit(0)
+	none.set = func(int64) int64 { t.Fatal("no budget set a limit"); return 0 }
+	none.add(1 << 30)
+	if none.check() != nil {
+		t.Fatal("no budget was refused")
+	}
+	if _, err := parseNode(strings.Fields("-node 2 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a -memory -1")); err == nil {
+		t.Fatal("a negative -memory was taken")
+	}
+}
