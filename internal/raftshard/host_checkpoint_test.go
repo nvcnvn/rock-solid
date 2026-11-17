@@ -239,3 +239,30 @@ func TestARestartTakesTheCompactionIndexFromTheBase(t *testing.T) {
 		t.Fatalf("after the restart the host's compaction index is %d and it holds %d blobs; want 3 and %d", hd.compacted, len(hd.refs), want)
 	}
 }
+
+// A rewrite repeats the newest hard state the host made durable, which the shard may not have
+// taken yet: its storage's older one would replace it on a restart, a vote and term gone back.
+func TestARewriteWritesTheHostsNewestHardStateBeforeTheShardTakesIt(t *testing.T) {
+	r := newRig(t)
+	st := NewStorage()
+	r.host.Add(6, st)
+	r.commit(st, 6, 1, Round{Entries: entries(1, 1, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 1}})
+	if err := r.host.Compact(6, 1, raftpb.ConfState{Voters: []uint64{1}}); err != nil {
+		t.Fatal(err)
+	}
+	newer := raftpb.HardState{Term: 2, Vote: 2, Commit: 1}
+	r.write(6, 2, &Round{HardState: newer, Removed: true})
+	r.run()
+	r.checkpoint()
+	if err := r.host.Rewrite(&r.ctx, r.host.Log.DurableLSN(), &r.out); err != nil {
+		t.Fatal(err)
+	}
+	r.absorb()
+	r.run()
+	st.SetHardState(newer)
+	r.bases = map[uint32]raftpb.SnapshotMetadata{6: st.Base()}
+	sts := r.crashCleaned(6)
+	if got := sts[6]; got.HardState() != newer || !got.Removed() {
+		t.Fatalf("the restart recovered hard state %+v, removed %v; want %+v, removed", got.HardState(), got.Removed(), newer)
+	}
+}

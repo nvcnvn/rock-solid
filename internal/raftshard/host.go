@@ -375,7 +375,7 @@ func (h *Host) Rewrite(ctx *core.Context, lsn uint64, out *disklog.Output) error
 		if hd.newest != 0 || hd.rounds[0].last > hd.compacted || hd.refs[0].LSN > lsn || hd.inflight > 0 || hd.wait != 0 {
 			continue
 		}
-		r := Round{HardState: hd.st.hs, Removed: hd.st.removed}
+		r := Round{HardState: hd.rounds[0].state, Removed: hd.rounds[0].removed}
 		if ok, err := h.submit(ctx, hd, 0, &r, out); err != nil || !ok {
 			return err
 		}
