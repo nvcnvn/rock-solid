@@ -21,20 +21,41 @@ const (
 	invLeftGated     = "no running disk keeps a write gated of a PG its table names it in no interval of since the last activated"
 )
 
-// leftGated is the first running disk whose store keeps gated a write of a PG its replica's table names it in no interval
-// of, but one whose writes there are still unresolved.
+// leftGated is the first running disk whose store keeps gated a write of a PG the cluster's table names it in no
+// interval of since the last activated, but one whose writes there are still unresolved.
 func (c *rcluster) leftGated() error {
 	for n, rep := range c.reps {
-		if rep == nil || rep.leftDue || !c.s.Node(uint32(n)).Up() || !rep.st.Serving() {
+		if rep == nil || !c.s.Node(uint32(n)).Up() || !rep.st.Serving() {
+			continue
+		}
+		p := c.table.pool(rep.st.cfg.Pool)
+		if p == nil {
 			continue
 		}
 		for _, ch := range rep.st.Unsettled(nil) {
-			if pg, ok := rep.pgOf(ch); ok && !rep.names(pg) {
-				return fmt.Errorf("%s: disk %d keeps %v of PG %d gated", invLeftGated, c.ids[n], ch, pg.Index)
+			i := core.PGIndexOf(ch.Hash(), uint32(len(p.PGs)))
+			if !unresolved(rep.st, ch) && !namesDisk(&p.PGs[i], c.ids[n]) {
+				return fmt.Errorf("%s: disk %d keeps %v of PG %d gated", invLeftGated, c.ids[n], ch, i)
 			}
 		}
 	}
 	return nil
+}
+
+// namesDisk reports whether e names disk in its current interval or in a past one since its last activated.
+func namesDisk(e *PGEntry, disk uint32) bool {
+	in := func(ms []Member) bool { return slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == disk }) }
+	return in(e.Members) || slices.ContainsFunc(e.Past, func(p PastInterval) bool { return p.Interval >= e.Activated && in(p.Members) })
+}
+
+// unresolved reports whether a write or punch of chunk c in st waits to be ordered or has records neither durable nor failed.
+func unresolved(st *Store, c core.ChunkID) bool {
+	ci, ok := st.chunkOf[c]
+	if !ok {
+		return false
+	}
+	cs := &st.chunks[ci]
+	return len(cs.waiting) > 0 || slices.ContainsFunc(cs.pending, func(oi int32) bool { return st.ops[oi].left > 0 })
 }
 
 // inactive is the first PG of c's table with min_live live members whose primary runs but has not activated its current interval.
