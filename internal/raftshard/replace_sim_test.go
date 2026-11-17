@@ -55,6 +55,13 @@ type replacement struct {
 	handed      bool
 	leave       uint64
 	leadRemoved bool
+	// With regress, the first old voter that runs, follows and applied the joint configuration
+	// while holding the leave beyond its commit index crashes, regressed, at regressAt; until
+	// 10 s on it reaches only the cut-off replica, which reaches only it, and the leader hands its
+	// leadership to the fourth replica once it applied the leave.
+	regress   bool
+	regressed int
+	regressAt core.Tick
 }
 
 type commitAt struct {
@@ -87,7 +94,7 @@ func faults() sim.Settings {
 // newReplaceCluster runs a replacement cut 2 to 4 s in and planned up to 2 s later; with crash the first leader to apply crashAt values also crashes, and with pauseD the fourth node is suspended for 2 s once the plan names it.
 func newReplaceCluster(seed uint64, p plants, set sim.Settings, crash, pauseD bool) *simCluster {
 	rng := core.NewRand(seed ^ 0x7e91ace)
-	return newCluster(seed, p, set, &replacement{crash: crash, pauseD: pauseD, dead: -1, swapBy: -1,
+	return newCluster(seed, p, set, &replacement{crash: crash, pauseD: pauseD, dead: -1, swapBy: -1, regressed: -1,
 		cutAt: 2_000_000 + core.Tick(rng.Below(2_000_001)), planDelay: core.Tick(rng.Below(2_000_001)),
 		early: rng.Chance(1, 2), healDelay: core.Tick(rng.Below(1_000_001)), cutLeader: crash && rng.Chance(1, 2), outgoing: rng.Chance(1, 2)}, nil)
 }
@@ -119,7 +126,7 @@ func (c *simCluster) replace() {
 		if nd := c.s.Node(simNodes); p.pauseD && nd.Up() && !nd.Paused() {
 			c.s.Pause(simNodes, clock.Suspend, 2_000_000, false)
 		}
-	case !p.healed && (p.early && p.plan != nil && now >= p.planAt+p.healDelay || p.swappedAt != 0 && now >= p.swappedAt+1_000_000):
+	case !p.healed && p.regressed < 0 && (p.early && p.plan != nil && now >= p.planAt+p.healDelay || p.swappedAt != 0 && now >= p.swappedAt+1_000_000):
 		p.healed = true
 		for x := range uint32(len(c.reps)) {
 			c.s.Heal(uint32(p.dead), x)
@@ -139,6 +146,54 @@ func (c *simCluster) replace() {
 			}
 		}
 	}
+	if p.regress {
+		c.regress()
+	}
+}
+
+// regress moves the regress fault on.
+func (c *simCluster) regress() {
+	p := c.rep
+	now := c.s.Time()
+	switch l := c.leader(); {
+	case p.regressed < 0 && p.plan != nil && l >= 0:
+		for id, r := range c.reps[:simNodes] {
+			if id == p.dead || r.leads || !c.s.Node(uint32(id)).Up() || len(r.s.conf.VotersOutgoing) == 0 || !holdsConf(c.storage[id], r.s.rn.BasicStatus().Commit) {
+				continue
+			}
+			c.s.CrashRandom(uint32(id))
+			p.regressed, p.regressAt = id, now
+			for x := range uint32(len(c.reps)) {
+				if x != uint32(p.dead) && x != uint32(id) {
+					c.s.Partition(uint32(id), x, false)
+				}
+			}
+			break
+		}
+	case p.regressed >= 0 && !p.handed && l >= 0 && l != simNodes && len(c.reps[l].s.conf.VotersOutgoing) == 0 && slices.Equal(sorted(c.reps[l].s.conf.Voters), planned(p.plan)):
+		p.handed = true
+		c.transfer(l, simNodes+1)
+	case p.regressed >= 0 && !p.healed && now >= p.regressAt+10_000_000:
+		p.healed = true
+		for a := range uint32(len(c.reps)) {
+			for b := range uint32(len(c.reps)) {
+				c.s.Heal(a, b)
+			}
+		}
+	}
+	if p.regressed >= 0 && !p.healed {
+		c.s.Heal(uint32(p.dead), uint32(p.regressed))
+	}
+}
+
+// holdsConf reports whether st holds a configuration change past commit.
+func holdsConf(st *Storage, commit uint64) bool {
+	for i := max(commit, st.base.Index) + 1; i <= st.last(); i++ {
+		if st.entry(i).Type != raftpb.EntryNormal {
+			return true
+		}
+	}
+	return false
 }
 
 // applied records that replica r applied value v at index.
@@ -349,4 +404,38 @@ func TestARemovedLeaderThatKeepsReadingBreaksTheLeaseInvariant(t *testing.T) {
 		}
 	}
 	t.Fatal("20 seeds whose removed leader keeps serving lease reads broke no lease reader invariant")
+}
+
+// regressCluster is seed's replacement run with no fault but the regress one.
+func regressCluster(seed uint64, p plants) *simCluster {
+	c := newReplaceCluster(seed, p, sim.DefaultSettings(), false, false)
+	c.rep.outgoing, c.rep.early, c.rep.regress = false, false, true
+	return c
+}
+
+// Under the regress fault a voter that restarts once the joint configuration committed, holding
+// the leave, restarts in that configuration and wins no term on its vote and the cut-off replica's.
+func TestAVoterRestartedMidSwapKeepsTheConfigurationItKnewCommitted(t *testing.T) {
+	seeds.Run(t, 0, 20, func(seed uint64) {
+		if c := regressCluster(seed, plants{}).run(t, seed); !c.done || c.rep.regressed < 0 || !c.rep.handed {
+			t.Fatalf("seed %d: regressed %d, handed %v, swapped at %d, removed %v, the new replica caught up %v", seed, c.rep.regressed, c.rep.handed, c.rep.swappedAt, c.rep.removed, c.rep.caughtUp)
+		}
+	})
+}
+
+// The voter model's neg-conf-commit-not-durable: with rounds that write only their own Ready's hard
+// state, and none for a Ready that commits a configuration change, the regressed voter restarts in
+// the configuration before the swap and wins the term the fourth replica won.
+func TestRoundsThatLeaveTheCommitOfASwapBehindElectTwoLeaders(t *testing.T) {
+	for seed := range uint64(5) {
+		c := regressCluster(seed, plants{confCommitNotDurable: true})
+		c.inv.Only(invOneLeader)
+		for c.s.Time() < simRunFor && c.s.Step() {
+			if c.inv.Check() != nil {
+				return
+			}
+			c.after(t, seed)
+		}
+	}
+	t.Fatal("5 seeds whose rounds leave the commit of a swap behind broke no one-leader invariant")
 }

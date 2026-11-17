@@ -6377,6 +6377,7 @@ place of replaying the disk log.
 | A node answering a pre-vote while a round holding an append is in flight | `MsgPreVoteResp` waits for that round, as every message stepped mid-round does, then leaves with the next round's write, since a pre-vote changes no hard state; that round's `MsgAppResp` waits for its flush |
 | A `Ready` with committed entries | Applied after persistence, then `Advance`. A message stepped while the round is in flight takes no second `Ready` before `Advance`; it comes out in the next round |
 | A crash before the durable notice | On restart the follower's log lacks the entry, and the leader resends it. No acknowledgment was sent for it |
+| A follower's append that only moves its commit index, then an append with an entry | The first takes no round and leaves storage's commit index where it was; the second's round writes the moved commit index, which etcd-raft hands out only once (`TestTheNextRoundWritesACommitIndexMovedWithoutOne`) |
 
 **Simulator runs.** `TestRaftRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000 per commit in
 `scripts/seeds.sh` (15 s at `JOBS=2`), 10,000 once in 150 s. One group of three shards on the
@@ -6577,6 +6578,8 @@ a snapshot taken at the leader's applied index in for the point-in-time view the
 | A, the leader, cut off while B leads, and the plan swaps D in for A | A still leads its old term; once reconnected, its messages draw the removal notice and A reports `Removed` |
 | A proposal every 10 ms, D's link one step slower than B's | D, trailing the current commit index for good, is swapped in; planted, a learner held to the current commit index never is |
 | A removal notice at any index to D before its addition | Ignored: a notice proves a removal only to a replica its own applied configuration holds |
+| B holds the joint entry swapping D in for C, and hears its commit from an append with no entry | A round of its own: B sends nothing, its acknowledgment included, and stays in the first configuration until the round is durable, then holds that commit index in storage, applies the joint configuration and acknowledges. A transfer's `MsgTimeoutNow` that came meanwhile has B campaign once the round is durable (`TestACommittedConfigurationChangeIsDurableBeforeItApplies`) |
+| B applied the joint configuration and holds the leave; it crashes before it hears the leave commit, A hands D its leadership on A and D, and B, restarted from its base and the rounds it made durable, campaigns cut off from A and D | B restarts in the joint configuration and wins no term on its vote and C's. Planted, rounds that write only their own `Ready`'s hard state bring B back in the first configuration, where it leads the term D leads (`TestARestartDoesNotTakeAReplicaBackAcrossACommittedConfigurationChange`) |
 | C restarts after the swap | Within a second, inside its restart wait, C asks its peers whether it is a member; their answer at an applied index past its own makes C report `Removed`. It sends no pre-vote or vote, and nothing in 10 s after |
 | A removal notice at an index below the replica's applied index | Ignored: a peer that has not applied the change that added it says nothing of its removal |
 | B has committed D's addition, its commit index at D's applied index, but not applied it; D asks B, or sends B a Raft message | B answers at its applied index, which D ignores; an answer at its commit index would have D delete its state |
@@ -6621,6 +6624,16 @@ a leader of the new configuration, so it never finishes, while the same seed fin
 keeps serving lease reads (`neg-removed-keeps-lease`) breaks "no two replicas of a shard serve
 lease reads at overlapping times" (`TestARemovedLeaderThatKeepsReadingBreaksTheLeaseInvariant`;
 7 of the first 20 seeds).
+
+With the regress fault (`TestAVoterRestartedMidSwapKeepsTheConfigurationItKnewCommitted`, 20 seeds
+in `go test` and 2,000 per commit in `scripts/seeds.sh`, with no other fault but the pauses), the first old voter that follows, applied the joint
+configuration and holds the leave past its commit index crashes; until 10 s on it reaches only the
+replaced replica, which reaches only it, and once the leader applied the leave it hands the fourth
+replica its leadership. Every seed finishes. Planted, rounds that write only their own `Ready`'s
+hard state and none for a `Ready` that commits a configuration change (`neg-conf-commit-not-durable`)
+bring the crashed voter back in the configuration before the swap, where it wins the term the
+fourth replica won on the replaced replica's vote: "at most one leader per shard per term" breaks
+within 5 seeds (`TestRoundsThatLeaveTheCommitOfASwapBehindElectTwoLeaders`; 39 of the first 40).
 
 `TestVoterReplacementRegressionSeeds` keeps three seeds that found bugs: 6389, which found a
 lease-reading leader behind a follower that applied first (the run has since changed and no longer

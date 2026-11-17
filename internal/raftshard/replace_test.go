@@ -44,7 +44,11 @@ var replacing = []Peer{{ID: 1, Node: core.NodeID{Node: 0}}, {ID: 2, Node: core.N
 
 // settleWithout delivers and flushes until nothing is left to do, losing every message to or from the replicas in cut.
 func (n *testNet) settleWithout(cut ...int) {
-	keep := func(e envelope) bool { return !slices.Contains(cut, e.from) && !slices.Contains(cut, e.to) }
+	n.settleKeeping(func(e envelope) bool { return !slices.Contains(cut, e.from) && !slices.Contains(cut, e.to) }, cut...)
+}
+
+// settleKeeping delivers and flushes until nothing is left to do, losing every message keep refuses and flushing no replica in cut.
+func (n *testNet) settleKeeping(keep func(e envelope) bool, cut ...int) {
 	for range 1000 {
 		n.deliver(keep)
 		flushed := false
@@ -590,6 +594,7 @@ func TestASnapshotWaitsOutAConfigurationChangeAsItApplies(t *testing.T) {
 	n.deliver(func(e envelope) bool { return e.from == rB && e.to == rA })
 	n.event(rA, core.Event{Kind: core.EvPeerLost, Peer: core.NodeID{Node: rC}})
 	n.durable(rA)
+	n.durable(rA)
 	if c := n.conf(rA); !slices.Equal(c.Learners, []uint64{4}) {
 		t.Fatalf("configuration %+v once A applied the change, want D a learner", c)
 	}
@@ -796,5 +801,112 @@ func TestANodeAnswersGoneOnlyForTheReplicaItNoLongerHolds(t *testing.T) {
 		if dropped := n.r[rB].s.support.term == 0; dropped != c.drop {
 			t.Fatalf("an answer from node %d that %d is gone: B dropped its support %v", c.node, c.from, dropped)
 		}
+	}
+}
+
+// The voter model's neg-conf-commit-not-durable, the trace TLC found: B learns that the joint
+// configuration swapping D in for C committed from an append that carries no entry, then holds the
+// leave, and crashes before it learns the leave committed. A Ready that only moves the commit index
+// writes nothing, so had B's durable commit index stayed below the joint entry, B would restart in
+// the first configuration and win a term on its vote and C's while D, handed A's leadership, wins
+// the same term on its vote and A's.
+func TestARestartDoesNotTakeAReplicaBackAcrossACommittedConfigurationChange(t *testing.T) {
+	n, joint := swapNet(t)
+	leave := joint + 1
+	n.settleKeeping(func(e envelope) bool {
+		if e.from == rC || e.to == rC {
+			return false
+		}
+		m, raft := n.message(e)
+		return !raft || e.to != rB || m.Commit < leave
+	})
+	if c := n.conf(rB); len(c.VotersOutgoing) == 0 {
+		t.Fatalf("B is in %+v, want the joint configuration", c)
+	}
+	if last, _ := n.r[rB].st.LastIndex(); last != leave || !slices.Equal(sorted(n.conf(rA).Voters), []uint64{1, 2, 4}) || len(n.conf(rA).VotersOutgoing) != 0 {
+		t.Fatalf("B holds up to %d, want the leave %d; A is in %+v", last, leave, n.conf(rA))
+	}
+	n.crash(rB)
+	n.call(rB, func(ctx *core.Context, out *Output) { n.r[rB].s.ready(ctx, out) })
+	restarted := n.conf(rB)
+	n.inbox = n.inbox[:0]
+	n.call(rA, func(ctx *core.Context, out *Output) {
+		n.r[rA].s.rn.TransferLeader(4)
+		n.r[rA].s.ready(ctx, out)
+	})
+	n.settleWithout(rB, rC)
+	if n.leaderOf(rD) < 0 {
+		t.Fatal("D did not win the election A handed it")
+	}
+	n.call(rB, func(ctx *core.Context, out *Output) {
+		if err := n.r[rB].s.rn.Campaign(); err != nil {
+			t.Fatal(err)
+		}
+		n.r[rB].s.ready(ctx, out)
+	})
+	n.settleWithout(rA, rD)
+	if n.leaderOf(rB) >= 0 && n.term(rB) == n.term(rD) {
+		t.Fatalf("B, restarted in %+v, and D both lead term %d", restarted, n.term(rB))
+	}
+	if len(restarted.VotersOutgoing) == 0 {
+		t.Fatalf("B restarted in %+v, before the joint configuration it knew committed", restarted)
+	}
+}
+
+// message decodes a queued message, and reports whether it is a Raft one.
+func (n *testNet) message(e envelope) (raftpb.Message, bool) {
+	var m raftpb.Message
+	kind, err := decodeKind(n.r[e.to].pool, &e.msg, &m, &fortify{})
+	if err != nil {
+		n.t.Fatal(err)
+	}
+	return m, kind == kindRaft
+}
+
+// swapNet is a group of voters A, B and C and D a learner, A leading, where A proposed swapping D
+// in for C in one joint change at index joint.
+func swapNet(t *testing.T) (*testNet, uint64) {
+	n := newConfNet(t, 4, 1, func(int) *Storage {
+		return confStorage(raftpb.ConfState{Voters: []uint64{1, 2, 3}, Learners: []uint64{4}})
+	})
+	n.elect(rA)
+	swap := raftpb.ConfChangeV2{Changes: []raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeRemoveNode, NodeID: 3}, {Type: raftpb.ConfChangeAddNode, NodeID: 4}}}
+	n.call(rA, func(ctx *core.Context, out *Output) {
+		if err := n.r[rA].s.rn.ProposeConfChange(swap); err != nil {
+			t.Fatal(err)
+		}
+		n.r[rA].s.ready(ctx, out)
+	})
+	ents := n.r[rA].s.rd.Entries
+	return n, ents[len(ents)-1].Index
+}
+
+// A Ready that commits a configuration change while its commit index is not durable is a round
+// that sends nothing before its flush: B, holding the joint entry, hears its commit from an append
+// that carries no entry, and applies it and acknowledges once that commit index is durable. A
+// transfer's MsgTimeoutNow that comes meanwhile, which etcd-raft would drop with the change
+// unapplied, has B campaign once the round is durable.
+func TestACommittedConfigurationChangeIsDurableBeforeItApplies(t *testing.T) {
+	n, joint := swapNet(t)
+	n.settleKeeping(func(e envelope) bool {
+		if e.from == rC || e.to == rC {
+			return false
+		}
+		m, raft := n.message(e)
+		return !raft || e.to != rB || m.Commit < joint
+	})
+	b := n.r[rB]
+	term := n.term(rA)
+	sent := n.recv(rB, rA, raftpb.Message{Type: raftpb.MsgApp, From: 1, To: 2, Term: term, Index: joint, LogTerm: term, Commit: joint})
+	if b.flush == 0 || len(sent) != 0 || len(n.conf(rB).VotersOutgoing) != 0 {
+		t.Fatalf("the commit of the joint entry took round %d, sent %v and left B in %+v before its flush", b.flush, types(sent), n.conf(rB))
+	}
+	n.recv(rB, rA, raftpb.Message{Type: raftpb.MsgTimeoutNow, From: 1, To: 2, Term: term})
+	sent = n.durable(rB)
+	if count(sent, raftpb.MsgAppResp) != 1 || b.st.HardState().Commit != joint || len(n.conf(rB).VotersOutgoing) == 0 {
+		t.Fatalf("once durable B sent %v, holds commit %d of %d and is in %+v", types(sent), b.st.HardState().Commit, joint, n.conf(rB))
+	}
+	if st := b.s.rn.BasicStatus(); st.RaftState != raft.StateCandidate || st.Term != term+1 {
+		t.Fatalf("B is %v in term %d once the round is durable, want a candidate of term %d", st.RaftState, st.Term, term+1)
 	}
 }

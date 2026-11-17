@@ -9,6 +9,7 @@ import (
 	"go.etcd.io/raft/v3/tracker"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
@@ -33,6 +34,9 @@ type replica struct {
 	// snaps counts the snapshots it restored, and removed whether it learned it left the group.
 	snaps   int
 	removed bool
+	// rec is the record of the round in flight, and disk the records of the rounds made durable.
+	rec  []byte
+	disk [][]byte
 }
 
 type envelope struct {
@@ -96,6 +100,23 @@ func newConfNet(t testing.TB, n int, seed uint64, boot func(i int) *Storage) *te
 func (n *testNet) restart(i int) {
 	ctx := n.ctx(i)
 	n.start(i, lease.Now(&ctx))
+}
+
+// crash restarts replica i from its storage's base and the rounds it made durable, replayed as from
+// its disk log, losing whatever reached its storage another way; its node is past its restart wait.
+func (n *testNet) crash(i int) {
+	r := n.r[i]
+	st := NewStorage()
+	if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: r.st.Base()}); err != nil {
+		n.t.Fatal(err)
+	}
+	for _, rec := range r.disk {
+		if err := st.Replay(disklog.BlobRaftState, append([]byte{1}, rec...)); err != nil {
+			n.t.Fatal(err)
+		}
+	}
+	r.st = st
+	n.start(i, lease.Time{})
 }
 
 func (n *testNet) start(i int, at lease.Time) {
@@ -169,6 +190,9 @@ func (n *testNet) call(i int, f func(ctx *core.Context, out *Output)) []raftpb.M
 			n.t.Fatalf("replica %d took round %d with round %d in flight", i, r.out.Flush, r.flush)
 		}
 		r.flush = r.out.Flush
+		if !n.lean {
+			r.rec = AppendRound(nil, &r.out.Round)
+		}
 	}
 	var sent []raftpb.Message
 	r.forts = r.forts[:0]
@@ -225,6 +249,9 @@ func (n *testNet) durable(i int) []raftpb.Message {
 		n.t.Fatalf("replica %d has no round in flight", i)
 	}
 	r.flush = 0
+	if !n.lean {
+		r.disk = append(r.disk, r.rec)
+	}
 	return n.call(i, func(ctx *core.Context, out *Output) { r.s.Durable(ctx, round, out) })
 }
 
@@ -725,6 +752,34 @@ func TestCommittedEntriesAreAppliedOnceDurable(t *testing.T) {
 	n.durable(1)
 	if len(f.applied) != applied+2 || string(f.applied[applied+1].Data) != "y" {
 		t.Fatalf("applied %v after the second round", f.applied[applied:])
+	}
+}
+
+// A Ready that moves only the commit index is no round, and etcd-raft hands its hard state out only
+// once, so the next round writes it.
+func TestTheNextRoundWritesACommitIndexMovedWithoutOne(t *testing.T) {
+	n := newNet(t, 3, 1)
+	n.elect(0)
+	f := n.r[1]
+	last, _ := f.st.LastIndex()
+	term := n.term(1)
+	app := func(index, commit uint64, data string) raftpb.Message {
+		m := raftpb.Message{Type: raftpb.MsgApp, To: 2, From: 1, Term: term, Index: index, LogTerm: term, Commit: commit}
+		if data != "" {
+			m.Entries = []raftpb.Entry{{Term: term, Index: index + 1, Data: []byte(data)}}
+		}
+		return m
+	}
+	n.recv(1, 0, app(last, last, "x"))
+	n.durable(1)
+	n.recv(1, 0, app(last+1, last+1, ""))
+	if f.flush != 0 || f.st.HardState().Commit > last {
+		t.Fatalf("moving the commit index took round %d and left commit %d in storage", f.flush, f.st.HardState().Commit)
+	}
+	n.recv(1, 0, app(last+1, last+1, "y"))
+	n.durable(1)
+	if f.st.HardState().Commit != last+1 {
+		t.Fatalf("the next round wrote commit %d, want %d", f.st.HardState().Commit, last+1)
 	}
 }
 
