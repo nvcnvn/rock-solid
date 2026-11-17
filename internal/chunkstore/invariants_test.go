@@ -72,7 +72,8 @@ func (h *harness) register() {
 
 // slotsErr checks store st's chunk slots: every slot the log holds in use is referred to by a map,
 // named by a durable slot write still pending, or queued to free, and every slot a map refers to is
-// in use.
+// in use. The slots the store counts pinned are those its held writes name, by a full scan, and no
+// slot a live write names is queued to free.
 func slotsErr(st *Store) error {
 	if !st.Serving() || st.ix.segmentBlocks < core.BlocksPerChunk {
 		return nil
@@ -93,8 +94,27 @@ func slotsErr(st *Store) error {
 			return fmt.Errorf("slot %d is mapped but not in use (in use %v)", r, inUse)
 		}
 	}
+	pinned, named := map[core.LBA]int32{}, map[core.LBA]bool{}
+	for ci := range st.chunks {
+		for _, oi := range st.chunks[ci].pending {
+			o := &st.ops[oi]
+			for j := range o.items {
+				if it := &o.items[j]; it.entry.Kind == disklog.EntrySlot && it.state == itemDurable {
+					slot := st.ix.slotLBA(&it.entry)
+					if o.req.Gated {
+						pinned[slot]++
+					} else if named[slot] = true; slices.Contains(st.freed, slot) || slices.Contains(st.ix.freed, slot) {
+						return fmt.Errorf("slot %d is queued to free under a live write of chunk %v", slot, it.entry.Chunk)
+					}
+				}
+			}
+		}
+	}
+	if !maps.Equal(pinned, st.pinned) {
+		return fmt.Errorf("the held writes pin slots %v, the store counts %v", pinned, st.pinned)
+	}
 	for _, u := range inUse {
-		if !slices.Contains(referred, u) && !slices.Contains(st.freed, u) && !slices.Contains(st.ix.freed, u) && !st.heldIn(u) {
+		if !slices.Contains(referred, u) && !slices.Contains(st.freed, u) && !slices.Contains(st.ix.freed, u) && pinned[u] == 0 && !named[u] {
 			return fmt.Errorf("slot %d is in use, but no map refers to it, no pending write names it and none frees it (mapped %v)", u, referred)
 		}
 	}

@@ -359,6 +359,9 @@ type Store struct {
 	loading map[disklog.BlobRef]*loadingRun
 	pieceOf map[disklog.BlobRef]disklog.BlobRef
 	freed   []core.LBA
+	// pinned counts, for each chunk slot, the slot writes replay held that wait in a gated op for a
+	// decision: the slot stays in use while any does.
+	pinned map[core.LBA]int32
 
 	apply   disklog.Event
 	marks   []disklog.Entry
@@ -390,7 +393,7 @@ func newStore(cfg Config) *Store {
 	if reserved(cfg.Pool) {
 		panic("chunkstore: a store of the index's reserved pool")
 	}
-	return &Store{cfg: cfg, interval: 1, chunkOf: map[core.ChunkID]int32{}, sessions: map[uint64]uint64{}}
+	return &Store{cfg: cfg, interval: 1, chunkOf: map[core.ChunkID]int32{}, sessions: map[uint64]uint64{}, pinned: map[core.LBA]int32{}}
 }
 
 // Format starts a store on an empty disk.
@@ -2001,6 +2004,9 @@ func (s *Store) gateHeld() {
 		}
 		o := &s.ops[cs.pending[len(cs.pending)-1]]
 		o.items = append(o.items, *it)
+		if it.entry.Kind == disklog.EntrySlot {
+			s.pinned[s.ix.slotLBA(&it.entry)]++
+		}
 		if it.entry.Last {
 			o.torn = false
 		}
@@ -2149,6 +2155,9 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 			if o.dropped && !o.mapped {
 				s.dropSlot(it)
 			}
+			if o.req.Gated && it.entry.Kind == disklog.EntrySlot {
+				s.unpin(s.ix.slotLBA(&it.entry))
+			}
 			if it.buf != core.NoBuf {
 				ctx.Pool.Free(it.buf)
 				it.buf = core.NoBuf
@@ -2178,7 +2187,9 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 // that rewrote or deleted their chunks are durable. After a recovery some may already be free
 // in the log, which the manifest recorded as of a later record than replay applied again.
 // A slot a read in flight reads from waits until the read completes, so the log never reuses or
-// TRIMs it under the read.
+// TRIMs it under the read. A slot a held write names waits too: replay can hold both a version that
+// overwrote the slot and another chunk's later write the log gave it to, and mapping the first takes
+// away the index's last reference while the second still names it.
 func (s *Store) freeSlots(recovered bool) {
 	s.freed = s.ix.TakeFreed(s.freed)
 	if s.log.Err() != nil {
@@ -2189,7 +2200,7 @@ func (s *Store) freeSlots(recovered bool) {
 	for _, lba := range s.freed {
 		switch {
 		case s.ix.Live(lba) != 0:
-		case s.reading(lba) || s.heldIn(lba):
+		case s.reading(lba) || s.pinned[lba] > 0:
 			waiting = append(waiting, lba)
 		default:
 			if err := s.log.FreeSlot(lba, &s.lout); err != nil && !recovered {
@@ -2215,22 +2226,13 @@ func (s *Store) dropSlot(it *item) {
 	}
 }
 
-// heldIn reports whether a durable slot write the index does not map yet, such as one replay held,
-// writes the chunk slot starting at slot. The live store frees a slot once a version overwrites it
-// and may give it to another chunk's write; replay can hold both, and settling the first lets the
-// slot go before the second maps.
-func (s *Store) heldIn(slot core.LBA) bool {
-	for ci := range s.chunks {
-		for _, oi := range s.chunks[ci].pending {
-			for j := range s.ops[oi].items {
-				it := &s.ops[oi].items[j]
-				if it.entry.Kind == disklog.EntrySlot && it.state == itemDurable && s.ix.slotLBA(&it.entry) == slot {
-					return true
-				}
-			}
-		}
+// unpin ends one held slot write's pin on slot.
+func (s *Store) unpin(slot core.LBA) {
+	if n := s.pinned[slot] - 1; n > 0 {
+		s.pinned[slot] = n
+	} else {
+		delete(s.pinned, slot)
 	}
-	return false
 }
 
 // reading reports whether a read in flight reads from the chunk slot starting at slot.
@@ -2497,6 +2499,7 @@ func (s *Store) abandonPending(ctx *core.Context, out *Output) {
 	}
 	s.persists = s.persists[:0]
 	clear(s.covers)
+	clear(s.pinned)
 	s.checkFlushes(out)
 }
 
