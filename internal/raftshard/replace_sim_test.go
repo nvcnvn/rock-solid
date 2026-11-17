@@ -48,10 +48,8 @@ type replacement struct {
 	wedged     int
 	wedgeLeave uint64
 	stopped    bool
-	// noLeader reports a run in which no replica led having applied the plan's configuration
-	// within newLeaderBound of the faults stopping, and planLed whether one did.
-	noLeader error
-	planLed  bool
+	// planLed is whether a replica led having applied the plan's configuration once the faults stopped.
+	planLed bool
 	// removed is whether the cut-off replica reported itself removed, sinceSwap the first value
 	// proposed after the swap, and caughtUp whether the fourth replica applied one from then on.
 	removed   bool
@@ -174,16 +172,32 @@ func (c *simCluster) replace() {
 		d := c.reps[p.dead]
 		p.deleted, d.deleted, d.leads = true, true, false
 	}
-	if c.quietAt != 0 && p.plan != nil && !p.planLed {
-		if slices.ContainsFunc(c.reps, func(r *simReplica) bool {
-			nd := c.s.Node(uint32(r.id))
-			return r.leads && nd.Up() && !nd.Paused() && !r.s.halted && p.holds(r)
-		}) {
-			p.planLed = true
-		} else if now > c.quietAt+newLeaderBound && p.noLeader == nil {
-			p.noLeader = fmt.Errorf("no replica led having applied the plan's configuration within %v of the faults stopping", newLeaderBound.Duration())
-		}
+}
+
+// newLeader checks invNewLeader, noting in planLed once a replica led having applied the plan's configuration.
+func (c *simCluster) newLeader() error {
+	p := c.rep
+	if c.quietAt == 0 || p.plan == nil || p.planLed {
+		return nil
 	}
+	if slices.ContainsFunc(c.reps, func(r *simReplica) bool {
+		nd := c.s.Node(uint32(r.id))
+		return r.leads && nd.Up() && !nd.Paused() && !r.s.halted && p.holds(r)
+	}) {
+		p.planLed = true
+		return nil
+	}
+	if c.s.Time() > c.quietAt+newLeaderBound {
+		return fmt.Errorf("no replica led having applied the plan's configuration within %v of the faults stopping", newLeaderBound.Duration())
+	}
+	return nil
+}
+
+// awaitsLeader reports whether the run still owes invNewLeader's check: a plan was made and no
+// replica led having applied it, while newLeaderBound has not yet passed since the faults stopped.
+func (c *simCluster) awaitsLeader() bool {
+	p := c.rep
+	return p != nil && p.plan != nil && !p.planLed && c.s.Time() <= c.quietAt+newLeaderBound
 }
 
 // holds reports whether r applied the plan's configuration.

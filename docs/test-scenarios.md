@@ -4219,7 +4219,7 @@ next milestone's run, which is also the twins' first.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
-| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 25 | 533,097 | 128 s |
+| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 26 | 533,097 | 122 s |
 | Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 20 | 2,623 | 3 s |
 | Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 24 | 45,904 | 58 s |
 | Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 22 | 330,009 | 66 s |
@@ -6652,7 +6652,8 @@ and:
 - "only a replica the group's configuration removed deletes its state": no replica but the
   replaced one reports `Removed`.
 - [property] "a replica leads having applied the plan's configuration within 15 election timeouts
-  of the faults stopping", the model's `NewLeader`. Fifteen is past the longest wait a run allows
+  of the faults stopping", the model's `NewLeader`. A run done before then runs on quietly until
+  a replica leads so, or the bound passes. Fifteen is past the longest wait a run allows
   once its faults stop: a pause drawn before then holds a leader's node up to 5 s, its followers'
   grants lapse `primary_lease` and a heartbeat after its last renewal, they campaign
   `raft_lapse_campaign` later, and two split votes cost up to 2 s each, 14.3 s in all; the longest

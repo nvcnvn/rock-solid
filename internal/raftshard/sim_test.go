@@ -146,7 +146,7 @@ func newCluster(seed uint64, p plants, set sim.Settings, rep *replacement, disk 
 	nodes := simNodes
 	if rep != nil {
 		nodes++
-		c.inv.Register(invNewLeader, func() error { return rep.noLeader })
+		c.inv.Register(invNewLeader, c.newLeader)
 	}
 	c.storage, c.reps = make([]*Storage, nodes), make([]*simReplica, nodes)
 	disks := []sim.DiskSpec{{Blocks: 16, Settings: sim.DefaultDiskSettings()}}
@@ -203,8 +203,9 @@ func (r *simReplica) start(ctx *core.Context) {
 	s.Start(ctx, &r.out)
 }
 
-// run steps the group under faults for simRunFor, then, if it is not done, heals every partition
-// and runs it with only drops left for simRunFor more, since a partition that never heals stops it.
+// run steps the group under faults for simRunFor, then heals every partition and, while it is not
+// done or a replacement's new leader is still owed, runs it with only drops left for simRunFor
+// more, since a partition that never heals stops it.
 func (c *simCluster) run(t *testing.T, seed uint64) *simCluster {
 	c.drive(func() bool {
 		c.after(t, seed)
@@ -240,7 +241,7 @@ func (c *simCluster) drive(each func() bool) {
 		}
 	}
 	c.quietAt = c.s.Time()
-	for end := c.s.Time() + simRunFor; c.s.Time() < end && !c.done; {
+	for end := c.s.Time() + simRunFor; c.s.Time() < end && (!c.done || c.awaitsLeader()); {
 		cs := c.s.Choices()
 		if len(cs) == 0 {
 			break
