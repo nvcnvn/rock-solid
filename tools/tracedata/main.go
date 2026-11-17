@@ -801,6 +801,7 @@ func (g *gen) write(w *bufio.Writer, module string) {
 	}
 	fmt.Fprintf(w, "TWrites == <<%s>>\n", strings.Join(ws, ",\n  "))
 	fmt.Fprintf(w, "TTables == %d\n", g.tables)
+	fmt.Fprintf(w, "TMaxFormat == %d\n", max(g.fmts, 1))
 	fmt.Fprintf(w, "Trace == <<\n  %s\n>>\n", strings.Join(g.lines, ",\n  "))
 	fmt.Fprintln(w, "====")
 }
