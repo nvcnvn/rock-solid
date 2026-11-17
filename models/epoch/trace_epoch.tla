@@ -126,8 +126,9 @@ RecoveredLate(l) ==
 \* lose a prefix of themselves: a line loses its version only if the one before
 \* lost its own.
 LostAbove(l) ==
-    LET p == Trace[line - 1]
-    IN line = 1 \/ p.k # "mayfail" \/ p.n # l.n \/ p.v \notin dlog[ddisk[l.n]][p.c]
+    IF line > 1 /\ Trace[line - 1].k = "mayfail" /\ Trace[line - 1].n = l.n
+    THEN Trace[line - 1].v \notin dlog[ddisk[l.n]][Trace[line - 1].c]
+    ELSE TRUE
 
 RecoverLine(l) ==
     /\ (l.s = 0) = (miss[ddisk[l.n]][l.c] = 0)
