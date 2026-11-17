@@ -4114,7 +4114,6 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 - `ci-halt-live`: from `JointInit` under weak fairness, every replica up, no crash, up to term 3, and the leader of any term may halt: `NewLeader` holds, the halted leader handing its leadership on and the dropped voter keeping its state for a leader that holds the leave but applied only the joint configuration. `neg-removed-deletes-at-once` and `neg-halted-keeps-leading` are this configuration with one rule off.
 - `ci-die-live`: `ci-halt-live` with any one replica dying for good in place of the halt.
 - `ci-leave-die-live`: from `LeaveInit`, `OutgoingInit` three steps on, where c, leading term 2, has committed the leave on b and d, which do not yet know it committed, while a lags behind both; every replica up, no crash, no leader fortified, up to term 5, and any one replica dying for good. c can hold the outgoing half's newest entry once its removal committed, and `NewLeader` holds because c stays a voter of the joint configuration: it wins the votes a and d need, commits the leave on them and hands its leadership on. Each fault can cost two elections when c leads between, hence term 5. `neg-removed-applies-removal` is this configuration with one rule off.
-- `deep-crash-die-live`: `ci-leave-die-live` with one crash and restart of a leader. A crash and a death can each cost two elections, more than term 5 allows, so it checks `NewLeaderOrTermsSpent`, `NewLeader` unless every term up to 5 has been used.
 - `ci-restart`: from `JointInit`, up to term 2, no leader fortified, as in `ci-swap`: b, which both configurations keep, crashes once and restarts from any base at or below what it applied, so its configuration can rewind past both changes; the other replicas' restarts are `deep-restart`'s, and lease reads across a restart `deep-lease`'s. `neg-restart-commit-at-base` and `neg-conf-commit-not-durable` are this configuration with one rule off.
 - `deep-restart`: `ci-restart` with a crash of any replica.
 - `deep-swap`: `ci-swap` with one crash and restart of any replica. Every `deep` and `heavy` restart is from a base.
@@ -4122,6 +4121,7 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 - `deep-live-moved`: from `JointInit`, one crash and restart, up to term 3, so c wins after a crashes and its commit of the leave can reach no follower.
 - `deep-lease`: `ci-lease` with one crash and restart, up to term 3.
 - `heavy-live-moved`: `deep-live-moved` from the empty log, up to term 4, so the leader that is crashed while joint can be one that took over by transfer.
+- `heavy-crash-die-live`: `ci-leave-die-live` with one crash and restart of a leader. A crash and a death can each cost two elections, more than term 5 allows, so it checks `NewLeaderOrTermsSpent`, `NewLeader` unless every term up to 5 has been used. It has not run to the end: stopped after 33 minutes at 4 workers, it had reached depth 15 and 1,579,660 distinct states, its queue still growing, with no violation.
 
 ## Model-to-simulator map
 
