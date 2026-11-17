@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -103,6 +104,9 @@ func parseCtl(args []string) (ctlConfig, error) {
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
+	if *node > math.MaxUint32 {
+		return cfg, fmt.Errorf("-node %d is past 32 bits", *node)
+	}
 	cfg.Node = uint32(*node)
 	var err error
 	if cfg.Voters, err = parseAddrs("-voters", *voters); err != nil {
@@ -167,6 +171,9 @@ func parseNode(args []string) (nodeConfig, error) {
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
+	if *node > math.MaxUint32 || *pool > math.MaxUint32 {
+		return cfg, fmt.Errorf("-node %d or -pool %d is past 32 bits", *node, *pool)
+	}
 	cfg.Node, cfg.Pool = uint32(*node), uint32(*pool)
 	var err error
 	if cfg.Ctls, err = parseAddrs("-ctl", *ctls); err != nil {
@@ -192,6 +199,8 @@ func parseNode(args []string) (nodeConfig, error) {
 		return cfg, errors.New("-peers names a voter")
 	case len(cfg.Devices) == 0:
 		return cfg, errors.New("no -device")
+	case len(slices.Compact(slices.Sorted(slices.Values(cfg.Devices)))) != len(cfg.Devices):
+		return cfg, errors.New("a -device is named twice")
 	case int(cfg.Listen.Port())+len(cfg.Devices) > 65535 || cfg.Listen.Port() == 0:
 		return cfg, fmt.Errorf("-listen: port %d leaves no port for each device's loop", cfg.Listen.Port())
 	}
