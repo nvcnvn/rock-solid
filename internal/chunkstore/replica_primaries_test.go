@@ -631,8 +631,8 @@ func runPrimaryRun(t *testing.T, seed uint64, plant *peerPlant, crashLeaving boo
 	tbl, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	c := newRClusterWith(t, tbl, s, func(cfg *Config) {
 		cfg.Log.MaxRecordBytes = 3 * core.BlockSize
-		// A quarter of the seeds keep two rounds in flight, so a crash can leave a gap in the log and a traced run reaches the gap half of the spec's LostAbove.
-		if seed%4 == 1 {
+		// A quarter of the seeds keep two rounds in flight, so a crash can leave a gap in the log and a traced run reaches the gap half of the spec's LostAbove; none of them is a planted bug's seed.
+		if seed%8 == 4 || seed%8 == 7 {
 			cfg.Log.CommitDepth = 2
 		}
 	})

@@ -4374,7 +4374,7 @@ The record kinds of the event loop, such as `NetRecv` and `DiskDone`, have no sp
 the machine's steps below the protocol's, and the records above say what those steps did. `tracedata`
 lists them in `belowProtocol`, and stops on a record neither mapped nor listed.
 
-Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` and the scripted traces, at this commit. The format change that trims every segment (`add7c9f`) shifts the simulator's choices, so every seed took a new path from it on:
+Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` and the scripted traces, in a run where seeds 1, 5, 9 and every fourth after kept two rounds in flight (`CommitDepth` 2) and the rest one. The format change that trims every segment (`add7c9f`) shifts the simulator's choices, so every seed took a new path from it on:
 
 | Trace | Lines | Result | Seconds |
 | --- | --- | --- | --- |
@@ -4397,7 +4397,7 @@ Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` an
 | `primaries-21` | 695 | passes: two rounds in flight, a crash leaves a gap in the log, which replay ends at, and 12 `mayfail` lines lose only a prefix of themselves | 17 |
 | `primaries-25` | 628 | passes: two rounds in flight, 21 `mayfail` lines | 91 |
 
-All 40 seeds and the 14 scripted traces pass at this commit, in 6 minutes at 4 at once. Seeds 1, 5, 9 and every fourth after keep two rounds in flight (`CommitDepth` 2), the rest one. None broke a safety invariant,
+All 40 seeds and the 14 scripted traces passed, in 6 minutes at 4 at once. The depth-2 seeds have since moved to 4, 7, 12, 15 and every eighth after each, off every planted bug's seed; there seed 7 leaves a gap and all 40 pass the simulator, and TLC has not checked them. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
 and `mayfail` branches stay alive, not its length.
 
